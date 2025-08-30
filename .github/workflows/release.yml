@@ -1,0 +1,171 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+env:
+  GO_VERSION: '1.25'
+
+jobs:
+  release:
+    name: Semantic Release
+    runs-on: ubuntu-latest
+    outputs:
+      released: ${{ steps.semantic.outputs.new_release_published }}
+      version: ${{ steps.semantic.outputs.new_release_version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "lts/*"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Release
+        id: semantic
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          npx semantic-release > release_output.txt 2>&1 || true
+          
+          # 检查是否创建了新版本
+          if git describe --exact-match --tags HEAD >/dev/null 2>&1; then
+            NEW_VERSION=$(git describe --exact-match --tags HEAD)
+            echo "new_release_published=true" >> $GITHUB_OUTPUT
+            echo "new_release_version=${NEW_VERSION#v}" >> $GITHUB_OUTPUT
+            echo "✅ 发布了新版本: $NEW_VERSION"
+          else
+            echo "new_release_published=false" >> $GITHUB_OUTPUT
+            echo "❌ 没有发布新版本"
+          fi
+
+  build:
+    name: Build and Release
+    runs-on: ubuntu-latest
+    needs: release
+    if: needs.release.outputs.released == 'true'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        # 确保能获取到最新创建的 tag
+        ref: main
+        
+    - name: Setup Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        
+    - name: Get version
+      id: get_version
+      run: |
+        # 强制刷新 tags，确保获取 semantic-release 刚创建的 tag
+        git fetch --tags --force
+        VERSION=v${{ needs.release.outputs.version }}
+        echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
+        echo "Building version: ${VERSION}"
+          
+    - name: Tidy Go modules
+      run: go mod tidy
+      
+    - name: Download dependencies
+      run: go mod download
+      
+    - name: Build binaries
+      run: |
+        VERSION=${{ steps.get_version.outputs.VERSION }}
+        BUILD_TIME=$(date -u '+%Y-%m-%d_%H:%M:%S')
+        GIT_COMMIT=$(git rev-parse --short HEAD)
+        
+        LDFLAGS="-ldflags \"-X main.Version=${VERSION} -X main.BuildTime=${BUILD_TIME} -X main.GitCommit=${GIT_COMMIT} -s -w\""
+        
+        # Build for multiple platforms
+        mkdir -p dist/{linux-amd64,linux-arm64,darwin-arm64,windows-amd64,windows-arm64}
+        
+        # Linux AMD64
+        GOOS=linux GOARCH=amd64 CGO_ENABLED=0 eval go build $LDFLAGS -o dist/linux-amd64/singctl ./cmd/singctl
+        
+        # Linux ARM64
+        GOOS=linux GOARCH=arm64 CGO_ENABLED=0 eval go build $LDFLAGS -o dist/linux-arm64/singctl ./cmd/singctl
+        
+        # macOS ARM64 (Apple Silicon)
+        GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 eval go build $LDFLAGS -o dist/darwin-arm64/singctl ./cmd/singctl
+        
+        # Windows AMD64
+        GOOS=windows GOARCH=amd64 CGO_ENABLED=0 eval go build $LDFLAGS -o dist/windows-amd64/singctl.exe ./cmd/singctl
+        
+        # Windows ARM64
+        GOOS=windows GOARCH=arm64 CGO_ENABLED=0 eval go build $LDFLAGS -o dist/windows-arm64/singctl.exe ./cmd/singctl
+        
+    - name: Create packages
+      run: |
+        cd dist
+        
+        # Create tarballs for Unix systems
+        for platform_dir in linux-amd64 linux-arm64 darwin-arm64; do
+          if [[ -d "$platform_dir" && -f "$platform_dir/singctl" ]]; then
+            # Create final package directory with proper name
+            package_name="singctl-${platform_dir}"
+            mkdir -p ${package_name}
+            
+            # Copy binary and configs to package directory
+            cp ${platform_dir}/singctl ${package_name}/
+            cp -r ../configs ${package_name}/
+            
+            # Create tarball containing the named directory
+            tar -czf singctl-${platform_dir}.tar.gz ${package_name}
+            rm -rf ${package_name}
+            echo "Created singctl-${platform_dir}.tar.gz"
+          fi
+        done
+        
+        # Create zip files for Windows systems
+        for platform_dir in windows-amd64 windows-arm64; do
+          if [[ -d "$platform_dir" && -f "$platform_dir/singctl.exe" ]]; then
+            # Create final package directory with proper name
+            package_name="singctl-${platform_dir}"
+            mkdir -p ${package_name}
+            
+            # Copy binary and configs to package directory
+            cp ${platform_dir}/singctl.exe ${package_name}/
+            cp -r ../configs ${package_name}/
+            
+            # Create zip file containing the named directory
+            zip -r singctl-${platform_dir}.zip ${package_name}
+            rm -rf ${package_name}
+            echo "Created singctl-${platform_dir}.zip"
+          fi
+        done
+        
+        # Generate checksums for all packages
+        sha256sum *.tar.gz *.zip > checksums.txt
+        echo "Generated checksums"
+        
+    - name: Upload Release Assets
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ steps.get_version.outputs.VERSION }}
+        # 不设置 name 和 body，只上传文件到现有 release
+        append_body: false
+        make_latest: false
+        files: |
+          dist/*.tar.gz
+          dist/*.zip
+          dist/checksums.txt
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

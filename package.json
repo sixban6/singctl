@@ -1,0 +1,18 @@
+{
+  "name": "singctl",
+  "version": "0.0.0-development",
+  "description": "Sing-box management tool",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sixban6/singctl.git"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@semantic-release/changelog": "^6.0.3",
+    "@semantic-release/git": "^10.0.1",
+    "semantic-release": "^22.0.12"
+  },
+  "scripts": {
+    "release": "semantic-release"
+  }
+}

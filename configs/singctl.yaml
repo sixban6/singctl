@@ -1,0 +1,13 @@
+subs:
+  - name: "main"                              # 订阅名称 (多订阅时必填)
+    url: ""                                   # 你VPN订阅地址
+    skip_tls_verify: false                    # 是否跳过TLS验证
+    remove-emoji: true
+  # 多订阅示例 (可选):
+  # - name: "backup"
+  #   url: "https://your-backup-subscription"
+  #   skip_tls_verify: false
+  #   remove-emoji: true
+
+github:
+  mirror_url: "https://ghfast.top"            # GitHub镜像地址,用于加速

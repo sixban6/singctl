@@ -1,0 +1,4 @@
+subs: []  # 空订阅列表，应该验证失败
+
+github:
+  mirror_url: ""

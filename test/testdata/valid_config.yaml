@@ -1,0 +1,7 @@
+subs:
+  - url: "https://example.com/sub1"
+    insecure: false
+    remove-emoji: true
+
+github:
+  mirror_url: "https://ghfast.top"
