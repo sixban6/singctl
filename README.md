@@ -48,6 +48,5 @@ singctl gen --stdout              # 输出到控制台查看
 singctl gen -o /tmp/config.json   # 自定义输出路径      
 ```
 
-
 ## License
 [MIT License](LICENSE)
