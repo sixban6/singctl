@@ -38,14 +38,42 @@ powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "[System.IO.File]
 
 ## Usage
 ```bash
-singctl start                     # 生成配置并启动 sing-box
-singctl stop                      # 停止 sing-box
-singctl install sb                # 安装 sing-box
-singctl update sb                 # 更新 sing-box
-singctl update self               # 更新 singctl 自身
-sudo singctl gen                  # 生成配置到默认位置并备份
-singctl gen --stdout              # 输出到控制台查看
-singctl gen -o /tmp/config.json   # 自定义输出路径      
+# 生成配置并启动 sing-box
+singctl start           
+
+# 停止 sing-box & 关闭守护进程     
+singctl stop       
+
+# 安装 sing-box               
+singctl install sb            
+
+# 更新 sing-box
+singctl update sb        
+
+# 更新 singctl 自身         
+singctl update self      
+
+# 生成配置到默认位置并备份         
+sudo singctl gen          
+
+# 输出到控制台查看        
+singctl gen --stdout       
+
+ # 自定义输出路径             
+singctl gen -o /tmp/config.json  
+
+# 快速查看系统状态
+singctl info
+
+# 启动守护进程
+singctl daemon start
+
+# 查看详细监控状态
+singctl daemon status
+
+# 查看守护进程日志
+singctl daemon logs -n 50
+
 ```
 
 ## License

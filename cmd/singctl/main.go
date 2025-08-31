@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 	"singctl/internal/cmd"
 	"singctl/internal/config"
+	"singctl/internal/daemon"
 	"singctl/internal/logger"
 	"singctl/internal/singbox"
 	"singctl/internal/updater"
@@ -94,6 +95,7 @@ DNS optimization, and complete service lifecycle management.`,
 		updateCmd(),
 		versionCmd(),
 		cmd.NewInfoCommand(Version),
+		cmd.NewDaemonCommand(),
 	)
 
 	if err := rootCmd.Execute(); err != nil {
@@ -134,8 +136,19 @@ func startCmd() *cobra.Command {
 func stopCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "stop",
-		Short: "Stop sing-box",
+		Short: "Stop sing-box and daemon",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// 先停止守护进程
+			if daemon.IsDaemonRunning() {
+				logger.Info("Stopping daemon...")
+				if err := daemon.StopDaemon(); err != nil {
+					logger.Warn("Failed to stop daemon: %v", err)
+				} else {
+					logger.Success("Daemon stopped")
+				}
+			}
+
+			// 再停止sing-box
 			cfg, _ := config.Load(configPath)
 			sb := singbox.New(cfg)
 			return sb.Stop()

@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"singctl/internal/config"
+	"singctl/internal/daemon"
 	"singctl/internal/logger"
 )
 
@@ -74,7 +75,31 @@ func showSystemInfo(configPath, version string) error {
 		logger.Warn("配置文件路径    : %s (不存在) ✗", configPath)
 	}
 
-	// 3. 订阅连接信息
+	// 3. 守护进程信息
+	logger.Info("")
+	logger.Success("🤖 守护进程信息")
+	logger.Info("───────────────────────────────────────────────────────────")
+	
+	if daemon.IsDaemonRunning() {
+		logger.Success("守护进程状态    : 运行中 ✓")
+		
+		// 显示重启统计
+		limiter := daemon.NewRestartLimiter()
+		logger.Info("重启统计        : %d/%d (最近1小时)", 
+			limiter.GetRestartCount(), limiter.GetMaxRestarts())
+	} else {
+		logger.Warn("守护进程状态    : 未运行 ✗")
+	}
+	
+	// 日志文件路径
+	logPath := daemon.GetDaemonLogPath()
+	if _, err := os.Stat(logPath); err == nil {
+		logger.Success("日志文件路径    : %s ✓", logPath)
+	} else {
+		logger.Info("日志文件路径    : %s (未生成)", logPath)
+	}
+
+	// 4. 订阅连接信息
 	logger.Info("")
 	logger.Success("📡 订阅连接信息")
 	logger.Info("───────────────────────────────────────────────────────────")
