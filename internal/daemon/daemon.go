@@ -96,12 +96,8 @@ func (d *Daemon) daemonize() error {
 	// Fork到后台
 	cmd := exec.Command(os.Args[0], os.Args[1:]...)
 	
-	// 设置进程属性
-	if runtime.GOOS != "windows" {
-		cmd.SysProcAttr = &syscall.SysProcAttr{
-			Setsid: true, // 创建新会话
-		}
-	}
+	// 设置进程属性（跨平台处理）
+	d.setProcAttrs(cmd)
 
 	// 重定向标准输入输出到 /dev/null (Unix) 或 NUL (Windows)
 	devNull := "/dev/null"
