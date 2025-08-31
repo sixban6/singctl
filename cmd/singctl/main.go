@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"singctl/internal/cmd"
 	"singctl/internal/config"
 	"singctl/internal/logger"
 	"singctl/internal/singbox"
@@ -92,6 +93,7 @@ DNS optimization, and complete service lifecycle management.`,
 		installCmd(),
 		updateCmd(),
 		versionCmd(),
+		cmd.NewInfoCommand(Version),
 	)
 
 	if err := rootCmd.Execute(); err != nil {
@@ -262,3 +264,4 @@ func versionCmd() *cobra.Command {
 		},
 	}
 }
+
