@@ -1,3 +1,10 @@
+## [1.12.5](https://github.com/sixban6/singctl/compare/v1.12.4...v1.12.5) (2025-09-01)
+
+
+### Bug Fixes
+
+* add singctl daemon ([60c6537](https://github.com/sixban6/singctl/commit/60c6537e8f0a6a5ef17af9df3cad1301dce3deb2))
+
 ## [1.12.4](https://github.com/sixban6/singctl/compare/v1.12.3...v1.12.4) (2025-08-31)
 
 
