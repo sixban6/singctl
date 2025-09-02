@@ -1,3 +1,10 @@
+## [1.12.8](https://github.com/sixban6/singctl/compare/v1.12.7...v1.12.8) (2025-09-02)
+
+
+### Bug Fixes
+
+* update singgen ([c67045e](https://github.com/sixban6/singctl/commit/c67045ea3de8cc25deb87ddc262645ed328f42c3))
+
 ## [1.12.7](https://github.com/sixban6/singctl/compare/v1.12.6...v1.12.7) (2025-09-02)
 
 
