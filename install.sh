@@ -431,6 +431,87 @@ show_completion_info() {
     printf "\n"
 }
 
+# 检查 sing-box 是否已安装并获取版本
+get_singbox_version() {
+    if command -v sing-box >/dev/null 2>&1; then
+        local version_output
+        version_output=$(sing-box version 2>/dev/null | head -1)
+        
+        # 从输出中提取版本号，处理不同的版本格式
+        # 例如: "sing-box version 1.12.0" 或 "1.12.0"
+        local version
+        version=$(echo "$version_output" | sed -n 's/.*\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p')
+        
+        if [ -n "$version" ]; then
+            echo "$version"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# 比较版本号，检查是否大于等于指定版本
+version_ge() {
+    local current_version="$1"
+    local required_version="$2"
+    
+    # 将版本号分解为主版本、次版本、修订版本
+    local current_major current_minor current_patch
+    local required_major required_minor required_patch
+    
+    current_major=$(echo "$current_version" | cut -d. -f1)
+    current_minor=$(echo "$current_version" | cut -d. -f2)
+    current_patch=$(echo "$current_version" | cut -d. -f3)
+    
+    required_major=$(echo "$required_version" | cut -d. -f1)
+    required_minor=$(echo "$required_version" | cut -d. -f2)
+    required_patch=$(echo "$required_version" | cut -d. -f3)
+    
+    # 比较主版本号
+    if [ "$current_major" -gt "$required_major" ]; then
+        return 0
+    elif [ "$current_major" -lt "$required_major" ]; then
+        return 1
+    fi
+    
+    # 主版本号相同，比较次版本号
+    if [ "$current_minor" -gt "$required_minor" ]; then
+        return 0
+    elif [ "$current_minor" -lt "$required_minor" ]; then
+        return 1
+    fi
+    
+    # 次版本号相同，比较修订版本号
+    if [ "$current_patch" -ge "$required_patch" ]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# 检查 sing-box 是否需要安装或更新
+check_singbox_installation() {
+    local required_version="1.12.0"
+    local current_version
+    
+    echo_info "检查 sing-box 安装状态..."
+    
+    if current_version=$(get_singbox_version); then
+        echo_info "检测到已安装的 sing-box 版本: $current_version"
+        
+        if version_ge "$current_version" "$required_version"; then
+            echo_success "sing-box 版本 $current_version >= $required_version，无需重新安装"
+            return 1  # 不需要安装
+        else
+            echo_warning "sing-box 版本 $current_version < $required_version，需要更新"
+            return 0  # 需要安装/更新
+        fi
+    else
+        echo_info "未检测到 sing-box 或无法获取版本信息，需要安装"
+        return 0  # 需要安装
+    fi
+}
+
 init_singbox_config() {
   # === 创建 /etc/sing-box 目录，但不创建空配置文件 ===
   # 让 singctl start 在第一次运行时生成正确的配置
@@ -458,11 +539,18 @@ main() {
     
     # 检查配置文件是否有效订阅地址
     if [ -f "$CONFIG_FILE" ] && ! grep -q "YOUR_SUBSCRIPTION_URL_HERE" "$CONFIG_FILE" 2>/dev/null; then
-        echo_info "检测到有效配置，开始自动安装Singbox..."
-        "$INSTALL_DIR/singctl" install sb
-        echo_success "安装Singbox成功"
-        echo_success "尝试启动sing-box"
+        echo_info "检测到有效配置，检查 sing-box 安装状态..."
+        
+        # 检查是否需要安装或更新 sing-box
+        if check_singbox_installation; then
+            echo_info "开始安装/更新 sing-box..."
+            "$INSTALL_DIR/singctl" install sb
+            echo_success "安装/更新 sing-box 成功"
+        fi
+        
+        echo_info "尝试启动 sing-box..."
         "$INSTALL_DIR/singctl" start
+        echo_success "sing-box 启动完成"
     else
         echo_warning "配置文件需要手动编辑或未配置有效订阅"
         echo_info "请先编辑配置文件: $CONFIG_FILE"  
