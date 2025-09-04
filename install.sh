@@ -29,24 +29,45 @@ TEMP_DIR="/tmp/singctl-install"
 
 # 获取当前时间
 timestamp() {
-    date +"%Y-%m-%d %H:%M:%S"
+    date "+%Y-%m-%d %H:%M:%S"
 }
 
-# 输出函数 (POSIX兼容)
+# 检测终端颜色支持
+supports_color() {
+    [ -t 1 ] && [ -n "$TERM" ] && [ "$TERM" != "dumb" ]
+}
+
+# 输出函数 (POSIX兼容) - 修复颜色输出
 echo_info() {
-    printf "${CYAN}%s [INFO] %s${NC}\n" "$(timestamp)" "$1"
+    if supports_color; then
+        printf "\033[0;36m%s [INFO] %s\033[0m\n" "$(timestamp)" "$1"
+    else
+        printf "%s [INFO] %s\n" "$(timestamp)" "$1"
+    fi
 }
 
 echo_success() {
-    printf "${GREEN}%s [SUCCESS] %s${NC}\n" "$(timestamp)" "$1"
+    if supports_color; then
+        printf "\033[0;32m%s [SUCCESS] %s\033[0m\n" "$(timestamp)" "$1"
+    else
+        printf "%s [SUCCESS] %s\n" "$(timestamp)" "$1"
+    fi
 }
 
 echo_warning() {
-    printf "${YELLOW}%s [WARNING] %s${NC}\n" "$(timestamp)" "$1"
+    if supports_color; then
+        printf "\033[0;33m%s [WARNING] %s\033[0m\n" "$(timestamp)" "$1"
+    else
+        printf "%s [WARNING] %s\n" "$(timestamp)" "$1"
+    fi
 }
 
 echo_error() {
-    printf "${RED}%s [ERROR] %s${NC}\n" "$(timestamp)" "$1"
+    if supports_color; then
+        printf "\033[0;31m%s [ERROR] %s\033[0m\n" "$(timestamp)" "$1"
+    else
+        printf "%s [ERROR] %s\n" "$(timestamp)" "$1"
+    fi
 }
 
 # 错误处理
@@ -69,9 +90,9 @@ trap cleanup EXIT
 
 # 检查权限
 check_permissions() {
-    if [ "$EUID" -ne 0 ]; then
+    if [ "$(id -u)" -ne 0 ]; then
         echo_error "此脚本需要 root 权限运行"
-        echo_info "请使用: sudo bash $0"
+        echo_info "请使用: sudo sh $0"
         exit 1
     fi
 }
@@ -306,9 +327,21 @@ setup_path() {
 # 配置订阅
 configure_subscription() {
     echo_info "配置订阅连接..."
-    printf "%s请输入您的订阅连接 (留空跳过):%s\n" "$YELLOW" "$NC"
-    printf "订阅URL: "
-    read -r sub_url
+    
+    # 检查是否有可用的stdin (当通过管道运行时会失败)
+    if [ -t 0 ]; then
+            if supports_color; then
+            printf "\033[0;33m请输入您的订阅连接 (留空跳过):\033[0m\n"
+        else
+            printf "请输入您的订阅连接 (留空跳过):\n"
+        fi
+        printf "订阅URL: "
+        read -r sub_url
+    else
+        echo_info "通过管道运行，跳过交互式订阅配置"
+        echo_info "安装完成后可手动编辑配置文件: $CONFIG_FILE"
+        return 0
+    fi
 
     [ -z "$sub_url" ] && { echo_info "跳过订阅配置"; return 0; }
 
@@ -347,9 +380,15 @@ verify_installation() {
 # 显示完成信息
 show_completion_info() {
     printf "\n"
-    printf "${GREEN}========================================${NC}\n"
-    printf "${GREEN}  SingCtl 安装完成！${NC}\n"
-    printf "${GREEN}========================================${NC}\n"
+    if supports_color; then
+        printf "\033[0;32m========================================\033[0m\n"
+        printf "\033[0;32m  SingCtl 安装完成！\033[0m\n"
+        printf "\033[0;32m========================================\033[0m\n"
+    else
+        printf "========================================\n"
+        printf "  SingCtl 安装完成！\n"
+        printf "========================================\n"
+    fi
     printf "\n"
     echo_info "安装位置: $INSTALL_DIR/singctl"
     echo_info "配置文件: $CONFIG_FILE"
