@@ -10,8 +10,79 @@ export PATH="/usr/local/bin:/usr/bin:$PATH"
 
 CONFIG_FILE="/etc/sing-box/config.json"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SANDBOX_STRICT="$SCRIPT_DIR/sing-box-sandbox.sb"
-SANDBOX_LOOSE="$SCRIPT_DIR/sing-box-sandbox-loose.sb"
+SANDBOX_STRICT="/tmp/sing-box-sandbox.sb"
+SANDBOX_LOOSE="/tmp/sing-box-sandbox-loose.sb"
+
+# 创建沙盒配置文件函数
+create_sandbox_configs() {
+    echo_info "创建自定义沙盒配置文件..."
+    
+    # 创建严格沙盒配置
+    cat > "$SANDBOX_STRICT" << 'EOF'
+;; sing-box macOS Sandbox Profile  
+;; 专为翻墙代理功能设计的沙盒配置
+(version 1)
+
+;; 默认允许，然后选择性拒绝（更宽松的策略）
+(allow default)
+
+;; ===== 禁止危险操作 =====
+;; 禁止执行其他程序（除了必要的）
+(deny process-exec 
+  (with no-log))
+
+;; 允许执行 sing-box 相关程序
+(allow process-exec
+  (literal "/usr/local/bin/sing-box")
+  (literal "/usr/bin/sing-box")
+  (literal "/bin/sh")
+  (literal "/bin/echo"))
+
+;; ===== 限制文件写入 =====
+;; 禁止写入系统关键目录
+(deny file-write*
+  (subpath "/System")
+  (subpath "/usr")
+  (subpath "/bin")
+  (subpath "/sbin")
+  (literal "/etc/passwd")
+  (literal "/etc/shadow")
+  (with no-log))
+
+;; 允许写入必要目录
+(allow file-write*
+  (subpath "/tmp")
+  (subpath "/var/tmp")
+  (subpath "/etc/sing-box")
+  (regex #"^/.*\.log$"))
+EOF
+
+    # 创建宽松沙盒配置
+    cat > "$SANDBOX_LOOSE" << 'EOF'
+;; sing-box macOS Sandbox Profile - Loose Version
+;; 宽松版本，用于兼容性回退
+(version 1)
+
+;; 默认允许
+(allow default)
+
+;; 仅禁止最危险的操作
+(deny process-exec
+  (literal "/bin/rm")
+  (literal "/usr/bin/sudo")
+  (literal "/bin/chmod")
+  (with no-log))
+
+;; 禁止写入系统核心目录
+(deny file-write*
+  (literal "/etc/passwd")
+  (literal "/etc/shadow")
+  (subpath "/System/Library")
+  (with no-log))
+EOF
+
+    echo_info "沙盒配置文件创建完成"
+}
 CYAN='\033[0;36m'
 YLW='\033[0;33m'
 RED='\033[0;31m'
@@ -70,9 +141,12 @@ check_sandbox_available() {
         return 1
     fi
     
-    # 检查自定义沙盒配置文件
+    # 创建沙盒配置文件
+    create_sandbox_configs
+    
+    # 检查配置文件是否创建成功
     if [ ! -f "$SANDBOX_STRICT" ]; then
-        echo_warn "自定义沙盒配置文件不存在: $SANDBOX_STRICT"
+        echo_warn "沙盒配置文件创建失败: $SANDBOX_STRICT"
         return 1
     fi
     
