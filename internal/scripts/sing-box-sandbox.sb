@@ -1,0 +1,36 @@
+;; sing-box macOS Sandbox Profile  
+;; 专为翻墙代理功能设计的沙盒配置
+(version 1)
+
+;; 默认允许，然后选择性拒绝（更宽松的策略）
+(allow default)
+
+;; ===== 禁止危险操作 =====
+;; 禁止执行其他程序（除了必要的）
+(deny process-exec 
+  (with no-log))
+
+;; 允许执行 sing-box 相关程序
+(allow process-exec
+  (literal "/usr/local/bin/sing-box")
+  (literal "/usr/bin/sing-box")
+  (literal "/bin/sh")
+  (literal "/bin/echo"))
+
+;; ===== 限制文件写入 =====
+;; 禁止写入系统关键目录
+(deny file-write*
+  (subpath "/System")
+  (subpath "/usr")
+  (subpath "/bin")
+  (subpath "/sbin")
+  (literal "/etc/passwd")
+  (literal "/etc/shadow")
+  (with no-log))
+
+;; 允许写入必要目录
+(allow file-write*
+  (subpath "/tmp")
+  (subpath "/var/tmp")
+  (subpath "/etc/sing-box")
+  (regex #"^/.*\.log$"))

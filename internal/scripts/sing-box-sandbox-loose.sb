@@ -1,0 +1,43 @@
+;; sing-box macOS Sandbox Profile - Loose Version
+;; 宽松版本，用于兼容性回退
+(version 1)
+
+;; 默认拒绝，但允许更多操作
+(deny default)
+
+;; 允许所有网络操作
+(allow network*)
+
+;; 允许所有系统调用和设备访问 - TUN 模式需要
+(allow system*)
+(allow iokit*)
+
+;; 允许读取大部分系统文件
+(allow file-read*
+  (subpath "/etc")
+  (subpath "/usr")
+  (subpath "/System")
+  (subpath "/Library")
+  (subpath "/var/db")
+  (regex #"^/.*\.(db|mmdb|plist)$"))
+
+;; 限制写入到安全目录
+(allow file-write*
+  (subpath "/tmp")
+  (subpath "/var/tmp") 
+  (subpath "/etc/sing-box")
+  (literal "/dev/stdout")
+  (literal "/dev/stderr")
+  (literal "/dev/null"))
+
+;; 允许进程操作
+(allow process*)
+
+;; 允许所有 mach 服务查找
+(allow mach-lookup)
+
+;; 允许系统配置读写
+(allow sysctl*)
+
+;; 允许基础系统审计
+(allow system-audit)
