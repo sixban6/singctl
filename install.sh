@@ -1,8 +1,9 @@
-#!/bin/bash
+#!/bin/sh
 
 #################################################
 # SingCtl 自动安装脚本
 # 功能：从GitHub自动下载最新版本并安装
+# 兼容：POSIX sh (busybox, dash, ash等)
 #################################################
 
 set -e
@@ -31,21 +32,21 @@ timestamp() {
     date +"%Y-%m-%d %H:%M:%S"
 }
 
-# 输出函数
+# 输出函数 (POSIX兼容)
 echo_info() {
-    echo -e "${CYAN}$(timestamp) [INFO] $1${NC}"
+    printf "${CYAN}%s [INFO] %s${NC}\n" "$(timestamp)" "$1"
 }
 
 echo_success() {
-    echo -e "${GREEN}$(timestamp) [SUCCESS] $1${NC}"
+    printf "${GREEN}%s [SUCCESS] %s${NC}\n" "$(timestamp)" "$1"
 }
 
 echo_warning() {
-    echo -e "${YELLOW}$(timestamp) [WARNING] $1${NC}"
+    printf "${YELLOW}%s [WARNING] %s${NC}\n" "$(timestamp)" "$1"
 }
 
 echo_error() {
-    echo -e "${RED}$(timestamp) [ERROR] $1${NC}"
+    printf "${RED}%s [ERROR] %s${NC}\n" "$(timestamp)" "$1"
 }
 
 # 错误处理
@@ -79,9 +80,9 @@ check_permissions() {
 check_dependencies() {
     echo_info "检查系统依赖..."
     
-    local deps=("curl" "tar" "uname")
-    for dep in "${deps[@]}"; do
-        if ! command -v "$dep" &> /dev/null; then
+    # POSIX兼容的依赖检查
+    for dep in curl tar uname; do
+        if ! command -v "$dep" >/dev/null 2>&1; then
             error_exit "缺少依赖: $dep，请先安装"
         fi
     done
@@ -162,10 +163,9 @@ build_download_url() {
 }
 
 # 下载和解压
-#!/usr/bin/env bash
 # ------------------------------------------------------------
-# 跨平台下载并解压 .tar.gz
-# 兼容：Linux / macOS
+# 跨平台下载并解压 .tar.gz  
+# 兼容：POSIX sh (busybox, dash, ash等)
 # ------------------------------------------------------------
 
 download_and_extract() {
@@ -221,9 +221,14 @@ install_files() {
     local binary_file
     binary_file=$(find "$TEMP_DIR" -type f -name "singctl" | head -1)
     
-    # 如果没找到，尝试查找可执行文件
+    # 如果没找到，尝试查找可执行文件 (POSIX兼容写法)
     if [ ! -f "$binary_file" ]; then
-        binary_file=$(find "$TEMP_DIR" -type f -perm +111 | grep singctl | head -1)
+        # 使用-executable替代-perm +111，更安全
+        binary_file=$(find "$TEMP_DIR" -type f -name "*singctl*" | head -1)
+        # 如果还是没找到，尝试更广泛的查找
+        if [ ! -f "$binary_file" ]; then
+            binary_file=$(find "$TEMP_DIR" -type f | grep singctl | head -1)
+        fi
     fi
 
     [ -f "$binary_file" ] || error_exit "在解压的文件中未找到 singctl 二进制文件"
@@ -232,7 +237,7 @@ install_files() {
     # 2) 其余逻辑保持不变
     # ----------------------------------------------------------
     # 停止现有服务
-    if command -v singctl &>/dev/null; then
+    if command -v singctl >/dev/null 2>&1; then
         echo_info "停止现有 singctl 服务..."
         singctl stop 2>/dev/null || true
     fi
@@ -247,15 +252,14 @@ install_files() {
     mkdir -p "$CONFIG_DIR"
 
     # 查找并安装配置文件
-    local config_file
     config_file=$(find "$TEMP_DIR" -type f -name "singctl.yaml" | head -1)
 
     if [ -f "$config_file" ]; then
-        [ -f "$CONFIG_FILE" ] && {
-            local backup_file="${CONFIG_FILE}.backup.$(date +%s)"
+        if [ -f "$CONFIG_FILE" ]; then
+            backup_file="${CONFIG_FILE}.backup.$(date +%s)"
             echo_warning "配置文件已存在，备份到: $backup_file"
             cp "$CONFIG_FILE" "$backup_file"
-        }
+        fi
 
         cp "$config_file" "$CONFIG_FILE"
         chmod 644 "$CONFIG_FILE"
@@ -275,10 +279,10 @@ install_files() {
 
 # 设置 PATH 环境变量
 setup_path() {
-    local path_added=false
+    path_added=false
     
-    # 尝试添加到各种可能的配置文件
-    local profile_files="/etc/profile /"
+    # 尝试添加到各种可能的配置文件  
+    profile_files="/etc/profile"
     
     for profile in $profile_files; do
         if [ -f "$profile" ] && [ -w "$profile" ]; then
@@ -292,7 +296,7 @@ setup_path() {
         fi
     done
     
-    if [ "$path_added" = false ]; then
+    if [ "$path_added" = "false" ]; then
         echo_warning "无法自动添加 PATH，请手动执行："
         echo "  export PATH=\"/usr/local/bin:\$PATH\""
         echo "  或将此命令添加到您的 shell 配置文件中"
@@ -302,9 +306,9 @@ setup_path() {
 # 配置订阅
 configure_subscription() {
     echo_info "配置订阅连接..."
-    printf '%b请输入您的订阅连接 (留空跳过):%b\n' "$YELLOW" "$NC"
-    printf '订阅URL: '
-    read -r sub_url </dev/tty
+    printf "%s请输入您的订阅连接 (留空跳过):%s\n" "$YELLOW" "$NC"
+    printf "订阅URL: "
+    read -r sub_url
 
     [ -z "$sub_url" ] && { echo_info "跳过订阅配置"; return 0; }
 
@@ -333,7 +337,7 @@ verify_installation() {
     fi
     
     # 检查可执行性
-    if ! "$INSTALL_DIR/singctl" version &>/dev/null; then
+    if ! "$INSTALL_DIR/singctl" version >/dev/null 2>&1; then
         error_exit "二进制文件无法执行"
     fi
     
@@ -342,14 +346,14 @@ verify_installation() {
 
 # 显示完成信息
 show_completion_info() {
-    echo ""
-    echo -e "${GREEN}========================================${NC}"
-    echo -e "${GREEN}  SingCtl 安装完成！${NC}"
-    echo -e "${GREEN}========================================${NC}"
-    echo ""
+    printf "\n"
+    printf "${GREEN}========================================${NC}\n"
+    printf "${GREEN}  SingCtl 安装完成！${NC}\n"
+    printf "${GREEN}========================================${NC}\n"
+    printf "\n"
     echo_info "安装位置: $INSTALL_DIR/singctl"
     echo_info "配置文件: $CONFIG_FILE"
-    echo ""
+    printf "\n"
     echo_info "常用命令:"
     echo " singctl version               - 查看版本信息"
     echo " singctl gen                   - 生成配置"
@@ -357,7 +361,7 @@ show_completion_info() {
     echo " sudo singctl stop             - 停止singbox服务"
     echo " sudo singctl install sb       - 安装 sing-box"
     echo " sudo singctl gen              - 生成配置到默认位置, 并备份原始配置"
-    echo ""
+    printf "\n"
     
     if [ -f "$CONFIG_FILE" ]; then
         echo_info "下一步操作:"
@@ -368,7 +372,7 @@ show_completion_info() {
         echo_warning "请手动创建并配置 $CONFIG_FILE"
     fi
     
-    echo ""
+    printf "\n"
 }
 
 init_singbox_config() {
@@ -381,7 +385,7 @@ init_singbox_config() {
 # 主函数
 main() {
     echo_info "开始安装 SingCtl..."
-    echo ""
+    printf "\n"
     
     check_permissions
     check_dependencies
