@@ -1,3 +1,10 @@
+## [1.12.17](https://github.com/sixban6/singctl/compare/v1.12.16...v1.12.17) (2025-09-04)
+
+
+### Bug Fixes
+
+* add sandbox ([0526d21](https://github.com/sixban6/singctl/commit/0526d21484bbd0d26ba4934e19f4dfa85dc7aaa7))
+
 ## [1.12.16](https://github.com/sixban6/singctl/compare/v1.12.15...v1.12.16) (2025-09-04)
 
 
