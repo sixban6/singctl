@@ -289,9 +289,14 @@ start_singbox() {
         return
     fi
     
-    # 尝试最简单的沙盒模式 - 只使用-w参数
-    echo_succ "尝试基础沙盒模式(仅临时目录)..."
-    ujail -n sing-box -w /tmp -- "$SINGBOX_EXEC" run -c /tmp/sing-box-work/config.json >/tmp/sing-box-basic.log 2>&1 &
+    # 尝试最简单的沙盒模式 - 添加必要的证书和配置访问
+    echo_succ "尝试基础沙盒模式(证书+配置访问)..."
+    ujail -n sing-box \
+          -w /tmp \
+          -r /etc/ssl \
+          -r /etc/sing-box \
+          -r /usr/share/ca-certificates \
+          -- "$SINGBOX_EXEC" run -c /tmp/sing-box-work/config.json >/tmp/sing-box-basic.log 2>&1 &
     UJAIL_PID=$!
     
     sleep 3
@@ -306,7 +311,7 @@ start_singbox() {
     kill $UJAIL_PID 2>/dev/null || true
     pkill -f "ujail.*sing-box" 2>/dev/null || true
     
-    ujail -n sing-box -p -- "$SINGBOX_EXEC" run -c /etc/sing-box/config.json >/tmp/sing-box-simple.log 2>&1 &
+    ujail -n sing-box -p -r /etc/sing-box -- "$SINGBOX_EXEC" run -c /etc/sing-box/config.json >/tmp/sing-box-simple.log 2>&1 &
     UJAIL_PID=$!
     
     sleep 3
