@@ -230,16 +230,34 @@ start_singbox() {
 
     echo_succ "启动 sing-box 服务(沙盒模式)..."
     
-    # 尝试文件系统隔离沙盒
+    # 准备沙盒环境和配置
+    echo_succ "准备沙盒环境..."
+    mkdir -p /tmp/sing-box-work
+    
+    # 创建沙盒专用配置，修改路径到可写目录
+    if [ -f "/etc/sing-box/config.json" ]; then
+        # 复制配置并修改路径到临时目录
+        sed 's|"/etc/sing-box/cache.db"|"/tmp/sing-box-work/cache.db"|g; s|"/etc/sing-box/ui"|"/tmp/sing-box-work/ui"|g' \
+            /etc/sing-box/config.json > /tmp/sing-box-work/config.json
+        
+        # 复制UI文件到临时目录(如果存在)
+        if [ -d "/etc/sing-box/ui" ]; then
+            cp -r /etc/sing-box/ui /tmp/sing-box-work/
+        fi
+    else
+        echo_warn "配置文件不存在，使用原路径"
+        cp /etc/sing-box/config.json /tmp/sing-box-work/config.json 2>/dev/null || true
+    fi
+    
+    # 尝试文件系统隔离沙盒  
     echo_succ "尝试文件系统隔离模式..."
     ujail -n sing-box \
-          -T 32M \
-          -r /etc/sing-box \
+          -T 64M \
           -r /usr/bin/sing-box \
           -r /lib \
           -r /usr/lib \
           -w /tmp \
-          -- sing-box run -c /etc/sing-box/config.json >/tmp/sing-box-fs.log 2>&1 &
+          -- sing-box run -c /tmp/sing-box-work/config.json >/tmp/sing-box-fs.log 2>&1 &
 
     UJAIL_PID=$!
     

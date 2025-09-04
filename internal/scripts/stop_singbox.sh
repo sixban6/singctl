@@ -81,5 +81,6 @@ ip -6 route flush table $PROXY_ROUTE_TABLE 2>/dev/null && echo_succ "$(timestamp
 # 删除缓存
 rm -f /etc/sing-box/cache.db && echo_succ "$(timestamp) 已清理缓存文件"
 
-# 清理沙盒日志文件
+# 清理沙盒工作目录和日志文件
+rm -rf /tmp/sing-box-work && echo_succ "$(timestamp) 已清理沙盒工作目录"
 rm -f /tmp/sing-box-fs.log /tmp/sing-box-priv.log && echo_succ "$(timestamp) 已清理沙盒调试日志"
