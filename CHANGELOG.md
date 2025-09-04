@@ -1,3 +1,10 @@
+# [1.14.0](https://github.com/sixban6/singctl/compare/v1.13.0...v1.14.0) (2025-09-04)
+
+
+### Features
+
+* add macos sandbox ([aa38b6d](https://github.com/sixban6/singctl/commit/aa38b6d3dabdf99ed541486150c711894f3dc192))
+
 # [1.13.0](https://github.com/sixban6/singctl/compare/v1.12.17...v1.13.0) (2025-09-04)
 
 
