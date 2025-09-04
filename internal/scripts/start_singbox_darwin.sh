@@ -17,44 +17,78 @@ SANDBOX_LOOSE="/tmp/sing-box-sandbox-loose.sb"
 create_sandbox_configs() {
     echo_info "创建自定义沙盒配置文件..."
     
-    # 创建严格沙盒配置
+    # 创建全协议支持沙盒配置
     cat > "$SANDBOX_STRICT" << 'EOF'
-;; sing-box macOS Sandbox Profile  
-;; 专为翻墙代理功能设计的沙盒配置
+;; 全协议翻墙沙盒配置  
+;; 支持: hy2, trojan, vless, vmess, tuic, ss, socks5, reality, anytls
+;; 策略: 允许网络和读取，严格控制写入和执行
 (version 1)
 
-;; 默认允许，然后选择性拒绝（更宽松的策略）
+;; ===== 基础策略：允许大部分操作 =====
 (allow default)
 
-;; ===== 禁止危险操作 =====
-;; 禁止执行其他程序（除了必要的）
-(deny process-exec 
+;; ===== 严格禁止危险操作 =====
+;; 禁止执行系统命令（除了必要的）
+(deny process-exec
   (with no-log))
 
-;; 允许执行 sing-box 相关程序
+;; 允许执行必要程序
 (allow process-exec
   (literal "/usr/local/bin/sing-box")
   (literal "/usr/bin/sing-box")
-  (literal "/bin/sh")
-  (literal "/bin/echo"))
+  (literal "/bin/echo")
+  (literal "/bin/sh"))
 
-;; ===== 限制文件写入 =====
+;; ===== 严格控制文件写入 =====
 ;; 禁止写入系统关键目录
 (deny file-write*
   (subpath "/System")
-  (subpath "/usr")
+  (subpath "/usr/bin")
+  (subpath "/usr/sbin") 
   (subpath "/bin")
   (subpath "/sbin")
+  (subpath "/Library/LaunchDaemons")
+  (subpath "/Library/LaunchAgents")
   (literal "/etc/passwd")
-  (literal "/etc/shadow")
+  (literal "/etc/shadow") 
+  (literal "/etc/sudoers")
+  (literal "/etc/hosts")
   (with no-log))
 
-;; 允许写入必要目录
+;; 允许写入安全目录
 (allow file-write*
   (subpath "/tmp")
   (subpath "/var/tmp")
   (subpath "/etc/sing-box")
-  (regex #"^/.*\.log$"))
+  (subpath "/private/tmp")
+  (literal "/dev/null")
+  (literal "/dev/stdout")
+  (literal "/dev/stderr")
+  (regex #"^/.*\.log$")
+  (regex #"^/.*\.cache$")
+  (regex #"^/.*\.db$"))
+
+;; ===== 网络安全控制 =====
+;; 禁止监听特权端口（防止端口劫持）
+(deny network-bind
+  (local tcp "localhost:22")   ; SSH
+  (local tcp "localhost:80")   ; HTTP  
+  (local tcp "localhost:443")  ; HTTPS
+  (local tcp "localhost:25")   ; SMTP
+  (with no-log))
+
+;; ===== 协议特殊权限保留 =====
+;; Reality 协议：允许 TLS 指纹伪装
+(allow iokit-open)
+(allow mach-lookup)
+(allow ipc-posix-shm)
+
+;; QUIC 协议：允许 UDP 特殊操作
+(allow system-socket)
+(allow system-info)
+(allow sysctl-read)
+(allow sysctl-write
+  (sysctl-name-regex #"^net\.inet\..*"))
 EOF
 
     # 创建宽松沙盒配置
