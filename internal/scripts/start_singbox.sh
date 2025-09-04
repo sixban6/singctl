@@ -215,16 +215,54 @@ setup_route() {
 }
 
 start_singbox() {
-    # 启动服务
-    echo_succ "启动 sing-box 服务..."
-    sing-box run -c "/etc/sing-box/config.json" >/dev/null 2>&1 &
+    # 检查ujail是否可用
+    if ! command -v ujail >/dev/null 2>&1; then
+        echo_warn "ujail 不可用，使用普通模式启动 sing-box"
+        sing-box run -c "/etc/sing-box/config.json" >/dev/null 2>&1 &
+        sleep 2
+        if pgrep "sing-box" > /dev/null; then
+           echo_succ "sing-box 启动成功 运行模式--TProxy(普通模式)"
+        else
+           error_exit "sing-box 启动失败，请检查日志"
+        fi
+        return
+    fi
+
+    # 创建沙盒环境目录
+    echo_succ "创建 sing-box 沙盒环境..."
+    mkdir -p /tmp/sing-box-jail/{bin,etc,tmp,dev,proc,sys}
+    mkdir -p /tmp/sing-box-jail/etc/sing-box
+    
+    # 准备沙盒环境
+    cp /usr/bin/sing-box /tmp/sing-box-jail/bin/ 2>/dev/null || cp /usr/local/bin/sing-box /tmp/sing-box-jail/bin/
+    cp /etc/sing-box/config.json /tmp/sing-box-jail/etc/sing-box/
+    
+    # 创建必需的设备文件
+    mknod /tmp/sing-box-jail/dev/null c 1 3 2>/dev/null || true
+    mknod /tmp/sing-box-jail/dev/urandom c 1 9 2>/dev/null || true
+    
+    echo_succ "启动 sing-box 服务(沙盒模式)..."
+    
+    # 使用ujail启动sing-box
+    ujail -n sing-box \
+        -u root \
+        -g root \
+        -C /tmp/sing-box-jail \
+        -r /lib:/lib \
+        -r /usr/lib:/usr/lib \
+        -w /tmp \
+        -R /dev/null \
+        -R /dev/urandom \
+        -E PATH=/bin:/usr/bin:/sbin:/usr/sbin \
+        -E CONFIG_FILE=/etc/sing-box/config.json \
+        -- /bin/sing-box run -c /etc/sing-box/config.json >/dev/null 2>&1 &
 
     # 检查服务状态
-    sleep 2
-    if pgrep "sing-box" > /dev/null; then
+    sleep 3
+    if ps | grep -v grep | grep "ujail -n sing-box" > /dev/null; then
        echo_succ "sing-box 启动成功 运行模式--TProxy(沙盒运行)"
     else
-       error_exit "sing-box 启动失败，请检查日志"
+       error_exit "sing-box 沙盒启动失败，请检查日志和ujail配置"
     fi
 }
 

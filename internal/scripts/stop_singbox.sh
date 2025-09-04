@@ -35,8 +35,29 @@ check_command "sing-box"
 check_command "nft"
 check_command "ip"
 
-# 停止 sing-box 服务（包括沙盒实例）
-if pgrep "sing-box" > /dev/null; then
+# 停止 sing-box 服务（优先处理沙盒实例）
+if ps | grep -v grep | grep "ujail -n sing-box" > /dev/null; then
+    echo_succ "$(timestamp) 检测到沙盒运行的 sing-box，正在停止..."
+    
+    # 先尝试优雅停止ujail容器
+    pkill -TERM -f "ujail -n sing-box"
+    sleep 2
+    
+    # 如果还在运行，强制终止
+    if ps | grep -v grep | grep "ujail -n sing-box" > /dev/null; then
+        pkill -KILL -f "ujail -n sing-box"
+        sleep 1
+    fi
+    echo_succ "$(timestamp) 已停止 sing-box 沙盒实例"
+    
+    # 清理沙盒临时目录
+    if [ -d "/tmp/sing-box-jail" ]; then
+        rm -rf /tmp/sing-box-jail
+        echo_succ "$(timestamp) 已清理沙盒环境目录"
+    fi
+    
+elif pgrep "sing-box" > /dev/null; then
+    echo_succ "$(timestamp) 检测到普通模式的 sing-box，正在停止..."
     # 先尝试正常终止
     killall sing-box
     sleep 1
@@ -47,12 +68,6 @@ if pgrep "sing-box" > /dev/null; then
     echo_succ "$(timestamp) 已停止现有 sing-box 服务"
 else
     echo_succ "$(timestamp) 没有运行中的 sing-box 服务"
-fi
-
-# 确保 ujail 实例被清理
-if ps | grep -v grep | grep "ujail -n sing-box" > /dev/null; then
-    pkill -f "ujail -n sing-box"
-    echo_succ "$(timestamp) 已清理 sing-box 沙盒实例"
 fi
 
 # 删除防火墙规则文件
