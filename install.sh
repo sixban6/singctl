@@ -328,19 +328,36 @@ setup_path() {
 configure_subscription() {
     echo_info "配置订阅连接..."
     
-    # 检查是否有可用的stdin (当通过管道运行时会失败)
-    if [ -t 0 ]; then
-            if supports_color; then
-            printf "\033[0;33m请输入您的订阅连接 (留空跳过):\033[0m\n"
-        else
-            printf "请输入您的订阅连接 (留空跳过):\n"
-        fi
-        printf "订阅URL: "
-        read -r sub_url
+    # 强制从终端读取输入，即使在管道中运行
+    if supports_color; then
+        printf "\033[0;33m请输入您的订阅连接 (留空跳过):\033[0m\n"
     else
-        echo_info "通过管道运行，跳过交互式订阅配置"
-        echo_info "安装完成后可手动编辑配置文件: $CONFIG_FILE"
-        return 0
+        printf "请输入您的订阅连接 (留空跳过):\n"
+    fi
+    
+    printf "订阅URL: "
+    
+    # 直接从 /dev/tty 读取，绕过管道限制
+    if [ -c /dev/tty ]; then
+        read -r sub_url < /dev/tty
+    else
+        # 如果没有 /dev/tty，尝试其他方法
+        exec < /dev/tty 2>/dev/null || {
+            echo_warning "无法获取终端输入，创建配置模板"
+            cat > "$CONFIG_FILE" <<EOF
+subs:
+  - name: "main"
+    url: "YOUR_SUBSCRIPTION_URL_HERE"
+    skip_tls_verify: false
+    remove-emoji: true
+
+github:
+  mirror_url: "https://ghfast.top"
+EOF
+            echo_warning "请手动编辑配置文件: $CONFIG_FILE"
+            return 0
+        }
+        read -r sub_url
     fi
 
     [ -z "$sub_url" ] && { echo_info "跳过订阅配置"; return 0; }
@@ -438,11 +455,19 @@ main() {
     show_completion_info
     init_singbox_config
     echo_success "安装脚本执行完成！"
-    echo_info "开始安装Singbox..."
-    "$INSTALL_DIR/singctl" install sb
-    echo_success "安装Singbox成功"
-    echo_success "尝试启动sing-box"
-    "$INSTALL_DIR/singctl" start
+    
+    # 检查配置文件是否有效订阅地址
+    if [ -f "$CONFIG_FILE" ] && ! grep -q "YOUR_SUBSCRIPTION_URL_HERE" "$CONFIG_FILE" 2>/dev/null; then
+        echo_info "检测到有效配置，开始自动安装Singbox..."
+        "$INSTALL_DIR/singctl" install sb
+        echo_success "安装Singbox成功"
+        echo_success "尝试启动sing-box"
+        "$INSTALL_DIR/singctl" start
+    else
+        echo_warning "配置文件需要手动编辑或未配置有效订阅"
+        echo_info "请先编辑配置文件: $CONFIG_FILE"  
+        echo_info "然后运行: sudo singctl install sb && sudo singctl start"
+    fi
 }
 
 # 执行主函数
