@@ -18,7 +18,7 @@ SingCtl是一个简单高效的命令行VPN客户端, 能让你根据订阅地�
 
 **Mac**
 ```bash
-curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/sixban6/singctl/main/install.sh | sudo bash 
+curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/sixban6/singctl/main/install.sh | sudo sh 
 ```
 
 **OpenWrt**
