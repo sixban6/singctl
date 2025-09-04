@@ -249,48 +249,76 @@ start_singbox() {
         cp /etc/sing-box/config.json /tmp/sing-box-work/config.json 2>/dev/null || true
     fi
     
-    # 尝试文件系统隔离沙盒  
-    echo_succ "尝试文件系统隔离模式..."
-    ujail -n sing-box \
-          -T 64M \
-          -r /usr/bin/sing-box \
-          -r /lib \
-          -r /usr/lib \
-          -w /tmp \
-          -- sing-box run -c /tmp/sing-box-work/config.json >/tmp/sing-box-fs.log 2>&1 &
-
+    # 找到sing-box的绝对路径
+    SINGBOX_EXEC=""
+    if [ -f "/usr/bin/sing-box" ]; then
+        SINGBOX_EXEC="/usr/bin/sing-box"
+    elif [ -f "/usr/local/bin/sing-box" ]; then
+        SINGBOX_EXEC="/usr/local/bin/sing-box"
+    else
+        SINGBOX_EXEC=$(which sing-box 2>/dev/null || echo "")
+    fi
+    
+    if [ -z "$SINGBOX_EXEC" ] || [ ! -f "$SINGBOX_EXEC" ]; then
+        echo_warn "找不到sing-box可执行文件，跳过沙盒模式"
+        # 使用普通模式启动
+        sing-box run -c "/etc/sing-box/config.json" >/dev/null 2>&1 &
+        sleep 2
+        if pgrep "sing-box" > /dev/null; then
+           echo_succ "sing-box 启动成功 运行模式--TProxy(普通模式)"
+        else
+           error_exit "sing-box 启动失败，请检查配置和日志"
+        fi
+        return
+    fi
+    
+    echo_succ "发现 sing-box 路径: $SINGBOX_EXEC"
+    
+    # 先测试最基本的ujail功能 - 使用namespace选项避免段错误
+    echo_succ "测试ujail基础功能..."
+    if ! ujail -n test-basic -w /tmp -- /bin/echo "test" >/tmp/ujail-test.log 2>&1; then
+        echo_warn "ujail基础功能异常，查看 /tmp/ujail-test.log"
+        echo_warn "跳过沙盒模式，使用普通模式启动..."
+        sing-box run -c "/etc/sing-box/config.json" >/dev/null 2>&1 &
+        sleep 2
+        if pgrep "sing-box" > /dev/null; then
+           echo_succ "sing-box 启动成功 运行模式--TProxy(普通模式)"
+        else
+           error_exit "sing-box 启动失败，请检查配置和日志"
+        fi
+        return
+    fi
+    
+    # 尝试最简单的沙盒模式 - 只使用-w参数
+    echo_succ "尝试基础沙盒模式(仅临时目录)..."
+    ujail -n sing-box -w /tmp -- "$SINGBOX_EXEC" run -c /tmp/sing-box-work/config.json >/tmp/sing-box-basic.log 2>&1 &
     UJAIL_PID=$!
     
-    # 检查服务状态
     sleep 3
     if ps | grep -v grep | grep "ujail.*sing-box" > /dev/null; then
-       echo_succ "sing-box 启动成功 运行模式--TProxy(文件系统隔离沙盒)"
-       echo_succ "沙盒特性: tmpfs + 只读文件系统"
+       echo_succ "sing-box 启动成功 运行模式--TProxy(基础沙盒)"
+       echo_succ "沙盒特性: 进程隔离 + 临时目录访问"
        return
     fi
     
-    # 文件系统隔离失败，尝试基础权限限制
-    echo_warn "文件系统隔离失败，尝试权限限制模式..."
+    # 基础沙盒失败，尝试无参数ujail
+    echo_warn "基础沙盒失败，尝试最简沙盒..."
     kill $UJAIL_PID 2>/dev/null || true
     pkill -f "ujail.*sing-box" 2>/dev/null || true
     
-    ujail -n sing-box \
-          -c \
-          -w /tmp \
-          -- sing-box run -c /etc/sing-box/config.json >/tmp/sing-box-priv.log 2>&1 &
-
+    ujail -n sing-box -p -- "$SINGBOX_EXEC" run -c /etc/sing-box/config.json >/tmp/sing-box-simple.log 2>&1 &
     UJAIL_PID=$!
     
     sleep 3
     if ps | grep -v grep | grep "ujail.*sing-box" > /dev/null; then
-       echo_succ "sing-box 启动成功 运行模式--TProxy(权限限制沙盒)"
-       echo_succ "沙盒特性: PR_SET_NO_NEW_PRIVS"
+       echo_succ "sing-box 启动成功 运行模式--TProxy(最简沙盒)"
+       echo_succ "沙盒特性: 基础进程隔离"
        return
     fi
     
     # 所有沙盒模式失败，回退到普通模式
     echo_warn "所有沙盒模式失败，回退到普通模式..."
-    echo_warn "查看日志: /tmp/sing-box-fs.log 和 /tmp/sing-box-priv.log"
+    echo_warn "查看日志: /tmp/ujail-test.log, /tmp/sing-box-basic.log 和 /tmp/sing-box-simple.log"
     kill $UJAIL_PID 2>/dev/null || true
     pkill -f "ujail.*sing-box" 2>/dev/null || true
     

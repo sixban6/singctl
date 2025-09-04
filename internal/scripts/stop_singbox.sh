@@ -83,4 +83,4 @@ rm -f /etc/sing-box/cache.db && echo_succ "$(timestamp) 已清理缓存文件"
 
 # 清理沙盒工作目录和日志文件
 rm -rf /tmp/sing-box-work && echo_succ "$(timestamp) 已清理沙盒工作目录"
-rm -f /tmp/sing-box-fs.log /tmp/sing-box-priv.log && echo_succ "$(timestamp) 已清理沙盒调试日志"
+rm -f /tmp/ujail-test.log /tmp/sing-box-basic.log /tmp/sing-box-simple.log && echo_succ "$(timestamp) 已清理沙盒调试日志"
