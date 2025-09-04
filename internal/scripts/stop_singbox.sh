@@ -36,25 +36,19 @@ check_command "nft"
 check_command "ip"
 
 # 停止 sing-box 服务（优先处理沙盒实例）
-if ps | grep -v grep | grep "ujail -n sing-box" > /dev/null; then
+if ps | grep -v grep | grep "ujail.*sing-box" > /dev/null; then
     echo_succ "$(timestamp) 检测到沙盒运行的 sing-box，正在停止..."
     
     # 先尝试优雅停止ujail容器
-    pkill -TERM -f "ujail -n sing-box"
+    pkill -TERM -f "ujail.*sing-box"
     sleep 2
     
     # 如果还在运行，强制终止
-    if ps | grep -v grep | grep "ujail -n sing-box" > /dev/null; then
-        pkill -KILL -f "ujail -n sing-box"
+    if ps | grep -v grep | grep "ujail.*sing-box" > /dev/null; then
+        pkill -KILL -f "ujail.*sing-box"
         sleep 1
     fi
     echo_succ "$(timestamp) 已停止 sing-box 沙盒实例"
-    
-    # 清理沙盒临时目录
-    if [ -d "/tmp/sing-box-jail" ]; then
-        rm -rf /tmp/sing-box-jail
-        echo_succ "$(timestamp) 已清理沙盒环境目录"
-    fi
     
 elif pgrep "sing-box" > /dev/null; then
     echo_succ "$(timestamp) 检测到普通模式的 sing-box，正在停止..."
@@ -86,3 +80,9 @@ ip -6 route flush table $PROXY_ROUTE_TABLE 2>/dev/null && echo_succ "$(timestamp
 
 # 删除缓存
 rm -f /etc/sing-box/cache.db && echo_succ "$(timestamp) 已清理缓存文件"
+
+# 清理沙盒安全配置文件
+rm -rf /tmp/sing-box-security && echo_succ "$(timestamp) 已清理沙盒安全配置"
+
+# 清理日志文件
+rm -f /tmp/sing-box.log /tmp/sing-box-simple.log && echo_succ "$(timestamp) 已清理调试日志"

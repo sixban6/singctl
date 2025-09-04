@@ -228,41 +228,97 @@ start_singbox() {
         return
     fi
 
-    # 创建沙盒环境目录
-    echo_succ "创建 sing-box 沙盒环境..."
-    mkdir -p /tmp/sing-box-jail/{bin,etc,tmp,dev,proc,sys}
-    mkdir -p /tmp/sing-box-jail/etc/sing-box
+    # 创建安全配置文件
+    echo_succ "创建安全沙盒配置..."
+    mkdir -p /tmp/sing-box-security
     
-    # 准备沙盒环境
-    cp /usr/bin/sing-box /tmp/sing-box-jail/bin/ 2>/dev/null || cp /usr/local/bin/sing-box /tmp/sing-box-jail/bin/
-    cp /etc/sing-box/config.json /tmp/sing-box-jail/etc/sing-box/
-    
-    # 创建必需的设备文件
-    mknod /tmp/sing-box-jail/dev/null c 1 3 2>/dev/null || true
-    mknod /tmp/sing-box-jail/dev/urandom c 1 9 2>/dev/null || true
-    
-    echo_succ "启动 sing-box 服务(沙盒模式)..."
-    
-    # 使用ujail启动sing-box
-    ujail -n sing-box \
-        -u root \
-        -g root \
-        -C /tmp/sing-box-jail \
-        -r /lib:/lib \
-        -r /usr/lib:/usr/lib \
-        -w /tmp \
-        -R /dev/null \
-        -R /dev/urandom \
-        -E PATH=/bin:/usr/bin:/sbin:/usr/sbin \
-        -E CONFIG_FILE=/etc/sing-box/config.json \
-        -- /bin/sing-box run -c /etc/sing-box/config.json >/dev/null 2>&1 &
+    # 创建capabilities配置文件 - 只保留网络必需权限
+    cat > /tmp/sing-box-security/capabilities.drop << EOF
+CAP_AUDIT_CONTROL
+CAP_AUDIT_READ
+CAP_AUDIT_WRITE
+CAP_BLOCK_SUSPEND
+CAP_CHOWN
+CAP_DAC_OVERRIDE
+CAP_DAC_READ_SEARCH
+CAP_FOWNER
+CAP_FSETID
+CAP_IPC_LOCK
+CAP_IPC_OWNER
+CAP_KILL
+CAP_LEASE
+CAP_LINUX_IMMUTABLE
+CAP_MAC_ADMIN
+CAP_MAC_OVERRIDE
+CAP_MKNOD
+CAP_SETFCAP
+CAP_SETGID
+CAP_SETPCAP
+CAP_SETUID
+CAP_SYS_ADMIN
+CAP_SYS_BOOT
+CAP_SYS_CHROOT
+CAP_SYS_MODULE
+CAP_SYS_NICE
+CAP_SYS_PACCT
+CAP_SYS_PTRACE
+CAP_SYS_RAWIO
+CAP_SYS_RESOURCE
+CAP_SYS_TIME
+CAP_SYS_TTY_CONFIG
+CAP_SYSLOG
+CAP_WAKE_ALARM
+EOF
 
+    echo_succ "启动 sing-box 服务(增强沙盒模式)..."
+    
+    # 使用ujail启动sing-box - 网络命名空间 + capabilities限制
+    ujail -n sing-box \
+          -C /tmp/sing-box-security/capabilities.drop \
+          -c \
+          -r /etc/sing-box \
+          -r /usr/bin/sing-box \
+          -r /lib \
+          -r /usr/lib \
+          -w /tmp \
+          -p \
+          -- sing-box run -c /etc/sing-box/config.json >/tmp/sing-box.log 2>&1 &
+
+    UJAIL_PID=$!
+    
     # 检查服务状态
     sleep 3
-    if ps | grep -v grep | grep "ujail -n sing-box" > /dev/null; then
-       echo_succ "sing-box 启动成功 运行模式--TProxy(沙盒运行)"
+    if ps | grep -v grep | grep "ujail.*sing-box" > /dev/null; then
+       echo_succ "sing-box 启动成功 运行模式--TProxy(增强沙盒)"
+       echo_succ "沙盒特性: capabilities限制 + 文件系统隔离"
     else
-       error_exit "sing-box 沙盒启动失败，请检查日志和ujail配置"
+       echo_warn "增强沙盒启动失败，尝试简单沙盒模式..."
+       # 清理失败的ujail
+       kill $UJAIL_PID 2>/dev/null || true
+       pkill -f "ujail.*sing-box" 2>/dev/null || true
+       
+       # 尝试简单沙盒模式
+       ujail -n sing-box -c -- sing-box run -c /etc/sing-box/config.json >/tmp/sing-box-simple.log 2>&1 &
+       UJAIL_PID=$!
+       
+       sleep 3
+       if ps | grep -v grep | grep "ujail.*sing-box" > /dev/null; then
+          echo_succ "sing-box 启动成功 运行模式--TProxy(简单沙盒)"
+       else
+          echo_warn "沙盒模式均失败，回退到普通模式..."
+          echo_warn "查看日志: /tmp/sing-box.log 和 /tmp/sing-box-simple.log"
+          # 清理ujail残留
+          kill $UJAIL_PID 2>/dev/null || true
+          pkill -f "ujail.*sing-box" 2>/dev/null || true
+          # 使用普通模式启动
+          sing-box run -c "/etc/sing-box/config.json" >/dev/null 2>&1 &
+          sleep 2
+          if pgrep "sing-box" > /dev/null; then
+             echo_succ "sing-box 启动成功 运行模式--TProxy(普通模式)"
+          else
+             error_exit "sing-box 启动失败，请检查配置和日志"
+          fi
+       fi
     fi
 }
 
