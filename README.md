@@ -23,12 +23,12 @@ curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/sixban6/singctl/
 
 **OpenWrt**
 ```bash
-opkg update && opkg install bash && curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/sixban6/singctl/main/install.sh | bash 
+curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/sixban6/singctl/main/install.sh | sh 
 ```
 
 **Linux** (root)
 ```bash
-curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/sixban6/singctl/main/install.sh | bash 
+curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/sixban6/singctl/main/install.sh | sh 
 ```
 
 **Windows 11** (用管理员权限运行Powershell)
