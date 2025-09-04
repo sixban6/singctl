@@ -10,14 +10,7 @@ github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZN
 github.com/russross/blackfriday/v2 v2.1.0/go.mod h1:+Rmxgy9KzJVeS9/2gXHxylqXiyQDYRxCVz55jmeOWTM=
 github.com/sixban6/ghinstall v1.12.9 h1:nAhnF+JppZftxTYDKMib3vRN9thvytaDuompCWOXRpY=
 github.com/sixban6/ghinstall v1.12.9/go.mod h1:wqLoQGCDfqEcwVtrRxRo97OSjTOh5E/qunTaxFzljic=
-github.com/sixban6/singgen v1.12.13 h1:sSyeOkEJTM8rOAwz+FMnjkH1FWPJ0hpJJ+zNgUz1Fic=
-github.com/sixban6/singgen v1.12.13/go.mod h1:CZ+Prs2a/Kuj9Tx1ehBRrpzcrj4GrcLRNqjD+Z87jVc=
-github.com/sixban6/singgen v1.12.14/go.mod h1:CZ+Prs2a/Kuj9Tx1ehBRrpzcrj4GrcLRNqjD+Z87jVc=
-github.com/sixban6/singgen v1.12.15/go.mod h1:3KSsRgnNU1BEOxn3QAWGGVu7x7RnaKGODGdh2rc2fuc=
-github.com/sixban6/singgen v1.12.16/go.mod h1:3KSsRgnNU1BEOxn3QAWGGVu7x7RnaKGODGdh2rc2fuc=
-github.com/sixban6/singgen v1.12.17/go.mod h1:3KSsRgnNU1BEOxn3QAWGGVu7x7RnaKGODGdh2rc2fuc=
-github.com/sixban6/singgen v1.12.18/go.mod h1:3KSsRgnNU1BEOxn3QAWGGVu7x7RnaKGODGdh2rc2fuc=
-github.com/sixban6/singgen v1.12.19/go.mod h1:3KSsRgnNU1BEOxn3QAWGGVu7x7RnaKGODGdh2rc2fuc=
+github.com/sixban6/singgen v1.12.20 h1:nE92vhSmoqIpYlZfXIdygSAaKo0zQI7vmJc/1EJYrXA=
 github.com/sixban6/singgen v1.12.20/go.mod h1:3KSsRgnNU1BEOxn3QAWGGVu7x7RnaKGODGdh2rc2fuc=
 github.com/spf13/cobra v1.8.1 h1:e5/vxKd/rZsfSJMUX1agtjeTDf+qv1/JdBF8gg5k9ZM=
 github.com/spf13/cobra v1.8.1/go.mod h1:wHxEcudfqmLYa8iTfL+OuZPbBZkmvliBWKIezN3kD9Y=
