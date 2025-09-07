@@ -40,12 +40,12 @@ if ps | grep -v grep | grep "ujail.*sing-box" > /dev/null; then
     echo_succ "$(timestamp) 检测到沙盒运行的 sing-box，正在停止..."
     
     # 先尝试优雅停止ujail容器
-    pkill -TERM -f "ujail.*sing-box"
+    killall sing-box
     sleep 2
     
     # 如果还在运行，强制终止
     if ps | grep -v grep | grep "ujail.*sing-box" > /dev/null; then
-        pkill -KILL -f "ujail.*sing-box"
+        killall -9 sing-box
         sleep 1
     fi
     echo_succ "$(timestamp) 已停止 sing-box 沙盒实例"
