@@ -1,3 +1,10 @@
+## [1.15.2](https://github.com/sixban6/singctl/compare/v1.15.1...v1.15.2) (2025-09-14)
+
+
+### Bug Fixes
+
+* fix stop sing-box ([fc379a9](https://github.com/sixban6/singctl/commit/fc379a9a03855dfee11ad05b10334f4dbb7b1c3b))
+
 ## [1.15.1](https://github.com/sixban6/singctl/compare/v1.15.0...v1.15.1) (2025-09-07)
 
 
