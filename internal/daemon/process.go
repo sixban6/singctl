@@ -1,9 +1,11 @@
 package daemon
 
 import (
+	"bytes"
 	"fmt"
 	"io/ioutil"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -56,12 +58,12 @@ func ReadDaemonPid() (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("failed to read pid file: %w", err)
 	}
-	
+
 	pid, err := strconv.Atoi(string(data))
 	if err != nil {
 		return 0, fmt.Errorf("invalid pid in file: %w", err)
 	}
-	
+
 	return pid, nil
 }
 
@@ -149,32 +151,35 @@ func isSingBoxProcessRunning() bool {
 }
 
 // checkProcessByCommand 通过命令检查进程
-func checkProcessByCommand(cmd string, args []string) bool {
-	// 简化实现：通过文件系统检查
-	// 实际实现中应该使用更可靠的方法
-	
-	// 检查常见的sing-box安装路径
-	singboxPaths := []string{
-		"/usr/local/bin/sing-box",
-		"/usr/bin/sing-box",
-	}
-	
-	if runtime.GOOS == "windows" {
-		localAppData := os.Getenv("LOCALAPPDATA")
-		if localAppData != "" {
-			singboxPaths = append(singboxPaths, filepath.Join(localAppData, "Programs", "sing-box", "sing-box.exe"))
+func checkProcessByCommand(cmdName string, args []string) bool {
+	// 1. 使用 os/exec 包来创建一个代表外部命令的对象
+	cmd := exec.Command(cmdName, args...)
+
+	// 2. 根据不同的命令，使用不同的策略来判断结果
+	switch cmdName {
+	case "pgrep":
+		// 对于 pgrep，我们只关心它的退出状态码。
+		// 如果 pgrep 找到了进程，它会以状态码 0 正常退出，此时 .Run() 方法返回的 err 是 nil。
+		// 如果没找到，它会以状态码 1 退出，.Run() 会返回一个 *exec.ExitError。
+		// 所以，只需要判断 err 是否为 nil 即可。
+		err := cmd.Run()
+		return err == nil
+
+	case "tasklist":
+		// 对于 tasklist，即使没有找到进程，只要命令语法正确，它通常也会以状态码 0 退出。
+		// 因此，我们必须检查它的输出内容。
+		output, err := cmd.Output()
+		if err != nil {
+			// 如果命令执行本身就出错了（比如 tasklist 不在 PATH 中），
+			// 我们可以安全地认为进程没有在运行。
+			return false
 		}
+
+		// 如果输出中包含了 "sing-box.exe" 字符串，说明进程存在。
+		return bytes.Contains(output, []byte("sing-box.exe"))
+
+	default:
+		// 如果传入了未知的命令，返回 false。
+		return false
 	}
-	
-	// 这是一个简化的实现，实际中需要更准确的进程检查
-	// 可以使用 github.com/shirou/gopsutil 库来精确检查进程
-	for _, path := range singboxPaths {
-		if _, err := os.Stat(path); err == nil {
-			// 如果可执行文件存在，假设进程正在运行
-			// 这里需要更精确的实现
-			return true
-		}
-	}
-	
-	return false
 }
