@@ -1,3 +1,11 @@
+## [1.15.4](https://github.com/sixban6/singctl/compare/v1.15.3...v1.15.4) (2025-09-24)
+
+
+### Bug Fixes
+
+* update singgen ([5822968](https://github.com/sixban6/singctl/commit/582296846e0bd26bb990f6d921e3d921797e4c08))
+* update singgen ([27b056f](https://github.com/sixban6/singctl/commit/27b056f51e60cc5ed2d00138f4db8da39b06e6b1))
+
 ## [1.15.3](https://github.com/sixban6/singctl/compare/v1.15.2...v1.15.3) (2025-09-16)
 
 
