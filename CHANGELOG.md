@@ -1,3 +1,10 @@
+## [1.15.9](https://github.com/sixban6/singctl/compare/v1.15.8...v1.15.9) (2026-01-18)
+
+
+### Bug Fixes
+
+* update singgen ([d36beda](https://github.com/sixban6/singctl/commit/d36bedafd0e518cc3e09a99a7447c8cf4c2bdb27))
+
 ## [1.15.8](https://github.com/sixban6/singctl/compare/v1.15.7...v1.15.8) (2026-01-18)
 
 
