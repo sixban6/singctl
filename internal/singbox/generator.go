@@ -57,12 +57,14 @@ func (g *ConfigGenerator) Generate() (string, error) {
 	ctx := context.Background()
 
 	// 检查 DNS 服务器是否可用
-	var dnsServer string
-	if g.netInfo != nil && len(g.netInfo.DNSServers) > 0 {
-		dnsServer = g.netInfo.DNSServers[0]
-	} else {
-		dnsServer = "8.8.8.8" // 默认 DNS
-	}
+	//var dnsServer string
+	//if g.netInfo != nil && len(g.netInfo.DNSServers) > 0 {
+	//	dnsServer = g.netInfo.DNSServers[0]
+	//} else {
+	//	dnsServer = "8.8.8.8" // 默认 DNS
+	//}
+	// dnsServer sing-box已经实现自动获取
+	var dnsServer = ""
 
 	// 如果只有一个订阅，使用单订阅API
 	if len(g.config.Subs) == 1 {
