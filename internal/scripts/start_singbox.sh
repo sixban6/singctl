@@ -296,6 +296,9 @@ start_singbox() {
           -r /etc/ssl \
           -r /etc/sing-box \
           -r /usr/share/ca-certificates \
+          -r /etc/hosts \
+          -r /etc/resolv.conf \
+          -r /proc \
           -- "$SINGBOX_EXEC" run -c /tmp/sing-box-work/config.json >/tmp/sing-box-basic.log 2>&1 &
     UJAIL_PID=$!
     
