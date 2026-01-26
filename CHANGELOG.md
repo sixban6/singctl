@@ -1,3 +1,10 @@
+## [1.15.10](https://github.com/sixban6/singctl/compare/v1.15.9...v1.15.10) (2026-01-26)
+
+
+### Bug Fixes
+
+* remove quic reject action ([0bc8aed](https://github.com/sixban6/singctl/commit/0bc8aedd4198253417fdb82af08acffa740920ab))
+
 ## [1.15.9](https://github.com/sixban6/singctl/compare/v1.15.8...v1.15.9) (2026-01-18)
 
 
