@@ -26,26 +26,9 @@ Signed-By: /etc/apt/keyrings/sagernet.asc
      apt-get update -qq > /dev/null 2>&1
 
     # 选择安装稳定版或测试版
-    while true; do
-        read -rp "请选择安装版本(1: 稳定版, 2: 测试版): " version_choice
-        case $version_choice in
-            1)
-                echo "安装稳定版..."
-                 apt-get install sing-box -yq > /dev/null 2>&1
-                echo "安装已完成"
-                break
-                ;;
-            2)
-                echo "安装测试版..."
-                 apt-get install sing-box-beta -yq > /dev/null 2>&1
-                echo "安装已完成"
-                break
-                ;;
-            *)
-                echo -e "${RED}无效的选择，请输入 1 或 2。${NC}"
-                ;;
-        esac
-    done
+    echo "安装稳定版..."
+     apt-get install sing-box -yq > /dev/null 2>&1
+    echo "安装已完成"
 
     if command -v sing-box &> /dev/null; then
         sing_box_version=$(sing-box version | grep 'sing-box version' | awk '{print $3}')
