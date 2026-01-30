@@ -127,9 +127,9 @@ jobs:
             echo "Created singctl-${platform_dir}.tar.gz"
           fi
         done
-        
+      
         # Generate checksums for all packages
-        sha256sum *.tar.gz *.zip > checksums.txt
+        sha256sum *.tar.gz > checksums.txt
         echo "Generated checksums"
         
     - name: Upload Release Assets
