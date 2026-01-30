@@ -128,24 +128,6 @@ jobs:
           fi
         done
         
-        # Create zip files for Windows systems
-        for platform_dir in windows-amd64 windows-arm64; do
-          if [[ -d "$platform_dir" && -f "$platform_dir/singctl.exe" ]]; then
-            # Create final package directory with proper name
-            package_name="singctl-${platform_dir}"
-            mkdir -p ${package_name}
-            
-            # Copy binary and configs to package directory
-            cp ${platform_dir}/singctl.exe ${package_name}/
-            cp -r ../configs ${package_name}/
-            
-            # Create zip file containing the named directory
-            zip -r singctl-${platform_dir}.zip ${package_name}
-            rm -rf ${package_name}
-            echo "Created singctl-${platform_dir}.zip"
-          fi
-        done
-        
         # Generate checksums for all packages
         sha256sum *.tar.gz *.zip > checksums.txt
         echo "Generated checksums"
