@@ -105,13 +105,7 @@ jobs:
         
         # macOS ARM64 (Apple Silicon)
         GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 eval go build $LDFLAGS -o dist/darwin-arm64/singctl ./cmd/singctl
-        
-        # Windows AMD64
-        GOOS=windows GOARCH=amd64 CGO_ENABLED=0 eval go build $LDFLAGS -o dist/windows-amd64/singctl.exe ./cmd/singctl
-        
-        # Windows ARM64
-        GOOS=windows GOARCH=arm64 CGO_ENABLED=0 eval go build $LDFLAGS -o dist/windows-arm64/singctl.exe ./cmd/singctl
-        
+
     - name: Create packages
       run: |
         cd dist
