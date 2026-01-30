@@ -1,3 +1,10 @@
+## [1.15.15](https://github.com/sixban6/singctl/compare/v1.15.14...v1.15.15) (2026-01-30)
+
+
+### Bug Fixes
+
+* Added Mozilla certificate to prevent man-in-the-middle attacks ([9e09fdd](https://github.com/sixban6/singctl/commit/9e09fddbbb44a24db32e8c416474155455603bf3))
+
 ## [1.15.14](https://github.com/sixban6/singctl/compare/v1.15.13...v1.15.14) (2026-01-30)
 
 
