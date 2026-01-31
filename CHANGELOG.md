@@ -1,3 +1,10 @@
+## [1.15.17](https://github.com/sixban6/singctl/compare/v1.15.16...v1.15.17) (2026-01-31)
+
+
+### Bug Fixes
+
+* force webrtc go proxy ([27e78b7](https://github.com/sixban6/singctl/commit/27e78b7350f20cf5ae7e03dccc4da153e6903fc2))
+
 ## [1.15.16](https://github.com/sixban6/singctl/compare/v1.15.15...v1.15.16) (2026-01-30)
 
 
