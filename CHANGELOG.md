@@ -3,6 +3,14 @@
 
 ### Bug Fixes
 
+* reset code ([bacf564](https://github.com/sixban6/singctl/commit/bacf56468db899a3d84cde4515332dea20072bf2))
+* reset code ([7c21e52](https://github.com/sixban6/singctl/commit/7c21e5255f00d9ab019c94a324c04832e0a43efe))
+
+## [1.15.17](https://github.com/sixban6/singctl/compare/v1.15.16...v1.15.17) (2026-02-01)
+
+
+### Bug Fixes
+
 * reset code ([7c21e52](https://github.com/sixban6/singctl/commit/7c21e5255f00d9ab019c94a324c04832e0a43efe))
 
 ## [1.15.16](https://github.com/sixban6/singctl/compare/v1.15.15...v1.15.16) (2026-01-30)
