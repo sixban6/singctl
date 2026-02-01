@@ -28,7 +28,7 @@ Signed-By: /etc/apt/keyrings/sagernet.asc
     # 选择安装稳定版或测试版
     echo "安装稳定版..."
      apt-get install sing-box -yq > /dev/null 2>&1
-    echo "安装已完成"
+    echo "安装已完成!"
 
     if command -v sing-box &> /dev/null; then
         sing_box_version=$(sing-box version | grep 'sing-box version' | awk '{print $3}')
