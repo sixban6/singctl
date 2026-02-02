@@ -169,6 +169,11 @@ subs:
 
 github:
   mirror_url: "https://ghfast.top"
+
+gui:
+  mac_url: "https://github.com/SagerNet/sing-box/releases/download/v1.13.0-rc.1/SFM-1.13.0-rc.1-Apple.pkg"
+  win_url: "https://github.com/SagerNet/sing-box/releases/download/v1.13.0-rc.1/sing-box-1.13.0-rc.1-windows-amd64.zip"
+  app_name: "SFM"
 "@ | Out-File $ConfigFile -Encoding utf8
     Write-Success '订阅已写入配置文件'
 } else {
