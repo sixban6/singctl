@@ -3,7 +3,8 @@ package singbox
 import (
 	"context"
 	"fmt"
-	"github.com/sixban6/ghinstall"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,9 @@ import (
 	"singctl/internal/logger"
 	"singctl/internal/scripts"
 	"strings"
+	"time"
+
+	"github.com/sixban6/ghinstall"
 )
 
 // getSingBoxInstallDir 返回适合当前系统的 sing-box 安装路径
@@ -45,6 +49,9 @@ func New(cfg *config.Config) *SingBox {
 	var configPath string
 	if runtime.GOOS == "windows" {
 		configPath = filepath.Join(os.Getenv("LOCALAPPDATA"), "sing-box", "config.json")
+	} else if runtime.GOOS == "darwin" {
+		home, _ := os.UserHomeDir()
+		configPath = filepath.Join(home, "Documents", "sing-box-config.json")
 	} else {
 		configPath = "/etc/sing-box/config.json"
 	}
@@ -201,10 +208,154 @@ func (sb *SingBox) GenerateConfig() error {
 
 // Install 安装 sing-box
 func (sb *SingBox) Install() error {
+	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+		return sb.InstallGUI()
+	}
 	return sb.installOrUpdate(getSingBoxInstallDir())
 }
 
-// installOrUpdate 安装或更新 sing-box
+// InstallGUI 安装 GUI 客户端
+func (sb *SingBox) InstallGUI() error {
+	var downloadURL string
+	if runtime.GOOS == "darwin" {
+		downloadURL = sb.config.GUI.MacURL
+	} else if runtime.GOOS == "windows" {
+		downloadURL = sb.config.GUI.WinURL
+	}
+
+	if downloadURL == "" {
+		return fmt.Errorf("GUI download URL not configured for %s", runtime.GOOS)
+	}
+
+	// 优化下载逻辑：检查Google连通性
+	if !checkGoogleConnectivity() {
+		logger.Info("Google is not accessible, using mirror for download...")
+		mirrorURL := sb.config.GitHub.MirrorURL
+		if mirrorURL != "" {
+			// 确保 mirrorURL 以 / 结尾，或者 downloadURL 拼接时注意
+			// 用户示例: https://ghfast.top/https://github.com/...
+			// ghfast.top 通常直接拼接完整 URL
+			if !strings.HasSuffix(mirrorURL, "/") {
+				mirrorURL += "/"
+			}
+			downloadURL = mirrorURL + downloadURL
+		}
+	} else {
+		logger.Info("Google is accessible, downloading directly...")
+	}
+
+	logger.Info("Downloading GUI client from: %s", downloadURL)
+
+	// Create temp file
+	tempFile, err := os.CreateTemp("", "singbox-gui-*"+filepath.Ext(downloadURL))
+	if err != nil {
+		return fmt.Errorf("create temp file failed: %w", err)
+	}
+	defer os.Remove(tempFile.Name())
+
+	// Download
+	resp, err := http.Get(downloadURL)
+	if err != nil {
+		return fmt.Errorf("download failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("download failed with status: %s", resp.Status)
+	}
+
+	_, err = io.Copy(tempFile, resp.Body)
+	if err != nil {
+		return fmt.Errorf("write to file failed: %w", err)
+	}
+	tempFile.Close()
+
+	// Install
+	if runtime.GOOS == "darwin" {
+		if strings.HasSuffix(downloadURL, ".pkg") {
+			logger.Info("Installing PKG package (requires administrator privileges)...")
+			// 使用 osascript 获取管理员权限并执行静默安装
+			// "do shell script ... with administrator privileges" 会弹出系统的密码输入框
+			// 注意: AppleScript 中字符串内嵌引号需要转义，这里使用单引号包裹路径以简化
+			script := fmt.Sprintf("installer -pkg '%s' -target /", tempFile.Name())
+			cmd := exec.Command("osascript", "-e", fmt.Sprintf("do shell script \"%s\" with administrator privileges", script))
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			return cmd.Run()
+		} else if strings.HasSuffix(downloadURL, ".dmg") {
+			logger.Info("Mounting DMG...")
+			// Simplified DMG handling: User might need to drag-drop manually if we just open it
+			cmd := exec.Command("open", tempFile.Name())
+			return cmd.Run()
+		}
+	} else if runtime.GOOS == "windows" {
+		logger.Info("Starting installer...")
+		cmd := exec.Command("cmd", "/C", "start", "", tempFile.Name())
+		return cmd.Run()
+	}
+
+	return fmt.Errorf("unsupported installer format")
+}
+
+// StartGUI 启动 GUI 客户端
+func (sb *SingBox) StartGUI() error {
+	appName := sb.config.GUI.AppName
+	if appName == "" {
+		appName = "SFM"
+	}
+
+	// Mac App path check
+	appPath := fmt.Sprintf("/Applications/%s.app", appName)
+	if _, err := os.Stat(appPath); os.IsNotExist(err) {
+		logger.Info("App %s not found in /Applications", appName)
+		fmt.Print("Do you want to install it now? [Y/n]: ")
+		var input string
+		fmt.Scanln(&input)
+		if input == "" || strings.ToLower(input) == "y" {
+			if err := sb.InstallGUI(); err != nil {
+				return err
+			}
+		} else {
+			return fmt.Errorf("app not installed")
+		}
+	} else {
+		// App exists, just open it
+		logger.Success("App found at %s", appPath)
+	}
+
+	logger.Info("Config file is located at: %s", sb.configPath)
+
+	// Ensure config is generated
+	if err := sb.GenerateConfig(); err != nil {
+		logger.Warn("Failed to generate config: %v", err)
+	} else {
+		logger.Success("Config generated successfully.")
+	}
+
+	// 启动应用,并打开配置
+	if runtime.GOOS == "darwin" {
+
+		cmd1 := exec.Command("open", "-a", appName)
+		cmd2 := exec.Command("open", "-t", sb.configPath)
+		// 依次执行并检查错误
+		if err := cmd1.Run(); err != nil {
+			return fmt.Errorf("启动应用失败: %w", err)
+		}
+
+		if err := cmd2.Run(); err != nil {
+			return fmt.Errorf("打开配置失败: %w", err)
+		}
+		logger.Info("配置文件: %s, 请手动导入配置", sb.configPath)
+	} else if runtime.GOOS == "windows" {
+		// Windows logic needs path presumably, or if it's in path
+		// For now simple placeholder or assume standard install location if possible
+		return fmt.Errorf("windows start not fully implemented yet without known path")
+	}
+
+	return nil
+}
+
+// installOrUpdate 安装或更新 sing-box (CLI)
 func (sb *SingBox) installOrUpdate(targetPath string) error {
 	ctx := context.Background()
 
@@ -325,4 +476,18 @@ func (sb *SingBox) selectSingBoxAsset(assetName string) bool {
 // Update 更新 sing-box
 func (sb *SingBox) Update() error {
 	return sb.installOrUpdate(getSingBoxInstallDir())
+}
+
+// checkGoogleConnectivity 检查是否能访问Google
+func checkGoogleConnectivity() bool {
+	client := http.Client{
+		Timeout: 3 * time.Second,
+	}
+	// 尝试访问 google.com
+	resp, err := client.Head("https://www.google.com")
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode >= 200 && resp.StatusCode < 400
 }
