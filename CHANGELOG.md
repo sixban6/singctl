@@ -1,3 +1,10 @@
+# [1.16.0](https://github.com/sixban6/singctl/compare/v1.15.21...v1.16.0) (2026-02-02)
+
+
+### Features
+
+* mac和windows平台使用官方GUI ([f92c956](https://github.com/sixban6/singctl/commit/f92c956b944a68909a90e0447691819cf7859d74))
+
 ## [1.15.21](https://github.com/sixban6/singctl/compare/v1.15.20...v1.15.21) (2026-02-02)
 
 
