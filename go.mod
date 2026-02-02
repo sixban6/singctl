@@ -4,7 +4,7 @@ go 1.25
 
 require (
 	github.com/sixban6/ghinstall v1.12.9
-	github.com/sixban6/singgen v1.12.30
+	github.com/sixban6/singgen v1.12.50
 	github.com/spf13/cobra v1.10.2
 	gopkg.in/yaml.v3 v3.0.1
 )
