@@ -27,6 +27,7 @@ github.com/sixban6/singgen v1.12.46/go.mod h1:3KSsRgnNU1BEOxn3QAWGGVu7x7RnaKGODG
 github.com/sixban6/singgen v1.12.50 h1:lFYICdjbeVt6Zrs9Nu4FX61BrWYCffOnxPbv4RU4gfc=
 github.com/sixban6/singgen v1.12.50/go.mod h1:3KSsRgnNU1BEOxn3QAWGGVu7x7RnaKGODGdh2rc2fuc=
 github.com/sixban6/singgen v1.13.1/go.mod h1:3KSsRgnNU1BEOxn3QAWGGVu7x7RnaKGODGdh2rc2fuc=
+github.com/sixban6/singgen v1.13.2/go.mod h1:3KSsRgnNU1BEOxn3QAWGGVu7x7RnaKGODGdh2rc2fuc=
 github.com/spf13/cobra v1.8.1 h1:e5/vxKd/rZsfSJMUX1agtjeTDf+qv1/JdBF8gg5k9ZM=
 github.com/spf13/cobra v1.8.1/go.mod h1:wHxEcudfqmLYa8iTfL+OuZPbBZkmvliBWKIezN3kD9Y=
 github.com/spf13/cobra v1.10.2 h1:DMTTonx5m65Ic0GOoRY2c16WCbHxOOw6xxezuLaBpcU=
