@@ -372,6 +372,11 @@ subs:
 
 github:
   mirror_url: "https://ghfast.top"
+
+gui:
+  mac_url: "https://github.com/SagerNet/sing-box/releases/download/v1.13.0-rc.1/SFM-1.13.0-rc.1-Apple.pkg"
+  win_url: "https://github.com/SagerNet/sing-box/releases/download/v1.13.0-rc.1/sing-box-1.13.0-rc.1-windows-amd64.zip"
+  app_name: "SFM"
 EOF
 
     echo_success "订阅连接已写入 $CONFIG_FILE"
