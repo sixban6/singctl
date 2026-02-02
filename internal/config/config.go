@@ -10,7 +10,9 @@ import (
 type Config struct {
 	Subs   []Subscription `yaml:"subs"`
 	GitHub GitHubConfig   `yaml:"github"`
+	GUI    GUIConfig      `yaml:"gui"`
 }
+
 
 type Subscription struct {
 	Name          string `yaml:"name"`
@@ -21,6 +23,12 @@ type Subscription struct {
 
 type GitHubConfig struct {
 	MirrorURL string `yaml:"mirror_url"`
+}
+
+type GUIConfig struct {
+	MacURL  string `yaml:"mac_url"`
+	WinURL  string `yaml:"win_url"`
+	AppName string `yaml:"app_name"`
 }
 
 func Load(path string) (*Config, error) {
@@ -69,6 +77,13 @@ func (c *Config) Validate() error {
 
 	if c.GitHub.MirrorURL == "" {
 		c.GitHub.MirrorURL = "https://github.com"
+	}
+
+	if c.GUI.MacURL == "" {
+		c.GUI.MacURL = "https://github.com/SagerNet/sing-box/releases/download/v1.13.0-rc.1/SFM-1.13.0-rc.1-Apple.pkg"
+	}
+	if c.GUI.AppName == "" {
+		c.GUI.AppName = "SFM"
 	}
 
 	return nil

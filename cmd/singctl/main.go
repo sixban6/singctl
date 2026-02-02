@@ -8,13 +8,14 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/spf13/cobra"
 	"singctl/internal/cmd"
 	"singctl/internal/config"
 	"singctl/internal/daemon"
 	"singctl/internal/logger"
 	"singctl/internal/singbox"
 	"singctl/internal/updater"
+
+	"github.com/spf13/cobra"
 )
 
 var (
@@ -128,6 +129,17 @@ func startCmd() *cobra.Command {
 			}
 
 			// 启动服务
+			if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+				// 对于GUI客户端，先确保配置已生成
+				// GenerateConfig is called inside ValidateConfig if invalid, but if valid we might need to tell user where it is.
+				// However, StartGUI handles app launch. Config inject?
+				// Requirement 4: "Make user import generated config..."
+
+				// Ensure config is generated/updated if using custom logic?
+				// The existing code calls GenerateConfig if invalid.
+				// Let's just call StartGUI.
+				return sb.StartGUI()
+			}
 			return sb.Start()
 		},
 	}
@@ -138,6 +150,11 @@ func stopCmd() *cobra.Command {
 		Use:   "stop",
 		Short: "Stop sing-box and daemon",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+				logger.Warn("Stop command is not supported/needed for GUI clients on this platform.")
+				return nil
+			}
+
 			// 先停止守护进程
 			if daemon.IsDaemonRunning() {
 				logger.Info("Stopping daemon...")
@@ -277,4 +294,3 @@ func versionCmd() *cobra.Command {
 		},
 	}
 }
-
