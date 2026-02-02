@@ -1,3 +1,10 @@
+## [1.15.20](https://github.com/sixban6/singctl/compare/v1.15.19...v1.15.20) (2026-02-02)
+
+
+### Bug Fixes
+
+* fix dns leak ([7ed9adc](https://github.com/sixban6/singctl/commit/7ed9adc634bbf9ea819a44c1eba1d75a996f4705))
+
 ## [1.15.19](https://github.com/sixban6/singctl/compare/v1.15.18...v1.15.19) (2026-02-02)
 
 
