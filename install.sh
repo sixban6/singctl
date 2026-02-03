@@ -178,7 +178,7 @@ get_latest_version() {
 build_download_url() {
     # 构建文件名
     local filename="singctl-${OS}-${ARCH}.tar.gz"
-    DOWNLOAD_URL="https://github.com/$GITHUB_REPO/releases/download/$LATEST_VERSION/$filename"
+    DOWNLOAD_URL="https://ghfast.top/https://github.com/$GITHUB_REPO/releases/download/$LATEST_VERSION/$filename"
     
     echo_info "下载链接: $DOWNLOAD_URL"
 }
