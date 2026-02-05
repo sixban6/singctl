@@ -3,6 +3,7 @@ package singbox
 import (
 	"context"
 	"fmt"
+	"github.com/sixban6/ghinstall"
 	"io"
 	"net/http"
 	"os"
@@ -12,11 +13,9 @@ import (
 	"singctl/internal/config"
 	"singctl/internal/fileutil"
 	"singctl/internal/logger"
+	"singctl/internal/netinfo"
 	"singctl/internal/scripts"
 	"strings"
-	"time"
-
-	"github.com/sixban6/ghinstall"
 )
 
 // getSingBoxInstallDir 返回适合当前系统的 sing-box 安装路径
@@ -228,21 +227,7 @@ func (sb *SingBox) InstallGUI() error {
 	}
 
 	// 优化下载逻辑：检查Google连通性
-	if !checkGoogleConnectivity() {
-		logger.Info("Google is not accessible, using mirror for download...")
-		mirrorURL := sb.config.GitHub.MirrorURL
-		if mirrorURL != "" {
-			// 确保 mirrorURL 以 / 结尾，或者 downloadURL 拼接时注意
-			// 用户示例: https://ghfast.top/https://github.com/...
-			// ghfast.top 通常直接拼接完整 URL
-			if !strings.HasSuffix(mirrorURL, "/") {
-				mirrorURL += "/"
-			}
-			downloadURL = mirrorURL + downloadURL
-		}
-	} else {
-		logger.Info("Google is accessible, downloading directly...")
-	}
+	downloadURL = netinfo.GetReachableURL(downloadURL, sb.config.GitHub.MirrorURL)
 
 	logger.Info("Downloading GUI client from: %s", downloadURL)
 
@@ -476,18 +461,4 @@ func (sb *SingBox) selectSingBoxAsset(assetName string) bool {
 // Update 更新 sing-box
 func (sb *SingBox) Update() error {
 	return sb.installOrUpdate(getSingBoxInstallDir())
-}
-
-// checkGoogleConnectivity 检查是否能访问Google
-func checkGoogleConnectivity() bool {
-	client := http.Client{
-		Timeout: 3 * time.Second,
-	}
-	// 尝试访问 google.com
-	resp, err := client.Head("https://www.google.com")
-	if err != nil {
-		return false
-	}
-	defer resp.Body.Close()
-	return resp.StatusCode >= 200 && resp.StatusCode < 400
 }
