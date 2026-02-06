@@ -1,3 +1,10 @@
+## [1.16.5](https://github.com/sixban6/singctl/compare/v1.16.4...v1.16.5) (2026-02-06)
+
+
+### Bug Fixes
+
+* support vless ([870dc34](https://github.com/sixban6/singctl/commit/870dc343e38e0827a8034654a738df212f2acca5))
+
 ## [1.16.4](https://github.com/sixban6/singctl/compare/v1.16.3...v1.16.4) (2026-02-05)
 
 
