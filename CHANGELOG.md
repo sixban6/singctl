@@ -1,3 +1,10 @@
+## [1.16.6](https://github.com/sixban6/singctl/compare/v1.16.5...v1.16.6) (2026-02-07)
+
+
+### Bug Fixes
+
+* add auto update gui url ([a86d39c](https://github.com/sixban6/singctl/commit/a86d39c9edc89d1fe4a15a6209bad5d612cdadf0))
+
 ## [1.16.5](https://github.com/sixban6/singctl/compare/v1.16.4...v1.16.5) (2026-02-06)
 
 
