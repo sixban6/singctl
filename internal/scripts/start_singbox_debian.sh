@@ -262,7 +262,7 @@ table inet sing-box {
 
         # 放行局域网流量
         ip daddr @LOCAL_IPV4_SET accept
-        ip6 daddr { ::1, fc00::/7, fe80::/10 } accept
+        ip6 daddr { ::1, fc00::/7, fe80::/10, ff00::/8 } accept
 
         # 放行端口转发流量
         ct status dnat accept comment "Allow forwarded traffic"
@@ -288,7 +288,7 @@ table inet sing-box {
 
         # 放行局域网流量
         ip daddr @LOCAL_IPV4_SET accept
-        ip6 daddr { ::1, fc00::/7, fe80::/10 } accept
+        ip6 daddr { ::1, fc00::/7, fe80::/10, ff00::/8 } accept
 
         # 标记其他流量
         meta l4proto { tcp, udp } meta mark set $PROXY_FWMARK accept
@@ -321,6 +321,8 @@ setup_iptables() {
     iptables -t mangle -A SINGBOX -d 172.16.0.0/12 -j RETURN
     iptables -t mangle -A SINGBOX -d 192.168.0.0/16 -j RETURN
     iptables -t mangle -A SINGBOX -d 169.254.0.0/16 -j RETURN
+    iptables -t mangle -A SINGBOX -d 224.0.0.0/4 -j RETURN
+    iptables -t mangle -A SINGBOX -d 255.255.255.255/32 -j RETURN
     
     # DNS 重定向
     iptables -t mangle -A SINGBOX -p tcp --dport 53 -j TPROXY --tproxy-mark $PROXY_FWMARK --on-port $TPROXY_PORT

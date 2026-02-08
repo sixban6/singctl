@@ -139,7 +139,7 @@ setup_nft() {
 
             # 放行局域网流量
             ip daddr @LOCAL_IPV4_SET accept
-            ip6 daddr { ::1, fc00::/7, fe80::/10 } accept
+            ip6 daddr { ::1, fc00::/7, fe80::/10, ff00::/8 } accept
 
             # 放行所有经过 DNAT 的流量.即端口转发流量
             ct status dnat accept comment "Allow forwarded traffic"
@@ -165,7 +165,7 @@ setup_nft() {
 
             # 4.放行局域网流量
             ip daddr @LOCAL_IPV4_SET accept
-            ip6 daddr { ::1, fc00::/7, fe80::/10 } accept
+            ip6 daddr { ::1, fc00::/7, fe80::/10, ff00::/8 } accept
 
             # 5.标记其余流量
             meta l4proto { tcp, udp } meta mark set $PROXY_FWMARK accept
