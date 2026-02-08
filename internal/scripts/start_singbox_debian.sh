@@ -25,7 +25,7 @@ DEBIAN_VERSION=$(lsb_release -r 2>/dev/null | awk '{print $2}' | cut -d. -f1)
 [ -z "$DEBIAN_VERSION" ] && DEBIAN_VERSION=$(cat /etc/debian_version 2>/dev/null | cut -d. -f1)
 [ -z "$DEBIAN_VERSION" ] && DEBIAN_VERSION="11"  # 默认
 
-LOCAL_IPV4='{127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16}'
+LOCAL_IPV4='{127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 224.0.0.0/4, 255.255.255.255/32}'
 
 # 获取当前时间
 timestamp() {
