@@ -1,3 +1,10 @@
+## [1.16.8](https://github.com/sixban6/singctl/compare/v1.16.7...v1.16.8) (2026-02-08)
+
+
+### Bug Fixes
+
+* mDNS loop in passby router ([92e1b53](https://github.com/sixban6/singctl/commit/92e1b534c0974ec849483e800db6a509a460b4a2))
+
 ## [1.16.7](https://github.com/sixban6/singctl/compare/v1.16.6...v1.16.7) (2026-02-08)
 
 
