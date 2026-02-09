@@ -77,9 +77,17 @@ init_env() {
         echo_succ "没有运行中的 sing-box 服务"
     fi
 
-    # 检查并删除已存在的 sing-box 表（如果存在）
-    if nft list tables | grep -q 'inet sing-box'; then
-        nft delete table inet sing-box
+    # 根据版本检查并清理防火墙规则
+    if [ $OPENWRT_MAIN_VERSION -ge 23 ]; then
+        # OpenWrt 23+ 使用 nftables
+        if nft list tables 2>/dev/null | grep -q 'inet sing-box'; then
+            nft delete table inet sing-box
+        fi
+    else
+        # OpenWrt 22 及以下使用 iptables
+        # 清理可能存在的 iptables 规则
+        iptables -t mangle -F SING_BOX 2>/dev/null || true
+        iptables -t mangle -X SING_BOX 2>/dev/null || true
     fi
 
     # 检查是否以 root 权限运行
@@ -89,7 +97,14 @@ init_env() {
 
     # 检查必要命令是否安装
     check_command "sing-box"
-    check_command "nft"
+    
+    # 根据版本检查防火墙工具
+    if [ $OPENWRT_MAIN_VERSION -ge 23 ]; then
+        check_command "nft"
+    else
+        check_command "iptables"
+    fi
+    
     check_command "ip"
     check_command "ping"
     check_command "netstat"
@@ -182,7 +197,70 @@ EOF
 }
 
 setup_iptables() {
-  echo "setup_iptables"
+    echo_succ "配置 iptables 规则 (OpenWrt 22 及以下版本)..."
+    
+    # 清除现有的 iptables 规则
+    echo_succ "清除现有的 iptables 规则..."
+    iptables -t mangle -F PREROUTING 2>/dev/null || true
+    iptables -t mangle -F OUTPUT 2>/dev/null || true
+    iptables -t mangle -F SING_BOX 2>/dev/null || true
+    iptables -t mangle -X SING_BOX 2>/dev/null || true
+    
+    # 创建新的 iptables 链
+    echo_succ "创建 SING_BOX 链..."
+    iptables -t mangle -N SING_BOX
+    
+    # DHCP 和 DNS 规则
+    echo_succ "配置 DHCP 和 DNS 规则..."
+    # 放行 DHCP (67-68端口)
+    iptables -t mangle -A SING_BOX -p udp --dport 67:68 -j RETURN
+    
+    # 劫持 DNS 请求到 sing-box (53端口)
+    iptables -t mangle -A SING_BOX -p udp --dport 53 -j TPROXY --on-port $TPROXY_PORT --tproxy-mark $PROXY_FWMARK
+    iptables -t mangle -A SING_BOX -p tcp --dport 53 -j TPROXY --on-port $TPROXY_PORT --tproxy-mark $PROXY_FWMARK
+    
+    # 放行局域网地址
+    echo_succ "配置局域网地址放行规则..."
+    iptables -t mangle -A SING_BOX -d 127.0.0.0/8 -j RETURN
+    iptables -t mangle -A SING_BOX -d 10.0.0.0/8 -j RETURN
+    iptables -t mangle -A SING_BOX -d 172.16.0.0/12 -j RETURN
+    iptables -t mangle -A SING_BOX -d 192.168.0.0/16 -j RETURN
+    iptables -t mangle -A SING_BOX -d 169.254.0.0/16 -j RETURN
+    iptables -t mangle -A SING_BOX -d 224.0.0.0/4 -j RETURN       # 组播地址
+    iptables -t mangle -A SING_BOX -d 255.255.255.255/32 -j RETURN # 广播地址
+    
+    # 代理 TCP 和 UDP 流量
+    echo_succ "配置 TProxy 代理规则..."
+    iptables -t mangle -A SING_BOX -p tcp -j TPROXY --on-port $TPROXY_PORT --tproxy-mark $PROXY_FWMARK
+    iptables -t mangle -A SING_BOX -p udp -j TPROXY --on-port $TPROXY_PORT --tproxy-mark $PROXY_FWMARK
+    
+    # 将 SING_BOX 链添加到 PREROUTING 链
+    echo_succ "将规则应用到 PREROUTING 链..."
+    iptables -t mangle -A PREROUTING -j SING_BOX
+    
+    # 配置 OUTPUT 链规则（用于路由器本机流量）
+    echo_succ "配置 OUTPUT 链规则..."
+    # 放行已标记的流量，防止回环
+    iptables -t mangle -A OUTPUT -m mark --mark $PROXY_FWMARK -j RETURN
+    
+    # 劫持 DNS 请求
+    iptables -t mangle -A OUTPUT -p udp --dport 53 -j MARK --set-mark $PROXY_FWMARK
+    iptables -t mangle -A OUTPUT -p tcp --dport 53 -j MARK --set-mark $PROXY_FWMARK
+    
+    # 放行局域网地址
+    iptables -t mangle -A OUTPUT -d 127.0.0.0/8 -j RETURN
+    iptables -t mangle -A OUTPUT -d 10.0.0.0/8 -j RETURN
+    iptables -t mangle -A OUTPUT -d 172.16.0.0/12 -j RETURN
+    iptables -t mangle -A OUTPUT -d 192.168.0.0/16 -j RETURN
+    iptables -t mangle -A OUTPUT -d 169.254.0.0/16 -j RETURN
+    iptables -t mangle -A OUTPUT -d 224.0.0.0/4 -j RETURN
+    iptables -t mangle -A OUTPUT -d 255.255.255.255/32 -j RETURN
+    
+    # 标记其他 TCP 和 UDP 流量
+    iptables -t mangle -A OUTPUT -p tcp -j MARK --set-mark $PROXY_FWMARK
+    iptables -t mangle -A OUTPUT -p udp -j MARK --set-mark $PROXY_FWMARK
+    
+    echo_succ "iptables 规则配置完成"
 }
 
 setup_firewall() {
