@@ -13,6 +13,7 @@ import (
 	"singctl/internal/daemon"
 	"singctl/internal/logger"
 	"singctl/internal/singbox"
+	"singctl/internal/tailscale"
 	"singctl/internal/updater"
 
 	"github.com/spf13/cobra"
@@ -106,7 +107,7 @@ DNS optimization, and complete service lifecycle management.`,
 }
 
 func startCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "start",
 		Short: "Generate config and start sing-box",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -143,6 +144,17 @@ func startCmd() *cobra.Command {
 			return sb.Start()
 		},
 	}
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "tailscale",
+		Short: "Start tailscale",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ts := tailscale.New()
+			return ts.Start()
+		},
+	})
+
+	return cmd
 }
 
 func stopCmd() *cobra.Command {
@@ -248,6 +260,9 @@ func installCmd() *cobra.Command {
 			case "sb", "sing-box":
 				sb := singbox.New(cfg)
 				return sb.Install()
+			case "tailscale":
+				ts := tailscale.New()
+				return ts.Install()
 			default:
 				return fmt.Errorf("unknown target: %s", args[0])
 			}
