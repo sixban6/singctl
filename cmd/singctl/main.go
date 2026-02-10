@@ -158,7 +158,7 @@ func startCmd() *cobra.Command {
 }
 
 func stopCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "stop",
 		Short: "Stop sing-box and daemon",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -183,6 +183,17 @@ func stopCmd() *cobra.Command {
 			return sb.Stop()
 		},
 	}
+
+	cmd.AddCommand(&cobra.Command{
+		Use:   "tailscale",
+		Short: "Stop tailscale",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ts := tailscale.New()
+			return ts.Stop()
+		},
+	})
+
+	return cmd
 }
 
 func genCmd() *cobra.Command {

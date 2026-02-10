@@ -219,29 +219,8 @@ func (t *Tailscale) Install() error {
 		return fmt.Errorf("start service failed: %w", err)
 	}
 
-	// 5. Get LAN subnet
-	lanSubnet, err := t.getLANSubnet()
-	if err != nil {
-		logger.Warn("Failed to detect LAN subnet, using default 192.168.31.0/24: %v", err)
-		lanSubnet = "192.168.31.0/24"
-	}
-	logger.Info("Detected LAN subnet: %s", lanSubnet)
-
-	// 6. Initial tailscale up execution
-	// User request implies running `up` after install.
-	logger.Info("Running tailscale up...")
-	args := []string{"up", "--advertise-routes=" + lanSubnet, "--accept-dns=false"}
-	if hasTun {
-		args = append(args, "--netfilter-mode=on")
-	}
-
-	if err := exec.Command(filepath.Join(installDir, "tailscale"), args...).Run(); err != nil {
-		logger.Warn("tailscale up failed (might need auth url, check output): %v", err)
-	} else {
-		logger.Success("Tailscale up executed successfully")
-	}
-
 	logger.Success("Tailscale installed successfully")
+	logger.Info("Run 'singctl start tailscale' to configure and authenticate your device")
 	return nil
 }
 
@@ -354,6 +333,27 @@ func (t *Tailscale) Start() error {
 	exec.Command("/etc/init.d/firewall", "reload").Run()
 
 	logger.Success("Tailscale configured and started")
+	return nil
+}
+
+func (t *Tailscale) Stop() error {
+	if !isOpenWrt() {
+		logger.Warn("Tailscale stop is currently only supported on OpenWrt and ImmortalWrt.")
+		return nil
+	}
+	logger.Info("Stopping Tailscale...")
+
+	// 1. Bring down Tailscale connection
+	if err := exec.Command(filepath.Join(installDir, "tailscale"), "down").Run(); err != nil {
+		logger.Warn("tailscale down failed: %v", err)
+	}
+
+	// 2. Stop the service
+	if err := exec.Command("/etc/init.d/tailscale", "stop").Run(); err != nil {
+		return fmt.Errorf("stop service failed: %w", err)
+	}
+
+	logger.Success("Tailscale stopped successfully")
 	return nil
 }
 
