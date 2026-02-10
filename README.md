@@ -75,11 +75,13 @@ singctl daemon status
 singctl daemon logs -n 50
 
 # 安装 Tailscale (仅 OpenWrt/ImmortalWrt)
-singctl tailscale install
+singctl install tailscale
 
 # 配置并启动 Tailscale (仅 OpenWrt/ImmortalWrt)
-singctl tailscale start
+singctl start tailscale
 
+
+singctl stop tailscale
 ```
 
 ## License
