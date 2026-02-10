@@ -268,6 +268,12 @@ func (t *Tailscale) Start() error {
 		return fmt.Errorf("tailscale up failed: %w", err)
 	}
 
+	// 3. Optimize UDP GRO for better performance (Tailscale recommendation)
+	logger.Info("Optimizing UDP GRO settings for better performance...")
+	if err := optimizeUDPGRO(); err != nil {
+		logger.Warn("Failed to optimize UDP GRO (non-critical): %v", err)
+	}
+
 	// 3. Configure Firewall and Network
 	logger.Info("Configuring firewall and network...")
 
@@ -362,7 +368,82 @@ func (t *Tailscale) Stop() error {
 		return fmt.Errorf("stop service failed: %w", err)
 	}
 
+	// 3. Restore UDP GRO settings to default
+	logger.Info("Restoring UDP GRO settings to default...")
+	if err := restoreUDPGRO(); err != nil {
+		logger.Warn("Failed to restore UDP GRO (non-critical): %v", err)
+	}
+
 	logger.Success("Tailscale stopped successfully")
+	return nil
+}
+
+// optimizeUDPGRO configures UDP GRO settings for better Tailscale performance
+// Reference: https://tailscale.com/s/ethtool-config-udp-gro
+func optimizeUDPGRO() error {
+	// Get the default route network interface
+	out, err := exec.Command("ip", "-o", "route", "get", "8.8.8.8").Output()
+	if err != nil {
+		return fmt.Errorf("failed to get default route: %w", err)
+	}
+
+	// Parse interface name from output (typically field 5)
+	fields := strings.Fields(string(out))
+	var netdev string
+	for i, field := range fields {
+		if field == "dev" && i+1 < len(fields) {
+			netdev = fields[i+1]
+			break
+		}
+	}
+
+	if netdev == "" {
+		return fmt.Errorf("could not determine network interface")
+	}
+
+	logger.Info("Configuring UDP GRO on interface: %s", netdev)
+
+	// Configure rx-udp-gro-forwarding and rx-gro-list
+	cmd := exec.Command("ethtool", "-K", netdev, "rx-udp-gro-forwarding", "on", "rx-gro-list", "off")
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("ethtool command failed: %w", err)
+	}
+
+	logger.Success("UDP GRO optimization applied")
+	return nil
+}
+
+// restoreUDPGRO restores UDP GRO settings to default values
+func restoreUDPGRO() error {
+	// Get the default route network interface
+	out, err := exec.Command("ip", "-o", "route", "get", "8.8.8.8").Output()
+	if err != nil {
+		return fmt.Errorf("failed to get default route: %w", err)
+	}
+
+	// Parse interface name from output
+	fields := strings.Fields(string(out))
+	var netdev string
+	for i, field := range fields {
+		if field == "dev" && i+1 < len(fields) {
+			netdev = fields[i+1]
+			break
+		}
+	}
+
+	if netdev == "" {
+		return fmt.Errorf("could not determine network interface")
+	}
+
+	logger.Info("Restoring UDP GRO on interface: %s", netdev)
+
+	// Restore to default settings (rx-udp-gro-forwarding off)
+	cmd := exec.Command("ethtool", "-K", netdev, "rx-udp-gro-forwarding", "off", "rx-gro-list", "on")
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("ethtool command failed: %w", err)
+	}
+
+	logger.Success("UDP GRO settings restored to default")
 	return nil
 }
 
