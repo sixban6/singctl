@@ -74,6 +74,12 @@ singctl daemon status
 # 查看守护进程日志
 singctl daemon logs -n 50
 
+# 安装 Tailscale (仅 OpenWrt/ImmortalWrt)
+singctl tailscale install
+
+# 配置并启动 Tailscale (仅 OpenWrt/ImmortalWrt)
+singctl tailscale start
+
 ```
 
 ## License

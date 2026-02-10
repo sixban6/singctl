@@ -1,8 +1,10 @@
 package tailscale
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -12,9 +14,7 @@ import (
 )
 
 const (
-	tailscaleVersion = "1.94.1"
-	tailscaleURL     = "https://pkgs.tailscale.com/stable/tailscale_" + tailscaleVersion + "_amd64.tgz"
-	installDir       = "/usr/sbin"
+	installDir = "/usr/sbin"
 )
 
 type Tailscale struct{}
@@ -23,12 +23,123 @@ func New() *Tailscale {
 	return &Tailscale{}
 }
 
+// getLatestTailscaleVersion 从 GitHub API 获取最新的稳定版本
+func (t *Tailscale) getLatestTailscaleVersion() (string, error) {
+	url := "https://api.github.com/repos/tailscale/tailscale/releases/latest"
+	resp, err := http.Get(url)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch latest version: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("GitHub API returned status: %s", resp.Status)
+	}
+
+	var release struct {
+		TagName string `json:"tag_name"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		return "", fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	// tag_name 格式通常是 "v1.94.1"，需要去掉前缀 "v"
+	version := strings.TrimPrefix(release.TagName, "v")
+	if version == "" {
+		return "", fmt.Errorf("invalid version format: %s", release.TagName)
+	}
+
+	return version, nil
+}
+
+// getLANSubnet 从 UCI 配置中获取 LAN 接口的子网信息
+func (t *Tailscale) getLANSubnet() (string, error) {
+	// 获取 LAN 接口的 IP 地址
+	out, err := exec.Command("uci", "get", "network.lan.ipaddr").Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to get LAN IP: %w", err)
+	}
+	ipAddr := strings.TrimSpace(string(out))
+
+	// 获取 LAN 接口的子网掩码
+	out, err = exec.Command("uci", "get", "network.lan.netmask").Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to get LAN netmask: %w", err)
+	}
+	netmask := strings.TrimSpace(string(out))
+
+	// 将 IP 和子网掩码转换为 CIDR 格式
+	ip := net.ParseIP(ipAddr)
+	if ip == nil {
+		return "", fmt.Errorf("invalid IP address: %s", ipAddr)
+	}
+
+	mask := net.ParseIP(netmask)
+	if mask == nil {
+		return "", fmt.Errorf("invalid netmask: %s", netmask)
+	}
+
+	// 转换为 IPMask
+	ipMask := net.IPMask(mask.To4())
+	ones, _ := ipMask.Size()
+
+	// 计算网络地址
+	network := ip.Mask(ipMask)
+
+	// 返回 CIDR 格式的子网
+	return fmt.Sprintf("%s/%d", network.String(), ones), nil
+}
+
+// getSystemArchitecture 检测系统架构并映射到 Tailscale 的架构命名
+func (t *Tailscale) getSystemArchitecture() (string, error) {
+	out, err := exec.Command("uname", "-m").Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to detect architecture: %w", err)
+	}
+
+	arch := strings.TrimSpace(string(out))
+
+	// 映射系统架构到 Tailscale 的架构命名
+	switch arch {
+	case "x86_64", "amd64":
+		return "amd64", nil
+	case "aarch64", "arm64":
+		return "arm64", nil
+	case "armv7l", "armv7":
+		return "arm", nil
+	case "i386", "i686":
+		return "386", nil
+	default:
+		return "", fmt.Errorf("unsupported architecture: %s", arch)
+	}
+}
+
 func (t *Tailscale) Install() error {
 	if !isOpenWrt() {
 		logger.Warn("Tailscale installation is currently only supported on OpenWrt and ImmortalWrt.")
 		return nil
 	}
 	logger.Info("Starting Tailscale installation...")
+
+	// 0. Get latest version
+	logger.Info("Fetching latest Tailscale version...")
+	version, err := t.getLatestTailscaleVersion()
+	if err != nil {
+		logger.Warn("Failed to fetch latest version, using fallback 1.94.1: %v", err)
+		version = "1.94.1"
+	}
+	logger.Info("Using Tailscale version: %s", version)
+
+	// 0.1 Detect system architecture
+	arch, err := t.getSystemArchitecture()
+	if err != nil {
+		logger.Warn("Failed to detect architecture, using fallback amd64: %v", err)
+		arch = "amd64"
+	}
+	logger.Info("Detected system architecture: %s", arch)
+
+	tailscaleURL := fmt.Sprintf("https://pkgs.tailscale.com/stable/tailscale_%s_%s.tgz", version, arch)
 
 	// 1. Download
 	logger.Info("Downloading Tailscale...")
@@ -67,8 +178,8 @@ func (t *Tailscale) Install() error {
 		return fmt.Errorf("extract failed: %w", err)
 	}
 
-	// Find extracted directory (it should be tailscale_<version>_amd64)
-	extractedDir := filepath.Join(tmpDir, "tailscale_"+tailscaleVersion+"_amd64")
+	// Find extracted directory (it should be tailscale_<version>_<arch>)
+	extractedDir := filepath.Join(tmpDir, fmt.Sprintf("tailscale_%s_%s", version, arch))
 
 	// Copy binaries
 	if err := copyFile(filepath.Join(extractedDir, "tailscale"), filepath.Join(installDir, "tailscale")); err != nil {
@@ -108,10 +219,18 @@ func (t *Tailscale) Install() error {
 		return fmt.Errorf("start service failed: %w", err)
 	}
 
-	// 5. Initial tailscale up execution
+	// 5. Get LAN subnet
+	lanSubnet, err := t.getLANSubnet()
+	if err != nil {
+		logger.Warn("Failed to detect LAN subnet, using default 192.168.31.0/24: %v", err)
+		lanSubnet = "192.168.31.0/24"
+	}
+	logger.Info("Detected LAN subnet: %s", lanSubnet)
+
+	// 6. Initial tailscale up execution
 	// User request implies running `up` after install.
 	logger.Info("Running tailscale up...")
-	args := []string{"up", "--advertise-routes=192.168.31.0/24", "--accept-dns=false"}
+	args := []string{"up", "--advertise-routes=" + lanSubnet, "--accept-dns=false"}
 	if hasTun {
 		args = append(args, "--netfilter-mode=on")
 	}
@@ -140,8 +259,16 @@ func (t *Tailscale) Start() error {
 		logger.Info("kmod-tun NOT detected, configuring for Userspace Mode")
 	}
 
-	// 1. Tailscale Up (Config and Online)
-	args := []string{"up", "--advertise-routes=192.168.31.0/24", "--accept-dns=false"}
+	// 1. Get LAN subnet
+	lanSubnet, err := t.getLANSubnet()
+	if err != nil {
+		logger.Warn("Failed to detect LAN subnet, using default 192.168.31.0/24: %v", err)
+		lanSubnet = "192.168.31.0/24"
+	}
+	logger.Info("Detected LAN subnet: %s", lanSubnet)
+
+	// 2. Tailscale Up (Config and Online)
+	args := []string{"up", "--advertise-routes=" + lanSubnet, "--accept-dns=false"}
 	if hasTun {
 		args = append(args, "--netfilter-mode=on")
 	}
@@ -153,7 +280,7 @@ func (t *Tailscale) Start() error {
 		return fmt.Errorf("tailscale up failed: %w", err)
 	}
 
-	// 2. Configure Firewall and Network
+	// 3. Configure Firewall and Network
 	logger.Info("Configuring firewall and network...")
 
 	// Commands
