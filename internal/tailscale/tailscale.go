@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"singctl/internal/logger"
 	"strings"
+	"time"
 )
 
 const (
@@ -237,6 +238,14 @@ func (t *Tailscale) Start() error {
 	} else {
 		logger.Info("kmod-tun NOT detected, configuring for Userspace Mode")
 	}
+
+	// 0. Ensure tailscaled service is running
+	logger.Info("Ensuring tailscaled service is running...")
+	if err := exec.Command("/etc/init.d/tailscale", "start").Run(); err != nil {
+		logger.Warn("Failed to start tailscaled service: %v", err)
+	}
+	// Give it a moment to start
+	time.Sleep(1 * time.Second)
 
 	// 1. Get LAN subnet
 	lanSubnet, err := t.getLANSubnet()
