@@ -1,3 +1,10 @@
+## [1.16.16](https://github.com/sixban6/singctl/compare/v1.16.15...v1.16.16) (2026-02-18)
+
+
+### Bug Fixes
+
+* support auto restart in daemon ([42c5cd3](https://github.com/sixban6/singctl/commit/42c5cd364f47869247095b8891dcc3be8d7fa3d5))
+
 ## [1.16.15](https://github.com/sixban6/singctl/compare/v1.16.14...v1.16.15) (2026-02-18)
 
 
