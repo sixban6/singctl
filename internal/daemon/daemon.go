@@ -20,19 +20,19 @@ import (
 
 // Daemon 守护进程
 type Daemon struct {
-	config   *config.Config
-	monitor  *Monitor
-	limiter  *RestartLimiter
-	singbox  *singbox.SingBox
-	ctx      context.Context
-	cancel   context.CancelFunc
-	logFile  *os.File
+	config  *config.Config
+	monitor *Monitor
+	limiter *RestartLimiter
+	singbox *singbox.SingBox
+	ctx     context.Context
+	cancel  context.CancelFunc
+	logFile *os.File
 }
 
 // NewDaemon 创建守护进程
 func NewDaemon(cfg *config.Config) *Daemon {
 	ctx, cancel := context.WithCancel(context.Background())
-	
+
 	return &Daemon{
 		config:  cfg,
 		monitor: NewMonitor(cfg),
@@ -83,7 +83,7 @@ func (d *Daemon) Stop() error {
 
 // Status 获取守护进程状态
 func (d *Daemon) Status() MonitorStatus {
-	return d.monitor.GetMonitorStatus()
+	return d.monitor.GetStatus()
 }
 
 // daemonize 后台化进程
@@ -95,7 +95,7 @@ func (d *Daemon) daemonize() error {
 
 	// Fork到后台
 	cmd := exec.Command(os.Args[0], os.Args[1:]...)
-	
+
 	// 设置进程属性（跨平台处理）
 	d.setProcAttrs(cmd)
 
@@ -109,7 +109,7 @@ func (d *Daemon) daemonize() error {
 	if err != nil {
 		return err
 	}
-	
+
 	cmd.Stdin = nullFile
 	cmd.Stdout = nullFile
 	cmd.Stderr = nullFile
@@ -140,94 +140,85 @@ func (d *Daemon) setupSignalHandler() {
 // shutdown 优雅关闭守护进程
 func (d *Daemon) shutdown() {
 	logger.Info("Daemon shutting down...")
-	
+
 	// 取消监控循环
 	d.cancel()
-	
+
 	// 删除PID文件
 	RemovePidFile()
-	
+
 	logger.Success("Daemon stopped")
 	os.Exit(0)
 }
 
 // monitorLoop 监控循环
 func (d *Daemon) monitorLoop() error {
-	// 定时器
-	procTicker := time.NewTicker(60 * time.Second)    // 进程检查：每60秒
-	subTicker := time.NewTicker(5 * time.Minute)      // 订阅检查：每5分钟
-	netTicker := time.NewTicker(10 * time.Minute)     // 网络检查：每10分钟
-	
+	// 单一看门狗定时器：每3分钟检查一次
+	watchdogTicker := time.NewTicker(3 * time.Minute)
+
 	defer func() {
-		procTicker.Stop()
-		subTicker.Stop() 
-		netTicker.Stop()
+		watchdogTicker.Stop()
 		RemovePidFile()
 		if d.logFile != nil {
 			d.logFile.Close()
 		}
 	}()
 
-	logger.Info("Daemon monitoring started")
+	logger.Info("Daemon watchdog started (check interval: 3min)")
 
 	for {
 		select {
 		case <-d.ctx.Done():
-			logger.Info("Daemon monitoring stopped")
+			logger.Info("Daemon watchdog stopped")
 			return nil
 
-		case <-procTicker.C:
-			d.checkAndRestartProcess()
-
-		case <-subTicker.C:
-			d.checkSubscriptions()
-
-		case <-netTicker.C:
+		case <-watchdogTicker.C:
 			d.checkNetwork()
 		}
 	}
 }
 
-// checkAndRestartProcess 检查并重启进程
-func (d *Daemon) checkAndRestartProcess() {
-	if IsSingBoxRunning() {
-		return // 进程正常运行
+// checkNetwork 网络看门狗：检查是否能上网，不能则执行 stop → start
+// 逻辑很简单：能上网就没问题，不能上网就重启，不管 sing-box 在不在
+func (d *Daemon) checkNetwork() {
+	// 第一轮检测
+	result1 := d.monitor.CheckInternetAccess()
+	if result1.Accessible {
+		return // 能上网，一切正常
 	}
 
-	// 检查是否允许重启
-	if !d.limiter.CanRestart() {
-		logger.Error("Restart limit exceeded (%d restarts in last hour), stopping daemon", 
-			d.limiter.GetMaxRestarts())
-		d.shutdown()
+	logger.Warn("[Watchdog] Internet access check failed (round 1), waiting 30s for confirmation...")
+	LogWatchdogEvent(WatchdogEvent{
+		Time:          time.Now(),
+		Action:        "DETECT",
+		CheckResult:   result1,
+		RestartResult: "-",
+	})
+
+	// 等待 30 秒后进行第二轮确认
+	select {
+	case <-time.After(30 * time.Second):
+	case <-d.ctx.Done():
 		return
 	}
 
-	// 获取重启延迟
-	delay := d.limiter.GetRestartDelay()
-	restartCount := d.limiter.GetRestartCount() + 1
-
-	logger.Warn("sing-box stopped, restarting in %v... (attempt %d/%d)", 
-		delay, restartCount, d.limiter.GetMaxRestarts())
-
-	// 等待延迟时间
-	if delay > 0 {
-		select {
-		case <-time.After(delay):
-		case <-d.ctx.Done():
-			return
-		}
-	}
-
-	// 尝试重启
-	if err := d.restartSingBox(); err != nil {
-		logger.Error("Failed to restart sing-box: %v", err)
+	// 第二轮确认检测
+	result2 := d.monitor.CheckInternetAccess()
+	if result2.Accessible {
+		logger.Info("[Watchdog] Internet access recovered on confirmation check, no action needed")
 		return
 	}
 
-	// 记录重启
-	d.limiter.RecordRestart()
-	logger.Success("sing-box restarted successfully (attempt %d/%d)", 
-		restartCount, d.limiter.GetMaxRestarts())
+	logger.Warn("[Watchdog] Internet access confirmed unreachable (round 2), preparing restart...")
+	LogWatchdogEvent(WatchdogEvent{
+		Time:          time.Now(),
+		Action:        "CONFIRM",
+		CheckResult:   result2,
+		RestartResult: "-",
+	})
+
+	// 执行 stop → start
+	d.doRestart(result2, "internet unreachable")
 }
 
 // restartSingBox 重启sing-box
@@ -244,30 +235,65 @@ func (d *Daemon) restartSingBox() error {
 	return d.singbox.Start()
 }
 
-// checkSubscriptions 检查订阅状态
-func (d *Daemon) checkSubscriptions() {
-	healthy, failedSubs := d.monitor.CheckSubscriptionHealth()
-	
-	if !healthy && len(failedSubs) > 0 {
-		logger.Warn("Subscription issues detected:")
-		for _, sub := range failedSubs {
-			logger.Warn("  - Unreachable: %s", sub)
-		}
-		logger.Info("Consider running 'singctl gen' to update configuration")
+// doRestart 执行完整 stop → start 重启流程（带频率限制）
+func (d *Daemon) doRestart(checkResult InternetCheckResult, reason string) {
+	// 检查是否允许重启（频率限制）
+	if !d.limiter.CanRestart() {
+		logger.Error("[Watchdog] Restart limit exceeded (%d restarts in last hour), skipping auto-restart",
+			d.limiter.GetMaxRestarts())
+		LogWatchdogEvent(WatchdogEvent{
+			Time:          time.Now(),
+			Action:        "RESTART_BLOCKED",
+			CheckResult:   checkResult,
+			RestartResult: "rate limited",
+		})
+		return
 	}
-}
 
-// checkNetwork 检查网络连通性
-func (d *Daemon) checkNetwork() {
-	if !d.monitor.CheckNetworkConnectivity() {
-		logger.Warn("Network connectivity issues detected")
+	logger.Warn("[Watchdog] Executing full restart: stop → start (reason: %s)", reason)
+
+	// Stop (stop 脚本是幂等的，即使没有进程也不会出错)
+	if err := d.singbox.Stop(); err != nil {
+		logger.Error("[Watchdog] Stop failed: %v", err)
+		LogWatchdogEvent(WatchdogEvent{
+			Time:          time.Now(),
+			Action:        "RESTART",
+			CheckResult:   checkResult,
+			RestartResult: fmt.Sprintf("stop failed: %v", err),
+		})
+		return
 	}
+
+	// 等待 2 秒确保清理完毕
+	time.Sleep(2 * time.Second)
+
+	// Start
+	if err := d.restartSingBox(); err != nil {
+		logger.Error("[Watchdog] Start failed: %v", err)
+		LogWatchdogEvent(WatchdogEvent{
+			Time:          time.Now(),
+			Action:        "RESTART",
+			CheckResult:   checkResult,
+			RestartResult: fmt.Sprintf("start failed: %v", err),
+		})
+		return
+	}
+
+	// 记录重启成功
+	d.limiter.RecordRestart()
+	logger.Success("[Watchdog] sing-box restarted successfully (reason: %s)", reason)
+	LogWatchdogEvent(WatchdogEvent{
+		Time:          time.Now(),
+		Action:        "RESTART",
+		CheckResult:   checkResult,
+		RestartResult: "success",
+	})
 }
 
 // setupLogFile 设置日志文件
 func (d *Daemon) setupLogFile() error {
 	logPath := GetDaemonLogPath()
-	
+
 	// 确保日志目录存在
 	logDir := filepath.Dir(logPath)
 	if err := os.MkdirAll(logDir, 0755); err != nil {

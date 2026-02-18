@@ -381,6 +381,11 @@ func (t *Tailscale) Stop() error {
 // optimizeUDPGRO configures UDP GRO settings for better Tailscale performance
 // Reference: https://tailscale.com/s/ethtool-config-udp-gro
 func optimizeUDPGRO() error {
+	// Check if ethtool is available
+	if _, err := exec.LookPath("ethtool"); err != nil {
+		return fmt.Errorf("ethtool not found (install with: apk add ethtool or opkg install ethtool)")
+	}
+
 	// Get the default route network interface
 	out, err := exec.Command("ip", "-o", "route", "get", "8.8.8.8").Output()
 	if err != nil {
@@ -415,6 +420,11 @@ func optimizeUDPGRO() error {
 
 // restoreUDPGRO restores UDP GRO settings to default values
 func restoreUDPGRO() error {
+	// Check if ethtool is available
+	if _, err := exec.LookPath("ethtool"); err != nil {
+		return fmt.Errorf("ethtool not found")
+	}
+
 	// Get the default route network interface
 	out, err := exec.Command("ip", "-o", "route", "get", "8.8.8.8").Output()
 	if err != nil {

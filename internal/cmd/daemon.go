@@ -6,10 +6,11 @@ import (
 	"os"
 	"strings"
 
-	"github.com/spf13/cobra"
 	"singctl/internal/config"
 	"singctl/internal/daemon"
 	"singctl/internal/logger"
+
+	"github.com/spf13/cobra"
 )
 
 // NewDaemonCommand creates the daemon command with subcommands
@@ -38,7 +39,7 @@ func newDaemonStartCommand() *cobra.Command {
 		Long:  "Start the singctl daemon to monitor sing-box process and automatically restart it when needed",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			configPath := cmd.Flag("config").Value.String()
-			
+
 			cfg, err := config.Load(configPath)
 			if err != nil {
 				return fmt.Errorf("failed to load config: %w", err)
@@ -80,33 +81,28 @@ func newDaemonStatusCommand() *cobra.Command {
 		Long:  "Show the current status of the singctl daemon and monitored services",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			configPath := cmd.Flag("config").Value.String()
-			
+
 			cfg, err := config.Load(configPath)
 			if err != nil {
 				return fmt.Errorf("failed to load config: %w", err)
 			}
 
 			monitor := daemon.NewMonitor(cfg)
-			status := monitor.GetQuickStatus() // 使用快速状态，不进行网络检查
-			
+			status := monitor.GetStatus()
+
 			// 显示状态信息
 			logger.Info("Daemon Status:")
 			logger.Info("├─ %s", status.String())
-			
-			// 如果有重启限制器信息，也显示
+
+			// 显示重启限制器信息
 			if daemon.IsDaemonRunning() {
 				limiter := daemon.NewRestartLimiter()
-				logger.Info("├─ Restarts: %d/%d (last hour)", 
+				logger.Info("├─ Restarts: %d/%d (last hour)",
 					limiter.GetRestartCount(), limiter.GetMaxRestarts())
 			}
 
-			// 显示失败的订阅详情
-			if len(status.FailedSubscriptions) > 0 {
-				logger.Info("├─ Failed Subscriptions:")
-				for _, sub := range status.FailedSubscriptions {
-					logger.Info("│  └─ %s", sub)
-				}
-			}
+			// 显示看门狗日志路径
+			logger.Info("├─ Watchdog log: %s", daemon.GetWatchdogLogPath())
 
 			return nil
 		},
@@ -117,14 +113,14 @@ func newDaemonStatusCommand() *cobra.Command {
 func newDaemonLogsCommand() *cobra.Command {
 	var tail int
 	var follow bool
-	
+
 	cmd := &cobra.Command{
 		Use:   "logs",
 		Short: "Show daemon logs",
 		Long:  "Show the singctl daemon logs",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logPath := daemon.GetDaemonLogPath()
-			
+
 			// 检查日志文件是否存在
 			if _, err := os.Stat(logPath); os.IsNotExist(err) {
 				logger.Warn("Log file does not exist: %s", logPath)
@@ -139,7 +135,7 @@ func newDaemonLogsCommand() *cobra.Command {
 			}
 
 			lines := strings.Split(string(content), "\n")
-			
+
 			// 处理tail参数
 			if tail > 0 && len(lines) > tail {
 				lines = lines[len(lines)-tail:]
