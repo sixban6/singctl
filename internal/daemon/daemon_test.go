@@ -82,57 +82,49 @@ func TestRestartLimiter_GetMaxRestarts(t *testing.T) {
 }
 
 // =============================================================================
-// InternetCheckResult Tests
+// HealthCheckResult Tests
 // =============================================================================
 
-func TestInternetCheckResult_Accessible(t *testing.T) {
-	result := InternetCheckResult{
-		Accessible: true,
-		TargetResults: map[string]string{
-			"http://www.baidu.com":               "ok",
-			"http://www.google.com/generate_204": "ok",
-		},
+func TestHealthCheckResult_Healthy(t *testing.T) {
+	result := HealthCheckResult{
+		Healthy:   true,
+		DNSOK:     true,
+		Details:   "all checks passed",
 		CheckTime: time.Now(),
 	}
 
-	if !result.Accessible {
-		t.Error("expected result to be accessible")
+	if !result.Healthy {
+		t.Error("expected result to be healthy")
 	}
 }
 
-func TestInternetCheckResult_NotAccessible(t *testing.T) {
-	result := InternetCheckResult{
-		Accessible: false,
-		TargetResults: map[string]string{
-			"http://www.baidu.com":               "error: connection refused",
-			"http://www.google.com/generate_204": "error: timeout",
-			"http://cp.cloudflare.com":           "error: no route to host",
-		},
-		CheckTime: time.Now(),
+func TestHealthCheckResult_DNSStuck(t *testing.T) {
+	result := HealthCheckResult{
+		Healthy:      false,
+		DNSOK:        false,
+		FailedReason: "dns_stuck",
+		Details:      "DNS resolution timed out or failed",
+		CheckTime:    time.Now(),
 	}
 
-	if result.Accessible {
-		t.Error("expected result to be not accessible")
+	if result.Healthy {
+		t.Error("expected result to be unhealthy")
 	}
-	if len(result.TargetResults) != 3 {
-		t.Errorf("expected 3 target results, got %d", len(result.TargetResults))
+	if result.FailedReason != "dns_stuck" {
+		t.Errorf("expected reason 'dns_stuck', got %s", result.FailedReason)
 	}
 }
 
-func TestInternetCheckResult_PartiallyAccessible(t *testing.T) {
-	// 只要有一个成功就算可访问
-	result := InternetCheckResult{
-		Accessible: true,
-		TargetResults: map[string]string{
-			"http://www.baidu.com":               "ok",
-			"http://www.google.com/generate_204": "error: timeout",
-			"http://cp.cloudflare.com":           "error: timeout",
-		},
-		CheckTime: time.Now(),
+func TestHealthCheckResult_ProcessNotRunning(t *testing.T) {
+	result := HealthCheckResult{
+		Healthy:      false,
+		FailedReason: "sing-box process not running",
+		Details:      "sing-box 进程未运行",
+		CheckTime:    time.Now(),
 	}
 
-	if !result.Accessible {
-		t.Error("expected partially accessible result to be accessible")
+	if result.Healthy {
+		t.Error("expected result to be unhealthy when process not running")
 	}
 }
 
@@ -194,18 +186,17 @@ func TestLogWatchdogEvent_Format(t *testing.T) {
 	event := WatchdogEvent{
 		Time:   time.Date(2024, 6, 15, 10, 30, 0, 0, time.UTC),
 		Action: "RESTART",
-		CheckResult: InternetCheckResult{
-			Accessible: false,
-			TargetResults: map[string]string{
-				"http://www.baidu.com": "error: timeout",
-			},
+		CheckResult: HealthCheckResult{
+			Healthy:      false,
+			FailedReason: "dns_stuck",
+			Details:      "DNS resolution timed out",
 		},
 		RestartResult: "success",
 	}
 
 	// 手动验证格式化
 	timestamp := event.Time.Format("2006-01-02 15:04:05")
-	entry := "[" + timestamp + "] [" + event.Action + "] accessible=false restart_result=" + event.RestartResult + "\n"
+	entry := "[" + timestamp + "] [" + event.Action + "] healthy=false reason=dns_stuck detail=DNS resolution timed out restart_result=" + event.RestartResult + "\n"
 	os.WriteFile(tmpFile.Name(), []byte(entry), 0644)
 
 	content, err := os.ReadFile(tmpFile.Name())
@@ -230,12 +221,11 @@ func TestLogWatchdogEvent_Integration(t *testing.T) {
 	event := WatchdogEvent{
 		Time:   time.Now(),
 		Action: "TEST_EVENT",
-		CheckResult: InternetCheckResult{
-			Accessible: false,
-			TargetResults: map[string]string{
-				"http://test.example.com": "error: test",
-			},
-			CheckTime: time.Now(),
+		CheckResult: HealthCheckResult{
+			Healthy:      false,
+			FailedReason: "dns_stuck",
+			Details:      "DNS timed out",
+			CheckTime:    time.Now(),
 		},
 		RestartResult: "test_only",
 	}
@@ -259,62 +249,63 @@ func TestLogWatchdogEvent_Integration(t *testing.T) {
 // =============================================================================
 // Watchdog Decision Logic Tests
 // 测试看门狗的核心决策逻辑：
-//   能上网 → 什么都不做
-//   第一轮不通 + 第二轮恢复 → 不重启
-//   连续两轮不通 → 执行 stop → start
-//   频率限制 → 即使不通也不重启
+//   健康 → 什么都不做
+//   第一轮不健康 + 第二轮恢复 → 不重启
+//   连续两轮不健康 → 执行 stop → start
+//   频率限制 → 即使不健康也不重启
 // =============================================================================
 
-func TestWatchdogLogic_InternetOK_NoAction(t *testing.T) {
-	// 网络可达 → 不触发重启
-	result := InternetCheckResult{
-		Accessible:    true,
-		TargetResults: map[string]string{"http://www.baidu.com": "ok"},
-		CheckTime:     time.Now(),
+func TestWatchdogLogic_Healthy_NoAction(t *testing.T) {
+	// 健康 → 不触发重启
+	result := HealthCheckResult{
+		Healthy:   true,
+		DNSOK:     true,
+		Details:   "all checks passed",
+		CheckTime: time.Now(),
 	}
 
-	if !result.Accessible {
-		t.Error("expected internet accessible, should not trigger restart")
+	if !result.Healthy {
+		t.Error("expected healthy, should not trigger restart")
 	}
 }
 
 func TestWatchdogLogic_FirstFail_ThenRecover_NoRestart(t *testing.T) {
-	// 第一轮不通 + 第二轮恢复 = 不重启
-	result1 := InternetCheckResult{
-		Accessible:    false,
-		TargetResults: map[string]string{"http://www.baidu.com": "error: timeout"},
-		CheckTime:     time.Now(),
+	// 第一轮不健康 + 第二轮恢复 = 不重启
+	result1 := HealthCheckResult{
+		Healthy:      false,
+		FailedReason: "dns_stuck",
+		CheckTime:    time.Now(),
 	}
 
-	result2 := InternetCheckResult{
-		Accessible:    true,
-		TargetResults: map[string]string{"http://www.baidu.com": "ok"},
-		CheckTime:     time.Now(),
+	result2 := HealthCheckResult{
+		Healthy:   true,
+		DNSOK:     true,
+		CheckTime: time.Now(),
 	}
 
-	if result1.Accessible {
+	if result1.Healthy {
 		t.Error("round 1 should fail")
 	}
-	if !result2.Accessible {
+	if !result2.Healthy {
 		t.Error("round 2 should succeed (recovered)")
 	}
 	// 结论：不应触发重启
 }
 
 func TestWatchdogLogic_BothFail_ShouldRestart(t *testing.T) {
-	// 连续两轮都不通 → 应该 stop+start
+	// 连续两轮都不健康 → 应该 stop+start
 	limiter := NewRestartLimiter()
 
-	result1 := InternetCheckResult{
-		Accessible:    false,
-		TargetResults: map[string]string{"http://www.baidu.com": "error: timeout"},
+	result1 := HealthCheckResult{
+		Healthy:      false,
+		FailedReason: "dns_stuck",
 	}
-	result2 := InternetCheckResult{
-		Accessible:    false,
-		TargetResults: map[string]string{"http://www.baidu.com": "error: timeout"},
+	result2 := HealthCheckResult{
+		Healthy:      false,
+		FailedReason: "dns_stuck",
 	}
 
-	if result1.Accessible || result2.Accessible {
+	if result1.Healthy || result2.Healthy {
 		t.Error("both rounds should fail")
 	}
 
@@ -331,20 +322,20 @@ func TestWatchdogLogic_BothFail_ShouldRestart(t *testing.T) {
 }
 
 func TestWatchdogLogic_RateLimited_NoRestart(t *testing.T) {
-	// 已达到重启上限 → 即使不通也不重启
+	// 已达到重启上限 → 即使不健康也不重启
 	limiter := NewRestartLimiter()
 
 	for i := 0; i < limiter.GetMaxRestarts(); i++ {
 		limiter.RecordRestart()
 	}
 
-	result := InternetCheckResult{
-		Accessible:    false,
-		TargetResults: map[string]string{"http://www.baidu.com": "error: timeout"},
+	result := HealthCheckResult{
+		Healthy:      false,
+		FailedReason: "dns_stuck",
 	}
 
-	if result.Accessible {
-		t.Error("result should be inaccessible")
+	if result.Healthy {
+		t.Error("result should be unhealthy")
 	}
 
 	if limiter.CanRestart() {

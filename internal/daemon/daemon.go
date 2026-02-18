@@ -178,15 +178,16 @@ func (d *Daemon) monitorLoop() error {
 	}
 }
 
-// checkNetwork 网络看门狗：检查是否能上网，不能则执行 stop → start
+// checkNetwork 网络看门狗：检查是否健康（DNS + HTTP），不健康则执行 stop → start
 func (d *Daemon) checkNetwork() {
 	// 第一轮检测
-	result1 := d.monitor.CheckInternetAccess()
-	if result1.Accessible {
-		return // 能上网，一切正常
+	result1 := d.monitor.CheckHealth()
+	if result1.Healthy {
+		return // 健康，一切正常
 	}
 
-	logger.Warn("[Watchdog] Internet access check failed (round 1), waiting 30s for confirmation...")
+	logger.Warn("[Watchdog] Health check failed (round 1): %s - %s, waiting 30s for confirmation...",
+		result1.FailedReason, result1.Details)
 	LogWatchdogEvent(WatchdogEvent{
 		Time:          time.Now(),
 		Action:        "DETECT",
@@ -202,13 +203,14 @@ func (d *Daemon) checkNetwork() {
 	}
 
 	// 第二轮确认检测
-	result2 := d.monitor.CheckInternetAccess()
-	if result2.Accessible {
-		logger.Info("[Watchdog] Internet access recovered on confirmation check, no action needed")
+	result2 := d.monitor.CheckHealth()
+	if result2.Healthy {
+		logger.Info("[Watchdog] Health recovered on confirmation check, no action needed")
 		return
 	}
 
-	logger.Warn("[Watchdog] Internet access confirmed unreachable (round 2), preparing restart...")
+	logger.Warn("[Watchdog] Health check confirmed unhealthy (round 2): %s - %s, preparing restart...",
+		result2.FailedReason, result2.Details)
 	LogWatchdogEvent(WatchdogEvent{
 		Time:          time.Now(),
 		Action:        "CONFIRM",
@@ -217,7 +219,7 @@ func (d *Daemon) checkNetwork() {
 	})
 
 	// 执行 stop → start
-	d.doRestart(result2, "internet unreachable")
+	d.doRestart(result2, result2.FailedReason)
 }
 
 // restartSingBox 重启sing-box
@@ -235,7 +237,7 @@ func (d *Daemon) restartSingBox() error {
 }
 
 // doRestart 执行完整 stop → start 重启流程（带频率限制）
-func (d *Daemon) doRestart(checkResult InternetCheckResult, reason string) {
+func (d *Daemon) doRestart(checkResult HealthCheckResult, reason string) {
 	// 检查是否允许重启（频率限制）
 	if !d.limiter.CanRestart() {
 		logger.Error("[Watchdog] Restart limit exceeded (%d restarts in last hour), skipping auto-restart",
