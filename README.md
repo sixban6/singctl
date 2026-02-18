@@ -86,4 +86,5 @@ singctl stop tailscale
 ```
 
 ## License
+
 [MIT License](LICENSE)
