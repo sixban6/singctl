@@ -1,3 +1,11 @@
+## [1.16.14](https://github.com/sixban6/singctl/compare/v1.16.13...v1.16.14) (2026-02-18)
+
+
+### Bug Fixes
+
+* add tailscale support ([64de56b](https://github.com/sixban6/singctl/commit/64de56b57ceae5de04f75723c165033c3952bcd9))
+* support auto restart in daemon ([e06a6aa](https://github.com/sixban6/singctl/commit/e06a6aaafa79a193bed2d88440871e08cdb3a3a0))
+
 ## [1.16.13](https://github.com/sixban6/singctl/compare/v1.16.12...v1.16.13) (2026-02-10)
 
 
