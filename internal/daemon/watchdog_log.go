@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"time"
 )
 
@@ -25,7 +24,7 @@ func GetWatchdogLogPath() string {
 type WatchdogEvent struct {
 	Time          time.Time
 	Action        string // "DETECT" / "CONFIRM" / "RESTART" / "RESTART_BLOCKED"
-	CheckResult   InternetCheckResult
+	CheckResult   HealthCheckResult
 	RestartResult string // 重启结果 ("success" / 错误信息)
 }
 
@@ -46,18 +45,13 @@ func LogWatchdogEvent(event WatchdogEvent) {
 
 	timestamp := event.Time.Format("2006-01-02 15:04:05")
 
-	// 构建探测结果详情
-	var details []string
-	for target, result := range event.CheckResult.TargetResults {
-		details = append(details, fmt.Sprintf("  %s => %s", target, result))
-	}
-
-	entry := fmt.Sprintf("[%s] [%s] accessible=%v restart_result=%s\n%s\n",
+	entry := fmt.Sprintf("[%s] [%s] healthy=%v reason=%s detail=%s restart_result=%s\n",
 		timestamp,
 		event.Action,
-		event.CheckResult.Accessible,
+		event.CheckResult.Healthy,
+		event.CheckResult.FailedReason,
+		event.CheckResult.Details,
 		event.RestartResult,
-		strings.Join(details, "\n"),
 	)
 
 	f.WriteString(entry)
