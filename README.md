@@ -61,7 +61,9 @@ singctl gen --stdout
 
  # 自定义输出路径             
 singctl gen -o /tmp/config.json  
+```
 
+```bash
 # 快速查看系统状态
 singctl info
 
@@ -79,7 +81,6 @@ singctl install tailscale
 
 # 配置并启动 Tailscale (仅 OpenWrt/ImmortalWrt)
 singctl start tailscale
-
 
 singctl stop tailscale
 ```
