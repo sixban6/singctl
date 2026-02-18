@@ -179,7 +179,6 @@ func (d *Daemon) monitorLoop() error {
 }
 
 // checkNetwork 网络看门狗：检查是否能上网，不能则执行 stop → start
-// 逻辑很简单：能上网就没问题，不能上网就重启，不管 sing-box 在不在
 func (d *Daemon) checkNetwork() {
 	// 第一轮检测
 	result1 := d.monitor.CheckInternetAccess()
