@@ -13,7 +13,6 @@ type Config struct {
 	GUI    GUIConfig      `yaml:"gui"`
 }
 
-
 type Subscription struct {
 	Name          string `yaml:"name"`
 	URL           string `yaml:"url"`
@@ -55,17 +54,17 @@ func (c *Config) Validate() error {
 	}
 
 	nameMap := make(map[string]int)
-	
+
 	for i, sub := range c.Subs {
 		if sub.URL == "" {
 			return fmt.Errorf("subscription[%d]: URL is required", i)
 		}
-		
+
 		// 验证Name字段：如果有多个订阅但Name为空，则报错
 		if len(c.Subs) > 1 && sub.Name == "" {
 			return fmt.Errorf("subscription[%d]: Name is required when using multiple subscriptions", i)
 		}
-		
+
 		// 验证Name字段：不能重复
 		if sub.Name != "" {
 			if existingIndex, exists := nameMap[sub.Name]; exists {
@@ -79,9 +78,6 @@ func (c *Config) Validate() error {
 		c.GitHub.MirrorURL = "https://github.com"
 	}
 
-	if c.GUI.MacURL == "" {
-		c.GUI.MacURL = "https://github.com/SagerNet/sing-box/releases/download/v1.13.0-rc.1/SFM-1.13.0-rc.1-Apple.pkg"
-	}
 	if c.GUI.AppName == "" {
 		c.GUI.AppName = "SFM"
 	}
