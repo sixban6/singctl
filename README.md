@@ -83,6 +83,8 @@ singctl install tailscale
 singctl start tailscale
 
 singctl stop tailscale
+
+singctl update tailscale
 ```
 
 ## License
