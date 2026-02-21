@@ -327,7 +327,10 @@ func TestUpdate_FullFlow(t *testing.T) {
 	}
 
 	// 6. Verify tgz contents are valid (makeFakeTgz sanity check)
-	resp2, _ := http.Get(dlSrv.URL + "/tailscale.tgz")
+	resp2, err := http.Get(dlSrv.URL + "/tailscale.tgz")
+	if err != nil {
+		t.Fatalf("second download GET: %v", err)
+	}
 	defer resp2.Body.Close()
 	gr, err := gzip.NewReader(resp2.Body)
 	if err != nil {
