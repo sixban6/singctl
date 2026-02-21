@@ -270,7 +270,9 @@ func (t *Tailscale) Install() error {
 	return nil
 }
 
-func (t *Tailscale) Start() error {
+// Start brings up Tailscale and configures firewall/network rules.
+// advertiseExitNode=true also advertises this device as a Tailscale exit node.
+func (t *Tailscale) Start(advertiseExitNode bool) error {
 	if !t.openWrtCheck() {
 		logger.Warn("Tailscale start is currently only supported on OpenWrt and ImmortalWrt.")
 		return nil
@@ -301,9 +303,14 @@ func (t *Tailscale) Start() error {
 	logger.Info("Detected LAN subnet: %s", lanSubnet)
 
 	// 2. Tailscale Up (Config and Online)
-	args := []string{"up", "--advertise-routes=" + lanSubnet, "--accept-dns=false"}
+	// --reset: 让 singctl 成为参数的唯一来源，避免残留非默认参数导致 tailscale up 报错。
+	args := []string{"up", "--reset", "--advertise-routes=" + lanSubnet, "--accept-dns=false"}
 	if hasTun {
 		args = append(args, "--netfilter-mode=on")
+	}
+	if advertiseExitNode {
+		args = append(args, "--advertise-exit-node")
+		logger.Info("Exit node advertisement enabled")
 	}
 
 	cmd := exec.Command(filepath.Join(installDir, "tailscale"), args...)

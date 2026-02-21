@@ -145,14 +145,17 @@ func startCmd() *cobra.Command {
 		},
 	}
 
-	cmd.AddCommand(&cobra.Command{
+	tsCmd := &cobra.Command{
 		Use:   "tailscale",
 		Short: "Start tailscale",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			exitNode, _ := cmd.Flags().GetBool("exit-node")
 			ts := tailscale.New()
-			return ts.Start()
+			return ts.Start(exitNode)
 		},
-	})
+	}
+	tsCmd.Flags().Bool("exit-node", false, "Advertise this device as a Tailscale exit node")
+	cmd.AddCommand(tsCmd)
 
 	return cmd
 }
