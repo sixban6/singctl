@@ -286,8 +286,9 @@ func updateCmd() *cobra.Command {
 		Use:   "update <target>",
 		Short: "Update components",
 		Long: `Update components:
-  sb       - update sing-box
-  self     - update singctl itself`,
+  sb        - update sing-box
+  tailscale - update tailscale to the latest stable version
+  self      - update singctl itself`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.Load(configPath)
@@ -299,6 +300,9 @@ func updateCmd() *cobra.Command {
 			case "sb", "sing-box":
 				sb := singbox.New(cfg)
 				return sb.Update()
+			case "tailscale":
+				ts := tailscale.New()
+				return ts.Update()
 			case "self":
 				updater := updater.New(cfg.GitHub.MirrorURL, "https://github.com/sixban6/singctl")
 				return updater.UpdateSelf()
