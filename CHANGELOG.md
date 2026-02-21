@@ -1,3 +1,10 @@
+## [1.16.23](https://github.com/sixban6/singctl/compare/v1.16.22...v1.16.23) (2026-02-21)
+
+
+### Bug Fixes
+
+* fix repeat firewall config for tailscale ([8eee294](https://github.com/sixban6/singctl/commit/8eee29481b092cd770c4227484fa6549631e567e))
+
 ## [1.16.22](https://github.com/sixban6/singctl/compare/v1.16.21...v1.16.22) (2026-02-21)
 
 
