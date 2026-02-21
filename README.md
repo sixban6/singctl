@@ -82,6 +82,9 @@ singctl install tailscale
 # 配置并启动 Tailscale (仅 OpenWrt/ImmortalWrt)
 singctl start tailscale
 
+# 启动Tailscale 并作为出口节点
+singctl start tailscale --exit-node
+
 singctl stop tailscale
 
 singctl update tailscale

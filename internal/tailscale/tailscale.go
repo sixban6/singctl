@@ -329,69 +329,35 @@ func (t *Tailscale) Start(advertiseExitNode bool) error {
 	// 3. Configure Firewall and Network
 	logger.Info("Configuring firewall and network...")
 
-	// Commands
-	// Note: We need to handle potential duplicates or errors if items already exist.
-	// `uci add` creates a NEW anonymous section every time.
-	// To perform this idempotently without complex parsing, we can check if `network.tailscale` exists.
-	// The user request script logic is: uci set ... (implies create/overwrite for named, add for anonymous).
+	// 先清理历史上用 uci add 产生的重复匿名条目
+	cleanupTailscaleFirewall()
 
-	// For named section network.tailscale
+	// Network interface（命名 section，uci set 天然幂等）
 	exec.Command("uci", "set", "network.tailscale=interface").Run()
 	exec.Command("uci", "set", "network.tailscale.device=tailscale0").Run()
 	exec.Command("uci", "set", "network.tailscale.proto=unmanaged").Run()
 
-	// For firewall zone. 'tailscale' is a named section in network but firewall zones are usually anonymous or named.
-	// User script: `uci add firewall zone` then `uci set firewall.@zone[-1].name='tailscale'`
-	// This implies creating a new zone named tailscale.
-	// We should check if a zone named 'tailscale' already exists to avoid duplicates.
-	// Since we can't easily parse uci output here without a helper, we'll try to delete it first if possible,
-	// or assume the user wants us to run this setup.
-	// `uci delete firewall.tailscale` might not work if it's not a named section.
-	// However, standard OpenWrt practice for scripts is often checking or just appending.
-	// Given the "singctl" nature, repeated calls should be safe.
-	// Let's rely on `uci get firewall.@zone[-1].name` check? No too complex.
-	// Let's implement the script commands as requested.
+	// Firewall zone（改用命名 section "tailscale_zone"，多次运行只写入一次）
+	exec.Command("uci", "set", "firewall.tailscale_zone=zone").Run()
+	exec.Command("uci", "set", "firewall.tailscale_zone.name=tailscale").Run()
+	exec.Command("uci", "set", "firewall.tailscale_zone.network=tailscale").Run()
+	exec.Command("uci", "set", "firewall.tailscale_zone.input=ACCEPT").Run()
+	exec.Command("uci", "set", "firewall.tailscale_zone.output=ACCEPT").Run()
+	exec.Command("uci", "set", "firewall.tailscale_zone.forward=ACCEPT").Run()
+	exec.Command("uci", "set", "firewall.tailscale_zone.masq=1").Run()
 
-	cmds := [][]string{
-		// Network Interface (Named 'tailscale', safe to repeat)
-		{"uci", "set", "network.tailscale=interface"},
-		{"uci", "set", "network.tailscale.device=tailscale0"},
-		{"uci", "set", "network.tailscale.proto=unmanaged"},
+	// Forwarding rules（同样用命名 section，幂等）
+	exec.Command("uci", "set", "firewall.ts_fwd_to_lan=forwarding").Run()
+	exec.Command("uci", "set", "firewall.ts_fwd_to_lan.src=tailscale").Run()
+	exec.Command("uci", "set", "firewall.ts_fwd_to_lan.dest=lan").Run()
 
-		// Firewall Zone
-		// We use `uci add` which always adds. This WILL create duplicates if run multiple times.
-		// A simple workaround for the named zone 'tailscale' if we could refer to it.
-		// If we use named sections for zones (supported in newer OpenWrt), we could use `uci set firewall.tailscale=zone`.
-		// But the user script uses `uci add firewall zone` + `name=tailscale`.
-		// Let's stick to the user's script for correctness of their specific setup.
-		{"uci", "add", "firewall", "zone"},
-		{"uci", "set", "firewall.@zone[-1].name=tailscale"},
-		{"uci", "set", "firewall.@zone[-1].network=tailscale"},
-		{"uci", "set", "firewall.@zone[-1].input=ACCEPT"},
-		{"uci", "set", "firewall.@zone[-1].output=ACCEPT"},
-		{"uci", "set", "firewall.@zone[-1].forward=ACCEPT"},
-		{"uci", "set", "firewall.@zone[-1].masq=1"},
+	exec.Command("uci", "set", "firewall.ts_fwd_from_lan=forwarding").Run()
+	exec.Command("uci", "set", "firewall.ts_fwd_from_lan.src=lan").Run()
+	exec.Command("uci", "set", "firewall.ts_fwd_from_lan.dest=tailscale").Run()
 
-		// Forwarding Rules
-		{"uci", "add", "firewall", "forwarding"},
-		{"uci", "set", "firewall.@forwarding[-1].src=tailscale"},
-		{"uci", "set", "firewall.@forwarding[-1].dest=lan"},
-
-		{"uci", "add", "firewall", "forwarding"},
-		{"uci", "set", "firewall.@forwarding[-1].src=lan"},
-		{"uci", "set", "firewall.@forwarding[-1].dest=tailscale"},
-
-		{"uci", "add", "firewall", "forwarding"},
-		{"uci", "set", "firewall.@forwarding[-1].src=tailscale"},
-		{"uci", "set", "firewall.@forwarding[-1].dest=wan"},
-	}
-
-	for _, args := range cmds {
-		// Just run them.
-		if err := exec.Command(args[0], args[1:]...).Run(); err != nil {
-			logger.Warn("Command failed: %v", args)
-		}
-	}
+	exec.Command("uci", "set", "firewall.ts_fwd_to_wan=forwarding").Run()
+	exec.Command("uci", "set", "firewall.ts_fwd_to_wan.src=tailscale").Run()
+	exec.Command("uci", "set", "firewall.ts_fwd_to_wan.dest=wan").Run()
 
 	// Commit and Reload
 	exec.Command("uci", "commit", "network").Run()
@@ -401,6 +367,75 @@ func (t *Tailscale) Start(advertiseExitNode bool) error {
 
 	logger.Success("Tailscale configured and started")
 	return nil
+}
+
+// cleanupTailscaleFirewall 删除历史上用 "uci add" 产生的匿名重复 zone/forwarding 条目。
+// 匹配规则：zone.name==tailscale 或 forwarding.src/dest==tailscale 的匿名 section。
+func cleanupTailscaleFirewall() {
+	// 删除所有 name==tailscale 的匿名 zone
+	removeAnonymousUCISections("firewall", "zone", "name", "tailscale")
+	// 删除所有 src==tailscale 或 dest==tailscale 的匿名 forwarding
+	removeAnonymousUCISections("firewall", "forwarding", "src", "tailscale")
+	removeAnonymousUCISections("firewall", "forwarding", "dest", "tailscale")
+}
+
+// removeAnonymousUCISections 找出 config 中类型为 sectionType、且 key==value 的所有匿名
+// section，逐一删除。匿名 section 的 ID 格式为 @type[N]。
+func removeAnonymousUCISections(config, sectionType, key, value string) {
+	// uci show <config> 输出所有配置；逐行找匿名 section 中匹配的条目
+	out, err := exec.Command("uci", "show", config).Output()
+	if err != nil {
+		return
+	}
+
+	// 收集需要删除的匿名 section index（倒序删除，避免 index 偏移）
+	// 行格式示例：firewall.@zone[2].name='tailscale'
+	targetPrefix := config + ".@" + sectionType + "["
+	matchSuffix := "." + key + "='" + value + "'"
+
+	indexSet := map[int]struct{}{}
+	lines := strings.Split(string(out), "\n")
+	for _, line := range lines {
+		if !strings.HasPrefix(line, targetPrefix) {
+			continue
+		}
+		if !strings.HasSuffix(strings.TrimRight(line, "\r"), matchSuffix) {
+			continue
+		}
+		// 解析 index：firewall.@zone[2].name=... → 2
+		rest := strings.TrimPrefix(line, targetPrefix)
+		closeBracket := strings.Index(rest, "]")
+		if closeBracket < 0 {
+			continue
+		}
+		var idx int
+		if _, err := fmt.Sscanf(rest[:closeBracket], "%d", &idx); err == nil {
+			indexSet[idx] = struct{}{}
+		}
+	}
+
+	// 倒序删除，防止删除后 index 错位
+	indices := make([]int, 0, len(indexSet))
+	for idx := range indexSet {
+		indices = append(indices, idx)
+	}
+	// 简单冒泡降序
+	for i := 0; i < len(indices); i++ {
+		for j := i + 1; j < len(indices); j++ {
+			if indices[j] > indices[i] {
+				indices[i], indices[j] = indices[j], indices[i]
+			}
+		}
+	}
+
+	for _, idx := range indices {
+		section := fmt.Sprintf("%s.@%s[%d]", config, sectionType, idx)
+		exec.Command("uci", "delete", section).Run()
+		logger.Info("Removed duplicate anonymous section: %s", section)
+	}
+	if len(indices) > 0 {
+		exec.Command("uci", "commit", config).Run()
+	}
 }
 
 func (t *Tailscale) Stop() error {
