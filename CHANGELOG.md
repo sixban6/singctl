@@ -1,3 +1,10 @@
+# [1.17.0](https://github.com/sixban6/singctl/compare/v1.16.23...v1.17.0) (2026-02-21)
+
+
+### Features
+
+* **singbox:** dynamically fetch GUI client URL from GitHub Releases ([b842ccb](https://github.com/sixban6/singctl/commit/b842ccbbbc6b067beaec518f263704566cac0b60))
+
 ## [1.16.23](https://github.com/sixban6/singctl/compare/v1.16.22...v1.16.23) (2026-02-21)
 
 
