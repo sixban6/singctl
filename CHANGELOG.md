@@ -1,3 +1,10 @@
+## [1.16.22](https://github.com/sixban6/singctl/compare/v1.16.21...v1.16.22) (2026-02-21)
+
+
+### Bug Fixes
+
+* support update tailscale ([a9165a8](https://github.com/sixban6/singctl/commit/a9165a812bbfd9d10d476b17a107f4eec7afdf33))
+
 ## [1.16.21](https://github.com/sixban6/singctl/compare/v1.16.20...v1.16.21) (2026-02-21)
 
 
