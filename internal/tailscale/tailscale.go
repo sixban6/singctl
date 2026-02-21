@@ -18,16 +18,29 @@ const (
 	installDir = "/usr/sbin"
 )
 
-type Tailscale struct{}
+type Tailscale struct {
+	// httpClient is used for all HTTP requests. Defaults to http.DefaultClient.
+	httpClient *http.Client
+	// openWrtCheck returns true when running on OpenWrt/ImmortalWrt.
+	// Defaults to the real isOpenWrt() filesystem check.
+	openWrtCheck func() bool
+}
 
 func New() *Tailscale {
-	return &Tailscale{}
+	return &Tailscale{
+		httpClient:   http.DefaultClient,
+		openWrtCheck: isOpenWrt,
+	}
 }
 
 // getLatestTailscaleVersion 从 GitHub API 获取最新的稳定版本
 func (t *Tailscale) getLatestTailscaleVersion() (string, error) {
-	url := "https://api.github.com/repos/tailscale/tailscale/releases/latest"
-	resp, err := http.Get(url)
+	return t.getLatestTailscaleVersionFrom("https://api.github.com/repos/tailscale/tailscale/releases/latest")
+}
+
+// getLatestTailscaleVersionFrom 从指定 URL 获取最新版本（便于测试注入）
+func (t *Tailscale) getLatestTailscaleVersionFrom(apiURL string) (string, error) {
+	resp, err := t.httpClient.Get(apiURL)
 	if err != nil {
 		return "", fmt.Errorf("failed to fetch latest version: %w", err)
 	}
@@ -117,7 +130,7 @@ func (t *Tailscale) getSystemArchitecture() (string, error) {
 }
 
 func (t *Tailscale) Install() error {
-	if !isOpenWrt() {
+	if !t.openWrtCheck() {
 		logger.Warn("Tailscale installation is currently only supported on OpenWrt and ImmortalWrt.")
 		return nil
 	}
@@ -226,7 +239,7 @@ func (t *Tailscale) Install() error {
 }
 
 func (t *Tailscale) Start() error {
-	if !isOpenWrt() {
+	if !t.openWrtCheck() {
 		logger.Warn("Tailscale start is currently only supported on OpenWrt and ImmortalWrt.")
 		return nil
 	}
@@ -352,7 +365,7 @@ func (t *Tailscale) Start() error {
 }
 
 func (t *Tailscale) Stop() error {
-	if !isOpenWrt() {
+	if !t.openWrtCheck() {
 		logger.Warn("Tailscale stop is currently only supported on OpenWrt and ImmortalWrt.")
 		return nil
 	}
@@ -375,6 +388,127 @@ func (t *Tailscale) Stop() error {
 	}
 
 	logger.Success("Tailscale stopped successfully")
+	return nil
+}
+
+// parseVersionOutput 从 "tailscale version" 输出中提取版本号（首行）
+func parseVersionOutput(out string) (string, error) {
+	lines := strings.SplitN(strings.TrimSpace(out), "\n", 2)
+	if len(lines) == 0 || strings.TrimSpace(lines[0]) == "" {
+		return "", fmt.Errorf("unexpected tailscale version output: %s", out)
+	}
+	return strings.TrimSpace(lines[0]), nil
+}
+
+// getInstalledVersion 获取当前已安装的 Tailscale 版本
+func (t *Tailscale) getInstalledVersion() (string, error) {
+	tailscaleBin := filepath.Join(installDir, "tailscale")
+	out, err := exec.Command(tailscaleBin, "version").Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to run tailscale version: %w", err)
+	}
+	return parseVersionOutput(string(out))
+}
+
+// Update 将 Tailscale 更新到最新稳定版
+func (t *Tailscale) Update() error {
+	if !t.openWrtCheck() {
+		logger.Warn("Tailscale update is currently only supported on OpenWrt and ImmortalWrt.")
+		return nil
+	}
+	logger.Info("Checking for Tailscale updates...")
+
+	// 1. 获取最新版本
+	latestVersion, err := t.getLatestTailscaleVersion()
+	if err != nil {
+		return fmt.Errorf("failed to fetch latest version: %w", err)
+	}
+	logger.Info("Latest Tailscale version: %s", latestVersion)
+
+	// 2. 获取当前已安装版本
+	installedVersion, err := t.getInstalledVersion()
+	if err != nil {
+		logger.Warn("Could not determine installed version (%v), proceeding with update...", err)
+	} else {
+		logger.Info("Currently installed version: %s", installedVersion)
+		if installedVersion == latestVersion {
+			logger.Success("Tailscale is already up to date (%s)", installedVersion)
+			return nil
+		}
+		logger.Info("Updating %s -> %s", installedVersion, latestVersion)
+	}
+
+	// 3. 检测系统架构
+	arch, err := t.getSystemArchitecture()
+	if err != nil {
+		logger.Warn("Failed to detect architecture, using fallback amd64: %v", err)
+		arch = "amd64"
+	}
+	logger.Info("Detected system architecture: %s", arch)
+
+	tailscaleURL := fmt.Sprintf("https://pkgs.tailscale.com/stable/tailscale_%s_%s.tgz", latestVersion, arch)
+
+	// 4. 下载新版本
+	logger.Info("Downloading Tailscale %s...", latestVersion)
+	resp, err := t.httpClient.Get(tailscaleURL)
+	if err != nil {
+		return fmt.Errorf("download failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("download failed with status: %s", resp.Status)
+	}
+
+	tmpFile, err := os.CreateTemp("", "tailscale-*.tgz")
+	if err != nil {
+		return fmt.Errorf("create temp file failed: %w", err)
+	}
+	defer os.Remove(tmpFile.Name())
+
+	if _, err = io.Copy(tmpFile, resp.Body); err != nil {
+		return fmt.Errorf("write file failed: %w", err)
+	}
+	tmpFile.Close()
+
+	// 5. 解压
+	logger.Info("Extracting...")
+	tmpDir, err := os.MkdirTemp("", "tailscale-extract-*")
+	if err != nil {
+		return fmt.Errorf("create temp dir failed: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	if err := exec.Command("tar", "xzf", tmpFile.Name(), "-C", tmpDir).Run(); err != nil {
+		return fmt.Errorf("extract failed: %w", err)
+	}
+
+	extractedDir := filepath.Join(tmpDir, fmt.Sprintf("tailscale_%s_%s", latestVersion, arch))
+
+	// 6. 停止服务，替换二进制文件，重启服务
+	logger.Info("Stopping tailscale service before replacing binaries...")
+	exec.Command("/etc/init.d/tailscale", "stop").Run()
+
+	if err := copyFile(filepath.Join(extractedDir, "tailscale"), filepath.Join(installDir, "tailscale")); err != nil {
+		return fmt.Errorf("replace tailscale binary failed: %w", err)
+	}
+	if err := copyFile(filepath.Join(extractedDir, "tailscaled"), filepath.Join(installDir, "tailscaled")); err != nil {
+		return fmt.Errorf("replace tailscaled binary failed: %w", err)
+	}
+
+	if err := os.Chmod(filepath.Join(installDir, "tailscale"), 0755); err != nil {
+		return fmt.Errorf("chmod tailscale failed: %w", err)
+	}
+	if err := os.Chmod(filepath.Join(installDir, "tailscaled"), 0755); err != nil {
+		return fmt.Errorf("chmod tailscaled failed: %w", err)
+	}
+
+	logger.Info("Restarting tailscale service...")
+	if err := exec.Command("/etc/init.d/tailscale", "start").Run(); err != nil {
+		return fmt.Errorf("restart service failed: %w", err)
+	}
+
+	logger.Success("Tailscale updated to %s successfully", latestVersion)
 	return nil
 }
 
