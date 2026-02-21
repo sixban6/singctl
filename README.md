@@ -37,15 +37,19 @@ powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "[System.IO.File]
 ```
 
 ## Usage
+- 基本使用
 ```bash
+# 安装 sing-box               
+singctl install sb   
+
+# 生成配置到默认位置并备份         
+singctl gen     
+
 # 生成配置并启动 sing-box
 singctl start           
 
 # 停止 sing-box & 关闭守护进程     
 singctl stop       
-
-# 安装 sing-box               
-singctl install sb            
 
 # 更新 sing-box
 singctl update sb        
@@ -53,14 +57,6 @@ singctl update sb
 # 更新 singctl 自身         
 singctl update self      
 
-# 生成配置到默认位置并备份         
-sudo singctl gen          
-
-# 输出到控制台查看        
-singctl gen --stdout       
-
- # 自定义输出路径             
-singctl gen -o /tmp/config.json  
 ```
 - 守护进程使用
 ```bash
@@ -90,6 +86,14 @@ singctl start tailscale --exit-node
 singctl stop tailscale
 
 singctl update tailscale
+```
+- 其他
+```bash
+# 输出到控制台查看        
+singctl gen --stdout       
+
+ # 自定义输出路径             
+singctl gen -o /tmp/config.json  
 ```
 
 ## License
