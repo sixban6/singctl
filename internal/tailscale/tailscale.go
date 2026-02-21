@@ -526,7 +526,9 @@ func (t *Tailscale) Update() error {
 
 	// 6. 停止服务，替换二进制文件，重启服务
 	logger.Info("Stopping tailscale service before replacing binaries...")
-	exec.Command("/etc/init.d/tailscale", "stop").Run()
+	if err := stopTailscaledProcess(); err != nil {
+		logger.Warn("Stop may be incomplete: %v", err)
+	}
 
 	if err := copyFile(filepath.Join(extractedDir, "tailscale"), filepath.Join(installDir, "tailscale")); err != nil {
 		return fmt.Errorf("replace tailscale binary failed: %w", err)
@@ -549,6 +551,27 @@ func (t *Tailscale) Update() error {
 
 	logger.Success("Tailscale updated to %s successfully", latestVersion)
 	return nil
+}
+
+// stopTailscaledProcess 先通过 init.d 优雅停止服务，再用 killall -9 确保进程退出，
+// 最后轮询等待 tailscaled 进程消失，防止替换二进制时出现 "text file busy" 错误。
+func stopTailscaledProcess() error {
+	// 1. 优雅停止
+	exec.Command("/etc/init.d/tailscale", "stop").Run()
+
+	// 2. 强制杀掉仍在运行的 tailscaled（忽略 "no process" 错误）
+	exec.Command("killall", "-9", "tailscaled").Run()
+
+	// 3. 轮询等待进程彻底消失（最多 5 秒）
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		// "pgrep -x tailscaled" 退出码非 0 表示进程已不存在
+		if err := exec.Command("pgrep", "-x", "tailscaled").Run(); err != nil {
+			return nil // 进程已退出
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return fmt.Errorf("tailscaled process did not exit within timeout")
 }
 
 // optimizeUDPGRO configures UDP GRO settings for better Tailscale performance
