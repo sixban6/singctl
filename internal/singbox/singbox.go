@@ -3,7 +3,6 @@ package singbox
 import (
 	"context"
 	"fmt"
-	"github.com/sixban6/ghinstall"
 	"io"
 	"net/http"
 	"os"
@@ -16,6 +15,8 @@ import (
 	"singctl/internal/netinfo"
 	"singctl/internal/scripts"
 	"strings"
+
+	"github.com/sixban6/ghinstall"
 )
 
 // getSingBoxInstallDir 返回适合当前系统的 sing-box 安装路径
@@ -222,8 +223,18 @@ func (sb *SingBox) InstallGUI() error {
 		downloadURL = sb.config.GUI.WinURL
 	}
 
+	// If URL is empty or it's the old hardcoded default, fetch dynamically
+	if downloadURL == "" || strings.Contains(downloadURL, "SFM-1.13.0-rc.1-Apple.pkg") {
+		logger.Info("Dynamically resolving the latest GUI client address from GitHub...")
+		latestURL, err := fetchLatestGUIAsset(runtime.GOOS)
+		if err != nil {
+			return fmt.Errorf("failed to fetch latest GUI asset: %w", err)
+		}
+		downloadURL = latestURL
+	}
+
 	if downloadURL == "" {
-		return fmt.Errorf("GUI download URL not configured for %s", runtime.GOOS)
+		return fmt.Errorf("GUI download URL not configured for %s and dynamic fetch failed", runtime.GOOS)
 	}
 
 	// 优化下载逻辑：检查Google连通性
