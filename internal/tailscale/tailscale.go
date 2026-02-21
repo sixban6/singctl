@@ -33,38 +33,52 @@ func New() *Tailscale {
 	}
 }
 
-// getLatestTailscaleVersion 从 GitHub API 获取最新的稳定版本
-func (t *Tailscale) getLatestTailscaleVersion() (string, error) {
-	return t.getLatestTailscaleVersionFrom("https://api.github.com/repos/tailscale/tailscale/releases/latest")
+// pkgsStableURL 是 Tailscale 官方 stable 渠道的 JSON 元数据接口。
+// 该接口始终与实际可下载文件保持同步，避免 GitHub releases API 的延迟问题。
+const pkgsStableURL = "https://pkgs.tailscale.com/stable/?mode=json"
+
+// pkgsInfo 是 pkgs.tailscale.com/stable/?mode=json 返回的结构体
+type pkgsInfo struct {
+	Tarballs        map[string]string `json:"Tarballs"`        // arch -> filename
+	TarballsVersion string            `json:"TarballsVersion"` // e.g. "1.94.2"
 }
 
-// getLatestTailscaleVersionFrom 从指定 URL 获取最新版本（便于测试注入）
-func (t *Tailscale) getLatestTailscaleVersionFrom(apiURL string) (string, error) {
+// getLatestPkgsInfo 从 Tailscale 官方 pkgs 接口获取最新 stable 信息
+func (t *Tailscale) getLatestPkgsInfo() (*pkgsInfo, error) {
+	return t.getLatestPkgsInfoFrom(pkgsStableURL)
+}
+
+// getLatestPkgsInfoFrom 从指定 URL 获取 pkgsInfo（便于测试注入）
+func (t *Tailscale) getLatestPkgsInfoFrom(apiURL string) (*pkgsInfo, error) {
 	resp, err := t.httpClient.Get(apiURL)
 	if err != nil {
-		return "", fmt.Errorf("failed to fetch latest version: %w", err)
+		return nil, fmt.Errorf("failed to fetch pkgs info: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("GitHub API returned status: %s", resp.Status)
+		return nil, fmt.Errorf("pkgs API returned status: %s", resp.Status)
 	}
 
-	var release struct {
-		TagName string `json:"tag_name"`
+	var info pkgsInfo
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		return nil, fmt.Errorf("failed to decode pkgs response: %w", err)
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		return "", fmt.Errorf("failed to decode response: %w", err)
+	if info.TarballsVersion == "" {
+		return nil, fmt.Errorf("pkgs API returned empty version")
 	}
 
-	// tag_name 格式通常是 "v1.94.1"，需要去掉前缀 "v"
-	version := strings.TrimPrefix(release.TagName, "v")
-	if version == "" {
-		return "", fmt.Errorf("invalid version format: %s", release.TagName)
-	}
+	return &info, nil
+}
 
-	return version, nil
+// getLatestTailscaleVersion 获取最新 stable 版本号（保留向后兼容）
+func (t *Tailscale) getLatestTailscaleVersion() (string, error) {
+	info, err := t.getLatestPkgsInfo()
+	if err != nil {
+		return "", err
+	}
+	return info.TarballsVersion, nil
 }
 
 // getLANSubnet 从 UCI 配置中获取 LAN 接口的子网信息
@@ -136,13 +150,25 @@ func (t *Tailscale) Install() error {
 	}
 	logger.Info("Starting Tailscale installation...")
 
-	// 0. Get latest version
+	// 0. Get latest pkgs info (version + per-arch filenames)
 	logger.Info("Fetching latest Tailscale version...")
-	version, err := t.getLatestTailscaleVersion()
+	pkgs, err := t.getLatestPkgsInfo()
 	if err != nil {
-		logger.Warn("Failed to fetch latest version, using fallback 1.94.1: %v", err)
-		version = "1.94.1"
+		logger.Warn("Failed to fetch pkgs info: %v", err)
+		// fallback: use last known stable
+		pkgs = &pkgsInfo{
+			TarballsVersion: "1.94.2",
+			Tarballs: map[string]string{
+				"amd64":  "tailscale_1.94.2_amd64.tgz",
+				"arm64":  "tailscale_1.94.2_arm64.tgz",
+				"arm":    "tailscale_1.94.2_arm.tgz",
+				"386":    "tailscale_1.94.2_386.tgz",
+				"mips":   "tailscale_1.94.2_mips.tgz",
+				"mipsle": "tailscale_1.94.2_mipsle.tgz",
+			},
+		}
 	}
+	version := pkgs.TarballsVersion
 	logger.Info("Using Tailscale version: %s", version)
 
 	// 0.1 Detect system architecture
@@ -153,7 +179,13 @@ func (t *Tailscale) Install() error {
 	}
 	logger.Info("Detected system architecture: %s", arch)
 
-	tailscaleURL := fmt.Sprintf("https://pkgs.tailscale.com/stable/tailscale_%s_%s.tgz", version, arch)
+	// 0.2 Get tarball filename from pkgs info (falls back to constructed name)
+	tarball, ok := pkgs.Tarballs[arch]
+	if !ok {
+		tarball = fmt.Sprintf("tailscale_%s_%s.tgz", version, arch)
+		logger.Warn("Architecture %s not found in pkgs info, using fallback filename: %s", arch, tarball)
+	}
+	tailscaleURL := "https://pkgs.tailscale.com/stable/" + tarball
 
 	// 1. Download
 	logger.Info("Downloading Tailscale...")
@@ -418,11 +450,12 @@ func (t *Tailscale) Update() error {
 	}
 	logger.Info("Checking for Tailscale updates...")
 
-	// 1. 获取最新版本
-	latestVersion, err := t.getLatestTailscaleVersion()
+	// 1. 获取最新 pkgs info（版本 + 各架构文件名）
+	pkgs, err := t.getLatestPkgsInfo()
 	if err != nil {
 		return fmt.Errorf("failed to fetch latest version: %w", err)
 	}
+	latestVersion := pkgs.TarballsVersion
 	logger.Info("Latest Tailscale version: %s", latestVersion)
 
 	// 2. 获取当前已安装版本
@@ -446,7 +479,13 @@ func (t *Tailscale) Update() error {
 	}
 	logger.Info("Detected system architecture: %s", arch)
 
-	tailscaleURL := fmt.Sprintf("https://pkgs.tailscale.com/stable/tailscale_%s_%s.tgz", latestVersion, arch)
+	// 从 pkgs info 中取精确文件名（避免手动拼接出错）
+	tarball, ok := pkgs.Tarballs[arch]
+	if !ok {
+		tarball = fmt.Sprintf("tailscale_%s_%s.tgz", latestVersion, arch)
+		logger.Warn("Architecture %s not in pkgs info, using fallback: %s", arch, tarball)
+	}
+	tailscaleURL := "https://pkgs.tailscale.com/stable/" + tarball
 
 	// 4. 下载新版本
 	logger.Info("Downloading Tailscale %s...", latestVersion)

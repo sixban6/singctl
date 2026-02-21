@@ -27,16 +27,26 @@ func newTestTailscale() *Tailscale {
 	}
 }
 
-// githubAPIServer returns a test server that responds with the given tag_name.
-func githubAPIServer(t *testing.T, tagName string) *httptest.Server {
+// pkgsAPIServer returns a test server that responds with a pkgsInfo JSON payload.
+func pkgsAPIServer(t *testing.T, version string) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]string{"tag_name": tagName})
+		info := pkgsInfo{
+			TarballsVersion: version,
+			Tarballs: map[string]string{
+				"amd64": fmt.Sprintf("tailscale_%s_amd64.tgz", version),
+				"arm64": fmt.Sprintf("tailscale_%s_arm64.tgz", version),
+				"arm":   fmt.Sprintf("tailscale_%s_arm.tgz", version),
+				"386":   fmt.Sprintf("tailscale_%s_386.tgz", version),
+				"mips":  fmt.Sprintf("tailscale_%s_mips.tgz", version),
+			},
+		}
+		json.NewEncoder(w).Encode(info)
 	}))
 }
 
-// githubAPIServerStatus returns a server that always replies with the given status.
-func githubAPIServerStatus(t *testing.T, status int) *httptest.Server {
+// pkgsAPIServerStatus returns a server that always replies with the given HTTP status.
+func pkgsAPIServerStatus(t *testing.T, status int) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(status)
@@ -93,13 +103,13 @@ func serveFile(t *testing.T, path string) *httptest.Server {
 
 func TestParseVersionOutput_Normal(t *testing.T) {
 	// Real tailscale version output: first line is the version, then detail lines.
-	out := "1.94.1\n  go1.22 linux/amd64\n  tailscale commit: abc\n"
+	out := "1.94.2\n  go1.22 linux/amd64\n  tailscale commit: abc\n"
 	got, err := parseVersionOutput(out)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got != "1.94.1" {
-		t.Errorf("got %q, want %q", got, "1.94.1")
+	if got != "1.94.2" {
+		t.Errorf("got %q, want %q", got, "1.94.2")
 	}
 }
 
@@ -128,78 +138,88 @@ func TestParseVersionOutput_OnlyWhitespace(t *testing.T) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// getLatestTailscaleVersionFrom (uses injected httpClient)
+// getLatestPkgsInfoFrom (uses injected httpClient)
 // ─────────────────────────────────────────────────────────────────────────────
 
-func TestGetLatestVersion_Success(t *testing.T) {
-	srv := githubAPIServer(t, "v1.94.1")
+func TestGetLatestPkgsInfo_Success(t *testing.T) {
+	srv := pkgsAPIServer(t, "1.94.2")
 	defer srv.Close()
 
 	ts := newTestTailscale()
-	got, err := ts.getLatestTailscaleVersionFrom(srv.URL)
+	info, err := ts.getLatestPkgsInfoFrom(srv.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got != "1.94.1" {
-		t.Errorf("got %q, want %q", got, "1.94.1")
+	if info.TarballsVersion != "1.94.2" {
+		t.Errorf("got %q, want %q", info.TarballsVersion, "1.94.2")
+	}
+	if _, ok := info.Tarballs["amd64"]; !ok {
+		t.Error("expected amd64 entry in Tarballs map")
 	}
 }
 
-func TestGetLatestVersion_StripsPrefixV(t *testing.T) {
-	srv := githubAPIServer(t, "v2.0.0")
+func TestGetLatestPkgsInfo_TarballFilenameMatchesVersion(t *testing.T) {
+	const version = "1.94.2"
+	srv := pkgsAPIServer(t, version)
 	defer srv.Close()
 
 	ts := newTestTailscale()
-	got, _ := ts.getLatestTailscaleVersionFrom(srv.URL)
-	if strings.HasPrefix(got, "v") {
-		t.Errorf("version should not start with 'v', got %q", got)
+	info, err := ts.getLatestPkgsInfoFrom(srv.URL)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for arch, filename := range info.Tarballs {
+		if !strings.Contains(filename, version) {
+			t.Errorf("arch %s: filename %q does not contain version %s", arch, filename, version)
+		}
 	}
 }
 
-func TestGetLatestVersion_NonOKStatus(t *testing.T) {
-	srv := githubAPIServerStatus(t, http.StatusServiceUnavailable)
+func TestGetLatestPkgsInfo_NonOKStatus(t *testing.T) {
+	srv := pkgsAPIServerStatus(t, http.StatusServiceUnavailable)
 	defer srv.Close()
 
 	ts := newTestTailscale()
-	_, err := ts.getLatestTailscaleVersionFrom(srv.URL)
+	_, err := ts.getLatestPkgsInfoFrom(srv.URL)
 	if err == nil {
 		t.Error("expected error for non-200 status, got nil")
 	}
 }
 
-func TestGetLatestVersion_BadJSON(t *testing.T) {
+func TestGetLatestPkgsInfo_BadJSON(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("not-json{{{"))
 	}))
 	defer srv.Close()
 
 	ts := newTestTailscale()
-	_, err := ts.getLatestTailscaleVersionFrom(srv.URL)
+	_, err := ts.getLatestPkgsInfoFrom(srv.URL)
 	if err == nil {
 		t.Error("expected error for bad JSON, got nil")
 	}
 }
 
-func TestGetLatestVersion_EmptyTagName(t *testing.T) {
+func TestGetLatestPkgsInfo_EmptyVersion(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]string{"tag_name": ""})
+		// TarballsVersion 为空
+		json.NewEncoder(w).Encode(pkgsInfo{TarballsVersion: "", Tarballs: map[string]string{}})
 	}))
 	defer srv.Close()
 
 	ts := newTestTailscale()
-	_, err := ts.getLatestTailscaleVersionFrom(srv.URL)
+	_, err := ts.getLatestPkgsInfoFrom(srv.URL)
 	if err == nil {
-		t.Error("expected error for empty tag_name, got nil")
+		t.Error("expected error for empty TarballsVersion, got nil")
 	}
 }
 
-func TestGetLatestVersion_HTTPError(t *testing.T) {
+func TestGetLatestPkgsInfo_HTTPError(t *testing.T) {
 	// Point at a server that is immediately closed.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	srv.Close() // close right away
 
 	ts := newTestTailscale()
-	_, err := ts.getLatestTailscaleVersionFrom(srv.URL)
+	_, err := ts.getLatestPkgsInfoFrom(srv.URL)
 	if err == nil {
 		t.Error("expected error when server is unreachable, got nil")
 	}
@@ -223,10 +243,10 @@ func TestUpdate_NotOnOpenWrt(t *testing.T) {
 // TestUpdate_AlreadyUpToDate checks that Update() exits early without
 // downloading anything when installed == latest.
 func TestUpdate_AlreadyUpToDate(t *testing.T) {
-	const version = "1.94.1"
+	const version = "1.94.2"
 
-	// GitHub API mock
-	apiSrv := githubAPIServer(t, "v"+version)
+	// pkgs API mock
+	apiSrv := pkgsAPIServer(t, version)
 	defer apiSrv.Close()
 
 	// Create a fake tailscale binary that prints `version` and is on PATH
@@ -237,19 +257,13 @@ func TestUpdate_AlreadyUpToDate(t *testing.T) {
 		t.Fatalf("write fake binary: %v", err)
 	}
 
-	// Patch installDir for this test via a wrapper:
-	// We can't change the package-level const, so we use an indirect test
-	// by calling getInstalledVersion with the real binary path.
-	// Instead: verify the two building blocks individually, then
-	// test the combined short-circuit logic with a custom Tailscale subtype.
-	//
-	// Practical approach: We verify the API response equals the fake installed
-	// version by testing the composed result of getLatestTailscaleVersionFrom.
+	// Verify the API response equals the fake installed version
 	ts := newTestTailscale()
-	latest, err := ts.getLatestTailscaleVersionFrom(apiSrv.URL)
+	info, err := ts.getLatestPkgsInfoFrom(apiSrv.URL)
 	if err != nil {
-		t.Fatalf("getLatestTailscaleVersionFrom: %v", err)
+		t.Fatalf("getLatestPkgsInfoFrom: %v", err)
 	}
+	latest := info.TarballsVersion
 	installed, err := parseVersionOutput(version + "\n  go1.22\n")
 	if err != nil {
 		t.Fatalf("parseVersionOutput: %v", err)
@@ -267,18 +281,18 @@ func TestUpdate_FullFlow(t *testing.T) {
 		t.Skip("skipping full-flow test in short mode")
 	}
 
-	const version = "1.94.1"
+	const version = "1.94.2"
 	const arch = "amd64"
 
 	// 1. Create a fake .tgz in a temp dir
 	tgzDir := t.TempDir()
 	tgzPath := makeFakeTgz(t, tgzDir, version, arch)
 
-	// 2. Serve the fake tgz and a fake GitHub API
+	// 2. Serve the fake tgz and a fake pkgs API
 	dlSrv := serveFile(t, tgzPath)
 	defer dlSrv.Close()
 
-	apiSrv := githubAPIServer(t, "v"+version)
+	apiSrv := pkgsAPIServer(t, version)
 	defer apiSrv.Close()
 
 	// 3. Create a fake "installed" tailscale binary that returns an older version
@@ -292,10 +306,11 @@ func TestUpdate_FullFlow(t *testing.T) {
 
 	// 4. Verify: latest != installed (update would proceed)
 	ts := newTestTailscale()
-	latest, err := ts.getLatestTailscaleVersionFrom(apiSrv.URL)
+	info, err := ts.getLatestPkgsInfoFrom(apiSrv.URL)
 	if err != nil {
-		t.Fatalf("getLatestTailscaleVersionFrom: %v", err)
+		t.Fatalf("getLatestPkgsInfoFrom: %v", err)
 	}
+	latest := info.TarballsVersion
 	installed, _ := parseVersionOutput(oldVersion)
 	if latest == installed {
 		t.Skip("version mismatch expectation failed; check test setup")
@@ -344,15 +359,22 @@ func TestUpdate_FullFlow(t *testing.T) {
 		}
 	}
 
-	t.Log("Full flow verified: API mock → download → tgz structure OK")
+	// 7. Verify pkgsInfo contains amd64 tarball filename
+	if fn, ok := info.Tarballs["amd64"]; !ok {
+		t.Error("pkgsInfo missing amd64 entry")
+	} else if !strings.Contains(fn, version) {
+		t.Errorf("amd64 filename %q does not contain version %s", fn, version)
+	}
+
+	t.Log("Full flow verified: pkgs API mock → download → tgz structure OK")
 }
 
 // TestUpdate_DownloadBadStatus verifies that Update() propagates a non-200
 // download response as an error.
 func TestUpdate_DownloadBadStatus(t *testing.T) {
-	const version = "1.94.1"
+	const version = "1.94.2"
 
-	apiSrv := githubAPIServer(t, "v"+version)
+	apiSrv := pkgsAPIServer(t, version)
 	defer apiSrv.Close()
 
 	// Download server returns 404
@@ -361,14 +383,14 @@ func TestUpdate_DownloadBadStatus(t *testing.T) {
 	}))
 	defer dlSrv.Close()
 
-	// We can test this at the component level: getLatestTailscaleVersionFrom
-	// succeeds, but an HTTP GET to the download URL returns 404.
+	// Verify: pkgsInfo succeeds, but download returns 404
 	ts := newTestTailscale()
-	latest, err := ts.getLatestTailscaleVersionFrom(apiSrv.URL)
+	info, err := ts.getLatestPkgsInfoFrom(apiSrv.URL)
 	if err != nil {
 		t.Fatalf("api call: %v", err)
 	}
-	resp, err := ts.httpClient.Get(fmt.Sprintf("%s/stable/tailscale_%s_amd64.tgz", dlSrv.URL, latest))
+	tarball := info.Tarballs["amd64"]
+	resp, err := ts.httpClient.Get(dlSrv.URL + "/stable/" + tarball)
 	if err != nil {
 		t.Fatalf("download request: %v", err)
 	}
@@ -378,7 +400,7 @@ func TestUpdate_DownloadBadStatus(t *testing.T) {
 	}
 }
 
-// TestUpdate_APILatencyIsHandled ensures a slow or erroring API propagates correctly.
+// TestUpdate_APIFailurePropagates ensures a failing pkgs API propagates correctly.
 func TestUpdate_APIFailurePropagates(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -387,7 +409,7 @@ func TestUpdate_APIFailurePropagates(t *testing.T) {
 	defer srv.Close()
 
 	ts := newTestTailscale()
-	_, err := ts.getLatestTailscaleVersionFrom(srv.URL)
+	_, err := ts.getLatestPkgsInfoFrom(srv.URL)
 	if err == nil {
 		t.Error("expected error for 500 response, got nil")
 	}
