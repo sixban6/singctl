@@ -62,7 +62,7 @@ singctl gen --stdout
  # 自定义输出路径             
 singctl gen -o /tmp/config.json  
 ```
-
+- 守护进程使用
 ```bash
 # 快速查看系统状态
 singctl info
@@ -75,7 +75,9 @@ singctl daemon status
 
 # 查看守护进程日志
 singctl daemon logs -n 50
-
+```
+- tailscale使用
+```bash
 # 安装 Tailscale (仅 OpenWrt/ImmortalWrt)
 singctl install tailscale
 
