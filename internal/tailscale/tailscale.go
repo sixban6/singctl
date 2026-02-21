@@ -432,14 +432,44 @@ func parseVersionOutput(out string) (string, error) {
 	return strings.TrimSpace(lines[0]), nil
 }
 
-// getInstalledVersion 获取当前已安装的 Tailscale 版本
-func (t *Tailscale) getInstalledVersion() (string, error) {
-	tailscaleBin := filepath.Join(installDir, "tailscale")
-	out, err := exec.Command(tailscaleBin, "version").Output()
+// getInstalledVersionOf 运行指定二进制文件的 version 命令，返回版本号。
+func (t *Tailscale) getInstalledVersionOf(binPath string) (string, error) {
+	out, err := exec.Command(binPath, "version").Output()
 	if err != nil {
-		return "", fmt.Errorf("failed to run tailscale version: %w", err)
+		return "", fmt.Errorf("failed to run %s version: %w", binPath, err)
 	}
 	return parseVersionOutput(string(out))
+}
+
+// getInstalledVersion 返回 tailscale 和 tailscaled 中较旧的版本号。
+// 两者都必须达到最新版本，Update() 才能軭行。
+func (t *Tailscale) getInstalledVersion() (string, error) {
+	clientVer, clientErr := t.getInstalledVersionOf(filepath.Join(installDir, "tailscale"))
+	daemonVer, daemonErr := t.getInstalledVersionOf(filepath.Join(installDir, "tailscaled"))
+
+	// 两者都失败，返回客户端的错误
+	if clientErr != nil && daemonErr != nil {
+		return "", clientErr
+	}
+	// 仅客户端失败，以守护进程版本为准（会触发更新）
+	if clientErr != nil {
+		return daemonVer, nil
+	}
+	// 仅守护进程失败，以客户端版本为准（会触发更新）
+	if daemonErr != nil {
+		return clientVer, nil
+	}
+	// 两者都成功：返回较旧的版本。
+	// 只要两者中任意一个不是最新版，Update() 即会执行更新。
+	if clientVer != daemonVer {
+		logger.Warn("Version mismatch: tailscale=%s tailscaled=%s; will update both", clientVer, daemonVer)
+		// 返回较旧的一个，就能触发更新流程
+		if clientVer < daemonVer {
+			return clientVer, nil
+		}
+		return daemonVer, nil
+	}
+	return clientVer, nil
 }
 
 // Update 将 Tailscale 更新到最新稳定版
@@ -458,17 +488,27 @@ func (t *Tailscale) Update() error {
 	latestVersion := pkgs.TarballsVersion
 	logger.Info("Latest Tailscale version: %s", latestVersion)
 
-	// 2. 获取当前已安装版本
-	installedVersion, err := t.getInstalledVersion()
-	if err != nil {
-		logger.Warn("Could not determine installed version (%v), proceeding with update...", err)
-	} else {
-		logger.Info("Currently installed version: %s", installedVersion)
-		if installedVersion == latestVersion {
-			logger.Success("Tailscale is already up to date (%s)", installedVersion)
+	// 2. 获取当前已安装版本（tailscale 和 tailscaled 中较旧的一个）
+	clientVer, clientErr := t.getInstalledVersionOf(filepath.Join(installDir, "tailscale"))
+	daemonVer, daemonErr := t.getInstalledVersionOf(filepath.Join(installDir, "tailscaled"))
+
+	switch {
+	case clientErr != nil && daemonErr != nil:
+		logger.Warn("Could not determine installed versions (%v), proceeding with update...", clientErr)
+	case clientErr != nil:
+		logger.Warn("Could not read tailscale version (%v), proceeding...", clientErr)
+	case daemonErr != nil:
+		logger.Warn("Could not read tailscaled version (%v), proceeding...", daemonErr)
+	default:
+		logger.Info("Installed: tailscale=%s  tailscaled=%s", clientVer, daemonVer)
+		if clientVer == latestVersion && daemonVer == latestVersion {
+			logger.Success("Tailscale is already up to date (%s)", latestVersion)
 			return nil
 		}
-		logger.Info("Updating %s -> %s", installedVersion, latestVersion)
+		if clientVer != daemonVer {
+			logger.Info("Version mismatch detected: tailscale=%s tailscaled=%s", clientVer, daemonVer)
+		}
+		logger.Info("Updating to %s", latestVersion)
 	}
 
 	// 3. 检测系统架构
