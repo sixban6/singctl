@@ -715,17 +715,27 @@ func restoreUDPGRO() error {
 }
 
 func checkTunModule() bool {
-	// Use lsmod to check for 'tun' module
-	out, err := exec.Command("lsmod").Output()
-	if err != nil {
-		// If lsmod fails (e.g. not found), we can't be sure.
-		// Fallback to checking /dev/net/tun or return false?
-		// User explicitly asked for lsmod.
-		logger.Warn("lsmod failed: %v, assuming no kmod-tun", err)
-		return false
+	// 1. Check if the /dev/net/tun character device already exists
+	if fi, err := os.Stat("/dev/net/tun"); err == nil {
+		if fi.Mode()&os.ModeCharDevice != 0 {
+			return true
+		}
 	}
-	// Check if output contains "tun"
-	return strings.Contains(string(out), "tun")
+
+	// 2. Exact match using lsmod
+	out, err := exec.Command("lsmod").Output()
+	if err == nil {
+		lines := strings.Split(string(out), "\n")
+		for _, line := range lines {
+			parts := strings.Fields(line)
+			if len(parts) > 0 && parts[0] == "tun" {
+				return true
+			}
+		}
+	}
+
+	logger.Warn("tun module not loaded and /dev/net/tun not found, assuming no kmod-tun")
+	return false
 }
 
 func createInitScript(hasTun bool) error {
