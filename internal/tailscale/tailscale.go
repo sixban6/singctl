@@ -1,6 +1,7 @@
 package tailscale
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,107 +10,57 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"singctl/internal/logger"
+	"runtime"
 	"strings"
 	"time"
-)
 
-const (
-	maxRetries    = 3
-	retryBaseWait = 2 * time.Second
-)
+	"singctl/internal/fileutil"
+	"singctl/internal/logger"
+	"singctl/internal/netinfo"
 
-// httpGetWithRetry 对 HTTP GET 请求添加重试逻辑，处理 EOF / 超时等瞬态网络错误。
-// 最多重试 maxRetries 次，每次间隔指数退避 (2s, 4s, 8s)。
-func (t *Tailscale) httpGetWithRetry(url string) (*http.Response, error) {
-	var lastErr error
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		if attempt > 0 {
-			wait := retryBaseWait * (1 << (attempt - 1))
-			logger.Info("Retrying in %v (attempt %d/%d)...", wait, attempt, maxRetries)
-			time.Sleep(wait)
-		}
-		resp, err := t.httpClient.Get(url)
-		if err != nil {
-			lastErr = err
-			logger.Warn("HTTP GET %s failed: %v", url, err)
-			continue
-		}
-		if resp.StatusCode == http.StatusOK {
-			return resp, nil
-		}
-		resp.Body.Close()
-		lastErr = fmt.Errorf("HTTP %s", resp.Status)
-		// 4xx 客户端错误不重试
-		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
-			return nil, fmt.Errorf("download failed with status: %s", resp.Status)
-		}
-		logger.Warn("HTTP GET %s returned %s", url, resp.Status)
-	}
-	return nil, fmt.Errorf("all %d attempts failed, last error: %w", maxRetries+1, lastErr)
-}
+	"github.com/sixban6/ghinstall"
+)
 
 const (
 	installDir = "/usr/sbin"
 )
 
 type Tailscale struct {
-	// httpClient is used for all HTTP requests. Defaults to http.DefaultClient.
-	httpClient *http.Client
-	// openWrtCheck returns true when running on OpenWrt/ImmortalWrt.
-	// Defaults to the real isOpenWrt() filesystem check.
+	httpClient   *http.Client
 	openWrtCheck func() bool
+	downloadURL  string
 }
 
-func New() *Tailscale {
+func New(downloadURL string) *Tailscale {
 	return &Tailscale{
 		httpClient:   http.DefaultClient,
 		openWrtCheck: isOpenWrt,
+		downloadURL:  downloadURL,
 	}
 }
 
-// pkgsStableURL 是 Tailscale 官方 stable 渠道的 JSON 元数据接口。
-// 该接口始终与实际可下载文件保持同步，避免 GitHub releases API 的延迟问题。
-const pkgsStableURL = "https://pkgs.tailscale.com/stable/?mode=json"
+// selectTailscaleAsset 过滤合适的 Tailscale 发布包
+func (t *Tailscale) selectTailscaleAsset(assetName string) bool {
+	name := strings.ToLower(assetName)
 
-// pkgsInfo 是 pkgs.tailscale.com/stable/?mode=json 返回的结构体
-type pkgsInfo struct {
-	Tarballs        map[string]string `json:"Tarballs"`        // arch -> filename
-	TarballsVersion string            `json:"TarballsVersion"` // e.g. "1.94.2"
-}
+	if !strings.Contains(name, "tailscale") {
+		return false
+	}
 
-// getLatestPkgsInfo 从 Tailscale 官方 pkgs 接口获取最新 stable 信息
-func (t *Tailscale) getLatestPkgsInfo() (*pkgsInfo, error) {
-	return t.getLatestPkgsInfoFrom(pkgsStableURL)
-}
-
-// getLatestPkgsInfoFrom 从指定 URL 获取 pkgsInfo（便于测试注入）
-func (t *Tailscale) getLatestPkgsInfoFrom(apiURL string) (*pkgsInfo, error) {
-	resp, err := t.httpGetWithRetry(apiURL)
+	arch, err := t.getSystemArchitecture()
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch pkgs info: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var info pkgsInfo
-	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
-		return nil, fmt.Errorf("failed to decode pkgs response: %w", err)
+		arch = "amd64" // fallback
 	}
 
-	if info.TarballsVersion == "" {
-		return nil, fmt.Errorf("pkgs API returned empty version")
+	if !strings.Contains(name, arch) {
+		return false
 	}
 
-	return &info, nil
-}
-
-// getLatestTailscaleVersion 获取最新 stable 版本号（保留向后兼容）
-func (t *Tailscale) getLatestTailscaleVersion() (string, error) {
-	info, err := t.getLatestPkgsInfo()
-	if err != nil {
-		return "", err
+	if !strings.Contains(name, ".tgz") && !strings.Contains(name, ".tar.gz") {
+		return false
 	}
-	return info.TarballsVersion, nil
+
+	return true
 }
 
 // getLANSubnet 从 UCI 配置中获取 LAN 接口的子网信息
@@ -179,94 +130,65 @@ func (t *Tailscale) Install() error {
 		logger.Warn("Tailscale installation is currently only supported on OpenWrt and ImmortalWrt.")
 		return nil
 	}
-	logger.Info("Starting Tailscale installation...")
+	logger.Info("Starting Tailscale installation via ghinstall...")
 
-	// 0. Get latest pkgs info (version + per-arch filenames)
-	logger.Info("Fetching latest Tailscale version...")
-	pkgs, err := t.getLatestPkgsInfo()
+	ctx := context.Background()
+
+	// 创建临时目录
+	tempDir, err := os.MkdirTemp("", "tailscale-install-*")
 	if err != nil {
-		logger.Warn("Failed to fetch pkgs info: %v", err)
-		// fallback: use last known stable
-		pkgs = &pkgsInfo{
-			TarballsVersion: "1.94.2",
-			Tarballs: map[string]string{
-				"amd64":  "tailscale_1.94.2_amd64.tgz",
-				"arm64":  "tailscale_1.94.2_arm64.tgz",
-				"arm":    "tailscale_1.94.2_arm.tgz",
-				"386":    "tailscale_1.94.2_386.tgz",
-				"mips":   "tailscale_1.94.2_mips.tgz",
-				"mipsle": "tailscale_1.94.2_mipsle.tgz",
+		return fmt.Errorf("create temp dir: %w", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	mirror := ""
+	if !netinfo.CheckGoogleConnectivity() {
+		mirror = t.downloadURL
+		logger.Info("Google appears unreachable, applying mirror config: %s", mirror)
+	} else {
+		logger.Info("Google is reachable, skipping mirror config.")
+	}
+
+	cfg := &ghinstall.Config{
+		Github: []ghinstall.Repo{
+			{
+				URL:       "https://github.com/sixban6/auto_fetch_tailscale",
+				OutputDir: tempDir,
 			},
+		},
+		MirrorURL: mirror,
+	}
+
+	filter := ghinstall.CustomFilter(func(assets []ghinstall.Asset) (*ghinstall.Asset, error) {
+		for _, asset := range assets {
+			if t.selectTailscaleAsset(asset.Name) {
+				return &asset, nil
+			}
 		}
-	}
-	version := pkgs.TarballsVersion
-	logger.Info("Using Tailscale version: %s", version)
+		return nil, fmt.Errorf("no suitable asset found for OS: %s, Arch: %s", runtime.GOOS, runtime.GOARCH)
+	})
 
-	// 0.1 Detect system architecture
-	arch, err := t.getSystemArchitecture()
+	if err := ghinstall.InstallWithConfigAndFilter(ctx, cfg, filter); err != nil {
+		return fmt.Errorf("install tailscale failed: %w", err)
+	}
+
+	// 从下载的解压文件中查找二进制文件
+	tsBin, err := fileutil.FindExecutable(tempDir, "tailscale")
 	if err != nil {
-		logger.Warn("Failed to detect architecture, using fallback amd64: %v", err)
-		arch = "amd64"
+		return fmt.Errorf("tailscale binary not found: %w", err)
 	}
-	logger.Info("Detected system architecture: %s", arch)
 
-	// 0.2 Get tarball filename from pkgs info (falls back to constructed name)
-	tarball, ok := pkgs.Tarballs[arch]
-	if !ok {
-		tarball = fmt.Sprintf("tailscale_%s_%s.tgz", version, arch)
-		logger.Warn("Architecture %s not found in pkgs info, using fallback filename: %s", arch, tarball)
-	}
-	tailscaleURL := "https://pkgs.tailscale.com/stable/" + tarball
-
-	// 1. Download
-	logger.Info("Downloading Tailscale...")
-	resp, err := t.httpGetWithRetry(tailscaleURL)
+	tsdBin, err := fileutil.FindExecutable(tempDir, "tailscaled")
 	if err != nil {
-		return fmt.Errorf("download failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// Create temp file
-	tmpFile, err := os.CreateTemp("", "tailscale-*.tgz")
-	if err != nil {
-		return fmt.Errorf("create temp file failed: %w", err)
-	}
-	defer os.Remove(tmpFile.Name())
-
-	_, err = io.Copy(tmpFile, resp.Body)
-	if err != nil {
-		return fmt.Errorf("write file failed: %w", err)
-	}
-	tmpFile.Close()
-
-	// 2. Extract and Install
-	logger.Info("Extracting and installing...")
-	tmpDir, err := os.MkdirTemp("", "tailscale-extract-*")
-	if err != nil {
-		return fmt.Errorf("create temp dir failed: %w", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	if err := exec.Command("tar", "xzf", tmpFile.Name(), "-C", tmpDir).Run(); err != nil {
-		return fmt.Errorf("extract failed: %w", err)
+		return fmt.Errorf("tailscaled binary not found: %w", err)
 	}
 
-	// Find extracted directory (it should be tailscale_<version>_<arch>)
-	extractedDir := filepath.Join(tmpDir, fmt.Sprintf("tailscale_%s_%s", version, arch))
-
-	// Copy binaries
-	if err := copyFile(filepath.Join(extractedDir, "tailscale"), filepath.Join(installDir, "tailscale")); err != nil {
+	// 拷贝文件
+	if err := fileutil.InstallOrReplace(tsBin, filepath.Join(installDir, "tailscale")); err != nil {
 		return err
 	}
-	if err := copyFile(filepath.Join(extractedDir, "tailscaled"), filepath.Join(installDir, "tailscaled")); err != nil {
+	if err := fileutil.InstallOrReplace(tsdBin, filepath.Join(installDir, "tailscaled")); err != nil {
 		return err
-	}
-
-	if err := os.Chmod(filepath.Join(installDir, "tailscale"), 0755); err != nil {
-		return fmt.Errorf("chmod tailscale failed: %w", err)
-	}
-	if err := os.Chmod(filepath.Join(installDir, "tailscaled"), 0755); err != nil {
-		return fmt.Errorf("chmod tailscaled failed: %w", err)
 	}
 
 	// 3. Create Init Script
@@ -528,20 +450,52 @@ func (t *Tailscale) getInstalledVersion() (string, error) {
 	if daemonErr != nil {
 		return clientVer, nil
 	}
-	// 两者都成功：返回较旧的版本。
-	// 只要两者中任意一个不是最新版，Update() 即会执行更新。
 	if clientVer != daemonVer {
-		logger.Warn("Version mismatch: tailscale=%s tailscaled=%s; will update both", clientVer, daemonVer)
-		// 返回较旧的一个，就能触发更新流程
-		if clientVer < daemonVer {
-			return clientVer, nil
-		}
-		return daemonVer, nil
+		// Log or handle version mismatch if necessary.
+		// For now returning clientVer to trigger update
+		return clientVer, nil
 	}
 	return clientVer, nil
 }
 
-// Update 将 Tailscale 更新到最新稳定版
+type githubRelease struct {
+	TagName string `json:"tag_name"`
+}
+
+// fetchLatestTailscaleVersion 从 auto_fetch_tailscale 的 GitHub Releases 获取最新版本号
+func (t *Tailscale) fetchLatestTailscaleVersion() (string, error) {
+	url := "https://api.github.com/repos/sixban6/auto_fetch_tailscale/releases/latest"
+
+	// 如果配置了 mirror 并且 Google 不可达，尝试通过镜像拉取 API
+	if !netinfo.CheckGoogleConnectivity() && t.downloadURL != "" {
+		// 某些镜像服务可以代理 api.github.com
+		mirror := strings.TrimRight(t.downloadURL, "/")
+		if strings.Contains(mirror, "ghproxy") || strings.Contains(mirror, "mirror") {
+			// 如果是通用代理前缀，拼上 api 地址
+			url = mirror + "/https://api.github.com/repos/sixban6/auto_fetch_tailscale/releases/latest"
+		}
+	}
+
+	resp, err := t.httpClient.Get(url)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch releases: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("github api returned status: %s", resp.Status)
+	}
+
+	var rel githubRelease
+	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+		return "", fmt.Errorf("failed to decode releases response: %w", err)
+	}
+
+	// 去掉可能存在的 'v' 前缀
+	return strings.TrimPrefix(rel.TagName, "v"), nil
+}
+
+// Update 将 Tailscale 更新到最新版 (通过 ghinstall)
 func (t *Tailscale) Update() error {
 	if !t.openWrtCheck() {
 		logger.Warn("Tailscale update is currently only supported on OpenWrt and ImmortalWrt.")
@@ -549,85 +503,76 @@ func (t *Tailscale) Update() error {
 	}
 	logger.Info("Checking for Tailscale updates...")
 
-	// 1. 获取最新 pkgs info（版本 + 各架构文件名）
-	pkgs, err := t.getLatestPkgsInfo()
+	latestVersion, err := t.fetchLatestTailscaleVersion()
 	if err != nil {
-		return fmt.Errorf("failed to fetch latest version: %w", err)
+		// API 拉取失败，为了保险起见，继续执行安装逻辑，让 ghinstall 尝试最新版
+		logger.Warn("Failed to fetch latest version from GitHub API: %v", err)
+		latestVersion = "unknown"
+	} else {
+		logger.Info("Latest Tailscale version: %s", latestVersion)
 	}
-	latestVersion := pkgs.TarballsVersion
-	logger.Info("Latest Tailscale version: %s", latestVersion)
 
-	// 2. 获取当前已安装版本（tailscale 和 tailscaled 中较旧的一个）
-	clientVer, clientErr := t.getInstalledVersionOf(filepath.Join(installDir, "tailscale"))
-	daemonVer, daemonErr := t.getInstalledVersionOf(filepath.Join(installDir, "tailscaled"))
+	installedVer, installErr := t.getInstalledVersion()
+	if installErr != nil {
+		logger.Warn("Could not determine installed versions (%v), proceeding with update...", installErr)
+	} else if latestVersion != "unknown" && installedVer == latestVersion {
+		logger.Success("Tailscale is already up to date (%s)", latestVersion)
+		return nil
+	} else if latestVersion != "unknown" {
+		logger.Info("Updating Tailscale from %s to %s via ghinstall...", installedVer, latestVersion)
+	} else {
+		logger.Info("Updating Tailscale via ghinstall...")
+	}
 
-	switch {
-	case clientErr != nil && daemonErr != nil:
-		logger.Warn("Could not determine installed versions (%v), proceeding with update...", clientErr)
-	case clientErr != nil:
-		logger.Warn("Could not read tailscale version (%v), proceeding...", clientErr)
-	case daemonErr != nil:
-		logger.Warn("Could not read tailscaled version (%v), proceeding...", daemonErr)
-	default:
-		logger.Info("Installed: tailscale=%s  tailscaled=%s", clientVer, daemonVer)
-		if clientVer == latestVersion && daemonVer == latestVersion {
-			logger.Success("Tailscale is already up to date (%s)", latestVersion)
-			return nil
+	ctx := context.Background()
+
+	// 创建临时目录
+	tempDir, err := os.MkdirTemp("", "tailscale-update-*")
+	if err != nil {
+		return fmt.Errorf("create temp dir: %w", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	mirror := ""
+	if !netinfo.CheckGoogleConnectivity() {
+		mirror = t.downloadURL
+		logger.Info("Google appears unreachable, applying mirror config: %s", mirror)
+	} else {
+		logger.Info("Google is reachable, skipping mirror config.")
+	}
+
+	cfg := &ghinstall.Config{
+		Github: []ghinstall.Repo{
+			{
+				URL:       "https://github.com/sixban6/auto_fetch_tailscale",
+				OutputDir: tempDir,
+			},
+		},
+		MirrorURL: mirror,
+	}
+
+	filter := ghinstall.CustomFilter(func(assets []ghinstall.Asset) (*ghinstall.Asset, error) {
+		for _, asset := range assets {
+			if t.selectTailscaleAsset(asset.Name) {
+				return &asset, nil
+			}
 		}
-		if clientVer != daemonVer {
-			logger.Info("Version mismatch detected: tailscale=%s tailscaled=%s", clientVer, daemonVer)
-		}
-		logger.Info("Updating to %s", latestVersion)
+		return nil, fmt.Errorf("no suitable asset found for OS: %s, Arch: %s", runtime.GOOS, runtime.GOARCH)
+	})
+
+	if err := ghinstall.InstallWithConfigAndFilter(ctx, cfg, filter); err != nil {
+		return fmt.Errorf("download tailscale update failed: %w", err)
 	}
 
-	// 3. 检测系统架构
-	arch, err := t.getSystemArchitecture()
+	tsBin, err := fileutil.FindExecutable(tempDir, "tailscale")
 	if err != nil {
-		logger.Warn("Failed to detect architecture, using fallback amd64: %v", err)
-		arch = "amd64"
+		return fmt.Errorf("tailscale binary not found: %w", err)
 	}
-	logger.Info("Detected system architecture: %s", arch)
 
-	// 从 pkgs info 中取精确文件名（避免手动拼接出错）
-	tarball, ok := pkgs.Tarballs[arch]
-	if !ok {
-		tarball = fmt.Sprintf("tailscale_%s_%s.tgz", latestVersion, arch)
-		logger.Warn("Architecture %s not in pkgs info, using fallback: %s", arch, tarball)
-	}
-	tailscaleURL := "https://pkgs.tailscale.com/stable/" + tarball
-
-	// 4. 下载新版本
-	logger.Info("Downloading Tailscale %s...", latestVersion)
-	resp, err := t.httpGetWithRetry(tailscaleURL)
+	tsdBin, err := fileutil.FindExecutable(tempDir, "tailscaled")
 	if err != nil {
-		return fmt.Errorf("download failed: %w", err)
+		return fmt.Errorf("tailscaled binary not found: %w", err)
 	}
-	defer resp.Body.Close()
-
-	tmpFile, err := os.CreateTemp("", "tailscale-*.tgz")
-	if err != nil {
-		return fmt.Errorf("create temp file failed: %w", err)
-	}
-	defer os.Remove(tmpFile.Name())
-
-	if _, err = io.Copy(tmpFile, resp.Body); err != nil {
-		return fmt.Errorf("write file failed: %w", err)
-	}
-	tmpFile.Close()
-
-	// 5. 解压
-	logger.Info("Extracting...")
-	tmpDir, err := os.MkdirTemp("", "tailscale-extract-*")
-	if err != nil {
-		return fmt.Errorf("create temp dir failed: %w", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	if err := exec.Command("tar", "xzf", tmpFile.Name(), "-C", tmpDir).Run(); err != nil {
-		return fmt.Errorf("extract failed: %w", err)
-	}
-
-	extractedDir := filepath.Join(tmpDir, fmt.Sprintf("tailscale_%s_%s", latestVersion, arch))
 
 	// 6. 停止服务，替换二进制文件，重启服务
 	logger.Info("Stopping tailscale service before replacing binaries...")
@@ -635,18 +580,11 @@ func (t *Tailscale) Update() error {
 		logger.Warn("Stop may be incomplete: %v", err)
 	}
 
-	if err := copyFile(filepath.Join(extractedDir, "tailscale"), filepath.Join(installDir, "tailscale")); err != nil {
+	if err := fileutil.InstallOrReplace(tsBin, filepath.Join(installDir, "tailscale")); err != nil {
 		return fmt.Errorf("replace tailscale binary failed: %w", err)
 	}
-	if err := copyFile(filepath.Join(extractedDir, "tailscaled"), filepath.Join(installDir, "tailscaled")); err != nil {
+	if err := fileutil.InstallOrReplace(tsdBin, filepath.Join(installDir, "tailscaled")); err != nil {
 		return fmt.Errorf("replace tailscaled binary failed: %w", err)
-	}
-
-	if err := os.Chmod(filepath.Join(installDir, "tailscale"), 0755); err != nil {
-		return fmt.Errorf("chmod tailscale failed: %w", err)
-	}
-	if err := os.Chmod(filepath.Join(installDir, "tailscaled"), 0755); err != nil {
-		return fmt.Errorf("chmod tailscaled failed: %w", err)
 	}
 
 	logger.Info("Restarting tailscale service...")
@@ -654,7 +592,7 @@ func (t *Tailscale) Update() error {
 		return fmt.Errorf("restart service failed: %w", err)
 	}
 
-	logger.Success("Tailscale updated to %s successfully", latestVersion)
+	logger.Success("Tailscale updated successfully")
 	return nil
 }
 

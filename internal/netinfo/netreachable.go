@@ -9,7 +9,7 @@ import (
 
 func GetReachableURL(downloadURL string, mirrorURL string) string {
 	// 优化下载逻辑：检查Google连通性
-	if !checkGoogleConnectivity() {
+	if !CheckGoogleConnectivity() {
 		logger.Info("Google is not accessible, using mirror for download...")
 		if mirrorURL != "" {
 			if !strings.HasSuffix(mirrorURL, "/") {
@@ -23,8 +23,8 @@ func GetReachableURL(downloadURL string, mirrorURL string) string {
 	return downloadURL
 }
 
-// checkGoogleConnectivity 检查是否能访问Google
-func checkGoogleConnectivity() bool {
+// CheckGoogleConnectivity 检查是否能访问Google
+func CheckGoogleConnectivity() bool {
 	client := http.Client{
 		Timeout: 3 * time.Second,
 	}
