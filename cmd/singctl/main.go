@@ -150,7 +150,8 @@ func startCmd() *cobra.Command {
 		Short: "Start tailscale",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			exitNode, _ := cmd.Flags().GetBool("exit-node")
-			ts := tailscale.New()
+			cfg, _ := config.Load(configPath)
+			ts := tailscale.New(cfg.GitHub.MirrorURL)
 			return ts.Start(exitNode)
 		},
 	}
@@ -191,7 +192,8 @@ func stopCmd() *cobra.Command {
 		Use:   "tailscale",
 		Short: "Stop tailscale",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ts := tailscale.New()
+			cfg, _ := config.Load(configPath)
+			ts := tailscale.New(cfg.GitHub.MirrorURL)
 			return ts.Stop()
 		},
 	})
@@ -275,7 +277,7 @@ func installCmd() *cobra.Command {
 				sb := singbox.New(cfg)
 				return sb.Install()
 			case "tailscale":
-				ts := tailscale.New()
+				ts := tailscale.New(cfg.GitHub.MirrorURL)
 				return ts.Install()
 			default:
 				return fmt.Errorf("unknown target: %s", args[0])
@@ -304,8 +306,16 @@ func updateCmd() *cobra.Command {
 				sb := singbox.New(cfg)
 				return sb.Update()
 			case "tailscale":
-				ts := tailscale.New()
-				return ts.Update()
+				ts := tailscale.New(cfg.GitHub.MirrorURL)
+
+				// Run Tailscale Update
+				if err := ts.Update(); err != nil {
+					return err
+				}
+
+				// Synchronously update singctl self
+				updater := updater.New(cfg.GitHub.MirrorURL, "https://github.com/sixban6/singctl")
+				return updater.UpdateSelf()
 			case "self":
 				updater := updater.New(cfg.GitHub.MirrorURL, "https://github.com/sixban6/singctl")
 				return updater.UpdateSelf()
