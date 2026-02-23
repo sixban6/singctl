@@ -739,7 +739,10 @@ STOP=10
 start_service() {
 `
 	if hasTun {
-		content += `    # 确保 TUN 设备存在
+		content += `    # 加载 tun 模块以防未开机加载
+    modprobe tun > /dev/null 2>&1
+
+    # 确保 TUN 设备存在
     if [ ! -c /dev/net/tun ]; then
         mkdir -p /dev/net
         mknod /dev/net/tun c 10 200
