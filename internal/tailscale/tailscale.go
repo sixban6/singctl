@@ -15,6 +15,41 @@ import (
 )
 
 const (
+	maxRetries    = 3
+	retryBaseWait = 2 * time.Second
+)
+
+// httpGetWithRetry 对 HTTP GET 请求添加重试逻辑，处理 EOF / 超时等瞬态网络错误。
+// 最多重试 maxRetries 次，每次间隔指数退避 (2s, 4s, 8s)。
+func (t *Tailscale) httpGetWithRetry(url string) (*http.Response, error) {
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			wait := retryBaseWait * (1 << (attempt - 1))
+			logger.Info("Retrying in %v (attempt %d/%d)...", wait, attempt, maxRetries)
+			time.Sleep(wait)
+		}
+		resp, err := t.httpClient.Get(url)
+		if err != nil {
+			lastErr = err
+			logger.Warn("HTTP GET %s failed: %v", url, err)
+			continue
+		}
+		if resp.StatusCode == http.StatusOK {
+			return resp, nil
+		}
+		resp.Body.Close()
+		lastErr = fmt.Errorf("HTTP %s", resp.Status)
+		// 4xx 客户端错误不重试
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			return nil, fmt.Errorf("download failed with status: %s", resp.Status)
+		}
+		logger.Warn("HTTP GET %s returned %s", url, resp.Status)
+	}
+	return nil, fmt.Errorf("all %d attempts failed, last error: %w", maxRetries+1, lastErr)
+}
+
+const (
 	installDir = "/usr/sbin"
 )
 
@@ -50,15 +85,11 @@ func (t *Tailscale) getLatestPkgsInfo() (*pkgsInfo, error) {
 
 // getLatestPkgsInfoFrom 从指定 URL 获取 pkgsInfo（便于测试注入）
 func (t *Tailscale) getLatestPkgsInfoFrom(apiURL string) (*pkgsInfo, error) {
-	resp, err := t.httpClient.Get(apiURL)
+	resp, err := t.httpGetWithRetry(apiURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch pkgs info: %w", err)
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("pkgs API returned status: %s", resp.Status)
-	}
 
 	var info pkgsInfo
 	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
@@ -189,15 +220,11 @@ func (t *Tailscale) Install() error {
 
 	// 1. Download
 	logger.Info("Downloading Tailscale...")
-	resp, err := http.Get(tailscaleURL)
+	resp, err := t.httpGetWithRetry(tailscaleURL)
 	if err != nil {
 		return fmt.Errorf("download failed: %w", err)
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("download failed with status: %s", resp.Status)
-	}
 
 	// Create temp file
 	tmpFile, err := os.CreateTemp("", "tailscale-*.tgz")
@@ -571,15 +598,11 @@ func (t *Tailscale) Update() error {
 
 	// 4. 下载新版本
 	logger.Info("Downloading Tailscale %s...", latestVersion)
-	resp, err := t.httpClient.Get(tailscaleURL)
+	resp, err := t.httpGetWithRetry(tailscaleURL)
 	if err != nil {
 		return fmt.Errorf("download failed: %w", err)
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("download failed with status: %s", resp.Status)
-	}
 
 	tmpFile, err := os.CreateTemp("", "tailscale-*.tgz")
 	if err != nil {
