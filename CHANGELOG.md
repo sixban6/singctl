@@ -1,3 +1,10 @@
+## [1.17.8](https://github.com/sixban6/singctl/compare/v1.17.7...v1.17.8) (2026-02-23)
+
+
+### Bug Fixes
+
+* start error ([be9cad9](https://github.com/sixban6/singctl/commit/be9cad94e475fa30da2067ad033158c1a6ba34c3))
+
 ## [1.17.7](https://github.com/sixban6/singctl/compare/v1.17.6...v1.17.7) (2026-02-23)
 
 
