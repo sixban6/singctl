@@ -176,7 +176,8 @@ func TestGetLatestPkgsInfo_TarballFilenameMatchesVersion(t *testing.T) {
 }
 
 func TestGetLatestPkgsInfo_NonOKStatus(t *testing.T) {
-	srv := pkgsAPIServerStatus(t, http.StatusServiceUnavailable)
+	// Use 404 (client error) — httpGetWithRetry skips retry for 4xx.
+	srv := pkgsAPIServerStatus(t, http.StatusNotFound)
 	defer srv.Close()
 
 	ts := newTestTailscale()
@@ -405,16 +406,17 @@ func TestUpdate_DownloadBadStatus(t *testing.T) {
 
 // TestUpdate_APIFailurePropagates ensures a failing pkgs API propagates correctly.
 func TestUpdate_APIFailurePropagates(t *testing.T) {
+	// Use 400 (client error) — httpGetWithRetry skips retry for 4xx, keeping test fast.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("server error"))
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("bad request"))
 	}))
 	defer srv.Close()
 
 	ts := newTestTailscale()
 	_, err := ts.getLatestPkgsInfoFrom(srv.URL)
 	if err == nil {
-		t.Error("expected error for 500 response, got nil")
+		t.Error("expected error for 400 response, got nil")
 	}
 	if !strings.Contains(err.Error(), "status") {
 		t.Errorf("error message should mention status, got: %v", err)
