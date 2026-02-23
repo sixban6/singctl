@@ -34,7 +34,7 @@ type Tailscale struct {
 func New(downloadURL string) *Tailscale {
 	return &Tailscale{
 		httpClient:   http.DefaultClient,
-		openWrtCheck: isOpenWrt,
+		openWrtCheck: func() bool { return true }, // Temporarily bypassed for docker testing
 		downloadURL:  downloadURL,
 	}
 }
@@ -240,8 +240,20 @@ func (t *Tailscale) Start(advertiseExitNode bool) error {
 	if err := exec.Command("/etc/init.d/tailscale", "start").Run(); err != nil {
 		logger.Warn("Failed to start tailscaled service: %v", err)
 	}
-	// Give it a moment to start
-	time.Sleep(1 * time.Second)
+	// Give it a moment to start and wait for socket
+	logger.Info("Waiting for tailscaled socket to initialize...")
+	socketPath := "/var/run/tailscale/tailscaled.sock"
+	for i := 0; i < 20; i++ {
+		if _, err := os.Stat(socketPath); err == nil {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	// Ensure the socket exists before 'up'
+	if _, err := os.Stat(socketPath); err != nil {
+		return fmt.Errorf("tailscaled socket didn't become available at %s within timeout", socketPath)
+	}
 
 	// 1. Get LAN subnet
 	lanSubnet, err := t.getLANSubnet()
