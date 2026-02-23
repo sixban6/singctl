@@ -10,7 +10,7 @@ subs:
   #   remove-emoji: true
 
 github:
-  mirror_url: "https://ghfast.top"            # GitHub镜像地址,用于加速
+  mirror_url: "https://gh-proxy.com"            # GitHub镜像地址,用于加速
 
 gui:
   mac_url: "https://github.com/SagerNet/sing-box/releases/download/v1.13.0-rc.5/SFM-1.13.0-rc.5-Apple.pkg"
