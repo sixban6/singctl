@@ -34,7 +34,7 @@ type Tailscale struct {
 func New(downloadURL string) *Tailscale {
 	return &Tailscale{
 		httpClient:   http.DefaultClient,
-		openWrtCheck: func() bool { return true }, // Temporarily bypassed for docker testing
+		openWrtCheck: isOpenWrt,
 		downloadURL:  downloadURL,
 	}
 }
@@ -252,6 +252,12 @@ func (t *Tailscale) Start(advertiseExitNode bool) error {
 
 	// Ensure the socket exists before 'up'
 	if _, err := os.Stat(socketPath); err != nil {
+		out, _ := exec.Command("logread", "-e", "tailscale").Output()
+		logSnippet := string(out)
+		if len(logSnippet) > 1000 {
+			logSnippet = logSnippet[len(logSnippet)-1000:]
+		}
+		logger.Warn("tailscaled logs before crash:\n%s", logSnippet)
 		return fmt.Errorf("tailscaled socket didn't become available at %s within timeout", socketPath)
 	}
 
