@@ -310,6 +310,9 @@ func updateCmd() *cobra.Command {
 
 			switch args[0] {
 			case "sb", "sing-box":
+				if err := cfg.ValidateSubs(); err != nil {
+					return err
+				}
 				sb := singbox.New(cfg)
 				return sb.Update()
 			case "tailscale":
