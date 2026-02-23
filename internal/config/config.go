@@ -41,14 +41,17 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
-	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("validate config: %w", err)
+	if cfg.GitHub.MirrorURL == "" {
+		cfg.GitHub.MirrorURL = "https://github.com"
+	}
+	if cfg.GUI.AppName == "" {
+		cfg.GUI.AppName = "SFM"
 	}
 
 	return &cfg, nil
 }
 
-func (c *Config) Validate() error {
+func (c *Config) ValidateSubs() error {
 	if len(c.Subs) == 0 {
 		return fmt.Errorf("no subscriptions configured")
 	}
@@ -72,14 +75,6 @@ func (c *Config) Validate() error {
 			}
 			nameMap[sub.Name] = i
 		}
-	}
-
-	if c.GitHub.MirrorURL == "" {
-		c.GitHub.MirrorURL = "https://github.com"
-	}
-
-	if c.GUI.AppName == "" {
-		c.GUI.AppName = "SFM"
 	}
 
 	return nil
