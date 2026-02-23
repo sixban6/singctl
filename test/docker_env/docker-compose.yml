@@ -1,0 +1,9 @@
+services:
+  openwrt:
+    build: .
+    privileged: true
+    volumes:
+      - ../../build/singctl-linux-amd64:/usr/bin/singctl
+      - ./config:/etc/singctl
+    cap_add:
+      - NET_ADMIN

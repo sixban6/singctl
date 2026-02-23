@@ -715,14 +715,12 @@ func restoreUDPGRO() error {
 }
 
 func checkTunModule() bool {
-	// 1. Check if the /dev/net/tun character device already exists
-	if fi, err := os.Stat("/dev/net/tun"); err == nil {
-		if fi.Mode()&os.ModeCharDevice != 0 {
-			return true
-		}
+	// 1. Try to load the tun module. If modprobe succeeds, the module is available.
+	if err := exec.Command("modprobe", "tun").Run(); err == nil {
+		return true
 	}
 
-	// 2. Exact match using lsmod
+	// 2. Fallback: exact match "tun" in lsmod (module might already be loaded)
 	out, err := exec.Command("lsmod").Output()
 	if err == nil {
 		lines := strings.Split(string(out), "\n")
@@ -734,7 +732,9 @@ func checkTunModule() bool {
 		}
 	}
 
-	logger.Warn("tun module not loaded and /dev/net/tun not found, assuming no kmod-tun")
+	// NOTE: Do NOT check /dev/net/tun file existence here!
+	// A previous "mknod /dev/net/tun" in the init script can create the device node
+	// even when the kernel module is not loaded, causing a false positive.
 	return false
 }
 
