@@ -1,3 +1,10 @@
+## [1.17.1](https://github.com/sixban6/singctl/compare/v1.17.0...v1.17.1) (2026-02-23)
+
+
+### Bug Fixes
+
+* fix tailscale install error ([7593af7](https://github.com/sixban6/singctl/commit/7593af7be6bb2a7c0a3821442ed30a333c02fe83))
+
 # [1.17.0](https://github.com/sixban6/singctl/compare/v1.16.23...v1.17.0) (2026-02-21)
 
 
