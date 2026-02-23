@@ -115,6 +115,9 @@ func startCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if err := cfg.ValidateSubs(); err != nil {
+				return err
+			}
 
 			sb := singbox.New(cfg)
 
@@ -210,6 +213,10 @@ func genCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.Load(configPath)
 			if err != nil {
+				return err
+			}
+
+			if err := cfg.ValidateSubs(); err != nil {
 				return err
 			}
 

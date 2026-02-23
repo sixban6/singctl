@@ -77,10 +77,10 @@ func TestConfigGeneratorGenerate_Integration(t *testing.T) {
 	cfg := &config.Config{
 		Subs: []config.Subscription{
 			{
-				Name:        "test",
-				URL:         "https://example.com/invalid-subscription", // 故意使用无效订阅
-				SkipTlsVerify:    false,
-				RemoveEmoji: true,
+				Name:          "test",
+				URL:           "https://example.com/invalid-subscription", // 故意使用无效订阅
+				SkipTlsVerify: false,
+				RemoveEmoji:   true,
 			},
 		},
 		GitHub: config.GitHubConfig{MirrorURL: "https://ghfast.top"},
@@ -144,7 +144,7 @@ func TestMultipleSubscriptions(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := tt.config.Validate()
+			err := tt.config.ValidateSubs()
 			if (err != nil) != tt.wantError {
 				t.Errorf("Config.Validate() error = %v, wantError %v", err, tt.wantError)
 			}
@@ -192,7 +192,7 @@ func TestEmojiRemovalIndependent(t *testing.T) {
 	}
 
 	// 验证配置
-	if err := cfg.Validate(); err != nil {
+	if err := cfg.ValidateSubs(); err != nil {
 		t.Fatalf("Config validation failed: %v", err)
 	}
 
