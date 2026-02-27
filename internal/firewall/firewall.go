@@ -70,10 +70,8 @@ table inet security {
         elements = {
             20-23,   # FTP, SSH, Telnet
             25,      # SMTP
-            80,      # HTTP
             110,     # POP3
             123,     # NTP
-            443,     # HTTPS
             465,     # SMTPS
             587,     # SMTP (submission)
             993,     # IMAPS
