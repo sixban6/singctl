@@ -11,6 +11,7 @@ type Config struct {
 	Subs   []Subscription `yaml:"subs"`
 	GitHub GitHubConfig   `yaml:"github"`
 	GUI    GUIConfig      `yaml:"gui"`
+	Hy2    Hy2Config      `yaml:"hy2"`
 }
 
 type Subscription struct {
@@ -30,6 +31,11 @@ type GUIConfig struct {
 	AppName string `yaml:"app_name"`
 }
 
+type Hy2Config struct {
+	Up   int `yaml:"up"`
+	Down int `yaml:"down"`
+}
+
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -46,6 +52,12 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.GUI.AppName == "" {
 		cfg.GUI.AppName = "SFM"
+	}
+	if cfg.Hy2.Up == 0 {
+		cfg.Hy2.Up = 30
+	}
+	if cfg.Hy2.Down == 0 {
+		cfg.Hy2.Down = 300
 	}
 
 	return &cfg, nil
