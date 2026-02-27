@@ -357,6 +357,9 @@ hy2:
 
 github:
   mirror_url: "https://gh-proxy.com"
+
+tailscale:
+  auth_key: ""
 EOF
             echo_warning "请手动编辑配置文件: $CONFIG_FILE"
             return 0
@@ -385,6 +388,9 @@ gui:
   mac_url: "https://github.com/SagerNet/sing-box/releases/download/v1.13.0-rc.5/SFM-1.13.0-rc.5-Apple.pkg"
   win_url: "https://github.com/SagerNet/sing-box/releases/download/v1.13.0-rc.5/sing-box-1.13.0-rc.5-windows-amd64.zip"
   app_name: "SFM"
+
+tailscale:
+  auth_key: ""
 EOF
 
     echo_success "订阅连接已写入 $CONFIG_FILE"

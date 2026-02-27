@@ -3,15 +3,17 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
-	Subs   []Subscription `yaml:"subs"`
-	GitHub GitHubConfig   `yaml:"github"`
-	GUI    GUIConfig      `yaml:"gui"`
-	Hy2    Hy2Config      `yaml:"hy2"`
+	Subs      []Subscription  `yaml:"subs"`
+	GitHub    GitHubConfig    `yaml:"github"`
+	GUI       GUIConfig       `yaml:"gui"`
+	Hy2       Hy2Config       `yaml:"hy2"`
+	Tailscale TailscaleConfig `yaml:"tailscale"`
 }
 
 type Subscription struct {
@@ -34,6 +36,10 @@ type GUIConfig struct {
 type Hy2Config struct {
 	Up   int `yaml:"up"`
 	Down int `yaml:"down"`
+}
+
+type TailscaleConfig struct {
+	AuthKey string `yaml:"auth_key"`
 }
 
 func Load(path string) (*Config, error) {
@@ -87,6 +93,47 @@ func (c *Config) ValidateSubs() error {
 			}
 			nameMap[sub.Name] = i
 		}
+	}
+
+	return nil
+}
+
+// MigrateConfig reads the existing config file as text and appends purely new blocks
+// that might have been introduced in a newer singctl version, without destroying user comments.
+func MigrateConfig(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // No config file to migrate
+		}
+		return fmt.Errorf("failed to read config file for migration: %w", err)
+	}
+
+	content := string(data)
+	needsSave := false
+
+	// Example: migrate tailscale config
+	if !strings.Contains(content, "tailscale:") {
+		tailscaleBlock := `
+# (singctl update) 自动填补：Tailscale 自动化配置
+tailscale:
+  auth_key: ""                                  # (可选) Tailscale 授权密钥，用于免交互自动注册节点
+`
+		content += tailscaleBlock
+		needsSave = true
+	}
+
+	// Future migrations can be added here using similar string contains logic
+
+	if needsSave {
+		// Create backup
+		backupPath := path + ".migration.bak"
+		_ = os.WriteFile(backupPath, data, 0644)
+
+		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+			return fmt.Errorf("failed to write migrated config: %w", err)
+		}
+		// logger warning/info handled by caller or just silently succeed
 	}
 
 	return nil

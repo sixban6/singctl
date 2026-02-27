@@ -158,7 +158,7 @@ func startCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			exitNode, _ := cmd.Flags().GetBool("exit-node")
 			cfg, _ := config.Load(configPath)
-			ts := tailscale.New(cfg.GitHub.MirrorURL)
+			ts := tailscale.New(cfg.GitHub.MirrorURL, cfg.Tailscale.AuthKey)
 			return ts.Start(exitNode)
 		},
 	}
@@ -200,7 +200,7 @@ func stopCmd() *cobra.Command {
 		Short: "Stop tailscale",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, _ := config.Load(configPath)
-			ts := tailscale.New(cfg.GitHub.MirrorURL)
+			ts := tailscale.New(cfg.GitHub.MirrorURL, cfg.Tailscale.AuthKey)
 			return ts.Stop()
 		},
 	})
@@ -288,7 +288,7 @@ func installCmd() *cobra.Command {
 				sb := singbox.New(cfg)
 				return sb.Install()
 			case "tailscale":
-				ts := tailscale.New(cfg.GitHub.MirrorURL)
+				ts := tailscale.New(cfg.GitHub.MirrorURL, cfg.Tailscale.AuthKey)
 				return ts.Install()
 			default:
 				return fmt.Errorf("unknown target: %s", args[0])
@@ -320,7 +320,7 @@ func updateCmd() *cobra.Command {
 				sb := singbox.New(cfg)
 				return sb.Update()
 			case "tailscale":
-				ts := tailscale.New(cfg.GitHub.MirrorURL)
+				ts := tailscale.New(cfg.GitHub.MirrorURL, cfg.Tailscale.AuthKey)
 
 				// Run Tailscale Update
 				if err := ts.Update(); err != nil {
@@ -329,10 +329,22 @@ func updateCmd() *cobra.Command {
 
 				// Synchronously update singctl self
 				updater := updater.New(cfg.GitHub.MirrorURL, "https://github.com/sixban6/singctl")
-				return updater.UpdateSelf()
+				if err := updater.UpdateSelf(); err != nil {
+					return err
+				}
+				if err := config.MigrateConfig(configPath); err != nil {
+					logger.Warn("Failed to migrate config: %v", err)
+				}
+				return nil
 			case "self":
 				updater := updater.New(cfg.GitHub.MirrorURL, "https://github.com/sixban6/singctl")
-				return updater.UpdateSelf()
+				if err := updater.UpdateSelf(); err != nil {
+					return err
+				}
+				if err := config.MigrateConfig(configPath); err != nil {
+					logger.Warn("Failed to migrate config: %v", err)
+				}
+				return nil
 			default:
 				return fmt.Errorf("unknown target: %s", args[0])
 			}

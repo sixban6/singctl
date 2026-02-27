@@ -29,13 +29,15 @@ type Tailscale struct {
 	httpClient   *http.Client
 	openWrtCheck func() bool
 	downloadURL  string
+	authKey      string
 }
 
-func New(downloadURL string) *Tailscale {
+func New(downloadURL, authKey string) *Tailscale {
 	return &Tailscale{
 		httpClient:   http.DefaultClient,
 		openWrtCheck: isOpenWrt,
 		downloadURL:  downloadURL,
+		authKey:      authKey,
 	}
 }
 
@@ -269,22 +271,44 @@ func (t *Tailscale) Start(advertiseExitNode bool) error {
 	}
 	logger.Info("Detected LAN subnet: %s", lanSubnet)
 
-	// 2. Tailscale Up (Config and Online)
-	// --reset: 让 singctl 成为参数的唯一来源，避免残留非默认参数导致 tailscale up 报错。
-	args := []string{"up", "--reset", "--advertise-routes=" + lanSubnet, "--accept-dns=false", "--snat-subnet-routes=false"}
-	if hasTun {
-		args = append(args, "--netfilter-mode=on")
+	// 2. Check current status for idempotency
+	statusOut, statusErr := exec.Command(filepath.Join(installDir, "tailscale"), "status", "--json").Output()
+	var tsStatus struct {
+		BackendState string `json:"BackendState"`
 	}
-	if advertiseExitNode {
-		args = append(args, "--advertise-exit-node")
-		logger.Info("Exit node advertisement enabled")
+	isNeedsAuth := true
+	if statusErr == nil {
+		if err := json.Unmarshal(statusOut, &tsStatus); err == nil {
+			if tsStatus.BackendState == "Running" {
+				// 已经 Running 则无需重新 up
+				isNeedsAuth = false
+				logger.Success("Tailscale is already Running, skipping authorization step.")
+			}
+		}
 	}
 
-	cmd := exec.Command(filepath.Join(installDir, "tailscale"), args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("tailscale up failed: %w", err)
+	// 3. Tailscale Up (Config and Online)
+	if isNeedsAuth {
+		args := []string{"up", "--reset", "--advertise-routes=" + lanSubnet, "--accept-dns=false", "--snat-subnet-routes=false"}
+		if hasTun {
+			args = append(args, "--netfilter-mode=on")
+		}
+		if advertiseExitNode {
+			args = append(args, "--advertise-exit-node")
+			logger.Info("Exit node advertisement enabled")
+		}
+
+		if t.authKey != "" {
+			args = append(args, "--authkey="+t.authKey)
+			logger.Info("Using configured Auth Key for automatic authorization")
+		}
+
+		cmd := exec.Command(filepath.Join(installDir, "tailscale"), args...)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("tailscale up failed: %w", err)
+		}
 	}
 
 	// 3. Optimize UDP GRO for better performance (Tailscale recommendation)
