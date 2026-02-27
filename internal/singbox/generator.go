@@ -6,10 +6,11 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/sixban6/singgen/pkg/singgen"
 	"singctl/internal/config"
 	log "singctl/internal/logger"
 	"singctl/internal/netinfo"
+
+	"github.com/sixban6/singgen/pkg/singgen"
 )
 
 type ConfigGenerator struct {
@@ -89,6 +90,7 @@ func (g *ConfigGenerator) generateSingleSubscription(ctx context.Context, dnsSer
 		singgen.WithClientSubnet(g.getSubnetFromIP(dnsServer)),
 		singgen.WithMirrorURL(g.config.GitHub.MirrorURL),
 		singgen.WithEmojiRemoval(sub.RemoveEmoji),
+		singgen.WithBandwidthParams(g.config.Hy2.Up, g.config.Hy2.Down),
 	)
 
 	if err != nil {
@@ -112,6 +114,8 @@ func (g *ConfigGenerator) generateMultiSubscription(ctx context.Context, dnsServ
 			SkipTLSVerify:  false,
 			HTTPTimeout:    30 * time.Second,
 			Format:         "json",
+			UpMbps:         g.config.Hy2.Up,
+			DownMbps:       g.config.Hy2.Down,
 		},
 		Subscriptions: make([]singgen.SubscriptionConfig, 0, len(g.config.Subs)),
 	}

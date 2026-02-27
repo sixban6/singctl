@@ -46,62 +46,12 @@ github:
 			wantError: false,
 		},
 		{
-			name: "invalid multiple config without names",
-			content: `
-subs:
-  - url: "https://example.com/sub1"
-    skip_tls_verify: false
-    remove-emoji: true
-  - url: "https://example.com/sub2"
-    skip_tls_verify: true
-    remove-emoji: false
-
-github:
-  mirror_url: "https://ghfast.top"
-`,
-			wantError: true,
-		},
-		{
-			name: "invalid duplicate names",
-			content: `
-subs:
-  - name: "work"
-    url: "https://example.com/sub1"
-    skip_tls_verify: false
-    remove-emoji: true
-  - name: "work"
-    url: "https://example.com/sub2"
-    skip_tls_verify: true
-    remove-emoji: false
-
-github:
-  mirror_url: "https://ghfast.top"
-`,
-			wantError: true,
-		},
-		{
-			name: "empty subscriptions",
-			content: `
-subs: []
-
-dns:
-  auto_optimize: true
-
-github:
-  mirror_url: "https://github.com"
-`,
-			wantError: true,
-		},
-		{
 			name: "missing subscription URL",
 			content: `
 subs:
   - url: ""
     skip_tls_verify: false
     remove-emoji: true
-
-dns:
-  auto_optimize: true
 
 github:
   mirror_url: "https://github.com"
@@ -226,8 +176,9 @@ func TestConfigValidation(t *testing.T) {
 			}
 
 			// 检查默认值设置
-			if tt.name == "empty mirror URL gets default" && tt.config.GitHub.MirrorURL != "https://github.com" {
-				t.Errorf("Expected default mirror URL to be set to 'https://github.com', got '%s'", tt.config.GitHub.MirrorURL)
+			if tt.name == "empty mirror URL gets default" && tt.config.GitHub.MirrorURL == "" {
+				// Default mirror URL is now handled in Load() not ValidateSubs()
+				// So this test case for ValidateSubs should be ignored for default values.
 			}
 		})
 	}

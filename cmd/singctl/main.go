@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"time"
 
+	"singctl/internal/bandwidth"
 	"singctl/internal/cmd"
 	"singctl/internal/config"
 	"singctl/internal/daemon"
@@ -96,6 +97,7 @@ DNS optimization, and complete service lifecycle management.`,
 		installCmd(),
 		updateCmd(),
 		versionCmd(),
+		testCmd(),
 		cmd.NewInfoCommand(Version),
 		cmd.NewDaemonCommand(),
 	)
@@ -346,4 +348,22 @@ func versionCmd() *cobra.Command {
 			logger.Info("Git Commit: %s", GitCommit)
 		},
 	}
+}
+
+func testCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "test",
+		Short: "Test network features",
+	}
+
+	bdCmd := &cobra.Command{
+		Use:   "bd",
+		Short: "Test broadband bandwidth (upload/download speed)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return bandwidth.RunSpeedTest()
+		},
+	}
+
+	cmd.AddCommand(bdCmd)
+	return cmd
 }
