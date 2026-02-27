@@ -92,8 +92,11 @@ singctl update tailscale
 # 输出到控制台查看        
 singctl gen --stdout       
 
- # 自定义输出路径             
+# 自定义输出路径             
 singctl gen -o /tmp/config.json  
+
+# 测试宽带带宽
+singctl test bd
 ```
 
 ## License
