@@ -271,7 +271,7 @@ func (t *Tailscale) Start(advertiseExitNode bool) error {
 
 	// 2. Tailscale Up (Config and Online)
 	// --reset: 让 singctl 成为参数的唯一来源，避免残留非默认参数导致 tailscale up 报错。
-	args := []string{"up", "--reset", "--advertise-routes=" + lanSubnet, "--accept-dns=false"}
+	args := []string{"up", "--reset", "--advertise-routes=" + lanSubnet, "--accept-dns=false", "--snat-subnet-routes=false"}
 	if hasTun {
 		args = append(args, "--netfilter-mode=on")
 	}

@@ -18,7 +18,7 @@ YLW='\033[0;33m'
 RED='\033[0;31m'
 NC='\033[0m'
 OPENWRT_MAIN_VERSION=$(sed -n 's/VERSION="\([0-9]*\).*/\1/p' /etc/os-release)
-LOCAL_IPV4='{127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 224.0.0.0/4, 255.255.255.255/32}'
+LOCAL_IPV4='{127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 224.0.0.0/4, 255.255.255.255/32, 100.64.0.0/10}'
 # 获取当前时间
 timestamp() {
     date +"%Y-%m-%d %H:%M:%S"
@@ -147,6 +147,9 @@ setup_nft() {
         chain prerouting {
             type filter hook prerouting priority mangle; policy accept;
 
+            # 放行 Tailscale 接口流量，避免 TProxy 劫持子网路由流量
+            iifname "tailscale0" accept
+
             # 1.主要为了拒绝 外部尝试访问公网端口.
             fib daddr type local meta l4proto { tcp, udp } th dport $TPROXY_PORT reject with icmpx type host-unreachable
             #
@@ -210,6 +213,10 @@ setup_iptables() {
     echo_succ "创建 SING_BOX 链..."
     iptables -t mangle -N SING_BOX
     
+    # 放行 Tailscale 接口流量
+    echo_succ "配置 Tailscale 放行规则..."
+    iptables -t mangle -A PREROUTING -i tailscale0 -j RETURN
+
     # DHCP 和 DNS 规则
     echo_succ "配置 DHCP 和 DNS 规则..."
     # 放行 DHCP (67-68端口)
@@ -226,6 +233,7 @@ setup_iptables() {
     iptables -t mangle -A SING_BOX -d 172.16.0.0/12 -j RETURN
     iptables -t mangle -A SING_BOX -d 192.168.0.0/16 -j RETURN
     iptables -t mangle -A SING_BOX -d 169.254.0.0/16 -j RETURN
+    iptables -t mangle -A SING_BOX -d 100.64.0.0/10 -j RETURN     # Tailscale CGNAT
     iptables -t mangle -A SING_BOX -d 224.0.0.0/4 -j RETURN       # 组播地址
     iptables -t mangle -A SING_BOX -d 255.255.255.255/32 -j RETURN # 广播地址
     
