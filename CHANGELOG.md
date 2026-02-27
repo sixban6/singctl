@@ -1,3 +1,10 @@
+## [1.17.11](https://github.com/sixban6/singctl/compare/v1.17.10...v1.17.11) (2026-02-27)
+
+
+### Bug Fixes
+
+* fix hy2 ([4241763](https://github.com/sixban6/singctl/commit/424176325a6b84bae77b48c95d07cf4b1cc5b807))
+
 ## [1.17.10](https://github.com/sixban6/singctl/compare/v1.17.9...v1.17.10) (2026-02-27)
 
 
