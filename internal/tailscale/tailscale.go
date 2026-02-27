@@ -65,8 +65,25 @@ func (t *Tailscale) selectTailscaleAsset(assetName string) bool {
 	return true
 }
 
-// getLANSubnet 从 UCI 配置中获取 LAN 接口的子网信息
+// getLANSubnet 获取用于通告的本地子网。
+// 在 OpenWrt 上优先尝试从 uci network.lan.ipaddr 获取。
+// 若失败或非 OpenWrt，尝试通过 ip route 获取默认网络接口的子网。
 func (t *Tailscale) getLANSubnet() (string, error) {
+	if t.openWrtCheck() {
+		// 尝试 OpenWrt 方式
+		sub, err := t.getOpenWrtLANSubnet()
+		if err == nil {
+			return sub, nil
+		}
+		logger.Warn("Failed to get LAN subnet via uci, falling back to routing table: %v", err)
+	}
+
+	// 通用 Linux 方式
+	return getDefaultInterfaceSubnet()
+}
+
+// getOpenWrtLANSubnet 从 UCI 配置中获取 LAN 接口的子网信息
+func (t *Tailscale) getOpenWrtLANSubnet() (string, error) {
 	// 获取 LAN 接口的 IP 地址
 	out, err := exec.Command("uci", "get", "network.lan.ipaddr").Output()
 	if err != nil {
@@ -103,6 +120,60 @@ func (t *Tailscale) getLANSubnet() (string, error) {
 	return fmt.Sprintf("%s/%d", network.String(), ones), nil
 }
 
+// getDefaultInterfaceSubnet 通过 ip route 获取默认接口的子网
+func getDefaultInterfaceSubnet() (string, error) {
+	// 1. 获取默认路由出接口
+	out, err := exec.Command("ip", "-o", "route", "get", "8.8.8.8").Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to get default route: %w", err)
+	}
+
+	fields := strings.Fields(string(out))
+	var netdev string
+	for i, field := range fields {
+		if field == "dev" && i+1 < len(fields) {
+			netdev = fields[i+1]
+			break
+		}
+	}
+
+	if netdev == "" {
+		return "", fmt.Errorf("could not determine default network interface")
+	}
+
+	// 2. 获取该接口的子网
+	out, err = exec.Command("ip", "-o", "-f", "inet", "route", "show", "dev", netdev, "scope", "link").Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to get route for interface %s: %w", netdev, err)
+	}
+
+	lines := strings.Split(string(out), "\n")
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		parts := strings.Fields(line)
+		if len(parts) > 0 {
+			subnet := parts[0] // e.g., 192.168.1.0/24
+			return subnet, nil
+		}
+	}
+
+	return "", fmt.Errorf("no subnet found for interface %s", netdev)
+}
+
+// isPrivateSubnet 检查给定 CIDR 是否属于私有网络
+func isPrivateSubnet(cidr string) bool {
+	ip, _, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return false
+	}
+	if ip.To4() != nil {
+		return ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast()
+	}
+	return false
+}
+
 // getSystemArchitecture 检测系统架构并映射到 Tailscale 的架构命名
 func (t *Tailscale) getSystemArchitecture() (string, error) {
 	out, err := exec.Command("uname", "-m").Output()
@@ -128,10 +199,6 @@ func (t *Tailscale) getSystemArchitecture() (string, error) {
 }
 
 func (t *Tailscale) Install() error {
-	if !t.openWrtCheck() {
-		logger.Warn("Tailscale installation is currently only supported on OpenWrt and ImmortalWrt.")
-		return nil
-	}
 	logger.Info("Starting Tailscale installation via ghinstall...")
 
 	ctx := context.Background()
@@ -194,6 +261,7 @@ func (t *Tailscale) Install() error {
 	}
 
 	// 3. Create Init Script
+	isOpenWrt := t.openWrtCheck()
 	logger.Info("Checking for kmod-tun...")
 	hasTun := checkTunModule()
 	if hasTun {
@@ -202,18 +270,32 @@ func (t *Tailscale) Install() error {
 		logger.Info("kmod-tun NOT detected, using Scheme 1 (Userspace Mode)")
 	}
 
-	logger.Info("Creating init script...")
-	if err := createInitScript(hasTun); err != nil {
-		return err
-	}
-
-	// 4. Enable and Start Service
-	logger.Info("Enabling and starting service...")
-	if err := exec.Command("/etc/init.d/tailscale", "enable").Run(); err != nil {
-		return fmt.Errorf("enable service failed: %w", err)
-	}
-	if err := exec.Command("/etc/init.d/tailscale", "start").Run(); err != nil {
-		return fmt.Errorf("start service failed: %w", err)
+	if isOpenWrt {
+		logger.Info("Creating procd init script...")
+		if err := createInitScript(hasTun); err != nil {
+			return err
+		}
+		// 4. Enable and Start Service
+		logger.Info("Enabling and starting service...")
+		if err := exec.Command("/etc/init.d/tailscale", "enable").Run(); err != nil {
+			return fmt.Errorf("enable service failed: %w", err)
+		}
+		if err := exec.Command("/etc/init.d/tailscale", "start").Run(); err != nil {
+			return fmt.Errorf("start service failed: %w", err)
+		}
+	} else {
+		logger.Info("Creating systemd service script...")
+		if err := createSystemdScript(hasTun); err != nil {
+			return err
+		}
+		// 4. Enable and Start Service
+		logger.Info("Enabling and starting service via systemctl...")
+		if err := exec.Command("systemctl", "daemon-reload").Run(); err != nil {
+			logger.Warn("systemctl daemon-reload failed: %v", err)
+		}
+		if err := exec.Command("systemctl", "enable", "--now", "tailscaled.service").Run(); err != nil {
+			return fmt.Errorf("systemctl enable and start service failed: %w", err)
+		}
 	}
 
 	logger.Success("Tailscale installed successfully")
@@ -224,10 +306,6 @@ func (t *Tailscale) Install() error {
 // Start brings up Tailscale and configures firewall/network rules.
 // advertiseExitNode=true also advertises this device as a Tailscale exit node.
 func (t *Tailscale) Start(advertiseExitNode bool) error {
-	if !t.openWrtCheck() {
-		logger.Warn("Tailscale start is currently only supported on OpenWrt and ImmortalWrt.")
-		return nil
-	}
 	logger.Info("Starting Tailscale configuration...")
 
 	hasTun := checkTunModule()
@@ -237,10 +315,18 @@ func (t *Tailscale) Start(advertiseExitNode bool) error {
 		logger.Info("kmod-tun NOT detected, configuring for Userspace Mode")
 	}
 
+	isOpenWrt := t.openWrtCheck()
+
 	// 0. Ensure tailscaled service is running
 	logger.Info("Ensuring tailscaled service is running...")
-	if err := exec.Command("/etc/init.d/tailscale", "start").Run(); err != nil {
-		logger.Warn("Failed to start tailscaled service: %v", err)
+	if isOpenWrt {
+		if err := exec.Command("/etc/init.d/tailscale", "start").Run(); err != nil {
+			logger.Warn("Failed to start tailscaled service: %v", err)
+		}
+	} else {
+		if err := exec.Command("systemctl", "start", "tailscaled.service").Run(); err != nil {
+			logger.Warn("Failed to start tailscaled service via systemctl: %v", err)
+		}
 	}
 	// Give it a moment to start and wait for socket
 	logger.Info("Waiting for tailscaled socket to initialize...")
@@ -263,14 +349,6 @@ func (t *Tailscale) Start(advertiseExitNode bool) error {
 		return fmt.Errorf("tailscaled socket didn't become available at %s within timeout", socketPath)
 	}
 
-	// 1. Get LAN subnet
-	lanSubnet, err := t.getLANSubnet()
-	if err != nil {
-		logger.Warn("Failed to detect LAN subnet, using default 192.168.31.0/24: %v", err)
-		lanSubnet = "192.168.31.0/24"
-	}
-	logger.Info("Detected LAN subnet: %s", lanSubnet)
-
 	// 2. Check current status for idempotency
 	statusOut, statusErr := exec.Command(filepath.Join(installDir, "tailscale"), "status", "--json").Output()
 	var tsStatus struct {
@@ -289,7 +367,21 @@ func (t *Tailscale) Start(advertiseExitNode bool) error {
 
 	// 3. Tailscale Up (Config and Online)
 	if isNeedsAuth {
-		args := []string{"up", "--reset", "--advertise-routes=" + lanSubnet, "--accept-dns=false", "--snat-subnet-routes=false"}
+		args := []string{"up", "--reset", "--accept-dns=false"}
+
+		// Get LAN subnet to advertise (if it's a private network)
+		lanSubnet, err := t.getLANSubnet()
+		if err == nil && lanSubnet != "" && isPrivateSubnet(lanSubnet) {
+			logger.Info("Detected private LAN subnet: %s, adding to advertise-routes", lanSubnet)
+			args = append(args, "--advertise-routes="+lanSubnet)
+			if isOpenWrt {
+				args = append(args, "--snat-subnet-routes=false")
+			}
+		} else if err != nil {
+			logger.Warn("Failed to detect LAN subnet: %v", err)
+		} else {
+			logger.Info("Detected subnet %s is not a private LAN, skipping advertise-routes", lanSubnet)
+		}
 		if hasTun {
 			args = append(args, "--netfilter-mode=on")
 		}
@@ -317,44 +409,46 @@ func (t *Tailscale) Start(advertiseExitNode bool) error {
 		logger.Warn("Failed to optimize UDP GRO (non-critical): %v", err)
 	}
 
-	// 3. Configure Firewall and Network
-	logger.Info("Configuring firewall and network...")
+	if isOpenWrt {
+		// 3. Configure Firewall and Network
+		logger.Info("Configuring firewall and network for OpenWrt...")
 
-	// 先清理历史上用 uci add 产生的重复匿名条目
-	cleanupTailscaleFirewall()
+		// 先清理历史上用 uci add 产生的重复匿名条目
+		cleanupTailscaleFirewall()
 
-	// Network interface（命名 section，uci set 天然幂等）
-	exec.Command("uci", "set", "network.tailscale=interface").Run()
-	exec.Command("uci", "set", "network.tailscale.device=tailscale0").Run()
-	exec.Command("uci", "set", "network.tailscale.proto=unmanaged").Run()
+		// Network interface（命名 section，uci set 天然幂等）
+		exec.Command("uci", "set", "network.tailscale=interface").Run()
+		exec.Command("uci", "set", "network.tailscale.device=tailscale0").Run()
+		exec.Command("uci", "set", "network.tailscale.proto=unmanaged").Run()
 
-	// Firewall zone（改用命名 section "tailscale_zone"，多次运行只写入一次）
-	exec.Command("uci", "set", "firewall.tailscale_zone=zone").Run()
-	exec.Command("uci", "set", "firewall.tailscale_zone.name=tailscale").Run()
-	exec.Command("uci", "set", "firewall.tailscale_zone.network=tailscale").Run()
-	exec.Command("uci", "set", "firewall.tailscale_zone.input=ACCEPT").Run()
-	exec.Command("uci", "set", "firewall.tailscale_zone.output=ACCEPT").Run()
-	exec.Command("uci", "set", "firewall.tailscale_zone.forward=ACCEPT").Run()
-	exec.Command("uci", "set", "firewall.tailscale_zone.masq=1").Run()
+		// Firewall zone（改用命名 section "tailscale_zone"，多次运行只写入一次）
+		exec.Command("uci", "set", "firewall.tailscale_zone=zone").Run()
+		exec.Command("uci", "set", "firewall.tailscale_zone.name=tailscale").Run()
+		exec.Command("uci", "set", "firewall.tailscale_zone.network=tailscale").Run()
+		exec.Command("uci", "set", "firewall.tailscale_zone.input=ACCEPT").Run()
+		exec.Command("uci", "set", "firewall.tailscale_zone.output=ACCEPT").Run()
+		exec.Command("uci", "set", "firewall.tailscale_zone.forward=ACCEPT").Run()
+		exec.Command("uci", "set", "firewall.tailscale_zone.masq=1").Run()
 
-	// Forwarding rules（同样用命名 section，幂等）
-	exec.Command("uci", "set", "firewall.ts_fwd_to_lan=forwarding").Run()
-	exec.Command("uci", "set", "firewall.ts_fwd_to_lan.src=tailscale").Run()
-	exec.Command("uci", "set", "firewall.ts_fwd_to_lan.dest=lan").Run()
+		// Forwarding rules（同样用命名 section，幂等）
+		exec.Command("uci", "set", "firewall.ts_fwd_to_lan=forwarding").Run()
+		exec.Command("uci", "set", "firewall.ts_fwd_to_lan.src=tailscale").Run()
+		exec.Command("uci", "set", "firewall.ts_fwd_to_lan.dest=lan").Run()
 
-	exec.Command("uci", "set", "firewall.ts_fwd_from_lan=forwarding").Run()
-	exec.Command("uci", "set", "firewall.ts_fwd_from_lan.src=lan").Run()
-	exec.Command("uci", "set", "firewall.ts_fwd_from_lan.dest=tailscale").Run()
+		exec.Command("uci", "set", "firewall.ts_fwd_from_lan=forwarding").Run()
+		exec.Command("uci", "set", "firewall.ts_fwd_from_lan.src=lan").Run()
+		exec.Command("uci", "set", "firewall.ts_fwd_from_lan.dest=tailscale").Run()
 
-	exec.Command("uci", "set", "firewall.ts_fwd_to_wan=forwarding").Run()
-	exec.Command("uci", "set", "firewall.ts_fwd_to_wan.src=tailscale").Run()
-	exec.Command("uci", "set", "firewall.ts_fwd_to_wan.dest=wan").Run()
+		exec.Command("uci", "set", "firewall.ts_fwd_to_wan=forwarding").Run()
+		exec.Command("uci", "set", "firewall.ts_fwd_to_wan.src=tailscale").Run()
+		exec.Command("uci", "set", "firewall.ts_fwd_to_wan.dest=wan").Run()
 
-	// Commit and Reload
-	exec.Command("uci", "commit", "network").Run()
-	exec.Command("uci", "commit", "firewall").Run()
-	exec.Command("/etc/init.d/network", "reload").Run()
-	exec.Command("/etc/init.d/firewall", "reload").Run()
+		// Commit and Reload
+		exec.Command("uci", "commit", "network").Run()
+		exec.Command("uci", "commit", "firewall").Run()
+		exec.Command("/etc/init.d/network", "reload").Run()
+		exec.Command("/etc/init.d/firewall", "reload").Run()
+	}
 
 	logger.Success("Tailscale configured and started")
 	return nil
@@ -430,10 +524,6 @@ func removeAnonymousUCISections(config, sectionType, key, value string) {
 }
 
 func (t *Tailscale) Stop() error {
-	if !t.openWrtCheck() {
-		logger.Warn("Tailscale stop is currently only supported on OpenWrt and ImmortalWrt.")
-		return nil
-	}
 	logger.Info("Stopping Tailscale...")
 
 	// 1. Bring down Tailscale connection
@@ -442,8 +532,14 @@ func (t *Tailscale) Stop() error {
 	}
 
 	// 2. Stop the service
-	if err := exec.Command("/etc/init.d/tailscale", "stop").Run(); err != nil {
-		return fmt.Errorf("stop service failed: %w", err)
+	if t.openWrtCheck() {
+		if err := exec.Command("/etc/init.d/tailscale", "stop").Run(); err != nil {
+			return fmt.Errorf("stop service failed: %w", err)
+		}
+	} else {
+		if err := exec.Command("systemctl", "stop", "tailscaled.service").Run(); err != nil {
+			return fmt.Errorf("stop systemd service failed: %w", err)
+		}
 	}
 
 	// 3. Restore UDP GRO settings to default
@@ -539,10 +635,6 @@ func (t *Tailscale) fetchLatestTailscaleVersion() (string, error) {
 
 // Update 将 Tailscale 更新到最新版 (通过 ghinstall)
 func (t *Tailscale) Update() error {
-	if !t.openWrtCheck() {
-		logger.Warn("Tailscale update is currently only supported on OpenWrt and ImmortalWrt.")
-		return nil
-	}
 	logger.Info("Checking for Tailscale updates...")
 
 	latestVersion, err := t.fetchLatestTailscaleVersion()
@@ -618,7 +710,7 @@ func (t *Tailscale) Update() error {
 
 	// 6. 停止服务，替换二进制文件，重启服务
 	logger.Info("Stopping tailscale service before replacing binaries...")
-	if err := stopTailscaledProcess(); err != nil {
+	if err := stopTailscaledProcess(t.openWrtCheck()); err != nil {
 		logger.Warn("Stop may be incomplete: %v", err)
 	}
 
@@ -630,19 +722,29 @@ func (t *Tailscale) Update() error {
 	}
 
 	logger.Info("Restarting tailscale service...")
-	if err := exec.Command("/etc/init.d/tailscale", "start").Run(); err != nil {
-		return fmt.Errorf("restart service failed: %w", err)
+	if t.openWrtCheck() {
+		if err := exec.Command("/etc/init.d/tailscale", "start").Run(); err != nil {
+			return fmt.Errorf("restart service failed: %w", err)
+		}
+	} else {
+		if err := exec.Command("systemctl", "start", "tailscaled.service").Run(); err != nil {
+			return fmt.Errorf("restart systemd service failed: %w", err)
+		}
 	}
 
 	logger.Success("Tailscale updated successfully")
 	return nil
 }
 
-// stopTailscaledProcess 先通过 init.d 优雅停止服务，再用 killall -9 确保进程退出，
+// stopTailscaledProcess 先通过 init.d 或 systemctl 优雅停止服务，再用 killall -9 确保进程退出，
 // 最后轮询等待 tailscaled 进程消失，防止替换二进制时出现 "text file busy" 错误。
-func stopTailscaledProcess() error {
+func stopTailscaledProcess(isOpenWrt bool) error {
 	// 1. 优雅停止
-	exec.Command("/etc/init.d/tailscale", "stop").Run()
+	if isOpenWrt {
+		exec.Command("/etc/init.d/tailscale", "stop").Run()
+	} else {
+		exec.Command("systemctl", "stop", "tailscaled.service").Run()
+	}
 
 	// 2. 强制杀掉仍在运行的 tailscaled（忽略 "no process" 错误）
 	exec.Command("killall", "-9", "tailscaled").Run()
@@ -849,6 +951,49 @@ func copyFile(src, dst string) error {
 	_, err = io.Copy(destFile, sourceFile)
 	if err != nil {
 		return fmt.Errorf("copy failed: %w", err)
+	}
+	return nil
+}
+
+func createSystemdScript(hasTun bool) error {
+	scriptPath := "/etc/systemd/system/tailscaled.service"
+
+	content := `[Unit]
+Description=Tailscale node agent
+Documentation=https://tailscale.com/kb/
+Wants=network-pre.target
+After=network-pre.target NetworkManager.service systemd-resolved.service
+
+[Service]
+ExecStartPre=/usr/sbin/tailscaled --cleanup
+`
+	if hasTun {
+		content += `ExecStart=/usr/sbin/tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock --port=41641
+`
+	} else {
+		content += `ExecStart=/usr/sbin/tailscaled --tun=userspace-networking --state=/var/lib/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock --port=41641
+`
+	}
+	content += `ExecStopPost=/usr/sbin/tailscaled --cleanup
+Restart=on-failure
+RuntimeDirectory=tailscale
+RuntimeDirectoryMode=0755
+StateDirectory=tailscale
+StateDirectoryMode=0700
+CacheDirectory=tailscale
+CacheDirectoryMode=0750
+Type=notify
+
+[Install]
+WantedBy=multi-user.target
+`
+
+	// Ensure directories exist
+	os.MkdirAll("/var/lib/tailscale", 0700)
+	os.MkdirAll("/var/run/tailscale", 0755)
+
+	if err := os.WriteFile(scriptPath, []byte(content), 0644); err != nil {
+		return fmt.Errorf("write systemd script failed: %w", err)
 	}
 	return nil
 }
