@@ -98,6 +98,14 @@ singctl gen -o /tmp/config.json
 # 测试宽带带宽
 singctl test bd
 ```
+- 防火墙管理 (Linux/OpenWrt专有)
+```bash
+# 启用安全拦截规则并设置开机自启 (需 root)
+sudo singctl firewall enable
+
+# 禁用安全拦截规则并移除自启配置 (需 root)
+sudo singctl firewall disable
+```
 
 ## License
 
