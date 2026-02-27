@@ -1,3 +1,10 @@
+## [1.17.10](https://github.com/sixban6/singctl/compare/v1.17.9...v1.17.10) (2026-02-27)
+
+
+### Bug Fixes
+
+* fix tailscale ([ae5b005](https://github.com/sixban6/singctl/commit/ae5b00532da019624b54e9e345f5d0ecf12d264a))
+
 ## [1.17.9](https://github.com/sixban6/singctl/compare/v1.17.8...v1.17.9) (2026-02-23)
 
 
