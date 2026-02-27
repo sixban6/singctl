@@ -68,7 +68,7 @@ func RunSpeedTest() error {
 	fmt.Println("\n💡 提示: 您可以根据上述测试结果, 修改配置中的带宽参数:")
 	fmt.Println("\033[0;36m      # singctl.yaml")
 	fmt.Println("      hy2:")
-	fmt.Printf("        up: %d\n", int(upMbps))
+	fmt.Printf("        up: %d\n", int(upMbps*0.8))
 	fmt.Printf("        down: %d\033[0m\n\n", int(downMbps))
 
 	return nil
