@@ -170,6 +170,10 @@ subs:
 github:
   mirror_url: "https://ghfast.top"
 
+hy2:
+  up: 20                                         # Hysteria2 上行带宽 (Mbps)
+  down: 200                                      # Hysteria2 下行带宽 (Mbps)
+
 gui:
   mac_url: "https://github.com/SagerNet/sing-box/releases/download/v1.13.0-rc.5/SFM-1.13.0-rc.5-Apple.pkg"
   win_url: "https://github.com/SagerNet/sing-box/releases/download/v1.13.0-rc.5/sing-box-1.13.0-rc.5-windows-amd64.zip"

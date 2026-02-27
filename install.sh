@@ -178,7 +178,7 @@ get_latest_version() {
 build_download_url() {
     # 构建文件名
     local filename="singctl-${OS}-${ARCH}.tar.gz"
-    DOWNLOAD_URL="https://ghfast.top/https://github.com/$GITHUB_REPO/releases/download/$LATEST_VERSION/$filename"
+    DOWNLOAD_URL="https://gh-proxy.com/https://github.com/$GITHUB_REPO/releases/download/$LATEST_VERSION/$filename"
     
     echo_info "下载链接: $DOWNLOAD_URL"
 }
@@ -351,8 +351,12 @@ subs:
     skip_tls_verify: false
     remove-emoji: true
 
+hy2:
+  up: 20                                         # Hysteria2 上行带宽 (Mbps)
+  down: 200                                      # Hysteria2 下行带宽 (Mbps)
+
 github:
-  mirror_url: "https://ghfast.top"
+  mirror_url: "https://gh-proxy.com"
 EOF
             echo_warning "请手动编辑配置文件: $CONFIG_FILE"
             return 0
@@ -370,8 +374,12 @@ subs:
     skip_tls_verify: false
     remove-emoji: true
 
+hy2:
+  up: 20
+  down: 200
+
 github:
-  mirror_url: "https://ghfast.top"
+  mirror_url: "https://gh-proxy.com"
 
 gui:
   mac_url: "https://github.com/SagerNet/sing-box/releases/download/v1.13.0-rc.5/SFM-1.13.0-rc.5-Apple.pkg"
