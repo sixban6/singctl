@@ -1,3 +1,10 @@
+## [1.17.12](https://github.com/sixban6/singctl/compare/v1.17.11...v1.17.12) (2026-02-27)
+
+
+### Bug Fixes
+
+* use 0.8 upMbps ([71f0c65](https://github.com/sixban6/singctl/commit/71f0c658c49a21d41de50802a547a332782f7c5a))
+
 ## [1.17.11](https://github.com/sixban6/singctl/compare/v1.17.10...v1.17.11) (2026-02-27)
 
 
