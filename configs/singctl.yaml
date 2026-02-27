@@ -10,8 +10,8 @@ subs:
   #   remove-emoji: true
 
 hy2:
-  up: 30                                         # Hysteria2 上行带宽 (Mbps)
-  down: 300                                      # Hysteria2 下行带宽 (Mbps)
+  up: 20                                         # Hysteria2 上行带宽 (Mbps)
+  down: 200                                      # Hysteria2 下行带宽 (Mbps)
 
 github:
   mirror_url: "https://gh-proxy.com"            # GitHub镜像地址,用于加速
