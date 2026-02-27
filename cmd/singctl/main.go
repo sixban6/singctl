@@ -12,6 +12,7 @@ import (
 	"singctl/internal/cmd"
 	"singctl/internal/config"
 	"singctl/internal/daemon"
+	"singctl/internal/firewall"
 	"singctl/internal/logger"
 	"singctl/internal/singbox"
 	"singctl/internal/tailscale"
@@ -98,6 +99,7 @@ DNS optimization, and complete service lifecycle management.`,
 		updateCmd(),
 		versionCmd(),
 		testCmd(),
+		firewallCmd(),
 		cmd.NewInfoCommand(Version),
 		cmd.NewDaemonCommand(),
 	)
@@ -365,5 +367,32 @@ func testCmd() *cobra.Command {
 	}
 
 	cmd.AddCommand(bdCmd)
+	return cmd
+}
+
+func firewallCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "firewall",
+		Short: "Manage system firewall rules (nftables)",
+	}
+
+	enableCmd := &cobra.Command{
+		Use:   "enable",
+		Short: "Enable security block rules",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return firewall.Enable()
+		},
+	}
+
+	disableCmd := &cobra.Command{
+		Use:   "disable",
+		Short: "Disable and remove security block rules",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return firewall.Disable()
+		},
+	}
+
+	cmd.AddCommand(enableCmd)
+	cmd.AddCommand(disableCmd)
 	return cmd
 }
