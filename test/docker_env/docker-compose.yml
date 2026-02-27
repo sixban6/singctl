@@ -1,9 +1,16 @@
 services:
-  openwrt:
+  openwrt-test:
     build: .
     privileged: true
     volumes:
-      - ../../build/singctl-linux-amd64:/usr/bin/singctl
-      - ./config:/etc/singctl
+      - ../../:/app
     cap_add:
       - NET_ADMIN
+    environment:
+      - SINGCTL_DOCKER_TEST=1
+    command: >
+      sh -c "cd /app && go test ./internal/tailscale/ -v -count=1 -timeout 120s 2>&1 | tee /app/test_report.txt;
+             echo '';
+             echo '=== Test Summary ===';
+             go test ./internal/tailscale/ -count=1 -timeout 120s -json 2>&1 | tee /app/test_report.json;
+             echo 'Test report saved to /app/test_report.txt and /app/test_report.json'"
