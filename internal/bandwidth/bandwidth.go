@@ -69,7 +69,7 @@ func RunSpeedTest() error {
 	fmt.Println("\033[0;36m      # singctl.yaml")
 	fmt.Println("      hy2:")
 	fmt.Printf("        up: %d\n", int(upMbps*0.8))
-	fmt.Printf("        down: %d\033[0m\n\n", int(downMbps))
+	fmt.Printf("        down: %d\033[0m\n\n", int(downMbps*0.9))
 
 	return nil
 }
