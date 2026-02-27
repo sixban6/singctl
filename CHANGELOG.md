@@ -1,3 +1,10 @@
+## [1.17.15](https://github.com/sixban6/singctl/compare/v1.17.14...v1.17.15) (2026-02-27)
+
+
+### Bug Fixes
+
+* support singctl firewall enable ([30956d9](https://github.com/sixban6/singctl/commit/30956d9433f06f2668ef0619068540ba7935a02d))
+
 ## [1.17.14](https://github.com/sixban6/singctl/compare/v1.17.13...v1.17.14) (2026-02-27)
 
 
