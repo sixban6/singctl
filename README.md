@@ -74,10 +74,10 @@ singctl daemon logs -n 50
 ```
 - tailscale使用
 ```bash
-# 安装 Tailscale (仅 OpenWrt/ImmortalWrt)
+# 安装 Tailscale (仅 OpenWrt/Linux)
 singctl install tailscale
 
-# 配置并启动 Tailscale (仅 OpenWrt/ImmortalWrt)
+# 配置并启动 Tailscale (仅 OpenWrt/Linux)
 singctl start tailscale
 
 # 启动Tailscale 并作为出口节点
