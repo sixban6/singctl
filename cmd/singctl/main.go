@@ -12,6 +12,7 @@ import (
 	"singctl/internal/cmd"
 	"singctl/internal/config"
 	"singctl/internal/daemon"
+	"singctl/internal/deploy"
 	"singctl/internal/firewall"
 	"singctl/internal/logger"
 	"singctl/internal/singbox"
@@ -100,6 +101,7 @@ DNS optimization, and complete service lifecycle management.`,
 		versionCmd(),
 		testCmd(),
 		firewallCmd(),
+		serverCmd(),
 		cmd.NewInfoCommand(Version),
 		cmd.NewDaemonCommand(),
 	)
@@ -329,20 +331,14 @@ func updateCmd() *cobra.Command {
 
 				// Synchronously update singctl self
 				updater := updater.New(cfg.GitHub.MirrorURL, "https://github.com/sixban6/singctl")
-				if err := updater.UpdateSelf(); err != nil {
+				if err := updater.UpdateSelf(configPath); err != nil {
 					return err
-				}
-				if err := config.MigrateConfig(configPath); err != nil {
-					logger.Warn("Failed to migrate config: %v", err)
 				}
 				return nil
 			case "self":
 				updater := updater.New(cfg.GitHub.MirrorURL, "https://github.com/sixban6/singctl")
-				if err := updater.UpdateSelf(); err != nil {
+				if err := updater.UpdateSelf(configPath); err != nil {
 					return err
-				}
-				if err := config.MigrateConfig(configPath); err != nil {
-					logger.Warn("Failed to migrate config: %v", err)
 				}
 				return nil
 			default:
@@ -406,5 +402,67 @@ func firewallCmd() *cobra.Command {
 
 	cmd.AddCommand(enableCmd)
 	cmd.AddCommand(disableCmd)
+	return cmd
+}
+
+func serverCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "server",
+		Short: "Server deployment commands",
+	}
+
+	deployCmd := &cobra.Command{
+		Use:   "deploy",
+		Short: "Deploy server components. Optionally specify: common|caddy|singbox|substore",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load(configPath)
+			if err != nil {
+				return err
+			}
+
+			// Verify required config
+			if cfg.Server.SBDomain == "" || cfg.Server.CFDNSKey == "" {
+				return fmt.Errorf("server.sb_domain and server.cf_dns_key are required in singctl.yaml")
+			}
+
+			// If no target is specified, run them all in sequence
+			if len(args) == 0 {
+				if err := deploy.DeployCommon(); err != nil {
+					return err
+				}
+				if err := deploy.DeployCaddy(cfg); err != nil {
+					return err
+				}
+				if err := deploy.DeploySingbox(cfg); err != nil {
+					return err
+				}
+				if err := deploy.DeploySubstore(); err != nil {
+					return err
+				}
+				if err := deploy.DeployWarp(); err != nil {
+					return err
+				}
+				return nil
+			}
+
+			// Handle specified targets
+			switch args[0] {
+			case "common":
+				return deploy.DeployCommon()
+			case "caddy":
+				return deploy.DeployCaddy(cfg)
+			case "singbox":
+				return deploy.DeploySingbox(cfg)
+			case "substore":
+				return deploy.DeploySubstore()
+			case "warp":
+				return deploy.DeployWarp()
+			default:
+				return fmt.Errorf("unknown target: %s (must be common, caddy, singbox, substore, or warp)", args[0])
+			}
+		},
+	}
+
+	cmd.AddCommand(deployCmd)
 	return cmd
 }

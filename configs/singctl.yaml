@@ -21,5 +21,9 @@ gui:
   win_url: "https://github.com/SagerNet/sing-box/releases/download/v1.13.0-rc.5/sing-box-1.13.0-rc.5-windows-amd64.zip"
   app_name: "SFM"
 
-tailscale:
-  auth_key: ""                                  # (可选) Tailscale 授权密钥，用于免交互自动注册节点
+tailscale:                                      # (可选) Tailscale 部署配置
+  auth_key: ""                                  # (可选) Tailscale 授权密钥
+
+server:                                         # (可选) 服务器部署配置
+  sb_domain: "sub.yourdomain.com"               # 你的域名
+  cf_dns_key: "your_cloudflare_api_token"       # 你的 Cloudflare API Token

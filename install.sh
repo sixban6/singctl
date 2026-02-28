@@ -272,21 +272,22 @@ install_files() {
     echo_info "创建配置目录: $CONFIG_DIR"
     mkdir -p "$CONFIG_DIR"
 
-    # 查找并安装配置文件
-    config_file=$(find "$TEMP_DIR" -type f -name "singctl.yaml" | head -1)
+    # 查找并安装配置目录
+    configs_dir=$(find "$TEMP_DIR" -type d -name "configs" | head -1)
 
-    if [ -f "$config_file" ]; then
+    if [ -d "$configs_dir" ]; then
         if [ -f "$CONFIG_FILE" ]; then
             backup_file="${CONFIG_FILE}.backup.$(date +%s)"
-            echo_warning "配置文件已存在，备份到: $backup_file"
+            echo_warning "主配置文件已存在，备份到: $backup_file"
             cp "$CONFIG_FILE" "$backup_file"
         fi
 
-        cp "$config_file" "$CONFIG_FILE"
-        chmod 644 "$CONFIG_FILE"
-        echo_success "配置文件已安装到: $CONFIG_FILE"
+        echo_info "复制所有配置文件到: $CONFIG_DIR"
+        cp -r "$configs_dir"/* "$CONFIG_DIR/"
+        find "$CONFIG_DIR" -type f -exec chmod 644 {} \;
+        echo_success "配置文件已安装"
     else
-        echo_warning "未找到配置文件，请手动配置"
+        echo_warning "未找到配置目录，请手动配置"
     fi
 
     # 如果使用的是 /usr/local/bin 且不在 PATH 中，添加 PATH 配置
@@ -343,25 +344,7 @@ configure_subscription() {
     else
         # 如果没有 /dev/tty，尝试其他方法
         exec < /dev/tty 2>/dev/null || {
-            echo_warning "无法获取终端输入，创建配置模板"
-            cat > "$CONFIG_FILE" <<EOF
-subs:
-  - name: "main"
-    url: "YOUR_SUBSCRIPTION_URL_HERE"
-    skip_tls_verify: false
-    remove-emoji: true
-
-hy2:
-  up: 20                                         # Hysteria2 上行带宽 (Mbps)
-  down: 200                                      # Hysteria2 下行带宽 (Mbps)
-
-github:
-  mirror_url: "https://gh-proxy.com"
-
-tailscale:
-  auth_key: ""
-EOF
-            echo_warning "请手动编辑配置文件: $CONFIG_FILE"
+            echo_warning "无法获取终端输入，请手动编辑配置文件: $CONFIG_FILE"
             return 0
         }
         read -r sub_url
@@ -369,31 +352,14 @@ EOF
 
     [ -z "$sub_url" ] && { echo_info "跳过订阅配置"; return 0; }
 
-    # 直接生成全新的 subs 段落覆盖原文件
-    cat > "$CONFIG_FILE" <<EOF
-subs:
-  - name: "main"
-    url: "$sub_url"
-    skip_tls_verify: false
-    remove-emoji: true
-
-hy2:
-  up: 20
-  down: 200
-
-github:
-  mirror_url: "https://gh-proxy.com"
-
-gui:
-  mac_url: "https://github.com/SagerNet/sing-box/releases/download/v1.13.0-rc.5/SFM-1.13.0-rc.5-Apple.pkg"
-  win_url: "https://github.com/SagerNet/sing-box/releases/download/v1.13.0-rc.5/sing-box-1.13.0-rc.5-windows-amd64.zip"
-  app_name: "SFM"
-
-tailscale:
-  auth_key: ""
-EOF
-
-    echo_success "订阅连接已写入 $CONFIG_FILE"
+    if [ -f "$CONFIG_FILE" ]; then
+        # OSX sed syntax compat
+        sed -i.bak "s|url: \"\"|url: \"$sub_url\"|g" "$CONFIG_FILE"
+        rm -f "${CONFIG_FILE}.bak"
+        echo_success "订阅连接已更新到 $CONFIG_FILE"
+    else
+        echo_error "配置文件不存在，无法设置订阅，请手动编辑。"
+    fi
 }
 
 # 验证安装

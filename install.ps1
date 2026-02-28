@@ -115,17 +115,17 @@ Write-Success "已复制到 $InstallDir"
 #--------------------------------------------------
 # 配置文件
 New-Item $ConfigDir -ItemType Directory -Force | Out-Null
-$DefaultConfig = Get-ChildItem -Path $TempDir -Recurse -Filter 'singctl.yaml' | Select-Object -First 1
-if ($DefaultConfig) {
+$ConfigsDir = Get-ChildItem -Path $TempDir -Recurse -Filter 'configs' -Directory | Select-Object -First 1
+if ($ConfigsDir) {
     if (Test-Path $ConfigFile) {
         $Backup = "$ConfigFile.backup.$(Get-Date -Format 'yyyyMMdd_HHmmss')"
         Copy-Item $ConfigFile $Backup
-        Write-Warning "配置文件已存在，已备份到 $Backup"
+        Write-Warning "主配置文件已存在，已备份到 $Backup"
     }
-    Copy-Item $DefaultConfig.FullName $ConfigFile -Force
-    Write-Success "配置文件已安装到: $ConfigFile"
+    Copy-Item -Path "$($ConfigsDir.FullName)\*" -Destination $ConfigDir -Recurse -Force
+    Write-Success "所有配置文件已复制到: $ConfigDir"
 } else {
-    Write-Warning '未找到默认配置文件，稍后可手动创建'
+    Write-Warning '未找到配置目录，稍后可手动创建'
 }
 
 #--------------------------------------------------
