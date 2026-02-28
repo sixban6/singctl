@@ -81,8 +81,8 @@ DNS optimization, and complete service lifecycle management.`,
 	rootCmd.PersistentFlags().StringVarP(&configPath, "config", "c", defaultConfigPath, "config file")
 
 	rootCmd.AddCommand(
-		cmd.UpdateCmd(configPath),
-		cmd.VersionCmd(Version, BuildTime, GitCommit),
+		cmd.NewUpdateCmd(configPath),
+		cmd.NewVersionCmd(Version, BuildTime, GitCommit),
 		cmd.NewInfoCommand(Version),
 		cmd.NewSingboxCommand(configPath),
 		cmd.NewTailscaleCmd(configPath),
