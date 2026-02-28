@@ -53,6 +53,9 @@ func (sbs *SingBoxServer) initTag() {
 	suffix, _, _ := strings.Cut(sbs.cfg.Server.SBDomain, ".")
 	sbs.hy2Tag = fmt.Sprintf("sec_%s_hy2", suffix)
 	sbs.vrTag = fmt.Sprintf("sec_%s_vr", suffix)
+
+	sbs.ShareLinkHy2 = fmt.Sprintf("hysteria2://%s@%s/?sni=%s&alpn=h3&insecure=0#%s", sbs.hyUUID, sbs.cfg.Server.SBDomain, sbs.cfg.Server.SBDomain, sbs.hy2Tag)
+	sbs.ShareLinkVless = fmt.Sprintf("vless://%s@%s:443?type=tcp&encryption=none&security=reality&pbk=%s&fp=chrome&sni=www.microsoft.com&sid=%s&flow=xtls-rprx-vision#%s", sbs.hyUUID, sbs.cfg.Server.SBDomain, sbs.publicKey, sbs.shortID, sbs.vrTag)
 }
 
 // getCaddyCertPath waits and finds the actual cert path Caddy generated (Let's Encrypt or ZeroSSL)
@@ -60,6 +63,8 @@ func (sbs *SingBoxServer) initCaddyCertPath() {
 	basePath := "/var/lib/caddy/.local/share/caddy/certificates"
 
 	logger.Info("Waiting for Caddy to generate certificates for %s...", sbs.cfg.Server.SBDomain)
+
+	// 最多重试 30 次，每次间隔 1 秒
 	for i := 0; i < 30; i++ {
 		dirs, err := os.ReadDir(basePath)
 		if err == nil {
@@ -69,18 +74,23 @@ func (sbs *SingBoxServer) initCaddyCertPath() {
 				}
 				crtPath := filepath.Join(basePath, d.Name(), sbs.cfg.Server.SBDomain, sbs.cfg.Server.SBDomain+".crt")
 				keyPath := filepath.Join(basePath, d.Name(), sbs.cfg.Server.SBDomain, sbs.cfg.Server.SBDomain+".key")
+
 				if _, err := os.Stat(crtPath); err == nil {
 					if _, err := os.Stat(keyPath); err == nil {
 						logger.Success("Found certificate at %s", crtPath)
 						sbs.crtPath = crtPath
 						sbs.keyPath = keyPath
+						// 修复关键：找到证书后，立刻结束函数，不再继续等待
+						return
 					}
 				}
 			}
 		}
+		// 没找到，休息 1 秒后再进下一次循环
 		time.Sleep(1 * time.Second)
 	}
 
+	// 只有当 30 次循环都跑完还没 `return` 时，才会走到这里（真正触发超时）
 	logger.Warn("Timeout waiting for Caddy certs, using Let's Encrypt fallback path")
 	sbs.crtPath = filepath.Join(basePath, "acme-v02.api.letsencrypt.org-directory", sbs.cfg.Server.SBDomain, sbs.cfg.Server.SBDomain+".crt")
 	sbs.keyPath = filepath.Join(basePath, "acme-v02.api.letsencrypt.org-directory", sbs.cfg.Server.SBDomain, sbs.cfg.Server.SBDomain+".key")
@@ -149,9 +159,6 @@ func (sbs *SingBoxServer) DeploySingbox() error {
 	if err := runCmd("systemctl", "restart", "sing-box"); err != nil {
 		return fmt.Errorf("failed to restart sing-box service: %w", err)
 	}
-
-	sbs.ShareLinkHy2 = fmt.Sprintf("hysteria2://%s@%s/?sni=%s&alpn=h3&insecure=0#%s", sbs.hyUUID, sbs.cfg.Server.SBDomain, sbs.cfg.Server.SBDomain, sbs.hy2Tag)
-	sbs.ShareLinkVless = fmt.Sprintf("vless://%s@%s?type=tcp&security=reality&pbk=%s&fp=chrome&sni=www.microsoft.com&sid=%s&flow=xtls-rprx-vision#%s", sbs.hyUUID, sbs.cfg.Server.SBDomain, sbs.publicKey, sbs.shortID, sbs.vrTag)
 
 	return nil
 }
