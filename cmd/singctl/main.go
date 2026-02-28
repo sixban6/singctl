@@ -81,6 +81,25 @@ DNS optimization, and complete service lifecycle management.`,
 	rootCmd.PersistentFlags().StringVarP(&configPath, "config", "c", defaultConfigPath, "config file")
 	// 保留补全功能，但只是不想让它显示在 help 列表里，可以只隐藏它：
 	rootCmd.CompletionOptions.HiddenDefaultCmd = true
+
+	// 2. 覆写默认的 help 命令以修改解释文字
+	helpCmd := &cobra.Command{
+		Use:   "help [command]",
+		Short: "帮助  :获取任意命令的帮助信息(简写singctl help)",
+		Run: func(c *cobra.Command, args []string) {
+			// 复用 Cobra 底层自带的帮助渲染逻辑
+			cmd, _, e := c.Root().Find(args)
+			if cmd == nil || e != nil {
+				c.Printf("Unknown help topic %#q\n", args)
+				c.Root().Usage()
+			} else {
+				cmd.Help()
+			}
+		},
+	}
+	// 将我们自定义的 help 命令设置为根命令的 Help 命令
+	rootCmd.SetHelpCommand(helpCmd)
+
 	rootCmd.AddCommand(
 		cmd.NewUpdateCmd(configPath),
 		cmd.NewVersionCmd(Version, BuildTime, GitCommit),

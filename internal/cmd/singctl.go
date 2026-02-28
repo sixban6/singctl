@@ -15,7 +15,7 @@ import (
 func NewInfoCommand(version string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "info",
-		Short: "配置信息",
+		Short: "配置  : 查看配置信息",
 		Long:  "Display sing-box installation path, configuration file path, singctl version and subscription information",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			configPath := cmd.Flag("config").Value.String()
@@ -52,7 +52,7 @@ func NewUpdateCmd(configPath string) *cobra.Command {
 func NewVersionCmd(Version string, BuildTime string, GitCommit string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "version",
-		Short: "查询：查询singctl版本",
+		Short: "查询  ：查询singctl版本",
 		Run: func(cmd *cobra.Command, args []string) {
 			logger.Info("SingCtl %s", Version)
 			logger.Info("Build Time: %s", BuildTime)
