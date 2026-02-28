@@ -4,13 +4,14 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"singctl/internal/config"
 	"strings"
 
 	"singctl/internal/logger"
 )
 
 // DeploySubstore handles Docker installation, password generation, and sub-store container rotation
-func DeploySubstore() error {
+func DeploySubstore(cfg *config.Config) error {
 	logger.Info("Starting Sub-Store deployment...")
 
 	// 1. Install Docker if not present
@@ -66,8 +67,27 @@ func DeploySubstore() error {
 	logger.Success("Sub-Store deployed successfully!")
 	fmt.Println("\n========================================================")
 	fmt.Println("🔒 Sub-Store Admin Access URL:")
-	fmt.Printf("https://[YOUR_SB_DOMAIN_HERE]:9443/%s\n", ssKey)
+	fmt.Printf("https://%s:9443/%s\n", cfg.Server.SBDomain, ssKey)
 	fmt.Println("========================================================")
 
+	return nil
+}
+
+func UninstallSubstore() error {
+	logger.Info("Uninstalling Sub-Store...")
+
+	// Remove the container
+	err := runCmd("docker", "rm", "-f", "sub-store")
+	if err != nil {
+		logger.Warn("Failed to remove sub-store container (it might not exist): %v", err)
+	}
+
+	// Remove the volume directory
+	err = runCmd("rm", "-rf", "/etc/sub-store")
+	if err != nil {
+		return fmt.Errorf("failed to remove /etc/sub-store: %w", err)
+	}
+
+	logger.Success("Sub-Store uninstallation completed.")
 	return nil
 }

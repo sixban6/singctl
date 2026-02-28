@@ -116,7 +116,7 @@ server:                                         # (可选) 服务器部署配置
 
 执行部署
 ```bash
-singctl server deploy
+singctl server install
 ```
 
 ## License
