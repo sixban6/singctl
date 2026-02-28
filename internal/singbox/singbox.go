@@ -385,59 +385,55 @@ func (sb *SingBox) installOrUpdate(targetPath string) error {
 }
 
 // selectSingBoxAsset 选择合适的sing-box资产
+// selectSingBoxAsset 选择合适的sing-box资产
 func (sb *SingBox) selectSingBoxAsset(assetName string) bool {
 	name := strings.ToLower(assetName)
 
-	// 排除不需要的文件
+	// 1. 排除绝对不需要的关键词（包括 glibc）
 	excludePatterns := []string{
-		"dsym",    // Debug symbols (macOS)
-		"sfm",     // SFM GUI client (macOS)
-		".deb",    // Debian packages
-		".rpm",    // RPM packages
-		"android", // macOS binaries (if not on macOS)
+		"dsym",    // 排除 macOS Debug symbols
+		"sfm",     // 排除 macOS 图形界面客户端
+		".deb",    // 排除 Debian 安装包
+		".rpm",    // 排除 RPM 安装包
+		"android", // 排除 Android 库
+		"glibc",   // 关键修复：强行排除 glibc 版本，确保在 OpenWrt 等 musl 系统上可用
 	}
 
 	for _, pattern := range excludePatterns {
 		if strings.Contains(name, pattern) {
-			// Allow darwin only on macOS
-			if pattern == "darwin" && runtime.GOOS == "darwin" {
-				continue
-			}
-			// Allow windows only on Windows
-			if pattern == "windows" && runtime.GOOS == "windows" {
-				continue
-			}
 			return false
 		}
 	}
-	// 必须包含Linux（除非在其他平台）
+
+	// 2. 匹配操作系统
 	if runtime.GOOS == "darwin" && !strings.Contains(name, "darwin") {
 		return false
 	}
-
-	// 必须包含Linux（除非在其他平台）
 	if runtime.GOOS == "windows" && !strings.Contains(name, "windows") {
 		return false
 	}
-
-	// 必须包含Linux（除非在其他平台）
 	if runtime.GOOS == "linux" && !strings.Contains(name, "linux") {
 		return false
 	}
 
-	// 必须包含正确的架构
+	// 3. 匹配 CPU 架构
 	arch := runtime.GOARCH
 	if arch == "amd64" {
-		// Accept both amd64 and x86_64
+		// x86_64 和 amd64 是同义词
 		if !strings.Contains(name, "amd64") && !strings.Contains(name, "x86_64") {
+			return false
+		}
+	} else if arch == "arm64" {
+		// arm64 和 aarch64 经常混用，最好同时兼容
+		if !strings.Contains(name, "arm64") && !strings.Contains(name, "aarch64") {
 			return false
 		}
 	} else if !strings.Contains(name, arch) {
 		return false
 	}
 
-	// 必须是压缩包格式
-	if !strings.Contains(name, ".tar.gz") && !strings.Contains(name, ".zip") {
+	// 4. 确保是压缩包文件
+	if !strings.HasSuffix(name, ".tar.gz") && !strings.HasSuffix(name, ".zip") {
 		return false
 	}
 
