@@ -132,28 +132,79 @@ func (sbs *SingBoxServer) initVRParams() error {
 }
 
 // DeploySingbox handles sing-box installation, config rendering, and outputs URL
+
+// 定义标准的服务文件内容 (请根据你的实际二进制路径和配置文件路径调整 ExecStart)
+const singboxServiceContent = `[Unit]
+Description=sing-box service
+Documentation=https://sing-box.sagernet.org
+After=network.target nss-lookup.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/sing-box run -c /etc/sing-box/config.json
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=10s
+LimitNOFILE=infinity
+
+[Install]
+WantedBy=multi-user.target
+`
+
+// 检查并创建 service 文件的辅助方法
+func (sbs *SingBoxServer) ensureSystemdService() error {
+	servicePath := "/etc/systemd/system/sing-box.service"
+
+	// 1. 检查文件是否存在
+	if _, err := os.Stat(servicePath); os.IsNotExist(err) {
+		logger.Info("sing-box.service not found, creating it...")
+
+		// 2. 写入服务文件
+		if err := os.WriteFile(servicePath, []byte(singboxServiceContent), 0644); err != nil {
+			return fmt.Errorf("failed to write sing-box.service: %w", err)
+		}
+
+		// 3. 重新加载 systemd 守护进程以识别新服务
+		logger.Info("Reloading systemd daemon...")
+		if err := runCmd("systemctl", "daemon-reload"); err != nil {
+			return fmt.Errorf("failed to daemon-reload: %w", err)
+		}
+
+		logger.Success("Successfully created sing-box.service")
+	} else if err != nil {
+		return fmt.Errorf("failed to check service file state: %w", err)
+	}
+
+	return nil
+}
+
+// 修复后的主部署逻辑
 func (sbs *SingBoxServer) DeploySingbox() error {
 	logger.Info("Starting Sing-box Server deployment...")
 
-	// 1. Install or update Sing-box by reusing the internal installation logic
+	// 1. Install or update Sing-box core
 	logger.Info("Installing/Updating sing-box core...")
 	sb := singbox.New(sbs.cfg)
 	if err := sb.Install(); err != nil {
 		return fmt.Errorf("failed to install sing-box: %w", err)
 	}
 
-	// 3. Render and save config.json
+	// 2. Render and save config.json
 	logger.Info("Rendering and saving sing-box config.json...")
 	if err := sbs.renderSingboxConfig(); err != nil {
+		return fmt.Errorf("failed to render config: %w", err)
+	}
+
+	// 3. 检查并创建 systemd 服务 (新增的拦截逻辑)
+	if err := sbs.ensureSystemdService(); err != nil {
 		return err
 	}
 
-	// 4. Enable and restart sing-box service
+	// 4. Enable and restart sing-box service (使用 restart 确保加载新配置)
 	logger.Info("Restarting sing-box service...")
-	// Force daemon-reload
-	_ = runCmd("systemctl", "daemon-reload")
 
-	if err := runCmd("systemctl", "enable", "--now", "sing-box"); err != nil {
+	if err := runCmd("systemctl", "enable", "sing-box"); err != nil {
 		return fmt.Errorf("failed to enable sing-box service: %w", err)
 	}
 	if err := runCmd("systemctl", "restart", "sing-box"); err != nil {
