@@ -133,7 +133,7 @@ func NewServerCmd(configPath string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "server",
 		Aliases: []string{"sr"}, // 添加快捷命令 singctl sr
-		Short:   "服务端：singbox服务端部署命令(简写singctl sr)",
+		Short:   "服务端: singbox服务端部署命令(简写singctl sr)",
 	}
 	cfg, err := config.Load(configPath)
 	if err != nil {

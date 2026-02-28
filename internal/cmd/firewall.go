@@ -35,7 +35,7 @@ func NewFirewallCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "firewall",
 		Aliases: []string{"fw"}, // 添加快捷命令 singctl fw
-		Short:   "防火墙：服务器防火墙加固命令(简写singctl fw)",
+		Short:   "防火墙: 服务器防火墙加固命令(简写singctl fw)",
 	}
 
 	cmd.AddCommand(newEnableCmd())
