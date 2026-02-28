@@ -85,7 +85,7 @@ DNS optimization, and complete service lifecycle management.`,
 	// 2. 覆写默认的 help 命令以修改解释文字
 	helpCmd := &cobra.Command{
 		Use:   "help [command]",
-		Short: "帮助  :获取任意命令的帮助信息(简写singctl help)",
+		Short: "帮助  : 获取任意命令的帮助信息(简写singctl help)",
 		Run: func(c *cobra.Command, args []string) {
 			// 复用 Cobra 底层自带的帮助渲染逻辑
 			cmd, _, e := c.Root().Find(args)

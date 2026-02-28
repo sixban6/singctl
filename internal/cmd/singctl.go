@@ -27,7 +27,7 @@ func NewInfoCommand(version string) *cobra.Command {
 func NewUpdateCmd(configPath string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "update <target>",
-		Short: "更新  ：更新singctl到最新版",
+		Short: "更新  : 更新singctl到最新版",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.Load(configPath)
@@ -52,7 +52,7 @@ func NewUpdateCmd(configPath string) *cobra.Command {
 func NewVersionCmd(Version string, BuildTime string, GitCommit string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "version",
-		Short: "查询  ：查询singctl版本",
+		Short: "查询  : 查询singctl版本",
 		Run: func(cmd *cobra.Command, args []string) {
 			logger.Info("SingCtl %s", Version)
 			logger.Info("Build Time: %s", BuildTime)

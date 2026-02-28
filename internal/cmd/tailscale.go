@@ -66,7 +66,7 @@ func NewTailscaleCmd(configPath string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "tailscale",
 		Aliases: []string{"ts"}, // 添加快捷命令 singctl ts
-		Short:   "组网  ：管理tailscale的命令(简写singctl ts)",
+		Short:   "组网  : 管理tailscale的命令(简写singctl ts)",
 	}
 
 	cfg, err := config.Load(configPath)
