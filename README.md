@@ -106,6 +106,18 @@ singctl firewall enable
 # 禁用安全拦截规则并移除自启配置 (需 root)
 singctl firewall disable
 ```
+- 服务端部署
+Tips:需要singctl.yaml中配置
+```yaml
+server:                                         # (可选) 服务器部署配置
+  sb_domain: "sub.yourdomain.com"               # 你的域名
+  cf_dns_key: "your_cloudflare_api_token"       # 你的 Cloudflare API Token
+```
+
+执行部署
+```bash
+singctl server deploy
+```
 
 ## License
 
