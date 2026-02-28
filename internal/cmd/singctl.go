@@ -27,7 +27,7 @@ func NewInfoCommand(version string) *cobra.Command {
 func NewUpdateCmd(configPath string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "update <target>",
-		Short: "更新：更新singctl到最新版",
+		Short: "更新  ：更新singctl到最新版",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.Load(configPath)
