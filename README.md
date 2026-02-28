@@ -4,7 +4,7 @@
 [![Go Version](https://img.shields.io/github/go-mod/go-version/sixban6/singctl)](https://golang.org/)
 [![License](https://img.shields.io/github/license/sixban6/singctl)](https://github.com/sixban6/singctl/blob/main/LICENSE)
 
-SingCtl是一个简单高效的命令行VPN客户端, 能让你根据订阅地址，快速使用singbox，和管理singbox。
+SingCtl是多功能网络工具。可以用管理singbox客户端和服务端，异地组网，加固防火墙。
 
 ## Features
 - 🚀 **跨平台支持**: 一条命令跨平台安全的使用singbox
