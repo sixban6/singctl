@@ -151,7 +151,7 @@ func NewSingboxCommand(configPath string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "singbox",
 		Aliases: []string{"sb"}, // 添加快捷命令 singctl sb
-		Short:   "客户端：管理singbox客户端的启动和配置(可以使用singctl sb简写)",
+		Short:   "客户端：singbox客户端的启动和配置(简写singctl sb)",
 	}
 
 	cfg, err := config.Load(configPath)

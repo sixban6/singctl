@@ -18,7 +18,7 @@ func NewDaemonCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "daemon",
 		Aliases: []string{"dm"}, // 添加快捷命令 singctl dm
-		Short:   "守护进程：间写singctl dm",
+		Short:   "看门狗：间写singctl dm",
 		Long:    "Manage the singctl daemon for automatic sing-box monitoring and restart",
 	}
 

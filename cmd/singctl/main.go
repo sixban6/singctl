@@ -79,7 +79,8 @@ DNS optimization, and complete service lifecycle management.`,
 		defaultConfigPath = "/etc/singctl/singctl.yaml"
 	}
 	rootCmd.PersistentFlags().StringVarP(&configPath, "config", "c", defaultConfigPath, "config file")
-
+	// 保留补全功能，但只是不想让它显示在 help 列表里，可以只隐藏它：
+	rootCmd.CompletionOptions.HiddenDefaultCmd = true
 	rootCmd.AddCommand(
 		cmd.NewUpdateCmd(configPath),
 		cmd.NewVersionCmd(Version, BuildTime, GitCommit),

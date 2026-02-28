@@ -9,7 +9,7 @@ func NewUtilCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "util",
 		Aliases: []string{"ut"}, // 添加快捷命令 singctl ut
-		Short:   "工具：其他命令工具集合(支持网络带宽测试)",
+		Short:   "工具 ：其他命令工具集合(简写:singctl ut)",
 	}
 
 	cmd.AddCommand(newBDCmd())
