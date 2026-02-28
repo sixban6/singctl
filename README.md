@@ -37,87 +37,106 @@ powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "[System.IO.File]
 ```
 
 ## Usage
-- 基本使用
+- 1.客户端
 ```bash
-# 安装 sing-box               
-singctl install sb   
+# 安装sing-box客户端              
+singctl sb install   
 
-# 生成配置到默认位置并备份         
-singctl gen     
+# 生成客户端配置到默认位置并备份         
+singctl sb gen     
 
-# 生成配置并启动 sing-box
-singctl start           
+# 启动sing-box客户端
+singctl sb start           
 
-# 停止 sing-box & 关闭守护进程     
-singctl stop       
+# 停止 sing-box 客户端 & 关闭守护进程     
+singctl sb stop       
 
-# 更新 sing-box
-singctl update sb        
+# 更新sing-box客户单
+singctl sb update           
 
-# 更新 singctl 自身         
-singctl update self      
-
-```
-- 守护进程使用
-```bash
-# 快速查看系统状态
-singctl info
-
-# 启动守护进程
-singctl daemon start
-
-# 查看详细监控状态
-singctl daemon status
-
-# 查看守护进程日志
-singctl daemon logs -n 50
-```
-- tailscale使用
-```bash
-# 安装 Tailscale (仅 OpenWrt/Linux)
-singctl install tailscale
-
-# 配置并启动 Tailscale (仅 OpenWrt/Linux)
-singctl start tailscale
-
-# 启动Tailscale 并作为出口节点
-singctl start tailscale --exit-node
-
-singctl stop tailscale
-
-singctl update tailscale
-```
-- 其他
-```bash
 # 输出到控制台查看        
-singctl gen --stdout       
+singctl sb gen --stdout       
 
 # 自定义输出路径             
-singctl gen -o /tmp/config.json  
-
-# 测试宽带带宽
-singctl test bd
+singctl sb gen -o /tmp/config.json  
 ```
-- 防火墙加固 (Linux/OpenWrt专有)
+- 2.服务端管理
 ```bash
-# 启用安全拦截规则并设置开机自启 (需 root)
-singctl firewall enable
+singctl sr install
 
-# 禁用安全拦截规则并移除自启配置 (需 root)
-singctl firewall disable
+# 单独部署caddy
+singctl sr install caddy
+
+# 单独部署singbox
+singctl sr install singbox
+
+# 单独部署substore
+singctl sr install substore
+
+# 单独部署warp
+singctl sr install warp
 ```
-- 服务端部署
-Tips:需要singctl.yaml中配置
+Tips:服务端需要singctl.yaml中配置
 ```yaml
 server:                                         # (可选) 服务器部署配置
   sb_domain: "sub.yourdomain.com"               # 你的域名
   cf_dns_key: "your_cloudflare_api_token"       # 你的 Cloudflare API Token
 ```
 
-执行部署
+- 3.tailscale管理
 ```bash
-singctl server install
+# 安装 Tailscale (仅 OpenWrt/Linux)
+singctl ts install 
+
+# 配置并启动 Tailscale (仅 OpenWrt/Linux)
+singctl ts start 
+
+# 启动Tailscale 并作为出口节点
+singctl ts start  --exit-node
+
+singctl ts stop 
+
+singctl ts update 
 ```
+Tips: 可以在singctl.yaml中配置
+```yaml
+tailscale:                                        # (可选) Tailscale 部署配置
+    auth_key: ""                                  # (可选) Tailscale 授权密钥
+```
+- 4.守护进程使用
+```bash
+
+# 启动守护进程
+singctl dm start
+
+# 查看详细监控状态
+singctl dm status
+
+# 查看守护进程日志
+singctl dm logs -n 50
+```
+- 5.防火墙加固 (Linux/OpenWrt专有)
+```bash
+# 启用安全拦截规则并设置开机自启 (需 root)
+singctl fw enable
+
+# 禁用安全拦截规则并移除自启配置 (需 root)
+singctl fw disable
+```
+
+- 6.其他
+```bash
+# 测试宽带带宽
+singctl ut testbd
+
+# 更新 singctl 自身         
+singctl update self  
+
+# 快速查看系统状态
+singctl info
+```
+
+
 
 ## License
 

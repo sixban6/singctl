@@ -252,3 +252,38 @@ func GetSingboxConfigPath() string {
 	}
 	return configPath
 }
+
+// // maskSubscriptionURL 对订阅URL进行脱敏处理
+func MaskSubscriptionURL(url string) string {
+	if url == "" {
+		return "未配置"
+	}
+
+	// 找到://后的部分
+	parts := strings.Split(url, "//")
+	if len(parts) < 2 {
+		return "***"
+	}
+
+	scheme := parts[0] + "//"
+	remaining := parts[1]
+
+	// 按/分割获取域名部分
+	pathParts := strings.Split(remaining, "/")
+	if len(pathParts) == 0 {
+		return "***"
+	}
+
+	domain := pathParts[0]
+
+	// 域名脱敏，保留第一个字符和顶级域名
+	domainParts := strings.Split(domain, ".")
+	if len(domainParts) >= 2 {
+		if len(domainParts[0]) > 1 {
+			domainParts[0] = string(domainParts[0][0]) + strings.Repeat("*", len(domainParts[0])-1)
+		}
+		domain = strings.Join(domainParts, ".")
+	}
+
+	return scheme + domain + "/***"
+}
