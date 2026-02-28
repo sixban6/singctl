@@ -446,6 +446,12 @@ func serverCmd() *cobra.Command {
 					return err
 				}
 
+				err := sbt.UpdateSubstoreConfig(sbs)
+				if err != nil {
+					logger.Warn("Substore config update failed!")
+					return err
+				}
+
 				sbs.ShowLoginInfo()
 				sbt.ShowLoginInfo()
 				return nil
@@ -496,7 +502,7 @@ func serverCmd() *cobra.Command {
 				logger.Success("All specified server components have been uninstalled.")
 				return nil
 			}
-			
+
 			target := args[0]
 			switch target {
 			case "caddy":
