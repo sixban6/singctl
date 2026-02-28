@@ -4,10 +4,9 @@ build
 dist
 test
 bin
-/singctl
 data
 .idea
-singctl*
+singctl
 cache
 *.exe
 *.exe~
