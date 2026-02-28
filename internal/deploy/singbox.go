@@ -53,9 +53,6 @@ func (sbs *SingBoxServer) initTag() {
 	suffix, _, _ := strings.Cut(sbs.cfg.Server.SBDomain, ".")
 	sbs.hy2Tag = fmt.Sprintf("sec_%s_hy2", suffix)
 	sbs.vrTag = fmt.Sprintf("sec_%s_vr", suffix)
-
-	sbs.ShareLinkHy2 = fmt.Sprintf("hysteria2://%s@%s/?sni=%s&alpn=h3&insecure=0#%s", sbs.hyUUID, sbs.cfg.Server.SBDomain, sbs.cfg.Server.SBDomain, sbs.hy2Tag)
-	sbs.ShareLinkVless = fmt.Sprintf("vless://%s@%s:443?type=tcp&encryption=none&security=reality&pbk=%s&fp=chrome&sni=www.microsoft.com&sid=%s&flow=xtls-rprx-vision#%s", sbs.hyUUID, sbs.cfg.Server.SBDomain, sbs.publicKey, sbs.shortID, sbs.vrTag)
 }
 
 // getCaddyCertPath waits and finds the actual cert path Caddy generated (Let's Encrypt or ZeroSSL)
@@ -210,7 +207,8 @@ func (sbs *SingBoxServer) DeploySingbox() error {
 	if err := runCmd("systemctl", "restart", "sing-box"); err != nil {
 		return fmt.Errorf("failed to restart sing-box service: %w", err)
 	}
-
+	sbs.ShareLinkHy2 = fmt.Sprintf("hysteria2://%s@%s/?sni=%s&alpn=h3&insecure=0#%s", sbs.hyUUID, sbs.cfg.Server.SBDomain, sbs.cfg.Server.SBDomain, sbs.hy2Tag)
+	sbs.ShareLinkVless = fmt.Sprintf("vless://%s@%s:443?type=tcp&encryption=none&security=reality&pbk=%s&fp=chrome&sni=www.microsoft.com&sid=%s&flow=xtls-rprx-vision#%s", sbs.hyUUID, sbs.cfg.Server.SBDomain, sbs.publicKey, sbs.shortID, sbs.vrTag)
 	return nil
 }
 
