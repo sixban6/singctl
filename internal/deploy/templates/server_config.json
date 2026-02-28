@@ -1,29 +1,12 @@
 {
   "dns": {
     "servers": [
-      {
-        "tag": "google",
-        "type": "tls",
-        "server": "8.8.8.8"
-      },
-      {
-        "tag": "cloudflare",
-        "type": "tls",
-        "server": "1.1.1.1"
-      }
+      { "tag": "google", "type": "tls", "server": "8.8.8.8"},
+      { "tag": "cloudflare", "type": "tls", "server": "1.1.1.1"}
     ],
     "rules": [
-      {
-        "query_type": "HTTPS",
-        "action": "reject"
-      },
-      {
-        "query_type": [
-          "A",
-          "AAAA"
-        ],
-        "server": "cloudflare"
-      }
+      { "query_type": "HTTPS", "action": "reject"},
+      { "query_type": ["A", "AAAA"], "server": "cloudflare"}
     ],
     "final": "cloudflare",
     "strategy": "ipv4_only"
@@ -78,116 +61,48 @@
     }
   ],
   "outbounds": [
-    {
-      "tag": "DirectConn",
-      "type": "direct"
-    },
-    {
-      "type": "socks",
-      "tag": "WARP",
-      "server": "127.0.0.1",
-      "server_port": 40000
-    }
+    { "tag": "DirectConn", "type": "direct"},
+    { "type": "socks", "tag": "WARP", "server": "127.0.0.1", "server_port": 40000}
   ],
   "route": {
     "auto_detect_interface": true,
-    "default_domain_resolver": {
-      "server": "cloudflare"
-    },
+    "default_domain_resolver": { "server": "cloudflare"},
     "final": "DirectConn",
     "rule_set": [
       {
-        "tag": "rule-youtube",
-        "type": "remote",
-        "format": "binary",
-        "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/youtube.srs",
-        "download_detour": "DirectConn"
+        "tag": "rule-youtube", "type": "remote", "format": "binary", "download_detour": "DirectConn",
+        "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/youtube.srs"
       },
       {
-        "tag": "rule-google-domain",
-        "type": "remote",
-        "format": "binary",
-        "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/google.srs",
-        "download_detour": "DirectConn"
+        "tag": "rule-google-domain", "type": "remote", "format": "binary", "download_detour": "DirectConn",
+        "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/google.srs"
       },
       {
-        "tag": "rule-google-ip",
-        "type": "remote",
-        "format": "binary",
-        "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/google.srs",
-        "download_detour": "DirectConn"
+        "tag": "rule-google-ip", "type": "remote", "format": "binary","download_detour": "DirectConn",
+        "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/google.srs"
+
       },
       {
-        "tag": "rule-openai",
-        "type": "remote",
-        "format": "binary",
-        "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/openai.srs",
-        "download_detour": "DirectConn"
+        "tag": "rule-openai", "type": "remote", "format": "binary", "download_detour": "DirectConn",
+        "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/openai.srs"
       },
       {
-        "tag": "rule-anthropic",
-        "type": "remote",
-        "format": "binary",
-        "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/anthropic.srs",
-        "download_detour": "DirectConn"
+        "tag": "rule-anthropic", "type": "remote", "format": "binary", "download_detour": "DirectConn",
+        "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/anthropic.srs"
       },
       {
-        "tag": "rule-github",
-        "type": "remote",
-        "format": "binary",
-        "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/github.srs",
-        "download_detour": "DirectConn"
+        "tag": "rule-github", "type": "remote", "format": "binary", "download_detour": "DirectConn",
+        "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/github.srs"
       }
     ],
     "rules": [
-      {
-        "action": "sniff",
-        "timeout": "1s"
-      },
-      {
-        "action": "hijack-dns",
-        "mode": "or",
-        "rules": [
-          {
-            "port": 53
-          },
-          {
-            "protocol": "dns"
-          }
-        ],
-        "type": "logical"
-      },
-      {
-        "ip_is_private": true,
-        "outbound": "DirectConn"
-      },
-      {
-        "rule_set": [
-          "rule-youtube"
-        ],
-        "outbound": "DirectConn"
-      },
-      {
-        "rule_set": [
-          "rule-google-domain",
-          "rule-google-ip",
-          "rule-openai",
-          "rule-anthropic",
-          "rule-github"
-        ],
-        "outbound": "WARP"
-      }
+      { "action": "sniff", "timeout": "1s"},
+      { "action": "hijack-dns", "mode": "or", "rules": [ { "port": 53 }, { "protocol": "dns"}], "type": "logical" },
+      { "ip_is_private": true, "outbound": "DirectConn"},
+      { "rule_set": [ "rule-youtube","rule-github"], "outbound": "DirectConn" },
+      { "rule_set": [ "rule-google-domain", "rule-openai", "rule-anthropic",  "rule-google-ip" ], "outbound": "WARP" }
     ]
   },
-  "experimental": {
-    "cache_file": {
-      "enabled": true,
-      "path": "/etc/sing-box/cache.db"
-    }
-  },
-  "log": {
-    "disabled": false,
-    "level": "info",
-    "timestamp": true
-  }
+  "experimental": { "cache_file": { "enabled": true, "path": "/etc/sing-box/cache.db" } },
+  "log": { "disabled": false, "level": "info", "timestamp": true }
 }
