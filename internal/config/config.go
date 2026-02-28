@@ -14,8 +14,8 @@ type Config struct {
 	GUI       GUIConfig       `yaml:"gui"`
 	Hy2       Hy2Config       `yaml:"hy2"`
 	Tailscale TailscaleConfig `yaml:"tailscale"`
+	Server    ServerConfig    `yaml:"server"`
 }
-
 type Subscription struct {
 	Name          string `yaml:"name"`
 	URL           string `yaml:"url"`
@@ -40,6 +40,11 @@ type Hy2Config struct {
 
 type TailscaleConfig struct {
 	AuthKey string `yaml:"auth_key"`
+}
+
+type ServerConfig struct {
+	SBDomain string `yaml:"sb_domain"`
+	CFDNSKey string `yaml:"cf_dns_key"`
 }
 
 func Load(path string) (*Config, error) {
@@ -115,11 +120,23 @@ func MigrateConfig(path string) error {
 	// Example: migrate tailscale config
 	if !strings.Contains(content, "tailscale:") {
 		tailscaleBlock := `
-# (singctl update) 自动填补：Tailscale 自动化配置
+# (可选) Tailscale 部署配置
 tailscale:
-  auth_key: ""                                  # (可选) Tailscale 授权密钥，用于免交互自动注册节点
+  auth_key: ""                                  # (可选) Tailscale 授权密钥
 `
 		content += tailscaleBlock
+		needsSave = true
+	}
+
+	// Example: migrate server config
+	if !strings.Contains(content, "server:") {
+		serverBlock := `
+# (可选) 服务器部署配置
+server:
+  sb_domain: "sub.yourdomain.com"
+  cf_dns_key: "your_cloudflare_api_token"
+`
+		content += serverBlock
 		needsSave = true
 	}
 

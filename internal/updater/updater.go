@@ -4,12 +4,15 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 
-	"github.com/sixban6/ghinstall"
+	"singctl/internal/config"
 	"singctl/internal/fileutil"
 	"singctl/internal/logger"
+
+	"github.com/sixban6/ghinstall"
 )
 
 type Updater struct {
@@ -27,7 +30,7 @@ func New(mirrorURL, repoURL string) *Updater {
 	}
 }
 
-func (u *Updater) UpdateSelf() error {
+func (u *Updater) UpdateSelf(configPath string) error {
 	ctx := context.Background()
 
 	// 获取当前执行文件路径
@@ -71,6 +74,30 @@ func (u *Updater) UpdateSelf() error {
 		return fmt.Errorf("new executable not found in downloaded package: %w", err)
 	}
 
+	// 同步 configs 目录
+	var configsSrc string
+	filepath.Walk(tempDir, func(path string, info os.FileInfo, err error) error {
+		if err == nil && info.IsDir() && info.Name() == "configs" {
+			configsSrc = path
+			return filepath.SkipDir
+		}
+		return nil
+	})
+
+	if configsSrc != "" && configPath != "" {
+		configDir := filepath.Dir(configPath)
+		logger.Info("Syncing default configurations to %s...", configDir)
+		if err := fileutil.CopyDir(configsSrc, configDir); err != nil {
+			logger.Warn("Failed to sync configs directory: %v", err)
+		}
+
+		logger.Info("Migrating main configuration file...")
+		// 迁移主配置文件
+		if err := config.MigrateConfig(configPath); err != nil {
+			logger.Warn("Failed to migrate config %s: %v", configPath, err)
+		}
+	}
+
 	// 执行安全替换
 	if err := fileutil.SafeReplace(currentExe, newExe); err != nil {
 		return err
@@ -80,7 +107,6 @@ func (u *Updater) UpdateSelf() error {
 	logger.Info("Please restart the application to use the new version")
 	return nil
 }
-
 
 // selectSingCtlAsset 选择合适的 singctl 资源
 func (u *Updater) selectSingCtlAsset(assetName string) bool {
@@ -119,4 +145,3 @@ func (u *Updater) selectSingCtlAsset(assetName string) bool {
 
 	return true
 }
-

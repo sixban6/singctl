@@ -371,7 +371,11 @@ func (sb *SingBox) installOrUpdate(targetPath string) error {
 
 	defer os.RemoveAll(tempDir)
 
-	// 使用 ghinstall 配置下载到临时目录
+	mirror := sb.config.GitHub.MirrorURL
+	if mirror == "https://github.com" {
+		mirror = ""
+	}
+
 	cfg := &ghinstall.Config{
 		Github: []ghinstall.Repo{
 			{
@@ -379,7 +383,7 @@ func (sb *SingBox) installOrUpdate(targetPath string) error {
 				OutputDir: tempDir,
 			},
 		},
-		MirrorURL: sb.config.GitHub.MirrorURL,
+		MirrorURL: mirror,
 	}
 	// 2. 使用自定义过滤器
 	filter := ghinstall.CustomFilter(func(assets []ghinstall.Asset) (*ghinstall.Asset, error) {

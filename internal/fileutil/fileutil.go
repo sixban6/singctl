@@ -80,6 +80,45 @@ func CopyFile(src, dst string) error {
 	return err
 }
 
+// CopyDir recursively copies a directory tree, creating destination directories if they don't exist
+func CopyDir(src string, dst string) error {
+	srcInfo, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	if !srcInfo.IsDir() {
+		return fmt.Errorf("source is not a directory")
+	}
+
+	if err := os.MkdirAll(dst, srcInfo.Mode()); err != nil {
+		return err
+	}
+
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		srcPath := filepath.Join(src, entry.Name())
+		dstPath := filepath.Join(dst, entry.Name())
+
+		if entry.IsDir() {
+			if err := CopyDir(srcPath, dstPath); err != nil {
+				return err
+			}
+		} else {
+			// Skip overwriting existing files or copying configs over
+			if _, err := os.Stat(dstPath); os.IsNotExist(err) {
+				if err := CopyFile(srcPath, dstPath); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // FindExecutable 在目录中查找可执行文件
 func FindExecutable(dir string, namePattern string) (string, error) {
 	return findExecutableRecursive(dir, namePattern, 0)
