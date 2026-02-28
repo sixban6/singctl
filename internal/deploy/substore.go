@@ -10,8 +10,19 @@ import (
 	"singctl/internal/logger"
 )
 
+type Substore struct {
+	Config *config.Config
+	SSKey  string
+}
+
+func NewSubstore(cfg *config.Config, ssKey string) *Substore {
+	return &Substore{
+		Config: cfg, SSKey: ssKey,
+	}
+}
+
 // DeploySubstore handles Docker installation, password generation, and sub-store container rotation
-func DeploySubstore(cfg *config.Config) error {
+func (sb *Substore) DeploySubstore() error {
 	logger.Info("Starting Sub-Store deployment...")
 
 	// 1. Install Docker if not present
@@ -41,7 +52,7 @@ func DeploySubstore(cfg *config.Config) error {
 		return fmt.Errorf("failed to generate random string: %w", err)
 	}
 	ssKey := strings.TrimSpace(string(out))
-
+	sb.SSKey = ssKey
 	// 4. Remove old container if it exists
 	logger.Info("Removing old sub-store container (if exists)...")
 	_ = runCmd("docker", "rm", "-f", "sub-store")
@@ -63,17 +74,19 @@ func DeploySubstore(cfg *config.Config) error {
 		return fmt.Errorf("failed to run sub-store docker container: %w", err)
 	}
 
+	return nil
+}
+
+func (sb *Substore) ShowLoginInfo() {
 	// 6. Print Admin URL
 	logger.Success("Sub-Store deployed successfully!")
 	fmt.Println("\n========================================================")
 	fmt.Println("🔒 Sub-Store Admin Access URL:")
-	fmt.Printf("https://%s:9443/%s\n", cfg.Server.SBDomain, ssKey)
+	fmt.Printf("https://%s:9443/%s\n", sb.Config.Server.SBDomain, sb.SSKey)
 	fmt.Println("========================================================")
-
-	return nil
 }
 
-func UninstallSubstore() error {
+func (sb *Substore) UninstallSubstore() error {
 	logger.Info("Uninstalling Sub-Store...")
 
 	// Remove the container
