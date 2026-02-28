@@ -17,11 +17,37 @@ import (
 	"singctl/internal/singbox"
 )
 
+type SingBoxServer struct {
+	crtPath string
+	keyPath string
+
+	hyUUID     string
+	privateKey string
+	publicKey  string
+	shortID    string
+	cfg        *config.Config
+}
+
+func NewSingBoxServer(cfg *config.Config) *SingBoxServer {
+	sbs := &SingBoxServer{cfg: cfg}
+	sbs.init()
+	return sbs
+}
+
+func (sbs *SingBoxServer) init() {
+	sbs.initCaddyCertPath()
+	err := sbs.initVRParams()
+	if err != nil {
+		logger.Info("Init VR Protocol Params Failed")
+		return
+	}
+}
+
 // getCaddyCertPath waits and finds the actual cert path Caddy generated (Let's Encrypt or ZeroSSL)
-func getCaddyCertPath(domain string) (string, string) {
+func (sbs *SingBoxServer) initCaddyCertPath() {
 	basePath := "/var/lib/caddy/.local/share/caddy/certificates"
 
-	logger.Info("Waiting for Caddy to generate certificates for %s...", domain)
+	logger.Info("Waiting for Caddy to generate certificates for %s...", sbs.cfg.Server.SBDomain)
 	for i := 0; i < 30; i++ {
 		dirs, err := os.ReadDir(basePath)
 		if err == nil {
@@ -29,12 +55,13 @@ func getCaddyCertPath(domain string) (string, string) {
 				if !d.IsDir() {
 					continue
 				}
-				crtPath := filepath.Join(basePath, d.Name(), domain, domain+".crt")
-				keyPath := filepath.Join(basePath, d.Name(), domain, domain+".key")
+				crtPath := filepath.Join(basePath, d.Name(), sbs.cfg.Server.SBDomain, sbs.cfg.Server.SBDomain+".crt")
+				keyPath := filepath.Join(basePath, d.Name(), sbs.cfg.Server.SBDomain, sbs.cfg.Server.SBDomain+".key")
 				if _, err := os.Stat(crtPath); err == nil {
 					if _, err := os.Stat(keyPath); err == nil {
 						logger.Success("Found certificate at %s", crtPath)
-						return crtPath, keyPath
+						sbs.crtPath = crtPath
+						sbs.keyPath = keyPath
 					}
 				}
 			}
@@ -43,20 +70,10 @@ func getCaddyCertPath(domain string) (string, string) {
 	}
 
 	logger.Warn("Timeout waiting for Caddy certs, using Let's Encrypt fallback path")
-	return filepath.Join(basePath, "acme-v02.api.letsencrypt.org-directory", domain, domain+".crt"),
-		filepath.Join(basePath, "acme-v02.api.letsencrypt.org-directory", domain, domain+".key")
+	sbs.crtPath = filepath.Join(basePath, "acme-v02.api.letsencrypt.org-directory", sbs.cfg.Server.SBDomain, sbs.cfg.Server.SBDomain+".crt")
+	sbs.keyPath = filepath.Join(basePath, "acme-v02.api.letsencrypt.org-directory", sbs.cfg.Server.SBDomain, sbs.cfg.Server.SBDomain+".key")
 }
-
-// DeploySingbox handles sing-box installation, config rendering, and outputs URL
-func DeploySingbox(cfg *config.Config) error {
-	logger.Info("Starting Sing-box Server deployment...")
-
-	// 1. Install or update Sing-box by reusing the internal installation logic
-	logger.Info("Installing/Updating sing-box core...")
-	sb := singbox.New(cfg)
-	if err := sb.Install(); err != nil {
-		return fmt.Errorf("failed to install sing-box: %w", err)
-	}
+func (sbs *SingBoxServer) initVRParams() error {
 
 	// 2. Generate a new UUID
 	logger.Info("Generating new UUID for Hysteria2 and VLESS...")
@@ -65,7 +82,7 @@ func DeploySingbox(cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("failed to generate sing-box uuid: %w", err)
 	}
-	hyUUID := strings.TrimSpace(string(out))
+	sbs.hyUUID = strings.TrimSpace(string(out))
 
 	// Generate Reality Keypair
 	logger.Info("Generating VLESS Reality Keypair...")
@@ -74,12 +91,11 @@ func DeploySingbox(cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("failed to generate reality keypair: %w", err)
 	}
-	var privateKey, publicKey string
 	for _, line := range strings.Split(string(keyOut), "\n") {
 		if strings.HasPrefix(line, "PrivateKey: ") {
-			privateKey = strings.TrimSpace(strings.TrimPrefix(line, "PrivateKey: "))
+			sbs.privateKey = strings.TrimSpace(strings.TrimPrefix(line, "PrivateKey: "))
 		} else if strings.HasPrefix(line, "PublicKey: ") {
-			publicKey = strings.TrimSpace(strings.TrimPrefix(line, "PublicKey: "))
+			sbs.publicKey = strings.TrimSpace(strings.TrimPrefix(line, "PublicKey: "))
 		}
 	}
 
@@ -89,12 +105,24 @@ func DeploySingbox(cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("failed to generate short id: %w", err)
 	}
-	shortID := strings.TrimSpace(string(sidOut))
+	sbs.shortID = strings.TrimSpace(string(sidOut))
+	return nil
+}
+
+// DeploySingbox handles sing-box installation, config rendering, and outputs URL
+func (sbs *SingBoxServer) DeploySingbox() error {
+	logger.Info("Starting Sing-box Server deployment...")
+
+	// 1. Install or update Sing-box by reusing the internal installation logic
+	logger.Info("Installing/Updating sing-box core...")
+	sb := singbox.New(sbs.cfg)
+	if err := sb.Install(); err != nil {
+		return fmt.Errorf("failed to install sing-box: %w", err)
+	}
 
 	// 3. Render and save config.json
 	logger.Info("Rendering and saving sing-box config.json...")
-	crt, key := getCaddyCertPath(cfg.Server.SBDomain)
-	if err := renderSingboxConfig(cfg, hyUUID, crt, key, privateKey, shortID); err != nil {
+	if err := sbs.renderSingboxConfig(); err != nil {
 		return err
 	}
 
@@ -110,9 +138,13 @@ func DeploySingbox(cfg *config.Config) error {
 		return fmt.Errorf("failed to restart sing-box service: %w", err)
 	}
 
+	return nil
+}
+
+func (sbs *SingBoxServer) ShowLoginInfo() {
 	// 5. Print high-visibility output
-	shareLinkHy2 := fmt.Sprintf("hysteria2://%s@%s:52021/?sni=%s&alpn=h3&insecure=0#Hysteria2-Node", hyUUID, cfg.Server.SBDomain, cfg.Server.SBDomain)
-	shareLinkVless := fmt.Sprintf("vless://%s@%s:8443?type=tcp&security=reality&pbk=%s&fp=chrome&sni=www.microsoft.com&sid=%s&flow=xtls-rprx-vision#VLESS-Reality-Node", hyUUID, cfg.Server.SBDomain, publicKey, shortID)
+	shareLinkHy2 := fmt.Sprintf("hysteria2://%s@%s:52021/?sni=%s&alpn=h3&insecure=0#Hysteria2-Node", sbs.hyUUID, sbs.cfg.Server.SBDomain, sbs.cfg.Server.SBDomain)
+	shareLinkVless := fmt.Sprintf("vless://%s@%s:8443?type=tcp&security=reality&pbk=%s&fp=chrome&sni=www.microsoft.com&sid=%s&flow=xtls-rprx-vision#VLESS-Reality-Node", sbs.hyUUID, sbs.cfg.Server.SBDomain, sbs.publicKey, sbs.shortID)
 
 	logger.Success("Sing-box Server deployed successfully!")
 	fmt.Println("\n========================================================")
@@ -121,11 +153,9 @@ func DeploySingbox(cfg *config.Config) error {
 	fmt.Println("\n🚀 VLESS Reality Access Link (Copy to your client):")
 	fmt.Printf("%s\n", shareLinkVless)
 	fmt.Println("========================================================")
-
-	return nil
 }
 
-func renderSingboxConfig(cfg *config.Config, hyUUID, crtPath, keyPath, privKey, shortID string) error {
+func (sbs *SingBoxServer) renderSingboxConfig() error {
 	tmplData, err := templateFiles.ReadFile("templates/server_config.json")
 	if err != nil {
 		return fmt.Errorf("could not read embedded sing-box template: %w", err)
@@ -145,12 +175,12 @@ func renderSingboxConfig(cfg *config.Config, hyUUID, crtPath, keyPath, privKey, 
 		RealityShortID    string
 	}
 	ctx := tmplContext{
-		HyUUID:            hyUUID,
-		SBDomain:          cfg.Server.SBDomain,
-		CertPath:          crtPath,
-		KeyPath:           keyPath,
-		RealityPrivateKey: privKey,
-		RealityShortID:    shortID,
+		HyUUID:            sbs.hyUUID,
+		SBDomain:          sbs.cfg.Server.SBDomain,
+		CertPath:          sbs.crtPath,
+		KeyPath:           sbs.keyPath,
+		RealityPrivateKey: sbs.privateKey,
+		RealityShortID:    sbs.shortID,
 	}
 
 	var buf bytes.Buffer
@@ -166,7 +196,7 @@ func renderSingboxConfig(cfg *config.Config, hyUUID, crtPath, keyPath, privKey, 
 }
 
 // UninstallServer uninstalls sing-box from the server
-func UninstallSingbox() error {
+func (sbs *SingBoxServer) UninstallSingbox() error {
 	logger.Info("Uninstalling sing-box server...")
 
 	// Stop and disable service

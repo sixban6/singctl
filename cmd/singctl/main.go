@@ -410,15 +410,15 @@ func serverCmd() *cobra.Command {
 		Use:   "server",
 		Short: "Server deployment commands",
 	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return nil
+	}
 
 	deployCmd := &cobra.Command{
 		Use:   "install",
 		Short: "install server components. Optionally specify: common|caddy|singbox|substore",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load(configPath)
-			if err != nil {
-				return err
-			}
 
 			// Verify required config
 			if cfg.Server.SBDomain == "" || cfg.Server.CFDNSKey == "" {
@@ -430,21 +430,29 @@ func serverCmd() *cobra.Command {
 				if err := deploy.DeployCommon(); err != nil {
 					return err
 				}
-				if err := deploy.DeployCaddy(cfg); err != nil {
-					return err
-				}
-				if err := deploy.DeploySingbox(cfg); err != nil {
-					return err
-				}
-				if err := deploy.DeploySubstore(cfg); err != nil {
-					return err
-				}
 				if err := deploy.DeployWarp(); err != nil {
 					return err
 				}
+				if err := deploy.DeployCaddy(cfg); err != nil {
+					return err
+				}
+				sbs := deploy.NewSingBoxServer(cfg)
+				if err := sbs.DeploySingbox(); err != nil {
+					return err
+				}
+
+				sbt := deploy.NewSubstore(cfg, "")
+				if err := sbt.DeploySubstore(); err != nil {
+					return err
+				}
+
+				sbs.ShowLoginInfo()
+				sbt.ShowLoginInfo()
 				return nil
 			}
 
+			sbs := deploy.NewSingBoxServer(cfg)
+			sbt := deploy.Substore{Config: cfg, SSKey: ""}
 			// Handle specified targets
 			switch args[0] {
 			case "common":
@@ -452,9 +460,9 @@ func serverCmd() *cobra.Command {
 			case "caddy":
 				return deploy.DeployCaddy(cfg)
 			case "singbox":
-				return deploy.DeploySingbox(cfg)
+				return sbs.DeploySingbox()
 			case "substore":
-				return deploy.DeploySubstore(cfg)
+				return sbt.DeploySubstore()
 			case "warp":
 				return deploy.DeployWarp()
 			default:
@@ -473,12 +481,13 @@ func serverCmd() *cobra.Command {
 				if err := deploy.UninstallCaddy(); err != nil {
 					logger.Warn("Failed to uninstall Caddy: %v", err)
 				}
-
-				if err := deploy.UninstallSingbox(); err != nil {
+				sbs := deploy.NewSingBoxServer(cfg)
+				if err := sbs.UninstallSingbox(); err != nil {
 					logger.Warn("Failed to uninstall sing-box: %v", err)
 				}
 
-				if err := deploy.UninstallSubstore(); err != nil {
+				sst := deploy.NewSubstore(cfg, "")
+				if err := sst.UninstallSubstore(); err != nil {
 					logger.Warn("Failed to uninstall Sub-Store: %v", err)
 				}
 
@@ -488,6 +497,9 @@ func serverCmd() *cobra.Command {
 				logger.Success("All specified server components have been uninstalled.")
 				return nil
 			}
+
+			sbs := deploy.NewSingBoxServer(cfg)
+			sbt := deploy.Substore{Config: cfg, SSKey: ""}
 			target := args[0]
 			switch target {
 			case "caddy":
@@ -495,11 +507,11 @@ func serverCmd() *cobra.Command {
 					return err
 				}
 			case "singbox":
-				if err := deploy.UninstallSingbox(); err != nil {
+				if err := sbs.UninstallSingbox(); err != nil {
 					return err
 				}
 			case "substore":
-				if err := deploy.UninstallSubstore(); err != nil {
+				if err := sbt.UninstallSubstore(); err != nil {
 					return err
 				}
 			case "warp":
