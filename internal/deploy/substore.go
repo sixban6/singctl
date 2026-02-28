@@ -86,7 +86,7 @@ func (sb *Substore) ShowLoginInfo() {
 	fmt.Println("========================================================")
 }
 
-func (sb *Substore) UninstallSubstore() error {
+func UninstallSubstore() error {
 	logger.Info("Uninstalling Sub-Store...")
 
 	// Remove the container

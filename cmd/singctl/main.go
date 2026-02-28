@@ -481,13 +481,12 @@ func serverCmd() *cobra.Command {
 				if err := deploy.UninstallCaddy(); err != nil {
 					logger.Warn("Failed to uninstall Caddy: %v", err)
 				}
-				sbs := deploy.NewSingBoxServer(cfg)
-				if err := sbs.UninstallSingbox(); err != nil {
+
+				if err := deploy.UninstallSingbox(); err != nil {
 					logger.Warn("Failed to uninstall sing-box: %v", err)
 				}
 
-				sst := deploy.NewSubstore(cfg, "")
-				if err := sst.UninstallSubstore(); err != nil {
+				if err := deploy.UninstallSubstore(); err != nil {
 					logger.Warn("Failed to uninstall Sub-Store: %v", err)
 				}
 
@@ -497,9 +496,7 @@ func serverCmd() *cobra.Command {
 				logger.Success("All specified server components have been uninstalled.")
 				return nil
 			}
-
-			sbs := deploy.NewSingBoxServer(cfg)
-			sbt := deploy.Substore{Config: cfg, SSKey: ""}
+			
 			target := args[0]
 			switch target {
 			case "caddy":
@@ -507,11 +504,11 @@ func serverCmd() *cobra.Command {
 					return err
 				}
 			case "singbox":
-				if err := sbs.UninstallSingbox(); err != nil {
+				if err := deploy.UninstallSingbox(); err != nil {
 					return err
 				}
 			case "substore":
-				if err := sbt.UninstallSubstore(); err != nil {
+				if err := deploy.UninstallSubstore(); err != nil {
 					return err
 				}
 			case "warp":
