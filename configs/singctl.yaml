@@ -17,8 +17,8 @@ github:
   mirror_url: "https://gh-proxy.com"            # GitHub镜像地址,用于加速
 
 gui:
-  mac_url: "https://github.com/SagerNet/sing-box/releases/download/v1.13.0-rc.5/SFM-1.13.0-rc.5-Apple.pkg"
-  win_url: "https://github.com/SagerNet/sing-box/releases/download/v1.13.0-rc.5/sing-box-1.13.0-rc.5-windows-amd64.zip"
+  mac_url: "https://github.com/SagerNet/sing-box/releases/download/v1.13.0/SFM-1.13.0-Apple.pkg"
+  win_url: "https://github.com/SagerNet/sing-box/releases/download/v1.13.0/sing-box-1.13.0-windows-amd64.zip"
   app_name: "SFM"
 
 tailscale:                                      # (可选) Tailscale 部署配置

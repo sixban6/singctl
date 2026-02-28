@@ -396,19 +396,19 @@ show_completion_info() {
     echo_info "配置文件: $CONFIG_FILE"
     printf "\n"
     echo_info "常用命令:"
-    echo " singctl version               - 查看版本信息"
-    echo " singctl gen                   - 生成配置"
-    echo " sudo singctl start            - 启动singbox服务"
-    echo " sudo singctl stop             - 停止singbox服务"
-    echo " sudo singctl install sb       - 安装 sing-box"
-    echo " sudo singctl gen              - 生成配置到默认位置, 并备份原始配置"
+    echo " singctl version          - 查看版本信息"
+    echo " singctl gen              - 生成配置到默认位置, 并备份原始配置"
+    echo " singctl sb start         - 启动singbox服务"
+    echo " singctl sb stop          - 停止singbox服务"
+    echo " singctl sb install       - 安装 sing-box"
+
     printf "\n"
     
     if [ -f "$CONFIG_FILE" ]; then
         echo_info "下一步操作:"
-        echo "1. 编辑配置文件 (如需要): sudo nano $CONFIG_FILE"
-        echo "2. 安装 sing-box: sudo singctl install sb"
-        echo "3. 启动服务: sudo singctl start"
+        echo "1. 编辑配置文件 (如需要): vim $CONFIG_FILE"
+        echo "2. 安装 sing-box:singctl sb install"
+        echo "3. 启动服务:  singctl sb start"
     else
         echo_warning "请手动创建并配置 $CONFIG_FILE"
     fi
