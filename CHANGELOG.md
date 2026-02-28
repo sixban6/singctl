@@ -1,3 +1,10 @@
+# [1.18.0](https://github.com/sixban6/singctl/compare/v1.17.17...v1.18.0) (2026-02-28)
+
+
+### Features
+
+* support auto deploy server ([f6bcc8b](https://github.com/sixban6/singctl/commit/f6bcc8b7b14612001290680d5ccf076868f6d4e7))
+
 ## [1.17.17](https://github.com/sixban6/singctl/compare/v1.17.16...v1.17.17) (2026-02-27)
 
 
