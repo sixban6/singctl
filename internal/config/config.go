@@ -59,16 +59,16 @@ func Load(path string) (*Config, error) {
 	}
 
 	if cfg.GitHub.MirrorURL == "" {
-		cfg.GitHub.MirrorURL = "https://github.com"
+		cfg.GitHub.MirrorURL = "https://gh-proxy.com"
 	}
 	if cfg.GUI.AppName == "" {
 		cfg.GUI.AppName = "SFM"
 	}
 	if cfg.Hy2.Up == 0 {
-		cfg.Hy2.Up = 30
+		cfg.Hy2.Up = 21
 	}
 	if cfg.Hy2.Down == 0 {
-		cfg.Hy2.Down = 300
+		cfg.Hy2.Down = 200
 	}
 
 	return &cfg, nil
