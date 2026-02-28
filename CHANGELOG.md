@@ -1,3 +1,10 @@
+## [1.18.10](https://github.com/sixban6/singctl/compare/v1.18.9...v1.18.10) (2026-02-28)
+
+
+### Bug Fixes
+
+* sing-box install bug ([926620b](https://github.com/sixban6/singctl/commit/926620b0de0a11d03993c745f76a94245e6f0f5f))
+
 ## [1.18.9](https://github.com/sixban6/singctl/compare/v1.18.8...v1.18.9) (2026-02-28)
 
 
