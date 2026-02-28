@@ -8,8 +8,9 @@ SingCtl是多功能网络工具。可以用管理singbox客户端和服务端，
 
 ## Features
 - 🚀 **跨平台支持**: 一条命令跨平台安全的使用singbox
-- 📡 **多协议支持**: VMess, VLESS, Trojan, Hysteria2, Shadowsocks, TUIC
+- 📡 **多协议支持**: VLESS, Trojan, Hysteria2, Shadowsocks, TUIC
 - 🔧 **防止DNS泄漏**: 配置文件已经把国内IP和国外IP的DNS请求分开处理
+- 🍚 **服务端部署**: 自动部署singbox服务端
 
 
 ## Installation
