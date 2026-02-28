@@ -19,26 +19,6 @@ import (
 	"github.com/sixban6/ghinstall"
 )
 
-// getSingBoxInstallDir 返回适合当前系统的 sing-box 安装路径
-func getSingBoxInstallDir() string {
-	switch runtime.GOOS {
-	case "windows":
-		return filepath.Join(os.Getenv("LOCALAPPDATA"), "Programs", "sing-box", "sing-box.exe")
-	case "linux":
-		// 检查是否为 OpenWrt 系统
-		if _, err := os.Stat("/etc/openwrt_release"); err == nil {
-			return "/usr/bin/sing-box"
-		}
-		if _, err := os.Stat("/etc/openwrt_version"); err == nil {
-			return "/usr/bin/sing-box"
-		}
-		return "/usr/local/bin/sing-box"
-	default:
-		// macOS等其他系统
-		return "/usr/local/bin/sing-box"
-	}
-}
-
 type SingBox struct {
 	config          *config.Config
 	configPath      string
@@ -46,19 +26,10 @@ type SingBox struct {
 }
 
 func New(cfg *config.Config) *SingBox {
-	var configPath string
-	if runtime.GOOS == "windows" {
-		configPath = filepath.Join(os.Getenv("LOCALAPPDATA"), "sing-box", "config.json")
-	} else if runtime.GOOS == "darwin" {
-		home, _ := os.UserHomeDir()
-		configPath = filepath.Join(home, "Documents", "sing-box-config.json")
-	} else {
-		configPath = "/etc/sing-box/config.json"
-	}
 
 	return &SingBox{
 		config:          cfg,
-		configPath:      configPath,
+		configPath:      fileutil.GetSingboxConfigPath(),
 		configGenerator: NewConfigGenerator(cfg),
 	}
 }
@@ -160,7 +131,7 @@ func (sb *SingBox) ValidateConfig() error {
 		return fmt.Errorf("config file is empty or contains no valid configuration")
 	}
 
-	exe := getSingBoxInstallDir()
+	exe := fileutil.GetSingBoxInstallDir()
 	cmd := exec.Command(exe, "check", "-c", sb.configPath)
 	// 使用 sing-box check 命令验证配置
 	//cmd := exec.Command("sing-box", "check", "-c", sb.configPath)
@@ -211,7 +182,7 @@ func (sb *SingBox) Install() error {
 	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
 		return sb.InstallGUI()
 	}
-	return sb.installOrUpdate(getSingBoxInstallDir())
+	return sb.installOrUpdate(fileutil.GetSingBoxInstallDir())
 }
 
 // InstallGUI 安装 GUI 客户端
@@ -475,5 +446,5 @@ func (sb *SingBox) selectSingBoxAsset(assetName string) bool {
 
 // Update 更新 sing-box
 func (sb *SingBox) Update() error {
-	return sb.installOrUpdate(getSingBoxInstallDir())
+	return sb.installOrUpdate(fileutil.GetSingBoxInstallDir())
 }

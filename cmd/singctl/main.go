@@ -412,8 +412,8 @@ func serverCmd() *cobra.Command {
 	}
 
 	deployCmd := &cobra.Command{
-		Use:   "deploy",
-		Short: "Deploy server components. Optionally specify: common|caddy|singbox|substore",
+		Use:   "install",
+		Short: "install server components. Optionally specify: common|caddy|singbox|substore",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.Load(configPath)
 			if err != nil {
@@ -436,7 +436,7 @@ func serverCmd() *cobra.Command {
 				if err := deploy.DeploySingbox(cfg); err != nil {
 					return err
 				}
-				if err := deploy.DeploySubstore(); err != nil {
+				if err := deploy.DeploySubstore(cfg); err != nil {
 					return err
 				}
 				if err := deploy.DeployWarp(); err != nil {
@@ -454,7 +454,7 @@ func serverCmd() *cobra.Command {
 			case "singbox":
 				return deploy.DeploySingbox(cfg)
 			case "substore":
-				return deploy.DeploySubstore()
+				return deploy.DeploySubstore(cfg)
 			case "warp":
 				return deploy.DeployWarp()
 			default:
@@ -463,6 +463,57 @@ func serverCmd() *cobra.Command {
 		},
 	}
 
+	uninstallCmd := &cobra.Command{
+		Use:   "uninstall",
+		Short: "Uninstall server components. Optionally specify: caddy|singbox|substore|warp",
+		RunE: func(cmd *cobra.Command, args []string) error {
+
+			if len(args) == 0 {
+				logger.Info("Uninstalling all server components...")
+				if err := deploy.UninstallCaddy(); err != nil {
+					logger.Warn("Failed to uninstall Caddy: %v", err)
+				}
+
+				if err := deploy.UninstallSingbox(); err != nil {
+					logger.Warn("Failed to uninstall sing-box: %v", err)
+				}
+
+				if err := deploy.UninstallSubstore(); err != nil {
+					logger.Warn("Failed to uninstall Sub-Store: %v", err)
+				}
+
+				if err := deploy.UninstallWarp(); err != nil {
+					logger.Warn("Failed to uninstall WARP: %v", err)
+				}
+				logger.Success("All specified server components have been uninstalled.")
+				return nil
+			}
+			target := args[0]
+			switch target {
+			case "caddy":
+				if err := deploy.UninstallCaddy(); err != nil {
+					return err
+				}
+			case "singbox":
+				if err := deploy.UninstallSingbox(); err != nil {
+					return err
+				}
+			case "substore":
+				if err := deploy.UninstallSubstore(); err != nil {
+					return err
+				}
+			case "warp":
+				if err := deploy.UninstallWarp(); err != nil {
+					return err
+				}
+			default:
+				return fmt.Errorf("unknown target: %s (must be caddy, singbox, substore, or warp)", target)
+			}
+			return nil
+		},
+	}
+
 	cmd.AddCommand(deployCmd)
+	cmd.AddCommand(uninstallCmd)
 	return cmd
 }

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"singctl/internal/config"
+	"singctl/internal/fileutil"
 	"singctl/internal/logger"
 	"singctl/internal/singbox"
 )
@@ -162,4 +163,33 @@ func renderSingboxConfig(cfg *config.Config, hyUUID, crtPath, keyPath, privKey, 
 	}
 
 	return os.WriteFile("/etc/sing-box/config.json", buf.Bytes(), 0644)
+}
+
+// UninstallServer uninstalls sing-box from the server
+func UninstallSingbox() error {
+	logger.Info("Uninstalling sing-box server...")
+
+	// Stop and disable service
+	_ = exec.Command("systemctl", "stop", "sing-box").Run()
+	_ = exec.Command("systemctl", "disable", "sing-box").Run()
+
+	// Remove service file
+	if err := os.Remove("/etc/systemd/system/sing-box.service"); err != nil && !os.IsNotExist(err) {
+		logger.Warn("Failed to remove sing-box.service: %v", err)
+	}
+	_ = exec.Command("systemctl", "daemon-reload").Run()
+
+	// Remove executable
+	exe := fileutil.GetSingBoxInstallDir()
+	if err := os.Remove(exe); err != nil && !os.IsNotExist(err) {
+		logger.Warn("Failed to remove sing-box executable: %v", err)
+	}
+
+	// Remove configs
+	if err := os.RemoveAll(filepath.Dir(fileutil.GetSingboxConfigPath())); err != nil {
+		logger.Warn("Failed to remove sing-box config directory: %v", err)
+	}
+
+	logger.Success("Sing-box uninstallation completed.")
+	return nil
 }

@@ -1,5 +1,7 @@
 #!/bin/bash
+# 开启错误中断，并确保管道命令的错误也会被捕获
 set -e
+set -o pipefail
 
 echo "Starting WARP (wireproxy) deployment..."
 echo "Downloading WARP script..."
@@ -9,15 +11,12 @@ chmod +x menu.sh
 
 echo "Executing WARP installation (wireproxy on port 40000)..."
 
-# fscarmen 的脚本支持通过环境变量提前指定语言，跳过交互提示
-# L=C 代表中文，L=E 代表英文
+# 设置环境变量，指定中文并跳过语言交互
 export L=C
 
-# 移除 || true，通过 if 语句真实捕获安装结果
-# 使用 sed 修改 menu.sh 跳过 reading 输入，直接给 WIREPROXY_CHOOSE 赋值 1
-sed -i 's/reading " $(text 50) " WIREPROXY_CHOOSE/WIREPROXY_CHOOSE=1/' menu.sh
-
-if bash ./menu.sh w 40000; then
+# 使用 echo 将 "1" 通过管道传给脚本，模拟用户键盘输入 "1" 后回车
+# 这样即使原作者修改了代码中的提示文字，只要逻辑还是“输入1选择默认”，就不会受影响
+if echo "1" | bash ./menu.sh w 40000; then
     echo "WARP (wireproxy) deployed successfully on 127.0.0.1:40000"
 else
     echo "Error: WARP (wireproxy) deployment failed. Please check the logs above."

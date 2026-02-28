@@ -10,6 +10,16 @@ import (
 	"singctl/internal/logger"
 )
 
+// UninstallCaddy uninstalls Caddy and removes its configuration
+func UninstallCaddy() error {
+	logger.Info("Uninstalling Caddy...")
+	if err := runEmbeddedScript("uninstall_caddy.sh"); err != nil {
+		return fmt.Errorf("caddy uninstallation failed: %w", err)
+	}
+	logger.Success("Caddy uninstallation completed.")
+	return nil
+}
+
 // DeployCaddy handles the installation and configuration of Caddy + Cloudflare DNS plugin
 func DeployCaddy(cfg *config.Config) error {
 	logger.Info("Starting Caddy deployment...")
