@@ -1,3 +1,10 @@
+## [1.18.6](https://github.com/sixban6/singctl/compare/v1.18.5...v1.18.6) (2026-02-28)
+
+
+### Bug Fixes
+
+* uninstall server ([c9fe75d](https://github.com/sixban6/singctl/commit/c9fe75dc88697b09dfaff0fd1baa8805a3bdecce))
+
 ## [1.18.5](https://github.com/sixban6/singctl/compare/v1.18.4...v1.18.5) (2026-02-28)
 
 
