@@ -10,7 +10,7 @@ if ! command -v ufw &> /dev/null; then
 fi
 
 # 2. Configure UFW Rules
-for port in 22 2222 443 8443 52021; do
+for port in 22 2222 443; do
     echo "Allowing port $port..."
     ufw allow "$port" || true
 done
