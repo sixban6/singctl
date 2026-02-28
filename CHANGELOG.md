@@ -1,3 +1,10 @@
+# [1.19.0](https://github.com/sixban6/singctl/compare/v1.18.10...v1.19.0) (2026-02-28)
+
+
+### Features
+
+* refactor cmd ([adf528b](https://github.com/sixban6/singctl/commit/adf528bca84bca199ba2b1992791d6f61d443df6))
+
 ## [1.18.10](https://github.com/sixban6/singctl/compare/v1.18.9...v1.18.10) (2026-02-28)
 
 
