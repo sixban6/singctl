@@ -196,7 +196,7 @@ func (sbs *SingBoxServer) renderSingboxConfig() error {
 }
 
 // UninstallServer uninstalls sing-box from the server
-func (sbs *SingBoxServer) UninstallSingbox() error {
+func UninstallSingbox() error {
 	logger.Info("Uninstalling sing-box server...")
 
 	// Stop and disable service
