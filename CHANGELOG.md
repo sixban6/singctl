@@ -1,3 +1,10 @@
+## [1.19.4](https://github.com/sixban6/singctl/compare/v1.19.3...v1.19.4) (2026-02-28)
+
+
+### Bug Fixes
+
+* refactor cmd ([fd7c7ea](https://github.com/sixban6/singctl/commit/fd7c7ea96a04c42b309fdf22afba4ccbb01cfc41))
+
 ## [1.19.3](https://github.com/sixban6/singctl/compare/v1.19.2...v1.19.3) (2026-02-28)
 
 
