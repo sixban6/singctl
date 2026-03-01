@@ -26,11 +26,11 @@
       ],
       "tls": {
         "enabled": true,
-        "server_name": "www.microsoft.com",
+        "server_name": "swdist.apple.com",
         "reality": {
           "enabled": true,
           "handshake": {
-            "server": "www.microsoft.com",
+            "server": "swdist.apple.com",
             "server_port": 443
           },
           "private_key": "{{.RealityPrivateKey}}",
