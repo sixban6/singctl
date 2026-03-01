@@ -7,6 +7,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"os/exec"
+	"singctl/internal/logger"
 	"strings"
 	"time"
 )
@@ -154,4 +157,111 @@ func IsPrivateIP(ipStr string) bool {
 	}
 
 	return false
+}
+
+// getLANSubnet 获取用于通告的本地子网。
+// 在 OpenWrt 上优先尝试从 uci network.lan.ipaddr 获取。
+// 若失败或非 OpenWrt，尝试通过 ip route 获取默认网络接口的子网。
+func GetLANSubnet() (string, error) {
+	if IsOpenWrt() {
+		// 尝试 OpenWrt 方式
+		sub, err := getOpenWrtLANSubnet()
+		if err == nil {
+			return sub, nil
+		}
+		logger.Warn("Failed to get LAN subnet via uci, falling back to routing table: %v", err)
+	}
+
+	// 通用 Linux 方式
+	return getDefaultInterfaceSubnet()
+}
+
+func IsOpenWrt() bool {
+	if _, err := os.Stat("/etc/openwrt_release"); err == nil {
+		return true
+	}
+	if _, err := os.Stat("/etc/openwrt_version"); err == nil {
+		return true
+	}
+	return false
+}
+
+// getOpenWrtLANSubnet 从 UCI 配置中获取 LAN 接口的子网信息
+func getOpenWrtLANSubnet() (string, error) {
+	// 获取 LAN 接口的 IP 地址
+	out, err := exec.Command("uci", "get", "network.lan.ipaddr").Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to get LAN IP: %w", err)
+	}
+	ipAddr := strings.TrimSpace(string(out))
+
+	// 获取 LAN 接口的子网掩码
+	out, err = exec.Command("uci", "get", "network.lan.netmask").Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to get LAN netmask: %w", err)
+	}
+	netmask := strings.TrimSpace(string(out))
+
+	// 将 IP 和子网掩码转换为 CIDR 格式
+	ip := net.ParseIP(ipAddr)
+	if ip == nil {
+		return "", fmt.Errorf("invalid IP address: %s", ipAddr)
+	}
+
+	mask := net.ParseIP(netmask)
+	if mask == nil {
+		return "", fmt.Errorf("invalid netmask: %s", netmask)
+	}
+
+	// 转换为 IPMask
+	ipMask := net.IPMask(mask.To4())
+	ones, _ := ipMask.Size()
+
+	// 计算网络地址
+	network := ip.Mask(ipMask)
+
+	// 返回 CIDR 格式的子网
+	return fmt.Sprintf("%s/%d", network.String(), ones), nil
+}
+
+// getDefaultInterfaceSubnet 通过 ip route 获取默认接口的子网
+func getDefaultInterfaceSubnet() (string, error) {
+	// 1. 获取默认路由出接口
+	out, err := exec.Command("ip", "-o", "route", "get", "8.8.8.8").Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to get default route: %w", err)
+	}
+
+	fields := strings.Fields(string(out))
+	var netdev string
+	for i, field := range fields {
+		if field == "dev" && i+1 < len(fields) {
+			netdev = fields[i+1]
+			break
+		}
+	}
+
+	if netdev == "" {
+		return "", fmt.Errorf("could not determine default network interface")
+	}
+
+	// 2. 获取该接口的子网
+	out, err = exec.Command("ip", "-o", "-f", "inet", "route", "show", "dev", netdev, "scope", "link").Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to get route for interface %s: %w", netdev, err)
+	}
+
+	lines := strings.Split(string(out), "\n")
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		parts := strings.Fields(line)
+		if len(parts) > 0 {
+			subnet := parts[0] // e.g., 192.168.1.0/24
+			return subnet, nil
+		}
+	}
+
+	return "", fmt.Errorf("no subnet found for interface %s", netdev)
 }

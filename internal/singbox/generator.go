@@ -81,6 +81,7 @@ func (g *ConfigGenerator) generateSingleSubscription(ctx context.Context, dnsSer
 	sub := g.config.Subs[0]
 	log.Info("Platform for singgen:%s", runtime.GOOS)
 	// 使用GenerateConfigBytes来直接获取JSON字节
+	auth_key, lan_ipcidr := g.getTailScaleParmas()
 	configBytes, err := singgen.GenerateConfigBytes(ctx, sub.URL,
 		singgen.WithTemplate("v1.12"),
 		singgen.WithPlatform(runtime.GOOS),
@@ -91,6 +92,8 @@ func (g *ConfigGenerator) generateSingleSubscription(ctx context.Context, dnsSer
 		singgen.WithMirrorURL(g.config.GitHub.MirrorURL),
 		singgen.WithEmojiRemoval(sub.RemoveEmoji),
 		singgen.WithBandwidthParams(g.config.Hy2.Up, g.config.Hy2.Down),
+		singgen.WithTSAuthKey(auth_key),
+		singgen.WithTSLanIPCIDR(lan_ipcidr),
 	)
 
 	if err != nil {
@@ -100,9 +103,21 @@ func (g *ConfigGenerator) generateSingleSubscription(ctx context.Context, dnsSer
 	return string(configBytes), nil
 }
 
+func (g *ConfigGenerator) getTailScaleParmas() (string, string) {
+	subnet := ""
+	if g.config.Tailscale.AuthKey != "" {
+		s, err := netinfo.GetLANSubnet()
+		if err == nil {
+			subnet = s
+		}
+	}
+	return g.config.Tailscale.AuthKey, subnet
+}
+
 // generateMultiSubscription 处理多订阅
 func (g *ConfigGenerator) generateMultiSubscription(ctx context.Context, dnsServer string) (string, error) {
 	// 构建多订阅配置
+	auth_key, lan_ipcidr := g.getTailScaleParmas()
 	multiConfig := &singgen.MultiConfig{
 		Global: singgen.GlobalConfig{
 			Template:       "v1.12",
@@ -116,6 +131,8 @@ func (g *ConfigGenerator) generateMultiSubscription(ctx context.Context, dnsServ
 			Format:         "json",
 			UpMbps:         g.config.Hy2.Up,
 			DownMbps:       g.config.Hy2.Down,
+			TSAuthKey:      auth_key,
+			TSLanIPCIDR:    lan_ipcidr,
 		},
 		Subscriptions: make([]singgen.SubscriptionConfig, 0, len(g.config.Subs)),
 	}
