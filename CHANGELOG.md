@@ -1,3 +1,10 @@
+## [1.19.8](https://github.com/sixban6/singctl/compare/v1.19.7...v1.19.8) (2026-03-01)
+
+
+### Bug Fixes
+
+* update vr server name ([a9537d8](https://github.com/sixban6/singctl/commit/a9537d82b0847dfbe479c1e1755be5286be9e2a2))
+
 ## [1.19.7](https://github.com/sixban6/singctl/compare/v1.19.6...v1.19.7) (2026-03-01)
 
 
