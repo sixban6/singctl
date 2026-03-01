@@ -5,7 +5,7 @@ go 1.25
 require (
 	github.com/showwin/speedtest-go v1.7.10
 	github.com/sixban6/ghinstall v1.12.9
-	github.com/sixban6/singgen v1.13.11
+	github.com/sixban6/singgen v1.13.14
 	github.com/spf13/cobra v1.10.2
 	gopkg.in/yaml.v3 v3.0.1
 )
