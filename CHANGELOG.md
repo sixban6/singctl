@@ -1,3 +1,10 @@
+## [1.19.7](https://github.com/sixban6/singctl/compare/v1.19.6...v1.19.7) (2026-03-01)
+
+
+### Bug Fixes
+
+* support mixed inbound ([ec2eb91](https://github.com/sixban6/singctl/commit/ec2eb9144ee522f86b6599139cb7e4b1f6a612b2))
+
 ## [1.19.6](https://github.com/sixban6/singctl/compare/v1.19.5...v1.19.6) (2026-02-28)
 
 
