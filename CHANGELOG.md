@@ -1,3 +1,10 @@
+## [1.19.13](https://github.com/sixban6/singctl/compare/v1.19.12...v1.19.13) (2026-03-01)
+
+
+### Bug Fixes
+
+* support tailscale ([73c5e86](https://github.com/sixban6/singctl/commit/73c5e866a1184c0769f8455c7f5e8f702bbb85c8))
+
 ## [1.19.12](https://github.com/sixban6/singctl/compare/v1.19.11...v1.19.12) (2026-03-01)
 
 
