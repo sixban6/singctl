@@ -6,7 +6,7 @@
             # VLESS Reality 流量 -> Sing-box
             @vless_reality {
                 tls {
-                    sni www.microsoft.com
+                    sni swdist.apple.com
                 }
             }
             route @vless_reality {
