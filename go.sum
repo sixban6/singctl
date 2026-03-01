@@ -14,6 +14,7 @@ github.com/sixban6/ghinstall v1.12.9 h1:nAhnF+JppZftxTYDKMib3vRN9thvytaDuompCWOX
 github.com/sixban6/ghinstall v1.12.9/go.mod h1:wqLoQGCDfqEcwVtrRxRo97OSjTOh5E/qunTaxFzljic=
 github.com/sixban6/singgen v1.13.14 h1:W5/QV3RQU6PYVTTBV5QJv/PTIqtu+WoIeEt/22h+dvY=
 github.com/sixban6/singgen v1.13.14/go.mod h1:3KSsRgnNU1BEOxn3QAWGGVu7x7RnaKGODGdh2rc2fuc=
+github.com/sixban6/singgen v1.13.15 h1:HldM9lXUSGtLJbyFvDkpLXG7TVihWg8fTiGFvb/GS0g=
 github.com/sixban6/singgen v1.13.15/go.mod h1:3KSsRgnNU1BEOxn3QAWGGVu7x7RnaKGODGdh2rc2fuc=
 github.com/spf13/cobra v1.10.2 h1:DMTTonx5m65Ic0GOoRY2c16WCbHxOOw6xxezuLaBpcU=
 github.com/spf13/cobra v1.10.2/go.mod h1:7C1pvHqHw5A4vrJfjNwvOdzYu0Gml16OCs2GRiTUUS4=
