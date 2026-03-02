@@ -17,8 +17,9 @@ hy2:
   down: 200                                      # Hysteria2 下行带宽 (Mbps)
 
 tailscale:                                      # (可选) Tailscale 部署配置
-  auth_key: ""                                  # (可选) Tailscale 授权密钥
+  auth_key: ""                                  # (可选) Tailscale 授权密钥。默认是: ""
+  use_build: false                              # (可选) 是否使用singbox内置的TailScale。默认：false, 不启用
 
-server:                                         # (可选) 服务器部署配置
+server:                                         # (可选) 服务器部署配置.当需要部署singbox服务端的时候配置
   sb_domain: "sub.yourdomain.com"               # 你的域名
   cf_dns_key: "your_cloudflare_api_token"       # 你的 Cloudflare API Token
