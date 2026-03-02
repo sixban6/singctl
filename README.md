@@ -101,14 +101,14 @@ singctl ts update
 ```
 目前singctl的tailscale部署分为两个方式
 - 官方的版本
-- - 默认情况下不用配置tailscale,只有在需要使用tailscale授权密钥时候需要配置置auth_key和use_build。其中use_build配置为false
+  - 默认情况下不用配置tailscale,只有在需要使用tailscale授权密钥时候需要配置置auth_key和use_build。其中use_build配置为false
 ```yaml
 tailscale:                                        # (可选) Tailscale 部署配置
     auth_key: "ts-auth-abc123"                    # (可选) Tailscale 授权密钥
     use_build: false
 ```
 - singbox的版本
-- - 部署singbox的版本需要配置auth_key和use_build。其中use_build配置为true
+  - 部署singbox的版本需要配置auth_key和use_build。其中use_build配置为true
 ```yaml
 tailscale:                                        # (可选) Tailscale 部署配置
     auth_key: "ts-auth-abc123"                    # (可选) Tailscale 授权密钥
