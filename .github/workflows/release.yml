@@ -70,6 +70,12 @@ jobs:
       uses: actions/setup-go@v4
       with:
         go-version: ${{ env.GO_VERSION }}
+
+    - name: Install UPX
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y upx-ucl
+        upx --version
         
     - name: Get version
       id: get_version
@@ -86,7 +92,7 @@ jobs:
     - name: Download dependencies
       run: go mod download
       
-    - name: Build binaries
+    - name: Build binaries and Compress
       run: |
         VERSION=${{ steps.get_version.outputs.VERSION }}
         BUILD_TIME=$(date -u '+%Y-%m-%d_%H:%M:%S')
@@ -95,15 +101,18 @@ jobs:
         LDFLAGS="-ldflags \"-X main.Version=${VERSION} -X main.BuildTime=${BUILD_TIME} -X main.GitCommit=${GIT_COMMIT} -s -w\""
         
         # Build for multiple platforms
-        mkdir -p dist/{linux-amd64,linux-arm64,darwin-arm64,windows-amd64,windows-arm64}
+        mkdir -p dist/{linux-amd64,linux-arm64,darwin-arm64}
         
-        # Linux AMD64
+        # --- Linux AMD64 ---
         GOOS=linux GOARCH=amd64 CGO_ENABLED=0 eval go build $LDFLAGS -o dist/linux-amd64/singctl ./cmd/singctl
+        # 使用 UPX 极限压缩 (--best) 和 LZMA 算法 (--lzma)
+        upx --best --lzma dist/linux-amd64/singctl
         
-        # Linux ARM64
+        # --- Linux ARM64 ---
         GOOS=linux GOARCH=arm64 CGO_ENABLED=0 eval go build $LDFLAGS -o dist/linux-arm64/singctl ./cmd/singctl
+        upx --best --lzma dist/linux-arm64/singctl
         
-        # macOS ARM64 (Apple Silicon)
+        # --- macOS ARM64 (Apple Silicon) ---
         GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 eval go build $LDFLAGS -o dist/darwin-arm64/singctl ./cmd/singctl
 
     - name: Create packages
