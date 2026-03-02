@@ -14,7 +14,7 @@ func newStartTailScaleCmd(cfg *config.Config) *cobra.Command {
 		Short: "Start tailscale",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			exitNode, _ := cmd.Flags().GetBool("exit-node")
-			ts := tailscale.New(cfg.GitHub.MirrorURL, cfg.Tailscale.AuthKey)
+			ts := tailscale.New(cfg.GitHub.MirrorURL, &cfg.Tailscale)
 			return ts.Start(exitNode)
 		},
 	}
@@ -29,7 +29,7 @@ func newStopTailScaleCmd(cfg *config.Config) *cobra.Command {
 		Use:   "stop",
 		Short: "Stop tailscale",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ts := tailscale.New(cfg.GitHub.MirrorURL, cfg.Tailscale.AuthKey)
+			ts := tailscale.New(cfg.GitHub.MirrorURL, &cfg.Tailscale)
 			return ts.Stop()
 		},
 	}
@@ -43,7 +43,7 @@ func newInstallTailScaleCmd(cfg *config.Config) *cobra.Command {
 		Use:   "install",
 		Short: "Install tailscale",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ts := tailscale.New(cfg.GitHub.MirrorURL, cfg.Tailscale.AuthKey)
+			ts := tailscale.New(cfg.GitHub.MirrorURL, &cfg.Tailscale)
 			return ts.Install()
 		},
 	}
@@ -55,7 +55,7 @@ func newUpdateTailScaleCmd(cfg *config.Config) *cobra.Command {
 		Use:   "update",
 		Short: "Update tailscale",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ts := tailscale.New(cfg.GitHub.MirrorURL, cfg.Tailscale.AuthKey)
+			ts := tailscale.New(cfg.GitHub.MirrorURL, &cfg.Tailscale)
 			return ts.Update()
 		},
 	}

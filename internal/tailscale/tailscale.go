@@ -3,6 +3,7 @@ package tailscale
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"singctl/internal/config"
 	"strings"
 	"time"
 
@@ -29,15 +31,15 @@ type Tailscale struct {
 	httpClient   *http.Client
 	openWrtCheck func() bool
 	downloadURL  string
-	authKey      string
+	config       *config.TailscaleConfig
 }
 
-func New(downloadURL, authKey string) *Tailscale {
+func New(downloadURL string, config *config.TailscaleConfig) *Tailscale {
 	return &Tailscale{
 		httpClient:   http.DefaultClient,
 		openWrtCheck: netinfo.IsOpenWrt,
 		downloadURL:  downloadURL,
-		authKey:      authKey,
+		config:       config,
 	}
 }
 
@@ -270,10 +272,14 @@ func (t *Tailscale) Start(advertiseExitNode bool) error {
 
 	// 3. Tailscale Up (Config and Online)
 	if isNeedsAuth {
-		args := []string{"up", "--reset", "--accept-dns=false"}
+		args := []string{"up", "--reset", "--accept-dns=false", "--accept-routes=true"}
 
 		// Get LAN subnet to advertise (if it's a private network)
-		lanSubnet, err := netinfo.GetLANSubnet()
+		lanSubnet := t.config.LanIPICDR
+		err := errors.New("")
+		if t.config.LanIPICDR == "" {
+			lanSubnet, err = netinfo.GetLANSubnet()
+		}
 		if err == nil && lanSubnet != "" && isPrivateSubnet(lanSubnet) {
 			logger.Info("Detected private LAN subnet: %s, adding to advertise-routes", lanSubnet)
 			args = append(args, "--advertise-routes="+lanSubnet)
@@ -293,8 +299,8 @@ func (t *Tailscale) Start(advertiseExitNode bool) error {
 			logger.Info("Exit node advertisement enabled")
 		}
 
-		if t.authKey != "" {
-			args = append(args, "--authkey="+t.authKey)
+		if t.config.AuthKey != "" {
+			args = append(args, "--authkey="+t.config.AuthKey)
 			logger.Info("Using configured Auth Key for automatic authorization")
 		}
 
