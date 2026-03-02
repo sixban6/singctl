@@ -12,13 +12,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"singctl/internal/config"
 	"strings"
 	"time"
 
-	"singctl/internal/fileutil"
+	"singctl/internal/config"
+	"singctl/internal/constant"
+
 	"singctl/internal/logger"
-	"singctl/internal/netinfo"
+	"singctl/internal/util/file"
+	"singctl/internal/util/netinfo"
 
 	"github.com/sixban6/ghinstall"
 )
@@ -29,29 +31,29 @@ const (
 
 type Tailscale struct {
 	httpClient   *http.Client
-	openWrtCheck func() bool
-	downloadURL  string
+	OpenWrtCheck func() bool
+	DownloadURL  string
 	config       *config.TailscaleConfig
 }
 
 func New(downloadURL string, config *config.TailscaleConfig) *Tailscale {
 	return &Tailscale{
 		httpClient:   http.DefaultClient,
-		openWrtCheck: netinfo.IsOpenWrt,
-		downloadURL:  downloadURL,
+		OpenWrtCheck: netinfo.IsOpenWrt,
+		DownloadURL:  downloadURL,
 		config:       config,
 	}
 }
 
-// selectTailscaleAsset 过滤合适的 Tailscale 发布包
-func (t *Tailscale) selectTailscaleAsset(assetName string) bool {
+// SelectTailscaleAsset 过滤合适的 Tailscale 发布包
+func (t *Tailscale) SelectTailscaleAsset(assetName string) bool {
 	name := strings.ToLower(assetName)
 
 	if !strings.Contains(name, "tailscale") {
 		return false
 	}
 
-	arch, err := t.getSystemArchitecture()
+	arch, err := t.GetSystemArchitecture()
 	if err != nil {
 		arch = "amd64" // fallback
 	}
@@ -79,8 +81,8 @@ func isPrivateSubnet(cidr string) bool {
 	return false
 }
 
-// getSystemArchitecture 检测系统架构并映射到 Tailscale 的架构命名
-func (t *Tailscale) getSystemArchitecture() (string, error) {
+// GetSystemArchitecture 检测系统架构并映射到 Tailscale 的架构命名
+func (t *Tailscale) GetSystemArchitecture() (string, error) {
 	out, err := exec.Command("uname", "-m").Output()
 	if err != nil {
 		return "", fmt.Errorf("failed to detect architecture: %w", err)
@@ -117,7 +119,7 @@ func (t *Tailscale) Install() error {
 
 	mirror := ""
 	if !netinfo.CheckGoogleConnectivity() {
-		mirror = t.downloadURL
+		mirror = t.DownloadURL
 		logger.Info("Google appears unreachable, applying mirror config: %s", mirror)
 	} else {
 		logger.Info("Google is reachable, skipping mirror config.")
@@ -135,7 +137,7 @@ func (t *Tailscale) Install() error {
 
 	filter := ghinstall.CustomFilter(func(assets []ghinstall.Asset) (*ghinstall.Asset, error) {
 		for _, asset := range assets {
-			if t.selectTailscaleAsset(asset.Name) {
+			if t.SelectTailscaleAsset(asset.Name) {
 				return &asset, nil
 			}
 		}
@@ -147,28 +149,28 @@ func (t *Tailscale) Install() error {
 	}
 
 	// 从下载的解压文件中查找二进制文件
-	tsBin, err := fileutil.FindExecutable(tempDir, "tailscale")
+	tsBin, err := file.FindExecutable(tempDir, "tailscale")
 	if err != nil {
 		return fmt.Errorf("tailscale binary not found: %w", err)
 	}
 
-	tsdBin, err := fileutil.FindExecutable(tempDir, "tailscaled")
+	tsdBin, err := file.FindExecutable(tempDir, "tailscaled")
 	if err != nil {
 		return fmt.Errorf("tailscaled binary not found: %w", err)
 	}
 
 	// 拷贝文件
-	if err := fileutil.InstallOrReplace(tsBin, filepath.Join(installDir, "tailscale")); err != nil {
+	if err := file.InstallOrReplace(tsBin, filepath.Join(installDir, "tailscale")); err != nil {
 		return err
 	}
-	if err := fileutil.InstallOrReplace(tsdBin, filepath.Join(installDir, "tailscaled")); err != nil {
+	if err := file.InstallOrReplace(tsdBin, filepath.Join(installDir, "tailscaled")); err != nil {
 		return err
 	}
 
 	// 3. Create Init Script
-	isOpenWrt := t.openWrtCheck()
+	isOpenWrt := t.OpenWrtCheck()
 	logger.Info("Checking for kmod-tun...")
-	hasTun := checkTunModule()
+	hasTun := CheckTunModule()
 	if hasTun {
 		logger.Info("kmod-tun detected, using Scheme 2 (Kernel Mode)")
 	} else {
@@ -177,15 +179,15 @@ func (t *Tailscale) Install() error {
 
 	if isOpenWrt {
 		logger.Info("Creating procd init script...")
-		if err := createInitScript(hasTun); err != nil {
+		if err := CreateInitScript(hasTun); err != nil {
 			return err
 		}
 		// 4. Enable and Start Service
 		logger.Info("Enabling and starting service...")
-		if err := exec.Command("/etc/init.d/tailscale", "enable").Run(); err != nil {
+		if err := exec.Command(constant.TailscaleInitdScript, "enable").Run(); err != nil {
 			return fmt.Errorf("enable service failed: %w", err)
 		}
-		if err := exec.Command("/etc/init.d/tailscale", "start").Run(); err != nil {
+		if err := exec.Command(constant.TailscaleInitdScript, "start").Run(); err != nil {
 			return fmt.Errorf("start service failed: %w", err)
 		}
 	} else {
@@ -213,19 +215,19 @@ func (t *Tailscale) Install() error {
 func (t *Tailscale) Start(advertiseExitNode bool) error {
 	logger.Info("Starting Tailscale configuration...")
 
-	hasTun := checkTunModule()
+	hasTun := CheckTunModule()
 	if hasTun {
 		logger.Info("kmod-tun detected, configuring for Kernel Mode")
 	} else {
 		logger.Info("kmod-tun NOT detected, configuring for Userspace Mode")
 	}
 
-	isOpenWrt := t.openWrtCheck()
+	isOpenWrt := t.OpenWrtCheck()
 
 	// 0. Ensure tailscaled service is running
 	logger.Info("Ensuring tailscaled service is running...")
 	if isOpenWrt {
-		if err := exec.Command("/etc/init.d/tailscale", "start").Run(); err != nil {
+		if err := exec.Command(constant.TailscaleInitdScript, "start").Run(); err != nil {
 			logger.Warn("Failed to start tailscaled service: %v", err)
 		}
 	} else {
@@ -314,7 +316,7 @@ func (t *Tailscale) Start(advertiseExitNode bool) error {
 
 	// 3. Optimize UDP GRO for better performance (Tailscale recommendation)
 	logger.Info("Optimizing UDP GRO settings for better performance...")
-	if err := optimizeUDPGRO(); err != nil {
+	if err := OptimizeUDPGRO(); err != nil {
 		logger.Warn("Failed to optimize UDP GRO (non-critical): %v", err)
 	}
 
@@ -323,7 +325,7 @@ func (t *Tailscale) Start(advertiseExitNode bool) error {
 		logger.Info("Configuring firewall and network for OpenWrt...")
 
 		// 先清理历史上用 uci add 产生的重复匿名条目
-		cleanupTailscaleFirewall()
+		CleanupTailscaleFirewall()
 
 		// Network interface（命名 section，uci set 天然幂等）
 		exec.Command("uci", "set", "network.tailscale=interface").Run()
@@ -363,19 +365,19 @@ func (t *Tailscale) Start(advertiseExitNode bool) error {
 	return nil
 }
 
-// cleanupTailscaleFirewall 删除历史上用 "uci add" 产生的匿名重复 zone/forwarding 条目。
+// CleanupTailscaleFirewall 删除历史上用 "uci add" 产生的匿名重复 zone/forwarding 条目。
 // 匹配规则：zone.name==tailscale 或 forwarding.src/dest==tailscale 的匿名 section。
-func cleanupTailscaleFirewall() {
+func CleanupTailscaleFirewall() {
 	// 删除所有 name==tailscale 的匿名 zone
-	removeAnonymousUCISections("firewall", "zone", "name", "tailscale")
+	RemoveAnonymousUCISections("firewall", "zone", "name", "tailscale")
 	// 删除所有 src==tailscale 或 dest==tailscale 的匿名 forwarding
-	removeAnonymousUCISections("firewall", "forwarding", "src", "tailscale")
-	removeAnonymousUCISections("firewall", "forwarding", "dest", "tailscale")
+	RemoveAnonymousUCISections("firewall", "forwarding", "src", "tailscale")
+	RemoveAnonymousUCISections("firewall", "forwarding", "dest", "tailscale")
 }
 
-// removeAnonymousUCISections 找出 config 中类型为 sectionType、且 key==value 的所有匿名
+// RemoveAnonymousUCISections 找出 config 中类型为 sectionType、且 key==value 的所有匿名
 // section，逐一删除。匿名 section 的 ID 格式为 @type[N]。
-func removeAnonymousUCISections(config, sectionType, key, value string) {
+func RemoveAnonymousUCISections(config, sectionType, key, value string) {
 	// uci show <config> 输出所有配置；逐行找匿名 section 中匹配的条目
 	out, err := exec.Command("uci", "show", config).Output()
 	if err != nil {
@@ -441,8 +443,8 @@ func (t *Tailscale) Stop() error {
 	}
 
 	// 2. Stop the service
-	if t.openWrtCheck() {
-		if err := exec.Command("/etc/init.d/tailscale", "stop").Run(); err != nil {
+	if t.OpenWrtCheck() {
+		if err := exec.Command(constant.TailscaleInitdScript, "stop").Run(); err != nil {
 			return fmt.Errorf("stop service failed: %w", err)
 		}
 	} else {
@@ -453,7 +455,7 @@ func (t *Tailscale) Stop() error {
 
 	// 3. Restore UDP GRO settings to default
 	logger.Info("Restoring UDP GRO settings to default...")
-	if err := restoreUDPGRO(); err != nil {
+	if err := RestoreUDPGRO(); err != nil {
 		logger.Warn("Failed to restore UDP GRO (non-critical): %v", err)
 	}
 
@@ -461,8 +463,8 @@ func (t *Tailscale) Stop() error {
 	return nil
 }
 
-// parseVersionOutput 从 "tailscale version" 输出中提取版本号（首行）
-func parseVersionOutput(out string) (string, error) {
+// ParseVersionOutput 从 "tailscale version" 输出中提取版本号（首行）
+func ParseVersionOutput(out string) (string, error) {
 	lines := strings.SplitN(strings.TrimSpace(out), "\n", 2)
 	if len(lines) == 0 || strings.TrimSpace(lines[0]) == "" {
 		return "", fmt.Errorf("unexpected tailscale version output: %s", out)
@@ -476,7 +478,7 @@ func (t *Tailscale) getInstalledVersionOf(binPath string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to run %s version: %w", binPath, err)
 	}
-	return parseVersionOutput(string(out))
+	return ParseVersionOutput(string(out))
 }
 
 // getInstalledVersion 返回 tailscale 和 tailscaled 中较旧的版本号。
@@ -514,9 +516,9 @@ func (t *Tailscale) fetchLatestTailscaleVersion() (string, error) {
 	url := "https://api.github.com/repos/sixban6/auto_fetch_tailscale/releases/latest"
 
 	// 如果配置了 mirror 并且 Google 不可达，尝试通过镜像拉取 API
-	if !netinfo.CheckGoogleConnectivity() && t.downloadURL != "" {
+	if !netinfo.CheckGoogleConnectivity() && t.DownloadURL != "" {
 		// 某些镜像服务可以代理 api.github.com
-		mirror := strings.TrimRight(t.downloadURL, "/")
+		mirror := strings.TrimRight(t.DownloadURL, "/")
 		if strings.Contains(mirror, "ghproxy") || strings.Contains(mirror, "mirror") {
 			// 如果是通用代理前缀，拼上 api 地址
 			url = mirror + "/https://api.github.com/repos/sixban6/auto_fetch_tailscale/releases/latest"
@@ -544,6 +546,11 @@ func (t *Tailscale) fetchLatestTailscaleVersion() (string, error) {
 
 // Update 将 Tailscale 更新到最新版 (通过 ghinstall)
 func (t *Tailscale) Update() error {
+	if t.OpenWrtCheck != nil && !t.OpenWrtCheck() {
+		logger.Success("Tailscale update is skipped because system is not OpenWrt")
+		return nil
+	}
+
 	logger.Info("Checking for Tailscale updates...")
 
 	latestVersion, err := t.fetchLatestTailscaleVersion()
@@ -578,7 +585,7 @@ func (t *Tailscale) Update() error {
 
 	mirror := ""
 	if !netinfo.CheckGoogleConnectivity() {
-		mirror = t.downloadURL
+		mirror = t.DownloadURL
 		logger.Info("Google appears unreachable, applying mirror config: %s", mirror)
 	} else {
 		logger.Info("Google is reachable, skipping mirror config.")
@@ -596,7 +603,7 @@ func (t *Tailscale) Update() error {
 
 	filter := ghinstall.CustomFilter(func(assets []ghinstall.Asset) (*ghinstall.Asset, error) {
 		for _, asset := range assets {
-			if t.selectTailscaleAsset(asset.Name) {
+			if t.SelectTailscaleAsset(asset.Name) {
 				return &asset, nil
 			}
 		}
@@ -607,32 +614,32 @@ func (t *Tailscale) Update() error {
 		return fmt.Errorf("download tailscale update failed: %w", err)
 	}
 
-	tsBin, err := fileutil.FindExecutable(tempDir, "tailscale")
+	tsBin, err := file.FindExecutable(tempDir, "tailscale")
 	if err != nil {
 		return fmt.Errorf("tailscale binary not found: %w", err)
 	}
 
-	tsdBin, err := fileutil.FindExecutable(tempDir, "tailscaled")
+	tsdBin, err := file.FindExecutable(tempDir, "tailscaled")
 	if err != nil {
 		return fmt.Errorf("tailscaled binary not found: %w", err)
 	}
 
 	// 6. 停止服务，替换二进制文件，重启服务
 	logger.Info("Stopping tailscale service before replacing binaries...")
-	if err := stopTailscaledProcess(t.openWrtCheck()); err != nil {
+	if err := stopTailscaledProcess(t.OpenWrtCheck()); err != nil {
 		logger.Warn("Stop may be incomplete: %v", err)
 	}
 
-	if err := fileutil.InstallOrReplace(tsBin, filepath.Join(installDir, "tailscale")); err != nil {
+	if err := file.InstallOrReplace(tsBin, filepath.Join(installDir, "tailscale")); err != nil {
 		return fmt.Errorf("replace tailscale binary failed: %w", err)
 	}
-	if err := fileutil.InstallOrReplace(tsdBin, filepath.Join(installDir, "tailscaled")); err != nil {
+	if err := file.InstallOrReplace(tsdBin, filepath.Join(installDir, "tailscaled")); err != nil {
 		return fmt.Errorf("replace tailscaled binary failed: %w", err)
 	}
 
 	logger.Info("Restarting tailscale service...")
-	if t.openWrtCheck() {
-		if err := exec.Command("/etc/init.d/tailscale", "start").Run(); err != nil {
+	if t.OpenWrtCheck() {
+		if err := exec.Command(constant.TailscaleInitdScript, "start").Run(); err != nil {
 			return fmt.Errorf("restart service failed: %w", err)
 		}
 	} else {
@@ -650,7 +657,7 @@ func (t *Tailscale) Update() error {
 func stopTailscaledProcess(isOpenWrt bool) error {
 	// 1. 优雅停止
 	if isOpenWrt {
-		exec.Command("/etc/init.d/tailscale", "stop").Run()
+		exec.Command(constant.TailscaleInitdScript, "stop").Run()
 	} else {
 		exec.Command("systemctl", "stop", "tailscaled.service").Run()
 	}
@@ -670,9 +677,9 @@ func stopTailscaledProcess(isOpenWrt bool) error {
 	return fmt.Errorf("tailscaled process did not exit within timeout")
 }
 
-// optimizeUDPGRO configures UDP GRO settings for better Tailscale performance
+// OptimizeUDPGRO configures UDP GRO settings for better Tailscale performance
 // Reference: https://tailscale.com/s/ethtool-config-udp-gro
-func optimizeUDPGRO() error {
+func OptimizeUDPGRO() error {
 	// Check if ethtool is available
 	if _, err := exec.LookPath("ethtool"); err != nil {
 		return fmt.Errorf("ethtool not found (install with: apk add ethtool or opkg install ethtool)")
@@ -710,8 +717,8 @@ func optimizeUDPGRO() error {
 	return nil
 }
 
-// restoreUDPGRO restores UDP GRO settings to default values
-func restoreUDPGRO() error {
+// RestoreUDPGRO restores UDP GRO settings to default values
+func RestoreUDPGRO() error {
 	// Check if ethtool is available
 	if _, err := exec.LookPath("ethtool"); err != nil {
 		return fmt.Errorf("ethtool not found")
@@ -749,7 +756,7 @@ func restoreUDPGRO() error {
 	return nil
 }
 
-func checkTunModule() bool {
+func CheckTunModule() bool {
 	// 1. Try to load the tun module. If modprobe succeeds, the module is available.
 	if err := exec.Command("modprobe", "tun").Run(); err == nil {
 		return true
@@ -773,8 +780,8 @@ func checkTunModule() bool {
 	return false
 }
 
-func createInitScript(hasTun bool) error {
-	scriptPath := "/etc/init.d/tailscale"
+func CreateInitScript(hasTun bool) error {
+	scriptPath := constant.TailscaleInitdScript
 
 	content := `#!/bin/sh /etc/rc.common
 USE_PROCD=1
@@ -797,14 +804,14 @@ start_service() {
     # 开启转发
     sysctl -w net.ipv4.ip_forward=1 > /dev/null
 
-    mkdir -p /etc/tailscale
+    mkdir -p %s
     mkdir -p /var/run/tailscale
 
     procd_open_instance
     procd_set_param command /usr/sbin/tailscaled
     
     # 核心差异：移除 userspace-networking，默认使用 tun
-    procd_append_param command --state=/etc/tailscale/tailscaled.state
+    procd_append_param command --state=%s/tailscaled.state
     procd_append_param command --socket=/var/run/tailscale/tailscaled.sock
     procd_append_param command --port=41641
     
@@ -818,7 +825,7 @@ start_service() {
 		content += `    # 开启内核转发(虽然是用户态，但为了路由功能最好开启)
     sysctl -w net.ipv4.ip_forward=1 > /dev/null
 
-    mkdir -p /etc/tailscale
+    mkdir -p %s
     mkdir -p /var/run/tailscale
 
     procd_open_instance
@@ -826,7 +833,7 @@ start_service() {
     
     # 核心差异：用户态网络模式
     procd_append_param command --tun=userspace-networking
-    procd_append_param command --state=/etc/tailscale/tailscaled.state
+    procd_append_param command --state=%s/tailscaled.state
     procd_append_param command --socket=/var/run/tailscale/tailscaled.sock
     procd_append_param command --port=41641
     
@@ -838,7 +845,8 @@ start_service() {
 `
 	}
 
-	if err := os.WriteFile(scriptPath, []byte(content), 0755); err != nil {
+	finalContent := fmt.Sprintf(content, constant.TailscaleStateDir, constant.TailscaleStateDir)
+	if err := os.WriteFile(scriptPath, []byte(finalContent), 0755); err != nil {
 		return fmt.Errorf("write init script failed: %w", err)
 	}
 	return nil
@@ -865,7 +873,7 @@ func copyFile(src, dst string) error {
 }
 
 func createSystemdScript(hasTun bool) error {
-	scriptPath := "/etc/systemd/system/tailscaled.service"
+	scriptPath := constant.TailscaleSystemdService
 
 	content := `[Unit]
 Description=Tailscale node agent

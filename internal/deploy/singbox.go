@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"singctl/internal/config"
-	"singctl/internal/fileutil"
+	"singctl/internal/constant"
 	"singctl/internal/logger"
 	"singctl/internal/singbox"
 )
@@ -139,7 +139,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/sing-box run -c /etc/sing-box/config.json
+ExecStart=/usr/local/bin/sing-box run -c %s
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=10s
@@ -151,14 +151,15 @@ WantedBy=multi-user.target
 
 // 检查并创建 service 文件的辅助方法
 func (sbs *SingBoxServer) ensureSystemdService() error {
-	servicePath := "/etc/systemd/system/sing-box.service"
+	servicePath := constant.SingBoxSystemdService
 
 	// 1. 检查文件是否存在
 	if _, err := os.Stat(servicePath); os.IsNotExist(err) {
 		logger.Info("sing-box.service not found, creating it...")
 
 		// 2. 写入服务文件
-		if err := os.WriteFile(servicePath, []byte(singboxServiceContent), 0644); err != nil {
+		svcContent := fmt.Sprintf(singboxServiceContent, constant.SingBoxConfigFile)
+		if err := os.WriteFile(servicePath, []byte(svcContent), 0644); err != nil {
 			return fmt.Errorf("failed to write sing-box.service: %w", err)
 		}
 
@@ -259,11 +260,11 @@ func (sbs *SingBoxServer) renderSingboxConfig() error {
 		return fmt.Errorf("failed to execute sing-box template: %w", err)
 	}
 
-	if err := os.MkdirAll("/etc/sing-box", 0755); err != nil {
+	if err := os.MkdirAll(constant.SingBoxConfigDir, 0755); err != nil {
 		return err
 	}
 
-	return os.WriteFile("/etc/sing-box/config.json", buf.Bytes(), 0644)
+	return os.WriteFile(constant.SingBoxConfigFile, buf.Bytes(), 0644)
 }
 
 // UninstallServer uninstalls sing-box from the server
@@ -275,19 +276,19 @@ func UninstallSingbox() error {
 	_ = exec.Command("systemctl", "disable", "sing-box").Run()
 
 	// Remove service file
-	if err := os.Remove("/etc/systemd/system/sing-box.service"); err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(constant.SingBoxSystemdService); err != nil && !os.IsNotExist(err) {
 		logger.Warn("Failed to remove sing-box.service: %v", err)
 	}
 	_ = exec.Command("systemctl", "daemon-reload").Run()
 
 	// Remove executable
-	exe := fileutil.GetSingBoxInstallDir()
+	exe := constant.SingBoxInstallDir
 	if err := os.Remove(exe); err != nil && !os.IsNotExist(err) {
 		logger.Warn("Failed to remove sing-box executable: %v", err)
 	}
 
 	// Remove configs
-	if err := os.RemoveAll(filepath.Dir(fileutil.GetSingboxConfigPath())); err != nil {
+	if err := os.RemoveAll(constant.SingBoxConfigDir); err != nil {
 		logger.Warn("Failed to remove sing-box config directory: %v", err)
 	}
 

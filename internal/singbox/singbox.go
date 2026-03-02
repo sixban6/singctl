@@ -11,10 +11,10 @@ import (
 	"runtime"
 	"singctl/internal/config"
 	"singctl/internal/constant"
-	"singctl/internal/fileutil"
 	"singctl/internal/logger"
-	"singctl/internal/netinfo"
+	"singctl/internal/util/netinfo"
 	"singctl/internal/scripts"
+	"singctl/internal/util/file"
 	"strings"
 
 	"github.com/sixban6/ghinstall"
@@ -30,7 +30,7 @@ func New(cfg *config.Config) *SingBox {
 
 	return &SingBox{
 		config:          cfg,
-		configPath:      fileutil.GetSingboxConfigPath(),
+		configPath:      constant.SingBoxConfigFile,
 		configGenerator: NewConfigGenerator(cfg),
 	}
 }
@@ -132,7 +132,7 @@ func (sb *SingBox) ValidateConfig() error {
 		return fmt.Errorf("config file is empty or contains no valid configuration")
 	}
 
-	exe := fileutil.GetSingBoxInstallDir()
+	exe := constant.SingBoxInstallDir
 	cmd := exec.Command(exe, "check", "-c", sb.configPath)
 	// 使用 sing-box check 命令验证配置
 	//cmd := exec.Command("sing-box", "check", "-c", sb.configPath)
@@ -183,7 +183,7 @@ func (sb *SingBox) Install() error {
 	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
 		return sb.InstallGUI()
 	}
-	return sb.installOrUpdate(fileutil.GetSingBoxInstallDir())
+	return sb.installOrUpdate(constant.SingBoxInstallDir)
 }
 
 // InstallGUI 安装 GUI 客户端
@@ -368,13 +368,13 @@ func (sb *SingBox) installOrUpdate(targetPath string) error {
 	}
 
 	// 找到下载的新执行文件
-	newExe, err := fileutil.FindExecutable(tempDir, "sing-box")
+	newExe, err := file.FindExecutable(tempDir, "sing-box")
 	if err != nil {
 		return fmt.Errorf("new executable not found in downloaded package: %w", err)
 	}
 
 	// 安装或替换文件
-	if err := fileutil.InstallOrReplace(newExe, targetPath); err != nil {
+	if err := file.InstallOrReplace(newExe, targetPath); err != nil {
 		return fmt.Errorf("install or replace failed: %w", err)
 	}
 
@@ -440,5 +440,5 @@ func (sb *SingBox) selectSingBoxAsset(assetName string) bool {
 
 // Update 更新 sing-box
 func (sb *SingBox) Update() error {
-	return sb.installOrUpdate(fileutil.GetSingBoxInstallDir())
+	return sb.installOrUpdate(constant.SingBoxInstallDir)
 }

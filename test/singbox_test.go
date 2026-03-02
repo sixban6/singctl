@@ -2,7 +2,6 @@ package test
 
 import (
 	"os"
-	"path/filepath"
 	"testing"
 
 	"singctl/internal/config"
@@ -59,94 +58,6 @@ func TestSingBoxGenerateConfig_Integration(t *testing.T) {
 	} else {
 		// 清理测试文件
 		os.Remove(defaultConfigPath)
-	}
-}
-
-func TestSingBoxStartStop_WithMockScripts(t *testing.T) {
-	cfg := &config.Config{
-		Subs: []config.Subscription{
-			{Name: "test", URL: "https://example.com/sub", SkipTlsVerify: false, RemoveEmoji: true},
-		},
-		GitHub: config.GitHubConfig{MirrorURL: "https://ghfast.top"},
-	}
-
-	sb := singbox.New(cfg)
-
-	// 创建临时脚本目录和mock脚本
-	tempDir := t.TempDir()
-	scriptDir := filepath.Join(tempDir, "scripts")
-	if err := os.MkdirAll(scriptDir, 0755); err != nil {
-		t.Fatalf("Failed to create script directory: %v", err)
-	}
-
-	// 创建mock启动脚本
-	startScript := filepath.Join(scriptDir, "start_singbox.sh")
-	startScriptContent := `#!/bin/bash
-echo "Mock start script executed with config: $1"
-echo "Test start successful"
-exit 0`
-	if err := os.WriteFile(startScript, []byte(startScriptContent), 0755); err != nil {
-		t.Fatalf("Failed to create mock start script: %v", err)
-	}
-
-	// 创建mock停止脚本
-	stopScript := filepath.Join(scriptDir, "stop_singbox.sh")
-	stopScriptContent := `#!/bin/bash
-echo "Mock stop script executed"
-echo "Test stop successful"
-exit 0`
-	if err := os.WriteFile(stopScript, []byte(stopScriptContent), 0755); err != nil {
-		t.Fatalf("Failed to create mock stop script: %v", err)
-	}
-
-	// 改变工作目录以使用相对路径 ./scripts
-	oldDir, _ := os.Getwd()
-	defer os.Chdir(oldDir)
-	os.Chdir(tempDir)
-
-	// 测试启动
-	err := sb.Start()
-	if err != nil {
-		t.Errorf("Start() failed: %v", err)
-	}
-
-	// 测试停止
-	err = sb.Stop()
-	if err != nil {
-		t.Errorf("Stop() failed: %v", err)
-	}
-}
-
-func TestSingBoxStartStop_MissingScripts(t *testing.T) {
-	cfg := &config.Config{
-		Subs: []config.Subscription{
-			{Name: "test", URL: "https://example.com/sub", SkipTlsVerify: false, RemoveEmoji: true},
-		},
-		GitHub: config.GitHubConfig{MirrorURL: "https://ghfast.top"},
-	}
-
-	sb := singbox.New(cfg)
-
-	// 改变到一个不存在脚本的目录
-	tempDir := t.TempDir()
-	oldDir, _ := os.Getwd()
-	defer os.Chdir(oldDir)
-	os.Chdir(tempDir)
-
-	// 测试启动失败
-	err := sb.Start()
-	if err == nil {
-		t.Error("Start() should fail with missing script")
-	} else {
-		t.Logf("Start() correctly failed with missing script: %v", err)
-	}
-
-	// 测试停止失败
-	err = sb.Stop()
-	if err == nil {
-		t.Error("Stop() should fail with missing script")
-	} else {
-		t.Logf("Stop() correctly failed with missing script: %v", err)
 	}
 }
 

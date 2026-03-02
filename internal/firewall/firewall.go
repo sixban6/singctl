@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 
+	"singctl/internal/constant"
 	"singctl/internal/logger"
 )
 
@@ -147,7 +147,7 @@ After=network.target nftables.service firewalld.service ufw.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/sbin/nft -f /etc/sing-box/sec_block.nft
+ExecStart=/usr/sbin/nft -f %s
 ExecStop=/usr/sbin/nft delete table inet security
 RemainAfterExit=yes
 
@@ -162,7 +162,7 @@ STOP=10
 
 start() {
 	echo "Loading singctl security firewall rules..."
-	/usr/sbin/nft -f /etc/sing-box/sec_block.nft
+	/usr/sbin/nft -f %s
 }
 
 stop() {
@@ -197,8 +197,8 @@ func Enable() error {
 		return fmt.Errorf("nft command not found, please install nftables")
 	}
 
-	configDir := "/etc/sing-box"
-	scriptPath := filepath.Join(configDir, "sec_block.nft")
+	configDir := constant.SingBoxConfigDir
+	scriptPath := constant.SingBoxNftablesFile
 
 	if err := os.MkdirAll(configDir, 0755); err != nil {
 		return fmt.Errorf("failed to create config directory %s: %v", configDir, err)
@@ -257,7 +257,7 @@ func Disable() error {
 	_ = exec.Command("nft", "delete", "table", "inet", "security").Run()
 
 	// 3. 移除规则文件
-	_ = os.Remove("/etc/sing-box/sec_block.nft")
+	_ = os.Remove(constant.SingBoxNftablesFile)
 
 	logger.Success("Security block rules disabled and removed")
 	return nil
@@ -265,8 +265,9 @@ func Disable() error {
 
 // ----------------- Systemd (Debian / Ubuntu) -----------------
 func setupSystemdService() error {
-	servicePath := "/etc/systemd/system/singctl-firewall.service"
-	if err := os.WriteFile(servicePath, []byte(systemdService), 0644); err != nil {
+	servicePath := constant.FirewallSystemdService
+	content := fmt.Sprintf(systemdService, constant.SingBoxNftablesFile)
+	if err := os.WriteFile(servicePath, []byte(content), 0644); err != nil {
 		return err
 	}
 	_ = exec.Command("systemctl", "daemon-reload").Run()
@@ -278,14 +279,15 @@ func setupSystemdService() error {
 
 func teardownSystemdService() {
 	_ = exec.Command("systemctl", "disable", "--now", "singctl-firewall.service").Run()
-	_ = os.Remove("/etc/systemd/system/singctl-firewall.service")
+	_ = os.Remove(constant.FirewallSystemdService)
 	_ = exec.Command("systemctl", "daemon-reload").Run()
 }
 
 // ----------------- init.d (OpenWrt) -----------------
 func setupOpenWrtInit() error {
-	scriptPath := "/etc/init.d/singctl-firewall"
-	if err := os.WriteFile(scriptPath, []byte(openwrtInitScript), 0755); err != nil {
+	scriptPath := constant.FirewallInitdScript
+	content := fmt.Sprintf(openwrtInitScript, constant.SingBoxNftablesFile)
+	if err := os.WriteFile(scriptPath, []byte(content), 0755); err != nil {
 		return err
 	}
 	// 执行 /etc/init.d/singctl-firewall enable (相当于创建 /etc/rc.d/S99singctl-firewall)
@@ -296,7 +298,7 @@ func setupOpenWrtInit() error {
 }
 
 func teardownOpenWrtInit() {
-	scriptPath := "/etc/init.d/singctl-firewall"
+	scriptPath := constant.FirewallInitdScript
 	if _, err := os.Stat(scriptPath); err == nil {
 		_ = exec.Command(scriptPath, "disable").Run()
 		_ = os.Remove(scriptPath)

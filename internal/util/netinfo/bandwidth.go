@@ -1,4 +1,4 @@
-package bandwidth
+package netinfo
 
 import (
 	"fmt"

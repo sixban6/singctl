@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"singctl/internal/netinfo"
+	"singctl/internal/util/netinfo"
 )
 
 func TestNetinfoGet(t *testing.T) {
