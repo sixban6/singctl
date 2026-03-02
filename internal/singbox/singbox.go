@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"singctl/internal/config"
+	"singctl/internal/constant"
 	"singctl/internal/fileutil"
 	"singctl/internal/logger"
 	"singctl/internal/netinfo"
@@ -189,9 +190,9 @@ func (sb *SingBox) Install() error {
 func (sb *SingBox) InstallGUI() error {
 	var downloadURL string
 	if runtime.GOOS == "darwin" {
-		downloadURL = sb.config.GUI.MacURL
+		downloadURL = constant.MacURL
 	} else if runtime.GOOS == "windows" {
-		downloadURL = sb.config.GUI.WinURL
+		downloadURL = constant.WinURL
 	}
 
 	// If URL is empty or it's the old hardcoded default, fetch dynamically
@@ -266,10 +267,7 @@ func (sb *SingBox) InstallGUI() error {
 
 // StartGUI 启动 GUI 客户端
 func (sb *SingBox) StartGUI() error {
-	appName := sb.config.GUI.AppName
-	if appName == "" {
-		appName = "SFM"
-	}
+	appName := constant.AppName
 
 	// Mac App path check
 	appPath := fmt.Sprintf("/Applications/%s.app", appName)

@@ -174,11 +174,6 @@ hy2:
   up: 20                                         # Hysteria2 上行带宽 (Mbps)
   down: 200                                      # Hysteria2 下行带宽 (Mbps)
 
-gui:
-  mac_url: "https://github.com/SagerNet/sing-box/releases/download/v1.13.0/SFM-1.13.0-Apple.pkg"
-  win_url: "https://github.com/SagerNet/sing-box/releases/download/v1.13.0/sing-box-1.13.0-windows-amd64.zip"
-  app_name: "SFM"
-
 tailscale:
   auth_key: ""
 "@ | Out-File $ConfigFile -Encoding utf8

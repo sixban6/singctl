@@ -9,9 +9,9 @@ import (
 )
 
 type Config struct {
-	Subs      []Subscription  `yaml:"subs"`
-	GitHub    GitHubConfig    `yaml:"github"`
-	GUI       GUIConfig       `yaml:"gui"`
+	Subs   []Subscription `yaml:"subs"`
+	GitHub GitHubConfig   `yaml:"github"`
+	//GUI       GUIConfig       `yaml:"gui"`
 	Hy2       Hy2Config       `yaml:"hy2"`
 	Tailscale TailscaleConfig `yaml:"tailscale"`
 	Server    ServerConfig    `yaml:"server"`
@@ -60,9 +60,6 @@ func Load(path string) (*Config, error) {
 
 	if cfg.GitHub.MirrorURL == "" {
 		cfg.GitHub.MirrorURL = "https://gh-proxy.com"
-	}
-	if cfg.GUI.AppName == "" {
-		cfg.GUI.AppName = "SFM"
 	}
 	if cfg.Hy2.Up == 0 {
 		cfg.Hy2.Up = 21

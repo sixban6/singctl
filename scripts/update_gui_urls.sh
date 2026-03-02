@@ -19,7 +19,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
 # 文件路径
-CONFIG_FILE="$PROJECT_ROOT/configs/singctl.yaml"
+CONFIG_FILE="$PROJECT_ROOT/internal/constant/default.go"
 INSTALL_SH="$PROJECT_ROOT/install.sh"
 INSTALL_PS1="$PROJECT_ROOT/install.ps1"
 
@@ -127,20 +127,20 @@ update_file() {
     
     local updated=false
     
-    # 更新 mac_url
+    # 更新 MacURL
     if [ -n "$MAC_URL" ]; then
-        # 匹配 mac_url: "..." 格式（YAML）
-        if grep -q 'mac_url:' "$file"; then
-            sed -i.tmp -E "s|mac_url: *\"[^\"]*\"|mac_url: \"$MAC_URL\"|g" "$file"
+        # 匹配 MacURL: "..." 格式（YAML）
+        if grep -q 'MacURL:' "$file"; then
+            sed -i.tmp -E "s|MacURL: *\"[^\"]*\"|MacURL: \"$MAC_URL\"|g" "$file"
             updated=true
         fi
     fi
     
-    # 更新 win_url
+    # 更新 WinURL
     if [ -n "$WIN_URL" ]; then
-        # 匹配 win_url: "..." 格式（YAML）
-        if grep -q 'win_url:' "$file"; then
-            sed -i.tmp -E "s|win_url: *\"[^\"]*\"|win_url: \"$WIN_URL\"|g" "$file"
+        # 匹配 WinURL: "..." 格式（YAML）
+        if grep -q 'WinURL:' "$file"; then
+            sed -i.tmp -E "s|WinURL: *\"[^\"]*\"|WinURL: \"$WIN_URL\"|g" "$file"
             updated=true
         fi
     fi
@@ -175,16 +175,10 @@ show_summary() {
     echo -e "${CYAN}[INFO] 验证更新结果:${NC}"
     echo ""
     
-    echo "--- configs/singctl.yaml ---"
-    grep -E "(mac_url|win_url)" "$CONFIG_FILE" 2>/dev/null || echo "(未找到)"
+    echo "--- $CONFIG_FILE ---"
+    grep -E "(MacURL|WinURL)" "$CONFIG_FILE" 2>/dev/null || echo "(未找到)"
     echo ""
     
-    echo "--- install.sh ---"
-    grep -E "(mac_url|win_url)" "$INSTALL_SH" 2>/dev/null | head -4 || echo "(未找到)"
-    echo ""
-    
-    echo "--- install.ps1 ---"
-    grep -E "(mac_url|win_url)" "$INSTALL_PS1" 2>/dev/null | head -4 || echo "(未找到)"
 }
 
 # 主函数
@@ -195,8 +189,6 @@ main() {
     
     echo ""
     update_file "$CONFIG_FILE"
-    update_file "$INSTALL_SH"
-    update_file "$INSTALL_PS1"
     
     show_summary
 }
