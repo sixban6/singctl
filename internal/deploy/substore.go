@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"singctl/internal/config"
+	"singctl/internal/constant"
 	"singctl/internal/logger"
 )
 
@@ -19,7 +20,7 @@ type Substore struct {
 
 func NewSubstore(cfg *config.Config, ssKey string) *Substore {
 	return &Substore{
-		Config: cfg, SSKey: ssKey, substorePath: "/etc/sub-store/sub-store.json",
+		Config: cfg, SSKey: ssKey, substorePath: constant.SubStoreFile,
 	}
 }
 
@@ -42,8 +43,8 @@ func (sb *Substore) DeploySubstore() error {
 	}
 
 	// 2. Ensure /etc/sub-store directory exists for volumes
-	if err := os.MkdirAll("/etc/sub-store", 0755); err != nil {
-		return fmt.Errorf("failed to create /etc/sub-store: %w", err)
+	if err := os.MkdirAll(constant.SubStoreDir, 0755); err != nil {
+		return fmt.Errorf("failed to create %s: %w", constant.SubStoreDir, err)
 	}
 
 	// 3. Generate a new random password
@@ -68,7 +69,7 @@ func (sb *Substore) DeploySubstore() error {
 		"-e", "SUB_STORE_CRON=50 23 * * *",
 		"-e", fmt.Sprintf("SUB_STORE_FRONTEND_BACKEND_PATH=/%s", ssKey),
 		"-p", "127.0.0.1:3001:3001",
-		"-v", "/etc/sub-store:/opt/app/data",
+		"-v", fmt.Sprintf("%s:/opt/app/data", constant.SubStoreDir),
 		"--name", "sub-store",
 		"xream/sub-store",
 	}
@@ -100,9 +101,9 @@ func UninstallSubstore() error {
 	}
 
 	// Remove the volume directory
-	err = runCmd("rm", "-rf", "/etc/sub-store")
+	err = runCmd("rm", "-rf", constant.SubStoreDir)
 	if err != nil {
-		return fmt.Errorf("failed to remove /etc/sub-store: %w", err)
+		return fmt.Errorf("failed to remove %s: %w", constant.SubStoreDir, err)
 	}
 
 	logger.Success("Sub-Store uninstallation completed.")

@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	"singctl/internal/config"
-	"singctl/internal/fileutil"
+	"singctl/internal/util/file"
 	"singctl/internal/logger"
 
 	"github.com/sixban6/ghinstall"
@@ -69,7 +69,7 @@ func (u *Updater) UpdateSelf(configPath string) error {
 	}
 
 	// 找到下载的新执行文件
-	newExe, err := fileutil.FindExecutable(tempDir, "singctl")
+	newExe, err := file.FindExecutable(tempDir, "singctl")
 	if err != nil {
 		return fmt.Errorf("new executable not found in downloaded package: %w", err)
 	}
@@ -87,7 +87,7 @@ func (u *Updater) UpdateSelf(configPath string) error {
 	if configsSrc != "" && configPath != "" {
 		configDir := filepath.Dir(configPath)
 		logger.Info("Syncing default configurations to %s...", configDir)
-		if err := fileutil.CopyDir(configsSrc, configDir); err != nil {
+		if err := file.CopyDir(configsSrc, configDir); err != nil {
 			logger.Warn("Failed to sync configs directory: %v", err)
 		}
 
@@ -99,7 +99,7 @@ func (u *Updater) UpdateSelf(configPath string) error {
 	}
 
 	// 执行安全替换
-	if err := fileutil.SafeReplace(currentExe, newExe); err != nil {
+	if err := file.SafeReplace(currentExe, newExe); err != nil {
 		return err
 	}
 

@@ -9,7 +9,7 @@ import (
 
 	"singctl/internal/config"
 	log "singctl/internal/logger"
-	"singctl/internal/netinfo"
+	"singctl/internal/util/netinfo"
 
 	"github.com/sixban6/singgen/pkg/singgen"
 )

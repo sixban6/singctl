@@ -2,13 +2,15 @@ package cmd
 
 import (
 	"fmt"
-	"github.com/spf13/cobra"
 	"os"
 	"singctl/internal/config"
+	"singctl/internal/constant"
 	"singctl/internal/daemon"
-	"singctl/internal/fileutil"
 	"singctl/internal/logger"
 	"singctl/internal/updater"
+	"singctl/internal/util/file"
+
+	"github.com/spf13/cobra"
 )
 
 // NewInfoCommand creates the info command
@@ -73,7 +75,7 @@ func showSystemInfo(configPath, version string) error {
 	logger.Info("───────────────────────────────────────────────────────────")
 
 	// Sing-box 安装路径
-	singboxPath := fileutil.GetSingBoxInstallDir()
+	singboxPath := constant.SingBoxInstallDir
 	if _, err := os.Stat(singboxPath); err == nil {
 		logger.Success("安装路径        : %s ✓", singboxPath)
 	} else {
@@ -81,7 +83,7 @@ func showSystemInfo(configPath, version string) error {
 	}
 
 	// Sing-box 配置文件路径
-	singboxConfigPath := fileutil.GetSingboxConfigPath()
+	singboxConfigPath := constant.SingBoxConfigFile
 	if _, err := os.Stat(singboxConfigPath); err == nil {
 		logger.Success("配置文件路径    : %s ✓", singboxConfigPath)
 	} else {
@@ -156,7 +158,7 @@ func showSystemInfo(configPath, version string) error {
 				}
 
 				// 脱敏处理URL
-				maskedURL := fileutil.MaskSubscriptionURL(sub.URL)
+				maskedURL := file.MaskSubscriptionURL(sub.URL)
 				logger.Info("  └─ %-12s: %s", name, maskedURL)
 
 				if sub.SkipTlsVerify {

@@ -1,7 +1,7 @@
 package test
 
 import (
-	"singctl/internal/bandwidth"
+	"singctl/internal/util/netinfo"
 	"testing"
 )
 
@@ -12,7 +12,7 @@ func TestBandwidthRunSpeedTest(t *testing.T) {
 
 	// This integration test will actually run the speed test against external servers
 	// so it might take a while.
-	err := bandwidth.RunSpeedTest()
+	err := netinfo.RunSpeedTest()
 	if err != nil {
 		t.Fatalf("RunSpeedTest failed: %v", err)
 	}

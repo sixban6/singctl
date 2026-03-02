@@ -1,8 +1,9 @@
 package cmd
 
 import (
+	"singctl/internal/util/netinfo"
+
 	"github.com/spf13/cobra"
-	"singctl/internal/bandwidth"
 )
 
 func NewUtilCmd() *cobra.Command {
@@ -22,7 +23,7 @@ func newBDCmd() *cobra.Command {
 		Use:   "testbd",
 		Short: "测试网络上下行带宽(upload/download speed)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return bandwidth.RunSpeedTest()
+			return netinfo.RunSpeedTest()
 		},
 	}
 
