@@ -71,19 +71,15 @@ table inet security {
             20-23,   # FTP, SSH, Telnet
             25,      # SMTP
             110,     # POP3
-            123,     # NTP
             465,     # SMTPS
             587,     # SMTP (submission)
             993,     # IMAPS
             995,     # POP3S
             1433-1434, # Microsoft SQL Server
             1521,    # Oracle
-            2222,    # Alternative SSH
             3306,    # MySQL
             3389,    # RDP
             6379,    # Redis
-            8080,    # Alternative HTTP
-            8443,    # Alternative HTTPS
             1080,    # SOCKS proxy
         }
     }
@@ -123,11 +119,11 @@ table inet security {
         # 记录并处理 IPv4 受保护端口的连接尝试 (TCP & UDP)
         meta l4proto tcp tcp dport @protected_ports \
             log prefix "[NFT] Blocked IPv4 TCP: " \
-            add @blocklist_ip4 { ip saddr limit rate 3/minute } \
+            add @blocklist_ip4 { ip saddr limit rate 5/minute } \
             counter drop
         meta l4proto udp udp dport @protected_ports \
             log prefix "[NFT] Blocked IPv4 UDP: " \
-            add @blocklist_ip4 { ip saddr limit rate 3/minute } \
+            add @blocklist_ip4 { ip saddr limit rate 5/minute } \
             counter drop
 
         # 记录并处理 IPv6 受保护端口的连接尝试 (TCP & UDP)
