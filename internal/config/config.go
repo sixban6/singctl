@@ -26,20 +26,14 @@ type Subscription struct {
 type GitHubConfig struct {
 	MirrorURL string `yaml:"mirror_url"`
 }
-
-type GUIConfig struct {
-	MacURL  string `yaml:"mac_url"`
-	WinURL  string `yaml:"win_url"`
-	AppName string `yaml:"app_name"`
-}
-
 type Hy2Config struct {
 	Up   int `yaml:"up"`
 	Down int `yaml:"down"`
 }
 
 type TailscaleConfig struct {
-	AuthKey string `yaml:"auth_key"`
+	AuthKey  string `yaml:"auth_key"`
+	UseBuild bool   `yaml:"use_build"`
 }
 
 type ServerConfig struct {
@@ -118,8 +112,9 @@ func MigrateConfig(path string) error {
 	if !strings.Contains(content, "tailscale:") {
 		tailscaleBlock := `
 # (可选) Tailscale 部署配置
-tailscale:
-  auth_key: ""                                  # (可选) Tailscale 授权密钥
+tailscale:										# (可选)tailscale配置
+  auth_key: ""                                  # Tailscale 授权密钥
+  use_build: false                              # 是否使用singbox内置的TailScale。默认：false, 不启用
 `
 		content += tailscaleBlock
 		needsSave = true
