@@ -61,8 +61,10 @@ singctl sb gen --stdout
 # 自定义输出路径             
 singctl sb gen -o /tmp/config.json  
 ```
+
 - 2.服务端管理
 ```bash
+# 服务端一键部署
 singctl sr install
 
 # 单独部署caddy
@@ -129,6 +131,7 @@ singctl dm status
 # 查看守护进程日志
 singctl dm logs -n 50
 ```
+
 - 5.防火墙加固 (Linux/OpenWrt专有)
 ```bash
 # 启用安全拦截规则并设置开机自启 (需 root)
