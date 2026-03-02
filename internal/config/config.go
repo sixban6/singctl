@@ -32,8 +32,9 @@ type Hy2Config struct {
 }
 
 type TailscaleConfig struct {
-	AuthKey  string `yaml:"auth_key"`
-	UseBuild bool   `yaml:"use_build"`
+	AuthKey   string `yaml:"auth_key"`
+	UseBuild  bool   `yaml:"use_build"`
+	LanIPICDR string `yaml:"lan_ipicdr"`
 }
 
 type ServerConfig struct {
@@ -114,7 +115,8 @@ func MigrateConfig(path string) error {
 # (可选) Tailscale 部署配置
 tailscale:										# (可选)tailscale配置
   auth_key: ""                                  # Tailscale 授权密钥
-  use_build: false                              # 是否使用singbox内置的TailScale。默认：false, 不启用
+  lan_ipicdr: ""                                # (可选) 配置通告的子网，默认为空，程序会自动获取
+  use_build: false                              # (可选) 是否使用singbox内置的TailScale。默认：false, 不启用
 `
 		content += tailscaleBlock
 		needsSave = true

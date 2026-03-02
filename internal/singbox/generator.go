@@ -2,6 +2,7 @@ package singbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime"
 	"time"
@@ -80,11 +81,7 @@ func (g *ConfigGenerator) Generate() (string, error) {
 func (g *ConfigGenerator) generateSingleSubscription(ctx context.Context, dnsServer string) (string, error) {
 	sub := g.config.Subs[0]
 	log.Info("Platform for singgen:%s", runtime.GOOS)
-	auth_key := ""
-	lan_ipcidr := ""
-	if g.config.Tailscale.UseBuild {
-		auth_key, lan_ipcidr = g.getTailScaleParmas()
-	}
+	authKey, lanIpcidr := g.getTailScaleParmas()
 
 	configBytes, err := singgen.GenerateConfigBytes(ctx, sub.URL,
 		singgen.WithTemplate("v1.12"),
@@ -96,8 +93,8 @@ func (g *ConfigGenerator) generateSingleSubscription(ctx context.Context, dnsSer
 		singgen.WithMirrorURL(g.config.GitHub.MirrorURL),
 		singgen.WithEmojiRemoval(sub.RemoveEmoji),
 		singgen.WithBandwidthParams(g.config.Hy2.Up, g.config.Hy2.Down),
-		singgen.WithTSAuthKey(auth_key),
-		singgen.WithTSLanIPCIDR(lan_ipcidr),
+		singgen.WithTSAuthKey(authKey),
+		singgen.WithTSLanIPCIDR(lanIpcidr),
 	)
 
 	if err != nil {
@@ -108,9 +105,20 @@ func (g *ConfigGenerator) generateSingleSubscription(ctx context.Context, dnsSer
 }
 
 func (g *ConfigGenerator) getTailScaleParmas() (string, string) {
+
+	// 如果不开启内置tailscale则返回空.singgen就不会生成tailscale配置
+	if g.config.Tailscale.UseBuild == false {
+		return "", ""
+	}
+
 	subnet := ""
 	if g.config.Tailscale.AuthKey != "" {
-		s, err := netinfo.GetLANSubnet()
+
+		s := g.config.Tailscale.LanIPICDR
+		err := errors.New("")
+		if s == "" {
+			s, err = netinfo.GetLANSubnet()
+		}
 		if err == nil {
 			subnet = s
 		}
@@ -121,11 +129,9 @@ func (g *ConfigGenerator) getTailScaleParmas() (string, string) {
 // generateMultiSubscription 处理多订阅
 func (g *ConfigGenerator) generateMultiSubscription(ctx context.Context, dnsServer string) (string, error) {
 	// 构建多订阅配置
-	auth_key := ""
-	lan_ipcidr := ""
-	if g.config.Tailscale.UseBuild {
-		auth_key, lan_ipcidr = g.getTailScaleParmas()
-	}
+
+	authKey, lanIpcidr := g.getTailScaleParmas()
+
 	multiConfig := &singgen.MultiConfig{
 		Global: singgen.GlobalConfig{
 			Template:       "v1.12",
@@ -139,8 +145,8 @@ func (g *ConfigGenerator) generateMultiSubscription(ctx context.Context, dnsServ
 			Format:         "json",
 			UpMbps:         g.config.Hy2.Up,
 			DownMbps:       g.config.Hy2.Down,
-			TSAuthKey:      auth_key,
-			TSLanIPCIDR:    lan_ipcidr,
+			TSAuthKey:      authKey,
+			TSLanIPCIDR:    lanIpcidr,
 		},
 		Subscriptions: make([]singgen.SubscriptionConfig, 0, len(g.config.Subs)),
 	}
