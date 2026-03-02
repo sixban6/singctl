@@ -1,3 +1,10 @@
+# [1.20.0](https://github.com/sixban6/singctl/compare/v1.19.13...v1.20.0) (2026-03-02)
+
+
+### Features
+
+* support use tailscale over singbox ([c7c3ae5](https://github.com/sixban6/singctl/commit/c7c3ae5b7927f814c050fb51535c26ee9cbf090d))
+
 ## [1.19.13](https://github.com/sixban6/singctl/compare/v1.19.12...v1.19.13) (2026-03-01)
 
 
