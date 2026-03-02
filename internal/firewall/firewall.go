@@ -129,11 +129,11 @@ table inet security {
         # 记录并处理 IPv6 受保护端口的连接尝试 (TCP & UDP)
         meta l4proto tcp tcp dport @protected_ports \
             log prefix "[NFT] Blocked IPv6 TCP: " \
-            add @blocklist_ip6 { ip6 saddr limit rate 3/minute } \
+            add @blocklist_ip6 { ip6 saddr limit rate 5/minute } \
             counter drop
         meta l4proto udp udp dport @protected_ports \
             log prefix "[NFT] Blocked IPv6 UDP: " \
-            add @blocklist_ip6 { ip6 saddr limit rate 3/minute } \
+            add @blocklist_ip6 { ip6 saddr limit rate 5/minute } \
             counter drop
     }
 
