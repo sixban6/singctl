@@ -1,6 +1,7 @@
 package config
 
 import (
+	"cmp"
 	"fmt"
 	"os"
 	"strings"
@@ -53,9 +54,7 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
-	if cfg.GitHub.MirrorURL == "" {
-		cfg.GitHub.MirrorURL = "https://gh-proxy.com"
-	}
+	cfg.GitHub.MirrorURL = cmp.Or(cfg.GitHub.MirrorURL, "https://gh-proxy.com")
 	if cfg.Hy2.Up == 0 {
 		cfg.Hy2.Up = 21
 	}

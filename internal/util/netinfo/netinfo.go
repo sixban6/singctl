@@ -112,7 +112,7 @@ func publicIP(ctx context.Context) (string, error) {
 			ch <- out{ip, err}
 		}(url)
 	}
-	for i := 0; i < len(endpoints); i++ {
+	for range endpoints {
 		select {
 		case <-ctx.Done():
 			return "", ctx.Err()
