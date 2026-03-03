@@ -3,6 +3,7 @@ package cmd
 import (
 	"github.com/spf13/cobra"
 	"singctl/internal/config"
+	"singctl/internal/constant"
 	"singctl/internal/logger"
 	"singctl/internal/tailscale"
 )
@@ -13,12 +14,14 @@ func newStartTailScaleCmd(cfg *config.Config) *cobra.Command {
 		Use:   "start",
 		Short: "Start tailscale",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			exitNode, _ := cmd.Flags().GetBool("exit-node")
+			exitNode, _ := cmd.Flags().GetBool(constant.ExitNode)
+			mainRouter, _ := cmd.Flags().GetBool(constant.MainRouter)
 			ts := tailscale.New(cfg.GitHub.MirrorURL, &cfg.Tailscale)
-			return ts.Start(exitNode)
+			return ts.Start(exitNode, mainRouter)
 		},
 	}
-	startCmd.Flags().Bool("exit-node", false, "Advertise this device as a Tailscale exit node")
+	startCmd.Flags().Bool(constant.ExitNode, false, "Advertise this device as a Tailscale exit node")
+	startCmd.Flags().Bool(constant.MainRouter, false, "Advertise this device as a Tailscale exit node")
 	return startCmd
 }
 
