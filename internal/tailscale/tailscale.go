@@ -214,7 +214,7 @@ func (t *Tailscale) Install() error {
 
 // Start brings up Tailscale and configures firewall/network rules.
 // advertiseExitNode=true also advertises this device as a Tailscale exit node.
-func (t *Tailscale) Start(advertiseExitNode bool) error {
+func (t *Tailscale) Start(advertiseExitNode bool, IsMainRouter bool) error {
 	logger.Info("Starting Tailscale configuration...")
 
 	hasTun := CheckTunModule()
@@ -281,10 +281,10 @@ func (t *Tailscale) Start(advertiseExitNode bool) error {
 		// Get LAN subnet to advertise (if it's a private network)
 		lanSubnet := t.config.LanIPICDR
 		err := errors.New("")
-		if t.config.LanIPICDR == "" {
+		if t.config.LanIPICDR == "" && IsMainRouter {
 			lanSubnet, err = netinfo.GetLANSubnet()
 		}
-		if err == nil && lanSubnet != "" && isPrivateSubnet(lanSubnet) {
+		if IsMainRouter && err == nil && lanSubnet != "" && isPrivateSubnet(lanSubnet) {
 			logger.Info("Detected private LAN subnet: %s, adding to advertise-routes", lanSubnet)
 			args = append(args, "--advertise-routes="+lanSubnet)
 			if isOpenWrt {
