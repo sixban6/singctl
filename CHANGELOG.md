@@ -1,3 +1,10 @@
+## [1.20.9](https://github.com/sixban6/singctl/compare/v1.20.8...v1.20.9) (2026-03-03)
+
+
+### Bug Fixes
+
+* refactor ([9053ffa](https://github.com/sixban6/singctl/commit/9053ffa08d2036ea5024577f9f0a1f77932dfab9))
+
 ## [1.20.8](https://github.com/sixban6/singctl/compare/v1.20.7...v1.20.8) (2026-03-03)
 
 
