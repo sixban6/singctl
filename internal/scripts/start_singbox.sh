@@ -149,6 +149,7 @@ setup_nft() {
 
             # 放行 Tailscale 接口流量，避免 TProxy 劫持子网路由流量
             iifname "tailscale0" accept
+            iifname "wg*" counter accept
 
             # 1.主要为了拒绝 外部尝试访问公网端口.
             fib daddr type local meta l4proto { tcp, udp } th dport $TPROXY_PORT reject with icmpx type host-unreachable
@@ -174,6 +175,10 @@ setup_nft() {
 
             # 1.放行标记过的流量.防止回环问题.
             meta mark 0x1 accept
+
+            # 【新增这两行！】放行 Tailscale 进程自身发出的流量
+            meta mark 0x80000 accept comment "Bypass Tailscale fwmark"
+            udp sport 41641 accept comment "Bypass Tailscale UDP port"
 
             # 2.放行ipv6的icmp基础流量
             meta l4proto ipv6-icmp accept comment "Allow ICMPv6 traffic"
@@ -250,6 +255,10 @@ setup_iptables() {
     echo_succ "配置 OUTPUT 链规则..."
     # 放行已标记的流量，防止回环
     iptables -t mangle -A OUTPUT -m mark --mark $PROXY_FWMARK -j RETURN
+
+    # 【新增这两行！】放行 Tailscale 自身发出的流量
+    iptables -t mangle -A OUTPUT -m mark --mark 0x80000 -j RETURN
+    iptables -t mangle -A OUTPUT -p udp --sport 41641 -j RETURN
     
     # 劫持 DNS 请求
     iptables -t mangle -A OUTPUT -p udp --dport 53 -j MARK --set-mark $PROXY_FWMARK
@@ -261,6 +270,7 @@ setup_iptables() {
     iptables -t mangle -A OUTPUT -d 172.16.0.0/12 -j RETURN
     iptables -t mangle -A OUTPUT -d 192.168.0.0/16 -j RETURN
     iptables -t mangle -A OUTPUT -d 169.254.0.0/16 -j RETURN
+    iptables -t mangle -A OUTPUT -d 100.64.0.0/10 -j RETURN
     iptables -t mangle -A OUTPUT -d 224.0.0.0/4 -j RETURN
     iptables -t mangle -A OUTPUT -d 255.255.255.255/32 -j RETURN
     
