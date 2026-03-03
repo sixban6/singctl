@@ -1,8 +1,10 @@
 package osutil
 
 import (
+	"cmp"
 	"fmt"
 	"singctl/internal/logger"
+	"slices"
 	"strings"
 )
 
@@ -108,14 +110,10 @@ func UciDeleteAnonymous(config, sectionType, key, value string) {
 	for idx := range indexSet {
 		indices = append(indices, idx)
 	}
-	// 简单冒泡降序
-	for i := 0; i < len(indices); i++ {
-		for j := i + 1; j < len(indices); j++ {
-			if indices[j] > indices[i] {
-				indices[i], indices[j] = indices[j], indices[i]
-			}
-		}
-	}
+	// 简单冒泡降序 -> 改为使用 slices.SortFunc
+	slices.SortFunc(indices, func(a, b int) int {
+		return cmp.Compare(b, a)
+	})
 
 	for _, idx := range indices {
 		section := fmt.Sprintf("%s.@%s[%d]", config, sectionType, idx)

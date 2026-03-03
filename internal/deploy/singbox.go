@@ -62,7 +62,7 @@ func (sbs *SingBoxServer) initCaddyCertPath() {
 	logger.Info("Waiting for Caddy to generate certificates for %s...", sbs.cfg.Server.SBDomain)
 
 	// 最多重试 30 次，每次间隔 1 秒
-	for i := 0; i < 30; i++ {
+	for range 30 {
 		dirs, err := os.ReadDir(basePath)
 		if err == nil {
 			for _, d := range dirs {
