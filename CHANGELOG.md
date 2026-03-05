@@ -1,3 +1,10 @@
+## [1.20.14](https://github.com/sixban6/singctl/compare/v1.20.13...v1.20.14) (2026-03-05)
+
+
+### Bug Fixes
+
+* fix config check ([04b5b40](https://github.com/sixban6/singctl/commit/04b5b40f6d0fa6b38153ef86e80dd6e51b3c0529))
+
 ## [1.20.13](https://github.com/sixban6/singctl/compare/v1.20.12...v1.20.13) (2026-03-05)
 
 
