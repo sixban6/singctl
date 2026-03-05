@@ -1,3 +1,10 @@
+## [1.20.15](https://github.com/sixban6/singctl/compare/v1.20.14...v1.20.15) (2026-03-05)
+
+
+### Bug Fixes
+
+* repeat outbounds bug ([585e589](https://github.com/sixban6/singctl/commit/585e58933db07a15e784a60481467bc652f6e395))
+
 ## [1.20.14](https://github.com/sixban6/singctl/compare/v1.20.13...v1.20.14) (2026-03-05)
 
 
