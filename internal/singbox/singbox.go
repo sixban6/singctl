@@ -12,9 +12,9 @@ import (
 	"singctl/internal/config"
 	"singctl/internal/constant"
 	"singctl/internal/logger"
-	"singctl/internal/util/netinfo"
 	"singctl/internal/scripts"
 	"singctl/internal/util/file"
+	"singctl/internal/util/netinfo"
 	"strings"
 
 	"github.com/sixban6/ghinstall"
@@ -290,11 +290,20 @@ func (sb *SingBox) StartGUI() error {
 
 	logger.Info("Config file is located at: %s", sb.configPath)
 
-	// Ensure config is generated
-	if err := sb.GenerateConfig(); err != nil {
-		logger.Warn("Failed to generate config: %v", err)
+	// 按需生成配置：仅当现有配置无效时才重新生成
+	if err := sb.ValidateConfig(); err != nil {
+		// 需要重新生成，先校验 subs 确保不 panic
+		if err2 := sb.config.ValidateSubs(); err2 != nil {
+			logger.Warn("Cannot generate config, subscription invalid: %v", err2)
+		} else {
+			if err := sb.GenerateConfig(); err != nil {
+				logger.Warn("Failed to generate config: %v", err)
+			} else {
+				logger.Success("Config generated successfully.")
+			}
+		}
 	} else {
-		logger.Success("Config generated successfully.")
+		logger.Info("Using existing valid config")
 	}
 
 	// 启动应用,并打开配置

@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"github.com/spf13/cobra"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -11,6 +10,8 @@ import (
 	"singctl/internal/logger"
 	"singctl/internal/singbox"
 	"time"
+
+	"github.com/spf13/cobra"
 )
 
 func newStartCmd(cfg *config.Config) *cobra.Command {
@@ -22,7 +23,11 @@ func newStartCmd(cfg *config.Config) *cobra.Command {
 
 			sb := singbox.New(cfg)
 			if err := sb.ValidateConfig(); err != nil {
+				// 现有配置无效或不存在，需要重新生成 → 此时才校验 subs
 				logger.Info("Current config is invalid or missing, generating new config...")
+				if err := cfg.ValidateSubs(); err != nil {
+					return fmt.Errorf("subscription config invalid: %w", err)
+				}
 				if err := sb.GenerateConfig(); err != nil {
 					return err
 				}
@@ -72,6 +77,11 @@ func newGenCmd(cfg *config.Config) *cobra.Command {
 		Use:   "gen",
 		Short: "Generate sing-box configuration",
 		RunE: func(cmd *cobra.Command, args []string) error {
+
+			// gen 命令必须依赖 subs，提前校验防止 index-out-of-range panic
+			if err := cfg.ValidateSubs(); err != nil {
+				return fmt.Errorf("subscription config invalid: %w", err)
+			}
 
 			generator := singbox.NewConfigGenerator(cfg)
 			configJSON, err := generator.Generate()
@@ -157,10 +167,6 @@ func NewSingboxCommand(configPath string) *cobra.Command {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		logger.Error("配置文件加载失败")
-	}
-
-	if err := cfg.ValidateSubs(); err != nil {
-		logger.Error("配置校验失败", err)
 	}
 
 	cmd.AddCommand(
