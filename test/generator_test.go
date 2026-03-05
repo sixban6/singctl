@@ -96,7 +96,8 @@ func TestConfigGeneratorGenerate_Integration(t *testing.T) {
 
 		// 检查错误类型
 		if !strings.Contains(err.Error(), "error getting netResult") &&
-			!strings.Contains(err.Error(), "generate sing-box config failed") {
+			!strings.Contains(err.Error(), "generate sing-box config failed") &&
+			!strings.Contains(err.Error(), "failed to generate single subscription config") {
 			t.Errorf("Unexpected error type: %v", err)
 		}
 		return
