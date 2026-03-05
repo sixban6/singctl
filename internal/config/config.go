@@ -4,7 +4,10 @@ import (
 	"cmp"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
+
+	"singctl/internal/constant"
 
 	"gopkg.in/yaml.v3"
 )
@@ -33,9 +36,9 @@ type Hy2Config struct {
 }
 
 type TailscaleConfig struct {
-	AuthKey   string `yaml:"auth_key"`
-	UseBuild  bool   `yaml:"use_build"`
-	LanIPICDR string `yaml:"lan_ipicdr"`
+	AuthKey  string `yaml:"auth_key"`
+	UseBuild bool   `yaml:"use_build"`
+	Subnets  string `yaml:"subnets"`
 }
 
 type ServerConfig struct {
@@ -48,6 +51,19 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read config file: %w", err)
 	}
+
+	// Pre-process the YAML to fix common syntax errors such as missing spaces after colons.
+	// For example: `url:"https://test.com"` -> `url: "https://test.com"`
+	// We only match known keys to avoid accidentally modifying strings containing colons.
+	keys := []string{
+		"subs", "name", "url", "skip_tls_verify", "remove-emoji",
+		"github", "mirror_url", "hy2", "up", "down",
+		"tailscale", "auth_key", "use_build", constant.TailscaleSubnets,
+		"server", "sb_domain", "cf_dns_key",
+	}
+	pattern := fmt.Sprintf("(?m)^([ \\t-]*(?:%s)):([^\\s].*)", strings.Join(keys, "|"))
+	re := regexp.MustCompile(pattern)
+	data = re.ReplaceAll(data, []byte("$1: $2"))
 
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
@@ -114,7 +130,7 @@ func MigrateConfig(path string) error {
 # (可选) Tailscale 部署配置
 tailscale:										# (可选)tailscale配置
   auth_key: ""                                  # Tailscale 授权密钥
-  lan_ipicdr: ""                                # (可选) 配置通告的子网，默认为空，程序会自动获取
+  subnets: ""                                   # (可选) 配置通告的子网，默认为空，程序会自动获取
   use_build: false                              # (可选) 是否使用singbox内置的TailScale。默认：false, 不启用
 `
 		content += tailscaleBlock
