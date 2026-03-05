@@ -37,126 +37,22 @@ curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/sixban6/singct
 powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "[System.IO.File]::WriteAllText('install.ps1', (irm https://raw.githubusercontent.com/sixban6/singctl/main/install.ps1 -UseBasicParsing), [System.Text.Encoding]::UTF8); & .\install.ps1"
 ```
 
-## Usage
-- 1.客户端
-```bash
-# 安装sing-box客户端              
-singctl sb install   
+## 📚 使用指南 (Usage)
 
-# 生成客户端配置到默认位置并备份         
-singctl sb gen     
+SingCtl 按功能模块分为以下几个部分，点击链接查看详细说明：
 
-# 启动sing-box客户端
-singctl sb start           
+| 模块 | 命令前缀 | 描述 | 文档 |
+| :--- | :--- | :--- | :--- |
+| **客户端管理** | `singctl sb` | 管理 sing-box 客户端的安装、配置生成、启停 | [查看文档](docs/client.md) |
+| **服务端部署** | `singctl sr` | 一键部署服务端组件（Sing-box、Caddy、SubStore、WARP） | [查看文档](docs/server.md) |
+| **异地组网** | `singctl ts` | 管理 Tailscale 的安装、启动与路由配置 | [查看文档](docs/tailscale.md) |
+| **守护进程** | `singctl dm` | 管理后台守护进程，查看日志与监控状态 | [查看文档](docs/daemon.md) |
+| **防火墙加固** | `singctl fw` | Linux/OpenWrt 专用的防火墙安全规则配置 | [查看文档](docs/firewall.md) |
+| **实用工具** | `singctl ut` | 宽带测速、自更新、系统信息查看 | [查看文档](docs/utils.md) |
 
-# 停止 sing-box 客户端 & 关闭守护进程     
-singctl sb stop       
+## ⚙️ 配置文件
 
-# 更新sing-box客户单
-singctl sb update           
-
-# 输出到控制台查看        
-singctl sb gen --stdout       
-
-# 自定义输出路径             
-singctl sb gen -o /tmp/config.json  
-```
-
-- 2.服务端管理
-```bash
-# 服务端一键部署
-singctl sr install
-
-# 单独部署caddy
-singctl sr install caddy
-
-# 单独部署singbox
-singctl sr install singbox
-
-# 单独部署substore
-singctl sr install substore
-
-# 单独部署warp
-singctl sr install warp
-```
-Tips:服务端需要singctl.yaml中配置
-```yaml
-server:                                         # (可选) 服务器部署配置
-  sb_domain: "sub.yourdomain.com"               # 你的域名
-  cf_dns_key: "your_cloudflare_api_token"       # 你的 Cloudflare API Token
-```
-
-- 3.tailscale管理
-```bash
-# 安装 Tailscale (仅 OpenWrt/Linux)
-singctl ts install 
-
-# 配置并启动 Tailscale (仅 OpenWrt/Linux)
-singctl ts start 
-
-# 启动Tailscale 并作为 路由器(如果部署在路由器上推荐使用)
-singctl ts start  --router
-
-# 启动Tailscale 并作为出口节点
-singctl ts start  --exit-node
-
-singctl ts stop 
-
-singctl ts update 
-```
-目前singctl的tailscale部署分为两个方式
-- 官方的版本
-  - 默认情况下不用配置tailscale,只有在需要使用tailscale授权密钥时候需要配置置auth_key和use_build。其中use_build配置为false
-```yaml
-tailscale:                                        # (可选) Tailscale 部署配置
-    auth_key: "ts-auth-abc123"                    # (可选) Tailscale 授权密钥
-    use_build: false
-```
-- singbox的版本
-  - 部署singbox的版本需要配置auth_key和use_build。其中use_build配置为true
-```yaml
-tailscale:                                        # (可选) Tailscale 部署配置
-    auth_key: "ts-auth-abc123"                    # (可选) Tailscale 授权密钥
-    use_build: true
-```
-
-Tips: **建议优先使用官方版本管理。只有在官方版本无法满足再使用singbox版本** 
-
-- 4.守护进程使用
-```bash
-
-# 启动守护进程
-singctl dm start
-
-# 查看详细监控状态
-singctl dm status
-
-# 查看守护进程日志
-singctl dm logs -n 50
-```
-
-- 5.防火墙加固 (Linux/OpenWrt专有)
-```bash
-# 启用安全拦截规则并设置开机自启 (需 root)
-singctl fw enable
-
-# 禁用安全拦截规则并移除自启配置 (需 root)
-singctl fw disable
-```
-
-- 6.其他
-```bash
-# 测试宽带带宽
-singctl ut testbd
-
-# 更新 singctl 自身         
-singctl update self  
-
-# 快速查看系统状态
-singctl info
-```
-
-
+核心配置位于 `singctl.yaml`，各模块的配置项说明请参阅对应子文档。
 
 ## License
 
