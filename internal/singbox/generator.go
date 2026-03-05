@@ -1,6 +1,7 @@
 package singbox
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -84,7 +85,13 @@ func (g *ConfigGenerator) Generate() (string, error) {
 	}
 
 	// 统一在此处去重，覆盖单/多订阅两条路径
-	return DeduplicateOutbounds(raw)
+	deduped, err := DeduplicateOutbounds(raw)
+	if err != nil {
+		return "", err
+	}
+
+	// 格式化为可读 JSON
+	return PrettyJSON(deduped)
 }
 
 // generateSingleSubscription 处理单个订阅
@@ -269,4 +276,13 @@ func DeduplicateOutbounds(jsonStr string) (string, error) {
 		return "", fmt.Errorf("dedup: re-marshal config failed: %w", err)
 	}
 	return string(result), nil
+}
+
+// PrettyJSON 将紧凑 JSON 字符串格式化为缩进可读格式。
+func PrettyJSON(jsonStr string) (string, error) {
+	var buf bytes.Buffer
+	if err := json.Indent(&buf, []byte(jsonStr), "", "  "); err != nil {
+		return "", fmt.Errorf("pretty: invalid JSON: %w", err)
+	}
+	return buf.String(), nil
 }
