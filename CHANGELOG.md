@@ -1,3 +1,10 @@
+## [1.20.17](https://github.com/sixban6/singctl/compare/v1.20.16...v1.20.17) (2026-03-05)
+
+
+### Bug Fixes
+
+* update singgen v1.13.21 ([f829132](https://github.com/sixban6/singctl/commit/f8291327c7c6809bd6fd266b2d6ed25a9c54833a))
+
 ## [1.20.16](https://github.com/sixban6/singctl/compare/v1.20.15...v1.20.16) (2026-03-05)
 
 
