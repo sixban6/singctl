@@ -2,8 +2,10 @@ package singbox
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"runtime"
 	"time"
 
@@ -65,16 +67,24 @@ func (g *ConfigGenerator) Generate() (string, error) {
 	} else {
 		dnsServer = "8.8.8.8" // 默认 DNS
 	}
-	// dnsServer sing-box已经实现自动获取
-	//var dnsServer = ""
 
+	var (
+		raw string
+		err error
+	)
 	// 如果只有一个订阅，使用单订阅API
 	if len(g.config.Subs) == 1 {
-		return g.generateSingleSubscription(ctx, dnsServer)
+		raw, err = g.generateSingleSubscription(ctx, dnsServer)
+	} else {
+		// 多订阅使用新的多订阅API
+		raw, err = g.generateMultiSubscription(ctx, dnsServer)
+	}
+	if err != nil {
+		return "", err
 	}
 
-	// 多订阅使用新的多订阅API
-	return g.generateMultiSubscription(ctx, dnsServer)
+	// 统一在此处去重，覆盖单/多订阅两条路径
+	return DeduplicateOutbounds(raw)
 }
 
 // generateSingleSubscription 处理单个订阅
@@ -175,4 +185,88 @@ func (g *ConfigGenerator) generateMultiSubscription(ctx context.Context, dnsServ
 
 func (g *ConfigGenerator) GetWebUIAddress() string {
 	return g.webui
+}
+
+// DeduplicateOutbounds 对 sing-box JSON 配置中的 outbounds 进行去重。
+//   - Tag 相同且内容完全相同 → 丢弃（完全重复）
+//   - Tag 相同但内容不同     → 重命名为 tag_1, tag_2...（冲突保留）
+//   - 无 tag 字段的节点      → 直接保留（不参与去重）
+func DeduplicateOutbounds(jsonStr string) (string, error) {
+	var cfg map[string]any
+	if err := json.Unmarshal([]byte(jsonStr), &cfg); err != nil {
+		return "", fmt.Errorf("dedup: invalid JSON: %w", err)
+	}
+
+	rawOutbounds, ok := cfg["outbounds"]
+	if !ok {
+		return jsonStr, nil // 没有 outbounds 字段，原样返回
+	}
+	outbounds, ok := rawOutbounds.([]any)
+	if !ok {
+		return jsonStr, nil
+	}
+
+	// fingerprints: tag → canonical JSON bytes，用于内容比较
+	fingerprints := make(map[string]string)
+	// counter: originalTag → 冲突计数，用于生成 tag_1, tag_2...
+	counter := make(map[string]int)
+
+	clean := make([]any, 0, len(outbounds))
+
+	for _, item := range outbounds {
+		node, ok := item.(map[string]any)
+		if !ok {
+			// 非 map 节点直接保留
+			clean = append(clean, item)
+			continue
+		}
+
+		// 无 tag 节点直接保留（direct/block/dns 等固定出站）
+		tagVal, hasTag := node["tag"]
+		if !hasTag {
+			clean = append(clean, node)
+			continue
+		}
+		tag, ok := tagVal.(string)
+		if !ok || tag == "" {
+			clean = append(clean, node)
+			continue
+		}
+
+		// 序列化当前节点为 fingerprint（canonical JSON）
+		fp, err := json.Marshal(node)
+		if err != nil {
+			return "", fmt.Errorf("dedup: marshal node failed: %w", err)
+		}
+		fpStr := string(fp)
+
+		existingFP, seen := fingerprints[tag]
+		switch {
+		case !seen:
+			// Case A: 第一次出现，记录并保留
+			fingerprints[tag] = fpStr
+			clean = append(clean, node)
+		case existingFP == fpStr:
+			// Case B: 完全相同，丢弃重复节点
+			log.Info("dedup: dropping exact duplicate outbound tag=%q", tag)
+		default:
+			// Case C: Tag 相同但内容不同，重命名
+			counter[tag]++
+			newTag := fmt.Sprintf("%s_%d", tag, counter[tag])
+			// 深拷贝节点，避免修改原始 item
+			newNode := maps.Clone(node)
+			newNode["tag"] = newTag
+			newFP, _ := json.Marshal(newNode)
+			fingerprints[newTag] = string(newFP)
+			log.Info("dedup: renamed conflicting outbound %q → %q", tag, newTag)
+			clean = append(clean, newNode)
+		}
+	}
+
+	cfg["outbounds"] = clean
+	result, err := json.Marshal(cfg)
+	if err != nil {
+		return "", fmt.Errorf("dedup: re-marshal config failed: %w", err)
+	}
+	return string(result), nil
 }
