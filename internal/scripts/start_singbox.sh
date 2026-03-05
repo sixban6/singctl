@@ -147,8 +147,7 @@ setup_nft() {
         chain prerouting {
             type filter hook prerouting priority mangle; policy accept;
 
-            # 放行 Tailscale 接口流量，避免 TProxy 劫持子网路由流量
-            iifname "tailscale0" accept
+            # 放行 WireGuard 接口流量
             iifname "wg*" counter accept
 
             # 1.主要为了拒绝 外部尝试访问公网端口.
@@ -218,20 +217,7 @@ setup_iptables() {
     echo_succ "创建 SING_BOX 链..."
     iptables -t mangle -N SING_BOX
     
-    # 放行 Tailscale 接口流量
-    echo_succ "配置 Tailscale 放行规则..."
-    iptables -t mangle -A PREROUTING -i tailscale0 -j RETURN
-
-    # DHCP 和 DNS 规则
-    echo_succ "配置 DHCP 和 DNS 规则..."
-    # 放行 DHCP (67-68端口)
-    iptables -t mangle -A SING_BOX -p udp --dport 67:68 -j RETURN
-    
-    # 劫持 DNS 请求到 sing-box (53端口)
-    iptables -t mangle -A SING_BOX -p udp --dport 53 -j TPROXY --on-port $TPROXY_PORT --tproxy-mark $PROXY_FWMARK
-    iptables -t mangle -A SING_BOX -p tcp --dport 53 -j TPROXY --on-port $TPROXY_PORT --tproxy-mark $PROXY_FWMARK
-    
-    # 放行局域网地址
+    # 放行局域网地址 (包含 Tailscale CGNAT 流量及 MagicDNS 流量)
     echo_succ "配置局域网地址放行规则..."
     iptables -t mangle -A SING_BOX -d 127.0.0.0/8 -j RETURN
     iptables -t mangle -A SING_BOX -d 10.0.0.0/8 -j RETURN
@@ -241,6 +227,15 @@ setup_iptables() {
     iptables -t mangle -A SING_BOX -d 100.64.0.0/10 -j RETURN     # Tailscale CGNAT
     iptables -t mangle -A SING_BOX -d 224.0.0.0/4 -j RETURN       # 组播地址
     iptables -t mangle -A SING_BOX -d 255.255.255.255/32 -j RETURN # 广播地址
+
+    # DHCP 和 DNS 规则
+    echo_succ "配置 DHCP 和 DNS 规则..."
+    # 放行 DHCP (67-68端口)
+    iptables -t mangle -A SING_BOX -p udp --dport 67:68 -j RETURN
+    
+    # 劫持 DNS 请求到 sing-box (53端口)
+    iptables -t mangle -A SING_BOX -p udp --dport 53 -j TPROXY --on-port $TPROXY_PORT --tproxy-mark $PROXY_FWMARK
+    iptables -t mangle -A SING_BOX -p tcp --dport 53 -j TPROXY --on-port $TPROXY_PORT --tproxy-mark $PROXY_FWMARK
     
     # 代理 TCP 和 UDP 流量
     echo_succ "配置 TProxy 代理规则..."
@@ -260,11 +255,7 @@ setup_iptables() {
     iptables -t mangle -A OUTPUT -m mark --mark 0x80000 -j RETURN
     iptables -t mangle -A OUTPUT -p udp --sport 41641 -j RETURN
     
-    # 劫持 DNS 请求
-    iptables -t mangle -A OUTPUT -p udp --dport 53 -j MARK --set-mark $PROXY_FWMARK
-    iptables -t mangle -A OUTPUT -p tcp --dport 53 -j MARK --set-mark $PROXY_FWMARK
-    
-    # 放行局域网地址
+    # 放行局域网地址 (包含 Tailscale CGNAT 流量及 MagicDNS 流量)
     iptables -t mangle -A OUTPUT -d 127.0.0.0/8 -j RETURN
     iptables -t mangle -A OUTPUT -d 10.0.0.0/8 -j RETURN
     iptables -t mangle -A OUTPUT -d 172.16.0.0/12 -j RETURN
@@ -273,6 +264,10 @@ setup_iptables() {
     iptables -t mangle -A OUTPUT -d 100.64.0.0/10 -j RETURN
     iptables -t mangle -A OUTPUT -d 224.0.0.0/4 -j RETURN
     iptables -t mangle -A OUTPUT -d 255.255.255.255/32 -j RETURN
+
+    # 劫持 DNS 请求
+    iptables -t mangle -A OUTPUT -p udp --dport 53 -j MARK --set-mark $PROXY_FWMARK
+    iptables -t mangle -A OUTPUT -p tcp --dport 53 -j MARK --set-mark $PROXY_FWMARK
     
     # 标记其他 TCP 和 UDP 流量
     iptables -t mangle -A OUTPUT -p tcp -j MARK --set-mark $PROXY_FWMARK
