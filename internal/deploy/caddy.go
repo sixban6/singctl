@@ -65,30 +65,41 @@ func installCaddy() error {
 	return runEmbeddedScript("install_caddy.sh")
 }
 
-func renderCaddyfile(cfg *config.Config) error {
+// PreviewCaddyfile renders the Caddyfile template with cfg and returns the result as a string.
+// It is exported for use in tests.
+func PreviewCaddyfile(cfg *config.Config) (string, error) {
 	tmplData, err := templateFiles.ReadFile("templates/caddyfile.tpl")
 	if err != nil {
-		return fmt.Errorf("could not read embedded Caddyfile template: %w", err)
+		return "", fmt.Errorf("could not read embedded Caddyfile template: %w", err)
 	}
 
 	t, err := template.New("caddyfile").Parse(string(tmplData))
 	if err != nil {
-		return fmt.Errorf("failed to parse caddyfile template: %w", err)
+		return "", fmt.Errorf("failed to parse caddyfile template: %w", err)
 	}
 
-	// Make struct context available to the Go template
 	type tmplContext struct {
 		SBDomain string
 		CFDNSKey string
+		Sni      string
 	}
 	ctx := tmplContext{
 		SBDomain: cfg.Server.SBDomain,
 		CFDNSKey: cfg.Server.CFDNSKey,
+		Sni:      cfg.Server.Sni,
 	}
 
 	var buf bytes.Buffer
 	if err := t.Execute(&buf, ctx); err != nil {
-		return fmt.Errorf("failed to execute caddyfile template: %w", err)
+		return "", fmt.Errorf("failed to execute caddyfile template: %w", err)
+	}
+	return buf.String(), nil
+}
+
+func renderCaddyfile(cfg *config.Config) error {
+	content, err := PreviewCaddyfile(cfg)
+	if err != nil {
+		return err
 	}
 
 	// Ensure Caddy config directory exists
@@ -96,5 +107,5 @@ func renderCaddyfile(cfg *config.Config) error {
 		return err
 	}
 
-	return os.WriteFile("/etc/caddy/Caddyfile", buf.Bytes(), 0644)
+	return os.WriteFile("/etc/caddy/Caddyfile", []byte(content), 0644)
 }

@@ -6,7 +6,7 @@
             # VLESS Reality 流量 -> Sing-box
             @vless_reality {
                 tls {
-                    sni swdist.apple.com
+                    sni {{.Sni}}
                 }
             }
             route @vless_reality {

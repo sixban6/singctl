@@ -2,6 +2,7 @@ package deploy
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -93,6 +94,10 @@ func (sbs *SingBoxServer) initCaddyCertPath() {
 	sbs.keyPath = filepath.Join(basePath, "acme-v02.api.letsencrypt.org-directory", sbs.cfg.Server.SBDomain, sbs.cfg.Server.SBDomain+".key")
 }
 func (sbs *SingBoxServer) initVRParams() error {
+	// If credentials were already loaded (e.g. via LoadExistingCredentials), skip generation.
+	if sbs.hyUUID != "" {
+		return nil
+	}
 
 	// 2. Generate a new UUID
 	logger.Info("Generating new UUID for Hysteria2 and VLESS...")
@@ -209,7 +214,7 @@ func (sbs *SingBoxServer) DeploySingbox() error {
 		return fmt.Errorf("failed to restart sing-box service: %w", err)
 	}
 	sbs.ShareLinkHy2 = fmt.Sprintf("hysteria2://%s@%s/?sni=%s&alpn=h3&insecure=0#%s", sbs.hyUUID, sbs.cfg.Server.SBDomain, sbs.cfg.Server.SBDomain, sbs.hy2Tag)
-	sbs.ShareLinkVless = fmt.Sprintf("vless://%s@%s:443?type=tcp&encryption=none&security=reality&pbk=%s&fp=chrome&sni=swdist.apple.com&sid=%s&flow=xtls-rprx-vision#%s", sbs.hyUUID, sbs.cfg.Server.SBDomain, sbs.publicKey, sbs.shortID, sbs.vrTag)
+	sbs.ShareLinkVless = fmt.Sprintf("vless://%s@%s:443?type=tcp&encryption=none&security=reality&pbk=%s&fp=chrome&sni=%s&sid=%s&flow=xtls-rprx-vision#%s", sbs.hyUUID, sbs.cfg.Server.SBDomain, sbs.publicKey, sbs.cfg.Server.Sni, sbs.shortID, sbs.vrTag)
 	sbs.ShowLoginInfo()
 	return nil
 }
@@ -227,15 +232,17 @@ func (sbs *SingBoxServer) ShowLoginInfo() {
 	fmt.Println("========================================================")
 }
 
-func (sbs *SingBoxServer) renderSingboxConfig() error {
+// PreviewServerConfig renders the sing-box server config template and returns it as a string.
+// It is exported for use in tests.
+func (sbs *SingBoxServer) PreviewServerConfig() (string, error) {
 	tmplData, err := templateFiles.ReadFile("templates/server_config.json")
 	if err != nil {
-		return fmt.Errorf("could not read embedded sing-box template: %w", err)
+		return "", fmt.Errorf("could not read embedded sing-box template: %w", err)
 	}
 
 	t, err := template.New("singbox_config").Parse(string(tmplData))
 	if err != nil {
-		return fmt.Errorf("failed to parse sing-box template: %w", err)
+		return "", fmt.Errorf("failed to parse sing-box template: %w", err)
 	}
 
 	type tmplContext struct {
@@ -245,6 +252,7 @@ func (sbs *SingBoxServer) renderSingboxConfig() error {
 		KeyPath           string
 		RealityPrivateKey string
 		RealityShortID    string
+		Sni               string
 	}
 	ctx := tmplContext{
 		HyUUID:            sbs.hyUUID,
@@ -253,18 +261,67 @@ func (sbs *SingBoxServer) renderSingboxConfig() error {
 		KeyPath:           sbs.keyPath,
 		RealityPrivateKey: sbs.privateKey,
 		RealityShortID:    sbs.shortID,
+		Sni:               sbs.cfg.Server.Sni,
 	}
 
 	var buf bytes.Buffer
 	if err := t.Execute(&buf, ctx); err != nil {
-		return fmt.Errorf("failed to execute sing-box template: %w", err)
+		return "", fmt.Errorf("failed to execute sing-box template: %w", err)
+	}
+	return buf.String(), nil
+}
+
+func (sbs *SingBoxServer) renderSingboxConfig() error {
+	content, err := sbs.PreviewServerConfig()
+	if err != nil {
+		return fmt.Errorf("failed to render config: %w", err)
 	}
 
 	if err := os.MkdirAll(constant.SingBoxConfigDir, 0755); err != nil {
 		return err
 	}
 
-	return os.WriteFile(constant.SingBoxConfigFile, buf.Bytes(), 0644)
+	return os.WriteFile(constant.SingBoxConfigFile, []byte(content), 0644)
+}
+
+// LoadExistingCredentials reads the deployed sing-box config and populates
+// sbs with the existing uuid, private_key and short_id so that SNI updates
+// do not regenerate credentials.
+func (sbs *SingBoxServer) LoadExistingCredentials() error {
+	data, err := os.ReadFile(constant.SingBoxConfigFile)
+	if err != nil {
+		return fmt.Errorf("read existing config: %w", err)
+	}
+
+	var raw struct {
+		Inbounds []struct {
+			Users []struct {
+				UUID string `json:"uuid"`
+			} `json:"users"`
+			TLS struct {
+				Reality struct {
+					PrivateKey string   `json:"private_key"`
+					ShortID    []string `json:"short_id"`
+				} `json:"reality"`
+			} `json:"tls"`
+		} `json:"inbounds"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return fmt.Errorf("parse existing config: %w", err)
+	}
+
+	for _, inbound := range raw.Inbounds {
+		if len(inbound.Users) > 0 && inbound.Users[0].UUID != "" {
+			sbs.hyUUID = inbound.Users[0].UUID
+			sbs.privateKey = inbound.TLS.Reality.PrivateKey
+			if len(inbound.TLS.Reality.ShortID) > 0 {
+				sbs.shortID = inbound.TLS.Reality.ShortID[0]
+			}
+			logger.Info("Loaded existing credentials from %s", constant.SingBoxConfigFile)
+			return nil
+		}
+	}
+	return fmt.Errorf("no credentials found in existing sing-box config")
 }
 
 // UninstallServer uninstalls sing-box from the server

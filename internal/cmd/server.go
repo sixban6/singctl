@@ -2,10 +2,11 @@ package cmd
 
 import (
 	"fmt"
-	"github.com/spf13/cobra"
 	"singctl/internal/config"
 	"singctl/internal/deploy"
 	"singctl/internal/logger"
+
+	"github.com/spf13/cobra"
 )
 
 func newInstallServerCmd(cfg *config.Config) *cobra.Command {
@@ -142,5 +143,47 @@ func NewServerCmd(configPath string) *cobra.Command {
 
 	cmd.AddCommand(newInstallServerCmd(cfg))
 	cmd.AddCommand(newUninstallServerCmd())
+	cmd.AddCommand(newSniCmd(configPath))
 	return cmd
+}
+
+func newSniCmd(configPath string) *cobra.Command {
+	return &cobra.Command{
+		Use:   "sni <domain>",
+		Short: "Update Reality SNI domain and reload services without regenerating credentials",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			newSni := args[0]
+
+			cfg, err := config.Load(configPath)
+			if err != nil {
+				return fmt.Errorf("failed to load config: %w", err)
+			}
+			cfg.Server.Sni = newSni
+			if err := config.Save(configPath, cfg); err != nil {
+				return fmt.Errorf("failed to save config: %w", err)
+			}
+			logger.Info("SNI updated to %s in config", newSni)
+
+			if err := deploy.DeployCaddy(cfg); err != nil {
+				return fmt.Errorf("caddy update failed: %w", err)
+			}
+
+			sbs := deploy.NewSingBoxServer(cfg)
+			if err := sbs.LoadExistingCredentials(); err != nil {
+				logger.Warn("Could not load existing credentials, new ones will be generated: %v", err)
+			}
+			if err := sbs.DeploySingbox(); err != nil {
+				return fmt.Errorf("sing-box update failed: %w", err)
+			}
+
+			sbt := deploy.NewSubstore(cfg, "")
+			if err := sbt.UpdateSubstoreConfig(sbs); err != nil {
+				logger.Warn("Substore config update failed (non-fatal): %v", err)
+			}
+
+			logger.Success("SNI updated successfully to: %s", newSni)
+			return nil
+		},
+	}
 }

@@ -9,8 +9,8 @@ import (
 	"strings"
 
 	"singctl/internal/config"
-	"singctl/internal/util/file"
 	"singctl/internal/logger"
+	"singctl/internal/util/file"
 
 	"github.com/sixban6/ghinstall"
 )
@@ -93,8 +93,14 @@ func (u *Updater) UpdateSelf(configPath string) error {
 
 		logger.Info("Migrating main configuration file...")
 		// 迁移主配置文件
-		if err := config.MigrateConfig(configPath); err != nil {
-			logger.Warn("Failed to migrate config %s: %v", configPath, err)
+		templatePath := filepath.Join(configsSrc, "singctl.yaml")
+		templateData, err := os.ReadFile(templatePath)
+		if err != nil {
+			logger.Warn("Failed to read downloaded template config %s: %v", templatePath, err)
+		} else {
+			if err := config.MigrateConfig(configPath, templateData); err != nil {
+				logger.Warn("Failed to migrate config %s: %v", configPath, err)
+			}
 		}
 	}
 
