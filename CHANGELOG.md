@@ -1,3 +1,10 @@
+## [1.20.11](https://github.com/sixban6/singctl/compare/v1.20.10...v1.20.11) (2026-03-05)
+
+
+### Bug Fixes
+
+* refactor ([c05841e](https://github.com/sixban6/singctl/commit/c05841e2f6b3302d6cfea25f403169b85cb0351a))
+
 ## [1.20.10](https://github.com/sixban6/singctl/compare/v1.20.9...v1.20.10) (2026-03-03)
 
 
