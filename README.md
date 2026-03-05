@@ -94,6 +94,9 @@ singctl ts install
 # 配置并启动 Tailscale (仅 OpenWrt/Linux)
 singctl ts start 
 
+# 启动Tailscale 并作为 路由器(如果部署在路由器上推荐使用)
+singctl ts start  --router
+
 # 启动Tailscale 并作为出口节点
 singctl ts start  --exit-node
 
