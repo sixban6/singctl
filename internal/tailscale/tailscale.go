@@ -279,9 +279,9 @@ func (t *Tailscale) Start(advertiseExitNode bool, IsMainRouter bool) error {
 		args := []string{"up", "--reset", "--accept-dns=false", "--accept-routes=true"}
 
 		// Get LAN subnet to advertise (if it's a private network)
-		lanSubnet := t.config.LanIPICDR
+		lanSubnet := t.config.Subnets
 		err := errors.New("")
-		if t.config.LanIPICDR == "" && IsMainRouter {
+		if t.config.Subnets == "" && IsMainRouter {
 			lanSubnet, err = netinfo.GetLANSubnet()
 		}
 		if IsMainRouter && err == nil && lanSubnet != "" && isPrivateSubnet(lanSubnet) {

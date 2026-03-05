@@ -114,7 +114,7 @@ func (g *ConfigGenerator) getTailScaleParmas() (string, string) {
 	subnet := ""
 	if g.config.Tailscale.AuthKey != "" {
 
-		s := g.config.Tailscale.LanIPICDR
+		s := g.config.Tailscale.Subnets
 		err := errors.New("")
 		if s == "" {
 			s, err = netinfo.GetLANSubnet()
