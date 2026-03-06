@@ -19,7 +19,7 @@ func NewDaemonCommand() *cobra.Command {
 		Use:     "daemon",
 		Aliases: []string{"dm"}, // 添加快捷命令 singctl dm
 		Short:   "看门狗: 守护singbox(简写singctl dm)",
-		Long:    "Manage the singctl daemon for automatic sing-box monitoring and restart",
+		Long:    "管理 singctl 守护进程，自动监控和重启 sing-box / Manage the singctl daemon for automatic sing-box monitoring and restart",
 	}
 
 	cmd.AddCommand(
@@ -36,8 +36,8 @@ func NewDaemonCommand() *cobra.Command {
 func newDaemonStartCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "start",
-		Short: "Start the daemon",
-		Long:  "Start the singctl daemon to monitor sing-box process and automatically restart it when needed",
+		Short: "启动守护进程 / Start the daemon",
+		Long:  "启动 singctl 守护进程，监控 sing-box 进程并在需要时自动重启 / Start the singctl daemon to monitor sing-box process and automatically restart it when needed",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			configPath := cmd.Flag("config").Value.String()
 
@@ -56,8 +56,8 @@ func newDaemonStartCommand() *cobra.Command {
 func newDaemonStopCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "stop",
-		Short: "Stop the daemon",
-		Long:  "Stop the singctl daemon",
+		Short: "停止守护进程 / Stop the daemon",
+		Long:  "停止 singctl 守护进程 / Stop the singctl daemon",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if !daemon.IsDaemonRunning() {
 				logger.Warn("Daemon is not running")
@@ -78,8 +78,8 @@ func newDaemonStopCommand() *cobra.Command {
 func newDaemonStatusCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
-		Short: "Show daemon status",
-		Long:  "Show the current status of the singctl daemon and monitored services",
+		Short: "查看守护进程状态 / Show daemon status",
+		Long:  "查看 singctl 守护进程和被监控服务的当前状态 / Show the current status of the singctl daemon and monitored services",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			configPath := cmd.Flag("config").Value.String()
 
@@ -117,8 +117,8 @@ func newDaemonLogsCommand() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "logs",
-		Short: "Show daemon logs",
-		Long:  "Show the singctl daemon logs",
+		Short: "查看守护进程日志 / Show daemon logs",
+		Long:  "查看 singctl 守护进程日志 / Show the singctl daemon logs",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logPath := daemon.GetDaemonLogPath()
 

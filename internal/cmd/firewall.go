@@ -1,15 +1,16 @@
 package cmd
 
 import (
-	"github.com/spf13/cobra"
 	"singctl/internal/firewall"
+
+	"github.com/spf13/cobra"
 )
 
 func newEnableCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "enable",
-		Short: "Enable security block rules",
+		Short: "启用安全封锁规则 / Enable security block rules",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return firewall.Enable()
 		},
@@ -22,7 +23,7 @@ func newDisableCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "disable",
-		Short: "Disable and remove security block rules",
+		Short: "禁用并移除安全封锁规则 / Disable and remove security block rules",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return firewall.Disable()
 		},

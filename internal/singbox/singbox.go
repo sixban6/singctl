@@ -14,6 +14,7 @@ import (
 	"singctl/internal/logger"
 	"singctl/internal/scripts"
 	"singctl/internal/util/file"
+	"singctl/internal/util/github"
 	"singctl/internal/util/netinfo"
 	"strings"
 
@@ -447,7 +448,61 @@ func (sb *SingBox) selectSingBoxAsset(assetName string) bool {
 	return true
 }
 
-// Update 更新 sing-box
+// ParseSingBoxVersionOutput 从 "sing-box version" 的输出中提取版本号。
+// 支持格式: "sing-box version 1.12.0" 或多行输出（取首行最后一个字段）。
+func ParseSingBoxVersionOutput(raw string) (string, error) {
+	lines := strings.SplitN(strings.TrimSpace(raw), "\n", 2)
+	if len(lines) == 0 || strings.TrimSpace(lines[0]) == "" {
+		return "", fmt.Errorf("unexpected sing-box version output: %q", raw)
+	}
+	parts := strings.Fields(strings.TrimSpace(lines[0]))
+	if len(parts) == 0 {
+		return "", fmt.Errorf("unexpected sing-box version output: %q", raw)
+	}
+	return parts[len(parts)-1], nil
+}
+
+// getCurrentVersion 获取当前已安装 sing-box 的版本号。
+func (sb *SingBox) getCurrentVersion() (string, error) {
+	out, err := exec.Command(constant.SingBoxInstallDir, "version").Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to run sing-box version: %w", err)
+	}
+	return ParseSingBoxVersionOutput(string(out))
+}
+
+// fetchLatestVersion 从 GitHub API 获取 sing-box 最新稳定 Release 的版本号。
+func (sb *SingBox) fetchLatestVersion() (string, error) {
+	fetcher := github.NewReleaseFetcher(sb.config.GitHub.MirrorURL, nil)
+	return fetcher.FetchLatestTag("SagerNet/sing-box")
+}
+
+// Update 更新 sing-box（更新前对比版本，避免无意义的重复下载）。
 func (sb *SingBox) Update() error {
+	logger.Info("Checking for sing-box updates...")
+
+	// 1. 获取远端最新版本
+	latestVersion, err := sb.fetchLatestVersion()
+	if err != nil {
+		logger.Warn("⚠️ 无法获取最新版本 (%v)，将继续尝试更新", err)
+		latestVersion = "unknown"
+	} else {
+		logger.Info("Latest sing-box version: %s", latestVersion)
+	}
+
+	// 2. 获取当前安装版本
+	currentVersion, currentErr := sb.getCurrentVersion()
+	if currentErr != nil {
+		logger.Warn("无法获取当前版本 (%v)，继续执行更新...", currentErr)
+	} else if latestVersion != "unknown" && currentVersion == latestVersion {
+		logger.Success("✅ sing-box 已是最新版本 (当前: %s)", currentVersion)
+		return nil
+	} else if latestVersion != "unknown" {
+		logger.Info("⬆️ sing-box 更新: %s -> %s", currentVersion, latestVersion)
+	} else {
+		logger.Info("Updating sing-box...")
+	}
+
+	// 3. 执行实际更新
 	return sb.installOrUpdate(constant.SingBoxInstallDir)
 }

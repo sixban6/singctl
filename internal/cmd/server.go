@@ -13,7 +13,7 @@ func newInstallServerCmd(cfg *config.Config) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "install",
-		Short: "install server components. Optionally specify: common|caddy|singbox|substore",
+		Short: "安装服务端组件 / Install server components (common|caddy|singbox|substore)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 
 			// Verify required config
@@ -79,7 +79,7 @@ func newInstallServerCmd(cfg *config.Config) *cobra.Command {
 func newUninstallServerCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "uninstall",
-		Short: "Uninstall server components. Optionally specify: caddy|singbox|substore|warp",
+		Short: "卸载服务端组件 / Uninstall server components (caddy|singbox|substore|warp)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 
 			if len(args) == 0 {
@@ -150,7 +150,7 @@ func NewServerCmd(configPath string) *cobra.Command {
 func newSniCmd(configPath string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "sni <domain>",
-		Short: "Update Reality SNI domain and reload services without regenerating credentials",
+		Short: "更新 Reality SNI 域名 / Update Reality SNI domain and reload services",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			newSni := args[0]
