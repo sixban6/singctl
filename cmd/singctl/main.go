@@ -1,13 +1,14 @@
 package main
 
 import (
-	"github.com/spf13/cobra"
 	"log"
 	"os"
 	"path/filepath"
 	"runtime"
 	"singctl/internal/cmd"
 	"singctl/internal/logger"
+
+	"github.com/spf13/cobra"
 )
 
 var (
@@ -101,7 +102,7 @@ DNS optimization, and complete service lifecycle management.`,
 	rootCmd.SetHelpCommand(helpCmd)
 
 	rootCmd.AddCommand(
-		cmd.NewUpdateCmd(configPath),
+		cmd.NewUpdateCmd(configPath, Version),
 		cmd.NewVersionCmd(Version, BuildTime, GitCommit),
 		cmd.NewInfoCommand(Version),
 		cmd.NewSingboxCommand(configPath),
