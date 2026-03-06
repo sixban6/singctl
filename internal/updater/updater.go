@@ -11,6 +11,7 @@ import (
 	"singctl/internal/config"
 	"singctl/internal/logger"
 	"singctl/internal/util/file"
+	"singctl/internal/util/github"
 
 	"github.com/sixban6/ghinstall"
 )
@@ -30,7 +31,25 @@ func New(mirrorURL, repoURL string) *Updater {
 	}
 }
 
-func (u *Updater) UpdateSelf(configPath string) error {
+func (u *Updater) UpdateSelf(configPath string, currentVersion string) error {
+	logger.Info("Checking for singctl updates...")
+
+	// 版本检测：对比当前版本与远端最新版本
+	if currentVersion != "" && currentVersion != "dev" {
+		fetcher := github.NewReleaseFetcher(u.mirrorURL, nil)
+		latestVersion, err := fetcher.FetchLatestTag("sixban6/singctl")
+		if err != nil {
+			logger.Warn("⚠️ 无法获取最新版本 (%v)，将继续尝试更新", err)
+		} else {
+			logger.Info("Latest singctl version: %s, current: %s", latestVersion, currentVersion)
+			if currentVersion == latestVersion {
+				logger.Success("✅ singctl 已是最新版本 (当前: %s)", currentVersion)
+				return nil
+			}
+			logger.Info("⬆️ singctl 更新: %s -> %s", currentVersion, latestVersion)
+		}
+	}
+
 	ctx := context.Background()
 
 	// 获取当前执行文件路径

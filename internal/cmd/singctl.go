@@ -26,7 +26,7 @@ func NewInfoCommand(version string) *cobra.Command {
 	}
 }
 
-func NewUpdateCmd(configPath string) *cobra.Command {
+func NewUpdateCmd(configPath string, version string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "update <target>",
 		Short: "更新  : 更新singctl到最新版",
@@ -40,7 +40,7 @@ func NewUpdateCmd(configPath string) *cobra.Command {
 			switch args[0] {
 			case "self":
 				updater := updater.New(cfg.GitHub.MirrorURL, "https://github.com/sixban6/singctl")
-				if err := updater.UpdateSelf(configPath); err != nil {
+				if err := updater.UpdateSelf(configPath, version); err != nil {
 					return err
 				}
 				return nil
