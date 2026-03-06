@@ -18,7 +18,7 @@ func NewInfoCommand(version string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "info",
 		Short: "配置  : 查看配置信息",
-		Long:  "Display sing-box installation path, configuration file path, singctl version and subscription information",
+		Long:  "显示 sing-box 安装路径、配置文件路径、singctl 版本及订阅信息 / Display sing-box installation path, configuration file path, singctl version and subscription information",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			configPath := cmd.Flag("config").Value.String()
 			return showSystemInfo(configPath, version)

@@ -22,6 +22,7 @@ import (
 
 	"singctl/internal/logger"
 	"singctl/internal/util/file"
+	"singctl/internal/util/github"
 	"singctl/internal/util/netinfo"
 
 	"github.com/sixban6/ghinstall"
@@ -505,41 +506,14 @@ func (t *Tailscale) getInstalledVersion() (string, error) {
 	return clientVer, nil
 }
 
-type githubRelease struct {
-	TagName string `json:"tag_name"`
-}
-
 // fetchLatestTailscaleVersion 从 auto_fetch_tailscale 的 GitHub Releases 获取最新版本号
 func (t *Tailscale) fetchLatestTailscaleVersion() (string, error) {
-	url := "https://api.github.com/repos/sixban6/auto_fetch_tailscale/releases/latest"
-
-	// 如果配置了 mirror 并且 Google 不可达，尝试通过镜像拉取 API
+	mirror := ""
 	if !netinfo.CheckGoogleConnectivity() && t.DownloadURL != "" {
-		// 某些镜像服务可以代理 api.github.com
-		mirror := strings.TrimRight(t.DownloadURL, "/")
-		if strings.Contains(mirror, "ghproxy") || strings.Contains(mirror, "mirror") {
-			// 如果是通用代理前缀，拼上 api 地址
-			url = mirror + "/https://api.github.com/repos/sixban6/auto_fetch_tailscale/releases/latest"
-		}
+		mirror = t.DownloadURL
 	}
-
-	resp, err := t.httpClient.Get(url)
-	if err != nil {
-		return "", fmt.Errorf("failed to fetch releases: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("github api returned status: %s", resp.Status)
-	}
-
-	var rel githubRelease
-	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
-		return "", fmt.Errorf("failed to decode releases response: %w", err)
-	}
-
-	// 去掉可能存在的 'v' 前缀
-	return strings.TrimPrefix(rel.TagName, "v"), nil
+	fetcher := github.NewReleaseFetcher(mirror, t.httpClient)
+	return fetcher.FetchLatestTag("sixban6/auto_fetch_tailscale")
 }
 
 // Update 将 Tailscale 更新到最新版 (通过 ghinstall)

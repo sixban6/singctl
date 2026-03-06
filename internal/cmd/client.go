@@ -18,7 +18,7 @@ func newStartCmd(cfg *config.Config) *cobra.Command {
 	// 1. sb start
 	cmd := &cobra.Command{
 		Use:   "start",
-		Short: "Generate config and start sing-box",
+		Short: "生成配置并启动 sing-box / Generate config and start sing-box",
 		RunE: func(cmd *cobra.Command, args []string) error {
 
 			sb := singbox.New(cfg)
@@ -47,7 +47,7 @@ func newStopCmd(cfg *config.Config) *cobra.Command {
 	// 2. sb stop
 	cmd := &cobra.Command{
 		Use:   "stop",
-		Short: "Stop sing-box and daemon",
+		Short: "停止 sing-box 和守护进程 / Stop sing-box and daemon",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// 原 stopCmd 的逻辑...
 			if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
@@ -75,7 +75,7 @@ func newGenCmd(cfg *config.Config) *cobra.Command {
 	var stdout bool
 	genCmd := &cobra.Command{
 		Use:   "gen",
-		Short: "Generate sing-box configuration",
+		Short: "生成 sing-box 配置文件 / Generate sing-box configuration",
 		RunE: func(cmd *cobra.Command, args []string) error {
 
 			// gen 命令必须依赖 subs，提前校验防止 index-out-of-range panic
@@ -134,7 +134,7 @@ func newInstallCmd(cfg *config.Config) *cobra.Command {
 	// 4. sb install
 	installCmd := &cobra.Command{
 		Use:   "install",
-		Short: "Install sing-box",
+		Short: "安装 sing-box / Install sing-box",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			sb := singbox.New(cfg)
 			return sb.Install()
@@ -147,7 +147,7 @@ func newUpdateCmd(cfg *config.Config) *cobra.Command {
 	// 5. sb update
 	updateCmd := &cobra.Command{
 		Use:   "update",
-		Short: "Update sing-box",
+		Short: "更新 sing-box / Update sing-box",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			sb := singbox.New(cfg)
 			return sb.Update()
