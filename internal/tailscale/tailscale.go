@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -513,7 +514,22 @@ func (t *Tailscale) fetchLatestTailscaleVersion() (string, error) {
 		mirror = t.DownloadURL
 	}
 	fetcher := github.NewReleaseFetcher(mirror, t.httpClient)
-	return fetcher.FetchLatestTag("sixban6/auto_fetch_tailscale")
+
+	// auto_fetch_tailscale 仓库的 tag 是固定的 "latest"，
+	// 真正的版本号需要从下载文件名中解析 (例如 tailscale_1.94.2_amd64.tgz)
+	downloadURL, err := fetcher.FindAssetURL("sixban6/auto_fetch_tailscale", t.SelectTailscaleAsset)
+	if err != nil {
+		// 降级为直接取 tag（如果有别的上游结构变化）
+		return fetcher.FetchLatestTag("sixban6/auto_fetch_tailscale")
+	}
+
+	re := regexp.MustCompile(`tailscale_([\d\.]+)_`)
+	matches := re.FindStringSubmatch(downloadURL)
+	if len(matches) > 1 {
+		return matches[1], nil
+	}
+
+	return "latest", nil
 }
 
 // Update 将 Tailscale 更新到最新版 (通过 ghinstall)
@@ -528,7 +544,7 @@ func (t *Tailscale) Update() error {
 	latestVersion, err := t.fetchLatestTailscaleVersion()
 	if err != nil {
 		// API 拉取失败，为了保险起见，继续执行安装逻辑，让 ghinstall 尝试最新版
-		logger.Warn("Failed to fetch latest version from GitHub API: %v", err)
+		logger.Warn("⚠️ 无法获取最新版本 (%v)，将继续尝试更新", err)
 		latestVersion = "unknown"
 	} else {
 		logger.Info("Latest Tailscale version: %s", latestVersion)
@@ -538,10 +554,10 @@ func (t *Tailscale) Update() error {
 	if installErr != nil {
 		logger.Warn("Could not determine installed versions (%v), proceeding with update...", installErr)
 	} else if latestVersion != "unknown" && installedVer == latestVersion {
-		logger.Success("Tailscale is already up to date (%s)", latestVersion)
+		logger.Success("✅ Tailscale 已是最新版本 (当前: %s)", latestVersion)
 		return nil
 	} else if latestVersion != "unknown" {
-		logger.Info("Updating Tailscale from %s to %s via ghinstall...", installedVer, latestVersion)
+		logger.Info("⬆️ Tailscale 更新: %s -> %s via ghinstall...", installedVer, latestVersion)
 	} else {
 		logger.Info("Updating Tailscale via ghinstall...")
 	}
