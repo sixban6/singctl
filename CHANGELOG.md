@@ -1,3 +1,10 @@
+## [1.20.22](https://github.com/sixban6/singctl/compare/v1.20.21...v1.20.22) (2026-03-06)
+
+
+### Bug Fixes
+
+* update ([adc5bec](https://github.com/sixban6/singctl/commit/adc5bece3214f3a63427ba6b02c09825da9a9d6c))
+
 ## [1.20.21](https://github.com/sixban6/singctl/compare/v1.20.20...v1.20.21) (2026-03-06)
 
 
