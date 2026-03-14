@@ -137,6 +137,13 @@
         "format": "binary",
         "download_detour": "DirectConn",
         "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/github.srs"
+      },
+      {
+        "tag": "rule-reddit",
+        "type": "remote",
+        "format": "binary",
+        "download_detour": "DirectConn",
+        "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/reddit.srs"
       }
     ],
     "rules": [
@@ -173,6 +180,7 @@
           "rule-google-domain",
           "rule-openai",
           "rule-anthropic",
+          "rule-reddit",
           "rule-google-ip"
         ],
         "outbound": "WARP"
