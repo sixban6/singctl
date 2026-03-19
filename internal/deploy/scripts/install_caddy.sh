@@ -21,3 +21,5 @@ fi
 if ! caddy list-modules | grep -q "layer4"; then
     caddy add-package github.com/mholt/caddy-l4
 fi
+
+apt-mark hold caddy
