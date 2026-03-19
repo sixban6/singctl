@@ -2,6 +2,10 @@ package deploy
 
 import (
 	"bytes"
+	"crypto/ecdh"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -96,41 +100,83 @@ func (sbs *SingBoxServer) initCaddyCertPath() {
 func (sbs *SingBoxServer) initVRParams() error {
 	// If credentials were already loaded (e.g. via LoadExistingCredentials), skip generation.
 	if sbs.hyUUID != "" {
+		if sbs.publicKey == "" && sbs.privateKey != "" {
+			pub, err := deriveRealityPublicKey(sbs.privateKey)
+			if err != nil {
+				return fmt.Errorf("failed to derive reality public key from existing private key: %w", err)
+			}
+			sbs.publicKey = pub
+		}
 		return nil
 	}
 
 	// 2. Generate a new UUID
 	logger.Info("Generating new UUID for Hysteria2 and VLESS...")
-	uuidCmd := exec.Command("sing-box", "generate", "uuid")
-	out, err := uuidCmd.Output()
+	uuid, err := generateUUIDv4()
 	if err != nil {
-		return fmt.Errorf("failed to generate sing-box uuid: %w", err)
+		return fmt.Errorf("failed to generate uuid: %w", err)
 	}
-	sbs.hyUUID = strings.TrimSpace(string(out))
+	sbs.hyUUID = uuid
 
 	// Generate Reality Keypair
 	logger.Info("Generating VLESS Reality Keypair...")
-	keyCmd := exec.Command("sing-box", "generate", "reality-keypair")
-	keyOut, err := keyCmd.Output()
+	privateKey, publicKey, err := generateRealityKeypair()
 	if err != nil {
-		return fmt.Errorf("failed to generate reality keypair: %w", err)
+		return fmt.Errorf("failed to generate reality keypair locally: %w", err)
 	}
-	for _, line := range strings.Split(string(keyOut), "\n") {
-		if strings.HasPrefix(line, "PrivateKey: ") {
-			sbs.privateKey = strings.TrimSpace(strings.TrimPrefix(line, "PrivateKey: "))
-		} else if strings.HasPrefix(line, "PublicKey: ") {
-			sbs.publicKey = strings.TrimSpace(strings.TrimPrefix(line, "PublicKey: "))
-		}
-	}
+	sbs.privateKey = privateKey
+	sbs.publicKey = publicKey
 
 	logger.Info("Generating VLESS Reality Short ID...")
-	sidCmd := exec.Command("sing-box", "generate", "rand", "8", "--hex")
-	sidOut, err := sidCmd.Output()
+	shortID, err := generateHexRandom(8)
 	if err != nil {
 		return fmt.Errorf("failed to generate short id: %w", err)
 	}
-	sbs.shortID = strings.TrimSpace(string(sidOut))
+	sbs.shortID = shortID
 	return nil
+}
+
+func generateUUIDv4() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	// RFC 4122 version 4 UUID
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
+}
+
+func generateRealityKeypair() (privateKey string, publicKey string, err error) {
+	curve := ecdh.X25519()
+	priv, err := curve.GenerateKey(rand.Reader)
+	if err != nil {
+		return "", "", err
+	}
+	privateKey = base64.RawURLEncoding.EncodeToString(priv.Bytes())
+	publicKey = base64.RawURLEncoding.EncodeToString(priv.PublicKey().Bytes())
+	return privateKey, publicKey, nil
+}
+
+func deriveRealityPublicKey(privateKey string) (string, error) {
+	privBytes, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(privateKey))
+	if err != nil {
+		return "", err
+	}
+	curve := ecdh.X25519()
+	priv, err := curve.NewPrivateKey(privBytes)
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(priv.PublicKey().Bytes()), nil
+}
+
+func generateHexRandom(byteLen int) (string, error) {
+	b := make([]byte, byteLen)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
 // DeploySingbox handles sing-box installation, config rendering, and outputs URL
@@ -314,6 +360,13 @@ func (sbs *SingBoxServer) LoadExistingCredentials() error {
 		if len(inbound.Users) > 0 && inbound.Users[0].UUID != "" {
 			sbs.hyUUID = inbound.Users[0].UUID
 			sbs.privateKey = inbound.TLS.Reality.PrivateKey
+			if sbs.privateKey != "" {
+				pub, err := deriveRealityPublicKey(sbs.privateKey)
+				if err != nil {
+					return fmt.Errorf("derive public key from existing private key: %w", err)
+				}
+				sbs.publicKey = pub
+			}
 			if len(inbound.TLS.Reality.ShortID) > 0 {
 				sbs.shortID = inbound.TLS.Reality.ShortID[0]
 			}
