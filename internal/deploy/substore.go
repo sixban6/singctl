@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strings"
 
 	"singctl/internal/config"
 	"singctl/internal/constant"
@@ -49,12 +48,10 @@ func (sb *Substore) DeploySubstore() error {
 
 	// 3. Generate a new random password
 	logger.Info("Generating new random key for Sub-Store...")
-	randCmd := exec.Command("sing-box", "generate", "rand", "13", "--hex")
-	out, err := randCmd.Output()
+	ssKey, err := generateHexRandom(13)
 	if err != nil {
 		return fmt.Errorf("failed to generate random string: %w", err)
 	}
-	ssKey := strings.TrimSpace(string(out))
 	sb.SSKey = ssKey
 
 	// 4. Remove old container if it exists
