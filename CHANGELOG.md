@@ -1,3 +1,10 @@
+## [1.20.27](https://github.com/sixban6/singctl/compare/v1.20.26...v1.20.27) (2026-03-19)
+
+
+### Bug Fixes
+
+* failed to initialize VR parameters ([fe21091](https://github.com/sixban6/singctl/commit/fe210917a214a2bc90b83d4bc76b60236bcb3f1c))
+
 ## [1.20.26](https://github.com/sixban6/singctl/compare/v1.20.25...v1.20.26) (2026-03-19)
 
 
