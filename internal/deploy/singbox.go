@@ -44,8 +44,8 @@ func (sbs *SingBoxServer) init() {
 	sbs.initCaddyCertPath()
 	err := sbs.initVRParams()
 	if err != nil {
-		logger.Info("Init VR Protocol Params Failed")
-		return
+		logger.Error("failed to initialize VR parameters: %v", err)
+		os.Exit(-1)
 	}
 	sbs.initTag()
 }
