@@ -1,3 +1,10 @@
+## [1.20.28](https://github.com/sixban6/singctl/compare/v1.20.27...v1.20.28) (2026-03-20)
+
+
+### Bug Fixes
+
+* bug client_subnet ([9106b98](https://github.com/sixban6/singctl/commit/9106b9806bb6dbce7f264887ebd443b33e785c60))
+
 ## [1.20.27](https://github.com/sixban6/singctl/compare/v1.20.26...v1.20.27) (2026-03-19)
 
 
