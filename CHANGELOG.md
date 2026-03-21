@@ -1,3 +1,10 @@
+## [1.20.30](https://github.com/sixban6/singctl/compare/v1.20.29...v1.20.30) (2026-03-21)
+
+
+### Bug Fixes
+
+* three bug fix ([635c1a8](https://github.com/sixban6/singctl/commit/635c1a831d2500eb64a1187fa240778f19b54418))
+
 ## [1.20.29](https://github.com/sixban6/singctl/compare/v1.20.28...v1.20.29) (2026-03-21)
 
 
