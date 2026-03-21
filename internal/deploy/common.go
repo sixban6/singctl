@@ -2,6 +2,7 @@ package deploy
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 
 	"singctl/internal/logger"
@@ -25,6 +26,21 @@ func runCmd(name string, arg ...string) error {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("command execution failed (%s %v): %v, output: %s", name, arg, err, string(out))
+	}
+	return nil
+}
+
+// ensureFilePermissions applies and verifies the file mode.
+func ensureFilePermissions(path string, perm os.FileMode) error {
+	if err := os.Chmod(path, perm); err != nil {
+		return fmt.Errorf("chmod %s to %o failed: %w", path, perm, err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("stat %s failed: %w", path, err)
+	}
+	if info.Mode().Perm() != perm {
+		return fmt.Errorf("permission verify failed for %s: got %o, want %o", path, info.Mode().Perm(), perm)
 	}
 	return nil
 }
