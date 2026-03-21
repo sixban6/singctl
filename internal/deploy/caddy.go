@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"os/user"
+	"strconv"
 	"text/template"
 
 	"singctl/internal/config"
@@ -107,5 +109,38 @@ func renderCaddyfile(cfg *config.Config) error {
 		return err
 	}
 
-	return os.WriteFile("/etc/caddy/Caddyfile", []byte(content), 0644)
+	caddyfilePath := "/etc/caddy/Caddyfile"
+	if err := os.WriteFile(caddyfilePath, []byte(content), 0640); err != nil {
+		return err
+	}
+	return secureCaddyfile(caddyfilePath)
+}
+
+func secureCaddyfile(path string) error {
+	gid, err := lookupCaddyGID()
+	if err != nil {
+		return err
+	}
+	if err := os.Chown(path, 0, gid); err != nil {
+		return fmt.Errorf("set ownership root:caddy for %s failed: %w", path, err)
+	}
+	return ensureFilePermissions(path, 0640)
+}
+
+func lookupCaddyGID() (int, error) {
+	if u, err := user.Lookup("caddy"); err == nil {
+		gid, convErr := strconv.Atoi(u.Gid)
+		if convErr == nil {
+			return gid, nil
+		}
+	}
+	g, err := user.LookupGroup("caddy")
+	if err != nil {
+		return 0, fmt.Errorf("lookup caddy user/group failed: %w", err)
+	}
+	gid, err := strconv.Atoi(g.Gid)
+	if err != nil {
+		return 0, fmt.Errorf("parse caddy gid %q failed: %w", g.Gid, err)
+	}
+	return gid, nil
 }

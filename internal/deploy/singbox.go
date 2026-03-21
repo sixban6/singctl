@@ -38,20 +38,21 @@ type SingBoxServer struct {
 	ShareLinkVless string
 }
 
-func NewSingBoxServer(cfg *config.Config) *SingBoxServer {
+func NewSingBoxServer(cfg *config.Config) (*SingBoxServer, error) {
 	sbs := &SingBoxServer{cfg: cfg}
-	sbs.init()
-	return sbs
+	if err := sbs.init(); err != nil {
+		return nil, err
+	}
+	return sbs, nil
 }
 
-func (sbs *SingBoxServer) init() {
+func (sbs *SingBoxServer) init() error {
 	sbs.initCaddyCertPath()
-	err := sbs.initVRParams()
-	if err != nil {
-		logger.Error("failed to initialize VR parameters: %v", err)
-		os.Exit(-1)
+	if err := sbs.initVRParams(); err != nil {
+		return fmt.Errorf("failed to initialize VR parameters: %w", err)
 	}
 	sbs.initTag()
+	return nil
 }
 
 func (sbs *SingBoxServer) initTag() {
@@ -182,7 +183,7 @@ func generateHexRandom(byteLen int) (string, error) {
 // DeploySingbox handles sing-box installation, config rendering, and outputs URL
 
 // 定义标准的服务文件内容 (请根据你的实际二进制路径和配置文件路径调整 ExecStart)
-const singboxServiceContent = `[Unit]
+const singboxServiceContentTemplate = `[Unit]
 Description=sing-box service
 Documentation=https://sing-box.sagernet.org
 After=network.target nss-lookup.target network-online.target
@@ -190,7 +191,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/sing-box run -c %s
+ExecStart=%s run -c %s
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=10s
@@ -203,26 +204,28 @@ WantedBy=multi-user.target
 // 检查并创建 service 文件的辅助方法
 func (sbs *SingBoxServer) ensureSystemdService() error {
 	servicePath := constant.SingBoxSystemdService
+	expectedContent := fmt.Sprintf(singboxServiceContentTemplate, constant.SingBoxInstallDir, constant.SingBoxConfigFile)
+	shouldWrite := false
 
-	// 1. 检查文件是否存在
-	if _, err := os.Stat(servicePath); os.IsNotExist(err) {
+	if existing, err := os.ReadFile(servicePath); os.IsNotExist(err) {
 		logger.Info("sing-box.service not found, creating it...")
+		shouldWrite = true
+	} else if err != nil {
+		return fmt.Errorf("failed to check service file state: %w", err)
+	} else if string(existing) != expectedContent {
+		logger.Info("sing-box.service content is outdated, updating it...")
+		shouldWrite = true
+	}
 
-		// 2. 写入服务文件
-		svcContent := fmt.Sprintf(singboxServiceContent, constant.SingBoxConfigFile)
-		if err := os.WriteFile(servicePath, []byte(svcContent), 0644); err != nil {
+	if shouldWrite {
+		if err := os.WriteFile(servicePath, []byte(expectedContent), 0644); err != nil {
 			return fmt.Errorf("failed to write sing-box.service: %w", err)
 		}
-
-		// 3. 重新加载 systemd 守护进程以识别新服务
 		logger.Info("Reloading systemd daemon...")
 		if err := runCmd("systemctl", "daemon-reload"); err != nil {
 			return fmt.Errorf("failed to daemon-reload: %w", err)
 		}
-
-		logger.Success("Successfully created sing-box.service")
-	} else if err != nil {
-		return fmt.Errorf("failed to check service file state: %w", err)
+		logger.Success("sing-box.service is ready at %s", servicePath)
 	}
 
 	return nil
@@ -327,7 +330,10 @@ func (sbs *SingBoxServer) renderSingboxConfig() error {
 		return err
 	}
 
-	return os.WriteFile(constant.SingBoxConfigFile, []byte(content), 0644)
+	if err := os.WriteFile(constant.SingBoxConfigFile, []byte(content), 0600); err != nil {
+		return err
+	}
+	return ensureFilePermissions(constant.SingBoxConfigFile, 0600)
 }
 
 // LoadExistingCredentials reads the deployed sing-box config and populates

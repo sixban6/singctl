@@ -32,7 +32,10 @@ func newInstallServerCmd(cfg *config.Config) *cobra.Command {
 				if err := deploy.DeployCaddy(cfg); err != nil {
 					return err
 				}
-				sbs := deploy.NewSingBoxServer(cfg)
+				sbs, err := deploy.NewSingBoxServer(cfg)
+				if err != nil {
+					return err
+				}
 				if err := sbs.DeploySingbox(); err != nil {
 					return err
 				}
@@ -42,8 +45,7 @@ func newInstallServerCmd(cfg *config.Config) *cobra.Command {
 					return err
 				}
 
-				err := sbt.UpdateSubstoreConfig(sbs)
-				if err != nil {
+				if err := sbt.UpdateSubstoreConfig(sbs); err != nil {
 					logger.Warn("Substore config update failed!")
 					return err
 				}
@@ -53,7 +55,10 @@ func newInstallServerCmd(cfg *config.Config) *cobra.Command {
 				return nil
 			}
 
-			sbs := deploy.NewSingBoxServer(cfg)
+			sbs, err := deploy.NewSingBoxServer(cfg)
+			if err != nil {
+				return err
+			}
 			sbt := deploy.Substore{Config: cfg, SSKey: ""}
 			// Handle specified targets
 			switch args[0] {
@@ -169,7 +174,10 @@ func newSniCmd(configPath string) *cobra.Command {
 				return fmt.Errorf("caddy update failed: %w", err)
 			}
 
-			sbs := deploy.NewSingBoxServer(cfg)
+			sbs, err := deploy.NewSingBoxServer(cfg)
+			if err != nil {
+				return err
+			}
 			if err := sbs.LoadExistingCredentials(); err != nil {
 				logger.Warn("Could not load existing credentials, new ones will be generated: %v", err)
 			}
