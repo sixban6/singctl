@@ -184,7 +184,8 @@
       },
       {
         "rule_set": [
-          "rule-github"
+          "rule-github",
+          "rule-youtube"
         ],
         "outbound": "DirectConn"
       },
@@ -196,7 +197,6 @@
           "rule-reddit",
           "rule-x",
           "rule-porn",
-          "rule-youtube",
           "rule-google-ip"
         ],
         "outbound": "WARP"
