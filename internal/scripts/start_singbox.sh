@@ -149,7 +149,7 @@ setup_nft() {
 
             # 放行 WireGuard/Tailscale 接口流量，避免路由器/ExitNode转发流量被 TProxy 劫持
             iifname "wg*" counter accept
-            iifname "tailscale*" counter accept
+#            iifname "tailscale*" counter accept
 
             # 1.主要为了拒绝 外部尝试访问公网端口.
             fib daddr type local meta l4proto { tcp, udp } th dport $TPROXY_PORT reject with icmpx type host-unreachable
