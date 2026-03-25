@@ -1,3 +1,10 @@
+# [1.21.0](https://github.com/sixban6/singctl/compare/v1.20.36...v1.21.0) (2026-03-25)
+
+
+### Features
+
+* m ([5e8944f](https://github.com/sixban6/singctl/commit/5e8944f8f80a5f76234fd2e0eae56cecb0bf76dc))
+
 ## [1.20.36](https://github.com/sixban6/singctl/compare/v1.20.35...v1.20.36) (2026-03-25)
 
 
