@@ -48,6 +48,33 @@ func New(downloadURL string, config *config.TailscaleConfig) *Tailscale {
 	}
 }
 
+func commandExists(name string) bool {
+	_, err := exec.LookPath(name)
+	return err == nil
+}
+
+func hasActiveSingBoxTProxy() bool {
+	if exec.Command("pgrep", "-x", "sing-box").Run() == nil {
+		return true
+	}
+	if exec.Command("pgrep", "-f", "ujail.*sing-box").Run() == nil {
+		return true
+	}
+	if commandExists("nft") && exec.Command("nft", "list", "table", "inet", "sing-box").Run() == nil {
+		return true
+	}
+	if commandExists("iptables") && exec.Command("iptables", "-t", "mangle", "-S", "SING_BOX").Run() == nil {
+		return true
+	}
+	if out, err := exec.Command("ip", "rule", "show").Output(); err == nil {
+		rules := string(out)
+		if strings.Contains(rules, "fwmark 0x1") && strings.Contains(rules, "lookup 100") {
+			return true
+		}
+	}
+	return false
+}
+
 // SelectTailscaleAsset 过滤合适的 Tailscale 发布包
 func (t *Tailscale) SelectTailscaleAsset(assetName string) bool {
 	name := strings.ToLower(assetName)
@@ -309,10 +336,15 @@ func (t *Tailscale) Start(advertiseExitNode bool, IsMainRouter bool, acceptRoute
 		}
 		if hasTun {
 			if isOpenWrt {
-				// OpenWrt with singctl/sing-box TProxy already manages nft/iptables.
-				// Disable tailscale netfilter automation to avoid DNS/route conflicts.
-				args = append(args, "--netfilter-mode=off")
-				logger.Info("OpenWrt detected, using --netfilter-mode=off to avoid firewall conflicts with sing-box")
+				if hasActiveSingBoxTProxy() {
+					// OpenWrt with active sing-box TProxy already manages nft/iptables.
+					// Disable tailscale netfilter automation only when a real runtime conflict exists.
+					args = append(args, "--netfilter-mode=off")
+					logger.Info("OpenWrt detected with active sing-box TProxy, using --netfilter-mode=off to avoid firewall conflicts")
+				} else {
+					args = append(args, "--netfilter-mode=on")
+					logger.Info("OpenWrt detected without active sing-box TProxy, using --netfilter-mode=on for Tailscale-managed networking")
+				}
 			} else {
 				args = append(args, "--netfilter-mode=on")
 			}
