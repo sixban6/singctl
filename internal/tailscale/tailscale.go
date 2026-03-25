@@ -284,9 +284,10 @@ func (t *Tailscale) Start(advertiseExitNode bool, IsMainRouter bool) error {
 		lanSubnet := t.config.Subnets
 		err := errors.New("")
 		if t.config.Subnets == "" && IsMainRouter {
+			logger.Warn("subnets not config will auto detect")
 			lanSubnet, err = netinfo.GetLANSubnet()
 		}
-		if IsMainRouter && err == nil && lanSubnet != "" && isPrivateSubnet(lanSubnet) {
+		if IsMainRouter && err == nil && lanSubnet != "" {
 			logger.Info("Detected private LAN subnet: %s, adding to advertise-routes", lanSubnet)
 			args = append(args, "--advertise-routes="+lanSubnet)
 			if isOpenWrt {

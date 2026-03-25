@@ -12,5 +12,5 @@ else
 fi
 
 ./singctl sb gen -c /etc/singctl/singctl.yaml
-cat /etc/sing-box/config.json | grep tailscale
+cat /etc/sing-box/config.json | grep endpoint
 
