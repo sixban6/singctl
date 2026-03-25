@@ -170,18 +170,8 @@ read-only /sbin
 rlimit-nofile 65536
 rlimit-nproc 100
 EOF
-        echo_info "Firejail 配置已创建: /etc/sing-box/sing-box.profile"
-        return 0
-    fi
-    
-    # 检查是否支持 systemd 用户命名空间
-    if systemctl --version >/dev/null 2>&1; then
-        echo_info "将使用 systemd 安全特性"
-        return 0
-    fi
-    
-    echo_warn "未找到合适的沙盒工具，将使用普通模式"
-    return 1
+    echo_info "Firejail 配置已创建: /etc/sing-box/sing-box.profile"
+    return 0
 }
 
 init_env() {
@@ -256,6 +246,9 @@ table inet sing-box {
     chain prerouting {
         type filter hook prerouting priority mangle; policy accept;
 
+        # 放行 Tailscale 接口流量，避免 router/exit-node 转发流量被 TProxy 劫持
+        iifname "tailscale*" counter accept
+
         # 拒绝外部访问代理端口
         fib daddr type local meta l4proto { tcp, udp } th dport $TPROXY_PORT reject with icmpx type host-unreachable
         fib daddr type local accept
@@ -279,6 +272,9 @@ table inet sing-box {
 
         # 放行已标记流量，防止回环
         meta mark $PROXY_FWMARK accept
+        meta mark 0x80000 accept comment "Bypass Tailscale fwmark"
+        udp sport 41641 accept comment "Bypass Tailscale UDP port"
+        oifname "tailscale*" accept comment "Bypass outbound traffic to tailscale interface"
 
         # 放行 IPv6 ICMP
         meta l4proto ipv6-icmp accept
@@ -316,6 +312,7 @@ setup_iptables() {
     iptables -t mangle -I PREROUTING -j SINGBOX
     
     # 放行局域网
+    iptables -t mangle -A SINGBOX -i tailscale+ -j RETURN
     iptables -t mangle -A SINGBOX -d 127.0.0.0/8 -j RETURN
     iptables -t mangle -A SINGBOX -d 10.0.0.0/8 -j RETURN
     iptables -t mangle -A SINGBOX -d 172.16.0.0/12 -j RETURN
@@ -333,6 +330,9 @@ setup_iptables() {
     iptables -t mangle -A SINGBOX -p udp -j TPROXY --tproxy-mark $PROXY_FWMARK --on-port $TPROXY_PORT
     
     # OUTPUT 链规则
+    iptables -t mangle -I OUTPUT -o tailscale+ -j RETURN
+    iptables -t mangle -I OUTPUT -m mark --mark 0x80000 -j RETURN
+    iptables -t mangle -I OUTPUT -p udp --sport 41641 -j RETURN
     iptables -t mangle -I OUTPUT -m mark --mark $PROXY_FWMARK -j RETURN
     iptables -t mangle -I OUTPUT -p tcp --dport 53 -j MARK --set-mark $PROXY_FWMARK
     iptables -t mangle -I OUTPUT -p udp --dport 53 -j MARK --set-mark $PROXY_FWMARK

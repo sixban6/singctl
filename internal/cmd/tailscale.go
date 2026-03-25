@@ -1,10 +1,12 @@
 package cmd
 
 import (
+	"fmt"
 	"singctl/internal/config"
 	"singctl/internal/constant"
 	"singctl/internal/logger"
 	"singctl/internal/tailscale"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -15,20 +17,68 @@ func newStartTailScaleCmd(cfg *config.Config) *cobra.Command {
 		Use:   "start",
 		Short: "启动 Tailscale / Start tailscale",
 		Example: `  singctl ts start
-  singctl ts start --router
-  singctl ts start --exit-node
-  singctl ts start --router --exit-node`,
+	  singctl ts start --router
+	  singctl ts start --exit-node
+	  singctl ts start --router --exit-node
+	  singctl ts start --router --exit-node --accept-routes
+	  singctl ts start --mode gateway
+	  singctl ts start -m gateway`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			exitNode, _ := cmd.Flags().GetBool(constant.ExitNode)
 			mainRouter, _ := cmd.Flags().GetBool(constant.MainRouter)
+			acceptRoutes, _ := cmd.Flags().GetBool(constant.AcceptRoutes)
+			mode, _ := cmd.Flags().GetString(constant.TailscaleMode)
+
+			routerFlagChanged := cmd.Flags().Changed(constant.MainRouter)
+			exitFlagChanged := cmd.Flags().Changed(constant.ExitNode)
+			acceptRoutesChanged := cmd.Flags().Changed(constant.AcceptRoutes)
+
+			mode = strings.ToLower(strings.TrimSpace(mode))
+			if mode != "" {
+				if routerFlagChanged || exitFlagChanged {
+					return fmt.Errorf("--%s cannot be used with --%s/--%s", constant.TailscaleMode, constant.MainRouter, constant.ExitNode)
+				}
+
+				switch mode {
+				case "client":
+					mainRouter = false
+					exitNode = false
+				case "router":
+					mainRouter = true
+					exitNode = false
+				case "exit":
+					mainRouter = false
+					exitNode = true
+				case "gateway":
+					// gateway: route advertiser + exit node + import remote routes
+					mainRouter = true
+					exitNode = true
+					if !acceptRoutesChanged {
+						acceptRoutes = true
+						acceptRoutesChanged = true
+					}
+				default:
+					return fmt.Errorf("invalid --%s: %q (supported: client, router, exit, gateway)", constant.TailscaleMode, mode)
+				}
+			}
+
+			var acceptRoutesOverride *bool
+			if acceptRoutesChanged {
+				acceptRoutesOverride = &acceptRoutes
+			}
+
 			ts := tailscale.New(cfg.GitHub.MirrorURL, &cfg.Tailscale)
-			return ts.Start(exitNode, mainRouter)
+			return ts.Start(exitNode, mainRouter, acceptRoutesOverride)
 		},
 	}
-	startCmd.Flags().Bool(constant.ExitNode, false,
+	startCmd.Flags().BoolP(constant.ExitNode, "e", false,
 		"将本机设为出口节点 / Advertise this device as a Tailscale exit node")
-	startCmd.Flags().Bool(constant.MainRouter, false,
+	startCmd.Flags().BoolP(constant.MainRouter, "r", false,
 		"广播本机 LAN 子网路由（适合部署在路由器上） / Advertise LAN subnet routes (for router devices)")
+	startCmd.Flags().BoolP(constant.AcceptRoutes, "a", false,
+		"接收其他节点广播路由 / Accept routes advertised by other nodes")
+	startCmd.Flags().StringP(constant.TailscaleMode, "m", "",
+		"快速模式: client|router|exit|gateway (gateway = router+exit-node+accept-routes)")
 	return startCmd
 }
 

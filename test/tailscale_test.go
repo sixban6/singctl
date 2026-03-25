@@ -454,7 +454,7 @@ func TestStart_SkipsOnNonOpenWrt(t *testing.T) {
 		OpenWrtCheck: func() bool { return false },
 	}
 	// 在非 OpenWrt 环境下 Start() 应该返回 nil 而不是执行任何操作
-	err := ts.Start(false, false)
+	err := ts.Start(false, false, nil)
 	if err != nil {
 		t.Errorf("Start() on non-OpenWrt should return nil, got: %v", err)
 	}

@@ -53,17 +53,49 @@ singctl ts install
 # 普通模式启动
 singctl ts start
 
-# 作为路由器（推荐用于路由器设备，广播局域网子网）
+# 作为路由器（广播本机局域网子网）
 singctl ts start --router
+# 短参数写法
+singctl ts start -r
 
 # 作为出口节点（将本机设为其他设备的出口）
 singctl ts start --exit-node
+# 短参数写法
+singctl ts start -e
+
+# 同时作为路由器 + 出口节点（并接收其他节点广播路由）
+singctl ts start --router --exit-node --accept-routes
+# 短参数写法
+singctl ts start -r -e -a
+
+# 推荐：快速模式（一条命令）
+singctl ts start --mode gateway
+# 短参数写法（最简）
+singctl ts start -m gateway
 ```
 
 | 参数 | 说明 |
 | :--- | :--- |
-| `--router` | 启用子网路由，广播本机局域网网段（适合部署在路由器上） |
-| `--exit-node` | 将本机设置为 Tailscale 网络的出口节点 |
+| `--router` / `-r` | 启用子网路由，广播本机局域网网段（适合部署在路由器上） |
+| `--exit-node` / `-e` | 将本机设置为 Tailscale 网络的出口节点 |
+| `--accept-routes` / `-a` | 接收其他节点广播路由（例如访问异地内网 IP） |
+| `--mode` / `-m` | 快速模式：`client` / `router` / `exit` / `gateway` |
+
+快速模式说明：
+
+| 模式 | 等价行为 |
+| :--- | :--- |
+| `client` | 普通客户端 |
+| `router` | 等价 `--router` |
+| `exit` | 等价 `--exit-node` |
+| `gateway` | 等价 `--router --exit-node --accept-routes`（推荐路由器场景） |
+
+注意事项：
+
+- `--mode` 不能和 `--router/--exit-node` 同时使用。
+- 未显式指定 `--accept-routes` 时：  
+  普通模式默认 `true`；`--router` 或 `--exit-node` 默认 `false`（避免路由冲突）。
+- 若你需要通过本机访问异地内网 IP（如老家 `192.168.x.x`），请显式加 `--accept-routes`，或直接用 `-m gateway`。
 
 ---
 
