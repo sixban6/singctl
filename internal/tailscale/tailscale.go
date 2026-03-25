@@ -4,7 +4,6 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -216,7 +215,8 @@ func (t *Tailscale) Install() error {
 
 // Start brings up Tailscale and configures firewall/network rules.
 // advertiseExitNode=true also advertises this device as a Tailscale exit node.
-func (t *Tailscale) Start(advertiseExitNode bool, IsMainRouter bool) error {
+// acceptRoutesOverride, when non-nil, forces tailscale up --accept-routes=<value>.
+func (t *Tailscale) Start(advertiseExitNode bool, IsMainRouter bool, acceptRoutesOverride *bool) error {
 	logger.Info("Starting Tailscale configuration...")
 
 	hasTun := CheckTunModule()
@@ -278,11 +278,20 @@ func (t *Tailscale) Start(advertiseExitNode bool, IsMainRouter bool) error {
 
 	// 3. Tailscale Up (Config and Online)
 	if isNeedsAuth {
-		args := []string{"up", "--reset", "--accept-dns=false", "--accept-routes=true"}
+		args := []string{"up", "--reset", "--accept-dns=false"}
+		if acceptRoutesOverride != nil {
+			args = append(args, fmt.Sprintf("--accept-routes=%t", *acceptRoutesOverride))
+		} else if IsMainRouter || advertiseExitNode {
+			// Router/ExitNode mode should not import foreign routes by default.
+			// This avoids route conflicts when local TProxy rules are active.
+			args = append(args, "--accept-routes=false")
+		} else {
+			args = append(args, "--accept-routes=true")
+		}
 
 		// Get LAN subnet to advertise (if it's a private network)
 		lanSubnet := t.config.Subnets
-		err := errors.New("")
+		var err error
 		if t.config.Subnets == "" && IsMainRouter {
 			logger.Warn("subnets not config will auto detect")
 			lanSubnet, err = netinfo.GetLANSubnet()

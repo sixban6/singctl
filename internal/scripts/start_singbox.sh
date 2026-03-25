@@ -147,8 +147,9 @@ setup_nft() {
         chain prerouting {
             type filter hook prerouting priority mangle; policy accept;
 
-            # 放行 WireGuard 接口流量
+            # 放行 WireGuard/Tailscale 接口流量，避免路由器/ExitNode转发流量被 TProxy 劫持
             iifname "wg*" counter accept
+            iifname "tailscale*" counter accept
 
             # 1.主要为了拒绝 外部尝试访问公网端口.
             fib daddr type local meta l4proto { tcp, udp } th dport $TPROXY_PORT reject with icmpx type host-unreachable
@@ -178,6 +179,7 @@ setup_nft() {
             # 【新增这两行！】放行 Tailscale 进程自身发出的流量
             meta mark 0x80000 accept comment "Bypass Tailscale fwmark"
             udp sport 41641 accept comment "Bypass Tailscale UDP port"
+            oifname "tailscale*" accept comment "Bypass outbound traffic to tailscale interface"
 
             # 2.放行ipv6的icmp基础流量
             meta l4proto ipv6-icmp accept comment "Allow ICMPv6 traffic"
@@ -219,6 +221,7 @@ setup_iptables() {
     
     # 放行局域网地址 (包含 Tailscale CGNAT 流量及 MagicDNS 流量)
     echo_succ "配置局域网地址放行规则..."
+    iptables -t mangle -A SING_BOX -i tailscale+ -j RETURN
     iptables -t mangle -A SING_BOX -d 127.0.0.0/8 -j RETURN
     iptables -t mangle -A SING_BOX -d 10.0.0.0/8 -j RETURN
     iptables -t mangle -A SING_BOX -d 172.16.0.0/12 -j RETURN
@@ -254,6 +257,7 @@ setup_iptables() {
     # 【新增这两行！】放行 Tailscale 自身发出的流量
     iptables -t mangle -A OUTPUT -m mark --mark 0x80000 -j RETURN
     iptables -t mangle -A OUTPUT -p udp --sport 41641 -j RETURN
+    iptables -t mangle -A OUTPUT -o tailscale+ -j RETURN
     
     # 放行局域网地址 (包含 Tailscale CGNAT 流量及 MagicDNS 流量)
     iptables -t mangle -A OUTPUT -d 127.0.0.0/8 -j RETURN
