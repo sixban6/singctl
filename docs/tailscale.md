@@ -96,6 +96,7 @@ singctl ts start -m gateway
 - 未显式指定 `--accept-routes` 时：  
   普通模式默认 `true`；`--router` 或 `--exit-node` 默认 `false`（避免路由冲突）。
 - 若你需要通过本机访问异地内网 IP（如老家 `192.168.x.x`），请显式加 `--accept-routes`，或直接用 `-m gateway`。
+- 在 OpenWrt 且你已启用 `singctl sb start`（TProxy）时，`singctl ts start` 会自动使用 `--netfilter-mode=off`，避免与 sing-box 防火墙规则冲突（例如 DNS 异常）。
 
 ---
 
