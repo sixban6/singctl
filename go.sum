@@ -12,11 +12,7 @@ github.com/showwin/speedtest-go v1.7.10 h1:9o5zb7KsuzZKn+IE2//z5btLKJ870JwO6ETay
 github.com/showwin/speedtest-go v1.7.10/go.mod h1:Ei7OCTmNPdWofMadzcfgq1rUO7mvJy9Jycj//G7vyfA=
 github.com/sixban6/ghinstall v1.12.9 h1:nAhnF+JppZftxTYDKMib3vRN9thvytaDuompCWOXRpY=
 github.com/sixban6/ghinstall v1.12.9/go.mod h1:wqLoQGCDfqEcwVtrRxRo97OSjTOh5E/qunTaxFzljic=
-github.com/sixban6/singgen v1.13.22 h1:3QyY07GsmxBHtemRiFfBBQdC3pa/m35EV7Z45k52czE=
-github.com/sixban6/singgen v1.13.22/go.mod h1:3KSsRgnNU1BEOxn3QAWGGVu7x7RnaKGODGdh2rc2fuc=
-github.com/sixban6/singgen v1.13.23/go.mod h1:3KSsRgnNU1BEOxn3QAWGGVu7x7RnaKGODGdh2rc2fuc=
-github.com/sixban6/singgen v1.13.24 h1:hRF+8Y8TFhoyq1eV945ZgYq644liTN3rngUK2i6dxvA=
-github.com/sixban6/singgen v1.13.24/go.mod h1:3KSsRgnNU1BEOxn3QAWGGVu7x7RnaKGODGdh2rc2fuc=
+github.com/sixban6/singgen v1.13.25 h1:QPI8tmmZoERhysfGtfS/MnOwb+87t16Fs29ieG+93pE=
 github.com/sixban6/singgen v1.13.25/go.mod h1:3KSsRgnNU1BEOxn3QAWGGVu7x7RnaKGODGdh2rc2fuc=
 github.com/spf13/cobra v1.10.2 h1:DMTTonx5m65Ic0GOoRY2c16WCbHxOOw6xxezuLaBpcU=
 github.com/spf13/cobra v1.10.2/go.mod h1:7C1pvHqHw5A4vrJfjNwvOdzYu0Gml16OCs2GRiTUUS4=
