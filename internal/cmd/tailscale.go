@@ -26,12 +26,13 @@ func newStartTailScaleCmd(cfg *config.Config) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			exitNode, _ := cmd.Flags().GetBool(constant.ExitNode)
 			mainRouter, _ := cmd.Flags().GetBool(constant.MainRouter)
-			acceptRoutes, _ := cmd.Flags().GetBool(constant.AcceptRoutes)
+			// acceptRoutes, _ := cmd.Flags().GetBool(constant.AcceptRoutes)
+			acceptRoutes := false
 			mode, _ := cmd.Flags().GetString(constant.TailscaleMode)
 
 			routerFlagChanged := cmd.Flags().Changed(constant.MainRouter)
 			exitFlagChanged := cmd.Flags().Changed(constant.ExitNode)
-			acceptRoutesChanged := cmd.Flags().Changed(constant.AcceptRoutes)
+			// acceptRoutesChanged := cmd.Flags().Changed(constant.AcceptRoutes)
 
 			mode = strings.ToLower(strings.TrimSpace(mode))
 			if mode != "" {
@@ -56,18 +57,14 @@ func newStartTailScaleCmd(cfg *config.Config) *cobra.Command {
 					// the default path and make the box appear fully offline.
 					mainRouter = true
 					exitNode = true
+					acceptRoutes = true
 				default:
 					return fmt.Errorf("invalid --%s: %q (supported: client, router, exit, gateway)", constant.TailscaleMode, mode)
 				}
 			}
 
-			var acceptRoutesOverride *bool
-			if acceptRoutesChanged {
-				acceptRoutesOverride = &acceptRoutes
-			}
-
 			ts := tailscale.New(cfg.GitHub.MirrorURL, &cfg.Tailscale)
-			return ts.Start(exitNode, mainRouter, acceptRoutesOverride)
+			return ts.Start(exitNode, mainRouter, &acceptRoutes)
 		},
 	}
 	startCmd.Flags().BoolP(constant.ExitNode, "e", false,
