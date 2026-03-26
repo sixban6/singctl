@@ -334,10 +334,10 @@ func (t *Tailscale) Start(advertiseExitNode bool, IsMainRouter bool, acceptRoute
 		} else {
 			logger.Info("Detected subnet %s is not a private LAN, skipping advertise-routes", lanSubnet)
 		}
-		if hasTun {
-			logger.Info("Open netfilter-mode")
-			args = append(args, "--netfilter-mode=on")
-		}
+		//if hasTun {
+		//	logger.Info("Open netfilter-mode")
+		args = append(args, "--netfilter-mode=off")
+		//}
 		if advertiseExitNode {
 			args = append(args, "--advertise-exit-node")
 			logger.Info("Exit node advertisement enabled")

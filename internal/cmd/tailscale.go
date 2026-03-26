@@ -22,7 +22,7 @@ func newStartTailScaleCmd(cfg *config.Config) *cobra.Command {
 	  singctl ts start --router --exit-node
 	  singctl ts start --router --exit-node --accept-routes
 	  singctl ts start --mode gateway
-	  singctl ts start -m gateway`,
+	  singctl ts start -m gateway --accept-routes`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			exitNode, _ := cmd.Flags().GetBool(constant.ExitNode)
 			mainRouter, _ := cmd.Flags().GetBool(constant.MainRouter)
@@ -50,13 +50,12 @@ func newStartTailScaleCmd(cfg *config.Config) *cobra.Command {
 					mainRouter = false
 					exitNode = true
 				case "gateway":
-					// gateway: route advertiser + exit node + import remote routes
+					// gateway: main router + exit node.
+					// Do NOT auto-enable accept-routes here:
+					// importing remote routes on a TProxy router can hijack
+					// the default path and make the box appear fully offline.
 					mainRouter = true
 					exitNode = true
-					if !acceptRoutesChanged {
-						acceptRoutes = true
-						acceptRoutesChanged = true
-					}
 				default:
 					return fmt.Errorf("invalid --%s: %q (supported: client, router, exit, gateway)", constant.TailscaleMode, mode)
 				}
@@ -78,7 +77,7 @@ func newStartTailScaleCmd(cfg *config.Config) *cobra.Command {
 	startCmd.Flags().BoolP(constant.AcceptRoutes, "a", false,
 		"接收其他节点广播路由 / Accept routes advertised by other nodes")
 	startCmd.Flags().StringP(constant.TailscaleMode, "m", "",
-		"快速模式: client|router|exit|gateway (gateway = router+exit-node+accept-routes)")
+		"快速模式: client|router|exit|gateway (gateway = router+exit-node; add --accept-routes only if you really need remote routes)")
 	return startCmd
 }
 
