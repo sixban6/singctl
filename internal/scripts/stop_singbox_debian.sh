@@ -132,20 +132,18 @@ cleanup_firewall() {
     
     # 检查并清理 iptables 规则
     if command -v iptables >/dev/null 2>&1; then
-        if iptables -t mangle -L SINGBOX >/dev/null 2>&1; then
+        if iptables -t mangle -L SINGBOX >/dev/null 2>&1 || iptables -t mangle -L SINGBOX_OUTPUT >/dev/null 2>&1; then
             echo_info "清理 iptables 规则..."
             
             # 删除引用
-            iptables -t mangle -D PREROUTING -j SINGBOX 2>/dev/null || true
-            
-            # 删除 OUTPUT 链中的规则
-            iptables -t mangle -D OUTPUT -m mark --mark $PROXY_FWMARK -j RETURN 2>/dev/null || true
-            iptables -t mangle -D OUTPUT -p tcp --dport 53 -j MARK --set-mark $PROXY_FWMARK 2>/dev/null || true
-            iptables -t mangle -D OUTPUT -p udp --dport 53 -j MARK --set-mark $PROXY_FWMARK 2>/dev/null || true
+            while iptables -t mangle -D PREROUTING -j SINGBOX 2>/dev/null; do :; done
+            while iptables -t mangle -D OUTPUT -j SINGBOX_OUTPUT 2>/dev/null; do :; done
             
             # 清空并删除自定义链
             iptables -t mangle -F SINGBOX 2>/dev/null || true
             iptables -t mangle -X SINGBOX 2>/dev/null || true
+            iptables -t mangle -F SINGBOX_OUTPUT 2>/dev/null || true
+            iptables -t mangle -X SINGBOX_OUTPUT 2>/dev/null || true
             
             echo_succ "iptables 规则已清理"
         fi

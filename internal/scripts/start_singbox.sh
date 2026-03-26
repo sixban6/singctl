@@ -149,7 +149,7 @@ setup_nft() {
 
             # 放行 WireGuard/Tailscale 接口流量，避免路由器/ExitNode转发流量被 TProxy 劫持
             iifname "wg*" counter accept
-#            iifname "tailscale*" counter accept
+            iifname "tailscale*" counter accept
 
             # 1.主要为了拒绝 外部尝试访问公网端口.
             fib daddr type local meta l4proto { tcp, udp } th dport $TPROXY_PORT reject with icmpx type host-unreachable
@@ -184,12 +184,12 @@ setup_nft() {
             # 2.放行ipv6的icmp基础流量
             meta l4proto ipv6-icmp accept comment "Allow ICMPv6 traffic"
 
-            # 3.并放行DNS流量
-            meta l4proto { tcp, udp } th dport 53 meta mark set $PROXY_FWMARK accept
-
-            # 4.放行局域网流量
+            # 3.先放行局域网流量，避免 Tailscale CGNAT 与 MagicDNS 被误标记
             ip daddr @LOCAL_IPV4_SET accept
             ip6 daddr { ::1, fc00::/7, fe80::/10, ff00::/8 } accept
+
+            # 4.再标记 DNS 流量
+            meta l4proto { tcp, udp } th dport 53 meta mark set $PROXY_FWMARK accept
 
             # 5.标记其余流量
             meta l4proto { tcp, udp } meta mark set $PROXY_FWMARK accept
