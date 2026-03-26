@@ -3,10 +3,11 @@
 命令前缀：`singctl ts`
 
 在 Linux/OpenWrt 设备上管理 Tailscale 异地组网。
-原理：
-封装了tailscale，使用官方安装包。
-统一关闭netfilter，不让tailscale修改防火墙配置，防止冲突。
-singctl ts统一接管tailscale的防火墙配置，保持稳定可靠。
+
+**原理: **
+- 封装了tailscale，使用官方安装包。
+- 统一关闭netfilter，不让tailscale修改防火墙配置，防止冲突。
+- singctl ts统一接管tailscale的防火墙配置，保持稳定可靠。
 
 > **平台限制**：以下命令仅适用于 Linux / OpenWrt，macOS/Windows 请使用 Tailscale 官方客户端。
 
