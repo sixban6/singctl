@@ -50,28 +50,17 @@ singctl ts install
 ### `singctl ts start` — 启动 Tailscale
 
 ```bash
-# 普通模式启动
-singctl ts start
+# 推荐：快速模式（一条命令）同时作为路由器 + 出口节点 + 并接收其他节点广播路由
+singctl ts start -m gateway
 
 # 作为路由器（广播本机局域网子网）
-singctl ts start --router
-# 短参数写法
 singctl ts start -r
 
 # 作为出口节点（将本机设为其他设备的出口）
-singctl ts start --exit-node
-# 短参数写法
 singctl ts start -e
 
 # 同时作为路由器 + 出口节点（并接收其他节点广播路由）
-singctl ts start --router --exit-node --accept-routes
-# 短参数写法
 singctl ts start -r -e -a
-
-# 推荐：快速模式（一条命令）
-singctl ts start --mode gateway
-# 短参数写法（最简）
-singctl ts start -m gateway
 ```
 
 | 参数 | 说明 |
@@ -83,12 +72,12 @@ singctl ts start -m gateway
 
 快速模式说明：
 
-| 模式 | 等价行为 |
-| :--- | :--- |
-| `client` | 普通客户端 |
-| `router` | 等价 `--router` |
-| `exit` | 等价 `--exit-node` |
-| `gateway` | 等价 `--router --exit-node --accept-routes`（推荐路由器场景） |
+| 模式 | 等价行为                                               |
+| :--- |:---------------------------------------------------|
+| `client` | 普通客户端                                              |
+| `router` | 等价 `-r`                                            |
+| `exit` | 等价 `-e`                                            |
+| `gateway` | 等价 `-r -e -a`（推荐路由器场景） |
 
 注意事项：
 
