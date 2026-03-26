@@ -335,19 +335,8 @@ func (t *Tailscale) Start(advertiseExitNode bool, IsMainRouter bool, acceptRoute
 			logger.Info("Detected subnet %s is not a private LAN, skipping advertise-routes", lanSubnet)
 		}
 		if hasTun {
-			if isOpenWrt {
-				if hasActiveSingBoxTProxy() {
-					// OpenWrt with active sing-box TProxy already manages nft/iptables.
-					// Disable tailscale netfilter automation only when a real runtime conflict exists.
-					args = append(args, "--netfilter-mode=off")
-					logger.Info("OpenWrt detected with active sing-box TProxy, using --netfilter-mode=off to avoid firewall conflicts")
-				} else {
-					args = append(args, "--netfilter-mode=on")
-					logger.Info("OpenWrt detected without active sing-box TProxy, using --netfilter-mode=on for Tailscale-managed networking")
-				}
-			} else {
-				args = append(args, "--netfilter-mode=on")
-			}
+			logger.Info("Open netfilter-mode")
+			args = append(args, "--netfilter-mode=on")
 		}
 		if advertiseExitNode {
 			args = append(args, "--advertise-exit-node")
