@@ -1,3 +1,10 @@
+## [1.21.2](https://github.com/sixban6/singctl/compare/v1.21.1...v1.21.2) (2026-03-26)
+
+
+### Bug Fixes
+
+* m ([b8f9a8a](https://github.com/sixban6/singctl/commit/b8f9a8a720d020d149a0cf9277915ed9ffe335ca))
+
 ## [1.21.1](https://github.com/sixban6/singctl/compare/v1.21.0...v1.21.1) (2026-03-25)
 
 
