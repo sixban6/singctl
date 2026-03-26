@@ -25,7 +25,7 @@ DEBIAN_VERSION=$(lsb_release -r 2>/dev/null | awk '{print $2}' | cut -d. -f1)
 [ -z "$DEBIAN_VERSION" ] && DEBIAN_VERSION=$(cat /etc/debian_version 2>/dev/null | cut -d. -f1)
 [ -z "$DEBIAN_VERSION" ] && DEBIAN_VERSION="11"  # 默认
 
-LOCAL_IPV4='{127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 224.0.0.0/4, 255.255.255.255/32}'
+LOCAL_IPV4='{127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 100.64.0.0/10, 224.0.0.0/4, 255.255.255.255/32}'
 
 # 获取当前时间
 timestamp() {
@@ -59,8 +59,12 @@ error_exit() {
 # 清理函数
 cleanup() {
     # 清理可能的残留规则
+    while iptables -t mangle -D PREROUTING -j SINGBOX 2>/dev/null; do :; done
+    while iptables -t mangle -D OUTPUT -j SINGBOX_OUTPUT 2>/dev/null; do :; done
     iptables -t mangle -F SINGBOX 2>/dev/null || true
     iptables -t mangle -X SINGBOX 2>/dev/null || true
+    iptables -t mangle -F SINGBOX_OUTPUT 2>/dev/null || true
+    iptables -t mangle -X SINGBOX_OUTPUT 2>/dev/null || true
     nft delete table inet sing-box 2>/dev/null || true
     ip rule del table $PROXY_ROUTE_TABLE 2>/dev/null || true
     ip -6 rule del table $PROXY_ROUTE_TABLE 2>/dev/null || true
@@ -279,12 +283,12 @@ table inet sing-box {
         # 放行 IPv6 ICMP
         meta l4proto ipv6-icmp accept
 
-        # DNS 流量标记
-        meta l4proto { tcp, udp } th dport 53 meta mark set $PROXY_FWMARK accept
-
-        # 放行局域网流量
+        # 先放行局域网流量，避免 Tailscale CGNAT 与 MagicDNS 被误标记
         ip daddr @LOCAL_IPV4_SET accept
         ip6 daddr { ::1, fc00::/7, fe80::/10, ff00::/8 } accept
+
+        # DNS 流量标记
+        meta l4proto { tcp, udp } th dport 53 meta mark set $PROXY_FWMARK accept
 
         # 标记其他流量
         meta l4proto { tcp, udp } meta mark set $PROXY_FWMARK accept
@@ -307,9 +311,15 @@ setup_iptables() {
     # 创建自定义链
     iptables -t mangle -N SINGBOX 2>/dev/null || true
     iptables -t mangle -F SINGBOX
+    iptables -t mangle -N SINGBOX_OUTPUT 2>/dev/null || true
+    iptables -t mangle -F SINGBOX_OUTPUT
+
+    # 删除旧引用，避免重复执行脚本后规则叠加
+    while iptables -t mangle -D PREROUTING -j SINGBOX 2>/dev/null; do :; done
+    while iptables -t mangle -D OUTPUT -j SINGBOX_OUTPUT 2>/dev/null; do :; done
     
     # PREROUTING 规则
-    iptables -t mangle -I PREROUTING -j SINGBOX
+    iptables -t mangle -A PREROUTING -j SINGBOX
     
     # 放行局域网
     iptables -t mangle -A SINGBOX -i tailscale+ -j RETURN
@@ -318,6 +328,7 @@ setup_iptables() {
     iptables -t mangle -A SINGBOX -d 172.16.0.0/12 -j RETURN
     iptables -t mangle -A SINGBOX -d 192.168.0.0/16 -j RETURN
     iptables -t mangle -A SINGBOX -d 169.254.0.0/16 -j RETURN
+    iptables -t mangle -A SINGBOX -d 100.64.0.0/10 -j RETURN
     iptables -t mangle -A SINGBOX -d 224.0.0.0/4 -j RETURN
     iptables -t mangle -A SINGBOX -d 255.255.255.255/32 -j RETURN
     
@@ -330,12 +341,23 @@ setup_iptables() {
     iptables -t mangle -A SINGBOX -p udp -j TPROXY --tproxy-mark $PROXY_FWMARK --on-port $TPROXY_PORT
     
     # OUTPUT 链规则
-    iptables -t mangle -I OUTPUT -o tailscale+ -j RETURN
-    iptables -t mangle -I OUTPUT -m mark --mark 0x80000 -j RETURN
-    iptables -t mangle -I OUTPUT -p udp --sport 41641 -j RETURN
-    iptables -t mangle -I OUTPUT -m mark --mark $PROXY_FWMARK -j RETURN
-    iptables -t mangle -I OUTPUT -p tcp --dport 53 -j MARK --set-mark $PROXY_FWMARK
-    iptables -t mangle -I OUTPUT -p udp --dport 53 -j MARK --set-mark $PROXY_FWMARK
+    iptables -t mangle -A SINGBOX_OUTPUT -m mark --mark $PROXY_FWMARK -j RETURN
+    iptables -t mangle -A SINGBOX_OUTPUT -m mark --mark 0x80000 -j RETURN
+    iptables -t mangle -A SINGBOX_OUTPUT -p udp --sport 41641 -j RETURN
+    iptables -t mangle -A SINGBOX_OUTPUT -o tailscale+ -j RETURN
+    iptables -t mangle -A SINGBOX_OUTPUT -d 127.0.0.0/8 -j RETURN
+    iptables -t mangle -A SINGBOX_OUTPUT -d 10.0.0.0/8 -j RETURN
+    iptables -t mangle -A SINGBOX_OUTPUT -d 172.16.0.0/12 -j RETURN
+    iptables -t mangle -A SINGBOX_OUTPUT -d 192.168.0.0/16 -j RETURN
+    iptables -t mangle -A SINGBOX_OUTPUT -d 169.254.0.0/16 -j RETURN
+    iptables -t mangle -A SINGBOX_OUTPUT -d 100.64.0.0/10 -j RETURN
+    iptables -t mangle -A SINGBOX_OUTPUT -d 224.0.0.0/4 -j RETURN
+    iptables -t mangle -A SINGBOX_OUTPUT -d 255.255.255.255/32 -j RETURN
+    iptables -t mangle -A SINGBOX_OUTPUT -p tcp --dport 53 -j MARK --set-mark $PROXY_FWMARK
+    iptables -t mangle -A SINGBOX_OUTPUT -p udp --dport 53 -j MARK --set-mark $PROXY_FWMARK
+    iptables -t mangle -A SINGBOX_OUTPUT -p tcp -j MARK --set-mark $PROXY_FWMARK
+    iptables -t mangle -A SINGBOX_OUTPUT -p udp -j MARK --set-mark $PROXY_FWMARK
+    iptables -t mangle -A OUTPUT -j SINGBOX_OUTPUT
     
     echo_succ "iptables 规则配置完成"
 }

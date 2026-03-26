@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"singctl/internal/tailscale"
 	"singctl/internal/util/netinfo"
 	"strings"
@@ -21,6 +22,35 @@ func newTestTailscale() *tailscale.Tailscale {
 		OpenWrtCheck: func() bool { return true },
 		DownloadURL:  "",
 	}
+}
+
+func readScript(t *testing.T, name string) string {
+	t.Helper()
+
+	path := filepath.Join("..", "internal", "scripts", name)
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("Cannot read %s: %v", path, err)
+	}
+
+	return string(content)
+}
+
+func extractSection(t *testing.T, content, start, end string) string {
+	t.Helper()
+
+	startIdx := strings.Index(content, start)
+	if startIdx < 0 {
+		t.Fatalf("section start not found: %q", start)
+	}
+
+	section := content[startIdx:]
+	endIdx := strings.Index(section, end)
+	if endIdx < 0 {
+		t.Fatalf("section end not found: %q", end)
+	}
+
+	return section[:endIdx]
 }
 
 // =============================================================================
@@ -325,12 +355,9 @@ func TestStartArgs_SNATSubnetRoutes(t *testing.T) {
 // =============================================================================
 
 func TestStartScript_NFTables_TailscaleBypass(t *testing.T) {
-	// 读取嵌入的 start_singbox.sh 内容
-	scriptContent, err := os.ReadFile("../scripts/start_singbox.sh")
-	if err != nil {
-		t.Fatalf("Cannot read start_singbox.sh: %v", err)
-	}
-	script := string(scriptContent)
+	script := readScript(t, "start_singbox.sh")
+	prerouting := extractSection(t, script, "        chain prerouting {", "        }\n\n        chain output {")
+	output := extractSection(t, script, "        chain output {", "        }\n    }\nEOF")
 
 	t.Run("LOCAL_IPV4 contains CGNAT range", func(t *testing.T) {
 		if !strings.Contains(script, "100.64.0.0/10") {
@@ -338,21 +365,33 @@ func TestStartScript_NFTables_TailscaleBypass(t *testing.T) {
 		}
 	})
 
-	t.Run("nftables prerouting bypasses tailscale0", func(t *testing.T) {
-		if !strings.Contains(script, `iifname "tailscale0" accept`) {
-			t.Error("start_singbox.sh nftables 规则缺少 tailscale0 接口放行")
+	t.Run("nftables prerouting bypasses tailscale interface", func(t *testing.T) {
+		if !strings.Contains(prerouting, `iifname "tailscale*" counter accept`) {
+			t.Error("start_singbox.sh nftables 规则缺少 tailscale 接口放行")
 		}
 	})
 
-	t.Run("iptables bypasses tailscale0 interface", func(t *testing.T) {
-		if !strings.Contains(script, "-i tailscale0 -j RETURN") {
-			t.Error("start_singbox.sh iptables 规则缺少 tailscale0 接口放行")
+	t.Run("iptables bypasses tailscale interface", func(t *testing.T) {
+		if !strings.Contains(script, "-i tailscale+ -j RETURN") {
+			t.Error("start_singbox.sh iptables 规则缺少 tailscale 接口放行")
 		}
 	})
 
 	t.Run("iptables bypasses CGNAT range", func(t *testing.T) {
 		if !strings.Contains(script, "-d 100.64.0.0/10 -j RETURN") {
 			t.Error("start_singbox.sh iptables 规则缺少 Tailscale CGNAT 地址段放行")
+		}
+	})
+
+	t.Run("nftables output bypasses local ranges before DNS marking", func(t *testing.T) {
+		localBypassIdx := strings.Index(output, "ip daddr @LOCAL_IPV4_SET accept")
+		dnsMarkIdx := strings.Index(output, `th dport 53 meta mark set $PROXY_FWMARK accept`)
+
+		if localBypassIdx < 0 || dnsMarkIdx < 0 {
+			t.Fatal("start_singbox.sh output chain 缺少局域网放行或 DNS 标记规则")
+		}
+		if localBypassIdx > dnsMarkIdx {
+			t.Error("start_singbox.sh output chain 必须先放行局域网流量，再标记 DNS，避免 MagicDNS 被劫持")
 		}
 	})
 }
@@ -362,25 +401,74 @@ func TestStartScript_NFTables_TailscaleBypass(t *testing.T) {
 // =============================================================================
 
 func TestStartScript_NFTables_RuleOrder(t *testing.T) {
-	scriptContent, err := os.ReadFile("../scripts/start_singbox.sh")
-	if err != nil {
-		t.Fatalf("Cannot read start_singbox.sh: %v", err)
-	}
-	script := string(scriptContent)
+	script := readScript(t, "start_singbox.sh")
+	prerouting := extractSection(t, script, "        chain prerouting {", "        }\n\n        chain output {")
 
-	// tailscale0 放行必须在 tproxy 劫持之前
-	tailscaleBypassIdx := strings.Index(script, `iifname "tailscale0" accept`)
-	tproxyIdx := strings.Index(script, "tproxy to :$TPROXY_PORT")
+	// tailscale 放行必须在 tproxy 劫持之前
+	tailscaleBypassIdx := strings.Index(prerouting, `iifname "tailscale*" counter accept`)
+	tproxyIdx := strings.Index(prerouting, "tproxy to :$TPROXY_PORT")
 
 	if tailscaleBypassIdx < 0 {
-		t.Fatal("tailscale0 bypass rule not found")
+		t.Fatal("tailscale bypass rule not found")
 	}
 	if tproxyIdx < 0 {
 		t.Fatal("tproxy rule not found")
 	}
 	if tailscaleBypassIdx > tproxyIdx {
-		t.Error("tailscale0 bypass rule MUST appear BEFORE tproxy rule in prerouting chain")
+		t.Error("tailscale bypass rule MUST appear BEFORE tproxy rule in prerouting chain")
 	}
+}
+
+func TestDebianStartScript_TailscaleBypassAndOrder(t *testing.T) {
+	script := readScript(t, "start_singbox_debian.sh")
+	nftPrerouting := extractSection(t, script, "    chain prerouting {", "    }\n\n    chain output {")
+	nftOutput := extractSection(t, script, "    chain output {", "    }\n}\nEOF")
+	iptablesOutput := extractSection(t, script, "    # OUTPUT 链规则", "\n    echo_succ \"iptables 规则配置完成\"")
+
+	t.Run("LOCAL_IPV4 contains CGNAT range", func(t *testing.T) {
+		if !strings.Contains(script, "100.64.0.0/10") {
+			t.Error("start_singbox_debian.sh LOCAL_IPV4 set 缺少 Tailscale CGNAT 地址段 100.64.0.0/10")
+		}
+	})
+
+	t.Run("nftables prerouting bypasses tailscale interface", func(t *testing.T) {
+		if !strings.Contains(nftPrerouting, `iifname "tailscale*" counter accept`) {
+			t.Error("start_singbox_debian.sh nftables 规则缺少 tailscale 接口放行")
+		}
+	})
+
+	t.Run("nftables output bypasses local ranges before DNS marking", func(t *testing.T) {
+		localBypassIdx := strings.Index(nftOutput, "ip daddr @LOCAL_IPV4_SET accept")
+		dnsMarkIdx := strings.Index(nftOutput, `th dport 53 meta mark set $PROXY_FWMARK accept`)
+
+		if localBypassIdx < 0 || dnsMarkIdx < 0 {
+			t.Fatal("start_singbox_debian.sh nft output chain 缺少局域网放行或 DNS 标记规则")
+		}
+		if localBypassIdx > dnsMarkIdx {
+			t.Error("start_singbox_debian.sh nft output chain 必须先放行局域网流量，再标记 DNS")
+		}
+	})
+
+	t.Run("iptables uses dedicated output chain", func(t *testing.T) {
+		if !strings.Contains(script, "iptables -t mangle -N SINGBOX_OUTPUT") {
+			t.Error("start_singbox_debian.sh iptables 模式缺少独立 OUTPUT 链，无法保证顺序与幂等性")
+		}
+		if !strings.Contains(script, "while iptables -t mangle -D OUTPUT -j SINGBOX_OUTPUT") {
+			t.Error("start_singbox_debian.sh iptables 模式缺少 OUTPUT 链旧引用清理")
+		}
+	})
+
+	t.Run("iptables output bypasses CGNAT before DNS marking", func(t *testing.T) {
+		cgnatBypassIdx := strings.Index(iptablesOutput, "-d 100.64.0.0/10 -j RETURN")
+		dnsMarkIdx := strings.Index(iptablesOutput, "-p tcp --dport 53 -j MARK --set-mark $PROXY_FWMARK")
+
+		if cgnatBypassIdx < 0 || dnsMarkIdx < 0 {
+			t.Fatal("start_singbox_debian.sh iptables OUTPUT 规则缺少 CGNAT 放行或 DNS 标记")
+		}
+		if cgnatBypassIdx > dnsMarkIdx {
+			t.Error("start_singbox_debian.sh iptables OUTPUT 规则必须先放行 CGNAT，再标记 DNS")
+		}
+	})
 }
 
 // =============================================================================
@@ -596,19 +684,15 @@ func TestRegression_SubnetRouting(t *testing.T) {
 	})
 
 	t.Run("CGNAT range in LOCAL_IPV4 prevents TProxy hijack", func(t *testing.T) {
-		scriptContent, err := os.ReadFile("../scripts/start_singbox.sh")
-		if err != nil {
-			t.Fatalf("Cannot read start_singbox.sh: %v", err)
-		}
-		script := string(scriptContent)
+		script := readScript(t, "start_singbox.sh")
 
 		checks := []struct {
 			name    string
 			pattern string
 		}{
 			{"CGNAT in LOCAL_IPV4 set", "100.64.0.0/10"},
-			{"tailscale0 nft bypass", `iifname "tailscale0" accept`},
-			{"tailscale0 iptables bypass", "-i tailscale0 -j RETURN"},
+			{"tailscale nft bypass", `iifname "tailscale*" counter accept`},
+			{"tailscale iptables bypass", "-i tailscale+ -j RETURN"},
 			{"CGNAT iptables bypass", "-d 100.64.0.0/10 -j RETURN"},
 		}
 
