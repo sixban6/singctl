@@ -147,9 +147,9 @@ setup_nft() {
         chain prerouting {
             type filter hook prerouting priority mangle; policy accept;
 
-            # 放行 WireGuard/Tailscale 接口流量，避免路由器/ExitNode转发流量被 TProxy 劫持
-            iifname "wg*" counter accept
-            iifname "tailscale*" counter accept
+            # 需要让ExitNode转发流量被 TProxy 劫持,所以得注释掉
+            # iifname "wg*" counter accept
+            # iifname "tailscale*" counter accept
 
             # 1.主要为了拒绝 外部尝试访问公网端口.
             fib daddr type local meta l4proto { tcp, udp } th dport $TPROXY_PORT reject with icmpx type host-unreachable
