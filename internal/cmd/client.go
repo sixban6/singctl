@@ -3,9 +3,11 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"singctl/internal/config"
+	"singctl/internal/constant"
 	"singctl/internal/daemon"
 	"singctl/internal/logger"
 	"singctl/internal/singbox"
@@ -13,6 +15,31 @@ import (
 
 	"github.com/spf13/cobra"
 )
+
+var (
+	commandRunner = exec.Command
+	runtimeGOOS   = runtime.GOOS
+)
+
+func copyGeneratedConfigToClipboard(targetPath string) (bool, error) {
+	if runtimeGOOS != "darwin" || targetPath != constant.SingBoxConfigFile {
+		return false, nil
+	}
+
+	configFile, err := os.Open(targetPath)
+	if err != nil {
+		return false, fmt.Errorf("open generated config failed: %w", err)
+	}
+	defer configFile.Close()
+
+	cmd := commandRunner("pbcopy")
+	cmd.Stdin = configFile
+	if err := cmd.Run(); err != nil {
+		return false, fmt.Errorf("run pbcopy failed: %w", err)
+	}
+
+	return true, nil
+}
 
 func newStartCmd(cfg *config.Config) *cobra.Command {
 	// 1. sb start
@@ -96,7 +123,7 @@ func newGenCmd(cfg *config.Config) *cobra.Command {
 			}
 
 			// 确定输出路径
-			targetPath := "/etc/sing-box/config.json"
+			targetPath := constant.SingBoxConfigFile
 			if outputPath != "" {
 				targetPath = outputPath
 			}
@@ -122,6 +149,11 @@ func newGenCmd(cfg *config.Config) *cobra.Command {
 			}
 
 			logger.Success("配置已生成: %s", targetPath)
+			if copied, err := copyGeneratedConfigToClipboard(targetPath); err != nil {
+				logger.Warn("配置已生成，但复制到粘贴板失败: %v", err)
+			} else if copied {
+				logger.Success("配置文件已经复制到粘贴板，可以直接粘贴")
+			}
 			return nil
 		},
 	}
