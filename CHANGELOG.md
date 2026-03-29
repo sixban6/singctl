@@ -1,3 +1,10 @@
+## [1.21.7](https://github.com/sixban6/singctl/compare/v1.21.6...v1.21.7) (2026-03-29)
+
+
+### Bug Fixes
+
+* add auto paste on macos ([494d9f8](https://github.com/sixban6/singctl/commit/494d9f85807ab0ac915988edbc226c4871d9ca8a))
+
 ## [1.21.6](https://github.com/sixban6/singctl/compare/v1.21.5...v1.21.6) (2026-03-26)
 
 
