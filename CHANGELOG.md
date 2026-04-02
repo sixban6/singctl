@@ -1,3 +1,10 @@
+## [1.21.10](https://github.com/sixban6/singctl/compare/v1.21.9...v1.21.10) (2026-04-02)
+
+
+### Bug Fixes
+
+* add singctl sb restart ([a52a087](https://github.com/sixban6/singctl/commit/a52a087373df9314540f45b19d2720509effd2ad))
+
 ## [1.21.9](https://github.com/sixban6/singctl/compare/v1.21.8...v1.21.9) (2026-04-02)
 
 
