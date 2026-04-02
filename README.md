@@ -15,6 +15,12 @@ SingCtl是多功能网络工具。可以用管理singbox客户端和服务端，
 
 ## Installation
 
+### 🎯 使用Homebrew安装(MacOS 推荐)
+```bash
+brew tap sixban6/singctl
+brew install sixban6/singctl/singctl
+```
+
 ### 🎯 一键安装 (推荐)
 
 **Mac**
@@ -35,12 +41,6 @@ curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/sixban6/singct
 **Windows 11** (用管理员权限运行Powershell)
 ```cmd
 powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "[System.IO.File]::WriteAllText('install.ps1', (irm https://raw.githubusercontent.com/sixban6/singctl/main/install.ps1 -UseBasicParsing), [System.Text.Encoding]::UTF8); & .\install.ps1"
-```
-
-### 🎯 使用Homebrew安装
-```bash
-brew tap sixban6/singctl
-brew install sixban6/singctl/singctl
 ```
 
 ## 📚 使用指南 (Usage)
