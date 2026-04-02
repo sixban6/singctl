@@ -41,30 +41,50 @@ func copyGeneratedConfigToClipboard(targetPath string) (bool, error) {
 	return true, nil
 }
 
+func runStartSingbox(cfg *config.Config) error {
+	sb := singbox.New(cfg)
+	if err := sb.ValidateConfig(); err != nil {
+		// 现有配置无效或不存在，需要重新生成 → 此时才校验 subs
+		logger.Info("Current config is invalid or missing, generating new config...")
+		if err := cfg.ValidateSubs(); err != nil {
+			return fmt.Errorf("subscription config invalid: %w", err)
+		}
+		if err := sb.GenerateConfig(); err != nil {
+			return err
+		}
+	} else {
+		logger.Info("Using existing valid config")
+	}
+	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+		return sb.StartGUI()
+	}
+	return sb.Start()
+}
+
+func runStopSingbox(cfg *config.Config) error {
+	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+		logger.Warn("Stop command is not supported/needed for GUI clients on this platform.")
+		return nil
+	}
+	if daemon.IsDaemonRunning() {
+		logger.Info("Stopping daemon...")
+		if err := daemon.StopDaemon(); err != nil {
+			logger.Warn("Failed to stop daemon: %v", err)
+		} else {
+			logger.Success("Daemon stopped")
+		}
+	}
+	sb := singbox.New(cfg)
+	return sb.Stop()
+}
+
 func newStartCmd(cfg *config.Config) *cobra.Command {
 	// 1. sb start
 	cmd := &cobra.Command{
 		Use:   "start",
 		Short: "生成配置并启动 sing-box / Generate config and start sing-box",
 		RunE: func(cmd *cobra.Command, args []string) error {
-
-			sb := singbox.New(cfg)
-			if err := sb.ValidateConfig(); err != nil {
-				// 现有配置无效或不存在，需要重新生成 → 此时才校验 subs
-				logger.Info("Current config is invalid or missing, generating new config...")
-				if err := cfg.ValidateSubs(); err != nil {
-					return fmt.Errorf("subscription config invalid: %w", err)
-				}
-				if err := sb.GenerateConfig(); err != nil {
-					return err
-				}
-			} else {
-				logger.Info("Using existing valid config")
-			}
-			if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
-				return sb.StartGUI()
-			}
-			return sb.Start()
+			return runStartSingbox(cfg)
 		},
 	}
 	return cmd
@@ -76,28 +96,30 @@ func newStopCmd(cfg *config.Config) *cobra.Command {
 		Use:   "stop",
 		Short: "停止 sing-box 和守护进程 / Stop sing-box and daemon",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// 原 stopCmd 的逻辑...
-			if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
-				logger.Warn("Stop command is not supported/needed for GUI clients on this platform.")
-				return nil
+			return runStopSingbox(cfg)
+		},
+	}
+	return cmd
+}
+
+func newRestartCmd(cfg *config.Config) *cobra.Command {
+	// 3. sb restart
+	cmd := &cobra.Command{
+		Use:   "restart",
+		Short: "重启 sing-box / Restart sing-box",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			logger.Info("Restarting sing-box...")
+			if err := runStopSingbox(cfg); err != nil {
+				return err
 			}
-			if daemon.IsDaemonRunning() {
-				logger.Info("Stopping daemon...")
-				if err := daemon.StopDaemon(); err != nil {
-					logger.Warn("Failed to stop daemon: %v", err)
-				} else {
-					logger.Success("Daemon stopped")
-				}
-			}
-			sb := singbox.New(cfg)
-			return sb.Stop()
+			return runStartSingbox(cfg)
 		},
 	}
 	return cmd
 }
 
 func newGenCmd(cfg *config.Config) *cobra.Command {
-	// 3. sb gen (将原 genCmd 逻辑移入，注意保留 Flag 处理)
+	// 4. sb gen (将原 genCmd 逻辑移入，注意保留 Flag 处理)
 	var outputPath string
 	var stdout bool
 	genCmd := &cobra.Command{
@@ -163,7 +185,7 @@ func newGenCmd(cfg *config.Config) *cobra.Command {
 }
 
 func newInstallCmd(cfg *config.Config) *cobra.Command {
-	// 4. sb install
+	// 5. sb install
 	installCmd := &cobra.Command{
 		Use:   "install",
 		Short: "安装 sing-box / Install sing-box",
@@ -176,7 +198,7 @@ func newInstallCmd(cfg *config.Config) *cobra.Command {
 }
 
 func newUpdateCmd(cfg *config.Config) *cobra.Command {
-	// 5. sb update
+	// 6. sb update
 	updateCmd := &cobra.Command{
 		Use:   "update",
 		Short: "更新 sing-box / Update sing-box",
@@ -204,6 +226,7 @@ func NewSingboxCommand(configPath string) *cobra.Command {
 	cmd.AddCommand(
 		newStartCmd(cfg),
 		newStopCmd(cfg),
+		newRestartCmd(cfg),
 		newGenCmd(cfg),
 		newInstallCmd(cfg),
 		newUpdateCmd(cfg),
