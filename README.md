@@ -37,6 +37,12 @@ curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/sixban6/singct
 powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "[System.IO.File]::WriteAllText('install.ps1', (irm https://raw.githubusercontent.com/sixban6/singctl/main/install.ps1 -UseBasicParsing), [System.Text.Encoding]::UTF8); & .\install.ps1"
 ```
 
+### 使用Homebrew安装
+```bash
+brew tap sixban6/singctl
+brew install sixban6/singctl/singctl
+```
+
 ## 📚 使用指南 (Usage)
 
 SingCtl 按功能模块分为以下几个部分，点击链接查看详细说明：
