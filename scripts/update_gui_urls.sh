@@ -1,8 +1,8 @@
 #!/bin/bash
 #################################################
 # 自动更新 GUI URL 脚本
-# 功能：从 GitHub 获取 SagerNet/sing-box 最新 release
-#       并更新 singctl.yaml, install.sh, install.ps1 中的 URL
+# 功能：从 GitHub 获取 SagerNet/sing-box 最新稳定版 release
+#       并更新 internal/constant/default.go 中的 GUI URL 常量
 #################################################
 
 set -e
@@ -23,8 +23,7 @@ CONFIG_FILE="$PROJECT_ROOT/internal/constant/default.go"
 INSTALL_SH="$PROJECT_ROOT/install.sh"
 INSTALL_PS1="$PROJECT_ROOT/install.ps1"
 
-# GitHub API - 获取所有 releases（包括预发布版本，因为 SFM 只在预发布中提供）
-GITHUB_API_ALL="https://api.github.com/repos/SagerNet/sing-box/releases"
+# GitHub API - 仅获取最新稳定版 release
 GITHUB_API_LATEST="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
 
 echo -e "${CYAN}========================================${NC}"
@@ -45,50 +44,42 @@ check_dependencies() {
 # 获取 Release 信息
 get_latest_release() {
     echo -e "${CYAN}[INFO] 获取 SagerNet/sing-box release 信息...${NC}"
-    
-    # 获取所有 releases
-    ALL_RELEASES=$(curl -s "$GITHUB_API_ALL")
-    
-    if [ -z "$ALL_RELEASES" ]; then
-        echo -e "${RED}[ERROR] 无法获取 release 信息${NC}"
+
+    RELEASE_JSON=$(curl -fsSL "$GITHUB_API_LATEST")
+
+    if [ -z "$RELEASE_JSON" ]; then
+        echo -e "${RED}[ERROR] 无法获取最新稳定版 release 信息${NC}"
         exit 1
     fi
-    
-    # 找到包含 SFM .pkg 的最新 release（通常是预发布版本）
-    SFM_RELEASE=$(echo "$ALL_RELEASES" | jq -r '[.[] | select(.assets[] | .name | test("SFM-.*\\.pkg$"))][0]')
-    
-    if [ -z "$SFM_RELEASE" ] || [ "$SFM_RELEASE" = "null" ]; then
-        echo -e "${YELLOW}[WARNING] 未找到包含 SFM 的 release，使用最新稳定版${NC}"
-        RELEASE_JSON=$(curl -s "$GITHUB_API_LATEST")
-        SFM_RELEASE="$RELEASE_JSON"
-    else
-        RELEASE_JSON="$SFM_RELEASE"
+
+    TAG_NAME=$(echo "$RELEASE_JSON" | jq -r '.tag_name // empty')
+
+    if [ -z "$TAG_NAME" ]; then
+        echo -e "${RED}[ERROR] release 信息中缺少 tag_name${NC}"
+        exit 1
     fi
-    
-    TAG_NAME=$(echo "$RELEASE_JSON" | jq -r '.tag_name')
-    IS_PRERELEASE=$(echo "$RELEASE_JSON" | jq -r '.prerelease')
-    
-    if [ "$IS_PRERELEASE" = "true" ]; then
-        echo -e "${GREEN}[SUCCESS] 使用版本: $TAG_NAME (预发布版，包含 SFM)${NC}"
-    else
-        echo -e "${GREEN}[SUCCESS] 使用版本: $TAG_NAME (稳定版)${NC}"
-    fi
+
+    echo -e "${GREEN}[SUCCESS] 使用版本: $TAG_NAME (稳定版)${NC}"
 }
 
 # 解析下载 URL
 parse_download_urls() {
     echo -e "${CYAN}[INFO] 解析下载链接...${NC}"
-    
-    # 获取 macOS .pkg 文件 URL (SFM-*.pkg)
-    MAC_URL=$(echo "$RELEASE_JSON" | jq -r '.assets[] | select(.name | test("SFM-.*\\.pkg$")) | .browser_download_url' | head -1)
-    
-    # 如果没找到 SFM，尝试 Apple 命名
-    if [ -z "$MAC_URL" ] || [ "$MAC_URL" = "null" ]; then
-        MAC_URL=$(echo "$RELEASE_JSON" | jq -r '.assets[] | select(.name | test(".*Apple.*\\.pkg$")) | .browser_download_url' | head -1)
+
+    # 优先 Apple，其次 Universal/Intel，最后兜底任意 SFM pkg
+    MAC_URL=""
+    for pattern in '^SFM-.*-Apple\.pkg$' '^SFM-.*-Universal\.pkg$' '^SFM-.*-Intel\.pkg$' '^SFM-.*\.pkg$'; do
+        MAC_URL=$(echo "$RELEASE_JSON" | jq -r --arg pattern "$pattern" '.assets[] | select(.name | test($pattern)) | .browser_download_url' | head -1)
+        if [ -n "$MAC_URL" ] && [ "$MAC_URL" != "null" ]; then
+            break
+        fi
+    done
+
+    # 优先非 legacy 的 amd64 包，找不到时再退化
+    WIN_URL=$(echo "$RELEASE_JSON" | jq -r '.assets[] | select((.name | test("^sing-box-.*-windows-amd64\\.zip$")) and ((.name | test("legacy")) | not)) | .browser_download_url' | head -1)
+    if [ -z "$WIN_URL" ] || [ "$WIN_URL" = "null" ]; then
+        WIN_URL=$(echo "$RELEASE_JSON" | jq -r '.assets[] | select(.name | test("^sing-box-.*-windows-amd64.*\\.zip$")) | .browser_download_url' | head -1)
     fi
-    
-    # 获取 Windows amd64 zip 文件 URL（使用同一版本保持一致）
-    WIN_URL=$(echo "$RELEASE_JSON" | jq -r '.assets[] | select(.name | test("sing-box-.*-windows-amd64\\.zip$")) | .browser_download_url' | head -1)
     
     if [ -z "$MAC_URL" ] || [ "$MAC_URL" = "null" ]; then
         echo -e "${YELLOW}[WARNING] 未找到 macOS 下载链接${NC}"
@@ -129,8 +120,12 @@ update_file() {
     
     # 更新 MacURL
     if [ -n "$MAC_URL" ]; then
-        # 匹配 MacURL: "..." 格式（YAML）
-        if grep -q 'MacURL:' "$file"; then
+        # Go 常量格式：MacURL = "..."
+        if grep -qE '^[[:space:]]*MacURL[[:space:]]*=' "$file"; then
+            sed -i.tmp -E "s|^([[:space:]]*MacURL[[:space:]]*=[[:space:]]*)\"[^\"]*\"|\1\"$MAC_URL\"|g" "$file"
+            updated=true
+        # YAML 格式：MacURL: "..."
+        elif grep -q 'MacURL:' "$file"; then
             sed -i.tmp -E "s|MacURL: *\"[^\"]*\"|MacURL: \"$MAC_URL\"|g" "$file"
             updated=true
         fi
@@ -138,8 +133,12 @@ update_file() {
     
     # 更新 WinURL
     if [ -n "$WIN_URL" ]; then
-        # 匹配 WinURL: "..." 格式（YAML）
-        if grep -q 'WinURL:' "$file"; then
+        # Go 常量格式：WinURL = "..."
+        if grep -qE '^[[:space:]]*WinURL[[:space:]]*=' "$file"; then
+            sed -i.tmp -E "s|^([[:space:]]*WinURL[[:space:]]*=[[:space:]]*)\"[^\"]*\"|\1\"$WIN_URL\"|g" "$file"
+            updated=true
+        # YAML 格式：WinURL: "..."
+        elif grep -q 'WinURL:' "$file"; then
             sed -i.tmp -E "s|WinURL: *\"[^\"]*\"|WinURL: \"$WIN_URL\"|g" "$file"
             updated=true
         fi
