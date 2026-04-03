@@ -1,3 +1,10 @@
+## [1.21.12](https://github.com/sixban6/singctl/compare/v1.21.11...v1.21.12) (2026-04-03)
+
+
+### Bug Fixes
+
+* update sb gui version ([84e0a35](https://github.com/sixban6/singctl/commit/84e0a3522f9d559319543d527f10f3b71a63ab31))
+
 ## [1.21.11](https://github.com/sixban6/singctl/compare/v1.21.10...v1.21.11) (2026-04-03)
 
 
