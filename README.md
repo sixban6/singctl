@@ -15,17 +15,12 @@ SingCtl是多功能网络工具。可以用管理singbox客户端和服务端，
 
 ## Installation
 
-### 🎯 使用Homebrew安装(MacOS 推荐)
-```bash
-brew tap sixban6/singctl
-brew install sixban6/singctl/singctl
-```
-
 ### 🎯 一键安装 (推荐)
 
 **Mac**
 ```bash
-curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/sixban6/singctl/main/install.sh | sudo sh 
+brew tap sixban6/singctl
+brew install sixban6/singctl/singctl
 ```
 
 **OpenWrt**
@@ -59,6 +54,10 @@ SingCtl 按功能模块分为以下几个部分，点击链接查看详细说明
 ## ⚙️ 配置文件
 
 核心配置位于 `singctl.yaml`，各模块的配置项说明请参阅对应子文档。
+
+配置文件路径:
+- MacOS: `/opt/homebrew/etc/singctl/singctl.yaml`
+- Other: `/etc/singctl/singctl.yaml`
 
 ## License
 
