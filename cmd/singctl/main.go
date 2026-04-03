@@ -17,14 +17,29 @@ var (
 	GitCommit = "unknown"
 )
 
+const (
+	defaultUnixConfigPath           = "/etc/singctl/singctl.yaml"
+	defaultDarwinHomebrewConfigPath = "/opt/homebrew/etc/singctl/singctl.yaml"
+)
+
 var configPath string
 
 func init() {
+	configPath = resolveDefaultConfigPath()
+}
+
+func resolveDefaultConfigPath() string {
 	if runtime.GOOS == "windows" {
-		configPath = filepath.Join(os.Getenv("LOCALAPPDATA"), "singctl", "singctl.yaml")
-	} else {
-		configPath = "/etc/singctl/singctl.yaml"
+		return filepath.Join(os.Getenv("LOCALAPPDATA"), "singctl", "singctl.yaml")
 	}
+
+	if runtime.GOOS == "darwin" {
+		if _, err := os.Stat(defaultDarwinHomebrewConfigPath); err == nil {
+			return defaultDarwinHomebrewConfigPath
+		}
+	}
+
+	return defaultUnixConfigPath
 }
 
 func ensureConfigDir() error {
@@ -73,12 +88,7 @@ It supports automatic configuration generation from subscription URLs,
 DNS optimization, and complete service lifecycle management.`,
 	}
 
-	var defaultConfigPath string
-	if runtime.GOOS == "windows" {
-		defaultConfigPath = filepath.Join(os.Getenv("LOCALAPPDATA"), "singctl", "singctl.yaml")
-	} else {
-		defaultConfigPath = "/etc/singctl/singctl.yaml"
-	}
+	defaultConfigPath := resolveDefaultConfigPath()
 	rootCmd.PersistentFlags().StringVarP(&configPath, "config", "c", defaultConfigPath, "config file")
 	// 保留补全功能，但只是不想让它显示在 help 列表里，可以只隐藏它：
 	rootCmd.CompletionOptions.HiddenDefaultCmd = true
