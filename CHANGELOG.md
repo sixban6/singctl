@@ -1,3 +1,10 @@
+## [1.21.19](https://github.com/sixban6/singctl/compare/v1.21.18...v1.21.19) (2026-04-07)
+
+
+### Bug Fixes
+
+* m ([8aa1fe7](https://github.com/sixban6/singctl/commit/8aa1fe70b856904fb80fdb4f14ac60fe12f58bed))
+
 ## [1.21.18](https://github.com/sixban6/singctl/compare/v1.21.17...v1.21.18) (2026-04-07)
 
 
