@@ -1,3 +1,10 @@
+## [1.21.20](https://github.com/sixban6/singctl/compare/v1.21.19...v1.21.20) (2026-05-10)
+
+
+### Bug Fixes
+
+* support anytls ([dfbb07b](https://github.com/sixban6/singctl/commit/dfbb07b813b9fade984ab5952b81a528a85125f3))
+
 ## [1.21.19](https://github.com/sixban6/singctl/compare/v1.21.18...v1.21.19) (2026-04-07)
 
 
