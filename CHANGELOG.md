@@ -1,3 +1,10 @@
+## [1.21.21](https://github.com/sixban6/singctl/compare/v1.21.20...v1.21.21) (2026-08-15)
+
+
+### Bug Fixes
+
+* add geosite-bank ([cfc3fa6](https://github.com/sixban6/singctl/commit/cfc3fa6815f3f88e88f380079dfd9aa1f0cd122a))
+
 ## [1.21.20](https://github.com/sixban6/singctl/compare/v1.21.19...v1.21.20) (2026-05-10)
 
 
