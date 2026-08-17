@@ -116,6 +116,7 @@ func newRestartCmd(cfg *config.Config) *cobra.Command {
 			}
 			return runStartSingbox(cfg)
 		},
+		Aliases: []string{"r"},
 	}
 	return cmd
 }
