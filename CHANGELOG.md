@@ -1,3 +1,15 @@
+# [1.22.0](https://github.com/sixban6/singctl/compare/v1.21.26...v1.22.0) (2026-08-17)
+
+
+### Bug Fixes
+
+* add ruleset cache ([bd23727](https://github.com/sixban6/singctl/commit/bd2372782c70cbb3b9176b442d61aa3dce554891))
+
+
+### Features
+
+* 规则集本地缓存，sing-box 启动不再依赖 GitHub ([58faaab](https://github.com/sixban6/singctl/commit/58faaab36e6917e795db99fa53d25399a00b0442))
+
 ## [1.21.26](https://github.com/sixban6/singctl/compare/v1.21.25...v1.21.26) (2026-08-17)
 
 
