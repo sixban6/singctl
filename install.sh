@@ -183,10 +183,22 @@ build_download_url() {
     echo_info "下载链接: $DOWNLOAD_URL"
 }
 
+# 计算文件 sha256（兼容 GNU sha256sum / macOS shasum）
+compute_sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        echo ""
+    fi
+}
+
 # 下载和解压
 # ------------------------------------------------------------
 # 跨平台下载并解压 .tar.gz  
 # 兼容：POSIX sh (busybox, dash, ash等)
+# 安全：sha256 校验和必须从 GitHub 直连获取（不走镜像），校验失败一律中止
 # ------------------------------------------------------------
 
 download_and_extract() {
@@ -196,20 +208,23 @@ download_and_extract() {
     mkdir -p "$TEMP_DIR"
     tar_file="$TEMP_DIR/singctl.tar.gz"
 
-    # 2. 下载
-    if ! curl -fL -o "$tar_file" "$DOWNLOAD_URL"; then
+    # 2. 下载（可走镜像加速）
+    if ! curl -fL --retry 2 -o "$tar_file" "$DOWNLOAD_URL"; then
         error_exit "下载失败: $DOWNLOAD_URL"
     fi
     echo_success "下载完成"
 
-    # 3. 解压
+    # 3. sha256 校验（校验和从 GitHub 直连获取，绝不经镜像）
+    verify_checksum
+
+    # 4. 解压
     echo_info "解压安装包..."
     if ! tar -xzf "$tar_file" -C "$TEMP_DIR"; then
         error_exit "解压失败"
     fi
     echo_success "解压完成"
 
-    # 4. 修复可执行权限（POSIX 写法）
+    # 5. 修复可执行权限（POSIX 写法）
     echo_info "修复可执行权限..."
     # 用 find 查找所有文件，再用 test -x 判断是否可执行
     find "$TEMP_DIR" -type f | while IFS= read -r binary; do
@@ -230,6 +245,38 @@ download_and_extract() {
     done
 
     echo_success "权限修复完成"
+}
+
+# 校验下载包的 sha256
+verify_checksum() {
+    local filename="singctl-${OS}-${ARCH}.tar.gz"
+    local checksums_url="https://github.com/$GITHUB_REPO/releases/download/$LATEST_VERSION/checksums.txt"
+    local expected actual
+
+    if [ "$SINGCTL_SKIP_CHECKSUM" = "1" ]; then
+        echo_warning "SINGCTL_SKIP_CHECKSUM=1 已设置，跳过 sha256 校验（自担风险）"
+        return 0
+    fi
+
+    echo_info "从 GitHub 直连获取校验和（不走镜像）..."
+    if ! curl -fsSL --retry 2 --max-time 60 -o "$TEMP_DIR/checksums.txt" "$checksums_url"; then
+        error_exit "无法直连 GitHub 获取 checksums.txt，已中止安装。请检查网络后重试；确要跳过请设置 SINGCTL_SKIP_CHECKSUM=1"
+    fi
+
+    expected=$(awk -v f="$filename" '$2 == f {print tolower($1)}' "$TEMP_DIR/checksums.txt")
+    if [ -z "$expected" ]; then
+        error_exit "checksums.txt 中没有 $filename 的记录，拒绝安装"
+    fi
+
+    actual=$(compute_sha256 "$tar_file")
+    if [ -z "$actual" ]; then
+        error_exit "系统缺少 sha256sum/shasum，无法校验。请安装后重试或设置 SINGCTL_SKIP_CHECKSUM=1"
+    fi
+
+    if [ "$expected" != "$actual" ]; then
+        error_exit "sha256 校验失败（安装包可能被篡改或损坏），已中止安装: 期望 $expected, 实际 $actual"
+    fi
+    echo_success "sha256 校验通过 ($filename)"
 }
 
 # 安装文件
@@ -260,7 +307,7 @@ install_files() {
     # 停止现有服务
     if command -v singctl >/dev/null 2>&1; then
         echo_info "停止现有 singctl 服务..."
-        singctl stop 2>/dev/null || true
+        singctl sb stop 2>/dev/null || true
     fi
 
     # 复制二进制
@@ -284,7 +331,9 @@ install_files() {
 
         echo_info "复制所有配置文件到: $CONFIG_DIR"
         cp -r "$configs_dir"/* "$CONFIG_DIR/"
-        find "$CONFIG_DIR" -type f -exec chmod 644 {} \;
+        # 600：主配置含订阅地址/tailscale auth_key/cloudflare token 等敏感信息
+        find "$CONFIG_DIR" -type f -name "*.yaml" -exec chmod 600 {} \;
+        find "$CONFIG_DIR" -type f ! -name "*.yaml" -exec chmod 644 {} \;
         echo_success "配置文件已安装"
     else
         echo_warning "未找到配置目录，请手动配置"
@@ -522,24 +571,24 @@ main() {
     init_singbox_config
     echo_success "安装脚本执行完成！"
     
-    # 检查配置文件是否有效订阅地址
-    if [ -f "$CONFIG_FILE" ] && ! grep -q "YOUR_SUBSCRIPTION_URL_HERE" "$CONFIG_FILE" 2>/dev/null; then
-        echo_info "检测到有效配置，检查 sing-box 安装状态..."
+    # 检查配置文件是否有效订阅地址（先去掉注释行，避免示例被误判）
+    if [ -f "$CONFIG_FILE" ] && sed 's/#.*//' "$CONFIG_FILE" | grep -Eq 'url:[[:space:]]*["'"'"']?https?://'; then
+        echo_info "检测到有效订阅，检查 sing-box 安装状态..."
         
         # 检查是否需要安装或更新 sing-box
         if check_singbox_installation; then
             echo_info "开始安装/更新 sing-box..."
-            "$INSTALL_DIR/singctl" install sb
+            "$INSTALL_DIR/singctl" sb install
             echo_success "安装/更新 sing-box 成功"
         fi
         
         echo_info "尝试启动 sing-box..."
-        "$INSTALL_DIR/singctl" start
+        "$INSTALL_DIR/singctl" sb start
         echo_success "sing-box 启动完成"
     else
         echo_warning "配置文件需要手动编辑或未配置有效订阅"
         echo_info "请先编辑配置文件: $CONFIG_FILE"  
-        echo_info "然后运行: sudo singctl install sb && sudo singctl start"
+        echo_info "然后运行: sudo singctl sb install && sudo singctl sb start"
     fi
 }
 

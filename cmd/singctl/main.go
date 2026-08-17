@@ -61,7 +61,7 @@ func initConfigFile(srcConfigPath string, dstConfigPath string) {
 		log.Fatalf("Init failed to ensure config dir: %v", err)
 	}
 
-	err = os.WriteFile(dstConfigPath, file, 0644)
+	err = os.WriteFile(dstConfigPath, file, 0600)
 	if err != nil {
 		log.Fatalf("Init failed to write config file: %v", err)
 	}

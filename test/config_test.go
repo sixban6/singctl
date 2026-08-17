@@ -172,10 +172,27 @@ server:                                         # (可选) 服务器部署配置
 	if !strings.Contains(mergedStr, "up: 50") {
 		t.Errorf("Expected custom up bandwidth to be retained")
 	}
-	if !strings.Contains(mergedStr, "auth_key: tskey-custom") {
+	if !strings.Contains(mergedStr, `auth_key: "tskey-custom"`) {
 		t.Errorf("Expected custom auth_key to be retained")
 	}
-	if !strings.Contains(mergedStr, "sb_domain: sub.custom.com") {
+	if !strings.Contains(mergedStr, `sb_domain: "sub.custom.com"`) {
 		t.Errorf("Expected custom sb_domain to be retained")
+	}
+
+	// 验证配置文件权限：含 auth_key/cf_dns_key 等密钥，必须是 0600
+	fi, err := os.Stat(configPath)
+	if err != nil {
+		t.Fatalf("Failed to stat merged config: %v", err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0600 {
+		t.Errorf("Expected merged config permission 0600, got %o", perm)
+	}
+	// 备份文件同样含密钥
+	bfi, err := os.Stat(configPath + ".bak")
+	if err != nil {
+		t.Fatalf("Failed to stat backup config: %v", err)
+	}
+	if perm := bfi.Mode().Perm(); perm != 0600 {
+		t.Errorf("Expected backup config permission 0600, got %o", perm)
 	}
 }

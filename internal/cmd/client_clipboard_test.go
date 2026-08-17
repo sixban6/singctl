@@ -1,11 +1,10 @@
-package test
+package cmd
 
 import (
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"singctl/internal/cmd"
 	"testing"
 )
 
@@ -19,18 +18,18 @@ func TestCopyGeneratedConfigToClipboardOnDarwinDefaultPath(t *testing.T) {
 		t.Fatalf("write config file: %v", err)
 	}
 
-	oldCommandRunner := cmd.commandRunner
-	oldRuntimeGOOS := cmd.runtimeGOOS
-	oldDefaultPath := cmd.defaultSingBoxConfigPath
+	oldCommandRunner := commandRunner
+	oldRuntimeGOOS := runtimeGOOS
+	oldDefaultPath := defaultSingBoxConfigPath
 	t.Cleanup(func() {
-		cmd.commandRunner = oldCommandRunner
-		cmd.runtimeGOOS = oldRuntimeGOOS
-		cmd.defaultSingBoxConfigPath = oldDefaultPath
+		commandRunner = oldCommandRunner
+		runtimeGOOS = oldRuntimeGOOS
+		defaultSingBoxConfigPath = oldDefaultPath
 	})
 
-	cmd.runtimeGOOS = "darwin"
-	cmd.defaultSingBoxConfigPath = configPath
-	cmd.commandRunner = func(name string, args ...string) *exec.Cmd {
+	runtimeGOOS = "darwin"
+	defaultSingBoxConfigPath = configPath
+	commandRunner = func(name string, args ...string) *exec.Cmd {
 		cmd := exec.Command(os.Args[0], "-test.run=TestClipboardHelperProcess", "--", name)
 		cmd.Env = append(os.Environ(),
 			"GO_WANT_CLIPBOARD_HELPER=1",
@@ -39,7 +38,7 @@ func TestCopyGeneratedConfigToClipboardOnDarwinDefaultPath(t *testing.T) {
 		return cmd
 	}
 
-	copied, err := cmd.copyGeneratedConfigToClipboard(configPath)
+	copied, err := copyGeneratedConfigToClipboard(configPath)
 	if err != nil {
 		t.Fatalf("copyGeneratedConfigToClipboard returned error: %v", err)
 	}
@@ -64,24 +63,24 @@ func TestCopyGeneratedConfigToClipboardSkipsUnsupportedCases(t *testing.T) {
 		t.Fatalf("write config file: %v", err)
 	}
 
-	oldCommandRunner := cmd.commandRunner
-	oldRuntimeGOOS := cmd.runtimeGOOS
-	oldDefaultPath := cmd.defaultSingBoxConfigPath
+	oldCommandRunner := commandRunner
+	oldRuntimeGOOS := runtimeGOOS
+	oldDefaultPath := defaultSingBoxConfigPath
 	t.Cleanup(func() {
-		cmd.commandRunner = oldCommandRunner
-		cmd.runtimeGOOS = oldRuntimeGOOS
-		cmd.defaultSingBoxConfigPath = oldDefaultPath
+		commandRunner = oldCommandRunner
+		runtimeGOOS = oldRuntimeGOOS
+		defaultSingBoxConfigPath = oldDefaultPath
 	})
 
 	commandCalled := false
-	cmd.commandRunner = func(name string, args ...string) *exec.Cmd {
+	commandRunner = func(name string, args ...string) *exec.Cmd {
 		commandCalled = true
 		return exec.Command("true")
 	}
 
-	cmd.runtimeGOOS = "linux"
-	cmd.defaultSingBoxConfigPath = configPath
-	copied, err := cmd.copyGeneratedConfigToClipboard(configPath)
+	runtimeGOOS = "linux"
+	defaultSingBoxConfigPath = configPath
+	copied, err := copyGeneratedConfigToClipboard(configPath)
 	if err != nil {
 		t.Fatalf("unexpected error on linux: %v", err)
 	}
@@ -89,9 +88,9 @@ func TestCopyGeneratedConfigToClipboardSkipsUnsupportedCases(t *testing.T) {
 		t.Fatal("expected clipboard copy to be skipped on linux")
 	}
 
-	cmd.runtimeGOOS = "darwin"
-	cmd.defaultSingBoxConfigPath = filepath.Join(tempDir, "other-config.json")
-	copied, err = cmd.copyGeneratedConfigToClipboard(configPath)
+	runtimeGOOS = "darwin"
+	defaultSingBoxConfigPath = filepath.Join(tempDir, "other-config.json")
+	copied, err = copyGeneratedConfigToClipboard(configPath)
 	if err != nil {
 		t.Fatalf("unexpected error on non-default path: %v", err)
 	}

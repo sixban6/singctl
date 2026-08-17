@@ -24,8 +24,7 @@ import (
 	"singctl/internal/util/file"
 	"singctl/internal/util/github"
 	"singctl/internal/util/netinfo"
-
-	"github.com/sixban6/ghinstall"
+	releasepkg "singctl/internal/util/release"
 )
 
 const (
@@ -136,7 +135,7 @@ func (t *Tailscale) GetSystemArchitecture() (string, error) {
 }
 
 func (t *Tailscale) Install() error {
-	logger.Info("Starting Tailscale installation via ghinstall...")
+	logger.Info("Starting Tailscale installation...")
 
 	ctx := context.Background()
 
@@ -147,44 +146,50 @@ func (t *Tailscale) Install() error {
 	}
 	defer os.RemoveAll(tempDir)
 
+	// 直连获取发布元数据（信任锚，不走镜像）；压缩包按连通性选择直连/镜像
 	mirror := ""
 	if !netinfo.CheckGoogleConnectivity() {
 		mirror = t.DownloadURL
 		logger.Info("Google appears unreachable, applying mirror config: %s", mirror)
-	} else {
-		logger.Info("Google is reachable, skipping mirror config.")
+	}
+	client := releasepkg.NewClient(mirror)
+	client.DirectFirst = netinfo.CheckGoogleConnectivity()
+	info, err := client.FetchLatest(ctx, "sixban6/auto_fetch_tailscale")
+	if err != nil {
+		return fmt.Errorf("无法直连 GitHub API 获取 tailscale 发布信息（为保证供应链安全，元数据不走镜像）: %w", err)
 	}
 
-	cfg := &ghinstall.Config{
-		Github: []ghinstall.Repo{
-			{
-				URL:       "https://github.com/sixban6/auto_fetch_tailscale",
-				OutputDir: tempDir,
-			},
-		},
-		MirrorURL: mirror,
-	}
-
-	filter := ghinstall.CustomFilter(func(assets []ghinstall.Asset) (*ghinstall.Asset, error) {
-		for _, asset := range assets {
-			if t.SelectTailscaleAsset(asset.Name) {
-				return &asset, nil
-			}
+	var asset *releasepkg.Asset
+	for i := range info.Assets {
+		if t.SelectTailscaleAsset(info.Assets[i].Name) {
+			asset = &info.Assets[i]
+			break
 		}
-		return nil, fmt.Errorf("no suitable asset found for OS: %s, Arch: %s", runtime.GOOS, runtime.GOARCH)
-	})
+	}
+	if asset == nil {
+		return fmt.Errorf("no suitable asset found for OS: %s, Arch: %s", runtime.GOOS, runtime.GOARCH)
+	}
 
-	if err := ghinstall.InstallWithConfigAndFilter(ctx, cfg, filter); err != nil {
-		return fmt.Errorf("install tailscale failed: %w", err)
+	archivePath, viaMirror, err := client.Download(ctx, *asset, tempDir)
+	if err != nil {
+		return fmt.Errorf("download tailscale failed: %w", err)
+	}
+	if viaMirror {
+		logger.Warn("⚠️ tailscale 经镜像下载；上游未发布校验和，已按官方元数据校验文件大小（%d 字节），无法进行加密校验", asset.Size)
+	}
+
+	extractDir := filepath.Join(tempDir, "extracted")
+	if err := releasepkg.Extract(archivePath, extractDir); err != nil {
+		return fmt.Errorf("extract tailscale archive failed: %w", err)
 	}
 
 	// 从下载的解压文件中查找二进制文件
-	tsBin, err := file.FindExecutable(tempDir, "tailscale")
+	tsBin, err := file.FindExecutable(extractDir, "tailscale")
 	if err != nil {
 		return fmt.Errorf("tailscale binary not found: %w", err)
 	}
 
-	tsdBin, err := file.FindExecutable(tempDir, "tailscaled")
+	tsdBin, err := file.FindExecutable(extractDir, "tailscaled")
 	if err != nil {
 		return fmt.Errorf("tailscaled binary not found: %w", err)
 	}
@@ -343,12 +348,15 @@ func (t *Tailscale) Start(advertiseExitNode bool, IsMainRouter bool, acceptRoute
 			logger.Info("Exit node advertisement enabled")
 		}
 
+		// Auth Key 改用环境变量传递，避免出现在命令行参数中被 ps aux 泄露
+		cmdEnv := os.Environ()
 		if t.config.AuthKey != "" {
-			args = append(args, "--authkey="+t.config.AuthKey)
-			logger.Info("Using configured Auth Key for automatic authorization")
+			cmdEnv = append(cmdEnv, "TS_AUTHKEY="+t.config.AuthKey)
+			logger.Info("Using configured Auth Key for automatic authorization (via TS_AUTHKEY env)")
 		}
 
 		cmd := exec.Command(filepath.Join(installDir, "tailscale"), args...)
+		cmd.Env = cmdEnv
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
@@ -570,7 +578,7 @@ func (t *Tailscale) fetchLatestTailscaleVersion() (string, error) {
 	return "latest", nil
 }
 
-// Update 将 Tailscale 更新到最新版 (通过 ghinstall)
+// Update 将 Tailscale 更新到最新版
 func (t *Tailscale) Update() error {
 	if t.OpenWrtCheck != nil && !t.OpenWrtCheck() {
 		logger.Success("Tailscale update is skipped because system is not OpenWrt")
@@ -581,7 +589,7 @@ func (t *Tailscale) Update() error {
 
 	latestVersion, err := t.fetchLatestTailscaleVersion()
 	if err != nil {
-		// API 拉取失败，为了保险起见，继续执行安装逻辑，让 ghinstall 尝试最新版
+		// API 拉取失败时继续执行安装逻辑，安装最新版
 		logger.Warn("⚠️ 无法获取最新版本 (%v)，将继续尝试更新", err)
 		latestVersion = "unknown"
 	} else {
@@ -595,9 +603,9 @@ func (t *Tailscale) Update() error {
 		logger.Success("✅ Tailscale 已是最新版本 (当前: %s)", latestVersion)
 		return nil
 	} else if latestVersion != "unknown" {
-		logger.Info("⬆️ Tailscale 更新: %s -> %s via ghinstall...", installedVer, latestVersion)
+		logger.Info("⬆️ Tailscale 更新: %s -> %s ...", installedVer, latestVersion)
 	} else {
-		logger.Info("Updating Tailscale via ghinstall...")
+		logger.Info("Updating Tailscale...")
 	}
 
 	ctx := context.Background()
@@ -609,43 +617,49 @@ func (t *Tailscale) Update() error {
 	}
 	defer os.RemoveAll(tempDir)
 
+	// 直连获取发布元数据（信任锚，不走镜像）；压缩包按连通性选择直连/镜像
 	mirror := ""
 	if !netinfo.CheckGoogleConnectivity() {
 		mirror = t.DownloadURL
 		logger.Info("Google appears unreachable, applying mirror config: %s", mirror)
-	} else {
-		logger.Info("Google is reachable, skipping mirror config.")
+	}
+	client := releasepkg.NewClient(mirror)
+	client.DirectFirst = netinfo.CheckGoogleConnectivity()
+	info, err := client.FetchLatest(ctx, "sixban6/auto_fetch_tailscale")
+	if err != nil {
+		return fmt.Errorf("无法直连 GitHub API 获取 tailscale 发布信息（为保证供应链安全，元数据不走镜像）: %w", err)
 	}
 
-	cfg := &ghinstall.Config{
-		Github: []ghinstall.Repo{
-			{
-				URL:       "https://github.com/sixban6/auto_fetch_tailscale",
-				OutputDir: tempDir,
-			},
-		},
-		MirrorURL: mirror,
-	}
-
-	filter := ghinstall.CustomFilter(func(assets []ghinstall.Asset) (*ghinstall.Asset, error) {
-		for _, asset := range assets {
-			if t.SelectTailscaleAsset(asset.Name) {
-				return &asset, nil
-			}
+	var asset *releasepkg.Asset
+	for i := range info.Assets {
+		if t.SelectTailscaleAsset(info.Assets[i].Name) {
+			asset = &info.Assets[i]
+			break
 		}
-		return nil, fmt.Errorf("no suitable asset found for OS: %s, Arch: %s", runtime.GOOS, runtime.GOARCH)
-	})
-
-	if err := ghinstall.InstallWithConfigAndFilter(ctx, cfg, filter); err != nil {
-		return fmt.Errorf("download tailscale update failed: %w", err)
+	}
+	if asset == nil {
+		return fmt.Errorf("no suitable asset found for OS: %s, Arch: %s", runtime.GOOS, runtime.GOARCH)
 	}
 
-	tsBin, err := file.FindExecutable(tempDir, "tailscale")
+	archivePath, viaMirror, err := client.Download(ctx, *asset, tempDir)
+	if err != nil {
+		return fmt.Errorf("download tailscale failed: %w", err)
+	}
+	if viaMirror {
+		logger.Warn("⚠️ tailscale 经镜像下载；上游未发布校验和，已按官方元数据校验文件大小（%d 字节），无法进行加密校验", asset.Size)
+	}
+
+	extractDir := filepath.Join(tempDir, "extracted")
+	if err := releasepkg.Extract(archivePath, extractDir); err != nil {
+		return fmt.Errorf("extract tailscale archive failed: %w", err)
+	}
+
+	tsBin, err := file.FindExecutable(extractDir, "tailscale")
 	if err != nil {
 		return fmt.Errorf("tailscale binary not found: %w", err)
 	}
 
-	tsdBin, err := file.FindExecutable(tempDir, "tailscaled")
+	tsdBin, err := file.FindExecutable(extractDir, "tailscaled")
 	if err != nil {
 		return fmt.Errorf("tailscaled binary not found: %w", err)
 	}
