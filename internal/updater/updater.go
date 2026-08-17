@@ -11,10 +11,11 @@ import (
 	"singctl/internal/config"
 	"singctl/internal/logger"
 	"singctl/internal/util/file"
-	"singctl/internal/util/github"
-
-	"github.com/sixban6/ghinstall"
+	releasepkg "singctl/internal/util/release"
 )
+
+// SkipChecksumEnv 允许用户在无法直连 GitHub 时显式跳过校验（自担风险）。
+const SkipChecksumEnv = "SINGCTL_SKIP_CHECKSUM"
 
 type Updater struct {
 	mirrorURL string
@@ -34,69 +35,69 @@ func New(mirrorURL, repoURL string) *Updater {
 func (u *Updater) UpdateSelf(configPath string, currentVersion string) error {
 	logger.Info("Checking for singctl updates...")
 
-	// 版本检测：对比当前版本与远端最新版本
-	normalizedVersion := strings.TrimPrefix(currentVersion, "v")
-	if normalizedVersion != "" && normalizedVersion != "dev" {
-		fetcher := github.NewReleaseFetcher(u.mirrorURL, nil)
-		latestVersion, err := fetcher.FetchLatestTag("sixban6/singctl")
-		if err != nil {
-			logger.Warn("⚠️ 无法获取最新版本 (%v)，将继续尝试更新", err)
-		} else {
-			logger.Info("Latest singctl version: %s, current: %s", latestVersion, normalizedVersion)
-			if normalizedVersion == latestVersion {
-				logger.Success("✅ singctl 已是最新版本 (当前: %s)", normalizedVersion)
-				return nil
-			}
-			logger.Info("⬆️ singctl 更新: %s -> %s", normalizedVersion, latestVersion)
-		}
-	}
-
 	ctx := context.Background()
 
-	// 获取当前执行文件路径
-	currentExe, err := os.Executable()
+	// 1. 直连 GitHub API 获取发布元数据（tag + 资产列表，绝不经镜像，
+	//    防止镜像篡改"最新版本"指向旧版或恶意资产）。
+	client := releasepkg.NewClient(u.mirrorURL)
+	info, err := client.FetchLatest(ctx, "sixban6/singctl")
 	if err != nil {
-		return fmt.Errorf("get current executable: %w", err)
+		return fmt.Errorf("无法直连 GitHub API 获取版本信息（为保证供应链安全，元数据不走镜像）: %w", err)
 	}
 
-	// 创建临时目录下载新版本
+	// 版本检测：对比当前版本与远端最新版本
+	normalizedVersion := strings.TrimPrefix(currentVersion, "v")
+	latestVersion := strings.TrimPrefix(info.TagName, "v")
+	if normalizedVersion != "" && normalizedVersion != "dev" {
+		logger.Info("Latest singctl version: %s, current: %s", latestVersion, normalizedVersion)
+		if normalizedVersion == latestVersion {
+			logger.Success("✅ singctl 已是最新版本 (当前: %s)", normalizedVersion)
+			return nil
+		}
+		logger.Info("⬆️ singctl 更新: %s -> %s", normalizedVersion, latestVersion)
+	}
+
+	// 2. 选择当前平台的压缩包资产
+	var asset *releasepkg.Asset
+	for i := range info.Assets {
+		if u.selectSingCtlAsset(info.Assets[i].Name) {
+			asset = &info.Assets[i]
+			break
+		}
+	}
+	if asset == nil {
+		return fmt.Errorf("no suitable asset found for OS: %s, Arch: %s", runtime.GOOS, runtime.GOARCH)
+	}
+
+	// 3. 下载压缩包（可走镜像加速），并强制校验 sha256
 	tempDir, err := os.MkdirTemp("", "singctl-update-*")
 	if err != nil {
 		return fmt.Errorf("create temp dir: %w", err)
 	}
 	defer os.RemoveAll(tempDir)
 
-	cfg := &ghinstall.Config{
-		Github: []ghinstall.Repo{
-			{
-				URL:       u.repoURL,
-				OutputDir: tempDir,
-			},
-		},
-		MirrorURL: u.mirrorURL,
-	}
-	// 使用自定义过滤器匹配 singctl 资源
-	filter := ghinstall.CustomFilter(func(assets []ghinstall.Asset) (*ghinstall.Asset, error) {
-		for _, asset := range assets {
-			if u.selectSingCtlAsset(asset.Name) {
-				return &asset, nil
-			}
-		}
-		return nil, fmt.Errorf("no suitable asset found for OS: %s", runtime.GOOS)
-	})
-	if err := ghinstall.InstallWithConfigAndFilter(ctx, cfg, filter); err != nil {
+	archivePath, viaMirror, err := client.Download(ctx, *asset, tempDir)
+	if err != nil {
 		return fmt.Errorf("download new version failed: %w", err)
 	}
 
-	// 找到下载的新执行文件
-	newExe, err := file.FindExecutable(tempDir, "singctl")
+	if err := u.verifyArchive(ctx, client, info, asset, archivePath, viaMirror); err != nil {
+		return err
+	}
+
+	// 4. 解压并定位新的可执行文件
+	extractDir := filepath.Join(tempDir, "extracted")
+	if err := releasepkg.Extract(archivePath, extractDir); err != nil {
+		return fmt.Errorf("extract archive failed: %w", err)
+	}
+	newExe, err := file.FindExecutable(extractDir, "singctl")
 	if err != nil {
 		return fmt.Errorf("new executable not found in downloaded package: %w", err)
 	}
 
-	// 同步 configs 目录
+	// 5. 同步 configs 目录
 	var configsSrc string
-	filepath.Walk(tempDir, func(path string, info os.FileInfo, err error) error {
+	filepath.Walk(extractDir, func(path string, info os.FileInfo, err error) error {
 		if err == nil && info.IsDir() && info.Name() == "configs" {
 			configsSrc = path
 			return filepath.SkipDir
@@ -124,13 +125,44 @@ func (u *Updater) UpdateSelf(configPath string, currentVersion string) error {
 		}
 	}
 
-	// 执行安全替换
+	// 6. 执行安全替换
+	currentExe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("get current executable: %w", err)
+	}
 	if err := file.SafeReplace(currentExe, newExe); err != nil {
 		return err
 	}
 
 	logger.Success("SingCtl updated successfully")
 	logger.Info("Please restart the application to use the new version")
+	return nil
+}
+
+// verifyArchive 校验下载的压缩包。
+// checksums.txt 从 GitHub 直连获取（不走镜像），校验失败一律中止；
+// 仅当用户显式设置 SkipChecksumEnv=1 时跳过（会打印醒目警告）。
+func (u *Updater) verifyArchive(ctx context.Context, client *releasepkg.Client, info *releasepkg.Info, asset *releasepkg.Asset, archivePath string, viaMirror bool) error {
+	if os.Getenv(SkipChecksumEnv) == "1" {
+		logger.Warn("⚠️  %s=1 已设置，跳过 sha256 校验。镜像或网络被劫持时可能安装恶意程序，请自行承担风险！", SkipChecksumEnv)
+		return nil
+	}
+
+	sums, err := client.FetchChecksums(ctx, "sixban6/singctl", info.TagName, nil, info)
+	if err != nil {
+		return fmt.Errorf("无法直连 GitHub 获取 checksums.txt（校验必需，不走镜像）。请检查网络后重试；确要跳过请设置 %s=1: %w", SkipChecksumEnv, err)
+	}
+	expected, ok := sums[asset.Name]
+	if !ok {
+		return fmt.Errorf("checksums.txt 中没有资产 %s 的记录，拒绝安装", asset.Name)
+	}
+	if err := releasepkg.VerifySHA256(archivePath, expected); err != nil {
+		if viaMirror {
+			return fmt.Errorf("镜像下载的安装包校验失败（可能被篡改或损坏），已中止: %w", err)
+		}
+		return fmt.Errorf("安装包校验失败（可能被篡改或损坏），已中止: %w", err)
+	}
+	logger.Success("✅ sha256 校验通过 (%s)", asset.Name)
 	return nil
 }
 

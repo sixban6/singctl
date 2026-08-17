@@ -4,7 +4,6 @@ go 1.25
 
 require (
 	github.com/showwin/speedtest-go v1.7.10
-	github.com/sixban6/ghinstall v1.12.9
 	github.com/sixban6/singgen v1.13.37
 	github.com/spf13/cobra v1.10.2
 	gopkg.in/yaml.v3 v3.0.1
@@ -17,5 +16,4 @@ require (
 	github.com/stretchr/testify v1.9.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.1 // indirect
-	golang.org/x/mod v0.32.0 // indirect
 )

@@ -121,7 +121,8 @@ func MigrateConfig(configPath string, templateData []byte) error {
 	if err != nil {
 		if os.IsNotExist(err) {
 			// If no old config, simply write the template
-			return os.WriteFile(configPath, templateData, 0644)
+			// 0600：含 tailscale auth_key / cloudflare token 等密钥
+			return os.WriteFile(configPath, templateData, 0600)
 		}
 		return fmt.Errorf("failed to read old config: %w", err)
 	}
@@ -260,11 +261,11 @@ func MigrateConfig(configPath string, templateData []byte) error {
 
 	// Create backup
 	backupPath := configPath + ".bak"
-	_ = os.WriteFile(backupPath, oldData, 0644)
+	_ = os.WriteFile(backupPath, oldData, 0600)
 
 	// Write Atomically
 	tempPath := configPath + ".tmp"
-	if err := os.WriteFile(tempPath, newData, 0644); err != nil {
+	if err := os.WriteFile(tempPath, newData, 0600); err != nil {
 		return fmt.Errorf("failed to write tmp config: %w", err)
 	}
 
@@ -282,5 +283,5 @@ func Save(path string, cfg *Config) error {
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}
-	return os.WriteFile(path, data, 0644)
+	return os.WriteFile(path, data, 0600)
 }

@@ -33,10 +33,9 @@ func TestNetinfoGet(t *testing.T) {
 		}
 	}
 
-	// 验证公网 IP
-	if result.PublicIP == "" {
-		t.Error("Expected Public IP to be set")
-	} else {
+	// 验证公网 IP：实现中公网 IP 获取已按需停用（见 netinfo.Get），
+	// 因此只要求其为空或为合法 IP。
+	if result.PublicIP != "" {
 		ip := net.ParseIP(result.PublicIP)
 		if ip == nil {
 			t.Errorf("Invalid Public IP: %s", result.PublicIP)
@@ -160,11 +159,13 @@ func TestNetinfoPublicIP(t *testing.T) {
 		t.Fatalf("Failed to get network info: %v", err)
 	}
 
+	// 实现中公网 IP 获取已停用（netinfo.Get 里 r.PublicIP = ""），
+	// 这里验证停用行为：为空即符合预期；若未来重新启用，则校验格式与公网性。
 	if result.PublicIP == "" {
-		t.Error("Expected public IP address")
+		t.Log("Public IP lookup is disabled in netinfo.Get, got empty value as expected")
+		return
 	}
 
-	// 验证公网 IP 格式
 	ip := net.ParseIP(result.PublicIP)
 	if ip == nil {
 		t.Errorf("Invalid public IP address: %s", result.PublicIP)

@@ -38,6 +38,19 @@ curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/sixban6/singct
 powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "[System.IO.File]::WriteAllText('install.ps1', (irm https://raw.githubusercontent.com/sixban6/singctl/main/install.ps1 -UseBasicParsing), [System.Text.Encoding]::UTF8); & .\install.ps1"
 ```
 
+### 🔒 安全与校验
+
+安装和更新（`singctl update self` / `sb install` / `sb update`）会对下载的安装包做完整性校验：
+- 校验和与发布元数据**必须从 GitHub 直连获取**（不走镜像），安装包本身仍可走镜像加速。因此这些操作需要能直连 `github.com` / `api.github.com`（仅小请求）。
+- `singctl` 官方发布附带 `checksums.txt`，强校验 sha256，失败即中止；`sing-box`/`tailscale` 上游未发布校验和，改用官方元数据校验文件大小并提示风险。
+- 网络无法直连 GitHub 时，可设置 `SINGCTL_SKIP_CHECKSUM=1` 跳过校验（自担风险）：
+
+```bash
+curl -fsSL https://gh-proxy.com/https://raw.githubusercontent.com/sixban6/singctl/main/install.sh | SINGCTL_SKIP_CHECKSUM=1 sh
+```
+
+另外，`singctl.yaml` 及生成的 sing-box 配置包含订阅地址、auth_key 等敏感信息，默认权限为 `600`。
+
 ## 📚 使用指南 (Usage)
 
 SingCtl 按功能模块分为以下几个部分，点击链接查看详细说明：

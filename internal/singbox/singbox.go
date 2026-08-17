@@ -16,9 +16,9 @@ import (
 	"singctl/internal/util/file"
 	"singctl/internal/util/github"
 	"singctl/internal/util/netinfo"
+	releasepkg "singctl/internal/util/release"
 	"strings"
-
-	"github.com/sixban6/ghinstall"
+	"time"
 )
 
 type SingBox struct {
@@ -167,7 +167,12 @@ func (sb *SingBox) GenerateConfig() error {
 	}
 
 	tmp := sb.configPath + ".tmp"
-	if err := os.WriteFile(tmp, []byte(configContent), 0644); err != nil {
+	// 0600：生成的配置内含节点凭据/Tailscale auth key，不能让同机其它用户可读
+	if err := os.WriteFile(tmp, []byte(configContent), 0600); err != nil {
+		return err
+	}
+	// rename 会继承 .tmp 的权限，确保落盘后也是 0600
+	if err := os.Chmod(tmp, 0600); err != nil {
 		return err
 	}
 	err = os.Rename(tmp, sb.configPath)
@@ -222,8 +227,9 @@ func (sb *SingBox) InstallGUI() error {
 	}
 	defer os.Remove(tempFile.Name())
 
-	// Download
-	resp, err := http.Get(downloadURL)
+	// 下载（为避免弱网下永久挂起，显式使用带超时的 client）
+	dlClient := &http.Client{Timeout: 10 * time.Minute}
+	resp, err := dlClient.Get(downloadURL)
 	if err != nil {
 		return fmt.Errorf("download failed: %w", err)
 	}
@@ -331,6 +337,8 @@ func (sb *SingBox) StartGUI() error {
 }
 
 // installOrUpdate 安装或更新 sing-box (CLI)
+// 发布元数据从 GitHub API 直连获取（信任锚，不走镜像）；压缩包可走镜像加速，
+// 但会用官方元数据校验文件大小并在镜像下载时提示风险（上游不发布 checksums，无法加密校验）。
 func (sb *SingBox) installOrUpdate(targetPath string) error {
 	ctx := context.Background()
 
@@ -339,46 +347,44 @@ func (sb *SingBox) installOrUpdate(targetPath string) error {
 	if err != nil {
 		return fmt.Errorf("create temp dir: %w", err)
 	}
-	// 生成 8 位十六进制随机后缀
-	//b := make([]byte, 4)
-	//rand.Read(b)
-	//suffix := fmt.Sprintf("%08x", b)
-	//tempDir := fmt.Sprintf("./singbox-install-%s", suffix)
-	//if err := os.MkdirAll(tempDir, 0755); err != nil {
-	//	return fmt.Errorf("create temp dir: %w", err)
-	//}
-
 	defer os.RemoveAll(tempDir)
 
-	mirror := sb.config.GitHub.MirrorURL
-	if mirror == "https://github.com" {
-		mirror = ""
+	// 1. 直连获取发布元数据（资产名、大小、下载地址；信任锚，不走镜像）
+	client := releasepkg.NewClient(sb.config.GitHub.MirrorURL)
+	client.DirectFirst = netinfo.CheckGoogleConnectivity()
+	info, err := client.FetchLatest(ctx, "SagerNet/sing-box")
+	if err != nil {
+		return fmt.Errorf("无法直连 GitHub API 获取 sing-box 发布信息（为保证供应链安全，元数据不走镜像）: %w", err)
 	}
 
-	cfg := &ghinstall.Config{
-		Github: []ghinstall.Repo{
-			{
-				URL:       "https://github.com/SagerNet/sing-box",
-				OutputDir: tempDir,
-			},
-		},
-		MirrorURL: mirror,
-	}
-	// 2. 使用自定义过滤器
-	filter := ghinstall.CustomFilter(func(assets []ghinstall.Asset) (*ghinstall.Asset, error) {
-		for _, asset := range assets {
-			if sb.selectSingBoxAsset(asset.Name) {
-				return &asset, nil
-			}
+	// 2. 选择当前平台的压缩包资产
+	var asset *releasepkg.Asset
+	for i := range info.Assets {
+		if sb.selectSingBoxAsset(info.Assets[i].Name) {
+			asset = &info.Assets[i]
+			break
 		}
-		return nil, fmt.Errorf("no suitable asset found for OS: %s", runtime.GOOS)
-	})
-	if err := ghinstall.InstallWithConfigAndFilter(ctx, cfg, filter); err != nil {
-		return fmt.Errorf("install sing-box failed: %w", err)
+	}
+	if asset == nil {
+		return fmt.Errorf("no suitable asset found for OS: %s, Arch: %s", runtime.GOOS, runtime.GOARCH)
+	}
+
+	// 3. 下载并解压
+	archivePath, viaMirror, err := client.Download(ctx, *asset, tempDir)
+	if err != nil {
+		return fmt.Errorf("download sing-box failed: %w", err)
+	}
+	if viaMirror {
+		logger.Warn("⚠️ sing-box 经镜像下载；上游未发布校验和，已按官方元数据校验文件大小（%d 字节），无法进行加密校验", asset.Size)
+	}
+
+	extractDir := filepath.Join(tempDir, "extracted")
+	if err := releasepkg.Extract(archivePath, extractDir); err != nil {
+		return fmt.Errorf("extract sing-box archive failed: %w", err)
 	}
 
 	// 找到下载的新执行文件
-	newExe, err := file.FindExecutable(tempDir, "sing-box")
+	newExe, err := file.FindExecutable(extractDir, "sing-box")
 	if err != nil {
 		return fmt.Errorf("new executable not found in downloaded package: %w", err)
 	}

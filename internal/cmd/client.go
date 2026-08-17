@@ -19,10 +19,12 @@ import (
 var (
 	commandRunner = exec.Command
 	runtimeGOOS   = runtime.GOOS
+	// defaultSingBoxConfigPath 默认 sing-box 配置路径，测试可注入。
+	defaultSingBoxConfigPath = constant.SingBoxConfigFile
 )
 
 func copyGeneratedConfigToClipboard(targetPath string) (bool, error) {
-	if runtimeGOOS != "darwin" || targetPath != constant.SingBoxConfigFile {
+	if runtimeGOOS != "darwin" || targetPath != defaultSingBoxConfigPath {
 		return false, nil
 	}
 
