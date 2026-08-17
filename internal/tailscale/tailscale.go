@@ -170,16 +170,18 @@ func (t *Tailscale) Install() error {
 		return fmt.Errorf("no suitable asset found for OS: %s, Arch: %s", runtime.GOOS, runtime.GOARCH)
 	}
 
-	archivePath, viaMirror, err := client.Download(ctx, *asset, tempDir)
+	res, err := client.Download(ctx, *asset, tempDir)
 	if err != nil {
 		return fmt.Errorf("download tailscale failed: %w", err)
 	}
-	if viaMirror {
-		logger.Warn("⚠️ tailscale 经镜像下载；上游未发布校验和，已按官方元数据校验文件大小（%d 字节），无法进行加密校验", asset.Size)
+	if res.SHA256Verified {
+		logger.Success("✅ sha256 校验通过，与 GitHub 官方 digest 一致 (%s)", asset.Name)
+	} else if res.ViaMirror {
+		logger.Warn("⚠️ tailscale 经镜像下载；官方元数据无 digest，仅按大小校验（%d 字节），无法进行加密校验", asset.Size)
 	}
 
 	extractDir := filepath.Join(tempDir, "extracted")
-	if err := releasepkg.Extract(archivePath, extractDir); err != nil {
+	if err := releasepkg.Extract(res.Path, extractDir); err != nil {
 		return fmt.Errorf("extract tailscale archive failed: %w", err)
 	}
 
@@ -641,16 +643,18 @@ func (t *Tailscale) Update() error {
 		return fmt.Errorf("no suitable asset found for OS: %s, Arch: %s", runtime.GOOS, runtime.GOARCH)
 	}
 
-	archivePath, viaMirror, err := client.Download(ctx, *asset, tempDir)
+	res, err := client.Download(ctx, *asset, tempDir)
 	if err != nil {
 		return fmt.Errorf("download tailscale failed: %w", err)
 	}
-	if viaMirror {
-		logger.Warn("⚠️ tailscale 经镜像下载；上游未发布校验和，已按官方元数据校验文件大小（%d 字节），无法进行加密校验", asset.Size)
+	if res.SHA256Verified {
+		logger.Success("✅ sha256 校验通过，与 GitHub 官方 digest 一致 (%s)", asset.Name)
+	} else if res.ViaMirror {
+		logger.Warn("⚠️ tailscale 经镜像下载；官方元数据无 digest，仅按大小校验（%d 字节），无法进行加密校验", asset.Size)
 	}
 
 	extractDir := filepath.Join(tempDir, "extracted")
-	if err := releasepkg.Extract(archivePath, extractDir); err != nil {
+	if err := releasepkg.Extract(res.Path, extractDir); err != nil {
 		return fmt.Errorf("extract tailscale archive failed: %w", err)
 	}
 

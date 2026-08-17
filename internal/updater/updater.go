@@ -37,9 +37,10 @@ func (u *Updater) UpdateSelf(configPath string, currentVersion string) error {
 
 	ctx := context.Background()
 
-	// 1. 直连 GitHub API 获取发布元数据（tag + 资产列表，绝不经镜像，
-	//    防止镜像篡改"最新版本"指向旧版或恶意资产）。
+	// 1. 直连 GitHub API 获取发布元数据（tag + 资产列表 + 官方 digest，
+	//    绝不经镜像，防止镜像篡改"最新版本"指向旧版或恶意资产）。
 	client := releasepkg.NewClient(u.mirrorURL)
+	client.SkipSHA256 = os.Getenv(SkipChecksumEnv) == "1"
 	info, err := client.FetchLatest(ctx, "sixban6/singctl")
 	if err != nil {
 		return fmt.Errorf("无法直连 GitHub API 获取版本信息（为保证供应链安全，元数据不走镜像）: %w", err)
@@ -76,18 +77,20 @@ func (u *Updater) UpdateSelf(configPath string, currentVersion string) error {
 	}
 	defer os.RemoveAll(tempDir)
 
-	archivePath, viaMirror, err := client.Download(ctx, *asset, tempDir)
+	res, err := client.Download(ctx, *asset, tempDir)
 	if err != nil {
 		return fmt.Errorf("download new version failed: %w", err)
 	}
 
-	if err := u.verifyArchive(ctx, client, info, asset, archivePath, viaMirror); err != nil {
+	if res.SHA256Verified {
+		logger.Success("✅ sha256 校验通过，与 GitHub 官方 digest 一致 (%s)", asset.Name)
+	} else if err := u.verifyChecksumsFile(ctx, client, info, asset, res.Path, res.ViaMirror); err != nil {
 		return err
 	}
 
 	// 4. 解压并定位新的可执行文件
 	extractDir := filepath.Join(tempDir, "extracted")
-	if err := releasepkg.Extract(archivePath, extractDir); err != nil {
+	if err := releasepkg.Extract(res.Path, extractDir); err != nil {
 		return fmt.Errorf("extract archive failed: %w", err)
 	}
 	newExe, err := file.FindExecutable(extractDir, "singctl")
@@ -139,10 +142,9 @@ func (u *Updater) UpdateSelf(configPath string, currentVersion string) error {
 	return nil
 }
 
-// verifyArchive 校验下载的压缩包。
-// checksums.txt 从 GitHub 直连获取（不走镜像），校验失败一律中止；
-// 仅当用户显式设置 SkipChecksumEnv=1 时跳过（会打印醒目警告）。
-func (u *Updater) verifyArchive(ctx context.Context, client *releasepkg.Client, info *releasepkg.Info, asset *releasepkg.Asset, archivePath string, viaMirror bool) error {
+// verifyChecksumsFile 是 digest 不可用时的回退路径：
+// 用发布附带的 checksums.txt（从 GitHub 直连获取，不走镜像）校验 sha256。
+func (u *Updater) verifyChecksumsFile(ctx context.Context, client *releasepkg.Client, info *releasepkg.Info, asset *releasepkg.Asset, archivePath string, viaMirror bool) error {
 	if os.Getenv(SkipChecksumEnv) == "1" {
 		logger.Warn("⚠️  %s=1 已设置，跳过 sha256 校验。镜像或网络被劫持时可能安装恶意程序，请自行承担风险！", SkipChecksumEnv)
 		return nil

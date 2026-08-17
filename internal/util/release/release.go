@@ -37,6 +37,9 @@ type Asset struct {
 	BrowserDownloadURL string `json:"browser_download_url"`
 	ID                 int64  `json:"id"`
 	Size               int64  `json:"size"`
+	// Digest 为 GitHub 为资产计算的摘要（如 "sha256:<hex>"），
+	// 随元数据从 api.github.com 直连返回，是强校验的信任锚。
+	Digest string `json:"digest"`
 }
 
 // Info 描述一次 Release 查询结果。
@@ -58,6 +61,8 @@ type Client struct {
 	// DirectFirst 为 true 时优先直连下载大文件（镜像作后备），否则相反。
 	// 生产代码按 Google 连通性设置；测试可固定。
 	DirectFirst bool
+	// SkipSHA256 为 true 时跳过对 digest 的 sha256 校验（用户显式自担风险）。
+	SkipSHA256 bool
 }
 
 // NewClient 创建默认客户端。mirror 为空或 "https://github.com" 表示不使用镜像。
@@ -133,13 +138,23 @@ func (c *Client) fetchInfo(ctx context.Context, url string) (*Info, error) {
 	return &info, nil
 }
 
-// Download 下载资产到 destDir/<asset.Name>，返回本地路径和是否经镜像下载。
+// DownloadResult 描述一次资产下载的结果与校验情况。
+type DownloadResult struct {
+	Path           string
+	ViaMirror      bool
+	SHA256Verified bool // 下载内容已与官方元数据 digest 做 sha256 比对并通过
+	SizeChecked    bool // 官方元数据含大小且与下载文件一致（仅弱校验）
+}
+
+// Download 下载资产到 destDir/<asset.Name>，返回下载结果。
 // 按大小写不敏感扩展名识别压缩包，下载后：
 //   - 优先直连，失败换镜像（或相反，取决于 DirectFirst）；
-//   - 资产已知大小时，校验下载文件大小与官方元数据一致。
-func (c *Client) Download(ctx context.Context, asset Asset, destDir string) (string, bool, error) {
+//   - 官方元数据带 digest 时做 sha256 强校验（镜像投毒/网络损坏都会被拒收）；
+//   - 无 digest 时至少校验文件大小与官方元数据一致；
+//   - 校验失败会自动尝试另一条通道，全部失败才返回错误。
+func (c *Client) Download(ctx context.Context, asset Asset, destDir string) (*DownloadResult, error) {
 	if err := os.MkdirAll(destDir, 0755); err != nil {
-		return "", false, err
+		return nil, err
 	}
 	dest := filepath.Join(destDir, asset.Name)
 
@@ -147,6 +162,8 @@ func (c *Client) Download(ctx context.Context, asset Asset, destDir string) (str
 	if directURL == "" {
 		directURL = fmt.Sprintf("%s/%s", c.dlBase(), asset.Name) // 测试兜底，生产路径不会走到
 	}
+
+	digestHex, hasDigest := parseDigest(asset.Digest)
 
 	type candidate struct {
 		url   string
@@ -181,9 +198,28 @@ func (c *Client) Download(ctx context.Context, asset Asset, destDir string) (str
 				continue
 			}
 		}
-		return dest, cand.mirro, nil
+		if hasDigest && !c.SkipSHA256 {
+			if err := VerifySHA256(dest, digestHex); err != nil {
+				os.Remove(dest)
+				lastErr = fmt.Errorf("sha256 mismatch for %s against official digest (downloaded from %s): %w",
+					asset.Name, cand.url, err)
+				continue
+			}
+			return &DownloadResult{Path: dest, ViaMirror: cand.mirro, SHA256Verified: true, SizeChecked: asset.Size > 0}, nil
+		}
+		return &DownloadResult{Path: dest, ViaMirror: cand.mirro, SHA256Verified: false, SizeChecked: asset.Size > 0}, nil
 	}
-	return "", false, fmt.Errorf("all download attempts failed: %w", lastErr)
+	return nil, fmt.Errorf("all download attempts failed: %w", lastErr)
+}
+
+// parseDigest 解析 "sha256:<hex>" 形式的官方摘要。仅支持 sha256。
+func parseDigest(d string) (hexSum string, ok bool) {
+	d = strings.ToLower(strings.TrimSpace(d))
+	algo, sum, found := strings.Cut(d, ":")
+	if !found || algo != "sha256" || sum == "" {
+		return "", false
+	}
+	return sum, true
 }
 
 func (c *Client) mirrorURL(u string) string {

@@ -74,12 +74,19 @@ type fixture struct {
 	directBroken bool
 	// tamperMirror=true 时镜像返回被篡改的包
 	tamperMirror bool
+	// sameSizeTamper=true 时篡改包会被填充到与官方完全相同的字节数
+	// （此时大小校验必然放行，只有 sha256 能识破）
+	sameSizeTamper bool
 }
 
 func (f *fixture) setMirror(m string) { f.client.Mirror = m }
 
 // newFixture 起一个同时扮演 api.github.com / github.com / mirror 的测试服务器。
 func newFixture(t *testing.T, tamperMirror, directBroken bool) *fixture {
+	return newFixtureFull(t, tamperMirror, directBroken, false)
+}
+
+func newFixtureFull(t *testing.T, tamperMirror, directBroken, sameSizeTamper bool) *fixture {
 	t.Helper()
 
 	archiveBytes := makeTarGz(t, map[string]string{
@@ -90,11 +97,12 @@ func newFixture(t *testing.T, tamperMirror, directBroken bool) *fixture {
 		sha256Hex(archiveBytes), archiveName, sha256Hex([]byte("other")))
 
 	fx := &fixture{
-		archiveName:  archiveName,
-		archiveHash:  sha256Hex(archiveBytes),
-		archiveSize:  len(archiveBytes),
-		directBroken: directBroken,
-		tamperMirror: tamperMirror,
+		archiveName:    archiveName,
+		archiveHash:    sha256Hex(archiveBytes),
+		archiveSize:    len(archiveBytes),
+		directBroken:   directBroken,
+		tamperMirror:   tamperMirror,
+		sameSizeTamper: sameSizeTamper,
 	}
 
 	const archiveAssetID = 42
@@ -114,6 +122,7 @@ func newFixture(t *testing.T, tamperMirror, directBroken bool) *fixture {
 					"name":                 archiveName,
 					"id":                   archiveAssetID,
 					"size":                 len(archiveBytes),
+					"digest":               "sha256:" + sha256Hex(archiveBytes),
 					"browser_download_url": baseURL + "/dl/" + archiveName,
 				},
 				{
@@ -151,10 +160,17 @@ func newFixture(t *testing.T, tamperMirror, directBroken bool) *fixture {
 	})
 
 	// ---- 镜像（前缀代理 /mirror/<full-url>）----
+	malicious := []byte("MALICIOUS PAYLOAD ................")
+	if sameSizeTamper {
+		// 等长投毒：字节数与官方包完全一致，只有 sha256 能识破
+		for len(malicious) < len(archiveBytes) {
+			malicious = append(malicious, '.')
+		}
+		malicious = malicious[:len(archiveBytes)]
+	}
 	mux.HandleFunc("/mirror/", func(w http.ResponseWriter, r *http.Request) {
 		if tamperMirror {
-			// 被劫持的镜像：返回恶意内容（大小与官方元数据不一致）
-			_, _ = w.Write([]byte("MALICIOUS PAYLOAD WITH DIFFERENT SIZE ................"))
+			_, _ = w.Write(malicious)
 			return
 		}
 		rest := strings.TrimPrefix(r.URL.Path, "/mirror/")
@@ -297,14 +313,17 @@ func TestEndToEndDirectDownloadAndVerify(t *testing.T) {
 	fx := newFixture(t, false, false)
 	asset := fx.findAsset(t)
 
-	path, viaMirror, err := fx.client.Download(t.Context(), *asset, t.TempDir())
+	res, err := fx.client.Download(t.Context(), *asset, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if viaMirror {
+	if res.ViaMirror {
 		t.Error("expected direct download when no mirror configured")
 	}
-	if err := VerifySHA256(path, fx.archiveHash); err != nil {
+	if !res.SHA256Verified || !res.SizeChecked {
+		t.Errorf("expected digest+size verification, got sha=%v size=%v", res.SHA256Verified, res.SizeChecked)
+	}
+	if err := VerifySHA256(res.Path, fx.archiveHash); err != nil {
 		t.Fatalf("verify should pass: %v", err)
 	}
 
@@ -319,7 +338,7 @@ func TestEndToEndDirectDownloadAndVerify(t *testing.T) {
 	if sums[fx.archiveName] != fx.archiveHash {
 		t.Errorf("checksums map wrong: %v", sums)
 	}
-	if err := VerifySHA256(path, sums[fx.archiveName]); err != nil {
+	if err := VerifySHA256(res.Path, sums[fx.archiveName]); err != nil {
 		t.Errorf("verify with fetched checksums should pass: %v", err)
 	}
 }
@@ -331,14 +350,14 @@ func TestTamperedMirrorFallsBackToDirect(t *testing.T) {
 	fx.client.DirectFirst = false // 镜像优先
 	asset := fx.findAsset(t)
 
-	path, viaMirror, err := fx.client.Download(t.Context(), *asset, t.TempDir())
+	res, err := fx.client.Download(t.Context(), *asset, t.TempDir())
 	if err != nil {
 		t.Fatalf("expected fallback to direct: %v", err)
 	}
-	if viaMirror {
+	if res.ViaMirror {
 		t.Error("tampered mirror result must be rejected")
 	}
-	if err := VerifySHA256(path, fx.archiveHash); err != nil {
+	if err := VerifySHA256(res.Path, fx.archiveHash); err != nil {
 		t.Errorf("fallback content should verify: %v", err)
 	}
 }
@@ -350,7 +369,7 @@ func TestTamperedMirrorWithNoDirectMustFail(t *testing.T) {
 	fx.client.DirectFirst = false
 	asset := fx.findAsset(t)
 
-	if _, _, err := fx.client.Download(t.Context(), *asset, t.TempDir()); err == nil {
+	if _, err := fx.client.Download(t.Context(), *asset, t.TempDir()); err == nil {
 		t.Fatal("download must fail when mirror is tampered and direct is unreachable")
 	}
 }
@@ -362,14 +381,80 @@ func TestHonestMirrorSucceeds(t *testing.T) {
 	fx.client.DirectFirst = false
 	asset := fx.findAsset(t)
 
-	path, viaMirror, err := fx.client.Download(t.Context(), *asset, t.TempDir())
+	res, err := fx.client.Download(t.Context(), *asset, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !viaMirror {
+	if !res.ViaMirror {
 		t.Error("expected mirror to be used when preferred")
 	}
-	if err := VerifySHA256(path, fx.archiveHash); err != nil {
+	if !res.SHA256Verified {
+		t.Error("expected digest verification via honest mirror")
+	}
+	if err := VerifySHA256(res.Path, fx.archiveHash); err != nil {
 		t.Errorf("mirror content should verify: %v", err)
+	}
+}
+
+// 关键场景：镜像返回与官方包字节数完全相同的恶意内容。
+// 大小校验必然放行，只有官方 digest 的 sha256 比对能识破。
+func TestTamperedMirrorSameSizeCaughtByDigest(t *testing.T) {
+	fx := newFixtureFull(t, true, false, true)
+	fx.setMirror(fx.srv.URL + "/mirror")
+	fx.client.DirectFirst = false // 镜像优先
+	asset := fx.findAsset(t)
+
+	res, err := fx.client.Download(t.Context(), *asset, t.TempDir())
+	if err != nil {
+		t.Fatalf("expected fallback to direct: %v", err)
+	}
+	if res.ViaMirror || !res.SHA256Verified {
+		t.Errorf("same-size tampered mirror must be rejected by sha256, got viaMirror=%v shaVerified=%v", res.ViaMirror, res.SHA256Verified)
+	}
+	if err := VerifySHA256(res.Path, fx.archiveHash); err != nil {
+		t.Errorf("fallback content should verify: %v", err)
+	}
+}
+
+// digest 缺失（老版本 API/资产）时退化为仅大小校验，内容仍应正确
+func TestNoDigestFallsBackToSizeOnly(t *testing.T) {
+	fx := newFixture(t, false, false)
+	fx.setMirror(fx.srv.URL + "/mirror")
+	fx.client.DirectFirst = false
+	asset := fx.findAsset(t)
+	asset.Digest = "" // 模拟无 digest
+
+	res, err := fx.client.Download(t.Context(), *asset, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.SHA256Verified {
+		t.Error("digest cleared, sha256 verification should not be claimed")
+	}
+	if !res.SizeChecked || !res.ViaMirror {
+		t.Errorf("expected size-only check via mirror, got size=%v mirror=%v", res.SizeChecked, res.ViaMirror)
+	}
+	if err := VerifySHA256(res.Path, fx.archiveHash); err != nil {
+		t.Errorf("content should still be correct: %v", err)
+	}
+}
+
+// 用户显式 SkipSHA256 时允许跳过校验（自担风险）
+func TestSkipSHA256AcceptsTampered(t *testing.T) {
+	fx := newFixture(t, true, true) // 镜像投毒 + 直连不可用
+	fx.setMirror(fx.srv.URL + "/mirror")
+	fx.client.DirectFirst = false
+	fx.client.SkipSHA256 = true
+	asset := fx.findAsset(t)
+	// 投毒镜像内容大小与官方不同，跳过 sha256 后大小校验仍会拒绝，
+	// 这里把大小也一并视为不可信（模拟旧版无 size 元数据），验证逃生口行为
+	asset.Size = 0
+
+	res, err := fx.client.Download(t.Context(), *asset, t.TempDir())
+	if err != nil {
+		t.Fatalf("skip-verification download should succeed: %v", err)
+	}
+	if res.SHA256Verified {
+		t.Error("SkipSHA256 must not claim verification")
 	}
 }

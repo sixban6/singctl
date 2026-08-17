@@ -369,17 +369,19 @@ func (sb *SingBox) installOrUpdate(targetPath string) error {
 		return fmt.Errorf("no suitable asset found for OS: %s, Arch: %s", runtime.GOOS, runtime.GOARCH)
 	}
 
-	// 3. 下载并解压
-	archivePath, viaMirror, err := client.Download(ctx, *asset, tempDir)
+	// 3. 下载并解压（官方 digest 随元数据直连返回，下载内容做 sha256 强校验）
+	res, err := client.Download(ctx, *asset, tempDir)
 	if err != nil {
 		return fmt.Errorf("download sing-box failed: %w", err)
 	}
-	if viaMirror {
-		logger.Warn("⚠️ sing-box 经镜像下载；上游未发布校验和，已按官方元数据校验文件大小（%d 字节），无法进行加密校验", asset.Size)
+	if res.SHA256Verified {
+		logger.Success("✅ sha256 校验通过，与 GitHub 官方 digest 一致 (%s)", asset.Name)
+	} else if res.ViaMirror {
+		logger.Warn("⚠️ sing-box 经镜像下载；官方元数据无 digest，仅按大小校验（%d 字节），无法进行加密校验", asset.Size)
 	}
 
 	extractDir := filepath.Join(tempDir, "extracted")
-	if err := releasepkg.Extract(archivePath, extractDir); err != nil {
+	if err := releasepkg.Extract(res.Path, extractDir); err != nil {
 		return fmt.Errorf("extract sing-box archive failed: %w", err)
 	}
 
