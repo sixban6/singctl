@@ -81,6 +81,9 @@ singctl sb start
 | Linux / OpenWrt | 以后台服务方式启动 sing-box，并打印控制面板地址 |
 | macOS / Windows | 启动 GUI 客户端（SFM），并打开配置文件路径供手动导入 |
 
+> 启动时若检测到现有配置中存在远程规则集（remote rule_set），会自动迁移为
+> 本地缓存引用，使 sing-box 启动不依赖 GitHub（详见 `sb cache`）。
+
 ---
 
 ### `singctl sb stop` — 停止 sing-box
@@ -102,3 +105,37 @@ singctl sb stop
 ```bash
 singctl sb update
 ```
+
+---
+
+### `singctl sb cache` — 规则集本地缓存管理
+
+生成的配置中 `route.rule_set` 绝大多数为远程引用（URL 指向 GitHub），
+sing-box 启动阶段必须完成远程规则集下载，一旦 GitHub 不可用服务将无法启动。
+
+singctl 会将远程规则集预下载到本地缓存目录，并把配置改写为 `type: local`
+的本地引用，使 sing-box 启动完全不依赖网络：
+
+- 配置生成（`sb gen` / `sb start`）时自动下载并本地化；
+- 下载失败时自动回退本地旧缓存（规则集变动低频，旧版本可接受）；
+- 失败且无缓存时保持 remote 原样，行为与之前一致；
+- 网络整体不可用时快速熔断，避免拖慢 start/restart；
+- `manifest.json` 记录每个规则集的原始远程条目，支持刷新与还原。
+
+```bash
+# 刷新缓存：下载新的远程条目并本地化，同时刷新已本地化的条目
+singctl sb cache update
+
+# 查看缓存状态（每个规则集的来源、格式、更新时间、文件是否完好）
+singctl sb cache status
+
+# 还原配置为远程引用并清空缓存目录
+singctl sb cache clear
+```
+
+缓存目录位于 sing-box 配置目录下的 `rule_sets/`（如 `/etc/sing-box/rule_sets`）。
+下载依次尝试「镜像 → 直连」，并校验内容（.srs 魔数 / source JSON），
+防止把镜像返回的错误页缓存下来。
+
+> `sb gen --no-localize` 可生成保留远程引用的配置（例如需要迁移到其它机器时）。
+

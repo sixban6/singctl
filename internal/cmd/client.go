@@ -56,11 +56,30 @@ func runStartSingbox(cfg *config.Config) error {
 		}
 	} else {
 		logger.Info("Using existing valid config")
+		// 存量配置迁移：将 remote 规则集本地化，避免 sing-box 启动依赖 GitHub
+		migrateRuleSetCache(cfg)
 	}
 	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
 		return sb.StartGUI()
 	}
 	return sb.Start()
+}
+
+// migrateRuleSetCache 将现有配置中的 remote 规则集迁移为本地缓存引用。
+// 仅在迁移成功时改写配置文件；失败不影响启动流程。
+func migrateRuleSetCache(cfg *config.Config) {
+	opts := singbox.LocalizeOptions{MirrorURL: cfg.GitHub.MirrorURL}
+	changed, stats, err := singbox.LocalizeConfigFile(constant.SingBoxConfigFile, opts)
+	if err != nil {
+		logger.Warn("⚠️ 规则集缓存迁移失败(继续使用现有配置): %v", err)
+		return
+	}
+	if changed {
+		logger.Success("已将 %d 个规则集切换为本地缓存（回退旧缓存 %d 个），sing-box 启动不再依赖 GitHub",
+			stats.Localized, stats.Fallback)
+	} else if stats.Remote > 0 {
+		logger.Info("规则集缓存: %d 个远程条目保留原样（下载失败且无缓存）", stats.Kept)
+	}
 }
 
 func runStopSingbox(cfg *config.Config) error {
@@ -125,6 +144,7 @@ func newGenCmd(cfg *config.Config) *cobra.Command {
 	// 4. sb gen (将原 genCmd 逻辑移入，注意保留 Flag 处理)
 	var outputPath string
 	var stdout bool
+	var noLocalize bool
 	genCmd := &cobra.Command{
 		Use:     "gen",
 		Short:   "生成 sing-box 配置文件 / Generate sing-box configuration",
@@ -146,6 +166,21 @@ func newGenCmd(cfg *config.Config) *cobra.Command {
 			if stdout {
 				fmt.Print(configJSON)
 				return nil
+			}
+
+			// 规则集本地化（可用 --no-localize 关闭，例如需要生成可迁移到其它机器的配置）
+			if !noLocalize {
+				if localized, stats, err := singbox.LocalizeRuleSets(configJSON, singbox.LocalizeOptions{
+					MirrorURL: cfg.GitHub.MirrorURL,
+				}); err != nil {
+					logger.Warn("⚠️ 规则集本地化已跳过: %v", err)
+				} else {
+					configJSON = localized
+					if stats.Remote > 0 {
+						logger.Info("规则集缓存: 远程 %d → 已本地化 %d, 回退旧缓存 %d, 保留远程 %d",
+							stats.Remote, stats.Localized, stats.Fallback, stats.Kept)
+					}
+				}
 			}
 
 			// 确定输出路径
@@ -185,6 +220,7 @@ func newGenCmd(cfg *config.Config) *cobra.Command {
 	}
 	genCmd.Flags().StringVarP(&outputPath, "output", "o", "", "指定输出文件路径")
 	genCmd.Flags().BoolVar(&stdout, "stdout", false, "输出到标准输出而不是文件")
+	genCmd.Flags().BoolVar(&noLocalize, "no-localize", false, "不将远程规则集缓存到本地")
 	return genCmd
 }
 
@@ -215,6 +251,95 @@ func newUpdateCmd(cfg *config.Config) *cobra.Command {
 	return updateCmd
 }
 
+// ───────────────────────── sb cache ─────────────────────────
+
+func newCacheCmd(cfg *config.Config) *cobra.Command {
+	cacheCmd := &cobra.Command{
+		Use:   "cache",
+		Short: "管理规则集本地缓存 / Manage rule-set local cache",
+		Long: `管理规则集本地缓存。
+
+singctl 会将配置中的远程规则集(rule_set)预下载到本地并改写为本地引用，
+使 sing-box 启动不依赖 GitHub。此命令组用于刷新、查看和清理这些缓存。`,
+	}
+	cacheCmd.AddCommand(
+		newCacheUpdateCmd(cfg),
+		newCacheStatusCmd(cfg),
+		newCacheClearCmd(cfg),
+	)
+	return cacheCmd
+}
+
+func newCacheUpdateCmd(cfg *config.Config) *cobra.Command {
+	return &cobra.Command{
+		Use:     "update",
+		Aliases: []string{"u"},
+		Short:   "刷新规则集缓存 / Refresh rule-set cache",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			opts := singbox.LocalizeOptions{MirrorURL: cfg.GitHub.MirrorURL}
+			changed, stats, err := singbox.RefreshConfigCache(constant.SingBoxConfigFile, opts)
+			if err != nil {
+				return fmt.Errorf("刷新规则集缓存失败: %w", err)
+			}
+			logger.Info("规则集缓存刷新完成: 新本地化 %d, 回退旧缓存 %d, 刷新已有 %d, 保留远程 %d",
+				stats.Localized, stats.Fallback, stats.Refreshed, stats.Kept)
+			if changed {
+				logger.Success("配置文件已更新为本地规则集引用")
+			}
+			return nil
+		},
+	}
+}
+
+func newCacheStatusCmd(cfg *config.Config) *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "查看规则集缓存状态 / Show rule-set cache status",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			entries := singbox.CacheStatus(singbox.LocalizeOptions{
+				MirrorURL: cfg.GitHub.MirrorURL,
+			})
+			if len(entries) == 0 {
+				logger.Info("暂无规则集缓存（配置生成或 sb start 时会自动建立）")
+				return nil
+			}
+			logger.Info("规则集缓存目录: %s", singbox.RuleSetCacheDir())
+			for _, e := range entries {
+				state := "✅"
+				if !e.FileOK {
+					state = "❌ 缺失"
+				}
+				updatedAt := e.UpdatedAt
+				if updatedAt == "" {
+					updatedAt = "unknown"
+				}
+				logger.Info("%s %-24s format=%-6s updated=%s", state, e.Tag, e.Format, updatedAt)
+			}
+			return nil
+		},
+	}
+}
+
+func newCacheClearCmd(cfg *config.Config) *cobra.Command {
+	return &cobra.Command{
+		Use:   "clear",
+		Short: "还原配置并清空规则集缓存 / Revert config and clear rule-set cache",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			opts := singbox.LocalizeOptions{MirrorURL: cfg.GitHub.MirrorURL}
+			reverted, err := singbox.RevertAndClearCache(constant.SingBoxConfigFile, opts)
+			if err != nil {
+				return fmt.Errorf("清理规则集缓存失败: %w", err)
+			}
+			if reverted > 0 {
+				logger.Success("已将 %d 个规则集还原为远程引用，缓存已清空", reverted)
+			} else {
+				logger.Success("缓存已清空（配置中无可还原的本地规则集）")
+			}
+			return nil
+		},
+	}
+}
+
 func NewSingboxCommand(configPath string) *cobra.Command {
 
 	cmd := &cobra.Command{
@@ -235,6 +360,7 @@ func NewSingboxCommand(configPath string) *cobra.Command {
 		newGenCmd(cfg),
 		newInstallCmd(cfg),
 		newUpdateCmd(cfg),
+		newCacheCmd(cfg),
 	)
 	return cmd
 }
