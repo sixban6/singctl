@@ -126,8 +126,9 @@ func newGenCmd(cfg *config.Config) *cobra.Command {
 	var outputPath string
 	var stdout bool
 	genCmd := &cobra.Command{
-		Use:   "gen",
-		Short: "生成 sing-box 配置文件 / Generate sing-box configuration",
+		Use:     "gen",
+		Short:   "生成 sing-box 配置文件 / Generate sing-box configuration",
+		Aliases: []string{"g"},
 		RunE: func(cmd *cobra.Command, args []string) error {
 
 			// gen 命令必须依赖 subs，提前校验防止 index-out-of-range panic
@@ -203,8 +204,9 @@ func newInstallCmd(cfg *config.Config) *cobra.Command {
 func newUpdateCmd(cfg *config.Config) *cobra.Command {
 	// 6. sb update
 	updateCmd := &cobra.Command{
-		Use:   "update",
-		Short: "更新 sing-box / Update sing-box",
+		Use:     "update",
+		Aliases: []string{"u"},
+		Short:   "更新 sing-box / Update sing-box",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			sb := singbox.New(cfg)
 			return sb.Update()
