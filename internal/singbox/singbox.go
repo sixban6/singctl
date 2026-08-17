@@ -152,6 +152,10 @@ func (sb *SingBox) GenerateConfig() error {
 		return fmt.Errorf("generate config failed: %w", err)
 	}
 
+	// 规则集本地化：预下载 remote 规则集并改写为本地引用，
+	// 使 sing-box 启动不依赖 GitHub；下载失败自动回退/保留 remote
+	configContent = sb.localizeRuleSets(configContent)
+
 	// 备份原配置文件（如果存在）
 	if _, err := os.Stat(sb.configPath); err == nil {
 		backupPath := fmt.Sprintf("%s_bak", sb.configPath)
@@ -182,6 +186,27 @@ func (sb *SingBox) GenerateConfig() error {
 
 	logger.Success("Config generated: %s", sb.configPath)
 	return nil
+}
+
+// localizeRuleSets 将生成配置中的 remote 规则集替换为本地缓存引用。
+// 失败时返回原始内容，不影响配置生成流程。
+func (sb *SingBox) localizeRuleSets(configContent string) string {
+	localized, stats, err := LocalizeRuleSets(configContent, LocalizeOptions{
+		MirrorURL: sb.config.GitHub.MirrorURL,
+	})
+	if err != nil {
+		logger.Warn("⚠️ 规则集本地化已跳过: %v", err)
+		return configContent
+	}
+	if stats.Remote == 0 {
+		return configContent
+	}
+	logger.Info("规则集缓存: 远程 %d → 已本地化 %d, 回退旧缓存 %d, 保留远程 %d",
+		stats.Remote, stats.Localized, stats.Fallback, stats.Kept)
+	if stats.Aborted {
+		logger.Warn("⚠️ 网络不可用，未下载的规则集将保留远程引用或旧缓存")
+	}
+	return localized
 }
 
 // Install 安装 sing-box
