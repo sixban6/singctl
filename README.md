@@ -9,7 +9,7 @@ SingCtl是多功能网络工具。可以用管理singbox客户端和服务端，
 ## Features
 - 🚀 **跨平台支持**: 一条命令跨平台安全的使用singbox
 - 📡 **多协议支持**: VLESS, Trojan, Hysteria2, Shadowsocks, TUIC
-- 🔌 **规则集本地缓存**: 预下载远程规则集并改写为本地引用，sing-box 启动不依赖 GitHub（`sb cache update/status/clear`）
+- 🔌 **规则集本地缓存**: 预下载远程规则集并改写为本地引用，sing-box 启动不依赖 GitHub；内置全量规则集快照，极端情况（无网+无缓存）也能启动（`sb cache update/status/clear`）
 - 🔧 **防止DNS泄漏**: 配置文件已经把国内IP和国外IP的DNS请求分开处理
 - 🍚 **服务端部署**: 自动部署singbox服务端
 

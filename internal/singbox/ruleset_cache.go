@@ -15,6 +15,7 @@ import (
 
 	"singctl/internal/constant"
 	log "singctl/internal/logger"
+	rssnapshot "singctl/internal/singbox/ruleset_snapshot"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -38,8 +39,12 @@ const (
 	defaultFetchTimeout = 20 * time.Second
 	defaultWorkers      = 6
 	maxRuleSetSize      = 64 << 20 // 64MB 防御性上限
-	srsMagic            = "RULE"   // sing-box .srs 二进制格式魔数
-	manifestFileName    = "manifest.json"
+	// sing-box 二进制规则集魔数：
+	//   旧格式 (sing-box < 1.12): "RULE" + version(1)
+	//   新格式 (sing-box >= 1.12): "SRS" + version(2)
+	legacySRSMagic   = "RULE"
+	srsMagic         = "SRS"
+	manifestFileName = "manifest.json"
 	// 连续失败达到该阈值且无任何成功时熔断（判定 GitHub 与镜像均不可用）
 	breakerThreshold = 4
 )
@@ -70,13 +75,14 @@ type RuleSetStats struct {
 	Remote    int  // 配置中发现的 remote 规则集数量
 	Localized int  // 新下载成功并改写为本地引用
 	Fallback  int  // 下载失败但成功回退本地旧缓存
-	Kept      int  // 下载失败且无缓存，保持 remote 原样
+	Snapshot  int  // 下载失败且无缓存，从程序内置快照兑底
+	Kept      int  // 下载失败且无任何兑底，保持 remote 原样
 	Refreshed int  // cache update 时刷新的已本地化条目
 	Aborted   bool // 网络熔断，剩余下载被跳过
 }
 
 func (s RuleSetStats) HasLocalChange() bool {
-	return s.Localized > 0 || s.Fallback > 0
+	return s.Localized > 0 || s.Fallback > 0 || s.Snapshot > 0
 }
 
 // ruleSetManifest 缓存清单：tag → 原始条目信息，用于刷新与还原
@@ -148,7 +154,8 @@ func LocalizeRuleSets(jsonStr string, opts LocalizeOptions) (string, RuleSetStat
 	results, aborted := fetchRuleSets(tasks, opts, manifest)
 	stats.Aborted = aborted
 
-	// 3. 依据结果改写条目
+	// 3. 依据结果改写条目（在线下载 → 本地旧缓存 → 内置快照 三级兑底）
+	snap := rssnapshot.Load()
 	for _, t := range tasks {
 		path := cacheFilePath(opts.CacheDir, t.tag, t.format)
 		// 无论成败都记录 manifest，供 sb cache update/clear 使用
@@ -174,8 +181,19 @@ func LocalizeRuleSets(jsonStr string, opts LocalizeOptions) (string, RuleSetStat
 			log.Warn("⚠️ 规则集 %q 下载失败(%v)，已回退本地缓存: %s", t.tag, results[t.idx].err, path)
 			continue
 		}
+		// 无本地缓存 → 程序内置快照兑底（格式必须一致，避免错配）
+		if snapTag, _, snapFormat, ok := snap.Lookup(t.tag, t.url); ok && snapFormat == t.format {
+			if data, err := snap.Extract(snapTag); err == nil &&
+				validateRuleSet(data, snapFormat) == nil &&
+				atomicWriteFile(path, data, 0644) == nil {
+				stats.Snapshot++
+				localizeEntry(t.entry, path)
+				log.Warn("📦 规则集 %q 下载失败且无缓存，已使用程序内置快照兑底: %s", t.tag, path)
+				continue
+			}
+		}
 		stats.Kept++
-		log.Warn("⚠️ 规则集 %q 下载失败且无本地缓存(%v)，保留远程引用", t.tag, results[t.idx].err)
+		log.Warn("⚠️ 规则集 %q 下载失败且无任何兑底(%v)，保留远程引用", t.tag, results[t.idx].err)
 	}
 
 	if err := saveManifest(opts.CacheDir, manifest); err != nil {
@@ -295,33 +313,55 @@ func ruleSetTypes(jsonStr string) map[string]string {
 
 // RuleSetCacheEntry 单条规则集缓存的状态信息。
 type RuleSetCacheEntry struct {
-	Tag       string
-	URL       string
-	Format    string
-	UpdatedAt string
-	File      string
-	FileOK    bool // 缓存文件存在且内容合法
+	Tag        string
+	URL        string
+	Format     string
+	UpdatedAt  string
+	File       string
+	FileOK     bool // 缓存文件存在且内容合法
+	InSnapshot bool // 程序内置快照中包含此规则集（可随时兑底）
 }
 
 // CacheStatus 读取缓存清单，返回各规则集的缓存状态（按 tag 排序）。
+// 同时并入内置快照中存在但尚未建立缓存的条目，便于了解兑底覆盖面。
 func CacheStatus(opts LocalizeOptions) []RuleSetCacheEntry {
 	opts = opts.withDefaults()
 	manifest := loadManifest(opts.CacheDir)
-	entries := make([]RuleSetCacheEntry, 0, len(manifest))
+	snap := rssnapshot.Load()
+	entries := make([]RuleSetCacheEntry, 0, len(manifest)+snap.Count())
+	seen := map[string]bool{}
 	for tag, meta := range manifest {
 		format := meta.Format
 		if format == "" {
 			format = "binary"
 		}
 		path := cacheFilePath(opts.CacheDir, tag, format)
+		_, _, _, inSnap := snap.Lookup(tag, "")
 		entries = append(entries, RuleSetCacheEntry{
-			Tag:       tag,
-			URL:       meta.URL,
-			Format:    format,
-			UpdatedAt: meta.UpdatedAt,
-			File:      path,
-			FileOK:    cachedFileValid(path, format),
+			Tag:        tag,
+			URL:        meta.URL,
+			Format:     format,
+			UpdatedAt:  meta.UpdatedAt,
+			File:       path,
+			FileOK:     cachedFileValid(path, format),
+			InSnapshot: inSnap,
 		})
+		seen[tag] = true
+	}
+	// 快照中存在但尚未建立本地缓存的条目（例如从未成功下载过）
+	for _, tag := range snap.Tags() {
+		if seen[tag] {
+			continue
+		}
+		if mTag, mURL, mFormat, ok := snap.Lookup(tag, ""); ok {
+			entries = append(entries, RuleSetCacheEntry{
+				Tag:        mTag,
+				URL:        mURL,
+				Format:     mFormat,
+				File:       "(仅内置快照)",
+				InSnapshot: true,
+			})
+		}
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Tag < entries[j].Tag })
 	return entries
@@ -570,8 +610,8 @@ func validateRuleSet(data []byte, format string) error {
 			return fmt.Errorf("invalid source-format rule set (not JSON)")
 		}
 	default: // binary (.srs)
-		if !bytes.HasPrefix(data, []byte(srsMagic)) {
-			return fmt.Errorf("invalid binary rule set (missing %q magic)", srsMagic)
+		if !bytes.HasPrefix(data, []byte(srsMagic)) && !bytes.HasPrefix(data, []byte(legacySRSMagic)) {
+			return fmt.Errorf("invalid binary rule set (missing %q/%q magic)", srsMagic, legacySRSMagic)
 		}
 	}
 	return nil
@@ -648,11 +688,12 @@ func cachedFileValid(path, format string) bool {
 			return false
 		}
 		defer f.Close()
-		magic := make([]byte, len(srsMagic))
+		magicLen := len(legacySRSMagic) // 取两种魔数的最大长度（RULE=4 > SRS=3）
+		magic := make([]byte, magicLen)
 		if _, err := io.ReadFull(f, magic); err != nil {
 			return false
 		}
-		return bytes.HasPrefix(magic, []byte(srsMagic))
+		return bytes.HasPrefix(magic, []byte(srsMagic)) || bytes.HasPrefix(magic, []byte(legacySRSMagic))
 	}
 	return true
 }
