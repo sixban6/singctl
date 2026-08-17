@@ -1,3 +1,10 @@
+# [1.23.0](https://github.com/sixban6/singctl/compare/v1.22.0...v1.23.0) (2026-08-17)
+
+
+### Features
+
+* 内置规则集快照兜底，极端情况（无网+无缓存）下 sing-box 仍可启动 ([1327daa](https://github.com/sixban6/singctl/commit/1327daa260f49ebe49077f13e8a9416ce9df9ebb))
+
 # [1.22.0](https://github.com/sixban6/singctl/compare/v1.21.26...v1.22.0) (2026-08-17)
 
 
