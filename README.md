@@ -42,7 +42,9 @@ powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "[System.IO.File]
 
 安装和更新（`singctl update self` / `sb install` / `sb update`）会对下载的安装包做完整性校验：
 - 校验和与发布元数据**必须从 GitHub 直连获取**（不走镜像），安装包本身仍可走镜像加速。因此这些操作需要能直连 `github.com` / `api.github.com`（仅小请求）。
-- `singctl` 官方发布附带 `checksums.txt`，强校验 sha256，失败即中止；`sing-box`/`tailscale` 上游未发布校验和，改用官方元数据校验文件大小并提示风险。
+- 所有安装包（singctl/sing-box/tailscale）都与 **GitHub 官方资产 digest（sha256）**比对，失败即中止；镜像投毒、等长篡改、网络损坏都会被拒收。
+- `singctl update self` 在 digest 之外还有 `checksums.txt` 双重回退（均直连获取）。
+- 极少数无 digest 的资产退化为按官方元数据校验文件大小并提示风险。
 - 网络无法直连 GitHub 时，可设置 `SINGCTL_SKIP_CHECKSUM=1` 跳过校验（自担风险）：
 
 ```bash
