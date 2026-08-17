@@ -1,3 +1,10 @@
+## [1.21.25](https://github.com/sixban6/singctl/compare/v1.21.24...v1.21.25) (2026-08-17)
+
+
+### Bug Fixes
+
+* fix security issue ([f457049](https://github.com/sixban6/singctl/commit/f4570498322dc585137ea0a37098ff9b0de10634))
+
 ## [1.21.24](https://github.com/sixban6/singctl/compare/v1.21.23...v1.21.24) (2026-08-17)
 
 
