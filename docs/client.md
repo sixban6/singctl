@@ -114,13 +114,22 @@ singctl sb update
 sing-box 启动阶段必须完成远程规则集下载，一旦 GitHub 不可用服务将无法启动。
 
 singctl 会将远程规则集预下载到本地缓存目录，并把配置改写为 `type: local`
-的本地引用，使 sing-box 启动完全不依赖网络：
+的本地引用，使 sing-box 启动完全不依赖网络。采用三级兑底：
+
+1. **在线下载**：镜像/直连双候选，优先获取最新版本；
+2. **本地旧缓存**：下载失败时回退（规则集变动低频，旧版本可接受）；
+3. **内置快照**：程序编译时打包了全部常用规则集快照（约 1.5MB，
+   `go:embed` 嵌入），即使 GitHub 与镜像同时不可用、且从未建立过缓存
+   （例如新装机器），也能解出快照落盘，sing-box 照常启动。
+
+其他保障：
 
 - 配置生成（`sb gen` / `sb start`）时自动下载并本地化；
-- 下载失败时自动回退本地旧缓存（规则集变动低频，旧版本可接受）；
-- 失败且无缓存时保持 remote 原样，行为与之前一致；
+- 失败且无任何兑底时保持 remote 原样，行为与之前一致；
 - 网络整体不可用时快速熔断，避免拖慢 start/restart；
-- `manifest.json` 记录每个规则集的原始远程条目，支持刷新与还原。
+- `manifest.json` 记录每个规则集的原始远程条目，支持刷新与完整还原；
+- 下载内容均经校验（新版 `SRS\x02` / 旧版 `RULE` 魔数 / source JSON），
+  防止把镜像返回的错误页缓存下来。
 
 ```bash
 # 刷新缓存：下载新的远程条目并本地化，同时刷新已本地化的条目
@@ -134,8 +143,19 @@ singctl sb cache clear
 ```
 
 缓存目录位于 sing-box 配置目录下的 `rule_sets/`（如 `/etc/sing-box/rule_sets`）。
-下载依次尝试「镜像 → 直连」，并校验内容（.srs 魔数 / source JSON），
-防止把镜像返回的错误页缓存下来。
+`sb cache status` 会同时展示本地缓存与内置快照的覆盖情况（`📦` 标记）。
 
 > `sb gen --no-localize` 可生成保留远程引用的配置（例如需要迁移到其它机器时）。
+
+#### 维护：更新内置快照
+
+快照由维护者手动刷新（规则集列表变更或快照过旧时）：
+
+```bash
+go run ./cmd/snapshotgen            # 直连下载（默认不走镜像）
+go run ./cmd/snapshotgen -mirror https://gh-proxy.com  # 直连不可用时
+```
+
+工具会校验内容、gzip 压缩并生成 manifest（含 sha256），全部成功才会写入
+`internal/singbox/ruleset_snapshot/assets/`，提交后随下次编译打包进二进制。
 

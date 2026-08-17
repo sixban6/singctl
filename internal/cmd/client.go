@@ -11,6 +11,7 @@ import (
 	"singctl/internal/daemon"
 	"singctl/internal/logger"
 	"singctl/internal/singbox"
+	ruleset_snapshot "singctl/internal/singbox/ruleset_snapshot"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -177,8 +178,8 @@ func newGenCmd(cfg *config.Config) *cobra.Command {
 				} else {
 					configJSON = localized
 					if stats.Remote > 0 {
-						logger.Info("规则集缓存: 远程 %d → 已本地化 %d, 回退旧缓存 %d, 保留远程 %d",
-							stats.Remote, stats.Localized, stats.Fallback, stats.Kept)
+						logger.Info("规则集缓存: 远程 %d → 已本地化 %d, 回退旧缓存 %d, 内置快照兑底 %d, 保留远程 %d",
+							stats.Remote, stats.Localized, stats.Fallback, stats.Snapshot, stats.Kept)
 					}
 				}
 			}
@@ -281,8 +282,8 @@ func newCacheUpdateCmd(cfg *config.Config) *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("刷新规则集缓存失败: %w", err)
 			}
-			logger.Info("规则集缓存刷新完成: 新本地化 %d, 回退旧缓存 %d, 刷新已有 %d, 保留远程 %d",
-				stats.Localized, stats.Fallback, stats.Refreshed, stats.Kept)
+			logger.Info("规则集缓存刷新完成: 新本地化 %d, 回退旧缓存 %d, 内置快照兑底 %d, 刷新已有 %d, 保留远程 %d",
+				stats.Localized, stats.Fallback, stats.Snapshot, stats.Refreshed, stats.Kept)
 			if changed {
 				logger.Success("配置文件已更新为本地规则集引用")
 			}
@@ -303,17 +304,27 @@ func newCacheStatusCmd(cfg *config.Config) *cobra.Command {
 				logger.Info("暂无规则集缓存（配置生成或 sb start 时会自动建立）")
 				return nil
 			}
-			logger.Info("规则集缓存目录: %s", singbox.RuleSetCacheDir())
+			snap := ruleset_snapshot.Load()
+			logger.Info("规则集缓存目录: %s | 内置快照: %d 个（生成于 %s）",
+				singbox.RuleSetCacheDir(), snap.Count(), snap.GeneratedAt())
 			for _, e := range entries {
 				state := "✅"
 				if !e.FileOK {
-					state = "❌ 缺失"
+					if e.InSnapshot {
+						state = "📦 仅内置快照"
+					} else {
+						state = "❌ 缺失"
+					}
 				}
 				updatedAt := e.UpdatedAt
 				if updatedAt == "" {
-					updatedAt = "unknown"
+					updatedAt = "-"
 				}
-				logger.Info("%s %-24s format=%-6s updated=%s", state, e.Tag, e.Format, updatedAt)
+				snapMark := ""
+				if e.InSnapshot && e.FileOK {
+					snapMark = " +📦"
+				}
+				logger.Info("%s %-28s format=%-6s updated=%s%s", state, e.Tag, e.Format, updatedAt, snapMark)
 			}
 			return nil
 		},

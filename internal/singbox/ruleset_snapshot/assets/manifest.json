@@ -1,0 +1,420 @@
+{
+  "generated_at": "2026-08-17T16:46:29Z",
+  "count": 46,
+  "entries": {
+    "geoip-apple": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo-lite/geoip/apple.srs",
+      "format": "binary",
+      "file": "geoip-apple.srs.gz",
+      "sha256": "03d4dc02c3ba2e387566e992b3017b94a7f445f02da4b2e6e648aae41150a535",
+      "size": 111,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geoip-cn": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/cn.srs",
+      "format": "binary",
+      "file": "geoip-cn.srs.gz",
+      "sha256": "b708627b091f9fc4c10210643e06781da24df52ad671b54022baaf4b24cc6bd6",
+      "size": 20116,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geoip-google": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/google.srs",
+      "format": "binary",
+      "file": "geoip-google.srs.gz",
+      "sha256": "dd826b8de32dc885cce062177fd1ebbd7cddba5b67341485665d8462b903817a",
+      "size": 7791,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geoip-netflix": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/netflix.srs",
+      "format": "binary",
+      "file": "geoip-netflix.srs.gz",
+      "sha256": "4002a572b334fce7106230f8b2982bfa48b0c184f0e3e4ffbc54ae1a9d695a1d",
+      "size": 355,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geoip-private": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/private.srs",
+      "format": "binary",
+      "file": "geoip-private.srs.gz",
+      "sha256": "aa5331117805821ed6c4bcf30d4e844e73af4a1b3c8ad9bc8e67b1c26e3a75a7",
+      "size": 144,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geoip-telegram": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/telegram.srs",
+      "format": "binary",
+      "file": "geoip-telegram.srs.gz",
+      "sha256": "c5ae208004b0752baee307348ef820b9fe9e8aa3a14556f54af68791b6d4030b",
+      "size": 127,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geosite-ad1": {
+      "url": "https://github.com/Toperlock/sing-box-geosite/raw/main/rule/adservers.srs",
+      "format": "binary",
+      "file": "geosite-ad1.srs.gz",
+      "sha256": "e714d1d1d4cd37bff5bd62b4db879911ef4ef7592af1cc83160a1aa88c4cbc48",
+      "size": 10486,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geosite-ad2": {
+      "url": "https://raw.githubusercontent.com/privacy-protection-tools/anti-ad.github.io/master/docs/anti-ad-sing-box.srs",
+      "format": "binary",
+      "file": "geosite-ad2.srs.gz",
+      "sha256": "b4e01a98c12db9508dd75ef8cb9fdf10c35e9eaa561c8d2a3083e0085e36bf30",
+      "size": 780413,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geosite-ali": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/alibaba.srs",
+      "format": "binary",
+      "file": "geosite-ali.srs.gz",
+      "sha256": "ccd43988842cdf3575e606b21d172da6fe5eca4306adfd24856aebb486b40bff",
+      "size": 3342,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geosite-apple": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/apple.srs",
+      "format": "binary",
+      "file": "geosite-apple.srs.gz",
+      "sha256": "3993417e868f49f4375771139a7c243e34977e73fb2389dff635b4098735579f",
+      "size": 15674,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geosite-baidu": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/baidu.srs",
+      "format": "binary",
+      "file": "geosite-baidu.srs.gz",
+      "sha256": "6f91382cb34a85913d05372aca9f84e9265f822b02dfdc111370bd2c5bf496b4",
+      "size": 942,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geosite-bank-cn": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/category-bank-cn.srs",
+      "format": "binary",
+      "file": "geosite-bank-cn.srs.gz",
+      "sha256": "76f2f17e2ddcdd1c184f217063d14bc378e4446873fb6d7bc8e8c35c4a5bd5c9",
+      "size": 418,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geosite-bili": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/bilibili.srs",
+      "format": "binary",
+      "file": "geosite-bili.srs.gz",
+      "sha256": "217555916f18df6f399b8e335465369678732a1efaf34e6c737430c54b39e028",
+      "size": 463,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geosite-bytedance": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/bytedance.srs",
+      "format": "binary",
+      "file": "geosite-bytedance.srs.gz",
+      "sha256": "d0ee22f15c5c8f198c486fe77b1e91bd8fd02ce9d04a130acf1d4fe2d886b6b5",
+      "size": 6825,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geosite-chat": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/category-ai-chat-!cn.srs",
+      "format": "binary",
+      "file": "geosite-chat.srs.gz",
+      "sha256": "021009e322c9297a5eab5490fa601978af90bb83dbcbc8ad505e45e127ca9924",
+      "size": 1793,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geosite-cn": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/cn.srs",
+      "format": "binary",
+      "file": "geosite-cn.srs.gz",
+      "sha256": "5a0f569a4ab155d192ca1f801ac19d6c4a22c7352f50b8078f01e195c56b8324",
+      "size": 447412,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geosite-cryptocurrency": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/category-cryptocurrency.srs",
+      "format": "binary",
+      "file": "geosite-cryptocurrency.srs.gz",
+      "sha256": "a1f1e17f48fbd44b14383beec0cd2d58e20c00bda17eb86a0fe976bd0c5f0c2f",
+      "size": 2005,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geosite-ctm_cn": {
+      "url": "https://github.com/sixban6/rulesets/raw/refs/heads/main/rule/direct_cn.srs",
+      "format": "binary",
+      "file": "geosite-ctm_cn.srs.gz",
+      "sha256": "b93b38fffd3f80abe242feed5451f043002d26dd9380033b8cc620bcaa3cb6d6",
+      "size": 110,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geosite-ctrip": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/ctrip.srs",
+      "format": "binary",
+      "file": "geosite-ctrip.srs.gz",
+      "sha256": "c0d3a6952513790672ec188b428516b1086ee881449defb30453500f0e6150b7",
+      "size": 394,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geosite-disney": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/disney.srs",
+      "format": "binary",
+      "file": "geosite-disney.srs.gz",
+      "sha256": "8a3c9a6b8b3c82d593e42bf42d8ca78a8d8ab4e9d9029f354103bf0ebbf8ff12",
+      "size": 2269,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geosite-epic": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/epicgames.srs",
+      "format": "binary",
+      "file": "geosite-epic.srs.gz",
+      "sha256": "181fd3555f6a832d81a4d08e7ca7cc46c8e78548e9b9bd0871d6f4f13bc7a794",
+      "size": 439,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geosite-geolocation-!cn": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/geolocation-!cn.srs",
+      "format": "binary",
+      "file": "geosite-geolocation-_cn.srs.gz",
+      "sha256": "ee1f33b5d3b6703bc1a571f3c5ba24bfd199565c3982237d2ba32baed85cb0dd",
+      "size": 165854,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geosite-github": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/github.srs",
+      "format": "binary",
+      "file": "geosite-github.srs.gz",
+      "sha256": "494a462bee8e3dc865642a212213e37b90e022666da4f58bd0a512cefa2bc43b",
+      "size": 780,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geosite-google": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/google.srs",
+      "format": "binary",
+      "file": "geosite-google.srs.gz",
+      "sha256": "5e3d9b807fa235d50a54fc55ec2f587cc2908345e4fb9ad833811e3f636faba1",
+      "size": 7912,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geosite-hbo": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/hbo.srs",
+      "format": "binary",
+      "file": "geosite-hbo.srs.gz",
+      "sha256": "a43fc3f55a847f9c0cbaf76bcdd3a36416a9b5c2fae2bee0bafe067edcb923cd",
+      "size": 607,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geosite-hok": {
+      "url": "https://github.com/sixban6/rulesets/raw/refs/heads/main/rule/hok.srs",
+      "format": "binary",
+      "file": "geosite-hok.srs.gz",
+      "sha256": "fbe7cf1b2cae505de90e5bedfc363bcc2f31925ce838e88d4e3d951622cfa990",
+      "size": 269,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geosite-jd": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/jd.srs",
+      "format": "binary",
+      "file": "geosite-jd.srs.gz",
+      "sha256": "01d5376a97c1ee7f586619f08ca902510c6c049babd70ba57616df5fdeeefab3",
+      "size": 1790,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geosite-meituan": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/meituan.srs",
+      "format": "binary",
+      "file": "geosite-meituan.srs.gz",
+      "sha256": "93f06a86360899b347e4e92ccfce28da77099b81fa91bdcbc7143d70c236b30a",
+      "size": 203,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geosite-microsoft": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/microsoft.srs",
+      "format": "binary",
+      "file": "geosite-microsoft.srs.gz",
+      "sha256": "5fd79f2e7f8fda8af78aa772a7bff1beba6a868b65324589bca978098dbb360c",
+      "size": 6965,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geosite-netflix": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/netflix.srs",
+      "format": "binary",
+      "file": "geosite-netflix.srs.gz",
+      "sha256": "40c5f50c80ceaba2a5e0b5c5760c9c5fce0b08498501397d8264dcae2aeeda53",
+      "size": 344,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geosite-onedrive": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/onedrive.srs",
+      "format": "binary",
+      "file": "geosite-onedrive.srs.gz",
+      "sha256": "ecf26c6c2f999cc409fd2053128e361b48c1d7cdce130056f3cd2a6a74b0251c",
+      "size": 272,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geosite-paypal": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/paypal.srs",
+      "format": "binary",
+      "file": "geosite-paypal.srs.gz",
+      "sha256": "ea4f54930818b87699cc5852f192dd27056cb4bb04a0f0f7c412b8b3d315f6cf",
+      "size": 2340,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geosite-pdd": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/pinduoduo.srs",
+      "format": "binary",
+      "file": "geosite-pdd.srs.gz",
+      "sha256": "eead1093e1cd1330f75703fdd84eb79ddcbd71d5019254b0e5111d64acd60ed2",
+      "size": 105,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geosite-playstation": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/sony.srs",
+      "format": "binary",
+      "file": "geosite-playstation.srs.gz",
+      "sha256": "11fa9327b96ecf9e332df9f68f83d0d500ba52ba4b1b63cb737a3b68add87eae",
+      "size": 958,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geosite-porn": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/category-porn.srs",
+      "format": "binary",
+      "file": "geosite-porn.srs.gz",
+      "sha256": "c9ce70e51822a440825578d2a44b6e4248f8ed33d84da7ce853297308174d839",
+      "size": 43416,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geosite-primevideo": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/primevideo.srs",
+      "format": "binary",
+      "file": "geosite-primevideo.srs.gz",
+      "sha256": "018bbff65fdb3880bdc4b1d1a034b2bcf345e8ab3302f11df69cd4acae92f971",
+      "size": 373,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geosite-private": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/private.srs",
+      "format": "binary",
+      "file": "geosite-private.srs.gz",
+      "sha256": "3c2a2cff9a128a1f4fc30d4ce6f0928b613f4361287da8c20ccd1df0b0ff7e81",
+      "size": 696,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geosite-sourcehut": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/sourcehut.srs",
+      "format": "binary",
+      "file": "geosite-sourcehut.srs.gz",
+      "sha256": "c91722c823639646157f02d86ee820155594cc69a9e7e37b4fdd575236cebd91",
+      "size": 57,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geosite-spotify": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/spotify.srs",
+      "format": "binary",
+      "file": "geosite-spotify.srs.gz",
+      "sha256": "8df295332fbaab022ce950e9be2b6190b6502e95447150b8f6d81c2762117403",
+      "size": 399,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geosite-steam": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/steam.srs",
+      "format": "binary",
+      "file": "geosite-steam.srs.gz",
+      "sha256": "f9d7c11577f86eeaa315b188742cc40db1ef45994e29cb773c6268166b04c7bc",
+      "size": 800,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geosite-telegram": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/telegram.srs",
+      "format": "binary",
+      "file": "geosite-telegram.srs.gz",
+      "sha256": "30cd392b1d79b0569af077874b36c6892bf13a94dce0d8e4410c3b1976d62ea2",
+      "size": 248,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geosite-tencent": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/tencent.srs",
+      "format": "binary",
+      "file": "geosite-tencent.srs.gz",
+      "sha256": "eeebeb356c0eec11b991eaf4a30386a5693bda453c1b842402a0ab24ef1dd6b2",
+      "size": 4611,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geosite-tiktok": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/tiktok.srs",
+      "format": "binary",
+      "file": "geosite-tiktok.srs.gz",
+      "sha256": "12d85d691bd7af45ffc48bccababc7cff722e86ed95a89f09a444efe06b84ad4",
+      "size": 444,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geosite-x": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/x.srs",
+      "format": "binary",
+      "file": "geosite-x.srs.gz",
+      "sha256": "ac2b42996b8874ef5b028722b47592fd669ec6a94150c970953592d7c86d5224",
+      "size": 314,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geosite-xbox": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/xbox.srs",
+      "format": "binary",
+      "file": "geosite-xbox.srs.gz",
+      "sha256": "5e4733a874ae57750dc30b3663ada8d61ed1c2c2dbe42e8c3f8b7da5f87072c4",
+      "size": 506,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    },
+    "geosite-youtube": {
+      "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/youtube.srs",
+      "format": "binary",
+      "file": "geosite-youtube.srs.gz",
+      "sha256": "ae9a576c046627c01bc1488f526775dfe919f1152c3ce6f75b678fce92498b3f",
+      "size": 1144,
+      "via": "direct",
+      "updated_at": "2026-08-17T16:46:29Z"
+    }
+  }
+}

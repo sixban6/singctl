@@ -1,6 +1,7 @@
 package test
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"singctl/internal/singbox"
+	ruleset_snapshot "singctl/internal/singbox/ruleset_snapshot"
 )
 
 // ───────────────────────── 测试工具 ─────────────────────────
@@ -205,7 +207,8 @@ func TestLocalizeRuleSets_FallbackToExistingCache(t *testing.T) {
 func TestLocalizeRuleSets_KeepRemoteWhenNoCache(t *testing.T) {
 	srv := serveRuleSet(t, http.StatusNotFound, nil)
 
-	in := buildConfig(t, remoteEntry("geoip-cn", srv.URL+"/geoip-cn.srs"))
+	// tag 不在内置快照中，才会走“保留远程引用”路径
+	in := buildConfig(t, remoteEntry("my-custom-rs", srv.URL+"/custom.srs"))
 	out, stats, err := singbox.LocalizeRuleSets(in, testOpts(t, t.TempDir()))
 	if err != nil {
 		t.Fatalf("LocalizeRuleSets: %v", err)
@@ -214,7 +217,7 @@ func TestLocalizeRuleSets_KeepRemoteWhenNoCache(t *testing.T) {
 		t.Fatalf("stats = %+v, want Kept=1", stats)
 	}
 	entries := parseRuleSets(t, out)
-	if entries[0]["type"] != "remote" || entries[0]["url"] != srv.URL+"/geoip-cn.srs" {
+	if entries[0]["type"] != "remote" || entries[0]["url"] != srv.URL+"/custom.srs" {
 		t.Errorf("entry should stay remote, got %v", entries[0])
 	}
 }
@@ -459,6 +462,90 @@ func TestRevertAndClearCache(t *testing.T) {
 
 // ───────────────────────── CacheStatus ─────────────────────────
 
+// ───────────────── 内置快照兑底 ─────────────────
+
+func TestSnapshotFallbackByTag(t *testing.T) {
+	// 服务器不可用（返回 503），tag 命中内置快照 → 从快照兑底
+	srv := serveRuleSet(t, http.StatusServiceUnavailable, nil)
+	cacheDir := t.TempDir()
+
+	in := buildConfig(t, remoteEntry("geoip-cn", srv.URL+"/geoip-cn.srs"))
+	out, stats, err := singbox.LocalizeRuleSets(in, testOpts(t, cacheDir))
+	if err != nil {
+		t.Fatalf("LocalizeRuleSets: %v", err)
+	}
+	if stats.Snapshot != 1 || stats.Kept != 0 {
+		t.Fatalf("stats = %+v, want Snapshot=1 Kept=0", stats)
+	}
+	entries := parseRuleSets(t, out)
+	e := entries[0]
+	if e["type"] != "local" {
+		t.Fatalf("entry should be localized from snapshot, got %v", e)
+	}
+	// 缓存文件应存在且内容合法（sha256 已在解压时校验）
+	data, err := os.ReadFile(e["path"].(string))
+	if err != nil {
+		t.Fatalf("read snapshot-backed cache: %v", err)
+	}
+	if !bytes.HasPrefix(data, []byte("SRS")) && !bytes.HasPrefix(data, []byte("RULE")) {
+		t.Fatalf("snapshot content invalid: %q", data[:8])
+	}
+	// 后续再次运行：下载仍失败，但本地已有快照建立的缓存 → Fallback
+	_, stats2, err := singbox.LocalizeRuleSets(in, testOpts(t, cacheDir))
+	if err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if stats2.Fallback != 1 {
+		t.Fatalf("stats2 = %+v, want Fallback=1", stats2)
+	}
+}
+
+func TestSnapshotFallbackByURL(t *testing.T) {
+	// tag 不匹配，但 URL（含镜像前缀）与快照规范 URL 等价 → 兑底
+	// 用已关闭的本地服务器作镜像前缀，避免测试依赖真实网络
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	dead.Close()
+	url := dead.URL + "/https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/private.srs"
+
+	in := buildConfig(t, remoteEntry("my-renamed-private", url))
+	out, stats, err := singbox.LocalizeRuleSets(in, testOpts(t, t.TempDir()))
+	if err != nil {
+		t.Fatalf("LocalizeRuleSets: %v", err)
+	}
+	if stats.Snapshot != 1 {
+		t.Fatalf("stats = %+v, want Snapshot=1 (matched by URL)", stats)
+	}
+	entries := parseRuleSets(t, out)
+	if entries[0]["type"] != "local" {
+		t.Errorf("entry should be localized from snapshot, got %v", entries[0])
+	}
+}
+
+func TestSnapshotIntegrity(t *testing.T) {
+	snap := ruleset_snapshot.Load()
+	if snap.Count() == 0 {
+		t.Fatal("embedded snapshot is empty")
+	}
+	if snap.GeneratedAt() == "" {
+		t.Fatal("snapshot manifest missing generated_at")
+	}
+	// 逐条解压校验（sha256/size 由 Extract 内部校验）
+	for _, tag := range snap.Tags() {
+		data, err := snap.Extract(tag)
+		if err != nil {
+			t.Errorf("extract %s: %v", tag, err)
+			continue
+		}
+		if !bytes.HasPrefix(data, []byte("SRS")) && !bytes.HasPrefix(data, []byte("RULE")) {
+			t.Errorf("extract %s: invalid magic %q", tag, data[:4])
+		}
+	}
+	// 不存在的 tag
+	if _, err := snap.Extract("no-such-tag"); err == nil {
+		t.Error("expected error for unknown tag")
+	}
+}
+
 func TestCacheStatus(t *testing.T) {
 	srv := serveRuleSet(t, http.StatusOK, validSRS("v1"))
 	cacheDir := t.TempDir()
@@ -470,16 +557,28 @@ func TestCacheStatus(t *testing.T) {
 	}
 
 	entries := singbox.CacheStatus(singbox.LocalizeOptions{CacheDir: cacheDir})
-	if len(entries) != 1 {
-		t.Fatalf("entries = %d, want 1", len(entries))
+	// manifest 中的 geoip + 内置快照的全部条目
+	snap := ruleset_snapshot.Load()
+	if len(entries) != 1+snap.Count() {
+		t.Fatalf("entries = %d, want %d (1 manifest + %d snapshot-only)", len(entries), 1+snap.Count(), snap.Count())
 	}
-	e := entries[0]
-	if e.Tag != "geoip" || !e.FileOK || e.URL != srv.URL+"/geoip.srs" {
-		t.Errorf("entry = %+v", e)
+	var geoip *singbox.RuleSetCacheEntry
+	for i := range entries {
+		if entries[i].Tag == "geoip" {
+			geoip = &entries[i]
+		}
 	}
-
-	// 空缓存
-	if got := singbox.CacheStatus(singbox.LocalizeOptions{CacheDir: t.TempDir()}); len(got) != 0 {
-		t.Errorf("empty cache should return 0 entries, got %d", len(got))
+	if geoip == nil || !geoip.FileOK || geoip.URL != srv.URL+"/geoip.srs" {
+		t.Fatalf("geoip entry = %+v", geoip)
+	}
+	// 快照条目应标记 InSnapshot
+	snapOnly := 0
+	for _, e := range entries {
+		if e.InSnapshot {
+			snapOnly++
+		}
+	}
+	if snapOnly != snap.Count() {
+		t.Errorf("InSnapshot entries = %d, want %d", snapOnly, snap.Count())
 	}
 }

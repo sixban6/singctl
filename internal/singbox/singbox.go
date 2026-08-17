@@ -201,8 +201,8 @@ func (sb *SingBox) localizeRuleSets(configContent string) string {
 	if stats.Remote == 0 {
 		return configContent
 	}
-	logger.Info("规则集缓存: 远程 %d → 已本地化 %d, 回退旧缓存 %d, 保留远程 %d",
-		stats.Remote, stats.Localized, stats.Fallback, stats.Kept)
+	logger.Info("规则集缓存: 远程 %d → 已本地化 %d, 回退旧缓存 %d, 内置快照兑底 %d, 保留远程 %d",
+		stats.Remote, stats.Localized, stats.Fallback, stats.Snapshot, stats.Kept)
 	if stats.Aborted {
 		logger.Warn("⚠️ 网络不可用，未下载的规则集将保留远程引用或旧缓存")
 	}
