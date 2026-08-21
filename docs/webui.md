@@ -19,10 +19,15 @@
 ## 快速开始
 
 ```bash
-singctl web                # 监听 0.0.0.0:8090
-singctl web -l :8080       # 自定义端口
-singctl web --password xxx # 启用访问口令(用户名 admin)
+singctl web start              # 后台启动(推荐),监听 :8090
+singctl web status             # 查看后台运行状态
+singctl web stop               # 停止(简写 singctl w s)
+singctl web                    # 前台运行(Ctrl+C 停止,适合调试)
+singctl web start -l :8080 --password xxx   # 自定义端口 + 口令(admin/xxx)
 ```
+
+后台模式的机制与看门狗一致:启动时原子抢占状态文件(`/tmp/singctl-web.pid`)防止并发启动,
+fork 后等待子进程真正绑定端口成功才返回(失败如实报错);日志写入 `/tmp/singctl-web.log`。
 
 启动后浏览器访问 `http://<路由器IP>:8090`。
 
@@ -30,13 +35,18 @@ singctl web --password xxx # 启用访问口令(用户名 admin)
 
 | 参数 | 环境变量 | 说明 |
 | :--- | :--- | :--- |
-| `-l, --listen` | - | 监听地址,默认 `:8090` |
+| `-l, --listen` | - | 监听地址,默认 `:8090`
 | `-p, --password` | `SINGCTL_WEB_PASSWORD` | 访问口令(用户名固定 `admin`,留空则不鉴权) |
+
+子命令:`start`(后台启动)、`stop`(停止,别名 `s`)、`status`(状态,别名 `st`);
+不带子命令时为前台运行。
 
 > ⚠️ **安全提示**:不设口令时任何能访问该端口的人都可以管理你的路由器,
 > 请确保仅暴露在可信内网;如需从公网访问,务必设置口令。
 
-## OpenWrt 开机自启
+## OpenWrt 开机自启(推荐)
+
+内置的 `web start` 不会开机自启、崩溃也不会重生;生产环境建议用 procd 托管:
 
 创建 `/etc/init.d/singctl-web`:
 

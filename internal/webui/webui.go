@@ -24,10 +24,11 @@ var staticFS embed.FS
 
 // Options Web 服务配置
 type Options struct {
-	ConfigPath string // singctl 配置文件路径
-	Listen     string // 监听地址,如 ":8090"
-	Password   string // 可选的访问口令(空=不启用鉴权,建议仅在可信内网使用)
-	Version    string // singctl 版本号
+	ConfigPath string                  // singctl 配置文件路径
+	Listen     string                  // 监听地址,如 ":8090"
+	Password   string                  // 可选的访问口令(空=不启用鉴权,建议仅在可信内网使用)
+	Version    string                  // singctl 版本号
+	OnReady    func(listenAddr string) // Listen 成功后的回调(后台子进程用于就绪握手)
 }
 
 // Server Web 管理服务
@@ -80,6 +81,9 @@ func (s *Server) ListenAndServe() error {
 	if err != nil {
 		return err
 	}
+	if s.opts.OnReady != nil {
+		s.opts.OnReady(ln.Addr().String())
+	}
 
 	s.printBanner(ln)
 	srv := &http.Server{Handler: s.mux}
@@ -88,8 +92,7 @@ func (s *Server) ListenAndServe() error {
 
 func (s *Server) printBanner(ln net.Listener) {
 	logger.Success("SingCtl WebUI 已启动")
-	addrs := listenAddresses(ln)
-	for _, a := range addrs {
+	for _, a := range formatListenURLs(ln.Addr().String()) {
 		logger.Info("  ➜  http://%s", a)
 	}
 	if s.opts.Password == "" {
@@ -97,14 +100,8 @@ func (s *Server) printBanner(ln net.Listener) {
 	}
 }
 
-// listenAddresses 返回适合展示的访问地址(优先内网 IP)
-func listenAddresses(ln net.Listener) []string {
-	port := "8090"
-	if addr, ok := ln.Addr().(*net.TCPAddr); ok && addr.Port != 0 {
-		port = itoa(addr.Port)
-	}
-
-	var lan, loopback string
+// lanIPv4 返回第一个非回环内网 IPv4(无则空串)
+func lanIPv4() string {
 	if ifaces, err := net.Interfaces(); err == nil {
 		for _, iface := range ifaces {
 			if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
@@ -113,33 +110,12 @@ func listenAddresses(ln net.Listener) []string {
 			addrs, _ := iface.Addrs()
 			for _, a := range addrs {
 				if ipnet, ok := a.(*net.IPNet); ok && ipnet.IP.To4() != nil && !ipnet.IP.IsLoopback() {
-					if lan == "" {
-						lan = ipnet.IP.String()
-					}
+					return ipnet.IP.String()
 				}
 			}
 		}
 	}
-	loopback = "127.0.0.1"
-
-	var out []string
-	if lan != "" {
-		out = append(out, lan+":"+port)
-	}
-	out = append(out, loopback+":"+port)
-	return out
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var b []byte
-	for n > 0 {
-		b = append([]byte{byte('0' + n%10)}, b...)
-		n /= 10
-	}
-	return string(b)
+	return ""
 }
 
 // guard 包装器:统一鉴权、JSON 错误输出、方法校验
