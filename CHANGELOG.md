@@ -1,3 +1,10 @@
+## [1.23.4](https://github.com/sixban6/singctl/compare/v1.23.3...v1.23.4) (2026-08-21)
+
+
+### Bug Fixes
+
+* add webui ([6917e21](https://github.com/sixban6/singctl/commit/6917e2115bf63047d1f35ad995ec0a9603a16c97))
+
 ## [1.23.3](https://github.com/sixban6/singctl/compare/v1.23.2...v1.23.3) (2026-08-21)
 
 
