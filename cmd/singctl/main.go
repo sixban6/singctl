@@ -121,6 +121,7 @@ DNS optimization, and complete service lifecycle management.`,
 		cmd.NewFirewallCmd(),
 		cmd.NewServerCmd(configPath),
 		cmd.NewDaemonCommand(),
+		cmd.NewWebCmd(Version),
 	)
 
 	if err := rootCmd.Execute(); err != nil {

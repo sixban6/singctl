@@ -65,6 +65,7 @@ SingCtl 按功能模块分为以下几个部分，点击链接查看详细说明
 | **异地组网** | `singctl ts` | 管理 Tailscale 的安装、启动与路由配置 | [查看文档](docs/tailscale.md) |
 | **守护进程** | `singctl dm` | 管理后台守护进程，查看日志与监控状态 | [查看文档](docs/daemon.md) |
 | **防火墙加固** | `singctl fw` | Linux/OpenWrt 专用的防火墙安全规则配置 | [查看文档](docs/firewall.md) |
+| **Web 管理界面** | `singctl web` | 浏览器图形化管理 singctl 全部功能(简写 `singctl w`) | [查看文档](docs/webui.md) |
 | **实用工具** | `singctl ut` | 宽带测速、自更新、系统信息查看 | [查看文档](docs/utils.md) |
 
 ## ⚙️ 配置文件
