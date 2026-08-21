@@ -25,3 +25,8 @@ server:                                         # (可选) 服务器部署配置
   sb_domain: "sub.yourdomain.com"               # 你的域名
   cf_dns_key: "your_cloudflare_api_token"       # 你的 Cloudflare API Token
   sni: ""                                       # (可选) Reality SNI 伪装域名。默认: swdist.apple.com
+
+watchdog:                                      # (可选) 看门狗守护进程配置 (singctl dm)
+  interval: 180                                 # 检查间隔(秒), 默认 180
+  confirm_wait: 30                              # 检测失败后二次确认等待(秒), 默认 30
+  max_restarts: 3                               # 每小时最大自动重启次数, 默认 3
