@@ -13,6 +13,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"singctl/internal/util/os"
 )
 
 const (
@@ -73,35 +75,39 @@ func GetDaemonLogPath() string {
 	return filepath.Join("/tmp", logFileName)
 }
 
-// acquirePidLock 以 O_EXCL 原子创建 PID 文件作为互斥锁，写入当前进程 PID。
+// acquirePidLock 以硬链接原子创建 PID 文件作为互斥锁，写入当前进程 PID。
 //
 // 用途：防止并发 `dm start` 分裂出多个守护进程。
-// 若文件已存在：
+// 实现：先写临时文件再 os.Link 到目标 —— link 在目标已存在时原子失败，
+// 避免 O_EXCL“先建空文件后写内容”窗口期内被并发者误判为残留锁清除。
+// 若目标已存在：
 //   - PID 存活且进程名匹配 → 返回 errDaemonAlreadyRunning
 //   - PID 已死或进程名不符（PID 回绕复用）→ 视为残留锁，清除后重试一次
 func acquirePidLock() error {
-	pid := os.Getpid()
+	pid := strconv.Itoa(os.Getpid())
+	target := getPidFilePath()
+	tmp := fmt.Sprintf("%s.new-%d", target, os.Getpid())
+	defer os.Remove(tmp)
+
 	for attempt := 0; attempt < 2; attempt++ {
-		f, err := os.OpenFile(getPidFilePath(), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+		if err := os.WriteFile(tmp, []byte(pid), 0644); err != nil {
+			return fmt.Errorf("failed to write pid tmp file: %w", err)
+		}
+		err := os.Link(tmp, target)
 		if err == nil {
-			_, werr := f.WriteString(strconv.Itoa(pid))
-			f.Close()
-			if werr != nil {
-				return fmt.Errorf("failed to write pid file: %w", werr)
-			}
-			return nil
+			return nil // 赢得锁
 		}
 		if !os.IsExist(err) {
-			return fmt.Errorf("failed to create pid file: %w", err)
+			return fmt.Errorf("failed to claim pid lock: %w", err)
 		}
 
-		// 文件已存在：判断是否为活锁
+		// 目标已存在：判断是否为活锁
 		oldPid, rerr := ReadDaemonPid()
 		if rerr == nil && daemonProcessMatches(oldPid) {
 			return errDaemonAlreadyRunning
 		}
 		// 残留锁（进程已死或 PID 被无关进程复用），清除后重试
-		_ = os.Remove(getPidFilePath())
+		_ = os.Remove(target)
 	}
 	return errDaemonAlreadyRunning
 }
@@ -288,21 +294,19 @@ func IsSingBoxRunning() bool {
 
 // isSingBoxProcessRunning 检查sing-box进程（跨平台实现）
 func isSingBoxProcessRunning() bool {
-	var cmd string
-	var args []string
-
 	if runtime.GOOS == "windows" {
-		cmd = "tasklist"
-		args = []string{"/FI", "IMAGENAME eq sing-box.exe", "/NH"}
-	} else {
-		cmd = "pgrep"
-		args = []string{"-x", "sing-box"}
+		output, err := exec.Command("tasklist", "/FI", "IMAGENAME eq sing-box.exe", "/NH").Output()
+		if err != nil {
+			return false
+		}
+		return bytes.Contains(output, []byte("sing-box.exe"))
 	}
-
-	return checkProcessByCommand(cmd, args)
+	// busybox pgrep -x 存在匹配怪癖(实测 ImmortalWrt busybox 1.36.1 无法命中 tailscaled),
+	// 用两级匹配策略保证兼容
+	return osutil.PgrepMatch("sing-box")
 }
 
-// checkProcessByCommand 通过命令检查进程
+// checkProcessByCommand 通过命令检查进程(保留供兼容,新代码请用 osutil.PgrepMatch)
 func checkProcessByCommand(cmdName string, args []string) bool {
 	cmd := exec.Command(cmdName, args...)
 

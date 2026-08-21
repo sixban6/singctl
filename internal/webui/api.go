@@ -20,6 +20,7 @@ import (
 	ruleset_snapshot "singctl/internal/singbox/ruleset_snapshot"
 	"singctl/internal/tailscale"
 	"singctl/internal/util/netinfo"
+	"singctl/internal/util/os"
 
 	"gopkg.in/yaml.v3"
 )
@@ -122,11 +123,18 @@ func daemonStatus(cfgMaxRestarts int) map[string]any {
 }
 
 func tailscaleStatus(configPath string) map[string]any {
+	// OpenWrt 装在 /usr/sbin,发行版常在 /usr/bin,桌面端在 /usr/local/bin
 	binPath := ""
-	if p, err := exec.LookPath("tailscale"); err == nil {
-		binPath = p
-	} else if fileExists("/usr/bin/tailscale") {
-		binPath = "/usr/bin/tailscale"
+	for _, c := range []string{"/usr/sbin/tailscale", "/usr/bin/tailscale", "/usr/local/bin/tailscale"} {
+		if fileExists(c) {
+			binPath = c
+			break
+		}
+	}
+	if binPath == "" {
+		if p, err := exec.LookPath("tailscale"); err == nil {
+			binPath = p
+		}
 	}
 
 	version := ""
@@ -138,9 +146,13 @@ func tailscaleStatus(configPath string) map[string]any {
 		}
 	}
 
-	running := false
-	if runtime.GOOS != "windows" {
-		running = exec.Command("pgrep", "-x", "tailscaled").Run() == nil
+	// 权威判定:`tailscale status --json` 能连通后端即 daemon 在运行,
+	// 并拿到 BackendState(Running/NeedsLogin/Stopped...)。
+	// 注:不能用 pgrep -x 检测 —— busybox 1.36.1 上实测无法匹配 tailscaled(见 osutil.PgrepMatch)。
+	daemonUp, backendState := queryTailscaleBackend(binPath)
+	if !daemonUp && binPath == "" {
+		// CLI 不存在时退化为进程检测(子串匹配,兼容 busybox)
+		daemonUp = osutil.PgrepMatch("tailscaled")
 	}
 
 	authKeySet := false
@@ -150,10 +162,33 @@ func tailscaleStatus(configPath string) map[string]any {
 
 	return map[string]any{
 		"installed":  binPath != "",
-		"running":    running,
+		"running":    daemonUp,
+		"state":      backendState,
 		"version":    version,
 		"authKeySet": authKeySet,
 	}
+}
+
+// queryTailscaleBackend 通过 `tailscale status --json` 判定 daemon 是否存活及其后端状态。
+// daemon 存活时返回 (true, BackendState);不可达返回 (false, "")。
+// 实测退出码:daemon 在(含 Stopped/NeedsLogin)rc=0,daemon 不在 rc=1。
+func queryTailscaleBackend(binPath string) (bool, string) {
+	if binPath == "" {
+		return false, ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, binPath, "status", "--json").Output()
+	if err != nil {
+		return false, ""
+	}
+	var st struct {
+		BackendState string `json:"BackendState"`
+	}
+	if json.Unmarshal(out, &st) != nil || st.BackendState == "" {
+		return false, ""
+	}
+	return true, st.BackendState
 }
 
 func firewallStatus() map[string]any {
