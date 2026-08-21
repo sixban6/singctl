@@ -24,6 +24,7 @@ import (
 	"singctl/internal/util/file"
 	"singctl/internal/util/github"
 	"singctl/internal/util/netinfo"
+	"singctl/internal/util/os"
 	releasepkg "singctl/internal/util/release"
 )
 
@@ -53,7 +54,8 @@ func commandExists(name string) bool {
 }
 
 func hasActiveSingBoxTProxy() bool {
-	if exec.Command("pgrep", "-x", "sing-box").Run() == nil {
+	// 注:pgrep 用子串匹配兼容 busybox -x 怪癖(见 osutil.PgrepMatch)
+	if osutil.PgrepMatch("sing-box") {
 		return true
 	}
 	if exec.Command("pgrep", "-f", "ujail.*sing-box").Run() == nil {

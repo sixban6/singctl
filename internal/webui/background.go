@@ -97,29 +97,33 @@ func writeWebStateAtomic(st webState) error {
 	return os.Rename(tmp, path)
 }
 
-// acquireWebLock 以 O_EXCL 原子创建状态文件作为互斥锁。
+// acquireWebLock 以硬链接原子创建状态文件作为互斥锁。
+// 实现：先写临时文件再 os.Link —— 目标存在时原子失败，避免 O_EXCL
+// “先建空文件后写内容”的窗口期被并发者误判为残留锁清除。
 // 文件已存在时:PID 存活且命令行含 web → 已在运行;否则视为残留锁清除后重试一次。
 func acquireWebLock(st webState) error {
 	b, _ := json.Marshal(st)
+	target := WebStatePath()
+	tmp := fmt.Sprintf("%s.new-%d", target, os.Getpid())
+	defer os.Remove(tmp)
+
 	for attempt := 0; attempt < 2; attempt++ {
-		f, err := os.OpenFile(WebStatePath(), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+		if err := os.WriteFile(tmp, b, 0644); err != nil {
+			return fmt.Errorf("failed to write web state tmp: %w", err)
+		}
+		err := os.Link(tmp, target)
 		if err == nil {
-			_, werr := f.Write(b)
-			f.Close()
-			if werr != nil {
-				return fmt.Errorf("failed to write web state: %w", werr)
-			}
-			return nil
+			return nil // 赢得锁
 		}
 		if !os.IsExist(err) {
-			return fmt.Errorf("failed to create web state: %w", err)
+			return fmt.Errorf("failed to claim web state: %w", err)
 		}
 
 		old, rerr := readWebState()
 		if rerr == nil && webProcMatches(old.Pid) {
 			return errWebAlreadyRunning
 		}
-		_ = os.Remove(WebStatePath())
+		_ = os.Remove(target)
 	}
 	return errWebAlreadyRunning
 }

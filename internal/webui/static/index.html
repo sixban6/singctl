@@ -810,6 +810,20 @@ function statCard(opts) {
   </div>`;
 }
 
+/* Tailscale 状态徽标:区分 daemon 存活与 VPN 连接状态 */
+function tsBadge(ts) {
+  if (!ts.installed) return { badge: "未安装", cls: "warn", dot: "err", ico: "miss" };
+  if (!ts.running)  return { badge: "未运行", cls: "stop", dot: "",   ico: "off" };
+  switch (ts.state) {
+    case "Running":       return { badge: "已连接", cls: "run",  dot: "ok", ico: "on" };
+    case "NeedsLogin":
+    case "NeedsMachineAuth":
+    case "Starting":      return { badge: "待认证", cls: "warn", dot: "",   ico: "off" };
+    case "Stopped":       return { badge: "已停止", cls: "stop", dot: "",   ico: "off" };
+    default:              return { badge: ts.state || "运行中", cls: "run", dot: "ok", ico: "on" };
+  }
+}
+
 function renderStatus(st) {
   state.status = st;
   const sb = st.singbox, dm = st.daemon, ts = st.tailscale, fw = st.firewall;
@@ -846,12 +860,12 @@ function renderStatus(st) {
     }) +
     statCard({
       icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="6" r="3"/><path d="M12 6h5a2 2 0 0 1 2 2v7"/><path d="m15 9 3-3-3-3"/><circle cx="18" cy="17" r="3"/></svg>',
-      icoState: ts.running ? "on" : (ts.installed ? "off" : "miss"),
-      badge: ts.running ? "已连接" : (ts.installed ? "未运行" : "未安装"),
-      badgeCls: ts.running ? "run" : (ts.installed ? "stop" : "warn"),
-      dotCls: ts.running ? "ok" : (ts.installed ? "" : "err"),
+      icoState: tsBadge(ts).ico,
+      badge: tsBadge(ts).badge,
+      badgeCls: tsBadge(ts).cls,
+      dotCls: tsBadge(ts).dot,
       name: "Tailscale 组网",
-      meta: (ts.version ? "v" + esc(ts.version) : "") + (ts.authKeySet ? " · auth_key 已配置" : " · 未配置 auth_key"),
+      meta: (ts.version ? "v" + esc(ts.version) : "") + (ts.state ? " · 状态: " + esc(ts.state) : "") + (ts.authKeySet ? " · auth_key 已配置" : ""),
       actions: ts.installed
         ? '<button class="btn btn-sm" data-action="ts-start">启动</button><button class="btn btn-sm btn-danger" data-action="ts-stop">停止</button>'
         : '<button class="btn btn-sm btn-primary" data-action="ts-install">安装</button>',
@@ -906,7 +920,8 @@ function renderStatus(st) {
   // 组网页
   $("#ts-ver").textContent = ts.version ? "v" + ts.version : (ts.installed ? "" : "未安装");
   $("#ts-info").innerHTML = [
-    ["tailscaled 进程", ts.running ? '<span style="color:var(--ok);font-weight:600;">运行中</span>' : '<span style="color:var(--muted);">未运行</span>'],
+    ["daemon 进程", ts.running ? '<span style="color:var(--ok);font-weight:600;">运行中</span>' : '<span style="color:var(--muted);">未运行</span>'],
+    ["后端状态", ts.state ? esc(ts.state) + " (" + esc(tsBadge(ts).badge) + ")" : "-"],
     ["已安装", ts.installed ? "是" : "否"],
     ["auth_key", ts.authKeySet ? '<span style="color:var(--ok);">已配置</span>' : '<span style="color:var(--warn);">未配置(<a class="link" href="#" data-goto="config">去配置</a>)</span>'],
   ].map(([k, v]) => `<div class="kv"><span class="k">${k}</span><span class="v">${v}</span></div>`).join("");
