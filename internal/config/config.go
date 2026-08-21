@@ -19,6 +19,7 @@ type Config struct {
 	Hy2       Hy2Config       `yaml:"hy2"`
 	Tailscale TailscaleConfig `yaml:"tailscale"`
 	Server    ServerConfig    `yaml:"server"`
+	Watchdog  WatchdogConfig  `yaml:"watchdog"`
 }
 type Subscription struct {
 	Name          string `yaml:"name"`
@@ -47,6 +48,12 @@ type ServerConfig struct {
 	Sni      string `yaml:"sni"`
 }
 
+type WatchdogConfig struct {
+	Interval    int `yaml:"interval"`     // 检查间隔(秒), 默认 180
+	ConfirmWait int `yaml:"confirm_wait"` // 二次确认等待(秒), 默认 30
+	MaxRestarts int `yaml:"max_restarts"` // 每小时最大自动重启次数, 默认 3
+}
+
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -61,6 +68,7 @@ func Load(path string) (*Config, error) {
 		"github", "mirror_url", "hy2", "up", "down",
 		"tailscale", "auth_key", "use_build", constant.TailscaleSubnets,
 		"server", "sb_domain", "cf_dns_key", "sni",
+		"watchdog", "interval", "confirm_wait", "max_restarts",
 	}
 	pattern := fmt.Sprintf("(?m)^([ \\t-]*(?:%s)):([^\\s].*)", strings.Join(keys, "|"))
 	re := regexp.MustCompile(pattern)
@@ -80,6 +88,15 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Server.Sni == "" {
 		cfg.Server.Sni = "swdist.apple.com"
+	}
+	if cfg.Watchdog.Interval <= 0 {
+		cfg.Watchdog.Interval = 180
+	}
+	if cfg.Watchdog.ConfirmWait <= 0 {
+		cfg.Watchdog.ConfirmWait = 30
+	}
+	if cfg.Watchdog.MaxRestarts <= 0 {
+		cfg.Watchdog.MaxRestarts = 3
 	}
 
 	return &cfg, nil
@@ -134,6 +151,7 @@ func MigrateConfig(configPath string, templateData []byte) error {
 		"github", "mirror_url", "hy2", "up", "down",
 		"tailscale", "auth_key", "use_build", constant.TailscaleSubnets,
 		"server", "sb_domain", "cf_dns_key", "sni",
+		"watchdog", "interval", "confirm_wait", "max_restarts",
 	}
 	pattern := fmt.Sprintf("(?m)^([ \\t-]*(?:%s)):([^\\s].*)", strings.Join(keys, "|"))
 	re := regexp.MustCompile(pattern)
@@ -247,6 +265,13 @@ func MigrateConfig(configPath string, templateData []byte) error {
 		if strings.Contains(string(oldData), "sni:") {
 			replaceField(docNode, "server", "sni", oldCfg.Server.Sni)
 		}
+	}
+
+	// 6. Merge Watchdog
+	if strings.Contains(string(oldData), "watchdog:") {
+		replaceField(docNode, "watchdog", "interval", fmt.Sprintf("%d", oldCfg.Watchdog.Interval))
+		replaceField(docNode, "watchdog", "confirm_wait", fmt.Sprintf("%d", oldCfg.Watchdog.ConfirmWait))
+		replaceField(docNode, "watchdog", "max_restarts", fmt.Sprintf("%d", oldCfg.Watchdog.MaxRestarts))
 	}
 
 	newData, err := yaml.Marshal(&rootNode)

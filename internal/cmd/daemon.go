@@ -95,9 +95,9 @@ func newDaemonStatusCommand() *cobra.Command {
 			logger.Info("Daemon Status:")
 			logger.Info("├─ %s", status.String())
 
-			// 显示重启限制器信息
+			// 显示重启限制器信息（从持久化状态恢复真实计数）
 			if daemon.IsDaemonRunning() {
-				limiter := daemon.NewRestartLimiter()
+				limiter := daemon.NewRestartLimiterFromState(cfg.Watchdog.MaxRestarts)
 				logger.Info("├─ Restarts: %d/%d (last hour)",
 					limiter.GetRestartCount(), limiter.GetMaxRestarts())
 			}

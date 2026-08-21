@@ -239,6 +239,12 @@ tr:last-child td { border-bottom: none; }
   color: #9fb0c8;
 }
 
+/* ═══════════════════════ 内嵌面板 ═══════════════════════ */
+.embed-card { padding: 0; overflow: hidden; }
+.embed-card .card-head { padding: 10px 14px; border-bottom: 1px solid var(--border); margin-bottom: 0; }
+.embed-card iframe { width: 100%; height: calc(100vh - 200px); min-height: 460px; border: 0; display: block; background: #fff; }
+[data-theme="dark"] .embed-card iframe { background: #0d1524; }
+
 /* ═══════════════════════ 控制台抽屉 ═══════════════════════ */
 .console {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 60;
@@ -380,6 +386,40 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; ba
       <div id="cache-table"></div>
       <div class="hint">远程规则集会预下载到本地并改写为本地引用,让 sing-box 启动不依赖 GitHub。</div>
     </div>
+    <div class="card">
+      <div class="card-head">
+        <div class="card-title"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M9 13h6M9 17h6"/></svg>sing-box 配置文件</div>
+        <div class="btn-row">
+          <button class="btn btn-sm" id="btn-sbc-reload">重新加载</button>
+          <button class="btn btn-sm" id="btn-sbc-format">格式化</button>
+          <button class="btn btn-sm btn-primary" id="btn-sbc-save">校验并保存</button>
+          <button class="btn btn-sm" data-action="sb-restart">重启生效</button>
+        </div>
+      </div>
+      <div class="field"><label id="sbc-path-label">配置路径</label><textarea id="f-sbjson" spellcheck="false" style="min-height:360px;"></textarea></div>
+      <div class="btn-row" style="margin-bottom:10px;">
+        <select id="sbc-backups" class="btn" style="padding:6.5px 10px;">
+          <option value="">选择备份…</option>
+        </select>
+        <button class="btn btn-sm" id="btn-sbc-restore">恢复此备份</button>
+        <button class="btn btn-sm" data-action="sb-gen">从订阅重新生成</button>
+      </div>
+      <div class="hint">保存前会用 <code>sing-box check</code> 做语义校验,并自动备份当前版本(保留最近 3 份);修改需重启 sing-box 后生效。</div>
+    </div>
+  </section>
+
+  <!-- ═════════ 控制面板 ═════════ -->
+  <section class="panel" id="panel-panel">
+    <div class="card embed-card">
+      <div class="card-head">
+        <div class="card-title"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>控制面板 <span class="badge dim" id="panel-pill">检测中…</span></div>
+        <div class="btn-row">
+          <button class="btn btn-sm" id="btn-panel-reload">刷新</button>
+          <a class="btn btn-sm" id="btn-panel-newtab" href="#" target="_blank" rel="noopener">新窗口打开</a>
+        </div>
+      </div>
+      <iframe id="clash-frame" src="about:blank" title="clash 控制面板"></iframe>
+    </div>
   </section>
 
   <!-- ═════════ 看门狗 ═════════ -->
@@ -392,7 +432,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; ba
           <button class="btn btn-danger" data-action="dm-stop">停止守护</button>
           <a class="btn" href="#" data-goto="logs">查看日志</a>
         </div>
-        <div class="hint">守护进程会持续监控 sing-box,进程退出或 DNS 卡死时自动重启(每小时限 5 次)。</div>
+        <div class="hint">守护进程会持续监控 sing-box,进程退出或 DNS 卡死时自动重启(频率限制见下方状态)。</div>
       </div>
       <div class="card">
         <div class="card-head"><div class="card-title"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4"/><path d="m16.24 7.76-2.12 2.12"/><circle cx="12" cy="14" r="6"/><path d="M2 14h2"/><path d="M20 14h2"/></svg>运行状态</div></div>
@@ -628,6 +668,7 @@ function toast(type, msg, ms = 4200) {
 const TABS = [
   { id: "dash",    name: "概览",   ico: '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg>' },
   { id: "sb",      name: "sing-box", ico: '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="m3.3 7 8.7 5 8.7-5M12 22V12"/></svg>' },
+  { id: "panel",   name: "面板",   ico: '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>' },
   { id: "dm",      name: "看门狗", ico: ICONS.dog },
   { id: "ts",      name: "组网",   ico: '<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="6" r="3"/><path d="M12 6h5a2 2 0 0 1 2 2v7"/><path d="m15 9 3-3-3-3"/><circle cx="18" cy="17" r="3"/></svg>' },
   { id: "fw",      name: "防火墙", ico: ICONS.shield },
@@ -649,7 +690,8 @@ function showTab(id) {
   localStorage.setItem("sc-tab", id);
   if (id === "config") loadConfig();
   if (id === "logs") loadLogs();
-  if (id === "sb") loadCache();
+  if (id === "sb") { loadCache(); loadSbConfig(); }
+  if (id === "panel") checkPanel();
 }
 document.addEventListener("click", e => {
   const goto = e.target.closest("[data-goto]");
@@ -856,7 +898,7 @@ function renderStatus(st) {
   $("#dm-info").innerHTML = [
     ["守护进程", dm.running ? '<span style="color:var(--ok);font-weight:600;">运行中</span>' : '<span style="color:var(--muted);">未运行</span>'],
     ["sing-box 进程", sb.running ? '<span style="color:var(--ok);font-weight:600;">运行中</span>' : '<span style="color:var(--err);font-weight:600;">未运行</span>'],
-    ["最近 1 小时重启", dm.restarts + " / " + dm.maxRestarts + " 次"],
+    ["最近 1 小时重启", dm.restarts + " / " + dm.maxRestarts + " 次(重启守护进程后清零)"],
     ["守护日志", '<span class="mono" style="font-size:11.5px;">' + esc(dm.logPath) + "</span>"],
     ["看门狗日志", '<span style="font-size:11.5px;">' + esc(dm.watchdogLogPath) + "</span>"],
   ].map(([k, v]) => `<div class="kv"><span class="k">${k}</span><span class="v">${v}</span></div>`).join("");
@@ -1035,6 +1077,64 @@ $("#ts-modes").addEventListener("change", () => {
   $$("#ts-modes .mode-opt").forEach(l =>
     l.classList.toggle("sel", l.querySelector("input").checked));
 });
+
+/* ═══════════════════════ 控制面板(内嵌) ═══════════════════════ */
+async function checkPanel() {
+  const pill = $("#panel-pill");
+  pill.className = "badge dim"; pill.textContent = "检测中…";
+  const frame = $("#clash-frame");
+  $("#btn-panel-newtab").href = (state.status && state.status.singbox && state.status.singbox.panelURL) || "#";
+  try {
+    const r = await fetch("/clash/version");
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    await r.json();
+    pill.className = "badge ok"; pill.textContent = "已连接";
+    if (frame.dataset.loaded !== "1") { frame.dataset.loaded = "1"; frame.src = "/clash/ui/"; }
+  } catch {
+    pill.className = "badge err"; pill.textContent = "不可用";
+    frame.dataset.loaded = "";
+    frame.src = "about:blank";
+  }
+}
+$("#btn-panel-reload").onclick = () => {
+  const f = $("#clash-frame");
+  f.dataset.loaded = "";
+  checkPanel();
+};
+
+/* ═══════════════════════ sing-box 配置文件编辑 ═══════════════════════ */
+async function loadSbConfig() {
+  try {
+    const d = await api("/api/sbconfig");
+    $("#sbc-path-label").textContent = d.path + (d.exists ? "" : " (尚未生成,可点击「从订阅重新生成」)");
+    $("#f-sbjson").value = d.content || "";
+    $("#sbc-backups").innerHTML = '<option value="">选择备份…</option>' +
+      (d.backups || []).map(b => `<option value="${esc(b)}">${esc(b.replace(/^.*\.webui-bak-/, ""))}</option>`).join("");
+    if (!d.checkable) toast("warn", "未检测到 sing-box,保存时将只做 JSON 语法校验");
+  } catch (e) { toast("err", "加载失败: " + e.message); }
+}
+$("#btn-sbc-reload").onclick = loadSbConfig;
+$("#btn-sbc-format").onclick = () => {
+  try { $("#f-sbjson").value = JSON.stringify(JSON.parse($("#f-sbjson").value), null, 2); }
+  catch (e) { toast("err", "JSON 解析失败: " + e.message); }
+};
+$("#btn-sbc-save").onclick = async () => {
+  try {
+    const d = await api("/api/sbconfig", { method: "PUT", body: JSON.stringify({ content: $("#f-sbjson").value }) });
+    toast("ok", d.checked ? "校验通过,配置已保存" : "JSON 已保存(未安装 sing-box,跳过语义校验)");
+    loadSbConfig();
+  } catch (e) { toast("err", "保存失败: " + e.message); }
+};
+$("#btn-sbc-restore").onclick = async () => {
+  const name = $("#sbc-backups").value;
+  if (!name) { toast("warn", "请先选择一个备份"); return; }
+  if (!confirm("确认用该备份覆盖当前配置?当前配置会先另存为新备份。")) return;
+  try {
+    await api("/api/sbconfig/restore", { method: "POST", body: JSON.stringify({ name }) });
+    toast("ok", "已恢复备份");
+    loadSbConfig();
+  } catch (e) { toast("err", "恢复失败: " + e.message); }
+};
 
 /* ═══════════════════════ 启动 ═══════════════════════ */
 const urlParams = new URLSearchParams(location.search);

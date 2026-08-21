@@ -119,4 +119,6 @@ curl -N -X POST http://127.0.0.1:8090/api/action \
 `{"params":{"mode":"router","acceptRoutes":true}}`)、`fw-enable/disable`、
 `update-self`、`speedtest`。
 
+另有 clash API 反向代理:`/clash/*`(面板与 API)及 `/connections`、`/proxies` 等 clash API 根路径直通(供内嵌面板的页面同源请求使用)。
+
 同一时刻仅允许一个动作执行,并发请求返回 `409`。

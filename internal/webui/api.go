@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -30,12 +31,20 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"singctlVersion": s.opts.Version,
 		"host":           hostInfo(),
 		"singbox":        singboxStatus(),
-		"daemon":         daemonStatus(),
+		"daemon":         daemonStatus(s.watchdogMaxRestarts()),
 		"tailscale":      tailscaleStatus(s.opts.ConfigPath),
 		"firewall":       firewallStatus(),
 		"config":         configSummary(s.opts.ConfigPath),
 	}
 	writeJSON(w, http.StatusOK, status)
+}
+
+// watchdogMaxRestarts 从配置读取看门狗每小时重启上限（用于状态展示）
+func (s *Server) watchdogMaxRestarts() int {
+	if cfg, err := config.Load(s.opts.ConfigPath); err == nil {
+		return cfg.Watchdog.MaxRestarts
+	}
+	return 0
 }
 
 func hostInfo() map[string]any {
@@ -94,11 +103,12 @@ func singboxStatus() map[string]any {
 	}
 }
 
-func daemonStatus() map[string]any {
+func daemonStatus(cfgMaxRestarts int) map[string]any {
 	running := daemon.IsDaemonRunning()
 	restarts, maxRestarts := 0, 0
 	if running {
-		limiter := daemon.NewRestartLimiter()
+		// 从持久化状态恢复真实计数（看门狗每次重启都会落盘）
+		limiter := daemon.NewRestartLimiterFromState(cfgMaxRestarts)
 		restarts = limiter.GetRestartCount()
 		maxRestarts = limiter.GetMaxRestarts()
 	}
@@ -139,9 +149,9 @@ func tailscaleStatus(configPath string) map[string]any {
 	}
 
 	return map[string]any{
-		"installed": binPath != "",
-		"running":   running,
-		"version":   version,
+		"installed":  binPath != "",
+		"running":    running,
+		"version":    version,
 		"authKeySet": authKeySet,
 	}
 }
@@ -400,12 +410,171 @@ func backupConfig(path string) error {
 	dir := filepath.Dir(path)
 	base := filepath.Base(path)
 	matches, _ := filepath.Glob(filepath.Join(dir, base+".webui-bak-*"))
+	sort.Strings(matches)
 	if len(matches) > 3 {
 		for _, m := range matches[:len(matches)-3] {
 			_ = os.Remove(m)
 		}
 	}
 	return nil
+}
+
+// preserveMode 返回目标文件应使用的权限(存在则保持原样,否则 0600)
+func preserveMode(path string) os.FileMode {
+	if fi, err := os.Stat(path); err == nil {
+		return fi.Mode().Perm()
+	}
+	return 0600
+}
+
+// ───────────────────── sing-box 配置文件(config.json) ─────────────────────
+
+// sbconfigBackups 返回按时间倒序的备份文件基名列表
+func sbconfigBackups(path string) []string {
+	matches, _ := filepath.Glob(path + ".webui-bak-*")
+	sort.Sort(sort.Reverse(sort.StringSlice(matches)))
+	out := make([]string, 0, len(matches))
+	for _, m := range matches {
+		out = append(out, filepath.Base(m))
+	}
+	return out
+}
+
+// lookPathFunc 可注入的命令查找函数(测试用)
+var lookPathFunc = exec.LookPath
+
+// singboxBinaryPath 返回 sing-box 可执行文件路径(未安装则返回空)
+func singboxBinaryPath() string {
+	if fileExists(constant.SingBoxInstallDir) {
+		return constant.SingBoxInstallDir
+	}
+	if p, err := lookPathFunc("sing-box"); err == nil {
+		return p
+	}
+	return ""
+}
+
+// checkSingBoxConfig 用 sing-box check 校验配置内容(15s 超时)
+func checkSingBoxConfig(exe, content string) error {
+	tmp, err := os.CreateTemp("", "sbcheck-*.json")
+	if err != nil {
+		return fmt.Errorf("创建临时文件失败: %w", err)
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.WriteString(content); err != nil {
+		tmp.Close()
+		return fmt.Errorf("写入临时文件失败: %w", err)
+	}
+	tmp.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, exe, "check", "-c", tmp.Name()).CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg == "" {
+			msg = err.Error()
+		}
+		if len(msg) > 800 {
+			msg = msg[:800] + "…"
+		}
+		return fmt.Errorf("%s", msg)
+	}
+	return nil
+}
+
+func (s *Server) handleSbConfigGet(w http.ResponseWriter, r *http.Request) {
+	path := constant.SingBoxConfigFile
+	content := ""
+	data, err := os.ReadFile(path)
+	exists := err == nil
+	if exists {
+		content = string(data)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"path":      path,
+		"exists":    exists,
+		"content":   content,
+		"backups":   sbconfigBackups(path),
+		"checkable": singboxBinaryPath() != "",
+	})
+}
+
+func (s *Server) handleSbConfigPut(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "请求格式错误: "+err.Error())
+		return
+	}
+
+	// JSON 语法校验
+	if !json.Valid([]byte(body.Content)) {
+		writeJSONError(w, http.StatusBadRequest, "内容不是合法的 JSON")
+		return
+	}
+
+	// 有 sing-box 可执行文件时做语义校验,把住“改坏配置”这道门
+	checked := false
+	if exe := singboxBinaryPath(); exe != "" {
+		if err := checkSingBoxConfig(exe, body.Content); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "sing-box check 未通过: "+err.Error())
+			return
+		}
+		checked = true
+	}
+
+	path := constant.SingBoxConfigFile
+	if err := backupConfig(path); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "备份失败: "+err.Error())
+		return
+	}
+	if err := os.WriteFile(path, []byte(body.Content), preserveMode(path)); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "写入失败: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "checked": checked})
+}
+
+func (s *Server) handleSbConfigRestore(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "请求格式错误: "+err.Error())
+		return
+	}
+
+	// 防路径穿越:只允许本目录下、以备份前缀命名的基名
+	path := constant.SingBoxConfigFile
+	prefix := filepath.Base(path) + ".webui-bak-"
+	name := filepath.Base(body.Name)
+	if name == "" || !strings.HasPrefix(name, prefix) {
+		writeJSONError(w, http.StatusBadRequest, "非法的备份名称")
+		return
+	}
+
+	src := filepath.Join(filepath.Dir(path), name)
+	data, err := os.ReadFile(src)
+	if err != nil {
+		writeJSONError(w, http.StatusNotFound, "读取备份失败: "+err.Error())
+		return
+	}
+	if !json.Valid(data) {
+		writeJSONError(w, http.StatusBadRequest, "备份内容不是合法的 JSON")
+		return
+	}
+
+	if err := backupConfig(path); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "备份当前配置失败: "+err.Error())
+		return
+	}
+	if err := os.WriteFile(path, data, preserveMode(path)); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "写入失败: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // ───────────────────────── 规则集缓存 ─────────────────────────
@@ -441,10 +610,10 @@ func (s *Server) handleCache(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"cacheDir":        singbox.RuleSetCacheDir(),
-		"snapshotCount":   snap.Count(),
-		"snapshotTime":    snap.GeneratedAt(),
-		"entries":         list,
+		"cacheDir":      singbox.RuleSetCacheDir(),
+		"snapshotCount": snap.Count(),
+		"snapshotTime":  snap.GeneratedAt(),
+		"entries":       list,
 	})
 }
 

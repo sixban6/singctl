@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"singctl/internal/config"
+	"singctl/internal/singbox"
 )
 
 // Monitor 监控器
@@ -98,47 +99,52 @@ type clashDNSResponse struct {
 // 让 sing-box 内部执行 DNS 查询. 不经过任何 nftables 规则,
 // 直接测试 sing-box 的 DNS 处理器是否能正常工作.
 //
+// 地址解析: 生成配置在 Linux 上把 clash API 绑定到 LAN IP 而非 127.0.0.1,
+// 因此通过 singbox.ClashAPIEndpoints() 依次尝试配置中的真实地址与常见兑底地址。
+//
 // 如果 DNS 处理器卡死:
 //   - HTTP 请求会超时 → 检测到故障
 //   - 或返回空 Answer → 检测到故障
 func (m *Monitor) CheckDNSHealth() (ok bool, detail string) {
-	// clash API 地址 (sing-box 在 Linux 上监听 0.0.0.0:9090 或 LAN_IP:9090)
-	clashAPI := "http://127.0.0.1:9090"
+	endpoints := singbox.ClashAPIEndpoints()
 
+	// 单请求超时 5 秒;所有候选地址串行尝试
 	client := &http.Client{
-		Timeout: 10 * time.Second,
+		Timeout: 5 * time.Second,
 	}
 
 	// 测试多个域名, 任意一个返回 A 记录即视为 DNS 正常
 	domains := []string{"www.baidu.com", "www.google.com"}
 	var lastErr string
 
-	for _, domain := range domains {
-		url := fmt.Sprintf("%s/dns/query?name=%s&type=A", clashAPI, domain)
-		resp, err := client.Get(url)
-		if err != nil {
-			lastErr = fmt.Sprintf("%s: %v", domain, err)
-			continue
-		}
-
-		var dnsResp clashDNSResponse
-		if err := json.NewDecoder(resp.Body).Decode(&dnsResp); err != nil {
-			resp.Body.Close()
-			lastErr = fmt.Sprintf("%s: failed to decode response: %v", domain, err)
-			continue
-		}
-		resp.Body.Close()
-
-		// 检查是否有有效的 A 记录 (Type=1)
-		for _, answer := range dnsResp.Answer {
-			if answer.Type == 1 && answer.Data != "" {
-				return true, fmt.Sprintf("DNS OK: %s → %s", domain, answer.Data)
+	for _, base := range endpoints {
+		for _, domain := range domains {
+			url := fmt.Sprintf("%s/dns/query?name=%s&type=A", base, domain)
+			resp, err := client.Get(url)
+			if err != nil {
+				lastErr = fmt.Sprintf("%s: %v", domain, err)
+				continue
 			}
+
+			var dnsResp clashDNSResponse
+			err = json.NewDecoder(resp.Body).Decode(&dnsResp)
+			resp.Body.Close()
+			if err != nil {
+				lastErr = fmt.Sprintf("%s: failed to decode response: %v", domain, err)
+				continue
+			}
+
+			// 检查是否有有效的 A 记录 (Type=1)
+			for _, answer := range dnsResp.Answer {
+				if answer.Type == 1 && answer.Data != "" {
+					return true, fmt.Sprintf("DNS OK: %s → %s", domain, answer.Data)
+				}
+			}
+			lastErr = fmt.Sprintf("%s: no A record in response (status=%d, answers=%d)", domain, dnsResp.Status, len(dnsResp.Answer))
 		}
-		lastErr = fmt.Sprintf("%s: no A record in response (status=%d, answers=%d)", domain, dnsResp.Status, len(dnsResp.Answer))
 	}
 
-	return false, fmt.Sprintf("sing-box DNS handler may be stuck: %s", lastErr)
+	return false, fmt.Sprintf("sing-box DNS handler may be stuck: %s (tried %v)", lastErr, endpoints)
 }
 
 // MonitorStatus 监控状态

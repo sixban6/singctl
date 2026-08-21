@@ -45,10 +45,10 @@ type Server struct {
 func New(opts Options) *Server {
 	s := &Server{opts: opts, mux: http.NewServeMux()}
 
-	// 静态资源(同样受鉴权保护)
+	// 静态资源(同样受鉴权保护;不限方法,避免与 /clash/* 全方法代理模式冲突)
 	staticContent, _ := fs.Sub(staticFS, "static")
 	fileServer := http.FileServer(http.FS(staticContent))
-	s.mux.Handle("GET /", s.authOnly(fileServer))
+	s.mux.Handle("/", s.authOnly(fileServer))
 
 	// 只读 API
 	s.mux.HandleFunc("GET /api/status", s.guard(s.handleStatus))
@@ -59,6 +59,14 @@ func New(opts Options) *Server {
 	s.mux.HandleFunc("PUT /api/config/raw", s.guard(s.handleConfigRawPut))
 	s.mux.HandleFunc("GET /api/cache", s.guard(s.handleCache))
 	s.mux.HandleFunc("GET /api/logs", s.guard(s.handleLogs))
+
+	// sing-box 配置文件编辑
+	s.mux.HandleFunc("GET /api/sbconfig", s.guard(s.handleSbConfigGet))
+	s.mux.HandleFunc("PUT /api/sbconfig", s.guard(s.handleSbConfigPut))
+	s.mux.HandleFunc("POST /api/sbconfig/restore", s.guard(s.handleSbConfigRestore))
+
+	// clash 控制面板与 API 反向代理(/clash/* 及根路径直通)
+	s.setupClashProxy()
 
 	// 动作 API(流式输出)
 	s.mux.HandleFunc("POST /api/action", s.guard(s.handleAction))
