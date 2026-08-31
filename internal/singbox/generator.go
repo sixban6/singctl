@@ -18,9 +18,10 @@ import (
 )
 
 type ConfigGenerator struct {
-	config  *config.Config
-	webui   string
-	netInfo *netinfo.NetInfoResult
+	config        *config.Config
+	webui         string
+	netInfo       *netinfo.NetInfoResult
+	defaultTplVer string
 }
 
 func NewConfigGenerator(cfg *config.Config) *ConfigGenerator {
@@ -31,6 +32,7 @@ func NewConfigGenerator(cfg *config.Config) *ConfigGenerator {
 	}
 	cg.netInfo = netResult
 	cg.webui = getWebUIAddress(netResult.LANIPv4)
+	cg.defaultTplVer = "v1.14"
 	//log.Info("Network information: %+v", netResult)
 	return cg
 }
@@ -101,7 +103,7 @@ func (g *ConfigGenerator) generateSingleSubscription(ctx context.Context, dnsSer
 	authKey, lanIpcidr := g.getTailScaleParmas()
 
 	configBytes, err := singgen.GenerateConfigBytes(ctx, sub.URL,
-		singgen.WithTemplate("v1.12"),
+		singgen.WithTemplate(g.defaultTplVer),
 		singgen.WithPlatform(runtime.GOOS),
 		singgen.WithOutputFormat("json"),
 		singgen.WithDNSServer(dnsServer),
@@ -151,7 +153,7 @@ func (g *ConfigGenerator) generateMultiSubscription(ctx context.Context, dnsServ
 
 	multiConfig := &singgen.MultiConfig{
 		Global: singgen.GlobalConfig{
-			Template:       "v1.12",
+			Template:       g.defaultTplVer,
 			Platform:       runtime.GOOS,
 			MirrorURL:      g.config.GitHub.MirrorURL,
 			DNSLocalServer: dnsServer,
