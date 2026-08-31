@@ -1,3 +1,10 @@
+## [1.23.5](https://github.com/sixban6/singctl/compare/v1.23.4...v1.23.5) (2026-08-31)
+
+
+### Bug Fixes
+
+* support singbox v1.14.x ([f7f0534](https://github.com/sixban6/singctl/commit/f7f053482e7db91e1b541644f6ecbdb4a60d6d06))
+
 ## [1.23.4](https://github.com/sixban6/singctl/compare/v1.23.3...v1.23.4) (2026-08-21)
 
 
