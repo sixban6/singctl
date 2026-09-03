@@ -9,6 +9,7 @@ import (
 )
 
 // Linux/OpenWrt scripts
+//
 //go:embed start_singbox.sh
 var startScriptLinux string
 
@@ -16,6 +17,7 @@ var startScriptLinux string
 var stopScriptLinux string
 
 // Debian scripts
+//
 //go:embed start_singbox_debian.sh
 var startScriptDebian string
 
@@ -23,6 +25,7 @@ var startScriptDebian string
 var stopScriptDebian string
 
 // macOS scripts
+//
 //go:embed start_singbox_darwin.sh
 var startScriptDarwin string
 
@@ -30,6 +33,7 @@ var startScriptDarwin string
 var stopScriptDarwin string
 
 // Windows scripts
+//
 //go:embed start_singbox_windows.bat
 var startScriptWindows string
 
@@ -53,13 +57,13 @@ func isDebian() bool {
 		"/etc/debian_version",
 		"/etc/apt/sources.list",
 	}
-	
+
 	for _, file := range debianFiles {
 		if _, err := os.Stat(file); err == nil {
 			return true
 		}
 	}
-	
+
 	// Check /etc/os-release for Debian/Ubuntu
 	if content, err := os.ReadFile("/etc/os-release"); err == nil {
 		osRelease := strings.ToLower(string(content))
@@ -67,7 +71,7 @@ func isDebian() bool {
 			return true
 		}
 	}
-	
+
 	return false
 }
 
@@ -78,13 +82,13 @@ func isOpenWrt() bool {
 		"/etc/openwrt_release",
 		"/etc/openwrt_version",
 	}
-	
+
 	for _, file := range openwrtFiles {
 		if _, err := os.Stat(file); err == nil {
 			return true
 		}
 	}
-	
+
 	return false
 }
 
@@ -100,9 +104,9 @@ func GetStartScript() string {
 		if isDebian() {
 			return startScriptDebian
 		} else if isOpenWrt() {
-			return startScriptLinux  // OpenWrt 使用原来的脚本
+			return startScriptLinux // OpenWrt 使用原来的脚本
 		} else {
-			return startScriptLinux  // 其他 Linux 发行版使用默认脚本
+			return startScriptLinux // 其他 Linux 发行版使用默认脚本
 		}
 	default:
 		return startScriptLinux
@@ -121,9 +125,9 @@ func GetStopScript() string {
 		if isDebian() {
 			return stopScriptDebian
 		} else if isOpenWrt() {
-			return stopScriptLinux  // OpenWrt 使用原来的脚本
+			return stopScriptLinux // OpenWrt 使用原来的脚本
 		} else {
-			return stopScriptLinux  // 其他 Linux 发行版使用默认脚本
+			return stopScriptLinux // 其他 Linux 发行版使用默认脚本
 		}
 	default:
 		return stopScriptLinux
@@ -137,11 +141,11 @@ func writeScriptFile(path, content string) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
-	
+
 	// Write script content to file
 	if err := os.WriteFile(path, []byte(content), 0755); err != nil {
 		return err
 	}
-	
+
 	return nil
 }

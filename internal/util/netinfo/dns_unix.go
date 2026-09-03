@@ -83,7 +83,7 @@ func getDNSFromNetworkManager() ([]string, error) {
 		"/var/run/NetworkManager/resolv.conf",
 		"/etc/NetworkManager/system-connections",
 	}
-	
+
 	for _, path := range paths {
 		if servers, err := parseResolvConf(path); err == nil {
 			filtered := filterLocalAddresses(servers)
@@ -99,10 +99,10 @@ func getDNSFromNetworkManager() ([]string, error) {
 func getDNSFromRouterDHCP() ([]string, error) {
 	// OpenWrt/ImmortalWrt 常见路径
 	paths := []string{
-		"/tmp/resolv.conf.auto",    // OpenWrt DHCP自动生成
-		"/tmp/resolv.conf.d/base",  // OpenWrt基础DNS
-		"/var/resolv.conf.auto",    // 另一种可能路径
-		"/etc/config/dhcp",         // UCI配置（需要解析）
+		"/tmp/resolv.conf.auto",   // OpenWrt DHCP自动生成
+		"/tmp/resolv.conf.d/base", // OpenWrt基础DNS
+		"/var/resolv.conf.auto",   // 另一种可能路径
+		"/etc/config/dhcp",        // UCI配置（需要解析）
 	}
 
 	for _, path := range paths {
@@ -130,12 +130,12 @@ func filterLocalAddresses(servers []string) []string {
 func isLocalNetwork(ip net.IP) bool {
 	// 检查是否为本地网络地址
 	localNets := []string{
-		"127.0.0.0/8",   // 回环
+		"127.0.0.0/8",    // 回环
 		"169.254.0.0/16", // 链路本地
 		"::1/128",        // IPv6 回环
 		"fe80::/10",      // IPv6 链路本地
 	}
-	
+
 	for _, cidr := range localNets {
 		_, network, err := net.ParseCIDR(cidr)
 		if err == nil && network.Contains(ip) {

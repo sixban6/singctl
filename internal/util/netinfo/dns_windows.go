@@ -38,12 +38,12 @@ func getDNSFromIPConfig() ([]string, error) {
 	// 解析输出中的DNS服务器
 	var servers []string
 	lines := strings.Split(string(output), "\n")
-	
+
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		// 匹配DNS服务器行
-		if strings.Contains(strings.ToLower(line), "dns server") || 
-		   strings.Contains(strings.ToLower(line), "dns 服务器") {
+		if strings.Contains(strings.ToLower(line), "dns server") ||
+			strings.Contains(strings.ToLower(line), "dns 服务器") {
 			// 提取IP地址
 			ipRegex := regexp.MustCompile(`(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})`)
 			matches := ipRegex.FindAllString(line, -1)
@@ -54,13 +54,13 @@ func getDNSFromIPConfig() ([]string, error) {
 			}
 		}
 	}
-	
+
 	return filterLocalAddresses(servers), nil
 }
 
 // 使用 PowerShell 获取DNS服务器
 func getDNSFromPowerShell() ([]string, error) {
-	cmd := exec.Command("powershell", "-Command", 
+	cmd := exec.Command("powershell", "-Command",
 		"Get-DnsClientServerAddress | Where-Object {$_.AddressFamily -eq 'IPv4'} | Select-Object -ExpandProperty ServerAddresses")
 	output, err := cmd.Output()
 	if err != nil {
@@ -69,7 +69,7 @@ func getDNSFromPowerShell() ([]string, error) {
 
 	var servers []string
 	lines := strings.Split(string(output), "\n")
-	
+
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line != "" {
@@ -78,14 +78,14 @@ func getDNSFromPowerShell() ([]string, error) {
 			}
 		}
 	}
-	
+
 	return filterLocalAddresses(servers), nil
 }
 
 // 从Windows注册表获取DNS服务器 (备用方法)
 func getDNSFromRegistry() ([]string, error) {
 	// 使用 reg query 命令访问注册表
-	cmd := exec.Command("reg", "query", 
+	cmd := exec.Command("reg", "query",
 		`HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces`,
 		"/s", "/f", "NameServer", "/t", "REG_SZ")
 	output, err := cmd.Output()
@@ -95,7 +95,7 @@ func getDNSFromRegistry() ([]string, error) {
 
 	var servers []string
 	lines := strings.Split(string(output), "\n")
-	
+
 	for _, line := range lines {
 		if strings.Contains(strings.ToUpper(line), "NAMESERVER") {
 			// 提取IP地址
@@ -113,7 +113,7 @@ func getDNSFromRegistry() ([]string, error) {
 			}
 		}
 	}
-	
+
 	return filterLocalAddresses(servers), nil
 }
 
@@ -133,10 +133,10 @@ func isLocalNetwork(ip net.IP) bool {
 	localNets := []string{
 		"127.0.0.0/8",    // 回环
 		"169.254.0.0/16", // 链路本地
-		"::1/128",        // IPv6 回环  
+		"::1/128",        // IPv6 回环
 		"fe80::/10",      // IPv6 链路本地
 	}
-	
+
 	for _, cidr := range localNets {
 		_, network, err := net.ParseCIDR(cidr)
 		if err == nil && network.Contains(ip) {

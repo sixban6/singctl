@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -117,7 +116,7 @@ func WritePidFile() error {
 	pidFile := getPidFilePath()
 	pid := strconv.Itoa(os.Getpid())
 	tmp := pidFile + ".tmp"
-	if err := ioutil.WriteFile(tmp, []byte(pid), 0644); err != nil {
+	if err := os.WriteFile(tmp, []byte(pid), 0644); err != nil {
 		return err
 	}
 	return os.Rename(tmp, pidFile)
@@ -135,7 +134,7 @@ func RemovePidFile() error {
 // ReadDaemonPid 读取守护进程PID
 func ReadDaemonPid() (int, error) {
 	pidFile := getPidFilePath()
-	data, err := ioutil.ReadFile(pidFile)
+	data, err := os.ReadFile(pidFile)
 	if err != nil {
 		return 0, fmt.Errorf("failed to read pid file: %w", err)
 	}
@@ -304,25 +303,4 @@ func isSingBoxProcessRunning() bool {
 	// busybox pgrep -x 存在匹配怪癖(实测 ImmortalWrt busybox 1.36.1 无法命中 tailscaled),
 	// 用两级匹配策略保证兼容
 	return osutil.PgrepMatch("sing-box")
-}
-
-// checkProcessByCommand 通过命令检查进程(保留供兼容,新代码请用 osutil.PgrepMatch)
-func checkProcessByCommand(cmdName string, args []string) bool {
-	cmd := exec.Command(cmdName, args...)
-
-	switch cmdName {
-	case "pgrep":
-		err := cmd.Run()
-		return err == nil
-
-	case "tasklist":
-		output, err := cmd.Output()
-		if err != nil {
-			return false
-		}
-		return bytes.Contains(output, []byte("sing-box.exe"))
-
-	default:
-		return false
-	}
 }

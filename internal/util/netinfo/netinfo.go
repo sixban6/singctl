@@ -4,9 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"singctl/internal/logger"
@@ -42,10 +40,7 @@ func GetWithTimeout(d time.Duration) (*NetInfoResult, error) {
 		return nil, fmt.Errorf("lan ip: %w", err)
 	}
 
-	// 2. 公网地址
-	//if r.PublicIP, err = publicIP(ctx); err != nil {
-	//	return nil, fmt.Errorf("public ip: %w", err)
-	//}
+	// 2. 公网地址(探测较慢，暂不启用)
 	r.PublicIP = ""
 
 	// 3. DNS 服务器（平台实现见 *_unix.go / *_windows.go）
@@ -88,52 +83,6 @@ func localIPs() (v4, v6 string, _ error) {
 		return "", "", errors.New("no usable LAN address")
 	}
 	return
-}
-
-// ------------------------------------------------------------
-// 公网地址：通过多个 HTTP 探针并发
-// ------------------------------------------------------------
-var endpoints = []string{
-	"https://api.ipify.org?format=text",
-	"https://checkip.amazonaws.com",
-	"https://ifconfig.me/ip",
-	"https://ipv6.icanhazip.com", // 支持 IPv6
-}
-
-func publicIP(ctx context.Context) (string, error) {
-	type out struct {
-		ip  string
-		err error
-	}
-	ch := make(chan out, len(endpoints))
-	for _, url := range endpoints {
-		go func(u string) {
-			ip, err := simpleGet(ctx, u)
-			ch <- out{ip, err}
-		}(url)
-	}
-	for range endpoints {
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		case o := <-ch:
-			if o.err == nil && net.ParseIP(o.ip) != nil {
-				return o.ip, nil
-			}
-		}
-	}
-	return "", errors.New("all probes failed")
-}
-
-func simpleGet(ctx context.Context, url string) (string, error) {
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	b, err := io.ReadAll(io.LimitReader(resp.Body, 64))
-	return strings.TrimSpace(string(b)), err
 }
 
 func IsPrivateIP(ipStr string) bool {

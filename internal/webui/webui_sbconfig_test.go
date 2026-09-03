@@ -90,7 +90,7 @@ func TestSbConfigHandlers(t *testing.T) {
 	if code != 200 {
 		t.Fatalf("put failed: %d %s", code, body)
 	}
-	code, body = doJSON(t, "GET", ts.URL+"/api/sbconfig", "")
+	_, body = doJSON(t, "GET", ts.URL+"/api/sbconfig", "")
 	if !strings.Contains(body, `"backups":["config.json.webui-bak-`) || !strings.Contains(body, `\"level\":\"warn\"`) {
 		t.Fatalf("expected 1 backup + new content, got %s", body)
 	}
@@ -111,7 +111,7 @@ func TestSbConfigHandlers(t *testing.T) {
 		t.Fatalf("expected 404 for nonexistent backup, got %d %s", code, body)
 	}
 	// 用真实备份名
-	code, body = doJSON(t, "GET", ts.URL+"/api/sbconfig", "")
+	_, body = doJSON(t, "GET", ts.URL+"/api/sbconfig", "")
 	start := strings.Index(body, `config.json.webui-bak-`)
 	end := strings.Index(body[start:], `"`)
 	realName := body[start : start+end]
@@ -119,7 +119,7 @@ func TestSbConfigHandlers(t *testing.T) {
 	if code != 200 {
 		t.Fatalf("restore failed: %d", code)
 	}
-	code, body = doJSON(t, "GET", ts.URL+"/api/sbconfig", "")
+	_, body = doJSON(t, "GET", ts.URL+"/api/sbconfig", "")
 	if !strings.Contains(body, `\"level\":\"info\"`) {
 		t.Fatalf("expected restored content, got %s", body)
 	}
