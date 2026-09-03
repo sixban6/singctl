@@ -1,10 +1,14 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 
 	"singctl/internal/config"
 	"singctl/internal/daemon"
@@ -130,28 +134,30 @@ func newDaemonLogsCommand() *cobra.Command {
 			}
 
 			// 读取日志文件
-			content, err := ioutil.ReadFile(logPath)
+			content, err := os.ReadFile(logPath)
 			if err != nil {
 				return fmt.Errorf("failed to read log file: %w", err)
 			}
 
-			lines := strings.Split(string(content), "\n")
-
-			// 处理tail参数
-			if tail > 0 && len(lines) > tail {
-				lines = lines[len(lines)-tail:]
+			// 过滤空行后取末尾 tail 行(与 tail -n 行为一致)
+			var nonEmpty []string
+			for _, line := range strings.Split(string(content), "\n") {
+				if strings.TrimSpace(line) != "" {
+					nonEmpty = append(nonEmpty, line)
+				}
+			}
+			if tail > 0 && len(nonEmpty) > tail {
+				nonEmpty = nonEmpty[len(nonEmpty)-tail:]
 			}
 
 			// 输出日志内容
-			for _, line := range lines {
-				if strings.TrimSpace(line) != "" {
-					fmt.Println(line)
-				}
+			for _, line := range nonEmpty {
+				fmt.Println(line)
 			}
 
-			// TODO: 实现follow功能（类似tail -f）
+			// follow 模式：持续跟踪新增日志（类似 tail -f）
 			if follow {
-				logger.Info("Follow mode not yet implemented")
+				return followFile(cmd.Context(), logPath, int64(len(content)))
 			}
 
 			return nil
@@ -159,7 +165,57 @@ func newDaemonLogsCommand() *cobra.Command {
 	}
 
 	cmd.Flags().IntVarP(&tail, "tail", "n", 100, "Number of lines to show from the end of the log")
-	cmd.Flags().BoolVarP(&follow, "follow", "f", false, "Follow log output (not yet implemented)")
+	cmd.Flags().BoolVarP(&follow, "follow", "f", false, "Follow log output (like tail -f)")
 
 	return cmd
+}
+
+// followFile 从 offset 起持续输出文件新增内容，直到日志被删除或收到中断信号(Ctrl+C)。
+// 兼容日志轮转：检测到文件被截断/重建时从头重新读取。
+func followFile(ctx context.Context, path string, offset int64) error {
+	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+		}
+
+		f, err := os.Open(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil // 日志被清理，结束跟踪
+			}
+			return fmt.Errorf("failed to open log file: %w", err)
+		}
+
+		info, err := f.Stat()
+		if err != nil {
+			f.Close()
+			return fmt.Errorf("failed to stat log file: %w", err)
+		}
+
+		// 文件被轮转(截断或重建)：从头读取
+		if info.Size() < offset {
+			offset = 0
+		}
+
+		if info.Size() > offset {
+			if _, err := f.Seek(offset, io.SeekStart); err != nil {
+				f.Close()
+				return fmt.Errorf("failed to seek log file: %w", err)
+			}
+			if _, err := io.Copy(os.Stdout, f); err != nil {
+				f.Close()
+				return fmt.Errorf("failed to read log file: %w", err)
+			}
+			offset = info.Size()
+		}
+		f.Close()
+	}
 }
