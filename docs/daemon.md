@@ -38,11 +38,15 @@ singctl dm logs -n 50
 
 # 查看最近 20 条（默认）
 singctl dm logs
+
+# 持续跟踪新日志（类似 tail -f，Ctrl+C 退出）
+singctl dm logs -f
 ```
 
 | 参数 | 说明 |
 | :--- | :--- |
 | `-n <num>` | 显示最近 N 条日志，默认 20 |
+| `-f` | 持续跟踪新增日志（类似 tail -f），自动兼容日志轮转 |
 
 ## 配置
 
