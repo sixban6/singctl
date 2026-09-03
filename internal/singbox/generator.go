@@ -126,7 +126,7 @@ func (g *ConfigGenerator) generateSingleSubscription(ctx context.Context, dnsSer
 func (g *ConfigGenerator) getTailScaleParmas() (string, string) {
 
 	// 如果不开启内置tailscale则返回空.singgen就不会生成tailscale配置
-	if g.config.Tailscale.UseBuild == false {
+	if !g.config.Tailscale.UseBuild {
 		return "", ""
 	}
 

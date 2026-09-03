@@ -5,8 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -24,7 +22,6 @@ import (
 	"singctl/internal/util/file"
 	"singctl/internal/util/github"
 	"singctl/internal/util/netinfo"
-	"singctl/internal/util/os"
 	releasepkg "singctl/internal/util/release"
 )
 
@@ -46,34 +43,6 @@ func New(downloadURL string, config *config.TailscaleConfig) *Tailscale {
 		DownloadURL:  downloadURL,
 		config:       config,
 	}
-}
-
-func commandExists(name string) bool {
-	_, err := exec.LookPath(name)
-	return err == nil
-}
-
-func hasActiveSingBoxTProxy() bool {
-	// 注:pgrep 用子串匹配兼容 busybox -x 怪癖(见 osutil.PgrepMatch)
-	if osutil.PgrepMatch("sing-box") {
-		return true
-	}
-	if exec.Command("pgrep", "-f", "ujail.*sing-box").Run() == nil {
-		return true
-	}
-	if commandExists("nft") && exec.Command("nft", "list", "table", "inet", "sing-box").Run() == nil {
-		return true
-	}
-	if commandExists("iptables") && exec.Command("iptables", "-t", "mangle", "-S", "SING_BOX").Run() == nil {
-		return true
-	}
-	if out, err := exec.Command("ip", "rule", "show").Output(); err == nil {
-		rules := string(out)
-		if strings.Contains(rules, "fwmark 0x1") && strings.Contains(rules, "lookup 100") {
-			return true
-		}
-	}
-	return false
 }
 
 // SelectTailscaleAsset 过滤合适的 Tailscale 发布包
@@ -98,18 +67,6 @@ func (t *Tailscale) SelectTailscaleAsset(assetName string) bool {
 	}
 
 	return true
-}
-
-// isPrivateSubnet 检查给定 CIDR 是否属于私有网络
-func isPrivateSubnet(cidr string) bool {
-	ip, _, err := net.ParseCIDR(cidr)
-	if err != nil {
-		return false
-	}
-	if ip.To4() != nil {
-		return ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast()
-	}
-	return false
 }
 
 // GetSystemArchitecture 检测系统架构并映射到 Tailscale 的架构命名
@@ -894,26 +851,6 @@ start_service() {
 	finalContent := fmt.Sprintf(content, constant.TailscaleStateDir, constant.TailscaleStateDir)
 	if err := os.WriteFile(scriptPath, []byte(finalContent), 0755); err != nil {
 		return fmt.Errorf("write init script failed: %w", err)
-	}
-	return nil
-}
-
-func copyFile(src, dst string) error {
-	sourceFile, err := os.Open(src)
-	if err != nil {
-		return fmt.Errorf("open source failed: %w", err)
-	}
-	defer sourceFile.Close()
-
-	destFile, err := os.Create(dst)
-	if err != nil {
-		return fmt.Errorf("create dest failed: %w", err)
-	}
-	defer destFile.Close()
-
-	_, err = io.Copy(destFile, sourceFile)
-	if err != nil {
-		return fmt.Errorf("copy failed: %w", err)
 	}
 	return nil
 }

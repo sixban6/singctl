@@ -14,7 +14,6 @@ import (
 	"net"
 	"net/http"
 	"strings"
-	"sync"
 
 	"singctl/internal/logger"
 )
@@ -34,10 +33,6 @@ type Options struct {
 // Server Web 管理服务
 type Server struct {
 	opts Options
-
-	mu       sync.Mutex // 保护 busy
-	busy     bool       // 是否有动作正在执行
-	actionTx string     // 当前执行中的动作名
 
 	mux *http.ServeMux
 }
