@@ -1,3 +1,10 @@
+## [1.24.1](https://github.com/sixban6/singctl/compare/v1.24.0...v1.24.1) (2026-09-05)
+
+
+### Bug Fixes
+
+* **sb:** set download_detour to direct outbound for iOS rule-sets ([340c311](https://github.com/sixban6/singctl/commit/340c31176059fcfb4ead83ab523939da0e05de48))
+
 # [1.24.0](https://github.com/sixban6/singctl/compare/v1.23.7...v1.24.0) (2026-09-05)
 
 
