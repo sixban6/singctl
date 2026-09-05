@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -426,6 +427,59 @@ func (s *Server) handleConfigRawPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// ───────────────────── iOS (sing-box App) 配置下载 ─────────────────────
+
+// iosGenerate 生成 iOS 目标配置(可注入以便测试; 避免单测真实拉取订阅)
+var iosGenerate = func(cfg *config.Config) (string, error) {
+	return singbox.NewConfigGenerator(cfg).GenerateForPlatform(singbox.PlatformIOS)
+}
+
+// handleIOSConfig 生成并返回 iOS 配置文件(作为附件下载)
+func (s *Server) handleIOSConfig(w http.ResponseWriter, r *http.Request) {
+	cfg, err := config.Load(configPathFor(s))
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "读取配置失败: "+err.Error())
+		return
+	}
+	if err := cfg.ValidateSubs(); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "订阅未配置: "+err.Error())
+		return
+	}
+	configJSON, err := iosGenerate(cfg)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "生成 iOS 配置失败: "+err.Error())
+		return
+	}
+	// 双保险: 防止未来生成逻辑变化后把本地路径规则集发给 iPhone
+	if err := singbox.CheckIOSCompatibility(configJSON); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="singctl-ios.json"`)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(configJSON))
+}
+
+// handleIOSConfigURL 返回手机可直接访问的下载地址(含局域网 IP 与可选口令参数, 供二维码使用)
+func (s *Server) handleIOSConfigURL(w http.ResponseWriter, r *http.Request) {
+	ni, err := netinfo.Get()
+	if err != nil || ni.LANIPv4 == "" {
+		writeJSONError(w, http.StatusInternalServerError, "无法获取局域网 IP: "+err.Error())
+		return
+	}
+	_, port, err := net.SplitHostPort(s.opts.Listen)
+	if err != nil || port == "" {
+		writeJSONError(w, http.StatusInternalServerError, "无法解析监听端口: "+s.opts.Listen)
+		return
+	}
+	url := fmt.Sprintf("http://%s:%s/api/gen/ios", ni.LANIPv4, port)
+	if s.opts.Password != "" {
+		url += "?password=" + s.opts.Password
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"url": url})
 }
 
 // backupConfig 保存前备份(保留最近 3 份)

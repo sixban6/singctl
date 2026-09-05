@@ -57,12 +57,28 @@ singctl sb gen --stdout
 
 # 指定输出路径
 singctl sb gen -o /tmp/config.json
+
+# 生成 iPhone (sing-box iOS App) 专用配置
+singctl sb gen --platform ios
 ```
 
 | 参数 | 说明 |
 | :--- | :--- |
 | `--stdout` | 将生成的 JSON 输出到标准输出，不写入文件 |
 | `-o <path>` | 指定输出文件路径，覆盖默认的 `/etc/sing-box/config.json` |
+| `--platform <p>` | 目标平台：`auto`（默认，当前系统）/`darwin`/`windows`/`linux`/`ios` |
+
+### 生成 iOS (iPhone) 配置
+
+`--platform ios` 会生成专供 iOS 官方 sing-box App (SFI) 导入的配置：
+
+- **默认导出到 `~/Downloads/singctl-ios.json`**（不会写入本机 `/etc/sing-box/config.json`，避免看门狗误加载）；
+- 拒绝通过 `-o` 覆盖本机 sing-box 配置文件；
+- **保留远程规则集引用**（iPhone 沙盒无法读取本地规则集路径，也不做本地化缓存）；
+- DNS/客户端子网交由 iOS 模板默认，不注入本机局域网探测值，也不注入 clash API 与 Tailscale；
+- 文件权限 `0600`（配置含节点凭据）。
+
+导入方式：AirDrop/隔空投送该文件 → 文件 App → 分享给 sing-box App；或在 WebUI「配置」页扫码/点击下载。
 
 ---
 
