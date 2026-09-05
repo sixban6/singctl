@@ -1,3 +1,16 @@
+# [1.24.0](https://github.com/sixban6/singctl/compare/v1.23.7...v1.24.0) (2026-09-05)
+
+
+### Bug Fixes
+
+* add missing go.sum entry for singgen v1.14.2 to restore build ([f684fdf](https://github.com/sixban6/singctl/commit/f684fdfdda01612df8ca377aab85376668794283))
+
+
+### Features
+
+* **dm:** implement logs follow mode (tail -f) ([f73da2a](https://github.com/sixban6/singctl/commit/f73da2a2eeb1daa113f2ebb513d5088246cb7bdd))
+* **sb:** generate iOS (sing-box App) configs via CLI & WebUI ([06de818](https://github.com/sixban6/singctl/commit/06de81874a69527c7908018aabfdf8c7abfbf466))
+
 ## [1.23.7](https://github.com/sixban6/singctl/compare/v1.23.6...v1.23.7) (2026-09-01)
 
 
