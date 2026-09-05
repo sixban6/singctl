@@ -338,6 +338,21 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; ba
         <div class="hint">通过 clash API 检测 sing-box 进程与 DNS 处理器是否正常。</div>
       </div>
     </div>
+
+    <div class="card">
+      <div class="card-head">
+        <div class="card-title"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/></svg>iOS 配置 (iPhone · sing-box App)</div>
+        <div class="btn-row"><a class="btn btn-sm btn-primary" id="btn-ios-download" href="/api/gen/ios" download="singctl-ios.json">下载配置</a></div>
+      </div>
+      <div style="display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap;">
+        <div id="ios-qr" style="background:#fff;border-radius:12px;padding:8px;width:148px;height:148px;flex:none;">​</div>
+        <div style="flex:1;min-width:220px;">
+          <div class="kv" style="margin-bottom:8px;"><span class="k">手机扫码或访问</span></div>
+          <div class="mono" id="ios-url" style="word-break:break-all;font-size:12px;color:var(--muted);margin-bottom:8px;">…</div>
+          <div class="hint">与 singctl 主机处于同一局域网时,用 iPhone 相机扫码,在 Safari 打开即可下载 <code>singctl-ios.json</code>;再通过 文件 App 分享给 sing-box App 导入。配置保留远程规则集,不写入本机路径。</div>
+        </div>
+      </div>
+    </div>
     <div class="grid c2">
       <div class="card">
         <div class="card-head"><div class="card-title"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>主机信息</div></div>
@@ -544,21 +559,6 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; ba
         <div class="hint">保存时会校验 YAML 语法与结构,并自动备份原文件。</div>
       </div>
     </div>
-
-    <div class="card">
-      <div class="card-head">
-        <div class="card-title"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/></svg>iOS 配置 (iPhone · sing-box App)</div>
-        <div class="btn-row"><a class="btn btn-sm btn-primary" id="btn-ios-download" href="/api/gen/ios" download="singctl-ios.json">下载配置</a></div>
-      </div>
-      <div style="display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap;">
-        <div id="ios-qr" style="background:#fff;border-radius:12px;padding:8px;width:148px;height:148px;flex:none;">​</div>
-        <div style="flex:1;min-width:220px;">
-          <div class="kv" style="margin-bottom:8px;"><span class="k">手机扫码或访问</span></div>
-          <div class="mono" id="ios-url" style="word-break:break-all;font-size:12px;color:var(--muted);margin-bottom:8px;">…</div>
-          <div class="hint">与 singctl 主机处于同一局域网时,用 iPhone 相机扫码,在 Safari 打开即可下载 <code>singctl-ios.json</code>;再通过 文件 App 分享给 sing-box App 导入。配置保留远程规则集,不写入本机路径。</div>
-        </div>
-      </div>
-    </div>
   </section>
 
   <!-- ═════════ 日志 ═════════ -->
@@ -704,7 +704,8 @@ function showTab(id) {
   $$(".tab").forEach(b => b.classList.toggle("active", b.dataset.tab === id));
   $$("section.panel").forEach(p => p.classList.toggle("active", p.id === "panel-" + id));
   localStorage.setItem("sc-tab", id);
-  if (id === "config") { loadConfig(); loadIOSCard(); }
+  if (id === "config") loadConfig();
+  if (id === "dash") loadIOSCard();
   if (id === "logs") loadLogs();
   if (id === "sb") { loadCache(); loadSbConfig(); }
   if (id === "panel") checkPanel();
