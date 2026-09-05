@@ -74,7 +74,7 @@ singctl sb gen --platform ios
 
 - **默认导出到 `~/Downloads/singctl-ios.json`**（不会写入本机 `/etc/sing-box/config.json`，避免看门狗误加载）；
 - 拒绝通过 `-o` 覆盖本机 sing-box 配置文件；
-- **保留远程规则集引用**（iPhone 沙盒无法读取本地规则集路径，也不做本地化缓存）；
+- **保留远程规则集引用**（iPhone 沙盒无法读取本地规则集路径，也不做本地化缓存）；所有远程规则集自动注入 `download_detour` 指向直连出站（动态解析 tag，如 `DirectConn`），避免 SFI 首次启动时经代理下载规则集导致死循环；
 - DNS/客户端子网交由 iOS 模板默认，不注入本机局域网探测值，也不注入 clash API 与 Tailscale；
 - 文件权限 `0600`（配置含节点凭据）。
 
