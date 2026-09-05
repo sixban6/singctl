@@ -115,6 +115,44 @@ func TestApplyIOSPlatformAdjustments(t *testing.T) {
 		}
 	})
 
+	t.Run("剥离无人接住的http_proxy", func(t *testing.T) {
+		in := `{
+			"inbounds":[
+				{"type":"tun","tag":"tun-in","platform":{"http_proxy":{"enabled":true,"server":"127.0.0.1","server_port":7890}}}
+			],
+			"outbounds":[],
+			"route":{"rule_set":[]}
+		}`
+		out, err := ApplyIOSPlatformAdjustments(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(out, "http_proxy") {
+			t.Fatalf("unbacked http_proxy should be stripped, got %s", out)
+		}
+		if strings.Contains(out, `"platform"`) {
+			t.Fatalf("empty platform key should be removed, got %s", out)
+		}
+	})
+
+	t.Run("有本地入站接住时保留http_proxy", func(t *testing.T) {
+		in := `{
+			"inbounds":[
+				{"type":"tun","tag":"tun-in","platform":{"http_proxy":{"enabled":true,"server":"127.0.0.1","server_port":7890}}},
+				{"type":"mixed","tag":"mixed-in","listen":"127.0.0.1","listen_port":7890}
+			],
+			"outbounds":[],
+			"route":{"rule_set":[]}
+		}`
+		out, err := ApplyIOSPlatformAdjustments(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out, `"http_proxy"`) {
+			t.Fatalf("backed http_proxy should be kept, got %s", out)
+		}
+	})
+
 	t.Run("非法JSON报错", func(t *testing.T) {
 		if _, err := ApplyIOSPlatformAdjustments("not-json"); err == nil {
 			t.Fatal("invalid json should error")

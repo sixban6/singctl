@@ -151,6 +151,11 @@ func (g *ConfigGenerator) GenerateForPlatform(platform string) (string, error) {
 //     否则 http_clients 存在 → 注入 route.default_http_client = 第一个 tag
 //     否则 → 回退逐条 download_detour = 直连出站 tag(老模板语义)。
 //     完全缺省时 sing-box 用 route.final(代理)下载，SFI 首启代理未就绪会死循环。
+//
+//  3. 剥离无人接住的 tun.platform.http_proxy —— 它会让 SFI 把 iOS 系统 HTTP
+//     代理指向模板设定的 127.0.0.1:7890，但配置中并无本地入站监听该端口，
+//     结果是走系统代理的应用 HTTP 请求全部打到死端口。若存在能接住该端口的
+//     mixed/http 入站则保留(说明部署确实启用了系统代理模式)。
 func ApplyIOSPlatformAdjustments(jsonStr string) (string, error) {
 	var cfg map[string]any
 	if err := json.Unmarshal([]byte(jsonStr), &cfg); err != nil {
@@ -222,11 +227,72 @@ func ApplyIOSPlatformAdjustments(jsonStr string) (string, error) {
 		}
 	}
 
+	// ---- 3. 剥离无人接住的 platform.http_proxy ----
+	// 模板 tun.platform.http_proxy.enabled=true 指向 127.0.0.1:7890,
+	// iOS SFI 会通过 NetworkExtension 把系统 HTTP 代理指到该端口;
+	// 但配置中没有本地入站监听 7890 → 死端口, 走系统代理的应用(Safari/App Store 等)
+	// HTTP 请求全部失败。仅当存在能接住该端口的 mixed/http 入站时才保留。
+	if inbounds, ok := cfg["inbounds"].([]any); ok {
+		for _, item := range inbounds {
+			tun, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			if t, _ := tun["type"].(string); t != "tun" {
+				continue
+			}
+			platform, ok := tun["platform"].(map[string]any)
+			if !ok {
+				continue
+			}
+			proxy, ok := platform["http_proxy"].(map[string]any)
+			if !ok {
+				continue
+			}
+			if enabled, _ := proxy["enabled"].(bool); !enabled {
+				continue
+			}
+			server, _ := proxy["server"].(string)
+			port, _ := proxy["server_port"].(float64)
+			if hasLocalListener(inbounds, server, int(port)) {
+				continue // 有本地入站接住, 保留
+			}
+			delete(platform, "http_proxy")
+			if len(platform) == 0 {
+				delete(tun, "platform")
+			}
+			log.Info("ios adjust: 已剥离 tun.platform.http_proxy(%s:%d) —— 无本地入站接住该端口, SFI 系统代理会指向死端口", server, int(port))
+		}
+	}
+
 	result, err := json.Marshal(cfg)
 	if err != nil {
 		return "", fmt.Errorf("ios adjust: re-marshal failed: %w", err)
 	}
 	return string(result), nil
+}
+
+// hasLocalListener 检查 inbounds 中是否存在监听指定 loopback 地址+端口的 mixed/http 入站
+func hasLocalListener(inbounds []any, server string, port int) bool {
+	loopback := map[string]bool{"": true, "127.0.0.1": true, "::1": true, "localhost": true}
+	for _, item := range inbounds {
+		ib, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		t, _ := ib["type"].(string)
+		if t != "mixed" && t != "http" {
+			continue
+		}
+		listen, _ := ib["listen"].(string)
+		if !loopback[listen] {
+			continue
+		}
+		if p, _ := ib["listen_port"].(float64); int(p) == port {
+			return true
+		}
+	}
+	return false
 }
 
 // findDirectOutboundTag 返回第一个 type=direct 出站的 tag
