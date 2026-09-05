@@ -1,3 +1,10 @@
+## [1.25.1](https://github.com/sixban6/singctl/compare/v1.25.0...v1.25.1) (2026-09-05)
+
+
+### Bug Fixes
+
+* **sb:** bump singgen v1.14.4 — mac/win templates drop http_proxy & api service ([aeff25b](https://github.com/sixban6/singctl/commit/aeff25bdbedcdc04eab16a4c486468c13b75f9a1))
+
 # [1.25.0](https://github.com/sixban6/singctl/compare/v1.24.3...v1.25.0) (2026-09-05)
 
 
