@@ -1,3 +1,10 @@
+## [1.24.3](https://github.com/sixban6/singctl/compare/v1.24.2...v1.24.3) (2026-09-05)
+
+
+### Bug Fixes
+
+* **sb:** strip unbacked tun.platform.http_proxy for iOS ([6d644ba](https://github.com/sixban6/singctl/commit/6d644ba1a9f7b038ec4c9e330762264e7609e607))
+
 ## [1.24.2](https://github.com/sixban6/singctl/compare/v1.24.1...v1.24.2) (2026-09-05)
 
 
