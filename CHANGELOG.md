@@ -1,3 +1,11 @@
+## [1.24.2](https://github.com/sixban6/singctl/compare/v1.24.1...v1.24.2) (2026-09-05)
+
+
+### Bug Fixes
+
+* **sb:** strip desktop-bound api service for iOS; harden webui download ([02b35bc](https://github.com/sixban6/singctl/commit/02b35bc5ca687077ffa433be6c8de5fd8ba0207e))
+* **webui:** move iOS config card to Overview tab ([b4b4228](https://github.com/sixban6/singctl/commit/b4b422813526885efccb465452e7c097ec59e866))
+
 ## [1.24.1](https://github.com/sixban6/singctl/compare/v1.24.0...v1.24.1) (2026-09-05)
 
 
