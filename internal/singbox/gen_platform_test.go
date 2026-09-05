@@ -1,7 +1,6 @@
 package singbox
 
 import (
-	"encoding/json"
 	"runtime"
 	"strings"
 	"testing"
@@ -42,73 +41,83 @@ func TestResolvePlatform(t *testing.T) {
 	}
 }
 
-func TestApplyIOSDownloadDetour(t *testing.T) {
-	t.Run("注入直连tag到缺省条目", func(t *testing.T) {
+func TestApplyIOSPlatformAdjustments(t *testing.T) {
+	t.Run("剥离api service并保留default_http_client", func(t *testing.T) {
 		in := `{
-			"outbounds": [
-				{"type":"selector","tag":"Proxy"},
-				{"type":"direct","tag":"DirectConn"}
-			],
-			"route": {
-				"final": "Proxy",
-				"rule_set": [
-					{"type":"remote","tag":"rs1","url":"https://x/rs1.srs"},
-					{"type":"remote","tag":"rs2","url":"https://x/rs2.srs","download_detour":"Proxy"}
-				]
-			}
+			"inbounds":[{"type":"tun","tag":"tun-in"}],
+			"outbounds":[{"type":"selector","tag":"Proxy"},{"type":"direct","tag":"DirectConn"}],
+			"http_clients":[{"tag":"hc-direct","detour":"DirectConn"}],
+			"services":[{"type":"api","tag":"api-in","listen":"192.168.31.1","listen_port":9091}],
+			"route":{"final":"Proxy","default_http_client":"hc-direct","rule_set":[{"type":"remote","tag":"rs1","url":"https://x/rs1.srs"}]}
 		}`
-		out, err := ApplyIOSDownloadDetour(in)
+		out, err := ApplyIOSPlatformAdjustments(in)
 		if err != nil {
 			t.Fatal(err)
 		}
-		var cfg struct {
-			Route struct {
-				RuleSet []struct {
-					Tag            string `json:"tag"`
-					DownloadDetour string `json:"download_detour"`
-				} `json:"rule_set"`
-			} `json:"route"`
+		if strings.Contains(out, "api-in") || strings.Contains(out, "192.168.31.1") {
+			t.Fatalf("api service should be stripped, got %s", out)
 		}
-		if err := json.Unmarshal([]byte(out), &cfg); err != nil {
-			t.Fatal(err)
+		if strings.Contains(out, `"services"`) {
+			t.Fatalf("empty services key should be removed, got %s", out)
 		}
-		rs := cfg.Route.RuleSet
-		if len(rs) != 2 {
-			t.Fatalf("expected 2 rule_set, got %d", len(rs))
-		}
-		if rs[0].DownloadDetour != "DirectConn" {
-			t.Fatalf("rs1 should get DirectConn, got %q", rs[0].DownloadDetour)
-		}
-		if rs[1].DownloadDetour != "Proxy" {
-			t.Fatalf("rs2 existing detour should be preserved, got %q", rs[1].DownloadDetour)
-		}
-	})
-
-	t.Run("无直连出站时保持原样", func(t *testing.T) {
-		in := `{"outbounds":[{"type":"selector","tag":"Proxy"}],"route":{"rule_set":[{"type":"remote","tag":"rs1"}]}}`
-		out, err := ApplyIOSDownloadDetour(in)
-		if err != nil {
-			t.Fatal(err)
+		if !strings.Contains(out, `"default_http_client":"hc-direct"`) {
+			t.Fatalf("existing default_http_client should be preserved, got %s", out)
 		}
 		if strings.Contains(out, `"download_detour"`) {
-			t.Fatalf("should remain unchanged without direct outbound, got %s", out)
+			t.Fatalf("per-entry download_detour should NOT be injected when default_http_client exists, got %s", out)
 		}
 	})
 
-	t.Run("非法JSON报错", func(t *testing.T) {
-		if _, err := ApplyIOSDownloadDetour("not-json"); err == nil {
-			t.Fatal("invalid json should error")
+	t.Run("无default_http_client时从http_clients注入", func(t *testing.T) {
+		in := `{
+			"outbounds":[{"type":"direct","tag":"DirectConn"}],
+			"http_clients":[{"tag":"hc-direct","detour":"DirectConn"}],
+			"route":{"rule_set":[{"type":"remote","tag":"rs1"}]}
+		}`
+		out, err := ApplyIOSPlatformAdjustments(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out, `"default_http_client":"hc-direct"`) {
+			t.Fatalf("default_http_client should be injected, got %s", out)
 		}
 	})
 
-	t.Run("兼容direct缺省tag", func(t *testing.T) {
-		in := `{"outbounds":[{"type":"direct","tag":"direct"}],"route":{"rule_set":[{"type":"remote","tag":"rs1"}]}}`
-		out, err := ApplyIOSDownloadDetour(in)
+	t.Run("无http_clients时回退逐条download_detour", func(t *testing.T) {
+		in := `{
+			"outbounds":[{"type":"direct","tag":"direct"}],
+			"route":{"rule_set":[{"type":"remote","tag":"rs1"}]}
+		}`
+		out, err := ApplyIOSPlatformAdjustments(in)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if !strings.Contains(out, `"download_detour":"direct"`) {
-			t.Fatalf("should resolve plain direct tag, got %s", out)
+			t.Fatalf("legacy fallback should inject download_detour, got %s", out)
+		}
+	})
+
+	t.Run("保留非api service", func(t *testing.T) {
+		in := `{
+			"outbounds":[],
+			"services":[{"type":"api","tag":"api-in"},{"type":"ss","tag":"ss-in","listen":"127.0.0.1","listen_port":8388}],
+			"route":{"rule_set":[]}
+		}`
+		out, err := ApplyIOSPlatformAdjustments(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(out, "api-in") {
+			t.Fatalf("api service should be stripped, got %s", out)
+		}
+		if !strings.Contains(out, "ss-in") {
+			t.Fatalf("non-api services should be kept, got %s", out)
+		}
+	})
+
+	t.Run("非法JSON报错", func(t *testing.T) {
+		if _, err := ApplyIOSPlatformAdjustments("not-json"); err == nil {
+			t.Fatal("invalid json should error")
 		}
 	})
 }

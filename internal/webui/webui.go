@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 
 	"singctl/internal/logger"
 )
@@ -35,6 +36,11 @@ type Server struct {
 	opts Options
 
 	mux *http.ServeMux
+
+	// iOS 配置生成缓存: 实时生成需拉订阅(秒级), 缓存让 SFI 同步/重复扫码瞬时返回
+	iosMu       sync.Mutex
+	iosCacheKey string // singctl.yaml 的 path|mtime|size 指纹
+	iosCacheVal string
 }
 
 // New 创建 Web 服务
@@ -56,8 +62,9 @@ func New(opts Options) *Server {
 	s.mux.HandleFunc("GET /api/cache", s.guard(s.handleCache))
 	s.mux.HandleFunc("GET /api/logs", s.guard(s.handleLogs))
 
-	// iOS(sing-box App) 配置下载: 支持扫码 ?password= 鉴权
+	// iOS(sing-box App) 配置下载: 支持扫码 ?password= 鉴权(同时容忍尾斜杠)
 	s.mux.HandleFunc("GET /api/gen/ios", s.guardIOSDownload(s.handleIOSConfig))
+	s.mux.HandleFunc("GET /api/gen/ios/{$}", s.guardIOSDownload(s.handleIOSConfig))
 	s.mux.HandleFunc("GET /api/gen/ios/url", s.guard(s.handleIOSConfigURL))
 
 	// sing-box 配置文件编辑
