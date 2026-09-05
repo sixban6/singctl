@@ -126,10 +126,9 @@ func (g *ConfigGenerator) GenerateForPlatform(platform string) (string, error) {
 		return "", err
 	}
 
-	// iOS: 远程规则集必须显式指定 download_detour 为直连出站 ——
-	// 缺省时 sing-box 用 route.final(代理) 下载, SFI 首次启动代理未就绪会死循环报错
+	// iOS: 平台适配(剥离桌面专属 api service + 确保规则集下载通道)
 	if isIOS {
-		deduped, err = ApplyIOSDownloadDetour(deduped)
+		deduped, err = ApplyIOSPlatformAdjustments(deduped)
 		if err != nil {
 			return "", err
 		}
@@ -139,65 +138,116 @@ func (g *ConfigGenerator) GenerateForPlatform(platform string) (string, error) {
 	return PrettyJSON(deduped)
 }
 
-// ApplyIOSDownloadDetour 为远程规则集注入 download_detour。
-// 目标 tag 从配置的出站里动态解析(type=direct 的第一个, 如模板中的 DirectConn),
-// 不写死名称 —— 不同模板直连 tag 可能不同(direct/hc-direct/DirectConn...)。
-// 已有 download_detour 的条目不覆盖; 找不到直连出站时保持原样。
-func ApplyIOSDownloadDetour(jsonStr string) (string, error) {
+// ApplyIOSPlatformAdjustments 对 iOS(SFI 沙盒)做平台适配:
+//
+//  1. 剥离 services 中 type=api 的条目 —— 模板把它绑定在桌面机局域网 IP 上
+//     (如 listen: 192.168.31.1)，iPhone 上该 IP 不存在，bind 失败直接导致 SFI
+//     无法启动("bind: can't assign requested address")；其 dashboard 路径
+//     (/etc/sing-box/...)在 iOS 沙盒内同样无意义。
+//
+//  2. 确保远程规则集的下载通道，优先级:
+//     route.default_http_client 已存在 → 不动(模板已全局指向 hc-direct 直连，
+//     1.14 起官方推荐，逐条 download_detour 将在 1.16 移除)
+//     否则 http_clients 存在 → 注入 route.default_http_client = 第一个 tag
+//     否则 → 回退逐条 download_detour = 直连出站 tag(老模板语义)。
+//     完全缺省时 sing-box 用 route.final(代理)下载，SFI 首启代理未就绪会死循环。
+func ApplyIOSPlatformAdjustments(jsonStr string) (string, error) {
 	var cfg map[string]any
 	if err := json.Unmarshal([]byte(jsonStr), &cfg); err != nil {
-		return "", fmt.Errorf("ios detour: invalid JSON: %w", err)
+		return "", fmt.Errorf("ios adjust: invalid JSON: %w", err)
 	}
 
-	rawOutbounds, ok := cfg["outbounds"].([]any)
-	if !ok {
-		return jsonStr, nil
+	// ---- 1. 剥离桌面专属 api service ----
+	if services, ok := cfg["services"].([]any); ok {
+		kept := make([]any, 0, len(services))
+		stripped := 0
+		for _, item := range services {
+			sv, ok := item.(map[string]any)
+			if ok {
+				if t, _ := sv["type"].(string); t == "api" {
+					stripped++
+					continue
+				}
+			}
+			kept = append(kept, item)
+		}
+		if stripped > 0 {
+			log.Info("ios adjust: 已剥离 %d 个桌面专属 api service", stripped)
+			if len(kept) == 0 {
+				delete(cfg, "services")
+			} else {
+				cfg["services"] = kept
+			}
+		}
 	}
-	directTag := ""
-	for _, item := range rawOutbounds {
+
+	// ---- 2. 确保远程规则集下载通道 ----
+	route, _ := cfg["route"].(map[string]any)
+	rawRS, _ := route["rule_set"].([]any)
+	hasRemote := false
+	for _, item := range rawRS {
+		if rs, ok := item.(map[string]any); ok {
+			if t, _ := rs["type"].(string); t == "remote" {
+				hasRemote = true
+				break
+			}
+		}
+	}
+	if route != nil && hasRemote {
+		if _, has := route["default_http_client"]; has {
+			// 模板已全局配置下载通道，不动
+		} else if hcs, _ := cfg["http_clients"].([]any); len(hcs) > 0 {
+			if first, ok := hcs[0].(map[string]any); ok {
+				if tag, _ := first["tag"].(string); tag != "" {
+					route["default_http_client"] = tag
+					log.Info("ios adjust: 已设置 route.default_http_client: %s", tag)
+				}
+			}
+		} else if directTag := findDirectOutboundTag(rawOutbounds(cfg)); directTag != "" {
+			// 老模板无 http_clients 机制 → 回退逐条 download_detour
+			injected := 0
+			for _, item := range rawRS {
+				if rs, ok := item.(map[string]any); ok {
+					if _, has := rs["download_detour"]; !has {
+						rs["download_detour"] = directTag
+						injected++
+					}
+				}
+			}
+			if injected > 0 {
+				log.Info("ios adjust: 已为 %d 个规则集设置 download_detour: %s", injected, directTag)
+			}
+		} else {
+			log.Warn("ios adjust: 配置中无直连出站, 规则集下载通道保持缺省")
+		}
+	}
+
+	result, err := json.Marshal(cfg)
+	if err != nil {
+		return "", fmt.Errorf("ios adjust: re-marshal failed: %w", err)
+	}
+	return string(result), nil
+}
+
+// findDirectOutboundTag 返回第一个 type=direct 出站的 tag
+func findDirectOutboundTag(outbounds []any) string {
+	for _, item := range outbounds {
 		ob, ok := item.(map[string]any)
 		if !ok {
 			continue
 		}
 		if t, _ := ob["type"].(string); t == "direct" {
 			if tag, _ := ob["tag"].(string); tag != "" {
-				directTag = tag
-				break
+				return tag
 			}
 		}
 	}
-	if directTag == "" {
-		log.Warn("ios detour: 配置中无直连出站, 规则集 download_detour 保持缺省")
-		return jsonStr, nil
-	}
+	return ""
+}
 
-	route, ok := cfg["route"].(map[string]any)
-	if !ok {
-		return jsonStr, nil
-	}
-	ruleSets, ok := route["rule_set"].([]any)
-	if !ok {
-		return jsonStr, nil
-	}
-	injected := 0
-	for _, item := range ruleSets {
-		rs, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
-		if _, has := rs["download_detour"]; !has {
-			rs["download_detour"] = directTag
-			injected++
-		}
-	}
-	if injected > 0 {
-		log.Info("ios detour: 已为 %d 个规则集设置 download_detour: %s", injected, directTag)
-	}
-	result, err := json.Marshal(cfg)
-	if err != nil {
-		return "", fmt.Errorf("ios detour: re-marshal failed: %w", err)
-	}
-	return string(result), nil
+func rawOutbounds(cfg map[string]any) []any {
+	ob, _ := cfg["outbounds"].([]any)
+	return ob
 }
 
 // generateSingleSubscription 处理单个订阅

@@ -436,9 +436,26 @@ var iosGenerate = func(cfg *config.Config) (string, error) {
 	return singbox.NewConfigGenerator(cfg).GenerateForPlatform(singbox.PlatformIOS)
 }
 
-// handleIOSConfig 生成并返回 iOS 配置文件(作为附件下载)
+// handleIOSConfig 生成并返回 iOS 配置文件(作为附件下载)。
+// 以 singctl.yaml 的 mtime+size 为指纹缓存生成结果: 实时生成需拉订阅(秒级),
+// 缓存让 SFI 远程配置同步与重复扫码瞬时返回; 配置变更后自动失效。
 func (s *Server) handleIOSConfig(w http.ResponseWriter, r *http.Request) {
-	cfg, err := config.Load(configPathFor(s))
+	cfgPath := configPathFor(s)
+	cacheKey := ""
+	if fi, err := os.Stat(cfgPath); err == nil {
+		cacheKey = fmt.Sprintf("%s|%d|%d", cfgPath, fi.ModTime().UnixNano(), fi.Size())
+	}
+
+	s.iosMu.Lock()
+	if cacheKey != "" && cacheKey == s.iosCacheKey && s.iosCacheVal != "" {
+		content := s.iosCacheVal
+		s.iosMu.Unlock()
+		s.writeIOSConfig(w, content)
+		return
+	}
+	s.iosMu.Unlock()
+
+	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "读取配置失败: "+err.Error())
 		return
@@ -457,8 +474,20 @@ func (s *Server) handleIOSConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+
+	if cacheKey != "" {
+		s.iosMu.Lock()
+		s.iosCacheKey, s.iosCacheVal = cacheKey, configJSON
+		s.iosMu.Unlock()
+	}
+	s.writeIOSConfig(w, configJSON)
+}
+
+// writeIOSConfig 以附件形式输出 iOS 配置
+func (s *Server) writeIOSConfig(w http.ResponseWriter, configJSON string) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="singctl-ios.json"`)
+	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(configJSON))
 }
