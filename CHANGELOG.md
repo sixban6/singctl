@@ -1,3 +1,10 @@
+# [1.25.0](https://github.com/sixban6/singctl/compare/v1.24.3...v1.25.0) (2026-09-05)
+
+
+### Features
+
+* **sb:** iOS platform handling now shipped via singgen v1.14.3 ([007c001](https://github.com/sixban6/singctl/commit/007c00199da271cccbfc2daa8c12b004fa2cf048))
+
 ## [1.24.3](https://github.com/sixban6/singctl/compare/v1.24.2...v1.24.3) (2026-09-05)
 
 
