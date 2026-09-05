@@ -24,6 +24,25 @@ type ConfigGenerator struct {
 	defaultTplVer string
 }
 
+// 支持的目标平台
+const (
+	PlatformIOS = "ios"
+)
+
+// ResolvePlatform 将平台参数解析为实际值。
+// "auto"/空 → 当前系统平台(runtime.GOOS);否则仅接受白名单平台。
+// iOS 配置可在任意系统上生成 —— 平台指的是配置的“目标设备”而非本机。
+func ResolvePlatform(p string) (string, error) {
+	switch p {
+	case "", "auto":
+		return runtime.GOOS, nil
+	case "darwin", "windows", "linux", PlatformIOS:
+		return p, nil
+	default:
+		return "", fmt.Errorf("不支持的目标平台 %q (可选: auto/darwin/windows/linux/ios)", p)
+	}
+}
+
 func NewConfigGenerator(cfg *config.Config) *ConfigGenerator {
 	cg := &ConfigGenerator{config: cfg}
 	netResult, err := netinfo.Get()
@@ -61,26 +80,41 @@ func (c *ConfigGenerator) getSubnetFromIP(ip string) string {
 }
 
 func (g *ConfigGenerator) Generate() (string, error) {
+	return g.GenerateForPlatform(runtime.GOOS)
+}
+
+// GenerateForPlatform 生成针对指定目标平台的配置。
+// 与桌面端(Linux/macOS/Windows 本机运行)不同, iOS(sing-box 官方 App SFI)有以下平台差异:
+//   - DNS/客户端子网不注入探测值, 交给 singgen ios 模板默认(手机离 homesite 后局域网 DNS 无效)
+//   - external_controller 保留模板默认(127.0.0.1:9095, 仅 SFI 沙盒内 loopback 可访问,
+//     可供 SFI 内置 dashboard 使用; 不注入本机 webui 地址)
+//   - 不注入 Tailscale(手机上无 tailscaled)
+func (g *ConfigGenerator) GenerateForPlatform(platform string) (string, error) {
+	resolved, err := ResolvePlatform(platform)
+	if err != nil {
+		return "", err
+	}
+	isIOS := resolved == PlatformIOS
+
 	ctx := context.Background()
 
-	// 检查 DNS 服务器是否可用
+	// 检查 DNS 服务器是否可用(iOS 交给模板默认, 不探测本机局域网 DNS)
 	var dnsServer string
-	if g.netInfo != nil && len(g.netInfo.DNSServers) > 0 {
-		dnsServer = g.netInfo.DNSServers[0]
-	} else {
-		dnsServer = "8.8.8.8" // 默认 DNS
+	if !isIOS {
+		if g.netInfo != nil && len(g.netInfo.DNSServers) > 0 {
+			dnsServer = g.netInfo.DNSServers[0]
+		} else {
+			dnsServer = "8.8.8.8" // 默认 DNS
+		}
 	}
 
-	var (
-		raw string
-		err error
-	)
+	var raw string
 	// 如果只有一个订阅，使用单订阅API
 	if len(g.config.Subs) == 1 {
-		raw, err = g.generateSingleSubscription(ctx, dnsServer)
+		raw, err = g.generateSingleSubscription(ctx, dnsServer, resolved)
 	} else {
 		// 多订阅使用新的多订阅API
-		raw, err = g.generateMultiSubscription(ctx, dnsServer)
+		raw, err = g.generateMultiSubscription(ctx, dnsServer, resolved)
 	}
 	if err != nil {
 		return "", err
@@ -97,18 +131,24 @@ func (g *ConfigGenerator) Generate() (string, error) {
 }
 
 // generateSingleSubscription 处理单个订阅
-func (g *ConfigGenerator) generateSingleSubscription(ctx context.Context, dnsServer string) (string, error) {
+func (g *ConfigGenerator) generateSingleSubscription(ctx context.Context, dnsServer, platform string) (string, error) {
 	sub := g.config.Subs[0]
-	log.Info("Platform for singgen:%s", runtime.GOOS)
-	authKey, lanIpcidr := g.getTailScaleParmas()
+	log.Info("Platform for singgen:%s", platform)
+	authKey, lanIpcidr := "", ""
+	webui, clientSubnet := "", ""
+	if platform != PlatformIOS {
+		authKey, lanIpcidr = g.getTailScaleParmas()
+		webui = g.webui
+		clientSubnet = g.getSubnetFromIP(dnsServer)
+	}
 
 	configBytes, err := singgen.GenerateConfigBytes(ctx, sub.URL,
 		singgen.WithTemplate(g.defaultTplVer),
-		singgen.WithPlatform(runtime.GOOS),
+		singgen.WithPlatform(platform),
 		singgen.WithOutputFormat("json"),
 		singgen.WithDNSServer(dnsServer),
-		singgen.WithExternalController(g.webui),
-		singgen.WithClientSubnet(g.getSubnetFromIP(dnsServer)),
+		singgen.WithExternalController(webui),
+		singgen.WithClientSubnet(clientSubnet),
 		singgen.WithMirrorURL(g.config.GitHub.MirrorURL),
 		singgen.WithEmojiRemoval(sub.RemoveEmoji),
 		singgen.WithBandwidthParams(g.config.Hy2.Up, g.config.Hy2.Down),
@@ -146,18 +186,23 @@ func (g *ConfigGenerator) getTailScaleParmas() (string, string) {
 }
 
 // generateMultiSubscription 处理多订阅
-func (g *ConfigGenerator) generateMultiSubscription(ctx context.Context, dnsServer string) (string, error) {
+func (g *ConfigGenerator) generateMultiSubscription(ctx context.Context, dnsServer, platform string) (string, error) {
 	// 构建多订阅配置
 
-	authKey, lanIpcidr := g.getTailScaleParmas()
+	authKey, lanIpcidr := "", ""
+	webui := ""
+	if platform != PlatformIOS {
+		authKey, lanIpcidr = g.getTailScaleParmas()
+		webui = g.webui
+	}
 
 	multiConfig := &singgen.MultiConfig{
 		Global: singgen.GlobalConfig{
 			Template:       g.defaultTplVer,
-			Platform:       runtime.GOOS,
+			Platform:       platform,
 			MirrorURL:      g.config.GitHub.MirrorURL,
 			DNSLocalServer: dnsServer,
-			WebUIAddress:   g.webui,
+			WebUIAddress:   webui,
 			RemoveEmoji:    false, // 全局默认不移除，由各订阅控制
 			SkipTLSVerify:  false,
 			HTTPTimeout:    30 * time.Second,
@@ -170,7 +215,7 @@ func (g *ConfigGenerator) generateMultiSubscription(ctx context.Context, dnsServ
 		Subscriptions: make([]singgen.SubscriptionConfig, 0, len(g.config.Subs)),
 	}
 
-	log.Info("Platform for singgen:%s", runtime.GOOS)
+	log.Info("Platform for singgen:%s", platform)
 
 	// 添加所有订阅
 	for _, sub := range g.config.Subs {
@@ -287,4 +332,27 @@ func PrettyJSON(jsonStr string) (string, error) {
 		return "", fmt.Errorf("pretty: invalid JSON: %w", err)
 	}
 	return buf.String(), nil
+}
+
+// CheckIOSCompatibility 校验生成的配置是否适合导入 iOS SFI(沙盒环境)。
+// 目前检查: rule_set 不能有 type=local 条目 —— 本地绝对路径在 iPhone 沙盒内不可读,
+// 会导致 SFI 启动失败; iOS 配置必须保留远程规则集引用。
+func CheckIOSCompatibility(jsonStr string) error {
+	var cfg struct {
+		Route struct {
+			RuleSet []struct {
+				Type string `json:"type"`
+				Tag  string `json:"tag"`
+			} `json:"rule_set"`
+		} `json:"route"`
+	}
+	if err := json.Unmarshal([]byte(jsonStr), &cfg); err != nil {
+		return fmt.Errorf("ios check: invalid JSON: %w", err)
+	}
+	for _, rs := range cfg.Route.RuleSet {
+		if rs.Type == "local" {
+			return fmt.Errorf("ios check: 规则集 %q 使用了 type=local, iPhone 沙盒无法读取本地路径, 请用 --platform ios 重新生成(自动保留远程规则集)", rs.Tag)
+		}
+	}
+	return nil
 }

@@ -146,9 +146,10 @@ func newGenCmd(cfg *config.Config) *cobra.Command {
 	var outputPath string
 	var stdout bool
 	var noLocalize bool
+	var platform string
 	genCmd := &cobra.Command{
 		Use:     "gen",
-		Short:   "生成 sing-box 配置文件 / Generate sing-box configuration",
+		Short:   "生成 sing-box 配置文件(可指定目标平台) / Generate sing-box configuration",
 		Aliases: []string{"g"},
 		RunE: func(cmd *cobra.Command, args []string) error {
 
@@ -157,10 +158,23 @@ func newGenCmd(cfg *config.Config) *cobra.Command {
 				return fmt.Errorf("subscription config invalid: %w", err)
 			}
 
-			generator := singbox.NewConfigGenerator(cfg)
-			configJSON, err := generator.Generate()
+			target, err := singbox.ResolvePlatform(platform)
 			if err != nil {
 				return err
+			}
+			isIOS := target == singbox.PlatformIOS
+
+			generator := singbox.NewConfigGenerator(cfg)
+			configJSON, err := generator.GenerateForPlatform(target)
+			if err != nil {
+				return err
+			}
+
+			// iOS 兼容性检查(含 --stdout 路径): 本地路径规则集在 iPhone 沙盒不可读
+			if isIOS {
+				if err := singbox.CheckIOSCompatibility(configJSON); err != nil {
+					return err
+				}
 			}
 
 			// 如果指定了--stdout，输出到标准输出
@@ -169,8 +183,20 @@ func newGenCmd(cfg *config.Config) *cobra.Command {
 				return nil
 			}
 
-			// 规则集本地化（可用 --no-localize 关闭，例如需要生成可迁移到其它机器的配置）
-			if !noLocalize {
+			// iOS 配置不写入本机 sing-box 配置路径(看门狗会把 iPhone 配置跑在本机上), 且必须保留远程规则集
+			if isIOS {
+				if err := guardIOSOutputPath(outputPath); err != nil {
+					return err
+				}
+				if err := guardIOSOutputPath(outputPath); err != nil {
+					return err
+				}
+				if outputPath == "" {
+					outputPath = defaultIOSOutputPath()
+				}
+			} else if !noLocalize {
+				// 规则集本地化(可用 --no-localize 关闭，例如需要生成可迁移到其它机器的配置);
+				// iOS 分支不做本地化 —— iPhone 沙盒读不到本地路径, 必须保留远程引用
 				if localized, stats, err := singbox.LocalizeRuleSets(configJSON, singbox.LocalizeOptions{
 					MirrorURL: cfg.GitHub.MirrorURL,
 				}); err != nil {
@@ -205,12 +231,23 @@ func newGenCmd(cfg *config.Config) *cobra.Command {
 				logger.Info("已备份现有配置到: %s", backupPath)
 			}
 
-			// 写入新配置
-			if err := os.WriteFile(targetPath, []byte(configJSON), 0644); err != nil {
+			// 写入新配置(iOS 配置含节点凭据且放在 Downloads 等公共目录, 收紧为 0600)
+			perm := os.FileMode(0644)
+			if isIOS {
+				perm = 0600
+			}
+			if err := os.WriteFile(targetPath, []byte(configJSON), perm); err != nil {
 				return fmt.Errorf("写入配置文件失败: %w", err)
+			}
+			if perm == 0600 {
+				_ = os.Chmod(targetPath, perm) // 防止已存在文件保留了旧权限
 			}
 
 			logger.Success("配置已生成: %s", targetPath)
+			if isIOS {
+				logger.Info("导入 iPhone: AirDrop/隔空投送该文件 → 文件 App → 分享给 sing-box App; 或在 sing-box App 中新建配置时选择该文件")
+				return nil
+			}
 			if copied, err := copyGeneratedConfigToClipboard(targetPath); err != nil {
 				logger.Warn("配置已生成，但复制到粘贴板失败: %v", err)
 			} else if copied {
@@ -222,7 +259,44 @@ func newGenCmd(cfg *config.Config) *cobra.Command {
 	genCmd.Flags().StringVarP(&outputPath, "output", "o", "", "指定输出文件路径")
 	genCmd.Flags().BoolVar(&stdout, "stdout", false, "输出到标准输出而不是文件")
 	genCmd.Flags().BoolVar(&noLocalize, "no-localize", false, "不将远程规则集缓存到本地")
+	genCmd.Flags().StringVar(&platform, "platform", "auto", "目标平台: auto/darwin/windows/linux/ios (ios=导出给 iPhone sing-box App)")
 	return genCmd
+}
+
+// defaultIOSOutputPath 返回 iOS 配置的默认导出路径(用户下载/导出目录)
+func defaultIOSOutputPath() string {
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, "Downloads", "singctl-ios.json")
+	}
+	return "singctl-ios.json"
+}
+
+// guardIOSOutputPath 阻止 iOS 配置覆盖本机 sing-box 配置文件:
+// 本机 sing-box/看门狗加载的是桌面端配置, 一旦被 iPhone 配置覆盖会直接改变本机代理行为。
+// 保护范围取跨平台并集: 各 OS 的 constant.SingBoxConfigFile + Linux 官方路径 ——
+// 后者在 macOS/Windows 上也可能因手工部署而真实存在(已实际发生过覆盖事故)
+func guardIOSOutputPath(outputPath string) error {
+	if outputPath == "" {
+		return nil // 未指定时走默认导出路径, 不会撞上本机配置
+	}
+	clean := func(p string) string {
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			return filepath.Clean(p)
+		}
+		return abs
+	}
+	protected := []string{
+		constant.SingBoxConfigFile,
+		"/etc/sing-box/config.json", // Linux/OpenWrt 官方路径(跨平台并集)
+	}
+	target := clean(outputPath)
+	for _, p := range protected {
+		if p != "" && target == clean(p) {
+			return fmt.Errorf("拒绝写入: %q 是本机 sing-box 配置文件, iOS 配置不能覆盖它(可用 -o 指定其它路径, 省略 -o 则导出到 ~/Downloads/singctl-ios.json)", outputPath)
+		}
+	}
+	return nil
 }
 
 func newInstallCmd(cfg *config.Config) *cobra.Command {

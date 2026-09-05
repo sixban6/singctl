@@ -56,6 +56,10 @@ func New(opts Options) *Server {
 	s.mux.HandleFunc("GET /api/cache", s.guard(s.handleCache))
 	s.mux.HandleFunc("GET /api/logs", s.guard(s.handleLogs))
 
+	// iOS(sing-box App) 配置下载: 支持扫码 ?password= 鉴权
+	s.mux.HandleFunc("GET /api/gen/ios", s.guardIOSDownload(s.handleIOSConfig))
+	s.mux.HandleFunc("GET /api/gen/ios/url", s.guard(s.handleIOSConfigURL))
+
 	// sing-box 配置文件编辑
 	s.mux.HandleFunc("GET /api/sbconfig", s.guard(s.handleSbConfigGet))
 	s.mux.HandleFunc("PUT /api/sbconfig", s.guard(s.handleSbConfigPut))
@@ -154,6 +158,22 @@ func (s *Server) authorized(r *http.Request) bool {
 		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(pass), []byte(s.opts.Password)) == 1
+}
+
+// guardIOSDownload iOS 配置下载端点专用鉴权:
+// 除 Basic Auth 外还接受 ?password= 查询参数 —— 手机扫码下载时 Safari 不便输入 Basic 凭据,
+// 二维码 URL 会内嵌口令(与 Basic 口令同一秘密, 泄露面等价)
+func (s *Server) guardIOSDownload(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.opts.Password != "" && !s.authorized(r) {
+			q := r.URL.Query().Get("password")
+			if subtle.ConstantTimeCompare([]byte(q), []byte(s.opts.Password)) != 1 {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+		}
+		next(w, r)
+	}
 }
 
 // ───────────────────────── 内部工具 ─────────────────────────

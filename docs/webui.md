@@ -115,6 +115,8 @@ WebUI 后端提供简洁的 REST API,可用于自动化:
 | GET | `/api/cache` | 规则集缓存状态 |
 | GET | `/api/logs?name=daemon\|watchdog&tail=200` | 日志尾部 |
 | POST | `/api/action` | 执行动作(NDJSON 流式返回) |
+| GET | `/api/gen/ios` | 生成并下载 iOS (sing-box App) 配置,支持 `?password=` 鉴权 |
+| GET | `/api/gen/ios/url` | 返回手机可直接访问的下载地址(供二维码使用) |
 
 动作示例:
 
@@ -132,3 +134,7 @@ curl -N -X POST http://127.0.0.1:8090/api/action \
 另有 clash API 反向代理:`/clash/*`(面板与 API)及 `/connections`、`/proxies` 等 clash API 根路径直通(供内嵌面板的页面同源请求使用)。
 
 同一时刻仅允许一个动作执行,并发请求返回 `409`。
+
+### iOS 配置下载
+
+「配置」页的 iOS 卡片会展示局域网下载地址与二维码,iPhone 同局域网扫码即可下载 `singctl-ios.json` 并导入 sing-box App。设置了访问口令时,二维码 URL 内嵌 `?password=` 参数(与 Basic 口令同一秘密),请在受信内网使用。
