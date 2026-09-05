@@ -126,8 +126,78 @@ func (g *ConfigGenerator) GenerateForPlatform(platform string) (string, error) {
 		return "", err
 	}
 
+	// iOS: 远程规则集必须显式指定 download_detour 为直连出站 ——
+	// 缺省时 sing-box 用 route.final(代理) 下载, SFI 首次启动代理未就绪会死循环报错
+	if isIOS {
+		deduped, err = ApplyIOSDownloadDetour(deduped)
+		if err != nil {
+			return "", err
+		}
+	}
+
 	// 格式化为可读 JSON
 	return PrettyJSON(deduped)
+}
+
+// ApplyIOSDownloadDetour 为远程规则集注入 download_detour。
+// 目标 tag 从配置的出站里动态解析(type=direct 的第一个, 如模板中的 DirectConn),
+// 不写死名称 —— 不同模板直连 tag 可能不同(direct/hc-direct/DirectConn...)。
+// 已有 download_detour 的条目不覆盖; 找不到直连出站时保持原样。
+func ApplyIOSDownloadDetour(jsonStr string) (string, error) {
+	var cfg map[string]any
+	if err := json.Unmarshal([]byte(jsonStr), &cfg); err != nil {
+		return "", fmt.Errorf("ios detour: invalid JSON: %w", err)
+	}
+
+	rawOutbounds, ok := cfg["outbounds"].([]any)
+	if !ok {
+		return jsonStr, nil
+	}
+	directTag := ""
+	for _, item := range rawOutbounds {
+		ob, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if t, _ := ob["type"].(string); t == "direct" {
+			if tag, _ := ob["tag"].(string); tag != "" {
+				directTag = tag
+				break
+			}
+		}
+	}
+	if directTag == "" {
+		log.Warn("ios detour: 配置中无直连出站, 规则集 download_detour 保持缺省")
+		return jsonStr, nil
+	}
+
+	route, ok := cfg["route"].(map[string]any)
+	if !ok {
+		return jsonStr, nil
+	}
+	ruleSets, ok := route["rule_set"].([]any)
+	if !ok {
+		return jsonStr, nil
+	}
+	injected := 0
+	for _, item := range ruleSets {
+		rs, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, has := rs["download_detour"]; !has {
+			rs["download_detour"] = directTag
+			injected++
+		}
+	}
+	if injected > 0 {
+		log.Info("ios detour: 已为 %d 个规则集设置 download_detour: %s", injected, directTag)
+	}
+	result, err := json.Marshal(cfg)
+	if err != nil {
+		return "", fmt.Errorf("ios detour: re-marshal failed: %w", err)
+	}
+	return string(result), nil
 }
 
 // generateSingleSubscription 处理单个订阅
