@@ -1179,15 +1179,15 @@ async function checkPanel() {
       // MetaCubeXD 自身默认后端是 127.0.0.1:9090 —— 在手机/其他设备浏览器里指向设备自身,不可用。
       // 通过它的 URL 快速配置参数(hostname/port)让默认后端指向 WebUI 同源地址:
       // 根路径 clash API 已被 WebUI 反代接住, 密钥由代理自动注入, 面板无需填写。
-      // 仅首次注入(localStorage 标记), 之后不覆盖用户在面板里手动修改的后端。
+      // 仅首次(或 WebUI 访问地址变化后)注入, 不覆盖用户在面板里手动修改的后端。
       let src = "/clash/ui/";
       try {
-        if (!localStorage.getItem("xdBackendAutoSet")) {
+        if (localStorage.getItem("xdBackendAutoSet") !== location.origin) {
           const port = location.port || (location.protocol === "https:" ? "443" : "80");
           const qs = "hostname=" + encodeURIComponent(location.hostname) +
                      "&port=" + encodeURIComponent(port) + "&secret=";
           src += "?" + qs + "#/setup?" + qs; // 同时放 search 与 hash, 兼容不同版本的参数读取位置
-          localStorage.setItem("xdBackendAutoSet", "1");
+          localStorage.setItem("xdBackendAutoSet", location.origin);
         }
       } catch {}
       frame.src = src;
