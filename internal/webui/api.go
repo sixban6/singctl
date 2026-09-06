@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -254,10 +255,19 @@ func maskURL(u string) string {
 	if u == "" {
 		return ""
 	}
-	if len(u) <= 28 {
-		return u[:8] + "…" + u[len(u)-6:]
+	// 保留协议+域名(可识别服务商), 路径与 query(含订阅 token 凭据)全部用 * 遮蔽
+	parsed, err := url.Parse(u)
+	if err != nil || parsed.Host == "" {
+		if i := strings.Index(u, "://"); i > 0 {
+			return u[:i+3] + "******"
+		}
+		return "******"
 	}
-	return u[:18] + "…" + u[len(u)-10:]
+	scheme := parsed.Scheme
+	if scheme == "" {
+		scheme = "https"
+	}
+	return scheme + "://" + parsed.Host + "/******"
 }
 
 func fileExists(path string) bool {
