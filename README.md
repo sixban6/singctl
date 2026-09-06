@@ -71,7 +71,7 @@ SingCtl 按功能模块分为以下几个部分，点击链接查看详细说明
 
 ## 界面预览
 
-![WebUI 概览](docs/images/overview.png)
+![WebUI 概览](docs/images/exp.png)
 
 > 浏览器图形化管理全部功能：状态总览、快捷操作、iPhone 配置扫码下载、Tailscale 组网、防火墙加固等。默认监听 `:8090`，启动：`singctl web`
 
