@@ -69,6 +69,12 @@ SingCtl 按功能模块分为以下几个部分，点击链接查看详细说明
 | **Web 管理界面** | `singctl web` | 浏览器图形化管理 singctl 全部功能(简写 `singctl w`) | [查看文档](docs/webui.md) |
 | **实用工具** | `singctl ut` | 宽带测速、自更新、系统信息查看 | [查看文档](docs/utils.md) |
 
+## 界面预览
+
+![WebUI 概览](docs/images/overview.png)
+
+> 浏览器图形化管理全部功能：状态总览、快捷操作、iPhone 配置扫码下载、Tailscale 组网、防火墙加固等。默认监听 `:8090`，启动：`singctl web`
+
 ## ⚙️ 配置文件
 
 核心配置位于 `singctl.yaml`，各模块的配置项说明请参阅对应子文档。
