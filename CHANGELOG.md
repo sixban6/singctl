@@ -1,3 +1,10 @@
+## [1.25.3](https://github.com/sixban6/singctl/compare/v1.25.2...v1.25.3) (2026-09-06)
+
+
+### Bug Fixes
+
+* **webui:** preconfigure MetaCubeXD backend via URL params on first open ([45c9e30](https://github.com/sixban6/singctl/commit/45c9e3031034b6206fa920ceae855a20270fc406))
+
 ## [1.25.2](https://github.com/sixban6/singctl/compare/v1.25.1...v1.25.2) (2026-09-06)
 
 
