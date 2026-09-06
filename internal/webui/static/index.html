@@ -390,19 +390,6 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; ba
     </div>
     <div class="card">
       <div class="card-head">
-        <div class="card-title"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8V21H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/></svg>规则集缓存</div>
-        <div class="btn-row">
-          <button class="btn btn-sm" id="btn-cache-refresh">刷新状态</button>
-          <button class="btn btn-sm" data-action="cache-update">更新缓存</button>
-          <button class="btn btn-sm btn-danger" data-action="cache-clear">清空缓存</button>
-        </div>
-      </div>
-      <div id="cache-info" style="margin-bottom:12px;"></div>
-      <div id="cache-table"></div>
-      <div class="hint">远程规则集会预下载到本地并改写为本地引用,让 sing-box 启动不依赖 GitHub。</div>
-    </div>
-    <div class="card">
-      <div class="card-head">
         <div class="card-title"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M9 13h6M9 17h6"/></svg>sing-box 配置文件</div>
         <div class="btn-row">
           <button class="btn btn-sm" id="btn-sbc-reload">重新加载</button>
@@ -421,13 +408,30 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; ba
       </div>
       <div class="hint">保存前会用 <code>sing-box check</code> 做语义校验,并自动备份当前版本(保留最近 3 份);修改需重启 sing-box 后生效。</div>
     </div>
+
+    <div class="card">
+      <div class="card-head">
+        <div class="card-title"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8V21H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/></svg>规则集缓存</div>
+        <div class="btn-row">
+          <button class="btn btn-sm" id="btn-cache-toggle">展开 ▾</button>
+          <button class="btn btn-sm" id="btn-cache-refresh" hidden>刷新状态</button>
+          <button class="btn btn-sm" data-action="cache-update" hidden>更新缓存</button>
+          <button class="btn btn-sm btn-danger" data-action="cache-clear" hidden>清空缓存</button>
+        </div>
+      </div>
+      <div id="cache-body" hidden>
+        <div id="cache-info" style="margin-bottom:12px;"></div>
+        <div id="cache-table"></div>
+        <div class="hint">远程规则集会预下载到本地并改写为本地引用,让 sing-box 启动不依赖 GitHub。</div>
+      </div>
+    </div>
   </section>
 
   <!-- ═════════ 控制面板 ═════════ -->
   <section class="panel" id="panel-panel">
     <div class="card embed-card">
       <div class="card-head">
-        <div class="card-title"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>控制面板 <span class="badge dim" id="panel-pill">检测中…</span></div>
+        <div class="card-title"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>控制面板 <span class="badge dim" id="panel-pill">检测中…</span><span class="card-note mono" id="panel-addr" style="margin-left:8px;"></span></div>
         <div class="btn-row">
           <button class="btn btn-sm" id="btn-panel-reload">刷新</button>
           <a class="btn btn-sm" id="btn-panel-newtab" href="#" target="_blank" rel="noopener">新窗口打开</a>
@@ -707,7 +711,7 @@ function showTab(id) {
   if (id === "config") loadConfig();
   if (id === "dash") loadIOSCard();
   if (id === "logs") loadLogs();
-  if (id === "sb") { loadCache(); loadSbConfig(); }
+  if (id === "sb") { loadSbConfig(); if (!$("#cache-body").hidden) loadCache(); }
   if (id === "panel") checkPanel();
 }
 document.addEventListener("click", e => {
@@ -936,9 +940,21 @@ function renderStatus(st) {
 
   // 组网页
   $("#ts-ver").textContent = ts.version ? "v" + ts.version : (ts.installed ? "" : "未安装");
+  // 启动模式回显:以 tailscale 运行时真实状态为准(默认""/router/exit/gateway)
+  const MODE_NAMES = { "": "默认", router: "路由器", exit: "出口节点", gateway: "网关" };
+  if (ts.installed) {
+    const cur = ts.mode || "";
+    $$("#ts-modes .mode-opt").forEach(l => {
+      const input = l.querySelector("input");
+      const sel = input.value === cur;
+      input.checked = sel;
+      l.classList.toggle("sel", sel);
+    });
+  }
   $("#ts-info").innerHTML = [
     ["daemon 进程", ts.running ? '<span style="color:var(--ok);font-weight:600;">运行中</span>' : '<span style="color:var(--muted);">未运行</span>'],
     ["后端状态", ts.state ? esc(ts.state) + " (" + esc(tsBadge(ts).badge) + ")" : "-"],
+    ["启动模式", ts.running ? esc(MODE_NAMES[ts.mode || ""] || "默认") : "-"],
     ["已安装", ts.installed ? "是" : "否"],
     ["auth_key", ts.authKeySet ? '<span style="color:var(--ok);">已配置</span>' : '<span style="color:var(--warn);">未配置(<a class="link" href="#" data-goto="config">去配置</a>)</span>'],
   ].map(([k, v]) => `<div class="kv"><span class="k">${k}</span><span class="v">${v}</span></div>`).join("");
@@ -982,6 +998,7 @@ $("#btn-health").onclick = async () => {
 async function loadCache() {
   try {
     const c = await api("/api/cache");
+    $("#cache-table").dataset.loaded = "1";
     $("#cache-info").innerHTML =
       `<div class="kv"><span class="k">缓存目录</span><span class="v mono" style="font-size:11.5px;">${esc(c.cacheDir || "-")}</span></div>
        <div class="kv"><span class="k">内置快照</span><span class="v">${c.snapshotCount || 0} 个 · 生成于 ${esc(c.snapshotTime || "-")}</span></div>`;
@@ -1001,6 +1018,21 @@ async function loadCache() {
   }
 }
 $("#btn-cache-refresh").onclick = loadCache;
+
+/* ═══════════════════════ 规则集缓存折叠 ═══════════════════════ */
+$("#btn-cache-toggle").onclick = () => {
+  const body = $("#cache-body");
+  const btn = $("#btn-cache-toggle");
+  const willExpand = body.hidden;
+  body.hidden = !willExpand;
+  btn.textContent = willExpand ? "收起 ▴" : "展开 ▾";
+  $("#btn-cache-refresh").hidden = !willExpand;
+  $("[data-action=\"cache-update\"]").hidden = !willExpand;
+  $("[data-action=\"cache-clear\"]").hidden = !willExpand;
+  if (willExpand && !$("#cache-table").dataset.loaded) {
+    loadCache();
+  }
+};
 
 /* ═══════════════════════ iOS 配置下载 ═══════════════════════ */
 let iosCardLoaded = false;
@@ -1134,7 +1166,9 @@ async function checkPanel() {
   const pill = $("#panel-pill");
   pill.className = "badge dim"; pill.textContent = "检测中…";
   const frame = $("#clash-frame");
-  $("#btn-panel-newtab").href = (state.status && state.status.singbox && state.status.singbox.panelURL) || "#";
+  const panelURL = (state.status && state.status.singbox && state.status.singbox.panelURL) || "";
+  $("#panel-addr").textContent = panelURL || "";
+  $("#btn-panel-newtab").href = panelURL || "#";
   try {
     const r = await fetch("/clash/version");
     if (!r.ok) throw new Error("HTTP " + r.status);

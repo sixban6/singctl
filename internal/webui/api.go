@@ -87,12 +87,21 @@ func singboxStatus() map[string]any {
 		}
 	}
 
-	// 控制面板地址(与生成器逻辑保持一致)
-	panelHost := "127.0.0.1"
-	if runtime.GOOS == "linux" {
-		if ni, err := netinfo.Get(); err == nil && ni.LANIPv4 != "" {
-			panelHost = ni.LANIPv4
+	// 控制面板地址:以 sing-box 配置文件中的 external_controller 为权威
+	// (与 /clash 反代同源;配置缺失时按平台默认值兑底)
+	panelURL := ""
+	for _, ep := range singbox.ClashAPIEndpoints() {
+		panelURL = ep + "/ui"
+		break
+	}
+	if panelURL == "" {
+		panelHost := "127.0.0.1"
+		if runtime.GOOS == "linux" {
+			if ni, err := netinfo.Get(); err == nil && ni.LANIPv4 != "" {
+				panelHost = ni.LANIPv4
+			}
 		}
+		panelURL = fmt.Sprintf("http://%s:9090/ui", panelHost)
 	}
 
 	return map[string]any{
@@ -101,7 +110,7 @@ func singboxStatus() map[string]any {
 		"version":      version,
 		"configExists": fileExists(constant.SingBoxConfigFile),
 		"configPath":   constant.SingBoxConfigFile,
-		"panelURL":     fmt.Sprintf("http://%s:9090/ui", panelHost),
+		"panelURL":     panelURL,
 	}
 }
 
@@ -148,9 +157,9 @@ func tailscaleStatus(configPath string) map[string]any {
 	}
 
 	// 权威判定:`tailscale status --json` 能连通后端即 daemon 在运行,
-	// 并拿到 BackendState(Running/NeedsLogin/Stopped...)。
+	// 并拿到 BackendState(Running/NeedsLogin/Stopped...)与当前启动模式。
 	// 注:不能用 pgrep -x 检测 —— busybox 1.36.1 上实测无法匹配 tailscaled(见 osutil.PgrepMatch)。
-	daemonUp, backendState := queryTailscaleBackend(binPath)
+	daemonUp, backendState, mode := queryTailscaleBackend(binPath)
 	if !daemonUp && binPath == "" {
 		// CLI 不存在时退化为进程检测(子串匹配,兼容 busybox)
 		daemonUp = osutil.PgrepMatch("tailscaled")
@@ -165,6 +174,7 @@ func tailscaleStatus(configPath string) map[string]any {
 		"installed":  binPath != "",
 		"running":    daemonUp,
 		"state":      backendState,
+		"mode":       mode,
 		"version":    version,
 		"authKeySet": authKeySet,
 	}
@@ -173,23 +183,39 @@ func tailscaleStatus(configPath string) map[string]any {
 // queryTailscaleBackend 通过 `tailscale status --json` 判定 daemon 是否存活及其后端状态。
 // daemon 存活时返回 (true, BackendState);不可达返回 (false, "")。
 // 实测退出码:daemon 在(含 Stopped/NeedsLogin)rc=0,daemon 不在 rc=1。
-func queryTailscaleBackend(binPath string) (bool, string) {
+// 同时从 Self 提取启动模式: AdvertisedRoutes(广播的子网路由) + ExitNodeOption(出口节点)。
+func queryTailscaleBackend(binPath string) (bool, string, string) {
 	if binPath == "" {
-		return false, ""
+		return false, "", ""
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, binPath, "status", "--json").Output()
 	if err != nil {
-		return false, ""
+		return false, "", ""
 	}
 	var st struct {
 		BackendState string `json:"BackendState"`
+		Self         struct {
+			AdvertisedRoutes []string `json:"AdvertisedRoutes"`
+			ExitNodeOption   bool     `json:"ExitNodeOption"`
+		} `json:"Self"`
 	}
 	if json.Unmarshal(out, &st) != nil || st.BackendState == "" {
-		return false, ""
+		return false, "", ""
 	}
-	return true, st.BackendState
+	// 与 WebUI 启动模式选项对应: 默认""/router/exit/gateway(router+exit)
+	mode := ""
+	hasRoutes := len(st.Self.AdvertisedRoutes) > 0
+	switch {
+	case st.Self.ExitNodeOption && hasRoutes:
+		mode = "gateway"
+	case st.Self.ExitNodeOption:
+		mode = "exit"
+	case hasRoutes:
+		mode = "router"
+	}
+	return true, st.BackendState, mode
 }
 
 func firewallStatus() map[string]any {
