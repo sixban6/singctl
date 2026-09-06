@@ -1,3 +1,10 @@
+## [1.25.6](https://github.com/sixban6/singctl/compare/v1.25.5...v1.25.6) (2026-09-06)
+
+
+### Bug Fixes
+
+* **webui:** mask subscription URL domain on overview page ([d9755ca](https://github.com/sixban6/singctl/commit/d9755ca8ebc84c48199b67113b62a917ffb932a4))
+
 ## [1.25.5](https://github.com/sixban6/singctl/compare/v1.25.4...v1.25.5) (2026-09-06)
 
 
