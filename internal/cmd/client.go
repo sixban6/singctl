@@ -248,6 +248,16 @@ func newGenCmd(cfg *config.Config) *cobra.Command {
 				logger.Info("导入 iPhone: AirDrop/隔空投送该文件 → 文件 App → 分享给 sing-box App; 或在 sing-box App 中新建配置时选择该文件")
 				return nil
 			}
+			// linux 服务器: 预下载 api dashboard 静态文件, 绕过 sing-box 1.14.0
+			// http_client 空 direct 校验 bug(自带下载器必然失败)。仅在本机为目标平台
+			// 时执行(生成给其他机器的配置不应在本机落盘 dashboard)
+			if target == "linux" && runtime.GOOS == "linux" {
+				if err := singbox.ProvisionDashboard(configJSON); err != nil {
+					logger.Warn("⚠️ Dashboard 预下载失败(不影响其他功能, 可重试 gen): %v", err)
+				} else {
+					logger.Info("Dashboard 静态文件已就绪, 重启 sing-box 后访问 :9091/dashboard/")
+				}
+			}
 			if copied, err := copyGeneratedConfigToClipboard(targetPath); err != nil {
 				logger.Warn("配置已生成，但复制到粘贴板失败: %v", err)
 			} else if copied {
