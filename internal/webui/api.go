@@ -255,19 +255,17 @@ func maskURL(u string) string {
 	if u == "" {
 		return ""
 	}
-	// 保留协议+域名(可识别服务商), 路径与 query(含订阅 token 凭据)全部用 * 遮蔽
+	// 订阅 URL 含 token 凭据且域名本身就是敏感信息(机场站点),
+	// 概览页只保留协议, 其余全部遮蔽; 订阅名称已足以识别服务商
 	parsed, err := url.Parse(u)
-	if err != nil || parsed.Host == "" {
-		if i := strings.Index(u, "://"); i > 0 {
-			return u[:i+3] + "******"
-		}
+	if err != nil {
 		return "******"
 	}
 	scheme := parsed.Scheme
 	if scheme == "" {
 		scheme = "https"
 	}
-	return scheme + "://" + parsed.Host + "/******"
+	return scheme + "://******"
 }
 
 func fileExists(path string) bool {

@@ -5,7 +5,7 @@
 在 Linux/OpenWrt 设备上管理 Tailscale 异地组网。
 
 **原理**:
-- 封装了tailscale，使用官方安装包。
+- 封装了 tailscale，使用 [Tailscale 官方安装包](https://github.com/sixban6/auto_fetch_tailscale)。
 - 统一关闭netfilter，不让tailscale修改防火墙配置，防止冲突。
 - singctl ts统一接管tailscale的防火墙配置，保持稳定可靠。
 
@@ -18,6 +18,11 @@
 ### 模式一：官方版本（推荐）
 
 使用 Tailscale 官方二进制，功能最完整，**优先选择此模式**。
+
+> **📦 安装包来源说明**：singctl 不直接从 Tailscale 官网下载，而是从 [sixban6/auto_fetch_tailscale](https://github.com/sixban6/auto_fetch_tailscale) 仓库的 Releases 拉取。该仓库由 CI 自动跟踪 [Tailscale 官方稳定版](https://pkgs.tailscale.com/stable/?mode=json)，下载**官方原版二进制**后重新打包：
+> - **ARM 架构包**（`*_arm64.tgz`）：对 `tailscale` / `tailscaled` 二进制使用 **UPX（LZMA 极限算法）加壳压缩**，最大化节省 OpenWrt/嵌入式设备的 ROM 空间；
+> - **amd64 架构包**（`*_amd64.tgz`）：官方原版，未加壳；
+> - 包名及内部目录结构与官方完全一致，且附带 `checksums.txt`，singctl 安装时会自动校验。
 
 默认情况下无需配置 `tailscale` 字段，只有在需要授权密钥（`auth_key`）时才配置：
 
