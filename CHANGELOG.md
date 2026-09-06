@@ -1,3 +1,10 @@
+## [1.25.7](https://github.com/sixban6/singctl/compare/v1.25.6...v1.25.7) (2026-09-06)
+
+
+### Bug Fixes
+
+* **sb:** bump singgen v1.14.5 — correct SagerNet/sing-box-dashboard URL ([37129aa](https://github.com/sixban6/singctl/commit/37129aa98cefd5366f43c1abd4a250da6d99d8ee))
+
 ## [1.25.6](https://github.com/sixban6/singctl/compare/v1.25.5...v1.25.6) (2026-09-06)
 
 
