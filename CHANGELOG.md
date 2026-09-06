@@ -1,3 +1,10 @@
+# [1.26.0](https://github.com/sixban6/singctl/compare/v1.25.7...v1.26.0) (2026-09-06)
+
+
+### Features
+
+* **sb:** pre-provision api dashboard during gen (bypass 1.14.0 downloader) ([eea9607](https://github.com/sixban6/singctl/commit/eea96074b95c91da783dbbfca115badfa0b3d53c))
+
 ## [1.25.7](https://github.com/sixban6/singctl/compare/v1.25.6...v1.25.7) (2026-09-06)
 
 
