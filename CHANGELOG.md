@@ -1,3 +1,10 @@
+## [1.25.2](https://github.com/sixban6/singctl/compare/v1.25.1...v1.25.2) (2026-09-06)
+
+
+### Bug Fixes
+
+* **webui:** ts mode echo-back, sb tab card order, panel addr from config ([3517bad](https://github.com/sixban6/singctl/commit/3517bad90be5c2fe39fa86db9a4c6458e959a2f5))
+
 ## [1.25.1](https://github.com/sixban6/singctl/compare/v1.25.0...v1.25.1) (2026-09-05)
 
 
