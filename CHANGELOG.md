@@ -1,3 +1,10 @@
+## [1.25.4](https://github.com/sixban6/singctl/compare/v1.25.3...v1.25.4) (2026-09-06)
+
+
+### Bug Fixes
+
+* **webui:** re-inject MetaCubeXD backend when webui origin changes ([a999154](https://github.com/sixban6/singctl/commit/a999154fd4c2577a80dcb0bc45ae93fa31cc8e33))
+
 ## [1.25.3](https://github.com/sixban6/singctl/compare/v1.25.2...v1.25.3) (2026-09-06)
 
 
