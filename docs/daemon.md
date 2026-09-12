@@ -4,6 +4,9 @@
 
 守护进程会在 sing-box 意外退出时自动将其重启，保证服务持续可用。
 
+> **跟随启动**：`singctl sb start` / `sb restart` 会自动拉起看门狗（已在运行则跳过），
+> `sb stop` 会一并停止——日常使用无需手动操作 `dm start`/`dm stop`。
+
 ---
 
 ## 命令详解
