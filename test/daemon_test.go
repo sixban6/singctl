@@ -233,7 +233,7 @@ func TestLogWatchdogEvent_Integration(t *testing.T) {
 
 	daemon.LogWatchdogEvent(event)
 
-	content, err := os.ReadFile(daemon.GetWatchdogLogPath())
+	content, err := os.ReadFile(daemon.GetDaemonLogPath())
 	if err != nil {
 		t.Fatalf("failed to read watchdog log: %v", err)
 	}
@@ -347,16 +347,6 @@ func TestWatchdogLogic_RateLimited_NoRestart(t *testing.T) {
 // =============================================================================
 // Path Tests
 // =============================================================================
-
-func TestGetWatchdogLogPath(t *testing.T) {
-	path := daemon.GetWatchdogLogPath()
-	if path == "" {
-		t.Error("expected non-empty watchdog log path")
-	}
-	if !strings.Contains(path, "singctl-watchdog.log") {
-		t.Errorf("expected 'singctl-watchdog.log', got: %s", path)
-	}
-}
 
 func TestGetDaemonLogPath(t *testing.T) {
 	path := daemon.GetDaemonLogPath()

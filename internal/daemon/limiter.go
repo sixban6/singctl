@@ -15,10 +15,11 @@ const (
 
 // RestartLimiter 重启频率限制器
 type RestartLimiter struct {
-	maxRestarts  int           // 最大重启次数
-	timeWindow   time.Duration // 时间窗口
-	restartTimes []time.Time   // 重启时间记录
-	mu           sync.Mutex    // 并发保护
+	maxRestarts    int           // 最大重启次数
+	timeWindow     time.Duration // 时间窗口
+	restartTimes   []time.Time   // 重启时间记录
+	totalRestarts  int64         // 累计重启总数(跨窗口, 随状态文件持久化)
+	mu             sync.Mutex    // 并发保护
 }
 
 // NewRestartLimiter 创建重启限制器（内存态，不读取持久化状态）。
@@ -43,29 +44,49 @@ func NewRestartLimiterWithMax(max int) *RestartLimiter {
 // NewRestartLimiterFromState 读取持久化的重启记录构建限制器。
 // 用于 dm status / WebUI 等外部观察者：真实计数只存在于看门狗进程内存中，
 // 这里从状态文件恢复（看门狗每次 RecordRestart 都会落盘）。
+// 兼容旧格式(纯时间戳数组, 无累计总数——总数从 0 重新累计)。
 func NewRestartLimiterFromState(max int) *RestartLimiter {
 	rl := NewRestartLimiterWithMax(max)
 	if data, err := os.ReadFile(getStateFilePath()); err == nil {
-		var ts []int64
-		if json.Unmarshal(data, &ts) == nil {
-			cutoff := time.Now().Add(-rl.timeWindow)
-			for _, v := range ts {
-				if t := time.Unix(v, 0); t.After(cutoff) {
-					rl.restartTimes = append(rl.restartTimes, t)
-				}
-			}
+		var legacy []int64
+		if json.Unmarshal(data, &legacy) == nil {
+			// 旧格式: 纯时间戳数组
+			rl.loadTimes(legacy)
+			return rl
+		}
+		var st struct {
+			Total int64   `json:"total"`
+			Times []int64 `json:"times"`
+		}
+		if json.Unmarshal(data, &st) == nil {
+			rl.totalRestarts = st.Total
+			rl.loadTimes(st.Times)
 		}
 	}
 	return rl
 }
 
-// persist 将当前窗口内的重启记录写入状态文件（调用方需持有锁）
+// loadTimes 载入窗口内的时间戳(丢弃过期记录)
+func (rl *RestartLimiter) loadTimes(ts []int64) {
+	cutoff := time.Now().Add(-rl.timeWindow)
+	for _, v := range ts {
+		if t := time.Unix(v, 0); t.After(cutoff) {
+			rl.restartTimes = append(rl.restartTimes, t)
+		}
+	}
+}
+
+// persist 将重启记录写入状态文件（调用方需持有锁）
+// 格式: {"total":累计总数,"times":窗口内时间戳}; 兼容读取旧格式(纯数组)
 func (rl *RestartLimiter) persist() {
 	ts := make([]int64, 0, len(rl.restartTimes))
 	for _, t := range rl.restartTimes {
 		ts = append(ts, t.Unix())
 	}
-	b, err := json.Marshal(ts)
+	b, err := json.Marshal(struct {
+		Total int64   `json:"total"`
+		Times []int64 `json:"times"`
+	}{Total: rl.totalRestarts, Times: ts})
 	if err != nil {
 		return
 	}
@@ -96,13 +117,21 @@ func (rl *RestartLimiter) CanRestart() bool {
 	return len(rl.restartTimes) < rl.maxRestarts
 }
 
-// RecordRestart 记录重启时间（并持久化）
+// RecordRestart 记录重启时间（累计总数+1 并持久化）
 func (rl *RestartLimiter) RecordRestart() {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
 	rl.restartTimes = append(rl.restartTimes, time.Now())
+	rl.totalRestarts++
 	rl.persist()
+}
+
+// GetTotalRestarts 获取累计重启总数(跨时间窗口, 从状态文件恢复)
+func (rl *RestartLimiter) GetTotalRestarts() int64 {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	return rl.totalRestarts
 }
 
 // GetRestartCount 获取当前时间窗口内的重启次数

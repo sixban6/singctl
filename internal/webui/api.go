@@ -117,19 +117,17 @@ func singboxStatus() map[string]any {
 
 func daemonStatus(cfgMaxRestarts int) map[string]any {
 	running := daemon.IsDaemonRunning()
-	restarts, maxRestarts := 0, 0
-	if running {
-		// 从持久化状态恢复真实计数（看门狗每次重启都会落盘）
-		limiter := daemon.NewRestartLimiterFromState(cfgMaxRestarts)
-		restarts = limiter.GetRestartCount()
-		maxRestarts = limiter.GetMaxRestarts()
-	}
+	// 无论 daemon 是否运行, 都从状态文件恢复计数(文件由看门狗落盘, 跨重启保留)
+	limiter := daemon.NewRestartLimiterFromState(cfgMaxRestarts)
+	restarts := limiter.GetRestartCount()
+	maxRestarts := limiter.GetMaxRestarts()
+	totalRestarts := limiter.GetTotalRestarts()
 	return map[string]any{
 		"running":         running,
 		"restarts":        restarts,
 		"maxRestarts":     maxRestarts,
+		"totalRestarts":   totalRestarts,
 		"logPath":         daemon.GetDaemonLogPath(),
-		"watchdogLogPath": daemon.GetWatchdogLogPath(),
 	}
 }
 
@@ -786,7 +784,7 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	var path string
 	switch name {
 	case "watchdog":
-		path = daemon.GetWatchdogLogPath()
+		path = daemon.GetDaemonLogPath()
 	default:
 		name = "daemon"
 		path = daemon.GetDaemonLogPath()
