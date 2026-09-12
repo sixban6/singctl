@@ -63,7 +63,24 @@ func runStartSingbox(cfg *config.Config) error {
 	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
 		return sb.StartGUI()
 	}
-	return sb.Start()
+	if err := sb.Start(); err != nil {
+		return err
+	}
+
+	// 看门狗跟随 sing-box 一起启动(幂等, 已在运行则跳过):
+	// sb stop 会先停看门狗, sb restart 走 stop+start 也就一并重启了看门狗;
+	// 启动失败仅告警, 不影响 sing-box 本身
+	if daemon.IsDaemonRunning() {
+		logger.Info("Watchdog daemon already running")
+	} else {
+		logger.Info("Starting watchdog daemon...")
+		if err := daemon.NewDaemon(cfg).Start(); err != nil {
+			logger.Warn("Failed to start watchdog daemon: %v", err)
+		} else {
+			logger.Success("Watchdog daemon started")
+		}
+	}
+	return nil
 }
 
 // migrateRuleSetCache 将现有配置中的 remote 规则集迁移为本地缓存引用。
