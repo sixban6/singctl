@@ -572,8 +572,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; ba
         <div class="card-title"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m4 4 6 16 2.5-7.5L20 10z"/><path d="M13 13 20 20"/></svg>日志查看</div>
         <div class="btn-row">
           <select id="log-name" class="btn" style="padding:6.5px 10px;">
-            <option value="daemon">守护进程日志</option>
-            <option value="watchdog">看门狗日志</option>
+            <option value="daemon">守护日志(含看门狗事件)</option>
           </select>
           <select id="log-tail" class="btn" style="padding:6.5px 10px;">
             <option value="100">100 行</option>
@@ -933,9 +932,9 @@ function renderStatus(st) {
   $("#dm-info").innerHTML = [
     ["守护进程", dm.running ? '<span style="color:var(--ok);font-weight:600;">运行中</span>' : '<span style="color:var(--muted);">未运行</span>'],
     ["sing-box 进程", sb.running ? '<span style="color:var(--ok);font-weight:600;">运行中</span>' : '<span style="color:var(--err);font-weight:600;">未运行</span>'],
-    ["最近 1 小时重启", dm.restarts + " / " + dm.maxRestarts + " 次(重启守护进程后清零)"],
-    ["守护日志", '<span class="mono" style="font-size:11.5px;">' + esc(dm.logPath) + "</span>"],
-    ["看门狗日志", '<span style="font-size:11.5px;">' + esc(dm.watchdogLogPath) + "</span>"],
+    ["累计重启", dm.totalRestarts + " 次"],
+    ["熔断保护", "最近 1 小时 " + dm.restarts + " / " + dm.maxRestarts + " 次"],
+    ["日志文件", '<span class="mono" style="font-size:11.5px;">' + esc(dm.logPath) + "</span>"],
   ].map(([k, v]) => `<div class="kv"><span class="k">${k}</span><span class="v">${v}</span></div>`).join("");
 
   // 组网页

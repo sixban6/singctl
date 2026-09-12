@@ -12,6 +12,7 @@ import (
 	"singctl/internal/logger"
 	"singctl/internal/singbox"
 	ruleset_snapshot "singctl/internal/singbox/ruleset_snapshot"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -44,7 +45,7 @@ func copyGeneratedConfigToClipboard(targetPath string) (bool, error) {
 	return true, nil
 }
 
-func runStartSingbox(cfg *config.Config) error {
+func runStartSingbox(cfg *config.Config, configPath string) error {
 	sb := singbox.New(cfg)
 	if err := sb.ValidateConfig(); err != nil {
 		// 现有配置无效或不存在，需要重新生成 → 此时才校验 subs
@@ -68,14 +69,18 @@ func runStartSingbox(cfg *config.Config) error {
 	}
 
 	// 看门狗跟随 sing-box 一起启动(幂等, 已在运行则跳过):
-	// sb stop 会先停看门狗, sb restart 走 stop+start 也就一并重启了看门狗;
-	// 启动失败仅告警, 不影响 sing-box 本身
+	// sb stop 会先停看门狗, sb restart 走 stop+start 也就一并重启了看门狗。
+	// 通过子命令 `dm start` 拉起 —— 复用其成熟的后台化 fork 链路
+	// (不能直接调 NewDaemon().Start(): spawn 会复制当前 os.Args,
+	//  子进程将重放 "sb start" 而非进入守护循环)。失败仅告警不影响 sing-box。
 	if daemon.IsDaemonRunning() {
 		logger.Info("Watchdog daemon already running")
 	} else {
 		logger.Info("Starting watchdog daemon...")
-		if err := daemon.NewDaemon(cfg).Start(); err != nil {
-			logger.Warn("Failed to start watchdog daemon: %v", err)
+		cmd := exec.Command(os.Args[0], "dm", "start", "--config", configPath)
+		cmd.Env = os.Environ()
+		if out, err := cmd.CombinedOutput(); err != nil {
+			logger.Warn("Failed to start watchdog daemon: %v\n%s", err, strings.TrimSpace(string(out)))
 		} else {
 			logger.Success("Watchdog daemon started")
 		}
@@ -123,7 +128,7 @@ func newStartCmd(cfg *config.Config) *cobra.Command {
 		Use:   "start",
 		Short: "生成配置并启动 sing-box / Generate config and start sing-box",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runStartSingbox(cfg)
+			return runStartSingbox(cfg, cmd.Flag("config").Value.String())
 		},
 	}
 	return cmd
@@ -151,7 +156,7 @@ func newRestartCmd(cfg *config.Config) *cobra.Command {
 			if err := runStopSingbox(cfg); err != nil {
 				return err
 			}
-			return runStartSingbox(cfg)
+			return runStartSingbox(cfg, cmd.Flag("config").Value.String())
 		},
 		Aliases: []string{"r"},
 	}
