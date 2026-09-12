@@ -1,3 +1,10 @@
+# [1.27.0](https://github.com/sixban6/singctl/compare/v1.26.0...v1.27.0) (2026-09-12)
+
+
+### Features
+
+* **sb:** start watchdog daemon together with sing-box ([8114fe1](https://github.com/sixban6/singctl/commit/8114fe1efe825402ba00a716f89063f5d8e49e1a))
+
 # [1.26.0](https://github.com/sixban6/singctl/compare/v1.25.7...v1.26.0) (2026-09-06)
 
 
