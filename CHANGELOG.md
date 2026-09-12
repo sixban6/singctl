@@ -1,3 +1,10 @@
+## [1.27.1](https://github.com/sixban6/singctl/compare/v1.27.0...v1.27.1) (2026-09-12)
+
+
+### Bug Fixes
+
+* **daemon:** merge watchdog.log into daemon.log; total restart counter ([21e413b](https://github.com/sixban6/singctl/commit/21e413bf2c354731d8f76460e69de0c4f23f4a48))
+
 # [1.27.0](https://github.com/sixban6/singctl/compare/v1.26.0...v1.27.0) (2026-09-12)
 
 
