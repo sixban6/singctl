@@ -11,6 +11,7 @@ chmod o+r /usr/share/keyrings/caddy-stable-archive-keyring.gpg
 chmod o+r /etc/apt/sources.list.d/caddy-stable.list
 
 apt-get update
+apt-mark unhold caddy || true
 apt-get install -y caddy
 
 # Add plugins only if not already present

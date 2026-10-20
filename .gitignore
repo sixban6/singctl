@@ -5,7 +5,7 @@ dist
 bin
 data
 .idea
-singctl
+/singctl
 cache
 *.exe
 *.exe~

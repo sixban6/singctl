@@ -62,6 +62,38 @@ singctl sr install
 
 ---
 
+### `singctl sr ri [target]` — 重装服务端组件
+
+卸载旧组件并重新安装服务端组件。支持全量重装或指定单个组件重装。
+
+```bash
+# 重装所有服务端组件（简写）
+singctl sr ri
+
+# 或使用完整子命令
+singctl sr reinstall
+
+# 也可以重装指定组件
+singctl sr ri caddy
+singctl sr ri singbox
+singctl sr ri substore
+singctl sr ri warp
+```
+
+---
+
+### `singctl sr cf-token <token>` — 轮换 Cloudflare API Token
+
+轮换 `singctl.yaml` 中的 Cloudflare API Token（`server.cf_dns_key`），重新渲染 Caddyfile 并重启 Caddy 服务以生效。
+
+```bash
+# 轮换 Cloudflare API Token（支持别名 cf / token）
+singctl sr cf-token your_new_cloudflare_api_token
+singctl sr cf your_new_cloudflare_api_token
+```
+
+---
+
 ### 单独部署组件
 
 ```bash

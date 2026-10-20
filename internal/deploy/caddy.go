@@ -18,7 +18,34 @@ func UninstallCaddy() error {
 	if err := runEmbeddedScript("uninstall_caddy.sh"); err != nil {
 		return fmt.Errorf("caddy uninstallation failed: %w", err)
 	}
+	_ = runCmd("apt-mark", "unhold", "caddy")
 	logger.Success("Caddy uninstallation completed.")
+	return nil
+}
+
+// RestartCaddy restarts the caddy systemd service
+func RestartCaddy() error {
+	logger.Info("Restarting Caddy service...")
+	_ = runCmd("systemctl", "daemon-reload")
+	if err := runCmd("systemctl", "enable", "--now", "caddy"); err != nil {
+		return fmt.Errorf("failed to enable caddy: %w", err)
+	}
+	if err := runCmd("systemctl", "restart", "caddy"); err != nil {
+		return fmt.Errorf("failed to restart caddy: %w", err)
+	}
+	return nil
+}
+
+// RotateCloudflareToken renders Caddyfile with updated configuration and restarts Caddy
+func RotateCloudflareToken(cfg *config.Config) error {
+	logger.Info("Rendering and saving Caddyfile with new Cloudflare API token...")
+	if err := renderCaddyfile(cfg); err != nil {
+		return fmt.Errorf("failed to render Caddyfile: %w", err)
+	}
+	if err := RestartCaddy(); err != nil {
+		return err
+	}
+	logger.Success("Cloudflare API token rotated and Caddy restarted successfully.")
 	return nil
 }
 
@@ -49,14 +76,8 @@ func DeployCaddy(cfg *config.Config) error {
 	}
 
 	// 4. Restart Caddy
-	logger.Info("Restarting Caddy service...")
-	// ensure daemon reload in case systemd records changed somehow
-	_ = runCmd("systemctl", "daemon-reload")
-	if err := runCmd("systemctl", "enable", "--now", "caddy"); err != nil {
-		return fmt.Errorf("failed to enable caddy: %w", err)
-	}
-	if err := runCmd("systemctl", "restart", "caddy"); err != nil {
-		return fmt.Errorf("failed to restart caddy: %w", err)
+	if err := RestartCaddy(); err != nil {
+		return err
 	}
 
 	logger.Success("Caddy deployment completed successfully.")

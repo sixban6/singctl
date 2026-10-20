@@ -120,6 +120,8 @@ DNS optimization, and complete service lifecycle management.`,
 		cmd.NewUtilCmd(),
 		cmd.NewFirewallCmd(),
 		cmd.NewServerCmd(configPath),
+		cmd.NewReinstallServerCmd(configPath),
+		cmd.NewCfTokenCmd(configPath),
 		cmd.NewDaemonCommand(),
 		cmd.NewWebCmd(Version),
 	)
