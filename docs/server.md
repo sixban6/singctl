@@ -87,3 +87,20 @@ singctl sr install warp
 ```bash
 singctl sr sni swdist.apple.com
 ```
+
+---
+
+### `singctl sr reset [target]` — 重置节点凭证并同步 Sub-Store
+
+定期重置本机配置的所有服务端节点凭证（密码/UUID、Reality 密钥对与 Short ID），重启 sing-box，并自动更新 Sub-Store 订阅中的节点配置与热重载 Sub-Store 容器，保证安全性。
+
+```bash
+# 重置 singbox 服务端节点凭证并同步 Sub-Store
+singctl sr reset sb
+
+# 或使用完整别名
+singctl sr reset singbox
+```
+
+> **提示**：可将 `singctl sr reset sb` 配置到系统定时任务（cron）中，实现周期性自动轮转密码和更新订阅。
+

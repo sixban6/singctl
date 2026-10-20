@@ -52,6 +52,7 @@ func (sbs *SingBoxServer) init() error {
 		return fmt.Errorf("failed to initialize VR parameters: %w", err)
 	}
 	sbs.initTag()
+	sbs.updateShareLinks()
 	return nil
 }
 
@@ -61,9 +62,36 @@ func (sbs *SingBoxServer) initTag() {
 	sbs.vrTag = fmt.Sprintf("sec_%s_vr", suffix)
 }
 
+func (sbs *SingBoxServer) updateShareLinks() {
+	sbs.ShareLinkHy2 = fmt.Sprintf("hysteria2://%s@%s/?sni=%s&alpn=h3&insecure=0#%s", sbs.hyUUID, sbs.cfg.Server.SBDomain, sbs.cfg.Server.SBDomain, sbs.hy2Tag)
+	sbs.ShareLinkVless = fmt.Sprintf("vless://%s@%s:443?type=tcp&encryption=none&security=reality&pbk=%s&fp=chrome&sni=%s&sid=%s&flow=xtls-rprx-vision#%s", sbs.hyUUID, sbs.cfg.Server.SBDomain, sbs.publicKey, sbs.cfg.Server.Sni, sbs.shortID, sbs.vrTag)
+}
+
+// HyUUID returns the Hysteria2 password / VLESS UUID.
+func (sbs *SingBoxServer) HyUUID() string {
+	return sbs.hyUUID
+}
+
+// PublicKey returns the VLESS Reality public key.
+func (sbs *SingBoxServer) PublicKey() string {
+	return sbs.publicKey
+}
+
+// ShortID returns the VLESS Reality short ID.
+func (sbs *SingBoxServer) ShortID() string {
+	return sbs.shortID
+}
+
 // getCaddyCertPath waits and finds the actual cert path Caddy generated (Let's Encrypt or ZeroSSL)
 func (sbs *SingBoxServer) initCaddyCertPath() {
 	basePath := "/var/lib/caddy/.local/share/caddy/certificates"
+
+	if _, err := os.Stat("/var/lib/caddy"); os.IsNotExist(err) {
+		logger.Warn("Caddy directory not found, using fallback certificate paths")
+		sbs.crtPath = filepath.Join(basePath, "acme-v02.api.letsencrypt.org-directory", sbs.cfg.Server.SBDomain, sbs.cfg.Server.SBDomain+".crt")
+		sbs.keyPath = filepath.Join(basePath, "acme-v02.api.letsencrypt.org-directory", sbs.cfg.Server.SBDomain, sbs.cfg.Server.SBDomain+".key")
+		return
+	}
 
 	logger.Info("Waiting for Caddy to generate certificates for %s...", sbs.cfg.Server.SBDomain)
 
@@ -262,8 +290,62 @@ func (sbs *SingBoxServer) DeploySingbox() error {
 	if err := runCmd("systemctl", "restart", "sing-box"); err != nil {
 		return fmt.Errorf("failed to restart sing-box service: %w", err)
 	}
-	sbs.ShareLinkHy2 = fmt.Sprintf("hysteria2://%s@%s/?sni=%s&alpn=h3&insecure=0#%s", sbs.hyUUID, sbs.cfg.Server.SBDomain, sbs.cfg.Server.SBDomain, sbs.hy2Tag)
-	sbs.ShareLinkVless = fmt.Sprintf("vless://%s@%s:443?type=tcp&encryption=none&security=reality&pbk=%s&fp=chrome&sni=%s&sid=%s&flow=xtls-rprx-vision#%s", sbs.hyUUID, sbs.cfg.Server.SBDomain, sbs.publicKey, sbs.cfg.Server.Sni, sbs.shortID, sbs.vrTag)
+	sbs.updateShareLinks()
+	sbs.ShowLoginInfo()
+	return nil
+}
+
+// RegenerateCredentials forces generation of fresh credentials and updates share links.
+func (sbs *SingBoxServer) RegenerateCredentials() error {
+	sbs.hyUUID = ""
+	sbs.privateKey = ""
+	sbs.publicKey = ""
+	sbs.shortID = ""
+	if err := sbs.initVRParams(); err != nil {
+		return err
+	}
+	sbs.updateShareLinks()
+	return nil
+}
+
+// ResetCredentials regenerates credentials, renders configuration, and restarts sing-box.
+func (sbs *SingBoxServer) ResetCredentials() error {
+	logger.Info("Resetting sing-box server credentials...")
+
+	// 1. Check if sing-box is installed; install if missing
+	if _, err := os.Stat(constant.SingBoxInstallDir); os.IsNotExist(err) {
+		logger.Info("sing-box binary not found, installing...")
+		sb := singbox.New(sbs.cfg)
+		if err := sb.Install(); err != nil {
+			return fmt.Errorf("failed to install sing-box: %w", err)
+		}
+	}
+
+	// 2. Regenerate credentials and share links
+	if err := sbs.RegenerateCredentials(); err != nil {
+		return fmt.Errorf("failed to regenerate credentials: %w", err)
+	}
+
+	// 3. Render and save config.json
+	logger.Info("Rendering and saving new sing-box config.json...")
+	if err := sbs.renderSingboxConfig(); err != nil {
+		return fmt.Errorf("failed to render config: %w", err)
+	}
+
+	// 4. Ensure systemd service exists and is up to date
+	if err := sbs.ensureSystemdService(); err != nil {
+		return err
+	}
+
+	// 5. Restart sing-box service
+	logger.Info("Restarting sing-box service...")
+	if err := runCmd("systemctl", "enable", "sing-box"); err != nil {
+		return fmt.Errorf("failed to enable sing-box service: %w", err)
+	}
+	if err := runCmd("systemctl", "restart", "sing-box"); err != nil {
+		return fmt.Errorf("failed to restart sing-box service: %w", err)
+	}
+
 	sbs.ShowLoginInfo()
 	return nil
 }
