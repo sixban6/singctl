@@ -79,7 +79,7 @@
   ],
   "outbounds": [
     {
-      "tag": "DirectConn",
+      "tag": "DC",
       "type": "direct"
     },
     {
@@ -94,69 +94,69 @@
     "default_domain_resolver": {
       "server": "cloudflare"
     },
-    "final": "DirectConn",
+    "final": "DC",
     "rule_set": [
       {
         "tag": "rule-youtube",
         "type": "remote",
         "format": "binary",
-        "download_detour": "DirectConn",
+        "download_detour": "DC",
         "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/youtube.srs"
       },
       {
         "tag": "rule-google-domain",
         "type": "remote",
         "format": "binary",
-        "download_detour": "DirectConn",
+        "download_detour": "DC",
         "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/google.srs"
       },
       {
         "tag": "rule-google-ip",
         "type": "remote",
         "format": "binary",
-        "download_detour": "DirectConn",
+        "download_detour": "DC",
         "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/google.srs"
       },
       {
         "tag": "rule-openai",
         "type": "remote",
         "format": "binary",
-        "download_detour": "DirectConn",
+        "download_detour": "DC",
         "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/openai.srs"
       },
       {
         "tag": "rule-anthropic",
         "type": "remote",
         "format": "binary",
-        "download_detour": "DirectConn",
+        "download_detour": "DC",
         "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/anthropic.srs"
       },
       {
         "tag": "rule-github",
         "type": "remote",
         "format": "binary",
-        "download_detour": "DirectConn",
+        "download_detour": "DC",
         "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/github.srs"
       },
       {
         "tag": "rule-reddit",
         "type": "remote",
         "format": "binary",
-        "download_detour": "DirectConn",
+        "download_detour": "DC",
         "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/reddit.srs"
       },
       {
         "tag": "rule-x",
         "type": "remote",
         "format": "binary",
-        "download_detour": "DirectConn",
+        "download_detour": "DC",
         "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/x.srs"
       },
       {
         "tag": "rule-porn",
         "type": "remote",
         "format": "binary",
-        "download_detour": "DirectConn",
+        "download_detour": "DC",
         "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/category-porn.srs"
       }
     ],
@@ -180,24 +180,24 @@
       },
       {
         "ip_is_private": true,
-        "outbound": "DirectConn"
+        "outbound": "DC"
       },
       {
         "rule_set": [
           "rule-github",
-          "rule-youtube"
-        ],
-        "outbound": "DirectConn"
-      },
-      {
-        "rule_set": [
+          "rule-youtube",
           "rule-google-domain",
           "rule-openai",
           "rule-anthropic",
-          "rule-reddit",
           "rule-x",
           "rule-porn",
           "rule-google-ip"
+        ],
+        "outbound": "DC"
+      },
+      {
+        "rule_set": [
+          "rule-reddit"
         ],
         "outbound": "WARP"
       }
