@@ -1,3 +1,10 @@
+# [1.28.0](https://github.com/sixban6/singctl/compare/v1.27.3...v1.28.0) (2026-10-20)
+
+
+### Features
+
+* **server:** check latest versions before reinstalling in singctl sr ri unless -f is used ([f51c542](https://github.com/sixban6/singctl/commit/f51c5429a12bfea8aa0781b357bb695c868316d8))
+
 ## [1.27.2](https://github.com/sixban6/singctl/compare/v1.27.1...v1.27.2) (2026-10-20)
 
 
