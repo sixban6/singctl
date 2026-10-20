@@ -239,7 +239,7 @@ func TestLogWatchdogEvent_Integration(t *testing.T) {
 	}
 
 	logStr := string(content)
-	if !strings.Contains(logStr, "[TEST_EVENT]") {
+	if !strings.Contains(logStr, "action=TEST_EVENT") {
 		t.Errorf("expected TEST_EVENT in log, got: %s", logStr)
 	}
 	if !strings.Contains(logStr, "restart_result=test_only") {

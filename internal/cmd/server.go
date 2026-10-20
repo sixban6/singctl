@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"fmt"
+	"strings"
+
 	"singctl/internal/config"
 	"singctl/internal/deploy"
 	"singctl/internal/logger"
@@ -147,10 +149,165 @@ func NewServerCmd(configPath string) *cobra.Command {
 	}
 
 	cmd.AddCommand(newInstallServerCmd(cfg))
+	cmd.AddCommand(NewReinstallServerCmd(configPath))
 	cmd.AddCommand(newUninstallServerCmd())
 	cmd.AddCommand(newSniCmd(configPath))
+	cmd.AddCommand(NewCfTokenCmd(configPath))
 	cmd.AddCommand(newResetServerCmd(configPath))
 	return cmd
+}
+
+// NewReinstallServerCmd creates the reinstall command (singctl sr ri)
+func NewReinstallServerCmd(configPath string) *cobra.Command {
+	return &cobra.Command{
+		Use:     "reinstall [target]",
+		Aliases: []string{"ri"},
+		Short:   "重装服务端组件(简写singctl sr ri) / Reinstall server components (all|common|caddy|singbox|substore|warp)",
+		Args:    cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			resolvedPath := resolveConfigPath(cmd, configPath)
+			cfg, err := config.Load(resolvedPath)
+			if err != nil {
+				return fmt.Errorf("failed to load config: %w", err)
+			}
+
+			target := "all"
+			if len(args) > 0 {
+				target = args[0]
+			}
+
+			switch target {
+			case "all":
+				return reinstallAll(cfg)
+			case "common":
+				return deploy.DeployCommon()
+			case "caddy":
+				logger.Info("Reinstalling Caddy...")
+				if err := deploy.UninstallCaddy(); err != nil {
+					logger.Warn("Failed to uninstall Caddy: %v", err)
+				}
+				return deploy.DeployCaddy(cfg)
+			case "singbox":
+				logger.Info("Reinstalling sing-box...")
+				if err := deploy.UninstallSingbox(); err != nil {
+					logger.Warn("Failed to uninstall sing-box: %v", err)
+				}
+				sbs, err := deploy.NewSingBoxServer(cfg)
+				if err != nil {
+					return err
+				}
+				return sbs.DeploySingbox()
+			case "substore":
+				logger.Info("Reinstalling Sub-Store...")
+				if err := deploy.UninstallSubstore(); err != nil {
+					logger.Warn("Failed to uninstall Sub-Store: %v", err)
+				}
+				sbt := deploy.NewSubstore(cfg, "")
+				return sbt.DeploySubstore()
+			case "warp":
+				logger.Info("Reinstalling WARP...")
+				if err := deploy.UninstallWarp(); err != nil {
+					logger.Warn("Failed to uninstall WARP: %v", err)
+				}
+				return deploy.DeployWarp()
+			default:
+				return fmt.Errorf("unknown target: %s (must be all, common, caddy, singbox, substore, or warp)", target)
+			}
+		},
+	}
+}
+
+func reinstallAll(cfg *config.Config) error {
+	// Verify required config
+	if cfg.Server.SBDomain == "" || cfg.Server.CFDNSKey == "" {
+		return fmt.Errorf("server.sb_domain and server.cf_dns_key are required in singctl.yaml")
+	}
+
+	logger.Info("Reinstalling all server components...")
+
+	// 1. Uninstall existing components
+	logger.Info("Step 1/2: Uninstalling existing server components...")
+	if err := deploy.UninstallCaddy(); err != nil {
+		logger.Warn("Failed to uninstall Caddy: %v", err)
+	}
+	if err := deploy.UninstallSingbox(); err != nil {
+		logger.Warn("Failed to uninstall sing-box: %v", err)
+	}
+	if err := deploy.UninstallSubstore(); err != nil {
+		logger.Warn("Failed to uninstall Sub-Store: %v", err)
+	}
+	if err := deploy.UninstallWarp(); err != nil {
+		logger.Warn("Failed to uninstall WARP: %v", err)
+	}
+
+	// 2. Install all components fresh
+	logger.Info("Step 2/2: Installing all server components fresh...")
+	if err := deploy.DeployCommon(); err != nil {
+		return err
+	}
+	if err := deploy.DeployWarp(); err != nil {
+		return err
+	}
+	if err := deploy.DeployCaddy(cfg); err != nil {
+		return err
+	}
+	sbs, err := deploy.NewSingBoxServer(cfg)
+	if err != nil {
+		return err
+	}
+	if err := sbs.DeploySingbox(); err != nil {
+		return err
+	}
+
+	sbt := deploy.NewSubstore(cfg, "")
+	if err := sbt.DeploySubstore(); err != nil {
+		return err
+	}
+
+	if err := sbt.UpdateSubstoreConfig(sbs); err != nil {
+		logger.Warn("Substore config update failed!")
+		return err
+	}
+
+	sbs.ShowLoginInfo()
+	sbt.ShowLoginInfo()
+	logger.Success("All server components reinstalled successfully.")
+	return nil
+}
+
+// NewCfTokenCmd creates the cf-token command for rotating Cloudflare API token
+func NewCfTokenCmd(configPath string) *cobra.Command {
+	return &cobra.Command{
+		Use:     "cf-token <token>",
+		Aliases: []string{"cf", "token", "cftoken"},
+		Short:   "轮换 Cloudflare API Token 并重启 Caddy / Rotate Cloudflare API token and restart Caddy",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			newToken := strings.TrimSpace(args[0])
+			if newToken == "" {
+				return fmt.Errorf("cloudflare api token cannot be empty")
+			}
+
+			resolvedPath := resolveConfigPath(cmd, configPath)
+			cfg, err := config.Load(resolvedPath)
+			if err != nil {
+				return fmt.Errorf("failed to load config: %w", err)
+			}
+
+			cfg.Server.CFDNSKey = newToken
+			if err := config.Save(resolvedPath, cfg); err != nil {
+				return fmt.Errorf("failed to save config: %w", err)
+			}
+			logger.Info("Cloudflare API token updated in config (%s)", resolvedPath)
+
+			if err := deploy.RotateCloudflareToken(cfg); err != nil {
+				return fmt.Errorf("failed to rotate cloudflare token: %w", err)
+			}
+
+			logger.Success("Cloudflare API token rotated successfully to: %s", newToken)
+			return nil
+		},
+	}
 }
 
 func newResetServerCmd(configPath string) *cobra.Command {
