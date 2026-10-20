@@ -159,7 +159,9 @@ func NewServerCmd(configPath string) *cobra.Command {
 
 // NewReinstallServerCmd creates the reinstall command (singctl sr ri)
 func NewReinstallServerCmd(configPath string) *cobra.Command {
-	return &cobra.Command{
+	var force bool
+
+	cmd := &cobra.Command{
 		Use:     "reinstall [target]",
 		Aliases: []string{"ri"},
 		Short:   "重装服务端组件(简写singctl sr ri) / Reinstall server components (all|common|caddy|singbox|substore|warp)",
@@ -178,43 +180,219 @@ func NewReinstallServerCmd(configPath string) *cobra.Command {
 
 			switch target {
 			case "all":
-				return reinstallAll(cfg)
+				return handleReinstallAll(cfg, force)
 			case "common":
 				return deploy.DeployCommon()
 			case "caddy":
-				logger.Info("Reinstalling Caddy...")
-				if err := deploy.UninstallCaddy(); err != nil {
-					logger.Warn("Failed to uninstall Caddy: %v", err)
-				}
-				return deploy.DeployCaddy(cfg)
+				return handleReinstallCaddy(cfg, force)
 			case "singbox":
-				logger.Info("Reinstalling sing-box...")
-				if err := deploy.UninstallSingbox(); err != nil {
-					logger.Warn("Failed to uninstall sing-box: %v", err)
-				}
-				sbs, err := deploy.NewSingBoxServer(cfg)
-				if err != nil {
-					return err
-				}
-				return sbs.DeploySingbox()
+				return handleReinstallSingbox(cfg, force)
 			case "substore":
-				logger.Info("Reinstalling Sub-Store...")
-				if err := deploy.UninstallSubstore(); err != nil {
-					logger.Warn("Failed to uninstall Sub-Store: %v", err)
-				}
-				sbt := deploy.NewSubstore(cfg, "")
-				return sbt.DeploySubstore()
+				return handleReinstallSubstore(cfg, force)
 			case "warp":
-				logger.Info("Reinstalling WARP...")
-				if err := deploy.UninstallWarp(); err != nil {
-					logger.Warn("Failed to uninstall WARP: %v", err)
-				}
-				return deploy.DeployWarp()
+				return handleReinstallWarp(cfg, force)
 			default:
 				return fmt.Errorf("unknown target: %s (must be all, common, caddy, singbox, substore, or warp)", target)
 			}
 		},
 	}
+
+	cmd.Flags().BoolVarP(&force, "force", "f", false, "强制重装，跳过版本检查 / Force reinstall without checking latest versions")
+	return cmd
+}
+
+func handleReinstallAll(cfg *config.Config, force bool) error {
+	// Verify required config
+	if cfg.Server.SBDomain == "" || cfg.Server.CFDNSKey == "" {
+		return fmt.Errorf("server.sb_domain and server.cf_dns_key are required in singctl.yaml")
+	}
+
+	if force {
+		logger.Info("强制重装所有服务端组件 (-f)...")
+		return reinstallAll(cfg)
+	}
+
+	logger.Info("正在检查服务端各组件最新版本...")
+	results, err := deploy.CheckAllComponentVersions(cfg)
+	if err != nil {
+		logger.Warn("检查部分组件版本时发生错误: %v", err)
+	}
+
+	var hasAnyUpdate bool
+	for _, info := range results {
+		if info.HasUpdate {
+			hasAnyUpdate = true
+			logger.Info("📦 [%s]: 当前 %s -> 最新 %s (有新版本)", info.DisplayName, info.CurrentVersion, info.LatestVersion)
+		} else {
+			logger.Info("✅ [%s]: 当前 %s (已是最新)", info.DisplayName, info.CurrentVersion)
+		}
+	}
+
+	if !hasAnyUpdate {
+		logger.Success("所有服务端组件均已是最新版本，无需重装。使用 -f 参数可强制重装。")
+		return nil
+	}
+
+	logger.Info("检测到有组件需要更新，开始重装对应组件...")
+
+	var singboxReinstalled bool
+	var lastSBS *deploy.SingBoxServer
+
+	for _, info := range results {
+		if !info.HasUpdate {
+			continue
+		}
+		switch info.Name {
+		case "warp":
+			logger.Info("正在重装 WARP (wireproxy)...")
+			if err := deploy.UninstallWarp(); err != nil {
+				logger.Warn("Failed to uninstall WARP: %v", err)
+			}
+			if err := deploy.DeployWarp(); err != nil {
+				return err
+			}
+		case "caddy":
+			logger.Info("正在重装 Caddy...")
+			if err := deploy.UninstallCaddy(); err != nil {
+				logger.Warn("Failed to uninstall Caddy: %v", err)
+			}
+			if err := deploy.DeployCaddy(cfg); err != nil {
+				return err
+			}
+		case "singbox":
+			logger.Info("正在重装 sing-box...")
+			if err := deploy.UninstallSingbox(); err != nil {
+				logger.Warn("Failed to uninstall sing-box: %v", err)
+			}
+			sbs, err := deploy.NewSingBoxServer(cfg)
+			if err != nil {
+				return err
+			}
+			if err := sbs.DeploySingbox(); err != nil {
+				return err
+			}
+			singboxReinstalled = true
+			lastSBS = sbs
+		case "substore":
+			logger.Info("正在重装 Sub-Store...")
+			if err := deploy.UninstallSubstore(); err != nil {
+				logger.Warn("Failed to uninstall Sub-Store: %v", err)
+			}
+			sbt := deploy.NewSubstore(cfg, "")
+			if err := sbt.DeploySubstore(); err != nil {
+				return err
+			}
+			if lastSBS == nil {
+				sbs, err := deploy.NewSingBoxServer(cfg)
+				if err == nil {
+					lastSBS = sbs
+				}
+			}
+			if lastSBS != nil {
+				if err := sbt.UpdateSubstoreConfig(lastSBS); err != nil {
+					logger.Warn("Substore config update failed: %v", err)
+				}
+			}
+		}
+	}
+
+	if singboxReinstalled && lastSBS != nil {
+		sbt := deploy.NewSubstore(cfg, "")
+		_ = sbt.UpdateSubstoreConfig(lastSBS)
+		lastSBS.ShowLoginInfo()
+	}
+
+	logger.Success("组件更新/重装完成。")
+	return nil
+}
+
+func handleReinstallCaddy(cfg *config.Config, force bool) error {
+	if !force {
+		logger.Info("正在检查 Caddy 最新版本...")
+		info, err := deploy.CheckCaddyVersion(cfg)
+		if err != nil {
+			logger.Warn("无法获取 Caddy 远端最新版本 (%v)，如需强制重装请添加 -f 参数", err)
+		} else if !info.HasUpdate {
+			logger.Success("Caddy 已是最新版本 (%s)，无需重装。使用 -f 参数可强制重装。", info.CurrentVersion)
+			return nil
+		} else {
+			logger.Info("Caddy 发现新版本: 当前 %s -> 最新 %s，开始重装...", info.CurrentVersion, info.LatestVersion)
+		}
+	}
+
+	logger.Info("Reinstalling Caddy...")
+	if err := deploy.UninstallCaddy(); err != nil {
+		logger.Warn("Failed to uninstall Caddy: %v", err)
+	}
+	return deploy.DeployCaddy(cfg)
+}
+
+func handleReinstallSingbox(cfg *config.Config, force bool) error {
+	if !force {
+		logger.Info("正在检查 sing-box 最新版本...")
+		info, err := deploy.CheckSingBoxVersion(cfg)
+		if err != nil {
+			logger.Warn("无法获取 sing-box 远端最新版本 (%v)，如需强制重装请添加 -f 参数", err)
+		} else if !info.HasUpdate {
+			logger.Success("sing-box 已是最新版本 (%s)，无需重装。使用 -f 参数可强制重装。", info.CurrentVersion)
+			return nil
+		} else {
+			logger.Info("sing-box 发现新版本: 当前 %s -> 最新 %s，开始重装...", info.CurrentVersion, info.LatestVersion)
+		}
+	}
+
+	logger.Info("Reinstalling sing-box...")
+	if err := deploy.UninstallSingbox(); err != nil {
+		logger.Warn("Failed to uninstall sing-box: %v", err)
+	}
+	sbs, err := deploy.NewSingBoxServer(cfg)
+	if err != nil {
+		return err
+	}
+	return sbs.DeploySingbox()
+}
+
+func handleReinstallSubstore(cfg *config.Config, force bool) error {
+	if !force {
+		logger.Info("正在检查 Sub-Store 镜像版本...")
+		info, err := deploy.CheckSubstoreVersion(cfg)
+		if err != nil {
+			logger.Warn("无法获取 Sub-Store 镜像版本 (%v)，如需强制重装请添加 -f 参数", err)
+		} else if !info.HasUpdate {
+			logger.Success("Sub-Store 已是最新版本，无需重装。使用 -f 参数可强制重装。")
+			return nil
+		} else {
+			logger.Info("Sub-Store 发现新版本镜像: 当前 %s -> 最新 %s，开始重装...", info.CurrentVersion, info.LatestVersion)
+		}
+	}
+
+	logger.Info("Reinstalling Sub-Store...")
+	if err := deploy.UninstallSubstore(); err != nil {
+		logger.Warn("Failed to uninstall Sub-Store: %v", err)
+	}
+	sbt := deploy.NewSubstore(cfg, "")
+	return sbt.DeploySubstore()
+}
+
+func handleReinstallWarp(cfg *config.Config, force bool) error {
+	if !force {
+		logger.Info("正在检查 WARP (wireproxy) 最新版本...")
+		info, err := deploy.CheckWarpVersion(cfg)
+		if err != nil {
+			logger.Warn("无法获取 WARP (wireproxy) 远端最新版本 (%v)，如需强制重装请添加 -f 参数", err)
+		} else if !info.HasUpdate {
+			logger.Success("WARP (wireproxy) 已是最新版本 (%s)，无需重装。使用 -f 参数可强制重装。", info.CurrentVersion)
+			return nil
+		} else {
+			logger.Info("WARP (wireproxy) 发现新版本: 当前 %s -> 最新 %s，开始重装...", info.CurrentVersion, info.LatestVersion)
+		}
+	}
+
+	logger.Info("Reinstalling WARP...")
+	if err := deploy.UninstallWarp(); err != nil {
+		logger.Warn("Failed to uninstall WARP: %v", err)
+	}
+	return deploy.DeployWarp()
 }
 
 func reinstallAll(cfg *config.Config) error {

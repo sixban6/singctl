@@ -64,20 +64,27 @@ singctl sr install
 
 ### `singctl sr ri [target]` — 重装服务端组件
 
-卸载旧组件并重新安装服务端组件。支持全量重装或指定单个组件重装。
+重装服务端组件（支持全量重装或指定单个组件重装）。
+
+**版本检查机制**：
+- **默认行为**：检查目标组件是否有更新。若已是最新版本，将跳过重装（输出组件当前版本与最新版本对比）；仅当发现新版本时才执行重装。
+- **强制重装 (`-f` / `--force`)**：跳过版本检查，直接卸载并强制重新部署目标组件。
 
 ```bash
-# 重装所有服务端组件（简写）
+# 智能重装：检查最新版本，仅在有新版本时重装（简写）
 singctl sr ri
 
-# 或使用完整子命令
-singctl sr reinstall
+# 强制重装所有服务端组件（跳过版本检查）
+singctl sr ri -f
 
-# 也可以重装指定组件
+# 也可以重装指定组件（默认检查版本，有新版本才重装）
 singctl sr ri caddy
 singctl sr ri singbox
 singctl sr ri substore
 singctl sr ri warp
+
+# 强制重装指定组件
+singctl sr ri caddy -f
 ```
 
 ---

@@ -78,6 +78,22 @@ func TestReinstallServerCmd_MissingRequiredConfig(t *testing.T) {
 	}
 }
 
+// TestReinstallServerCmd_ForceFlag verifies that -f / --force flag is registered on reinstall command.
+func TestReinstallServerCmd_ForceFlag(t *testing.T) {
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "singctl.yaml")
+	_ = os.WriteFile(configPath, []byte("server:\n  sb_domain: \"test.example.com\"\n  cf_dns_key: \"test_token\"\n"), 0644)
+
+	reinstallCmd := cmd.NewReinstallServerCmd(configPath)
+	flag := reinstallCmd.Flags().Lookup("force")
+	if flag == nil {
+		t.Fatal("expected 'force' flag on reinstall command")
+	}
+	if flag.Shorthand != "f" {
+		t.Errorf("expected shorthand 'f' for force flag, got %q", flag.Shorthand)
+	}
+}
+
 // TestCfTokenCmd_Registered verifies that cf-token is registered with aliases cf, token, cftoken.
 func TestCfTokenCmd_Registered(t *testing.T) {
 	tempDir := t.TempDir()
