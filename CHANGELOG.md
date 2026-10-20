@@ -1,3 +1,5 @@
+## [1.28.1](https://github.com/sixban6/singctl/compare/v1.28.0...v1.28.1) (2026-10-20)
+
 # [1.28.0](https://github.com/sixban6/singctl/compare/v1.27.3...v1.28.0) (2026-10-20)
 
 
