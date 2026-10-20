@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 
 	"singctl/internal/config"
 	"singctl/internal/constant"
@@ -14,6 +16,7 @@ import (
 type Substore struct {
 	Config       *config.Config
 	SSKey        string
+	SubstorePath string
 	substorePath string
 }
 
@@ -21,6 +24,16 @@ func NewSubstore(cfg *config.Config, ssKey string) *Substore {
 	return &Substore{
 		Config: cfg, SSKey: ssKey, substorePath: constant.SubStoreFile,
 	}
+}
+
+func (sb *Substore) getSubstorePath() string {
+	if sb.SubstorePath != "" {
+		return sb.SubstorePath
+	}
+	if sb.substorePath != "" {
+		return sb.substorePath
+	}
+	return constant.SubStoreFile
 }
 
 // DeploySubstore handles Docker installation, password generation, and sub-store container rotation
@@ -109,8 +122,16 @@ func UninstallSubstore() error {
 
 // UpdateSubstoreConfig updates the sub-store.json file with Hysteria 2 and optionally VLESS+Reality subscriptions.
 func (sb *Substore) UpdateSubstoreConfig(sbs *SingBoxServer) error {
+	filePath := sb.getSubstorePath()
+	if filePath == "" {
+		return fmt.Errorf("sub-store file path is empty")
+	}
+
+	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
+		return fmt.Errorf("failed to create directory for sub-store config: %w", err)
+	}
+
 	// 1. Backup existing config if it exists
-	filePath := sb.substorePath
 	if _, err := os.Stat(filePath); err == nil {
 		backupPath := filePath + ".bak"
 		input, err := os.ReadFile(filePath)
@@ -173,6 +194,33 @@ func (sb *Substore) UpdateSubstoreConfig(sbs *SingBoxServer) error {
 	}
 
 	logger.Info("Successfully updated %s", filePath)
+
+	// Restart sub-store container if running to reload the config in memory
+	if err := sb.RestartSubstore(); err != nil {
+		logger.Warn("Failed to restart sub-store container (non-fatal): %v", err)
+	}
+
+	return nil
+}
+
+// RestartSubstore restarts the sub-store container if it is running in Docker,
+// allowing it to reload the updated configuration.
+func (sb *Substore) RestartSubstore() error {
+	if _, err := exec.LookPath("docker"); err != nil {
+		return nil
+	}
+	out, err := exec.Command("docker", "ps", "-q", "-f", "name=^sub-store$").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to check sub-store container status: %w", err)
+	}
+	if strings.TrimSpace(string(out)) == "" {
+		return nil
+	}
+	logger.Info("Restarting sub-store container to apply configuration changes...")
+	if err := runCmd("docker", "restart", "-t", "2", "sub-store"); err != nil {
+		return fmt.Errorf("failed to restart sub-store container: %w", err)
+	}
+	logger.Success("Sub-Store container restarted successfully.")
 	return nil
 }
 
@@ -213,7 +261,10 @@ func addOrUpdateSub(subs []interface{}, targetName, displayName, contentURI, rem
 	for i, v := range subs {
 		if sub, ok := v.(map[string]interface{}); ok {
 			if name, ok := sub["name"].(string); ok && name == targetName {
-				subs[i] = newSub
+				sub["content"] = contentURI
+				sub["displayName"] = displayName
+				sub["display-name"] = displayName
+				subs[i] = sub
 				found = true
 				logger.Info("Updated existing subscription: %s", targetName)
 				break

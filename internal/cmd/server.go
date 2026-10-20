@@ -143,13 +143,77 @@ func NewServerCmd(configPath string) *cobra.Command {
 	}
 	cfg, err := config.Load(configPath)
 	if err != nil {
-		return nil
+		logger.Warn("Failed to load config: %v", err)
 	}
 
 	cmd.AddCommand(newInstallServerCmd(cfg))
 	cmd.AddCommand(newUninstallServerCmd())
 	cmd.AddCommand(newSniCmd(configPath))
+	cmd.AddCommand(newResetServerCmd(configPath))
 	return cmd
+}
+
+func newResetServerCmd(configPath string) *cobra.Command {
+	return &cobra.Command{
+		Use:   "reset [target]",
+		Short: "重置服务端凭证并更新订阅 / Reset server credentials and update Sub-Store (sb|singbox)",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			target := "sb"
+			if len(args) > 0 {
+				target = args[0]
+			}
+
+			switch target {
+			case "sb", "singbox":
+				resolvedPath := resolveConfigPath(cmd, configPath)
+				return resetSingboxCredentials(resolvedPath)
+			default:
+				return fmt.Errorf("unknown target: %s (must be sb or singbox)", target)
+			}
+		},
+	}
+}
+
+func resolveConfigPath(cmd *cobra.Command, fallback string) string {
+	if f := cmd.Flag("config"); f != nil && f.Value.String() != "" {
+		return f.Value.String()
+	}
+	if f := cmd.InheritedFlags().Lookup("config"); f != nil && f.Value.String() != "" {
+		return f.Value.String()
+	}
+	return fallback
+}
+
+func resetSingboxCredentials(configPath string) error {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	if cfg.Server.SBDomain == "" {
+		return fmt.Errorf("server.sb_domain is required in config (%s)", configPath)
+	}
+
+	logger.Info("Resetting sing-box server credentials for domain: %s...", cfg.Server.SBDomain)
+
+	sbs, err := deploy.NewSingBoxServer(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to initialize sing-box server: %w", err)
+	}
+
+	if err := sbs.ResetCredentials(); err != nil {
+		return fmt.Errorf("failed to reset sing-box credentials: %w", err)
+	}
+
+	sbt := deploy.NewSubstore(cfg, "")
+	if err := sbt.UpdateSubstoreConfig(sbs); err != nil {
+		logger.Warn("Substore config update failed: %v", err)
+		return fmt.Errorf("failed to update substore config: %w", err)
+	}
+
+	logger.Success("Sing-box credentials reset and Sub-Store subscriptions updated successfully.")
+	return nil
 }
 
 func newSniCmd(configPath string) *cobra.Command {
@@ -160,12 +224,13 @@ func newSniCmd(configPath string) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			newSni := args[0]
 
-			cfg, err := config.Load(configPath)
+			resolvedPath := resolveConfigPath(cmd, configPath)
+			cfg, err := config.Load(resolvedPath)
 			if err != nil {
 				return fmt.Errorf("failed to load config: %w", err)
 			}
 			cfg.Server.Sni = newSni
-			if err := config.Save(configPath, cfg); err != nil {
+			if err := config.Save(resolvedPath, cfg); err != nil {
 				return fmt.Errorf("failed to save config: %w", err)
 			}
 			logger.Info("SNI updated to %s in config", newSni)
