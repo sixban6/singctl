@@ -1,3 +1,10 @@
+## [1.27.2](https://github.com/sixban6/singctl/compare/v1.27.1...v1.27.2) (2026-10-20)
+
+
+### Bug Fixes
+
+* singctl sr reset sb ([5b231dc](https://github.com/sixban6/singctl/commit/5b231dcda5ae22ccf9b5cb2c8098a16e104347bf))
+
 ## [1.27.1](https://github.com/sixban6/singctl/compare/v1.27.0...v1.27.1) (2026-09-12)
 
 
