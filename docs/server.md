@@ -143,3 +143,23 @@ singctl sr reset singbox
 
 > **提示**：可将 `singctl sr reset sb` 配置到系统定时任务（cron）中，实现周期性自动轮转密码和更新订阅。
 
+---
+
+### `singctl sr sync [target]` — 同步最新节点信息到 Sub-Store
+
+直接从当前正在运行的 `sing-box` 部署配置文件（`/etc/sing-box/config.json`）中读取实际生效的节点凭证与参数（包含 Hysteria 2、VLESS Reality 的 UUID、Public Key、Short ID 及 SNI 域名等），将其同步更新写入到 Sub-Store，并默认重启 Sub-Store 容器确保数据与内存缓存立即生效。
+
+适用于：修改了 SNI、手动调整过 sing-box 配置，或者 Sub-Store 内节点与服务器实际配置不一致时进行一键同步矫正。
+
+```bash
+# 同步节点到 Sub-Store 并重启 Sub-Store 容器（默认）
+singctl sr sync
+
+# 快捷命令别名
+singctl sr ss
+singctl sr sync-substore
+
+# 仅同步配置，跳过容器重启
+singctl sr sync --restart=false
+```
+

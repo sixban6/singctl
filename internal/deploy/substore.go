@@ -18,6 +18,7 @@ type Substore struct {
 	SSKey        string
 	SubstorePath string
 	substorePath string
+	SkipRestart  bool
 }
 
 func NewSubstore(cfg *config.Config, ssKey string) *Substore {
@@ -196,8 +197,10 @@ func (sb *Substore) UpdateSubstoreConfig(sbs *SingBoxServer) error {
 	logger.Info("Successfully updated %s", filePath)
 
 	// Restart sub-store container if running to reload the config in memory
-	if err := sb.RestartSubstore(); err != nil {
-		logger.Warn("Failed to restart sub-store container (non-fatal): %v", err)
+	if !sb.SkipRestart {
+		if err := sb.RestartSubstore(); err != nil {
+			logger.Warn("Failed to restart sub-store container (non-fatal): %v", err)
+		}
 	}
 
 	return nil

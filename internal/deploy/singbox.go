@@ -31,6 +31,7 @@ type SingBoxServer struct {
 	publicKey  string
 	shortID    string
 	cfg        *config.Config
+	ConfigFile string
 
 	hy2Tag         string
 	vrTag          string
@@ -418,22 +419,32 @@ func (sbs *SingBoxServer) renderSingboxConfig() error {
 	return ensureFilePermissions(constant.SingBoxConfigFile, 0600)
 }
 
+func (sbs *SingBoxServer) getConfigFile() string {
+	if sbs.ConfigFile != "" {
+		return sbs.ConfigFile
+	}
+	return constant.SingBoxConfigFile
+}
+
 // LoadExistingCredentials reads the deployed sing-box config and populates
-// sbs with the existing uuid, private_key and short_id so that SNI updates
-// do not regenerate credentials.
+// sbs with the existing uuid, private_key and short_id, and updates share links
+// so that SNI updates or node syncs accurately reflect deployed credentials.
 func (sbs *SingBoxServer) LoadExistingCredentials() error {
-	data, err := os.ReadFile(constant.SingBoxConfigFile)
+	configFile := sbs.getConfigFile()
+	data, err := os.ReadFile(configFile)
 	if err != nil {
 		return fmt.Errorf("read existing config: %w", err)
 	}
 
 	var raw struct {
 		Inbounds []struct {
+			Type  string `json:"type"`
 			Users []struct {
 				UUID string `json:"uuid"`
 			} `json:"users"`
 			TLS struct {
-				Reality struct {
+				ServerName string `json:"server_name"`
+				Reality    struct {
 					PrivateKey string   `json:"private_key"`
 					ShortID    []string `json:"short_id"`
 				} `json:"reality"`
@@ -447,6 +458,9 @@ func (sbs *SingBoxServer) LoadExistingCredentials() error {
 	for _, inbound := range raw.Inbounds {
 		if len(inbound.Users) > 0 && inbound.Users[0].UUID != "" {
 			sbs.hyUUID = inbound.Users[0].UUID
+			if inbound.TLS.ServerName != "" && sbs.cfg != nil && sbs.cfg.Server.Sni == "" {
+				sbs.cfg.Server.Sni = inbound.TLS.ServerName
+			}
 			sbs.privateKey = inbound.TLS.Reality.PrivateKey
 			if sbs.privateKey != "" {
 				pub, err := deriveRealityPublicKey(sbs.privateKey)
@@ -458,7 +472,8 @@ func (sbs *SingBoxServer) LoadExistingCredentials() error {
 			if len(inbound.TLS.Reality.ShortID) > 0 {
 				sbs.shortID = inbound.TLS.Reality.ShortID[0]
 			}
-			logger.Info("Loaded existing credentials from %s", constant.SingBoxConfigFile)
+			sbs.updateShareLinks()
+			logger.Info("Loaded existing credentials from %s", configFile)
 			return nil
 		}
 	}
