@@ -154,6 +154,7 @@ func NewServerCmd(configPath string) *cobra.Command {
 	cmd.AddCommand(newSniCmd(configPath))
 	cmd.AddCommand(NewCfTokenCmd(configPath))
 	cmd.AddCommand(newResetServerCmd(configPath))
+	cmd.AddCommand(NewSyncServerCmd(configPath))
 	return cmd
 }
 
@@ -594,4 +595,69 @@ func newSniCmd(configPath string) *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// NewSyncServerCmd creates the command to sync latest node credentials from sing-box to Sub-Store.
+func NewSyncServerCmd(configPath string) *cobra.Command {
+	var restart bool
+
+	cmd := &cobra.Command{
+		Use:     "sync [target]",
+		Aliases: []string{"ss", "sync-substore"},
+		Short:   "同步最新节点信息到Sub-Store / Sync latest node info to Sub-Store (substore)",
+		Args:    cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			target := "substore"
+			if len(args) > 0 {
+				target = args[0]
+			}
+
+			switch target {
+			case "substore", "sub-store", "sb", "singbox":
+				resolvedPath := resolveConfigPath(cmd, configPath)
+				return syncNodeToSubstore(resolvedPath, restart)
+			default:
+				return fmt.Errorf("unknown target: %s (must be substore, sub-store, sb, or singbox)", target)
+			}
+		},
+	}
+
+	cmd.Flags().BoolVarP(&restart, "restart", "r", true, "同步后自动重启 Sub-Store 容器保证数据最新 / Restart Sub-Store container after sync to ensure data is updated")
+	return cmd
+}
+
+func syncNodeToSubstore(configPath string, restart bool) error {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	if cfg.Server.SBDomain == "" {
+		return fmt.Errorf("server.sb_domain is required in config (%s)", configPath)
+	}
+
+	logger.Info("正在从本地 sing-box 配置文件读取实际节点凭证与参数...")
+
+	sbs, err := deploy.NewSingBoxServer(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to initialize sing-box server: %w", err)
+	}
+
+	if err := sbs.LoadExistingCredentials(); err != nil {
+		return fmt.Errorf("failed to load existing sing-box credentials: %w", err)
+	}
+
+	sbt := deploy.NewSubstore(cfg, "")
+	sbt.SkipRestart = !restart
+	if err := sbt.UpdateSubstoreConfig(sbs); err != nil {
+		return fmt.Errorf("failed to update substore config: %w", err)
+	}
+
+	logger.Success("最新节点信息已成功同步至 Sub-Store！")
+	fmt.Println("\n========================================================")
+	fmt.Println("📡 已同步至 Sub-Store 的节点配置:")
+	fmt.Printf("• Hysteria 2:    %s\n", sbs.ShareLinkHy2)
+	fmt.Printf("• VLESS Reality: %s\n", sbs.ShareLinkVless)
+	fmt.Println("========================================================")
+	return nil
 }
