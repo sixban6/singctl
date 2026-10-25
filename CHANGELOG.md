@@ -1,3 +1,10 @@
+## [1.29.1](https://github.com/sixban6/singctl/compare/v1.29.0...v1.29.1) (2026-10-25)
+
+
+### Bug Fixes
+
+* **server:** bind all inbounds to 127.0.0.1 and route via Caddy Layer 4 ([00e5108](https://github.com/sixban6/singctl/commit/00e51085af8de8c8a2b6fd63085f3e470bd5e230))
+
 # [1.29.0](https://github.com/sixban6/singctl/compare/v1.28.3...v1.29.0) (2026-10-25)
 
 
