@@ -13,17 +13,6 @@
                 proxy 127.0.0.1:8443
             }
 
-            # AnyTLS 流量 (ALPN: anytls) -> Sing-box
-            @anytls {
-                tls {
-                    sni {{.SBDomain}}
-                    alpn anytls
-                }
-            }
-            route @anytls {
-                proxy 127.0.0.1:52022
-            }
-
             # Sub-Store 域名流量 -> Caddy HTTP 层
             @substore {
                 tls {
@@ -35,17 +24,17 @@
             }
         }
 
-        # UDP 443: TUIC 与 Hysteria 2 分流
+        # UDP 443: TUIC 与 Hysteria 2 基于 QUIC SNI 分流 (ALPN 均为标准 h3)
         udp/:443 {
-            # TUIC 流量 (QUIC ALPN: tuic) -> Sing-box
+            # TUIC 流量 (QUIC SNI: {{.TuicDomain}}) -> Sing-box
             @tuic quic {
-                alpn tuic
+                sni {{.TuicDomain}}
             }
             route @tuic {
                 proxy udp/127.0.0.1:52023
             }
 
-            # Hysteria 2 (QUIC ALPN: h3) -> Sing-box (默认/回退路由)
+            # Hysteria 2 (QUIC SNI: {{.SBDomain}}) -> Sing-box (默认/回退路由)
             route {
                 proxy udp/127.0.0.1:52021
             }
@@ -65,4 +54,15 @@ https://{{.SBDomain}}:9443 {
         }
     }
     reverse_proxy http://127.0.0.1:3001
+}
+
+# TUIC 域名 TLS 证书自动化申请与续期
+https://{{.TuicDomain}}:9444 {
+    bind 127.0.0.1
+    tls {
+        issuer acme {
+            dns cloudflare {{.CFDNSKey}}
+        }
+    }
+    respond "OK" 200
 }

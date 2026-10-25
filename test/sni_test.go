@@ -57,10 +57,7 @@ func TestRender_CaddyfileWithSni(t *testing.T) {
 	if !strings.Contains(content, "sni test.sni.com") {
 		t.Errorf("Caddyfile missing expected SNI line. Got:\n%s", content)
 	}
-	if !strings.Contains(content, "alpn anytls") {
-		t.Errorf("Caddyfile missing expected AnyTLS ALPN matcher. Got:\n%s", content)
-	}
-	if !strings.Contains(content, "alpn tuic") {
-		t.Errorf("Caddyfile missing expected TUIC ALPN matcher. Got:\n%s", content)
+	if !strings.Contains(content, "sni tuic.sub.example.com") {
+		t.Errorf("Caddyfile missing expected TUIC QUIC SNI matcher. Got:\n%s", content)
 	}
 }

@@ -114,13 +114,22 @@ func PreviewCaddyfile(cfg *config.Config) (string, error) {
 
 	type tmplContext struct {
 		SBDomain   string
+		TuicDomain string
 		CFDNSKey   string
 		Sni        string
 		TuicPort   int
 		AnyTLSPort int
 	}
+	tuicDomain := ""
+	if cfg != nil {
+		tuicDomain = cfg.Server.TuicDomain
+		if tuicDomain == "" && cfg.Server.SBDomain != "" {
+			tuicDomain = "tuic." + cfg.Server.SBDomain
+		}
+	}
 	ctx := tmplContext{
 		SBDomain:   cfg.Server.SBDomain,
+		TuicDomain: tuicDomain,
 		CFDNSKey:   cfg.Server.CFDNSKey,
 		Sni:        cfg.Server.Sni,
 		TuicPort:   tuicPort,

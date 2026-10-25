@@ -23,8 +23,10 @@ import (
 )
 
 type SingBoxServer struct {
-	crtPath string
-	keyPath string
+	crtPath     string
+	keyPath     string
+	tuicCrtPath string
+	tuicKeyPath string
 
 	hyUUID     string
 	privateKey string
@@ -36,11 +38,9 @@ type SingBoxServer struct {
 	hy2Tag         string
 	vrTag          string
 	tuicTag        string
-	anytlsTag      string
 	ShareLinkHy2   string
 	ShareLinkVless string
 	ShareLinkTuic  string
-	ShareLinkAnytls string
 }
 
 func NewSingBoxServer(cfg *config.Config) (*SingBoxServer, error) {
@@ -66,14 +66,24 @@ func (sbs *SingBoxServer) initTag() {
 	sbs.hy2Tag = fmt.Sprintf("sec_%s_hy2", suffix)
 	sbs.vrTag = fmt.Sprintf("sec_%s_vr", suffix)
 	sbs.tuicTag = fmt.Sprintf("sec_%s_tuic", suffix)
-	sbs.anytlsTag = fmt.Sprintf("sec_%s_anytls", suffix)
+}
+
+// TuicDomain returns the configured or default TUIC domain.
+func (sbs *SingBoxServer) TuicDomain() string {
+	if sbs.cfg != nil && sbs.cfg.Server.TuicDomain != "" {
+		return sbs.cfg.Server.TuicDomain
+	}
+	if sbs.cfg != nil && sbs.cfg.Server.SBDomain != "" {
+		return "tuic." + sbs.cfg.Server.SBDomain
+	}
+	return ""
 }
 
 func (sbs *SingBoxServer) updateShareLinks() {
-	sbs.ShareLinkHy2 = fmt.Sprintf("hysteria2://%s@%s/?sni=%s&alpn=h3&insecure=0#%s", sbs.hyUUID, sbs.cfg.Server.SBDomain, sbs.cfg.Server.SBDomain, sbs.hy2Tag)
+	tuicDomain := sbs.TuicDomain()
+	sbs.ShareLinkHy2 = fmt.Sprintf("hysteria2://%s@%s:443/?sni=%s&alpn=h3&insecure=0#%s", sbs.hyUUID, sbs.cfg.Server.SBDomain, sbs.cfg.Server.SBDomain, sbs.hy2Tag)
 	sbs.ShareLinkVless = fmt.Sprintf("vless://%s@%s:443?type=tcp&encryption=none&security=reality&pbk=%s&fp=chrome&sni=%s&sid=%s&flow=xtls-rprx-vision#%s", sbs.hyUUID, sbs.cfg.Server.SBDomain, sbs.publicKey, sbs.cfg.Server.Sni, sbs.shortID, sbs.vrTag)
-	sbs.ShareLinkTuic = fmt.Sprintf("tuic://%s:%s@%s:%d/?sni=%s&alpn=tuic&congestion_control=bbr#%s", sbs.hyUUID, sbs.hyUUID, sbs.cfg.Server.SBDomain, sbs.TuicPort(), sbs.cfg.Server.SBDomain, sbs.tuicTag)
-	sbs.ShareLinkAnytls = fmt.Sprintf("anytls://%s@%s:%d/?sni=%s&alpn=anytls#%s", sbs.hyUUID, sbs.cfg.Server.SBDomain, sbs.AnyTLSPort(), sbs.cfg.Server.SBDomain, sbs.anytlsTag)
+	sbs.ShareLinkTuic = fmt.Sprintf("tuic://%s:%s@%s:443/?sni=%s&alpn=h3&congestion_control=bbr#%s", sbs.hyUUID, sbs.hyUUID, tuicDomain, tuicDomain, sbs.tuicTag)
 }
 
 // HyUUID returns the Hysteria2 password / VLESS UUID.
@@ -106,11 +116,6 @@ func (sbs *SingBoxServer) TuicTag() string {
 	return sbs.tuicTag
 }
 
-// AnytlsTag returns the AnyTLS tag.
-func (sbs *SingBoxServer) AnytlsTag() string {
-	return sbs.anytlsTag
-}
-
 // TuicPort returns the configured or default TUIC port (443).
 func (sbs *SingBoxServer) TuicPort() int {
 	if sbs.cfg != nil && sbs.cfg.Server.TuicPort > 0 {
@@ -127,20 +132,15 @@ func (sbs *SingBoxServer) AnyTLSPort() int {
 	return 443
 }
 
-// getCaddyCertPath waits and finds the actual cert path Caddy generated (Let's Encrypt or ZeroSSL)
-func (sbs *SingBoxServer) initCaddyCertPath() {
+func findCaddyCertForDomain(domain string) (string, string) {
 	basePath := "/var/lib/caddy/.local/share/caddy/certificates"
+	fallbackCrt := filepath.Join(basePath, "acme-v02.api.letsencrypt.org-directory", domain, domain+".crt")
+	fallbackKey := filepath.Join(basePath, "acme-v02.api.letsencrypt.org-directory", domain, domain+".key")
 
 	if _, err := os.Stat("/var/lib/caddy"); os.IsNotExist(err) {
-		logger.Warn("Caddy directory not found, using fallback certificate paths")
-		sbs.crtPath = filepath.Join(basePath, "acme-v02.api.letsencrypt.org-directory", sbs.cfg.Server.SBDomain, sbs.cfg.Server.SBDomain+".crt")
-		sbs.keyPath = filepath.Join(basePath, "acme-v02.api.letsencrypt.org-directory", sbs.cfg.Server.SBDomain, sbs.cfg.Server.SBDomain+".key")
-		return
+		return fallbackCrt, fallbackKey
 	}
 
-	logger.Info("Waiting for Caddy to generate certificates for %s...", sbs.cfg.Server.SBDomain)
-
-	// 最多重试 30 次，每次间隔 1 秒
 	for range 30 {
 		dirs, err := os.ReadDir(basePath)
 		if err == nil {
@@ -148,28 +148,37 @@ func (sbs *SingBoxServer) initCaddyCertPath() {
 				if !d.IsDir() {
 					continue
 				}
-				crtPath := filepath.Join(basePath, d.Name(), sbs.cfg.Server.SBDomain, sbs.cfg.Server.SBDomain+".crt")
-				keyPath := filepath.Join(basePath, d.Name(), sbs.cfg.Server.SBDomain, sbs.cfg.Server.SBDomain+".key")
+				crtPath := filepath.Join(basePath, d.Name(), domain, domain+".crt")
+				keyPath := filepath.Join(basePath, d.Name(), domain, domain+".key")
 
 				if _, err := os.Stat(crtPath); err == nil {
 					if _, err := os.Stat(keyPath); err == nil {
-						logger.Success("Found certificate at %s", crtPath)
-						sbs.crtPath = crtPath
-						sbs.keyPath = keyPath
-						// 修复关键：找到证书后，立刻结束函数，不再继续等待
-						return
+						return crtPath, keyPath
 					}
 				}
 			}
 		}
-		// 没找到，休息 1 秒后再进下一次循环
 		time.Sleep(1 * time.Second)
 	}
 
-	// 只有当 30 次循环都跑完还没 `return` 时，才会走到这里（真正触发超时）
-	logger.Warn("Timeout waiting for Caddy certs, using Let's Encrypt fallback path")
-	sbs.crtPath = filepath.Join(basePath, "acme-v02.api.letsencrypt.org-directory", sbs.cfg.Server.SBDomain, sbs.cfg.Server.SBDomain+".crt")
-	sbs.keyPath = filepath.Join(basePath, "acme-v02.api.letsencrypt.org-directory", sbs.cfg.Server.SBDomain, sbs.cfg.Server.SBDomain+".key")
+	return fallbackCrt, fallbackKey
+}
+
+// initCaddyCertPath waits and finds the actual cert path Caddy generated (Let's Encrypt or ZeroSSL)
+func (sbs *SingBoxServer) initCaddyCertPath() {
+	logger.Info("Waiting for Caddy to generate certificates for %s...", sbs.cfg.Server.SBDomain)
+	sbs.crtPath, sbs.keyPath = findCaddyCertForDomain(sbs.cfg.Server.SBDomain)
+	logger.Success("Found certificate at %s", sbs.crtPath)
+
+	tuicDomain := sbs.TuicDomain()
+	if tuicDomain != "" && tuicDomain != sbs.cfg.Server.SBDomain {
+		logger.Info("Waiting for Caddy to generate certificates for %s...", tuicDomain)
+		sbs.tuicCrtPath, sbs.tuicKeyPath = findCaddyCertForDomain(tuicDomain)
+		logger.Success("Found certificate at %s", sbs.tuicCrtPath)
+	} else {
+		sbs.tuicCrtPath = sbs.crtPath
+		sbs.tuicKeyPath = sbs.keyPath
+	}
 }
 func (sbs *SingBoxServer) initVRParams() error {
 	// If credentials were already loaded (e.g. via LoadExistingCredentials), skip generation.
@@ -407,8 +416,6 @@ func (sbs *SingBoxServer) ShowLoginInfo() {
 	fmt.Printf("%s\n", sbs.ShareLinkVless)
 	fmt.Println("\n🚀 TUIC Access Link (Copy to your client):")
 	fmt.Printf("%s\n", sbs.ShareLinkTuic)
-	fmt.Println("\n🚀 AnyTLS Access Link (Copy to your client):")
-	fmt.Printf("%s\n", sbs.ShareLinkAnytls)
 	fmt.Println("========================================================")
 }
 
@@ -425,11 +432,23 @@ func (sbs *SingBoxServer) PreviewServerConfig() (string, error) {
 		return "", fmt.Errorf("failed to parse sing-box template: %w", err)
 	}
 
+	tuicCrt := sbs.tuicCrtPath
+	if tuicCrt == "" {
+		tuicCrt = sbs.crtPath
+	}
+	tuicKey := sbs.tuicKeyPath
+	if tuicKey == "" {
+		tuicKey = sbs.keyPath
+	}
+
 	type tmplContext struct {
 		HyUUID            string
 		SBDomain          string
+		TuicDomain        string
 		CertPath          string
 		KeyPath           string
+		TuicCertPath      string
+		TuicKeyPath       string
 		RealityPrivateKey string
 		RealityShortID    string
 		Sni               string
@@ -439,8 +458,11 @@ func (sbs *SingBoxServer) PreviewServerConfig() (string, error) {
 	ctx := tmplContext{
 		HyUUID:            sbs.hyUUID,
 		SBDomain:          sbs.cfg.Server.SBDomain,
+		TuicDomain:        sbs.TuicDomain(),
 		CertPath:          sbs.crtPath,
 		KeyPath:           sbs.keyPath,
+		TuicCertPath:      tuicCrt,
+		TuicKeyPath:       tuicKey,
 		RealityPrivateKey: sbs.privateKey,
 		RealityShortID:    sbs.shortID,
 		Sni:               sbs.cfg.Server.Sni,

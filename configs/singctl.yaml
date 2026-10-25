@@ -22,7 +22,8 @@ tailscale:                                      # (可选) Tailscale 部署配�
   use_build: false                              # (可选) 是否使用singbox内置的TailScale。默认：false, 不启用
 
 server:                                         # (可选) 服务器部署配置.当需要部署singbox服务端的时候配置
-  sb_domain: "sub.yourdomain.com"               # 你的域名
+  sb_domain: "sub.yourdomain.com"               # 你的域名（用于 Sub-Store 面板 与 Hysteria 2）
+  tuic_domain: "tuic.yourdomain.com"           # (可选) TUIC 专属子域名。默认: tuic.<sb_domain>
   cf_dns_key: "your_cloudflare_api_token"       # 你的 Cloudflare API Token
   sni: ""                                       # (可选) Reality SNI 伪装域名。默认: swdist.apple.com
 
