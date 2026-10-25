@@ -61,14 +61,23 @@ func (sb *Substore) DeploySubstore() error {
 		return fmt.Errorf("failed to create %s: %w", constant.SubStoreDir, err)
 	}
 
-	// 3. Generate a new random password
-	logger.Info("Generating new random key for Sub-Store...")
-	ssKey, err := generateHexRandom(13)
-	if err != nil {
-		return fmt.Errorf("failed to generate random string: %w", err)
+	// 3. Obtain existing key or generate a new random key
+	keyFile := filepath.Join(constant.SubStoreDir, "key")
+	ssKey := sb.SSKey
+	if ssKey == "" {
+		if data, err := os.ReadFile(keyFile); err == nil && len(strings.TrimSpace(string(data))) > 0 {
+			ssKey = strings.TrimSpace(string(data))
+			logger.Info("Reusing existing Sub-Store key...")
+		} else {
+			logger.Info("Generating new random key for Sub-Store...")
+			var err error
+			ssKey, err = generateHexRandom(13)
+			if err != nil {
+				return fmt.Errorf("failed to generate random string: %w", err)
+			}
+		}
 	}
 	sb.SSKey = ssKey
-	keyFile := filepath.Join(constant.SubStoreDir, "key")
 	_ = os.WriteFile(keyFile, []byte(ssKey), 0600)
 
 	// 4. Remove old container if it exists
