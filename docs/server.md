@@ -10,7 +10,7 @@
 
 ```
 客户端
-  │ VLESS / Hysteria2
+  │ VLESS / Hysteria2 / TUIC / AnyTLS
   ▼
 Caddy (反向代理 + TLS 证书)
   │
@@ -21,7 +21,13 @@ sing-box (核心路由)
   └── WARP (出口节点，可选)
 ```
 
-Caddy 负责 TLS 终止和域名路由，sing-box 处理代理协议，SubStore 提供订阅转换服务。
+Caddy 负责 TLS 证书申请与分流，sing-box 处理代理协议，SubStore 提供订阅转换服务。
+
+服务端支持部署 4 种协议节点：
+- **Hysteria 2**：基于 QUIC/UDP，使用标准 443 端口与域名 TLS 证书。
+- **VLESS Reality**：基于 TCP，使用 443 端口与 SNI 伪装分流（默认伪装域名 `swdist.apple.com`）。
+- **TUIC**：基于 QUIC/UDP（默认端口 `8448`），内置 BBR 拥塞控制与域名 TLS 证书。
+- **AnyTLS**：基于 TCP/TLS（默认端口 `8444`），采用 AnyTLS 流量混淆机制与域名 TLS 证书。
 
 ---
 
@@ -34,6 +40,8 @@ server:
   sb_domain: "sub.yourdomain.com"         # 你的域名（必填）
   cf_dns_key: "your_cloudflare_api_token" # Cloudflare API Token，用于自动申请 TLS 证书（必填）
   sni: "swdist.apple.com"                 # TLS SNI 伪装域名，默认 swdist.apple.com（可选）
+  tuic_port: 8448                         # (可选) TUIC 端口，默认 8448
+  anytls_port: 8444                       # (可选) AnyTLS 端口，默认 8444
 ```
 
 ### 静态配置 vs 动态命令修改 SNI
@@ -147,7 +155,7 @@ singctl sr reset singbox
 
 ### `singctl sr sync [target]` — 同步最新节点信息到 Sub-Store
 
-直接从当前正在运行的 `sing-box` 部署配置文件（`/etc/sing-box/config.json`）中读取实际生效的节点凭证与参数（包含 Hysteria 2、VLESS Reality 的 UUID、Public Key、Short ID 及 SNI 域名等），将其同步更新写入到 Sub-Store，并默认重启 Sub-Store 容器确保数据与内存缓存立即生效。
+直接从当前正在运行的 `sing-box` 部署配置文件（`/etc/sing-box/config.json`）中读取实际生效的节点凭证与参数（包含 Hysteria 2、VLESS Reality、TUIC 与 AnyTLS 的 UUID/密码、Public Key、Short ID 及端口等），将其同步更新写入到 Sub-Store，并默认重启 Sub-Store 容器确保数据与内存缓存立即生效。
 
 适用于：修改了 SNI、手动调整过 sing-box 配置，或者 Sub-Store 内节点与服务器实际配置不一致时进行一键同步矫正。
 

@@ -170,6 +170,12 @@ func TestSync_LoadExistingCredentialsAndSyncSubstore(t *testing.T) {
 	if !strings.Contains(sbs.ShareLinkVless, testShortID) {
 		t.Errorf("ShareLinkVless does not contain expected short ID: %s", sbs.ShareLinkVless)
 	}
+	if !strings.Contains(sbs.ShareLinkTuic, testUUID) {
+		t.Errorf("ShareLinkTuic does not contain expected UUID: %s", sbs.ShareLinkTuic)
+	}
+	if !strings.Contains(sbs.ShareLinkAnytls, testUUID) {
+		t.Errorf("ShareLinkAnytls does not contain expected UUID: %s", sbs.ShareLinkAnytls)
+	}
 
 	// 3. Sync to Sub-Store config
 	sbt := deploy.NewSubstore(cfg, "")
@@ -196,7 +202,7 @@ func TestSync_LoadExistingCredentialsAndSyncSubstore(t *testing.T) {
 		t.Fatalf("expected non-empty subs in substore json")
 	}
 
-	var foundHy2, foundVless bool
+	var foundHy2, foundVless, foundTuic, foundAnytls bool
 	for _, s := range subs {
 		subObj, ok := s.(map[string]interface{})
 		if !ok {
@@ -220,6 +226,18 @@ func TestSync_LoadExistingCredentialsAndSyncSubstore(t *testing.T) {
 				t.Errorf("auto_generated_vless missing ShortID in content: %s", content)
 			}
 		}
+		if name == "auto_generated_tuic" {
+			foundTuic = true
+			if !strings.Contains(content, testUUID) {
+				t.Errorf("auto_generated_tuic missing UUID in content: %s", content)
+			}
+		}
+		if name == "auto_generated_anytls" {
+			foundAnytls = true
+			if !strings.Contains(content, testUUID) {
+				t.Errorf("auto_generated_anytls missing UUID in content: %s", content)
+			}
+		}
 	}
 
 	if !foundHy2 {
@@ -227,5 +245,160 @@ func TestSync_LoadExistingCredentialsAndSyncSubstore(t *testing.T) {
 	}
 	if !foundVless {
 		t.Error("expected auto_generated_vless in substore subs")
+	}
+	if !foundTuic {
+		t.Error("expected auto_generated_tuic in substore subs")
+	}
+	if !foundAnytls {
+		t.Error("expected auto_generated_anytls in substore subs")
+	}
+}
+
+// TestSync_PreserveOtherNodesWhenSyncingCurrentVPS verifies that syncing a VPS only overwrites
+// the current VPS's node information and preserves other VPS nodes in Sub-Store.
+func TestSync_PreserveOtherNodesWhenSyncingCurrentVPS(t *testing.T) {
+	tempDir := t.TempDir()
+	substoreFile := filepath.Join(tempDir, "sub-store.json")
+
+	// Pre-populate sub-store.json with an existing node from VPS-A
+	const vpsA_Domain = "vps-a.example.com"
+	const vpsA_Hy2 = "hysteria2://vps-a-uuid@" + vpsA_Domain + "/?sni=" + vpsA_Domain + "&alpn=h3&insecure=0#sec_vps-a_hy2"
+	const vpsA_Vless = "vless://vps-a-uuid@" + vpsA_Domain + ":443?type=tcp&security=reality&sni=swdist.apple.com#sec_vps-a_vr"
+	const vpsA_Tuic = "tuic://vps-a-uuid:vps-a-uuid@" + vpsA_Domain + ":8448/?sni=" + vpsA_Domain + "&alpn=h3&congestion_control=bbr#sec_vps-a_tuic"
+	const vpsA_Anytls = "anytls://vps-a-uuid@" + vpsA_Domain + ":8444/?sni=" + vpsA_Domain + "#sec_vps-a_anytls"
+
+	initialSubstore := map[string]interface{}{
+		"subs": []interface{}{
+			map[string]interface{}{
+				"name":        "auto_generated_hy2",
+				"displayName": "Hysteria2 Auto",
+				"content":     vpsA_Hy2,
+			},
+			map[string]interface{}{
+				"name":        "auto_generated_vless",
+				"displayName": "VLESS Reality Auto",
+				"content":     vpsA_Vless,
+			},
+			map[string]interface{}{
+				"name":        "auto_generated_tuic",
+				"displayName": "TUIC Auto",
+				"content":     vpsA_Tuic,
+			},
+			map[string]interface{}{
+				"name":        "auto_generated_anytls",
+				"displayName": "AnyTLS Auto",
+				"content":     vpsA_Anytls,
+			},
+		},
+		"collections": []interface{}{
+			map[string]interface{}{
+				"name":          "all",
+				"subscriptions": []interface{}{"auto_generated_hy2", "auto_generated_vless", "auto_generated_tuic", "auto_generated_anytls"},
+			},
+		},
+	}
+	initialData, err := json.Marshal(initialSubstore)
+	if err != nil {
+		t.Fatalf("failed to marshal initial substore: %v", err)
+	}
+	if err := os.WriteFile(substoreFile, initialData, 0644); err != nil {
+		t.Fatalf("failed to write initial substore: %v", err)
+	}
+
+	// Now sync VPS-B (the current VPS)
+	cfgB := &config.Config{
+		Server: config.ServerConfig{
+			SBDomain: "vps-b.example.com",
+			Sni:      "swdist.apple.com",
+		},
+	}
+	sbsB, err := deploy.NewSingBoxServer(cfgB)
+	if err != nil {
+		t.Fatalf("NewSingBoxServer for VPS-B failed: %v", err)
+	}
+
+	sbtB := deploy.NewSubstore(cfgB, "")
+	sbtB.SubstorePath = substoreFile
+	sbtB.SkipRestart = true
+
+	if err := sbtB.UpdateSubstoreConfig(sbsB); err != nil {
+		t.Fatalf("UpdateSubstoreConfig for VPS-B failed: %v", err)
+	}
+
+	// Verify both VPS-A and VPS-B exist
+	dataB, err := os.ReadFile(substoreFile)
+	if err != nil {
+		t.Fatalf("failed to read substore after VPS-B sync: %v", err)
+	}
+	var resB struct {
+		Subs []struct {
+			Name    string `json:"name"`
+			Content string `json:"content"`
+		} `json:"subs"`
+	}
+	if err := json.Unmarshal(dataB, &resB); err != nil {
+		t.Fatalf("failed to parse substore after VPS-B sync: %v", err)
+	}
+
+	for _, sub := range resB.Subs {
+		lines := strings.Split(sub.Content, "\n")
+		if len(lines) != 2 {
+			t.Fatalf("expected 2 lines in %s, got %d: %q", sub.Name, len(lines), sub.Content)
+		}
+		if lines[0] != vpsA_Hy2 && lines[0] != vpsA_Vless && lines[0] != vpsA_Tuic && lines[0] != vpsA_Anytls {
+			t.Errorf("expected line 0 to preserve VPS-A node, got %q", lines[0])
+		}
+		if sub.Name == "auto_generated_hy2" && lines[1] != sbsB.ShareLinkHy2 {
+			t.Errorf("expected line 1 to be VPS-B hy2 %q, got %q", sbsB.ShareLinkHy2, lines[1])
+		}
+		if sub.Name == "auto_generated_vless" && lines[1] != sbsB.ShareLinkVless {
+			t.Errorf("expected line 1 to be VPS-B vless %q, got %q", sbsB.ShareLinkVless, lines[1])
+		}
+		if sub.Name == "auto_generated_tuic" && lines[1] != sbsB.ShareLinkTuic {
+			t.Errorf("expected line 1 to be VPS-B tuic %q, got %q", sbsB.ShareLinkTuic, lines[1])
+		}
+		if sub.Name == "auto_generated_anytls" && lines[1] != sbsB.ShareLinkAnytls {
+			t.Errorf("expected line 1 to be VPS-B anytls %q, got %q", sbsB.ShareLinkAnytls, lines[1])
+		}
+	}
+
+	// Now re-sync VPS-B with regenerated credentials (testing overwrite of current VPS only)
+	if err := sbsB.RegenerateCredentials(); err != nil {
+		t.Fatalf("RegenerateCredentials for VPS-B failed: %v", err)
+	}
+	if err := sbtB.UpdateSubstoreConfig(sbsB); err != nil {
+		t.Fatalf("second UpdateSubstoreConfig for VPS-B failed: %v", err)
+	}
+
+	dataB2, err := os.ReadFile(substoreFile)
+	if err != nil {
+		t.Fatalf("failed to read substore after second sync: %v", err)
+	}
+	if err := json.Unmarshal(dataB2, &resB); err != nil {
+		t.Fatalf("failed to parse substore after second sync: %v", err)
+	}
+
+	for _, sub := range resB.Subs {
+		lines := strings.Split(sub.Content, "\n")
+		if len(lines) != 2 {
+			t.Fatalf("expected 2 lines in %s after second sync, got %d", sub.Name, len(lines))
+		}
+		// VPS-A MUST still be preserved!
+		if lines[0] != vpsA_Hy2 && lines[0] != vpsA_Vless && lines[0] != vpsA_Tuic && lines[0] != vpsA_Anytls {
+			t.Errorf("VPS-A node was overwritten! line 0: %q", lines[0])
+		}
+		// VPS-B MUST be updated to the new credentials
+		if sub.Name == "auto_generated_hy2" && lines[1] != sbsB.ShareLinkHy2 {
+			t.Errorf("VPS-B hy2 was not updated! line 1: %q, expected: %q", lines[1], sbsB.ShareLinkHy2)
+		}
+		if sub.Name == "auto_generated_vless" && lines[1] != sbsB.ShareLinkVless {
+			t.Errorf("VPS-B vless was not updated! line 1: %q, expected: %q", lines[1], sbsB.ShareLinkVless)
+		}
+		if sub.Name == "auto_generated_tuic" && lines[1] != sbsB.ShareLinkTuic {
+			t.Errorf("VPS-B tuic was not updated! line 1: %q, expected: %q", lines[1], sbsB.ShareLinkTuic)
+		}
+		if sub.Name == "auto_generated_anytls" && lines[1] != sbsB.ShareLinkAnytls {
+			t.Errorf("VPS-B anytls was not updated! line 1: %q, expected: %q", lines[1], sbsB.ShareLinkAnytls)
+		}
 	}
 }

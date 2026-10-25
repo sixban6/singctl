@@ -35,8 +35,12 @@ type SingBoxServer struct {
 
 	hy2Tag         string
 	vrTag          string
+	tuicTag        string
+	anytlsTag      string
 	ShareLinkHy2   string
 	ShareLinkVless string
+	ShareLinkTuic  string
+	ShareLinkAnytls string
 }
 
 func NewSingBoxServer(cfg *config.Config) (*SingBoxServer, error) {
@@ -61,11 +65,15 @@ func (sbs *SingBoxServer) initTag() {
 	suffix, _, _ := strings.Cut(sbs.cfg.Server.SBDomain, ".")
 	sbs.hy2Tag = fmt.Sprintf("sec_%s_hy2", suffix)
 	sbs.vrTag = fmt.Sprintf("sec_%s_vr", suffix)
+	sbs.tuicTag = fmt.Sprintf("sec_%s_tuic", suffix)
+	sbs.anytlsTag = fmt.Sprintf("sec_%s_anytls", suffix)
 }
 
 func (sbs *SingBoxServer) updateShareLinks() {
 	sbs.ShareLinkHy2 = fmt.Sprintf("hysteria2://%s@%s/?sni=%s&alpn=h3&insecure=0#%s", sbs.hyUUID, sbs.cfg.Server.SBDomain, sbs.cfg.Server.SBDomain, sbs.hy2Tag)
 	sbs.ShareLinkVless = fmt.Sprintf("vless://%s@%s:443?type=tcp&encryption=none&security=reality&pbk=%s&fp=chrome&sni=%s&sid=%s&flow=xtls-rprx-vision#%s", sbs.hyUUID, sbs.cfg.Server.SBDomain, sbs.publicKey, sbs.cfg.Server.Sni, sbs.shortID, sbs.vrTag)
+	sbs.ShareLinkTuic = fmt.Sprintf("tuic://%s:%s@%s:%d/?sni=%s&alpn=h3&congestion_control=bbr#%s", sbs.hyUUID, sbs.hyUUID, sbs.cfg.Server.SBDomain, sbs.TuicPort(), sbs.cfg.Server.SBDomain, sbs.tuicTag)
+	sbs.ShareLinkAnytls = fmt.Sprintf("anytls://%s@%s:%d/?sni=%s#%s", sbs.hyUUID, sbs.cfg.Server.SBDomain, sbs.AnyTLSPort(), sbs.cfg.Server.SBDomain, sbs.anytlsTag)
 }
 
 // HyUUID returns the Hysteria2 password / VLESS UUID.
@@ -81,6 +89,42 @@ func (sbs *SingBoxServer) PublicKey() string {
 // ShortID returns the VLESS Reality short ID.
 func (sbs *SingBoxServer) ShortID() string {
 	return sbs.shortID
+}
+
+// Hy2Tag returns the Hysteria 2 tag.
+func (sbs *SingBoxServer) Hy2Tag() string {
+	return sbs.hy2Tag
+}
+
+// VrTag returns the VLESS Reality tag.
+func (sbs *SingBoxServer) VrTag() string {
+	return sbs.vrTag
+}
+
+// TuicTag returns the TUIC tag.
+func (sbs *SingBoxServer) TuicTag() string {
+	return sbs.tuicTag
+}
+
+// AnytlsTag returns the AnyTLS tag.
+func (sbs *SingBoxServer) AnytlsTag() string {
+	return sbs.anytlsTag
+}
+
+// TuicPort returns the configured or default TUIC port.
+func (sbs *SingBoxServer) TuicPort() int {
+	if sbs.cfg != nil && sbs.cfg.Server.TuicPort > 0 {
+		return sbs.cfg.Server.TuicPort
+	}
+	return 8448
+}
+
+// AnyTLSPort returns the configured or default AnyTLS port.
+func (sbs *SingBoxServer) AnyTLSPort() int {
+	if sbs.cfg != nil && sbs.cfg.Server.AnyTLSPort > 0 {
+		return sbs.cfg.Server.AnyTLSPort
+	}
+	return 8444
 }
 
 // getCaddyCertPath waits and finds the actual cert path Caddy generated (Let's Encrypt or ZeroSSL)
@@ -361,6 +405,10 @@ func (sbs *SingBoxServer) ShowLoginInfo() {
 	fmt.Printf("%s\n", sbs.ShareLinkHy2)
 	fmt.Println("\n🚀 VLESS Reality Access Link (Copy to your client):")
 	fmt.Printf("%s\n", sbs.ShareLinkVless)
+	fmt.Println("\n🚀 TUIC Access Link (Copy to your client):")
+	fmt.Printf("%s\n", sbs.ShareLinkTuic)
+	fmt.Println("\n🚀 AnyTLS Access Link (Copy to your client):")
+	fmt.Printf("%s\n", sbs.ShareLinkAnytls)
 	fmt.Println("========================================================")
 }
 
@@ -385,6 +433,8 @@ func (sbs *SingBoxServer) PreviewServerConfig() (string, error) {
 		RealityPrivateKey string
 		RealityShortID    string
 		Sni               string
+		TuicPort          int
+		AnyTLSPort        int
 	}
 	ctx := tmplContext{
 		HyUUID:            sbs.hyUUID,
@@ -394,6 +444,8 @@ func (sbs *SingBoxServer) PreviewServerConfig() (string, error) {
 		RealityPrivateKey: sbs.privateKey,
 		RealityShortID:    sbs.shortID,
 		Sni:               sbs.cfg.Server.Sni,
+		TuicPort:          sbs.TuicPort(),
+		AnyTLSPort:        sbs.AnyTLSPort(),
 	}
 
 	var buf bytes.Buffer

@@ -3,6 +3,16 @@
 set -e
 set -o pipefail
 echo "Starting WARP (wireproxy) deployment..."
+
+# 检查 WARP wireproxy 是否已经在 40000 端口运行，避免重复安装报错
+if command -v ss >/dev/null 2>&1 && ss -tln | grep -q ":40000 "; then
+    echo "WARP (wireproxy) is already running on 127.0.0.1:40000"
+    exit 0
+elif command -v netstat >/dev/null 2>&1 && netstat -tln | grep -q ":40000 "; then
+    echo "WARP (wireproxy) is already running on 127.0.0.1:40000"
+    exit 0
+fi
+
 echo "Downloading WARP script..."
 
 curl -fsSLO https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh

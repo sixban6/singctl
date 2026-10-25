@@ -37,7 +37,7 @@ configure_firewall_debian_like() {
     # Remove legacy SSH 22 allow rules if present.
     ufw --force delete allow 22 >/dev/null 2>&1 || true
 
-    for port in "${SSH_PORT}" 443; do
+    for port in "${SSH_PORT}" 443 8444 8448; do
         echo "Allowing port ${port}..."
         ufw allow "${port}" || true
     done
@@ -80,6 +80,8 @@ configure_firewall_openwrt() {
 
     ensure_openwrt_allow_rule "Allow-SSH-${SSH_PORT}" "${SSH_PORT}" "tcp"
     ensure_openwrt_allow_rule "Allow-HTTPS-443" "443" "tcp udp"
+    ensure_openwrt_allow_rule "Allow-AnyTLS-8444" "8444" "tcp"
+    ensure_openwrt_allow_rule "Allow-TUIC-8448" "8448" "udp"
 
     uci -q commit firewall
     if [ -x /etc/init.d/firewall ]; then
