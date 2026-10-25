@@ -169,3 +169,17 @@ singctl sr sync-substore
 singctl sr sync --restart=false
 ```
 
+---
+
+### `singctl sr info` — 查看 Sub-Store 管理地址与节点信息
+
+随时查看当前服务器的 Sub-Store 后端管理登录地址，以及正在运行的 3 个主力协议节点（Hysteria 2、VLESS Reality、TUIC）的完整客户端分享链接。
+
+```bash
+# 查看服务端信息与节点分享链接
+singctl sr info
+
+# 别名
+singctl sr show
+```
+

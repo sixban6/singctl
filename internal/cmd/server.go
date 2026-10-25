@@ -57,11 +57,6 @@ func newInstallServerCmd(cfg *config.Config) *cobra.Command {
 				return nil
 			}
 
-			sbs, err := deploy.NewSingBoxServer(cfg)
-			if err != nil {
-				return err
-			}
-			sbt := deploy.Substore{Config: cfg, SSKey: ""}
 			// Handle specified targets
 			switch args[0] {
 			case "common":
@@ -69,8 +64,13 @@ func newInstallServerCmd(cfg *config.Config) *cobra.Command {
 			case "caddy":
 				return deploy.DeployCaddy(cfg)
 			case "singbox":
+				sbs, err := deploy.NewSingBoxServer(cfg)
+				if err != nil {
+					return err
+				}
 				return sbs.DeploySingbox()
 			case "substore":
+				sbt := deploy.Substore{Config: cfg, SSKey: ""}
 				return sbt.DeploySubstore()
 			case "warp":
 				return deploy.DeployWarp()
@@ -155,6 +155,7 @@ func NewServerCmd(configPath string) *cobra.Command {
 	cmd.AddCommand(NewCfTokenCmd(configPath))
 	cmd.AddCommand(newResetServerCmd(configPath))
 	cmd.AddCommand(NewSyncServerCmd(configPath))
+	cmd.AddCommand(NewInfoServerCmd(configPath))
 	return cmd
 }
 
@@ -660,5 +661,57 @@ func syncNodeToSubstore(configPath string, restart bool) error {
 	fmt.Printf("• VLESS Reality: %s\n", sbs.ShareLinkVless)
 	fmt.Printf("• TUIC:          %s\n", sbs.ShareLinkTuic)
 	fmt.Println("========================================================")
+	return nil
+}
+
+// NewInfoServerCmd creates the command to display Sub-Store admin URL and node share links.
+func NewInfoServerCmd(configPath string) *cobra.Command {
+	return &cobra.Command{
+		Use:     "info",
+		Aliases: []string{"show", "status-info"},
+		Short:   "查看Sub-Store登录地址与节点信息 / View Sub-Store admin URL and node share links",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			resolvedPath := resolveConfigPath(cmd, configPath)
+			return showServerInfo(resolvedPath)
+		},
+	}
+}
+
+func showServerInfo(configPath string) error {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	if cfg.Server.SBDomain == "" {
+		return fmt.Errorf("server.sb_domain is required in config (%s)", configPath)
+	}
+
+	sbs, err := deploy.NewSingBoxServer(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to initialize sing-box server: %w", err)
+	}
+
+	if err := sbs.LoadExistingCredentials(); err != nil {
+		logger.Warn("未能从现有 sing-box 配置文件加载凭证: %v", err)
+	}
+
+	sbt := deploy.NewSubstore(cfg, "")
+	adminURL, err := sbt.GetAdminURL()
+
+	fmt.Println("========================================================")
+	if err != nil {
+		fmt.Printf("🔒 Sub-Store 后端管理地址: [未能获取: %v]\n", err)
+	} else {
+		fmt.Println("🔒 Sub-Store 后端管理地址 (Admin Access URL):")
+		fmt.Printf("%s\n", adminURL)
+	}
+
+	fmt.Println("\n📡 服务端节点分享链接 (Node Share Links):")
+	fmt.Printf("• Hysteria 2:    %s\n", sbs.ShareLinkHy2)
+	fmt.Printf("• VLESS Reality: %s\n", sbs.ShareLinkVless)
+	fmt.Printf("• TUIC:          %s\n", sbs.ShareLinkTuic)
+	fmt.Println("========================================================")
+
 	return nil
 }
