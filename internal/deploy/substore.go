@@ -199,7 +199,7 @@ func (sb *Substore) GetSubstoreKey() (string, error) {
 	return "", fmt.Errorf("sub-store key not found (sub-store may not be deployed or running)")
 }
 
-// GetAdminURL returns the complete Sub-Store admin login URL.
+// GetAdminURL returns the complete Sub-Store admin login URL for the self-hosted frontend.
 func (sb *Substore) GetAdminURL() (string, error) {
 	key, err := sb.GetSubstoreKey()
 	if err != nil {
@@ -215,16 +215,36 @@ func (sb *Substore) GetAdminURL() (string, error) {
 	return fmt.Sprintf("https://%s?api=https://%s/%s", sbDomain, sbDomain, key), nil
 }
 
+// GetVercelAdminURL returns the official Sub-Store Web UI URL pointed to this backend.
+func (sb *Substore) GetVercelAdminURL() (string, error) {
+	key, err := sb.GetSubstoreKey()
+	if err != nil {
+		return "", err
+	}
+	sbDomain := ""
+	if sb.Config != nil {
+		sbDomain = sb.Config.Server.GetSubstoreDomain()
+	}
+	if sbDomain == "" {
+		return "", fmt.Errorf("server.substore_domain (or sb_domain) is not configured")
+	}
+	return fmt.Sprintf("https://sub-store.vercel.app?api=https://%s/%s", sbDomain, key), nil
+}
+
 func (sb *Substore) ShowLoginInfo() {
 	adminURL, err := sb.GetAdminURL()
 	if err != nil {
 		logger.Warn("Failed to get Sub-Store login URL: %v", err)
 		return
 	}
+	vercelURL, _ := sb.GetVercelAdminURL()
 	logger.Success("Sub-Store deployed successfully!")
 	fmt.Println("\n========================================================")
-	fmt.Println("🔒 Sub-Store Admin Access URL:")
-	fmt.Println(adminURL)
+	fmt.Println("🔒 Sub-Store Admin Access URLs:")
+	if vercelURL != "" {
+		fmt.Printf("• 官方 Web UI (推荐 / 免 CDN 缓存影响):\n  %s\n", vercelURL)
+	}
+	fmt.Printf("• 自建独立域名前端 (若遇白屏需在 Cloudflare 清除缓存):\n  %s\n", adminURL)
 	fmt.Println("========================================================")
 }
 
