@@ -1,3 +1,10 @@
+## [1.34.1](https://github.com/sixban6/singctl/compare/v1.34.0...v1.34.1) (2026-10-25)
+
+
+### Bug Fixes
+
+* **substore:** reuse existing sub-store key on reinstallation ([d6337e9](https://github.com/sixban6/singctl/commit/d6337e9434411fcb6ddfeaa8cb969070d199b031))
+
 # [1.34.0](https://github.com/sixban6/singctl/compare/v1.33.0...v1.34.0) (2026-10-25)
 
 
