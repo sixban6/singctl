@@ -68,6 +68,8 @@ func (sb *Substore) DeploySubstore() error {
 		return fmt.Errorf("failed to generate random string: %w", err)
 	}
 	sb.SSKey = ssKey
+	keyFile := filepath.Join(constant.SubStoreDir, "key")
+	_ = os.WriteFile(keyFile, []byte(ssKey), 0600)
 
 	// 4. Remove old container if it exists
 	logger.Info("Removing old sub-store container (if exists)...")
@@ -80,6 +82,7 @@ func (sb *Substore) DeploySubstore() error {
 		"--restart=always",
 		"-e", "SUB_STORE_CRON=50 23 * * *",
 		"-e", fmt.Sprintf("SUB_STORE_FRONTEND_BACKEND_PATH=/%s", ssKey),
+		"-e", "SUB_STORE_CORS_ALLOWED_ORIGINS=*",
 		"-p", "127.0.0.1:3001:3001",
 		"-v", fmt.Sprintf("%s:/opt/app/data", constant.SubStoreDir),
 		"--name", "sub-store",
@@ -93,13 +96,71 @@ func (sb *Substore) DeploySubstore() error {
 	return nil
 }
 
+// GetSubstoreKey retrieves the existing Sub-Store frontend/backend path key.
+// It first checks the persisted key file in /etc/sub-store/key, and if not present,
+// inspects the running Docker container's environment variables.
+func (sb *Substore) GetSubstoreKey() (string, error) {
+	if sb.SSKey != "" {
+		return sb.SSKey, nil
+	}
+
+	keyFile := filepath.Join(constant.SubStoreDir, "key")
+	if data, err := os.ReadFile(keyFile); err == nil {
+		key := strings.TrimSpace(string(data))
+		if key != "" {
+			sb.SSKey = key
+			return key, nil
+		}
+	}
+
+	// Fallback to inspecting Docker container
+	if _, err := exec.LookPath("docker"); err == nil {
+		out, err := exec.Command("docker", "inspect", "--format", "{{range .Config.Env}}{{println .}}{{end}}", "sub-store").Output()
+		if err == nil {
+			for _, line := range strings.Split(string(out), "\n") {
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(line, "SUB_STORE_FRONTEND_BACKEND_PATH=") {
+					raw := strings.TrimPrefix(line, "SUB_STORE_FRONTEND_BACKEND_PATH=")
+					key := strings.TrimPrefix(raw, "/")
+					if key != "" {
+						sb.SSKey = key
+						_ = os.WriteFile(keyFile, []byte(key), 0600)
+						return key, nil
+					}
+				}
+			}
+		}
+	}
+
+	return "", fmt.Errorf("sub-store key not found (sub-store may not be deployed or running)")
+}
+
+// GetAdminURL returns the complete Sub-Store admin login URL.
+func (sb *Substore) GetAdminURL() (string, error) {
+	key, err := sb.GetSubstoreKey()
+	if err != nil {
+		return "", err
+	}
+	sbDomain := ""
+	if sb.Config != nil {
+		sbDomain = sb.Config.Server.SBDomain
+	}
+	if sbDomain == "" {
+		return "", fmt.Errorf("server.sb_domain is not configured")
+	}
+	return fmt.Sprintf("https://%s?api=https://%s/%s", sbDomain, sbDomain, key), nil
+}
+
 func (sb *Substore) ShowLoginInfo() {
-	// 6. Print Admin URL
-	sbDomain := sb.Config.Server.SBDomain
+	adminURL, err := sb.GetAdminURL()
+	if err != nil {
+		logger.Warn("Failed to get Sub-Store login URL: %v", err)
+		return
+	}
 	logger.Success("Sub-Store deployed successfully!")
 	fmt.Println("\n========================================================")
 	fmt.Println("🔒 Sub-Store Admin Access URL:")
-	fmt.Printf("https://%s?api=https://%s/%s\n", sbDomain, sbDomain, sb.SSKey)
+	fmt.Println(adminURL)
 	fmt.Println("========================================================")
 }
 

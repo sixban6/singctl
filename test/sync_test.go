@@ -378,3 +378,26 @@ func TestSync_PreserveOtherNodesWhenSyncingCurrentVPS(t *testing.T) {
 		}
 	}
 }
+
+// TestInfoServerCmd_Registered verifies that the info subcommand is registered in server command.
+func TestInfoServerCmd_Registered(t *testing.T) {
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "singctl.yaml")
+	_ = os.WriteFile(configPath, []byte("server:\n  sb_domain: \"test.example.com\"\n"), 0644)
+
+	serverCmd := cmd.NewServerCmd(configPath)
+	if serverCmd == nil {
+		t.Fatal("expected NewServerCmd to return non-nil")
+	}
+
+	found := false
+	for _, sub := range serverCmd.Commands() {
+		if sub.Name() == "info" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected 'info' subcommand to be registered in server command")
+	}
+}
