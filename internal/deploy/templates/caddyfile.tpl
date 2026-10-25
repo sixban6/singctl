@@ -1,6 +1,10 @@
 {
     # 禁用 Caddy 全局自动针对 80 端口的 HTTP 重定向，确保 80 端口完全不被占用
     auto_https disable_redirects
+{{if .ServerIP}}
+    default_sni {{.ServerIP}}
+    fallback_sni {{.ServerIP}}
+{{end}}
 
     # layer4 是顶层模块，必须将其放在全局选项块中才能被正确识别
     layer4 {
@@ -47,6 +51,11 @@
             }
         }
     }
+}
+
+# --- HTTP 80 端口 (用于 Let's Encrypt 公网 IP 证书的 HTTP-01 验证及基础响应) ---
+:80 {
+    respond "OK" 200
 }
 
 # --- Layer 7 (HTTP) 网站层 ---
@@ -114,6 +123,20 @@ https://{{.SubstoreDomain}}:9443 {
 }
 {{end}}
 
+{{if .ServerIP}}
+# 公网 IP 专属站点：采用 Let's Encrypt shortlived profile 签发原生公网 IP 证书
+https://{{.ServerIPFormatted}}:9445 {
+    bind 127.0.0.1
+    tls {
+        issuer acme {
+            profile shortlived
+        }
+    }
+    root * /var/www/mask-site
+    file_server
+    try_files {path} /index.html
+}
+{{else}}
 # 兜底回落伪装站 (监听 9445，用于 Direct-IP 直连与异常 SNI 握手响应)
 :9445 {
     bind 127.0.0.1
@@ -124,6 +147,7 @@ https://{{.SubstoreDomain}}:9443 {
     file_server
     try_files {path} /index.html
 }
+{{end}}
 
 # TUIC 域名 TLS 证书自动化申请与续期 (如与 Substore/Node 域名不同)
 {{if and .TuicDomain (and (ne .TuicDomain .SubstoreDomain) (ne .TuicDomain .NodeDomain))}}

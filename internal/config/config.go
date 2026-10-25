@@ -3,9 +3,14 @@ package config
 import (
 	"cmp"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"regexp"
 	"strings"
+	"sync"
+	"time"
 
 	"singctl/internal/constant"
 
@@ -47,11 +52,71 @@ type ServerConfig struct {
 	NodeDomain         string `yaml:"node_domain"`         // 节点主域名 (Hysteria 2 / VLESS 分享链接主机)
 	SubstoreDomain     string `yaml:"substore_domain"`     // Sub-Store 专属域名
 	TuicDomain         string `yaml:"tuic_domain"`         // TUIC 专属域名
+	ServerIP           string `yaml:"server_ip"`           // 公网 IP 地址（选填，未填写时自动探测用于申请 Let's Encrypt 原生 IP 证书）
 	CFDNSKey           string `yaml:"cf_dns_key"`
 	Sni                string `yaml:"sni"`
 	TuicPort           int    `yaml:"tuic_port"`
 	AnyTLSPort         int    `yaml:"anytls_port"`
 	CorsAllowedOrigins string `yaml:"cors_allowed_origins"`
+}
+
+var (
+	discoveredPublicIP string
+	discoverIPOnce     sync.Once
+)
+
+// DiscoverPublicIP probes multiple fast IP echo services to determine the public IP.
+func DiscoverPublicIP() string {
+	discoverIPOnce.Do(func() {
+		endpoints := []string{
+			"https://api.ipify.org",
+			"https://ip.sb",
+			"https://icanhazip.com",
+			"https://ifconfig.me/ip",
+		}
+		client := &http.Client{
+			Timeout: 2 * time.Second,
+		}
+		for _, endpoint := range endpoints {
+			resp, err := client.Get(endpoint)
+			if err != nil {
+				continue
+			}
+			body, err := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if err != nil {
+				continue
+			}
+			ip := strings.TrimSpace(string(body))
+			if parsed := net.ParseIP(ip); parsed != nil {
+				discoveredPublicIP = ip
+				return
+			}
+		}
+	})
+	return discoveredPublicIP
+}
+
+// SetDiscoveredPublicIPForTest allows mocking the discovered IP during tests.
+func SetDiscoveredPublicIPForTest(ip string) {
+	discoveredPublicIP = ip
+	discoverIPOnce.Do(func() {})
+}
+
+// ResetDiscoveredPublicIPForTest resets the cached IP for tests.
+func ResetDiscoveredPublicIPForTest() {
+	discoveredPublicIP = ""
+	discoverIPOnce = sync.Once{}
+}
+
+// GetServerIP returns the server's public IP address.
+// If ServerIP is explicitly set in config, it returns that value.
+// Otherwise, it attempts to discover the public IP automatically.
+func (s *ServerConfig) GetServerIP() string {
+	if s.ServerIP != "" {
+		return strings.TrimSpace(s.ServerIP)
+	}
+	return DiscoverPublicIP()
 }
 
 // GetNodeDomain returns the domain for proxy nodes (Hy2 / VLESS).

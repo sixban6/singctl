@@ -39,7 +39,7 @@ configure_firewall_debian_like() {
     ufw --force delete allow 8444 >/dev/null 2>&1 || true
     ufw --force delete allow 8448 >/dev/null 2>&1 || true
 
-    for port in "${SSH_PORT}" 443; do
+    for port in "${SSH_PORT}" 80 443; do
         echo "Allowing port ${port}..."
         ufw allow "${port}" || true
     done

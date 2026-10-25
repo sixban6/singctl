@@ -74,3 +74,70 @@ func TestPreviewCaddyfile_BackwardCompatibility(t *testing.T) {
 		t.Errorf("expected fallback route to 9445, got:\n%s", content)
 	}
 }
+
+func TestPreviewCaddyfile_PublicIPv4ShortlivedCert(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			NodeDomain:     "node.example.com",
+			SubstoreDomain: "sub.example.com",
+			TuicDomain:     "tuic.example.com",
+			ServerIP:       "203.0.113.10",
+			CFDNSKey:       "dummy_cf_key",
+			Sni:            "swdist.apple.com",
+		},
+	}
+
+	content, err := PreviewCaddyfile(cfg)
+	if err != nil {
+		t.Fatalf("PreviewCaddyfile failed: %v", err)
+	}
+
+	// 1. Global default_sni and fallback_sni
+	if !strings.Contains(content, "default_sni 203.0.113.10") || !strings.Contains(content, "fallback_sni 203.0.113.10") {
+		t.Errorf("expected default_sni and fallback_sni for IP, got:\n%s", content)
+	}
+
+	// 2. Port 80 listener for HTTP-01 challenge
+	if !strings.Contains(content, ":80 {") {
+		t.Errorf("expected :80 listener for HTTP-01 challenge, got:\n%s", content)
+	}
+
+	// 3. Public IP shortlived ACME profile block on 9445
+	if !strings.Contains(content, "https://203.0.113.10:9445") {
+		t.Errorf("expected https://203.0.113.10:9445 block, got:\n%s", content)
+	}
+	if !strings.Contains(content, "profile shortlived") {
+		t.Errorf("expected profile shortlived in ACME issuer, got:\n%s", content)
+	}
+}
+
+func TestPreviewCaddyfile_PublicIPv6ShortlivedCert(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			NodeDomain:     "node.example.com",
+			SubstoreDomain: "sub.example.com",
+			TuicDomain:     "tuic.example.com",
+			ServerIP:       "2001:db8::1",
+			CFDNSKey:       "dummy_cf_key",
+			Sni:            "swdist.apple.com",
+		},
+	}
+
+	content, err := PreviewCaddyfile(cfg)
+	if err != nil {
+		t.Fatalf("PreviewCaddyfile failed: %v", err)
+	}
+
+	// 1. Global default_sni without brackets
+	if !strings.Contains(content, "default_sni 2001:db8::1") || !strings.Contains(content, "fallback_sni 2001:db8::1") {
+		t.Errorf("expected unbracketed default_sni for IPv6, got:\n%s", content)
+	}
+
+	// 2. Site block with brackets for IPv6
+	if !strings.Contains(content, "https://[2001:db8::1]:9445") {
+		t.Errorf("expected bracketed IPv6 site block https://[2001:db8::1]:9445, got:\n%s", content)
+	}
+	if !strings.Contains(content, "profile shortlived") {
+		t.Errorf("expected profile shortlived, got:\n%s", content)
+	}
+}

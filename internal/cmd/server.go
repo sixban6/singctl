@@ -715,6 +715,14 @@ func showServerInfo(configPath string) error {
 	fmt.Printf("• Hysteria 2:    %s\n", sbs.ShareLinkHy2)
 	fmt.Printf("• VLESS Reality: %s\n", sbs.ShareLinkVless)
 	fmt.Printf("• TUIC:          %s\n", sbs.ShareLinkTuic)
+
+	fmt.Println("\n🛡️ 伪装回落站点 (Mask Site & Fallback):")
+	if serverIP := cfg.Server.GetServerIP(); serverIP != "" {
+		fmt.Printf("• 公网 IP 直连:  https://%s (Let's Encrypt 原生免费公网 IP 证书)\n", deploy.FormatIPForCaddy(serverIP))
+	}
+	if nodeDomain := cfg.Server.GetNodeDomain(); nodeDomain != "" {
+		fmt.Printf("• 节点域名访问: https://%s\n", nodeDomain)
+	}
 	fmt.Println("========================================================")
 
 	return nil

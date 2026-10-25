@@ -52,6 +52,20 @@ func RotateCloudflareToken(cfg *config.Config) error {
 	return nil
 }
 
+// FormatIPForCaddy formats an IP for use in Caddy addresses (wrapping IPv6 in brackets).
+func FormatIPForCaddy(ip string) string {
+	trimmed := strings.TrimSpace(ip)
+	if strings.Contains(trimmed, ":") && !strings.HasPrefix(trimmed, "[") {
+		return fmt.Sprintf("[%s]", trimmed)
+	}
+	return trimmed
+}
+
+// StripIPBrackets removes brackets from IPv6 address if present.
+func StripIPBrackets(ip string) string {
+	return strings.Trim(strings.TrimSpace(ip), "[]")
+}
+
 // DeployCaddy handles the installation and configuration of Caddy + Cloudflare DNS plugin
 func DeployCaddy(cfg *config.Config) error {
 	logger.Info("Starting Caddy deployment...")
@@ -59,6 +73,14 @@ func DeployCaddy(cfg *config.Config) error {
 	// 1. Install Caddy & Cloudflare plugin via script
 	if err := installCaddy(); err != nil {
 		return fmt.Errorf("caddy installation failed: %w", err)
+	}
+
+	// Auto-detect server public IP if not explicitly configured
+	if cfg != nil && cfg.Server.ServerIP == "" {
+		if ip := config.DiscoverPublicIP(); ip != "" {
+			logger.Info("Auto-detected server public IP for ACME IP certificate: %s", ip)
+			cfg.Server.ServerIP = ip
+		}
 	}
 
 	// 2. Ensure mask site webroot and rich static index.html exist
@@ -119,14 +141,16 @@ func PreviewCaddyfile(cfg *config.Config) (string, error) {
 	}
 
 	type tmplContext struct {
-		NodeDomain     string
-		SubstoreDomain string
-		TuicDomain     string
-		CFDNSKey       string
-		Sni            string
-		TuicPort       int
-		AnyTLSPort     int
-		SSKey          string
+		NodeDomain        string
+		SubstoreDomain    string
+		TuicDomain        string
+		CFDNSKey          string
+		Sni               string
+		TuicPort          int
+		AnyTLSPort        int
+		SSKey             string
+		ServerIP          string
+		ServerIPFormatted string
 	}
 
 	nodeDomain := ""
@@ -134,12 +158,14 @@ func PreviewCaddyfile(cfg *config.Config) (string, error) {
 	tuicDomain := ""
 	cfDNSKey := ""
 	sni := ""
+	serverIPRaw := ""
 	if cfg != nil {
 		nodeDomain = cfg.Server.GetNodeDomain()
 		substoreDomain = cfg.Server.GetSubstoreDomain()
 		tuicDomain = cfg.Server.GetTuicDomain()
 		cfDNSKey = cfg.Server.CFDNSKey
 		sni = cfg.Server.Sni
+		serverIPRaw = cfg.Server.ServerIP
 	}
 
 	ssKey := ""
@@ -149,14 +175,16 @@ func PreviewCaddyfile(cfg *config.Config) (string, error) {
 	}
 
 	ctx := tmplContext{
-		NodeDomain:     nodeDomain,
-		SubstoreDomain: substoreDomain,
-		TuicDomain:     tuicDomain,
-		CFDNSKey:       cfDNSKey,
-		Sni:            sni,
-		TuicPort:       tuicPort,
-		AnyTLSPort:     anytlsPort,
-		SSKey:          ssKey,
+		NodeDomain:        nodeDomain,
+		SubstoreDomain:    substoreDomain,
+		TuicDomain:        tuicDomain,
+		CFDNSKey:          cfDNSKey,
+		Sni:               sni,
+		TuicPort:          tuicPort,
+		AnyTLSPort:        anytlsPort,
+		SSKey:             ssKey,
+		ServerIP:          StripIPBrackets(serverIPRaw),
+		ServerIPFormatted: FormatIPForCaddy(serverIPRaw),
 	}
 
 	var buf bytes.Buffer
