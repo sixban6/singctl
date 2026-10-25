@@ -57,4 +57,10 @@ func TestRender_CaddyfileWithSni(t *testing.T) {
 	if !strings.Contains(content, "sni test.sni.com") {
 		t.Errorf("Caddyfile missing expected SNI line. Got:\n%s", content)
 	}
+	if !strings.Contains(content, ":8444") {
+		t.Errorf("Caddyfile missing expected AnyTLS port 8444. Got:\n%s", content)
+	}
+	if !strings.Contains(content, "udp/:8448") {
+		t.Errorf("Caddyfile missing expected TUIC port 8448. Got:\n%s", content)
+	}
 }
