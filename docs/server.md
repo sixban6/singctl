@@ -21,13 +21,12 @@ sing-box (核心路由)
   └── WARP (出口节点，可选)
 ```
 
-Caddy 负责统一监听 443 端口（TCP 与 UDP），基于 Layer 4 SNI / ALPN 进行智能分流并申请 TLS 证书，sing-box 处理代理协议（所有入站均安全监听在 `127.0.0.1` 本地回环端口），SubStore 提供订阅转换服务。
+Caddy 负责统一监听 443 端口（TCP 与 UDP），基于 Layer 4 SNI 进行智能分流并申请 TLS 证书，sing-box 处理代理协议（所有入站均安全监听在 `127.0.0.1` 本地回环端口），SubStore 提供订阅转换服务。
 
-服务端支持部署 4 种协议节点（全部统一通过 443 端口接入）：
-- **Hysteria 2**：基于 QUIC/UDP（端口 443，ALPN `h3`）与域名 TLS 证书。
+服务端支持部署 3 种主力协议节点（全部统一通过 443 端口接入，ALPN 均为标准伪装）：
+- **Hysteria 2**：基于 QUIC/UDP（端口 443，QUIC SNI `sb_domain`，ALPN `h3`）与域名 TLS 证书。
 - **VLESS Reality**：基于 TCP（端口 443，Reality SNI 伪装分流，默认伪装域名 `swdist.apple.com`）。
-- **TUIC**：基于 QUIC/UDP（端口 443，QUIC ALPN `tuic` 分流），内置 BBR 拥塞控制与域名 TLS 证书。
-- **AnyTLS**：基于 TCP/TLS（端口 443，TLS ALPN `anytls` 分流），采用 AnyTLS 流量混淆机制与域名 TLS 证书。
+- **TUIC**：基于 QUIC/UDP（端口 443，QUIC SNI `tuic_domain`，ALPN `h3`），内置 BBR 拥塞控制与独立域名 TLS 证书。
 
 ---
 
@@ -37,7 +36,8 @@ Caddy 负责统一监听 443 端口（TCP 与 UDP），基于 Layer 4 SNI / ALPN
 
 ```yaml
 server:
-  sb_domain: "sub.yourdomain.com"         # 你的域名（必填）
+  sb_domain: "sub.yourdomain.com"         # 主域名（用于 Sub-Store 面板与 Hysteria 2，必填）
+  tuic_domain: "tuic.yourdomain.com"     # TUIC 专属子域名（用于 TUIC UDP 443 SNI 分流，可选，默认 tuic.<sb_domain>）
   cf_dns_key: "your_cloudflare_api_token" # Cloudflare API Token，用于自动申请 TLS 证书（必填）
   sni: "swdist.apple.com"                 # TLS SNI 伪装域名，默认 swdist.apple.com（可选）
 ```

@@ -659,7 +659,6 @@ func syncNodeToSubstore(configPath string, restart bool) error {
 	fmt.Printf("• Hysteria 2:    %s\n", sbs.ShareLinkHy2)
 	fmt.Printf("• VLESS Reality: %s\n", sbs.ShareLinkVless)
 	fmt.Printf("• TUIC:          %s\n", sbs.ShareLinkTuic)
-	fmt.Printf("• AnyTLS:        %s\n", sbs.ShareLinkAnytls)
 	fmt.Println("========================================================")
 	return nil
 }

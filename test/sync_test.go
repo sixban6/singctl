@@ -173,9 +173,6 @@ func TestSync_LoadExistingCredentialsAndSyncSubstore(t *testing.T) {
 	if !strings.Contains(sbs.ShareLinkTuic, testUUID) {
 		t.Errorf("ShareLinkTuic does not contain expected UUID: %s", sbs.ShareLinkTuic)
 	}
-	if !strings.Contains(sbs.ShareLinkAnytls, testUUID) {
-		t.Errorf("ShareLinkAnytls does not contain expected UUID: %s", sbs.ShareLinkAnytls)
-	}
 
 	// 3. Sync to Sub-Store config
 	sbt := deploy.NewSubstore(cfg, "")
@@ -202,7 +199,7 @@ func TestSync_LoadExistingCredentialsAndSyncSubstore(t *testing.T) {
 		t.Fatalf("expected non-empty subs in substore json")
 	}
 
-	var foundHy2, foundVless, foundTuic, foundAnytls bool
+	var foundHy2, foundVless, foundTuic bool
 	for _, s := range subs {
 		subObj, ok := s.(map[string]interface{})
 		if !ok {
@@ -232,12 +229,6 @@ func TestSync_LoadExistingCredentialsAndSyncSubstore(t *testing.T) {
 				t.Errorf("auto_generated_tuic missing UUID in content: %s", content)
 			}
 		}
-		if name == "auto_generated_anytls" {
-			foundAnytls = true
-			if !strings.Contains(content, testUUID) {
-				t.Errorf("auto_generated_anytls missing UUID in content: %s", content)
-			}
-		}
 	}
 
 	if !foundHy2 {
@@ -248,9 +239,6 @@ func TestSync_LoadExistingCredentialsAndSyncSubstore(t *testing.T) {
 	}
 	if !foundTuic {
 		t.Error("expected auto_generated_tuic in substore subs")
-	}
-	if !foundAnytls {
-		t.Error("expected auto_generated_anytls in substore subs")
 	}
 }
 
@@ -264,8 +252,7 @@ func TestSync_PreserveOtherNodesWhenSyncingCurrentVPS(t *testing.T) {
 	const vpsA_Domain = "vps-a.example.com"
 	const vpsA_Hy2 = "hysteria2://vps-a-uuid@" + vpsA_Domain + "/?sni=" + vpsA_Domain + "&alpn=h3&insecure=0#sec_vps-a_hy2"
 	const vpsA_Vless = "vless://vps-a-uuid@" + vpsA_Domain + ":443?type=tcp&security=reality&sni=swdist.apple.com#sec_vps-a_vr"
-	const vpsA_Tuic = "tuic://vps-a-uuid:vps-a-uuid@" + vpsA_Domain + ":443/?sni=" + vpsA_Domain + "&alpn=tuic&congestion_control=bbr#sec_vps-a_tuic"
-	const vpsA_Anytls = "anytls://vps-a-uuid@" + vpsA_Domain + ":443/?sni=" + vpsA_Domain + "&alpn=anytls#sec_vps-a_anytls"
+	const vpsA_Tuic = "tuic://vps-a-uuid:vps-a-uuid@tuic." + vpsA_Domain + ":443/?sni=tuic." + vpsA_Domain + "&alpn=h3&congestion_control=bbr#sec_vps-a_tuic"
 
 	initialSubstore := map[string]interface{}{
 		"subs": []interface{}{
@@ -284,16 +271,11 @@ func TestSync_PreserveOtherNodesWhenSyncingCurrentVPS(t *testing.T) {
 				"displayName": "TUIC Auto",
 				"content":     vpsA_Tuic,
 			},
-			map[string]interface{}{
-				"name":        "auto_generated_anytls",
-				"displayName": "AnyTLS Auto",
-				"content":     vpsA_Anytls,
-			},
 		},
 		"collections": []interface{}{
 			map[string]interface{}{
 				"name":          "all",
-				"subscriptions": []interface{}{"auto_generated_hy2", "auto_generated_vless", "auto_generated_tuic", "auto_generated_anytls"},
+				"subscriptions": []interface{}{"auto_generated_hy2", "auto_generated_vless", "auto_generated_tuic"},
 			},
 		},
 	}
@@ -345,7 +327,7 @@ func TestSync_PreserveOtherNodesWhenSyncingCurrentVPS(t *testing.T) {
 		if len(lines) != 2 {
 			t.Fatalf("expected 2 lines in %s, got %d: %q", sub.Name, len(lines), sub.Content)
 		}
-		if lines[0] != vpsA_Hy2 && lines[0] != vpsA_Vless && lines[0] != vpsA_Tuic && lines[0] != vpsA_Anytls {
+		if lines[0] != vpsA_Hy2 && lines[0] != vpsA_Vless && lines[0] != vpsA_Tuic {
 			t.Errorf("expected line 0 to preserve VPS-A node, got %q", lines[0])
 		}
 		if sub.Name == "auto_generated_hy2" && lines[1] != sbsB.ShareLinkHy2 {
@@ -356,9 +338,6 @@ func TestSync_PreserveOtherNodesWhenSyncingCurrentVPS(t *testing.T) {
 		}
 		if sub.Name == "auto_generated_tuic" && lines[1] != sbsB.ShareLinkTuic {
 			t.Errorf("expected line 1 to be VPS-B tuic %q, got %q", sbsB.ShareLinkTuic, lines[1])
-		}
-		if sub.Name == "auto_generated_anytls" && lines[1] != sbsB.ShareLinkAnytls {
-			t.Errorf("expected line 1 to be VPS-B anytls %q, got %q", sbsB.ShareLinkAnytls, lines[1])
 		}
 	}
 
@@ -384,7 +363,7 @@ func TestSync_PreserveOtherNodesWhenSyncingCurrentVPS(t *testing.T) {
 			t.Fatalf("expected 2 lines in %s after second sync, got %d", sub.Name, len(lines))
 		}
 		// VPS-A MUST still be preserved!
-		if lines[0] != vpsA_Hy2 && lines[0] != vpsA_Vless && lines[0] != vpsA_Tuic && lines[0] != vpsA_Anytls {
+		if lines[0] != vpsA_Hy2 && lines[0] != vpsA_Vless && lines[0] != vpsA_Tuic {
 			t.Errorf("VPS-A node was overwritten! line 0: %q", lines[0])
 		}
 		// VPS-B MUST be updated to the new credentials
@@ -396,9 +375,6 @@ func TestSync_PreserveOtherNodesWhenSyncingCurrentVPS(t *testing.T) {
 		}
 		if sub.Name == "auto_generated_tuic" && lines[1] != sbsB.ShareLinkTuic {
 			t.Errorf("VPS-B tuic was not updated! line 1: %q, expected: %q", lines[1], sbsB.ShareLinkTuic)
-		}
-		if sub.Name == "auto_generated_anytls" && lines[1] != sbsB.ShareLinkAnytls {
-			t.Errorf("VPS-B anytls was not updated! line 1: %q, expected: %q", lines[1], sbsB.ShareLinkAnytls)
 		}
 	}
 }

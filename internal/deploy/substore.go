@@ -183,9 +183,6 @@ func (sb *Substore) UpdateSubstoreConfig(sbs *SingBoxServer) error {
 	subs = addOrUpdateSub(subs, "auto_generated_tuic", "TUIC Auto", sbs.ShareLinkTuic, "Auto-generated TUIC Subscription", sbs, "tuic")
 	addedSubs = append(addedSubs, "auto_generated_tuic")
 
-	subs = addOrUpdateSub(subs, "auto_generated_anytls", "AnyTLS Auto", sbs.ShareLinkAnytls, "Auto-generated AnyTLS Subscription", sbs, "anytls")
-	addedSubs = append(addedSubs, "auto_generated_anytls")
-
 	config["subs"] = subs
 
 	// 5. Update collections
@@ -335,6 +332,7 @@ func isNodeForCurrentServer(nodeURI string, sbs *SingBoxServer, expectedScheme s
 		return false
 	}
 	currentDomain := strings.ToLower(strings.TrimSpace(sbs.cfg.Server.SBDomain))
+	tuicDomain := strings.ToLower(strings.TrimSpace(sbs.TuicDomain()))
 	if currentDomain == "" {
 		return false
 	}
@@ -347,8 +345,6 @@ func isNodeForCurrentServer(nodeURI string, sbs *SingBoxServer, expectedScheme s
 		targetTag = sbs.vrTag
 	case "tuic":
 		targetTag = sbs.tuicTag
-	case "anytls":
-		targetTag = sbs.anytlsTag
 	}
 
 	u, err := url.Parse(nodeURI)
@@ -359,12 +355,12 @@ func isNodeForCurrentServer(nodeURI string, sbs *SingBoxServer, expectedScheme s
 
 		uHost := strings.ToLower(u.Hostname())
 		if uHost != "" {
-			if uHost == currentDomain {
+			if uHost == currentDomain || (tuicDomain != "" && uHost == tuicDomain) {
 				return true
 			}
-			// Host differs; check if sni query param matches currentDomain (e.g. direct IP connection)
+			// Host differs; check if sni query param matches currentDomain or tuicDomain
 			sni := strings.ToLower(u.Query().Get("sni"))
-			if sni == currentDomain && targetTag != "" && u.Fragment == targetTag {
+			if (sni == currentDomain || (tuicDomain != "" && sni == tuicDomain)) && targetTag != "" && u.Fragment == targetTag {
 				return true
 			}
 			return false

@@ -174,8 +174,9 @@ func TestMergeNodeContent_DeduplicateCurrent(t *testing.T) {
 func TestMergeNodeContent_Tuic(t *testing.T) {
 	cfg := &config.Config{
 		Server: config.ServerConfig{
-			SBDomain: "hk.example.com",
-			Sni:      "swdist.apple.com",
+			SBDomain:   "hk.example.com",
+			TuicDomain: "tuic.hk.example.com",
+			Sni:        "swdist.apple.com",
 		},
 	}
 	sbs, err := NewSingBoxServer(cfg)
@@ -183,8 +184,8 @@ func TestMergeNodeContent_Tuic(t *testing.T) {
 		t.Fatalf("NewSingBoxServer failed: %v", err)
 	}
 
-	vps1Tuic := "tuic://uuid-vps1:uuid-vps1@us.example.com:443/?sni=us.example.com&alpn=tuic#sec_us_tuic"
-	oldHkTuic := "tuic://old-uuid:old-uuid@hk.example.com:443/?sni=hk.example.com&alpn=tuic#sec_hk_tuic"
+	vps1Tuic := "tuic://uuid-vps1:uuid-vps1@us.example.com:443/?sni=us.example.com&alpn=h3#sec_us_tuic"
+	oldHkTuic := "tuic://old-uuid:old-uuid@tuic.hk.example.com:443/?sni=tuic.hk.example.com&alpn=h3#sec_hk_tuic"
 
 	existing := vps1Tuic + "\n" + oldHkTuic
 	res := mergeNodeContent(existing, sbs.ShareLinkTuic, sbs, "tuic")
@@ -199,36 +200,5 @@ func TestMergeNodeContent_Tuic(t *testing.T) {
 	}
 	if lines[1] != sbs.ShareLinkTuic {
 		t.Errorf("current hk tuic should be updated, got %q", lines[1])
-	}
-}
-
-func TestMergeNodeContent_AnyTLS(t *testing.T) {
-	cfg := &config.Config{
-		Server: config.ServerConfig{
-			SBDomain: "hk.example.com",
-			Sni:      "swdist.apple.com",
-		},
-	}
-	sbs, err := NewSingBoxServer(cfg)
-	if err != nil {
-		t.Fatalf("NewSingBoxServer failed: %v", err)
-	}
-
-	vps1Anytls := "anytls://uuid-vps1@us.example.com:443/?sni=us.example.com&alpn=anytls#sec_us_anytls"
-	oldHkAnytls := "anytls://old-uuid@hk.example.com:443/?sni=hk.example.com&alpn=anytls#sec_hk_anytls"
-
-	existing := vps1Anytls + "\n" + oldHkAnytls
-	res := mergeNodeContent(existing, sbs.ShareLinkAnytls, sbs, "anytls")
-
-	lines := strings.Split(res, "\n")
-	if len(lines) != 2 {
-		t.Fatalf("expected 2 lines, got %d: %q", len(lines), res)
-	}
-
-	if lines[0] != vps1Anytls {
-		t.Errorf("vps1 anytls should be preserved, got %q", lines[0])
-	}
-	if lines[1] != sbs.ShareLinkAnytls {
-		t.Errorf("current hk anytls should be updated, got %q", lines[1])
 	}
 }
