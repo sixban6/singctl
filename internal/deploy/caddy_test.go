@@ -34,8 +34,11 @@ func TestPreviewCaddyfile_SeparatedDomainsAndFallback(t *testing.T) {
 	}
 
 	// 3. Layer 7 site blocks
-	if !strings.Contains(content, "https://sub.example.com:9443, https://node.example.com:9443") {
-		t.Errorf("expected both domains in layer 7 site address, got:\n%s", content)
+	if !strings.Contains(content, "https://sub.example.com:9443") || !strings.Contains(content, "reverse_proxy http://127.0.0.1:3001") {
+		t.Errorf("expected substore domain to reverse proxy to 3001, got:\n%s", content)
+	}
+	if !strings.Contains(content, "https://node.example.com:9443") {
+		t.Errorf("expected node domain block in layer 7, got:\n%s", content)
 	}
 
 	// 4. Fallback site block on 9445

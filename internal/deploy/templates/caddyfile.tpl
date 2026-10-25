@@ -52,8 +52,36 @@
 # --- Layer 7 (HTTP) 网站层 ---
 # 监听本地 9443 端口，处理真正的 HTTPS 请求
 
-# 业务网站层 (Sub-Store 专用路由反代 + 根路径及全站静态伪装站)
-https://{{.SubstoreDomain}}:9443{{if and .NodeDomain (ne .NodeDomain .SubstoreDomain)}}, https://{{.NodeDomain}}:9443{{end}} {
+{{if and .NodeDomain (ne .NodeDomain .SubstoreDomain)}}
+# 1. Sub-Store 专属域名层 (独立域名，纯反向代理到 Sub-Store 面板与 API)
+https://{{.SubstoreDomain}}:9443 {
+    bind 127.0.0.1
+    tls {
+        issuer acme {
+            dns cloudflare {{.CFDNSKey}}
+        }
+    }
+    request_header -If-Modified-Since
+    request_header -If-None-Match
+    header Cache-Control "no-cache, no-store, must-revalidate"
+    reverse_proxy http://127.0.0.1:3001
+}
+
+# 2. 节点专属域名层 (独立域名，纯静态伪装站，彻底隐藏节点服务背后的真实意图)
+https://{{.NodeDomain}}:9443 {
+    bind 127.0.0.1
+    tls {
+        issuer acme {
+            dns cloudflare {{.CFDNSKey}}
+        }
+    }
+    root * /var/www/mask-site
+    file_server
+    try_files {path} /index.html
+}
+{{else}}
+# 单域名兼容模式：根路径静态伪装站 + 专属路径反代 Sub-Store
+https://{{.SubstoreDomain}}:9443 {
     bind 127.0.0.1
     tls {
         issuer acme {
@@ -61,19 +89,20 @@ https://{{.SubstoreDomain}}:9443{{if and .NodeDomain (ne .NodeDomain .SubstoreDo
         }
     }
 
-    # 1. Sub-Store 专属路径反代（根据 key、subs、download、api 分流）
+    # Sub-Store 专属路径反代（根据 key、subs、download、api 分流）
     @substore path /subs* /download* /api* {{if .SSKey}}/{{.SSKey}}*{{end}}
     handle @substore {
         reverse_proxy http://127.0.0.1:3001
     }
 
-    # 2. 根路径及其他一切探测 -> 返回逼真的静态业务站点（杜绝空白页探测特征）
+    # 根路径及常规探测 -> 静态伪装站
     handle {
         root * /var/www/mask-site
         file_server
         try_files {path} /index.html
     }
 }
+{{end}}
 
 # 兜底回落伪装站 (监听 9445，用于 Direct-IP 直连与异常 SNI 握手响应)
 :9445 {
