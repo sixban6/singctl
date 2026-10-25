@@ -62,7 +62,7 @@ func (sbs *SingBoxServer) init() error {
 }
 
 func (sbs *SingBoxServer) initTag() {
-	suffix, _, _ := strings.Cut(sbs.cfg.Server.SBDomain, ".")
+	suffix, _, _ := strings.Cut(sbs.cfg.Server.GetNodeDomain(), ".")
 	sbs.hy2Tag = fmt.Sprintf("sec_%s_hy2", suffix)
 	sbs.vrTag = fmt.Sprintf("sec_%s_vr", suffix)
 	sbs.tuicTag = fmt.Sprintf("sec_%s_tuic", suffix)
@@ -70,19 +70,17 @@ func (sbs *SingBoxServer) initTag() {
 
 // TuicDomain returns the configured or default TUIC domain.
 func (sbs *SingBoxServer) TuicDomain() string {
-	if sbs.cfg != nil && sbs.cfg.Server.TuicDomain != "" {
-		return sbs.cfg.Server.TuicDomain
-	}
-	if sbs.cfg != nil && sbs.cfg.Server.SBDomain != "" {
-		return "tuic." + sbs.cfg.Server.SBDomain
+	if sbs.cfg != nil {
+		return sbs.cfg.Server.GetTuicDomain()
 	}
 	return ""
 }
 
 func (sbs *SingBoxServer) updateShareLinks() {
+	nodeDomain := sbs.cfg.Server.GetNodeDomain()
 	tuicDomain := sbs.TuicDomain()
-	sbs.ShareLinkHy2 = fmt.Sprintf("hysteria2://%s@%s:443/?sni=%s&alpn=h3&insecure=0#%s", sbs.hyUUID, sbs.cfg.Server.SBDomain, sbs.cfg.Server.SBDomain, sbs.hy2Tag)
-	sbs.ShareLinkVless = fmt.Sprintf("vless://%s@%s:443?type=tcp&encryption=none&security=reality&pbk=%s&fp=chrome&sni=%s&sid=%s&flow=xtls-rprx-vision#%s", sbs.hyUUID, sbs.cfg.Server.SBDomain, sbs.publicKey, sbs.cfg.Server.Sni, sbs.shortID, sbs.vrTag)
+	sbs.ShareLinkHy2 = fmt.Sprintf("hysteria2://%s@%s:443/?sni=%s&alpn=h3&insecure=0#%s", sbs.hyUUID, nodeDomain, nodeDomain, sbs.hy2Tag)
+	sbs.ShareLinkVless = fmt.Sprintf("vless://%s@%s:443?type=tcp&encryption=none&security=reality&pbk=%s&fp=chrome&sni=%s&sid=%s&flow=xtls-rprx-vision#%s", sbs.hyUUID, nodeDomain, sbs.publicKey, sbs.cfg.Server.Sni, sbs.shortID, sbs.vrTag)
 	sbs.ShareLinkTuic = fmt.Sprintf("tuic://%s:%s@%s:443/?sni=%s&alpn=h3&congestion_control=bbr#%s", sbs.hyUUID, sbs.hyUUID, tuicDomain, tuicDomain, sbs.tuicTag)
 }
 
@@ -141,6 +139,12 @@ func findCaddyCertForDomain(domain string) (string, string) {
 		return fallbackCrt, fallbackKey
 	}
 
+	parts := strings.Split(domain, ".")
+	var wildcardNames []string
+	if len(parts) >= 2 {
+		wildcardNames = append(wildcardNames, "wildcard_."+strings.Join(parts[1:], "."))
+	}
+
 	for range 30 {
 		dirs, err := os.ReadDir(basePath)
 		if err == nil {
@@ -148,12 +152,24 @@ func findCaddyCertForDomain(domain string) (string, string) {
 				if !d.IsDir() {
 					continue
 				}
+				// 1. Direct domain cert match
 				crtPath := filepath.Join(basePath, d.Name(), domain, domain+".crt")
 				keyPath := filepath.Join(basePath, d.Name(), domain, domain+".key")
 
 				if _, err := os.Stat(crtPath); err == nil {
 					if _, err := os.Stat(keyPath); err == nil {
 						return crtPath, keyPath
+					}
+				}
+
+				// 2. Wildcard cert fallback (e.g. wildcard_.example.com)
+				for _, wName := range wildcardNames {
+					wCrt := filepath.Join(basePath, d.Name(), wName, wName+".crt")
+					wKey := filepath.Join(basePath, d.Name(), wName, wName+".key")
+					if _, err := os.Stat(wCrt); err == nil {
+						if _, err := os.Stat(wKey); err == nil {
+							return wCrt, wKey
+						}
 					}
 				}
 			}
@@ -166,12 +182,13 @@ func findCaddyCertForDomain(domain string) (string, string) {
 
 // initCaddyCertPath waits and finds the actual cert path Caddy generated (Let's Encrypt or ZeroSSL)
 func (sbs *SingBoxServer) initCaddyCertPath() {
-	logger.Info("Waiting for Caddy to generate certificates for %s...", sbs.cfg.Server.SBDomain)
-	sbs.crtPath, sbs.keyPath = findCaddyCertForDomain(sbs.cfg.Server.SBDomain)
+	nodeDomain := sbs.cfg.Server.GetNodeDomain()
+	logger.Info("Waiting for Caddy to generate certificates for %s...", nodeDomain)
+	sbs.crtPath, sbs.keyPath = findCaddyCertForDomain(nodeDomain)
 	logger.Success("Found certificate at %s", sbs.crtPath)
 
 	tuicDomain := sbs.TuicDomain()
-	if tuicDomain != "" && tuicDomain != sbs.cfg.Server.SBDomain {
+	if tuicDomain != "" && tuicDomain != nodeDomain {
 		logger.Info("Waiting for Caddy to generate certificates for %s...", tuicDomain)
 		sbs.tuicCrtPath, sbs.tuicKeyPath = findCaddyCertForDomain(tuicDomain)
 		logger.Success("Found certificate at %s", sbs.tuicCrtPath)
@@ -457,7 +474,7 @@ func (sbs *SingBoxServer) PreviewServerConfig() (string, error) {
 	}
 	ctx := tmplContext{
 		HyUUID:            sbs.hyUUID,
-		SBDomain:          sbs.cfg.Server.SBDomain,
+		SBDomain:          sbs.cfg.Server.GetNodeDomain(),
 		TuicDomain:        sbs.TuicDomain(),
 		CertPath:          sbs.crtPath,
 		KeyPath:           sbs.keyPath,

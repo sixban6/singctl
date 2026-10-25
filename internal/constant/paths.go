@@ -26,6 +26,9 @@ var (
 	// Sub-store
 	SubStoreDir  string
 	SubStoreFile string
+
+	// Mask site
+	MaskSiteDir string
 )
 
 func init() {
@@ -44,6 +47,7 @@ func init() {
 
 		SubStoreDir = "/etc/sub-store"
 		SubStoreFile = "/etc/sub-store/sub-store.json"
+		MaskSiteDir = "/var/www/mask-site"
 	} else if runtime.GOOS == "windows" {
 		SingBoxInstallDir = filepath.Join(os.Getenv("LOCALAPPDATA"), "Programs", "sing-box", "sing-box.exe")
 		SingBoxConfigDir = filepath.Join(os.Getenv("LOCALAPPDATA"), "sing-box")
@@ -53,6 +57,9 @@ func init() {
 		SingBoxInstallDir = "/usr/local/bin/sing-box"
 		SingBoxConfigDir = filepath.Join(home, "Documents")
 		SingBoxConfigFile = filepath.Join(SingBoxConfigDir, "sing-box-config.json")
+		MaskSiteDir = filepath.Join(os.TempDir(), "mask-site")
+	} else {
+		MaskSiteDir = filepath.Join(os.TempDir(), "mask-site")
 	}
 
 	// Dynamic linux check for SingBoxInstallDir

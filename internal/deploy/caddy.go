@@ -5,10 +5,13 @@ import (
 	"fmt"
 	"os"
 	"os/user"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"text/template"
 
 	"singctl/internal/config"
+	"singctl/internal/constant"
 	"singctl/internal/logger"
 )
 
@@ -58,16 +61,19 @@ func DeployCaddy(cfg *config.Config) error {
 		return fmt.Errorf("caddy installation failed: %w", err)
 	}
 
-	// 2. Ensure basic webroot exists
-	if err := os.MkdirAll("/var/www/html", 0755); err != nil {
-		return fmt.Errorf("failed to create web root: %w", err)
+	// 2. Ensure mask site webroot and rich static index.html exist
+	if err := os.MkdirAll(constant.MaskSiteDir, 0755); err != nil {
+		return fmt.Errorf("failed to create mask site root: %w", err)
 	}
-	// Create empty index.html
-	if _, err := os.Stat("/var/www/html/index.html"); os.IsNotExist(err) {
-		if err := os.WriteFile("/var/www/html/index.html", []byte("OK"), 0644); err != nil {
-			return fmt.Errorf("failed to create dummy index.html: %w", err)
+	maskHTML, err := templateFiles.ReadFile("templates/mask_index.html")
+	if err == nil {
+		if err := os.WriteFile(filepath.Join(constant.MaskSiteDir, "index.html"), maskHTML, 0644); err != nil {
+			logger.Warn("Failed to write mask site index.html: %v", err)
 		}
 	}
+
+	// Also ensure legacy /var/www/html exists
+	_ = os.MkdirAll("/var/www/html", 0755)
 
 	// 3. Render and save Caddyfile
 	logger.Info("Rendering and saving Caddyfile...")
@@ -113,27 +119,44 @@ func PreviewCaddyfile(cfg *config.Config) (string, error) {
 	}
 
 	type tmplContext struct {
-		SBDomain   string
-		TuicDomain string
-		CFDNSKey   string
-		Sni        string
-		TuicPort   int
-		AnyTLSPort int
+		NodeDomain     string
+		SubstoreDomain string
+		TuicDomain     string
+		CFDNSKey       string
+		Sni            string
+		TuicPort       int
+		AnyTLSPort     int
+		SSKey          string
 	}
+
+	nodeDomain := ""
+	substoreDomain := ""
 	tuicDomain := ""
+	cfDNSKey := ""
+	sni := ""
 	if cfg != nil {
-		tuicDomain = cfg.Server.TuicDomain
-		if tuicDomain == "" && cfg.Server.SBDomain != "" {
-			tuicDomain = "tuic." + cfg.Server.SBDomain
-		}
+		nodeDomain = cfg.Server.GetNodeDomain()
+		substoreDomain = cfg.Server.GetSubstoreDomain()
+		tuicDomain = cfg.Server.GetTuicDomain()
+		cfDNSKey = cfg.Server.CFDNSKey
+		sni = cfg.Server.Sni
 	}
+
+	ssKey := ""
+	keyFile := filepath.Join(constant.SubStoreDir, "key")
+	if keyBytes, err := os.ReadFile(keyFile); err == nil {
+		ssKey = strings.TrimSpace(string(keyBytes))
+	}
+
 	ctx := tmplContext{
-		SBDomain:   cfg.Server.SBDomain,
-		TuicDomain: tuicDomain,
-		CFDNSKey:   cfg.Server.CFDNSKey,
-		Sni:        cfg.Server.Sni,
-		TuicPort:   tuicPort,
-		AnyTLSPort: anytlsPort,
+		NodeDomain:     nodeDomain,
+		SubstoreDomain: substoreDomain,
+		TuicDomain:     tuicDomain,
+		CFDNSKey:       cfDNSKey,
+		Sni:            sni,
+		TuicPort:       tuicPort,
+		AnyTLSPort:     anytlsPort,
+		SSKey:          ssKey,
 	}
 
 	var buf bytes.Buffer

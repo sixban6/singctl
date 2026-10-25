@@ -94,6 +94,13 @@ func (sb *Substore) DeploySubstore() error {
 		return fmt.Errorf("failed to run sub-store docker container: %w", err)
 	}
 
+	// Reload Caddy so its @substore route immediately recognizes the ssKey
+	if sb.Config != nil {
+		if err := renderCaddyfile(sb.Config); err == nil {
+			_ = RestartCaddy()
+		}
+	}
+
 	return nil
 }
 
@@ -111,11 +118,15 @@ func (sb *Substore) getCorsAllowedOrigins() string {
 
 	// 1. Configured server domains
 	if sb.Config != nil {
-		if domain := strings.TrimSpace(sb.Config.Server.SBDomain); domain != "" {
+		if domain := strings.TrimSpace(sb.Config.Server.GetSubstoreDomain()); domain != "" {
 			add(fmt.Sprintf("https://%s", domain))
 			add(fmt.Sprintf("http://%s", domain))
 		}
-		if domain := strings.TrimSpace(sb.Config.Server.TuicDomain); domain != "" {
+		if domain := strings.TrimSpace(sb.Config.Server.GetNodeDomain()); domain != "" {
+			add(fmt.Sprintf("https://%s", domain))
+			add(fmt.Sprintf("http://%s", domain))
+		}
+		if domain := strings.TrimSpace(sb.Config.Server.GetTuicDomain()); domain != "" {
 			add(fmt.Sprintf("https://%s", domain))
 			add(fmt.Sprintf("http://%s", domain))
 		}
@@ -187,10 +198,10 @@ func (sb *Substore) GetAdminURL() (string, error) {
 	}
 	sbDomain := ""
 	if sb.Config != nil {
-		sbDomain = sb.Config.Server.SBDomain
+		sbDomain = sb.Config.Server.GetSubstoreDomain()
 	}
 	if sbDomain == "" {
-		return "", fmt.Errorf("server.sb_domain is not configured")
+		return "", fmt.Errorf("server.substore_domain (or sb_domain) is not configured")
 	}
 	return fmt.Sprintf("https://%s?api=https://%s/%s", sbDomain, sbDomain, key), nil
 }
@@ -436,7 +447,7 @@ func isNodeForCurrentServer(nodeURI string, sbs *SingBoxServer, expectedScheme s
 	if nodeURI == "" || sbs == nil || sbs.cfg == nil {
 		return false
 	}
-	currentDomain := strings.ToLower(strings.TrimSpace(sbs.cfg.Server.SBDomain))
+	currentDomain := strings.ToLower(strings.TrimSpace(sbs.cfg.Server.GetNodeDomain()))
 	tuicDomain := strings.ToLower(strings.TrimSpace(sbs.TuicDomain()))
 	if currentDomain == "" {
 		return false
