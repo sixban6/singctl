@@ -1,3 +1,10 @@
+# [1.33.0](https://github.com/sixban6/singctl/compare/v1.32.0...v1.33.0) (2026-10-25)
+
+
+### Features
+
+* **server:** restrict Sub-Store CORS to configured domains and official web UIs ([193103e](https://github.com/sixban6/singctl/commit/193103eca8782a0cb1ca03ccde700279815bd2af))
+
 # [1.32.0](https://github.com/sixban6/singctl/compare/v1.31.0...v1.32.0) (2026-10-25)
 
 
