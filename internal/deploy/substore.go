@@ -3,6 +3,7 @@ package deploy
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -173,11 +174,17 @@ func (sb *Substore) UpdateSubstoreConfig(sbs *SingBoxServer) error {
 	var addedSubs []string
 
 	hyURI := sbs.ShareLinkHy2
-	subs = addOrUpdateSub(subs, "auto_generated_hy2", "Hysteria2 Auto", hyURI, "Auto-generated Hysteria 2 Subscription")
+	subs = addOrUpdateSub(subs, "auto_generated_hy2", "Hysteria2 Auto", hyURI, "Auto-generated Hysteria 2 Subscription", sbs, "hysteria2")
 	addedSubs = append(addedSubs, "auto_generated_hy2")
 
-	subs = addOrUpdateSub(subs, "auto_generated_vless", "VLESS Reality Auto", sbs.ShareLinkVless, "Auto-generated VLESS+Reality Subscription")
+	subs = addOrUpdateSub(subs, "auto_generated_vless", "VLESS Reality Auto", sbs.ShareLinkVless, "Auto-generated VLESS+Reality Subscription", sbs, "vless")
 	addedSubs = append(addedSubs, "auto_generated_vless")
+
+	subs = addOrUpdateSub(subs, "auto_generated_tuic", "TUIC Auto", sbs.ShareLinkTuic, "Auto-generated TUIC Subscription", sbs, "tuic")
+	addedSubs = append(addedSubs, "auto_generated_tuic")
+
+	subs = addOrUpdateSub(subs, "auto_generated_anytls", "AnyTLS Auto", sbs.ShareLinkAnytls, "Auto-generated AnyTLS Subscription", sbs, "anytls")
+	addedSubs = append(addedSubs, "auto_generated_anytls")
 
 	config["subs"] = subs
 
@@ -228,7 +235,7 @@ func (sb *Substore) RestartSubstore() error {
 }
 
 // Helper to add or update a subscription in the sub-store array
-func addOrUpdateSub(subs []interface{}, targetName, displayName, contentURI, remark string) []interface{} {
+func addOrUpdateSub(subs []interface{}, targetName, displayName, contentURI, remark string, sbs *SingBoxServer, protocol string) []interface{} {
 	newSub := map[string]interface{}{
 		"name":                  targetName,
 		"displayName":           displayName,
@@ -264,7 +271,8 @@ func addOrUpdateSub(subs []interface{}, targetName, displayName, contentURI, rem
 	for i, v := range subs {
 		if sub, ok := v.(map[string]interface{}); ok {
 			if name, ok := sub["name"].(string); ok && name == targetName {
-				sub["content"] = contentURI
+				existingContent, _ := sub["content"].(string)
+				sub["content"] = mergeNodeContent(existingContent, contentURI, sbs, protocol)
 				sub["displayName"] = displayName
 				sub["display-name"] = displayName
 				subs[i] = sub
@@ -281,6 +289,107 @@ func addOrUpdateSub(subs []interface{}, targetName, displayName, contentURI, rem
 	}
 
 	return subs
+}
+
+// mergeNodeContent merges a new node URI into the existing multi-line subscription content.
+// It replaces any node belonging to the current VPS while preserving nodes from other VPSs.
+// If no existing node belongs to the current VPS, the new URI is appended.
+func mergeNodeContent(existingContent, newURI string, sbs *SingBoxServer, expectedScheme string) string {
+	newURI = strings.TrimSpace(newURI)
+	if newURI == "" {
+		return existingContent
+	}
+
+	rawLines := strings.Split(strings.ReplaceAll(existingContent, "\r\n", "\n"), "\n")
+	var resultLines []string
+	replaced := false
+
+	for _, rawLine := range rawLines {
+		line := strings.TrimSpace(rawLine)
+		if line == "" {
+			continue
+		}
+
+		if isNodeForCurrentServer(line, sbs, expectedScheme) {
+			if !replaced {
+				resultLines = append(resultLines, newURI)
+				replaced = true
+			}
+			// Skip duplicate entries for the current server
+		} else {
+			resultLines = append(resultLines, line)
+		}
+	}
+
+	if !replaced {
+		resultLines = append(resultLines, newURI)
+	}
+
+	return strings.Join(resultLines, "\n")
+}
+
+// isNodeForCurrentServer checks whether a given node URI corresponds to the current VPS.
+func isNodeForCurrentServer(nodeURI string, sbs *SingBoxServer, expectedScheme string) bool {
+	nodeURI = strings.TrimSpace(nodeURI)
+	if nodeURI == "" || sbs == nil || sbs.cfg == nil {
+		return false
+	}
+	currentDomain := strings.ToLower(strings.TrimSpace(sbs.cfg.Server.SBDomain))
+	if currentDomain == "" {
+		return false
+	}
+
+	targetTag := ""
+	switch expectedScheme {
+	case "hysteria2":
+		targetTag = sbs.hy2Tag
+	case "vless":
+		targetTag = sbs.vrTag
+	case "tuic":
+		targetTag = sbs.tuicTag
+	case "anytls":
+		targetTag = sbs.anytlsTag
+	}
+
+	u, err := url.Parse(nodeURI)
+	if err == nil {
+		if u.Scheme != "" && !strings.EqualFold(u.Scheme, expectedScheme) {
+			return false
+		}
+
+		uHost := strings.ToLower(u.Hostname())
+		if uHost != "" {
+			if uHost == currentDomain {
+				return true
+			}
+			// Host differs; check if sni query param matches currentDomain (e.g. direct IP connection)
+			sni := strings.ToLower(u.Query().Get("sni"))
+			if sni == currentDomain && targetTag != "" && u.Fragment == targetTag {
+				return true
+			}
+			return false
+		}
+
+		if targetTag != "" && u.Fragment == targetTag {
+			return true
+		}
+	}
+
+	// Fallback string matching if url.Parse fails
+	lower := strings.ToLower(nodeURI)
+	if expectedScheme != "" && !strings.HasPrefix(lower, expectedScheme+"://") {
+		return false
+	}
+	if strings.Contains(lower, "@"+currentDomain+":") ||
+		strings.Contains(lower, "@"+currentDomain+"/") ||
+		strings.Contains(lower, "@"+currentDomain+"?") {
+		return true
+	}
+	if targetTag != "" && (strings.HasSuffix(nodeURI, "#"+targetTag) || strings.Contains(nodeURI, "#"+targetTag+"?")) {
+		return true
+	}
+
+	return false
 }
 
 // Helper to add the subscription names to the "all" or "Auto" collection

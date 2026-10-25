@@ -43,9 +43,11 @@ type TailscaleConfig struct {
 }
 
 type ServerConfig struct {
-	SBDomain string `yaml:"sb_domain"`
-	CFDNSKey string `yaml:"cf_dns_key"`
-	Sni      string `yaml:"sni"`
+	SBDomain   string `yaml:"sb_domain"`
+	CFDNSKey   string `yaml:"cf_dns_key"`
+	Sni        string `yaml:"sni"`
+	TuicPort   int    `yaml:"tuic_port"`
+	AnyTLSPort int    `yaml:"anytls_port"`
 }
 
 type WatchdogConfig struct {
@@ -67,7 +69,7 @@ func Load(path string) (*Config, error) {
 		"subs", "name", "url", "skip_tls_verify", "remove-emoji",
 		"github", "mirror_url", "hy2", "up", "down",
 		"tailscale", "auth_key", "use_build", constant.TailscaleSubnets,
-		"server", "sb_domain", "cf_dns_key", "sni",
+		"server", "sb_domain", "cf_dns_key", "sni", "tuic_port", "anytls_port",
 		"watchdog", "interval", "confirm_wait", "max_restarts",
 	}
 	pattern := fmt.Sprintf("(?m)^([ \\t-]*(?:%s)):([^\\s].*)", strings.Join(keys, "|"))
@@ -88,6 +90,12 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Server.Sni == "" {
 		cfg.Server.Sni = "swdist.apple.com"
+	}
+	if cfg.Server.TuicPort == 0 {
+		cfg.Server.TuicPort = 8448
+	}
+	if cfg.Server.AnyTLSPort == 0 {
+		cfg.Server.AnyTLSPort = 8444
 	}
 	if cfg.Watchdog.Interval <= 0 {
 		cfg.Watchdog.Interval = 180
@@ -150,7 +158,7 @@ func MigrateConfig(configPath string, templateData []byte) error {
 		"subs", "name", "url", "skip_tls_verify", "remove-emoji",
 		"github", "mirror_url", "hy2", "up", "down",
 		"tailscale", "auth_key", "use_build", constant.TailscaleSubnets,
-		"server", "sb_domain", "cf_dns_key", "sni",
+		"server", "sb_domain", "cf_dns_key", "sni", "tuic_port", "anytls_port",
 		"watchdog", "interval", "confirm_wait", "max_restarts",
 	}
 	pattern := fmt.Sprintf("(?m)^([ \\t-]*(?:%s)):([^\\s].*)", strings.Join(keys, "|"))

@@ -101,15 +101,30 @@ func PreviewCaddyfile(cfg *config.Config) (string, error) {
 		return "", fmt.Errorf("failed to parse caddyfile template: %w", err)
 	}
 
+	tuicPort := 8448
+	anytlsPort := 8444
+	if cfg != nil {
+		if cfg.Server.TuicPort > 0 {
+			tuicPort = cfg.Server.TuicPort
+		}
+		if cfg.Server.AnyTLSPort > 0 {
+			anytlsPort = cfg.Server.AnyTLSPort
+		}
+	}
+
 	type tmplContext struct {
-		SBDomain string
-		CFDNSKey string
-		Sni      string
+		SBDomain   string
+		CFDNSKey   string
+		Sni        string
+		TuicPort   int
+		AnyTLSPort int
 	}
 	ctx := tmplContext{
-		SBDomain: cfg.Server.SBDomain,
-		CFDNSKey: cfg.Server.CFDNSKey,
-		Sni:      cfg.Server.Sni,
+		SBDomain:   cfg.Server.SBDomain,
+		CFDNSKey:   cfg.Server.CFDNSKey,
+		Sni:        cfg.Server.Sni,
+		TuicPort:   tuicPort,
+		AnyTLSPort: anytlsPort,
 	}
 
 	var buf bytes.Buffer

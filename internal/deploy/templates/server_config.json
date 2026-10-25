@@ -75,6 +75,44 @@
         "certificate_path": "{{.CertPath}}",
         "key_path": "{{.KeyPath}}"
       }
+    },
+    {
+      "tag": "ANYTLS",
+      "type": "anytls",
+      "listen": "::",
+      "listen_port": {{.AnyTLSPort}},
+      "users": [
+        {
+          "name": "user1",
+          "password": "{{.HyUUID}}"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "certificate_path": "{{.CertPath}}",
+        "key_path": "{{.KeyPath}}"
+      }
+    },
+    {
+      "tag": "TUIC",
+      "type": "tuic",
+      "listen": "::",
+      "listen_port": {{.TuicPort}},
+      "users": [
+        {
+          "uuid": "{{.HyUUID}}",
+          "password": "{{.HyUUID}}"
+        }
+      ],
+      "congestion_control": "bbr",
+      "tls": {
+        "enabled": true,
+        "alpn": [
+          "h3"
+        ],
+        "certificate_path": "{{.CertPath}}",
+        "key_path": "{{.KeyPath}}"
+      }
     }
   ],
   "outbounds": [

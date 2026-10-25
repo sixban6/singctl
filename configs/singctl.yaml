@@ -25,6 +25,8 @@ server:                                         # (可选) 服务器部署配置
   sb_domain: "sub.yourdomain.com"               # 你的域名
   cf_dns_key: "your_cloudflare_api_token"       # 你的 Cloudflare API Token
   sni: ""                                       # (可选) Reality SNI 伪装域名。默认: swdist.apple.com
+  tuic_port: 8448                               # (可选) TUIC 端口。默认: 8448
+  anytls_port: 8444                             # (可选) AnyTLS 端口。默认: 8444
 
 watchdog:                                      # (可选) 看门狗守护进程配置 (singctl dm)
   interval: 180                                 # 检查间隔(秒), 默认 180
