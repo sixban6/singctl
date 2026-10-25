@@ -1,3 +1,10 @@
+## [1.34.2](https://github.com/sixban6/singctl/compare/v1.34.1...v1.34.2) (2026-10-25)
+
+
+### Bug Fixes
+
+* **caddy:** force no-cache on substore domain and strip conditional headers to prevent stale 304 fallback cache ([be8fd66](https://github.com/sixban6/singctl/commit/be8fd66a6540f1ffd62378b38a675a497a3a4207))
+
 ## [1.34.1](https://github.com/sixban6/singctl/compare/v1.34.0...v1.34.1) (2026-10-25)
 
 
