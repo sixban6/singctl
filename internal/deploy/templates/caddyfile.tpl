@@ -61,10 +61,20 @@ https://{{.SubstoreDomain}}:9443 {
             dns cloudflare {{.CFDNSKey}}
         }
     }
+    header {
+        Cache-Control "private, no-cache, no-store, max-age=0, must-revalidate"
+        CDN-Cache-Control "no-store"
+        Cloudflare-CDN-Cache-Control "no-store"
+        defer
+    }
     request_header -If-Modified-Since
     request_header -If-None-Match
-    header Cache-Control "no-cache, no-store, must-revalidate"
-    reverse_proxy http://127.0.0.1:3001
+    reverse_proxy http://127.0.0.1:3001 {
+        header_down -Cache-Control
+        header_down Cache-Control "private, no-cache, no-store, max-age=0, must-revalidate"
+        header_down CDN-Cache-Control "no-store"
+        header_down Cloudflare-CDN-Cache-Control "no-store"
+    }
 }
 
 # 2. 节点专属域名层 (独立域名，纯静态伪装站，彻底隐藏节点服务背后的真实意图)

@@ -698,13 +698,17 @@ func showServerInfo(configPath string) error {
 
 	sbt := deploy.NewSubstore(cfg, "")
 	adminURL, err := sbt.GetAdminURL()
+	vercelURL, _ := sbt.GetVercelAdminURL()
 
 	fmt.Println("========================================================")
 	if err != nil {
 		fmt.Printf("🔒 Sub-Store 后端管理地址: [未能获取: %v]\n", err)
 	} else {
-		fmt.Println("🔒 Sub-Store 后端管理地址 (Admin Access URL):")
-		fmt.Printf("%s\n", adminURL)
+		fmt.Println("🔒 Sub-Store 后端管理地址 (Admin Access URLs):")
+		if vercelURL != "" {
+			fmt.Printf("• 官方 Web UI (推荐 / 免 CDN 缓存影响):\n  %s\n", vercelURL)
+		}
+		fmt.Printf("• 自建独立域名前端 (若遇白屏需在 Cloudflare 清除缓存):\n  %s\n", adminURL)
 	}
 
 	fmt.Println("\n📡 服务端节点分享链接 (Node Share Links):")
