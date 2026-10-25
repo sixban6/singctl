@@ -1,3 +1,10 @@
+# [1.30.0](https://github.com/sixban6/singctl/compare/v1.29.1...v1.30.0) (2026-10-25)
+
+
+### Features
+
+* **server:** multiplex all inbounds on port 443 via Caddy layer4 ([c5c1f3b](https://github.com/sixban6/singctl/commit/c5c1f3bef43fee509bca70f99768e0dabe3b3ebd))
+
 ## [1.29.1](https://github.com/sixban6/singctl/compare/v1.29.0...v1.29.1) (2026-10-25)
 
 
