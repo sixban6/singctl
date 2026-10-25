@@ -1,3 +1,10 @@
+# [1.29.0](https://github.com/sixban6/singctl/compare/v1.28.3...v1.29.0) (2026-10-25)
+
+
+### Features
+
+* **server:** support tuic and anytls server deployment and bump singgen to v1.14.7 ([78b2ee8](https://github.com/sixban6/singctl/commit/78b2ee8dae9420a21889c1c4f72225983b78f1d2))
+
 ## [1.28.1](https://github.com/sixban6/singctl/compare/v1.28.0...v1.28.1) (2026-10-20)
 
 # [1.28.0](https://github.com/sixban6/singctl/compare/v1.27.3...v1.28.0) (2026-10-20)
