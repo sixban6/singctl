@@ -264,8 +264,8 @@ func TestSync_PreserveOtherNodesWhenSyncingCurrentVPS(t *testing.T) {
 	const vpsA_Domain = "vps-a.example.com"
 	const vpsA_Hy2 = "hysteria2://vps-a-uuid@" + vpsA_Domain + "/?sni=" + vpsA_Domain + "&alpn=h3&insecure=0#sec_vps-a_hy2"
 	const vpsA_Vless = "vless://vps-a-uuid@" + vpsA_Domain + ":443?type=tcp&security=reality&sni=swdist.apple.com#sec_vps-a_vr"
-	const vpsA_Tuic = "tuic://vps-a-uuid:vps-a-uuid@" + vpsA_Domain + ":8448/?sni=" + vpsA_Domain + "&alpn=h3&congestion_control=bbr#sec_vps-a_tuic"
-	const vpsA_Anytls = "anytls://vps-a-uuid@" + vpsA_Domain + ":8444/?sni=" + vpsA_Domain + "#sec_vps-a_anytls"
+	const vpsA_Tuic = "tuic://vps-a-uuid:vps-a-uuid@" + vpsA_Domain + ":443/?sni=" + vpsA_Domain + "&alpn=tuic&congestion_control=bbr#sec_vps-a_tuic"
+	const vpsA_Anytls = "anytls://vps-a-uuid@" + vpsA_Domain + ":443/?sni=" + vpsA_Domain + "&alpn=anytls#sec_vps-a_anytls"
 
 	initialSubstore := map[string]interface{}{
 		"subs": []interface{}{

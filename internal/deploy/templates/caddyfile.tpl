@@ -13,6 +13,17 @@
                 proxy 127.0.0.1:8443
             }
 
+            # AnyTLS 流量 (ALPN: anytls) -> Sing-box
+            @anytls {
+                tls {
+                    sni {{.SBDomain}}
+                    alpn anytls
+                }
+            }
+            route @anytls {
+                proxy 127.0.0.1:52022
+            }
+
             # Sub-Store 域名流量 -> Caddy HTTP 层
             @substore {
                 tls {
@@ -22,28 +33,21 @@
             route @substore {
                 proxy 127.0.0.1:9443
             }
-
-
         }
 
-        # AnyTLS on port {{.AnyTLSPort}}
-        :{{.AnyTLSPort}} {
-            route {
-                proxy 127.0.0.1:52022
-            }
-        }
-
-        # Hysteria2 (UDP) on port 443
+        # UDP 443: TUIC 与 Hysteria 2 分流
         udp/:443 {
+            # TUIC 流量 (QUIC ALPN: tuic) -> Sing-box
+            @tuic quic {
+                alpn tuic
+            }
+            route @tuic {
+                proxy udp/127.0.0.1:52023
+            }
+
+            # Hysteria 2 (QUIC ALPN: h3) -> Sing-box (默认/回退路由)
             route {
                 proxy udp/127.0.0.1:52021
-            }
-        }
-
-        # TUIC (UDP) on port {{.TuicPort}}
-        udp/:{{.TuicPort}} {
-            route {
-                proxy udp/127.0.0.1:52023
             }
         }
     }

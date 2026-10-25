@@ -101,8 +101,8 @@ func PreviewCaddyfile(cfg *config.Config) (string, error) {
 		return "", fmt.Errorf("failed to parse caddyfile template: %w", err)
 	}
 
-	tuicPort := 8448
-	anytlsPort := 8444
+	tuicPort := 443
+	anytlsPort := 443
 	if cfg != nil {
 		if cfg.Server.TuicPort > 0 {
 			tuicPort = cfg.Server.TuicPort
