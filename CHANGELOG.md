@@ -1,3 +1,10 @@
+# [1.35.0](https://github.com/sixban6/singctl/compare/v1.34.3...v1.35.0) (2026-10-25)
+
+
+### Features
+
+* **caddy:** support automatic Let's Encrypt public IP certificates via shortlived profile ([f1eff91](https://github.com/sixban6/singctl/commit/f1eff9113b26fab6c4a8d1f4b54178f2fba0cf3f))
+
 ## [1.34.3](https://github.com/sixban6/singctl/compare/v1.34.2...v1.34.3) (2026-10-25)
 
 
