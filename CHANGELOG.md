@@ -1,3 +1,10 @@
+# [1.31.0](https://github.com/sixban6/singctl/compare/v1.30.0...v1.31.0) (2026-10-25)
+
+
+### Features
+
+* **server:** support dual-subdomain QUIC SNI multiplexing for Reality, Hy2, and TUIC on port 443 ([04857d1](https://github.com/sixban6/singctl/commit/04857d17a68285fe488bae54ece04ca07e0079e3))
+
 # [1.30.0](https://github.com/sixban6/singctl/compare/v1.29.1...v1.30.0) (2026-10-25)
 
 
