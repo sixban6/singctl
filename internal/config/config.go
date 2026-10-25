@@ -43,12 +43,13 @@ type TailscaleConfig struct {
 }
 
 type ServerConfig struct {
-	SBDomain   string `yaml:"sb_domain"`
-	TuicDomain string `yaml:"tuic_domain"`
-	CFDNSKey   string `yaml:"cf_dns_key"`
-	Sni        string `yaml:"sni"`
-	TuicPort   int    `yaml:"tuic_port"`
-	AnyTLSPort int    `yaml:"anytls_port"`
+	SBDomain           string `yaml:"sb_domain"`
+	TuicDomain         string `yaml:"tuic_domain"`
+	CFDNSKey           string `yaml:"cf_dns_key"`
+	Sni                string `yaml:"sni"`
+	TuicPort           int    `yaml:"tuic_port"`
+	AnyTLSPort         int    `yaml:"anytls_port"`
+	CorsAllowedOrigins string `yaml:"cors_allowed_origins"`
 }
 
 type WatchdogConfig struct {
