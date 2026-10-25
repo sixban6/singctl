@@ -1,3 +1,10 @@
+## [1.34.3](https://github.com/sixban6/singctl/compare/v1.34.2...v1.34.3) (2026-10-25)
+
+
+### Bug Fixes
+
+* **substore:** prevent CDN caching on substore domain and provide vercel web ui link ([0f1a354](https://github.com/sixban6/singctl/commit/0f1a354c68f8ada495ddb1a7237de4f61238b97e))
+
 ## [1.34.2](https://github.com/sixban6/singctl/compare/v1.34.1...v1.34.2) (2026-10-25)
 
 
