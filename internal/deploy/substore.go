@@ -77,12 +77,13 @@ func (sb *Substore) DeploySubstore() error {
 
 	// 5. Run new container
 	logger.Info("Starting new sub-store container...")
+	corsOrigins := sb.getCorsAllowedOrigins()
 	runArgs := []string{
 		"run", "-it", "-d",
 		"--restart=always",
 		"-e", "SUB_STORE_CRON=50 23 * * *",
 		"-e", fmt.Sprintf("SUB_STORE_FRONTEND_BACKEND_PATH=/%s", ssKey),
-		"-e", "SUB_STORE_CORS_ALLOWED_ORIGINS=*",
+		"-e", fmt.Sprintf("SUB_STORE_CORS_ALLOWED_ORIGINS=%s", corsOrigins),
 		"-p", "127.0.0.1:3001:3001",
 		"-v", fmt.Sprintf("%s:/opt/app/data", constant.SubStoreDir),
 		"--name", "sub-store",
@@ -94,6 +95,49 @@ func (sb *Substore) DeploySubstore() error {
 	}
 
 	return nil
+}
+
+func (sb *Substore) getCorsAllowedOrigins() string {
+	var origins []string
+	seen := make(map[string]bool)
+
+	add := func(origin string) {
+		origin = strings.TrimSpace(origin)
+		if origin != "" && !seen[origin] {
+			seen[origin] = true
+			origins = append(origins, origin)
+		}
+	}
+
+	// 1. Configured server domains
+	if sb.Config != nil {
+		if domain := strings.TrimSpace(sb.Config.Server.SBDomain); domain != "" {
+			add(fmt.Sprintf("https://%s", domain))
+			add(fmt.Sprintf("http://%s", domain))
+		}
+		if domain := strings.TrimSpace(sb.Config.Server.TuicDomain); domain != "" {
+			add(fmt.Sprintf("https://%s", domain))
+			add(fmt.Sprintf("http://%s", domain))
+		}
+		if extra := strings.TrimSpace(sb.Config.Server.CorsAllowedOrigins); extra != "" {
+			for _, part := range strings.Split(extra, ",") {
+				add(part)
+			}
+		}
+	}
+
+	// 2. Official / standard frontend origins
+	add("https://sub-store.vercel.app")
+	add("http://substore.stash")
+	add("https://substore.stash")
+
+	// 3. Local loopback origins
+	add("http://127.0.0.1")
+	add("http://127.0.0.1:3001")
+	add("http://localhost")
+	add("http://localhost:3001")
+
+	return strings.Join(origins, ",")
 }
 
 // GetSubstoreKey retrieves the existing Sub-Store frontend/backend path key.

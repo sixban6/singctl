@@ -202,3 +202,37 @@ func TestMergeNodeContent_Tuic(t *testing.T) {
 		t.Errorf("current hk tuic should be updated, got %q", lines[1])
 	}
 }
+
+func TestSubstore_GetCorsAllowedOrigins(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			SBDomain:           "sub.example.com",
+			TuicDomain:         "tuic.example.com",
+			CorsAllowedOrigins: "https://custom.example.com, https://another.example.com",
+		},
+	}
+	sb := NewSubstore(cfg, "testkey")
+	origins := sb.getCorsAllowedOrigins()
+
+	expectedOrigins := []string{
+		"https://sub.example.com",
+		"http://sub.example.com",
+		"https://tuic.example.com",
+		"http://tuic.example.com",
+		"https://custom.example.com",
+		"https://another.example.com",
+		"https://sub-store.vercel.app",
+		"http://substore.stash",
+		"https://substore.stash",
+		"http://127.0.0.1",
+		"http://127.0.0.1:3001",
+		"http://localhost",
+		"http://localhost:3001",
+	}
+
+	for _, expected := range expectedOrigins {
+		if !strings.Contains(origins, expected) {
+			t.Errorf("expected origins to contain %q, but got %q", expected, origins)
+		}
+	}
+}
