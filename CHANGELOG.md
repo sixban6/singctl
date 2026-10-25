@@ -1,3 +1,10 @@
+# [1.32.0](https://github.com/sixban6/singctl/compare/v1.31.0...v1.32.0) (2026-10-25)
+
+
+### Features
+
+* **server:** add singctl sr info command and allow all CORS origins in sub-store ([9f86779](https://github.com/sixban6/singctl/commit/9f86779c053c22ab05799e0138685708f2b64193))
+
 # [1.31.0](https://github.com/sixban6/singctl/compare/v1.30.0...v1.31.0) (2026-10-25)
 
 
