@@ -1,3 +1,10 @@
+# [1.36.0](https://github.com/sixban6/singctl/compare/v1.35.0...v1.36.0) (2026-10-25)
+
+
+### Features
+
+* **mask:** update mask site to realistic static engineering blog ([50e0f71](https://github.com/sixban6/singctl/commit/50e0f7161c0ee1a3ca5931984f1cab77d546f404))
+
 # [1.35.0](https://github.com/sixban6/singctl/compare/v1.34.3...v1.35.0) (2026-10-25)
 
 
