@@ -1,3 +1,10 @@
+# [1.34.0](https://github.com/sixban6/singctl/compare/v1.33.0...v1.34.0) (2026-10-25)
+
+
+### Features
+
+* **server:** support separate node and substore domains, and serve rich static mask site for fallback and root access ([32a685c](https://github.com/sixban6/singctl/commit/32a685cf67dcc88f46329a1b5df1dbd52ae697ed))
+
 # [1.33.0](https://github.com/sixban6/singctl/compare/v1.32.0...v1.33.0) (2026-10-25)
 
 
