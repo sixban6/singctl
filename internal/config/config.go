@@ -92,10 +92,10 @@ func Load(path string) (*Config, error) {
 		cfg.Server.Sni = "swdist.apple.com"
 	}
 	if cfg.Server.TuicPort == 0 {
-		cfg.Server.TuicPort = 8448
+		cfg.Server.TuicPort = 443
 	}
 	if cfg.Server.AnyTLSPort == 0 {
-		cfg.Server.AnyTLSPort = 8444
+		cfg.Server.AnyTLSPort = 443
 	}
 	if cfg.Watchdog.Interval <= 0 {
 		cfg.Watchdog.Interval = 180

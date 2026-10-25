@@ -72,8 +72,8 @@ func (sbs *SingBoxServer) initTag() {
 func (sbs *SingBoxServer) updateShareLinks() {
 	sbs.ShareLinkHy2 = fmt.Sprintf("hysteria2://%s@%s/?sni=%s&alpn=h3&insecure=0#%s", sbs.hyUUID, sbs.cfg.Server.SBDomain, sbs.cfg.Server.SBDomain, sbs.hy2Tag)
 	sbs.ShareLinkVless = fmt.Sprintf("vless://%s@%s:443?type=tcp&encryption=none&security=reality&pbk=%s&fp=chrome&sni=%s&sid=%s&flow=xtls-rprx-vision#%s", sbs.hyUUID, sbs.cfg.Server.SBDomain, sbs.publicKey, sbs.cfg.Server.Sni, sbs.shortID, sbs.vrTag)
-	sbs.ShareLinkTuic = fmt.Sprintf("tuic://%s:%s@%s:%d/?sni=%s&alpn=h3&congestion_control=bbr#%s", sbs.hyUUID, sbs.hyUUID, sbs.cfg.Server.SBDomain, sbs.TuicPort(), sbs.cfg.Server.SBDomain, sbs.tuicTag)
-	sbs.ShareLinkAnytls = fmt.Sprintf("anytls://%s@%s:%d/?sni=%s#%s", sbs.hyUUID, sbs.cfg.Server.SBDomain, sbs.AnyTLSPort(), sbs.cfg.Server.SBDomain, sbs.anytlsTag)
+	sbs.ShareLinkTuic = fmt.Sprintf("tuic://%s:%s@%s:%d/?sni=%s&alpn=tuic&congestion_control=bbr#%s", sbs.hyUUID, sbs.hyUUID, sbs.cfg.Server.SBDomain, sbs.TuicPort(), sbs.cfg.Server.SBDomain, sbs.tuicTag)
+	sbs.ShareLinkAnytls = fmt.Sprintf("anytls://%s@%s:%d/?sni=%s&alpn=anytls#%s", sbs.hyUUID, sbs.cfg.Server.SBDomain, sbs.AnyTLSPort(), sbs.cfg.Server.SBDomain, sbs.anytlsTag)
 }
 
 // HyUUID returns the Hysteria2 password / VLESS UUID.
@@ -111,20 +111,20 @@ func (sbs *SingBoxServer) AnytlsTag() string {
 	return sbs.anytlsTag
 }
 
-// TuicPort returns the configured or default TUIC port.
+// TuicPort returns the configured or default TUIC port (443).
 func (sbs *SingBoxServer) TuicPort() int {
 	if sbs.cfg != nil && sbs.cfg.Server.TuicPort > 0 {
 		return sbs.cfg.Server.TuicPort
 	}
-	return 8448
+	return 443
 }
 
-// AnyTLSPort returns the configured or default AnyTLS port.
+// AnyTLSPort returns the configured or default AnyTLS port (443).
 func (sbs *SingBoxServer) AnyTLSPort() int {
 	if sbs.cfg != nil && sbs.cfg.Server.AnyTLSPort > 0 {
 		return sbs.cfg.Server.AnyTLSPort
 	}
-	return 8444
+	return 443
 }
 
 // getCaddyCertPath waits and finds the actual cert path Caddy generated (Let's Encrypt or ZeroSSL)

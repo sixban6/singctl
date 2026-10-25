@@ -183,8 +183,8 @@ func TestMergeNodeContent_Tuic(t *testing.T) {
 		t.Fatalf("NewSingBoxServer failed: %v", err)
 	}
 
-	vps1Tuic := "tuic://uuid-vps1:uuid-vps1@us.example.com:8448/?sni=us.example.com&alpn=h3#sec_us_tuic"
-	oldHkTuic := "tuic://old-uuid:old-uuid@hk.example.com:8448/?sni=hk.example.com&alpn=h3#sec_hk_tuic"
+	vps1Tuic := "tuic://uuid-vps1:uuid-vps1@us.example.com:443/?sni=us.example.com&alpn=tuic#sec_us_tuic"
+	oldHkTuic := "tuic://old-uuid:old-uuid@hk.example.com:443/?sni=hk.example.com&alpn=tuic#sec_hk_tuic"
 
 	existing := vps1Tuic + "\n" + oldHkTuic
 	res := mergeNodeContent(existing, sbs.ShareLinkTuic, sbs, "tuic")
@@ -214,8 +214,8 @@ func TestMergeNodeContent_AnyTLS(t *testing.T) {
 		t.Fatalf("NewSingBoxServer failed: %v", err)
 	}
 
-	vps1Anytls := "anytls://uuid-vps1@us.example.com:8444/?sni=us.example.com#sec_us_anytls"
-	oldHkAnytls := "anytls://old-uuid@hk.example.com:8444/?sni=hk.example.com#sec_hk_anytls"
+	vps1Anytls := "anytls://uuid-vps1@us.example.com:443/?sni=us.example.com&alpn=anytls#sec_us_anytls"
+	oldHkAnytls := "anytls://old-uuid@hk.example.com:443/?sni=hk.example.com&alpn=anytls#sec_hk_anytls"
 
 	existing := vps1Anytls + "\n" + oldHkAnytls
 	res := mergeNodeContent(existing, sbs.ShareLinkAnytls, sbs, "anytls")
