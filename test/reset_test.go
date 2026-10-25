@@ -252,8 +252,9 @@ func TestPreviewServerConfigWithRegeneratedCredentials(t *testing.T) {
 
 	var parsed struct {
 		Inbounds []struct {
-			Type string `json:"type"`
-			Tag  string `json:"tag"`
+			Type   string `json:"type"`
+			Tag    string `json:"tag"`
+			Listen string `json:"listen"`
 		} `json:"inbounds"`
 	}
 	if err := json.Unmarshal([]byte(content), &parsed); err != nil {
@@ -263,6 +264,9 @@ func TestPreviewServerConfigWithRegeneratedCredentials(t *testing.T) {
 	foundInbounds := make(map[string]bool)
 	for _, in := range parsed.Inbounds {
 		foundInbounds[in.Type] = true
+		if in.Listen != "127.0.0.1" {
+			t.Errorf("inbound %s (%s) should listen on 127.0.0.1, got %s", in.Tag, in.Type, in.Listen)
+		}
 	}
 	for _, expectedType := range []string{"vless", "hysteria2", "anytls", "tuic"} {
 		if !foundInbounds[expectedType] {

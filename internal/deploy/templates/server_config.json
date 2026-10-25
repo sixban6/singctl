@@ -79,8 +79,8 @@
     {
       "tag": "ANYTLS",
       "type": "anytls",
-      "listen": "::",
-      "listen_port": {{.AnyTLSPort}},
+      "listen": "127.0.0.1",
+      "listen_port": 52022,
       "users": [
         {
           "name": "user1",
@@ -96,8 +96,8 @@
     {
       "tag": "TUIC",
       "type": "tuic",
-      "listen": "::",
-      "listen_port": {{.TuicPort}},
+      "listen": "127.0.0.1",
+      "listen_port": 52023,
       "users": [
         {
           "uuid": "{{.HyUUID}}",

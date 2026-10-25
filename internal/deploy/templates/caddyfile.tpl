@@ -26,10 +26,24 @@
 
         }
 
+        # AnyTLS on port {{.AnyTLSPort}}
+        :{{.AnyTLSPort}} {
+            route {
+                proxy 127.0.0.1:52022
+            }
+        }
+
         # Hysteria2 (UDP) on port 443
         udp/:443 {
             route {
                 proxy udp/127.0.0.1:52021
+            }
+        }
+
+        # TUIC (UDP) on port {{.TuicPort}}
+        udp/:{{.TuicPort}} {
+            route {
+                proxy udp/127.0.0.1:52023
             }
         }
     }
