@@ -43,13 +43,49 @@ type TailscaleConfig struct {
 }
 
 type ServerConfig struct {
-	SBDomain           string `yaml:"sb_domain"`
-	TuicDomain         string `yaml:"tuic_domain"`
+	SBDomain           string `yaml:"sb_domain"`           // 兼容旧配置：默认主域名
+	NodeDomain         string `yaml:"node_domain"`         // 节点主域名 (Hysteria 2 / VLESS 分享链接主机)
+	SubstoreDomain     string `yaml:"substore_domain"`     // Sub-Store 专属域名
+	TuicDomain         string `yaml:"tuic_domain"`         // TUIC 专属域名
 	CFDNSKey           string `yaml:"cf_dns_key"`
 	Sni                string `yaml:"sni"`
 	TuicPort           int    `yaml:"tuic_port"`
 	AnyTLSPort         int    `yaml:"anytls_port"`
 	CorsAllowedOrigins string `yaml:"cors_allowed_origins"`
+}
+
+// GetNodeDomain returns the domain for proxy nodes (Hy2 / VLESS).
+// Falls back to SBDomain if NodeDomain is not set.
+func (s *ServerConfig) GetNodeDomain() string {
+	if s.NodeDomain != "" {
+		return strings.TrimSpace(s.NodeDomain)
+	}
+	return strings.TrimSpace(s.SBDomain)
+}
+
+// GetSubstoreDomain returns the domain for Sub-Store.
+// Falls back to SBDomain if SubstoreDomain is not set.
+func (s *ServerConfig) GetSubstoreDomain() string {
+	if s.SubstoreDomain != "" {
+		return strings.TrimSpace(s.SubstoreDomain)
+	}
+	return strings.TrimSpace(s.SBDomain)
+}
+
+// GetTuicDomain returns the domain for TUIC.
+// Falls back to "tuic." + GetNodeDomain() if not explicitly set.
+func (s *ServerConfig) GetTuicDomain() string {
+	if s.TuicDomain != "" {
+		return strings.TrimSpace(s.TuicDomain)
+	}
+	base := s.GetNodeDomain()
+	if base == "" {
+		base = s.GetSubstoreDomain()
+	}
+	if base != "" {
+		return "tuic." + base
+	}
+	return ""
 }
 
 type WatchdogConfig struct {
@@ -71,7 +107,7 @@ func Load(path string) (*Config, error) {
 		"subs", "name", "url", "skip_tls_verify", "remove-emoji",
 		"github", "mirror_url", "hy2", "up", "down",
 		"tailscale", "auth_key", "use_build", constant.TailscaleSubnets,
-		"server", "sb_domain", "tuic_domain", "cf_dns_key", "sni", "tuic_port", "anytls_port",
+		"server", "sb_domain", "node_domain", "substore_domain", "tuic_domain", "cf_dns_key", "sni", "tuic_port", "anytls_port", "cors_allowed_origins",
 		"watchdog", "interval", "confirm_wait", "max_restarts",
 	}
 	pattern := fmt.Sprintf("(?m)^([ \\t-]*(?:%s)):([^\\s].*)", strings.Join(keys, "|"))
@@ -93,8 +129,14 @@ func Load(path string) (*Config, error) {
 	if cfg.Server.Sni == "" {
 		cfg.Server.Sni = "swdist.apple.com"
 	}
-	if cfg.Server.TuicDomain == "" && cfg.Server.SBDomain != "" {
-		cfg.Server.TuicDomain = "tuic." + cfg.Server.SBDomain
+	if cfg.Server.NodeDomain == "" && cfg.Server.SBDomain != "" {
+		cfg.Server.NodeDomain = cfg.Server.SBDomain
+	}
+	if cfg.Server.SubstoreDomain == "" && cfg.Server.SBDomain != "" {
+		cfg.Server.SubstoreDomain = cfg.Server.SBDomain
+	}
+	if cfg.Server.TuicDomain == "" {
+		cfg.Server.TuicDomain = cfg.Server.GetTuicDomain()
 	}
 	if cfg.Server.TuicPort == 0 {
 		cfg.Server.TuicPort = 443

@@ -19,8 +19,8 @@ func newInstallServerCmd(cfg *config.Config) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 
 			// Verify required config
-			if cfg.Server.SBDomain == "" || cfg.Server.CFDNSKey == "" {
-				return fmt.Errorf("server.sb_domain and server.cf_dns_key are required in singctl.yaml")
+			if cfg.Server.GetNodeDomain() == "" || cfg.Server.CFDNSKey == "" {
+				return fmt.Errorf("server.node_domain (or sb_domain) and server.cf_dns_key are required in singctl.yaml")
 			}
 
 			// If no target is specified, run them all in sequence
@@ -205,8 +205,8 @@ func NewReinstallServerCmd(configPath string) *cobra.Command {
 
 func handleReinstallAll(cfg *config.Config, force bool) error {
 	// Verify required config
-	if cfg.Server.SBDomain == "" || cfg.Server.CFDNSKey == "" {
-		return fmt.Errorf("server.sb_domain and server.cf_dns_key are required in singctl.yaml")
+	if cfg.Server.GetNodeDomain() == "" || cfg.Server.CFDNSKey == "" {
+		return fmt.Errorf("server.node_domain (or sb_domain) and server.cf_dns_key are required in singctl.yaml")
 	}
 
 	if force {
@@ -399,8 +399,8 @@ func handleReinstallWarp(cfg *config.Config, force bool) error {
 
 func reinstallAll(cfg *config.Config) error {
 	// Verify required config
-	if cfg.Server.SBDomain == "" || cfg.Server.CFDNSKey == "" {
-		return fmt.Errorf("server.sb_domain and server.cf_dns_key are required in singctl.yaml")
+	if cfg.Server.GetNodeDomain() == "" || cfg.Server.CFDNSKey == "" {
+		return fmt.Errorf("server.node_domain (or sb_domain) and server.cf_dns_key are required in singctl.yaml")
 	}
 
 	logger.Info("Reinstalling all server components...")
@@ -528,11 +528,11 @@ func resetSingboxCredentials(configPath string) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	if cfg.Server.SBDomain == "" {
-		return fmt.Errorf("server.sb_domain is required in config (%s)", configPath)
+	if cfg.Server.GetNodeDomain() == "" {
+		return fmt.Errorf("server.node_domain (or sb_domain) is required in config (%s)", configPath)
 	}
 
-	logger.Info("Resetting sing-box server credentials for domain: %s...", cfg.Server.SBDomain)
+	logger.Info("Resetting sing-box server credentials for domain: %s...", cfg.Server.GetNodeDomain())
 
 	sbs, err := deploy.NewSingBoxServer(cfg)
 	if err != nil {
@@ -633,8 +633,8 @@ func syncNodeToSubstore(configPath string, restart bool) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	if cfg.Server.SBDomain == "" {
-		return fmt.Errorf("server.sb_domain is required in config (%s)", configPath)
+	if cfg.Server.GetNodeDomain() == "" {
+		return fmt.Errorf("server.node_domain (or sb_domain) is required in config (%s)", configPath)
 	}
 
 	logger.Info("正在从本地 sing-box 配置文件读取实际节点凭证与参数...")
@@ -683,8 +683,8 @@ func showServerInfo(configPath string) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	if cfg.Server.SBDomain == "" {
-		return fmt.Errorf("server.sb_domain is required in config (%s)", configPath)
+	if cfg.Server.GetNodeDomain() == "" {
+		return fmt.Errorf("server.node_domain (or sb_domain) is required in config (%s)", configPath)
 	}
 
 	sbs, err := deploy.NewSingBoxServer(cfg)

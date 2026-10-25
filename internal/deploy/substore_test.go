@@ -235,4 +235,21 @@ func TestSubstore_GetCorsAllowedOrigins(t *testing.T) {
 			t.Errorf("expected origins to contain %q, but got %q", expected, origins)
 		}
 	}
+
+	// Test with separated NodeDomain and SubstoreDomain
+	cfgSeparated := &config.Config{
+		Server: config.ServerConfig{
+			NodeDomain:     "node.example.com",
+			SubstoreDomain: "substore.example.com",
+			TuicDomain:     "tuic.example.com",
+		},
+	}
+	sbSeparated := NewSubstore(cfgSeparated, "testkey")
+	originsSeparated := sbSeparated.getCorsAllowedOrigins()
+	if !strings.Contains(originsSeparated, "https://substore.example.com") {
+		t.Errorf("expected origins to contain substore domain, got %s", originsSeparated)
+	}
+	if !strings.Contains(originsSeparated, "https://node.example.com") {
+		t.Errorf("expected origins to contain node domain, got %s", originsSeparated)
+	}
 }
