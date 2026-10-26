@@ -61,11 +61,14 @@ type ServerConfig struct {
 }
 
 type WebTerminalConfig struct {
-	Enabled  bool   `yaml:"enabled"`
-	Port     int    `yaml:"port,omitempty"`     // 默认 18080
-	Path     string `yaml:"path,omitempty"`     // 隐蔽访问路径，如 /ops-shell-8f9a
-	MtlsCA   string `yaml:"mtls_ca,omitempty"`  // CA 证书路径，默认 /etc/caddy/mtls/ca.crt
-	Password string `yaml:"password,omitempty"` // client.p12 证书导出密码
+	Enabled       bool   `yaml:"enabled"`
+	Port          int    `yaml:"port,omitempty"`            // 默认 18080 (GoTTY)
+	Path          string `yaml:"path,omitempty"`            // 隐蔽访问路径，如 /ops-shell-8f9a
+	MtlsCA        string `yaml:"mtls_ca,omitempty"`         // CA 证书路径，默认 /etc/caddy/mtls/ca.crt
+	Password      string `yaml:"password,omitempty"`        // client.p12 证书导出密码
+	SSHTunnelPort int    `yaml:"ssh_tunnel_port,omitempty"` // wstunnel 本地监听端口，默认 18081
+	SSHTunnelPath string `yaml:"ssh_tunnel_path,omitempty"` // wstunnel 访问路径，默认 /ssh-ws
+	SSHPort       int    `yaml:"ssh_port,omitempty"`        // 目标 SSH 端口 (e.g. 2222)
 }
 
 func parseIntAny(v any) (int, error) {
@@ -89,11 +92,14 @@ func parseIntAny(v any) (int, error) {
 
 func (w *WebTerminalConfig) UnmarshalYAML(node *yaml.Node) error {
 	var a struct {
-		Enabled  bool   `yaml:"enabled"`
-		Port     any    `yaml:"port"`
-		Path     string `yaml:"path"`
-		MtlsCA   string `yaml:"mtls_ca"`
-		Password string `yaml:"password"`
+		Enabled       bool   `yaml:"enabled"`
+		Port          any    `yaml:"port"`
+		Path          string `yaml:"path"`
+		MtlsCA        string `yaml:"mtls_ca"`
+		Password      string `yaml:"password"`
+		SSHTunnelPort any    `yaml:"ssh_tunnel_port"`
+		SSHTunnelPath string `yaml:"ssh_tunnel_path"`
+		SSHPort       any    `yaml:"ssh_port"`
 	}
 	if err := node.Decode(&a); err != nil {
 		return err
@@ -102,9 +108,20 @@ func (w *WebTerminalConfig) UnmarshalYAML(node *yaml.Node) error {
 	w.Path = a.Path
 	w.MtlsCA = a.MtlsCA
 	w.Password = a.Password
+	w.SSHTunnelPath = a.SSHTunnelPath
 	if a.Port != nil {
 		if p, err := parseIntAny(a.Port); err == nil {
 			w.Port = p
+		}
+	}
+	if a.SSHTunnelPort != nil {
+		if p, err := parseIntAny(a.SSHTunnelPort); err == nil {
+			w.SSHTunnelPort = p
+		}
+	}
+	if a.SSHPort != nil {
+		if p, err := parseIntAny(a.SSHPort); err == nil {
+			w.SSHPort = p
 		}
 	}
 	return nil
@@ -295,7 +312,7 @@ func Load(path string) (*Config, error) {
 		"subs", "name", "url", "skip_tls_verify", "remove-emoji",
 		"github", "mirror_url", "hy2", "up", "down",
 		"tailscale", "auth_key", "use_build", constant.TailscaleSubnets,
-		"server", "node_tag", "sb_domain", "node_domain", "substore_domain", "cf_dns_key", "sni", "cors_allowed_origins", "web_terminal",
+		"server", "node_tag", "sb_domain", "node_domain", "substore_domain", "cf_dns_key", "sni", "cors_allowed_origins", "web_terminal", "ssh_tunnel_port", "ssh_tunnel_path", "ssh_port",
 		"watchdog", "interval", "confirm_wait", "max_restarts",
 	}
 	pattern := fmt.Sprintf("(?m)^([ \\t-]*(?:%s)):([^\\s].*)", strings.Join(keys, "|"))
@@ -384,7 +401,7 @@ func MigrateConfig(configPath string, templateData []byte) error {
 		"subs", "name", "url", "skip_tls_verify", "remove-emoji",
 		"github", "mirror_url", "hy2", "up", "down",
 		"tailscale", "auth_key", "use_build", constant.TailscaleSubnets,
-		"server", "node_tag", "sb_domain", "node_domain", "substore_domain", "server_ip", "cf_dns_key", "sni", "cors_allowed_origins", "web_terminal",
+		"server", "node_tag", "sb_domain", "node_domain", "substore_domain", "server_ip", "cf_dns_key", "sni", "cors_allowed_origins", "web_terminal", "ssh_tunnel_port", "ssh_tunnel_path", "ssh_port",
 		"watchdog", "interval", "confirm_wait", "max_restarts",
 	}
 	pattern := fmt.Sprintf("(?m)^([ \\t-]*(?:%s)):([^\\s].*)", strings.Join(keys, "|"))

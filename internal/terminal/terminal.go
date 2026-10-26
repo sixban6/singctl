@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,13 +23,20 @@ import (
 )
 
 const (
-	DefaultTerminalPort = 18080
-	DefaultMtlsCADir    = "/etc/caddy/mtls"
-	DefaultMtlsCACert   = "/etc/caddy/mtls/ca.crt"
-	DefaultClientP12    = "/etc/caddy/mtls/client.p12"
-	GottyVersion        = "v1.5.0"
-	GottyBinaryPath     = "/usr/local/bin/gotty"
-	GottyServicePath    = "/etc/systemd/system/gotty.service"
+	DefaultTerminalPort  = 18080
+	DefaultSSHTunnelPort = 18081
+	DefaultSSHTunnelPath = "/ssh-ws"
+	DefaultMtlsCADir     = "/etc/caddy/mtls"
+	DefaultMtlsCACert    = "/etc/caddy/mtls/ca.crt"
+	DefaultClientP12     = "/etc/caddy/mtls/client.p12"
+	DefaultClientCrt     = "/etc/caddy/mtls/client.crt"
+	DefaultClientKey     = "/etc/caddy/mtls/client.key"
+	GottyVersion         = "v1.5.0"
+	GottyBinaryPath      = "/usr/local/bin/gotty"
+	GottyServicePath     = "/etc/systemd/system/gotty.service"
+	WstunnelVersion      = "v11.1.0"
+	WstunnelBinaryPath   = "/usr/local/bin/wstunnel"
+	WstunnelServicePath  = "/etc/systemd/system/wstunnel.service"
 )
 
 // InstallOptions contains options for terminal deployment
@@ -41,26 +49,38 @@ type InstallOptions struct {
 
 // InstallResult contains deployment details
 type InstallResult struct {
-	URL       string
-	Domain    string
-	Path      string
-	Port      int
-	Password  string
-	P12Path   string
-	P12Base64 string
+	URL           string
+	Domain        string
+	Path          string
+	Port          int
+	SSHTunnelPath string
+	SSHTunnelPort int
+	SSHPort       int
+	Password      string
+	P12Path       string
+	P12Base64     string
+	ClientCrtPath string
+	ClientKeyPath string
 }
 
 // StatusResult contains terminal status information
 type StatusResult struct {
-	Enabled       bool
-	ServiceActive bool
-	Domain        string
-	Path          string
-	Port          int
-	URL           string
-	P12Exists     bool
-	P12Path       string
-	Password      string
+	Enabled        bool
+	ServiceActive  bool // GoTTY Web Terminal
+	WstunnelActive bool // wstunnel Native SSH
+	Domain         string
+	Path           string
+	Port           int
+	SSHTunnelPath  string
+	SSHTunnelPort  int
+	SSHPort        int
+	URL            string
+	P12Exists      bool
+	P12Path        string
+	ClientCrtExists bool
+	ClientCrtPath  string
+	ClientKeyPath  string
+	Password       string
 }
 
 // GenerateRandomHex generates random hex characters
@@ -172,29 +192,42 @@ func Install(cfg *config.Config, configPath string, opts InstallOptions) (*Insta
 		return nil, fmt.Errorf("创建 GoTTY Systemd 服务失败: %w", err)
 	}
 
-	// 6. 更新 singctl.yaml 配置
+	// 6. 安装并配置 wstunnel (Native SSH over WSS)
+	sshPort := DetectSSHPort()
+	if err := installWstunnel(cfg, arch); err != nil {
+		logger.Warn("安装 wstunnel 失败 (Native SSH 穿透可能不可用): %v", err)
+	} else {
+		if err := createWstunnelSystemdService(DefaultSSHTunnelPort, sshPort); err != nil {
+			logger.Warn("启动 wstunnel 守护进程失败: %v", err)
+		}
+	}
+
+	// 7. 更新 singctl.yaml 配置
 	if cfg != nil {
 		cfg.Server.WebTerminal = config.WebTerminalConfig{
-			Enabled:  true,
-			Port:     port,
-			Path:     termPath,
-			MtlsCA:   DefaultMtlsCACert,
-			Password: password,
+			Enabled:       true,
+			Port:          port,
+			Path:          termPath,
+			MtlsCA:        DefaultMtlsCACert,
+			Password:      password,
+			SSHTunnelPort: DefaultSSHTunnelPort,
+			SSHTunnelPath: DefaultSSHTunnelPath,
+			SSHPort:       sshPort,
 		}
 		if err := config.Save(configPath, cfg); err != nil {
 			logger.Warn("保存 singctl.yaml 失败: %v", err)
 		} else {
-			logger.Success("已更新 Web 终端配置至 %s", configPath)
+			logger.Success("已更新 Web 终端与 SSH 穿透配置至 %s", configPath)
 		}
 	}
 
-	// 7. 渲染 Caddyfile 并平滑重载 Caddy
+	// 8. 渲染 Caddyfile 并平滑重载 Caddy
 	logger.Info("正在更新 Caddyfile 并重载 Caddy 路由...")
 	if err := deploy.DeployCaddy(cfg); err != nil {
 		return nil, fmt.Errorf("更新 Caddy 配置失败: %w", err)
 	}
 
-	// 8. 读取客户端证书 client.p12 并编码为 Base64
+	// 9. 读取客户端证书 client.p12 并编码为 Base64
 	var p12Base64 string
 	if p12Bytes, err := os.ReadFile(DefaultClientP12); err == nil {
 		p12Base64 = base64.StdEncoding.EncodeToString(p12Bytes)
@@ -202,13 +235,18 @@ func Install(cfg *config.Config, configPath string, opts InstallOptions) (*Insta
 
 	fullURL := fmt.Sprintf("https://%s%s/", domain, termPath)
 	res := &InstallResult{
-		URL:       fullURL,
-		Domain:    domain,
-		Path:      termPath,
-		Port:      port,
-		Password:  password,
-		P12Path:   DefaultClientP12,
-		P12Base64: p12Base64,
+		URL:           fullURL,
+		Domain:        domain,
+		Path:          termPath,
+		Port:          port,
+		SSHTunnelPath: DefaultSSHTunnelPath,
+		SSHTunnelPort: DefaultSSHTunnelPort,
+		SSHPort:       sshPort,
+		Password:      password,
+		P12Path:       DefaultClientP12,
+		P12Base64:     p12Base64,
+		ClientCrtPath: DefaultClientCrt,
+		ClientKeyPath: DefaultClientKey,
 	}
 
 	return res, nil
@@ -220,10 +258,13 @@ func Uninstall(cfg *config.Config, configPath string) error {
 		return fmt.Errorf("Web 终端操作仅支持在 Linux 系统上运行")
 	}
 
-	logger.Info("正在停止并禁用 GoTTY 服务...")
+	logger.Info("正在停止并禁用 GoTTY 与 wstunnel 服务...")
 	_ = exec.Command("systemctl", "stop", "gotty").Run()
 	_ = exec.Command("systemctl", "disable", "gotty").Run()
 	_ = os.Remove(GottyServicePath)
+	_ = exec.Command("systemctl", "stop", "wstunnel").Run()
+	_ = exec.Command("systemctl", "disable", "wstunnel").Run()
+	_ = os.Remove(WstunnelServicePath)
 	_ = exec.Command("systemctl", "daemon-reload").Run()
 
 	logger.Info("正在清理 mTLS 证书目录...")
@@ -234,20 +275,25 @@ func Uninstall(cfg *config.Config, configPath string) error {
 		if err := config.Save(configPath, cfg); err != nil {
 			logger.Warn("更新配置失败: %v", err)
 		}
-		logger.Info("正在更新 Caddyfile 并移除 Web 终端路由...")
+		logger.Info("正在更新 Caddyfile 并移除 Web 终端与 SSH 穿透路由...")
 		if err := deploy.DeployCaddy(cfg); err != nil {
 			logger.Warn("重载 Caddy 失败: %v", err)
 		}
 	}
 
-	logger.Success("GoTTY Web 终端与 mTLS 证书已彻底卸载。")
+	logger.Success("GoTTY Web 终端、wstunnel SSH 穿透服务与 mTLS 证书已彻底卸载。")
 	return nil
 }
 
 // Status checks the status of Web Terminal
 func Status(cfg *config.Config) (*StatusResult, error) {
 	res := &StatusResult{
-		P12Path: DefaultClientP12,
+		P12Path:       DefaultClientP12,
+		ClientCrtPath: DefaultClientCrt,
+		ClientKeyPath: DefaultClientKey,
+		SSHTunnelPath: DefaultSSHTunnelPath,
+		SSHTunnelPort: DefaultSSHTunnelPort,
+		SSHPort:       22,
 	}
 
 	if cfg != nil {
@@ -255,6 +301,17 @@ func Status(cfg *config.Config) (*StatusResult, error) {
 		res.Path = cfg.Server.WebTerminal.Path
 		res.Port = cfg.Server.WebTerminal.Port
 		res.Password = cfg.Server.WebTerminal.Password
+		if cfg.Server.WebTerminal.SSHTunnelPath != "" {
+			res.SSHTunnelPath = cfg.Server.WebTerminal.SSHTunnelPath
+		}
+		if cfg.Server.WebTerminal.SSHTunnelPort > 0 {
+			res.SSHTunnelPort = cfg.Server.WebTerminal.SSHTunnelPort
+		}
+		if cfg.Server.WebTerminal.SSHPort > 0 {
+			res.SSHPort = cfg.Server.WebTerminal.SSHPort
+		} else {
+			res.SSHPort = DetectSSHPort()
+		}
 		domain := cfg.Server.GetNodeDomain()
 		if domain == "" {
 			domain = cfg.Server.GetSubstoreDomain()
@@ -263,16 +320,25 @@ func Status(cfg *config.Config) (*StatusResult, error) {
 		if res.Domain != "" && res.Path != "" {
 			res.URL = fmt.Sprintf("https://%s%s/", res.Domain, res.Path)
 		}
+	} else {
+		res.SSHPort = DetectSSHPort()
 	}
 
 	if _, err := os.Stat(DefaultClientP12); err == nil {
 		res.P12Exists = true
+	}
+	if _, err := os.Stat(DefaultClientCrt); err == nil {
+		res.ClientCrtExists = true
 	}
 
 	if runtime.GOOS == "linux" {
 		out, err := exec.Command("systemctl", "is-active", "gotty").Output()
 		if err == nil && strings.TrimSpace(string(out)) == "active" {
 			res.ServiceActive = true
+		}
+		outWs, errWs := exec.Command("systemctl", "is-active", "wstunnel").Output()
+		if errWs == nil && strings.TrimSpace(string(outWs)) == "active" {
+			res.WstunnelActive = true
 		}
 	}
 
@@ -542,15 +608,17 @@ extendedKeyUsage = clientAuth
 		}
 	}
 
-	// 6. 将 ca.crt 与 client.p12 复制到正式目录，私钥全部自动销毁
+	// 6. 将 ca.crt 与 client.p12, client.crt, client.key 复制到正式目录
 	if err := copyFile(caCrt, DefaultMtlsCACert, 0644); err != nil {
 		return fmt.Errorf("保存 ca.crt 失败: %w", err)
 	}
 	if err := copyFile(clientP12, DefaultClientP12, 0600); err != nil {
 		return fmt.Errorf("保存 client.p12 失败: %w", err)
 	}
+	_ = copyFile(clientCrt, DefaultClientCrt, 0644)
+	_ = copyFile(clientKey, DefaultClientKey, 0600)
 
-	logger.Success("mTLS 证书生成成功：已保留公钥 ca.crt 与客户端包 client.p12，服务器端敏感私钥已自动彻底销毁。")
+	logger.Success("mTLS 证书生成成功：已就绪 ca.crt、client.p12 以及原生证书私钥 client.crt / client.key。")
 	return nil
 }
 
@@ -611,4 +679,150 @@ func copyFile(src, dst string, perm os.FileMode) error {
 
 	_, err = io.Copy(out, in)
 	return err
+}
+
+// DetectSSHPort tries to detect the SSH daemon port on the server
+func DetectSSHPort() int {
+	// 1. Check SSH_CONNECTION environment variable (e.g., "client_ip client_port server_ip server_port")
+	if conn := os.Getenv("SSH_CONNECTION"); conn != "" {
+		parts := strings.Fields(conn)
+		if len(parts) >= 4 {
+			if p, err := strconv.Atoi(parts[3]); err == nil && p > 0 {
+				return p
+			}
+		}
+	}
+
+	// 2. Check /etc/ssh/sshd_config
+	if data, err := os.ReadFile("/etc/ssh/sshd_config"); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(strings.ToLower(line), "port ") {
+				fields := strings.Fields(line)
+				if len(fields) >= 2 {
+					if p, err := strconv.Atoi(fields[1]); err == nil && p > 0 {
+						return p
+					}
+				}
+			}
+		}
+	}
+
+	// 3. Check /etc/ssh/sshd_config.d/*.conf
+	matches, _ := filepath.Glob("/etc/ssh/sshd_config.d/*.conf")
+	for _, match := range matches {
+		if data, err := os.ReadFile(match); err == nil {
+			for _, line := range strings.Split(string(data), "\n") {
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(strings.ToLower(line), "port ") {
+					fields := strings.Fields(line)
+					if len(fields) >= 2 {
+						if p, err := strconv.Atoi(fields[1]); err == nil && p > 0 {
+							return p
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return 22
+}
+
+func installWstunnel(cfg *config.Config, arch string) error {
+	if fi, err := os.Stat(WstunnelBinaryPath); err == nil && fi.Size() > 0 {
+		logger.Success("wstunnel 二进制已就绪 (%s)", WstunnelBinaryPath)
+		return nil
+	}
+
+	logger.Info("正在下载 wstunnel %s (%s)...", WstunnelVersion, arch)
+	versionNum := strings.TrimPrefix(WstunnelVersion, "v")
+	fileName := fmt.Sprintf("wstunnel_%s_linux_%s.tar.gz", versionNum, arch)
+	url := fmt.Sprintf("https://github.com/erebe/wstunnel/releases/download/%s/%s", WstunnelVersion, fileName)
+	if cfg != nil && cfg.GitHub.MirrorURL != "" {
+		url = strings.TrimSuffix(cfg.GitHub.MirrorURL, "/") + "/" + url
+	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return fmt.Errorf("下载 wstunnel 失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("下载 wstunnel 返回状态码 %d", resp.StatusCode)
+	}
+
+	gzReader, err := gzip.NewReader(resp.Body)
+	if err != nil {
+		return fmt.Errorf("解压 gzip 失败: %w", err)
+	}
+	defer gzReader.Close()
+
+	tarReader := tar.NewReader(gzReader)
+	for {
+		header, err := tarReader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("读取 tar 失败: %w", err)
+		}
+
+		if header.Name == "wstunnel" || filepath.Base(header.Name) == "wstunnel" {
+			tmpBinary := WstunnelBinaryPath + ".tmp"
+			outFile, err := os.OpenFile(tmpBinary, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+			if err != nil {
+				return fmt.Errorf("写入临时 wstunnel 失败: %w", err)
+			}
+			_, copyErr := io.Copy(outFile, tarReader)
+			outFile.Close()
+			if copyErr != nil {
+				_ = os.Remove(tmpBinary)
+				return fmt.Errorf("保存 wstunnel 失败: %w", copyErr)
+			}
+			_ = os.Chmod(tmpBinary, 0755)
+			if err := os.Rename(tmpBinary, WstunnelBinaryPath); err != nil {
+				_ = os.Remove(WstunnelBinaryPath)
+				if err := os.Rename(tmpBinary, WstunnelBinaryPath); err != nil {
+					return fmt.Errorf("更新 wstunnel 二进制失败: %w", err)
+				}
+			}
+			logger.Success("wstunnel 二进制已成功安装至 %s", WstunnelBinaryPath)
+			return nil
+		}
+	}
+
+	return fmt.Errorf("在下载包中未找到 wstunnel 可执行文件")
+}
+
+func createWstunnelSystemdService(sshTunnelPort int, sshPort int) error {
+	serviceContent := fmt.Sprintf(`[Unit]
+Description=wstunnel SSH WebSocket Bridge
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=%s server --restrict-to 127.0.0.1:%d ws://127.0.0.1:%d
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+`, WstunnelBinaryPath, sshPort, sshTunnelPort)
+
+	if err := os.WriteFile(WstunnelServicePath, []byte(serviceContent), 0644); err != nil {
+		return fmt.Errorf("写入 wstunnel.service 失败: %w", err)
+	}
+
+	_ = runCmd("systemctl", "daemon-reload")
+	if err := runCmd("systemctl", "enable", "--now", "wstunnel"); err != nil {
+		return fmt.Errorf("启动 wstunnel.service 失败: %w", err)
+	}
+	_ = runCmd("systemctl", "restart", "wstunnel")
+
+	logger.Success("wstunnel 守护进程已启动 (监听 127.0.0.1:%d, 转发至本地 SSH 127.0.0.1:%d)", sshTunnelPort, sshPort)
+	return nil
 }
