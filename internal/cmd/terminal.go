@@ -2,9 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
-	"strconv"
 	"strings"
 
 	"singctl/internal/config"
@@ -147,145 +144,141 @@ func newCertTerminalCmd(configPath string) *cobra.Command {
 	}
 }
 
-// detectSSHPort tries to detect the SSH daemon port on the server
-func detectSSHPort() int {
-	// 1. Check SSH_CONNECTION environment variable (e.g., "client_ip client_port server_ip server_port")
-	if conn := os.Getenv("SSH_CONNECTION"); conn != "" {
-		parts := strings.Fields(conn)
-		if len(parts) >= 4 {
-			if p, err := strconv.Atoi(parts[3]); err == nil && p > 0 {
-				return p
-			}
-		}
-	}
-
-	// 2. Check /etc/ssh/sshd_config
-	if data, err := os.ReadFile("/etc/ssh/sshd_config"); err == nil {
-		for _, line := range strings.Split(string(data), "\n") {
-			line = strings.TrimSpace(line)
-			if strings.HasPrefix(strings.ToLower(line), "port ") {
-				fields := strings.Fields(line)
-				if len(fields) >= 2 {
-					if p, err := strconv.Atoi(fields[1]); err == nil && p > 0 {
-						return p
-					}
-				}
-			}
-		}
-	}
-
-	// 3. Check /etc/ssh/sshd_config.d/*.conf
-	matches, _ := filepath.Glob("/etc/ssh/sshd_config.d/*.conf")
-	for _, match := range matches {
-		if data, err := os.ReadFile(match); err == nil {
-			for _, line := range strings.Split(string(data), "\n") {
-				line = strings.TrimSpace(line)
-				if strings.HasPrefix(strings.ToLower(line), "port ") {
-					fields := strings.Fields(line)
-					if len(fields) >= 2 {
-						if p, err := strconv.Atoi(fields[1]); err == nil && p > 0 {
-							return p
-						}
-					}
-				}
-			}
-		}
-	}
-
-	return 22
-}
-
 func printInstallSummary(res *terminal.InstallResult) {
-	sshPort := detectSSHPort()
-	scpCmd := fmt.Sprintf("scp root@%s:%s ./client.p12", res.Domain, res.P12Path)
+	sshPort := res.SSHPort
+	if sshPort <= 0 {
+		sshPort = terminal.DetectSSHPort()
+	}
+	portFlag := ""
 	if sshPort != 22 {
-		scpCmd = fmt.Sprintf("scp -P %d root@%s:%s ./client.p12", sshPort, res.Domain, res.P12Path)
+		portFlag = fmt.Sprintf("-P %d ", sshPort)
+	}
+
+	sshPathPrefix := strings.TrimPrefix(res.SSHTunnelPath, "/")
+	if sshPathPrefix == "" {
+		sshPathPrefix = "ssh-ws"
 	}
 
 	fmt.Println()
-	logger.Success("🎉 GoTTY + Tmux + Caddy mTLS 双向认证终端部署成功！")
-	fmt.Println("═══════════════════════════════════════════════════════════")
-	fmt.Printf("🌐 终端访问地址 : %s\n", res.URL)
-	fmt.Printf("🔒 安全认证模式 : mTLS (强制双向客户端证书，无证书直接 404)\n")
-	fmt.Printf("📦 客户端证书   : %s\n", res.P12Path)
-	fmt.Printf("🔑 证书导入密码 : %s\n", res.Password)
-	fmt.Println("═══════════════════════════════════════════════════════════")
+	logger.Success("🎉 GoTTY + Tmux + wstunnel + Caddy mTLS 双模式运维环境部署成功！")
+	fmt.Println("═══════════════════════════════════════════════════════════════════════════")
+	fmt.Printf("🌐 Web 终端地址   : %s\n", res.URL)
+	fmt.Printf("🚀 SSH 穿透路径   : %s\n", res.SSHTunnelPath)
+	fmt.Printf("🎯 本地 SSH 目标  : 127.0.0.1:%d\n", sshPort)
+	fmt.Printf("🔒 安全认证模式   : mTLS 双向 TLS 证书 (无证书访问直接返回 404)\n")
+	fmt.Printf("📦 客户端证书包   : %s (导入密码: %s)\n", res.P12Path, res.Password)
+	fmt.Printf("📜 原生证书/私钥  : %s , %s\n", res.ClientCrtPath, res.ClientKeyPath)
+	fmt.Println("═══════════════════════════════════════════════════════════════════════════")
 	fmt.Println()
-	fmt.Println("📥 如何将客户端证书导入电脑/手机：")
-	fmt.Printf("  方法 1 (推荐 SCP 下载):\n")
-	fmt.Printf("    %s\n\n", scpCmd)
-	fmt.Printf("  方法 2 (本地终端一键 Base64 还原):\n")
-	fmt.Printf("    在本地 Mac/Linux 执行: echo \"%s\" | base64 -d > client.p12\n\n", res.P12Base64)
-	fmt.Println("💡 客户端使用步骤：")
-	fmt.Printf("  1. 双击 client.p12，输入密码 [%s]，导入系统钥匙串 (macOS 放入「登录」钥匙串即可)\n", res.Password)
-	fmt.Printf("  2. 打开浏览器访问: %s\n", res.URL)
-	fmt.Println("  3. 浏览器弹窗提示选择客户端证书「AdminClient」，确认后即可无感登录并持久化运行！")
-	fmt.Println("  4. 验证防扫描：在浏览器无痕模式访问，将直接收到 404，彻底隐藏终端存在。")
-	fmt.Println("═══════════════════════════════════════════════════════════")
+	fmt.Println("📱【方案一：Web 终端 (手机 / 平板 / 浏览器极简登录)】")
+	fmt.Printf("  1. 下载客户端证书: scp %sroot@%s:%s ./client.p12\n", portFlag, res.Domain, res.P12Path)
+	fmt.Printf("  2. 双击 client.p12，输入密码 [%s]，导入系统钥匙串\n", res.Password)
+	fmt.Printf("  3. 浏览器打开: %s，确认证书即可无感登录并持久化运行！\n\n", res.URL)
+	fmt.Println("⚡【方案二：WezTerm / 本地终端原生 SSH 穿透 443 + mTLS (推荐，体验最佳)】")
+	fmt.Println("  1. Mac 本地安装 wstunnel (如已安装可跳过):")
+	fmt.Println("     brew install wstunnel")
+	fmt.Println("  2. 从 VPS 一键下载客户端证书与私钥至本地 ~/.ssh/:")
+	fmt.Printf("     mkdir -p ~/.ssh && scp %sroot@%s:%s %s ~/.ssh/\n\n", portFlag, res.Domain, res.ClientCrtPath, res.ClientKeyPath)
+	fmt.Println("  3. 在 Mac 终端执行以下一键命令，自动配置 ~/.ssh/config:")
+	fmt.Printf(`     cat << 'EOF' >> ~/.ssh/config
+
+Host vps-ws
+    HostName 127.0.0.1
+    Port %d
+    User root
+    ProxyCommand wstunnel client --log-lvl off --tls-certificate ~/.ssh/client.crt --tls-private-key ~/.ssh/client.key --http-upgrade-path-prefix %s -L stdio://%%%%h:%%%%p wss://%s
+EOF
+`, sshPort, sshPathPrefix, res.Domain)
+	fmt.Println()
+	fmt.Println("  4. 在 WezTerm 中直接敲原生命令直连:")
+	fmt.Println("     ssh vps-ws")
+	fmt.Println("     (享受所有快捷键、动态窗口缩放、文件拖拽与原生 SSH 极速体验！)")
+	fmt.Println("═══════════════════════════════════════════════════════════════════════════")
 	fmt.Println()
 }
 
 func printStatusSummary(st *terminal.StatusResult) {
 	fmt.Println()
 	logger.Info("═══════════════════════════════════════════════════════════")
-	logger.Info("📊 Web 终端 (GoTTY + mTLS) 运行状态")
+	logger.Info("📊 Web 终端与 SSH 穿透 (GoTTY + wstunnel + mTLS) 运行状态")
 	logger.Info("═══════════════════════════════════════════════════════════")
 	if st.Enabled {
-		logger.Success("配置启用状态: 已启用 (Enabled)")
+		logger.Success("配置启用状态  : 已启用 (Enabled)")
 	} else {
-		logger.Warn("配置启用状态: 未启用 (Disabled)")
+		logger.Warn("配置启用状态  : 未启用 (Disabled)")
 	}
 
 	if st.ServiceActive {
-		logger.Success("服务运行状态: 正在运行 (gotty.service active)")
+		logger.Success("GoTTY Web服务 : 正在运行 (gotty.service active, 127.0.0.1:%d)", st.Port)
 	} else {
-		logger.Warn("服务运行状态: 未运行 (gotty.service inactive)")
+		logger.Warn("GoTTY Web服务 : 未运行 (gotty.service inactive)")
+	}
+
+	if st.WstunnelActive {
+		logger.Success("wstunnel 服务 : 正在运行 (wstunnel.service active, 127.0.0.1:%d -> 127.0.0.1:%d)", st.SSHTunnelPort, st.SSHPort)
+	} else {
+		logger.Warn("wstunnel 服务 : 未运行 (wstunnel.service inactive)")
 	}
 
 	if st.URL != "" {
-		fmt.Printf("🌐 访问 URL   : %s\n", st.URL)
+		fmt.Printf("🌐 Web 访问 URL: %s\n", st.URL)
 	}
-	fmt.Printf("🔌 本地端口   : 127.0.0.1:%d\n", st.Port)
-	fmt.Printf("🚪 访问路径   : %s\n", st.Path)
+	fmt.Printf("🚪 SSH 穿透路径: %s\n", st.SSHTunnelPath)
 
 	if st.P12Exists {
-		logger.Success("客户端证书   : 已存在 (%s)", st.P12Path)
+		logger.Success("客户端证书包  : 已就绪 (%s)", st.P12Path)
 		if st.Password != "" {
 			fmt.Printf("🔑 证书导入密码: %s\n", st.Password)
 		}
 	} else {
-		logger.Warn("客户端证书   : 未找到 (%s)", st.P12Path)
+		logger.Warn("客户端证书包  : 未找到 (%s)", st.P12Path)
+	}
+
+	if st.ClientCrtExists {
+		logger.Success("原生证书密钥  : 已就绪 (%s, %s)", st.ClientCrtPath, st.ClientKeyPath)
 	}
 	fmt.Println("═══════════════════════════════════════════════════════════")
 	fmt.Println()
 }
 
 func printCertExport(st *terminal.StatusResult, b64 string) {
-	sshPort := detectSSHPort()
-	scpCmd := fmt.Sprintf("scp root@%s:%s ./client.p12", st.Domain, st.P12Path)
+	sshPort := st.SSHPort
+	if sshPort <= 0 {
+		sshPort = terminal.DetectSSHPort()
+	}
+	portFlag := ""
 	if sshPort != 22 {
-		scpCmd = fmt.Sprintf("scp -P %d root@%s:%s ./client.p12", sshPort, st.Domain, st.P12Path)
+		portFlag = fmt.Sprintf("-P %d ", sshPort)
+	}
+
+	sshPathPrefix := strings.TrimPrefix(st.SSHTunnelPath, "/")
+	if sshPathPrefix == "" {
+		sshPathPrefix = "ssh-ws"
 	}
 
 	fmt.Println()
 	logger.Info("═══════════════════════════════════════════════════════════")
-	logger.Info("🔐 mTLS 客户端证书 (.p12) 导出")
+	logger.Info("🔐 mTLS 客户端证书与 SSH-over-WSS 配置导出")
 	logger.Info("═══════════════════════════════════════════════════════════")
 	fmt.Printf("📁 证书路径: %s\n", st.P12Path)
 	if st.Password != "" {
 		fmt.Printf("🔑 导入密码: %s\n", st.Password)
 	}
 	fmt.Println()
-	fmt.Println("📥 下载方式 1 (推荐 SCP 下载):")
-	fmt.Printf("  %s\n\n", scpCmd)
-	fmt.Println("📋 下载方式 2 (本地终端 Base64 一键还原):")
-	fmt.Printf("  echo \"%s\" | base64 -d > client.p12\n\n", b64)
-	fmt.Println("💡 客户端使用指引:")
-	if st.Password != "" {
-		fmt.Printf("  双击 client.p12，输入密码 [%s]，导入系统钥匙串即可。\n", st.Password)
-	} else {
-		fmt.Println("  双击 client.p12，导入系统钥匙串即可。")
-	}
+	fmt.Println("📱【方案一：Web 终端 (.p12 证书)】")
+	fmt.Printf("  scp %sroot@%s:%s ./client.p12\n\n", portFlag, st.Domain, st.P12Path)
+	fmt.Println("⚡【方案二：WezTerm 原生 SSH (client.crt + client.key)】")
+	fmt.Printf("  mkdir -p ~/.ssh && scp %sroot@%s:%s %s ~/.ssh/\n\n", portFlag, st.Domain, st.ClientCrtPath, st.ClientKeyPath)
+	fmt.Println("  追加到本地 ~/.ssh/config:")
+	fmt.Printf(`  cat << 'EOF' >> ~/.ssh/config
+
+Host vps-ws
+    HostName 127.0.0.1
+    Port %d
+    User root
+    ProxyCommand wstunnel client --log-lvl off --tls-certificate ~/.ssh/client.crt --tls-private-key ~/.ssh/client.key --http-upgrade-path-prefix %s -L stdio://%%%%h:%%%%p wss://%s
+EOF
+`, sshPort, sshPathPrefix, st.Domain)
 	fmt.Println("═══════════════════════════════════════════════════════════")
 	fmt.Println()
 }

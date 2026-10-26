@@ -142,6 +142,8 @@ func PreviewCaddyfile(cfg *config.Config) (string, error) {
 		ServerIPFormatted string
 		TerminalPath      string
 		TerminalPort      int
+		SSHTunnelPath     string
+		SSHTunnelPort     int
 		MtlsCA            string
 	}
 
@@ -152,6 +154,8 @@ func PreviewCaddyfile(cfg *config.Config) (string, error) {
 	serverIPRaw := ""
 	terminalPath := ""
 	terminalPort := 18080
+	sshTunnelPath := ""
+	sshTunnelPort := 18081
 	mtlsCA := ""
 	if cfg != nil {
 		nodeDomain = cfg.Server.GetNodeDomain()
@@ -170,6 +174,20 @@ func PreviewCaddyfile(cfg *config.Config) (string, error) {
 			if cfg.Server.WebTerminal.Port > 0 {
 				terminalPort = cfg.Server.WebTerminal.Port
 			}
+
+			sshTunnelPath = strings.TrimSpace(cfg.Server.WebTerminal.SSHTunnelPath)
+			if sshTunnelPath == "" {
+				sshTunnelPath = "/ssh-ws"
+			}
+			if !strings.HasPrefix(sshTunnelPath, "/") {
+				sshTunnelPath = "/" + sshTunnelPath
+			}
+			sshTunnelPath = strings.TrimSuffix(sshTunnelPath, "/")
+
+			if cfg.Server.WebTerminal.SSHTunnelPort > 0 {
+				sshTunnelPort = cfg.Server.WebTerminal.SSHTunnelPort
+			}
+
 			mtlsCA = strings.TrimSpace(cfg.Server.WebTerminal.MtlsCA)
 			if mtlsCA == "" {
 				mtlsCA = "/etc/caddy/mtls/ca.crt"
@@ -194,6 +212,8 @@ func PreviewCaddyfile(cfg *config.Config) (string, error) {
 		ServerIPFormatted: FormatIPForCaddy(serverIPRaw),
 		TerminalPath:      terminalPath,
 		TerminalPort:      terminalPort,
+		SSHTunnelPath:     sshTunnelPath,
+		SSHTunnelPort:     sshTunnelPort,
 		MtlsCA:            mtlsCA,
 	}
 

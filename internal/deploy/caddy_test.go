@@ -208,4 +208,12 @@ func TestPreviewCaddyfile_WebTerminal(t *testing.T) {
 	if !strings.Contains(content, "reverse_proxy 127.0.0.1:18080") {
 		t.Errorf("expected reverse_proxy 127.0.0.1:18080, got:\n%s", content)
 	}
+
+	// 3. Verify native SSH-over-WSS route
+	if !strings.Contains(content, "handle /ssh-ws* {") {
+		t.Errorf("expected handle /ssh-ws*, got:\n%s", content)
+	}
+	if !strings.Contains(content, "reverse_proxy 127.0.0.1:18081") {
+		t.Errorf("expected reverse_proxy 127.0.0.1:18081, got:\n%s", content)
+	}
 }
