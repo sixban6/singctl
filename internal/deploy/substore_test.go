@@ -254,12 +254,10 @@ func TestSubstore_GetCorsAllowedOrigins(t *testing.T) {
 	}
 }
 
-func TestSingBoxServer_NodeTagFromSubscriptionName(t *testing.T) {
+func TestSingBoxServer_NodeTag(t *testing.T) {
 	cfg := &config.Config{
-		Subs: []config.Subscription{
-			{Name: "los"},
-		},
 		Server: config.ServerConfig{
+			NodeTag:    "los",
 			NodeDomain: "cdn.l1.example.com",
 			TuicDomain: "cdn.l2.example.com",
 			Sni:        "swdist.apple.com",

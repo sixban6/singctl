@@ -48,6 +48,7 @@ type TailscaleConfig struct {
 }
 
 type ServerConfig struct {
+	NodeTag            string `yaml:"node_tag"`            // (可选) 节点地区/名称标识 (例如: los, sg, hk)，留空自动根据公网 IP 智能识别
 	SBDomain           string `yaml:"sb_domain"`           // 兼容旧配置：默认主域名
 	NodeDomain         string `yaml:"node_domain"`         // 节点主域名 (Hysteria 2 / VLESS 分享链接主机)
 	SubstoreDomain     string `yaml:"substore_domain"`     // Sub-Store 专属域名
@@ -153,6 +154,47 @@ func (s *ServerConfig) GetTuicDomain() string {
 	return ""
 }
 
+// GetNodeTag returns the location/name tag for server nodes (e.g. "los", "sg").
+// If node_tag is explicitly configured, it returns that value.
+// Otherwise, it discovers the location from the server's public IP GeoIP.
+// If discovery fails, it falls back to the first segment of node_domain or "node".
+func (s *ServerConfig) GetNodeTag() string {
+	if s != nil && strings.TrimSpace(s.NodeTag) != "" {
+		tag := sanitizeTag(s.NodeTag)
+		if tag != "" {
+			return tag
+		}
+	}
+
+	if discoveredLocationTag != "" {
+		return discoveredLocationTag
+	}
+
+	var ip string
+	if s != nil {
+		ip = s.GetServerIP()
+	} else {
+		ip = DiscoverPublicIP()
+	}
+	if ip != "" {
+		if tag := DiscoverLocationTag(ip); tag != "" {
+			return tag
+		}
+	}
+
+	if s != nil {
+		nodeDomain := s.GetNodeDomain()
+		if nodeDomain != "" {
+			first, _, _ := strings.Cut(nodeDomain, ".")
+			first = sanitizeTag(first)
+			if first != "" {
+				return first
+			}
+		}
+	}
+	return "node"
+}
+
 type WatchdogConfig struct {
 	Interval    int `yaml:"interval"`     // 检查间隔(秒), 默认 180
 	ConfirmWait int `yaml:"confirm_wait"` // 二次确认等待(秒), 默认 30
@@ -172,7 +214,7 @@ func Load(path string) (*Config, error) {
 		"subs", "name", "url", "skip_tls_verify", "remove-emoji",
 		"github", "mirror_url", "hy2", "up", "down",
 		"tailscale", "auth_key", "use_build", constant.TailscaleSubnets,
-		"server", "sb_domain", "node_domain", "substore_domain", "tuic_domain", "cf_dns_key", "sni", "tuic_port", "anytls_port", "cors_allowed_origins",
+		"server", "node_tag", "sb_domain", "node_domain", "substore_domain", "tuic_domain", "cf_dns_key", "sni", "tuic_port", "anytls_port", "cors_allowed_origins",
 		"watchdog", "interval", "confirm_wait", "max_restarts",
 	}
 	pattern := fmt.Sprintf("(?m)^([ \\t-]*(?:%s)):([^\\s].*)", strings.Join(keys, "|"))
@@ -270,7 +312,7 @@ func MigrateConfig(configPath string, templateData []byte) error {
 		"subs", "name", "url", "skip_tls_verify", "remove-emoji",
 		"github", "mirror_url", "hy2", "up", "down",
 		"tailscale", "auth_key", "use_build", constant.TailscaleSubnets,
-		"server", "sb_domain", "node_domain", "substore_domain", "tuic_domain", "server_ip", "cf_dns_key", "sni", "tuic_port", "anytls_port", "cors_allowed_origins",
+		"server", "node_tag", "sb_domain", "node_domain", "substore_domain", "tuic_domain", "server_ip", "cf_dns_key", "sni", "tuic_port", "anytls_port", "cors_allowed_origins",
 		"watchdog", "interval", "confirm_wait", "max_restarts",
 	}
 	pattern := fmt.Sprintf("(?m)^([ \\t-]*(?:%s)):([^\\s].*)", strings.Join(keys, "|"))
@@ -405,6 +447,12 @@ func MigrateConfig(configPath string, templateData []byte) error {
 
 	// 5. Merge Server (全量保留所有字段，包括 node_domain, substore_domain 等)
 	if strings.Contains(string(oldData), "server:") {
+		if oldCfg.Server.NodeTag != "" {
+			setOrAddField(docNode, "server", "node_tag", oldCfg.Server.NodeTag)
+		} else if strings.Contains(string(oldData), "node_tag:") {
+			setOrAddField(docNode, "server", "node_tag", "")
+		}
+
 		// 平滑迁移：如果旧配置只有 sb_domain，则将其迁移到 node_domain
 		nodeDomain := oldCfg.Server.NodeDomain
 		if nodeDomain == "" && oldCfg.Server.SBDomain != "" {
