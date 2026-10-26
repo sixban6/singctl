@@ -253,3 +253,47 @@ func TestSubstore_GetCorsAllowedOrigins(t *testing.T) {
 		t.Errorf("expected origins to contain node domain, got %s", originsSeparated)
 	}
 }
+
+func TestSingBoxServer_NodeTagFromSubscriptionName(t *testing.T) {
+	cfg := &config.Config{
+		Subs: []config.Subscription{
+			{Name: "los"},
+		},
+		Server: config.ServerConfig{
+			NodeDomain: "cdn.l1.example.com",
+			TuicDomain: "cdn.l2.example.com",
+			Sni:        "swdist.apple.com",
+		},
+	}
+	sbs, err := NewSingBoxServer(cfg)
+	if err != nil {
+		t.Fatalf("NewSingBoxServer failed: %v", err)
+	}
+
+	if sbs.VrTag() != "sec_los_vr" {
+		t.Errorf("expected VrTag to be %q, got %q", "sec_los_vr", sbs.VrTag())
+	}
+	if sbs.Hy2Tag() != "sec_los_hy2" {
+		t.Errorf("expected Hy2Tag to be %q, got %q", "sec_los_hy2", sbs.Hy2Tag())
+	}
+	if sbs.TuicTag() != "sec_los_tuic" {
+		t.Errorf("expected TuicTag to be %q, got %q", "sec_los_tuic", sbs.TuicTag())
+	}
+
+	if !strings.HasSuffix(sbs.ShareLinkVless, "#sec_los_vr") {
+		t.Errorf("expected ShareLinkVless to end with #sec_los_vr, got %q", sbs.ShareLinkVless)
+	}
+	if !strings.HasSuffix(sbs.ShareLinkHy2, "#sec_los_hy2") {
+		t.Errorf("expected ShareLinkHy2 to end with #sec_los_hy2, got %q", sbs.ShareLinkHy2)
+	}
+	if !strings.HasSuffix(sbs.ShareLinkTuic, "#sec_los_tuic") {
+		t.Errorf("expected ShareLinkTuic to end with #sec_los_tuic, got %q", sbs.ShareLinkTuic)
+	}
+
+	// Verify mergeNodeContent replaces an existing node that used old sec_cdn_vr tag
+	oldVless := "vless://uuid-test@cdn.l1.example.com:443?type=tcp&security=reality&sni=swdist.apple.com#sec_cdn_vr"
+	merged := mergeNodeContent(oldVless, sbs.ShareLinkVless, sbs, "vless")
+	if merged != sbs.ShareLinkVless {
+		t.Errorf("expected old sec_cdn_vr node to be replaced by %q, got %q", sbs.ShareLinkVless, merged)
+	}
+}
