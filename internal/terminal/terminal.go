@@ -293,27 +293,56 @@ func ExportCert() (string, error) {
 
 func installDependencies() error {
 	logger.Info("正在检查并安装系统依赖 (tmux, openssl, tar, wget)...")
-	if isCommandAvailable("apt-get") {
-		cmd := exec.Command("apt-get", "update", "-y")
-		_ = cmd.Run()
-		// 优先安装 openssl-provider-legacy 确保 OpenSSL 3 导出 legacy PKCS#12 证书
-		_ = exec.Command("apt-get", "install", "-y", "tmux", "openssl", "openssl-provider-legacy", "tar", "wget").Run()
-	}
 
+	// 1. 如果基础依赖都已经安装，直接放行
 	if isCommandAvailable("tmux") && isCommandAvailable("openssl") && isCommandAvailable("tar") && isCommandAvailable("wget") {
 		logger.Success("基础依赖环境已完备。")
 		return nil
 	}
 
-	if isCommandAvailable("dnf") {
+	// 2. 根据系统包管理器安装基础依赖
+	if isCommandAvailable("apt-get") {
+		_ = exec.Command("apt-get", "update", "-y").Run()
+		cmdInstall := exec.Command("apt-get", "install", "-y", "tmux", "openssl", "tar", "wget")
+		cmdInstall.Stdout = os.Stdout
+		cmdInstall.Stderr = os.Stderr
+		if err := cmdInstall.Run(); err != nil {
+			return fmt.Errorf("apt-get 安装依赖失败: %w", err)
+		}
+		// 可选安装 openssl-provider-legacy (部分系统无此独立包，忽略错误)
+		_ = exec.Command("apt-get", "install", "-y", "openssl-provider-legacy").Run()
+	} else if isCommandAvailable("dnf") {
 		cmd := exec.Command("dnf", "install", "-y", "tmux", "openssl", "tar", "wget")
-		return cmd.Run()
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("dnf 安装依赖失败: %w", err)
+		}
 	} else if isCommandAvailable("yum") {
 		cmd := exec.Command("yum", "install", "-y", "tmux", "openssl", "tar", "wget")
-		return cmd.Run()
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("yum 安装依赖失败: %w", err)
+		}
+	} else if isCommandAvailable("apk") {
+		cmd := exec.Command("apk", "add", "--no-cache", "tmux", "openssl", "tar", "wget")
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("apk 安装依赖失败: %w", err)
+		}
+	} else {
+		return fmt.Errorf("未识别的 Linux 包管理器 (请先手动安装 tmux, openssl, tar, wget)")
 	}
 
-	return fmt.Errorf("未识别的 Linux 包管理器 (请手动安装 tmux 与 openssl)")
+	// 3. 再次校验关键依赖
+	if isCommandAvailable("tmux") && isCommandAvailable("openssl") && isCommandAvailable("tar") && isCommandAvailable("wget") {
+		logger.Success("基础依赖环境已安装完成。")
+		return nil
+	}
+
+	return fmt.Errorf("基础依赖未完全就绪，请手动安装 tmux 与 openssl")
 }
 
 func isCommandAvailable(name string) bool {
