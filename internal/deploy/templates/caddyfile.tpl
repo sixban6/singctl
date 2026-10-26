@@ -46,7 +46,13 @@
 
 # --- HTTP 80 端口 (用于 Let's Encrypt 公网 IP 证书的 HTTP-01 验证及 301 重定向至 443) ---
 :80 {
-    redir https://{host}{uri} 301
+    @validMethods method GET POST HEAD OPTIONS
+    handle @validMethods {
+        redir https://{host}{uri} 301
+    }
+    handle {
+        respond "Method Not Allowed" 405
+    }
 }
 
 # --- Layer 7 (HTTP) 网站层 ---

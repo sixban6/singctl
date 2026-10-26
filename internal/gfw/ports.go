@@ -76,6 +76,10 @@ func probePorts(ctx context.Context, opts ProbeOptions) Category {
 	cat.Items = append(cat.Items, itemRedirect)
 
 	// 3. 敏感代理/面板管理端口暴露检测
+	// 首先通过随机金丝雀高位端口检测当前测试客户端是否处于软路由/透明代理全端口劫持环境中
+	canaryPort := 59183
+	isTransparentProxy := isPortOpen(opts.IP, canaryPort, 800*time.Millisecond)
+
 	sensitivePorts := []int{7895, 9090, 9091, 2080, 1080}
 	var exposed []int
 	for _, port := range sensitivePorts {
@@ -90,7 +94,11 @@ func probePorts(ctx context.Context, opts ProbeOptions) Category {
 		MaxScore:    15,
 	}
 
-	if len(exposed) > 0 {
+	if isTransparentProxy {
+		itemSensitive.Score = 0
+		itemSensitive.Passed = true
+		itemSensitive.Details = fmt.Sprintf("检测到当前测试客户端处于透明代理/软路由全端口拦截环境中 (金丝雀端口 %d 异常联通)，已自动规避假阳性误报。建议在直连网络中复测。", canaryPort)
+	} else if len(exposed) > 0 {
 		itemSensitive.Score = min(15, len(exposed)*5)
 		itemSensitive.Passed = false
 		itemSensitive.Details = fmt.Sprintf("公网暴露了敏感端口: %v，直接泄露了代理程序运行痕迹！", exposed)
