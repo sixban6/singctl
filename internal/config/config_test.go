@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -181,5 +182,93 @@ server:
 	}
 	if loaded.Server.CFDNSKey != "my_key" {
 		t.Errorf("expected cf_dns_key 'my_key', got '%s'", loaded.Server.CFDNSKey)
+	}
+}
+
+func TestLoad_StringPorts(t *testing.T) {
+	yamlContent := `
+hy2:
+  up: "30"
+  down: "300"
+server:
+  node_domain: "node.example.com"
+  anytls_port: "443"
+  web_terminal:
+    enabled: true
+    port: "18080"
+    path: "/ops-shell-123"
+watchdog:
+  interval: "180"
+  confirm_wait: "30"
+  max_restarts: "5"
+`
+	tmpFile, err := os.CreateTemp("", "singctl_str_ports_*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpFile.Name())
+
+	if _, err := tmpFile.WriteString(yamlContent); err != nil {
+		t.Fatal(err)
+	}
+	tmpFile.Close()
+
+	loaded, err := Load(tmpFile.Name())
+	if err != nil {
+		t.Fatalf("Load with string ports failed: %v", err)
+	}
+
+	if loaded.Server.WebTerminal.Port != 18080 {
+		t.Errorf("expected WebTerminal.Port 18080, got %d", loaded.Server.WebTerminal.Port)
+	}
+	if loaded.Hy2.Up != 30 || loaded.Hy2.Down != 300 {
+		t.Errorf("expected Hy2 30/300, got %d/%d", loaded.Hy2.Up, loaded.Hy2.Down)
+	}
+	if loaded.Watchdog.Interval != 180 || loaded.Watchdog.MaxRestarts != 5 {
+		t.Errorf("expected Watchdog 180/5, got %d/%d", loaded.Watchdog.Interval, loaded.Watchdog.MaxRestarts)
+	}
+}
+
+func TestMigrateConfig_AnyTLSPortPurgedAndResilient(t *testing.T) {
+	oldYAML := `
+server:
+  node_domain: "node.example.com"
+  anytls_port: "443"
+`
+	templateBytes, err := os.ReadFile("../../configs/singctl.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tmpFile, err := os.CreateTemp("", "singctl_migrate_port_*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpFile.Name())
+
+	if _, err := tmpFile.WriteString(oldYAML); err != nil {
+		t.Fatal(err)
+	}
+	tmpFile.Close()
+
+	if err := MigrateConfig(tmpFile.Name(), templateBytes); err != nil {
+		t.Fatalf("MigrateConfig failed: %v", err)
+	}
+
+	content, err := os.ReadFile(tmpFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(content), "anytls_port") {
+		t.Errorf("expected anytls_port to be purged from migrated config, but found it in:\n%s", string(content))
+	}
+
+	loaded, err := Load(tmpFile.Name())
+	if err != nil {
+		t.Fatalf("Load migrated config failed: %v", err)
+	}
+
+	if loaded.Server.NodeDomain != "node.example.com" {
+		t.Errorf("expected node_domain 'node.example.com', got '%s'", loaded.Server.NodeDomain)
 	}
 }

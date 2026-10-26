@@ -2,6 +2,10 @@ package cmd
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 
 	"singctl/internal/config"
 	"singctl/internal/logger"
@@ -143,7 +147,61 @@ func newCertTerminalCmd(configPath string) *cobra.Command {
 	}
 }
 
+// detectSSHPort tries to detect the SSH daemon port on the server
+func detectSSHPort() int {
+	// 1. Check SSH_CONNECTION environment variable (e.g., "client_ip client_port server_ip server_port")
+	if conn := os.Getenv("SSH_CONNECTION"); conn != "" {
+		parts := strings.Fields(conn)
+		if len(parts) >= 4 {
+			if p, err := strconv.Atoi(parts[3]); err == nil && p > 0 {
+				return p
+			}
+		}
+	}
+
+	// 2. Check /etc/ssh/sshd_config
+	if data, err := os.ReadFile("/etc/ssh/sshd_config"); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(strings.ToLower(line), "port ") {
+				fields := strings.Fields(line)
+				if len(fields) >= 2 {
+					if p, err := strconv.Atoi(fields[1]); err == nil && p > 0 {
+						return p
+					}
+				}
+			}
+		}
+	}
+
+	// 3. Check /etc/ssh/sshd_config.d/*.conf
+	matches, _ := filepath.Glob("/etc/ssh/sshd_config.d/*.conf")
+	for _, match := range matches {
+		if data, err := os.ReadFile(match); err == nil {
+			for _, line := range strings.Split(string(data), "\n") {
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(strings.ToLower(line), "port ") {
+					fields := strings.Fields(line)
+					if len(fields) >= 2 {
+						if p, err := strconv.Atoi(fields[1]); err == nil && p > 0 {
+							return p
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return 22
+}
+
 func printInstallSummary(res *terminal.InstallResult) {
+	sshPort := detectSSHPort()
+	scpCmd := fmt.Sprintf("scp root@%s:%s ./client.p12", res.Domain, res.P12Path)
+	if sshPort != 22 {
+		scpCmd = fmt.Sprintf("scp -P %d root@%s:%s ./client.p12", sshPort, res.Domain, res.P12Path)
+	}
+
 	fmt.Println()
 	logger.Success("🎉 GoTTY + Tmux + Caddy mTLS 双向认证终端部署成功！")
 	fmt.Println("═══════════════════════════════════════════════════════════")
@@ -155,7 +213,7 @@ func printInstallSummary(res *terminal.InstallResult) {
 	fmt.Println()
 	fmt.Println("📥 如何将客户端证书导入电脑/手机：")
 	fmt.Printf("  方法 1 (推荐 SCP 下载):\n")
-	fmt.Printf("    scp root@%s:%s ./client.p12\n\n", res.Domain, res.P12Path)
+	fmt.Printf("    %s\n\n", scpCmd)
 	fmt.Printf("  方法 2 (本地终端一键 Base64 还原):\n")
 	fmt.Printf("    在本地 Mac/Linux 执行: echo \"%s\" | base64 -d > client.p12\n\n", res.P12Base64)
 	fmt.Println("💡 客户端使用步骤：")
@@ -203,6 +261,12 @@ func printStatusSummary(st *terminal.StatusResult) {
 }
 
 func printCertExport(st *terminal.StatusResult, b64 string) {
+	sshPort := detectSSHPort()
+	scpCmd := fmt.Sprintf("scp root@%s:%s ./client.p12", st.Domain, st.P12Path)
+	if sshPort != 22 {
+		scpCmd = fmt.Sprintf("scp -P %d root@%s:%s ./client.p12", sshPort, st.Domain, st.P12Path)
+	}
+
 	fmt.Println()
 	logger.Info("═══════════════════════════════════════════════════════════")
 	logger.Info("🔐 mTLS 客户端证书 (.p12) 导出")
@@ -212,14 +276,16 @@ func printCertExport(st *terminal.StatusResult, b64 string) {
 		fmt.Printf("🔑 导入密码: %s\n", st.Password)
 	}
 	fmt.Println()
-	fmt.Println("📋 证书 Base64 编码 (可直接复制至本地):")
-	fmt.Println("-----------------------------------------------------------")
-	fmt.Println(b64)
-	fmt.Println("-----------------------------------------------------------")
-	fmt.Println()
-	fmt.Println("💻 本地还原命令 (Mac / Linux):")
+	fmt.Println("📥 下载方式 1 (推荐 SCP 下载):")
+	fmt.Printf("  %s\n\n", scpCmd)
+	fmt.Println("📋 下载方式 2 (本地终端 Base64 一键还原):")
 	fmt.Printf("  echo \"%s\" | base64 -d > client.p12\n\n", b64)
-	fmt.Println("  然后双击 client.p12 导入系统钥匙串即可。")
+	fmt.Println("💡 客户端使用指引:")
+	if st.Password != "" {
+		fmt.Printf("  双击 client.p12，输入密码 [%s]，导入系统钥匙串即可。\n", st.Password)
+	} else {
+		fmt.Println("  双击 client.p12，导入系统钥匙串即可。")
+	}
 	fmt.Println("═══════════════════════════════════════════════════════════")
 	fmt.Println()
 }

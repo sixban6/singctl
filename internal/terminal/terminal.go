@@ -70,9 +70,9 @@ func GenerateRandomHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
-// GenerateRandomPassword generates a friendly secure password
+// GenerateRandomPassword generates a friendly secure alphanumeric password
 func GenerateRandomPassword(length int) string {
-	const charset = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$%^&*"
+	const charset = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 	b := make([]byte, length)
 	randBytes := make([]byte, length)
 	_, _ = rand.Read(randBytes)
@@ -285,19 +285,19 @@ func ExportCert() (string, error) {
 
 func installDependencies() error {
 	logger.Info("正在检查并安装系统依赖 (tmux, openssl, tar, wget)...")
+	if isCommandAvailable("apt-get") {
+		cmd := exec.Command("apt-get", "update", "-y")
+		_ = cmd.Run()
+		// 优先安装 openssl-provider-legacy 确保 OpenSSL 3 导出 legacy PKCS#12 证书
+		_ = exec.Command("apt-get", "install", "-y", "tmux", "openssl", "openssl-provider-legacy", "tar", "wget").Run()
+	}
+
 	if isCommandAvailable("tmux") && isCommandAvailable("openssl") && isCommandAvailable("tar") && isCommandAvailable("wget") {
 		logger.Success("基础依赖环境已完备。")
 		return nil
 	}
 
-	if isCommandAvailable("apt-get") {
-		cmd := exec.Command("apt-get", "update", "-y")
-		_ = cmd.Run()
-		cmd = exec.Command("apt-get", "install", "-y", "tmux", "openssl", "tar", "wget")
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		return cmd.Run()
-	} else if isCommandAvailable("dnf") {
+	if isCommandAvailable("dnf") {
 		cmd := exec.Command("dnf", "install", "-y", "tmux", "openssl", "tar", "wget")
 		return cmd.Run()
 	} else if isCommandAvailable("yum") {
@@ -438,7 +438,9 @@ extendedKeyUsage = clientAuth
 		return fmt.Errorf("签发客户端证书失败: %w", err)
 	}
 
-	// 5. 打包为客户端用的 .p12 文件 (加 -legacy 确保 macOS 钥匙串兼容)
+	// 5. 打包为客户端用的 .p12 文件 (多重兼容策略：确保 macOS Keychain、Windows 与现代浏览器无缝导入)
+	var exportErr error
+	// 策略 1: 标准 OpenSSL 3.x -legacy 模式
 	p12Args := []string{
 		"pkcs12", "-export", "-legacy",
 		"-out", clientP12,
@@ -447,8 +449,40 @@ extendedKeyUsage = clientAuth
 		"-certfile", caCrt,
 		"-passout", fmt.Sprintf("pass:%s", password),
 	}
-	if err := runCmd("openssl", p12Args...); err != nil {
-		// 如果 OpenSSL 1.1 不支持 -legacy 标志，回退重试无 -legacy 形式
+	exportErr = runCmd("openssl", p12Args...)
+
+	// 策略 2: 显式加载 default 与 legacy provider
+	if exportErr != nil {
+		p12ProviderArgs := []string{
+			"pkcs12", "-export",
+			"-provider", "default", "-provider", "legacy",
+			"-out", clientP12,
+			"-inkey", clientKey,
+			"-in", clientCrt,
+			"-certfile", caCrt,
+			"-passout", fmt.Sprintf("pass:%s", password),
+		}
+		exportErr = runCmd("openssl", p12ProviderArgs...)
+	}
+
+	// 策略 3: 显式指定 macOS 原生支持的 3DES/SHA1 算法
+	if exportErr != nil {
+		p12AlgoArgs := []string{
+			"pkcs12", "-export",
+			"-keypbe", "PBE-SHA1-3DES",
+			"-certpbe", "PBE-SHA1-3DES",
+			"-macalg", "sha1",
+			"-out", clientP12,
+			"-inkey", clientKey,
+			"-in", clientCrt,
+			"-certfile", caCrt,
+			"-passout", fmt.Sprintf("pass:%s", password),
+		}
+		exportErr = runCmd("openssl", p12AlgoArgs...)
+	}
+
+	// 策略 4: 如果为 OpenSSL 1.1 或以上参数皆不支持，尝试原生模式
+	if exportErr != nil {
 		p12FallbackArgs := []string{
 			"pkcs12", "-export",
 			"-out", clientP12,
@@ -458,7 +492,7 @@ extendedKeyUsage = clientAuth
 			"-passout", fmt.Sprintf("pass:%s", password),
 		}
 		if err2 := runCmd("openssl", p12FallbackArgs...); err2 != nil {
-			return fmt.Errorf("打包 PKCS#12 客户端证书失败: %w", err)
+			return fmt.Errorf("打包 PKCS#12 客户端证书失败: %w", exportErr)
 		}
 	}
 

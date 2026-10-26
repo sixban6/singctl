@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -55,7 +56,6 @@ type ServerConfig struct {
 	ServerIP           string            `yaml:"server_ip"`       // 公网 IP 地址（选填，未填写时自动探测用于申请 Let's Encrypt 原生 IP 证书）
 	CFDNSKey           string            `yaml:"cf_dns_key"`
 	Sni                string            `yaml:"sni"`
-	AnyTLSPort         int               `yaml:"anytls_port"`
 	CorsAllowedOrigins string            `yaml:"cors_allowed_origins"`
 	WebTerminal        WebTerminalConfig `yaml:"web_terminal,omitempty"`
 }
@@ -66,6 +66,96 @@ type WebTerminalConfig struct {
 	Path     string `yaml:"path,omitempty"`     // 隐蔽访问路径，如 /ops-shell-8f9a
 	MtlsCA   string `yaml:"mtls_ca,omitempty"`  // CA 证书路径，默认 /etc/caddy/mtls/ca.crt
 	Password string `yaml:"password,omitempty"` // client.p12 证书导出密码
+}
+
+func parseIntAny(v any) (int, error) {
+	switch val := v.(type) {
+	case int:
+		return val, nil
+	case int64:
+		return int(val), nil
+	case float64:
+		return int(val), nil
+	case string:
+		trimmed := strings.TrimSpace(val)
+		if trimmed == "" {
+			return 0, nil
+		}
+		return strconv.Atoi(trimmed)
+	default:
+		return 0, fmt.Errorf("unsupported type %T for integer conversion", v)
+	}
+}
+
+func (w *WebTerminalConfig) UnmarshalYAML(node *yaml.Node) error {
+	var a struct {
+		Enabled  bool   `yaml:"enabled"`
+		Port     any    `yaml:"port"`
+		Path     string `yaml:"path"`
+		MtlsCA   string `yaml:"mtls_ca"`
+		Password string `yaml:"password"`
+	}
+	if err := node.Decode(&a); err != nil {
+		return err
+	}
+	w.Enabled = a.Enabled
+	w.Path = a.Path
+	w.MtlsCA = a.MtlsCA
+	w.Password = a.Password
+	if a.Port != nil {
+		if p, err := parseIntAny(a.Port); err == nil {
+			w.Port = p
+		}
+	}
+	return nil
+}
+
+func (h *Hy2Config) UnmarshalYAML(node *yaml.Node) error {
+	var a struct {
+		Up   any `yaml:"up"`
+		Down any `yaml:"down"`
+	}
+	if err := node.Decode(&a); err != nil {
+		return err
+	}
+	if a.Up != nil {
+		if v, err := parseIntAny(a.Up); err == nil {
+			h.Up = v
+		}
+	}
+	if a.Down != nil {
+		if v, err := parseIntAny(a.Down); err == nil {
+			h.Down = v
+		}
+	}
+	return nil
+}
+
+func (w *WatchdogConfig) UnmarshalYAML(node *yaml.Node) error {
+	var a struct {
+		Interval    any `yaml:"interval"`
+		ConfirmWait any `yaml:"confirm_wait"`
+		MaxRestarts any `yaml:"max_restarts"`
+	}
+	if err := node.Decode(&a); err != nil {
+		return err
+	}
+	if a.Interval != nil {
+		if v, err := parseIntAny(a.Interval); err == nil {
+			w.Interval = v
+		}
+	}
+	if a.ConfirmWait != nil {
+		if v, err := parseIntAny(a.ConfirmWait); err == nil {
+			w.ConfirmWait = v
+		}
+	}
+	if a.MaxRestarts != nil {
+		if v, err := parseIntAny(a.MaxRestarts); err == nil {
+			w.MaxRestarts = v
+		}
+	}
+	return nil
 }
 
 var (
@@ -205,7 +295,7 @@ func Load(path string) (*Config, error) {
 		"subs", "name", "url", "skip_tls_verify", "remove-emoji",
 		"github", "mirror_url", "hy2", "up", "down",
 		"tailscale", "auth_key", "use_build", constant.TailscaleSubnets,
-		"server", "node_tag", "sb_domain", "node_domain", "substore_domain", "cf_dns_key", "sni", "anytls_port", "cors_allowed_origins",
+		"server", "node_tag", "sb_domain", "node_domain", "substore_domain", "cf_dns_key", "sni", "cors_allowed_origins", "web_terminal",
 		"watchdog", "interval", "confirm_wait", "max_restarts",
 	}
 	pattern := fmt.Sprintf("(?m)^([ \\t-]*(?:%s)):([^\\s].*)", strings.Join(keys, "|"))
@@ -232,9 +322,6 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Server.SubstoreDomain == "" && cfg.Server.SBDomain != "" {
 		cfg.Server.SubstoreDomain = cfg.Server.SBDomain
-	}
-	if cfg.Server.AnyTLSPort == 0 {
-		cfg.Server.AnyTLSPort = 443
 	}
 	if cfg.Watchdog.Interval <= 0 {
 		cfg.Watchdog.Interval = 180
@@ -297,7 +384,7 @@ func MigrateConfig(configPath string, templateData []byte) error {
 		"subs", "name", "url", "skip_tls_verify", "remove-emoji",
 		"github", "mirror_url", "hy2", "up", "down",
 		"tailscale", "auth_key", "use_build", constant.TailscaleSubnets,
-		"server", "node_tag", "sb_domain", "node_domain", "substore_domain", "server_ip", "cf_dns_key", "sni", "anytls_port", "cors_allowed_origins",
+		"server", "node_tag", "sb_domain", "node_domain", "substore_domain", "server_ip", "cf_dns_key", "sni", "cors_allowed_origins", "web_terminal",
 		"watchdog", "interval", "confirm_wait", "max_restarts",
 	}
 	pattern := fmt.Sprintf("(?m)^([ \\t-]*(?:%s)):([^\\s].*)", strings.Join(keys, "|"))
@@ -356,10 +443,21 @@ func MigrateConfig(configPath string, templateData []byte) error {
 				for j := 0; j < len(mapNode.Content); j += 2 {
 					if mapNode.Content[j].Value == childKey {
 						mapNode.Content[j+1].Value = childVal
+						if _, err := strconv.Atoi(childVal); err == nil {
+							mapNode.Content[j+1].Tag = "!!int"
+						} else if childVal == "true" || childVal == "false" {
+							mapNode.Content[j+1].Tag = "!!bool"
+						}
 						return
 					}
 				}
 				// If not found in template, append new scalar node pair!
+				tag := "!!str"
+				if _, err := strconv.Atoi(childVal); err == nil {
+					tag = "!!int"
+				} else if childVal == "true" || childVal == "false" {
+					tag = "!!bool"
+				}
 				keyNode := &yaml.Node{
 					Kind:  yaml.ScalarNode,
 					Tag:   "!!str",
@@ -367,7 +465,7 @@ func MigrateConfig(configPath string, templateData []byte) error {
 				}
 				valNode := &yaml.Node{
 					Kind:  yaml.ScalarNode,
-					Tag:   "!!str",
+					Tag:   tag,
 					Value: childVal,
 				}
 				mapNode.Content = append(mapNode.Content, keyNode, valNode)
@@ -457,6 +555,7 @@ func MigrateConfig(configPath string, templateData []byte) error {
 
 		removeField(docNode, "server", "tuic_domain")
 		removeField(docNode, "server", "tuic_port")
+		removeField(docNode, "server", "anytls_port")
 
 		if oldCfg.Server.ServerIP != "" {
 			setOrAddField(docNode, "server", "server_ip", oldCfg.Server.ServerIP)
@@ -472,10 +571,6 @@ func MigrateConfig(configPath string, templateData []byte) error {
 
 		if strings.Contains(string(oldData), "sni:") {
 			setOrAddField(docNode, "server", "sni", oldCfg.Server.Sni)
-		}
-
-		if oldCfg.Server.AnyTLSPort != 0 {
-			setOrAddField(docNode, "server", "anytls_port", fmt.Sprintf("%d", oldCfg.Server.AnyTLSPort))
 		}
 		if strings.Contains(string(oldData), "cors_allowed_origins:") {
 			setOrAddField(docNode, "server", "cors_allowed_origins", oldCfg.Server.CorsAllowedOrigins)

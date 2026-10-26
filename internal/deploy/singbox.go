@@ -100,11 +100,8 @@ func (sbs *SingBoxServer) VrTag() string {
 	return sbs.vrTag
 }
 
-// AnyTLSPort returns the configured or default AnyTLS port (443).
+// AnyTLSPort returns the AnyTLS port (443).
 func (sbs *SingBoxServer) AnyTLSPort() int {
-	if sbs.cfg != nil && sbs.cfg.Server.AnyTLSPort > 0 {
-		return sbs.cfg.Server.AnyTLSPort
-	}
 	return 443
 }
 
