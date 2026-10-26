@@ -90,7 +90,25 @@ https://{{.NodeDomain}}:9443 {
         issuer acme {
             dns cloudflare {{.CFDNSKey}}
         }
+{{if .MtlsCA}}
+        client_auth {
+            mode verify_if_given
+            trust_pool file {{.MtlsCA}}
+        }
+{{end}}
     }
+{{if .TerminalPath}}
+
+    # GoTTY Web 终端安全路由 (双向 TLS 认证保护)
+    redir {{.TerminalPath}} {{.TerminalPath}}/
+    handle {{.TerminalPath}}/* {
+        @unauth {
+            expression {http.request.tls.client.subject} == ""
+        }
+        respond @unauth 404
+        reverse_proxy 127.0.0.1:{{.TerminalPort}}
+    }
+{{end}}
     root * /var/www/mask-site
     file_server
     try_files {path} /index.html
@@ -103,7 +121,25 @@ https://{{.SubstoreDomain}}:9443 {
         issuer acme {
             dns cloudflare {{.CFDNSKey}}
         }
+{{if .MtlsCA}}
+        client_auth {
+            mode verify_if_given
+            trust_pool file {{.MtlsCA}}
+        }
+{{end}}
     }
+{{if .TerminalPath}}
+
+    # GoTTY Web 终端安全路由 (双向 TLS 认证保护)
+    redir {{.TerminalPath}} {{.TerminalPath}}/
+    handle {{.TerminalPath}}/* {
+        @unauth {
+            expression {http.request.tls.client.subject} == ""
+        }
+        respond @unauth 404
+        reverse_proxy 127.0.0.1:{{.TerminalPort}}
+    }
+{{end}}
 
     # Sub-Store 专属路径反代（根据 key、subs、download、api 分流）
     @substore path /subs* /download* /api* {{if .SSKey}}/{{.SSKey}}*{{end}}

@@ -145,6 +145,9 @@ func PreviewCaddyfile(cfg *config.Config) (string, error) {
 		SSKey             string
 		ServerIP          string
 		ServerIPFormatted string
+		TerminalPath      string
+		TerminalPort      int
+		MtlsCA            string
 	}
 
 	nodeDomain := ""
@@ -152,12 +155,31 @@ func PreviewCaddyfile(cfg *config.Config) (string, error) {
 	cfDNSKey := ""
 	sni := ""
 	serverIPRaw := ""
+	terminalPath := ""
+	terminalPort := 18080
+	mtlsCA := ""
 	if cfg != nil {
 		nodeDomain = cfg.Server.GetNodeDomain()
 		substoreDomain = cfg.Server.GetSubstoreDomain()
 		cfDNSKey = cfg.Server.CFDNSKey
 		sni = cfg.Server.Sni
 		serverIPRaw = cfg.Server.ServerIP
+
+		if cfg.Server.WebTerminal.Enabled {
+			terminalPath = strings.TrimSpace(cfg.Server.WebTerminal.Path)
+			if terminalPath != "" && !strings.HasPrefix(terminalPath, "/") {
+				terminalPath = "/" + terminalPath
+			}
+			terminalPath = strings.TrimSuffix(terminalPath, "/")
+
+			if cfg.Server.WebTerminal.Port > 0 {
+				terminalPort = cfg.Server.WebTerminal.Port
+			}
+			mtlsCA = strings.TrimSpace(cfg.Server.WebTerminal.MtlsCA)
+			if mtlsCA == "" {
+				mtlsCA = "/etc/caddy/mtls/ca.crt"
+			}
+		}
 	}
 
 	ssKey := ""
@@ -175,6 +197,9 @@ func PreviewCaddyfile(cfg *config.Config) (string, error) {
 		SSKey:             ssKey,
 		ServerIP:          StripIPBrackets(serverIPRaw),
 		ServerIPFormatted: FormatIPForCaddy(serverIPRaw),
+		TerminalPath:      terminalPath,
+		TerminalPort:      terminalPort,
+		MtlsCA:            mtlsCA,
 	}
 
 	var buf bytes.Buffer

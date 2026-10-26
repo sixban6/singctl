@@ -166,3 +166,46 @@ func TestPreviewCaddyfile_Udp443Hy2Only(t *testing.T) {
 		t.Errorf("expected proxy to Hysteria 2 on 52021, got:\n%s", content)
 	}
 }
+
+func TestPreviewCaddyfile_WebTerminal(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			NodeDomain:     "node.example.com",
+			SubstoreDomain: "sub.example.com",
+			CFDNSKey:       "dummy_cf_key",
+			WebTerminal: config.WebTerminalConfig{
+				Enabled: true,
+				Path:    "/ops-shell-test123",
+				Port:    18080,
+				MtlsCA:  "/etc/caddy/mtls/ca.crt",
+			},
+		},
+	}
+
+	content, err := PreviewCaddyfile(cfg)
+	if err != nil {
+		t.Fatalf("PreviewCaddyfile failed: %v", err)
+	}
+
+	// 1. Verify mTLS client_auth under NodeDomain
+	if !strings.Contains(content, "client_auth {") || !strings.Contains(content, "mode verify_if_given") || !strings.Contains(content, "trust_pool file /etc/caddy/mtls/ca.crt") {
+		t.Errorf("expected mTLS client_auth block, got:\n%s", content)
+	}
+
+	// 2. Verify terminal route on NodeDomain
+	if !strings.Contains(content, "redir /ops-shell-test123 /ops-shell-test123/") {
+		t.Errorf("expected redir for terminal, got:\n%s", content)
+	}
+	if !strings.Contains(content, "handle /ops-shell-test123/* {") {
+		t.Errorf("expected handle /ops-shell-test123/*, got:\n%s", content)
+	}
+	if !strings.Contains(content, "expression {http.request.tls.client.subject} == \"\"") {
+		t.Errorf("expected client subject empty check, got:\n%s", content)
+	}
+	if !strings.Contains(content, "respond @unauth 404") {
+		t.Errorf("expected respond @unauth 404, got:\n%s", content)
+	}
+	if !strings.Contains(content, "reverse_proxy 127.0.0.1:18080") {
+		t.Errorf("expected reverse_proxy 127.0.0.1:18080, got:\n%s", content)
+	}
+}
