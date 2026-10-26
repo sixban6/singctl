@@ -64,16 +64,10 @@ func (sbs *SingBoxServer) init() error {
 func (sbs *SingBoxServer) initTag() {
 	tagPrefix := ""
 	if sbs.cfg != nil {
-		for _, sub := range sbs.cfg.Subs {
-			name := strings.TrimSpace(sub.Name)
-			if name != "" {
-				tagPrefix = name
-				break
-			}
-		}
+		tagPrefix = sbs.cfg.Server.GetNodeTag()
 	}
 	if tagPrefix == "" {
-		tagPrefix, _, _ = strings.Cut(sbs.cfg.Server.GetNodeDomain(), ".")
+		tagPrefix = "node"
 	}
 	sbs.hy2Tag = fmt.Sprintf("sec_%s_hy2", tagPrefix)
 	sbs.vrTag = fmt.Sprintf("sec_%s_vr", tagPrefix)

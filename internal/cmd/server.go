@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"singctl/internal/config"
@@ -601,6 +602,7 @@ func newSniCmd(configPath string) *cobra.Command {
 // NewSyncServerCmd creates the command to sync latest node credentials from sing-box to Sub-Store.
 func NewSyncServerCmd(configPath string) *cobra.Command {
 	var restart bool
+	var tag string
 
 	cmd := &cobra.Command{
 		Use:     "sync [target]",
@@ -616,7 +618,7 @@ func NewSyncServerCmd(configPath string) *cobra.Command {
 			switch target {
 			case "substore", "sub-store", "sb", "singbox":
 				resolvedPath := resolveConfigPath(cmd, configPath)
-				return syncNodeToSubstore(resolvedPath, restart)
+				return syncNodeToSubstore(resolvedPath, restart, tag)
 			default:
 				return fmt.Errorf("unknown target: %s (must be substore, sub-store, sb, or singbox)", target)
 			}
@@ -624,13 +626,22 @@ func NewSyncServerCmd(configPath string) *cobra.Command {
 	}
 
 	cmd.Flags().BoolVarP(&restart, "restart", "r", true, "同步后自动重启 Sub-Store 容器保证数据最新 / Restart Sub-Store container after sync to ensure data is updated")
+	cmd.Flags().StringVarP(&tag, "tag", "t", "", "节点名称/地区代号 (例如: los, sg)，若指定则同步更新并持久化到配置文件")
 	return cmd
 }
 
-func syncNodeToSubstore(configPath string, restart bool) error {
+func syncNodeToSubstore(configPath string, restart bool, tag string) error {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
+	}
+
+	if tag != "" {
+		cfg.Server.NodeTag = tag
+		// If tag explicitly provided via CLI, update the config file atomically
+		if curData, rErr := os.ReadFile(configPath); rErr == nil {
+			_ = config.MigrateConfig(configPath, curData)
+		}
 	}
 
 	if cfg.Server.GetNodeDomain() == "" {
