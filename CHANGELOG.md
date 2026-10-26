@@ -1,3 +1,10 @@
+# [1.41.0](https://github.com/sixban6/singctl/compare/v1.40.1...v1.41.0) (2026-10-26)
+
+
+### Features
+
+* **server:** support explicit node_tag and automatic geoip location tag detection for share links ([63f90e9](https://github.com/sixban6/singctl/commit/63f90e97c0797c3d86460be49205098f76c49e62))
+
 ## [1.40.1](https://github.com/sixban6/singctl/compare/v1.40.0...v1.40.1) (2026-10-26)
 
 
