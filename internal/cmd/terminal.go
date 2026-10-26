@@ -186,9 +186,9 @@ Host vps-ws
     HostName 127.0.0.1
     Port %d
     User root
-    ProxyCommand wstunnel client --log-lvl off --tls-certificate ~/.ssh/client.crt --tls-private-key ~/.ssh/client.key --http-upgrade-path-prefix %s -L stdio://%%%%h:%%%%p wss://%s
+    ProxyCommand wstunnel client --log-lvl off --tls-certificate ~/.ssh/client.crt --tls-private-key ~/.ssh/client.key --http-upgrade-path-prefix %s -L stdio://127.0.0.1:%d wss://%s
 EOF
-`, sshPort, sshPathPrefix, res.Domain)
+`, sshPort, sshPathPrefix, sshPort, res.Domain)
 	fmt.Println()
 	fmt.Println("  4. 在 WezTerm 中直接敲原生命令直连:")
 	fmt.Println("     ssh vps-ws")
@@ -276,9 +276,9 @@ Host vps-ws
     HostName 127.0.0.1
     Port %d
     User root
-    ProxyCommand wstunnel client --log-lvl off --tls-certificate ~/.ssh/client.crt --tls-private-key ~/.ssh/client.key --http-upgrade-path-prefix %s -L stdio://%%%%h:%%%%p wss://%s
+    ProxyCommand wstunnel client --log-lvl off --tls-certificate ~/.ssh/client.crt --tls-private-key ~/.ssh/client.key --http-upgrade-path-prefix %s -L stdio://127.0.0.1:%d wss://%s
 EOF
-`, sshPort, sshPathPrefix, st.Domain)
+`, sshPort, sshPathPrefix, sshPort, st.Domain)
 	fmt.Println("═══════════════════════════════════════════════════════════")
 	fmt.Println()
 }
