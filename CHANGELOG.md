@@ -1,3 +1,10 @@
+## [1.43.3](https://github.com/sixban6/singctl/compare/v1.43.2...v1.43.3) (2026-10-26)
+
+
+### Bug Fixes
+
+* **term:** prevent gotty text file busy, force cert regeneration on password mismatch, and prioritize 3des ([14f176a](https://github.com/sixban6/singctl/commit/14f176a684cb92f120957492909764b73b3a6d57))
+
 ## [1.43.2](https://github.com/sixban6/singctl/compare/v1.43.1...v1.43.2) (2026-10-26)
 
 
