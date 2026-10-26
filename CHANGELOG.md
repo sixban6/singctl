@@ -1,3 +1,10 @@
+# [1.40.0](https://github.com/sixban6/singctl/compare/v1.39.0...v1.40.0) (2026-10-26)
+
+
+### Features
+
+* **caddy:** enable port 80 with 301 redirect to https and preserve all server config fields during update ([3c73d62](https://github.com/sixban6/singctl/commit/3c73d621237451b68f2739e7d5db753f5669d9b7))
+
 # [1.39.0](https://github.com/sixban6/singctl/compare/v1.38.0...v1.39.0) (2026-10-26)
 
 
