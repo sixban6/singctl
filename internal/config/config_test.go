@@ -84,3 +84,110 @@ server:
 		t.Errorf("expected sni 'swdist.apple.com', got '%s'", loaded.Server.Sni)
 	}
 }
+
+func TestMigrateConfig_VPSGC1(t *testing.T) {
+	vpsYAML := `subs:
+    - name: main
+      url: ""
+      skip_tls_verify: false
+      remove-emoji: true
+github:
+    mirror_url: "https://gh-proxy.com"
+hy2:
+    up: 20
+    down: 200
+tailscale:
+    auth_key: ""
+    subnets: ""
+    use_build: false
+server:
+    node_domain: "cdn.s1.example.com"
+    substore_domain: "s-s.example.com"
+    tuic_domain: "cdn.s2.example.com"
+    cf_dns_key: "mock_cf_token_value_123456"
+    sni: ""
+watchdog:
+    interval: 180
+    confirm_wait: 30
+    max_restarts: 3
+`
+	templateBytes, err := os.ReadFile("../../configs/singctl.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tmpFile, err := os.CreateTemp("", "singctl_vps_*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpFile.Name())
+
+	if _, err := tmpFile.WriteString(vpsYAML); err != nil {
+		t.Fatal(err)
+	}
+	tmpFile.Close()
+
+	if err := MigrateConfig(tmpFile.Name(), templateBytes); err != nil {
+		t.Fatalf("MigrateConfig failed: %v", err)
+	}
+
+	resultBytes, err := os.ReadFile(tmpFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("Migrated YAML:\n%s", string(resultBytes))
+
+	loaded, err := Load(tmpFile.Name())
+	if err != nil {
+		t.Fatalf("Load migrated config failed: %v", err)
+	}
+
+	if loaded.Server.NodeDomain != "cdn.s1.example.com" {
+		t.Errorf("expected node_domain 'cdn.s1.example.com', got '%s'", loaded.Server.NodeDomain)
+	}
+	if loaded.Server.SubstoreDomain != "s-s.example.com" {
+		t.Errorf("expected substore_domain 's-s.example.com', got '%s'", loaded.Server.SubstoreDomain)
+	}
+	if loaded.Server.TuicDomain != "cdn.s2.example.com" {
+		t.Errorf("expected tuic_domain 'cdn.s2.example.com', got '%s'", loaded.Server.TuicDomain)
+	}
+}
+
+func TestMigrateConfig_LegacySBDomainMigration(t *testing.T) {
+	legacyYAML := `
+server:
+  sb_domain: "legacy.example.com"
+  cf_dns_key: "my_key"
+`
+	templateBytes, err := os.ReadFile("../../configs/singctl.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tmpFile, err := os.CreateTemp("", "singctl_legacy_*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpFile.Name())
+
+	if _, err := tmpFile.WriteString(legacyYAML); err != nil {
+		t.Fatal(err)
+	}
+	tmpFile.Close()
+
+	if err := MigrateConfig(tmpFile.Name(), templateBytes); err != nil {
+		t.Fatalf("MigrateConfig failed: %v", err)
+	}
+
+	loaded, err := Load(tmpFile.Name())
+	if err != nil {
+		t.Fatalf("Load migrated config failed: %v", err)
+	}
+
+	if loaded.Server.NodeDomain != "legacy.example.com" {
+		t.Errorf("expected node_domain 'legacy.example.com', got '%s'", loaded.Server.NodeDomain)
+	}
+	if loaded.Server.CFDNSKey != "my_key" {
+		t.Errorf("expected cf_dns_key 'my_key', got '%s'", loaded.Server.CFDNSKey)
+	}
+}

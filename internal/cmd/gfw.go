@@ -84,7 +84,7 @@ func NewGFWCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&sni, "sni", "", "Reality / 伪装 SNI 域名 (例如 swdist.apple.com)")
-	cmd.Flags().StringVar(&domain, "domain", "", "节点所属域名 (例如 cdn.l1.sixleaves.top)")
+	cmd.Flags().StringVar(&domain, "domain", "", "节点所属域名 (例如 cdn.l1.example.com)")
 	cmd.Flags().IntVarP(&timeoutSec, "timeout", "t", 4, "单项探测超时时间 (秒)")
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "显示详细的探测过程与调试信息")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "以 JSON 格式输出检测报告")
