@@ -199,7 +199,7 @@ func TestPreviewCaddyfile_WebTerminal(t *testing.T) {
 	if !strings.Contains(content, "handle /ops-shell-test123/* {") {
 		t.Errorf("expected handle /ops-shell-test123/*, got:\n%s", content)
 	}
-	if !strings.Contains(content, "expression {http.request.tls.client.subject} == \"\"") {
+	if !strings.Contains(content, "expression {http.request.tls.client.subject} == ''") {
 		t.Errorf("expected client subject empty check, got:\n%s", content)
 	}
 	if !strings.Contains(content, "respond @unauth 404") {
