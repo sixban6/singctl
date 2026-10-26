@@ -1,3 +1,10 @@
+## [1.43.1](https://github.com/sixban6/singctl/compare/v1.43.0...v1.43.1) (2026-10-26)
+
+
+### Bug Fixes
+
+* **term:** wrap fallback file_server in handle block to prevent try_files hijacking terminal route ([5d994ec](https://github.com/sixban6/singctl/commit/5d994ecc3a0f8354e4f3f7ee36e8ed376dfd2718))
+
 # [1.43.0](https://github.com/sixban6/singctl/compare/v1.42.0...v1.43.0) (2026-10-26)
 
 
