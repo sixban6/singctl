@@ -1,3 +1,10 @@
+# [1.44.0](https://github.com/sixban6/singctl/compare/v1.43.4...v1.44.0) (2026-10-26)
+
+
+### Features
+
+* **term:** automate native SSH-over-WSS via wstunnel and mTLS behind Caddy 443 ([dfde932](https://github.com/sixban6/singctl/commit/dfde9327ffcb0d704ac11dcb8de4e0b8cab2b331))
+
 ## [1.43.4](https://github.com/sixban6/singctl/compare/v1.43.3...v1.43.4) (2026-10-26)
 
 
