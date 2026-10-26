@@ -124,6 +124,7 @@ DNS optimization, and complete service lifecycle management.`,
 		cmd.NewCfTokenCmd(configPath),
 		cmd.NewDaemonCommand(),
 		cmd.NewWebCmd(Version),
+		cmd.NewGFWCmd(),
 	)
 
 	if err := rootCmd.Execute(); err != nil {
