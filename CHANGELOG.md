@@ -1,3 +1,10 @@
+# [1.37.0](https://github.com/sixban6/singctl/compare/v1.36.0...v1.37.0) (2026-10-26)
+
+
+### Features
+
+* **singbox:** support resilient multi-subscription skipping with detailed logs and standardize default collection name to all ([ce4732f](https://github.com/sixban6/singctl/commit/ce4732fccc4c1506a132eceb163b41bc0e0b0467))
+
 # [1.36.0](https://github.com/sixban6/singctl/compare/v1.35.0...v1.36.0) (2026-10-25)
 
 
