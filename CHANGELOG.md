@@ -1,3 +1,10 @@
+## [1.43.4](https://github.com/sixban6/singctl/compare/v1.43.3...v1.43.4) (2026-10-26)
+
+
+### Bug Fixes
+
+* **term:** robust package manager detection and decouple optional packages ([01f2d8d](https://github.com/sixban6/singctl/commit/01f2d8d66f412a9892b3d166d6670c3f3f27d258))
+
 ## [1.43.3](https://github.com/sixban6/singctl/compare/v1.43.2...v1.43.3) (2026-10-26)
 
 
