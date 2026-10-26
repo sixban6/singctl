@@ -1,3 +1,10 @@
+## [1.43.2](https://github.com/sixban6/singctl/compare/v1.43.1...v1.43.2) (2026-10-26)
+
+
+### Bug Fixes
+
+* **term,config:** purge anytls_port, fix p12 keychain compatibility, and auto-detect ssh port for scp ([b031fa6](https://github.com/sixban6/singctl/commit/b031fa6cc231d2f46750cb4b586ae4ae788b5c7d))
+
 ## [1.43.1](https://github.com/sixban6/singctl/compare/v1.43.0...v1.43.1) (2026-10-26)
 
 
