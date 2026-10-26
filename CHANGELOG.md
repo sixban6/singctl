@@ -1,3 +1,10 @@
+# [1.39.0](https://github.com/sixban6/singctl/compare/v1.38.0...v1.39.0) (2026-10-26)
+
+
+### Features
+
+* **gfw:** add active probing command to detect and score vpn/proxy indicators ([a211793](https://github.com/sixban6/singctl/commit/a2117937fd6eb7a82a5aa1750c89ee9627b7d8ba))
+
 # [1.38.0](https://github.com/sixban6/singctl/compare/v1.37.0...v1.38.0) (2026-10-26)
 
 
