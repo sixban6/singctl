@@ -174,9 +174,17 @@ func newGenCmd(cfg *config.Config) *cobra.Command {
 		Short:   "生成 sing-box 配置文件(可指定目标平台) / Generate sing-box configuration",
 		Aliases: []string{"g"},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			effectiveCfg := cfg
+			if configPathFlag := cmd.Flag("config"); configPathFlag != nil && configPathFlag.Value.String() != "" {
+				loadedCfg, err := config.Load(configPathFlag.Value.String())
+				if err != nil {
+					return fmt.Errorf("failed to load config from %s: %w", configPathFlag.Value.String(), err)
+				}
+				effectiveCfg = loadedCfg
+			}
 
 			// gen 命令必须依赖 subs，提前校验防止 index-out-of-range panic
-			if err := cfg.ValidateSubs(); err != nil {
+			if err := effectiveCfg.ValidateSubs(); err != nil {
 				return fmt.Errorf("subscription config invalid: %w", err)
 			}
 
@@ -186,7 +194,7 @@ func newGenCmd(cfg *config.Config) *cobra.Command {
 			}
 			isIOS := target == singbox.PlatformIOS
 
-			generator := singbox.NewConfigGenerator(cfg)
+			generator := singbox.NewConfigGenerator(effectiveCfg)
 			configJSON, err := generator.GenerateForPlatform(target)
 			if err != nil {
 				return err

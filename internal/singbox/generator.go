@@ -6,8 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"runtime"
+	"strings"
+	"sync"
 	"time"
 
 	"singctl/internal/config"
@@ -108,6 +111,10 @@ func (g *ConfigGenerator) GenerateForPlatform(platform string) (string, error) {
 		}
 	}
 
+	if len(g.config.Subs) == 0 {
+		return "", errors.New("配置中未找到任何订阅源 (subs 列表为空)")
+	}
+
 	var raw string
 	// 如果只有一个订阅，使用单订阅API
 	if len(g.config.Subs) == 1 {
@@ -142,6 +149,9 @@ func (g *ConfigGenerator) generateSingleSubscription(ctx context.Context, dnsSer
 		clientSubnet = g.getSubnetFromIP(dnsServer)
 	}
 
+	handler := newSubLogHandler()
+	logger := slog.New(handler)
+
 	configBytes, err := singgen.GenerateConfigBytes(ctx, sub.URL,
 		singgen.WithTemplate(g.defaultTplVer),
 		singgen.WithPlatform(platform),
@@ -154,10 +164,11 @@ func (g *ConfigGenerator) generateSingleSubscription(ctx context.Context, dnsSer
 		singgen.WithBandwidthParams(g.config.Hy2.Up, g.config.Hy2.Down),
 		singgen.WithTSAuthKey(authKey),
 		singgen.WithTSLanIPCIDR(lanIpcidr),
+		singgen.WithLogger(logger),
 	)
 
 	if err != nil {
-		return "", fmt.Errorf("failed to generate single subscription config: %w", err)
+		return "", fmt.Errorf("failed to generate single subscription config (订阅 [%s]): %w", sub.Name, err)
 	}
 
 	return string(configBytes), nil
@@ -188,12 +199,12 @@ func (g *ConfigGenerator) getTailScaleParmas() (string, string) {
 // generateMultiSubscription 处理多订阅
 func (g *ConfigGenerator) generateMultiSubscription(ctx context.Context, dnsServer, platform string) (string, error) {
 	// 构建多订阅配置
-
 	authKey, lanIpcidr := "", ""
-	webui := ""
+	webui, clientSubnet := "", ""
 	if platform != PlatformIOS {
 		authKey, lanIpcidr = g.getTailScaleParmas()
 		webui = g.webui
+		clientSubnet = g.getSubnetFromIP(dnsServer)
 	}
 
 	multiConfig := &singgen.MultiConfig{
@@ -203,6 +214,7 @@ func (g *ConfigGenerator) generateMultiSubscription(ctx context.Context, dnsServ
 			MirrorURL:      g.config.GitHub.MirrorURL,
 			DNSLocalServer: dnsServer,
 			WebUIAddress:   webui,
+			ClientSubnet:   clientSubnet,
 			RemoveEmoji:    false, // 全局默认不移除，由各订阅控制
 			SkipTLSVerify:  false,
 			HTTPTimeout:    30 * time.Second,
@@ -228,13 +240,109 @@ func (g *ConfigGenerator) generateMultiSubscription(ctx context.Context, dnsServ
 		multiConfig.Subscriptions = append(multiConfig.Subscriptions, subConfig)
 	}
 
+	handler := newSubLogHandler()
+	logger := slog.New(handler)
+
 	// 生成配置
-	configData, err := singgen.GenerateConfigBytesFromMulti(ctx, multiConfig)
+	configData, err := singgen.GenerateConfigBytesFromMulti(ctx, multiConfig, singgen.WithLogger(logger))
 	if err != nil {
+		handler.mu.Lock()
+		defer handler.mu.Unlock()
+		if len(handler.failedSubs) > 0 {
+			var details []string
+			for _, sub := range g.config.Subs {
+				if reason, ok := handler.failedSubs[sub.Name]; ok {
+					details = append(details, fmt.Sprintf("- 订阅 [%s]: %s", sub.Name, reason))
+				}
+			}
+			return "", fmt.Errorf("所有订阅均未获取到有效节点，配置生成终止。失败详情:\n%s", strings.Join(details, "\n"))
+		}
 		return "", fmt.Errorf("failed to generate multi-subscription config: %w", err)
 	}
 
 	return string(configData), nil
+}
+
+type subLogHandler struct {
+	mu          sync.Mutex
+	failedSubs  map[string]string // sub name -> failure reason
+	successSubs map[string]int    // sub name -> node count
+}
+
+func newSubLogHandler() *subLogHandler {
+	return &subLogHandler{
+		failedSubs:  make(map[string]string),
+		successSubs: make(map[string]int),
+	}
+}
+
+func (h *subLogHandler) Enabled(_ context.Context, _ slog.Level) bool {
+	return true
+}
+
+func (h *subLogHandler) Handle(_ context.Context, r slog.Record) error {
+	attrs := make(map[string]any)
+	r.Attrs(func(a slog.Attr) bool {
+		attrs[a.Key] = a.Value.Any()
+		return true
+	})
+
+	name, _ := attrs["name"].(string)
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	switch r.Message {
+	case "Processing subscription":
+		url, _ := attrs["url"].(string)
+		log.Info("正在解析订阅 [%s] (%s)...", name, url)
+	case "Failed to parse subscription":
+		errVal := attrs["error"]
+		errStr := fmt.Sprintf("%v", errVal)
+		h.failedSubs[name] = errStr
+		log.Warn("订阅 [%s] 获取或解析失败 (原因: %v)，已跳过该订阅", name, errVal)
+	case "No nodes found in subscription":
+		h.failedSubs[name] = "未获取到有效节点"
+		log.Warn("订阅 [%s] 未获取到有效节点，已跳过该订阅", name)
+	case "Failed to transform nodes":
+		errVal := attrs["error"]
+		errStr := fmt.Sprintf("节点转换失败: %v", errVal)
+		h.failedSubs[name] = errStr
+		log.Warn("订阅 [%s] 节点转换失败 (原因: %v)，已跳过该订阅", name, errVal)
+	case "Successfully processed subscription":
+		nodeCount := 0
+		if nc, ok := attrs["node_count"].(int); ok {
+			nodeCount = nc
+		} else if nc, ok := attrs["node_count"].(int64); ok {
+			nodeCount = int(nc)
+		}
+		outboundCount := 0
+		if oc, ok := attrs["outbound_count"].(int); ok {
+			outboundCount = oc
+		} else if oc, ok := attrs["outbound_count"].(int64); ok {
+			outboundCount = int(oc)
+		}
+		h.successSubs[name] = nodeCount
+		log.Success("订阅 [%s] 成功解析 %d 个有效节点 (生成 %d 个出站)", name, nodeCount, outboundCount)
+	case "Merged all subscriptions":
+		total := 0
+		if t, ok := attrs["total_outbounds"].(int); ok {
+			total = t
+		} else if t, ok := attrs["total_outbounds"].(int64); ok {
+			total = int(t)
+		}
+		log.Info("所有可用订阅合并完成，有效出站节点总计: %d 个", total)
+	}
+
+	return nil
+}
+
+func (h *subLogHandler) WithAttrs(_ []slog.Attr) slog.Handler {
+	return h
+}
+
+func (h *subLogHandler) WithGroup(_ string) slog.Handler {
+	return h
 }
 
 func (g *ConfigGenerator) GetWebUIAddress() string {
