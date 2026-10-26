@@ -169,6 +169,7 @@ func NewServerCmd(configPath string) *cobra.Command {
 	cmd.AddCommand(newResetServerCmd(configPath))
 	cmd.AddCommand(NewSyncServerCmd(configPath))
 	cmd.AddCommand(NewInfoServerCmd(configPath))
+	cmd.AddCommand(NewTerminalCmd(configPath))
 	return cmd
 }
 
@@ -753,6 +754,15 @@ func showServerInfo(configPath string) error {
 	}
 	if nodeDomain := cfg.Server.GetNodeDomain(); nodeDomain != "" {
 		fmt.Printf("• 节点域名访问: https://%s\n", nodeDomain)
+	}
+	if cfg.Server.WebTerminal.Enabled && cfg.Server.WebTerminal.Path != "" {
+		domain := cfg.Server.GetNodeDomain()
+		if domain == "" {
+			domain = cfg.Server.GetSubstoreDomain()
+		}
+		if domain != "" {
+			fmt.Printf("• Web 运维终端:  https://%s%s/ (mTLS 双向认证保护)\n", domain, cfg.Server.WebTerminal.Path)
+		}
 	}
 	fmt.Println("========================================================")
 

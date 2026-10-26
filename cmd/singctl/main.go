@@ -125,6 +125,7 @@ DNS optimization, and complete service lifecycle management.`,
 		cmd.NewDaemonCommand(),
 		cmd.NewWebCmd(Version),
 		cmd.NewGFWCmd(),
+		cmd.NewTerminalCmd(configPath),
 		cmd.NewInternalMigrateCmd(),
 	)
 
