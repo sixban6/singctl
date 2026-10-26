@@ -171,12 +171,11 @@ func TestMergeNodeContent_DeduplicateCurrent(t *testing.T) {
 	}
 }
 
-func TestMergeNodeContent_Tuic(t *testing.T) {
+func TestMergeNodeContent_DeduplicateIdentical(t *testing.T) {
 	cfg := &config.Config{
 		Server: config.ServerConfig{
-			SBDomain:   "hk.example.com",
-			TuicDomain: "tuic.hk.example.com",
-			Sni:        "swdist.apple.com",
+			SBDomain: "hk.example.com",
+			Sni:      "swdist.apple.com",
 		},
 	}
 	sbs, err := NewSingBoxServer(cfg)
@@ -184,22 +183,19 @@ func TestMergeNodeContent_Tuic(t *testing.T) {
 		t.Fatalf("NewSingBoxServer failed: %v", err)
 	}
 
-	vps1Tuic := "tuic://uuid-vps1:uuid-vps1@us.example.com:443/?sni=us.example.com&alpn=h3#sec_us_tuic"
-	oldHkTuic := "tuic://old-uuid:old-uuid@tuic.hk.example.com:443/?sni=tuic.hk.example.com&alpn=h3#sec_hk_tuic"
-
-	existing := vps1Tuic + "\n" + oldHkTuic
-	res := mergeNodeContent(existing, sbs.ShareLinkTuic, sbs, "tuic")
-
+	// Repeatedly merging the exact same link must NEVER duplicate it
+	res := mergeNodeContent(sbs.ShareLinkHy2, sbs.ShareLinkHy2, sbs, "hysteria2")
 	lines := strings.Split(res, "\n")
-	if len(lines) != 2 {
-		t.Fatalf("expected 2 lines, got %d: %q", len(lines), res)
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 line after merging identical, got %d: %q", len(lines), res)
 	}
 
-	if lines[0] != vps1Tuic {
-		t.Errorf("vps1 tuic should be preserved, got %q", lines[0])
-	}
-	if lines[1] != sbs.ShareLinkTuic {
-		t.Errorf("current hk tuic should be updated, got %q", lines[1])
+	// Multiple duplicates in existing content should be strictly cleaned up
+	existing := strings.Join([]string{sbs.ShareLinkHy2, sbs.ShareLinkHy2, sbs.ShareLinkHy2}, "\n")
+	res2 := mergeNodeContent(existing, sbs.ShareLinkHy2, sbs, "hysteria2")
+	lines2 := strings.Split(res2, "\n")
+	if len(lines2) != 1 {
+		t.Fatalf("expected 1 line after deduplicating multiple identical, got %d: %q", len(lines2), res2)
 	}
 }
 
@@ -207,7 +203,6 @@ func TestSubstore_GetCorsAllowedOrigins(t *testing.T) {
 	cfg := &config.Config{
 		Server: config.ServerConfig{
 			SBDomain:           "sub.example.com",
-			TuicDomain:         "tuic.example.com",
 			CorsAllowedOrigins: "https://custom.example.com, https://another.example.com",
 		},
 	}
@@ -217,8 +212,6 @@ func TestSubstore_GetCorsAllowedOrigins(t *testing.T) {
 	expectedOrigins := []string{
 		"https://sub.example.com",
 		"http://sub.example.com",
-		"https://tuic.example.com",
-		"http://tuic.example.com",
 		"https://custom.example.com",
 		"https://another.example.com",
 		"https://sub-store.vercel.app",
@@ -241,7 +234,6 @@ func TestSubstore_GetCorsAllowedOrigins(t *testing.T) {
 		Server: config.ServerConfig{
 			NodeDomain:     "node.example.com",
 			SubstoreDomain: "substore.example.com",
-			TuicDomain:     "tuic.example.com",
 		},
 	}
 	sbSeparated := NewSubstore(cfgSeparated, "testkey")
@@ -259,7 +251,6 @@ func TestSingBoxServer_NodeTag(t *testing.T) {
 		Server: config.ServerConfig{
 			NodeTag:    "los",
 			NodeDomain: "cdn.l1.example.com",
-			TuicDomain: "cdn.l2.example.com",
 			Sni:        "swdist.apple.com",
 		},
 	}
@@ -274,9 +265,6 @@ func TestSingBoxServer_NodeTag(t *testing.T) {
 	if sbs.Hy2Tag() != "sec_los_hy2" {
 		t.Errorf("expected Hy2Tag to be %q, got %q", "sec_los_hy2", sbs.Hy2Tag())
 	}
-	if sbs.TuicTag() != "sec_los_tuic" {
-		t.Errorf("expected TuicTag to be %q, got %q", "sec_los_tuic", sbs.TuicTag())
-	}
 
 	if !strings.HasSuffix(sbs.ShareLinkVless, "#sec_los_vr") {
 		t.Errorf("expected ShareLinkVless to end with #sec_los_vr, got %q", sbs.ShareLinkVless)
@@ -284,14 +272,34 @@ func TestSingBoxServer_NodeTag(t *testing.T) {
 	if !strings.HasSuffix(sbs.ShareLinkHy2, "#sec_los_hy2") {
 		t.Errorf("expected ShareLinkHy2 to end with #sec_los_hy2, got %q", sbs.ShareLinkHy2)
 	}
-	if !strings.HasSuffix(sbs.ShareLinkTuic, "#sec_los_tuic") {
-		t.Errorf("expected ShareLinkTuic to end with #sec_los_tuic, got %q", sbs.ShareLinkTuic)
-	}
 
 	// Verify mergeNodeContent replaces an existing node that used old sec_cdn_vr tag
 	oldVless := "vless://uuid-test@cdn.l1.example.com:443?type=tcp&security=reality&sni=swdist.apple.com#sec_cdn_vr"
 	merged := mergeNodeContent(oldVless, sbs.ShareLinkVless, sbs, "vless")
 	if merged != sbs.ShareLinkVless {
 		t.Errorf("expected old sec_cdn_vr node to be replaced by %q, got %q", sbs.ShareLinkVless, merged)
+	}
+}
+
+func TestSubstore_CleanLegacyAutoCollection(t *testing.T) {
+	cols := []interface{}{
+		map[string]interface{}{
+			"name":          "Auto",
+			"displayName":   "Auto",
+			"subscriptions": []interface{}{"auto_generated_hy2", "auto_generated_vless"},
+		},
+	}
+
+	result := addToCollection(cols, []string{"auto_generated_hy2", "auto_generated_vless"})
+
+	if len(result) != 1 {
+		t.Fatalf("expected exactly 1 collection, got %d", len(result))
+	}
+	firstCol, ok := result[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map in collection, got %T", result[0])
+	}
+	if firstCol["name"] != "all" {
+		t.Errorf("expected collection name 'all', got %v", firstCol["name"])
 	}
 }

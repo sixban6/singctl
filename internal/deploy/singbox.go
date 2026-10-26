@@ -23,10 +23,8 @@ import (
 )
 
 type SingBoxServer struct {
-	crtPath     string
-	keyPath     string
-	tuicCrtPath string
-	tuicKeyPath string
+	crtPath string
+	keyPath string
 
 	hyUUID     string
 	privateKey string
@@ -37,10 +35,8 @@ type SingBoxServer struct {
 
 	hy2Tag         string
 	vrTag          string
-	tuicTag        string
 	ShareLinkHy2   string
 	ShareLinkVless string
-	ShareLinkTuic  string
 }
 
 func NewSingBoxServer(cfg *config.Config) (*SingBoxServer, error) {
@@ -71,23 +67,12 @@ func (sbs *SingBoxServer) initTag() {
 	}
 	sbs.hy2Tag = fmt.Sprintf("sec_%s_hy2", tagPrefix)
 	sbs.vrTag = fmt.Sprintf("sec_%s_vr", tagPrefix)
-	sbs.tuicTag = fmt.Sprintf("sec_%s_tuic", tagPrefix)
-}
-
-// TuicDomain returns the configured or default TUIC domain.
-func (sbs *SingBoxServer) TuicDomain() string {
-	if sbs.cfg != nil {
-		return sbs.cfg.Server.GetTuicDomain()
-	}
-	return ""
 }
 
 func (sbs *SingBoxServer) updateShareLinks() {
 	nodeDomain := sbs.cfg.Server.GetNodeDomain()
-	tuicDomain := sbs.TuicDomain()
 	sbs.ShareLinkHy2 = fmt.Sprintf("hysteria2://%s@%s:443/?sni=%s&alpn=h3&insecure=0#%s", sbs.hyUUID, nodeDomain, nodeDomain, sbs.hy2Tag)
 	sbs.ShareLinkVless = fmt.Sprintf("vless://%s@%s:443?type=tcp&encryption=none&security=reality&pbk=%s&fp=chrome&sni=%s&sid=%s&flow=xtls-rprx-vision#%s", sbs.hyUUID, nodeDomain, sbs.publicKey, sbs.cfg.Server.Sni, sbs.shortID, sbs.vrTag)
-	sbs.ShareLinkTuic = fmt.Sprintf("tuic://%s:%s@%s:443/?sni=%s&alpn=h3&congestion_control=bbr#%s", sbs.hyUUID, sbs.hyUUID, tuicDomain, tuicDomain, sbs.tuicTag)
 }
 
 // HyUUID returns the Hysteria2 password / VLESS UUID.
@@ -113,19 +98,6 @@ func (sbs *SingBoxServer) Hy2Tag() string {
 // VrTag returns the VLESS Reality tag.
 func (sbs *SingBoxServer) VrTag() string {
 	return sbs.vrTag
-}
-
-// TuicTag returns the TUIC tag.
-func (sbs *SingBoxServer) TuicTag() string {
-	return sbs.tuicTag
-}
-
-// TuicPort returns the configured or default TUIC port (443).
-func (sbs *SingBoxServer) TuicPort() int {
-	if sbs.cfg != nil && sbs.cfg.Server.TuicPort > 0 {
-		return sbs.cfg.Server.TuicPort
-	}
-	return 443
 }
 
 // AnyTLSPort returns the configured or default AnyTLS port (443).
@@ -192,16 +164,6 @@ func (sbs *SingBoxServer) initCaddyCertPath() {
 	logger.Info("Waiting for Caddy to generate certificates for %s...", nodeDomain)
 	sbs.crtPath, sbs.keyPath = findCaddyCertForDomain(nodeDomain)
 	logger.Success("Found certificate at %s", sbs.crtPath)
-
-	tuicDomain := sbs.TuicDomain()
-	if tuicDomain != "" && tuicDomain != nodeDomain {
-		logger.Info("Waiting for Caddy to generate certificates for %s...", tuicDomain)
-		sbs.tuicCrtPath, sbs.tuicKeyPath = findCaddyCertForDomain(tuicDomain)
-		logger.Success("Found certificate at %s", sbs.tuicCrtPath)
-	} else {
-		sbs.tuicCrtPath = sbs.crtPath
-		sbs.tuicKeyPath = sbs.keyPath
-	}
 }
 func (sbs *SingBoxServer) initVRParams() error {
 	// If credentials were already loaded (e.g. via LoadExistingCredentials), skip generation.
@@ -437,8 +399,6 @@ func (sbs *SingBoxServer) ShowLoginInfo() {
 	fmt.Printf("%s\n", sbs.ShareLinkHy2)
 	fmt.Println("\n🚀 VLESS Reality Access Link (Copy to your client):")
 	fmt.Printf("%s\n", sbs.ShareLinkVless)
-	fmt.Println("\n🚀 TUIC Access Link (Copy to your client):")
-	fmt.Printf("%s\n", sbs.ShareLinkTuic)
 	fmt.Println("========================================================")
 }
 
@@ -455,41 +415,24 @@ func (sbs *SingBoxServer) PreviewServerConfig() (string, error) {
 		return "", fmt.Errorf("failed to parse sing-box template: %w", err)
 	}
 
-	tuicCrt := sbs.tuicCrtPath
-	if tuicCrt == "" {
-		tuicCrt = sbs.crtPath
-	}
-	tuicKey := sbs.tuicKeyPath
-	if tuicKey == "" {
-		tuicKey = sbs.keyPath
-	}
-
 	type tmplContext struct {
 		HyUUID            string
 		SBDomain          string
-		TuicDomain        string
 		CertPath          string
 		KeyPath           string
-		TuicCertPath      string
-		TuicKeyPath       string
 		RealityPrivateKey string
 		RealityShortID    string
 		Sni               string
-		TuicPort          int
 		AnyTLSPort        int
 	}
 	ctx := tmplContext{
 		HyUUID:            sbs.hyUUID,
 		SBDomain:          sbs.cfg.Server.GetNodeDomain(),
-		TuicDomain:        sbs.TuicDomain(),
 		CertPath:          sbs.crtPath,
 		KeyPath:           sbs.keyPath,
-		TuicCertPath:      tuicCrt,
-		TuicKeyPath:       tuicKey,
 		RealityPrivateKey: sbs.privateKey,
 		RealityShortID:    sbs.shortID,
 		Sni:               sbs.cfg.Server.Sni,
-		TuicPort:          sbs.TuicPort(),
 		AnyTLSPort:        sbs.AnyTLSPort(),
 	}
 

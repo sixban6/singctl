@@ -31,8 +31,7 @@ server:
   sb_domain: "sub.example.com"
   node_domain: "cdn.l1.example.com"
   substore_domain: "l-s.example.com"
-  tuic_domain: "cdn.l2.example.com"
-  server_ip: "107.172.89.197"
+  server_ip: "198.51.100.1"
   cf_dns_key: "my_token"
   sni: "swdist.apple.com"
 `
@@ -68,11 +67,8 @@ server:
 	if loaded.Server.SubstoreDomain != "l-s.example.com" {
 		t.Errorf("expected substore_domain 'l-s.example.com', got '%s'", loaded.Server.SubstoreDomain)
 	}
-	if loaded.Server.TuicDomain != "cdn.l2.example.com" {
-		t.Errorf("expected tuic_domain 'cdn.l2.example.com', got '%s'", loaded.Server.TuicDomain)
-	}
-	if loaded.Server.ServerIP != "107.172.89.197" {
-		t.Errorf("expected server_ip '107.172.89.197', got '%s'", loaded.Server.ServerIP)
+	if loaded.Server.ServerIP != "198.51.100.1" {
+		t.Errorf("expected server_ip '198.51.100.1', got '%s'", loaded.Server.ServerIP)
 	}
 	if loaded.Server.SBDomain != "sub.example.com" {
 		t.Errorf("expected sb_domain 'sub.example.com', got '%s'", loaded.Server.SBDomain)
@@ -103,7 +99,6 @@ tailscale:
 server:
     node_domain: "cdn.s1.example.com"
     substore_domain: "s-s.example.com"
-    tuic_domain: "cdn.s2.example.com"
     cf_dns_key: "mock_cf_token_value_123456"
     sni: ""
 watchdog:
@@ -147,9 +142,6 @@ watchdog:
 	}
 	if loaded.Server.SubstoreDomain != "s-s.example.com" {
 		t.Errorf("expected substore_domain 's-s.example.com', got '%s'", loaded.Server.SubstoreDomain)
-	}
-	if loaded.Server.TuicDomain != "cdn.s2.example.com" {
-		t.Errorf("expected tuic_domain 'cdn.s2.example.com', got '%s'", loaded.Server.TuicDomain)
 	}
 }
 

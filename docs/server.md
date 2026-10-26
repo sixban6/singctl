@@ -10,7 +10,7 @@
 
 ```
 客户端
-  │ VLESS / Hysteria2 / TUIC / AnyTLS
+  │ VLESS / Hysteria2
   ▼
 Caddy (反向代理 + TLS 证书)
   │
@@ -23,10 +23,9 @@ sing-box (核心路由)
 
 Caddy 负责统一监听 443 端口（TCP 与 UDP），基于 Layer 4 SNI 进行智能分流并申请 TLS 证书，sing-box 处理代理协议（所有入站均安全监听在 `127.0.0.1` 本地回环端口），SubStore 提供订阅转换服务。
 
-服务端支持部署 3 种主力协议节点（全部统一通过 443 端口接入，ALPN 均为标准伪装）：
-- **Hysteria 2**：基于 QUIC/UDP（端口 443，QUIC SNI `sb_domain`，ALPN `h3`）与域名 TLS 证书。
+服务端支持部署 2 种主力协议节点（全部统一通过 443 端口接入，ALPN 均为标准伪装）：
+- **Hysteria 2**：基于 QUIC/UDP（端口 443，QUIC SNI `node_domain`，ALPN `h3`）与域名 TLS 证书。
 - **VLESS Reality**：基于 TCP（端口 443，Reality SNI 伪装分流，默认伪装域名 `swdist.apple.com`）。
-- **TUIC**：基于 QUIC/UDP（端口 443，QUIC SNI `tuic_domain`，ALPN `h3`），内置 BBR 拥塞控制与独立域名 TLS 证书。
 
 ---
 
@@ -36,8 +35,9 @@ Caddy 负责统一监听 443 端口（TCP 与 UDP），基于 Layer 4 SNI 进行
 
 ```yaml
 server:
-  sb_domain: "sub.yourdomain.com"         # 主域名（用于 Sub-Store 面板与 Hysteria 2，必填）
-  tuic_domain: "tuic.yourdomain.com"     # TUIC 专属子域名（用于 TUIC UDP 443 SNI 分流，可选，默认 tuic.<sb_domain>）
+  node_tag: ""                            # (可选) 节点地区/名称标识 (例如: los, sg)，留空智能识别
+  node_domain: "node.yourdomain.com"      # 节点主域名（用于 Sub-Store 面板与 Hysteria 2，必填）
+  substore_domain: ""                     # (可选) Sub-Store 专属域名，留空默认使用 node_domain
   cf_dns_key: "your_cloudflare_api_token" # Cloudflare API Token，用于自动申请 TLS 证书（必填）
   sni: "swdist.apple.com"                 # TLS SNI 伪装域名，默认 swdist.apple.com（可选）
 ```
@@ -153,7 +153,7 @@ singctl sr reset singbox
 
 ### `singctl sr sync [target]` — 同步最新节点信息到 Sub-Store
 
-直接从当前正在运行的 `sing-box` 部署配置文件（`/etc/sing-box/config.json`）中读取实际生效的节点凭证与参数（包含 Hysteria 2、VLESS Reality、TUIC 与 AnyTLS 的 UUID/密码、Public Key、Short ID 及端口等），将其同步更新写入到 Sub-Store，并默认重启 Sub-Store 容器确保数据与内存缓存立即生效。
+直接从当前正在运行的 `sing-box` 部署配置文件（`/etc/sing-box/config.json`）中读取实际生效的节点凭证与参数（包含 Hysteria 2 与 VLESS Reality 的 UUID/密码、Public Key、Short ID 及端口等），将其同步更新写入到 Sub-Store，并默认重启 Sub-Store 容器确保数据与内存缓存立即生效。
 
 适用于：修改了 SNI、手动调整过 sing-box 配置，或者 Sub-Store 内节点与服务器实际配置不一致时进行一键同步矫正。
 
@@ -173,7 +173,7 @@ singctl sr sync --restart=false
 
 ### `singctl sr info` — 查看 Sub-Store 管理地址与节点信息
 
-随时查看当前服务器的 Sub-Store 后端管理登录地址，以及正在运行的 3 个主力协议节点（Hysteria 2、VLESS Reality、TUIC）的完整客户端分享链接。
+随时查看当前服务器的 Sub-Store 后端管理登录地址，以及正在运行的主力协议节点（Hysteria 2、VLESS Reality）的完整客户端分享链接。
 
 ```bash
 # 查看服务端信息与节点分享链接

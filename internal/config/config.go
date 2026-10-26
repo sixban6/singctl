@@ -52,11 +52,9 @@ type ServerConfig struct {
 	SBDomain           string `yaml:"sb_domain"`           // 兼容旧配置：默认主域名
 	NodeDomain         string `yaml:"node_domain"`         // 节点主域名 (Hysteria 2 / VLESS 分享链接主机)
 	SubstoreDomain     string `yaml:"substore_domain"`     // Sub-Store 专属域名
-	TuicDomain         string `yaml:"tuic_domain"`         // TUIC 专属域名
 	ServerIP           string `yaml:"server_ip"`           // 公网 IP 地址（选填，未填写时自动探测用于申请 Let's Encrypt 原生 IP 证书）
 	CFDNSKey           string `yaml:"cf_dns_key"`
 	Sni                string `yaml:"sni"`
-	TuicPort           int    `yaml:"tuic_port"`
 	AnyTLSPort         int    `yaml:"anytls_port"`
 	CorsAllowedOrigins string `yaml:"cors_allowed_origins"`
 }
@@ -138,22 +136,6 @@ func (s *ServerConfig) GetSubstoreDomain() string {
 	return strings.TrimSpace(s.SBDomain)
 }
 
-// GetTuicDomain returns the domain for TUIC.
-// Falls back to "tuic." + GetNodeDomain() if not explicitly set.
-func (s *ServerConfig) GetTuicDomain() string {
-	if s.TuicDomain != "" {
-		return strings.TrimSpace(s.TuicDomain)
-	}
-	base := s.GetNodeDomain()
-	if base == "" {
-		base = s.GetSubstoreDomain()
-	}
-	if base != "" {
-		return "tuic." + base
-	}
-	return ""
-}
-
 // GetNodeTag returns the location/name tag for server nodes (e.g. "los", "sg").
 // If node_tag is explicitly configured, it returns that value.
 // Otherwise, it discovers the location from the server's public IP GeoIP.
@@ -214,7 +196,7 @@ func Load(path string) (*Config, error) {
 		"subs", "name", "url", "skip_tls_verify", "remove-emoji",
 		"github", "mirror_url", "hy2", "up", "down",
 		"tailscale", "auth_key", "use_build", constant.TailscaleSubnets,
-		"server", "node_tag", "sb_domain", "node_domain", "substore_domain", "tuic_domain", "cf_dns_key", "sni", "tuic_port", "anytls_port", "cors_allowed_origins",
+		"server", "node_tag", "sb_domain", "node_domain", "substore_domain", "cf_dns_key", "sni", "anytls_port", "cors_allowed_origins",
 		"watchdog", "interval", "confirm_wait", "max_restarts",
 	}
 	pattern := fmt.Sprintf("(?m)^([ \\t-]*(?:%s)):([^\\s].*)", strings.Join(keys, "|"))
@@ -241,12 +223,6 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Server.SubstoreDomain == "" && cfg.Server.SBDomain != "" {
 		cfg.Server.SubstoreDomain = cfg.Server.SBDomain
-	}
-	if cfg.Server.TuicDomain == "" {
-		cfg.Server.TuicDomain = cfg.Server.GetTuicDomain()
-	}
-	if cfg.Server.TuicPort == 0 {
-		cfg.Server.TuicPort = 443
 	}
 	if cfg.Server.AnyTLSPort == 0 {
 		cfg.Server.AnyTLSPort = 443
@@ -312,7 +288,7 @@ func MigrateConfig(configPath string, templateData []byte) error {
 		"subs", "name", "url", "skip_tls_verify", "remove-emoji",
 		"github", "mirror_url", "hy2", "up", "down",
 		"tailscale", "auth_key", "use_build", constant.TailscaleSubnets,
-		"server", "node_tag", "sb_domain", "node_domain", "substore_domain", "tuic_domain", "server_ip", "cf_dns_key", "sni", "tuic_port", "anytls_port", "cors_allowed_origins",
+		"server", "node_tag", "sb_domain", "node_domain", "substore_domain", "server_ip", "cf_dns_key", "sni", "anytls_port", "cors_allowed_origins",
 		"watchdog", "interval", "confirm_wait", "max_restarts",
 	}
 	pattern := fmt.Sprintf("(?m)^([ \\t-]*(?:%s)):([^\\s].*)", strings.Join(keys, "|"))
@@ -470,11 +446,8 @@ func MigrateConfig(configPath string, templateData []byte) error {
 			setOrAddField(docNode, "server", "substore_domain", "")
 		}
 
-		if oldCfg.Server.TuicDomain != "" {
-			setOrAddField(docNode, "server", "tuic_domain", oldCfg.Server.TuicDomain)
-		} else if strings.Contains(string(oldData), "tuic_domain:") {
-			setOrAddField(docNode, "server", "tuic_domain", "")
-		}
+		removeField(docNode, "server", "tuic_domain")
+		removeField(docNode, "server", "tuic_port")
 
 		if oldCfg.Server.ServerIP != "" {
 			setOrAddField(docNode, "server", "server_ip", oldCfg.Server.ServerIP)
@@ -492,9 +465,6 @@ func MigrateConfig(configPath string, templateData []byte) error {
 			setOrAddField(docNode, "server", "sni", oldCfg.Server.Sni)
 		}
 
-		if oldCfg.Server.TuicPort != 0 {
-			setOrAddField(docNode, "server", "tuic_port", fmt.Sprintf("%d", oldCfg.Server.TuicPort))
-		}
 		if oldCfg.Server.AnyTLSPort != 0 {
 			setOrAddField(docNode, "server", "anytls_port", fmt.Sprintf("%d", oldCfg.Server.AnyTLSPort))
 		}

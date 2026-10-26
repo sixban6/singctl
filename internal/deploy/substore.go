@@ -135,10 +135,6 @@ func (sb *Substore) getCorsAllowedOrigins() string {
 			add(fmt.Sprintf("https://%s", domain))
 			add(fmt.Sprintf("http://%s", domain))
 		}
-		if domain := strings.TrimSpace(sb.Config.Server.GetTuicDomain()); domain != "" {
-			add(fmt.Sprintf("https://%s", domain))
-			add(fmt.Sprintf("http://%s", domain))
-		}
 		if extra := strings.TrimSpace(sb.Config.Server.CorsAllowedOrigins); extra != "" {
 			for _, part := range strings.Split(extra, ",") {
 				add(part)
@@ -325,13 +321,54 @@ func (sb *Substore) UpdateSubstoreConfig(sbs *SingBoxServer) error {
 	subs = addOrUpdateSub(subs, "auto_generated_vless", "VLESS Reality Auto", sbs.ShareLinkVless, "Auto-generated VLESS+Reality Subscription", sbs, "vless")
 	addedSubs = append(addedSubs, "auto_generated_vless")
 
-	subs = addOrUpdateSub(subs, "auto_generated_tuic", "TUIC Auto", sbs.ShareLinkTuic, "Auto-generated TUIC Subscription", sbs, "tuic")
-	addedSubs = append(addedSubs, "auto_generated_tuic")
+	// Clean up deprecated protocols (TUIC, AnyTLS) and deduplicate subscriptions by name
+	var cleanedSubs []interface{}
+	seenSubNames := make(map[string]bool)
+	for _, s := range subs {
+		if subObj, ok := s.(map[string]interface{}); ok {
+			name, _ := subObj["name"].(string)
+			if name == "auto_generated_tuic" || name == "auto_generated_anytls" {
+				logger.Info("Removing deprecated subscription: %s", name)
+				continue
+			}
+			if name != "" {
+				if seenSubNames[name] {
+					logger.Info("Removing duplicate subscription: %s", name)
+					continue
+				}
+				seenSubNames[name] = true
+			}
+		}
+		cleanedSubs = append(cleanedSubs, s)
+	}
+	subs = cleanedSubs
 
 	config["subs"] = subs
 
 	// 5. Update collections
-	config["collections"] = addToCollection(collections, addedSubs)
+	collections = addToCollection(collections, addedSubs)
+	existingSubNames := make(map[string]bool)
+	for _, s := range subs {
+		if subObj, ok := s.(map[string]interface{}); ok {
+			if name, ok := subObj["name"].(string); ok && name != "" {
+				existingSubNames[name] = true
+			}
+		}
+	}
+	for _, v := range collections {
+		if col, ok := v.(map[string]interface{}); ok {
+			if existingSubs, ok := col["subscriptions"].([]interface{}); ok {
+				var cleaned []interface{}
+				for _, subName := range existingSubs {
+					if name, ok := subName.(string); ok && existingSubNames[name] {
+						cleaned = append(cleaned, name)
+					}
+				}
+				col["subscriptions"] = cleaned
+			}
+		}
+	}
+	config["collections"] = collections
 
 	// 6. Write back to file
 	outData, err := json.MarshalIndent(config, "", "  ")
@@ -433,9 +470,50 @@ func addOrUpdateSub(subs []interface{}, targetName, displayName, contentURI, rem
 	return subs
 }
 
+// removeNodeFromSub removes any node belonging to the current VPS from target subscription.
+// If the subscription's content becomes completely empty, it is removed from subs.
+func removeNodeFromSub(subs []interface{}, targetName string, sbs *SingBoxServer, protocol string) []interface{} {
+	var result []interface{}
+	for _, v := range subs {
+		if sub, ok := v.(map[string]interface{}); ok {
+			if name, ok := sub["name"].(string); ok && name == targetName {
+				existingContent, _ := sub["content"].(string)
+				updatedContent := removeNodeForCurrentServer(existingContent, sbs, protocol)
+				if strings.TrimSpace(updatedContent) == "" {
+					logger.Info("Removed empty subscription: %s", targetName)
+					continue
+				}
+				sub["content"] = updatedContent
+				result = append(result, sub)
+				logger.Info("Removed current server node from %s", targetName)
+				continue
+			}
+		}
+		result = append(result, v)
+	}
+	return result
+}
+
+// removeNodeForCurrentServer filters out any node lines belonging to the current VPS.
+func removeNodeForCurrentServer(existingContent string, sbs *SingBoxServer, expectedScheme string) string {
+	rawLines := strings.Split(strings.ReplaceAll(existingContent, "\r\n", "\n"), "\n")
+	var resultLines []string
+	for _, rawLine := range rawLines {
+		line := strings.TrimSpace(rawLine)
+		if line == "" {
+			continue
+		}
+		if !isNodeForCurrentServer(line, sbs, expectedScheme) {
+			resultLines = append(resultLines, line)
+		}
+	}
+	return strings.Join(resultLines, "\n")
+}
+
 // mergeNodeContent merges a new node URI into the existing multi-line subscription content.
 // It replaces any node belonging to the current VPS while preserving nodes from other VPSs.
 // If no existing node belongs to the current VPS, the new URI is appended.
+// Duplicate lines are strictly filtered out to prevent identical nodes.
 func mergeNodeContent(existingContent, newURI string, sbs *SingBoxServer, expectedScheme string) string {
 	newURI = strings.TrimSpace(newURI)
 	if newURI == "" {
@@ -452,7 +530,7 @@ func mergeNodeContent(existingContent, newURI string, sbs *SingBoxServer, expect
 			continue
 		}
 
-		if isNodeForCurrentServer(line, sbs, expectedScheme) {
+		if line == newURI || isNodeForCurrentServer(line, sbs, expectedScheme) {
 			if !replaced {
 				resultLines = append(resultLines, newURI)
 				replaced = true
@@ -467,7 +545,17 @@ func mergeNodeContent(existingContent, newURI string, sbs *SingBoxServer, expect
 		resultLines = append(resultLines, newURI)
 	}
 
-	return strings.Join(resultLines, "\n")
+	// Strictly deduplicate lines so no identical node can ever appear more than once
+	var finalLines []string
+	seen := make(map[string]bool)
+	for _, l := range resultLines {
+		if !seen[l] {
+			seen[l] = true
+			finalLines = append(finalLines, l)
+		}
+	}
+
+	return strings.Join(finalLines, "\n")
 }
 
 // isNodeForCurrentServer checks whether a given node URI corresponds to the current VPS.
@@ -477,7 +565,6 @@ func isNodeForCurrentServer(nodeURI string, sbs *SingBoxServer, expectedScheme s
 		return false
 	}
 	currentDomain := strings.ToLower(strings.TrimSpace(sbs.cfg.Server.GetNodeDomain()))
-	tuicDomain := strings.ToLower(strings.TrimSpace(sbs.TuicDomain()))
 	if currentDomain == "" {
 		return false
 	}
@@ -488,8 +575,6 @@ func isNodeForCurrentServer(nodeURI string, sbs *SingBoxServer, expectedScheme s
 		targetTag = sbs.hy2Tag
 	case "vless":
 		targetTag = sbs.vrTag
-	case "tuic":
-		targetTag = sbs.tuicTag
 	}
 
 	u, err := url.Parse(nodeURI)
@@ -500,15 +585,14 @@ func isNodeForCurrentServer(nodeURI string, sbs *SingBoxServer, expectedScheme s
 
 		uHost := strings.ToLower(u.Hostname())
 		if uHost != "" {
-			if uHost == currentDomain || (tuicDomain != "" && uHost == tuicDomain) {
+			if uHost == currentDomain {
 				return true
 			}
-			// Host differs; check if sni query param matches currentDomain or tuicDomain
+			// Host differs; check if sni query param matches currentDomain
 			sni := strings.ToLower(u.Query().Get("sni"))
-			if (sni == currentDomain || (tuicDomain != "" && sni == tuicDomain)) && targetTag != "" && u.Fragment == targetTag {
+			if sni == currentDomain && targetTag != "" && u.Fragment == targetTag {
 				return true
 			}
-			return false
 		}
 
 		if targetTag != "" && u.Fragment == targetTag {
@@ -533,15 +617,21 @@ func isNodeForCurrentServer(nodeURI string, sbs *SingBoxServer, expectedScheme s
 	return false
 }
 
-// Helper to add the subscription names to the "all" collection (and maintain "Auto" if present for backward compatibility)
+// Helper to add the subscription names to the "all" collection (and clean up legacy "Auto" collection to prevent duplicate shared collections)
 func addToCollection(collections []interface{}, subNames []string) []interface{} {
 	targetCollection := "all"
 	collectionFound := false
 
-	// 1. 查找并更新 "all" 集合
+	// 1. 查找并更新 "all" 集合，同时清理历史遗留的重复 "Auto" 集合
+	var cleanedCols []interface{}
 	for _, v := range collections {
 		if col, ok := v.(map[string]interface{}); ok {
-			if name, ok := col["name"].(string); ok && name == targetCollection {
+			name, _ := col["name"].(string)
+			if name == "Auto" {
+				logger.Info("Removing legacy duplicate collection: Auto")
+				continue
+			}
+			if name == targetCollection {
 				var subs []interface{}
 				if existingSubs, ok := col["subscriptions"].([]interface{}); ok {
 					subs = existingSubs
@@ -554,10 +644,13 @@ func addToCollection(collections []interface{}, subNames []string) []interface{}
 				}
 				col["subscriptions"] = subs
 				collectionFound = true
-				break
 			}
+			cleanedCols = append(cleanedCols, col)
+		} else {
+			cleanedCols = append(cleanedCols, v)
 		}
 	}
+	collections = cleanedCols
 
 	// 2. 全新安装或重新部署找不到 all 时，新建出来的集合名称统一叫 "all"
 	if !collectionFound {
@@ -572,26 +665,6 @@ func addToCollection(collections []interface{}, subNames []string) []interface{}
 			"subscriptions": subs,
 		}
 		collections = append(collections, newCol)
-	}
-
-	// 3. 向后兼容：如果已有 "Auto" 集合（历史版本遗留），也同步更新其中的节点，确保历史订阅链接依然可用
-	for _, v := range collections {
-		if col, ok := v.(map[string]interface{}); ok {
-			if name, ok := col["name"].(string); ok && name == "Auto" {
-				var subs []interface{}
-				if existingSubs, ok := col["subscriptions"].([]interface{}); ok {
-					subs = existingSubs
-				}
-				for _, subName := range subNames {
-					if !containsStr(subs, subName) {
-						subs = append(subs, subName)
-						logger.Info("Added %s to collection Auto (backward compatibility)", subName)
-					}
-				}
-				col["subscriptions"] = subs
-				break
-			}
-		}
 	}
 
 	return collections

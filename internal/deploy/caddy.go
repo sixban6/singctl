@@ -129,12 +129,8 @@ func PreviewCaddyfile(cfg *config.Config) (string, error) {
 		return "", fmt.Errorf("failed to parse caddyfile template: %w", err)
 	}
 
-	tuicPort := 443
 	anytlsPort := 443
 	if cfg != nil {
-		if cfg.Server.TuicPort > 0 {
-			tuicPort = cfg.Server.TuicPort
-		}
 		if cfg.Server.AnyTLSPort > 0 {
 			anytlsPort = cfg.Server.AnyTLSPort
 		}
@@ -143,10 +139,8 @@ func PreviewCaddyfile(cfg *config.Config) (string, error) {
 	type tmplContext struct {
 		NodeDomain        string
 		SubstoreDomain    string
-		TuicDomain        string
 		CFDNSKey          string
 		Sni               string
-		TuicPort          int
 		AnyTLSPort        int
 		SSKey             string
 		ServerIP          string
@@ -155,14 +149,12 @@ func PreviewCaddyfile(cfg *config.Config) (string, error) {
 
 	nodeDomain := ""
 	substoreDomain := ""
-	tuicDomain := ""
 	cfDNSKey := ""
 	sni := ""
 	serverIPRaw := ""
 	if cfg != nil {
 		nodeDomain = cfg.Server.GetNodeDomain()
 		substoreDomain = cfg.Server.GetSubstoreDomain()
-		tuicDomain = cfg.Server.GetTuicDomain()
 		cfDNSKey = cfg.Server.CFDNSKey
 		sni = cfg.Server.Sni
 		serverIPRaw = cfg.Server.ServerIP
@@ -177,10 +169,8 @@ func PreviewCaddyfile(cfg *config.Config) (string, error) {
 	ctx := tmplContext{
 		NodeDomain:        nodeDomain,
 		SubstoreDomain:    substoreDomain,
-		TuicDomain:        tuicDomain,
 		CFDNSKey:          cfDNSKey,
 		Sni:               sni,
-		TuicPort:          tuicPort,
 		AnyTLSPort:        anytlsPort,
 		SSKey:             ssKey,
 		ServerIP:          StripIPBrackets(serverIPRaw),

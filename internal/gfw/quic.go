@@ -8,10 +8,10 @@ import (
 	"time"
 )
 
-// probeQUIC 探测 UDP / QUIC 协议画像（满分 15 分 - 针对 Hysteria2 / TUIC）
+// probeQUIC 探测 UDP / QUIC 协议画像（满分 15 分 - 针对 Hysteria2）
 func probeQUIC(ctx context.Context, opts ProbeOptions) Category {
 	cat := Category{
-		Name:     "UDP / QUIC (Hysteria2 / TUIC) 协议探测",
+		Name:     "UDP / QUIC (Hysteria2) 协议探测",
 		MaxScore: 15,
 		Items:    make([]CheckItem, 0),
 	}
@@ -33,7 +33,7 @@ func probeQUIC(ctx context.Context, opts ProbeOptions) Category {
 		itemQUIC.Score = 4
 		itemQUIC.Passed = false
 		itemQUIC.Details = details
-		itemQUIC.Mitigation = "如果服务器运行 Hysteria 2 / TUIC，建议确认 UDP 443 是否在系统防火墙正确放行，并确保使用了规范的 QUIC 实现以响应协商报文。"
+		itemQUIC.Mitigation = "如果服务器运行 Hysteria 2，建议确认 UDP 443 是否在系统防火墙正确放行，并确保使用了规范的 QUIC 实现以响应协商报文。"
 	} else {
 		itemQUIC.Score = 0
 		itemQUIC.Passed = true
