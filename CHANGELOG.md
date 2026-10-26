@@ -1,3 +1,10 @@
+## [1.44.1](https://github.com/sixban6/singctl/compare/v1.44.0...v1.44.1) (2026-10-26)
+
+
+### Bug Fixes
+
+* **term:** use explicit stdio destination IP and port to prevent SSH percent-escape parsing errors ([2137814](https://github.com/sixban6/singctl/commit/2137814495e6b8be4cb2cad5d160f6eb5ba89a6c))
+
 # [1.44.0](https://github.com/sixban6/singctl/compare/v1.43.4...v1.44.0) (2026-10-26)
 
 
