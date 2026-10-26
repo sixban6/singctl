@@ -1,3 +1,10 @@
+# [1.45.0](https://github.com/sixban6/singctl/compare/v1.44.1...v1.45.0) (2026-10-26)
+
+
+### Features
+
+* **term:** isolate client certs and ssh configs by node tag and domain ([3bb110c](https://github.com/sixban6/singctl/commit/3bb110c802a12b249bf7351cc5d884120577512e))
+
 ## [1.44.1](https://github.com/sixban6/singctl/compare/v1.44.0...v1.44.1) (2026-10-26)
 
 
