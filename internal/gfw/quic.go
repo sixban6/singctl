@@ -50,8 +50,8 @@ func probeQUIC(ctx context.Context, opts ProbeOptions) Category {
 
 	udpResponsive, udpMsg := testUDPEntropy(opts.IP, timeout)
 	if !udpResponsive {
-		itemUDPEntropy.Score = 3
-		itemUDPEntropy.Passed = true // UDP 通常不回包，因此视为轻度可疑但通过
+		itemUDPEntropy.Score = 0
+		itemUDPEntropy.Passed = true // 静默丢弃随机未格式化 UDP 报文是防御反射放大 DDoS 的标准最佳实践
 		itemUDPEntropy.Details = udpMsg
 	} else {
 		itemUDPEntropy.Score = 0

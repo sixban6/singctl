@@ -43,17 +43,16 @@ func probeEntropy(ctx context.Context, opts ProbeOptions) Category {
 			itemEntropy.Details = fmt.Sprintf("服务端挂起长达 %v 后异常断开，具备高可疑度的代理服务端特征。", duration)
 			itemEntropy.Mitigation = "配置激进的空闲读取超时 (ReadHeaderTimeout)，防止主动探测器利用等待时长对节点进行行为画像。"
 		} else {
-			// 短时间内被重置（< 500ms），分析是否有明确响应
+			// 短时间内被重置（< 2s），分析是否有明确响应
 			if len(responseBytes) > 0 && strings.Contains(string(responseBytes), "400") {
 				itemEntropy.Score = 0
 				itemEntropy.Passed = true
 				itemEntropy.Details = fmt.Sprintf("服务端在 %v 内快速响应了 HTTP 400 Bad Request 并断开，表现与正规 Web 服务器完全一致。", duration)
 			} else {
-				// 快速 RST
-				itemEntropy.Score = 5
-				itemEntropy.Passed = false
-				itemEntropy.Details = fmt.Sprintf("服务端在 %v 内直接丢弃/RST 断开，虽未超时挂起，但未返回正规 HTTP 400 页面。", duration)
-				itemEntropy.Mitigation = "尽量让前置 Caddy/Nginx 代理处理异常流量，返回合规的 HTML 错误响应以提高伪装可信度。"
+				// 快速 RST / FIN 断开（对齐主流 Web 基础设施如 Apple/Microsoft/Baidu 在处理非法握手时的行为）
+				itemEntropy.Score = 0
+				itemEntropy.Passed = true
+				itemEntropy.Details = fmt.Sprintf("服务端在 %v 内快速拒绝并关闭连接 (TCP RST/FIN)，无挂起等待翻墙认证特征，表现符合现代标准 TLS 协议栈规范。", duration)
 			}
 		}
 	} else {

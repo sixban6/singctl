@@ -140,8 +140,8 @@ func testMalformedHTTPRequest(ip string, timeout time.Duration) (bool, string) {
 
 	_ = conn.SetDeadline(time.Now().Add(timeout))
 
-	// 发送未知非法 Method
-	malformedReq := "PROBE_GFW / HTTP/1.1\r\nHost: " + ip + "\r\nInvalid-Header: " + strings.Repeat("A", 128) + "\r\n\r\n"
+	// 发送语法畸形请求（缺少冒号的非法报文头部），检验服务端是否返回标准 RFC 400 响应
+	malformedReq := "GET / HTTP/1.1\r\nHost: " + ip + "\r\nInvalidHeaderWithoutColon\r\n\r\n"
 	if _, err := conn.Write([]byte(malformedReq)); err != nil {
 		return false, fmt.Sprintf("写入畸形请求失败: %v", err)
 	}
@@ -154,7 +154,11 @@ func testMalformedHTTPRequest(ip string, timeout time.Duration) (bool, string) {
 
 	statusLine = strings.TrimSpace(statusLine)
 	if strings.Contains(statusLine, "400") || strings.Contains(statusLine, "405") || strings.Contains(statusLine, "501") {
-		return true, fmt.Sprintf("服务端符合 RFC 规范，正确响应: %s", statusLine)
+		return true, fmt.Sprintf("服务端底层协议栈符合 RFC 规范，正确响应: %s", statusLine)
+	}
+
+	if strings.Contains(statusLine, "301") || strings.Contains(statusLine, "302") || strings.Contains(statusLine, "307") || strings.Contains(statusLine, "308") {
+		return true, fmt.Sprintf("服务端运行规范的 HTTP->HTTPS 重定向网关 (%s)，符合主流 Web 服务器标准", statusLine)
 	}
 
 	return false, fmt.Sprintf("服务端对非法请求返回了非标准响应: %s", statusLine)
