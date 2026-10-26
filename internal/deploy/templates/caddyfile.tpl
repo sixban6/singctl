@@ -53,9 +53,9 @@
     }
 }
 
-# --- HTTP 80 端口 (用于 Let's Encrypt 公网 IP 证书的 HTTP-01 验证及基础响应) ---
+# --- HTTP 80 端口 (用于 Let's Encrypt 公网 IP 证书的 HTTP-01 验证及 301 重定向至 443) ---
 :80 {
-    respond "OK" 200
+    redir https://{host}{uri} 301
 }
 
 # --- Layer 7 (HTTP) 网站层 ---

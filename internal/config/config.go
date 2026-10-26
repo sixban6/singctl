@@ -270,7 +270,7 @@ func MigrateConfig(configPath string, templateData []byte) error {
 		"subs", "name", "url", "skip_tls_verify", "remove-emoji",
 		"github", "mirror_url", "hy2", "up", "down",
 		"tailscale", "auth_key", "use_build", constant.TailscaleSubnets,
-		"server", "sb_domain", "tuic_domain", "cf_dns_key", "sni", "tuic_port", "anytls_port",
+		"server", "sb_domain", "node_domain", "substore_domain", "tuic_domain", "server_ip", "cf_dns_key", "sni", "tuic_port", "anytls_port", "cors_allowed_origins",
 		"watchdog", "interval", "confirm_wait", "max_restarts",
 	}
 	pattern := fmt.Sprintf("(?m)^([ \\t-]*(?:%s)):([^\\s].*)", strings.Join(keys, "|"))
@@ -318,17 +318,33 @@ func MigrateConfig(configPath string, templateData []byte) error {
 		}
 	}
 
-	// Helper to replace a scalar field under a specific map
-	replaceField := func(parent *yaml.Node, parentKey, childKey, childVal string) {
+	// Helper to set or add a scalar field under a specific map
+	setOrAddField := func(parent *yaml.Node, parentKey, childKey, childVal string) {
 		for i := 0; i < len(parent.Content); i += 2 {
 			if parent.Content[i].Value == parentKey {
 				mapNode := parent.Content[i+1]
+				if mapNode.Kind != yaml.MappingNode {
+					return
+				}
 				for j := 0; j < len(mapNode.Content); j += 2 {
 					if mapNode.Content[j].Value == childKey {
 						mapNode.Content[j+1].Value = childVal
 						return
 					}
 				}
+				// If not found in template, append new scalar node pair!
+				keyNode := &yaml.Node{
+					Kind:  yaml.ScalarNode,
+					Tag:   "!!str",
+					Value: childKey,
+				}
+				valNode := &yaml.Node{
+					Kind:  yaml.ScalarNode,
+					Tag:   "!!str",
+					Value: childVal,
+				}
+				mapNode.Content = append(mapNode.Content, keyNode, valNode)
+				return
 			}
 		}
 	}
@@ -348,50 +364,66 @@ func MigrateConfig(configPath string, templateData []byte) error {
 	}
 
 	// 2. Merge GitHub Mirror URL (Preserve even if it's explicitly empty)
-	// We can check the raw yaml text to see if github.mirror_url was specified in oldData
-	// or we just unconditionally preserve what was Unmarshaled.
-	// Since go yaml.Unmarshal will set strings to "" if they exist and are empty,
-	// but also "" if they are missing. In config loading context, preserving oldCfg.GitHub.MirrorURL is safe.
-	// However, to only override if the block existed, we can do a quick check:
 	if strings.Contains(string(oldData), "mirror_url:") {
-		replaceField(docNode, "github", "mirror_url", oldCfg.GitHub.MirrorURL)
+		setOrAddField(docNode, "github", "mirror_url", oldCfg.GitHub.MirrorURL)
 	}
 
 	// 3. Merge Hy2
 	if strings.Contains(string(oldData), "hy2:") {
-		replaceField(docNode, "hy2", "up", fmt.Sprintf("%d", oldCfg.Hy2.Up))
-		replaceField(docNode, "hy2", "down", fmt.Sprintf("%d", oldCfg.Hy2.Down))
+		setOrAddField(docNode, "hy2", "up", fmt.Sprintf("%d", oldCfg.Hy2.Up))
+		setOrAddField(docNode, "hy2", "down", fmt.Sprintf("%d", oldCfg.Hy2.Down))
 	}
 
 	// 4. Merge Tailscale
-	// Check if the tailscale section existed in the old data.
-	// In the unmarshaled oldCfg, if auth_key was empty, it will be "" which is valid.
 	if strings.Contains(string(oldData), "tailscale:") {
-		// Replace everything under tailscale that isn't the struct default if it existed in text
-		// or just safely copy the struct value because if they deleted it the oldCfg has "" which overrides the template "" anyway
-		replaceField(docNode, "tailscale", "auth_key", oldCfg.Tailscale.AuthKey)
-		replaceField(docNode, "tailscale", "subnets", oldCfg.Tailscale.Subnets)
+		setOrAddField(docNode, "tailscale", "auth_key", oldCfg.Tailscale.AuthKey)
+		setOrAddField(docNode, "tailscale", "subnets", oldCfg.Tailscale.Subnets)
 		if oldCfg.Tailscale.UseBuild {
-			replaceField(docNode, "tailscale", "use_build", "true")
+			setOrAddField(docNode, "tailscale", "use_build", "true")
 		} else {
-			replaceField(docNode, "tailscale", "use_build", "false")
+			setOrAddField(docNode, "tailscale", "use_build", "false")
 		}
 	}
 
-	// 5. Merge Server
+	// 5. Merge Server (全量保留所有字段，包括 node_domain, substore_domain 等)
 	if strings.Contains(string(oldData), "server:") {
-		replaceField(docNode, "server", "sb_domain", oldCfg.Server.SBDomain)
-		replaceField(docNode, "server", "cf_dns_key", oldCfg.Server.CFDNSKey)
+		if strings.Contains(string(oldData), "sb_domain:") {
+			setOrAddField(docNode, "server", "sb_domain", oldCfg.Server.SBDomain)
+		}
+		if strings.Contains(string(oldData), "node_domain:") {
+			setOrAddField(docNode, "server", "node_domain", oldCfg.Server.NodeDomain)
+		}
+		if strings.Contains(string(oldData), "substore_domain:") {
+			setOrAddField(docNode, "server", "substore_domain", oldCfg.Server.SubstoreDomain)
+		}
+		if strings.Contains(string(oldData), "tuic_domain:") {
+			setOrAddField(docNode, "server", "tuic_domain", oldCfg.Server.TuicDomain)
+		}
+		if strings.Contains(string(oldData), "server_ip:") {
+			setOrAddField(docNode, "server", "server_ip", oldCfg.Server.ServerIP)
+		}
+		if strings.Contains(string(oldData), "cf_dns_key:") {
+			setOrAddField(docNode, "server", "cf_dns_key", oldCfg.Server.CFDNSKey)
+		}
 		if strings.Contains(string(oldData), "sni:") {
-			replaceField(docNode, "server", "sni", oldCfg.Server.Sni)
+			setOrAddField(docNode, "server", "sni", oldCfg.Server.Sni)
+		}
+		if strings.Contains(string(oldData), "tuic_port:") && oldCfg.Server.TuicPort != 0 {
+			setOrAddField(docNode, "server", "tuic_port", fmt.Sprintf("%d", oldCfg.Server.TuicPort))
+		}
+		if strings.Contains(string(oldData), "anytls_port:") && oldCfg.Server.AnyTLSPort != 0 {
+			setOrAddField(docNode, "server", "anytls_port", fmt.Sprintf("%d", oldCfg.Server.AnyTLSPort))
+		}
+		if strings.Contains(string(oldData), "cors_allowed_origins:") {
+			setOrAddField(docNode, "server", "cors_allowed_origins", oldCfg.Server.CorsAllowedOrigins)
 		}
 	}
 
 	// 6. Merge Watchdog
 	if strings.Contains(string(oldData), "watchdog:") {
-		replaceField(docNode, "watchdog", "interval", fmt.Sprintf("%d", oldCfg.Watchdog.Interval))
-		replaceField(docNode, "watchdog", "confirm_wait", fmt.Sprintf("%d", oldCfg.Watchdog.ConfirmWait))
-		replaceField(docNode, "watchdog", "max_restarts", fmt.Sprintf("%d", oldCfg.Watchdog.MaxRestarts))
+		setOrAddField(docNode, "watchdog", "interval", fmt.Sprintf("%d", oldCfg.Watchdog.Interval))
+		setOrAddField(docNode, "watchdog", "confirm_wait", fmt.Sprintf("%d", oldCfg.Watchdog.ConfirmWait))
+		setOrAddField(docNode, "watchdog", "max_restarts", fmt.Sprintf("%d", oldCfg.Watchdog.MaxRestarts))
 	}
 
 	newData, err := yaml.Marshal(&rootNode)

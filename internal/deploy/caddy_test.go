@@ -97,9 +97,9 @@ func TestPreviewCaddyfile_PublicIPv4ShortlivedCert(t *testing.T) {
 		t.Errorf("expected default_sni and fallback_sni for IP, got:\n%s", content)
 	}
 
-	// 2. Port 80 listener for HTTP-01 challenge
-	if !strings.Contains(content, ":80 {") {
-		t.Errorf("expected :80 listener for HTTP-01 challenge, got:\n%s", content)
+	// 2. Port 80 listener for HTTP-01 challenge and 301 redirect to HTTPS
+	if !strings.Contains(content, ":80 {") || !strings.Contains(content, "redir https://{host}{uri} 301") {
+		t.Errorf("expected :80 listener with 301 redirect, got:\n%s", content)
 	}
 
 	// 3. Public IP shortlived ACME profile block on 9445
