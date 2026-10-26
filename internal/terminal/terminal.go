@@ -116,12 +116,20 @@ func Install(cfg *config.Config, configPath string, opts InstallOptions) (*Insta
 		}
 	}
 
+	forceCert := opts.Force
 	password := strings.TrimSpace(opts.Password)
-	if password == "" {
+	if password != "" {
+		if cfg == nil || cfg.Server.WebTerminal.Password != password {
+			forceCert = true
+		}
+	} else {
 		if cfg != nil && cfg.Server.WebTerminal.Password != "" {
 			password = cfg.Server.WebTerminal.Password
 		} else {
 			password = GenerateRandomPassword(10)
+			if _, err := os.Stat(DefaultClientP12); err == nil {
+				forceCert = true
+			}
 		}
 	}
 
@@ -146,12 +154,12 @@ func Install(cfg *config.Config, configPath string, opts InstallOptions) (*Insta
 	}
 
 	// 3. 安装 GoTTY 二进制
-	if err := installGoTTY(cfg, arch, opts.Force); err != nil {
+	if err := installGoTTY(cfg, arch); err != nil {
 		return nil, fmt.Errorf("安装 GoTTY 二进制失败: %w", err)
 	}
 
 	// 4. 生成 mTLS 根证书与客户端证书
-	if err := generateMTLSCertificates(password, opts.Force); err != nil {
+	if err := generateMTLSCertificates(password, forceCert); err != nil {
 		return nil, fmt.Errorf("生成 mTLS 双向认证证书失败: %w", err)
 	}
 
@@ -313,8 +321,8 @@ func isCommandAvailable(name string) bool {
 	return err == nil
 }
 
-func installGoTTY(cfg *config.Config, arch string, force bool) error {
-	if _, err := os.Stat(GottyBinaryPath); err == nil && !force {
+func installGoTTY(cfg *config.Config, arch string) error {
+	if fi, err := os.Stat(GottyBinaryPath); err == nil && fi.Size() > 0 {
 		logger.Success("GoTTY 二进制已就绪 (%s)", GottyBinaryPath)
 		return nil
 	}
@@ -354,14 +362,23 @@ func installGoTTY(cfg *config.Config, arch string, force bool) error {
 		}
 
 		if header.Name == "gotty" || filepath.Base(header.Name) == "gotty" {
-			outFile, err := os.OpenFile(GottyBinaryPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+			tmpBinary := GottyBinaryPath + ".tmp"
+			outFile, err := os.OpenFile(tmpBinary, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
 			if err != nil {
-				return fmt.Errorf("写入 gotty 二进制失败: %w", err)
+				return fmt.Errorf("写入临时 gotty 二进制失败: %w", err)
 			}
 			_, copyErr := io.Copy(outFile, tarReader)
 			outFile.Close()
 			if copyErr != nil {
+				_ = os.Remove(tmpBinary)
 				return fmt.Errorf("保存 gotty 失败: %w", copyErr)
+			}
+			_ = os.Chmod(tmpBinary, 0755)
+			if err := os.Rename(tmpBinary, GottyBinaryPath); err != nil {
+				_ = os.Remove(GottyBinaryPath)
+				if err := os.Rename(tmpBinary, GottyBinaryPath); err != nil {
+					return fmt.Errorf("安装 gotty 二进制失败: %w", err)
+				}
 			}
 			logger.Success("GoTTY 二进制已成功安装至 %s", GottyBinaryPath)
 			return nil
@@ -440,18 +457,34 @@ extendedKeyUsage = clientAuth
 
 	// 5. 打包为客户端用的 .p12 文件 (多重兼容策略：确保 macOS Keychain、Windows 与现代浏览器无缝导入)
 	var exportErr error
-	// 策略 1: 标准 OpenSSL 3.x -legacy 模式
-	p12Args := []string{
-		"pkcs12", "-export", "-legacy",
+	// 策略 1: 显式指定 macOS 原生支持的 3DES/SHA1 算法 (兼容性最强，防止 RC2 或现代 AES 在 macOS 钥匙串报错)
+	p12AlgoArgs := []string{
+		"pkcs12", "-export",
+		"-keypbe", "PBE-SHA1-3DES",
+		"-certpbe", "PBE-SHA1-3DES",
+		"-macalg", "sha1",
 		"-out", clientP12,
 		"-inkey", clientKey,
 		"-in", clientCrt,
 		"-certfile", caCrt,
 		"-passout", fmt.Sprintf("pass:%s", password),
 	}
-	exportErr = runCmd("openssl", p12Args...)
+	exportErr = runCmd("openssl", p12AlgoArgs...)
 
-	// 策略 2: 显式加载 default 与 legacy provider
+	// 策略 2: 标准 OpenSSL 3.x -legacy 模式
+	if exportErr != nil {
+		p12Args := []string{
+			"pkcs12", "-export", "-legacy",
+			"-out", clientP12,
+			"-inkey", clientKey,
+			"-in", clientCrt,
+			"-certfile", caCrt,
+			"-passout", fmt.Sprintf("pass:%s", password),
+		}
+		exportErr = runCmd("openssl", p12Args...)
+	}
+
+	// 策略 3: 显式加载 default 与 legacy provider
 	if exportErr != nil {
 		p12ProviderArgs := []string{
 			"pkcs12", "-export",
@@ -463,22 +496,6 @@ extendedKeyUsage = clientAuth
 			"-passout", fmt.Sprintf("pass:%s", password),
 		}
 		exportErr = runCmd("openssl", p12ProviderArgs...)
-	}
-
-	// 策略 3: 显式指定 macOS 原生支持的 3DES/SHA1 算法
-	if exportErr != nil {
-		p12AlgoArgs := []string{
-			"pkcs12", "-export",
-			"-keypbe", "PBE-SHA1-3DES",
-			"-certpbe", "PBE-SHA1-3DES",
-			"-macalg", "sha1",
-			"-out", clientP12,
-			"-inkey", clientKey,
-			"-in", clientCrt,
-			"-certfile", caCrt,
-			"-passout", fmt.Sprintf("pass:%s", password),
-		}
-		exportErr = runCmd("openssl", p12AlgoArgs...)
 	}
 
 	// 策略 4: 如果为 OpenSSL 1.1 或以上参数皆不支持，尝试原生模式
