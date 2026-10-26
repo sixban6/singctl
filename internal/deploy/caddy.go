@@ -130,11 +130,6 @@ func PreviewCaddyfile(cfg *config.Config) (string, error) {
 	}
 
 	anytlsPort := 443
-	if cfg != nil {
-		if cfg.Server.AnyTLSPort > 0 {
-			anytlsPort = cfg.Server.AnyTLSPort
-		}
-	}
 
 	type tmplContext struct {
 		NodeDomain        string
