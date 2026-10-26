@@ -1,3 +1,10 @@
+# [1.43.0](https://github.com/sixban6/singctl/compare/v1.42.0...v1.43.0) (2026-10-26)
+
+
+### Features
+
+* **term:** add GoTTY + Tmux + Caddy mTLS web terminal subcommand ([816460f](https://github.com/sixban6/singctl/commit/816460fc14cedd015a48fc03bf0fc010f190d228))
+
 # [1.42.0](https://github.com/sixban6/singctl/compare/v1.41.1...v1.42.0) (2026-10-26)
 
 
