@@ -21,14 +21,13 @@ tailscale:                                      # (可选) Tailscale 部署配�
   subnets: ""                                   # (可选) 配置通告的子网，默认为空，程序会自动获取
   use_build: false                              # (可选) 是否使用singbox内置的TailScale。默认：false, 不启用
 
-server:                                         # (可选) 服务器部署配置.当需要部署singbox服务端的时候配置
-  sb_domain: "sub.yourdomain.com"               # 你的域名（用于 Sub-Store 面板 与 Hysteria 2）
-  node_domain: ""                               # (可选) 节点主域名 (Hysteria 2 / VLESS 分享链接主机)，留空默认使用 sb_domain
-  substore_domain: ""                           # (可选) Sub-Store 专属域名，留空默认使用 sb_domain
-  tuic_domain: "tuic.yourdomain.com"           # (可选) TUIC 专属子域名。默认: tuic.<sb_domain>
-  server_ip: ""                                 # (可选) 公网 IP 地址（未填自动探测用于申请 Let's Encrypt 原生 IP 证书）
-  cf_dns_key: "your_cloudflare_api_token"       # 你的 Cloudflare API Token
-  sni: ""                                       # (可选) Reality SNI 伪装域名。默认: swdist.apple.com
+server: # (可选) 服务器部署配置.当需要部署singbox服务端的时候配置
+  node_domain: "node.yourdomain.com" # 你的域名（用于 Sub-Store 面板 与 Hysteria 2）
+  substore_domain: "" # (可选) Sub-Store 专属域名，留空默认使用 node_domain
+  tuic_domain: "tuic.yourdomain.com" # (可选) TUIC 专属子域名。默认: tuic.<node_domain>
+  server_ip: "" # (可选) 公网 IP 地址（未填自动探测用于申请 Let's Encrypt 原生 IP 证书）
+  cf_dns_key: "your_cloudflare_api_token" # 你的 Cloudflare API Token
+  sni: "" # (可选) Reality SNI 伪装域名。默认: swdist.apple.com
 
 watchdog:                                      # (可选) 看门狗守护进程配置 (singctl dm)
   interval: 180                                 # 检查间隔(秒), 默认 180

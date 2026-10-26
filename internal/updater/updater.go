@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -116,15 +117,21 @@ func (u *Updater) UpdateSelf(configPath string, currentVersion string) error {
 		}
 
 		logger.Info("Migrating main configuration file...")
-		// 迁移主配置文件
+		// 迁移主配置文件：优先调用新下载的 singctl 二进制执行迁移，确保新版本字段与合并逻辑生效
 		templatePath := filepath.Join(configsSrc, "singctl.yaml")
-		templateData, err := os.ReadFile(templatePath)
-		if err != nil {
-			logger.Warn("Failed to read downloaded template config %s: %v", templatePath, err)
-		} else {
-			if err := config.MigrateConfig(configPath, templateData); err != nil {
-				logger.Warn("Failed to migrate config %s: %v", configPath, err)
+		migrateCmd := exec.Command(newExe, "internal-migrate", "--config", configPath, "--template", templatePath)
+		if out, err := migrateCmd.CombinedOutput(); err != nil {
+			logger.Warn("New binary migrate command returned %v (%s), falling back to in-process migration", err, strings.TrimSpace(string(out)))
+			templateData, rErr := os.ReadFile(templatePath)
+			if rErr != nil {
+				logger.Warn("Failed to read downloaded template config %s: %v", templatePath, rErr)
+			} else {
+				if mErr := config.MigrateConfig(configPath, templateData); mErr != nil {
+					logger.Warn("Failed to migrate config %s: %v", configPath, mErr)
+				}
 			}
+		} else {
+			logger.Success("Main configuration migrated successfully using new version.")
 		}
 	}
 

@@ -349,6 +349,24 @@ func MigrateConfig(configPath string, templateData []byte) error {
 		}
 	}
 
+	// Helper to remove a key-value pair from a map node
+	removeField := func(parent *yaml.Node, parentKey, childKey string) {
+		for i := 0; i < len(parent.Content); i += 2 {
+			if parent.Content[i].Value == parentKey {
+				mapNode := parent.Content[i+1]
+				if mapNode.Kind != yaml.MappingNode {
+					return
+				}
+				for j := 0; j < len(mapNode.Content); j += 2 {
+					if mapNode.Content[j].Value == childKey {
+						mapNode.Content = append(mapNode.Content[:j], mapNode.Content[j+2:]...)
+						return
+					}
+				}
+			}
+		}
+	}
+
 	// 1. Merge Subs (only if user actually configured something)
 	if len(oldCfg.Subs) > 0 {
 		hasRealSub := false
@@ -387,35 +405,60 @@ func MigrateConfig(configPath string, templateData []byte) error {
 
 	// 5. Merge Server (全量保留所有字段，包括 node_domain, substore_domain 等)
 	if strings.Contains(string(oldData), "server:") {
-		if strings.Contains(string(oldData), "sb_domain:") {
-			setOrAddField(docNode, "server", "sb_domain", oldCfg.Server.SBDomain)
+		// 平滑迁移：如果旧配置只有 sb_domain，则将其迁移到 node_domain
+		nodeDomain := oldCfg.Server.NodeDomain
+		if nodeDomain == "" && oldCfg.Server.SBDomain != "" {
+			nodeDomain = oldCfg.Server.SBDomain
 		}
-		if strings.Contains(string(oldData), "node_domain:") {
-			setOrAddField(docNode, "server", "node_domain", oldCfg.Server.NodeDomain)
+		if nodeDomain != "" {
+			setOrAddField(docNode, "server", "node_domain", nodeDomain)
+		} else if strings.Contains(string(oldData), "node_domain:") {
+			setOrAddField(docNode, "server", "node_domain", "")
 		}
-		if strings.Contains(string(oldData), "substore_domain:") {
+
+		if oldCfg.Server.SubstoreDomain != "" {
 			setOrAddField(docNode, "server", "substore_domain", oldCfg.Server.SubstoreDomain)
+		} else if strings.Contains(string(oldData), "substore_domain:") {
+			setOrAddField(docNode, "server", "substore_domain", "")
 		}
-		if strings.Contains(string(oldData), "tuic_domain:") {
+
+		if oldCfg.Server.TuicDomain != "" {
 			setOrAddField(docNode, "server", "tuic_domain", oldCfg.Server.TuicDomain)
+		} else if strings.Contains(string(oldData), "tuic_domain:") {
+			setOrAddField(docNode, "server", "tuic_domain", "")
 		}
-		if strings.Contains(string(oldData), "server_ip:") {
+
+		if oldCfg.Server.ServerIP != "" {
 			setOrAddField(docNode, "server", "server_ip", oldCfg.Server.ServerIP)
+		} else if strings.Contains(string(oldData), "server_ip:") {
+			setOrAddField(docNode, "server", "server_ip", "")
 		}
-		if strings.Contains(string(oldData), "cf_dns_key:") {
+
+		if oldCfg.Server.CFDNSKey != "" {
 			setOrAddField(docNode, "server", "cf_dns_key", oldCfg.Server.CFDNSKey)
+		} else if strings.Contains(string(oldData), "cf_dns_key:") {
+			setOrAddField(docNode, "server", "cf_dns_key", "")
 		}
+
 		if strings.Contains(string(oldData), "sni:") {
 			setOrAddField(docNode, "server", "sni", oldCfg.Server.Sni)
 		}
-		if strings.Contains(string(oldData), "tuic_port:") && oldCfg.Server.TuicPort != 0 {
+
+		if oldCfg.Server.TuicPort != 0 {
 			setOrAddField(docNode, "server", "tuic_port", fmt.Sprintf("%d", oldCfg.Server.TuicPort))
 		}
-		if strings.Contains(string(oldData), "anytls_port:") && oldCfg.Server.AnyTLSPort != 0 {
+		if oldCfg.Server.AnyTLSPort != 0 {
 			setOrAddField(docNode, "server", "anytls_port", fmt.Sprintf("%d", oldCfg.Server.AnyTLSPort))
 		}
 		if strings.Contains(string(oldData), "cors_allowed_origins:") {
 			setOrAddField(docNode, "server", "cors_allowed_origins", oldCfg.Server.CorsAllowedOrigins)
+		}
+
+		// 处理旧版兼容字段 sb_domain：若旧配置包含则保留，否则从模板中移除，绝不注入虚假默认域名
+		if strings.Contains(string(oldData), "sb_domain:") {
+			setOrAddField(docNode, "server", "sb_domain", oldCfg.Server.SBDomain)
+		} else {
+			removeField(docNode, "server", "sb_domain")
 		}
 	}
 

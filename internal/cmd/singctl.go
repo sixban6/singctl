@@ -52,6 +52,34 @@ func NewUpdateCmd(configPath string, version string) *cobra.Command {
 	}
 }
 
+func NewInternalMigrateCmd() *cobra.Command {
+	var configPath string
+	var templatePath string
+
+	cmd := &cobra.Command{
+		Use:    "internal-migrate",
+		Hidden: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if configPath == "" || templatePath == "" {
+				return fmt.Errorf("both --config and --template are required")
+			}
+			tplData, err := os.ReadFile(templatePath)
+			if err != nil {
+				return fmt.Errorf("failed to read template file %s: %w", templatePath, err)
+			}
+			if err := config.MigrateConfig(configPath, tplData); err != nil {
+				return fmt.Errorf("migration failed: %w", err)
+			}
+			logger.Success("Config migration completed successfully.")
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&configPath, "config", "", "Path to user config file")
+	cmd.Flags().StringVar(&templatePath, "template", "", "Path to template file")
+	return cmd
+}
+
 func NewVersionCmd(Version string, BuildTime string, GitCommit string) *cobra.Command {
 	return &cobra.Command{
 		Use:     "version",

@@ -327,14 +327,26 @@ install_files() {
             backup_file="${CONFIG_FILE}.backup.$(date +%s)"
             echo_warning "主配置文件已存在，备份到: $backup_file"
             cp "$CONFIG_FILE" "$backup_file"
+
+            echo_info "保留已有配置并执行配置合并迁移..."
+            "$INSTALL_DIR/singctl" internal-migrate --config "$CONFIG_FILE" --template "$configs_dir/singctl.yaml" || echo_warning "配置合并迁移失败，保留现有配置"
+
+            # 仅复制不存在的其余默认配置文件，绝不覆盖已有文件
+            for f in "$configs_dir"/*; do
+                fname=$(basename "$f")
+                if [ "$fname" != "singctl.yaml" ] && [ ! -e "$CONFIG_DIR/$fname" ]; then
+                    cp -r "$f" "$CONFIG_DIR/"
+                fi
+            done
+        else
+            echo_info "复制所有配置文件到: $CONFIG_DIR"
+            cp -r "$configs_dir"/* "$CONFIG_DIR/"
         fi
 
-        echo_info "复制所有配置文件到: $CONFIG_DIR"
-        cp -r "$configs_dir"/* "$CONFIG_DIR/"
         # 600：主配置含订阅地址/tailscale auth_key/cloudflare token 等敏感信息
         find "$CONFIG_DIR" -type f -name "*.yaml" -exec chmod 600 {} \;
         find "$CONFIG_DIR" -type f ! -name "*.yaml" -exec chmod 644 {} \;
-        echo_success "配置文件已安装"
+        echo_success "配置文件检查与安装完成"
     else
         echo_warning "未找到配置目录，请手动配置"
     fi
