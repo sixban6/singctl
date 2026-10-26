@@ -44,6 +44,11 @@ configure_firewall_debian_like() {
         ufw allow "${port}" || true
     done
 
+    # Ensure iptables accepts port 80 if iptables is used
+    if command -v iptables >/dev/null 2>&1; then
+        iptables -C INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport 80 -j ACCEPT 2>/dev/null || true
+    fi
+
     echo "Enabling UFW..."
     ufw --force enable || true
 }
@@ -81,6 +86,7 @@ configure_firewall_openwrt() {
     fi
 
     ensure_openwrt_allow_rule "Allow-SSH-${SSH_PORT}" "${SSH_PORT}" "tcp"
+    ensure_openwrt_allow_rule "Allow-HTTP-80" "80" "tcp"
     ensure_openwrt_allow_rule "Allow-HTTPS-443" "443" "tcp udp"
 
     uci -q commit firewall
