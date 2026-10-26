@@ -34,6 +34,7 @@ func TestStatus_ConfigParsed(t *testing.T) {
 	cfg := &config.Config{
 		Server: config.ServerConfig{
 			NodeDomain: "node.example.com",
+			NodeTag:    "los",
 			WebTerminal: config.WebTerminalConfig{
 				Enabled:  true,
 				Port:     18080,
@@ -56,6 +57,9 @@ func TestStatus_ConfigParsed(t *testing.T) {
 	}
 	if st.Password != "secret-pass-123" {
 		t.Errorf("unexpected Password: %s", st.Password)
+	}
+	if st.NodeTag != "los" {
+		t.Errorf("expected NodeTag los, got %s", st.NodeTag)
 	}
 }
 

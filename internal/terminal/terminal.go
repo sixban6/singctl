@@ -61,26 +61,28 @@ type InstallResult struct {
 	P12Base64     string
 	ClientCrtPath string
 	ClientKeyPath string
+	NodeTag       string
 }
 
 // StatusResult contains terminal status information
 type StatusResult struct {
-	Enabled        bool
-	ServiceActive  bool // GoTTY Web Terminal
-	WstunnelActive bool // wstunnel Native SSH
-	Domain         string
-	Path           string
-	Port           int
-	SSHTunnelPath  string
-	SSHTunnelPort  int
-	SSHPort        int
-	URL            string
-	P12Exists      bool
-	P12Path        string
+	Enabled         bool
+	ServiceActive   bool // GoTTY Web Terminal
+	WstunnelActive  bool // wstunnel Native SSH
+	Domain          string
+	Path            string
+	Port            int
+	SSHTunnelPath   string
+	SSHTunnelPort   int
+	SSHPort         int
+	URL             string
+	P12Exists       bool
+	P12Path         string
 	ClientCrtExists bool
-	ClientCrtPath  string
-	ClientKeyPath  string
-	Password       string
+	ClientCrtPath   string
+	ClientKeyPath   string
+	Password        string
+	NodeTag         string
 }
 
 // GenerateRandomHex generates random hex characters
@@ -233,6 +235,14 @@ func Install(cfg *config.Config, configPath string, opts InstallOptions) (*Insta
 		p12Base64 = base64.StdEncoding.EncodeToString(p12Bytes)
 	}
 
+	nodeTag := "node"
+	if cfg != nil {
+		nodeTag = cfg.Server.GetNodeTag()
+	}
+	if nodeTag == "" {
+		nodeTag = "node"
+	}
+
 	fullURL := fmt.Sprintf("https://%s%s/", domain, termPath)
 	res := &InstallResult{
 		URL:           fullURL,
@@ -247,6 +257,7 @@ func Install(cfg *config.Config, configPath string, opts InstallOptions) (*Insta
 		P12Base64:     p12Base64,
 		ClientCrtPath: DefaultClientCrt,
 		ClientKeyPath: DefaultClientKey,
+		NodeTag:       nodeTag,
 	}
 
 	return res, nil
@@ -294,9 +305,13 @@ func Status(cfg *config.Config) (*StatusResult, error) {
 		SSHTunnelPath: DefaultSSHTunnelPath,
 		SSHTunnelPort: DefaultSSHTunnelPort,
 		SSHPort:       22,
+		NodeTag:       "node",
 	}
 
 	if cfg != nil {
+		if tag := cfg.Server.GetNodeTag(); tag != "" {
+			res.NodeTag = tag
+		}
 		res.Enabled = cfg.Server.WebTerminal.Enabled
 		res.Path = cfg.Server.WebTerminal.Path
 		res.Port = cfg.Server.WebTerminal.Port
