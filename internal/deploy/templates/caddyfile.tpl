@@ -66,7 +66,23 @@ https://{{.SubstoreDomain}}:9443 {
         issuer acme {
             dns cloudflare {{.CFDNSKey}}
         }
+{{if .MtlsCA}}
+        client_auth {
+            mode verify_if_given
+            trust_pool file {{.MtlsCA}}
+        }
+{{end}}
     }
+{{if .TerminalPath}}
+
+    # GoTTY Web 终端安全路由 (双向 TLS 认证保护)
+    redir {{.TerminalPath}} {{.TerminalPath}}/
+    handle {{.TerminalPath}}/* {
+        @unauth expression {http.request.tls.client.subject} == ''
+        respond @unauth 404
+        reverse_proxy 127.0.0.1:{{.TerminalPort}}
+    }
+{{end}}
     header {
         Cache-Control "private, no-cache, no-store, max-age=0, must-revalidate"
         CDN-Cache-Control "no-store"
@@ -102,16 +118,18 @@ https://{{.NodeDomain}}:9443 {
     # GoTTY Web 终端安全路由 (双向 TLS 认证保护)
     redir {{.TerminalPath}} {{.TerminalPath}}/
     handle {{.TerminalPath}}/* {
-        @unauth {
-            expression {http.request.tls.client.subject} == ""
-        }
+        @unauth expression {http.request.tls.client.subject} == ''
         respond @unauth 404
         reverse_proxy 127.0.0.1:{{.TerminalPort}}
     }
 {{end}}
-    root * /var/www/mask-site
-    file_server
-    try_files {path} /index.html
+
+    # 默认静态伪装站 (必须包裹在 handle 块内，确保 handle 互斥，防止 try_files 劫持其他路径)
+    handle {
+        root * /var/www/mask-site
+        file_server
+        try_files {path} /index.html
+    }
 }
 {{else}}
 # 单域名兼容模式：根路径静态伪装站 + 专属路径反代 Sub-Store
@@ -133,9 +151,7 @@ https://{{.SubstoreDomain}}:9443 {
     # GoTTY Web 终端安全路由 (双向 TLS 认证保护)
     redir {{.TerminalPath}} {{.TerminalPath}}/
     handle {{.TerminalPath}}/* {
-        @unauth {
-            expression {http.request.tls.client.subject} == ""
-        }
+        @unauth expression {http.request.tls.client.subject} == ''
         respond @unauth 404
         reverse_proxy 127.0.0.1:{{.TerminalPort}}
     }

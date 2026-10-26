@@ -485,7 +485,7 @@ User=root
 Environment="LANG=en_US.UTF-8"
 Environment="TERM=xterm-256color"
 WorkingDirectory=/root
-ExecStart=%s -a 127.0.0.1 -p %d -w --path %s %s new -A -s web
+ExecStart=%s -a 127.0.0.1 -p %d -w --ws-origin ".*" --path %s %s new -A -s web
 Restart=always
 RestartSec=5
 
