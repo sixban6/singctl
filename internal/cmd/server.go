@@ -39,6 +39,7 @@ func newInstallServerCmd(cfg *config.Config) *cobra.Command {
 				if err != nil {
 					return err
 				}
+				_ = sbs.LoadExistingCredentials()
 				if err := sbs.DeploySingbox(); err != nil {
 					return err
 				}
@@ -69,7 +70,18 @@ func newInstallServerCmd(cfg *config.Config) *cobra.Command {
 				if err != nil {
 					return err
 				}
-				return sbs.DeploySingbox()
+				_ = sbs.LoadExistingCredentials()
+				if err := sbs.DeploySingbox(); err != nil {
+					return err
+				}
+				// If Sub-Store is installed, keep its subscriptions in sync
+				if _, err := os.Stat("/etc/sub-store"); err == nil {
+					sbt := deploy.NewSubstore(cfg, "")
+					if err := sbt.UpdateSubstoreConfig(sbs); err != nil {
+						logger.Warn("Sub-Store config sync failed (non-fatal): %v", err)
+					}
+				}
+				return nil
 			case "substore":
 				sbt := deploy.Substore{Config: cfg, SSKey: ""}
 				return sbt.DeploySubstore()
@@ -352,7 +364,17 @@ func handleReinstallSingbox(cfg *config.Config, force bool) error {
 	if err != nil {
 		return err
 	}
-	return sbs.DeploySingbox()
+	_ = sbs.LoadExistingCredentials()
+	if err := sbs.DeploySingbox(); err != nil {
+		return err
+	}
+	if _, err := os.Stat("/etc/sub-store"); err == nil {
+		sbt := deploy.NewSubstore(cfg, "")
+		if err := sbt.UpdateSubstoreConfig(sbs); err != nil {
+			logger.Warn("Sub-Store config sync failed (non-fatal): %v", err)
+		}
+	}
+	return nil
 }
 
 func handleReinstallSubstore(cfg *config.Config, force bool) error {
@@ -670,7 +692,6 @@ func syncNodeToSubstore(configPath string, restart bool, tag string) error {
 	fmt.Println("📡 已同步至 Sub-Store 的节点配置:")
 	fmt.Printf("• Hysteria 2:    %s\n", sbs.ShareLinkHy2)
 	fmt.Printf("• VLESS Reality: %s\n", sbs.ShareLinkVless)
-	fmt.Printf("• TUIC:          %s\n", sbs.ShareLinkTuic)
 	fmt.Println("========================================================")
 	return nil
 }
@@ -725,7 +746,6 @@ func showServerInfo(configPath string) error {
 	fmt.Println("\n📡 服务端节点分享链接 (Node Share Links):")
 	fmt.Printf("• Hysteria 2:    %s\n", sbs.ShareLinkHy2)
 	fmt.Printf("• VLESS Reality: %s\n", sbs.ShareLinkVless)
-	fmt.Printf("• TUIC:          %s\n", sbs.ShareLinkTuic)
 
 	fmt.Println("\n🛡️ 伪装回落站点 (Mask Site & Fallback):")
 	if serverIP := cfg.Server.GetServerIP(); serverIP != "" {

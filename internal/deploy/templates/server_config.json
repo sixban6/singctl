@@ -75,27 +75,6 @@
         "certificate_path": "{{.CertPath}}",
         "key_path": "{{.KeyPath}}"
       }
-    },
-    {
-      "tag": "TUIC",
-      "type": "tuic",
-      "listen": "127.0.0.1",
-      "listen_port": 52023,
-      "users": [
-        {
-          "uuid": "{{.HyUUID}}",
-          "password": "{{.HyUUID}}"
-        }
-      ],
-      "congestion_control": "bbr",
-      "tls": {
-        "enabled": true,
-        "alpn": [
-          "h3"
-        ],
-        "certificate_path": "{{.TuicCertPath}}",
-        "key_path": "{{.TuicKeyPath}}"
-      }
     }
   ],
   "outbounds": [

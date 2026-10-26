@@ -71,7 +71,6 @@ func TestSingBoxServer_RegenerateCredentials(t *testing.T) {
 	firstShortID := sbs.ShortID()
 	firstHy2Link := sbs.ShareLinkHy2
 	firstVlessLink := sbs.ShareLinkVless
-	firstTuicLink := sbs.ShareLinkTuic
 
 	if firstUUID == "" || firstPubKey == "" || firstShortID == "" {
 		t.Fatalf("expected non-empty initial credentials, got uuid=%q pub=%q sid=%q", firstUUID, firstPubKey, firstShortID)
@@ -86,7 +85,6 @@ func TestSingBoxServer_RegenerateCredentials(t *testing.T) {
 	secondShortID := sbs.ShortID()
 	secondHy2Link := sbs.ShareLinkHy2
 	secondVlessLink := sbs.ShareLinkVless
-	secondTuicLink := sbs.ShareLinkTuic
 
 	if secondUUID == firstUUID {
 		t.Errorf("expected UUID to change after regeneration, got %q", secondUUID)
@@ -102,9 +100,6 @@ func TestSingBoxServer_RegenerateCredentials(t *testing.T) {
 	}
 	if secondVlessLink == firstVlessLink {
 		t.Errorf("expected VLESS link to change after regeneration")
-	}
-	if secondTuicLink == firstTuicLink {
-		t.Errorf("expected TUIC link to change after regeneration")
 	}
 }
 
@@ -150,18 +145,16 @@ func TestSubstore_UpdateSubstoreConfig(t *testing.T) {
 		t.Fatalf("failed to parse substore json: %v", err)
 	}
 
-	if len(root.Subs) < 3 {
-		t.Fatalf("expected at least 3 subscriptions, got %d", len(root.Subs))
+	if len(root.Subs) < 2 {
+		t.Fatalf("expected at least 2 subscriptions, got %d", len(root.Subs))
 	}
 
-	var hyContent, vlessContent, tuicContent string
+	var hyContent, vlessContent string
 	for _, s := range root.Subs {
 		if s.Name == "auto_generated_hy2" {
 			hyContent = s.Content
 		} else if s.Name == "auto_generated_vless" {
 			vlessContent = s.Content
-		} else if s.Name == "auto_generated_tuic" {
-			tuicContent = s.Content
 		}
 	}
 
@@ -170,9 +163,6 @@ func TestSubstore_UpdateSubstoreConfig(t *testing.T) {
 	}
 	if vlessContent != sbs.ShareLinkVless {
 		t.Errorf("expected Vless link %q, got %q", sbs.ShareLinkVless, vlessContent)
-	}
-	if tuicContent != sbs.ShareLinkTuic {
-		t.Errorf("expected TUIC link %q, got %q", sbs.ShareLinkTuic, tuicContent)
 	}
 
 	// Test second reset: regenerate credentials and update substore again
@@ -199,9 +189,6 @@ func TestSubstore_UpdateSubstoreConfig(t *testing.T) {
 		}
 		if s.Name == "auto_generated_vless" && s.Content != sbs.ShareLinkVless {
 			t.Errorf("expected updated Vless link %q, got %q", sbs.ShareLinkVless, s.Content)
-		}
-		if s.Name == "auto_generated_tuic" && s.Content != sbs.ShareLinkTuic {
-			t.Errorf("expected updated TUIC link %q, got %q", sbs.ShareLinkTuic, s.Content)
 		}
 	}
 }
@@ -255,7 +242,7 @@ func TestPreviewServerConfigWithRegeneratedCredentials(t *testing.T) {
 			t.Errorf("inbound %s (%s) should listen on 127.0.0.1, got %s", in.Tag, in.Type, in.Listen)
 		}
 	}
-	for _, expectedType := range []string{"vless", "hysteria2", "tuic"} {
+	for _, expectedType := range []string{"vless", "hysteria2"} {
 		if !foundInbounds[expectedType] {
 			t.Errorf("expected inbound type %q not found in rendered server config", expectedType)
 		}

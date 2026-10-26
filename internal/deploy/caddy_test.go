@@ -12,7 +12,6 @@ func TestPreviewCaddyfile_SeparatedDomainsAndFallback(t *testing.T) {
 		Server: config.ServerConfig{
 			NodeDomain:     "node.example.com",
 			SubstoreDomain: "sub.example.com",
-			TuicDomain:     "tuic.example.com",
 			CFDNSKey:       "dummy_cf_key",
 			Sni:            "swdist.apple.com",
 		},
@@ -80,7 +79,6 @@ func TestPreviewCaddyfile_PublicIPv4ShortlivedCert(t *testing.T) {
 		Server: config.ServerConfig{
 			NodeDomain:     "node.example.com",
 			SubstoreDomain: "sub.example.com",
-			TuicDomain:     "tuic.example.com",
 			ServerIP:       "203.0.113.10",
 			CFDNSKey:       "dummy_cf_key",
 			Sni:            "swdist.apple.com",
@@ -116,7 +114,6 @@ func TestPreviewCaddyfile_PublicIPv6ShortlivedCert(t *testing.T) {
 		Server: config.ServerConfig{
 			NodeDomain:     "node.example.com",
 			SubstoreDomain: "sub.example.com",
-			TuicDomain:     "tuic.example.com",
 			ServerIP:       "2001:db8::1",
 			CFDNSKey:       "dummy_cf_key",
 			Sni:            "swdist.apple.com",
@@ -139,5 +136,30 @@ func TestPreviewCaddyfile_PublicIPv6ShortlivedCert(t *testing.T) {
 	}
 	if !strings.Contains(content, "profile shortlived") {
 		t.Errorf("expected profile shortlived, got:\n%s", content)
+	}
+}
+
+func TestPreviewCaddyfile_Udp443Hy2Only(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			NodeDomain:     "node.example.com",
+			SubstoreDomain: "sub.example.com",
+			CFDNSKey:       "dummy_cf_key",
+		},
+	}
+
+	content, err := PreviewCaddyfile(cfg)
+	if err != nil {
+		t.Fatalf("PreviewCaddyfile failed: %v", err)
+	}
+
+	if strings.Contains(content, "@tuic quic") {
+		t.Errorf("expected no @tuic quic in Caddyfile, got:\n%s", content)
+	}
+	if strings.Contains(content, "proxy udp/127.0.0.1:52023") {
+		t.Errorf("expected no proxy to TUIC 52023, got:\n%s", content)
+	}
+	if !strings.Contains(content, "proxy udp/127.0.0.1:52021") {
+		t.Errorf("expected proxy to Hysteria 2 on 52021, got:\n%s", content)
 	}
 }

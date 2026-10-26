@@ -35,17 +35,8 @@
             }
         }
 
-        # UDP 443: TUIC 与 Hysteria 2 基于 QUIC SNI 分流 (ALPN 均为标准 h3)
+        # UDP 443: Hysteria 2 流量 -> Sing-box (标准 h3)
         udp/:443 {
-            # TUIC 流量 (QUIC SNI: {{.TuicDomain}}) -> Sing-box
-            @tuic quic {
-                sni {{.TuicDomain}}
-            }
-            route @tuic {
-                proxy udp/127.0.0.1:52023
-            }
-
-            # Hysteria 2 (QUIC SNI: {{.NodeDomain}}) -> Sing-box (默认/回退路由)
             route {
                 proxy udp/127.0.0.1:52021
             }
@@ -149,15 +140,3 @@ https://{{.ServerIPFormatted}}:9445 {
 }
 {{end}}
 
-# TUIC 域名 TLS 证书自动化申请与续期 (如与 Substore/Node 域名不同)
-{{if and .TuicDomain (and (ne .TuicDomain .SubstoreDomain) (ne .TuicDomain .NodeDomain))}}
-https://{{.TuicDomain}}:9444 {
-    bind 127.0.0.1
-    tls {
-        issuer acme {
-            dns cloudflare {{.CFDNSKey}}
-        }
-    }
-    respond "OK" 200
-}
-{{end}}
