@@ -1,3 +1,10 @@
+# [1.38.0](https://github.com/sixban6/singctl/compare/v1.37.0...v1.38.0) (2026-10-26)
+
+
+### Features
+
+* **server:** use subscription name for node share links tag in substore ([e31c6e2](https://github.com/sixban6/singctl/commit/e31c6e2408e0fed8d01d2b59db97ffd7f5366d31))
+
 # [1.37.0](https://github.com/sixban6/singctl/compare/v1.36.0...v1.37.0) (2026-10-26)
 
 
