@@ -533,11 +533,12 @@ func isNodeForCurrentServer(nodeURI string, sbs *SingBoxServer, expectedScheme s
 	return false
 }
 
-// Helper to add the subscription names to the "all" or "Auto" collection
+// Helper to add the subscription names to the "all" collection (and maintain "Auto" if present for backward compatibility)
 func addToCollection(collections []interface{}, subNames []string) []interface{} {
 	targetCollection := "all"
 	collectionFound := false
 
+	// 1. 查找并更新 "all" 集合
 	for _, v := range collections {
 		if col, ok := v.(map[string]interface{}); ok {
 			if name, ok := col["name"].(string); ok && name == targetCollection {
@@ -558,41 +559,38 @@ func addToCollection(collections []interface{}, subNames []string) []interface{}
 		}
 	}
 
+	// 2. 全新安装或重新部署找不到 all 时，新建出来的集合名称统一叫 "all"
 	if !collectionFound {
-		autoColName := "Auto"
-		autoColFound := false
-		for _, v := range collections {
-			if col, ok := v.(map[string]interface{}); ok {
-				if name, ok := col["name"].(string); ok && name == autoColName {
-					var subs []interface{}
-					if existingSubs, ok := col["subscriptions"].([]interface{}); ok {
-						subs = existingSubs
-					}
-					for _, subName := range subNames {
-						if !containsStr(subs, subName) {
-							subs = append(subs, subName)
-							logger.Info("Added %s to collection %s", subName, autoColName)
-						}
-					}
-					col["subscriptions"] = subs
-					autoColFound = true
-					break
-				}
-			}
+		logger.Info("Creating new collection: %s", targetCollection)
+		var subs []interface{}
+		for _, s := range subNames {
+			subs = append(subs, s)
 		}
+		newCol := map[string]interface{}{
+			"name":          targetCollection,
+			"displayName":   targetCollection,
+			"subscriptions": subs,
+		}
+		collections = append(collections, newCol)
+	}
 
-		if !autoColFound {
-			logger.Info("Creating new collection: %s", autoColName)
-			var subs []interface{}
-			for _, s := range subNames {
-				subs = append(subs, s)
+	// 3. 向后兼容：如果已有 "Auto" 集合（历史版本遗留），也同步更新其中的节点，确保历史订阅链接依然可用
+	for _, v := range collections {
+		if col, ok := v.(map[string]interface{}); ok {
+			if name, ok := col["name"].(string); ok && name == "Auto" {
+				var subs []interface{}
+				if existingSubs, ok := col["subscriptions"].([]interface{}); ok {
+					subs = existingSubs
+				}
+				for _, subName := range subNames {
+					if !containsStr(subs, subName) {
+						subs = append(subs, subName)
+						logger.Info("Added %s to collection Auto (backward compatibility)", subName)
+					}
+				}
+				col["subscriptions"] = subs
+				break
 			}
-			newCol := map[string]interface{}{
-				"name":          autoColName,
-				"displayName":   autoColName,
-				"subscriptions": subs,
-			}
-			collections = append(collections, newCol)
 		}
 	}
 
