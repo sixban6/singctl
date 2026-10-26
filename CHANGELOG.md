@@ -1,3 +1,10 @@
+# [1.42.0](https://github.com/sixban6/singctl/compare/v1.41.1...v1.42.0) (2026-10-26)
+
+
+### Features
+
+* **gfw:** harden port 80 methods, refine active probing scoring, and add canary proxy probe ([bfe2fb2](https://github.com/sixban6/singctl/commit/bfe2fb236f93760f74fa9f848590f2c979d8d620))
+
 ## [1.41.1](https://github.com/sixban6/singctl/compare/v1.41.0...v1.41.1) (2026-10-26)
 
 
