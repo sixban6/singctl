@@ -1,3 +1,10 @@
+## [1.40.1](https://github.com/sixban6/singctl/compare/v1.40.0...v1.40.1) (2026-10-26)
+
+
+### Bug Fixes
+
+* **config:** ensure zero data loss during update self and install by delegating migration to new binary ([487f392](https://github.com/sixban6/singctl/commit/487f39297c5c38a206b206112e8b1c07a488cab0))
+
 # [1.40.0](https://github.com/sixban6/singctl/compare/v1.39.0...v1.40.0) (2026-10-26)
 
 
