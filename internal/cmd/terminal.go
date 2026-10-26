@@ -159,6 +159,11 @@ func printInstallSummary(res *terminal.InstallResult) {
 		sshPathPrefix = "ssh-ws"
 	}
 
+	tag := res.NodeTag
+	if tag == "" {
+		tag = "vps"
+	}
+
 	fmt.Println()
 	logger.Success("🎉 GoTTY + Tmux + wstunnel + Caddy mTLS 双模式运维环境部署成功！")
 	fmt.Println("═══════════════════════════════════════════════════════════════════════════")
@@ -171,27 +176,30 @@ func printInstallSummary(res *terminal.InstallResult) {
 	fmt.Println("═══════════════════════════════════════════════════════════════════════════")
 	fmt.Println()
 	fmt.Println("📱【方案一：Web 终端 (手机 / 平板 / 浏览器极简登录)】")
-	fmt.Printf("  1. 下载客户端证书: scp %sroot@%s:%s ./client.p12\n", portFlag, res.Domain, res.P12Path)
-	fmt.Printf("  2. 双击 client.p12，输入密码 [%s]，导入系统钥匙串\n", res.Password)
+	fmt.Printf("  1. 下载客户端证书: scp %sroot@%s:%s ./%s-client.p12\n", portFlag, res.Domain, res.P12Path, tag)
+	fmt.Printf("  2. 双击 %s-client.p12，输入密码 [%s]，导入系统钥匙串\n", tag, res.Password)
 	fmt.Printf("  3. 浏览器打开: %s，确认证书即可无感登录并持久化运行！\n\n", res.URL)
 	fmt.Println("⚡【方案二：WezTerm / 本地终端原生 SSH 穿透 443 + mTLS (推荐，体验最佳)】")
 	fmt.Println("  1. Mac 本地安装 wstunnel (如已安装可跳过):")
 	fmt.Println("     brew install wstunnel")
+	fmt.Println()
 	fmt.Println("  2. 从 VPS 一键下载客户端证书与私钥至本地 ~/.ssh/:")
-	fmt.Printf("     mkdir -p ~/.ssh && scp %sroot@%s:%s %s ~/.ssh/\n\n", portFlag, res.Domain, res.ClientCrtPath, res.ClientKeyPath)
+	fmt.Println("     mkdir -p ~/.ssh")
+	fmt.Printf("     scp %sroot@%s:%s ~/.ssh/%s-client.crt\n", portFlag, res.Domain, res.ClientCrtPath, tag)
+	fmt.Printf("     scp %sroot@%s:%s ~/.ssh/%s-client.key\n\n", portFlag, res.Domain, res.ClientKeyPath, tag)
 	fmt.Println("  3. 在 Mac 终端执行以下一键命令，自动配置 ~/.ssh/config:")
 	fmt.Printf(`     cat << 'EOF' >> ~/.ssh/config
 
-Host vps-ws
-    HostName 127.0.0.1
+Host vps-%s
+    HostName %s
     Port %d
     User root
-    ProxyCommand wstunnel client --log-lvl off --tls-certificate ~/.ssh/client.crt --tls-private-key ~/.ssh/client.key --http-upgrade-path-prefix %s -L stdio://127.0.0.1:%d wss://%s
+    ProxyCommand wstunnel client --log-lvl off --tls-certificate ~/.ssh/%s-client.crt --tls-private-key ~/.ssh/%s-client.key --http-upgrade-path-prefix %s -L stdio://127.0.0.1:%d wss://%s
 EOF
-`, sshPort, sshPathPrefix, sshPort, res.Domain)
+`, tag, res.Domain, sshPort, tag, tag, sshPathPrefix, sshPort, res.Domain)
 	fmt.Println()
 	fmt.Println("  4. 在 WezTerm 中直接敲原生命令直连:")
-	fmt.Println("     ssh vps-ws")
+	fmt.Printf("     ssh vps-%s\n", tag)
 	fmt.Println("     (享受所有快捷键、动态窗口缩放、文件拖拽与原生 SSH 极速体验！)")
 	fmt.Println("═══════════════════════════════════════════════════════════════════════════")
 	fmt.Println()
@@ -256,6 +264,11 @@ func printCertExport(st *terminal.StatusResult, b64 string) {
 		sshPathPrefix = "ssh-ws"
 	}
 
+	tag := st.NodeTag
+	if tag == "" {
+		tag = "vps"
+	}
+
 	fmt.Println()
 	logger.Info("═══════════════════════════════════════════════════════════")
 	logger.Info("🔐 mTLS 客户端证书与 SSH-over-WSS 配置导出")
@@ -266,19 +279,24 @@ func printCertExport(st *terminal.StatusResult, b64 string) {
 	}
 	fmt.Println()
 	fmt.Println("📱【方案一：Web 终端 (.p12 证书)】")
-	fmt.Printf("  scp %sroot@%s:%s ./client.p12\n\n", portFlag, st.Domain, st.P12Path)
+	fmt.Printf("  scp %sroot@%s:%s ./%s-client.p12\n\n", portFlag, st.Domain, st.P12Path, tag)
 	fmt.Println("⚡【方案二：WezTerm 原生 SSH (client.crt + client.key)】")
-	fmt.Printf("  mkdir -p ~/.ssh && scp %sroot@%s:%s %s ~/.ssh/\n\n", portFlag, st.Domain, st.ClientCrtPath, st.ClientKeyPath)
+	fmt.Println("  mkdir -p ~/.ssh")
+	fmt.Printf("  scp %sroot@%s:%s ~/.ssh/%s-client.crt\n", portFlag, st.Domain, st.ClientCrtPath, tag)
+	fmt.Printf("  scp %sroot@%s:%s ~/.ssh/%s-client.key\n\n", portFlag, st.Domain, st.ClientKeyPath, tag)
 	fmt.Println("  追加到本地 ~/.ssh/config:")
 	fmt.Printf(`  cat << 'EOF' >> ~/.ssh/config
 
-Host vps-ws
-    HostName 127.0.0.1
+Host vps-%s
+    HostName %s
     Port %d
     User root
-    ProxyCommand wstunnel client --log-lvl off --tls-certificate ~/.ssh/client.crt --tls-private-key ~/.ssh/client.key --http-upgrade-path-prefix %s -L stdio://127.0.0.1:%d wss://%s
+    ProxyCommand wstunnel client --log-lvl off --tls-certificate ~/.ssh/%s-client.crt --tls-private-key ~/.ssh/%s-client.key --http-upgrade-path-prefix %s -L stdio://127.0.0.1:%d wss://%s
 EOF
-`, sshPort, sshPathPrefix, sshPort, st.Domain)
+`, tag, st.Domain, sshPort, tag, tag, sshPathPrefix, sshPort, st.Domain)
+	fmt.Println()
+	fmt.Println("  在 WezTerm 中直接敲原生命令直连:")
+	fmt.Printf("  ssh vps-%s\n", tag)
 	fmt.Println("═══════════════════════════════════════════════════════════")
 	fmt.Println()
 }
