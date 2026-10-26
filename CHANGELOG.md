@@ -1,3 +1,10 @@
+## [1.41.1](https://github.com/sixban6/singctl/compare/v1.41.0...v1.41.1) (2026-10-26)
+
+
+### Bug Fixes
+
+* **server:** drop TUIC protocol and prevent duplicate Sub-Store shared subscriptions ([44071b1](https://github.com/sixban6/singctl/commit/44071b1b2efbc68d5449ef04151ba7c8af117767))
+
 # [1.41.0](https://github.com/sixban6/singctl/compare/v1.40.1...v1.41.0) (2026-10-26)
 
 
