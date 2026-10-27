@@ -8,11 +8,13 @@ SingCtl是多功能网络工具。可以用管理singbox客户端和服务端，
 
 ## Features
 - 🚀 **跨平台支持**: 一条命令跨平台安全的使用singbox
-- 📡 **多协议支持**: VLESS, Trojan, Hysteria2, Shadowsocks
+- 📡 **多协议支持**: VLESS Reality, Hysteria 2, Trojan, Shadowsocks
+- 🛡️ **GFW 探测仿真**: 模拟防火墙主动探测 (Active Probing) 手段，从端口对称性、HTTP 回落、TLS/Reality 降级、高熵挂起、QUIC 协商等 5 大维度对服务器进行 0~100 分量化评分与加固指导（`singctl gfw <ip>`）
+- 💻 **mTLS 隐蔽终端**: 基于 Caddy 443 端口与 mTLS 双向 TLS 认证的运维通道，支持浏览器 Web Shell (GoTTY + Tmux) 与本地终端 (WezTerm) 原生 SSH-over-WSS 穿透，无客户端证书直接返回 404（`singctl term install/cert`）
 - 🔌 **规则集本地缓存**: 预下载远程规则集并改写为本地引用，sing-box 启动不依赖 GitHub；内置全量规则集快照，极端情况（无网+无缓存）也能启动（`sb cache update/status/clear`）
 - 📱 **iOS 配置生成**: 一键生成 iPhone sing-box App 专用配置（`sb gen --platform ios`），WebUI 扫码下载
 - 🔧 **防止DNS泄漏**: 配置文件已经把国内IP和国外IP的DNS请求分开处理
-- 🍚 **服务端部署**: 自动部署singbox服务端
+- 🍚 **服务端部署**: 自动部署singbox服务端（VLESS Reality + Hysteria 2 + Caddy + SubStore + WARP）
 
 
 ## Installation
@@ -57,6 +59,8 @@ SingCtl 按功能模块分为以下几个部分，点击链接查看详细说明
 | :--- | :--- | :--- | :--- |
 | **客户端管理** | `singctl sb` | 管理 sing-box 客户端的安装、配置生成、启停 | [查看文档](docs/client.md) |
 | **服务端部署** | `singctl sr` | 一键部署服务端组件（Sing-box、Caddy、SubStore、WARP） | [查看文档](docs/server.md) |
+| **Web 终端 / SSH穿透** | `singctl term` | 基于 mTLS 双向认证的 Web 终端 (GoTTY+Tmux) 与 SSH-over-WSS 穿透通道 | [查看文档](docs/terminal.md) |
+| **GFW 探测评估** | `singctl gfw` | 模拟 GFW 主动探测并对节点是否为代理进行打分 (0-100分) | [查看文档](docs/gfw.md) |
 | **异地组网** | `singctl ts` | 管理 Tailscale 的安装、启动与路由配置 | [查看文档](docs/tailscale.md) |
 | **守护进程** | `singctl dm` | 管理后台守护进程，查看日志与监控状态 | [查看文档](docs/daemon.md) |
 | **防火墙加固** | `singctl fw` | Linux/OpenWrt 专用的防火墙安全规则配置 | [查看文档](docs/firewall.md) |
