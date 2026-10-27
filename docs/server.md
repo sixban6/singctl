@@ -35,12 +35,26 @@ Caddy 负责统一监听 443 端口（TCP 与 UDP），基于 Layer 4 SNI 进行
 
 ```yaml
 server:
-  node_tag: ""                            # (可选) 节点地区/名称标识 (例如: los, sg)，留空智能识别
+  node_tag: "los"                         # (可选) 节点地区/名称标识 (例如: los, sg, hk)，留空自动根据公网 IP 智能识别
   node_domain: "node.yourdomain.com"      # 节点主域名（用于 Sub-Store 面板与 Hysteria 2，必填）
   substore_domain: ""                     # (可选) Sub-Store 专属域名，留空默认使用 node_domain
   cf_dns_key: "your_cloudflare_api_token" # Cloudflare API Token，用于自动申请 TLS 证书（必填）
   sni: "swdist.apple.com"                 # TLS SNI 伪装域名，默认 swdist.apple.com（可选）
+  web_terminal:                           # (可选) mTLS Web 终端与 SSH 穿透配置 (singctl term install 自动生成)
+    enabled: true
+    port: 18080
+    path: "/term-8f9a2b"
+    mtls_ca: "/etc/caddy/mtls/ca.crt"
+    ssh_tunnel_port: 18081
+    ssh_tunnel_path: "/ssh-ws"
+    ssh_port: 22
 ```
+
+### 节点标识 (`node_tag`) 说明
+
+- `node_tag` 用于在多台服务器集群部署时区分节点代号（如 `los` 代表洛杉矶，`sg` 代表新加坡，`hk` 代表香港）。
+- 该代号会直接应用在 Sub-Store 聚合订阅的节点命名、客户端分享链接、mTLS 客户端证书命名（如 `los-client.crt`）以及本地 SSH 别名（`vps-los`）中。
+- 若留空，singctl 将在部署或同步时自动基于公网 IP 通过 GeoIP 查询城市地区代号进行智能命名。
 
 ### 静态配置 vs 动态命令修改 SNI
 
@@ -182,4 +196,29 @@ singctl sr info
 # 别名
 singctl sr show
 ```
+
+---
+
+### `singctl sr term` / `singctl term` — Web 终端与 SSH 穿透通道
+
+一键在服务端开启基于 Caddy 443 端口与 mTLS 双向认证的隐蔽运维通道：
+- **Web 终端**：内置 GoTTY + Tmux，支持手机 / 浏览器无感接入与会话后台持久化；
+- **SSH-over-WSS 穿透**：通过 wstunnel 将 SSH 封装在 443 端口 WebSocket 中直连，穿透企业/校园网防火墙对 22 端口的拦截。
+
+```bash
+# 一键安装并配置
+singctl term install
+
+# 导出客户端证书与 SSH 连接配置
+singctl term cert
+
+# 查看运行状态
+singctl term status
+
+# 卸载恢复
+singctl term uninstall
+```
+
+> 详细的证书导入与本地 WezTerm / `~/.ssh/config` 配置教程，请参阅专用文档：[Web 终端与 SSH-over-WSS 穿透通道文档](terminal.md)。
+
 
