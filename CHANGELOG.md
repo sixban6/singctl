@@ -1,3 +1,10 @@
+## [1.45.1](https://github.com/sixban6/singctl/compare/v1.45.0...v1.45.1) (2026-10-27)
+
+
+### Bug Fixes
+
+* **gfw:** fix probe bugs and expand active probing dimensions ([60f9ecb](https://github.com/sixban6/singctl/commit/60f9ecb5e9a873417c1ef692a9319cfea1e45ecd))
+
 # [1.45.0](https://github.com/sixban6/singctl/compare/v1.44.1...v1.45.0) (2026-10-26)
 
 
