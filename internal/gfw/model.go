@@ -14,13 +14,35 @@ const (
 
 // ProbeOptions 探测运行选项
 type ProbeOptions struct {
-	IP          string
-	Ports       []int
-	SNI         string
-	Domain      string
-	Timeout     time.Duration
-	Verbose     bool
-	JSONOutput  bool
+	IP         string
+	Ports      []int
+	SNI        string
+	Domain     string
+	Timeout    time.Duration
+	Verbose    bool
+	JSONOutput bool
+}
+
+// GetHTTPPort 获取目标 HTTP 端口 (默认 80)
+func (o ProbeOptions) GetHTTPPort() int {
+	if len(o.Ports) >= 2 {
+		return o.Ports[0]
+	}
+	if len(o.Ports) == 1 {
+		return o.Ports[0]
+	}
+	return 80
+}
+
+// GetHTTPSPort 获取目标 HTTPS 端口 (默认 443)
+func (o ProbeOptions) GetHTTPSPort() int {
+	if len(o.Ports) >= 2 {
+		return o.Ports[1]
+	}
+	if len(o.Ports) == 1 {
+		return o.Ports[0]
+	}
+	return 443
 }
 
 // CheckItem 单项探测结果

@@ -3,6 +3,7 @@ package gfw
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 )
 
@@ -19,7 +20,7 @@ func NewDetector(opts ProbeOptions) *Detector {
 	return &Detector{opts: opts}
 }
 
-// Run 执行全套模拟探测并生成打分报告
+// Run 执行全套模拟探测并生成打分报告（各探测维度并发执行）
 func (d *Detector) Run(ctx context.Context) (*Report, error) {
 	if d.opts.IP == "" {
 		return nil, fmt.Errorf("target IP is required for GFW probe")
@@ -35,27 +36,49 @@ func (d *Detector) Run(ctx context.Context) (*Report, error) {
 		Recommendations: make([]string, 0),
 	}
 
-	// 1. 端口与基础画像探测
-	catPorts := probePorts(ctx, d.opts)
-	report.Categories = append(report.Categories, catPorts)
+	// 5 大探测维度并发执行，将总体探测时间压缩至 3~5 秒内
+	var wg sync.WaitGroup
+	var (
+		catPorts   Category
+		catHTTP    Category
+		catTLS     Category
+		catEntropy Category
+		catQUIC    Category
+	)
 
-	// 2. HTTP 规范与回落伪装测试
-	catHTTP := probeHTTP(ctx, d.opts)
-	report.Categories = append(report.Categories, catHTTP)
+	wg.Add(5)
+	go func() {
+		defer wg.Done()
+		catPorts = probePorts(ctx, d.opts)
+	}()
+	go func() {
+		defer wg.Done()
+		catHTTP = probeHTTP(ctx, d.opts)
+	}()
+	go func() {
+		defer wg.Done()
+		catTLS = probeTLS(ctx, d.opts)
+	}()
+	go func() {
+		defer wg.Done()
+		catEntropy = probeEntropy(ctx, d.opts)
+	}()
+	go func() {
+		defer wg.Done()
+		catQUIC = probeQUIC(ctx, d.opts)
+	}()
 
-	// 3. TLS 与 Reality 伪装探测
-	catTLS := probeTLS(ctx, d.opts)
-	report.Categories = append(report.Categories, catTLS)
+	wg.Wait()
 
-	// 4. 高熵随机垃圾数据探测 (Active Probing)
-	catEntropy := probeEntropy(ctx, d.opts)
-	report.Categories = append(report.Categories, catEntropy)
+	// 检查 context 是否在探测过程中被取消
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("probe canceled or timed out: %w", err)
+	}
 
-	// 5. UDP / QUIC 协议画像探测
-	catQUIC := probeQUIC(ctx, d.opts)
-	report.Categories = append(report.Categories, catQUIC)
+	// 按预定顺序组装报告分类
+	report.Categories = append(report.Categories, catPorts, catHTTP, catTLS, catEntropy, catQUIC)
 
-	// 汇总计算总分
+	// 汇总计算总分与整改建议
 	totalScore := 0
 	for _, cat := range report.Categories {
 		totalScore += cat.Score

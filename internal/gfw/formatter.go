@@ -26,7 +26,7 @@ func PrintReport(w io.Writer, report *Report, verbose bool) error {
 
 	// 打印各大分类探测详情
 	for i, cat := range report.Categories {
-		fmt.Fprintf(w, "\n[%d/5] %s (得分贡献: %d/%d 分)\n", i+1, cat.Name, cat.Score, cat.MaxScore)
+		fmt.Fprintf(w, "\n[%d/%d] %s (得分贡献: %d/%d 分)\n", i+1, len(report.Categories), cat.Name, cat.Score, cat.MaxScore)
 		for _, item := range cat.Items {
 			statusMark := "✅"
 			scoreInfo := ""

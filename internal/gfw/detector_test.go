@@ -103,3 +103,38 @@ func TestDetector_MockServer(t *testing.T) {
 		t.Errorf("json report invalid: %s", jsonBuf.String())
 	}
 }
+
+func TestProbeOptions_PortResolution(t *testing.T) {
+	// Empty ports -> default 80 and 443
+	o1 := ProbeOptions{}
+	if o1.GetHTTPPort() != 80 || o1.GetHTTPSPort() != 443 {
+		t.Errorf("o1: expected 80 and 443, got %d and %d", o1.GetHTTPPort(), o1.GetHTTPSPort())
+	}
+
+	// 1 port provided -> both use that port
+	o2 := ProbeOptions{Ports: []int{8443}}
+	if o2.GetHTTPPort() != 8443 || o2.GetHTTPSPort() != 8443 {
+		t.Errorf("o2: expected 8443 and 8443, got %d and %d", o2.GetHTTPPort(), o2.GetHTTPSPort())
+	}
+
+	// 2 ports provided -> 0 is HTTP, 1 is HTTPS
+	o3 := ProbeOptions{Ports: []int{8080, 8443}}
+	if o3.GetHTTPPort() != 8080 || o3.GetHTTPSPort() != 8443 {
+		t.Errorf("o3: expected 8080 and 8443, got %d and %d", o3.GetHTTPPort(), o3.GetHTTPSPort())
+	}
+}
+
+func TestDetector_ContextCancel(t *testing.T) {
+	opts := ProbeOptions{
+		IP:      "127.0.0.1",
+		Timeout: 5 * time.Second,
+	}
+	d := NewDetector(opts)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel immediately
+
+	_, err := d.Run(ctx)
+	if err == nil {
+		t.Errorf("expected error on canceled context, got nil")
+	}
+}
