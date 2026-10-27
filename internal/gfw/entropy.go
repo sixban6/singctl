@@ -22,14 +22,16 @@ func probeEntropy(ctx context.Context, opts ProbeOptions) Category {
 		timeout = 5 * time.Second
 	}
 
+	httpsPort := opts.GetHTTPSPort()
+
 	// 1. 发送 64 字节高熵随机数据并测量挂起超时时间
 	itemEntropy := CheckItem{
-		Name:        "高熵未知随机数据包注入测试",
+		Name:        fmt.Sprintf("端口 %d 高熵未知随机数据包注入测试", httpsPort),
 		Description: "模拟 GFW 主动探测器注入 64 字节加密随机数据，观测服务端超时与断开行为",
 		MaxScore:    20,
 	}
 
-	duration, responseBytes, err := testEntropyPayload(opts.IP, 64, timeout)
+	duration, responseBytes, err := testEntropyPayload(ctx, opts.IP, httpsPort, 64, timeout)
 	if err != nil {
 		// 读取超时或连接重置
 		if strings.Contains(err.Error(), "i/o timeout") {
@@ -82,8 +84,9 @@ func probeEntropy(ctx context.Context, opts ProbeOptions) Category {
 	return cat
 }
 
-func testEntropyPayload(ip string, payloadLen int, timeout time.Duration) (time.Duration, []byte, error) {
-	conn, err := net.DialTimeout("tcp", net.JoinHostPort(ip, "443"), 3*time.Second)
+func testEntropyPayload(ctx context.Context, ip string, port int, payloadLen int, timeout time.Duration) (time.Duration, []byte, error) {
+	dialer := &net.Dialer{Timeout: timeout}
+	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(ip, fmt.Sprintf("%d", port)))
 	if err != nil {
 		return 0, nil, err
 	}

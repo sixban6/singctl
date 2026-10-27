@@ -21,19 +21,26 @@ func probeQUIC(ctx context.Context, opts ProbeOptions) Category {
 		timeout = 3 * time.Second
 	}
 
+	httpsPort := opts.GetHTTPSPort()
+
 	// 1. 畸形 QUIC 数据包探测与 Version Negotiation
 	itemQUIC := CheckItem{
-		Name:        "畸形 QUIC 数据包与版本协商探测",
-		Description: "向 UDP 443 发送保留版本号为 0 的畸形 QUIC 报文，检验是否回复标准 Stateless Reset 或协商包",
+		Name:        fmt.Sprintf("UDP %d 畸形 QUIC 数据包与版本协商探测", httpsPort),
+		Description: fmt.Sprintf("向 UDP %d 发送保留版本号为 0x1a2a3a4a 的 QUIC 报文，检验是否回复标准版本协商包", httpsPort),
 		MaxScore:    8,
 	}
 
-	quicResponsive, details := testQUICInitialPacket(opts.IP, timeout)
+	quicResponsive, isAbnormal, details := testQUICInitialPacket(ctx, opts.IP, httpsPort, timeout)
 	if !quicResponsive {
-		itemQUIC.Score = 4
+		// 未开启 HTTP/3 或未开启 UDP 属于主流公网 Web 服务器常规策略，不增加风险分
+		itemQUIC.Score = 0
+		itemQUIC.Passed = true
+		itemQUIC.Details = details
+	} else if isAbnormal {
+		itemQUIC.Score = 8
 		itemQUIC.Passed = false
 		itemQUIC.Details = details
-		itemQUIC.Mitigation = "如果服务器运行 Hysteria 2，建议确认 UDP 443 是否在系统防火墙正确放行，并确保使用了规范的 QUIC 实现以响应协商报文。"
+		itemQUIC.Mitigation = "检查 UDP/QUIC 端口暴露情况，若使用 Hysteria 2，请确保采用标准的 QUIC 协议栈实现以防止非标特征泄露。"
 	} else {
 		itemQUIC.Score = 0
 		itemQUIC.Passed = true
@@ -43,12 +50,12 @@ func probeQUIC(ctx context.Context, opts ProbeOptions) Category {
 
 	// 2. UDP 端口高熵探测
 	itemUDPEntropy := CheckItem{
-		Name:        "UDP 443 随机高熵数据吞吐测试",
-		Description: "探测 UDP 443 对随机未格式化 UDP 报文的处理（防黑洞/反射分析）",
+		Name:        fmt.Sprintf("UDP %d 随机高熵数据吞吐测试", httpsPort),
+		Description: fmt.Sprintf("探测 UDP %d 对随机未格式化 UDP 报文的处理（防黑洞/反射分析）", httpsPort),
 		MaxScore:    7,
 	}
 
-	udpResponsive, udpMsg := testUDPEntropy(opts.IP, timeout)
+	udpResponsive, udpMsg := testUDPEntropy(ctx, opts.IP, httpsPort, timeout)
 	if !udpResponsive {
 		itemUDPEntropy.Score = 0
 		itemUDPEntropy.Passed = true // 静默丢弃随机未格式化 UDP 报文是防御反射放大 DDoS 的标准最佳实践
@@ -72,23 +79,28 @@ func probeQUIC(ctx context.Context, opts ProbeOptions) Category {
 }
 
 // testQUICInitialPacket 构造并发送测试 QUIC Initial 数据包
-func testQUICInitialPacket(ip string, timeout time.Duration) (bool, string) {
-	raddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(ip, "443"))
+func testQUICInitialPacket(ctx context.Context, ip string, port int, timeout time.Duration) (bool, bool, string) {
+	raddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(ip, fmt.Sprintf("%d", port)))
 	if err != nil {
-		return false, fmt.Sprintf("解析 UDP 地址失败: %v", err)
+		return false, false, fmt.Sprintf("解析 UDP 地址失败: %v", err)
 	}
 
-	conn, err := net.DialUDP("udp", nil, raddr)
+	var d net.Dialer
+	connRaw, err := d.DialContext(ctx, "udp", raddr.String())
 	if err != nil {
-		return false, fmt.Sprintf("创建 UDP Socket 失败: %v", err)
+		return false, false, fmt.Sprintf("创建 UDP Socket 失败: %v", err)
 	}
-	defer conn.Close()
+	defer connRaw.Close()
+
+	conn, ok := connRaw.(*net.UDPConn)
+	if !ok {
+		return false, false, "非 UDP 套接字"
+	}
 
 	_ = conn.SetDeadline(time.Now().Add(timeout))
 
-	// 构造伪造的 QUIC Initial 头部 (Header form: Long header 0xc0, Version: 0x00000000 触发版本协商)
-	// RFC 9000: When a server receives a packet with Version 0x00000000, it MUST NOT send a Version Negotiation packet.
-	// But sending an unsupported version like 0x1a2a3a4a SHOULD trigger Version Negotiation.
+	// 构造伪造的 QUIC Initial 头部 (Header form: Long header 0xc0, Version: 0x1a2a3a4a 触发版本协商)
+	// RFC 9000: Sending an unsupported version like 0x1a2a3a4a SHOULD trigger Version Negotiation.
 	quicProbe := []byte{
 		0xc0,                   // Long Header (Initial)
 		0x1a, 0x2a, 0x3a, 0x4a, // Unsupported reserved version for negotiation testing
@@ -103,29 +115,35 @@ func testQUICInitialPacket(ip string, timeout time.Duration) (bool, string) {
 	packet := append(quicProbe, padding...)
 
 	if _, err := conn.Write(packet); err != nil {
-		return false, fmt.Sprintf("发送 QUIC 探测包失败: %v", err)
+		return false, false, fmt.Sprintf("发送 QUIC 探测包失败: %v", err)
 	}
 
 	recvBuf := make([]byte, 1500)
 	n, _, err := conn.ReadFrom(recvBuf)
 	if err != nil {
-		return false, "UDP 443 未收到 QUIC 版本协商回复（可能未启用 HTTP/3，或防火墙阻断了非法包长）"
+		return false, false, fmt.Sprintf("UDP %d 未响应 QUIC 报文 (目标未开启 HTTP/3 或防火墙过滤了 UDP，未暴露特征)", port)
 	}
 
 	if n > 0 {
-		return true, fmt.Sprintf("UDP 443 响应正常，返回了标准 QUIC 握手/协商报文 (%d 字节)", n)
+		// RFC 9000: Version Negotiation Packet 的 Version 字段固定为 0x00000000 (bytes 1..4)
+		if n >= 5 && recvBuf[1] == 0x00 && recvBuf[2] == 0x00 && recvBuf[3] == 0x00 && recvBuf[4] == 0x00 {
+			return true, false, fmt.Sprintf("UDP %d 响应正常，返回了标准 RFC 9000 QUIC 版本协商报文 (%d 字节)", port, n)
+		}
+		// 返回了非标准响应
+		return true, true, fmt.Sprintf("UDP %d 响应了非标准数据包 (%d 字节，首字节: 0x%02x)，可能存在非标 QUIC 代理特征！", port, n, recvBuf[0])
 	}
 
-	return false, "未收到响应"
+	return false, false, "未收到响应"
 }
 
-func testUDPEntropy(ip string, timeout time.Duration) (bool, string) {
-	raddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(ip, "443"))
+func testUDPEntropy(ctx context.Context, ip string, port int, timeout time.Duration) (bool, string) {
+	raddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(ip, fmt.Sprintf("%d", port)))
 	if err != nil {
 		return false, "UDP 地址解析失败"
 	}
 
-	conn, err := net.DialUDP("udp", nil, raddr)
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, "udp", raddr.String())
 	if err != nil {
 		return false, "UDP 连接失败"
 	}
@@ -138,10 +156,10 @@ func testUDPEntropy(ip string, timeout time.Duration) (bool, string) {
 	_, _ = conn.Write(buf)
 
 	recv := make([]byte, 512)
-	n, _, readErr := conn.ReadFrom(recv)
-	if readErr != nil {
-		return false, "UDP 443 静默丢弃随机高熵包（符合标准安全防护策略，防止 UDP 反射）"
+	n, err := conn.Read(recv)
+	if err != nil {
+		return false, fmt.Sprintf("UDP %d 静默丢弃随机高熵包（符合标准安全防护策略，防止 UDP 反射攻击）", port)
 	}
 
-	return true, fmt.Sprintf("UDP 443 对随机未识别包返回了数据响应 (%d 字节)", n)
+	return true, fmt.Sprintf("UDP %d 对随机未识别包返回了数据响应 (%d 字节)", port, n)
 }

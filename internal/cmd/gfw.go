@@ -16,6 +16,7 @@ import (
 // NewGFWCmd 创建 GFW 模拟主动探测与打分命令
 func NewGFWCmd() *cobra.Command {
 	var (
+		ports      []int
 		sni        string
 		domain     string
 		timeoutSec int
@@ -48,6 +49,7 @@ func NewGFWCmd() *cobra.Command {
 
 			opts := gfw.ProbeOptions{
 				IP:         targetIP,
+				Ports:      ports,
 				SNI:        sni,
 				Domain:     domain,
 				Timeout:    time.Duration(timeoutSec) * time.Second,
@@ -58,6 +60,9 @@ func NewGFWCmd() *cobra.Command {
 			if !jsonOutput {
 				logger.Info("正在启动 GFW 主动探测模拟器...")
 				logger.Info("目标 IP: %s | 超时: %ds | 详细模式: %v", targetIP, timeoutSec, verbose)
+				if len(ports) > 0 {
+					logger.Info("指定端口: %v", ports)
+				}
 				if sni != "" {
 					logger.Info("伪装 SNI: %s", sni)
 				}
@@ -83,6 +88,7 @@ func NewGFWCmd() *cobra.Command {
 		},
 	}
 
+	cmd.Flags().IntSliceVarP(&ports, "ports", "p", nil, "自定义探测端口列表 (默认: 80,443，例如: -p 80,443 或 -p 8443)")
 	cmd.Flags().StringVar(&sni, "sni", "", "Reality / 伪装 SNI 域名 (例如 swdist.apple.com)")
 	cmd.Flags().StringVar(&domain, "domain", "", "节点所属域名 (例如 cdn.l1.example.com)")
 	cmd.Flags().IntVarP(&timeoutSec, "timeout", "t", 4, "单项探测超时时间 (秒)")

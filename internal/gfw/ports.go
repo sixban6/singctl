@@ -23,67 +23,70 @@ func probePorts(ctx context.Context, opts ProbeOptions) Category {
 		timeout = 3 * time.Second
 	}
 
-	// 1. 检查 80 与 443 端口状态
-	p80Open := isPortOpen(opts.IP, 80, timeout)
-	p443Open := isPortOpen(opts.IP, 443, timeout)
+	httpPort := opts.GetHTTPPort()
+	httpsPort := opts.GetHTTPSPort()
 
-	itemPort80 := CheckItem{
-		Name:        "80/443 端口对称性分析",
+	// 1. 检查 HTTP 与 HTTPS 端口状态
+	pHTTPOpen := isPortOpen(ctx, opts.IP, httpPort, timeout)
+	pHTTPSOpen := isPortOpen(ctx, opts.IP, httpsPort, timeout)
+
+	itemPortSymmetry := CheckItem{
+		Name:        fmt.Sprintf("%d/%d 端口对称性分析", httpPort, httpsPort),
 		Description: "分析公网 Web 标准端口开放状态",
 		MaxScore:    10,
 	}
 
-	if p443Open && !p80Open {
-		itemPort80.Score = 10
-		itemPort80.Passed = false
-		itemPort80.Details = "端口 443 开放，但端口 80 关闭/超时。正常商业 Web 站点几乎 100% 开放 80 端口用于 ACME 与 HTTP 跳转，只有 443 开放具备极高的翻墙特征。"
-		itemPort80.Mitigation = "在服务器放行 80 端口，并由 Caddy/Nginx 提供 80 到 443 的 301 重定向。"
-	} else if !p443Open && !p80Open {
-		itemPort80.Score = 0
-		itemPort80.Passed = false
-		itemPort80.Details = "80 与 443 端口均不可达，可能服务器未运行或防火墙已拦截。"
+	if pHTTPSOpen && !pHTTPOpen {
+		itemPortSymmetry.Score = 10
+		itemPortSymmetry.Passed = false
+		itemPortSymmetry.Details = fmt.Sprintf("端口 %d (HTTPS) 开放，但端口 %d (HTTP) 关闭/超时。正常商业 Web 站点几乎 100%% 开放标准 HTTP 端口用于证书 ACME 挑战与协议跳转，只有 HTTPS 开放具备极高的翻墙特征。", httpsPort, httpPort)
+		itemPortSymmetry.Mitigation = fmt.Sprintf("在服务器防火墙放行 %d 端口，并由 Web 服务器 (Caddy/Nginx) 提供强制重定向至 HTTPS。", httpPort)
+	} else if !pHTTPSOpen && !pHTTPOpen {
+		itemPortSymmetry.Score = 0
+		itemPortSymmetry.Passed = false
+		itemPortSymmetry.Details = fmt.Sprintf("%d 与 %d 端口均不可达，可能服务器未运行或防火墙已拦截。", httpPort, httpsPort)
 	} else {
-		itemPort80.Score = 0
-		itemPort80.Passed = true
-		itemPort80.Details = fmt.Sprintf("80 端口 (%v), 443 端口 (%v) 状态符合常见公网服务器标准。", p80Open, p443Open)
+		itemPortSymmetry.Score = 0
+		itemPortSymmetry.Passed = true
+		itemPortSymmetry.Details = fmt.Sprintf("%d 端口 (%v), %d 端口 (%v) 状态符合公网服务器标准。", httpPort, pHTTPOpen, httpsPort, pHTTPSOpen)
 	}
-	cat.Items = append(cat.Items, itemPort80)
+	cat.Items = append(cat.Items, itemPortSymmetry)
 
 	// 2. HTTP 到 HTTPS 规范跳转检测
 	itemRedirect := CheckItem{
-		Name:        "HTTP 80 到 HTTPS 443 重定向合规度",
-		Description: "检测端口 80 是否返回规范的 301/302/308 重定向",
+		Name:        fmt.Sprintf("HTTP %d 到 HTTPS 重定向合规度", httpPort),
+		Description: fmt.Sprintf("检测端口 %d 是否返回规范的 301/302/307/308 重定向", httpPort),
 		MaxScore:    5,
 	}
 
-	if p80Open {
-		redirects, targetURL, err := checkHTTPRedirect(opts.IP, timeout)
+	if pHTTPOpen {
+		redirects, targetURL, err := checkHTTPRedirect(ctx, opts.IP, httpPort, timeout)
 		if err != nil || !redirects {
 			itemRedirect.Score = 5
 			itemRedirect.Passed = false
-			itemRedirect.Details = fmt.Sprintf("80 端口未返回到 HTTPS 的重定向响应 (状态: %v, 目标: %s)", err, targetURL)
-			itemRedirect.Mitigation = "配置 Caddy 对 80 端口全部请求返回 308/301 强制跳转至 HTTPS。"
+			itemRedirect.Details = fmt.Sprintf("%d 端口未返回到 HTTPS 的重定向响应 (状态: %v, 目标: %s)", httpPort, err, targetURL)
+			itemRedirect.Mitigation = "配置 Caddy / Web 服务器对 HTTP 端口全部请求返回 308/301 强制跳转至 HTTPS。"
 		} else {
 			itemRedirect.Score = 0
 			itemRedirect.Passed = true
-			itemRedirect.Details = fmt.Sprintf("80 端口正确重定向至 HTTPS (Location: %s)", targetURL)
+			itemRedirect.Details = fmt.Sprintf("%d 端口正确重定向至 HTTPS (Location: %s)", httpPort, targetURL)
 		}
 	} else {
 		itemRedirect.Score = 0
 		itemRedirect.Passed = true
-		itemRedirect.Details = "80 端口未开放，已在上一项计入特征，本项跳过。"
+		itemRedirect.Details = fmt.Sprintf("%d 端口未开放，已在前项计入特征，本项跳过。", httpPort)
 	}
 	cat.Items = append(cat.Items, itemRedirect)
 
 	// 3. 敏感代理/面板管理端口暴露检测
 	// 首先通过随机金丝雀高位端口检测当前测试客户端是否处于软路由/透明代理全端口劫持环境中
 	canaryPort := 59183
-	isTransparentProxy := isPortOpen(opts.IP, canaryPort, 800*time.Millisecond)
+	isTransparentProxy := isPortOpen(ctx, opts.IP, canaryPort, 800*time.Millisecond)
 
 	sensitivePorts := []int{7895, 9090, 9091, 2080, 1080}
 	var exposed []int
 	for _, port := range sensitivePorts {
-		if isPortOpen(opts.IP, port, 1500*time.Millisecond) {
+		if isPortOpen(ctx, opts.IP, port, 1500*time.Millisecond) {
 			exposed = append(exposed, port)
 		}
 	}
@@ -121,9 +124,10 @@ func probePorts(ctx context.Context, opts ProbeOptions) Category {
 	return cat
 }
 
-func isPortOpen(ip string, port int, timeout time.Duration) bool {
+func isPortOpen(ctx context.Context, ip string, port int, timeout time.Duration) bool {
 	addr := net.JoinHostPort(ip, fmt.Sprintf("%d", port))
-	conn, err := net.DialTimeout("tcp", addr, timeout)
+	dialer := &net.Dialer{Timeout: timeout}
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return false
 	}
@@ -131,14 +135,19 @@ func isPortOpen(ip string, port int, timeout time.Duration) bool {
 	return true
 }
 
-func checkHTTPRedirect(ip string, timeout time.Duration) (bool, string, error) {
+func checkHTTPRedirect(ctx context.Context, ip string, port int, timeout time.Duration) (bool, string, error) {
 	client := &http.Client{
 		Timeout: timeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 	}
-	resp, err := client.Get(fmt.Sprintf("http://%s/", ip))
+	url := fmt.Sprintf("http://%s/", net.JoinHostPort(ip, fmt.Sprintf("%d", port)))
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return false, "", err
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return false, "", err
 	}
@@ -150,6 +159,5 @@ func checkHTTPRedirect(ip string, timeout time.Duration) (bool, string, error) {
 		strings.HasPrefix(strings.ToLower(loc), "https://") {
 		return true, loc, nil
 	}
-
 	return false, loc, nil
 }
