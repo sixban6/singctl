@@ -2,133 +2,27 @@
 
 #################################################
 # 描述: macOS sing-box TUN模式 启动脚本
-# 用途: 在macOS上启动sing-box TUN模式代理服务
+# 用途: 在macOS上启动sing-box TUN模式代理服务 (使用 launchd 守护进程)
 #################################################
 
-# 确保能找到 sing-box 命令
-export PATH="/usr/local/bin:/usr/bin:$PATH"
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
 CONFIG_FILE="/etc/sing-box/config.json"
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SANDBOX_STRICT="/tmp/sing-box-sandbox.sb"
-SANDBOX_LOOSE="/tmp/sing-box-sandbox-loose.sb"
+PLIST_PATH="/Library/LaunchDaemons/com.singctl.sing-box.plist"
+LOG_DIR="/var/log/sing-box"
+STDOUT_LOG="$LOG_DIR/sing-box.log"
+STDERR_LOG="$LOG_DIR/sing-box.err.log"
 
-# 创建沙盒配置文件函数
-create_sandbox_configs() {
-    echo_info "创建自定义沙盒配置文件..."
-    
-    # 创建全协议支持沙盒配置
-    cat > "$SANDBOX_STRICT" << 'EOF'
-;; 全协议翻墙沙盒配置  
-;; 支持: hy2, trojan, vless, vmess, tuic, ss, socks5, reality, anytls
-;; 策略: 允许网络和读取，严格控制写入和执行
-(version 1)
-
-;; ===== 基础策略：允许大部分操作 =====
-(allow default)
-
-;; ===== 严格禁止危险操作 =====
-;; 禁止执行系统命令（除了必要的）
-(deny process-exec
-  (with no-log))
-
-;; 允许执行必要程序
-(allow process-exec
-  (literal "/usr/local/bin/sing-box")
-  (literal "/usr/bin/sing-box")
-  (literal "/bin/echo")
-  (literal "/bin/sh"))
-
-;; ===== 严格控制文件写入 =====
-;; 禁止写入系统关键目录
-(deny file-write*
-  (subpath "/System")
-  (subpath "/usr/bin")
-  (subpath "/usr/sbin") 
-  (subpath "/bin")
-  (subpath "/sbin")
-  (subpath "/Library/LaunchDaemons")
-  (subpath "/Library/LaunchAgents")
-  (literal "/etc/passwd")
-  (literal "/etc/shadow") 
-  (literal "/etc/sudoers")
-  (literal "/etc/hosts")
-  (with no-log))
-
-;; 允许写入安全目录
-(allow file-write*
-  (subpath "/tmp")
-  (subpath "/var/tmp")
-  (subpath "/etc/sing-box")
-  (subpath "/private/tmp")
-  (literal "/dev/null")
-  (literal "/dev/stdout")
-  (literal "/dev/stderr")
-  (regex #"^/.*\.log$")
-  (regex #"^/.*\.cache$")
-  (regex #"^/.*\.db$"))
-
-;; ===== 网络安全控制 =====
-;; 禁止监听特权端口（防止端口劫持）
-(deny network-bind
-  (local tcp "localhost:22")   ; SSH
-  (local tcp "localhost:80")   ; HTTP  
-  (local tcp "localhost:443")  ; HTTPS
-  (local tcp "localhost:25")   ; SMTP
-  (with no-log))
-
-;; ===== 协议特殊权限保留 =====
-;; Reality 协议：允许 TLS 指纹伪装
-(allow iokit-open)
-(allow mach-lookup)
-(allow ipc-posix-shm)
-
-;; QUIC 协议：允许 UDP 特殊操作
-(allow system-socket)
-(allow system-info)
-(allow sysctl-read)
-(allow sysctl-write
-  (sysctl-name-regex #"^net\.inet\..*"))
-EOF
-
-    # 创建宽松沙盒配置
-    cat > "$SANDBOX_LOOSE" << 'EOF'
-;; sing-box macOS Sandbox Profile - Loose Version
-;; 宽松版本，用于兼容性回退
-(version 1)
-
-;; 默认允许
-(allow default)
-
-;; 仅禁止最危险的操作
-(deny process-exec
-  (literal "/bin/rm")
-  (literal "/usr/bin/sudo")
-  (literal "/bin/chmod")
-  (with no-log))
-
-;; 禁止写入系统核心目录
-(deny file-write*
-  (literal "/etc/passwd")
-  (literal "/etc/shadow")
-  (subpath "/System/Library")
-  (with no-log))
-EOF
-
-    echo_info "沙盒配置文件创建完成"
-}
 CYAN='\033[0;36m'
 YLW='\033[0;33m'
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 NC='\033[0m'
 
-# 获取当前时间
 timestamp() {
     date +"%Y-%m-%d %H:%M:%S"
 }
 
-# 错误处理函数
 error_exit() {
     printf "${RED}错误: %s${NC}\n" "$1"
     exit 1
@@ -150,143 +44,38 @@ echo_info() {
     printf "${GREEN}%s [INFO] %s${NC}\n" "$(timestamp)" "$1"
 }
 
-# 检查命令是否存在
-check_command() {
-    local cmd=$1
-    if ! command -v "$cmd" >/dev/null 2>&1; then
-        error_exit "$cmd 未安装，请安装后再运行此脚本"
+# 查找 sing-box 二进制路径
+find_singbox_bin() {
+    if command -v sing-box >/dev/null 2>&1; then
+        command -v sing-box
+        return 0
     fi
+    for path in "/opt/homebrew/bin/sing-box" "/usr/local/bin/sing-box" "/usr/bin/sing-box"; do
+        if [ -x "$path" ]; then
+            echo "$path"
+            return 0
+        fi
+    done
+    return 1
 }
 
 # 检查网络连接
 check_network() {
-    local ping_count=3
+    local ping_count=2
     local test_host="8.8.8.8"
     echo_succ "检查网络连接..."
     if ! ping -c $ping_count $test_host >/dev/null 2>&1; then
-        echo_warn "网络连接检查失败，但将继续启动服务"
-    fi
-}
-
-# 检查 macOS 沙盒是否可用
-check_sandbox_available() {
-    if ! command -v sandbox-exec >/dev/null 2>&1; then
-        echo_warn "sandbox-exec 不可用，跳过沙盒模式"
-        return 1
-    fi
-    
-    # 创建沙盒配置文件
-    create_sandbox_configs
-    
-    # 检查配置文件是否创建成功
-    if [ ! -f "$SANDBOX_STRICT" ]; then
-        echo_warn "沙盒配置文件创建失败: $SANDBOX_STRICT"
-        return 1
-    fi
-    
-    # 测试自定义沙盒配置
-    if ! sandbox-exec -f "$SANDBOX_STRICT" /bin/echo "test" >/dev/null 2>&1; then
-        echo_warn "自定义沙盒配置测试失败"
-        return 1
-    fi
-    
-    echo_info "沙盒环境检查通过"
-    return 0
-}
-
-# 测试自定义沙盒配置
-test_custom_sandbox() {
-    local sandbox_file="$1"
-    local test_name="$2"
-    
-    echo_info "测试${test_name}沙盒配置..."
-    
-    # 测试基础沙盒功能
-    if ! sandbox-exec -f "$sandbox_file" /bin/echo "sandbox test" >/tmp/sandbox-test.log 2>&1; then
-        echo_warn "${test_name}沙盒配置测试失败，查看 /tmp/sandbox-test.log"
-        return 1
-    fi
-    
-    # 测试 sing-box 版本查询（不启动服务）
-    if ! sandbox-exec -f "$sandbox_file" sing-box version >/tmp/sandbox-singbox-test.log 2>&1; then
-        echo_warn "${test_name}沙盒下 sing-box 无法运行，查看 /tmp/sandbox-singbox-test.log"
-        return 1
-    fi
-    
-    echo_succ "${test_name}沙盒配置测试通过"
-    return 0
-}
-
-# 使用自定义沙盒配置启动 sing-box
-start_with_custom_sandbox() {
-    local sandbox_file="$1"
-    local mode_name="$2"
-    
-    echo_succ "使用${mode_name}沙盒启动 sing-box..."
-    
-    # 使用自定义沙盒启动 sing-box
-    sudo sandbox-exec -f "$sandbox_file" sing-box run -c "$CONFIG_FILE" >/tmp/sing-box-sandbox.log 2>&1 &
-    local pid=$!
-    
-    echo_info "sing-box 沙盒进程已启动，PID: $pid"
-    
-    # 等待服务启动
-    sleep 3
-    
-    # 检查进程是否还在运行
-    if kill -0 $pid 2>/dev/null; then
-        # 进程存在，检查是否是我们的 sing-box 进程
-        if ps -p $pid | grep -q "sing-box"; then
-            echo_succ "sing-box 启动成功 (${mode_name}沙盒模式)"
-            echo_info "沙盒特性: 自定义翻墙优化沙盒保护"
-            echo_info "安全限制: 禁止执行其他程序 + 限制系统目录写入"
-            echo_info "日志文件: /tmp/sing-box-sandbox.log"
-            return 0
-        fi
-    fi
-    
-    echo_warn "${mode_name}沙盒启动失败，查看日志: /tmp/sing-box-sandbox.log"
-    return 1
-}
-
-# 原生模式启动（无沙盒）
-start_without_sandbox() {
-    echo_warn "回退到原生模式启动 sing-box（无沙盒保护）..."
-    
-    sudo sing-box run -c "$CONFIG_FILE" >/dev/null 2>&1 &
-    local pid=$!
-    echo_info "sing-box 进程已启动，PID: $pid"
-    
-    sleep 3
-    if pgrep "sing-box" > /dev/null; then
-        echo_succ "sing-box 启动成功 (原生模式，无沙盒)"
-        echo_warn "注意: 未使用沙盒保护，安全性较低"
-        return 0
-    else
-        error_exit "sing-box 启动失败，请检查日志"
+        echo_warn "网络连接检查未通过，继续尝试启动服务"
     fi
 }
 
 init_env() {
-    # 停止现有的 sing-box 进程
-    if pgrep "sing-box" > /dev/null; then
-        echo_succ "发现运行中的 sing-box 进程，正在停止..."
-        pkill sing-box
-        sleep 2
-        # 如果还在运行，强制终止
-        if pgrep "sing-box" > /dev/null; then
-            pkill -9 sing-box
-            echo_succ "已强制停止现有 sing-box 服务"
-        else
-            echo_succ "已停止现有 sing-box 服务"
-        fi
-    else
-        echo_succ "没有运行中的 sing-box 服务"
+    # 查找 sing-box
+    SING_BOX_BIN=$(find_singbox_bin)
+    if [ -z "$SING_BOX_BIN" ]; then
+        error_exit "未找到 sing-box 可执行文件，请先安装 sing-box"
     fi
-
-    # 检查必要命令是否安装
-    check_command "sing-box"
-    check_command "ping"
+    echo_info "sing-box 路径: $SING_BOX_BIN"
 
     # 检查网络
     check_network
@@ -302,54 +91,101 @@ init_env() {
         error_exit "配置文件不存在: $CONFIG_FILE"
     fi
 
-    if ! sing-box check -c "$CONFIG_FILE"; then
+    if ! "$SING_BOX_BIN" check -c "$CONFIG_FILE"; then
         error_exit "配置文件验证失败"
     fi
     echo_succ "配置文件验证通过"
+
+    # 确保日志目录存在
+    if [ ! -d "$LOG_DIR" ]; then
+        sudo mkdir -p "$LOG_DIR"
+        sudo chmod 755 "$LOG_DIR"
+    fi
 }
 
-start_singbox() {
-    echo_succ "启动 sing-box 服务 (TUN模式)..."
-    echo_info "尝试使用自定义沙盒保护启动..."
-    
-    # 策略1: 检查沙盒是否可用
-    if check_sandbox_available; then
-        echo_info "开始自定义沙盒模式启动流程..."
-        
-        # 策略2: 尝试自定义沙盒模式（专为翻墙优化）
-        if test_custom_sandbox "$SANDBOX_STRICT" "自定义"; then
-            echo_info "尝试自定义沙盒模式启动..."
-            if start_with_custom_sandbox "$SANDBOX_STRICT" "自定义"; then
-                return 0  # 成功启动，退出函数
-            fi
-            echo_warn "自定义沙盒模式启动失败，尝试宽松模式..."
-        else
-            echo_warn "自定义沙盒配置测试失败，尝试宽松模式..."
-        fi
-        
-        # 策略3: 尝试宽松沙盒模式（备选方案）
-        if [ -f "$SANDBOX_LOOSE" ] && test_custom_sandbox "$SANDBOX_LOOSE" "宽松"; then
-            echo_info "尝试宽松沙盒模式启动..."
-            if start_with_custom_sandbox "$SANDBOX_LOOSE" "宽松"; then
-                return 0  # 成功启动，退出函数
-            fi
-            echo_warn "宽松沙盒模式启动失败，回退到原生模式..."
-        fi
-        
-        # 清理失败的沙盒测试日志
-        rm -f /tmp/sandbox-test.log /tmp/sandbox-singbox-test.log /tmp/sing-box-sandbox.log 2>/dev/null || true
-    else
-        echo_warn "沙盒环境不可用，使用原生模式..."
+# 创建并注册 macOS launchd 守护进程
+start_launchd_service() {
+    echo_succ "配置 macOS launchd 守护进程..."
+
+    # 如果已有服务在运行，先平滑卸载
+    if [ -f "$PLIST_PATH" ]; then
+        echo_info "检测到已有服务配置，先卸载旧服务..."
+        sudo launchctl unload -w "$PLIST_PATH" 2>/dev/null || true
+        sleep 1
     fi
-    
-    # 策略4: 原生模式启动（最后回退方案）
-    echo_warn "所有沙盒模式尝试失败或不可用"
-    start_without_sandbox
+
+    # 写入 LaunchDaemon plist
+    cat <<EOF | sudo tee "$PLIST_PATH" > /dev/null
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.singctl.sing-box</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${SING_BOX_BIN}</string>
+        <string>run</string>
+        <string>-c</string>
+        <string>${CONFIG_FILE}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>NetworkState</key>
+        <true/>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>${STDOUT_LOG}</string>
+    <key>StandardErrorPath</key>
+    <string>${STDERR_LOG}</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>
+EOF
+
+    sudo chown root:wheel "$PLIST_PATH"
+    sudo chmod 644 "$PLIST_PATH"
+    echo_info "已生成 LaunchDaemon plist: $PLIST_PATH"
+
+    # 加载并启动守护进程
+    echo_info "加载并启动 com.singctl.sing-box 服务..."
+    if ! sudo launchctl load -w "$PLIST_PATH"; then
+        error_exit "launchctl load 失败"
+    fi
+
+    # 轮询验证服务启动状态
+    echo_info "等待 sing-box 初始化并建立 TUN 路由..."
+    local started=false
+    for i in $(seq 1 10); do
+        if pgrep -f "${SING_BOX_BIN} run" >/dev/null 2>&1 || pgrep "sing-box" >/dev/null 2>&1; then
+            started=true
+            break
+        fi
+        sleep 1
+    done
+
+    if [ "$started" = true ]; then
+        echo_succ "sing-box 启动成功 (launchd 守护进程模式)"
+        echo_info "服务标签: com.singctl.sing-box"
+        echo_info "标准日志: $STDOUT_LOG"
+        echo_info "错误日志: $STDERR_LOG"
+    else
+        echo_err "sing-box 启动超时，请查看错误日志: $STDERR_LOG"
+        exit 1
+    fi
 }
 
 main() {
     init_env
-    start_singbox
+    start_launchd_service
 }
 
 main

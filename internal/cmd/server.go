@@ -26,7 +26,7 @@ func newInstallServerCmd(cfg *config.Config) *cobra.Command {
 
 			// If no target is specified, run them all in sequence
 			if len(args) == 0 {
-				if err := deploy.DeployCommon(); err != nil {
+				if err := deploy.DeployCommonWithConfig(cfg); err != nil {
 					return err
 				}
 				if err := deploy.DeployWarp(); err != nil {
@@ -62,7 +62,7 @@ func newInstallServerCmd(cfg *config.Config) *cobra.Command {
 			// Handle specified targets
 			switch args[0] {
 			case "common":
-				return deploy.DeployCommon()
+				return deploy.DeployCommonWithConfig(cfg)
 			case "caddy":
 				return deploy.DeployCaddy(cfg)
 			case "singbox":
@@ -198,7 +198,7 @@ func NewReinstallServerCmd(configPath string) *cobra.Command {
 			case "all":
 				return handleReinstallAll(cfg, force)
 			case "common":
-				return deploy.DeployCommon()
+				return deploy.DeployCommonWithConfig(cfg)
 			case "caddy":
 				return handleReinstallCaddy(cfg, force)
 			case "singbox":
@@ -446,7 +446,7 @@ func reinstallAll(cfg *config.Config) error {
 
 	// 2. Install all components fresh
 	logger.Info("Step 2/2: Installing all server components fresh...")
-	if err := deploy.DeployCommon(); err != nil {
+	if err := deploy.DeployCommonWithConfig(cfg); err != nil {
 		return err
 	}
 	if err := deploy.DeployWarp(); err != nil {

@@ -320,3 +320,71 @@ func TestConfigGeneratorParameters(t *testing.T) {
 		})
 	}
 }
+
+func TestCustomRulesInjection(t *testing.T) {
+	cfg := &config.Config{
+		CustomRules: config.CustomRulesConfig{
+			Route: []map[string]any{
+				{
+					"action":        "route",
+					"domain_suffix": []any{"htsc.com.cn", "zhangle.com"},
+					"outbound":      "DirectConn",
+				},
+			},
+			DNS: []map[string]any{
+				{
+					"domain_suffix": []any{"htsc.com.cn"},
+					"server":        "dns_local",
+				},
+			},
+		},
+	}
+
+	generator := singbox.NewConfigGenerator(cfg)
+	baseJSON := `{
+		"dns": {
+			"rules": [
+				{"rule_set": "geosite-cn", "server": "dns_local"}
+			]
+		},
+		"route": {
+			"rules": [
+				{"action": "sniff"},
+				{"ip_is_private": true, "outbound": "DirectConn"},
+				{"action": "route", "rule_set": "geosite-steam", "outbound": "Steam"}
+			]
+		}
+	}`
+
+	outJSON, err := generator.InjectCustomRules(baseJSON)
+	if err != nil {
+		t.Fatalf("InjectCustomRules failed: %v", err)
+	}
+
+	var root map[string]any
+	if err := json.Unmarshal([]byte(outJSON), &root); err != nil {
+		t.Fatalf("unmarshal injected json failed: %v", err)
+	}
+
+	// Verify DNS rule was prepended
+	dnsMap := root["dns"].(map[string]any)
+	dnsRules := dnsMap["rules"].([]any)
+	if len(dnsRules) != 2 {
+		t.Fatalf("expected 2 dns rules, got %d", len(dnsRules))
+	}
+	firstDNS := dnsRules[0].(map[string]any)
+	if firstDNS["server"] != "dns_local" {
+		t.Errorf("expected first dns rule server to be dns_local, got %v", firstDNS["server"])
+	}
+
+	// Verify Route rule was inserted after ip_is_private
+	routeMap := root["route"].(map[string]any)
+	routeRules := routeMap["rules"].([]any)
+	if len(routeRules) != 4 {
+		t.Fatalf("expected 4 route rules, got %d", len(routeRules))
+	}
+	customRoute := routeRules[2].(map[string]any)
+	if customRoute["outbound"] != "DirectConn" {
+		t.Errorf("expected custom route outbound DirectConn, got %v", customRoute["outbound"])
+	}
+}

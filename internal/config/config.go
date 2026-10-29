@@ -19,13 +19,19 @@ import (
 )
 
 type Config struct {
-	Subs   []Subscription `yaml:"subs"`
-	GitHub GitHubConfig   `yaml:"github"`
+	Subs        []Subscription    `yaml:"subs"`
+	GitHub      GitHubConfig      `yaml:"github"`
 	//GUI       GUIConfig       `yaml:"gui"`
-	Hy2       Hy2Config       `yaml:"hy2"`
-	Tailscale TailscaleConfig `yaml:"tailscale"`
-	Server    ServerConfig    `yaml:"server"`
-	Watchdog  WatchdogConfig  `yaml:"watchdog"`
+	Hy2         Hy2Config         `yaml:"hy2"`
+	Tailscale   TailscaleConfig   `yaml:"tailscale"`
+	Server      ServerConfig      `yaml:"server"`
+	Watchdog    WatchdogConfig    `yaml:"watchdog"`
+	CustomRules CustomRulesConfig `yaml:"custom_rules,omitempty"`
+}
+
+type CustomRulesConfig struct {
+	Route []map[string]any `yaml:"route,omitempty"`
+	DNS   []map[string]any `yaml:"dns,omitempty"`
 }
 type Subscription struct {
 	Name          string `yaml:"name"`
@@ -314,6 +320,7 @@ func Load(path string) (*Config, error) {
 		"tailscale", "auth_key", "use_build", constant.TailscaleSubnets,
 		"server", "node_tag", "sb_domain", "node_domain", "substore_domain", "cf_dns_key", "sni", "cors_allowed_origins", "web_terminal", "ssh_tunnel_port", "ssh_tunnel_path", "ssh_port",
 		"watchdog", "interval", "confirm_wait", "max_restarts",
+		"custom_rules", "route", "dns",
 	}
 	pattern := fmt.Sprintf("(?m)^([ \\t-]*(?:%s)):([^\\s].*)", strings.Join(keys, "|"))
 	re := regexp.MustCompile(pattern)
@@ -403,6 +410,7 @@ func MigrateConfig(configPath string, templateData []byte) error {
 		"tailscale", "auth_key", "use_build", constant.TailscaleSubnets,
 		"server", "node_tag", "sb_domain", "node_domain", "substore_domain", "server_ip", "cf_dns_key", "sni", "cors_allowed_origins", "web_terminal", "ssh_tunnel_port", "ssh_tunnel_path", "ssh_port",
 		"watchdog", "interval", "confirm_wait", "max_restarts",
+		"custom_rules", "route", "dns",
 	}
 	pattern := fmt.Sprintf("(?m)^([ \\t-]*(?:%s)):([^\\s].*)", strings.Join(keys, "|"))
 	re := regexp.MustCompile(pattern)
@@ -606,6 +614,11 @@ func MigrateConfig(configPath string, templateData []byte) error {
 		setOrAddField(docNode, "watchdog", "interval", fmt.Sprintf("%d", oldCfg.Watchdog.Interval))
 		setOrAddField(docNode, "watchdog", "confirm_wait", fmt.Sprintf("%d", oldCfg.Watchdog.ConfirmWait))
 		setOrAddField(docNode, "watchdog", "max_restarts", fmt.Sprintf("%d", oldCfg.Watchdog.MaxRestarts))
+	}
+
+	// 7. Merge CustomRules
+	if strings.Contains(string(oldData), "custom_rules:") {
+		replaceNode(docNode, "custom_rules", oldCfg.CustomRules)
 	}
 
 	newData, err := yaml.Marshal(&rootNode)

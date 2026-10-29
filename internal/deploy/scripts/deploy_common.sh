@@ -4,7 +4,8 @@ set -o pipefail
 
 echo "Starting Common deployment (Firewall, Sysctl BBR, SSH hardening)..."
 
-SSH_PORT="2222"
+SSH_PORT="${SSH_PORT:-2222}"
+SKIP_SSH_PORT_CHANGE="${SKIP_SSH_PORT_CHANGE:-false}"
 
 detect_os() {
     if [ -f /etc/openwrt_release ] || [ -f /etc/openwrt_version ]; then
@@ -26,7 +27,44 @@ detect_os() {
     echo "unknown"
 }
 
+configure_firewall_nftables() {
+    echo "Configuring firewall via native nftables..."
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl enable nftables || true
+        systemctl start nftables || true
+    fi
+
+    nft add table inet filter 2>/dev/null || true
+    nft add chain inet filter input '{ type filter hook input priority 0; policy accept; }' 2>/dev/null || true
+
+    # Allow established and loopback
+    nft add rule inet filter input ct state related,established accept 2>/dev/null || true
+    nft add rule inet filter input iifname "lo" accept 2>/dev/null || true
+
+    # Keep port 22 open and allow target SSH port
+    nft add rule inet filter input tcp dport 22 accept 2>/dev/null || true
+    if [ "${SSH_PORT}" != "22" ] && [ "${SKIP_SSH_PORT_CHANGE}" != "true" ]; then
+        nft add rule inet filter input tcp dport "${SSH_PORT}" accept 2>/dev/null || true
+    fi
+
+    for port in 80 443; do
+        nft add rule inet filter input tcp dport "${port}" accept 2>/dev/null || true
+        nft add rule inet filter input udp dport "${port}" accept 2>/dev/null || true
+    done
+
+    # Persist ruleset if /etc/nftables.conf is present
+    if [ -f /etc/nftables.conf ]; then
+        nft list ruleset > /etc/nftables.conf 2>/dev/null || true
+    fi
+}
+
 configure_firewall_debian_like() {
+    # Check if native nftables is active or installed without UFW
+    if systemctl is-active --quiet nftables 2>/dev/null || (command -v nft >/dev/null 2>&1 && ! command -v ufw >/dev/null 2>&1); then
+        configure_firewall_nftables
+        return
+    fi
+
     echo "Configuring firewall via UFW (Debian/Ubuntu)..."
 
     if ! command -v ufw >/dev/null 2>&1; then
@@ -34,12 +72,17 @@ configure_firewall_debian_like() {
         apt-get install -y ufw
     fi
 
-    # Remove legacy SSH 22 and standalone port allow rules if present.
-    ufw --force delete allow 22 >/dev/null 2>&1 || true
+    # Keep port 22 open during transition to prevent accidental lockout!
+    ufw allow 22 || true
+    if [ "${SSH_PORT}" != "22" ] && [ "${SKIP_SSH_PORT_CHANGE}" != "true" ]; then
+        echo "Allowing SSH transition port ${SSH_PORT}..."
+        ufw allow "${SSH_PORT}" || true
+    fi
+
     ufw --force delete allow 8444 >/dev/null 2>&1 || true
     ufw --force delete allow 8448 >/dev/null 2>&1 || true
 
-    for port in "${SSH_PORT}" 80 443; do
+    for port in 80 443; do
         echo "Allowing port ${port}..."
         ufw allow "${port}" || true
     done
@@ -199,13 +242,28 @@ configure_ssh_debian_like() {
         sed -i -E 's/^[[:space:]]*Port[[:space:]]+[0-9]+/# &/g' "${conf}"
     done
 
-    cat > /etc/ssh/sshd_config.d/99-singctl-hardening.conf <<EOF
+    if [ "${SKIP_SSH_PORT_CHANGE}" = "true" ] || [ "${SSH_PORT}" = "22" ]; then
+        echo "Keeping standard SSH Port 22..."
+        cat > /etc/ssh/sshd_config.d/99-singctl-hardening.conf <<EOF
+Port 22
+PasswordAuthentication no
+PubkeyAuthentication yes
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+EOF
+    else
+        echo "Adopting dual-port transition (Port 22 and Port ${SSH_PORT}) to avoid lockout..."
+        cat > /etc/ssh/sshd_config.d/99-singctl-hardening.conf <<EOF
+Port 22
 Port ${SSH_PORT}
 PasswordAuthentication no
 PubkeyAuthentication yes
 KbdInteractiveAuthentication no
 ChallengeResponseAuthentication no
 EOF
+        echo "[SAFETY NOTICE] SSH is listening on BOTH Port 22 and Port ${SSH_PORT}."
+        echo "[SAFETY NOTICE] Please ensure your cloud provider's firewall/security group allows Port ${SSH_PORT}."
+    fi
 
     local sshd_bin
     sshd_bin="$(command -v sshd || true)"

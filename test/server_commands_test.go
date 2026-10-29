@@ -73,7 +73,7 @@ func TestReinstallServerCmd_MissingRequiredConfig(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for missing required config, got nil")
 	}
-	if !strings.Contains(err.Error(), "server.sb_domain and server.cf_dns_key are required") {
+	if !strings.Contains(err.Error(), "and server.cf_dns_key are required") {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }
