@@ -41,8 +41,8 @@ if [ -n "${CADDY_ARCH}" ]; then
                 apt-mark unhold caddy || true
                 apt-get install -y caddy
 
-                cp "${TMP_DIR}/caddy" /usr/bin/caddy
-                chmod 0755 /usr/bin/caddy
+                systemctl stop caddy 2>/dev/null || true
+                install -m 0755 "${TMP_DIR}/caddy" /usr/bin/caddy
                 apt-mark hold caddy
                 echo "Prebuilt Caddy with Cloudflare & layer4 installed successfully."
                 PREBUILT_SUCCESS=true
