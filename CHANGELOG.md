@@ -1,3 +1,10 @@
+## [1.46.1](https://github.com/sixban6/singctl/compare/v1.46.0...v1.46.1) (2026-10-29)
+
+
+### Bug Fixes
+
+* **deploy:** stop caddy service and use install to prevent text file busy error ([5d43178](https://github.com/sixban6/singctl/commit/5d43178faef08e387185704be7e8da28cbff5dd4))
+
 # [1.46.0](https://github.com/sixban6/singctl/compare/v1.45.1...v1.46.0) (2026-10-29)
 
 
