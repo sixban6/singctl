@@ -133,8 +133,78 @@ func (g *ConfigGenerator) GenerateForPlatform(platform string) (string, error) {
 		return "", err
 	}
 
+	// 注入自定义规则（DNS 与路由）
+	withCustomRules, err := g.InjectCustomRules(deduped)
+	if err != nil {
+		return "", err
+	}
+
 	// 格式化为可读 JSON
-	return PrettyJSON(deduped)
+	return PrettyJSON(withCustomRules)
+}
+
+func (g *ConfigGenerator) InjectCustomRules(rawJSON string) (string, error) {
+	if g.config == nil || (len(g.config.CustomRules.Route) == 0 && len(g.config.CustomRules.DNS) == 0) {
+		return rawJSON, nil
+	}
+
+	var root map[string]any
+	if err := json.Unmarshal([]byte(rawJSON), &root); err != nil {
+		return "", fmt.Errorf("failed to parse config JSON for custom rules: %w", err)
+	}
+
+	// 注入 DNS 规则
+	if len(g.config.CustomRules.DNS) > 0 {
+		if dnsMap, ok := root["dns"].(map[string]any); ok {
+			var existingRules []any
+			if r, ok := dnsMap["rules"].([]any); ok {
+				existingRules = r
+			}
+			newRules := make([]any, 0, len(g.config.CustomRules.DNS)+len(existingRules))
+			for _, r := range g.config.CustomRules.DNS {
+				newRules = append(newRules, r)
+			}
+			newRules = append(newRules, existingRules...)
+			dnsMap["rules"] = newRules
+		}
+	}
+
+	// 注入路由规则
+	if len(g.config.CustomRules.Route) > 0 {
+		if routeMap, ok := root["route"].(map[string]any); ok {
+			var existingRules []any
+			if r, ok := routeMap["rules"].([]any); ok {
+				existingRules = r
+			}
+			// 找到 private IP 规则之后的位置插入
+			insertIdx := 0
+			for i, r := range existingRules {
+				if rMap, ok := r.(map[string]any); ok {
+					if _, hasPrivate := rMap["ip_is_private"]; hasPrivate {
+						insertIdx = i + 1
+						break
+					}
+				}
+			}
+			if insertIdx == 0 {
+				insertIdx = len(existingRules)
+			}
+
+			newRules := make([]any, 0, len(existingRules)+len(g.config.CustomRules.Route))
+			newRules = append(newRules, existingRules[:insertIdx]...)
+			for _, r := range g.config.CustomRules.Route {
+				newRules = append(newRules, r)
+			}
+			newRules = append(newRules, existingRules[insertIdx:]...)
+			routeMap["rules"] = newRules
+		}
+	}
+
+	data, err := json.Marshal(root)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal config JSON with custom rules: %w", err)
+	}
+	return string(data), nil
 }
 
 // generateSingleSubscription 处理单个订阅

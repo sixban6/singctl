@@ -465,6 +465,9 @@ func TestRevertAndClearCache(t *testing.T) {
 // ───────────────── 内置快照兑底 ─────────────────
 
 func TestSnapshotFallbackByTag(t *testing.T) {
+	if ruleset_snapshot.Load().Count() == 0 {
+		t.Skip("skipping snapshot test in lite build (no embedded ruleset snapshot)")
+	}
 	// 服务器不可用（返回 503），tag 命中内置快照 → 从快照兑底
 	srv := serveRuleSet(t, http.StatusServiceUnavailable, nil)
 	cacheDir := t.TempDir()
@@ -501,6 +504,9 @@ func TestSnapshotFallbackByTag(t *testing.T) {
 }
 
 func TestSnapshotFallbackByURL(t *testing.T) {
+	if ruleset_snapshot.Load().Count() == 0 {
+		t.Skip("skipping snapshot test in lite build (no embedded ruleset snapshot)")
+	}
 	// tag 不匹配，但 URL（含镜像前缀）与快照规范 URL 等价 → 兑底
 	// 用已关闭的本地服务器作镜像前缀，避免测试依赖真实网络
 	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
@@ -524,7 +530,7 @@ func TestSnapshotFallbackByURL(t *testing.T) {
 func TestSnapshotIntegrity(t *testing.T) {
 	snap := ruleset_snapshot.Load()
 	if snap.Count() == 0 {
-		t.Fatal("embedded snapshot is empty")
+		t.Skip("skipping snapshot integrity test in lite build (no embedded ruleset snapshot)")
 	}
 	if snap.GeneratedAt() == "" {
 		t.Fatal("snapshot manifest missing generated_at")

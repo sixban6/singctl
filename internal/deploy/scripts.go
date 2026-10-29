@@ -12,6 +12,11 @@ var scriptFiles embed.FS
 
 // runEmbeddedScript is a helper to run a bash script embedded in the binary
 func runEmbeddedScript(scriptName string, args ...string) error {
+	return runEmbeddedScriptWithEnv(scriptName, nil, args...)
+}
+
+// runEmbeddedScriptWithEnv runs an embedded bash script with custom environment variables
+func runEmbeddedScriptWithEnv(scriptName string, env []string, args ...string) error {
 	content, err := scriptFiles.ReadFile("scripts/" + scriptName)
 	if err != nil {
 		return fmt.Errorf("read embedded script %s failed: %w", scriptName, err)
@@ -31,6 +36,9 @@ func runEmbeddedScript(scriptName string, args ...string) error {
 	cmd := exec.Command("bash", cmdArgs...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
 
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("script execution failed (%s): %w", scriptName, err)

@@ -5,13 +5,29 @@ import (
 	"os"
 	"os/exec"
 
+	"singctl/internal/config"
 	"singctl/internal/logger"
 )
 
-// DeployCommon env initializes base environment (UFW, sysctl)
+// DeployCommon env initializes base environment (UFW/nftables, sysctl, SSH dual-port hardening)
 func DeployCommon() error {
-	logger.Info("Running common deployment script...")
-	if err := runEmbeddedScript("deploy_common.sh"); err != nil {
+	return DeployCommonWithConfig(nil)
+}
+
+// DeployCommonWithConfig initializes base environment with SSH port from config if provided
+func DeployCommonWithConfig(cfg *config.Config) error {
+	logger.Info("Running common deployment script (Firewall, Sysctl BBR, SSH hardening)...")
+	var env []string
+	if cfg != nil {
+		sshPort := cfg.Server.WebTerminal.SSHPort
+		if sshPort > 0 {
+			env = append(env, fmt.Sprintf("SSH_PORT=%d", sshPort))
+			if sshPort == 22 {
+				env = append(env, "SKIP_SSH_PORT_CHANGE=true")
+			}
+		}
+	}
+	if err := runEmbeddedScriptWithEnv("deploy_common.sh", env); err != nil {
 		return err
 	}
 	logger.Success("Common deployment script finished.")

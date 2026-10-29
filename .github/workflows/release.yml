@@ -101,7 +101,7 @@ jobs:
         LDFLAGS="-ldflags \"-X main.Version=${VERSION} -X main.BuildTime=${BUILD_TIME} -X main.GitCommit=${GIT_COMMIT} -s -w\""
         
         # Build for multiple platforms
-        mkdir -p dist/{linux-amd64,linux-arm64,darwin-arm64}
+        mkdir -p dist/{linux-amd64,linux-arm64,darwin-arm64,linux-amd64-lite,linux-arm64-lite}
         
         # --- Linux AMD64 ---
         GOOS=linux GOARCH=amd64 CGO_ENABLED=0 eval go build $LDFLAGS -o dist/linux-amd64/singctl ./cmd/singctl
@@ -111,16 +111,45 @@ jobs:
         # --- Linux ARM64 ---
         GOOS=linux GOARCH=arm64 CGO_ENABLED=0 eval go build $LDFLAGS -o dist/linux-arm64/singctl ./cmd/singctl
         upx --best --lzma dist/linux-arm64/singctl
+
+        # --- Linux AMD64 (Lite - no embedded rule snapshots) ---
+        GOOS=linux GOARCH=amd64 CGO_ENABLED=0 eval go build -tags lite $LDFLAGS -o dist/linux-amd64-lite/singctl ./cmd/singctl
+        upx --best --lzma dist/linux-amd64-lite/singctl
+
+        # --- Linux ARM64 (Lite - no embedded rule snapshots) ---
+        GOOS=linux GOARCH=arm64 CGO_ENABLED=0 eval go build -tags lite $LDFLAGS -o dist/linux-arm64-lite/singctl ./cmd/singctl
+        upx --best --lzma dist/linux-arm64-lite/singctl
         
         # --- macOS ARM64 (Apple Silicon) ---
         GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 eval go build $LDFLAGS -o dist/darwin-arm64/singctl ./cmd/singctl
+
+    - name: Build custom Caddy with Cloudflare and Layer4 plugins
+      run: |
+        go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+        mkdir -p dist/caddy-build
+        
+        # Build Linux amd64 custom Caddy
+        GOOS=linux GOARCH=amd64 xcaddy build \
+          --with github.com/caddy-dns/cloudflare \
+          --with github.com/mholt/caddy-l4 \
+          --output dist/caddy-build/caddy
+        tar -czf dist/caddy-custom-linux-amd64.tar.gz -C dist/caddy-build caddy
+        rm -f dist/caddy-build/caddy
+
+        # Build Linux arm64 custom Caddy
+        GOOS=linux GOARCH=arm64 xcaddy build \
+          --with github.com/caddy-dns/cloudflare \
+          --with github.com/mholt/caddy-l4 \
+          --output dist/caddy-build/caddy
+        tar -czf dist/caddy-custom-linux-arm64.tar.gz -C dist/caddy-build caddy
+        rm -rf dist/caddy-build
 
     - name: Create packages
       run: |
         cd dist
         
         # Create tarballs for Unix systems
-        for platform_dir in linux-amd64 linux-arm64 darwin-arm64; do
+        for platform_dir in linux-amd64 linux-arm64 darwin-arm64 linux-amd64-lite linux-arm64-lite; do
           if [[ -d "$platform_dir" && -f "$platform_dir/singctl" ]]; then
             # Create final package directory with proper name
             package_name="singctl-${platform_dir}"

@@ -10,8 +10,8 @@ github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZN
 github.com/russross/blackfriday/v2 v2.1.0/go.mod h1:+Rmxgy9KzJVeS9/2gXHxylqXiyQDYRxCVz55jmeOWTM=
 github.com/showwin/speedtest-go v1.7.10 h1:9o5zb7KsuzZKn+IE2//z5btLKJ870JwO6ETayUkqRFw=
 github.com/showwin/speedtest-go v1.7.10/go.mod h1:Ei7OCTmNPdWofMadzcfgq1rUO7mvJy9Jycj//G7vyfA=
-github.com/sixban6/singgen v1.14.7 h1:Ugc4ote3PJ6p3SSCeGHae2ALGAapjR2nHxUjXGop94Y=
-github.com/sixban6/singgen v1.14.7/go.mod h1:3KSsRgnNU1BEOxn3QAWGGVu7x7RnaKGODGdh2rc2fuc=
+github.com/sixban6/singgen v1.14.8 h1:IqBS2q+Hbo0HxbE9RBgQM+CxRMDdR5Zi+gzGxMXf2vw=
+github.com/sixban6/singgen v1.14.8/go.mod h1:3KSsRgnNU1BEOxn3QAWGGVu7x7RnaKGODGdh2rc2fuc=
 github.com/spf13/cobra v1.10.2 h1:DMTTonx5m65Ic0GOoRY2c16WCbHxOOw6xxezuLaBpcU=
 github.com/spf13/cobra v1.10.2/go.mod h1:7C1pvHqHw5A4vrJfjNwvOdzYu0Gml16OCs2GRiTUUS4=
 github.com/spf13/pflag v1.0.9/go.mod h1:McXfInJRrz4CZXVZOBLb0bTZqETkiAhM9Iw0y3An2Bg=

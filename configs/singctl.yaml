@@ -33,3 +33,12 @@ watchdog:                                      # (可选) 看门狗守护进程�
   interval: 180                                 # 检查间隔(秒), 默认 180
   confirm_wait: 30                              # 检测失败后二次确认等待(秒), 默认 30
   max_restarts: 3                               # 每小时最大自动重启次数, 默认 3
+
+# custom_rules:                                 # (可选) 自定义分流规则扩展 (个人券商/域名直连或特定分流)
+#   route:
+#     - action: route
+#       domain_suffix: [htsc.com.cn, zhangle.com, 10jqka.com.cn, eastmoney.com, tradingview.com]
+#       outbound: DirectConn
+#   dns:
+#     - domain_suffix: [htsc.com.cn, zhangle.com, 10jqka.com.cn, eastmoney.com]
+#       server: dns_local
