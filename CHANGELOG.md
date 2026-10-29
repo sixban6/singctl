@@ -1,3 +1,10 @@
+# [1.46.0](https://github.com/sixban6/singctl/compare/v1.45.1...v1.46.0) (2026-10-29)
+
+
+### Features
+
+* optimize template decoupling, deploy safety, warp api, macos launchd and lite build ([b7ab8e8](https://github.com/sixban6/singctl/commit/b7ab8e8fa78902512a81f2b41a7c64d6432eaada))
+
 ## [1.45.1](https://github.com/sixban6/singctl/compare/v1.45.0...v1.45.1) (2026-10-27)
 
 
