@@ -15,42 +15,71 @@ env:
 
 jobs:
   release:
-    name: Semantic Release
+    name: Calculate & Tag Release
     runs-on: ubuntu-latest
     outputs:
-      released: ${{ steps.semantic.outputs.new_release_published }}
-      version: ${{ steps.semantic.outputs.new_release_version }}
+      released: ${{ steps.version.outputs.new_release_published }}
+      version: ${{ steps.version.outputs.new_release_version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "lts/*"
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Release
-        id: semantic
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Determine Next Version
+        id: version
         run: |
-          npx semantic-release > release_output.txt 2>&1 || true
-          
-          # 检查是否创建了新版本
-          if git describe --exact-match --tags HEAD >/dev/null 2>&1; then
-            NEW_VERSION=$(git describe --exact-match --tags HEAD)
-            echo "new_release_published=true" >> $GITHUB_OUTPUT
-            echo "new_release_version=${NEW_VERSION#v}" >> $GITHUB_OUTPUT
-            echo "✅ 发布了新版本: $NEW_VERSION"
+          # 1. 读取上游目标版本基准
+          if [ -f .upstream-version ]; then
+            TARGET_MAJOR=$(tr -d ' \n\r' < .upstream-version)
           else
-            echo "new_release_published=false" >> $GITHUB_OUTPUT
-            echo "❌ 没有发布新版本"
+            TARGET_MAJOR="1.14"
           fi
+          echo "Target Upstream Major: $TARGET_MAJOR"
+
+          # 确保获取所有远程 tags
+          git fetch --tags --force
+
+          # 2. 查找匹配当前大版本的所有 tag: v${TARGET_MAJOR}.*
+          MATCHING_TAGS=$(git tag -l "v${TARGET_MAJOR}.*")
+          MAX_PATCH=-1
+
+          if [ -n "$MATCHING_TAGS" ]; then
+            for t in $MATCHING_TAGS; do
+              # 提取末尾 patch 数字
+              p=$(echo "$t" | awk -F. '{print $3}')
+              if [ -n "$p" ] && [ "$p" -eq "$p" ] 2>/dev/null; then
+                if [ "$p" -gt "$MAX_PATCH" ]; then
+                  MAX_PATCH=$p
+                fi
+              fi
+            done
+          fi
+
+          if [ "$MAX_PATCH" -lt 0 ]; then
+            # 该大版本首发，从 0 开始
+            NEXT_VERSION="${TARGET_MAJOR}.0"
+          else
+            NEXT_PATCH=$((MAX_PATCH + 1))
+            NEXT_VERSION="${TARGET_MAJOR}.${NEXT_PATCH}"
+          fi
+
+          TAG_NAME="v${NEXT_VERSION}"
+          echo "Next tag to create: $TAG_NAME"
+
+          # 3. 创建 Git Tag 并推送到远程
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG_NAME" -m "Release $TAG_NAME"
+          git push origin "$TAG_NAME"
+
+          # 4. 创建基础 GitHub Release
+          gh release create "$TAG_NAME" --title "$TAG_NAME" --generate-notes
+          
+          echo "new_release_published=true" >> $GITHUB_OUTPUT
+          echo "new_release_version=${NEXT_VERSION}" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   build:
     name: Build and Release
@@ -63,7 +92,6 @@ jobs:
       uses: actions/checkout@v4
       with:
         fetch-depth: 0
-        # 确保能获取到最新创建的 tag
         ref: main
         
     - name: Setup Go
@@ -80,7 +108,6 @@ jobs:
     - name: Get version
       id: get_version
       run: |
-        # 强制刷新 tags，确保获取 semantic-release 刚创建的 tag
         git fetch --tags --force
         VERSION=v${{ needs.release.outputs.version }}
         echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
@@ -105,7 +132,6 @@ jobs:
         
         # --- Linux AMD64 ---
         GOOS=linux GOARCH=amd64 CGO_ENABLED=0 eval go build $LDFLAGS -o dist/linux-amd64/singctl ./cmd/singctl
-        # 使用 UPX 极限压缩 (--best) 和 LZMA 算法 (--lzma)
         upx --best --lzma dist/linux-amd64/singctl
         
         # --- Linux ARM64 ---
@@ -128,7 +154,6 @@ jobs:
         go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
         mkdir -p dist/caddy-build
         
-        # Build Linux amd64 custom Caddy
         GOOS=linux GOARCH=amd64 xcaddy build \
           --with github.com/caddy-dns/cloudflare \
           --with github.com/mholt/caddy-l4 \
@@ -136,7 +161,6 @@ jobs:
         tar -czf dist/caddy-custom-linux-amd64.tar.gz -C dist/caddy-build caddy
         rm -f dist/caddy-build/caddy
 
-        # Build Linux arm64 custom Caddy
         GOOS=linux GOARCH=arm64 xcaddy build \
           --with github.com/caddy-dns/cloudflare \
           --with github.com/mholt/caddy-l4 \
@@ -148,25 +172,18 @@ jobs:
       run: |
         cd dist
         
-        # Create tarballs for Unix systems
         for platform_dir in linux-amd64 linux-arm64 darwin-arm64 linux-amd64-lite linux-arm64-lite; do
           if [[ -d "$platform_dir" && -f "$platform_dir/singctl" ]]; then
-            # Create final package directory with proper name
             package_name="singctl-${platform_dir}"
             mkdir -p ${package_name}
-            
-            # Copy binary and configs to package directory
             cp ${platform_dir}/singctl ${package_name}/
             cp -r ../configs ${package_name}/
-            
-            # Create tarball containing the named directory
             tar -czf singctl-${platform_dir}.tar.gz ${package_name}
             rm -rf ${package_name}
             echo "Created singctl-${platform_dir}.tar.gz"
           fi
         done
       
-        # Generate checksums for all packages
         sha256sum *.tar.gz > checksums.txt
         echo "Generated checksums"
         
@@ -174,9 +191,7 @@ jobs:
       uses: softprops/action-gh-release@v1
       with:
         tag_name: ${{ steps.get_version.outputs.VERSION }}
-        # 不设置 name 和 body，只上传文件到现有 release
-        append_body: false
-        make_latest: false
+        make_latest: true
         files: |
           dist/*.tar.gz
           dist/*.zip

@@ -56,7 +56,21 @@ func (u *Updater) UpdateSelf(configPath string, currentVersion string) error {
 			logger.Success("✅ singctl 已是最新版本 (当前: %s)", normalizedVersion)
 			return nil
 		}
-		logger.Info("⬆️ singctl 更新: %s -> %s", normalizedVersion, latestVersion)
+
+		// 检查是否为跨大版本升级 (例如 1.14.x -> 1.15.0)
+		curParts := strings.Split(normalizedVersion, ".")
+		latestParts := strings.Split(latestVersion, ".")
+		if len(curParts) >= 2 && len(latestParts) >= 2 {
+			curMajorMinor := curParts[0] + "." + curParts[1]
+			latestMajorMinor := latestParts[0] + "." + latestParts[1]
+			if curMajorMinor != latestMajorMinor {
+				logger.Warn("🚀 检测到全新的 sing-box 大版本内核升级: %s -> %s (适配 sing-box %s.x)", normalizedVersion, latestVersion, latestMajorMinor)
+			} else {
+				logger.Info("⬆️ singctl 同轨升级: %s -> %s", normalizedVersion, latestVersion)
+			}
+		} else {
+			logger.Info("⬆️ singctl 更新: %s -> %s", normalizedVersion, latestVersion)
+		}
 	}
 
 	// 2. 选择当前平台的压缩包资产
