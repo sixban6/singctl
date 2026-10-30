@@ -1,3 +1,10 @@
+## [1.48.1](https://github.com/sixban6/singctl/compare/v1.48.0...v1.48.1) (2026-10-30)
+
+
+### Bug Fixes
+
+* **ssh:** resolve real alias ports, query authoritative sshd state, and eliminate targetPort=0 bug ([b6fcf9b](https://github.com/sixban6/singctl/commit/b6fcf9b4a14ae310b8ab0ba5ca9a63c66285623f))
+
 # [1.48.0](https://github.com/sixban6/singctl/compare/v1.47.0...v1.48.0) (2026-10-30)
 
 
