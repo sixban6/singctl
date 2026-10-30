@@ -1,3 +1,10 @@
+## [1.49.1](https://github.com/sixban6/singctl/compare/v1.49.0...v1.49.1) (2026-10-30)
+
+
+### Bug Fixes
+
+* **table:** replace ambiguous symbol ⚠️ with standardized wide emojis 🔓 and 🟡 to fix column misalignment ([c914834](https://github.com/sixban6/singctl/commit/c914834bbb788ecf9ebcf6626e5fd4c24aab4ace))
+
 # [1.49.0](https://github.com/sixban6/singctl/compare/v1.48.1...v1.49.0) (2026-10-30)
 
 
