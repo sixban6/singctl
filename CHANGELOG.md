@@ -1,3 +1,10 @@
+# [1.48.0](https://github.com/sixban6/singctl/compare/v1.47.0...v1.48.0) (2026-10-30)
+
+
+### Features
+
+* **ssh:** support domain names and existing ~/.ssh/config alias hosts ([c9cdb04](https://github.com/sixban6/singctl/commit/c9cdb04b0273cb8635539aa1917f5e9c964807c6))
+
 # [1.47.0](https://github.com/sixban6/singctl/compare/v1.46.1...v1.47.0) (2026-10-30)
 
 
