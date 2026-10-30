@@ -2,22 +2,27 @@ package ssh
 
 import (
 	"fmt"
-	"os"
-	"text/tabwriter"
 
 	"singctl/internal/logger"
+	"singctl/internal/util/table"
 )
 
 // PrintExecutionReport prints a summary table of the execution results across hosts.
 func PrintExecutionReport(results []*HostResult) {
 	fmt.Println()
-	logger.Info("════════════════════════════════════════════════════════════════════════════════════")
-	logger.Success("                         📊 SSH 批量操作与加固执行报告 📊")
-	logger.Info("════════════════════════════════════════════════════════════════════════════════════")
+	logger.Success("📊 SSH 批量操作与加固执行报告")
+	fmt.Println()
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	_, _ = fmt.Fprintln(w, "主机别名\t目标地址\t端口变更\t公钥分发\t免密拨测\t密码认证\t配置托管\t状态\t耗时")
-	_, _ = fmt.Fprintln(w, "────────\t────────\t────────\t────────\t────────\t────────\t────────\t────\t────")
+	tbl := table.New("主机别名", "目标地址", "端口变更", "公钥分发", "密钥登录", "密码登录", "配置托管", "执行状态", "耗时")
+	tbl.SetAlign(0, table.AlignLeft)
+	tbl.SetAlign(1, table.AlignLeft)
+	tbl.SetAlign(2, table.AlignCenter)
+	tbl.SetAlign(3, table.AlignCenter)
+	tbl.SetAlign(4, table.AlignCenter)
+	tbl.SetAlign(5, table.AlignCenter)
+	tbl.SetAlign(6, table.AlignCenter)
+	tbl.SetAlign(7, table.AlignCenter)
+	tbl.SetAlign(8, table.AlignRight)
 
 	for _, r := range results {
 		addrStr := r.Host.Host
@@ -65,7 +70,7 @@ func PrintExecutionReport(results []*HostResult) {
 		}
 
 		durationStr := fmt.Sprintf("%.1fs", r.Duration.Seconds())
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		tbl.AddRow(
 			r.Host.Name,
 			addrStr,
 			portStr,
@@ -78,8 +83,7 @@ func PrintExecutionReport(results []*HostResult) {
 		)
 	}
 
-	_ = w.Flush()
-	logger.Info("────────────────────────────────────────────────────────────────────────────────────")
+	fmt.Print(tbl.Render())
 
 	hasErrors := false
 	for _, r := range results {
@@ -107,13 +111,18 @@ func PrintExecutionReport(results []*HostResult) {
 // PrintTestReport prints the diagnostic matrix from singctl ssh test.
 func PrintTestReport(results []*TestResult) {
 	fmt.Println()
-	logger.Info("════════════════════════════════════════════════════════════════════════════════════")
-	logger.Success("                          🩺 SSH 主机连通性与合规诊断 🩺")
-	logger.Info("════════════════════════════════════════════════════════════════════════════════════")
+	logger.Success("🩺 SSH 主机连通性与合规诊断")
+	fmt.Println()
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	_, _ = fmt.Fprintln(w, "主机别名\t目标地址\t当前端口\t目标端口\t密钥免密\t密码登录\t安全评级\t耗时")
-	_, _ = fmt.Fprintln(w, "────────\t────────\t────────\t────────\t────────\t────────\t────────\t────")
+	tbl := table.New("主机别名", "目标地址", "当前端口", "目标端口", "密钥登录", "密码登录", "安全评级", "耗时")
+	tbl.SetAlign(0, table.AlignLeft)
+	tbl.SetAlign(1, table.AlignLeft)
+	tbl.SetAlign(2, table.AlignCenter)
+	tbl.SetAlign(3, table.AlignCenter)
+	tbl.SetAlign(4, table.AlignCenter)
+	tbl.SetAlign(5, table.AlignCenter)
+	tbl.SetAlign(6, table.AlignCenter)
+	tbl.SetAlign(7, table.AlignRight)
 
 	for _, r := range results {
 		addrStr := r.Host.Host
@@ -146,16 +155,14 @@ func PrintTestReport(results []*TestResult) {
 		}
 
 		compliance := "✅ 达标"
-		if !r.KeyAuthWork || r.PasswordAuthWork || (r.Port22Open && r.Host.TargetPort != 22) {
-			if !r.KeyAuthWork {
-				compliance = "❌ 未免密"
-			} else {
-				compliance = "⚠️ 待加固"
-			}
+		if !r.KeyAuthWork {
+			compliance = "❌ 密钥未通"
+		} else if r.PasswordAuthWork || (r.Port22Open && r.Host.TargetPort != 22) {
+			compliance = "⚠️ 待加固"
 		}
 
 		durationStr := fmt.Sprintf("%.1fs", r.Duration.Seconds())
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		tbl.AddRow(
 			r.Host.Name,
 			addrStr,
 			curPortStr,
@@ -167,18 +174,16 @@ func PrintTestReport(results []*TestResult) {
 		)
 	}
 
-	_ = w.Flush()
-	logger.Info("────────────────────────────────────────────────────────────────────────────────────")
+	fmt.Print(tbl.Render())
 	fmt.Println()
 }
 
 // PrintManagedHosts displays hosts parsed from ~/.ssh/config.
 func PrintManagedHosts(hosts []ManagedHost, configPath string) {
 	fmt.Println()
-	logger.Info("═══════════════════════════════════════════════════════════")
 	logger.Info("📋 ~/.ssh/config 中由 singctl 托管的主机清单")
 	logger.Info("📍 配置文件路径: %s", configPath)
-	logger.Info("═══════════════════════════════════════════════════════════")
+	fmt.Println()
 
 	if len(hosts) == 0 {
 		logger.Warn("当前 ~/.ssh/config 中没有任何由 singctl 托管的主机。")
@@ -186,21 +191,23 @@ func PrintManagedHosts(hosts []ManagedHost, configPath string) {
 		return
 	}
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	_, _ = fmt.Fprintln(w, "Host 别名\tHostName\tUser\tPort\tIdentityFile")
-	_, _ = fmt.Fprintln(w, "─────────\t────────\t────\t────\t────────────")
+	tbl := table.New("Host 别名", "HostName", "User", "Port", "IdentityFile")
+	tbl.SetAlign(0, table.AlignLeft)
+	tbl.SetAlign(1, table.AlignLeft)
+	tbl.SetAlign(2, table.AlignCenter)
+	tbl.SetAlign(3, table.AlignCenter)
+	tbl.SetAlign(4, table.AlignLeft)
 
 	for _, h := range hosts {
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\n",
+		tbl.AddRow(
 			h.Name,
 			h.HostName,
 			h.User,
-			h.Port,
+			fmt.Sprintf("%d", h.Port),
 			h.IdentityFile,
 		)
 	}
 
-	_ = w.Flush()
-	logger.Info("───────────────────────────────────────────────────────────")
-	fmt.Printf("总计: %d 台主机\n\n", len(hosts))
+	fmt.Print(tbl.Render())
+	fmt.Printf("\n总计: %d 台主机\n\n", len(hosts))
 }
