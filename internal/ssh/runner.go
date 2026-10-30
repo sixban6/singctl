@@ -2,6 +2,7 @@ package ssh
 
 import (
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -131,16 +132,26 @@ func (r *Runner) executeInitHost(h *Host, dryRun bool) *HostResult {
 		res.KeyVerified = true
 		logger.Success("[%s] ✅ [2/3] 免密验证通过", h.Name)
 
-		// 3. Finalize hardening: preserve tunnel port mapping, disable password auth if requested
-		logger.Info("[%s] 🔒 [3/3] 禁用密码登录 (保持端口映射不变)...", h.Name)
+		// 3. Finalize hardening: enforce h.TargetPort (never 0!) and disable password auth
+		logger.Info("[%s] 🔒 [3/3] 执行安全加固 (端口: %d, 禁用密码登录: %v)...", h.Name, h.TargetPort, h.DisablePasswordAuth)
 		harden := NewSshdHarden(executor)
-		if err := harden.FinalizeHardening(0, h.DisablePasswordAuth); err != nil {
+		if err := harden.FinalizeHardening(h.TargetPort, h.DisablePasswordAuth); err != nil {
 			res.Error = fmt.Errorf("finalize hardening failed: %w", err)
 			res.Duration = time.Since(start)
 			logger.Error("[%s] ❌ 安全加固失败: %v", h.Name, err)
 			return res
 		}
 
+		// 4. Post-check verification
+		time.Sleep(500 * time.Millisecond)
+		if !ProbeAliasLogin(h, h.Timeout) {
+			res.Error = fmt.Errorf("post-hardening key login verification via alias '%s' failed", h.Alias)
+			res.Duration = time.Since(start)
+			logger.Error("[%s] ❌ 加固后通道免密验证失败: %v", h.Name, res.Error)
+			return res
+		}
+
+		res.FinalPort = h.TargetPort
 		res.PasswordDisabled = h.DisablePasswordAuth
 		res.Status = StatusSuccess
 		res.Duration = time.Since(start)
@@ -281,45 +292,74 @@ func (r *Runner) RunTest(hosts []*Host, concurrency int) []*TestResult {
 					Duration: 0,
 				}
 
+				var currentPortOpen bool
+				var port22Open bool
+				var targetPortOpen bool
+				var keyAuthWork bool
+				var passwordAuthWork bool
+
 				if h.IsAliasMode {
-					keyOk := ProbeAliasLogin(h, h.Timeout)
-					tr.Port22Open = true
-					tr.TargetPortOpen = true
-					tr.KeyAuthWork = keyOk
-					tr.PasswordAuthWork = !keyOk
-					tr.Duration = time.Since(start)
-					results[idx] = tr
-					continue
-				}
-
-				hostTarget := h.Host
-				if hostTarget == "" {
-					hostTarget = h.IP
-				}
-
-				// 1. Probe current port
-				tr.Port22Open = TestTCPPort(hostTarget, h.CurrentPort, h.Timeout)
-
-				// 2. Probe target port
-				if h.TargetPort == h.CurrentPort {
-					tr.TargetPortOpen = tr.Port22Open
+					// 1. In alias mode, probe key login via system SSH alias
+					keyAuthWork = ProbeAliasLogin(h, h.Timeout)
+					if keyAuthWork {
+						// 2. Query remote sshd -T for authoritative port & password auth state
+						aliasClient := NewAliasClient(h)
+						if info, err := InspectRemoteSshd(aliasClient); err == nil {
+							port22Open = slices.Contains(info.Ports, 22)
+							currentPortOpen = slices.Contains(info.Ports, h.CurrentPort)
+							targetPortOpen = slices.Contains(info.Ports, h.TargetPort)
+							passwordAuthWork = info.PasswordAuth
+						} else {
+							currentPortOpen = true
+							targetPortOpen = true
+							port22Open = (h.CurrentPort == 22)
+						}
+					}
 				} else {
-					tr.TargetPortOpen = TestTCPPort(hostTarget, h.TargetPort, h.Timeout)
+					hostTarget := h.Host
+					if hostTarget == "" {
+						hostTarget = h.IP
+					}
+
+					// 1. Probe ports
+					currentPortOpen = TestTCPPort(hostTarget, h.CurrentPort, h.Timeout)
+					port22Open = TestTCPPort(hostTarget, 22, h.Timeout)
+					if h.TargetPort == h.CurrentPort {
+						targetPortOpen = currentPortOpen
+					} else {
+						targetPortOpen = TestTCPPort(hostTarget, h.TargetPort, h.Timeout)
+					}
+
+					// 2. Test Key Auth on whichever port is open
+					activePort := h.CurrentPort
+					if targetPortOpen {
+						activePort = h.TargetPort
+					}
+
+					keyAuthWork, _ = ProbeKeyLogin(h, activePort, h.Timeout)
+
+					if keyAuthWork {
+						// Query remote sshd -T for authoritative password authentication status
+						if executor, err := CreateExecutor(h, activePort, true); err == nil {
+							if info, err := InspectRemoteSshd(executor); err == nil {
+								port22Open = slices.Contains(info.Ports, 22)
+								currentPortOpen = slices.Contains(info.Ports, h.CurrentPort)
+								targetPortOpen = slices.Contains(info.Ports, h.TargetPort)
+								passwordAuthWork = info.PasswordAuth
+							}
+							_ = executor.Close()
+						}
+					} else {
+						passAccepted, _ := ProbePasswordLogin(h, activePort, "", h.Timeout)
+						passwordAuthWork = passAccepted
+					}
 				}
 
-				// 3. Test Key Auth on whichever port is open
-				activePort := h.CurrentPort
-				if tr.TargetPortOpen {
-					activePort = h.TargetPort
-				}
-
-				keyOk, _ := ProbeKeyLogin(h, activePort, h.Timeout)
-				tr.KeyAuthWork = keyOk
-
-				// 4. Test Password Auth status
-				passAccepted, _ := ProbePasswordLogin(h, activePort, "", h.Timeout)
-				tr.PasswordAuthWork = passAccepted
-
+				tr.CurrentPortOpen = currentPortOpen
+				tr.Port22Open = port22Open
+				tr.TargetPortOpen = targetPortOpen
+				tr.KeyAuthWork = keyAuthWork
+				tr.PasswordAuthWork = passwordAuthWork
 				tr.Duration = time.Since(start)
 				results[idx] = tr
 			}
@@ -379,7 +419,12 @@ func (r *Runner) RunPushKey(hosts []*Host, concurrency int) []*HostResult {
 				_ = executor.Close()
 
 				res.KeyPushed = true
-				ok, _ := ProbeKeyLogin(h, h.CurrentPort, h.Timeout)
+				var ok bool
+				if h.IsAliasMode {
+					ok = ProbeAliasLogin(h, h.Timeout)
+				} else {
+					ok, _ = ProbeKeyLogin(h, h.CurrentPort, h.Timeout)
+				}
 				res.KeyVerified = ok
 				if ok {
 					res.Status = StatusSuccess
@@ -411,7 +456,7 @@ func (r *Runner) RunHarden(hosts []*Host, concurrency int, overridePort int, dis
 		concurrency = 5
 	}
 
-	logger.Info("🛡️ 开始对 %d 台主机执行安全加固 (并发: %d)...", len(hosts), concurrency)
+	logger.Info("🔒 开始批量执行 SSH 端口切换与密码禁用安全加固 (主机数: %d)...", len(hosts))
 
 	results := make([]*HostResult, len(hosts))
 	jobs := make(chan int, len(hosts))
@@ -423,14 +468,15 @@ func (r *Runner) RunHarden(hosts []*Host, concurrency int, overridePort int, dis
 			defer wg.Done()
 			for idx := range jobs {
 				h := hosts[idx]
-				if overridePort > 0 && !h.IsAliasMode {
+				start := time.Now()
+
+				if overridePort > 0 {
 					h.TargetPort = overridePort
 				}
 				if disablePassword {
 					h.DisablePasswordAuth = true
 				}
 
-				start := time.Now()
 				res := &HostResult{
 					Host:        h,
 					InitialPort: h.CurrentPort,
@@ -440,17 +486,46 @@ func (r *Runner) RunHarden(hosts []*Host, concurrency int, overridePort int, dis
 
 				executor, err := CreateExecutor(h, h.CurrentPort, true)
 				if err != nil {
-					res.Error = fmt.Errorf("connect on port %d failed: %w", h.CurrentPort, err)
+					// In direct mode, try target port if already switched
+					if !h.IsAliasMode && h.TargetPort != h.CurrentPort {
+						if altExecutor, altErr := CreateExecutor(h, h.TargetPort, true); altErr == nil {
+							executor = altExecutor
+							h.CurrentPort = h.TargetPort
+						}
+					}
+					if executor == nil {
+						res.Error = fmt.Errorf("connect on port %d failed: %w", h.CurrentPort, err)
+						res.Duration = time.Since(start)
+						results[idx] = res
+						continue
+					}
+				}
+				defer executor.Close()
+
+				// Step 1: Ensure public key is injected to avoid lockout
+				if err := executor.InjectPublicKey(h.IdentityFile); err != nil {
+					logger.Warn("[%s] 注入公钥提示: %v", h.Name, err)
+				}
+
+				// Step 2: Verify key authentication works BEFORE modifying anything
+				var preCheckOk bool
+				if h.IsAliasMode {
+					preCheckOk = ProbeAliasLogin(h, h.Timeout)
+				} else {
+					preCheckOk, _ = ProbeKeyLogin(h, h.CurrentPort, h.Timeout)
+				}
+				if !preCheckOk {
+					res.Error = fmt.Errorf("pre-check key authentication failed on port %d, aborting hardening to prevent lockout", h.CurrentPort)
 					res.Duration = time.Since(start)
 					results[idx] = res
 					continue
 				}
-				defer executor.Close()
 
 				res.KeyVerified = true
 				fw := NewFirewallManager(executor)
 				harden := NewSshdHarden(executor)
 
+				// Step 3: Dual-port transition if TargetPort differs from CurrentPort (direct mode)
 				if !h.IsAliasMode && h.TargetPort != h.CurrentPort {
 					if h.ManageFirewall {
 						_ = fw.AllowPort(h.TargetPort)
@@ -475,18 +550,36 @@ func (r *Runner) RunHarden(hosts []*Host, concurrency int, overridePort int, dis
 					}
 				}
 
-				targetPortToHarden := h.TargetPort
-				if h.IsAliasMode {
-					targetPortToHarden = 0 // Preserve existing port configuration
-				}
-
-				if err := harden.FinalizeHardening(targetPortToHarden, h.DisablePasswordAuth); err != nil {
+				// Step 4: Finalize hardening with h.TargetPort (NEVER 0!)
+				if err := harden.FinalizeHardening(h.TargetPort, h.DisablePasswordAuth); err != nil {
 					res.Error = fmt.Errorf("finalize hardening failed: %w", err)
 					res.Duration = time.Since(start)
 					results[idx] = res
 					continue
 				}
 
+				// Step 5: Post-hardening verification
+				time.Sleep(500 * time.Millisecond)
+				var postCheckOk bool
+				if h.IsAliasMode {
+					postCheckOk = ProbeAliasLogin(h, h.Timeout)
+				} else {
+					postCheckOk, _ = ProbeKeyLogin(h, h.TargetPort, h.Timeout)
+				}
+				if !postCheckOk {
+					// Post verification failed! Rollback to prevent lockout!
+					if !h.IsAliasMode && h.TargetPort != h.CurrentPort {
+						_ = harden.EnableDualPort(h.CurrentPort, h.TargetPort)
+					}
+					res.Error = fmt.Errorf("post-hardening key login verification failed on port %d", h.TargetPort)
+					res.Status = StatusWarning
+					res.WarningMsg = "Post verification failed; dual-port safely maintained to prevent lockout."
+					res.Duration = time.Since(start)
+					results[idx] = res
+					continue
+				}
+
+				// Step 6: Close old port in firewall if TargetPort != CurrentPort and not alias mode
 				if !h.IsAliasMode && h.TargetPort != h.CurrentPort && h.ManageFirewall {
 					_ = fw.DisallowPort(h.CurrentPort)
 				}

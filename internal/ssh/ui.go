@@ -2,63 +2,24 @@ package ssh
 
 import (
 	"fmt"
-	"strings"
-	"text/tabwriter"
 	"os"
+	"text/tabwriter"
 
 	"singctl/internal/logger"
 )
 
-// PrintExecutionReport prints a structured summary table for singctl ssh init / harden results.
+// PrintExecutionReport prints a summary table of the execution results across hosts.
 func PrintExecutionReport(results []*HostResult) {
 	fmt.Println()
 	logger.Info("════════════════════════════════════════════════════════════════════════════════════")
-	logger.Success("                          🎉 SSH 执行结果汇总报告 🎉")
+	logger.Success("                         📊 SSH 批量操作与加固执行报告 📊")
 	logger.Info("════════════════════════════════════════════════════════════════════════════════════")
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	_, _ = fmt.Fprintln(w, "主机别名\t目标地址\t初始端口\t最终端口\t公钥注入\t免密验证\t密码禁用\t状态\t耗时")
+	_, _ = fmt.Fprintln(w, "主机别名\t目标地址\t端口变更\t公钥分发\t免密拨测\t密码认证\t配置托管\t状态\t耗时")
 	_, _ = fmt.Fprintln(w, "────────\t────────\t────────\t────────\t────────\t────────\t────────\t────\t────")
 
-	successCount := 0
-	warningCount := 0
-	failedCount := 0
-
 	for _, r := range results {
-		keyPushed := "—"
-		if r.KeyPushed {
-			keyPushed = "✅ 成功"
-		}
-
-		keyVerified := "❌ 失败"
-		if r.KeyVerified {
-			keyVerified = "✅ 已通过"
-		}
-
-		passDisabled := "—"
-		if r.Host.DisablePasswordAuth {
-			if r.PasswordDisabled {
-				passDisabled = "🔒 已禁用"
-			} else {
-				passDisabled = "⚠️ 仍开启"
-			}
-		}
-
-		statusStr := ""
-		switch r.Status {
-		case StatusSuccess:
-			statusStr = "✅ 成功"
-			successCount++
-		case StatusWarning:
-			statusStr = "⚠️ 警告"
-			warningCount++
-		case StatusFailed:
-			statusStr = "❌ 失败"
-			failedCount++
-		case StatusSkipped:
-			statusStr = "⏭️ 跳过"
-		}
-
 		addrStr := r.Host.Host
 		if r.Host.IsAliasMode {
 			addrStr = fmt.Sprintf("alias(%s)", r.Host.Alias)
@@ -66,15 +27,52 @@ func PrintExecutionReport(results []*HostResult) {
 			addrStr = r.Host.IP
 		}
 
+		portStr := fmt.Sprintf("%d", r.FinalPort)
+		if r.InitialPort != r.FinalPort {
+			portStr = fmt.Sprintf("%d ➔ %d", r.InitialPort, r.FinalPort)
+		}
+
+		keyPushedStr := "➖"
+		if r.KeyPushed {
+			keyPushedStr = "✅ 已写入"
+		}
+
+		keyVerifiedStr := "❌ 失败"
+		if r.KeyVerified {
+			keyVerifiedStr = "🟢 成功"
+		}
+
+		passStr := "保持原样"
+		if r.PasswordDisabled {
+			passStr = "🔒 已禁用"
+		}
+
+		cfgStr := "➖"
+		if r.Host.IsAliasMode {
+			cfgStr = "已存在"
+		} else if r.ConfigUpdated {
+			cfgStr = "✅ 已写入"
+		}
+
+		statusStr := string(r.Status)
+		switch r.Status {
+		case StatusSuccess:
+			statusStr = "🟢 成功"
+		case StatusWarning:
+			statusStr = "⚠️ 警告"
+		case StatusFailed:
+			statusStr = "❌ 失败"
+		}
+
 		durationStr := fmt.Sprintf("%.1fs", r.Duration.Seconds())
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%d\t%d\t%s\t%s\t%s\t%s\t%s\n",
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			r.Host.Name,
 			addrStr,
-			r.InitialPort,
-			r.FinalPort,
-			keyPushed,
-			keyVerified,
-			passDisabled,
+			portStr,
+			keyPushedStr,
+			keyVerifiedStr,
+			passStr,
+			cfgStr,
 			statusStr,
 			durationStr,
 		)
@@ -82,29 +80,21 @@ func PrintExecutionReport(results []*HostResult) {
 
 	_ = w.Flush()
 	logger.Info("────────────────────────────────────────────────────────────────────────────────────")
-	fmt.Printf("📊 总计: %d 台 | 成功: %d | 警告: %d | 失败: %d\n\n", len(results), successCount, warningCount, failedCount)
 
-	// If there are errors or warnings, print details
-	hasIssues := false
+	hasErrors := false
 	for _, r := range results {
 		if r.Error != nil {
-			if !hasIssues {
-				logger.Warn("⚠️ 失败详情与排错建议:")
-				hasIssues = true
-			}
-			fmt.Printf("  • [%s] (%s): %v\n", r.Host.Name, r.Host.IP, r.Error)
+			hasErrors = true
+			logger.Error("[%s] 异常信息: %v", r.Host.Name, r.Error)
 		}
 		if r.WarningMsg != "" {
-			if !hasIssues {
-				logger.Warn("⚠️ 告警详情:")
-				hasIssues = true
-			}
-			fmt.Printf("  • [%s] (%s): %s\n", r.Host.Name, r.Host.IP, r.WarningMsg)
+			logger.Warn("[%s] 提示: %s", r.Host.Name, r.WarningMsg)
 		}
 	}
 
-	if successCount > 0 {
-		logger.Success("💡 提示: 已更新本地 ~/.ssh/config，你可以直接使用别名快速登录:")
+	if !hasErrors {
+		fmt.Println()
+		logger.Success("🎉 所有目标主机均已完成验证！您可直接使用标准别名秒级连接：")
 		for _, r := range results {
 			if r.Status == StatusSuccess {
 				fmt.Printf("   ssh %s\n", r.Host.Name)
@@ -134,8 +124,10 @@ func PrintTestReport(results []*TestResult) {
 		}
 
 		curPortStr := fmt.Sprintf("%d ❌", r.Host.CurrentPort)
-		if r.Port22Open {
+		if r.CurrentPortOpen {
 			curPortStr = fmt.Sprintf("%d 🟢", r.Host.CurrentPort)
+		} else if r.Host.CurrentPort == 22 && r.Host.TargetPort != 22 && r.TargetPortOpen {
+			curPortStr = fmt.Sprintf("%d 🔒 已收敛", r.Host.CurrentPort)
 		}
 
 		targetPortStr := fmt.Sprintf("%d ❌", r.Host.TargetPort)
@@ -154,7 +146,7 @@ func PrintTestReport(results []*TestResult) {
 		}
 
 		compliance := "✅ 达标"
-		if !r.KeyAuthWork || r.PasswordAuthWork || (!r.TargetPortOpen && r.Port22Open) {
+		if !r.KeyAuthWork || r.PasswordAuthWork || (r.Port22Open && r.Host.TargetPort != 22) {
 			if !r.KeyAuthWork {
 				compliance = "❌ 未免密"
 			} else {
@@ -180,35 +172,35 @@ func PrintTestReport(results []*TestResult) {
 	fmt.Println()
 }
 
-// PrintManagedHosts prints the list of managed hosts from ~/.ssh/config.
+// PrintManagedHosts displays hosts parsed from ~/.ssh/config.
 func PrintManagedHosts(hosts []ManagedHost, configPath string) {
 	fmt.Println()
-	logger.Info("════════════════════════════════════════════════════════════════════════════════════")
-	logger.Success("                   📋 由 singctl 托管的 ~/.ssh/config 节点列表 📋")
-	logger.Info("════════════════════════════════════════════════════════════════════════════════════")
-	fmt.Printf("配置文件路径: %s\n\n", configPath)
+	logger.Info("═══════════════════════════════════════════════════════════")
+	logger.Info("📋 ~/.ssh/config 中由 singctl 托管的主机清单")
+	logger.Info("📍 配置文件路径: %s", configPath)
+	logger.Info("═══════════════════════════════════════════════════════════")
 
 	if len(hosts) == 0 {
-		logger.Warn("未发现任何由 singctl 托管的节点标记块。")
+		logger.Warn("当前 ~/.ssh/config 中没有任何由 singctl 托管的主机。")
 		fmt.Println()
 		return
 	}
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 4, ' ', 0)
-	_, _ = fmt.Fprintln(w, "Host 别名\tHostName (IP)\t端口\t用户\tIdentityFile (私钥)")
-	_, _ = fmt.Fprintln(w, "─────────\t─────────────\t────\t────\t───────────────────")
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
+	_, _ = fmt.Fprintln(w, "Host 别名\tHostName\tUser\tPort\tIdentityFile")
+	_, _ = fmt.Fprintln(w, "─────────\t────────\t────\t────\t────────────")
 
 	for _, h := range hosts {
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\n",
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\n",
 			h.Name,
 			h.HostName,
-			h.Port,
 			h.User,
-			strings.ReplaceAll(h.IdentityFile, os.Getenv("HOME"), "~"),
+			h.Port,
+			h.IdentityFile,
 		)
 	}
 
 	_ = w.Flush()
-	logger.Info("────────────────────────────────────────────────────────────────────────────────────")
-	fmt.Printf("总计: %d 个托管节点\n\n", len(hosts))
+	logger.Info("───────────────────────────────────────────────────────────")
+	fmt.Printf("总计: %d 台主机\n\n", len(hosts))
 }

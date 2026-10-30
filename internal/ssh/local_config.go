@@ -42,8 +42,16 @@ func (m *LocalConfigManager) GetConfigPath() string {
 }
 
 // SyncHosts updates or appends host entries into ~/.ssh/config without altering other entries.
+// Hosts configured as aliases (IsAliasMode = true) are safely skipped to protect existing tunnel/proxy configurations.
 func (m *LocalConfigManager) SyncHosts(hosts []*Host) error {
-	if len(hosts) == 0 {
+	var toSync []*Host
+	for _, h := range hosts {
+		if !h.IsAliasMode {
+			toSync = append(toSync, h)
+		}
+	}
+
+	if len(toSync) == 0 {
 		return nil
 	}
 
@@ -60,7 +68,7 @@ func (m *LocalConfigManager) SyncHosts(hosts []*Host) error {
 	}
 
 	updatedContent := content
-	for _, h := range hosts {
+	for _, h := range toSync {
 		block := m.renderBlock(h)
 		pattern := regexp.MustCompile(fmt.Sprintf(`(?s)# === BEGIN SINGCTL MANAGED HOST: %s ===.*?# === END SINGCTL MANAGED HOST: %s ===\n?`,
 			regexp.QuoteMeta(h.Name), regexp.QuoteMeta(h.Name)))
@@ -105,7 +113,7 @@ func (m *LocalConfigManager) ListManagedHosts() ([]ManagedHost, error) {
 		body := m[2]
 
 		mh := ManagedHost{Name: name}
-		for _, line := range strings.Split(body, "\n") {
+		for line := range strings.SplitSeq(body, "\n") {
 			trimmed := strings.TrimSpace(line)
 			parts := strings.Fields(trimmed)
 			if len(parts) >= 2 {
@@ -171,6 +179,10 @@ func (m *LocalConfigManager) CleanManagedHosts(targetName string) (int, error) {
 }
 
 func (m *LocalConfigManager) renderBlock(h *Host) string {
+	targetHost := h.Host
+	if targetHost == "" {
+		targetHost = h.IP
+	}
 	return fmt.Sprintf(`# === BEGIN SINGCTL MANAGED HOST: %s ===
 Host %s
     HostName %s
@@ -179,7 +191,7 @@ Host %s
     IdentityFile %s
     IdentitiesOnly yes
 # === END SINGCTL MANAGED HOST: %s ===
-`, h.Name, h.Name, h.IP, h.User, h.TargetPort, h.PrivateKey, h.Name)
+`, h.Name, h.Name, targetHost, h.User, h.TargetPort, h.PrivateKey, h.Name)
 }
 
 func (m *LocalConfigManager) ensureDir() error {

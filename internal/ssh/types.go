@@ -94,6 +94,7 @@ type HostResult struct {
 // TestResult records diagnostic information from `singctl ssh test`
 type TestResult struct {
 	Host             *Host
+	CurrentPortOpen  bool
 	Port22Open       bool
 	TargetPortOpen   bool
 	KeyAuthWork      bool
