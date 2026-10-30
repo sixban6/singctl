@@ -13,7 +13,7 @@ SingCtl是多功能网络工具。可以用管理singbox客户端和服务端，
 - 💻 **mTLS 隐蔽终端**: 基于 Caddy 443 端口与 mTLS 双向 TLS 认证的运维通道，支持浏览器 Web Shell (GoTTY + Tmux) 与本地终端 (WezTerm) 原生 SSH-over-WSS 穿透，无客户端证书直接返回 404（`singctl term install/cert`）
 - 🔌 **规则集本地缓存**: 预下载远程规则集并改写为本地引用，sing-box 启动不依赖 GitHub；内置全量规则集快照，极端情况（无网+无缓存）也能启动（`sb cache update/status/clear`）
 - 📱 **iOS 配置生成**: 一键生成 iPhone sing-box App 专用配置（`sb gen --platform ios`），WebUI 扫码下载
-- 🔑 **SSH 批量免密与加固**: 基于纯 Go 客户端实现自动化公钥分发、免密验证、端口收敛至 2222、禁用密码登录及 `~/.ssh/config` 增量回写；采用“双端口过渡+外部探活熔断”机制，彻底杜绝运维失联（`singctl ssh init/test/tpl`）
+- 🔑 **SSH 批量免密与加固**: 自动化公钥分发、免密验证、端口收敛至 2222、禁用密码登录及 `~/.ssh/config` 增量回写；原生支持域名与 `~/.ssh/config` 中已配置的主机（如穿透代理/跳板机，无需重配凭据与端口）；采用“双端口过渡+外部探活熔断”机制，彻底杜绝运维失联（`singctl ssh init/test/tpl`）
 - 🔧 **防止DNS泄漏**: 配置文件已经把国内IP和国外IP的DNS请求分开处理
 - 🍚 **服务端部署**: 自动部署singbox服务端（VLESS Reality + Hysteria 2 + Caddy + SubStore + WARP）
 

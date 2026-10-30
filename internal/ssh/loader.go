@@ -143,16 +143,29 @@ func LoadConfig(configPath string) (*Config, []*Host, error) {
 	seenNames := make(map[string]bool)
 
 	for idx, item := range cfg.Hosts {
-		if strings.TrimSpace(item.Name) == "" {
-			return nil, nil, fmt.Errorf("hosts[%d]: 'name' cannot be empty", idx)
-		}
-		if seenNames[item.Name] {
-			return nil, nil, fmt.Errorf("hosts[%d]: duplicate host name '%s'", idx, item.Name)
-		}
-		seenNames[item.Name] = true
+		alias := strings.TrimSpace(item.Alias)
+		isAliasMode := alias != ""
 
-		if strings.TrimSpace(item.IP) == "" {
-			return nil, nil, fmt.Errorf("hosts[%s]: 'ip' cannot be empty", item.Name)
+		name := strings.TrimSpace(item.Name)
+		if isAliasMode && name == "" {
+			name = alias
+		}
+
+		if name == "" {
+			return nil, nil, fmt.Errorf("hosts[%d]: 'name' (or 'alias') cannot be empty", idx)
+		}
+		if seenNames[name] {
+			return nil, nil, fmt.Errorf("hosts[%d]: duplicate host name '%s'", idx, name)
+		}
+		seenNames[name] = true
+
+		hostVal := strings.TrimSpace(item.Host)
+		if hostVal == "" {
+			hostVal = strings.TrimSpace(item.IP)
+		}
+
+		if !isAliasMode && hostVal == "" {
+			return nil, nil, fmt.Errorf("hosts[%s]: 'host' (or 'ip') cannot be empty", name)
 		}
 
 		user := item.User
@@ -165,15 +178,20 @@ func LoadConfig(configPath string) (*Config, []*Host, error) {
 			curPort = defaults.CurrentPort
 		}
 		if curPort < 1 || curPort > 65535 {
-			return nil, nil, fmt.Errorf("hosts[%s]: invalid current_port %d", item.Name, curPort)
+			return nil, nil, fmt.Errorf("hosts[%s]: invalid current_port %d", name, curPort)
 		}
 
 		targetPort := item.TargetPort
 		if targetPort <= 0 {
-			targetPort = defaults.TargetPort
+			if isAliasMode {
+				// In alias mode, preserve current port by default to prevent breaking tunnel mapping
+				targetPort = curPort
+			} else {
+				targetPort = defaults.TargetPort
+			}
 		}
 		if targetPort < 1 || targetPort > 65535 {
-			return nil, nil, fmt.Errorf("hosts[%s]: invalid target_port %d", item.Name, targetPort)
+			return nil, nil, fmt.Errorf("hosts[%s]: invalid target_port %d", name, targetPort)
 		}
 
 		idFile := item.IdentityFile
@@ -214,13 +232,16 @@ func LoadConfig(configPath string) (*Config, []*Host, error) {
 			Key:      authKey,
 		}
 
-		if auth.Password == "" && auth.Key == "" {
-			return nil, nil, fmt.Errorf("hosts[%s]: either auth.password or auth.key must be specified", item.Name)
+		if !isAliasMode && auth.Password == "" && auth.Key == "" {
+			return nil, nil, fmt.Errorf("hosts[%s]: either auth.password or auth.key must be specified", name)
 		}
 
 		h := &Host{
-			Name:                  item.Name,
-			IP:                    strings.TrimSpace(item.IP),
+			Name:                  name,
+			Host:                  hostVal,
+			IP:                    hostVal,
+			Alias:                 alias,
+			IsAliasMode:           isAliasMode,
 			User:                  strings.TrimSpace(user),
 			CurrentPort:           curPort,
 			TargetPort:            targetPort,

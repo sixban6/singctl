@@ -22,15 +22,16 @@ defaults:
   private_key: ~/.ssh/id_ed25519
 hosts:
   - name: node-1
-    ip: 1.1.1.1
+    host: 1.1.1.1
     auth:
       password: "${TEST_SSH_PASS}"
   - name: node-2
-    ip: 2.2.2.2
+    host: mynode.example.com
     user: admin
     target_port: 3333
     auth:
       password: "DirectPassword"
+  - alias: vps_rn
 `
 	if err := os.WriteFile(confPath, []byte(yamlContent), 0644); err != nil {
 		t.Fatalf("WriteFile failed: %v", err)
@@ -41,13 +42,13 @@ hosts:
 		t.Fatalf("LoadConfig failed: %v", err)
 	}
 
-	if len(hosts) != 2 {
-		t.Fatalf("Expected 2 hosts, got %d", len(hosts))
+	if len(hosts) != 3 {
+		t.Fatalf("Expected 3 hosts, got %d", len(hosts))
 	}
 
 	// Host 1 checks
 	h1 := hosts[0]
-	if h1.Name != "node-1" || h1.IP != "1.1.1.1" {
+	if h1.Name != "node-1" || h1.Host != "1.1.1.1" {
 		t.Errorf("Unexpected host 1 properties: %+v", h1)
 	}
 	if h1.Auth.Password != "SecretPass123" {
@@ -57,13 +58,22 @@ hosts:
 		t.Errorf("Expected default target port 2222, got %d", h1.TargetPort)
 	}
 
-	// Host 2 checks
+	// Host 2 checks (domain support)
 	h2 := hosts[1]
-	if h2.Name != "node-2" || h2.User != "admin" {
+	if h2.Name != "node-2" || h2.Host != "mynode.example.com" || h2.User != "admin" {
 		t.Errorf("Unexpected host 2 properties: %+v", h2)
 	}
 	if h2.TargetPort != 3333 {
 		t.Errorf("Expected override target port 3333, got %d", h2.TargetPort)
+	}
+
+	// Host 3 checks (alias in ~/.ssh/config)
+	h3 := hosts[2]
+	if h3.Name != "vps_rn" || h3.Alias != "vps_rn" || !h3.IsAliasMode {
+		t.Errorf("Unexpected host 3 properties: %+v", h3)
+	}
+	if h3.TargetPort != 22 {
+		t.Errorf("Expected alias mode to preserve port 22 by default, got %d", h3.TargetPort)
 	}
 }
 

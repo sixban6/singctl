@@ -12,12 +12,12 @@ const (
 
 // SshdHarden handles sshd configuration file adjustments and daemon reloading.
 type SshdHarden struct {
-	client *Client
+	executor Executor
 }
 
 // NewSshdHarden creates a new SshdHarden.
-func NewSshdHarden(client *Client) *SshdHarden {
-	return &SshdHarden{client: client}
+func NewSshdHarden(executor Executor) *SshdHarden {
+	return &SshdHarden{executor: executor}
 }
 
 // PrepareSshdConfigEnv ensures /etc/ssh/sshd_config.d directory exists and is included in sshd_config.
@@ -38,7 +38,7 @@ if [ -f /etc/ssh/sshd_config ]; then
     done
 fi
 `
-	_, err := s.client.Run(script)
+	_, err := s.executor.Run(script)
 	return err
 }
 
@@ -54,7 +54,7 @@ PubkeyAuthentication yes
 `, currentPort, targetPort)
 
 	cmd := fmt.Sprintf("cat << 'EOF' > %s\n%sEOF\n", HardeningConfPath, confContent)
-	if _, err := s.client.Run(cmd); err != nil {
+	if _, err := s.executor.Run(cmd); err != nil {
 		return fmt.Errorf("failed to write dual-port configuration: %w", err)
 	}
 
@@ -72,7 +72,7 @@ PubkeyAuthentication yes
 `, safePort)
 
 	cmd := fmt.Sprintf("cat << 'EOF' > %s\n%sEOF\n", HardeningConfPath, confContent)
-	if _, err := s.client.Run(cmd); err != nil {
+	if _, err := s.executor.Run(cmd); err != nil {
 		return fmt.Errorf("failed to write rollback configuration: %w", err)
 	}
 
@@ -82,7 +82,9 @@ PubkeyAuthentication yes
 // FinalizeHardening transitions sshd to listen only on targetPort, and optionally disables password authentication.
 func (s *SshdHarden) FinalizeHardening(targetPort int, disablePassword bool) error {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Port %d\n", targetPort))
+	if targetPort > 0 {
+		sb.WriteString(fmt.Sprintf("Port %d\n", targetPort))
+	}
 	sb.WriteString("PubkeyAuthentication yes\n")
 
 	if disablePassword {
@@ -92,7 +94,7 @@ func (s *SshdHarden) FinalizeHardening(targetPort int, disablePassword bool) err
 	}
 
 	cmd := fmt.Sprintf("cat << 'EOF' > %s\n%sEOF\n", HardeningConfPath, sb.String())
-	if _, err := s.client.Run(cmd); err != nil {
+	if _, err := s.executor.Run(cmd); err != nil {
 		return fmt.Errorf("failed to write hardened sshd configuration: %w", err)
 	}
 
@@ -121,6 +123,6 @@ else
     /etc/init.d/ssh reload 2>/dev/null || /etc/init.d/sshd reload 2>/dev/null || /etc/init.d/ssh restart 2>/dev/null || /etc/init.d/sshd restart
 fi
 `
-	_, err := s.client.Run(script)
+	_, err := s.executor.Run(script)
 	return err
 }

@@ -36,8 +36,8 @@ func TestGenerateTemplate(t *testing.T) {
 		t.Fatalf("Failed to parse generated template: %v", err)
 	}
 
-	if len(hosts) != 3 {
-		t.Fatalf("Expected 3 sample hosts, got %d", len(hosts))
+	if len(hosts) != 4 {
+		t.Fatalf("Expected 4 sample hosts, got %d", len(hosts))
 	}
 
 	if cfg.Defaults.TargetPort != 2222 {
