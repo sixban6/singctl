@@ -112,7 +112,7 @@ func PrintTestReport(results []*TestResult) {
 	logger.Info("════════════════════════════════════════════════════════════════════════════════════")
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	_, _ = fmt.Fprintln(w, "主机别名\t目标地址\t当前端口\t目标端口\t免密认证\t密码认证\t安全评级\t耗时")
+	_, _ = fmt.Fprintln(w, "主机别名\t目标地址\t当前端口\t目标端口\t密钥免密\t密码登录\t安全评级\t耗时")
 	_, _ = fmt.Fprintln(w, "────────\t────────\t────────\t────────\t────────\t────────\t────────\t────")
 
 	for _, r := range results {
@@ -137,12 +137,12 @@ func PrintTestReport(results []*TestResult) {
 
 		keyAuthStr := "❌ 失败"
 		if r.KeyAuthWork {
-			keyAuthStr = "🟢 正常"
+			keyAuthStr = "🟢 畅通"
 		}
 
-		passAuthStr := "🟢 已禁用"
+		passAuthStr := "🔒 已关闭"
 		if r.PasswordAuthWork {
-			passAuthStr = "⚠️ 仍允许"
+			passAuthStr = "⚠️ 仍开启"
 		}
 
 		compliance := "✅ 达标"
