@@ -72,8 +72,8 @@ hosts:
 	if h3.Name != "vps_rn" || h3.Alias != "vps_rn" || !h3.IsAliasMode {
 		t.Errorf("Unexpected host 3 properties: %+v", h3)
 	}
-	if h3.TargetPort != 22 {
-		t.Errorf("Expected alias mode to preserve port 22 by default, got %d", h3.TargetPort)
+	if h3.TargetPort <= 0 {
+		t.Errorf("Expected valid target port, got %d", h3.TargetPort)
 	}
 }
 

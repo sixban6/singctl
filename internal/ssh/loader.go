@@ -3,6 +3,7 @@ package ssh
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -37,24 +38,30 @@ func ExpandPath(path string) string {
 }
 
 // ResolveConfigFile finds the target configuration file.
-// If configPath is empty, it defaults to "./ssh-init.yaml".
+// If configPath is empty, it checks "./ssh-init.yaml" first, falling back to "~/ssh-init.yaml".
 func ResolveConfigFile(configPath string) (string, error) {
-	if configPath == "" {
-		configPath = DefaultConfigFile
-	}
-
-	cleanPath := filepath.Clean(configPath)
-	if _, err := os.Stat(cleanPath); err != nil {
-		if os.IsNotExist(err) {
-			if configPath == DefaultConfigFile {
-				return "", fmt.Errorf("configuration file '%s' not found in current directory.\n💡 Tip: Run 'singctl ssh tpl' to generate a template or specify one using -f <path>", DefaultConfigFile)
-			}
+	if configPath != "" {
+		cleanPath := filepath.Clean(configPath)
+		if _, err := os.Stat(cleanPath); err != nil {
 			return "", fmt.Errorf("configuration file '%s' not found: %w", cleanPath, err)
 		}
-		return "", fmt.Errorf("failed to access config file '%s': %w", cleanPath, err)
+		return cleanPath, nil
 	}
 
-	return cleanPath, nil
+	// 1. Current directory
+	if _, err := os.Stat(DefaultConfigFile); err == nil {
+		return DefaultConfigFile, nil
+	}
+
+	// 2. User home directory fallback
+	if home, err := os.UserHomeDir(); err == nil {
+		homePath := filepath.Join(home, DefaultConfigFile)
+		if _, err := os.Stat(homePath); err == nil {
+			return homePath, nil
+		}
+	}
+
+	return "", fmt.Errorf("configuration file '%s' not found in current directory or user home directory (~).\n💡 Tip: Run 'singctl ssh tpl' to generate a template or specify one using -f <path>", DefaultConfigFile)
 }
 
 var envWithDefPattern = regexp.MustCompile(`\$\{([a-zA-Z_][a-zA-Z0-9_]*)(?::-([^}]*))?\}`)
@@ -77,6 +84,37 @@ func ExpandEnv(s string) string {
 		return match
 	})
 	return os.ExpandEnv(expanded)
+}
+
+// ResolveAliasConfig queries OpenSSH to inspect user, hostname, port, and proxycommand for a ~/.ssh/config alias.
+func ResolveAliasConfig(alias string) (user string, host string, port int, proxyCmd string, err error) {
+	cmd := exec.Command("ssh", "-G", alias)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", "", 0, "", fmt.Errorf("ssh -G %s failed: %w", alias, err)
+	}
+
+	for line := range strings.SplitSeq(string(out), "\n") {
+		trimmed := strings.TrimSpace(line)
+		parts := strings.Fields(trimmed)
+		if len(parts) >= 2 {
+			key := strings.ToLower(parts[0])
+			val := strings.Join(parts[1:], " ")
+			switch key {
+			case "user":
+				user = val
+			case "hostname":
+				host = val
+			case "port":
+				_, _ = fmt.Sscanf(val, "%d", &port)
+			case "proxycommand":
+				if val != "none" {
+					proxyCmd = val
+				}
+			}
+		}
+	}
+	return user, host, port, proxyCmd, nil
 }
 
 // LoadConfig reads, expands environment variables, and parses ssh-init.yaml into resolved Host models.
@@ -164,10 +202,6 @@ func LoadConfig(configPath string) (*Config, []*Host, error) {
 			hostVal = strings.TrimSpace(item.IP)
 		}
 
-		if !isAliasMode && hostVal == "" {
-			return nil, nil, fmt.Errorf("hosts[%s]: 'host' (or 'ip') cannot be empty", name)
-		}
-
 		user := item.User
 		if user == "" {
 			user = defaults.User
@@ -177,6 +211,27 @@ func LoadConfig(configPath string) (*Config, []*Host, error) {
 		if curPort <= 0 {
 			curPort = defaults.CurrentPort
 		}
+
+		// In alias mode, auto-resolve user, host, and port from ~/.ssh/config if not specified
+		if isAliasMode {
+			resolvedUser, resolvedHost, resolvedPort, _, err := ResolveAliasConfig(alias)
+			if err == nil {
+				if item.User == "" && resolvedUser != "" {
+					user = resolvedUser
+				}
+				if hostVal == "" && resolvedHost != "" {
+					hostVal = resolvedHost
+				}
+				if item.CurrentPort <= 0 && resolvedPort > 0 {
+					curPort = resolvedPort
+				}
+			}
+		}
+
+		if !isAliasMode && hostVal == "" {
+			return nil, nil, fmt.Errorf("hosts[%s]: 'host' (or 'ip') cannot be empty", name)
+		}
+
 		if curPort < 1 || curPort > 65535 {
 			return nil, nil, fmt.Errorf("hosts[%s]: invalid current_port %d", name, curPort)
 		}
@@ -184,7 +239,7 @@ func LoadConfig(configPath string) (*Config, []*Host, error) {
 		targetPort := item.TargetPort
 		if targetPort <= 0 {
 			if isAliasMode {
-				// In alias mode, preserve current port by default to prevent breaking tunnel mapping
+				// In alias mode, targetPort matches the active alias port (e.g. 2222)
 				targetPort = curPort
 			} else {
 				targetPort = defaults.TargetPort
