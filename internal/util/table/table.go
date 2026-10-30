@@ -18,22 +18,10 @@ const (
 )
 
 // StringDisplayWidth calculates visual column width of a string in terminal.
-// It strips ANSI color codes, handles East Asian wide characters, and emoji presentation selectors.
+// It strips ANSI color codes and calculates width using Unicode East Asian Width standard.
 func StringDisplayWidth(s string) int {
 	clean := ansiRegex.ReplaceAllString(s, "")
-	runes := []rune(clean)
-	width := 0
-	for i := 0; i < len(runes); i++ {
-		r := runes[i]
-		if r == 0xfe0f { // emoji variation selector-16
-			if i > 0 && runewidth.RuneWidth(runes[i-1]) == 1 {
-				width++
-			}
-			continue
-		}
-		width += runewidth.RuneWidth(r)
-	}
-	return width
+	return runewidth.StringWidth(clean)
 }
 
 // PadString pads a string to target width according to alignment.

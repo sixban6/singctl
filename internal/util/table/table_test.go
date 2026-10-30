@@ -18,7 +18,7 @@ func TestTableRender(t *testing.T) {
 
 	tbl.AddRow("vps_sg", "alias(vps_sg)", "2222 🟢", "2222 🟢", "🟢 畅通", "🔒 已关闭", "✅ 达标", "0.4s")
 	tbl.AddRow("vps_rn", "alias(vps_rn)", "2222 🟢", "2222 🟢", "🟢 畅通", "🔒 已关闭", "✅ 达标", "0.3s")
-	tbl.AddRow("vps_rn2", "alias(vps_rn2)", "2222 🟢", "2222 🟢", "🟢 畅通", "⚠️ 仍开启", "⚠️ 待加固", "0.3s")
+	tbl.AddRow("vps_rn2", "alias(vps_rn2)", "2222 🟢", "2222 🟢", "🟢 畅通", "🔓 仍开启", "🟡 待加固", "0.3s")
 
 	output := tbl.Render()
 	lines := strings.Split(strings.TrimSpace(output), "\n")
