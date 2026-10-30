@@ -64,7 +64,7 @@ func PrintExecutionReport(results []*HostResult) {
 		case StatusSuccess:
 			statusStr = "🟢 成功"
 		case StatusWarning:
-			statusStr = "⚠️ 警告"
+			statusStr = "🟡 警告"
 		case StatusFailed:
 			statusStr = "❌ 失败"
 		}
@@ -151,14 +151,14 @@ func PrintTestReport(results []*TestResult) {
 
 		passAuthStr := "🔒 已关闭"
 		if r.PasswordAuthWork {
-			passAuthStr = "⚠️ 仍开启"
+			passAuthStr = "🔓 仍开启"
 		}
 
 		compliance := "✅ 达标"
 		if !r.KeyAuthWork {
 			compliance = "❌ 密钥未通"
 		} else if r.PasswordAuthWork || (r.Port22Open && r.Host.TargetPort != 22) {
-			compliance = "⚠️ 待加固"
+			compliance = "🟡 待加固"
 		}
 
 		durationStr := fmt.Sprintf("%.1fs", r.Duration.Seconds())
