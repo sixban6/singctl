@@ -1,3 +1,10 @@
+# [1.47.0](https://github.com/sixban6/singctl/compare/v1.46.1...v1.47.0) (2026-10-30)
+
+
+### Features
+
+* **ssh:** add batch key injection, port hardening and local config sync ([9ce3b3d](https://github.com/sixban6/singctl/commit/9ce3b3dc3341a49d1f9d4827b5755e1b06f39731))
+
 ## [1.46.1](https://github.com/sixban6/singctl/compare/v1.46.0...v1.46.1) (2026-10-29)
 
 
