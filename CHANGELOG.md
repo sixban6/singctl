@@ -1,3 +1,10 @@
+# [1.49.0](https://github.com/sixban6/singctl/compare/v1.48.1...v1.49.0) (2026-10-30)
+
+
+### Features
+
+* **ssh:** format terminal reports with aligned unicode box tables and visual width calculation ([f811c0a](https://github.com/sixban6/singctl/commit/f811c0aa7132525cdc4738248f70cae76c2c0d35))
+
 ## [1.48.1](https://github.com/sixban6/singctl/compare/v1.48.0...v1.48.1) (2026-10-30)
 
 
