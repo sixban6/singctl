@@ -7,12 +7,12 @@ import (
 
 // FirewallManager handles firewall rules and SELinux port policies on the remote host.
 type FirewallManager struct {
-	client *Client
+	executor Executor
 }
 
 // NewFirewallManager creates a new FirewallManager.
-func NewFirewallManager(client *Client) *FirewallManager {
-	return &FirewallManager{client: client}
+func NewFirewallManager(executor Executor) *FirewallManager {
+	return &FirewallManager{executor: executor}
 }
 
 // AllowPort enables incoming TCP traffic on the given port across UFW, Firewalld, and SELinux.
@@ -48,7 +48,7 @@ func (f *FirewallManager) DisallowPort(port int) error {
 
 func (f *FirewallManager) configureSELinux(port int) {
 	// Check if getenforce is available and active
-	out, err := f.client.Run("command -v getenforce >/dev/null 2>&1 && getenforce || true")
+	out, err := f.executor.Run("command -v getenforce >/dev/null 2>&1 && getenforce || true")
 	if err != nil {
 		return
 	}
@@ -65,34 +65,34 @@ if command -v semanage >/dev/null 2>&1; then
     fi
 fi
 `, port, port, port)
-	_, _ = f.client.Run(cmd)
+	_, _ = f.executor.Run(cmd)
 }
 
 func (f *FirewallManager) configureUFW(port int, allow bool) {
 	checkCmd := "command -v ufw >/dev/null 2>&1 && ufw status | grep -qw active && echo 'active' || true"
-	out, err := f.client.Run(checkCmd)
+	out, err := f.executor.Run(checkCmd)
 	if err != nil || strings.TrimSpace(out) != "active" {
 		return
 	}
 
 	if allow {
-		_, _ = f.client.Run(fmt.Sprintf("ufw allow %d/tcp comment 'singctl-ssh'", port))
+		_, _ = f.executor.Run(fmt.Sprintf("ufw allow %d/tcp comment 'singctl-ssh'", port))
 	} else {
-		_, _ = f.client.Run(fmt.Sprintf("ufw delete allow %d/tcp", port))
+		_, _ = f.executor.Run(fmt.Sprintf("ufw delete allow %d/tcp", port))
 	}
 }
 
 func (f *FirewallManager) configureFirewalld(port int, allow bool) {
 	checkCmd := "command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state 2>/dev/null || true"
-	out, err := f.client.Run(checkCmd)
+	out, err := f.executor.Run(checkCmd)
 	if err != nil || strings.TrimSpace(out) != "running" {
 		return
 	}
 
 	if allow {
-		_, _ = f.client.Run(fmt.Sprintf("firewall-cmd --permanent --add-port=%d/tcp && firewall-cmd --reload", port))
+		_, _ = f.executor.Run(fmt.Sprintf("firewall-cmd --permanent --add-port=%d/tcp && firewall-cmd --reload", port))
 	} else {
-		_, _ = f.client.Run(fmt.Sprintf("firewall-cmd --permanent --remove-port=%d/tcp 2>/dev/null; firewall-cmd --reload", port))
+		_, _ = f.executor.Run(fmt.Sprintf("firewall-cmd --permanent --remove-port=%d/tcp 2>/dev/null; firewall-cmd --reload", port))
 	}
 }
 
@@ -105,7 +105,7 @@ if command -v iptables >/dev/null 2>&1; then
     fi
 fi
 `
-	out, err := f.client.Run(checkCmd)
+	out, err := f.executor.Run(checkCmd)
 	if err != nil || strings.TrimSpace(out) != "drop_policy" {
 		return
 	}
@@ -116,8 +116,8 @@ if ! iptables -C INPUT -p tcp --dport %d -j ACCEPT 2>/dev/null; then
     iptables -I INPUT 1 -p tcp --dport %d -j ACCEPT
 fi
 `, port, port)
-		_, _ = f.client.Run(cmd)
+		_, _ = f.executor.Run(cmd)
 	} else {
-		_, _ = f.client.Run(fmt.Sprintf("iptables -D INPUT -p tcp --dport %d -j ACCEPT 2>/dev/null || true", port))
+		_, _ = f.executor.Run(fmt.Sprintf("iptables -D INPUT -p tcp --dport %d -j ACCEPT 2>/dev/null || true", port))
 	}
 }

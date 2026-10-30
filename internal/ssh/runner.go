@@ -47,11 +47,11 @@ func (r *Runner) RunInit(hosts []*Host, concurrency int, dryRun bool, skipConfig
 	close(jobs)
 	wg.Wait()
 
-	// Sync local ~/.ssh/config for successful hosts
+	// Sync local ~/.ssh/config only for successful DIRECT hosts (alias hosts are already managed in ~/.ssh/config)
 	if !skipConfig && !dryRun {
 		var successHosts []*Host
 		for _, res := range results {
-			if res.Status == StatusSuccess {
+			if res.Status == StatusSuccess && !res.Host.IsAliasMode {
 				successHosts = append(successHosts, res.Host)
 			}
 		}
@@ -61,7 +61,7 @@ func (r *Runner) RunInit(hosts []*Host, concurrency int, dryRun bool, skipConfig
 				logger.Error("回写本地 ~/.ssh/config 失败: %v", err)
 			} else {
 				for _, res := range results {
-					if res.Status == StatusSuccess {
+					if res.Status == StatusSuccess && !res.Host.IsAliasMode {
 						res.ConfigUpdated = true
 					}
 				}
@@ -82,12 +82,84 @@ func (r *Runner) executeInitHost(h *Host, dryRun bool) *HostResult {
 		Status:      StatusFailed,
 	}
 
+	// Case A: Host already configured in ~/.ssh/config (Alias mode)
+	if h.IsAliasMode {
+		logger.Info("[%s] 🌐 检测到 ~/.ssh/config 中已配置的主机 (别名: %s)", h.Name, h.Alias)
+		executor, err := CreateExecutor(h, h.CurrentPort, false)
+		if err != nil {
+			res.Error = fmt.Errorf("alias client init failed: %w", err)
+			res.Duration = time.Since(start)
+			return res
+		}
+		defer executor.Close()
+
+		if dryRun {
+			if !ProbeAliasLogin(h, h.Timeout) {
+				res.Error = fmt.Errorf("alias '%s' connection probe failed", h.Alias)
+				res.Duration = time.Since(start)
+				logger.Error("[%s] ❌ [DRY-RUN] 连接失败", h.Name)
+				return res
+			}
+			res.Status = StatusSuccess
+			res.KeyPushed = true
+			res.KeyVerified = true
+			res.Duration = time.Since(start)
+			logger.Success("[%s] ✅ [DRY-RUN] ~/.ssh/config 主机通道畅通", h.Name)
+			return res
+		}
+
+		// 1. Inject public key
+		logger.Info("[%s] 🔑 [1/3] 注入本地公钥至 ~/.ssh/authorized_keys...", h.Name)
+		if err := executor.InjectPublicKey(h.IdentityFile); err != nil {
+			res.Error = fmt.Errorf("inject public key failed: %w", err)
+			res.Duration = time.Since(start)
+			logger.Error("[%s] ❌ 公钥注入失败: %v", h.Name, err)
+			return res
+		}
+		res.KeyPushed = true
+		logger.Success("[%s] 🔑 [1/3] 公钥已写入", h.Name)
+
+		// 2. Probe key login
+		time.Sleep(500 * time.Millisecond)
+		logger.Info("[%s] 🩺 [2/3] 验证免密登录连通性...", h.Name)
+		if !ProbeAliasLogin(h, h.Timeout) {
+			res.Error = fmt.Errorf("verification of key login via alias '%s' failed", h.Alias)
+			res.Duration = time.Since(start)
+			logger.Error("[%s] ❌ 免密登录验证失败 (中止加固以防失联): %v", h.Name, res.Error)
+			return res
+		}
+		res.KeyVerified = true
+		logger.Success("[%s] ✅ [2/3] 免密验证通过", h.Name)
+
+		// 3. Finalize hardening: preserve tunnel port mapping, disable password auth if requested
+		logger.Info("[%s] 🔒 [3/3] 禁用密码登录 (保持端口映射不变)...", h.Name)
+		harden := NewSshdHarden(executor)
+		if err := harden.FinalizeHardening(0, h.DisablePasswordAuth); err != nil {
+			res.Error = fmt.Errorf("finalize hardening failed: %w", err)
+			res.Duration = time.Since(start)
+			logger.Error("[%s] ❌ 安全加固失败: %v", h.Name, err)
+			return res
+		}
+
+		res.PasswordDisabled = h.DisablePasswordAuth
+		res.Status = StatusSuccess
+		res.Duration = time.Since(start)
+		logger.Success("[%s] 🎉 ~/.ssh/config 已配置主机加固完成！", h.Name)
+		return res
+	}
+
+	// Case B: Direct Host (IP / Hostname)
+	targetAddr := h.Host
+	if targetAddr == "" {
+		targetAddr = h.IP
+	}
+
 	logger.Info("[%s] 🔑 [1/5] 连接初始端口 %d 并注入公钥...", h.Name, h.CurrentPort)
 
 	// Step 1: Initial connection with password or initial key
 	client, err := DialHost(h, h.CurrentPort, false)
 	if err != nil {
-		res.Error = fmt.Errorf("initial connection failed on port %d: %w", h.CurrentPort, err)
+		res.Error = fmt.Errorf("initial connection failed on %s:%d: %w", targetAddr, h.CurrentPort, err)
 		res.Duration = time.Since(start)
 		logger.Error("[%s] ❌ 初始连接失败: %v", h.Name, err)
 		return res
@@ -126,7 +198,6 @@ func (r *Runner) executeInitHost(h *Host, dryRun bool) *HostResult {
 	res.KeyVerified = true
 	logger.Success("[%s] ✅ [3/5] 新私钥免密登录首验成功 (端口 %d)", h.Name, h.CurrentPort)
 
-	// If target port is same as current port and no port change is required
 	fw := NewFirewallManager(client)
 	harden := NewSshdHarden(client)
 
@@ -210,14 +281,30 @@ func (r *Runner) RunTest(hosts []*Host, concurrency int) []*TestResult {
 					Duration: 0,
 				}
 
+				if h.IsAliasMode {
+					keyOk := ProbeAliasLogin(h, h.Timeout)
+					tr.Port22Open = true
+					tr.TargetPortOpen = true
+					tr.KeyAuthWork = keyOk
+					tr.PasswordAuthWork = !keyOk
+					tr.Duration = time.Since(start)
+					results[idx] = tr
+					continue
+				}
+
+				hostTarget := h.Host
+				if hostTarget == "" {
+					hostTarget = h.IP
+				}
+
 				// 1. Probe current port
-				tr.Port22Open = TestTCPPort(h.IP, h.CurrentPort, h.Timeout)
+				tr.Port22Open = TestTCPPort(hostTarget, h.CurrentPort, h.Timeout)
 
 				// 2. Probe target port
 				if h.TargetPort == h.CurrentPort {
 					tr.TargetPortOpen = tr.Port22Open
 				} else {
-					tr.TargetPortOpen = TestTCPPort(h.IP, h.TargetPort, h.Timeout)
+					tr.TargetPortOpen = TestTCPPort(hostTarget, h.TargetPort, h.Timeout)
 				}
 
 				// 3. Test Key Auth on whichever port is open
@@ -274,7 +361,7 @@ func (r *Runner) RunPushKey(hosts []*Host, concurrency int) []*HostResult {
 					Status:      StatusFailed,
 				}
 
-				client, err := DialHost(h, h.CurrentPort, false)
+				executor, err := CreateExecutor(h, h.CurrentPort, false)
 				if err != nil {
 					res.Error = fmt.Errorf("connect failed: %w", err)
 					res.Duration = time.Since(start)
@@ -282,17 +369,16 @@ func (r *Runner) RunPushKey(hosts []*Host, concurrency int) []*HostResult {
 					continue
 				}
 
-				if err := client.InjectPublicKey(h.IdentityFile); err != nil {
-					_ = client.Close()
+				if err := executor.InjectPublicKey(h.IdentityFile); err != nil {
+					_ = executor.Close()
 					res.Error = fmt.Errorf("inject key failed: %w", err)
 					res.Duration = time.Since(start)
 					results[idx] = res
 					continue
 				}
-				_ = client.Close()
+				_ = executor.Close()
 
 				res.KeyPushed = true
-				// Test key
 				ok, _ := ProbeKeyLogin(h, h.CurrentPort, h.Timeout)
 				res.KeyVerified = ok
 				if ok {
@@ -337,7 +423,7 @@ func (r *Runner) RunHarden(hosts []*Host, concurrency int, overridePort int, dis
 			defer wg.Done()
 			for idx := range jobs {
 				h := hosts[idx]
-				if overridePort > 0 {
+				if overridePort > 0 && !h.IsAliasMode {
 					h.TargetPort = overridePort
 				}
 				if disablePassword {
@@ -352,21 +438,20 @@ func (r *Runner) RunHarden(hosts []*Host, concurrency int, overridePort int, dis
 					Status:      StatusFailed,
 				}
 
-				// Must connect with key
-				client, err := DialHost(h, h.CurrentPort, true)
+				executor, err := CreateExecutor(h, h.CurrentPort, true)
 				if err != nil {
-					res.Error = fmt.Errorf("connect with key on port %d failed: %w", h.CurrentPort, err)
+					res.Error = fmt.Errorf("connect on port %d failed: %w", h.CurrentPort, err)
 					res.Duration = time.Since(start)
 					results[idx] = res
 					continue
 				}
-				defer client.Close()
+				defer executor.Close()
 
 				res.KeyVerified = true
-				fw := NewFirewallManager(client)
-				harden := NewSshdHarden(client)
+				fw := NewFirewallManager(executor)
+				harden := NewSshdHarden(executor)
 
-				if h.TargetPort != h.CurrentPort {
+				if !h.IsAliasMode && h.TargetPort != h.CurrentPort {
 					if h.ManageFirewall {
 						_ = fw.AllowPort(h.TargetPort)
 					}
@@ -390,14 +475,19 @@ func (r *Runner) RunHarden(hosts []*Host, concurrency int, overridePort int, dis
 					}
 				}
 
-				if err := harden.FinalizeHardening(h.TargetPort, h.DisablePasswordAuth); err != nil {
+				targetPortToHarden := h.TargetPort
+				if h.IsAliasMode {
+					targetPortToHarden = 0 // Preserve existing port configuration
+				}
+
+				if err := harden.FinalizeHardening(targetPortToHarden, h.DisablePasswordAuth); err != nil {
 					res.Error = fmt.Errorf("finalize hardening failed: %w", err)
 					res.Duration = time.Since(start)
 					results[idx] = res
 					continue
 				}
 
-				if h.TargetPort != h.CurrentPort && h.ManageFirewall {
+				if !h.IsAliasMode && h.TargetPort != h.CurrentPort && h.ManageFirewall {
 					_ = fw.DisallowPort(h.CurrentPort)
 				}
 
@@ -419,7 +509,7 @@ func (r *Runner) RunHarden(hosts []*Host, concurrency int, overridePort int, dis
 	if !skipConfig {
 		var successHosts []*Host
 		for _, res := range results {
-			if res.Status == StatusSuccess {
+			if res.Status == StatusSuccess && !res.Host.IsAliasMode {
 				successHosts = append(successHosts, res.Host)
 			}
 		}
@@ -427,7 +517,7 @@ func (r *Runner) RunHarden(hosts []*Host, concurrency int, overridePort int, dis
 			cfgMgr := NewLocalConfigManager("")
 			_ = cfgMgr.SyncHosts(successHosts)
 			for _, res := range results {
-				if res.Status == StatusSuccess {
+				if res.Status == StatusSuccess && !res.Host.IsAliasMode {
 					res.ConfigUpdated = true
 				}
 			}

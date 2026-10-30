@@ -17,8 +17,8 @@ func PrintExecutionReport(results []*HostResult) {
 	logger.Info("════════════════════════════════════════════════════════════════════════════════════")
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	_, _ = fmt.Fprintln(w, "主机别名\t目标IP\t初始端口\t最终端口\t公钥注入\t免密验证\t密码禁用\t状态\t耗时")
-	_, _ = fmt.Fprintln(w, "────────\t──────\t────────\t────────\t────────\t────────\t────────\t────\t────")
+	_, _ = fmt.Fprintln(w, "主机别名\t目标地址\t初始端口\t最终端口\t公钥注入\t免密验证\t密码禁用\t状态\t耗时")
+	_, _ = fmt.Fprintln(w, "────────\t────────\t────────\t────────\t────────\t────────\t────────\t────\t────")
 
 	successCount := 0
 	warningCount := 0
@@ -59,10 +59,17 @@ func PrintExecutionReport(results []*HostResult) {
 			statusStr = "⏭️ 跳过"
 		}
 
+		addrStr := r.Host.Host
+		if r.Host.IsAliasMode {
+			addrStr = fmt.Sprintf("alias(%s)", r.Host.Alias)
+		} else if addrStr == "" {
+			addrStr = r.Host.IP
+		}
+
 		durationStr := fmt.Sprintf("%.1fs", r.Duration.Seconds())
 		_, _ = fmt.Fprintf(w, "%s\t%s\t%d\t%d\t%s\t%s\t%s\t%s\t%s\n",
 			r.Host.Name,
-			r.Host.IP,
+			addrStr,
 			r.InitialPort,
 			r.FinalPort,
 			keyPushed,
@@ -115,10 +122,17 @@ func PrintTestReport(results []*TestResult) {
 	logger.Info("════════════════════════════════════════════════════════════════════════════════════")
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	_, _ = fmt.Fprintln(w, "主机别名\t目标IP\t当前端口\t目标端口\t免密认证\t密码认证\t安全评级\t耗时")
-	_, _ = fmt.Fprintln(w, "────────\t──────\t────────\t────────\t────────\t────────\t────────\t────")
+	_, _ = fmt.Fprintln(w, "主机别名\t目标地址\t当前端口\t目标端口\t免密认证\t密码认证\t安全评级\t耗时")
+	_, _ = fmt.Fprintln(w, "────────\t────────\t────────\t────────\t────────\t────────\t────────\t────")
 
 	for _, r := range results {
+		addrStr := r.Host.Host
+		if r.Host.IsAliasMode {
+			addrStr = fmt.Sprintf("alias(%s)", r.Host.Alias)
+		} else if addrStr == "" {
+			addrStr = r.Host.IP
+		}
+
 		curPortStr := fmt.Sprintf("%d ❌", r.Host.CurrentPort)
 		if r.Port22Open {
 			curPortStr = fmt.Sprintf("%d 🟢", r.Host.CurrentPort)
@@ -151,7 +165,7 @@ func PrintTestReport(results []*TestResult) {
 		durationStr := fmt.Sprintf("%.1fs", r.Duration.Seconds())
 		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			r.Host.Name,
-			r.Host.IP,
+			addrStr,
 			curPortStr,
 			targetPortStr,
 			keyAuthStr,

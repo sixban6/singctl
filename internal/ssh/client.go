@@ -2,16 +2,26 @@ package ssh
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 )
 
-// Client encapsulates an SSH connection and execution context.
+// Executor defines the unified interface for executing commands and injecting keys on a remote machine,
+// whether connected directly via Go SSH or routed through an existing ~/.ssh/config host.
+type Executor interface {
+	Run(cmd string) (string, error)
+	InjectPublicKey(pubKeyPath string) error
+	Close() error
+}
+
+// Client encapsulates a direct SSH connection using Go's crypto/ssh.
 type Client struct {
 	client *ssh.Client
 	host   *Host
@@ -48,7 +58,6 @@ func DialHost(h *Host, port int, usePrivateKey bool) (*Client, error) {
 	}
 
 	hostKeyCallback := ssh.InsecureIgnoreHostKey()
-	// Note: When StrictHostKeyChecking is false, we ignore host key validation to facilitate automated onboarding.
 
 	sshConfig := &ssh.ClientConfig{
 		User:            h.User,
@@ -57,7 +66,12 @@ func DialHost(h *Host, port int, usePrivateKey bool) (*Client, error) {
 		Timeout:         h.Timeout,
 	}
 
-	addr := net.JoinHostPort(h.IP, fmt.Sprintf("%d", port))
+	hostTarget := h.Host
+	if hostTarget == "" {
+		hostTarget = h.IP
+	}
+
+	addr := net.JoinHostPort(hostTarget, fmt.Sprintf("%d", port))
 	conn, err := net.DialTimeout("tcp", addr, h.Timeout)
 	if err != nil {
 		return nil, fmt.Errorf("TCP dial to %s failed: %w", addr, err)
@@ -82,7 +96,6 @@ func (c *Client) Close() error {
 }
 
 // Run executes a shell command on the remote host and returns stdout.
-// Stderr is captured and included in error if non-zero exit.
 func (c *Client) Run(cmd string) (string, error) {
 	session, err := c.client.NewSession()
 	if err != nil {
@@ -94,10 +107,8 @@ func (c *Client) Run(cmd string) (string, error) {
 	session.Stdout = &stdoutBuf
 	session.Stderr = &stderrBuf
 
-	// If non-root user, prepend sudo
 	execCmd := cmd
 	if c.host.User != "root" && !strings.HasPrefix(strings.TrimSpace(cmd), "sudo") {
-		// Use non-interactive sudo
 		execCmd = fmt.Sprintf("sudo -n sh -c %s", escapeShellArg(cmd))
 	}
 
@@ -127,7 +138,6 @@ func (c *Client) InjectPublicKey(pubKeyPath string) error {
 		return fmt.Errorf("public key file '%s' is empty", pubKeyPath)
 	}
 
-	// Remote script ensuring permissions and idempotent append
 	remoteScript := fmt.Sprintf(`
 set -e
 mkdir -p ~/.ssh
@@ -157,9 +167,99 @@ fi
 	return nil
 }
 
-// TestTCPPort checks whether the specified IP and port are reachable via TCP.
-func TestTCPPort(ip string, port int, timeout time.Duration) bool {
-	addr := net.JoinHostPort(ip, fmt.Sprintf("%d", port))
+// AliasClient executes commands on a host already defined in ~/.ssh/config using the system ssh binary.
+type AliasClient struct {
+	host *Host
+}
+
+// NewAliasClient creates an Executor for a host configured in ~/.ssh/config.
+func NewAliasClient(h *Host) *AliasClient {
+	return &AliasClient{host: h}
+}
+
+// Run executes a command via system ssh using the alias configured in ~/.ssh/config.
+func (a *AliasClient) Run(cmd string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), a.host.Timeout)
+	defer cancel()
+
+	execCmd := cmd
+	if a.host.User != "" && a.host.User != "root" && !strings.HasPrefix(strings.TrimSpace(cmd), "sudo") {
+		execCmd = fmt.Sprintf("sudo -n sh -c %s", escapeShellArg(cmd))
+	}
+
+	sshCmd := exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", a.host.Alias, execCmd)
+	var stdoutBuf, stderrBuf bytes.Buffer
+	sshCmd.Stdout = &stdoutBuf
+	sshCmd.Stderr = &stderrBuf
+
+	err := sshCmd.Run()
+	stdout := stdoutBuf.String()
+	stderr := strings.TrimSpace(stderrBuf.String())
+
+	if err != nil {
+		if stderr != "" {
+			return stdout, fmt.Errorf("ssh alias '%s' command '%s' failed: %v (stderr: %s)", a.host.Alias, cmd, err, stderr)
+		}
+		return stdout, fmt.Errorf("ssh alias '%s' command '%s' failed: %w", a.host.Alias, cmd, err)
+	}
+
+	return stdout, nil
+}
+
+// InjectPublicKey injects public key via ssh alias into remote ~/.ssh/authorized_keys.
+func (a *AliasClient) InjectPublicKey(pubKeyPath string) error {
+	pubBytes, err := os.ReadFile(pubKeyPath)
+	if err != nil {
+		return fmt.Errorf("cannot read local public key '%s': %w", pubKeyPath, err)
+	}
+
+	pubKeyStr := strings.TrimSpace(string(pubBytes))
+	if pubKeyStr == "" {
+		return fmt.Errorf("public key file '%s' is empty", pubKeyPath)
+	}
+
+	remoteScript := fmt.Sprintf(`
+set -e
+mkdir -p ~/.ssh
+chmod 700 ~/.ssh
+touch ~/.ssh/authorized_keys
+chmod 600 ~/.ssh/authorized_keys
+
+KEY=%s
+if ! grep -q -F "$KEY" ~/.ssh/authorized_keys; then
+    printf "%%s\n" "$KEY" >> ~/.ssh/authorized_keys
+fi
+`, escapeShellArg(pubKeyStr))
+
+	_, err = a.Run(remoteScript)
+	return err
+}
+
+// Close is a no-op for AliasClient.
+func (a *AliasClient) Close() error {
+	return nil
+}
+
+// ProbeAliasLogin tests if login via ~/.ssh/config alias succeeds without password prompt.
+func ProbeAliasLogin(h *Host, timeout time.Duration) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", h.Alias, "true")
+	return cmd.Run() == nil
+}
+
+// CreateExecutor creates an Executor based on whether host is an alias in ~/.ssh/config or a direct host.
+func CreateExecutor(h *Host, port int, usePrivateKey bool) (Executor, error) {
+	if h.IsAliasMode {
+		return NewAliasClient(h), nil
+	}
+	return DialHost(h, port, usePrivateKey)
+}
+
+// TestTCPPort checks whether the specified IP/Host and port are reachable via TCP.
+func TestTCPPort(hostOrIP string, port int, timeout time.Duration) bool {
+	addr := net.JoinHostPort(hostOrIP, fmt.Sprintf("%d", port))
 	conn, err := net.DialTimeout("tcp", addr, timeout)
 	if err != nil {
 		return false
@@ -170,6 +270,10 @@ func TestTCPPort(ip string, port int, timeout time.Duration) bool {
 
 // ProbeKeyLogin tests if public-key authentication succeeds on the specified port.
 func ProbeKeyLogin(h *Host, port int, timeout time.Duration) (bool, error) {
+	if h.IsAliasMode {
+		return ProbeAliasLogin(h, timeout), nil
+	}
+
 	keyBytes, err := os.ReadFile(h.PrivateKey)
 	if err != nil {
 		return false, fmt.Errorf("read private key %s: %w", h.PrivateKey, err)
@@ -187,7 +291,12 @@ func ProbeKeyLogin(h *Host, port int, timeout time.Duration) (bool, error) {
 		Timeout:         timeout,
 	}
 
-	addr := net.JoinHostPort(h.IP, fmt.Sprintf("%d", port))
+	hostTarget := h.Host
+	if hostTarget == "" {
+		hostTarget = h.IP
+	}
+
+	addr := net.JoinHostPort(hostTarget, fmt.Sprintf("%d", port))
 	conn, err := net.DialTimeout("tcp", addr, timeout)
 	if err != nil {
 		return false, err
@@ -209,6 +318,11 @@ func ProbeKeyLogin(h *Host, port int, timeout time.Duration) (bool, error) {
 
 // ProbePasswordLogin tests if password authentication succeeds or is accepted on the port.
 func ProbePasswordLogin(h *Host, port int, password string, timeout time.Duration) (bool, error) {
+	if h.IsAliasMode {
+		// For ~/.ssh/config hosts, check if BatchMode=yes succeeds. If it succeeds, password is not required.
+		return !ProbeAliasLogin(h, timeout), nil
+	}
+
 	if password == "" {
 		password = "invalid_probe_dummy_password_singctl"
 	}
@@ -220,7 +334,12 @@ func ProbePasswordLogin(h *Host, port int, password string, timeout time.Duratio
 		Timeout:         timeout,
 	}
 
-	addr := net.JoinHostPort(h.IP, fmt.Sprintf("%d", port))
+	hostTarget := h.Host
+	if hostTarget == "" {
+		hostTarget = h.IP
+	}
+
+	addr := net.JoinHostPort(hostTarget, fmt.Sprintf("%d", port))
 	conn, err := net.DialTimeout("tcp", addr, timeout)
 	if err != nil {
 		return false, err
@@ -230,10 +349,8 @@ func ProbePasswordLogin(h *Host, port int, password string, timeout time.Duratio
 	sshConn, _, _, err := ssh.NewClientConn(conn, addr, sshConfig)
 	if err != nil {
 		errStr := err.Error()
-		// If ssh rejected password, but password auth is enabled, the error contains "ssh: handshake failed: ssh: unable to authenticate"
-		// If password auth is disabled on server, it will fail with "none,publickey" supported methods.
 		if strings.Contains(errStr, "password") {
-			return true, nil // server still accepts/offers password method
+			return true, nil
 		}
 		return false, nil
 	}

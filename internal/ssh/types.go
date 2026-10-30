@@ -31,7 +31,9 @@ type AuthConfig struct {
 // HostItem represents a single host configuration from YAML
 type HostItem struct {
 	Name                  string      `yaml:"name"`
-	IP                    string      `yaml:"ip"`
+	Host                  string      `yaml:"host"`
+	IP                    string      `yaml:"ip"`    // Kept for backward compatibility
+	Alias                 string      `yaml:"alias"` // Existing ~/.ssh/config alias (tunnel / proxy jump)
 	User                  string      `yaml:"user"`
 	CurrentPort           int         `yaml:"current_port"`
 	TargetPort            int         `yaml:"target_port"`
@@ -47,7 +49,10 @@ type HostItem struct {
 // Host is the resolved runtime host model after applying defaults and env vars
 type Host struct {
 	Name                  string
-	IP                    string
+	Host                  string // Hostname or IP
+	IP                    string // Deprecated: alias to Host
+	Alias                 string // SSH config alias if running in alias/tunnel mode
+	IsAliasMode           bool
 	User                  string
 	CurrentPort           int
 	TargetPort            int
