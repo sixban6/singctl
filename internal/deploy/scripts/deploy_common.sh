@@ -228,23 +228,27 @@ configure_ssh_debian_like() {
     fi
 
     mkdir -p /etc/ssh/sshd_config.d
+    rm -f /etc/ssh/sshd_config.d/99-singctl-hardening.conf
+    rm -f /etc/ssh/sshd_config.d/99-ctrl.conf
 
     if ! grep -Eq '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/\*\.conf' /etc/ssh/sshd_config; then
         echo "Include /etc/ssh/sshd_config.d/*.conf" >> /etc/ssh/sshd_config
     fi
 
-    # Make sure old active Port directives do not keep SSH on 22.
-    # Port is multi-value in sshd, so we neutralize previous Port lines first.
+    # Make sure old active Port and Password directives do not override hardening.
     local conf
     for conf in /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf; do
         [ -f "${conf}" ] || continue
-        [ "${conf}" = "/etc/ssh/sshd_config.d/99-singctl-hardening.conf" ] && continue
+        [ "${conf}" = "/etc/ssh/sshd_config.d/00-singctl-hardening.conf" ] && continue
         sed -i -E 's/^[[:space:]]*Port[[:space:]]+[0-9]+/# &/g' "${conf}"
+        sed -i -E 's/^[[:space:]]*PasswordAuthentication[[:space:]]+yes/# &/g' "${conf}"
+        sed -i -E 's/^[[:space:]]*KbdInteractiveAuthentication[[:space:]]+yes/# &/g' "${conf}"
+        sed -i -E 's/^[[:space:]]*ChallengeResponseAuthentication[[:space:]]+yes/# &/g' "${conf}"
     done
 
     if [ "${SKIP_SSH_PORT_CHANGE}" = "true" ] || [ "${SSH_PORT}" = "22" ]; then
         echo "Keeping standard SSH Port 22..."
-        cat > /etc/ssh/sshd_config.d/99-singctl-hardening.conf <<EOF
+        cat > /etc/ssh/sshd_config.d/00-singctl-hardening.conf <<EOF
 Port 22
 PasswordAuthentication no
 PubkeyAuthentication yes
@@ -253,7 +257,7 @@ ChallengeResponseAuthentication no
 EOF
     else
         echo "Adopting dual-port transition (Port 22 and Port ${SSH_PORT}) to avoid lockout..."
-        cat > /etc/ssh/sshd_config.d/99-singctl-hardening.conf <<EOF
+        cat > /etc/ssh/sshd_config.d/00-singctl-hardening.conf <<EOF
 Port 22
 Port ${SSH_PORT}
 PasswordAuthentication no
