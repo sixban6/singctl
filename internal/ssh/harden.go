@@ -7,7 +7,7 @@ import (
 )
 
 const (
-	HardeningConfPath = "/etc/ssh/sshd_config.d/99-singctl-hardening.conf"
+	HardeningConfPath = "/etc/ssh/sshd_config.d/00-singctl-hardening.conf"
 	MainSshdConfig    = "/etc/ssh/sshd_config"
 )
 
@@ -80,15 +80,24 @@ func (s *SshdHarden) PrepareSshdConfigEnv() error {
 set -e
 mkdir -p /etc/ssh/sshd_config.d
 
+# Clean up legacy 99-singctl-hardening.conf to avoid duplicate drop-ins
+rm -f /etc/ssh/sshd_config.d/99-singctl-hardening.conf
+
+# Neutralize known vendor panel backdoor files that force password authentication
+rm -f /etc/ssh/sshd_config.d/99-ctrl.conf
+
 if [ -f /etc/ssh/sshd_config ]; then
     if ! grep -Eq '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/\*\.conf' /etc/ssh/sshd_config; then
         echo "Include /etc/ssh/sshd_config.d/*.conf" >> /etc/ssh/sshd_config
     fi
-    # Neutralize conflicting unmanaged Port directives in other config files
+    # Neutralize conflicting unmanaged directives in other config files
     for conf in /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf; do
         [ -f "${conf}" ] || continue
-        [ "${conf}" = "/etc/ssh/sshd_config.d/99-singctl-hardening.conf" ] && continue
+        [ "${conf}" = "/etc/ssh/sshd_config.d/00-singctl-hardening.conf" ] && continue
         sed -i -E 's/^[[:space:]]*Port[[:space:]]+[0-9]+/# &/g' "${conf}"
+        sed -i -E 's/^[[:space:]]*PasswordAuthentication[[:space:]]+yes/# &/g' "${conf}"
+        sed -i -E 's/^[[:space:]]*KbdInteractiveAuthentication[[:space:]]+yes/# &/g' "${conf}"
+        sed -i -E 's/^[[:space:]]*ChallengeResponseAuthentication[[:space:]]+yes/# &/g' "${conf}"
     done
 fi
 `
