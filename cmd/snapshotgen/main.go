@@ -88,6 +88,7 @@ var snapshotItems = []snapshotItem{
 	{"geosite-ad1", "https://github.com/Toperlock/sing-box-geosite/raw/main/rule/adservers.srs", "binary"},
 	{"geosite-ad2", "https://raw.githubusercontent.com/privacy-protection-tools/anti-ad.github.io/master/docs/anti-ad-sing-box.srs", "binary"},
 	{"geosite-ctm_cn", "https://github.com/sixban6/rulesets/raw/refs/heads/main/rule/direct_cn.srs", "binary"},
+	{"geosite-hok", "https://github.com/sixban6/rulesets/raw/refs/heads/main/rule/hok.srs", "binary"},
 }
 
 const (
