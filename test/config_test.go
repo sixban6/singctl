@@ -196,3 +196,78 @@ server:                                         # (可选) 服务器部署配置
 		t.Errorf("Expected backup config permission 0600, got %o", perm)
 	}
 }
+
+func TestSavePreservesCommentsAndCustomRules(t *testing.T) {
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "singctl_save.yaml")
+
+	initialYAML := `# 顶部配置说明注释
+subs:
+  - name: "main"
+    url: "https://sub1.example.com"
+    skip_tls_verify: false
+    remove-emoji: true
+
+github:
+  mirror_url: "https://gh-proxy.com" # 镜像注释
+
+hy2:
+  up: 30
+  down: 300
+
+server:
+  sb_domain: "sb.example.com"
+  node_domain: "node.example.com"
+  substore_domain: "sub.example.com"
+
+watchdog:
+  interval: 45
+
+custom_rules:
+  route:
+    - domain_suffix:
+        - "internal.example.com"
+      outbound: "direct"
+`
+	if err := os.WriteFile(configPath, []byte(initialYAML), 0600); err != nil {
+		t.Fatalf("write initial config: %v", err)
+	}
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	// 模拟修改部分字段后调用 config.Save
+	cfg.Hy2.Up = 50
+	cfg.Hy2.Down = 500
+	cfg.GitHub.MirrorURL = "https://mirror.example.org"
+
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	savedBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read saved config: %v", err)
+	}
+	savedStr := string(savedBytes)
+
+	if !strings.Contains(savedStr, "# 镜像注释") {
+		t.Errorf("expected inline comment to be preserved, got:\n%s", savedStr)
+	}
+
+	reloaded, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("reload saved config: %v", err)
+	}
+	if reloaded.Hy2.Up != 50 || reloaded.Hy2.Down != 500 {
+		t.Errorf("unexpected hy2 bandwidth: %+v", reloaded.Hy2)
+	}
+	if reloaded.Server.NodeDomain != "node.example.com" || reloaded.Server.SubstoreDomain != "sub.example.com" {
+		t.Errorf("expected server domains to be preserved, got: %+v", reloaded.Server)
+	}
+	if len(reloaded.CustomRules.Route) != 1 {
+		t.Errorf("expected custom_rules.route to be preserved, got: %+v", reloaded.CustomRules)
+	}
+}

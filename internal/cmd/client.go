@@ -12,6 +12,7 @@ import (
 	"singctl/internal/logger"
 	"singctl/internal/singbox"
 	ruleset_snapshot "singctl/internal/singbox/ruleset_snapshot"
+	"sort"
 	"strings"
 	"time"
 
@@ -91,17 +92,61 @@ func runStartSingbox(cfg *config.Config, configPath string) error {
 // migrateRuleSetCache 将现有配置中的 remote 规则集迁移为本地缓存引用。
 // 仅在迁移成功时改写配置文件；失败不影响启动流程。
 func migrateRuleSetCache(cfg *config.Config) {
-	opts := singbox.LocalizeOptions{MirrorURL: cfg.GitHub.MirrorURL}
+	opts := singbox.LocalizeOptions{
+		MirrorURL: cfg.GitHub.MirrorURL,
+		CacheTTL:  singbox.DefaultRuleSetCacheTTL,
+	}
 	changed, stats, err := singbox.LocalizeConfigFile(constant.SingBoxConfigFile, opts)
 	if err != nil {
 		logger.Warn("⚠️ 规则集缓存迁移失败(继续使用现有配置): %v", err)
 		return
 	}
 	if changed {
-		logger.Success("已将 %d 个规则集切换为本地缓存（回退旧缓存 %d 个），sing-box 启动不再依赖 GitHub",
-			stats.Localized, stats.Fallback)
+		logger.Success("已将 %d 个规则集切换为本地缓存（复用缓存 %d 个，回退旧缓存 %d 个），sing-box 启动不再依赖 GitHub",
+			stats.Localized, stats.Cached, stats.Fallback)
 	} else if stats.Remote > 0 {
 		logger.Info("规则集缓存: %d 个远程条目保留原样（下载失败且无缓存）", stats.Kept)
+	}
+}
+
+func resolveCmdConfigPath(cmd *cobra.Command, defaultConfigPath string) string {
+	if cmd != nil {
+		if configPathFlag := cmd.Flag("config"); configPathFlag != nil && configPathFlag.Value.String() != "" {
+			return configPathFlag.Value.String()
+		}
+	}
+	return defaultConfigPath
+}
+
+func loadCmdConfig(cmd *cobra.Command, defaultConfigPath string) (*config.Config, string, error) {
+	resolvedPath := resolveCmdConfigPath(cmd, defaultConfigPath)
+	cfg, err := config.Load(resolvedPath)
+	if err != nil {
+		return nil, resolvedPath, fmt.Errorf("failed to load config from %s: %w", resolvedPath, err)
+	}
+	return cfg, resolvedPath, nil
+}
+
+func loadCmdConfigOrDefault(cmd *cobra.Command, defaultConfigPath string) *config.Config {
+	cfg, _, err := loadCmdConfig(cmd, defaultConfigPath)
+	if err != nil || cfg == nil {
+		return &config.Config{}
+	}
+	return cfg
+}
+
+// pruneConfigBackups 清理多余的 .backup.* 备份文件，仅保留最新的 keep 份，防止占满软路由 Flash 空间。
+func pruneConfigBackups(targetPath string, keep int) {
+	if keep <= 0 {
+		return
+	}
+	matches, err := filepath.Glob(targetPath + ".backup.*")
+	if err != nil || len(matches) <= keep {
+		return
+	}
+	sort.Strings(matches)
+	for _, old := range matches[:len(matches)-keep] {
+		_ = os.Remove(old)
 	}
 }
 
@@ -122,48 +167,56 @@ func runStopSingbox(cfg *config.Config) error {
 	return sb.Stop()
 }
 
-func newStartCmd(cfg *config.Config) *cobra.Command {
+func newStartCmd(defaultConfigPath string) *cobra.Command {
 	// 1. sb start
 	cmd := &cobra.Command{
 		Use:   "start",
 		Short: "生成配置并启动 sing-box / Generate config and start sing-box",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runStartSingbox(cfg, cmd.Flag("config").Value.String())
+			cfg, resolvedPath, err := loadCmdConfig(cmd, defaultConfigPath)
+			if err != nil {
+				return err
+			}
+			return runStartSingbox(cfg, resolvedPath)
 		},
 	}
 	return cmd
 }
 
-func newStopCmd(cfg *config.Config) *cobra.Command {
+func newStopCmd(defaultConfigPath string) *cobra.Command {
 	// 2. sb stop
 	cmd := &cobra.Command{
 		Use:   "stop",
 		Short: "停止 sing-box 和守护进程 / Stop sing-box and daemon",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runStopSingbox(cfg)
+			return runStopSingbox(loadCmdConfigOrDefault(cmd, defaultConfigPath))
 		},
 	}
 	return cmd
 }
 
-func newRestartCmd(cfg *config.Config) *cobra.Command {
+func newRestartCmd(defaultConfigPath string) *cobra.Command {
 	// 3. sb restart
 	cmd := &cobra.Command{
 		Use:   "restart",
 		Short: "重启 sing-box / Restart sing-box",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, resolvedPath, err := loadCmdConfig(cmd, defaultConfigPath)
+			if err != nil {
+				return err
+			}
 			logger.Info("Restarting sing-box...")
 			if err := runStopSingbox(cfg); err != nil {
 				return err
 			}
-			return runStartSingbox(cfg, cmd.Flag("config").Value.String())
+			return runStartSingbox(cfg, resolvedPath)
 		},
 		Aliases: []string{"r"},
 	}
 	return cmd
 }
 
-func newGenCmd(cfg *config.Config) *cobra.Command {
+func newGenCmd(defaultConfigPath string) *cobra.Command {
 	// 4. sb gen (将原 genCmd 逻辑移入，注意保留 Flag 处理)
 	var outputPath string
 	var stdout bool
@@ -174,13 +227,9 @@ func newGenCmd(cfg *config.Config) *cobra.Command {
 		Short:   "生成 sing-box 配置文件(可指定目标平台) / Generate sing-box configuration",
 		Aliases: []string{"g"},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			effectiveCfg := cfg
-			if configPathFlag := cmd.Flag("config"); configPathFlag != nil && configPathFlag.Value.String() != "" {
-				loadedCfg, err := config.Load(configPathFlag.Value.String())
-				if err != nil {
-					return fmt.Errorf("failed to load config from %s: %w", configPathFlag.Value.String(), err)
-				}
-				effectiveCfg = loadedCfg
+			effectiveCfg, _, err := loadCmdConfig(cmd, defaultConfigPath)
+			if err != nil {
+				return err
 			}
 
 			// gen 命令必须依赖 subs，提前校验防止 index-out-of-range panic
@@ -214,10 +263,8 @@ func newGenCmd(cfg *config.Config) *cobra.Command {
 			}
 
 			// iOS 配置不写入本机 sing-box 配置路径(看门狗会把 iPhone 配置跑在本机上), 且必须保留远程规则集
+			networkAborted := false
 			if isIOS {
-				if err := guardIOSOutputPath(outputPath); err != nil {
-					return err
-				}
 				if err := guardIOSOutputPath(outputPath); err != nil {
 					return err
 				}
@@ -228,14 +275,16 @@ func newGenCmd(cfg *config.Config) *cobra.Command {
 				// 规则集本地化(可用 --no-localize 关闭，例如需要生成可迁移到其它机器的配置);
 				// iOS 分支不做本地化 —— iPhone 沙盒读不到本地路径, 必须保留远程引用
 				if localized, stats, err := singbox.LocalizeRuleSets(configJSON, singbox.LocalizeOptions{
-					MirrorURL: cfg.GitHub.MirrorURL,
+					MirrorURL: effectiveCfg.GitHub.MirrorURL,
+					CacheTTL:  singbox.DefaultRuleSetCacheTTL,
 				}); err != nil {
 					logger.Warn("⚠️ 规则集本地化已跳过: %v", err)
 				} else {
 					configJSON = localized
+					networkAborted = stats.Aborted
 					if stats.Remote > 0 {
-						logger.Info("规则集缓存: 远程 %d → 已本地化 %d, 回退旧缓存 %d, 内置快照兑底 %d, 保留远程 %d",
-							stats.Remote, stats.Localized, stats.Fallback, stats.Snapshot, stats.Kept)
+						logger.Info("规则集缓存: 远程 %d → 已本地化 %d (复用缓存 %d), 回退旧缓存 %d, 内置快照兑底 %d, 保留远程 %d",
+							stats.Remote, stats.Localized, stats.Cached, stats.Fallback, stats.Snapshot, stats.Kept)
 					}
 				}
 			}
@@ -252,13 +301,14 @@ func newGenCmd(cfg *config.Config) *cobra.Command {
 				return fmt.Errorf("创建目录失败: %w", err)
 			}
 
-			// 备份现有配置
+			// 备份现有配置（最多保留最近 3 份，防止占满软路由 Flash）
 			if _, err := os.Stat(targetPath); err == nil {
 				backupPath := fmt.Sprintf("%s.backup.%d", targetPath, time.Now().Unix())
 				if err := os.Rename(targetPath, backupPath); err != nil {
 					return fmt.Errorf("备份现有配置失败: %w", err)
 				}
 				logger.Info("已备份现有配置到: %s", backupPath)
+				pruneConfigBackups(targetPath, 3)
 			}
 
 			// 写入新配置(iOS 配置含节点凭据且放在 Downloads 等公共目录, 收紧为 0600)
@@ -273,8 +323,8 @@ func newGenCmd(cfg *config.Config) *cobra.Command {
 				_ = os.Chmod(targetPath, perm) // 防止已存在文件保留了旧权限
 			}
 
-			logger.Success("配置已生成: %s", targetPath)
 			if isIOS {
+				logger.Success("配置已生成: %s", targetPath)
 				logger.Info("导入 iPhone: AirDrop/隔空投送该文件 → 文件 App → 分享给 sing-box App; 或在 sing-box App 中新建配置时选择该文件")
 				return nil
 			}
@@ -282,12 +332,15 @@ func newGenCmd(cfg *config.Config) *cobra.Command {
 			// http_client 空 direct 校验 bug(自带下载器必然失败)。仅在本机为目标平台
 			// 时执行(生成给其他机器的配置不应在本机落盘 dashboard)
 			if target == "linux" && runtime.GOOS == "linux" {
-				if err := singbox.ProvisionDashboard(configJSON); err != nil {
+				if networkAborted {
+					logger.Warn("⚠️ 检测到 GitHub/镜像网络不可用，已跳过 Dashboard 在线预下载")
+				} else if err := singbox.ProvisionDashboard(configJSON); err != nil {
 					logger.Warn("⚠️ Dashboard 预下载失败(不影响其他功能, 可重试 gen): %v", err)
 				} else {
 					logger.Info("Dashboard 静态文件已就绪, 重启 sing-box 后访问 :9091/dashboard/")
 				}
 			}
+			logger.Success("配置已生成: %s", targetPath)
 			if copied, err := copyGeneratedConfigToClipboard(targetPath); err != nil {
 				logger.Warn("配置已生成，但复制到粘贴板失败: %v", err)
 			} else if copied {
@@ -339,27 +392,27 @@ func guardIOSOutputPath(outputPath string) error {
 	return nil
 }
 
-func newInstallCmd(cfg *config.Config) *cobra.Command {
+func newInstallCmd(defaultConfigPath string) *cobra.Command {
 	// 5. sb install
 	installCmd := &cobra.Command{
 		Use:   "install",
 		Short: "安装 sing-box / Install sing-box",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sb := singbox.New(cfg)
+			sb := singbox.New(loadCmdConfigOrDefault(cmd, defaultConfigPath))
 			return sb.Install()
 		},
 	}
 	return installCmd
 }
 
-func newUpdateCmd(cfg *config.Config) *cobra.Command {
+func newUpdateCmd(defaultConfigPath string) *cobra.Command {
 	// 6. sb update
 	updateCmd := &cobra.Command{
 		Use:     "update",
 		Aliases: []string{"u"},
 		Short:   "更新 sing-box / Update sing-box",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sb := singbox.New(cfg)
+			sb := singbox.New(loadCmdConfigOrDefault(cmd, defaultConfigPath))
 			return sb.Update()
 		},
 	}
@@ -368,7 +421,7 @@ func newUpdateCmd(cfg *config.Config) *cobra.Command {
 
 // ───────────────────────── sb cache ─────────────────────────
 
-func newCacheCmd(cfg *config.Config) *cobra.Command {
+func newCacheCmd(defaultConfigPath string) *cobra.Command {
 	cacheCmd := &cobra.Command{
 		Use:   "cache",
 		Short: "管理规则集本地缓存 / Manage rule-set local cache",
@@ -378,19 +431,20 @@ singctl 会将配置中的远程规则集(rule_set)预下载到本地并改写�
 使 sing-box 启动不依赖 GitHub。此命令组用于刷新、查看和清理这些缓存。`,
 	}
 	cacheCmd.AddCommand(
-		newCacheUpdateCmd(cfg),
-		newCacheStatusCmd(cfg),
-		newCacheClearCmd(cfg),
+		newCacheUpdateCmd(defaultConfigPath),
+		newCacheStatusCmd(defaultConfigPath),
+		newCacheClearCmd(defaultConfigPath),
 	)
 	return cacheCmd
 }
 
-func newCacheUpdateCmd(cfg *config.Config) *cobra.Command {
+func newCacheUpdateCmd(defaultConfigPath string) *cobra.Command {
 	return &cobra.Command{
 		Use:     "update",
 		Aliases: []string{"u"},
 		Short:   "刷新规则集缓存 / Refresh rule-set cache",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg := loadCmdConfigOrDefault(cmd, defaultConfigPath)
 			opts := singbox.LocalizeOptions{MirrorURL: cfg.GitHub.MirrorURL}
 			changed, stats, err := singbox.RefreshConfigCache(constant.SingBoxConfigFile, opts)
 			if err != nil {
@@ -406,11 +460,12 @@ func newCacheUpdateCmd(cfg *config.Config) *cobra.Command {
 	}
 }
 
-func newCacheStatusCmd(cfg *config.Config) *cobra.Command {
+func newCacheStatusCmd(defaultConfigPath string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
 		Short: "查看规则集缓存状态 / Show rule-set cache status",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg := loadCmdConfigOrDefault(cmd, defaultConfigPath)
 			entries := singbox.CacheStatus(singbox.LocalizeOptions{
 				MirrorURL: cfg.GitHub.MirrorURL,
 			})
@@ -445,11 +500,12 @@ func newCacheStatusCmd(cfg *config.Config) *cobra.Command {
 	}
 }
 
-func newCacheClearCmd(cfg *config.Config) *cobra.Command {
+func newCacheClearCmd(defaultConfigPath string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "clear",
 		Short: "还原配置并清空规则集缓存 / Revert config and clear rule-set cache",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg := loadCmdConfigOrDefault(cmd, defaultConfigPath)
 			opts := singbox.LocalizeOptions{MirrorURL: cfg.GitHub.MirrorURL}
 			reverted, err := singbox.RevertAndClearCache(constant.SingBoxConfigFile, opts)
 			if err != nil {
@@ -466,26 +522,20 @@ func newCacheClearCmd(cfg *config.Config) *cobra.Command {
 }
 
 func NewSingboxCommand(configPath string) *cobra.Command {
-
 	cmd := &cobra.Command{
 		Use:     "singbox",
 		Aliases: []string{"sb"}, // 添加快捷命令 singctl sb
 		Short:   "客户端: singbox客户端的启动和配置(简写singctl sb)",
 	}
 
-	cfg, err := config.Load(configPath)
-	if err != nil {
-		logger.Error("配置文件加载失败")
-	}
-
 	cmd.AddCommand(
-		newStartCmd(cfg),
-		newStopCmd(cfg),
-		newRestartCmd(cfg),
-		newGenCmd(cfg),
-		newInstallCmd(cfg),
-		newUpdateCmd(cfg),
-		newCacheCmd(cfg),
+		newStartCmd(configPath),
+		newStopCmd(configPath),
+		newRestartCmd(configPath),
+		newGenCmd(configPath),
+		newInstallCmd(configPath),
+		newUpdateCmd(configPath),
+		newCacheCmd(configPath),
 	)
 	return cmd
 }

@@ -50,13 +50,11 @@ check_command() {
     fi
 }
 
-# 检查网络连接
+# 检查网络连接（使用国内公共 DNS 快速探测，超时 2 秒；禁 Ping 环境仅告警不阻断启动）
 check_network() {
-    local ping_count=3
-    local test_host="8.8.8.8"
     echo_succ "检查网络连接..."
-    if ! ping -c $ping_count $test_host >/dev/null 2>&1; then
-        error_exit "网络连接失败，请检查网络设置"
+    if ! ping -c 1 -W 2 223.5.5.5 >/dev/null 2>&1 && ! ping -c 1 -W 2 119.29.29.29 >/dev/null 2>&1; then
+        echo_warn "ICMP 探测未响应（可能处于禁 Ping 网络），继续启动流程..."
     fi
 }
 
@@ -65,7 +63,7 @@ check_port() {
     local port=$1
     if netstat -tuln | grep -q ":$port "; then
         echo_succ "端口 $port 已被占用.强制重启"
-        pgrep "sing-box" | xargs kill -9
+        killall -9 sing-box 2>/dev/null || true
     fi
 }
 
@@ -331,13 +329,16 @@ start_singbox() {
     
     # 创建沙盒专用配置，修改路径到可写目录
     if [ -f "/etc/sing-box/config.json" ]; then
-        # 复制配置并修改路径到临时目录
-        sed 's|"/etc/sing-box/cache.db"|"/tmp/sing-box-work/cache.db"|g; s|"/etc/sing-box/ui"|"/tmp/sing-box-work/ui"|g' \
+        # 复制配置并修改路径到临时目录（兼容 ui 与 sing-box 1.14 dashboard 目录）
+        sed 's|"/etc/sing-box/cache.db"|"/tmp/sing-box-work/cache.db"|g; s|"/etc/sing-box/ui"|"/tmp/sing-box-work/ui"|g; s|"/etc/sing-box/dashboard"|"/tmp/sing-box-work/dashboard"|g' \
             /etc/sing-box/config.json > /tmp/sing-box-work/config.json
         
-        # 复制UI文件到临时目录(如果存在)
+        # 复制UI/Dashboard文件到临时目录(如果存在)
         if [ -d "/etc/sing-box/ui" ]; then
             cp -r /etc/sing-box/ui /tmp/sing-box-work/
+        fi
+        if [ -d "/etc/sing-box/dashboard" ]; then
+            cp -r /etc/sing-box/dashboard /tmp/sing-box-work/
         fi
     else
         echo_warn "配置文件不存在，使用原路径"

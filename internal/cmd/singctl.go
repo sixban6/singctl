@@ -33,7 +33,7 @@ func NewUpdateCmd(configPath string, version string) *cobra.Command {
 		Aliases: []string{"u"},
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load(configPath)
+			cfg, resolvedPath, err := loadCmdConfig(cmd, configPath)
 			if err != nil {
 				return err
 			}
@@ -41,7 +41,7 @@ func NewUpdateCmd(configPath string, version string) *cobra.Command {
 			switch args[0] {
 			case "s", "self":
 				updater := updater.New(cfg.GitHub.MirrorURL, "https://github.com/sixban6/singctl")
-				if err := updater.UpdateSelf(configPath, version); err != nil {
+				if err := updater.UpdateSelf(resolvedPath, version); err != nil {
 					return err
 				}
 				return nil
