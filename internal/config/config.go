@@ -657,3 +657,67 @@ func Save(path string, cfg *Config) error {
 	}
 	return os.WriteFile(path, data, 0600)
 }
+
+// UpdateHy2Bandwidth updates hy2.up and hy2.down in the given YAML file while preserving comments and structure.
+func UpdateHy2Bandwidth(configPath string, up, down int) error {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return fmt.Errorf("read config file: %w", err)
+	}
+
+	var rootNode yaml.Node
+	if err := yaml.Unmarshal(data, &rootNode); err != nil {
+		return fmt.Errorf("parse yaml AST: %w", err)
+	}
+
+	if len(rootNode.Content) == 0 {
+		return fmt.Errorf("empty yaml document")
+	}
+
+	docNode := rootNode.Content[0]
+	if docNode.Kind != yaml.MappingNode {
+		return fmt.Errorf("invalid yaml root kind")
+	}
+
+	// find hy2 node
+	var hy2Map *yaml.Node
+	for i := 0; i < len(docNode.Content); i += 2 {
+		if docNode.Content[i].Value == "hy2" {
+			hy2Map = docNode.Content[i+1]
+			break
+		}
+	}
+
+	if hy2Map == nil {
+		keyNode := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "hy2"}
+		hy2Map = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+		docNode.Content = append(docNode.Content, keyNode, hy2Map)
+	}
+
+	setScalar := func(m *yaml.Node, key, val string) {
+		for j := 0; j < len(m.Content); j += 2 {
+			if m.Content[j].Value == key {
+				m.Content[j+1].Value = val
+				m.Content[j+1].Tag = "!!int"
+				return
+			}
+		}
+		k := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}
+		v := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!int", Value: val}
+		m.Content = append(m.Content, k, v)
+	}
+
+	setScalar(hy2Map, "up", strconv.Itoa(up))
+	setScalar(hy2Map, "down", strconv.Itoa(down))
+
+	newData, err := yaml.Marshal(&rootNode)
+	if err != nil {
+		return fmt.Errorf("marshal updated AST: %w", err)
+	}
+
+	tempPath := configPath + ".tmp"
+	if err := os.WriteFile(tempPath, newData, 0600); err != nil {
+		return fmt.Errorf("write tmp config: %w", err)
+	}
+	return os.Rename(tempPath, configPath)
+}

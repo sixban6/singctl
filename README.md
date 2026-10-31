@@ -9,6 +9,7 @@ SingCtl是多功能网络工具。可以用管理singbox客户端和服务端，
 ## Features
 - 🚀 **跨平台支持**: 一条命令跨平台安全的使用singbox
 - 📡 **多协议支持**: VLESS Reality, Hysteria 2, Trojan, Shadowsocks
+- 🌐 **网络链路画像与智能选型**: 多轮 TCP/ICMP 丢包抖动诊断、跨境三网骨干线路识别（CN2 GIA/163/9929/4837/CMIN2/CMI）、VPS 三网回程分析，并根据本地运营商与晚高峰拥塞度给出 VPS 选型建议与 `singctl.yaml` 的 Hy2/VLESS 协议自动调优（`singctl net diag/return/advice`）
 - 🛡️ **GFW 探测仿真**: 模拟防火墙主动探测 (Active Probing) 手段，从端口对称性、HTTP 回落、TLS/Reality 降级、高熵挂起、QUIC 协商等 5 大维度对服务器进行 0~100 分量化评分与加固指导（`singctl gfw <ip>`）
 - 💻 **mTLS 隐蔽终端**: 基于 Caddy 443 端口与 mTLS 双向 TLS 认证的运维通道，支持浏览器 Web Shell (GoTTY + Tmux) 与本地终端 (WezTerm) 原生 SSH-over-WSS 穿透，无客户端证书直接返回 404（`singctl term install/cert`）
 - 🔌 **规则集本地缓存**: 预下载远程规则集并改写为本地引用，sing-box 启动不依赖 GitHub；内置全量规则集快照，极端情况（无网+无缓存）也能启动（`sb cache update/status/clear`）
@@ -67,6 +68,7 @@ SingCtl 按功能模块分为以下几个部分，点击链接查看详细说明
 | **守护进程** | `singctl dm` | 管理后台守护进程，查看日志与监控状态 | [查看文档](docs/daemon.md) |
 | **防火墙加固** | `singctl fw` | Linux/OpenWrt 专用的防火墙安全规则配置 | [查看文档](docs/firewall.md) |
 | **Web 管理界面** | `singctl web` | 浏览器图形化管理 singctl 全部功能(简写 `singctl w`) | [查看文档](docs/webui.md) |
+| **网络画像与选型** | `singctl net` | 丢包抖动测试、三网骨干线路识别（CN2 GIA/163/9929/CMIN2等）、VPS回程与选型调优 | [查看文档](docs/net.md) |
 | **实用工具** | `singctl ut` | 宽带测速、自更新、系统信息查看 | [查看文档](docs/utils.md) |
 
 ## 界面预览
