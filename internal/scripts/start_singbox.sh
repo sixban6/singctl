@@ -531,13 +531,33 @@ check_page_connect() {
     fi
 }
 
+# 当 sing-box 配置启用 ipv4_only 策略时，同步开启 OpenWrt dnsmasq 的 filter_aaaa，
+# 防止 sing-box 停机或切换间隙 dnsmasq 缓存并下发 IPv6 (AAAA) 记录导致连接超时或泄漏。
+sync_dnsmasq_ipv4_only() {
+    if [ -f "$CONFIG_FILE" ] && grep -q '"ipv4_only"' "$CONFIG_FILE" 2>/dev/null; then
+        if command -v uci >/dev/null 2>&1; then
+            local current_filter
+            current_filter=$(uci -q get dhcp.@dnsmasq[0].filter_aaaa 2>/dev/null || echo "")
+            if [ "$current_filter" != "1" ]; then
+                echo_succ "检测到 ipv4_only 策略，同步开启 dnsmasq AAAA (IPv6) 记录过滤..."
+                uci set dhcp.@dnsmasq[0].filter_aaaa='1' 2>/dev/null || true
+                uci commit dhcp 2>/dev/null || true
+                if [ -x /etc/init.d/dnsmasq ]; then
+                    /etc/init.d/dnsmasq reload >/dev/null 2>&1 || /etc/init.d/dnsmasq restart >/dev/null 2>&1 || true
+                fi
+            fi
+        fi
+    fi
+    # 刷新 dnsmasq 缓存，清除启动前可能残留的旧记录
+    killall -HUP dnsmasq 2>/dev/null || true
+}
+
 main() {
   init_env
   setup_firewall
   setup_route
   start_singbox
-  # 刷新 dnsmasq 缓存，清除启动前可能残留的 AAAA (IPv6) 记录，防止 TProxy 下 IPv6 连接失败
-  killall -HUP dnsmasq 2>/dev/null || true
+  sync_dnsmasq_ipv4_only
 }
 
 main
