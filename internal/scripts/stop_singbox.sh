@@ -64,6 +64,11 @@ else
     check_command "iptables"
 fi
 
+# 若存在 procd 托管的 /etc/init.d/sing-box，先通知 procd 停止，防止其自动拉起
+if [ -x /etc/init.d/sing-box ]; then
+    /etc/init.d/sing-box stop >/dev/null 2>&1 || true
+fi
+
 # 停止 sing-box 服务（优先处理沙盒实例）
 if ps | grep -v grep | grep "ujail.*sing-box" > /dev/null; then
     echo_succ "$(timestamp) 检测到沙盒运行的 sing-box，正在停止..."

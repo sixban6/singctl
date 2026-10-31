@@ -9,10 +9,13 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"singctl/internal/config"
+	"singctl/internal/constant"
 	"singctl/internal/logger"
 	"singctl/internal/singbox"
 )
@@ -24,15 +27,21 @@ const envDaemonized = "SINGCTL_DAEMONIZED"
 // readyFd 子进程向父进程回传就绪信号的管道 fd
 const readyFd = 3
 
+// ruleSetRetryCooldown 后台规则集静默更新失败后的冷却间隔，防止网络不通时频繁重试
+const ruleSetRetryCooldown = 30 * time.Minute
+
 // Daemon 守护进程
 type Daemon struct {
-	config  *config.Config
-	monitor *Monitor
-	limiter *RestartLimiter
-	singbox *singbox.SingBox
-	ctx     context.Context
-	cancel  context.CancelFunc
-	logFile *os.File
+	config              *config.Config
+	monitor             *Monitor
+	limiter             *RestartLimiter
+	singbox             *singbox.SingBox
+	ctx                 context.Context
+	cancel              context.CancelFunc
+	logFile             *os.File
+	ruleSetRefreshing   atomic.Bool
+	ruleSetMu           sync.Mutex
+	lastRuleSetFailedAt time.Time
 }
 
 // NewDaemon 创建守护进程
@@ -245,9 +254,12 @@ func (d *Daemon) monitorLoop() error {
 		interval = 3 * time.Minute
 	}
 	watchdogTicker := time.NewTicker(interval)
+	// 启动 30 秒后首次检查规则集是否需要后台静默更新（此时 sing-box 代理已稳定就绪）
+	initRefreshTimer := time.NewTimer(30 * time.Second)
 
 	defer func() {
 		watchdogTicker.Stop()
+		initRefreshTimer.Stop()
 		logger.Info("Daemon stopped")
 		RemovePidFile()
 		if d.logFile != nil {
@@ -262,10 +274,72 @@ func (d *Daemon) monitorLoop() error {
 		case <-d.ctx.Done():
 			return nil
 
+		case <-initRefreshTimer.C:
+			if d.monitor.CheckHealth().Healthy {
+				d.maybeRefreshRuleSetsAsync()
+			}
+
 		case <-watchdogTicker.C:
 			d.runWatchdogCheck()
 		}
 	}
+}
+
+// maybeRefreshRuleSetsAsync 在 sing-box 正常运行且健康的前提下，
+// 后台静默检查并更新已过期（>24h）或仅由内置快照初装的规则集缓存。
+func (d *Daemon) maybeRefreshRuleSetsAsync() {
+	if d.ruleSetRefreshing.Load() {
+		return
+	}
+
+	d.ruleSetMu.Lock()
+	if !d.lastRuleSetFailedAt.IsZero() && time.Since(d.lastRuleSetFailedAt) < ruleSetRetryCooldown {
+		d.ruleSetMu.Unlock()
+		return
+	}
+	d.ruleSetMu.Unlock()
+
+	mirrorURL := ""
+	if d.config != nil {
+		mirrorURL = d.config.GitHub.MirrorURL
+	}
+	opts := singbox.LocalizeOptions{
+		MirrorURL: mirrorURL,
+		CacheTTL:  singbox.DefaultRuleSetCacheTTL,
+		Workers:   2, // 后台低并发静默更新，避免抢占正常带宽
+		Silent:    true,
+	}
+	if !singbox.NeedsCacheRefresh(constant.SingBoxConfigFile, opts) {
+		return
+	}
+
+	if !d.ruleSetRefreshing.CompareAndSwap(false, true) {
+		return
+	}
+
+	go func() {
+		defer d.ruleSetRefreshing.Store(false)
+
+		_, stats, err := singbox.RefreshConfigCache(constant.SingBoxConfigFile, opts)
+		if err != nil || stats.Aborted {
+			d.ruleSetMu.Lock()
+			d.lastRuleSetFailedAt = time.Now()
+			d.ruleSetMu.Unlock()
+			if err != nil {
+				logger.Warn("[RuleSet] Background silent refresh failed: %v", err)
+			}
+			return
+		}
+
+		d.ruleSetMu.Lock()
+		d.lastRuleSetFailedAt = time.Time{}
+		d.ruleSetMu.Unlock()
+
+		if stats.Refreshed > 0 || stats.Localized > 0 {
+			logger.Info("[RuleSet] Background silent refresh completed: refreshed=%d, localized=%d, cached=%d",
+				stats.Refreshed, stats.Localized, stats.Cached)
+		}
+	}()
 }
 
 // runWatchdogCheck 健康检查：DNS + 进程，不健康则确认后 stop → start
@@ -273,6 +347,8 @@ func (d *Daemon) runWatchdogCheck() {
 	// 第一轮检测
 	result1 := d.monitor.CheckHealth()
 	if result1.Healthy {
+		// sing-box 健康运行时，顺带按需触发规则集后台静默更新
+		d.maybeRefreshRuleSetsAsync()
 		return // 健康，一切正常
 	}
 

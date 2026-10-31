@@ -2,9 +2,11 @@ package singbox
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -36,7 +38,7 @@ import (
 // ─────────────────────────────────────────────────────────────────────────────
 
 const (
-	defaultFetchTimeout    = 10 * time.Second
+	defaultFetchTimeout    = 8 * time.Second
 	defaultWorkers         = 6
 	maxRuleSetSize         = 64 << 20 // 64MB 防御性上限
 	DefaultRuleSetCacheTTL = 24 * time.Hour
@@ -46,17 +48,21 @@ const (
 	legacySRSMagic   = "RULE"
 	srsMagic         = "SRS"
 	manifestFileName = "manifest.json"
-	// 连续失败达到该阈值且无任何成功时熔断（判定 GitHub 与镜像均不可用）
+	// 连续失败达到该阈值时熔断（判定 GitHub 与镜像均不可用）
 	breakerThreshold = 4
+	// 首选候选（如镜像源）连续失败达到该阈值时自动降级为直连优先
+	primaryFailThreshold = 2
 )
 
 // LocalizeOptions 本地化选项
 type LocalizeOptions struct {
-	MirrorURL string        // GitHub 镜像前缀，如 https://gh-proxy.com
-	CacheDir  string        // 缓存目录
-	Client    *http.Client  // HTTP 客户端（测试可注入）
-	Workers   int           // 并发下载数
-	CacheTTL  time.Duration // 本地缓存有效期（>0 时命中未过期缓存直接跳过网络下载）
+	MirrorURL    string        // GitHub 镜像前缀，如 https://gh-proxy.com
+	CacheDir     string        // 缓存目录
+	Client       *http.Client  // HTTP 客户端（测试可注入）
+	Workers      int           // 并发下载数
+	CacheTTL     time.Duration // 本地缓存有效期（>0 时命中未过期缓存直接跳过网络下载）
+	OfflineFirst bool          // 离线优先（sb gen / sb start 使用）：直接复用本地缓存或解压内置快照，不阻塞等待网络下载
+	Silent       bool          // 静默模式（后台守护进程自动更新使用）：不向终端输出常规进度与单条警告
 }
 
 func (o LocalizeOptions) withDefaults() LocalizeOptions {
@@ -64,7 +70,16 @@ func (o LocalizeOptions) withDefaults() LocalizeOptions {
 		o.CacheDir = RuleSetCacheDir()
 	}
 	if o.Client == nil {
-		o.Client = &http.Client{Timeout: defaultFetchTimeout}
+		o.Client = &http.Client{
+			Timeout: defaultFetchTimeout,
+			Transport: &http.Transport{
+				DialContext: (&net.Dialer{
+					Timeout: 4 * time.Second,
+				}).DialContext,
+				TLSHandshakeTimeout:   4 * time.Second,
+				ResponseHeaderTimeout: 5 * time.Second,
+			},
+		}
 	}
 	if o.Workers <= 0 {
 		o.Workers = defaultWorkers
@@ -152,16 +167,8 @@ func LocalizeRuleSets(jsonStr string, opts LocalizeOptions) (string, RuleSetStat
 	}
 
 	manifest := loadManifest(opts.CacheDir)
-
-	// 2. 并行下载
-	results, aborted := fetchRuleSets(tasks, opts, manifest)
-	stats.Aborted = aborted
-
-	// 3. 依据结果改写条目（在线下载 → 本地旧缓存 → 内置快照 三级兑底）
-	snap := rssnapshot.Load()
 	for _, t := range tasks {
-		path := cacheFilePath(opts.CacheDir, t.tag, t.format)
-		// 无论成败都记录 manifest，供 sb cache update/clear 使用
+		// 无论成败都预先记录 manifest 元信息，供下载期间增量落盘及 sb cache update/clear 使用
 		meta := manifest[t.tag]
 		meta.URL = t.url
 		meta.Format = t.format
@@ -171,6 +178,69 @@ func LocalizeRuleSets(jsonStr string, opts LocalizeOptions) (string, RuleSetStat
 			meta.Original = copyRuleSetEntry(t.entry)
 		}
 		manifest[t.tag] = meta
+	}
+
+	snap := rssnapshot.Load()
+
+	// OfflineFirst 模式（用于 sb gen / sb start）：
+	// 优先直接复用本地已有 .srs 缓存或解压程序内置快照，完全不发起网络请求，做到毫秒级生成；
+	// 仅当存在既无本地缓存、又不在内置快照中的自定义远程规则集时，才对该条目发起网络拉取。
+	if opts.OfflineFirst {
+		var netTasks []ruleSetTask
+		for _, t := range tasks {
+			path := cacheFilePath(opts.CacheDir, t.tag, t.format)
+			if cachedFileValid(path, t.format) {
+				stats.Localized++
+				stats.Cached++
+				localizeEntry(t.entry, path)
+				continue
+			}
+			if snapTag, _, snapFormat, ok := snap.Lookup(t.tag, t.url); ok && snapFormat == t.format {
+				if data, err := snap.Extract(snapTag); err == nil &&
+					validateRuleSet(data, snapFormat) == nil &&
+					atomicWriteFile(path, data, 0644) == nil {
+					stats.Snapshot++
+					localizeEntry(t.entry, path)
+					continue
+				}
+			}
+			netTasks = append(netTasks, t)
+		}
+
+		if len(netTasks) > 0 {
+			results, aborted := fetchRuleSets(netTasks, opts, manifest)
+			stats.Aborted = aborted
+			for _, t := range netTasks {
+				path := cacheFilePath(opts.CacheDir, t.tag, t.format)
+				if results[t.idx].ok {
+					stats.Localized++
+					localizeEntry(t.entry, path)
+					continue
+				}
+				stats.Kept++
+				if !opts.Silent && !results[t.idx].aborted {
+					log.Warn("⚠️ 自定义规则集 %q 下载失败且无内置快照(%v)，保留远程引用", t.tag, results[t.idx].err)
+				}
+			}
+		}
+
+		if err := saveManifest(opts.CacheDir, manifest); err != nil && !opts.Silent {
+			log.Warn("ruleset manifest save failed: %v", err)
+		}
+		out, err := json.Marshal(cfg)
+		if err != nil {
+			return jsonStr, stats, fmt.Errorf("ruleset localize: re-marshal failed: %w", err)
+		}
+		return string(out), stats, nil
+	}
+
+	// 2. 并行下载
+	results, aborted := fetchRuleSets(tasks, opts, manifest)
+	stats.Aborted = aborted
+
+	// 3. 依据结果改写条目（在线下载 → 本地旧缓存 → 内置快照 三级兑底）
+	for _, t := range tasks {
+		path := cacheFilePath(opts.CacheDir, t.tag, t.format)
 
 		if results[t.idx].ok {
 			stats.Localized++
@@ -184,7 +254,9 @@ func LocalizeRuleSets(jsonStr string, opts LocalizeOptions) (string, RuleSetStat
 		if cachedFileValid(path, t.format) {
 			stats.Fallback++
 			localizeEntry(t.entry, path)
-			log.Warn("⚠️ 规则集 %q 下载失败(%v)，已回退本地缓存: %s", t.tag, results[t.idx].err, path)
+			if !opts.Silent && !results[t.idx].aborted {
+				log.Warn("⚠️ 规则集 %q 下载失败(%v)，已回退本地缓存: %s", t.tag, results[t.idx].err, path)
+			}
 			continue
 		}
 		// 无本地缓存 → 程序内置快照兑底（格式必须一致，避免错配）
@@ -194,15 +266,19 @@ func LocalizeRuleSets(jsonStr string, opts LocalizeOptions) (string, RuleSetStat
 				atomicWriteFile(path, data, 0644) == nil {
 				stats.Snapshot++
 				localizeEntry(t.entry, path)
-				log.Warn("📦 规则集 %q 下载失败且无缓存，已使用程序内置快照兑底: %s", t.tag, path)
+				if !opts.Silent && !results[t.idx].aborted {
+					log.Warn("📦 规则集 %q 下载失败且无缓存，已使用程序内置快照兑底: %s", t.tag, path)
+				}
 				continue
 			}
 		}
 		stats.Kept++
-		log.Warn("⚠️ 规则集 %q 下载失败且无任何兑底(%v)，保留远程引用", t.tag, results[t.idx].err)
+		if !opts.Silent && !results[t.idx].aborted {
+			log.Warn("⚠️ 规则集 %q 下载失败且无任何兑底(%v)，保留远程引用", t.tag, results[t.idx].err)
+		}
 	}
 
-	if err := saveManifest(opts.CacheDir, manifest); err != nil {
+	if err := saveManifest(opts.CacheDir, manifest); err != nil && !opts.Silent {
 		log.Warn("ruleset manifest save failed: %v", err)
 	}
 
@@ -278,17 +354,82 @@ func RefreshConfigCache(configPath string, opts LocalizeOptions) (bool, RuleSetS
 			if err := os.MkdirAll(o.CacheDir, 0755); err != nil {
 				return out, stats, nil
 			}
-			results, _ := fetchRuleSets(tasks, o, manifest)
+			results, aborted := fetchRuleSets(tasks, o, manifest)
+			stats.Aborted = stats.Aborted || aborted
 			for _, t := range tasks {
 				if results[t.idx].ok {
-					stats.Refreshed++
-				} else {
+					if results[t.idx].cached {
+						stats.Cached++
+					} else {
+						stats.Refreshed++
+					}
+				} else if !o.Silent && !results[t.idx].aborted {
 					log.Warn("⚠️ 规则集 %q 刷新失败(%v)，继续使用现有缓存", t.tag, results[t.idx].err)
 				}
 			}
+			_ = saveManifest(o.CacheDir, manifest)
 		}
 		return out, stats, nil
 	})
+}
+
+// NeedsCacheRefresh 检查配置文件中的规则集是否存在需要联网更新的条目
+// （例如仍为 remote、本地文件缺失、仅由内置快照初装尚未联网更新、或已超过 CacheTTL）。
+func NeedsCacheRefresh(configPath string, opts LocalizeOptions) bool {
+	opts = opts.withDefaults()
+	ttl := opts.CacheTTL
+	if ttl <= 0 {
+		ttl = DefaultRuleSetCacheTTL
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return false
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return false
+	}
+	route, _ := cfg["route"].(map[string]any)
+	if route == nil {
+		return false
+	}
+	arr, _ := route["rule_set"].([]any)
+	if len(arr) == 0 {
+		return false
+	}
+
+	manifest := loadManifest(opts.CacheDir)
+	for _, raw := range arr {
+		entry, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		typ, _ := entry["type"].(string)
+		tag, _ := entry["tag"].(string)
+		if tag == "" {
+			continue
+		}
+		if typ == "remote" {
+			return true
+		}
+		if typ != "local" {
+			continue
+		}
+		meta, hasMeta := manifest[tag]
+		if !hasMeta || meta.URL == "" {
+			continue
+		}
+		format, _ := entry["format"].(string)
+		if format == "" {
+			format = "binary"
+		}
+		path := cacheFilePath(opts.CacheDir, tag, format)
+		if !isCacheFresh(path, format, manifest, tag, ttl) {
+			return true
+		}
+	}
+	return false
 }
 
 // ruleSetTypes 解析配置中各规则集条目的 tag → type 映射。
@@ -435,9 +576,10 @@ func RevertAndClearCache(configPath string, opts LocalizeOptions) (int, error) {
 // ───────────────────────────── 内部实现 ─────────────────────────────
 
 type fetchOutcome struct {
-	ok     bool
-	cached bool
-	err    error
+	ok      bool
+	cached  bool
+	aborted bool
+	err     error
 }
 
 // ruleSetTask 单个规则集下载任务；entry 仅在需要改写配置的场景使用（刷新场景可为 nil）。
@@ -453,16 +595,73 @@ func (t ruleSetTask) fields() (int, string, string, string) {
 	return t.idx, t.tag, t.url, t.format
 }
 
-// fetchRuleSets 并行下载任务，带网络熔断（连续失败且无任何成功时跳过剩余下载）。
+// isCacheFresh 判断本地规则集缓存是否在有效期内且内容合法。
+func isCacheFresh(path, format string, manifest ruleSetManifest, tag string, ttl time.Duration) bool {
+	if ttl <= 0 || !cachedFileValid(path, format) {
+		return false
+	}
+	meta, hasMeta := manifest[tag]
+	if !hasMeta || meta.UpdatedAt == "" {
+		return false
+	}
+	updatedAt, err := time.Parse(time.RFC3339, meta.UpdatedAt)
+	if err != nil {
+		return false
+	}
+	if time.Since(updatedAt) < ttl {
+		return true
+	}
+	// 兜底：若上次运行被中断（如 Ctrl+C），文件已落盘但 manifest 尚未覆写，
+	// 此时文件修改时间明显晚于 manifest 记录时间且仍在 TTL 内，可视为有效新缓存
+	if fi, err := os.Stat(path); err == nil {
+		if fi.ModTime().After(updatedAt.Add(time.Minute)) && time.Since(fi.ModTime()) < ttl {
+			meta.UpdatedAt = fi.ModTime().UTC().Format(time.RFC3339)
+			manifest[tag] = meta
+			return true
+		}
+	}
+	return false
+}
+
+// fetchRuleSets 并行下载任务，带以下加速与容错机制：
+//  1. 命中未过期本地缓存（CacheTTL）时直接复用，不发起网络请求；
+//  2. 首选候选（如镜像源）连续失败达到阈值时，立即取消在途镜像请求并切换为直连优先；
+//  3. 整体连续失败达到阈值时触发熔断，立即取消所有在途请求并回退本地缓存。
 func fetchRuleSets(tasks []ruleSetTask, opts LocalizeOptions, manifest ruleSetManifest) (map[int]fetchOutcome, bool) {
 	results := make(map[int]fetchOutcome, len(tasks))
 
+	var pending []ruleSetTask
+	for _, t := range tasks {
+		idx, tag, _, format := t.fields()
+		path := cacheFilePath(opts.CacheDir, tag, format)
+		if isCacheFresh(path, format, manifest, tag, opts.CacheTTL) {
+			results[idx] = fetchOutcome{ok: true, cached: true}
+			continue
+		}
+		pending = append(pending, t)
+	}
+	if len(pending) == 0 {
+		return results, false
+	}
+
+	if !opts.Silent {
+		log.Info("正在同步规则集缓存 (需更新 %d/%d 个)...", len(pending), len(tasks))
+	}
+
+	abortCtx, cancelAbort := context.WithCancel(context.Background())
+	defer cancelAbort()
+
+	primaryCtx, cancelPrimary := context.WithCancel(abortCtx)
+	defer cancelPrimary()
+
 	var (
-		mu         sync.Mutex
-		okCount    int
-		failStreak int
-		aborted    bool
-		manMu      sync.Mutex
+		mu                sync.Mutex
+		failStreak        int
+		aborted           bool
+		primaryFailStreak int
+		primaryBroken     bool
+		fallbackWorking   bool
+		manMu             sync.Mutex
 	)
 
 	shouldAbort := func() bool {
@@ -474,48 +673,63 @@ func fetchRuleSets(tasks []ruleSetTask, opts LocalizeOptions, manifest ruleSetMa
 		mu.Lock()
 		defer mu.Unlock()
 		if ok {
-			okCount++
 			failStreak = 0
 			return
 		}
 		failStreak++
-		if okCount == 0 && failStreak >= breakerThreshold {
+		if failStreak >= breakerThreshold {
 			if !aborted {
 				aborted = true
-				log.Warn("⚠️ 网络不可用（GitHub/镜像均无法访问），跳过剩余规则集下载，将回退本地缓存")
+				cancelAbort()
+				if !opts.Silent {
+					log.Warn("⚠️ 网络不可用（GitHub/镜像均无法访问），跳过剩余规则集下载，将回退本地缓存")
+				}
 			}
 		}
 	}
 
+	getCandidateState := func() (broken, fbWorking bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		return primaryBroken, fallbackWorking
+	}
+	notePrimaryResult := func(ok bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		if ok {
+			primaryFailStreak = 0
+			return
+		}
+		if aborted {
+			return
+		}
+		primaryFailStreak++
+		if !primaryBroken && primaryFailStreak >= primaryFailThreshold {
+			primaryBroken = true
+			cancelPrimary()
+			if !opts.Silent {
+				log.Warn("⚠️ 镜像源响应异常，已自动切换为直连优先下载")
+			}
+		}
+	}
+	noteFallbackSuccess := func() {
+		mu.Lock()
+		fallbackWorking = true
+		mu.Unlock()
+	}
+
 	sem := make(chan struct{}, opts.Workers)
 	var wg sync.WaitGroup
-	for _, t := range tasks {
+	for _, t := range pending {
 		wg.Add(1)
 		go func(t ruleSetTask) {
 			defer wg.Done()
 			idx, tag, url, format := t.fields()
 			path := cacheFilePath(opts.CacheDir, tag, format)
 
-			// 若设置了 CacheTTL 且本地已有未过期的合法缓存，直接复用免网络下载
-			if opts.CacheTTL > 0 {
-				manMu.Lock()
-				meta, hasMeta := manifest[tag]
-				manMu.Unlock()
-				if hasMeta && meta.UpdatedAt != "" {
-					if updatedAt, err := time.Parse(time.RFC3339, meta.UpdatedAt); err == nil && time.Since(updatedAt) < opts.CacheTTL {
-						if cachedFileValid(path, format) {
-							mu.Lock()
-							results[idx] = fetchOutcome{ok: true, cached: true}
-							mu.Unlock()
-							return
-						}
-					}
-				}
-			}
-
 			if shouldAbort() {
 				mu.Lock()
-				results[idx] = fetchOutcome{ok: false, err: fmt.Errorf("network aborted")}
+				results[idx] = fetchOutcome{ok: false, aborted: true, err: fmt.Errorf("network aborted")}
 				mu.Unlock()
 				return
 			}
@@ -525,16 +739,32 @@ func fetchRuleSets(tasks []ruleSetTask, opts LocalizeOptions, manifest ruleSetMa
 			// 获取信号量后再次检查熔断状态，防止排队等待期间已触发熔断但协程仍继续发起超时请求
 			if shouldAbort() {
 				mu.Lock()
-				results[idx] = fetchOutcome{ok: false, err: fmt.Errorf("network aborted")}
+				results[idx] = fetchOutcome{ok: false, aborted: true, err: fmt.Errorf("network aborted")}
 				mu.Unlock()
 				return
 			}
 
-			data, err := downloadRuleSet(url, format, opts, shouldAbort)
+			data, err := downloadRuleSet(
+				abortCtx,
+				primaryCtx,
+				url,
+				format,
+				opts,
+				shouldAbort,
+				getCandidateState,
+				notePrimaryResult,
+				noteFallbackSuccess,
+			)
+			if shouldAbort() && err != nil {
+				mu.Lock()
+				results[idx] = fetchOutcome{ok: false, aborted: true, err: err}
+				mu.Unlock()
+				return
+			}
 			noteResult(err == nil)
 			if err != nil {
 				mu.Lock()
-				results[idx] = fetchOutcome{ok: false, err: err}
+				results[idx] = fetchOutcome{ok: false, aborted: false, err: err}
 				mu.Unlock()
 				return
 			}
@@ -548,6 +778,7 @@ func fetchRuleSets(tasks []ruleSetTask, opts LocalizeOptions, manifest ruleSetMa
 			meta := manifest[tag]
 			meta.UpdatedAt = time.Now().Format(time.RFC3339)
 			manifest[tag] = meta
+			_ = saveManifest(opts.CacheDir, manifest)
 			manMu.Unlock()
 			mu.Lock()
 			results[idx] = fetchOutcome{ok: true}
@@ -560,21 +791,64 @@ func fetchRuleSets(tasks []ruleSetTask, opts LocalizeOptions, manifest ruleSetMa
 	mu.Lock()
 	wasAborted := aborted
 	mu.Unlock()
-	if wasAborted {
+	if wasAborted && !opts.Silent {
 		log.Warn("⚠️ 规则集下载被熔断跳过，重启将继续使用本地缓存（如存在）")
 	}
 	return results, wasAborted
 }
 
-// downloadRuleSet 依次尝试原始 URL / 直连 / 镜像，校验内容合法性。
-func downloadRuleSet(rawURL, format string, opts LocalizeOptions, shouldAbort func() bool) ([]byte, error) {
+// downloadRuleSet 依次尝试候选 URL（支持镜像源故障自动降级与在途取消），并校验内容合法性。
+func downloadRuleSet(
+	abortCtx context.Context,
+	primaryCtx context.Context,
+	rawURL, format string,
+	opts LocalizeOptions,
+	shouldAbort func() bool,
+	getCandidateState func() (broken, fbWorking bool),
+	notePrimaryResult func(ok bool),
+	noteFallbackSuccess func(),
+) ([]byte, error) {
 	client := opts.Client
+	cands := fetchCandidates(rawURL, opts.MirrorURL)
+	hasFallback := len(cands) > 1
+
+	type candItem struct {
+		url       string
+		isPrimary bool
+	}
+	items := make([]candItem, 0, len(cands))
+	if hasFallback && getCandidateState != nil {
+		broken, fbWorking := getCandidateState()
+		if broken {
+			// 首选源已判定异常：优先尝试备用（直连）源；若备用源已验证可用则直接跳过异常首选源
+			for _, u := range cands[1:] {
+				items = append(items, candItem{url: u, isPrimary: false})
+			}
+			if !fbWorking {
+				items = append(items, candItem{url: cands[0], isPrimary: true})
+			}
+		}
+	}
+	if len(items) == 0 {
+		for i, u := range cands {
+			items = append(items, candItem{url: u, isPrimary: hasFallback && i == 0})
+		}
+	}
+
 	var lastErr error
-	for _, cand := range fetchCandidates(rawURL, opts.MirrorURL) {
+	for _, item := range items {
 		if shouldAbort != nil && shouldAbort() {
 			return nil, fmt.Errorf("network aborted")
 		}
-		req, err := http.NewRequest(http.MethodGet, cand, nil)
+		reqCtx := abortCtx
+		if item.isPrimary && primaryCtx != nil {
+			reqCtx = primaryCtx
+		}
+		if reqCtx == nil {
+			reqCtx = context.Background()
+		}
+
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, item.url, nil)
 		if err != nil {
 			lastErr = err
 			continue
@@ -582,22 +856,45 @@ func downloadRuleSet(rawURL, format string, opts LocalizeOptions, shouldAbort fu
 		req.Header.Set("User-Agent", "singctl-rule-set-cache")
 		resp, err := client.Do(req)
 		if err != nil {
-			lastErr = fmt.Errorf("%s: %w", redactURL(cand), err)
+			if shouldAbort != nil && shouldAbort() {
+				return nil, fmt.Errorf("network aborted")
+			}
+			if item.isPrimary && notePrimaryResult != nil {
+				notePrimaryResult(false)
+			}
+			lastErr = fmt.Errorf("%s: %w", redactURL(item.url), err)
 			continue
 		}
 		body, err := io.ReadAll(io.LimitReader(resp.Body, maxRuleSetSize+1))
 		resp.Body.Close()
 		if err != nil {
-			lastErr = fmt.Errorf("%s: read body: %w", redactURL(cand), err)
+			if shouldAbort != nil && shouldAbort() {
+				return nil, fmt.Errorf("network aborted")
+			}
+			if item.isPrimary && notePrimaryResult != nil {
+				notePrimaryResult(false)
+			}
+			lastErr = fmt.Errorf("%s: read body: %w", redactURL(item.url), err)
 			continue
 		}
 		if resp.StatusCode != http.StatusOK {
-			lastErr = fmt.Errorf("%s: HTTP %d", redactURL(cand), resp.StatusCode)
+			if item.isPrimary && notePrimaryResult != nil {
+				notePrimaryResult(false)
+			}
+			lastErr = fmt.Errorf("%s: HTTP %d", redactURL(item.url), resp.StatusCode)
 			continue
 		}
 		if err := validateRuleSet(body, format); err != nil {
-			lastErr = fmt.Errorf("%s: %w", redactURL(cand), err)
+			if item.isPrimary && notePrimaryResult != nil {
+				notePrimaryResult(false)
+			}
+			lastErr = fmt.Errorf("%s: %w", redactURL(item.url), err)
 			continue
+		}
+		if item.isPrimary && notePrimaryResult != nil {
+			notePrimaryResult(true)
+		} else if hasFallback && !item.isPrimary && noteFallbackSuccess != nil {
+			noteFallbackSuccess()
 		}
 		return body, nil
 	}

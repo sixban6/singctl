@@ -89,12 +89,13 @@ func runStartSingbox(cfg *config.Config, configPath string) error {
 	return nil
 }
 
-// migrateRuleSetCache 将现有配置中的 remote 规则集迁移为本地缓存引用。
+// migrateRuleSetCache 将现有配置中的 remote 规则集迁移为本地缓存引用（离线优先，不阻塞启动）。
 // 仅在迁移成功时改写配置文件；失败不影响启动流程。
 func migrateRuleSetCache(cfg *config.Config) {
 	opts := singbox.LocalizeOptions{
-		MirrorURL: cfg.GitHub.MirrorURL,
-		CacheTTL:  singbox.DefaultRuleSetCacheTTL,
+		MirrorURL:    cfg.GitHub.MirrorURL,
+		CacheTTL:     singbox.DefaultRuleSetCacheTTL,
+		OfflineFirst: true,
 	}
 	changed, stats, err := singbox.LocalizeConfigFile(constant.SingBoxConfigFile, opts)
 	if err != nil {
@@ -102,8 +103,8 @@ func migrateRuleSetCache(cfg *config.Config) {
 		return
 	}
 	if changed {
-		logger.Success("已将 %d 个规则集切换为本地缓存（复用缓存 %d 个，回退旧缓存 %d 个），sing-box 启动不再依赖 GitHub",
-			stats.Localized, stats.Cached, stats.Fallback)
+		logger.Success("已将 %d 个规则集切换为本地缓存（本地缓存 %d 个，内置快照 %d 个），sing-box 启动不再依赖 GitHub",
+			stats.Localized+stats.Snapshot, stats.Cached, stats.Snapshot)
 	} else if stats.Remote > 0 {
 		logger.Info("规则集缓存: %d 个远程条目保留原样（下载失败且无缓存）", stats.Kept)
 	}
@@ -272,19 +273,20 @@ func newGenCmd(defaultConfigPath string) *cobra.Command {
 					outputPath = defaultIOSOutputPath()
 				}
 			} else if !noLocalize {
-				// 规则集本地化(可用 --no-localize 关闭，例如需要生成可迁移到其它机器的配置);
-				// iOS 分支不做本地化 —— iPhone 沙盒读不到本地路径, 必须保留远程引用
+				// 规则集本地化（离线优先：直接复用本地已有 .srs 缓存或解压内置快照，不阻塞等待网络下载；
+				// 规则集联网更新交由后台守护进程在 sing-box 运行后自动静默完成，或手动执行 sb cache update）
 				if localized, stats, err := singbox.LocalizeRuleSets(configJSON, singbox.LocalizeOptions{
-					MirrorURL: effectiveCfg.GitHub.MirrorURL,
-					CacheTTL:  singbox.DefaultRuleSetCacheTTL,
+					MirrorURL:    effectiveCfg.GitHub.MirrorURL,
+					CacheTTL:     singbox.DefaultRuleSetCacheTTL,
+					OfflineFirst: true,
 				}); err != nil {
 					logger.Warn("⚠️ 规则集本地化已跳过: %v", err)
 				} else {
 					configJSON = localized
 					networkAborted = stats.Aborted
 					if stats.Remote > 0 {
-						logger.Info("规则集缓存: 远程 %d → 已本地化 %d (复用缓存 %d), 回退旧缓存 %d, 内置快照兑底 %d, 保留远程 %d",
-							stats.Remote, stats.Localized, stats.Cached, stats.Fallback, stats.Snapshot, stats.Kept)
+						logger.Info("规则集本地化: 远程 %d → 本地缓存 %d, 内置快照 %d, 保留远程 %d",
+							stats.Remote, stats.Cached, stats.Snapshot, stats.Kept)
 					}
 				}
 			}
