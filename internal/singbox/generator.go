@@ -75,11 +75,7 @@ func getWebUIAddress(ipv4 string) string {
 }
 
 func (c *ConfigGenerator) getSubnetFromIP(ip string) string {
-
-	if netinfo.IsPrivateIP(ip) {
-		return "202.96.199.1/24" // 如果是私有IP段 subnet直接用上海电信IP
-	}
-	return fmt.Sprintf("%s/24", ip)
+	return netinfo.ResolveClientSubnet(context.Background(), ip)
 }
 
 func (g *ConfigGenerator) Generate() (string, error) {
@@ -107,7 +103,7 @@ func (g *ConfigGenerator) GenerateForPlatform(platform string) (string, error) {
 		if g.netInfo != nil && len(g.netInfo.DNSServers) > 0 {
 			dnsServer = g.netInfo.DNSServers[0]
 		} else {
-			dnsServer = "8.8.8.8" // 默认 DNS
+			dnsServer = "223.5.5.5" // 默认国内 DNS
 		}
 	}
 
