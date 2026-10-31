@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"net"
 	"os/exec"
 	"regexp"
 	"runtime"
@@ -41,14 +40,8 @@ func RunTrace(ctx context.Context, opts TraceOptions) (*TraceResult, error) {
 		Target: opts.Target,
 	}
 
-	// 1. 优先尝试解析域名为 IP
-	targetIP := opts.Target
-	if parsed := net.ParseIP(targetIP); parsed == nil {
-		ips, err := net.LookupIP(opts.Target)
-		if err == nil && len(ips) > 0 {
-			targetIP = ips[0].String()
-		}
-	}
+	// 1. 优先尝试解析域名为真实 IPv4 (穿透 Fake-IP)
+	targetIP := ResolveTargetIP(ctx, opts.Target)
 
 	// 2. 调用跨平台底层追踪命令
 	hops, err := executeSystemTrace(ctx, targetIP, opts.MaxHops, opts.Timeout)

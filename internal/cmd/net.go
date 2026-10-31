@@ -3,7 +3,6 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"net"
 	"os"
 	"strings"
 	"time"
@@ -79,13 +78,8 @@ func newNetDiagCmd(configPath string) *cobra.Command {
 			// 1. 本地网络运营商画像
 			localISP, _ := netdiag.GetPublicISP(ctx)
 
-			// 2. 目标 IP 解析
-			targetIP := target
-			if parsed := net.ParseIP(target); parsed == nil {
-				if ips, err := net.LookupIP(target); err == nil && len(ips) > 0 {
-					targetIP = ips[0].String()
-				}
-			}
+			// 2. 目标 IP 解析 (优先 IPv4 并穿透 Fake-IP)
+			targetIP := netdiag.ResolveTargetIP(ctx, target)
 
 			// 3. 多轮 TCP Ping 测丢包与抖动
 			pingRes, err := netdiag.RunPing(ctx, netdiag.PingOptions{
@@ -103,8 +97,9 @@ func newNetDiagCmd(configPath string) *cobra.Command {
 				MaxHops: 25,
 			})
 
-			// 5. 判断是否处于晚高峰 (20:00 - 24:00)
-			nowHour := time.Now().Hour()
+			// 5. 判断是否处于国内晚高峰 (北京时间 UTC+8 20:00 - 24:00，兼容 OpenWrt 默认 UTC 时区)
+			cstZone := time.FixedZone("CST", 8*3600)
+			nowHour := time.Now().In(cstZone).Hour()
 			isPeak := nowHour >= 20 && nowHour <= 23
 
 			// 6. 建议引擎决策
@@ -160,23 +155,30 @@ func newNetPingCmd() *cobra.Command {
 		port       int
 		count      int
 		timeoutMs  int
+		useTCP     bool
+		useUDP     bool
 		useICMP    bool
 		jsonOutput bool
 	)
 
 	cmd := &cobra.Command{
 		Use:   "ping <ip/domain>",
-		Short: "高精度丢包率与网络抖动测试 (支持 TCP Ping 与 ICMP Ping)",
+		Short: "高精度丢包率与网络抖动测试 (支持 TCP + UDP/QUIC + ICMP 多维并发探测)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 
+			target := args[0]
+			targetIP := netdiag.ResolveTargetIP(ctx, target)
+
 			res, err := netdiag.RunPing(ctx, netdiag.PingOptions{
-				Host:      args[0],
+				Host:      targetIP,
 				Port:      port,
 				Count:     count,
 				Timeout:   time.Duration(timeoutMs) * time.Millisecond,
+				ForceTCP:  useTCP,
+				ForceUDP:  useUDP,
 				ForceICMP: useICMP,
 			})
 			if err != nil {
@@ -192,10 +194,12 @@ func newNetPingCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().IntVarP(&port, "port", "p", 443, "测试端口 (TCP Ping 时使用)")
+	cmd.Flags().IntVarP(&port, "port", "p", 443, "测试端口 (TCP / UDP-QUIC Ping 时使用)")
 	cmd.Flags().IntVarP(&count, "count", "n", 10, "发包次数")
-	cmd.Flags().IntVarP(&timeoutMs, "timeout", "t", 1500, "单次超时时间 (毫秒)")
-	cmd.Flags().BoolVar(&useICMP, "icmp", false, "强制使用系统 ICMP Ping (默认使用更贴合代理端口的 TCP Ping)")
+	cmd.Flags().IntVarP(&timeoutMs, "timeout", "t", 1200, "单次超时时间 (毫秒)")
+	cmd.Flags().BoolVar(&useTCP, "tcp", false, "仅执行 TCP 握手探测 (含内核 SYN 重传识别)")
+	cmd.Flags().BoolVar(&useUDP, "udp", false, "仅执行 UDP/QUIC 1200B 大包探测 (测试 Hysteria 2 端口与 UDP QoS)")
+	cmd.Flags().BoolVar(&useICMP, "icmp", false, "仅执行系统 ICMP Ping 探测")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "以 JSON 格式输出结果")
 
 	return cmd

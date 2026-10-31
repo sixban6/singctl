@@ -49,16 +49,26 @@ type PingResult struct {
 	Target       string          `json:"target"`
 	Port         int             `json:"port"`
 	IsTCP        bool            `json:"is_tcp"`
+	IsUDP        bool            `json:"is_udp,omitempty"`
+	Protocol     string          `json:"protocol,omitempty"` // "TCP", "UDP", "ICMP", "MULTI"
 	Sent         int             `json:"sent"`
 	Received     int             `json:"received"`
 	LossCount    int             `json:"loss_count"`
-	LossRate     float64         `json:"loss_rate"` // 百分比, 如 15.0 表示 15%
+	RetransCount int             `json:"retrans_count,omitempty"` // TCP SYN 丢包重传次数
+	LossRate     float64         `json:"loss_rate"`               // 百分比, 如 15.0 表示 15%
 	MinRTT       time.Duration   `json:"min_rtt"`
 	AvgRTT       time.Duration   `json:"avg_rtt"`
 	MaxRTT       time.Duration   `json:"max_rtt"`
 	Jitter       time.Duration   `json:"jitter"` // RTT 标准差
 	RTTs         []time.Duration `json:"rtts,omitempty"`
 	QualityLevel RouteQuality    `json:"quality_level"`
+	PortClosed   bool            `json:"port_closed,omitempty"`
+	LocalProxied bool            `json:"local_proxied,omitempty"` // 本地 TUN / 透明代理接管了 TCP 握手
+
+	// 多维探测子结果 (TCP + UDP/QUIC + ICMP)
+	TCP  *PingResult `json:"tcp,omitempty"`
+	UDP  *PingResult `json:"udp,omitempty"`
+	ICMP *PingResult `json:"icmp,omitempty"`
 }
 
 // HopInfo 路由跳点信息

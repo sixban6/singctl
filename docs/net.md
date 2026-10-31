@@ -6,7 +6,10 @@
 
 ## 🌟 核心特性
 
-- 📡 **免 Root 跨平台高精度探测**: 优先采用 TCP 端口握手测量（默认 443 端口），直击代理节点真实可用性，完全无需 root 权限且免疫机房 ICMP 阻断；支持自动无缝回退至系统 ICMP Ping。
+- 📡 **三维立体并发丢包与抖动探测 (TCP + UDP/QUIC + ICMP)**:
+  - **TCP 握手与 SYN 重传识别**: 测量真实端口连通性，并自动识别操作系统内核因丢包触发 `1.0s` TCP SYN 重传导致的隐性丢包（以及本地 TUN 透明代理握手劫持检测）。
+  - **UDP / QUIC 1200B 大包探测**: 向目标 UDP 端口（默认 443）发送 RFC 9000 标准 1200 字节 QUIC Initial 探测包，0 内核重传、真实 MTU 负载，精准揭露晚高峰国际出口队列尾丢弃与运营商 UDP QoS 限流。
+  - **ICMP 并发探测**: 跨平台交错并发单包 ICMP 探测，兼容 OpenWrt BusyBox / Linux / macOS / Windows。
 - 🛣️ **三网骨干线路全景识别**:
   - **中国电信**: 识别普通 163 骨干 (AS4134, `202.97`)、半程优化 CN2 GT 以及全程精品网 CN2 GIA (AS4809, `59.43`)。
   - **中国联通**: 识别大带宽 169 骨干 (AS4837, `219.158`) 与政企精品 A 网 (AS9929 / CUG 10099, `218.105` / `210.51`)。
@@ -50,13 +53,16 @@ singctl net diag 154.22.x.x --json
 高精度多轮 Ping，输出 Min/Avg/Max 延迟与 Jitter (标准差/抖动) 指标。
 
 ```bash
-# 默认 TCP 443 Ping (免 root)
-singctl net ping 154.22.x.x -n 20
+# 默认：TCP + UDP/QUIC (1200B) + ICMP 三维并发探测
+singctl net ping 154.22.x.x -n 10
 
-# 指定端口
-singctl net ping 154.22.x.x -p 2222
+# 仅执行 UDP/QUIC 1200B 大包探测 (测试 Hysteria 2 端口与 UDP QoS)
+singctl net ping 154.22.x.x --udp -p 443
 
-# 强制使用系统 ICMP Ping
+# 仅执行 TCP 握手探测 (含内核 SYN 重传识别)
+singctl net ping 154.22.x.x --tcp -p 443
+
+# 仅执行系统 ICMP Ping
 singctl net ping 154.22.x.x --icmp -n 10
 ```
 
