@@ -23,8 +23,8 @@ func systemDNS() ([]string, error) {
 		}
 	}
 
-	// 所有方法都失败，使用公共DNS
-	return []string{"8.8.8.8", "1.1.1.1"}, nil
+	// 所有方法都失败，使用国内高可用公共DNS（避免 8.8.8.8 造成污染与海外 ECS）
+	return []string{"223.5.5.5", "119.29.29.29"}, nil
 }
 
 // 使用 ipconfig /all 获取DNS服务器
