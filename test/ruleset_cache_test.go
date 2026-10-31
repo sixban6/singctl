@@ -631,3 +631,155 @@ func TestLocalizeRuleSets_CacheTTL(t *testing.T) {
 		}
 	}
 }
+
+func TestLocalizeRuleSets_BreakerAfterInitialSuccess(t *testing.T) {
+	// 第一个请求成功，后续全部失败 —— 验证 okCount > 0 时连续失败仍能触发熔断
+	var mu sync.Mutex
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls++
+		c := calls
+		mu.Unlock()
+		if c == 1 {
+			_, _ = w.Write(validSRS("ok-first"))
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+
+	entries := make([]map[string]any, 0, 12)
+	for i := 0; i < 12; i++ {
+		entries = append(entries, remoteEntry(fmt.Sprintf("rs-partial-%02d", i), fmt.Sprintf("%s/rs%02d.srs", srv.URL, i)))
+	}
+	opts := testOpts(t, t.TempDir())
+	opts.Workers = 1 // 串行以确保第 1 个成功后连续 4 个失败触发熔断
+
+	_, stats, err := singbox.LocalizeRuleSets(buildConfig(t, entries...), opts)
+	if err != nil {
+		t.Fatalf("LocalizeRuleSets: %v", err)
+	}
+	if !stats.Aborted {
+		t.Fatalf("expected breaker to abort even after initial success, stats = %+v", stats)
+	}
+	if stats.Localized != 1 {
+		t.Errorf("stats.Localized = %d, want 1", stats.Localized)
+	}
+	mu.Lock()
+	totalCalls := calls
+	mu.Unlock()
+	if totalCalls > 6 {
+		t.Errorf("expected breaker to skip remaining tasks, but server received %d calls", totalCalls)
+	}
+}
+
+func TestLocalizeRuleSets_MirrorAutoDemotion(t *testing.T) {
+	// 镜像源始终失败，直连源正常 —— 验证镜像连续失败达到阈值后自动降级，后续任务不再请求死镜像
+	var mirrorMu sync.Mutex
+	mirrorHits := 0
+	badMirror := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mirrorMu.Lock()
+		mirrorHits++
+		mirrorMu.Unlock()
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	t.Cleanup(badMirror.Close)
+
+	goodDirect := serveRuleSet(t, http.StatusOK, validSRS("from-direct"))
+
+	entries := make([]map[string]any, 0, 10)
+	for i := 0; i < 10; i++ {
+		// 模拟已带镜像前缀的规则集 URL
+		u := fmt.Sprintf("%s/%s/rs-%02d.srs", badMirror.URL, goodDirect.URL, i)
+		entries = append(entries, remoteEntry(fmt.Sprintf("rs-demote-%02d", i), u))
+	}
+
+	opts := singbox.LocalizeOptions{
+		MirrorURL: badMirror.URL,
+		CacheDir:  t.TempDir(),
+		Client:    &http.Client{Timeout: 5 * time.Second},
+		Workers:   1,
+	}
+
+	_, stats, err := singbox.LocalizeRuleSets(buildConfig(t, entries...), opts)
+	if err != nil {
+		t.Fatalf("LocalizeRuleSets: %v", err)
+	}
+	if stats.Localized != 10 {
+		t.Fatalf("stats = %+v, want Localized=10", stats)
+	}
+	mirrorMu.Lock()
+	mHits := mirrorHits
+	mirrorMu.Unlock()
+	// 镜像源连续失败 2 次后应被跳过，不应再被后续 8 个规则集请求
+	if mHits > 3 {
+		t.Errorf("mirror was hit %d times, want <= 3 (should auto-demote to direct)", mHits)
+	}
+}
+
+func TestLocalizeRuleSets_OfflineFirst_AndBackgroundRefresh(t *testing.T) {
+	if ruleset_snapshot.Load().Count() == 0 {
+		t.Skip("skipping snapshot test in lite build (no embedded ruleset snapshot)")
+	}
+	var hits sync.Map
+	srv := countingServer(t, &hits)
+	cacheDir := t.TempDir()
+
+	// 准备两个规则集：一个已有本地旧缓存，一个仅存在于内置快照
+	if err := os.WriteFile(filepath.Join(cacheDir, "geoip-cn.srs"), validSRS("cached-local"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	in := buildConfig(t,
+		remoteEntry("geoip-cn", srv.URL+"/geoip-cn.srs"),
+		remoteEntry("geosite-cn", srv.URL+"/geosite-cn.srs"),
+	)
+
+	// 1. 前台 OfflineFirst 模式（模拟 singctl sb gen）：不应触发任何 HTTP 请求
+	genOpts := singbox.LocalizeOptions{
+		CacheDir:     cacheDir,
+		Client:       &http.Client{Timeout: 5 * time.Second},
+		CacheTTL:     time.Hour,
+		OfflineFirst: true,
+	}
+	out, stats, err := singbox.LocalizeRuleSets(in, genOpts)
+	if err != nil {
+		t.Fatalf("OfflineFirst LocalizeRuleSets: %v", err)
+	}
+	if stats.Cached != 1 || stats.Snapshot != 1 {
+		t.Fatalf("stats = %+v, want Cached=1 Snapshot=1", stats)
+	}
+	for _, p := range []string{"/geoip-cn.srs", "/geosite-cn.srs"} {
+		if _, called := hits.Load(p); called {
+			t.Errorf("OfflineFirst should not hit network for %s", p)
+		}
+	}
+
+	// 2. 写入配置文件，检查 NeedsCacheRefresh：因尚未通过网络更新（UpdatedAt 为空），应返回 true
+	cfgPath := writeConfigFile(t, out)
+	bgOpts := singbox.LocalizeOptions{
+		CacheDir: cacheDir,
+		Client:   &http.Client{Timeout: 5 * time.Second},
+		CacheTTL: time.Hour,
+		Workers:  2,
+		Silent:   true,
+	}
+	if !singbox.NeedsCacheRefresh(cfgPath, bgOpts) {
+		t.Fatal("NeedsCacheRefresh should return true for snapshot/unrefreshed entries")
+	}
+
+	// 3. 后台静默更新：应从网络拉取更新并写入 UpdatedAt
+	_, bgStats, err := singbox.RefreshConfigCache(cfgPath, bgOpts)
+	if err != nil {
+		t.Fatalf("background RefreshConfigCache: %v", err)
+	}
+	if bgStats.Refreshed != 2 {
+		t.Fatalf("bgStats = %+v, want Refreshed=2", bgStats)
+	}
+
+	// 4. 更新后 TTL 内再次检查 NeedsCacheRefresh：应返回 false
+	if singbox.NeedsCacheRefresh(cfgPath, bgOpts) {
+		t.Fatal("NeedsCacheRefresh should return false after fresh background update")
+	}
+}

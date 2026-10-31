@@ -196,12 +196,13 @@ func (sb *SingBox) GenerateConfig() error {
 	return nil
 }
 
-// localizeRuleSets 将生成配置中的 remote 规则集替换为本地缓存引用。
+// localizeRuleSets 将生成配置中的 remote 规则集替换为本地缓存引用（离线优先，不阻塞等待网络下载）。
 // 失败时返回原始内容，不影响配置生成流程。
 func (sb *SingBox) localizeRuleSets(configContent string) (string, bool) {
 	localized, stats, err := LocalizeRuleSets(configContent, LocalizeOptions{
-		MirrorURL: sb.config.GitHub.MirrorURL,
-		CacheTTL:  DefaultRuleSetCacheTTL,
+		MirrorURL:    sb.config.GitHub.MirrorURL,
+		CacheTTL:     DefaultRuleSetCacheTTL,
+		OfflineFirst: true,
 	})
 	if err != nil {
 		logger.Warn("⚠️ 规则集本地化已跳过: %v", err)
@@ -210,11 +211,8 @@ func (sb *SingBox) localizeRuleSets(configContent string) (string, bool) {
 	if stats.Remote == 0 {
 		return configContent, false
 	}
-	logger.Info("规则集缓存: 远程 %d → 已本地化 %d (复用缓存 %d), 回退旧缓存 %d, 内置快照兑底 %d, 保留远程 %d",
-		stats.Remote, stats.Localized, stats.Cached, stats.Fallback, stats.Snapshot, stats.Kept)
-	if stats.Aborted {
-		logger.Warn("⚠️ 网络不可用，未下载的规则集将保留远程引用或旧缓存")
-	}
+	logger.Info("规则集本地化: 远程 %d → 本地缓存 %d, 内置快照 %d, 保留远程 %d",
+		stats.Remote, stats.Cached, stats.Snapshot, stats.Kept)
 	return localized, stats.Aborted
 }
 

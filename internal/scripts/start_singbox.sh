@@ -68,10 +68,17 @@ check_port() {
 }
 
 init_env() {
+    # 若存在 procd 托管的 /etc/init.d/sing-box，先通知 procd 停止，防止其 respawn 抢占端口
+    if [ -x /etc/init.d/sing-box ]; then
+        /etc/init.d/sing-box stop >/dev/null 2>&1 || true
+    fi
+
     # 停止 sing-box 服务
     if killall sing-box 2>/dev/null; then
+        pkill -f "ujail.*sing-box" 2>/dev/null || true
         echo_succ "已停止现有 sing-box 服务"
     else
+        pkill -f "ujail.*sing-box" 2>/dev/null || true
         echo_succ "没有运行中的 sing-box 服务"
     fi
 
@@ -529,6 +536,8 @@ main() {
   setup_firewall
   setup_route
   start_singbox
+  # 刷新 dnsmasq 缓存，清除启动前可能残留的 AAAA (IPv6) 记录，防止 TProxy 下 IPv6 连接失败
+  killall -HUP dnsmasq 2>/dev/null || true
 }
 
 main
