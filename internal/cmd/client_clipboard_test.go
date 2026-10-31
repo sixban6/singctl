@@ -122,3 +122,36 @@ func TestClipboardHelperProcess(t *testing.T) {
 
 	os.Exit(0)
 }
+
+func TestPruneConfigBackups(t *testing.T) {
+	tempDir := t.TempDir()
+	targetPath := filepath.Join(tempDir, "config.json")
+
+	names := []string{
+		"config.json.backup.1700000001",
+		"config.json.backup.1700000002",
+		"config.json.backup.1700000003",
+		"config.json.backup.1700000004",
+		"config.json.backup.1700000005",
+	}
+	for _, n := range names {
+		if err := os.WriteFile(filepath.Join(tempDir, n), []byte("{}"), 0600); err != nil {
+			t.Fatalf("write backup %s: %v", n, err)
+		}
+	}
+
+	pruneConfigBackups(targetPath, 3)
+
+	matches, err := filepath.Glob(targetPath + ".backup.*")
+	if err != nil {
+		t.Fatalf("glob backups: %v", err)
+	}
+	if len(matches) != 3 {
+		t.Fatalf("expected 3 backups remaining, got %d: %v", len(matches), matches)
+	}
+	for _, expected := range names[2:] {
+		if _, err := os.Stat(filepath.Join(tempDir, expected)); err != nil {
+			t.Errorf("expected newest backup %s to be kept: %v", expected, err)
+		}
+	}
+}

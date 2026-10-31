@@ -2,16 +2,14 @@ package cmd
 
 import (
 	"fmt"
-	"singctl/internal/config"
 	"singctl/internal/constant"
-	"singctl/internal/logger"
 	"singctl/internal/tailscale"
 	"strings"
 
 	"github.com/spf13/cobra"
 )
 
-func newStartTailScaleCmd(cfg *config.Config) *cobra.Command {
+func newStartTailScaleCmd(defaultConfigPath string) *cobra.Command {
 	// 1. tailscale start
 	startCmd := &cobra.Command{
 		Use:   "start",
@@ -24,6 +22,10 @@ func newStartTailScaleCmd(cfg *config.Config) *cobra.Command {
 	  singctl ts start --mode gateway
 	  singctl ts start -m gateway --accept-routes`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, _, err := loadCmdConfig(cmd, defaultConfigPath)
+			if err != nil {
+				return err
+			}
 			exitNode, _ := cmd.Flags().GetBool(constant.ExitNode)
 			mainRouter, _ := cmd.Flags().GetBool(constant.MainRouter)
 			// acceptRoutes, _ := cmd.Flags().GetBool(constant.AcceptRoutes)
@@ -78,13 +80,13 @@ func newStartTailScaleCmd(cfg *config.Config) *cobra.Command {
 	return startCmd
 }
 
-func newStopTailScaleCmd(cfg *config.Config) *cobra.Command {
-
+func newStopTailScaleCmd(defaultConfigPath string) *cobra.Command {
 	// 2. tailscale stop
 	stopCmd := &cobra.Command{
 		Use:   "stop",
 		Short: "停止 Tailscale / Stop tailscale",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg := loadCmdConfigOrDefault(cmd, defaultConfigPath)
 			ts := tailscale.New(cfg.GitHub.MirrorURL, &cfg.Tailscale)
 			return ts.Stop()
 		},
@@ -93,24 +95,26 @@ func newStopTailScaleCmd(cfg *config.Config) *cobra.Command {
 	return stopCmd
 }
 
-func newInstallTailScaleCmd(cfg *config.Config) *cobra.Command {
+func newInstallTailScaleCmd(defaultConfigPath string) *cobra.Command {
 	// 3. tailscale install
 	installCmd := &cobra.Command{
 		Use:   "install",
 		Short: "安装 Tailscale / Install tailscale",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg := loadCmdConfigOrDefault(cmd, defaultConfigPath)
 			ts := tailscale.New(cfg.GitHub.MirrorURL, &cfg.Tailscale)
 			return ts.Install()
 		},
 	}
 	return installCmd
 }
-func newUpdateTailScaleCmd(cfg *config.Config) *cobra.Command {
+func newUpdateTailScaleCmd(defaultConfigPath string) *cobra.Command {
 	// 4. tailscale update
 	updateCmd := &cobra.Command{
 		Use:   "update",
 		Short: "更新 Tailscale / Update tailscale",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg := loadCmdConfigOrDefault(cmd, defaultConfigPath)
 			ts := tailscale.New(cfg.GitHub.MirrorURL, &cfg.Tailscale)
 			return ts.Update()
 		},
@@ -125,14 +129,9 @@ func NewTailscaleCmd(configPath string) *cobra.Command {
 		Short:   "组网  : 管理tailscale的命令(简写singctl ts)",
 	}
 
-	cfg, err := config.Load(configPath)
-	if err != nil {
-		logger.Error("配置文件加载失败")
-	}
-
-	cmd.AddCommand(newStartTailScaleCmd(cfg))
-	cmd.AddCommand(newStopTailScaleCmd(cfg))
-	cmd.AddCommand(newInstallTailScaleCmd(cfg))
-	cmd.AddCommand(newUpdateTailScaleCmd(cfg))
+	cmd.AddCommand(newStartTailScaleCmd(configPath))
+	cmd.AddCommand(newStopTailScaleCmd(configPath))
+	cmd.AddCommand(newInstallTailScaleCmd(configPath))
+	cmd.AddCommand(newUpdateTailScaleCmd(configPath))
 	return cmd
 }

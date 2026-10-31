@@ -36,9 +36,10 @@ import (
 // ─────────────────────────────────────────────────────────────────────────────
 
 const (
-	defaultFetchTimeout = 20 * time.Second
-	defaultWorkers      = 6
-	maxRuleSetSize      = 64 << 20 // 64MB 防御性上限
+	defaultFetchTimeout    = 10 * time.Second
+	defaultWorkers         = 6
+	maxRuleSetSize         = 64 << 20 // 64MB 防御性上限
+	DefaultRuleSetCacheTTL = 24 * time.Hour
 	// sing-box 二进制规则集魔数：
 	//   旧格式 (sing-box < 1.12): "RULE" + version(1)
 	//   新格式 (sing-box >= 1.12): "SRS" + version(2)
@@ -51,10 +52,11 @@ const (
 
 // LocalizeOptions 本地化选项
 type LocalizeOptions struct {
-	MirrorURL string       // GitHub 镜像前缀，如 https://gh-proxy.com
-	CacheDir  string       // 缓存目录
-	Client    *http.Client // HTTP 客户端（测试可注入）
-	Workers   int          // 并发下载数
+	MirrorURL string        // GitHub 镜像前缀，如 https://gh-proxy.com
+	CacheDir  string        // 缓存目录
+	Client    *http.Client  // HTTP 客户端（测试可注入）
+	Workers   int           // 并发下载数
+	CacheTTL  time.Duration // 本地缓存有效期（>0 时命中未过期缓存直接跳过网络下载）
 }
 
 func (o LocalizeOptions) withDefaults() LocalizeOptions {
@@ -73,7 +75,8 @@ func (o LocalizeOptions) withDefaults() LocalizeOptions {
 // RuleSetStats 本地化结果统计
 type RuleSetStats struct {
 	Remote    int  // 配置中发现的 remote 规则集数量
-	Localized int  // 新下载成功并改写为本地引用
+	Localized int  // 新下载成功（或命中未过期缓存）并改写为本地引用
+	Cached    int  // 其中直接复用 TTL 内未过期本地缓存的数量
 	Fallback  int  // 下载失败但成功回退本地旧缓存
 	Snapshot  int  // 下载失败且无缓存，从程序内置快照兑底
 	Kept      int  // 下载失败且无任何兑底，保持 remote 原样
@@ -171,6 +174,9 @@ func LocalizeRuleSets(jsonStr string, opts LocalizeOptions) (string, RuleSetStat
 
 		if results[t.idx].ok {
 			stats.Localized++
+			if results[t.idx].cached {
+				stats.Cached++
+			}
 			localizeEntry(t.entry, path)
 			continue
 		}
@@ -429,8 +435,9 @@ func RevertAndClearCache(configPath string, opts LocalizeOptions) (int, error) {
 // ───────────────────────────── 内部实现 ─────────────────────────────
 
 type fetchOutcome struct {
-	ok  bool
-	err error
+	ok     bool
+	cached bool
+	err    error
 }
 
 // ruleSetTask 单个规则集下载任务；entry 仅在需要改写配置的场景使用（刷新场景可为 nil）。
@@ -487,6 +494,25 @@ func fetchRuleSets(tasks []ruleSetTask, opts LocalizeOptions, manifest ruleSetMa
 		go func(t ruleSetTask) {
 			defer wg.Done()
 			idx, tag, url, format := t.fields()
+			path := cacheFilePath(opts.CacheDir, tag, format)
+
+			// 若设置了 CacheTTL 且本地已有未过期的合法缓存，直接复用免网络下载
+			if opts.CacheTTL > 0 {
+				manMu.Lock()
+				meta, hasMeta := manifest[tag]
+				manMu.Unlock()
+				if hasMeta && meta.UpdatedAt != "" {
+					if updatedAt, err := time.Parse(time.RFC3339, meta.UpdatedAt); err == nil && time.Since(updatedAt) < opts.CacheTTL {
+						if cachedFileValid(path, format) {
+							mu.Lock()
+							results[idx] = fetchOutcome{ok: true, cached: true}
+							mu.Unlock()
+							return
+						}
+					}
+				}
+			}
+
 			if shouldAbort() {
 				mu.Lock()
 				results[idx] = fetchOutcome{ok: false, err: fmt.Errorf("network aborted")}
@@ -496,7 +522,15 @@ func fetchRuleSets(tasks []ruleSetTask, opts LocalizeOptions, manifest ruleSetMa
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			data, err := downloadRuleSet(url, format, opts)
+			// 获取信号量后再次检查熔断状态，防止排队等待期间已触发熔断但协程仍继续发起超时请求
+			if shouldAbort() {
+				mu.Lock()
+				results[idx] = fetchOutcome{ok: false, err: fmt.Errorf("network aborted")}
+				mu.Unlock()
+				return
+			}
+
+			data, err := downloadRuleSet(url, format, opts, shouldAbort)
 			noteResult(err == nil)
 			if err != nil {
 				mu.Lock()
@@ -504,7 +538,6 @@ func fetchRuleSets(tasks []ruleSetTask, opts LocalizeOptions, manifest ruleSetMa
 				mu.Unlock()
 				return
 			}
-			path := cacheFilePath(opts.CacheDir, tag, format)
 			if err := atomicWriteFile(path, data, 0644); err != nil {
 				mu.Lock()
 				results[idx] = fetchOutcome{ok: false, err: err}
@@ -512,10 +545,9 @@ func fetchRuleSets(tasks []ruleSetTask, opts LocalizeOptions, manifest ruleSetMa
 				return
 			}
 			manMu.Lock()
-			if meta, ok := manifest[tag]; ok {
-				meta.UpdatedAt = time.Now().Format(time.RFC3339)
-				manifest[tag] = meta
-			}
+			meta := manifest[tag]
+			meta.UpdatedAt = time.Now().Format(time.RFC3339)
+			manifest[tag] = meta
 			manMu.Unlock()
 			mu.Lock()
 			results[idx] = fetchOutcome{ok: true}
@@ -535,10 +567,13 @@ func fetchRuleSets(tasks []ruleSetTask, opts LocalizeOptions, manifest ruleSetMa
 }
 
 // downloadRuleSet 依次尝试原始 URL / 直连 / 镜像，校验内容合法性。
-func downloadRuleSet(rawURL, format string, opts LocalizeOptions) ([]byte, error) {
+func downloadRuleSet(rawURL, format string, opts LocalizeOptions, shouldAbort func() bool) ([]byte, error) {
 	client := opts.Client
 	var lastErr error
 	for _, cand := range fetchCandidates(rawURL, opts.MirrorURL) {
+		if shouldAbort != nil && shouldAbort() {
+			return nil, fmt.Errorf("network aborted")
+		}
 		req, err := http.NewRequest(http.MethodGet, cand, nil)
 		if err != nil {
 			lastErr = err

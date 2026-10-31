@@ -154,7 +154,7 @@ func (sb *SingBox) GenerateConfig() error {
 
 	// 规则集本地化：预下载 remote 规则集并改写为本地引用，
 	// 使 sing-box 启动不依赖 GitHub；下载失败自动回退/保留 remote
-	configContent = sb.localizeRuleSets(configContent)
+	configContent, networkAborted := sb.localizeRuleSets(configContent)
 
 	// 备份原配置文件（如果存在）
 	if _, err := os.Stat(sb.configPath); err == nil {
@@ -184,29 +184,38 @@ func (sb *SingBox) GenerateConfig() error {
 		return fmt.Errorf("rename config file failed: %w", err)
 	}
 
+	if runtime.GOOS == "linux" {
+		if networkAborted {
+			logger.Warn("⚠️ 检测到 GitHub/镜像网络不可用，已跳过 Dashboard 在线预下载")
+		} else if err := ProvisionDashboard(configContent); err != nil {
+			logger.Warn("⚠️ Dashboard 预下载失败(不影响其他功能): %v", err)
+		}
+	}
+
 	logger.Success("Config generated: %s", sb.configPath)
 	return nil
 }
 
 // localizeRuleSets 将生成配置中的 remote 规则集替换为本地缓存引用。
 // 失败时返回原始内容，不影响配置生成流程。
-func (sb *SingBox) localizeRuleSets(configContent string) string {
+func (sb *SingBox) localizeRuleSets(configContent string) (string, bool) {
 	localized, stats, err := LocalizeRuleSets(configContent, LocalizeOptions{
 		MirrorURL: sb.config.GitHub.MirrorURL,
+		CacheTTL:  DefaultRuleSetCacheTTL,
 	})
 	if err != nil {
 		logger.Warn("⚠️ 规则集本地化已跳过: %v", err)
-		return configContent
+		return configContent, false
 	}
 	if stats.Remote == 0 {
-		return configContent
+		return configContent, false
 	}
-	logger.Info("规则集缓存: 远程 %d → 已本地化 %d, 回退旧缓存 %d, 内置快照兑底 %d, 保留远程 %d",
-		stats.Remote, stats.Localized, stats.Fallback, stats.Snapshot, stats.Kept)
+	logger.Info("规则集缓存: 远程 %d → 已本地化 %d (复用缓存 %d), 回退旧缓存 %d, 内置快照兑底 %d, 保留远程 %d",
+		stats.Remote, stats.Localized, stats.Cached, stats.Fallback, stats.Snapshot, stats.Kept)
 	if stats.Aborted {
 		logger.Warn("⚠️ 网络不可用，未下载的规则集将保留远程引用或旧缓存")
 	}
-	return localized
+	return localized, stats.Aborted
 }
 
 // Install 安装 sing-box

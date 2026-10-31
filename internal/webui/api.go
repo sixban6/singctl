@@ -379,7 +379,12 @@ func (s *Server) handleConfigPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg := dto.toConfig()
+	// 基于现有配置合并更新，避免丢失 custom_rules、watchdog、server 高级字段等非表单项
+	cfg, err := config.Load(configPathFor(s))
+	if err != nil || cfg == nil {
+		cfg = &config.Config{}
+	}
+	dto.applyTo(cfg)
 
 	// 有订阅时做完整校验;允许暂存空订阅(首次使用)
 	if len(cfg.Subs) > 0 {
@@ -402,6 +407,12 @@ func (s *Server) handleConfigPut(w http.ResponseWriter, r *http.Request) {
 
 func (dto configDTO) toConfig() *config.Config {
 	cfg := &config.Config{}
+	dto.applyTo(cfg)
+	return cfg
+}
+
+func (dto configDTO) applyTo(cfg *config.Config) {
+	cfg.Subs = make([]config.Subscription, 0, len(dto.Subs))
 	for _, sub := range dto.Subs {
 		cfg.Subs = append(cfg.Subs, config.Subscription{
 			Name:          strings.TrimSpace(sub.Name),
@@ -419,7 +430,6 @@ func (dto configDTO) toConfig() *config.Config {
 	cfg.Server.SBDomain = strings.TrimSpace(dto.Server.SBDomain)
 	cfg.Server.CFDNSKey = strings.TrimSpace(dto.Server.CFDNSKey)
 	cfg.Server.Sni = strings.TrimSpace(dto.Server.Sni)
-	return cfg
 }
 
 // ───────────────────────── 配置(原文 YAML) ─────────────────────────

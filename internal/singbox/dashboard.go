@@ -6,11 +6,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	log "singctl/internal/logger"
 )
 
 // ProvisionDashboard 检查配置中的 api dashboard 设置, 若本地静态文件未就绪
@@ -47,22 +50,72 @@ func ProvisionDashboard(configJSON string) error {
 			return nil // 已就绪
 		}
 
-		client := &http.Client{Timeout: 3 * time.Minute}
-		resp, err := client.Get(svc.Dashboard.DownloadURL)
-		if err != nil {
-			return fmt.Errorf("dashboard provision: download: %w", err)
+		log.Info("正在预下载 Dashboard 静态面板文件至 %s ...", svc.Dashboard.Path)
+
+		client := &http.Client{
+			Timeout: 15 * time.Second,
+			Transport: &http.Transport{
+				DialContext: (&net.Dialer{
+					Timeout: 5 * time.Second,
+				}).DialContext,
+				TLSHandshakeTimeout:   5 * time.Second,
+				ResponseHeaderTimeout: 8 * time.Second,
+			},
 		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("dashboard provision: download failed: HTTP %d", resp.StatusCode)
+
+		candidates := dashboardDownloadCandidates(svc.Dashboard.DownloadURL)
+		var lastErr error
+		for _, u := range candidates {
+			data, err := downloadDashboardArchive(client, u)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			if err := extractDashboardZip(data, svc.Dashboard.Path); err != nil {
+				lastErr = err
+				continue
+			}
+			return nil
 		}
-		data, err := io.ReadAll(io.LimitReader(resp.Body, 256<<20))
-		if err != nil {
-			return fmt.Errorf("dashboard provision: read body: %w", err)
-		}
-		return extractDashboardZip(data, svc.Dashboard.Path)
+		return fmt.Errorf("dashboard provision: %w", lastErr)
 	}
 	return nil
+}
+
+func dashboardDownloadCandidates(rawURL string) []string {
+	var out []string
+	out = append(out, rawURL)
+	// 若配置了镜像前缀 (如 https://mirror.example/https://github.com/...)，追加直连候选兜底
+	if idx := strings.Index(rawURL, "/https://github.com/"); idx > 0 {
+		direct := rawURL[idx+1:]
+		if direct != rawURL {
+			out = append(out, direct)
+		}
+	}
+	return out
+}
+
+func downloadDashboardArchive(client *http.Client, url string) ([]byte, error) {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "singctl-dashboard-provisioner")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("download: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("download failed: HTTP %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	if err != nil {
+		return nil, fmt.Errorf("read body: %w", err)
+	}
+	return data, nil
 }
 
 // extractDashboardZip 解压 dashboard zip 到 dir, 自动剥掉 GitHub archive 的

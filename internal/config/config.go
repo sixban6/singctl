@@ -649,13 +649,86 @@ func MigrateConfig(configPath string, templateData []byte) error {
 }
 
 // Save serializes cfg to YAML and writes it to path.
-// Note: YAML comments are not preserved by this operation.
+// When path already exists and contains a valid YAML mapping document, Save merges
+// the updated fields into the existing YAML AST so comments and unreferenced keys are preserved.
 func Save(path string, cfg *Config) error {
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}
+
+	if existingData, err := os.ReadFile(path); err == nil && len(existingData) > 0 {
+		var oldRoot, newRoot yaml.Node
+		if errOld := yaml.Unmarshal(existingData, &oldRoot); errOld == nil {
+			if errNew := yaml.Unmarshal(data, &newRoot); errNew == nil {
+				if mergeYAMLDocument(&oldRoot, &newRoot) {
+					if mergedData, errMarshal := yaml.Marshal(&oldRoot); errMarshal == nil {
+						data = mergedData
+					}
+				}
+			}
+		}
+	}
+
+	tmpPath := path + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0600); err == nil {
+		if err := os.Rename(tmpPath, path); err == nil {
+			return nil
+		}
+		_ = os.Remove(tmpPath)
+	}
 	return os.WriteFile(path, data, 0600)
+}
+
+func mergeYAMLDocument(dstRoot, srcRoot *yaml.Node) bool {
+	if dstRoot.Kind != yaml.DocumentNode || srcRoot.Kind != yaml.DocumentNode {
+		return false
+	}
+	if len(dstRoot.Content) == 0 || len(srcRoot.Content) == 0 {
+		return false
+	}
+	dstDoc := dstRoot.Content[0]
+	srcDoc := srcRoot.Content[0]
+	if dstDoc.Kind != yaml.MappingNode || srcDoc.Kind != yaml.MappingNode {
+		return false
+	}
+	mergeYAMLMapping(dstDoc, srcDoc)
+	return true
+}
+
+func mergeYAMLMapping(dst, src *yaml.Node) {
+	for i := 0; i+1 < len(src.Content); i += 2 {
+		srcKey := src.Content[i]
+		srcVal := src.Content[i+1]
+
+		found := false
+		for j := 0; j+1 < len(dst.Content); j += 2 {
+			dstKey := dst.Content[j]
+			dstVal := dst.Content[j+1]
+			if dstKey.Value == srcKey.Value {
+				found = true
+				if dstVal.Kind == yaml.MappingNode && srcVal.Kind == yaml.MappingNode {
+					mergeYAMLMapping(dstVal, srcVal)
+				} else {
+					head, line, foot := dstVal.HeadComment, dstVal.LineComment, dstVal.FootComment
+					*dstVal = *srcVal
+					if dstVal.HeadComment == "" {
+						dstVal.HeadComment = head
+					}
+					if dstVal.LineComment == "" {
+						dstVal.LineComment = line
+					}
+					if dstVal.FootComment == "" {
+						dstVal.FootComment = foot
+					}
+				}
+				break
+			}
+		}
+		if !found {
+			dst.Content = append(dst.Content, srcKey, srcVal)
+		}
+	}
 }
 
 // UpdateHy2Bandwidth updates hy2.up and hy2.down in the given YAML file while preserving comments and structure.

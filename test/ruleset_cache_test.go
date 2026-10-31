@@ -588,3 +588,46 @@ func TestCacheStatus(t *testing.T) {
 		t.Errorf("InSnapshot entries = %d, want %d", snapOnly, snap.Count())
 	}
 }
+
+func TestLocalizeRuleSets_CacheTTL(t *testing.T) {
+	var hits sync.Map
+	srv := countingServer(t, &hits)
+	cacheDir := t.TempDir()
+
+	opts := testOpts(t, cacheDir)
+	opts.CacheTTL = time.Hour
+
+	in := buildConfig(t,
+		remoteEntry("rs-ttl-a", srv.URL+"/ttl-a.srs"),
+		remoteEntry("rs-ttl-b", srv.URL+"/ttl-b.srs"),
+	)
+
+	// 首次运行：无本地缓存，触发网络下载
+	_, stats1, err := singbox.LocalizeRuleSets(in, opts)
+	if err != nil {
+		t.Fatalf("first LocalizeRuleSets: %v", err)
+	}
+	if stats1.Localized != 2 || stats1.Cached != 0 {
+		t.Fatalf("stats1 = %+v, want Localized=2 Cached=0", stats1)
+	}
+
+	// 第二次运行（TTL 内）：直接复用未过期的本地缓存，不发起任何 HTTP 请求
+	out2, stats2, err := singbox.LocalizeRuleSets(in, opts)
+	if err != nil {
+		t.Fatalf("second LocalizeRuleSets: %v", err)
+	}
+	if stats2.Localized != 2 || stats2.Cached != 2 {
+		t.Fatalf("stats2 = %+v, want Localized=2 Cached=2", stats2)
+	}
+	for _, e := range parseRuleSets(t, out2) {
+		if e["type"] != "local" {
+			t.Errorf("entry %v should be local, got %v", e["tag"], e["type"])
+		}
+	}
+	for _, p := range []string{"/ttl-a.srs", "/ttl-b.srs"} {
+		n, _ := hits.Load(p)
+		if n.(int) != 1 {
+			t.Errorf("%s downloaded %d times, want 1 (second run should hit TTL cache)", p, n.(int))
+		}
+	}
+}
