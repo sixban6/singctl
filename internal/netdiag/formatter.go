@@ -35,19 +35,27 @@ func PrintDiagReport(w io.Writer, r *DiagReport, verbose bool) error {
 
 	// [1/3] 延迟、抖动与丢包
 	if r.Ping != nil {
-		fmt.Fprintf(w, "\n[1/3] 📡 连通性与丢包波动测试 (%d 轮 %s Ping)\n", r.Ping.Sent, pingTypeStr(r.Ping.IsTCP))
-		statusEmoji := "🟢"
-		if r.Ping.QualityLevel == QualityCongested {
-			statusEmoji = "🟠"
-		} else if r.Ping.QualityLevel == QualitySevere {
-			statusEmoji = "🔴"
-		} else if r.Ping.QualityLevel == QualityGood {
-			statusEmoji = "🟡"
+		statusEmoji := qualityEmoji(r.Ping.QualityLevel)
+		if r.Ping.TCP != nil || r.Ping.UDP != nil || r.Ping.ICMP != nil {
+			fmt.Fprintf(w, "\n[1/3] 📡 连通性与丢包波动测试 (%d 轮 TCP + UDP/QUIC + ICMP 并发探测)\n", r.Ping.Sent)
+			if r.Ping.TCP != nil {
+				fmt.Fprintf(w, "      ├─ TCP 握手  : %s\n", formatSubPingLine(r.Ping.TCP, "TCP"))
+			}
+			if r.Ping.UDP != nil {
+				fmt.Fprintf(w, "      ├─ UDP/QUIC  : %s\n", formatUDPSubPingLine(r.Ping.UDP, r.Ping.TCP))
+			}
+			if r.Ping.ICMP != nil {
+				fmt.Fprintf(w, "      ├─ ICMP 探测 : %s\n", formatICMPSubPingLine(r.Ping.ICMP, r.Ping.TCP))
+			}
+			fmt.Fprintf(w, "      └─ 综合评估  : 综合丢包率 %.1f%% (%d/%d 丢失) | 最大抖动 %v | %s %s\n",
+				r.Ping.LossRate, r.Ping.LossCount, r.Ping.Sent, r.Ping.Jitter.Round(time.Millisecond), statusEmoji, r.Ping.QualityLevel)
+		} else {
+			fmt.Fprintf(w, "\n[1/3] 📡 连通性与丢包波动测试 (%d 轮 %s Ping)\n", r.Ping.Sent, pingProtoLabel(r.Ping))
+			fmt.Fprintf(w, "      ├─ 延迟指标 : Min %v | Avg %v | Max %v\n", r.Ping.MinRTT.Round(time.Millisecond), r.Ping.AvgRTT.Round(time.Millisecond), r.Ping.MaxRTT.Round(time.Millisecond))
+			fmt.Fprintf(w, "      ├─ 网络抖动 : %v (Jitter/标准差)\n", r.Ping.Jitter.Round(time.Millisecond))
+			fmt.Fprintf(w, "      ├─ 丢包表现 : %.1f%% (%d/%d 丢失) %s %s\n", r.Ping.LossRate, r.Ping.LossCount, r.Ping.Sent, statusEmoji, r.Ping.QualityLevel)
 		}
 
-		fmt.Fprintf(w, "      ├─ 延迟指标 : Min %v | Avg %v | Max %v\n", r.Ping.MinRTT.Round(time.Millisecond), r.Ping.AvgRTT.Round(time.Millisecond), r.Ping.MaxRTT.Round(time.Millisecond))
-		fmt.Fprintf(w, "      ├─ 网络抖动 : %v (Jitter/标准差)\n", r.Ping.Jitter.Round(time.Millisecond))
-		fmt.Fprintf(w, "      ├─ 丢包表现 : %.1f%% (%d/%d 丢失) %s %s\n", r.Ping.LossRate, r.Ping.LossCount, r.Ping.Sent, statusEmoji, r.Ping.QualityLevel)
 		if verbose && len(r.Ping.RTTs) > 0 {
 			var rttStrs []string
 			for _, rtt := range r.Ping.RTTs {
@@ -101,11 +109,95 @@ func PrintDiagReport(w io.Writer, r *DiagReport, verbose bool) error {
 	return nil
 }
 
+func formatSubPingLine(p *PingResult, kind string) string {
+	if len(p.RTTs) == 0 {
+		return fmt.Sprintf("丢包 100.0%% (%d/%d 超时)", p.Sent, p.Sent)
+	}
+	if kind == "TCP" && p.LocalProxied {
+		return fmt.Sprintf("Min %v | Avg %v | Max %v (⚠️ 本地 TUN/透明代理已接管 TCP 握手，以 UDP/ICMP 物理链路为准)",
+			p.MinRTT.Round(time.Millisecond),
+			p.AvgRTT.Round(time.Millisecond),
+			p.MaxRTT.Round(time.Millisecond),
+		)
+	}
+	lossDetail := fmt.Sprintf("%d/%d 丢失", p.LossCount, p.Sent)
+	if kind == "TCP" && p.RetransCount > 0 {
+		lossDetail = fmt.Sprintf("%d/%d 异常, 含 %d 次 SYN 丢包重传", p.LossCount, p.Sent, p.RetransCount)
+	} else if kind == "UDP" {
+		lossDetail = fmt.Sprintf("%d/%d 丢失, QUIC 1200B", p.LossCount, p.Sent)
+	}
+	return fmt.Sprintf("丢包 %.1f%% (%s) | Min %v | Avg %v | Max %v | Jitter %v",
+		p.LossRate,
+		lossDetail,
+		p.MinRTT.Round(time.Millisecond),
+		p.AvgRTT.Round(time.Millisecond),
+		p.MaxRTT.Round(time.Millisecond),
+		p.Jitter.Round(time.Millisecond),
+	)
+}
+
+func formatUDPSubPingLine(udp *PingResult, tcp *PingResult) string {
+	if udp.Received > 0 {
+		return formatSubPingLine(udp, "UDP")
+	}
+	if udp.PortClosed {
+		return fmt.Sprintf("端口 %d 已关闭 (Connection Refused，未运行 Hysteria2/QUIC)", udp.Port)
+	}
+	if tcp != nil && len(tcp.RTTs) > 0 {
+		return fmt.Sprintf("100.0%% 超时 (%d/%d) ⚠️ UDP %d 未响应 QUIC (未开启 Hy2/HTTP3 或被防火墙/运营商阻断)", udp.Sent, udp.Sent, udp.Port)
+	}
+	return fmt.Sprintf("丢包 100.0%% (%d/%d 超时)", udp.Sent, udp.Sent)
+}
+
+func formatICMPSubPingLine(icmp *PingResult, tcp *PingResult) string {
+	if icmp.Received > 0 {
+		return formatSubPingLine(icmp, "ICMP")
+	}
+	if tcp != nil && len(tcp.RTTs) > 0 {
+		return fmt.Sprintf("100.0%% 超时 (%d/%d，目标机房可能禁 Ping 或全丢)", icmp.Sent, icmp.Sent)
+	}
+	return fmt.Sprintf("丢包 100.0%% (%d/%d 超时)", icmp.Sent, icmp.Sent)
+}
+
+func qualityEmoji(q RouteQuality) string {
+	switch q {
+	case QualityCongested:
+		return "🟠"
+	case QualitySevere:
+		return "🔴"
+	case QualityGood:
+		return "🟡"
+	default:
+		return "🟢"
+	}
+}
+
 // PrintPingResult 单独格式化输出 Ping 报告
 func PrintPingResult(w io.Writer, p *PingResult) {
-	fmt.Fprintf(w, "📡 目标: %s (端口: %d, %s Ping)\n", p.Target, p.Port, pingTypeStr(p.IsTCP))
-	fmt.Fprintf(w, "已发: %d, 收到: %d, 丢包: %d (%.1f%%)\n", p.Sent, p.Received, p.LossCount, p.LossRate)
-	if p.Received > 0 {
+	if p.TCP != nil || p.UDP != nil || p.ICMP != nil {
+		fmt.Fprintf(w, "📡 目标: %s (端口: %d, 多维并发 Ping: TCP + UDP/QUIC + ICMP)\n", p.Target, p.Port)
+		if p.TCP != nil {
+			fmt.Fprintf(w, "  ├─ TCP 握手  : %s\n", formatSubPingLine(p.TCP, "TCP"))
+		}
+		if p.UDP != nil {
+			fmt.Fprintf(w, "  ├─ UDP/QUIC  : %s\n", formatUDPSubPingLine(p.UDP, p.TCP))
+		}
+		if p.ICMP != nil {
+			fmt.Fprintf(w, "  ├─ ICMP 探测 : %s\n", formatICMPSubPingLine(p.ICMP, p.TCP))
+		}
+		fmt.Fprintf(w, "  └─ 综合评估  : 丢包率 %.1f%% (%d/%d) | 抖动 %v | 链路质量: %s\n",
+			p.LossRate, p.LossCount, p.Sent, p.Jitter.Round(time.Millisecond), p.QualityLevel)
+		return
+	}
+
+	fmt.Fprintf(w, "📡 目标: %s (端口: %d, %s Ping)\n", p.Target, p.Port, pingProtoLabel(p))
+	if p.RetransCount > 0 {
+		fmt.Fprintf(w, "已发: %d, 正常收到: %d, 丢包/重传: %d (%.1f%%, 含 %d 次 SYN 重传)\n",
+			p.Sent, p.Received, p.LossCount, p.LossRate, p.RetransCount)
+	} else {
+		fmt.Fprintf(w, "已发: %d, 收到: %d, 丢包: %d (%.1f%%)\n", p.Sent, p.Received, p.LossCount, p.LossRate)
+	}
+	if len(p.RTTs) > 0 {
 		fmt.Fprintf(w, "往返延迟: Min = %v, Avg = %v, Max = %v, Jitter = %v\n",
 			p.MinRTT.Round(time.Millisecond), p.AvgRTT.Round(time.Millisecond), p.MaxRTT.Round(time.Millisecond), p.Jitter.Round(time.Millisecond))
 	}
@@ -166,8 +258,17 @@ func PrintJSON(w io.Writer, v any) error {
 	return enc.Encode(v)
 }
 
-func pingTypeStr(isTCP bool) string {
-	if isTCP {
+func pingProtoLabel(p *PingResult) string {
+	if p.Protocol != "" && p.Protocol != "MULTI" {
+		if p.Protocol == "UDP" {
+			return "UDP/QUIC"
+		}
+		return p.Protocol
+	}
+	if p.IsUDP {
+		return "UDP/QUIC"
+	}
+	if p.IsTCP {
 		return "TCP"
 	}
 	return "ICMP"

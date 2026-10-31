@@ -22,29 +22,35 @@ func GenerateAdvice(localISP *ISPInfo, ping *PingResult, trace *TraceResult, isP
 	} else {
 		adv.RecommendedProtocol = ProtocolHysteria2
 		if ping.LossRate >= 15.0 {
-			adv.ProtocolReason = fmt.Sprintf("线路丢包率高达 %.1f%%（中重度拥堵），TCP 协议会因丢包频繁触发拥塞退避而严重降速；必须使用 Hysteria 2 凭借 Brutal 拥塞控制暴力抗丢包保活。", ping.LossRate)
+			adv.ProtocolReason = fmt.Sprintf("线路实测综合丢包率高达 %.1f%%（中重度拥堵），TCP 协议会因丢包频繁触发拥塞退避而严重降速或断流；必须使用 Hysteria 2 凭借 Brutal 拥塞控制暴力抗丢包保活。", ping.LossRate)
 		} else {
-			adv.ProtocolReason = fmt.Sprintf("检测到轻微丢包 (%.1f%%) 或延迟抖动波动；Hysteria 2 能更好抹平网络波动带来的卡顿感。", ping.LossRate)
+			adv.ProtocolReason = fmt.Sprintf("检测到丢包 (%.1f%%) 或延迟抖动波动 (%v)；Hysteria 2 能更好抹平网络波动带来的卡顿感。", ping.LossRate, ping.Jitter.Round(time.Millisecond))
+		}
+
+		if ping.UDP != nil {
+			if ping.UDP.Received == 0 && ((ping.TCP != nil && len(ping.TCP.RTTs) > 0) || (ping.ICMP != nil && ping.ICMP.Received > 0)) {
+				adv.ProtocolReason += fmt.Sprintf(" ⚠️ 注意：实测 UDP %d 端口未响应 QUIC 握手，若启用 Hysteria 2 请确认服务端已放行 UDP 端口且未被运营商完全阻断 UDP。", ping.Port)
+			} else if ping.UDP.Received > 0 && ping.TCP != nil && !ping.TCP.LocalProxied && ping.UDP.LossRate >= ping.TCP.LossRate+20.0 {
+				adv.ProtocolReason += fmt.Sprintf(" (检测到 UDP 1200B 大包丢包率 %.1f%% 显著高于 TCP 小包，存在国际出口队列尾丢弃或运营商 UDP QoS 限流，务必限制 hy2 带宽参数以防链路被打死)", ping.UDP.LossRate)
+			} else if ping.UDP.Received > 0 && ping.UDP.LossRate >= 15.0 {
+				adv.ProtocolReason += fmt.Sprintf(" (实测 UDP/QUIC 1200B 真实载荷丢包率达 %.1f%%，建议采用保守 hy2 带宽设置以防触发运营商 UDP QoS)", ping.UDP.LossRate)
+			}
 		}
 	}
 
 	// 2. 推荐 Hysteria 2 上下行带宽 (hy2.up / hy2.down)
 	// 根据实测丢包情况推算安全激进系数，避免暴力打满拥塞链路导致运营商 UDP QoS 扼死
-	baseDown := 150
-	baseUp := 30
-	if ping.LossRate <= 1.0 {
+	if ping.LossRate <= 1.0 && ping.Jitter < 50*time.Millisecond {
 		adv.SuggestedHy2Down = 200
 		adv.SuggestedHy2Up = 30
-	} else if ping.LossRate <= 10.0 {
+	} else if ping.LossRate <= 10.0 && ping.Jitter < 150*time.Millisecond {
 		adv.SuggestedHy2Down = 120
 		adv.SuggestedHy2Up = 20
 	} else {
-		// 丢包 > 10% 时，保守下调发包速率，防止将链路直接打死
+		// 丢包 > 10% 或重度拥堵抖动时，保守下调发包速率，防止将链路直接打死
 		adv.SuggestedHy2Down = 80
 		adv.SuggestedHy2Up = 15
 	}
-	_ = baseDown
-	_ = baseUp
 
 	// 3. 运营商与线路匹配度打分与晚高峰稳定性分析
 	localType := ISPTelecom
@@ -78,7 +84,7 @@ func evaluateCarrierMatch(local ISPType, routeType string, isPeakHour bool) (int
 		case "CN2_GT":
 			return 75, fmt.Sprintf("⚠️ 半程优化。该线路国内省级节点仍走 163 骨干，国际出海口切入 CN2。晚高峰省级节点排队时可能会有轻度抖动，建议备好 Hysteria 2 兜底。%s", peakTag)
 		case "163":
-			return 45, fmt.Sprintf("❌ 严重警告！该节点走传统 163 骨干，电信晚高峰国际出口拥堵严重（丢包常达 20%%%%~40%%%%）。TCP 协议（VLESS）极易断流，务必强制启用 Hysteria 2 抗丢包，或考虑升级更换为 CN2 GIA / 联通 9929 线路。%s", peakTag)
+			return 45, fmt.Sprintf("❌ 严重警告！该节点走传统 163 骨干，电信晚高峰国际出口拥堵严重（丢包常达 20%%~40%%）。TCP 协议（VLESS）极易断流，务必强制启用 Hysteria 2 抗丢包，或考虑升级更换为 CN2 GIA / 联通 9929 线路。%s", peakTag)
 		case "CU9929":
 			return 92, fmt.Sprintf("✨ 联通 9929 反向优化！联通精品网出口对电信互联非常友好，晚高峰表现极其稳定，媲美 CN2 GIA。%s", peakTag)
 		case "CMIN2":
