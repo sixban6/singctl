@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	github.com/mattn/go-runewidth v0.0.31
 	github.com/showwin/speedtest-go v1.7.10
-	github.com/sixban6/singgen v1.14.9
+	github.com/sixban6/singgen v1.14.10
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/crypto v0.58.0
 	gopkg.in/yaml.v3 v3.0.1
