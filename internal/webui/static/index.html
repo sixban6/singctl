@@ -4,8 +4,12 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#0a0e16">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="SingCtl">
 <title>SingCtl · WebUI</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2338bdf8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M13 2 3 14h7l-1 8 10-12h-7l1-8z'/%3E%3C/svg%3E">
+<link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%230a0e16' stroke='%2338bdf8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect width='24' height='24' rx='5' fill='%230a0e16' stroke='none'/%3E%3Cpath d='M13 2 3 14h7l-1 8 10-12h-7l1-8z' fill='%2338bdf8' stroke='%2338bdf8'/%3E%3C/svg%3E">
 <style>
 /* ═══════════════════════ 设计变量 ═══════════════════════ */
 :root, [data-theme="dark"] {
@@ -342,7 +346,10 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; ba
     <div class="card">
       <div class="card-head">
         <div class="card-title"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/></svg>iOS 配置 (iPhone · sing-box App)</div>
-        <div class="btn-row"><a class="btn btn-sm btn-primary" id="btn-ios-download" href="/api/gen/ios" download="singctl-ios.json">下载配置</a></div>
+        <div class="btn-row">
+          <button class="btn btn-sm btn-ghost" id="btn-copy-pwa" title="复制添加到 iPhone 主屏幕免输密码的专属访问链接">📱 桌面免密链接</button>
+          <a class="btn btn-sm btn-primary" id="btn-ios-download" href="/api/gen/ios" download="singctl-ios.json">下载配置</a>
+        </div>
       </div>
       <div style="display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap;">
         <div id="ios-qr" style="background:#fff;border-radius:12px;padding:8px;width:148px;height:148px;flex:none;">​</div>
@@ -635,6 +642,26 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; ba
 <script src="qrcode.js"></script>
 <script>
 "use strict";
+/* ═══════════════════════ 免密 Token 持久化 (解决 iOS 桌面 WebApp 输密码) ═══════════════════════ */
+(function initSessionAuth() {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get("token");
+    const pwd = params.get("password");
+    if (token) {
+      localStorage.setItem("sc_token", token);
+      document.cookie = `singctl_session=${token}; path=/; max-age=2592000; SameSite=Lax`;
+    }
+    // 静默清除地址栏敏感参数, 防复制分享泄漏
+    if (token || pwd) {
+      params.delete("token");
+      params.delete("password");
+      const cleanSearch = params.toString() ? ("?" + params.toString()) : "";
+      window.history.replaceState({}, document.title, window.location.pathname + cleanSearch + window.location.hash);
+    }
+  } catch (e) {}
+})();
+
 /* ═══════════════════════ 工具 ═══════════════════════ */
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
@@ -642,7 +669,12 @@ const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 
 async function api(path, opts = {}) {
-  const r = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
+  const headers = { "Content-Type": "application/json", ...(opts.headers || {}) };
+  const savedToken = localStorage.getItem("sc_token");
+  if (savedToken && !headers["Authorization"]) {
+    headers["Authorization"] = "Bearer " + savedToken;
+  }
+  const r = await fetch(path, { ...opts, headers });
   let data = {};
   try { data = await r.json(); } catch {}
   if (!r.ok) throw new Error(data.error || r.statusText || ("HTTP " + r.status));
@@ -972,6 +1004,10 @@ function renderStatus(st) {
     ["sing-box 配置", '<span class="mono" style="font-size:11.5px;">' + esc(sb.configPath || "-") + "</span>"],
     ["运行平台", esc(h.os) + "/" + esc(h.arch) + (h.openwrt ? " · OpenWrt" : "")],
   ].map(([k, v]) => `<div class="kv"><span class="k">${k}</span><span class="v">${v}</span></div>`).join("");
+
+  if (st.sessionToken) {
+    localStorage.setItem("sc_token", st.sessionToken);
+  }
 }
 
 async function refreshStatus() {
@@ -1051,6 +1087,21 @@ async function loadIOSCard() {
     $("#ios-url").textContent = "无法获取下载地址: " + e.message;
   }
 }
+
+$("#btn-copy-pwa").onclick = async () => {
+  try {
+    const res = await api("/api/session/url");
+    if (!res || !res.url) throw new Error("获取链接失败");
+    await navigator.clipboard.writeText(res.url);
+    toast("ok", "已复制手机免密链接！用 iPhone Safari 打开并选择「添加到主屏幕」即可永久免输密码");
+  } catch (e) {
+    const token = localStorage.getItem("sc_token");
+    const u = new URL(window.location.origin + window.location.pathname);
+    if (token) u.searchParams.set("token", token);
+    await navigator.clipboard.writeText(u.toString());
+    toast("ok", "已复制免密链接！用 iPhone Safari 打开并选择「添加到主屏幕」");
+  }
+};
 
 /* ═══════════════════════ 配置编辑 ═══════════════════════ */
 let cfgUseBuild = false; // 表单未展示的字段,保存时原样保留

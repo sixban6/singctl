@@ -7,9 +7,13 @@
 package webui
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
 	"crypto/subtle"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"net"
 	"net/http"
@@ -17,7 +21,11 @@ import (
 	"sync"
 
 	"singctl/internal/logger"
+	"singctl/internal/util/netinfo"
 )
+
+// sessionCookieName 持久化 Cookie 键名,用于 Safari/PWA 独立沙盒免密免登
+const sessionCookieName = "singctl_session"
 
 //go:embed static
 var staticFS embed.FS
@@ -61,6 +69,10 @@ func New(opts Options) *Server {
 	s.mux.HandleFunc("PUT /api/config/raw", s.guard(s.handleConfigRawPut))
 	s.mux.HandleFunc("GET /api/cache", s.guard(s.handleCache))
 	s.mux.HandleFunc("GET /api/logs", s.guard(s.handleLogs))
+
+	// 登出 API (清除持久化 Cookie)
+	s.mux.HandleFunc("POST /api/logout", s.handleLogout)
+	s.mux.HandleFunc("GET /api/session/url", s.guard(s.handleSessionURL))
 
 	// iOS(sing-box App) 配置下载: 支持扫码 ?password= 鉴权(同时容忍尾斜杠)
 	s.mux.HandleFunc("GET /api/gen/ios", s.guardIOSDownload(s.handleIOSConfig))
@@ -124,6 +136,35 @@ func lanIPv4() string {
 	return ""
 }
 
+// sessionToken 根据访问口令派生无状态持久化 Token (HMAC-SHA256)
+func (s *Server) sessionToken() string {
+	if s.opts.Password == "" {
+		return ""
+	}
+	mac := hmac.New(sha256.New, []byte("singctl-webui-session-salt-v1"))
+	mac.Write([]byte(s.opts.Password))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// setAuthCookie 若客户端未携带或携带无效 Cookie, 在通过鉴权后下发 30 天持久化 Cookie
+func (s *Server) setAuthCookie(w http.ResponseWriter, r *http.Request) {
+	token := s.sessionToken()
+	if token == "" {
+		return
+	}
+	if c, err := r.Cookie(sessionCookieName); err == nil && subtle.ConstantTimeCompare([]byte(c.Value), []byte(token)) == 1 {
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    token,
+		Path:     "/",
+		MaxAge:   30 * 86400, // 30 天持久化,完美解决 iOS 添加到主屏幕后频繁要求输密码的问题
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
 // guard 包装器:统一鉴权、JSON 错误输出、方法校验
 func (s *Server) guard(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -132,6 +173,7 @@ func (s *Server) guard(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
+		s.setAuthCookie(w, r)
 		// 轻量 CSRF 防护:写操作要求 JSON Content-Type(跨站表单无法伪造)
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
@@ -151,36 +193,98 @@ func (s *Server) authOnly(next http.Handler) http.Handler {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
+		s.setAuthCookie(w, r)
 		next.ServeHTTP(w, r)
 	})
 }
 
-// authorized 校验 Basic Auth(可选)
+// authorized 校验多通道凭据 (支持 Cookie、Bearer Token、URL 参数、Basic Auth)
 func (s *Server) authorized(r *http.Request) bool {
 	if s.opts.Password == "" {
 		return true
 	}
-	user, pass, ok := r.BasicAuth()
-	if !ok || user != "admin" {
-		return false
+	expectedToken := s.sessionToken()
+
+	// 1. 持久化 Cookie (最适合 iOS 桌面 WebApp 沙盒持久化)
+	if cookie, err := r.Cookie(sessionCookieName); err == nil && cookie.Value != "" {
+		if subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(expectedToken)) == 1 {
+			return true
+		}
 	}
-	return subtle.ConstantTimeCompare([]byte(pass), []byte(s.opts.Password)) == 1
+
+	// 2. Header: Authorization: Bearer <token>
+	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+		token := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
+		if subtle.ConstantTimeCompare([]byte(token), []byte(expectedToken)) == 1 {
+			return true
+		}
+	}
+
+	// 3. URL Query 参数 (?token=... 或 ?password=...), 方便添加到手机桌面时内嵌免密凭据
+	if qToken := r.URL.Query().Get("token"); qToken != "" {
+		if subtle.ConstantTimeCompare([]byte(qToken), []byte(expectedToken)) == 1 {
+			return true
+		}
+	}
+	if qPass := r.URL.Query().Get("password"); qPass != "" {
+		if subtle.ConstantTimeCompare([]byte(qPass), []byte(s.opts.Password)) == 1 {
+			return true
+		}
+	}
+
+	// 4. 标准 HTTP Basic Auth (admin / password)
+	user, pass, ok := r.BasicAuth()
+	if ok && user == "admin" {
+		if subtle.ConstantTimeCompare([]byte(pass), []byte(s.opts.Password)) == 1 {
+			return true
+		}
+	}
+
+	return false
 }
 
-// guardIOSDownload iOS 配置下载端点专用鉴权:
-// 除 Basic Auth 外还接受 ?password= 查询参数 —— 手机扫码下载时 Safari 不便输入 Basic 凭据,
-// 二维码 URL 会内嵌口令(与 Basic 口令同一秘密, 泄露面等价)
+// guardIOSDownload iOS 配置下载端点专用鉴权
 func (s *Server) guardIOSDownload(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.opts.Password != "" && !s.authorized(r) {
-			q := r.URL.Query().Get("password")
-			if subtle.ConstantTimeCompare([]byte(q), []byte(s.opts.Password)) != 1 {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
+		if !s.authorized(r) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
 		}
 		next(w, r)
 	}
+}
+
+// handleLogout 登出并清理 Cookie
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+	})
+	writeJSON(w, http.StatusOK, map[string]string{"message": "已退出登录"})
+}
+
+// handleSessionURL 返回手机添加到主屏幕专用的免密访问 URL (含局域网 IP 与持久 Token)
+func (s *Server) handleSessionURL(w http.ResponseWriter, r *http.Request) {
+	lanIP := "127.0.0.1"
+	if ni, err := netinfo.Get(); err == nil && ni.LANIPv4 != "" {
+		lanIP = ni.LANIPv4
+	}
+	_, port, err := net.SplitHostPort(s.opts.Listen)
+	if err != nil || port == "" {
+		port = "8090"
+	}
+	targetURL := fmt.Sprintf("http://%s:%s/", lanIP, port)
+	token := s.sessionToken()
+	if token != "" {
+		targetURL += "?token=" + token
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"url":   targetURL,
+		"token": token,
+	})
 }
 
 // ───────────────────────── 内部工具 ─────────────────────────

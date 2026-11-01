@@ -32,6 +32,8 @@ import (
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	status := map[string]any{
 		"singctlVersion": s.opts.Version,
+		"authEnabled":    s.opts.Password != "",
+		"sessionToken":   s.sessionToken(),
 		"host":           hostInfo(),
 		"singbox":        singboxStatus(),
 		"daemon":         daemonStatus(s.watchdogMaxRestarts()),
