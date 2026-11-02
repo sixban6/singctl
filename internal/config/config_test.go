@@ -280,8 +280,8 @@ func TestGenerateRandomAdminPath(t *testing.T) {
 			t.Fatalf("expected prefix /sr/, got %s", p)
 		}
 		token := strings.TrimPrefix(p, "/sr/")
-		if len(token) != 16 {
-			t.Fatalf("expected token length 16, got %d (%s)", len(token), token)
+		if len(token) != 24 {
+			t.Fatalf("expected token length 24, got %d (%s)", len(token), token)
 		}
 
 		hasUpper := false
@@ -319,8 +319,8 @@ func TestEnsureWebAdminCredentials_PathUpgrade(t *testing.T) {
 		t.Fatalf("expected upgraded path with /sr/ prefix, got %s", s.WebAdmin.Path)
 	}
 	token := strings.TrimPrefix(s.WebAdmin.Path, "/sr/")
-	if len(token) != 16 {
-		t.Fatalf("expected 16-char token, got %s (len %d)", token, len(token))
+	if len(token) != 24 {
+		t.Fatalf("expected 24-char token, got %s (len %d)", token, len(token))
 	}
 }
 

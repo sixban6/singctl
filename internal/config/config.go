@@ -130,9 +130,9 @@ func GenerateAdminToken(length int) string {
 	return string(buf)
 }
 
-// GenerateRandomAdminPath 生成 /sr/ 加上 16 位包含大小写字母和数字的高熵路径，例如 /sr/3aB9kLmN2pQrSt8X
+// GenerateRandomAdminPath 生成 /sr/ 加上 24 位包含大小写字母和数字的高熵路径，例如 /sr/3aB9kLmN2pQrSt8XWk9Lp2Zx
 func GenerateRandomAdminPath() string {
-	return "/sr/" + GenerateAdminToken(16)
+	return "/sr/" + GenerateAdminToken(24)
 }
 
 // GenerateSecurePassword 生成 8 位包含大写字母、小写字母和数字的强随机密码

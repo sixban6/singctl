@@ -210,7 +210,38 @@ func NewServerCmd(configPath string) *cobra.Command {
 	cmd.AddCommand(newServerDoctorCmd(configPath))
 	cmd.AddCommand(newMaskSiteCmd(configPath))
 	cmd.AddCommand(newServerUpdateCmd(configPath))
+	cmd.AddCommand(newServerCheckCmd(configPath))
 	return cmd
+}
+
+func newServerCheckCmd(configPath string) *cobra.Command {
+	return &cobra.Command{
+		Use:     "check-update [component]",
+		Aliases: []string{"checkver", "cu"},
+		Short:   "检查核心组件远端是否有新版本 / Check latest remote versions (singbox|caddy|substore|warp)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			target := "singbox"
+			if len(args) > 0 {
+				target = args[0]
+			}
+			resolvedPath := resolveConfigPath(cmd, configPath)
+			cfg, err := config.Load(resolvedPath)
+			if err != nil {
+				return fmt.Errorf("无法加载配置文件: %w", err)
+			}
+
+			res, err := deploy.CheckComponentUpdate(target, cfg)
+			if err != nil {
+				return err
+			}
+			if res.HasUpdate {
+				logger.Warn("[%s] 发现新版本: v%s (当前本地: v%s)，可运行 'singctl sr update %s' 进行升级", res.DisplayName, res.LatestVersion, res.CurrentVersion, res.Component)
+			} else {
+				logger.Success("[%s] %s", res.DisplayName, res.Message)
+			}
+			return nil
+		},
+	}
 }
 
 func newServerUpdateCmd(configPath string) *cobra.Command {

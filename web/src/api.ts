@@ -6,6 +6,7 @@ import {
   BannedIP,
   DoctorReport,
   MediaUnlockReport,
+  CheckUpdateResponse,
 } from './types';
 
 export const getBasePath = (): string => {
@@ -59,6 +60,9 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ service, action }),
     }),
+
+  checkServiceUpdate: (service: string) =>
+    request<CheckUpdateResponse>(`/api/server/service/check-update?service=${encodeURIComponent(service)}`),
 
   upgradeService: (service: string) =>
     request<{ message: string; results?: any[] }>('/api/server/service/upgrade', {

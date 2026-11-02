@@ -158,3 +158,12 @@ export interface MediaUnlockReport {
   warp: ExitProfile;
   testedAt: string;
 }
+
+export interface CheckUpdateResponse {
+  component: string;
+  displayName: string;
+  currentVersion: string;
+  latestVersion: string;
+  hasUpdate: boolean;
+  message: string;
+}

@@ -101,6 +101,7 @@ func New(opts Options) *Server {
 	s.mux.HandleFunc("GET /api/server/subscriptions", s.guard(s.handleSubscriptions))
 	s.mux.HandleFunc("POST /api/server/action", s.guard(s.handleAction))
 	s.mux.HandleFunc("POST /api/server/service/action", s.guard(s.handleServiceAction))
+	s.mux.HandleFunc("GET /api/server/service/check-update", s.guard(s.handleCheckServiceUpdate))
 	s.mux.HandleFunc("POST /api/server/service/upgrade", s.guard(s.handleUpgradeService))
 	s.mux.HandleFunc("GET /api/server/service/logs", s.guard(s.handleServiceLogs))
 	s.mux.HandleFunc("GET /api/server/service/config", s.guard(s.handleServiceConfig))
@@ -527,6 +528,23 @@ func (s *Server) handleServiceAction(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{
 		"message": fmt.Sprintf("服务 %s 动作 %s 执行成功", service, action),
 	})
+}
+
+func (s *Server) handleCheckServiceUpdate(w http.ResponseWriter, r *http.Request) {
+	service := strings.TrimSpace(r.URL.Query().Get("service"))
+	if service == "" {
+		writeJSONError(w, http.StatusBadRequest, "缺少检查目标服务名称 (service)")
+		return
+	}
+
+	cfg, _ := config.Load(s.opts.ConfigPath)
+	res, err := deploy.CheckComponentUpdate(service, cfg)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, res)
 }
 
 func (s *Server) handleUpgradeService(w http.ResponseWriter, r *http.Request) {

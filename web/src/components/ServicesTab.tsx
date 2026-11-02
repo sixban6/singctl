@@ -23,18 +23,116 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
   const [updatingSNI, setUpdatingSNI] = useState(false);
   const [showSyncNotice, setShowSyncNotice] = useState(false);
 
-  const handleUpgrade = async (service: string) => {
+  // 状态字典: service -> { checked, hasUpdate, latestVersion, message }
+  const [updateStates, setUpdateStates] = useState<Record<string, { checked: boolean; hasUpdate: boolean; latestVersion: string; message?: string }>>({});
+
+  const handleCheckUpdate = async (service: string) => {
+    const key = `${service}-check`;
+    setLoading(key);
+    try {
+      const res = await api.checkServiceUpdate(service);
+      setUpdateStates(prev => ({
+        ...prev,
+        [service]: {
+          checked: true,
+          hasUpdate: res.hasUpdate,
+          latestVersion: res.latestVersion,
+          message: res.message,
+        },
+      }));
+      if (res.hasUpdate) {
+        success(`发现新版本 (v${res.latestVersion})，可点击升级按钮`);
+      } else {
+        success(res.message || `${service} 已是最新稳定版本，无需更新`);
+      }
+    } catch (err: any) {
+      error(err.message || `${service} 检查更新失败`);
+    } finally {
+      setLoading(null);
+    }
+  };
+
+  const handleExecuteUpgrade = async (service: string) => {
     const key = `${service}-upgrade`;
     setLoading(key);
     try {
       const res = await api.upgradeService(service);
-      success(res.message || `${service} 升级指令已完成`);
+      success(res.message || `${service} 平滑升级成功`);
+      // 重置该组件检查状态
+      setUpdateStates(prev => {
+        const next = { ...prev };
+        delete next[service];
+        return next;
+      });
       setTimeout(onRefresh, 1500);
     } catch (err: any) {
       error(err.message || `${service} 升级失败`);
     } finally {
       setLoading(null);
     }
+  };
+
+  const renderUpgradeAction = (service: string, color: 'emerald' | 'blue' | 'purple' | 'amber') => {
+    const info = updateStates[service];
+    const isChecking = loading === `${service}-check`;
+    const isUpgrading = loading === `${service}-upgrade`;
+
+    // 1. 若检测到新版本: 渲染高亮醒目的立即升级按钮
+    if (info?.hasUpdate) {
+      const gradients = {
+        emerald: 'from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 shadow-emerald-500/20',
+        blue: 'from-blue-500 to-indigo-600 hover:from-blue-400 hover:to-indigo-500 shadow-blue-500/20',
+        purple: 'from-purple-500 to-pink-600 hover:from-purple-400 hover:to-pink-500 shadow-purple-500/20',
+        amber: 'from-amber-500 to-orange-600 hover:from-amber-400 hover:to-orange-500 shadow-amber-500/20',
+      };
+
+      return (
+        <button
+          onClick={() => handleExecuteUpgrade(service)}
+          disabled={isUpgrading}
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gradient-to-r ${gradients[color]} text-white shadow-lg text-xs font-bold transition-all`}
+          title={`检测到远端新版本 (v${info.latestVersion})，点击立即下载并平滑重启`}
+        >
+          <ArrowUpCircle className={`w-3.5 h-3.5 ${isUpgrading ? 'animate-spin' : ''}`} />
+          <span>{isUpgrading ? '正在平滑升级...' : `立即升级至 v${info.latestVersion}`}</span>
+        </button>
+      );
+    }
+
+    // 2. 若已检查且已是最新版本: 渲染已是最新状态
+    if (info?.checked && !info.hasUpdate) {
+      return (
+        <button
+          onClick={() => handleCheckUpdate(service)}
+          disabled={isChecking}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-xs font-semibold text-emerald-400 transition-colors"
+          title="当前核心已是最新稳定版本 (点击可重新探查)"
+        >
+          <CheckCircle2 className={`w-3.5 h-3.5 ${isChecking ? 'animate-spin' : 'text-emerald-400'}`} />
+          <span>{isChecking ? '探查中...' : '已是最新'}</span>
+        </button>
+      );
+    }
+
+    // 3. 默认初始状态: 检查更新
+    const themeBorders = {
+      emerald: 'bg-emerald-500/10 hover:bg-emerald-500/20 border-emerald-500/30 text-emerald-300',
+      blue: 'bg-blue-500/10 hover:bg-blue-500/20 border-blue-500/30 text-blue-300',
+      purple: 'bg-purple-500/10 hover:bg-purple-500/20 border-purple-500/30 text-purple-300',
+      amber: 'bg-amber-500/10 hover:bg-amber-500/20 border-amber-500/30 text-amber-300',
+    };
+
+    return (
+      <button
+        onClick={() => handleCheckUpdate(service)}
+        disabled={isChecking}
+        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-semibold transition-colors ${themeBorders[color]}`}
+        title="在线检查远端版本更新"
+      >
+        <RefreshCw className={`w-3.5 h-3.5 ${isChecking ? 'animate-spin' : ''}`} />
+        <span>{isChecking ? '检查中...' : '检查更新'}</span>
+      </button>
+    );
   };
 
   const handleEnableBBR = async () => {
@@ -152,6 +250,11 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
                     {singbox.version}
                   </span>
                 )}
+                {updateStates.singbox?.hasUpdate && (
+                  <span className="px-2 py-0.5 rounded-md bg-amber-500/20 text-amber-300 border border-amber-500/30 text-xs font-mono font-medium animate-pulse">
+                    新版 v{updateStates.singbox.latestVersion}
+                  </span>
+                )}
                 <div
                   className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${
                     singbox?.running
@@ -194,15 +297,7 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
           </div>
 
           <div className="mt-5 pt-4 border-t border-slate-800 flex flex-wrap gap-2">
-            <button
-              onClick={() => handleUpgrade('singbox')}
-              disabled={loading === 'singbox-upgrade'}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-xs font-semibold text-emerald-300 transition-colors"
-              title="检查并平滑升级 sing-box 核心至最新稳定版本"
-            >
-              <ArrowUpCircle className={`w-3.5 h-3.5 ${loading === 'singbox-upgrade' ? 'animate-spin' : ''}`} />
-              <span>{loading === 'singbox-upgrade' ? '升级中...' : '检查升级'}</span>
-            </button>
+            {renderUpgradeAction('singbox', 'emerald')}
             <button
               onClick={() => handleAction('singbox', 'restart')}
               disabled={loading === 'singbox-restart'}
@@ -255,6 +350,11 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
                     {caddy.version}
                   </span>
                 )}
+                {updateStates.caddy?.hasUpdate && (
+                  <span className="px-2 py-0.5 rounded-md bg-amber-500/20 text-amber-300 border border-amber-500/30 text-xs font-mono font-medium animate-pulse">
+                    新版 v{updateStates.caddy.latestVersion}
+                  </span>
+                )}
                 <div
                   className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${
                     caddy?.running
@@ -297,15 +397,7 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
           </div>
 
           <div className="mt-5 pt-4 border-t border-slate-800 flex flex-wrap gap-2">
-            <button
-              onClick={() => handleUpgrade('caddy')}
-              disabled={loading === 'caddy-upgrade'}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/30 text-xs font-semibold text-blue-300 transition-colors"
-              title="检查并平滑升级 Caddy 网关 (包含 Cloudflare DNS 与 Layer4 定制模块)"
-            >
-              <ArrowUpCircle className={`w-3.5 h-3.5 ${loading === 'caddy-upgrade' ? 'animate-spin' : ''}`} />
-              <span>{loading === 'caddy-upgrade' ? '升级中...' : '检查升级'}</span>
-            </button>
+            {renderUpgradeAction('caddy', 'blue')}
             <button
               onClick={() => handleAction('caddy', 'reload')}
               disabled={loading === 'caddy-reload'}
@@ -379,6 +471,11 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
                     {substore.version}
                   </span>
                 )}
+                {updateStates.substore?.hasUpdate && (
+                  <span className="px-2 py-0.5 rounded-md bg-amber-500/20 text-amber-300 border border-amber-500/30 text-xs font-mono font-medium animate-pulse">
+                    新版 v{updateStates.substore.latestVersion}
+                  </span>
+                )}
                 <div
                   className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${
                     substore?.running
@@ -413,15 +510,7 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
           </div>
 
           <div className="mt-5 pt-4 border-t border-slate-800 flex flex-wrap gap-2">
-            <button
-              onClick={() => handleUpgrade('substore')}
-              disabled={loading === 'substore-upgrade'}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-purple-500/10 hover:bg-purple-500/20 border border-purple-500/30 text-xs font-semibold text-purple-300 transition-colors"
-              title="拉取 Sub-Store 最新镜像并平滑重建容器 (保留所有订阅数据)"
-            >
-              <ArrowUpCircle className={`w-3.5 h-3.5 ${loading === 'substore-upgrade' ? 'animate-spin' : ''}`} />
-              <span>{loading === 'substore-upgrade' ? '升级中...' : '检查升级'}</span>
-            </button>
+            {renderUpgradeAction('substore', 'purple')}
             <button
               onClick={() => handleAction('substore', 'restart')}
               disabled={loading === 'substore-restart'}
@@ -469,6 +558,11 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
                     {warp.version}
                   </span>
                 )}
+                {updateStates.warp?.hasUpdate && (
+                  <span className="px-2 py-0.5 rounded-md bg-amber-500/20 text-amber-300 border border-amber-500/30 text-xs font-mono font-medium animate-pulse">
+                    新版 v{updateStates.warp.latestVersion}
+                  </span>
+                )}
                 <div
                   className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${
                     warp?.running
@@ -503,15 +597,7 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
           </div>
 
           <div className="mt-5 pt-4 border-t border-slate-800 flex flex-wrap gap-2">
-            <button
-              onClick={() => handleUpgrade('warp')}
-              disabled={loading === 'warp-upgrade'}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-xs font-semibold text-amber-300 transition-colors"
-              title="检查并平滑升级 wireproxy 核心"
-            >
-              <ArrowUpCircle className={`w-3.5 h-3.5 ${loading === 'warp-upgrade' ? 'animate-spin' : ''}`} />
-              <span>{loading === 'warp-upgrade' ? '升级中...' : '检查升级'}</span>
-            </button>
+            {renderUpgradeAction('warp', 'amber')}
             <button
               onClick={() => handleAction('warp', 'restart')}
               disabled={loading === 'warp-restart'}

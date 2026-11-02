@@ -30,10 +30,193 @@ type UpgradeResult struct {
 	Updated     bool   `json:"updated"`
 }
 
+// CheckUpdateResult represents the inspection of latest remote version vs local version.
+type CheckUpdateResult struct {
+	Component      string `json:"component"`
+	DisplayName    string `json:"displayName"`
+	CurrentVersion string `json:"currentVersion"`
+	LatestVersion  string `json:"latestVersion"`
+	HasUpdate      bool   `json:"hasUpdate"`
+	Message        string `json:"message"`
+}
+
+// cleanVersion normalizes version string by removing 'v' prefix and trimming whitespace.
+func cleanVersion(v string) string {
+	v = strings.TrimSpace(v)
+	v = strings.TrimPrefix(v, "v")
+	return v
+}
+
+// isNewerVersion returns true if remoteVer is strictly greater than localVer.
+func isNewerVersion(localVer, remoteVer string) bool {
+	l := cleanVersion(localVer)
+	r := cleanVersion(remoteVer)
+	if l == "" || r == "" {
+		return false
+	}
+	if l == r {
+		return false
+	}
+
+	lParts := strings.Split(l, ".")
+	rParts := strings.Split(r, ".")
+	maxLen := len(lParts)
+	if len(rParts) > maxLen {
+		maxLen = len(rParts)
+	}
+
+	for i := 0; i < maxLen; i++ {
+		var lNum, rNum int
+		if i < len(lParts) {
+			var sub string
+			for _, ch := range lParts[i] {
+				if ch >= '0' && ch <= '9' {
+					sub += string(ch)
+				} else {
+					break
+				}
+			}
+			if sub != "" {
+				fmt.Sscanf(sub, "%d", &lNum)
+			}
+		}
+		if i < len(rParts) {
+			var sub string
+			for _, ch := range rParts[i] {
+				if ch >= '0' && ch <= '9' {
+					sub += string(ch)
+				} else {
+					break
+				}
+			}
+			if sub != "" {
+				fmt.Sscanf(sub, "%d", &rNum)
+			}
+		}
+
+		if rNum > lNum {
+			return true
+		} else if rNum < lNum {
+			return false
+		}
+	}
+
+	return false
+}
+
+// CheckComponentUpdate inspects if a component has a newer version available upstream.
+func CheckComponentUpdate(target string, cfg *config.Config) (*CheckUpdateResult, error) {
+	fetcher := github.NewReleaseFetcher(getMirrorURL(cfg), ReleaseClient)
+
+	switch strings.ToLower(target) {
+	case "singbox", "sb", "sing-box":
+		curr := GetInstalledSingBoxVersion()
+		tag, err := fetcher.FetchLatestTag("SagerNet/sing-box")
+		latest := cleanVersion(tag)
+		if err != nil || latest == "" {
+			latest = curr
+		}
+		hasUp := isNewerVersion(curr, latest)
+		msg := fmt.Sprintf("sing-box 已是最新版本 (v%s)", curr)
+		if hasUp {
+			msg = fmt.Sprintf("发现 sing-box 新版本: v%s (当前: v%s)", latest, curr)
+		}
+		return &CheckUpdateResult{
+			Component:      "singbox",
+			DisplayName:    "sing-box 代理核心",
+			CurrentVersion: curr,
+			LatestVersion:  latest,
+			HasUpdate:      hasUp,
+			Message:        msg,
+		}, nil
+
+	case "caddy":
+		curr := GetInstalledCaddyVersion()
+		tag, err := fetcher.FetchLatestTag("caddyserver/caddy")
+		latest := cleanVersion(tag)
+		if err != nil || latest == "" {
+			latest = curr
+		}
+		hasUp := isNewerVersion(curr, latest)
+		msg := fmt.Sprintf("Caddy 已是最新版本 (v%s)", curr)
+		if hasUp {
+			msg = fmt.Sprintf("发现 Caddy 新版本: v%s (当前: v%s)", latest, curr)
+		}
+		return &CheckUpdateResult{
+			Component:      "caddy",
+			DisplayName:    "Caddy 网关",
+			CurrentVersion: curr,
+			LatestVersion:  latest,
+			HasUpdate:      hasUp,
+			Message:        msg,
+		}, nil
+
+	case "substore", "ss", "sub-store":
+		curr := GetInstalledSubstoreVersion()
+		tag, err := fetcher.FetchLatestTag("xream/sub-store")
+		latest := cleanVersion(tag)
+		if err != nil || latest == "" {
+			latest = curr
+		}
+		hasUp := isNewerVersion(curr, latest)
+		msg := fmt.Sprintf("Sub-Store 已是最新版本 (%s)", curr)
+		if hasUp {
+			msg = fmt.Sprintf("发现 Sub-Store 新版本: %s (当前: %s)", latest, curr)
+		}
+		return &CheckUpdateResult{
+			Component:      "substore",
+			DisplayName:    "Sub-Store 订阅中心",
+			CurrentVersion: curr,
+			LatestVersion:  latest,
+			HasUpdate:      hasUp,
+			Message:        msg,
+		}, nil
+
+	case "warp", "wireproxy":
+		curr := GetInstalledWarpVersion()
+		tag, err := fetcher.FetchLatestTag("windtf/wireproxy")
+		latest := cleanVersion(tag)
+		if err != nil || latest == "" {
+			latest = curr
+		}
+		hasUp := isNewerVersion(curr, latest)
+		msg := fmt.Sprintf("WARP (wireproxy) 已是最新版本 (v%s)", curr)
+		if hasUp {
+			msg = fmt.Sprintf("发现 WARP (wireproxy) 新版本: v%s (当前: v%s)", latest, curr)
+		}
+		return &CheckUpdateResult{
+			Component:      "warp",
+			DisplayName:    "WARP 出口",
+			CurrentVersion: curr,
+			LatestVersion:  latest,
+			HasUpdate:      hasUp,
+			Message:        msg,
+		}, nil
+
+	default:
+		return nil, fmt.Errorf("未知的服务组件: %s", target)
+	}
+}
+
 // UpgradeSingbox updates sing-box to the latest version and restarts its service.
 func UpgradeSingbox(cfg *config.Config) (*UpgradeResult, error) {
 	oldVer := GetInstalledSingBoxVersion()
 	logger.Info("Starting sing-box core upgrade (current: %s)...", oldVer)
+
+	fetcher := github.NewReleaseFetcher(getMirrorURL(cfg), ReleaseClient)
+	latestTag, _ := fetcher.FetchLatestTag("SagerNet/sing-box")
+	latest := cleanVersion(latestTag)
+	if latest != "" && !isNewerVersion(oldVer, latest) {
+		logger.Success("sing-box 已是最新版本 (%s)，无需重复更新", oldVer)
+		return &UpgradeResult{
+			Component:   "singbox",
+			DisplayName: "sing-box 代理核心",
+			OldVersion:  oldVer,
+			NewVersion:  oldVer,
+			Message:     fmt.Sprintf("sing-box 当前已是最新版本 (v%s)，无需重复更新", oldVer),
+			Updated:     false,
+		}, nil
+	}
 
 	sb := singbox.New(cfg)
 	if err := sb.Update(); err != nil {
@@ -60,6 +243,21 @@ func UpgradeSingbox(cfg *config.Config) (*UpgradeResult, error) {
 func UpgradeCaddy(cfg *config.Config) (*UpgradeResult, error) {
 	oldVer := GetInstalledCaddyVersion()
 	logger.Info("Starting Caddy gateway upgrade (current: %s)...", oldVer)
+
+	fetcher := github.NewReleaseFetcher(getMirrorURL(cfg), ReleaseClient)
+	latestTag, _ := fetcher.FetchLatestTag("caddyserver/caddy")
+	latest := cleanVersion(latestTag)
+	if latest != "" && !isNewerVersion(oldVer, latest) {
+		logger.Success("Caddy 已是最新版本 (%s)，无需重复更新", oldVer)
+		return &UpgradeResult{
+			Component:   "caddy",
+			DisplayName: "Caddy 网关",
+			OldVersion:  oldVer,
+			NewVersion:  oldVer,
+			Message:     fmt.Sprintf("Caddy 当前已是最新版本 (v%s)，无需重复更新", oldVer),
+			Updated:     false,
+		}, nil
+	}
 
 	arch := runtime.GOARCH
 	caddyTar := fmt.Sprintf("caddy-custom-linux-%s.tar.gz", arch)
@@ -161,6 +359,18 @@ func UpgradeWarp(cfg *config.Config) (*UpgradeResult, error) {
 	latestTag, err := fetcher.FetchLatestTag("windtf/wireproxy")
 	if err != nil {
 		latestTag = "latest"
+	}
+	latest := cleanVersion(latestTag)
+	if latest != "" && latest != "latest" && !isNewerVersion(oldVer, latest) {
+		logger.Success("WARP (wireproxy) 已是最新版本 (%s)，无需重复更新", oldVer)
+		return &UpgradeResult{
+			Component:   "warp",
+			DisplayName: "WARP (wireproxy)",
+			OldVersion:  oldVer,
+			NewVersion:  oldVer,
+			Message:     fmt.Sprintf("WARP (wireproxy) 当前已是最新版本 (v%s)，无需重复更新", oldVer),
+			Updated:     false,
+		}, nil
 	}
 
 	downloadURL := fmt.Sprintf("https://github.com/windtf/wireproxy/releases/download/%s/%s", latestTag, wireproxyTar)
