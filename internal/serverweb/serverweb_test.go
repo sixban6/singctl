@@ -2,6 +2,7 @@ package serverweb
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -163,6 +164,62 @@ server:
 		// 验证内存更新
 		if srv.getUsername() != "myuser" || srv.getPassword() != "NewPassword888" {
 			t.Fatalf("expected memory credentials updated, got user=%s pass=%s", srv.getUsername(), srv.getPassword())
+		}
+	}
+
+	// 7. IP 防暴破封禁测试 (3次错误封锁)
+	{
+		remoteIP := "198.51.100.88"
+
+		for i := 1; i <= 2; i++ {
+			req := httptest.NewRequest("POST", "/api/server/login", strings.NewReader(`{"username":"myuser","password":"bad"}`))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-Forwarded-For", remoteIP)
+			rec := httptest.NewRecorder()
+			srv.mux.ServeHTTP(rec, req)
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("attempt %d: expected 401, got %d", i, rec.Code)
+			}
+		}
+
+		// 第 3 次失败 -> 触发 429 Too Many Requests
+		req := httptest.NewRequest("POST", "/api/server/login", strings.NewReader(`{"username":"myuser","password":"bad"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Forwarded-For", remoteIP)
+		rec := httptest.NewRecorder()
+		srv.mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusTooManyRequests {
+			t.Fatalf("attempt 3: expected 429 Too Many Requests, got %d (%s)", rec.Code, rec.Body.String())
+		}
+
+		// 处于封禁期，即使输入正确密码也应当被直接拦截返回 429
+		req = httptest.NewRequest("POST", "/api/server/login", strings.NewReader(`{"username":"myuser","password":"NewPassword888"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Forwarded-For", remoteIP)
+		rec = httptest.NewRecorder()
+		srv.mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusTooManyRequests {
+			t.Fatalf("while banned: expected 429, got %d", rec.Code)
+		}
+
+		// 调用 POST /api/server/unban 解封
+		unbanReq := httptest.NewRequest("POST", "/api/server/unban", strings.NewReader(fmt.Sprintf(`{"ip":"%s"}`, remoteIP)))
+		unbanReq.Header.Set("Content-Type", "application/json")
+		unbanReq.RemoteAddr = "127.0.0.1:9999" // 本机解封
+		unbanRec := httptest.NewRecorder()
+		srv.mux.ServeHTTP(unbanRec, unbanReq)
+		if unbanRec.Code != http.StatusOK {
+			t.Fatalf("expected 200 for unban, got %d", unbanRec.Code)
+		}
+
+		// 解封后输入正确密码应当成功登录 200
+		req = httptest.NewRequest("POST", "/api/server/login", strings.NewReader(`{"username":"myuser","password":"NewPassword888"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Forwarded-For", remoteIP)
+		rec = httptest.NewRecorder()
+		srv.mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("after unban: expected 200, got %d", rec.Code)
 		}
 	}
 }

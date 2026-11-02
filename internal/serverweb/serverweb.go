@@ -52,6 +52,7 @@ type Server struct {
 	mu         sync.RWMutex
 	sessions   map[string]time.Time
 	sessionsMu sync.RWMutex
+	limiter    *IPLimiter
 }
 
 // New 创建服务端 Web 实例
@@ -83,6 +84,7 @@ func New(opts Options) *Server {
 		opts:     opts,
 		mux:      http.NewServeMux(),
 		sessions: make(map[string]time.Time),
+		limiter:  NewIPLimiter(3, 10*time.Minute, 15*time.Minute),
 	}
 
 	// 静态单页面：放行静态资源，敏感 API 均受 guard 保护
@@ -111,6 +113,8 @@ func New(opts Options) *Server {
 	s.mux.HandleFunc("PUT /api/server/credentials", s.guard(s.handleUpdateCredentials))
 	s.mux.HandleFunc("GET /api/server/logs/stream", s.guard(s.handleLogsSSE))
 	s.mux.HandleFunc("GET /api/server/session/url", s.guard(s.handleSessionURL))
+	s.mux.HandleFunc("GET /api/server/bans", s.guard(s.handleListBans))
+	s.mux.HandleFunc("POST /api/server/unban", s.handleUnban)
 
 	// 认证 API (公开访问)
 	s.mux.HandleFunc("POST /api/server/login", s.handleLogin)
@@ -876,6 +880,16 @@ func (s *Server) handleSessionURL(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	clientIP := GetClientIP(r)
+
+	// 1. 防暴力破解：检查当前 IP 是否正处于封禁期
+	if remaining, banned := s.limiter.CheckBan(clientIP); banned {
+		mins := int(remaining.Minutes()) + 1
+		w.Header().Set("Retry-After", fmt.Sprintf("%d", int(remaining.Seconds())))
+		writeJSONError(w, http.StatusTooManyRequests, fmt.Sprintf("密码错误已达 3 次，该 IP (%s) 已被安全封锁，请在 %d 分钟后再试", clientIP, mins))
+		return
+	}
+
 	var body struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
@@ -887,22 +901,71 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	if pass != "" {
 		inputUser := strings.TrimSpace(body.Username)
-		if inputUser != "" && subtle.ConstantTimeCompare([]byte(inputUser), []byte(user)) != 1 {
-			writeJSONError(w, http.StatusUnauthorized, "用户名或密码错误")
-			return
-		}
-		if subtle.ConstantTimeCompare([]byte(body.Password), []byte(pass)) != 1 {
-			writeJSONError(w, http.StatusUnauthorized, "用户名或密码错误")
+		userMatch := inputUser == "" || subtle.ConstantTimeCompare([]byte(inputUser), []byte(user)) == 1
+		passMatch := subtle.ConstantTimeCompare([]byte(body.Password), []byte(pass)) == 1
+
+		if !userMatch || !passMatch {
+			banned, remaining, fails := s.limiter.RecordFailure(clientIP)
+			if banned {
+				mins := int(remaining.Minutes()) + 1
+				w.Header().Set("Retry-After", fmt.Sprintf("%d", int(remaining.Seconds())))
+				writeJSONError(w, http.StatusTooManyRequests, fmt.Sprintf("密码错误已达 3 次，该 IP (%s) 已被安全封锁，请在 %d 分钟后再试", clientIP, mins))
+				return
+			}
+			remainingAttempts := s.limiter.maxAttempts - fails
+			writeJSONError(w, http.StatusUnauthorized, fmt.Sprintf("用户名或密码错误 (还剩 %d 次尝试机会)", remainingAttempts))
 			return
 		}
 	}
 
+	// 登录成功，重置当前 IP 失败计数并颁发会话凭据
+	s.limiter.RecordSuccess(clientIP)
 	s.setAuthCookie(w, r)
 	token := s.sessionToken()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"token":    token,
 		"username": user,
 		"message":  "登录成功",
+	})
+}
+
+func (s *Server) handleUnban(w http.ResponseWriter, r *http.Request) {
+	// 安全校验：仅允许本机 127.0.0.1 来源，或携带有效管理员凭据
+	clientIP := GetClientIP(r)
+	if !isWhitelisted(clientIP) && !s.authorized(r) {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+
+	var body struct {
+		IP string `json:"ip"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+
+	targetIP := strings.TrimSpace(body.IP)
+	if targetIP == "" {
+		targetIP = "all"
+	}
+
+	s.limiter.Unban(targetIP)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"message":  fmt.Sprintf("已成功解封 IP: %s", targetIP),
+		"unbanned": targetIP,
+	})
+}
+
+func (s *Server) handleListBans(w http.ResponseWriter, r *http.Request) {
+	bans := s.limiter.ListBans()
+	banList := make([]map[string]any, 0, len(bans))
+	for ip, rem := range bans {
+		banList = append(banList, map[string]any{
+			"ip":               ip,
+			"remainingSeconds": int(rem.Seconds()),
+			"remainingMinutes": int(rem.Minutes()) + 1,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"bans": banList,
 	})
 }
 

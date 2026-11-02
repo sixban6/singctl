@@ -1,8 +1,13 @@
 package cmd
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
+	"strings"
+	"time"
 
 	"singctl/internal/config"
 	"singctl/internal/logger"
@@ -69,6 +74,7 @@ func newServerWebCmd(configPath string) *cobra.Command {
 		}),
 		newServerWebStopCmd(),
 		newServerWebStatusCmd(configPath),
+		newServerWebUnbanCmd(configPath),
 	)
 
 	return root
@@ -172,6 +178,49 @@ func newServerWebStatusCmd(configPath string) *cobra.Command {
 				logger.Info("  ➜  管理员账号: %s", cfg.Server.GetWebAdminUsername())
 			}
 			logger.Info("日志: %s   状态: %s", serverweb.ServerWebLogPath(), serverweb.ServerWebStatePath())
+			return nil
+		},
+	}
+}
+
+func newServerWebUnbanCmd(configPath string) *cobra.Command {
+	return &cobra.Command{
+		Use:   "unban [IP|all]",
+		Short: "解封被限制登录的 IP (默认解封全部) / Unban locked IP address (default all)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			targetIP := "all"
+			if len(args) > 0 && strings.TrimSpace(args[0]) != "" {
+				targetIP = strings.TrimSpace(args[0])
+			}
+
+			resolvedConfig := resolveConfigPath(cmd, configPath)
+			port := 8092
+			if cfg, err := config.Load(resolvedConfig); err == nil && cfg != nil {
+				port = cfg.Server.GetWebAdminPort()
+			}
+
+			url := fmt.Sprintf("http://127.0.0.1:%d/api/server/unban", port)
+			bodyBytes, _ := json.Marshal(map[string]string{"ip": targetIP})
+			req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(bodyBytes))
+			if err != nil {
+				return err
+			}
+			req.Header.Set("Content-Type", "application/json")
+
+			client := &http.Client{Timeout: 3 * time.Second}
+			resp, err := client.Do(req)
+			if err != nil {
+				logger.Warn("向服务端 Web 发送解封请求失败: %v", err)
+				logger.Info("提示: 重启服务可直接重置全部封禁: systemctl restart singctl-serverweb")
+				return nil
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode == http.StatusOK {
+				logger.Success("已成功解封 IP: %s", targetIP)
+			} else {
+				logger.Warn("解封请求响应状态: %s", resp.Status)
+			}
 			return nil
 		},
 	}
