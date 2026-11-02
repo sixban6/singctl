@@ -6,7 +6,10 @@
     功能与官方 install.bat 一致，去除编码/路径/依赖烦恼。
 #>
 
-param()
+param(
+    [switch]$Server,
+    [switch]$Client
+)
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference    = 'SilentlyContinue'
@@ -156,7 +159,47 @@ try {
 }
 
 #--------------------------------------------------
-# 配置订阅（可选）
+# 运行模式选择
+$Mode = if ($Server) { 'server' } elseif ($Client) { 'client' } else { '' }
+
+if (-not $Mode) {
+    Write-Host ''
+    Write-Host '====================================================' -ForegroundColor Cyan
+    Write-Host '          请选择 SingCtl 运行模式:'                      -ForegroundColor Cyan
+    Write-Host '  1) 客户端模式 (Client Mode) [回车默认]'           -ForegroundColor White
+    Write-Host '     • 本地 / 透明代理加速'
+    Write-Host '     • 订阅导入与智能分流规则'
+    Write-Host '     • 本地轻量 Web 管理控制台 (http://127.0.0.1:8090)'
+    Write-Host ''
+    Write-Host '  2) 服务端模式 (Server Mode)'                     -ForegroundColor White
+    Write-Host '     • VLESS Reality + Hysteria 2 节点服务'
+    Write-Host '     • 自动化 TLS / 域名反代与配置管理'
+    Write-Host '     • 服务端 Web 管理控制台'
+    Write-Host '     • Sub-Store 节点聚合与分发'
+    Write-Host '====================================================' -ForegroundColor Cyan
+    Write-Host ''
+
+    $Choice = Read-Host '请输入选项 [1-2] (默认 1)'
+    if ($Choice -eq '2' -or $Choice -eq 'server' -or $Choice -eq 's') {
+        $Mode = 'server'
+    } else {
+        $Mode = 'client'
+    }
+}
+
+if ($Mode -eq 'server') {
+    Write-Info '已选择【服务端模式】'
+    Write-Info '正在启动 SingCtl 服务端初始化向导...'
+    Write-Host ''
+    Cleanup
+    & "$InstallDir\singctl.exe" sr init
+    exit 0
+}
+
+Write-Info '已选择【客户端模式】'
+
+#--------------------------------------------------
+# 配置订阅（客户端可选）
 Write-Host ''
 $SubUrl = Read-Host '请输入订阅链接（留空跳过）'
 if ($SubUrl) {
@@ -183,13 +226,14 @@ tailscale:
 }
 
 #--------------------------------------------------
-Write-Info '安装并启动 sing-box...'
+Write-Info '安装并启动 sing-box 客户端...'
 try {
-    & "$InstallDir\singctl.exe" install sb
-    & "$InstallDir\singctl.exe" start
-    Write-Success 'sing-box 已启动'
+    & "$InstallDir\singctl.exe" sb install
+    & "$InstallDir\singctl.exe" sb start
+    & "$InstallDir\singctl.exe" web start
+    Write-Success 'sing-box 客户端与本地 Web 控制台已启动'
 } catch {
-    Write-Warning 'sing-box 安装/启动失败，请手动执行：singctl install sb / singctl start'
+    Write-Warning 'sing-box 安装/启动失败，请手动执行：singctl sb install / singctl sb start'
 }
 
 #--------------------------------------------------

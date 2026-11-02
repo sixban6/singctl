@@ -565,24 +565,88 @@ init_singbox_config() {
   echo_info "已创建 /etc/sing-box 目录，配置文件将在首次启动时生成"
 }
 
-# 主函数
-main() {
-    echo_info "开始安装 SingCtl..."
-    printf "\n"
-    
-    check_permissions
-    check_dependencies
-    detect_system
-    get_latest_version
-    build_download_url
-    download_and_extract
-    install_files
+# 模式选择与后续引导
+select_mode_and_setup() {
+    local mode=""
+    for arg in "$@"; do
+        case "$arg" in
+            --server|-s|server)
+                mode="server"
+                ;;
+            --client|-c|client)
+                mode="client"
+                ;;
+        esac
+    done
+
+    if [ -z "$mode" ]; then
+        if [ -c /dev/tty ]; then
+            printf "\n"
+            if supports_color; then
+                printf "\033[0;36m====================================================\033[0m\n"
+                printf "\033[1;32m  请选择 SingCtl 运行模式:\033[0m\n"
+                printf "  \033[1;37m1) 客户端模式 (Client Mode)\033[0m [回车默认]\n"
+                printf "     • 软路由 / Linux 透明代理网关 (TProxy)\n"
+                printf "     • 自动转换订阅与智能分流规则\n"
+                printf "     • 本地轻量 Web 图形管理后台 (:8090)\n"
+                printf "\n"
+                printf "  \033[1;37m2) 服务端模式 (Server Mode)\033[0m\n"
+                printf "     • VLESS Reality + Hysteria 2 节点承载\n"
+                printf "     • Caddy 自动化 TLS / 原生 IP 证书 / 隐蔽反代\n"
+                printf "     • 服务端专属 Web 控制台 (高熵安全随机路径)\n"
+                printf "     • Sub-Store 节点管理与多客户端订阅聚合\n"
+                printf "\033[0;36m====================================================\033[0m\n"
+                printf "\033[0;33m请输入选项 [1-2] (默认 1): \033[0m"
+            else
+                printf "====================================================\n"
+                printf "  请选择 SingCtl 运行模式:\n"
+                printf "  1) 客户端模式 (Client Mode) [回车默认]\n"
+                printf "     • 软路由 / Linux 透明代理网关 (TProxy)\n"
+                printf "     • 自动转换订阅与智能分流规则\n"
+                printf "     • 本地轻量 Web 图形管理后台 (:8090)\n"
+                printf "\n"
+                printf "  2) 服务端模式 (Server Mode)\n"
+                printf "     • VLESS Reality + Hysteria 2 节点承载\n"
+                printf "     • Caddy 自动化 TLS / 原生 IP 证书 / 隐蔽反代\n"
+                printf "     • 服务端专属 Web 控制台 (高熵安全随机路径)\n"
+                printf "     • Sub-Store 节点管理与多客户端订阅聚合\n"
+                printf "====================================================\n"
+                printf "请输入选项 [1-2] (默认 1): "
+            fi
+
+            read -r choice < /dev/tty || choice="1"
+            case "$choice" in
+                2|server|s|Server)
+                    mode="server"
+                    ;;
+                *)
+                    mode="client"
+                    ;;
+            esac
+        else
+            mode="client"
+        fi
+    fi
+
+    if [ "$mode" = "server" ]; then
+        echo_info "已选择【服务端模式】"
+        echo_info "正在启动 SingCtl 服务端初始化向导..."
+        printf "\n"
+        if [ -c /dev/tty ]; then
+            exec "$INSTALL_DIR/singctl" sr init < /dev/tty
+        else
+            exec "$INSTALL_DIR/singctl" sr init
+        fi
+        exit 0
+    fi
+
+    echo_info "已选择【客户端模式】"
     configure_subscription
     verify_installation
     show_completion_info
     init_singbox_config
     echo_success "安装脚本执行完成！"
-    
+
     # 检查配置文件是否有效订阅地址（先去掉注释行，避免示例被误判）
     if [ -f "$CONFIG_FILE" ] && sed 's/#.*//' "$CONFIG_FILE" | grep -Eq 'url:[[:space:]]*["'"'"']?https?://'; then
         echo_info "检测到有效订阅，检查 sing-box 安装状态..."
@@ -620,6 +684,21 @@ main() {
         echo_info "  配置完成后运行: singctl sb start"
         echo_success "========================================================"
     fi
+}
+
+# 主函数
+main() {
+    echo_info "开始安装 SingCtl..."
+    printf "\n"
+    
+    check_permissions
+    check_dependencies
+    detect_system
+    get_latest_version
+    build_download_url
+    download_and_extract
+    install_files
+    select_mode_and_setup "$@"
 }
 
 # 执行主函数

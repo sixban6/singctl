@@ -3,6 +3,7 @@ package cmd
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -39,7 +40,13 @@ func newInitServerCmd(configPath string) *cobra.Command {
 				cfg = &config.Config{}
 			}
 
-			reader := bufio.NewReader(os.Stdin)
+			// 交互式读取终端输入 (优先使用 /dev/tty 以免在管道中运行时读取到 EOF)
+			var inputReader io.Reader = os.Stdin
+			if tty, err := os.Open("/dev/tty"); err == nil {
+				defer tty.Close()
+				inputReader = tty
+			}
+			reader := bufio.NewReader(inputReader)
 
 			// 1. 域名 (node_domain)
 			if domain == "" {
