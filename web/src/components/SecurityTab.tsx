@@ -1,8 +1,8 @@
-import React, { useState } from 'react';
-import { ServerStatusResponse } from '../types';
+import React, { useState, useEffect } from 'react';
+import { ServerStatusResponse, BannedIP } from '../types';
 import { api } from '../api';
 import { useToast } from './Toast';
-import { Shield, KeyRound, Dices, Lock, UserCheck, ShieldAlert, Check, X, RefreshCw } from 'lucide-react';
+import { Shield, KeyRound, Dices, Lock, UserCheck, ShieldAlert, ShieldCheck, Check, X, RefreshCw, Unlock, AlertOctagon } from 'lucide-react';
 
 interface SecurityTabProps {
   status: ServerStatusResponse | null;
@@ -17,6 +17,40 @@ export const SecurityTab: React.FC<SecurityTabProps> = ({ status, onRefresh }) =
   const [confirmPassword, setConfirmPassword] = useState('');
   const [loadingCreds, setLoadingCreds] = useState(false);
   const [loadingPath, setLoadingPath] = useState(false);
+
+  // 防爆破封禁 IP 列表状态
+  const [bans, setBans] = useState<BannedIP[]>([]);
+  const [loadingBans, setLoadingBans] = useState(false);
+  const [unbanningIP, setUnbanningIP] = useState<string | null>(null);
+
+  const fetchBans = async () => {
+    setLoadingBans(true);
+    try {
+      const res = await api.getBans();
+      setBans(res.bans || []);
+    } catch (err: any) {
+      // 静默处理，若未登录或网络异常不阻断其他卡片
+    } finally {
+      setLoadingBans(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchBans();
+  }, []);
+
+  const handleUnban = async (ip: string) => {
+    setUnbanningIP(ip);
+    try {
+      const res = await api.unban(ip);
+      success(res.message || `已成功解除 IP ${ip} 的封锁`);
+      await fetchBans();
+    } catch (err: any) {
+      error(err.message || '解封失败');
+    } finally {
+      setUnbanningIP(null);
+    }
+  };
 
   // 密码规则校验
   const hasMinLength = newPassword.length >= 8;
@@ -217,6 +251,107 @@ export const SecurityTab: React.FC<SecurityTabProps> = ({ status, onRefresh }) =
             </button>
           </div>
         </form>
+      </div>
+
+      {/* IP Rate Limiting & Anti-Brute-Force Card */}
+      <div className="p-6 rounded-2xl glass-card">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-800">
+          <div>
+            <div className="flex items-center gap-2 text-rose-400 text-xs font-semibold uppercase tracking-wider mb-1">
+              <AlertOctagon className="w-3.5 h-3.5" />
+              <span>智能防御与防暴力破解</span>
+            </div>
+            <h3 className="text-xl font-bold text-white tracking-tight flex items-center gap-2">
+              <span>登录失败 IP 拦截看板</span>
+              {bans.length > 0 ? (
+                <span className="px-2.5 py-0.5 rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/30 text-xs font-semibold">
+                  拦截中: {bans.length} 个 IP
+                </span>
+              ) : (
+                <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-xs font-semibold">
+                  全绿无拦截
+                </span>
+              )}
+            </h3>
+            <p className="text-xs text-slate-400 mt-0.5">
+              规则：10 分钟内累计输错密码 3 次，系统将自动封锁源 IP 15 分钟并返回 HTTP 429。本机回环受白名单免锁保护。
+            </p>
+          </div>
+
+          <div className="flex items-center gap-2 self-start sm:self-auto">
+            <button
+              onClick={fetchBans}
+              disabled={loadingBans}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-xs text-slate-300 transition-all disabled:opacity-50"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${loadingBans ? 'animate-spin' : ''}`} />
+              <span>刷新列表</span>
+            </button>
+            {bans.length > 0 && (
+              <button
+                onClick={() => handleUnban('all')}
+                disabled={unbanningIP === 'all'}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/30 text-xs text-rose-200 font-semibold transition-all disabled:opacity-50"
+              >
+                <Unlock className="w-3.5 h-3.5" />
+                <span>一键解封全部</span>
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Bans Content */}
+        <div className="mt-4">
+          {bans.length === 0 ? (
+            <div className="py-8 text-center rounded-xl bg-slate-950/40 border border-slate-800/80">
+              <ShieldCheck className="w-9 h-9 text-emerald-400 mx-auto mb-2 opacity-80" />
+              <div className="text-sm font-semibold text-slate-200">当前系统安全，未拦截任何异常 IP</div>
+              <p className="text-xs text-slate-500 mt-1 max-w-md mx-auto">
+                实时守护运行中。当发生针对面板的字典撞库或恶意密码试探时，受限 IP 将在此处展示，支持倒计时观察与一键即时解除。
+              </p>
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs font-mono">
+                <thead>
+                  <tr className="border-b border-slate-800 text-slate-400">
+                    <th className="py-2.5 px-3">受限源 IP</th>
+                    <th className="py-2.5 px-3">状态</th>
+                    <th className="py-2.5 px-3">剩余封锁时间</th>
+                    <th className="py-2.5 px-3 text-right">运维操作</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/60">
+                  {bans.map((b) => (
+                    <tr key={b.ip} className="hover:bg-slate-900/40 transition-colors">
+                      <td className="py-3 px-3 text-white font-semibold flex items-center gap-2">
+                        <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse"></span>
+                        <span>{b.ip}</span>
+                      </td>
+                      <td className="py-3 px-3">
+                        <span className="px-2 py-0.5 rounded-md bg-rose-500/20 text-rose-300 border border-rose-500/30 text-[11px]">
+                          已封锁 (429)
+                        </span>
+                      </td>
+                      <td className="py-3 px-3 text-amber-300 font-medium">
+                        约 {b.remainingMinutes} 分钟 ({b.remainingSeconds} 秒)
+                      </td>
+                      <td className="py-3 px-3 text-right">
+                        <button
+                          onClick={() => handleUnban(b.ip)}
+                          disabled={unbanningIP === b.ip}
+                          className="px-3 py-1.5 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/30 text-emerald-300 text-xs font-sans font-medium transition-all disabled:opacity-50"
+                        >
+                          {unbanningIP === b.ip ? '正在解封...' : '立即解封'}
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Session Security Policy Card */}

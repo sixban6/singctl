@@ -22,6 +22,7 @@ type PreflightReport struct {
 	PublicIPv6 string
 	DNSMatches bool
 	DNSErrors  []string
+	IsCFProxy  bool
 	TokenValid bool
 	TokenMsg   string
 	BusyPorts  []int
@@ -60,9 +61,19 @@ func RunPreflight(cfg *config.Config, fixBBR bool) (*PreflightReport, error) {
 				if ip.String() == report.PublicIPv4 || (report.PublicIPv6 != "" && ip.String() == report.PublicIPv6) {
 					report.DNSMatches = true
 				}
+				if IsCloudflareIP(ip) {
+					report.IsCFProxy = true
+				}
 			}
-			if report.DNSMatches {
-				logger.Success("  ✓ 域名 %s 解析与当前服务器公网 IP 匹配 (%s)", domain, strings.Join(ipStrs, ", "))
+
+			if report.IsCFProxy {
+				msg := fmt.Sprintf("域名 %s 当前解析到 Cloudflare CDN 代理节点 (已开启小黄云)", domain)
+				report.DNSErrors = append(report.DNSErrors, msg)
+				logger.Error("    🚨 严重警告: 检测到域名 [%s] 解析为 Cloudflare CDN 节点 IP (%s)！", domain, strings.Join(ipStrs, ", "))
+				logger.Warn("    ➜ 影响: Hysteria 2 UDP 流量与 Reality 伪装无法穿透 CDN，且会导致 TLS 证书申请出现重定向循环！")
+				logger.Warn("    ➜ 解决方式: 请前往 Cloudflare 控制台 DNS 记录中，将 [%s] 由【已代理 (小黄云)】切换为【仅 DNS (灰云)】！", domain)
+			} else if report.DNSMatches {
+				logger.Success("  ✓ 域名 %s 解析与当前服务器公网 IP 匹配 (%s) [灰云直连]", domain, strings.Join(ipStrs, ", "))
 			} else {
 				msg := fmt.Sprintf("域名 %s 解析为 [%s], 与当前公网 IP [%s] 不一致", domain, strings.Join(ipStrs, ", "), report.PublicIPv4)
 				report.DNSErrors = append(report.DNSErrors, msg)
@@ -242,4 +253,46 @@ func enableBBR() error {
 	_ = exec.Command("sysctl", "--system").Run()
 	_ = exec.Command("sysctl", "-p").Run()
 	return nil
+}
+
+// cfCIDRs 包含官方公布的 Cloudflare CDN 边缘代理节点 IP 范围
+var cfCIDRs = []string{
+	// IPv4
+	"173.245.48.0/20",
+	"103.21.244.0/22",
+	"103.22.200.0/22",
+	"103.31.4.0/22",
+	"141.101.64.0/18",
+	"108.162.192.0/18",
+	"190.93.240.0/20",
+	"188.114.96.0/20",
+	"197.234.240.0/22",
+	"198.41.128.0/17",
+	"162.158.0.0/15",
+	"104.16.0.0/13",
+	"104.24.0.0/14",
+	"172.64.0.0/13",
+	"131.0.72.0/22",
+	// IPv6
+	"2400:cb00::/32",
+	"2606:4700::/32",
+	"2803:f800::/32",
+	"2405:b500::/32",
+	"2405:8100::/32",
+	"2a06:98c0::/29",
+	"2c0f:f248::/32",
+}
+
+// IsCloudflareIP 检查 IP 是否属于 Cloudflare 代理节点
+func IsCloudflareIP(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	for _, cidr := range cfCIDRs {
+		_, ipNet, err := net.ParseCIDR(cidr)
+		if err == nil && ipNet.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }

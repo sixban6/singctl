@@ -6,6 +6,7 @@ import (
 	"singctl/internal/config"
 	"singctl/internal/constant"
 	"singctl/internal/daemon"
+	"singctl/internal/doctor"
 	"singctl/internal/logger"
 	"singctl/internal/updater"
 	"singctl/internal/util/file"
@@ -22,6 +23,22 @@ func NewInfoCommand(version string) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			configPath := cmd.Flag("config").Value.String()
 			return showSystemInfo(configPath, version)
+		},
+	}
+}
+
+// NewDoctorCmd creates the doctor command
+func NewDoctorCmd(configPath string) *cobra.Command {
+	return &cobra.Command{
+		Use:     "doctor",
+		Aliases: []string{"doc", "check"},
+		Short:   "体检  : 全链路健康体检与故障自检",
+		Long:    "自动化检测系统基础环境、TCP BBR 加速、端口监听、四核服务状态、TLS 证书有效性、Reality 伪装连通性及海外全球边缘多点出口画像与服务连通性",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, _, _ := loadCmdConfig(cmd, configPath)
+			report := doctor.RunDoctor(cfg)
+			doctor.PrintDoctorReport(report)
+			return nil
 		},
 	}
 }

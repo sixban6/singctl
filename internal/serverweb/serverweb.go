@@ -25,6 +25,7 @@ import (
 
 	"singctl/internal/config"
 	"singctl/internal/deploy"
+	"singctl/internal/doctor"
 	"singctl/internal/logger"
 	"singctl/internal/netdiag"
 	"singctl/internal/util/netinfo"
@@ -115,6 +116,8 @@ func New(opts Options) *Server {
 	s.mux.HandleFunc("GET /api/server/session/url", s.guard(s.handleSessionURL))
 	s.mux.HandleFunc("GET /api/server/bans", s.guard(s.handleListBans))
 	s.mux.HandleFunc("POST /api/server/unban", s.handleUnban)
+	s.mux.HandleFunc("GET /api/server/doctor", s.guard(s.handleDoctor))
+	s.mux.HandleFunc("GET /api/server/diagnose/unlock", s.guard(s.handleUnlockDiagnose))
 
 	// 认证 API (公开访问)
 	s.mux.HandleFunc("POST /api/server/login", s.handleLogin)
@@ -967,6 +970,17 @@ func (s *Server) handleListBans(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"bans": banList,
 	})
+}
+
+func (s *Server) handleDoctor(w http.ResponseWriter, r *http.Request) {
+	cfg, _ := config.Load(s.opts.ConfigPath)
+	report := doctor.RunDoctor(cfg)
+	writeJSON(w, http.StatusOK, report)
+}
+
+func (s *Server) handleUnlockDiagnose(w http.ResponseWriter, r *http.Request) {
+	report := doctor.CheckMediaUnlock()
+	writeJSON(w, http.StatusOK, report)
 }
 
 func (s *Server) handleUpdateCredentials(w http.ResponseWriter, r *http.Request) {

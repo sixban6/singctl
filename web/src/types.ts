@@ -110,3 +110,40 @@ export interface ReturnSummary {
   bestForIsp?: any[];
   summary: string;
 }
+
+export interface BannedIP {
+  ip: string;
+  remainingSeconds: number;
+  remainingMinutes: number;
+}
+
+export interface DoctorCheckItem {
+  name: string;
+  category: string;
+  status: 'ok' | 'warn' | 'fail';
+  summary: string;
+  detail?: string;
+}
+
+export interface DoctorReport {
+  score: number;
+  checkedAt: string;
+  items: DoctorCheckItem[];
+  summary: string;
+}
+
+export interface ServiceUnlockStatus {
+  status: 'unlocked' | 'partially_unlocked' | 'locked' | 'warn' | 'error';
+  region?: string;
+  details?: string;
+}
+
+export interface MediaUnlockReport {
+  openai: ServiceUnlockStatus;
+  netflix: ServiceUnlockStatus;
+  youtube: ServiceUnlockStatus;
+  disney: ServiceUnlockStatus;
+  google: ServiceUnlockStatus;
+  testedAt: string;
+  proxyUsed?: string;
+}

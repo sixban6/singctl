@@ -7,6 +7,7 @@ import (
 
 	"singctl/internal/config"
 	"singctl/internal/deploy"
+	"singctl/internal/doctor"
 	"singctl/internal/logger"
 	"singctl/internal/serverweb"
 	"singctl/internal/util/terminalqr"
@@ -208,7 +209,26 @@ func NewServerCmd(configPath string) *cobra.Command {
 	cmd.AddCommand(NewTerminalCmd(configPath))
 	cmd.AddCommand(newServerWebCmd(configPath))
 	cmd.AddCommand(NewNetCmd(configPath))
+	cmd.AddCommand(newServerDoctorCmd(configPath))
 	return cmd
+}
+
+func newServerDoctorCmd(configPath string) *cobra.Command {
+	return &cobra.Command{
+		Use:     "doctor",
+		Aliases: []string{"doc", "check"},
+		Short:   "全链路健康体检与故障自检 / Full-stack health check and diagnostics",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			resolvedPath := resolveConfigPath(cmd, configPath)
+			cfg, err := config.Load(resolvedPath)
+			if err != nil {
+				return fmt.Errorf("无法加载配置文件: %w", err)
+			}
+			report := doctor.RunDoctor(cfg)
+			doctor.PrintDoctorReport(report)
+			return nil
+		},
+	}
 }
 
 // NewReinstallServerCmd creates the reinstall command (singctl sr ri)

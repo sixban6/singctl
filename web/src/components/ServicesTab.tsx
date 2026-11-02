@@ -21,6 +21,7 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
   const [editingSNI, setEditingSNI] = useState(false);
   const [sniInput, setSniInput] = useState('');
   const [updatingSNI, setUpdatingSNI] = useState(false);
+  const [showSyncNotice, setShowSyncNotice] = useState(false);
 
   const handleEnableBBR = async () => {
     setEnablingBBR(true);
@@ -42,6 +43,7 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
       const res = await api.updateSNI(sniInput.trim());
       success(res.message);
       setEditingSNI(false);
+      setShowSyncNotice(true);
       setTimeout(onRefresh, 1500);
     } catch (err: any) {
       error(err.message || '更新 SNI 失败');
@@ -81,6 +83,7 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
       const res = await api.updateServiceConfig(viewingConfig.service, editedConfig);
       success(res.message);
       setViewingConfig(null);
+      setShowSyncNotice(true);
       setTimeout(onRefresh, 1200);
     } catch (err: any) {
       error(err.message || '保存配置失败');
@@ -593,6 +596,34 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
                 </button>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+      {/* Client Sync Notice Modal */}
+      {showSyncNotice && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-fade-in">
+          <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl p-6 text-center space-y-4">
+            <div className="w-12 h-12 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 flex items-center justify-center mx-auto">
+              <CheckCircle2 className="w-6 h-6" />
+            </div>
+            <div>
+              <h4 className="text-base font-bold text-white">服务端核心配置已生效</h4>
+              <p className="text-xs text-slate-300 mt-2 leading-relaxed">
+                Reality 伪装 SNI / 核心服务配置已在 VPS 完成热重载并同步至 Sub-Store。
+              </p>
+              <div className="mt-3 p-3 rounded-xl bg-slate-950 border border-slate-800 text-left text-xs text-amber-300 flex items-start gap-2">
+                <span className="text-base leading-none">📱</span>
+                <span>
+                  <strong>重要提醒</strong>：请在您的手机/电脑客户端（如 Shadowrocket 客户端、Clash Verge、Sing-box 等）中点击<strong>【更新订阅】</strong>，以拉取最新节点连接参数！
+                </span>
+              </div>
+            </div>
+            <button
+              onClick={() => setShowSyncNotice(false)}
+              className="w-full py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-semibold text-xs transition-colors shadow-lg shadow-emerald-500/20"
+            >
+              我知道了，已了解
+            </button>
           </div>
         </div>
       )}

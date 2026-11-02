@@ -2,7 +2,7 @@ import React, { useEffect, useState, useRef } from 'react';
 import { SubscriptionsResponse } from '../types';
 import { api } from '../api';
 import { useToast } from './Toast';
-import { Copy, QrCode, ExternalLink, Check, Download, ShieldAlert, Sparkles, X } from 'lucide-react';
+import { Copy, QrCode, ExternalLink, Check, Download, ShieldAlert, Sparkles, X, RefreshCw, Info } from 'lucide-react';
 import QRCode from 'qrcode';
 
 export const SubscriptionsTab: React.FC = () => {
@@ -133,7 +133,22 @@ export const SubscriptionsTab: React.FC = () => {
               <QrCode className="w-3.5 h-3.5" />
               <span>二维码</span>
             </button>
+            <button
+              onClick={loadData}
+              title="重新拉取最新订阅"
+              className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white transition-colors"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+            </button>
           </div>
+        </div>
+
+        {/* Sync Hint Banner */}
+        <div className="mt-3.5 flex items-center gap-2 text-xs text-slate-400 bg-emerald-950/20 border border-emerald-500/20 rounded-xl px-3.5 py-2">
+          <Info className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+          <span>
+            提示：若在控制台修改了 Reality 伪装域名 (SNI) 或端口，配置已由服务端热生效，请记得在手机/电脑客户端点击【更新订阅】同步节点。
+          </span>
         </div>
       </div>
 

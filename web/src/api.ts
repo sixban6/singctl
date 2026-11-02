@@ -1,4 +1,12 @@
-import { ServerStatusResponse, SubscriptionsResponse, WarpDiagnoseResponse, ReturnSummary } from './types';
+import {
+  ServerStatusResponse,
+  SubscriptionsResponse,
+  WarpDiagnoseResponse,
+  ReturnSummary,
+  BannedIP,
+  DoctorReport,
+  MediaUnlockReport,
+} from './types';
 
 export const getBasePath = (): string => {
   const p = window.location.pathname.replace(/\/+$/, '');
@@ -91,6 +99,18 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ username, password }),
     }),
+
+  getBans: () => request<{ bans: BannedIP[] }>('/api/server/bans'),
+
+  unban: (ip: string) =>
+    request<{ message: string; unbanned: string }>('/api/server/unban', {
+      method: 'POST',
+      body: JSON.stringify({ ip }),
+    }),
+
+  getDoctorReport: () => request<DoctorReport>('/api/server/doctor'),
+
+  getMediaUnlock: () => request<MediaUnlockReport>('/api/server/diagnose/unlock'),
 
   logout: () =>
     request<{ message: string }>('/api/server/logout', {

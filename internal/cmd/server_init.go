@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"strings"
 
@@ -66,6 +67,16 @@ func newInitServerCmd(configPath string) *cobra.Command {
 			}
 			if domain == "" {
 				return fmt.Errorf("节点域名 (node_domain) 不能为空")
+			}
+			// 快速 DNS 预检 (小黄云代理检测)
+			if ips, err := net.LookupIP(domain); err == nil && len(ips) > 0 {
+				for _, ip := range ips {
+					if deploy.IsCloudflareIP(ip) {
+						logger.Warn("  ⚠️ 提示: 检测到 [%s] 当前解析到了 Cloudflare 代理节点 (已开启小黄云)！", domain)
+						logger.Warn("  ➜ 请务必在 Cloudflare DNS 面板将该域名修改为【仅 DNS (灰云)】以确保直连穿透正常。")
+						break
+					}
+				}
 			}
 
 			// 2. Cloudflare API Token (cf_dns_key)

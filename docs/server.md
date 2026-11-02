@@ -221,4 +221,43 @@ singctl term uninstall
 
 > 详细的证书导入与本地 WezTerm / `~/.ssh/config` 配置教程，请参阅专用文档：[Web 终端与 SSH-over-WSS 穿透通道文档](terminal.md)。
 
+---
+
+### `singctl sr web` — 服务端专属隐蔽控制台与安全运维
+
+采用 **无特征 16 位随机安全路径** (`/sr/<random-token>/`) + Caddy 动态反向代理，默认公网端口严密关闭（仅监听 127.0.0.1:8092），全网爬虫探测一律返回 404 或静态伪装站点。
+
+```bash
+# 启动 Web 管理面板
+singctl sr web start
+
+# 查看专属访问 URL、随机路径与临时凭据
+singctl sr web status
+
+# 停止 Web 管理面板
+singctl sr web stop
+
+# 解除被防爆破机制拦截的 IP (3次密码错误自动封禁15分钟)
+singctl sr web unban <IP地址>
+
+# 一键解封所有受限 IP
+singctl sr web unban all
+```
+
+---
+
+### `singctl sr doctor` — 全链路健康体检与故障自检
+
+全自动对系统环境、TCP BBR 加速、核心端口监听、四核服务状态、TLS 证书有效期、Reality SNI 伪装握手连通性及海外流媒体与 AI 出口解锁进行端到端自动化体检：
+
+```bash
+# 执行全链路体检
+singctl sr doctor
+
+# 快捷别名
+singctl doctor
+singctl doc
+```
+
+
 

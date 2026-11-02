@@ -1,8 +1,8 @@
 import React, { useState } from 'react';
-import { WarpDiagnoseResponse, ServerStatusResponse, ReturnSummary } from '../types';
+import { WarpDiagnoseResponse, ServerStatusResponse, ReturnSummary, MediaUnlockReport } from '../types';
 import { api } from '../api';
 import { useToast } from './Toast';
-import { Globe, Activity, RefreshCw, CheckCircle2, AlertTriangle, ArrowUpDown, ChevronDown, ChevronUp } from 'lucide-react';
+import { Globe, Activity, RefreshCw, CheckCircle2, AlertTriangle, ArrowUpDown, ChevronDown, ChevronUp, Sparkles, Tv, Bot, Search, PlaySquare, ShieldCheck } from 'lucide-react';
 
 interface DiagnosticsTabProps {
   status: ServerStatusResponse | null;
@@ -16,6 +16,22 @@ export const DiagnosticsTab: React.FC<DiagnosticsTabProps> = ({ status }) => {
   const [returnSummary, setReturnSummary] = useState<ReturnSummary | null>(null);
   const [testingReturn, setTestingReturn] = useState(false);
   const [showHops, setShowHops] = useState<{ [key: number]: boolean }>({});
+
+  const [unlockData, setUnlockData] = useState<MediaUnlockReport | null>(null);
+  const [testingUnlock, setTestingUnlock] = useState(false);
+
+  const runUnlockDiagnose = async () => {
+    setTestingUnlock(true);
+    try {
+      const res = await api.getMediaUnlock();
+      setUnlockData(res);
+      success('全球边缘多点出口画像与服务连通性探测完成');
+    } catch (err: any) {
+      error(err.message || '解锁探测失败');
+    } finally {
+      setTestingUnlock(false);
+    }
+  };
 
   const runWarpDiagnose = async () => {
     setTestingWarp(true);
@@ -219,6 +235,167 @@ export const DiagnosticsTab: React.FC<DiagnosticsTabProps> = ({ status }) => {
                 {warpData.latencyMs ? `${warpData.latencyMs} ms` : '-'}
               </div>
             </div>
+          </div>
+        )}
+      </div>
+
+      {/* Streaming & AI Unlock Card */}
+      <div className="p-6 rounded-2xl glass-card">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-800">
+          <div>
+            <div className="flex items-center gap-2 text-purple-400 text-xs font-semibold uppercase tracking-wider mb-1">
+              <Sparkles className="w-3.5 h-3.5" />
+              <span>原生流媒体与 AI 出口解锁能力</span>
+            </div>
+            <h3 className="text-xl font-bold text-white tracking-tight">海外流媒体与 AI 关键服务解锁画像</h3>
+            <p className="text-xs text-slate-400 mt-0.5">
+              实测当前落地出口对 ChatGPT / OpenAI、Netflix、YouTube Premium、Disney+ 以及 Google 搜索风控状态
+            </p>
+          </div>
+
+          <button
+            onClick={runUnlockDiagnose}
+            disabled={testingUnlock}
+            className="flex items-center gap-2 px-4 py-2 rounded-xl bg-purple-500/20 hover:bg-purple-500/30 border border-purple-500/30 text-purple-200 text-xs font-semibold self-start sm:self-auto transition-all disabled:opacity-50"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${testingUnlock ? 'animate-spin' : ''}`} />
+            <span>{testingUnlock ? '正在深度探测海外服务...' : '开始解锁测试'}</span>
+          </button>
+        </div>
+
+        {/* Unlock Results */}
+        {unlockData ? (
+          <div className="mt-5 space-y-4 animate-fade-in">
+            <div className="text-[11px] font-mono text-slate-400 flex items-center justify-between">
+              <span>探测时间: {unlockData.testedAt}</span>
+              {unlockData.proxyUsed && (
+                <span className="text-purple-300">出口链路: {unlockData.proxyUsed}</span>
+              )}
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5">
+              {/* OpenAI */}
+              <div className="p-4 rounded-xl bg-slate-950/70 border border-slate-800 flex items-start gap-3">
+                <div className="p-2 rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                  <Bot className="w-5 h-5" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between">
+                    <span className="font-semibold text-sm text-white">ChatGPT / OpenAI</span>
+                    {unlockData.openai.status === 'unlocked' ? (
+                      <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[11px] font-semibold">
+                        完整解锁 {unlockData.openai.region ? `(${unlockData.openai.region})` : ''}
+                      </span>
+                    ) : (
+                      <span className="px-2 py-0.5 rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/30 text-[11px] font-semibold">
+                        受阻/风控
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-slate-400 mt-1">{unlockData.openai.details || '测试完成'}</p>
+                </div>
+              </div>
+
+              {/* Netflix */}
+              <div className="p-4 rounded-xl bg-slate-950/70 border border-slate-800 flex items-start gap-3">
+                <div className="p-2 rounded-lg bg-rose-500/10 text-rose-400 border border-rose-500/20">
+                  <Tv className="w-5 h-5" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between">
+                    <span className="font-semibold text-sm text-white">Netflix (奈飞)</span>
+                    {unlockData.netflix.status === 'unlocked' ? (
+                      <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[11px] font-semibold">
+                        完整解锁 (含非自制)
+                      </span>
+                    ) : unlockData.netflix.status === 'partially_unlocked' ? (
+                      <span className="px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[11px] font-semibold">
+                        仅自制剧
+                      </span>
+                    ) : (
+                      <span className="px-2 py-0.5 rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/30 text-[11px] font-semibold">
+                        未解锁
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-slate-400 mt-1">{unlockData.netflix.details || '测试完成'}</p>
+                </div>
+              </div>
+
+              {/* YouTube Premium */}
+              <div className="p-4 rounded-xl bg-slate-950/70 border border-slate-800 flex items-start gap-3">
+                <div className="p-2 rounded-lg bg-red-500/10 text-red-400 border border-red-500/20">
+                  <PlaySquare className="w-5 h-5" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between">
+                    <span className="font-semibold text-sm text-white">YouTube Premium</span>
+                    {unlockData.youtube.status === 'unlocked' ? (
+                      <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[11px] font-semibold">
+                        原生支持
+                      </span>
+                    ) : (
+                      <span className="px-2 py-0.5 rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/30 text-[11px] font-semibold">
+                        地区受限
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-slate-400 mt-1">{unlockData.youtube.details || '测试完成'}</p>
+                </div>
+              </div>
+
+              {/* Disney+ */}
+              <div className="p-4 rounded-xl bg-slate-950/70 border border-slate-800 flex items-start gap-3">
+                <div className="p-2 rounded-lg bg-blue-500/10 text-blue-400 border border-blue-500/20">
+                  <Globe className="w-5 h-5" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between">
+                    <span className="font-semibold text-sm text-white">Disney+</span>
+                    {unlockData.disney.status === 'unlocked' ? (
+                      <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[11px] font-semibold">
+                        支持访问
+                      </span>
+                    ) : (
+                      <span className="px-2 py-0.5 rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/30 text-[11px] font-semibold">
+                        拦截受阻
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-slate-400 mt-1">{unlockData.disney.details || '测试完成'}</p>
+                </div>
+              </div>
+
+              {/* Google Search */}
+              <div className="p-4 rounded-xl bg-slate-950/70 border border-slate-800 flex items-start gap-3">
+                <div className="p-2 rounded-lg bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                  <Search className="w-5 h-5" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between">
+                    <span className="font-semibold text-sm text-white">Google 搜索人机风控</span>
+                    {unlockData.google.status === 'unlocked' ? (
+                      <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[11px] font-semibold">
+                        绿灯 (无验证码)
+                      </span>
+                    ) : (
+                      <span className="px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[11px] font-semibold">
+                        需人机验证
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-slate-400 mt-1">{unlockData.google.details || '测试完成'}</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="mt-5 p-6 rounded-xl bg-slate-950/40 border border-slate-800/80 text-center">
+            <Sparkles className="w-8 h-8 text-purple-400 mx-auto mb-2 opacity-70" />
+            <div className="text-sm font-semibold text-slate-300">尚未执行流媒体与 AI 出口解锁诊断</div>
+            <p className="text-xs text-slate-500 mt-1 max-w-md mx-auto">
+              点击上方【开始解锁测试】按钮，后台将并发检测节点或 WARP 落地出口对 ChatGPT、Netflix、Disney+ 等主流海外平台的访问能力。
+            </p>
           </div>
         )}
       </div>
