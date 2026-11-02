@@ -64,8 +64,8 @@ export const SubscriptionsTab: React.FC = () => {
 
   const clients = [
     {
-      name: 'Shadowrocket (客户端)',
-      desc: 'iOS 最受欢迎网络代理客户端',
+      name: 'Shadowrocket',
+      desc: 'iOS 跨协议网络客户端',
       icon: '🚀',
       scheme: data?.importLinks?.shadowrocket,
       color: 'from-blue-600 to-indigo-600',

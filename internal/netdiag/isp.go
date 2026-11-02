@@ -36,7 +36,7 @@ type ipSBResponse struct {
 }
 
 // GetPublicISP 获取本地公网 IP 及运营商画像
-// 优先获取国内物理真实宽带出口（绕开代理网关规则），再解析精准画像
+// 优先获取物理真实宽带出口（直连探测真实出口），再解析精准画像
 func GetPublicISP(ctx context.Context) (*ISPInfo, error) {
 	// 1. 优先探测国内真实的物理宽带出口 IP (3322 / cip.cc)
 	if ip := fetchDomesticIP(ctx); ip != "" {

@@ -39,7 +39,7 @@ func probePorts(ctx context.Context, opts ProbeOptions) Category {
 	if pHTTPSOpen && !pHTTPOpen {
 		itemPortSymmetry.Score = 10
 		itemPortSymmetry.Passed = false
-		itemPortSymmetry.Details = fmt.Sprintf("端口 %d (HTTPS) 开放，但端口 %d (HTTP) 关闭/超时。正常商业 Web 站点几乎 100%% 开放标准 HTTP 端口用于证书 ACME 挑战与协议跳转，只有 HTTPS 开放具备极高的非标协议特征。", httpsPort, httpPort)
+		itemPortSymmetry.Details = fmt.Sprintf("端口 %d (HTTPS) 开放，但端口 %d (HTTP) 关闭/超时。正常商业 Web 站点几乎 100%% 开放标准 HTTP 端口用于证书 ACME 挑战与协议跳转，只有 HTTPS 开放具备非标私有网关特征。", httpsPort, httpPort)
 		itemPortSymmetry.Mitigation = fmt.Sprintf("在服务器防火墙放行 %d 端口，并由 Web 服务器 (Caddy/Nginx) 提供强制重定向至 HTTPS。", httpPort)
 	} else if !pHTTPSOpen && !pHTTPOpen {
 		itemPortSymmetry.Score = 0

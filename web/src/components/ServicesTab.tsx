@@ -493,7 +493,7 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
                   <Zap className="w-5 h-5" />
                 </div>
                 <div>
-                  <h3 className="font-semibold text-white text-base">Reality 伪装与传输安全</h3>
+                  <h3 className="font-semibold text-white text-base">Reality 目标伪装与探测防御</h3>
                   <p className="text-xs text-slate-400">TLS 握手伪装域名 (SNI)</p>
                 </div>
               </div>
@@ -502,7 +502,7 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
               </span>
             </div>
             <p className="text-xs text-slate-400 mt-3 leading-relaxed">
-              伪装 TLS 握手域名，使节点流量穿透审查时表现为对官方分发站点的正常合法访问。
+              伪装 TLS 握手域名，使 TLS 握手特征与官方分发站点的正常访问保持高度一致。
             </p>
             {editingSNI ? (
               <div className="mt-3 space-y-2">
@@ -648,7 +648,7 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
               <div className="mt-3 p-3 rounded-xl bg-slate-950 border border-slate-800 text-left text-xs text-amber-300 flex items-start gap-2">
                 <span className="text-base leading-none">📱</span>
                 <span>
-                  <strong>重要提醒</strong>：请在您的手机/电脑客户端（如 Shadowrocket 客户端、Clash Verge、Sing-box 等）中点击<strong>【更新订阅】</strong>，以拉取最新节点连接参数！
+                  <strong>重要提醒</strong>：请在您的手机/电脑客户端（如 Shadowrocket、Clash Verge、Sing-box 等）中点击<strong>【更新订阅】</strong>，以拉取最新节点连接参数！
                 </span>
               </div>
             </div>

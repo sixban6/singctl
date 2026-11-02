@@ -134,7 +134,7 @@ create_debian_sandbox() {
         # 创建 firejail 配置文件
         cat > /etc/sing-box/sing-box.profile << 'EOF'
 # Firejail profile for sing-box
-# 支持所有代理传输协议的安全配置
+# 核心网络协议安全配置
 
 # 网络访问
 net none

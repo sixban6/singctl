@@ -52,12 +52,12 @@ func PrintReport(w io.Writer, report *Report, verbose bool) error {
 
 	// 核心风险特征发现
 	if len(report.Findings) > 0 {
-		fmt.Fprintln(w, "\n⚠️  识别到的核心代理访问/代理特征 (扣分明细):")
+		fmt.Fprintln(w, "\n⚠️  识别到的异常私有网关特征 (扣分明细):")
 		for _, f := range report.Findings {
 			fmt.Fprintf(w, "  • %s\n", f)
 		}
 	} else {
-		fmt.Fprintln(w, "\n✨ 未发现明显的非标协议特征，行为与标准公网 Web 服务器高度一致！")
+		fmt.Fprintln(w, "\n✨ 未发现异常私有协议特征，行为与标准公网 Web 服务器高度一致！")
 	}
 
 	// 修复与加固建议

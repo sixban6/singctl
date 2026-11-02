@@ -7,7 +7,7 @@ import (
 )
 
 // RenderString 将文本编码为高密度终端 ASCII 二维码（双行半块合一渲染）
-// 适合在各种终端终端界面、SSH 会话中输出，手机相机和客户端等客户端可即刻扫码导入
+// 适合在各种终端终端界面、SSH 会话中输出，移动端相机和主流客户端可即刻扫码导入
 func RenderString(content string) (string, error) {
 	qr, err := qrcode.New(content, qrcode.Medium)
 	if err != nil {

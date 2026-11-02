@@ -37,7 +37,7 @@ func probeEntropy(ctx context.Context, opts ProbeOptions) Category {
 		if strings.Contains(err.Error(), "i/o timeout") {
 			itemEntropy.Score = 20
 			itemEntropy.Passed = false
-			itemEntropy.Details = fmt.Sprintf("服务端在接收随机二进制数据后处于挂起等待状态 (超时耗时: %v)！这是代理传输协议等待客户端认证的典型非标协议特征！", duration)
+			itemEntropy.Details = fmt.Sprintf("服务端在接收随机二进制数据后处于挂起等待状态 (超时耗时: %v)！这是私有协议等待客户端认证的典型非标特征！", duration)
 			itemEntropy.Mitigation = "优化前端伪装回落，配置 Web 服务器在收到非 HTTP/TLS 数据时立即关闭连接 (ReadTimeout < 1s) 或快速返回 HTTP 400。"
 		} else if duration > 2*time.Second {
 			itemEntropy.Score = 15
@@ -54,7 +54,7 @@ func probeEntropy(ctx context.Context, opts ProbeOptions) Category {
 				// 快速 RST / FIN 断开（对齐主流 Web 基础设施如 Apple/Microsoft/Baidu 在处理非法握手时的行为）
 				itemEntropy.Score = 0
 				itemEntropy.Passed = true
-				itemEntropy.Details = fmt.Sprintf("服务端在 %v 内快速拒绝并关闭连接 (TCP RST/FIN)，无挂起等待代理访问认证特征，表现符合现代标准 TLS 协议栈规范。", duration)
+				itemEntropy.Details = fmt.Sprintf("服务端在 %v 内快速拒绝并关闭连接 (TCP RST/FIN)，无挂起等待私有协议认证特征，表现符合现代标准 TLS 协议栈规范。", duration)
 			}
 		}
 	} else {
