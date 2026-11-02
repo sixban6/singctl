@@ -168,13 +168,14 @@ func checkPorts(cfg *config.Config, r *DoctorReport) {
 
 func checkServices(r *DoctorReport) {
 	services := []struct {
-		id   string
-		name string
+		id       string
+		name     string
+		fixGuide string
 	}{
-		{"caddy", "Caddy 网关"},
-		{"sing-box", "sing-box 核心"},
-		{"substore", "Sub-Store 订阅中心"},
-		{"wireproxy", "WARP (wireproxy)"},
+		{"caddy", "Caddy 网关", "systemctl restart caddy"},
+		{"sing-box", "sing-box 核心", "systemctl restart sing-box"},
+		{"substore", "Sub-Store 订阅中心", "docker restart sub-store"},
+		{"wireproxy", "WARP (wireproxy)", "systemctl restart wireproxy"},
 	}
 
 	for _, s := range services {
@@ -184,7 +185,7 @@ func checkServices(r *DoctorReport) {
 				Name:     s.name,
 				Category: "services",
 				Status:   "ok",
-				Summary:  "进程处于活跃运行状态 (active)",
+				Summary:  "服务处于活跃运行状态 (active)",
 			})
 		} else {
 			r.Items = append(r.Items, DoctorItem{
@@ -192,7 +193,7 @@ func checkServices(r *DoctorReport) {
 				Category: "services",
 				Status:   "warn",
 				Summary:  "服务未运行或未启动 (inactive)",
-				Detail:   fmt.Sprintf("可尝试在控制台或终端运行 'systemctl restart %s'", s.id),
+				Detail:   fmt.Sprintf("可尝试在控制台或终端运行: %s", s.fixGuide),
 			})
 		}
 	}
@@ -315,44 +316,96 @@ func checkSubstore(r *DoctorReport) {
 
 func checkWARPAndUnlock(r *DoctorReport) {
 	unlock := CheckMediaUnlock()
-	summaryList := []string{}
 
-	if unlock.OpenAI.Status == "unlocked" {
-		loc := unlock.OpenAI.Region
-		if loc == "" {
-			loc = "OK"
-		}
-		summaryList = append(summaryList, fmt.Sprintf("OpenAI [%s]", loc))
-	}
-	if unlock.Netflix.Status == "unlocked" {
-		summaryList = append(summaryList, "Netflix [完整解锁]")
-	} else if unlock.Netflix.Status == "partially_unlocked" {
-		summaryList = append(summaryList, "Netflix [仅自制剧]")
-	}
-	if unlock.YouTube.Status == "unlocked" {
-		summaryList = append(summaryList, "YouTube [正常]")
-	}
+	// 1. VPS 原生出口
+	directSummary := formatProfileSummary(&unlock.Direct)
+	r.Items = append(r.Items, DoctorItem{
+		Name:     "VPS 原生出口画像",
+		Category: "network",
+		Status:   "ok",
+		Summary:  directSummary,
+		Detail:   fmt.Sprintf("出口公网 IP: %s (%s)", unlock.Direct.ExitIP, unlock.Direct.ExitLoc),
+	})
 
-	if len(summaryList) > 0 {
+	// 2. WARP 分流出口
+	if unlock.WARP.Available {
+		warpSummary := formatProfileSummary(&unlock.WARP)
 		r.Items = append(r.Items, DoctorItem{
-			Name:     "全球边缘多点出口画像与服务连通性",
+			Name:     "WARP 分流出口画像",
 			Category: "network",
 			Status:   "ok",
-			Summary:  strings.Join(summaryList, " | "),
-			Detail:   fmt.Sprintf("出口网络: %s", unlock.ProxyUsed),
+			Summary:  warpSummary,
+			Detail:   fmt.Sprintf("出口公网 IP: %s (%s)", unlock.WARP.ExitIP, unlock.WARP.ExitLoc),
 		})
 	} else {
 		r.Items = append(r.Items, DoctorItem{
-			Name:     "全球边缘多点出口画像与服务连通性",
+			Name:     "WARP 分流出口画像",
 			Category: "network",
 			Status:   "warn",
-			Summary:  "部分海外流媒体服务未能解锁",
-			Detail:   "可尝试重新部署 WARP 以获取原生分流出口",
+			Summary:  "WARP 服务未运行或 40000 端口未就绪",
+			Detail:   "若需要海外流媒体/AI 解锁增强，可运行 'singctl sr install warp'",
 		})
 	}
 }
 
+func formatProfileSummary(p *ExitProfile) string {
+	list := []string{}
+	if p.OpenAI.Status == "unlocked" {
+		loc := p.OpenAI.Region
+		if loc == "" {
+			loc = "OK"
+		}
+		list = append(list, fmt.Sprintf("OpenAI [%s]", loc))
+	} else {
+		list = append(list, "OpenAI [受阻]")
+	}
+
+	if p.Netflix.Status == "unlocked" {
+		list = append(list, "Netflix [完整解锁]")
+	} else if p.Netflix.Status == "partially_unlocked" {
+		list = append(list, "Netflix [仅自制剧]")
+	} else {
+		list = append(list, "Netflix [未解锁]")
+	}
+
+	if p.YouTube.Status == "unlocked" {
+		list = append(list, "YouTube [原生]")
+	}
+	if p.Google.Status == "unlocked" {
+		list = append(list, "Google [无验证码]")
+	}
+
+	return strings.Join(list, " | ")
+}
+
 func isServiceActive(serviceName string) bool {
+	// 针对 Sub-Store: 优先检查 Docker 容器或本地 3001 端口
+	if serviceName == "substore" || serviceName == "sub-store" {
+		if out, err := exec.Command("docker", "inspect", "-f", "{{.State.Running}}", "sub-store").Output(); err == nil {
+			if strings.TrimSpace(string(out)) == "true" {
+				return true
+			}
+		}
+		// 本地 3001 端口嗅探
+		conn, err := net.DialTimeout("tcp", "127.0.0.1:3001", 300*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return true
+		}
+	}
+
+	// 针对 WARP: 检查 wireproxy 或 warp-svc 或 40000 端口
+	if serviceName == "wireproxy" {
+		conn, err := net.DialTimeout("tcp", "127.0.0.1:40000", 300*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return true
+		}
+		if out, err := exec.Command("systemctl", "is-active", "warp-svc").Output(); err == nil && strings.TrimSpace(string(out)) == "active" {
+			return true
+		}
+	}
+
 	// 优先检查 systemctl
 	out, err := exec.Command("systemctl", "is-active", serviceName).Output()
 	if err == nil && strings.TrimSpace(string(out)) == "active" {

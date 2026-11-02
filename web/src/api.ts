@@ -88,6 +88,11 @@ export const api = {
       method: 'POST',
     }),
 
+  regenerateMaskSite: () =>
+    request<{ message: string; meta: any }>('/api/server/mask-site/regenerate', {
+      method: 'POST',
+    }),
+
   updateCredentials: (body: { currentPassword: string; newUsername: string; newPassword: string }) =>
     request<{ message: string; username: string; token: string }>('/api/server/credentials', {
       method: 'PUT',

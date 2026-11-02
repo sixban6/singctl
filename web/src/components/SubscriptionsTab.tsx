@@ -133,6 +133,18 @@ export const SubscriptionsTab: React.FC = () => {
               <QrCode className="w-3.5 h-3.5" />
               <span>二维码</span>
             </button>
+            {data?.substoreAdminUrl && (
+              <a
+                href={data.substoreAdminUrl}
+                target="_blank"
+                rel="noreferrer"
+                title="打开 Sub-Store 后台 (自动携带完整免密鉴权凭证)"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-purple-500/20 hover:bg-purple-500/30 border border-purple-500/30 text-purple-200 text-xs font-semibold transition-colors"
+              >
+                <ExternalLink className="w-3.5 h-3.5 text-purple-400" />
+                <span>Sub-Store 订阅源 (免密)</span>
+              </a>
+            )}
             <button
               onClick={loadData}
               title="重新拉取最新订阅"

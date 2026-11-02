@@ -227,6 +227,25 @@ func (sb *Substore) GetVercelAdminURL() (string, error) {
 	return fmt.Sprintf("https://sub-store.vercel.app?api=https://%s/%s", sbDomain, key), nil
 }
 
+// GetSubscriptionURL returns the primary subscription link for all clients.
+func (sb *Substore) GetSubscriptionURL() string {
+	key, err := sb.GetSubstoreKey()
+	sbDomain := ""
+	if sb.Config != nil {
+		sbDomain = sb.Config.Server.GetSubstoreDomain()
+		if sbDomain == "" {
+			sbDomain = sb.Config.Server.GetNodeDomain()
+		}
+	}
+	if sbDomain == "" {
+		return ""
+	}
+	if err == nil && key != "" {
+		return fmt.Sprintf("https://%s/%s/download/collection/all", sbDomain, key)
+	}
+	return fmt.Sprintf("https://%s/download/collection/all", sbDomain)
+}
+
 func (sb *Substore) ShowLoginInfo() {
 	adminURL, err := sb.GetAdminURL()
 	if err != nil {

@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { ServerStatusResponse } from '../types';
 import { api } from '../api';
 import { useToast } from './Toast';
-import { Play, Square, RotateCw, FileText, Code2, ExternalLink, CheckCircle2, XCircle, X, Save, Edit3, ShieldCheck, Zap, RefreshCw } from 'lucide-react';
+import { Play, Square, RotateCw, FileText, Code2, ExternalLink, CheckCircle2, XCircle, X, Save, Edit3, ShieldCheck, Zap, RefreshCw, Sparkles, Globe } from 'lucide-react';
 
 interface ServicesTabProps {
   status: ServerStatusResponse | null;
@@ -33,6 +33,18 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
       error(err.message || '启用 BBR 失败');
     } finally {
       setEnablingBBR(false);
+    }
+  };
+
+  const handleRegenerateMaskSite = async () => {
+    setLoading('caddy-mask');
+    try {
+      const res = await api.regenerateMaskSite();
+      success(res.message);
+    } catch (err: any) {
+      error(err.message || '重新生成伪装站失败');
+    } finally {
+      setLoading(null);
     }
   };
 
@@ -262,6 +274,27 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
               <Edit3 className="w-3.5 h-3.5 text-purple-400" />
               <span>Caddyfile 编辑</span>
             </button>
+            <button
+              onClick={handleRegenerateMaskSite}
+              disabled={loading === 'caddy-mask'}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-500/10 hover:bg-indigo-500/20 border border-indigo-500/30 text-xs font-semibold text-indigo-300 transition-colors"
+              title="随机生成全新主题、作者和文章的高熵伪装博客，防御空间测绘与流量指纹"
+            >
+              <Sparkles className={`w-3.5 h-3.5 ${loading === 'caddy-mask' ? 'animate-spin' : ''}`} />
+              <span>换一批伪装站</span>
+            </button>
+            {status?.config?.nodeDomain && (
+              <a
+                href={`https://${status.config.nodeDomain}`}
+                target="_blank"
+                rel="noreferrer"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700/60 text-xs font-medium text-slate-300 transition-colors"
+                title="在浏览器中直接打开当前 443 伪装回落网站"
+              >
+                <Globe className="w-3.5 h-3.5 text-cyan-400" />
+                <span>访问回落页</span>
+              </a>
+            )}
           </div>
         </div>
 
@@ -319,13 +352,14 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
               <span>容器日志</span>
             </button>
             <a
-              href={`https://${status?.config?.substoreDomain || status?.config?.nodeDomain}`}
+              href={status?.config?.substoreAdminUrl || `https://${status?.config?.substoreDomain || status?.config?.nodeDomain}`}
               target="_blank"
               rel="noreferrer"
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700/60 text-xs font-medium text-slate-200 transition-colors"
+              title="一键打开 Sub-Store 后台 (自动携带完整免密 API 鉴权凭据)"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-purple-500/20 hover:bg-purple-500/30 border border-purple-500/30 text-xs font-semibold text-purple-200 transition-colors"
             >
               <ExternalLink className="w-3.5 h-3.5 text-purple-400" />
-              <span>打开 Sub-Store</span>
+              <span>打开 Sub-Store (免密直达)</span>
             </a>
           </div>
         </div>

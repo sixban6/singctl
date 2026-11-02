@@ -41,6 +41,7 @@ export interface ServerStatusResponse {
   config: {
     nodeDomain: string;
     substoreDomain: string;
+    substoreAdminUrl?: string;
     nodeTag: string;
     sni: string;
     hasCFToken: boolean;
@@ -138,12 +139,21 @@ export interface ServiceUnlockStatus {
   details?: string;
 }
 
-export interface MediaUnlockReport {
+export interface ExitProfile {
+  name: string;
+  available: boolean;
+  exitIP?: string;
+  exitLoc?: string;
   openai: ServiceUnlockStatus;
   netflix: ServiceUnlockStatus;
   youtube: ServiceUnlockStatus;
   disney: ServiceUnlockStatus;
   google: ServiceUnlockStatus;
+  errorReason?: string;
+}
+
+export interface MediaUnlockReport {
+  direct: ExitProfile;
+  warp: ExitProfile;
   testedAt: string;
-  proxyUsed?: string;
 }

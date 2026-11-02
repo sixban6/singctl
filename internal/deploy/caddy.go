@@ -12,6 +12,7 @@ import (
 
 	"singctl/internal/config"
 	"singctl/internal/constant"
+	"singctl/internal/deploy/masksite"
 	"singctl/internal/logger"
 )
 
@@ -52,6 +53,17 @@ func RotateCloudflareToken(cfg *config.Config) error {
 	return nil
 }
 
+// RegenerateMaskSite creates and writes a brand new randomized camouflage site to constant.MaskSiteDir.
+func RegenerateMaskSite() (*masksite.SiteMeta, error) {
+	logger.Info("Generating new randomized camouflage blog...")
+	meta, err := masksite.GenerateAndWrite(constant.MaskSiteDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to regenerate mask site: %w", err)
+	}
+	logger.Success("Generated unique camouflage blog: '%s' by %s (%s)", meta.BlogTitle, meta.AuthorName, meta.Category)
+	return meta, nil
+}
+
 // FormatIPForCaddy formats an IP for use in Caddy addresses (wrapping IPv6 in brackets).
 func FormatIPForCaddy(ip string) string {
 	trimmed := strings.TrimSpace(ip)
@@ -83,14 +95,33 @@ func DeployCaddy(cfg *config.Config) error {
 		}
 	}
 
-	// 2. Ensure mask site webroot and rich static index.html exist
+	// 2. Ensure mask site webroot and rich dynamic camouflage blog exist
 	if err := os.MkdirAll(constant.MaskSiteDir, 0755); err != nil {
 		return fmt.Errorf("failed to create mask site root: %w", err)
 	}
-	maskHTML, err := templateFiles.ReadFile("templates/mask_index.html")
-	if err == nil {
-		if err := os.WriteFile(filepath.Join(constant.MaskSiteDir, "index.html"), maskHTML, 0644); err != nil {
-			logger.Warn("Failed to write mask site index.html: %v", err)
+	indexPath := filepath.Join(constant.MaskSiteDir, "index.html")
+	needRegen := false
+	if _, err := os.Stat(indexPath); os.IsNotExist(err) {
+		needRegen = true
+	} else if data, err := os.ReadFile(indexPath); err == nil {
+		// Automatically replace the old static hardcoded template with a unique randomized blog
+		contentStr := string(data)
+		if strings.Contains(contentStr, "Alex Chen") || strings.Contains(contentStr, "DevNotes | Systems, Architecture") {
+			needRegen = true
+		}
+	}
+
+	if needRegen {
+		logger.Info("Generating randomized camouflage fallback blog for Caddy...")
+		meta, err := masksite.GenerateAndWrite(constant.MaskSiteDir)
+		if err != nil {
+			logger.Warn("Failed to generate random camouflage site: %v, falling back to embedded template", err)
+			maskHTML, rErr := templateFiles.ReadFile("templates/mask_index.html")
+			if rErr == nil {
+				_ = os.WriteFile(indexPath, maskHTML, 0644)
+			}
+		} else {
+			logger.Success("Camouflage fallback blog ready: '%s' by %s (%s)", meta.BlogTitle, meta.AuthorName, meta.Category)
 		}
 	}
 

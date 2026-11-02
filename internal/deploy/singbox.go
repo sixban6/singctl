@@ -20,7 +20,6 @@ import (
 	"singctl/internal/constant"
 	"singctl/internal/logger"
 	"singctl/internal/singbox"
-	"singctl/internal/util/terminalqr"
 )
 
 type SingBoxServer struct {
@@ -396,18 +395,10 @@ func (sbs *SingBoxServer) ShowLoginInfo() {
 	// 1. Hysteria 2
 	fmt.Println("\n【1】Hysteria 2 节点 (端口: 443 / QUIC UDP)")
 	fmt.Printf("• 分享链接: %s\n", sbs.ShareLinkHy2)
-	if qr, err := terminalqr.RenderString(sbs.ShareLinkHy2); err == nil && qr != "" {
-		fmt.Println("• 手机扫码导入 (Hysteria 2):")
-		fmt.Print(qr)
-	}
 
 	// 2. VLESS Reality
 	fmt.Println("\n【2】VLESS Reality 节点 (端口: 443 / TCP Reality)")
 	fmt.Printf("• 分享链接: %s\n", sbs.ShareLinkVless)
-	if qr, err := terminalqr.RenderString(sbs.ShareLinkVless); err == nil && qr != "" {
-		fmt.Println("• 手机扫码导入 (VLESS Reality):")
-		fmt.Print(qr)
-	}
 	fmt.Println("────────────────────────────────────────────────────────────")
 	fmt.Println()
 }

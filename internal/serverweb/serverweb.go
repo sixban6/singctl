@@ -109,6 +109,7 @@ func New(opts Options) *Server {
 	s.mux.HandleFunc("POST /api/server/bbr", s.guard(s.handleEnableBBR))
 	s.mux.HandleFunc("GET /api/server/warp/diagnose", s.guard(s.handleWarpDiagnose))
 	s.mux.HandleFunc("POST /api/server/path/regenerate", s.guard(s.handleRegeneratePath))
+	s.mux.HandleFunc("POST /api/server/mask-site/regenerate", s.guard(s.handleRegenerateMaskSite))
 	s.mux.HandleFunc("PUT /api/server/sni", s.guard(s.handleUpdateSNI))
 	s.mux.HandleFunc("PUT /api/server/cf-token", s.guard(s.handleUpdateCFToken))
 	s.mux.HandleFunc("PUT /api/server/credentials", s.guard(s.handleUpdateCredentials))
@@ -303,6 +304,14 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	substoreRunning := checkDockerRunning("sub-store")
 	warpRunning := checkServiceRunning("wireproxy") || checkServiceRunning("warp-svc")
 
+	substoreAdminURL := ""
+	sbt := deploy.NewSubstore(cfg, "")
+	if adminURL, err := sbt.GetAdminURL(); err == nil && adminURL != "" {
+		substoreAdminURL = adminURL
+	} else if vercelURL, err := sbt.GetVercelAdminURL(); err == nil && vercelURL != "" {
+		substoreAdminURL = vercelURL
+	}
+
 	status := map[string]any{
 		"version":      s.opts.Version,
 		"authEnabled":  s.getPassword() != "",
@@ -336,11 +345,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			},
 		},
 		"config": map[string]any{
-			"nodeDomain":     cfg.Server.GetNodeDomain(),
-			"substoreDomain": cfg.Server.GetSubstoreDomain(),
-			"nodeTag":        cfg.Server.NodeTag,
-			"sni":            cfg.Server.Sni,
-			"hasCFToken":     cfg.Server.CFDNSKey != "",
+			"nodeDomain":        cfg.Server.GetNodeDomain(),
+			"substoreDomain":    cfg.Server.GetSubstoreDomain(),
+			"substoreAdminUrl":  substoreAdminURL,
+			"nodeTag":           cfg.Server.NodeTag,
+			"sni":               cfg.Server.Sni,
+			"hasCFToken":        cfg.Server.CFDNSKey != "",
 		},
 	}
 	writeJSON(w, http.StatusOK, status)
@@ -719,6 +729,19 @@ func (s *Server) handleRegeneratePath(w http.ResponseWriter, r *http.Request) {
 		"message":  "全新隐蔽访问路径已生成并生效",
 		"path":     newPath,
 		"httpsUrl": newHTTPS,
+	})
+}
+
+func (s *Server) handleRegenerateMaskSite(w http.ResponseWriter, r *http.Request) {
+	meta, err := deploy.RegenerateMaskSite()
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "重新生成伪装站点失败: "+err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"message": fmt.Sprintf("已成功重新生成伪装博客：%s（作者：%s，主题：%s）", meta.BlogTitle, meta.AuthorName, meta.Category),
+		"meta":    meta,
 	})
 }
 

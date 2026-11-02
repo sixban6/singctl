@@ -6,11 +6,12 @@ import (
 	"strings"
 
 	"singctl/internal/config"
+	"singctl/internal/constant"
 	"singctl/internal/deploy"
+	"singctl/internal/deploy/masksite"
 	"singctl/internal/doctor"
 	"singctl/internal/logger"
 	"singctl/internal/serverweb"
-	"singctl/internal/util/terminalqr"
 
 	"github.com/spf13/cobra"
 )
@@ -74,9 +75,6 @@ func newInstallServerCmd(cfg *config.Config, configPath string) *cobra.Command {
 					return err
 				}
 
-				sbs.ShowLoginInfo()
-				sbt.ShowLoginInfo()
-
 				// 后台启动服务端 WebUI (仅监听本地 127.0.0.1，通过 Caddy HTTPS 自动反向代理)
 				if err := serverweb.InstallSystemdService(resolvedPath); err != nil {
 					_ = serverweb.StartBackground(serverweb.Options{
@@ -87,7 +85,7 @@ func newInstallServerCmd(cfg *config.Config, configPath string) *cobra.Command {
 						Version:    "1.0.0",
 					})
 				}
-				showWebAdminBanner(cfg)
+				showUnifiedInstallSummary(cfg, sbs, sbt)
 				return nil
 			}
 
@@ -210,6 +208,41 @@ func NewServerCmd(configPath string) *cobra.Command {
 	cmd.AddCommand(newServerWebCmd(configPath))
 	cmd.AddCommand(NewNetCmd(configPath))
 	cmd.AddCommand(newServerDoctorCmd(configPath))
+	cmd.AddCommand(newMaskSiteCmd(configPath))
+	return cmd
+}
+
+func newMaskSiteCmd(configPath string) *cobra.Command {
+	var regen bool
+	cmd := &cobra.Command{
+		Use:     "mask-site",
+		Aliases: []string{"mask", "camouflage"},
+		Short:   "管理或重新生成 Caddy 伪装回落博客 / Manage or regenerate camouflage mask blog",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if regen || (len(args) > 0 && args[0] == "regen") {
+				meta, err := deploy.RegenerateMaskSite()
+				if err != nil {
+					return err
+				}
+				logger.Success("Camouflage site regenerated successfully:")
+				logger.Info("  Title:    %s", meta.BlogTitle)
+				logger.Info("  Author:   %s (%s)", meta.AuthorName, meta.AuthorRole)
+				logger.Info("  Category: %s", meta.Category)
+				logger.Info("  Articles: %d posts generated", meta.ArticleCount)
+				return nil
+			}
+
+			metaJson := masksite.ReadExistingMeta(constant.MaskSiteDir)
+			if metaJson != "" {
+				logger.Info("Current camouflage site metadata:\n%s", metaJson)
+			} else {
+				logger.Info("Camouflage site directory: %s", constant.MaskSiteDir)
+			}
+			logger.Info("To regenerate a brand new randomized persona and articles, run: singctl sr mask-site --regen")
+			return nil
+		},
+	}
+	cmd.Flags().BoolVarP(&regen, "regen", "r", false, "随机重新生成高熵伪装站点 (Randomly regenerate high-entropy camouflage blog)")
 	return cmd
 }
 
@@ -839,11 +872,52 @@ func showWebAdminBanner(cfg *config.Config) {
 	fmt.Println("🌐 服务端专属 Web 管理面板 (HTTPS Caddy 专属路径反代):")
 	fmt.Printf("• 访问地址: %s\n", adminURL)
 	fmt.Printf("• 管理员账号: %s\n", cfg.Server.GetWebAdminUsername())
-	fmt.Printf("• 随机初始密码: %s (登录后台后可随时修改)\n", cfg.Server.GetWebAdminPassword())
+	fmt.Printf("• 初始管理密码: %s (登录后台后可随时修改)\n", cfg.Server.GetWebAdminPassword())
 	fmt.Println("• 安全机制: 纯会话安全 Cookie，关闭浏览器/标签页即退出，无长期免密")
-	if qr, err := terminalqr.RenderString(adminURL); err == nil && qr != "" {
-		fmt.Println("• 手机扫码直达 (扫码打开登录页面):")
-		fmt.Print(qr)
-	}
 	fmt.Println("========================================================")
+}
+
+func showUnifiedInstallSummary(cfg *config.Config, sbs *deploy.SingBoxServer, sbt *deploy.Substore) {
+	domain := cfg.Server.GetSubstoreDomain()
+	if domain == "" {
+		domain = cfg.Server.GetNodeDomain()
+	}
+	adminPath := cfg.Server.GetWebAdminPath()
+	adminURL := fmt.Sprintf("https://%s%s/", domain, adminPath)
+
+	subURL := ""
+	if sbt != nil {
+		subURL = sbt.GetSubscriptionURL()
+	}
+
+	fmt.Println("\n══════════════════════════════════════════════════════════════════════════")
+	fmt.Println("                     🎉 SingCtl 服务端全组件部署成功！")
+	fmt.Println("══════════════════════════════════════════════════════════════════════════")
+	fmt.Println(" [✓] Caddy 2.11.7     : TLS 证书申请成功，443 端口反代已就绪")
+	fmt.Println(" [✓] sing-box 核心    : VLESS Reality & Hysteria 2 双协议已启动")
+	fmt.Println(" [✓] Sub-Store        : 节点聚合与订阅转换已就绪 (端口 3001)")
+	fmt.Println(" [✓] WARP 出口        : 本地分流出口已就绪 (端口 40000)")
+	fmt.Println("──────────────────────────────────────────────────────────────────────────")
+	fmt.Println(" 🌐 专属管理控制台 (核心入口):")
+	fmt.Printf("   • 访问链接 : %s\n", adminURL)
+	fmt.Printf("   • 管理账号 : %s\n", cfg.Server.GetWebAdminUsername())
+	fmt.Printf("   • 初始密码 : %s\n", cfg.Server.GetWebAdminPassword())
+	fmt.Println("   • 安全机制 : 纯会话 Cookie 认证，公网端口严密关闭，防爆破 3次错封IP 保护")
+	fmt.Println("──────────────────────────────────────────────────────────────────────────")
+	fmt.Println(" 📦 客户端全平台聚合订阅:")
+	if subURL != "" {
+		fmt.Printf("   • 订阅地址 : %s\n", subURL)
+	} else {
+		fmt.Printf("   • 订阅地址 : https://%s/api/substore/download/singctl\n", domain)
+	}
+	fmt.Println("   • 快速导入 : 登录上述管理控制台，可一键唤醒导入 Shadowrocket、")
+	fmt.Println("                Clash Verge、Sing-box，或在网页端直接扫码导入。")
+	fmt.Println("──────────────────────────────────────────────────────────────────────────")
+	fmt.Println(" 💡 核心运维常用命令:")
+	fmt.Println("   • 全链路健康体检   : singctl doctor")
+	fmt.Println("   • 查看控制台访问信息: singctl sr web status")
+	fmt.Println("   • 一键解封受限 IP  : singctl sr web unban [IP|all]")
+	fmt.Println("   • 动态修改伪装域名 : singctl sr sni <新域名>")
+	fmt.Println("══════════════════════════════════════════════════════════════════════════")
+	fmt.Println()
 }
