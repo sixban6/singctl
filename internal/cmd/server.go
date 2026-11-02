@@ -8,16 +8,27 @@ import (
 	"singctl/internal/config"
 	"singctl/internal/deploy"
 	"singctl/internal/logger"
+	"singctl/internal/serverweb"
+	"singctl/internal/util/terminalqr"
 
 	"github.com/spf13/cobra"
 )
 
-func newInstallServerCmd(cfg *config.Config) *cobra.Command {
+func newInstallServerCmd(cfg *config.Config, configPath string) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "install",
 		Short: "安装服务端组件 / Install server components (common|caddy|singbox|substore)",
 		RunE: func(cmd *cobra.Command, args []string) error {
+
+			resolvedPath := resolveConfigPath(cmd, configPath)
+			if cfg == nil {
+				var err error
+				cfg, err = config.Load(resolvedPath)
+				if err != nil || cfg == nil {
+					return fmt.Errorf("加载配置文件失败: %w", err)
+				}
+			}
 
 			// Verify required config
 			if cfg.Server.GetNodeDomain() == "" || cfg.Server.CFDNSKey == "" {
@@ -26,6 +37,14 @@ func newInstallServerCmd(cfg *config.Config) *cobra.Command {
 
 			// If no target is specified, run them all in sequence
 			if len(args) == 0 {
+				// 自动初始化服务端 WebUI 凭据与随机路径并保存，供 Caddyfile 渲染
+				if cfg.Server.EnsureWebAdminCredentials() {
+					_ = config.Save(resolvedPath, cfg)
+				}
+
+				if _, err := deploy.RunPreflight(cfg, true); err != nil {
+					logger.Warn("预检发现警告: %v", err)
+				}
 				if err := deploy.DeployCommonWithConfig(cfg); err != nil {
 					return err
 				}
@@ -56,6 +75,18 @@ func newInstallServerCmd(cfg *config.Config) *cobra.Command {
 
 				sbs.ShowLoginInfo()
 				sbt.ShowLoginInfo()
+
+				// 后台启动服务端 WebUI (仅监听本地 127.0.0.1，通过 Caddy HTTPS 自动反向代理)
+				if err := serverweb.InstallSystemdService(resolvedPath); err != nil {
+					_ = serverweb.StartBackground(serverweb.Options{
+						ConfigPath: resolvedPath,
+						Listen:     fmt.Sprintf("127.0.0.1:%d", cfg.Server.GetWebAdminPort()),
+						Username:   cfg.Server.GetWebAdminUsername(),
+						Password:   cfg.Server.GetWebAdminPassword(),
+						Version:    "1.0.0",
+					})
+				}
+				showWebAdminBanner(cfg)
 				return nil
 			}
 
@@ -104,6 +135,9 @@ func newUninstallServerCmd() *cobra.Command {
 
 			if len(args) == 0 {
 				logger.Info("Uninstalling all server components...")
+				_ = serverweb.UninstallSystemdService()
+				_, _ = serverweb.StopServerWeb()
+
 				if err := deploy.UninstallCaddy(); err != nil {
 					logger.Warn("Failed to uninstall Caddy: %v", err)
 				}
@@ -161,7 +195,9 @@ func NewServerCmd(configPath string) *cobra.Command {
 		logger.Warn("Failed to load config: %v", err)
 	}
 
-	cmd.AddCommand(newInstallServerCmd(cfg))
+	cmd.AddCommand(newInitServerCmd(configPath))
+	cmd.AddCommand(newPreflightServerCmd(configPath))
+	cmd.AddCommand(newInstallServerCmd(cfg, configPath))
 	cmd.AddCommand(NewReinstallServerCmd(configPath))
 	cmd.AddCommand(newUninstallServerCmd())
 	cmd.AddCommand(newSniCmd(configPath))
@@ -170,6 +206,8 @@ func NewServerCmd(configPath string) *cobra.Command {
 	cmd.AddCommand(NewSyncServerCmd(configPath))
 	cmd.AddCommand(NewInfoServerCmd(configPath))
 	cmd.AddCommand(NewTerminalCmd(configPath))
+	cmd.AddCommand(newServerWebCmd(configPath))
+	cmd.AddCommand(NewNetCmd(configPath))
 	return cmd
 }
 
@@ -767,4 +805,25 @@ func showServerInfo(configPath string) error {
 	fmt.Println("========================================================")
 
 	return nil
+}
+
+func showWebAdminBanner(cfg *config.Config) {
+	domain := cfg.Server.GetSubstoreDomain()
+	if domain == "" {
+		domain = cfg.Server.GetNodeDomain()
+	}
+	adminPath := cfg.Server.GetWebAdminPath()
+	adminURL := fmt.Sprintf("https://%s%s/", domain, adminPath)
+
+	fmt.Println("\n========================================================")
+	fmt.Println("🌐 服务端专属 Web 管理面板 (HTTPS Caddy 专属路径反代):")
+	fmt.Printf("• 访问地址: %s\n", adminURL)
+	fmt.Printf("• 管理员账号: %s\n", cfg.Server.GetWebAdminUsername())
+	fmt.Printf("• 随机初始密码: %s (登录后台后可随时修改)\n", cfg.Server.GetWebAdminPassword())
+	fmt.Println("• 安全机制: 纯会话安全 Cookie，关闭浏览器/标签页即退出，无长期免密")
+	if qr, err := terminalqr.RenderString(adminURL); err == nil && qr != "" {
+		fmt.Println("• 手机扫码直达 (扫码打开登录页面):")
+		fmt.Print(qr)
+	}
+	fmt.Println("========================================================")
 }

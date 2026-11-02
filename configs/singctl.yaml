@@ -28,6 +28,12 @@ server: # (可选) 服务器部署配置.当需要部署singbox服务端的时�
   server_ip: "" # (可选) 公网 IP 地址（未填自动探测用于申请 Let's Encrypt 原生 IP 证书）
   cf_dns_key: "your_cloudflare_api_token" # 你的 Cloudflare API Token
   sni: "" # (可选) Reality SNI 伪装域名。默认: swdist.apple.com
+  # web_admin: # (可选) 服务端专属管理后台 (通过 Caddy HTTPS 自动反代，免开公网端口)
+  #   enabled: true
+  #   port: 8092
+  #   path: "" # (留空首次部署自动生成随机安全路径如 /sr/k9X2Mn8Pq4Rw7T1Z)
+  #   username: "singctl"
+  #   password: "" # (留空首次部署自动生成高强度随机密码)
 
 watchdog:                                      # (可选) 看门狗守护进程配置 (singctl dm)
   interval: 180                                 # 检查间隔(秒), 默认 180

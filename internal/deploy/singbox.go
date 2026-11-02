@@ -20,6 +20,7 @@ import (
 	"singctl/internal/constant"
 	"singctl/internal/logger"
 	"singctl/internal/singbox"
+	"singctl/internal/util/terminalqr"
 )
 
 type SingBoxServer struct {
@@ -387,16 +388,28 @@ func (sbs *SingBoxServer) ResetCredentials() error {
 }
 
 func (sbs *SingBoxServer) ShowLoginInfo() {
+	logger.Success("Sing-box 服务端核心部署完成！")
+	fmt.Println("\n┌────────────────────────────────────────────────────────────┐")
+	fmt.Println("│               🚀 服务端节点分享与客户端导入                │")
+	fmt.Println("└────────────────────────────────────────────────────────────┘")
 
-	// 5. Print high-visibility output
+	// 1. Hysteria 2
+	fmt.Println("\n【1】Hysteria 2 节点 (端口: 443 / QUIC UDP)")
+	fmt.Printf("• 分享链接: %s\n", sbs.ShareLinkHy2)
+	if qr, err := terminalqr.RenderString(sbs.ShareLinkHy2); err == nil && qr != "" {
+		fmt.Println("• 手机扫码导入 (Hysteria 2):")
+		fmt.Print(qr)
+	}
 
-	logger.Success("Sing-box Server deployed successfully!")
-	fmt.Println("\n========================================================")
-	fmt.Println("🚀 Hysteria2 Access Link (Copy to your client):")
-	fmt.Printf("%s\n", sbs.ShareLinkHy2)
-	fmt.Println("\n🚀 VLESS Reality Access Link (Copy to your client):")
-	fmt.Printf("%s\n", sbs.ShareLinkVless)
-	fmt.Println("========================================================")
+	// 2. VLESS Reality
+	fmt.Println("\n【2】VLESS Reality 节点 (端口: 443 / TCP Reality)")
+	fmt.Printf("• 分享链接: %s\n", sbs.ShareLinkVless)
+	if qr, err := terminalqr.RenderString(sbs.ShareLinkVless); err == nil && qr != "" {
+		fmt.Println("• 手机扫码导入 (VLESS Reality):")
+		fmt.Print(qr)
+	}
+	fmt.Println("────────────────────────────────────────────────────────────")
+	fmt.Println()
 }
 
 // PreviewServerConfig renders the sing-box server config template and returns it as a string.

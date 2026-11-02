@@ -598,9 +598,27 @@ main() {
         "$INSTALL_DIR/singctl" sb start
         echo_success "sing-box 启动完成"
     else
-        echo_warning "配置文件需要手动编辑或未配置有效订阅"
-        echo_info "请先编辑配置文件: $CONFIG_FILE"  
-        echo_info "然后运行: sudo singctl sb install && sudo singctl sb start"
+        echo_warning "配置文件中尚未配置有效订阅"
+        
+        # 预先安装好 sing-box 内核，免去用户后续手动安装步骤
+        if check_singbox_installation; then
+            echo_info "正在自动预安装 sing-box 核心组件..."
+            "$INSTALL_DIR/singctl" sb install || true
+        fi
+
+        # 自动拉起 WebUI，让用户能直接在浏览器中填入订阅
+        echo_info "正在自动启动 SingCtl WebUI 图形管理后台..."
+        "$INSTALL_DIR/singctl" web start >/dev/null 2>&1 || true
+
+        echo_success "========================================================"
+        echo_success "🎉 SingCtl 客户端已就绪！"
+        echo_info "你可以选择以下任一方式完成订阅配置:"
+        echo_info "【方式 1】在手机或电脑浏览器中打开 Web 管理页面 (推荐):"
+        "$INSTALL_DIR/singctl" web status 2>/dev/null | grep -E "http://" || echo "  ➜ http://$(uci get network.lan.ipaddr 2>/dev/null || hostname -I | awk '{print $1}'):8090"
+        echo_info "【方式 2】在终端手动编辑配置文件:"
+        echo_info "  vim $CONFIG_FILE"
+        echo_info "  配置完成后运行: singctl sb start"
+        echo_success "========================================================"
     fi
 }
 

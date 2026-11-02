@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"singctl/configs"
 	"singctl/internal/cmd"
 	"singctl/internal/logger"
 
@@ -51,34 +52,35 @@ func ensureConfigDir() error {
 	return nil
 }
 
-func initConfigFile(srcConfigPath string, dstConfigPath string) {
-	file, err := os.ReadFile(srcConfigPath)
-	if err != nil {
-		log.Fatalf("Init failed to read config file: %v", err)
-	}
-	err = ensureConfigDir()
-	if err != nil {
-		log.Fatalf("Init failed to ensure config dir: %v", err)
+func initConfigFile(dstConfigPath string) {
+	if err := ensureConfigDir(); err != nil {
+		log.Printf("Warning: failed to ensure config dir: %v", err)
+		return
 	}
 
-	err = os.WriteFile(dstConfigPath, file, 0600)
-	if err != nil {
-		log.Fatalf("Init failed to write config file: %v", err)
+	if err := os.WriteFile(dstConfigPath, configs.DefaultConfigYAML, 0600); err != nil {
+		log.Printf("Warning: failed to write default config file: %v", err)
 	}
 }
 
 func main() {
-	// 只在配置文件不存在时才初始化
-	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		// 获取可执行文件所在目录
-		exePath, err := os.Executable()
-		if err != nil {
-			log.Fatalf("Failed to get executable path: %v", err)
+	// 判断是否是 init, help 或 version 等命令，避免在执行初始化向导前自动生成占位配置文件
+	isInitOrHelp := false
+	for i, arg := range os.Args {
+		if arg == "init" || arg == "help" || arg == "-h" || arg == "--help" || arg == "version" || arg == "-v" || arg == "--version" {
+			isInitOrHelp = true
+			break
 		}
-		exeDir := filepath.Dir(exePath)
-		srcConfigPath := filepath.Join(exeDir, "configs", "singctl.yaml")
+		if (arg == "sr" || arg == "server") && i+1 < len(os.Args) && os.Args[i+1] == "init" {
+			isInitOrHelp = true
+			break
+		}
+	}
 
-		initConfigFile(srcConfigPath, configPath)
+	if !isInitOrHelp {
+		if _, err := os.Stat(configPath); os.IsNotExist(err) {
+			initConfigFile(configPath)
+		}
 	}
 	rootCmd := &cobra.Command{
 		Use:   "singctl",

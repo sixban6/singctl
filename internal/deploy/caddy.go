@@ -145,6 +145,8 @@ func PreviewCaddyfile(cfg *config.Config) (string, error) {
 		SSHTunnelPath     string
 		SSHTunnelPort     int
 		MtlsCA            string
+		AdminPath         string
+		AdminPort         int
 	}
 
 	nodeDomain := ""
@@ -157,12 +159,19 @@ func PreviewCaddyfile(cfg *config.Config) (string, error) {
 	sshTunnelPath := ""
 	sshTunnelPort := 18081
 	mtlsCA := ""
+	adminPath := ""
+	adminPort := 8092
 	if cfg != nil {
 		nodeDomain = cfg.Server.GetNodeDomain()
 		substoreDomain = cfg.Server.GetSubstoreDomain()
 		cfDNSKey = cfg.Server.CFDNSKey
 		sni = cfg.Server.Sni
 		serverIPRaw = cfg.Server.ServerIP
+
+		if cfg.Server.WebAdmin.Enabled || cfg.Server.WebAdmin.Path != "" {
+			adminPath = cfg.Server.GetWebAdminPath()
+			adminPort = cfg.Server.GetWebAdminPort()
+		}
 
 		if cfg.Server.WebTerminal.Enabled {
 			terminalPath = strings.TrimSpace(cfg.Server.WebTerminal.Path)
@@ -215,6 +224,8 @@ func PreviewCaddyfile(cfg *config.Config) (string, error) {
 		SSHTunnelPath:     sshTunnelPath,
 		SSHTunnelPort:     sshTunnelPort,
 		MtlsCA:            mtlsCA,
+		AdminPath:         adminPath,
+		AdminPort:         adminPort,
 	}
 
 	var buf bytes.Buffer

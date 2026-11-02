@@ -272,3 +272,55 @@ server:
 		t.Errorf("expected node_domain 'node.example.com', got '%s'", loaded.Server.NodeDomain)
 	}
 }
+
+func TestGenerateRandomAdminPath(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		p := GenerateRandomAdminPath()
+		if !strings.HasPrefix(p, "/sr/") {
+			t.Fatalf("expected prefix /sr/, got %s", p)
+		}
+		token := strings.TrimPrefix(p, "/sr/")
+		if len(token) != 16 {
+			t.Fatalf("expected token length 16, got %d (%s)", len(token), token)
+		}
+
+		hasUpper := false
+		hasLower := false
+		hasDigit := false
+		for _, r := range token {
+			switch {
+			case r >= 'A' && r <= 'Z':
+				hasUpper = true
+			case r >= 'a' && r <= 'z':
+				hasLower = true
+			case r >= '0' && r <= '9':
+				hasDigit = true
+			default:
+				t.Fatalf("unexpected char %c in token %s", r, token)
+			}
+		}
+		if !hasUpper || !hasLower || !hasDigit {
+			t.Fatalf("token %s must contain upper, lower, and digit", token)
+		}
+	}
+}
+
+func TestEnsureWebAdminCredentials_PathUpgrade(t *testing.T) {
+	s := &ServerConfig{
+		WebAdmin: WebAdminConfig{
+			Path: "/sr_3002961010c61739", // old hex path
+		},
+	}
+	changed := s.EnsureWebAdminCredentials()
+	if !changed {
+		t.Fatalf("expected changed=true when upgrading old hex path")
+	}
+	if !strings.HasPrefix(s.WebAdmin.Path, "/sr/") {
+		t.Fatalf("expected upgraded path with /sr/ prefix, got %s", s.WebAdmin.Path)
+	}
+	token := strings.TrimPrefix(s.WebAdmin.Path, "/sr/")
+	if len(token) != 16 {
+		t.Fatalf("expected 16-char token, got %s (len %d)", token, len(token))
+	}
+}
+

@@ -2,6 +2,7 @@ package config
 
 import (
 	"cmp"
+	"crypto/rand"
 	"fmt"
 	"io"
 	"net"
@@ -64,6 +65,145 @@ type ServerConfig struct {
 	Sni                string            `yaml:"sni"`
 	CorsAllowedOrigins string            `yaml:"cors_allowed_origins"`
 	WebTerminal        WebTerminalConfig `yaml:"web_terminal,omitempty"`
+	WebAdmin           WebAdminConfig    `yaml:"web_admin,omitempty"`
+}
+
+type WebAdminConfig struct {
+	Enabled  bool   `yaml:"enabled"`
+	Port     int    `yaml:"port,omitempty"`     // 默认 8092
+	Path     string `yaml:"path,omitempty"`     // 随机隐藏路径，如 /admin_8a7fbc2e
+	Username string `yaml:"username,omitempty"` // 管理员账号，默认 admin
+	Password string `yaml:"password,omitempty"` // 随机生成的强管理密码
+}
+
+func (s *ServerConfig) GetWebAdminPort() int {
+	if s.WebAdmin.Port > 0 {
+		return s.WebAdmin.Port
+	}
+	return 8092
+}
+
+func (s *ServerConfig) GetWebAdminPath() string {
+	p := strings.TrimSpace(s.WebAdmin.Path)
+	if p == "" {
+		return ""
+	}
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	return strings.TrimSuffix(p, "/")
+}
+
+func (s *ServerConfig) GetWebAdminUsername() string {
+	if strings.TrimSpace(s.WebAdmin.Username) != "" {
+		return strings.TrimSpace(s.WebAdmin.Username)
+	}
+	return "singctl"
+}
+
+func (s *ServerConfig) GetWebAdminPassword() string {
+	return strings.TrimSpace(s.WebAdmin.Password)
+}
+
+// GenerateAdminToken 生成 16 位包含数字、大写字母与小写字母的高熵安全 Token
+func GenerateAdminToken(length int) string {
+	if length < 16 {
+		length = 16
+	}
+	const upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	const lower = "abcdefghijklmnopqrstuvwxyz"
+	const digits = "0123456789"
+	const all = upper + lower + digits
+
+	buf := make([]byte, length)
+	buf[0] = upper[cryptoRandInt(len(upper))]
+	buf[1] = lower[cryptoRandInt(len(lower))]
+	buf[2] = digits[cryptoRandInt(len(digits))]
+
+	for i := 3; i < length; i++ {
+		buf[i] = all[cryptoRandInt(len(all))]
+	}
+	for i := length - 1; i > 0; i-- {
+		j := cryptoRandInt(i + 1)
+		buf[i], buf[j] = buf[j], buf[i]
+	}
+	return string(buf)
+}
+
+// GenerateRandomAdminPath 生成 /sr/ 加上 16 位包含大小写字母和数字的高熵路径，例如 /sr/3aB9kLmN2pQrSt8X
+func GenerateRandomAdminPath() string {
+	return "/sr/" + GenerateAdminToken(16)
+}
+
+// GenerateSecurePassword 生成 8 位包含大写字母、小写字母和数字的强随机密码
+func GenerateSecurePassword(length int) string {
+	if length < 8 {
+		length = 8
+	}
+	const upper = "ABCDEFGHJKLMNPQRSTUVWXYZ"
+	const lower = "abcdefghijkmnopqrstuvwxyz"
+	const digits = "23456789"
+	const all = upper + lower + digits
+
+	buf := make([]byte, length)
+	buf[0] = upper[cryptoRandInt(len(upper))]
+	buf[1] = lower[cryptoRandInt(len(lower))]
+	buf[2] = digits[cryptoRandInt(len(digits))]
+
+	for i := 3; i < length; i++ {
+		buf[i] = all[cryptoRandInt(len(all))]
+	}
+	for i := length - 1; i > 0; i-- {
+		j := cryptoRandInt(i + 1)
+		buf[i], buf[j] = buf[j], buf[i]
+	}
+	return string(buf)
+}
+
+func cryptoRandInt(n int) int {
+	if n <= 0 {
+		return 0
+	}
+	b := make([]byte, 1)
+	for {
+		_, _ = rand.Read(b)
+		val := int(b[0])
+		if val < 256-(256%n) {
+			return val % n
+		}
+	}
+}
+
+// EnsureWebAdminCredentials 确保 Web 管理面板拥有随机安全路径、用户名与强随机密码
+func (s *ServerConfig) EnsureWebAdminCredentials() bool {
+	changed := false
+	if s.WebAdmin.Port <= 0 {
+		s.WebAdmin.Port = 8092
+		changed = true
+	}
+	// 如果为空、包含过时的 admin 标识、缺少 /sr/ 前缀或随机长度不足 16 位，则升级生成全新 /sr/<16位> 路径
+	trimmedPath := strings.TrimSpace(s.WebAdmin.Path)
+	cleanPath := strings.Trim(trimmedPath, "/")
+	parts := strings.Split(cleanPath, "/")
+	if trimmedPath == "" || strings.Contains(trimmedPath, "admin") || len(parts) != 2 || parts[0] != "sr" || len(parts[1]) < 16 {
+		s.WebAdmin.Path = GenerateRandomAdminPath()
+		changed = true
+	}
+	// 如果为空或者为旧默认 admin，则换为非 admin 用户名
+	if strings.TrimSpace(s.WebAdmin.Username) == "" || strings.TrimSpace(s.WebAdmin.Username) == "admin" {
+		s.WebAdmin.Username = "singctl"
+		changed = true
+	}
+	// 如果密码为空，生成 8 位混合大小写和数字的随机密码
+	if strings.TrimSpace(s.WebAdmin.Password) == "" {
+		s.WebAdmin.Password = GenerateSecurePassword(8)
+		changed = true
+	}
+	if !s.WebAdmin.Enabled {
+		s.WebAdmin.Enabled = true
+		changed = true
+	}
+	return changed
 }
 
 type WebTerminalConfig struct {
