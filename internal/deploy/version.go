@@ -84,6 +84,122 @@ func shortDigest(id string) string {
 	return id
 }
 
+// GetInstalledSingBoxVersion returns the locally installed sing-box version.
+func GetInstalledSingBoxVersion() string {
+	binPath := constant.SingBoxInstallDir
+	if _, err := os.Stat(binPath); err != nil {
+		if path, err := exec.LookPath("sing-box"); err == nil {
+			binPath = path
+		} else {
+			return ""
+		}
+	}
+	out, err := exec.Command(binPath, "version").Output()
+	if err != nil {
+		return ""
+	}
+	ver, err := singbox.ParseSingBoxVersionOutput(string(out))
+	if err != nil {
+		return ""
+	}
+	return ver
+}
+
+// GetInstalledCaddyVersion returns the locally installed Caddy version.
+func GetInstalledCaddyVersion() string {
+	binPath := ""
+	for _, p := range []string{"/usr/bin/caddy", "/usr/local/bin/caddy"} {
+		if _, err := os.Stat(p); err == nil {
+			binPath = p
+			break
+		}
+	}
+	if binPath == "" {
+		if path, err := exec.LookPath("caddy"); err == nil {
+			binPath = path
+		} else {
+			return ""
+		}
+	}
+	out, err := exec.Command(binPath, "version").Output()
+	if err != nil {
+		return ""
+	}
+	ver, err := ParseCaddyVersion(string(out))
+	if err != nil {
+		return ""
+	}
+	return ver
+}
+
+// GetInstalledWarpVersion returns the locally installed wireproxy version.
+func GetInstalledWarpVersion() string {
+	binPath := ""
+	for _, p := range []string{"/usr/local/bin/wireproxy", "/usr/bin/wireproxy"} {
+		if _, err := os.Stat(p); err == nil {
+			binPath = p
+			break
+		}
+	}
+	if binPath == "" {
+		if path, err := exec.LookPath("wireproxy"); err == nil {
+			binPath = path
+		} else {
+			return ""
+		}
+	}
+	out, err := exec.Command(binPath, "--version").Output()
+	if err != nil {
+		out, err = exec.Command(binPath, "-v").Output()
+	}
+	if err != nil {
+		return ""
+	}
+	ver, err := ParseWireproxyVersion(string(out))
+	if err != nil {
+		return ""
+	}
+	return ver
+}
+
+// GetInstalledSubstoreVersion returns the running sub-store version from local endpoint or container.
+func GetInstalledSubstoreVersion() string {
+	// 1. Probe local port 3001
+	client := http.Client{Timeout: 500 * time.Millisecond}
+	resp, err := client.Get("http://127.0.0.1:3001/")
+	if err == nil {
+		defer resp.Body.Close()
+		buf := make([]byte, 4096)
+		n, _ := resp.Body.Read(buf)
+		html := string(buf[:n])
+		if idx := strings.Index(html, `name="version" content="`); idx != -1 {
+			start := idx + len(`name="version" content="`)
+			if end := strings.Index(html[start:], `"`); end != -1 {
+				return html[start : start+end]
+			}
+		}
+	}
+
+	// 2. Fallback to docker inspect image id
+	if out, err := exec.Command("docker", "inspect", "--format={{.Image}}", "sub-store").Output(); err == nil {
+		img := strings.TrimSpace(string(out))
+		if len(img) > 0 {
+			return shortDigest(img)
+		}
+	}
+	return ""
+}
+
+// GetCoreServiceVersions collects the currently installed versions of all 4 core services.
+func GetCoreServiceVersions() map[string]string {
+	return map[string]string{
+		"singbox":  GetInstalledSingBoxVersion(),
+		"caddy":    GetInstalledCaddyVersion(),
+		"substore": GetInstalledSubstoreVersion(),
+		"warp":     GetInstalledWarpVersion(),
+	}
+}
+
 func getMirrorURL(cfg *config.Config) string {
 	if cfg != nil && cfg.GitHub.MirrorURL != "" {
 		return cfg.GitHub.MirrorURL

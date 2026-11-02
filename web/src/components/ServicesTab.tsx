@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { ServerStatusResponse } from '../types';
 import { api } from '../api';
 import { useToast } from './Toast';
-import { Play, Square, RotateCw, FileText, Code2, ExternalLink, CheckCircle2, XCircle, X, Save, Edit3, ShieldCheck, Zap, RefreshCw, Sparkles, Globe } from 'lucide-react';
+import { Play, Square, RotateCw, FileText, Code2, ExternalLink, CheckCircle2, XCircle, X, Save, Edit3, ShieldCheck, Zap, RefreshCw, Sparkles, Globe, ArrowUpCircle } from 'lucide-react';
 
 interface ServicesTabProps {
   status: ServerStatusResponse | null;
@@ -22,6 +22,20 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
   const [sniInput, setSniInput] = useState('');
   const [updatingSNI, setUpdatingSNI] = useState(false);
   const [showSyncNotice, setShowSyncNotice] = useState(false);
+
+  const handleUpgrade = async (service: string) => {
+    const key = `${service}-upgrade`;
+    setLoading(key);
+    try {
+      const res = await api.upgradeService(service);
+      success(res.message || `${service} 升级指令已完成`);
+      setTimeout(onRefresh, 1500);
+    } catch (err: any) {
+      error(err.message || `${service} 升级失败`);
+    } finally {
+      setLoading(null);
+    }
+  };
 
   const handleEnableBBR = async () => {
     setEnablingBBR(true);
@@ -132,19 +146,34 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
                   <p className="text-xs text-slate-400">VLESS Reality & Shadowsocks 协议承载</p>
                 </div>
               </div>
-              <div
-                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${
-                  singbox?.running
-                    ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
-                    : 'bg-rose-500/10 text-rose-400 border-rose-500/20'
-                }`}
-              >
-                {singbox?.running ? <CheckCircle2 className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
-                <span>{singbox?.running ? 'active (运行中)' : 'inactive'}</span>
+              <div className="flex items-center gap-2">
+                {singbox?.version && (
+                  <span className="px-2 py-0.5 rounded-md bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-xs font-mono font-medium">
+                    {singbox.version}
+                  </span>
+                )}
+                <div
+                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${
+                    singbox?.running
+                      ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                      : 'bg-rose-500/10 text-rose-400 border-rose-500/20'
+                  }`}
+                >
+                  {singbox?.running ? <CheckCircle2 className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
+                  <span>{singbox?.running ? 'active (运行中)' : 'inactive'}</span>
+                </div>
               </div>
             </div>
 
             <div className="mt-4 grid grid-cols-2 gap-2 text-xs font-mono">
+              <div className="p-2.5 rounded-xl bg-slate-900/60 border border-slate-800">
+                <div className="text-slate-500">当前版本</div>
+                <div className="text-emerald-400 font-semibold mt-0.5">{singbox?.version || '检测中...'}</div>
+              </div>
+              <div className="p-2.5 rounded-xl bg-slate-900/60 border border-slate-800">
+                <div className="text-slate-500">持续运行</div>
+                <div className="text-slate-200 mt-0.5">{singbox?.uptime || '-'}</div>
+              </div>
               <div className="p-2.5 rounded-xl bg-slate-900/60 border border-slate-800">
                 <div className="text-slate-500">监听端口</div>
                 <div className="text-slate-200 mt-0.5">8443 (Reality) / 2080 (SS)</div>
@@ -158,13 +187,22 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
                 <div className="text-slate-200 mt-0.5">{singbox?.pid || '-'}</div>
               </div>
               <div className="p-2.5 rounded-xl bg-slate-900/60 border border-slate-800">
-                <div className="text-slate-500">持续运行</div>
-                <div className="text-slate-200 mt-0.5">{singbox?.uptime || '-'}</div>
+                <div className="text-slate-500">进程守护</div>
+                <div className="text-slate-200 mt-0.5">systemd (sing-box)</div>
               </div>
             </div>
           </div>
 
           <div className="mt-5 pt-4 border-t border-slate-800 flex flex-wrap gap-2">
+            <button
+              onClick={() => handleUpgrade('singbox')}
+              disabled={loading === 'singbox-upgrade'}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-xs font-semibold text-emerald-300 transition-colors"
+              title="检查并平滑升级 sing-box 核心至最新稳定版本"
+            >
+              <ArrowUpCircle className={`w-3.5 h-3.5 ${loading === 'singbox-upgrade' ? 'animate-spin' : ''}`} />
+              <span>{loading === 'singbox-upgrade' ? '升级中...' : '检查升级'}</span>
+            </button>
             <button
               onClick={() => handleAction('singbox', 'restart')}
               disabled={loading === 'singbox-restart'}
@@ -211,19 +249,34 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
                   <p className="text-xs text-slate-400">Cloudflare DNS 自动化 TLS 与隐蔽路径反代</p>
                 </div>
               </div>
-              <div
-                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${
-                  caddy?.running
-                    ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
-                    : 'bg-rose-500/10 text-rose-400 border-rose-500/20'
-                }`}
-              >
-                {caddy?.running ? <CheckCircle2 className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
-                <span>{caddy?.running ? 'active (运行中)' : 'inactive'}</span>
+              <div className="flex items-center gap-2">
+                {caddy?.version && (
+                  <span className="px-2 py-0.5 rounded-md bg-blue-500/10 text-blue-400 border border-blue-500/20 text-xs font-mono font-medium">
+                    {caddy.version}
+                  </span>
+                )}
+                <div
+                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${
+                    caddy?.running
+                      ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                      : 'bg-rose-500/10 text-rose-400 border-rose-500/20'
+                  }`}
+                >
+                  {caddy?.running ? <CheckCircle2 className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
+                  <span>{caddy?.running ? 'active (运行中)' : 'inactive'}</span>
+                </div>
               </div>
             </div>
 
             <div className="mt-4 grid grid-cols-2 gap-2 text-xs font-mono">
+              <div className="p-2.5 rounded-xl bg-slate-900/60 border border-slate-800">
+                <div className="text-slate-500">当前版本</div>
+                <div className="text-blue-400 font-semibold mt-0.5">{caddy?.version || '检测中...'}</div>
+              </div>
+              <div className="p-2.5 rounded-xl bg-slate-900/60 border border-slate-800">
+                <div className="text-slate-500">持续运行</div>
+                <div className="text-slate-200 mt-0.5">{caddy?.uptime || '-'}</div>
+              </div>
               <div className="p-2.5 rounded-xl bg-slate-900/60 border border-slate-800">
                 <div className="text-slate-500">主绑定域名</div>
                 <div className="text-slate-200 mt-0.5 truncate">{status?.config?.nodeDomain || '-'}</div>
@@ -237,13 +290,22 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
                 <div className="text-slate-200 mt-0.5">{caddy?.pid || '-'}</div>
               </div>
               <div className="p-2.5 rounded-xl bg-slate-900/60 border border-slate-800">
-                <div className="text-slate-500">持续运行</div>
-                <div className="text-slate-200 mt-0.5">{caddy?.uptime || '-'}</div>
+                <div className="text-slate-500">扩展模块</div>
+                <div className="text-slate-200 mt-0.5">CF DNS + Layer4</div>
               </div>
             </div>
           </div>
 
           <div className="mt-5 pt-4 border-t border-slate-800 flex flex-wrap gap-2">
+            <button
+              onClick={() => handleUpgrade('caddy')}
+              disabled={loading === 'caddy-upgrade'}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/30 text-xs font-semibold text-blue-300 transition-colors"
+              title="检查并平滑升级 Caddy 网关 (包含 Cloudflare DNS 与 Layer4 定制模块)"
+            >
+              <ArrowUpCircle className={`w-3.5 h-3.5 ${loading === 'caddy-upgrade' ? 'animate-spin' : ''}`} />
+              <span>{loading === 'caddy-upgrade' ? '升级中...' : '检查升级'}</span>
+            </button>
             <button
               onClick={() => handleAction('caddy', 'reload')}
               disabled={loading === 'caddy-reload'}
@@ -311,31 +373,55 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
                   <p className="text-xs text-slate-400">Docker 容器化订阅解析与节点下发</p>
                 </div>
               </div>
-              <div
-                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${
-                  substore?.running
-                    ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
-                    : 'bg-rose-500/10 text-rose-400 border-rose-500/20'
-                }`}
-              >
-                {substore?.running ? <CheckCircle2 className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
-                <span>{substore?.running ? 'active (运行中)' : 'inactive'}</span>
+              <div className="flex items-center gap-2">
+                {substore?.version && (
+                  <span className="px-2 py-0.5 rounded-md bg-purple-500/10 text-purple-400 border border-purple-500/20 text-xs font-mono font-medium">
+                    {substore.version}
+                  </span>
+                )}
+                <div
+                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${
+                    substore?.running
+                      ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                      : 'bg-rose-500/10 text-rose-400 border-rose-500/20'
+                  }`}
+                >
+                  {substore?.running ? <CheckCircle2 className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
+                  <span>{substore?.running ? 'active (运行中)' : 'inactive'}</span>
+                </div>
               </div>
             </div>
 
             <div className="mt-4 grid grid-cols-2 gap-2 text-xs font-mono">
               <div className="p-2.5 rounded-xl bg-slate-900/60 border border-slate-800">
-                <div className="text-slate-500">容器 ID</div>
-                <div className="text-slate-200 mt-0.5">{substore?.id || 'sub-store'}</div>
+                <div className="text-slate-500">当前版本</div>
+                <div className="text-purple-400 font-semibold mt-0.5">{substore?.version || '检测中...'}</div>
               </div>
               <div className="p-2.5 rounded-xl bg-slate-900/60 border border-slate-800">
                 <div className="text-slate-500">内网端口</div>
                 <div className="text-slate-200 mt-0.5">3001 (反代保护)</div>
               </div>
+              <div className="p-2.5 rounded-xl bg-slate-900/60 border border-slate-800">
+                <div className="text-slate-500">容器 ID</div>
+                <div className="text-slate-200 mt-0.5 truncate">{substore?.id || 'sub-store'}</div>
+              </div>
+              <div className="p-2.5 rounded-xl bg-slate-900/60 border border-slate-800">
+                <div className="text-slate-500">部署架构</div>
+                <div className="text-slate-200 mt-0.5">Docker 独立挂载容器</div>
+              </div>
             </div>
           </div>
 
           <div className="mt-5 pt-4 border-t border-slate-800 flex flex-wrap gap-2">
+            <button
+              onClick={() => handleUpgrade('substore')}
+              disabled={loading === 'substore-upgrade'}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-purple-500/10 hover:bg-purple-500/20 border border-purple-500/30 text-xs font-semibold text-purple-300 transition-colors"
+              title="拉取 Sub-Store 最新镜像并平滑重建容器 (保留所有订阅数据)"
+            >
+              <ArrowUpCircle className={`w-3.5 h-3.5 ${loading === 'substore-upgrade' ? 'animate-spin' : ''}`} />
+              <span>{loading === 'substore-upgrade' ? '升级中...' : '检查升级'}</span>
+            </button>
             <button
               onClick={() => handleAction('substore', 'restart')}
               disabled={loading === 'substore-restart'}
@@ -377,19 +463,30 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
                   <p className="text-xs text-slate-400">wireproxy 专属出口 SOCKS5 代理</p>
                 </div>
               </div>
-              <div
-                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${
-                  warp?.running
-                    ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
-                    : 'bg-rose-500/10 text-rose-400 border-rose-500/20'
-                }`}
-              >
-                {warp?.running ? <CheckCircle2 className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
-                <span>{warp?.running ? 'active (运行中)' : 'inactive'}</span>
+              <div className="flex items-center gap-2">
+                {warp?.version && (
+                  <span className="px-2 py-0.5 rounded-md bg-amber-500/10 text-amber-400 border border-amber-500/20 text-xs font-mono font-medium">
+                    {warp.version}
+                  </span>
+                )}
+                <div
+                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${
+                    warp?.running
+                      ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                      : 'bg-rose-500/10 text-rose-400 border-rose-500/20'
+                  }`}
+                >
+                  {warp?.running ? <CheckCircle2 className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
+                  <span>{warp?.running ? 'active (运行中)' : 'inactive'}</span>
+                </div>
               </div>
             </div>
 
             <div className="mt-4 grid grid-cols-2 gap-2 text-xs font-mono">
+              <div className="p-2.5 rounded-xl bg-slate-900/60 border border-slate-800">
+                <div className="text-slate-500">当前版本</div>
+                <div className="text-amber-400 font-semibold mt-0.5">{warp?.version || '检测中...'}</div>
+              </div>
               <div className="p-2.5 rounded-xl bg-slate-900/60 border border-slate-800">
                 <div className="text-slate-500">SOCKS5 代理</div>
                 <div className="text-slate-200 mt-0.5">127.0.0.1:40000</div>
@@ -398,10 +495,23 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
                 <div className="text-slate-500">主进程 PID</div>
                 <div className="text-slate-200 mt-0.5">{warp?.pid || '-'}</div>
               </div>
+              <div className="p-2.5 rounded-xl bg-slate-900/60 border border-slate-800">
+                <div className="text-slate-500">进程守护</div>
+                <div className="text-slate-200 mt-0.5">systemd (singctl-warp)</div>
+              </div>
             </div>
           </div>
 
           <div className="mt-5 pt-4 border-t border-slate-800 flex flex-wrap gap-2">
+            <button
+              onClick={() => handleUpgrade('warp')}
+              disabled={loading === 'warp-upgrade'}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-xs font-semibold text-amber-300 transition-colors"
+              title="检查并平滑升级 wireproxy 核心"
+            >
+              <ArrowUpCircle className={`w-3.5 h-3.5 ${loading === 'warp-upgrade' ? 'animate-spin' : ''}`} />
+              <span>{loading === 'warp-upgrade' ? '升级中...' : '检查升级'}</span>
+            </button>
             <button
               onClick={() => handleAction('warp', 'restart')}
               disabled={loading === 'warp-restart'}

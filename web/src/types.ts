@@ -15,6 +15,7 @@ export interface SystemMetrics {
 
 export interface ServiceDetail {
   running: boolean;
+  version?: string;
   pid?: string;
   uptime?: string;
   id?: string;

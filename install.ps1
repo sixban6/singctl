@@ -166,24 +166,24 @@ if (-not $Mode) {
     Write-Host ''
     Write-Host '====================================================' -ForegroundColor Cyan
     Write-Host '          请选择 SingCtl 运行模式:'                      -ForegroundColor Cyan
-    Write-Host '  1) 客户端模式 (Client Mode) [回车默认]'           -ForegroundColor White
-    Write-Host '     • 本地 / 透明代理加速'
-    Write-Host '     • 订阅导入与智能分流规则'
-    Write-Host '     • 本地轻量 Web 管理控制台 (http://127.0.0.1:8090)'
-    Write-Host ''
-    Write-Host '  2) 服务端模式 (Server Mode)'                     -ForegroundColor White
+    Write-Host '  1) 服务端模式 (Server Mode) [回车默认]'           -ForegroundColor White
     Write-Host '     • VLESS Reality + Hysteria 2 节点服务'
     Write-Host '     • 自动化 TLS / 域名反代与配置管理'
     Write-Host '     • 服务端 Web 管理控制台'
     Write-Host '     • Sub-Store 节点聚合与分发'
+    Write-Host ''
+    Write-Host '  2) 客户端模式 (Client Mode)'                     -ForegroundColor White
+    Write-Host '     • 本地 / 透明代理加速'
+    Write-Host '     • 订阅导入与智能分流规则'
+    Write-Host '     • 本地轻量 Web 管理控制台 (http://127.0.0.1:8090)'
     Write-Host '====================================================' -ForegroundColor Cyan
     Write-Host ''
 
     $Choice = Read-Host '请输入选项 [1-2] (默认 1)'
-    if ($Choice -eq '2' -or $Choice -eq 'server' -or $Choice -eq 's') {
-        $Mode = 'server'
-    } else {
+    if ($Choice -eq '2' -or $Choice -eq 'client' -or $Choice -eq 'c') {
         $Mode = 'client'
+    } else {
+        $Mode = 'server'
     }
 }
 

@@ -585,46 +585,46 @@ select_mode_and_setup() {
             if supports_color; then
                 printf "\033[0;36m====================================================\033[0m\n"
                 printf "\033[1;32m  请选择 SingCtl 运行模式:\033[0m\n"
-                printf "  \033[1;37m1) 客户端模式 (Client Mode)\033[0m [回车默认]\n"
-                printf "     • 软路由 / Linux 透明代理网关 (TProxy)\n"
-                printf "     • 自动转换订阅与智能分流规则\n"
-                printf "     • 本地轻量 Web 图形管理后台 (:8090)\n"
-                printf "\n"
-                printf "  \033[1;37m2) 服务端模式 (Server Mode)\033[0m\n"
+                printf "  \033[1;37m1) 服务端模式 (Server Mode)\033[0m [回车默认]\n"
                 printf "     • VLESS Reality + Hysteria 2 节点承载\n"
                 printf "     • Caddy 自动化 TLS / 原生 IP 证书 / 隐蔽反代\n"
                 printf "     • 服务端专属 Web 控制台 (高熵安全随机路径)\n"
                 printf "     • Sub-Store 节点管理与多客户端订阅聚合\n"
+                printf "\n"
+                printf "  \033[1;37m2) 客户端模式 (Client Mode)\033[0m\n"
+                printf "     • 软路由 / Linux 透明代理网关 (TProxy)\n"
+                printf "     • 自动转换订阅与智能分流规则\n"
+                printf "     • 本地轻量 Web 图形管理后台 (:8090)\n"
                 printf "\033[0;36m====================================================\033[0m\n"
                 printf "\033[0;33m请输入选项 [1-2] (默认 1): \033[0m"
             else
                 printf "====================================================\n"
                 printf "  请选择 SingCtl 运行模式:\n"
-                printf "  1) 客户端模式 (Client Mode) [回车默认]\n"
-                printf "     • 软路由 / Linux 透明代理网关 (TProxy)\n"
-                printf "     • 自动转换订阅与智能分流规则\n"
-                printf "     • 本地轻量 Web 图形管理后台 (:8090)\n"
-                printf "\n"
-                printf "  2) 服务端模式 (Server Mode)\n"
+                printf "  1) 服务端模式 (Server Mode) [回车默认]\n"
                 printf "     • VLESS Reality + Hysteria 2 节点承载\n"
                 printf "     • Caddy 自动化 TLS / 原生 IP 证书 / 隐蔽反代\n"
                 printf "     • 服务端专属 Web 控制台 (高熵安全随机路径)\n"
                 printf "     • Sub-Store 节点管理与多客户端订阅聚合\n"
+                printf "\n"
+                printf "  2) 客户端模式 (Client Mode)\n"
+                printf "     • 软路由 / Linux 透明代理网关 (TProxy)\n"
+                printf "     • 自动转换订阅与智能分流规则\n"
+                printf "     • 本地轻量 Web 图形管理后台 (:8090)\n"
                 printf "====================================================\n"
                 printf "请输入选项 [1-2] (默认 1): "
             fi
 
             read -r choice < /dev/tty || choice="1"
             case "$choice" in
-                2|server|s|Server)
-                    mode="server"
+                2|client|c|Client)
+                    mode="client"
                     ;;
                 *)
-                    mode="client"
+                    mode="server"
                     ;;
             esac
         else
-            mode="client"
+            mode="server"
         fi
     fi
 

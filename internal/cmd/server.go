@@ -209,7 +209,42 @@ func NewServerCmd(configPath string) *cobra.Command {
 	cmd.AddCommand(NewNetCmd(configPath))
 	cmd.AddCommand(newServerDoctorCmd(configPath))
 	cmd.AddCommand(newMaskSiteCmd(configPath))
+	cmd.AddCommand(newServerUpdateCmd(configPath))
 	return cmd
+}
+
+func newServerUpdateCmd(configPath string) *cobra.Command {
+	return &cobra.Command{
+		Use:     "update [component]",
+		Aliases: []string{"upgrade", "up"},
+		Short:   "平滑升级服务端核心组件 / Smooth upgrade server components (singbox|caddy|substore|warp|all)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			target := "all"
+			if len(args) > 0 {
+				target = args[0]
+			}
+			resolvedPath := resolveConfigPath(cmd, configPath)
+			cfg, err := config.Load(resolvedPath)
+			if err != nil {
+				return fmt.Errorf("无法加载配置文件: %w", err)
+			}
+
+			logger.Info("开始执行核心组件平滑升级: %s ...", target)
+			results, err := deploy.UpgradeComponent(target, cfg)
+			if err != nil {
+				return err
+			}
+
+			for _, r := range results {
+				if r.OldVersion != "" && r.OldVersion != r.NewVersion {
+					logger.Success("[%s] 已成功从 %s 升级至 %s", r.DisplayName, r.OldVersion, r.NewVersion)
+				} else {
+					logger.Success("[%s] %s", r.DisplayName, r.Message)
+				}
+			}
+			return nil
+		},
+	}
 }
 
 func newMaskSiteCmd(configPath string) *cobra.Command {

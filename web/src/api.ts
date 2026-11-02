@@ -60,6 +60,12 @@ export const api = {
       body: JSON.stringify({ service, action }),
     }),
 
+  upgradeService: (service: string) =>
+    request<{ message: string; results?: any[] }>('/api/server/service/upgrade', {
+      method: 'POST',
+      body: JSON.stringify({ service }),
+    }),
+
   getServiceLogs: (service: string, lines = 100) =>
     request<{ service: string; logs: string }>(`/api/server/service/logs?service=${encodeURIComponent(service)}&lines=${lines}`),
 

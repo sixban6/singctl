@@ -101,6 +101,7 @@ func New(opts Options) *Server {
 	s.mux.HandleFunc("GET /api/server/subscriptions", s.guard(s.handleSubscriptions))
 	s.mux.HandleFunc("POST /api/server/action", s.guard(s.handleAction))
 	s.mux.HandleFunc("POST /api/server/service/action", s.guard(s.handleServiceAction))
+	s.mux.HandleFunc("POST /api/server/service/upgrade", s.guard(s.handleUpgradeService))
 	s.mux.HandleFunc("GET /api/server/service/logs", s.guard(s.handleServiceLogs))
 	s.mux.HandleFunc("GET /api/server/service/config", s.guard(s.handleServiceConfig))
 	s.mux.HandleFunc("PUT /api/server/service/config", s.guard(s.handleUpdateServiceConfig))
@@ -304,6 +305,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	substoreRunning := checkDockerRunning("sub-store")
 	warpRunning := checkServiceRunning("wireproxy") || checkServiceRunning("warp-svc")
 
+	caddyVer := deploy.GetInstalledCaddyVersion()
+	singboxVer := deploy.GetInstalledSingBoxVersion()
+	substoreVer := deploy.GetInstalledSubstoreVersion()
+	warpVer := deploy.GetInstalledWarpVersion()
+
 	substoreAdminURL := ""
 	sbt := deploy.NewSubstore(cfg, "")
 	if adminURL, err := sbt.GetAdminURL(); err == nil && adminURL != "" {
@@ -326,20 +332,24 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"services": map[string]any{
 			"caddy": map[string]any{
 				"running": caddyRunning,
+				"version": caddyVer,
 				"pid":     getServicePID("caddy"),
 				"uptime":  getServiceUptime("caddy"),
 			},
 			"singbox": map[string]any{
 				"running": singboxRunning,
+				"version": singboxVer,
 				"pid":     getServicePID("sing-box"),
 				"uptime":  getServiceUptime("sing-box"),
 			},
 			"substore": map[string]any{
 				"running": substoreRunning,
+				"version": substoreVer,
 				"id":      getDockerContainerID("sub-store"),
 			},
 			"warp": map[string]any{
 				"running":   warpRunning,
+				"version":   warpVer,
 				"pid":       getServicePID("wireproxy"),
 				"socksPort": 40000,
 			},
@@ -516,6 +526,36 @@ func (s *Server) handleServiceAction(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]string{
 		"message": fmt.Sprintf("服务 %s 动作 %s 执行成功", service, action),
+	})
+}
+
+func (s *Server) handleUpgradeService(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Service string `json:"service"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.Service) == "" {
+		writeJSONError(w, http.StatusBadRequest, "缺少升级目标服务名称")
+		return
+	}
+
+	target := strings.ToLower(strings.TrimSpace(body.Service))
+	cfg, _ := config.Load(s.opts.ConfigPath)
+	results, err := deploy.UpgradeComponent(target, cfg)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "组件升级失败: "+err.Error())
+		return
+	}
+
+	msg := "组件已成功平滑更新"
+	if len(results) == 1 {
+		msg = results[0].Message
+	} else if len(results) > 1 {
+		msg = fmt.Sprintf("已成功平滑更新 %d 个核心服务组件", len(results))
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"message": msg,
+		"results": results,
 	})
 }
 
