@@ -103,6 +103,7 @@ func New(opts Options) *Server {
 	s.mux.HandleFunc("PUT /api/server/service/config", s.guard(s.handleUpdateServiceConfig))
 	s.mux.HandleFunc("GET /api/server/net/return", s.guard(s.handleNetReturn))
 	s.mux.HandleFunc("POST /api/server/net/return", s.guard(s.handleNetReturn))
+	s.mux.HandleFunc("POST /api/server/bbr", s.guard(s.handleEnableBBR))
 	s.mux.HandleFunc("GET /api/server/warp/diagnose", s.guard(s.handleWarpDiagnose))
 	s.mux.HandleFunc("POST /api/server/path/regenerate", s.guard(s.handleRegeneratePath))
 	s.mux.HandleFunc("PUT /api/server/sni", s.guard(s.handleUpdateSNI))
@@ -735,15 +736,37 @@ func (s *Server) handleUpdateSNI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 1. 同步更新 Caddy Layer4 路由配置
+	if err := deploy.DeployCaddy(cfg); err != nil {
+		logger.Warn("更新 Caddy SNI 警告: %v", err)
+	}
+
+	// 2. 更新 sing-box Reality 配置并重启
 	sbs, err := deploy.NewSingBoxServer(cfg)
 	if err == nil {
 		_ = sbs.LoadExistingCredentials()
 		_ = sbs.DeploySingbox()
+
+		// 3. 同步更新 Sub-Store 节点订阅
+		sbt := deploy.NewSubstore(cfg, "")
+		_ = sbt.UpdateSubstoreConfig(sbs)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{
-		"message": "Reality SNI 已成功更新为 " + cfg.Server.Sni,
+		"message": "Reality SNI 已成功更新为 " + cfg.Server.Sni + " 并自动重载服务与订阅",
 		"sni":     cfg.Server.Sni,
+	})
+}
+
+func (s *Server) handleEnableBBR(w http.ResponseWriter, r *http.Request) {
+	if err := deploy.EnableBBR(); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "启用 TCP BBR 失败: "+err.Error())
+		return
+	}
+	bbrOk := isBBREnabled()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"message": "Google TCP BBR 拥塞控制算法已成功开启并立即生效",
+		"bbr":     bbrOk,
 	})
 }
 

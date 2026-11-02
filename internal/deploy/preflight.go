@@ -219,6 +219,11 @@ func isBBREnabled() bool {
 	return strings.Contains(strings.TrimSpace(string(data)), "bbr")
 }
 
+// EnableBBR installs and activates the Google BBR TCP congestion control algorithm.
+func EnableBBR() error {
+	return enableBBR()
+}
+
 func enableBBR() error {
 	_ = exec.Command("modprobe", "tcp_bbr").Run()
 

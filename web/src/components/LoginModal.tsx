@@ -40,7 +40,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onSuccess }) => 
           <Activity className="w-6 h-6" />
         </div>
 
-        <h3 className="text-xl font-bold text-white tracking-tight">singctl 身份验证</h3>
+        <h3 className="text-xl font-bold text-white tracking-tight">管理后台身份验证</h3>
         <p className="text-xs text-slate-400 mt-1">请输入管理员账号和强密码以解锁控制面板</p>
 
         {errorMsg && (

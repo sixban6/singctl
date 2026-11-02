@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { WarpDiagnoseResponse, ServerStatusResponse, ReturnSummary } from '../types';
 import { api } from '../api';
 import { useToast } from './Toast';
-import { Globe, ShieldCheck, Zap, Activity, RefreshCw, CheckCircle2, AlertTriangle, ArrowUpDown, ChevronDown, ChevronUp } from 'lucide-react';
+import { Globe, Activity, RefreshCw, CheckCircle2, AlertTriangle, ArrowUpDown, ChevronDown, ChevronUp } from 'lucide-react';
 
 interface DiagnosticsTabProps {
   status: ServerStatusResponse | null;
@@ -59,13 +59,13 @@ export const DiagnosticsTab: React.FC<DiagnosticsTabProps> = ({ status }) => {
 
   return (
     <div className="space-y-6">
-      {/* Return Route Test Card (singctl sr net) */}
+      {/* Return Route Test Card */}
       <div className="p-6 rounded-2xl glass-card">
         <div className="flex items-center gap-2 text-emerald-400 text-xs font-semibold uppercase tracking-wider mb-2">
           <ArrowUpDown className="w-3.5 h-3.5" />
-          <span>回程质量诊断 (singctl sr net)</span>
+          <span>三网回程质量诊断</span>
         </div>
-        <h2 className="text-xl font-bold text-white tracking-tight">三网回程线路画像与丢包探测</h2>
+        <h2 className="text-xl font-bold text-white tracking-tight">三网回程线路探测</h2>
         <p className="text-xs text-slate-400 mt-1 max-w-2xl">
           并发向中国电信 (163/CN2)、中国联通 (4837/9929)、中国移动 (CMI/CMIN2) 国内核心节点发起轻量路由追踪与 Ping 丢包探测
         </p>
@@ -77,7 +77,7 @@ export const DiagnosticsTab: React.FC<DiagnosticsTabProps> = ({ status }) => {
             className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-semibold text-xs transition-all shadow-lg shadow-emerald-500/20 disabled:opacity-50"
           >
             <RefreshCw className={`w-4 h-4 ${testingReturn ? 'animate-spin' : ''}`} />
-            <span>{testingReturn ? '正在探测三网骨干节点线路...' : '开始三网回程测试 (singctl sr net)'}</span>
+            <span>{testingReturn ? '正在探测三网骨干节点线路...' : '开始三网回程测试'}</span>
           </button>
         </div>
 
@@ -221,47 +221,6 @@ export const DiagnosticsTab: React.FC<DiagnosticsTabProps> = ({ status }) => {
             </div>
           </div>
         )}
-      </div>
-
-      {/* Network Stack Overview */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {/* BBR Status */}
-        <div className="p-5 rounded-2xl glass-card flex items-start gap-3.5">
-          <div className="p-2.5 rounded-xl bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-            <ShieldCheck className="w-5 h-5" />
-          </div>
-          <div>
-            <h4 className="font-semibold text-sm text-white">Google BBR 拥塞控制算法</h4>
-            <p className="text-xs text-slate-400 mt-1">
-              {status?.system?.bbr
-                ? '内核已启用 TCP BBR 算法，大幅优化跨国高丢包网络与长距离大带宽传输'
-                : '系统当前未检测到 BBR 模块'}
-            </p>
-            <div className="mt-3">
-              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-mono font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
-                <span>{status?.system?.bbr ? 'BBR Enabled' : 'Disabled'}</span>
-              </span>
-            </div>
-          </div>
-        </div>
-
-        {/* TLS & SNI */}
-        <div className="p-5 rounded-2xl glass-card flex items-start gap-3.5">
-          <div className="p-2.5 rounded-xl bg-purple-500/10 text-purple-400 border border-purple-500/20">
-            <Zap className="w-5 h-5" />
-          </div>
-          <div>
-            <h4 className="font-semibold text-sm text-white">Reality 伪装与传输安全</h4>
-            <p className="text-xs text-slate-400 mt-1">
-              伪装 SNI 指向苹果官方分发站点，杜绝主动握手探测与中间人拦截
-            </p>
-            <div className="mt-3 text-xs font-mono text-slate-300 bg-slate-950/60 px-3 py-1.5 rounded-xl border border-slate-800">
-              <span className="text-slate-500">当前 SNI: </span>
-              <span className="text-emerald-400">{status?.config?.sni || 'swdist.apple.com'}</span>
-            </div>
-          </div>
-        </div>
       </div>
     </div>
   );

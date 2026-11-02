@@ -164,7 +164,7 @@ export const LogsTab: React.FC<LogsTabProps> = ({ initialService = 'singbox' }) 
             <span className="w-2.5 h-2.5 rounded-full bg-rose-500/80 inline-block"></span>
             <span className="w-2.5 h-2.5 rounded-full bg-amber-500/80 inline-block"></span>
             <span className="w-2.5 h-2.5 rounded-full bg-emerald-500/80 inline-block"></span>
-            <span className="ml-2 text-slate-300 font-medium">journalctl -u {service}</span>
+            <span className="ml-2 text-slate-300 font-medium">实时运行日志流 · {service}</span>
           </div>
           <span className="text-[11px] text-slate-500">
             {autoRefresh ? '实时监听中 (每 3s)' : '静态快照'}

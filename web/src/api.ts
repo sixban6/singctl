@@ -64,6 +64,17 @@ export const api = {
       body: JSON.stringify({ service, content }),
     }),
 
+  enableBBR: () =>
+    request<{ message: string; bbr: boolean }>('/api/server/bbr', {
+      method: 'POST',
+    }),
+
+  updateSNI: (sni: string) =>
+    request<{ message: string; sni: string }>('/api/server/sni', {
+      method: 'PUT',
+      body: JSON.stringify({ sni }),
+    }),
+
   regeneratePath: () =>
     request<{ message: string; path: string; httpsUrl: string }>('/api/server/path/regenerate', {
       method: 'POST',

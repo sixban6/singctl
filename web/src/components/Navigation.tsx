@@ -14,7 +14,7 @@ export const Navigation: React.FC<NavigationProps> = ({ currentTab, onChangeTab 
     { key: 'services' as TabKey, label: '核心服务管控', icon: Server },
     { key: 'subscriptions' as TabKey, label: '节点与订阅分发', icon: Link2 },
     { key: 'logs' as TabKey, label: '终端实时日志', icon: Terminal },
-    { key: 'diagnostics' as TabKey, label: 'WARP与链路体检', icon: Globe },
+    { key: 'diagnostics' as TabKey, label: '回程链路探测', icon: Globe },
     { key: 'security' as TabKey, label: '凭据与隐蔽安全', icon: Shield },
   ];
 

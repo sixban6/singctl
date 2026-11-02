@@ -23,7 +23,7 @@ export const Header: React.FC<HeaderProps> = ({ status, onLogout }) => {
           </div>
           <div>
             <div className="flex items-center gap-2">
-              <span className="font-bold text-base tracking-tight text-white font-mono">singctl</span>
+              <span className="font-bold text-base tracking-tight text-white">服务端控制台</span>
               <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-medium">
                 v{status?.version || '1.0.0'}
               </span>

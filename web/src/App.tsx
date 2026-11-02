@@ -134,7 +134,7 @@ const DashboardContent: React.FC = () => {
       </main>
 
       <footer className="border-t border-slate-900 py-6 text-center text-xs text-slate-600 font-mono">
-        singctl fleet manager · zero external npm runtime · memory &lt; 25MB
+        Fleet Manager · 极简轻量 · 纯单页面无冗余依赖 · 内存占用 &lt; 25MB
       </footer>
     </div>
   );
