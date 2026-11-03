@@ -100,7 +100,14 @@ func StartBackground(opts Options) error {
 	}
 	defer rPipe.Close()
 
-	args := append([]string{}, os.Args[1:]...)
+	args := make([]string, 0, len(os.Args))
+	for _, arg := range os.Args[1:] {
+		if arg == "restart" || arg == "r" {
+			args = append(args, "start")
+		} else {
+			args = append(args, arg)
+		}
+	}
 	cmd := exec.Command(execPath, args...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile

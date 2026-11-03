@@ -641,6 +641,34 @@ func MigrateConfig(configPath string, templateData []byte) error {
 		}
 	}
 
+	// Helper to set or add an entire mapping node under a specific map
+	setOrAddMapping := func(parent *yaml.Node, parentKey, childKey string, val interface{}) {
+		for i := 0; i < len(parent.Content); i += 2 {
+			if parent.Content[i].Value == parentKey {
+				mapNode := parent.Content[i+1]
+				if mapNode.Kind != yaml.MappingNode {
+					return
+				}
+				var newNode yaml.Node
+				b, _ := yaml.Marshal(val)
+				_ = yaml.Unmarshal(b, &newNode)
+				if len(newNode.Content) == 0 {
+					return
+				}
+				childNode := newNode.Content[0]
+				for j := 0; j < len(mapNode.Content); j += 2 {
+					if mapNode.Content[j].Value == childKey {
+						mapNode.Content[j+1] = childNode
+						return
+					}
+				}
+				keyNode := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: childKey}
+				mapNode.Content = append(mapNode.Content, keyNode, childNode)
+				return
+			}
+		}
+	}
+
 	// Helper to remove a key-value pair from a map node
 	removeField := func(parent *yaml.Node, parentKey, childKey string) {
 		for i := 0; i < len(parent.Content); i += 2 {
@@ -748,6 +776,10 @@ func MigrateConfig(configPath string, templateData []byte) error {
 			setOrAddField(docNode, "server", "sb_domain", oldCfg.Server.SBDomain)
 		} else {
 			removeField(docNode, "server", "sb_domain")
+		}
+
+		if strings.Contains(string(oldData), "web_admin:") && oldCfg.Server.WebAdmin.Path != "" {
+			setOrAddMapping(docNode, "server", "web_admin", oldCfg.Server.WebAdmin)
 		}
 	}
 

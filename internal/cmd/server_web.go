@@ -153,6 +153,12 @@ func newServerWebRestartCmd(opts func() serverweb.Options) *cobra.Command {
 		Aliases: []string{"r"},
 		Short:   "重启后台服务端 WebUI / Restart background Server WebUI",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			o := opts()
+			if serverweb.IsBackgroundChild() {
+				o.OnReady = serverweb.ChildReady
+				return serverweb.New(o).ListenAndServe()
+			}
+
 			stopped, err := serverweb.StopServerWeb()
 			if err != nil {
 				logger.Warn("停止旧服务实例失败: %v", err)
@@ -161,7 +167,6 @@ func newServerWebRestartCmd(opts func() serverweb.Options) *cobra.Command {
 			}
 			time.Sleep(300 * time.Millisecond)
 
-			o := opts()
 			if err := serverweb.StartBackground(o); err != nil {
 				return err
 			}

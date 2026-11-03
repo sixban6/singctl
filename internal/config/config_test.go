@@ -354,3 +354,49 @@ func validatePasswordChars(pass string) bool {
 	}
 	return hasUpper && hasLower && hasDigit
 }
+
+func TestMigrateConfig_PreserveWebAdmin(t *testing.T) {
+	oldYAML := `
+server:
+  node_domain: "node.example.com"
+  substore_domain: "sub.example.com"
+  web_admin:
+    enabled: true
+    port: 8092
+    path: "/sr/ExistingPath987654321012"
+    username: "singctl"
+    password: "MySecurePassword123"
+`
+	templateYAML := `
+server:
+  node_domain: "template.example.com"
+  # web_admin:
+  #   enabled: true
+`
+	tmpFile, err := os.CreateTemp("", "singctl_test_webadmin_*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpFile.Name())
+
+	if _, err := tmpFile.WriteString(oldYAML); err != nil {
+		t.Fatal(err)
+	}
+	tmpFile.Close()
+
+	if err := MigrateConfig(tmpFile.Name(), []byte(templateYAML)); err != nil {
+		t.Fatalf("MigrateConfig failed: %v", err)
+	}
+
+	loaded, err := Load(tmpFile.Name())
+	if err != nil {
+		t.Fatalf("Load migrated config failed: %v", err)
+	}
+
+	if loaded.Server.WebAdmin.Path != "/sr/ExistingPath987654321012" {
+		t.Errorf("expected web_admin.path '/sr/ExistingPath987654321012', got '%s'", loaded.Server.WebAdmin.Path)
+	}
+	if loaded.Server.WebAdmin.Password != "MySecurePassword123" {
+		t.Errorf("expected web_admin.password 'MySecurePassword123', got '%s'", loaded.Server.WebAdmin.Password)
+	}
+}
