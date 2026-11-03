@@ -178,6 +178,7 @@ func PreviewCaddyfile(cfg *config.Config) (string, error) {
 		MtlsCA            string
 		AdminPath         string
 		AdminPort         int
+		ACMEEmail         string
 	}
 
 	nodeDomain := ""
@@ -241,6 +242,20 @@ func PreviewCaddyfile(cfg *config.Config) (string, error) {
 		ssKey = strings.TrimSpace(string(keyBytes))
 	}
 
+	domainForEmail := substoreDomain
+	if domainForEmail == "" {
+		domainForEmail = nodeDomain
+	}
+	acmeEmail := "admin@example.com"
+	if domainForEmail != "" {
+		parts := strings.Split(strings.TrimSpace(domainForEmail), ".")
+		if len(parts) >= 2 {
+			acmeEmail = "admin@" + strings.Join(parts[len(parts)-2:], ".")
+		} else {
+			acmeEmail = "admin@" + domainForEmail
+		}
+	}
+
 	ctx := tmplContext{
 		NodeDomain:        nodeDomain,
 		SubstoreDomain:    substoreDomain,
@@ -257,6 +272,7 @@ func PreviewCaddyfile(cfg *config.Config) (string, error) {
 		MtlsCA:            mtlsCA,
 		AdminPath:         adminPath,
 		AdminPort:         adminPort,
+		ACMEEmail:         acmeEmail,
 	}
 
 	var buf bytes.Buffer

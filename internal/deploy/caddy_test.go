@@ -49,6 +49,14 @@ func TestPreviewCaddyfile_SeparatedDomainsAndFallback(t *testing.T) {
 	if !strings.Contains(content, "root * /var/www/mask-site") {
 		t.Errorf("expected root * /var/www/mask-site, got:\n%s", content)
 	}
+
+	// 6. Double CA fallback (Let's Encrypt + ZeroSSL)
+	if !strings.Contains(content, "https://acme.zerossl.com/v2/DV90") {
+		t.Errorf("expected ZeroSSL fallback issuer in Caddyfile, got:\n%s", content)
+	}
+	if !strings.Contains(content, "email admin@example.com") {
+		t.Errorf("expected ZeroSSL email admin@example.com in Caddyfile, got:\n%s", content)
+	}
 }
 
 func TestPreviewCaddyfile_BackwardCompatibility(t *testing.T) {

@@ -7,11 +7,17 @@ echo "Starting Caddy uninstallation..."
 systemctl stop caddy || true
 systemctl disable caddy || true
 
-# Unhold caddy if held before purging
+# Unhold caddy if held before removing
 apt-mark unhold caddy || true
 
-# Purge caddy package
-apt-get purge -y caddy || true
+# Backup existing SSL certificates before package removal to prevent rate-limiting on reinstall
+if [ -d "/var/lib/caddy/.local/share/caddy/certificates" ]; then
+    mkdir -p /var/lib/singctl/caddy_certs_backup
+    cp -a /var/lib/caddy/.local/share/caddy/certificates/* /var/lib/singctl/caddy_certs_backup/ 2>/dev/null || true
+fi
+
+# Remove caddy package (use remove instead of purge to avoid wiping valid ACME state)
+apt-get remove -y caddy || true
 apt-get autoremove -y || true
 
 # Remove Caddy APT sources and keys

@@ -66,6 +66,13 @@ https://{{.SubstoreDomain}}:9443 {
         issuer acme {
             dns cloudflare {{.CFDNSKey}}
         }
+        issuer acme {
+            dir https://acme.zerossl.com/v2/DV90
+            {{- if .ACMEEmail}}
+            email {{.ACMEEmail}}
+            {{- end}}
+            dns cloudflare {{.CFDNSKey}}
+        }
 {{if .MtlsCA}}
         client_auth {
             mode verify_if_given
@@ -159,6 +166,13 @@ https://{{.NodeDomain}}:9443 {
         issuer acme {
             dns cloudflare {{.CFDNSKey}}
         }
+        issuer acme {
+            dir https://acme.zerossl.com/v2/DV90
+            {{- if .ACMEEmail}}
+            email {{.ACMEEmail}}
+            {{- end}}
+            dns cloudflare {{.CFDNSKey}}
+        }
 {{if .MtlsCA}}
         client_auth {
             mode verify_if_given
@@ -242,6 +256,13 @@ https://{{.SubstoreDomain}}:9443 {
     bind 127.0.0.1
     tls {
         issuer acme {
+            dns cloudflare {{.CFDNSKey}}
+        }
+        issuer acme {
+            dir https://acme.zerossl.com/v2/DV90
+            {{- if .ACMEEmail}}
+            email {{.ACMEEmail}}
+            {{- end}}
             dns cloudflare {{.CFDNSKey}}
         }
 {{if .MtlsCA}}

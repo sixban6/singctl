@@ -77,3 +77,10 @@ if [ "${PREBUILT_SUCCESS}" != "true" ]; then
 
     apt-mark hold caddy
 fi
+
+# 4. Restore certificates if backup exists and target directory is empty
+if [ -d "/var/lib/singctl/caddy_certs_backup" ]; then
+    mkdir -p /var/lib/caddy/.local/share/caddy/certificates
+    cp -rn /var/lib/singctl/caddy_certs_backup/* /var/lib/caddy/.local/share/caddy/certificates/ 2>/dev/null || true
+    chown -R caddy:caddy /var/lib/caddy 2>/dev/null || true
+fi
