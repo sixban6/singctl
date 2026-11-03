@@ -7,6 +7,9 @@ import (
 	"fmt"
 )
 
+// IsLite 标识当前二进制是否为不含内嵌规则集快照的轻量构建。
+const IsLite = true
+
 // Load 返回空的快照清单（轻量版无内嵌快照）。
 func Load() *Snapshot {
 	if loaded != nil {

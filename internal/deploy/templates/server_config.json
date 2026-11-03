@@ -180,7 +180,7 @@
       },
       {
         "ip_is_private": true,
-        "outbound": "DC"
+        "action": "reject"
       },
       {
         "rule_set": [

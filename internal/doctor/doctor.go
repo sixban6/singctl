@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"singctl/internal/config"
+	"singctl/internal/constant"
 	"singctl/internal/logger"
 )
 
@@ -32,8 +33,36 @@ type DoctorReport struct {
 	Summary   string       `json:"summary"`
 }
 
-// RunDoctor 执行全链路体检
+// IsServerEnvironment 判断当前主机/配置是否处于服务端部署模式
+func IsServerEnvironment(cfg *config.Config) bool {
+	if _, err := os.Stat("/etc/caddy/Caddyfile"); err == nil {
+		return true
+	}
+	if _, err := os.Stat("/etc/sub-store"); err == nil {
+		return true
+	}
+	if cfg != nil {
+		domain := cfg.Server.GetNodeDomain()
+		if domain != "" && domain != "node.yourdomain.com" {
+			return true
+		}
+		if cfg.Server.GetWebAdminPath() != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// RunDoctor 根据当前环境自动识别服务端或客户端模式并执行体检
 func RunDoctor(cfg *config.Config) *DoctorReport {
+	if IsServerEnvironment(cfg) {
+		return RunServerDoctor(cfg)
+	}
+	return RunClientDoctor(cfg)
+}
+
+// RunServerDoctor 执行服务端全链路体检
+func RunServerDoctor(cfg *config.Config) *DoctorReport {
 	report := &DoctorReport{
 		Score:     100,
 		CheckedAt: time.Now().Format("2006-01-02 15:04:05"),
@@ -64,7 +93,124 @@ func RunDoctor(cfg *config.Config) *DoctorReport {
 	// 8. WARP 状态与出口流媒体解锁
 	checkWARPAndUnlock(report)
 
-	// 计算总体得分与总结
+	finalizeReport(report, "🎉 系统运行状态极佳！所有核心组件、TLS 证书与高可用链路均处于健康状态。")
+	return report
+}
+
+// RunClientDoctor 执行客户端透明代理/桌面网关模式体检
+func RunClientDoctor(cfg *config.Config) *DoctorReport {
+	report := &DoctorReport{
+		Score:     100,
+		CheckedAt: time.Now().Format("2006-01-02 15:04:05"),
+		Items:     make([]DoctorItem, 0),
+	}
+
+	// 1. 系统基础环境
+	checkSystem(report)
+
+	// 2. Linux 内核下顺带检查 BBR
+	if runtime.GOOS == "linux" {
+		checkBBR(report)
+	}
+
+	// 3. 客户端订阅配置检查
+	hasValidSub := false
+	if cfg != nil {
+		for _, sub := range cfg.Subs {
+			if strings.TrimSpace(sub.URL) != "" {
+				hasValidSub = true
+				break
+			}
+		}
+	}
+	if hasValidSub {
+		report.Items = append(report.Items, DoctorItem{
+			Name:     "客户端订阅配置",
+			Category: "system",
+			Status:   "ok",
+			Summary:  fmt.Sprintf("已配置 %d 个订阅源", len(cfg.Subs)),
+		})
+	} else {
+		report.Items = append(report.Items, DoctorItem{
+			Name:     "客户端订阅配置",
+			Category: "system",
+			Status:   "warn",
+			Summary:  "尚未配置有效订阅链接 (subs.url)",
+			Detail:   "若作为客户端使用，请编辑 singctl.yaml 填入订阅地址；若为服务端请运行 'singctl sr doctor'",
+		})
+	}
+
+	// 4. 客户端 sing-box 配置与进程状态
+	if _, err := os.Stat(constant.SingBoxConfigFile); err == nil {
+		if isServiceActive("sing-box") {
+			report.Items = append(report.Items, DoctorItem{
+				Name:     "sing-box 客户端核心",
+				Category: "services",
+				Status:   "ok",
+				Summary:  "配置文件就绪且 sing-box 正在运行",
+			})
+		} else {
+			report.Items = append(report.Items, DoctorItem{
+				Name:     "sing-box 客户端核心",
+				Category: "services",
+				Status:   "warn",
+				Summary:  "配置文件已生成，但 sing-box 当前未运行",
+				Detail:   "可执行 'singctl sb start' 启动客户端代理",
+			})
+		}
+	} else {
+		report.Items = append(report.Items, DoctorItem{
+			Name:     "sing-box 客户端核心",
+			Category: "services",
+			Status:   "warn",
+			Summary:  "未检测到客户端配置 (" + constant.SingBoxConfigFile + ")",
+			Detail:   "可执行 'singctl sb install && singctl sb start' 初始化客户端",
+		})
+	}
+
+	// 5. 本地控制面端口探测 (Clash API 9090 / Web 面板 8090)
+	var activeLocalPorts []int
+	for _, p := range []int{9090, 8090} {
+		if conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", p), 300*time.Millisecond); err == nil {
+			_ = conn.Close()
+			activeLocalPorts = append(activeLocalPorts, p)
+		}
+	}
+	if len(activeLocalPorts) > 0 {
+		report.Items = append(report.Items, DoctorItem{
+			Name:     "本地控制面板监听",
+			Category: "network",
+			Status:   "ok",
+			Summary:  fmt.Sprintf("已检测到本地控制端口 (%s) 在线", joinInts(activeLocalPorts)),
+		})
+	}
+
+	// 6. 基础外网连通性探测
+	client := &http.Client{Timeout: 3 * time.Second}
+	start := time.Now()
+	if resp, err := client.Get("https://cp.cloudflare.com/generate_204"); err == nil {
+		_ = resp.Body.Close()
+		report.Items = append(report.Items, DoctorItem{
+			Name:     "外网 HTTPS 连通性",
+			Category: "network",
+			Status:   "ok",
+			Summary:  fmt.Sprintf("Cloudflare 连通探测正常 (延迟: %d ms)", time.Since(start).Milliseconds()),
+		})
+	} else {
+		report.Items = append(report.Items, DoctorItem{
+			Name:     "外网 HTTPS 连通性",
+			Category: "network",
+			Status:   "warn",
+			Summary:  "无法直连 cp.cloudflare.com",
+			Detail:   err.Error(),
+		})
+	}
+
+	finalizeReport(report, "🎉 客户端运行环境健康，代理与网络组件状态良好。")
+	return report
+}
+
+func finalizeReport(report *DoctorReport, healthyMsg string) {
 	var fails, warns int
 	for _, item := range report.Items {
 		if item.Status == "fail" {
@@ -73,20 +219,15 @@ func RunDoctor(cfg *config.Config) *DoctorReport {
 			warns++
 		}
 	}
-	report.Score = 100 - (fails * 20) - (warns * 5)
-	if report.Score < 0 {
-		report.Score = 0
-	}
+	report.Score = max(0, 100-(fails*20)-(warns*5))
 
 	if fails == 0 && warns == 0 {
-		report.Summary = "🎉 系统运行状态极佳！所有核心组件、TLS 证书与高可用链路均处于健康状态。"
+		report.Summary = healthyMsg
 	} else if fails == 0 {
 		report.Summary = fmt.Sprintf("⚠️ 系统整体可用，但发现 %d 项次要警告，建议排查优化。", warns)
 	} else {
 		report.Summary = fmt.Sprintf("❌ 检测到 %d 项严重异常与 %d 项警告，部分代理或网关链路可能受阻，请根据下方详情排查！", fails, warns)
 	}
-
-	return report
 }
 
 func checkSystem(r *DoctorReport) {

@@ -263,6 +263,10 @@ func TestPreviewCaddyfile_WebAdmin(t *testing.T) {
 	if !strings.Contains(content, "header_up X-Geo-Country {header.CF-IPCountry}") {
 		t.Errorf("expected Caddy to pass X-Geo-Country, got:\n%s", content)
 	}
+	expectedGateway := "header_up X-Singctl-Gateway " + config.DeriveGatewayToken("/admin_sec9988")
+	if !strings.Contains(content, expectedGateway) {
+		t.Errorf("expected Caddy to inject %q, got:\n%s", expectedGateway, content)
+	}
 	if !strings.Contains(content, "header_up -X-Forwarded-For") || !strings.Contains(content, "header_up -CF-Connecting-IP") {
 		t.Errorf("expected Caddy to drop client forwarding headers, got:\n%s", content)
 	}

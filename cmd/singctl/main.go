@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"singctl/configs"
 	"singctl/internal/cmd"
 	"singctl/internal/logger"
@@ -43,8 +44,8 @@ func resolveDefaultConfigPath() string {
 	return defaultUnixConfigPath
 }
 
-func ensureConfigDir() error {
-	dir := filepath.Dir(configPath)
+func ensureConfigDir(dstConfigPath string) error {
+	dir := filepath.Dir(dstConfigPath)
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		// 目录不存在，创建它（包括所有中间目录）
 		return os.MkdirAll(dir, 0755)
@@ -53,7 +54,7 @@ func ensureConfigDir() error {
 }
 
 func initConfigFile(dstConfigPath string) {
-	if err := ensureConfigDir(); err != nil {
+	if err := ensureConfigDir(dstConfigPath); err != nil {
 		log.Printf("Warning: failed to ensure config dir: %v", err)
 		return
 	}
@@ -63,21 +64,46 @@ func initConfigFile(dstConfigPath string) {
 	}
 }
 
-func main() {
-	// 判断是否是 init, help 或 version 等命令，避免在执行初始化向导前自动生成占位配置文件
-	isInitOrHelp := false
-	for i, arg := range os.Args {
-		if arg == "init" || arg == "help" || arg == "-h" || arg == "--help" || arg == "version" || arg == "-v" || arg == "--version" {
-			isInitOrHelp = true
-			break
+func parseEarlyConfigPath(args []string, fallback string) string {
+	for i := 1; i < len(args); i++ {
+		arg := args[i]
+		if (arg == "-c" || arg == "--config") && i+1 < len(args) {
+			return args[i+1]
 		}
-		if (arg == "sr" || arg == "server") && i+1 < len(os.Args) && os.Args[i+1] == "init" {
-			isInitOrHelp = true
-			break
+		if v, ok := strings.CutPrefix(arg, "--config="); ok && v != "" {
+			return v
+		}
+		if v, ok := strings.CutPrefix(arg, "-c="); ok && v != "" {
+			return v
 		}
 	}
+	return fallback
+}
 
-	if !isInitOrHelp {
+func isStatelessCommand(args []string) bool {
+	if len(args) <= 1 {
+		return true
+	}
+	for i, arg := range args[1:] {
+		idx := i + 1
+		switch arg {
+		case "init", "help", "-h", "--help", "version", "-v", "--version", "internal-migrate", "completion", "util", "gfw":
+			return true
+		case "sr", "server":
+			if idx+1 < len(args) && args[idx+1] == "init" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func main() {
+	defaultConfigPath := resolveDefaultConfigPath()
+	configPath = parseEarlyConfigPath(os.Args, defaultConfigPath)
+
+	// 判断是否是 init, help, version 等无状态命令，避免自动生成占位配置文件或污染只读目录
+	if !isStatelessCommand(os.Args) {
 		if _, err := os.Stat(configPath); os.IsNotExist(err) {
 			initConfigFile(configPath)
 		}
@@ -90,7 +116,6 @@ It supports automatic configuration generation from subscription URLs,
 DNS optimization, and complete service lifecycle management.`,
 	}
 
-	defaultConfigPath := resolveDefaultConfigPath()
 	rootCmd.PersistentFlags().StringVarP(&configPath, "config", "c", defaultConfigPath, "config file")
 	// 保留补全功能，但只是不想让它显示在 help 列表里，可以只隐藏它：
 	rootCmd.CompletionOptions.HiddenDefaultCmd = true
@@ -130,7 +155,7 @@ DNS optimization, and complete service lifecycle management.`,
 	)
 
 	// 服务端核心命令
-	serverCmd := cmd.NewServerCmd(configPath)
+	serverCmd := cmd.NewServerCmd(configPath, Version)
 	serverCmd.GroupID = "server"
 	reinstallServerCmd := cmd.NewReinstallServerCmd(configPath)
 	reinstallServerCmd.GroupID = "server"

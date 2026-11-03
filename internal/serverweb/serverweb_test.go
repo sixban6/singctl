@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"singctl/internal/config"
 )
 
 func TestServerWebAuthAndStatic(t *testing.T) {
@@ -219,8 +221,12 @@ server:
 		}
 		newCookie := cookieHeader(rec)
 
-		if srv.getUsername() != "myuser" || srv.getPassword() != "NewPassword888" {
-			t.Fatalf("expected memory credentials updated, got user=%s pass=%s", srv.getUsername(), srv.getPassword())
+		if srv.getUsername() != "myuser" || !config.IsHashedPassword(srv.getPassword()) || !config.VerifyPassword(srv.getPassword(), "NewPassword888") {
+			t.Fatalf("expected memory credentials updated with bcrypt hash, got user=%s pass=%s", srv.getUsername(), srv.getPassword())
+		}
+		diskRaw, _ := os.ReadFile(cfgPath)
+		if strings.Contains(string(diskRaw), "NewPassword888") {
+			t.Fatalf("updated password must be stored as bcrypt hash on disk, never plaintext:\n%s", string(diskRaw))
 		}
 
 		req = httptest.NewRequest("GET", "/api/server/status", nil)
@@ -236,10 +242,12 @@ server:
 	// 9. 伪造转发头不能绕过封禁；未登录不能解封
 	{
 		remoteIP := "198.51.100.88"
+		gwToken := srv.GatewayToken()
 		loginFail := func() *httptest.ResponseRecorder {
 			req := httptest.NewRequest("POST", "/api/server/login", strings.NewReader(`{"username":"myuser","password":"bad"}`))
 			req.Header.Set("Content-Type", "application/json")
 			req.RemoteAddr = "127.0.0.1:40000"
+			req.Header.Set("X-Singctl-Gateway", gwToken)
 			req.Header.Set("X-Real-IP", remoteIP)
 			req.Header.Set("X-Forwarded-For", "127.0.0.1")
 			req.Header.Set("CF-Connecting-IP", "127.0.0.1")
@@ -262,6 +270,7 @@ server:
 		req := httptest.NewRequest("POST", "/api/server/login", strings.NewReader(`{"username":"myuser","password":"NewPassword888"}`))
 		req.Header.Set("Content-Type", "application/json")
 		req.RemoteAddr = "127.0.0.1:40000"
+		req.Header.Set("X-Singctl-Gateway", gwToken)
 		req.Header.Set("X-Real-IP", remoteIP)
 		rec = httptest.NewRecorder()
 		srv.mux.ServeHTTP(rec, req)
@@ -291,6 +300,7 @@ server:
 		req = httptest.NewRequest("POST", "/api/server/login", strings.NewReader(`{"username":"myuser","password":"NewPassword888"}`))
 		req.Header.Set("Content-Type", "application/json")
 		req.RemoteAddr = "127.0.0.1:40000"
+		req.Header.Set("X-Singctl-Gateway", gwToken)
 		req.Header.Set("X-Real-IP", remoteIP)
 		rec = httptest.NewRecorder()
 		srv.mux.ServeHTTP(rec, req)
@@ -320,6 +330,39 @@ server:
 		raw := rec.Body.String()
 		if strings.Contains(raw, "NewPassword888") || strings.Contains(raw, "ServerPassword888") {
 			t.Fatalf("audit logs must never contain passwords, got: %s", raw)
+		}
+	}
+
+	// 11. 本机直连缺少 X-Singctl-Gateway 时，轮换伪造 X-Real-IP 无法绕过 3 次防爆破封锁，且本机 CLI Token 可解封
+	{
+		for i := 1; i <= 3; i++ {
+			req := httptest.NewRequest("POST", "/api/server/login", strings.NewReader(`{"username":"myuser","password":"bad"}`))
+			req.Header.Set("Content-Type", "application/json")
+			req.RemoteAddr = "127.0.0.1:50000"
+			req.Header.Set("X-Real-IP", fmt.Sprintf("203.0.113.%d", i))
+			rec := httptest.NewRecorder()
+			srv.mux.ServeHTTP(rec, req)
+			if i < 3 && rec.Code != http.StatusUnauthorized {
+				t.Fatalf("direct loopback attempt %d: expected 401, got %d", i, rec.Code)
+			}
+			if i == 3 && rec.Code != http.StatusTooManyRequests {
+				t.Fatalf("direct loopback attempt 3 with spoofed X-Real-IP must be rate-limited (429), got %d", rec.Code)
+			}
+		}
+
+		// 验证本机 0600 CLI Token 可在不依赖明文密码的情况下调用解封接口
+		cliTokBytes, err := os.ReadFile(ResolveCLITokenPath(cfgPath))
+		if err != nil {
+			t.Fatalf("expected CLI token file to exist: %v", err)
+		}
+		unbanReq := httptest.NewRequest("POST", "/api/server/unban", strings.NewReader(`{"ip":"all"}`))
+		unbanReq.Header.Set("Content-Type", "application/json")
+		unbanReq.RemoteAddr = "127.0.0.1:50001"
+		unbanReq.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(cliTokBytes)))
+		unbanRec := httptest.NewRecorder()
+		srv.mux.ServeHTTP(unbanRec, unbanReq)
+		if unbanRec.Code != http.StatusOK {
+			t.Fatalf("expected 200 for local CLI token unban, got %d (%s)", unbanRec.Code, unbanRec.Body.String())
 		}
 	}
 }

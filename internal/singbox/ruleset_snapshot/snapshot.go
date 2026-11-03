@@ -17,6 +17,9 @@ import (
 //go:embed assets
 var assetsFS embed.FS
 
+// IsLite 标识当前二进制是否为不含内嵌规则集快照的轻量构建。
+const IsLite = false
+
 // Load 解析内置快照清单（进程内缓存，重复调用开销可忽略）。
 func Load() *Snapshot {
 	if loaded != nil {

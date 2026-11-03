@@ -263,3 +263,17 @@ func (l *IPLimiter) Close() {
 		close(l.stopCleaner)
 	}
 }
+
+// UnbanPersistedIP 直接修改磁盘上的持久化封禁记录文件（供本地 CLI 兜底解封使用）
+func UnbanPersistedIP(banFilePath, targetIP string) error {
+	if strings.TrimSpace(banFilePath) == "" {
+		return nil
+	}
+	if _, err := os.Stat(banFilePath); os.IsNotExist(err) {
+		return nil
+	}
+	l := NewIPLimiter(3, 10*time.Minute, 15*time.Minute, banFilePath)
+	defer l.Close()
+	l.Unban(strings.TrimSpace(targetIP))
+	return nil
+}

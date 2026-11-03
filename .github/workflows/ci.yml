@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches-ignore:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: '1.27.3'
+  NODE_VERSION: '22'
+
+jobs:
+  verify:
+    name: Test & Build Matrix Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: Typecheck & Build Server WebUI
+        working-directory: web
+        run: |
+          npm ci
+          npx tsc --noEmit
+          npm run build
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Go Vet
+        run: go vet ./...
+
+      - name: Unit Tests (Race Detector)
+        run: go test -race ./internal/...
+
+      - name: Integration Smoke Tests
+        run: go test -short ./test/...
+
+      - name: Cross-Platform & Lite Build Smoke Check
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o /tmp/singctl-linux ./cmd/singctl
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -tags lite -o /tmp/singctl-lite ./cmd/singctl
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -o /tmp/singctl-darwin ./cmd/singctl
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -o /tmp/singctl.exe ./cmd/singctl

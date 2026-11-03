@@ -11,6 +11,7 @@ import (
 
 	"singctl/internal/config"
 	"singctl/internal/logger"
+	"singctl/internal/singbox/ruleset_snapshot"
 	"singctl/internal/util/file"
 	releasepkg "singctl/internal/util/release"
 )
@@ -73,16 +74,10 @@ func (u *Updater) UpdateSelf(configPath string, currentVersion string) error {
 		}
 	}
 
-	// 2. 选择当前平台的压缩包资产
-	var asset *releasepkg.Asset
-	for i := range info.Assets {
-		if u.selectSingCtlAsset(info.Assets[i].Name) {
-			asset = &info.Assets[i]
-			break
-		}
-	}
+	// 2. 选择当前平台的压缩包资产（严格区分完整版与 lite 轻量版）
+	asset := SelectSingCtlAsset(info.Assets, runtime.GOOS, runtime.GOARCH, ruleset_snapshot.IsLite)
 	if asset == nil {
-		return fmt.Errorf("no suitable asset found for OS: %s, Arch: %s", runtime.GOOS, runtime.GOARCH)
+		return fmt.Errorf("no suitable asset found for OS: %s, Arch: %s (lite=%v)", runtime.GOOS, runtime.GOARCH, ruleset_snapshot.IsLite)
 	}
 
 	// 3. 下载压缩包（可走镜像加速），并强制校验 sha256
@@ -189,9 +184,45 @@ func (u *Updater) verifyChecksumsFile(ctx context.Context, client *releasepkg.Cl
 	return nil
 }
 
-// selectSingCtlAsset 选择合适的 singctl 资源
-func (u *Updater) selectSingCtlAsset(assetName string) bool {
+// SelectSingCtlAsset 根据目标系统、架构及构建变体（完整版 vs lite 轻量版）选择最合适的资产。
+// 标准版绝不误选 -lite 包；lite 版优先匹配 -lite 包，仅在无 -lite 资产时回退标准包。
+func SelectSingCtlAsset(assets []releasepkg.Asset, goos, goarch string, isLite bool) *releasepkg.Asset {
+	var standardMatch *releasepkg.Asset
+	var liteMatch *releasepkg.Asset
+
+	for i := range assets {
+		if !matchesOSAndArch(assets[i].Name, goos, goarch) {
+			continue
+		}
+		if isLiteAssetName(assets[i].Name) {
+			if liteMatch == nil {
+				liteMatch = &assets[i]
+			}
+		} else {
+			if standardMatch == nil {
+				standardMatch = &assets[i]
+			}
+		}
+	}
+
+	if isLite {
+		if liteMatch != nil {
+			return liteMatch
+		}
+		return standardMatch
+	}
+	return standardMatch
+}
+
+func isLiteAssetName(assetName string) bool {
 	name := strings.ToLower(assetName)
+	return strings.Contains(name, "-lite.") || strings.Contains(name, "-lite-") || strings.Contains(name, "_lite.")
+}
+
+func matchesOSAndArch(assetName, goos, goarch string) bool {
+	name := strings.ToLower(assetName)
+	goos = strings.ToLower(goos)
+	goarch = strings.ToLower(goarch)
 
 	// 排除校验文件
 	if strings.Contains(name, "checksums") {
@@ -204,23 +235,21 @@ func (u *Updater) selectSingCtlAsset(assetName string) bool {
 	}
 
 	// 必须包含正确的操作系统
-	if !strings.Contains(name, runtime.GOOS) {
+	if !strings.Contains(name, goos) {
 		return false
 	}
 
 	// 必须包含正确的架构
-	arch := runtime.GOARCH
-	if arch == "amd64" {
-		// Accept both amd64 and x86_64
+	if goarch == "amd64" {
 		if !strings.Contains(name, "amd64") && !strings.Contains(name, "x86_64") {
 			return false
 		}
-	} else if !strings.Contains(name, arch) {
+	} else if !strings.Contains(name, goarch) {
 		return false
 	}
 
 	// 必须是压缩包格式
-	if !strings.Contains(name, ".tar.gz") && !strings.Contains(name, ".zip") {
+	if !strings.HasSuffix(name, ".tar.gz") && !strings.HasSuffix(name, ".zip") {
 		return false
 	}
 

@@ -25,6 +25,27 @@ func TestDoctor_BasicRun(t *testing.T) {
 	}
 }
 
+func TestIsServerEnvironment(t *testing.T) {
+	placeholderCfg := &config.Config{
+		Server: config.ServerConfig{
+			NodeDomain: "node.yourdomain.com",
+		},
+	}
+	// On dev workstations without /etc/caddy/Caddyfile, placeholder domain must be treated as client mode
+	if IsServerEnvironment(placeholderCfg) {
+		t.Log("host has /etc/caddy/Caddyfile or /etc/sub-store present")
+	}
+
+	serverCfg := &config.Config{
+		Server: config.ServerConfig{
+			NodeDomain: "edge.example.com",
+		},
+	}
+	if !IsServerEnvironment(serverCfg) {
+		t.Fatal("configured server.node_domain should be detected as server environment")
+	}
+}
+
 func TestCheckMediaUnlock(t *testing.T) {
 	report := CheckMediaUnlock()
 	if report == nil {

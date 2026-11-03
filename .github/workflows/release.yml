@@ -4,32 +4,79 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 permissions:
   contents: write
-  issues: write
-  pull-requests: write
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
 
 env:
   GO_VERSION: '1.27.3'
+  NODE_VERSION: '22'
 
 jobs:
-  release:
-    name: Calculate & Tag Release
+  verify:
+    name: Verify Quality Gates & Calculate Version
     runs-on: ubuntu-latest
     outputs:
-      released: ${{ steps.version.outputs.new_release_published }}
-      version: ${{ steps.version.outputs.new_release_version }}
+      should_release: ${{ steps.version.outputs.should_release }}
+      version: ${{ steps.version.outputs.version }}
+      tag_name: ${{ steps.version.outputs.tag_name }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Determine Next Version
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: Typecheck & Build Server WebUI
+        working-directory: web
+        run: |
+          npm ci
+          npx tsc --noEmit
+          npm run build
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Go Vet & Tests
+        run: |
+          go vet ./...
+          go test -race ./internal/...
+          go test -short ./test/...
+
+      - name: Upload Built WebUI Static Assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: serverweb-static
+          path: internal/serverweb/static
+          if-no-files-found: error
+
+      - name: Determine Release Eligibility & Next Version
         id: version
         run: |
-          # 1. 读取上游目标版本基准
+          COMMIT_SUBJECT=$(git log -1 --pretty=%s)
+          echo "Latest commit: $COMMIT_SUBJECT"
+
+          if [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+            if echo "$COMMIT_SUBJECT" | grep -Eq '(\[skip release\]|^(docs|style|test|ci)(\([^)]+\))?:)'; then
+              echo "Skipping binary release for non-runtime commit."
+              echo "should_release=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
           if [ -f .upstream-version ]; then
             TARGET_MAJOR=$(tr -d ' \n\r' < .upstream-version)
           else
@@ -37,16 +84,12 @@ jobs:
           fi
           echo "Target Upstream Major: $TARGET_MAJOR"
 
-          # 确保获取所有远程 tags
           git fetch --tags --force
-
-          # 2. 查找匹配当前大版本的所有 tag: v${TARGET_MAJOR}.*
           MATCHING_TAGS=$(git tag -l "v${TARGET_MAJOR}.*")
           MAX_PATCH=-1
 
           if [ -n "$MATCHING_TAGS" ]; then
             for t in $MATCHING_TAGS; do
-              # 提取末尾 patch 数字
               p=$(echo "$t" | awk -F. '{print $3}')
               if [ -n "$p" ] && [ "$p" -eq "$p" ] 2>/dev/null; then
                 if [ "$p" -gt "$MAX_PATCH" ]; then
@@ -57,7 +100,6 @@ jobs:
           fi
 
           if [ "$MAX_PATCH" -lt 0 ]; then
-            # 该大版本首发，从 0 开始
             NEXT_VERSION="${TARGET_MAJOR}.0"
           else
             NEXT_PATCH=$((MAX_PATCH + 1))
@@ -65,136 +107,128 @@ jobs:
           fi
 
           TAG_NAME="v${NEXT_VERSION}"
-          echo "Next tag to create: $TAG_NAME"
+          echo "Prepared release version: $TAG_NAME"
+          echo "should_release=true" >> "$GITHUB_OUTPUT"
+          echo "version=${NEXT_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag_name=${TAG_NAME}" >> "$GITHUB_OUTPUT"
 
-          # 3. 创建 Git Tag 并推送到远程
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "$TAG_NAME" -m "Release $TAG_NAME"
-          git push origin "$TAG_NAME"
-
-          # 4. 创建基础 GitHub Release
-          gh release create "$TAG_NAME" --title "$TAG_NAME" --generate-notes
-          
-          echo "new_release_published=true" >> $GITHUB_OUTPUT
-          echo "new_release_version=${NEXT_VERSION}" >> $GITHUB_OUTPUT
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  build:
-    name: Build and Release
+  build_and_release:
+    name: Build Matrix & Publish Release
     runs-on: ubuntu-latest
-    needs: release
-    if: needs.release.outputs.released == 'true'
-    
+    needs: verify
+    if: needs.verify.outputs.should_release == 'true'
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-        ref: main
-        
-    - name: Setup Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: ${{ env.GO_VERSION }}
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-    - name: Install UPX
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y upx-ucl
-        upx --version
-        
-    - name: Get version
-      id: get_version
-      run: |
-        git fetch --tags --force
-        VERSION=v${{ needs.release.outputs.version }}
-        echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
-        echo "Building version: ${VERSION}"
-          
-    - name: Tidy Go modules
-      run: go mod tidy
-      
-    - name: Download dependencies
-      run: go mod download
-      
-    - name: Build binaries and Compress
-      run: |
-        VERSION=${{ steps.get_version.outputs.VERSION }}
-        BUILD_TIME=$(date -u '+%Y-%m-%d_%H:%M:%S')
-        GIT_COMMIT=$(git rev-parse --short HEAD)
-        
-        LDFLAGS="-ldflags \"-X main.Version=${VERSION} -X main.BuildTime=${BUILD_TIME} -X main.GitCommit=${GIT_COMMIT} -s -w\""
-        
-        # Build for multiple platforms
-        mkdir -p dist/{linux-amd64,linux-arm64,darwin-arm64,linux-amd64-lite,linux-arm64-lite}
-        
-        # --- Linux AMD64 ---
-        GOOS=linux GOARCH=amd64 CGO_ENABLED=0 eval go build $LDFLAGS -o dist/linux-amd64/singctl ./cmd/singctl
-        upx --best --lzma dist/linux-amd64/singctl
-        
-        # --- Linux ARM64 ---
-        GOOS=linux GOARCH=arm64 CGO_ENABLED=0 eval go build $LDFLAGS -o dist/linux-arm64/singctl ./cmd/singctl
-        upx --best --lzma dist/linux-arm64/singctl
+      - name: Restore Built WebUI Static Assets
+        uses: actions/download-artifact@v4
+        with:
+          name: serverweb-static
+          path: internal/serverweb/static
 
-        # --- Linux AMD64 (Lite - no embedded rule snapshots) ---
-        GOOS=linux GOARCH=amd64 CGO_ENABLED=0 eval go build -tags lite $LDFLAGS -o dist/linux-amd64-lite/singctl ./cmd/singctl
-        upx --best --lzma dist/linux-amd64-lite/singctl
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
 
-        # --- Linux ARM64 (Lite - no embedded rule snapshots) ---
-        GOOS=linux GOARCH=arm64 CGO_ENABLED=0 eval go build -tags lite $LDFLAGS -o dist/linux-arm64-lite/singctl ./cmd/singctl
-        upx --best --lzma dist/linux-arm64-lite/singctl
-        
-        # --- macOS ARM64 (Apple Silicon) ---
-        GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 eval go build $LDFLAGS -o dist/darwin-arm64/singctl ./cmd/singctl
+      - name: Install Packaging Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y upx-ucl zip
+          upx --version
 
-    - name: Build custom Caddy with Cloudflare and Layer4 plugins
-      run: |
-        go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
-        mkdir -p dist/caddy-build
-        
-        GOOS=linux GOARCH=amd64 xcaddy build \
-          --with github.com/caddy-dns/cloudflare \
-          --with github.com/mholt/caddy-l4 \
-          --output dist/caddy-build/caddy
-        tar -czf dist/caddy-custom-linux-amd64.tar.gz -C dist/caddy-build caddy
-        rm -f dist/caddy-build/caddy
+      - name: Build Cross-Platform SingCtl Binaries
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.verify.outputs.tag_name }}"
+          BUILD_TIME="$(date -u '+%Y-%m-%d_%H:%M:%S')"
+          GIT_COMMIT="$(git rev-parse --short HEAD)"
+          LDFLAGS="-X main.Version=${VERSION} -X main.BuildTime=${BUILD_TIME} -X main.GitCommit=${GIT_COMMIT} -s -w"
 
-        GOOS=linux GOARCH=arm64 xcaddy build \
-          --with github.com/caddy-dns/cloudflare \
-          --with github.com/mholt/caddy-l4 \
-          --output dist/caddy-build/caddy
-        tar -czf dist/caddy-custom-linux-arm64.tar.gz -C dist/caddy-build caddy
-        rm -rf dist/caddy-build
+          mkdir -p dist/{linux-amd64,linux-arm64,linux-amd64-lite,linux-arm64-lite,darwin-arm64,darwin-amd64,windows-amd64,windows-arm64}
 
-    - name: Create packages
-      run: |
-        cd dist
-        
-        for platform_dir in linux-amd64 linux-arm64 darwin-arm64 linux-amd64-lite linux-arm64-lite; do
-          if [[ -d "$platform_dir" && -f "$platform_dir/singctl" ]]; then
+          # Linux Standard (with embedded rule snapshots)
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "${LDFLAGS}" -o dist/linux-amd64/singctl ./cmd/singctl
+          upx --best --lzma dist/linux-amd64/singctl
+
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "${LDFLAGS}" -o dist/linux-arm64/singctl ./cmd/singctl
+          upx --best --lzma dist/linux-arm64/singctl
+
+          # Linux Lite (OpenWrt / flash-constrained devices)
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -tags lite -ldflags "${LDFLAGS}" -o dist/linux-amd64-lite/singctl ./cmd/singctl
+          upx --best --lzma dist/linux-amd64-lite/singctl
+
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -tags lite -ldflags "${LDFLAGS}" -o dist/linux-arm64-lite/singctl ./cmd/singctl
+          upx --best --lzma dist/linux-arm64-lite/singctl
+
+          # macOS (Apple Silicon & Intel — un-UPX'd for macOS Gatekeeper compatibility)
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "${LDFLAGS}" -o dist/darwin-arm64/singctl ./cmd/singctl
+          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags "${LDFLAGS}" -o dist/darwin-amd64/singctl ./cmd/singctl
+
+          # Windows (AMD64 & ARM64)
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "${LDFLAGS}" -o dist/windows-amd64/singctl.exe ./cmd/singctl
+          CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -trimpath -ldflags "${LDFLAGS}" -o dist/windows-arm64/singctl.exe ./cmd/singctl
+
+      - name: Build Custom Caddy (Cloudflare DNS + Layer4)
+        run: |
+          set -euo pipefail
+          go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+          mkdir -p dist/caddy-build
+
+          GOOS=linux GOARCH=amd64 xcaddy build \
+            --with github.com/caddy-dns/cloudflare \
+            --with github.com/mholt/caddy-l4 \
+            --output dist/caddy-build/caddy
+          tar -czf dist/caddy-custom-linux-amd64.tar.gz -C dist/caddy-build caddy
+          rm -f dist/caddy-build/caddy
+
+          GOOS=linux GOARCH=arm64 xcaddy build \
+            --with github.com/caddy-dns/cloudflare \
+            --with github.com/mholt/caddy-l4 \
+            --output dist/caddy-build/caddy
+          tar -czf dist/caddy-custom-linux-arm64.tar.gz -C dist/caddy-build caddy
+          rm -rf dist/caddy-build
+
+      - name: Package Archives & Generate SHA256 Checksums
+        run: |
+          set -euo pipefail
+          cd dist
+
+          for platform_dir in linux-amd64 linux-arm64 linux-amd64-lite linux-arm64-lite darwin-arm64 darwin-amd64; do
             package_name="singctl-${platform_dir}"
-            mkdir -p ${package_name}
-            cp ${platform_dir}/singctl ${package_name}/
-            cp -r ../configs ${package_name}/
-            tar -czf singctl-${platform_dir}.tar.gz ${package_name}
-            rm -rf ${package_name}
-            echo "Created singctl-${platform_dir}.tar.gz"
-          fi
-        done
-      
-        sha256sum *.tar.gz > checksums.txt
-        echo "Generated checksums"
-        
-    - name: Upload Release Assets
-      uses: softprops/action-gh-release@v1
-      with:
-        tag_name: ${{ steps.get_version.outputs.VERSION }}
-        make_latest: true
-        files: |
-          dist/*.tar.gz
-          dist/*.zip
-          dist/checksums.txt
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            mkdir -p "${package_name}"
+            cp "${platform_dir}/singctl" "${package_name}/"
+            cp -r ../configs "${package_name}/"
+            tar -czf "${package_name}.tar.gz" "${package_name}"
+            rm -rf "${package_name}" "${platform_dir}"
+          done
+
+          for win_dir in windows-amd64 windows-arm64; do
+            package_name="singctl-${win_dir}"
+            mkdir -p "${package_name}"
+            cp "${win_dir}/singctl.exe" "${package_name}/"
+            cp -r ../configs "${package_name}/"
+            zip -rq "${package_name}.zip" "${package_name}"
+            rm -rf "${package_name}" "${win_dir}"
+          done
+
+          sha256sum *.tar.gz *.zip > checksums.txt
+          cat checksums.txt
+
+      - name: Tag Commit & Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.verify.outputs.tag_name }}
+          name: ${{ needs.verify.outputs.tag_name }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          make_latest: true
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/checksums.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

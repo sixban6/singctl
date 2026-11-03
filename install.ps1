@@ -68,15 +68,16 @@ Write-Info "系统: $OS, 架构: $ARCH"
 #--------------------------------------------------
 # 下载地址
 $FileName    = "singctl-$OS-$ARCH.zip"
-$DownloadURL = $release.assets | Where-Object name -eq $FileName | Select-Object -ExpandProperty browser_download_url
-if (-not $DownloadURL) {
+$TargetAsset = $release.assets | Where-Object name -eq $FileName | Select-Object -First 1
+if (-not $TargetAsset -or -not $TargetAsset.browser_download_url) {
     Write-Error "未找到对应架构的发行包: $FileName"
     exit 1
 }
+$DownloadURL = $TargetAsset.browser_download_url
 Write-Info "下载链接: $DownloadURL"
 
 #--------------------------------------------------
-# 下载 & 解压
+# 下载 & SHA256 完整性校验 & 解压
 Cleanup
 New-Item $TempDir -ItemType Directory -Force | Out-Null
 $ZipPath = "$TempDir\singctl.zip"
@@ -89,6 +90,44 @@ try {
     exit 1
 }
 Write-Success '下载完成'
+
+if ($env:SINGCTL_SKIP_CHECKSUM -eq '1') {
+    Write-Warning 'SINGCTL_SKIP_CHECKSUM=1 已设置，跳过 SHA256 完整性校验（请自行承担安全风险）'
+} else {
+    Write-Info '校验安装包 SHA256 完整性...'
+    $ExpectedHash = ''
+    if ($TargetAsset.digest -and $TargetAsset.digest.StartsWith('sha256:')) {
+        $ExpectedHash = $TargetAsset.digest.Substring(7).Trim().ToLower()
+    } else {
+        $ChecksumAsset = $release.assets | Where-Object name -eq 'checksums.txt' | Select-Object -First 1
+        if ($ChecksumAsset -and $ChecksumAsset.browser_download_url) {
+            $ChecksumsRaw = (Invoke-WebRequest -Uri $ChecksumAsset.browser_download_url -UseBasicParsing).Content
+            if ($ChecksumsRaw -is [byte[]]) {
+                $ChecksumsRaw = [System.Text.Encoding]::UTF8.GetString($ChecksumsRaw)
+            }
+            foreach ($line in ($ChecksumsRaw -split "`r?`n")) {
+                if ($line -match "^([0-9a-fA-F]{64})\s+\*?$([regex]::Escape($FileName))$") {
+                    $ExpectedHash = $Matches[1].ToLower()
+                    break
+                }
+            }
+        }
+    }
+
+    if (-not $ExpectedHash) {
+        Cleanup
+        Write-Error "无法从 GitHub Release 获取 $FileName 的 SHA256 校验值，已拒绝安装（如需强制跳过可设置 SINGCTL_SKIP_CHECKSUM=1）"
+        exit 1
+    }
+
+    $ActualHash = (Get-FileHash -Path $ZipPath -Algorithm SHA256).Hash.ToLower()
+    if ($ActualHash -ne $ExpectedHash) {
+        Cleanup
+        Write-Error "SHA256 校验失败！期望: $ExpectedHash，实际: $ActualHash"
+        exit 1
+    }
+    Write-Success "SHA256 校验通过 ($ActualHash)"
+}
 
 Write-Info '解压安装包...'
 try {
@@ -122,11 +161,22 @@ $ConfigsDir = Get-ChildItem -Path $TempDir -Recurse -Filter 'configs' -Directory
 if ($ConfigsDir) {
     if (Test-Path $ConfigFile) {
         $Backup = "$ConfigFile.backup.$(Get-Date -Format 'yyyyMMdd_HHmmss')"
-        Copy-Item $ConfigFile $Backup
-        Write-Warning "主配置文件已存在，已备份到 $Backup"
+        Copy-Item $ConfigFile $Backup -Force
+        Write-Info "主配置文件已存在，已备份到 $Backup 并执行无损迁移..."
+        Get-ChildItem -Path $ConfigsDir.FullName -Exclude 'singctl.yaml' | Copy-Item -Destination $ConfigDir -Recurse -Force
+        $TplFile = Join-Path $ConfigsDir.FullName 'singctl.yaml'
+        if (Test-Path $TplFile) {
+            try {
+                & "$InstallDir\singctl.exe" internal-migrate --config $ConfigFile --template $TplFile
+                Write-Success '现有主配置文件已无损合并升级'
+            } catch {
+                Write-Warning "自动迁移返回异常，已保留原配置文件: $ConfigFile"
+            }
+        }
+    } else {
+        Copy-Item -Path "$($ConfigsDir.FullName)\*" -Destination $ConfigDir -Recurse -Force
+        Write-Success "默认配置文件已复制到: $ConfigDir"
     }
-    Copy-Item -Path "$($ConfigsDir.FullName)\*" -Destination $ConfigDir -Recurse -Force
-    Write-Success "所有配置文件已复制到: $ConfigDir"
 } else {
     Write-Warning '未找到配置目录，稍后可手动创建'
 }

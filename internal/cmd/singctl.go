@@ -170,7 +170,11 @@ func showSystemInfo(configPath, version string) error {
 		logger.Success("守护进程状态    : 运行中 ✓")
 
 		// 显示重启统计（从持久化状态恢复真实计数）
-		limiter := daemon.NewRestartLimiterFromState(cfg.Watchdog.MaxRestarts)
+		maxRestarts := 3
+		if cfg != nil && cfg.Watchdog.MaxRestarts > 0 {
+			maxRestarts = cfg.Watchdog.MaxRestarts
+		}
+		limiter := daemon.NewRestartLimiterFromState(maxRestarts)
 		logger.Info("重启统计        : %d/%d (最近1小时)",
 			limiter.GetRestartCount(), limiter.GetMaxRestarts())
 	} else {
@@ -192,7 +196,7 @@ func showSystemInfo(configPath, version string) error {
 
 	if cfgErr != nil {
 		logger.Warn("订阅数量        : 无法读取配置文件 ✗")
-		logger.Error("配置文件错误: %v", err)
+		logger.Error("配置文件错误: %v", cfgErr)
 	} else {
 		if len(cfg.Subs) == 0 {
 			logger.Warn("订阅数量        : 0 (未配置订阅) ✗")

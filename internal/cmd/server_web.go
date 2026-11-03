@@ -18,7 +18,11 @@ import (
 )
 
 // newServerWebCmd 创建服务端 Web 管理命令
-func newServerWebCmd(configPath string) *cobra.Command {
+func newServerWebCmd(configPath string, version ...string) *cobra.Command {
+	ver := "dev"
+	if len(version) > 0 && strings.TrimSpace(version[0]) != "" {
+		ver = strings.TrimSpace(version[0])
+	}
 	var listen string
 	var username string
 	var password string
@@ -51,7 +55,7 @@ func newServerWebCmd(configPath string) *cobra.Command {
 				Listen:     listen,
 				Username:   u,
 				Password:   p,
-				Version:    "1.0.0",
+				Version:    ver,
 			})
 			logger.Info("服务端 WebUI 前台运行中, 按 Ctrl+C 停止; 后台模式请使用: singctl sr web start")
 			return server.ListenAndServe()
@@ -73,7 +77,7 @@ func newServerWebCmd(configPath string) *cobra.Command {
 			Listen:     listen,
 			Username:   u,
 			Password:   p,
-			Version:    "1.0.0",
+			Version:    ver,
 		}
 	}
 
@@ -137,7 +141,7 @@ func newServerWebStartCmd(opts func() serverweb.Options) *cobra.Command {
 					logger.Success("  ➜  HTTPS Caddy 专属访问地址: https://%s%s/", domain, adminPath)
 				}
 				logger.Info("  ➜  管理员账号: %s", o.Username)
-				if o.Password != "" && cfg.Server.WebAdmin.PasswordPendingAck {
+				if o.Password != "" && cfg.Server.WebAdmin.PasswordPendingAck && !config.IsHashedPassword(o.Password) {
 					logger.Info("  ➜  管理密码: %s", o.Password)
 					logger.Info("  ➜  此密码在你于面板确认已保存之前才会显示。请写入密码管理器，终端记录和截图都会留下它。")
 				}
@@ -183,7 +187,7 @@ func newServerWebRestartCmd(opts func() serverweb.Options) *cobra.Command {
 					logger.Success("  ➜  HTTPS Caddy 专属访问地址: https://%s%s/", domain, adminPath)
 				}
 				logger.Info("  ➜  管理员账号: %s", o.Username)
-				if o.Password != "" && cfg.Server.WebAdmin.PasswordPendingAck {
+				if o.Password != "" && cfg.Server.WebAdmin.PasswordPendingAck && !config.IsHashedPassword(o.Password) {
 					logger.Info("  ➜  管理密码: %s", o.Password)
 					logger.Info("  ➜  此密码在你于面板确认已保存之前才会显示。请写入密码管理器，终端记录和截图都会留下它。")
 				}
@@ -259,12 +263,13 @@ func newServerWebUnbanCmd(configPath string) *cobra.Command {
 				adminUser = cfg.Server.GetWebAdminUsername()
 				adminPass = cfg.Server.GetWebAdminPassword()
 			} else if err != nil {
-				logger.Warn("读取配置失败，无法携带管理凭据解封: %v", err)
-				return nil
+				logger.Warn("读取配置失败，尝试直接清理本地持久化封禁记录: %v", err)
 			}
-			if adminPass == "" {
-				logger.Warn("管理密码为空，无法解封。请先在面板登录，或设置 web_admin.password")
-				return nil
+
+			banFile := serverweb.ResolveBanFilePath(resolvedConfig)
+			cliToken := ""
+			if rawTok, err := os.ReadFile(serverweb.ResolveCLITokenPath(resolvedConfig)); err == nil {
+				cliToken = strings.TrimSpace(string(rawTok))
 			}
 
 			url := fmt.Sprintf("http://127.0.0.1:%d/api/server/unban", port)
@@ -274,13 +279,21 @@ func newServerWebUnbanCmd(configPath string) *cobra.Command {
 				return err
 			}
 			req.Header.Set("Content-Type", "application/json")
-			req.SetBasicAuth(adminUser, adminPass)
+			if cliToken != "" {
+				req.Header.Set("Authorization", "Bearer "+cliToken)
+			} else if adminPass != "" && !config.IsHashedPassword(adminPass) {
+				req.SetBasicAuth(adminUser, adminPass)
+			}
 
 			client := &http.Client{Timeout: 3 * time.Second}
 			resp, err := client.Do(req)
 			if err != nil {
+				if fErr := serverweb.UnbanPersistedIP(banFile, targetIP); fErr == nil {
+					logger.Success("服务端 Web 当前未连接，已直接清理本地封禁文件 (%s)", targetIP)
+					return nil
+				}
 				logger.Warn("向服务端 Web 发送解封请求失败: %v", err)
-				logger.Info("提示: 重启服务可直接重置全部封禁: systemctl restart singctl-serverweb")
+				logger.Info("提示: 重启服务可直接重置全部封禁: singctl sr web restart")
 				return nil
 			}
 			defer resp.Body.Close()
@@ -288,7 +301,8 @@ func newServerWebUnbanCmd(configPath string) *cobra.Command {
 			if resp.StatusCode == http.StatusOK {
 				logger.Success("已成功解封 IP: %s", targetIP)
 			} else {
-				logger.Warn("解封请求响应状态: %s", resp.Status)
+				_ = serverweb.UnbanPersistedIP(banFile, targetIP)
+				logger.Warn("在线解封响应状态 %s，已同步清理磁盘封禁记录；如仍受限可执行 singctl sr web restart", resp.Status)
 			}
 			return nil
 		},

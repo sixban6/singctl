@@ -32,7 +32,7 @@ CLI 命令 `singctl install tailscale` 和 `singctl start tailscale` 会检查�
 启动命令负责配置环境并将 Tailscale 节点上线：
 
 1.  **Tailscale Up**: 使用以下默认参数执行 `tailscale up`：
-    -   `--advertise-routes=192.168.31.0/24`: 宣告本地子网（目前硬编码，未来可能需要在配置中指定）。
+    -   `--advertise-routes=192.168.1.0/24`: 宣告本地子网（示例网段，实际可根据配置与网关网段自动获取）。
     -   `--accept-dns=false`: 禁用 Tailscale DNS 以避免冲突。
     -   `--netfilter-mode=on`: 仅在内核模式下启用。
 2.  **网络配置 (UCI)**:

@@ -193,6 +193,7 @@ func PreviewCaddyfile(cfg *config.Config) (string, error) {
 		MtlsCA            string
 		AdminPath         string
 		AdminPort         int
+		AdminGatewayToken string
 		ACMEEmail         string
 	}
 
@@ -287,6 +288,7 @@ func PreviewCaddyfile(cfg *config.Config) (string, error) {
 		MtlsCA:            mtlsCA,
 		AdminPath:         adminPath,
 		AdminPort:         adminPort,
+		AdminGatewayToken: config.DeriveGatewayToken(adminPath),
 		ACMEEmail:         acmeEmail,
 	}
 

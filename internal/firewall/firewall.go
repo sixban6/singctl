@@ -2,15 +2,132 @@ package firewall
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
+	"slices"
+	"strconv"
+	"strings"
 
 	"singctl/internal/constant"
 	"singctl/internal/logger"
 )
 
-const secBlockNFT = `#!/usr/sbin/nft -f
+var defaultBaseProtectedPorts = []int{
+	20, 21, 22, 23, // FTP, SSH (auto-excluded if sshd uses 22), Telnet
+	25, 110, 465, 587, 993, 995, // Mail protocols
+	1080,       // Open SOCKS proxy
+	1433, 1434, // MSSQL
+	1521, // Oracle
+	3306, // MySQL
+	3389, // RDP
+	6379, // Redis
+}
+
+// DetectSSHPorts inspects sshd configuration and SSH_CONNECTION to avoid locking out active SSH ports.
+func DetectSSHPorts() []int {
+	var ports []int
+	addPort := func(p int) {
+		if p > 0 && p <= 65535 && !slices.Contains(ports, p) {
+			ports = append(ports, p)
+		}
+	}
+
+	// 1. Inspect current SSH_CONNECTION ("<client_ip> <client_port> <server_ip> <server_port>")
+	fields := strings.Fields(os.Getenv("SSH_CONNECTION"))
+	if len(fields) == 4 {
+		if p, err := strconv.Atoi(fields[3]); err == nil {
+			addPort(p)
+		}
+	}
+
+	// 2. Inspect /etc/ssh/sshd_config and /etc/ssh/sshd_config.d/*.conf
+	files := []string{"/etc/ssh/sshd_config"}
+	if extra, err := filepath.Glob("/etc/ssh/sshd_config.d/*.conf"); err == nil {
+		files = append(files, extra...)
+	}
+	foundExplicitPort := false
+	for _, f := range files {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		for line := range strings.SplitSeq(string(raw), "\n") {
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			parts := strings.Fields(trimmed)
+			if len(parts) >= 2 && strings.EqualFold(parts[0], "Port") {
+				if p, err := strconv.Atoi(parts[1]); err == nil {
+					addPort(p)
+					foundExplicitPort = true
+				}
+			}
+		}
+	}
+
+	// Default OpenSSH port is 22 when no explicit Port directive is configured
+	if !foundExplicitPort && len(ports) == 0 {
+		addPort(22)
+	}
+	return ports
+}
+
+// BuildSecurityNFT generates a sanitized nftables security ruleset.
+// It whitelists RFC1918 + CGNAT/Tailscale ranges and the current SSH client IP (if any),
+// and excludes active SSH daemon ports from protected_ports to prevent self-lockout.
+func BuildSecurityNFT(sshConnection string, activeSSHPorts []int) string {
+	whitelistV4 := []string{
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+		"100.64.0.0/10",
+	}
+	var whitelistV6 []string
+
+	fields := strings.Fields(strings.TrimSpace(sshConnection))
+	if len(fields) >= 1 {
+		if ip := net.ParseIP(fields[0]); ip != nil && !ip.IsLoopback() && !ip.IsPrivate() {
+			if v4 := ip.To4(); v4 != nil {
+				s := v4.String()
+				if !slices.Contains(whitelistV4, s) {
+					whitelistV4 = append(whitelistV4, s)
+				}
+			} else {
+				s := ip.String()
+				if !slices.Contains(whitelistV6, s) {
+					whitelistV6 = append(whitelistV6, s)
+				}
+			}
+		}
+	}
+
+	var protected []string
+	for _, p := range defaultBaseProtectedPorts {
+		if slices.Contains(activeSSHPorts, p) {
+			continue
+		}
+		protected = append(protected, strconv.Itoa(p))
+	}
+
+	v6WhitelistSet := ""
+	v6WhitelistRule := ""
+	if len(whitelistV6) > 0 {
+		v6WhitelistSet = fmt.Sprintf(`
+    set whitelist_ip6 {
+        type ipv6_addr
+        flags interval
+        auto-merge
+        elements = { %s }
+    }
+`, strings.Join(whitelistV6, ", "))
+		v6WhitelistRule = "\n        ip6 saddr @whitelist_ip6 counter accept"
+	}
+
+	return fmt.Sprintf(`#!/usr/sbin/nft -f
 
 table inet security {
 
@@ -61,26 +178,14 @@ table inet security {
         type ipv4_addr
         flags interval
         auto-merge
-        elements = { 192.168.31.0/24, 112.26.33.106, 10.8.8.8/30, 100.64.0.0/10}
+        elements = { %s }
     }
-
+%s
     set protected_ports {
         type inet_service
         flags interval
         elements = {
-            20-23,   # FTP, SSH, Telnet
-            25,      # SMTP
-            110,     # POP3
-            465,     # SMTPS
-            587,     # SMTP (submission)
-            993,     # IMAPS
-            995,     # POP3S
-            1433-1434, # Microsoft SQL Server
-            1521,    # Oracle
-            3306,    # MySQL
-            3389,    # RDP
-            6379,    # Redis
-            1080,    # SOCKS proxy
+            %s
         }
     }
 
@@ -102,7 +207,7 @@ table inet security {
         ip6 nexthdr icmpv6 icmpv6 type echo-request limit rate 10/second counter accept
 
         # 允许来自白名单 IP 的所有连接
-        ip saddr @whitelist_ip counter accept
+        ip saddr @whitelist_ip counter accept%s
 
         ip saddr @blocklist_ip4_forever log prefix "[NFT] Ban Forever IPv4 (listed): " counter drop
 
@@ -138,7 +243,8 @@ table inet security {
     }
 
 }
-`
+`, strings.Join(whitelistV4, ", "), v6WhitelistSet, strings.Join(protected, ",\n            "), v6WhitelistRule)
+}
 
 const systemdService = `[Unit]
 Description=Singctl Security NFTables Rules
@@ -182,7 +288,7 @@ func isOpenWrt() bool {
 	return false
 }
 
-// Enable write sec_block.nft to /etc/sing-box/ and loads it using nft.
+// Enable writes sec_block.nft to /etc/sing-box/ and loads it using nft.
 // It also sets up an auto-start service to persist the firewall rules across reboots.
 func Enable() error {
 	if runtime.GOOS != "linux" {
@@ -204,11 +310,18 @@ func Enable() error {
 		return fmt.Errorf("failed to create config directory %s: %v", configDir, err)
 	}
 
-	if err := os.WriteFile(scriptPath, []byte(secBlockNFT), 0644); err != nil {
+	nftRules := BuildSecurityNFT(os.Getenv("SSH_CONNECTION"), DetectSSHPorts())
+	if err := os.WriteFile(scriptPath, []byte(nftRules), 0600); err != nil {
 		return fmt.Errorf("failed to write %s: %v", scriptPath, err)
 	}
 
-	// 1. 本次执行，立即生效
+	// 1. 预校验语法并清理旧表，确保重复执行幂等且绝不追加重复规则
+	if out, err := exec.Command("nft", "-c", "-f", scriptPath).CombinedOutput(); err != nil {
+		return fmt.Errorf("nftables syntax check failed: %v\nOutput: %s", err, string(out))
+	}
+	_ = exec.Command("nft", "delete", "table", "inet", "security").Run()
+
+	// 2. 本次执行，立即生效
 	logger.Info("Loading nftables rules from %s...", scriptPath)
 	cmd := exec.Command("nft", "-f", scriptPath)
 	output, err := cmd.CombinedOutput()
@@ -216,7 +329,7 @@ func Enable() error {
 		return fmt.Errorf("failed to load nftables rules: %v\nOutput: %s", err, string(output))
 	}
 
-	// 2. 部署跨平台开机自启
+	// 3. 部署跨平台开机自启
 	var persistErr error
 	if isOpenWrt() {
 		logger.Info("Detected OpenWrt system, setting up init.d service...")

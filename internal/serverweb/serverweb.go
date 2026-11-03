@@ -61,6 +61,8 @@ type Server struct {
 	audit              *AuditManager
 	geo                *IPGeoResolver
 	passwordPendingAck bool
+	gatewayToken       string
+	cliToken           string
 }
 
 type sessionRecord struct {
@@ -78,13 +80,53 @@ func resolveBanFilePath(opts Options) string {
 	if opts.BanFilePath != "" {
 		return opts.BanFilePath
 	}
-	if opts.ConfigPath != "" {
-		return filepath.Join(filepath.Dir(opts.ConfigPath), ".serverweb_bans.json")
+	return ResolveBanFilePath(opts.ConfigPath)
+}
+
+// ResolveBanFilePath 返回指定配置文件对应的防爆破封禁持久化文件路径
+func ResolveBanFilePath(configPath string) string {
+	if configPath != "" {
+		return filepath.Join(filepath.Dir(configPath), ".serverweb_bans.json")
 	}
 	if st, err := os.Stat("/etc/singctl"); err == nil && st.IsDir() {
 		return "/etc/singctl/.serverweb_bans.json"
 	}
 	return ""
+}
+
+// ResolveCLITokenPath 返回本机 root CLI 管理令牌文件路径 (0600)
+func ResolveCLITokenPath(configPath string) string {
+	if configPath != "" {
+		return filepath.Join(filepath.Dir(configPath), ".serverweb_cli.token")
+	}
+	if st, err := os.Stat("/etc/singctl"); err == nil && st.IsDir() {
+		return "/etc/singctl/.serverweb_cli.token"
+	}
+	return ""
+}
+
+func ensureCLIToken(tokenPath string) string {
+	if strings.TrimSpace(tokenPath) == "" {
+		return ""
+	}
+	if raw, err := os.ReadFile(tokenPath); err == nil {
+		tok := strings.TrimSpace(string(raw))
+		if len(tok) >= 32 {
+			_ = os.Chmod(tokenPath, 0600)
+			return tok
+		}
+	}
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return ""
+	}
+	tok := hex.EncodeToString(buf)
+	_ = os.MkdirAll(filepath.Dir(tokenPath), 0700)
+	if err := os.WriteFile(tokenPath, []byte(tok+"\n"), 0600); err != nil {
+		return ""
+	}
+	_ = os.Chmod(tokenPath, 0600)
+	return tok
 }
 
 func resolveAuditFilePath(opts Options) string {
@@ -103,6 +145,7 @@ func resolveAuditFilePath(opts Options) string {
 // New 创建服务端 Web 实例
 func New(opts Options) *Server {
 	pendingAck := false
+	gatewayToken := ""
 	if opts.ConfigPath != "" {
 		if cfg, err := config.Load(opts.ConfigPath); err == nil && cfg != nil {
 			if cfg.Server.EnsureWebAdminCredentials() {
@@ -118,6 +161,7 @@ func New(opts Options) *Server {
 				opts.Listen = fmt.Sprintf("127.0.0.1:%d", cfg.Server.GetWebAdminPort())
 			}
 			pendingAck = cfg.Server.WebAdmin.PasswordPendingAck
+			gatewayToken = config.DeriveGatewayToken(cfg.Server.GetWebAdminPath())
 		}
 	}
 	if opts.Listen == "" {
@@ -129,6 +173,7 @@ func New(opts Options) *Server {
 
 	banFile := resolveBanFilePath(opts)
 	auditFile := resolveAuditFilePath(opts)
+	cliToken := ensureCLIToken(ResolveCLITokenPath(opts.ConfigPath))
 
 	s := &Server{
 		opts:               opts,
@@ -138,6 +183,8 @@ func New(opts Options) *Server {
 		audit:              NewAuditManager(auditFile),
 		geo:                NewIPGeoResolver(),
 		passwordPendingAck: pendingAck,
+		gatewayToken:       gatewayToken,
+		cliToken:           cliToken,
 	}
 
 	// 静态单页面：放行静态资源，敏感 API 均受 guard 保护
@@ -222,6 +269,21 @@ func (s *Server) pendingAck() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.passwordPendingAck
+}
+
+// GatewayToken 返回当前 Caddy -> ServerWeb 内部网关校验令牌
+func (s *Server) GatewayToken() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.gatewayToken
+}
+
+func isLoopbackRemote(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil || host == "" {
+		host = remoteAddr
+	}
+	return isWhitelisted(host)
 }
 
 func (s *Server) issueSession() string {
@@ -342,11 +404,15 @@ func (s *Server) authorized(r *http.Request) bool {
 		if s.useSession(token) {
 			return true
 		}
+		if s.cliToken != "" && isLoopbackRemote(r.RemoteAddr) &&
+			subtle.ConstantTimeCompare([]byte(token), []byte(s.cliToken)) == 1 {
+			return true
+		}
 	}
 
 	user, pass, ok := r.BasicAuth()
 	if ok && subtle.ConstantTimeCompare([]byte(user), []byte(s.getUsername())) == 1 {
-		if subtle.ConstantTimeCompare([]byte(pass), []byte(s.getPassword())) == 1 {
+		if config.VerifyPassword(s.getPassword(), pass) {
 			return true
 		}
 	}
@@ -470,7 +536,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		status["auditLogs"] = enriched
 	}
-	if s.pendingAck() {
+	if s.pendingAck() && !config.IsHashedPassword(s.getPassword()) {
 		status["initialCredentials"] = map[string]any{
 			"pending":  true,
 			"username": s.getUsername(),
@@ -941,6 +1007,9 @@ func (s *Server) handleRegeneratePath(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "保存新随机路径失败: "+err.Error())
 		return
 	}
+	s.mu.Lock()
+	s.gatewayToken = config.DeriveGatewayToken(newPath)
+	s.mu.Unlock()
 
 	// 重新渲染 Caddyfile 并热重载
 	if err := deploy.DeployCaddy(cfg); err != nil {
@@ -1137,13 +1206,45 @@ func (s *Server) handleSessionURL(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getClientIPAndSeedGeo(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil || host == "" {
+		host = r.RemoteAddr
+	}
+	if isWhitelisted(host) {
+		gw := s.GatewayToken()
+		if gw != "" {
+			gotGW := strings.TrimSpace(r.Header.Get("X-Singctl-Gateway"))
+			if subtle.ConstantTimeCompare([]byte(gotGW), []byte(gw)) == 1 {
+				ip := GetClientIP(r)
+				if s.geo != nil {
+					if country := strings.TrimSpace(r.Header.Get("X-Geo-Country")); country != "" {
+						s.geo.SeedCountry(ip, country)
+					}
+				}
+				return ip
+			}
+			// 未携带合法 Caddy 网关凭证的直连回环请求：忽略伪造的 X-Real-IP / X-Geo-Country，并纳入独立限流桶
+			return "loopback-direct"
+		}
+	}
+
 	ip := GetClientIP(r)
-	if s.geo != nil {
+	if s.geo != nil && gwAllowedForGeo(host, s.GatewayToken(), r) {
 		if country := strings.TrimSpace(r.Header.Get("X-Geo-Country")); country != "" {
 			s.geo.SeedCountry(ip, country)
 		}
 	}
 	return ip
+}
+
+func gwAllowedForGeo(host, gw string, r *http.Request) bool {
+	if !isWhitelisted(host) {
+		return false
+	}
+	if gw == "" {
+		return true
+	}
+	return subtle.ConstantTimeCompare([]byte(strings.TrimSpace(r.Header.Get("X-Singctl-Gateway"))), []byte(gw)) == 1
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -1167,7 +1268,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	pass := s.getPassword()
 	inputUser := strings.TrimSpace(body.Username)
 	userMatch := inputUser == "" || subtle.ConstantTimeCompare([]byte(inputUser), []byte(user)) == 1
-	passMatch := pass != "" && subtle.ConstantTimeCompare([]byte(body.Password), []byte(pass)) == 1
+	passMatch := pass != "" && config.VerifyPassword(pass, body.Password)
 
 	if !userMatch || !passMatch {
 		banned, remaining, fails := s.limiter.RecordFailure(clientIP)
@@ -1273,7 +1374,7 @@ func (s *Server) recordAudit(r *http.Request, action string) {
 
 func (s *Server) handleDoctor(w http.ResponseWriter, r *http.Request) {
 	cfg, _ := config.Load(s.opts.ConfigPath)
-	report := doctor.RunDoctor(cfg)
+	report := doctor.RunServerDoctor(cfg)
 	writeJSON(w, http.StatusOK, report)
 }
 
@@ -1294,7 +1395,7 @@ func (s *Server) handleUpdateCredentials(w http.ResponseWriter, r *http.Request)
 	}
 
 	currentPass := s.getPassword()
-	if currentPass != "" && subtle.ConstantTimeCompare([]byte(body.CurrentPassword), []byte(currentPass)) != 1 {
+	if currentPass != "" && !config.VerifyPassword(currentPass, body.CurrentPassword) {
 		writeJSONError(w, http.StatusForbidden, "当前管理密码错误，禁止修改")
 		return
 	}
@@ -1315,6 +1416,12 @@ func (s *Server) handleUpdateCredentials(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	hashedPassword, err := config.HashPassword(newPassword)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "密码加密失败: "+err.Error())
+		return
+	}
+
 	cfg, err := config.Load(s.opts.ConfigPath)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "加载配置文件失败: "+err.Error())
@@ -1322,7 +1429,7 @@ func (s *Server) handleUpdateCredentials(w http.ResponseWriter, r *http.Request)
 	}
 
 	cfg.Server.WebAdmin.Username = newUsername
-	cfg.Server.WebAdmin.Password = newPassword
+	cfg.Server.WebAdmin.Password = hashedPassword
 	cfg.Server.WebAdmin.PasswordPendingAck = false
 	if err := config.Save(s.opts.ConfigPath, cfg); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "保存配置文件失败: "+err.Error())
@@ -1331,7 +1438,7 @@ func (s *Server) handleUpdateCredentials(w http.ResponseWriter, r *http.Request)
 
 	s.mu.Lock()
 	s.opts.Username = newUsername
-	s.opts.Password = newPassword
+	s.opts.Password = hashedPassword
 	s.passwordPendingAck = false
 	s.mu.Unlock()
 
@@ -1351,16 +1458,26 @@ func (s *Server) handleAckCredentials(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "加载配置文件失败")
 		return
 	}
+	hashedPass := s.getPassword()
+	if plain := strings.TrimSpace(cfg.Server.WebAdmin.Password); plain != "" && !config.IsHashedPassword(plain) {
+		if h, hashErr := config.HashPassword(plain); hashErr == nil {
+			cfg.Server.WebAdmin.Password = h
+			hashedPass = h
+		}
+	}
 	cfg.Server.WebAdmin.PasswordPendingAck = false
 	if err := config.Save(s.opts.ConfigPath, cfg); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "保存配置文件失败: "+err.Error())
 		return
 	}
 	s.mu.Lock()
+	if hashedPass != "" {
+		s.opts.Password = hashedPass
+	}
 	s.passwordPendingAck = false
 	s.mu.Unlock()
 	s.recordAudit(r, "在面板确认已保存初始密码")
-	writeJSON(w, http.StatusOK, map[string]string{"message": "已确认密码保存，面板不再显示明文"})
+	writeJSON(w, http.StatusOK, map[string]string{"message": "已确认密码保存，密码已单向哈希加密存储"})
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {

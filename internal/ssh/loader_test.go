@@ -31,7 +31,7 @@ hosts:
     target_port: 3333
     auth:
       password: "DirectPassword"
-  - alias: vps_rn
+  - alias: edge-tunnel-01
 `
 	if err := os.WriteFile(confPath, []byte(yamlContent), 0644); err != nil {
 		t.Fatalf("WriteFile failed: %v", err)
@@ -69,7 +69,7 @@ hosts:
 
 	// Host 3 checks (alias in ~/.ssh/config)
 	h3 := hosts[2]
-	if h3.Name != "vps_rn" || h3.Alias != "vps_rn" || !h3.IsAliasMode {
+	if h3.Name != "edge-tunnel-01" || h3.Alias != "edge-tunnel-01" || !h3.IsAliasMode {
 		t.Errorf("Unexpected host 3 properties: %+v", h3)
 	}
 	if h3.TargetPort <= 0 {

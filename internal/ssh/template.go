@@ -34,13 +34,13 @@ defaults:
 hosts:
   # 场景 1: 直连服务器 (填 host, 支持域名或 IP; 自动推公钥、切换 2222 端口、关密码、写 ~/.ssh/config)
   - name: hk-prod-01                      # 唯一别名 (写入 ~/.ssh/config 的 Host 项)
-    host: 43.154.10.1                     # 支持填 IP 或 域名 (如 hk.example.com)
+    host: 203.0.113.10                    # 支持填 IP 或 域名 (如 hk.example.com)
     auth:
       password: "${HK_ROOT_PASS:-InitialPassword123}" # 支持环境变量, 也可直接写密码
 
   # 场景 2: ~/.ssh/config 中已经配置的机器 (已有穿透代理/跳板/自定义配置, 免填密码与端口)
   # 系统会自动复用本地已有的连接通道，注入公钥并关闭远端密码登录，绝不破坏原有端口映射
-  - alias: vps_rn                         # ~/.ssh/config 中已存在的 Host 别名
+  - alias: edge-tunnel-01                 # ~/.ssh/config 中已存在的 Host 别名
 
   # 场景 3: 非 root 用户、自定义目标端口、自定义临时密码
   - name: us-gpu-02
@@ -52,7 +52,7 @@ hosts:
 
   # 场景 4: 已拥有临时 Key 的服务器 (无需密码)，仅做安全加固与端口收敛
   - name: jp-edge-03
-    host: 129.226.50.12
+    host: 198.51.100.20
     auth:
       key: ~/.ssh/old_temp_rsa            # 初始连接时所使用的已有私钥
 `

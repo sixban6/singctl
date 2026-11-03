@@ -2,7 +2,11 @@ package config
 
 import (
 	"cmp"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net"
@@ -16,6 +20,7 @@ import (
 
 	"singctl/internal/constant"
 
+	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
 )
 
@@ -104,6 +109,60 @@ func (s *ServerConfig) GetWebAdminUsername() string {
 
 func (s *ServerConfig) GetWebAdminPassword() string {
 	return strings.TrimSpace(s.WebAdmin.Password)
+}
+
+// IsHashedPassword 判断密码字段是否已经采用 bcrypt 哈希存储
+func IsHashedPassword(secret string) bool {
+	trimmed := strings.TrimSpace(secret)
+	return strings.HasPrefix(trimmed, "$2a$") ||
+		strings.HasPrefix(trimmed, "$2b$") ||
+		strings.HasPrefix(trimmed, "$2y$")
+}
+
+// HashPassword 使用 bcrypt 对明文密码进行单向哈希；若已是哈希值则原样返回。
+func HashPassword(plain string) (string, error) {
+	trimmed := strings.TrimSpace(plain)
+	if trimmed == "" {
+		return "", fmt.Errorf("password cannot be empty")
+	}
+	if IsHashedPassword(trimmed) {
+		return trimmed, nil
+	}
+	hashed, err := bcrypt.GenerateFromPassword([]byte(trimmed), bcrypt.DefaultCost)
+	if err != nil {
+		return "", fmt.Errorf("hash password: %w", err)
+	}
+	return string(hashed), nil
+}
+
+// VerifyPassword 同时兼容校验 bcrypt 哈希密码与初始明文密码（常量时间比对）。
+func VerifyPassword(stored, candidate string) bool {
+	stored = strings.TrimSpace(stored)
+	if stored == "" || candidate == "" {
+		return false
+	}
+	if IsHashedPassword(stored) {
+		return bcrypt.CompareHashAndPassword([]byte(stored), []byte(candidate)) == nil
+	}
+	return subtle.ConstantTimeCompare([]byte(stored), []byte(candidate)) == 1
+}
+
+// DeriveGatewayToken 基于随机管理路径派生 Caddy -> ServerWeb 内部网关鉴权令牌。
+func DeriveGatewayToken(adminPath string) string {
+	p := strings.TrimSpace(adminPath)
+	if p == "" {
+		return ""
+	}
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	p = strings.TrimSuffix(p, "/")
+	if p == "" {
+		return ""
+	}
+	mac := hmac.New(sha256.New, []byte("singctl-caddy-gateway-v1"))
+	_, _ = mac.Write([]byte(p))
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 // GenerateAdminToken 生成 16 位包含数字、大写字母与小写字母的高熵安全 Token
@@ -447,6 +506,22 @@ type WatchdogConfig struct {
 	MaxRestarts int `yaml:"max_restarts"` // 每小时最大自动重启次数, 默认 3
 }
 
+var knownYAMLKeys = []string{
+	"subs", "name", "url", "skip_tls_verify", "remove-emoji",
+	"github", "mirror_url", "hy2", "up", "down",
+	"tailscale", "auth_key", "use_build", constant.TailscaleSubnets,
+	"server", "node_tag", "sb_domain", "node_domain", "substore_domain", "server_ip",
+	"cf_dns_key", "sni", "cors_allowed_origins",
+	"web_terminal", "mtls_ca", "ssh_tunnel_port", "ssh_tunnel_path", "ssh_port",
+	"web_admin", "enabled", "port", "path", "username", "password", "password_pending_ack",
+	"watchdog", "interval", "confirm_wait", "max_restarts",
+	"custom_rules", "route", "dns",
+}
+
+var colonSpaceFixRegex = regexp.MustCompile(
+	fmt.Sprintf("(?m)^([ \\t-]*(?:%s)):([^\\s].*)", strings.Join(knownYAMLKeys, "|")),
+)
+
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -456,17 +531,7 @@ func Load(path string) (*Config, error) {
 	// Pre-process the YAML to fix common syntax errors such as missing spaces after colons.
 	// For example: `url:"https://test.com"` -> `url: "https://test.com"`
 	// We only match known keys to avoid accidentally modifying strings containing colons.
-	keys := []string{
-		"subs", "name", "url", "skip_tls_verify", "remove-emoji",
-		"github", "mirror_url", "hy2", "up", "down",
-		"tailscale", "auth_key", "use_build", constant.TailscaleSubnets,
-		"server", "node_tag", "sb_domain", "node_domain", "substore_domain", "cf_dns_key", "sni", "cors_allowed_origins", "web_terminal", "ssh_tunnel_port", "ssh_tunnel_path", "ssh_port",
-		"watchdog", "interval", "confirm_wait", "max_restarts",
-		"custom_rules", "route", "dns",
-	}
-	pattern := fmt.Sprintf("(?m)^([ \\t-]*(?:%s)):([^\\s].*)", strings.Join(keys, "|"))
-	re := regexp.MustCompile(pattern)
-	data = re.ReplaceAll(data, []byte("$1: $2"))
+	data = colonSpaceFixRegex.ReplaceAll(data, []byte("$1: $2"))
 
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
@@ -546,21 +611,44 @@ func MigrateConfig(configPath string, templateData []byte) error {
 
 	// Pre-process the old YAML to fix common syntax errors such as missing spaces after colons.
 	// This ensures `oldCfg` populates zero-values properly instead of treating the whole line as a string.
-	keys := []string{
-		"subs", "name", "url", "skip_tls_verify", "remove-emoji",
-		"github", "mirror_url", "hy2", "up", "down",
-		"tailscale", "auth_key", "use_build", constant.TailscaleSubnets,
-		"server", "node_tag", "sb_domain", "node_domain", "substore_domain", "server_ip", "cf_dns_key", "sni", "cors_allowed_origins", "web_terminal", "ssh_tunnel_port", "ssh_tunnel_path", "ssh_port",
-		"watchdog", "interval", "confirm_wait", "max_restarts",
-		"custom_rules", "route", "dns",
-	}
-	pattern := fmt.Sprintf("(?m)^([ \\t-]*(?:%s)):([^\\s].*)", strings.Join(keys, "|"))
-	re := regexp.MustCompile(pattern)
-	cleanOldData := re.ReplaceAll(oldData, []byte("$1: $2"))
+	cleanOldData := colonSpaceFixRegex.ReplaceAll(oldData, []byte("$1: $2"))
 
 	var oldCfg Config
 	if err := yaml.Unmarshal(cleanOldData, &oldCfg); err != nil {
 		return fmt.Errorf("failed to parse old config: %w", err)
+	}
+
+	var oldRootNode yaml.Node
+	if err := yaml.Unmarshal(cleanOldData, &oldRootNode); err != nil {
+		return fmt.Errorf("failed to parse old config AST: %w", err)
+	}
+	var oldDocNode *yaml.Node
+	if len(oldRootNode.Content) > 0 && oldRootNode.Content[0].Kind == yaml.MappingNode {
+		oldDocNode = oldRootNode.Content[0]
+	}
+
+	hasYAMLKey := func(mapNode *yaml.Node, key string) bool {
+		if mapNode == nil || mapNode.Kind != yaml.MappingNode {
+			return false
+		}
+		for i := 0; i+1 < len(mapNode.Content); i += 2 {
+			if mapNode.Content[i].Value == key {
+				return true
+			}
+		}
+		return false
+	}
+
+	getYAMLSubMap := func(mapNode *yaml.Node, key string) *yaml.Node {
+		if mapNode == nil || mapNode.Kind != yaml.MappingNode {
+			return nil
+		}
+		for i := 0; i+1 < len(mapNode.Content); i += 2 {
+			if mapNode.Content[i].Value == key && mapNode.Content[i+1].Kind == yaml.MappingNode {
+				return mapNode.Content[i+1]
+			}
+		}
+		return nil
 	}
 
 	var rootNode yaml.Node
@@ -574,29 +662,36 @@ func MigrateConfig(configPath string, templateData []byte) error {
 
 	docNode := rootNode.Content[0]
 
-	// Helper to replace an entire top-level node (like 'subs' array)
-	replaceNode := func(parent *yaml.Node, key string, val interface{}) {
-		for i := 0; i < len(parent.Content); i += 2 {
-			if parent.Content[i].Value == key {
-				var newNode yaml.Node
-				b, _ := yaml.Marshal(val)
-				_ = yaml.Unmarshal(b, &newNode)
-				if len(newNode.Content) > 0 {
-					originalNode := parent.Content[i+1]
-					newNodeChild := newNode.Content[0]
-					newNodeChild.HeadComment = originalNode.HeadComment
-					newNodeChild.LineComment = originalNode.LineComment
-					newNodeChild.FootComment = originalNode.FootComment
+	// Helper to replace or append an entire top-level node (like 'subs' array or 'custom_rules')
+	replaceNode := func(parent *yaml.Node, key string, val any) {
+		var newNode yaml.Node
+		b, err := yaml.Marshal(val)
+		if err != nil {
+			return
+		}
+		if err := yaml.Unmarshal(b, &newNode); err != nil || len(newNode.Content) == 0 {
+			return
+		}
+		newNodeChild := newNode.Content[0]
 
-					if originalNode.Kind == yaml.ScalarNode && newNodeChild.Kind == yaml.ScalarNode {
-						originalNode.Value = newNodeChild.Value
-					} else {
-						parent.Content[i+1] = newNodeChild
-					}
+		for i := 0; i+1 < len(parent.Content); i += 2 {
+			if parent.Content[i].Value == key {
+				originalNode := parent.Content[i+1]
+				newNodeChild.HeadComment = originalNode.HeadComment
+				newNodeChild.LineComment = originalNode.LineComment
+				newNodeChild.FootComment = originalNode.FootComment
+
+				if originalNode.Kind == yaml.ScalarNode && newNodeChild.Kind == yaml.ScalarNode {
+					originalNode.Value = newNodeChild.Value
+				} else {
+					parent.Content[i+1] = newNodeChild
 				}
 				return
 			}
 		}
+
+		keyNode := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}
+		parent.Content = append(parent.Content, keyNode, newNodeChild)
 	}
 
 	// Helper to set or add a scalar field under a specific map
@@ -702,32 +797,38 @@ func MigrateConfig(configPath string, templateData []byte) error {
 	}
 
 	// 2. Merge GitHub Mirror URL (Preserve even if it's explicitly empty)
-	if strings.Contains(string(oldData), "mirror_url:") {
+	if oldGitHub := getYAMLSubMap(oldDocNode, "github"); hasYAMLKey(oldGitHub, "mirror_url") {
 		setOrAddField(docNode, "github", "mirror_url", oldCfg.GitHub.MirrorURL)
 	}
 
 	// 3. Merge Hy2
-	if strings.Contains(string(oldData), "hy2:") {
-		setOrAddField(docNode, "hy2", "up", fmt.Sprintf("%d", oldCfg.Hy2.Up))
-		setOrAddField(docNode, "hy2", "down", fmt.Sprintf("%d", oldCfg.Hy2.Down))
-	}
-
-	// 4. Merge Tailscale
-	if strings.Contains(string(oldData), "tailscale:") {
-		setOrAddField(docNode, "tailscale", "auth_key", oldCfg.Tailscale.AuthKey)
-		setOrAddField(docNode, "tailscale", "subnets", oldCfg.Tailscale.Subnets)
-		if oldCfg.Tailscale.UseBuild {
-			setOrAddField(docNode, "tailscale", "use_build", "true")
-		} else {
-			setOrAddField(docNode, "tailscale", "use_build", "false")
+	if oldHy2 := getYAMLSubMap(oldDocNode, "hy2"); oldHy2 != nil {
+		if hasYAMLKey(oldHy2, "up") {
+			setOrAddField(docNode, "hy2", "up", strconv.Itoa(oldCfg.Hy2.Up))
+		}
+		if hasYAMLKey(oldHy2, "down") {
+			setOrAddField(docNode, "hy2", "down", strconv.Itoa(oldCfg.Hy2.Down))
 		}
 	}
 
-	// 5. Merge Server (全量保留所有字段，包括 node_domain, substore_domain 等)
-	if strings.Contains(string(oldData), "server:") {
+	// 4. Merge Tailscale
+	if oldTS := getYAMLSubMap(oldDocNode, "tailscale"); oldTS != nil {
+		if hasYAMLKey(oldTS, "auth_key") {
+			setOrAddField(docNode, "tailscale", "auth_key", oldCfg.Tailscale.AuthKey)
+		}
+		if hasYAMLKey(oldTS, "subnets") {
+			setOrAddField(docNode, "tailscale", "subnets", oldCfg.Tailscale.Subnets)
+		}
+		if hasYAMLKey(oldTS, "use_build") {
+			setOrAddField(docNode, "tailscale", "use_build", strconv.FormatBool(oldCfg.Tailscale.UseBuild))
+		}
+	}
+
+	// 5. Merge Server (全量保留所有字段，包括 node_domain, substore_domain, web_terminal, web_admin 等)
+	if oldServer := getYAMLSubMap(oldDocNode, "server"); oldServer != nil {
 		if oldCfg.Server.NodeTag != "" {
 			setOrAddField(docNode, "server", "node_tag", oldCfg.Server.NodeTag)
-		} else if strings.Contains(string(oldData), "node_tag:") {
+		} else if hasYAMLKey(oldServer, "node_tag") {
 			setOrAddField(docNode, "server", "node_tag", "")
 		}
 
@@ -738,13 +839,13 @@ func MigrateConfig(configPath string, templateData []byte) error {
 		}
 		if nodeDomain != "" {
 			setOrAddField(docNode, "server", "node_domain", nodeDomain)
-		} else if strings.Contains(string(oldData), "node_domain:") {
+		} else if hasYAMLKey(oldServer, "node_domain") {
 			setOrAddField(docNode, "server", "node_domain", "")
 		}
 
 		if oldCfg.Server.SubstoreDomain != "" {
 			setOrAddField(docNode, "server", "substore_domain", oldCfg.Server.SubstoreDomain)
-		} else if strings.Contains(string(oldData), "substore_domain:") {
+		} else if hasYAMLKey(oldServer, "substore_domain") {
 			setOrAddField(docNode, "server", "substore_domain", "")
 		}
 
@@ -754,44 +855,54 @@ func MigrateConfig(configPath string, templateData []byte) error {
 
 		if oldCfg.Server.ServerIP != "" {
 			setOrAddField(docNode, "server", "server_ip", oldCfg.Server.ServerIP)
-		} else if strings.Contains(string(oldData), "server_ip:") {
+		} else if hasYAMLKey(oldServer, "server_ip") {
 			setOrAddField(docNode, "server", "server_ip", "")
 		}
 
 		if oldCfg.Server.CFDNSKey != "" {
 			setOrAddField(docNode, "server", "cf_dns_key", oldCfg.Server.CFDNSKey)
-		} else if strings.Contains(string(oldData), "cf_dns_key:") {
+		} else if hasYAMLKey(oldServer, "cf_dns_key") {
 			setOrAddField(docNode, "server", "cf_dns_key", "")
 		}
 
-		if strings.Contains(string(oldData), "sni:") {
+		if hasYAMLKey(oldServer, "sni") {
 			setOrAddField(docNode, "server", "sni", oldCfg.Server.Sni)
 		}
-		if strings.Contains(string(oldData), "cors_allowed_origins:") {
+		if hasYAMLKey(oldServer, "cors_allowed_origins") {
 			setOrAddField(docNode, "server", "cors_allowed_origins", oldCfg.Server.CorsAllowedOrigins)
 		}
 
 		// 处理旧版兼容字段 sb_domain：若旧配置包含则保留，否则从模板中移除，绝不注入虚假默认域名
-		if strings.Contains(string(oldData), "sb_domain:") {
+		if hasYAMLKey(oldServer, "sb_domain") {
 			setOrAddField(docNode, "server", "sb_domain", oldCfg.Server.SBDomain)
 		} else {
 			removeField(docNode, "server", "sb_domain")
 		}
 
-		if strings.Contains(string(oldData), "web_admin:") && oldCfg.Server.WebAdmin.Path != "" {
+		if hasYAMLKey(oldServer, "web_terminal") {
+			setOrAddMapping(docNode, "server", "web_terminal", oldCfg.Server.WebTerminal)
+		}
+
+		if hasYAMLKey(oldServer, "web_admin") && (oldCfg.Server.WebAdmin.Path != "" || oldCfg.Server.WebAdmin.Enabled || oldCfg.Server.WebAdmin.Password != "") {
 			setOrAddMapping(docNode, "server", "web_admin", oldCfg.Server.WebAdmin)
 		}
 	}
 
 	// 6. Merge Watchdog
-	if strings.Contains(string(oldData), "watchdog:") {
-		setOrAddField(docNode, "watchdog", "interval", fmt.Sprintf("%d", oldCfg.Watchdog.Interval))
-		setOrAddField(docNode, "watchdog", "confirm_wait", fmt.Sprintf("%d", oldCfg.Watchdog.ConfirmWait))
-		setOrAddField(docNode, "watchdog", "max_restarts", fmt.Sprintf("%d", oldCfg.Watchdog.MaxRestarts))
+	if oldWD := getYAMLSubMap(oldDocNode, "watchdog"); oldWD != nil {
+		if hasYAMLKey(oldWD, "interval") {
+			setOrAddField(docNode, "watchdog", "interval", strconv.Itoa(oldCfg.Watchdog.Interval))
+		}
+		if hasYAMLKey(oldWD, "confirm_wait") {
+			setOrAddField(docNode, "watchdog", "confirm_wait", strconv.Itoa(oldCfg.Watchdog.ConfirmWait))
+		}
+		if hasYAMLKey(oldWD, "max_restarts") {
+			setOrAddField(docNode, "watchdog", "max_restarts", strconv.Itoa(oldCfg.Watchdog.MaxRestarts))
+		}
 	}
 
-	// 7. Merge CustomRules
-	if strings.Contains(string(oldData), "custom_rules:") {
+	// 7. Merge CustomRules (only when uncommented in old config, never triggered by `# custom_rules:` comments)
+	if hasYAMLKey(oldDocNode, "custom_rules") && (len(oldCfg.CustomRules.Route) > 0 || len(oldCfg.CustomRules.DNS) > 0) {
 		replaceNode(docNode, "custom_rules", oldCfg.CustomRules)
 	}
 

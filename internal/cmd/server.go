@@ -16,7 +16,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func newInstallServerCmd(cfg *config.Config, configPath string) *cobra.Command {
+func newInstallServerCmd(configPath, version string) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "install",
@@ -24,12 +24,9 @@ func newInstallServerCmd(cfg *config.Config, configPath string) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 
 			resolvedPath := resolveConfigPath(cmd, configPath)
-			if cfg == nil {
-				var err error
-				cfg, err = config.Load(resolvedPath)
-				if err != nil || cfg == nil {
-					return fmt.Errorf("加载配置文件失败: %w", err)
-				}
+			cfg, err := config.Load(resolvedPath)
+			if err != nil || cfg == nil {
+				return fmt.Errorf("加载配置文件失败: %w", err)
 			}
 
 			// Verify required config
@@ -82,7 +79,7 @@ func newInstallServerCmd(cfg *config.Config, configPath string) *cobra.Command {
 						Listen:     fmt.Sprintf("127.0.0.1:%d", cfg.Server.GetWebAdminPort()),
 						Username:   cfg.Server.GetWebAdminUsername(),
 						Password:   cfg.Server.GetWebAdminPassword(),
-						Version:    "1.0.0",
+						Version:    version,
 					})
 				}
 				showUnifiedInstallSummary(cfg, sbs, sbt)
@@ -183,20 +180,20 @@ func newUninstallServerCmd() *cobra.Command {
 	return cmd
 }
 
-func NewServerCmd(configPath string) *cobra.Command {
+func NewServerCmd(configPath string, version ...string) *cobra.Command {
+	ver := "dev"
+	if len(version) > 0 && strings.TrimSpace(version[0]) != "" {
+		ver = strings.TrimSpace(version[0])
+	}
 	cmd := &cobra.Command{
 		Use:     "server",
 		Aliases: []string{"sr"}, // 添加快捷命令 singctl sr
 		Short:   "服务端: singbox服务端部署命令(简写singctl sr)",
 	}
-	cfg, err := config.Load(configPath)
-	if err != nil {
-		logger.Warn("Failed to load config: %v", err)
-	}
 
 	cmd.AddCommand(newInitServerCmd(configPath))
 	cmd.AddCommand(newPreflightServerCmd(configPath))
-	cmd.AddCommand(newInstallServerCmd(cfg, configPath))
+	cmd.AddCommand(newInstallServerCmd(configPath, ver))
 	cmd.AddCommand(NewReinstallServerCmd(configPath))
 	cmd.AddCommand(newUninstallServerCmd())
 	cmd.AddCommand(newSniCmd(configPath))
@@ -205,7 +202,7 @@ func NewServerCmd(configPath string) *cobra.Command {
 	cmd.AddCommand(NewSyncServerCmd(configPath))
 	cmd.AddCommand(NewInfoServerCmd(configPath))
 	cmd.AddCommand(NewTerminalCmd(configPath))
-	cmd.AddCommand(newServerWebCmd(configPath))
+	cmd.AddCommand(newServerWebCmd(configPath, ver))
 	cmd.AddCommand(NewNetCmd(configPath))
 	cmd.AddCommand(newServerDoctorCmd(configPath))
 	cmd.AddCommand(newMaskSiteCmd(configPath))
@@ -323,7 +320,7 @@ func newServerDoctorCmd(configPath string) *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("无法加载配置文件: %w", err)
 			}
-			report := doctor.RunDoctor(cfg)
+			report := doctor.RunServerDoctor(cfg)
 			doctor.PrintDoctorReport(report)
 			return nil
 		},
@@ -968,8 +965,12 @@ func showUnifiedServerPanel(cfg *config.Config, sbs *deploy.SingBoxServer, sbt *
 		fmt.Println("   • 访问链接 : [未配置后台路径]")
 	}
 	fmt.Printf("   • 管理账号 : %s\n", cfg.Server.GetWebAdminUsername())
-	fmt.Printf("   • 登录密码 : %s (登录后台后可随时修改)\n", cfg.Server.GetWebAdminPassword())
-	fmt.Println("   • 请立即把密码写入密码管理器。终端滚动记录和截图都会留下这行。")
+	if config.IsHashedPassword(cfg.Server.GetWebAdminPassword()) {
+		fmt.Println("   • 登录密码 : [已加密保护] (已确认保存并完成 bcrypt 单向加密，可在后台修改)")
+	} else {
+		fmt.Printf("   • 登录密码 : %s (登录后台后可随时修改)\n", cfg.Server.GetWebAdminPassword())
+		fmt.Println("   • 请立即把密码写入密码管理器。终端滚动记录和截图都会留下这行。")
+	}
 	fmt.Println("   • 安全机制 : 纯会话 Cookie 认证，公网端口严密关闭，防爆破 3次错封IP 保护")
 	fmt.Println("──────────────────────────────────────────────────────────────────────────")
 	fmt.Println(" 📦 客户端全平台聚合订阅:")

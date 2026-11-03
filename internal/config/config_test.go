@@ -82,8 +82,8 @@ server:
 	}
 }
 
-func TestMigrateConfig_VPSGC1(t *testing.T) {
-	vpsYAML := `subs:
+func TestMigrateConfig_MultiDomainServer(t *testing.T) {
+	serverYAML := `subs:
     - name: main
       url: ""
       skip_tls_verify: false
@@ -112,13 +112,13 @@ watchdog:
 		t.Fatal(err)
 	}
 
-	tmpFile, err := os.CreateTemp("", "singctl_vps_*.yaml")
+	tmpFile, err := os.CreateTemp("", "singctl_multidomain_*.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer os.Remove(tmpFile.Name())
 
-	if _, err := tmpFile.WriteString(vpsYAML); err != nil {
+	if _, err := tmpFile.WriteString(serverYAML); err != nil {
 		t.Fatal(err)
 	}
 	tmpFile.Close()
@@ -455,6 +455,130 @@ func TestSave_PasswordPendingAckFlip(t *testing.T) {
 	}
 	if reloaded.Server.WebAdmin.PasswordPendingAck {
 		t.Fatal("expected reloaded password_pending_ack to be false")
+	}
+}
+
+func TestMigrateConfig_PreservesWebTerminalAndCustomRules(t *testing.T) {
+	oldYAML := `server:
+  node_domain: "node.example.com"
+  web_terminal:
+    enabled: true
+    port: 18080
+    path: "/ops-shell-test"
+    mtls_ca: "/etc/caddy/mtls/ca.crt"
+    password: "P12SecretPassword"
+    ssh_tunnel_port: 18081
+    ssh_tunnel_path: "/ssh-ws"
+    ssh_port: 2222
+custom_rules:
+  route:
+    - action: route
+      domain_suffix: [example.org]
+      outbound: DirectConn
+`
+	templateBytes, err := os.ReadFile("../../configs/singctl.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tmpFile, err := os.CreateTemp("", "singctl_test_wt_*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpFile.Name())
+
+	if _, err := tmpFile.WriteString(oldYAML); err != nil {
+		t.Fatal(err)
+	}
+	tmpFile.Close()
+
+	if err := MigrateConfig(tmpFile.Name(), templateBytes); err != nil {
+		t.Fatalf("MigrateConfig failed: %v", err)
+	}
+
+	loaded, err := Load(tmpFile.Name())
+	if err != nil {
+		t.Fatalf("Load migrated config failed: %v", err)
+	}
+
+	wt := loaded.Server.WebTerminal
+	if !wt.Enabled || wt.Port != 18080 || wt.Path != "/ops-shell-test" || wt.SSHTunnelPort != 18081 || wt.SSHPort != 2222 {
+		t.Fatalf("expected web_terminal to survive migration intact, got %+v", wt)
+	}
+	if len(loaded.CustomRules.Route) != 1 {
+		t.Fatalf("expected 1 custom_rules.route entry after migration, got %d", len(loaded.CustomRules.Route))
+	}
+}
+
+func TestMigrateConfig_CommentedCustomRulesNotInjected(t *testing.T) {
+	templateBytes, err := os.ReadFile("../../configs/singctl.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tmpFile, err := os.CreateTemp("", "singctl_test_comments_*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpFile.Name())
+
+	if _, err := tmpFile.Write(templateBytes); err != nil {
+		t.Fatal(err)
+	}
+	tmpFile.Close()
+
+	if err := MigrateConfig(tmpFile.Name(), templateBytes); err != nil {
+		t.Fatalf("MigrateConfig failed: %v", err)
+	}
+
+	raw, err := os.ReadFile(tmpFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for line := range strings.SplitSeq(string(raw), "\n") {
+		if strings.HasPrefix(line, "custom_rules:") || strings.HasPrefix(line, "  web_admin:") {
+			t.Fatalf("commented template keys must not become active YAML keys: %q", line)
+		}
+	}
+}
+
+func TestPasswordHashingAndGatewayToken(t *testing.T) {
+	plain := "SuperSecretPass99"
+	if IsHashedPassword(plain) {
+		t.Fatal("plaintext should not be detected as hashed")
+	}
+	if !VerifyPassword(plain, plain) {
+		t.Fatal("plaintext VerifyPassword failed")
+	}
+	if VerifyPassword(plain, "wrong") {
+		t.Fatal("plaintext VerifyPassword accepted wrong password")
+	}
+
+	hashed, err := HashPassword(plain)
+	if err != nil {
+		t.Fatalf("HashPassword failed: %v", err)
+	}
+	if !IsHashedPassword(hashed) {
+		t.Fatalf("expected bcrypt hash prefix, got %q", hashed)
+	}
+	idempotent, err := HashPassword(hashed)
+	if err != nil || idempotent != hashed {
+		t.Fatalf("HashPassword should be idempotent on existing hash")
+	}
+	if !VerifyPassword(hashed, plain) {
+		t.Fatal("bcrypt VerifyPassword rejected valid password")
+	}
+	if VerifyPassword(hashed, "wrong") {
+		t.Fatal("bcrypt VerifyPassword accepted wrong password")
+	}
+
+	tok1 := DeriveGatewayToken("/sr/AbCdEfGh1234567890123456")
+	tok2 := DeriveGatewayToken("/sr/AbCdEfGh1234567890123456/")
+	if tok1 == "" || tok1 != tok2 {
+		t.Fatalf("DeriveGatewayToken normalization mismatch: %q vs %q", tok1, tok2)
+	}
+	if DeriveGatewayToken("") != "" {
+		t.Fatal("DeriveGatewayToken should be empty when adminPath is empty")
 	}
 }
 
