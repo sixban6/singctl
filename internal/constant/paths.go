@@ -23,9 +23,11 @@ var (
 	FirewallSystemdService string
 	FirewallInitdScript    string
 
-	// Sub-store
-	SubStoreDir  string
-	SubStoreFile string
+	// Sub-store / Native SubHub
+	SubStoreDir          string
+	SubStoreFile         string
+	SubHubSystemdService string
+	SubHubInitdScript    string
 
 	// Mask site
 	MaskSiteDir string
@@ -47,18 +49,26 @@ func init() {
 
 		SubStoreDir = "/etc/sub-store"
 		SubStoreFile = "/etc/sub-store/sub-store.json"
+		SubHubSystemdService = "/etc/systemd/system/singctl-sub.service"
+		SubHubInitdScript = "/etc/init.d/singctl-sub"
 		MaskSiteDir = "/var/www/mask-site"
 	} else if runtime.GOOS == "windows" {
 		SingBoxInstallDir = filepath.Join(os.Getenv("LOCALAPPDATA"), "Programs", "sing-box", "sing-box.exe")
 		SingBoxConfigDir = filepath.Join(os.Getenv("LOCALAPPDATA"), "sing-box")
 		SingBoxConfigFile = filepath.Join(SingBoxConfigDir, "config.json")
+		SubStoreDir = filepath.Join(os.TempDir(), "singctl-sub-store")
+		SubStoreFile = filepath.Join(SubStoreDir, "sub-store.json")
 	} else if runtime.GOOS == "darwin" {
 		home, _ := os.UserHomeDir()
 		SingBoxInstallDir = "/usr/local/bin/sing-box"
 		SingBoxConfigDir = filepath.Join(home, "Documents")
 		SingBoxConfigFile = filepath.Join(SingBoxConfigDir, "sing-box-config.json")
+		SubStoreDir = filepath.Join(os.TempDir(), "singctl-sub-store")
+		SubStoreFile = filepath.Join(SubStoreDir, "sub-store.json")
 		MaskSiteDir = filepath.Join(os.TempDir(), "mask-site")
 	} else {
+		SubStoreDir = filepath.Join(os.TempDir(), "singctl-sub-store")
+		SubStoreFile = filepath.Join(SubStoreDir, "sub-store.json")
 		MaskSiteDir = filepath.Join(os.TempDir(), "mask-site")
 	}
 

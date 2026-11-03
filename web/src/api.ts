@@ -1,6 +1,9 @@
 import {
   ServerStatusResponse,
   SubscriptionsResponse,
+  SubscriptionSourceItem,
+  SourceUpsertInput,
+  SubscriptionPreviewResponse,
   WarpDiagnoseResponse,
   ReturnSummary,
   BannedIP,
@@ -67,6 +70,27 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
 export const api = {
   getStatus: () => request<ServerStatusResponse>('/api/server/status'),
   getSubscriptions: () => request<SubscriptionsResponse>('/api/server/subscriptions'),
+
+  upsertSubSource: (input: SourceUpsertInput) =>
+    request<{ message: string; source: SubscriptionSourceItem }>('/api/server/subscriptions/sources', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+
+  deleteSubSource: (name: string) =>
+    request<{ message: string }>(`/api/server/subscriptions/sources?name=${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+      body: JSON.stringify({ name }),
+    }),
+
+  rotateSubKey: () =>
+    request<{ message: string; substoreKey: string; subscriptionUrl: string }>('/api/server/subscriptions/rotate-key', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
+
+  previewSubscription: (target: string) =>
+    request<SubscriptionPreviewResponse>(`/api/server/subscriptions/preview?target=${encodeURIComponent(target)}`),
   getWarpDiagnose: () => request<WarpDiagnoseResponse>('/api/server/warp/diagnose'),
   getNetReturn: () => request<ReturnSummary>('/api/server/net/return'),
 

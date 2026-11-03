@@ -50,7 +50,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ status, onRefresh, onN
   };
 
   const handleRestartAll = async () => {
-    if (!window.confirm('确定要一键重启所有核心服务吗 (Caddy, sing-box, Sub-Store, WARP)？')) return;
+    if (!window.confirm('确定要一键重启所有核心服务吗 (Caddy, sing-box, SubHub, WARP)？')) return;
     setLoadingAction('all');
     try {
       await api.serviceAction('all', 'restart');
@@ -80,8 +80,8 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ status, onRefresh, onN
     },
     {
       key: 'substore',
-      name: 'Sub-Store 订阅中枢',
-      desc: '多协议节点转换与聚合分发',
+      name: 'SubHub 订阅中枢',
+      desc: 'Go 原生多协议节点转换与聚合分发',
       detail: status?.services?.substore,
       ports: '3001',
     },

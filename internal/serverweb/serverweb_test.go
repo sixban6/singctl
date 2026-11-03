@@ -462,3 +462,76 @@ func TestSessionPruningAndCap(t *testing.T) {
 		t.Fatalf("sessions count (%d) exceeded maxActiveSessions (%d)", len(srv.sessions), maxActiveSessions)
 	}
 }
+
+func TestServerWeb_SubscriptionSourcesAndPreview(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "singctl.yaml")
+	subDir := filepath.Join(tmpDir, "sub-store")
+
+	cfgYAML := `server:
+  node_domain: "node.example.com"
+  substore_domain: "sub.example.com"
+  sni: "www.apple.com"
+  web_admin:
+    enabled: true
+    port: 8092
+    path: "/sr/testadmin123"
+    username: "opsadmin"
+    password: "Password123"
+`
+	if err := os.WriteFile(cfgPath, []byte(cfgYAML), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := New(Options{
+		ConfigPath:  cfgPath,
+		SubStoreDir: subDir,
+		Username:    "opsadmin",
+		Password:    "Password123",
+	})
+
+	doAuthReq := func(method, target, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, target, strings.NewReader(body))
+		req.SetBasicAuth("opsadmin", "Password123")
+		if method != http.MethodGet && method != http.MethodHead {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		rec := httptest.NewRecorder()
+		srv.mux.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// 1. Add a local custom node source
+	upsertBody := `{"displayName":"JP Custom","source":"local","content":"hysteria2://pass123@jp.example.com:443/?sni=jp.example.com&alpn=h3#JP-Hy2"}`
+	recUpsert := doAuthReq(http.MethodPost, "/api/server/subscriptions/sources", upsertBody)
+	if recUpsert.Code != http.StatusOK {
+		t.Fatalf("expected 200 on upsert source, got %d: %s", recUpsert.Code, recUpsert.Body.String())
+	}
+
+	// 2. Fetch /api/server/subscriptions and verify engine + sources
+	recSubs := doAuthReq(http.MethodGet, "/api/server/subscriptions", "")
+	if recSubs.Code != http.StatusOK {
+		t.Fatalf("expected 200 on GET /api/server/subscriptions, got %d: %s", recSubs.Code, recSubs.Body.String())
+	}
+	if !strings.Contains(recSubs.Body.String(), `"engine":"native-go"`) || !strings.Contains(recSubs.Body.String(), `"jp-custom"`) {
+		t.Fatalf("unexpected subscriptions payload: %s", recSubs.Body.String())
+	}
+
+	// 3. Preview converted ClashMeta config
+	recPreview := doAuthReq(http.MethodGet, "/api/server/subscriptions/preview?target=ClashMeta", "")
+	if recPreview.Code != http.StatusOK || !strings.Contains(recPreview.Body.String(), "proxies:") {
+		t.Fatalf("expected ClashMeta preview 200, got %d: %s", recPreview.Code, recPreview.Body.String())
+	}
+
+	// 4. Rotate subscription secret key
+	recRotate := doAuthReq(http.MethodPost, "/api/server/subscriptions/rotate-key", "{}")
+	if recRotate.Code != http.StatusOK || !strings.Contains(recRotate.Body.String(), "https://sub.example.com/") {
+		t.Fatalf("expected rotate-key 200, got %d: %s", recRotate.Code, recRotate.Body.String())
+	}
+
+	// 5. Delete custom source
+	recDel := doAuthReq(http.MethodDelete, "/api/server/subscriptions/sources?name=jp-custom", "{}")
+	if recDel.Code != http.StatusOK {
+		t.Fatalf("expected delete source 200, got %d: %s", recDel.Code, recDel.Body.String())
+	}
+}

@@ -1,7 +1,7 @@
 package deploy
 
 import (
-	"context"
+	"cmp"
 	"fmt"
 	"net/http"
 	"os"
@@ -73,15 +73,6 @@ func ParseWireproxyVersion(raw string) (string, error) {
 		}
 	}
 	return strings.TrimPrefix(fields[len(fields)-1], "v"), nil
-}
-
-func shortDigest(id string) string {
-	id = strings.TrimSpace(id)
-	id = strings.TrimPrefix(id, "sha256:")
-	if len(id) > 12 {
-		return id[:12]
-	}
-	return id
 }
 
 // GetInstalledSingBoxVersion returns the locally installed sing-box version.
@@ -162,9 +153,8 @@ func GetInstalledWarpVersion() string {
 	return ver
 }
 
-// GetInstalledSubstoreVersion returns the running sub-store version from local endpoint or container.
+// GetInstalledSubstoreVersion returns the running SubHub version from local port 3001.
 func GetInstalledSubstoreVersion() string {
-	// 1. Probe local port 3001
 	client := http.Client{Timeout: 500 * time.Millisecond}
 	resp, err := client.Get("http://127.0.0.1:3001/")
 	if err == nil {
@@ -175,16 +165,8 @@ func GetInstalledSubstoreVersion() string {
 		if idx := strings.Index(html, `name="version" content="`); idx != -1 {
 			start := idx + len(`name="version" content="`)
 			if end := strings.Index(html[start:], `"`); end != -1 {
-				return html[start : start+end]
+				return NormalizeVersion(html[start : start+end])
 			}
-		}
-	}
-
-	// 2. Fallback to docker inspect image id
-	if out, err := exec.Command("docker", "inspect", "--format={{.Image}}", "sub-store").Output(); err == nil {
-		img := strings.TrimSpace(string(out))
-		if len(img) > 0 {
-			return shortDigest(img)
 		}
 	}
 	return ""
@@ -375,52 +357,46 @@ func CheckWarpVersion(cfg *config.Config) (*ComponentVersionInfo, error) {
 	return info, nil
 }
 
-// CheckSubstoreVersion checks the sub-store docker container image against the latest image.
+// CheckSubstoreVersion checks the native SubHub subscription service version against the latest SingCtl release.
 func CheckSubstoreVersion(cfg *config.Config) (*ComponentVersionInfo, error) {
 	info := &ComponentVersionInfo{
 		Name:        "substore",
-		DisplayName: "Sub-Store",
+		DisplayName: "SubHub 订阅引擎",
 	}
 
-	if _, err := exec.LookPath("docker"); err != nil {
-		info.Installed = false
-		info.CurrentVersion = "未安装"
-		info.LatestVersion = "latest"
-		info.HasUpdate = true
-		return info, nil
-	}
-
-	// Check if sub-store container exists
-	out, err := exec.Command("docker", "inspect", "--format={{.Image}}", "sub-store").Output()
-	if err != nil || len(strings.TrimSpace(string(out))) == 0 {
+	curr := GetInstalledSubstoreVersion()
+	if curr != "" {
+		info.Installed = true
+		info.CurrentVersion = curr
+	} else {
 		info.Installed = false
 		info.CurrentVersion = "未运行"
-		info.LatestVersion = "latest"
+	}
+
+	fetcher := github.NewReleaseFetcher(getMirrorURL(cfg), ReleaseClient)
+	latestTag, err := fetcher.FetchLatestTag("sixban6/singctl")
+	if err != nil {
+		info.Error = fmt.Errorf("fetch latest singctl version failed: %w", err)
+		info.LatestVersion = cmp.Or(curr, "unknown")
+		info.HasUpdate = !info.Installed
+		return info, info.Error
+	}
+	info.LatestVersion = NormalizeVersion(latestTag)
+
+	// Flag update if not installed, or if legacy Docker sub-store container is still running instead of singctl-sub
+	if !info.Installed {
 		info.HasUpdate = true
 		return info, nil
 	}
-
-	containerImageID := strings.TrimSpace(string(out))
-	info.Installed = true
-	info.CurrentVersion = shortDigest(containerImageID)
-
-	// Check remote latest image via docker pull with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	_ = exec.CommandContext(ctx, "docker", "pull", "xream/sub-store").Run()
-
-	outLatest, err := exec.Command("docker", "inspect", "--format={{.Id}}", "xream/sub-store:latest").Output()
-	if err != nil || len(strings.TrimSpace(string(outLatest))) == 0 {
-		info.LatestVersion = info.CurrentVersion
-		info.HasUpdate = false
-		return info, nil
+	if constant.SubHubSystemdService != "" {
+		if _, err := os.Stat(constant.SubHubSystemdService); os.IsNotExist(err) {
+			info.CurrentVersion = curr + " (旧版容器)"
+			info.HasUpdate = true
+			return info, nil
+		}
 	}
 
-	latestImageID := strings.TrimSpace(string(outLatest))
-	info.LatestVersion = shortDigest(latestImageID)
-	info.HasUpdate = (containerImageID != latestImageID)
-
+	info.HasUpdate = isNewerVersion(info.CurrentVersion, info.LatestVersion)
 	return info, nil
 }
 

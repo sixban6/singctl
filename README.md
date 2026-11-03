@@ -23,10 +23,10 @@
 `SingCtl` 为解决这三大运维挑战而生，由纯 Go 原生编译打造，运行时内存开销仅 **10~20MB**：
 
 * 🛡️ **动态伪装与零特征防护**：基于 Caddy 443 统一反代分流，内置**高熵随机伪装博客引擎**，搭配 **16 位专属安全路径**（`/sr/<token>/`）与 **3 次输错封禁 IP** 防爆破安全网关，非授权探测一律回落至合法伪装站点。
-* ⚡ **原生四核自愈协同**：**sing-box** (核心路由引擎) + **Caddy** (自动化证书/安全网关) + **Sub-Store** (配置聚合分发) + **WARP** (双出口智能分流) 深度融合。
+* ⚡ **原生四核自愈协同**：**sing-box** (核心路由引擎) + **Caddy** (自动化证书/安全网关) + **SubHub** (纯 Go 零 Docker 订阅聚合中枢) + **WARP** (双出口智能分流) 深度融合。
 * 🩺 **全链路一键体检 (`singctl doctor`)**：系统负载、BBR 拥塞控制、端口监听、四核组件健康度、TLS 证书周期、Reality SNI 握手及双出口网络画像端到端一键自检。
 * 🌐 **三网骨干回程拓扑画像 (`singctl net`)**：并发探测中国电信 (163/CN2)、中国联通 (4837/9929)、中国移动 (CMI/CMIN2) 骨干网，输出精准路由画像与延迟报告。
-* 🚀 **多端通用配置一键聚合**：内置 Sub-Store 聚合分发，无缝对接 **Shadowrocket、Clash Verge、Sing-box、Surge、Loon** 等通用客户端，支持免密直达与动态配置订阅。
+* 🚀 **多端通用配置一键聚合**：内置纯 Go **SubHub** 订阅转换引擎（零 Docker 依赖、常驻内存 ~10MB，100% 兼容历史 Sub-Store 订阅路径），无缝对接 **Shadowrocket、Clash.Meta/Mihomo、Sing-box v1.14、Surge、Loon** 等客户端。
 
 ---
 
@@ -97,11 +97,11 @@ singctl sr mask-site   # 重新生成或换一批随机伪装站点
   [✓] 网关与管理端口监听          : 核心端口 (80, 443, 8092) 均正常监听运行
   [✓] Caddy 网关           : 服务处于活跃运行状态 (active)
   [✓] sing-box 核心        : 服务处于活跃运行状态 (active)
-  [✓] Sub-Store 订阅中心     : 服务处于活跃运行状态 (active)
+  [✓] SubHub 订阅引擎         : 原生 Go 服务处于活跃运行状态 (active)
   [✓] WARP (wireproxy)     : 服务处于活跃运行状态 (active)
   [✓] HTTPS 证书状态         : Let's Encrypt 原生证书正常 (剩余 89 天)
   [✓] Reality 目标探测        : 目标 SNI [swdist.apple.com] 握手正常 (8 ms, TLS 1.3)
-  [✓] Sub-Store 聚合分发     : 本地容器响应正常 (HTTP 200)
+  [✓] SubHub 订阅聚合         : 原生 Go 引擎响应正常 (HTTP 200)
   [✓] VPS 原生出口画像         : OpenAI [SG] | Netflix [完整支持] | YouTube [原生]
   [✓] WARP 分流出口画像        : OpenAI [SG] | Netflix [完整支持] | YouTube [原生]
 ───────────────────────────────────────────────────────────

@@ -315,7 +315,7 @@ func checkServices(r *DoctorReport) {
 	}{
 		{"caddy", "Caddy 网关", "systemctl restart caddy"},
 		{"sing-box", "sing-box 核心", "systemctl restart sing-box"},
-		{"substore", "Sub-Store 订阅中心", "docker restart sub-store"},
+		{"singctl-sub", "SubHub 订阅引擎", "systemctl restart singctl-sub"},
 		{"wireproxy", "WARP (wireproxy)", "systemctl restart wireproxy"},
 	}
 
@@ -435,22 +435,31 @@ func checkRealitySNI(cfg *config.Config, r *DoctorReport) {
 
 func checkSubstore(r *DoctorReport) {
 	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get("http://127.0.0.1:3001")
-	if err == nil {
+	resp, err := client.Get("http://127.0.0.1:3001/healthz")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		resp, err = client.Get("http://127.0.0.1:3001/")
+	}
+	if err == nil && resp.StatusCode == http.StatusOK {
 		defer resp.Body.Close()
 		r.Items = append(r.Items, DoctorItem{
-			Name:     "Sub-Store 订阅聚合",
+			Name:     "SubHub 订阅聚合",
 			Category: "services",
 			Status:   "ok",
-			Summary:  "本地 3001 端口响应正常 (HTTP 200)",
+			Summary:  "本地 3001 端口原生引擎响应正常 (HTTP 200)",
 		})
 	} else {
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
 		r.Items = append(r.Items, DoctorItem{
-			Name:     "Sub-Store 订阅聚合",
+			Name:     "SubHub 订阅聚合",
 			Category: "services",
 			Status:   "warn",
 			Summary:  "本地 3001 端口未响应",
-			Detail:   "请检查 substore 守护进程状态",
+			Detail:   "可执行 'singctl sr sub restart' 或 'systemctl status singctl-sub' 检查状态",
 		})
 	}
 }
@@ -520,14 +529,13 @@ func formatProfileSummary(p *ExitProfile) string {
 }
 
 func isServiceActive(serviceName string) bool {
-	// 针对 Sub-Store: 优先检查 Docker 容器或本地 3001 端口
-	if serviceName == "substore" || serviceName == "sub-store" {
-		if out, err := exec.Command("docker", "inspect", "-f", "{{.State.Running}}", "sub-store").Output(); err == nil {
-			if strings.TrimSpace(string(out)) == "true" {
+	// 针对 SubHub 原生订阅引擎: 优先检查 singctl-sub systemd 服务及本地 3001 端口
+	if serviceName == "singctl-sub" || serviceName == "substore" || serviceName == "sub-store" {
+		if out, err := exec.Command("systemctl", "is-active", "singctl-sub").Output(); err == nil {
+			if strings.TrimSpace(string(out)) == "active" {
 				return true
 			}
 		}
-		// 本地 3001 端口嗅探
 		conn, err := net.DialTimeout("tcp", "127.0.0.1:3001", 300*time.Millisecond)
 		if err == nil {
 			_ = conn.Close()

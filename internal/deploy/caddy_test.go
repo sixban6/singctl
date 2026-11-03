@@ -282,3 +282,26 @@ func TestPreviewCaddyfile_WebAdmin(t *testing.T) {
 		t.Errorf("expected client_ip_headers in Caddyfile, got:\n%s", content)
 	}
 }
+
+func TestPreviewCaddyfile_SubHubMaskFallback(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			NodeDomain:     "node.example.com",
+			SubstoreDomain: "sub.example.com",
+			CFDNSKey:       "dummy_cf_key",
+			Sni:            "swdist.apple.com",
+		},
+	}
+
+	content, err := PreviewCaddyfile(cfg)
+	if err != nil {
+		t.Fatalf("PreviewCaddyfile failed: %v", err)
+	}
+
+	if !strings.Contains(content, "@subhub path ") {
+		t.Errorf("expected @subhub path matcher on SubstoreDomain, got:\n%s", content)
+	}
+	if strings.Count(content, "root * /var/www/mask-site") < 3 {
+		t.Errorf("expected mask-site fallback on SubstoreDomain, NodeDomain, and :9445, got:\n%s", content)
+	}
+}

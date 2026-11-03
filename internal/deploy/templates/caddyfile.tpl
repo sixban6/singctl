@@ -174,24 +174,26 @@ self.addEventListener('activate', (e) => {
 # 监听本地 9443 端口，处理真正的 HTTPS 请求
 
 {{if and .NodeDomain (ne .NodeDomain .SubstoreDomain)}}
-# 1. Sub-Store 专属域名层 (独立域名，纯反向代理到 Sub-Store 面板与 API)
+# 1. 订阅与控制面板域名层 (仅密钥订阅路径转发至原生 SubHub，其余路径回落静态伪装站，零代理指纹)
 https://{{.SubstoreDomain}}:9443 {
 {{template "common_site_routes" .}}
-    header {
-        Cache-Control "private, no-cache, no-store, max-age=0, must-revalidate"
-        CDN-Cache-Control "no-store"
-        Cloudflare-CDN-Cache-Control "no-store"
-        defer
-    }
-    request_header -If-Modified-Since
-    request_header -If-None-Match
-    handle {
+
+    @subhub path {{if .SSKey}}/{{.SSKey}}/*{{else}}/download/* /api/file/*{{end}}
+    handle @subhub {
+        request_header -If-Modified-Since
+        request_header -If-None-Match
         reverse_proxy http://127.0.0.1:3001 {
-            header_down -Cache-Control
             header_down Cache-Control "private, no-cache, no-store, max-age=0, must-revalidate"
             header_down CDN-Cache-Control "no-store"
             header_down Cloudflare-CDN-Cache-Control "no-store"
         }
+    }
+
+    # 根路径及未授权探测统一回落静态伪装博客
+    handle {
+        root * /var/www/mask-site
+        file_server
+        try_files {path} /index.html
     }
 }
 
@@ -207,14 +209,19 @@ https://{{.NodeDomain}}:9443 {
     }
 }
 {{else}}
-# 单域名兼容模式：根路径静态伪装站 + 专属路径反代 Sub-Store
+# 单域名兼容模式：根路径静态伪装站 + 专属密钥路径反代原生 SubHub
 https://{{.SubstoreDomain}}:9443 {
 {{template "common_site_routes" .}}
 
-    # Sub-Store 专属路径反代（根据 key、subs、download、api 分流）
-    @substore path /subs* /download* /api* {{if .SSKey}}/{{.SSKey}}*{{end}}
-    handle @substore {
-        reverse_proxy http://127.0.0.1:3001
+    @subhub path {{if .SSKey}}/{{.SSKey}}/*{{else}}/subs* /download/* /api/file/*{{end}}
+    handle @subhub {
+        request_header -If-Modified-Since
+        request_header -If-None-Match
+        reverse_proxy http://127.0.0.1:3001 {
+            header_down Cache-Control "private, no-cache, no-store, max-age=0, must-revalidate"
+            header_down CDN-Cache-Control "no-store"
+            header_down Cloudflare-CDN-Cache-Control "no-store"
+        }
     }
 
     # 根路径及常规探测 -> 静态伪装站

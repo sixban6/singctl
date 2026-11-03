@@ -19,6 +19,7 @@ export interface ServiceDetail {
   pid?: string;
   uptime?: string;
   id?: string;
+  engine?: string;
   socksPort?: number;
 }
 
@@ -65,11 +66,43 @@ export interface AuditLogItem {
   flag?: string;
 }
 
+export interface SubscriptionSourceItem {
+  name: string;
+  displayName: string;
+  source: 'local' | 'remote';
+  url: string;
+  content: string;
+  remark: string;
+  enabled: boolean;
+  autoManaged: boolean;
+  nodeCount: number;
+}
+
+export interface SourceUpsertInput {
+  name?: string;
+  displayName: string;
+  source: 'local' | 'remote';
+  url?: string;
+  content?: string;
+  remark?: string;
+  enabled?: boolean;
+}
+
+export interface SubscriptionPreviewResponse {
+  target: string;
+  filename: string;
+  contentType: string;
+  nodeCount: number;
+  content: string;
+}
+
 export interface SubscriptionsResponse {
+  engine?: string;
   substoreKey?: string;
   substoreAdminUrl: string;
   substoreVercelUrl: string;
   subscriptionUrl: string;
+  sources?: SubscriptionSourceItem[];
   importLinks: {
     shadowrocket: string;
     clash: string;

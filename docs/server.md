@@ -17,11 +17,11 @@ Caddy (反向代理 + TLS 证书)
   ▼
 sing-box (核心路由)
   │
-  ├── SubStore (订阅管理面板，可选)
+  ├── SubHub (原生 Go 订阅聚合中枢 singctl-sub，零 Docker 依赖)
   └── WARP (出口节点，可选)
 ```
 
-Caddy 负责统一监听 443 端口（TCP 与 UDP），基于 Layer 4 SNI 进行智能分流并申请 TLS 证书，sing-box 处理代理协议（所有入站均安全监听在 `127.0.0.1` 本地回环端口），SubStore 提供订阅转换服务。
+Caddy 负责统一监听 443 端口（TCP 与 UDP），基于 Layer 4 SNI 进行智能分流并申请 TLS 证书，sing-box 处理代理协议（所有入站均安全监听在 `127.0.0.1` 本地回环端口），内置原生 Go `SubHub`（`singctl-sub`）提供多客户端订阅聚合与动态格式转换服务（无缝兼容原有 `/etc/sub-store` 数据与客户端订阅 URL）。
 
 服务端支持部署 2 种主力协议节点（全部统一通过 443 端口接入，ALPN 均为标准伪装）：
 - **Hysteria 2**：基于 QUIC/UDP（端口 443，QUIC SNI `node_domain`，ALPN `h3`）与域名 TLS 证书。
@@ -185,9 +185,28 @@ singctl sr sync --restart=false
 
 ---
 
-### `singctl sr info` — 查看 Sub-Store 管理地址与节点信息
+### `singctl sr sub` — 原生 SubHub 订阅中枢管理
 
-随时查看当前服务器的 Sub-Store 后端管理登录地址，以及正在运行的主力协议节点（Hysteria 2、VLESS Reality）的完整客户端分享链接。
+管理原生 Go 订阅聚合服务（`singctl-sub`，监听 `127.0.0.1:3001`），无需安装 Docker：
+
+```bash
+# 查看订阅中枢运行状态与聚合订阅 URL
+singctl sr sub status
+
+# 启停或重启订阅中枢服务
+singctl sr sub start
+singctl sr sub stop
+singctl sr sub restart
+
+# 轮换客户端订阅安全密钥并自动热重载 Caddy 路由
+singctl sr sub rotate-key
+```
+
+---
+
+### `singctl sr info` — 查看服务端面板与节点信息
+
+随时查看当前服务器的 Web 管理控制台入口、聚合订阅链接，以及正在运行的主力协议节点（Hysteria 2、VLESS Reality）的完整客户端分享链接。
 
 ```bash
 # 查看服务端信息与节点分享链接

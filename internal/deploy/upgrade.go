@@ -3,12 +3,10 @@ package deploy
 import (
 	"archive/tar"
 	"compress/gzip"
-	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -17,6 +15,7 @@ import (
 	"singctl/internal/config"
 	"singctl/internal/logger"
 	"singctl/internal/singbox"
+	"singctl/internal/updater"
 	"singctl/internal/util/github"
 )
 
@@ -151,21 +150,21 @@ func CheckComponentUpdate(target string, cfg *config.Config) (*CheckUpdateResult
 			Message:        msg,
 		}, nil
 
-	case "substore", "ss", "sub-store":
+	case "substore", "ss", "sub-store", "subhub":
 		curr := GetInstalledSubstoreVersion()
-		tag, err := fetcher.FetchLatestTag("xream/sub-store")
+		tag, err := fetcher.FetchLatestTag("sixban6/singctl")
 		latest := cleanVersion(tag)
 		if err != nil || latest == "" {
 			latest = curr
 		}
 		hasUp := isNewerVersion(curr, latest)
-		msg := fmt.Sprintf("Sub-Store 已是最新版本 (%s)", curr)
+		msg := fmt.Sprintf("SubHub 订阅引擎已是最新版本 (v%s)", curr)
 		if hasUp {
-			msg = fmt.Sprintf("发现 Sub-Store 新版本: %s (当前: %s)", latest, curr)
+			msg = fmt.Sprintf("发现 SubHub 订阅引擎新版本: v%s (当前: v%s)", latest, curr)
 		}
 		return &CheckUpdateResult{
 			Component:      "substore",
-			DisplayName:    "Sub-Store 订阅中心",
+			DisplayName:    "SubHub 订阅引擎",
 			CurrentVersion: curr,
 			LatestVersion:  latest,
 			HasUpdate:      hasUp,
@@ -318,33 +317,40 @@ func UpgradeCaddy(cfg *config.Config) (*UpgradeResult, error) {
 	}, nil
 }
 
-// UpgradeSubstore pulls the latest xream/sub-store docker image and recreates the container.
+// UpgradeSubstore upgrades the SingCtl binary if a newer release is available,
+// cleans up any legacy Docker sub-store container, and restarts singctl-sub.service.
 func UpgradeSubstore(cfg *config.Config) (*UpgradeResult, error) {
 	oldVer := GetInstalledSubstoreVersion()
-	logger.Info("Starting Sub-Store upgrade (current: %s)...", oldVer)
+	logger.Info("Starting native SubHub subscription engine upgrade (current: %s)...", oldVer)
 
-	logger.Info("Pulling latest xream/sub-store docker image...")
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "docker", "pull", "xream/sub-store:latest")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return nil, fmt.Errorf("docker pull failed: %v (output: %s)", err, string(out))
+	fetcher := github.NewReleaseFetcher(getMirrorURL(cfg), ReleaseClient)
+	latestTag, _ := fetcher.FetchLatestTag("sixban6/singctl")
+	latest := cleanVersion(latestTag)
+	if latest != "" && isNewerVersion(oldVer, latest) {
+		up := updater.New(getMirrorURL(cfg), "")
+		if err := up.UpdateSelf("/etc/singctl/singctl.yaml", oldVer); err != nil {
+			logger.Warn("singctl self-update warning during SubHub upgrade: %v", err)
+		}
 	}
 
 	sbt := NewSubstore(cfg, "")
 	if err := sbt.DeploySubstore(); err != nil {
-		return nil, fmt.Errorf("sub-store redeploy failed: %w", err)
+		return nil, fmt.Errorf("subhub redeploy failed: %w", err)
 	}
 
 	newVer := GetInstalledSubstoreVersion()
+	updated := oldVer != newVer
+	msg := fmt.Sprintf("SubHub 原生订阅引擎已就绪 (当前版本: v%s)", newVer)
+	if updated {
+		msg = fmt.Sprintf("SubHub 原生订阅引擎已成功更新 (v%s -> v%s)", oldVer, newVer)
+	}
 	return &UpgradeResult{
 		Component:   "substore",
-		DisplayName: "Sub-Store 订阅中心",
+		DisplayName: "SubHub 订阅引擎",
 		OldVersion:  oldVer,
 		NewVersion:  newVer,
-		Message:     fmt.Sprintf("Sub-Store 容器已成功更新至最新镜像 (%s)", newVer),
-		Updated:     true,
+		Message:     msg,
+		Updated:     updated,
 	}, nil
 }
 

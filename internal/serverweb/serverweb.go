@@ -30,6 +30,7 @@ import (
 	"singctl/internal/doctor"
 	"singctl/internal/logger"
 	"singctl/internal/netdiag"
+	"singctl/internal/subhub"
 	"singctl/internal/util/netinfo"
 )
 
@@ -41,6 +42,7 @@ const sessionCookieName = "singctl_server_session"
 // Options 服务端 Web 界面配置
 type Options struct {
 	ConfigPath    string
+	SubStoreDir   string // (可选) SubHub 数据存储目录，默认 /etc/sub-store
 	BanFilePath   string // (可选) 防爆破封禁列表存储文件 (默认: <ConfigDir>/.serverweb_bans.json)
 	AuditFilePath string // (可选) 管理操作审计日志存储文件 (默认: <ConfigDir>/.serverweb_audit.json)
 	Listen        string
@@ -54,6 +56,7 @@ type Options struct {
 type Server struct {
 	opts               Options
 	mux                *http.ServeMux
+	subStore           *subhub.Store
 	mu                 sync.RWMutex
 	sessions           map[string]sessionRecord
 	sessionsMu         sync.Mutex
@@ -178,6 +181,7 @@ func New(opts Options) *Server {
 	s := &Server{
 		opts:               opts,
 		mux:                http.NewServeMux(),
+		subStore:           subhub.NewStore(opts.SubStoreDir, ""),
 		sessions:           make(map[string]sessionRecord),
 		limiter:            NewIPLimiter(3, 10*time.Minute, 15*time.Minute, banFile),
 		audit:              NewAuditManager(auditFile),
@@ -198,6 +202,10 @@ func New(opts Options) *Server {
 	s.mux.HandleFunc("GET /api/server/status", s.guard(s.handleStatus))
 	s.mux.HandleFunc("GET /api/server/nodes", s.guard(s.handleNodes))
 	s.mux.HandleFunc("GET /api/server/subscriptions", s.guard(s.handleSubscriptions))
+	s.mux.HandleFunc("POST /api/server/subscriptions/sources", s.guard(s.handleUpsertSubscriptionSource))
+	s.mux.HandleFunc("DELETE /api/server/subscriptions/sources", s.guard(s.handleDeleteSubscriptionSource))
+	s.mux.HandleFunc("POST /api/server/subscriptions/rotate-key", s.guard(s.handleRotateSubscriptionKey))
+	s.mux.HandleFunc("GET /api/server/subscriptions/preview", s.guard(s.handlePreviewSubscription))
 	s.mux.HandleFunc("POST /api/server/action", s.guard(s.handleAction))
 	s.mux.HandleFunc("POST /api/server/service/action", s.guard(s.handleServiceAction))
 	s.mux.HandleFunc("GET /api/server/service/check-update", s.guard(s.handleCheckServiceUpdate))
@@ -455,7 +463,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	caddyRunning := checkServiceRunning("caddy")
 	singboxRunning := checkServiceRunning("sing-box")
-	substoreRunning := checkDockerRunning("sub-store")
+	substoreRunning := checkServiceRunning("singctl-sub") || subhub.IsRunning()
 	warpRunning := checkServiceRunning("wireproxy") || checkServiceRunning("warp-svc")
 
 	caddyVer := deploy.GetInstalledCaddyVersion()
@@ -497,7 +505,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			"substore": map[string]any{
 				"running": substoreRunning,
 				"version": substoreVer,
-				"id":      getDockerContainerID("sub-store"),
+				"pid":     getServicePID("singctl-sub"),
+				"uptime":  getServiceUptime("singctl-sub"),
+				"engine":  "native-go",
 			},
 			"warp": map[string]any{
 				"running":   warpRunning,
@@ -592,15 +602,23 @@ func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var hy2Link, vlessLink string
 	sbs, _ := deploy.NewSingBoxServer(cfg)
 	if sbs != nil {
 		_ = sbs.LoadExistingCredentials()
+		hy2Link = sbs.ShareLinkHy2
+		vlessLink = sbs.ShareLinkVless
 	}
 
 	sbt := deploy.NewSubstore(cfg, "")
 	adminURL, _ := sbt.GetAdminURL()
-	vercelURL, _ := sbt.GetVercelAdminURL()
-	ssKey, _ := sbt.GetSubstoreKey()
+	ssKey, err := s.subStore.GetKey()
+	if err != nil || ssKey == "" {
+		ssKey, _ = sbt.GetSubstoreKey()
+	}
+	if ssKey == "" {
+		ssKey, _ = s.subStore.EnsureKey()
+	}
 
 	subDomain := cfg.Server.GetSubstoreDomain()
 	if subDomain == "" {
@@ -610,6 +628,11 @@ func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 	rawSubURL := fmt.Sprintf("https://%s/download/collection/all", subDomain)
 	if ssKey != "" {
 		rawSubURL = fmt.Sprintf("https://%s/%s/download/collection/all", subDomain, ssKey)
+	}
+
+	sources, err := s.subStore.ListSources()
+	if err != nil || sources == nil {
+		sources = []subhub.SourceItem{}
 	}
 
 	// 各客户端直连导入 Scheme 深度链接
@@ -622,25 +645,143 @@ func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	res := map[string]any{
+		"engine":            "native-go",
 		"substoreKey":       ssKey,
 		"substoreAdminUrl":  adminURL,
-		"substoreVercelUrl": vercelURL,
+		"substoreVercelUrl": "",
 		"subscriptionUrl":   rawSubURL,
 		"importLinks":       importLinks,
+		"sources":           sources,
 		"nodes": map[string]any{
 			"hy2": map[string]any{
-				"link":   sbs.ShareLinkHy2,
+				"link":   hy2Link,
 				"domain": cfg.Server.GetNodeDomain(),
 				"port":   443,
 			},
 			"vless": map[string]any{
-				"link": sbs.ShareLinkVless,
+				"link": vlessLink,
 				"sni":  cfg.Server.Sni,
 				"port": 443,
 			},
 		},
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *Server) handleUpsertSubscriptionSource(w http.ResponseWriter, r *http.Request) {
+	var in subhub.SourceUpsertInput
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "无效的 JSON 请求: "+err.Error())
+		return
+	}
+	item, err := s.subStore.UpsertSource(r.Context(), in)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.recordAudit(r, fmt.Sprintf("保存聚合订阅源 [%s (%s)]", item.DisplayName, item.Source))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"message": "订阅源已保存并实时加入聚合节点池",
+		"source":  item,
+	})
+}
+
+func (s *Server) handleDeleteSubscriptionSource(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimSpace(r.URL.Query().Get("name"))
+	if name == "" {
+		var body struct {
+			Name string `json:"name"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		name = strings.TrimSpace(body.Name)
+	}
+	if err := s.subStore.DeleteSource(name); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.recordAudit(r, fmt.Sprintf("删除聚合订阅源 [%s]", name))
+	writeJSON(w, http.StatusOK, map[string]string{
+		"message": "订阅源已成功移除",
+	})
+}
+
+func (s *Server) handleRotateSubscriptionKey(w http.ResponseWriter, r *http.Request) {
+	newKey, err := s.subStore.RotateKey()
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "轮换订阅密钥失败: "+err.Error())
+		return
+	}
+
+	cfg, _ := config.Load(s.opts.ConfigPath)
+	if cfg != nil {
+		if err := deploy.SyncCaddyfile(cfg); err != nil {
+			logger.Warn("轮换订阅密钥后同步 Caddyfile 警告: %v", err)
+		}
+	}
+
+	subDomain := ""
+	if cfg != nil {
+		subDomain = cfg.Server.GetSubstoreDomain()
+		if subDomain == "" {
+			subDomain = cfg.Server.GetNodeDomain()
+		}
+	}
+	newSubURL := ""
+	if subDomain != "" {
+		newSubURL = fmt.Sprintf("https://%s/%s/download/collection/all", subDomain, newKey)
+	}
+
+	s.recordAudit(r, "轮换客户端聚合订阅访问密钥")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"message":         "订阅访问密钥已成功轮换，旧订阅链接已立即失效",
+		"substoreKey":     newKey,
+		"subscriptionUrl": newSubURL,
+	})
+}
+
+func (s *Server) handlePreviewSubscription(w http.ResponseWriter, r *http.Request) {
+	qTarget := strings.TrimSpace(r.URL.Query().Get("target"))
+	if qTarget == "" {
+		qTarget = "ClashMeta"
+	}
+	target := subhub.DetectTarget(qTarget, r.URL.Query().Get("raw"), "")
+
+	bundle, err := s.subStore.ResolveCollection(r.Context(), "all")
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "解析聚合节点池失败: "+err.Error())
+		return
+	}
+
+	renderOpts := subhub.RenderOptions{
+		Target:   target,
+		Platform: r.URL.Query().Get("platform"),
+	}
+	if cfg, err := config.Load(s.opts.ConfigPath); err == nil && cfg != nil {
+		renderOpts.MirrorURL = cfg.GitHub.MirrorURL
+		renderOpts.UpMbps = cfg.Hy2.Up
+		renderOpts.DownMbps = cfg.Hy2.Down
+		subDomain := cfg.Server.GetSubstoreDomain()
+		if subDomain == "" {
+			subDomain = cfg.Server.GetNodeDomain()
+		}
+		if key, kErr := s.subStore.GetKey(); kErr == nil && key != "" && subDomain != "" {
+			renderOpts.RequestURL = fmt.Sprintf("https://%s/%s/download/collection/all?target=%s", subDomain, key, qTarget)
+		}
+	}
+
+	res, err := subhub.RenderBundle(r.Context(), bundle, renderOpts)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"target":      string(res.Format),
+		"filename":    res.Filename,
+		"contentType": res.ContentType,
+		"nodeCount":   len(bundle.Nodes),
+		"content":     string(res.Body),
+	})
 }
 
 func (s *Server) handleServiceAction(w http.ResponseWriter, r *http.Request) {
@@ -677,11 +818,11 @@ func (s *Server) handleServiceAction(w http.ResponseWriter, r *http.Request) {
 			action = "restart"
 		}
 		cmdErr = exec.Command("systemctl", action, "sing-box").Run()
-	case "substore":
+	case "substore", "singctl-sub", "subhub":
 		if action == "reload" {
 			action = "restart"
 		}
-		cmdErr = exec.Command("docker", action, "sub-store").Run()
+		cmdErr = exec.Command("systemctl", action, "singctl-sub").Run()
 	case "warp":
 		if action == "reload" {
 			action = "restart"
@@ -693,7 +834,7 @@ func (s *Server) handleServiceAction(w http.ResponseWriter, r *http.Request) {
 	case "all":
 		_ = exec.Command("systemctl", "restart", "sing-box").Run()
 		_ = exec.Command("systemctl", "restart", "caddy").Run()
-		_ = exec.Command("docker", "restart", "sub-store").Run()
+		_ = exec.Command("systemctl", "restart", "singctl-sub").Run()
 		_ = exec.Command("systemctl", "restart", "wireproxy").Run()
 	default:
 		writeJSONError(w, http.StatusBadRequest, "未知服务: "+service)
@@ -774,7 +915,7 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 	case "restart-singbox":
 		_ = exec.Command("systemctl", "restart", "sing-box").Run()
 	case "restart-substore":
-		_ = exec.Command("docker", "restart", "sub-store").Run()
+		_ = exec.Command("systemctl", "restart", "singctl-sub").Run()
 	case "restart-warp":
 		_ = exec.Command("systemctl", "restart", "wireproxy").Run()
 	default:
@@ -800,8 +941,8 @@ func (s *Server) handleServiceLogs(w http.ResponseWriter, r *http.Request) {
 		output, err = exec.Command("journalctl", "-u", "caddy", "-n", strconv.Itoa(lines), "--no-pager").CombinedOutput()
 	case "singbox":
 		output, err = exec.Command("journalctl", "-u", "sing-box", "-n", strconv.Itoa(lines), "--no-pager").CombinedOutput()
-	case "substore":
-		output, err = exec.Command("docker", "logs", "--tail", strconv.Itoa(lines), "sub-store").CombinedOutput()
+	case "substore", "singctl-sub", "subhub":
+		output, err = exec.Command("journalctl", "-u", "singctl-sub", "-n", strconv.Itoa(lines), "--no-pager").CombinedOutput()
 	case "warp":
 		output, err = exec.Command("journalctl", "-u", "wireproxy", "-n", strconv.Itoa(lines), "--no-pager").CombinedOutput()
 		if err != nil || len(output) == 0 {
@@ -1136,7 +1277,10 @@ func (s *Server) handleLogsSSE(w http.ResponseWriter, r *http.Request) {
 	if service == "" {
 		service = "sing-box"
 	}
-	if service != "sing-box" && service != "caddy" && service != "wireproxy" {
+	if service == "substore" || service == "subhub" {
+		service = "singctl-sub"
+	}
+	if service != "sing-box" && service != "caddy" && service != "wireproxy" && service != "singctl-sub" {
 		http.Error(w, "invalid service", http.StatusBadRequest)
 		return
 	}
@@ -1613,31 +1757,10 @@ func getServiceUptime(name string) string {
 	return time.Since(t).Round(time.Second).String()
 }
 
-func getDockerContainerID(containerName string) string {
-	out, err := exec.Command("docker", "inspect", "-f", "{{.Id}}", containerName).Output()
-	if err != nil {
-		return ""
-	}
-	raw := strings.TrimSpace(string(out))
-	if len(raw) > 12 {
-		return raw[:12]
-	}
-	return raw
-}
-
 func checkServiceRunning(name string) bool {
 	cmd := exec.Command("systemctl", "is-active", name)
 	out, _ := cmd.Output()
 	return strings.TrimSpace(string(out)) == "active"
-}
-
-func checkDockerRunning(containerName string) bool {
-	cmd := exec.Command("docker", "inspect", "-f", "{{.State.Running}}", containerName)
-	out, err := cmd.Output()
-	if err != nil {
-		return false
-	}
-	return strings.TrimSpace(string(out)) == "true"
 }
 
 func isBBREnabled() bool {

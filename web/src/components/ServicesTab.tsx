@@ -452,17 +452,17 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
           </div>
         </div>
 
-        {/* Sub-Store Card */}
+        {/* SubHub Native Subscription Engine Card */}
         <div className="p-5 rounded-2xl glass-card flex flex-col justify-between">
           <div>
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
               <div className="flex items-center gap-2.5">
                 <div className="w-8 h-8 rounded-xl bg-purple-500/10 border border-purple-500/20 flex items-center justify-center text-purple-400 font-bold font-mono text-sm">
-                  SS
+                  SH
                 </div>
                 <div>
-                  <h3 className="font-semibold text-white text-base">Sub-Store 订阅中枢</h3>
-                  <p className="text-xs text-slate-400">Docker 容器化订阅解析与节点下发</p>
+                  <h3 className="font-semibold text-white text-base">SubHub 订阅中枢</h3>
+                  <p className="text-xs text-slate-400">Go 原生内置多协议聚合与配置转换引擎</p>
                 </div>
               </div>
               <div className="flex items-center gap-2">
@@ -495,16 +495,24 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
                 <div className="text-purple-400 font-semibold mt-0.5">{substore?.version || '检测中...'}</div>
               </div>
               <div className="p-2.5 rounded-xl bg-slate-900/60 border border-slate-800">
-                <div className="text-slate-500">内网端口</div>
-                <div className="text-slate-200 mt-0.5">3001 (反代保护)</div>
+                <div className="text-slate-500">持续运行</div>
+                <div className="text-slate-200 mt-0.5">{substore?.uptime || '-'}</div>
               </div>
               <div className="p-2.5 rounded-xl bg-slate-900/60 border border-slate-800">
-                <div className="text-slate-500">容器 ID</div>
-                <div className="text-slate-200 mt-0.5 truncate">{substore?.id || 'sub-store'}</div>
+                <div className="text-slate-500">内网监听</div>
+                <div className="text-slate-200 mt-0.5">127.0.0.1:3001</div>
               </div>
               <div className="p-2.5 rounded-xl bg-slate-900/60 border border-slate-800">
-                <div className="text-slate-500">部署架构</div>
-                <div className="text-slate-200 mt-0.5">Docker 独立挂载容器</div>
+                <div className="text-slate-500">主进程 PID</div>
+                <div className="text-slate-200 mt-0.5">{substore?.pid || '-'}</div>
+              </div>
+              <div className="p-2.5 rounded-xl bg-slate-900/60 border border-slate-800">
+                <div className="text-slate-500">进程守护</div>
+                <div className="text-slate-200 mt-0.5">systemd (singctl-sub)</div>
+              </div>
+              <div className="p-2.5 rounded-xl bg-slate-900/60 border border-slate-800">
+                <div className="text-slate-500">运行架构</div>
+                <div className="text-emerald-400 mt-0.5">Go 原生零容器依赖</div>
               </div>
             </div>
           </div>
@@ -517,25 +525,23 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700/60 text-xs font-medium text-slate-200 transition-colors"
             >
               <RotateCw className={`w-3.5 h-3.5 ${loading === 'substore-restart' ? 'animate-spin' : ''}`} />
-              <span>重启容器</span>
+              <span>重启服务</span>
+            </button>
+            <button
+              onClick={() => handleAction('substore', substore?.running ? 'stop' : 'start')}
+              disabled={loading === 'substore-start' || loading === 'substore-stop'}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700/60 text-xs font-medium text-slate-200 transition-colors"
+            >
+              {substore?.running ? <Square className="w-3.5 h-3.5 text-rose-400" /> : <Play className="w-3.5 h-3.5 text-emerald-400" />}
+              <span>{substore?.running ? '停止' : '启动'}</span>
             </button>
             <button
               onClick={() => onOpenLogs('substore')}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700/60 text-xs font-medium text-slate-200 transition-colors"
             >
               <FileText className="w-3.5 h-3.5 text-blue-400" />
-              <span>容器日志</span>
+              <span>实时日志</span>
             </button>
-            <a
-              href={status?.config?.substoreAdminUrl || `https://${status?.config?.substoreDomain || status?.config?.nodeDomain}`}
-              target="_blank"
-              rel="noreferrer"
-              title="一键打开 Sub-Store 后台 (自动携带完整免密 API 鉴权凭据)"
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-purple-500/20 hover:bg-purple-500/30 border border-purple-500/30 text-xs font-semibold text-purple-200 transition-colors"
-            >
-              <ExternalLink className="w-3.5 h-3.5 text-purple-400" />
-              <span>打开 Sub-Store (免密直达)</span>
-            </a>
           </div>
         </div>
 

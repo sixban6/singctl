@@ -63,6 +63,7 @@ func newInstallServerCmd(configPath, version string) *cobra.Command {
 				}
 
 				sbt := deploy.NewSubstore(cfg, "")
+				sbt.ConfigPath = resolvedPath
 				if err := sbt.DeploySubstore(); err != nil {
 					return err
 				}
@@ -109,8 +110,9 @@ func newInstallServerCmd(configPath, version string) *cobra.Command {
 					}
 				}
 				return nil
-			case "substore":
-				sbt := deploy.Substore{Config: cfg, SSKey: ""}
+			case "substore", "sub", "subhub":
+				sbt := deploy.NewSubstore(cfg, "")
+				sbt.ConfigPath = resolvedPath
 				return sbt.DeploySubstore()
 			case "warp":
 				return deploy.DeployWarp()
@@ -163,7 +165,7 @@ func newUninstallServerCmd() *cobra.Command {
 				if err := deploy.UninstallSingbox(); err != nil {
 					return err
 				}
-			case "substore":
+			case "substore", "sub", "subhub":
 				if err := deploy.UninstallSubstore(); err != nil {
 					return err
 				}
@@ -203,6 +205,7 @@ func NewServerCmd(configPath string, version ...string) *cobra.Command {
 	cmd.AddCommand(NewInfoServerCmd(configPath))
 	cmd.AddCommand(NewTerminalCmd(configPath))
 	cmd.AddCommand(newServerWebCmd(configPath, ver))
+	cmd.AddCommand(newServerSubCmd(configPath, ver))
 	cmd.AddCommand(NewNetCmd(configPath))
 	cmd.AddCommand(newServerDoctorCmd(configPath))
 	cmd.AddCommand(newMaskSiteCmd(configPath))
@@ -357,8 +360,8 @@ func NewReinstallServerCmd(configPath string) *cobra.Command {
 				return handleReinstallCaddy(cfg, force)
 			case "singbox":
 				return handleReinstallSingbox(cfg, force)
-			case "substore":
-				return handleReinstallSubstore(cfg, force)
+			case "substore", "sub", "subhub":
+				return handleReinstallSubstore(cfg, resolvedPath, force)
 			case "warp":
 				return handleReinstallWarp(cfg, force)
 			default:
@@ -444,10 +447,7 @@ func handleReinstallAll(cfg *config.Config, force bool) error {
 			singboxReinstalled = true
 			lastSBS = sbs
 		case "substore":
-			logger.Info("正在重装 Sub-Store...")
-			if err := deploy.UninstallSubstore(); err != nil {
-				logger.Warn("Failed to uninstall Sub-Store: %v", err)
-			}
+			logger.Info("正在升级/重装原生 SubHub 订阅引擎 (保留现有订阅配置与密钥)...")
 			sbt := deploy.NewSubstore(cfg, "")
 			if err := sbt.DeploySubstore(); err != nil {
 				return err
@@ -455,12 +455,13 @@ func handleReinstallAll(cfg *config.Config, force bool) error {
 			if lastSBS == nil {
 				sbs, err := deploy.NewSingBoxServer(cfg)
 				if err == nil {
+					_ = sbs.LoadExistingCredentials()
 					lastSBS = sbs
 				}
 			}
 			if lastSBS != nil {
 				if err := sbt.UpdateSubstoreConfig(lastSBS); err != nil {
-					logger.Warn("Substore config update failed: %v", err)
+					logger.Warn("SubHub config sync warning: %v", err)
 				}
 			}
 		}
@@ -532,25 +533,23 @@ func handleReinstallSingbox(cfg *config.Config, force bool) error {
 	return nil
 }
 
-func handleReinstallSubstore(cfg *config.Config, force bool) error {
+func handleReinstallSubstore(cfg *config.Config, configPath string, force bool) error {
 	if !force {
-		logger.Info("正在检查 Sub-Store 镜像版本...")
+		logger.Info("正在检查 SubHub 订阅引擎版本...")
 		info, err := deploy.CheckSubstoreVersion(cfg)
 		if err != nil {
-			logger.Warn("无法获取 Sub-Store 镜像版本 (%v)，如需强制重装请添加 -f 参数", err)
+			logger.Warn("无法获取远端版本 (%v)，如需强制重装请添加 -f 参数", err)
 		} else if !info.HasUpdate {
-			logger.Success("Sub-Store 已是最新版本，无需重装。使用 -f 参数可强制重装。")
+			logger.Success("SubHub 已是最新版本 (%s)，无需重装。使用 -f 参数可强制重装。", info.CurrentVersion)
 			return nil
 		} else {
-			logger.Info("Sub-Store 发现新版本镜像: 当前 %s -> 最新 %s，开始重装...", info.CurrentVersion, info.LatestVersion)
+			logger.Info("SubHub 发现新版本或待迁移容器: 当前 %s -> 最新 %s，开始部署...", info.CurrentVersion, info.LatestVersion)
 		}
 	}
 
-	logger.Info("Reinstalling Sub-Store...")
-	if err := deploy.UninstallSubstore(); err != nil {
-		logger.Warn("Failed to uninstall Sub-Store: %v", err)
-	}
+	logger.Info("Redeploying native SubHub subscription engine (preserving /etc/sub-store data)...")
 	sbt := deploy.NewSubstore(cfg, "")
+	sbt.ConfigPath = configPath
 	return sbt.DeploySubstore()
 }
 
@@ -913,13 +912,6 @@ func showUnifiedServerPanel(cfg *config.Config, sbs *deploy.SingBoxServer, sbt *
 		subURL = fmt.Sprintf("https://%s/api/substore/download/singctl", domain)
 	}
 
-	substoreAdminURL := ""
-	substoreVercelURL := ""
-	if sbt != nil {
-		substoreAdminURL, _ = sbt.GetAdminURL()
-		substoreVercelURL, _ = sbt.GetVercelAdminURL()
-	}
-
 	// 动态检测各核心服务版本
 	versions := deploy.GetCoreServiceVersions()
 	caddyVer := versions["caddy"]
@@ -955,7 +947,7 @@ func showUnifiedServerPanel(cfg *config.Config, sbs *deploy.SingBoxServer, sbt *
 	fmt.Println("══════════════════════════════════════════════════════════════════════════")
 	fmt.Printf(" [✓] Caddy %-11s : TLS 证书申请成功，443 端口反代已就绪\n", caddyVer)
 	fmt.Printf(" [✓] sing-box %-9s: VLESS Reality & Hysteria 2 双协议已启动\n", sbVer)
-	fmt.Printf(" [✓] Sub-Store %-8s: 节点聚合与订阅转换已就绪 (端口 3001)\n", ssVer)
+	fmt.Printf(" [✓] SubHub %-10s : Go 原生多协议订阅聚合转换已就绪 (端口 3001)\n", ssVer)
 	fmt.Printf(" [✓] WARP 出口 %-8s: 本地分流出口已就绪 (端口 40000)\n", warpVer)
 	fmt.Println("──────────────────────────────────────────────────────────────────────────")
 	fmt.Println(" 🌐 专属管理控制台 (核心 Web 后台入口):")
@@ -1008,15 +1000,6 @@ func showUnifiedServerPanel(cfg *config.Config, sbs *deploy.SingBoxServer, sbt *
 		}
 		if terminalDomain != "" {
 			fmt.Printf("   • Web 运维终端   : https://%s%s/ (mTLS 双向认证保护)\n", terminalDomain, cfg.Server.WebTerminal.Path)
-		}
-	}
-	if substoreVercelURL != "" || substoreAdminURL != "" {
-		fmt.Println("   • Sub-Store 页面 :")
-		if substoreVercelURL != "" {
-			fmt.Printf("     - 官方 Web UI  : %s\n", substoreVercelURL)
-		}
-		if substoreAdminURL != "" {
-			fmt.Printf("     - 自建独立端   : %s\n", substoreAdminURL)
 		}
 	}
 
