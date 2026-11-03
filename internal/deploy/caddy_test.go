@@ -263,4 +263,15 @@ func TestPreviewCaddyfile_WebAdmin(t *testing.T) {
 	if !strings.Contains(content, "header_up -X-Forwarded-For") || !strings.Contains(content, "header_up -CF-Connecting-IP") {
 		t.Errorf("expected Caddy to drop client forwarding headers, got:\n%s", content)
 	}
+
+	// 验证 PROXY Protocol v2 与真实访客 IP 透传配置
+	if !strings.Contains(content, "servers :9443") || !strings.Contains(content, "proxy_protocol v2") {
+		t.Errorf("expected proxy_protocol v2 configuration in Caddyfile, got:\n%s", content)
+	}
+	if !strings.Contains(content, "listener_wrappers") || !strings.Contains(content, "trusted_proxies static") {
+		t.Errorf("expected listener_wrappers and trusted_proxies in Caddyfile, got:\n%s", content)
+	}
+	if !strings.Contains(content, "client_ip_headers CF-Connecting-IP X-Forwarded-For") {
+		t.Errorf("expected client_ip_headers in Caddyfile, got:\n%s", content)
+	}
 }
