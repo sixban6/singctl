@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"singctl/internal/config"
+	"singctl/internal/deploy"
 	"singctl/internal/logger"
 	"singctl/internal/serverweb"
 
@@ -32,15 +33,19 @@ func newServerWebCmd(configPath string) *cobra.Command {
   singctl sr web                   # 前台运行
   singctl sr web start             # 后台启动 (默认通过 Caddy HTTPS 自动反代)
   singctl sr web stop              # 停止后台服务
+  singctl sr web restart           # 重启后台服务并同步 Caddy 路由
   singctl sr web status            # 查看后台运行状态与访问链接
   singctl sr web -l 127.0.0.1:8092 # 指定监听端口`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) > 0 {
-				return fmt.Errorf("未知子命令: %q (可用: start, stop, status)", args[0])
+				return fmt.Errorf("未知子命令: %q (可用: start, stop, restart, status, unban)", args[0])
 			}
 
 			resolvedConfig := resolveConfigPath(cmd, configPath)
 			u, p := resolveServerWebCredentials(resolvedConfig, username, password)
+			if cfg, err := config.Load(resolvedConfig); err == nil && cfg != nil {
+				_ = deploy.SyncCaddyfile(cfg)
+			}
 			server := serverweb.New(serverweb.Options{
 				ConfigPath: resolvedConfig,
 				Listen:     listen,
@@ -60,19 +65,22 @@ func newServerWebCmd(configPath string) *cobra.Command {
 	root.PersistentFlags().StringVarP(&password, "password", "p", "",
 		"管理密码(留空自动从配置读取或生成) / Server Web UI password")
 
+	optsHelper := func() serverweb.Options {
+		resolvedConfig := resolveConfigPath(root, configPath)
+		u, p := resolveServerWebCredentials(resolvedConfig, username, password)
+		return serverweb.Options{
+			ConfigPath: resolvedConfig,
+			Listen:     listen,
+			Username:   u,
+			Password:   p,
+			Version:    "1.0.0",
+		}
+	}
+
 	root.AddCommand(
-		newServerWebStartCmd(func() serverweb.Options {
-			resolvedConfig := resolveConfigPath(root, configPath)
-			u, p := resolveServerWebCredentials(resolvedConfig, username, password)
-			return serverweb.Options{
-				ConfigPath: resolvedConfig,
-				Listen:     listen,
-				Username:   u,
-				Password:   p,
-				Version:    "1.0.0",
-			}
-		}),
+		newServerWebStartCmd(optsHelper),
 		newServerWebStopCmd(),
+		newServerWebRestartCmd(optsHelper),
 		newServerWebStatusCmd(configPath),
 		newServerWebUnbanCmd(configPath),
 	)
@@ -117,6 +125,50 @@ func newServerWebStartCmd(opts func() serverweb.Options) *cobra.Command {
 				return err
 			}
 			if cfg, err := config.Load(o.ConfigPath); err == nil && cfg != nil {
+				if err := deploy.SyncCaddyfile(cfg); err != nil {
+					logger.Warn("同步 Caddy 路由失败 (非致命): %v", err)
+				}
+				domain := cfg.Server.GetSubstoreDomain()
+				if domain == "" {
+					domain = cfg.Server.GetNodeDomain()
+				}
+				adminPath := cfg.Server.GetWebAdminPath()
+				if domain != "" && adminPath != "" {
+					logger.Success("  ➜  HTTPS Caddy 专属访问地址: https://%s%s/", domain, adminPath)
+				}
+				logger.Info("  ➜  管理员账号: %s", o.Username)
+				if o.Password != "" && cfg.Server.WebAdmin.PasswordPendingAck {
+					logger.Info("  ➜  管理密码: %s", o.Password)
+					logger.Info("  ➜  此密码在你于面板确认已保存之前才会显示。请写入密码管理器，终端记录和截图都会留下它。")
+				}
+			}
+			return nil
+		},
+	}
+}
+
+func newServerWebRestartCmd(opts func() serverweb.Options) *cobra.Command {
+	return &cobra.Command{
+		Use:     "restart",
+		Aliases: []string{"r"},
+		Short:   "重启后台服务端 WebUI / Restart background Server WebUI",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			stopped, err := serverweb.StopServerWeb()
+			if err != nil {
+				logger.Warn("停止旧服务实例失败: %v", err)
+			} else if stopped {
+				logger.Success("已停止旧的服务端 WebUI 实例")
+			}
+			time.Sleep(300 * time.Millisecond)
+
+			o := opts()
+			if err := serverweb.StartBackground(o); err != nil {
+				return err
+			}
+			if cfg, err := config.Load(o.ConfigPath); err == nil && cfg != nil {
+				if err := deploy.SyncCaddyfile(cfg); err != nil {
+					logger.Warn("同步 Caddy 路由失败 (非致命): %v", err)
+				}
 				domain := cfg.Server.GetSubstoreDomain()
 				if domain == "" {
 					domain = cfg.Server.GetNodeDomain()

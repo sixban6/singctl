@@ -40,6 +40,21 @@ func RestartCaddy() error {
 	return nil
 }
 
+// SyncCaddyfile checks if Caddy is installed, renders Caddyfile with current cfg, and reloads Caddy.
+func SyncCaddyfile(cfg *config.Config) error {
+	caddyfilePath := "/etc/caddy/Caddyfile"
+	if _, err := os.Stat(caddyfilePath); os.IsNotExist(err) {
+		return nil
+	}
+	if err := renderCaddyfile(cfg); err != nil {
+		return fmt.Errorf("failed to render Caddyfile: %w", err)
+	}
+	if err := runCmd("systemctl", "reload", "caddy"); err != nil {
+		return RestartCaddy()
+	}
+	return nil
+}
+
 // RotateCloudflareToken renders Caddyfile with updated configuration and restarts Caddy
 func RotateCloudflareToken(cfg *config.Config) error {
 	logger.Info("Rendering and saving Caddyfile with new Cloudflare API token...")
