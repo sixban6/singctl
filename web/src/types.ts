@@ -25,13 +25,17 @@ export interface ServiceDetail {
 export interface ServerStatusResponse {
   version: string;
   authEnabled: boolean;
-  sessionToken: string;
   system: SystemMetrics;
   admin: {
     username: string;
     path: string;
     httpsUrl: string;
     port: number;
+  };
+  initialCredentials?: {
+    pending: boolean;
+    username: string;
+    password: string;
   };
   services: {
     caddy: ServiceDetail;

@@ -47,32 +47,24 @@ func NewIPLimiter(maxAttempts int, window, banDuration time.Duration) *IPLimiter
 	return l
 }
 
-// GetClientIP 提取真实终端源 IP (支持 Cloudflare、Caddy 反代头与 RemoteAddr)
+// GetClientIP 只在本机反代连接上信任 Caddy 覆写的 X-Real-IP。
+// 调用方自带的 CF-Connecting-IP 和 X-Forwarded-For 一律忽略。
 func GetClientIP(r *http.Request) string {
-	// 1. Cloudflare CDN Header
-	if cf := strings.TrimSpace(r.Header.Get("CF-Connecting-IP")); cf != "" {
-		return cf
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil || host == "" {
+		host = r.RemoteAddr
 	}
-	// 2. X-Real-IP
-	if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" {
-		return realIP
-	}
-	// 3. X-Forwarded-For (提取首个真实客户端 IP)
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		parts := strings.Split(xff, ",")
-		if len(parts) > 0 {
-			ip := strings.TrimSpace(parts[0])
-			if ip != "" {
-				return ip
+	if isWhitelisted(host) {
+		if real := strings.TrimSpace(r.Header.Get("X-Real-IP")); real != "" {
+			if ip := net.ParseIP(real); ip != nil {
+				return ip.String()
 			}
 		}
 	}
-	// 4. RemoteAddr 回退 (去除端口)
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err == nil && host != "" {
-		return host
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.String()
 	}
-	return r.RemoteAddr
+	return host
 }
 
 // isWhitelisted 本地回环免锁保护

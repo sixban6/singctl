@@ -969,6 +969,7 @@ func showUnifiedServerPanel(cfg *config.Config, sbs *deploy.SingBoxServer, sbt *
 	}
 	fmt.Printf("   • 管理账号 : %s\n", cfg.Server.GetWebAdminUsername())
 	fmt.Printf("   • 登录密码 : %s (登录后台后可随时修改)\n", cfg.Server.GetWebAdminPassword())
+	fmt.Println("   • 请立即把密码写入密码管理器。终端滚动记录和截图都会留下这行。")
 	fmt.Println("   • 安全机制 : 纯会话 Cookie 认证，公网端口严密关闭，防爆破 3次错封IP 保护")
 	fmt.Println("──────────────────────────────────────────────────────────────────────────")
 	fmt.Println(" 📦 客户端全平台聚合订阅:")

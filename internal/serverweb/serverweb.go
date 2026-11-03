@@ -3,8 +3,7 @@ package serverweb
 import (
 	"bufio"
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
+	"crypto/rand"
 	"crypto/subtle"
 	"embed"
 	"encoding/base64"
@@ -18,6 +17,9 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/user"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -48,16 +50,29 @@ type Options struct {
 
 // Server 服务端 Web 实例
 type Server struct {
-	opts       Options
-	mux        *http.ServeMux
-	mu         sync.RWMutex
-	sessions   map[string]time.Time
-	sessionsMu sync.RWMutex
-	limiter    *IPLimiter
+	opts               Options
+	mux                *http.ServeMux
+	mu                 sync.RWMutex
+	sessions           map[string]sessionRecord
+	sessionsMu         sync.Mutex
+	limiter            *IPLimiter
+	passwordPendingAck bool
 }
+
+type sessionRecord struct {
+	created time.Time
+	last    time.Time
+}
+
+const (
+	sessionIdleTTL     = 2 * time.Hour
+	sessionAbsoluteTTL = 12 * time.Hour
+	maxActiveSessions  = 50
+)
 
 // New 创建服务端 Web 实例
 func New(opts Options) *Server {
+	pendingAck := false
 	if opts.ConfigPath != "" {
 		if cfg, err := config.Load(opts.ConfigPath); err == nil && cfg != nil {
 			if cfg.Server.EnsureWebAdminCredentials() {
@@ -72,6 +87,7 @@ func New(opts Options) *Server {
 			if opts.Listen == "" || opts.Listen == "127.0.0.1:8092" {
 				opts.Listen = fmt.Sprintf("127.0.0.1:%d", cfg.Server.GetWebAdminPort())
 			}
+			pendingAck = cfg.Server.WebAdmin.PasswordPendingAck
 		}
 	}
 	if opts.Listen == "" {
@@ -82,10 +98,11 @@ func New(opts Options) *Server {
 	}
 
 	s := &Server{
-		opts:     opts,
-		mux:      http.NewServeMux(),
-		sessions: make(map[string]time.Time),
-		limiter:  NewIPLimiter(3, 10*time.Minute, 15*time.Minute),
+		opts:               opts,
+		mux:                http.NewServeMux(),
+		sessions:           make(map[string]sessionRecord),
+		limiter:            NewIPLimiter(3, 10*time.Minute, 15*time.Minute),
+		passwordPendingAck: pendingAck,
 	}
 
 	// 静态单页面：放行静态资源，敏感 API 均受 guard 保护
@@ -115,10 +132,11 @@ func New(opts Options) *Server {
 	s.mux.HandleFunc("PUT /api/server/sni", s.guard(s.handleUpdateSNI))
 	s.mux.HandleFunc("PUT /api/server/cf-token", s.guard(s.handleUpdateCFToken))
 	s.mux.HandleFunc("PUT /api/server/credentials", s.guard(s.handleUpdateCredentials))
+	s.mux.HandleFunc("POST /api/server/credentials/ack", s.guard(s.handleAckCredentials))
 	s.mux.HandleFunc("GET /api/server/logs/stream", s.guard(s.handleLogsSSE))
 	s.mux.HandleFunc("GET /api/server/session/url", s.guard(s.handleSessionURL))
 	s.mux.HandleFunc("GET /api/server/bans", s.guard(s.handleListBans))
-	s.mux.HandleFunc("POST /api/server/unban", s.handleUnban)
+	s.mux.HandleFunc("POST /api/server/unban", s.guard(s.handleUnban))
 	s.mux.HandleFunc("GET /api/server/doctor", s.guard(s.handleDoctor))
 	s.mux.HandleFunc("GET /api/server/diagnose/unlock", s.guard(s.handleUnlockDiagnose))
 
@@ -131,6 +149,9 @@ func New(opts Options) *Server {
 
 // ListenAndServe 启动 HTTP 服务
 func (s *Server) ListenAndServe() error {
+	if strings.TrimSpace(s.getPassword()) == "" {
+		return fmt.Errorf("服务端管理密码为空，拒绝启动。请在配置 web_admin.password 中设置密码")
+	}
 	ln, err := net.Listen("tcp", s.opts.Listen)
 	if err != nil {
 		return err
@@ -161,114 +182,138 @@ func (s *Server) getPassword() string {
 	return s.opts.Password
 }
 
-// sessionToken 生成 HMAC-SHA256 安全会话 Token (混合用户名与密码)
-func (s *Server) sessionToken() string {
-	pass := s.getPassword()
-	user := s.getUsername()
-	if pass == "" {
-		return ""
-	}
-	mac := hmac.New(sha256.New, []byte("singctl-server-session-salt-v2"))
-	mac.Write([]byte(user + ":" + pass))
-	return hex.EncodeToString(mac.Sum(nil))
+func (s *Server) pendingAck() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.passwordPendingAck
 }
 
-func (s *Server) touchSession(token string) {
-	if token == "" {
+func (s *Server) issueSession() string {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return ""
+	}
+	id := hex.EncodeToString(buf)
+	now := time.Now()
+	s.sessionsMu.Lock()
+	defer s.sessionsMu.Unlock()
+	s.pruneExpiredSessionsLocked(now)
+	s.sessions[id] = sessionRecord{created: now, last: now}
+	return id
+}
+
+func (s *Server) pruneExpiredSessionsLocked(now time.Time) {
+	for id, rec := range s.sessions {
+		if now.Sub(rec.created) >= sessionAbsoluteTTL || now.Sub(rec.last) >= sessionIdleTTL {
+			delete(s.sessions, id)
+		}
+	}
+	for len(s.sessions) >= maxActiveSessions {
+		var oldestID string
+		var oldestTime time.Time
+		for id, rec := range s.sessions {
+			if oldestID == "" || rec.last.Before(oldestTime) {
+				oldestID = id
+				oldestTime = rec.last
+			}
+		}
+		if oldestID == "" {
+			break
+		}
+		delete(s.sessions, oldestID)
+	}
+}
+
+func (s *Server) useSession(id string) bool {
+	if id == "" {
+		return false
+	}
+	now := time.Now()
+	s.sessionsMu.Lock()
+	defer s.sessionsMu.Unlock()
+	rec, ok := s.sessions[id]
+	if !ok {
+		return false
+	}
+	if now.Sub(rec.created) >= sessionAbsoluteTTL || now.Sub(rec.last) >= sessionIdleTTL {
+		delete(s.sessions, id)
+		return false
+	}
+	rec.last = now
+	s.sessions[id] = rec
+	return true
+}
+
+func (s *Server) sessionAlive(id string) bool {
+	if id == "" {
+		return false
+	}
+	now := time.Now()
+	s.sessionsMu.Lock()
+	defer s.sessionsMu.Unlock()
+	rec, ok := s.sessions[id]
+	if !ok {
+		return false
+	}
+	return now.Sub(rec.created) < sessionAbsoluteTTL && now.Sub(rec.last) < sessionIdleTTL
+}
+
+func (s *Server) deleteSession(id string) {
+	if id == "" {
 		return
 	}
 	s.sessionsMu.Lock()
-	defer s.sessionsMu.Unlock()
-	s.sessions[token] = time.Now()
+	delete(s.sessions, id)
+	s.sessionsMu.Unlock()
 }
 
-func (s *Server) isSessionValid(token string) bool {
-	if token == "" {
-		return false
-	}
-	s.sessionsMu.RLock()
-	defer s.sessionsMu.RUnlock()
-	last, ok := s.sessions[token]
-	if !ok {
-		// 如果刚启动不久且符合当前 token，允许首次 touch 注册
-		return true
-	}
-	// 2 小时空闲超时
-	return time.Since(last) < 2*time.Hour
-}
-
-func (s *Server) deleteSession(token string) {
+func (s *Server) revokeAllSessions() {
 	s.sessionsMu.Lock()
-	defer s.sessionsMu.Unlock()
-	delete(s.sessions, token)
+	s.sessions = make(map[string]sessionRecord)
+	s.sessionsMu.Unlock()
 }
 
 func (s *Server) setAuthCookie(w http.ResponseWriter, r *http.Request) {
-	token := s.sessionToken()
-	if token == "" {
+	if c, err := r.Cookie(sessionCookieName); err == nil && s.sessionAlive(c.Value) {
 		return
 	}
-	s.touchSession(token)
-
-	// 纯 Session Cookie (不设置 MaxAge 与 Expires，浏览器/手机标签页关闭即自动清除)
+	id := s.issueSession()
+	if id == "" {
+		return
+	}
+	secure := r.TLS != nil || strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https")
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
-		Value:    token,
+		Value:    id,
 		Path:     "/",
 		HttpOnly: true,
+		Secure:   secure,
 		SameSite: http.SameSiteLaxMode,
 	})
 }
 
 func (s *Server) authorized(r *http.Request) bool {
-	expectedPass := s.getPassword()
-	if expectedPass == "" {
+	if s.getPassword() == "" {
+		return false
+	}
+
+	if cookie, err := r.Cookie(sessionCookieName); err == nil && s.useSession(cookie.Value) {
 		return true
 	}
-	expectedToken := s.sessionToken()
-	expectedUser := s.getUsername()
 
-	// 1. Session Cookie (必须在 2 小时活跃期内)
-	if cookie, err := r.Cookie(sessionCookieName); err == nil && cookie.Value != "" {
-		if subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(expectedToken)) == 1 {
-			if s.isSessionValid(cookie.Value) {
-				s.touchSession(cookie.Value)
-				return true
-			}
-		}
-	}
-
-	// 2. Bearer Header
 	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
 		token := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
-		if subtle.ConstantTimeCompare([]byte(token), []byte(expectedToken)) == 1 {
-			if s.isSessionValid(token) {
-				s.touchSession(token)
-				return true
-			}
-		}
-	}
-
-	// 3. URL Query Token / Password
-	if qToken := r.URL.Query().Get("token"); qToken != "" {
-		if subtle.ConstantTimeCompare([]byte(qToken), []byte(expectedToken)) == 1 {
-			return true
-		}
-	}
-	if qPass := r.URL.Query().Get("password"); qPass != "" {
-		if subtle.ConstantTimeCompare([]byte(qPass), []byte(expectedPass)) == 1 {
+		if s.useSession(token) {
 			return true
 		}
 	}
 
-	// 4. HTTP Basic Auth
 	user, pass, ok := r.BasicAuth()
-	if ok && user == expectedUser {
-		if subtle.ConstantTimeCompare([]byte(pass), []byte(expectedPass)) == 1 {
+	if ok && subtle.ConstantTimeCompare([]byte(user), []byte(s.getUsername())) == 1 {
+		if subtle.ConstantTimeCompare([]byte(pass), []byte(s.getPassword())) == 1 {
 			return true
 		}
 	}
-
 	return false
 }
 
@@ -278,7 +323,12 @@ func (s *Server) guard(next http.HandlerFunc) http.HandlerFunc {
 			writeJSONError(w, http.StatusUnauthorized, "未授权访问，请先登录")
 			return
 		}
-		s.setAuthCookie(w, r)
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+				writeJSONError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
+				return
+			}
+		}
 		next(w, r)
 	}
 }
@@ -320,10 +370,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	status := map[string]any{
-		"version":      s.opts.Version,
-		"authEnabled":  s.getPassword() != "",
-		"sessionToken": s.sessionToken(),
-		"system":       getSystemMetrics(),
+		"version":     s.opts.Version,
+		"authEnabled": s.getPassword() != "",
+		"system":      getSystemMetrics(),
 		"admin": map[string]any{
 			"username": s.getUsername(),
 			"path":     adminPath,
@@ -356,13 +405,20 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			},
 		},
 		"config": map[string]any{
-			"nodeDomain":        cfg.Server.GetNodeDomain(),
-			"substoreDomain":    cfg.Server.GetSubstoreDomain(),
-			"substoreAdminUrl":  substoreAdminURL,
-			"nodeTag":           cfg.Server.NodeTag,
-			"sni":               cfg.Server.Sni,
-			"hasCFToken":        cfg.Server.CFDNSKey != "",
+			"nodeDomain":       cfg.Server.GetNodeDomain(),
+			"substoreDomain":   cfg.Server.GetSubstoreDomain(),
+			"substoreAdminUrl": substoreAdminURL,
+			"nodeTag":          cfg.Server.NodeTag,
+			"sni":              cfg.Server.Sni,
+			"hasCFToken":       cfg.Server.CFDNSKey != "",
 		},
+	}
+	if s.pendingAck() {
+		status["initialCredentials"] = map[string]any{
+			"pending":  true,
+			"username": s.getUsername(),
+			"password": s.getPassword(),
+		}
 	}
 	writeJSON(w, http.StatusOK, status)
 }
@@ -672,6 +728,44 @@ func (s *Server) handleServiceConfig(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// writeConfigBackup 把旧配置写成 0600 的时间戳备份，只保留最近 3 份。
+func writeConfigBackup(path string, content []byte) error {
+	bak := fmt.Sprintf("%s.%d.bak", path, time.Now().UnixNano())
+	if err := os.WriteFile(bak, content, 0600); err != nil {
+		return err
+	}
+	if err := os.Chmod(bak, 0600); err != nil {
+		return err
+	}
+	pruneConfigBackups(path, 3)
+	return nil
+}
+
+func pruneConfigBackups(path string, keep int) {
+	if keep < 1 {
+		keep = 1
+	}
+	matches, _ := filepath.Glob(path + ".*.bak")
+	legacy := path + ".bak"
+	if st, err := os.Stat(legacy); err == nil && !st.IsDir() {
+		matches = append(matches, legacy)
+	}
+	sort.Slice(matches, func(i, j int) bool {
+		si, errI := os.Stat(matches[i])
+		sj, errJ := os.Stat(matches[j])
+		if errI != nil || errJ != nil {
+			return matches[i] > matches[j]
+		}
+		if !si.ModTime().Equal(sj.ModTime()) {
+			return si.ModTime().After(sj.ModTime())
+		}
+		return matches[i] > matches[j]
+	})
+	for i := keep; i < len(matches); i++ {
+		_ = os.Remove(matches[i])
+	}
+}
+
 func (s *Server) handleUpdateServiceConfig(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Service string `json:"service"`
@@ -700,10 +794,14 @@ func (s *Server) handleUpdateServiceConfig(w http.ResponseWriter, r *http.Reques
 		}
 	case "caddy":
 		path = "/etc/caddy/Caddyfile"
-		tmpFile := "/tmp/Caddyfile.validate"
-		if err := os.WriteFile(tmpFile, []byte(content), 0644); err == nil {
-			defer os.Remove(tmpFile)
-			cmd := exec.Command("caddy", "validate", "--config", tmpFile, "--adapter", "caddyfile")
+		tmp, err := os.CreateTemp("", "caddyfile-validate-*.caddy")
+		if err == nil {
+			tmpName := tmp.Name()
+			defer os.Remove(tmpName)
+			_ = tmp.Chmod(0600)
+			_, _ = tmp.WriteString(content)
+			_ = tmp.Close()
+			cmd := exec.Command("caddy", "validate", "--config", tmpName, "--adapter", "caddyfile")
 			if out, err := cmd.CombinedOutput(); err != nil {
 				writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("Caddy 语法校验失败: %s", string(out)))
 				return
@@ -718,12 +816,24 @@ func (s *Server) handleUpdateServiceConfig(w http.ResponseWriter, r *http.Reques
 
 	// 备份现有配置
 	if old, err := os.ReadFile(path); err == nil {
-		_ = os.WriteFile(path+".bak", old, 0644)
+		_ = writeConfigBackup(path, old)
 	}
 
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+	mode := os.FileMode(0600)
+	if service == "caddy" {
+		mode = 0640
+	}
+	if err := os.WriteFile(path, []byte(content), mode); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "保存配置文件失败: "+err.Error())
 		return
+	}
+	_ = os.Chmod(path, mode)
+	if service == "caddy" {
+		if g, err := user.LookupGroup("caddy"); err == nil {
+			if gid, convErr := strconv.Atoi(g.Gid); convErr == nil {
+				_ = os.Chown(path, 0, gid)
+			}
+		}
 	}
 
 	// 自动重载/重启对应服务
@@ -956,10 +1066,8 @@ func (s *Server) handleSessionURL(w http.ResponseWriter, r *http.Request) {
 		targetURL = fmt.Sprintf("http://%s:%s/", lanIP, port)
 	}
 
-	token := s.sessionToken()
 	writeJSON(w, http.StatusOK, map[string]string{
-		"url":   targetURL,
-		"token": token,
+		"url": targetURL,
 	})
 }
 
@@ -982,45 +1090,32 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	user := s.getUsername()
 	pass := s.getPassword()
+	inputUser := strings.TrimSpace(body.Username)
+	userMatch := inputUser == "" || subtle.ConstantTimeCompare([]byte(inputUser), []byte(user)) == 1
+	passMatch := pass != "" && subtle.ConstantTimeCompare([]byte(body.Password), []byte(pass)) == 1
 
-	if pass != "" {
-		inputUser := strings.TrimSpace(body.Username)
-		userMatch := inputUser == "" || subtle.ConstantTimeCompare([]byte(inputUser), []byte(user)) == 1
-		passMatch := subtle.ConstantTimeCompare([]byte(body.Password), []byte(pass)) == 1
-
-		if !userMatch || !passMatch {
-			banned, remaining, fails := s.limiter.RecordFailure(clientIP)
-			if banned {
-				mins := int(remaining.Minutes()) + 1
-				w.Header().Set("Retry-After", fmt.Sprintf("%d", int(remaining.Seconds())))
-				writeJSONError(w, http.StatusTooManyRequests, fmt.Sprintf("密码错误已达 3 次，该 IP (%s) 已被安全封锁，请在 %d 分钟后再试", clientIP, mins))
-				return
-			}
-			remainingAttempts := s.limiter.maxAttempts - fails
-			writeJSONError(w, http.StatusUnauthorized, fmt.Sprintf("用户名或密码错误 (还剩 %d 次尝试机会)", remainingAttempts))
+	if !userMatch || !passMatch {
+		banned, remaining, fails := s.limiter.RecordFailure(clientIP)
+		if banned {
+			mins := int(remaining.Minutes()) + 1
+			w.Header().Set("Retry-After", fmt.Sprintf("%d", int(remaining.Seconds())))
+			writeJSONError(w, http.StatusTooManyRequests, fmt.Sprintf("密码错误已达 3 次，该 IP (%s) 已被安全封锁，请在 %d 分钟后再试", clientIP, mins))
 			return
 		}
+		remainingAttempts := s.limiter.maxAttempts - fails
+		writeJSONError(w, http.StatusUnauthorized, fmt.Sprintf("用户名或密码错误 (还剩 %d 次尝试机会)", remainingAttempts))
+		return
 	}
 
-	// 登录成功，重置当前 IP 失败计数并颁发会话凭据
 	s.limiter.RecordSuccess(clientIP)
 	s.setAuthCookie(w, r)
-	token := s.sessionToken()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"token":    token,
 		"username": user,
 		"message":  "登录成功",
 	})
 }
 
 func (s *Server) handleUnban(w http.ResponseWriter, r *http.Request) {
-	// 安全校验：仅允许本机 127.0.0.1 来源，或携带有效管理员凭据
-	clientIP := GetClientIP(r)
-	if !isWhitelisted(clientIP) && !s.authorized(r) {
-		http.Error(w, "Forbidden", http.StatusForbidden)
-		return
-	}
-
 	var body struct {
 		IP string `json:"ip"`
 	}
@@ -1105,6 +1200,7 @@ func (s *Server) handleUpdateCredentials(w http.ResponseWriter, r *http.Request)
 
 	cfg.Server.WebAdmin.Username = newUsername
 	cfg.Server.WebAdmin.Password = newPassword
+	cfg.Server.WebAdmin.PasswordPendingAck = false
 	if err := config.Save(s.opts.ConfigPath, cfg); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "保存配置文件失败: "+err.Error())
 		return
@@ -1113,16 +1209,33 @@ func (s *Server) handleUpdateCredentials(w http.ResponseWriter, r *http.Request)
 	s.mu.Lock()
 	s.opts.Username = newUsername
 	s.opts.Password = newPassword
+	s.passwordPendingAck = false
 	s.mu.Unlock()
 
+	s.revokeAllSessions()
 	s.setAuthCookie(w, r)
-	newToken := s.sessionToken()
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"message":  "账号与密码修改成功，新凭据已生效",
 		"username": newUsername,
-		"token":    newToken,
 	})
+}
+
+func (s *Server) handleAckCredentials(w http.ResponseWriter, r *http.Request) {
+	cfg, err := config.Load(s.opts.ConfigPath)
+	if err != nil || cfg == nil {
+		writeJSONError(w, http.StatusInternalServerError, "加载配置文件失败")
+		return
+	}
+	cfg.Server.WebAdmin.PasswordPendingAck = false
+	if err := config.Save(s.opts.ConfigPath, cfg); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "保存配置文件失败: "+err.Error())
+		return
+	}
+	s.mu.Lock()
+	s.passwordPendingAck = false
+	s.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]string{"message": "已确认密码保存，面板不再显示明文"})
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {

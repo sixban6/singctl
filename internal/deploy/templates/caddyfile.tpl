@@ -107,7 +107,11 @@ https://{{.SubstoreDomain}}:9443 {
             Clear-Site-Data "cache"
             Cache-Control "no-store, no-cache, must-revalidate"
         }
-        reverse_proxy http://127.0.0.1:{{.AdminPort}}
+        reverse_proxy http://127.0.0.1:{{.AdminPort}} {
+            header_up X-Real-IP {client_ip}
+            header_up -CF-Connecting-IP
+            header_up -X-Forwarded-For
+        }
     }
 {{end}}
 
@@ -208,7 +212,11 @@ https://{{.NodeDomain}}:9443 {
             Clear-Site-Data "cache"
             Cache-Control "no-store, no-cache, must-revalidate"
         }
-        reverse_proxy http://127.0.0.1:{{.AdminPort}}
+        reverse_proxy http://127.0.0.1:{{.AdminPort}} {
+            header_up X-Real-IP {client_ip}
+            header_up -CF-Connecting-IP
+            header_up -X-Forwarded-For
+        }
     }
 {{end}}
 
@@ -300,7 +308,11 @@ https://{{.SubstoreDomain}}:9443 {
             Clear-Site-Data "cache"
             Cache-Control "no-store, no-cache, must-revalidate"
         }
-        reverse_proxy http://127.0.0.1:{{.AdminPort}}
+        reverse_proxy http://127.0.0.1:{{.AdminPort}} {
+            header_up X-Real-IP {client_ip}
+            header_up -CF-Connecting-IP
+            header_up -X-Forwarded-For
+        }
     }
 {{end}}
 

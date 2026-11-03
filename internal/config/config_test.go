@@ -324,3 +324,33 @@ func TestEnsureWebAdminCredentials_PathUpgrade(t *testing.T) {
 	}
 }
 
+func TestEnsureWebAdminCredentials_Generates16CharPassword(t *testing.T) {
+	s := &ServerConfig{}
+	if !s.EnsureWebAdminCredentials() {
+		t.Fatal("expected credentials to be generated")
+	}
+	if len(s.WebAdmin.Password) != 16 {
+		t.Fatalf("expected 16-char password, got %q", s.WebAdmin.Password)
+	}
+	if !s.WebAdmin.PasswordPendingAck {
+		t.Fatal("expected newly generated password to require acknowledgement")
+	}
+	if !validatePasswordChars(s.WebAdmin.Password) {
+		t.Fatalf("password %q missing required character classes", s.WebAdmin.Password)
+	}
+}
+
+func validatePasswordChars(pass string) bool {
+	var hasUpper, hasLower, hasDigit bool
+	for _, r := range pass {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			hasUpper = true
+		case r >= 'a' && r <= 'z':
+			hasLower = true
+		case r >= '0' && r <= '9':
+			hasDigit = true
+		}
+	}
+	return hasUpper && hasLower && hasDigit
+}

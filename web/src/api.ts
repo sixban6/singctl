@@ -20,30 +20,44 @@ export const setOnUnauthorized = (cb: () => void) => {
   onUnauthorizedCallback = cb;
 };
 
+export class ApiError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
+
 async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
   const base = getBasePath();
   const url = `${base}${endpoint}`;
 
-  const res = await fetch(url, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(options.headers || {}),
-    },
-  });
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      ...options,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(options.headers || {}),
+      },
+    });
+  } catch {
+    throw new ApiError(0, '网络不可达');
+  }
 
   if (res.status === 401) {
     if (onUnauthorizedCallback) {
       onUnauthorizedCallback();
     }
     const err = await res.json().catch(() => ({ error: '未授权访问，请先登录' }));
-    throw new Error(err.error || '未授权访问，请先登录');
+    throw new ApiError(401, err.error || '未授权访问，请先登录');
   }
 
   const data = await res.json().catch(() => ({}));
 
   if (!res.ok) {
-    throw new Error(data.error || `请求失败 (${res.status})`);
+    throw new ApiError(res.status, data.error || `请求失败 (${res.status})`);
   }
 
   return data as T;
@@ -104,13 +118,18 @@ export const api = {
     }),
 
   updateCredentials: (body: { currentPassword: string; newUsername: string; newPassword: string }) =>
-    request<{ message: string; username: string; token: string }>('/api/server/credentials', {
+    request<{ message: string; username: string }>('/api/server/credentials', {
       method: 'PUT',
       body: JSON.stringify(body),
     }),
 
+  ackInitialPassword: () =>
+    request<{ message: string }>('/api/server/credentials/ack', {
+      method: 'POST',
+    }),
+
   login: (username: string, password: string) =>
-    request<{ message: string; token: string; username: string }>('/api/server/login', {
+    request<{ message: string; username: string }>('/api/server/login', {
       method: 'POST',
       body: JSON.stringify({ username, password }),
     }),

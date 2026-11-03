@@ -126,8 +126,9 @@ func newServerWebStartCmd(opts func() serverweb.Options) *cobra.Command {
 					logger.Success("  ➜  HTTPS Caddy 专属访问地址: https://%s%s/", domain, adminPath)
 				}
 				logger.Info("  ➜  管理员账号: %s", o.Username)
-				if o.Password != "" {
+				if o.Password != "" && cfg.Server.WebAdmin.PasswordPendingAck {
 					logger.Info("  ➜  管理密码: %s", o.Password)
+					logger.Info("  ➜  此密码在你于面板确认已保存之前才会显示。请写入密码管理器，终端记录和截图都会留下它。")
 				}
 			}
 			return nil
@@ -195,8 +196,18 @@ func newServerWebUnbanCmd(configPath string) *cobra.Command {
 
 			resolvedConfig := resolveConfigPath(cmd, configPath)
 			port := 8092
+			var adminUser, adminPass string
 			if cfg, err := config.Load(resolvedConfig); err == nil && cfg != nil {
 				port = cfg.Server.GetWebAdminPort()
+				adminUser = cfg.Server.GetWebAdminUsername()
+				adminPass = cfg.Server.GetWebAdminPassword()
+			} else if err != nil {
+				logger.Warn("读取配置失败，无法携带管理凭据解封: %v", err)
+				return nil
+			}
+			if adminPass == "" {
+				logger.Warn("管理密码为空，无法解封。请先在面板登录，或设置 web_admin.password")
+				return nil
 			}
 
 			url := fmt.Sprintf("http://127.0.0.1:%d/api/server/unban", port)
@@ -206,6 +217,7 @@ func newServerWebUnbanCmd(configPath string) *cobra.Command {
 				return err
 			}
 			req.Header.Set("Content-Type", "application/json")
+			req.SetBasicAuth(adminUser, adminPass)
 
 			client := &http.Client{Timeout: 3 * time.Second}
 			resp, err := client.Do(req)

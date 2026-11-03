@@ -20,8 +20,8 @@ import (
 )
 
 type Config struct {
-	Subs        []Subscription    `yaml:"subs"`
-	GitHub      GitHubConfig      `yaml:"github"`
+	Subs   []Subscription `yaml:"subs"`
+	GitHub GitHubConfig   `yaml:"github"`
 	//GUI       GUIConfig       `yaml:"gui"`
 	Hy2         Hy2Config         `yaml:"hy2"`
 	Tailscale   TailscaleConfig   `yaml:"tailscale"`
@@ -69,11 +69,12 @@ type ServerConfig struct {
 }
 
 type WebAdminConfig struct {
-	Enabled  bool   `yaml:"enabled"`
-	Port     int    `yaml:"port,omitempty"`     // 默认 8092
-	Path     string `yaml:"path,omitempty"`     // 随机隐藏路径，如 /admin_8a7fbc2e
-	Username string `yaml:"username,omitempty"` // 管理员账号，默认 admin
-	Password string `yaml:"password,omitempty"` // 随机生成的强管理密码
+	Enabled            bool   `yaml:"enabled"`
+	Port               int    `yaml:"port,omitempty"`                 // 默认 8092
+	Path               string `yaml:"path,omitempty"`                 // 随机隐藏路径，如 /sr/<24位>
+	Username           string `yaml:"username,omitempty"`             // 管理员账号，默认 singctl
+	Password           string `yaml:"password,omitempty"`             // 随机生成的强管理密码
+	PasswordPendingAck bool   `yaml:"password_pending_ack,omitempty"` // 安装生成的密码尚未在面板确认保存
 }
 
 func (s *ServerConfig) GetWebAdminPort() int {
@@ -135,7 +136,7 @@ func GenerateRandomAdminPath() string {
 	return "/sr/" + GenerateAdminToken(24)
 }
 
-// GenerateSecurePassword 生成 8 位包含大写字母、小写字母和数字的强随机密码
+// GenerateSecurePassword 生成包含大写字母、小写字母和数字的随机密码。length 小于 8 时按 8 位生成。
 func GenerateSecurePassword(length int) string {
 	if length < 8 {
 		length = 8
@@ -194,9 +195,10 @@ func (s *ServerConfig) EnsureWebAdminCredentials() bool {
 		s.WebAdmin.Username = "singctl"
 		changed = true
 	}
-	// 如果密码为空，生成 8 位混合大小写和数字的随机密码
+	// 如果密码为空，生成 16 位混合大小写和数字的随机密码，并要求首次登录后确认已保存
 	if strings.TrimSpace(s.WebAdmin.Password) == "" {
-		s.WebAdmin.Password = GenerateSecurePassword(8)
+		s.WebAdmin.Password = GenerateSecurePassword(16)
+		s.WebAdmin.PasswordPendingAck = true
 		changed = true
 	}
 	if !s.WebAdmin.Enabled {

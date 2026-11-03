@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { ServerStatusResponse } from './types';
-import { api, setOnUnauthorized } from './api';
+import { ApiError, api, setOnUnauthorized } from './api';
 import { ToastProvider, useToast } from './components/Toast';
 import { Header } from './components/Header';
 import { Navigation, TabKey } from './components/Navigation';
@@ -20,6 +20,9 @@ const DashboardContent: React.FC = () => {
   const [isCheckingAuth, setIsCheckingAuth] = useState(true);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [logService, setLogService] = useState('singbox');
+  const [linkDown, setLinkDown] = useState(false);
+  const [lastOk, setLastOk] = useState<Date | null>(null);
+  const [ackingPassword, setAckingPassword] = useState(false);
 
   const fetchStatus = useCallback(async (silent = false) => {
     if (!silent && !isAuthenticated) setIsCheckingAuth(true);
@@ -27,8 +30,16 @@ const DashboardContent: React.FC = () => {
       const data = await api.getStatus();
       setStatus(data);
       setIsAuthenticated(true);
-    } catch (err: any) {
-      setIsAuthenticated(false);
+      setLinkDown(false);
+      setLastOk(new Date());
+    } catch (err: unknown) {
+      const unauthorized = err instanceof ApiError && err.status === 401;
+      if (unauthorized || !isAuthenticated) {
+        setIsAuthenticated(false);
+        setLinkDown(false);
+      } else {
+        setLinkDown(true);
+      }
     } finally {
       setIsCheckingAuth(false);
     }
@@ -57,8 +68,31 @@ const DashboardContent: React.FC = () => {
       success('已安全退出');
       setStatus(null);
       setIsAuthenticated(false);
+      setLinkDown(false);
     } catch (err: any) {
       error(err.message || '登出失败');
+    }
+  };
+
+  const handleAckPassword = async () => {
+    setAckingPassword(true);
+    try {
+      await api.ackInitialPassword();
+      success('已确认保存，面板不再显示密码');
+      await fetchStatus(true);
+    } catch (err: unknown) {
+      error(err instanceof Error ? err.message : '确认失败');
+    } finally {
+      setAckingPassword(false);
+    }
+  };
+
+  const copyPassword = async (password: string) => {
+    try {
+      await navigator.clipboard.writeText(password);
+      success('密码已复制');
+    } catch {
+      error('复制失败，请手动选择密码');
     }
   };
 
@@ -99,9 +133,46 @@ const DashboardContent: React.FC = () => {
   // 3. Authenticated Full Dashboard
   return (
     <div className="min-h-screen flex flex-col bg-[#080d1a] text-slate-100 animate-fade-in">
-      <Header status={status} onLogout={handleLogout} />
+      <Header status={status} onLogout={handleLogout} lastOk={lastOk} linkDown={linkDown} />
+
+      {linkDown && (
+        <div className="bg-amber-500/10 border-b border-amber-500/30 text-amber-200 text-xs font-mono px-4 py-2 text-center">
+          连接中断，正在重试
+          {lastOk ? `。上次成功刷新 ${lastOk.toLocaleTimeString()}` : ''}
+        </div>
+      )}
 
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
+        {status?.initialCredentials?.pending && (
+          <div className="p-5 rounded-2xl border border-amber-500/30 bg-amber-500/10 space-y-3">
+            <div>
+              <h2 className="text-sm font-semibold text-amber-100">请先保存安装时生成的管理密码</h2>
+              <p className="text-xs text-amber-200/80 mt-1">确认之后，面板不再显示这组明文。</p>
+            </div>
+            <div className="font-mono text-xs text-slate-100 space-y-1">
+              <div>账号 {status.initialCredentials.username}</div>
+              <div>密码 {status.initialCredentials.password}</div>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => copyPassword(status.initialCredentials?.password || '')}
+                className="px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-xs text-slate-100"
+              >
+                复制密码
+              </button>
+              <button
+                type="button"
+                onClick={handleAckPassword}
+                disabled={ackingPassword}
+                className="px-3 py-1.5 rounded-lg bg-emerald-500/20 border border-emerald-500/30 text-xs text-emerald-200 disabled:opacity-50"
+              >
+                {ackingPassword ? '正在确认...' : '我已保存'}
+              </button>
+            </div>
+          </div>
+        )}
+
         <Navigation currentTab={currentTab} onChangeTab={setCurrentTab} />
 
         <div className="pt-2">

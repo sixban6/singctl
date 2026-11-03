@@ -8,44 +8,36 @@ import (
 )
 
 func TestGetClientIP(t *testing.T) {
-	// 1. CF-Connecting-IP
-	{
+	t.Run("loopback trusts X-Real-IP", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
-		req.Header.Set("CF-Connecting-IP", "104.28.1.1")
-		req.RemoteAddr = "127.0.0.1:12345"
-		if ip := GetClientIP(req); ip != "104.28.1.1" {
-			t.Fatalf("expected 104.28.1.1 from CF-Connecting-IP, got %s", ip)
-		}
-	}
-
-	// 2. X-Real-IP
-	{
-		req := httptest.NewRequest("GET", "/", nil)
 		req.Header.Set("X-Real-IP", "203.0.113.195")
+		req.Header.Set("X-Forwarded-For", "127.0.0.1")
+		req.Header.Set("CF-Connecting-IP", "127.0.0.1")
 		req.RemoteAddr = "127.0.0.1:12345"
 		if ip := GetClientIP(req); ip != "203.0.113.195" {
 			t.Fatalf("expected 203.0.113.195 from X-Real-IP, got %s", ip)
 		}
-	}
+	})
 
-	// 3. X-Forwarded-For (multiple IPs)
-	{
-		req := httptest.NewRequest("GET", "/", nil)
-		req.Header.Set("X-Forwarded-For", "198.51.100.42, 172.68.1.1")
+	t.Run("spoofed forwarding headers are ignored", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Set("CF-Connecting-IP", "104.28.1.1")
+		req.Header.Set("X-Real-IP", "127.0.0.1")
+		req.Header.Set("X-Forwarded-For", "127.0.0.1, 198.51.100.42")
+		req.RemoteAddr = "203.0.113.9:54321"
+		if ip := GetClientIP(req); ip != "203.0.113.9" {
+			t.Fatalf("expected remote address 203.0.113.9, got %s", ip)
+		}
+	})
+
+	t.Run("invalid X-Real-IP falls back to loopback", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Set("X-Real-IP", "not-an-ip")
 		req.RemoteAddr = "127.0.0.1:12345"
-		if ip := GetClientIP(req); ip != "198.51.100.42" {
-			t.Fatalf("expected 198.51.100.42 from X-Forwarded-For, got %s", ip)
+		if ip := GetClientIP(req); ip != "127.0.0.1" {
+			t.Fatalf("expected 127.0.0.1, got %s", ip)
 		}
-	}
-
-	// 4. RemoteAddr
-	{
-		req := httptest.NewRequest("GET", "/", nil)
-		req.RemoteAddr = "192.0.2.1:54321"
-		if ip := GetClientIP(req); ip != "192.0.2.1" {
-			t.Fatalf("expected 192.0.2.1 from RemoteAddr, got %s", ip)
-		}
-	}
+	})
 }
 
 func TestIPLimiter_BanAfterThreeFails(t *testing.T) {

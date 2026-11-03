@@ -257,4 +257,10 @@ func TestPreviewCaddyfile_WebAdmin(t *testing.T) {
 	if !strings.Contains(content, "reverse_proxy http://127.0.0.1:8092") {
 		t.Errorf("expected reverse_proxy http://127.0.0.1:8092, got:\n%s", content)
 	}
+	if !strings.Contains(content, "header_up X-Real-IP {client_ip}") {
+		t.Errorf("expected Caddy to overwrite X-Real-IP, got:\n%s", content)
+	}
+	if !strings.Contains(content, "header_up -X-Forwarded-For") || !strings.Contains(content, "header_up -CF-Connecting-IP") {
+		t.Errorf("expected Caddy to drop client forwarding headers, got:\n%s", content)
+	}
 }

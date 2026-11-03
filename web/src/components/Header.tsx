@@ -5,9 +5,11 @@ import { ServerStatusResponse } from '../types';
 interface HeaderProps {
   status: ServerStatusResponse | null;
   onLogout: () => void;
+  lastOk?: Date | null;
+  linkDown?: boolean;
 }
 
-export const Header: React.FC<HeaderProps> = ({ status, onLogout }) => {
+export const Header: React.FC<HeaderProps> = ({ status, onLogout, lastOk, linkDown }) => {
   const nodeDomain = status?.config?.nodeDomain || status?.config?.substoreDomain || 'Node Fleet';
   const username = status?.admin?.username || 'singctl';
   const memPercent = status?.system?.memUsagePercent || '0%';
@@ -43,6 +45,10 @@ export const Header: React.FC<HeaderProps> = ({ status, onLogout }) => {
             <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-800">
               <span className="text-slate-400">内存</span>
               <span className="text-slate-200 font-semibold">{memPercent}</span>
+            </div>
+            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-800">
+              <span className="text-slate-400">{linkDown ? '上次刷新' : '刷新'}</span>
+              <span className="text-slate-200 font-semibold">{lastOk ? lastOk.toLocaleTimeString() : '--'}</span>
             </div>
             {status?.system?.bbr && (
               <div className="flex items-center gap-1 px-2 py-1 rounded-lg bg-emerald-950/40 border border-emerald-500/20 text-emerald-400 font-medium">
