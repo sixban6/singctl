@@ -347,9 +347,18 @@ export const SecurityTab: React.FC<SecurityTabProps> = ({ status, onRefresh }) =
                 <tbody className="divide-y divide-slate-800/60">
                   {bans.map((b) => (
                     <tr key={b.ip} className="hover:bg-slate-900/40 transition-colors">
-                      <td className="py-3 px-3 text-white font-semibold flex items-center gap-2">
-                        <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse"></span>
-                        <span>{b.ip}</span>
+                      <td className="py-3 px-3 text-white font-semibold">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse shrink-0"></span>
+                          <span>{b.ip}</span>
+                          {(b.flag || b.geo || b.isp) && (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-slate-800/90 border border-slate-700/60 text-[10px] text-slate-300 font-sans font-normal">
+                              {b.flag && <span>{b.flag}</span>}
+                              {b.geo && <span>{b.geo}</span>}
+                              {b.isp && <span className="text-slate-500">· {b.isp}</span>}
+                            </span>
+                          )}
+                        </div>
                       </td>
                       <td className="py-3 px-3">
                         <span className="px-2 py-0.5 rounded-md bg-rose-500/20 text-rose-300 border border-rose-500/30 text-[11px]">
@@ -438,8 +447,17 @@ export const SecurityTab: React.FC<SecurityTabProps> = ({ status, onRefresh }) =
                           {log.action}
                         </span>
                       </td>
-                      <td className="py-3 px-3 text-right text-emerald-400 font-semibold whitespace-nowrap">
-                        {log.ip}
+                      <td className="py-3 px-3 text-right whitespace-nowrap">
+                        <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                          <span className="text-emerald-400 font-semibold">{log.ip}</span>
+                          {(log.flag || log.geo || log.isp) && (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-slate-800/90 border border-slate-700/60 text-[10px] text-slate-300 font-sans font-normal">
+                              {log.flag && <span>{log.flag}</span>}
+                              {log.geo && <span>{log.geo}</span>}
+                              {log.isp && <span className="text-slate-500">· {log.isp}</span>}
+                            </span>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   ))}

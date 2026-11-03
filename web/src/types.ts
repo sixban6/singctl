@@ -58,6 +58,11 @@ export interface AuditLogItem {
   time: string;
   action: string;
   ip: string;
+  geo?: string;
+  isp?: string;
+  country?: string;
+  countryCode?: string;
+  flag?: string;
 }
 
 export interface SubscriptionsResponse {
@@ -128,6 +133,11 @@ export interface BannedIP {
   ip: string;
   remainingSeconds: number;
   remainingMinutes: number;
+  geo?: string;
+  isp?: string;
+  country?: string;
+  countryCode?: string;
+  flag?: string;
 }
 
 export interface DoctorCheckItem {

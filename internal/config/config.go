@@ -74,7 +74,7 @@ type WebAdminConfig struct {
 	Path               string `yaml:"path,omitempty"`                 // 随机隐藏路径，如 /sr/<24位>
 	Username           string `yaml:"username,omitempty"`             // 管理员账号，默认 singctl
 	Password           string `yaml:"password,omitempty"`             // 随机生成的强管理密码
-	PasswordPendingAck bool   `yaml:"password_pending_ack,omitempty"` // 安装生成的密码尚未在面板确认保存
+	PasswordPendingAck bool   `yaml:"password_pending_ack"`           // 安装生成的密码尚未在面板确认保存
 }
 
 func (s *ServerConfig) GetWebAdminPort() int {

@@ -400,3 +400,61 @@ server:
 		t.Errorf("expected web_admin.password 'MySecurePassword123', got '%s'", loaded.Server.WebAdmin.Password)
 	}
 }
+
+func TestSave_PasswordPendingAckFlip(t *testing.T) {
+	initialYAML := `server:
+  web_admin:
+    enabled: true
+    port: 8092
+    path: /sr/ExistingPath987654321012
+    username: singctl
+    password: MySecurePassword123
+    password_pending_ack: true
+`
+	tmpFile, err := os.CreateTemp("", "singctl_test_ack_*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpFile.Name())
+
+	if _, err := tmpFile.WriteString(initialYAML); err != nil {
+		t.Fatal(err)
+	}
+	tmpFile.Close()
+
+	cfg, err := Load(tmpFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Server.WebAdmin.PasswordPendingAck {
+		t.Fatal("expected password_pending_ack to be true initially")
+	}
+
+	// Flip to false and save
+	cfg.Server.WebAdmin.PasswordPendingAck = false
+	if err := Save(tmpFile.Name(), cfg); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+
+	// Verify file content directly
+	content, err := os.ReadFile(tmpFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(content), "password_pending_ack: true") {
+		t.Fatalf("expected password_pending_ack to be false in YAML, got:\n%s", string(content))
+	}
+	if !strings.Contains(string(content), "password_pending_ack: false") {
+		t.Fatalf("expected password_pending_ack: false in YAML, got:\n%s", string(content))
+	}
+
+	// Reload and verify
+	reloaded, err := Load(tmpFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Server.WebAdmin.PasswordPendingAck {
+		t.Fatal("expected reloaded password_pending_ack to be false")
+	}
+}
+

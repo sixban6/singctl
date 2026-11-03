@@ -59,6 +59,7 @@ type Server struct {
 	sessionsMu         sync.Mutex
 	limiter            *IPLimiter
 	audit              *AuditManager
+	geo                *IPGeoResolver
 	passwordPendingAck bool
 }
 
@@ -135,6 +136,7 @@ func New(opts Options) *Server {
 		sessions:           make(map[string]sessionRecord),
 		limiter:            NewIPLimiter(3, 10*time.Minute, 15*time.Minute, banFile),
 		audit:              NewAuditManager(auditFile),
+		geo:                NewIPGeoResolver(),
 		passwordPendingAck: pendingAck,
 	}
 
@@ -448,7 +450,25 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 	if s.audit != nil {
-		status["auditLogs"] = s.audit.List()
+		rawLogs := s.audit.List()
+		enriched := make([]map[string]any, 0, len(rawLogs))
+		for _, entry := range rawLogs {
+			item := map[string]any{
+				"time":   entry.Time,
+				"action": entry.Action,
+				"ip":     entry.IP,
+			}
+			if s.geo != nil {
+				geo := s.geo.Resolve(entry.IP)
+				item["geo"] = geo.Geo
+				item["isp"] = geo.ISP
+				item["country"] = geo.Country
+				item["countryCode"] = geo.CountryCode
+				item["flag"] = geo.Flag
+			}
+			enriched = append(enriched, item)
+		}
+		status["auditLogs"] = enriched
 	}
 	if s.pendingAck() {
 		status["initialCredentials"] = map[string]any{
@@ -1116,8 +1136,18 @@ func (s *Server) handleSessionURL(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) getClientIPAndSeedGeo(r *http.Request) string {
+	ip := GetClientIP(r)
+	if s.geo != nil {
+		if country := strings.TrimSpace(r.Header.Get("X-Geo-Country")); country != "" {
+			s.geo.SeedCountry(ip, country)
+		}
+	}
+	return ip
+}
+
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	clientIP := GetClientIP(r)
+	clientIP := s.getClientIPAndSeedGeo(r)
 
 	// 1. 防暴力破解：检查当前 IP 是否正处于封禁期
 	if remaining, banned := s.limiter.CheckBan(clientIP); banned {
@@ -1186,11 +1216,20 @@ func (s *Server) handleListBans(w http.ResponseWriter, r *http.Request) {
 	bans := s.limiter.ListBans()
 	banList := make([]map[string]any, 0, len(bans))
 	for ip, rem := range bans {
-		banList = append(banList, map[string]any{
+		item := map[string]any{
 			"ip":               ip,
 			"remainingSeconds": int(rem.Seconds()),
 			"remainingMinutes": int(rem.Minutes()) + 1,
-		})
+		}
+		if s.geo != nil {
+			geo := s.geo.Resolve(ip)
+			item["geo"] = geo.Geo
+			item["isp"] = geo.ISP
+			item["country"] = geo.Country
+			item["countryCode"] = geo.CountryCode
+			item["flag"] = geo.Flag
+		}
+		banList = append(banList, item)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"bans": banList,
@@ -1198,11 +1237,28 @@ func (s *Server) handleListBans(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListAuditLogs(w http.ResponseWriter, r *http.Request) {
-	var logs []AuditEntry
+	var rawLogs []AuditEntry
 	if s.audit != nil {
-		logs = s.audit.List()
+		rawLogs = s.audit.List()
 	} else {
-		logs = []AuditEntry{}
+		rawLogs = []AuditEntry{}
+	}
+	logs := make([]map[string]any, 0, len(rawLogs))
+	for _, entry := range rawLogs {
+		item := map[string]any{
+			"time":   entry.Time,
+			"action": entry.Action,
+			"ip":     entry.IP,
+		}
+		if s.geo != nil {
+			geo := s.geo.Resolve(entry.IP)
+			item["geo"] = geo.Geo
+			item["isp"] = geo.ISP
+			item["country"] = geo.Country
+			item["countryCode"] = geo.CountryCode
+			item["flag"] = geo.Flag
+		}
+		logs = append(logs, item)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"logs": logs,
@@ -1211,7 +1267,7 @@ func (s *Server) handleListAuditLogs(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) recordAudit(r *http.Request, action string) {
 	if s.audit != nil {
-		s.audit.Record(GetClientIP(r), action)
+		s.audit.Record(s.getClientIPAndSeedGeo(r), action)
 	}
 }
 

@@ -260,6 +260,9 @@ func TestPreviewCaddyfile_WebAdmin(t *testing.T) {
 	if !strings.Contains(content, "header_up X-Real-IP {client_ip}") {
 		t.Errorf("expected Caddy to overwrite X-Real-IP, got:\n%s", content)
 	}
+	if !strings.Contains(content, "header_up X-Geo-Country {header.CF-IPCountry}") {
+		t.Errorf("expected Caddy to pass X-Geo-Country, got:\n%s", content)
+	}
 	if !strings.Contains(content, "header_up -X-Forwarded-For") || !strings.Contains(content, "header_up -CF-Connecting-IP") {
 		t.Errorf("expected Caddy to drop client forwarding headers, got:\n%s", content)
 	}

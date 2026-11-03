@@ -139,6 +139,7 @@ https://{{.SubstoreDomain}}:9443 {
         }
         reverse_proxy http://127.0.0.1:{{.AdminPort}} {
             header_up X-Real-IP {client_ip}
+            header_up X-Geo-Country {header.CF-IPCountry}
             header_up -CF-Connecting-IP
             header_up -X-Forwarded-For
         }
@@ -244,6 +245,7 @@ https://{{.NodeDomain}}:9443 {
         }
         reverse_proxy http://127.0.0.1:{{.AdminPort}} {
             header_up X-Real-IP {client_ip}
+            header_up X-Geo-Country {header.CF-IPCountry}
             header_up -CF-Connecting-IP
             header_up -X-Forwarded-For
         }
@@ -340,6 +342,7 @@ https://{{.SubstoreDomain}}:9443 {
         }
         reverse_proxy http://127.0.0.1:{{.AdminPort}} {
             header_up X-Real-IP {client_ip}
+            header_up X-Geo-Country {header.CF-IPCountry}
             header_up -CF-Connecting-IP
             header_up -X-Forwarded-For
         }
