@@ -3,6 +3,8 @@ package serverweb
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -115,5 +117,58 @@ func TestIPLimiter_LocalhostWhitelisted(t *testing.T) {
 	}
 	if _, isBanned := limiter.CheckBan("127.0.0.1"); isBanned {
 		t.Fatalf("localhost 127.0.0.1 should never be banned")
+	}
+}
+
+func TestIPLimiter_FilePersistence(t *testing.T) {
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "bans.json")
+
+	l1 := NewIPLimiter(3, 10*time.Minute, 15*time.Minute, filePath)
+	testIP := "198.51.100.77"
+
+	// 触发封禁
+	l1.RecordFailure(testIP)
+	l1.RecordFailure(testIP)
+	banned, _, _ := l1.RecordFailure(testIP)
+	if !banned {
+		t.Fatal("expected IP to be banned")
+	}
+	l1.Close()
+
+	// 验证文件权限为 0600
+	st, err := os.Stat(filePath)
+	if err != nil {
+		t.Fatalf("stat failed: %v", err)
+	}
+	if perm := st.Mode().Perm(); perm != 0600 {
+		t.Fatalf("expected ban file perm 0600, got %o", perm)
+	}
+
+	// 模拟服务重启：创建新实例 l2 读取相同的小文件
+	l2 := NewIPLimiter(3, 10*time.Minute, 15*time.Minute, filePath)
+	defer l2.Close()
+
+	rem, isBanned := l2.CheckBan(testIP)
+	if !isBanned || rem <= 0 {
+		t.Fatalf("expected banned IP to persist after restart, got isBanned=%v, rem=%v", isBanned, rem)
+	}
+
+	bans := l2.ListBans()
+	if _, exists := bans[testIP]; !exists {
+		t.Fatalf("expected %s in ListBans after restart", testIP)
+	}
+
+	// 解封并验证持久化
+	l2.Unban(testIP)
+	if _, isBanned := l2.CheckBan(testIP); isBanned {
+		t.Fatal("expected unbanned")
+	}
+
+	// 再次重启验证解封已持久化
+	l3 := NewIPLimiter(3, 10*time.Minute, 15*time.Minute, filePath)
+	defer l3.Close()
+	if _, isBanned := l3.CheckBan(testIP); isBanned {
+		t.Fatal("expected unban state to persist across restart")
 	}
 }

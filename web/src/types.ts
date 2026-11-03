@@ -51,6 +51,13 @@ export interface ServerStatusResponse {
     sni: string;
     hasCFToken: boolean;
   };
+  auditLogs?: AuditLogItem[];
+}
+
+export interface AuditLogItem {
+  time: string;
+  action: string;
+  ip: string;
 }
 
 export interface SubscriptionsResponse {

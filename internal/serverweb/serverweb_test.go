@@ -298,6 +298,30 @@ server:
 			t.Fatalf("after unban: expected 200, got %d (%s)", rec.Code, rec.Body.String())
 		}
 	}
+
+	// 10. GET /api/server/audit-logs 返回最近管理操作且不含密码或令牌
+	{
+		req := httptest.NewRequest("GET", "/api/server/audit-logs", nil)
+		req.Header.Set("Cookie", sessionCookie)
+		rec := httptest.NewRecorder()
+		srv.mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 for audit-logs, got %d", rec.Code)
+		}
+		var res struct {
+			Logs []AuditEntry `json:"logs"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+			t.Fatalf("failed to parse audit logs: %v", err)
+		}
+		if len(res.Logs) == 0 {
+			t.Fatal("expected audit logs to be recorded")
+		}
+		raw := rec.Body.String()
+		if strings.Contains(raw, "NewPassword888") || strings.Contains(raw, "ServerPassword888") {
+			t.Fatalf("audit logs must never contain passwords, got: %s", raw)
+		}
+	}
 }
 
 func TestWriteConfigBackupKeepsThree(t *testing.T) {

@@ -40,12 +40,14 @@ const sessionCookieName = "singctl_server_session"
 
 // Options 服务端 Web 界面配置
 type Options struct {
-	ConfigPath string
-	Listen     string
-	Username   string
-	Password   string
-	Version    string
-	OnReady    func(listenAddr string)
+	ConfigPath    string
+	BanFilePath   string // (可选) 防爆破封禁列表存储文件 (默认: <ConfigDir>/.serverweb_bans.json)
+	AuditFilePath string // (可选) 管理操作审计日志存储文件 (默认: <ConfigDir>/.serverweb_audit.json)
+	Listen        string
+	Username      string
+	Password      string
+	Version       string
+	OnReady       func(listenAddr string)
 }
 
 // Server 服务端 Web 实例
@@ -56,6 +58,7 @@ type Server struct {
 	sessions           map[string]sessionRecord
 	sessionsMu         sync.Mutex
 	limiter            *IPLimiter
+	audit              *AuditManager
 	passwordPendingAck bool
 }
 
@@ -69,6 +72,32 @@ const (
 	sessionAbsoluteTTL = 12 * time.Hour
 	maxActiveSessions  = 50
 )
+
+func resolveBanFilePath(opts Options) string {
+	if opts.BanFilePath != "" {
+		return opts.BanFilePath
+	}
+	if opts.ConfigPath != "" {
+		return filepath.Join(filepath.Dir(opts.ConfigPath), ".serverweb_bans.json")
+	}
+	if st, err := os.Stat("/etc/singctl"); err == nil && st.IsDir() {
+		return "/etc/singctl/.serverweb_bans.json"
+	}
+	return ""
+}
+
+func resolveAuditFilePath(opts Options) string {
+	if opts.AuditFilePath != "" {
+		return opts.AuditFilePath
+	}
+	if opts.ConfigPath != "" {
+		return filepath.Join(filepath.Dir(opts.ConfigPath), ".serverweb_audit.json")
+	}
+	if st, err := os.Stat("/etc/singctl"); err == nil && st.IsDir() {
+		return "/etc/singctl/.serverweb_audit.json"
+	}
+	return ""
+}
 
 // New 创建服务端 Web 实例
 func New(opts Options) *Server {
@@ -97,11 +126,15 @@ func New(opts Options) *Server {
 		opts.Username = "singctl"
 	}
 
+	banFile := resolveBanFilePath(opts)
+	auditFile := resolveAuditFilePath(opts)
+
 	s := &Server{
 		opts:               opts,
 		mux:                http.NewServeMux(),
 		sessions:           make(map[string]sessionRecord),
-		limiter:            NewIPLimiter(3, 10*time.Minute, 15*time.Minute),
+		limiter:            NewIPLimiter(3, 10*time.Minute, 15*time.Minute, banFile),
+		audit:              NewAuditManager(auditFile),
 		passwordPendingAck: pendingAck,
 	}
 
@@ -137,6 +170,7 @@ func New(opts Options) *Server {
 	s.mux.HandleFunc("GET /api/server/session/url", s.guard(s.handleSessionURL))
 	s.mux.HandleFunc("GET /api/server/bans", s.guard(s.handleListBans))
 	s.mux.HandleFunc("POST /api/server/unban", s.guard(s.handleUnban))
+	s.mux.HandleFunc("GET /api/server/audit-logs", s.guard(s.handleListAuditLogs))
 	s.mux.HandleFunc("GET /api/server/doctor", s.guard(s.handleDoctor))
 	s.mux.HandleFunc("GET /api/server/diagnose/unlock", s.guard(s.handleUnlockDiagnose))
 
@@ -413,6 +447,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			"hasCFToken":       cfg.Server.CFDNSKey != "",
 		},
 	}
+	if s.audit != nil {
+		status["auditLogs"] = s.audit.List()
+	}
 	if s.pendingAck() {
 		status["initialCredentials"] = map[string]any{
 			"pending":  true,
@@ -581,6 +618,7 @@ func (s *Server) handleServiceAction(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("执行 %s %s 失败: %v", service, action, cmdErr))
 		return
 	}
+	s.recordAudit(r, fmt.Sprintf("执行服务操作 [%s -> %s]", service, action))
 	writeJSON(w, http.StatusOK, map[string]string{
 		"message": fmt.Sprintf("服务 %s 动作 %s 执行成功", service, action),
 	})
@@ -627,6 +665,7 @@ func (s *Server) handleUpgradeService(w http.ResponseWriter, r *http.Request) {
 		msg = fmt.Sprintf("已成功平滑更新 %d 个核心服务组件", len(results))
 	}
 
+	s.recordAudit(r, fmt.Sprintf("平滑升级组件 [%s]", target))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"message": msg,
 		"results": results,
@@ -846,6 +885,7 @@ func (s *Server) handleUpdateServiceConfig(w http.ResponseWriter, r *http.Reques
 		_ = exec.Command("systemctl", "restart", "wireproxy").Run()
 	}
 
+	s.recordAudit(r, fmt.Sprintf("修改并保存 %s 服务配置", service))
 	writeJSON(w, http.StatusOK, map[string]string{
 		"message": fmt.Sprintf("服务 %s 配置文件已成功保存并重新加载", service),
 	})
@@ -893,6 +933,7 @@ func (s *Server) handleRegeneratePath(w http.ResponseWriter, r *http.Request) {
 	}
 	newHTTPS := fmt.Sprintf("https://%s%s/", subDomain, newPath)
 
+	s.recordAudit(r, fmt.Sprintf("重新生成随机安全管理路径为 [%s]", newPath))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"message":  "全新隐蔽访问路径已生成并生效",
 		"path":     newPath,
@@ -907,6 +948,7 @@ func (s *Server) handleRegenerateMaskSite(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	s.recordAudit(r, "重新生成随机伪装站")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"message": fmt.Sprintf("已成功重新生成伪装博客：%s（作者：%s，主题：%s）", meta.BlogTitle, meta.AuthorName, meta.Category),
 		"meta":    meta,
@@ -950,6 +992,7 @@ func (s *Server) handleUpdateSNI(w http.ResponseWriter, r *http.Request) {
 		_ = sbt.UpdateSubstoreConfig(sbs)
 	}
 
+	s.recordAudit(r, fmt.Sprintf("更新 Reality SNI 伪装域名为 [%s]", cfg.Server.Sni))
 	writeJSON(w, http.StatusOK, map[string]string{
 		"message": "Reality SNI 已成功更新为 " + cfg.Server.Sni + " 并自动重载服务与订阅",
 		"sni":     cfg.Server.Sni,
@@ -962,6 +1005,7 @@ func (s *Server) handleEnableBBR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	bbrOk := isBBREnabled()
+	s.recordAudit(r, "启用 Google TCP BBR 加速")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"message": "Google TCP BBR 拥塞控制算法已成功开启并立即生效",
 		"bbr":     bbrOk,
@@ -994,6 +1038,7 @@ func (s *Server) handleUpdateCFToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.recordAudit(r, "轮换 Cloudflare API Token")
 	writeJSON(w, http.StatusOK, map[string]string{"message": "Cloudflare Token 已成功更新并重载 Caddy"})
 }
 
@@ -1098,17 +1143,20 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		banned, remaining, fails := s.limiter.RecordFailure(clientIP)
 		if banned {
 			mins := int(remaining.Minutes()) + 1
+			s.recordAudit(r, fmt.Sprintf("连续密码错误 %d 次，触发封锁 %d 分钟", fails, mins))
 			w.Header().Set("Retry-After", fmt.Sprintf("%d", int(remaining.Seconds())))
 			writeJSONError(w, http.StatusTooManyRequests, fmt.Sprintf("密码错误已达 3 次，该 IP (%s) 已被安全封锁，请在 %d 分钟后再试", clientIP, mins))
 			return
 		}
 		remainingAttempts := s.limiter.maxAttempts - fails
+		s.recordAudit(r, fmt.Sprintf("登录失败 (密码错误，剩余尝试机会 %d 次)", remainingAttempts))
 		writeJSONError(w, http.StatusUnauthorized, fmt.Sprintf("用户名或密码错误 (还剩 %d 次尝试机会)", remainingAttempts))
 		return
 	}
 
 	s.limiter.RecordSuccess(clientIP)
 	s.setAuthCookie(w, r)
+	s.recordAudit(r, fmt.Sprintf("管理员 [%s] 登录成功", user))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"username": user,
 		"message":  "登录成功",
@@ -1127,6 +1175,7 @@ func (s *Server) handleUnban(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.limiter.Unban(targetIP)
+	s.recordAudit(r, fmt.Sprintf("解除 IP 封禁: %s", targetIP))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"message":  fmt.Sprintf("已成功解封 IP: %s", targetIP),
 		"unbanned": targetIP,
@@ -1146,6 +1195,24 @@ func (s *Server) handleListBans(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"bans": banList,
 	})
+}
+
+func (s *Server) handleListAuditLogs(w http.ResponseWriter, r *http.Request) {
+	var logs []AuditEntry
+	if s.audit != nil {
+		logs = s.audit.List()
+	} else {
+		logs = []AuditEntry{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"logs": logs,
+	})
+}
+
+func (s *Server) recordAudit(r *http.Request, action string) {
+	if s.audit != nil {
+		s.audit.Record(GetClientIP(r), action)
+	}
 }
 
 func (s *Server) handleDoctor(w http.ResponseWriter, r *http.Request) {
@@ -1215,6 +1282,7 @@ func (s *Server) handleUpdateCredentials(w http.ResponseWriter, r *http.Request)
 	s.revokeAllSessions()
 	s.setAuthCookie(w, r)
 
+	s.recordAudit(r, fmt.Sprintf("修改管理账号为 [%s] 并更新管理密码", newUsername))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"message":  "账号与密码修改成功，新凭据已生效",
 		"username": newUsername,
@@ -1235,10 +1303,12 @@ func (s *Server) handleAckCredentials(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.passwordPendingAck = false
 	s.mu.Unlock()
+	s.recordAudit(r, "在面板确认已保存初始密码")
 	writeJSON(w, http.StatusOK, map[string]string{"message": "已确认密码保存，面板不再显示明文"})
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	s.recordAudit(r, "管理员退出登录")
 	if c, err := r.Cookie(sessionCookieName); err == nil && c.Value != "" {
 		s.deleteSession(c.Value)
 	}

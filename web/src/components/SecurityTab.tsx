@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { ServerStatusResponse, BannedIP } from '../types';
+import { ServerStatusResponse, BannedIP, AuditLogItem } from '../types';
 import { api } from '../api';
 import { useToast } from './Toast';
-import { Shield, KeyRound, Dices, Lock, UserCheck, ShieldAlert, ShieldCheck, Check, X, RefreshCw, Unlock, AlertOctagon } from 'lucide-react';
+import { Shield, KeyRound, Dices, Lock, UserCheck, ShieldAlert, ShieldCheck, Check, X, RefreshCw, Unlock, AlertOctagon, ClipboardList } from 'lucide-react';
 
 interface SecurityTabProps {
   status: ServerStatusResponse | null;
@@ -23,6 +23,10 @@ export const SecurityTab: React.FC<SecurityTabProps> = ({ status, onRefresh }) =
   const [loadingBans, setLoadingBans] = useState(false);
   const [unbanningIP, setUnbanningIP] = useState<string | null>(null);
 
+  // 最近管理操作审计状态
+  const [auditLogs, setAuditLogs] = useState<AuditLogItem[]>(status?.auditLogs || []);
+  const [loadingAudit, setLoadingAudit] = useState(false);
+
   const fetchBans = async () => {
     setLoadingBans(true);
     try {
@@ -35,9 +39,28 @@ export const SecurityTab: React.FC<SecurityTabProps> = ({ status, onRefresh }) =
     }
   };
 
+  const fetchAuditLogs = async () => {
+    setLoadingAudit(true);
+    try {
+      const res = await api.getAuditLogs();
+      setAuditLogs(res.logs || []);
+    } catch (err: any) {
+      // 静默处理
+    } finally {
+      setLoadingAudit(false);
+    }
+  };
+
   useEffect(() => {
     fetchBans();
+    fetchAuditLogs();
   }, []);
+
+  useEffect(() => {
+    if (status?.auditLogs) {
+      setAuditLogs(status.auditLogs);
+    }
+  }, [status?.auditLogs]);
 
   const handleUnban = async (ip: string) => {
     setUnbanningIP(ip);
@@ -344,6 +367,79 @@ export const SecurityTab: React.FC<SecurityTabProps> = ({ status, onRefresh }) =
                         >
                           {unbanningIP === b.ip ? '正在解封...' : '立即解封'}
                         </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Recent Management Operations Audit Card */}
+      <div className="p-6 rounded-2xl glass-card">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-800">
+          <div>
+            <div className="flex items-center gap-2 text-indigo-400 text-xs font-semibold uppercase tracking-wider mb-1">
+              <ClipboardList className="w-3.5 h-3.5" />
+              <span>操作审计与合规追溯</span>
+            </div>
+            <h3 className="text-xl font-bold text-white tracking-tight flex items-center gap-2">
+              <span>最近管理操作</span>
+              <span className="px-2.5 py-0.5 rounded-full bg-indigo-500/10 text-indigo-300 border border-indigo-500/20 text-xs font-semibold">
+                共 {auditLogs.length} 条记录
+              </span>
+            </h3>
+            <p className="text-xs text-slate-400 mt-0.5">
+              记录最近管理操作的时间、动作与来源 IP。受隐私与安全策略保护，绝不记录任何明文密码、会话令牌或敏感秘钥。
+            </p>
+          </div>
+
+          <div className="flex items-center gap-2 self-start sm:self-auto">
+            <button
+              onClick={fetchAuditLogs}
+              disabled={loadingAudit}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-xs text-slate-300 transition-all disabled:opacity-50"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${loadingAudit ? 'animate-spin' : ''}`} />
+              <span>刷新记录</span>
+            </button>
+          </div>
+        </div>
+
+        <div className="mt-4">
+          {auditLogs.length === 0 ? (
+            <div className="py-8 text-center rounded-xl bg-slate-950/40 border border-slate-800/80">
+              <ClipboardList className="w-9 h-9 text-slate-600 mx-auto mb-2 opacity-80" />
+              <div className="text-sm font-semibold text-slate-400">暂无管理操作记录</div>
+              <p className="text-xs text-slate-600 mt-1 max-w-md mx-auto">
+                当您在控制面板中登录、修改配置、轮换域名或执行运维动作时，相关审计日志将自动在此处展示。
+              </p>
+            </div>
+          ) : (
+            <div className="overflow-x-auto max-h-80 overflow-y-auto">
+              <table className="w-full text-left text-xs font-mono">
+                <thead className="sticky top-0 bg-slate-900/90 backdrop-blur-md z-10">
+                  <tr className="border-b border-slate-800 text-slate-400">
+                    <th className="py-2.5 px-3">操作时间</th>
+                    <th className="py-2.5 px-3">管理动作</th>
+                    <th className="py-2.5 px-3 text-right">来源客户端 IP</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/60">
+                  {auditLogs.map((log, idx) => (
+                    <tr key={`${log.time}-${idx}`} className="hover:bg-slate-900/40 transition-colors">
+                      <td className="py-3 px-3 text-slate-400 whitespace-nowrap">
+                        {log.time}
+                      </td>
+                      <td className="py-3 px-3 text-slate-200">
+                        <span className="font-sans font-medium text-slate-200">
+                          {log.action}
+                        </span>
+                      </td>
+                      <td className="py-3 px-3 text-right text-emerald-400 font-semibold whitespace-nowrap">
+                        {log.ip}
                       </td>
                     </tr>
                   ))}

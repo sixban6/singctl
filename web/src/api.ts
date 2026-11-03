@@ -4,6 +4,7 @@ import {
   WarpDiagnoseResponse,
   ReturnSummary,
   BannedIP,
+  AuditLogItem,
   DoctorReport,
   MediaUnlockReport,
   CheckUpdateResponse,
@@ -135,6 +136,8 @@ export const api = {
     }),
 
   getBans: () => request<{ bans: BannedIP[] }>('/api/server/bans'),
+
+  getAuditLogs: () => request<{ logs: AuditLogItem[] }>('/api/server/audit-logs'),
 
   unban: (ip: string) =>
     request<{ message: string; unbanned: string }>('/api/server/unban', {

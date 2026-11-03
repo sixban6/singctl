@@ -1,20 +1,24 @@
 package serverweb
 
 import (
+	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 )
 
 type ipAttempt struct {
-	failCount   int
-	lastFail    time.Time
-	bannedUntil time.Time
+	FailCount   int       `json:"fail_count"`
+	LastFail    time.Time `json:"last_fail"`
+	BannedUntil time.Time `json:"banned_until"`
 }
 
-// IPLimiter IP 登录限流与防暴力破解器
+// IPLimiter IP 登录限流与防暴力破解器 (支持 0600 文件持久化)
 type IPLimiter struct {
 	mu          sync.RWMutex
 	attempts    map[string]*ipAttempt
@@ -22,10 +26,11 @@ type IPLimiter struct {
 	window      time.Duration
 	banDuration time.Duration
 	stopCleaner chan struct{}
+	filePath    string
 }
 
-// NewIPLimiter 创建 IPLimiter 实例 (默认 3 次失败、10 分钟窗口、15 分钟封禁)
-func NewIPLimiter(maxAttempts int, window, banDuration time.Duration) *IPLimiter {
+// NewIPLimiter 创建 IPLimiter 实例 (默认 3 次失败、10 分钟窗口、15 分钟封禁，支持传入 0600 小文件持久化路径)
+func NewIPLimiter(maxAttempts int, window, banDuration time.Duration, filePath ...string) *IPLimiter {
 	if maxAttempts <= 0 {
 		maxAttempts = 3
 	}
@@ -36,15 +41,69 @@ func NewIPLimiter(maxAttempts int, window, banDuration time.Duration) *IPLimiter
 		banDuration = 15 * time.Minute
 	}
 
+	fp := ""
+	if len(filePath) > 0 {
+		fp = strings.TrimSpace(filePath[0])
+	}
+
 	l := &IPLimiter{
 		attempts:    make(map[string]*ipAttempt),
 		maxAttempts: maxAttempts,
 		window:      window,
 		banDuration: banDuration,
 		stopCleaner: make(chan struct{}),
+		filePath:    fp,
 	}
+	l.loadLocked()
 	go l.startCleaner()
 	return l
+}
+
+func (l *IPLimiter) loadLocked() {
+	if l.filePath == "" {
+		return
+	}
+	data, err := os.ReadFile(l.filePath)
+	if err != nil {
+		return
+	}
+	var loaded map[string]*ipAttempt
+	if err := json.Unmarshal(data, &loaded); err != nil {
+		return
+	}
+	now := time.Now()
+	for ip, att := range loaded {
+		if att == nil {
+			continue
+		}
+		// 恢复封禁中或仍在失败统计窗口内的 IP
+		if now.Before(att.BannedUntil) || now.Sub(att.LastFail) <= l.window {
+			l.attempts[ip] = att
+		}
+	}
+}
+
+func (l *IPLimiter) saveLocked() {
+	if l.filePath == "" {
+		return
+	}
+	data, err := json.MarshalIndent(l.attempts, "", "  ")
+	if err != nil {
+		return
+	}
+	dir := filepath.Dir(l.filePath)
+	_ = os.MkdirAll(dir, 0700)
+
+	tmp := fmt.Sprintf("%s.%d.tmp", l.filePath, time.Now().UnixNano())
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return
+	}
+	_ = os.Chmod(tmp, 0600)
+	if err := os.Rename(tmp, l.filePath); err != nil {
+		_ = os.Remove(tmp)
+		_ = os.WriteFile(l.filePath, data, 0600)
+		_ = os.Chmod(l.filePath, 0600)
+	}
 }
 
 // GetClientIP 只在本机反代连接上信任 Caddy 覆写的 X-Real-IP。
@@ -85,8 +144,8 @@ func (l *IPLimiter) CheckBan(ip string) (time.Duration, bool) {
 		return 0, false
 	}
 	now := time.Now()
-	if now.Before(att.bannedUntil) {
-		return att.bannedUntil.Sub(now), true
+	if now.Before(att.BannedUntil) {
+		return att.BannedUntil.Sub(now), true
 	}
 	return 0, false
 }
@@ -101,24 +160,27 @@ func (l *IPLimiter) RecordFailure(ip string) (banned bool, remainingTime time.Du
 
 	now := time.Now()
 	att, exists := l.attempts[ip]
-	if !exists || now.Sub(att.lastFail) > l.window {
+	if !exists || now.Sub(att.LastFail) > l.window {
 		att = &ipAttempt{
-			failCount: 1,
-			lastFail:  now,
+			FailCount: 1,
+			LastFail:  now,
 		}
 		l.attempts[ip] = att
+		l.saveLocked()
 		return false, 0, 1
 	}
 
-	att.failCount++
-	att.lastFail = now
+	att.FailCount++
+	att.LastFail = now
 
-	if att.failCount >= l.maxAttempts {
-		att.bannedUntil = now.Add(l.banDuration)
-		return true, l.banDuration, att.failCount
+	if att.FailCount >= l.maxAttempts {
+		att.BannedUntil = now.Add(l.banDuration)
+		l.saveLocked()
+		return true, l.banDuration, att.FailCount
 	}
 
-	return false, 0, att.failCount
+	l.saveLocked()
+	return false, 0, att.FailCount
 }
 
 // RecordSuccess 登录成功时清空该 IP 的失败记录
@@ -128,7 +190,10 @@ func (l *IPLimiter) RecordSuccess(ip string) {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	delete(l.attempts, ip)
+	if _, exists := l.attempts[ip]; exists {
+		delete(l.attempts, ip)
+		l.saveLocked()
+	}
 }
 
 // Unban 解除指定 IP 或全部 IP 的封禁
@@ -136,11 +201,15 @@ func (l *IPLimiter) Unban(ip string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if ip == "all" || ip == "*" || ip == "" {
-		l.attempts = make(map[string]*ipAttempt)
+		if len(l.attempts) > 0 {
+			l.attempts = make(map[string]*ipAttempt)
+			l.saveLocked()
+		}
 		return true
 	}
 	if _, exists := l.attempts[ip]; exists {
 		delete(l.attempts, ip)
+		l.saveLocked()
 		return true
 	}
 	return false
@@ -153,8 +222,8 @@ func (l *IPLimiter) ListBans() map[string]time.Duration {
 	result := make(map[string]time.Duration)
 	now := time.Now()
 	for ip, att := range l.attempts {
-		if now.Before(att.bannedUntil) {
-			result[ip] = att.bannedUntil.Sub(now)
+		if now.Before(att.BannedUntil) {
+			result[ip] = att.BannedUntil.Sub(now)
 		}
 	}
 	return result
@@ -169,10 +238,15 @@ func (l *IPLimiter) startCleaner() {
 		case <-ticker.C:
 			l.mu.Lock()
 			now := time.Now()
+			changed := false
 			for ip, att := range l.attempts {
-				if now.After(att.bannedUntil) && now.Sub(att.lastFail) > l.window {
+				if now.After(att.BannedUntil) && now.Sub(att.LastFail) > l.window {
 					delete(l.attempts, ip)
+					changed = true
 				}
+			}
+			if changed {
+				l.saveLocked()
 			}
 			l.mu.Unlock()
 		case <-l.stopCleaner:
