@@ -630,9 +630,7 @@ func reinstallAll(cfg *config.Config) error {
 		return err
 	}
 
-	sbs.ShowLoginInfo()
-	sbt.ShowLoginInfo()
-	logger.Success("All server components reinstalled successfully.")
+	showUnifiedServerPanel(cfg, sbs, sbt, "🎉 SingCtl 服务端全组件重装部署成功！")
 	return nil
 }
 
@@ -854,12 +852,12 @@ func syncNodeToSubstore(configPath string, restart bool, tag string) error {
 	return nil
 }
 
-// NewInfoServerCmd creates the command to display Sub-Store admin URL and node share links.
+// NewInfoServerCmd creates the command to display server configuration, web admin panel, and node share links.
 func NewInfoServerCmd(configPath string) *cobra.Command {
 	return &cobra.Command{
 		Use:     "info",
-		Aliases: []string{"show", "status-info"},
-		Short:   "查看Sub-Store登录地址与节点信息 / View Sub-Store admin URL and node share links",
+		Aliases: []string{"show", "status-info", "i"},
+		Short:   "查看服务端核心配置、专属管理面板与节点订阅信息 / View server status, web admin panel and subscription info",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			resolvedPath := resolveConfigPath(cmd, configPath)
 			return showServerInfo(resolvedPath)
@@ -877,6 +875,11 @@ func showServerInfo(configPath string) error {
 		return fmt.Errorf("server.node_domain (or sb_domain) is required in config (%s)", configPath)
 	}
 
+	// 确保后台管理凭证完备 (兼容升级场景)
+	if cfg.Server.EnsureWebAdminCredentials() {
+		_ = config.Save(configPath, cfg)
+	}
+
 	sbs, err := deploy.NewSingBoxServer(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to initialize sing-box server: %w", err)
@@ -887,87 +890,85 @@ func showServerInfo(configPath string) error {
 	}
 
 	sbt := deploy.NewSubstore(cfg, "")
-	adminURL, err := sbt.GetAdminURL()
-	vercelURL, _ := sbt.GetVercelAdminURL()
-
-	fmt.Println("========================================================")
-	if err != nil {
-		fmt.Printf("🔒 Sub-Store 后端管理地址: [未能获取: %v]\n", err)
-	} else {
-		fmt.Println("🔒 Sub-Store 后端管理地址 (Admin Access URLs):")
-		if vercelURL != "" {
-			fmt.Printf("• 官方 Web UI (推荐 / 免 CDN 缓存影响):\n  %s\n", vercelURL)
-		}
-		fmt.Printf("• 自建独立域名前端 (若遇白屏需在 Cloudflare 清除缓存):\n  %s\n", adminURL)
-	}
-
-	fmt.Println("\n📡 服务端节点分享链接 (Node Share Links):")
-	fmt.Printf("• Hysteria 2:    %s\n", sbs.ShareLinkHy2)
-	fmt.Printf("• VLESS Reality: %s\n", sbs.ShareLinkVless)
-
-	fmt.Println("\n🛡️ 伪装回落站点 (Mask Site & Fallback):")
-	if serverIP := cfg.Server.GetServerIP(); serverIP != "" {
-		fmt.Printf("• 公网 IP 直连:  https://%s (Let's Encrypt 原生免费公网 IP 证书)\n", deploy.FormatIPForCaddy(serverIP))
-	}
-	if nodeDomain := cfg.Server.GetNodeDomain(); nodeDomain != "" {
-		fmt.Printf("• 节点域名访问: https://%s\n", nodeDomain)
-	}
-	if cfg.Server.WebTerminal.Enabled && cfg.Server.WebTerminal.Path != "" {
-		domain := cfg.Server.GetNodeDomain()
-		if domain == "" {
-			domain = cfg.Server.GetSubstoreDomain()
-		}
-		if domain != "" {
-			fmt.Printf("• Web 运维终端:  https://%s%s/ (mTLS 双向认证保护)\n", domain, cfg.Server.WebTerminal.Path)
-		}
-	}
-	fmt.Println("========================================================")
-
+	showUnifiedServerPanel(cfg, sbs, sbt, "📌 SingCtl 服务端核心配置与连接信息")
 	return nil
 }
 
-func showWebAdminBanner(cfg *config.Config) {
-	domain := cfg.Server.GetSubstoreDomain()
-	if domain == "" {
-		domain = cfg.Server.GetNodeDomain()
-	}
-	adminPath := cfg.Server.GetWebAdminPath()
-	adminURL := fmt.Sprintf("https://%s%s/", domain, adminPath)
-
-	fmt.Println("\n========================================================")
-	fmt.Println("🌐 服务端专属 Web 管理面板 (HTTPS Caddy 专属路径反代):")
-	fmt.Printf("• 访问地址: %s\n", adminURL)
-	fmt.Printf("• 管理员账号: %s\n", cfg.Server.GetWebAdminUsername())
-	fmt.Printf("• 初始管理密码: %s (登录后台后可随时修改)\n", cfg.Server.GetWebAdminPassword())
-	fmt.Println("• 安全机制: 纯会话安全 Cookie，关闭浏览器/标签页即退出，无长期免密")
-	fmt.Println("========================================================")
+func showUnifiedInstallSummary(cfg *config.Config, sbs *deploy.SingBoxServer, sbt *deploy.Substore) {
+	showUnifiedServerPanel(cfg, sbs, sbt, "🎉 SingCtl 服务端全组件部署成功！")
 }
 
-func showUnifiedInstallSummary(cfg *config.Config, sbs *deploy.SingBoxServer, sbt *deploy.Substore) {
+func showUnifiedServerPanel(cfg *config.Config, sbs *deploy.SingBoxServer, sbt *deploy.Substore, title string) {
 	domain := cfg.Server.GetSubstoreDomain()
 	if domain == "" {
 		domain = cfg.Server.GetNodeDomain()
 	}
 	adminPath := cfg.Server.GetWebAdminPath()
-	adminURL := fmt.Sprintf("https://%s%s/", domain, adminPath)
+	adminURL := ""
+	if domain != "" && adminPath != "" {
+		adminURL = fmt.Sprintf("https://%s%s/", domain, adminPath)
+	}
 
 	subURL := ""
 	if sbt != nil {
 		subURL = sbt.GetSubscriptionURL()
+	} else if domain != "" {
+		subURL = fmt.Sprintf("https://%s/api/substore/download/singctl", domain)
+	}
+
+	substoreAdminURL := ""
+	substoreVercelURL := ""
+	if sbt != nil {
+		substoreAdminURL, _ = sbt.GetAdminURL()
+		substoreVercelURL, _ = sbt.GetVercelAdminURL()
+	}
+
+	// 动态检测各核心服务版本
+	versions := deploy.GetCoreServiceVersions()
+	caddyVer := versions["caddy"]
+	if caddyVer != "" {
+		caddyVer = "v" + caddyVer
+	} else {
+		caddyVer = "已就绪"
+	}
+
+	sbVer := versions["singbox"]
+	if sbVer != "" {
+		sbVer = "v" + sbVer
+	} else {
+		sbVer = "已就绪"
+	}
+
+	ssVer := versions["substore"]
+	if ssVer != "" {
+		ssVer = "v" + ssVer
+	} else {
+		ssVer = "已就绪"
+	}
+
+	warpVer := versions["warp"]
+	if warpVer != "" {
+		warpVer = "v" + warpVer
+	} else {
+		warpVer = "已就绪"
 	}
 
 	fmt.Println("\n══════════════════════════════════════════════════════════════════════════")
-	fmt.Println("                     🎉 SingCtl 服务端全组件部署成功！")
+	fmt.Printf("                     %s\n", title)
 	fmt.Println("══════════════════════════════════════════════════════════════════════════")
-	fmt.Println(" [✓] Caddy 2.11.7     : TLS 证书申请成功，443 端口反代已就绪")
-	fmt.Println(" [✓] sing-box 核心    : VLESS Reality & Hysteria 2 双协议已启动")
-	fmt.Println(" [✓] Sub-Store        : 节点聚合与订阅转换已就绪 (端口 3001)")
-	fmt.Println(" [✓] WARP 出口        : 本地分流出口已就绪 (端口 40000)")
+	fmt.Printf(" [✓] Caddy %-11s : TLS 证书申请成功，443 端口反代已就绪\n", caddyVer)
+	fmt.Printf(" [✓] sing-box %-9s: VLESS Reality & Hysteria 2 双协议已启动\n", sbVer)
+	fmt.Printf(" [✓] Sub-Store %-8s: 节点聚合与订阅转换已就绪 (端口 3001)\n", ssVer)
+	fmt.Printf(" [✓] WARP 出口 %-8s: 本地分流出口已就绪 (端口 40000)\n", warpVer)
 	fmt.Println("──────────────────────────────────────────────────────────────────────────")
-	fmt.Println(" 🌐 专属管理控制台 (核心入口):")
-	fmt.Printf("   • 访问链接 : %s\n", adminURL)
+	fmt.Println(" 🌐 专属管理控制台 (核心 Web 后台入口):")
+	if adminURL != "" {
+		fmt.Printf("   • 访问链接 : %s\n", adminURL)
+	} else {
+		fmt.Println("   • 访问链接 : [未配置后台路径]")
+	}
 	fmt.Printf("   • 管理账号 : %s\n", cfg.Server.GetWebAdminUsername())
-	fmt.Printf("   • 初始密码 : %s\n", cfg.Server.GetWebAdminPassword())
+	fmt.Printf("   • 登录密码 : %s (登录后台后可随时修改)\n", cfg.Server.GetWebAdminPassword())
 	fmt.Println("   • 安全机制 : 纯会话 Cookie 认证，公网端口严密关闭，防爆破 3次错封IP 保护")
 	fmt.Println("──────────────────────────────────────────────────────────────────────────")
 	fmt.Println(" 📦 客户端全平台聚合订阅:")
@@ -978,10 +979,51 @@ func showUnifiedInstallSummary(cfg *config.Config, sbs *deploy.SingBoxServer, sb
 	}
 	fmt.Println("   • 快速导入 : 登录上述管理控制台，可一键唤醒导入 Shadowrocket、")
 	fmt.Println("                Clash Verge、Sing-box，或在网页端直接扫码导入。")
+
+	if sbs != nil && (sbs.ShareLinkHy2 != "" || sbs.ShareLinkVless != "") {
+		fmt.Println("──────────────────────────────────────────────────────────────────────────")
+		fmt.Println(" 📡 服务端节点直连分享链接 (Node Share Links):")
+		if sbs.ShareLinkHy2 != "" {
+			fmt.Printf("   • Hysteria 2    : %s\n", sbs.ShareLinkHy2)
+		}
+		if sbs.ShareLinkVless != "" {
+			fmt.Printf("   • VLESS Reality : %s\n", sbs.ShareLinkVless)
+		}
+	}
+
+	fmt.Println("──────────────────────────────────────────────────────────────────────────")
+	fmt.Println(" 🛡️ 伪装回落与辅助入口 (Mask Site & Fallback):")
+	if serverIP := cfg.Server.GetServerIP(); serverIP != "" {
+		fmt.Printf("   • 公网 IP 直连  : https://%s (Let's Encrypt 原生免费公网 IP 证书)\n", deploy.FormatIPForCaddy(serverIP))
+	}
+	if nodeDomain := cfg.Server.GetNodeDomain(); nodeDomain != "" {
+		fmt.Printf("   • 节点域名伪装  : https://%s\n", nodeDomain)
+	}
+	if cfg.Server.WebTerminal.Enabled && cfg.Server.WebTerminal.Path != "" {
+		terminalDomain := cfg.Server.GetNodeDomain()
+		if terminalDomain == "" {
+			terminalDomain = cfg.Server.GetSubstoreDomain()
+		}
+		if terminalDomain != "" {
+			fmt.Printf("   • Web 运维终端   : https://%s%s/ (mTLS 双向认证保护)\n", terminalDomain, cfg.Server.WebTerminal.Path)
+		}
+	}
+	if substoreVercelURL != "" || substoreAdminURL != "" {
+		fmt.Println("   • Sub-Store 页面 :")
+		if substoreVercelURL != "" {
+			fmt.Printf("     - 官方 Web UI  : %s\n", substoreVercelURL)
+		}
+		if substoreAdminURL != "" {
+			fmt.Printf("     - 自建独立端   : %s\n", substoreAdminURL)
+		}
+	}
+
 	fmt.Println("──────────────────────────────────────────────────────────────────────────")
 	fmt.Println(" 💡 核心运维常用命令:")
 	fmt.Println("   • 全链路健康体检   : singctl doctor")
-	fmt.Println("   • 查看控制台访问信息: singctl sr web status")
+	fmt.Println("   • 查看控制台访问信息: singctl sr info")
+	fmt.Println("   • 检查组件远端升级 : singctl sr check-update [singbox|caddy|substore|warp]")
+	fmt.Println("   • 一键平滑升级组件 : singctl sr update [component|all]")
 	fmt.Println("   • 一键解封受限 IP  : singctl sr web unban [IP|all]")
 	fmt.Println("   • 动态修改伪装域名 : singctl sr sni <新域名>")
 	fmt.Println("══════════════════════════════════════════════════════════════════════════")

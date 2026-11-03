@@ -48,6 +48,9 @@ func NewSingBoxServer(cfg *config.Config) (*SingBoxServer, error) {
 }
 
 func (sbs *SingBoxServer) init() error {
+	// Try loading existing deployed credentials first to prevent redundant regeneration
+	_ = sbs.LoadExistingCredentials()
+
 	sbs.initCaddyCertPath()
 	if err := sbs.initVRParams(); err != nil {
 		return fmt.Errorf("failed to initialize VR parameters: %w", err)
@@ -105,6 +108,49 @@ func (sbs *SingBoxServer) AnyTLSPort() int {
 	return 443
 }
 
+func lookupCaddyCert(domain string) (string, string) {
+	basePath := "/var/lib/caddy/.local/share/caddy/certificates"
+	if _, err := os.Stat("/var/lib/caddy"); os.IsNotExist(err) {
+		return "", ""
+	}
+
+	parts := strings.Split(domain, ".")
+	var wildcardNames []string
+	if len(parts) >= 2 {
+		wildcardNames = append(wildcardNames, "wildcard_."+strings.Join(parts[1:], "."))
+	}
+
+	dirs, err := os.ReadDir(basePath)
+	if err != nil {
+		return "", ""
+	}
+	for _, d := range dirs {
+		if !d.IsDir() {
+			continue
+		}
+		// 1. Direct domain cert match
+		crtPath := filepath.Join(basePath, d.Name(), domain, domain+".crt")
+		keyPath := filepath.Join(basePath, d.Name(), domain, domain+".key")
+		if _, err := os.Stat(crtPath); err == nil {
+			if _, err := os.Stat(keyPath); err == nil {
+				return crtPath, keyPath
+			}
+		}
+
+		// 2. Wildcard cert fallback (e.g. wildcard_.example.com)
+		for _, wName := range wildcardNames {
+			wCrt := filepath.Join(basePath, d.Name(), wName, wName+".crt")
+			wKey := filepath.Join(basePath, d.Name(), wName, wName+".key")
+			if _, err := os.Stat(wCrt); err == nil {
+				if _, err := os.Stat(wKey); err == nil {
+					return wCrt, wKey
+				}
+			}
+		}
+	}
+	return "", ""
+}
+
 func findCaddyCertForDomain(domain string) (string, string) {
 	basePath := "/var/lib/caddy/.local/share/caddy/certificates"
 	fallbackCrt := filepath.Join(basePath, "acme-v02.api.letsencrypt.org-directory", domain, domain+".crt")
@@ -114,53 +160,27 @@ func findCaddyCertForDomain(domain string) (string, string) {
 		return fallbackCrt, fallbackKey
 	}
 
-	parts := strings.Split(domain, ".")
-	var wildcardNames []string
-	if len(parts) >= 2 {
-		wildcardNames = append(wildcardNames, "wildcard_."+strings.Join(parts[1:], "."))
+	// 1. Immediate check: if certs already exist, return instantly without logging wait
+	if crt, key := lookupCaddyCert(domain); crt != "" {
+		return crt, key
 	}
 
+	logger.Info("Waiting for Caddy to generate certificates for %s...", domain)
 	for range 30 {
-		dirs, err := os.ReadDir(basePath)
-		if err == nil {
-			for _, d := range dirs {
-				if !d.IsDir() {
-					continue
-				}
-				// 1. Direct domain cert match
-				crtPath := filepath.Join(basePath, d.Name(), domain, domain+".crt")
-				keyPath := filepath.Join(basePath, d.Name(), domain, domain+".key")
-
-				if _, err := os.Stat(crtPath); err == nil {
-					if _, err := os.Stat(keyPath); err == nil {
-						return crtPath, keyPath
-					}
-				}
-
-				// 2. Wildcard cert fallback (e.g. wildcard_.example.com)
-				for _, wName := range wildcardNames {
-					wCrt := filepath.Join(basePath, d.Name(), wName, wName+".crt")
-					wKey := filepath.Join(basePath, d.Name(), wName, wName+".key")
-					if _, err := os.Stat(wCrt); err == nil {
-						if _, err := os.Stat(wKey); err == nil {
-							return wCrt, wKey
-						}
-					}
-				}
-			}
-		}
 		time.Sleep(1 * time.Second)
+		if crt, key := lookupCaddyCert(domain); crt != "" {
+			logger.Success("Found certificate at %s", crt)
+			return crt, key
+		}
 	}
 
 	return fallbackCrt, fallbackKey
 }
 
-// initCaddyCertPath waits and finds the actual cert path Caddy generated (Let's Encrypt or ZeroSSL)
+// initCaddyCertPath finds or waits for the actual cert path Caddy generated (Let's Encrypt or ZeroSSL)
 func (sbs *SingBoxServer) initCaddyCertPath() {
 	nodeDomain := sbs.cfg.Server.GetNodeDomain()
-	logger.Info("Waiting for Caddy to generate certificates for %s...", nodeDomain)
 	sbs.crtPath, sbs.keyPath = findCaddyCertForDomain(nodeDomain)
-	logger.Success("Found certificate at %s", sbs.crtPath)
 }
 func (sbs *SingBoxServer) initVRParams() error {
 	// If credentials were already loaded (e.g. via LoadExistingCredentials), skip generation.
