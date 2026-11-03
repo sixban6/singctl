@@ -7,6 +7,7 @@ import { Navigation, TabKey } from './components/Navigation';
 import { OverviewTab } from './components/OverviewTab';
 import { ServicesTab } from './components/ServicesTab';
 import { SubscriptionsTab } from './components/SubscriptionsTab';
+import { FleetTab } from './components/FleetTab';
 import { LogsTab } from './components/LogsTab';
 import { DiagnosticsTab } from './components/DiagnosticsTab';
 import { SecurityTab } from './components/SecurityTab';
@@ -193,6 +194,8 @@ const DashboardContent: React.FC = () => {
           )}
 
           {currentTab === 'subscriptions' && <SubscriptionsTab />}
+
+          {currentTab === 'fleet' && <FleetTab />}
 
           {currentTab === 'logs' && <LogsTab initialService={logService} />}
 

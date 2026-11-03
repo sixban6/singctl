@@ -1,6 +1,8 @@
 package serverweb
 
 import (
+	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -12,6 +14,8 @@ import (
 	"time"
 
 	"singctl/internal/config"
+	"singctl/internal/fleet"
+	"singctl/internal/subhub"
 )
 
 func TestServerWebAuthAndStatic(t *testing.T) {
@@ -533,5 +537,117 @@ func TestServerWeb_SubscriptionSourcesAndPreview(t *testing.T) {
 	recDel := doAuthReq(http.MethodDelete, "/api/server/subscriptions/sources?name=jp-custom", "{}")
 	if recDel.Code != http.StatusOK {
 		t.Fatalf("expected delete source 200, got %d: %s", recDel.Code, recDel.Body.String())
+	}
+}
+
+func TestServerWeb_TelemetryAuditAndFleet(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "singctl.yaml")
+	sbCfgPath := filepath.Join(tmpDir, "singbox.json")
+	subDir := filepath.Join(tmpDir, "sub-store")
+	fleetFile := filepath.Join(tmpDir, "fleet.json")
+
+	_ = os.WriteFile(cfgPath, []byte(`
+server:
+  node_domain: "node.example.com"
+  web_admin:
+    username: "opsadmin"
+    password: "Password123"
+`), 0600)
+
+	mockClash := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"uploadTotal":   204800,
+			"downloadTotal": 1048576,
+			"connections": []map[string]any{
+				{
+					"id":       "1",
+					"upload":   1000,
+					"download": 9000,
+					"chains":   []string{"WARP"},
+					"metadata": map[string]any{"type": "hysteria2/HYSTERIA2", "host": "netflix.com"},
+				},
+			},
+		})
+	}))
+	defer mockClash.Close()
+
+	_ = os.WriteFile(sbCfgPath, []byte(fmt.Sprintf(`{
+  "experimental": {
+    "clash_api": {
+      "external_controller": %q,
+      "secret": "testsecret"
+    }
+  }
+}`, mockClash.Listener.Addr().String())), 0600)
+
+	srv := New(Options{
+		ConfigPath:        cfgPath,
+		SingBoxConfigPath: sbCfgPath,
+		SubStoreDir:       subDir,
+		FleetFilePath:     fleetFile,
+		Username:          "opsadmin",
+		Password:          "Password123",
+	})
+
+	remoteDoc, _ := json.Marshal(map[string]any{
+		"subs": []map[string]any{
+			{"name": "auto_generated_hy2", "content": "hysteria2://pw@tokyo.example.com:443?sni=tokyo.example.com#TYO-HY2"},
+		},
+	})
+	b64Doc := base64.StdEncoding.EncodeToString(remoteDoc)
+	srv.FleetManager().Runner = func(ctx context.Context, node fleet.Node, script string) (string, int, error) {
+		return "SINGCTL_VER=SingCtl v1.14.31\nSINGCTL_LOAD=0.10 0.05 0.01\nSINGCTL_MEM=25.0\nSINGCTL_CC=bbr\nSINGCTL_SUB_B64=" + b64Doc + "\n", 28, nil
+	}
+
+	doAuthReq := func(method, target, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, target, strings.NewReader(body))
+		req.SetBasicAuth("opsadmin", "Password123")
+		if method != http.MethodGet && method != http.MethodHead {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		rec := httptest.NewRecorder()
+		srv.mux.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// 1. Telemetry snapshot
+	recTel := doAuthReq(http.MethodGet, "/api/server/telemetry/snapshot", "")
+	if recTel.Code != http.StatusOK || !strings.Contains(recTel.Body.String(), `"netflix.com"`) {
+		t.Fatalf("unexpected telemetry snapshot: code=%d body=%s", recTel.Code, recTel.Body.String())
+	}
+
+	// 2. Subscription audit log + clear
+	srv.SubStore().RecordAccess(subhub.AccessLogEntry{
+		IP:          "198.51.100.8",
+		CountryCode: "SG",
+		ClientApp:   "Shadowrocket",
+		Target:      "base64",
+		NodeCount:   2,
+		Status:      "ok",
+	})
+	recAudit := doAuthReq(http.MethodGet, "/api/server/subscriptions/audit", "")
+	if recAudit.Code != http.StatusOK || !strings.Contains(recAudit.Body.String(), `"Shadowrocket"`) {
+		t.Fatalf("unexpected subscription audit response: %d %s", recAudit.Code, recAudit.Body.String())
+	}
+	recClear := doAuthReq(http.MethodDelete, "/api/server/subscriptions/audit", "{}")
+	if recClear.Code != http.StatusOK {
+		t.Fatalf("expected 200 clearing audit logs, got %d", recClear.Code)
+	}
+
+	// 3. Fleet add + autoSync -> syncs TYO-HY2 into SubHub!
+	recAddNode := doAuthReq(http.MethodPost, "/api/server/fleet/nodes", `{"id":"jp-tyo","name":"日本东京","host":"198.51.100.20","authType":"ssh_alias","sshAlias":"vps_tyo","autoSync":true}`)
+	if recAddNode.Code != http.StatusOK || !strings.Contains(recAddNode.Body.String(), `"syncedNodes":1`) {
+		t.Fatalf("unexpected fleet upsert response: %d %s", recAddNode.Code, recAddNode.Body.String())
+	}
+
+	recFleet := doAuthReq(http.MethodGet, "/api/server/fleet", "")
+	if recFleet.Code != http.StatusOK || !strings.Contains(recFleet.Body.String(), `"totalSyncedEndpoints":1`) {
+		t.Fatalf("unexpected fleet list response: %d %s", recFleet.Code, recFleet.Body.String())
+	}
+
+	recDelNode := doAuthReq(http.MethodDelete, "/api/server/fleet/nodes?id=jp-tyo", "{}")
+	if recDelNode.Code != http.StatusOK {
+		t.Fatalf("expected 200 deleting fleet node, got %d", recDelNode.Code)
 	}
 }

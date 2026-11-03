@@ -183,6 +183,8 @@ https://{{.SubstoreDomain}}:9443 {
         request_header -If-Modified-Since
         request_header -If-None-Match
         reverse_proxy http://127.0.0.1:3001 {
+            header_up X-Real-IP {client_ip}
+            header_up X-Geo-Country {header.CF-IPCountry}
             header_down Cache-Control "private, no-cache, no-store, max-age=0, must-revalidate"
             header_down CDN-Cache-Control "no-store"
             header_down Cloudflare-CDN-Cache-Control "no-store"
@@ -218,6 +220,8 @@ https://{{.SubstoreDomain}}:9443 {
         request_header -If-Modified-Since
         request_header -If-None-Match
         reverse_proxy http://127.0.0.1:3001 {
+            header_up X-Real-IP {client_ip}
+            header_up X-Geo-Country {header.CF-IPCountry}
             header_down Cache-Control "private, no-cache, no-store, max-age=0, must-revalidate"
             header_down CDN-Cache-Control "no-store"
             header_down Cloudflare-CDN-Cache-Control "no-store"

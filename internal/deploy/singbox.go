@@ -20,6 +20,7 @@ import (
 	"singctl/internal/constant"
 	"singctl/internal/logger"
 	"singctl/internal/singbox"
+	"singctl/internal/telemetry"
 )
 
 type SingBoxServer struct {
@@ -445,7 +446,13 @@ func (sbs *SingBoxServer) PreviewServerConfig() (string, error) {
 		RealityShortID    string
 		Sni               string
 		AnyTLSPort        int
+		TelemetrySecret   string
 	}
+	cfgDir := constant.SingBoxConfigDir
+	if sbs.ConfigFile != "" {
+		cfgDir = filepath.Dir(sbs.ConfigFile)
+	}
+	telemetrySecret, _ := telemetry.EnsureSecret(cfgDir)
 	ctx := tmplContext{
 		HyUUID:            sbs.hyUUID,
 		SBDomain:          sbs.cfg.Server.GetNodeDomain(),
@@ -455,6 +462,7 @@ func (sbs *SingBoxServer) PreviewServerConfig() (string, error) {
 		RealityShortID:    sbs.shortID,
 		Sni:               sbs.cfg.Server.Sni,
 		AnyTLSPort:        sbs.AnyTLSPort(),
+		TelemetrySecret:   telemetrySecret,
 	}
 
 	var buf bytes.Buffer

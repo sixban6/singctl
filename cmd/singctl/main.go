@@ -87,7 +87,7 @@ func isStatelessCommand(args []string) bool {
 	for i, arg := range args[1:] {
 		idx := i + 1
 		switch arg {
-		case "init", "help", "-h", "--help", "version", "-v", "--version", "internal-migrate", "completion", "util", "gfw":
+		case "init", "help", "-h", "--help", "version", "-v", "--version", "internal-migrate", "completion", "util", "gfw", "fleet", "fl":
 			return true
 		case "sr", "server":
 			if idx+1 < len(args) && args[idx+1] == "init" {
@@ -157,6 +157,8 @@ DNS optimization, and complete service lifecycle management.`,
 	// 服务端核心命令
 	serverCmd := cmd.NewServerCmd(configPath, Version)
 	serverCmd.GroupID = "server"
+	fleetCmd := cmd.NewFleetCmd(configPath)
+	fleetCmd.GroupID = "server"
 	reinstallServerCmd := cmd.NewReinstallServerCmd(configPath)
 	reinstallServerCmd.GroupID = "server"
 	cfTokenCmd := cmd.NewCfTokenCmd(configPath)
@@ -197,6 +199,7 @@ DNS optimization, and complete service lifecycle management.`,
 
 	rootCmd.AddCommand(
 		serverCmd,
+		fleetCmd,
 		reinstallServerCmd,
 		cfTokenCmd,
 		singboxCmd,

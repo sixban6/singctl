@@ -170,6 +170,19 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	rest := trimmed[slashIdx+1:]
 
 	if len(providedKey) != len(expectedKey) || subtle.ConstantTimeCompare([]byte(providedKey), []byte(expectedKey)) != 1 {
+		if r.Method == http.MethodGet {
+			clientIP, country := extractRequestIPAndCountry(r)
+			ua := strings.TrimSpace(r.Header.Get("User-Agent"))
+			s.store.RecordAccess(AccessLogEntry{
+				IP:          clientIP,
+				CountryCode: country,
+				ClientApp:   IdentifyClientApp(ua),
+				UserAgent:   ua,
+				Target:      "-",
+				Collection:  rest,
+				Status:      "denied",
+			})
+		}
 		http.NotFound(w, r)
 		return
 	}
@@ -233,6 +246,26 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	if r.Method != http.MethodHead {
 		_, _ = w.Write(res.Body)
+		clientIP, country := extractRequestIPAndCountry(r)
+		ua := strings.TrimSpace(r.Header.Get("User-Agent"))
+		colLabel := DefaultCollectionName
+		if bundle != nil && bundle.Name != "" {
+			colLabel = bundle.Name
+		}
+		nodeCount := 0
+		if bundle != nil {
+			nodeCount = max(len(bundle.Nodes), len(bundle.URIs))
+		}
+		s.store.RecordAccess(AccessLogEntry{
+			IP:          clientIP,
+			CountryCode: country,
+			ClientApp:   IdentifyClientApp(ua),
+			UserAgent:   ua,
+			Target:      string(res.Format),
+			Collection:  colLabel,
+			NodeCount:   nodeCount,
+			Status:      "ok",
+		})
 	}
 }
 

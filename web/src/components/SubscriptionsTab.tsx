@@ -4,6 +4,7 @@ import {
   SubscriptionSourceItem,
   SourceUpsertInput,
   SubscriptionPreviewResponse,
+  SubscriptionAccessLogItem,
 } from '../types';
 import { api } from '../api';
 import { useToast } from './Toast';
@@ -24,6 +25,8 @@ import {
   Globe,
   Server,
   Layers,
+  ShieldCheck,
+  ShieldAlert,
 } from 'lucide-react';
 import QRCode from 'qrcode';
 
@@ -56,8 +59,14 @@ export const SubscriptionsTab: React.FC = () => {
   const [previewData, setPreviewData] = useState<SubscriptionPreviewResponse | null>(null);
   const [loadingPreview, setLoadingPreview] = useState(false);
 
+  // Subscription access audit state
+  const [auditLogs, setAuditLogs] = useState<SubscriptionAccessLogItem[]>([]);
+  const [loadingAudit, setLoadingAudit] = useState(false);
+  const [clearingAudit, setClearingAudit] = useState(false);
+
   useEffect(() => {
     loadData();
+    loadAuditLogs();
   }, []);
 
   const loadData = async () => {
@@ -69,6 +78,32 @@ export const SubscriptionsTab: React.FC = () => {
       error(err.message || '获取订阅信息失败');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadAuditLogs = async () => {
+    setLoadingAudit(true);
+    try {
+      const res = await api.getSubscriptionAuditLogs();
+      setAuditLogs(res.logs || []);
+    } catch {
+      // non-fatal
+    } finally {
+      setLoadingAudit(false);
+    }
+  };
+
+  const handleClearAuditLogs = async () => {
+    if (!window.confirm('确定要清空近期订阅拉取与拦截记录吗？')) return;
+    setClearingAudit(true);
+    try {
+      const res = await api.clearSubscriptionAuditLogs();
+      success(res.message || '订阅审计记录已清空');
+      setAuditLogs([]);
+    } catch (err: any) {
+      error(err.message || '清空审计记录失败');
+    } finally {
+      setClearingAudit(false);
     }
   };
 
@@ -378,6 +413,11 @@ export const SubscriptionsTab: React.FC = () => {
                         <span className="px-2 py-0.5 rounded-md text-[10px] font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
                           本机自动同步
                         </span>
+                      ) : item.name.startsWith('fleet_') ? (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-mono bg-cyan-500/10 text-cyan-300 border border-cyan-500/25">
+                          <Server className="w-2.5 h-2.5" />
+                          舰队自动同步
+                        </span>
                       ) : item.source === 'remote' ? (
                         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-mono bg-blue-500/10 text-blue-400 border border-blue-500/20">
                           <Globe className="w-2.5 h-2.5" />
@@ -513,6 +553,114 @@ export const SubscriptionsTab: React.FC = () => {
             </div>
           )}
         </div>
+      </div>
+
+      {/* Subscription Anti-Theft Access Audit */}
+      <div className="p-5 rounded-2xl glass-card space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-800">
+          <div>
+            <h3 className="text-sm font-semibold text-white flex items-center gap-2">
+              <ShieldCheck className="w-4 h-4 text-emerald-400" />
+              <span>订阅拉取防盗刷审计 (Access Audit)</span>
+              {auditLogs.some((item) => item.status === 'denied') && (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-mono bg-rose-500/15 text-rose-300 border border-rose-500/30">
+                  <ShieldAlert className="w-3 h-3" />
+                  检测到异常探测
+                </span>
+              )}
+            </h3>
+            <p className="text-xs text-slate-400 mt-0.5">
+              自动记录每次客户端订阅拉取与错误密钥试探（保留最近 100 条）。如发现陌生海外 IP 盗刷，点击顶部「轮换密钥」即可一键熔断旧链接
+            </p>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={loadAuditLogs}
+              disabled={loadingAudit}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700/70 text-xs text-slate-200 transition-colors"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${loadingAudit ? 'animate-spin' : ''}`} />
+              <span>刷新审计</span>
+            </button>
+            {auditLogs.length > 0 && (
+              <button
+                type="button"
+                onClick={handleClearAuditLogs}
+                disabled={clearingAudit}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/25 text-xs text-rose-300 transition-colors disabled:opacity-50"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>清空记录</span>
+              </button>
+            )}
+          </div>
+        </div>
+
+        {auditLogs.length === 0 ? (
+          <div className="p-6 text-center text-xs text-slate-500 bg-slate-950/40 rounded-xl border border-slate-800/70 font-mono">
+            暂无客户端订阅拉取记录。当手机或桌面客户端更新订阅时，此处将实时记录设备软件类型与来源地区
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse text-xs">
+              <thead>
+                <tr className="border-b border-slate-800/80 text-[11px] text-slate-400 font-mono">
+                  <th className="py-2.5 pr-3">拉取时间</th>
+                  <th className="py-2.5 px-3">客户端软件</th>
+                  <th className="py-2.5 px-3">来源 IP / 地区</th>
+                  <th className="py-2.5 px-3">转换目标</th>
+                  <th className="py-2.5 pl-3 text-right">状态</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/50 font-mono">
+                {auditLogs.slice(0, 25).map((log, idx) => {
+                  const formattedTime = (() => {
+                    const d = new Date(log.timestamp);
+                    return Number.isNaN(d.getTime()) ? log.timestamp : d.toLocaleString();
+                  })();
+                  const isDenied = log.status === 'denied';
+                  return (
+                    <tr key={`${log.timestamp}-${idx}`} className="hover:bg-slate-900/40 transition-colors">
+                      <td className="py-2.5 pr-3 text-slate-400 whitespace-nowrap">{formattedTime}</td>
+                      <td className="py-2.5 px-3 whitespace-nowrap">
+                        <span
+                          className="px-2 py-0.5 rounded-md bg-slate-900 border border-slate-700/80 text-slate-200 text-[11px]"
+                          title={log.userAgent || ''}
+                        >
+                          {log.clientApp || 'Unknown'}
+                        </span>
+                      </td>
+                      <td className="py-2.5 px-3 whitespace-nowrap text-slate-200">
+                        <span className="mr-1.5">{log.flag || '🌐'}</span>
+                        <span>{log.ip || '-'}</span>
+                        {log.geo && <span className="text-slate-500 ml-1.5">({log.geo})</span>}
+                      </td>
+                      <td className="py-2.5 px-3 whitespace-nowrap text-slate-300">
+                        <span>{log.target}</span>
+                        {!isDenied && log.nodeCount > 0 && (
+                          <span className="text-slate-500 ml-1.5">· {log.nodeCount} 节点</span>
+                        )}
+                      </td>
+                      <td className="py-2.5 pl-3 text-right whitespace-nowrap">
+                        {isDenied ? (
+                          <span className="px-2 py-0.5 rounded-md text-[10px] bg-rose-500/15 text-rose-300 border border-rose-500/30">
+                            密钥拦截
+                          </span>
+                        ) : (
+                          <span className="px-2 py-0.5 rounded-md text-[10px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/25">
+                            正常下发
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
 
       {/* Add / Edit Subscription Source Modal */}

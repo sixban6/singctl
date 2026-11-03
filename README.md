@@ -26,7 +26,9 @@
 * ⚡ **原生四核自愈协同**：**sing-box** (核心路由引擎) + **Caddy** (自动化证书/安全网关) + **SubHub** (纯 Go 零 Docker 订阅聚合中枢) + **WARP** (双出口智能分流) 深度融合。
 * 🩺 **全链路一键体检 (`singctl doctor`)**：系统负载、BBR 拥塞控制、端口监听、四核组件健康度、TLS 证书周期、Reality SNI 握手及双出口网络画像端到端一键自检。
 * 🌐 **三网骨干回程拓扑画像 (`singctl net`)**：并发探测中国电信 (163/CN2)、中国联通 (4837/9929)、中国移动 (CMI/CMIN2) 骨干网，输出精准路由画像与延迟报告。
-* 🚀 **多端通用配置一键聚合**：内置纯 Go **SubHub** 订阅转换引擎（零 Docker 依赖、常驻内存 ~10MB，100% 兼容历史 Sub-Store 订阅路径），无缝对接 **Shadowrocket、Clash.Meta/Mihomo、Sing-box v1.14、Surge、Loon** 等客户端。
+* 🚀 **多端通用配置一键聚合与防盗刷审计**：内置纯 Go **SubHub** 订阅转换引擎（零 Docker 依赖、常驻内存 ~10MB，100% 兼容历史 Sub-Store 订阅路径），无缝对接 **Shadowrocket、Clash.Meta/Mihomo、Sing-box v1.14、Surge、Loon** 等客户端，并内置客户端拉取防盗刷审计与一键轮换密钥。
+* 📊 **实时流量与双出口分流雷达 (`singctl sr top`)**：本地回环零公网暴露采集上下行吞吐波形、Hysteria2 / VLESS Reality 协议负载、原生直出 / WARP 分流占比与活跃目标域名去向。
+* 🌍 **无 Agent 全球多节点舰队编排 (`singctl fleet`)**：零子节点常驻开销，基于原生 SSH 并发纳管多地域 VPS，支持裸机 60s 全自动开荒部署、全网并发体检、一键换血重置凭据并自动汇入单一主控订阅链接。
 
 ---
 
@@ -82,7 +84,9 @@ SingCtl 服务端自带现代化 Web 控制台，基于 **Session Cookie** 严�
 ```bash
 singctl sr web start   # 启动服务端管理后台
 singctl sr web status  # 查看专属访问 URL、随机路径与管理员凭据
+singctl sr top         # 终端实时观测上下行吞吐、协议负载与 WARP 分流雷达
 singctl sr doctor      # 终端执行端到端健康体检
+singctl fleet doctor   # 并发对全球多台纳管子节点执行健康体检
 singctl sr mask-site   # 重新生成或换一批随机伪装站点
 ```
 
@@ -117,7 +121,8 @@ singctl sr mask-site   # 重新生成或换一批随机伪装站点
 
 | 运维场景 | 对应模块 | 核心能力说明 | 完整指南 |
 | :--- | :--- | :--- | :---: |
-| **服务端全生命周期** | `singctl sr` | 四核组件安装、伪装站重置、凭据管理、专属Web后台 | [👉 服务端运维指南](docs/server.md) |
+| **服务端全生命周期** | `singctl sr` | 四核组件安装、实时分流雷达 (`sr top`)、凭据管理、专属Web后台 | [👉 服务端运维指南](docs/server.md) |
+| **全球多节点舰队** | `singctl fleet` | 无 Agent 跨地域节点纳管、裸机 60s 部署、全网体检与换血同步 | [👉 服务端运维指南](docs/server.md) |
 | **客户端透明路由** | `singctl sb` | TUN / TProxy 模式、规则集本地加速、iOS 配置生成 | [👉 客户端配置指南](docs/client.md) |
 | **网络拓扑与选型** | `singctl net` | 跨境三网回程线路识别 (CN2/9929/CMI)、丢包抖动评测 | [👉 网络诊断指南](docs/net.md) |
 | **网络健壮性仿真** | `singctl gfw` | 模拟复杂网络环境下的主动探测抗压与握手健壮度评分 | [👉 健壮性测试指南](docs/gfw.md) |

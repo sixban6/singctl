@@ -1,7 +1,7 @@
 import React from 'react';
-import { LayoutDashboard, Server, Link2, Terminal, Globe, Shield } from 'lucide-react';
+import { LayoutDashboard, Server, Link2, Network, Terminal, Globe, Shield } from 'lucide-react';
 
-export type TabKey = 'overview' | 'services' | 'subscriptions' | 'logs' | 'diagnostics' | 'security';
+export type TabKey = 'overview' | 'services' | 'subscriptions' | 'fleet' | 'logs' | 'diagnostics' | 'security';
 
 interface NavigationProps {
   currentTab: TabKey;
@@ -13,6 +13,7 @@ export const Navigation: React.FC<NavigationProps> = ({ currentTab, onChangeTab 
     { key: 'overview' as TabKey, label: '总览与监控', icon: LayoutDashboard },
     { key: 'services' as TabKey, label: '核心服务管控', icon: Server },
     { key: 'subscriptions' as TabKey, label: '节点与订阅分发', icon: Link2 },
+    { key: 'fleet' as TabKey, label: '全球节点舰队', icon: Network },
     { key: 'logs' as TabKey, label: '终端实时日志', icon: Terminal },
     { key: 'diagnostics' as TabKey, label: '回程链路探测', icon: Globe },
     { key: 'security' as TabKey, label: '凭据与隐蔽安全', icon: Shield },

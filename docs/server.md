@@ -278,5 +278,45 @@ singctl doctor
 singctl doc
 ```
 
+---
+
+### `singctl sr top` — 实时流量与双出口分流雷达
+
+基于 `sing-box` 本地回环遥测接口（`127.0.0.1:9099` + `0600` Bearer 密钥，零公网暴露），在终端或 WebUI 总览页实时观测上下行速率、Hysteria2 / VLESS Reality 协议负载占比、原生直出 / WARP 双出口分流占比以及 Top 活跃目标域名去向：
+
+```bash
+# 终端实时刷新分流雷达（默认 1.5s 刷新，按 Ctrl+C 退出）
+singctl sr top
+
+# 为历史旧配置无损开启本地遥测接口（不更改任何节点 UUID / 密码）
+singctl sr top --enable
+
+# 单次快照输出（适合脚本采集）
+singctl sr top --once
+```
+
+---
+
+### `singctl fleet` (`fl`) — 无 Agent 全球多节点舰队编排
+
+无需在子节点常驻任何额外 Agent 进程，通过加密 SSH 并发管理多地域 VPS，自动提取各台子节点的 Hysteria2 / VLESS Reality 链接并实时汇入主控 `SubHub` 统一订阅池：
+
+```bash
+# 纳管已有 SingCtl 节点并立即同步进主控订阅池（支持 --alias / --key / --password）
+singctl fleet add tokyo --name "东京主力" --alias vps-tokyo --sync
+
+# 全新裸机 VPS 60s 一键全自动部署 BBR + Caddy + Sing-Box 并自动汇入舰队订阅池
+singctl fleet bootstrap us-lax --host 203.0.113.10 --key ~/.ssh/id_ed25519 \
+  --domain lax.yourdomain.com --cf-token <CF_API_TOKEN> --tag US-LAX
+
+# 查看所有纳管子节点状态、全网并发体检、一键全网换血重置凭据并同步订阅、全网升级
+singctl fleet list
+singctl fleet doctor
+singctl fleet sync
+singctl fleet reset
+singctl fleet update
+```
+
+
 
 

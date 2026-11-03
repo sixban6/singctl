@@ -221,3 +221,144 @@ export interface CheckUpdateResponse {
   hasUpdate: boolean;
   message: string;
 }
+
+export interface TelemetryRatePoint {
+  time: string;
+  upBps: number;
+  downBps: number;
+}
+
+export interface TelemetryProtocolBreakdown {
+  hy2Connections: number;
+  hy2Bytes: number;
+  realityConnections: number;
+  realityBytes: number;
+  otherConnections: number;
+  otherBytes: number;
+}
+
+export interface TelemetryOutboundBreakdown {
+  directConnections: number;
+  directBytes: number;
+  warpConnections: number;
+  warpBytes: number;
+  otherConnections: number;
+  otherBytes: number;
+}
+
+export interface TelemetryDomainStat {
+  domain: string;
+  protocol: string;
+  outbound: string;
+  rule?: string;
+  connections: number;
+  bytes: number;
+}
+
+export interface TelemetrySnapshot {
+  enabled: boolean;
+  reachable: boolean;
+  controllerAddr?: string;
+  timestamp: string;
+  upBps: number;
+  downBps: number;
+  uploadTotal: number;
+  downloadTotal: number;
+  memoryBytes?: number;
+  activeConnections: number;
+  protocols: TelemetryProtocolBreakdown;
+  outbounds: TelemetryOutboundBreakdown;
+  topDomains: TelemetryDomainStat[];
+  history: TelemetryRatePoint[];
+  message?: string;
+}
+
+export interface SubscriptionAccessLogItem {
+  timestamp: string;
+  ip: string;
+  countryCode?: string;
+  geo?: string;
+  flag?: string;
+  clientApp: string;
+  userAgent?: string;
+  target: string;
+  collection?: string;
+  nodeCount: number;
+  status: 'ok' | 'denied';
+}
+
+export type FleetAuthType = 'inline_key' | 'key_file' | 'ssh_alias' | 'password';
+
+export interface FleetNode {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  user: string;
+  authType: FleetAuthType;
+  sshAlias?: string;
+  keyPath?: string;
+  hasCredential: boolean;
+  enabled: boolean;
+  addedAt?: string;
+  lastSyncAt?: string;
+  online: boolean;
+  lastError?: string;
+  latencyMs: number;
+  singctlVersion?: string;
+  doctorScore: number;
+  doctorSummary?: string;
+  cpuLoad?: string;
+  memPercent: number;
+  bbrEnabled: boolean;
+  syncedNodes: number;
+  protocols?: string[];
+}
+
+export interface FleetSummary {
+  total: number;
+  online: number;
+  totalSyncedEndpoints: number;
+  avgDoctorScore: number;
+}
+
+export interface FleetListResponse {
+  nodes: FleetNode[];
+  summary: FleetSummary;
+}
+
+export interface FleetUpsertInput {
+  id: string;
+  name: string;
+  host: string;
+  port?: number;
+  user?: string;
+  authType: FleetAuthType;
+  sshAlias?: string;
+  keyPath?: string;
+  privateKey?: string;
+  password?: string;
+  enabled?: boolean;
+  autoSync?: boolean;
+}
+
+export interface FleetBootstrapInput extends FleetUpsertInput {
+  nodeDomain: string;
+  substoreDomain?: string;
+  cfDnsKey: string;
+  nodeTag?: string;
+  sni?: string;
+}
+
+export interface FleetActionResult {
+  id: string;
+  name: string;
+  success: boolean;
+  latencyMs: number;
+  singctlVersion?: string;
+  doctorScore?: number;
+  syncedNodes?: number;
+  message: string;
+  output?: string;
+  protocols?: string[];
+}

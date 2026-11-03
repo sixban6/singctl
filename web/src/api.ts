@@ -4,6 +4,7 @@ import {
   SubscriptionSourceItem,
   SourceUpsertInput,
   SubscriptionPreviewResponse,
+  SubscriptionAccessLogItem,
   WarpDiagnoseResponse,
   ReturnSummary,
   BannedIP,
@@ -11,6 +12,12 @@ import {
   DoctorReport,
   MediaUnlockReport,
   CheckUpdateResponse,
+  TelemetrySnapshot,
+  FleetListResponse,
+  FleetUpsertInput,
+  FleetBootstrapInput,
+  FleetNode,
+  FleetActionResult,
 } from './types';
 
 export const getBasePath = (): string => {
@@ -172,6 +179,49 @@ export const api = {
   getDoctorReport: () => request<DoctorReport>('/api/server/doctor'),
 
   getMediaUnlock: () => request<MediaUnlockReport>('/api/server/diagnose/unlock'),
+
+  getTelemetrySnapshot: () => request<TelemetrySnapshot>('/api/server/telemetry/snapshot'),
+
+  enableTelemetry: () =>
+    request<{ message: string; changed: boolean; snapshot: TelemetrySnapshot }>('/api/server/telemetry/enable', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
+
+  getSubscriptionAuditLogs: () =>
+    request<{ logs: SubscriptionAccessLogItem[] }>('/api/server/subscriptions/audit'),
+
+  clearSubscriptionAuditLogs: () =>
+    request<{ message: string }>('/api/server/subscriptions/audit', {
+      method: 'DELETE',
+      body: JSON.stringify({}),
+    }),
+
+  getFleet: () => request<FleetListResponse>('/api/server/fleet'),
+
+  upsertFleetNode: (input: FleetUpsertInput) =>
+    request<{ message: string; node: FleetNode; syncResult?: FleetActionResult }>('/api/server/fleet/nodes', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+
+  deleteFleetNode: (id: string) =>
+    request<{ message: string }>(`/api/server/fleet/nodes?id=${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      body: JSON.stringify({ id }),
+    }),
+
+  runFleetAction: (action: 'sync' | 'doctor' | 'reset' | 'update', ids?: string[]) =>
+    request<{ message: string; results: FleetActionResult[] }>('/api/server/fleet/action', {
+      method: 'POST',
+      body: JSON.stringify({ action, ids: ids || [] }),
+    }),
+
+  bootstrapFleetNode: (input: FleetBootstrapInput) =>
+    request<{ message: string; result: FleetActionResult }>('/api/server/fleet/bootstrap', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
 
   logout: () =>
     request<{ message: string }>('/api/server/logout', {

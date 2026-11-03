@@ -316,6 +316,9 @@ func TestServerHTTPHandlersAndSecurity(t *testing.T) {
 
 	// 4. Valid legacy URL with ClashMeta target -> 200 YAML
 	reqValid := httptest.NewRequest(http.MethodGet, "https://sub.example.com/a1b2c3d4e5f60718293a4b5c6d/download/collection/all?target=ClashMeta", nil)
+	reqValid.Header.Set("User-Agent", "Clash.Meta/v1.18.8")
+	reqValid.Header.Set("X-Real-IP", "198.51.100.7")
+	reqValid.Header.Set("X-Geo-Country", "JP")
 	recValid := httptest.NewRecorder()
 	h.ServeHTTP(recValid, reqValid)
 	if recValid.Code != http.StatusOK {
@@ -326,5 +329,17 @@ func TestServerHTTPHandlersAndSecurity(t *testing.T) {
 	}
 	if cc := recValid.Header().Get("Cache-Control"); !strings.Contains(cc, "no-store") {
 		t.Fatalf("expected private no-store Cache-Control, got %q", cc)
+	}
+
+	// 5. Subscription access audit log records both valid pulls and denied probes
+	logs, err := srv.Store().ListAccessLogs()
+	if err != nil || len(logs) != 2 {
+		t.Fatalf("expected 2 access audit logs (ok + denied), got %d err=%v", len(logs), err)
+	}
+	if logs[0].Status != "ok" || logs[0].ClientApp != "Clash.Meta" || logs[0].CountryCode != "JP" || logs[0].IP != "198.51.100.7" {
+		t.Fatalf("unexpected latest access log: %+v", logs[0])
+	}
+	if logs[1].Status != "denied" {
+		t.Fatalf("expected second log to be denied probe, got %+v", logs[1])
 	}
 }

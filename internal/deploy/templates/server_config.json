@@ -207,6 +207,10 @@
     "cache_file": {
       "enabled": true,
       "path": "/etc/sing-box/cache.db"
+    },
+    "clash_api": {
+      "external_controller": "127.0.0.1:9099",
+      "secret": "{{.TelemetrySecret}}"
     }
   },
   "log": {
