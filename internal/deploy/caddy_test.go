@@ -265,8 +265,8 @@ func TestPreviewCaddyfile_WebAdmin(t *testing.T) {
 	}
 
 	// 验证 PROXY Protocol v2 与真实访客 IP 透传配置
-	if !strings.Contains(content, "servers :9443") || !strings.Contains(content, "proxy_protocol v2") {
-		t.Errorf("expected proxy_protocol v2 configuration in Caddyfile, got:\n%s", content)
+	if !strings.Contains(content, "servers 127.0.0.1:9443") || !strings.Contains(content, "proxy_protocol v2") {
+		t.Errorf("expected proxy_protocol v2 and servers 127.0.0.1:9443 configuration in Caddyfile, got:\n%s", content)
 	}
 	if !strings.Contains(content, "listener_wrappers") || !strings.Contains(content, "trusted_proxies static") {
 		t.Errorf("expected listener_wrappers and trusted_proxies in Caddyfile, got:\n%s", content)
