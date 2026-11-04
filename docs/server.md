@@ -299,15 +299,16 @@ singctl sr top --once
 
 ### `singctl fleet` (`fl`) — 无 Agent 全球多节点舰队编排
 
-无需在子节点常驻任何额外 Agent 进程，通过加密 SSH 并发管理多地域 VPS，自动提取各台子节点的 Hysteria2 / VLESS Reality 链接并实时汇入主控 `SubHub` 统一订阅池：
+无需在子节点常驻任何额外 Agent 进程，清单以人类易读的 `/etc/singctl/fleet.yaml`（`0600` 权限，自动无损迁移历史 `fleet.json`）存储。通过加密 SSH 并发管理多地域 VPS，自动提取各台子节点的 Hysteria2 / VLESS Reality 链接并实时汇入主控 `SubHub` 统一订阅池：
 
 ```bash
 # 纳管已有 SingCtl 节点并立即同步进主控订阅池（支持 --alias / --key / --password）
 singctl fleet add tokyo --name "东京主力" --alias vps-tokyo --sync
 
-# 全新裸机 VPS 60s 一键全自动部署 BBR + Caddy + Sing-Box 并自动汇入舰队订阅池
-singctl fleet bootstrap us-lax --host 203.0.113.10 --key ~/.ssh/id_ed25519 \
-  --domain lax.yourdomain.com --cf-token <CF_API_TOKEN> --tag US-LAX
+# 全新空白裸机 VPS 一键开荒：自动注入双公钥 + SSH 22->2222 防失联平滑加固 + 四核部署 + 自动进总订阅
+singctl fleet bootstrap jp --name "日本东京" \
+  --host 203.0.113.10 --port 22 --password '<root初始密码>' \
+  --domain jp.example.com --cf-token '<CF_API_TOKEN>'
 
 # 查看所有纳管子节点状态、全网并发体检、一键全网换血重置凭据并同步订阅、全网升级
 singctl fleet list
@@ -316,6 +317,8 @@ singctl fleet sync
 singctl fleet reset
 singctl fleet update
 ```
+
+> 📘 **实战保姆级指南**：请查阅 [单节点 VPS 部署与运维全解](guide-single-node.md) 与 [多节点 VPS 舰队 + 软路由闭环全解](guide-multi-node-fleet.md)。
 
 
 

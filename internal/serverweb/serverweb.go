@@ -28,7 +28,7 @@ type Options struct {
 	ConfigPath        string
 	SingBoxConfigPath string // (可选) sing-box 配置文件路径，默认 /etc/sing-box/config.json
 	SubStoreDir       string // (可选) SubHub 数据存储目录，默认 /etc/sub-store
-	FleetFilePath     string // (可选) 节点舰队存储文件路径，默认 <ConfigDir>/fleet.json
+	FleetFilePath     string // (可选) 节点舰队存储文件路径，默认 <ConfigDir>/fleet.yaml
 	BanFilePath       string // (可选) 防爆破封禁列表存储文件 (默认: <ConfigDir>/.serverweb_bans.json)
 	AuditFilePath     string // (可选) 管理操作审计日志存储文件 (默认: <ConfigDir>/.serverweb_audit.json)
 	Listen            string

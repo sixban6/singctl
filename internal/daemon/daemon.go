@@ -42,6 +42,9 @@ type Daemon struct {
 	ruleSetRefreshing   atomic.Bool
 	ruleSetMu           sync.Mutex
 	lastRuleSetFailedAt time.Time
+	subSyncRunning      atomic.Bool
+	subSyncMu           sync.Mutex
+	lastSubSyncCheckAt  time.Time
 }
 
 // NewDaemon 创建守护进程
@@ -51,12 +54,13 @@ func NewDaemon(cfg *config.Config) *Daemon {
 	limiter := NewRestartLimiterWithMax(cfg.Watchdog.MaxRestarts)
 
 	return &Daemon{
-		config:  cfg,
-		monitor: NewMonitor(cfg),
-		limiter: limiter,
-		singbox: singbox.New(cfg),
-		ctx:     ctx,
-		cancel:  cancel,
+		config:             cfg,
+		monitor:            NewMonitor(cfg),
+		limiter:            limiter,
+		singbox:            singbox.New(cfg),
+		ctx:                ctx,
+		cancel:             cancel,
+		lastSubSyncCheckAt: time.Now(), // 启动时配置已是最新或刚校验，等待首个周期后再静默比对
 	}
 }
 
@@ -347,8 +351,9 @@ func (d *Daemon) runWatchdogCheck() {
 	// 第一轮检测
 	result1 := d.monitor.CheckHealth()
 	if result1.Healthy {
-		// sing-box 健康运行时，顺带按需触发规则集后台静默更新
+		// sing-box 健康运行时，顺带按需触发规则集与上游订阅节点后台静默热同步
 		d.maybeRefreshRuleSetsAsync()
+		d.maybeSyncSubscriptionsAsync()
 		return // 健康，一切正常
 	}
 

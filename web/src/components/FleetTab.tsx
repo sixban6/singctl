@@ -83,7 +83,10 @@ export const FleetTab: React.FC = () => {
     substoreDomain: '',
     cfDnsKey: '',
     nodeTag: '',
-    sni: 'www.microsoft.com',
+    sni: 'swdist.apple.com',
+    hardenSsh: true,
+    targetSshPort: 2222,
+    extraAuthorizedKeys: '',
   });
 
   useEffect(() => {
@@ -110,9 +113,9 @@ export const FleetTab: React.FC = () => {
       id: '',
       name: '',
       host: '',
-      port: 22,
+      port: mode === 'bootstrap' ? 22 : 2222,
       user: 'root',
-      authType: 'inline_key',
+      authType: mode === 'bootstrap' ? 'password' : 'inline_key',
       sshAlias: '',
       keyPath: '~/.ssh/id_ed25519',
       privateKey: '',
@@ -122,7 +125,10 @@ export const FleetTab: React.FC = () => {
       substoreDomain: '',
       cfDnsKey: '',
       nodeTag: '',
-      sni: 'www.microsoft.com',
+      sni: 'swdist.apple.com',
+      hardenSsh: true,
+      targetSshPort: 2222,
+      extraAuthorizedKeys: '',
     });
     setShowModal(true);
   };
@@ -630,7 +636,14 @@ export const FleetTab: React.FC = () => {
                 <div className="grid grid-cols-2 gap-2 p-1 rounded-xl bg-slate-950 border border-slate-800 text-xs">
                   <button
                     type="button"
-                    onClick={() => setModalMode('existing')}
+                    onClick={() => {
+                      setModalMode('existing');
+                      setForm((prev) => ({
+                        ...prev,
+                        port: prev.port === 22 ? 2222 : prev.port,
+                        authType: prev.authType === 'password' && !prev.password ? 'inline_key' : prev.authType,
+                      }));
+                    }}
                     className={`py-2 rounded-lg font-semibold transition-colors ${
                       modalMode === 'existing'
                         ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
@@ -641,7 +654,14 @@ export const FleetTab: React.FC = () => {
                   </button>
                   <button
                     type="button"
-                    onClick={() => setModalMode('bootstrap')}
+                    onClick={() => {
+                      setModalMode('bootstrap');
+                      setForm((prev) => ({
+                        ...prev,
+                        port: 22,
+                        authType: 'password',
+                      }));
+                    }}
                     className={`py-2 rounded-lg font-semibold transition-colors ${
                       modalMode === 'bootstrap'
                         ? 'bg-sky-500/20 text-sky-200 border border-sky-500/30'
@@ -802,8 +822,34 @@ export const FleetTab: React.FC = () => {
               {modalMode === 'bootstrap' ? (
                 <div className="p-4 rounded-2xl bg-sky-950/20 border border-sky-500/25 space-y-3">
                   <div className="text-xs font-semibold text-sky-300">
-                    裸机自动建站与代理参数（需要该域名托管在 Cloudflare）
+                    裸机自动建站与 SSH 安全加固参数（需要该域名托管在 Cloudflare）
                   </div>
+                  {form.authType !== 'ssh_alias' && (
+                    <div className="p-3 rounded-xl bg-slate-950/70 border border-slate-800 space-y-2.5">
+                      <label className="flex items-center justify-between gap-2 text-xs text-emerald-300 cursor-pointer select-none">
+                        <span className="flex items-center gap-2 font-medium">
+                          <input
+                            type="checkbox"
+                            checked={form.hardenSsh !== false}
+                            onChange={(e) => setForm({ ...form, hardenSsh: e.target.checked })}
+                            className="rounded border-slate-700 bg-slate-950 text-emerald-500 focus:ring-emerald-500"
+                          />
+                          <span>自动完成 SSH 免密注入（含本机公钥）、安全切换端口并禁用密码登录</span>
+                        </span>
+                        {form.hardenSsh !== false && (
+                          <span className="flex items-center gap-1.5 text-slate-400">
+                            <span>收敛端口:</span>
+                            <input
+                              type="number"
+                              value={form.targetSshPort || 2222}
+                              onChange={(e) => setForm({ ...form, targetSshPort: Number(e.target.value) || 2222 })}
+                              className="w-20 bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-xs font-mono text-white"
+                            />
+                          </span>
+                        )}
+                      </label>
+                    </div>
+                  )}
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div>
                       <label className="block text-xs text-slate-400 mb-1">子节点已解析域名 *</label>

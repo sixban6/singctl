@@ -121,8 +121,10 @@ singctl sr mask-site   # 重新生成或换一批随机伪装站点
 
 | 运维场景 | 对应模块 | 核心能力说明 | 完整指南 |
 | :--- | :--- | :--- | :---: |
+| **单节点 VPS 实战全解** | `singctl ssh` / `sr` | 新机买来后从 SSH 加固、四核一键部署、客户端接入到防盗刷全流程 | [👉 单节点实战全解](docs/guide-single-node.md) |
+| **多节点舰队闭环全解** | `singctl fl` / `dm` | 主从架构选型、`fleet.yaml`、裸机一键开荒加固与软路由无感热同步 | [👉 多节点舰队全解](docs/guide-multi-node-fleet.md) |
 | **服务端全生命周期** | `singctl sr` | 四核组件安装、实时分流雷达 (`sr top`)、凭据管理、专属Web后台 | [👉 服务端运维指南](docs/server.md) |
-| **全球多节点舰队** | `singctl fleet` | 无 Agent 跨地域节点纳管、裸机 60s 部署、全网体检与换血同步 | [👉 服务端运维指南](docs/server.md) |
+| **全球多节点舰队** | `singctl fleet` | 无 Agent 跨地域节点纳管、裸机 60s 部署、全网体检与换血同步 | [👉 多节点舰队全解](docs/guide-multi-node-fleet.md) |
 | **客户端透明路由** | `singctl sb` | TUN / TProxy 模式、规则集本地加速、iOS 配置生成 | [👉 客户端配置指南](docs/client.md) |
 | **网络拓扑与选型** | `singctl net` | 跨境三网回程线路识别 (CN2/9929/CMI)、丢包抖动评测 | [👉 网络诊断指南](docs/net.md) |
 | **网络健壮性仿真** | `singctl gfw` | 模拟复杂网络环境下的主动探测抗压与握手健壮度评分 | [👉 健壮性测试指南](docs/gfw.md) |

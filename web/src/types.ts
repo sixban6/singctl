@@ -348,6 +348,9 @@ export interface FleetBootstrapInput extends FleetUpsertInput {
   cfDnsKey: string;
   nodeTag?: string;
   sni?: string;
+  hardenSsh?: boolean;
+  targetSshPort?: number;
+  extraAuthorizedKeys?: string;
 }
 
 export interface FleetActionResult {

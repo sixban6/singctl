@@ -26,7 +26,7 @@ func NewFleetCmd(configPath string) *cobra.Command {
 		Long:    "无 Agent 轻量级多节点集群管控：支持一键纳管多台 VPS、并发健康体检、全网一键轮换密码并自动汇总至主控 SubHub 总订阅。",
 	}
 
-	cmd.PersistentFlags().StringVar(&fleetFile, "fleet-file", "", "指定舰队配置文件路径 (默认与 singctl.yaml 同目录 fleet.json)")
+	cmd.PersistentFlags().StringVar(&fleetFile, "fleet-file", "", "指定舰队配置文件路径 (默认与 singctl.yaml 同目录 fleet.yaml)")
 	cmd.PersistentFlags().StringVar(&subhubDir, "subhub-dir", "", "指定本地 SubHub 数据目录 (服务端默认自动关联 /etc/sub-store)")
 
 	buildManager := func(c *cobra.Command) *fleet.Manager {
@@ -222,19 +222,21 @@ func NewFleetCmd(configPath string) *cobra.Command {
 
 	// 5. bootstrap
 	var (
-		bsIn fleet.BootstrapInput
+		bsIn        fleet.BootstrapInput
+		bsHardenSSH bool
 	)
 	bootstrapCmd := &cobra.Command{
 		Use:   "bootstrap <id>",
-		Short: "新购裸机一键自动化部署四核服务端并纳管进总订阅",
+		Short: "新购裸机一键 SSH 安全加固(22→2222免密禁密码) + 部署四核服务端并纳管进总订阅",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			bsIn.ID = args[0]
+			bsIn.HardenSSH = &bsHardenSSH
 			if bsIn.CFDNSKey == "" {
 				bsIn.CFDNSKey = os.Getenv("CF_DNS_API_TOKEN")
 			}
 			mgr := buildManager(c)
-			logger.Info("正在连接新机器 [%s] 执行全自动初始化部署 (预计耗时 1~3 分钟)...", bsIn.ID)
+			logger.Info("正在连接新机器 [%s] 执行 SSH 免密加固与全自动四核部署 (预计耗时 40~90 秒)...", bsIn.ID)
 			res, err := mgr.BootstrapNode(c.Context(), bsIn)
 			if err != nil {
 				return err
@@ -249,10 +251,13 @@ func NewFleetCmd(configPath string) *cobra.Command {
 	bootstrapCmd.Flags().StringVar(&bsIn.Name, "name", "", "子节点显示名称")
 	bootstrapCmd.Flags().StringVar(&bsIn.Host, "host", "", "新服务器公网 IP 或主机名")
 	bootstrapCmd.Flags().StringVar(&bsIn.SSHAlias, "alias", "", "本地 ~/.ssh/config 别名")
-	bootstrapCmd.Flags().IntVar(&bsIn.Port, "port", 22, "SSH 端口")
+	bootstrapCmd.Flags().IntVar(&bsIn.Port, "port", 22, "初始 SSH 端口 (新购裸机通常为 22)")
 	bootstrapCmd.Flags().StringVar(&bsIn.User, "user", "root", "SSH 用户名")
-	bootstrapCmd.Flags().StringVar(&bsIn.KeyPath, "key", "", "本地 SSH 私钥路径")
-	bootstrapCmd.Flags().StringVar(&bsIn.Password, "password", "", "SSH 登录密码")
+	bootstrapCmd.Flags().StringVar(&bsIn.KeyPath, "key", "", "初始 SSH 私钥路径 (若新机使用密码登录可留空)")
+	bootstrapCmd.Flags().StringVar(&bsIn.Password, "password", "", "初始 SSH 登录密码 (加固完成后自动擦除明文并切为密钥免密)")
+	bootstrapCmd.Flags().BoolVar(&bsHardenSSH, "harden-ssh", true, "自动注入主控+本机公钥、验证切换 SSH 端口并禁用密码登录")
+	bootstrapCmd.Flags().IntVar(&bsIn.TargetSSHPort, "target-port", fleet.DefaultTargetSSHPort, "SSH 安全加固目标端口 (默认收敛至 2222)")
+	bootstrapCmd.Flags().StringVar(&bsIn.ExtraAuthorizedKeys, "extra-pubkey", "", "(可选) 额外写入新机的管理员 SSH 公钥字符串")
 	bootstrapCmd.Flags().StringVar(&bsIn.NodeDomain, "domain", "", "绑定至该新节点的解析域名 (必填)")
 	bootstrapCmd.Flags().StringVar(&bsIn.SubstoreDomain, "sub-domain", "", "(可选) 独立订阅域名")
 	bootstrapCmd.Flags().StringVar(&bsIn.CFDNSKey, "cf-token", "", "Cloudflare DNS API Token (也可通过环境变量 CF_DNS_API_TOKEN 传入)")

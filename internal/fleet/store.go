@@ -1,6 +1,7 @@
 package fleet
 
 import (
+	"bytes"
 	"cmp"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 var (
@@ -27,32 +30,34 @@ const (
 	AuthPassword  = "password"
 )
 
+const fleetYAMLHeader = "# SingCtl 全球节点舰队清单 (由 singctl fleet 自动维护，支持人工查阅编辑，请保持 0600 权限)\n"
+
 // Node represents a managed remote SingCtl server in the fleet.
 type Node struct {
-	ID             string   `json:"id"`
-	Name           string   `json:"name"`
-	Host           string   `json:"host"`
-	Port           int      `json:"port"`
-	User           string   `json:"user"`
-	AuthType       string   `json:"authType"`
-	SSHAlias       string   `json:"sshAlias,omitempty"`
-	KeyPath        string   `json:"keyPath,omitempty"`
-	Password       string   `json:"password,omitempty"`
-	HasCredential  bool     `json:"hasCredential"`
-	Enabled        bool     `json:"enabled"`
-	AddedAt        string   `json:"addedAt,omitempty"`
-	LastSyncAt     string   `json:"lastSyncAt,omitempty"`
-	Online         bool     `json:"online"`
-	LastError      string   `json:"lastError,omitempty"`
-	LatencyMs      int      `json:"latencyMs"`
-	SingctlVersion string   `json:"singctlVersion,omitempty"`
-	DoctorScore    int      `json:"doctorScore"`
-	DoctorSummary  string   `json:"doctorSummary,omitempty"`
-	CPULoad        string   `json:"cpuLoad,omitempty"`
-	MemPercent     float64  `json:"memPercent"`
-	BBREnabled     bool     `json:"bbrEnabled"`
-	SyncedNodes    int      `json:"syncedNodes"`
-	Protocols      []string `json:"protocols,omitempty"`
+	ID             string   `json:"id" yaml:"id"`
+	Name           string   `json:"name" yaml:"name"`
+	Host           string   `json:"host" yaml:"host"`
+	Port           int      `json:"port" yaml:"port"`
+	User           string   `json:"user" yaml:"user"`
+	AuthType       string   `json:"authType" yaml:"auth_type"`
+	SSHAlias       string   `json:"sshAlias,omitempty" yaml:"ssh_alias,omitempty"`
+	KeyPath        string   `json:"keyPath,omitempty" yaml:"key_path,omitempty"`
+	Password       string   `json:"password,omitempty" yaml:"password,omitempty"`
+	HasCredential  bool     `json:"hasCredential" yaml:"-"`
+	Enabled        bool     `json:"enabled" yaml:"enabled"`
+	AddedAt        string   `json:"addedAt,omitempty" yaml:"added_at,omitempty"`
+	LastSyncAt     string   `json:"lastSyncAt,omitempty" yaml:"last_sync_at,omitempty"`
+	Online         bool     `json:"online" yaml:"online"`
+	LastError      string   `json:"lastError,omitempty" yaml:"last_error,omitempty"`
+	LatencyMs      int      `json:"latencyMs" yaml:"latency_ms,omitempty"`
+	SingctlVersion string   `json:"singctlVersion,omitempty" yaml:"singctl_version,omitempty"`
+	DoctorScore    int      `json:"doctorScore" yaml:"doctor_score,omitempty"`
+	DoctorSummary  string   `json:"doctorSummary,omitempty" yaml:"doctor_summary,omitempty"`
+	CPULoad        string   `json:"cpuLoad,omitempty" yaml:"cpu_load,omitempty"`
+	MemPercent     float64  `json:"memPercent" yaml:"mem_percent,omitempty"`
+	BBREnabled     bool     `json:"bbrEnabled" yaml:"bbr_enabled,omitempty"`
+	SyncedNodes    int      `json:"syncedNodes" yaml:"synced_nodes,omitempty"`
+	Protocols      []string `json:"protocols,omitempty" yaml:"protocols,omitempty"`
 }
 
 // PublicView returns a sanitized copy safe for API responses (stripping secrets).
@@ -84,48 +89,117 @@ type UpsertInput struct {
 	Enabled    *bool  `json:"enabled,omitzero"`
 }
 
-// BootstrapInput extends UpsertInput with initial SingCtl server deployment parameters.
+// BootstrapInput extends UpsertInput with initial SingCtl server deployment & SSH hardening parameters.
 type BootstrapInput struct {
 	UpsertInput
-	NodeDomain     string `json:"nodeDomain"`
-	SubstoreDomain string `json:"substoreDomain"`
-	CFDNSKey       string `json:"cfDnsKey"`
-	NodeTag        string `json:"nodeTag"`
-	SNI            string `json:"sni"`
+	NodeDomain          string `json:"nodeDomain"`
+	SubstoreDomain      string `json:"substoreDomain"`
+	CFDNSKey            string `json:"cfDnsKey"`
+	NodeTag             string `json:"nodeTag"`
+	SNI                 string `json:"sni"`
+	HardenSSH           *bool  `json:"hardenSsh,omitzero"`
+	TargetSSHPort       int    `json:"targetSshPort,omitzero"`
+	ExtraAuthorizedKeys string `json:"extraAuthorizedKeys,omitzero"`
 }
 
 type fleetFileDoc struct {
-	Version string `json:"version"`
-	Nodes   []Node `json:"nodes"`
+	Version string `json:"version" yaml:"version"`
+	Nodes   []Node `json:"nodes" yaml:"nodes"`
 }
 
-// Store persists fleet node metadata and SSH key files with 0600 permissions.
+// Store persists fleet node metadata (fleet.yaml) and SSH key files with 0600 permissions.
 type Store struct {
 	FilePath string
 	KeysDir  string
 	mu       sync.RWMutex
 }
 
-// ResolveFleetFilePath resolves fleet.json alongside singctl.yaml.
+// ResolveFleetFilePath resolves fleet.yaml alongside singctl.yaml.
 func ResolveFleetFilePath(configPath string) string {
 	if strings.TrimSpace(configPath) != "" {
-		return filepath.Join(filepath.Dir(configPath), "fleet.json")
+		return filepath.Join(filepath.Dir(configPath), "fleet.yaml")
 	}
 	if st, err := os.Stat("/etc/singctl"); err == nil && st.IsDir() {
-		return "/etc/singctl/fleet.json"
+		return "/etc/singctl/fleet.yaml"
 	}
-	return filepath.Join(os.TempDir(), "singctl-fleet", "fleet.json")
+	return filepath.Join(os.TempDir(), "singctl-fleet", "fleet.yaml")
 }
 
-// NewStore creates a Fleet Store rooted at filePath.
+// NewStore creates a Fleet Store rooted at filePath and automatically migrates legacy fleet.json if present.
 func NewStore(filePath string) *Store {
 	if strings.TrimSpace(filePath) == "" {
 		filePath = ResolveFleetFilePath("")
 	}
-	return &Store{
+	s := &Store{
 		FilePath: filePath,
 		KeysDir:  filepath.Join(filepath.Dir(filePath), "fleet_keys"),
 	}
+	s.migrateLegacyJSONIfNeeded()
+	return s
+}
+
+func (s *Store) legacyJSONPath() string {
+	ext := strings.ToLower(filepath.Ext(s.FilePath))
+	if ext != ".yaml" && ext != ".yml" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(s.FilePath), "fleet.json")
+}
+
+func (s *Store) migrateLegacyJSONIfNeeded() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	legacyPath := s.legacyJSONPath()
+	if legacyPath == "" {
+		return
+	}
+	if _, err := os.Stat(s.FilePath); err == nil {
+		return
+	}
+	raw, err := os.ReadFile(legacyPath)
+	if err != nil {
+		return
+	}
+	nodes, err := parseFleetBytes(raw, legacyPath)
+	if err != nil {
+		return
+	}
+	if err := s.writeLocked(nodes); err == nil {
+		_ = os.Remove(legacyPath)
+	}
+}
+
+func parseFleetBytes(raw []byte, sourcePath string) ([]Node, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return []Node{}, nil
+	}
+
+	var doc fleetFileDoc
+	// Legacy JSON files use camelCase tags (authType, keyPath, syncedNodes), so decode JSON first when starting with '{'.
+	if trimmed[0] == '{' || strings.EqualFold(filepath.Ext(sourcePath), ".json") {
+		if err := json.Unmarshal(trimmed, &doc); err == nil {
+			for i := range doc.Nodes {
+				doc.Nodes[i].HasCredential = doc.Nodes[i].Password != "" || doc.Nodes[i].KeyPath != "" || doc.Nodes[i].SSHAlias != ""
+			}
+			if doc.Nodes == nil {
+				return []Node{}, nil
+			}
+			return doc.Nodes, nil
+		}
+	}
+
+	if err := yaml.Unmarshal(trimmed, &doc); err != nil {
+		return nil, fmt.Errorf("解析舰队配置 %s 失败: %w", filepath.Base(sourcePath), err)
+	}
+	for i := range doc.Nodes {
+		doc.Nodes[i].HasCredential = doc.Nodes[i].Password != "" || doc.Nodes[i].KeyPath != "" || doc.Nodes[i].SSHAlias != ""
+	}
+	if doc.Nodes == nil {
+		return []Node{}, nil
+	}
+	return doc.Nodes, nil
 }
 
 // ValidateHostTarget guards against leading '-' or shell metacharacters in host/alias.
@@ -152,21 +226,16 @@ func (s *Store) readLocked() ([]Node, error) {
 	raw, err := os.ReadFile(s.FilePath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			if legacy := s.legacyJSONPath(); legacy != "" {
+				if legacyRaw, lErr := os.ReadFile(legacy); lErr == nil {
+					return parseFleetBytes(legacyRaw, legacy)
+				}
+			}
 			return []Node{}, nil
 		}
 		return nil, err
 	}
-	if len(strings.TrimSpace(string(raw))) == 0 {
-		return []Node{}, nil
-	}
-	var doc fleetFileDoc
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		return nil, fmt.Errorf("解析 fleet.json 失败: %w", err)
-	}
-	if doc.Nodes == nil {
-		return []Node{}, nil
-	}
-	return doc.Nodes, nil
+	return parseFleetBytes(raw, s.FilePath)
 }
 
 func (s *Store) writeLocked(nodes []Node) error {
@@ -178,10 +247,27 @@ func (s *Store) writeLocked(nodes []Node) error {
 		Version: "1",
 		Nodes:   nodes,
 	}
-	out, err := json.MarshalIndent(doc, "", "  ")
-	if err != nil {
-		return err
+
+	var out []byte
+	if strings.EqualFold(filepath.Ext(s.FilePath), ".json") {
+		var err error
+		out, err = json.MarshalIndent(doc, "", "  ")
+		if err != nil {
+			return err
+		}
+	} else {
+		var buf bytes.Buffer
+		buf.WriteString(fleetYAMLHeader)
+		enc := yaml.NewEncoder(&buf)
+		enc.SetIndent(2)
+		if err := enc.Encode(doc); err != nil {
+			_ = enc.Close()
+			return err
+		}
+		_ = enc.Close()
+		out = buf.Bytes()
 	}
+
 	tmp := s.FilePath + ".tmp"
 	if err := os.WriteFile(tmp, out, 0600); err != nil {
 		return err
@@ -233,8 +319,8 @@ func (s *Store) Get(id string) (Node, bool, error) {
 	return Node{}, false, nil
 }
 
-// Upsert creates or updates a fleet node and securely persists any inline SSH key.
-func (s *Store) Upsert(in UpsertInput) (Node, error) {
+// NormalizeUpsertInput validates and resolves an UpsertInput into a clean Node without writing to disk.
+func NormalizeUpsertInput(in UpsertInput) (Node, error) {
 	id := strings.ToLower(strings.TrimSpace(in.ID))
 	if id == "" && strings.TrimSpace(in.Name) != "" {
 		slug := regexp.MustCompile(`[^a-z0-9_-]+`).ReplaceAllString(strings.ToLower(strings.TrimSpace(in.Name)), "-")
@@ -279,6 +365,34 @@ func (s *Store) Upsert(in UpsertInput) (Node, error) {
 		return Node{}, errors.New("SSH 用户名包含非法字符")
 	}
 
+	enabled := true
+	if in.Enabled != nil {
+		enabled = *in.Enabled
+	}
+
+	return Node{
+		ID:       id,
+		Name:     cmp.Or(strings.TrimSpace(in.Name), id),
+		Host:     strings.TrimSpace(in.Host),
+		Port:     port,
+		User:     user,
+		AuthType: authType,
+		SSHAlias: strings.TrimSpace(in.SSHAlias),
+		KeyPath:  expandHomePath(strings.TrimSpace(in.KeyPath)),
+		Password: in.Password,
+		Enabled:  enabled,
+	}, nil
+}
+
+// Upsert creates or updates a fleet node and securely persists any inline SSH key.
+func (s *Store) Upsert(in UpsertInput) (Node, error) {
+	parsed, err := NormalizeUpsertInput(in)
+	if err != nil {
+		return Node{}, err
+	}
+	id := parsed.ID
+	authType := parsed.AuthType
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -301,19 +415,20 @@ func (s *Store) Upsert(in UpsertInput) (Node, error) {
 
 	target.Name = cmp.Or(strings.TrimSpace(in.Name), target.Name, id)
 	target.AuthType = authType
-	target.Port = port
-	target.User = user
+	target.Port = parsed.Port
+	target.User = parsed.User
 	if in.Enabled != nil {
 		target.Enabled = *in.Enabled
 	}
 
 	switch authType {
 	case AuthSSHAlias:
-		alias := cmp.Or(strings.TrimSpace(in.SSHAlias), strings.TrimSpace(in.Host))
+		alias := cmp.Or(parsed.SSHAlias, parsed.Host)
 		target.SSHAlias = alias
-		target.Host = cmp.Or(strings.TrimSpace(in.Host), alias)
+		target.Host = cmp.Or(parsed.Host, alias)
+		target.Password = ""
 	case AuthInlineKey:
-		target.Host = strings.TrimSpace(in.Host)
+		target.Host = parsed.Host
 		target.SSHAlias = ""
 		if strings.TrimSpace(in.PrivateKey) != "" {
 			if err := os.MkdirAll(s.KeysDir, 0700); err != nil {
@@ -331,16 +446,16 @@ func (s *Store) Upsert(in UpsertInput) (Node, error) {
 			return Node{}, errors.New("请提供 SSH 私钥内容")
 		}
 	case AuthKeyFile:
-		target.Host = strings.TrimSpace(in.Host)
+		target.Host = parsed.Host
 		target.SSHAlias = ""
-		if strings.TrimSpace(in.KeyPath) != "" {
-			target.KeyPath = expandHomePath(strings.TrimSpace(in.KeyPath))
+		if parsed.KeyPath != "" {
+			target.KeyPath = parsed.KeyPath
 		} else if target.KeyPath == "" {
 			target.KeyPath = defaultLocalSSHKeyPath()
 		}
 		target.Password = ""
 	case AuthPassword:
-		target.Host = strings.TrimSpace(in.Host)
+		target.Host = parsed.Host
 		target.SSHAlias = ""
 		if in.Password != "" {
 			target.Password = in.Password
@@ -361,6 +476,9 @@ func (s *Store) Upsert(in UpsertInput) (Node, error) {
 
 	if err := s.writeLocked(nodes); err != nil {
 		return Node{}, err
+	}
+	if legacy := s.legacyJSONPath(); legacy != "" {
+		_ = os.Remove(legacy)
 	}
 	return target, nil
 }

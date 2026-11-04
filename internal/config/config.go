@@ -501,9 +501,10 @@ func (s *ServerConfig) GetNodeTag() string {
 }
 
 type WatchdogConfig struct {
-	Interval    int `yaml:"interval"`     // 检查间隔(秒), 默认 180
-	ConfirmWait int `yaml:"confirm_wait"` // 二次确认等待(秒), 默认 30
-	MaxRestarts int `yaml:"max_restarts"` // 每小时最大自动重启次数, 默认 3
+	Interval        int `yaml:"interval"`                    // 检查间隔(秒), 默认 180
+	ConfirmWait     int `yaml:"confirm_wait"`                // 二次确认等待(秒), 默认 30
+	MaxRestarts     int `yaml:"max_restarts"`                // 每小时最大自动重启次数, 默认 3
+	SubSyncInterval int `yaml:"sub_sync_interval,omitempty"` // 订阅节点指纹自动热同步间隔(秒), 默认 600; 设为 -1 关闭
 }
 
 var knownYAMLKeys = []string{
@@ -514,7 +515,7 @@ var knownYAMLKeys = []string{
 	"cf_dns_key", "sni", "cors_allowed_origins",
 	"web_terminal", "mtls_ca", "ssh_tunnel_port", "ssh_tunnel_path", "ssh_port",
 	"web_admin", "enabled", "port", "path", "username", "password", "password_pending_ack",
-	"watchdog", "interval", "confirm_wait", "max_restarts",
+	"watchdog", "interval", "confirm_wait", "max_restarts", "sub_sync_interval",
 	"custom_rules", "route", "dns",
 }
 
@@ -562,6 +563,9 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Watchdog.MaxRestarts <= 0 {
 		cfg.Watchdog.MaxRestarts = 3
+	}
+	if cfg.Watchdog.SubSyncInterval == 0 {
+		cfg.Watchdog.SubSyncInterval = 600
 	}
 
 	return &cfg, nil

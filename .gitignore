@@ -52,6 +52,9 @@ temp/
 # Sensitive configuration & SSH keys
 ssh-init.yaml
 *ssh-init*.yaml
+fleet.yaml
+fleet.json
+*fleet_keys*
 *.pem
 *.key
 .env

@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -547,7 +548,10 @@ singctl sr web restart >/dev/null 2>&1 || true
 	return syncRes
 }
 
-// BootstrapNode provisions a fresh Linux VPS with SingCtl, deploys all server components, and enrolls it into the fleet.
+// BootstrapNode provisions a fresh Linux VPS:
+//  1. (Default ON) Hardens SSH: injects Master + operator public keys, transitions port 22 -> 2222 with anti-lockout verification, disables password auth, and wipes plaintext password
+//  2. Installs SingCtl (with SHA-256 verification) and deploys the 4-core server stack
+//  3. Enrolls the node into fleet.yaml and syncs its HY2/Reality endpoints into Master SubHub
 func (m *Manager) BootstrapNode(ctx context.Context, in BootstrapInput) (NodeActionResult, error) {
 	domain := strings.TrimSpace(in.NodeDomain)
 	cfKey := strings.TrimSpace(in.CFDNSKey)
@@ -558,7 +562,49 @@ func (m *Manager) BootstrapNode(ctx context.Context, in BootstrapInput) (NodeAct
 		return NodeActionResult{}, errors.New("Cloudflare DNS API Token 不能为空")
 	}
 
-	node, err := m.Store.Upsert(in.UpsertInput)
+	initialNode, err := NormalizeUpsertInput(in.UpsertInput)
+	if err != nil {
+		return NodeActionResult{}, err
+	}
+	if initialNode.AuthType == AuthKeyFile && initialNode.KeyPath == "" {
+		initialNode.KeyPath = defaultLocalSSHKeyPath()
+	}
+	if initialNode.AuthType == AuthInlineKey {
+		saved, uErr := m.Store.Upsert(in.UpsertInput)
+		if uErr != nil {
+			return NodeActionResult{}, uErr
+		}
+		initialNode = saved
+	}
+
+	upsertIn := in.UpsertInput
+	sshHardenedMsg := ""
+	if shouldHardenBootstrapSSH(in, initialNode.AuthType) {
+		targetPort := in.TargetSSHPort
+		if targetPort <= 0 {
+			targetPort = DefaultTargetSSHPort
+		}
+		hardenedNode, hErr := m.hardenBootstrapSSH(ctx, initialNode, targetPort, in.ExtraAuthorizedKeys)
+		if hErr != nil {
+			return NodeActionResult{
+				ID:      initialNode.ID,
+				Name:    initialNode.Name,
+				Success: false,
+				Message: "SSH 安全基线加固未完成: " + hErr.Error(),
+			}, nil
+		}
+		if initialNode.AuthType == AuthInlineKey {
+			_ = os.Remove(filepath.Join(m.Store.KeysDir, initialNode.ID+".pem"))
+		}
+		upsertIn.Port = hardenedNode.Port
+		upsertIn.AuthType = AuthKeyFile
+		upsertIn.KeyPath = hardenedNode.KeyPath
+		upsertIn.Password = ""
+		upsertIn.PrivateKey = ""
+		sshHardenedMsg = fmt.Sprintf("（SSH 已收敛至 %d 免密并禁用密码）", hardenedNode.Port)
+	}
+
+	node, err := m.Store.Upsert(upsertIn)
 	if err != nil {
 		return NodeActionResult{}, err
 	}
@@ -592,8 +638,18 @@ if ! command -v singctl >/dev/null 2>&1; then
     *) echo "Unsupported arch: $ARCH" >&2; exit 1 ;;
   esac
   TMPD=$(mktemp -d)
-  curl -fsSL "https://github.com/sixban6/singctl/releases/latest/download/${PKG}" -o "${TMPD}/pkg.tgz"
-  tar -xzf "${TMPD}/pkg.tgz" -C "${TMPD}"
+  curl -fsSL "https://github.com/sixban6/singctl/releases/latest/download/checksums.txt" -o "${TMPD}/checksums.txt" || true
+  curl -fsSL "https://github.com/sixban6/singctl/releases/latest/download/${PKG}" -o "${TMPD}/${PKG}"
+  if [ -s "${TMPD}/checksums.txt" ] && command -v sha256sum >/dev/null 2>&1; then
+    EXPECTED=$(grep "  ${PKG}$" "${TMPD}/checksums.txt" | awk '{print $1}')
+    ACTUAL=$(sha256sum "${TMPD}/${PKG}" | awk '{print $1}')
+    if [ -n "$EXPECTED" ] && [ "$EXPECTED" != "$ACTUAL" ]; then
+      rm -rf "${TMPD}"
+      echo "SHA256 verification failed for ${PKG}" >&2
+      exit 1
+    fi
+  fi
+  tar -xzf "${TMPD}/${PKG}" -C "${TMPD}"
   BIN=$(find "${TMPD}" -type f -name singctl | head -n1)
   install -m 0755 "$BIN" /usr/local/bin/singctl
   rm -rf "${TMPD}"
@@ -625,12 +681,12 @@ singctl sr install >/dev/null 2>&1
 
 	syncRes := m.syncNodeObj(ctx, node)
 	if syncRes.Success {
-		syncRes.Message = fmt.Sprintf("新机自动化部署成功，已纳管 %d 个节点至总订阅", syncRes.SyncedNodes)
+		syncRes.Message = fmt.Sprintf("新机自动化部署成功%s，已纳管 %d 个节点至总订阅", sshHardenedMsg, syncRes.SyncedNodes)
 	}
 	return syncRes, nil
 }
 
-// RemoveNode removes a node from fleet.json and cleans up its SubHub source entry.
+// RemoveNode removes a node from fleet.yaml and cleans up its SubHub source entry.
 func (m *Manager) RemoveNode(id string) error {
 	if err := m.Store.Delete(id); err != nil {
 		return err

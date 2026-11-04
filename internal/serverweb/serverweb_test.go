@@ -545,7 +545,7 @@ func TestServerWeb_TelemetryAuditAndFleet(t *testing.T) {
 	cfgPath := filepath.Join(tmpDir, "singctl.yaml")
 	sbCfgPath := filepath.Join(tmpDir, "singbox.json")
 	subDir := filepath.Join(tmpDir, "sub-store")
-	fleetFile := filepath.Join(tmpDir, "fleet.json")
+	fleetFile := filepath.Join(tmpDir, "fleet.yaml")
 
 	_ = os.WriteFile(cfgPath, []byte(`
 server:
