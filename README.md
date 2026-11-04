@@ -28,7 +28,8 @@
 * 🌐 **三网骨干回程拓扑画像 (`singctl net`)**：并发探测中国电信 (163/CN2)、中国联通 (4837/9929)、中国移动 (CMI/CMIN2) 骨干网，输出精准路由画像与延迟报告。
 * 🚀 **多端通用配置一键聚合与防盗刷审计**：内置纯 Go **SubHub** 订阅转换引擎（零 Docker 依赖、常驻内存 ~10MB，100% 兼容历史 Sub-Store 订阅路径），无缝对接 **Shadowrocket、Clash.Meta/Mihomo、Sing-box v1.14、Surge、Loon** 等客户端，并内置客户端拉取防盗刷审计与一键轮换密钥。
 * 📊 **实时流量与双出口分流雷达 (`singctl sr top`)**：本地回环零公网暴露采集上下行吞吐波形、Hysteria2 / VLESS Reality 协议负载、原生直出 / WARP 分流占比与活跃目标域名去向。
-* 🌍 **无 Agent 全球多节点舰队编排 (`singctl fleet`)**：零子节点常驻开销，基于原生 SSH 并发纳管多地域 VPS，支持裸机 60s 全自动开荒部署、全网并发体检、一键换血重置凭据并自动汇入单一主控订阅链接。
+* 🌍 **无 Agent 全球多节点舰队编排 (`singctl fleet`)**：零子节点常驻开销，新购裸机只需提供 **IP + 初始密码**，自动继承主控凭据、按归属地分配代号、自动创建 Cloudflare 灰云 DNS、完成 `22 → 2222` 免密加固并汇入单一主控总订阅。
+* 🛡️ **三层自动化安全漏洞自愈 (`singctl sr heal` / `fl heal`)**：零常驻内存（原生 `systemd timer` 凌晨窗口唤醒），覆盖核心代理组件（金丝雀预检 + 15s 异常秒级回滚）、系统安全补丁与残留 `.so` 动态库热重载、以及多节点内核单台串行滚动重启与故障熔断。
 
 ---
 
@@ -54,21 +55,21 @@ curl -fsSL https://raw.githubusercontent.com/sixban6/singctl/main/install.sh | s
 
 ---
 
-### 场景二：【第 2~N 台新 VPS 扩容组网】（多节点舰队 — 无需登录新机器）
+### 场景二：【第 2~N 台新 VPS 扩容组网】（多节点舰队 — 零配置复用主控信息）
 
-新买第 2、第 3 台空白裸机 VPS 时，**无需手动 SSH 登录新机器**，直接在**第 1 台主控 VPS** 上执行一条命令（或在主控 Web 后台点击「裸机一键部署」）：
+新买第 2、第 3 台空白裸机 VPS 时，**无需手动登录新机，也无需提前去 Cloudflare 配解析**，直接在**第 1 台主控 VPS** 上只需提供**新机 IP 与初始密码**即可一键开荒（或在主控自适应 Web 后台点击「新机零配置开荒」）：
 
 ```bash
-# 语法: singctl fl bootstrap <自定义唯一短代号> [参数...]
-# 下面以给新买的日本机起代号 jp1 为例（可自由起名如 hk1 / sg2 / de，仅限字母、数字、连字符）：
-singctl fl bootstrap jp1 --name "日本东京主力" \
-  --host 203.0.113.10 --port 22 --password '<新机root初始密码>' \
-  --domain jp1.example.com --cf-token '<Cloudflare_DNS_Token>'
+# 方式 A：零参数交互向导（最推荐：密码免回显，不留命令历史，回车前自动预览分配的代号与域名）
+singctl fl bootstrap
+
+# 方式 B：极简一行非交互命令（仅需新机 IP 与初始密码，其余全部自动复用主控配置）
+singctl fl bootstrap --host 203.0.113.10 --password '<新机root初始密码>'
 ```
 
-> **参数与全自动闭环说明**（完整参数表与日常运维见 [👉 多节点舰队全解](docs/guide-multi-node-fleet.md)）：
-> - **`jp1`（自定义短代号）**：不是固定关键字，而是你给这台机器起的唯一简称（默认也会作为客户端节点标签如 `sec_jp1_hy2`，买多台同国机器也不会撞名）；以后想**单独操作这一台**时直接点名即可（如 `singctl fl doc jp1` 体检、`singctl fl reset jp1` 换密码、`singctl fl rm jp1` 下线；不加代号则默认操作全部子节点）。
-> - **一条命令后台全自动完成**：自动连入新机 `22` 端口注入双公钥并切换 SSH 至 `2222` 免密（销毁明文密码） → 部署四核组件 → 自动提取新节点并入**第 1 台主控的总订阅链接**，所有软路由与客户端无需改配置自动热同步上线。
+> **全自动智能闭环说明**（亦支持 `singctl fl bootstrap jp1 --domain ...` 手动指定，详见 [👉 多节点舰队全解](docs/guide-multi-node-fleet.md)）：
+> - **自动归属地命名 + 自动灰云 DNS**：自动探测新机 IP 所在国家/城市分配唯一短代号（如 `sg` / `新加坡`，同国第 2 台自动递增为 `sg2`），并复用主控 `cf_dns_key` 在根域名下自动创建灰云（仅 DNS）解析记录（退租执行 `singctl fl rm sg` 时自动同步清理 DNS）。
+> - **防锁死加固 + 汇入唯一总订阅**：自动注入双公钥、验证切换 SSH `22 → 2222` 免密禁密码（销毁明文密码） → 部署四核组件 → 自动提取新节点并入**第 1 台主控的总订阅链接**，家里软路由与随身手机无需改配置自动热同步上线。
 
 ---
 
@@ -109,6 +110,8 @@ singctl sr web start   # 启动服务端管理后台
 singctl sr web status  # 查看专属访问 URL、随机路径与管理员凭据
 singctl sr top         # 终端实时观测上下行吞吐、协议负载与 WARP 分流雷达
 singctl sr doctor      # 终端执行端到端健康体检
+singctl sr heal        # 本机三层安全漏洞无感热修复 (--enable-timer 开启每日凌晨自动守护)
+singctl fl heal        # 全舰队协同安全自愈 (单台串行滚动重启新内核 + 异常自动熔断)
 singctl fleet doctor   # 并发对全球多台纳管子节点执行健康体检
 singctl sr mask-site   # 重新生成或换一批随机伪装站点
 ```

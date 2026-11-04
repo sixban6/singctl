@@ -297,26 +297,58 @@ singctl sr top --once
 
 ---
 
-### `singctl fleet` (`fl`) — 无 Agent 全球多节点舰队编排
+### `singctl sr heal` — 三层自动化安全自愈与零中断升级
 
-无需在子节点常驻任何额外 Agent 进程，清单以人类易读的 `/etc/singctl/fleet.yaml`（`0600` 权限，自动无损迁移历史 `fleet.json`）存储。通过加密 SSH 并发管理多地域 VPS，自动提取各台子节点的 Hysteria2 / VLESS Reality 链接并实时汇入主控 `SubHub` 统一订阅池：
+零常驻内存开销（基于每日 `04:00` `systemd timer` 维护窗口运行，状态以 `0600` 权限落盘于 `/etc/singctl/security_heal.json`），自动防御系统内核、系统库及核心代理组件漏洞：
+
+- **Layer 1（核心二进制）**：巡检 `singctl`、`sing-box`、`Caddy`、`wireproxy` 上游稳定版，执行 SHA-256 完整性校验 + `sing-box check` / `caddy validate` 离线预检 + `.heal.bak` 备份 + 15 秒健康探针，失败自动秒级回滚。
+- **Layer 2（系统安全补丁与残留动态库热重载）**：自动拉取 Debian/Ubuntu `-security` 或 RHEL `dnf --security` 安全更新（强制 `--force-confdef --force-confold` 保护 `2222` SSH 配置并经 `sshd -t` 校验），扫描 `/proc/*/maps` 清理仍占用旧漏洞 `.so`（如 `libssl.so (deleted)`）的守护进程并平滑重载。
+- **Layer 3（内核高危漏洞感知）**：对比运行中 `uname -r` 与 `/boot/vmlinuz-*` 及 `/var/run/reboot-required`，单节点默认仅告警不擅自重启（除非开启 `--allow-reboot`）。
 
 ```bash
-# 纳管已有 SingCtl 节点并同步进主控订阅池（第一个参数如 tokyo 为你自定义的唯一短代号）
-singctl fleet add tokyo --name "东京主力" --alias vps-tokyo --sync
+# 只读扫描三层漏洞状态（不执行变更）
+singctl sr heal --check
 
-# 全新空白裸机 VPS 一键开荒（jp1 为你自定义的唯一短代号，如 hk1 / sg2 / de，后续可按该代号单独点名运维）
+# 立即执行三层安全自愈（热修复 Layer 1 + Layer 2）
+singctl sr heal
+
+# 开启每日凌晨 04:00 自动化安全自愈定时器（systemd timer，零常驻内存）
+singctl sr heal --enable-timer
+
+# 关闭自动化安全自愈定时器
+singctl sr heal --disable-timer
+```
+
+---
+
+### `singctl fleet` (`fl`) — 无 Agent 全球多节点舰队编排
+
+无需在子节点常驻任何额外 Agent 进程，清单以人类易读的 `/etc/singctl/fleet.yaml`（`0600` 权限，自动无损迁移历史 `fleet.json`）存储。通过加密 SSH 并发管理多地域 VPS，自动继承主控配置并实时汇入主控 `SubHub` 统一订阅池：
+
+```bash
+# 极简零配置开荒：自动复用主控 Cloudflare Token / SNI / 带宽，自动识别地域代号并创建灰云 DNS 记录！
+singctl fl bootstrap --host 203.0.113.10 --password '<root初始密码>'
+
+# 零参数向导式开荒（密码不回显、不进 history）
+singctl fl bootstrap
+
+# 手动全参数覆盖模式（自定义代号 jp1 / 名称 / 域名）
 singctl fleet bootstrap jp1 --name "日本东京" \
   --host 203.0.113.10 --port 22 --password '<root初始密码>' \
   --domain jp1.example.com --cf-token '<CF_API_TOKEN>'
 
-# 查看所有子节点（不加代号默认并发操作全部子节点；加上代号如 jp1 则仅操作该台机器）
+# 纳管已有 SingCtl 节点并同步进主控订阅池
+singctl fleet add tokyo --name "东京主力" --alias vps-tokyo --sync
+
+# 查看所有子节点（不加代号默认操作全部子节点；加上代号如 jp1 则仅操作该台机器）
 singctl fleet list
 singctl fleet doctor          # 全网体检（单台点名: singctl fleet doctor jp1）
 singctl fleet sync            # 全网同步（单台点名: singctl fleet sync jp1）
+singctl fleet heal            # 全网三层安全自愈 + 内核漏洞 1-by-1 串行滚动重启（异常自动熔断！）
+singctl fleet heal --enable-timer  # 为主控与全体子节点开启每日 04:00 自动安全自愈
 singctl fleet reset           # 全网换血重置密码（单台点名: singctl fleet reset jp1）
 singctl fleet update          # 全网升级（单台点名: singctl fleet update jp1）
-singctl fleet remove jp1      # 机器到期下线，自动从 fleet.yaml 与总订阅池清理 jp1
+singctl fleet remove jp1      # 机器到期下线，自动清理 fleet.yaml、总订阅池及自动托管的 DNS 记录（加 --keep-dns 可保留 DNS）
 ```
 
 > 📘 **实战保姆级指南**：请查阅 [单节点 VPS 部署与运维全解](guide-single-node.md) 与 [多节点 VPS 舰队 + 软路由闭环全解](guide-multi-node-fleet.md)。

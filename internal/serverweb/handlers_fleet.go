@@ -89,26 +89,56 @@ func (s *Server) handleFleetUpsertNode(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleFleetDefaults(w http.ResponseWriter, r *http.Request) {
+	defaults := s.fleet.GetBootstrapDefaults(r.Context())
+	writeJSON(w, http.StatusOK, defaults)
+}
+
+func (s *Server) handleFleetPreviewBootstrap(w http.ResponseWriter, r *http.Request) {
+	var body fleet.BootstrapInput
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "无效的 JSON 请求: "+err.Error())
+		return
+	}
+	plan, err := s.fleet.PreviewBootstrapNode(r.Context(), body)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, plan)
+}
+
 func (s *Server) handleFleetDeleteNode(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	keepDNS := r.URL.Query().Get("keepDns") == "true" || r.URL.Query().Get("keep_dns") == "true"
 	if id == "" {
 		var body struct {
-			ID string `json:"id"`
+			ID      string `json:"id"`
+			KeepDNS bool   `json:"keepDns"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		id = strings.TrimSpace(body.ID)
+		if body.KeepDNS {
+			keepDNS = true
+		}
 	}
 	if id == "" {
 		writeJSONError(w, http.StatusBadRequest, "缺少子节点代号 (id)")
 		return
 	}
-	if err := s.fleet.RemoveNode(id); err != nil {
+	dnsDeleted, err := s.fleet.RemoveNodeWithOptions(r.Context(), id, keepDNS)
+	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s.recordAudit(r, fmt.Sprintf("移除舰队子节点 [%s] 并清理对应订阅源", id))
-	writeJSON(w, http.StatusOK, map[string]string{
-		"message": "子节点及关联聚合节点已成功移除",
+	msg := "子节点及关联聚合节点已成功移除"
+	if dnsDeleted {
+		msg = "子节点、关联聚合节点及自动创建的 Cloudflare DNS 记录已同步清理"
+	}
+	s.recordAudit(r, fmt.Sprintf("移除舰队子节点 [%s] (DNS同步清理=%v)", id, dnsDeleted))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"message":    msg,
+		"dnsDeleted": dnsDeleted,
 	})
 }
 

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"singctl/internal/config"
 	"singctl/internal/subhub"
 
 	"golang.org/x/crypto/ssh"
@@ -48,18 +50,82 @@ type NodeActionResult struct {
 
 // Manager coordinates concurrent operations across fleet nodes and syncs endpoints into SubHub.
 type Manager struct {
-	Store    *Store
-	SubStore *subhub.Store
-	Runner   RunnerFunc
+	Store      *Store
+	SubStore   *subhub.Store
+	ConfigPath string
+	CFClient   *CloudflareDNSClient
+	GeoProber  GeoProberFunc
+	Runner     RunnerFunc
 }
 
 // NewManager creates a Fleet Manager backed by fleetStore and subStore.
 func NewManager(fleetStore *Store, subStore *subhub.Store) *Manager {
-	return &Manager{
-		Store:    fleetStore,
-		SubStore: subStore,
-		Runner:   DefaultSSHRunner,
+	cfgPath := ""
+	if fleetStore != nil && fleetStore.FilePath != "" {
+		cand := filepath.Join(filepath.Dir(fleetStore.FilePath), "singctl.yaml")
+		if _, err := os.Stat(cand); err == nil {
+			cfgPath = cand
+		}
 	}
+	return &Manager{
+		Store:      fleetStore,
+		SubStore:   subStore,
+		ConfigPath: cfgPath,
+		CFClient:   NewCloudflareDNSClient(),
+		GeoProber:  DefaultGeoProber,
+		Runner:     DefaultSSHRunner,
+	}
+}
+
+func (m *Manager) loadMasterConfig() *config.Config {
+	p := strings.TrimSpace(m.ConfigPath)
+	if p == "" && m.Store != nil && m.Store.FilePath != "" {
+		p = filepath.Join(filepath.Dir(m.Store.FilePath), "singctl.yaml")
+	}
+	if p == "" {
+		p = "/etc/singctl/singctl.yaml"
+	}
+	cfg, err := config.Load(p)
+	if err != nil || cfg == nil {
+		return &config.Config{}
+	}
+	return cfg
+}
+
+// GetBootstrapDefaults returns sanitized Master configuration metadata for zero-config UI/CLI bootstrap.
+func (m *Manager) GetBootstrapDefaults(ctx context.Context) BootstrapDefaults {
+	cfg := m.loadMasterConfig()
+	masterDom := strings.TrimSpace(cfg.Server.GetNodeDomain())
+	hasCF := strings.TrimSpace(cfg.Server.CFDNSKey) != ""
+	rootZone := guessRootDomain(masterDom)
+	if hasCF && m.CFClient != nil {
+		zCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		if z, err := m.CFClient.FindZone(zCtx, cfg.Server.CFDNSKey, masterDom, false); err == nil && z != nil {
+			rootZone = z.Name
+		}
+		cancel()
+	}
+	return BootstrapDefaults{
+		HasMasterCFToken:     hasCF,
+		MasterNodeDomain:     masterDom,
+		SuggestedRootZone:    rootZone,
+		DefaultSNI:           cmp.Or(strings.TrimSpace(cfg.Server.Sni), "swdist.apple.com"),
+		DefaultTargetSSHPort: DefaultTargetSSHPort,
+		Hy2Up:                cmp.Or(cfg.Hy2.Up, 50),
+		Hy2Down:              cmp.Or(cfg.Hy2.Down, 300),
+	}
+}
+
+func guessRootDomain(d string) string {
+	d = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(d)), ".")
+	if d == "" || d == "node.yourdomain.com" {
+		return ""
+	}
+	parts := strings.Split(d, ".")
+	if len(parts) >= 2 {
+		return parts[len(parts)-2] + "." + parts[len(parts)-1]
+	}
+	return d
 }
 
 // DefaultSSHRunner connects via either OpenSSH config alias or native Go crypto/ssh.
@@ -306,6 +372,8 @@ func (m *Manager) syncNodeObj(ctx context.Context, node Node) NodeActionResult {
 		}
 	}
 
+	inferredDomain := extractFirstURIHost(uris)
+
 	_, _ = m.Store.UpdateRuntimeState(node.ID, func(n *Node) {
 		n.Online = true
 		n.LastError = ""
@@ -313,6 +381,9 @@ func (m *Manager) syncNodeObj(ctx context.Context, node Node) NodeActionResult {
 		n.LatencyMs = rtt
 		if verStr != "" {
 			n.SingctlVersion = verStr
+		}
+		if n.Domain == "" && inferredDomain != "" {
+			n.Domain = inferredDomain
 		}
 		n.CPULoad = loadStr
 		n.MemPercent = memPct
@@ -548,19 +619,138 @@ singctl sr web restart >/dev/null 2>&1 || true
 	return syncRes
 }
 
-// BootstrapNode provisions a fresh Linux VPS:
-//  1. (Default ON) Hardens SSH: injects Master + operator public keys, transitions port 22 -> 2222 with anti-lockout verification, disables password auth, and wipes plaintext password
-//  2. Installs SingCtl (with SHA-256 verification) and deploys the 4-core server stack
-//  3. Enrolls the node into fleet.yaml and syncs its HY2/Reality endpoints into Master SubHub
-func (m *Manager) BootstrapNode(ctx context.Context, in BootstrapInput) (NodeActionResult, error) {
-	domain := strings.TrimSpace(in.NodeDomain)
-	cfKey := strings.TrimSpace(in.CFDNSKey)
-	if domain == "" || unsafeHostChars.MatchString(domain) {
-		return NodeActionResult{}, errors.New("节点域名不能为空且不能包含非法字符")
+// BootstrapPlan describes the resolved configuration for a fleet node bootstrap (inheriting Master defaults when omitted).
+type BootstrapPlan struct {
+	ID               string `json:"id"`
+	Name             string `json:"name"`
+	Host             string `json:"host"`
+	Domain           string `json:"domain"`
+	DomainAutoDerive bool   `json:"domainAutoDerive"`
+	CFDNSKey         string `json:"-"`
+	InheritCFToken   bool   `json:"inheritCfToken"`
+	MasterDomain     string `json:"masterDomain,omitempty"`
+	SNI              string `json:"sni"`
+	SubstoreDomain   string `json:"substoreDomain,omitempty"`
+	MirrorURL        string `json:"mirrorUrl"`
+	Hy2Up            int    `json:"hy2Up"`
+	Hy2Down          int    `json:"hy2Down"`
+	NodeTag          string `json:"nodeTag"`
+	TargetSSHPort    int    `json:"targetSshPort"`
+}
+
+// PreviewBootstrapNode resolves omitted ID, Name, Domain, CF Token, SNI, and HY2 bandwidth from GeoIP + Master config.
+func (m *Manager) PreviewBootstrapNode(ctx context.Context, in BootstrapInput) (BootstrapPlan, error) {
+	hostTarget := cmp.Or(strings.TrimSpace(in.Host), strings.TrimSpace(in.SSHAlias))
+	if err := ValidateHostTarget(hostTarget); err != nil {
+		return BootstrapPlan{}, err
 	}
+
+	masterCfg := m.loadMasterConfig()
+	masterDom := strings.TrimSpace(masterCfg.Server.GetNodeDomain())
+	if masterDom == "node.yourdomain.com" {
+		masterDom = ""
+	}
+
+	takenIDs := make(map[string]bool)
+	if mTag := strings.ToLower(strings.TrimSpace(masterCfg.Server.NodeTag)); mTag != "" {
+		takenIDs[mTag] = true
+	}
+	if m.Store != nil {
+		if existing, err := m.Store.List(); err == nil {
+			for _, n := range existing {
+				takenIDs[strings.ToLower(strings.TrimSpace(n.ID))] = true
+			}
+		}
+	}
+
+	var geo GeoInfo
+	if strings.TrimSpace(in.ID) == "" || strings.TrimSpace(in.Name) == "" {
+		prober := m.GeoProber
+		if prober == nil {
+			prober = DefaultGeoProber
+		}
+		if strings.TrimSpace(in.Host) != "" {
+			geo = prober(ctx, in.Host)
+		} else {
+			geo = GeoInfo{Tag: "node", DisplayName: "边缘节点"}
+		}
+	}
+
+	allocID, allocName := AllocateUniqueIDAndName(in.ID, in.Name, geo.Tag, geo.DisplayName, takenIDs)
+	if !validNodeIDRe.MatchString(allocID) {
+		return BootstrapPlan{}, fmt.Errorf("无效的子节点代号 %q (仅允许字母、数字、连字符和下划线，最长 32 位)", allocID)
+	}
+
+	explicitCF := cmp.Or(strings.TrimSpace(in.CFDNSKey), strings.TrimSpace(os.Getenv("CF_DNS_API_TOKEN")))
+	masterCF := strings.TrimSpace(masterCfg.Server.CFDNSKey)
+	cfKey := cmp.Or(explicitCF, masterCF)
 	if cfKey == "" {
-		return NodeActionResult{}, errors.New("Cloudflare DNS API Token 不能为空")
+		return BootstrapPlan{}, errors.New("未检测到 Cloudflare DNS API Token：主控 /etc/singctl/singctl.yaml 未配置 cf_dns_key，请通过 --cf-token 传入")
 	}
+
+	explicitDom := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(in.NodeDomain)), ".")
+	domainAuto := false
+	resolvedDom := explicitDom
+	if explicitDom != "" {
+		if unsafeHostChars.MatchString(explicitDom) {
+			return BootstrapPlan{}, errors.New("节点域名包含非法字符")
+		}
+	} else {
+		domainAuto = true
+		rootZone := guessRootDomain(masterDom)
+		if m.CFClient != nil {
+			zCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			if z, zErr := m.CFClient.FindZone(zCtx, cfKey, masterDom, false); zErr == nil && z != nil {
+				rootZone = z.Name
+			}
+			cancel()
+		}
+		if rootZone != "" {
+			resolvedDom = fmt.Sprintf("%s.%s", allocID, rootZone)
+		}
+	}
+
+	sni := cmp.Or(strings.TrimSpace(in.SNI), strings.TrimSpace(masterCfg.Server.Sni), "swdist.apple.com")
+	mirrorURL := cmp.Or(strings.TrimSpace(masterCfg.GitHub.MirrorURL), "https://gh-proxy.com")
+	hy2Up := cmp.Or(masterCfg.Hy2.Up, 50)
+	hy2Down := cmp.Or(masterCfg.Hy2.Down, 300)
+	tag := cmp.Or(strings.TrimSpace(in.NodeTag), allocID)
+	targetPort := in.TargetSSHPort
+	if targetPort <= 0 {
+		targetPort = DefaultTargetSSHPort
+	}
+
+	return BootstrapPlan{
+		ID:               allocID,
+		Name:             allocName,
+		Host:             hostTarget,
+		Domain:           resolvedDom,
+		DomainAutoDerive: domainAuto,
+		CFDNSKey:         cfKey,
+		InheritCFToken:   explicitCF == "" && masterCF != "",
+		MasterDomain:     masterDom,
+		SNI:              sni,
+		SubstoreDomain:   strings.TrimSpace(in.SubstoreDomain),
+		MirrorURL:        mirrorURL,
+		Hy2Up:            hy2Up,
+		Hy2Down:          hy2Down,
+		NodeTag:          tag,
+		TargetSSHPort:    targetPort,
+	}, nil
+}
+
+// BootstrapNode provisions a fresh Linux VPS with intelligent Master inheritance:
+//  1. Auto-resolves omitted ID/Name via GeoIP and inherits Master's CF Token, SNI, HY2 bandwidth, and GitHub mirror
+//  2. (Default ON) Hardens SSH: injects Master + operator public keys, transitions port 22 -> 2222 with anti-lockout verification, disables password auth, and wipes plaintext password
+//  3. Auto-allocates and provisions a grey-cloud Cloudflare A/AAAA DNS record (collision-free) before certificate issuance
+//  4. Installs SingCtl (with SHA-256 verification), deploys the 4-core server stack, and syncs endpoints into Master SubHub
+func (m *Manager) BootstrapNode(ctx context.Context, in BootstrapInput) (NodeActionResult, error) {
+	plan, err := m.PreviewBootstrapNode(ctx, in)
+	if err != nil {
+		return NodeActionResult{}, err
+	}
+	in.ID = plan.ID
+	in.Name = plan.Name
 
 	initialNode, err := NormalizeUpsertInput(in.UpsertInput)
 	if err != nil {
@@ -580,11 +770,7 @@ func (m *Manager) BootstrapNode(ctx context.Context, in BootstrapInput) (NodeAct
 	upsertIn := in.UpsertInput
 	sshHardenedMsg := ""
 	if shouldHardenBootstrapSSH(in, initialNode.AuthType) {
-		targetPort := in.TargetSSHPort
-		if targetPort <= 0 {
-			targetPort = DefaultTargetSSHPort
-		}
-		hardenedNode, hErr := m.hardenBootstrapSSH(ctx, initialNode, targetPort, in.ExtraAuthorizedKeys)
+		hardenedNode, hErr := m.hardenBootstrapSSH(ctx, initialNode, plan.TargetSSHPort, in.ExtraAuthorizedKeys)
 		if hErr != nil {
 			return NodeActionResult{
 				ID:      initialNode.ID,
@@ -604,27 +790,57 @@ func (m *Manager) BootstrapNode(ctx context.Context, in BootstrapInput) (NodeAct
 		sshHardenedMsg = fmt.Sprintf("（SSH 已收敛至 %d 免密并禁用密码）", hardenedNode.Port)
 	}
 
+	// Provision Cloudflare grey-cloud DNS record AFTER SSH succeeds (zero orphan DNS if password/IP was wrong) and BEFORE Caddy ACME challenge.
+	finalDomain := plan.Domain
+	dnsAutoManaged := false
+	dnsMsg := ""
+	if !in.SkipDNS && m.CFClient != nil && strings.TrimSpace(in.Host) != "" {
+		dnsCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		provDom, autoManaged, dnsErr := m.CFClient.ProvisionNodeDNS(
+			dnsCtx,
+			plan.CFDNSKey,
+			plan.MasterDomain,
+			plan.ID,
+			in.NodeDomain,
+			in.Host,
+		)
+		cancel()
+		if dnsErr != nil {
+			if plan.DomainAutoDerive {
+				return NodeActionResult{}, fmt.Errorf("自动创建 Cloudflare DNS 解析失败: %w", dnsErr)
+			}
+		} else if provDom != "" {
+			finalDomain = provDom
+			dnsAutoManaged = autoManaged
+			if autoManaged {
+				dnsMsg = fmt.Sprintf("（DNS %s 已自动绑定灰云解析）", finalDomain)
+			}
+		}
+	}
+	if finalDomain == "" {
+		return NodeActionResult{}, errors.New("无法自动推导节点域名，请通过 --domain 显式指定")
+	}
+
+	upsertIn.Domain = finalDomain
+	upsertIn.DNSAutoManaged = &dnsAutoManaged
+
 	node, err := m.Store.Upsert(upsertIn)
 	if err != nil {
 		return NodeActionResult{}, err
 	}
 
-	sni := cmp.Or(strings.TrimSpace(in.SNI), "swdist.apple.com")
-	subDom := strings.TrimSpace(in.SubstoreDomain)
-	tag := cmp.Or(strings.TrimSpace(in.NodeTag), node.ID)
-
 	yamlContent := fmt.Sprintf(`github:
-  mirror_url: "https://gh-proxy.com"
+  mirror_url: %q
 hy2:
-  up: 50
-  down: 300
+  up: %d
+  down: %d
 server:
   node_tag: %q
   node_domain: %q
   substore_domain: %q
   cf_dns_key: %q
   sni: %q
-`, tag, domain, subDom, cfKey, sni)
+`, plan.MirrorURL, plan.Hy2Up, plan.Hy2Down, plan.NodeTag, finalDomain, plan.SubstoreDomain, plan.CFDNSKey, plan.SNI)
 
 	cfgB64 := base64.StdEncoding.EncodeToString([]byte(yamlContent))
 
@@ -681,20 +897,52 @@ singctl sr install >/dev/null 2>&1
 
 	syncRes := m.syncNodeObj(ctx, node)
 	if syncRes.Success {
-		syncRes.Message = fmt.Sprintf("新机自动化部署成功%s，已纳管 %d 个节点至总订阅", sshHardenedMsg, syncRes.SyncedNodes)
+		syncRes.Message = fmt.Sprintf("新机 [%s] 自动化部署成功%s%s，已纳管 %d 个节点至总订阅",
+			node.ID, sshHardenedMsg, dnsMsg, syncRes.SyncedNodes)
 	}
 	return syncRes, nil
 }
 
-// RemoveNode removes a node from fleet.yaml and cleans up its SubHub source entry.
+// RemoveNode removes a node from fleet.yaml, cleans up its SubHub source entry, and deletes any auto-managed Cloudflare DNS record matching the node IP.
 func (m *Manager) RemoveNode(id string) error {
+	_, err := m.RemoveNodeWithOptions(context.Background(), id, false)
+	return err
+}
+
+// RemoveNodeWithOptions removes a node and optionally preserves its Cloudflare DNS record when keepDNS is true.
+func (m *Manager) RemoveNodeWithOptions(ctx context.Context, id string, keepDNS bool) (dnsDeleted bool, err error) {
+	existing, hasNode, _ := m.Store.Get(id)
 	if err := m.Store.Delete(id); err != nil {
-		return err
+		return false, err
 	}
 	if m.SubStore != nil {
 		_ = m.SubStore.DeleteSource(SubHubSourceName(id))
 	}
-	return nil
+	if !keepDNS && hasNode && existing.DNSAutoManaged && existing.Domain != "" && existing.Host != "" && m.CFClient != nil {
+		masterCfg := m.loadMasterConfig()
+		cfKey := cmp.Or(strings.TrimSpace(masterCfg.Server.CFDNSKey), strings.TrimSpace(os.Getenv("CF_DNS_API_TOKEN")))
+		if cfKey != "" {
+			dCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			deleted, _ := m.CFClient.DeleteNodeDNSIfMatching(dCtx, cfKey, existing.Domain, existing.Host)
+			cancel()
+			dnsDeleted = deleted
+		}
+	}
+	return dnsDeleted, nil
+}
+
+func extractFirstURIHost(uris []string) string {
+	for _, raw := range uris {
+		u, err := url.Parse(strings.TrimSpace(raw))
+		if err != nil || u.Host == "" {
+			continue
+		}
+		h := u.Hostname()
+		if h != "" && net.ParseIP(h) == nil {
+			return strings.ToLower(h)
+		}
+	}
+	return ""
 }
 
 func truncateLine(s string, maxLen int) string {

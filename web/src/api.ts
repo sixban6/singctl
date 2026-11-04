@@ -16,8 +16,12 @@ import {
   FleetListResponse,
   FleetUpsertInput,
   FleetBootstrapInput,
+  FleetBootstrapDefaults,
+  FleetBootstrapPlan,
   FleetNode,
   FleetActionResult,
+  HealStatusReport,
+  HealRunResponse,
 } from './types';
 
 export const getBasePath = (): string => {
@@ -199,17 +203,28 @@ export const api = {
 
   getFleet: () => request<FleetListResponse>('/api/server/fleet'),
 
+  getFleetDefaults: () => request<FleetBootstrapDefaults>('/api/server/fleet/defaults'),
+
+  previewFleetBootstrap: (input: FleetBootstrapInput) =>
+    request<FleetBootstrapPlan>('/api/server/fleet/preview-bootstrap', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+
   upsertFleetNode: (input: FleetUpsertInput) =>
     request<{ message: string; node: FleetNode; syncResult?: FleetActionResult }>('/api/server/fleet/nodes', {
       method: 'POST',
       body: JSON.stringify(input),
     }),
 
-  deleteFleetNode: (id: string) =>
-    request<{ message: string }>(`/api/server/fleet/nodes?id=${encodeURIComponent(id)}`, {
-      method: 'DELETE',
-      body: JSON.stringify({ id }),
-    }),
+  deleteFleetNode: (id: string, keepDns = false) =>
+    request<{ message: string; dnsDeleted?: boolean }>(
+      `/api/server/fleet/nodes?id=${encodeURIComponent(id)}&keepDns=${keepDns ? 'true' : 'false'}`,
+      {
+        method: 'DELETE',
+        body: JSON.stringify({ id, keepDns }),
+      }
+    ),
 
   runFleetAction: (action: 'sync' | 'doctor' | 'reset' | 'update', ids?: string[]) =>
     request<{ message: string; results: FleetActionResult[] }>('/api/server/fleet/action', {
@@ -221,6 +236,20 @@ export const api = {
     request<{ message: string; result: FleetActionResult }>('/api/server/fleet/bootstrap', {
       method: 'POST',
       body: JSON.stringify(input),
+    }),
+
+  getHealStatus: () => request<HealStatusReport>('/api/server/heal/status'),
+
+  runHeal: (opts: { scope?: 'local' | 'fleet'; checkOnly?: boolean; allowReboot?: boolean; enableTimers?: boolean; targetIds?: string[] }) =>
+    request<HealRunResponse>('/api/server/heal/run', {
+      method: 'POST',
+      body: JSON.stringify(opts),
+    }),
+
+  updateHealPolicy: (opts: { autoHealEnabled: boolean; schedule?: string; autoReboot?: boolean; applyToFleet?: boolean }) =>
+    request<{ message: string; status: HealStatusReport }>('/api/server/heal/policy', {
+      method: 'PUT',
+      body: JSON.stringify(opts),
     }),
 
   logout: () =>

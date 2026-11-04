@@ -106,13 +106,17 @@ func New(opts Options) *Server {
 		fleetFile = fleet.ResolveFleetFilePath(opts.ConfigPath)
 	}
 	fleetStore := fleet.NewStore(fleetFile)
+	fleetMgr := fleet.NewManager(fleetStore, subStore)
+	if opts.ConfigPath != "" {
+		fleetMgr.ConfigPath = opts.ConfigPath
+	}
 
 	s := &Server{
 		opts:               opts,
 		mux:                http.NewServeMux(),
 		subStore:           subStore,
 		telemetry:          telemetry.NewCollector(opts.SingBoxConfigPath),
-		fleet:              fleet.NewManager(fleetStore, subStore),
+		fleet:              fleetMgr,
 		sessions:           make(map[string]sessionRecord),
 		limiter:            NewIPLimiter(3, 10*time.Minute, 15*time.Minute, banFile),
 		audit:              NewAuditManager(auditFile),
@@ -154,6 +158,8 @@ func (s *Server) registerRoutes() {
 
 	// 多节点舰队编排 (Multi-Node Fleet)
 	s.mux.HandleFunc("GET /api/server/fleet", s.guard(s.handleFleetList))
+	s.mux.HandleFunc("GET /api/server/fleet/defaults", s.guard(s.handleFleetDefaults))
+	s.mux.HandleFunc("POST /api/server/fleet/preview-bootstrap", s.guard(s.handleFleetPreviewBootstrap))
 	s.mux.HandleFunc("POST /api/server/fleet/nodes", s.guard(s.handleFleetUpsertNode))
 	s.mux.HandleFunc("DELETE /api/server/fleet/nodes", s.guard(s.handleFleetDeleteNode))
 	s.mux.HandleFunc("POST /api/server/fleet/action", s.guard(s.handleFleetAction))
@@ -186,6 +192,11 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/server/audit-logs", s.guard(s.handleListAuditLogs))
 	s.mux.HandleFunc("GET /api/server/doctor", s.guard(s.handleDoctor))
 	s.mux.HandleFunc("GET /api/server/diagnose/unlock", s.guard(s.handleUnlockDiagnose))
+
+	// 三层自动化安全漏洞自愈中心 (3-Layer Security Self-Healing)
+	s.mux.HandleFunc("GET /api/server/heal/status", s.guard(s.handleHealStatus))
+	s.mux.HandleFunc("POST /api/server/heal/run", s.guard(s.handleHealRun))
+	s.mux.HandleFunc("PUT /api/server/heal/policy", s.guard(s.handleHealPolicy))
 
 	// 认证 API (公开访问)
 	s.mux.HandleFunc("POST /api/server/login", s.handleLogin)

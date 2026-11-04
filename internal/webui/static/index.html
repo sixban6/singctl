@@ -65,7 +65,13 @@ body {
   font-size: 14px;
   line-height: 1.55;
 }
-.app { max-width: 1120px; margin: 0 auto; padding: 0 20px 140px; }
+.app { max-width: 1180px; margin: 0 auto; padding: 0 20px calc(130px + env(safe-area-inset-bottom, 0px)); }
+@media (max-width: 767px) {
+  .app { padding: 0 14px calc(110px + env(safe-area-inset-bottom, 0px)); }
+  .topbar { flex-wrap: wrap; gap: 10px; padding: 14px 0 10px; }
+  .field input[type="text"], .field input[type="password"], .field input[type="number"], .field select, .field textarea { font-size: 16px; }
+  .console { padding-bottom: env(safe-area-inset-bottom, 0px); }
+}
 svg.ic { width: 17px; height: 17px; flex: none; vertical-align: -3px; }
 
 /* ═══════════════════════ 顶栏 ═══════════════════════ */

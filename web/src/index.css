@@ -43,3 +43,35 @@
 .glow-green {
   box-shadow: 0 0 16px -2px rgba(34, 197, 94, 0.4);
 }
+
+/* Hide scrollbars cleanly on horizontal tab strips */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Dynamic viewport height & iOS notch / home-indicator safe area support */
+.min-h-dvh {
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+.pb-mobile-nav {
+  padding-bottom: calc(5.25rem + env(safe-area-inset-bottom, 0px));
+}
+
+/* Prevent iOS Safari forced page zoom when focusing inputs (< 16px triggers auto-zoom on WebKit) */
+@media (max-width: 767px) {
+  input,
+  select,
+  textarea {
+    font-size: 16px !important;
+  }
+}

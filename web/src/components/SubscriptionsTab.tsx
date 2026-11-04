@@ -603,8 +603,48 @@ export const SubscriptionsTab: React.FC = () => {
             暂无客户端订阅拉取记录。当手机或桌面客户端更新订阅时，此处将实时记录设备软件类型与来源地区
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse text-xs">
+          <>
+            {/* Mobile Stacked Audit Cards (< 768px) */}
+            <div className="md:hidden space-y-2">
+              {auditLogs.slice(0, 25).map((log, idx) => {
+                const formattedTime = (() => {
+                  const d = new Date(log.timestamp);
+                  return Number.isNaN(d.getTime()) ? log.timestamp : d.toLocaleString();
+                })();
+                const isDenied = log.status === 'denied';
+                return (
+                  <div
+                    key={`m-${log.timestamp}-${idx}`}
+                    className="p-3 rounded-xl bg-slate-950/60 border border-slate-800/80 space-y-1.5 text-xs font-mono"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="px-2 py-0.5 rounded bg-slate-900 border border-slate-700/80 text-slate-200 text-[11px] truncate">
+                        {log.clientApp || 'Unknown'} · {log.target}
+                      </span>
+                      {isDenied ? (
+                        <span className="px-2 py-0.5 rounded text-[10px] bg-rose-500/15 text-rose-300 border border-rose-500/30 shrink-0">
+                          密钥拦截
+                        </span>
+                      ) : (
+                        <span className="px-2 py-0.5 rounded text-[10px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/25 shrink-0">
+                          正常下发
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap items-center justify-between gap-1 text-[11px] text-slate-400">
+                      <span>
+                        {log.flag || '🌐'} {log.ip || '-'} {log.geo ? `(${log.geo})` : ''}
+                      </span>
+                      <span>{formattedTime}</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Desktop Table (>= 768px) */}
+            <div className="hidden md:block overflow-x-auto">
+              <table className="w-full text-left border-collapse text-xs">
               <thead>
                 <tr className="border-b border-slate-800/80 text-[11px] text-slate-400 font-mono">
                   <th className="py-2.5 pr-3">拉取时间</th>
@@ -659,16 +699,17 @@ export const SubscriptionsTab: React.FC = () => {
                 })}
               </tbody>
             </table>
-          </div>
+            </div>
+          </>
         )}
       </div>
 
       {/* Add / Edit Subscription Source Modal */}
       {editingSource && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-md">
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center sm:p-4 bg-slate-950/85 backdrop-blur-md">
           <form
             onSubmit={handleSaveSource}
-            className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-xl overflow-hidden shadow-2xl"
+            className="bg-slate-900 border-t sm:border border-slate-800 rounded-t-3xl sm:rounded-3xl w-full max-w-xl max-h-[92dvh] overflow-y-auto shadow-2xl pb-safe"
           >
             <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800">
               <div>
@@ -795,8 +836,8 @@ export const SubscriptionsTab: React.FC = () => {
 
       {/* Live Target Config Preview Modal */}
       {showPreviewModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-md">
-          <div className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-4xl max-h-[88vh] flex flex-col overflow-hidden shadow-2xl">
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center sm:p-4 bg-slate-950/85 backdrop-blur-md">
+          <div className="bg-slate-900 border-t sm:border border-slate-800 rounded-t-3xl sm:rounded-3xl w-full max-w-4xl max-h-[90dvh] flex flex-col overflow-hidden shadow-2xl pb-safe">
             <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800">
               <div>
                 <h4 className="text-base font-bold text-white flex items-center gap-2">

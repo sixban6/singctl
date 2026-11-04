@@ -187,6 +187,7 @@ func NewServerCmd(configPath string, version ...string) *cobra.Command {
 	cmd.AddCommand(NewFleetCmd(configPath))
 	cmd.AddCommand(NewNetCmd(configPath))
 	cmd.AddCommand(newServerDoctorCmd(configPath))
+	cmd.AddCommand(newServerHealCmd(configPath, ver))
 	cmd.AddCommand(newMaskSiteCmd(configPath))
 	cmd.AddCommand(newServerUpdateCmd(configPath))
 	cmd.AddCommand(newServerCheckCmd(configPath))

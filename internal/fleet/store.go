@@ -37,6 +37,8 @@ type Node struct {
 	ID             string   `json:"id" yaml:"id"`
 	Name           string   `json:"name" yaml:"name"`
 	Host           string   `json:"host" yaml:"host"`
+	Domain         string   `json:"domain,omitempty" yaml:"domain,omitempty"`
+	DNSAutoManaged bool     `json:"dnsAutoManaged,omitempty" yaml:"dns_auto_managed,omitempty"`
 	Port           int      `json:"port" yaml:"port"`
 	User           string   `json:"user" yaml:"user"`
 	AuthType       string   `json:"authType" yaml:"auth_type"`
@@ -76,17 +78,19 @@ func (n Node) PublicView() Node {
 
 // UpsertInput defines parameters to create or update a fleet node.
 type UpsertInput struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	Host       string `json:"host"`
-	Port       int    `json:"port"`
-	User       string `json:"user"`
-	AuthType   string `json:"authType"`
-	SSHAlias   string `json:"sshAlias"`
-	KeyPath    string `json:"keyPath"`
-	PrivateKey string `json:"privateKey"` // inline PEM key content
-	Password   string `json:"password"`
-	Enabled    *bool  `json:"enabled,omitzero"`
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	Host           string `json:"host"`
+	Domain         string `json:"domain,omitempty"`
+	DNSAutoManaged *bool  `json:"dnsAutoManaged,omitzero"`
+	Port           int    `json:"port"`
+	User           string `json:"user"`
+	AuthType       string `json:"authType"`
+	SSHAlias       string `json:"sshAlias"`
+	KeyPath        string `json:"keyPath"`
+	PrivateKey     string `json:"privateKey"` // inline PEM key content
+	Password       string `json:"password"`
+	Enabled        *bool  `json:"enabled,omitzero"`
 }
 
 // BootstrapInput extends UpsertInput with initial SingCtl server deployment & SSH hardening parameters.
@@ -97,9 +101,21 @@ type BootstrapInput struct {
 	CFDNSKey            string `json:"cfDnsKey"`
 	NodeTag             string `json:"nodeTag"`
 	SNI                 string `json:"sni"`
+	SkipDNS             bool   `json:"skipDns,omitzero"`
 	HardenSSH           *bool  `json:"hardenSsh,omitzero"`
 	TargetSSHPort       int    `json:"targetSshPort,omitzero"`
 	ExtraAuthorizedKeys string `json:"extraAuthorizedKeys,omitzero"`
+}
+
+// BootstrapDefaults exposes sanitized Master configuration defaults so CLI and WebUI can guide zero-config bootstrap.
+type BootstrapDefaults struct {
+	HasMasterCFToken     bool   `json:"hasMasterCfToken"`
+	MasterNodeDomain     string `json:"masterNodeDomain,omitempty"`
+	SuggestedRootZone    string `json:"suggestedRootZone,omitempty"`
+	DefaultSNI           string `json:"defaultSni"`
+	DefaultTargetSSHPort int    `json:"defaultTargetSshPort"`
+	Hy2Up                int    `json:"hy2Up"`
+	Hy2Down              int    `json:"hy2Down"`
 }
 
 type fleetFileDoc struct {
@@ -414,6 +430,12 @@ func (s *Store) Upsert(in UpsertInput) (Node, error) {
 	}
 
 	target.Name = cmp.Or(strings.TrimSpace(in.Name), target.Name, id)
+	if strings.TrimSpace(in.Domain) != "" {
+		target.Domain = strings.ToLower(strings.TrimSpace(in.Domain))
+	}
+	if in.DNSAutoManaged != nil {
+		target.DNSAutoManaged = *in.DNSAutoManaged
+	}
 	target.AuthType = authType
 	target.Port = parsed.Port
 	target.User = parsed.User

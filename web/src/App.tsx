@@ -133,7 +133,7 @@ const DashboardContent: React.FC = () => {
 
   // 3. Authenticated Full Dashboard
   return (
-    <div className="min-h-screen flex flex-col bg-[#080d1a] text-slate-100 animate-fade-in">
+    <div className="min-h-dvh flex flex-col bg-[#080d1a] text-slate-100 animate-fade-in">
       <Header status={status} onLogout={handleLogout} lastOk={lastOk} linkDown={linkDown} />
 
       {linkDown && (
@@ -143,7 +143,7 @@ const DashboardContent: React.FC = () => {
         </div>
       )}
 
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
+      <main className="flex-1 max-w-[1440px] w-full mx-auto px-3.5 sm:px-6 lg:px-8 py-4 sm:py-6 pb-mobile-nav md:pb-8 space-y-5 sm:space-y-6">
         {status?.initialCredentials?.pending && (
           <div className="p-5 rounded-2xl border border-amber-500/30 bg-amber-500/10 space-y-3">
             <div>
@@ -207,8 +207,8 @@ const DashboardContent: React.FC = () => {
         </div>
       </main>
 
-      <footer className="border-t border-slate-900 py-6 text-center text-xs text-slate-600 font-mono">
-        Fleet Manager · 极简轻量 · 纯单页面无冗余依赖 · 内存占用 &lt; 25MB
+      <footer className="hidden md:block border-t border-slate-900 py-5 text-center text-xs text-slate-600 font-mono">
+        SingCtl Fleet &amp; Security Self-Healing · 极简零外部依赖 · 单二进制内嵌静态控制台
       </footer>
     </div>
   );

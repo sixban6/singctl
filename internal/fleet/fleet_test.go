@@ -5,11 +5,17 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"singctl/internal/heal"
 	"singctl/internal/subhub"
 )
 
@@ -276,5 +282,299 @@ func TestBootstrapNodeSSHHardeningAndRollback(t *testing.T) {
 	savedNode, ok, _ := fleetStore.Get("jp")
 	if !ok || savedNode.Port != 2222 || savedNode.AuthType != AuthKeyFile || savedNode.Password != "" {
 		t.Fatalf("expected saved node on port 2222 + key_file with wiped password, got %+v", savedNode)
+	}
+}
+
+func TestZeroConfigBootstrapMasterInheritanceAndCloudflareDNS(t *testing.T) {
+	tmpDir := t.TempDir()
+	masterCfgPath := filepath.Join(tmpDir, "singctl.yaml")
+	masterCfgYAML := `github:
+  mirror_url: "https://mirror.example.com"
+hy2:
+  up: 80
+  down: 500
+server:
+  node_tag: "los"
+  node_domain: "cdn.l1.example.com"
+  cf_dns_key: "cf-master-secret-token"
+  sni: "itunes.apple.com"
+`
+	if err := os.WriteFile(masterCfgPath, []byte(masterCfgYAML), 0600); err != nil {
+		t.Fatalf("write master singctl.yaml failed: %v", err)
+	}
+
+	// Mock Cloudflare API v4 server
+	var mu sync.Mutex
+	records := map[string]cfDNSRecord{
+		// Pre-existing record pointing to a DIFFERENT IP -> must NEVER be overwritten!
+		"rec-conflict": {
+			ID:      "rec-conflict",
+			Type:    "A",
+			Name:    "sg2.example.com",
+			Content: "198.51.100.77",
+			Proxied: true,
+		},
+	}
+	cfSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer cf-master-secret-token" {
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": false})
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/zones") && !strings.Contains(r.URL.Path, "/dns_records"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"result": []cfZone{
+					{ID: "zone-example-1", Name: "example.com"},
+				},
+			})
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/dns_records"):
+			wantName := r.URL.Query().Get("name")
+			var matched []cfDNSRecord
+			for _, rec := range records {
+				if rec.Name == wantName {
+					matched = append(matched, rec)
+				}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "result": matched})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/dns_records"):
+			var body struct {
+				Type    string `json:"type"`
+				Name    string `json:"name"`
+				Content string `json:"content"`
+				Proxied bool   `json:"proxied"`
+				TTL     int    `json:"ttl"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if body.Proxied {
+				t.Errorf("SECURITY/AVAILABILITY BUG: Cloudflare DNS record created with proxied=true (orange cloud)!")
+			}
+			id := "rec-" + body.Name
+			rec := cfDNSRecord{ID: id, Type: body.Type, Name: body.Name, Content: body.Content, Proxied: body.Proxied, TTL: body.TTL}
+			records[id] = rec
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "result": rec})
+		case r.Method == http.MethodDelete && strings.Contains(r.URL.Path, "/dns_records/"):
+			parts := strings.Split(r.URL.Path, "/")
+			recID := parts[len(parts)-1]
+			delete(records, recID)
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "result": map[string]any{"id": recID}})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer cfSrv.Close()
+
+	fleetStore := NewStore(filepath.Join(tmpDir, "fleet.yaml"))
+	subStore := subhub.NewStore(filepath.Join(tmpDir, "sub-store"), "")
+	mgr := NewManager(fleetStore, subStore)
+	mgr.ConfigPath = masterCfgPath
+	mgr.CFClient = &CloudflareDNSClient{BaseURL: cfSrv.URL, HTTPClient: cfSrv.Client()}
+	mgr.GeoProber = func(ctx context.Context, host string) GeoInfo {
+		return GeoInfo{Tag: "sg", CountryCode: "SG", City: "Singapore", DisplayName: "新加坡"}
+	}
+
+	var capturedYAML string
+	mgr.Runner = func(ctx context.Context, n Node, script string) (string, int, error) {
+		switch {
+		case strings.Contains(script, "SINGCTL_FLEET_SSH_VERIFIED"):
+			return "SINGCTL_FLEET_SSH_VERIFIED\n", 15, nil
+		case strings.Contains(script, "singctl sr install"):
+			// Extract base64 encoded singctl.yaml pushed to remote node
+			for line := range strings.SplitSeq(script, "\n") {
+				if strings.Contains(line, "base64 -d > /etc/singctl/singctl.yaml") {
+					fields := strings.Fields(line)
+					if len(fields) >= 3 {
+						b64 := strings.Trim(fields[2], `"'`)
+						raw, _ := base64.StdEncoding.DecodeString(b64)
+						capturedYAML = string(raw)
+					}
+				}
+			}
+			return "OK", 20, nil
+		case strings.Contains(script, "SINGCTL_SUB_B64="):
+			subDoc, _ := json.Marshal(map[string]any{
+				"subs": []map[string]any{
+					{"name": "auto_generated_hy2", "content": "hysteria2://p@" + n.Domain + ":443?sni=" + n.Domain + "#" + n.ID},
+				},
+			})
+			return "SINGCTL_VER=SingCtl v1.14.34\nSINGCTL_SUB_B64=" + base64.StdEncoding.EncodeToString(subDoc) + "\n", 15, nil
+		default:
+			return "OK", 15, nil
+		}
+	}
+
+	ctx := t.Context()
+
+	// 1) Zero-config bootstrap #1: ONLY Host + Password provided!
+	res1, err := mgr.BootstrapNode(ctx, BootstrapInput{
+		UpsertInput: UpsertInput{
+			Host:     "203.0.113.51",
+			Password: "TempRootPassword1!",
+		},
+	})
+	if err != nil || !res1.Success {
+		t.Fatalf("zero-config bootstrap #1 failed: res=%+v err=%v", res1, err)
+	}
+	if res1.ID != "sg" || res1.Name != "新加坡" {
+		t.Fatalf("expected auto-GeoIP ID=sg Name=新加坡, got ID=%q Name=%q", res1.ID, res1.Name)
+	}
+	n1, ok, _ := fleetStore.Get("sg")
+	if !ok || n1.Domain != "sg.example.com" || !n1.DNSAutoManaged {
+		t.Fatalf("expected auto-provisioned domain sg.example.com, got %+v", n1)
+	}
+	if !strings.Contains(capturedYAML, `sni: "itunes.apple.com"`) ||
+		!strings.Contains(capturedYAML, `up: 80`) ||
+		!strings.Contains(capturedYAML, `cf_dns_key: "cf-master-secret-token"`) ||
+		!strings.Contains(capturedYAML, `mirror_url: "https://mirror.example.com"`) {
+		t.Fatalf("remote singctl.yaml did not inherit Master config:\n%s", capturedYAML)
+	}
+
+	// 2) Zero-config bootstrap #2 in SAME country (Singapore):
+	//    - ID auto-increments to "sg2", Name to "新加坡 #2"
+	//    - Because "sg2.example.com" already points to 198.51.100.77 in Cloudflare, it MUST NOT overwrite it and must allocate "fl-sg2.example.com"!
+	res2, err := mgr.BootstrapNode(ctx, BootstrapInput{
+		UpsertInput: UpsertInput{
+			Host:     "203.0.113.52",
+			Password: "TempRootPassword2!",
+		},
+	})
+	if err != nil || !res2.Success {
+		t.Fatalf("zero-config bootstrap #2 failed: res=%+v err=%v", res2, err)
+	}
+	if res2.ID != "sg2" || res2.Name != "新加坡 #2" {
+		t.Fatalf("expected collision-free ID=sg2 Name='新加坡 #2', got ID=%q Name=%q", res2.ID, res2.Name)
+	}
+	n2, ok, _ := fleetStore.Get("sg2")
+	if !ok || n2.Domain != "fl-sg2.example.com" {
+		t.Fatalf("expected DNS collision avoidance to pick fl-sg2.example.com, got %+v", n2)
+	}
+	mu.Lock()
+	if records["rec-conflict"].Content != "198.51.100.77" {
+		t.Fatalf("CRITICAL: pre-existing DNS record sg2.example.com was overwritten!")
+	}
+	mu.Unlock()
+
+	// 3) RemoveNodeWithOptions cleans up auto-managed DNS record ONLY if IP matches
+	deletedDNS, err := mgr.RemoveNodeWithOptions(ctx, "sg", false)
+	if err != nil || !deletedDNS {
+		t.Fatalf("expected RemoveNodeWithOptions to delete auto-managed DNS record sg.example.com, got deleted=%v err=%v", deletedDNS, err)
+	}
+	mu.Lock()
+	if _, exists := records["rec-sg.example.com"]; exists {
+		t.Fatalf("expected rec-sg.example.com to be deleted from Cloudflare")
+	}
+	mu.Unlock()
+}
+
+func TestFleetHealSerialRollingRebootAndCircuitBreaker(t *testing.T) {
+	tmpDir := t.TempDir()
+	store := NewStore(filepath.Join(tmpDir, "fleet.yaml"))
+	for _, spec := range []struct{ id, name, ip string }{
+		{"n1", "节点一", "198.51.100.11"},
+		{"n2", "节点二", "198.51.100.12"},
+		{"n3", "节点三", "198.51.100.13"},
+	} {
+		_, err := store.Upsert(UpsertInput{
+			ID:       spec.id,
+			Name:     spec.name,
+			Host:     spec.ip,
+			Port:     2222,
+			User:     "root",
+			AuthType: AuthSSHAlias,
+			SSHAlias: spec.id,
+		})
+		if err != nil {
+			t.Fatalf("seed %s failed: %v", spec.id, err)
+		}
+	}
+
+	mgr := NewManager(store, nil)
+
+	// Scenario 1: All 3 nodes require kernel reboot -> MUST reboot strictly 1 at a time (never >=2 concurrently)
+	var inFlightReboots atomic.Int32
+	var maxConcurrentReboots atomic.Int32
+
+	healJSON, _ := json.Marshal(heal.RunResult{
+		Execution: heal.HealHistoryItem{Success: true, Summary: "已修复安全更新"},
+		Status: heal.StatusReport{
+			Posture: heal.PostureRebootRequired,
+			Kernel:  heal.KernelLayerStatus{RebootRequired: true},
+		},
+	})
+
+	mgr.Runner = func(ctx context.Context, n Node, script string) (string, int, error) {
+		switch {
+		case strings.Contains(script, "singctl sr heal"):
+			return string(healJSON), 12, nil
+		case strings.Contains(script, "SINGCTL_REBOOT_TRIGGERED"):
+			cur := inFlightReboots.Add(1)
+			for {
+				prev := maxConcurrentReboots.Load()
+				if cur <= prev || maxConcurrentReboots.CompareAndSwap(prev, cur) {
+					break
+				}
+			}
+			return "SINGCTL_REBOOT_TRIGGERED\n", 10, nil
+		case strings.Contains(script, "singctl sr doctor"):
+			inFlightReboots.Add(-1)
+			return "综合健康指数: 100 / 100\n", 15, nil
+		default:
+			return "OK", 10, nil
+		}
+	}
+
+	rep1, err := mgr.HealFleet(t.Context(), FleetHealOptions{
+		AllowReboot:           true,
+		RebootPollInterval:    20 * time.Millisecond,
+		RebootRecoveryTimeout: 200 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("HealFleet scenario 1 failed: %v", err)
+	}
+	if maxConcurrentReboots.Load() != 1 {
+		t.Fatalf("AVAILABILITY VIOLATION: expected strictly serial 1-by-1 reboot, got maxConcurrent=%d", maxConcurrentReboots.Load())
+	}
+	if rep1.RebootedNodes != 3 || rep1.CircuitBreakerHit {
+		t.Fatalf("expected 3 rebooted healthy nodes with no circuit breaker, got %+v", rep1)
+	}
+
+	// Scenario 2: n2 fails to come back healthy after reboot -> Circuit Breaker MUST abort rebooting n3!
+	var n3RebootTriggered atomic.Bool
+	mgr.Runner = func(ctx context.Context, n Node, script string) (string, int, error) {
+		switch {
+		case strings.Contains(script, "singctl sr heal"):
+			return string(healJSON), 12, nil
+		case strings.Contains(script, "SINGCTL_REBOOT_TRIGGERED"):
+			if n.ID == "n3" {
+				n3RebootTriggered.Store(true)
+			}
+			return "SINGCTL_REBOOT_TRIGGERED\n", 10, nil
+		case strings.Contains(script, "singctl sr doctor"):
+			if n.ID == "n2" {
+				return "", 0, errors.New("ssh: connect to host 198.51.100.12 port 2222: Connection timed out")
+			}
+			return "综合健康指数: 100 / 100\n", 15, nil
+		default:
+			return "OK", 10, nil
+		}
+	}
+
+	rep2, err := mgr.HealFleet(t.Context(), FleetHealOptions{
+		AllowReboot:           true,
+		RebootPollInterval:    20 * time.Millisecond,
+		RebootRecoveryTimeout: 90 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("HealFleet scenario 2 failed: %v", err)
+	}
+	if !rep2.CircuitBreakerHit || n3RebootTriggered.Load() {
+		t.Fatalf("CIRCUIT BREAKER FAILURE: expected abort after n2 failed, got hit=%v n3Rebooted=%v rep=%+v",
+			rep2.CircuitBreakerHit, n3RebootTriggered.Load(), rep2)
+	}
+	if !rep2.Results[2].SkippedByCircuitBreaker {
+		t.Fatalf("expected n3 to be marked SkippedByCircuitBreaker=true, got %+v", rep2.Results[2])
 	}
 }
