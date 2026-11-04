@@ -219,6 +219,15 @@ func showSystemInfo(configPath, version string) error {
 				if sub.RemoveEmoji {
 					logger.Info("      └─ 移除Emoji  : 是")
 				}
+				if sub.Include != "" {
+					logger.Info("      └─ 保留规则   : %s", sub.Include)
+				}
+				if sub.Exclude != "" {
+					logger.Info("      └─ 剔除规则   : %s", sub.Exclude)
+				}
+				if len(sub.Rename) > 0 {
+					logger.Info("      └─ 重命名规则 : %d 条", len(sub.Rename))
+				}
 			}
 		}
 	}

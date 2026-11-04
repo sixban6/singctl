@@ -125,11 +125,11 @@ func daemonStatus(cfgMaxRestarts int) map[string]any {
 	maxRestarts := limiter.GetMaxRestarts()
 	totalRestarts := limiter.GetTotalRestarts()
 	return map[string]any{
-		"running":         running,
-		"restarts":        restarts,
-		"maxRestarts":     maxRestarts,
-		"totalRestarts":   totalRestarts,
-		"logPath":         daemon.GetDaemonLogPath(),
+		"running":       running,
+		"restarts":      restarts,
+		"maxRestarts":   maxRestarts,
+		"totalRestarts": totalRestarts,
+		"logPath":       daemon.GetDaemonLogPath(),
 	}
 }
 
@@ -309,10 +309,13 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 // ───────────────────────── 配置(结构化) ─────────────────────────
 
 type subDTO struct {
-	Name          string `json:"name"`
-	URL           string `json:"url"`
-	SkipTlsVerify bool   `json:"skip_tls_verify"`
-	RemoveEmoji   bool   `json:"remove_emoji"`
+	Name          string              `json:"name"`
+	URL           string              `json:"url"`
+	SkipTlsVerify bool                `json:"skip_tls_verify"`
+	RemoveEmoji   bool                `json:"remove_emoji"`
+	Include       *string             `json:"include,omitempty"`
+	Exclude       *string             `json:"exclude,omitempty"`
+	Rename        []config.RenameRule `json:"rename,omitempty"`
 }
 
 type configDTO struct {
@@ -351,12 +354,22 @@ func (s *Server) handleConfigGet(w http.ResponseWriter, r *http.Request) {
 
 	var dto configDTO
 	for _, sub := range cfg.Subs {
-		dto.Subs = append(dto.Subs, subDTO{
+		item := subDTO{
 			Name:          sub.Name,
 			URL:           sub.URL,
 			SkipTlsVerify: sub.SkipTlsVerify,
 			RemoveEmoji:   sub.RemoveEmoji,
-		})
+			Rename:        sub.Rename,
+		}
+		if sub.Include != "" {
+			inc := sub.Include
+			item.Include = &inc
+		}
+		if sub.Exclude != "" {
+			exc := sub.Exclude
+			item.Exclude = &exc
+		}
+		dto.Subs = append(dto.Subs, item)
 	}
 	dto.GitHub.MirrorURL = cfg.GitHub.MirrorURL
 	dto.Hy2.Up = cfg.Hy2.Up
@@ -414,14 +427,47 @@ func (dto configDTO) toConfig() *config.Config {
 }
 
 func (dto configDTO) applyTo(cfg *config.Config) {
+	prevByName := make(map[string]config.Subscription, len(cfg.Subs))
+	prevByURL := make(map[string]config.Subscription, len(cfg.Subs))
+	for _, old := range cfg.Subs {
+		if old.Name != "" {
+			prevByName[old.Name] = old
+		}
+		if old.URL != "" {
+			prevByURL[old.URL] = old
+		}
+	}
+
 	cfg.Subs = make([]config.Subscription, 0, len(dto.Subs))
 	for _, sub := range dto.Subs {
-		cfg.Subs = append(cfg.Subs, config.Subscription{
-			Name:          strings.TrimSpace(sub.Name),
-			URL:           strings.TrimSpace(sub.URL),
+		name := strings.TrimSpace(sub.Name)
+		u := strings.TrimSpace(sub.URL)
+		prev, ok := prevByName[name]
+		if !ok || name == "" {
+			prev, ok = prevByURL[u]
+		}
+
+		next := config.Subscription{
+			Name:          name,
+			URL:           u,
 			SkipTlsVerify: sub.SkipTlsVerify,
 			RemoveEmoji:   sub.RemoveEmoji,
-		})
+		}
+		if ok {
+			next.Include = prev.Include
+			next.Exclude = prev.Exclude
+			next.Rename = prev.Rename
+		}
+		if sub.Include != nil {
+			next.Include = strings.TrimSpace(*sub.Include)
+		}
+		if sub.Exclude != nil {
+			next.Exclude = strings.TrimSpace(*sub.Exclude)
+		}
+		if sub.Rename != nil {
+			next.Rename = sub.Rename
+		}
+		cfg.Subs = append(cfg.Subs, next)
 	}
 	cfg.GitHub.MirrorURL = strings.TrimSpace(dto.GitHub.MirrorURL)
 	cfg.Hy2.Up = dto.Hy2.Up

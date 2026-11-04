@@ -3,9 +3,13 @@ subs:
     url: ""                                   # 你VPN订阅地址
     skip_tls_verify: false                    # 是否跳过TLS验证
     remove-emoji: true
+    # include: ""                             # (可选) 仅保留匹配正则的节点 (如 "HK|SG|JP")
+    # exclude: ""                             # (可选) 剔除匹配正则的节点 (如 "剩余|到期|官网|流量")
+    # rename:                                 # (可选) 按正则顺序批量重命名节点
+    #   - {match: " Premium$", replace: ""}
   # 多订阅示例 (可选):
   # - name: "backup"
-  #   url: "https://your-backup-subscription"
+  #   url: "https://example.com/subscription"
   #   skip_tls_verify: false
   #   remove-emoji: true
 

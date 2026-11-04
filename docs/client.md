@@ -13,9 +13,13 @@
 ```yaml
 subs:                                         # 订阅配置（至少配置一个）
   - name: "main"                              # 订阅名称（多订阅时必填，且不可重复）
-    url: "https://your-subscription-url"      # 订阅链接（必填）
+    url: "https://example.com/subscription"   # 订阅链接（必填）
     skip_tls_verify: false                    # 是否跳过 TLS 验证
     remove-emoji: true                        # 是否移除节点名称中的 emoji
+    # include: "HK|SG|JP"                     # (可选) Go 正则：仅保留命中的节点
+    # exclude: "剩余|到期|官网|流量"             # (可选) Go 正则：剔除命中的无效提示节点
+    # rename:                                 # (可选) Go 正则：按顺序批量重命名节点
+    #   - {match: " Premium$", replace: ""}
 
 github:
   mirror_url: "https://gh-proxy.com"         # GitHub 镜像加速地址（国内推荐）
@@ -26,6 +30,11 @@ hy2:
 ```
 
 > **注意**：`singctl sb gen` 和 `singctl sb start`（首次启动）需要 `subs` 中至少有一条有效的订阅 URL，否则会提示配置错误。`singctl sb stop`、`singctl sb install`、`singctl sb update` 不依赖订阅配置。
+>
+> **订阅拉取可靠性增强（基于 `singgen v1.15.0`）**：
+> - 遇到网络波动、`5xx` 或 `429` 时自动指数退避重试（最多 3 次）；多订阅并发拉取（最多 4 路并发），输出顺序保持确定性；
+> - 每次成功拉取后以 URL 哈希落盘缓存副本（`0600` 权限，自动过滤错误页），后续若上游临时故障自动回退至上次可用副本并输出告警，防止生成空配置断网；
+> - 自动解析订阅响应头 `subscription-userinfo`，在剩余流量低于 `10%` 或 `7` 天内到期/已过期时输出提示。
 
 ---
 

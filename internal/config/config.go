@@ -39,11 +39,19 @@ type CustomRulesConfig struct {
 	Route []map[string]any `yaml:"route,omitempty"`
 	DNS   []map[string]any `yaml:"dns,omitempty"`
 }
+type RenameRule struct {
+	Match   string `yaml:"match" json:"match"`
+	Replace string `yaml:"replace" json:"replace"`
+}
+
 type Subscription struct {
-	Name          string `yaml:"name"`
-	URL           string `yaml:"url"`
-	SkipTlsVerify bool   `yaml:"skip_tls_verify"`
-	RemoveEmoji   bool   `yaml:"remove-emoji"`
+	Name          string       `yaml:"name"`
+	URL           string       `yaml:"url"`
+	SkipTlsVerify bool         `yaml:"skip_tls_verify"`
+	RemoveEmoji   bool         `yaml:"remove-emoji"`
+	Include       string       `yaml:"include,omitempty"`
+	Exclude       string       `yaml:"exclude,omitempty"`
+	Rename        []RenameRule `yaml:"rename,omitempty"`
 }
 
 type GitHubConfig struct {
@@ -75,11 +83,11 @@ type ServerConfig struct {
 
 type WebAdminConfig struct {
 	Enabled            bool   `yaml:"enabled"`
-	Port               int    `yaml:"port,omitempty"`                 // 默认 8092
-	Path               string `yaml:"path,omitempty"`                 // 随机隐藏路径，如 /sr/<24位>
-	Username           string `yaml:"username,omitempty"`             // 管理员账号，默认 singctl
-	Password           string `yaml:"password,omitempty"`             // 随机生成的强管理密码
-	PasswordPendingAck bool   `yaml:"password_pending_ack"`           // 安装生成的密码尚未在面板确认保存
+	Port               int    `yaml:"port,omitempty"`       // 默认 8092
+	Path               string `yaml:"path,omitempty"`       // 随机隐藏路径，如 /sr/<24位>
+	Username           string `yaml:"username,omitempty"`   // 管理员账号，默认 singctl
+	Password           string `yaml:"password,omitempty"`   // 随机生成的强管理密码
+	PasswordPendingAck bool   `yaml:"password_pending_ack"` // 安装生成的密码尚未在面板确认保存
 }
 
 func (s *ServerConfig) GetWebAdminPort() int {
@@ -509,6 +517,7 @@ type WatchdogConfig struct {
 
 var knownYAMLKeys = []string{
 	"subs", "name", "url", "skip_tls_verify", "remove-emoji",
+	"include", "exclude", "rename", "match", "replace",
 	"github", "mirror_url", "hy2", "up", "down",
 	"tailscale", "auth_key", "use_build", constant.TailscaleSubnets,
 	"server", "node_tag", "sb_domain", "node_domain", "substore_domain", "server_ip",
@@ -594,6 +603,25 @@ func (c *Config) ValidateSubs() error {
 				return fmt.Errorf("subscription[%d]: Name '%s' is already used by subscription[%d]", i, sub.Name, existingIndex)
 			}
 			nameMap[sub.Name] = i
+		}
+
+		// 验证节点过滤/重命名正则表达式
+		if sub.Include != "" {
+			if _, err := regexp.Compile(sub.Include); err != nil {
+				return fmt.Errorf("subscription[%d]: invalid include regex %q: %w", i, sub.Include, err)
+			}
+		}
+		if sub.Exclude != "" {
+			if _, err := regexp.Compile(sub.Exclude); err != nil {
+				return fmt.Errorf("subscription[%d]: invalid exclude regex %q: %w", i, sub.Exclude, err)
+			}
+		}
+		for j, rr := range sub.Rename {
+			if rr.Match != "" {
+				if _, err := regexp.Compile(rr.Match); err != nil {
+					return fmt.Errorf("subscription[%d].rename[%d]: invalid match regex %q: %w", i, j, rr.Match, err)
+				}
+			}
 		}
 	}
 

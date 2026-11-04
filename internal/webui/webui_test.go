@@ -5,6 +5,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"singctl/internal/config"
 )
 
 func TestTsStartArgs(t *testing.T) {
@@ -80,5 +82,63 @@ func TestNDJSONWriterStripsANSI(t *testing.T) {
 	}
 	if !strings.Contains(lines[1], "[ERROR] bad") {
 		t.Errorf("second line wrong: %q", lines[1])
+	}
+}
+
+func TestConfigDTOApplyPreservesNodeRules(t *testing.T) {
+	cfg := &config.Config{
+		Subs: []config.Subscription{
+			{
+				Name:        "main",
+				URL:         "https://example.com/sub1",
+				RemoveEmoji: true,
+				Include:     "HK|JP",
+				Exclude:     "剩余|到期",
+				Rename:      []config.RenameRule{{Match: " VIP$", Replace: ""}},
+			},
+		},
+	}
+
+	// Simulate WebUI basic form submission where include/exclude/rename are omitted (nil)
+	formDTO := configDTO{
+		Subs: []subDTO{
+			{
+				Name:        "main",
+				URL:         "https://example.com/sub1-updated",
+				RemoveEmoji: false,
+			},
+		},
+	}
+	formDTO.applyTo(cfg)
+
+	if len(cfg.Subs) != 1 {
+		t.Fatalf("expected 1 sub, got %d", len(cfg.Subs))
+	}
+	got := cfg.Subs[0]
+	if got.URL != "https://example.com/sub1-updated" || got.RemoveEmoji {
+		t.Fatalf("basic fields not updated: %+v", got)
+	}
+	if got.Include != "HK|JP" || got.Exclude != "剩余|到期" || len(got.Rename) != 1 {
+		t.Fatalf("expected omitted node rules to be preserved, got: %+v", got)
+	}
+
+	// Explicit override in DTO updates/clears rules
+	empty := ""
+	newInc := "US"
+	overrideDTO := configDTO{
+		Subs: []subDTO{
+			{
+				Name:    "main",
+				URL:     "https://example.com/sub1-updated",
+				Include: &newInc,
+				Exclude: &empty,
+				Rename:  []config.RenameRule{},
+			},
+		},
+	}
+	overrideDTO.applyTo(cfg)
+	got = cfg.Subs[0]
+	if got.Include != "US" || got.Exclude != "" || len(got.Rename) != 0 {
+		t.Fatalf("expected explicit node rule overrides to apply, got: %+v", got)
 	}
 }

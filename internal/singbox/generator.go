@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ import (
 	log "singctl/internal/logger"
 	"singctl/internal/util/netinfo"
 
+	"github.com/sixban6/singgen/pkg/model"
 	"github.com/sixban6/singgen/pkg/singgen"
 )
 
@@ -25,6 +27,7 @@ type ConfigGenerator struct {
 	webui         string
 	netInfo       *netinfo.NetInfoResult
 	defaultTplVer string
+	cacheDir      string
 }
 
 // 支持的目标平台
@@ -47,30 +50,49 @@ func ResolvePlatform(p string) (string, error) {
 }
 
 func NewConfigGenerator(cfg *config.Config) *ConfigGenerator {
-	cg := &ConfigGenerator{config: cfg}
+	cg := &ConfigGenerator{
+		config:        cfg,
+		defaultTplVer: "v1.14",
+		cacheDir:      singgen.DefaultCacheDir(),
+	}
 	netResult, err := netinfo.Get()
 	if err != nil {
 		log.Error("error getting netResult: %v", err)
 	}
 	cg.netInfo = netResult
-	cg.webui = getWebUIAddress(netResult.LANIPv4)
-	cg.defaultTplVer = "v1.14"
+	var lanIP string
+	if netResult != nil {
+		lanIP = netResult.LANIPv4
+	}
+	cg.webui = getWebUIAddress(lanIP)
 	//log.Info("Network information: %+v", netResult)
 	return cg
 }
 
-func getWebUIAddress(ipv4 string) string {
+// SetCacheDir 覆盖订阅缓存目录（传空字符串可禁用订阅缓存回退，主要用于测试或无状态场景）。
+func (g *ConfigGenerator) SetCacheDir(dir string) {
+	g.cacheDir = dir
+}
 
+func getWebUIAddress(ipv4 string) string {
 	const localhost = "127.0.0.1"
-	switch runtime.GOOS {
-	case "darwin":
-		return fmt.Sprintf("%s:9090", localhost)
-	case "linux":
+	if runtime.GOOS == "linux" && ipv4 != "" {
 		return fmt.Sprintf("%s:9090", ipv4)
-	case "windows":
-		return fmt.Sprintf("%s:9090", localhost)
+	}
+	return fmt.Sprintf("%s:9090", localhost)
+}
+
+func (g *ConfigGenerator) webuiForPlatform(platform string) string {
+	switch platform {
+	case PlatformIOS:
+		return "127.0.0.1:9095"
+	case "linux":
+		if g.netInfo != nil && g.netInfo.LANIPv4 != "" {
+			return fmt.Sprintf("%s:9090", g.netInfo.LANIPv4)
+		}
+		return "127.0.0.1:9090"
 	default:
-		return fmt.Sprintf("%s:9090", localhost)
+		return "127.0.0.1:9090"
 	}
 }
 
@@ -208,17 +230,17 @@ func (g *ConfigGenerator) generateSingleSubscription(ctx context.Context, dnsSer
 	sub := g.config.Subs[0]
 	log.Info("Platform for singgen:%s", platform)
 	authKey, lanIpcidr := "", ""
-	webui, clientSubnet := "", ""
+	clientSubnet := ""
+	webui := g.webuiForPlatform(platform)
 	if platform != PlatformIOS {
 		authKey, lanIpcidr = g.getTailScaleParmas()
-		webui = g.webui
 		clientSubnet = g.getSubnetFromIP(dnsServer)
 	}
 
 	handler := newSubLogHandler()
 	logger := slog.New(handler)
 
-	configBytes, err := singgen.GenerateConfigBytes(ctx, sub.URL,
+	opts := []singgen.Option{
 		singgen.WithTemplate(g.defaultTplVer),
 		singgen.WithPlatform(platform),
 		singgen.WithOutputFormat("json"),
@@ -231,7 +253,26 @@ func (g *ConfigGenerator) generateSingleSubscription(ctx context.Context, dnsSer
 		singgen.WithTSAuthKey(authKey),
 		singgen.WithTSLanIPCIDR(lanIpcidr),
 		singgen.WithLogger(logger),
-	)
+	}
+	if g.cacheDir != "" {
+		opts = append(opts, singgen.WithCacheDir(g.cacheDir))
+	}
+
+	var configBytes []byte
+	var err error
+	if hasSubNodeRules(sub) {
+		filterParser, ruleErr := newRuleFilteringParser(sub, logger)
+		if ruleErr != nil {
+			return "", fmt.Errorf("failed to generate single subscription config (订阅 [%s]): %w", sub.Name, ruleErr)
+		}
+		pipeline := singgen.NewPipeline(
+			singgen.WithPipelineOptions(opts...),
+			singgen.WithCustomParser(filterParser),
+		)
+		configBytes, err = pipeline.ExecuteBytes(ctx, sub.URL)
+	} else {
+		configBytes, err = singgen.GenerateConfigBytes(ctx, sub.URL, opts...)
+	}
 
 	if err != nil {
 		return "", fmt.Errorf("failed to generate single subscription config (订阅 [%s]): %w", sub.Name, err)
@@ -266,10 +307,10 @@ func (g *ConfigGenerator) getTailScaleParmas() (string, string) {
 func (g *ConfigGenerator) generateMultiSubscription(ctx context.Context, dnsServer, platform string) (string, error) {
 	// 构建多订阅配置
 	authKey, lanIpcidr := "", ""
-	webui, clientSubnet := "", ""
+	clientSubnet := ""
+	webui := g.webuiForPlatform(platform)
 	if platform != PlatformIOS {
 		authKey, lanIpcidr = g.getTailScaleParmas()
-		webui = g.webui
 		clientSubnet = g.getSubnetFromIP(dnsServer)
 	}
 
@@ -297,11 +338,28 @@ func (g *ConfigGenerator) generateMultiSubscription(ctx context.Context, dnsServ
 
 	// 添加所有订阅
 	for _, sub := range g.config.Subs {
+		removeEmoji := sub.RemoveEmoji
+		skipTLS := sub.SkipTlsVerify
 		subConfig := singgen.SubscriptionConfig{
 			Name:          sub.Name,
 			URL:           sub.URL,
-			RemoveEmoji:   &sub.RemoveEmoji,   // 每个订阅独立控制emoji
-			SkipTLSVerify: &sub.SkipTlsVerify, // 使用订阅的skip_tls_verify设置
+			RemoveEmoji:   &removeEmoji, // 每个订阅独立控制emoji
+			SkipTLSVerify: &skipTLS,     // 使用订阅的skip_tls_verify设置
+		}
+		if sub.Include != "" {
+			inc := sub.Include
+			subConfig.Include = &inc
+		}
+		if sub.Exclude != "" {
+			exc := sub.Exclude
+			subConfig.Exclude = &exc
+		}
+		if len(sub.Rename) > 0 {
+			renames := make([]singgen.RenameRule, len(sub.Rename))
+			for i, rr := range sub.Rename {
+				renames[i] = singgen.RenameRule{Match: rr.Match, Replace: rr.Replace}
+			}
+			subConfig.Rename = renames
 		}
 		multiConfig.Subscriptions = append(multiConfig.Subscriptions, subConfig)
 	}
@@ -309,8 +367,13 @@ func (g *ConfigGenerator) generateMultiSubscription(ctx context.Context, dnsServ
 	handler := newSubLogHandler()
 	logger := slog.New(handler)
 
+	multiOpts := []singgen.Option{singgen.WithLogger(logger)}
+	if g.cacheDir != "" {
+		multiOpts = append(multiOpts, singgen.WithCacheDir(g.cacheDir))
+	}
+
 	// 生成配置
-	configData, err := singgen.GenerateConfigBytesFromMulti(ctx, multiConfig, singgen.WithLogger(logger))
+	configData, err := singgen.GenerateConfigBytesFromMulti(ctx, multiConfig, multiOpts...)
 	if err != nil {
 		handler.mu.Lock()
 		defer handler.mu.Unlock()
@@ -370,37 +433,168 @@ func (h *subLogHandler) Handle(_ context.Context, r slog.Record) error {
 	case "No nodes found in subscription":
 		h.failedSubs[name] = "未获取到有效节点"
 		log.Warn("订阅 [%s] 未获取到有效节点，已跳过该订阅", name)
+	case "Node rules applied":
+		dropped := attrInt(attrs, "dropped")
+		kept := attrInt(attrs, "kept")
+		log.Info("订阅 [%s] 节点过滤规则已生效: 保留 %d 个，剔除 %d 个", name, kept, dropped)
+	case "All nodes were filtered out by node rules":
+		h.failedSubs[name] = "所有节点均被过滤规则剔除"
+		log.Warn("订阅 [%s] 所有节点均被过滤规则剔除，已跳过该订阅", name)
 	case "Failed to transform nodes":
 		errVal := attrs["error"]
 		errStr := fmt.Sprintf("节点转换失败: %v", errVal)
 		h.failedSubs[name] = errStr
 		log.Warn("订阅 [%s] 节点转换失败 (原因: %v)，已跳过该订阅", name, errVal)
 	case "Successfully processed subscription":
-		nodeCount := 0
-		if nc, ok := attrs["node_count"].(int); ok {
-			nodeCount = nc
-		} else if nc, ok := attrs["node_count"].(int64); ok {
-			nodeCount = int(nc)
-		}
-		outboundCount := 0
-		if oc, ok := attrs["outbound_count"].(int); ok {
-			outboundCount = oc
-		} else if oc, ok := attrs["outbound_count"].(int64); ok {
-			outboundCount = int(oc)
-		}
+		nodeCount := attrInt(attrs, "node_count")
+		outboundCount := attrInt(attrs, "outbound_count")
 		h.successSubs[name] = nodeCount
 		log.Success("订阅 [%s] 成功解析 %d 个有效节点 (生成 %d 个出站)", name, nodeCount, outboundCount)
+	case "Removed duplicate nodes across subscriptions":
+		removed := attrInt(attrs, "removed")
+		log.Info("跨订阅节点去重: 已移除 %d 个重复节点", removed)
 	case "Merged all subscriptions":
-		total := 0
-		if t, ok := attrs["total_outbounds"].(int); ok {
-			total = t
-		} else if t, ok := attrs["total_outbounds"].(int64); ok {
-			total = int(t)
-		}
+		total := attrInt(attrs, "total_outbounds")
 		log.Info("所有可用订阅合并完成，有效出站节点总计: %d 个", total)
+	case "Subscription usage":
+		u, _ := attrs["url"].(string)
+		used, _ := attrs["used"].(string)
+		total, _ := attrs["total"].(string)
+		remaining, _ := attrs["remaining"].(string)
+		expire, _ := attrs["expire"].(string)
+		summary := fmt.Sprintf("已用 %s", used)
+		if total != "" {
+			summary += fmt.Sprintf(" / 总计 %s (剩余 %s)", total, remaining)
+		}
+		if expire != "" {
+			summary += fmt.Sprintf(", 到期 %s", expire)
+		}
+		log.Info("订阅用量 (%s): %s", u, summary)
+	case "Subscription traffic is running low":
+		u, _ := attrs["url"].(string)
+		remaining, _ := attrs["remaining"].(string)
+		total, _ := attrs["total"].(string)
+		log.Warn("⚠️ 订阅流量即将耗尽 (%s): 剩余 %s / 总计 %s", u, remaining, total)
+	case "Subscription has expired":
+		u, _ := attrs["url"].(string)
+		expire, _ := attrs["expire"].(string)
+		log.Warn("⚠️ 订阅已过期 (%s): 到期日 %s", u, expire)
+	case "Subscription expires soon":
+		u, _ := attrs["url"].(string)
+		expire, _ := attrs["expire"].(string)
+		log.Warn("⚠️ 订阅即将到期 (%s): 到期日 %s", u, expire)
+	case "Subscription fetch failed, using cached copy":
+		u, _ := attrs["url"].(string)
+		age, _ := attrs["age"].(string)
+		errVal := attrs["error"]
+		log.Warn("⚠️ 订阅拉取失败 (%s)，已回退使用本地缓存副本 (缓存距今 %s, 原因: %v)", u, age, errVal)
 	}
 
 	return nil
+}
+
+func attrInt(attrs map[string]any, key string) int {
+	switch v := attrs[key].(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	default:
+		return 0
+	}
+}
+
+func hasSubNodeRules(sub config.Subscription) bool {
+	return sub.Include != "" || sub.Exclude != "" || len(sub.Rename) > 0
+}
+
+type compiledRenameRule struct {
+	re      *regexp.Regexp
+	replace string
+}
+
+type ruleFilteringParser struct {
+	base    singgen.ContextParser
+	subName string
+	include *regexp.Regexp
+	exclude *regexp.Regexp
+	rename  []compiledRenameRule
+	logger  *slog.Logger
+}
+
+func newRuleFilteringParser(sub config.Subscription, logger *slog.Logger) (*ruleFilteringParser, error) {
+	p := &ruleFilteringParser{
+		base:    singgen.NewContextParser(singgen.GenerateOptions{Logger: logger}),
+		subName: sub.Name,
+		logger:  logger,
+	}
+	var err error
+	if sub.Include != "" {
+		p.include, err = regexp.Compile(sub.Include)
+		if err != nil {
+			return nil, fmt.Errorf("%w: subscription %q include %q: %v", singgen.ErrInvalidNodeRule, sub.Name, sub.Include, err)
+		}
+	}
+	if sub.Exclude != "" {
+		p.exclude, err = regexp.Compile(sub.Exclude)
+		if err != nil {
+			return nil, fmt.Errorf("%w: subscription %q exclude %q: %v", singgen.ErrInvalidNodeRule, sub.Name, sub.Exclude, err)
+		}
+	}
+	for i, rr := range sub.Rename {
+		if rr.Match == "" {
+			continue
+		}
+		re, err := regexp.Compile(rr.Match)
+		if err != nil {
+			return nil, fmt.Errorf("%w: subscription %q rename[%d] %q: %v", singgen.ErrInvalidNodeRule, sub.Name, i, rr.Match, err)
+		}
+		p.rename = append(p.rename, compiledRenameRule{re: re, replace: rr.Replace})
+	}
+	return p, nil
+}
+
+func (p *ruleFilteringParser) DetectFormat(ctx context.Context, data []byte) string {
+	return p.base.DetectFormat(ctx, data)
+}
+
+func (p *ruleFilteringParser) Parse(ctx context.Context, data []byte) ([]model.Node, error) {
+	return p.ParseWithHint(ctx, data, "")
+}
+
+func (p *ruleFilteringParser) ParseWithHint(ctx context.Context, data []byte, formatHint string) ([]model.Node, error) {
+	nodes, err := p.base.ParseWithHint(ctx, data, formatHint)
+	if err != nil || len(nodes) == 0 {
+		return nodes, err
+	}
+
+	kept := make([]model.Node, 0, len(nodes))
+	for _, node := range nodes {
+		name := node.Tag
+		if name == "" {
+			name = node.Addr
+		}
+		if p.exclude != nil && p.exclude.MatchString(name) {
+			continue
+		}
+		if p.include != nil && !p.include.MatchString(name) {
+			continue
+		}
+		for _, rr := range p.rename {
+			name = rr.re.ReplaceAllString(name, rr.replace)
+		}
+		node.Tag = name
+		kept = append(kept, node)
+	}
+
+	dropped := len(nodes) - len(kept)
+	if dropped > 0 && p.logger != nil {
+		p.logger.Info("Node rules applied", "name", p.subName, "dropped", dropped, "kept", len(kept))
+	}
+	if len(kept) == 0 && p.logger != nil {
+		p.logger.Warn("All nodes were filtered out by node rules", "name", p.subName)
+	}
+	return kept, nil
 }
 
 func (h *subLogHandler) WithAttrs(_ []slog.Attr) slog.Handler {

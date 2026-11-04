@@ -582,3 +582,62 @@ func TestPasswordHashingAndGatewayToken(t *testing.T) {
 	}
 }
 
+func TestSubscriptionNodeRulesLoadValidateAndMigrate(t *testing.T) {
+	rawYAML := `subs:
+  - name: "main"
+    url: "https://example.com/sub"
+    skip_tls_verify: false
+    remove-emoji: true
+    include:"HK|SG|JP"
+    exclude: "剩余|到期"
+    rename:
+      - match: " Premium$"
+        replace: ""
+`
+	tmpDir := t.TempDir()
+	cfgPath := tmpDir + "/singctl.yaml"
+	if err := os.WriteFile(cfgPath, []byte(rawYAML), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if len(cfg.Subs) != 1 {
+		t.Fatalf("expected 1 sub, got %d", len(cfg.Subs))
+	}
+	sub := cfg.Subs[0]
+	if sub.Include != "HK|SG|JP" || sub.Exclude != "剩余|到期" || len(sub.Rename) != 1 || sub.Rename[0].Match != " Premium$" {
+		t.Fatalf("unexpected parsed node rules: %+v", sub)
+	}
+	if err := cfg.ValidateSubs(); err != nil {
+		t.Fatalf("ValidateSubs failed for valid regexes: %v", err)
+	}
+
+	// Invalid regex must be rejected
+	badCfg := &Config{
+		Subs: []Subscription{
+			{Name: "bad", URL: "https://example.com/sub", Include: "[unclosed"},
+		},
+	}
+	if err := badCfg.ValidateSubs(); err == nil {
+		t.Fatal("expected ValidateSubs to reject invalid include regex")
+	}
+
+	// MigrateConfig must preserve include/exclude/rename on subs
+	templateBytes, err := os.ReadFile("../../configs/singctl.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := MigrateConfig(cfgPath, templateBytes); err != nil {
+		t.Fatalf("MigrateConfig failed: %v", err)
+	}
+	migrated, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load after MigrateConfig failed: %v", err)
+	}
+	if migrated.Subs[0].Include != "HK|SG|JP" || len(migrated.Subs[0].Rename) != 1 {
+		t.Fatalf("expected node rules preserved after MigrateConfig, got %+v", migrated.Subs[0])
+	}
+}
