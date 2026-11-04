@@ -603,6 +603,22 @@ func renderSurge(bundle *ResolvedBundle, opts RenderOptions) []byte {
 			}
 			proxyLines = append(proxyLines, strings.Join(parts, ", "))
 			proxyNames = append(proxyNames, tag)
+
+		case "anytls":
+			parts := []string{
+				fmt.Sprintf("%s = anytls", tag),
+				n.Addr,
+				strconv.Itoa(int(n.Port)),
+				fmt.Sprintf("password=%s", n.Password),
+			}
+			if n.Security.ServerName != "" {
+				parts = append(parts, fmt.Sprintf("sni=%s", n.Security.ServerName))
+			}
+			if n.Security.SkipVerify {
+				parts = append(parts, "skip-cert-verify=true")
+			}
+			proxyLines = append(proxyLines, strings.Join(parts, ", "))
+			proxyNames = append(proxyNames, tag)
 		}
 	}
 
@@ -798,9 +814,21 @@ func NodeToURI(n model.Node) string {
 			q.Set("fp", cmp.Or(fp, "chrome"))
 		} else if n.Security.TLS {
 			q.Set("security", "tls")
+			if n.Security.SkipVerify {
+				q.Set("allowInsecure", "1")
+			}
 		}
 		if n.Security.ServerName != "" {
 			q.Set("sni", n.Security.ServerName)
+		}
+		if len(n.Security.ALPN) > 0 {
+			q.Set("alpn", strings.Join(n.Security.ALPN, ","))
+		}
+		if n.Transport.Host != "" {
+			q.Set("host", n.Transport.Host)
+		}
+		if n.Transport.Path != "" {
+			q.Set("path", n.Transport.Path)
 		}
 		return fmt.Sprintf("vless://%s@%s?%s#%s", url.PathEscape(n.UUID), hostPort, q.Encode(), frag)
 
@@ -809,15 +837,95 @@ func NodeToURI(n model.Node) string {
 		if n.Security.ServerName != "" {
 			q.Set("sni", n.Security.ServerName)
 		}
+		if len(n.Security.ALPN) > 0 {
+			q.Set("alpn", strings.Join(n.Security.ALPN, ","))
+		}
 		if n.Security.SkipVerify {
 			q.Set("allowInsecure", "1")
+		}
+		if n.Transport.Net != "" && n.Transport.Net != "tcp" {
+			q.Set("type", n.Transport.Net)
+			if n.Transport.Host != "" {
+				q.Set("host", n.Transport.Host)
+			}
+			if n.Transport.Path != "" {
+				q.Set("path", n.Transport.Path)
+			}
 		}
 		return fmt.Sprintf("trojan://%s@%s?%s#%s", url.User(n.Password).String(), hostPort, q.Encode(), frag)
 
 	case "shadowsocks", "ss":
 		method, _ := n.Extra["method"].(string)
-		cred := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", cmp.Or(method, "aes-256-gcm"), n.Password)))
+		b64 := base64.RawStdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", cmp.Or(method, "aes-256-gcm"), n.Password)))
+		cred := strings.ReplaceAll(b64, "/", "%2F")
 		return fmt.Sprintf("ss://%s@%s#%s", cred, hostPort, frag)
+
+	case "anytls":
+		q := url.Values{}
+		if n.Security.ServerName != "" {
+			q.Set("sni", n.Security.ServerName)
+		}
+		if len(n.Security.ALPN) > 0 {
+			q.Set("alpn", strings.Join(n.Security.ALPN, ","))
+		}
+		if n.Security.SkipVerify {
+			q.Set("insecure", "1")
+		} else {
+			q.Set("insecure", "0")
+		}
+		for _, extraKey := range []string{"idle_session_check_interval", "idle_session_timeout", "min_idle_session"} {
+			if val := strings.TrimSpace(fmt.Sprint(n.Extra[extraKey])); val != "" && val != "<nil>" && val != "0" {
+				q.Set(extraKey, val)
+			}
+		}
+		return fmt.Sprintf("anytls://%s@%s/?%s#%s", url.User(n.Password).String(), hostPort, q.Encode(), frag)
+
+	case "tuic":
+		q := url.Values{}
+		if n.Security.ServerName != "" {
+			q.Set("sni", n.Security.ServerName)
+		}
+		if len(n.Security.ALPN) > 0 {
+			q.Set("alpn", strings.Join(n.Security.ALPN, ","))
+		}
+		if n.Security.SkipVerify {
+			q.Set("insecure", "1")
+		}
+		if cc, _ := n.Extra["congestion_control"].(string); cc != "" {
+			q.Set("congestion_control", cc)
+		}
+		if udpMode, _ := n.Extra["udp_relay_mode"].(string); udpMode != "" {
+			q.Set("udp_relay_mode", udpMode)
+		}
+		return fmt.Sprintf("tuic://%s@%s/?%s#%s", url.UserPassword(n.UUID, n.Password).String(), hostPort, q.Encode(), frag)
+
+	case "vmess":
+		dto := map[string]any{
+			"v":    "2",
+			"ps":   n.Tag,
+			"add":  n.Addr,
+			"port": strconv.Itoa(int(n.Port)),
+			"id":   n.UUID,
+			"aid":  "0",
+			"scy":  "auto",
+			"net":  cmp.Or(n.Transport.Net, "tcp"),
+			"type": "none",
+			"host": n.Transport.Host,
+			"path": n.Transport.Path,
+			"tls":  "",
+			"sni":  n.Security.ServerName,
+		}
+		if n.Security.TLS {
+			dto["tls"] = "tls"
+		}
+		if len(n.Security.ALPN) > 0 {
+			dto["alpn"] = strings.Join(n.Security.ALPN, ",")
+		}
+		raw, err := json.Marshal(dto)
+		if err != nil {
+			return ""
+		}
+		return "vmess://" + base64.StdEncoding.EncodeToString(raw)
 
 	default:
 		return ""

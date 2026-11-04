@@ -88,6 +88,15 @@ export const api = {
       body: JSON.stringify(input),
     }),
 
+  refreshSubSources: (name?: string) =>
+    request<{ message: string; warning?: string; sources: SubscriptionSourceItem[] }>(
+      '/api/server/subscriptions/sources/refresh',
+      {
+        method: 'POST',
+        body: JSON.stringify(name ? { name } : {}),
+      }
+    ),
+
   deleteSubSource: (name: string) =>
     request<{ message: string }>(`/api/server/subscriptions/sources?name=${encodeURIComponent(name)}`, {
       method: 'DELETE',

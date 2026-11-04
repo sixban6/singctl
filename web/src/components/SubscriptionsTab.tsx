@@ -39,6 +39,16 @@ const PREVIEW_TARGETS = [
   { key: 'plain', label: '明文 URI 列表' },
 ];
 
+const formatEffectiveUA = (ua?: string): string => {
+  if (!ua) return '';
+  const lower = ua.toLowerCase();
+  if (lower.includes('v2rayng')) return 'v2rayNG';
+  if (lower.includes('shadowrocket')) return 'Shadowrocket';
+  if (lower.includes('clash') || lower.includes('mihomo')) return 'Clash.Meta';
+  if (lower.includes('sing-box') || lower.includes('sfa/') || lower.includes('sfi/')) return 'Sing-box';
+  return ua.length > 20 ? `${ua.slice(0, 20)}...` : ua;
+};
+
 export const SubscriptionsTab: React.FC = () => {
   const { success, error } = useToast();
   const [data, setData] = useState<SubscriptionsResponse | null>(null);
@@ -51,6 +61,7 @@ export const SubscriptionsTab: React.FC = () => {
   const [editingSource, setEditingSource] = useState<SourceUpsertInput | null>(null);
   const [isAutoManagedEdit, setIsAutoManagedEdit] = useState(false);
   const [savingSource, setSavingSource] = useState(false);
+  const [refreshingSource, setRefreshingSource] = useState<string | null>(null);
   const [rotatingKey, setRotatingKey] = useState(false);
 
   // Live conversion preview modal state
@@ -139,6 +150,8 @@ export const SubscriptionsTab: React.FC = () => {
       url: '',
       content: '',
       remark: '',
+      userAgent: 'auto',
+      proxyMode: 'auto',
       enabled: true,
     });
   };
@@ -152,6 +165,8 @@ export const SubscriptionsTab: React.FC = () => {
       url: item.url,
       content: item.content,
       remark: item.remark,
+      userAgent: item.userAgent || 'auto',
+      proxyMode: item.proxyMode || 'auto',
       enabled: item.enabled,
     });
   };
@@ -169,6 +184,23 @@ export const SubscriptionsTab: React.FC = () => {
       error(err.message || '保存订阅源失败');
     } finally {
       setSavingSource(false);
+    }
+  };
+
+  const handleRefreshSources = async (targetName?: string) => {
+    const key = targetName || '__all__';
+    setRefreshingSource(key);
+    try {
+      const res = await api.refreshSubSources(targetName);
+      if (res.sources) {
+        setData((prev) => (prev ? { ...prev, sources: res.sources } : prev));
+      }
+      success(res.message || '远程订阅源已刷新');
+    } catch (err: any) {
+      error(err.message || '刷新远程订阅源失败');
+      await loadData();
+    } finally {
+      setRefreshingSource(null);
     }
   };
 
@@ -381,13 +413,27 @@ export const SubscriptionsTab: React.FC = () => {
               除本机自动同步节点外，可添加其他自建 VPS 节点链接或第三方远程订阅链接统一合并下发
             </p>
           </div>
-          <button
-            onClick={openAddSourceModal}
-            className="flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 text-xs font-semibold transition-colors shrink-0"
-          >
-            <Plus className="w-3.5 h-3.5" />
-            <span>添加节点源 / 外部订阅</span>
-          </button>
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            {sources.some((s) => s.source === 'remote') && (
+              <button
+                type="button"
+                onClick={() => handleRefreshSources()}
+                disabled={refreshingSource !== null}
+                className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/30 text-blue-300 text-xs font-semibold transition-colors disabled:opacity-50"
+                title="使用自适应客户端 UA 重新拉取并解析全部外部订阅"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${refreshingSource === '__all__' ? 'animate-spin' : ''}`} />
+                <span>刷新远程源</span>
+              </button>
+            )}
+            <button
+              onClick={openAddSourceModal}
+              className="flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 text-xs font-semibold transition-colors"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>添加节点源 / 外部订阅</span>
+            </button>
+          </div>
         </div>
 
         {sources.length === 0 ? (
@@ -429,13 +475,31 @@ export const SubscriptionsTab: React.FC = () => {
                           自定义节点
                         </span>
                       )}
-                      <span className="px-2 py-0.5 rounded-md text-[10px] font-mono bg-slate-800 text-slate-300">
+                      <span
+                        className={`px-2 py-0.5 rounded-md text-[10px] font-mono ${
+                          item.nodeCount > 0 ? 'bg-slate-800 text-slate-200' : 'bg-amber-500/15 text-amber-300 border border-amber-500/25'
+                        }`}
+                      >
                         {item.nodeCount} 节点
                       </span>
+                      {item.source === 'remote' && item.effectiveUa && (
+                        <span
+                          className="px-2 py-0.5 rounded-md text-[10px] font-mono bg-slate-900 text-slate-400 border border-slate-800"
+                          title={`协商客户端 UA: ${item.effectiveUa}${item.usedProxy ? ` (${item.usedProxy})` : ''}`}
+                        >
+                          {formatEffectiveUA(item.effectiveUa)}
+                          {item.usedProxy === 'warp' ? ' · WARP' : ''}
+                        </span>
+                      )}
                     </div>
                     <p className="text-[11px] text-slate-500 font-mono mt-1 truncate">
                       {item.source === 'remote' ? item.url : item.remark || `标识: ${item.name}`}
                     </p>
+                    {item.source === 'remote' && item.lastError && (
+                      <p className="text-[11px] text-amber-300/90 font-mono mt-1.5 px-2 py-1 rounded-lg bg-amber-500/10 border border-amber-500/20 break-all">
+                        拉取提示: {item.lastError}
+                      </p>
+                    )}
                   </div>
 
                   <button
@@ -451,9 +515,25 @@ export const SubscriptionsTab: React.FC = () => {
                   </button>
                 </div>
 
-                <div className="pt-2.5 border-t border-slate-800/70 flex items-center justify-between text-xs">
-                  <span className="text-[11px] text-slate-500 font-mono truncate">{item.name}</span>
-                  <div className="flex items-center gap-1.5">
+                <div className="pt-2.5 border-t border-slate-800/70 flex items-center justify-between gap-2 text-xs">
+                  <span className="text-[11px] text-slate-500 font-mono truncate">
+                    {item.source === 'remote' && item.lastFetchedAt
+                      ? `更新于 ${new Date(item.lastFetchedAt).toLocaleTimeString()}`
+                      : item.name}
+                  </span>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    {item.source === 'remote' && (
+                      <button
+                        type="button"
+                        onClick={() => handleRefreshSources(item.name)}
+                        disabled={refreshingSource !== null}
+                        className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/25 text-blue-300 transition-colors disabled:opacity-50"
+                        title="立即重新拉取此远程订阅"
+                      >
+                        <RefreshCw className={`w-3 h-3 ${refreshingSource === item.name ? 'animate-spin' : ''}`} />
+                        <span>刷新</span>
+                      </button>
+                    )}
                     <button
                       type="button"
                       onClick={() => openEditSourceModal(item)}
@@ -782,24 +862,58 @@ export const SubscriptionsTab: React.FC = () => {
               </div>
 
               {editingSource.source === 'remote' ? (
-                <div>
-                  <label className="block text-xs text-slate-400 mb-1">远程订阅 URL *</label>
-                  <input
-                    type="url"
-                    required
-                    value={editingSource.url || ''}
-                    onChange={(e) => setEditingSource({ ...editingSource, url: e.target.value })}
-                    placeholder="https://example.com/api/v1/client/subscribe?token=..."
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs font-mono text-emerald-300 focus:outline-none focus:border-blue-500"
-                  />
-                  <p className="text-[11px] text-slate-500 mt-1.5">
-                    支持 Base64 URI 列表或 Clash YAML 订阅，内置 SSRF 私网防护与 10 分钟容灾缓存。
-                  </p>
+                <div className="space-y-3.5">
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">远程订阅 URL *</label>
+                    <input
+                      type="url"
+                      required
+                      value={editingSource.url || ''}
+                      onChange={(e) => setEditingSource({ ...editingSource, url: e.target.value })}
+                      placeholder="https://example.com/api/v1/client/subscribe?token=..."
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs font-mono text-emerald-300 focus:outline-none focus:border-blue-500"
+                    />
+                    <p className="text-[11px] text-slate-500 mt-1.5">
+                      全格式支持 Base64 URI、Clash YAML 与 Sing-box JSON，内置反爬 UA 自动协商与 10 分钟容灾缓存。
+                    </p>
+                  </div>
+
+                  <div className="p-3.5 rounded-xl bg-slate-950/70 border border-slate-800/80 space-y-3">
+                    <div className="text-[11px] font-semibold text-slate-300">反爬伪装与拉取通道策略 (Anti-WAF Options)</div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-[11px] text-slate-400 mb-1">客户端 User-Agent 伪装</label>
+                        <select
+                          value={editingSource.userAgent || 'auto'}
+                          onChange={(e) => setEditingSource({ ...editingSource, userAgent: e.target.value })}
+                          className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-blue-500"
+                        >
+                          <option value="auto">智能自适应协商 (推荐)</option>
+                          <option value="v2rayng">v2rayNG (轻量 Base64 URI)</option>
+                          <option value="shadowrocket">Shadowrocket (iOS CFNetwork)</option>
+                          <option value="clashmeta">Clash.Meta / Mihomo (YAML)</option>
+                          <option value="singbox">Sing-box SFA (JSON)</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-[11px] text-slate-400 mb-1">拉取出口通道</label>
+                        <select
+                          value={editingSource.proxyMode || 'auto'}
+                          onChange={(e) => setEditingSource({ ...editingSource, proxyMode: e.target.value })}
+                          className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-blue-500"
+                        >
+                          <option value="auto">智能容灾 (直连优先 · 失败转 WARP)</option>
+                          <option value="direct">强制本机直连 (Direct)</option>
+                          <option value="warp">强制走 WARP SOCKS5 (127.0.0.1:40000)</option>
+                        </select>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               ) : (
                 <div>
                   <label className="block text-xs text-slate-400 mb-1">
-                    节点分享链接 (每行一条 URI，或粘贴 Base64 / Clash YAML) *
+                    节点分享链接 (每行一条 URI，或粘贴 Base64 / Clash YAML / Sing-box JSON) *
                   </label>
                   <textarea
                     rows={6}

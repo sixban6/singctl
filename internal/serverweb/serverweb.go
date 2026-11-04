@@ -151,6 +151,7 @@ func (s *Server) registerRoutes() {
 	// 原生 SubHub 订阅管理与防盗刷访问审计
 	s.mux.HandleFunc("GET /api/server/subscriptions", s.guard(s.handleSubscriptions))
 	s.mux.HandleFunc("POST /api/server/subscriptions/sources", s.guard(s.handleUpsertSubscriptionSource))
+	s.mux.HandleFunc("POST /api/server/subscriptions/sources/refresh", s.guard(s.handleRefreshSubscriptionSources))
 	s.mux.HandleFunc("DELETE /api/server/subscriptions/sources", s.guard(s.handleDeleteSubscriptionSource))
 	s.mux.HandleFunc("POST /api/server/subscriptions/rotate-key", s.guard(s.handleRotateSubscriptionKey))
 	s.mux.HandleFunc("GET /api/server/subscriptions/preview", s.guard(s.handlePreviewSubscription))

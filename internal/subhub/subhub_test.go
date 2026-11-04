@@ -3,11 +3,14 @@ package subhub
 import (
 	"encoding/base64"
 	"encoding/json"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"singctl/internal/singbox"
@@ -341,5 +344,266 @@ func TestServerHTTPHandlersAndSecurity(t *testing.T) {
 	}
 	if logs[1].Status != "denied" {
 		t.Fatalf("expected second log to be denied probe, got %+v", logs[1])
+	}
+}
+
+func TestAdaptiveUAWaterfallAndAntiWAF(t *testing.T) {
+	var hitCount atomic.Int32
+	wafSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hitCount.Add(1)
+		ua := strings.ToLower(r.Header.Get("User-Agent"))
+		switch {
+		case strings.Contains(ua, "mozilla/") || strings.Contains(ua, "singctl-subhub"):
+			w.WriteHeader(http.StatusTeapot) // 418 Photon-Edge WAF block
+			_, _ = w.Write([]byte("<html>blocked bot</html>"))
+		case strings.Contains(ua, "v2rayng"):
+			w.WriteHeader(http.StatusForbidden) // 403 block
+		case strings.Contains(ua, "shadowrocket"):
+			// 200 OK HTML WAF JS challenge — must NOT poison cache!
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("<!DOCTYPE html><html><body>Checking your browser before accessing...</body></html>"))
+		case strings.Contains(ua, "clash.meta"):
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`proxies:
+  - name: JP-AnyTLS-01
+    type: anytls
+    server: jp1.example.com
+    port: 443
+    password: secret-anytls-pass
+    sni: jp1.example.com
+    skip-cert-verify: false
+  - name: SG-SS2022-01
+    type: ss
+    server: 198.51.100.41
+    port: 8388
+    cipher: 2022-blake3-aes-128-gcm
+    password: AbCd/Ef+GhIjKlMnOpQrSw==
+`))
+		default:
+			w.WriteHeader(http.StatusForbidden)
+		}
+	}))
+	defer wafSrv.Close()
+
+	dir := t.TempDir()
+	st := NewStore(dir, filepath.Join(dir, "sub-store.json"))
+	st.AllowLoopbackRemote = true
+
+	item, err := st.UpsertSource(t.Context(), SourceUpsertInput{
+		Name:        "cry_test",
+		DisplayName: "Cry Anti-Bot Sub",
+		Source:      "remote",
+		URL:         wafSrv.URL + "/api/v1/subscribe?token=testtoken",
+	})
+	if err != nil {
+		t.Fatalf("UpsertSource adaptive waterfall failed: %v", err)
+	}
+	if item.NodeCount != 2 {
+		t.Fatalf("expected 2 parsed nodes from Clash YAML fallback, got %d", item.NodeCount)
+	}
+	if item.EffectiveUA != UAClashMeta {
+		t.Fatalf("expected winning EffectiveUA=%q, got %q", UAClashMeta, item.EffectiveUA)
+	}
+	if got := hitCount.Load(); got != 3 {
+		t.Fatalf("expected 3 waterfall attempts (v2rayNG->Shadowrocket->ClashMeta), got %d", got)
+	}
+
+	// Second explicit refresh should remember EffectiveUA and succeed on the very first request
+	hitCount.Store(0)
+	refreshed, err := st.RefreshSources(t.Context(), "cry_test")
+	if err != nil {
+		t.Fatalf("RefreshSources failed: %v", err)
+	}
+	if got := hitCount.Load(); got != 1 {
+		t.Fatalf("expected cached winning UA to succeed in 1 request, got %d", got)
+	}
+	if len(refreshed) != 1 || refreshed[0].NodeCount != 2 {
+		t.Fatalf("unexpected refreshed items: %+v", refreshed)
+	}
+}
+
+func TestSingBoxJSONParserAndAnyTLSRoundTrip(t *testing.T) {
+	sbPayload := `{
+  "outbounds": [
+    {"type": "selector", "tag": "Proxy", "outbounds": ["HK-AnyTLS", "US-SS2022", "JP-Reality"]},
+    {"type": "urltest", "tag": "Auto", "outbounds": ["HK-AnyTLS", "US-SS2022"]},
+    {
+      "type": "anytls",
+      "tag": "HK-AnyTLS",
+      "server": "hk1.example.com",
+      "server_port": 443,
+      "password": "anytls-test-password",
+      "idle_session_check_interval": "30s",
+      "tls": {
+        "enabled": true,
+        "server_name": "hk1.example.com",
+        "insecure": false,
+        "alpn": ["h2", "http/1.1"]
+      }
+    },
+    {
+      "type": "shadowsocks",
+      "tag": "US-SS2022",
+      "server": "203.0.113.77",
+      "server_port": 8388,
+      "method": "2022-blake3-aes-128-gcm",
+      "password": "KeyWith/Slash+AndPlus=="
+    },
+    {
+      "type": "vless",
+      "tag": "JP-Reality",
+      "server": "198.51.100.99",
+      "server_port": 443,
+      "uuid": "11111111-2222-3333-4444-555555555555",
+      "flow": "xtls-rprx-vision",
+      "tls": {
+        "enabled": true,
+        "server_name": "www.microsoft.com",
+        "utls": {"enabled": true, "fingerprint": "chrome"},
+        "reality": {
+          "enabled": true,
+          "public_key": "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfE",
+          "short_id": "a1b2c3d4"
+        }
+      }
+    },
+    {"type": "direct", "tag": "direct"},
+    {"type": "dns", "tag": "dns-out"}
+  ]
+}`
+
+	nodes, uris := ParseRawSubscriptionPayload(t.Context(), []byte(sbPayload))
+	if len(nodes) != 3 || len(uris) != 3 {
+		t.Fatalf("expected 3 proxy nodes and 3 synthesized URIs, got nodes=%d uris=%d", len(nodes), len(uris))
+	}
+
+	bundle := &ResolvedBundle{
+		Name:  "all",
+		Nodes: nodes,
+		URIs:  uris,
+	}
+
+	// Verify SingBox v1.14 rendering preserves anytls and SS-2022 password with '/' intact
+	resSB, err := RenderBundle(t.Context(), bundle, RenderOptions{Target: TargetSingBox})
+	if err != nil {
+		t.Fatalf("RenderBundle SingBox failed: %v", err)
+	}
+	sbOut := string(resSB.Body)
+	if !strings.Contains(sbOut, `"type": "anytls"`) || !strings.Contains(sbOut, `"KeyWith/Slash+AndPlus=="`) {
+		t.Fatalf("expected SingBox output to preserve anytls and exact SS-2022 key, got:\n%s", sbOut)
+	}
+
+	// Verify Clash.Meta rendering includes anytls
+	resClash, err := RenderBundle(t.Context(), bundle, RenderOptions{Target: TargetClashMeta})
+	if err != nil {
+		t.Fatalf("RenderBundle ClashMeta failed: %v", err)
+	}
+	if !strings.Contains(string(resClash.Body), "type: anytls") {
+		t.Fatalf("expected ClashMeta output to contain anytls proxy, got:\n%s", string(resClash.Body))
+	}
+
+	// Verify legacy SS Base64 + URL-safe SIP002 SS + raw UTF-8 Chinese/Emoji fragments normalize cleanly
+	legacyCred := base64.StdEncoding.EncodeToString([]byte("2022-blake3-aes-128-gcm:Sec/Key+123==@192.0.2.88:8388"))
+	sipURLSafe := base64.RawURLEncoding.EncodeToString([]byte("2022-blake3-aes-256-gcm:Another/Key+With/Slashes=="))
+	mixedRaw := strings.Join([]string{
+		"ss://" + legacyCred + "#🇯🇵 东京节点 01",
+		"ss://" + sipURLSafe + "@192.0.2.89:8389#🇭🇰 香港专线 02",
+	}, "\n")
+	ssNodes, ssURIs := ParseRawSubscriptionPayload(t.Context(), []byte(mixedRaw))
+	if len(ssNodes) != 2 || len(ssURIs) != 2 {
+		t.Fatalf("expected 2 normalized SS nodes, got nodes=%d uris=%d", len(ssNodes), len(ssURIs))
+	}
+	if ssNodes[0].Password != "Sec/Key+123==" || ssNodes[0].Tag != "🇯🇵 东京节点 01" {
+		t.Fatalf("unexpected legacy SS node[0]: %+v", ssNodes[0])
+	}
+	if ssNodes[1].Password != "Another/Key+With/Slashes==" || ssNodes[1].Tag != "🇭🇰 香港专线 02" {
+		t.Fatalf("unexpected SIP002 URL-safe SS node[1]: %+v", ssNodes[1])
+	}
+}
+
+func TestSOCKS5WarpFallbackInAutoMode(t *testing.T) {
+	// Target upstream server reachable via our mock WARP SOCKS5 proxy
+	upstreamGoodSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		payload := base64.StdEncoding.EncodeToString([]byte("anytls://warp-pass@us1.example.com:443/?sni=us1.example.com&insecure=0#US-AnyTLS"))
+		_, _ = w.Write([]byte(payload))
+	}))
+	defer upstreamGoodSrv.Close()
+
+	// Direct server simulates Cloudflare/WAF blocking datacenter direct IP with 403
+	directBlockedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer directBlockedSrv.Close()
+
+	goodAddr := strings.TrimPrefix(upstreamGoodSrv.URL, "http://")
+
+	// Minimal RFC 1928 SOCKS5 server forwarding all CONNECT streams to upstreamGoodSrv
+	socksLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen mock socks5: %v", err)
+	}
+	defer socksLn.Close()
+
+	go func() {
+		for {
+			conn, err := socksLn.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				var greet [3]byte
+				if _, err := io.ReadFull(c, greet[:]); err != nil {
+					return
+				}
+				_, _ = c.Write([]byte{0x05, 0x00})
+
+				var hdr [4]byte
+				if _, err := io.ReadFull(c, hdr[:]); err != nil {
+					return
+				}
+				switch hdr[3] {
+				case 0x01:
+					var skip [6]byte
+					_, _ = io.ReadFull(c, skip[:])
+				case 0x03:
+					var dlen [1]byte
+					_, _ = io.ReadFull(c, dlen[:])
+					skip := make([]byte, int(dlen[0])+2)
+					_, _ = io.ReadFull(c, skip)
+				case 0x04:
+					var skip [18]byte
+					_, _ = io.ReadFull(c, skip[:])
+				}
+				_, _ = c.Write([]byte{0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0, 80})
+
+				upConn, err := net.Dial("tcp", goodAddr)
+				if err != nil {
+					return
+				}
+				defer upConn.Close()
+				go func() { _, _ = io.Copy(upConn, c) }()
+				_, _ = io.Copy(c, upConn)
+			}(conn)
+		}
+	}()
+
+	dir := t.TempDir()
+	st := NewStore(dir, filepath.Join(dir, "sub-store.json"))
+	st.AllowLoopbackRemote = true
+	st.WarpProxyAddr = socksLn.Addr().String()
+
+	item, err := st.UpsertSource(t.Context(), SourceUpsertInput{
+		Name:        "warp_rescued",
+		DisplayName: "WARP Rescued Sub",
+		Source:      "remote",
+		URL:         directBlockedSrv.URL + "/sub",
+		ProxyMode:   "auto",
+	})
+	if err != nil {
+		t.Fatalf("expected auto proxyMode to fall back from direct 403 to WARP SOCKS5, got err: %v", err)
+	}
+	if item.UsedProxy != "warp" || item.NodeCount != 1 {
+		t.Fatalf("expected UsedProxy=warp and NodeCount=1, got %+v", item)
 	}
 }

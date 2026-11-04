@@ -76,6 +76,12 @@ export interface SubscriptionSourceItem {
   enabled: boolean;
   autoManaged: boolean;
   nodeCount: number;
+  userAgent?: string;
+  proxyMode?: string;
+  effectiveUa?: string;
+  usedProxy?: string;
+  lastFetchedAt?: string;
+  lastError?: string;
 }
 
 export interface SourceUpsertInput {
@@ -85,6 +91,8 @@ export interface SourceUpsertInput {
   url?: string;
   content?: string;
   remark?: string;
+  userAgent?: string;
+  proxyMode?: string;
   enabled?: boolean;
 }
 

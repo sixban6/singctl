@@ -188,6 +188,8 @@ singctl sr sync --restart=false
 ### `singctl sr sub` — 原生 SubHub 订阅中枢管理
 
 管理原生 Go 订阅聚合服务（`singctl-sub`，监听 `127.0.0.1:3001`），无需安装 Docker：
+- **全格式外部订阅解析**：原生支持 `Base64 URI`、明文分享链接、`Clash.Meta YAML` 与 `Sing-box JSON`（含 `VLESS Reality`、`Hysteria2`、`AnyTLS`、`Shadowsocks-2022`、`Trojan`、`TUIC`、`VMess`）无损互转。
+- **反爬 WAF 自适应伪装与双出口容灾**：拉取第三方远程订阅时自动按真实客户端 `User-Agent` 瀑布流（`v2rayNG` → `Shadowrocket` → `Clash.Meta` → `Sing-box SFA`）协商并记忆最优指纹，拦截空白/HTML 盾页污染缓存；支持直连与本机 `WARP SOCKS5 (127.0.0.1:40000)` 智能切换。
 
 ```bash
 # 查看订阅中枢运行状态与聚合订阅 URL

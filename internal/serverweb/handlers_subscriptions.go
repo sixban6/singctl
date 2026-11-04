@@ -1,12 +1,14 @@
 package serverweb
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"singctl/internal/config"
 	"singctl/internal/deploy"
@@ -48,6 +50,10 @@ func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 	if ssKey != "" {
 		rawSubURL = fmt.Sprintf("https://%s/%s/download/collection/all", subDomain, ssKey)
 	}
+
+	warmupCtx, cancelWarmup := context.WithTimeout(r.Context(), 6*time.Second)
+	s.subStore.WarmupUncachedSources(warmupCtx)
+	cancelWarmup()
 
 	sources, err := s.subStore.ListSources()
 	if err != nil || sources == nil {
@@ -120,6 +126,48 @@ func (s *Server) handleDeleteSubscriptionSource(w http.ResponseWriter, r *http.R
 	s.recordAudit(r, fmt.Sprintf("删除聚合订阅源 [%s]", name))
 	writeJSON(w, http.StatusOK, map[string]string{
 		"message": "订阅源已成功移除",
+	})
+}
+
+func (s *Server) handleRefreshSubscriptionSources(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimSpace(r.URL.Query().Get("name"))
+	if name == "" && r.Body != nil {
+		var body struct {
+			Name string `json:"name"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		name = strings.TrimSpace(body.Name)
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
+	defer cancel()
+
+	sources, err := s.subStore.RefreshSources(ctx, name)
+	if name != "" && err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":   "刷新远程订阅源失败: " + err.Error(),
+			"sources": sources,
+		})
+		return
+	}
+
+	if name != "" {
+		s.recordAudit(r, fmt.Sprintf("手动刷新远程订阅源 [%s]", name))
+	} else {
+		s.recordAudit(r, "手动刷新全部远程订阅源")
+	}
+
+	msg := "远程订阅源已刷新并同步最新节点"
+	var warnMsg string
+	if err != nil {
+		warnMsg = err.Error()
+		msg = "部分远程订阅源刷新存在告警: " + err.Error()
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"message": msg,
+		"warning": warnMsg,
+		"sources": sources,
 	})
 }
 
