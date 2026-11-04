@@ -220,7 +220,7 @@ if (-not $Mode) {
     Write-Host '     • VLESS Reality + Hysteria 2 节点服务'
     Write-Host '     • 自动化 TLS / 域名反代与配置管理'
     Write-Host '     • 服务端 Web 管理控制台'
-    Write-Host '     • Sub-Store 节点聚合与分发'
+    Write-Host '     • SubHub 原生节点聚合与分发'
     Write-Host ''
     Write-Host '  2) 客户端模式 (Client Mode)'                     -ForegroundColor White
     Write-Host '     • 本地 / 透明代理加速'
@@ -243,6 +243,13 @@ if ($Mode -eq 'server') {
     Write-Host ''
     Cleanup
     & "$InstallDir\singctl.exe" sr init
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host ''
+        $DeployChoice = Read-Host '是否立即执行四核组件全量部署 (singctl sr install)？[Y/n] (回车默认立即部署)'
+        if ($DeployChoice -ne 'n' -and $DeployChoice -ne 'N' -and $DeployChoice -ne 'no') {
+            & "$InstallDir\singctl.exe" sr install
+        }
+    }
     exit 0
 }
 

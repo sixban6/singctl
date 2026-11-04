@@ -17,8 +17,10 @@ NC='\033[0m' # No Color
 
 # 配置变量
 GITHUB_REPO="sixban6/singctl"
-# OpenWrt 使用 /usr/bin，其他系统使用 /usr/local/bin
+# OpenWrt 使用 /usr/bin 及 -lite 轻量包，其他系统使用 /usr/local/bin
+IS_OPENWRT="false"
 if [ -f "/etc/openwrt_release" ] || [ -f "/etc/openwrt_version" ]; then
+    IS_OPENWRT="true"
     INSTALL_DIR="/usr/bin"
 else
     INSTALL_DIR="/usr/local/bin"
@@ -174,13 +176,16 @@ get_latest_version() {
     echo_success "最新版本: $LATEST_VERSION"
 }
 
-# 构建下载URL
+# 构建下载URL（直连 GitHub 优先，不可达时自动回退镜像；OpenWrt 自动优先选用 -lite 轻量包）
 build_download_url() {
-    # 构建文件名
-    local filename="singctl-${OS}-${ARCH}.tar.gz"
-    DOWNLOAD_URL="https://gh-proxy.com/https://github.com/$GITHUB_REPO/releases/download/$LATEST_VERSION/$filename"
-    
-    echo_info "下载链接: $DOWNLOAD_URL"
+    PACKAGE_FILENAME="singctl-${OS}-${ARCH}.tar.gz"
+    if [ "$IS_OPENWRT" = "true" ] && [ "$OS" = "linux" ] && { [ "$ARCH" = "amd64" ] || [ "$ARCH" = "arm64" ]; }; then
+        PACKAGE_FILENAME="singctl-${OS}-${ARCH}-lite.tar.gz"
+    fi
+    DIRECT_URL="https://github.com/$GITHUB_REPO/releases/download/$LATEST_VERSION/$PACKAGE_FILENAME"
+    MIRROR_URL="https://gh-proxy.com/$DIRECT_URL"
+
+    echo_info "目标安装包: $PACKAGE_FILENAME"
 }
 
 # 计算文件 sha256（兼容 GNU sha256sum / macOS shasum）
@@ -208,11 +213,17 @@ download_and_extract() {
     mkdir -p "$TEMP_DIR"
     tar_file="$TEMP_DIR/singctl.tar.gz"
 
-    # 2. 下载（可走镜像加速）
-    if ! curl -fL --retry 2 -o "$tar_file" "$DOWNLOAD_URL"; then
-        error_exit "下载失败: $DOWNLOAD_URL"
+    # 2. 下载（优先直连 GitHub 保障海外 VPS 满速稳定，失败再自动回退镜像加速）
+    echo_info "尝试从 GitHub 官方源直连下载: $DIRECT_URL"
+    if curl -fL --connect-timeout 8 --retry 1 -o "$tar_file" "$DIRECT_URL"; then
+        echo_success "GitHub 官方源直连下载完成"
+    else
+        echo_warning "GitHub 直连超时或受阻，自动切换镜像加速下载: $MIRROR_URL"
+        if ! curl -fL --connect-timeout 10 --retry 2 -o "$tar_file" "$MIRROR_URL"; then
+            error_exit "下载失败，请检查主机网络连接"
+        fi
+        echo_success "镜像加速下载完成"
     fi
-    echo_success "下载完成"
 
     # 3. sha256 校验（校验和从 GitHub 直连获取，绝不经镜像）
     verify_checksum
@@ -249,7 +260,7 @@ download_and_extract() {
 
 # 校验下载包的 sha256
 verify_checksum() {
-    local filename="singctl-${OS}-${ARCH}.tar.gz"
+    local filename="$PACKAGE_FILENAME"
     local checksums_url="https://github.com/$GITHUB_REPO/releases/download/$LATEST_VERSION/checksums.txt"
     local expected actual
 
@@ -259,11 +270,11 @@ verify_checksum() {
     fi
 
     echo_info "从 GitHub 直连获取校验和（不走镜像）..."
-    if ! curl -fsSL --retry 2 --max-time 60 -o "$TEMP_DIR/checksums.txt" "$checksums_url"; then
+    if ! curl -fsSL --connect-timeout 10 --retry 2 --max-time 60 -o "$TEMP_DIR/checksums.txt" "$checksums_url"; then
         error_exit "无法直连 GitHub 获取 checksums.txt，已中止安装。请检查网络后重试；确要跳过请设置 SINGCTL_SKIP_CHECKSUM=1"
     fi
 
-    expected=$(awk -v f="$filename" '$2 == f {print tolower($1)}' "$TEMP_DIR/checksums.txt")
+    expected=$(awk -v f="$filename" '$2 == f || $2 == "*"f {print tolower($1)}' "$TEMP_DIR/checksums.txt")
     if [ -z "$expected" ]; then
         error_exit "checksums.txt 中没有 $filename 的记录，拒绝安装"
     fi
@@ -458,9 +469,9 @@ show_completion_info() {
     printf "\n"
     echo_info "常用命令:"
     echo " singctl version          - 查看版本信息"
-    echo " singctl gen              - 生成配置到默认位置, 并备份原始配置"
-    echo " singctl sb start         - 启动singbox服务"
-    echo " singctl sb stop          - 停止singbox服务"
+    echo " singctl sb gen           - 生成配置到默认位置，并备份原始配置"
+    echo " singctl sb start         - 启动 sing-box 与看门狗守护进程"
+    echo " singctl sb stop          - 停止 sing-box 与看门狗守护进程"
     echo " singctl sb install       - 安装 sing-box"
 
     printf "\n"
@@ -560,8 +571,8 @@ check_singbox_installation() {
 
 init_singbox_config() {
   # === 创建 /etc/sing-box 目录，但不创建空配置文件 ===
-  # 让 singctl start 在第一次运行时生成正确的配置
-  sudo mkdir -p /etc/sing-box
+  # 脚本开头已强制校验 root 权限，避免 OpenWrt 无 sudo 命令报错
+  mkdir -p /etc/sing-box
   echo_info "已创建 /etc/sing-box 目录，配置文件将在首次启动时生成"
 }
 
@@ -589,11 +600,11 @@ select_mode_and_setup() {
                 printf "     • VLESS Reality + Hysteria 2 节点承载\n"
                 printf "     • Caddy 自动化 TLS / 原生 IP 证书 / 隐蔽反代\n"
                 printf "     • 服务端专属 Web 控制台 (高熵安全随机路径)\n"
-                printf "     • Sub-Store 节点管理与多客户端订阅聚合\n"
+                printf "     • SubHub 原生节点管理与多客户端订阅聚合\n"
                 printf "\n"
                 printf "  \033[1;37m2) 客户端模式 (Client Mode)\033[0m\n"
                 printf "     • 软路由 / Linux 透明代理网关 (TProxy)\n"
-                printf "     • 自动转换订阅与智能分流规则\n"
+                printf "     • 自动转换订阅与看门狗静默热同步\n"
                 printf "     • 本地轻量 Web 图形管理后台 (:8090)\n"
                 printf "\033[0;36m====================================================\033[0m\n"
                 printf "\033[0;33m请输入选项 [1-2] (默认 1): \033[0m"
@@ -604,11 +615,11 @@ select_mode_and_setup() {
                 printf "     • VLESS Reality + Hysteria 2 节点承载\n"
                 printf "     • Caddy 自动化 TLS / 原生 IP 证书 / 隐蔽反代\n"
                 printf "     • 服务端专属 Web 控制台 (高熵安全随机路径)\n"
-                printf "     • Sub-Store 节点管理与多客户端订阅聚合\n"
+                printf "     • SubHub 原生节点管理与多客户端订阅聚合\n"
                 printf "\n"
                 printf "  2) 客户端模式 (Client Mode)\n"
                 printf "     • 软路由 / Linux 透明代理网关 (TProxy)\n"
-                printf "     • 自动转换订阅与智能分流规则\n"
+                printf "     • 自动转换订阅与看门狗静默热同步\n"
                 printf "     • 本地轻量 Web 图形管理后台 (:8090)\n"
                 printf "====================================================\n"
                 printf "请输入选项 [1-2] (默认 1): "
@@ -633,9 +644,41 @@ select_mode_and_setup() {
         echo_info "正在启动 SingCtl 服务端初始化向导..."
         printf "\n"
         if [ -c /dev/tty ]; then
-            exec "$INSTALL_DIR/singctl" sr init < /dev/tty
+            "$INSTALL_DIR/singctl" sr init < /dev/tty
         else
-            exec "$INSTALL_DIR/singctl" sr init
+            "$INSTALL_DIR/singctl" sr init
+        fi
+
+        deploy_now="y"
+        if [ -c /dev/tty ]; then
+            printf "\n"
+            if supports_color; then
+                printf "\033[0;33m是否立即执行四核组件全量部署 (singctl sr install)？[Y/n] (回车默认立即部署): \033[0m"
+            else
+                printf "是否立即执行四核组件全量部署 (singctl sr install)？[Y/n] (回车默认立即部署): "
+            fi
+            read -r deploy_choice < /dev/tty || deploy_choice="y"
+            case "$deploy_choice" in
+                n|N|no|NO|No)
+                    deploy_now="n"
+                    ;;
+                *)
+                    deploy_now="y"
+                    ;;
+            esac
+        fi
+
+        if [ "$deploy_now" = "y" ]; then
+            echo_info "正在启动四核组件全量部署..."
+            printf "\n"
+            if [ -c /dev/tty ]; then
+                exec "$INSTALL_DIR/singctl" sr install < /dev/tty
+            else
+                exec "$INSTALL_DIR/singctl" sr install
+            fi
+        else
+            echo_info "已保留配置文件: $CONFIG_FILE"
+            echo_info "确认无误后可随时运行: singctl sr install"
         fi
         exit 0
     fi

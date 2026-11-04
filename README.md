@@ -34,22 +34,44 @@
 
 ## 🚀 1 分钟极速上手
 
-### 场景一：【服务端部署】（跨地域云服务器一键初始化并获取运维配置）
+> [!TIP]
+> **单节点与多节点怎么选？**
+> - **只有 1 台 VPS**：直接按【场景一】跑完即可，全部功能一步到位。
+> - **有 2 台及以上 VPS**：只在**第 1 台主控机（Master）**跑一次【场景一】；买第 2~N 台新机时**切勿再登新机跑 `install.sh`**，直接按【场景二】在主控机一条命令远程开荒，新节点会自动汇入第 1 台的同一条总订阅链接！
 
-登录你的云服务器（Debian / Ubuntu / CentOS），执行自动化部署向导：
+### 场景一：【单节点 VPS / 舰队首台主控部署】
+
+登录你的**唯一一台 VPS**（或多节点架构中的**第 1 台主控 VPS**，支持 Debian / Ubuntu / CentOS），执行自动化部署向导：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sixban6/singctl/main/install.sh | sh
 ```
 
-> **全流程自动化**：
-> 1. 选择 `1) 服务端部署 (Server)`，按向导填写解析域名与 Cloudflare Token；
-> 2. 安装完成后，终端呈现 **专属 HTTPS 管理后台入口** 与 **客户端聚合订阅链接**；
+> **全流程一气呵成**（完整图文排障见 [👉 单节点实战全解](docs/guide-single-node.md)）：
+> 1. 选择 `1) 服务端模式 (Server Mode)`，按向导填写解析域名与 Cloudflare Token；
+> 2. 回车确认立即执行四核全量部署，完成后终端直接呈现 **专属 HTTPS 管理后台入口** 与 **唯一总订阅链接**；
 > 3. 支持登录专属控制台一键导入客户端或调取二维码，开启双出口智能分流体验。
 
 ---
 
-### 场景二：【客户端路由中枢】（Mac / Linux / 软路由 / Windows 本地透明路由）
+### 场景二：【第 2~N 台新 VPS 扩容组网】（多节点舰队 — 无需登录新机器）
+
+新买第 2、第 3 台空白裸机 VPS 时，**无需手动 SSH 登录新机器**，直接在**第 1 台主控 VPS** 上执行一条命令（或在主控 Web 后台点击「裸机一键部署」）：
+
+```bash
+singctl fl bootstrap jp --name "日本东京" \
+  --host 203.0.113.10 --port 22 --password '<新机root初始密码>' \
+  --domain jp.example.com --cf-token '<Cloudflare_DNS_Token>'
+```
+
+> **主控全自动远程闭环**（架构选型与日常运维见 [👉 多节点舰队全解](docs/guide-multi-node-fleet.md)）：
+> 1. 自动连入新机 `22` 端口注入双公钥、平滑切换 SSH 至 `2222` 免密并销毁明文密码；
+> 2. 自动在新机部署 BBR + Caddy + Sing-Box + SubHub + WARP 四核组件；
+> 3. 自动提取新机节点并入**第 1 台主控的总订阅链接**，所有软路由与客户端无需改配置自动热同步上线。
+
+---
+
+### 场景三：【客户端路由中枢】（Mac / Linux / 软路由 / Windows 本地透明路由）
 
 **macOS (Homebrew)**
 ```bash
@@ -57,7 +79,7 @@ brew tap sixban6/singctl
 brew install sixban6/singctl/singctl
 ```
 
-**Linux / 软路由网关**
+**Linux / OpenWrt 软路由网关**（自动识别软路由并选用 `-lite` 轻量包）
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sixban6/singctl/main/install.sh | sh
 ```
@@ -69,9 +91,9 @@ powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "[System.IO.File]
 
 **日常运维常用命令**：
 ```bash
-singctl sb run       # 启动客户端透明路由引擎 (TUN / TProxy)
-singctl sb stop      # 停止客户端路由引擎
-singctl w            # 启动本地可视化 Web 控制台 (默认 http://127.0.0.1:8090)
+singctl sb start     # 生成配置并启动客户端路由引擎与看门狗 (看门狗自动静默热同步订阅变更)
+singctl sb stop      # 停止客户端路由引擎与看门狗 (Linux / 软路由后台模式)
+singctl w start      # 后台启动本地可视化 Web 控制台 (默认监听 :8090，本机访问 http://127.0.0.1:8090)
 singctl doctor       # 运行客户端全链路健康体检
 ```
 
