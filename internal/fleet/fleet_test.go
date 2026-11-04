@@ -426,6 +426,8 @@ server:
 		t.Fatalf("expected auto-provisioned domain sg.example.com, got %+v", n1)
 	}
 	if !strings.Contains(capturedYAML, `sni: "itunes.apple.com"`) ||
+		!strings.Contains(capturedYAML, `node_domain: "sg.example.com"`) ||
+		!strings.Contains(capturedYAML, `substore_domain: "sg.example.com"`) ||
 		!strings.Contains(capturedYAML, `up: 80`) ||
 		!strings.Contains(capturedYAML, `cf_dns_key: "cf-master-secret-token"`) ||
 		!strings.Contains(capturedYAML, `mirror_url: "https://mirror.example.com"`) {

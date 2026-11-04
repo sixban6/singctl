@@ -58,6 +58,14 @@ configure_firewall_nftables() {
     fi
 }
 
+is_ssh_already_converged() {
+    local target="$1"
+    [ -n "${target}" ] && [ "${target}" != "22" ] || return 1
+    [ -f /etc/ssh/sshd_config.d/00-singctl-hardening.conf ] || return 1
+    grep -Eq "^[[:space:]]*Port[[:space:]]+${target}([[:space:]]|$)" /etc/ssh/sshd_config.d/00-singctl-hardening.conf && \
+    ! grep -Eq "^[[:space:]]*Port[[:space:]]+22([[:space:]]|$)" /etc/ssh/sshd_config.d/00-singctl-hardening.conf
+}
+
 configure_firewall_debian_like() {
     # Check if native nftables is active or installed without UFW
     if systemctl is-active --quiet nftables 2>/dev/null || (command -v nft >/dev/null 2>&1 && ! command -v ufw >/dev/null 2>&1); then
@@ -72,11 +80,18 @@ configure_firewall_debian_like() {
         apt-get install -y ufw
     fi
 
-    # Keep port 22 open during transition to prevent accidental lockout!
-    ufw allow 22 || true
-    if [ "${SSH_PORT}" != "22" ] && [ "${SKIP_SSH_PORT_CHANGE}" != "true" ]; then
-        echo "Allowing SSH transition port ${SSH_PORT}..."
-        ufw allow "${SSH_PORT}" || true
+    if is_ssh_already_converged "${SSH_PORT}"; then
+        echo "SSH already converged to port ${SSH_PORT}; allowing ${SSH_PORT} and keeping port 22 closed..."
+        ufw allow "${SSH_PORT}/tcp" >/dev/null 2>&1 || ufw allow "${SSH_PORT}" || true
+        ufw --force delete allow 22 >/dev/null 2>&1 || true
+        ufw --force delete allow 22/tcp >/dev/null 2>&1 || true
+    else
+        # Keep port 22 open during transition to prevent accidental lockout!
+        ufw allow 22 || true
+        if [ "${SSH_PORT}" != "22" ] && [ "${SKIP_SSH_PORT_CHANGE}" != "true" ]; then
+            echo "Allowing SSH transition port ${SSH_PORT}..."
+            ufw allow "${SSH_PORT}" || true
+        fi
     fi
 
     ufw --force delete allow 8444 >/dev/null 2>&1 || true
@@ -250,6 +265,15 @@ configure_ssh_debian_like() {
         echo "Keeping standard SSH Port 22..."
         cat > /etc/ssh/sshd_config.d/00-singctl-hardening.conf <<EOF
 Port 22
+PasswordAuthentication no
+PubkeyAuthentication yes
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+EOF
+    elif is_ssh_already_converged "${SSH_PORT}"; then
+        echo "Preserving already-converged single-port SSH hardening on Port ${SSH_PORT}..."
+        cat > /etc/ssh/sshd_config.d/00-singctl-hardening.conf <<EOF
+Port ${SSH_PORT}
 PasswordAuthentication no
 PubkeyAuthentication yes
 KbdInteractiveAuthentication no

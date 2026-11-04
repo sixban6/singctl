@@ -730,7 +730,7 @@ func (m *Manager) PreviewBootstrapNode(ctx context.Context, in BootstrapInput) (
 		InheritCFToken:   explicitCF == "" && masterCF != "",
 		MasterDomain:     masterDom,
 		SNI:              sni,
-		SubstoreDomain:   strings.TrimSpace(in.SubstoreDomain),
+		SubstoreDomain:   cmp.Or(strings.TrimSpace(in.SubstoreDomain), resolvedDom),
 		MirrorURL:        mirrorURL,
 		Hy2Up:            hy2Up,
 		Hy2Down:          hy2Down,
@@ -829,6 +829,8 @@ func (m *Manager) BootstrapNode(ctx context.Context, in BootstrapInput) (NodeAct
 		return NodeActionResult{}, err
 	}
 
+	subDom := cmp.Or(strings.TrimSpace(in.SubstoreDomain), finalDomain)
+
 	yamlContent := fmt.Sprintf(`github:
   mirror_url: %q
 hy2:
@@ -840,7 +842,9 @@ server:
   substore_domain: %q
   cf_dns_key: %q
   sni: %q
-`, plan.MirrorURL, plan.Hy2Up, plan.Hy2Down, plan.NodeTag, finalDomain, plan.SubstoreDomain, plan.CFDNSKey, plan.SNI)
+  web_terminal:
+    ssh_port: %d
+`, plan.MirrorURL, plan.Hy2Up, plan.Hy2Down, plan.NodeTag, finalDomain, subDom, plan.CFDNSKey, plan.SNI, node.Port)
 
 	cfgB64 := base64.StdEncoding.EncodeToString([]byte(yamlContent))
 
@@ -873,8 +877,25 @@ fi
 mkdir -p /etc/singctl
 printf '%%s' %q | base64 -d > /etc/singctl/singctl.yaml
 chmod 600 /etc/singctl/singctl.yaml
-singctl sr install >/dev/null 2>&1
-`, cfgB64)
+SSH_PORT=%d singctl sr install >/dev/null 2>&1
+if command -v systemctl >/dev/null 2>&1; then
+  for _i in $(seq 1 30); do
+    if systemctl is-active --quiet caddy && systemctl is-active --quiet sing-box; then
+      break
+    fi
+    if systemctl is-active --quiet caddy && ! systemctl is-active --quiet sing-box; then
+      if find /var/lib/caddy/.local/share/caddy/certificates -name "*.crt" 2>/dev/null | grep -q .; then
+        systemctl restart sing-box >/dev/null 2>&1 || true
+      fi
+    fi
+    sleep 2
+  done
+  if ! systemctl is-active --quiet caddy; then
+    echo "Caddy gateway failed to start after install" >&2
+    exit 1
+  fi
+fi
+`, cfgB64, node.Port)
 
 	runner := m.runner()
 	callCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)

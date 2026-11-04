@@ -212,6 +212,9 @@ func PreviewCaddyfile(cfg *config.Config) (string, error) {
 	if cfg != nil {
 		nodeDomain = cfg.Server.GetNodeDomain()
 		substoreDomain = cfg.Server.GetSubstoreDomain()
+		if substoreDomain == "" {
+			substoreDomain = nodeDomain
+		}
 		cfDNSKey = cfg.Server.CFDNSKey
 		sni = cfg.Server.Sni
 		serverIPRaw = cfg.Server.ServerIP

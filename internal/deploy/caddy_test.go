@@ -305,3 +305,25 @@ func TestPreviewCaddyfile_SubHubMaskFallback(t *testing.T) {
 		t.Errorf("expected mask-site fallback on SubstoreDomain, NodeDomain, and :9445, got:\n%s", content)
 	}
 }
+
+func TestPreviewCaddyfile_EmptySubstoreDomainFallsBackToNodeDomain(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			NodeDomain:     "sg.example.com",
+			SubstoreDomain: "",
+			CFDNSKey:       "dummy_cf_key",
+			Sni:            "swdist.apple.com",
+		},
+	}
+
+	content, err := PreviewCaddyfile(cfg)
+	if err != nil {
+		t.Fatalf("PreviewCaddyfile failed: %v", err)
+	}
+	if strings.Contains(content, "https://:9443") {
+		t.Fatalf("Caddyfile must never render empty hostname site block https://:9443, got:\n%s", content)
+	}
+	if !strings.Contains(content, "https://sg.example.com:9443") {
+		t.Fatalf("expected https://sg.example.com:9443 when SubstoreDomain is empty, got:\n%s", content)
+	}
+}
