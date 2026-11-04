@@ -310,7 +310,7 @@ server:
 		"rec-conflict": {
 			ID:      "rec-conflict",
 			Type:    "A",
-			Name:    "sg2.example.com",
+			Name:    "sg2.cdn.example.com",
 			Content: "198.51.100.77",
 			Proxied: true,
 		},
@@ -418,25 +418,32 @@ server:
 	if err != nil || !res1.Success {
 		t.Fatalf("zero-config bootstrap #1 failed: res=%+v err=%v", res1, err)
 	}
-	if res1.ID != "sg" || res1.Name != "新加坡" {
-		t.Fatalf("expected auto-GeoIP ID=sg Name=新加坡, got ID=%q Name=%q", res1.ID, res1.Name)
+	if res1.ID != "sg1" || res1.Name != "新加坡" {
+		t.Fatalf("expected auto-GeoIP ID=sg1 Name=新加坡, got ID=%q Name=%q", res1.ID, res1.Name)
 	}
-	n1, ok, _ := fleetStore.Get("sg")
-	if !ok || n1.Domain != "sg.example.com" || !n1.DNSAutoManaged {
-		t.Fatalf("expected auto-provisioned domain sg.example.com, got %+v", n1)
+	n1, ok, _ := fleetStore.Get("sg1")
+	if !ok || n1.Domain != "sg1.cdn.example.com" || !n1.DNSAutoManaged {
+		t.Fatalf("expected auto-provisioned domain sg1.cdn.example.com, got %+v", n1)
 	}
 	if !strings.Contains(capturedYAML, `sni: "itunes.apple.com"`) ||
-		!strings.Contains(capturedYAML, `node_domain: "sg.example.com"`) ||
-		!strings.Contains(capturedYAML, `substore_domain: "sg.example.com"`) ||
+		!strings.Contains(capturedYAML, `node_domain: "sg1.cdn.example.com"`) ||
+		!strings.Contains(capturedYAML, `substore_domain: "sg1.cdn.example.com"`) ||
 		!strings.Contains(capturedYAML, `up: 80`) ||
 		!strings.Contains(capturedYAML, `cf_dns_key: "cf-master-secret-token"`) ||
 		!strings.Contains(capturedYAML, `mirror_url: "https://mirror.example.com"`) {
 		t.Fatalf("remote singctl.yaml did not inherit Master config:\n%s", capturedYAML)
 	}
 
+	preview2, err := mgr.PreviewBootstrapNode(ctx, BootstrapInput{
+		UpsertInput: UpsertInput{Host: "203.0.113.52"},
+	})
+	if err != nil || preview2.ID != "sg2" || preview2.Domain != "sg2.cdn.example.com" {
+		t.Fatalf("expected preview sg2 / sg2.cdn.example.com, got preview=%+v err=%v", preview2, err)
+	}
+
 	// 2) Zero-config bootstrap #2 in SAME country (Singapore):
 	//    - ID auto-increments to "sg2", Name to "新加坡 #2"
-	//    - Because "sg2.example.com" already points to 198.51.100.77 in Cloudflare, it MUST NOT overwrite it and must allocate "fl-sg2.example.com"!
+	//    - Because "sg2.cdn.example.com" already points to 198.51.100.77 in Cloudflare, it MUST NOT overwrite it and must allocate "sg3.cdn.example.com"!
 	res2, err := mgr.BootstrapNode(ctx, BootstrapInput{
 		UpsertInput: UpsertInput{
 			Host:     "203.0.113.52",
@@ -450,23 +457,23 @@ server:
 		t.Fatalf("expected collision-free ID=sg2 Name='新加坡 #2', got ID=%q Name=%q", res2.ID, res2.Name)
 	}
 	n2, ok, _ := fleetStore.Get("sg2")
-	if !ok || n2.Domain != "fl-sg2.example.com" {
-		t.Fatalf("expected DNS collision avoidance to pick fl-sg2.example.com, got %+v", n2)
+	if !ok || n2.Domain != "sg3.cdn.example.com" {
+		t.Fatalf("expected DNS collision avoidance to pick sg3.cdn.example.com, got %+v", n2)
 	}
 	mu.Lock()
 	if records["rec-conflict"].Content != "198.51.100.77" {
-		t.Fatalf("CRITICAL: pre-existing DNS record sg2.example.com was overwritten!")
+		t.Fatalf("CRITICAL: pre-existing DNS record sg2.cdn.example.com was overwritten!")
 	}
 	mu.Unlock()
 
 	// 3) RemoveNodeWithOptions cleans up auto-managed DNS record ONLY if IP matches
-	deletedDNS, err := mgr.RemoveNodeWithOptions(ctx, "sg", false)
+	deletedDNS, err := mgr.RemoveNodeWithOptions(ctx, "sg1", false)
 	if err != nil || !deletedDNS {
-		t.Fatalf("expected RemoveNodeWithOptions to delete auto-managed DNS record sg.example.com, got deleted=%v err=%v", deletedDNS, err)
+		t.Fatalf("expected RemoveNodeWithOptions to delete auto-managed DNS record sg1.cdn.example.com, got deleted=%v err=%v", deletedDNS, err)
 	}
 	mu.Lock()
-	if _, exists := records["rec-sg.example.com"]; exists {
-		t.Fatalf("expected rec-sg.example.com to be deleted from Cloudflare")
+	if _, exists := records["rec-sg1.cdn.example.com"]; exists {
+		t.Fatalf("expected rec-sg1.cdn.example.com to be deleted from Cloudflare")
 	}
 	mu.Unlock()
 }
@@ -578,5 +585,87 @@ func TestFleetHealSerialRollingRebootAndCircuitBreaker(t *testing.T) {
 	}
 	if !rep2.Results[2].SkippedByCircuitBreaker {
 		t.Fatalf("expected n3 to be marked SkippedByCircuitBreaker=true, got %+v", rep2.Results[2])
+	}
+}
+
+func TestFleetHTTPSProbeAndPatrol(t *testing.T) {
+	tmpDir := t.TempDir()
+	store := NewStore(filepath.Join(tmpDir, "fleet.yaml"))
+
+	var healthyFlag atomic.Bool
+	healthyFlag.Store(true)
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !healthyFlag.Load() {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer tlsSrv.Close()
+
+	srvHostPort := strings.TrimPrefix(tlsSrv.URL, "https://")
+	if _, err := store.Upsert(UpsertInput{
+		ID:       "sg1",
+		Name:     "新加坡",
+		Host:     srvHostPort, // pure IP:port exercises DefaultHTTPSProber end-to-end TLS handshake
+		Port:     2222,
+		User:     "root",
+		AuthType: AuthKeyFile,
+		KeyPath:  filepath.Join(tmpDir, "dummy_ed25519"),
+	}); err != nil {
+		t.Fatalf("seed sg1 failed: %v", err)
+	}
+
+	mgr := NewManager(store, nil)
+	var sshCalls atomic.Int32
+	mgr.Runner = func(ctx context.Context, n Node, script string) (string, int, error) {
+		sshCalls.Add(1)
+		return "", 0, errors.New("SSH runner must NOT be called during HTTPS :443 probe")
+	}
+
+	// 1) Direct ProbeNodes succeeds with zero SSH calls
+	results, err := mgr.ProbeNodes(t.Context(), nil)
+	if err != nil || len(results) != 1 || !results[0].Online {
+		t.Fatalf("expected online HTTPS probe result, got results=%+v err=%v", results, err)
+	}
+	if sshCalls.Load() != 0 {
+		t.Fatalf("expected 0 SSH invocations during HTTPS probe, got %d", sshCalls.Load())
+	}
+	n1, ok, _ := store.Get("sg1")
+	if !ok || !n1.Online || n1.LastProbeAt == "" || n1.LatencyMs <= 0 {
+		t.Fatalf("expected store runtime state updated with Online=true and LastProbeAt, got %+v", n1)
+	}
+
+	// 2) Simulate gateway failure (502) -> flips Online=false; then background patrol recovers Online=true automatically
+	healthyFlag.Store(false)
+	if _, err := mgr.RunAcross(t.Context(), "probe", []string{"sg1"}); err != nil {
+		t.Fatalf("RunAcross(probe) failed: %v", err)
+	}
+	nDown, _, _ := store.Get("sg1")
+	if nDown.Online || nDown.ProbeStatus != "unreachable" {
+		t.Fatalf("expected Offline on HTTP 502, got %+v", nDown)
+	}
+
+	healthyFlag.Store(true)
+	pCtx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	mgr.StartBackgroundPatrol(pCtx, 25*time.Millisecond)
+
+	deadline := time.Now().Add(2 * time.Second)
+	recovered := false
+	for time.Now().Before(deadline) {
+		cur, _, _ := store.Get("sg1")
+		if cur.Online {
+			recovered = true
+			break
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	cancel()
+	if !recovered {
+		t.Fatal("expected background HTTPS patrol to automatically recover sg1 Online=true")
+	}
+	if sshCalls.Load() != 0 {
+		t.Fatalf("background patrol leaked SSH calls: %d", sshCalls.Load())
 	}
 }

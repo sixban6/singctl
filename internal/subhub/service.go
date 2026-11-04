@@ -119,6 +119,8 @@ User=root
 ExecStart=%s -c %s sr sub serve --listen %s
 Restart=always
 RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
 LimitNOFILE=65535
 
 [Install]

@@ -181,9 +181,22 @@ sysctl_set() {
 }
 
 configure_sysctl() {
-    echo "Configuring sysctl (TCP BBR and FQ)..."
+    local os_name="${1:-}"
+    echo "Configuring sysctl (TCP BBR, FQ, and kernel network security baseline)..."
     sysctl_set "net.core.default_qdisc" "fq"
     sysctl_set "net.ipv4.tcp_congestion_control" "bbr"
+    if [ "${os_name}" != "openwrt" ]; then
+        sysctl_set "net.ipv4.tcp_syncookies" "1"
+        sysctl_set "net.ipv4.conf.all.rp_filter" "1"
+        sysctl_set "net.ipv4.conf.default.rp_filter" "1"
+        sysctl_set "net.ipv4.conf.all.accept_redirects" "0"
+        sysctl_set "net.ipv4.conf.default.accept_redirects" "0"
+        sysctl_set "net.ipv6.conf.all.accept_redirects" "0"
+        sysctl_set "net.ipv4.conf.all.send_redirects" "0"
+        sysctl_set "net.ipv4.conf.default.send_redirects" "0"
+        sysctl_set "kernel.kptr_restrict" "2"
+        sysctl_set "kernel.dmesg_restrict" "1"
+    fi
 
     echo "Applying sysctl changes..."
     sysctl -p || true
@@ -256,6 +269,8 @@ configure_ssh_debian_like() {
         [ -f "${conf}" ] || continue
         [ "${conf}" = "/etc/ssh/sshd_config.d/00-singctl-hardening.conf" ] && continue
         sed -i -E 's/^[[:space:]]*Port[[:space:]]+[0-9]+/# &/g' "${conf}"
+        sed -i -E 's/^[[:space:]]*PermitRootLogin[[:space:]]+yes/# &/g' "${conf}"
+        sed -i -E 's/^[[:space:]]*X11Forwarding[[:space:]]+yes/# &/g' "${conf}"
         sed -i -E 's/^[[:space:]]*PasswordAuthentication[[:space:]]+yes/# &/g' "${conf}"
         sed -i -E 's/^[[:space:]]*KbdInteractiveAuthentication[[:space:]]+yes/# &/g' "${conf}"
         sed -i -E 's/^[[:space:]]*ChallengeResponseAuthentication[[:space:]]+yes/# &/g' "${conf}"
@@ -265,29 +280,44 @@ configure_ssh_debian_like() {
         echo "Keeping standard SSH Port 22..."
         cat > /etc/ssh/sshd_config.d/00-singctl-hardening.conf <<EOF
 Port 22
+PermitRootLogin prohibit-password
 PasswordAuthentication no
 PubkeyAuthentication yes
 KbdInteractiveAuthentication no
 ChallengeResponseAuthentication no
+X11Forwarding no
+MaxAuthTries 3
+ClientAliveInterval 60
+ClientAliveCountMax 3
 EOF
     elif is_ssh_already_converged "${SSH_PORT}"; then
         echo "Preserving already-converged single-port SSH hardening on Port ${SSH_PORT}..."
         cat > /etc/ssh/sshd_config.d/00-singctl-hardening.conf <<EOF
 Port ${SSH_PORT}
+PermitRootLogin prohibit-password
 PasswordAuthentication no
 PubkeyAuthentication yes
 KbdInteractiveAuthentication no
 ChallengeResponseAuthentication no
+X11Forwarding no
+MaxAuthTries 3
+ClientAliveInterval 60
+ClientAliveCountMax 3
 EOF
     else
         echo "Adopting dual-port transition (Port 22 and Port ${SSH_PORT}) to avoid lockout..."
         cat > /etc/ssh/sshd_config.d/00-singctl-hardening.conf <<EOF
 Port 22
 Port ${SSH_PORT}
+PermitRootLogin prohibit-password
 PasswordAuthentication no
 PubkeyAuthentication yes
 KbdInteractiveAuthentication no
 ChallengeResponseAuthentication no
+X11Forwarding no
+MaxAuthTries 3
+ClientAliveInterval 60
+ClientAliveCountMax 3
 EOF
         echo "[SAFETY NOTICE] SSH is listening on BOTH Port 22 and Port ${SSH_PORT}."
         echo "[SAFETY NOTICE] Please ensure your cloud provider's firewall/security group allows Port ${SSH_PORT}."
@@ -346,7 +376,7 @@ OS_NAME="$(detect_os)"
 echo "Detected OS: ${OS_NAME}"
 
 configure_firewall "${OS_NAME}"
-configure_sysctl
+configure_sysctl "${OS_NAME}"
 echo "Hardening SSH access..."
 harden_ssh_access "${OS_NAME}"
 verify_ssh_settings "${OS_NAME}"

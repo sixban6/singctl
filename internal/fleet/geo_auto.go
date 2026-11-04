@@ -178,9 +178,12 @@ func buildGeoInfo(city, countryCode string) GeoInfo {
 	}
 }
 
-var cleanIDCharsRe = regexp.MustCompile(`[^a-z0-9_-]+`)
+var (
+	cleanIDCharsRe  = regexp.MustCompile(`[^a-z0-9_-]+`)
+	trailingDigitRe = regexp.MustCompile(`[0-9]+$`)
+)
 
-// AllocateUniqueIDAndName assigns a collision-free node ID and human-readable display name.
+// AllocateUniqueIDAndName assigns a collision-free numbered node ID (e.g., sg1, sg2) and human-readable display name.
 func AllocateUniqueIDAndName(preferredID, preferredName, geoTag, geoDisplayName string, takenIDs map[string]bool) (string, string) {
 	explicitID := strings.ToLower(strings.TrimSpace(preferredID))
 	explicitName := strings.TrimSpace(preferredName)
@@ -196,11 +199,13 @@ func AllocateUniqueIDAndName(preferredID, preferredName, geoTag, geoDisplayName 
 	}
 	baseDisplay := cmp.Or(explicitName, strings.TrimSpace(geoDisplayName), strings.ToUpper(baseTag))
 
-	if !takenIDs[baseTag] {
-		return baseTag, baseDisplay
+	startIdx := 1
+	if takenIDs[baseTag] {
+		// 若已存在历史无序号节点（如 sg），新节点直接从 sg2 起步，避免产生歧义
+		startIdx = 2
 	}
 
-	for i := 2; i <= 999; i++ {
+	for i := startIdx; i <= 999; i++ {
 		cand := fmt.Sprintf("%s%d", baseTag, i)
 		if len(cand) > 32 {
 			cand = cand[:32]
@@ -209,8 +214,34 @@ func AllocateUniqueIDAndName(preferredID, preferredName, geoTag, geoDisplayName 
 			if explicitName != "" {
 				return cand, explicitName
 			}
+			if i == 1 {
+				return cand, baseDisplay
+			}
 			return cand, fmt.Sprintf("%s #%d", baseDisplay, i)
 		}
 	}
 	return fmt.Sprintf("%s-%d", baseTag, time.Now().Unix()%10000), baseDisplay
+}
+
+// FormatAutoCDNSubdomain formats an auto-derived CDN edge subdomain such as "sg1.cdn.example.com".
+func FormatAutoCDNSubdomain(nodeID, rootZone string) string {
+	zone := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(rootZone)), ".")
+	if zone == "" {
+		return ""
+	}
+	label := NormalizeCDNNodeLabel(nodeID)
+	return fmt.Sprintf("%s.cdn.%s", label, zone)
+}
+
+// NormalizeCDNNodeLabel ensures an auto-derived subdomain label ends with an index (e.g. "sg" -> "sg1", "sg2" -> "sg2").
+func NormalizeCDNNodeLabel(nodeID string) string {
+	clean := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(nodeID)), ".cdn")
+	clean = strings.Trim(cleanIDCharsRe.ReplaceAllString(clean, "-"), "-")
+	if clean == "" {
+		return "node1"
+	}
+	if !trailingDigitRe.MatchString(clean) {
+		clean += "1"
+	}
+	return clean
 }

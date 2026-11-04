@@ -304,6 +304,9 @@ export interface FleetNode {
   enabled: boolean;
   addedAt?: string;
   lastSyncAt?: string;
+  lastProbeAt?: string;
+  probeStatus?: string;
+  certDaysLeft?: number;
   online: boolean;
   lastError?: string;
   latencyMs: number;
@@ -322,6 +325,8 @@ export interface FleetSummary {
   online: number;
   totalSyncedEndpoints: number;
   avgDoctorScore: number;
+  lastProbeAt?: string;
+  patrolIntervalSec?: number;
 }
 
 export interface FleetListResponse {

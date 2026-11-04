@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"singctl/internal/config"
@@ -50,12 +51,15 @@ type NodeActionResult struct {
 
 // Manager coordinates concurrent operations across fleet nodes and syncs endpoints into SubHub.
 type Manager struct {
-	Store      *Store
-	SubStore   *subhub.Store
-	ConfigPath string
-	CFClient   *CloudflareDNSClient
-	GeoProber  GeoProberFunc
-	Runner     RunnerFunc
+	Store         *Store
+	SubStore      *subhub.Store
+	ConfigPath    string
+	CFClient      *CloudflareDNSClient
+	GeoProber     GeoProberFunc
+	HTTPProber    HTTPSProberFunc
+	Runner        RunnerFunc
+	patrolStarted atomic.Bool
+	probeMu       sync.Mutex
 }
 
 // NewManager creates a Fleet Manager backed by fleetStore and subStore.
@@ -73,6 +77,7 @@ func NewManager(fleetStore *Store, subStore *subhub.Store) *Manager {
 		ConfigPath: cfgPath,
 		CFClient:   NewCloudflareDNSClient(),
 		GeoProber:  DefaultGeoProber,
+		HTTPProber: DefaultHTTPSProber,
 		Runner:     DefaultSSHRunner,
 	}
 }
@@ -493,6 +498,8 @@ func (m *Manager) RunAcross(ctx context.Context, action string, targetIDs []stri
 			switch action {
 			case "sync":
 				results[idx] = m.syncNodeObj(ctx, node)
+			case "probe":
+				results[idx] = m.probeNodeActionObj(ctx, node)
 			case "doctor":
 				results[idx] = m.doctorNodeObj(ctx, node)
 			case "reset":
@@ -706,7 +713,7 @@ func (m *Manager) PreviewBootstrapNode(ctx context.Context, in BootstrapInput) (
 			cancel()
 		}
 		if rootZone != "" {
-			resolvedDom = fmt.Sprintf("%s.%s", allocID, rootZone)
+			resolvedDom = FormatAutoCDNSubdomain(allocID, rootZone)
 		}
 	}
 

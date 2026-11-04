@@ -68,7 +68,7 @@ singctl fl bootstrap --host 203.0.113.10 --password '<新机root初始密码>'
 ```
 
 > **全自动智能闭环说明**（亦支持 `singctl fl bootstrap jp1 --domain ...` 手动指定，详见 [👉 多节点舰队全解](docs/guide-multi-node-fleet.md)）：
-> - **自动归属地命名 + 自动灰云 DNS**：自动探测新机 IP 所在国家/城市分配唯一短代号（如 `sg` / `新加坡`，同国第 2 台自动递增为 `sg2`），并复用主控 `cf_dns_key` 在根域名下自动创建灰云（仅 DNS）解析记录（退租执行 `singctl fl rm sg` 时自动同步清理 DNS）。
+> - **自动归属地命名 + 自动 `.cdn` 灰云 DNS**：自动探测新机 IP 所在国家/城市分配唯一编号代号（如 `sg1` / `新加坡`，同国第 2 台自动递增为 `sg2`），并复用主控 `cf_dns_key` 在根域名下自动创建 `<id>.cdn.<根域名>`（如 `sg1.cdn.example.com`）灰云（仅 DNS）解析记录（退租执行 `singctl fl rm sg1` 时自动同步清理 DNS）。
 > - **防锁死加固 + 汇入唯一总订阅**：自动注入双公钥、验证切换 SSH `22 → 2222` 免密禁密码（销毁明文密码） → 部署四核组件 → 自动提取新节点并入**第 1 台主控的总订阅链接**，家里软路由与随身手机无需改配置自动热同步上线。
 
 ---
@@ -112,6 +112,7 @@ singctl sr top         # 终端实时观测上下行吞吐、协议负载与 WAR
 singctl sr doctor      # 终端执行端到端健康体检
 singctl sr heal        # 本机三层安全漏洞无感热修复 (--enable-timer 开启每日凌晨自动守护)
 singctl fl heal        # 全舰队协同安全自愈 (单台串行滚动重启新内核 + 异常自动熔断)
+singctl fl probe       # 并发对全球子节点发起零 SSH 日志 HTTPS :443 毫秒级探活与证书余量检测
 singctl fleet doctor   # 并发对全球多台纳管子节点执行健康体检
 singctl sr mask-site   # 重新生成或换一批随机伪装站点
 ```

@@ -326,4 +326,15 @@ func TestPreviewCaddyfile_EmptySubstoreDomainFallsBackToNodeDomain(t *testing.T)
 	if !strings.Contains(content, "https://sg.example.com:9443") {
 		t.Fatalf("expected https://sg.example.com:9443 when SubstoreDomain is empty, got:\n%s", content)
 	}
+	for _, hdr := range []string{
+		"-Server",
+		`Strict-Transport-Security "max-age=31536000"`,
+		`X-Content-Type-Options "nosniff"`,
+		`X-Frame-Options "SAMEORIGIN"`,
+		`Referrer-Policy "strict-origin-when-cross-origin"`,
+	} {
+		if !strings.Contains(content, hdr) {
+			t.Errorf("expected hardened security header %q in Caddyfile, got:\n%s", hdr, content)
+		}
+	}
 }

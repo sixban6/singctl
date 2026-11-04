@@ -362,6 +362,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Username string `json:"username"`
 		Password string `json:"password"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
 	_ = json.NewDecoder(r.Body).Decode(&body)
 
 	user := s.getUsername()

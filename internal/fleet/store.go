@@ -49,6 +49,9 @@ type Node struct {
 	Enabled        bool     `json:"enabled" yaml:"enabled"`
 	AddedAt        string   `json:"addedAt,omitempty" yaml:"added_at,omitempty"`
 	LastSyncAt     string   `json:"lastSyncAt,omitempty" yaml:"last_sync_at,omitempty"`
+	LastProbeAt    string   `json:"lastProbeAt,omitempty" yaml:"last_probe_at,omitempty"`
+	ProbeStatus    string   `json:"probeStatus,omitempty" yaml:"probe_status,omitempty"`
+	CertDaysLeft   int      `json:"certDaysLeft,omitempty" yaml:"cert_days_left,omitempty"`
 	Online         bool     `json:"online" yaml:"online"`
 	LastError      string   `json:"lastError,omitempty" yaml:"last_error,omitempty"`
 	LatencyMs      int      `json:"latencyMs" yaml:"latency_ms,omitempty"`

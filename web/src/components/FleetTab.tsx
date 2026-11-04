@@ -34,6 +34,7 @@ import {
   ChevronUp,
   Globe,
   Search,
+  Zap,
 } from 'lucide-react';
 
 type ModalMode = 'existing' | 'bootstrap';
@@ -102,12 +103,33 @@ export const FleetTab: React.FC = () => {
   });
 
   useEffect(() => {
-    loadFleet();
+    loadFleet().then(() => {
+      triggerSilentProbe();
+    });
     api
       .getFleetDefaults()
       .then((d) => setDefaults(d))
       .catch(() => {});
+
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        triggerSilentProbe();
+      }
+    }, 60_000);
+    return () => window.clearInterval(timer);
   }, []);
+
+  const triggerSilentProbe = async () => {
+    try {
+      const res = await api.probeFleet();
+      if (res && Array.isArray(res.nodes)) {
+        setNodes(res.nodes);
+        if (res.summary) setSummary(res.summary);
+      }
+    } catch {
+      // ignore silent patrol error
+    }
+  };
 
   const loadFleet = async (silent = false) => {
     if (!silent) setLoading(true);
@@ -234,7 +256,7 @@ export const FleetTab: React.FC = () => {
   };
 
   const handleRunAction = async (
-    action: 'sync' | 'doctor' | 'reset' | 'update',
+    action: 'sync' | 'probe' | 'doctor' | 'reset' | 'update',
     ids?: string[],
     label?: string
   ) => {
@@ -349,7 +371,7 @@ export const FleetTab: React.FC = () => {
           <div className="text-xl sm:text-2xl font-bold font-mono text-emerald-400 mt-1">
             {summary.online} <span className="text-sm text-slate-500">/ {summary.total}</span>
           </div>
-          <div className="text-[11px] text-slate-500 mt-1 font-mono truncate">子节点零常驻内存开销</div>
+          <div className="text-[11px] text-slate-500 mt-1 font-mono truncate">HTTPS :443 零日志自动巡检</div>
         </div>
         <div className="p-3.5 sm:p-4 rounded-2xl glass-card">
           <div className="text-xs text-slate-400">全网平均健康分</div>
@@ -402,6 +424,14 @@ export const FleetTab: React.FC = () => {
               >
                 <ShieldAlert className={`w-3.5 h-3.5 text-emerald-400 ${runningKey === 'heal:all' ? 'animate-pulse' : ''}`} />
                 <span>{runningKey === 'heal:all' ? '正在全网自愈...' : '全网安全自愈'}</span>
+              </button>
+              <button
+                onClick={() => handleRunAction('probe', undefined, '全网 HTTPS :443 毫秒级探活报告')}
+                disabled={!!runningKey}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-sky-500/15 hover:bg-sky-500/25 border border-sky-500/30 text-xs text-sky-200 font-medium transition-colors disabled:opacity-50"
+              >
+                <Zap className={`w-3.5 h-3.5 text-sky-400 ${runningKey === 'probe:all' ? 'animate-pulse' : ''}`} />
+                <span>秒级探活</span>
               </button>
               <button
                 onClick={() => handleRunAction('sync', undefined, '全网节点同步报告')}
@@ -558,6 +588,15 @@ export const FleetTab: React.FC = () => {
                           <Globe className="w-3 h-3 shrink-0" />
                           <span>{n.domain}</span>
                           {n.dnsAutoManaged && <span className="text-[10px] text-sky-400/80">· 自动灰云</span>}
+                          {typeof n.certDaysLeft === 'number' && n.certDaysLeft > 0 && (
+                            <span
+                              className={`text-[10px] ${
+                                n.certDaysLeft <= 7 ? 'text-amber-300 font-semibold' : 'text-emerald-300/80'
+                              }`}
+                            >
+                              · 证书{n.certDaysLeft}天
+                            </span>
+                          )}
                         </div>
                       )}
                     </div>
@@ -778,7 +817,7 @@ export const FleetTab: React.FC = () => {
                       • 节点代号与中文名：按新机 IP 归属地自动分配（同地区多台自动递增如 sg2）
                       <br />• 节点域名与解析：
                       {defaults?.hasMasterCfToken
-                        ? `自动在 *.${defaults.suggestedRootZone || '主控根域名'} 下创建灰云仅 DNS 解析`
+                        ? `自动在 *.cdn.${defaults.suggestedRootZone || '主控根域名'} 下创建灰云仅 DNS 解析`
                         : '主控未检出 CF Token，请在下方高级选项填入'}
                       <br />• 安全与协议参数：SSH 22→{form.targetSshPort || 2222} 免密禁密码 · SNI={defaults?.defaultSni || 'swdist.apple.com'} · HY2={defaults?.hy2Up || 50}/{defaults?.hy2Down || 300}M
                     </p>
@@ -882,7 +921,7 @@ export const FleetTab: React.FC = () => {
                             type="text"
                             value={form.id || ''}
                             onChange={(e) => setForm({ ...form, id: e.target.value })}
-                            placeholder="例如: jp 或 sg2"
+                            placeholder="例如: jp1 或 sg2"
                             className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs font-mono text-white"
                           />
                         </div>

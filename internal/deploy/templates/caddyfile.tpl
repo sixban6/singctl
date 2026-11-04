@@ -1,4 +1,5 @@
 {{- define "server_options" -}}
+        protocols h1 h2
         listener_wrappers {
             proxy_protocol {
                 allow 127.0.0.0/8 ::1/128
@@ -13,6 +14,15 @@
 
 {{- define "common_site_routes" -}}
     bind 127.0.0.1
+    header {
+        -Server
+        -Alt-Svc
+        Strict-Transport-Security "max-age=31536000"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
+    }
     tls {
         issuer acme {
             dns cloudflare {{.CFDNSKey}}
@@ -118,6 +128,14 @@ self.addEventListener('activate', (e) => {
 {{template "server_options" .}}
     }
 
+    servers 127.0.0.1:9445 {
+        protocols h1 h2
+    }
+
+    servers :9445 {
+        protocols h1 h2
+    }
+
     # layer4 是顶层模块，必须将其放在全局选项块中才能被正确识别
     layer4 {
         :443 {
@@ -161,6 +179,7 @@ self.addEventListener('activate', (e) => {
 
 # --- HTTP 80 端口 (用于 Let's Encrypt 公网 IP 证书的 HTTP-01 验证及 301 重定向至 443) ---
 :80 {
+    header -Server
     @validMethods method GET POST HEAD OPTIONS
     handle @validMethods {
         redir https://{host}{uri} 301
@@ -241,6 +260,10 @@ https://{{.SubstoreDomain}}:9443 {
 # 公网 IP 专属站点：采用 Let's Encrypt shortlived profile 签发原生公网 IP 证书
 https://{{.ServerIPFormatted}}:9445 {
     bind 127.0.0.1
+    header {
+        -Server
+        -Alt-Svc
+    }
     tls {
         issuer acme {
             profile shortlived
@@ -254,6 +277,10 @@ https://{{.ServerIPFormatted}}:9445 {
 # 兜底回落伪装站 (监听 9445，用于 Direct-IP 直连与异常 SNI 握手响应)
 :9445 {
     bind 127.0.0.1
+    header {
+        -Server
+        -Alt-Svc
+    }
     tls internal {
         on_demand
     }

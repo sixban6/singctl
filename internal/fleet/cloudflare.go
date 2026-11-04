@@ -277,23 +277,28 @@ func (c *CloudflareDNSClient) ProvisionNodeDNS(
 		return explicit, true, nil
 	}
 
-	// 自动推导子域名：绝不覆盖指向其他 IP 的既有记录
+	// 自动推导 .cdn 子域名（如 sg1.cdn.example.com）：绝不覆盖指向其他 IP 的既有记录
 	zone, err := c.FindZone(ctx, token, masterDomain, false)
 	if err != nil {
 		return "", false, err
 	}
 
-	cleanID := strings.ToLower(strings.TrimSpace(nodeID))
-	if cleanID == "" {
-		cleanID = "node"
+	primaryLabel := NormalizeCDNNodeLabel(nodeID)
+	basePrefix := trailingDigitRe.ReplaceAllString(primaryLabel, "")
+	if basePrefix == "" {
+		basePrefix = "node"
 	}
+
 	candidates := []string{
-		fmt.Sprintf("%s.%s", cleanID, zone.Name),
-		fmt.Sprintf("fl-%s.%s", cleanID, zone.Name),
+		fmt.Sprintf("%s.cdn.%s", primaryLabel, zone.Name),
 	}
-	for i := 2; i <= 9; i++ {
-		candidates = append(candidates, fmt.Sprintf("%s%d.%s", cleanID, i, zone.Name))
+	for i := 1; i <= 9; i++ {
+		seqCand := fmt.Sprintf("%s%d.cdn.%s", basePrefix, i, zone.Name)
+		if !strings.EqualFold(seqCand, candidates[0]) {
+			candidates = append(candidates, seqCand)
+		}
 	}
+	candidates = append(candidates, fmt.Sprintf("fl-%s.cdn.%s", primaryLabel, zone.Name))
 
 	for _, cand := range candidates {
 		if strings.EqualFold(cand, strings.TrimSpace(masterDomain)) {

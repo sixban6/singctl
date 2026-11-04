@@ -225,6 +225,8 @@ if [ -f /etc/ssh/sshd_config ]; then
     [ -f "$conf" ] || continue
     [ "$conf" = "/etc/ssh/sshd_config.d/00-singctl-hardening.conf" ] && continue
     sed -i -E 's/^[[:space:]]*Port[[:space:]]+[0-9]+/# &/g' "$conf"
+    sed -i -E 's/^[[:space:]]*PermitRootLogin[[:space:]]+yes/# &/g' "$conf"
+    sed -i -E 's/^[[:space:]]*X11Forwarding[[:space:]]+yes/# &/g' "$conf"
     sed -i -E 's/^[[:space:]]*PasswordAuthentication[[:space:]]+yes/# &/g' "$conf"
     sed -i -E 's/^[[:space:]]*KbdInteractiveAuthentication[[:space:]]+yes/# &/g' "$conf"
     sed -i -E 's/^[[:space:]]*ChallengeResponseAuthentication[[:space:]]+yes/# &/g' "$conf"
@@ -308,10 +310,15 @@ fi
 set -e
 cat << 'EOF' > /etc/ssh/sshd_config.d/00-singctl-hardening.conf
 Port %d
+PermitRootLogin prohibit-password
 PubkeyAuthentication yes
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 ChallengeResponseAuthentication no
+X11Forwarding no
+MaxAuthTries 3
+ClientAliveInterval 60
+ClientAliveCountMax 3
 EOF
 
 SSHD_BIN="$(command -v sshd || echo '/usr/sbin/sshd')"

@@ -9,17 +9,12 @@ import (
 	"singctl/internal/fleet"
 )
 
-func (s *Server) handleFleetList(w http.ResponseWriter, r *http.Request) {
-	nodes, err := s.fleet.Store.ListPublic()
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "读取节点舰队列表失败: "+err.Error())
-		return
-	}
-
+func buildFleetSummary(nodes []fleet.Node) map[string]any {
 	online := 0
 	totalSynced := 0
 	scoreSum := 0
 	scoredNodes := 0
+	lastProbeAt := ""
 	for _, n := range nodes {
 		if n.Online {
 			online++
@@ -29,20 +24,56 @@ func (s *Server) handleFleetList(w http.ResponseWriter, r *http.Request) {
 			scoreSum += n.DoctorScore
 			scoredNodes++
 		}
+		if n.LastProbeAt > lastProbeAt {
+			lastProbeAt = n.LastProbeAt
+		}
 	}
 	avgScore := 0
 	if scoredNodes > 0 {
 		avgScore = scoreSum / scoredNodes
 	}
+	return map[string]any{
+		"total":                len(nodes),
+		"online":               online,
+		"totalSyncedEndpoints": totalSynced,
+		"avgDoctorScore":       avgScore,
+		"lastProbeAt":          lastProbeAt,
+		"patrolIntervalSec":    int(fleet.DefaultPatrolInterval.Seconds()),
+	}
+}
+
+func (s *Server) handleFleetList(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("probe") == "1" {
+		_, _ = s.fleet.ProbeNodes(r.Context(), nil)
+	}
+	nodes, err := s.fleet.Store.ListPublic()
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "读取节点舰队列表失败: "+err.Error())
+		return
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"nodes": nodes,
-		"summary": map[string]any{
-			"total":                len(nodes),
-			"online":               online,
-			"totalSyncedEndpoints": totalSynced,
-			"avgDoctorScore":       avgScore,
-		},
+		"nodes":   nodes,
+		"summary": buildFleetSummary(nodes),
+	})
+}
+
+func (s *Server) handleFleetProbe(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		IDs []string `json:"ids"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+
+	results, err := s.fleet.ProbeNodes(r.Context(), body.IDs)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "HTTPS 探活失败: "+err.Error())
+		return
+	}
+	nodes, _ := s.fleet.Store.ListPublic()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"results": results,
+		"nodes":   nodes,
+		"summary": buildFleetSummary(nodes),
 	})
 }
 
@@ -153,7 +184,7 @@ func (s *Server) handleFleetAction(w http.ResponseWriter, r *http.Request) {
 	}
 	action := strings.ToLower(strings.TrimSpace(body.Action))
 	switch action {
-	case "sync", "doctor", "reset", "update":
+	case "sync", "probe", "doctor", "reset", "update":
 	default:
 		writeJSONError(w, http.StatusBadRequest, "不支持的舰队操作: "+action)
 		return

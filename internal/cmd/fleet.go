@@ -56,12 +56,16 @@ func NewFleetCmd(configPath string) *cobra.Command {
 	}
 
 	// 1. list
+	var listProbe bool
 	listCmd := &cobra.Command{
 		Use:     "list",
 		Aliases: []string{"ls", "status"},
-		Short:   "查看已纳管的全部舰队子节点与状态汇总",
+		Short:   "查看已纳管的全部舰队子节点与状态汇总 (支持 --probe 秒级 HTTPS 探活)",
 		RunE: func(c *cobra.Command, args []string) error {
 			mgr := buildManager(c)
+			if listProbe {
+				_, _ = mgr.ProbeNodes(c.Context(), nil)
+			}
 			nodes, err := mgr.Store.ListPublic()
 			if err != nil {
 				return err
@@ -98,6 +102,7 @@ func NewFleetCmd(configPath string) *cobra.Command {
 			return nil
 		},
 	}
+	listCmd.Flags().BoolVar(&listProbe, "probe", false, "展示前并发执行一次零 SSH 日志的 HTTPS :443 毫秒级探活")
 
 	// 2. add
 	var (
@@ -235,6 +240,7 @@ func NewFleetCmd(configPath string) *cobra.Command {
 		return nil
 	}
 
+	probeCmd := makeBatchCmd("probe", []string{"ping"}, "零 SSH 日志毫秒级 HTTPS :443 网关探活与证书余期巡检", "probe", false)
 	resetCmd := makeBatchCmd("reset", nil, "全网一键轮换所有子节点代理密码/Reality密钥并自动同步至总订阅", "reset", false)
 	updateCmd := makeBatchCmd("update", []string{"up", "upgrade"}, "全网并发升级所有子节点的 SingCtl 至官方最新版", "update", false)
 
@@ -246,10 +252,10 @@ func NewFleetCmd(configPath string) *cobra.Command {
 	)
 	bootstrapCmd := &cobra.Command{
 		Use:   "bootstrap [id]",
-		Short: "新购裸机智能零配置开荒：复用主控凭据 + 自动创建灰云 DNS + SSH(22→2222免密) + 四核部署纳管",
+		Short: "新购裸机智能零配置开荒：复用主控凭据 + 自动创建 .cdn 灰云 DNS + SSH(22→2222免密) + 四核部署纳管",
 		Long: `在主控节点上远程开荒一台全新空白 VPS，默认自动复用本机 /etc/singctl/singctl.yaml 配置：
-  • 自动探测新机 IP 地理位置，智能分配不冲突代号与中文名称（如 sg / 新加坡、jp2 / 日本·东京 #2）
-  • 自动复用主控 cf_dns_key 查询根域名，创建灰云（仅 DNS）A/AAAA 解析记录（下线 rm 时自动清理）
+  • 自动探测新机 IP 地理位置，智能分配不冲突代号与中文名称（如 sg1 / 新加坡、jp2 / 日本·东京 #2）
+  • 自动复用主控 cf_dns_key 查询根域名，创建 <id>.cdn.<根域名> 灰云（仅 DNS）解析记录（下线 rm 时自动清理）
   • 自动完成 SSH 双公钥注入、22→2222 端口防锁死切换、禁用密码登录并擦除明文密码
   • 自动部署四核服务端并将 HY2 / VLESS-Reality 节点汇入本机总订阅
 
@@ -261,7 +267,7 @@ func NewFleetCmd(configPath string) *cobra.Command {
      singctl fl bootstrap --host 203.0.113.10 --password '<新机初始密码>'
 
   3) 显式自定义代号与域名（完全兼容手动指定）:
-     singctl fl bootstrap jp1 --name "日本东京" --host 203.0.113.10 --password '<密码>' --domain jp1.example.com`,
+     singctl fl bootstrap jp1 --name "日本东京" --host 203.0.113.10 --password '<密码>' --domain jp1.cdn.example.com`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			if len(args) > 0 {
@@ -349,7 +355,7 @@ func NewFleetCmd(configPath string) *cobra.Command {
 	bootstrapCmd.Flags().BoolVar(&bsHardenSSH, "harden-ssh", true, "自动注入主控+本机公钥、验证切换 SSH 端口并禁用密码登录")
 	bootstrapCmd.Flags().IntVar(&bsIn.TargetSSHPort, "target-port", fleet.DefaultTargetSSHPort, "SSH 安全加固目标端口 (默认收敛至 2222)")
 	bootstrapCmd.Flags().StringVar(&bsIn.ExtraAuthorizedKeys, "extra-pubkey", "", "(可选) 额外写入新机的管理员 SSH 公钥字符串")
-	bootstrapCmd.Flags().StringVar(&bsIn.NodeDomain, "domain", "", "(可选) 绑定域名，留空自动从主控根域名分配 <id>.<根域名> 并创建灰云解析")
+	bootstrapCmd.Flags().StringVar(&bsIn.NodeDomain, "domain", "", "(可选) 绑定域名，留空自动从主控根域名分配 <id>.cdn.<根域名> 并创建灰云解析")
 	bootstrapCmd.Flags().StringVar(&bsIn.SubstoreDomain, "sub-domain", "", "(可选) 独立订阅域名")
 	bootstrapCmd.Flags().StringVar(&bsIn.CFDNSKey, "cf-token", "", "(可选) Cloudflare DNS Token，留空自动复用主控配置")
 	bootstrapCmd.Flags().StringVar(&bsIn.NodeTag, "tag", "", "(可选) 节点代号，留空与自动推导的 <id> 一致")
@@ -449,7 +455,7 @@ func NewFleetCmd(configPath string) *cobra.Command {
 	healCmd.Flags().StringVar(&flHealSchedule, "schedule", "", "自定义自动巡检时间 (默认 '*-*-* 04:00:00')")
 	healCmd.Flags().BoolVar(&flHealIncludeLocal, "include-master", true, "全量执行时同步自愈主控本机 (主控不自动重启)")
 
-	cmd.AddCommand(listCmd, addCmd, removeCmd, syncCmd, doctorCmd, resetCmd, updateCmd, bootstrapCmd, healCmd)
+	cmd.AddCommand(listCmd, addCmd, removeCmd, syncCmd, probeCmd, doctorCmd, resetCmd, updateCmd, bootstrapCmd, healCmd)
 	return cmd
 }
 

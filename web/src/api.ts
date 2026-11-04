@@ -203,6 +203,12 @@ export const api = {
 
   getFleet: () => request<FleetListResponse>('/api/server/fleet'),
 
+  probeFleet: (ids?: string[]) =>
+    request<FleetListResponse & { results: any[] }>('/api/server/fleet/probe', {
+      method: 'POST',
+      body: JSON.stringify({ ids: ids || [] }),
+    }),
+
   getFleetDefaults: () => request<FleetBootstrapDefaults>('/api/server/fleet/defaults'),
 
   previewFleetBootstrap: (input: FleetBootstrapInput) =>
@@ -226,7 +232,7 @@ export const api = {
       }
     ),
 
-  runFleetAction: (action: 'sync' | 'doctor' | 'reset' | 'update', ids?: string[]) =>
+  runFleetAction: (action: 'sync' | 'probe' | 'doctor' | 'reset' | 'update', ids?: string[]) =>
     request<{ message: string; results: FleetActionResult[] }>('/api/server/fleet/action', {
       method: 'POST',
       body: JSON.stringify({ action, ids: ids || [] }),

@@ -1,6 +1,7 @@
 package serverweb
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -158,6 +159,7 @@ func (s *Server) registerRoutes() {
 
 	// 多节点舰队编排 (Multi-Node Fleet)
 	s.mux.HandleFunc("GET /api/server/fleet", s.guard(s.handleFleetList))
+	s.mux.HandleFunc("POST /api/server/fleet/probe", s.guard(s.handleFleetProbe))
 	s.mux.HandleFunc("GET /api/server/fleet/defaults", s.guard(s.handleFleetDefaults))
 	s.mux.HandleFunc("POST /api/server/fleet/preview-bootstrap", s.guard(s.handleFleetPreviewBootstrap))
 	s.mux.HandleFunc("POST /api/server/fleet/nodes", s.guard(s.handleFleetUpsertNode))
@@ -229,12 +231,23 @@ func (s *Server) ListenAndServe() error {
 	logger.Success("SingCtl 服务端管理面板已启动")
 	logger.Info("  ➜  http://%s", ln.Addr().String())
 
-	srv := &http.Server{Handler: s.mux}
+	patrolCtx, cancelPatrol := context.WithCancel(context.Background())
+	defer cancelPatrol()
+	s.fleet.StartBackgroundPatrol(patrolCtx, fleet.DefaultPatrolInterval)
+
+	srv := &http.Server{
+		Handler:           s.mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 	return srv.Serve(ln)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }
