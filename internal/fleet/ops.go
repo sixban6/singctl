@@ -255,7 +255,7 @@ func (m *Manager) syncNodeObj(ctx context.Context, node Node) NodeActionResult {
 		line = strings.TrimSpace(line)
 		switch {
 		case strings.HasPrefix(line, "SINGCTL_VER="):
-			rawVer := strings.TrimPrefix(line, "SINGCTL_VER=")
+			rawVer := ansiEscapeRe.ReplaceAllString(strings.TrimPrefix(line, "SINGCTL_VER="), "")
 			if m := versionLineRe.FindStringSubmatch(rawVer); len(m) > 1 {
 				verStr = m[1]
 			}
@@ -611,7 +611,7 @@ func (m *Manager) BootstrapNode(ctx context.Context, in BootstrapInput) (NodeAct
 
 	sni := cmp.Or(strings.TrimSpace(in.SNI), "swdist.apple.com")
 	subDom := strings.TrimSpace(in.SubstoreDomain)
-	tag := strings.TrimSpace(in.NodeTag)
+	tag := cmp.Or(strings.TrimSpace(in.NodeTag), node.ID)
 
 	yamlContent := fmt.Sprintf(`github:
   mirror_url: "https://gh-proxy.com"

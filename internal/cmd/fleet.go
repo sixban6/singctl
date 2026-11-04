@@ -228,7 +228,16 @@ func NewFleetCmd(configPath string) *cobra.Command {
 	bootstrapCmd := &cobra.Command{
 		Use:   "bootstrap <id>",
 		Short: "新购裸机一键 SSH 安全加固(22→2222免密禁密码) + 部署四核服务端并纳管进总订阅",
-		Args:  cobra.ExactArgs(1),
+		Long: `在主控节点上远程开荒一台全新空白 VPS，全自动完成 SSH 免密加固、四核部署并汇入本机总订阅。
+
+位置参数 <id> 说明:
+  <id> 是你为这台新机器自定义的唯一短代号（非固定参数，支持 1~32 位字母/数字/连字符，如 jp1、hk、sg2）。
+  • 默认同时作为该机器生成节点的标签（如 sec_jp1_hy2），同国多台机器不会撞名；
+  • 后续可随时用该代号单独点名运维，如:
+      singctl fl doc jp1     # 仅体检 jp1
+      singctl fl reset jp1   # 仅重置 jp1 节点凭据
+      singctl fl rm jp1      # 下线移除 jp1`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			bsIn.ID = args[0]
 			bsIn.HardenSSH = &bsHardenSSH

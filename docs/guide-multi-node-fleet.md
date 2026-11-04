@@ -60,18 +60,31 @@ flowchart TB
 
 ### 第二步：新买一台空白裸机 VPS？一条命令开荒到底（`fl bootstrap`）
 
-假设你刚买了一台全新的日本 Debian 12 裸机（IP `203.0.113.99`，初始默认是 **SSH 22 端口 + root 密码登录**），只需在 Cloudflare 把 `jp1.example.com` 解析到 `203.0.113.99`，然后登录 **Master 主控**执行这一条命令（或者在主控 Web 后台「全球舰队 -> 裸机 60s 部署纳管」填表提交）：
+假设你刚买了一台全新的日本 Debian 12 裸机（IP `203.0.113.99`，初始默认是 **SSH 22 端口 + root 密码登录**），只需在 Cloudflare 把 `jp1.example.com` 解析到 `203.0.113.99`（仅 DNS 灰云），然后登录 **Master 主控**执行这一条命令（或者在主控 Web 后台「全球舰队 -> 裸机 60s 部署纳管」填表提交）：
 
 ```bash
-singctl fl bootstrap jp \
+# 命令格式: singctl fl bootstrap <你自定义的唯一短代号> [参数...]
+singctl fl bootstrap jp1 \
   --name "日本东京主力" \
   --host 203.0.113.99 \
   --port 22 \
   --password '新机初始Root密码' \
   --domain jp1.example.com \
-  --cf-token '你的Cloudflare_DNS_Token' \
-  --tag jp
+  --cf-token '你的Cloudflare_DNS_Token'
 ```
+
+#### 📋 各参数白话详解（特别是第一个 `jp1` 是干啥的？）
+
+| 参数 / 位置 | 是否必填 | 作用与填写说明 |
+| :--- | :---: | :--- |
+| **`jp1`**（位置参数 `<id>`） | **必填** | **你自己给这台机器起的唯一短代号（不是固定关键字！）**。支持 1～32 位字母、数字、下划线或连字符（如 `jp1`、`jp2`、`hk`、`sg`、`de`），只要同一主控下不重名即可。<br>**三大用途**：① 作为 `fleet.yaml` 里的 `id` 主键；② 默认直接作为该机器的节点代号（客户端显示 `sec_jp1_hy2` / `sec_jp1_vr`，同国买多台如 `jp1`、`jp2` 天然不撞名）；③ **日后单独点名运维**（例如 `singctl fl doc jp1` 只体检它、`singctl fl reset jp1` 只给它换密码、`singctl fl rm jp1` 退租下线它；不写代号则默认操作全部子节点）。 |
+| `--name` | 推荐 | 人类易读的中文备注名（如 `"日本东京主力"`），显示在 `fl ls` 列表和 Web 舰队卡片上；省略时默认等于短代号。 |
+| `--host` | **必填** | 新买 VPS 的公网 IPv4 / IPv6 地址。 |
+| `--port` | 可选 | 新机器**当前初始**的 SSH 端口（刚买的新机默认就是 `22`，可省略；加固后会自动切到 `--target-port` 默认的 `2222`）。 |
+| `--password` | 二选一 | 新机初始 `root` 密码（请用单引号 `'...'` 包裹防特殊字符转义；加固切为免密后明文自动销毁，绝不落盘）。若新机本身已是密钥登录，改传 `--key /path/to/key` 即可。 |
+| `--domain` | **必填** | 已解析到该新机 IP 的子域名（如 `jp1.example.com`，Cloudflare 需关掉小黄云设为灰云）。 |
+| `--cf-token` | **必填** | Cloudflare DNS API Token（具备该域名 `Zone.DNS` 编辑权限，用于自动申请 TLS 证书）。 |
+| `--tag` | 可选 | 自定义客户端节点名称里的地区标签；省略时自动沿用上面的短代号（如 `jp1`）。 |
 
 #### 这一条命令在后台自动帮你干了哪 4 件大事？（约 40～60 秒）
 

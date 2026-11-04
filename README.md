@@ -59,15 +59,16 @@ curl -fsSL https://raw.githubusercontent.com/sixban6/singctl/main/install.sh | s
 新买第 2、第 3 台空白裸机 VPS 时，**无需手动 SSH 登录新机器**，直接在**第 1 台主控 VPS** 上执行一条命令（或在主控 Web 后台点击「裸机一键部署」）：
 
 ```bash
-singctl fl bootstrap jp --name "日本东京" \
+# 语法: singctl fl bootstrap <自定义唯一短代号> [参数...]
+# 下面以给新买的日本机起代号 jp1 为例（可自由起名如 hk1 / sg2 / de，仅限字母、数字、连字符）：
+singctl fl bootstrap jp1 --name "日本东京主力" \
   --host 203.0.113.10 --port 22 --password '<新机root初始密码>' \
-  --domain jp.example.com --cf-token '<Cloudflare_DNS_Token>'
+  --domain jp1.example.com --cf-token '<Cloudflare_DNS_Token>'
 ```
 
-> **主控全自动远程闭环**（架构选型与日常运维见 [👉 多节点舰队全解](docs/guide-multi-node-fleet.md)）：
-> 1. 自动连入新机 `22` 端口注入双公钥、平滑切换 SSH 至 `2222` 免密并销毁明文密码；
-> 2. 自动在新机部署 BBR + Caddy + Sing-Box + SubHub + WARP 四核组件；
-> 3. 自动提取新机节点并入**第 1 台主控的总订阅链接**，所有软路由与客户端无需改配置自动热同步上线。
+> **参数与全自动闭环说明**（完整参数表与日常运维见 [👉 多节点舰队全解](docs/guide-multi-node-fleet.md)）：
+> - **`jp1`（自定义短代号）**：不是固定关键字，而是你给这台机器起的唯一简称（默认也会作为客户端节点标签如 `sec_jp1_hy2`，买多台同国机器也不会撞名）；以后想**单独操作这一台**时直接点名即可（如 `singctl fl doc jp1` 体检、`singctl fl reset jp1` 换密码、`singctl fl rm jp1` 下线；不加代号则默认操作全部子节点）。
+> - **一条命令后台全自动完成**：自动连入新机 `22` 端口注入双公钥并切换 SSH 至 `2222` 免密（销毁明文密码） → 部署四核组件 → 自动提取新节点并入**第 1 台主控的总订阅链接**，所有软路由与客户端无需改配置自动热同步上线。
 
 ---
 
