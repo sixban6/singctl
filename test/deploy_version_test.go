@@ -109,6 +109,21 @@ func TestParseWireproxyVersion(t *testing.T) {
 	}
 }
 
+type mockRewriteTransport struct {
+	targetURL string
+	base      http.RoundTripper
+}
+
+func (m *mockRewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	clone := req.Clone(req.Context())
+	rewritten, err := http.NewRequestWithContext(req.Context(), req.Method, m.targetURL+req.URL.RequestURI(), req.Body)
+	if err != nil {
+		return nil, err
+	}
+	rewritten.Header = clone.Header
+	return m.base.RoundTrip(rewritten)
+}
+
 func TestCheckComponentVersion_MockServer(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -117,15 +132,17 @@ func TestCheckComponentVersion_MockServer(t *testing.T) {
 	}))
 	defer server.Close()
 
-	// Inject test client
-	deploy.ReleaseClient = server.Client()
-	defer func() { deploy.ReleaseClient = nil }()
-
-	cfg := &config.Config{
-		GitHub: config.GitHubConfig{
-			MirrorURL: server.URL,
+	// Inject hermetic test client so CI runners with direct Google/GitHub access still hit the mock server.
+	baseClient := server.Client()
+	deploy.ReleaseClient = &http.Client{
+		Transport: &mockRewriteTransport{
+			targetURL: server.URL,
+			base:      baseClient.Transport,
 		},
 	}
+	defer func() { deploy.ReleaseClient = nil }()
+
+	cfg := &config.Config{}
 
 	info, err := deploy.CheckComponentVersion(cfg, "caddy")
 	if err != nil {
