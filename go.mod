@@ -5,10 +5,10 @@ go 1.26.0
 require (
 	github.com/mattn/go-runewidth v0.0.31
 	github.com/showwin/speedtest-go v1.7.10
-	github.com/sixban6/singgen v1.15.0
+	github.com/sixban6/singgen v1.15.1
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	github.com/spf13/cobra v1.10.2
-	golang.org/x/crypto v0.58.0
+	golang.org/x/crypto v0.58.1-0.20261009181718-2f1f834330b2
 	gopkg.in/yaml.v3 v3.0.1
 )
 

@@ -127,3 +127,64 @@ func TestGenerator_InjectLocalDNS_AdGuardHome(t *testing.T) {
 		}
 	})
 }
+
+func TestGenerator_GameUDPAndDNSIsolation(t *testing.T) {
+	payload := encodeURISub(
+		"hysteria2://dummy-pass@los.example.com:443?sni=los.example.com#sec_los_hy2",
+		"hysteria2://dummy-pass@hk1.example.com:443?sni=hk1.example.com#HK-01",
+	)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(payload))
+	}))
+	defer ts.Close()
+
+	cfg := &config.Config{
+		Subs: []config.Subscription{{Name: "main", URL: ts.URL}},
+	}
+	gen := NewConfigGenerator(cfg)
+	gen.SetCacheDir(t.TempDir())
+
+	for _, platform := range []string{"linux", PlatformIOS, "darwin"} {
+		out, err := gen.GenerateForPlatform(platform)
+		if err != nil {
+			t.Fatalf("GenerateForPlatform(%s) failed: %v", platform, err)
+		}
+		var parsed struct {
+			Outbounds []struct {
+				Tag       string   `json:"tag"`
+				Outbounds []string `json:"outbounds"`
+			} `json:"outbounds"`
+		}
+		if err := json.Unmarshal([]byte(out), &parsed); err != nil {
+			t.Fatal(err)
+		}
+
+		byTag := make(map[string][]string)
+		for _, ob := range parsed.Outbounds {
+			byTag[ob.Tag] = ob.Outbounds
+		}
+
+		// 1. DNS 分组绝不能包含 DirectConn 或 Proxy，且首选 Auto
+		dnsGroup := byTag["DNS"]
+		if len(dnsGroup) == 0 || dnsGroup[0] != "Auto" {
+			t.Fatalf("[%s] DNS group should prioritize Auto, got %v", platform, dnsGroup)
+		}
+		for _, item := range dnsGroup {
+			if item == "DirectConn" || item == "Proxy" {
+				t.Fatalf("[%s] DNS group must be isolated from %s to prevent 8.8.8.8 GFW blackhole, got %v", platform, item, dnsGroup)
+			}
+		}
+
+		// 2. HoK 分组首选 Auto 低延迟节点
+		hokGroup := byTag["HoK"]
+		if len(hokGroup) == 0 || hokGroup[0] != "Auto" {
+			t.Fatalf("[%s] HoK group should prioritize Auto, got %v", platform, hokGroup)
+		}
+
+		// 3. Game-UDP 分组存在且默认首选 DirectConn
+		gameGroup := byTag["Game-UDP"]
+		if len(gameGroup) == 0 || gameGroup[0] != "DirectConn" {
+			t.Fatalf("[%s] Game-UDP group should default to DirectConn, got %v", platform, gameGroup)
+		}
+	}
+}
