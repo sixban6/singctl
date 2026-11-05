@@ -171,7 +171,14 @@ func TestGenerator_GameUDPAndDNSIsolation(t *testing.T) {
 			byTag[ob.Tag] = ob.Outbounds
 		}
 
-		// 1. Auto 测速组必须自动剔除【5倍】高倍率节点，而 Select 保留供手动选
+		// 1. 冗余分组已被彻底精简移除，仅保留 6 个核心控制/节点池组
+		for _, removed := range []string{"DIY-Node", "DNS", "HoK", "YouTube", "OpenAI", "Google", "Netflix", "Steam"} {
+			if _, exists := byTag[removed]; exists {
+				t.Fatalf("[%s] redundant group %q should be removed", platform, removed)
+			}
+		}
+
+		// 2. Auto 测速组必须自动剔除【5倍】高倍率节点，而 Select 保留供手动选
 		autoGroup := byTag["Auto"]
 		for _, item := range autoGroup {
 			if item == "香港 001【5倍】" {
@@ -179,32 +186,30 @@ func TestGenerator_GameUDPAndDNSIsolation(t *testing.T) {
 			}
 		}
 
-		// 2. DNS 分组绝不能包含 DirectConn 或 Proxy，且首选 Auto (1倍低延迟节点)
-		dnsGroup := byTag["DNS"]
-		if len(dnsGroup) == 0 || dnsGroup[0] != "Auto" {
-			t.Fatalf("[%s] DNS group should prioritize Auto, got %v", platform, dnsGroup)
+		// 3. VPS 自建池、Proxy 与 AI 默认首选 VPS，Game-UDP 默认首选 DirectConn
+		if len(byTag["VPS"]) == 0 {
+			t.Fatalf("[%s] expected VPS group to contain sec_ nodes", platform)
 		}
-		for _, item := range dnsGroup {
-			if item == "DirectConn" || item == "Proxy" {
-				t.Fatalf("[%s] DNS group must be isolated from %s to prevent 8.8.8.8 GFW blackhole, got %v", platform, item, dnsGroup)
-			}
+		if got := byTag["Proxy"]; len(got) == 0 || got[0] != "VPS" {
+			t.Fatalf("[%s] Proxy should default to VPS, got %v", platform, got)
+		}
+		if got := byTag["AI"]; len(got) == 0 || got[0] != "VPS" {
+			t.Fatalf("[%s] AI should default to VPS, got %v", platform, got)
+		}
+		if got := byTag["Game-UDP"]; len(got) == 0 || got[0] != "DirectConn" {
+			t.Fatalf("[%s] Game-UDP should default to DirectConn, got %v", platform, got)
 		}
 
-		// 3. HoK 分组首选 DIY-Node 自建免流节点，且 dns_hok 走 DNS (亚洲低延迟解析)
-		hokGroup := byTag["HoK"]
-		if len(hokGroup) == 0 || hokGroup[0] != "DIY-Node" {
-			t.Fatalf("[%s] HoK group should prioritize DIY-Node, got %v", platform, hokGroup)
-		}
+		// 4. dns_proxy 独立绑 VPS，dns_hok 独立绑 Auto (彻底解耦且隔离 DirectConn)
+		detours := make(map[string]string)
 		for _, srv := range parsed.DNS.Servers {
-			if srv.Tag == "dns_hok" && srv.Detour != "DNS" {
-				t.Fatalf("[%s] dns_hok detour = %q, want DNS", platform, srv.Detour)
-			}
+			detours[srv.Tag] = srv.Detour
 		}
-
-		// 4. Game-UDP 分组存在且默认首选 DirectConn
-		gameGroup := byTag["Game-UDP"]
-		if len(gameGroup) == 0 || gameGroup[0] != "DirectConn" {
-			t.Fatalf("[%s] Game-UDP group should default to DirectConn, got %v", platform, gameGroup)
+		if detours["dns_proxy"] != "VPS" {
+			t.Fatalf("[%s] dns_proxy detour = %q, want VPS", platform, detours["dns_proxy"])
+		}
+		if detours["dns_hok"] != "Auto" {
+			t.Fatalf("[%s] dns_hok detour = %q, want Auto", platform, detours["dns_hok"])
 		}
 	}
 }
