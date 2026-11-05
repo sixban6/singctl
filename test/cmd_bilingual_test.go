@@ -14,6 +14,7 @@ func TestAllCommandsBilingual(t *testing.T) {
 	// 收集所有可测试的命令树
 	commands := map[string]*cobra.Command{
 		"tailscale": cmd.NewTailscaleCmd("/tmp/singctl.yaml"),
+		"dns":       cmd.NewDNSCmd("/tmp/singctl.yaml"),
 		"daemon":    cmd.NewDaemonCommand(),
 		"firewall":  cmd.NewFirewallCmd(),
 		"util":      cmd.NewUtilCmd(),

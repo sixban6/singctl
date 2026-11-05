@@ -27,6 +27,13 @@ github:
 hy2:
   up: 21                                      # Hysteria2 上行带宽 (Mbps)
   down: 200                                   # Hysteria2 下行带宽 (Mbps)
+
+dns:                                          # (可选) 客户端本地防劫持 DNS (AdGuard Home)
+  enabled: true                               # 是否启用本地 AdGuard Home 接管 dns_local
+  dns_port: 5353                              # 本地 DNS 监听端口 (仅绑定 127.0.0.1)
+  web_port: 3000                              # Web 管理面板端口 (仅绑定本机局域网 IP，如 192.168.1.1)
+  username: "root"                            # 管理账号 (首次安装可输入自定义账号，直接回车默认 root)
+  password: ""                                # 管理密码 (首次安装留空时自动生成 16 位随机强密码)
 ```
 
 > **注意**：`singctl sb gen` 和 `singctl sb start`（首次启动）需要 `subs` 中至少有一条有效的订阅 URL，否则会提示配置错误。`singctl sb stop`、`singctl sb install`、`singctl sb update` 不依赖订阅配置。
@@ -183,4 +190,41 @@ go run ./cmd/snapshotgen -mirror https://gh-proxy.com  # 直连不可用时
 
 工具会校验内容、gzip 压缩并生成 manifest（含 sha256），全部成功才会写入
 `internal/singbox/ruleset_snapshot/assets/`，提交后随下次编译打包进二进制。
+
+---
+
+## 本地防劫持 DNS (AdGuard Home)
+
+命令前缀：`singctl dns` / `singctl agh`（适用于 Linux / OpenWrt 客户端网关）
+
+在客户端网关一键部署 AdGuard Home，负责接管 `sing-box` 的 `dns_local`（国内域名与代理节点 Bootstrap 解析），上游统一采用纯 IP 加密 DoH / DoT（`223.5.5.5`、`223.6.6.6`、`1.12.12.12`），彻底杜绝宽带运营商对明文 `UDP 53` 的抢答劫持。
+
+### 核心安全设计
+
+- **DNS 端口本地隔离**：仅绑定 `127.0.0.1:5353`，不与 OpenWrt `dnsmasq` 或系统 `53` 端口冲突；
+- **Web 面板仅绑局域网 IP**：自动提取本机真实局域网私网 IP（如 `http://192.168.1.1:3000`），绝不监听 `0.0.0.0` 或公网接口；
+- **免首次引导与强随机密码**：首次安装可直接输入管理员用户名（直接回车默认 `root`），自动生成 16 位强随机密码并跳过无鉴权初始化向导；
+- **透明代理防回环死锁**：TProxy 防火墙自动直通放行加密 DNS 上游端口，并由 `singctl dm` 看门狗守护进程存活。
+
+### 常用命令
+
+```bash
+# 安装、免向导初始化并启动 AdGuard Home（install.sh 客户端模式会自动调用）
+singctl dns install
+
+# 查看运行状态、加密解析延迟、局域网面板地址与管理员密码
+singctl dns status
+
+# 启动 / 停止 / 重启服务
+singctl dns start
+singctl dns stop
+singctl dns restart
+
+# 重置管理员密码（可选 -u 指定新用户名）
+singctl dns reset-password
+
+# 卸载服务（附加 --purge 同时清理 /etc/AdGuardHome 配置目录）
+singctl dns uninstall
+```
+
 

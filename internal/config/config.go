@@ -29,6 +29,7 @@ type Config struct {
 	GitHub GitHubConfig   `yaml:"github"`
 	//GUI       GUIConfig       `yaml:"gui"`
 	Hy2         Hy2Config         `yaml:"hy2"`
+	DNS         ClientDNSConfig   `yaml:"dns,omitempty"`
 	Tailscale   TailscaleConfig   `yaml:"tailscale"`
 	Server      ServerConfig      `yaml:"server"`
 	Watchdog    WatchdogConfig    `yaml:"watchdog"`
@@ -60,6 +61,113 @@ type GitHubConfig struct {
 type Hy2Config struct {
 	Up   int `yaml:"up"`
 	Down int `yaml:"down"`
+}
+
+type ClientDNSConfig struct {
+	Enabled  *bool  `yaml:"enabled,omitempty"`  // nil 或 true 视为启用；显式 false 禁用
+	DNSPort  int    `yaml:"dns_port,omitempty"` // 本地 DNS 端口，默认 5353 (127.0.0.1)
+	WebPort  int    `yaml:"web_port,omitempty"` // Web 管理面板端口，默认 3000 (本机局域网 IP)
+	Username string `yaml:"username,omitempty"` // 管理账号，默认 root
+	Password string `yaml:"password,omitempty"` // 管理密码，首次安装留空时自动生成 16 位强密码
+}
+
+func (c *ClientDNSConfig) IsEnabled() bool {
+	if c == nil || c.Enabled == nil {
+		return true
+	}
+	return *c.Enabled
+}
+
+func (c *ClientDNSConfig) SetEnabled(v bool) {
+	c.Enabled = &v
+}
+
+func (c *ClientDNSConfig) GetDNSPort() int {
+	if c != nil && c.DNSPort > 0 && c.DNSPort <= 65535 {
+		return c.DNSPort
+	}
+	return 5353
+}
+
+func (c *ClientDNSConfig) GetWebPort() int {
+	if c != nil && c.WebPort > 0 && c.WebPort <= 65535 {
+		return c.WebPort
+	}
+	return 3000
+}
+
+func (c *ClientDNSConfig) GetUsername() string {
+	if c != nil && strings.TrimSpace(c.Username) != "" {
+		return strings.TrimSpace(c.Username)
+	}
+	return "root"
+}
+
+func (c *ClientDNSConfig) GetPassword() string {
+	if c == nil {
+		return ""
+	}
+	return strings.TrimSpace(c.Password)
+}
+
+// EnsureCredentials 确保客户端 AdGuard Home 拥有合法端口、管理员用户名（默认 root）与 16 位强随机密码。
+func (c *ClientDNSConfig) EnsureCredentials(preferredUsername string) bool {
+	changed := false
+	if c.Enabled == nil {
+		enabled := true
+		c.Enabled = &enabled
+		changed = true
+	}
+	if c.DNSPort <= 0 || c.DNSPort > 65535 {
+		c.DNSPort = 5353
+		changed = true
+	}
+	if c.WebPort <= 0 || c.WebPort > 65535 {
+		c.WebPort = 3000
+		changed = true
+	}
+	preferred := strings.TrimSpace(preferredUsername)
+	if preferred != "" {
+		if c.Username != preferred {
+			c.Username = preferred
+			changed = true
+		}
+	} else if strings.TrimSpace(c.Username) == "" {
+		c.Username = "root"
+		changed = true
+	}
+	if strings.TrimSpace(c.Password) == "" {
+		c.Password = GenerateSecurePassword(16)
+		changed = true
+	}
+	return changed
+}
+
+func (c *ClientDNSConfig) UnmarshalYAML(node *yaml.Node) error {
+	var raw struct {
+		Enabled  *bool  `yaml:"enabled"`
+		DNSPort  any    `yaml:"dns_port"`
+		WebPort  any    `yaml:"web_port"`
+		Username string `yaml:"username"`
+		Password string `yaml:"password"`
+	}
+	if err := node.Decode(&raw); err != nil {
+		return err
+	}
+	c.Enabled = raw.Enabled
+	c.Username = strings.TrimSpace(raw.Username)
+	c.Password = strings.TrimSpace(raw.Password)
+	if raw.DNSPort != nil {
+		if v, err := parseIntAny(raw.DNSPort); err == nil {
+			c.DNSPort = v
+		}
+	}
+	if raw.WebPort != nil {
+		if v, err := parseIntAny(raw.WebPort); err == nil {
+			c.WebPort = v
+		}
+	}
+	return nil
 }
 
 type TailscaleConfig struct {
@@ -525,7 +633,7 @@ var knownYAMLKeys = []string{
 	"web_terminal", "mtls_ca", "ssh_tunnel_port", "ssh_tunnel_path", "ssh_port",
 	"web_admin", "enabled", "port", "path", "username", "password", "password_pending_ack",
 	"watchdog", "interval", "confirm_wait", "max_restarts", "sub_sync_interval",
-	"custom_rules", "route", "dns",
+	"custom_rules", "route", "dns", "dns_port", "web_port",
 }
 
 var colonSpaceFixRegex = regexp.MustCompile(
@@ -840,6 +948,25 @@ func MigrateConfig(configPath string, templateData []byte) error {
 		}
 		if hasYAMLKey(oldHy2, "down") {
 			setOrAddField(docNode, "hy2", "down", strconv.Itoa(oldCfg.Hy2.Down))
+		}
+	}
+
+	// 3.5 Merge Client DNS (AdGuard Home)
+	if oldDNS := getYAMLSubMap(oldDocNode, "dns"); oldDNS != nil {
+		if hasYAMLKey(oldDNS, "enabled") && oldCfg.DNS.Enabled != nil {
+			setOrAddField(docNode, "dns", "enabled", strconv.FormatBool(*oldCfg.DNS.Enabled))
+		}
+		if hasYAMLKey(oldDNS, "dns_port") && oldCfg.DNS.DNSPort > 0 {
+			setOrAddField(docNode, "dns", "dns_port", strconv.Itoa(oldCfg.DNS.DNSPort))
+		}
+		if hasYAMLKey(oldDNS, "web_port") && oldCfg.DNS.WebPort > 0 {
+			setOrAddField(docNode, "dns", "web_port", strconv.Itoa(oldCfg.DNS.WebPort))
+		}
+		if hasYAMLKey(oldDNS, "username") && oldCfg.DNS.Username != "" {
+			setOrAddField(docNode, "dns", "username", oldCfg.DNS.Username)
+		}
+		if hasYAMLKey(oldDNS, "password") && oldCfg.DNS.Password != "" {
+			setOrAddField(docNode, "dns", "password", oldCfg.DNS.Password)
 		}
 	}
 

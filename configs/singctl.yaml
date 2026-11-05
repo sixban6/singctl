@@ -20,6 +20,13 @@ hy2:
   up: 20                                         # Hysteria2 上行带宽 (Mbps)
   down: 200                                      # Hysteria2 下行带宽 (Mbps)
 
+dns:                                             # (可选) 客户端本地防劫持 DNS (AdGuard Home) 配置
+  enabled: true                                  # 是否启用本地 AdGuard Home 接管 dns_local
+  dns_port: 5353                                 # 本地 DNS 监听端口 (仅绑定 127.0.0.1)
+  web_port: 3000                                 # Web 管理面板端口 (仅绑定本机局域网 IP)
+  username: "root"                               # 管理面板账号 (安装时可自定义，回车默认 root)
+  password: ""                                   # 管理面板密码 (留空首次安装自动生成随机强密码)
+
 tailscale:                                      # (可选) Tailscale 部署配置
   auth_key: ""                                  # (可选) Tailscale 授权密钥。默认是: ""
   subnets: ""                                   # (可选) 配置通告的子网，默认为空，程序会自动获取

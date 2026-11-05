@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"singctl/internal/adguard"
 	"singctl/internal/config"
 	"singctl/internal/constant"
 	"singctl/internal/logger"
@@ -346,8 +347,14 @@ func (d *Daemon) maybeRefreshRuleSetsAsync() {
 	}()
 }
 
-// runWatchdogCheck 健康检查：DNS + 进程，不健康则确认后 stop → start
+// runWatchdogCheck 健康检查：先确保本地 AdGuard Home (如已安装启用) 在线，再探测 sing-box 健康，不健康则确认后 stop → start
 func (d *Daemon) runWatchdogCheck() {
+	if runtime.GOOS == "linux" && d.config != nil && d.config.DNS.IsEnabled() && adguard.IsInstalled() {
+		if err := adguard.NewManager(d.config, "").EnsureHealthy(); err != nil {
+			logger.Warn("[Watchdog] AdGuard Home 自愈启动失败: %v", err)
+		}
+	}
+
 	// 第一轮检测
 	result1 := d.monitor.CheckHealth()
 	if result1.Healthy {

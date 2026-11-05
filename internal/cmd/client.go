@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"singctl/internal/adguard"
 	"singctl/internal/config"
 	"singctl/internal/constant"
 	"singctl/internal/daemon"
@@ -47,6 +48,12 @@ func copyGeneratedConfigToClipboard(targetPath string) (bool, error) {
 }
 
 func runStartSingbox(cfg *config.Config, configPath string) error {
+	if runtime.GOOS == "linux" && cfg != nil && cfg.DNS.IsEnabled() && adguard.IsInstalled() {
+		if err := adguard.NewManager(cfg, configPath).EnsureHealthy(); err != nil {
+			logger.Warn("AdGuard Home 启动检查异常 (将继续启动 sing-box): %v", err)
+		}
+	}
+
 	sb := singbox.New(cfg)
 	if err := sb.ValidateConfig(); err != nil {
 		// 现有配置无效或不存在，需要重新生成 → 此时才校验 subs

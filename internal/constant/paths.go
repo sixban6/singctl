@@ -29,6 +29,14 @@ var (
 	SubHubSystemdService string
 	SubHubInitdScript    string
 
+	// AdGuard Home (Client Local Anti-Hijack DNS)
+	AdGuardInstallPath    string
+	AdGuardConfigDir      string
+	AdGuardConfigFile     string
+	AdGuardWorkDir        string
+	AdGuardSystemdService string
+	AdGuardInitdScript    string
+
 	// Mask site
 	MaskSiteDir string
 )
@@ -51,6 +59,11 @@ func init() {
 		SubStoreFile = "/etc/sub-store/sub-store.json"
 		SubHubSystemdService = "/etc/systemd/system/singctl-sub.service"
 		SubHubInitdScript = "/etc/init.d/singctl-sub"
+		AdGuardConfigDir = "/etc/AdGuardHome"
+		AdGuardConfigFile = "/etc/AdGuardHome/AdGuardHome.yaml"
+		AdGuardWorkDir = "/etc/AdGuardHome"
+		AdGuardSystemdService = "/etc/systemd/system/AdGuardHome.service"
+		AdGuardInitdScript = "/etc/init.d/AdGuardHome"
 		MaskSiteDir = "/var/www/mask-site"
 	} else if runtime.GOOS == "windows" {
 		SingBoxInstallDir = filepath.Join(os.Getenv("LOCALAPPDATA"), "Programs", "sing-box", "sing-box.exe")
@@ -58,6 +71,10 @@ func init() {
 		SingBoxConfigFile = filepath.Join(SingBoxConfigDir, "config.json")
 		SubStoreDir = filepath.Join(os.TempDir(), "singctl-sub-store")
 		SubStoreFile = filepath.Join(SubStoreDir, "sub-store.json")
+		AdGuardInstallPath = filepath.Join(os.Getenv("LOCALAPPDATA"), "Programs", "AdGuardHome", "AdGuardHome.exe")
+		AdGuardConfigDir = filepath.Join(os.Getenv("LOCALAPPDATA"), "AdGuardHome")
+		AdGuardConfigFile = filepath.Join(AdGuardConfigDir, "AdGuardHome.yaml")
+		AdGuardWorkDir = AdGuardConfigDir
 	} else if runtime.GOOS == "darwin" {
 		home, _ := os.UserHomeDir()
 		SingBoxInstallDir = "/usr/local/bin/sing-box"
@@ -65,21 +82,32 @@ func init() {
 		SingBoxConfigFile = filepath.Join(SingBoxConfigDir, "sing-box-config.json")
 		SubStoreDir = filepath.Join(os.TempDir(), "singctl-sub-store")
 		SubStoreFile = filepath.Join(SubStoreDir, "sub-store.json")
+		AdGuardInstallPath = "/usr/local/bin/AdGuardHome"
+		AdGuardConfigDir = "/etc/AdGuardHome"
+		AdGuardConfigFile = "/etc/AdGuardHome/AdGuardHome.yaml"
+		AdGuardWorkDir = "/etc/AdGuardHome"
 		MaskSiteDir = filepath.Join(os.TempDir(), "mask-site")
 	} else {
 		SubStoreDir = filepath.Join(os.TempDir(), "singctl-sub-store")
 		SubStoreFile = filepath.Join(SubStoreDir, "sub-store.json")
+		AdGuardInstallPath = "/usr/local/bin/AdGuardHome"
+		AdGuardConfigDir = "/etc/AdGuardHome"
+		AdGuardConfigFile = "/etc/AdGuardHome/AdGuardHome.yaml"
+		AdGuardWorkDir = "/etc/AdGuardHome"
 		MaskSiteDir = filepath.Join(os.TempDir(), "mask-site")
 	}
 
-	// Dynamic linux check for SingBoxInstallDir
+	// Dynamic linux check for SingBoxInstallDir & AdGuardInstallPath
 	if runtime.GOOS == "linux" {
 		if _, err := os.Stat("/etc/openwrt_release"); err == nil {
 			SingBoxInstallDir = "/usr/bin/sing-box"
+			AdGuardInstallPath = "/usr/bin/AdGuardHome"
 		} else if _, err := os.Stat("/etc/openwrt_version"); err == nil {
 			SingBoxInstallDir = "/usr/bin/sing-box"
+			AdGuardInstallPath = "/usr/bin/AdGuardHome"
 		} else {
 			SingBoxInstallDir = "/usr/local/bin/sing-box"
+			AdGuardInstallPath = "/usr/local/bin/AdGuardHome"
 		}
 	}
 }

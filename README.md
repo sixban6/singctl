@@ -93,7 +93,9 @@ powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "[System.IO.File]
 
 **日常运维常用命令**：
 ```bash
-singctl sb start     # 生成配置并启动客户端路由引擎与看门狗 (看门狗自动静默热同步订阅变更)
+singctl dns status   # 查看本地防劫持 AdGuard Home 运行状态、局域网面板地址与登录密码
+singctl sb gen       # 拉取订阅并生成客户端配置 (已安装 AdGuard Home 时自动对接 dns_local)
+singctl sb start     # 启动客户端路由引擎与看门狗 (看门狗自动静默热同步订阅变更并守护本地 DNS)
 singctl sb stop      # 停止客户端路由引擎与看门狗 (Linux / 软路由后台模式)
 singctl w start      # 后台启动本地可视化 Web 控制台 (默认监听 :8090，本机访问 http://127.0.0.1:8090)
 singctl doctor       # 运行客户端全链路健康体检

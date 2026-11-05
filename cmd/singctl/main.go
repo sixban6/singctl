@@ -167,6 +167,8 @@ DNS optimization, and complete service lifecycle management.`,
 	// 客户端透明代理命令
 	singboxCmd := cmd.NewSingboxCommand(configPath)
 	singboxCmd.GroupID = "client"
+	dnsCmd := cmd.NewDNSCmd(configPath)
+	dnsCmd.GroupID = "client"
 	gfwCmd := cmd.NewGFWCmd()
 	gfwCmd.GroupID = "client"
 	netCmd := cmd.NewNetCmd(configPath)
@@ -203,6 +205,7 @@ DNS optimization, and complete service lifecycle management.`,
 		reinstallServerCmd,
 		cfTokenCmd,
 		singboxCmd,
+		dnsCmd,
 		gfwCmd,
 		netCmd,
 		webCmd,

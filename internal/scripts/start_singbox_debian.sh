@@ -257,15 +257,19 @@ table inet sing-box {
         fib daddr type local meta l4proto { tcp, udp } th dport $TPROXY_PORT reject with icmpx type host-unreachable
         fib daddr type local accept
 
-        # 放行局域网流量
-        ip daddr @LOCAL_IPV4_SET accept
-        ip6 daddr { ::1, fc00::/7, fe80::/10, ff00::/8 } accept
+        # 先豁免回环与 Tailscale MagicDNS
+        ip daddr { 127.0.0.0/8, 100.64.0.0/10 } accept
+        ip6 daddr { ::1, fd7a:115c:a1e0::/48 } accept
 
         # 放行端口转发流量
         ct status dnat accept comment "Allow forwarded traffic"
 
-        # DNS 透明代理
-        meta l4proto { tcp, udp } th dport 53 tproxy to :$TPROXY_PORT accept comment "DNS transparent proxy"
+        # DNS 透明代理（置于局域网网段放行之前，防止上级光猫明文 DNS 绕过）
+        meta l4proto { tcp, udp } th dport 53 tproxy to :$TPROXY_PORT meta mark set $PROXY_FWMARK accept comment "DNS transparent proxy"
+
+        # 放行其余局域网流量
+        ip daddr @LOCAL_IPV4_SET accept
+        ip6 daddr { ::1, fc00::/7, fe80::/10, ff00::/8 } accept
 
         # TProxy 流量处理
         meta l4proto { tcp, udp } tproxy to :$TPROXY_PORT meta mark set $PROXY_FWMARK accept
@@ -280,15 +284,20 @@ table inet sing-box {
         udp sport 41641 accept comment "Bypass Tailscale UDP port"
         oifname "tailscale*" accept comment "Bypass outbound traffic to tailscale interface"
 
+        # 放行本地 AdGuard Home 加密上游 (DoH/DoT) 直连流量，防止冷启动或 Global 全局模式下死锁
+        ip daddr { 223.5.5.5, 223.6.6.6, 1.12.12.12, 120.53.53.53 } tcp dport { 443, 853 } accept comment "Bypass AdGuard Home encrypted DNS upstreams"
+
         # 放行 IPv6 ICMP
         meta l4proto ipv6-icmp accept
 
-        # 先放行局域网流量，避免 Tailscale CGNAT 与 MagicDNS 被误标记
+        # 先豁免回环与 Tailscale CGNAT/MagicDNS，再标记其余 53 端口 DNS 流量
+        ip daddr { 127.0.0.0/8, 100.64.0.0/10 } accept
+        ip6 daddr { ::1, fd7a:115c:a1e0::/48 } accept
+        meta l4proto { tcp, udp } th dport 53 meta mark set $PROXY_FWMARK accept
+
+        # 放行其余局域网流量
         ip daddr @LOCAL_IPV4_SET accept
         ip6 daddr { ::1, fc00::/7, fe80::/10, ff00::/8 } accept
-
-        # DNS 流量标记
-        meta l4proto { tcp, udp } th dport 53 meta mark set $PROXY_FWMARK accept
 
         # 标记其他流量
         meta l4proto { tcp, udp } meta mark set $PROXY_FWMARK accept
@@ -345,6 +354,10 @@ setup_iptables() {
     iptables -t mangle -A SINGBOX_OUTPUT -m mark --mark 0x80000 -j RETURN
     iptables -t mangle -A SINGBOX_OUTPUT -p udp --sport 41641 -j RETURN
     iptables -t mangle -A SINGBOX_OUTPUT -o tailscale+ -j RETURN
+    for agh_ip in 223.5.5.5 223.6.6.6 1.12.12.12 120.53.53.53; do
+        iptables -t mangle -A SINGBOX_OUTPUT -d "$agh_ip" -p tcp --dport 443 -j RETURN
+        iptables -t mangle -A SINGBOX_OUTPUT -d "$agh_ip" -p tcp --dport 853 -j RETURN
+    done
     iptables -t mangle -A SINGBOX_OUTPUT -d 127.0.0.0/8 -j RETURN
     iptables -t mangle -A SINGBOX_OUTPUT -d 10.0.0.0/8 -j RETURN
     iptables -t mangle -A SINGBOX_OUTPUT -d 172.16.0.0/12 -j RETURN

@@ -641,3 +641,64 @@ func TestSubscriptionNodeRulesLoadValidateAndMigrate(t *testing.T) {
 		t.Fatalf("expected node rules preserved after MigrateConfig, got %+v", migrated.Subs[0])
 	}
 }
+
+func TestClientDNSConfig_EnsureCredentialsAndMigrate(t *testing.T) {
+	var d ClientDNSConfig
+	if !d.IsEnabled() {
+		t.Fatal("default ClientDNSConfig should be enabled")
+	}
+	if d.GetDNSPort() != 5353 || d.GetWebPort() != 3000 || d.GetUsername() != "root" {
+		t.Fatalf("unexpected defaults: dns=%d web=%d user=%s", d.GetDNSPort(), d.GetWebPort(), d.GetUsername())
+	}
+
+	// Empty preferred username defaults to "root" and generates 16-char password
+	if !d.EnsureCredentials("") {
+		t.Fatal("expected EnsureCredentials to report changed")
+	}
+	if d.Username != "root" || len(d.Password) != 16 || !validatePasswordChars(d.Password) {
+		t.Fatalf("unexpected generated credentials: user=%q pass=%q", d.Username, d.Password)
+	}
+
+	// Custom preferred username overrides
+	savedPass := d.Password
+	if !d.EnsureCredentials("myadmin") {
+		t.Fatal("expected custom username update to report changed")
+	}
+	if d.Username != "myadmin" || d.Password != savedPass {
+		t.Fatalf("expected username=myadmin and preserved password, got user=%q pass=%q", d.Username, d.Password)
+	}
+
+	// MigrateConfig preserves dns block including explicit enabled: false
+	oldYAML := `subs:
+  - name: "main"
+    url: "https://example.com/sub"
+dns:
+  enabled: false
+  dns_port: 5354
+  web_port: 3005
+  username: "customuser"
+  password: "CustomPassword12"
+`
+	tmpPath := t.TempDir() + "/singctl.yaml"
+	if err := os.WriteFile(tmpPath, []byte(oldYAML), 0600); err != nil {
+		t.Fatal(err)
+	}
+	templateBytes, err := os.ReadFile("../../configs/singctl.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := MigrateConfig(tmpPath, templateBytes); err != nil {
+		t.Fatalf("MigrateConfig failed: %v", err)
+	}
+	loaded, err := Load(tmpPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if loaded.DNS.IsEnabled() {
+		t.Fatal("expected dns.enabled=false to be preserved after migration")
+	}
+	if loaded.DNS.GetDNSPort() != 5354 || loaded.DNS.GetWebPort() != 3005 ||
+		loaded.DNS.GetUsername() != "customuser" || loaded.DNS.GetPassword() != "CustomPassword12" {
+		t.Fatalf("unexpected migrated DNS config: %+v", loaded.DNS)
+	}
+}

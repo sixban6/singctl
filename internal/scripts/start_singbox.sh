@@ -161,15 +161,19 @@ setup_nft() {
             #
             fib daddr type local accept
 
-            # 放行局域网流量
-            ip daddr @LOCAL_IPV4_SET accept
-            ip6 daddr { ::1, fc00::/7, fe80::/10, ff00::/8 } accept
+            # 先豁免回环与 Tailscale MagicDNS，防止内网域名解析受影响
+            ip daddr { 127.0.0.0/8, 100.64.0.0/10 } accept
+            ip6 daddr { ::1, fd7a:115c:a1e0::/48 } accept
 
             # 放行所有经过 DNAT 的流量.即端口转发流量
             ct status dnat accept comment "Allow forwarded traffic"
 
-            # 2.劫持dns请求到sing-box
-            meta l4proto { tcp, udp } th dport 53 tproxy to :$TPROXY_PORT accept comment "DNS透明代理"
+            # 2.劫持dns请求到sing-box（置于局域网网段放行之前，堵死上级光猫 192.168.x.1:53 / fe80::1:53 明文漏网）
+            meta l4proto { tcp, udp } th dport 53 tproxy to :$TPROXY_PORT meta mark set $PROXY_FWMARK accept comment "DNS透明代理"
+
+            # 放行其余局域网、组播与广播流量
+            ip daddr @LOCAL_IPV4_SET accept
+            ip6 daddr { ::1, fc00::/7, fe80::/10, ff00::/8 } accept
 
             # 3.将其他流量标记并转发到 TProxy
             meta l4proto { tcp, udp } tproxy to :$TPROXY_PORT meta mark set $PROXY_FWMARK accept
@@ -181,20 +185,25 @@ setup_nft() {
             # 1.放行标记过的流量.防止回环问题.
             meta mark 0x1 accept
 
-            # 【新增这两行！】放行 Tailscale 进程自身发出的流量
+            # 放行 Tailscale 进程自身发出的流量
             meta mark 0x80000 accept comment "Bypass Tailscale fwmark"
             udp sport 41641 accept comment "Bypass Tailscale UDP port"
             oifname "tailscale*" accept comment "Bypass outbound traffic to tailscale interface"
 
+            # 放行本地 AdGuard Home 加密上游 (DoH/DoT) 直连流量，防止冷启动或 Global 全局模式下产生解析死锁
+            ip daddr { 223.5.5.5, 223.6.6.6, 1.12.12.12, 120.53.53.53 } tcp dport { 443, 853 } accept comment "Bypass AdGuard Home encrypted DNS upstreams"
+
             # 2.放行ipv6的icmp基础流量
             meta l4proto ipv6-icmp accept comment "Allow ICMPv6 traffic"
 
-            # 3.先放行局域网流量，避免 Tailscale CGNAT 与 MagicDNS 被误标记
+            # 3.先豁免回环与 Tailscale CGNAT/MagicDNS，再拦截所有发往外部/上级光猫的 53 端口明文 DNS
+            ip daddr { 127.0.0.0/8, 100.64.0.0/10 } accept
+            ip6 daddr { ::1, fd7a:115c:a1e0::/48 } accept
+            meta l4proto { tcp, udp } th dport 53 meta mark set $PROXY_FWMARK accept
+
+            # 4.放行其余局域网流量
             ip daddr @LOCAL_IPV4_SET accept
             ip6 daddr { ::1, fc00::/7, fe80::/10, ff00::/8 } accept
-
-            # 4.再标记 DNS 流量
-            meta l4proto { tcp, udp } th dport 53 meta mark set $PROXY_FWMARK accept
 
             # 5.标记其余流量
             meta l4proto { tcp, udp } meta mark set $PROXY_FWMARK accept
@@ -263,6 +272,12 @@ setup_iptables() {
     iptables -t mangle -A OUTPUT -m mark --mark 0x80000 -j RETURN
     iptables -t mangle -A OUTPUT -p udp --sport 41641 -j RETURN
     iptables -t mangle -A OUTPUT -o tailscale+ -j RETURN
+
+    # 放行本地 AdGuard Home 加密上游 (DoH/DoT) 直连流量，防止回环死锁
+    for agh_ip in 223.5.5.5 223.6.6.6 1.12.12.12 120.53.53.53; do
+        iptables -t mangle -A OUTPUT -d "$agh_ip" -p tcp --dport 443 -j RETURN
+        iptables -t mangle -A OUTPUT -d "$agh_ip" -p tcp --dport 853 -j RETURN
+    done
     
     # 放行局域网地址 (包含 Tailscale CGNAT 流量及 MagicDNS 流量)
     iptables -t mangle -A OUTPUT -d 127.0.0.0/8 -j RETURN

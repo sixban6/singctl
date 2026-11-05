@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"singctl/internal/adguard"
 	"singctl/internal/config"
 	log "singctl/internal/logger"
 	"singctl/internal/util/netinfo"
@@ -151,14 +152,74 @@ func (g *ConfigGenerator) GenerateForPlatform(platform string) (string, error) {
 		return "", err
 	}
 
+	// 若客户端启用且已安装本地 AdGuard Home，将 dns_local 自动指向 127.0.0.1:<dns_port>
+	withLocalDNS, err := g.InjectLocalDNS(deduped, resolved)
+	if err != nil {
+		return "", err
+	}
+
 	// 注入自定义规则（DNS 与路由）
-	withCustomRules, err := g.InjectCustomRules(deduped)
+	withCustomRules, err := g.InjectCustomRules(withLocalDNS)
 	if err != nil {
 		return "", err
 	}
 
 	// 格式化为可读 JSON
 	return PrettyJSON(withCustomRules)
+}
+
+// InjectLocalDNS 在 Linux/OpenWrt 客户端网关平台且启用并安装了 AdGuard Home 时，
+// 将 sing-box 配置中的 dns_local 解析器指向本地 127.0.0.1:<dns_port>（默认 5353）。
+// iOS 等移动端配置永远保持原样，不注入本机回环端口。
+func (g *ConfigGenerator) InjectLocalDNS(rawJSON, platform string) (string, error) {
+	if platform != "linux" || g.config == nil || !g.config.DNS.IsEnabled() || !adguard.IsInstalled() {
+		return rawJSON, nil
+	}
+
+	var root map[string]any
+	if err := json.Unmarshal([]byte(rawJSON), &root); err != nil {
+		return "", fmt.Errorf("failed to parse config JSON for local DNS injection: %w", err)
+	}
+
+	dnsMap, ok := root["dns"].(map[string]any)
+	if !ok {
+		return rawJSON, nil
+	}
+	servers, ok := dnsMap["servers"].([]any)
+	if !ok {
+		return rawJSON, nil
+	}
+
+	dnsPort := g.config.DNS.GetDNSPort()
+	updated := false
+	for i, item := range servers {
+		srvMap, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if tag, _ := srvMap["tag"].(string); tag == "dns_local" {
+			servers[i] = map[string]any{
+				"tag":         "dns_local",
+				"type":        "udp",
+				"server":      "127.0.0.1",
+				"server_port": dnsPort,
+			}
+			updated = true
+			break
+		}
+	}
+
+	if !updated {
+		return rawJSON, nil
+	}
+	dnsMap["servers"] = servers
+	log.Info("已将 sing-box dns_local 指向本地 AdGuard Home (127.0.0.1:%d)", dnsPort)
+
+	data, err := json.Marshal(root)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal config JSON after local DNS injection: %w", err)
+	}
+	return string(data), nil
 }
 
 func (g *ConfigGenerator) InjectCustomRules(rawJSON string) (string, error) {

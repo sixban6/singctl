@@ -313,18 +313,12 @@ install_files() {
     [ -f "$binary_file" ] || error_exit "在解压的文件中未找到 singctl 二进制文件"
 
     # ----------------------------------------------------------
-    # 2) 其余逻辑保持不变
+    # 2) 原子安装二进制（不提前停止现有 sing-box，避免软路由网关升级时断网导致后续无法拉取组件与订阅）
     # ----------------------------------------------------------
-    # 停止现有服务
-    if command -v singctl >/dev/null 2>&1; then
-        echo_info "停止现有 singctl 服务..."
-        singctl sb stop 2>/dev/null || true
-    fi
-
-    # 复制二进制
     echo_info "安装二进制文件到 $INSTALL_DIR..."
-    cp "$binary_file" "$INSTALL_DIR/singctl"
-    chmod +x "$INSTALL_DIR/singctl"
+    cp "$binary_file" "$INSTALL_DIR/singctl.new"
+    chmod +x "$INSTALL_DIR/singctl.new"
+    mv -f "$INSTALL_DIR/singctl.new" "$INSTALL_DIR/singctl"
 
     # 创建配置目录
     echo_info "创建配置目录: $CONFIG_DIR"
@@ -469,6 +463,7 @@ show_completion_info() {
     printf "\n"
     echo_info "常用命令:"
     echo " singctl version          - 查看版本信息"
+    echo " singctl dns status       - 查看本地 AdGuard Home 状态与管理面板密码"
     echo " singctl sb gen           - 生成配置到默认位置，并备份原始配置"
     echo " singctl sb start         - 启动 sing-box 与看门狗守护进程"
     echo " singctl sb stop          - 停止 sing-box 与看门狗守护进程"
@@ -604,6 +599,7 @@ select_mode_and_setup() {
                 printf "\n"
                 printf "  \033[1;37m2) 客户端模式 (Client Mode)\033[0m\n"
                 printf "     • 软路由 / Linux 透明代理网关 (TProxy)\n"
+                printf "     • 内置 AdGuard Home 本地防劫持 DNS 与管理面板\n"
                 printf "     • 自动转换订阅与看门狗静默热同步\n"
                 printf "     • 本地轻量 Web 图形管理后台 (:8090)\n"
                 printf "\033[0;36m====================================================\033[0m\n"
@@ -619,6 +615,7 @@ select_mode_and_setup() {
                 printf "\n"
                 printf "  2) 客户端模式 (Client Mode)\n"
                 printf "     • 软路由 / Linux 透明代理网关 (TProxy)\n"
+                printf "     • 内置 AdGuard Home 本地防劫持 DNS 与管理面板\n"
                 printf "     • 自动转换订阅与看门狗静默热同步\n"
                 printf "     • 本地轻量 Web 图形管理后台 (:8090)\n"
                 printf "====================================================\n"
@@ -688,7 +685,18 @@ select_mode_and_setup() {
     verify_installation
     show_completion_info
     init_singbox_config
-    echo_success "安装脚本执行完成！"
+
+    # Linux / OpenWrt 客户端自动安装、免向导配置并启动本地防劫持 AdGuard Home
+    if [ "$OS" = "linux" ]; then
+        echo_info "正在安装并初始化客户端防劫持 DNS (AdGuard Home)..."
+        if [ -c /dev/tty ]; then
+            "$INSTALL_DIR/singctl" dns install --config "$CONFIG_FILE" < /dev/tty || echo_warning "AdGuard Home 自动安装未完成 (将继续部署 sing-box，稍后可手动运行 singctl dns install)"
+        else
+            "$INSTALL_DIR/singctl" dns install --config "$CONFIG_FILE" --non-interactive || echo_warning "AdGuard Home 自动安装未完成 (将继续部署 sing-box，稍后可手动运行 singctl dns install)"
+        fi
+    fi
+
+    echo_success "安装脚本基础组件准备完成！"
 
     # 检查配置文件是否有效订阅地址（先去掉注释行，避免示例被误判）
     if [ -f "$CONFIG_FILE" ] && sed 's/#.*//' "$CONFIG_FILE" | grep -Eq 'url:[[:space:]]*["'"'"']?https?://'; then
@@ -697,20 +705,28 @@ select_mode_and_setup() {
         # 检查是否需要安装或更新 sing-box
         if check_singbox_installation; then
             echo_info "开始安装/更新 sing-box..."
-            "$INSTALL_DIR/singctl" sb install
+            "$INSTALL_DIR/singctl" sb install --config "$CONFIG_FILE"
             echo_success "安装/更新 sing-box 成功"
         fi
         
-        echo_info "尝试启动 sing-box..."
-        "$INSTALL_DIR/singctl" sb start
+        echo_info "正在生成最新 sing-box 配置文件 (自动对接本地防劫持 DNS)..."
+        "$INSTALL_DIR/singctl" sb gen --config "$CONFIG_FILE"
+        echo_success "sing-box 配置文件生成完成"
+
+        echo_info "正在启动/重载 sing-box 服务..."
+        "$INSTALL_DIR/singctl" sb restart --config "$CONFIG_FILE"
         echo_success "sing-box 启动完成"
+
+        if [ "$OS" = "linux" ]; then
+            "$INSTALL_DIR/singctl" dns status --config "$CONFIG_FILE" 2>/dev/null || true
+        fi
     else
         echo_warning "配置文件中尚未配置有效订阅"
         
         # 预先安装好 sing-box 内核，免去用户后续手动安装步骤
         if check_singbox_installation; then
             echo_info "正在自动预安装 sing-box 核心组件..."
-            "$INSTALL_DIR/singctl" sb install || true
+            "$INSTALL_DIR/singctl" sb install --config "$CONFIG_FILE" || true
         fi
 
         # 自动拉起 WebUI，让用户能直接在浏览器中填入订阅
@@ -724,8 +740,11 @@ select_mode_and_setup() {
         "$INSTALL_DIR/singctl" web status 2>/dev/null | grep -E "http://" || echo "  ➜ http://$(uci get network.lan.ipaddr 2>/dev/null || hostname -I | awk '{print $1}'):8090"
         echo_info "【方式 2】在终端手动编辑配置文件:"
         echo_info "  vim $CONFIG_FILE"
-        echo_info "  配置完成后运行: singctl sb start"
+        echo_info "  配置完成后运行: singctl sb gen && singctl sb start"
         echo_success "========================================================"
+        if [ "$OS" = "linux" ]; then
+            "$INSTALL_DIR/singctl" dns status --config "$CONFIG_FILE" 2>/dev/null || true
+        fi
     fi
 }
 
