@@ -231,10 +231,10 @@
       "url": "https://github.com/sixban6/rulesets/raw/refs/heads/main/rule/hok.srs",
       "format": "binary",
       "file": "geosite-hok.srs.gz",
-      "sha256": "fca3becf504e05f95ee2f2d2e5d07e3fa04952b5dfc4cc7c280892f47d29ac10",
-      "size": 290,
+      "sha256": "14966de9c8ad42b472ba2969518b0cc2ba65e15886bdc50179ad732a0bb14dcb",
+      "size": 250,
       "via": "direct",
-      "updated_at": "2026-11-05T19:22:00Z"
+      "updated_at": "2026-11-05T19:45:00Z"
     },
     "geosite-jd": {
       "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/jd.srs",

@@ -132,6 +132,7 @@ func TestGenerator_GameUDPAndDNSIsolation(t *testing.T) {
 	payload := encodeURISub(
 		"hysteria2://dummy-pass@los.example.com:443?sni=los.example.com#sec_los_hy2",
 		"hysteria2://dummy-pass@hk1.example.com:443?sni=hk1.example.com#HK-01",
+		"hysteria2://dummy-pass@hk5.example.com:443?sni=hk5.example.com#香港 001【5倍】",
 	)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(payload))
@@ -150,6 +151,12 @@ func TestGenerator_GameUDPAndDNSIsolation(t *testing.T) {
 			t.Fatalf("GenerateForPlatform(%s) failed: %v", platform, err)
 		}
 		var parsed struct {
+			DNS struct {
+				Servers []struct {
+					Tag    string `json:"tag"`
+					Detour string `json:"detour"`
+				} `json:"servers"`
+			} `json:"dns"`
 			Outbounds []struct {
 				Tag       string   `json:"tag"`
 				Outbounds []string `json:"outbounds"`
@@ -164,7 +171,15 @@ func TestGenerator_GameUDPAndDNSIsolation(t *testing.T) {
 			byTag[ob.Tag] = ob.Outbounds
 		}
 
-		// 1. DNS 分组绝不能包含 DirectConn 或 Proxy，且首选 Auto
+		// 1. Auto 测速组必须自动剔除【5倍】高倍率节点，而 Select 保留供手动选
+		autoGroup := byTag["Auto"]
+		for _, item := range autoGroup {
+			if item == "香港 001【5倍】" {
+				t.Fatalf("[%s] Auto group must exclude high-multiplier nodes, got %v", platform, autoGroup)
+			}
+		}
+
+		// 2. DNS 分组绝不能包含 DirectConn 或 Proxy，且首选 Auto (1倍低延迟节点)
 		dnsGroup := byTag["DNS"]
 		if len(dnsGroup) == 0 || dnsGroup[0] != "Auto" {
 			t.Fatalf("[%s] DNS group should prioritize Auto, got %v", platform, dnsGroup)
@@ -175,13 +190,18 @@ func TestGenerator_GameUDPAndDNSIsolation(t *testing.T) {
 			}
 		}
 
-		// 2. HoK 分组首选 Auto 低延迟节点
+		// 3. HoK 分组首选 DIY-Node 自建免流节点，且 dns_hok 走 DNS (亚洲低延迟解析)
 		hokGroup := byTag["HoK"]
-		if len(hokGroup) == 0 || hokGroup[0] != "Auto" {
-			t.Fatalf("[%s] HoK group should prioritize Auto, got %v", platform, hokGroup)
+		if len(hokGroup) == 0 || hokGroup[0] != "DIY-Node" {
+			t.Fatalf("[%s] HoK group should prioritize DIY-Node, got %v", platform, hokGroup)
+		}
+		for _, srv := range parsed.DNS.Servers {
+			if srv.Tag == "dns_hok" && srv.Detour != "DNS" {
+				t.Fatalf("[%s] dns_hok detour = %q, want DNS", platform, srv.Detour)
+			}
 		}
 
-		// 3. Game-UDP 分组存在且默认首选 DirectConn
+		// 4. Game-UDP 分组存在且默认首选 DirectConn
 		gameGroup := byTag["Game-UDP"]
 		if len(gameGroup) == 0 || gameGroup[0] != "DirectConn" {
 			t.Fatalf("[%s] Game-UDP group should default to DirectConn, got %v", platform, gameGroup)
