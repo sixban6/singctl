@@ -171,45 +171,51 @@ func TestGenerator_GameUDPAndDNSIsolation(t *testing.T) {
 			byTag[ob.Tag] = ob.Outbounds
 		}
 
-		// 1. 冗余分组已被彻底精简移除，仅保留 6 个核心控制/节点池组
-		for _, removed := range []string{"DIY-Node", "DNS", "HoK", "YouTube", "OpenAI", "Google", "Netflix", "Steam"} {
+		// 1. 冗余旧分组已被精简移除，保留两层清晰结构：分流组(Proxy/AI/Game/Game-UDP) + 节点池(#VPS/#Auto/#Nodes)
+		for _, removed := range []string{"DIY-Node", "VPS", "Auto", "Select", "DNS", "HoK", "YouTube", "OpenAI", "Google", "Netflix", "Steam"} {
 			if _, exists := byTag[removed]; exists {
 				t.Fatalf("[%s] redundant group %q should be removed", platform, removed)
 			}
 		}
 
-		// 2. Auto 测速组必须自动剔除【5倍】高倍率节点，而 Select 保留供手动选
-		autoGroup := byTag["Auto"]
-		for _, item := range autoGroup {
+		// 2. #Auto 测速池必须自动剔除【5倍】高倍率节点，而 #Nodes 保留供手动选
+		autoPool := byTag["#Auto"]
+		if len(autoPool) == 0 {
+			t.Fatalf("[%s] expected #Auto pool to be non-empty", platform)
+		}
+		for _, item := range autoPool {
 			if item == "香港 001【5倍】" {
-				t.Fatalf("[%s] Auto group must exclude high-multiplier nodes, got %v", platform, autoGroup)
+				t.Fatalf("[%s] #Auto pool must exclude high-multiplier nodes, got %v", platform, autoPool)
 			}
 		}
 
-		// 3. VPS 自建池、Proxy 与 AI 默认首选 VPS，Game-UDP 默认首选 DirectConn
-		if len(byTag["VPS"]) == 0 {
-			t.Fatalf("[%s] expected VPS group to contain sec_ nodes", platform)
+		// 3. 验证 4 个分流控制组默认首选项
+		if len(byTag["#VPS"]) == 0 {
+			t.Fatalf("[%s] expected #VPS pool to contain sec_ nodes", platform)
 		}
-		if got := byTag["Proxy"]; len(got) == 0 || got[0] != "VPS" {
-			t.Fatalf("[%s] Proxy should default to VPS, got %v", platform, got)
+		if got := byTag["Proxy"]; len(got) == 0 || got[0] != "#VPS" {
+			t.Fatalf("[%s] Proxy should default to #VPS, got %v", platform, got)
 		}
-		if got := byTag["AI"]; len(got) == 0 || got[0] != "VPS" {
-			t.Fatalf("[%s] AI should default to VPS, got %v", platform, got)
+		if got := byTag["AI"]; len(got) == 0 || got[0] != "#VPS" {
+			t.Fatalf("[%s] AI should default to #VPS, got %v", platform, got)
+		}
+		if got := byTag["Game"]; len(got) == 0 || got[0] != "#Auto" {
+			t.Fatalf("[%s] Game should default to #Auto, got %v", platform, got)
 		}
 		if got := byTag["Game-UDP"]; len(got) == 0 || got[0] != "DirectConn" {
 			t.Fatalf("[%s] Game-UDP should default to DirectConn, got %v", platform, got)
 		}
 
-		// 4. dns_proxy 独立绑 VPS，dns_hok 独立绑 Auto (彻底解耦且隔离 DirectConn)
+		// 4. dns_proxy 独立绑 #VPS，dns_hok 独立绑 #Auto
 		detours := make(map[string]string)
 		for _, srv := range parsed.DNS.Servers {
 			detours[srv.Tag] = srv.Detour
 		}
-		if detours["dns_proxy"] != "VPS" {
-			t.Fatalf("[%s] dns_proxy detour = %q, want VPS", platform, detours["dns_proxy"])
+		if detours["dns_proxy"] != "#VPS" {
+			t.Fatalf("[%s] dns_proxy detour = %q, want #VPS", platform, detours["dns_proxy"])
 		}
-		if detours["dns_hok"] != "Auto" {
-			t.Fatalf("[%s] dns_hok detour = %q, want Auto", platform, detours["dns_hok"])
+		if detours["dns_hok"] != "#Auto" {
+			t.Fatalf("[%s] dns_hok detour = %q, want #Auto", platform, detours["dns_hok"])
 		}
 	}
 }
