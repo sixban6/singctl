@@ -85,6 +85,46 @@ func Run(ctx context.Context, opts RunOptions) (RunResult, error) {
 		}
 	}
 
+	// Automatically heal Hysteria2 certificate_path / masquerade if Caddy renewed or switched from local CA
+	if certHealed, certMsg, certErr := deploy.SyncHysteria2CertIfNeeded(cfg); certErr != nil {
+		allOK = false
+		actions = append(actions, LayerActionDetail{
+			Layer:   "core",
+			Target:  "hysteria2-cert",
+			Success: false,
+			Message: "Hysteria2 证书同步异常: " + certErr.Error(),
+		})
+	} else if certHealed {
+		updatedCount++
+		actions = append(actions, LayerActionDetail{
+			Layer:   "core",
+			Target:  "hysteria2-cert",
+			Success: true,
+			Updated: true,
+			Message: certMsg,
+		})
+	}
+
+	// Automatically heal WARP (wireproxy) IPv4 resolution strategy & WireGuard tunnel connectivity
+	if warpHealed, warpMsg, warpErr := deploy.SyncWarpConfigIfNeeded(); warpErr != nil {
+		allOK = false
+		actions = append(actions, LayerActionDetail{
+			Layer:   "core",
+			Target:  "warp-tunnel",
+			Success: false,
+			Message: "WARP 隧道自愈异常: " + warpErr.Error(),
+		})
+	} else if warpHealed {
+		updatedCount++
+		actions = append(actions, LayerActionDetail{
+			Layer:   "core",
+			Target:  "warp-tunnel",
+			Success: true,
+			Updated: true,
+			Message: warpMsg,
+		})
+	}
+
 	// ── Layer 2: OS Security Patches (Preserving sshd_config) + Stale .so Reload ──
 	if runtime.GOOS == "linux" {
 		osActs := healOSLayer(ctx, opts.AsyncWebRestart)
@@ -308,7 +348,7 @@ func healCoreComponent(ctx context.Context, cfg *config.Config, cfgPath string, 
 		if cfg != nil {
 			mirror = cfg.GitHub.MirrorURL
 		}
-		exePath, _ := os.Executable()
+		exePath, _ := updater.ResolveExecutablePath()
 		bakPath := backupBinary(exePath)
 		defer cleanupBackup(bakPath)
 
@@ -542,18 +582,43 @@ func waitServiceActive(ctx context.Context, unit string, timeout time.Duration) 
 }
 
 func restartWebDaemonSafely(async bool) {
-	if !hasBinary("systemctl") {
+	hasSystemdUnit := false
+	unitName := ""
+	if hasBinary("systemctl") {
+		for _, candidate := range []string{"singctl-serverweb", "singctl-web"} {
+			if out, err := exec.Command("systemctl", "is-active", candidate).Output(); err == nil && strings.TrimSpace(string(out)) == "active" {
+				hasSystemdUnit = true
+				unitName = candidate
+				break
+			}
+		}
+	}
+
+	hasBgPid := false
+	if _, err := os.Stat("/tmp/singctl-serverweb.pid"); err == nil {
+		hasBgPid = true
+	}
+
+	if !hasSystemdUnit && !hasBgPid {
 		return
 	}
-	if out, err := exec.Command("systemctl", "is-active", "singctl-web").Output(); err != nil || strings.TrimSpace(string(out)) != "active" {
-		return
-	}
+
+	binPath := locateBinary([]string{"/usr/local/bin/singctl", "/usr/bin/singctl"}, "singctl")
 	if async {
-		cmd := exec.Command("sh", "-c", "sleep 2 && systemctl restart singctl-web >/dev/null 2>&1")
-		_ = cmd.Start()
+		if hasSystemdUnit {
+			cmd := exec.Command("sh", "-c", fmt.Sprintf("sleep 2 && systemctl restart %s >/dev/null 2>&1", unitName))
+			_ = cmd.Start()
+		} else if hasBgPid && binPath != "" {
+			cmd := exec.Command("sh", "-c", fmt.Sprintf("sleep 2 && %s sr web restart >/dev/null 2>&1", binPath))
+			_ = cmd.Start()
+		}
 		return
 	}
-	_ = exec.Command("systemctl", "restart", "singctl-web").Run()
+	if hasSystemdUnit {
+		_ = exec.Command("systemctl", "restart", unitName).Run()
+	} else if hasBgPid && binPath != "" {
+		_ = exec.Command(binPath, "sr", "web", "restart").Run()
+	}
 }
 
 func triggerDelayedReboot() {

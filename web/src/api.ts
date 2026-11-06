@@ -22,6 +22,8 @@ import {
   FleetActionResult,
   HealStatusReport,
   HealRunResponse,
+  CamouflageDefaultsResponse,
+  CamouflageReport,
 } from './types';
 
 export const getBasePath = (): string => {
@@ -265,6 +267,15 @@ export const api = {
     request<{ message: string; status: HealStatusReport }>('/api/server/heal/policy', {
       method: 'PUT',
       body: JSON.stringify(opts),
+    }),
+
+  getCamouflageDefaults: () =>
+    request<CamouflageDefaultsResponse>('/api/server/camouflage/defaults'),
+
+  runCamouflageProbe: (input: { ip?: string; domain?: string; sni?: string; ports?: string; timeoutSec?: number }) =>
+    request<CamouflageReport>('/api/server/camouflage/probe', {
+      method: 'POST',
+      body: JSON.stringify(input),
     }),
 
   logout: () =>

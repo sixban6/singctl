@@ -1,16 +1,20 @@
 package serverweb
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"singctl/internal/config"
 	"singctl/internal/deploy"
 	"singctl/internal/doctor"
+	"singctl/internal/gfw"
 	"singctl/internal/logger"
 	"singctl/internal/netdiag"
 )
@@ -174,4 +178,160 @@ func (s *Server) handleDoctor(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleUnlockDiagnose(w http.ResponseWriter, r *http.Request) {
 	report := doctor.CheckMediaUnlock()
 	writeJSON(w, http.StatusOK, report)
+}
+
+type camouflagePreset struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	IP     string `json:"ip"`
+	Domain string `json:"domain"`
+	SNI    string `json:"sni"`
+}
+
+func (s *Server) resolveLocalCamouflageDefaults(ctx context.Context) (ip, domain, sni string) {
+	cfg, _ := config.Load(s.opts.ConfigPath)
+	if cfg != nil {
+		domain = cfg.Server.GetNodeDomain()
+		if domain == "" {
+			domain = cfg.Server.GetSubstoreDomain()
+		}
+		sni = cfg.Server.Sni
+		ip = strings.TrimSpace(cfg.Server.ServerIP)
+	}
+	if ip == "" && domain != "" {
+		rCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		if ips, err := net.DefaultResolver.LookupHost(rCtx, domain); err == nil && len(ips) > 0 {
+			ip = ips[0]
+		}
+		cancel()
+	}
+	if ip == "" {
+		ip = "127.0.0.1"
+	}
+	return ip, domain, sni
+}
+
+func (s *Server) handleCamouflageDefaults(w http.ResponseWriter, r *http.Request) {
+	ip, domain, sni := s.resolveLocalCamouflageDefaults(r.Context())
+	presets := []camouflagePreset{
+		{
+			ID:     "local",
+			Name:   "本机节点 (当前网关)",
+			IP:     ip,
+			Domain: domain,
+			SNI:    sni,
+		},
+	}
+	if s.fleet != nil && s.fleet.Store != nil {
+		if nodes, err := s.fleet.Store.ListPublic(); err == nil {
+			for _, n := range nodes {
+				if strings.TrimSpace(n.Host) == "" {
+					continue
+				}
+				presets = append(presets, camouflagePreset{
+					ID:     n.ID,
+					Name:   cmp.Or(n.Name, n.ID),
+					IP:     n.Host,
+					Domain: n.Domain,
+					SNI:    sni,
+				})
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ip":      ip,
+		"domain":  domain,
+		"sni":     sni,
+		"ports":   "80,443",
+		"presets": presets,
+	})
+}
+
+func (s *Server) handleCamouflageProbe(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		IP         string `json:"ip"`
+		Domain     string `json:"domain"`
+		SNI        string `json:"sni"`
+		Ports      string `json:"ports"`
+		TimeoutSec int    `json:"timeoutSec"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+
+	defaultIP, defaultDomain, defaultSNI := s.resolveLocalCamouflageDefaults(r.Context())
+	targetIP := strings.TrimSpace(body.IP)
+	targetDomain := strings.TrimSpace(body.Domain)
+	targetSNI := strings.TrimSpace(body.SNI)
+
+	if targetIP == "" {
+		targetIP = defaultIP
+		if targetDomain == "" {
+			targetDomain = defaultDomain
+		}
+		if targetSNI == "" {
+			targetSNI = defaultSNI
+		}
+	}
+
+	// 若用户在 IP 栏输入了域名，自动解析为 IP 并回填 Domain
+	if net.ParseIP(targetIP) == nil {
+		hostCandidate := targetIP
+		rCtx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		ips, err := net.DefaultResolver.LookupHost(rCtx, hostCandidate)
+		cancel()
+		if err != nil || len(ips) == 0 {
+			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("无法解析目标地址 %q: %v", hostCandidate, err))
+			return
+		}
+		if targetDomain == "" {
+			targetDomain = hostCandidate
+		}
+		targetIP = ips[0]
+	}
+
+	var ports []int
+	portsRaw := cmp.Or(strings.TrimSpace(body.Ports), "80,443")
+	for pStr := range strings.SplitSeq(portsRaw, ",") {
+		pStr = strings.TrimSpace(pStr)
+		if pStr == "" {
+			continue
+		}
+		p, err := strconv.Atoi(pStr)
+		if err != nil || p < 1 || p > 65535 {
+			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("无效的端口号: %s", pStr))
+			return
+		}
+		ports = append(ports, p)
+	}
+	if len(ports) == 0 {
+		ports = []int{80, 443}
+	}
+
+	timeoutSec := body.TimeoutSec
+	if timeoutSec <= 0 {
+		timeoutSec = 4
+	}
+	if timeoutSec > 10 {
+		timeoutSec = 10
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(timeoutSec*4)*time.Second)
+	defer cancel()
+
+	detector := gfw.NewDetector(gfw.ProbeOptions{
+		IP:      targetIP,
+		Ports:   ports,
+		SNI:     targetSNI,
+		Domain:  targetDomain,
+		Timeout: time.Duration(timeoutSec) * time.Second,
+	})
+
+	rep, err := detector.Run(ctx)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "伪装与抗探测评估执行失败: "+err.Error())
+		return
+	}
+
+	s.recordAudit(r, fmt.Sprintf("执行伪装与抗探测评估 [目标=%s, 域名=%s, 风险分=%d/100]",
+		targetIP, cmp.Or(targetDomain, "-"), rep.TotalScore))
+	writeJSON(w, http.StatusOK, rep)
 }

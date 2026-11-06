@@ -13,6 +13,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -81,8 +82,8 @@ func DeployWarp() error {
 func DeployWarpWithConfig(cfg *config.Config) error {
 	logger.Info("Starting WARP (wireproxy) native deployment...")
 
-	// 1. Check if WARP SOCKS5 is already running on port 40000
-	if isWarpSocksRunning() {
+	// 1. Check if WARP SOCKS5 is already running and tunnel is healthy on port 40000
+	if isWarpSocksRunning() && IsWarpTunnelHealthy(3*time.Second) {
 		logger.Success("WARP (wireproxy) is already running on 127.0.0.1:40000")
 		return nil
 	}
@@ -137,22 +138,7 @@ func DeployWarpWithConfig(cfg *config.Config) error {
 		peerPubKey = reg.Config.Peers[0].PublicKey
 	}
 
-	confContent := fmt.Sprintf(`[Interface]
-Address = %s
-MTU = 1420
-PrivateKey = %s
-DNS = 1.1.1.1,8.8.8.8,8.8.4.4,2606:4700:4700::1111,2001:4860:4860::8888,2001:4860:4860::8844
-
-[Peer]
-PublicKey = %s
-Endpoint = engage.cloudflareclient.com:2408
-
-[Socks5]
-BindAddress = 127.0.0.1:40000
-
-[Resolve]
-ResolveStrategy = auto
-`, addressLine, privKey, peerPubKey)
+	confContent := buildWireproxyConfig(addressLine, privKey, peerPubKey, hasGlobalIPv6())
 
 	confPath := "/etc/wireproxy/wireproxy.conf"
 	if err := os.WriteFile(confPath, []byte(confContent), 0600); err != nil {
@@ -218,6 +204,218 @@ func isWarpSocksRunning() bool {
 	}
 	_ = conn.Close()
 	return true
+}
+
+// buildWireproxyConfig 渲染 wireproxy 配置。
+// 注意：
+// 1. wireproxy 的 ResolveStrategy = auto 只要检测到 [Interface] Address 含虚拟 IPv6 地址就会强制转为 ipv6，
+//    在纯 IPv4 VPS 上会导致 engage.cloudflareclient.com 解析为 AAAA 记录并引发 WireGuard 握手 100% 超时黑洞。
+// 2. wireproxy 在启动阶段若配置了 PersistentKeepalive，会在 Routine: receive incoming v4 启动前抢先触发握手导致死锁。
+// 因此固定使用 IPv4 Endpoint (162.159.192.1:2408) 与 ResolveStrategy = ipv4，且不启用 PersistentKeepalive。
+func buildWireproxyConfig(addressLine, privKey, peerPubKey string, hasIPv6 bool) string {
+	dnsLine := "1.1.1.1,8.8.8.8,8.8.4.4"
+	if hasIPv6 {
+		dnsLine = "1.1.1.1,8.8.8.8,8.8.4.4,2606:4700:4700::1111,2001:4860:4860::8888,2001:4860:4860::8844"
+	}
+	return fmt.Sprintf(`[Interface]
+Address = %s
+MTU = 1420
+PrivateKey = %s
+DNS = %s
+
+[Peer]
+PublicKey = %s
+Endpoint = 162.159.192.1:2408
+
+[Socks5]
+BindAddress = 127.0.0.1:40000
+
+[Resolve]
+ResolveStrategy = ipv4
+`, addressLine, privKey, dnsLine, peerPubKey)
+}
+
+func hasGlobalIPv6() bool {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return false
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip != nil && ip.To4() == nil && ip.IsGlobalUnicast() && !ip.IsPrivate() {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// IsWarpTunnelHealthy 通过本地 SOCKS5 (127.0.0.1:40000) 探测 Cloudflare trace，确认底层 WireGuard 隧道已真实连通
+func IsWarpTunnelHealthy(timeout time.Duration) bool {
+	if timeout <= 0 {
+		timeout = 3 * time.Second
+	}
+	proxyURL, err := url.Parse("socks5://127.0.0.1:40000")
+	if err != nil {
+		return false
+	}
+	client := &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(proxyURL),
+		},
+	}
+	resp, err := client.Get("https://cloudflare.com/cdn-cgi/trace")
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if err != nil {
+		return false
+	}
+	trace := string(body)
+	return strings.Contains(trace, "warp=on") || strings.Contains(trace, "warp=plus")
+}
+
+// NormalizeWireproxyConfigContent 修正既有 wireproxy 配置中的 ResolveStrategy=auto、域名 Endpoint 与会导致启动抢跑死锁的 PersistentKeepalive
+func NormalizeWireproxyConfigContent(content string) (string, bool) {
+	lines := strings.Split(content, "\n")
+	changed := false
+	inPeer := false
+	out := make([]string, 0, len(lines))
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			inPeer = strings.EqualFold(trimmed, "[Peer]")
+		}
+		if strings.HasPrefix(trimmed, "ResolveStrategy") && !strings.HasPrefix(trimmed, "#") {
+			parts := strings.SplitN(trimmed, "=", 2)
+			if len(parts) == 2 && strings.TrimSpace(parts[1]) != "ipv4" {
+				line = "ResolveStrategy = ipv4"
+				changed = true
+			}
+		}
+		if inPeer && strings.HasPrefix(trimmed, "Endpoint") && !strings.HasPrefix(trimmed, "#") {
+			parts := strings.SplitN(trimmed, "=", 2)
+			if len(parts) == 2 && strings.Contains(parts[1], "engage.cloudflareclient.com") {
+				line = "Endpoint = 162.159.192.1:2408"
+				changed = true
+			}
+		}
+		if inPeer && strings.HasPrefix(trimmed, "PersistentKeepalive") {
+			changed = true
+			continue
+		}
+		out = append(out, line)
+	}
+
+	return strings.Join(out, "\n"), changed
+}
+
+// SyncWarpConfigIfNeeded 检查并自愈本机 WARP (wireproxy) 配置与隧道握手状态
+func SyncWarpConfigIfNeeded() (healed bool, msg string, err error) {
+	confPaths := []string{"/etc/wireproxy/wireproxy.conf", "/etc/wireguard/proxy.conf"}
+	var existingPaths []string
+	for _, p := range confPaths {
+		if _, stErr := os.Stat(p); stErr == nil {
+			existingPaths = append(existingPaths, p)
+		}
+	}
+	if len(existingPaths) == 0 {
+		return false, "", nil
+	}
+
+	anyChanged := false
+	for _, p := range existingPaths {
+		raw, rErr := os.ReadFile(p)
+		if rErr != nil {
+			continue
+		}
+		normalized, changed := NormalizeWireproxyConfigContent(string(raw))
+		if changed {
+			if wErr := os.WriteFile(p, []byte(normalized), 0600); wErr != nil {
+				return false, "", fmt.Errorf("写入 %s 失败: %w", p, wErr)
+			}
+			anyChanged = true
+		}
+	}
+
+	tunnelOK := isWarpSocksRunning() && IsWarpTunnelHealthy(3*time.Second)
+	if !anyChanged && tunnelOK {
+		return false, "", nil
+	}
+
+	_ = runCmd("systemctl", "restart", "wireproxy")
+	for range 4 {
+		time.Sleep(800 * time.Millisecond)
+		if isWarpSocksRunning() && IsWarpTunnelHealthy(3*time.Second) {
+			return true, "WARP (wireproxy) 已修正 IPv4 解析策略并恢复隧道握手连通", nil
+		}
+	}
+
+	// 若规范化配置重启后仍无法完成 WireGuard 握手（例如旧设备密钥已被 Cloudflare 注销），则自动重新注册密钥对
+	privKey, pubKey, kErr := generateWireguardKeypair()
+	if kErr != nil {
+		return false, "", fmt.Errorf("WARP 隧道未连通且生成新密钥对失败: %w", kErr)
+	}
+	reg, rErr := registerCloudflareWarp(pubKey)
+	if rErr != nil {
+		return false, "", fmt.Errorf("WARP 隧道未连通且重新注册 Cloudflare WARP 失败: %w", rErr)
+	}
+	v4Addr := reg.Config.Interface.Addresses.V4
+	if !strings.Contains(v4Addr, "/") && v4Addr != "" {
+		v4Addr += "/32"
+	}
+	v6Addr := reg.Config.Interface.Addresses.V6
+	if !strings.Contains(v6Addr, "/") && v6Addr != "" {
+		v6Addr += "/128"
+	}
+	addressLine := v4Addr
+	if v6Addr != "" {
+		if addressLine != "" {
+			addressLine += ", " + v6Addr
+		} else {
+			addressLine = v6Addr
+		}
+	}
+	if addressLine == "" {
+		addressLine = "172.16.0.2/32"
+	}
+	peerPubKey := "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
+	if len(reg.Config.Peers) > 0 && reg.Config.Peers[0].PublicKey != "" {
+		peerPubKey = reg.Config.Peers[0].PublicKey
+	}
+	freshConf := buildWireproxyConfig(addressLine, privKey, peerPubKey, hasGlobalIPv6())
+	for _, p := range existingPaths {
+		_ = os.WriteFile(p, []byte(freshConf), 0600)
+	}
+	_ = runCmd("systemctl", "restart", "wireproxy")
+	for range 4 {
+		time.Sleep(800 * time.Millisecond)
+		if isWarpSocksRunning() && IsWarpTunnelHealthy(3*time.Second) {
+			return true, "WARP (wireproxy) 已自动重新注册设备密钥并恢复隧道连通", nil
+		}
+	}
+	return false, "", fmt.Errorf("WARP (wireproxy) 重启后隧道握手仍未就绪，请检查 UDP 2408 出口连通性")
 }
 
 func generateWireguardKeypair() (string, string, error) {

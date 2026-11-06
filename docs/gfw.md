@@ -62,22 +62,25 @@ singctl gfw
 
 ### 3. TLS 与 Reality 伪装主动探测 (满分 35 分)
 
-- **随机伪造 SNI 握手与证书泄露探测**：使用随机伪造域名发送 TLS ClientHello，检验服务端是正确发送 TLS Alert (unrecognized_name)，还是直接断开，或错误泄露了证书域名。
-- **目标 SNI 伪装度与网络 RTT 梯级时延分析**：测量 TCP 握手时延与 TLS 握手时延，结合协商版本的比率模型，评估是否存在跨地域中继时延偏差。
-- **Reality TLS 1.2 强制降级探测**：强制客户端仅提供 TLS 1.2 发起握手，检验服务端回落至真实目标站点的连贯性。
+- **随机伪造 SNI 握手、证书泄露与动态签发神谕探测**：使用随机伪造域名发送 TLS ClientHello，检验服务端是正确发送 TLS Alert (`unrecognized_name`)，还是错误暴露了 Reality 偷取证书，或因开启 `tls internal on_demand` 对随机域名现场签发了 `Caddy Local Authority` 同名自签假证书。
+- **目标 SNI 源站 Ground-Truth 差分、CA 签名链与握手后 L7 穿透检验**：
+  - 强校验系统根 CA 信任链与有效期（拦截 L4 路由错误落入本地自签证书）；
+  - 当指定 `--sni` 时，并发直连真实源站（如 `swdist.apple.com:443`）比对证书签发机构、ALPN、TLS 版本及 HTTP `Server` 响应头；
+  - 在同一条已完成 TLS 握手的连接上继续发送 L7 请求（HTTP `HEAD /` 或 H2 `Preface + SETTINGS`），验证应用层是否真正打通；
+  - 测量同连接跨层 TCP 握手时延与 TLS 握手时延比率，识别跨地域远程偷取时延阶跃特征。
+- **Reality TLS 1.2 强制降级探测**：强制客户端仅提供 TLS 1.2 发起握手，检验服务端回落至真实目标站点的连贯性及证书一致性。
 - **ALPN 协商与 HTTP/2 协议栈一致性**：同时声明 `h2` 与 `http/1.1`。若协商为 `h2`，验证服务端底层是否原生支持 HTTP/2，识别外层伪装与后端协议错配。
 - **TLS Alert RFC 规范性**：发送非法记录层报文，检验是否回复标准格式的 TLS Alert（Type: 0x15，含正确的 Level 与 Description 字段）。
 
 ### 4. 高熵随机垃圾数据探测 (满分 20 分)
 
-- **高熵未知随机数据包注入测试**：模拟外部扫描器发送 64 字节高随机度数据，高精度测量服务端断开连接的耗时：
-  - 若服务端挂起等待超过 2 秒甚至超时，判定为“服务端异常挂起等待握手认证”的非标 Web 行为；
-  - 若在 1 秒内快速 RST / FIN 拒绝或返回 HTTP 400，表现符合现代标准 Web 协议栈规范。
+- **多阶段变长高熵数据包注入与时延差侧信道 (IMC 2020)**：并发发送 `13B`（短于 AEAD Salt 阈值）与 `64B`（长于 AEAD 头部阈值）高熵随机密文，同时测量绝对挂起时间与短包/长包断开时延差 ($\Delta t$)，识别代理协议等待定长认证头部的侧信道。
+- **L4 SNI 预读器截断与 ExEntropy 豁免边界探测 (USENIX Security '23)**：发送外层声明 512B 但实际仅发 9B 的截断 TLS ClientHello 以及可打印 ASCII 前缀混合流，检测前置 L4 SNI 分流器（如 Caddy `layer4` / Nginx `ssl_preread`）是否存在等待完整握手的挂起侧信道或协议嗅探脑裂。
 
 ### 5. UDP / QUIC (Hysteria2) 协议探测 (满分 15 分)
 
-- **畸形 QUIC 数据包与版本协商探测**：向 UDP 443 发送填充满 1200 字节（RFC 9000 防放大规范）且携带保留版本号（`0x1a2a3a4a`）的 Initial 包。若目标未开启 UDP 则安全通过不扣分；若响应则校验是否符合标准 QUIC Version Negotiation 格式。
-- **UDP 随机高熵数据吞吐测试**：向 UDP 443 发送随机数据包，检验是否遵循防御反射放大 DDoS 的静默丢弃规范。
+- **QUIC 版本协商与防反射基准探测**：向 UDP 443 发送填充满 1200 字节（RFC 9000 防放大规范）且携带保留版本号（`0x1a2a3a4a`）的 Initial 包及 64B 随机高熵短包，校验是否返回标准 Version Negotiation 并静默丢弃未格式化随机短包。
+- **真实 QUIC v1 (`h3`) 加密握手与 TCP/UDP 双栈证书脑裂比对**：使用标准库 `crypto/tls.QUICClient` 发起 RFC 9001 QUIC v1 Initial (`0x00000001`, `ALPN: h3`) 真实 TLS 1.3 握手，提取 UDP 443 服务端证书链，检验是否存在过期/`Caddy Local Authority` 自签证书，并与同 IP 的 TCP 443 证书 SHA-256 指纹比对是否发生双栈脑裂。
 
 ---
 

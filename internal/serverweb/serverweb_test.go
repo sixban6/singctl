@@ -650,4 +650,10 @@ server:
 	if recDelNode.Code != http.StatusOK {
 		t.Fatalf("expected 200 deleting fleet node, got %d", recDelNode.Code)
 	}
+
+	// 4. Camouflage defaults + probe API
+	recCamoDef := doAuthReq(http.MethodGet, "/api/server/camouflage/defaults", "")
+	if recCamoDef.Code != http.StatusOK || !strings.Contains(recCamoDef.Body.String(), `"presets":`) {
+		t.Fatalf("unexpected camouflage defaults response: %d %s", recCamoDef.Code, recCamoDef.Body.String())
+	}
 }

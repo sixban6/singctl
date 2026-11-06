@@ -74,7 +74,8 @@
         ],
         "certificate_path": "{{.CertPath}}",
         "key_path": "{{.KeyPath}}"
-      }
+      },
+      "masquerade": "file:///var/www/mask-site"
     }
   ],
   "outbounds": [

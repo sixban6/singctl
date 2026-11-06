@@ -11,6 +11,7 @@ import { FleetTab } from './components/FleetTab';
 import { LogsTab } from './components/LogsTab';
 import { DiagnosticsTab } from './components/DiagnosticsTab';
 import { SecurityTab } from './components/SecurityTab';
+import { CamouflageTab } from './components/CamouflageTab';
 import { LoginModal } from './components/LoginModal';
 import { Activity } from 'lucide-react';
 
@@ -200,6 +201,8 @@ const DashboardContent: React.FC = () => {
           {currentTab === 'logs' && <LogsTab initialService={logService} />}
 
           {currentTab === 'diagnostics' && <DiagnosticsTab status={status} />}
+
+          {currentTab === 'camouflage' && <CamouflageTab status={status} />}
 
           {currentTab === 'security' && (
             <SecurityTab status={status} onRefresh={() => fetchStatus(false)} />

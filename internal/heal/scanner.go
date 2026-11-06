@@ -103,6 +103,11 @@ func scanCoreLayer(_ context.Context, cfg *config.Config, currentSingctlVer stri
 	fetcher := github.NewReleaseFetcher(mirror, deploy.ReleaseClient)
 
 	curSingctl := strings.TrimPrefix(strings.TrimSpace(currentSingctlVer), "v")
+	if diskVer := queryDiskSingctlVersion(); diskVer != "" {
+		if curSingctl == "" || curSingctl == "dev" || compareVersionTokens(curSingctl, diskVer) < 0 {
+			curSingctl = diskVer
+		}
+	}
 	if curSingctl == "" || curSingctl == "dev" {
 		if out, err := exec.Command("singctl", "version").CombinedOutput(); err == nil {
 			for line := range strings.SplitSeq(string(out), "\n") {
@@ -319,6 +324,12 @@ func ScanStaleSharedLibraryServices() []string {
 		if svc == "" || staleSet[svc] {
 			continue
 		}
+		if exeLink, lErr := os.Readlink(filepath.Join("/proc", pid, "exe")); lErr == nil {
+			if strings.Contains(exeLink, "(deleted)") || strings.Contains(exeLink, ".backup") {
+				staleSet[svc] = true
+				continue
+			}
+		}
 		mapsBytes, err := os.ReadFile(filepath.Join("/proc", pid, "maps"))
 		if err != nil {
 			continue
@@ -519,4 +530,28 @@ func isOpenWrtSystem() bool {
 func hasBinary(name string) bool {
 	_, err := exec.LookPath(name)
 	return err == nil
+}
+
+func queryDiskSingctlVersion() string {
+	candidates := []string{"/usr/local/bin/singctl", "/usr/bin/singctl"}
+	for _, bin := range candidates {
+		if _, err := os.Stat(bin); err != nil {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		out, err := exec.CommandContext(ctx, bin, "version").CombinedOutput()
+		cancel()
+		if err != nil {
+			continue
+		}
+		for line := range strings.SplitSeq(string(out), "\n") {
+			if idx := strings.Index(line, "SingCtl v"); idx != -1 {
+				fields := strings.Fields(line[idx:])
+				if len(fields) >= 2 {
+					return strings.TrimPrefix(fields[1], "v")
+				}
+			}
+		}
+	}
+	return ""
 }

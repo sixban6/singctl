@@ -13,6 +13,7 @@ import (
 
 	"singctl/internal/config"
 	"singctl/internal/constant"
+	"singctl/internal/deploy"
 	"singctl/internal/logger"
 )
 
@@ -398,6 +399,37 @@ func checkTLSCert(cfg *config.Config, r *DoctorReport) {
 			Summary:  "证书已过期！",
 			Detail:   "请检查 Caddy 证书续期日志",
 		})
+	}
+
+	// 校验 sing-box Hysteria2 配置证书文件是否真实存在且为非自签有效 ACME 证书
+	if rawCfg, err := os.ReadFile(constant.SingBoxConfigFile); err == nil {
+		s := string(rawCfg)
+		if strings.Contains(s, `"hysteria2"`) {
+			if strings.Contains(s, "/certificates/local/") {
+				r.Items = append(r.Items, DoctorItem{
+					Name:     "Hysteria2 QUIC 证书",
+					Category: "security",
+					Status:   "fail",
+					Summary:  "Hysteria2 证书误指向 Caddy local 内部自签证书",
+					Detail:   "客户端将拒绝自签证书握手，请执行安全自愈或重新同步证书路径",
+				})
+			} else if validCrt, _ := deploy.LookupValidCaddyCert(domain); validCrt != "" && !strings.Contains(s, validCrt) {
+				r.Items = append(r.Items, DoctorItem{
+					Name:     "Hysteria2 QUIC 证书",
+					Category: "security",
+					Status:   "warn",
+					Summary:  "Hysteria2 证书路径与最新 ACME 证书不一致",
+					Detail:   "可执行安全自愈自动同步至最新 ACME 证书并重载 sing-box",
+				})
+			} else {
+				r.Items = append(r.Items, DoctorItem{
+					Name:     "Hysteria2 QUIC 证书",
+					Category: "security",
+					Status:   "ok",
+					Summary:  "UDP 443 (QUIC/H3) 证书链与 TCP 443 保持一致且有效",
+				})
+			}
+		}
 	}
 }
 

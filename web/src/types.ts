@@ -522,3 +522,48 @@ export interface HealRunResponse {
   status: HealStatusReport;
   fleetReport?: FleetHealReport;
 }
+
+export interface CamouflagePreset {
+  id: string;
+  name: string;
+  ip: string;
+  domain: string;
+  sni: string;
+}
+
+export interface CamouflageDefaultsResponse {
+  ip: string;
+  domain: string;
+  sni: string;
+  ports: string;
+  presets: CamouflagePreset[];
+}
+
+export interface CamouflageCheckItem {
+  name: string;
+  description: string;
+  score: number;
+  max_score: number;
+  passed: boolean;
+  details: string;
+  mitigation: string;
+}
+
+export interface CamouflageCategory {
+  name: string;
+  score: number;
+  max_score: number;
+  items: CamouflageCheckItem[];
+}
+
+export interface CamouflageReport {
+  target_ip: string;
+  target_sni?: string;
+  target_domain?: string;
+  scan_time: string;
+  total_score: number;
+  risk_level: string;
+  categories: CamouflageCategory[];
+  findings: string[];
+  recommendations: string[];
+}

@@ -145,7 +145,7 @@ func (u *Updater) UpdateSelf(configPath string, currentVersion string) error {
 	}
 
 	// 6. 执行安全替换
-	currentExe, err := os.Executable()
+	currentExe, err := ResolveExecutablePath()
 	if err != nil {
 		return fmt.Errorf("get current executable: %w", err)
 	}
@@ -156,6 +156,36 @@ func (u *Updater) UpdateSelf(configPath string, currentVersion string) error {
 	logger.Success("SingCtl updated successfully")
 	logger.Info("Please restart the application to use the new version")
 	return nil
+}
+
+// ResolveExecutablePath returns the canonical on-disk executable path for singctl,
+// stripping Linux `/proc/self/exe` artifacts such as ` (deleted)` or `.backup` left over
+// when a long-running daemon (e.g. `singctl sr web`) was already replaced on disk.
+func ResolveExecutablePath() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		if _, stErr := os.Stat("/usr/local/bin/singctl"); stErr == nil {
+			return "/usr/local/bin/singctl", nil
+		}
+		return "", err
+	}
+	cleaned := SanitizeExecutablePath(exe)
+	if _, stErr := os.Stat(cleaned); stErr != nil {
+		if _, fbErr := os.Stat("/usr/local/bin/singctl"); fbErr == nil {
+			return "/usr/local/bin/singctl", nil
+		}
+	}
+	return cleaned, nil
+}
+
+// SanitizeExecutablePath strips ` (deleted)` and trailing `.backup` suffixes from an executable path.
+func SanitizeExecutablePath(exe string) string {
+	p := strings.TrimSpace(exe)
+	p = strings.TrimSuffix(p, " (deleted)")
+	for strings.HasSuffix(p, ".backup") {
+		p = strings.TrimSuffix(p, ".backup")
+	}
+	return p
 }
 
 // verifyChecksumsFile 是 digest 不可用时的回退路径：

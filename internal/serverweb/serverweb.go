@@ -195,6 +195,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/server/audit-logs", s.guard(s.handleListAuditLogs))
 	s.mux.HandleFunc("GET /api/server/doctor", s.guard(s.handleDoctor))
 	s.mux.HandleFunc("GET /api/server/diagnose/unlock", s.guard(s.handleUnlockDiagnose))
+	s.mux.HandleFunc("GET /api/server/camouflage/defaults", s.guard(s.handleCamouflageDefaults))
+	s.mux.HandleFunc("POST /api/server/camouflage/probe", s.guard(s.handleCamouflageProbe))
 
 	// 三层自动化安全漏洞自愈中心 (3-Layer Security Self-Healing)
 	s.mux.HandleFunc("GET /api/server/heal/status", s.guard(s.handleHealStatus))

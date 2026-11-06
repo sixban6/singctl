@@ -7,12 +7,13 @@ import {
   Terminal,
   Globe,
   Shield,
+  Radar,
   MoreHorizontal,
   X,
   Check,
 } from 'lucide-react';
 
-export type TabKey = 'overview' | 'services' | 'subscriptions' | 'fleet' | 'logs' | 'diagnostics' | 'security';
+export type TabKey = 'overview' | 'services' | 'subscriptions' | 'fleet' | 'camouflage' | 'logs' | 'diagnostics' | 'security';
 
 interface NavigationProps {
   currentTab: TabKey;
@@ -28,6 +29,7 @@ export const Navigation: React.FC<NavigationProps> = ({ currentTab, onChangeTab 
     { key: 'subscriptions' as TabKey, label: '节点与订阅分发', shortLabel: '订阅', icon: Link2, desc: '全平台订阅链接、防盗刷审计与二维码' },
     { key: 'fleet' as TabKey, label: '全球节点舰队', shortLabel: '舰队', icon: Network, desc: '新机零配置开荒、全网体检与凭据换血' },
     { key: 'security' as TabKey, label: '安全与自愈中心', shortLabel: '安全自愈', icon: Shield, desc: '三层漏洞自动热修复、隐蔽入口与防爆破' },
+    { key: 'camouflage' as TabKey, label: '伪装与抗探测评估', shortLabel: '伪装评估', icon: Radar, desc: '五维黑盒协议特征审讯、源站比对与双栈证书核验' },
     { key: 'diagnostics' as TabKey, label: '回程链路探测', shortLabel: '回程', icon: Globe, desc: '三网回程路由追踪 (CN2 GIA / 9929 / CMI)' },
     { key: 'logs' as TabKey, label: '终端实时日志', shortLabel: '日志', icon: Terminal, desc: 'SSE 零轮询彩色实时服务日志流' },
   ];

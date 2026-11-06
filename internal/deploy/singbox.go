@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"crypto/ecdh"
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"os"
 	"os/exec"
@@ -109,6 +111,41 @@ func (sbs *SingBoxServer) AnyTLSPort() int {
 	return 443
 }
 
+// IsValidPublicACMECert verifies that the certificate file exists, is a valid X.509 PEM certificate,
+// has not expired, and is not issued by Caddy's internal self-signed CA ("Caddy Local Authority").
+func IsValidPublicACMECert(crtPath string) bool {
+	data, err := os.ReadFile(crtPath)
+	if err != nil || len(data) == 0 {
+		return false
+	}
+	block, _ := pem.Decode(data)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return false
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return false
+	}
+	now := time.Now()
+	if now.After(cert.NotAfter) {
+		return false
+	}
+	issuerCN := strings.ToLower(cert.Issuer.CommonName)
+	issuerOrg := strings.ToLower(strings.Join(cert.Issuer.Organization, " "))
+	if strings.Contains(issuerCN, "caddy local") || strings.Contains(issuerOrg, "caddy local") {
+		return false
+	}
+	if cert.Issuer.String() == cert.Subject.String() {
+		return false
+	}
+	return true
+}
+
+// LookupValidCaddyCert locates a valid, non-self-signed ACME certificate and key for domain under Caddy's storage.
+func LookupValidCaddyCert(domain string) (string, string) {
+	return lookupCaddyCert(domain)
+}
+
 func lookupCaddyCert(domain string) (string, string) {
 	basePath := "/var/lib/caddy/.local/share/caddy/certificates"
 	if _, err := os.Stat("/var/lib/caddy"); os.IsNotExist(err) {
@@ -129,11 +166,16 @@ func lookupCaddyCert(domain string) (string, string) {
 		if !d.IsDir() {
 			continue
 		}
+		dirNameLower := strings.ToLower(d.Name())
+		// Never select Caddy's internal self-signed local CA directory for public Hysteria2 nodes
+		if dirNameLower == "local" || dirNameLower == "pki" {
+			continue
+		}
 		// 1. Direct domain cert match
 		crtPath := filepath.Join(basePath, d.Name(), domain, domain+".crt")
 		keyPath := filepath.Join(basePath, d.Name(), domain, domain+".key")
 		if _, err := os.Stat(crtPath); err == nil {
-			if _, err := os.Stat(keyPath); err == nil {
+			if _, err := os.Stat(keyPath); err == nil && IsValidPublicACMECert(crtPath) {
 				return crtPath, keyPath
 			}
 		}
@@ -143,7 +185,7 @@ func lookupCaddyCert(domain string) (string, string) {
 			wCrt := filepath.Join(basePath, d.Name(), wName, wName+".crt")
 			wKey := filepath.Join(basePath, d.Name(), wName, wName+".key")
 			if _, err := os.Stat(wCrt); err == nil {
-				if _, err := os.Stat(wKey); err == nil {
+				if _, err := os.Stat(wKey); err == nil && IsValidPublicACMECert(wCrt) {
 					return wCrt, wKey
 				}
 			}
@@ -166,16 +208,114 @@ func findCaddyCertForDomain(domain string) (string, string) {
 		return crt, key
 	}
 
-	logger.Info("Waiting for Caddy to generate certificates for %s...", domain)
-	for range 30 {
+	logger.Info("Waiting for Caddy to generate public ACME certificates for %s...", domain)
+	for range 60 {
 		time.Sleep(1 * time.Second)
 		if crt, key := lookupCaddyCert(domain); crt != "" {
-			logger.Success("Found certificate at %s", crt)
+			logger.Success("Found valid ACME certificate at %s", crt)
 			return crt, key
 		}
 	}
 
 	return fallbackCrt, fallbackKey
+}
+
+// SyncHysteria2CertIfNeeded inspects /etc/sing-box/config.json and heals the Hysteria2 certificate_path
+// if it points to a deleted/expired/local self-signed cert while a valid Caddy ACME cert is available.
+func SyncHysteria2CertIfNeeded(cfg *config.Config) (bool, string, error) {
+	cfgFile := constant.SingBoxConfigFile
+	rawBytes, err := os.ReadFile(cfgFile)
+	if err != nil {
+		return false, "", nil
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal(rawBytes, &doc); err != nil {
+		return false, "", nil
+	}
+
+	inbounds, ok := doc["inbounds"].([]any)
+	if !ok {
+		return false, "", nil
+	}
+
+	domain := ""
+	if cfg != nil {
+		domain = cfg.Server.GetNodeDomain()
+	}
+
+	changed := false
+	var healMsg string
+	for _, ibAny := range inbounds {
+		ib, ok := ibAny.(map[string]any)
+		if !ok || ib["type"] != "hysteria2" {
+			continue
+		}
+		tlsObj, ok := ib["tls"].(map[string]any)
+		if !ok {
+			continue
+		}
+		curCrt, _ := tlsObj["certificate_path"].(string)
+		if domain == "" && curCrt != "" {
+			domain = filepath.Base(filepath.Dir(curCrt))
+		}
+		if domain == "" {
+			continue
+		}
+
+		validCrt, validKey := lookupCaddyCert(domain)
+		if validCrt == "" || validKey == "" {
+			continue
+		}
+
+		needsCertFix := curCrt != validCrt || !IsValidPublicACMECert(curCrt)
+		if needsCertFix {
+			tlsObj["certificate_path"] = validCrt
+			tlsObj["key_path"] = validKey
+			changed = true
+			healMsg = fmt.Sprintf("Hysteria2 证书路径已自动修复同步至有效 ACME 证书 (%s)", domain)
+		}
+		if _, hasMasq := ib["masquerade"]; !hasMasq {
+			if st, err := os.Stat("/var/www/mask-site"); err == nil && st.IsDir() {
+				ib["masquerade"] = "file:///var/www/mask-site"
+				changed = true
+				if healMsg == "" {
+					healMsg = "已为 Hysteria2 补齐 HTTP/3 静态伪装站回落配置 (masquerade)"
+				}
+			}
+		}
+	}
+
+	if !changed {
+		return false, "", nil
+	}
+
+	outBytes, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return false, "", err
+	}
+
+	tmpPath := cfgFile + ".tmp"
+	if err := os.WriteFile(tmpPath, outBytes, 0600); err != nil {
+		return false, "", err
+	}
+	_ = os.Chmod(tmpPath, 0600)
+
+	sbBin := constant.SingBoxInstallDir
+	if _, err := os.Stat(sbBin); err == nil {
+		if out, cErr := exec.Command(sbBin, "check", "-c", tmpPath).CombinedOutput(); cErr != nil {
+			_ = os.Remove(tmpPath)
+			return false, "", fmt.Errorf("sing-box check failed: %s", strings.TrimSpace(string(out)))
+		}
+	}
+
+	if err := os.Rename(tmpPath, cfgFile); err != nil {
+		_ = os.Remove(tmpPath)
+		return false, "", err
+	}
+	_ = os.Chmod(cfgFile, 0600)
+	_ = exec.Command("systemctl", "restart", "sing-box").Run()
+	return true, healMsg, nil
 }
 
 // initCaddyCertPath finds or waits for the actual cert path Caddy generated (Let's Encrypt or ZeroSSL)

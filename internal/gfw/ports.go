@@ -6,7 +6,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -26,9 +28,28 @@ func probePorts(ctx context.Context, opts ProbeOptions) Category {
 	httpPort := opts.GetHTTPPort()
 	httpsPort := opts.GetHTTPSPort()
 
-	// 1. 检查 HTTP 与 HTTPS 端口状态
-	pHTTPOpen := isPortOpen(ctx, opts.IP, httpPort, timeout)
-	pHTTPSOpen := isPortOpen(ctx, opts.IP, httpsPort, timeout)
+	// 1. 并发检查 HTTP 与 HTTPS 端口状态及金丝雀端口
+	var (
+		pHTTPOpen          bool
+		pHTTPSOpen         bool
+		isTransparentProxy bool
+		wg                 sync.WaitGroup
+	)
+	canaryPort := 59183
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		pHTTPOpen = isPortOpen(ctx, opts.IP, httpPort, timeout)
+	}()
+	go func() {
+		defer wg.Done()
+		pHTTPSOpen = isPortOpen(ctx, opts.IP, httpsPort, timeout)
+	}()
+	go func() {
+		defer wg.Done()
+		isTransparentProxy = isPortOpen(ctx, opts.IP, canaryPort, 800*time.Millisecond)
+	}()
+	wg.Wait()
 
 	itemPortSymmetry := CheckItem{
 		Name:        fmt.Sprintf("%d/%d 端口对称性分析", httpPort, httpsPort),
@@ -78,17 +99,27 @@ func probePorts(ctx context.Context, opts ProbeOptions) Category {
 	}
 	cat.Items = append(cat.Items, itemRedirect)
 
-	// 3. 敏感代理/面板管理端口暴露检测
-	// 首先通过随机金丝雀高位端口检测当前测试客户端是否处于软路由/透明代理全端口劫持环境中
-	canaryPort := 59183
-	isTransparentProxy := isPortOpen(ctx, opts.IP, canaryPort, 800*time.Millisecond)
-
+	// 3. 敏感代理/面板管理端口暴露检测（并发探测）
 	sensitivePorts := []int{7895, 9090, 9091, 2080, 1080}
-	var exposed []int
-	for _, port := range sensitivePorts {
-		if isPortOpen(ctx, opts.IP, port, 1500*time.Millisecond) {
-			exposed = append(exposed, port)
+	var (
+		exposed   []int
+		exposedMu sync.Mutex
+		sWg       sync.WaitGroup
+	)
+	if !isTransparentProxy {
+		for _, port := range sensitivePorts {
+			sWg.Add(1)
+			go func(p int) {
+				defer sWg.Done()
+				if isPortOpen(ctx, opts.IP, p, 1200*time.Millisecond) {
+					exposedMu.Lock()
+					exposed = append(exposed, p)
+					exposedMu.Unlock()
+				}
+			}(port)
 		}
+		sWg.Wait()
+		slices.Sort(exposed)
 	}
 
 	itemSensitive := CheckItem{
