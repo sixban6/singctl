@@ -193,38 +193,27 @@ go run ./cmd/snapshotgen -mirror https://gh-proxy.com  # 直连不可用时
 
 ---
 
-## 本地防劫持 DNS (AdGuard Home)
+## 两层极简分流模型与本地防劫持 DNS
 
-命令前缀：`singctl dns` / `singctl agh`（适用于 Linux / OpenWrt 客户端网关）
+### 1. 面板分组结构（`singgen v1.17.0+`）
 
-在客户端网关一键部署 AdGuard Home，负责接管 `sing-box` 的 `dns_local`（国内域名与代理节点 Bootstrap 解析），上游统一采用纯 IP 加密 DoH / DoT（`223.5.5.5`、`223.6.6.6`、`1.12.12.12`），彻底杜绝宽带运营商对明文 `UDP 53` 的抢答劫持。
+生成的客户端配置采用 **「4 个业务分流开关 + 3 个 `#` 底层节点池」** 两层布局：
 
-### 核心安全设计
+- **业务分流开关**：
+  - `Proxy`（默认 `#VPS`）：日常海外总开关及大型游戏资源下载；
+  - `AI`（默认 `#VPS`）：ChatGPT / Claude / Grok 独立防锁区；
+  - `Game`（默认 `#Auto`）：海外游戏大厅、匹配与禁选英雄 TCP 信令；
+  - `Game-UDP`（默认 `DirectConn`）：海外游戏局内高端口（`1024:65535`）实时帧同步 UDP 直连。
+- **底层节点池（带 `#` 微前缀）**：
+  - `#VPS`：自建 `sec_` 节点池；
+  - `#Auto`：机场 1 倍节点自动测速最低延迟池（自动剔除高倍率节点）；
+  - `#Nodes`：机场全部节点手动选择池。
 
-- **DNS 端口本地隔离**：仅绑定 `127.0.0.1:5353`，不与 OpenWrt `dnsmasq` 或系统 `53` 端口冲突；
-- **Web 面板仅绑局域网 IP**：自动提取本机真实局域网私网 IP（如 `http://192.168.1.1:3000`），绝不监听 `0.0.0.0` 或公网接口；
-- **免首次引导与强随机密码**：首次安装可直接输入管理员用户名（直接回车默认 `root`），自动生成 16 位强随机密码并跳过无鉴权初始化向导；
-- **透明代理防回环死锁**：TProxy 防火墙自动直通放行加密 DNS 上游端口，并由 `singctl dm` 看门狗守护进程存活。
+### 2. 本地防劫持 DNS (`singctl dns`)
 
-### 常用命令
+Linux / OpenWrt 客户端网关可通过 `singctl dns install` 一键部署本地 AdGuard Home（监听 `127.0.0.1:5353` + 局域网管理面板），自动接管 `dns_local` 并通过纯 IP 加密 DoH/DoT 杜绝运营商明文 DNS 劫持。
 
-```bash
-# 安装、免向导初始化并启动 AdGuard Home（install.sh 客户端模式会自动调用）
-singctl dns install
+> 📘 完整架构说明、配置项与子命令手册请参阅：**[👉 本地防劫持 DNS (AdGuard Home) 指南](dns.md)**
 
-# 查看运行状态、加密解析延迟、局域网面板地址与管理员密码
-singctl dns status
-
-# 启动 / 停止 / 重启服务
-singctl dns start
-singctl dns stop
-singctl dns restart
-
-# 重置管理员密码（可选 -u 指定新用户名）
-singctl dns reset-password
-
-# 卸载服务（附加 --purge 同时清理 /etc/AdGuardHome 配置目录）
-singctl dns uninstall
-```
 
 

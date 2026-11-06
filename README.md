@@ -146,25 +146,19 @@ singctl sr mask-site   # 重新生成或换一批随机伪装站点
 
 ## 📚 全功能深入文档导航
 
-各项进阶模块与调优配置已整理至 `docs/` 目录中：
+全部进阶配置与排障手册均按四大场景归类于 `docs/` 目录：
 
-| 运维场景 | 对应模块 | 核心能力说明 | 完整指南 |
-| :--- | :--- | :--- | :---: |
-| **单节点 VPS 实战全解** | `singctl ssh` / `sr` | 新机买来后从 SSH 加固、四核一键部署、客户端接入到防盗刷全流程 | [👉 单节点实战全解](docs/guide-single-node.md) |
-| **多节点舰队闭环全解** | `singctl fl` / `dm` | 主从架构选型、`fleet.yaml`、裸机一键开荒加固与软路由无感热同步 | [👉 多节点舰队全解](docs/guide-multi-node-fleet.md) |
-| **服务端全生命周期** | `singctl sr` | 四核组件安装、实时分流雷达 (`sr top`)、凭据管理、专属Web后台 | [👉 服务端运维指南](docs/server.md) |
-| **全球多节点舰队** | `singctl fleet` | 无 Agent 跨地域节点纳管、裸机 60s 部署、全网体检与换血同步 | [👉 多节点舰队全解](docs/guide-multi-node-fleet.md) |
-| **客户端透明路由** | `singctl sb` | TUN / TProxy 模式、两层极简分流 (`Game`/`Game-UDP`)、规则集缓存、iOS 配置生成 | [👉 客户端配置指南](docs/client.md) |
-| **本地防劫持 DNS** | `singctl dns` | 一键托管 AdGuard Home (`127.0.0.1:5353` + 内网面板)、纯 IP 加密 DoH 免向导部署 | [👉 防劫持 DNS 指南](docs/dns.md) |
-| **网络拓扑与选型** | `singctl net` | 跨境三网回程线路识别 (CN2/9929/CMI)、丢包抖动评测 | [👉 网络诊断指南](docs/net.md) |
-| **网络健壮性仿真** | `singctl gfw` | 模拟复杂网络环境下的主动探测抗压与握手健壮度评分 | [👉 健壮性测试指南](docs/gfw.md) |
-| **隐蔽 Web 终端** | `singctl term` | 基于 mTLS 双向认证的 Web 终端 (GoTTY) 与安全穿透 | [👉 隐蔽终端指南](docs/terminal.md) |
-| **SSH 免密与加固** | `singctl ssh` | 批量免密分发、端口收敛至 2222、禁用密码与防失联 | [👉 SSH 加固指南](docs/ssh.md) |
-| **客户端可视化控制** | `singctl web` | 本地浏览器控制台、实时多节点分流与流量监控 | [👉 WebUI 管理指南](docs/webui.md) |
-| **Tailscale 私网互联**| `singctl ts` | 多机私有内网互联、Subnet 路由转发与 DERP 自建 | [👉 Tailscale 指南](docs/tailscale.md) |
-| **守护进程与看门狗** | `singctl dm` | sing-box 后台进程自动看门狗、异常崩溃自动拉起 | [👉 守护进程指南](docs/daemon.md) |
-| **系统防火墙加固** | `singctl fw` | Linux / OpenWrt 专用最小权限开放加固规则 | [👉 防火墙指南](docs/firewall.md) |
-| **实用综合工具** | `singctl ut` | 单线程/多线程测速、配置迁移、核心组件自更新 | [👉 实用工具指南](docs/utils.md) |
+| 所属分类 | 模块与命令 | 核心能力说明 | 深入指南 |
+| :--- | :--- | :--- | :--- |
+| **🚀 实战教程** | **单节点开荒闭环**<br>`singctl ssh` / `sr` | 新机 SSH 防锁死加固、四核一键部署、客户端接入与防盗刷全流程 | [👉 单节点实战](docs/guide-single-node.md) |
+| **🚀 实战教程** | **多节点舰队闭环**<br>`singctl fl` / `dm` | 主从架构、`fleet.yaml` 纳管、60s 裸机开荒、巡检自愈与软路由无感热同步 | [👉 多节点舰队](docs/guide-multi-node-fleet.md) |
+| **☁️ 服务端运维** | **服务端全生命周期**<br>`singctl sr` | 四核组件安装升级、`sr top` 实时雷达、WARP 解锁与隐蔽 Web 管理后台 | [👉 服务端指南](docs/server.md) |
+| **☁️ 服务端运维** | **SSH 加固与隐蔽终端**<br>`singctl ssh` / `term` | 批量免密、端口平滑迁至 `2222`、mTLS 双向认证 Web 终端与 WSS 穿透 | [👉 SSH 加固](docs/ssh.md)<br>[👉 隐蔽终端](docs/terminal.md) |
+| **🏠 客户端网关** | **透明路由与可视化面板**<br>`singctl sb` / `web` | TProxy/TUN 网关、两层极简分流 (`Game`/`Game-UDP`)、规则集离线缓存、iOS 导出与本地 WebUI | [👉 客户端路由](docs/client.md)<br>[👉 本地 WebUI](docs/webui.md) |
+| **🏠 客户端网关** | **本地防劫持加密 DNS**<br>`singctl dns` | 一键托管 AdGuard Home (`127.0.0.1:5353` + 局域网面板)、纯 IP DoH 免向导部署 | [👉 防劫持 DNS](docs/dns.md) |
+| **🏠 客户端网关** | **Tailscale 私网互联**<br>`singctl ts` | 异地多机私网直连、家庭局域网 Subnet 路由通告与 Exit Node 配置 | [👉 Tailscale 指南](docs/tailscale.md) |
+| **🩺 诊断与系统** | **链路选型与健壮性评测**<br>`singctl net` / `gfw` | 三网回程骨干识别 (CN2/9929/CMI)、QUIC 丢包抖动测试与 5 维主动探测评分 | [👉 网络诊断](docs/net.md)<br>[👉 健壮性评估](docs/gfw.md) |
+| **🩺 诊断与系统** | **看门狗、防火墙与工具**<br>`singctl dm` / `fw` / `ut` | 进程与本地 DNS 崩溃自愈、最小权限防火墙加固、带宽测速与平滑自更新 | [👉 看门狗守护](docs/daemon.md)<br>[👉 防火墙加固](docs/firewall.md)<br>[👉 实用工具](docs/utils.md) |
 
 ---
 
