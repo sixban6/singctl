@@ -119,6 +119,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+KillMode=process
 ExecStart=%s sr heal --trigger timer%s -c %s
 Nice=10
 IOSchedulingClass=best-effort
