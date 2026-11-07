@@ -254,9 +254,16 @@ func (s *Server) authorized(r *http.Request) bool {
 
 func (s *Server) guard(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		clientIP := s.getClientIPAndSeedGeo(r)
 		if !s.authorized(r) {
+			if s.sniff != nil && clientIP != "" && clientIP != "loopback-direct" {
+				s.sniff.Observe(clientIP, "Web 管理路径嗅探", "observing", 1)
+			}
 			writeJSONError(w, http.StatusUnauthorized, "未授权访问，请先登录")
 			return
+		}
+		if s.sniff != nil && clientIP != "" && clientIP != "loopback-direct" {
+			s.sniff.MarkTrustedClientIPs(clientIP)
 		}
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {

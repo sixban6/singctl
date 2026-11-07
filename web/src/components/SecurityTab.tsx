@@ -5,6 +5,7 @@ import {
   AuditLogItem,
   HealStatusReport,
   FleetHealReport,
+  SniffSummary,
 } from '../types';
 import { api } from '../api';
 import { useToast } from './Toast';
@@ -29,6 +30,10 @@ import {
   Network,
   CheckCircle2,
   AlertTriangle,
+  Eye,
+  EyeOff,
+  Copy,
+  Ban,
 } from 'lucide-react';
 
 interface SecurityTabProps {
@@ -42,6 +47,7 @@ export const SecurityTab: React.FC<SecurityTabProps> = ({ status, onRefresh }) =
   const [newUsername, setNewUsername] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+  const [showNewPassword, setShowNewPassword] = useState(false);
   const [loadingCreds, setLoadingCreds] = useState(false);
   const [loadingPath, setLoadingPath] = useState(false);
 
@@ -57,6 +63,13 @@ export const SecurityTab: React.FC<SecurityTabProps> = ({ status, onRefresh }) =
   const [bans, setBans] = useState<BannedIP[]>([]);
   const [loadingBans, setLoadingBans] = useState(false);
   const [unbanningIP, setUnbanningIP] = useState<string | null>(null);
+
+  // 外部活跃嗅探与探测追踪状态
+  const [sniffSummary, setSniffSummary] = useState<SniffSummary | null>(null);
+  const [loadingSniff, setLoadingSniff] = useState(false);
+  const [sniffTab, setSniffTab] = useState<'ip' | 'subnet' | 'country'>('ip');
+  const [blockingTarget, setBlockingTarget] = useState<string | null>(null);
+  const [manualBlockInput, setManualBlockInput] = useState('');
 
   // 最近管理操作审计状态
   const [auditLogs, setAuditLogs] = useState<AuditLogItem[]>(status?.auditLogs || []);
@@ -86,6 +99,18 @@ export const SecurityTab: React.FC<SecurityTabProps> = ({ status, onRefresh }) =
     }
   };
 
+  const fetchSniffers = async () => {
+    setLoadingSniff(true);
+    try {
+      const res = await api.getSniffers();
+      setSniffSummary(res);
+    } catch {
+      // silent
+    } finally {
+      setLoadingSniff(false);
+    }
+  };
+
   const fetchAuditLogs = async () => {
     setLoadingAudit(true);
     try {
@@ -101,6 +126,7 @@ export const SecurityTab: React.FC<SecurityTabProps> = ({ status, onRefresh }) =
   useEffect(() => {
     fetchHealStatus();
     fetchBans();
+    fetchSniffers();
     fetchAuditLogs();
   }, []);
 
@@ -165,10 +191,32 @@ export const SecurityTab: React.FC<SecurityTabProps> = ({ status, onRefresh }) =
       const res = await api.unban(ip);
       success(res.message || `已成功解除 IP ${ip} 的封锁`);
       await fetchBans();
+      await fetchSniffers();
     } catch (err: any) {
       error(err.message || '解封失败');
     } finally {
       setUnbanningIP(null);
+    }
+  };
+
+  const handleBlockSniffer = async (target: string) => {
+    const trimmed = target.trim();
+    if (!trimmed) {
+      error('请输入要封禁的 IP 地址或 /24 网段');
+      return;
+    }
+    setBlockingTarget(trimmed);
+    try {
+      const res = await api.blockSniffer(trimmed);
+      success(res.message || `已封禁 ${trimmed}`);
+      setSniffSummary(res.summary);
+      setManualBlockInput('');
+      await fetchBans();
+      await fetchAuditLogs();
+    } catch (err: any) {
+      error(err.message || '封禁失败');
+    } finally {
+      setBlockingTarget(null);
     }
   };
 
@@ -178,6 +226,58 @@ export const SecurityTab: React.FC<SecurityTabProps> = ({ status, onRefresh }) =
   const hasLower = /[a-z]/.test(newPassword);
   const hasDigit = /[0-9]/.test(newPassword);
   const isPasswordValid = hasMinLength && hasUpper && hasLower && hasDigit;
+
+  const handleGenerateRandomPassword = async () => {
+    const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+    const lower = 'abcdefghijkmnopqrstuvwxyz';
+    const digits = '23456789';
+    const symbols = '!@#$%^&*-_=+';
+    const allChars = upper + lower + digits + symbols;
+
+    const pickRandom = (charset: string, count: number): string[] => {
+      const arr = new Uint32Array(count);
+      window.crypto.getRandomValues(arr);
+      return Array.from(arr, (v) => charset[v % charset.length]);
+    };
+
+    const chars = [
+      ...pickRandom(upper, 3),
+      ...pickRandom(lower, 5),
+      ...pickRandom(digits, 4),
+      ...pickRandom(symbols, 4),
+      ...pickRandom(allChars, 0),
+    ];
+
+    // Fisher-Yates CSPRNG shuffle
+    const shuffleBuf = new Uint32Array(chars.length);
+    window.crypto.getRandomValues(shuffleBuf);
+    for (let i = chars.length - 1; i > 0; i--) {
+      const j = shuffleBuf[i] % (i + 1);
+      [chars[i], chars[j]] = [chars[j], chars[i]];
+    }
+
+    const generated = chars.join('');
+    setNewPassword(generated);
+    setConfirmPassword(generated);
+    setShowNewPassword(true);
+
+    try {
+      await navigator.clipboard.writeText(generated);
+      success('已生成 16 位随机强密码并自动复制到剪贴板，请输入当前密码后保存');
+    } catch {
+      success('已生成 16 位随机强密码并填入输入框，请复制保存');
+    }
+  };
+
+  const handleCopyNewPassword = async () => {
+    if (!newPassword) return;
+    try {
+      await navigator.clipboard.writeText(newPassword);
+      success('新管理密码已复制到剪贴板');
+    } catch {
+      error('复制失败，请手动选中复制');
+    }
+  };
 
   const handleUpdateCreds = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -628,14 +728,46 @@ export const SecurityTab: React.FC<SecurityTabProps> = ({ status, onRefresh }) =
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-slate-300 mb-1.5">
-              新管理密码 <span className="text-rose-400">*</span>
-            </label>
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
+              <label className="block text-xs font-medium text-slate-300">
+                新管理密码 <span className="text-rose-400">*</span>
+              </label>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={handleGenerateRandomPassword}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 text-[11px] font-medium transition-all"
+                >
+                  <Dices className="w-3.5 h-3.5" />
+                  <span>随机生成强密码</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowNewPassword((v) => !v)}
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 text-[11px] transition-all"
+                  title={showNewPassword ? '隐藏密码' : '显示明文'}
+                >
+                  {showNewPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                  <span>{showNewPassword ? '隐藏' : '明文'}</span>
+                </button>
+                {newPassword && (
+                  <button
+                    type="button"
+                    onClick={handleCopyNewPassword}
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 text-[11px] transition-all"
+                    title="复制新密码"
+                  >
+                    <Copy className="w-3.5 h-3.5" />
+                    <span>复制</span>
+                  </button>
+                )}
+              </div>
+            </div>
             <input
-              type="password"
+              type={showNewPassword ? 'text' : 'password'}
               value={newPassword}
               onChange={(e) => setNewPassword(e.target.value)}
-              placeholder="至少 8 位，包含大写、小写、数字"
+              placeholder="至少 8 位，包含大写、小写、数字（可点击右上角一键生成）"
               required
               className="w-full bg-slate-950/80 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-200 placeholder:text-slate-600 focus:outline-none focus:border-emerald-500 font-mono"
             />
@@ -664,7 +796,7 @@ export const SecurityTab: React.FC<SecurityTabProps> = ({ status, onRefresh }) =
               确认新管理密码 <span className="text-rose-400">*</span>
             </label>
             <input
-              type="password"
+              type={showNewPassword ? 'text' : 'password'}
               value={confirmPassword}
               onChange={(e) => setConfirmPassword(e.target.value)}
               placeholder="再次输入新管理密码"
@@ -684,6 +816,302 @@ export const SecurityTab: React.FC<SecurityTabProps> = ({ status, onRefresh }) =
             </button>
           </div>
         </form>
+      </div>
+
+      {/* ═══════════════════════ 3.5 External Active Sniffing & One-Click Block Card ═══════════════════════ */}
+      <div className="p-4 sm:p-6 rounded-2xl glass-card">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 pb-4 border-b border-slate-800">
+          <div>
+            <div className="flex items-center gap-2 text-amber-400 text-xs font-semibold uppercase tracking-wider mb-1">
+              <ShieldAlert className="w-3.5 h-3.5" />
+              <span>外部主动探测与嗅探态势感知</span>
+            </div>
+            <h3 className="text-lg sm:text-xl font-bold text-white tracking-tight flex flex-wrap items-center gap-2">
+              <span>活跃嗅探追踪与网段防御 (Top 8)</span>
+              <span className="px-2.5 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30 text-xs font-semibold font-mono">
+                {sniffSummary?.totalSniffIPs || 0} 嗅探 IP · {sniffSummary?.totalSubnets || 0} 个 /24 段 ·{' '}
+                {sniffSummary?.totalCountries || 0} 个国家
+              </span>
+            </h3>
+            <p className="text-xs text-slate-400 mt-0.5">
+              自动剔除已鉴权代理客户端与管理会话 IP，聚合防火墙、SSH 防爆破及 TLS/80 伪装回落嗅探源，支持一键拉黑单点 IP 或整个{' '}
+              <code className="text-amber-300 font-mono">/24</code> 扫描段。
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 self-start lg:self-auto">
+            <div className="inline-flex rounded-xl bg-slate-950/80 p-1 border border-slate-800 text-xs">
+              <button
+                type="button"
+                onClick={() => setSniffTab('ip')}
+                className={`px-3 py-1 rounded-lg font-medium transition-all ${
+                  sniffTab === 'ip'
+                    ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                活跃嗅探 IP ({sniffSummary?.topIPs?.length || 0})
+              </button>
+              <button
+                type="button"
+                onClick={() => setSniffTab('subnet')}
+                className={`px-3 py-1 rounded-lg font-medium transition-all ${
+                  sniffTab === 'subnet'
+                    ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                活跃嗅探 IP段 ({sniffSummary?.topSubnets?.length || 0})
+              </button>
+              <button
+                type="button"
+                onClick={() => setSniffTab('country')}
+                className={`px-3 py-1 rounded-lg font-medium transition-all ${
+                  sniffTab === 'country'
+                    ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                活跃嗅探国 ({sniffSummary?.topCountries?.length || 0})
+              </button>
+            </div>
+
+            <button
+              type="button"
+              onClick={fetchSniffers}
+              disabled={loadingSniff}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-xs text-slate-300 transition-all disabled:opacity-50"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${loadingSniff ? 'animate-spin' : ''}`} />
+              <span>刷新态势</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Manual Block Input Bar */}
+        <div className="mt-4 flex flex-col sm:flex-row items-stretch sm:items-center gap-2 bg-slate-950/50 p-3 rounded-xl border border-slate-800/80">
+          <input
+            type="text"
+            value={manualBlockInput}
+            onChange={(e) => setManualBlockInput(e.target.value)}
+            placeholder="输入异常嗅探 IP 或 /24 网段 (例如 198.51.100.42 或 198.51.100.0/24)"
+            className="flex-1 bg-slate-900/90 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 placeholder:text-slate-500 focus:outline-none focus:border-rose-500 font-mono"
+          />
+          <button
+            type="button"
+            onClick={() => handleBlockSniffer(manualBlockInput)}
+            disabled={!manualBlockInput.trim() || blockingTarget !== null}
+            className="inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/30 text-rose-200 text-xs font-semibold transition-all disabled:opacity-50 shrink-0"
+          >
+            <Ban className="w-3.5 h-3.5" />
+            <span>{blockingTarget === manualBlockInput.trim() ? '正在拉黑...' : '一键拉黑 IP / 网段'}</span>
+          </button>
+        </div>
+
+        <div className="mt-4">
+          {sniffTab === 'ip' && (
+            <>
+              {!sniffSummary?.topIPs || sniffSummary.topIPs.length === 0 ? (
+                <div className="py-8 text-center rounded-xl bg-slate-950/40 border border-slate-800/80">
+                  <ShieldCheck className="w-9 h-9 text-emerald-400 mx-auto mb-2 opacity-80" />
+                  <div className="text-sm font-semibold text-slate-200">当前未捕获到外部活跃嗅探 IP</div>
+                  <p className="text-xs text-slate-500 mt-1 max-w-md mx-auto px-3">
+                    当外部扫描器试探高危端口、回落伪装站或爆破密码时，将在此处实时汇总并支持一键拉黑。
+                  </p>
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs font-mono">
+                    <thead>
+                      <tr className="border-b border-slate-800 text-slate-400">
+                        <th className="py-2.5 px-3">活跃嗅探源 IP</th>
+                        <th className="py-2.5 px-3">所属 /24 网段</th>
+                        <th className="py-2.5 px-3">探测特征与指纹</th>
+                        <th className="py-2.5 px-3">命中数</th>
+                        <th className="py-2.5 px-3">当前状态</th>
+                        <th className="py-2.5 px-3 text-right">主动防御操作</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800/60">
+                      {sniffSummary.topIPs.map((item) => (
+                        <tr key={item.ip} className="hover:bg-slate-900/40 transition-colors">
+                          <td className="py-3 px-3 text-white font-semibold">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span>{item.ip}</span>
+                              {(item.flag || item.geo || item.isp) && (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-slate-800/90 border border-slate-700/60 text-[10px] text-slate-300 font-sans font-normal">
+                                  {item.flag && <span>{item.flag}</span>}
+                                  {item.geo && <span>{item.geo}</span>}
+                                  {item.isp && <span className="text-slate-400">· {item.isp}</span>}
+                                </span>
+                              )}
+                            </div>
+                          </td>
+                          <td className="py-3 px-3 text-amber-300">{item.subnet}</td>
+                          <td className="py-3 px-3 font-sans">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              {item.scannerTag && (
+                                <span className="px-2 py-0.5 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30 text-[10px] font-semibold">
+                                  {item.scannerTag}
+                                </span>
+                              )}
+                              <span className="text-slate-300">{item.vector}</span>
+                            </div>
+                          </td>
+                          <td className="py-3 px-3 text-slate-200">{item.hits} 次</td>
+                          <td className="py-3 px-3">
+                            {item.status === 'banned' ? (
+                              <span className="px-2 py-0.5 rounded-md bg-rose-500/20 text-rose-300 border border-rose-500/30 text-[11px]">
+                                已拉黑拦截
+                              </span>
+                            ) : (
+                              <span className="px-2 py-0.5 rounded-md bg-amber-500/15 text-amber-300 border border-amber-500/25 text-[11px]">
+                                已回落伪装
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-3 px-3 text-right">
+                            <div className="inline-flex items-center justify-end gap-1.5 flex-wrap">
+                              {item.status !== 'banned' && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleBlockSniffer(item.ip)}
+                                  disabled={blockingTarget === item.ip}
+                                  className="px-2.5 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/30 text-rose-300 text-[11px] font-sans font-medium transition-all disabled:opacity-50"
+                                >
+                                  {blockingTarget === item.ip ? '拉黑中...' : '一键拉黑 IP'}
+                                </button>
+                              )}
+                              {item.subnet && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleBlockSniffer(item.subnet)}
+                                  disabled={blockingTarget === item.subnet}
+                                  className="px-2.5 py-1 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-amber-300 text-[11px] font-sans font-medium transition-all disabled:opacity-50"
+                                >
+                                  {blockingTarget === item.subnet ? '封网段中...' : '一键拉黑 /24 段'}
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </>
+          )}
+
+          {sniffTab === 'subnet' && (
+            <>
+              {!sniffSummary?.topSubnets || sniffSummary.topSubnets.length === 0 ? (
+                <div className="py-8 text-center rounded-xl bg-slate-950/40 border border-slate-800/80 text-xs text-slate-400">
+                  当前暂无活跃 /24 嗅探网段记录
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs font-mono">
+                    <thead>
+                      <tr className="border-b border-slate-800 text-slate-400">
+                        <th className="py-2.5 px-3">活跃嗅探 IP 段 (/24)</th>
+                        <th className="py-2.5 px-3">段内独立 IP 数</th>
+                        <th className="py-2.5 px-3">累计探测次数</th>
+                        <th className="py-2.5 px-3">归属国家与组织指纹</th>
+                        <th className="py-2.5 px-3">状态</th>
+                        <th className="py-2.5 px-3 text-right">网段级封禁操作</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800/60">
+                      {sniffSummary.topSubnets.map((sub) => (
+                        <tr key={sub.cidr} className="hover:bg-slate-900/40 transition-colors">
+                          <td className="py-3 px-3 text-amber-300 font-semibold">{sub.cidr}</td>
+                          <td className="py-3 px-3 text-white">{sub.uniqueIPs} 个 IP</td>
+                          <td className="py-3 px-3 text-slate-300">{sub.totalHits} 次</td>
+                          <td className="py-3 px-3 font-sans">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              {sub.flag && <span>{sub.flag}</span>}
+                              {sub.country && <span className="text-slate-200">{sub.country}</span>}
+                              {sub.scannerTag && (
+                                <span className="px-2 py-0.5 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30 text-[10px] font-semibold">
+                                  {sub.scannerTag}
+                                </span>
+                              )}
+                              {sub.isp && <span className="text-slate-400 text-[11px]">· {sub.isp}</span>}
+                            </div>
+                          </td>
+                          <td className="py-3 px-3">
+                            {sub.status === 'banned' ? (
+                              <span className="px-2 py-0.5 rounded-md bg-rose-500/20 text-rose-300 border border-rose-500/30 text-[11px]">
+                                全段已封禁
+                              </span>
+                            ) : (
+                              <span className="px-2 py-0.5 rounded-md bg-amber-500/15 text-amber-300 border border-amber-500/25 text-[11px]">
+                                活跃扫描段
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-3 px-3 text-right">
+                            {sub.status === 'banned' ? (
+                              <span className="text-slate-500 text-[11px] font-sans">已写入防火墙黑名单</span>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => handleBlockSniffer(sub.cidr)}
+                                disabled={blockingTarget === sub.cidr}
+                                className="px-3 py-1.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/30 text-rose-300 text-xs font-sans font-medium transition-all disabled:opacity-50"
+                              >
+                                {blockingTarget === sub.cidr ? '正在封禁网段...' : `一键拉黑 ${sub.cidr}`}
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </>
+          )}
+
+          {sniffTab === 'country' && (
+            <>
+              {!sniffSummary?.topCountries || sniffSummary.topCountries.length === 0 ? (
+                <div className="py-8 text-center rounded-xl bg-slate-950/40 border border-slate-800/80 text-xs text-slate-400">
+                  当前暂无活跃嗅探国统计数据
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                  {sniffSummary.topCountries.map((c) => (
+                    <div
+                      key={c.countryCode}
+                      className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800 space-y-2"
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm font-semibold text-white">
+                          {c.flag ? `${c.flag} ` : ''}
+                          {c.country}
+                        </span>
+                        <span className="text-xs font-mono text-indigo-300 font-bold">{c.ratioPercent}%</span>
+                      </div>
+                      <div className="w-full h-2 bg-slate-900 rounded-full overflow-hidden">
+                        <div
+                          className="bg-indigo-500 h-full rounded-full"
+                          style={{ width: `${Math.min(100, Math.max(5, c.ratioPercent))}%` }}
+                        />
+                      </div>
+                      <div className="flex items-center justify-between text-[11px] font-mono text-slate-400">
+                        <span>独立 IP: {c.uniqueIPs}</span>
+                        <span>涉及 /24 段: {c.uniqueSubnets}</span>
+                        <span>命中: {c.totalHits}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+        </div>
       </div>
 
       {/* ═══════════════════════ 4. IP Rate Limiting & Anti-Brute-Force Card (Mobile Cards + Desktop Table) ═══════════════════════ */}

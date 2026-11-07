@@ -80,6 +80,8 @@ type Snapshot struct {
 	Outbounds         OutboundBreakdown `json:"outbounds"`
 	TopDomains        []DomainStat      `json:"topDomains"`
 	History           []RatePoint       `json:"history"`
+	Sniffing          any               `json:"sniffing,omitempty"`
+	ActiveClientIPs   []string          `json:"-"`
 	Message           string            `json:"message,omitempty"`
 }
 
@@ -258,6 +260,7 @@ type clashConnection struct {
 	Metadata struct {
 		Network         string `json:"network"`
 		Type            string `json:"type"`
+		SourceIP        string `json:"sourceIP"`
 		Host            string `json:"host"`
 		DestinationIP   string `json:"destinationIP"`
 		DestinationPort string `json:"destinationPort"`
@@ -371,7 +374,11 @@ func (c *Collector) Collect(ctx context.Context) Snapshot {
 	snap.History = historyCopy
 
 	domainMap := make(map[string]*DomainStat)
+	clientIPSet := make(map[string]struct{})
 	for _, conn := range payload.Connections {
+		if srcIP := strings.TrimSpace(conn.Metadata.SourceIP); srcIP != "" {
+			clientIPSet[srcIP] = struct{}{}
+		}
 		totalConnBytes := conn.Upload + conn.Download
 		proto := classifyProtocol(conn.Metadata.Type)
 		switch proto {
@@ -432,6 +439,12 @@ func (c *Collector) Collect(ctx context.Context) Snapshot {
 		domains = domains[:maxTopDomains]
 	}
 	snap.TopDomains = domains
+	if len(clientIPSet) > 0 {
+		snap.ActiveClientIPs = make([]string, 0, len(clientIPSet))
+		for ip := range clientIPSet {
+			snap.ActiveClientIPs = append(snap.ActiveClientIPs, ip)
+		}
+	}
 	return snap
 }
 

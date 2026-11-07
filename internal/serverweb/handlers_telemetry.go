@@ -10,8 +10,20 @@ import (
 	"singctl/internal/telemetry"
 )
 
-func (s *Server) handleTelemetrySnapshot(w http.ResponseWriter, r *http.Request) {
+func (s *Server) collectEnrichedTelemetry(r *http.Request) telemetry.Snapshot {
 	snap := s.telemetry.Collect(r.Context())
+	if s.sniff != nil {
+		clientIP := s.getClientIPAndSeedGeo(r)
+		if clientIP != "" && clientIP != "loopback-direct" {
+			s.sniff.MarkTrustedClientIPs(clientIP)
+		}
+		snap.Sniffing = s.sniff.Snapshot(r.Context(), snap.ActiveClientIPs...)
+	}
+	return snap
+}
+
+func (s *Server) handleTelemetrySnapshot(w http.ResponseWriter, r *http.Request) {
+	snap := s.collectEnrichedTelemetry(r)
 	writeJSON(w, http.StatusOK, snap)
 }
 
@@ -28,7 +40,7 @@ func (s *Server) handleTelemetrySSE(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no")
 
 	sendFrame := func() bool {
-		snap := s.telemetry.Collect(r.Context())
+		snap := s.collectEnrichedTelemetry(r)
 		raw, err := json.Marshal(snap)
 		if err != nil {
 			return false

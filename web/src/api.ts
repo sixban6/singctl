@@ -24,6 +24,7 @@ import {
   HealRunResponse,
   CamouflageDefaultsResponse,
   CamouflageReport,
+  SniffSummary,
 } from './types';
 
 export const getBasePath = (): string => {
@@ -182,6 +183,14 @@ export const api = {
     }),
 
   getBans: () => request<{ bans: BannedIP[] }>('/api/server/bans'),
+
+  getSniffers: () => request<SniffSummary>('/api/server/security/sniffers'),
+
+  blockSniffer: (target: string) =>
+    request<{ message: string; target: string; summary: SniffSummary }>('/api/server/security/block', {
+      method: 'POST',
+      body: JSON.stringify({ target }),
+    }),
 
   getAuditLogs: () => request<{ logs: AuditLogItem[] }>('/api/server/audit-logs'),
 

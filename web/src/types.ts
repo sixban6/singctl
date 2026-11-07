@@ -263,6 +263,56 @@ export interface TelemetryDomainStat {
   bytes: number;
 }
 
+export interface SniffIPStat {
+  ip: string;
+  subnet: string;
+  hits: number;
+  vector: string;
+  status: 'banned' | 'masqueraded' | 'observing' | string;
+  country?: string;
+  countryCode?: string;
+  flag?: string;
+  geo?: string;
+  isp?: string;
+  scannerTag?: string;
+  lastSeen: string;
+}
+
+export interface SniffSubnetStat {
+  cidr: string;
+  uniqueIPs: number;
+  totalHits: number;
+  bannedCount: number;
+  status: 'banned' | 'partial' | 'active' | string;
+  country?: string;
+  countryCode?: string;
+  flag?: string;
+  isp?: string;
+  scannerTag?: string;
+  sampleIPs?: string[];
+}
+
+export interface SniffCountryStat {
+  countryCode: string;
+  country: string;
+  flag?: string;
+  uniqueIPs: number;
+  uniqueSubnets: number;
+  totalHits: number;
+  ratioPercent: number;
+}
+
+export interface SniffSummary {
+  updatedAt: string;
+  totalSniffIPs: number;
+  totalSubnets: number;
+  totalCountries: number;
+  totalBannedIPs: number;
+  topIPs: SniffIPStat[];
+  topSubnets: SniffSubnetStat[];
+  topCountries: SniffCountryStat[];
+}
+
 export interface TelemetrySnapshot {
   enabled: boolean;
   reachable: boolean;
@@ -278,6 +328,7 @@ export interface TelemetrySnapshot {
   outbounds: TelemetryOutboundBreakdown;
   topDomains: TelemetryDomainStat[];
   history: TelemetryRatePoint[];
+  sniffing?: SniffSummary;
   message?: string;
 }
 

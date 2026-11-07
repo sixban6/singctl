@@ -229,6 +229,72 @@ func (l *IPLimiter) ListBans() map[string]time.Duration {
 	return result
 }
 
+// AttemptSnapshot 暴露给嗅探追踪器的只读失败记录快照
+type AttemptSnapshot struct {
+	IP        string
+	FailCount int
+	LastFail  time.Time
+	Banned    bool
+}
+
+// ListAllAttempts 返回窗口内所有试探或已封禁的 IP 快照
+func (l *IPLimiter) ListAllAttempts() []AttemptSnapshot {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	now := time.Now()
+	out := make([]AttemptSnapshot, 0, len(l.attempts))
+	for ip, att := range l.attempts {
+		if att == nil || isWhitelisted(ip) {
+			continue
+		}
+		banned := now.Before(att.BannedUntil)
+		if banned || now.Sub(att.LastFail) <= l.window {
+			out = append(out, AttemptSnapshot{
+				IP:        ip,
+				FailCount: cmpMax(att.FailCount, 1),
+				LastFail:  att.LastFail,
+				Banned:    banned,
+			})
+		}
+	}
+	return out
+}
+
+// BanManual 手动封禁指定 IP 指定时长并持久化
+func (l *IPLimiter) BanManual(ip string, duration time.Duration) {
+	ip = strings.TrimSpace(ip)
+	if ip == "" || isWhitelisted(ip) {
+		return
+	}
+	if duration <= 0 {
+		duration = 7 * 24 * time.Hour
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	att, exists := l.attempts[ip]
+	if !exists || att == nil {
+		att = &ipAttempt{
+			FailCount: l.maxAttempts,
+			LastFail:  now,
+		}
+		l.attempts[ip] = att
+	}
+	if att.FailCount < l.maxAttempts {
+		att.FailCount = l.maxAttempts
+	}
+	att.LastFail = now
+	att.BannedUntil = now.Add(duration)
+	l.saveLocked()
+}
+
+func cmpMax(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 // startCleaner 定时清理过期记录，杜绝内存泄漏
 func (l *IPLimiter) startCleaner() {
 	ticker := time.NewTicker(3 * time.Minute)

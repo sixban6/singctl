@@ -52,6 +52,7 @@ type Server struct {
 	limiter            *IPLimiter
 	audit              *AuditManager
 	geo                *IPGeoResolver
+	sniff              *SniffTracker
 	passwordPendingAck bool
 	gatewayToken       string
 	cliToken           string
@@ -112,6 +113,8 @@ func New(opts Options) *Server {
 		fleetMgr.ConfigPath = opts.ConfigPath
 	}
 
+	limiter := NewIPLimiter(3, 10*time.Minute, 15*time.Minute, banFile)
+	geo := NewIPGeoResolver()
 	s := &Server{
 		opts:               opts,
 		mux:                http.NewServeMux(),
@@ -119,9 +122,10 @@ func New(opts Options) *Server {
 		telemetry:          telemetry.NewCollector(opts.SingBoxConfigPath),
 		fleet:              fleetMgr,
 		sessions:           make(map[string]sessionRecord),
-		limiter:            NewIPLimiter(3, 10*time.Minute, 15*time.Minute, banFile),
+		limiter:            limiter,
 		audit:              NewAuditManager(auditFile),
-		geo:                NewIPGeoResolver(),
+		geo:                geo,
+		sniff:              NewSniffTracker(geo, limiter),
 		passwordPendingAck: pendingAck,
 		gatewayToken:       gatewayToken,
 		cliToken:           cliToken,
@@ -192,6 +196,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/server/session/url", s.guard(s.handleSessionURL))
 	s.mux.HandleFunc("GET /api/server/bans", s.guard(s.handleListBans))
 	s.mux.HandleFunc("POST /api/server/unban", s.guard(s.handleUnban))
+	s.mux.HandleFunc("GET /api/server/security/sniffers", s.guard(s.handleGetSniffers))
+	s.mux.HandleFunc("POST /api/server/security/block", s.guard(s.handleBlockSniffer))
 	s.mux.HandleFunc("GET /api/server/audit-logs", s.guard(s.handleListAuditLogs))
 	s.mux.HandleFunc("GET /api/server/doctor", s.guard(s.handleDoctor))
 	s.mux.HandleFunc("GET /api/server/diagnose/unlock", s.guard(s.handleUnlockDiagnose))

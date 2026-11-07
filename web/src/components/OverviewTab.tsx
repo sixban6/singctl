@@ -20,6 +20,7 @@ import {
   Zap,
   Globe,
   Split,
+  ShieldAlert,
 } from 'lucide-react';
 import { TabKey } from './Navigation';
 
@@ -61,6 +62,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ status, onRefresh, onN
   const [telemetry, setTelemetry] = useState<TelemetrySnapshot | null>(null);
   const [telemetryStreamLive, setTelemetryStreamLive] = useState(false);
   const [enablingTelemetry, setEnablingTelemetry] = useState(false);
+  const [sniffTab, setSniffTab] = useState<'ip' | 'subnet' | 'country'>('ip');
 
   useEffect(() => {
     let cancelled = false;
@@ -547,6 +549,185 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ status, onRefresh, onN
                 </div>
               )}
             </div>
+          </div>
+
+          {/* External Active Sniffing & Probing Tracker (Top 8 IP / /24 Subnet / Country) */}
+          <div className="mt-4 p-4 rounded-xl bg-slate-950/50 border border-slate-800/80">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 mb-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs font-medium text-slate-200 flex items-center gap-1.5">
+                  <ShieldAlert className="w-3.5 h-3.5 text-rose-400" />
+                  外部活跃嗅探与探测追踪 (Top 8)
+                </span>
+                <span className="px-2 py-0.5 rounded-md bg-slate-900 border border-slate-800 text-[10px] font-mono text-slate-400">
+                  已排除合法代理用户 · 嗅探源 {telemetry.sniffing?.totalSniffIPs || 0} IP /{' '}
+                  {telemetry.sniffing?.totalSubnets || 0} 网段 / {telemetry.sniffing?.totalCountries || 0} 国
+                </span>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1.5">
+                <div className="inline-flex rounded-lg bg-slate-900/90 p-0.5 border border-slate-800 text-[11px]">
+                  <button
+                    type="button"
+                    onClick={() => setSniffTab('ip')}
+                    className={`px-2.5 py-1 rounded-md font-medium transition-all ${
+                      sniffTab === 'ip'
+                        ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    活跃嗅探 IP ({telemetry.sniffing?.topIPs?.length || 0})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSniffTab('subnet')}
+                    className={`px-2.5 py-1 rounded-md font-medium transition-all ${
+                      sniffTab === 'subnet'
+                        ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    活跃嗅探 IP段 ({telemetry.sniffing?.topSubnets?.length || 0})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSniffTab('country')}
+                    className={`px-2.5 py-1 rounded-md font-medium transition-all ${
+                      sniffTab === 'country'
+                        ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    活跃嗅探国 ({telemetry.sniffing?.topCountries?.length || 0})
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => onNavigate('security')}
+                  className="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-[11px] text-emerald-400 flex items-center gap-1 transition-colors"
+                >
+                  <span>前往安全页一键拉黑</span>
+                  <ArrowRight className="w-3 h-3" />
+                </button>
+              </div>
+            </div>
+
+            {sniffTab === 'ip' && (
+              <>
+                {!telemetry.sniffing?.topIPs || telemetry.sniffing.topIPs.length === 0 ? (
+                  <div className="text-center text-xs text-slate-500 py-4 font-mono">
+                    当前暂无外部异常嗅探 IP，防火墙与伪装层静默守护中
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-2">
+                    {telemetry.sniffing.topIPs.map((item) => (
+                      <div
+                        key={item.ip}
+                        className="px-3 py-2 rounded-lg bg-slate-900/70 border border-slate-800/80 flex flex-col justify-between gap-1 text-[11px] font-mono"
+                      >
+                        <div className="flex items-center justify-between gap-1.5">
+                          <span className="text-slate-100 font-semibold truncate" title={item.ip}>
+                            {item.flag ? `${item.flag} ` : ''}
+                            {item.ip}
+                          </span>
+                          <span
+                            className={`px-1.5 py-0.5 rounded text-[10px] shrink-0 ${
+                              item.status === 'banned'
+                                ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                                : 'bg-amber-500/15 text-amber-300 border border-amber-500/25'
+                            }`}
+                          >
+                            {item.status === 'banned' ? '已封禁' : '已伪装回落'}
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between gap-1 text-[10px] text-slate-400 font-sans">
+                          <span className="truncate" title={item.vector}>
+                            {item.scannerTag ? `[${item.scannerTag}] ` : ''}
+                            {item.vector}
+                          </span>
+                          <span className="font-mono text-slate-300 shrink-0">{item.hits} 次</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
+
+            {sniffTab === 'subnet' && (
+              <>
+                {!telemetry.sniffing?.topSubnets || telemetry.sniffing.topSubnets.length === 0 ? (
+                  <div className="text-center text-xs text-slate-500 py-4 font-mono">
+                    当前暂无聚集性 /24 嗅探网段
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-2">
+                    {telemetry.sniffing.topSubnets.map((sub) => (
+                      <div
+                        key={sub.cidr}
+                        className="px-3 py-2 rounded-lg bg-slate-900/70 border border-slate-800/80 flex flex-col justify-between gap-1 text-[11px] font-mono"
+                      >
+                        <div className="flex items-center justify-between gap-1.5">
+                          <span className="text-amber-300 font-semibold truncate" title={sub.cidr}>
+                            {sub.flag ? `${sub.flag} ` : ''}
+                            {sub.cidr}
+                          </span>
+                          <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-200 text-[10px] shrink-0">
+                            {sub.uniqueIPs} 个 IP
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between gap-1 text-[10px] text-slate-400 font-sans">
+                          <span className="truncate">
+                            {sub.scannerTag || sub.country || sub.isp || '外部探测网段'}
+                          </span>
+                          <span className="font-mono text-slate-300 shrink-0">累计 {sub.totalHits} 次</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
+
+            {sniffTab === 'country' && (
+              <>
+                {!telemetry.sniffing?.topCountries || telemetry.sniffing.topCountries.length === 0 ? (
+                  <div className="text-center text-xs text-slate-500 py-4 font-mono">
+                    当前暂无外部嗅探国家分布数据
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-2">
+                    {telemetry.sniffing.topCountries.map((c) => (
+                      <div
+                        key={c.countryCode}
+                        className="px-3 py-2 rounded-lg bg-slate-900/70 border border-slate-800/80 flex flex-col justify-between gap-1.5 text-[11px]"
+                      >
+                        <div className="flex items-center justify-between gap-1.5">
+                          <span className="text-slate-100 font-medium truncate">
+                            {c.flag ? `${c.flag} ` : ''}
+                            {c.country}
+                          </span>
+                          <span className="font-mono text-indigo-300 font-semibold shrink-0">
+                            {c.ratioPercent}%
+                          </span>
+                        </div>
+                        <div className="w-full h-1.5 bg-slate-950 rounded-full overflow-hidden">
+                          <div
+                            className="bg-indigo-500 h-full rounded-full"
+                            style={{ width: `${Math.min(100, Math.max(4, c.ratioPercent))}%` }}
+                          />
+                        </div>
+                        <div className="flex items-center justify-between text-[10px] font-mono text-slate-400">
+                          <span>{c.uniqueIPs} 独立 IP ({c.uniqueSubnets} 段)</span>
+                          <span>{c.totalHits} 次试探</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
           </div>
         </div>
       ) : null}

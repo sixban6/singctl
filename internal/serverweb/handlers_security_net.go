@@ -335,3 +335,77 @@ func (s *Server) handleCamouflageProbe(w http.ResponseWriter, r *http.Request) {
 		targetIP, cmp.Or(targetDomain, "-"), rep.TotalScore))
 	writeJSON(w, http.StatusOK, rep)
 }
+
+func (s *Server) collectProtectedIPs(ctx context.Context) []string {
+	var out []string
+	localIP, _, _ := s.resolveLocalCamouflageDefaults(ctx)
+	if localIP != "" && localIP != "127.0.0.1" {
+		out = append(out, localIP)
+	}
+	if s.fleet != nil && s.fleet.Store != nil {
+		if nodes, err := s.fleet.Store.ListPublic(); err == nil {
+			for _, n := range nodes {
+				if strings.TrimSpace(n.Host) != "" {
+					out = append(out, strings.TrimSpace(n.Host))
+				}
+			}
+		}
+	}
+	return out
+}
+
+func (s *Server) handleGetSniffers(w http.ResponseWriter, r *http.Request) {
+	if s.sniff == nil {
+		writeJSON(w, http.StatusOK, SniffSummary{
+			TopIPs:       []SniffIPStat{},
+			TopSubnets:   []SniffSubnetStat{},
+			TopCountries: []SniffCountryStat{},
+		})
+		return
+	}
+	clientIP := s.getClientIPAndSeedGeo(r)
+	protected := s.collectProtectedIPs(r.Context())
+	if clientIP != "" && clientIP != "loopback-direct" {
+		protected = append(protected, clientIP)
+	}
+	if len(protected) > 0 {
+		s.sniff.MarkTrustedClientIPs(protected...)
+	}
+	var activeProxyClients []string
+	if s.telemetry != nil {
+		tSnap := s.telemetry.Collect(r.Context())
+		activeProxyClients = tSnap.ActiveClientIPs
+	}
+	summary := s.sniff.Snapshot(r.Context(), activeProxyClients...)
+	writeJSON(w, http.StatusOK, summary)
+}
+
+func (s *Server) handleBlockSniffer(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Target string `json:"target"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.Target) == "" {
+		writeJSONError(w, http.StatusBadRequest, "请提供要封禁的 IP 地址或 /24 网段")
+		return
+	}
+	if s.sniff == nil {
+		writeJSONError(w, http.StatusInternalServerError, "嗅探追踪器未初始化")
+		return
+	}
+
+	operatorIP := s.getClientIPAndSeedGeo(r)
+	protected := s.collectProtectedIPs(r.Context())
+	blockedTarget, err := s.sniff.BlockTarget(body.Target, operatorIP, protected...)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	s.recordAudit(r, fmt.Sprintf("手动拉黑外部嗅探源 [%s]", blockedTarget))
+	summary := s.sniff.Snapshot(r.Context())
+	writeJSON(w, http.StatusOK, map[string]any{
+		"message": fmt.Sprintf("已成功封禁嗅探目标 [%s] 并同步至防火墙黑名单", blockedTarget),
+		"target":  blockedTarget,
+		"summary": summary,
+	})
+}
