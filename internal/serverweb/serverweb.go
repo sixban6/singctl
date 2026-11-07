@@ -115,6 +115,9 @@ func New(opts Options) *Server {
 
 	limiter := NewIPLimiter(3, 10*time.Minute, 15*time.Minute, banFile)
 	geo := NewIPGeoResolver()
+	sniffFile := resolveSniffFilePath(opts)
+	sniffTracker := NewSniffTracker(geo, limiter, sniffFile)
+	sniffTracker.SetFleetManager(fleetMgr)
 	s := &Server{
 		opts:               opts,
 		mux:                http.NewServeMux(),
@@ -125,7 +128,7 @@ func New(opts Options) *Server {
 		limiter:            limiter,
 		audit:              NewAuditManager(auditFile),
 		geo:                geo,
-		sniff:              NewSniffTracker(geo, limiter),
+		sniff:              sniffTracker,
 		passwordPendingAck: pendingAck,
 		gatewayToken:       gatewayToken,
 		cliToken:           cliToken,

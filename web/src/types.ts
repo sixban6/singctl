@@ -263,6 +263,24 @@ export interface TelemetryDomainStat {
   bytes: number;
 }
 
+export interface SniffNodeRef {
+  id: string;
+  name: string;
+  host?: string;
+}
+
+export interface SniffNodeSummary {
+  id: string;
+  name: string;
+  host?: string;
+  online: boolean;
+  totalSniffIPs: number;
+  totalSubnets: number;
+  totalBanned: number;
+  lastHarvestAt?: string;
+  error?: string;
+}
+
 export interface SniffIPStat {
   ip: string;
   subnet: string;
@@ -275,7 +293,9 @@ export interface SniffIPStat {
   geo?: string;
   isp?: string;
   scannerTag?: string;
+  firstSeen: string;
   lastSeen: string;
+  nodes?: SniffNodeRef[];
 }
 
 export interface SniffSubnetStat {
@@ -290,6 +310,9 @@ export interface SniffSubnetStat {
   isp?: string;
   scannerTag?: string;
   sampleIPs?: string[];
+  firstSeen?: string;
+  lastSeen?: string;
+  nodes?: SniffNodeRef[];
 }
 
 export interface SniffCountryStat {
@@ -304,6 +327,8 @@ export interface SniffCountryStat {
 
 export interface SniffSummary {
   updatedAt: string;
+  selectedNode?: string;
+  nodes?: SniffNodeSummary[];
   totalSniffIPs: number;
   totalSubnets: number;
   totalCountries: number;

@@ -83,6 +83,16 @@ func resolveAuditFilePath(opts Options) string {
 	return ""
 }
 
+func resolveSniffFilePath(opts Options) string {
+	if opts.ConfigPath != "" {
+		return filepath.Join(filepath.Dir(opts.ConfigPath), ".serverweb_sniff.json")
+	}
+	if st, err := os.Stat("/etc/singctl"); err == nil && st.IsDir() {
+		return "/etc/singctl/.serverweb_sniff.json"
+	}
+	return ""
+}
+
 func (s *Server) getUsername() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

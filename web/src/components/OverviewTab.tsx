@@ -551,13 +551,13 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ status, onRefresh, onN
             </div>
           </div>
 
-          {/* External Active Sniffing & Probing Tracker (Top 8 IP / /24 Subnet / Country) */}
+          {/* External Active Sniffing & Probing Tracker */}
           <div className="mt-4 p-4 rounded-xl bg-slate-950/50 border border-slate-800/80">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 mb-3">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-xs font-medium text-slate-200 flex items-center gap-1.5">
                   <ShieldAlert className="w-3.5 h-3.5 text-rose-400" />
-                  外部活跃嗅探与探测追踪 (Top 8)
+                  集群活跃嗅探与探测追踪
                 </span>
                 <span className="px-2 py-0.5 rounded-md bg-slate-900 border border-slate-800 text-[10px] font-mono text-slate-400">
                   已排除合法代理用户 · 嗅探源 {telemetry.sniffing?.totalSniffIPs || 0} IP /{' '}
@@ -607,7 +607,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ status, onRefresh, onN
                   onClick={() => onNavigate('security')}
                   className="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-[11px] text-emerald-400 flex items-center gap-1 transition-colors"
                 >
-                  <span>前往安全页一键拉黑</span>
+                  <span>分主机查看全部与拉黑</span>
                   <ArrowRight className="w-3 h-3" />
                 </button>
               </div>
@@ -621,7 +621,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ status, onRefresh, onN
                   </div>
                 ) : (
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-2">
-                    {telemetry.sniffing.topIPs.map((item) => (
+                    {telemetry.sniffing.topIPs.slice(0, 12).map((item) => (
                       <div
                         key={item.ip}
                         className="px-3 py-2 rounded-lg bg-slate-900/70 border border-slate-800/80 flex flex-col justify-between gap-1 text-[11px] font-mono"
@@ -648,6 +648,14 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ status, onRefresh, onN
                           </span>
                           <span className="font-mono text-slate-300 shrink-0">{item.hits} 次</span>
                         </div>
+                        <div className="flex items-center justify-between gap-1 text-[10px] text-slate-500 pt-0.5 border-t border-slate-800/60">
+                          <span className="truncate" title={`开始: ${item.firstSeen || item.lastSeen}`}>
+                            始: {(item.firstSeen || item.lastSeen || '').slice(5)}
+                          </span>
+                          <span className="text-emerald-400/90 truncate" title={`最近: ${item.lastSeen}`}>
+                            近: {(item.lastSeen || '').slice(5)}
+                          </span>
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -663,7 +671,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ status, onRefresh, onN
                   </div>
                 ) : (
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-2">
-                    {telemetry.sniffing.topSubnets.map((sub) => (
+                    {telemetry.sniffing.topSubnets.slice(0, 12).map((sub) => (
                       <div
                         key={sub.cidr}
                         className="px-3 py-2 rounded-lg bg-slate-900/70 border border-slate-800/80 flex flex-col justify-between gap-1 text-[11px] font-mono"
@@ -683,6 +691,12 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ status, onRefresh, onN
                           </span>
                           <span className="font-mono text-slate-300 shrink-0">累计 {sub.totalHits} 次</span>
                         </div>
+                        {(sub.firstSeen || sub.lastSeen) && (
+                          <div className="flex items-center justify-between gap-1 text-[10px] text-slate-500 pt-0.5 border-t border-slate-800/60">
+                            <span className="truncate">始: {(sub.firstSeen || sub.lastSeen || '').slice(5)}</span>
+                            <span className="text-emerald-400/90 truncate">近: {(sub.lastSeen || '').slice(5)}</span>
+                          </div>
+                        )}
                       </div>
                     ))}
                   </div>

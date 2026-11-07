@@ -184,13 +184,19 @@ export const api = {
 
   getBans: () => request<{ bans: BannedIP[] }>('/api/server/bans'),
 
-  getSniffers: () => request<SniffSummary>('/api/server/security/sniffers'),
+  getSniffers: (node = 'all', refresh = false) =>
+    request<SniffSummary>(
+      `/api/server/security/sniffers?node=${encodeURIComponent(node)}${refresh ? '&refresh=1' : ''}`
+    ),
 
-  blockSniffer: (target: string) =>
-    request<{ message: string; target: string; summary: SniffSummary }>('/api/server/security/block', {
-      method: 'POST',
-      body: JSON.stringify({ target }),
-    }),
+  blockSniffer: (target: string, node = 'all', viewNode = 'all') =>
+    request<{ message: string; target: string; appliedNodes?: number; summary: SniffSummary }>(
+      '/api/server/security/block',
+      {
+        method: 'POST',
+        body: JSON.stringify({ target, node, viewNode }),
+      }
+    ),
 
   getAuditLogs: () => request<{ logs: AuditLogItem[] }>('/api/server/audit-logs'),
 

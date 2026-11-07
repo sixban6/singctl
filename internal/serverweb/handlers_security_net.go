@@ -355,8 +355,12 @@ func (s *Server) collectProtectedIPs(ctx context.Context) []string {
 }
 
 func (s *Server) handleGetSniffers(w http.ResponseWriter, r *http.Request) {
+	nodeScope := cmp.Or(strings.TrimSpace(r.URL.Query().Get("node")), "all")
+	forceRefresh := r.URL.Query().Get("refresh") == "1" || r.URL.Query().Get("refresh") == "true"
+
 	if s.sniff == nil {
 		writeJSON(w, http.StatusOK, SniffSummary{
+			SelectedNode: nodeScope,
 			TopIPs:       []SniffIPStat{},
 			TopSubnets:   []SniffSubnetStat{},
 			TopCountries: []SniffCountryStat{},
@@ -376,13 +380,15 @@ func (s *Server) handleGetSniffers(w http.ResponseWriter, r *http.Request) {
 		tSnap := s.telemetry.Collect(r.Context())
 		activeProxyClients = tSnap.ActiveClientIPs
 	}
-	summary := s.sniff.Snapshot(r.Context(), activeProxyClients...)
+	summary := s.sniff.SnapshotForNode(r.Context(), nodeScope, forceRefresh, activeProxyClients...)
 	writeJSON(w, http.StatusOK, summary)
 }
 
 func (s *Server) handleBlockSniffer(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Target string `json:"target"`
+		Target   string `json:"target"`
+		Node     string `json:"node"`
+		ViewNode string `json:"viewNode"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.Target) == "" {
 		writeJSONError(w, http.StatusBadRequest, "请提供要封禁的 IP 地址或 /24 网段")
@@ -393,19 +399,29 @@ func (s *Server) handleBlockSniffer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	nodeScope := cmp.Or(strings.TrimSpace(body.Node), "all")
+	viewScope := cmp.Or(strings.TrimSpace(body.ViewNode), nodeScope)
+
 	operatorIP := s.getClientIPAndSeedGeo(r)
 	protected := s.collectProtectedIPs(r.Context())
-	blockedTarget, err := s.sniff.BlockTarget(body.Target, operatorIP, protected...)
+	blockedTarget, appliedNodes, err := s.sniff.BlockTargetForNode(r.Context(), body.Target, nodeScope, operatorIP, protected...)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	s.recordAudit(r, fmt.Sprintf("手动拉黑外部嗅探源 [%s]", blockedTarget))
-	summary := s.sniff.Snapshot(r.Context())
+	scopeDesc := "全集群"
+	if nodeScope == "local" {
+		scopeDesc = "本机网关"
+	} else if nodeScope != "all" {
+		scopeDesc = "节点 " + nodeScope
+	}
+	s.recordAudit(r, fmt.Sprintf("手动拉黑外部嗅探源 [%s] (范围: %s, 生效主机: %d 台)", blockedTarget, scopeDesc, max(1, appliedNodes)))
+	summary := s.sniff.SnapshotForNode(r.Context(), viewScope, false)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"message": fmt.Sprintf("已成功封禁嗅探目标 [%s] 并同步至防火墙黑名单", blockedTarget),
-		"target":  blockedTarget,
-		"summary": summary,
+		"message":      fmt.Sprintf("已成功封禁嗅探目标 [%s]（生效范围: %s，共 %d 台主机已同步防火墙黑名单）", blockedTarget, scopeDesc, max(1, appliedNodes)),
+		"target":       blockedTarget,
+		"appliedNodes": max(1, appliedNodes),
+		"summary":      summary,
 	})
 }
