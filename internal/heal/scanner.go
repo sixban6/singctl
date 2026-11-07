@@ -548,7 +548,11 @@ func queryDiskSingctlVersion() string {
 			if idx := strings.Index(line, "SingCtl v"); idx != -1 {
 				fields := strings.Fields(line[idx:])
 				if len(fields) >= 2 {
-					return strings.TrimPrefix(fields[1], "v")
+					ver := strings.TrimPrefix(fields[1], "v")
+					if escIdx := strings.IndexByte(ver, '\x1b'); escIdx != -1 {
+						ver = ver[:escIdx]
+					}
+					return strings.TrimSpace(ver)
 				}
 			}
 		}

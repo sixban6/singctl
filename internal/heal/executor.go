@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -141,6 +142,15 @@ func Run(ctx context.Context, opts RunOptions) (RunResult, error) {
 
 	// ── Post-Heal Verification Scan ──
 	finalReport := Scan(ctx, cfgPath, effectiveSingctlVer)
+	if opts.AsyncWebRestart && len(finalReport.OS.StaleServices) > 0 {
+		// AsyncWebRestart uses `sleep 2 && singctl sr web restart` so HTTP response returns first;
+		// remove singctl-web from the immediate post-scan StaleServices so the persisted report reflects the scheduled restart.
+		finalReport.OS.StaleServices = slices.DeleteFunc(finalReport.OS.StaleServices, func(s string) bool {
+			return s == "singctl-web"
+		})
+		finalReport.OS.Healthy = finalReport.OS.SecurityCount == 0 && len(finalReport.OS.StaleServices) == 0
+		finalReport.Posture, finalReport.PostureLabel = evaluatePosture(finalReport.Core, finalReport.OS, finalReport.Kernel)
+	}
 
 	// ── Layer 3: Kernel Reboot Handling ──
 	willReboot := false
@@ -191,7 +201,10 @@ func Run(ctx context.Context, opts RunOptions) (RunResult, error) {
 	}
 
 	_ = RecordExecution(cfgPath, hist, &finalReport)
-	finalReport = Scan(ctx, cfgPath, effectiveSingctlVer)
+	finalReport.History = append([]HealHistoryItem{hist}, finalReport.History...)
+	if len(finalReport.History) > 30 {
+		finalReport.History = finalReport.History[:30]
+	}
 
 	if willReboot {
 		triggerDelayedReboot()
@@ -609,7 +622,7 @@ func restartWebDaemonSafely(async bool) {
 			cmd := exec.Command("sh", "-c", fmt.Sprintf("sleep 2 && systemctl restart %s >/dev/null 2>&1", unitName))
 			_ = cmd.Start()
 		} else if hasBgPid && binPath != "" {
-			cmd := exec.Command("sh", "-c", fmt.Sprintf("sleep 2 && %s sr web restart >/dev/null 2>&1", binPath))
+			cmd := exec.Command("sh", "-c", fmt.Sprintf("sleep 2 && env -u SINGCTL_SERVER_WEB_BACKGROUND %s sr web restart >/dev/null 2>&1", binPath))
 			_ = cmd.Start()
 		}
 		return
@@ -617,7 +630,8 @@ func restartWebDaemonSafely(async bool) {
 	if hasSystemdUnit {
 		_ = exec.Command("systemctl", "restart", unitName).Run()
 	} else if hasBgPid && binPath != "" {
-		_ = exec.Command(binPath, "sr", "web", "restart").Run()
+		cmd := exec.Command("env", "-u", "SINGCTL_SERVER_WEB_BACKGROUND", binPath, "sr", "web", "restart")
+		_ = cmd.Run()
 	}
 }
 

@@ -137,6 +137,8 @@ func StartBackground(opts Options) error {
 
 // ChildReady 子进程 Listen 成功后的回调
 func ChildReady(listenAddr string) {
+	// 立即清除后台子进程标记环境变量，防止后续 Web 触发自愈执行 singctl sr web restart 时继承该变量而跳过重启
+	_ = os.Unsetenv(envServerWebBackground)
 	pipe := os.NewFile(uintptr(serverWebReadyFd), "serverWebReadyPipe")
 	if pipe != nil {
 		_, _ = pipe.WriteString(listenAddr)
