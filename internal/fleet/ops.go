@@ -268,6 +268,18 @@ func DefaultSSHRunner(ctx context.Context, node Node, script string) (string, in
 
 const remoteProbeScript = `
 set -e
+MASTER_IP=$(printf '%s' "${SSH_CLIENT:-}" | awk '{print $1}')
+if [ -n "$MASTER_IP" ]; then
+  if command -v nft >/dev/null 2>&1 && nft list table inet security >/dev/null 2>&1; then
+    nft delete element inet security protected_ports { 1080 } >/dev/null 2>&1 || true
+    nft add element inet security whitelist_ip { "$MASTER_IP" } >/dev/null 2>&1 || true
+    nft delete element inet security blocklist_ip4 { "$MASTER_IP" } >/dev/null 2>&1 || true
+  fi
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qw active; then
+    ufw delete deny from "$MASTER_IP" to any port 2222 >/dev/null 2>&1 || true
+    ufw delete deny from "$MASTER_IP" >/dev/null 2>&1 || true
+  fi
+fi
 VER=$(singctl version 2>&1 | tr '\n' ' ' || true)
 LOAD=$(awk '{print $1" "$2" "$3}' /proc/loadavg 2>/dev/null || echo "-")
 MEM=$(awk '/MemTotal:/ {t=$2} /MemAvailable:/ {a=$2} END {if (t>0) printf "%.1f", (t-a)*100/t; else print "0"}' /proc/meminfo 2>/dev/null || echo "0")

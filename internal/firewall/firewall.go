@@ -18,7 +18,6 @@ import (
 var defaultBaseProtectedPorts = []int{
 	20, 21, 22, 23, // FTP, SSH (auto-excluded if sshd uses 22), Telnet
 	25, 110, 465, 587, 993, 995, // Mail protocols
-	1080,       // Open SOCKS proxy
 	1433, 1434, // MSSQL
 	1521, // Oracle
 	3306, // MySQL

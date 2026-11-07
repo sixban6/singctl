@@ -99,8 +99,8 @@ func probePorts(ctx context.Context, opts ProbeOptions) Category {
 	}
 	cat.Items = append(cat.Items, itemRedirect)
 
-	// 3. 敏感代理/面板管理端口暴露检测（并发探测）
-	sensitivePorts := []int{7895, 9090, 9091, 2080, 1080}
+	// 3. 敏感代理/面板管理端口暴露检测（并发探测，避开 sec_block.nft 的 1080 等蜜罐端口防止触发 7 天自封禁）
+	sensitivePorts := []int{7895, 9090, 9099, 2080, 3001, 8092}
 	var (
 		exposed   []int
 		exposedMu sync.Mutex
@@ -124,7 +124,7 @@ func probePorts(ctx context.Context, opts ProbeOptions) Category {
 
 	itemSensitive := CheckItem{
 		Name:        "敏感代理管理端口暴露扫描",
-		Description: "扫描 7895(tproxy), 9090(clash api), 9091(api), 2080(mixed), 1080(socks)",
+		Description: "扫描 7895(tproxy), 9090/9099(clash api), 2080(mixed), 3001(sub-store), 8092(serverweb)",
 		MaxScore:    15,
 	}
 

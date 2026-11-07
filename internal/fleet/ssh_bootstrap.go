@@ -194,7 +194,18 @@ fi
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qw active; then
   ufw allow "${TARGET_PORT}/tcp" comment 'singctl-ssh' >/dev/null 2>&1 || true
   if [ -n "$MASTER_IP" ]; then
+    ufw delete deny from "$MASTER_IP" to any port "$TARGET_PORT" >/dev/null 2>&1 || true
+    ufw delete deny from "$MASTER_IP" >/dev/null 2>&1 || true
     ufw insert 1 allow from "$MASTER_IP" to any port "$TARGET_PORT" proto tcp >/dev/null 2>&1 || true
+  fi
+fi
+
+if command -v nft >/dev/null 2>&1 && nft list table inet security >/dev/null 2>&1; then
+  nft delete element inet security protected_ports { 1080 } >/dev/null 2>&1 || true
+  nft delete element inet security protected_ports { "$TARGET_PORT" } >/dev/null 2>&1 || true
+  if [ -n "$MASTER_IP" ]; then
+    nft add element inet security whitelist_ip { "$MASTER_IP" } >/dev/null 2>&1 || true
+    nft delete element inet security blocklist_ip4 { "$MASTER_IP" } >/dev/null 2>&1 || true
   fi
 fi
 
