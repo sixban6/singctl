@@ -22,7 +22,7 @@ import (
 
 const (
 	maxTrackedSniffIPs = 1000
-	sniffEntryTTL      = 24 * time.Hour
+	sniffEntryTTL      = 7 * 24 * time.Hour
 	trustedClientTTL   = 2 * time.Hour
 	systemHarvestMinDT = 6 * time.Second
 	fleetHarvestMinDT  = 20 * time.Second
@@ -159,6 +159,9 @@ var (
 
 	reNFTLogLine      = regexp.MustCompile(`SRC=([0-9a-fA-F:\.]+).*?DPT=([0-9]+)`)
 	reIPv4Token       = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
+	reNFTTimeout      = regexp.MustCompile(`timeout\s+([0-9a-zA-Z]+)`)
+	reNFTExpires      = regexp.MustCompile(`expires\s+([0-9a-zA-Z]+)`)
+	reFail2banLogIP   = regexp.MustCompile(`\b(?:Found|Ban)\s+([0-9a-fA-F:\.]+)`)
 	reSingBoxSourceIP = regexp.MustCompile(`"sourceIP"\s*:\s*"([^"]+)"`)
 )
 
@@ -537,6 +540,13 @@ func (t *SniffTracker) observeNodeAtLocked(nodeID, nodeName, ipStr, vector, stat
 	}
 
 	if setExactHits {
+		// 若此前仅记录了首次采集时刻的近似时间，而本次从 nftables expires 或日志解析出了更早的真实拦截时间，自动校准
+		if !firstTime.IsZero() && !lastTime.IsZero() && lastTime.Before(rec.lastSeen) && rec.lastSeen.Sub( firstTime ) > time.Minute {
+			if rec.vector == "高危端口扫描拦截" || rec.vector == "SSH 暴力破解" {
+				rec.lastSeen = lastTime
+				t.dirty = true
+			}
+		}
 		if !lastTime.IsZero() && lastTime.After(rec.lastSeen) {
 			rec.lastSeen = lastTime
 			t.dirty = true
@@ -1401,14 +1411,14 @@ func (t *SniffTracker) maybeHarvestSystemSources(ctx context.Context, force bool
 	hCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
 	defer cancel()
 
-	// 1. 采集 nftables 动态封禁集 (@blocklist_ip4)
+	// 1. 采集 nftables 动态封禁集 (@blocklist_ip4，支持从 timeout/expires 反推真实封禁时间)
 	if _, err := exec.LookPath("nft"); err == nil {
 		if out, err := exec.CommandContext(hCtx, "nft", "list", "set", "inet", "security", "blocklist_ip4").Output(); err == nil {
-			ips := parseNFTSetIPs(string(out))
+			entries := parseNFTSetEntries(string(out), now)
 			t.mu.Lock()
-			for _, ip := range ips {
-				if !isIgnoredInternalIP(ip) {
-					t.observeNodeAtLocked("local", "本机网关", ip, "高危端口扫描拦截", "banned", 1, true, time.Time{}, time.Time{})
+			for _, ent := range entries {
+				if !isIgnoredInternalIP(ent.ip) {
+					t.observeNodeAtLocked("local", "本机网关", ent.ip, "高危端口扫描拦截", "banned", 1, true, ent.observedAt, ent.observedAt)
 				}
 			}
 			t.mu.Unlock()
@@ -1418,7 +1428,8 @@ func (t *SniffTracker) maybeHarvestSystemSources(ctx context.Context, force bool
 	// 2. 采集内核日志中 [NFT] Blocked 的精确命中端口、次数与日志时间戳
 	harvestNFTKernelLogs(hCtx, t)
 
-	// 3. 采集 fail2ban (sshd / recidive) 封禁 IP
+	// 3. 采集 fail2ban (sshd / recidive) 封禁 IP 及 /var/log/fail2ban.log 时间戳
+	f2bTimeMap := harvestLocalFail2banLogTimes(now)
 	if _, err := exec.LookPath("fail2ban-client"); err == nil {
 		for _, jail := range []string{"sshd", "recidive"} {
 			if out, err := exec.CommandContext(hCtx, "fail2ban-client", "status", jail).Output(); err == nil {
@@ -1426,7 +1437,14 @@ func (t *SniffTracker) maybeHarvestSystemSources(ctx context.Context, force bool
 				t.mu.Lock()
 				for _, ip := range ips {
 					if !isIgnoredInternalIP(ip) {
-						t.observeNodeAtLocked("local", "本机网关", ip, "SSH 暴力破解", "banned", 3, true, time.Time{}, time.Time{})
+						ft, lt, hits := time.Time{}, time.Time{}, 3
+						if info, ok := f2bTimeMap[ip]; ok {
+							ft, lt = info.first, info.last
+							if info.hits > hits {
+								hits = info.hits
+							}
+						}
+						t.observeNodeAtLocked("local", "本机网关", ip, "SSH 暴力破解", "banned", hits, true, ft, lt)
 					}
 				}
 				t.mu.Unlock()
@@ -1465,12 +1483,14 @@ echo ""
 echo "===SINGCTL_NFT==="
 if command -v nft >/dev/null 2>&1; then
   nft list set inet security blocklist_ip4 2>/dev/null || true
-  nft list set inet security blocklist_ip4_forever 2>/dev/null || true
 fi
 echo "===SINGCTL_F2B==="
 if command -v fail2ban-client >/dev/null 2>&1; then
   fail2ban-client status sshd 2>/dev/null || true
   fail2ban-client status recidive 2>/dev/null || true
+fi
+if [ -r /var/log/fail2ban.log ]; then
+  tail -c 32768 /var/log/fail2ban.log 2>/dev/null | grep -E "Found |Ban " || true
 fi
 echo "===SINGCTL_KERN==="
 for f in /var/log/kern.log /var/log/syslog /var/log/messages; do
@@ -1605,19 +1625,27 @@ func (t *SniffTracker) ingestRemoteSniffOutput(nodeID, nodeName, raw string) {
 	}
 
 	now := time.Now()
-	nftIPs := parseNFTSetIPs(secNFT.String())
+	nftEntries := parseNFTSetEntries(secNFT.String(), now)
 	f2bIPs := parseFail2banBannedIPs(secF2B.String())
+	f2bTimes := parseFail2banLogTimestamps(secF2B.String(), now)
 	ssProbes := parseSSExternalProbes(secSS.String())
 
 	t.mu.Lock()
-	for _, ip := range nftIPs {
-		if !isIgnoredInternalIP(ip) {
-			t.observeNodeAtLocked(nodeID, nodeName, ip, "高危端口扫描拦截", "banned", 1, true, time.Time{}, time.Time{})
+	for _, ent := range nftEntries {
+		if !isIgnoredInternalIP(ent.ip) {
+			t.observeNodeAtLocked(nodeID, nodeName, ent.ip, "高危端口扫描拦截", "banned", 1, true, ent.observedAt, ent.observedAt)
 		}
 	}
 	for _, ip := range f2bIPs {
 		if !isIgnoredInternalIP(ip) {
-			t.observeNodeAtLocked(nodeID, nodeName, ip, "SSH 暴力破解", "banned", 3, true, time.Time{}, time.Time{})
+			ft, lt, hits := time.Time{}, time.Time{}, 3
+			if info, ok := f2bTimes[ip]; ok {
+				ft, lt = info.first, info.last
+				if info.hits > hits {
+					hits = info.hits
+				}
+			}
+			t.observeNodeAtLocked(nodeID, nodeName, ip, "SSH 暴力破解", "banned", hits, true, ft, lt)
 		}
 	}
 	for _, p := range ssProbes {
@@ -1632,20 +1660,136 @@ func (t *SniffTracker) ingestRemoteSniffOutput(nodeID, nodeName, raw string) {
 	}
 }
 
-func parseNFTSetIPs(raw string) []string {
-	if !strings.Contains(raw, "elements = {") {
+type nftSetEntry struct {
+	ip         string
+	observedAt time.Time
+}
+
+func parseNFTDuration(s string) time.Duration {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0
+	}
+	var total time.Duration
+	if before, after, hasDay := strings.Cut(s, "d"); hasDay {
+		if days, err := strconv.Atoi(before); err == nil && days > 0 {
+			total += time.Duration(days) * 24 * time.Hour
+		}
+		s = after
+	}
+	if s != "" {
+		if rem, err := time.ParseDuration(s); err == nil {
+			total += rem
+		}
+	}
+	return total
+}
+
+func parseNFTSetEntries(raw string, refNow time.Time) []nftSetEntry {
+	idx := strings.Index(raw, "elements = {")
+	if idx < 0 {
 		return nil
 	}
-	matches := reIPv4Token.FindAllString(raw, -1)
-	seen := make(map[string]struct{}, len(matches))
-	out := make([]string, 0, len(matches))
-	for _, m := range matches {
-		if ip := normalizeIPString(m); ip != "" {
-			if _, ok := seen[ip]; !ok {
-				seen[ip] = struct{}{}
-				out = append(out, ip)
+	sub := raw[idx+len("elements = {"):]
+	if endIdx := strings.IndexByte(sub, '}'); endIdx >= 0 {
+		sub = sub[:endIdx]
+	}
+
+	seen := make(map[string]struct{})
+	out := make([]nftSetEntry, 0, 32)
+	for part := range strings.SplitSeq(sub, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		tok := reIPv4Token.FindString(part)
+		if tok == "" {
+			continue
+		}
+		// 跳过 CIDR 网段前缀 (如 198.51.100.0/24)，避免将网段基址误判为单点活跃 IP
+		if strings.Contains(part, tok+"/") {
+			continue
+		}
+		ip := normalizeIPString(tok)
+		if ip == "" {
+			continue
+		}
+		if _, exists := seen[ip]; exists {
+			continue
+		}
+		seen[ip] = struct{}{}
+
+		var observedAt time.Time
+		timeoutDur := 7 * 24 * time.Hour
+		if tm := reNFTTimeout.FindStringSubmatch(part); len(tm) == 2 {
+			if d := parseNFTDuration(tm[1]); d > 0 {
+				timeoutDur = d
 			}
 		}
+		if em := reNFTExpires.FindStringSubmatch(part); len(em) == 2 {
+			if expDur := parseNFTDuration(em[1]); expDur > 0 && timeoutDur >= expDur {
+				observedAt = refNow.Add(-(timeoutDur - expDur))
+			}
+		}
+		out = append(out, nftSetEntry{
+			ip:         ip,
+			observedAt: observedAt,
+		})
+	}
+	return out
+}
+
+func parseNFTSetIPs(raw string) []string {
+	entries := parseNFTSetEntries(raw, time.Now())
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, e.ip)
+	}
+	return out
+}
+
+type fail2banTimeInfo struct {
+	first time.Time
+	last  time.Time
+	hits  int
+}
+
+func harvestLocalFail2banLogTimes(refNow time.Time) map[string]fail2banTimeInfo {
+	raw, err := readTailBytes("/var/log/fail2ban.log", 64*1024)
+	if err != nil || len(raw) == 0 {
+		return nil
+	}
+	return parseFail2banLogTimestamps(string(raw), refNow)
+}
+
+func parseFail2banLogTimestamps(raw string, refNow time.Time) map[string]fail2banTimeInfo {
+	out := make(map[string]fail2banTimeInfo)
+	for line := range strings.SplitSeq(raw, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if len(trimmed) < 20 {
+			continue
+		}
+		m := reFail2banLogIP.FindStringSubmatch(trimmed)
+		if len(m) != 2 {
+			continue
+		}
+		ip := normalizeIPString(m[1])
+		if ip == "" || isIgnoredInternalIP(ip) {
+			continue
+		}
+		ts, err := time.ParseInLocation(sniffTimeLayout, trimmed[:19], refNow.Location())
+		if err != nil {
+			continue
+		}
+		info := out[ip]
+		info.hits++
+		if info.first.IsZero() || ts.Before(info.first) {
+			info.first = ts
+		}
+		if info.last.IsZero() || ts.After(info.last) {
+			info.last = ts
+		}
+		out[ip] = info
 	}
 	return out
 }
