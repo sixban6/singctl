@@ -12,6 +12,8 @@ github.com/showwin/speedtest-go v1.7.10 h1:9o5zb7KsuzZKn+IE2//z5btLKJ870JwO6ETay
 github.com/showwin/speedtest-go v1.7.10/go.mod h1:Ei7OCTmNPdWofMadzcfgq1rUO7mvJy9Jycj//G7vyfA=
 github.com/sixban6/singgen v1.17.1-0.20261107103814-3a8241cdf570 h1:rf5xSrZrxte8jyfSBhiAPw5nAyg30STaPFN9g04nKq0=
 github.com/sixban6/singgen v1.17.1-0.20261107103814-3a8241cdf570/go.mod h1:OaPXXhoj1p7X0rPy8c6ifl6E0+se7xJ/84gwql5zzk8=
+github.com/sixban6/singgen v1.17.1-0.20261107175301-10ec855303d7 h1:BI3+KsKw3CBnSUVZKbHAJQzEk2ScBwQFocncDCrm/YM=
+github.com/sixban6/singgen v1.17.1-0.20261107175301-10ec855303d7/go.mod h1:OaPXXhoj1p7X0rPy8c6ifl6E0+se7xJ/84gwql5zzk8=
 github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e h1:MRM5ITcdelLK2j1vwZ3Je0FKVCfqOLp5zO6trqMLYs0=
 github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e/go.mod h1:XV66xRDqSt+GTGFMVlhk3ULuV0y9ZmzeVGR4mloJI3M=
 github.com/spf13/cobra v1.10.2 h1:DMTTonx5m65Ic0GOoRY2c16WCbHxOOw6xxezuLaBpcU=

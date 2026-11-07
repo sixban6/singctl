@@ -23,7 +23,7 @@ const (
 )
 
 var (
-	defaultWatchedSelectorGroups = []string{"#VPS", "Game", "Proxy", "AI"}
+	defaultWatchedSelectorGroups = []string{"#VPS", "Game-TCP", "Game-UDP", "Game", "Proxy", "AI"}
 	defaultProbeURLs             = []string{
 		"https://captive.apple.com/hotspot-detect.html",
 		"http://www.gstatic.com/generate_204",

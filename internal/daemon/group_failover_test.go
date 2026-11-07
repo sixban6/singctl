@@ -27,7 +27,7 @@ func TestGroupFailover_AutoSwitchAndAutoRestore(t *testing.T) {
 		if r.Method == http.MethodGet && path == "/proxies" {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"proxies": map[string]any{
-					"Game": map[string]any{
+					"Game-TCP": map[string]any{
 						"type": "Selector",
 						"now":  gameNow,
 						"all":  []string{"#Auto", "#VPS", "#Nodes"},
@@ -68,7 +68,7 @@ func TestGroupFailover_AutoSwitchAndAutoRestore(t *testing.T) {
 				Name string `json:"name"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
-			if strings.HasSuffix(path, "/Game") {
+			if strings.HasSuffix(path, "/Game-TCP") || strings.HasSuffix(path, "/Game") {
 				gameNow = body.Name
 			}
 			w.WriteHeader(http.StatusNoContent)

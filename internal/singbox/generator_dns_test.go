@@ -249,8 +249,8 @@ func TestGenerator_GameUDPAndDNSIsolation(t *testing.T) {
 		if got := byTag["AI"]; len(got) == 0 || got[0] != "#VPS" {
 			t.Fatalf("[%s] AI should default to #VPS, got %v", platform, got)
 		}
-		if got := byTag["Game"]; len(got) == 0 || got[0] != "#Auto" {
-			t.Fatalf("[%s] Game should default to #Auto, got %v", platform, got)
+		if got := byTag["Game-TCP"]; len(got) == 0 || got[0] != "#Auto" {
+			t.Fatalf("[%s] Game-TCP should default to #Auto, got %v", platform, got)
 		}
 		if got := byTag["Game-UDP"]; len(got) == 0 || got[0] != "DirectConn" {
 			t.Fatalf("[%s] Game-UDP should default to DirectConn, got %v", platform, got)
@@ -291,12 +291,12 @@ func TestGenerator_GameUDPAndDNSIsolation(t *testing.T) {
 			t.Fatalf("[%s] #Auto interrupt_exist_connections must be false", platform)
 		}
 
-		// 6. 验证 HoK 规则顺序与选人房/局内战斗拆分：
-		//    geosite-hok 在广告拦截之前；geoip-cn 在纯 IP 端口之前；UDP 6650:6659 进房走 Game，其余高端口 UDP 走 Game-UDP
-		hokIdx, adIdx, cnIdx, tcpGameIdx, bpUDPIdx, battleUDPIdx := -1, -1, -1, -1, -1, -1
-		wantTCPPorts := []int{5010, 5692, 8500, 8600, 8801, 10004, 20000, 31003}
+		// 6. 验证游戏 TCP/UDP 高端口排除法规则顺序：
+		//    geosite-hok 在广告拦截之前走 Game-TCP；geoip-cn 在高端口规则之前；
+		//    海外高端口 (1024:65535) TCP 走 Game-TCP，海外高端口 (1024:65535) UDP 走 Game-UDP
+		hokIdx, adIdx, cnIdx, tcpGameIdx, battleUDPIdx := -1, -1, -1, -1, -1
 		for i, r := range parsed.Route.Rules {
-			if rs, ok := r.RuleSet.(string); ok && rs == "geosite-hok" && r.Outbound == "Game" {
+			if rs, ok := r.RuleSet.(string); ok && rs == "geosite-hok" && r.Outbound == "Game-TCP" {
 				hokIdx = i
 			}
 			if rsArr, ok := r.RuleSet.([]any); ok && r.Action == "reject" {
@@ -313,21 +313,8 @@ func TestGenerator_GameUDPAndDNSIsolation(t *testing.T) {
 					}
 				}
 			}
-			if r.Network == "tcp" && r.Outbound == "Game" {
-				if portSlice, ok := r.Port.([]any); ok {
-					gotPorts := make([]int, 0, len(portSlice))
-					for _, p := range portSlice {
-						if pf, ok := p.(float64); ok {
-							gotPorts = append(gotPorts, int(pf))
-						}
-					}
-					if slices.Equal(gotPorts, wantTCPPorts) {
-						tcpGameIdx = i
-					}
-				}
-			}
-			if r.Network == "udp" && r.Outbound == "Game" && slices.Equal(r.PortRange, []string{"6650:6659"}) {
-				bpUDPIdx = i
+			if r.Network == "tcp" && r.Outbound == "Game-TCP" && slices.Equal(r.PortRange, []string{"1024:65535"}) {
+				tcpGameIdx = i
 			}
 			if r.Network == "udp" && r.Outbound == "Game-UDP" && slices.Equal(r.PortRange, []string{"1024:65535"}) {
 				battleUDPIdx = i
@@ -336,9 +323,9 @@ func TestGenerator_GameUDPAndDNSIsolation(t *testing.T) {
 		if hokIdx < 0 || adIdx < 0 || hokIdx >= adIdx {
 			t.Fatalf("[%s] expected geosite-hok (%d) before geosite-ad1 (%d)", platform, hokIdx, adIdx)
 		}
-		if cnIdx < 0 || tcpGameIdx <= cnIdx || bpUDPIdx <= cnIdx || battleUDPIdx <= bpUDPIdx {
-			t.Fatalf("[%s] unexpected rule order: cn=%d tcpGame=%d bpUDP=%d battleUDP=%d",
-				platform, cnIdx, tcpGameIdx, bpUDPIdx, battleUDPIdx)
+		if cnIdx < 0 || tcpGameIdx <= cnIdx || battleUDPIdx <= tcpGameIdx {
+			t.Fatalf("[%s] unexpected rule order: cn=%d tcpGame=%d battleUDP=%d",
+				platform, cnIdx, tcpGameIdx, battleUDPIdx)
 		}
 	}
 }
