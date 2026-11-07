@@ -413,6 +413,7 @@ func (m *Manager) installAndStartService() error {
 	}
 
 	if hasOpenWrtProcd() && m.initdScript != "" {
+		sanitizeOpenWrtDnsmasqTTL()
 		scriptContent := BuildOpenWrtInitScript(m.binPath, m.aghConfigFile, m.aghWorkDir)
 		if err := os.WriteFile(m.initdScript, []byte(scriptContent), 0755); err != nil {
 			return fmt.Errorf("写入 OpenWrt 服务脚本 %s 失败: %w", m.initdScript, err)
@@ -442,6 +443,27 @@ func (m *Manager) installAndStartService() error {
 	// 无 systemd/procd 环境（如容器或开发机）直接后台守护启动
 	_ = m.Stop()
 	return startBackgroundDirect(m.binPath, m.aghConfigFile, m.aghWorkDir)
+}
+
+// sanitizeOpenWrtDnsmasqTTL 清理 OpenWrt/ImmortalWrt 固件自带 dnsmasq 中可能存在的强制 min_cache_ttl / mini_ttl，
+// 防止 1 秒 TTL 的动态节点域名被 dnsmasq 强行篡改缓存 3600 秒。
+func sanitizeOpenWrtDnsmasqTTL() {
+	if _, err := exec.LookPath("uci"); err != nil {
+		return
+	}
+	changed := false
+	for _, key := range []string{"min_cache_ttl", "mini_ttl", "minttl", "use_stale_cache"} {
+		target := "dhcp.@dnsmasq[0]." + key
+		if out, err := exec.Command("uci", "-q", "get", target).Output(); err == nil && len(strings.TrimSpace(string(out))) > 0 {
+			if exec.Command("uci", "-q", "delete", target).Run() == nil {
+				changed = true
+			}
+		}
+	}
+	if changed {
+		_ = exec.Command("uci", "commit", "dhcp").Run()
+		_ = exec.Command("/etc/init.d/dnsmasq", "reload").Run()
+	}
 }
 
 func (m *Manager) waitDNSReady(maxWait time.Duration) error {

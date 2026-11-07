@@ -213,7 +213,19 @@ func (g *ConfigGenerator) InjectLocalDNS(rawJSON, platform string) (string, erro
 		return rawJSON, nil
 	}
 	dnsMap["servers"] = servers
-	log.Info("已将 sing-box dns_local 指向本地 AdGuard Home (127.0.0.1:%d)", dnsPort)
+	// 当本机 AdGuard Home 接管 DNS 时，关闭 sing-box 侧的重复 DNS 缓存、乐观缓存与磁盘持久化，
+	// 完全交由 AdGuard Home (127.0.0.1:5353) 集中管理缓存与乐观刷新，防止双层缓存死锁。
+	dnsMap["disable_cache"] = true
+	dnsMap["optimistic"] = false
+
+	if expMap, ok := root["experimental"].(map[string]any); ok {
+		if cfMap, ok := expMap["cache_file"].(map[string]any); ok {
+			cfMap["store_dns"] = false
+			cfMap["store_fakeip"] = false
+		}
+	}
+
+	log.Info("已将 sing-box dns_local 指向本地 AdGuard Home (127.0.0.1:%d)，并交由 AdGuard Home 统一管理 DNS 缓存", dnsPort)
 
 	data, err := json.Marshal(root)
 	if err != nil {

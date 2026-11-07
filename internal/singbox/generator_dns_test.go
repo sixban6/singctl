@@ -64,6 +64,28 @@ func TestGenerator_InjectLocalDNS_AdGuardHome(t *testing.T) {
 			t.Fatalf("unexpected dns_local: %+v", srv)
 		}
 
+		var fullCfg struct {
+			DNS struct {
+				DisableCache bool `json:"disable_cache"`
+				Optimistic   bool `json:"optimistic"`
+			} `json:"dns"`
+			Experimental struct {
+				CacheFile struct {
+					StoreDNS    bool `json:"store_dns"`
+					StoreFakeIP bool `json:"store_fakeip"`
+				} `json:"cache_file"`
+			} `json:"experimental"`
+		}
+		if err := json.Unmarshal([]byte(out), &fullCfg); err != nil {
+			t.Fatalf("unmarshal full config: %v", err)
+		}
+		if !fullCfg.DNS.DisableCache || fullCfg.DNS.Optimistic {
+			t.Fatalf("expected sing-box dns disable_cache=true and optimistic=false when AdGuardHome is active, got %+v", fullCfg.DNS)
+		}
+		if fullCfg.Experimental.CacheFile.StoreDNS || fullCfg.Experimental.CacheFile.StoreFakeIP {
+			t.Fatalf("expected store_dns=false and store_fakeip=false when AdGuardHome is active, got %+v", fullCfg.Experimental.CacheFile)
+		}
+
 		if sbBin, err := exec.LookPath("sing-box"); err == nil && sbBin != "" {
 			checkJSON := out
 			if runtime.GOOS != "linux" {
