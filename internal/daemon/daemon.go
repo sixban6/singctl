@@ -46,6 +46,8 @@ type Daemon struct {
 	subSyncRunning      atomic.Bool
 	subSyncMu           sync.Mutex
 	lastSubSyncCheckAt  time.Time
+	failoverRunning     atomic.Bool
+	failover            *GroupFailoverState
 }
 
 // NewDaemon 创建守护进程
@@ -62,6 +64,7 @@ func NewDaemon(cfg *config.Config) *Daemon {
 		ctx:                ctx,
 		cancel:             cancel,
 		lastSubSyncCheckAt: time.Now(), // 启动时配置已是最新或刚校验，等待首个周期后再静默比对
+		failover:           NewGroupFailoverState(),
 	}
 }
 
@@ -259,11 +262,15 @@ func (d *Daemon) monitorLoop() error {
 		interval = 3 * time.Minute
 	}
 	watchdogTicker := time.NewTicker(interval)
+	failoverTicker := time.NewTicker(groupFailoverInterval)
+	initFailoverTimer := time.NewTimer(8 * time.Second)
 	// 启动 30 秒后首次检查规则集是否需要后台静默更新（此时 sing-box 代理已稳定就绪）
 	initRefreshTimer := time.NewTimer(30 * time.Second)
 
 	defer func() {
 		watchdogTicker.Stop()
+		failoverTicker.Stop()
+		initFailoverTimer.Stop()
 		initRefreshTimer.Stop()
 		logger.Info("Daemon stopped")
 		RemovePidFile()
@@ -272,12 +279,18 @@ func (d *Daemon) monitorLoop() error {
 		}
 	}()
 
-	logger.Info("Daemon watchdog started (check interval: %s)", interval)
+	logger.Info("Daemon watchdog started (check interval: %s, group failover patrol: %s)", interval, groupFailoverInterval)
 
 	for {
 		select {
 		case <-d.ctx.Done():
 			return nil
+
+		case <-initFailoverTimer.C:
+			d.maybePatrolGroupFailoverAsync()
+
+		case <-failoverTicker.C:
+			d.maybePatrolGroupFailoverAsync()
 
 		case <-initRefreshTimer.C:
 			if d.monitor.CheckHealth().Healthy {
