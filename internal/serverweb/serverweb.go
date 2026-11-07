@@ -114,7 +114,7 @@ func New(opts Options) *Server {
 	}
 
 	limiter := NewIPLimiter(3, 10*time.Minute, 15*time.Minute, banFile)
-	geo := NewIPGeoResolver()
+	geo := NewIPGeoResolver(resolveGeoFilePath(opts))
 	sniffFile := resolveSniffFilePath(opts)
 	sniffTracker := NewSniffTracker(geo, limiter, sniffFile)
 	sniffTracker.SetFleetManager(fleetMgr)

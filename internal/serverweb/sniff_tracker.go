@@ -22,7 +22,7 @@ import (
 
 const (
 	maxTrackedSniffIPs = 1000
-	sniffEntryTTL      = 7 * 24 * time.Hour
+	sniffEntryTTL      = 24 * time.Hour
 	trustedClientTTL   = 2 * time.Hour
 	systemHarvestMinDT = 6 * time.Second
 	fleetHarvestMinDT  = 20 * time.Second
@@ -1122,12 +1122,21 @@ func (t *SniffTracker) SnapshotForNode(ctx context.Context, nodeScope string, fo
 		tag   string
 	}
 
+	var geoMap map[string]IPGeoInfo
+	if t.geo != nil && len(mergedByIP) > 0 {
+		ipList := make([]string, 0, len(mergedByIP))
+		for ip := range mergedByIP {
+			ipList = append(ipList, ip)
+		}
+		geoMap = t.geo.ResolveBatch(ctx, ipList)
+	}
+
 	enriched := make([]enrichedItem, 0, len(mergedByIP))
 	totalBanned := 0
 	for _, m := range mergedByIP {
 		var geo IPGeoInfo
-		if t.geo != nil {
-			geo = t.geo.Resolve(m.rec.ip)
+		if geoMap != nil {
+			geo = geoMap[m.rec.ip]
 		}
 		tag := cmp.Or(m.rec.scannerTag, MatchScannerTag(m.rec.ip, geo.ISP))
 		if m.rec.status == "banned" {
@@ -1728,7 +1737,11 @@ func parseNFTSetEntries(raw string, refNow time.Time) []nftSetEntry {
 		}
 		if em := reNFTExpires.FindStringSubmatch(part); len(em) == 2 {
 			if expDur := parseNFTDuration(em[1]); expDur > 0 && timeoutDur >= expDur {
-				observedAt = refNow.Add(-(timeoutDur - expDur))
+				age := timeoutDur - expDur
+				if age > sniffEntryTTL {
+					continue
+				}
+				observedAt = refNow.Add(-age)
 			}
 		}
 		out = append(out, nftSetEntry{

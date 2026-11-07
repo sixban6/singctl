@@ -93,6 +93,16 @@ func resolveSniffFilePath(opts Options) string {
 	return ""
 }
 
+func resolveGeoFilePath(opts Options) string {
+	if opts.ConfigPath != "" {
+		return filepath.Join(filepath.Dir(opts.ConfigPath), ".serverweb_geo_cache.json")
+	}
+	if st, err := os.Stat("/etc/singctl"); err == nil && st.IsDir() {
+		return "/etc/singctl/.serverweb_geo_cache.json"
+	}
+	return ""
+}
+
 func (s *Server) getUsername() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

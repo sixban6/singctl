@@ -74,8 +74,8 @@ func TestIPGeoResolver_FetchAsync(t *testing.T) {
 		Geo:         formatGeoLabel("SG", "Singapore", "Singapore"),
 	}
 	resolver.cache["1.1.1.1"] = geoCacheEntry{
-		info:      info,
-		expiresAt: time.Now().Add(1 * time.Hour),
+		Info:      info,
+		ExpiresAt: time.Now().Add(1 * time.Hour),
 	}
 
 	resolved := resolver.Resolve("1.1.1.1")
