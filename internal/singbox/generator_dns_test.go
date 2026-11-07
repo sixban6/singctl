@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"testing"
 
 	"singctl/internal/adguard"
@@ -174,23 +175,50 @@ func TestGenerator_GameUDPAndDNSIsolation(t *testing.T) {
 		}
 		var parsed struct {
 			DNS struct {
-				Servers []struct {
+				ClientSubnet string `json:"client_subnet"`
+				Servers      []struct {
 					Tag    string `json:"tag"`
 					Detour string `json:"detour"`
 				} `json:"servers"`
+				Rules []struct {
+					RuleSet      any    `json:"rule_set"`
+					Server       string `json:"server"`
+					ClientSubnet string `json:"client_subnet"`
+				} `json:"rules"`
 			} `json:"dns"`
 			Outbounds []struct {
-				Tag       string   `json:"tag"`
-				Outbounds []string `json:"outbounds"`
+				Tag                       string   `json:"tag"`
+				Outbounds                 []string `json:"outbounds"`
+				Interval                  string   `json:"interval"`
+				Tolerance                 int      `json:"tolerance"`
+				InterruptExistConnections *bool    `json:"interrupt_exist_connections"`
 			} `json:"outbounds"`
+			Route struct {
+				Rules []struct {
+					Action    string   `json:"action"`
+					Network   string   `json:"network"`
+					Outbound  string   `json:"outbound"`
+					Port      any      `json:"port"`
+					PortRange []string `json:"port_range"`
+					RuleSet   any      `json:"rule_set"`
+				} `json:"rules"`
+			} `json:"route"`
 		}
 		if err := json.Unmarshal([]byte(out), &parsed); err != nil {
 			t.Fatal(err)
 		}
 
 		byTag := make(map[string][]string)
+		var autoInterval string
+		var autoTolerance int
+		var autoInterrupt *bool
 		for _, ob := range parsed.Outbounds {
 			byTag[ob.Tag] = ob.Outbounds
+			if ob.Tag == "#Auto" {
+				autoInterval = ob.Interval
+				autoTolerance = ob.Tolerance
+				autoInterrupt = ob.InterruptExistConnections
+			}
 		}
 
 		// 1. 冗余旧分组已被精简移除，保留两层清晰结构：分流组(Proxy/AI/Game/Game-UDP) + 节点池(#VPS/#Auto/#Nodes)
@@ -228,7 +256,7 @@ func TestGenerator_GameUDPAndDNSIsolation(t *testing.T) {
 			t.Fatalf("[%s] Game-UDP should default to DirectConn, got %v", platform, got)
 		}
 
-		// 4. dns_proxy 独立绑 #VPS，dns_hok 独立绑 #Auto
+		// 4. dns_proxy 与 dns_hok 均走高可靠自建 #VPS，且 dns_hok 规则显式携带香港 ECS 子网 203.80.96.0/24
 		detours := make(map[string]string)
 		for _, srv := range parsed.DNS.Servers {
 			detours[srv.Tag] = srv.Detour
@@ -236,8 +264,81 @@ func TestGenerator_GameUDPAndDNSIsolation(t *testing.T) {
 		if detours["dns_proxy"] != "#VPS" {
 			t.Fatalf("[%s] dns_proxy detour = %q, want #VPS", platform, detours["dns_proxy"])
 		}
-		if detours["dns_hok"] != "#Auto" {
-			t.Fatalf("[%s] dns_hok detour = %q, want #Auto", platform, detours["dns_hok"])
+		if detours["dns_hok"] != "#VPS" {
+			t.Fatalf("[%s] dns_hok detour = %q, want #VPS", platform, detours["dns_hok"])
+		}
+		if parsed.DNS.ClientSubnet != "" {
+			t.Fatalf("[%s] top-level dns.client_subnet should be empty to avoid polluting dns_proxy, got %q", platform, parsed.DNS.ClientSubnet)
+		}
+		foundHoKECS := false
+		for _, dr := range parsed.DNS.Rules {
+			if rs, ok := dr.RuleSet.(string); ok && rs == "geosite-hok" && dr.Server == "dns_hok" {
+				if dr.ClientSubnet != "203.80.96.0/24" {
+					t.Fatalf("[%s] geosite-hok dns rule client_subnet = %q, want 203.80.96.0/24", platform, dr.ClientSubnet)
+				}
+				foundHoKECS = true
+			}
+		}
+		if !foundHoKECS {
+			t.Fatalf("[%s] geosite-hok dns rule with dns_hok not found", platform)
+		}
+
+		// 5. #Auto 后台测速必须快速容灾 (1m/50) 且禁止强断存量对局连接
+		if autoInterval != "1m" || autoTolerance != 50 {
+			t.Fatalf("[%s] #Auto interval/tolerance = %q/%d, want 1m/50", platform, autoInterval, autoTolerance)
+		}
+		if autoInterrupt == nil || *autoInterrupt {
+			t.Fatalf("[%s] #Auto interrupt_exist_connections must be false", platform)
+		}
+
+		// 6. 验证 HoK 规则顺序与选人房/局内战斗拆分：
+		//    geosite-hok 在广告拦截之前；geoip-cn 在纯 IP 端口之前；UDP 6650:6659 进房走 Game，其余高端口 UDP 走 Game-UDP
+		hokIdx, adIdx, cnIdx, tcpGameIdx, bpUDPIdx, battleUDPIdx := -1, -1, -1, -1, -1, -1
+		wantTCPPorts := []int{5010, 5692, 8500, 8600, 8801, 10004, 20000, 31003}
+		for i, r := range parsed.Route.Rules {
+			if rs, ok := r.RuleSet.(string); ok && rs == "geosite-hok" && r.Outbound == "Game" {
+				hokIdx = i
+			}
+			if rsArr, ok := r.RuleSet.([]any); ok && r.Action == "reject" {
+				for _, item := range rsArr {
+					if item == "geosite-ad1" {
+						adIdx = i
+					}
+				}
+			}
+			if rsArr, ok := r.RuleSet.([]any); ok && r.Outbound == "DirectConn" {
+				for _, item := range rsArr {
+					if item == "geoip-cn" {
+						cnIdx = i
+					}
+				}
+			}
+			if r.Network == "tcp" && r.Outbound == "Game" {
+				if portSlice, ok := r.Port.([]any); ok {
+					gotPorts := make([]int, 0, len(portSlice))
+					for _, p := range portSlice {
+						if pf, ok := p.(float64); ok {
+							gotPorts = append(gotPorts, int(pf))
+						}
+					}
+					if slices.Equal(gotPorts, wantTCPPorts) {
+						tcpGameIdx = i
+					}
+				}
+			}
+			if r.Network == "udp" && r.Outbound == "Game" && slices.Equal(r.PortRange, []string{"6650:6659"}) {
+				bpUDPIdx = i
+			}
+			if r.Network == "udp" && r.Outbound == "Game-UDP" && slices.Equal(r.PortRange, []string{"1024:65535"}) {
+				battleUDPIdx = i
+			}
+		}
+		if hokIdx < 0 || adIdx < 0 || hokIdx >= adIdx {
+			t.Fatalf("[%s] expected geosite-hok (%d) before geosite-ad1 (%d)", platform, hokIdx, adIdx)
+		}
+		if cnIdx < 0 || tcpGameIdx <= cnIdx || bpUDPIdx <= cnIdx || battleUDPIdx <= bpUDPIdx {
+			t.Fatalf("[%s] unexpected rule order: cn=%d tcpGame=%d bpUDP=%d battleUDP=%d",
+				platform, cnIdx, tcpGameIdx, bpUDPIdx, battleUDPIdx)
 		}
 	}
 }
