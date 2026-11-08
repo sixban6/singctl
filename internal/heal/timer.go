@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+
+	"singctl/internal/updater"
 )
 
 const (
@@ -101,7 +103,7 @@ func ApplyPolicy(configPath string, policy HealPolicy) (TimerStatus, error) {
 
 func installAndEnableTimer(configPath string, policy HealPolicy) error {
 	exePath := "/usr/local/bin/singctl"
-	if cur, err := os.Executable(); err == nil && strings.TrimSpace(cur) != "" {
+	if cur, err := updater.ResolveExecutablePath(); err == nil && strings.TrimSpace(cur) != "" {
 		if _, sErr := os.Stat(cur); sErr == nil {
 			exePath = cur
 		}

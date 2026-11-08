@@ -131,6 +131,13 @@ func (s *Server) handleUpgradeService(w http.ResponseWriter, r *http.Request) {
 		"message": msg,
 		"results": results,
 	})
+
+	for _, res := range results {
+		if res != nil && res.Component == "substore" && res.Updated {
+			_ = exec.Command("sh", "-c", "sleep 2 && singctl sr web restart >/dev/null 2>&1").Start()
+			break
+		}
+	}
 }
 
 func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {

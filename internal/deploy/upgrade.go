@@ -455,7 +455,7 @@ func UpgradeComponent(target string, cfg *config.Config) ([]*UpgradeResult, erro
 		}
 		return []*UpgradeResult{res}, nil
 
-	case "substore", "ss", "sub-store":
+	case "substore", "ss", "sub-store", "subhub":
 		res, err := UpgradeSubstore(cfg)
 		if err != nil {
 			return nil, err

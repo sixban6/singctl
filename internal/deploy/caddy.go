@@ -40,14 +40,31 @@ func RestartCaddy() error {
 	return nil
 }
 
-// SyncCaddyfile checks if Caddy is installed, renders Caddyfile with current cfg, and reloads Caddy.
+// SyncCaddyfile checks if Caddy is installed, renders Caddyfile with current cfg, and reloads Caddy only if changed or inactive.
 func SyncCaddyfile(cfg *config.Config) error {
 	caddyfilePath := "/etc/caddy/Caddyfile"
 	if _, err := os.Stat(caddyfilePath); os.IsNotExist(err) {
 		return nil
 	}
-	if err := renderCaddyfile(cfg); err != nil {
+	content, err := PreviewCaddyfile(cfg)
+	if err != nil {
 		return fmt.Errorf("failed to render Caddyfile: %w", err)
+	}
+	existing, rErr := os.ReadFile(caddyfilePath)
+	changed := rErr != nil || string(existing) != content
+	if changed {
+		if err := os.MkdirAll("/etc/caddy", 0755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(caddyfilePath, []byte(content), 0640); err != nil {
+			return err
+		}
+		if err := secureCaddyfile(caddyfilePath); err != nil {
+			return err
+		}
+	}
+	if !changed && runCmd("systemctl", "is-active", "--quiet", "caddy") == nil {
+		return nil
 	}
 	if err := runCmd("systemctl", "reload", "caddy"); err != nil {
 		return RestartCaddy()

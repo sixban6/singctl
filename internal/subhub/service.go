@@ -13,6 +13,7 @@ import (
 
 	"singctl/internal/constant"
 	"singctl/internal/logger"
+	"singctl/internal/updater"
 )
 
 const ServiceName = "singctl-sub"
@@ -24,12 +25,12 @@ func InstallService(cfgPath string) error {
 		return fmt.Errorf("singctl-sub service installation is only supported on Linux (current: %s)", runtime.GOOS)
 	}
 
-	exePath, err := os.Executable()
+	exePath, err := updater.ResolveExecutablePath()
 	if err != nil {
 		return fmt.Errorf("resolve executable path: %w", err)
 	}
 	if realExe, err := filepath.EvalSymlinks(exePath); err == nil {
-		exePath = realExe
+		exePath = updater.SanitizeExecutablePath(realExe)
 	}
 
 	absCfg := cmp.Or(strings.TrimSpace(cfgPath), "/etc/singctl/singctl.yaml")

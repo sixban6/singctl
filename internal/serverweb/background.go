@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"singctl/internal/logger"
+	"singctl/internal/updater"
 )
 
 const (
@@ -83,7 +84,7 @@ func StartBackground(opts Options) error {
 		return nil
 	}
 
-	execPath, err := os.Executable()
+	execPath, err := updater.ResolveExecutablePath()
 	if err != nil {
 		return fmt.Errorf("failed to get executable path: %w", err)
 	}
@@ -208,8 +209,8 @@ func InstallSystemdService(cfgPath string) error {
 	if _, err := os.Stat("/run/systemd/system"); err != nil {
 		return nil
 	}
-	execPath, err := os.Executable()
-	if err != nil {
+	execPath, err := updater.ResolveExecutablePath()
+	if err != nil || strings.TrimSpace(execPath) == "" {
 		execPath = "/usr/local/bin/singctl"
 	}
 	content := fmt.Sprintf(`[Unit]
