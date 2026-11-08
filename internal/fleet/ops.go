@@ -551,8 +551,20 @@ func (m *Manager) doctorNodeObj(ctx context.Context, node Node) NodeActionResult
 	callCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 
-	out, rtt, err := runner(callCtx, node, "singctl sr doctor 2>&1")
-	clean := strings.TrimSpace(ansiEscapeRe.ReplaceAllString(out, ""))
+	out, rtt, err := runner(callCtx, node, "printf 'SINGCTL_VER=%s\\n' \"$(singctl version 2>&1 | tr '\\n' ' ' || true)\"; singctl sr doctor 2>&1")
+	var verStr string
+	var filteredLines []string
+	for line := range strings.SplitSeq(out, "\n") {
+		if after, ok := strings.CutPrefix(strings.TrimSpace(line), "SINGCTL_VER="); ok {
+			rawVer := ansiEscapeRe.ReplaceAllString(after, "")
+			if m := versionLineRe.FindStringSubmatch(rawVer); len(m) > 1 {
+				verStr = m[1]
+			}
+			continue
+		}
+		filteredLines = append(filteredLines, line)
+	}
+	clean := strings.TrimSpace(ansiEscapeRe.ReplaceAllString(strings.Join(filteredLines, "\n"), ""))
 	if err != nil {
 		_, _ = m.Store.UpdateRuntimeState(node.ID, func(n *Node) {
 			n.Online = false
@@ -577,6 +589,9 @@ func (m *Manager) doctorNodeObj(ctx context.Context, node Node) NodeActionResult
 		n.Online = true
 		n.LastError = ""
 		n.LatencyMs = rtt
+		if verStr != "" {
+			n.SingctlVersion = verStr
+		}
 		if score > 0 {
 			n.DoctorScore = score
 			n.DoctorSummary = summary

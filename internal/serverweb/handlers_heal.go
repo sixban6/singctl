@@ -2,10 +2,12 @@ package serverweb
 
 import (
 	"cmp"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"singctl/internal/fleet"
 	"singctl/internal/heal"
@@ -79,8 +81,15 @@ func (s *Server) handleHealRun(w http.ResponseWriter, r *http.Request) {
 		scope = "local"
 	}
 
+	execCtx := r.Context()
+	var cancel context.CancelFunc
+	if !body.CheckOnly {
+		execCtx, cancel = context.WithTimeout(context.WithoutCancel(r.Context()), 10*time.Minute)
+		defer cancel()
+	}
+
 	if scope == "fleet" {
-		fleetRep, err := s.fleet.HealFleet(r.Context(), fleet.FleetHealOptions{
+		fleetRep, err := s.fleet.HealFleet(execCtx, fleet.FleetHealOptions{
 			CheckOnly:    body.CheckOnly,
 			AllowReboot:  body.AllowReboot,
 			EnableTimers: body.EnableTimers,
@@ -92,7 +101,7 @@ func (s *Server) handleHealRun(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Run local Master self-healing (never auto-rebooting Master mid-WebUI session unless explicitly local)
-		localRes, _ := heal.Run(r.Context(), heal.RunOptions{
+		localRes, _ := heal.Run(execCtx, heal.RunOptions{
 			ConfigPath:        s.opts.ConfigPath,
 			CurrentSingctlVer: s.opts.Version,
 			CheckOnly:         body.CheckOnly,

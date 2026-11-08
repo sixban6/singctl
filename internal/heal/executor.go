@@ -180,6 +180,8 @@ func Run(ctx context.Context, opts RunOptions) (RunResult, error) {
 	switch {
 	case rollbackCount > 0:
 		summary = fmt.Sprintf("自愈完成：更新 %d 项，触发 %d 项异常自动回滚保护（服务未中断）", updatedCount, rollbackCount)
+	case updatedCount > 0 && !allOK:
+		summary = fmt.Sprintf("已修复 %d 项安全更新，但部分组件更新遇到异常，请查看明细", updatedCount)
 	case updatedCount > 0 && willReboot:
 		summary = fmt.Sprintf("成功修复 %d 项安全更新，节点即将平滑重启加载新内核", updatedCount)
 	case updatedCount > 0:

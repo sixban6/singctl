@@ -203,9 +203,10 @@ if ! singctl sr heal --help >/dev/null 2>&1; then
   singctl update self >/dev/null 2>&1 || true
 fi
 singctl sr heal %s
+printf "\nSINGCTL_VER=%%s\n" "$(singctl version 2>&1 | tr '\n' ' ' || true)"
 `, strings.Join(flags, " "))
 
-	out, _, err := runner(cCtx, node, script)
+	out, rtt, err := runner(cCtx, node, script)
 	if err != nil {
 		return FleetHealNodeResult{
 			ID:      node.ID,
@@ -216,8 +217,29 @@ singctl sr heal %s
 		}
 	}
 
+	var verStr string
+	for line := range strings.SplitSeq(out, "\n") {
+		line = strings.TrimSpace(line)
+		if after, ok := strings.CutPrefix(line, "SINGCTL_VER="); ok {
+			rawVer := ansiEscapeRe.ReplaceAllString(after, "")
+			if m := versionLineRe.FindStringSubmatch(rawVer); len(m) > 1 {
+				verStr = m[1]
+			}
+		}
+	}
+
 	jsonRaw := extractLastJSONObject(out)
 	if jsonRaw == "" {
+		if verStr != "" {
+			_, _ = m.Store.UpdateRuntimeState(node.ID, func(n *Node) {
+				n.Online = true
+				n.LastError = ""
+				if rtt > 0 {
+					n.LatencyMs = rtt
+				}
+				n.SingctlVersion = verStr
+			})
+		}
 		return FleetHealNodeResult{
 			ID:      node.ID,
 			Name:    node.Name,
@@ -237,6 +259,36 @@ singctl sr heal %s
 			Summary: "解析远端自愈报告失败: " + jErr.Error(),
 		}
 	}
+
+	if verStr == "" {
+		for _, comp := range rr.Status.Core.Components {
+			if comp.Name == "singctl" {
+				v := strings.TrimSpace(comp.CurrentVersion)
+				if v != "" && v != "未知" && v != "未安装" {
+					if !strings.HasPrefix(v, "v") && v != "dev" {
+						v = "v" + v
+					}
+					verStr = v
+				}
+				break
+			}
+		}
+	}
+
+	nowStr := time.Now().Format(time.RFC3339)
+	_, _ = m.Store.UpdateRuntimeState(node.ID, func(n *Node) {
+		n.Online = true
+		n.LastError = ""
+		if rtt > 0 {
+			n.LatencyMs = rtt
+		}
+		if verStr != "" {
+			n.SingctlVersion = verStr
+		}
+		if !opts.CheckOnly && rr.Execution.Success {
+			n.LastSyncAt = nowStr
+		}
+	})
 
 	return FleetHealNodeResult{
 		ID:             node.ID,

@@ -510,7 +510,12 @@ func TestFleetHealSerialRollingRebootAndCircuitBreaker(t *testing.T) {
 		Execution: heal.HealHistoryItem{Success: true, Summary: "已修复安全更新"},
 		Status: heal.StatusReport{
 			Posture: heal.PostureRebootRequired,
-			Kernel:  heal.KernelLayerStatus{RebootRequired: true},
+			Core: heal.CoreLayerStatus{
+				Components: []heal.ComponentCheck{
+					{Name: "singctl", CurrentVersion: "1.14.62"},
+				},
+			},
+			Kernel: heal.KernelLayerStatus{RebootRequired: true},
 		},
 	})
 
@@ -548,6 +553,9 @@ func TestFleetHealSerialRollingRebootAndCircuitBreaker(t *testing.T) {
 	}
 	if rep1.RebootedNodes != 3 || rep1.CircuitBreakerHit {
 		t.Fatalf("expected 3 rebooted healthy nodes with no circuit breaker, got %+v", rep1)
+	}
+	if n1, ok, _ := store.Get("n1"); !ok || n1.SingctlVersion != "v1.14.62" {
+		t.Fatalf("expected HealFleet to persist updated worker SingctlVersion v1.14.62 into fleet.yaml, got %+v", n1)
 	}
 
 	// Scenario 2: n2 fails to come back healthy after reboot -> Circuit Breaker MUST abort rebooting n3!
