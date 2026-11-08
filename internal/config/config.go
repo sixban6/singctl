@@ -197,11 +197,12 @@ type TailscaleConfig struct {
 }
 
 type ServerConfig struct {
-	NodeTag            string            `yaml:"node_tag"`        // (可选) 节点地区/名称标识 (例如: los, sg, hk)，留空自动根据公网 IP 智能识别
-	SBDomain           string            `yaml:"sb_domain"`       // 兼容旧配置：默认主域名
-	NodeDomain         string            `yaml:"node_domain"`     // 节点主域名 (Hysteria 2 / VLESS 分享链接主机)
-	SubstoreDomain     string            `yaml:"substore_domain"` // Sub-Store 专属域名
-	ServerIP           string            `yaml:"server_ip"`       // 公网 IP 地址（选填，未填写时自动探测用于申请 Let's Encrypt 原生 IP 证书）
+	NodeTag            string            `yaml:"node_tag"`             // (可选) 节点地区/名称标识 (例如: los, sg, hk)，留空自动根据公网 IP 智能识别
+	SBDomain           string            `yaml:"sb_domain"`            // 兼容旧配置：默认主域名
+	NodeDomain         string            `yaml:"node_domain"`          // 节点主域名 (Hysteria 2 / VLESS 分享链接主机)
+	NodePort           int               `yaml:"node_port,omitempty"`  // (可选) 节点对外监听与订阅导出端口 (默认 443；NAT 小鸡可指定可用 TCP+UDP 端口如 11501)
+	SubstoreDomain     string            `yaml:"substore_domain"`      // Sub-Store 专属域名
+	ServerIP           string            `yaml:"server_ip"`            // 公网 IP 地址（选填，未填写时自动探测用于申请 Let's Encrypt 原生 IP 证书）
 	CFDNSKey           string            `yaml:"cf_dns_key"`
 	Sni                string            `yaml:"sni"`
 	CorsAllowedOrigins string            `yaml:"cors_allowed_origins"`
@@ -586,6 +587,15 @@ func (s *ServerConfig) GetNodeDomain() string {
 	return strings.TrimSpace(s.SBDomain)
 }
 
+// GetNodePort returns the external port for proxy nodes (Hysteria2 UDP + VLESS Reality TCP + Caddy L4).
+// Defaults to 443 when unset or out of range.
+func (s *ServerConfig) GetNodePort() int {
+	if s != nil && s.NodePort > 0 && s.NodePort <= 65535 {
+		return s.NodePort
+	}
+	return 443
+}
+
 // GetSubstoreDomain returns the domain for Sub-Store.
 // Falls back to SBDomain if SubstoreDomain is not set.
 func (s *ServerConfig) GetSubstoreDomain() string {
@@ -648,7 +658,7 @@ var knownYAMLKeys = []string{
 	"include", "exclude", "rename", "match", "replace",
 	"github", "mirror_url", "hy2", "up", "down",
 	"tailscale", "auth_key", "use_build", constant.TailscaleSubnets,
-	"server", "node_tag", "sb_domain", "node_domain", "substore_domain", "server_ip",
+	"server", "node_tag", "sb_domain", "node_domain", "node_port", "substore_domain", "server_ip",
 	"cf_dns_key", "sni", "cors_allowed_origins",
 	"web_terminal", "mtls_ca", "ssh_tunnel_port", "ssh_tunnel_path", "ssh_port",
 	"web_admin", "enabled", "port", "path", "username", "password", "password_pending_ack",
@@ -1044,6 +1054,12 @@ func MigrateConfig(configPath string, templateData []byte) error {
 			setOrAddField(docNode, "server", "node_domain", nodeDomain)
 		} else if hasYAMLKey(oldServer, "node_domain") {
 			setOrAddField(docNode, "server", "node_domain", "")
+		}
+
+		if oldCfg.Server.NodePort > 0 && oldCfg.Server.NodePort <= 65535 {
+			setOrAddField(docNode, "server", "node_port", strconv.Itoa(oldCfg.Server.NodePort))
+		} else if hasYAMLKey(oldServer, "node_port") {
+			removeField(docNode, "server", "node_port")
 		}
 
 		if oldCfg.Server.SubstoreDomain != "" {

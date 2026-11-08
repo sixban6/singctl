@@ -353,7 +353,9 @@ func checkTLSCert(cfg *config.Config, r *DoctorReport) {
 		return
 	}
 
-	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 3 * time.Second}, "tcp", domain+":443", &tls.Config{
+	nodePort := cfg.Server.GetNodePort()
+	targetAddr := fmt.Sprintf("%s:%d", domain, nodePort)
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 3 * time.Second}, "tcp", targetAddr, &tls.Config{
 		ServerName:         domain,
 		InsecureSkipVerify: false,
 	})
@@ -362,7 +364,7 @@ func checkTLSCert(cfg *config.Config, r *DoctorReport) {
 			Name:     "HTTPS 证书与网关",
 			Category: "security",
 			Status:   "warn",
-			Summary:  fmt.Sprintf("无法建立与 %s:443 的 TLS 握手", domain),
+			Summary:  fmt.Sprintf("无法建立与 %s 的 TLS 握手", targetAddr),
 			Detail:   err.Error(),
 		})
 		return

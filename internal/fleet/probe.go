@@ -9,6 +9,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -64,7 +65,11 @@ func DefaultHTTPSProber(ctx context.Context, node Node) ProbeResult {
 		if sniHost == "" && net.ParseIP(dialHost) == nil {
 			sniHost = strings.ToLower(dialHost)
 		}
-		dialAddr = net.JoinHostPort(dialHost, "443")
+		targetPort := 443
+		if node.NodePort > 0 && node.NodePort <= 65535 {
+			targetPort = node.NodePort
+		}
+		dialAddr = net.JoinHostPort(dialHost, strconv.Itoa(targetPort))
 	}
 
 	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)

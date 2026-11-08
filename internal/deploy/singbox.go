@@ -77,8 +77,9 @@ func (sbs *SingBoxServer) initTag() {
 
 func (sbs *SingBoxServer) updateShareLinks() {
 	nodeDomain := sbs.cfg.Server.GetNodeDomain()
-	sbs.ShareLinkHy2 = fmt.Sprintf("hysteria2://%s@%s:443/?sni=%s&alpn=h3&insecure=0#%s", sbs.hyUUID, nodeDomain, nodeDomain, sbs.hy2Tag)
-	sbs.ShareLinkVless = fmt.Sprintf("vless://%s@%s:443?type=tcp&encryption=none&security=reality&pbk=%s&fp=chrome&sni=%s&sid=%s&flow=xtls-rprx-vision#%s", sbs.hyUUID, nodeDomain, sbs.publicKey, sbs.cfg.Server.Sni, sbs.shortID, sbs.vrTag)
+	nodePort := sbs.AnyTLSPort()
+	sbs.ShareLinkHy2 = fmt.Sprintf("hysteria2://%s@%s:%d/?sni=%s&alpn=h3&insecure=0#%s", sbs.hyUUID, nodeDomain, nodePort, nodeDomain, sbs.hy2Tag)
+	sbs.ShareLinkVless = fmt.Sprintf("vless://%s@%s:%d?type=tcp&encryption=none&security=reality&pbk=%s&fp=chrome&sni=%s&sid=%s&flow=xtls-rprx-vision#%s", sbs.hyUUID, nodeDomain, nodePort, sbs.publicKey, sbs.cfg.Server.Sni, sbs.shortID, sbs.vrTag)
 }
 
 // HyUUID returns the Hysteria2 password / VLESS UUID.
@@ -106,8 +107,11 @@ func (sbs *SingBoxServer) VrTag() string {
 	return sbs.vrTag
 }
 
-// AnyTLSPort returns the AnyTLS port (443).
+// AnyTLSPort returns the external node port (defaults to 443; configurable via server.node_port for NAT VPS).
 func (sbs *SingBoxServer) AnyTLSPort() int {
+	if sbs != nil && sbs.cfg != nil {
+		return sbs.cfg.Server.GetNodePort()
+	}
 	return 443
 }
 
@@ -553,12 +557,13 @@ func (sbs *SingBoxServer) ShowLoginInfo() {
 	fmt.Println("│               🚀 服务端节点分享与客户端导入                │")
 	fmt.Println("└────────────────────────────────────────────────────────────┘")
 
+	nodePort := sbs.AnyTLSPort()
 	// 1. Hysteria 2
-	fmt.Println("\n【1】Hysteria 2 节点 (端口: 443 / QUIC UDP)")
+	fmt.Printf("\n【1】Hysteria 2 节点 (端口: %d / QUIC UDP)\n", nodePort)
 	fmt.Printf("• 分享链接: %s\n", sbs.ShareLinkHy2)
 
 	// 2. VLESS Reality
-	fmt.Println("\n【2】VLESS Reality 节点 (端口: 443 / TCP Reality)")
+	fmt.Printf("\n【2】VLESS Reality 节点 (端口: %d / TCP Reality)\n", nodePort)
 	fmt.Printf("• 分享链接: %s\n", sbs.ShareLinkVless)
 	fmt.Println("────────────────────────────────────────────────────────────")
 	fmt.Println()
@@ -578,38 +583,61 @@ func (sbs *SingBoxServer) PreviewServerConfig() (string, error) {
 	}
 
 	type tmplContext struct {
-		HyUUID            string
-		SBDomain          string
-		CertPath          string
-		KeyPath           string
-		RealityPrivateKey string
-		RealityShortID    string
-		Sni               string
-		AnyTLSPort        int
-		TelemetrySecret   string
+		HyUUID                 string
+		SBDomain               string
+		CertPath               string
+		KeyPath                string
+		RealityPrivateKey      string
+		RealityShortID         string
+		Sni                    string
+		RealityHandshakeServer string
+		RealityHandshakePort   int
+		AnyTLSPort             int
+		TelemetrySecret        string
 	}
 	cfgDir := constant.SingBoxConfigDir
 	if sbs.ConfigFile != "" {
 		cfgDir = filepath.Dir(sbs.ConfigFile)
 	}
 	telemetrySecret, _ := telemetry.EnsureSecret(cfgDir)
+	sbDomain := sbs.cfg.Server.GetNodeDomain()
+	sni := sbs.cfg.Server.Sni
+	handshakeServer := sni
+	handshakePort := 443
+	if sbDomain != "" && strings.EqualFold(strings.TrimSpace(sni), strings.TrimSpace(sbDomain)) {
+		// Reality 自偷模式 (当 SNI 与节点自身域名一致，如 NAT 443 域名分流场景)：
+		// 指向本地 Caddy 9443 真实 ACME 证书端点，避免连接自身 :443 形成 Layer4 转发死循环。
+		handshakeServer = "127.0.0.1"
+		handshakePort = 9443
+	}
 	ctx := tmplContext{
-		HyUUID:            sbs.hyUUID,
-		SBDomain:          sbs.cfg.Server.GetNodeDomain(),
-		CertPath:          sbs.crtPath,
-		KeyPath:           sbs.keyPath,
-		RealityPrivateKey: sbs.privateKey,
-		RealityShortID:    sbs.shortID,
-		Sni:               sbs.cfg.Server.Sni,
-		AnyTLSPort:        sbs.AnyTLSPort(),
-		TelemetrySecret:   telemetrySecret,
+		HyUUID:                 sbs.hyUUID,
+		SBDomain:               sbDomain,
+		CertPath:               sbs.crtPath,
+		KeyPath:                sbs.keyPath,
+		RealityPrivateKey:      sbs.privateKey,
+		RealityShortID:         sbs.shortID,
+		Sni:                    sni,
+		RealityHandshakeServer: handshakeServer,
+		RealityHandshakePort:   handshakePort,
+		AnyTLSPort:             sbs.AnyTLSPort(),
+		TelemetrySecret:        telemetrySecret,
 	}
 
 	var buf bytes.Buffer
 	if err := t.Execute(&buf, ctx); err != nil {
 		return "", fmt.Errorf("failed to execute sing-box template: %w", err)
 	}
-	return buf.String(), nil
+	rendered := buf.String()
+	if handshakePort != 443 {
+		rendered = strings.Replace(
+			rendered,
+			fmt.Sprintf("\"server\": %q,\n            \"server_port\": 443", handshakeServer),
+			fmt.Sprintf("\"server\": %q,\n            \"server_port\": %d", handshakeServer, handshakePort),
+			1,
+		)
+	}
+	return rendered, nil
 }
 
 func (sbs *SingBoxServer) renderSingboxConfig() error {

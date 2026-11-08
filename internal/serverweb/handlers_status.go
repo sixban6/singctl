@@ -145,16 +145,17 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 	adminURL, _ := sbt.GetAdminURL()
 	vercelURL, _ := sbt.GetVercelAdminURL()
 
+	nodePort := sbs.AnyTLSPort()
 	res := map[string]any{
 		"hy2": map[string]any{
 			"link":     sbs.ShareLinkHy2,
-			"port":     443,
+			"port":     nodePort,
 			"protocol": "hysteria2",
 			"domain":   cfg.Server.GetNodeDomain(),
 		},
 		"vless": map[string]any{
 			"link":     sbs.ShareLinkVless,
-			"port":     443,
+			"port":     nodePort,
 			"protocol": "vless",
 			"sni":      cfg.Server.Sni,
 		},

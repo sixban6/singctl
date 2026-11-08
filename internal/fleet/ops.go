@@ -269,14 +269,17 @@ func DefaultSSHRunner(ctx context.Context, node Node, script string) (string, in
 const remoteProbeScript = `
 set -e
 MASTER_IP=$(printf '%s' "${SSH_CLIENT:-}" | awk '{print $1}')
+LOCAL_SSH_PORT=$(printf '%s' "${SSH_CONNECTION:-}" | awk '{print $4}')
 if [ -n "$MASTER_IP" ]; then
   if command -v nft >/dev/null 2>&1 && nft list table inet security >/dev/null 2>&1; then
     nft delete element inet security protected_ports { 1080 } >/dev/null 2>&1 || true
+    [ -n "$LOCAL_SSH_PORT" ] && nft delete element inet security protected_ports { "$LOCAL_SSH_PORT" } >/dev/null 2>&1 || true
     nft add element inet security whitelist_ip { "$MASTER_IP" } >/dev/null 2>&1 || true
     nft delete element inet security blocklist_ip4 { "$MASTER_IP" } >/dev/null 2>&1 || true
   fi
   if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qw active; then
     ufw delete deny from "$MASTER_IP" to any port 2222 >/dev/null 2>&1 || true
+    [ -n "$LOCAL_SSH_PORT" ] && ufw delete deny from "$MASTER_IP" to any port "$LOCAL_SSH_PORT" >/dev/null 2>&1 || true
     ufw delete deny from "$MASTER_IP" >/dev/null 2>&1 || true
   fi
 fi
@@ -390,6 +393,7 @@ func (m *Manager) syncNodeObj(ctx context.Context, node Node) NodeActionResult {
 	}
 
 	inferredDomain := extractFirstURIHost(uris)
+	inferredPort := extractFirstURIPort(uris)
 
 	_, _ = m.Store.UpdateRuntimeState(node.ID, func(n *Node) {
 		n.Online = true
@@ -401,6 +405,9 @@ func (m *Manager) syncNodeObj(ctx context.Context, node Node) NodeActionResult {
 		}
 		if n.Domain == "" && inferredDomain != "" {
 			n.Domain = inferredDomain
+		}
+		if n.NodePort == 0 && inferredPort > 0 && inferredPort != 443 {
+			n.NodePort = inferredPort
 		}
 		n.CPULoad = loadStr
 		n.MemPercent = memPct
@@ -654,6 +661,7 @@ type BootstrapPlan struct {
 	Hy2Up            int    `json:"hy2Up"`
 	Hy2Down          int    `json:"hy2Down"`
 	NodeTag          string `json:"nodeTag"`
+	NodePort         int    `json:"nodePort"`
 	TargetSSHPort    int    `json:"targetSshPort"`
 }
 
@@ -734,6 +742,10 @@ func (m *Manager) PreviewBootstrapNode(ctx context.Context, in BootstrapInput) (
 	hy2Up := cmp.Or(masterCfg.Hy2.Up, 50)
 	hy2Down := cmp.Or(masterCfg.Hy2.Down, 300)
 	tag := cmp.Or(strings.TrimSpace(in.NodeTag), allocID)
+	nodePort := in.NodePort
+	if nodePort <= 0 || nodePort > 65535 {
+		nodePort = 443
+	}
 	targetPort := in.TargetSSHPort
 	if targetPort <= 0 {
 		targetPort = DefaultTargetSSHPort
@@ -754,6 +766,7 @@ func (m *Manager) PreviewBootstrapNode(ctx context.Context, in BootstrapInput) (
 		Hy2Up:            hy2Up,
 		Hy2Down:          hy2Down,
 		NodeTag:          tag,
+		NodePort:         nodePort,
 		TargetSSHPort:    targetPort,
 	}, nil
 }
@@ -841,6 +854,7 @@ func (m *Manager) BootstrapNode(ctx context.Context, in BootstrapInput) (NodeAct
 	}
 
 	upsertIn.Domain = finalDomain
+	upsertIn.NodePort = plan.NodePort
 	upsertIn.DNSAutoManaged = &dnsAutoManaged
 
 	node, err := m.Store.Upsert(upsertIn)
@@ -849,6 +863,10 @@ func (m *Manager) BootstrapNode(ctx context.Context, in BootstrapInput) (NodeAct
 	}
 
 	subDom := cmp.Or(strings.TrimSpace(in.SubstoreDomain), finalDomain)
+	nodePortYAML := ""
+	if plan.NodePort > 0 && plan.NodePort != 443 {
+		nodePortYAML = fmt.Sprintf("  node_port: %d\n", plan.NodePort)
+	}
 
 	yamlContent := fmt.Sprintf(`github:
   mirror_url: %q
@@ -858,14 +876,19 @@ hy2:
 server:
   node_tag: %q
   node_domain: %q
-  substore_domain: %q
+%s  substore_domain: %q
   cf_dns_key: %q
   sni: %q
   web_terminal:
     ssh_port: %d
-`, plan.MirrorURL, plan.Hy2Up, plan.Hy2Down, plan.NodeTag, finalDomain, subDom, plan.CFDNSKey, plan.SNI, node.Port)
+`, plan.MirrorURL, plan.Hy2Up, plan.Hy2Down, plan.NodeTag, finalDomain, nodePortYAML, subDom, plan.CFDNSKey, plan.SNI, node.Port)
 
 	cfgB64 := base64.StdEncoding.EncodeToString([]byte(yamlContent))
+
+	installEnv := fmt.Sprintf("SSH_PORT=%d", node.Port)
+	if plan.NodePort > 0 && plan.NodePort != 443 {
+		installEnv = fmt.Sprintf("SSH_PORT=%d NODE_PORT=%d", node.Port, plan.NodePort)
+	}
 
 	bootstrapScript := fmt.Sprintf(`
 set -e
@@ -896,7 +919,7 @@ fi
 mkdir -p /etc/singctl
 printf '%%s' %q | base64 -d > /etc/singctl/singctl.yaml
 chmod 600 /etc/singctl/singctl.yaml
-SSH_PORT=%d singctl sr install >/dev/null 2>&1
+%s singctl sr install >/dev/null 2>&1
 if command -v systemctl >/dev/null 2>&1; then
   for _i in $(seq 1 30); do
     if systemctl is-active --quiet caddy && systemctl is-active --quiet sing-box; then
@@ -914,7 +937,7 @@ if command -v systemctl >/dev/null 2>&1; then
     exit 1
   fi
 fi
-`, cfgB64, node.Port)
+`, cfgB64, installEnv)
 
 	runner := m.runner()
 	callCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
@@ -983,6 +1006,21 @@ func extractFirstURIHost(uris []string) string {
 		}
 	}
 	return ""
+}
+
+func extractFirstURIPort(uris []string) int {
+	for _, raw := range uris {
+		u, err := url.Parse(strings.TrimSpace(raw))
+		if err != nil || u.Host == "" {
+			continue
+		}
+		if pStr := u.Port(); pStr != "" {
+			if p, err := strconv.Atoi(pStr); err == nil && p > 0 && p <= 65535 {
+				return p
+			}
+		}
+	}
+	return 0
 }
 
 func truncateLine(s string, maxLen int) string {

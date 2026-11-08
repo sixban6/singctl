@@ -669,3 +669,84 @@ func TestFleetHTTPSProbeAndPatrol(t *testing.T) {
 		t.Fatalf("background patrol leaked SSH calls: %d", sshCalls.Load())
 	}
 }
+
+func TestFleetBootstrapNATVPS_CustomSSHAndNodePort(t *testing.T) {
+	tmpDir := t.TempDir()
+	masterCfgPath := filepath.Join(tmpDir, "singctl.yaml")
+	masterYAML := `server:
+  node_tag: "los"
+  node_domain: "cdn.l1.example.com"
+  cf_dns_key: "cf-test-token"
+`
+	if err := os.WriteFile(masterCfgPath, []byte(masterYAML), 0600); err != nil {
+		t.Fatalf("write master config: %v", err)
+	}
+
+	store := NewStore(filepath.Join(tmpDir, "fleet.yaml"))
+	subStore := subhub.NewStore(filepath.Join(tmpDir, "sub-store"), "")
+	mgr := NewManager(store, subStore)
+	mgr.ConfigPath = masterCfgPath
+	mgr.GeoProber = func(ctx context.Context, host string) GeoInfo {
+		return GeoInfo{CountryCode: "JP", Tag: "jp", DisplayName: "日本·东京"}
+	}
+
+	var sawStage1, sawFallbackVerify15500, sawFinalizeWithDNAT22, sawInstallCustomNodePort bool
+	mgr.Runner = func(ctx context.Context, n Node, script string) (string, int, error) {
+		switch {
+		case strings.Contains(script, "SINGCTL_LOCAL_SSH_PORT="):
+			sawStage1 = true
+			// Simulate NAT host forwarding external 15500 -> internal 22
+			return "SINGCTL_LOCAL_SSH_PORT=22\n", 18, nil
+		case strings.Contains(script, "echo SINGCTL_FLEET_SSH_VERIFIED"):
+			if n.Port == 2222 {
+				// Simulate NAT VPS where port 2222 is not mapped/allocated to this container
+				return "", 0, errors.New("dial tcp 203.0.113.10:2222: i/o timeout")
+			}
+			if n.Port == 15500 && n.AuthType == AuthKeyFile && n.Password == "" {
+				sawFallbackVerify15500 = true
+				return "SINGCTL_FLEET_SSH_VERIFIED\n", 15, nil
+			}
+			t.Fatalf("unexpected verify call on node %+v", n)
+			return "", 0, nil
+		case strings.Contains(script, "PermitRootLogin prohibit-password"):
+			if n.Port != 15500 {
+				t.Fatalf("expected finalize over fallback port 15500, got %d", n.Port)
+			}
+			if !strings.Contains(script, "Port 22\nPort 15500") {
+				t.Fatalf("expected finalize script to preserve internal DNAT Port 22 alongside Port 15500, got:\n%s", script)
+			}
+			sawFinalizeWithDNAT22 = true
+			return "", 16, nil
+		case strings.Contains(script, "singctl sr install"):
+			if !strings.Contains(script, "SSH_PORT=15500 NODE_PORT=11501 singctl sr install") {
+				t.Fatalf("expected install script to pass SSH_PORT=15500 NODE_PORT=11501, got:\n%s", script)
+			}
+			sawInstallCustomNodePort = true
+			return "", 95, nil
+		default:
+			subJSON := `{"subs":[{"name":"auto_generated_hy2","content":"hysteria2://pw@jp1.cdn.example.com:11501/?sni=jp1.cdn.example.com#sec_jp1_hy2"},{"name":"auto_generated_vless","content":"vless://11111111-1111-1111-1111-111111111111@jp1.cdn.example.com:11501?security=reality&sni=swdist.apple.com&pbk=7abc8def9ghi0jkl1mno2pqr3stu4vwx5yz6ABC7DEF&sid=1a2b#sec_jp1_vr"}]}`
+			return "SINGCTL_VER=v1.14.59\nSINGCTL_CC=bbr\nSINGCTL_SUB_B64=" + base64.StdEncoding.EncodeToString([]byte(subJSON)) + "\n", 18, nil
+		}
+	}
+
+	res, err := mgr.BootstrapNode(t.Context(), BootstrapInput{
+		UpsertInput: UpsertInput{
+			Host:     "203.0.113.10",
+			Port:     15500,
+			NodePort: 11501,
+			Password: "nat-initial-password",
+		},
+		SkipDNS: true,
+	})
+	if err != nil || !res.Success {
+		t.Fatalf("NAT VPS bootstrap failed: res=%+v err=%v", res, err)
+	}
+	if !sawStage1 || !sawFallbackVerify15500 || !sawFinalizeWithDNAT22 || !sawInstallCustomNodePort {
+		t.Fatalf("missing expected NAT bootstrap stages: stage1=%v fallbackVerify=%v finalizeDNAT=%v installNodePort=%v",
+			sawStage1, sawFallbackVerify15500, sawFinalizeWithDNAT22, sawInstallCustomNodePort)
+	}
+	saved, ok, _ := store.Get("jp1")
+	if !ok || saved.Port != 15500 || saved.NodePort != 11501 || saved.AuthType != AuthKeyFile || saved.Password != "" {
+		t.Fatalf("unexpected saved NAT node in fleet.yaml: %+v", saved)
+	}
+}

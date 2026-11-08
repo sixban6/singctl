@@ -338,3 +338,45 @@ func TestPreviewCaddyfile_EmptySubstoreDomainFallsBackToNodeDomain(t *testing.T)
 		}
 	}
 }
+
+func TestPreviewCaddyfileAndSingBox_CustomNodePortAndRealitySelfSteal(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			NodeTag:    "nat1",
+			NodeDomain: "nat1.cdn.example.com",
+			NodePort:   11501,
+			CFDNSKey:   "cf-test-token",
+			Sni:        "nat1.cdn.example.com",
+		},
+	}
+
+	caddyContent, err := PreviewCaddyfile(cfg)
+	if err != nil {
+		t.Fatalf("PreviewCaddyfile failed: %v", err)
+	}
+	if !strings.Contains(caddyContent, ":443 :11501 {") {
+		t.Errorf("expected Caddy Layer4 TCP to listen on :443 :11501, got:\n%s", caddyContent)
+	}
+	if !strings.Contains(caddyContent, "udp/:443 udp/:11501 {") {
+		t.Errorf("expected Caddy Layer4 UDP to listen on udp/:443 udp/:11501, got:\n%s", caddyContent)
+	}
+
+	sbs, err := NewSingBoxServer(cfg)
+	if err != nil {
+		t.Fatalf("NewSingBoxServer failed: %v", err)
+	}
+	if !strings.Contains(sbs.ShareLinkHy2, "@nat1.cdn.example.com:11501/") {
+		t.Errorf("expected ShareLinkHy2 to use port 11501, got %q", sbs.ShareLinkHy2)
+	}
+	if !strings.Contains(sbs.ShareLinkVless, "@nat1.cdn.example.com:11501?") {
+		t.Errorf("expected ShareLinkVless to use port 11501, got %q", sbs.ShareLinkVless)
+	}
+
+	sbConfig, err := sbs.PreviewServerConfig()
+	if err != nil {
+		t.Fatalf("PreviewServerConfig failed: %v", err)
+	}
+	if !strings.Contains(sbConfig, `"server": "127.0.0.1"`) || !strings.Contains(sbConfig, `"server_port": 9443`) {
+		t.Errorf("expected Reality self-steal mode (SNI == NodeDomain) to point handshake to 127.0.0.1:9443, got:\n%s", sbConfig)
+	}
+}

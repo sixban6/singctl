@@ -102,8 +102,9 @@ func DeployCaddy(cfg *config.Config) error {
 		return fmt.Errorf("caddy installation failed: %w", err)
 	}
 
-	// Auto-detect server public IP if not explicitly configured
-	if cfg != nil && cfg.Server.ServerIP == "" {
+	// Auto-detect server public IP if not explicitly configured (only when using standard port 443,
+	// since shared-IP NAT VPSs on custom ports do not own port 80/443 for IP ACME HTTP-01/TLS-ALPN-01 challenges)
+	if cfg != nil && cfg.Server.ServerIP == "" && cfg.Server.GetNodePort() == 443 {
 		if ip := config.DiscoverPublicIP(); ip != "" {
 			logger.Info("Auto-detected server public IP for ACME IP certificate: %s", ip)
 			cfg.Server.ServerIP = ip
@@ -210,6 +211,7 @@ func PreviewCaddyfile(cfg *config.Config) (string, error) {
 	adminPath := ""
 	adminPort := 8092
 	if cfg != nil {
+		anytlsPort = cfg.Server.GetNodePort()
 		nodeDomain = cfg.Server.GetNodeDomain()
 		substoreDomain = cfg.Server.GetSubstoreDomain()
 		if substoreDomain == "" {

@@ -6,6 +6,7 @@ echo "Starting Common deployment (Firewall, Sysctl BBR, SSH hardening)..."
 
 SSH_PORT="${SSH_PORT:-2222}"
 SKIP_SSH_PORT_CHANGE="${SKIP_SSH_PORT_CHANGE:-false}"
+NODE_PORT="${NODE_PORT:-443}"
 
 detect_os() {
     if [ -f /etc/openwrt_release ] || [ -f /etc/openwrt_version ]; then
@@ -51,6 +52,10 @@ configure_firewall_nftables() {
         nft add rule inet filter input tcp dport "${port}" accept 2>/dev/null || true
         nft add rule inet filter input udp dport "${port}" accept 2>/dev/null || true
     done
+    if [ "${NODE_PORT}" != "443" ] && [ "${NODE_PORT}" != "80" ]; then
+        nft add rule inet filter input tcp dport "${NODE_PORT}" accept 2>/dev/null || true
+        nft add rule inet filter input udp dport "${NODE_PORT}" accept 2>/dev/null || true
+    fi
 
     # Persist ruleset if /etc/nftables.conf is present
     if [ -f /etc/nftables.conf ]; then
@@ -101,6 +106,10 @@ configure_firewall_debian_like() {
         echo "Allowing port ${port}..."
         ufw allow "${port}" || true
     done
+    if [ "${NODE_PORT}" != "443" ] && [ "${NODE_PORT}" != "80" ]; then
+        echo "Allowing custom node port ${NODE_PORT} (TCP+UDP)..."
+        ufw allow "${NODE_PORT}" || true
+    fi
 
     # Ensure iptables accepts port 80 if iptables is used
     if command -v iptables >/dev/null 2>&1; then
@@ -146,6 +155,9 @@ configure_firewall_openwrt() {
     ensure_openwrt_allow_rule "Allow-SSH-${SSH_PORT}" "${SSH_PORT}" "tcp"
     ensure_openwrt_allow_rule "Allow-HTTP-80" "80" "tcp"
     ensure_openwrt_allow_rule "Allow-HTTPS-443" "443" "tcp udp"
+    if [ "${NODE_PORT}" != "443" ] && [ "${NODE_PORT}" != "80" ]; then
+        ensure_openwrt_allow_rule "Allow-Node-${NODE_PORT}" "${NODE_PORT}" "tcp udp"
+    fi
 
     uci -q commit firewall
     if [ -x /etc/init.d/firewall ]; then

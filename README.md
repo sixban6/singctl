@@ -65,11 +65,15 @@ singctl fl bootstrap
 
 # 方式 B：极简一行非交互命令（仅需新机 IP 与初始密码，其余全部自动复用主控配置）
 singctl fl bootstrap --host 203.0.113.10 --password '<新机root初始密码>'
+
+# 方式 C：共享 IP 的 NAT 小鸡一行开荒（指定商家映射的 SSH 端口与分配的可用 TCP+UDP 节点端口）
+singctl fl bootstrap --host 203.0.113.10 --port 15500 --node-port 11501 --password '<新机root初始密码>'
 ```
 
 > **全自动智能闭环说明**（亦支持 `singctl fl bootstrap jp1 --domain ...` 手动指定，详见 [👉 多节点舰队全解](docs/guide-multi-node-fleet.md)）：
 > - **自动归属地命名 + 自动 `.cdn` 灰云 DNS**：自动探测新机 IP 所在国家/城市分配唯一编号代号（如 `sg1` / `新加坡`，同国第 2 台自动递增为 `sg2`），并复用主控 `cf_dns_key` 在根域名下自动创建 `<id>.cdn.<根域名>`（如 `sg1.cdn.example.com`）灰云（仅 DNS）解析记录（退租执行 `singctl fl rm sg1` 时自动同步清理 DNS）。
 > - **防锁死加固 + 汇入唯一总订阅**：自动注入双公钥、验证切换 SSH `22 → 2222` 免密禁密码（销毁明文密码） → 部署四核组件 → 自动提取新节点并入**第 1 台主控的总订阅链接**，家里软路由与随身手机无需改配置自动热同步上线。
+> - **原生兼容共享 IP 的 NAT 小鸡**：通过 `--port 15500` 指定商家映射的初始 SSH 端口（若 `2222` 未分配会自动退回 `15500` 原地完成免密禁密码加固，并智能保留机内 `Port 22` 防止母鸡 DNAT 转发断联），同时通过 `--node-port 11501` 将 Hysteria2 (UDP) 与 VLESS-Reality (TCP) 绑定至商家分配的可用端口段并自动汇入总订阅。
 
 ---
 

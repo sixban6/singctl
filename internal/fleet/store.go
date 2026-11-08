@@ -38,6 +38,7 @@ type Node struct {
 	Name           string   `json:"name" yaml:"name"`
 	Host           string   `json:"host" yaml:"host"`
 	Domain         string   `json:"domain,omitempty" yaml:"domain,omitempty"`
+	NodePort       int      `json:"nodePort,omitempty" yaml:"node_port,omitempty"`
 	DNSAutoManaged bool     `json:"dnsAutoManaged,omitempty" yaml:"dns_auto_managed,omitempty"`
 	Port           int      `json:"port" yaml:"port"`
 	User           string   `json:"user" yaml:"user"`
@@ -85,6 +86,7 @@ type UpsertInput struct {
 	Name           string `json:"name"`
 	Host           string `json:"host"`
 	Domain         string `json:"domain,omitempty"`
+	NodePort       int    `json:"nodePort,omitzero"`
 	DNSAutoManaged *bool  `json:"dnsAutoManaged,omitzero"`
 	Port           int    `json:"port"`
 	User           string `json:"user"`
@@ -389,10 +391,16 @@ func NormalizeUpsertInput(in UpsertInput) (Node, error) {
 		enabled = *in.Enabled
 	}
 
+	nodePort := in.NodePort
+	if nodePort < 0 || nodePort > 65535 || nodePort == 443 {
+		nodePort = 0
+	}
+
 	return Node{
 		ID:       id,
 		Name:     cmp.Or(strings.TrimSpace(in.Name), id),
 		Host:     strings.TrimSpace(in.Host),
+		NodePort: nodePort,
 		Port:     port,
 		User:     user,
 		AuthType: authType,
@@ -435,6 +443,13 @@ func (s *Store) Upsert(in UpsertInput) (Node, error) {
 	target.Name = cmp.Or(strings.TrimSpace(in.Name), target.Name, id)
 	if strings.TrimSpace(in.Domain) != "" {
 		target.Domain = strings.ToLower(strings.TrimSpace(in.Domain))
+	}
+	if in.NodePort > 0 && in.NodePort <= 65535 {
+		if in.NodePort == 443 {
+			target.NodePort = 0
+		} else {
+			target.NodePort = in.NodePort
+		}
 	}
 	if in.DNSAutoManaged != nil {
 		target.DNSAutoManaged = *in.DNSAutoManaged

@@ -47,7 +47,7 @@
         "reality": {
           "enabled": true,
           "handshake": {
-            "server": "{{.Sni}}",
+            "server": "{{.RealityHandshakeServer}}",
             "server_port": 443
           },
           "private_key": "{{.RealityPrivateKey}}",

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -249,6 +250,16 @@ cat << 'EOF' > /etc/ssh/sshd_config.d/00-singctl-hardening.conf
 PubkeyAuthentication yes
 EOF
 
+LOCAL_SSH_PORT=$(printf '%%s' "${SSH_CONNECTION:-}" | awk '{print $4}')
+if [ -n "$LOCAL_SSH_PORT" ] && ! grep -Eq "^[[:space:]]*Port[[:space:]]+${LOCAL_SSH_PORT}([[:space:]]|$)" /etc/ssh/sshd_config.d/00-singctl-hardening.conf 2>/dev/null; then
+  TMP_SSHD_CONF=$(mktemp)
+  printf 'Port %%s\n' "$LOCAL_SSH_PORT" > "$TMP_SSHD_CONF"
+  cat /etc/ssh/sshd_config.d/00-singctl-hardening.conf >> "$TMP_SSHD_CONF"
+  cat "$TMP_SSHD_CONF" > /etc/ssh/sshd_config.d/00-singctl-hardening.conf
+  rm -f "$TMP_SSHD_CONF"
+fi
+[ -n "$LOCAL_SSH_PORT" ] && printf 'SINGCTL_LOCAL_SSH_PORT=%%s\n' "$LOCAL_SSH_PORT" || true
+
 SSHD_BIN="$(command -v sshd || echo '/usr/sbin/sshd')"
 [ -x "$SSHD_BIN" ] && "$SSHD_BIN" -t
 
@@ -263,11 +274,12 @@ fi
 
 	runner := m.runner()
 	stage1Ctx, cancel1 := context.WithTimeout(ctx, 45*time.Second)
-	_, _, err = runner(stage1Ctx, initialNode, stage1Script)
+	stage1Out, _, err := runner(stage1Ctx, initialNode, stage1Script)
 	cancel1()
 	if err != nil {
 		return Node{}, fmt.Errorf("SSH 免密注入与双端口预备阶段失败: %w", err)
 	}
+	localSSHPort := parseDetectedLocalSSHPort(stage1Out, currentPort)
 
 	hardenedNode := initialNode
 	hardenedNode.Port = targetPort
@@ -295,18 +307,38 @@ fi
 		}
 	}
 
+	// If initial port was a custom non-22 port (e.g. NAT VPS port 15500) and default targetPort (2222)
+	// is unreachable because the NAT host only maps 15500, automatically verify & fall back to currentPort!
+	if (verifyErr != nil || !strings.Contains(verifyOut, "SINGCTL_FLEET_SSH_VERIFIED")) && currentPort != 22 && targetPort != currentPort {
+		fallbackNode := hardenedNode
+		fallbackNode.Port = currentPort
+		fCtx, fCancel := context.WithTimeout(ctx, 12*time.Second)
+		fOut, _, fErr := runner(fCtx, fallbackNode, "echo SINGCTL_FLEET_SSH_VERIFIED")
+		fCancel()
+		if fErr == nil && strings.Contains(fOut, "SINGCTL_FLEET_SSH_VERIFIED") {
+			hardenedNode = fallbackNode
+			targetPort = currentPort
+			verifyOut = fOut
+			verifyErr = nil
+		}
+	}
+
 	if verifyErr != nil || !strings.Contains(verifyOut, "SINGCTL_FLEET_SSH_VERIFIED") {
 		// Automatic rollback over initialNode so the machine is never locked out!
+		rbPortDirectives := fmt.Sprintf("Port %d", currentPort)
+		if localSSHPort > 0 && localSSHPort != currentPort {
+			rbPortDirectives = fmt.Sprintf("Port %d\nPort %d", localSSHPort, currentPort)
+		}
 		rbScript := fmt.Sprintf(`
 cat << 'EOF' > /etc/ssh/sshd_config.d/00-singctl-hardening.conf
-Port %d
+%s
 PubkeyAuthentication yes
 PasswordAuthentication yes
 EOF
 if command -v systemctl >/dev/null 2>&1; then
   systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || systemctl restart sshd || true
 fi
-`, currentPort)
+`, rbPortDirectives)
 		rbCtx, rbCancel := context.WithTimeout(context.Background(), 15*time.Second)
 		_, _, _ = runner(rbCtx, initialNode, rbScript)
 		rbCancel()
@@ -316,11 +348,20 @@ fi
 		)
 	}
 
-	// Stage 3: Finalize port convergence + disable password authentication over verified hardenedNode
+	// Stage 3: Finalize port convergence + disable password authentication over verified hardenedNode.
+	// When NAT host forwards external currentPort (e.g. 15500) -> internal localSSHPort (e.g. 22),
+	// preserve both localSSHPort and targetPort so the NAT port mapping stays alive.
+	finalPortDirectives := fmt.Sprintf("Port %d", targetPort)
+	effectiveOldPort := currentPort
+	if targetPort == currentPort && localSSHPort > 0 && localSSHPort != targetPort {
+		finalPortDirectives = fmt.Sprintf("Port %d\nPort %d", localSSHPort, targetPort)
+		effectiveOldPort = targetPort // do not remove localSSHPort from firewall
+	}
+
 	finalizeScript := fmt.Sprintf(`
 set -e
 cat << 'EOF' > /etc/ssh/sshd_config.d/00-singctl-hardening.conf
-Port %d
+%s
 PermitRootLogin prohibit-password
 PubkeyAuthentication yes
 PasswordAuthentication no
@@ -355,7 +396,7 @@ if [ "$OLD_PORT" != "$TARGET_PORT" ]; then
     firewall-cmd --reload >/dev/null 2>&1 || true
   fi
 fi
-`, targetPort, currentPort, targetPort)
+`, finalPortDirectives, effectiveOldPort, targetPort)
 
 	finCtx, finCancel := context.WithTimeout(ctx, 25*time.Second)
 	_, _, finErr := runner(finCtx, hardenedNode, finalizeScript)
@@ -365,4 +406,16 @@ fi
 	}
 
 	return hardenedNode, nil
+}
+
+func parseDetectedLocalSSHPort(stage1Out string, fallbackPort int) int {
+	for line := range strings.SplitSeq(stage1Out, "\n") {
+		line = strings.TrimSpace(line)
+		if after, ok := strings.CutPrefix(line, "SINGCTL_LOCAL_SSH_PORT="); ok {
+			if p, err := strconv.Atoi(strings.TrimSpace(after)); err == nil && p > 0 && p <= 65535 {
+				return p
+			}
+		}
+	}
+	return fallbackPort
 }

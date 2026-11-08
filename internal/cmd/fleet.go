@@ -320,7 +320,7 @@ func NewFleetCmd(configPath string) *cobra.Command {
 				}
 				fmt.Println("──────────────────────────────────────────────────────────────────────")
 				fmt.Printf("  • 节点代号与名称 : %s (%s)\n", plan.ID, plan.Name)
-				fmt.Printf("  • 目标主机与端口 : %s (SSH %d → %d 免密禁密码)\n", plan.Host, cmp.Or(bsIn.Port, 22), plan.TargetSSHPort)
+				fmt.Printf("  • 目标主机与端口 : %s (SSH %d → %d 免密禁密码 | 节点端口 %d)\n", plan.Host, cmp.Or(bsIn.Port, 22), plan.TargetSSHPort, plan.NodePort)
 				fmt.Printf("  • 绑定节点域名   : %s\n", cmp.Or(dnsDesc, "待指定"))
 				fmt.Printf("  • 继承主控参数   : %s | SNI=%s | HY2=%d/%d Mbps\n", cfDesc, plan.SNI, plan.Hy2Up, plan.Hy2Down)
 				fmt.Println("──────────────────────────────────────────────────────────────────────")
@@ -356,6 +356,7 @@ func NewFleetCmd(configPath string) *cobra.Command {
 	bootstrapCmd.Flags().IntVar(&bsIn.TargetSSHPort, "target-port", fleet.DefaultTargetSSHPort, "SSH 安全加固目标端口 (默认收敛至 2222)")
 	bootstrapCmd.Flags().StringVar(&bsIn.ExtraAuthorizedKeys, "extra-pubkey", "", "(可选) 额外写入新机的管理员 SSH 公钥字符串")
 	bootstrapCmd.Flags().StringVar(&bsIn.NodeDomain, "domain", "", "(可选) 绑定域名，留空自动从主控根域名分配 <id>.cdn.<根域名> 并创建灰云解析")
+	bootstrapCmd.Flags().IntVar(&bsIn.NodePort, "node-port", 443, "(可选) 节点业务监听与订阅端口 (默认 443；共享 IP 的 NAT 小鸡可指定可用 TCP+UDP 端口如 11501)")
 	bootstrapCmd.Flags().StringVar(&bsIn.SubstoreDomain, "sub-domain", "", "(可选) 独立订阅域名")
 	bootstrapCmd.Flags().StringVar(&bsIn.CFDNSKey, "cf-token", "", "(可选) Cloudflare DNS Token，留空自动复用主控配置")
 	bootstrapCmd.Flags().StringVar(&bsIn.NodeTag, "tag", "", "(可选) 节点代号，留空与自动推导的 <id> 一致")
