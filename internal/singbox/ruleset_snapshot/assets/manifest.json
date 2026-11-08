@@ -231,8 +231,8 @@
       "url": "https://github.com/sixban6/rulesets/raw/refs/heads/main/rule/hok.srs",
       "format": "binary",
       "file": "geosite-hok.srs.gz",
-      "sha256": "5e2229ac1741f697cbb808b335bfb2be7b756ff1505ca7ae86e092559e4f5346",
-      "size": 276,
+      "sha256": "d159fe1ce64a5c6e53aa3eaafb89d0c6bb64d619abbf698df932e36a5ff000bf",
+      "size": 289,
       "via": "direct",
       "updated_at": "2026-11-08T07:25:00Z"
     },

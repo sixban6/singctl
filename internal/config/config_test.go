@@ -471,6 +471,13 @@ func TestMigrateConfig_PreservesWebTerminalAndCustomRules(t *testing.T) {
     ssh_tunnel_path: "/ssh-ws"
     ssh_port: 2222
 custom_rules:
+  outbounds:
+    - tag: "#Auto"
+      include: "香港|HK|獅城|SG"
+      exclude: "美國|澳門"
+      interval: "3m"
+      tolerance: 80
+      interrupt_exist_connections: false
   route:
     - action: route
       domain_suffix: [example.org]
@@ -507,6 +514,25 @@ custom_rules:
 	}
 	if len(loaded.CustomRules.Route) != 1 {
 		t.Fatalf("expected 1 custom_rules.route entry after migration, got %d", len(loaded.CustomRules.Route))
+	}
+	if len(loaded.CustomRules.Outbounds) != 1 {
+		t.Fatalf("expected 1 custom_rules.outbounds entry after migration, got %d", len(loaded.CustomRules.Outbounds))
+	}
+	ob := loaded.CustomRules.Outbounds[0]
+	if ob.Tag != "#Auto" || ob.Tolerance != 80 || ob.Interval != "3m" || ob.InterruptExistConnections == nil || *ob.InterruptExistConnections {
+		t.Fatalf("unexpected migrated outbound rule: %+v", ob)
+	}
+	if err := loaded.ValidateCustomRules(); err != nil {
+		t.Fatalf("ValidateCustomRules failed: %v", err)
+	}
+
+	badCfg := &Config{
+		CustomRules: CustomRulesConfig{
+			Outbounds: []OutboundRule{{Tag: "#Auto", Include: "[unclosed"}},
+		},
+	}
+	if err := badCfg.ValidateCustomRules(); err == nil {
+		t.Fatal("expected ValidateCustomRules to reject invalid regex")
 	}
 }
 

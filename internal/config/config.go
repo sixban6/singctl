@@ -37,8 +37,28 @@ type Config struct {
 }
 
 type CustomRulesConfig struct {
-	Route []map[string]any `yaml:"route,omitempty"`
-	DNS   []map[string]any `yaml:"dns,omitempty"`
+	Outbounds []OutboundRule   `yaml:"outbounds,omitempty" json:"outbounds,omitempty"`
+	Route     []map[string]any `yaml:"route,omitempty" json:"route,omitempty"`
+	DNS       []map[string]any `yaml:"dns,omitempty" json:"dns,omitempty"`
+}
+
+func (c CustomRulesConfig) IsEmpty() bool {
+	return len(c.Outbounds) == 0 && len(c.Route) == 0 && len(c.DNS) == 0
+}
+
+// OutboundRule 定义针对 sing-box 出站策略组 (urltest / selector) 的定制与节点过滤规则。
+// 可在 singctl.yaml 的 custom_rules.outbounds 中按 tag 覆写策略组测速参数并按正则过滤候选节点，
+// 从而在不修改通用 singgen 模板的前提下实现本地个性化策略注入。
+type OutboundRule struct {
+	Tag                       string   `yaml:"tag" json:"tag"`
+	Include                   string   `yaml:"include,omitempty" json:"include,omitempty"`
+	Exclude                   string   `yaml:"exclude,omitempty" json:"exclude,omitempty"`
+	Outbounds                 []string `yaml:"outbounds,omitempty" json:"outbounds,omitempty"`
+	Default                   string   `yaml:"default,omitempty" json:"default,omitempty"`
+	URL                       string   `yaml:"url,omitempty" json:"url,omitempty"`
+	Interval                  string   `yaml:"interval,omitempty" json:"interval,omitempty"`
+	Tolerance                 int      `yaml:"tolerance,omitempty" json:"tolerance,omitempty"`
+	InterruptExistConnections *bool    `yaml:"interrupt_exist_connections,omitempty" json:"interrupt_exist_connections,omitempty"`
 }
 type RenameRule struct {
 	Match   string `yaml:"match" json:"match"`
@@ -633,7 +653,8 @@ var knownYAMLKeys = []string{
 	"web_terminal", "mtls_ca", "ssh_tunnel_port", "ssh_tunnel_path", "ssh_port",
 	"web_admin", "enabled", "port", "path", "username", "password", "password_pending_ack",
 	"watchdog", "interval", "confirm_wait", "max_restarts", "sub_sync_interval",
-	"custom_rules", "route", "dns", "dns_port", "web_port",
+	"custom_rules", "outbounds", "tag", "default", "tolerance", "interrupt_exist_connections",
+	"route", "dns", "dns_port", "web_port",
 }
 
 var colonSpaceFixRegex = regexp.MustCompile(
@@ -733,6 +754,29 @@ func (c *Config) ValidateSubs() error {
 		}
 	}
 
+	return c.ValidateCustomRules()
+}
+
+// ValidateCustomRules 校验 custom_rules.outbounds 中的出站组标签与过滤正则表达式。
+func (c *Config) ValidateCustomRules() error {
+	if c == nil {
+		return nil
+	}
+	for i, ob := range c.CustomRules.Outbounds {
+		if strings.TrimSpace(ob.Tag) == "" {
+			return fmt.Errorf("custom_rules.outbounds[%d]: tag is required", i)
+		}
+		if ob.Include != "" {
+			if _, err := regexp.Compile(ob.Include); err != nil {
+				return fmt.Errorf("custom_rules.outbounds[%d] (%s): invalid include regex %q: %w", i, ob.Tag, ob.Include, err)
+			}
+		}
+		if ob.Exclude != "" {
+			if _, err := regexp.Compile(ob.Exclude); err != nil {
+				return fmt.Errorf("custom_rules.outbounds[%d] (%s): invalid exclude regex %q: %w", i, ob.Tag, ob.Exclude, err)
+			}
+		}
+	}
 	return nil
 }
 
@@ -1061,7 +1105,7 @@ func MigrateConfig(configPath string, templateData []byte) error {
 	}
 
 	// 7. Merge CustomRules (only when uncommented in old config, never triggered by `# custom_rules:` comments)
-	if hasYAMLKey(oldDocNode, "custom_rules") && (len(oldCfg.CustomRules.Route) > 0 || len(oldCfg.CustomRules.DNS) > 0) {
+	if hasYAMLKey(oldDocNode, "custom_rules") && !oldCfg.CustomRules.IsEmpty() {
 		replaceNode(docNode, "custom_rules", oldCfg.CustomRules)
 	}
 

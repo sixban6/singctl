@@ -283,39 +283,19 @@ func TestGenerator_GameUDPAndDNSIsolation(t *testing.T) {
 			t.Fatalf("[%s] geosite-hok dns rule with dns_hok not found", platform)
 		}
 
-		// 5. #Auto 后台测速抑制频繁跳 IP (3m/150) 且禁止强断存量对局连接
-		if autoInterval != "3m" || autoTolerance != 150 {
-			t.Fatalf("[%s] #Auto interval/tolerance = %q/%d, want 3m/150", platform, autoInterval, autoTolerance)
+		// 5. 通用基准模板保持 #Auto 默认 1m/50 且禁止强断存量连接
+		if autoInterval != "1m" || autoTolerance != 50 {
+			t.Fatalf("[%s] #Auto baseline interval/tolerance = %q/%d, want 1m/50", platform, autoInterval, autoTolerance)
 		}
 		if autoInterrupt == nil || *autoInterrupt {
 			t.Fatalf("[%s] #Auto interrupt_exist_connections must be false", platform)
 		}
 
-		// 6. 验证 HoK 进房端口前置（防 geoip-cn 截胡）与海外高端口排除法规则顺序：
-		//    geosite-hok、HoK 专属 TCP 端口与进房/语音 UDP 端口段在广告拦截和 geoip-cn 之前走 Game-TCP；
-		//    geoip-cn 在通用海外高端口规则之前；海外高端口 TCP 走 Game-TCP，海外高端口 UDP 走 Game-UDP
-		hokIdx, hokTCPIdx, hokUDPIdx, adIdx, cnIdx, tcpGameIdx, battleUDPIdx := -1, -1, -1, -1, -1, -1, -1
-		wantHoKTCPPorts := []int{5010, 5692, 8500, 8600, 8801, 10004, 20000, 31003}
-		wantHoKUDPRanges := []string{"6650:6659", "7000:8000", "10000:10100"}
+		// 6. 验证通用基准模板顺序：geosite-hok -> geosite-ad1 -> geoip-cn -> Game-TCP(1024:65535) -> Game-UDP(1024:65535)
+		hokIdx, adIdx, cnIdx, tcpGameIdx, battleUDPIdx := -1, -1, -1, -1, -1
 		for i, r := range parsed.Route.Rules {
 			if rs, ok := r.RuleSet.(string); ok && rs == "geosite-hok" && r.Outbound == "Game-TCP" {
 				hokIdx = i
-			}
-			if r.Network == "tcp" && r.Outbound == "Game-TCP" {
-				if portSlice, ok := r.Port.([]any); ok {
-					gotPorts := make([]int, 0, len(portSlice))
-					for _, p := range portSlice {
-						if pf, ok := p.(float64); ok {
-							gotPorts = append(gotPorts, int(pf))
-						}
-					}
-					if slices.Equal(gotPorts, wantHoKTCPPorts) {
-						hokTCPIdx = i
-					}
-				}
-			}
-			if r.Network == "udp" && r.Outbound == "Game-TCP" && slices.Equal(r.PortRange, wantHoKUDPRanges) {
-				hokUDPIdx = i
 			}
 			if rsArr, ok := r.RuleSet.([]any); ok && r.Action == "reject" {
 				for _, item := range rsArr {
@@ -338,13 +318,186 @@ func TestGenerator_GameUDPAndDNSIsolation(t *testing.T) {
 				battleUDPIdx = i
 			}
 		}
-		if hokIdx < 0 || hokTCPIdx <= hokIdx || hokUDPIdx <= hokTCPIdx || adIdx <= hokUDPIdx {
-			t.Fatalf("[%s] expected geosite-hok (%d) < hokTCP (%d) < hokUDP (%d) < geosite-ad1 (%d)",
-				platform, hokIdx, hokTCPIdx, hokUDPIdx, adIdx)
+		if hokIdx < 0 || adIdx <= hokIdx || cnIdx <= adIdx || tcpGameIdx <= cnIdx || battleUDPIdx <= tcpGameIdx {
+			t.Fatalf("[%s] unexpected baseline rule order: hok=%d ad=%d cn=%d tcpGame=%d battleUDP=%d",
+				platform, hokIdx, adIdx, cnIdx, tcpGameIdx, battleUDPIdx)
 		}
-		if cnIdx <= hokUDPIdx || tcpGameIdx <= cnIdx || battleUDPIdx <= tcpGameIdx {
-			t.Fatalf("[%s] unexpected rule order: hokUDP=%d cn=%d tcpGame=%d battleUDP=%d",
-				platform, hokUDPIdx, cnIdx, tcpGameIdx, battleUDPIdx)
+	}
+}
+
+func TestGenerator_InjectCustomRules_OutboundsRouteAndDNS(t *testing.T) {
+	payload := encodeURISub(
+		"hysteria2://dummy-pass@los.example.com:443?sni=los.example.com#sec_los_hy2",
+		"hysteria2://dummy-pass@hk1.example.com:443?sni=hk1.example.com#香港 01",
+		"hysteria2://dummy-pass@sg1.example.com:443?sni=sg1.example.com#獅城 01",
+		"hysteria2://dummy-pass@us1.example.com:443?sni=us1.example.com#美國 01",
+		"hysteria2://dummy-pass@mo1.example.com:443?sni=mo1.example.com#澳門 01",
+	)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(payload))
+	}))
+	defer ts.Close()
+
+	noInterrupt := false
+	cfg := &config.Config{
+		Subs: []config.Subscription{{Name: "main", URL: ts.URL}},
+		CustomRules: config.CustomRulesConfig{
+			Outbounds: []config.OutboundRule{
+				{
+					Tag:                       "#Auto",
+					Include:                   "香港|HK|台灣|TW|獅城|SG|日本|JP",
+					Exclude:                   "美國|澳門|德國|英國",
+					Interval:                  "3m",
+					Tolerance:                 80,
+					InterruptExistConnections: &noInterrupt,
+				},
+			},
+			DNS: []map[string]any{
+				{
+					"domain_suffix": []string{"igamecj.com", "gcloud.qq.com", "gvoice.qq.com", "gvoiceplat.com"},
+					"server":        "dns_hok",
+					"client_subnet": "203.80.96.0/24",
+				},
+			},
+			Route: []map[string]any{
+				{
+					"action":        "route",
+					"domain_suffix": []string{"igamecj.com", "gcloud.qq.com", "gvoice.qq.com", "gvoiceplat.com"},
+					"outbound":      "Game-TCP",
+				},
+				{
+					"action":   "route",
+					"port":     []int{5010, 5692, 8500, 8600, 8801, 10004, 20000, 31003},
+					"outbound": "Game-TCP",
+				},
+				{
+					"action":     "route",
+					"network":    "udp",
+					"port_range": []string{"6650:6659", "7000:9000", "10000:10100", "20000:20100", "30000:30100"},
+					"outbound":   "Game-TCP",
+				},
+			},
+		},
+	}
+
+	gen := NewConfigGenerator(cfg)
+	gen.SetCacheDir(t.TempDir())
+
+	out, err := gen.GenerateForPlatform("darwin")
+	if err != nil {
+		t.Fatalf("GenerateForPlatform(darwin) failed: %v", err)
+	}
+
+	var parsed struct {
+		DNS struct {
+			Rules []map[string]any `json:"rules"`
+		} `json:"dns"`
+		Outbounds []struct {
+			Tag                       string   `json:"tag"`
+			Outbounds                 []string `json:"outbounds"`
+			Interval                  string   `json:"interval"`
+			Tolerance                 int      `json:"tolerance"`
+			InterruptExistConnections *bool    `json:"interrupt_exist_connections"`
+		} `json:"outbounds"`
+		Route struct {
+			Rules []struct {
+				Action    string   `json:"action"`
+				Network   string   `json:"network"`
+				Outbound  string   `json:"outbound"`
+				Port      any      `json:"port"`
+				PortRange []string `json:"port_range"`
+				RuleSet   any      `json:"rule_set"`
+			} `json:"rules"`
+		} `json:"route"`
+	}
+	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. 验证 #Auto 仅保留香港/狮城节点，剔除美国与澳门，且 interval=3m, tolerance=80
+	var gotAuto []string
+	var gotInterval string
+	var gotTolerance int
+	for _, ob := range parsed.Outbounds {
+		if ob.Tag == "#Auto" {
+			gotAuto = ob.Outbounds
+			gotInterval = ob.Interval
+			gotTolerance = ob.Tolerance
+		}
+	}
+	wantAuto := []string{"香港 01", "獅城 01"}
+	if !slices.Equal(gotAuto, wantAuto) {
+		t.Fatalf("#Auto outbounds = %v, want %v", gotAuto, wantAuto)
+	}
+	if gotInterval != "3m" || gotTolerance != 80 {
+		t.Fatalf("#Auto interval/tolerance = %q/%d, want 3m/80", gotInterval, gotTolerance)
+	}
+
+	// 2. 验证 HoK 端口规则（TCP+UDP 双栈端口与扩展 UDP 端口段）注入在 geosite-hok 之后、geosite-ad1 和 geoip-cn 之前
+	hokIdx, hokDualPortIdx, hokUDPIdx, adIdx, cnIdx := -1, -1, -1, -1, -1
+	wantPorts := []int{5010, 5692, 8500, 8600, 8801, 10004, 20000, 31003}
+	wantUDPRanges := []string{"6650:6659", "7000:9000", "10000:10100", "20000:20100", "30000:30100"}
+	for i, r := range parsed.Route.Rules {
+		if rs, ok := r.RuleSet.(string); ok && rs == "geosite-hok" && r.Outbound == "Game-TCP" {
+			hokIdx = i
+		}
+		if r.Network == "" && r.Outbound == "Game-TCP" {
+			if portSlice, ok := r.Port.([]any); ok {
+				gotPorts := make([]int, 0, len(portSlice))
+				for _, p := range portSlice {
+					if pf, ok := p.(float64); ok {
+						gotPorts = append(gotPorts, int(pf))
+					}
+				}
+				if slices.Equal(gotPorts, wantPorts) {
+					hokDualPortIdx = i
+				}
+			}
+		}
+		if r.Network == "udp" && r.Outbound == "Game-TCP" && slices.Equal(r.PortRange, wantUDPRanges) {
+			hokUDPIdx = i
+		}
+		if rsArr, ok := r.RuleSet.([]any); ok && r.Action == "reject" {
+			for _, item := range rsArr {
+				if item == "geosite-ad1" {
+					adIdx = i
+				}
+			}
+		}
+		if rsArr, ok := r.RuleSet.([]any); ok && r.Outbound == "DirectConn" {
+			for _, item := range rsArr {
+				if item == "geoip-cn" {
+					cnIdx = i
+				}
+			}
+		}
+	}
+	if hokIdx < 0 || hokDualPortIdx <= hokIdx || hokUDPIdx <= hokDualPortIdx || adIdx <= hokUDPIdx || cnIdx <= adIdx {
+		t.Fatalf("unexpected injected route order: hok=%d dualPort=%d udpRange=%d ad=%d cn=%d",
+			hokIdx, hokDualPortIdx, hokUDPIdx, adIdx, cnIdx)
+	}
+
+	// 3. 验证零节点防断网回退：当 include 匹配不到任何节点时，保留原节点池而非清空
+	fallbackCfg := &config.Config{
+		Subs: []config.Subscription{{Name: "main", URL: ts.URL}},
+		CustomRules: config.CustomRulesConfig{
+			Outbounds: []config.OutboundRule{
+				{Tag: "#Auto", Include: "NON_EXISTENT_REGION_XYZ"},
+			},
+		},
+	}
+	fallbackGen := NewConfigGenerator(fallbackCfg)
+	fallbackGen.SetCacheDir(t.TempDir())
+	fallbackOut, err := fallbackGen.GenerateForPlatform("darwin")
+	if err != nil {
+		t.Fatalf("fallback GenerateForPlatform failed: %v", err)
+	}
+	if err := json.Unmarshal([]byte(fallbackOut), &parsed); err != nil {
+		t.Fatal(err)
+	}
+	for _, ob := range parsed.Outbounds {
+		if ob.Tag == "#Auto" && len(ob.Outbounds) == 0 {
+			t.Fatal("expected zero-match filter to fallback to original non-empty #Auto node pool")
 		}
 	}
 }

@@ -234,8 +234,10 @@ func (g *ConfigGenerator) InjectLocalDNS(rawJSON, platform string) (string, erro
 	return string(data), nil
 }
 
+// InjectCustomRules 将 singctl.yaml 中声明的 custom_rules（出站组定制、DNS 规则、路由规则）
+// 注入到生成的 sing-box 配置中，从而在不污染通用 singgen 模板的前提下实现高可维护性的策略扩展。
 func (g *ConfigGenerator) InjectCustomRules(rawJSON string) (string, error) {
-	if g.config == nil || (len(g.config.CustomRules.Route) == 0 && len(g.config.CustomRules.DNS) == 0) {
+	if g.config == nil || g.config.CustomRules.IsEmpty() {
 		return rawJSON, nil
 	}
 
@@ -244,51 +246,21 @@ func (g *ConfigGenerator) InjectCustomRules(rawJSON string) (string, error) {
 		return "", fmt.Errorf("failed to parse config JSON for custom rules: %w", err)
 	}
 
-	// 注入 DNS 规则
-	if len(g.config.CustomRules.DNS) > 0 {
-		if dnsMap, ok := root["dns"].(map[string]any); ok {
-			var existingRules []any
-			if r, ok := dnsMap["rules"].([]any); ok {
-				existingRules = r
-			}
-			newRules := make([]any, 0, len(g.config.CustomRules.DNS)+len(existingRules))
-			for _, r := range g.config.CustomRules.DNS {
-				newRules = append(newRules, r)
-			}
-			newRules = append(newRules, existingRules...)
-			dnsMap["rules"] = newRules
+	// 1. 注入出站策略组定制与过滤 (custom_rules.outbounds)
+	if len(g.config.CustomRules.Outbounds) > 0 {
+		if err := applyCustomOutboundRules(root, g.config.CustomRules.Outbounds); err != nil {
+			return "", err
 		}
 	}
 
-	// 注入路由规则
-	if len(g.config.CustomRules.Route) > 0 {
-		if routeMap, ok := root["route"].(map[string]any); ok {
-			var existingRules []any
-			if r, ok := routeMap["rules"].([]any); ok {
-				existingRules = r
-			}
-			// 找到 private IP 规则之后的位置插入
-			insertIdx := 0
-			for i, r := range existingRules {
-				if rMap, ok := r.(map[string]any); ok {
-					if _, hasPrivate := rMap["ip_is_private"]; hasPrivate {
-						insertIdx = i + 1
-						break
-					}
-				}
-			}
-			if insertIdx == 0 {
-				insertIdx = len(existingRules)
-			}
+	// 2. 注入 DNS 规则 (custom_rules.dns)
+	if len(g.config.CustomRules.DNS) > 0 {
+		applyCustomDNSRules(root, g.config.CustomRules.DNS)
+	}
 
-			newRules := make([]any, 0, len(existingRules)+len(g.config.CustomRules.Route))
-			newRules = append(newRules, existingRules[:insertIdx]...)
-			for _, r := range g.config.CustomRules.Route {
-				newRules = append(newRules, r)
-			}
-			newRules = append(newRules, existingRules[insertIdx:]...)
-			routeMap["rules"] = newRules
-		}
+	// 3. 注入路由规则 (custom_rules.route)
+	if len(g.config.CustomRules.Route) > 0 {
+		applyCustomRouteRules(root, g.config.CustomRules.Route)
 	}
 
 	data, err := json.Marshal(root)
@@ -296,6 +268,260 @@ func (g *ConfigGenerator) InjectCustomRules(rawJSON string) (string, error) {
 		return "", fmt.Errorf("failed to marshal config JSON with custom rules: %w", err)
 	}
 	return string(data), nil
+}
+
+func applyCustomOutboundRules(root map[string]any, rules []config.OutboundRule) error {
+	rawOutbounds, ok := root["outbounds"].([]any)
+	if !ok || len(rawOutbounds) == 0 {
+		return nil
+	}
+
+	// 收集所有底层代理节点 tag，供 custom_rules.outbounds 中使用 "{all}" 展开
+	var allLeafTags []string
+	for _, item := range rawOutbounds {
+		obMap, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		tag, _ := obMap["tag"].(string)
+		obType, _ := obMap["type"].(string)
+		if tag == "" {
+			continue
+		}
+		switch obType {
+		case "selector", "urltest", "direct", "block", "dns":
+			continue
+		default:
+			allLeafTags = append(allLeafTags, tag)
+		}
+	}
+
+	for idx, rule := range rules {
+		targetTag := strings.TrimSpace(rule.Tag)
+		if targetTag == "" {
+			return fmt.Errorf("custom_rules.outbounds[%d]: tag is required", idx)
+		}
+
+		var includeRe, excludeRe *regexp.Regexp
+		var err error
+		if rule.Include != "" {
+			includeRe, err = regexp.Compile(rule.Include)
+			if err != nil {
+				return fmt.Errorf("custom_rules.outbounds[%d] (%s): invalid include regex %q: %w", idx, targetTag, rule.Include, err)
+			}
+		}
+		if rule.Exclude != "" {
+			excludeRe, err = regexp.Compile(rule.Exclude)
+			if err != nil {
+				return fmt.Errorf("custom_rules.outbounds[%d] (%s): invalid exclude regex %q: %w", idx, targetTag, rule.Exclude, err)
+			}
+		}
+
+		var targetMap map[string]any
+		for _, item := range rawOutbounds {
+			obMap, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			if tag, _ := obMap["tag"].(string); tag == targetTag {
+				targetMap = obMap
+				break
+			}
+		}
+		if targetMap == nil {
+			log.Warn("custom_rules.outbounds: 未找到目标出站组 [%s]，已跳过", targetTag)
+			continue
+		}
+
+		// 确定基础候选节点列表
+		var candidates []string
+		if len(rule.Outbounds) > 0 {
+			for _, o := range rule.Outbounds {
+				if o == "{all}" {
+					candidates = append(candidates, allLeafTags...)
+				} else if o != "" {
+					candidates = append(candidates, o)
+				}
+			}
+		} else if existing, ok := targetMap["outbounds"].([]any); ok {
+			for _, item := range existing {
+				if s, ok := item.(string); ok && s != "" {
+					candidates = append(candidates, s)
+				}
+			}
+		} else if existingStrs, ok := targetMap["outbounds"].([]string); ok {
+			candidates = append(candidates, existingStrs...)
+		}
+
+		// 执行 include / exclude 正则过滤（带零节点防断网回退保护）
+		finalMembers := candidates
+		if (includeRe != nil || excludeRe != nil) && len(candidates) > 0 {
+			filtered := make([]string, 0, len(candidates))
+			for _, name := range candidates {
+				if excludeRe != nil && excludeRe.MatchString(name) {
+					continue
+				}
+				if includeRe != nil && !includeRe.MatchString(name) {
+					continue
+				}
+				filtered = append(filtered, name)
+			}
+			if len(filtered) > 0 {
+				finalMembers = filtered
+				log.Info("自定义出站组 [%s] 节点过滤已生效: 保留 %d 个，剔除 %d 个", targetTag, len(filtered), len(candidates)-len(filtered))
+			} else {
+				log.Warn("⚠️ 自定义出站组 [%s] 过滤规则未匹配到任何节点，已自动回退保留原节点池 (%d 个)", targetTag, len(candidates))
+			}
+		}
+
+		if len(rule.Outbounds) > 0 || includeRe != nil || excludeRe != nil {
+			memberAny := make([]any, len(finalMembers))
+			for i, m := range finalMembers {
+				memberAny[i] = m
+			}
+			targetMap["outbounds"] = memberAny
+
+			// 若原 default 节点被过滤剔除，自动修正避免 sing-box 校验失败
+			if defTag, ok := targetMap["default"].(string); ok && defTag != "" && len(finalMembers) > 0 {
+				foundDef := false
+				for _, m := range finalMembers {
+					if m == defTag {
+						foundDef = true
+						break
+					}
+				}
+				if !foundDef {
+					targetMap["default"] = finalMembers[0]
+				}
+			}
+		}
+
+		if rule.URL != "" {
+			targetMap["url"] = rule.URL
+		}
+		if rule.Interval != "" {
+			targetMap["interval"] = rule.Interval
+		}
+		if rule.Tolerance > 0 {
+			targetMap["tolerance"] = rule.Tolerance
+		}
+		if rule.InterruptExistConnections != nil {
+			targetMap["interrupt_exist_connections"] = *rule.InterruptExistConnections
+		}
+		if rule.Default != "" {
+			foundDef := false
+			for _, m := range finalMembers {
+				if m == rule.Default {
+					foundDef = true
+					break
+				}
+			}
+			if foundDef || len(finalMembers) == 0 {
+				targetMap["default"] = rule.Default
+			} else {
+				log.Warn("custom_rules.outbounds [%s]: 指定的 default=%q 不在候选节点池中，已忽略", targetTag, rule.Default)
+			}
+		}
+	}
+
+	return nil
+}
+
+func applyCustomDNSRules(root map[string]any, customDNS []map[string]any) {
+	dnsMap, ok := root["dns"].(map[string]any)
+	if !ok {
+		return
+	}
+	var existingRules []any
+	if r, ok := dnsMap["rules"].([]any); ok {
+		existingRules = r
+	}
+
+	// 插入在 clash_mode 与 dns_tailscale 基础规则之后、所有业务/GeoSite 规则之前
+	insertIdx := 0
+	for i, r := range existingRules {
+		rMap, ok := r.(map[string]any)
+		if !ok {
+			continue
+		}
+		_, hasClashMode := rMap["clash_mode"]
+		srv, _ := rMap["server"].(string)
+		if hasClashMode || srv == "dns_tailscale" {
+			insertIdx = i + 1
+		}
+	}
+
+	newRules := make([]any, 0, len(existingRules)+len(customDNS))
+	newRules = append(newRules, existingRules[:insertIdx]...)
+	for _, r := range customDNS {
+		newRules = append(newRules, r)
+	}
+	newRules = append(newRules, existingRules[insertIdx:]...)
+	dnsMap["rules"] = newRules
+}
+
+func applyCustomRouteRules(root map[string]any, customRoute []map[string]any) {
+	routeMap, ok := root["route"].(map[string]any)
+	if !ok {
+		return
+	}
+	var existingRules []any
+	if r, ok := routeMap["rules"].([]any); ok {
+		existingRules = r
+	}
+
+	// 优先定位在广告拦截规则 (geosite-ad1) 之前插入（即处于私网/SSH/ClashMode/geosite-hok 之后，
+	// 广告拦截与所有 GeoIP/GeoSite 大集合规则之前）；若无 geosite-ad1 则回退到 ip_is_private 之后。
+	insertIdx := -1
+	privateIdx := -1
+	for i, r := range existingRules {
+		rMap, ok := r.(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, hasPrivate := rMap["ip_is_private"]; hasPrivate && privateIdx < 0 {
+			privateIdx = i + 1
+		}
+		if ruleSetContains(rMap["rule_set"], "geosite-ad1") {
+			insertIdx = i
+			break
+		}
+	}
+	if insertIdx < 0 {
+		if privateIdx >= 0 {
+			insertIdx = privateIdx
+		} else {
+			insertIdx = len(existingRules)
+		}
+	}
+
+	newRules := make([]any, 0, len(existingRules)+len(customRoute))
+	newRules = append(newRules, existingRules[:insertIdx]...)
+	for _, r := range customRoute {
+		newRules = append(newRules, r)
+	}
+	newRules = append(newRules, existingRules[insertIdx:]...)
+	routeMap["rules"] = newRules
+}
+
+func ruleSetContains(raw any, target string) bool {
+	switch v := raw.(type) {
+	case string:
+		return v == target
+	case []any:
+		for _, item := range v {
+			if s, ok := item.(string); ok && s == target {
+				return true
+			}
+		}
+	case []string:
+		for _, s := range v {
+			if s == target {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // generateSingleSubscription 处理单个订阅
