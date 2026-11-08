@@ -52,7 +52,7 @@ func (s *Server) handleServiceAction(w http.ResponseWriter, r *http.Request) {
 			action = "restart"
 		}
 		cmdErr = exec.Command("systemctl", action, "sing-box").Run()
-	case "substore", "singctl-sub", "subhub":
+	case "subhub":
 		if action == "reload" {
 			action = "restart"
 		}
@@ -133,7 +133,7 @@ func (s *Server) handleUpgradeService(w http.ResponseWriter, r *http.Request) {
 	})
 
 	for _, res := range results {
-		if res != nil && res.Component == "substore" && res.Updated {
+		if res != nil && res.Component == "subhub" && res.Updated {
 			_ = exec.Command("sh", "-c", "sleep 2 && singctl sr web restart >/dev/null 2>&1").Start()
 			break
 		}
@@ -154,7 +154,7 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		_ = exec.Command("systemctl", "restart", "caddy").Run()
 	case "restart-singbox":
 		_ = exec.Command("systemctl", "restart", "sing-box").Run()
-	case "restart-substore":
+	case "restart-subhub":
 		_ = exec.Command("systemctl", "restart", "singctl-sub").Run()
 	case "restart-warp":
 		_ = exec.Command("systemctl", "restart", "wireproxy").Run()
@@ -181,7 +181,7 @@ func (s *Server) handleServiceLogs(w http.ResponseWriter, r *http.Request) {
 		output, err = exec.Command("journalctl", "-u", "caddy", "-n", strconv.Itoa(lines), "--no-pager").CombinedOutput()
 	case "singbox":
 		output, err = exec.Command("journalctl", "-u", "sing-box", "-n", strconv.Itoa(lines), "--no-pager").CombinedOutput()
-	case "substore", "singctl-sub", "subhub":
+	case "subhub":
 		output, err = exec.Command("journalctl", "-u", "singctl-sub", "-n", strconv.Itoa(lines), "--no-pager").CombinedOutput()
 	case "warp":
 		output, err = exec.Command("journalctl", "-u", "wireproxy", "-n", strconv.Itoa(lines), "--no-pager").CombinedOutput()
@@ -211,7 +211,7 @@ func (s *Server) handleLogsSSE(w http.ResponseWriter, r *http.Request) {
 	if service == "" {
 		service = "sing-box"
 	}
-	if service == "substore" || service == "subhub" {
+	if service == "subhub" {
 		service = "singctl-sub"
 	}
 	if service != "sing-box" && service != "caddy" && service != "wireproxy" && service != "singctl-sub" {

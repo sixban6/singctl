@@ -41,7 +41,7 @@ export interface ServerStatusResponse {
   services: {
     caddy: ServiceDetail;
     singbox: ServiceDetail;
-    substore: ServiceDetail;
+    subhub: ServiceDetail;
     warp: ServiceDetail;
   };
   config: {

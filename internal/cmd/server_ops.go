@@ -335,7 +335,7 @@ func showUnifiedServerPanel(cfg *config.Config, sbs *deploy.SingBoxServer, sbt *
 		sbVer = "已就绪"
 	}
 
-	ssVer := versions["substore"]
+	ssVer := versions["subhub"]
 	if ssVer != "" {
 		ssVer = "v" + ssVer
 	} else {

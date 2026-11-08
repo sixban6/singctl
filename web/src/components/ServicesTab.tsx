@@ -218,7 +218,7 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
 
   const singbox = status?.services?.singbox;
   const caddy = status?.services?.caddy;
-  const substore = status?.services?.substore;
+  const subhub = status?.services?.subhub;
   const warp = status?.services?.warp;
 
   return (
@@ -466,25 +466,25 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                {substore?.version && (
+                {subhub?.version && (
                   <span className="px-2 py-0.5 rounded-md bg-purple-500/10 text-purple-400 border border-purple-500/20 text-xs font-mono font-medium">
-                    {substore.version}
+                    {subhub.version}
                   </span>
                 )}
-                {updateStates.substore?.hasUpdate && (
+                {updateStates.subhub?.hasUpdate && (
                   <span className="px-2 py-0.5 rounded-md bg-amber-500/20 text-amber-300 border border-amber-500/30 text-xs font-mono font-medium animate-pulse">
-                    新版 v{updateStates.substore.latestVersion}
+                    新版 v{updateStates.subhub.latestVersion}
                   </span>
                 )}
                 <div
                   className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${
-                    substore?.running
+                    subhub?.running
                       ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
                       : 'bg-rose-500/10 text-rose-400 border-rose-500/20'
                   }`}
                 >
-                  {substore?.running ? <CheckCircle2 className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
-                  <span>{substore?.running ? 'active (运行中)' : 'inactive'}</span>
+                  {subhub?.running ? <CheckCircle2 className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
+                  <span>{subhub?.running ? 'active (运行中)' : 'inactive'}</span>
                 </div>
               </div>
             </div>
@@ -492,11 +492,11 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
             <div className="mt-4 grid grid-cols-2 gap-2 text-xs font-mono">
               <div className="p-2.5 rounded-xl bg-slate-900/60 border border-slate-800">
                 <div className="text-slate-500">当前版本</div>
-                <div className="text-purple-400 font-semibold mt-0.5">{substore?.version || '检测中...'}</div>
+                <div className="text-purple-400 font-semibold mt-0.5">{subhub?.version || '检测中...'}</div>
               </div>
               <div className="p-2.5 rounded-xl bg-slate-900/60 border border-slate-800">
                 <div className="text-slate-500">持续运行</div>
-                <div className="text-slate-200 mt-0.5">{substore?.uptime || '-'}</div>
+                <div className="text-slate-200 mt-0.5">{subhub?.uptime || '-'}</div>
               </div>
               <div className="p-2.5 rounded-xl bg-slate-900/60 border border-slate-800">
                 <div className="text-slate-500">内网监听</div>
@@ -504,7 +504,7 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
               </div>
               <div className="p-2.5 rounded-xl bg-slate-900/60 border border-slate-800">
                 <div className="text-slate-500">主进程 PID</div>
-                <div className="text-slate-200 mt-0.5">{substore?.pid || '-'}</div>
+                <div className="text-slate-200 mt-0.5">{subhub?.pid || '-'}</div>
               </div>
               <div className="p-2.5 rounded-xl bg-slate-900/60 border border-slate-800">
                 <div className="text-slate-500">进程守护</div>
@@ -518,25 +518,25 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
           </div>
 
           <div className="mt-5 pt-4 border-t border-slate-800 flex flex-wrap gap-2">
-            {renderUpgradeAction('substore', 'purple')}
+            {renderUpgradeAction('subhub', 'purple')}
             <button
-              onClick={() => handleAction('substore', 'restart')}
-              disabled={loading === 'substore-restart'}
+              onClick={() => handleAction('subhub', 'restart')}
+              disabled={loading === 'subhub-restart'}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700/60 text-xs font-medium text-slate-200 transition-colors"
             >
-              <RotateCw className={`w-3.5 h-3.5 ${loading === 'substore-restart' ? 'animate-spin' : ''}`} />
+              <RotateCw className={`w-3.5 h-3.5 ${loading === 'subhub-restart' ? 'animate-spin' : ''}`} />
               <span>重启服务</span>
             </button>
             <button
-              onClick={() => handleAction('substore', substore?.running ? 'stop' : 'start')}
-              disabled={loading === 'substore-start' || loading === 'substore-stop'}
+              onClick={() => handleAction('subhub', subhub?.running ? 'stop' : 'start')}
+              disabled={loading === 'subhub-start' || loading === 'subhub-stop'}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700/60 text-xs font-medium text-slate-200 transition-colors"
             >
-              {substore?.running ? <Square className="w-3.5 h-3.5 text-rose-400" /> : <Play className="w-3.5 h-3.5 text-emerald-400" />}
-              <span>{substore?.running ? '停止' : '启动'}</span>
+              {subhub?.running ? <Square className="w-3.5 h-3.5 text-rose-400" /> : <Play className="w-3.5 h-3.5 text-emerald-400" />}
+              <span>{subhub?.running ? '停止' : '启动'}</span>
             </button>
             <button
-              onClick={() => onOpenLogs('substore')}
+              onClick={() => onOpenLogs('subhub')}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700/60 text-xs font-medium text-slate-200 transition-colors"
             >
               <FileText className="w-3.5 h-3.5 text-blue-400" />

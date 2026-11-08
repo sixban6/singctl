@@ -2,6 +2,7 @@ package deploy
 
 import (
 	"archive/tar"
+	"cmp"
 	"compress/gzip"
 	"fmt"
 	"io"
@@ -150,8 +151,8 @@ func CheckComponentUpdate(target string, cfg *config.Config) (*CheckUpdateResult
 			Message:        msg,
 		}, nil
 
-	case "substore", "ss", "sub-store", "subhub":
-		curr := GetInstalledSubstoreVersion()
+	case "subhub":
+		curr := GetInstalledSubhubVersion()
 		tag, err := fetcher.FetchLatestTag("sixban6/singctl")
 		latest := cleanVersion(tag)
 		if err != nil || latest == "" {
@@ -163,7 +164,7 @@ func CheckComponentUpdate(target string, cfg *config.Config) (*CheckUpdateResult
 			msg = fmt.Sprintf("发现 SubHub 订阅引擎新版本: v%s (当前: v%s)", latest, curr)
 		}
 		return &CheckUpdateResult{
-			Component:      "substore",
+			Component:      "subhub",
 			DisplayName:    "SubHub 订阅引擎",
 			CurrentVersion: curr,
 			LatestVersion:  latest,
@@ -317,35 +318,25 @@ func UpgradeCaddy(cfg *config.Config) (*UpgradeResult, error) {
 	}, nil
 }
 
-// UpgradeSubstore upgrades the SingCtl binary if a newer release is available,
-// cleans up any legacy Docker sub-store container, and restarts singctl-sub.service.
-func UpgradeSubstore(cfg *config.Config) (*UpgradeResult, error) {
-	oldVer := GetInstalledSubstoreVersion()
-	logger.Info("Starting native SubHub subscription engine upgrade (current: %s)...", oldVer)
-
-	fetcher := github.NewReleaseFetcher(getMirrorURL(cfg), ReleaseClient)
-	latestTag, _ := fetcher.FetchLatestTag("sixban6/singctl")
-	latest := cleanVersion(latestTag)
-	if latest != "" && isNewerVersion(oldVer, latest) {
-		up := updater.New(getMirrorURL(cfg), "")
-		if err := up.UpdateSelf("/etc/singctl/singctl.yaml", oldVer); err != nil {
-			logger.Warn("singctl self-update warning during SubHub upgrade: %v", err)
-		}
+// UpgradeSubhub upgrades the SingCtl binary if a newer release is available and restarts singctl-sub.service.
+func UpgradeSubhub(cfg *config.Config) (*UpgradeResult, error) {
+	oldVer := GetInstalledSubhubVersion()
+	if err := updater.New(getMirrorURL(cfg), "").UpdateSelf("/etc/singctl/singctl.yaml", oldVer); err != nil {
+		return nil, err
 	}
 
-	sbt := NewSubstore(cfg, "")
-	if err := sbt.DeploySubstore(); err != nil {
-		return nil, fmt.Errorf("subhub redeploy failed: %w", err)
-	}
-
-	newVer := GetInstalledSubstoreVersion()
-	updated := oldVer != newVer
-	msg := fmt.Sprintf("SubHub 原生订阅引擎已就绪 (当前版本: v%s)", newVer)
+	newVer := cmp.Or(GetDiskSingctlVersion(), GetInstalledSubhubVersion(), oldVer)
+	updated := newVer != "" && newVer != oldVer
 	if updated {
-		msg = fmt.Sprintf("SubHub 原生订阅引擎已成功更新 (v%s -> v%s)", oldVer, newVer)
+		_ = runCmd("systemctl", "restart", "singctl-sub")
+	}
+
+	msg := fmt.Sprintf("SubHub 订阅引擎已是最新版本 (v%s)", newVer)
+	if updated {
+		msg = fmt.Sprintf("SubHub 订阅引擎已成功更新 (v%s -> v%s)", oldVer, newVer)
 	}
 	return &UpgradeResult{
-		Component:   "substore",
+		Component:   "subhub",
 		DisplayName: "SubHub 订阅引擎",
 		OldVersion:  oldVer,
 		NewVersion:  newVer,
@@ -455,8 +446,8 @@ func UpgradeComponent(target string, cfg *config.Config) ([]*UpgradeResult, erro
 		}
 		return []*UpgradeResult{res}, nil
 
-	case "substore", "ss", "sub-store", "subhub":
-		res, err := UpgradeSubstore(cfg)
+	case "subhub":
+		res, err := UpgradeSubhub(cfg)
 		if err != nil {
 			return nil, err
 		}
@@ -485,8 +476,8 @@ func UpgradeComponent(target string, cfg *config.Config) ([]*UpgradeResult, erro
 			results = append(results, res)
 		}
 
-		if res, err := UpgradeSubstore(cfg); err != nil {
-			errs = append(errs, fmt.Sprintf("Sub-Store: %v", err))
+		if res, err := UpgradeSubhub(cfg); err != nil {
+			errs = append(errs, fmt.Sprintf("SubHub: %v", err))
 		} else {
 			results = append(results, res)
 		}
@@ -503,7 +494,7 @@ func UpgradeComponent(target string, cfg *config.Config) ([]*UpgradeResult, erro
 		return results, nil
 
 	default:
-		return nil, fmt.Errorf("未知的服务组件: %s (支持: singbox, caddy, substore, warp, all)", target)
+		return nil, fmt.Errorf("未知的服务组件: %s (支持: singbox, caddy, subhub, warp, all)", target)
 	}
 }
 

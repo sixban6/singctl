@@ -198,7 +198,7 @@ func newServerCheckCmd(configPath string) *cobra.Command {
 	return &cobra.Command{
 		Use:     "check-update [component]",
 		Aliases: []string{"checkver", "cu"},
-		Short:   "检查核心组件远端是否有新版本 / Check latest remote versions (singbox|caddy|substore|warp)",
+		Short:   "检查核心组件远端是否有新版本 / Check latest remote versions (singbox|caddy|subhub|warp)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			target := "singbox"
 			if len(args) > 0 {
@@ -228,7 +228,7 @@ func newServerUpdateCmd(configPath string) *cobra.Command {
 	return &cobra.Command{
 		Use:     "update [component]",
 		Aliases: []string{"upgrade", "up"},
-		Short:   "平滑升级服务端核心组件 / Smooth upgrade server components (singbox|caddy|substore|warp|all)",
+		Short:   "平滑升级服务端核心组件 / Smooth upgrade server components (singbox|caddy|subhub|warp|all)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			target := "all"
 			if len(args) > 0 {

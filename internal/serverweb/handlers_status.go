@@ -34,12 +34,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	caddyRunning := checkServiceRunning("caddy")
 	singboxRunning := checkServiceRunning("sing-box")
-	substoreRunning := checkServiceRunning("singctl-sub") || subhub.IsRunning()
+	subhubRunning := checkServiceRunning("singctl-sub") || subhub.IsRunning()
 	warpRunning := checkServiceRunning("wireproxy") || checkServiceRunning("warp-svc")
 
 	caddyVer := deploy.GetInstalledCaddyVersion()
 	singboxVer := deploy.GetInstalledSingBoxVersion()
-	substoreVer := deploy.GetInstalledSubstoreVersion()
+	subhubVer := deploy.GetInstalledSubhubVersion()
 	warpVer := deploy.GetInstalledWarpVersion()
 
 	substoreAdminURL := ""
@@ -73,9 +73,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 				"pid":     getServicePID("sing-box"),
 				"uptime":  getServiceUptime("sing-box"),
 			},
-			"substore": map[string]any{
-				"running": substoreRunning,
-				"version": substoreVer,
+			"subhub": map[string]any{
+				"running": subhubRunning,
+				"version": subhubVer,
 				"pid":     getServicePID("singctl-sub"),
 				"uptime":  getServiceUptime("singctl-sub"),
 				"engine":  "native-go",

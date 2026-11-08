@@ -216,7 +216,7 @@ func handleReinstallSingbox(cfg *config.Config, force bool) error {
 func handleReinstallSubstore(cfg *config.Config, configPath string, force bool) error {
 	if !force {
 		logger.Info("正在检查 SubHub 订阅引擎版本...")
-		info, err := deploy.CheckSubstoreVersion(cfg)
+		info, err := deploy.CheckSubhubVersion(cfg)
 		if err != nil {
 			logger.Warn("无法获取远端版本 (%v)，如需强制重装请添加 -f 参数", err)
 		} else if !info.HasUpdate {

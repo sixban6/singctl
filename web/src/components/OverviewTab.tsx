@@ -207,10 +207,10 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ status, onRefresh, onN
       ports: '80, 443',
     },
     {
-      key: 'substore',
+      key: 'subhub',
       name: 'SubHub 订阅中枢',
       desc: 'Go 原生多协议节点转换与聚合分发',
-      detail: status?.services?.substore,
+      detail: status?.services?.subhub,
       ports: '3001',
     },
     {

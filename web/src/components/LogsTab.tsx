@@ -64,7 +64,7 @@ export const LogsTab: React.FC<LogsTabProps> = ({ initialService = 'singbox' }) 
   const services = [
     { key: 'singbox', label: 'sing-box' },
     { key: 'caddy', label: 'Caddy' },
-    { key: 'substore', label: 'SubHub 订阅' },
+    { key: 'subhub', label: 'SubHub 订阅' },
     { key: 'warp', label: 'WARP' },
     { key: 'system', label: '系统日志' },
   ];

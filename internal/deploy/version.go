@@ -153,8 +153,8 @@ func GetInstalledWarpVersion() string {
 	return ver
 }
 
-// GetInstalledSubstoreVersion returns the running SubHub version from local port 3001.
-func GetInstalledSubstoreVersion() string {
+// GetInstalledSubhubVersion returns the running SubHub version from local port 3001, falling back to the on-disk singctl binary version.
+func GetInstalledSubhubVersion() string {
 	client := http.Client{Timeout: 500 * time.Millisecond}
 	resp, err := client.Get("http://127.0.0.1:3001/")
 	if err == nil {
@@ -169,16 +169,35 @@ func GetInstalledSubstoreVersion() string {
 			}
 		}
 	}
+	return GetDiskSingctlVersion()
+}
+
+// GetDiskSingctlVersion returns the version reported by the on-disk singctl binary.
+func GetDiskSingctlVersion() string {
+	for _, p := range []string{"/usr/local/bin/singctl", "/usr/bin/singctl"} {
+		if _, err := os.Stat(p); err == nil {
+			if out, err := exec.Command(p, "version").CombinedOutput(); err == nil {
+				for line := range strings.SplitSeq(string(out), "\n") {
+					if idx := strings.Index(line, "SingCtl v"); idx != -1 {
+						fields := strings.Fields(line[idx:])
+						if len(fields) >= 2 {
+							return NormalizeVersion(fields[1])
+						}
+					}
+				}
+			}
+		}
+	}
 	return ""
 }
 
 // GetCoreServiceVersions collects the currently installed versions of all 4 core services.
 func GetCoreServiceVersions() map[string]string {
 	return map[string]string{
-		"singbox":  GetInstalledSingBoxVersion(),
-		"caddy":    GetInstalledCaddyVersion(),
-		"substore": GetInstalledSubstoreVersion(),
-		"warp":     GetInstalledWarpVersion(),
+		"singbox": GetInstalledSingBoxVersion(),
+		"caddy":   GetInstalledCaddyVersion(),
+		"subhub":  GetInstalledSubhubVersion(),
+		"warp":    GetInstalledWarpVersion(),
 	}
 }
 
@@ -357,14 +376,14 @@ func CheckWarpVersion(cfg *config.Config) (*ComponentVersionInfo, error) {
 	return info, nil
 }
 
-// CheckSubstoreVersion checks the native SubHub subscription service version against the latest SingCtl release.
-func CheckSubstoreVersion(cfg *config.Config) (*ComponentVersionInfo, error) {
+// CheckSubhubVersion checks the native SubHub subscription service version against the latest SingCtl release.
+func CheckSubhubVersion(cfg *config.Config) (*ComponentVersionInfo, error) {
 	info := &ComponentVersionInfo{
-		Name:        "substore",
+		Name:        "subhub",
 		DisplayName: "SubHub 订阅引擎",
 	}
 
-	curr := GetInstalledSubstoreVersion()
+	curr := GetInstalledSubhubVersion()
 	if curr != "" {
 		info.Installed = true
 		info.CurrentVersion = curr
@@ -383,17 +402,9 @@ func CheckSubstoreVersion(cfg *config.Config) (*ComponentVersionInfo, error) {
 	}
 	info.LatestVersion = NormalizeVersion(latestTag)
 
-	// Flag update if not installed, or if legacy Docker sub-store container is still running instead of singctl-sub
 	if !info.Installed {
 		info.HasUpdate = true
 		return info, nil
-	}
-	if constant.SubHubSystemdService != "" {
-		if _, err := os.Stat(constant.SubHubSystemdService); os.IsNotExist(err) {
-			info.CurrentVersion = curr + " (旧版容器)"
-			info.HasUpdate = true
-			return info, nil
-		}
 	}
 
 	info.HasUpdate = isNewerVersion(info.CurrentVersion, info.LatestVersion)
@@ -407,8 +418,8 @@ func CheckComponentVersion(cfg *config.Config, target string) (*ComponentVersion
 		return CheckSingBoxVersion(cfg)
 	case "caddy":
 		return CheckCaddyVersion(cfg)
-	case "substore":
-		return CheckSubstoreVersion(cfg)
+	case "subhub":
+		return CheckSubhubVersion(cfg)
 	case "warp":
 		return CheckWarpVersion(cfg)
 	default:
@@ -418,7 +429,7 @@ func CheckComponentVersion(cfg *config.Config, target string) (*ComponentVersion
 
 // CheckAllComponentVersions checks versions of all four server components.
 func CheckAllComponentVersions(cfg *config.Config) ([]*ComponentVersionInfo, error) {
-	targets := []string{"singbox", "caddy", "substore", "warp"}
+	targets := []string{"singbox", "caddy", "subhub", "warp"}
 	var results []*ComponentVersionInfo
 
 	for _, target := range targets {

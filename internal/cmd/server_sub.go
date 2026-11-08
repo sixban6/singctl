@@ -97,7 +97,7 @@ func newServerSubCmd(configPath string, version ...string) *cobra.Command {
 			sources, _ := st.ListSources()
 
 			if subhub.IsRunning() {
-				verStr := deploy.GetInstalledSubstoreVersion()
+				verStr := deploy.GetInstalledSubhubVersion()
 				if verStr != "" {
 					logger.Success("SubHub 原生订阅引擎运行中 (v%s, 监听 http://%s)", verStr, subhub.DefaultListenAddr)
 				} else {
