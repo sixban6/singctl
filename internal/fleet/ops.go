@@ -915,6 +915,8 @@ if ! command -v singctl >/dev/null 2>&1; then
   BIN=$(find "${TMPD}" -type f -name singctl | head -n1)
   install -m 0755 "$BIN" /usr/local/bin/singctl
   rm -rf "${TMPD}"
+else
+  singctl update self >/dev/null 2>&1 || true
 fi
 mkdir -p /etc/singctl
 printf '%%s' %q | base64 -d > /etc/singctl/singctl.yaml

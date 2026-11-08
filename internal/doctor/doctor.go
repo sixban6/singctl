@@ -251,10 +251,17 @@ func checkSystem(r *DoctorReport) {
 }
 
 func checkBBR(r *DoctorReport) {
-	bbrEnabled := false
-	if data, err := os.ReadFile("/proc/sys/net/ipv4/tcp_congestion_control"); err == nil {
-		bbrEnabled = strings.Contains(strings.TrimSpace(string(data)), "bbr")
+	data, err := os.ReadFile("/proc/sys/net/ipv4/tcp_congestion_control")
+	if err != nil && os.IsNotExist(err) {
+		r.Items = append(r.Items, DoctorItem{
+			Name:     "TCP 拥塞控制算法",
+			Category: "network",
+			Status:   "ok",
+			Summary:  "容器共享宿主机内核网络栈 (TCP 拥塞控制由宿主机托管)",
+		})
+		return
 	}
+	bbrEnabled := err == nil && strings.Contains(strings.TrimSpace(string(data)), "bbr")
 
 	if bbrEnabled {
 		r.Items = append(r.Items, DoctorItem{
@@ -276,6 +283,9 @@ func checkBBR(r *DoctorReport) {
 
 func checkPorts(cfg *config.Config, r *DoctorReport) {
 	ports := []int{80, 443}
+	if cfg != nil && cfg.Server.GetNodePort() != 443 {
+		ports = append(ports, cfg.Server.GetNodePort())
+	}
 	if cfg != nil && cfg.Server.GetWebAdminPort() > 0 {
 		ports = append(ports, cfg.Server.GetWebAdminPort())
 	}
@@ -355,10 +365,15 @@ func checkTLSCert(cfg *config.Config, r *DoctorReport) {
 
 	nodePort := cfg.Server.GetNodePort()
 	targetAddr := fmt.Sprintf("%s:%d", domain, nodePort)
-	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 3 * time.Second}, "tcp", targetAddr, &tls.Config{
+	tlsCfg := &tls.Config{
 		ServerName:         domain,
 		InsecureSkipVerify: false,
-	})
+	}
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 3 * time.Second}, "tcp", targetAddr, tlsCfg)
+	if err != nil {
+		// NAT 共享 IP 小鸡内部往往不支持 Hairpin NAT (容器内直连自身公网 IP 端口超时)，回退通过本地回环验证同一网关与真实 ACME 证书链
+		conn, err = tls.DialWithDialer(&net.Dialer{Timeout: 2 * time.Second}, "tcp", fmt.Sprintf("127.0.0.1:%d", nodePort), tlsCfg)
+	}
 	if err != nil {
 		r.Items = append(r.Items, DoctorItem{
 			Name:     "HTTPS 证书与网关",

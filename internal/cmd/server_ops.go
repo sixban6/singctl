@@ -240,6 +240,8 @@ func syncNodeToSubstore(configPath string, restart bool, tag string) error {
 		return fmt.Errorf("failed to load existing sing-box credentials: %w", err)
 	}
 
+	_ = deploy.SyncCaddyfile(cfg)
+
 	sbt := deploy.NewSubstore(cfg, "")
 	sbt.SkipRestart = !restart
 	if err := sbt.UpdateSubstoreConfig(sbs); err != nil {

@@ -41,9 +41,16 @@ func DefaultHTTPSProber(ctx context.Context, node Node) ProbeResult {
 	sniHost := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(node.Domain)), ".")
 	rawHost := strings.TrimSpace(node.Host)
 
+	targetPort := 443
+	if node.NodePort > 0 && node.NodePort <= 65535 {
+		targetPort = node.NodePort
+	}
 	dialAddr := ""
 	if h, p, err := net.SplitHostPort(rawHost); err == nil && h != "" && p != "" {
 		dialAddr = net.JoinHostPort(h, p)
+		if pNum, pErr := strconv.Atoi(p); pErr == nil && pNum > 0 && pNum <= 65535 {
+			targetPort = pNum
+		}
 		if sniHost == "" && net.ParseIP(h) == nil {
 			sniHost = strings.ToLower(h)
 		}
@@ -64,10 +71,6 @@ func DefaultHTTPSProber(ctx context.Context, node Node) ProbeResult {
 		}
 		if sniHost == "" && net.ParseIP(dialHost) == nil {
 			sniHost = strings.ToLower(dialHost)
-		}
-		targetPort := 443
-		if node.NodePort > 0 && node.NodePort <= 65535 {
-			targetPort = node.NodePort
 		}
 		dialAddr = net.JoinHostPort(dialHost, strconv.Itoa(targetPort))
 	}
@@ -134,7 +137,7 @@ func DefaultHTTPSProber(ctx context.Context, node Node) ProbeResult {
 			LatencyMs:   rtt,
 			ProbeStatus: "unreachable",
 			CheckedAt:   nowStr,
-			Message:     "HTTPS :443 探活失败: " + truncateLine(err.Error(), 120),
+			Message:     fmt.Sprintf("HTTPS :%d 探活失败: %s", targetPort, truncateLine(err.Error(), 120)),
 		}
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
@@ -161,14 +164,14 @@ func DefaultHTTPSProber(ctx context.Context, node Node) ProbeResult {
 	}
 
 	statusTag := "https_ok"
-	msg := fmt.Sprintf("HTTPS :443 正常 (%d ms)", rtt)
+	msg := fmt.Sprintf("HTTPS :%d 正常 (%d ms)", targetPort, rtt)
 	if sniHost == "" {
 		statusTag = "tls_ip_ok"
 	} else if certDays > 0 && certDays <= 7 {
 		statusTag = "cert_expiring"
 		msg = fmt.Sprintf("HTTPS 在线 (%d ms)，TLS 证书仅剩 %d 天", rtt, certDays)
 	} else if certDays > 0 {
-		msg = fmt.Sprintf("HTTPS :443 正常 (%d ms，证书余 %d 天)", rtt, certDays)
+		msg = fmt.Sprintf("HTTPS :%d 正常 (%d ms，证书余 %d 天)", targetPort, rtt, certDays)
 	}
 
 	return ProbeResult{
