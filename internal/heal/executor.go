@@ -143,10 +143,10 @@ func Run(ctx context.Context, opts RunOptions) (RunResult, error) {
 	// ── Post-Heal Verification Scan ──
 	finalReport := Scan(ctx, cfgPath, effectiveSingctlVer)
 	if opts.AsyncWebRestart && len(finalReport.OS.StaleServices) > 0 {
-		// AsyncWebRestart uses `sleep 2 && singctl sr web restart` so HTTP response returns first;
-		// remove singctl-web from the immediate post-scan StaleServices so the persisted report reflects the scheduled restart.
+		// AsyncWebRestart defers restarting singctl-ui by 2s so HTTP response returns first;
+		// remove singctl-ui from the immediate post-scan StaleServices so the persisted report reflects the scheduled restart.
 		finalReport.OS.StaleServices = slices.DeleteFunc(finalReport.OS.StaleServices, func(s string) bool {
-			return s == "singctl-web"
+			return s == "singctl-ui"
 		})
 		finalReport.OS.Healthy = finalReport.OS.SecurityCount == 0 && len(finalReport.OS.StaleServices) == 0
 		finalReport.Posture, finalReport.PostureLabel = evaluatePosture(finalReport.Core, finalReport.OS, finalReport.Kernel)
@@ -514,9 +514,9 @@ func healOSLayer(ctx context.Context, asyncWebRestart bool) []LayerActionDetail 
 					_ = exec.Command("systemctl", "restart", "caddy").Run()
 				}
 				reloaded = append(reloaded, "caddy")
-			case "singctl-web":
+			case "singctl-ui":
 				restartWebDaemonSafely(asyncWebRestart)
-				reloaded = append(reloaded, "singctl-web")
+				reloaded = append(reloaded, "singctl-ui")
 			default:
 				if exec.Command("systemctl", "restart", svc).Run() == nil {
 					reloaded = append(reloaded, svc)
@@ -597,43 +597,26 @@ func waitServiceActive(ctx context.Context, unit string, timeout time.Duration) 
 }
 
 func restartWebDaemonSafely(async bool) {
-	hasSystemdUnit := false
-	unitName := ""
-	if hasBinary("systemctl") {
-		for _, candidate := range []string{"singctl-serverweb", "singctl-web"} {
-			if out, err := exec.Command("systemctl", "is-active", candidate).Output(); err == nil && strings.TrimSpace(string(out)) == "active" {
-				hasSystemdUnit = true
-				unitName = candidate
-				break
-			}
+	if isServiceActive("singctl-ui") {
+		if async {
+			_ = exec.Command("sh", "-c", "sleep 2 && systemctl restart singctl-ui >/dev/null 2>&1").Start()
+		} else {
+			_ = exec.Command("systemctl", "restart", "singctl-ui").Run()
 		}
+		return
 	}
 
-	hasBgPid := false
+	// Migrate legacy PID-based daemon to singctl-ui.service if encountered once during upgrade
 	if _, err := os.Stat("/tmp/singctl-serverweb.pid"); err == nil {
-		hasBgPid = true
-	}
-
-	if !hasSystemdUnit && !hasBgPid {
-		return
-	}
-
-	binPath := locateBinary([]string{"/usr/local/bin/singctl", "/usr/bin/singctl"}, "singctl")
-	if async {
-		if hasSystemdUnit {
-			cmd := exec.Command("sh", "-c", fmt.Sprintf("sleep 2 && systemctl restart %s >/dev/null 2>&1", unitName))
-			_ = cmd.Start()
-		} else if hasBgPid && binPath != "" {
-			cmd := exec.Command("sh", "-c", fmt.Sprintf("sleep 2 && env -u SINGCTL_SERVER_WEB_BACKGROUND %s sr web restart >/dev/null 2>&1", binPath))
-			_ = cmd.Start()
+		binPath := locateBinary([]string{"/usr/local/bin/singctl", "/usr/bin/singctl"}, "singctl")
+		if binPath == "" {
+			return
 		}
-		return
-	}
-	if hasSystemdUnit {
-		_ = exec.Command("systemctl", "restart", unitName).Run()
-	} else if hasBgPid && binPath != "" {
-		cmd := exec.Command("env", "-u", "SINGCTL_SERVER_WEB_BACKGROUND", binPath, "sr", "web", "restart")
-		_ = cmd.Run()
+		if async {
+			_ = exec.Command("sh", "-c", fmt.Sprintf("sleep 2 && %s sr ui restart >/dev/null 2>&1", binPath)).Start()
+		} else {
+			_ = exec.Command(binPath, "sr", "ui", "restart").Run()
+		}
 	}
 }
 

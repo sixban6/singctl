@@ -2,7 +2,6 @@ package deploy
 
 import (
 	"archive/tar"
-	"cmp"
 	"compress/gzip"
 	"fmt"
 	"io"
@@ -16,7 +15,7 @@ import (
 	"singctl/internal/config"
 	"singctl/internal/logger"
 	"singctl/internal/singbox"
-	"singctl/internal/updater"
+	"singctl/internal/util/file"
 	"singctl/internal/util/github"
 )
 
@@ -48,24 +47,18 @@ func cleanVersion(v string) string {
 }
 
 // isNewerVersion returns true if remoteVer is strictly greater than localVer.
-func isNewerVersion(localVer, remoteVer string) bool {
+func IsNewerVersion(localVer, remoteVer string) bool {
 	l := cleanVersion(localVer)
 	r := cleanVersion(remoteVer)
-	if l == "" || r == "" {
-		return false
-	}
-	if l == r {
+	if l == "" || r == "" || l == r {
 		return false
 	}
 
 	lParts := strings.Split(l, ".")
 	rParts := strings.Split(r, ".")
-	maxLen := len(lParts)
-	if len(rParts) > maxLen {
-		maxLen = len(rParts)
-	}
+	maxLen := max(len(lParts), len(rParts))
 
-	for i := 0; i < maxLen; i++ {
+	for i := range maxLen {
 		var lNum, rNum int
 		if i < len(lParts) {
 			var sub string
@@ -104,7 +97,7 @@ func isNewerVersion(localVer, remoteVer string) bool {
 	return false
 }
 
-// CheckComponentUpdate inspects if a component has a newer version available upstream.
+// CheckComponentUpdate inspects if an external component (singbox, caddy, warp) has a newer version upstream.
 func CheckComponentUpdate(target string, cfg *config.Config) (*CheckUpdateResult, error) {
 	fetcher := github.NewReleaseFetcher(getMirrorURL(cfg), ReleaseClient)
 
@@ -116,7 +109,7 @@ func CheckComponentUpdate(target string, cfg *config.Config) (*CheckUpdateResult
 		if err != nil || latest == "" {
 			latest = curr
 		}
-		hasUp := isNewerVersion(curr, latest)
+		hasUp := IsNewerVersion(curr, latest)
 		msg := fmt.Sprintf("sing-box 已是最新版本 (v%s)", curr)
 		if hasUp {
 			msg = fmt.Sprintf("发现 sing-box 新版本: v%s (当前: v%s)", latest, curr)
@@ -137,7 +130,7 @@ func CheckComponentUpdate(target string, cfg *config.Config) (*CheckUpdateResult
 		if err != nil || latest == "" {
 			latest = curr
 		}
-		hasUp := isNewerVersion(curr, latest)
+		hasUp := IsNewerVersion(curr, latest)
 		msg := fmt.Sprintf("Caddy 已是最新版本 (v%s)", curr)
 		if hasUp {
 			msg = fmt.Sprintf("发现 Caddy 新版本: v%s (当前: v%s)", latest, curr)
@@ -151,27 +144,6 @@ func CheckComponentUpdate(target string, cfg *config.Config) (*CheckUpdateResult
 			Message:        msg,
 		}, nil
 
-	case "subhub":
-		curr := GetInstalledSubhubVersion()
-		tag, err := fetcher.FetchLatestTag("sixban6/singctl")
-		latest := cleanVersion(tag)
-		if err != nil || latest == "" {
-			latest = curr
-		}
-		hasUp := isNewerVersion(curr, latest)
-		msg := fmt.Sprintf("SubHub 订阅引擎已是最新版本 (v%s)", curr)
-		if hasUp {
-			msg = fmt.Sprintf("发现 SubHub 订阅引擎新版本: v%s (当前: v%s)", latest, curr)
-		}
-		return &CheckUpdateResult{
-			Component:      "subhub",
-			DisplayName:    "SubHub 订阅引擎",
-			CurrentVersion: curr,
-			LatestVersion:  latest,
-			HasUpdate:      hasUp,
-			Message:        msg,
-		}, nil
-
 	case "warp", "wireproxy":
 		curr := GetInstalledWarpVersion()
 		tag, err := fetcher.FetchLatestTag("windtf/wireproxy")
@@ -179,7 +151,7 @@ func CheckComponentUpdate(target string, cfg *config.Config) (*CheckUpdateResult
 		if err != nil || latest == "" {
 			latest = curr
 		}
-		hasUp := isNewerVersion(curr, latest)
+		hasUp := IsNewerVersion(curr, latest)
 		msg := fmt.Sprintf("WARP (wireproxy) 已是最新版本 (v%s)", curr)
 		if hasUp {
 			msg = fmt.Sprintf("发现 WARP (wireproxy) 新版本: v%s (当前: v%s)", latest, curr)
@@ -194,7 +166,7 @@ func CheckComponentUpdate(target string, cfg *config.Config) (*CheckUpdateResult
 		}, nil
 
 	default:
-		return nil, fmt.Errorf("未知的服务组件: %s", target)
+		return nil, fmt.Errorf("未知的服务组件: %s (支持: singbox, caddy, warp)", target)
 	}
 }
 
@@ -206,7 +178,7 @@ func UpgradeSingbox(cfg *config.Config) (*UpgradeResult, error) {
 	fetcher := github.NewReleaseFetcher(getMirrorURL(cfg), ReleaseClient)
 	latestTag, _ := fetcher.FetchLatestTag("SagerNet/sing-box")
 	latest := cleanVersion(latestTag)
-	if latest != "" && !isNewerVersion(oldVer, latest) {
+	if latest != "" && !IsNewerVersion(oldVer, latest) {
 		logger.Success("sing-box 已是最新版本 (%s)，无需重复更新", oldVer)
 		return &UpgradeResult{
 			Component:   "singbox",
@@ -239,7 +211,7 @@ func UpgradeSingbox(cfg *config.Config) (*UpgradeResult, error) {
 	}, nil
 }
 
-// UpgradeCaddy updates Caddy (with Cloudflare DNS & layer4) and restarts the service.
+// UpgradeCaddy atomically replaces Caddy (with Cloudflare DNS & layer4) and restarts the service.
 func UpgradeCaddy(cfg *config.Config) (*UpgradeResult, error) {
 	oldVer := GetInstalledCaddyVersion()
 	logger.Info("Starting Caddy gateway upgrade (current: %s)...", oldVer)
@@ -247,7 +219,7 @@ func UpgradeCaddy(cfg *config.Config) (*UpgradeResult, error) {
 	fetcher := github.NewReleaseFetcher(getMirrorURL(cfg), ReleaseClient)
 	latestTag, _ := fetcher.FetchLatestTag("caddyserver/caddy")
 	latest := cleanVersion(latestTag)
-	if latest != "" && !isNewerVersion(oldVer, latest) {
+	if latest != "" && !IsNewerVersion(oldVer, latest) {
 		logger.Success("Caddy 已是最新版本 (%s)，无需重复更新", oldVer)
 		return &UpgradeResult{
 			Component:   "caddy",
@@ -273,36 +245,20 @@ func UpgradeCaddy(cfg *config.Config) (*UpgradeResult, error) {
 	defer os.RemoveAll(tmpDir)
 
 	archivePath := filepath.Join(tmpDir, caddyTar)
-	client := &http.Client{Timeout: 60 * time.Second}
-	resp, err := client.Get(downloadURL)
-	if err != nil {
-		return nil, fmt.Errorf("failed to download %s: %w", downloadURL, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("download %s failed with status %d", downloadURL, resp.StatusCode)
-	}
-
-	outFile, err := os.Create(archivePath)
-	if err != nil {
+	if err := downloadToFile(downloadURL, archivePath); err != nil {
 		return nil, err
 	}
-	if _, err := io.Copy(outFile, resp.Body); err != nil {
-		outFile.Close()
-		return nil, err
-	}
-	outFile.Close()
 
-	// Extract caddy binary from archive
 	extractedCaddy := filepath.Join(tmpDir, "caddy")
 	if err := extractFileFromTarGz(archivePath, "caddy", extractedCaddy); err != nil {
 		return nil, fmt.Errorf("failed to extract caddy: %w", err)
 	}
 
-	_ = runCmd("systemctl", "stop", "caddy")
-	_ = runCmd("install", "-m", "0755", extractedCaddy, "/usr/bin/caddy")
+	if err := file.SafeReplace("/usr/bin/caddy", extractedCaddy); err != nil {
+		return nil, fmt.Errorf("failed to replace /usr/bin/caddy: %w", err)
+	}
 	if _, err := os.Stat("/usr/local/bin/caddy"); err == nil {
-		_ = runCmd("install", "-m", "0755", extractedCaddy, "/usr/local/bin/caddy")
+		_ = file.SafeReplace("/usr/local/bin/caddy", extractedCaddy)
 	}
 	_ = runCmd("apt-mark", "hold", "caddy")
 	_ = runCmd("systemctl", "restart", "caddy")
@@ -318,34 +274,7 @@ func UpgradeCaddy(cfg *config.Config) (*UpgradeResult, error) {
 	}, nil
 }
 
-// UpgradeSubhub upgrades the SingCtl binary if a newer release is available and restarts singctl-sub.service.
-func UpgradeSubhub(cfg *config.Config) (*UpgradeResult, error) {
-	oldVer := GetInstalledSubhubVersion()
-	if err := updater.New(getMirrorURL(cfg), "").UpdateSelf("/etc/singctl/singctl.yaml", oldVer); err != nil {
-		return nil, err
-	}
-
-	newVer := cmp.Or(GetDiskSingctlVersion(), GetInstalledSubhubVersion(), oldVer)
-	updated := newVer != "" && newVer != oldVer
-	if updated {
-		_ = runCmd("systemctl", "restart", "singctl-sub")
-	}
-
-	msg := fmt.Sprintf("SubHub 订阅引擎已是最新版本 (v%s)", newVer)
-	if updated {
-		msg = fmt.Sprintf("SubHub 订阅引擎已成功更新 (v%s -> v%s)", oldVer, newVer)
-	}
-	return &UpgradeResult{
-		Component:   "subhub",
-		DisplayName: "SubHub 订阅引擎",
-		OldVersion:  oldVer,
-		NewVersion:  newVer,
-		Message:     msg,
-		Updated:     updated,
-	}, nil
-}
-
-// UpgradeWarp updates wireproxy to latest version and restarts the service.
+// UpgradeWarp atomically replaces wireproxy with the latest version and restarts the service.
 func UpgradeWarp(cfg *config.Config) (*UpgradeResult, error) {
 	oldVer := GetInstalledWarpVersion()
 	logger.Info("Starting WARP (wireproxy) upgrade (current: %s)...", oldVer)
@@ -358,7 +287,7 @@ func UpgradeWarp(cfg *config.Config) (*UpgradeResult, error) {
 		latestTag = "latest"
 	}
 	latest := cleanVersion(latestTag)
-	if latest != "" && latest != "latest" && !isNewerVersion(oldVer, latest) {
+	if latest != "" && latest != "latest" && !IsNewerVersion(oldVer, latest) {
 		logger.Success("WARP (wireproxy) 已是最新版本 (%s)，无需重复更新", oldVer)
 		return &UpgradeResult{
 			Component:   "warp",
@@ -385,37 +314,22 @@ func UpgradeWarp(cfg *config.Config) (*UpgradeResult, error) {
 	defer os.RemoveAll(tmpDir)
 
 	archivePath := filepath.Join(tmpDir, wireproxyTar)
-	client := &http.Client{Timeout: 60 * time.Second}
-	resp, err := client.Get(downloadURL)
-	if err != nil {
-		return nil, fmt.Errorf("failed to download %s: %w", downloadURL, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("download %s failed with status %d", downloadURL, resp.StatusCode)
-	}
-
-	outFile, err := os.Create(archivePath)
-	if err != nil {
+	if err := downloadToFile(downloadURL, archivePath); err != nil {
 		return nil, err
 	}
-	if _, err := io.Copy(outFile, resp.Body); err != nil {
-		outFile.Close()
-		return nil, err
-	}
-	outFile.Close()
 
 	extractedWP := filepath.Join(tmpDir, "wireproxy")
 	if err := extractFileFromTarGz(archivePath, "wireproxy", extractedWP); err != nil {
 		return nil, fmt.Errorf("failed to extract wireproxy: %w", err)
 	}
 
-	_ = runCmd("systemctl", "stop", "wireproxy")
 	targetDest := "/usr/local/bin/wireproxy"
 	if _, err := os.Stat("/usr/bin/wireproxy"); err == nil {
 		targetDest = "/usr/bin/wireproxy"
 	}
-	_ = runCmd("install", "-m", "0755", extractedWP, targetDest)
+	if err := file.SafeReplace(targetDest, extractedWP); err != nil {
+		return nil, fmt.Errorf("failed to replace %s: %w", targetDest, err)
+	}
 	_ = runCmd("systemctl", "restart", "wireproxy")
 
 	newVer := GetInstalledWarpVersion()
@@ -429,7 +343,7 @@ func UpgradeWarp(cfg *config.Config) (*UpgradeResult, error) {
 	}, nil
 }
 
-// UpgradeComponent coordinates the upgrade of the specified service or all services.
+// UpgradeComponent coordinates the upgrade of the specified external service or all external services.
 func UpgradeComponent(target string, cfg *config.Config) ([]*UpgradeResult, error) {
 	switch strings.ToLower(target) {
 	case "singbox", "sb", "sing-box":
@@ -441,13 +355,6 @@ func UpgradeComponent(target string, cfg *config.Config) ([]*UpgradeResult, erro
 
 	case "caddy":
 		res, err := UpgradeCaddy(cfg)
-		if err != nil {
-			return nil, err
-		}
-		return []*UpgradeResult{res}, nil
-
-	case "subhub":
-		res, err := UpgradeSubhub(cfg)
 		if err != nil {
 			return nil, err
 		}
@@ -476,12 +383,6 @@ func UpgradeComponent(target string, cfg *config.Config) ([]*UpgradeResult, erro
 			results = append(results, res)
 		}
 
-		if res, err := UpgradeSubhub(cfg); err != nil {
-			errs = append(errs, fmt.Sprintf("SubHub: %v", err))
-		} else {
-			results = append(results, res)
-		}
-
 		if res, err := UpgradeWarp(cfg); err != nil {
 			errs = append(errs, fmt.Sprintf("WARP: %v", err))
 		} else {
@@ -494,8 +395,28 @@ func UpgradeComponent(target string, cfg *config.Config) ([]*UpgradeResult, erro
 		return results, nil
 
 	default:
-		return nil, fmt.Errorf("未知的服务组件: %s (支持: singbox, caddy, subhub, warp, all)", target)
+		return nil, fmt.Errorf("未知的服务组件: %s (支持: singbox, caddy, warp, all)", target)
 	}
+}
+
+func downloadToFile(url, destPath string) error {
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return fmt.Errorf("failed to download %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("download %s failed with status %d", url, resp.StatusCode)
+	}
+
+	outFile, err := os.Create(destPath)
+	if err != nil {
+		return err
+	}
+	defer outFile.Close()
+	_, err = io.Copy(outFile, resp.Body)
+	return err
 }
 
 func extractFileFromTarGz(tarGzPath, targetFileName, destPath string) error {

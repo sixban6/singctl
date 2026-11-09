@@ -93,10 +93,10 @@ func getDNSFromOpenWrtUbus() ([]string, error) {
 		return nil, err
 	}
 
-	return parseUbusInterfaceDNS(out), nil
+	return ParseUbusInterfaceDNS(out), nil
 }
 
-func parseUbusInterfaceDNS(raw []byte) []string {
+func ParseUbusInterfaceDNS(raw []byte) []string {
 	var dump ubusInterfaceDump
 	if err := json.Unmarshal(raw, &dump); err != nil {
 		return nil
@@ -223,7 +223,7 @@ func getDNSFromSystemdResolved() ([]string, error) {
 	}
 
 	// 2. 解析 /etc/systemd/resolved.conf 中的 INI 格式 DNS= 配置
-	if servers, err := parseSystemdResolvedConf("/etc/systemd/resolved.conf"); err == nil {
+	if servers, err := ParseSystemdResolvedConf("/etc/systemd/resolved.conf"); err == nil {
 		if filtered := filterLocalAddresses(servers); len(filtered) > 0 {
 			return filtered, nil
 		}
@@ -253,7 +253,7 @@ func getDNSFromSystemdResolved() ([]string, error) {
 	return nil, nil
 }
 
-func parseSystemdResolvedConf(path string) ([]string, error) {
+func ParseSystemdResolvedConf(path string) ([]string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err

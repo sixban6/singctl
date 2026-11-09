@@ -12,10 +12,10 @@ import (
 
 // clash 目标地址缓存(避免每个请求都读配置文件/枚举网卡)
 var (
-	clashCacheMu  sync.Mutex
-	clashCachedAt time.Time
-	clashCacheURL *url.URL
-	clashCacheSec string
+	ClashCacheMu  sync.Mutex
+	ClashCachedAt time.Time
+	ClashCacheURL *url.URL
+	ClashCacheSec string
 )
 
 const clashCacheTTL = 10 * time.Second
@@ -24,21 +24,21 @@ const clashCacheTTL = 10 * time.Second
 // 解析顺序见 singbox.ClashAPIEndpoints:生成配置中的 external_controller
 // 优先,127.0.0.1 与 LAN IP 兜底。
 func cachedClashTarget() (*url.URL, string) {
-	clashCacheMu.Lock()
-	defer clashCacheMu.Unlock()
+	ClashCacheMu.Lock()
+	defer ClashCacheMu.Unlock()
 
-	if clashCacheURL != nil && time.Since(clashCachedAt) < clashCacheTTL {
-		return clashCacheURL, clashCacheSec
+	if ClashCacheURL != nil && time.Since(ClashCachedAt) < clashCacheTTL {
+		return ClashCacheURL, ClashCacheSec
 	}
-	clashCacheURL, clashCacheSec = nil, ""
+	ClashCacheURL, ClashCacheSec = nil, ""
 	for _, ep := range singbox.ClashAPIEndpoints() {
 		if u, err := url.Parse(ep); err == nil && u.Host != "" {
-			clashCacheURL, clashCacheSec = u, singbox.ClashAPISecret()
+			ClashCacheURL, ClashCacheSec = u, singbox.ClashAPISecret()
 			break
 		}
 	}
-	clashCachedAt = time.Now()
-	return clashCacheURL, clashCacheSec
+	ClashCachedAt = time.Now()
+	return ClashCacheURL, ClashCacheSec
 }
 
 // setupClashProxy 注册 clash API/控制面板反向代理路由。
@@ -75,7 +75,7 @@ func (s *Server) setupClashProxy() {
 		},
 	}
 
-	s.mux.Handle("/clash/", http.StripPrefix("/clash", proxy))
+	s.Mux.Handle("/clash/", http.StripPrefix("/clash", proxy))
 
 	// clash API 根路径(面板 JS 可能直接以页面 origin 调用)
 	for _, base := range []string{
@@ -83,7 +83,7 @@ func (s *Server) setupClashProxy() {
 		"/memory", "/version", "/rules", "/dns", "/group", "/providers",
 		"/restart", "/upgrade", "/cache", "/gc", "/close",
 	} {
-		s.mux.Handle(base, proxy)
-		s.mux.Handle(base+"/", proxy)
+		s.Mux.Handle(base, proxy)
+		s.Mux.Handle(base+"/", proxy)
 	}
 }

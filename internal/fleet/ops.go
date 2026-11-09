@@ -393,7 +393,8 @@ func (m *Manager) syncNodeObj(ctx context.Context, node Node) NodeActionResult {
 	}
 
 	inferredDomain := extractFirstURIHost(uris)
-	inferredPort := extractFirstURIPort(uris)
+	inferredHy2Port := extractProtocolURIPort(uris, "hysteria2://", "hy2://")
+	inferredVlessPort := extractProtocolURIPort(uris, "vless://")
 
 	_, _ = m.Store.UpdateRuntimeState(node.ID, func(n *Node) {
 		n.Online = true
@@ -406,8 +407,11 @@ func (m *Manager) syncNodeObj(ctx context.Context, node Node) NodeActionResult {
 		if n.Domain == "" && inferredDomain != "" {
 			n.Domain = inferredDomain
 		}
-		if n.NodePort == 0 && inferredPort > 0 && inferredPort != 443 {
-			n.NodePort = inferredPort
+		if n.Hy2Port == 0 && inferredHy2Port > 0 && inferredHy2Port != 443 {
+			n.Hy2Port = inferredHy2Port
+		}
+		if n.VlessPort == 0 && inferredVlessPort > 0 && inferredVlessPort != 443 {
+			n.VlessPort = inferredVlessPort
 		}
 		n.CPULoad = loadStr
 		n.MemPercent = memPct
@@ -641,7 +645,7 @@ singctl update self >/dev/null 2>&1
 if systemctl list-unit-files singctl-sub.service >/dev/null 2>&1; then
   systemctl restart singctl-sub >/dev/null 2>&1 || true
 fi
-singctl sr web restart >/dev/null 2>&1 || true
+singctl sr ui restart >/dev/null 2>&1 || true
 `
 	_, rtt, err := runner(callCtx, node, script)
 	if err != nil {
@@ -676,7 +680,8 @@ type BootstrapPlan struct {
 	Hy2Up            int    `json:"hy2Up"`
 	Hy2Down          int    `json:"hy2Down"`
 	NodeTag          string `json:"nodeTag"`
-	NodePort         int    `json:"nodePort"`
+	Hy2Port          int    `json:"hy2Port"`
+	VlessPort        int    `json:"vlessPort"`
 	TargetSSHPort    int    `json:"targetSshPort"`
 }
 
@@ -757,9 +762,13 @@ func (m *Manager) PreviewBootstrapNode(ctx context.Context, in BootstrapInput) (
 	hy2Up := cmp.Or(masterCfg.Hy2.Up, 50)
 	hy2Down := cmp.Or(masterCfg.Hy2.Down, 300)
 	tag := cmp.Or(strings.TrimSpace(in.NodeTag), allocID)
-	nodePort := in.NodePort
-	if nodePort <= 0 || nodePort > 65535 {
-		nodePort = 443
+	hy2Port := in.Hy2Port
+	if hy2Port <= 0 || hy2Port > 65535 {
+		hy2Port = 443
+	}
+	vlessPort := in.VlessPort
+	if vlessPort <= 0 || vlessPort > 65535 {
+		vlessPort = 443
 	}
 	targetPort := in.TargetSSHPort
 	if targetPort <= 0 {
@@ -781,7 +790,8 @@ func (m *Manager) PreviewBootstrapNode(ctx context.Context, in BootstrapInput) (
 		Hy2Up:            hy2Up,
 		Hy2Down:          hy2Down,
 		NodeTag:          tag,
-		NodePort:         nodePort,
+		Hy2Port:          hy2Port,
+		VlessPort:        vlessPort,
 		TargetSSHPort:    targetPort,
 	}, nil
 }
@@ -869,7 +879,8 @@ func (m *Manager) BootstrapNode(ctx context.Context, in BootstrapInput) (NodeAct
 	}
 
 	upsertIn.Domain = finalDomain
-	upsertIn.NodePort = plan.NodePort
+	upsertIn.Hy2Port = plan.Hy2Port
+	upsertIn.VlessPort = plan.VlessPort
 	upsertIn.DNSAutoManaged = &dnsAutoManaged
 
 	node, err := m.Store.Upsert(upsertIn)
@@ -878,9 +889,12 @@ func (m *Manager) BootstrapNode(ctx context.Context, in BootstrapInput) (NodeAct
 	}
 
 	subDom := cmp.Or(strings.TrimSpace(in.SubstoreDomain), finalDomain)
-	nodePortYAML := ""
-	if plan.NodePort > 0 && plan.NodePort != 443 {
-		nodePortYAML = fmt.Sprintf("  node_port: %d\n", plan.NodePort)
+	portYAML := ""
+	if plan.Hy2Port > 0 && plan.Hy2Port != 443 {
+		portYAML += fmt.Sprintf("  hy2_port: %d\n", plan.Hy2Port)
+	}
+	if plan.VlessPort > 0 && plan.VlessPort != 443 {
+		portYAML += fmt.Sprintf("  vless_port: %d\n", plan.VlessPort)
 	}
 
 	yamlContent := fmt.Sprintf(`github:
@@ -896,13 +910,16 @@ server:
   sni: %q
   web_terminal:
     ssh_port: %d
-`, plan.MirrorURL, plan.Hy2Up, plan.Hy2Down, plan.NodeTag, finalDomain, nodePortYAML, subDom, plan.CFDNSKey, plan.SNI, node.Port)
+`, plan.MirrorURL, plan.Hy2Up, plan.Hy2Down, plan.NodeTag, finalDomain, portYAML, subDom, plan.CFDNSKey, plan.SNI, node.Port)
 
 	cfgB64 := base64.StdEncoding.EncodeToString([]byte(yamlContent))
 
 	installEnv := fmt.Sprintf("SSH_PORT=%d", node.Port)
-	if plan.NodePort > 0 && plan.NodePort != 443 {
-		installEnv = fmt.Sprintf("SSH_PORT=%d NODE_PORT=%d", node.Port, plan.NodePort)
+	if plan.Hy2Port > 0 && plan.Hy2Port != 443 {
+		installEnv += fmt.Sprintf(" HY2_PORT=%d", plan.Hy2Port)
+	}
+	if plan.VlessPort > 0 && plan.VlessPort != 443 {
+		installEnv += fmt.Sprintf(" VLESS_PORT=%d", plan.VlessPort)
 	}
 
 	bootstrapScript := fmt.Sprintf(`
@@ -1025,9 +1042,21 @@ func extractFirstURIHost(uris []string) string {
 	return ""
 }
 
-func extractFirstURIPort(uris []string) int {
+func extractProtocolURIPort(uris []string, schemePrefixes ...string) int {
 	for _, raw := range uris {
-		u, err := url.Parse(strings.TrimSpace(raw))
+		trimmed := strings.TrimSpace(raw)
+		lower := strings.ToLower(trimmed)
+		matched := len(schemePrefixes) == 0
+		for _, prefix := range schemePrefixes {
+			if strings.HasPrefix(lower, strings.ToLower(prefix)) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		u, err := url.Parse(trimmed)
 		if err != nil || u.Host == "" {
 			continue
 		}

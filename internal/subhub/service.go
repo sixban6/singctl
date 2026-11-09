@@ -12,14 +12,13 @@ import (
 	"time"
 
 	"singctl/internal/constant"
-	"singctl/internal/logger"
 	"singctl/internal/updater"
 )
 
 const ServiceName = "singctl-sub"
 
-// InstallService stops any legacy Docker sub-store container, installs the singctl-sub
-// systemd/OpenWrt service, enables and starts it, and waits briefly for HTTP readiness.
+// InstallService installs the singctl-sub systemd/OpenWrt service,
+// enables and starts it, and waits briefly for HTTP readiness.
 func InstallService(cfgPath string) error {
 	if runtime.GOOS != "linux" {
 		return fmt.Errorf("singctl-sub service installation is only supported on Linux (current: %s)", runtime.GOOS)
@@ -42,12 +41,6 @@ func InstallService(cfgPath string) error {
 		return fmt.Errorf("create %s: %w", constant.SubStoreDir, err)
 	}
 
-	// Migrate key from legacy Docker sub-store container before removing it if /etc/sub-store/key is missing.
-	MigrateKeyFromLegacyDocker()
-	if CleanupLegacyDockerContainer() {
-		logger.Info("Removed legacy Docker sub-store container; port 3001 handed over to native SubHub.")
-	}
-
 	st := NewStore(constant.SubStoreDir, constant.SubStoreFile)
 	if _, err := st.EnsureKey(); err != nil {
 		return fmt.Errorf("ensure subscription key: %w", err)
@@ -67,47 +60,6 @@ func InstallService(cfgPath string) error {
 	return nil
 }
 
-// MigrateKeyFromLegacyDocker extracts SUB_STORE_FRONTEND_BACKEND_PATH from a legacy
-// sub-store Docker container if /etc/sub-store/key does not yet exist.
-func MigrateKeyFromLegacyDocker() string {
-	keyFile := filepath.Join(constant.SubStoreDir, "key")
-	if data, err := os.ReadFile(keyFile); err == nil && strings.TrimSpace(string(data)) != "" {
-		return strings.TrimSpace(string(data))
-	}
-	if _, err := exec.LookPath("docker"); err != nil {
-		return ""
-	}
-	out, err := exec.Command("docker", "inspect", "--format", "{{range .Config.Env}}{{println .}}{{end}}", "sub-store").Output()
-	if err != nil {
-		return ""
-	}
-	for line := range strings.SplitSeq(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if after, ok := strings.CutPrefix(line, "SUB_STORE_FRONTEND_BACKEND_PATH="); ok {
-			key := strings.TrimPrefix(strings.TrimSpace(after), "/")
-			if key != "" {
-				_ = os.MkdirAll(constant.SubStoreDir, 0755)
-				_ = os.WriteFile(keyFile, []byte(key), 0600)
-				return key
-			}
-		}
-	}
-	return ""
-}
-
-// CleanupLegacyDockerContainer stops and removes the legacy Docker "sub-store" container if present.
-func CleanupLegacyDockerContainer() bool {
-	if _, err := exec.LookPath("docker"); err != nil {
-		return false
-	}
-	out, err := exec.Command("docker", "ps", "-a", "-q", "-f", "name=^sub-store$").Output()
-	if err != nil || strings.TrimSpace(string(out)) == "" {
-		return false
-	}
-	_ = exec.Command("docker", "rm", "-f", "sub-store").Run()
-	return true
-}
-
 func installSystemdService(exePath, cfgPath string) error {
 	unitPath := cmp.Or(constant.SubHubSystemdService, "/etc/systemd/system/singctl-sub.service")
 	content := fmt.Sprintf(`[Unit]
@@ -117,7 +69,7 @@ After=network.target
 [Service]
 Type=simple
 User=root
-ExecStart=%s -c %s sr sub serve --listen %s
+ExecStart=%s -c %s sr sub --listen %s
 Restart=always
 RestartSec=3
 NoNewPrivileges=true
@@ -151,7 +103,7 @@ USE_PROCD=1
 
 start_service() {
     procd_open_instance
-    procd_set_param command %s -c %s sr sub serve --listen %s
+    procd_set_param command %s -c %s sr sub --listen %s
     procd_set_param respawn
     procd_set_param stdout 1
     procd_set_param stderr 1
@@ -201,10 +153,8 @@ func RestartService() error {
 	return exec.Command("systemctl", "restart", ServiceName).Run()
 }
 
-// UninstallService stops and removes the singctl-sub service, legacy Docker container, and optionally /etc/sub-store.
+// UninstallService stops and removes the singctl-sub service and optionally /etc/sub-store.
 func UninstallService(removeData bool) error {
-	CleanupLegacyDockerContainer()
-
 	if runtime.GOOS == "linux" {
 		if isOpenWrt() {
 			script := cmp.Or(constant.SubHubInitdScript, "/etc/init.d/singctl-sub")

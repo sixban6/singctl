@@ -624,14 +624,14 @@ extendedKeyUsage = clientAuth
 	}
 
 	// 6. 将 ca.crt 与 client.p12, client.crt, client.key 复制到正式目录
-	if err := copyFile(caCrt, DefaultMtlsCACert, 0644); err != nil {
+	if err := CopyFile(caCrt, DefaultMtlsCACert, 0644); err != nil {
 		return fmt.Errorf("保存 ca.crt 失败: %w", err)
 	}
-	if err := copyFile(clientP12, DefaultClientP12, 0600); err != nil {
+	if err := CopyFile(clientP12, DefaultClientP12, 0600); err != nil {
 		return fmt.Errorf("保存 client.p12 失败: %w", err)
 	}
-	_ = copyFile(clientCrt, DefaultClientCrt, 0644)
-	_ = copyFile(clientKey, DefaultClientKey, 0600)
+	_ = CopyFile(clientCrt, DefaultClientCrt, 0644)
+	_ = CopyFile(clientKey, DefaultClientKey, 0600)
 
 	logger.Success("mTLS 证书生成成功：已就绪 ca.crt、client.p12 以及原生证书私钥 client.crt / client.key。")
 	return nil
@@ -679,7 +679,7 @@ func runCmd(name string, arg ...string) error {
 	return nil
 }
 
-func copyFile(src, dst string, perm os.FileMode) error {
+func CopyFile(src, dst string, perm os.FileMode) error {
 	in, err := os.Open(src)
 	if err != nil {
 		return err

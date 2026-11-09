@@ -93,13 +93,13 @@ func RunReturnRoute(ctx context.Context, count int) (*ReturnSummary, error) {
 	summary.Results = results
 
 	// 3. 统计适配的运营商
-	summary.BestForISP = evaluateBestISPs(results)
-	summary.Summary = buildReturnSummaryText(results, summary.BestForISP)
+	summary.BestForISP = EvaluateBestISPs(results)
+	summary.Summary = BuildReturnSummaryText(results, summary.BestForISP)
 
 	return summary, nil
 }
 
-func evaluateBestISPs(results []ReturnHopResult) []ISPType {
+func EvaluateBestISPs(results []ReturnHopResult) []ISPType {
 	var best []ISPType
 	var ctScore, cuScore, cmScore int
 
@@ -134,7 +134,7 @@ func evaluateBestISPs(results []ReturnHopResult) []ISPType {
 	return best
 }
 
-func buildReturnSummaryText(results []ReturnHopResult, best []ISPType) string {
+func BuildReturnSummaryText(results []ReturnHopResult, best []ISPType) string {
 	if len(best) == 3 {
 		return "三网回程均非常均衡优秀（全网优化线路）"
 	}

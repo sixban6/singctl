@@ -33,12 +33,12 @@ func NewCloudflareDNSClient() *CloudflareDNSClient {
 	}
 }
 
-type cfZone struct {
+type CFZone struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
 }
 
-type cfDNSRecord struct {
+type CFDNSRecord struct {
 	ID      string `json:"id"`
 	Type    string `json:"type"`
 	Name    string `json:"name"`
@@ -106,11 +106,11 @@ func (c *CloudflareDNSClient) doJSON(ctx context.Context, token, method, path st
 }
 
 // ListActiveZones returns active Cloudflare zones accessible by token.
-func (c *CloudflareDNSClient) ListActiveZones(ctx context.Context, token string) ([]cfZone, error) {
+func (c *CloudflareDNSClient) ListActiveZones(ctx context.Context, token string) ([]CFZone, error) {
 	if strings.TrimSpace(token) == "" {
 		return nil, errors.New("Cloudflare API Token 为空")
 	}
-	var env cfEnvelope[[]cfZone]
+	var env cfEnvelope[[]CFZone]
 	if err := c.doJSON(ctx, token, http.MethodGet, "/zones?status=active&per_page=50", nil, &env); err != nil {
 		return nil, err
 	}
@@ -125,7 +125,7 @@ func (c *CloudflareDNSClient) ListActiveZones(ctx context.Context, token string)
 
 // FindZone locates the best matching Cloudflare zone for domainHint.
 // If strictMatch is false and domainHint does not match any zone, falls back when exactly one zone exists.
-func (c *CloudflareDNSClient) FindZone(ctx context.Context, token, domainHint string, strictMatch bool) (*cfZone, error) {
+func (c *CloudflareDNSClient) FindZone(ctx context.Context, token, domainHint string, strictMatch bool) (*CFZone, error) {
 	zones, err := c.ListActiveZones(ctx, token)
 	if err != nil {
 		return nil, err
@@ -135,7 +135,7 @@ func (c *CloudflareDNSClient) FindZone(ctx context.Context, token, domainHint st
 	}
 
 	hint := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domainHint)), ".")
-	var best *cfZone
+	var best *CFZone
 	for i := range zones {
 		zn := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(zones[i].Name)), ".")
 		if zn == "" {
@@ -183,11 +183,11 @@ func resolveTargetRecordIP(host string) (ipStr string, recType string, err error
 	return ips[0].String(), "AAAA", nil
 }
 
-func (c *CloudflareDNSClient) listRecordsByName(ctx context.Context, token, zoneID, fqdn string) ([]cfDNSRecord, error) {
+func (c *CloudflareDNSClient) listRecordsByName(ctx context.Context, token, zoneID, fqdn string) ([]CFDNSRecord, error) {
 	q := url.Values{}
 	q.Set("name", strings.ToLower(strings.TrimSpace(fqdn)))
 	q.Set("per_page", "20")
-	var env cfEnvelope[[]cfDNSRecord]
+	var env cfEnvelope[[]CFDNSRecord]
 	if err := c.doJSON(ctx, token, http.MethodGet, "/zones/"+zoneID+"/dns_records?"+q.Encode(), nil, &env); err != nil {
 		return nil, err
 	}
@@ -209,7 +209,7 @@ func (c *CloudflareDNSClient) createOrUpdateRecord(ctx context.Context, token, z
 		"proxied": false, // 强制灰云仅 DNS，杜绝套小黄云导致 Reality / Hysteria2 握手失败
 		"comment": "Managed by SingCtl Fleet",
 	}
-	var env cfEnvelope[cfDNSRecord]
+	var env cfEnvelope[CFDNSRecord]
 	method := http.MethodPost
 	path := "/zones/" + zoneID + "/dns_records"
 	if existingID != "" {
@@ -254,7 +254,7 @@ func (c *CloudflareDNSClient) ProvisionNodeDNS(
 		if rErr != nil {
 			return "", false, rErr
 		}
-		var sameTypeRec *cfDNSRecord
+		var sameTypeRec *CFDNSRecord
 		for i := range records {
 			if strings.EqualFold(records[i].Type, "CNAME") {
 				return "", false, fmt.Errorf("域名 %s 已存在 CNAME 记录 (%s)，拒绝覆盖，请换用其他子域名", explicit, records[i].Content)

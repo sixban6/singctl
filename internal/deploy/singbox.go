@@ -77,9 +77,10 @@ func (sbs *SingBoxServer) initTag() {
 
 func (sbs *SingBoxServer) updateShareLinks() {
 	nodeDomain := sbs.cfg.Server.GetNodeDomain()
-	nodePort := sbs.AnyTLSPort()
-	sbs.ShareLinkHy2 = fmt.Sprintf("hysteria2://%s@%s:%d/?sni=%s&alpn=h3&insecure=0#%s", sbs.hyUUID, nodeDomain, nodePort, nodeDomain, sbs.hy2Tag)
-	sbs.ShareLinkVless = fmt.Sprintf("vless://%s@%s:%d?type=tcp&encryption=none&security=reality&pbk=%s&fp=chrome&sni=%s&sid=%s&flow=xtls-rprx-vision#%s", sbs.hyUUID, nodeDomain, nodePort, sbs.publicKey, sbs.cfg.Server.Sni, sbs.shortID, sbs.vrTag)
+	hy2Port := sbs.Hy2Port()
+	vlessPort := sbs.VlessPort()
+	sbs.ShareLinkHy2 = fmt.Sprintf("hysteria2://%s@%s:%d/?sni=%s&alpn=h3&insecure=0#%s", sbs.hyUUID, nodeDomain, hy2Port, nodeDomain, sbs.hy2Tag)
+	sbs.ShareLinkVless = fmt.Sprintf("vless://%s@%s:%d?type=tcp&encryption=none&security=reality&pbk=%s&fp=chrome&sni=%s&sid=%s&flow=xtls-rprx-vision#%s", sbs.hyUUID, nodeDomain, vlessPort, sbs.publicKey, sbs.cfg.Server.Sni, sbs.shortID, sbs.vrTag)
 }
 
 // HyUUID returns the Hysteria2 password / VLESS UUID.
@@ -107,10 +108,18 @@ func (sbs *SingBoxServer) VrTag() string {
 	return sbs.vrTag
 }
 
-// AnyTLSPort returns the external node port (defaults to 443; configurable via server.node_port for NAT VPS).
-func (sbs *SingBoxServer) AnyTLSPort() int {
+// Hy2Port returns the external Hysteria 2 UDP port (defaults to 443; configurable via server.hy2_port).
+func (sbs *SingBoxServer) Hy2Port() int {
 	if sbs != nil && sbs.cfg != nil {
-		return sbs.cfg.Server.GetNodePort()
+		return sbs.cfg.Server.GetHy2Port()
+	}
+	return 443
+}
+
+// VlessPort returns the external VLESS Reality TCP port (defaults to 443; configurable via server.vless_port).
+func (sbs *SingBoxServer) VlessPort() int {
+	if sbs != nil && sbs.cfg != nil {
+		return sbs.cfg.Server.GetVlessPort()
 	}
 	return 443
 }
@@ -557,13 +566,12 @@ func (sbs *SingBoxServer) ShowLoginInfo() {
 	fmt.Println("│               🚀 服务端节点分享与客户端导入                │")
 	fmt.Println("└────────────────────────────────────────────────────────────┘")
 
-	nodePort := sbs.AnyTLSPort()
 	// 1. Hysteria 2
-	fmt.Printf("\n【1】Hysteria 2 节点 (端口: %d / QUIC UDP)\n", nodePort)
+	fmt.Printf("\n【1】Hysteria 2 节点 (端口: %d / QUIC UDP)\n", sbs.Hy2Port())
 	fmt.Printf("• 分享链接: %s\n", sbs.ShareLinkHy2)
 
 	// 2. VLESS Reality
-	fmt.Printf("\n【2】VLESS Reality 节点 (端口: %d / TCP Reality)\n", nodePort)
+	fmt.Printf("\n【2】VLESS Reality 节点 (端口: %d / TCP Reality)\n", sbs.VlessPort())
 	fmt.Printf("• 分享链接: %s\n", sbs.ShareLinkVless)
 	fmt.Println("────────────────────────────────────────────────────────────")
 	fmt.Println()
@@ -572,7 +580,7 @@ func (sbs *SingBoxServer) ShowLoginInfo() {
 // PreviewServerConfig renders the sing-box server config template and returns it as a string.
 // It is exported for use in tests.
 func (sbs *SingBoxServer) PreviewServerConfig() (string, error) {
-	tmplData, err := templateFiles.ReadFile("templates/server_config.json")
+	tmplData, err := TemplateFiles.ReadFile("templates/server_config.json")
 	if err != nil {
 		return "", fmt.Errorf("could not read embedded sing-box template: %w", err)
 	}
@@ -592,7 +600,6 @@ func (sbs *SingBoxServer) PreviewServerConfig() (string, error) {
 		Sni                    string
 		RealityHandshakeServer string
 		RealityHandshakePort   int
-		AnyTLSPort             int
 		TelemetrySecret        string
 	}
 	cfgDir := constant.SingBoxConfigDir
@@ -620,7 +627,6 @@ func (sbs *SingBoxServer) PreviewServerConfig() (string, error) {
 		Sni:                    sni,
 		RealityHandshakeServer: handshakeServer,
 		RealityHandshakePort:   handshakePort,
-		AnyTLSPort:             sbs.AnyTLSPort(),
 		TelemetrySecret:        telemetrySecret,
 	}
 

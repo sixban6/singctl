@@ -138,7 +138,7 @@ self.addEventListener('activate', (e) => {
 
     # layer4 是顶层模块，必须将其放在全局选项块中才能被正确识别
     layer4 {
-        :443{{if ne .AnyTLSPort 443}} :{{.AnyTLSPort}}{{end}} {
+        :443{{if ne .VlessPort 443}} :{{.VlessPort}}{{end}} {
             # VLESS Reality 流量 -> Sing-box
             @vless_reality {
                 tls {
@@ -168,8 +168,8 @@ self.addEventListener('activate', (e) => {
             }
         }
 
-        # UDP 443{{if ne .AnyTLSPort 443}} & {{.AnyTLSPort}}{{end}}: Hysteria 2 流量 -> Sing-box (标准 h3)
-        udp/:443{{if ne .AnyTLSPort 443}} udp/:{{.AnyTLSPort}}{{end}} {
+        # UDP 443{{if ne .Hy2Port 443}} & {{.Hy2Port}}{{end}}: Hysteria 2 流量 -> Sing-box (标准 h3)
+        udp/:443{{if ne .Hy2Port 443}} udp/:{{.Hy2Port}}{{end}} {
             route {
                 proxy udp/127.0.0.1:52021
             }

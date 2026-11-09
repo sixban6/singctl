@@ -33,7 +33,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	status := map[string]any{
 		"singctlVersion": s.opts.Version,
 		"authEnabled":    s.opts.Password != "",
-		"sessionToken":   s.sessionToken(),
+		"sessionToken":   s.SessionToken(),
 		"host":           hostInfo(),
 		"singbox":        singboxStatus(),
 		"daemon":         daemonStatus(s.watchdogMaxRestarts()),
@@ -244,14 +244,14 @@ func configSummary(path string) map[string]any {
 	for _, sub := range cfg.Subs {
 		subs = append(subs, map[string]any{
 			"name":    sub.Name,
-			"urlHint": maskURL(sub.URL),
+			"urlHint": MaskURL(sub.URL),
 		})
 	}
 	summary["subs"] = subs
 	return summary
 }
 
-func maskURL(u string) string {
+func MaskURL(u string) string {
 	if u == "" {
 		return ""
 	}
@@ -308,7 +308,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 // ───────────────────────── 配置(结构化) ─────────────────────────
 
-type subDTO struct {
+type SubDTO struct {
 	Name          string              `json:"name"`
 	URL           string              `json:"url"`
 	SkipTlsVerify bool                `json:"skip_tls_verify"`
@@ -318,8 +318,8 @@ type subDTO struct {
 	Rename        []config.RenameRule `json:"rename,omitempty"`
 }
 
-type configDTO struct {
-	Subs []subDTO `json:"subs"`
+type ConfigDTO struct {
+	Subs []SubDTO `json:"subs"`
 
 	GitHub struct {
 		MirrorURL string `json:"mirror_url"`
@@ -352,9 +352,9 @@ func (s *Server) handleConfigGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var dto configDTO
+	var dto ConfigDTO
 	for _, sub := range cfg.Subs {
-		item := subDTO{
+		item := SubDTO{
 			Name:          sub.Name,
 			URL:           sub.URL,
 			SkipTlsVerify: sub.SkipTlsVerify,
@@ -388,7 +388,7 @@ func (s *Server) handleConfigGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleConfigPut(w http.ResponseWriter, r *http.Request) {
-	var dto configDTO
+	var dto ConfigDTO
 	if err := json.NewDecoder(r.Body).Decode(&dto); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "请求格式错误: "+err.Error())
 		return
@@ -399,7 +399,7 @@ func (s *Server) handleConfigPut(w http.ResponseWriter, r *http.Request) {
 	if err != nil || cfg == nil {
 		cfg = &config.Config{}
 	}
-	dto.applyTo(cfg)
+	dto.ApplyTo(cfg)
 
 	// 有订阅时做完整校验;允许暂存空订阅(首次使用)
 	if len(cfg.Subs) > 0 {
@@ -420,13 +420,13 @@ func (s *Server) handleConfigPut(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-func (dto configDTO) toConfig() *config.Config {
+func (dto ConfigDTO) toConfig() *config.Config {
 	cfg := &config.Config{}
-	dto.applyTo(cfg)
+	dto.ApplyTo(cfg)
 	return cfg
 }
 
-func (dto configDTO) applyTo(cfg *config.Config) {
+func (dto ConfigDTO) ApplyTo(cfg *config.Config) {
 	prevByName := make(map[string]config.Subscription, len(cfg.Subs))
 	prevByURL := make(map[string]config.Subscription, len(cfg.Subs))
 	for _, old := range cfg.Subs {
@@ -522,7 +522,7 @@ func (s *Server) handleConfigRawPut(w http.ResponseWriter, r *http.Request) {
 // ───────────────────── iOS (sing-box App) 配置下载 ─────────────────────
 
 // iosGenerate 生成 iOS 目标配置(可注入以便测试; 避免单测真实拉取订阅)
-var iosGenerate = func(cfg *config.Config) (string, error) {
+var IOSGenerate = func(cfg *config.Config) (string, error) {
 	return singbox.NewConfigGenerator(cfg).GenerateForPlatform(singbox.PlatformIOS)
 }
 
@@ -554,7 +554,7 @@ func (s *Server) handleIOSConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "订阅未配置: "+err.Error())
 		return
 	}
-	configJSON, err := iosGenerate(cfg)
+	configJSON, err := IOSGenerate(cfg)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "生成 iOS 配置失败: "+err.Error())
 		return
@@ -649,14 +649,14 @@ func sbconfigBackups(path string) []string {
 }
 
 // lookPathFunc 可注入的命令查找函数(测试用)
-var lookPathFunc = exec.LookPath
+var LookPathFunc = exec.LookPath
 
 // singboxBinaryPath 返回 sing-box 可执行文件路径(未安装则返回空)
 func singboxBinaryPath() string {
 	if fileExists(constant.SingBoxInstallDir) {
 		return constant.SingBoxInstallDir
 	}
-	if p, err := lookPathFunc("sing-box"); err == nil {
+	if p, err := LookPathFunc("sing-box"); err == nil {
 		return p
 	}
 	return ""

@@ -58,26 +58,26 @@ flowchart TB
 
 挑选你手头线路最稳、续费周期最长的一台 VPS（例如 `los`）按[《单节点指南》](./guide-single-node.md)完成常规部署。它既是你的主力代理节点之一，也同时兼任舰队司令部与统一订阅中心（`SubHub`）。
 
-### 第二步：新买一台空白裸机 VPS？零配置一条命令开荒到底（`fl bootstrap`）
+### 第二步：新买一台空白裸机 VPS？零配置一条命令开荒到底（`fl new`）
 
 假设你刚买了一台全新的新加坡或日本 Debian 12 裸机（IP `203.0.113.99`，初始默认是 **SSH 22 端口 + root 密码登录**）。你**不需要登录新机，甚至不需要提前去 Cloudflare 手动添加 DNS 记录**——直接在 **Master 主控**上任选以下三种极简方式之一：
 
 ```bash
 # 方式 1（最推荐）：零参数交互向导 —— 密码免回显不进 .bash_history，自动展示推导预览卡片
-singctl fl bootstrap
+singctl fl new
 
 # 方式 2：极简一行命令 —— 只填新机 IP 与初始密码，其余 100% 自动继承主控并创建灰云 DNS
-singctl fl bootstrap --host 203.0.113.99 --password '新机初始Root密码'
+singctl fl new --host 203.0.113.99 --password '新机初始Root密码'
 
 # 方式 3（高级自定义，完全兼容）：手动指定唯一代号、中文名或独立域名
-singctl fl bootstrap jp1 \
+singctl fl new jp1 \
   --name "日本东京主力" \
   --host 203.0.113.99 \
   --password '新机初始Root密码' \
   --domain jp1.example.com
 
-# 方式 4（共享 IP 的 NAT 小鸡开荒）：指定初始映射 SSH 端口 (--port) 与可用 TCP+UDP 节点端口 (--node-port)
-singctl fl bootstrap --host 203.0.113.99 --port 15500 --node-port 11501 --password '新机初始Root密码'
+# 方式 4（共享 IP 的 NAT 小鸡开荒）：指定初始映射 SSH 端口 (--port) 与独立的 HY2 (UDP) / VLESS (TCP) 节点端口 (--hy2-port / --vless-port)
+singctl fl new --host 203.0.113.99 --port 15500 --hy2-port 11501 --vless-port 11502 --password '新机初始Root密码'
 ```
 
 *(你也可以直接在手机或电脑打开主控自适应 Web 后台 ->「全球节点舰队 -> 新机零配置开荒」，默认同样只需填写 **IP + 初始密码** 两项即可一键完成。)*
@@ -93,7 +93,7 @@ singctl fl bootstrap --host 203.0.113.99 --port 15500 --node-port 11501 --passwo
 | `--domain` | **可选（自动创建 `.cdn` 灰云 DNS）** | **省略时**：自动复用主控 `cf_dns_key` 查询 Cloudflare 根域名，分配空闲子域名 `<id>.cdn.<根域名>`（如 `sg1.cdn.example.com`）并创建灰云（`proxied: false`）A/AAAA 解析，**绝不覆盖指向其他 IP 的既有记录**；后续执行 `singctl fl rm <id>` 下线时还会自动清理该条 DNS（加 `--keep-dns` 可保留）。 |
 | `--cf-token` | **可选（自动继承主控）** | 省略时自动复用主控 `/etc/singctl/singctl.yaml` 中的 `server.cf_dns_key`。 |
 | `--sni` | 可选（自动继承主控） | 省略时自动复用主控的 Reality SNI 伪装域名与 HY2 带宽配置。 |
-| `--port` / `--node-port` | 可选（适配 NAT 小鸡） | 初始 SSH 端口默认 `22`（NAT 小鸡可传 `--port 15500`，若 `2222` 未映射会自动原地免密加固并保留机内 DNAT 端口）；节点业务端口默认 `443`（NAT 小鸡可传 `--node-port 11501` 使用分配的 TCP+UDP 端口）。 |
+| `--port` / `--hy2-port` / `--vless-port` | 可选（适配 NAT 小鸡） | 初始 SSH 端口默认 `22`（NAT 小鸡可传 `--port 15500`，若 `2222` 未映射会自动原地免密加固并保留机内 DNAT 端口）；HY2 (UDP) 与 VLESS (TCP) 节点端口默认均为 `443`，可分开指定（如 `--hy2-port 11501 --vless-port 11502`）。 |
 
 #### 这一条命令在后台自动帮你干了哪 4 件大事？（约 40～60 秒）
 

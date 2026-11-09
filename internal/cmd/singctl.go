@@ -10,6 +10,8 @@ import (
 	"singctl/internal/daemon"
 	"singctl/internal/doctor"
 	"singctl/internal/logger"
+	"singctl/internal/serverweb"
+	"singctl/internal/subhub"
 	"singctl/internal/updater"
 	"singctl/internal/util/file"
 
@@ -59,9 +61,15 @@ func NewUpdateCmd(configPath string, version string) *cobra.Command {
 
 			switch args[0] {
 			case "s", "self":
-				updater := updater.New(cfg.GitHub.MirrorURL, "https://github.com/sixban6/singctl")
-				if err := updater.UpdateSelf(resolvedPath, version); err != nil {
+				up := updater.New(cfg.GitHub.MirrorURL, "https://github.com/sixban6/singctl")
+				if err := up.UpdateSelf(resolvedPath, version); err != nil {
 					return err
+				}
+				if subhub.IsRunning() {
+					_ = subhub.RestartService()
+				}
+				if serverweb.IsRunning(resolvedPath) {
+					_ = serverweb.RestartService()
 				}
 				return nil
 			default:

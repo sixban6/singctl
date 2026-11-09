@@ -46,16 +46,14 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	sbt := deploy.NewSubstore(cfg, "")
 	if adminURL, err := sbt.GetAdminURL(); err == nil && adminURL != "" {
 		substoreAdminURL = adminURL
-	} else if vercelURL, err := sbt.GetVercelAdminURL(); err == nil && vercelURL != "" {
-		substoreAdminURL = vercelURL
 	}
 
 	status := map[string]any{
 		"version":     s.opts.Version,
-		"authEnabled": s.getPassword() != "",
+		"authEnabled": s.GetPassword() != "",
 		"system":      getSystemMetrics(),
 		"admin": map[string]any{
-			"username": s.getUsername(),
+			"username": s.GetUsername(),
 			"path":     adminPath,
 			"httpsUrl": httpsURL,
 			"port":     cfg.Server.GetWebAdminPort(),
@@ -117,11 +115,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		status["auditLogs"] = enriched
 	}
-	if s.pendingAck() && !config.IsHashedPassword(s.getPassword()) {
+	if s.pendingAck() && !config.IsHashedPassword(s.GetPassword()) {
 		status["initialCredentials"] = map[string]any{
 			"pending":  true,
-			"username": s.getUsername(),
-			"password": s.getPassword(),
+			"username": s.GetUsername(),
+			"password": s.GetPassword(),
 		}
 	}
 	writeJSON(w, http.StatusOK, status)
@@ -143,25 +141,22 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 
 	sbt := deploy.NewSubstore(cfg, "")
 	adminURL, _ := sbt.GetAdminURL()
-	vercelURL, _ := sbt.GetVercelAdminURL()
 
-	nodePort := sbs.AnyTLSPort()
 	res := map[string]any{
 		"hy2": map[string]any{
 			"link":     sbs.ShareLinkHy2,
-			"port":     nodePort,
+			"port":     sbs.Hy2Port(),
 			"protocol": "hysteria2",
 			"domain":   cfg.Server.GetNodeDomain(),
 		},
 		"vless": map[string]any{
 			"link":     sbs.ShareLinkVless,
-			"port":     nodePort,
+			"port":     sbs.VlessPort(),
 			"protocol": "vless",
 			"sni":      cfg.Server.Sni,
 		},
 		"substore": map[string]any{
-			"adminUrl":  adminURL,
-			"vercelUrl": vercelURL,
+			"adminUrl": adminURL,
 		},
 	}
 	writeJSON(w, http.StatusOK, res)

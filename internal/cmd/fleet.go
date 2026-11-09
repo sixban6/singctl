@@ -244,15 +244,16 @@ func NewFleetCmd(configPath string) *cobra.Command {
 	resetCmd := makeBatchCmd("reset", nil, "全网一键轮换所有子节点代理密码/Reality密钥并自动同步至总订阅", "reset", false)
 	updateCmd := makeBatchCmd("update", []string{"up", "upgrade"}, "全网并发升级所有子节点的 SingCtl 至官方最新版", "update", false)
 
-	// 5. bootstrap
+	// 5. new (with init / bs / bootstrap aliases)
 	var (
 		bsIn        fleet.BootstrapInput
 		bsHardenSSH bool
 		bsYes       bool
 	)
 	bootstrapCmd := &cobra.Command{
-		Use:   "bootstrap [id]",
-		Short: "新购裸机智能零配置开荒：复用主控凭据 + 自动创建 .cdn 灰云 DNS + SSH(22→2222免密) + 四核部署纳管",
+		Use:     "new [id]",
+		Aliases: []string{"init", "bs", "bootstrap"},
+		Short:   "新购裸机智能零配置开荒：复用主控凭据 + 自动创建 .cdn 灰云 DNS + SSH(22→2222免密) + 四核部署纳管",
 		Long: `在主控节点上远程开荒一台全新空白 VPS，默认自动复用本机 /etc/singctl/singctl.yaml 配置：
   • 自动探测新机 IP 地理位置，智能分配不冲突代号与中文名称（如 sg1 / 新加坡、jp2 / 日本·东京 #2）
   • 自动复用主控 cf_dns_key 查询根域名，创建 <id>.cdn.<根域名> 灰云（仅 DNS）解析记录（下线 rm 时自动清理）
@@ -261,13 +262,13 @@ func NewFleetCmd(configPath string) *cobra.Command {
 
 极简用法示例:
   1) 零参数交互向导（推荐，密码不回显、不进命令历史）:
-     singctl fl bootstrap
+     singctl fl new
 
   2) 一行非交互命令（仅需新机 IP 与初始密码）:
-     singctl fl bootstrap --host 203.0.113.10 --password '<新机初始密码>'
+     singctl fl new --host 203.0.113.10 --password '<新机初始密码>'
 
   3) 显式自定义代号与域名（完全兼容手动指定）:
-     singctl fl bootstrap jp1 --name "日本东京" --host 203.0.113.10 --password '<密码>' --domain jp1.cdn.example.com`,
+     singctl fl new jp1 --name "日本东京" --host 203.0.113.10 --password '<密码>' --domain jp1.cdn.example.com`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			if len(args) > 0 {
@@ -282,7 +283,7 @@ func NewFleetCmd(configPath string) *cobra.Command {
 			// 零参数交互向导模式：当未传 --host 且未传 --alias 时自动唤醒
 			if strings.TrimSpace(bsIn.Host) == "" && strings.TrimSpace(bsIn.SSHAlias) == "" {
 				if !isInteractiveTerminal() {
-					return errors.New("请通过 --host <IP> 指定新服务器公网 IP，或在交互式终端直接运行 'singctl fl bootstrap'")
+					return errors.New("请通过 --host <IP> 指定新服务器公网 IP，或在交互式终端直接运行 'singctl fl new'")
 				}
 				fmt.Println("\n🚀 SingCtl 舰队智能零配置开荒向导（自动复用主控配置与 Cloudflare DNS）")
 				fmt.Println("──────────────────────────────────────────────────────────────────────")
@@ -320,7 +321,7 @@ func NewFleetCmd(configPath string) *cobra.Command {
 				}
 				fmt.Println("──────────────────────────────────────────────────────────────────────")
 				fmt.Printf("  • 节点代号与名称 : %s (%s)\n", plan.ID, plan.Name)
-				fmt.Printf("  • 目标主机与端口 : %s (SSH %d → %d 免密禁密码 | 节点端口 %d)\n", plan.Host, cmp.Or(bsIn.Port, 22), plan.TargetSSHPort, plan.NodePort)
+				fmt.Printf("  • 目标主机与端口 : %s (SSH %d → %d 免密禁密码 | HY2端口 %d | VLESS端口 %d)\n", plan.Host, cmp.Or(bsIn.Port, 22), plan.TargetSSHPort, plan.Hy2Port, plan.VlessPort)
 				fmt.Printf("  • 绑定节点域名   : %s\n", cmp.Or(dnsDesc, "待指定"))
 				fmt.Printf("  • 继承主控参数   : %s | SNI=%s | HY2=%d/%d Mbps\n", cfDesc, plan.SNI, plan.Hy2Up, plan.Hy2Down)
 				fmt.Println("──────────────────────────────────────────────────────────────────────")
@@ -356,7 +357,8 @@ func NewFleetCmd(configPath string) *cobra.Command {
 	bootstrapCmd.Flags().IntVar(&bsIn.TargetSSHPort, "target-port", fleet.DefaultTargetSSHPort, "SSH 安全加固目标端口 (默认收敛至 2222)")
 	bootstrapCmd.Flags().StringVar(&bsIn.ExtraAuthorizedKeys, "extra-pubkey", "", "(可选) 额外写入新机的管理员 SSH 公钥字符串")
 	bootstrapCmd.Flags().StringVar(&bsIn.NodeDomain, "domain", "", "(可选) 绑定域名，留空自动从主控根域名分配 <id>.cdn.<根域名> 并创建灰云解析")
-	bootstrapCmd.Flags().IntVar(&bsIn.NodePort, "node-port", 443, "(可选) 节点业务监听与订阅端口 (默认 443；共享 IP 的 NAT 小鸡可指定可用 TCP+UDP 端口如 11501)")
+	bootstrapCmd.Flags().IntVar(&bsIn.Hy2Port, "hy2-port", 443, "(可选) Hysteria 2 (UDP QUIC) 对外监听与订阅端口，默认 443")
+	bootstrapCmd.Flags().IntVar(&bsIn.VlessPort, "vless-port", 443, "(可选) VLESS Reality (TCP) 与 HTTPS 网关对外监听与订阅端口，默认 443")
 	bootstrapCmd.Flags().StringVar(&bsIn.SubstoreDomain, "sub-domain", "", "(可选) 独立订阅域名")
 	bootstrapCmd.Flags().StringVar(&bsIn.CFDNSKey, "cf-token", "", "(可选) Cloudflare DNS Token，留空自动复用主控配置")
 	bootstrapCmd.Flags().StringVar(&bsIn.NodeTag, "tag", "", "(可选) 节点代号，留空与自动推导的 <id> 一致")

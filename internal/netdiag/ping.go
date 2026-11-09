@@ -129,11 +129,11 @@ func RunPing(ctx context.Context, opts PingOptions) (*PingResult, error) {
 		return nil, tcpErr
 	}
 
-	return mergeMultiPingResults(opts, tcpRes, udpRes, icmpRes), nil
+	return MergeMultiPingResults(opts, tcpRes, udpRes, icmpRes), nil
 }
 
 // mergeMultiPingResults 聚合 TCP、UDP (QUIC 1200B) 与 ICMP 三维探测结果，取真实有效最大丢包率作为综合评估指标
-func mergeMultiPingResults(opts PingOptions, tcpRes, udpRes, icmpRes *PingResult) *PingResult {
+func MergeMultiPingResults(opts PingOptions, tcpRes, udpRes, icmpRes *PingResult) *PingResult {
 	combined := &PingResult{
 		Target:   opts.Host,
 		Port:     opts.Port,
@@ -285,7 +285,7 @@ func RunTCPPing(ctx context.Context, opts PingOptions) (*PingResult, error) {
 		}
 	}
 
-	computeRTTStats(result, rtts, true)
+	ComputeRTTStats(result, rtts, true)
 	result.QualityLevel = EvaluateQuality(result.LossRate, result.Jitter)
 	return result, nil
 }
@@ -343,7 +343,7 @@ func RunUDPPing(ctx context.Context, opts PingOptions) (*PingResult, error) {
 		result.PortClosed = true
 	}
 
-	computeRTTStats(result, rtts, false)
+	ComputeRTTStats(result, rtts, false)
 	result.QualityLevel = EvaluateQuality(result.LossRate, result.Jitter)
 	return result, nil
 }
@@ -366,8 +366,8 @@ func sendSingleQUICProbe(ctx context.Context, addr string, timeout time.Duration
 	packet[1] = 0x1a
 	packet[2] = 0x2a
 	packet[3] = 0x3a
-	packet[4] = 0x4a // Reserved version for Version Negotiation
-	packet[5] = 0x08 // DCID len = 8 (bytes 6..13 random)
+	packet[4] = 0x4a  // Reserved version for Version Negotiation
+	packet[5] = 0x08  // DCID len = 8 (bytes 6..13 random)
 	packet[14] = 0x08 // SCID len = 8 (bytes 15..22 random)
 
 	start := time.Now()
@@ -465,13 +465,13 @@ func RunICMPPing(ctx context.Context, opts PingOptions) (*PingResult, error) {
 		}
 	}
 
-	computeRTTStats(result, rtts, false)
+	ComputeRTTStats(result, rtts, false)
 	result.QualityLevel = EvaluateQuality(result.LossRate, result.Jitter)
 	return result, nil
 }
 
 // computeRTTStats 统计 RTT 指标；若 detectSYNRetrans 为 true，则自动识别因丢包触发内核 TCP SYN 重传的异常高延迟轮次
-func computeRTTStats(result *PingResult, rtts []time.Duration, detectSYNRetrans bool) {
+func ComputeRTTStats(result *PingResult, rtts []time.Duration, detectSYNRetrans bool) {
 	result.RTTs = rtts
 	if len(rtts) == 0 {
 		result.Received = 0
@@ -563,7 +563,7 @@ func EvaluateQuality(lossRate float64, jitter time.Duration) RouteQuality {
 	return QualitySevere
 }
 
-func parseSystemPingOutput(output string, res *PingResult) {
+func ParseSystemPingOutput(output string, res *PingResult) {
 	lines := strings.Split(output, "\n")
 	var rtts []time.Duration
 	for _, line := range lines {

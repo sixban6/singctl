@@ -26,9 +26,13 @@ func DeployCommonWithConfig(cfg *config.Config) error {
 				env = append(env, "SKIP_SSH_PORT_CHANGE=true")
 			}
 		}
-		nodePort := cfg.Server.GetNodePort()
-		if nodePort > 0 && nodePort != 443 {
-			env = append(env, fmt.Sprintf("NODE_PORT=%d", nodePort))
+		hy2Port := cfg.Server.GetHy2Port()
+		if hy2Port > 0 && hy2Port != 443 {
+			env = append(env, fmt.Sprintf("HY2_PORT=%d", hy2Port))
+		}
+		vlessPort := cfg.Server.GetVlessPort()
+		if vlessPort > 0 && vlessPort != 443 {
+			env = append(env, fmt.Sprintf("VLESS_PORT=%d", vlessPort))
 		}
 	}
 	if err := runEmbeddedScriptWithEnv("deploy_common.sh", env); err != nil {

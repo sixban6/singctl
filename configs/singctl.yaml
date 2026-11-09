@@ -35,7 +35,8 @@ tailscale:                                      # (可选) Tailscale 部署配�
 server: # (可选) 服务器部署配置.当需要部署singbox服务端的时候配置
   node_tag: "" # (可选) 节点地区/代号 (例如: los, sg, hk)，留空自动根据公网 IP 智能识别
   node_domain: "node.yourdomain.com" # 你的域名（用于 SubHub 订阅与 Hysteria 2）
-  # node_port: 443 # (可选) 节点对外监听与订阅端口，默认 443；共享 IP 的 NAT 小鸡可改为可用 TCP+UDP 端口 (如 11501)
+  # hy2_port: 443 # (可选) Hysteria 2 (UDP) 对外监听与订阅端口，默认 443；NAT 小鸡可指定独立 UDP 端口 (如 11501)
+  # vless_port: 443 # (可选) VLESS Reality (TCP) 与 HTTPS 网关对外监听与订阅端口，默认 443；NAT 小鸡可指定独立 TCP 端口 (如 11502)
   substore_domain: "" # (可选) 订阅聚合专属域名，留空默认使用 node_domain
   server_ip: "" # (可选) 公网 IP 地址（未填自动探测用于申请 Let's Encrypt 原生 IP 证书）
   cf_dns_key: "your_cloudflare_api_token" # 你的 Cloudflare API Token

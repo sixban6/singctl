@@ -106,7 +106,7 @@ func testQUICv1HandshakeAndSplitBrain(ctx context.Context, ip string, port int, 
 		sni = "localhost"
 	}
 
-	quicCerts, quicALPN, quicErr := probeQUICv1Certificates(ctx, ip, port, sni, timeout)
+	quicCerts, quicALPN, quicErr := ProbeQUICv1Certificates(ctx, ip, port, sni, timeout)
 	if quicErr != nil {
 		return false, 10, fmt.Sprintf("UDP %d 响应了 QUIC 版本协商，但真实 QUIC v1 (h3, SNI=%s) 加密握手失败: %v！极可能是 Hysteria2 证书缺失或失效！",
 			port, sni, quicErr), "检查 /etc/sing-box/config.json 中 HYSTERIA2 的 certificate_path 是否指向有效的 Let's Encrypt/ZeroSSL 证书并重启 sing-box。"
@@ -121,7 +121,7 @@ func testQUICv1HandshakeAndSplitBrain(ctx context.Context, ip string, port int, 
 	udpIssuer := certIssuerDisplay(udpLeaf)
 
 	// 1. 若用户提供了域名，或者即便未提供域名也检查是否暴露了 Caddy Local Authority 自签/过期证书
-	if isSelfSignedOrInternalCA(udpLeaf) {
+	if IsSelfSignedOrInternalCA(udpLeaf) {
 		return false, 10, fmt.Sprintf("UDP %d (QUIC/H3) 暴露了内部自签证书 (CN: %s, Issuer: %s)！客户端在 insecure=0 下将无法连接且极易被主动探测识别！",
 			port, udpLeaf.Subject.CommonName, udpIssuer), "严禁在 Hysteria2 中使用 Caddy local 自签证书，请将其修正为 ACME 公共 CA 证书路径。"
 	}
@@ -142,7 +142,7 @@ func testQUICv1HandshakeAndSplitBrain(ctx context.Context, ip string, port int, 
 		tcpSum := sha256.Sum256(tcpLeaf.Raw)
 		if udpSum != tcpSum {
 			return false, 10, fmt.Sprintf("检测到 TCP %d 与 UDP %d 双栈证书脑裂不一致！(TCP CN=%s [Issuer: %s] vs UDP CN=%s [Issuer: %s])，直接暴露独立 UDP 代理后端！",
-				port, port, tcpLeaf.Subject.CommonName, certIssuerDisplay(tcpLeaf), udpLeaf.Subject.CommonName, udpIssuer),
+					port, port, tcpLeaf.Subject.CommonName, certIssuerDisplay(tcpLeaf), udpLeaf.Subject.CommonName, udpIssuer),
 				"确保 Hysteria2 与 Caddy HTTPS 共用同一张最新 ACME 证书文件，并在 Caddy 续期后自动同步重载 sing-box。"
 		}
 		if len(chainForVerify) == 1 && len(tcpCerts) > 1 {
@@ -176,13 +176,13 @@ var quicV1InitialSalt = []byte{
 	0xcc, 0xbb, 0x7f, 0x0a,
 }
 
-type quicKeys struct {
+type QuicKeys struct {
 	key []byte
 	iv  []byte
 	hp  []byte
 }
 
-func deriveQUICInitialKeys(dcid []byte, isClient bool) (quicKeys, error) {
+func DeriveQUICInitialKeys(dcid []byte, isClient bool) (QuicKeys, error) {
 	initialSecret := hkdfExtract(sha256.New, dcid, quicV1InitialSalt)
 	label := "server in"
 	if isClient {
@@ -192,8 +192,8 @@ func deriveQUICInitialKeys(dcid []byte, isClient bool) (quicKeys, error) {
 	return deriveQUICKeysFromSecret(sha256.New, secret, 16), nil
 }
 
-func deriveQUICKeysFromSecret(hashFn func() hash.Hash, secret []byte, keyLen int) quicKeys {
-	return quicKeys{
+func deriveQUICKeysFromSecret(hashFn func() hash.Hash, secret []byte, keyLen int) QuicKeys {
+	return QuicKeys{
 		key: hkdfExpandLabel(hashFn, secret, "quic key", nil, keyLen),
 		iv:  hkdfExpandLabel(hashFn, secret, "quic iv", nil, 12),
 		hp:  hkdfExpandLabel(hashFn, secret, "quic hp", nil, 16),
@@ -231,7 +231,7 @@ func hkdfExpandLabel(hashFn func() hash.Hash, secret []byte, label string, conte
 }
 
 // probeQUICv1Certificates 使用标准库 crypto/tls.QUICClient 发起 QUIC v1 握手并提取服务端 X.509 证书链
-func probeQUICv1Certificates(ctx context.Context, ip string, port int, serverName string, timeout time.Duration) ([]*x509.Certificate, string, error) {
+func ProbeQUICv1Certificates(ctx context.Context, ip string, port int, serverName string, timeout time.Duration) ([]*x509.Certificate, string, error) {
 	raddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(ip, fmt.Sprintf("%d", port)))
 	if err != nil {
 		return nil, "", err
@@ -261,7 +261,7 @@ func probeQUICv1Certificates(ctx context.Context, ip string, port int, serverNam
 	})
 	defer qconn.Close()
 
-	qconn.SetTransportParameters(buildClientTransportParameters(scid))
+	qconn.SetTransportParameters(BuildClientTransportParameters(scid))
 	if err := qconn.Start(ctx); err != nil {
 		return nil, "", err
 	}
@@ -280,11 +280,11 @@ func probeQUICv1Certificates(ctx context.Context, ip string, port int, serverNam
 		return nil, "", fmt.Errorf("empty QUIC ClientHello")
 	}
 
-	cKeys, err := deriveQUICInitialKeys(dcid, true)
+	cKeys, err := DeriveQUICInitialKeys(dcid, true)
 	if err != nil {
 		return nil, "", err
 	}
-	sInitKeys, err := deriveQUICInitialKeys(dcid, false)
+	sInitKeys, err := DeriveQUICInitialKeys(dcid, false)
 	if err != nil {
 		return nil, "", err
 	}
@@ -292,10 +292,10 @@ func probeQUICv1Certificates(ctx context.Context, ip string, port int, serverNam
 	// 封装 CRYPTO 帧 (0x06 + offset(0) + varint(len) + clientHello)
 	cryptoFrame := make([]byte, 0, 4+len(clientHello))
 	cryptoFrame = append(cryptoFrame, 0x06, 0x00)
-	cryptoFrame = appendQUICVarint(cryptoFrame, uint64(len(clientHello)))
+	cryptoFrame = AppendQUICVarint(cryptoFrame, uint64(len(clientHello)))
 	cryptoFrame = append(cryptoFrame, clientHello...)
 
-	initialPkt, err := packQUICLongHeaderPacket(0x00, dcid, scid, 1, cryptoFrame, cKeys, 1200)
+	initialPkt, err := PackQUICLongHeaderPacket(0x00, dcid, scid, 1, cryptoFrame, cKeys, 1200)
 	if err != nil {
 		return nil, "", err
 	}
@@ -304,13 +304,13 @@ func probeQUICv1Certificates(ctx context.Context, ip string, port int, serverNam
 	}
 
 	var (
-		hsKeys       *quicKeys
-		serverSCID   []byte
-		initStream   = newCryptoReassembler()
-		hsStream     = newCryptoReassembler()
+		hsKeys        *QuicKeys
+		serverSCID    []byte
+		initStream    = newCryptoReassembler()
+		hsStream      = newCryptoReassembler()
 		receivedCerts []*x509.Certificate
-		negotiated   string
-		sentAck      bool
+		negotiated    string
+		sentAck       bool
 	)
 
 	recvBuf := make([]byte, 65535)
@@ -326,7 +326,7 @@ func probeQUICv1Certificates(ctx context.Context, ip string, port int, serverNam
 
 		datagram := recvBuf[:n]
 		for len(datagram) > 0 {
-			pktType, pktDCID, pktSCID, plainPayload, consumed, uErr := unpackQUICLongHeaderPacket(datagram, sInitKeys, hsKeys)
+			pktType, pktDCID, pktSCID, plainPayload, consumed, uErr := UnpackQUICLongHeaderPacket(datagram, sInitKeys, hsKeys)
 			if consumed <= 0 {
 				break
 			}
@@ -340,7 +340,7 @@ func probeQUICv1Certificates(ctx context.Context, ip string, port int, serverNam
 			}
 
 			// 解析帧列表中的 CRYPTO (0x06) 或 CONNECTION_CLOSE (0x1c)
-			cryptoChunks, closeReason, fErr := extractQUICFrames(plainPayload)
+			cryptoChunks, closeReason, fErr := ExtractQUICFrames(plainPayload)
 			if closeReason != "" {
 				return nil, "", fmt.Errorf("server closed QUIC connection: %s", closeReason)
 			}
@@ -350,9 +350,9 @@ func probeQUICv1Certificates(ctx context.Context, ip string, port int, serverNam
 
 			for _, ch := range cryptoChunks {
 				if pktType == 0x00 { // Initial
-					initStream.push(ch.offset, ch.data)
+					initStream.push(ch.offset, ch.Data)
 				} else if pktType == 0x02 { // Handshake
-					hsStream.push(ch.offset, ch.data)
+					hsStream.push(ch.offset, ch.Data)
 				}
 			}
 
@@ -371,7 +371,7 @@ func probeQUICv1Certificates(ctx context.Context, ip string, port int, serverNam
 				switch ev.Kind {
 				case tls.QUICSetReadSecret:
 					if ev.Level == tls.QUICEncryptionLevelHandshake {
-						hk := deriveHandshakeKeysForSuite(ev.Suite, ev.Data)
+						hk := DeriveHandshakeKeysForSuite(ev.Suite, ev.Data)
 						hsKeys = &hk
 					}
 				case tls.QUICHandshakeDone:
@@ -417,7 +417,7 @@ func probeQUICv1Certificates(ctx context.Context, ip string, port int, serverNam
 			// ACK Frame (0x02): Largest Acknowledged=0, ACK Delay=0, ACK Range Count=0, First ACK Range=0
 			ackFrame := []byte{0x02, 0x00, 0x00, 0x00, 0x00}
 			sKeysForNewDCID := cKeys
-			if ackPkt, aErr := packQUICLongHeaderPacket(0x00, serverSCID, scid, 2, ackFrame, sKeysForNewDCID, 1200); aErr == nil {
+			if ackPkt, aErr := PackQUICLongHeaderPacket(0x00, serverSCID, scid, 2, ackFrame, sKeysForNewDCID, 1200); aErr == nil {
 				_, _ = connRaw.Write(ackPkt)
 			}
 		}
@@ -429,14 +429,14 @@ func probeQUICv1Certificates(ctx context.Context, ip string, port int, serverNam
 	return nil, "", fmt.Errorf("QUIC handshake timed out waiting for server Certificate")
 }
 
-func deriveHandshakeKeysForSuite(suite uint16, secret []byte) quicKeys {
+func DeriveHandshakeKeysForSuite(suite uint16, secret []byte) QuicKeys {
 	if suite == tls.TLS_AES_256_GCM_SHA384 {
 		return deriveQUICKeysFromSecret(sha512.New384, secret, 32)
 	}
 	return deriveQUICKeysFromSecret(sha256.New, secret, 16)
 }
 
-func buildClientTransportParameters(scid []byte) []byte {
+func BuildClientTransportParameters(scid []byte) []byte {
 	var b []byte
 	// max_idle_timeout (0x01) = 10000ms
 	b = appendTPVarint(b, 0x01, 10000)
@@ -453,22 +453,22 @@ func buildClientTransportParameters(scid []byte) []byte {
 	// initial_max_streams_uni (0x09) = 100
 	b = appendTPVarint(b, 0x09, 100)
 	// initial_source_connection_id (0x0f) = scid
-	b = appendQUICVarint(b, 0x0f)
-	b = appendQUICVarint(b, uint64(len(scid)))
+	b = AppendQUICVarint(b, 0x0f)
+	b = AppendQUICVarint(b, uint64(len(scid)))
 	b = append(b, scid...)
 	return b
 }
 
 func appendTPVarint(b []byte, id uint64, val uint64) []byte {
 	var valBuf []byte
-	valBuf = appendQUICVarint(valBuf, val)
-	b = appendQUICVarint(b, id)
-	b = appendQUICVarint(b, uint64(len(valBuf)))
+	valBuf = AppendQUICVarint(valBuf, val)
+	b = AppendQUICVarint(b, id)
+	b = AppendQUICVarint(b, uint64(len(valBuf)))
 	b = append(b, valBuf...)
 	return b
 }
 
-func appendQUICVarint(b []byte, v uint64) []byte {
+func AppendQUICVarint(b []byte, v uint64) []byte {
 	switch {
 	case v <= 63:
 		return append(b, byte(v))
@@ -497,7 +497,7 @@ func readQUICVarint(b []byte) (uint64, int) {
 	return val, length
 }
 
-func packQUICLongHeaderPacket(pktType byte, dcid, scid []byte, pktNum uint32, payload []byte, keys quicKeys, minTotalSize int) ([]byte, error) {
+func PackQUICLongHeaderPacket(pktType byte, dcid, scid []byte, pktNum uint32, payload []byte, keys QuicKeys, minTotalSize int) ([]byte, error) {
 	// Long Header: 1(fixed=1)|1(long=1)|2(type)|2(reserved=0)|2(pnLen=1 -> 2 bytes PN)
 	firstByte := byte(0xc0 | ((pktType & 0x03) << 4) | 0x01)
 	var hdr []byte
@@ -562,7 +562,7 @@ func packQUICLongHeaderPacket(pktType byte, dcid, scid []byte, pktNum uint32, pa
 	return pkt, nil
 }
 
-func unpackQUICLongHeaderPacket(datagram []byte, initKeys quicKeys, hsKeys *quicKeys) (byte, []byte, []byte, []byte, int, error) {
+func UnpackQUICLongHeaderPacket(datagram []byte, initKeys QuicKeys, hsKeys *QuicKeys) (byte, []byte, []byte, []byte, int, error) {
 	if len(datagram) < 7 {
 		return 0, nil, nil, nil, len(datagram), fmt.Errorf("short datagram")
 	}
@@ -608,7 +608,7 @@ func unpackQUICLongHeaderPacket(datagram []byte, initKeys quicKeys, hsKeys *quic
 		return 0, nil, nil, nil, len(datagram), fmt.Errorf("truncated packet")
 	}
 
-	var keys quicKeys
+	var keys QuicKeys
 	switch pktType {
 	case 0x00:
 		keys = initKeys
@@ -666,13 +666,13 @@ func unpackQUICLongHeaderPacket(datagram []byte, initKeys quicKeys, hsKeys *quic
 	return pktType, dcid, scid, plain, totalPktLen, nil
 }
 
-type cryptoChunk struct {
+type CryptoChunk struct {
 	offset uint64
-	data   []byte
+	Data   []byte
 }
 
-func extractQUICFrames(plain []byte) ([]cryptoChunk, string, error) {
-	var chunks []cryptoChunk
+func ExtractQUICFrames(plain []byte) ([]CryptoChunk, string, error) {
+	var chunks []CryptoChunk
 	idx := 0
 	for idx < len(plain) {
 		frameType, n := readQUICVarint(plain[idx:])
@@ -712,9 +712,9 @@ func extractQUICFrames(plain []byte) ([]cryptoChunk, string, error) {
 			if n1 == 0 || n2 == 0 || idx+int(length) > len(plain) {
 				return chunks, "", fmt.Errorf("invalid CRYPTO frame")
 			}
-			chunks = append(chunks, cryptoChunk{
+			chunks = append(chunks, CryptoChunk{
 				offset: offset,
-				data:   plain[idx : idx+int(length)],
+				Data:   plain[idx : idx+int(length)],
 			})
 			idx += int(length)
 		case 0x1c, 0x1d: // CONNECTION_CLOSE
@@ -870,7 +870,7 @@ func testQUICInitialPacket(ctx context.Context, ip string, port int, timeout tim
 	quicProbe := []byte{
 		0xc0,                   // Long Header (Initial)
 		0x1a, 0x2a, 0x3a, 0x4a, // Unsupported reserved version for negotiation testing
-		0x08,                   // DCID Length: 8
+		0x08, // DCID Length: 8
 		0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
 		0x08, // SCID Length: 8
 		0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,

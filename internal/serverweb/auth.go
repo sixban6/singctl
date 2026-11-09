@@ -103,7 +103,7 @@ func resolveGeoFilePath(opts Options) string {
 	return ""
 }
 
-func (s *Server) getUsername() string {
+func (s *Server) GetUsername() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.opts.Username != "" {
@@ -112,7 +112,7 @@ func (s *Server) getUsername() string {
 	return "singctl"
 }
 
-func (s *Server) getPassword() string {
+func (s *Server) GetPassword() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.opts.Password
@@ -139,39 +139,39 @@ func isLoopbackRemote(remoteAddr string) bool {
 	return isWhitelisted(host)
 }
 
-func (s *Server) issueSession() string {
+func (s *Server) IssueSession() string {
 	buf := make([]byte, 32)
 	if _, err := rand.Read(buf); err != nil {
 		return ""
 	}
 	id := hex.EncodeToString(buf)
 	now := time.Now()
-	s.sessionsMu.Lock()
-	defer s.sessionsMu.Unlock()
+	s.SessionsMu.Lock()
+	defer s.SessionsMu.Unlock()
 	s.pruneExpiredSessionsLocked(now)
-	s.sessions[id] = sessionRecord{created: now, last: now}
+	s.Sessions[id] = SessionRecord{Created: now, Last: now}
 	return id
 }
 
 func (s *Server) pruneExpiredSessionsLocked(now time.Time) {
-	for id, rec := range s.sessions {
-		if now.Sub(rec.created) >= sessionAbsoluteTTL || now.Sub(rec.last) >= sessionIdleTTL {
-			delete(s.sessions, id)
+	for id, rec := range s.Sessions {
+		if now.Sub(rec.Created) >= sessionAbsoluteTTL || now.Sub(rec.Last) >= sessionIdleTTL {
+			delete(s.Sessions, id)
 		}
 	}
-	for len(s.sessions) >= maxActiveSessions {
+	for len(s.Sessions) >= MaxActiveSessions {
 		var oldestID string
 		var oldestTime time.Time
-		for id, rec := range s.sessions {
-			if oldestID == "" || rec.last.Before(oldestTime) {
+		for id, rec := range s.Sessions {
+			if oldestID == "" || rec.Last.Before(oldestTime) {
 				oldestID = id
-				oldestTime = rec.last
+				oldestTime = rec.Last
 			}
 		}
 		if oldestID == "" {
 			break
 		}
-		delete(s.sessions, oldestID)
+		delete(s.Sessions, oldestID)
 	}
 }
 
@@ -180,18 +180,18 @@ func (s *Server) useSession(id string) bool {
 		return false
 	}
 	now := time.Now()
-	s.sessionsMu.Lock()
-	defer s.sessionsMu.Unlock()
-	rec, ok := s.sessions[id]
+	s.SessionsMu.Lock()
+	defer s.SessionsMu.Unlock()
+	rec, ok := s.Sessions[id]
 	if !ok {
 		return false
 	}
-	if now.Sub(rec.created) >= sessionAbsoluteTTL || now.Sub(rec.last) >= sessionIdleTTL {
-		delete(s.sessions, id)
+	if now.Sub(rec.Created) >= sessionAbsoluteTTL || now.Sub(rec.Last) >= sessionIdleTTL {
+		delete(s.Sessions, id)
 		return false
 	}
-	rec.last = now
-	s.sessions[id] = rec
+	rec.Last = now
+	s.Sessions[id] = rec
 	return true
 }
 
@@ -200,35 +200,35 @@ func (s *Server) sessionAlive(id string) bool {
 		return false
 	}
 	now := time.Now()
-	s.sessionsMu.Lock()
-	defer s.sessionsMu.Unlock()
-	rec, ok := s.sessions[id]
+	s.SessionsMu.Lock()
+	defer s.SessionsMu.Unlock()
+	rec, ok := s.Sessions[id]
 	if !ok {
 		return false
 	}
-	return now.Sub(rec.created) < sessionAbsoluteTTL && now.Sub(rec.last) < sessionIdleTTL
+	return now.Sub(rec.Created) < sessionAbsoluteTTL && now.Sub(rec.Last) < sessionIdleTTL
 }
 
 func (s *Server) deleteSession(id string) {
 	if id == "" {
 		return
 	}
-	s.sessionsMu.Lock()
-	delete(s.sessions, id)
-	s.sessionsMu.Unlock()
+	s.SessionsMu.Lock()
+	delete(s.Sessions, id)
+	s.SessionsMu.Unlock()
 }
 
 func (s *Server) revokeAllSessions() {
-	s.sessionsMu.Lock()
-	s.sessions = make(map[string]sessionRecord)
-	s.sessionsMu.Unlock()
+	s.SessionsMu.Lock()
+	s.Sessions = make(map[string]SessionRecord)
+	s.SessionsMu.Unlock()
 }
 
 func (s *Server) setAuthCookie(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(sessionCookieName); err == nil && s.sessionAlive(c.Value) {
 		return
 	}
-	id := s.issueSession()
+	id := s.IssueSession()
 	if id == "" {
 		return
 	}
@@ -244,7 +244,7 @@ func (s *Server) setAuthCookie(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) authorized(r *http.Request) bool {
-	if s.getPassword() == "" {
+	if s.GetPassword() == "" {
 		return false
 	}
 
@@ -264,8 +264,8 @@ func (s *Server) authorized(r *http.Request) bool {
 	}
 
 	user, pass, ok := r.BasicAuth()
-	if ok && subtle.ConstantTimeCompare([]byte(user), []byte(s.getUsername())) == 1 {
-		if config.VerifyPassword(s.getPassword(), pass) {
+	if ok && subtle.ConstantTimeCompare([]byte(user), []byte(s.GetUsername())) == 1 {
+		if config.VerifyPassword(s.GetPassword(), pass) {
 			return true
 		}
 	}
@@ -392,8 +392,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 4096)
 	_ = json.NewDecoder(r.Body).Decode(&body)
 
-	user := s.getUsername()
-	pass := s.getPassword()
+	user := s.GetUsername()
+	pass := s.GetPassword()
 	inputUser := strings.TrimSpace(body.Username)
 	userMatch := inputUser == "" || subtle.ConstantTimeCompare([]byte(inputUser), []byte(user)) == 1
 	passMatch := pass != "" && config.VerifyPassword(pass, body.Password)
@@ -520,7 +520,7 @@ func (s *Server) handleUpdateCredentials(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	currentPass := s.getPassword()
+	currentPass := s.GetPassword()
 	if currentPass != "" && !config.VerifyPassword(currentPass, body.CurrentPassword) {
 		writeJSONError(w, http.StatusForbidden, "当前管理密码错误，禁止修改")
 		return
@@ -534,7 +534,7 @@ func (s *Server) handleUpdateCredentials(w http.ResponseWriter, r *http.Request)
 
 	newUsername := strings.TrimSpace(body.NewUsername)
 	if newUsername == "" {
-		newUsername = s.getUsername()
+		newUsername = s.GetUsername()
 	}
 	if strings.EqualFold(newUsername, "admin") {
 		writeJSONError(w, http.StatusBadRequest, "管理账号禁止使用通用的 admin，请设置个性化用户名")
@@ -583,7 +583,7 @@ func (s *Server) handleAckCredentials(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "加载配置文件失败")
 		return
 	}
-	hashedPass := s.getPassword()
+	hashedPass := s.GetPassword()
 	if plain := strings.TrimSpace(cfg.Server.WebAdmin.Password); plain != "" && !config.IsHashedPassword(plain) {
 		if h, hashErr := config.HashPassword(plain); hashErr == nil {
 			cfg.Server.WebAdmin.Password = h

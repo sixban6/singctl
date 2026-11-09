@@ -27,7 +27,7 @@ const (
 	systemHarvestMinDT = 6 * time.Second
 	fleetHarvestMinDT  = 20 * time.Second
 	sniffSaveMinDT     = 3 * time.Second
-	sniffTimeLayout    = "2006-01-02 15:04:05"
+	SniffTimeLayout    = "2006-01-02 15:04:05"
 )
 
 // SniffNodeRef 标记某个嗅探源被集群中哪台主机捕获
@@ -309,7 +309,7 @@ func formatSniffTime(t time.Time) string {
 	if t.IsZero() {
 		return ""
 	}
-	return t.Local().Format(sniffTimeLayout)
+	return t.Local().Format(SniffTimeLayout)
 }
 
 // SniffTracker 外部活跃嗅探与探测态势聚合器 (支持本机与多节点舰队分主机追踪)
@@ -327,7 +327,7 @@ type SniffTracker struct {
 	geo                *IPGeoResolver
 	limiter            *IPLimiter
 	fleetMgr           *fleet.Manager
-	enableSystemProbe  bool
+	EnableSystemProbe  bool
 	fleetBgRunning     atomic.Bool
 }
 
@@ -348,7 +348,7 @@ func NewSniffTracker(geo *IPGeoResolver, limiter *IPLimiter, filePath ...string)
 		filePath:           fp,
 		geo:                geo,
 		limiter:            limiter,
-		enableSystemProbe:  true,
+		EnableSystemProbe:  true,
 	}
 	t.loadLocked()
 	return t
@@ -441,6 +441,12 @@ func (t *SniffTracker) ObserveNodeAt(nodeID, nodeName, rawIP, vector, status str
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.observeNodeAtLocked(nodeID, nodeName, ipStr, vector, status, hitsDelta, false, firstTime, lastTime)
+}
+
+func (t *SniffTracker) Flush() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.SaveLocked(true)
 }
 
 func (t *SniffTracker) observeLocked(ipStr, vector, status string, hitsDelta int, setExactHits bool) {
@@ -541,7 +547,7 @@ func (t *SniffTracker) observeNodeAtLocked(nodeID, nodeName, ipStr, vector, stat
 
 	if setExactHits {
 		// 若此前仅记录了首次采集时刻的近似时间，而本次从 nftables expires 或日志解析出了更早的真实拦截时间，自动校准
-		if !firstTime.IsZero() && !lastTime.IsZero() && lastTime.Before(rec.lastSeen) && rec.lastSeen.Sub( firstTime ) > time.Minute {
+		if !firstTime.IsZero() && !lastTime.IsZero() && lastTime.Before(rec.lastSeen) && rec.lastSeen.Sub(firstTime) > time.Minute {
 			if rec.vector == "高危端口扫描拦截" || rec.vector == "SSH 暴力破解" {
 				rec.lastSeen = lastTime
 				t.dirty = true
@@ -783,7 +789,7 @@ func (t *SniffTracker) BlockTargetForNode(ctx context.Context, target, nodeScope
 		}
 	}
 	t.dirty = true
-	t.saveLocked(true)
+	t.SaveLocked(true)
 	t.mu.Unlock()
 
 	appliedNodes := 0
@@ -906,7 +912,7 @@ func (t *SniffTracker) SnapshotForNode(ctx context.Context, nodeScope string, fo
 	var fleetNodes []fleet.Node
 	t.mu.RLock()
 	fleetMgr := t.fleetMgr
-	enableProbe := t.enableSystemProbe
+	enableProbe := t.EnableSystemProbe
 	t.mu.RUnlock()
 
 	if fleetMgr != nil && fleetMgr.Store != nil {
@@ -946,7 +952,7 @@ func (t *SniffTracker) SnapshotForNode(ctx context.Context, nodeScope string, fo
 		}
 	}
 	if t.dirty {
-		t.saveLocked(false)
+		t.SaveLocked(false)
 	}
 
 	// 构建主机节点元数据映射
@@ -1386,7 +1392,7 @@ func (t *SniffTracker) SnapshotForNode(ctx context.Context, nodeScope string, fo
 func (t *SniffTracker) triggerBackgroundFleetHarvestIfNeeded() {
 	t.mu.RLock()
 	fleetMgr := t.fleetMgr
-	enableProbe := t.enableSystemProbe
+	enableProbe := t.EnableSystemProbe
 	t.mu.RUnlock()
 	if !enableProbe || fleetMgr == nil || fleetMgr.Store == nil {
 		return
@@ -1409,7 +1415,7 @@ func (t *SniffTracker) triggerBackgroundFleetHarvestIfNeeded() {
 func (t *SniffTracker) maybeHarvestSystemSources(ctx context.Context, force bool) {
 	now := time.Now()
 	t.mu.Lock()
-	if !t.enableSystemProbe || (!force && !t.lastSystemHarvest.IsZero() && now.Sub(t.lastSystemHarvest) < systemHarvestMinDT) {
+	if !t.EnableSystemProbe || (!force && !t.lastSystemHarvest.IsZero() && now.Sub(t.lastSystemHarvest) < systemHarvestMinDT) {
 		t.mu.Unlock()
 		return
 	}
@@ -1448,7 +1454,7 @@ func (t *SniffTracker) maybeHarvestSystemSources(ctx context.Context, force bool
 					if !isIgnoredInternalIP(ip) {
 						ft, lt, hits := time.Time{}, time.Time{}, 3
 						if info, ok := f2bTimeMap[ip]; ok {
-							ft, lt = info.first, info.last
+							ft, lt = info.first, info.Last
 							if info.hits > hits {
 								hits = info.hits
 							}
@@ -1570,13 +1576,13 @@ func (t *SniffTracker) maybeHarvestFleetNodes(ctx context.Context, fleetNodes []
 			t.mu.Lock()
 			t.ensureNodeMetaLocked(node.ID).lastError = ""
 			t.mu.Unlock()
-			t.ingestRemoteSniffOutput(node.ID, cmp.Or(node.Name, node.ID), out)
+			t.IngestRemoteSniffOutput(node.ID, cmp.Or(node.Name, node.ID), out)
 		}(fn)
 	}
 	wg.Wait()
 }
 
-func (t *SniffTracker) ingestRemoteSniffOutput(nodeID, nodeName, raw string) {
+func (t *SniffTracker) IngestRemoteSniffOutput(nodeID, nodeName, raw string) {
 	var secTrusted, secNFT, secF2B, secKern, secSS strings.Builder
 	currentSec := ""
 	for line := range strings.SplitSeq(raw, "\n") {
@@ -1649,7 +1655,7 @@ func (t *SniffTracker) ingestRemoteSniffOutput(nodeID, nodeName, raw string) {
 		if !isIgnoredInternalIP(ip) {
 			ft, lt, hits := time.Time{}, time.Time{}, 3
 			if info, ok := f2bTimes[ip]; ok {
-				ft, lt = info.first, info.last
+				ft, lt = info.first, info.Last
 				if info.hits > hits {
 					hits = info.hits
 				}
@@ -1763,7 +1769,7 @@ func parseNFTSetIPs(raw string) []string {
 
 type fail2banTimeInfo struct {
 	first time.Time
-	last  time.Time
+	Last  time.Time
 	hits  int
 }
 
@@ -1790,7 +1796,7 @@ func parseFail2banLogTimestamps(raw string, refNow time.Time) map[string]fail2ba
 		if ip == "" || isIgnoredInternalIP(ip) {
 			continue
 		}
-		ts, err := time.ParseInLocation(sniffTimeLayout, trimmed[:19], refNow.Location())
+		ts, err := time.ParseInLocation(SniffTimeLayout, trimmed[:19], refNow.Location())
 		if err != nil {
 			continue
 		}
@@ -1799,8 +1805,8 @@ func parseFail2banLogTimestamps(raw string, refNow time.Time) map[string]fail2ba
 		if info.first.IsZero() || ts.Before(info.first) {
 			info.first = ts
 		}
-		if info.last.IsZero() || ts.After(info.last) {
-			info.last = ts
+		if info.Last.IsZero() || ts.After(info.Last) {
+			info.Last = ts
 		}
 		out[ip] = info
 	}
@@ -2109,7 +2115,7 @@ func (t *SniffTracker) loadLocked() {
 	}
 }
 
-func (t *SniffTracker) saveLocked(force bool) {
+func (t *SniffTracker) SaveLocked(force bool) {
 	if t.filePath == "" {
 		return
 	}

@@ -18,22 +18,22 @@ import (
 
 const (
 	// PID文件路径（跨平台）
-	pidFileName = "singctl-daemon.pid"
+	PidFileName = "singctl-daemon.pid"
 	// 日志文件名
 	logFileName = "singctl-daemon.log"
 	// 重启计数状态文件名（/tmp 在 OpenWrt 上是 tmpfs，重启自动清零）
-	stateFileName = "singctl-daemon.state"
+	StateFileName = "singctl-daemon.state"
 )
 
 // errDaemonAlreadyRunning 已有守护进程运行
-var errDaemonAlreadyRunning = errors.New("daemon already running")
+var ErrDaemonAlreadyRunning = errors.New("daemon already running")
 
 // 路径覆盖钩子（仅测试使用）
 var (
-	pidFilePathOverride   string
-	stateFilePathOverride string
+	PidFilePathOverride   string
+	StateFilePathOverride string
 	// expectedProcNameFn 返回守护进程期望的进程名（默认取当前可执行文件名）
-	expectedProcNameFn = defaultProcName
+	ExpectedProcNameFn = defaultProcName
 )
 
 func defaultProcName() string {
@@ -45,25 +45,25 @@ func defaultProcName() string {
 }
 
 // getPidFilePath 获取PID文件路径
-func getPidFilePath() string {
-	if pidFilePathOverride != "" {
-		return pidFilePathOverride
+func GetPidFilePath() string {
+	if PidFilePathOverride != "" {
+		return PidFilePathOverride
 	}
 	if runtime.GOOS == "windows" {
-		return filepath.Join(os.Getenv("TEMP"), pidFileName)
+		return filepath.Join(os.Getenv("TEMP"), PidFileName)
 	}
-	return filepath.Join("/tmp", pidFileName)
+	return filepath.Join("/tmp", PidFileName)
 }
 
 // getStateFilePath 获取重启计数状态文件路径
-func getStateFilePath() string {
-	if stateFilePathOverride != "" {
-		return stateFilePathOverride
+func GetStateFilePath() string {
+	if StateFilePathOverride != "" {
+		return StateFilePathOverride
 	}
 	if runtime.GOOS == "windows" {
-		return filepath.Join(os.Getenv("TEMP"), stateFileName)
+		return filepath.Join(os.Getenv("TEMP"), StateFileName)
 	}
-	return filepath.Join("/tmp", stateFileName)
+	return filepath.Join("/tmp", StateFileName)
 }
 
 // GetDaemonLogPath 获取守护进程日志文件路径
@@ -82,9 +82,9 @@ func GetDaemonLogPath() string {
 // 若目标已存在：
 //   - PID 存活且进程名匹配 → 返回 errDaemonAlreadyRunning
 //   - PID 已死或进程名不符（PID 回绕复用）→ 视为残留锁，清除后重试一次
-func acquirePidLock() error {
+func AcquirePidLock() error {
 	pid := strconv.Itoa(os.Getpid())
-	target := getPidFilePath()
+	target := GetPidFilePath()
 	tmp := fmt.Sprintf("%s.new-%d", target, os.Getpid())
 	defer os.Remove(tmp)
 
@@ -102,18 +102,18 @@ func acquirePidLock() error {
 
 		// 目标已存在：判断是否为活锁
 		oldPid, rerr := ReadDaemonPid()
-		if rerr == nil && daemonProcessMatches(oldPid) {
-			return errDaemonAlreadyRunning
+		if rerr == nil && DaemonProcessMatches(oldPid) {
+			return ErrDaemonAlreadyRunning
 		}
 		// 残留锁（进程已死或 PID 被无关进程复用），清除后重试
 		_ = os.Remove(target)
 	}
-	return errDaemonAlreadyRunning
+	return ErrDaemonAlreadyRunning
 }
 
 // WritePidFile 以原子方式写入PID文件（先写临时文件再 rename，避免读到半截内容）
 func WritePidFile() error {
-	pidFile := getPidFilePath()
+	pidFile := GetPidFilePath()
 	pid := strconv.Itoa(os.Getpid())
 	tmp := pidFile + ".tmp"
 	if err := os.WriteFile(tmp, []byte(pid), 0644); err != nil {
@@ -124,7 +124,7 @@ func WritePidFile() error {
 
 // RemovePidFile 删除PID文件
 func RemovePidFile() error {
-	pidFile := getPidFilePath()
+	pidFile := GetPidFilePath()
 	if _, err := os.Stat(pidFile); os.IsNotExist(err) {
 		return nil // 文件不存在，无需删除
 	}
@@ -133,7 +133,7 @@ func RemovePidFile() error {
 
 // ReadDaemonPid 读取守护进程PID
 func ReadDaemonPid() (int, error) {
-	pidFile := getPidFilePath()
+	pidFile := GetPidFilePath()
 	data, err := os.ReadFile(pidFile)
 	if err != nil {
 		return 0, fmt.Errorf("failed to read pid file: %w", err)
@@ -153,16 +153,16 @@ func IsDaemonRunning() bool {
 	if err != nil {
 		return false
 	}
-	return daemonProcessMatches(pid)
+	return DaemonProcessMatches(pid)
 }
 
 // daemonProcessMatches 判断 PID 对应的进程是否为存活的 singctl 守护进程
-func daemonProcessMatches(pid int) bool {
+func DaemonProcessMatches(pid int) bool {
 	if !ProcessExists(pid) {
 		return false
 	}
 
-	expected := expectedProcNameFn()
+	expected := ExpectedProcNameFn()
 
 	// Linux: /proc/<pid>/comm（最快且无副作用）
 	if runtime.GOOS != "windows" {
@@ -241,7 +241,7 @@ func StopDaemon() error {
 		return nil // 守护进程不存在
 	}
 
-	if !daemonProcessMatches(pid) {
+	if !DaemonProcessMatches(pid) {
 		// PID 已死或被无关进程复用 → 残留文件，清理即可
 		RemovePidFile()
 		return nil

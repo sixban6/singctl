@@ -57,7 +57,7 @@ func (d *Detector) Run(ctx context.Context) (*Report, error) {
 	}()
 	go func() {
 		defer wg.Done()
-		catTLS = probeTLS(ctx, d.opts)
+		catTLS = ProbeTLS(ctx, d.opts)
 	}()
 	go func() {
 		defer wg.Done()

@@ -121,7 +121,7 @@ func DeployCaddy(cfg *config.Config) error {
 
 	// Auto-detect server public IP if not explicitly configured (only when using standard port 443,
 	// since shared-IP NAT VPSs on custom ports do not own port 80/443 for IP ACME HTTP-01/TLS-ALPN-01 challenges)
-	if cfg != nil && cfg.Server.ServerIP == "" && cfg.Server.GetNodePort() == 443 {
+	if cfg != nil && cfg.Server.ServerIP == "" && cfg.Server.GetHy2Port() == 443 && cfg.Server.GetVlessPort() == 443 {
 		if ip := config.DiscoverPublicIP(); ip != "" {
 			logger.Info("Auto-detected server public IP for ACME IP certificate: %s", ip)
 			cfg.Server.ServerIP = ip
@@ -137,9 +137,10 @@ func DeployCaddy(cfg *config.Config) error {
 	if _, err := os.Stat(indexPath); os.IsNotExist(err) {
 		needRegen = true
 	} else if data, err := os.ReadFile(indexPath); err == nil {
-		// Automatically replace the old static hardcoded template with a unique randomized blog
-		contentStr := string(data)
-		if strings.Contains(contentStr, "Alex Chen") || strings.Contains(contentStr, "DevNotes | Systems, Architecture") {
+		// Automatically replace tiny placeholder stubs (e.g. "<html><body>ok</body></html>")
+		// or the old static hardcoded template with a unique randomized blog.
+		contentStr := strings.TrimSpace(string(data))
+		if len(contentStr) < 512 || strings.Contains(contentStr, "Alex Chen") || strings.Contains(contentStr, "DevNotes | Systems, Architecture") {
 			needRegen = true
 		}
 	}
@@ -149,7 +150,7 @@ func DeployCaddy(cfg *config.Config) error {
 		meta, err := masksite.GenerateAndWrite(constant.MaskSiteDir)
 		if err != nil {
 			logger.Warn("Failed to generate random camouflage site: %v, falling back to embedded template", err)
-			maskHTML, rErr := templateFiles.ReadFile("templates/mask_index.html")
+			maskHTML, rErr := TemplateFiles.ReadFile("templates/mask_index.html")
 			if rErr == nil {
 				_ = os.WriteFile(indexPath, maskHTML, 0644)
 			}
@@ -183,7 +184,7 @@ func installCaddy() error {
 // PreviewCaddyfile renders the Caddyfile template with cfg and returns the result as a string.
 // It is exported for use in tests.
 func PreviewCaddyfile(cfg *config.Config) (string, error) {
-	tmplData, err := templateFiles.ReadFile("templates/caddyfile.tpl")
+	tmplData, err := TemplateFiles.ReadFile("templates/caddyfile.tpl")
 	if err != nil {
 		return "", fmt.Errorf("could not read embedded Caddyfile template: %w", err)
 	}
@@ -193,14 +194,16 @@ func PreviewCaddyfile(cfg *config.Config) (string, error) {
 		return "", fmt.Errorf("failed to parse caddyfile template: %w", err)
 	}
 
-	anytlsPort := 443
+	hy2Port := 443
+	vlessPort := 443
 
 	type tmplContext struct {
 		NodeDomain        string
 		SubstoreDomain    string
 		CFDNSKey          string
 		Sni               string
-		AnyTLSPort        int
+		Hy2Port           int
+		VlessPort         int
 		SSKey             string
 		ServerIP          string
 		ServerIPFormatted string
@@ -228,7 +231,8 @@ func PreviewCaddyfile(cfg *config.Config) (string, error) {
 	adminPath := ""
 	adminPort := 8092
 	if cfg != nil {
-		anytlsPort = cfg.Server.GetNodePort()
+		hy2Port = cfg.Server.GetHy2Port()
+		vlessPort = cfg.Server.GetVlessPort()
 		nodeDomain = cfg.Server.GetNodeDomain()
 		substoreDomain = cfg.Server.GetSubstoreDomain()
 		if substoreDomain == "" {
@@ -299,7 +303,8 @@ func PreviewCaddyfile(cfg *config.Config) (string, error) {
 		SubstoreDomain:    substoreDomain,
 		CFDNSKey:          cfDNSKey,
 		Sni:               sni,
-		AnyTLSPort:        anytlsPort,
+		Hy2Port:           hy2Port,
+		VlessPort:         vlessPort,
 		SSKey:             ssKey,
 		ServerIP:          StripIPBrackets(serverIPRaw),
 		ServerIPFormatted: FormatIPForCaddy(serverIPRaw),

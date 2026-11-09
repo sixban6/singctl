@@ -329,13 +329,13 @@ singctl sr heal --disable-timer
 
 ```bash
 # 极简零配置开荒：自动复用主控 Cloudflare Token / SNI / 带宽，自动识别地域代号并创建灰云 DNS 记录！
-singctl fl bootstrap --host 203.0.113.10 --password '<root初始密码>'
+singctl fl new --host 203.0.113.10 --password '<root初始密码>'
 
 # 零参数向导式开荒（密码不回显、不进 history）
-singctl fl bootstrap
+singctl fl new
 
 # 手动全参数覆盖模式（自定义代号 jp1 / 名称 / 域名）
-singctl fleet bootstrap jp1 --name "日本东京" \
+singctl fleet new jp1 --name "日本东京" \
   --host 203.0.113.10 --port 22 --password '<root初始密码>' \
   --domain jp1.example.com --cf-token '<CF_API_TOKEN>'
 

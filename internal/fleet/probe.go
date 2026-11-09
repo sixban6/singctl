@@ -42,8 +42,8 @@ func DefaultHTTPSProber(ctx context.Context, node Node) ProbeResult {
 	rawHost := strings.TrimSpace(node.Host)
 
 	targetPort := 443
-	if node.NodePort > 0 && node.NodePort <= 65535 {
-		targetPort = node.NodePort
+	if node.VlessPort > 0 && node.VlessPort <= 65535 {
+		targetPort = node.VlessPort
 	}
 	dialAddr := ""
 	if h, p, err := net.SplitHostPort(rawHost); err == nil && h != "" && p != "" {

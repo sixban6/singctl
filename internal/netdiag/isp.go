@@ -134,10 +134,10 @@ func fetchFromCipCC(ctx context.Context) (*ISPInfo, error) {
 		return nil, fmt.Errorf("cip.cc failed")
 	}
 
-	return parseCipCCOutput(body)
+	return ParseCipCCOutput(body)
 }
 
-func parseCipCCOutput(output string) (*ISPInfo, error) {
+func ParseCipCCOutput(output string) (*ISPInfo, error) {
 	lines := strings.Split(output, "\n")
 	info := &ISPInfo{Country: "中国", CountryCode: "CN"}
 

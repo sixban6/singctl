@@ -83,7 +83,7 @@ func (l *IPLimiter) loadLocked() {
 	}
 }
 
-func (l *IPLimiter) saveLocked() {
+func (l *IPLimiter) SaveLocked() {
 	if l.filePath == "" {
 		return
 	}
@@ -166,7 +166,7 @@ func (l *IPLimiter) RecordFailure(ip string) (banned bool, remainingTime time.Du
 			LastFail:  now,
 		}
 		l.attempts[ip] = att
-		l.saveLocked()
+		l.SaveLocked()
 		return false, 0, 1
 	}
 
@@ -175,11 +175,11 @@ func (l *IPLimiter) RecordFailure(ip string) (banned bool, remainingTime time.Du
 
 	if att.FailCount >= l.maxAttempts {
 		att.BannedUntil = now.Add(l.banDuration)
-		l.saveLocked()
+		l.SaveLocked()
 		return true, l.banDuration, att.FailCount
 	}
 
-	l.saveLocked()
+	l.SaveLocked()
 	return false, 0, att.FailCount
 }
 
@@ -192,7 +192,7 @@ func (l *IPLimiter) RecordSuccess(ip string) {
 	defer l.mu.Unlock()
 	if _, exists := l.attempts[ip]; exists {
 		delete(l.attempts, ip)
-		l.saveLocked()
+		l.SaveLocked()
 	}
 }
 
@@ -203,13 +203,13 @@ func (l *IPLimiter) Unban(ip string) bool {
 	if ip == "all" || ip == "*" || ip == "" {
 		if len(l.attempts) > 0 {
 			l.attempts = make(map[string]*ipAttempt)
-			l.saveLocked()
+			l.SaveLocked()
 		}
 		return true
 	}
 	if _, exists := l.attempts[ip]; exists {
 		delete(l.attempts, ip)
-		l.saveLocked()
+		l.SaveLocked()
 		return true
 	}
 	return false
@@ -285,7 +285,7 @@ func (l *IPLimiter) BanManual(ip string, duration time.Duration) {
 	}
 	att.LastFail = now
 	att.BannedUntil = now.Add(duration)
-	l.saveLocked()
+	l.SaveLocked()
 }
 
 func cmpMax(a, b int) int {
@@ -312,7 +312,7 @@ func (l *IPLimiter) startCleaner() {
 				}
 			}
 			if changed {
-				l.saveLocked()
+				l.SaveLocked()
 			}
 			l.mu.Unlock()
 		case <-l.stopCleaner:

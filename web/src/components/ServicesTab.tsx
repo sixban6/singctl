@@ -471,11 +471,6 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
                     {subhub.version}
                   </span>
                 )}
-                {updateStates.subhub?.hasUpdate && (
-                  <span className="px-2 py-0.5 rounded-md bg-amber-500/20 text-amber-300 border border-amber-500/30 text-xs font-mono font-medium animate-pulse">
-                    新版 v{updateStates.subhub.latestVersion}
-                  </span>
-                )}
                 <div
                   className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${
                     subhub?.running
@@ -518,7 +513,6 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
           </div>
 
           <div className="mt-5 pt-4 border-t border-slate-800 flex flex-wrap gap-2">
-            {renderUpgradeAction('subhub', 'purple')}
             <button
               onClick={() => handleAction('subhub', 'restart')}
               disabled={loading === 'subhub-restart'}

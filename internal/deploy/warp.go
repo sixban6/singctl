@@ -95,7 +95,7 @@ func DeployWarpWithConfig(cfg *config.Config) error {
 	}
 
 	// 3. Generate WireGuard X25519 keypair
-	privKey, pubKey, err := generateWireguardKeypair()
+	privKey, pubKey, err := GenerateWireguardKeypair()
 	if err != nil {
 		return fmt.Errorf("failed to generate WireGuard keypair: %w", err)
 	}
@@ -138,7 +138,7 @@ func DeployWarpWithConfig(cfg *config.Config) error {
 		peerPubKey = reg.Config.Peers[0].PublicKey
 	}
 
-	confContent := buildWireproxyConfig(addressLine, privKey, peerPubKey, hasGlobalIPv6())
+	confContent := BuildWireproxyConfig(addressLine, privKey, peerPubKey, hasGlobalIPv6())
 
 	confPath := "/etc/wireproxy/wireproxy.conf"
 	if err := os.WriteFile(confPath, []byte(confContent), 0600); err != nil {
@@ -208,11 +208,12 @@ func isWarpSocksRunning() bool {
 
 // buildWireproxyConfig 渲染 wireproxy 配置。
 // 注意：
-// 1. wireproxy 的 ResolveStrategy = auto 只要检测到 [Interface] Address 含虚拟 IPv6 地址就会强制转为 ipv6，
-//    在纯 IPv4 VPS 上会导致 engage.cloudflareclient.com 解析为 AAAA 记录并引发 WireGuard 握手 100% 超时黑洞。
-// 2. wireproxy 在启动阶段若配置了 PersistentKeepalive，会在 Routine: receive incoming v4 启动前抢先触发握手导致死锁。
+//  1. wireproxy 的 ResolveStrategy = auto 只要检测到 [Interface] Address 含虚拟 IPv6 地址就会强制转为 ipv6，
+//     在纯 IPv4 VPS 上会导致 engage.cloudflareclient.com 解析为 AAAA 记录并引发 WireGuard 握手 100% 超时黑洞。
+//  2. wireproxy 在启动阶段若配置了 PersistentKeepalive，会在 Routine: receive incoming v4 启动前抢先触发握手导致死锁。
+//
 // 因此固定使用 IPv4 Endpoint (162.159.192.1:2408) 与 ResolveStrategy = ipv4，且不启用 PersistentKeepalive。
-func buildWireproxyConfig(addressLine, privKey, peerPubKey string, hasIPv6 bool) string {
+func BuildWireproxyConfig(addressLine, privKey, peerPubKey string, hasIPv6 bool) string {
 	dnsLine := "1.1.1.1,8.8.8.8,8.8.4.4"
 	if hasIPv6 {
 		dnsLine = "1.1.1.1,8.8.8.8,8.8.4.4,2606:4700:4700::1111,2001:4860:4860::8888,2001:4860:4860::8844"
@@ -373,7 +374,7 @@ func SyncWarpConfigIfNeeded() (healed bool, msg string, err error) {
 	}
 
 	// 若规范化配置重启后仍无法完成 WireGuard 握手（例如旧设备密钥已被 Cloudflare 注销），则自动重新注册密钥对
-	privKey, pubKey, kErr := generateWireguardKeypair()
+	privKey, pubKey, kErr := GenerateWireguardKeypair()
 	if kErr != nil {
 		return false, "", fmt.Errorf("WARP 隧道未连通且生成新密钥对失败: %w", kErr)
 	}
@@ -404,7 +405,7 @@ func SyncWarpConfigIfNeeded() (healed bool, msg string, err error) {
 	if len(reg.Config.Peers) > 0 && reg.Config.Peers[0].PublicKey != "" {
 		peerPubKey = reg.Config.Peers[0].PublicKey
 	}
-	freshConf := buildWireproxyConfig(addressLine, privKey, peerPubKey, hasGlobalIPv6())
+	freshConf := BuildWireproxyConfig(addressLine, privKey, peerPubKey, hasGlobalIPv6())
 	for _, p := range existingPaths {
 		_ = os.WriteFile(p, []byte(freshConf), 0600)
 	}
@@ -418,7 +419,7 @@ func SyncWarpConfigIfNeeded() (healed bool, msg string, err error) {
 	return false, "", fmt.Errorf("WARP (wireproxy) 重启后隧道握手仍未就绪，请检查 UDP 2408 出口连通性")
 }
 
-func generateWireguardKeypair() (string, string, error) {
+func GenerateWireguardKeypair() (string, string, error) {
 	priv, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
 		return "", "", err

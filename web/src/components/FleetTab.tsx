@@ -554,7 +554,7 @@ export const FleetTab: React.FC = () => {
             </button>
           </div>
           <p className="text-[11px] text-slate-500 font-mono break-all">
-            SSH 命令行同样支持零参数向导: <code className="text-emerald-300">singctl fl bootstrap</code>
+            SSH 命令行同样支持零参数向导: <code className="text-emerald-300">singctl fl new</code>
           </p>
         </div>
       ) : (

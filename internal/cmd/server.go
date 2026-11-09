@@ -66,14 +66,8 @@ func newInstallServerCmd(configPath, version string) *cobra.Command {
 					return err
 				}
 
-				if err := serverweb.InstallSystemdService(resolvedPath); err != nil {
-					_ = serverweb.StartBackground(serverweb.Options{
-						ConfigPath: resolvedPath,
-						Listen:     fmt.Sprintf("127.0.0.1:%d", cfg.Server.GetWebAdminPort()),
-						Username:   cfg.Server.GetWebAdminUsername(),
-						Password:   cfg.Server.GetWebAdminPassword(),
-						Version:    version,
-					})
+				if err := serverweb.InstallService(resolvedPath); err != nil {
+					logger.Warn("安装服务端管理面板服务警告: %v", err)
 				}
 				showUnifiedInstallSummary(cfg, sbs, sbt)
 				return nil
@@ -100,14 +94,10 @@ func newInstallServerCmd(configPath, version string) *cobra.Command {
 					}
 				}
 				return nil
-			case "substore", "sub", "subhub":
-				sbt := deploy.NewSubstore(cfg, "")
-				sbt.ConfigPath = resolvedPath
-				return sbt.DeploySubstore()
 			case "warp":
 				return deploy.DeployWarp()
 			default:
-				return fmt.Errorf("unknown target: %s (must be common, caddy, singbox, substore, or warp)", args[0])
+				return fmt.Errorf("unknown target: %s (must be common, caddy, singbox, or warp)", args[0])
 			}
 		},
 	}
@@ -118,12 +108,11 @@ func newInstallServerCmd(configPath, version string) *cobra.Command {
 func newUninstallServerCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "uninstall",
-		Short: "卸载服务端组件 / Uninstall server components (caddy|singbox|substore|warp)",
+		Short: "卸载服务端组件 / Uninstall server components (caddy|singbox|warp)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				logger.Info("Uninstalling all server components...")
-				_ = serverweb.UninstallSystemdService()
-				_, _ = serverweb.StopServerWeb()
+				_ = serverweb.UninstallService()
 
 				if err := deploy.UninstallCaddy(); err != nil {
 					logger.Warn("Failed to uninstall Caddy: %v", err)
@@ -147,12 +136,10 @@ func newUninstallServerCmd() *cobra.Command {
 				return deploy.UninstallCaddy()
 			case "singbox":
 				return deploy.UninstallSingbox()
-			case "substore", "sub", "subhub":
-				return deploy.UninstallSubstore()
 			case "warp":
 				return deploy.UninstallWarp()
 			default:
-				return fmt.Errorf("unknown target: %s (must be caddy, singbox, substore, or warp)", target)
+				return fmt.Errorf("unknown target: %s (must be caddy, singbox, or warp)", target)
 			}
 		},
 	}
@@ -181,7 +168,7 @@ func NewServerCmd(configPath string, version ...string) *cobra.Command {
 	cmd.AddCommand(NewSyncServerCmd(configPath))
 	cmd.AddCommand(NewInfoServerCmd(configPath))
 	cmd.AddCommand(NewTerminalCmd(configPath))
-	cmd.AddCommand(newServerWebCmd(configPath, ver))
+	cmd.AddCommand(NewServerWebCmd(configPath, ver))
 	cmd.AddCommand(newServerSubCmd(configPath, ver))
 	cmd.AddCommand(newServerTopCmd())
 	cmd.AddCommand(NewFleetCmd(configPath))
@@ -198,7 +185,7 @@ func newServerCheckCmd(configPath string) *cobra.Command {
 	return &cobra.Command{
 		Use:     "check-update [component]",
 		Aliases: []string{"checkver", "cu"},
-		Short:   "检查核心组件远端是否有新版本 / Check latest remote versions (singbox|caddy|subhub|warp)",
+		Short:   "检查外部核心组件远端是否有新版本 / Check latest remote versions (singbox|caddy|warp)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			target := "singbox"
 			if len(args) > 0 {
@@ -228,7 +215,7 @@ func newServerUpdateCmd(configPath string) *cobra.Command {
 	return &cobra.Command{
 		Use:     "update [component]",
 		Aliases: []string{"upgrade", "up"},
-		Short:   "平滑升级服务端核心组件 / Smooth upgrade server components (singbox|caddy|subhub|warp|all)",
+		Short:   "平滑升级外部核心组件 / Smooth upgrade server components (singbox|caddy|warp|all)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			target := "all"
 			if len(args) > 0 {

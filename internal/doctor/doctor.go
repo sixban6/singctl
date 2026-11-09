@@ -283,8 +283,8 @@ func checkBBR(r *DoctorReport) {
 
 func checkPorts(cfg *config.Config, r *DoctorReport) {
 	ports := []int{80, 443}
-	if cfg != nil && cfg.Server.GetNodePort() != 443 {
-		ports = append(ports, cfg.Server.GetNodePort())
+	if cfg != nil && cfg.Server.GetVlessPort() != 443 {
+		ports = append(ports, cfg.Server.GetVlessPort())
 	}
 	if cfg != nil && cfg.Server.GetWebAdminPort() > 0 {
 		ports = append(ports, cfg.Server.GetWebAdminPort())
@@ -363,8 +363,8 @@ func checkTLSCert(cfg *config.Config, r *DoctorReport) {
 		return
 	}
 
-	nodePort := cfg.Server.GetNodePort()
-	targetAddr := fmt.Sprintf("%s:%d", domain, nodePort)
+	vlessPort := cfg.Server.GetVlessPort()
+	targetAddr := fmt.Sprintf("%s:%d", domain, vlessPort)
 	tlsCfg := &tls.Config{
 		ServerName:         domain,
 		InsecureSkipVerify: false,
@@ -372,7 +372,7 @@ func checkTLSCert(cfg *config.Config, r *DoctorReport) {
 	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 3 * time.Second}, "tcp", targetAddr, tlsCfg)
 	if err != nil {
 		// NAT 共享 IP 小鸡内部往往不支持 Hairpin NAT (容器内直连自身公网 IP 端口超时)，回退通过本地回环验证同一网关与真实 ACME 证书链
-		conn, err = tls.DialWithDialer(&net.Dialer{Timeout: 2 * time.Second}, "tcp", fmt.Sprintf("127.0.0.1:%d", nodePort), tlsCfg)
+		conn, err = tls.DialWithDialer(&net.Dialer{Timeout: 2 * time.Second}, "tcp", fmt.Sprintf("127.0.0.1:%d", vlessPort), tlsCfg)
 	}
 	if err != nil {
 		r.Items = append(r.Items, DoctorItem{

@@ -181,29 +181,19 @@ func newSniCmd(configPath string) *cobra.Command {
 	}
 }
 
-// NewSyncServerCmd creates the command to sync latest node credentials from sing-box to SubHub.
+// NewSyncServerCmd creates the command to sync latest server config to sing-box, Caddyfile, and SubHub.
 func NewSyncServerCmd(configPath string) *cobra.Command {
 	var restart bool
 	var tag string
 
 	cmd := &cobra.Command{
-		Use:     "sync [target]",
-		Aliases: []string{"ss", "sync-substore"},
-		Short:   "同步最新节点信息到 SubHub / Sync latest node info to SubHub (substore)",
-		Args:    cobra.MaximumNArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			target := "substore"
-			if len(args) > 0 {
-				target = args[0]
-			}
-
-			switch target {
-			case "substore", "sub-store", "subhub", "sb", "singbox":
-				resolvedPath := resolveConfigPath(cmd, configPath)
-				return syncNodeToSubstore(resolvedPath, restart, tag)
-			default:
-				return fmt.Errorf("unknown target: %s (must be substore, subhub, sb, or singbox)", target)
-			}
+		Use:     "sync",
+		Aliases: []string{"ss"},
+		Short:   "同步最新配置到本机节点、Caddy与SubHub / Sync latest server config to sing-box, Caddy, and SubHub",
+		Args:    cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			resolvedPath := resolveConfigPath(cmd, configPath)
+			return syncNodeToSubstore(resolvedPath, restart, tag)
 		},
 	}
 
@@ -294,15 +284,15 @@ func showServerInfo(configPath string) error {
 	}
 
 	sbt := deploy.NewSubstore(cfg, "")
-	showUnifiedServerPanel(cfg, sbs, sbt, "📌 SingCtl 服务端核心配置与连接信息")
+	ShowUnifiedServerPanel(cfg, sbs, sbt, "📌 SingCtl 服务端核心配置与连接信息")
 	return nil
 }
 
 func showUnifiedInstallSummary(cfg *config.Config, sbs *deploy.SingBoxServer, sbt *deploy.Substore) {
-	showUnifiedServerPanel(cfg, sbs, sbt, "🎉 SingCtl 服务端全组件部署成功！")
+	ShowUnifiedServerPanel(cfg, sbs, sbt, "🎉 SingCtl 服务端全组件部署成功！")
 }
 
-func showUnifiedServerPanel(cfg *config.Config, sbs *deploy.SingBoxServer, sbt *deploy.Substore, title string) {
+func ShowUnifiedServerPanel(cfg *config.Config, sbs *deploy.SingBoxServer, sbt *deploy.Substore, title string) {
 	domain := cfg.Server.GetSubstoreDomain()
 	if domain == "" {
 		domain = cfg.Server.GetNodeDomain()

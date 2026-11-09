@@ -46,8 +46,8 @@ type GroupFailoverState struct {
 	mu              sync.Mutex
 	failoverOrigin  map[string]string // group -> original target before failover (e.g. "Game" -> "#Auto")
 	failoverCurrent map[string]string // group -> target set by failover (e.g. "Game" -> "#VPS")
-	probeURLs       []string
-	probeTimeout    time.Duration
+	ProbeURLs       []string
+	ProbeTimeout    time.Duration
 }
 
 // NewGroupFailoverState creates a new failover state tracker.
@@ -55,8 +55,8 @@ func NewGroupFailoverState() *GroupFailoverState {
 	return &GroupFailoverState{
 		failoverOrigin:  make(map[string]string),
 		failoverCurrent: make(map[string]string),
-		probeURLs:       defaultProbeURLs,
-		probeTimeout:    groupProbeTimeout,
+		ProbeURLs:       defaultProbeURLs,
+		ProbeTimeout:    groupProbeTimeout,
 	}
 }
 
@@ -209,11 +209,11 @@ func (s *GroupFailoverState) ensureSubSelectorHealthy(
 }
 
 func (s *GroupFailoverState) probeOutboundAlive(ctx context.Context, base, secret, target string) (int, bool) {
-	urls := s.probeURLs
+	urls := s.ProbeURLs
 	if len(urls) == 0 {
 		urls = defaultProbeURLs
 	}
-	timeout := s.probeTimeout
+	timeout := s.ProbeTimeout
 	if timeout <= 0 {
 		timeout = groupProbeTimeout
 	}

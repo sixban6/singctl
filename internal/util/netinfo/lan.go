@@ -11,10 +11,10 @@ import (
 
 // InterfaceCandidate 用于抽象网卡及其 IPv4 地址列表（便于纯内存单元测试）。
 type InterfaceCandidate struct {
-	Name       string
-	Up         bool
-	Loopback   bool
-	IPv4Addrs  []string
+	Name      string
+	Up        bool
+	Loopback  bool
+	IPv4Addrs []string
 }
 
 // GetPrimaryLANIPv4 获取本机首选局域网（RFC1918 私网）IPv4 地址，供内部管理面板安全绑定。
@@ -189,7 +189,7 @@ func getOpenWrtPrimaryLANIP() string {
 		out, err := exec.CommandContext(ctx, "ubus", "call", "network.interface.lan", "status").Output()
 		cancel()
 		if err == nil && len(out) > 0 {
-			if ip := parseUbusLANStatusIP(out); ip != "" {
+			if ip := ParseUbusLANStatusIP(out); ip != "" {
 				return ip
 			}
 		}
@@ -198,7 +198,7 @@ func getOpenWrtPrimaryLANIP() string {
 	return ""
 }
 
-func parseUbusLANStatusIP(raw []byte) string {
+func ParseUbusLANStatusIP(raw []byte) string {
 	var status struct {
 		IPv4Address []struct {
 			Address string `json:"address"`

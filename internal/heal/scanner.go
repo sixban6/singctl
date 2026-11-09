@@ -35,7 +35,7 @@ func Scan(ctx context.Context, configPath string, currentSingctlVer string) Stat
 	}
 
 	statePath := ResolveStateFilePath(configPath)
-	persisted := loadPersistedState(statePath)
+	persisted := LoadPersistedState(statePath)
 
 	var (
 		coreStatus   CoreLayerStatus
@@ -375,8 +375,8 @@ func mapProcessToServiceUnit(pid, comm string) string {
 		if strings.Contains(s, " sub") {
 			return "singctl-sub"
 		}
-		if strings.Contains(s, " web") {
-			return "singctl-web"
+		if strings.Contains(s, " ui") || strings.Contains(s, " web") {
+			return "singctl-ui"
 		}
 	}
 	return ""

@@ -33,7 +33,7 @@ type IPGeoInfo struct {
 	Geo         string `json:"geo,omitempty"` // 格式化展示，例如 "美国 · 洛杉矶" 或 "中国 · 深圳"
 }
 
-type geoCacheEntry struct {
+type GeoCacheEntry struct {
 	Info      IPGeoInfo `json:"info"`
 	ExpiresAt time.Time `json:"expiresAt"`
 }
@@ -41,14 +41,14 @@ type geoCacheEntry struct {
 // IPGeoResolver 支持批量解析 (Batch API)、/24 网段归属地共享与 0600 磁盘持久化的 IP 地理信息解析器
 type IPGeoResolver struct {
 	mu           sync.RWMutex
-	cache        map[string]geoCacheEntry
+	Cache        map[string]GeoCacheEntry
 	subnetCache  map[string]IPGeoInfo
 	inFlight     map[string]bool
 	pendingQueue []string
 	filePath     string
 	dirty        bool
 	lastSaveAt   time.Time
-	httpClient   *http.Client
+	HTTPClient   *http.Client
 	batchRunning atomic.Bool
 }
 
@@ -201,7 +201,7 @@ func resolveCountryDisplayName(countryCode, rawCountry string) string {
 	return cmp.Or(strings.TrimSpace(rawCountry), code)
 }
 
-func formatGeoLabel(countryCode, country, city string) string {
+func FormatGeoLabel(countryCode, country, city string) string {
 	countryDisplay := resolveCountryDisplayName(countryCode, country)
 	city = strings.TrimSpace(city)
 	if city != "" && countryDisplay != "" && !strings.EqualFold(city, country) && city != countryDisplay {
@@ -243,11 +243,11 @@ func NewIPGeoResolver(filePath ...string) *IPGeoResolver {
 		fp = strings.TrimSpace(filePath[0])
 	}
 	r := &IPGeoResolver{
-		cache:       make(map[string]geoCacheEntry),
+		Cache:       make(map[string]GeoCacheEntry),
 		subnetCache: make(map[string]IPGeoInfo),
 		inFlight:    make(map[string]bool),
 		filePath:    fp,
-		httpClient: &http.Client{
+		HTTPClient: &http.Client{
 			Timeout: 2500 * time.Millisecond,
 		},
 	}
@@ -263,30 +263,30 @@ func (r *IPGeoResolver) storeResolvedLocked(ipStr string, info IPGeoInfo, ttl ti
 		info.Flag = CountryCodeToFlag(info.CountryCode)
 	}
 	if info.Geo == "" {
-		info.Geo = formatGeoLabel(info.CountryCode, info.Country, info.City)
+		info.Geo = FormatGeoLabel(info.CountryCode, info.Country, info.City)
 	}
 
-	if len(r.cache) >= maxGeoCacheEntries {
+	if len(r.Cache) >= maxGeoCacheEntries {
 		now := time.Now()
-		for k, v := range r.cache {
+		for k, v := range r.Cache {
 			if now.After(v.ExpiresAt) {
-				delete(r.cache, k)
+				delete(r.Cache, k)
 			}
-			if len(r.cache) <= maxGeoCacheEntries-500 {
+			if len(r.Cache) <= maxGeoCacheEntries-500 {
 				break
 			}
 		}
-		if len(r.cache) >= maxGeoCacheEntries {
-			for k := range r.cache {
-				delete(r.cache, k)
-				if len(r.cache) <= maxGeoCacheEntries-500 {
+		if len(r.Cache) >= maxGeoCacheEntries {
+			for k := range r.Cache {
+				delete(r.Cache, k)
+				if len(r.Cache) <= maxGeoCacheEntries-500 {
 					break
 				}
 			}
 		}
 	}
 
-	r.cache[ipStr] = geoCacheEntry{
+	r.Cache[ipStr] = GeoCacheEntry{
 		Info:      info,
 		ExpiresAt: time.Now().Add(ttl),
 	}
@@ -312,7 +312,7 @@ func (r *IPGeoResolver) SeedCountry(ipStr, countryCode string) {
 	countryCode = strings.ToUpper(strings.TrimSpace(countryCode))
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	entry, exists := r.cache[ipStr]
+	entry, exists := r.Cache[ipStr]
 	if !exists || entry.Info.CountryCode == "" {
 		countryName := resolveCountryDisplayName(countryCode, countryCode)
 		r.storeResolvedLocked(ipStr, IPGeoInfo{
@@ -339,7 +339,7 @@ func (r *IPGeoResolver) Resolve(ipStr string) IPGeoInfo {
 
 	now := time.Now()
 	r.mu.RLock()
-	entry, found := r.cache[ipStr]
+	entry, found := r.Cache[ipStr]
 	var subFallback IPGeoInfo
 	var hasSubFallback bool
 	if !found || entry.Info.CountryCode == "" {
@@ -391,7 +391,7 @@ func (r *IPGeoResolver) ResolveBatch(ctx context.Context, ips []string) map[stri
 			}
 			continue
 		}
-		if entry, ok := r.cache[ip]; ok && now.Before(entry.ExpiresAt) && entry.Info.CountryCode != "" {
+		if entry, ok := r.Cache[ip]; ok && now.Before(entry.ExpiresAt) && entry.Info.CountryCode != "" {
 			out[ip] = entry.Info
 			continue
 		}
@@ -436,7 +436,7 @@ func (r *IPGeoResolver) ResolveBatch(ctx context.Context, ips []string) map[stri
 		if _, done := out[ip]; done {
 			continue
 		}
-		if entry, ok := r.cache[ip]; ok && entry.Info.CountryCode != "" {
+		if entry, ok := r.Cache[ip]; ok && entry.Info.CountryCode != "" {
 			out[ip] = entry.Info
 			continue
 		}
@@ -451,7 +451,7 @@ func (r *IPGeoResolver) ResolveBatch(ctx context.Context, ips []string) map[stri
 		out[ip] = IPGeoInfo{IP: ip}
 	}
 	if r.dirty {
-		r.saveLocked(false)
+		r.SaveLocked(false)
 	}
 	r.mu.Unlock()
 
@@ -481,7 +481,7 @@ func (r *IPGeoResolver) drainBatchLoop() {
 		r.mu.Lock()
 		if len(r.pendingQueue) == 0 {
 			if r.dirty {
-				r.saveLocked(false)
+				r.SaveLocked(false)
 			}
 			r.mu.Unlock()
 			return
@@ -549,7 +549,7 @@ func (r *IPGeoResolver) queryIPAPIBatch(ctx context.Context, ips []string) map[s
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "singctl-serverweb/1.0")
 
-	resp, err := r.httpClient.Do(req)
+	resp, err := r.HTTPClient.Do(req)
 	if err != nil {
 		return out
 	}
@@ -581,7 +581,7 @@ func (r *IPGeoResolver) queryIPAPIBatch(ctx context.Context, ips []string) map[s
 			City:        it.City,
 			ISP:         it.ISP,
 			Flag:        CountryCodeToFlag(it.CountryCode),
-			Geo:         formatGeoLabel(it.CountryCode, countryCN, it.City),
+			Geo:         FormatGeoLabel(it.CountryCode, countryCN, it.City),
 		}
 	}
 	return out
@@ -599,7 +599,7 @@ func (r *IPGeoResolver) queryGeoJSBatch(ctx context.Context, ips []string) map[s
 			continue
 		}
 		req.Header.Set("User-Agent", "singctl-serverweb/1.0")
-		resp, err := r.httpClient.Do(req)
+		resp, err := r.HTTPClient.Do(req)
 		if err != nil {
 			continue
 		}
@@ -627,7 +627,7 @@ func (r *IPGeoResolver) queryGeoJSBatch(ctx context.Context, ips []string) map[s
 				City:        it.City,
 				ISP:         it.OrgName,
 				Flag:        CountryCodeToFlag(it.CountryCode),
-				Geo:         formatGeoLabel(it.CountryCode, countryCN, it.City),
+				Geo:         FormatGeoLabel(it.CountryCode, countryCN, it.City),
 			}
 		}
 	}
@@ -642,7 +642,7 @@ func (r *IPGeoResolver) loadLocked() {
 	if err != nil {
 		return
 	}
-	var entries map[string]geoCacheEntry
+	var entries map[string]GeoCacheEntry
 	if err := json.Unmarshal(raw, &entries); err != nil {
 		return
 	}
@@ -652,8 +652,8 @@ func (r *IPGeoResolver) loadLocked() {
 			continue
 		}
 		ent.Info.Country = resolveCountryDisplayName(ent.Info.CountryCode, ent.Info.Country)
-		ent.Info.Geo = formatGeoLabel(ent.Info.CountryCode, ent.Info.Country, ent.Info.City)
-		r.cache[ip] = ent
+		ent.Info.Geo = FormatGeoLabel(ent.Info.CountryCode, ent.Info.Country, ent.Info.City)
+		r.Cache[ip] = ent
 		if cidr := ComputeSubnetCIDR(ip); cidr != "" {
 			r.subnetCache[cidr] = IPGeoInfo{
 				Country:     ent.Info.Country,
@@ -666,7 +666,7 @@ func (r *IPGeoResolver) loadLocked() {
 	}
 }
 
-func (r *IPGeoResolver) saveLocked(force bool) {
+func (r *IPGeoResolver) SaveLocked(force bool) {
 	if r.filePath == "" {
 		return
 	}
@@ -677,7 +677,7 @@ func (r *IPGeoResolver) saveLocked(force bool) {
 	r.lastSaveAt = now
 	r.dirty = false
 
-	raw, err := json.Marshal(r.cache)
+	raw, err := json.Marshal(r.Cache)
 	if err != nil {
 		return
 	}

@@ -28,32 +28,32 @@ import (
 const (
 	envWebBackground = "SINGCTL_WEB_BACKGROUND"
 	webReadyFd       = 3
-	webStateName     = "singctl-web.pid"
+	WebStateName     = "singctl-web.pid"
 	webLogName       = "singctl-web.log"
 )
 
 // webState 后台运行状态文件内容
-type webState struct {
+type WebState struct {
 	Pid    int    `json:"pid"`
 	Listen string `json:"listen"`
 }
 
 var (
-	errWebAlreadyRunning = errors.New("webui already running")
+	ErrWebAlreadyRunning = errors.New("webui already running")
 	// 测试钩子
-	webStatePathOverride   string
+	WebStatePathOverride   string
 	webProcMatchesOverride func(pid int) bool
 )
 
 // WebStatePath 状态文件路径
 func WebStatePath() string {
-	if webStatePathOverride != "" {
-		return webStatePathOverride
+	if WebStatePathOverride != "" {
+		return WebStatePathOverride
 	}
 	if runtime.GOOS == "windows" {
-		return filepath.Join(os.Getenv("TEMP"), webStateName)
+		return filepath.Join(os.Getenv("TEMP"), WebStateName)
 	}
-	return filepath.Join("/tmp", webStateName)
+	return filepath.Join("/tmp", WebStateName)
 }
 
 // WebLogPath 后台运行日志路径
@@ -71,20 +71,20 @@ func IsBackgroundChild() bool {
 
 // ───────────────────────── 状态文件 ─────────────────────────
 
-func readWebState() (webState, error) {
+func ReadWebState() (WebState, error) {
 	data, err := os.ReadFile(WebStatePath())
 	if err != nil {
-		return webState{}, err
+		return WebState{}, err
 	}
-	var st webState
+	var st WebState
 	if err := json.Unmarshal(data, &st); err != nil {
-		return webState{}, err
+		return WebState{}, err
 	}
 	return st, nil
 }
 
 // writeWebStateAtomic 原子写入状态文件(先写临时文件再 rename,避免读到半截内容)
-func writeWebStateAtomic(st webState) error {
+func WriteWebStateAtomic(st WebState) error {
 	b, err := json.Marshal(st)
 	if err != nil {
 		return err
@@ -101,7 +101,7 @@ func writeWebStateAtomic(st webState) error {
 // 实现：先写临时文件再 os.Link —— 目标存在时原子失败，避免 O_EXCL
 // “先建空文件后写内容”的窗口期被并发者误判为残留锁清除。
 // 文件已存在时:PID 存活且命令行含 web → 已在运行;否则视为残留锁清除后重试一次。
-func acquireWebLock(st webState) error {
+func AcquireWebLock(st WebState) error {
 	b, _ := json.Marshal(st)
 	target := WebStatePath()
 	tmp := fmt.Sprintf("%s.new-%d", target, os.Getpid())
@@ -119,13 +119,13 @@ func acquireWebLock(st webState) error {
 			return fmt.Errorf("failed to claim web state: %w", err)
 		}
 
-		old, rerr := readWebState()
-		if rerr == nil && webProcMatches(old.Pid) {
-			return errWebAlreadyRunning
+		old, rerr := ReadWebState()
+		if rerr == nil && WebProcMatches(old.Pid) {
+			return ErrWebAlreadyRunning
 		}
 		_ = os.Remove(target)
 	}
-	return errWebAlreadyRunning
+	return ErrWebAlreadyRunning
 }
 
 // ───────────────────────── 进程校验 ─────────────────────────
@@ -133,11 +133,11 @@ func acquireWebLock(st webState) error {
 // webProcMatches 判断 PID 是否为运行中的 WebUI 进程。
 // 看门狗与 WebUI 同为 singctl 可执行文件,无法只靠进程名区分,
 // 因此校验完整命令行中是否含 web/w 子命令参数(防 PID 回绕误杀无关进程)。
-func webProcMatches(pid int) bool {
+func WebProcMatches(pid int) bool {
 	if webProcMatchesOverride != nil {
 		return webProcMatchesOverride(pid)
 	}
-	if !processAlive(pid) {
+	if !ProcessAlive(pid) {
 		return false
 	}
 
@@ -167,7 +167,7 @@ func webProcMatches(pid int) bool {
 	return true
 }
 
-func processAlive(pid int) bool {
+func ProcessAlive(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
@@ -199,7 +199,7 @@ func processAlive(pid int) bool {
 
 // ChildReady 子进程就绪回调:覆写状态文件(带上真实监听地址)并通知父进程。
 func ChildReady(listenAddr string) {
-	_ = writeWebStateAtomic(webState{Pid: os.Getpid(), Listen: listenAddr})
+	_ = WriteWebStateAtomic(WebState{Pid: os.Getpid(), Listen: listenAddr})
 
 	if runtime.GOOS == "windows" {
 		return
@@ -227,9 +227,9 @@ func InstallChildSignalCleanup() {
 
 // StartBackground 后台启动 WebUI(父进程路径)。
 func StartBackground(opts Options) error {
-	if err := acquireWebLock(webState{Pid: os.Getpid(), Listen: opts.Listen}); err != nil {
-		if errors.Is(err, errWebAlreadyRunning) {
-			if st, rerr := readWebState(); rerr == nil {
+	if err := AcquireWebLock(WebState{Pid: os.Getpid(), Listen: opts.Listen}); err != nil {
+		if errors.Is(err, ErrWebAlreadyRunning) {
+			if st, rerr := ReadWebState(); rerr == nil {
 				logger.Error("WebUI 已在后台运行 (pid=%d, %s)", st.Pid, st.Listen)
 			} else {
 				logger.Error("WebUI 已在后台运行")
@@ -295,13 +295,13 @@ func StartBackground(opts Options) error {
 		return fmt.Errorf("webui background start failed: %w", rerr)
 	}
 
-	st, serr := readWebState()
+	st, serr := ReadWebState()
 	if serr != nil {
 		logger.Success("WebUI 已在后台启动 (pid=%d)", cmd.Process.Pid)
 		return nil
 	}
 	logger.Success("WebUI 已在后台启动 (pid=%d)", st.Pid)
-	for _, u := range formatListenURLs(st.Listen) {
+	for _, u := range FormatListenURLs(st.Listen) {
 		logger.Info("  ➜  http://%s", u)
 	}
 	if opts.Password == "" {
@@ -336,10 +336,10 @@ func waitWebReady(r *os.File, timeout time.Duration) error {
 }
 
 // ListenURLs 把监听地址转成可访问的 URL 列表(导出版,供 cmd 层展示)
-func ListenURLs(listen string) []string { return formatListenURLs(listen) }
+func ListenURLs(listen string) []string { return FormatListenURLs(listen) }
 
 // formatListenURLs 把监听地址转成可访问的 URL 列表(通配地址展开为 LAN/loopback)
-func formatListenURLs(listen string) []string {
+func FormatListenURLs(listen string) []string {
 	host, port, err := net.SplitHostPort(listen)
 	if err != nil {
 		return []string{listen}
@@ -358,12 +358,12 @@ func formatListenURLs(listen string) []string {
 
 // StopWeb 停止后台 WebUI。返回是否真的执行了停止( false = 本来就没在运行)。
 func StopWeb() (bool, error) {
-	st, err := readWebState()
+	st, err := ReadWebState()
 	if err != nil {
 		return false, nil // 状态文件不存在 → 未在运行
 	}
 
-	if !webProcMatches(st.Pid) {
+	if !WebProcMatches(st.Pid) {
 		// PID 已死或被无关进程复用 → 残留文件,清理即可
 		_ = os.Remove(WebStatePath())
 		return false, nil
@@ -394,19 +394,19 @@ func StopWeb() (bool, error) {
 func waitWebExit(pid int, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if !processAlive(pid) {
+		if !ProcessAlive(pid) {
 			return true
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	return !processAlive(pid)
+	return !ProcessAlive(pid)
 }
 
 // WebStatus 查询后台运行状态
-func WebStatus() (webState, bool) {
-	st, err := readWebState()
+func WebStatus() (WebState, bool) {
+	st, err := ReadWebState()
 	if err != nil {
-		return webState{}, false
+		return WebState{}, false
 	}
-	return st, webProcMatches(st.Pid)
+	return st, WebProcMatches(st.Pid)
 }

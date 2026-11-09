@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const maxAuditLogs = 50
+const MaxAuditLogs = 50
 
 // AuditEntry 最近管理操作审计记录 (绝对不记录任何密码、会话令牌或敏感秘钥)
 type AuditEntry struct {
@@ -33,7 +33,7 @@ func NewAuditManager(filePath ...string) *AuditManager {
 		fp = strings.TrimSpace(filePath[0])
 	}
 	m := &AuditManager{
-		logs:     make([]AuditEntry, 0, maxAuditLogs),
+		logs:     make([]AuditEntry, 0, MaxAuditLogs),
 		filePath: fp,
 	}
 	m.loadLocked()
@@ -59,10 +59,10 @@ func (m *AuditManager) Record(ip, action string) {
 
 	// 最新记录插入切片头部
 	m.logs = append([]AuditEntry{entry}, m.logs...)
-	if len(m.logs) > maxAuditLogs {
-		m.logs = m.logs[:maxAuditLogs]
+	if len(m.logs) > MaxAuditLogs {
+		m.logs = m.logs[:MaxAuditLogs]
 	}
-	m.saveLocked()
+	m.SaveLocked()
 }
 
 // List 获取最近管理操作列表 (最新的在前)
@@ -91,13 +91,13 @@ func (m *AuditManager) loadLocked() {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if len(loaded) > maxAuditLogs {
-		loaded = loaded[:maxAuditLogs]
+	if len(loaded) > MaxAuditLogs {
+		loaded = loaded[:MaxAuditLogs]
 	}
 	m.logs = loaded
 }
 
-func (m *AuditManager) saveLocked() {
+func (m *AuditManager) SaveLocked() {
 	if m.filePath == "" {
 		return
 	}

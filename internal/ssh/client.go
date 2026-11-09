@@ -109,7 +109,7 @@ func (c *Client) Run(cmd string) (string, error) {
 
 	execCmd := cmd
 	if c.host.User != "root" && !strings.HasPrefix(strings.TrimSpace(cmd), "sudo") {
-		execCmd = fmt.Sprintf("sudo -n sh -c %s", escapeShellArg(cmd))
+		execCmd = fmt.Sprintf("sudo -n sh -c %s", EscapeShellArg(cmd))
 	}
 
 	err = session.Run(execCmd)
@@ -149,7 +149,7 @@ KEY=%s
 if ! grep -q -F "$KEY" ~/.ssh/authorized_keys; then
     printf "%%s\n" "$KEY" >> ~/.ssh/authorized_keys
 fi
-`, escapeShellArg(pubKeyStr))
+`, EscapeShellArg(pubKeyStr))
 
 	session, err := c.client.NewSession()
 	if err != nil {
@@ -160,7 +160,7 @@ fi
 	var stderrBuf bytes.Buffer
 	session.Stderr = &stderrBuf
 
-	if err := session.Run(fmt.Sprintf("sh -c %s", escapeShellArg(remoteScript))); err != nil {
+	if err := session.Run(fmt.Sprintf("sh -c %s", EscapeShellArg(remoteScript))); err != nil {
 		return fmt.Errorf("failed to inject public key: %v (stderr: %s)", err, strings.TrimSpace(stderrBuf.String()))
 	}
 
@@ -184,7 +184,7 @@ func (a *AliasClient) Run(cmd string) (string, error) {
 
 	execCmd := cmd
 	if a.host.User != "" && a.host.User != "root" && !strings.HasPrefix(strings.TrimSpace(cmd), "sudo") {
-		execCmd = fmt.Sprintf("sudo -n sh -c %s", escapeShellArg(cmd))
+		execCmd = fmt.Sprintf("sudo -n sh -c %s", EscapeShellArg(cmd))
 	}
 
 	sshCmd := exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", a.host.Alias, execCmd)
@@ -229,7 +229,7 @@ KEY=%s
 if ! grep -q -F "$KEY" ~/.ssh/authorized_keys; then
     printf "%%s\n" "$KEY" >> ~/.ssh/authorized_keys
 fi
-`, escapeShellArg(pubKeyStr))
+`, EscapeShellArg(pubKeyStr))
 
 	_, err = a.Run(remoteScript)
 	return err
@@ -358,6 +358,6 @@ func ProbePasswordLogin(h *Host, port int, password string, timeout time.Duratio
 	return true, nil
 }
 
-func escapeShellArg(arg string) string {
+func EscapeShellArg(arg string) string {
 	return "'" + strings.ReplaceAll(arg, "'", "'\"'\"'") + "'"
 }

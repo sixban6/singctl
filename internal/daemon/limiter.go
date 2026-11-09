@@ -15,11 +15,11 @@ const (
 
 // RestartLimiter 重启频率限制器
 type RestartLimiter struct {
-	maxRestarts    int           // 最大重启次数
-	timeWindow     time.Duration // 时间窗口
-	restartTimes   []time.Time   // 重启时间记录
-	totalRestarts  int64         // 累计重启总数(跨窗口, 随状态文件持久化)
-	mu             sync.Mutex    // 并发保护
+	maxRestarts   int           // 最大重启次数
+	timeWindow    time.Duration // 时间窗口
+	restartTimes  []time.Time   // 重启时间记录
+	totalRestarts int64         // 累计重启总数(跨窗口, 随状态文件持久化)
+	mu            sync.Mutex    // 并发保护
 }
 
 // NewRestartLimiter 创建重启限制器（内存态，不读取持久化状态）。
@@ -47,7 +47,7 @@ func NewRestartLimiterWithMax(max int) *RestartLimiter {
 // 兼容旧格式(纯时间戳数组, 无累计总数——总数从 0 重新累计)。
 func NewRestartLimiterFromState(max int) *RestartLimiter {
 	rl := NewRestartLimiterWithMax(max)
-	if data, err := os.ReadFile(getStateFilePath()); err == nil {
+	if data, err := os.ReadFile(GetStateFilePath()); err == nil {
 		var legacy []int64
 		if json.Unmarshal(data, &legacy) == nil {
 			// 旧格式: 纯时间戳数组
@@ -90,9 +90,9 @@ func (rl *RestartLimiter) persist() {
 	if err != nil {
 		return
 	}
-	tmp := getStateFilePath() + ".tmp"
+	tmp := GetStateFilePath() + ".tmp"
 	if os.WriteFile(tmp, b, 0644) == nil {
-		_ = os.Rename(tmp, getStateFilePath())
+		_ = os.Rename(tmp, GetStateFilePath())
 	}
 }
 

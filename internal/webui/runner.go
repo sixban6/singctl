@@ -19,43 +19,43 @@ const actionTimeout = 30 * time.Minute
 var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
 
 // actionDef 动作定义:name → CLI 参数
-type actionDef struct {
-	title string
-	build func(params map[string]any) []string
+type ActionDef struct {
+	Title string
+	Build func(params map[string]any) []string
 }
 
 // actions 动作白名单。所有动作都通过重新执行 singctl 自身完成,
 // 与命令行行为完全一致,不侵入既有逻辑。
-var actions = map[string]actionDef{
+var Actions = map[string]ActionDef{
 	// sing-box 客户端
-	"sb-start":   {title: "启动 sing-box", build: fixed("sb", "start")},
-	"sb-stop":    {title: "停止 sing-box", build: fixed("sb", "stop")},
-	"sb-restart": {title: "重启 sing-box", build: fixed("sb", "restart")},
-	"sb-gen":     {title: "生成 sing-box 配置", build: fixed("sb", "gen")},
-	"sb-install": {title: "安装 sing-box", build: fixed("sb", "install")},
-	"sb-update":  {title: "更新 sing-box", build: fixed("sb", "update")},
+	"sb-start":   {Title: "启动 sing-box", Build: fixed("sb", "start")},
+	"sb-stop":    {Title: "停止 sing-box", Build: fixed("sb", "stop")},
+	"sb-restart": {Title: "重启 sing-box", Build: fixed("sb", "restart")},
+	"sb-gen":     {Title: "生成 sing-box 配置", Build: fixed("sb", "gen")},
+	"sb-install": {Title: "安装 sing-box", Build: fixed("sb", "install")},
+	"sb-update":  {Title: "更新 sing-box", Build: fixed("sb", "update")},
 
 	// 规则集缓存
-	"cache-update": {title: "刷新规则集缓存", build: fixed("sb", "cache", "update")},
-	"cache-clear":  {title: "清空规则集缓存", build: fixed("sb", "cache", "clear")},
+	"cache-update": {Title: "刷新规则集缓存", Build: fixed("sb", "cache", "update")},
+	"cache-clear":  {Title: "清空规则集缓存", Build: fixed("sb", "cache", "clear")},
 
 	// 守护进程
-	"dm-start": {title: "启动守护进程", build: fixed("dm", "start")},
-	"dm-stop":  {title: "停止守护进程", build: fixed("dm", "stop")},
+	"dm-start": {Title: "启动守护进程", Build: fixed("dm", "start")},
+	"dm-stop":  {Title: "停止守护进程", Build: fixed("dm", "stop")},
 
 	// Tailscale
-	"ts-start":   {title: "启动 Tailscale", build: tsStartArgs},
-	"ts-stop":    {title: "停止 Tailscale", build: fixed("ts", "stop")},
-	"ts-install": {title: "安装 Tailscale", build: fixed("ts", "install")},
-	"ts-update":  {title: "更新 Tailscale", build: fixed("ts", "update")},
+	"ts-start":   {Title: "启动 Tailscale", Build: TsStartArgs},
+	"ts-stop":    {Title: "停止 Tailscale", Build: fixed("ts", "stop")},
+	"ts-install": {Title: "安装 Tailscale", Build: fixed("ts", "install")},
+	"ts-update":  {Title: "更新 Tailscale", Build: fixed("ts", "update")},
 
 	// 防火墙
-	"fw-enable":  {title: "启用防火墙加固", build: fixed("fw", "enable")},
-	"fw-disable": {title: "禁用防火墙加固", build: fixed("fw", "disable")},
+	"fw-enable":  {Title: "启用防火墙加固", Build: fixed("fw", "enable")},
+	"fw-disable": {Title: "禁用防火墙加固", Build: fixed("fw", "disable")},
 
 	// 工具
-	"update-self": {title: "更新 singctl 自身", build: fixed("update", "self")},
-	"speedtest":   {title: "带宽测速", build: fixed("ut", "testbd")},
+	"update-self": {Title: "更新 singctl 自身", Build: fixed("update", "self")},
+	"speedtest":   {Title: "带宽测速", Build: fixed("ut", "testbd")},
 }
 
 func fixed(args ...string) func(map[string]any) []string {
@@ -63,7 +63,7 @@ func fixed(args ...string) func(map[string]any) []string {
 }
 
 // tsStartArgs 将 Web 参数映射为 ts start 的命令行参数
-func tsStartArgs(p map[string]any) []string {
+func TsStartArgs(p map[string]any) []string {
 	args := []string{"ts", "start"}
 	mode := paramString(p, "mode")
 	switch mode {
@@ -118,7 +118,7 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	def, ok := actions[body.Name]
+	def, ok := Actions[body.Name]
 	if !ok {
 		writeJSONError(w, http.StatusBadRequest, "未知动作: "+body.Name)
 		return
@@ -137,7 +137,7 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	args := append([]string{"--config", s.opts.ConfigPath}, def.build(body.Params)...)
+	args := append([]string{"--config", s.opts.ConfigPath}, def.Build(body.Params)...)
 
 	ctx, cancel := context.WithTimeout(context.Background(), actionTimeout)
 	defer cancel()
@@ -148,14 +148,14 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
 
-	stream := newNDJSONWriter(w)
+	stream := NewNDJSONWriter(w)
 	cmd.Stdout = stream
 	cmd.Stderr = stream
 
 	stream.write(map[string]any{
 		"t":     "start",
-		"title": def.title,
-		"cmd":   "singctl " + strings.Join(def.build(body.Params), " "),
+		"title": def.Title,
+		"cmd":   "singctl " + strings.Join(def.Build(body.Params), " "),
 	})
 
 	waitErr := cmd.Run()
@@ -177,7 +177,7 @@ type ndjsonWriter struct {
 	buf   []byte
 }
 
-func newNDJSONWriter(w http.ResponseWriter) *ndjsonWriter {
+func NewNDJSONWriter(w http.ResponseWriter) *ndjsonWriter {
 	flush := func() {}
 	if f, ok := w.(http.Flusher); ok {
 		flush = f.Flush

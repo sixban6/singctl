@@ -200,7 +200,8 @@ type ServerConfig struct {
 	NodeTag            string            `yaml:"node_tag"`             // (可选) 节点地区/名称标识 (例如: los, sg, hk)，留空自动根据公网 IP 智能识别
 	SBDomain           string            `yaml:"sb_domain"`            // 兼容旧配置：默认主域名
 	NodeDomain         string            `yaml:"node_domain"`          // 节点主域名 (Hysteria 2 / VLESS 分享链接主机)
-	NodePort           int               `yaml:"node_port,omitempty"`  // (可选) 节点对外监听与订阅导出端口 (默认 443；NAT 小鸡可指定可用 TCP+UDP 端口如 11501)
+	Hy2Port            int               `yaml:"hy2_port,omitempty"`   // (可选) Hysteria 2 (UDP QUIC) 对外监听与订阅端口，默认 443
+	VlessPort          int               `yaml:"vless_port,omitempty"` // (可选) VLESS Reality (TCP) 与 HTTPS 伪装站对外监听与订阅端口，默认 443
 	SubstoreDomain     string            `yaml:"substore_domain"`      // Sub-Store 专属域名
 	ServerIP           string            `yaml:"server_ip"`            // 公网 IP 地址（选填，未填写时自动探测用于申请 Let's Encrypt 原生 IP 证书）
 	CFDNSKey           string            `yaml:"cf_dns_key"`
@@ -587,11 +588,18 @@ func (s *ServerConfig) GetNodeDomain() string {
 	return strings.TrimSpace(s.SBDomain)
 }
 
-// GetNodePort returns the external port for proxy nodes (Hysteria2 UDP + VLESS Reality TCP + Caddy L4).
-// Defaults to 443 when unset or out of range.
-func (s *ServerConfig) GetNodePort() int {
-	if s != nil && s.NodePort > 0 && s.NodePort <= 65535 {
-		return s.NodePort
+// GetHy2Port returns the external UDP port for Hysteria 2 (defaults to 443 when unset or out of range).
+func (s *ServerConfig) GetHy2Port() int {
+	if s != nil && s.Hy2Port > 0 && s.Hy2Port <= 65535 {
+		return s.Hy2Port
+	}
+	return 443
+}
+
+// GetVlessPort returns the external TCP port for VLESS Reality & Caddy L4 TCP (defaults to 443 when unset or out of range).
+func (s *ServerConfig) GetVlessPort() int {
+	if s != nil && s.VlessPort > 0 && s.VlessPort <= 65535 {
+		return s.VlessPort
 	}
 	return 443
 }
@@ -658,7 +666,7 @@ var knownYAMLKeys = []string{
 	"include", "exclude", "rename", "match", "replace",
 	"github", "mirror_url", "hy2", "up", "down",
 	"tailscale", "auth_key", "use_build", constant.TailscaleSubnets,
-	"server", "node_tag", "sb_domain", "node_domain", "node_port", "substore_domain", "server_ip",
+	"server", "node_tag", "sb_domain", "node_domain", "hy2_port", "vless_port", "substore_domain", "server_ip",
 	"cf_dns_key", "sni", "cors_allowed_origins",
 	"web_terminal", "mtls_ca", "ssh_tunnel_port", "ssh_tunnel_path", "ssh_port",
 	"web_admin", "enabled", "port", "path", "username", "password", "password_pending_ack",
@@ -1056,11 +1064,17 @@ func MigrateConfig(configPath string, templateData []byte) error {
 			setOrAddField(docNode, "server", "node_domain", "")
 		}
 
-		if oldCfg.Server.NodePort > 0 && oldCfg.Server.NodePort <= 65535 {
-			setOrAddField(docNode, "server", "node_port", strconv.Itoa(oldCfg.Server.NodePort))
-		} else if hasYAMLKey(oldServer, "node_port") {
-			removeField(docNode, "server", "node_port")
+		if oldCfg.Server.Hy2Port > 0 && oldCfg.Server.Hy2Port <= 65535 {
+			setOrAddField(docNode, "server", "hy2_port", strconv.Itoa(oldCfg.Server.Hy2Port))
+		} else if hasYAMLKey(oldServer, "hy2_port") {
+			removeField(docNode, "server", "hy2_port")
 		}
+		if oldCfg.Server.VlessPort > 0 && oldCfg.Server.VlessPort <= 65535 {
+			setOrAddField(docNode, "server", "vless_port", strconv.Itoa(oldCfg.Server.VlessPort))
+		} else if hasYAMLKey(oldServer, "vless_port") {
+			removeField(docNode, "server", "vless_port")
+		}
+		removeField(docNode, "server", "node_port")
 
 		if oldCfg.Server.SubstoreDomain != "" {
 			setOrAddField(docNode, "server", "substore_domain", oldCfg.Server.SubstoreDomain)

@@ -38,7 +38,8 @@ type Node struct {
 	Name           string   `json:"name" yaml:"name"`
 	Host           string   `json:"host" yaml:"host"`
 	Domain         string   `json:"domain,omitempty" yaml:"domain,omitempty"`
-	NodePort       int      `json:"nodePort,omitempty" yaml:"node_port,omitempty"`
+	Hy2Port        int      `json:"hy2Port,omitempty" yaml:"hy2_port,omitempty"`
+	VlessPort      int      `json:"vlessPort,omitempty" yaml:"vless_port,omitempty"`
 	DNSAutoManaged bool     `json:"dnsAutoManaged,omitempty" yaml:"dns_auto_managed,omitempty"`
 	Port           int      `json:"port" yaml:"port"`
 	User           string   `json:"user" yaml:"user"`
@@ -86,7 +87,8 @@ type UpsertInput struct {
 	Name           string `json:"name"`
 	Host           string `json:"host"`
 	Domain         string `json:"domain,omitempty"`
-	NodePort       int    `json:"nodePort,omitzero"`
+	Hy2Port        int    `json:"hy2Port,omitzero"`
+	VlessPort      int    `json:"vlessPort,omitzero"`
 	DNSAutoManaged *bool  `json:"dnsAutoManaged,omitzero"`
 	Port           int    `json:"port"`
 	User           string `json:"user"`
@@ -391,23 +393,28 @@ func NormalizeUpsertInput(in UpsertInput) (Node, error) {
 		enabled = *in.Enabled
 	}
 
-	nodePort := in.NodePort
-	if nodePort < 0 || nodePort > 65535 || nodePort == 443 {
-		nodePort = 0
+	hy2Port := in.Hy2Port
+	if hy2Port < 0 || hy2Port > 65535 || hy2Port == 443 {
+		hy2Port = 0
+	}
+	vlessPort := in.VlessPort
+	if vlessPort < 0 || vlessPort > 65535 || vlessPort == 443 {
+		vlessPort = 0
 	}
 
 	return Node{
-		ID:       id,
-		Name:     cmp.Or(strings.TrimSpace(in.Name), id),
-		Host:     strings.TrimSpace(in.Host),
-		NodePort: nodePort,
-		Port:     port,
-		User:     user,
-		AuthType: authType,
-		SSHAlias: strings.TrimSpace(in.SSHAlias),
-		KeyPath:  expandHomePath(strings.TrimSpace(in.KeyPath)),
-		Password: in.Password,
-		Enabled:  enabled,
+		ID:        id,
+		Name:      cmp.Or(strings.TrimSpace(in.Name), id),
+		Host:      strings.TrimSpace(in.Host),
+		Hy2Port:   hy2Port,
+		VlessPort: vlessPort,
+		Port:      port,
+		User:      user,
+		AuthType:  authType,
+		SSHAlias:  strings.TrimSpace(in.SSHAlias),
+		KeyPath:   expandHomePath(strings.TrimSpace(in.KeyPath)),
+		Password:  in.Password,
+		Enabled:   enabled,
 	}, nil
 }
 
@@ -444,11 +451,18 @@ func (s *Store) Upsert(in UpsertInput) (Node, error) {
 	if strings.TrimSpace(in.Domain) != "" {
 		target.Domain = strings.ToLower(strings.TrimSpace(in.Domain))
 	}
-	if in.NodePort > 0 && in.NodePort <= 65535 {
-		if in.NodePort == 443 {
-			target.NodePort = 0
+	if in.Hy2Port > 0 && in.Hy2Port <= 65535 {
+		if in.Hy2Port == 443 {
+			target.Hy2Port = 0
 		} else {
-			target.NodePort = in.NodePort
+			target.Hy2Port = in.Hy2Port
+		}
+	}
+	if in.VlessPort > 0 && in.VlessPort <= 65535 {
+		if in.VlessPort == 443 {
+			target.VlessPort = 0
+		} else {
+			target.VlessPort = in.VlessPort
 		}
 	}
 	if in.DNSAutoManaged != nil {

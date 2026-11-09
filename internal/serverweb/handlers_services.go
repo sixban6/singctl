@@ -131,13 +131,6 @@ func (s *Server) handleUpgradeService(w http.ResponseWriter, r *http.Request) {
 		"message": msg,
 		"results": results,
 	})
-
-	for _, res := range results {
-		if res != nil && res.Component == "subhub" && res.Updated {
-			_ = exec.Command("sh", "-c", "sleep 2 && singctl sr web restart >/dev/null 2>&1").Start()
-			break
-		}
-	}
 }
 
 func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
@@ -279,7 +272,7 @@ func (s *Server) handleServiceConfig(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func writeConfigBackup(path string, content []byte) error {
+func WriteConfigBackup(path string, content []byte) error {
 	bak := fmt.Sprintf("%s.%d.bak", path, time.Now().UnixNano())
 	if err := os.WriteFile(bak, content, 0600); err != nil {
 		return err
@@ -365,7 +358,7 @@ func (s *Server) handleUpdateServiceConfig(w http.ResponseWriter, r *http.Reques
 	}
 
 	if old, err := os.ReadFile(path); err == nil {
-		_ = writeConfigBackup(path, old)
+		_ = WriteConfigBackup(path, old)
 	}
 
 	mode := os.FileMode(0600)

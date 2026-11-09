@@ -133,7 +133,7 @@ type RunResult struct {
 	Status    StatusReport    `json:"status"`
 }
 
-type persistedHealState struct {
+type PersistedHealState struct {
 	Policy     HealPolicy        `json:"policy"`
 	LastStatus *StatusReport     `json:"lastStatus,omitempty"`
 	History    []HealHistoryItem `json:"history"`
@@ -152,14 +152,14 @@ func ResolveStateFilePath(configPath string) string {
 	return filepath.Join(os.TempDir(), "singctl-heal", "security_heal.json")
 }
 
-func loadPersistedState(statePath string) persistedHealState {
+func LoadPersistedState(statePath string) PersistedHealState {
 	stateMu.Lock()
 	defer stateMu.Unlock()
 	return readStateUnlocked(statePath)
 }
 
-func readStateUnlocked(statePath string) persistedHealState {
-	def := persistedHealState{
+func readStateUnlocked(statePath string) PersistedHealState {
+	def := PersistedHealState{
 		Policy:  DefaultPolicy(),
 		History: []HealHistoryItem{},
 	}
@@ -167,7 +167,7 @@ func readStateUnlocked(statePath string) persistedHealState {
 	if err != nil || len(raw) == 0 {
 		return def
 	}
-	var st persistedHealState
+	var st PersistedHealState
 	if err := json.Unmarshal(raw, &st); err != nil {
 		return def
 	}
@@ -180,7 +180,7 @@ func readStateUnlocked(statePath string) persistedHealState {
 	return st
 }
 
-func writeStateUnlocked(statePath string, st persistedHealState) error {
+func writeStateUnlocked(statePath string, st PersistedHealState) error {
 	if err := os.MkdirAll(filepath.Dir(statePath), 0700); err != nil {
 		return err
 	}

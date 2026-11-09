@@ -25,7 +25,7 @@ import (
 )
 
 // sessionCookieName 持久化 Cookie 键名,用于 Safari/PWA 独立沙盒免密免登
-const sessionCookieName = "singctl_session"
+const SessionCookieName = "singctl_session"
 
 //go:embed static
 var staticFS embed.FS
@@ -43,7 +43,7 @@ type Options struct {
 type Server struct {
 	opts Options
 
-	mux *http.ServeMux
+	Mux *http.ServeMux
 
 	// iOS 配置生成缓存: 实时生成需拉订阅(秒级), 缓存让 SFI 同步/重复扫码瞬时返回
 	iosMu       sync.Mutex
@@ -53,42 +53,42 @@ type Server struct {
 
 // New 创建 Web 服务
 func New(opts Options) *Server {
-	s := &Server{opts: opts, mux: http.NewServeMux()}
+	s := &Server{opts: opts, Mux: http.NewServeMux()}
 
 	// 静态资源(同样受鉴权保护;不限方法,避免与 /clash/* 全方法代理模式冲突)
 	staticContent, _ := fs.Sub(staticFS, "static")
 	fileServer := http.FileServer(http.FS(staticContent))
-	s.mux.Handle("/", s.authOnly(fileServer))
+	s.Mux.Handle("/", s.authOnly(fileServer))
 
 	// 只读 API
-	s.mux.HandleFunc("GET /api/status", s.guard(s.handleStatus))
-	s.mux.HandleFunc("GET /api/health", s.guard(s.handleHealth))
-	s.mux.HandleFunc("GET /api/config", s.guard(s.handleConfigGet))
-	s.mux.HandleFunc("PUT /api/config", s.guard(s.handleConfigPut))
-	s.mux.HandleFunc("GET /api/config/raw", s.guard(s.handleConfigRawGet))
-	s.mux.HandleFunc("PUT /api/config/raw", s.guard(s.handleConfigRawPut))
-	s.mux.HandleFunc("GET /api/cache", s.guard(s.handleCache))
-	s.mux.HandleFunc("GET /api/logs", s.guard(s.handleLogs))
+	s.Mux.HandleFunc("GET /api/status", s.guard(s.handleStatus))
+	s.Mux.HandleFunc("GET /api/health", s.guard(s.handleHealth))
+	s.Mux.HandleFunc("GET /api/config", s.guard(s.handleConfigGet))
+	s.Mux.HandleFunc("PUT /api/config", s.guard(s.handleConfigPut))
+	s.Mux.HandleFunc("GET /api/config/raw", s.guard(s.handleConfigRawGet))
+	s.Mux.HandleFunc("PUT /api/config/raw", s.guard(s.handleConfigRawPut))
+	s.Mux.HandleFunc("GET /api/cache", s.guard(s.handleCache))
+	s.Mux.HandleFunc("GET /api/logs", s.guard(s.handleLogs))
 
 	// 登出 API (清除持久化 Cookie)
-	s.mux.HandleFunc("POST /api/logout", s.handleLogout)
-	s.mux.HandleFunc("GET /api/session/url", s.guard(s.handleSessionURL))
+	s.Mux.HandleFunc("POST /api/logout", s.handleLogout)
+	s.Mux.HandleFunc("GET /api/session/url", s.guard(s.handleSessionURL))
 
 	// iOS(sing-box App) 配置下载: 支持扫码 ?password= 鉴权(同时容忍尾斜杠)
-	s.mux.HandleFunc("GET /api/gen/ios", s.guardIOSDownload(s.handleIOSConfig))
-	s.mux.HandleFunc("GET /api/gen/ios/{$}", s.guardIOSDownload(s.handleIOSConfig))
-	s.mux.HandleFunc("GET /api/gen/ios/url", s.guard(s.handleIOSConfigURL))
+	s.Mux.HandleFunc("GET /api/gen/ios", s.guardIOSDownload(s.handleIOSConfig))
+	s.Mux.HandleFunc("GET /api/gen/ios/{$}", s.guardIOSDownload(s.handleIOSConfig))
+	s.Mux.HandleFunc("GET /api/gen/ios/url", s.guard(s.handleIOSConfigURL))
 
 	// sing-box 配置文件编辑
-	s.mux.HandleFunc("GET /api/sbconfig", s.guard(s.handleSbConfigGet))
-	s.mux.HandleFunc("PUT /api/sbconfig", s.guard(s.handleSbConfigPut))
-	s.mux.HandleFunc("POST /api/sbconfig/restore", s.guard(s.handleSbConfigRestore))
+	s.Mux.HandleFunc("GET /api/sbconfig", s.guard(s.handleSbConfigGet))
+	s.Mux.HandleFunc("PUT /api/sbconfig", s.guard(s.handleSbConfigPut))
+	s.Mux.HandleFunc("POST /api/sbconfig/restore", s.guard(s.handleSbConfigRestore))
 
 	// clash 控制面板与 API 反向代理(/clash/* 及根路径直通)
 	s.setupClashProxy()
 
 	// 动作 API(流式输出)
-	s.mux.HandleFunc("POST /api/action", s.guard(s.handleAction))
+	s.Mux.HandleFunc("POST /api/action", s.guard(s.handleAction))
 
 	return s
 }
@@ -104,13 +104,13 @@ func (s *Server) ListenAndServe() error {
 	}
 
 	s.printBanner(ln)
-	srv := &http.Server{Handler: s.mux}
+	srv := &http.Server{Handler: s.Mux}
 	return srv.Serve(ln)
 }
 
 func (s *Server) printBanner(ln net.Listener) {
 	logger.Success("SingCtl WebUI 已启动")
-	for _, a := range formatListenURLs(ln.Addr().String()) {
+	for _, a := range FormatListenURLs(ln.Addr().String()) {
 		logger.Info("  ➜  http://%s", a)
 	}
 	if s.opts.Password == "" {
@@ -137,7 +137,7 @@ func lanIPv4() string {
 }
 
 // sessionToken 根据访问口令派生无状态持久化 Token (HMAC-SHA256)
-func (s *Server) sessionToken() string {
+func (s *Server) SessionToken() string {
 	if s.opts.Password == "" {
 		return ""
 	}
@@ -148,15 +148,15 @@ func (s *Server) sessionToken() string {
 
 // setAuthCookie 若客户端未携带或携带无效 Cookie, 在通过鉴权后下发 30 天持久化 Cookie
 func (s *Server) setAuthCookie(w http.ResponseWriter, r *http.Request) {
-	token := s.sessionToken()
+	token := s.SessionToken()
 	if token == "" {
 		return
 	}
-	if c, err := r.Cookie(sessionCookieName); err == nil && subtle.ConstantTimeCompare([]byte(c.Value), []byte(token)) == 1 {
+	if c, err := r.Cookie(SessionCookieName); err == nil && subtle.ConstantTimeCompare([]byte(c.Value), []byte(token)) == 1 {
 		return
 	}
 	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookieName,
+		Name:     SessionCookieName,
 		Value:    token,
 		Path:     "/",
 		MaxAge:   30 * 86400, // 30 天持久化,完美解决 iOS 添加到主屏幕后频繁要求输密码的问题
@@ -203,10 +203,10 @@ func (s *Server) authorized(r *http.Request) bool {
 	if s.opts.Password == "" {
 		return true
 	}
-	expectedToken := s.sessionToken()
+	expectedToken := s.SessionToken()
 
 	// 1. 持久化 Cookie (最适合 iOS 桌面 WebApp 沙盒持久化)
-	if cookie, err := r.Cookie(sessionCookieName); err == nil && cookie.Value != "" {
+	if cookie, err := r.Cookie(SessionCookieName); err == nil && cookie.Value != "" {
 		if subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(expectedToken)) == 1 {
 			return true
 		}
@@ -257,7 +257,7 @@ func (s *Server) guardIOSDownload(next http.HandlerFunc) http.HandlerFunc {
 // handleLogout 登出并清理 Cookie
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookieName,
+		Name:     SessionCookieName,
 		Value:    "",
 		Path:     "/",
 		MaxAge:   -1,
@@ -277,7 +277,7 @@ func (s *Server) handleSessionURL(w http.ResponseWriter, r *http.Request) {
 		port = "8090"
 	}
 	targetURL := fmt.Sprintf("http://%s:%s/", lanIP, port)
-	token := s.sessionToken()
+	token := s.SessionToken()
 	if token != "" {
 		targetURL += "?token=" + token
 	}

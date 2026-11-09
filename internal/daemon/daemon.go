@@ -83,8 +83,8 @@ func (d *Daemon) Start() error {
 	}
 
 	// 前台：抢占互斥锁（已运行则直接报错）
-	if err := acquirePidLock(); err != nil {
-		if errors.Is(err, errDaemonAlreadyRunning) {
+	if err := AcquirePidLock(); err != nil {
+		if errors.Is(err, ErrDaemonAlreadyRunning) {
 			logger.Error("daemon already running")
 		}
 		return err

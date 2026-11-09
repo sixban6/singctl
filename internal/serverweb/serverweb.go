@@ -42,13 +42,13 @@ type Options struct {
 // Server 服务端 Web 实例
 type Server struct {
 	opts               Options
-	mux                *http.ServeMux
+	Mux                *http.ServeMux
 	subStore           *subhub.Store
 	telemetry          *telemetry.Collector
 	fleet              *fleet.Manager
 	mu                 sync.RWMutex
-	sessions           map[string]sessionRecord
-	sessionsMu         sync.Mutex
+	Sessions           map[string]SessionRecord
+	SessionsMu         sync.Mutex
 	limiter            *IPLimiter
 	audit              *AuditManager
 	geo                *IPGeoResolver
@@ -58,15 +58,15 @@ type Server struct {
 	cliToken           string
 }
 
-type sessionRecord struct {
-	created time.Time
-	last    time.Time
+type SessionRecord struct {
+	Created time.Time
+	Last    time.Time
 }
 
 const (
 	sessionIdleTTL     = 2 * time.Hour
 	sessionAbsoluteTTL = 12 * time.Hour
-	maxActiveSessions  = 50
+	MaxActiveSessions  = 50
 )
 
 // New 创建服务端 Web 实例
@@ -120,11 +120,11 @@ func New(opts Options) *Server {
 	sniffTracker.SetFleetManager(fleetMgr)
 	s := &Server{
 		opts:               opts,
-		mux:                http.NewServeMux(),
+		Mux:                http.NewServeMux(),
 		subStore:           subStore,
 		telemetry:          telemetry.NewCollector(opts.SingBoxConfigPath),
 		fleet:              fleetMgr,
-		sessions:           make(map[string]sessionRecord),
+		Sessions:           make(map[string]SessionRecord),
 		limiter:            limiter,
 		audit:              NewAuditManager(auditFile),
 		geo:                geo,
@@ -138,7 +138,7 @@ func New(opts Options) *Server {
 	staticContent, err := fs.Sub(staticFS, "static")
 	if err == nil {
 		fileServer := http.FileServer(http.FS(staticContent))
-		s.mux.Handle("/", fileServer)
+		s.Mux.Handle("/", fileServer)
 	}
 
 	s.registerRoutes()
@@ -147,74 +147,74 @@ func New(opts Options) *Server {
 
 func (s *Server) registerRoutes() {
 	// 状态与总览
-	s.mux.HandleFunc("GET /api/server/status", s.guard(s.handleStatus))
-	s.mux.HandleFunc("GET /api/server/nodes", s.guard(s.handleNodes))
+	s.Mux.HandleFunc("GET /api/server/status", s.guard(s.handleStatus))
+	s.Mux.HandleFunc("GET /api/server/nodes", s.guard(s.handleNodes))
 
 	// 实时流量与分流遥测驾驶舱
-	s.mux.HandleFunc("GET /api/server/telemetry/snapshot", s.guard(s.handleTelemetrySnapshot))
-	s.mux.HandleFunc("GET /api/server/telemetry/stream", s.guard(s.handleTelemetrySSE))
-	s.mux.HandleFunc("POST /api/server/telemetry/enable", s.guard(s.handleEnableTelemetry))
+	s.Mux.HandleFunc("GET /api/server/telemetry/snapshot", s.guard(s.handleTelemetrySnapshot))
+	s.Mux.HandleFunc("GET /api/server/telemetry/stream", s.guard(s.handleTelemetrySSE))
+	s.Mux.HandleFunc("POST /api/server/telemetry/enable", s.guard(s.handleEnableTelemetry))
 
 	// 原生 SubHub 订阅管理与防盗刷访问审计
-	s.mux.HandleFunc("GET /api/server/subscriptions", s.guard(s.handleSubscriptions))
-	s.mux.HandleFunc("POST /api/server/subscriptions/sources", s.guard(s.handleUpsertSubscriptionSource))
-	s.mux.HandleFunc("POST /api/server/subscriptions/sources/refresh", s.guard(s.handleRefreshSubscriptionSources))
-	s.mux.HandleFunc("DELETE /api/server/subscriptions/sources", s.guard(s.handleDeleteSubscriptionSource))
-	s.mux.HandleFunc("POST /api/server/subscriptions/rotate-key", s.guard(s.handleRotateSubscriptionKey))
-	s.mux.HandleFunc("GET /api/server/subscriptions/preview", s.guard(s.handlePreviewSubscription))
-	s.mux.HandleFunc("GET /api/server/subscriptions/audit", s.guard(s.handleListSubscriptionAccessLogs))
-	s.mux.HandleFunc("DELETE /api/server/subscriptions/audit", s.guard(s.handleClearSubscriptionAccessLogs))
+	s.Mux.HandleFunc("GET /api/server/subscriptions", s.guard(s.handleSubscriptions))
+	s.Mux.HandleFunc("POST /api/server/subscriptions/sources", s.guard(s.handleUpsertSubscriptionSource))
+	s.Mux.HandleFunc("POST /api/server/subscriptions/sources/refresh", s.guard(s.handleRefreshSubscriptionSources))
+	s.Mux.HandleFunc("DELETE /api/server/subscriptions/sources", s.guard(s.handleDeleteSubscriptionSource))
+	s.Mux.HandleFunc("POST /api/server/subscriptions/rotate-key", s.guard(s.handleRotateSubscriptionKey))
+	s.Mux.HandleFunc("GET /api/server/subscriptions/preview", s.guard(s.handlePreviewSubscription))
+	s.Mux.HandleFunc("GET /api/server/subscriptions/audit", s.guard(s.handleListSubscriptionAccessLogs))
+	s.Mux.HandleFunc("DELETE /api/server/subscriptions/audit", s.guard(s.handleClearSubscriptionAccessLogs))
 
 	// 多节点舰队编排 (Multi-Node Fleet)
-	s.mux.HandleFunc("GET /api/server/fleet", s.guard(s.handleFleetList))
-	s.mux.HandleFunc("POST /api/server/fleet/probe", s.guard(s.handleFleetProbe))
-	s.mux.HandleFunc("GET /api/server/fleet/defaults", s.guard(s.handleFleetDefaults))
-	s.mux.HandleFunc("POST /api/server/fleet/preview-bootstrap", s.guard(s.handleFleetPreviewBootstrap))
-	s.mux.HandleFunc("POST /api/server/fleet/nodes", s.guard(s.handleFleetUpsertNode))
-	s.mux.HandleFunc("DELETE /api/server/fleet/nodes", s.guard(s.handleFleetDeleteNode))
-	s.mux.HandleFunc("POST /api/server/fleet/action", s.guard(s.handleFleetAction))
-	s.mux.HandleFunc("POST /api/server/fleet/bootstrap", s.guard(s.handleFleetBootstrap))
+	s.Mux.HandleFunc("GET /api/server/fleet", s.guard(s.handleFleetList))
+	s.Mux.HandleFunc("POST /api/server/fleet/probe", s.guard(s.handleFleetProbe))
+	s.Mux.HandleFunc("GET /api/server/fleet/defaults", s.guard(s.handleFleetDefaults))
+	s.Mux.HandleFunc("POST /api/server/fleet/preview-bootstrap", s.guard(s.handleFleetPreviewBootstrap))
+	s.Mux.HandleFunc("POST /api/server/fleet/nodes", s.guard(s.handleFleetUpsertNode))
+	s.Mux.HandleFunc("DELETE /api/server/fleet/nodes", s.guard(s.handleFleetDeleteNode))
+	s.Mux.HandleFunc("POST /api/server/fleet/action", s.guard(s.handleFleetAction))
+	s.Mux.HandleFunc("POST /api/server/fleet/bootstrap", s.guard(s.handleFleetBootstrap))
 
 	// 四核服务生命周期与配置编辑
-	s.mux.HandleFunc("POST /api/server/action", s.guard(s.handleAction))
-	s.mux.HandleFunc("POST /api/server/service/action", s.guard(s.handleServiceAction))
-	s.mux.HandleFunc("GET /api/server/service/check-update", s.guard(s.handleCheckServiceUpdate))
-	s.mux.HandleFunc("POST /api/server/service/upgrade", s.guard(s.handleUpgradeService))
-	s.mux.HandleFunc("GET /api/server/service/logs", s.guard(s.handleServiceLogs))
-	s.mux.HandleFunc("GET /api/server/service/config", s.guard(s.handleServiceConfig))
-	s.mux.HandleFunc("PUT /api/server/service/config", s.guard(s.handleUpdateServiceConfig))
-	s.mux.HandleFunc("GET /api/server/logs/stream", s.guard(s.handleLogsSSE))
+	s.Mux.HandleFunc("POST /api/server/action", s.guard(s.handleAction))
+	s.Mux.HandleFunc("POST /api/server/service/action", s.guard(s.handleServiceAction))
+	s.Mux.HandleFunc("GET /api/server/service/check-update", s.guard(s.handleCheckServiceUpdate))
+	s.Mux.HandleFunc("POST /api/server/service/upgrade", s.guard(s.handleUpgradeService))
+	s.Mux.HandleFunc("GET /api/server/service/logs", s.guard(s.handleServiceLogs))
+	s.Mux.HandleFunc("GET /api/server/service/config", s.guard(s.handleServiceConfig))
+	s.Mux.HandleFunc("PUT /api/server/service/config", s.guard(s.handleUpdateServiceConfig))
+	s.Mux.HandleFunc("GET /api/server/logs/stream", s.guard(s.handleLogsSSE))
 
 	// 网络诊断、体检与隐蔽安全管理
-	s.mux.HandleFunc("GET /api/server/net/return", s.guard(s.handleNetReturn))
-	s.mux.HandleFunc("POST /api/server/net/return", s.guard(s.handleNetReturn))
-	s.mux.HandleFunc("POST /api/server/bbr", s.guard(s.handleEnableBBR))
-	s.mux.HandleFunc("GET /api/server/warp/diagnose", s.guard(s.handleWarpDiagnose))
-	s.mux.HandleFunc("POST /api/server/path/regenerate", s.guard(s.handleRegeneratePath))
-	s.mux.HandleFunc("POST /api/server/mask-site/regenerate", s.guard(s.handleRegenerateMaskSite))
-	s.mux.HandleFunc("PUT /api/server/sni", s.guard(s.handleUpdateSNI))
-	s.mux.HandleFunc("PUT /api/server/cf-token", s.guard(s.handleUpdateCFToken))
-	s.mux.HandleFunc("PUT /api/server/credentials", s.guard(s.handleUpdateCredentials))
-	s.mux.HandleFunc("POST /api/server/credentials/ack", s.guard(s.handleAckCredentials))
-	s.mux.HandleFunc("GET /api/server/session/url", s.guard(s.handleSessionURL))
-	s.mux.HandleFunc("GET /api/server/bans", s.guard(s.handleListBans))
-	s.mux.HandleFunc("POST /api/server/unban", s.guard(s.handleUnban))
-	s.mux.HandleFunc("GET /api/server/security/sniffers", s.guard(s.handleGetSniffers))
-	s.mux.HandleFunc("POST /api/server/security/block", s.guard(s.handleBlockSniffer))
-	s.mux.HandleFunc("GET /api/server/audit-logs", s.guard(s.handleListAuditLogs))
-	s.mux.HandleFunc("GET /api/server/doctor", s.guard(s.handleDoctor))
-	s.mux.HandleFunc("GET /api/server/diagnose/unlock", s.guard(s.handleUnlockDiagnose))
-	s.mux.HandleFunc("GET /api/server/camouflage/defaults", s.guard(s.handleCamouflageDefaults))
-	s.mux.HandleFunc("POST /api/server/camouflage/probe", s.guard(s.handleCamouflageProbe))
+	s.Mux.HandleFunc("GET /api/server/net/return", s.guard(s.handleNetReturn))
+	s.Mux.HandleFunc("POST /api/server/net/return", s.guard(s.handleNetReturn))
+	s.Mux.HandleFunc("POST /api/server/bbr", s.guard(s.handleEnableBBR))
+	s.Mux.HandleFunc("GET /api/server/warp/diagnose", s.guard(s.handleWarpDiagnose))
+	s.Mux.HandleFunc("POST /api/server/path/regenerate", s.guard(s.handleRegeneratePath))
+	s.Mux.HandleFunc("POST /api/server/mask-site/regenerate", s.guard(s.handleRegenerateMaskSite))
+	s.Mux.HandleFunc("PUT /api/server/sni", s.guard(s.handleUpdateSNI))
+	s.Mux.HandleFunc("PUT /api/server/cf-token", s.guard(s.handleUpdateCFToken))
+	s.Mux.HandleFunc("PUT /api/server/credentials", s.guard(s.handleUpdateCredentials))
+	s.Mux.HandleFunc("POST /api/server/credentials/ack", s.guard(s.handleAckCredentials))
+	s.Mux.HandleFunc("GET /api/server/session/url", s.guard(s.handleSessionURL))
+	s.Mux.HandleFunc("GET /api/server/bans", s.guard(s.handleListBans))
+	s.Mux.HandleFunc("POST /api/server/unban", s.guard(s.handleUnban))
+	s.Mux.HandleFunc("GET /api/server/security/sniffers", s.guard(s.handleGetSniffers))
+	s.Mux.HandleFunc("POST /api/server/security/block", s.guard(s.handleBlockSniffer))
+	s.Mux.HandleFunc("GET /api/server/audit-logs", s.guard(s.handleListAuditLogs))
+	s.Mux.HandleFunc("GET /api/server/doctor", s.guard(s.handleDoctor))
+	s.Mux.HandleFunc("GET /api/server/diagnose/unlock", s.guard(s.handleUnlockDiagnose))
+	s.Mux.HandleFunc("GET /api/server/camouflage/defaults", s.guard(s.handleCamouflageDefaults))
+	s.Mux.HandleFunc("POST /api/server/camouflage/probe", s.guard(s.handleCamouflageProbe))
 
 	// 三层自动化安全漏洞自愈中心 (3-Layer Security Self-Healing)
-	s.mux.HandleFunc("GET /api/server/heal/status", s.guard(s.handleHealStatus))
-	s.mux.HandleFunc("POST /api/server/heal/run", s.guard(s.handleHealRun))
-	s.mux.HandleFunc("PUT /api/server/heal/policy", s.guard(s.handleHealPolicy))
+	s.Mux.HandleFunc("GET /api/server/heal/status", s.guard(s.handleHealStatus))
+	s.Mux.HandleFunc("POST /api/server/heal/run", s.guard(s.handleHealRun))
+	s.Mux.HandleFunc("PUT /api/server/heal/policy", s.guard(s.handleHealPolicy))
 
 	// 认证 API (公开访问)
-	s.mux.HandleFunc("POST /api/server/login", s.handleLogin)
-	s.mux.HandleFunc("POST /api/server/logout", s.handleLogout)
+	s.Mux.HandleFunc("POST /api/server/login", s.handleLogin)
+	s.Mux.HandleFunc("POST /api/server/logout", s.handleLogout)
 }
 
 // FleetManager exposes the underlying fleet manager (useful for testing/injection).
@@ -229,7 +229,7 @@ func (s *Server) SubStore() *subhub.Store {
 
 // ListenAndServe 启动 HTTP 服务
 func (s *Server) ListenAndServe() error {
-	if strings.TrimSpace(s.getPassword()) == "" {
+	if strings.TrimSpace(s.GetPassword()) == "" {
 		return fmt.Errorf("服务端管理密码为空，拒绝启动。请在配置 web_admin.password 中设置密码")
 	}
 	ln, err := net.Listen("tcp", s.opts.Listen)
@@ -248,7 +248,7 @@ func (s *Server) ListenAndServe() error {
 	s.fleet.StartBackgroundPatrol(patrolCtx, fleet.DefaultPatrolInterval)
 
 	srv := &http.Server{
-		Handler:           s.mux,
+		Handler:           s.Mux,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}

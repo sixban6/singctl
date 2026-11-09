@@ -16,7 +16,7 @@ import (
 )
 
 // probeTLS 探测 TLS 与 Reality 伪装测试（满分 35 分）
-func probeTLS(ctx context.Context, opts ProbeOptions) Category {
+func ProbeTLS(ctx context.Context, opts ProbeOptions) Category {
 	cat := Category{
 		Name:     "TLS 与 Reality 伪装主动探测",
 		MaxScore: 35,
@@ -93,7 +93,7 @@ func probeTLS(ctx context.Context, opts ProbeOptions) Category {
 				}
 			}
 
-			mintedOnTheFly := time.Since(cert.NotBefore) >= -1*time.Minute && time.Since(cert.NotBefore) < 5*time.Minute && isSelfSignedOrInternalCA(cert)
+			mintedOnTheFly := time.Since(cert.NotBefore) >= -1*time.Minute && time.Since(cert.NotBefore) < 5*time.Minute && IsSelfSignedOrInternalCA(cert)
 
 			switch {
 			case leakedTargetSNI:
@@ -107,7 +107,7 @@ func probeTLS(ctx context.Context, opts ProbeOptions) Category {
 				it.Details = fmt.Sprintf("服务端针对随机伪造域名 (%s) 现场动态签发了同名自签证书 (Issuer: %s)！暴露了 tls internal on_demand 动态签发神谕指纹！",
 					randomDomain, issuerName)
 				it.Mitigation = "在 Caddy 配置中设置 server_ip 启用 Let's Encrypt shortlived 公网 IP 证书，关闭 :9445 的 tls internal on_demand。"
-			case isSelfSignedOrInternalCA(cert):
+			case IsSelfSignedOrInternalCA(cert):
 				it.Score = 6
 				it.Passed = false
 				it.Details = fmt.Sprintf("服务端对随机 SNI 返回了带内部 CA 指纹的自签证书 (Issuer: %s, CN: %s)", issuerName, commonName)
@@ -390,7 +390,7 @@ func verifyCertificateChain(certs []*x509.Certificate, dnsName string) (bool, st
 	if now.After(leaf.NotAfter) {
 		return false, fmt.Sprintf("证书已于 %s 过期", leaf.NotAfter.Format("2006-01-02"))
 	}
-	if isSelfSignedOrInternalCA(leaf) {
+	if IsSelfSignedOrInternalCA(leaf) {
 		return false, "自签名或内部非公共 CA 签发"
 	}
 	if dnsName != "" && net.ParseIP(dnsName) == nil {
@@ -461,7 +461,7 @@ func compareWithRealOrigin(ctx context.Context, targetIP, targetSNI string, node
 	return false, ""
 }
 
-func isSelfSignedOrInternalCA(cert *x509.Certificate) bool {
+func IsSelfSignedOrInternalCA(cert *x509.Certificate) bool {
 	if cert == nil {
 		return true
 	}
@@ -555,7 +555,7 @@ func testRealityTLS12Downgrade(ctx context.Context, ip string, port int, serverN
 	}
 
 	state := tlsConn.ConnectionState()
-	if len(state.PeerCertificates) > 0 && isSelfSignedOrInternalCA(state.PeerCertificates[0]) {
+	if len(state.PeerCertificates) > 0 && IsSelfSignedOrInternalCA(state.PeerCertificates[0]) {
 		return false, 8, fmt.Sprintf("强制 TLS 1.2 降级握手返回了内部自签证书 (Issuer: %s)，暴露了 TLS 1.2 与 1.3 分流不一致破绽！",
 			certIssuerDisplay(state.PeerCertificates[0])), "确保 TLS 1.2 与 TLS 1.3 流量均路由至同一套有效证书或真实源站。"
 	}
