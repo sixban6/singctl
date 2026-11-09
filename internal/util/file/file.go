@@ -108,6 +108,9 @@ func CopyDir(src string, dst string) error {
 				return err
 			}
 		} else {
+			if strings.HasSuffix(entry.Name(), ".go") {
+				continue
+			}
 			// Skip overwriting existing files or copying configs over
 			if _, err := os.Stat(dstPath); os.IsNotExist(err) {
 				if err := CopyFile(srcPath, dstPath); err != nil {

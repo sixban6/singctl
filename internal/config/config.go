@@ -18,11 +18,77 @@ import (
 	"sync"
 	"time"
 
+	"singctl/configs"
 	"singctl/internal/constant"
 
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
 )
+
+// TemplateForCommandArgs 根据用户执行的命令行参数识别服务端或客户端角色，返回对应的精简初始化模板。
+func TemplateForCommandArgs(args []string) []byte {
+	for i := 1; i < len(args); i++ {
+		arg := strings.TrimSpace(args[i])
+		if arg == "-c" || arg == "--config" {
+			i++
+			continue
+		}
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		switch arg {
+		case "sr", "server", "reinstall", "cftoken", "terminal", "fleet", "fl":
+			return configs.ServerConfigYAML
+		default:
+			return configs.ClientConfigYAML
+		}
+	}
+	return configs.ClientConfigYAML
+}
+
+// HasRealSubs 判断配置中是否包含非空的客户端订阅地址。
+func (c *Config) HasRealSubs() bool {
+	if c == nil {
+		return false
+	}
+	for _, s := range c.Subs {
+		if strings.TrimSpace(s.URL) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// HasActiveServerConfig 判断配置中是否包含有效的服务端参数（排除未修改的模板占位值）。
+func (c *Config) HasActiveServerConfig() bool {
+	if c == nil {
+		return false
+	}
+	s := c.Server
+	nd := strings.TrimSpace(s.NodeDomain)
+	if nd != "" && nd != "node.example.com" && nd != "node.yourdomain.com" {
+		return true
+	}
+	sbd := strings.TrimSpace(s.SBDomain)
+	if sbd != "" && sbd != "sub.yourdomain.com" && sbd != "node.example.com" && sbd != "node.yourdomain.com" {
+		return true
+	}
+	cfKey := strings.TrimSpace(s.CFDNSKey)
+	if cfKey != "" && cfKey != "your_cloudflare_api_token" {
+		return true
+	}
+	return strings.TrimSpace(s.SubstoreDomain) != "" ||
+		strings.TrimSpace(s.ServerIP) != "" ||
+		strings.TrimSpace(s.NodeTag) != "" ||
+		s.Hy2Port > 0 ||
+		s.VlessPort > 0 ||
+		s.WebAdmin.Enabled ||
+		strings.TrimSpace(s.WebAdmin.Path) != "" ||
+		strings.TrimSpace(s.WebAdmin.Password) != "" ||
+		s.WebTerminal.Enabled ||
+		strings.TrimSpace(s.WebTerminal.Path) != "" ||
+		s.WebTerminal.SSHPort > 0
+}
 
 type Config struct {
 	Subs   []Subscription `yaml:"subs"`
@@ -197,16 +263,16 @@ type TailscaleConfig struct {
 }
 
 type ServerConfig struct {
-	NodeTag            string            `yaml:"node_tag"`             // (可选) 节点地区/名称标识 (例如: los, sg, hk)，留空自动根据公网 IP 智能识别
-	SBDomain           string            `yaml:"sb_domain"`            // 兼容旧配置：默认主域名
-	NodeDomain         string            `yaml:"node_domain"`          // 节点主域名 (Hysteria 2 / VLESS 分享链接主机)
-	Hy2Port            int               `yaml:"hy2_port,omitempty"`   // (可选) Hysteria 2 (UDP QUIC) 对外监听与订阅端口，默认 443
-	VlessPort          int               `yaml:"vless_port,omitempty"` // (可选) VLESS Reality (TCP) 与 HTTPS 伪装站对外监听与订阅端口，默认 443
-	SubstoreDomain     string            `yaml:"substore_domain"`      // Sub-Store 专属域名
-	ServerIP           string            `yaml:"server_ip"`            // 公网 IP 地址（选填，未填写时自动探测用于申请 Let's Encrypt 原生 IP 证书）
+	NodeTag            string            `yaml:"node_tag"`                      // (可选) 节点地区/名称标识 (例如: los, sg, hk)，留空自动根据公网 IP 智能识别
+	SBDomain           string            `yaml:"sb_domain,omitempty"`           // 兼容旧配置：默认主域名
+	NodeDomain         string            `yaml:"node_domain"`                   // 节点主域名 (Hysteria 2 / VLESS 分享链接主机)
+	Hy2Port            int               `yaml:"hy2_port,omitempty"`            // (可选) Hysteria 2 (UDP QUIC) 对外监听与订阅端口，默认 443
+	VlessPort          int               `yaml:"vless_port,omitempty"`          // (可选) VLESS Reality (TCP) 与 HTTPS 伪装站对外监听与订阅端口，默认 443
+	SubstoreDomain     string            `yaml:"substore_domain"`               // Sub-Store 专属域名
+	ServerIP           string            `yaml:"server_ip"`                     // 公网 IP 地址（选填，未填写时自动探测用于申请 Let's Encrypt 原生 IP 证书）
 	CFDNSKey           string            `yaml:"cf_dns_key"`
 	Sni                string            `yaml:"sni"`
-	CorsAllowedOrigins string            `yaml:"cors_allowed_origins"`
+	CorsAllowedOrigins string            `yaml:"cors_allowed_origins,omitempty"`
 	WebTerminal        WebTerminalConfig `yaml:"web_terminal,omitempty"`
 	WebAdmin           WebAdminConfig    `yaml:"web_admin,omitempty"`
 }
@@ -864,6 +930,36 @@ func MigrateConfig(configPath string, templateData []byte) error {
 
 	docNode := rootNode.Content[0]
 
+	// 当传入的是包含双端字段的通用模板时，按旧配置的实际角色（纯服务端 vs 纯客户端）自动选用精简模板，
+	// 防止升级迁移将客户端配置块重新注入服务端或将 server 块注入客户端。
+	if hasYAMLKey(docNode, "subs") && hasYAMLKey(docNode, "server") {
+		oldHasServer := hasYAMLKey(oldDocNode, "server")
+		oldHasClient := hasYAMLKey(oldDocNode, "subs") || hasYAMLKey(oldDocNode, "dns") ||
+			hasYAMLKey(oldDocNode, "tailscale") || hasYAMLKey(oldDocNode, "watchdog") || hasYAMLKey(oldDocNode, "hy2")
+		hasRealSub := oldCfg.HasRealSubs()
+		hasRealServer := oldCfg.HasActiveServerConfig()
+		hasCustomClientFields := strings.TrimSpace(oldCfg.Tailscale.AuthKey) != "" ||
+			strings.TrimSpace(oldCfg.DNS.Password) != "" ||
+			(oldCfg.DNS.Enabled != nil && !*oldCfg.DNS.Enabled)
+
+		isServerOnly := (oldHasServer && !oldHasClient) || (hasRealServer && !hasRealSub && !hasCustomClientFields)
+		isClientOnly := (!oldHasServer && oldHasClient) || (!hasRealServer && (hasRealSub || hasCustomClientFields))
+
+		if isServerOnly {
+			var srvRoot yaml.Node
+			if err := yaml.Unmarshal(configs.ServerConfigYAML, &srvRoot); err == nil && len(srvRoot.Content) > 0 {
+				rootNode = srvRoot
+				docNode = rootNode.Content[0]
+			}
+		} else if isClientOnly {
+			var cliRoot yaml.Node
+			if err := yaml.Unmarshal(configs.ClientConfigYAML, &cliRoot); err == nil && len(cliRoot.Content) > 0 {
+				rootNode = cliRoot
+				docNode = rootNode.Content[0]
+			}
+		}
+	}
+
 	// Helper to replace or append an entire top-level node (like 'subs' array or 'custom_rules')
 	replaceNode := func(parent *yaml.Node, key string, val any) {
 		var newNode yaml.Node
@@ -1169,16 +1265,30 @@ func MigrateConfig(configPath string, templateData []byte) error {
 // Save serializes cfg to YAML and writes it to path.
 // When path already exists and contains a valid YAML mapping document, Save merges
 // the updated fields into the existing YAML AST so comments and unreferenced keys are preserved.
+// When path does not exist, Save initializes from the role-specific template (ServerConfigYAML or ClientConfigYAML).
 func Save(path string, cfg *Config) error {
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}
 
-	if existingData, err := os.ReadFile(path); err == nil && len(existingData) > 0 {
+	existingData, err := os.ReadFile(path)
+	if err != nil || len(existingData) == 0 {
+		switch {
+		case cfg != nil && cfg.HasActiveServerConfig() && !cfg.HasRealSubs():
+			existingData = configs.ServerConfigYAML
+		case cfg != nil && !cfg.HasActiveServerConfig():
+			existingData = configs.ClientConfigYAML
+		default:
+			existingData = configs.DefaultConfigYAML
+		}
+	}
+
+	if len(existingData) > 0 {
 		var oldRoot, newRoot yaml.Node
 		if errOld := yaml.Unmarshal(existingData, &oldRoot); errOld == nil {
 			if errNew := yaml.Unmarshal(data, &newRoot); errNew == nil {
+				filterRoleNodesBeforeMerge(&oldRoot, &newRoot, cfg)
 				if mergeYAMLDocument(&oldRoot, &newRoot) {
 					if mergedData, errMarshal := yaml.Marshal(&oldRoot); errMarshal == nil {
 						data = mergedData
@@ -1196,6 +1306,69 @@ func Save(path string, cfg *Config) error {
 		_ = os.Remove(tmpPath)
 	}
 	return os.WriteFile(path, data, 0600)
+}
+
+func filterRoleNodesBeforeMerge(dstRoot, srcRoot *yaml.Node, cfg *Config) {
+	if len(dstRoot.Content) == 0 || len(srcRoot.Content) == 0 {
+		return
+	}
+	dstDoc := dstRoot.Content[0]
+	srcDoc := srcRoot.Content[0]
+	if dstDoc.Kind != yaml.MappingNode || srcDoc.Kind != yaml.MappingNode {
+		return
+	}
+
+	hasKey := func(m *yaml.Node, key string) bool {
+		if m == nil || m.Kind != yaml.MappingNode {
+			return false
+		}
+		for i := 0; i+1 < len(m.Content); i += 2 {
+			if m.Content[i].Value == key {
+				return true
+			}
+		}
+		return false
+	}
+
+	dstHasServer := hasKey(dstDoc, "server")
+	dstHasSubs := hasKey(dstDoc, "subs")
+
+	isServerDoc := dstHasServer && !dstHasSubs && (cfg == nil || !cfg.HasRealSubs())
+	isClientDoc := !dstHasServer && (cfg == nil || !cfg.HasActiveServerConfig())
+
+	filtered := make([]*yaml.Node, 0, len(srcDoc.Content))
+	for i := 0; i+1 < len(srcDoc.Content); i += 2 {
+		k := srcDoc.Content[i]
+		v := srcDoc.Content[i+1]
+		key := k.Value
+
+		if isServerDoc {
+			// 纯服务端配置：只保留原文件已有的顶层键、server 以及非空的 custom_rules
+			if !hasKey(dstDoc, key) && key != "server" && !(key == "custom_rules" && cfg != nil && !cfg.CustomRules.IsEmpty()) {
+				continue
+			}
+		}
+		if isClientDoc && key == "server" {
+			// 纯客户端配置：不注入 server 块
+			continue
+		}
+		filtered = append(filtered, k, v)
+	}
+	srcDoc.Content = filtered
+
+	// 若 server.web_admin 已激活，清理 dstDoc 中 sni 节点尾部残留的 `# web_admin:` 注释块，避免重复
+	for i := 0; i+1 < len(dstDoc.Content); i += 2 {
+		if dstDoc.Content[i].Value == "server" && dstDoc.Content[i+1].Kind == yaml.MappingNode {
+			srvMap := dstDoc.Content[i+1]
+			if cfg != nil && (cfg.Server.WebAdmin.Enabled || cfg.Server.WebAdmin.Path != "" || cfg.Server.WebAdmin.Password != "") {
+				for j := 0; j+1 < len(srvMap.Content); j += 2 {
+					if strings.Contains(srvMap.Content[j+1].FootComment, "web_admin:") {
+						srvMap.Content[j+1].FootComment = ""
+					}
+				}
+			}
+		}
+	}
 }
 
 func mergeYAMLDocument(dstRoot, srcRoot *yaml.Node) bool {

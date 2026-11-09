@@ -123,7 +123,7 @@ func (m *Manager) GetBootstrapDefaults(ctx context.Context) BootstrapDefaults {
 
 func guessRootDomain(d string) string {
 	d = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(d)), ".")
-	if d == "" || d == "node.yourdomain.com" {
+	if d == "" || d == "node.yourdomain.com" || d == "node.example.com" {
 		return ""
 	}
 	parts := strings.Split(d, ".")
@@ -694,7 +694,7 @@ func (m *Manager) PreviewBootstrapNode(ctx context.Context, in BootstrapInput) (
 
 	masterCfg := m.loadMasterConfig()
 	masterDom := strings.TrimSpace(masterCfg.Server.GetNodeDomain())
-	if masterDom == "node.yourdomain.com" {
+	if masterDom == "node.yourdomain.com" || masterDom == "node.example.com" {
 		masterDom = ""
 	}
 
@@ -897,12 +897,7 @@ func (m *Manager) BootstrapNode(ctx context.Context, in BootstrapInput) (NodeAct
 		portYAML += fmt.Sprintf("  vless_port: %d\n", plan.VlessPort)
 	}
 
-	yamlContent := fmt.Sprintf(`github:
-  mirror_url: %q
-hy2:
-  up: %d
-  down: %d
-server:
+	yamlContent := fmt.Sprintf(`server:
   node_tag: %q
   node_domain: %q
 %s  substore_domain: %q
@@ -910,7 +905,7 @@ server:
   sni: %q
   web_terminal:
     ssh_port: %d
-`, plan.MirrorURL, plan.Hy2Up, plan.Hy2Down, plan.NodeTag, finalDomain, portYAML, subDom, plan.CFDNSKey, plan.SNI, node.Port)
+`, plan.NodeTag, finalDomain, portYAML, subDom, plan.CFDNSKey, plan.SNI, node.Port)
 
 	cfgB64 := base64.StdEncoding.EncodeToString([]byte(yamlContent))
 

@@ -6,8 +6,10 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 
+	"singctl/configs"
 	"singctl/internal/config"
 	"singctl/internal/deploy"
 	"singctl/internal/logger"
@@ -187,6 +189,12 @@ func newInitServerCmd(configPath string) *cobra.Command {
 				cfg.Server.WebAdmin.Username = adminUser
 			}
 			cfg.Server.EnsureWebAdminCredentials()
+
+			// 若当前文件尚未配置真实客户端订阅，先以精简服务端模板重置基底，确保不残留任何客户端配置项
+			if !cfg.HasRealSubs() {
+				_ = os.MkdirAll(filepath.Dir(resolvedPath), 0755)
+				_ = os.WriteFile(resolvedPath, configs.ServerConfigYAML, 0600)
+			}
 
 			// 保存配置
 			if err := config.Save(resolvedPath, cfg); err != nil {

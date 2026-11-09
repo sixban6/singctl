@@ -429,10 +429,10 @@ server:
 	if !strings.Contains(capturedYAML, `sni: "itunes.apple.com"`) ||
 		!strings.Contains(capturedYAML, `node_domain: "sg1.cdn.example.com"`) ||
 		!strings.Contains(capturedYAML, `substore_domain: "sg1.cdn.example.com"`) ||
-		!strings.Contains(capturedYAML, `up: 80`) ||
 		!strings.Contains(capturedYAML, `cf_dns_key: "cf-master-secret-token"`) ||
-		!strings.Contains(capturedYAML, `mirror_url: "https://mirror.example.com"`) {
-		t.Fatalf("remote singctl.yaml did not inherit Master config:\n%s", capturedYAML)
+		strings.Contains(capturedYAML, "hy2:") ||
+		strings.Contains(capturedYAML, "subs:") {
+		t.Fatalf("remote singctl.yaml did not inherit concise server config:\n%s", capturedYAML)
 	}
 
 	preview2, err := mgr.PreviewBootstrapNode(ctx, fleet.BootstrapInput{

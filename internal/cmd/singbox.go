@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"singctl/configs"
 	"singctl/internal/adguard"
 	"singctl/internal/config"
 	"singctl/internal/constant"
@@ -13,6 +14,7 @@ import (
 	"singctl/internal/logger"
 	"singctl/internal/singbox"
 	ruleset_snapshot "singctl/internal/singbox/ruleset_snapshot"
+	"singctl/internal/util/netinfo"
 	"sort"
 	"strings"
 	"time"
@@ -407,11 +409,38 @@ func newInstallCmd(defaultConfigPath string) *cobra.Command {
 		Use:   "install",
 		Short: "安装 sing-box / Install sing-box",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			resolvedPath := resolveCmdConfigPath(cmd, defaultConfigPath)
 			sb := singbox.New(loadCmdConfigOrDefault(cmd, defaultConfigPath))
-			return sb.Install()
+			if err := sb.Install(); err != nil {
+				return err
+			}
+			AutoMeasureAndSaveHy2Bandwidth(resolvedPath)
+			return nil
 		},
 	}
 	return installCmd
+}
+
+// AutoMeasureAndSaveHy2Bandwidth 在客户端首次安装时自动测定网络上下行带宽并回写到 singctl.yaml 的 hy2.up / hy2.down。
+func AutoMeasureAndSaveHy2Bandwidth(configPath string) {
+	logger.Info("正在测定当前网络上下行带宽，以便自动配置 Hysteria2 最佳速率...")
+	up, down, err := netinfo.MeasureHy2Bandwidth()
+	if err != nil {
+		logger.Warn("⚠️ 自动带宽测定未完成（保留默认带宽配置）: %v", err)
+		return
+	}
+	if strings.TrimSpace(configPath) == "" || up <= 0 || down <= 0 {
+		return
+	}
+	if _, statErr := os.Stat(configPath); os.IsNotExist(statErr) {
+		_ = os.MkdirAll(filepath.Dir(configPath), 0755)
+		_ = os.WriteFile(configPath, configs.ClientConfigYAML, 0600)
+	}
+	if err := config.UpdateHy2Bandwidth(configPath, up, down); err != nil {
+		logger.Warn("⚠️ 回写 Hysteria2 测定带宽至 %s 失败: %v", configPath, err)
+		return
+	}
+	logger.Success("✅ 已自动将测定带宽写入 %s -> hy2.up: %d Mbps, hy2.down: %d Mbps", configPath, up, down)
 }
 
 func newUpdateCmd(defaultConfigPath string) *cobra.Command {

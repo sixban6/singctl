@@ -1065,3 +1065,91 @@ func TestServerConfig_GetNodeTag_Fallback(t *testing.T) {
 		t.Errorf("expected 'cdn', got '%s'", tag)
 	}
 }
+
+func TestRoleSpecificTemplatesAndSaveMigrate(t *testing.T) {
+	// 1. TemplateForCommandArgs picks ServerConfigYAML for server commands and ClientConfigYAML for client commands
+	srvTpl := string(config.TemplateForCommandArgs([]string{"singctl", "sr", "install"}))
+	if !strings.Contains(srvTpl, "server:") || strings.Contains(srvTpl, "subs:") || strings.Contains(srvTpl, "hy2:") || strings.Contains(srvTpl, "watchdog:") {
+		t.Fatalf("ServerConfigYAML should only contain server block, got:\n%s", srvTpl)
+	}
+
+	cliTpl := string(config.TemplateForCommandArgs([]string{"singctl", "-c", "/tmp/x.yaml", "sb", "start"}))
+	if !strings.Contains(cliTpl, "subs:") || !strings.Contains(cliTpl, "hy2:") || strings.Contains(cliTpl, "\nserver:") {
+		t.Fatalf("ClientConfigYAML should only contain client blocks without server, got:\n%s", cliTpl)
+	}
+
+	// 2. Saving a new server config creates a concise server-only YAML without subs/hy2/tailscale/watchdog
+	tmpDir := t.TempDir()
+	srvPath := filepath.Join(tmpDir, "server_singctl.yaml")
+	srvCfg := &config.Config{
+		Server: config.ServerConfig{
+			NodeTag:    "sg",
+			NodeDomain: "sg1.example.com",
+			CFDNSKey:   "cf-test-token",
+			Sni:        "swdist.apple.com",
+		},
+	}
+	srvCfg.Server.EnsureWebAdminCredentials()
+	if err := config.Save(srvPath, srvCfg); err != nil {
+		t.Fatalf("Save server config failed: %v", err)
+	}
+	srvRaw, err := os.ReadFile(srvPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srvStr := string(srvRaw)
+	if !strings.Contains(srvStr, "server:") || !strings.Contains(srvStr, "sg1.example.com") {
+		t.Fatalf("expected server fields in saved server config:\n%s", srvStr)
+	}
+	for _, forbidden := range []string{"subs:", "hy2:", "tailscale:", "watchdog:", "dns:"} {
+		if strings.Contains(srvStr, forbidden) {
+			t.Fatalf("server singctl.yaml must not contain %q, got:\n%s", forbidden, srvStr)
+		}
+	}
+
+	// 3. Saving a client config preserves client-only structure without injecting server block
+	cliPath := filepath.Join(tmpDir, "client_singctl.yaml")
+	cliCfg := &config.Config{
+		Subs: []config.Subscription{
+			{Name: "main", URL: "https://example.com/sub", RemoveEmoji: true},
+		},
+		Hy2: config.Hy2Config{Up: 35, Down: 300},
+	}
+	if err := config.Save(cliPath, cliCfg); err != nil {
+		t.Fatalf("Save client config failed: %v", err)
+	}
+	cliRaw, err := os.ReadFile(cliPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cliStr := string(cliRaw)
+	if !strings.Contains(cliStr, "subs:") || !strings.Contains(cliStr, "hy2:") {
+		t.Fatalf("expected subs and hy2 in saved client config:\n%s", cliStr)
+	}
+	if strings.Contains(cliStr, "\nserver:") || strings.HasPrefix(cliStr, "server:") {
+		t.Fatalf("client singctl.yaml must not contain server block, got:\n%s", cliStr)
+	}
+
+	// 4. MigrateConfig against full template keeps server config server-only and client config client-only
+	fullTpl, err := os.ReadFile("../configs/singctl.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := config.MigrateConfig(srvPath, fullTpl); err != nil {
+		t.Fatalf("MigrateConfig on server config failed: %v", err)
+	}
+	srvMigrated, _ := os.ReadFile(srvPath)
+	for _, forbidden := range []string{"subs:", "hy2:", "tailscale:", "watchdog:"} {
+		if strings.Contains(string(srvMigrated), forbidden) {
+			t.Fatalf("migrated server config must not contain %q, got:\n%s", forbidden, string(srvMigrated))
+		}
+	}
+
+	if err := config.MigrateConfig(cliPath, fullTpl); err != nil {
+		t.Fatalf("MigrateConfig on client config failed: %v", err)
+	}
+	cliMigrated, _ := os.ReadFile(cliPath)
+	if strings.Contains(string(cliMigrated), "\nserver:") || strings.HasPrefix(string(cliMigrated), "server:") {
+		t.Fatalf("migrated client config must not contain server block, got:\n%s", string(cliMigrated))
+	}
+}

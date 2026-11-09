@@ -11,8 +11,10 @@ import (
 	"singctl/internal/config"
 	"singctl/internal/constant"
 	"singctl/internal/deploy"
+	"singctl/internal/util/netinfo"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestAllCommandsBilingual 验证所有命令和子命令的 Short 都包含中英文双语描述。
@@ -326,5 +328,32 @@ func TestShowUnifiedServerPanel(t *testing.T) {
 	// 5. Verify maintenance commands
 	if !strings.Contains(output, "singctl doctor") || !strings.Contains(output, "singctl sr info") {
 		t.Errorf("missing maintenance commands in output:\n%s", output)
+	}
+}
+
+func TestAutoMeasureAndSaveHy2BandwidthOnClientInstall(t *testing.T) {
+	origSpeedTest := netinfo.SpeedTestFn
+	t.Cleanup(func() {
+		netinfo.SpeedTestFn = origSpeedTest
+	})
+
+	// Simulate 100 Mbps upload, 500 Mbps download -> 80% up = 80 Mbps, 90% down = 450 Mbps
+	netinfo.SpeedTestFn = func() (float64, float64, time.Duration, string, error) {
+		return 100.0, 500.0, 12 * time.Millisecond, "MockServer", nil
+	}
+
+	cfgPath := filepath.Join(t.TempDir(), "singctl.yaml")
+	cmd.AutoMeasureAndSaveHy2Bandwidth(cfgPath)
+
+	loaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load config after AutoMeasureAndSaveHy2Bandwidth failed: %v", err)
+	}
+	if loaded.Hy2.Up != 80 || loaded.Hy2.Down != 450 {
+		t.Fatalf("expected measured Hy2 bandwidth 80/450, got %d/%d", loaded.Hy2.Up, loaded.Hy2.Down)
+	}
+	raw, _ := os.ReadFile(cfgPath)
+	if strings.Contains(string(raw), "\nserver:") {
+		t.Fatalf("client auto-initialized singctl.yaml must not contain server block:\n%s", string(raw))
 	}
 }

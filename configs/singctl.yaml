@@ -34,7 +34,7 @@ tailscale:                                      # (可选) Tailscale 部署配�
 
 server: # (可选) 服务器部署配置.当需要部署singbox服务端的时候配置
   node_tag: "" # (可选) 节点地区/代号 (例如: los, sg, hk)，留空自动根据公网 IP 智能识别
-  node_domain: "node.yourdomain.com" # 你的域名（用于 SubHub 订阅与 Hysteria 2）
+  node_domain: "node.example.com" # 你的域名（用于 SubHub 订阅与 Hysteria 2）
   # hy2_port: 443 # (可选) Hysteria 2 (UDP) 对外监听与订阅端口，默认 443；NAT 小鸡可指定独立 UDP 端口 (如 11501)
   # vless_port: 443 # (可选) VLESS Reality (TCP) 与 HTTPS 网关对外监听与订阅端口，默认 443；NAT 小鸡可指定独立 TCP 端口 (如 11502)
   substore_domain: "" # (可选) 订阅聚合专属域名，留空默认使用 node_domain
@@ -64,8 +64,8 @@ watchdog:                                      # (可选) 看门狗守护进程�
 #       interrupt_exist_connections: false
 #   route:
 #     - action: route
-#       domain_suffix: [htsc.com.cn, zhangle.com, 10jqka.com.cn, eastmoney.com, tradingview.com]
+#       domain_suffix: [example.com, internal.example.org]
 #       outbound: "#DC"
 #   dns:
-#     - domain_suffix: [htsc.com.cn, zhangle.com, 10jqka.com.cn, eastmoney.com]
+#     - domain_suffix: [example.com, internal.example.org]
 #       server: dns_local

@@ -44,7 +44,7 @@ func IsServerEnvironment(cfg *config.Config) bool {
 	}
 	if cfg != nil {
 		domain := cfg.Server.GetNodeDomain()
-		if domain != "" && domain != "node.yourdomain.com" {
+		if domain != "" && domain != "node.yourdomain.com" && domain != "node.example.com" {
 			return true
 		}
 		if cfg.Server.GetWebAdminPath() != "" {

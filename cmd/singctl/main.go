@@ -5,10 +5,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
-	"singctl/configs"
 	"singctl/internal/cmd"
+	"singctl/internal/config"
 	"singctl/internal/logger"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -53,13 +53,14 @@ func ensureConfigDir(dstConfigPath string) error {
 	return nil
 }
 
-func initConfigFile(dstConfigPath string) {
+func initConfigFile(dstConfigPath string, args []string) {
 	if err := ensureConfigDir(dstConfigPath); err != nil {
 		log.Printf("Warning: failed to ensure config dir: %v", err)
 		return
 	}
 
-	if err := os.WriteFile(dstConfigPath, configs.DefaultConfigYAML, 0600); err != nil {
+	tpl := config.TemplateForCommandArgs(args)
+	if err := os.WriteFile(dstConfigPath, tpl, 0600); err != nil {
 		log.Printf("Warning: failed to write default config file: %v", err)
 	}
 }
@@ -105,7 +106,7 @@ func main() {
 	// 判断是否是 init, help, version 等无状态命令，避免自动生成占位配置文件或污染只读目录
 	if !isStatelessCommand(os.Args) {
 		if _, err := os.Stat(configPath); os.IsNotExist(err) {
-			initConfigFile(configPath)
+			initConfigFile(configPath, os.Args)
 		}
 	}
 	rootCmd := &cobra.Command{

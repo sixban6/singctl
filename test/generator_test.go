@@ -337,13 +337,13 @@ func TestCustomRulesInjection(t *testing.T) {
 			Route: []map[string]any{
 				{
 					"action":        "route",
-					"domain_suffix": []any{"htsc.com.cn", "zhangle.com"},
+					"domain_suffix": []any{"corp.example.com", "intranet.example.com"},
 					"outbound":      "DirectConn",
 				},
 			},
 			DNS: []map[string]any{
 				{
-					"domain_suffix": []any{"htsc.com.cn"},
+					"domain_suffix": []any{"corp.example.com"},
 					"server":        "dns_local",
 				},
 			},
