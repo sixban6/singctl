@@ -85,13 +85,20 @@ func GetDaemonLogPath() string {
 func AcquirePidLock() error {
 	pid := strconv.Itoa(os.Getpid())
 	target := GetPidFilePath()
-	tmp := fmt.Sprintf("%s.new-%d", target, os.Getpid())
+	f, err := os.CreateTemp(filepath.Dir(target), filepath.Base(target)+".new-*")
+	if err != nil {
+		return fmt.Errorf("failed to create pid tmp file: %w", err)
+	}
+	tmp := f.Name()
+	if _, err := f.WriteString(pid); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("failed to write pid tmp file: %w", err)
+	}
+	_ = f.Close()
 	defer os.Remove(tmp)
 
 	for attempt := 0; attempt < 2; attempt++ {
-		if err := os.WriteFile(tmp, []byte(pid), 0644); err != nil {
-			return fmt.Errorf("failed to write pid tmp file: %w", err)
-		}
 		err := os.Link(tmp, target)
 		if err == nil {
 			return nil // 赢得锁
@@ -164,10 +171,11 @@ func DaemonProcessMatches(pid int) bool {
 
 	expected := ExpectedProcNameFn()
 
-	// Linux: /proc/<pid>/comm（最快且无副作用）
+	// Linux: /proc/<pid>/comm（最快且无副作用，内核限制最多 15 字符）
 	if runtime.GOOS != "windows" {
 		if b, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid)); err == nil {
-			return strings.TrimSpace(string(b)) == expected
+			comm := strings.TrimSpace(string(b))
+			return comm == expected || (len(expected) > 15 && comm == expected[:15])
 		}
 	}
 
