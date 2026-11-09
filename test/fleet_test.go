@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"singctl/internal/cmd"
 	"singctl/internal/fleet"
 	"singctl/internal/heal"
 	"singctl/internal/subhub"
@@ -757,5 +758,17 @@ func TestFleetBootstrapNATVPS_CustomSSHAndHy2VlessPorts(t *testing.T) {
 	saved, ok, _ := store.Get("jp1")
 	if !ok || saved.Port != 15500 || saved.Hy2Port != 11501 || saved.VlessPort != 11502 || saved.AuthType != fleet.AuthKeyFile || saved.Password != "" {
 		t.Fatalf("unexpected saved NAT node in fleet.yaml: %+v", saved)
+	}
+
+	// Verify CLI positional `ip:port` syntax: `singctl fl new 203.0.113.10:15500`
+	var bsPos fleet.BootstrapInput
+	cmd.ApplyPositionalFleetNewArgs([]string{"203.0.113.10:15500"}, &bsPos, false, false)
+	if bsPos.Host != "203.0.113.10" || bsPos.Port != 15500 || bsPos.ID != "" {
+		t.Fatalf("expected positional 203.0.113.10:15500 to set Host=203.0.113.10 Port=15500, got %+v", bsPos)
+	}
+	var bsNamed fleet.BootstrapInput
+	cmd.ApplyPositionalFleetNewArgs([]string{"fr1", "root@203.0.113.10:11500"}, &bsNamed, false, false)
+	if bsNamed.ID != "fr1" || bsNamed.Host != "203.0.113.10" || bsNamed.Port != 11500 || bsNamed.User != "root" {
+		t.Fatalf("expected positional fr1 root@203.0.113.10:11500 to parse ID/Host/Port/User, got %+v", bsNamed)
 	}
 }

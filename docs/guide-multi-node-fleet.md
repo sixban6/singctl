@@ -67,17 +67,16 @@ flowchart TB
 singctl fl new
 
 # 方式 2：极简一行命令 —— 只填新机 IP 与初始密码，其余 100% 自动继承主控并创建灰云 DNS
-singctl fl new --host 203.0.113.99 --password '新机初始Root密码'
+singctl fl new 203.0.113.99 --password '新机初始Root密码'
 
 # 方式 3（高级自定义，完全兼容）：手动指定唯一代号、中文名或独立域名
-singctl fl new jp1 \
+singctl fl new jp1 203.0.113.99 \
   --name "日本东京主力" \
-  --host 203.0.113.99 \
   --password '新机初始Root密码' \
   --domain jp1.example.com
 
-# 方式 4（共享 IP 的 NAT 小鸡开荒）：指定初始映射 SSH 端口 (--port) 与独立的 HY2 (UDP) / VLESS (TCP) 节点端口 (--hy2-port / --vless-port)
-singctl fl new --host 203.0.113.99 --port 15500 --hy2-port 11501 --vless-port 11502 --password '新机初始Root密码'
+# 方式 4（共享 IP 的 NAT 小鸡开荒）：直接通过 ip:port 指定初始 SSH 端口，以及独立的 HY2 (UDP) / VLESS (TCP) 节点端口
+singctl fl new 203.0.113.99:15500 --hy2-port 11501 --vless-port 11502 --password '新机初始Root密码'
 ```
 
 *(你也可以直接在手机或电脑打开主控自适应 Web 后台 ->「全球节点舰队 -> 新机零配置开荒」，默认同样只需填写 **IP + 初始密码** 两项即可一键完成。)*

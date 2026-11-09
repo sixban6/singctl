@@ -5,10 +5,12 @@ import (
 	"cmp"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -251,7 +253,7 @@ func NewFleetCmd(configPath string) *cobra.Command {
 		bsYes       bool
 	)
 	bootstrapCmd := &cobra.Command{
-		Use:     "new [id]",
+		Use:     "new [host[:port] | id] [host[:port]]",
 		Aliases: []string{"init", "bs", "bootstrap"},
 		Short:   "新购裸机智能零配置开荒：复用主控凭据 + 自动创建 .cdn 灰云 DNS + SSH(22→2222免密) + 四核部署纳管",
 		Long: `在主控节点上远程开荒一台全新空白 VPS，默认自动复用本机 /etc/singctl/singctl.yaml 配置：
@@ -264,34 +266,54 @@ func NewFleetCmd(configPath string) *cobra.Command {
   1) 零参数交互向导（推荐，密码不回显、不进命令历史）:
      singctl fl new
 
-  2) 一行非交互命令（仅需新机 IP 与初始密码）:
-     singctl fl new --host 203.0.113.10 --password '<新机初始密码>'
+  2) 一行非交互命令（直接传 IP 或 IP:SSH端口）:
+     singctl fl new 203.0.113.10 --password '<新机初始密码>'
+     singctl fl new 203.0.113.10:15500 --hy2-port 11501 --vless-port 11502 --password '<新机初始密码>'
 
   3) 显式自定义代号与域名（完全兼容手动指定）:
-     singctl fl new jp1 --name "日本东京" --host 203.0.113.10 --password '<密码>' --domain jp1.cdn.example.com`,
-		Args: cobra.MaximumNArgs(1),
+     singctl fl new jp1 203.0.113.10 --name "日本东京" --password '<密码>' --domain jp1.cdn.example.com`,
+		Args: cobra.MaximumNArgs(2),
 		RunE: func(c *cobra.Command, args []string) error {
-			if len(args) > 0 {
-				bsIn.ID = args[0]
+			applyPositionalFleetNewArgs(args, &bsIn, c.Flags().Changed("port"), c.Flags().Changed("user"))
+			if h, p, u, ok := splitHostPortUser(bsIn.Host); ok {
+				bsIn.Host = h
+				if p > 0 && !c.Flags().Changed("port") {
+					bsIn.Port = p
+				}
+				if u != "" && !c.Flags().Changed("user") {
+					bsIn.User = u
+				}
 			}
+
 			bsIn.HardenSSH = &bsHardenSSH
 			if bsIn.CFDNSKey == "" {
 				bsIn.CFDNSKey = os.Getenv("CF_DNS_API_TOKEN")
 			}
 			mgr := buildManager(c)
 
-			// 零参数交互向导模式：当未传 --host 且未传 --alias 时自动唤醒
+			// 零参数交互向导模式：当未传 host 且未传 --alias 时自动唤醒
+			usedWizard := false
 			if strings.TrimSpace(bsIn.Host) == "" && strings.TrimSpace(bsIn.SSHAlias) == "" {
 				if !isInteractiveTerminal() {
-					return errors.New("请通过 --host <IP> 指定新服务器公网 IP，或在交互式终端直接运行 'singctl fl new'")
+					return errors.New("请指定新服务器公网 IP (如 'singctl fl new 203.0.113.10')，或在交互式终端直接运行 'singctl fl new'")
 				}
+				usedWizard = true
 				fmt.Println("\n🚀 SingCtl 舰队智能零配置开荒向导（自动复用主控配置与 Cloudflare DNS）")
 				fmt.Println("──────────────────────────────────────────────────────────────────────")
-				hostVal, pErr := promptLine("1. 新服务器公网 IP 地址: ")
+				hostVal, pErr := promptLine("1. 新服务器公网 IP 地址 (支持 ip:port): ")
 				if pErr != nil || strings.TrimSpace(hostVal) == "" {
 					return errors.New("已取消：新服务器公网 IP 不能为空")
 				}
 				bsIn.Host = strings.TrimSpace(hostVal)
+				if h, p, u, ok := splitHostPortUser(bsIn.Host); ok {
+					bsIn.Host = h
+					if p > 0 && !c.Flags().Changed("port") {
+						bsIn.Port = p
+					}
+					if u != "" && !c.Flags().Changed("user") {
+						bsIn.User = u
+					}
+				}
 
 				if bsIn.Password == "" && bsIn.KeyPath == "" {
 					sec, sErr := promptPasswordNoEcho("2. root 初始 SSH 密码 (输入不回显，若已配免密直接回车): ")
@@ -310,7 +332,7 @@ func NewFleetCmd(configPath string) *cobra.Command {
 			bsIn.ID = plan.ID
 			bsIn.Name = plan.Name
 
-			if isInteractiveTerminal() && !bsYes && !c.Flags().Changed("host") {
+			if isInteractiveTerminal() && !bsYes && usedWizard {
 				dnsDesc := plan.Domain + " (自动创建 Cloudflare 灰云解析)"
 				if !plan.DomainAutoDerive {
 					dnsDesc = plan.Domain
@@ -523,4 +545,84 @@ func truncateDisplay(s string, maxRunes int) string {
 		return s
 	}
 	return string(runes[:maxRunes-1]) + "…"
+}
+
+// ApplyPositionalFleetNewArgs resolves positional arguments for `singctl fl new`:
+//   - `singctl fl new 203.0.113.10:15500` -> Host="203.0.113.10", Port=15500
+//   - `singctl fl new 203.0.113.10`       -> Host="203.0.113.10"
+//   - `singctl fl new jp1`                -> ID="jp1"
+//   - `singctl fl new jp1 203.0.113.10:15500` -> ID="jp1", Host="203.0.113.10", Port=15500
+func ApplyPositionalFleetNewArgs(args []string, bsIn *fleet.BootstrapInput, portFlagChanged, userFlagChanged bool) {
+	applyPositionalFleetNewArgs(args, bsIn, portFlagChanged, userFlagChanged)
+}
+
+func applyPositionalFleetNewArgs(args []string, bsIn *fleet.BootstrapInput, portFlagChanged, userFlagChanged bool) {
+	if len(args) == 0 || bsIn == nil {
+		return
+	}
+	if len(args) == 1 {
+		arg := strings.TrimSpace(args[0])
+		if looksLikeHostOrIPArg(arg) && strings.TrimSpace(bsIn.Host) == "" {
+			if h, p, u, ok := splitHostPortUser(arg); ok {
+				bsIn.Host = h
+				if p > 0 && !portFlagChanged {
+					bsIn.Port = p
+				}
+				if u != "" && !userFlagChanged {
+					bsIn.User = u
+				}
+			} else {
+				bsIn.Host = arg
+			}
+			return
+		}
+		bsIn.ID = arg
+		return
+	}
+	// len(args) >= 2: args[0] is ID, args[1] is host[:port]
+	bsIn.ID = strings.TrimSpace(args[0])
+	if strings.TrimSpace(bsIn.Host) == "" {
+		arg1 := strings.TrimSpace(args[1])
+		if h, p, u, ok := splitHostPortUser(arg1); ok {
+			bsIn.Host = h
+			if p > 0 && !portFlagChanged {
+				bsIn.Port = p
+			}
+			if u != "" && !userFlagChanged {
+				bsIn.User = u
+			}
+		} else {
+			bsIn.Host = arg1
+		}
+	}
+}
+
+func looksLikeHostOrIPArg(arg string) bool {
+	arg = strings.TrimSpace(arg)
+	if arg == "" {
+		return false
+	}
+	// Node IDs only allow [a-zA-Z0-9_-]; any '.', ':', or '@' indicates IP / domain / host:port / user@host.
+	return strings.ContainsAny(arg, ".:@") || net.ParseIP(arg) != nil
+}
+
+func splitHostPortUser(raw string) (host string, port int, user string, ok bool) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return "", 0, "", false
+	}
+	if u, rest, hasAt := strings.Cut(s, "@"); hasAt && u != "" && rest != "" {
+		user = strings.TrimSpace(u)
+		s = strings.TrimSpace(rest)
+	}
+	if h, pStr, err := net.SplitHostPort(s); err == nil && h != "" && pStr != "" {
+		if p, pErr := strconv.Atoi(pStr); pErr == nil && p > 0 && p <= 65535 {
+			return strings.Trim(h, "[]"), p, user, true
+		}
+	}
+	// Plain IPv6 without port or plain IPv4/domain
+	if user != "" {
+		return strings.Trim(s, "[]"), 0, user, true
+	}
+	return s, 0, "", false
 }

@@ -64,10 +64,10 @@ curl -fsSL https://raw.githubusercontent.com/sixban6/singctl/main/install.sh | s
 singctl fl new
 
 # 方式 B：极简一行非交互命令（仅需新机 IP 与初始密码，其余全部自动复用主控配置）
-singctl fl new --host 203.0.113.10 --password '<新机root初始密码>'
+singctl fl new 203.0.113.10 --password '<新机root初始密码>'
 
-# 方式 C：共享 IP 的 NAT 小鸡一行开荒（指定商家映射的 SSH 端口与分配的 HY2 / VLESS 节点端口）
-singctl fl new --host 203.0.113.10 --port 15500 --hy2-port 11501 --vless-port 11502 --password '<新机root初始密码>'
+# 方式 C：共享 IP 的 NAT 小鸡一行开荒（直接用 ip:port 指定 SSH 端口，并指定 HY2 / VLESS 节点端口）
+singctl fl new 203.0.113.10:15500 --hy2-port 11501 --vless-port 11502 --password '<新机root初始密码>'
 ```
 
 > **全自动智能闭环说明**（亦支持 `singctl fl new jp1 --domain ...` 手动指定，详见 [👉 多节点舰队全解](docs/guide-multi-node-fleet.md)）：
