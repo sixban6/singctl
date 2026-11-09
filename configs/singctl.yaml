@@ -65,7 +65,7 @@ watchdog:                                      # (可选) 看门狗守护进程�
 #   route:
 #     - action: route
 #       domain_suffix: [htsc.com.cn, zhangle.com, 10jqka.com.cn, eastmoney.com, tradingview.com]
-#       outbound: DirectConn
+#       outbound: "#DC"
 #   dns:
 #     - domain_suffix: [htsc.com.cn, zhangle.com, 10jqka.com.cn, eastmoney.com]
 #       server: dns_local

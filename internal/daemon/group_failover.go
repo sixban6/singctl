@@ -100,6 +100,10 @@ func (s *GroupFailoverState) Patrol(ctx context.Context, endpoints []string, sec
 	}
 }
 
+func isDirectOutboundTag(tag string) bool {
+	return strings.EqualFold(tag, "#DC") || strings.EqualFold(tag, "DirectConn") || strings.EqualFold(tag, "direct")
+}
+
 func (s *GroupFailoverState) checkAndHealGroup(
 	ctx context.Context,
 	base, secret string,
@@ -111,7 +115,7 @@ func (s *GroupFailoverState) checkAndHealGroup(
 		return
 	}
 	cur := strings.TrimSpace(grp.Now)
-	if cur == "" || strings.EqualFold(cur, "DirectConn") || strings.EqualFold(cur, "direct") {
+	if cur == "" || isDirectOutboundTag(cur) {
 		return
 	}
 
@@ -154,7 +158,7 @@ func (s *GroupFailoverState) checkAndHealGroup(
 	// 3. 当前线路两次确认探测均超时失败，遍历候选列表寻找最佳可用备选线路
 	for _, cand := range grp.All {
 		cand = strings.TrimSpace(cand)
-		if cand == "" || cand == cur || strings.EqualFold(cand, "DirectConn") || strings.EqualFold(cand, "direct") {
+		if cand == "" || cand == cur || isDirectOutboundTag(cand) {
 			continue
 		}
 		// 若备选本身也是 Selector (例如 #VPS)，先确保该子 Selector 内部处在可用节点上
@@ -198,7 +202,7 @@ func (s *GroupFailoverState) ensureSubSelectorHealthy(
 	}
 	for _, cand := range subGrp.All {
 		cand = strings.TrimSpace(cand)
-		if cand == "" || cand == cur || strings.EqualFold(cand, "DirectConn") {
+		if cand == "" || cand == cur || isDirectOutboundTag(cand) {
 			continue
 		}
 		if _, ok := s.probeOutboundAlive(ctx, base, secret, cand); ok {
