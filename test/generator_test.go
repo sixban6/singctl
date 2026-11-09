@@ -1089,9 +1089,9 @@ func TestGenerator_GameUDPAndDNSIsolation(t *testing.T) {
 			t.Fatalf("[%s] geosite-hok dns rule with dns_proxy not found", platform)
 		}
 
-		// 5. 通用基准模板保持 #Auto 默认 1m/50 且禁止强断存量连接
-		if autoInterval != "1m" || autoTolerance != 50 {
-			t.Fatalf("[%s] #Auto baseline interval/tolerance = %q/%d, want 1m/50", platform, autoInterval, autoTolerance)
+		// 5. 通用基准模板保持 #Auto 默认 3m/80 且禁止强断存量连接
+		if autoInterval != "3m" || autoTolerance != 80 {
+			t.Fatalf("[%s] #Auto baseline interval/tolerance = %q/%d, want 3m/80", platform, autoInterval, autoTolerance)
 		}
 		if autoInterrupt == nil || *autoInterrupt {
 			t.Fatalf("[%s] #Auto interrupt_exist_connections must be false", platform)
