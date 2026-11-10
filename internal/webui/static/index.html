@@ -1601,7 +1601,7 @@ function renderAuditFlowsTable() {
     return;
   }
   const prevWrap = $("#audit-flows-box .table-wrap");
-  const prevScrollLeft = prevWrap ? prevScrollLeft.scrollLeft : 0;
+  const prevScrollLeft = prevWrap ? prevWrap.scrollLeft : 0;
 
   $("#audit-flows-box").innerHTML = `
     <div class="table-wrap"><table class="tbl audit-tbl">
