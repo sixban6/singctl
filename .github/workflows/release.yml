@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 concurrency:
   group: release-main
@@ -225,3 +226,14 @@ jobs:
             dist/checksums.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prune Old Releases & Orphan Tags (Keep Latest 3)
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KEEP_RELEASES: '3'
+          KEEP_RUNS: '15'
+        run: |
+          chmod +x scripts/cleanup-releases.sh
+          ./scripts/cleanup-releases.sh 3
+

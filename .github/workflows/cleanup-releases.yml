@@ -1,0 +1,43 @@
+name: Cleanup Old Releases
+
+on:
+  schedule:
+    # Weekly cleanup at 19:00 UTC Sunday (03:00 Monday CST / UTC+8)
+    - cron: '0 19 * * 0'
+  workflow_dispatch:
+    inputs:
+      keep_releases:
+        description: 'Number of latest releases to keep'
+        required: false
+        default: '3'
+        type: string
+      keep_runs:
+        description: 'Number of completed workflow runs to keep'
+        required: false
+        default: '15'
+        type: string
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: cleanup-releases
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    name: Prune Old Releases, Orphan Tags & Action Logs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Run Cleanup Script
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KEEP_RELEASES: ${{ inputs.keep_releases || '3' }}
+          KEEP_RUNS: ${{ inputs.keep_runs || '15' }}
+        run: |
+          chmod +x scripts/cleanup-releases.sh
+          ./scripts/cleanup-releases.sh "${KEEP_RELEASES}"
