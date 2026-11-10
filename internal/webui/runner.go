@@ -131,7 +131,7 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 	}
 	defer busyFlag.Store(false)
 
-	exe, err := os.Executable()
+	exe, err := resolveOnDiskExecutable()
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "定位 singctl 可执行文件失败: "+err.Error())
 		return
@@ -142,7 +142,7 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.Background(), actionTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, exe, args...)
-	cmd.Env = append(os.Environ(), "TERM=dumb")
+	cmd.Env = append(os.Environ(), "TERM=dumb", "SINGCTL_FROM_WEBUI=1")
 
 	w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -167,14 +167,23 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 			code = exitErr.ExitCode()
 		}
 	}
-	stream.write(map[string]any{"t": "exit", "code": code})
+	restarting := false
+	if body.Name == "update-self" && code == 0 && stream.sawSelfUpdated {
+		restarting = true
+		stream.emitLine("[INFO] 🔄 正在自动热重启 WebUI 服务以应用新版本，页面将在 3 秒后自动刷新...")
+	}
+	stream.write(map[string]any{"t": "exit", "code": code, "restarting": restarting})
+	if restarting {
+		ScheduleDetachedRestart(s.opts.ConfigPath, s.opts.Listen, s.opts.Password)
+	}
 }
 
 // ndjsonWriter 将子进程输出按行转为 NDJSON 事件并立即刷新
 type ndjsonWriter struct {
-	w     http.ResponseWriter
-	flush func()
-	buf   []byte
+	w              http.ResponseWriter
+	flush          func()
+	buf            []byte
+	sawSelfUpdated bool
 }
 
 func NewNDJSONWriter(w http.ResponseWriter) *ndjsonWriter {
@@ -220,6 +229,9 @@ func (nw *ndjsonWriter) emitLine(line string) {
 	line = ansiRe.ReplaceAllString(line, "")
 	if strings.TrimSpace(line) == "" {
 		return
+	}
+	if strings.Contains(line, "SingCtl updated successfully") {
+		nw.sawSelfUpdated = true
 	}
 	nw.write(map[string]any{"t": "out", "line": line})
 }

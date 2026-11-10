@@ -336,6 +336,9 @@ tr.dual-alert-row td:first-child { box-shadow: inset 4px 0 0 var(--err); }
       </div>
     </div>
     <div class="topbar-right">
+      <button class="btn btn-sm btn-ghost" id="btn-top-update" data-action="update-self" title="点击一键检查并更新 SingCtl（更新后自动热重启 WebUI）" style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;padding:5px 10px;">
+        <span id="top-sc-ver">v…</span> · ⬆️ 更新
+      </button>
       <span class="pill" id="pill-singbox"><span class="dot" id="pill-dot"></span><span id="pill-text">加载中…</span></span>
       <button class="btn btn-icon" id="theme-btn" title="切换主题"></button>
     </div>
@@ -726,7 +729,7 @@ tr.dual-alert-row td:first-child { box-shadow: inset 4px 0 0 var(--err); }
         <div class="card" style="margin-bottom:14px;">
           <div class="card-head"><div class="card-title"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg>自更新</div></div>
           <button class="btn btn-primary" data-action="update-self">更新 singctl</button>
-          <div class="hint">从 GitHub 下载最新版本并校验 sha256,完成后需手动重启 WebUI 与相关服务。</div>
+          <div class="hint">从 GitHub 下载最新版本并校验 sha256，完成后自动热重启 WebUI 服务并刷新页面。</div>
         </div>
         <div class="card">
           <div class="card-head"><div class="card-title"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.55a11 11 0 0 1 14 0"/><path d="M2 8.82a15.5 15.5 0 0 1 20 0"/><path d="M8.5 16.4a6 6 0 0 1 7 0"/><circle cx="12" cy="20" r="1"/></svg>带宽测速</div></div>
@@ -923,7 +926,7 @@ async function runAction(name, params = {}) {
     }
     const reader = r.body.getReader();
     const dec = new TextDecoder();
-    let buf = "", exitCode = null;
+    let buf = "", exitCode = null, restarting = false;
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -936,10 +939,17 @@ async function runAction(name, params = {}) {
         let ev; try { ev = JSON.parse(line); } catch { continue; }
         if (ev.t === "start") openConsole(ev.title, "$ singctl " + (ev.cmd || "").replace(/^singctl\s*/, ""));
         else if (ev.t === "out") consoleLine(ev.line);
-        else if (ev.t === "exit") exitCode = ev.code;
+        else if (ev.t === "exit") { exitCode = ev.code; restarting = !!ev.restarting; }
       }
     }
-    if (exitCode === 0 || exitCode === null) toast("ok", "执行完成");
+    if (exitCode === 0 || exitCode === null) {
+      if (restarting) {
+        toast("ok", "SingCtl 更新完成，WebUI 正在热重启，3 秒后自动刷新页面…", 4000);
+        setTimeout(() => location.reload(), 3200);
+      } else {
+        toast("ok", "执行完成");
+      }
+    }
     else toast("err", "执行失败 (退出码 " + exitCode + "),详情见控制台");
   } catch (e) {
     toast("err", e.message || "网络错误");
@@ -1002,7 +1012,9 @@ function renderStatus(st) {
   state.status = st;
   const sb = st.singbox, dm = st.daemon, ts = st.tailscale, fw = st.firewall;
 
-  // 顶栏 pill
+  // 顶栏 pill & 版本号
+  const topVerEl = $("#top-sc-ver");
+  if (topVerEl) topVerEl.textContent = "v" + String(st.singctlVersion || "dev").replace(/^v/, "");
   $("#pill-dot").className = "dot " + (sb.running ? "ok" : "");
   $("#pill-text").textContent = sb.running ? "sing-box 运行中" : "sing-box 已停止";
 

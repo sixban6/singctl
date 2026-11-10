@@ -14,6 +14,7 @@ import (
 	"singctl/internal/subhub"
 	"singctl/internal/updater"
 	"singctl/internal/util/file"
+	"singctl/internal/webui"
 
 	"github.com/spf13/cobra"
 )
@@ -70,6 +71,14 @@ func NewUpdateCmd(configPath string, version string) *cobra.Command {
 				}
 				if serverweb.IsRunning(resolvedPath) {
 					_ = serverweb.RestartService()
+				}
+				if os.Getenv("SINGCTL_FROM_WEBUI") != "1" {
+					if _, running := webui.WebStatus(); running {
+						logger.Info("Restarting client WebUI daemon to apply new version...")
+						if rErr := webui.RestartWeb(resolvedPath); rErr != nil {
+							logger.Warn("Failed to restart client WebUI daemon: %v", rErr)
+						}
+					}
 				}
 				return nil
 			default:

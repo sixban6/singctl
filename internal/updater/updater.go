@@ -154,7 +154,7 @@ func (u *Updater) UpdateSelf(configPath string, currentVersion string) error {
 	}
 
 	logger.Success("SingCtl updated successfully")
-	logger.Info("Please restart the application to use the new version")
+	logger.Info("Binary replaced on disk: %s", currentExe)
 	return nil
 }
 

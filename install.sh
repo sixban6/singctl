@@ -157,33 +157,56 @@ detect_system() {
     echo_info "调试 - uname -m: $(uname -m)"
 }
 
-# 获取最新版本
+# 获取最新版本（优先 GitHub API -> releases/latest 302 重定向防限流 -> 国内镜像兜底）
 get_latest_version() {
     echo_info "获取最新版本信息..."
     
     local api_url="https://api.github.com/repos/$GITHUB_REPO/releases/latest"
-    local version
+    local latest_page="https://github.com/$GITHUB_REPO/releases/latest"
+    local version=""
     
-    if ! version=$(curl -s "$api_url" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/'); then
-        error_exit "获取版本信息失败"
+    # 1) 尝试 GitHub 官方 API（带超时保护）
+    version=$(curl -fsSL --connect-timeout 8 --max-time 15 "$api_url" 2>/dev/null | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' | head -1 || true)
+    
+    # 2) 若 API 被限流 (403/429) 或失败，利用 GitHub Web 302 重定向 URL 提取 tag（零 API 配额消耗）
+    if [ -z "$version" ]; then
+        local effective_url
+        effective_url=$(curl -fsSLI -o /dev/null -w '%{url_effective}' --connect-timeout 8 --max-time 15 "$latest_page" 2>/dev/null || true)
+        case "$effective_url" in
+            */releases/tag/*)
+                version=$(echo "$effective_url" | sed -E 's|.*/releases/tag/([^/?#]+).*|\1|')
+                ;;
+        esac
+    fi
+
+    # 3) 国内无代理环境兜底：通过多镜像获取版本元数据
+    if [ -z "$version" ]; then
+        for mirror_prefix in "https://ghfast.top" "https://gh-proxy.com"; do
+            version=$(curl -fsSL --connect-timeout 8 --max-time 15 "$mirror_prefix/$api_url" 2>/dev/null | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' | head -1 || true)
+            if [ -n "$version" ]; then
+                echo_info "已通过镜像 ($mirror_prefix) 获取最新版本信息"
+                break
+            fi
+        done
     fi
     
     if [ -z "$version" ]; then
-        error_exit "无法解析版本信息"
+        error_exit "无法获取或解析最新版本信息，请检查网络连接"
     fi
     
     LATEST_VERSION="$version"
     echo_success "最新版本: $LATEST_VERSION"
 }
 
-# 构建下载URL（直连 GitHub 优先，不可达时自动回退镜像；OpenWrt 自动优先选用 -lite 轻量包）
+# 构建下载URL（直连 GitHub 优先，不可达时自动回退多镜像；OpenWrt 自动优先选用 -lite 轻量包）
 build_download_url() {
     PACKAGE_FILENAME="singctl-${OS}-${ARCH}.tar.gz"
     if [ "$IS_OPENWRT" = "true" ] && [ "$OS" = "linux" ] && { [ "$ARCH" = "amd64" ] || [ "$ARCH" = "arm64" ]; }; then
         PACKAGE_FILENAME="singctl-${OS}-${ARCH}-lite.tar.gz"
     fi
     DIRECT_URL="https://github.com/$GITHUB_REPO/releases/download/$LATEST_VERSION/$PACKAGE_FILENAME"
-    MIRROR_URL="https://gh-proxy.com/$DIRECT_URL"
+    MIRROR_URL_1="https://ghfast.top/$DIRECT_URL"
+    MIRROR_URL_2="https://gh-proxy.com/$DIRECT_URL"
 
     echo_info "目标安装包: $PACKAGE_FILENAME"
 }
@@ -213,19 +236,21 @@ download_and_extract() {
     mkdir -p "$TEMP_DIR"
     tar_file="$TEMP_DIR/singctl.tar.gz"
 
-    # 2. 下载（优先直连 GitHub 保障海外 VPS 满速稳定，失败再自动回退镜像加速）
+    # 2. 下载（优先直连 GitHub 保障海外 VPS 满速稳定，失败则依次回退多镜像加速）
     echo_info "尝试从 GitHub 官方源直连下载: $DIRECT_URL"
     if curl -fL --connect-timeout 8 --retry 1 -o "$tar_file" "$DIRECT_URL"; then
         echo_success "GitHub 官方源直连下载完成"
+    elif echo_warning "GitHub 直连超时或受阻，自动切换镜像 1 加速下载: $MIRROR_URL_1" && curl -fL --connect-timeout 10 --retry 2 -o "$tar_file" "$MIRROR_URL_1"; then
+        echo_success "镜像 1 (ghfast.top) 加速下载完成"
     else
-        echo_warning "GitHub 直连超时或受阻，自动切换镜像加速下载: $MIRROR_URL"
-        if ! curl -fL --connect-timeout 10 --retry 2 -o "$tar_file" "$MIRROR_URL"; then
-            error_exit "下载失败，请检查主机网络连接"
+        echo_warning "镜像 1 下载未成功，自动切换镜像 2 加速下载: $MIRROR_URL_2"
+        if ! curl -fL --connect-timeout 10 --retry 2 -o "$tar_file" "$MIRROR_URL_2"; then
+            error_exit "下载失败，所有下载源均不可达，请检查主机网络连接"
         fi
-        echo_success "镜像加速下载完成"
+        echo_success "镜像 2 (gh-proxy.com) 加速下载完成"
     fi
 
-    # 3. sha256 校验（校验和从 GitHub 直连获取，绝不经镜像）
+    # 3. sha256 校验（优先从 GitHub 直连获取校验和，不可达时回退镜像并严格比对 SHA256）
     verify_checksum
 
     # 4. 解压
@@ -269,9 +294,13 @@ verify_checksum() {
         return 0
     fi
 
-    echo_info "从 GitHub 直连获取校验和（不走镜像）..."
-    if ! curl -fsSL --connect-timeout 10 --retry 2 --max-time 60 -o "$TEMP_DIR/checksums.txt" "$checksums_url"; then
-        error_exit "无法直连 GitHub 获取 checksums.txt，已中止安装。请检查网络后重试；确要跳过请设置 SINGCTL_SKIP_CHECKSUM=1"
+    echo_info "获取官方 SHA256 校验和文件 (checksums.txt)..."
+    if ! curl -fsSL --connect-timeout 8 --retry 1 --max-time 30 -o "$TEMP_DIR/checksums.txt" "$checksums_url"; then
+        echo_warning "GitHub 直连获取 checksums.txt 超时，尝试通过加速镜像获取..."
+        if ! curl -fsSL --connect-timeout 8 --retry 1 --max-time 30 -o "$TEMP_DIR/checksums.txt" "https://ghfast.top/$checksums_url" && \
+           ! curl -fsSL --connect-timeout 8 --retry 1 --max-time 30 -o "$TEMP_DIR/checksums.txt" "https://gh-proxy.com/$checksums_url"; then
+            error_exit "无法获取 checksums.txt，已中止安装。请检查网络后重试；确要跳过请设置 SINGCTL_SKIP_CHECKSUM=1"
+        fi
     fi
 
     expected=$(awk -v f="$filename" '$2 == f || $2 == "*"f {print tolower($1)}' "$TEMP_DIR/checksums.txt")
@@ -586,53 +615,108 @@ select_mode_and_setup() {
     done
 
     if [ -z "$mode" ]; then
+        local prefer_client="false"
+        if [ "$IS_OPENWRT" = "true" ] || [ "$OS" = "darwin" ]; then
+            prefer_client="true"
+        fi
+
         if [ -c /dev/tty ]; then
             printf "\n"
-            if supports_color; then
-                printf "\033[0;36m====================================================\033[0m\n"
-                printf "\033[1;32m  请选择 SingCtl 运行模式:\033[0m\n"
-                printf "  \033[1;37m1) 服务端模式 (Server Mode)\033[0m [回车默认]\n"
-                printf "     • VLESS Reality + Hysteria 2 节点承载\n"
-                printf "     • Caddy 自动化 TLS / 原生 IP 证书 / 隐蔽反代\n"
-                printf "     • 服务端专属 Web 控制台 (高熵安全随机路径)\n"
-                printf "     • SubHub 原生节点管理与多客户端订阅聚合\n"
-                printf "\n"
-                printf "  \033[1;37m2) 客户端模式 (Client Mode)\033[0m\n"
-                printf "     • 软路由 / Linux 透明代理网关 (TProxy)\n"
-                printf "     • 内置 AdGuard Home 本地防劫持 DNS 与管理面板\n"
-                printf "     • 自动转换订阅与看门狗静默热同步\n"
-                printf "     • 本地轻量 Web 图形管理后台 (:8090)\n"
-                printf "\033[0;36m====================================================\033[0m\n"
-                printf "\033[0;33m请输入选项 [1-2] (默认 1): \033[0m"
-            else
-                printf "====================================================\n"
-                printf "  请选择 SingCtl 运行模式:\n"
-                printf "  1) 服务端模式 (Server Mode) [回车默认]\n"
-                printf "     • VLESS Reality + Hysteria 2 节点承载\n"
-                printf "     • Caddy 自动化 TLS / 原生 IP 证书 / 隐蔽反代\n"
-                printf "     • 服务端专属 Web 控制台 (高熵安全随机路径)\n"
-                printf "     • SubHub 原生节点管理与多客户端订阅聚合\n"
-                printf "\n"
-                printf "  2) 客户端模式 (Client Mode)\n"
-                printf "     • 软路由 / Linux 透明代理网关 (TProxy)\n"
-                printf "     • 内置 AdGuard Home 本地防劫持 DNS 与管理面板\n"
-                printf "     • 自动转换订阅与看门狗静默热同步\n"
-                printf "     • 本地轻量 Web 图形管理后台 (:8090)\n"
-                printf "====================================================\n"
-                printf "请输入选项 [1-2] (默认 1): "
-            fi
+            if [ "$prefer_client" = "true" ]; then
+                if supports_color; then
+                    printf "\033[0;36m====================================================\033[0m\n"
+                    printf "\033[1;32m  请选择 SingCtl 运行模式 (检测到 OpenWrt/macOS 环境):\033[0m\n"
+                    printf "  \033[1;37m1) 客户端模式 (Client Mode)\033[0m [回车默认]\n"
+                    printf "     • 软路由 / macOS / Linux 透明代理网关 (TProxy)\n"
+                    printf "     • 内置 AdGuard Home 本地防劫持 DNS 与管理面板\n"
+                    printf "     • 自动转换订阅与看门狗静默热同步\n"
+                    printf "     • 本地轻量 Web 图形管理后台 (:8090)\n"
+                    printf "\n"
+                    printf "  \033[1;37m2) 服务端模式 (Server Mode)\033[0m\n"
+                    printf "     • VLESS Reality + Hysteria 2 节点承载\n"
+                    printf "     • Caddy 自动化 TLS / 原生 IP 证书 / 隐蔽反代\n"
+                    printf "     • 服务端专属 Web 控制台 (高熵安全随机路径)\n"
+                    printf "     • SubHub 原生节点管理与多客户端订阅聚合\n"
+                    printf "\033[0;36m====================================================\033[0m\n"
+                    printf "\033[0;33m请输入选项 [1-2] (默认 1 客户端模式): \033[0m"
+                else
+                    printf "====================================================\n"
+                    printf "  请选择 SingCtl 运行模式 (检测到 OpenWrt/macOS 环境):\n"
+                    printf "  1) 客户端模式 (Client Mode) [回车默认]\n"
+                    printf "     • 软路由 / macOS / Linux 透明代理网关 (TProxy)\n"
+                    printf "     • 内置 AdGuard Home 本地防劫持 DNS 与管理面板\n"
+                    printf "     • 自动转换订阅与看门狗静默热同步\n"
+                    printf "     • 本地轻量 Web 图形管理后台 (:8090)\n"
+                    printf "\n"
+                    printf "  2) 服务端模式 (Server Mode)\n"
+                    printf "     • VLESS Reality + Hysteria 2 节点承载\n"
+                    printf "     • Caddy 自动化 TLS / 原生 IP 证书 / 隐蔽反代\n"
+                    printf "     • 服务端专属 Web 控制台 (高熵安全随机路径)\n"
+                    printf "     • SubHub 原生节点管理与多客户端订阅聚合\n"
+                    printf "====================================================\n"
+                    printf "请输入选项 [1-2] (默认 1 客户端模式): "
+                fi
 
-            read -r choice < /dev/tty || choice="1"
-            case "$choice" in
-                2|client|c|Client)
-                    mode="client"
-                    ;;
-                *)
-                    mode="server"
-                    ;;
-            esac
+                read -r choice < /dev/tty || choice="1"
+                case "$choice" in
+                    2|server|s|Server)
+                        mode="server"
+                        ;;
+                    *)
+                        mode="client"
+                        ;;
+                esac
+            else
+                if supports_color; then
+                    printf "\033[0;36m====================================================\033[0m\n"
+                    printf "\033[1;32m  请选择 SingCtl 运行模式:\033[0m\n"
+                    printf "  \033[1;37m1) 服务端模式 (Server Mode)\033[0m [回车默认]\n"
+                    printf "     • VLESS Reality + Hysteria 2 节点承载\n"
+                    printf "     • Caddy 自动化 TLS / 原生 IP 证书 / 隐蔽反代\n"
+                    printf "     • 服务端专属 Web 控制台 (高熵安全随机路径)\n"
+                    printf "     • SubHub 原生节点管理与多客户端订阅聚合\n"
+                    printf "\n"
+                    printf "  \033[1;37m2) 客户端模式 (Client Mode)\033[0m\n"
+                    printf "     • 软路由 / Linux 透明代理网关 (TProxy)\n"
+                    printf "     • 内置 AdGuard Home 本地防劫持 DNS 与管理面板\n"
+                    printf "     • 自动转换订阅与看门狗静默热同步\n"
+                    printf "     • 本地轻量 Web 图形管理后台 (:8090)\n"
+                    printf "\033[0;36m====================================================\033[0m\n"
+                    printf "\033[0;33m请输入选项 [1-2] (默认 1 服务端模式): \033[0m"
+                else
+                    printf "====================================================\n"
+                    printf "  请选择 SingCtl 运行模式:\n"
+                    printf "  1) 服务端模式 (Server Mode) [回车默认]\n"
+                    printf "     • VLESS Reality + Hysteria 2 节点承载\n"
+                    printf "     • Caddy 自动化 TLS / 原生 IP 证书 / 隐蔽反代\n"
+                    printf "     • 服务端专属 Web 控制台 (高熵安全随机路径)\n"
+                    printf "     • SubHub 原生节点管理与多客户端订阅聚合\n"
+                    printf "\n"
+                    printf "  2) 客户端模式 (Client Mode)\n"
+                    printf "     • 软路由 / Linux 透明代理网关 (TProxy)\n"
+                    printf "     • 内置 AdGuard Home 本地防劫持 DNS 与管理面板\n"
+                    printf "     • 自动转换订阅与看门狗静默热同步\n"
+                    printf "     • 本地轻量 Web 图形管理后台 (:8090)\n"
+                    printf "====================================================\n"
+                    printf "请输入选项 [1-2] (默认 1 服务端模式): "
+                fi
+
+                read -r choice < /dev/tty || choice="1"
+                case "$choice" in
+                    2|client|c|Client)
+                        mode="client"
+                        ;;
+                    *)
+                        mode="server"
+                        ;;
+                esac
+            fi
         else
-            mode="server"
+            if [ "$prefer_client" = "true" ]; then
+                mode="client"
+            else
+                mode="server"
+            fi
         fi
     fi
 
@@ -717,6 +801,17 @@ select_mode_and_setup() {
         "$INSTALL_DIR/singctl" sb restart --config "$CONFIG_FILE"
         echo_success "sing-box 启动完成"
 
+        # 无论是否已填订阅，统一启动/热重启客户端 WebUI 管理后台 (:8090)
+        echo_info "正在启动/重载 SingCtl WebUI 图形管理后台..."
+        "$INSTALL_DIR/singctl" web stop >/dev/null 2>&1 || true
+        "$INSTALL_DIR/singctl" web start --config "$CONFIG_FILE" >/dev/null 2>&1 || true
+
+        echo_success "========================================================"
+        echo_success "🎉 SingCtl 客户端部署并启动完成！"
+        echo_info "🌐 Web 图形管理后台 (设备审计 / 黑名单 / 节点面板):"
+        "$INSTALL_DIR/singctl" web status 2>/dev/null | grep -E "http://" || echo "  ➜ http://$(uci get network.lan.ipaddr 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}' || echo '127.0.0.1'):8090"
+        echo_success "========================================================"
+
         if [ "$OS" = "linux" ]; then
             "$INSTALL_DIR/singctl" dns status --config "$CONFIG_FILE" 2>/dev/null || true
         fi
@@ -729,15 +824,16 @@ select_mode_and_setup() {
             "$INSTALL_DIR/singctl" sb install --config "$CONFIG_FILE" || true
         fi
 
-        # 自动拉起 WebUI，让用户能直接在浏览器中填入订阅
+        # 自动拉起/重载 WebUI，让用户能直接在浏览器中填入订阅
         echo_info "正在自动启动 SingCtl WebUI 图形管理后台..."
-        "$INSTALL_DIR/singctl" web start >/dev/null 2>&1 || true
+        "$INSTALL_DIR/singctl" web stop >/dev/null 2>&1 || true
+        "$INSTALL_DIR/singctl" web start --config "$CONFIG_FILE" >/dev/null 2>&1 || true
 
         echo_success "========================================================"
         echo_success "🎉 SingCtl 客户端已就绪！"
         echo_info "你可以选择以下任一方式完成订阅配置:"
         echo_info "【方式 1】在手机或电脑浏览器中打开 Web 管理页面 (推荐):"
-        "$INSTALL_DIR/singctl" web status 2>/dev/null | grep -E "http://" || echo "  ➜ http://$(uci get network.lan.ipaddr 2>/dev/null || hostname -I | awk '{print $1}'):8090"
+        "$INSTALL_DIR/singctl" web status 2>/dev/null | grep -E "http://" || echo "  ➜ http://$(uci get network.lan.ipaddr 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}' || echo '127.0.0.1'):8090"
         echo_info "【方式 2】在终端手动编辑配置文件:"
         echo_info "  vim $CONFIG_FILE"
         echo_info "  配置完成后运行: singctl sb gen && singctl sb start"

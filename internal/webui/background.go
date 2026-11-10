@@ -410,3 +410,95 @@ func WebStatus() (WebState, bool) {
 	}
 	return st, WebProcMatches(st.Pid)
 }
+
+// resolveOnDiskExecutable 定位磁盘上最新的 singctl 可执行文件路径（剥离 Linux /proc/self/exe 的 " (deleted)" 或 ".backup" 后缀）
+func resolveOnDiskExecutable() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		for _, p := range []string{"/usr/bin/singctl", "/usr/local/bin/singctl"} {
+			if _, stErr := os.Stat(p); stErr == nil {
+				return p, nil
+			}
+		}
+		return "", err
+	}
+	p := strings.TrimSpace(exe)
+	p = strings.TrimSuffix(p, " (deleted)")
+	for strings.HasSuffix(p, ".backup") {
+		p = strings.TrimSuffix(p, ".backup")
+	}
+	if _, stErr := os.Stat(p); stErr != nil {
+		for _, fb := range []string{"/usr/bin/singctl", "/usr/local/bin/singctl"} {
+			if _, fbErr := os.Stat(fb); fbErr == nil {
+				return fb, nil
+			}
+		}
+	}
+	return p, nil
+}
+
+// buildRestartArgs 根据之前的状态或回退参数构造重启 `singctl web start` 的命令行参数
+func buildRestartArgs(st WebState, configPath string, fallbackListen string) []string {
+	listen := st.Listen
+	if listen == "" {
+		listen = fallbackListen
+	}
+	if listen == "" {
+		listen = ":8090"
+	}
+	args := []string{}
+	if configPath != "" {
+		args = append(args, "--config", configPath)
+	}
+	args = append(args, "web", "start", "-l", listen)
+	return args
+}
+
+// RestartWeb 停止当前后台运行的 WebUI 并使用磁盘上的最新二进制重新拉起（供 CLI `singctl update self` 调用）
+func RestartWeb(configPath string) error {
+	st, running := WebStatus()
+	if !running {
+		return nil
+	}
+	exe, err := resolveOnDiskExecutable()
+	if err != nil {
+		return err
+	}
+	args := buildRestartArgs(st, configPath, st.Listen)
+	if _, err := StopWeb(); err != nil {
+		return err
+	}
+	cmd := exec.Command(exe, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+// ScheduleDetachedRestart 供 WebUI 内部触发 `update-self` 成功后异步热重启自身：
+// 先让当前 HTTP 响应流完整返回给浏览器，1 秒后由独立会话子进程执行 stop + start。
+func ScheduleDetachedRestart(configPath string, listen string, password string) {
+	if runtime.GOOS == "windows" {
+		return
+	}
+	st, _ := WebStatus()
+	exe, err := resolveOnDiskExecutable()
+	if err != nil || exe == "" {
+		return
+	}
+	startArgs := buildRestartArgs(st, configPath, listen)
+	// 参数全部通过位置参数 ($1, "$@") 传递，绝不拼接 shell 字符串，杜绝命令注入
+	shArgs := []string{
+		"-c",
+		`sleep 1; "$1" web stop >/dev/null 2>&1 || true; exec "$@" >/dev/null 2>&1`,
+		"--",
+		exe,
+		exe,
+	}
+	shArgs = append(shArgs, startArgs...)
+	cmd := exec.Command("/bin/sh", shArgs...)
+	if password != "" {
+		cmd.Env = append(os.Environ(), "SINGCTL_WEB_PASSWORD="+password)
+	}
+	setWebSpawnAttrs(cmd)
+	_ = cmd.Start()
+}
