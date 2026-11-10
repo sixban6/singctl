@@ -49,11 +49,17 @@ type Server struct {
 	iosMu       sync.Mutex
 	iosCacheKey string // singctl.yaml 的 path|mtime|size 指纹
 	iosCacheVal string
+
+	auditLimiter *auditRateLimiter
 }
 
 // New 创建 Web 服务
 func New(opts Options) *Server {
-	s := &Server{opts: opts, Mux: http.NewServeMux()}
+	s := &Server{
+		opts:         opts,
+		Mux:          http.NewServeMux(),
+		auditLimiter: newAuditRateLimiter(),
+	}
 
 	// 静态资源(同样受鉴权保护;不限方法,避免与 /clash/* 全方法代理模式冲突)
 	staticContent, _ := fs.Sub(staticFS, "static")
@@ -83,6 +89,11 @@ func New(opts Options) *Server {
 	s.Mux.HandleFunc("GET /api/sbconfig", s.guard(s.handleSbConfigGet))
 	s.Mux.HandleFunc("PUT /api/sbconfig", s.guard(s.handleSbConfigPut))
 	s.Mux.HandleFunc("POST /api/sbconfig/restore", s.guard(s.handleSbConfigRestore))
+
+	// 局域网设备行为审计与双层一键拉黑 API
+	s.Mux.HandleFunc("GET /api/audit", s.guard(s.handleAuditGet))
+	s.Mux.HandleFunc("POST /api/audit/block", s.guard(s.handleAuditBlock))
+	s.Mux.HandleFunc("POST /api/audit/unblock", s.guard(s.handleAuditUnblock))
 
 	// clash 控制面板与 API 反向代理(/clash/* 及根路径直通)
 	s.setupClashProxy()
@@ -165,9 +176,12 @@ func (s *Server) setAuthCookie(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// guard 包装器:统一鉴权、JSON 错误输出、方法校验
+// guard 包装器:统一鉴权、反爬虫头注入、JSON 错误输出、方法校验
 func (s *Server) guard(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Robots-Tag", "noindex, nofollow, noarchive, nosnippet")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Cache-Control", "no-store")
 		if !s.authorized(r) {
 			w.Header().Set("WWW-Authenticate", `Basic realm="SingCtl WebUI"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -188,6 +202,8 @@ func (s *Server) guard(next http.HandlerFunc) http.HandlerFunc {
 // authOnly 仅鉴权(用于静态资源,不校验 Content-Type)
 func (s *Server) authOnly(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Robots-Tag", "noindex, nofollow, noarchive, nosnippet")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
 		if !s.authorized(r) {
 			w.Header().Set("WWW-Authenticate", `Basic realm="SingCtl WebUI"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)

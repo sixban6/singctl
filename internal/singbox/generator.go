@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"net"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -253,14 +255,19 @@ func (g *ConfigGenerator) InjectCustomRules(rawJSON string) (string, error) {
 		}
 	}
 
-	// 2. 注入 DNS 规则 (custom_rules.dns)
-	if len(g.config.CustomRules.DNS) > 0 {
-		applyCustomDNSRules(root, g.config.CustomRules.DNS)
+	// 2. 编译设备审计黑名单规则 (custom_rules.block)，作为最高优先级阻断规则注入
+	blockDNS, blockRoute := CompileBlockRules(g.config.CustomRules.Block)
+
+	// 3. 注入 DNS 规则 (custom_rules.block + custom_rules.dns)
+	allDNS := append(blockDNS, g.config.CustomRules.DNS...)
+	if len(allDNS) > 0 {
+		applyCustomDNSRules(root, allDNS)
 	}
 
-	// 3. 注入路由规则 (custom_rules.route)
-	if len(g.config.CustomRules.Route) > 0 {
-		applyCustomRouteRules(root, g.config.CustomRules.Route)
+	// 4. 注入路由规则 (custom_rules.block + custom_rules.route)
+	allRoute := append(blockRoute, g.config.CustomRules.Route...)
+	if len(allRoute) > 0 {
+		applyCustomRouteRules(root, allRoute)
 	}
 
 	data, err := json.Marshal(root)
@@ -268,6 +275,193 @@ func (g *ConfigGenerator) InjectCustomRules(rawJSON string) (string, error) {
 		return "", fmt.Errorf("failed to marshal config JSON with custom rules: %w", err)
 	}
 	return string(data), nil
+}
+
+// NormalizeBlockTarget 规范化拉黑目标（去除协议头、端口、首尾通配符与空格），并判定其是否为 IP/CIDR。
+func NormalizeBlockTarget(raw string) (cleaned string, isIPOrCIDR bool) {
+	s := strings.TrimSpace(raw)
+	s = strings.TrimPrefix(s, "||")
+	s = strings.TrimSuffix(s, "^")
+	if idx := strings.Index(s, "://"); idx >= 0 {
+		s = s[idx+3:]
+	}
+	if idx := strings.IndexByte(s, '/'); idx >= 0 {
+		// 保留合法 CIDR，剥离 URL 路径
+		if _, _, err := net.ParseCIDR(s); err == nil {
+			return s, true
+		}
+		s = s[:idx]
+	}
+	// 若包含端口 (host:port) 则剥离端口
+	if h, _, err := net.SplitHostPort(s); err == nil && h != "" {
+		s = h
+	}
+	s = strings.Trim(s, "[]")
+	s = strings.TrimPrefix(s, "*.")
+	s = strings.TrimPrefix(s, ".")
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "" {
+		return "", false
+	}
+	if ip := net.ParseIP(s); ip != nil {
+		if ip4 := ip.To4(); ip4 != nil {
+			return ip4.String() + "/32", true
+		}
+		return ip.String() + "/128", true
+	}
+	if _, ipNet, err := net.ParseCIDR(s); err == nil && ipNet != nil {
+		return ipNet.String(), true
+	}
+	return s, false
+}
+
+// NormalizeSourceIPCIDR 将可选的内网源设备 IP 规范化为 CIDR 表达式（如 192.168.1.55 -> 192.168.1.55/32）。
+func NormalizeSourceIPCIDR(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	if _, ipNet, err := net.ParseCIDR(s); err == nil && ipNet != nil {
+		return ipNet.String()
+	}
+	if h, _, err := net.SplitHostPort(s); err == nil && h != "" {
+		s = h
+	}
+	if ip := net.ParseIP(s); ip != nil {
+		if ip4 := ip.To4(); ip4 != nil {
+			return ip4.String() + "/32"
+		}
+		return ip.String() + "/128"
+	}
+	return ""
+}
+
+// CompileBlockRules 将语义化 BlockRule 列表编译为 sing-box 原生 DNS 阻断规则与路由阻断规则。
+// 按 source_ip_cidr 分组聚合，保证生成的 JSON 紧凑、高效且完全符合 sing-box v1.12+/v1.14 规范。
+func CompileBlockRules(blocks []config.BlockRule) (dnsRules []map[string]any, routeRules []map[string]any) {
+	if len(blocks) == 0 {
+		return nil, nil
+	}
+
+	type groupBucket struct {
+		sourceCIDR string
+		domains    []string
+		ipCIDRs    []string
+	}
+	var groups []*groupBucket
+	bySource := make(map[string]*groupBucket)
+
+	for _, b := range blocks {
+		target, isIP := NormalizeBlockTarget(b.Target)
+		if target == "" {
+			continue
+		}
+		srcCIDR := NormalizeSourceIPCIDR(b.SourceIP)
+		bucket, ok := bySource[srcCIDR]
+		if !ok {
+			bucket = &groupBucket{sourceCIDR: srcCIDR}
+			bySource[srcCIDR] = bucket
+			groups = append(groups, bucket)
+		}
+		if isIP {
+			if !slices.Contains(bucket.ipCIDRs, target) {
+				bucket.ipCIDRs = append(bucket.ipCIDRs, target)
+			}
+		} else {
+			if !slices.Contains(bucket.domains, target) {
+				bucket.domains = append(bucket.domains, target)
+			}
+		}
+	}
+
+	for _, g := range groups {
+		if len(g.domains) > 0 {
+			dr := map[string]any{
+				"action":        "reject",
+				"domain_suffix": g.domains,
+			}
+			rr := map[string]any{
+				"action":        "reject",
+				"domain_suffix": g.domains,
+			}
+			if g.sourceCIDR != "" {
+				dr["source_ip_cidr"] = []string{g.sourceCIDR}
+				rr["source_ip_cidr"] = []string{g.sourceCIDR}
+			}
+			dnsRules = append(dnsRules, dr)
+			routeRules = append(routeRules, rr)
+		}
+		if len(g.ipCIDRs) > 0 {
+			rr := map[string]any{
+				"action":  "reject",
+				"ip_cidr": g.ipCIDRs,
+			}
+			if g.sourceCIDR != "" {
+				rr["source_ip_cidr"] = []string{g.sourceCIDR}
+			}
+			routeRules = append(routeRules, rr)
+		}
+	}
+	return dnsRules, routeRules
+}
+
+// SyncBlockRulesInConfigJSON 在不重新拉取远程订阅的前提下，对现有 sing-box config.json 原地幂等同步黑名单阻断规则。
+func SyncBlockRulesInConfigJSON(rawJSON string, oldBlocks, newBlocks []config.BlockRule) (string, error) {
+	var root map[string]any
+	if err := json.Unmarshal([]byte(rawJSON), &root); err != nil {
+		return "", fmt.Errorf("failed to parse config.json: %w", err)
+	}
+
+	oldDNS, oldRoute := CompileBlockRules(oldBlocks)
+	newDNS, newRoute := CompileBlockRules(newBlocks)
+
+	// 先从现有规则集中剔除旧的或重复的受管 block 规则
+	removeMatchingRules(root, "dns", append(oldDNS, newDNS...))
+	removeMatchingRules(root, "route", append(oldRoute, newRoute...))
+
+	// 再注入最新的受管 block 规则
+	if len(newDNS) > 0 {
+		applyCustomDNSRules(root, newDNS)
+	}
+	if len(newRoute) > 0 {
+		applyCustomRouteRules(root, newRoute)
+	}
+
+	data, err := json.Marshal(root)
+	if err != nil {
+		return "", err
+	}
+	return PrettyJSON(string(data))
+}
+
+func removeMatchingRules(root map[string]any, section string, toRemove []map[string]any) {
+	if len(toRemove) == 0 {
+		return
+	}
+	secMap, ok := root[section].(map[string]any)
+	if !ok {
+		return
+	}
+	existing, ok := secMap["rules"].([]any)
+	if !ok || len(existing) == 0 {
+		return
+	}
+	signatures := make(map[string]struct{}, len(toRemove))
+	for _, r := range toRemove {
+		if b, err := json.Marshal(r); err == nil {
+			signatures[string(b)] = struct{}{}
+		}
+	}
+	kept := make([]any, 0, len(existing))
+	for _, item := range existing {
+		if b, err := json.Marshal(item); err == nil {
+			if _, hit := signatures[string(b)]; hit {
+				continue
+			}
+		}
+		kept = append(kept, item)
+	}
+	secMap["rules"] = kept
 }
 
 func applyCustomOutboundRules(root map[string]any, rules []config.OutboundRule) error {

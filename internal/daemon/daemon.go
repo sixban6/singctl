@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"singctl/internal/adguard"
+	"singctl/internal/audit"
 	"singctl/internal/config"
 	"singctl/internal/constant"
 	"singctl/internal/logger"
@@ -48,6 +49,7 @@ type Daemon struct {
 	lastSubSyncCheckAt  time.Time
 	failoverRunning     atomic.Bool
 	failover            *GroupFailoverState
+	auditSampling       atomic.Bool
 }
 
 // NewDaemon 创建守护进程
@@ -291,6 +293,7 @@ func (d *Daemon) monitorLoop() error {
 
 		case <-failoverTicker.C:
 			d.maybePatrolGroupFailoverAsync()
+			d.maybeSampleDeviceAuditAsync()
 
 		case <-initRefreshTimer.C:
 			if d.monitor.CheckHealth().Healthy {
@@ -301,6 +304,20 @@ func (d *Daemon) monitorLoop() error {
 			d.runWatchdogCheck()
 		}
 	}
+}
+
+// maybeSampleDeviceAuditAsync 后台静默采样当前活跃连接至 /tmp 内存环形池，
+// 确保即使短连接或夜间连接断开，后续执行 singctl sb audit 依然能回溯历史可疑上传。
+func (d *Daemon) maybeSampleDeviceAuditAsync() {
+	if !d.auditSampling.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer d.auditSampling.Store(false)
+		ctx, cancel := context.WithTimeout(d.ctx, 4*time.Second)
+		defer cancel()
+		_ = audit.NewCollector(d.config).Collect(ctx, audit.CollectOptions{Limit: 10})
+	}()
 }
 
 // maybeRefreshRuleSetsAsync 在 sing-box 正常运行且健康的前提下，

@@ -99,17 +99,46 @@ type Config struct {
 	Tailscale   TailscaleConfig   `yaml:"tailscale"`
 	Server      ServerConfig      `yaml:"server"`
 	Watchdog    WatchdogConfig    `yaml:"watchdog"`
+	Audit       AuditConfig       `yaml:"audit,omitempty" json:"audit,omitempty"`
 	CustomRules CustomRulesConfig `yaml:"custom_rules,omitempty"`
 }
 
+// AuditConfig 定义客户端设备行为审计与可选 AI 深度研判配置。
+type AuditConfig struct {
+	Whitelist []string      `yaml:"whitelist,omitempty" json:"whitelist,omitempty"` // 额外信任的域名后缀或 IP/CIDR 白名单
+	AI        AuditAIConfig `yaml:"ai,omitempty" json:"ai,omitempty"`               // 可选 L2 AI 语义研判配置 (OpenAI 兼容接口)
+}
+
+func (a AuditConfig) IsEmpty() bool {
+	return len(a.Whitelist) == 0 && !a.AI.Enabled && strings.TrimSpace(a.AI.Endpoint) == "" && strings.TrimSpace(a.AI.APIKey) == ""
+}
+
+// AuditAIConfig 定义用于二次确认可疑上传的 OpenAI 兼容大模型接口参数。
+type AuditAIConfig struct {
+	Enabled  bool   `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Endpoint string `yaml:"endpoint,omitempty" json:"endpoint,omitempty"` // 如 https://api.deepseek.com/v1 或 http://127.0.0.1:11434/v1
+	APIKey   string `yaml:"api_key,omitempty" json:"api_key,omitempty"`
+	Model    string `yaml:"model,omitempty" json:"model,omitempty"` // 如 deepseek-chat / gpt-4o-mini
+}
+
+// BlockRule 定义由设备审计或用户一键拉黑生成的阻断规则。
+// 同时作用于 sing-box 路由层 (action: reject)、sing-box DNS 层与自建 AdGuard Home 黑名单。
+type BlockRule struct {
+	Target    string `yaml:"target" json:"target"`                           // 被拉黑的目标域名或 IP/CIDR
+	SourceIP  string `yaml:"source_ip,omitempty" json:"source_ip,omitempty"` // 可选：仅限制特定局域网设备 IP
+	Reason    string `yaml:"reason,omitempty" json:"reason,omitempty"`       // 拉黑原因备注
+	CreatedAt string `yaml:"created_at,omitempty" json:"created_at,omitempty"`
+}
+
 type CustomRulesConfig struct {
+	Block     []BlockRule      `yaml:"block,omitempty" json:"block,omitempty"`
 	Outbounds []OutboundRule   `yaml:"outbounds,omitempty" json:"outbounds,omitempty"`
 	Route     []map[string]any `yaml:"route,omitempty" json:"route,omitempty"`
 	DNS       []map[string]any `yaml:"dns,omitempty" json:"dns,omitempty"`
 }
 
 func (c CustomRulesConfig) IsEmpty() bool {
-	return len(c.Outbounds) == 0 && len(c.Route) == 0 && len(c.DNS) == 0
+	return len(c.Block) == 0 && len(c.Outbounds) == 0 && len(c.Route) == 0 && len(c.DNS) == 0
 }
 
 // OutboundRule 定义针对 sing-box 出站策略组 (urltest / selector) 的定制与节点过滤规则。
@@ -737,8 +766,10 @@ var knownYAMLKeys = []string{
 	"web_terminal", "mtls_ca", "ssh_tunnel_port", "ssh_tunnel_path", "ssh_port",
 	"web_admin", "enabled", "port", "path", "username", "password", "password_pending_ack",
 	"watchdog", "interval", "confirm_wait", "max_restarts", "sub_sync_interval",
-	"custom_rules", "outbounds", "tag", "default", "tolerance", "interrupt_exist_connections",
+	"custom_rules", "block", "target", "source_ip", "reason", "created_at",
+	"outbounds", "tag", "default", "tolerance", "interrupt_exist_connections",
 	"route", "dns", "dns_port", "web_port",
+	"audit", "whitelist", "ai", "endpoint", "api_key", "model",
 }
 
 var colonSpaceFixRegex = regexp.MustCompile(
@@ -1234,6 +1265,9 @@ func MigrateConfig(configPath string, templateData []byte) error {
 	if hasYAMLKey(oldDocNode, "custom_rules") && !oldCfg.CustomRules.IsEmpty() {
 		replaceNode(docNode, "custom_rules", oldCfg.CustomRules)
 	}
+	if hasYAMLKey(oldDocNode, "audit") && !oldCfg.Audit.IsEmpty() {
+		replaceNode(docNode, "audit", oldCfg.Audit)
+	}
 
 	newData, err := yaml.Marshal(&rootNode)
 	if err != nil {
@@ -1342,6 +1376,12 @@ func filterRoleNodesBeforeMerge(dstRoot, srcRoot *yaml.Node, cfg *Config) {
 		v := srcDoc.Content[i+1]
 		key := k.Value
 
+		if key == "audit" && (cfg == nil || cfg.Audit.IsEmpty()) {
+			continue
+		}
+		if key == "custom_rules" && (cfg == nil || cfg.CustomRules.IsEmpty()) {
+			continue
+		}
 		if isServerDoc {
 			// 纯服务端配置：只保留原文件已有的顶层键、server 以及非空的 custom_rules
 			if !hasKey(dstDoc, key) && key != "server" && !(key == "custom_rules" && cfg != nil && !cfg.CustomRules.IsEmpty()) {
@@ -1355,6 +1395,27 @@ func filterRoleNodesBeforeMerge(dstRoot, srcRoot *yaml.Node, cfg *Config) {
 		filtered = append(filtered, k, v)
 	}
 	srcDoc.Content = filtered
+
+	// 当 custom_rules.block 被清空（如 unblock 最后一个条目）时，同步从 dstDoc 移除旧的 block 子节点
+	if cfg != nil && len(cfg.CustomRules.Block) == 0 {
+		for i := 0; i+1 < len(dstDoc.Content); i += 2 {
+			if dstDoc.Content[i].Value == "custom_rules" && dstDoc.Content[i+1].Kind == yaml.MappingNode {
+				crMap := dstDoc.Content[i+1]
+				newCR := make([]*yaml.Node, 0, len(crMap.Content))
+				for j := 0; j+1 < len(crMap.Content); j += 2 {
+					if crMap.Content[j].Value == "block" {
+						continue
+					}
+					newCR = append(newCR, crMap.Content[j], crMap.Content[j+1])
+				}
+				crMap.Content = newCR
+				if len(crMap.Content) == 0 && cfg.CustomRules.IsEmpty() {
+					dstDoc.Content = append(dstDoc.Content[:i], dstDoc.Content[i+2:]...)
+				}
+				break
+			}
+		}
+	}
 
 	// 若 server.web_admin 已激活，清理 dstDoc 中 sni 节点尾部残留的 `# web_admin:` 注释块，避免重复
 	for i := 0; i+1 < len(dstDoc.Content); i += 2 {

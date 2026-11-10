@@ -574,6 +574,9 @@ func NewSingboxCommand(configPath string) *cobra.Command {
 		newInstallCmd(configPath),
 		newUpdateCmd(configPath),
 		newCacheCmd(configPath),
+		newAuditCmd(configPath),
+		newBlockCmd(configPath),
+		newUnblockCmd(configPath),
 	)
 	return cmd
 }
