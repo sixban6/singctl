@@ -65,7 +65,7 @@ body {
   font-size: 14px;
   line-height: 1.55;
 }
-.app { max-width: 1180px; margin: 0 auto; padding: 0 20px calc(130px + env(safe-area-inset-bottom, 0px)); }
+.app { width: 100%; max-width: min(96vw, 2160px); margin: 0 auto; padding: 0 28px calc(130px + env(safe-area-inset-bottom, 0px)); }
 @media (max-width: 767px) {
   .app { padding: 0 14px calc(110px + env(safe-area-inset-bottom, 0px)); }
   .topbar { flex-wrap: wrap; gap: 10px; padding: 14px 0 10px; }
@@ -214,14 +214,16 @@ svg.ic { width: 17px; height: 17px; flex: none; vertical-align: -3px; }
 
 /* ═══════════════════════ 表格 ═══════════════════════ */
 .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 13px; }
-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
-th { text-align: left; padding: 10px 13px; color: var(--muted); font-weight: 600; background: var(--card-2); border-bottom: 1px solid var(--border); white-space: nowrap; }
-td { padding: 9.5px 13px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; padding: 11px 14px; color: var(--muted); font-weight: 600; background: var(--card-2); border-bottom: 1px solid var(--border); white-space: nowrap; }
+td { padding: 11px 14px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+tbody tr:hover td { background: rgba(148, 163, 184, .05); }
 tr:last-child td { border-bottom: none; }
-.badge { display: inline-flex; align-items: center; gap: 5px; padding: 2.5px 9px; border-radius: 999px; font-size: 11.5px; font-weight: 600; }
+.badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9.5px; border-radius: 999px; font-size: 12px; font-weight: 600; }
 .badge.ok { background: var(--ok-soft); color: var(--ok); }
 .badge.warn { background: var(--warn-soft); color: var(--warn); }
 .badge.err { background: var(--err-soft); color: var(--err); }
+.badge.info { background: var(--accent-soft); color: var(--accent); }
 .badge.dim { background: var(--card-2); color: var(--muted); }
 
 /* ═══════════════════════ KV 列表 ═══════════════════════ */
@@ -245,14 +247,14 @@ tr:last-child td { border-bottom: none; }
 .logview {
   background: var(--console-bg); border-radius: 13px; border: 1px solid var(--border);
   padding: 14px 16px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px; line-height: 1.75; max-height: 520px; overflow: auto; white-space: pre-wrap; word-break: break-all;
+  font-size: 12.5px; line-height: 1.75; max-height: calc(100vh - 230px); min-height: 460px; overflow: auto; white-space: pre-wrap; word-break: break-all;
   color: #9fb0c8;
 }
 
 /* ═══════════════════════ 内嵌面板 ═══════════════════════ */
 .embed-card { padding: 0; overflow: hidden; }
 .embed-card .card-head { padding: 10px 14px; border-bottom: 1px solid var(--border); margin-bottom: 0; }
-.embed-card iframe { width: 100%; height: calc(100vh - 200px); min-height: 460px; border: 0; display: block; background: #fff; }
+.embed-card iframe { width: 100%; height: calc(100vh - 170px); min-height: 580px; border: 0; display: block; background: #fff; }
 [data-theme="dark"] .embed-card iframe { background: #0d1524; }
 
 /* ═══════════════════════ 控制台抽屉 ═══════════════════════ */
@@ -302,14 +304,14 @@ section.panel.active { display: block; }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: var(--card-2); border: 1px solid var(--border); padding: 1px 6px; border-radius: 6px; font-size: 12px; }
 .audit-tbl th, .audit-tbl td { vertical-align: top; }
 .audit-tbl .col-nowrap { white-space: nowrap; }
-.app-pill { display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border-radius: 6px; font-size: 11px; font-weight: 600; background: rgba(59,130,246,.14); color: var(--accent); border: 1px solid rgba(59,130,246,.28); white-space: nowrap; margin-top: 3px; }
-.axis-sub { font-size: 11px; color: var(--muted); margin-top: 4px; white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-.ai-card { padding: 6px 10px; border-radius: 8px; background: var(--card-2); border: 1px solid var(--border); border-left: 3px solid var(--accent); font-size: 12px; line-height: 1.48; max-width: 360px; }
+.app-pill { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 6px; font-size: 11.5px; font-weight: 600; background: rgba(59,130,246,.14); color: var(--accent); border: 1px solid rgba(59,130,246,.28); white-space: nowrap; margin-top: 4px; }
+.axis-sub { font-size: 11.5px; color: var(--muted); margin-top: 4px; white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.ai-card { padding: 8px 12px; border-radius: 9px; background: var(--card-2); border: 1px solid var(--border); border-left: 3.5px solid var(--accent); font-size: 12.5px; line-height: 1.55; width: 100%; }
 .ai-card.safe { border-left-color: var(--ok); }
 .ai-card.caution { border-left-color: var(--warn); }
-.ai-card-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; flex-wrap: wrap; margin-bottom: 3px; }
-.ai-card-src { font-size: 10.5px; color: var(--muted); font-family: ui-monospace, Menlo, monospace; }
-.ai-card-impact { color: var(--muted); font-size: 11.5px; word-break: break-word; white-space: normal; }
+.ai-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
+.ai-card-src { font-size: 11px; color: var(--muted); font-family: ui-monospace, Menlo, monospace; }
+.ai-card-impact { color: var(--muted); font-size: 12px; word-break: break-word; white-space: normal; }
 tr.dual-alert-row td { background: linear-gradient(90deg, rgba(239, 68, 68, .13) 0%, rgba(245, 158, 11, .07) 50%, rgba(239, 68, 68, .10) 100%) !important; }
 tr.dual-alert-row:hover td { background: linear-gradient(90deg, rgba(239, 68, 68, .19) 0%, rgba(245, 158, 11, .11) 50%, rgba(239, 68, 68, .15) 100%) !important; }
 tr.dual-alert-row td:first-child { box-shadow: inset 4px 0 0 var(--err); }
@@ -1580,19 +1582,19 @@ function renderAuditFlowsTable() {
             <div class="axis-sub">🛡️安:${f.securityScore || 0} · 👁️隐:${f.privacyScore || 0}</div>
             <div data-dual-badge-idx="${idx}">${dualBadgeHtml}</div>
           </td>
-          <td class="col-nowrap"><div><b>${esc(f.deviceName || f.deviceIp)}</b></div><div class="mono" style="font-size:11px;color:var(--muted);">${esc(f.deviceIp)}</div></td>
-          <td>
-            <div class="mono" style="word-break:break-all;max-width:240px;">${esc(targetDisp)}</div>
+          <td class="col-nowrap"><div><b>${esc(f.deviceName || f.deviceIp)}</b></div><div class="mono" style="font-size:11.5px;color:var(--muted);">${esc(f.deviceIp)}</div></td>
+          <td style="min-width:210px;white-space:normal;">
+            <div class="mono" style="word-break:break-all;font-size:13px;font-weight:500;">${esc(targetDisp)}</div>
             ${appPillHtml}
           </td>
           <td class="mono col-nowrap">${esc((f.network || "").toUpperCase())}</td>
           <td class="mono col-nowrap">${fmtBytes(f.uploadBytes)}</td>
           <td class="mono col-nowrap">${fmtBytes(dOrZero(f.downloadBytes))}</td>
           <td class="mono col-nowrap">${Number(f.uploadRatio || 0).toFixed(1)}x</td>
-          <td style="min-width:190px;max-width:270px;font-size:12px;word-break:break-word;white-space:normal;">
+          <td style="min-width:240px;width:23%;font-size:13px;line-height:1.58;word-break:break-word;white-space:normal;">
             <div>${esc(reasonText)}</div>
           </td>
-          <td style="min-width:250px;max-width:350px;font-size:12px;word-break:break-word;white-space:normal;">
+          <td style="min-width:300px;width:28%;font-size:12.5px;word-break:break-word;white-space:normal;">
             <div data-ai-row-idx="${idx}">${aiSlotHtml}</div>
           </td>
           <td class="col-nowrap">${actionHtml}</td>
