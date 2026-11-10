@@ -1505,14 +1505,13 @@ function buildAIRowSlotHTML(f) {
     const cardCls = aiRev.verdict === "safe_to_block" ? "safe" : (aiRev.verdict === "caution" ? "caution" : "keep");
     const vBadgeCls = aiRev.verdict === "safe_to_block" ? "ok" : (aiRev.verdict === "caution" ? "warn" : "info");
     const isRealLLM = aiRev.source && aiRev.source !== "builtin_expert";
-    const srcLabel = isRealLLM ? aiRev.source : "离线专家库";
     const retryBtn = !isRealLLM
-      ? `<button class="btn btn-sm" style="padding:1px 6px;font-size:10.5px;margin-left:6px;" onclick="reviewSingleAuditFlow('${esc(flowKey)}', this, true)">🤖 重试AI</button>`
-      : `<button class="btn btn-sm" style="padding:0 5px;font-size:10px;margin-left:5px;opacity:.72;" title="忽略缓存，强制重新调用 AI 研判此目标" onclick="reviewSingleAuditFlow('${esc(flowKey)}', this, true)">🔄</button>`;
+      ? `<button class="btn btn-sm" style="padding:1px 6px;font-size:10.5px;" onclick="reviewSingleAuditFlow('${esc(flowKey)}', this, true)">🤖 重试AI</button>`
+      : `<button class="btn btn-sm" style="padding:0 5px;font-size:10px;opacity:.72;" title="重新调用 AI 研判此目标" onclick="reviewSingleAuditFlow('${esc(flowKey)}', this, true)">🔄</button>`;
     return `<div class="ai-card ${cardCls}">
       <div class="ai-card-head">
         <span><span class="badge ${vBadgeCls}" style="margin-right:5px;">🤖 ${esc(aiRev.verdictText)}</span><b>${esc(aiRev.category)}</b></span>
-        <span class="ai-card-src">${esc(srcLabel)}${retryBtn}</span>
+        <span class="ai-card-src">${retryBtn}</span>
       </div>
       <div class="ai-card-impact">${esc(aiRev.impact)}</div>
     </div>`;
