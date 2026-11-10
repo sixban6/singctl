@@ -218,6 +218,7 @@ func LocalizeRuleSets(jsonStr string, opts LocalizeOptions) (string, RuleSetStat
 					continue
 				}
 				stats.Kept++
+				sanitizeKeptRemoteEntry(t.entry)
 				if !opts.Silent && !results[t.idx].aborted {
 					log.Warn("⚠️ 自定义规则集 %q 下载失败且无内置快照(%v)，保留远程引用", t.tag, results[t.idx].err)
 				}
@@ -273,6 +274,7 @@ func LocalizeRuleSets(jsonStr string, opts LocalizeOptions) (string, RuleSetStat
 			}
 		}
 		stats.Kept++
+		sanitizeKeptRemoteEntry(t.entry)
 		if !opts.Silent && !results[t.idx].aborted {
 			log.Warn("⚠️ 规则集 %q 下载失败且无任何兑底(%v)，保留远程引用", t.tag, results[t.idx].err)
 		}
@@ -967,6 +969,15 @@ func localizeEntry(entry map[string]any, path string) {
 	}
 	entry["type"] = "local"
 	entry["path"] = path
+}
+
+// sanitizeKeptRemoteEntry 清理保留为 remote 的规则集条目：
+// sing-box 1.14+ 严格禁止 remote 规则集的 download_detour 指向空的 direct 出站
+// （会直接报 FATAL: "detour to an empty direct outbound makes no sense" 导致整个 sing-box 启动失败）。
+func sanitizeKeptRemoteEntry(entry map[string]any) {
+	if detour, _ := entry["download_detour"].(string); strings.EqualFold(detour, "direct") || strings.EqualFold(detour, "DirectConn") {
+		delete(entry, "download_detour")
+	}
 }
 
 // replaceMapEntry 用原始条目内容完整覆盖现有 map（原地替换，保持引用）。
