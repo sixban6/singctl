@@ -1396,6 +1396,92 @@ function fmtBytes(b) {
 const auditAICache = new Map();
 let suggestedMagpieLanURL = "http://127.0.0.1:3425/v1";
 let auditAILoading = false;
+let auditAIAbort = false;
+let lastRenderedFlows = [];
+let lastEmptyFlowMsg = "暂无符合过滤条件的流量记录";
+
+function getFlowCacheKey(f) {
+  return f.key || f.id || `${f.deviceIp}|${f.target}|${f.network}`;
+}
+
+function getCachedAIReview(f) {
+  const k = getFlowCacheKey(f);
+  return auditAICache.get(k) || (f.target ? auditAICache.get("tgt:" + f.target) : null) || f.aiReview || null;
+}
+
+function setCachedAIReview(fOrKey, target, rev) {
+  if (!rev) return;
+  const k = typeof fOrKey === "string" ? fOrKey : getFlowCacheKey(fOrKey);
+  const prev = auditAICache.get(k);
+  const isNewLLM = rev.source && rev.source !== "builtin_expert";
+  const hadPrevLLM = prev && prev.source && prev.source !== "builtin_expert";
+  if (isNewLLM || !hadPrevLLM) {
+    auditAICache.set(k, rev);
+    if (target) auditAICache.set("tgt:" + target, rev);
+  }
+}
+
+function renderAuditFlowsTable() {
+  const flows = lastRenderedFlows || [];
+  if (!flows.length) {
+    $("#audit-flows-box").innerHTML = '<div class="empty">' + esc(lastEmptyFlowMsg) + '</div>';
+    return;
+  }
+  $("#audit-flows-box").innerHTML = `
+    <div class="table-wrap"><table class="tbl audit-tbl">
+      <thead><tr><th>双轴评分</th><th>源设备</th><th>目标域名 / IP & 归属应用</th><th>协议</th><th>上传 ↑</th><th>下载 ↓</th><th>比值</th><th>双轴非线性诊断原因 & AI 顾问研判</th><th>一键拉黑 (路由+DNS)</th></tr></thead>
+      <tbody>${flows.map(f => {
+        const cls = f.state === "blocked" ? "dim" : (f.threat === "high_risk" ? "err" : (f.threat === "suspicious" ? "warn" : (f.threat === "notice" ? "info" : "ok")));
+        const label = f.state === "blocked" ? "已拉黑" : (f.threatLabel || "正常");
+        const targetDisp = f.isDirectIp && f.destPort ? `${f.target}:${f.destPort}` : f.target;
+        const appPillHtml = f.appName ? `<div><span class="app-pill">🏷️ ${esc(f.appName)}</span></div>` : "";
+        const flowKey = getFlowCacheKey(f);
+        const aiRev = getCachedAIReview(f);
+        let aiHtml = "";
+        if (aiRev) {
+          const cardCls = aiRev.verdict === "safe_to_block" ? "safe" : (aiRev.verdict === "caution" ? "caution" : "keep");
+          const vBadgeCls = aiRev.verdict === "safe_to_block" ? "ok" : (aiRev.verdict === "caution" ? "warn" : "info");
+          const isRealLLM = aiRev.source && aiRev.source !== "builtin_expert";
+          const srcLabel = isRealLLM ? aiRev.source : "离线专家库";
+          const retryBtn = !isRealLLM
+            ? `<button class="btn btn-sm" style="padding:1px 6px;font-size:10.5px;margin-left:6px;" onclick="reviewSingleAuditFlow('${esc(flowKey)}', this)">🤖 重试AI</button>`
+            : "";
+          aiHtml = `<div class="ai-card ${cardCls}">
+            <div class="ai-card-head">
+              <span><span class="badge ${vBadgeCls}" style="margin-right:5px;">🤖 ${esc(aiRev.verdictText)}</span><b>${esc(aiRev.category)}</b></span>
+              <span class="ai-card-src">${esc(srcLabel)}${retryBtn}</span>
+            </div>
+            <div class="ai-card-impact">${esc(aiRev.impact)}</div>
+          </div>`;
+        } else {
+          aiHtml = `<div style="margin-top:4px;"><button class="btn btn-sm" style="padding:2px 8px;font-size:11px;" onclick="reviewSingleAuditFlow('${esc(flowKey)}', this)">🤖 AI 研判此条</button></div>`;
+        }
+        const reasonText = (f.reasons || []).join("；");
+        const actionHtml = f.state === "blocked"
+          ? `<button class="btn btn-sm" onclick="unblockAuditTarget('${esc(f.target)}','')">解封</button>`
+          : `<button class="btn btn-sm btn-danger" onclick="blockAuditTarget('${esc(f.target)}','','${esc(reasonText)}')">一键拉黑</button>`;
+        return `<tr>
+          <td class="col-nowrap">
+            <span class="badge ${cls}">${esc(label)} · ${f.riskScore}分</span>
+            <div class="axis-sub">🛡️安:${f.securityScore || 0} · 👁️隐:${f.privacyScore || 0}</div>
+          </td>
+          <td class="col-nowrap"><div><b>${esc(f.deviceName || f.deviceIp)}</b></div><div class="mono" style="font-size:11px;color:var(--muted);">${esc(f.deviceIp)}</div></td>
+          <td>
+            <div class="mono" style="word-break:break-all;max-width:250px;">${esc(targetDisp)}</div>
+            ${appPillHtml}
+          </td>
+          <td class="mono col-nowrap">${esc((f.network || "").toUpperCase())}</td>
+          <td class="mono col-nowrap">${fmtBytes(f.uploadBytes)}</td>
+          <td class="mono col-nowrap">${fmtBytes(dOrZero(f.downloadBytes))}</td>
+          <td class="mono col-nowrap">${Number(f.uploadRatio || 0).toFixed(1)}x</td>
+          <td style="min-width:260px;max-width:400px;font-size:12px;word-break:break-word;white-space:normal;"><div>${esc(reasonText)}</div>${aiHtml}</td>
+          <td class="col-nowrap">${actionHtml}</td>
+        </tr>`;
+      }).join("")}</tbody>
+    </table></div>`;
+}
+
+function dOrZero(n) { return n || 0; }
 
 async function loadAuditAIConfig() {
   try {
@@ -1437,16 +1523,6 @@ async function loadAudit(withAI = false, silent = false) {
   const qs = new URLSearchParams();
   if (dev) qs.set("device", dev);
   if (susp) qs.set("suspicious", "1");
-  if (withAI) qs.set("ai", "1");
-
-  const aiBtn = $("#btn-audit-ai");
-  if (withAI) {
-    auditAILoading = true;
-    if (aiBtn) {
-      aiBtn.disabled = true;
-      aiBtn.innerHTML = '<span class="spin-inline"></span> AI 研判中…';
-    }
-  }
 
   try {
     const rep = await api("/api/audit?" + qs.toString());
@@ -1488,87 +1564,17 @@ async function loadAudit(withAI = false, silent = false) {
 
     // 2. 连接行为与可疑上传明细 (支持按安全/隐私轴过滤)
     const rawFlows = rep.flows || [];
-    let llmHitCount = 0;
-    let llmSourceName = "";
     rawFlows.forEach(f => {
-      const cacheKey = f.key || f.id || `${f.deviceIp}->${f.target}`;
-      if (f.aiReview) {
-        const prev = auditAICache.get(cacheKey);
-        const isNewLLM = f.aiReview.source && f.aiReview.source !== "builtin_expert";
-        const hadPrevLLM = prev && prev.source && prev.source !== "builtin_expert";
-        if (isNewLLM || !hadPrevLLM) {
-          auditAICache.set(cacheKey, f.aiReview);
-        }
-        if (isNewLLM) {
-          llmHitCount++;
-          if (!llmSourceName) llmSourceName = f.aiReview.source;
-        }
-      }
+      if (f.aiReview) setCachedAIReview(f, f.target, f.aiReview);
     });
-    if (withAI) {
-      if (llmHitCount > 0) {
-        toast("ok", `🤖 已通过 ${llmSourceName} 完成 ${llmHitCount} 条高优流深度研判`);
-      } else {
-        toast("info", "🤖 AI 网关未响应，已使用内置离线专家库完成兜底研判");
-      }
-    }
 
-    const flows = rawFlows.filter(f => {
+    lastEmptyFlowMsg = rep.message || "暂无符合过滤条件的流量记录";
+    lastRenderedFlows = rawFlows.filter(f => {
       if (axisFilter === "security") return (f.securityScore || 0) >= 15 || f.dominantAxis === "security" || f.dominantAxis === "both";
       if (axisFilter === "privacy") return (f.privacyScore || 0) >= 15 || f.dominantAxis === "privacy" || f.dominantAxis === "both";
       return true;
     });
-
-    if (!flows.length) {
-      $("#audit-flows-box").innerHTML = '<div class="empty">' + esc(rep.message || "暂无符合过滤条件的流量记录") + '</div>';
-    } else {
-      $("#audit-flows-box").innerHTML = `
-        <div class="table-wrap"><table class="tbl audit-tbl">
-          <thead><tr><th>双轴评分</th><th>源设备</th><th>目标域名 / IP & 归属应用</th><th>协议</th><th>上传 ↑</th><th>下载 ↓</th><th>比值</th><th>双轴非线性诊断原因 & AI 顾问研判</th><th>一键拉黑 (路由+DNS)</th></tr></thead>
-          <tbody>${flows.map(f => {
-            const cls = f.state === "blocked" ? "dim" : (f.threat === "high_risk" ? "err" : (f.threat === "suspicious" ? "warn" : (f.threat === "notice" ? "info" : "ok")));
-            const label = f.state === "blocked" ? "已拉黑" : (f.threatLabel || "正常");
-            const targetDisp = f.isDirectIp && f.destPort ? `${f.target}:${f.destPort}` : f.target;
-            const appPillHtml = f.appName ? `<div><span class="app-pill">🏷️ ${esc(f.appName)}</span></div>` : "";
-            const cacheKey = f.key || f.id || `${f.deviceIp}->${f.target}`;
-            const aiRev = auditAICache.get(cacheKey) || f.aiReview;
-            let aiHtml = "";
-            if (aiRev) {
-              const cardCls = aiRev.verdict === "safe_to_block" ? "safe" : (aiRev.verdict === "caution" ? "caution" : "keep");
-              const vBadgeCls = aiRev.verdict === "safe_to_block" ? "ok" : (aiRev.verdict === "caution" ? "warn" : "info");
-              const srcLabel = (aiRev.source && aiRev.source !== "builtin_expert") ? aiRev.source : "离线专家库";
-              aiHtml = `<div class="ai-card ${cardCls}">
-                <div class="ai-card-head">
-                  <span><span class="badge ${vBadgeCls}" style="margin-right:5px;">🤖 ${esc(aiRev.verdictText)}</span><b>${esc(aiRev.category)}</b></span>
-                  <span class="ai-card-src">${esc(srcLabel)}</span>
-                </div>
-                <div class="ai-card-impact">${esc(aiRev.impact)}</div>
-              </div>`;
-            }
-            const reasonText = (f.reasons || []).join("；");
-            const actionHtml = f.state === "blocked"
-              ? `<button class="btn btn-sm" onclick="unblockAuditTarget('${esc(f.target)}','')">解封</button>`
-              : `<button class="btn btn-sm btn-danger" onclick="blockAuditTarget('${esc(f.target)}','','${esc(reasonText)}')">一键拉黑</button>`;
-            return `<tr>
-              <td class="col-nowrap">
-                <span class="badge ${cls}">${esc(label)} · ${f.riskScore}分</span>
-                <div class="axis-sub">🛡️安:${f.securityScore || 0} · 👁️隐:${f.privacyScore || 0}</div>
-              </td>
-              <td class="col-nowrap"><div><b>${esc(f.deviceName || f.deviceIp)}</b></div><div class="mono" style="font-size:11px;color:var(--muted);">${esc(f.deviceIp)}</div></td>
-              <td>
-                <div class="mono" style="word-break:break-all;max-width:250px;">${esc(targetDisp)}</div>
-                ${appPillHtml}
-              </td>
-              <td class="mono col-nowrap">${esc((f.network || "").toUpperCase())}</td>
-              <td class="mono col-nowrap">${fmtBytes(f.uploadBytes)}</td>
-              <td class="mono col-nowrap">${fmtBytes(f.downloadBytes)}</td>
-              <td class="mono col-nowrap">${Number(f.uploadRatio || 0).toFixed(1)}x</td>
-              <td style="min-width:260px;max-width:400px;font-size:12px;word-break:break-word;white-space:normal;"><div>${esc(reasonText)}</div>${aiHtml}</td>
-              <td class="col-nowrap">${actionHtml}</td>
-            </tr>`;
-          }).join("")}</tbody>
-        </table></div>`;
-    }
+    renderAuditFlowsTable();
 
     // 3. 当前生效黑名单 (顶部折叠抽屉内渲染)
     const rules = rep.blockRules || [];
@@ -1586,18 +1592,130 @@ async function loadAudit(withAI = false, silent = false) {
           </tr>`).join("")}</tbody>
         </table></div>`;
     }
+
+    if (withAI) {
+      await runProgressiveAIReview();
+    }
   } catch (e) {
     if (!silent) toast("err", "加载设备审计失败: " + e.message);
-  } finally {
-    if (withAI) {
-      auditAILoading = false;
-      if (aiBtn) {
-        aiBtn.disabled = false;
-        aiBtn.textContent = "🤖 AI 深度研判";
+  }
+}
+
+// 渐进式全量分批 AI 研判：按独立 target 去重，每批 8 条流式点亮整表，支持中途随时点击按钮暂停
+async function runProgressiveAIReview() {
+  const aiBtn = $("#btn-audit-ai");
+  if (auditAILoading) {
+    auditAIAbort = true;
+    return;
+  }
+  if (!lastRenderedFlows.length) {
+    toast("info", "当前列表暂无可研判的流量记录");
+    return;
+  }
+
+  // 收集待研判的独立 target 代表流（优先挑选尚未经过远程大模型研判的记录）
+  const collectUniqueTargets = (forceAll) => {
+    const seenTargets = new Set();
+    const list = [];
+    for (const f of lastRenderedFlows) {
+      const tgtKey = f.target || getFlowCacheKey(f);
+      if (seenTargets.has(tgtKey)) continue;
+      const cached = getCachedAIReview(f);
+      const hasRealLLM = cached && cached.source && cached.source !== "builtin_expert";
+      if (!forceAll && hasRealLLM) continue;
+      seenTargets.add(tgtKey);
+      list.push(f);
+    }
+    return list;
+  };
+
+  let todoList = collectUniqueTargets(false);
+  if (!todoList.length) {
+    todoList = collectUniqueTargets(true);
+  }
+  if (!todoList.length) return;
+
+  auditAILoading = true;
+  auditAIAbort = false;
+  const total = todoList.length;
+  const batchSize = 8;
+  let done = 0;
+  let remoteHit = 0;
+  let remoteSource = "";
+
+  try {
+    for (let i = 0; i < total; i += batchSize) {
+      if (auditAIAbort) {
+        toast("info", `⏹️ 已暂停批量 AI 研判（已完成 ${done}/${total} 个独立目标）`);
+        break;
       }
+      const chunk = todoList.slice(i, i + batchSize);
+      if (aiBtn) {
+        aiBtn.innerHTML = `<span class="spin-inline"></span> 研判中 (${done}/${total}) · 点击停止`;
+      }
+      const res = await api("/api/audit/ai-review", {
+        method: "POST",
+        body: JSON.stringify({ flows: chunk }),
+      });
+      const results = (res && res.results) || {};
+      chunk.forEach(f => {
+        const k = getFlowCacheKey(f);
+        const rev = results[k];
+        if (rev) {
+          setCachedAIReview(f, f.target, rev);
+          if (rev.source && rev.source !== "builtin_expert") {
+            remoteHit++;
+            if (!remoteSource) remoteSource = rev.source;
+          }
+        }
+      });
+      done += chunk.length;
+      renderAuditFlowsTable();
+    }
+    if (!auditAIAbort) {
+      if (remoteHit > 0) {
+        toast("ok", `🤖 全量深度研判完成：已通过 ${remoteSource} 点亮 ${done} 个独立目标`);
+      } else {
+        toast("info", `🤖 已使用内置离线专家库完成 ${done} 个目标兜底研判`);
+      }
+    }
+  } catch (e) {
+    toast("err", "批量 AI 研判中断: " + e.message);
+  } finally {
+    auditAILoading = false;
+    auditAIAbort = false;
+    if (aiBtn) {
+      aiBtn.disabled = false;
+      aiBtn.textContent = "🤖 AI 深度研判";
     }
   }
 }
+
+window.reviewSingleAuditFlow = async function(flowKey, btnEl) {
+  const f = lastRenderedFlows.find(it => getFlowCacheKey(it) === flowKey);
+  if (!f) return;
+  if (btnEl) {
+    btnEl.disabled = true;
+    btnEl.innerHTML = '<span class="spin-inline"></span> 研判中…';
+  }
+  try {
+    const res = await api("/api/audit/ai-review", {
+      method: "POST",
+      body: JSON.stringify({ flows: [f] }),
+    });
+    const rev = res && res.results && res.results[getFlowCacheKey(f)];
+    if (rev) {
+      setCachedAIReview(f, f.target, rev);
+      renderAuditFlowsTable();
+    }
+  } catch (e) {
+    toast("err", "单条 AI 研判失败: " + e.message);
+    if (btnEl) {
+      btnEl.disabled = false;
+      btnEl.textContent = "🤖 AI 研判此条";
+    }
+  }
+};
 
 window.filterAuditByDevice = function(ip) {
   $("#audit-device-filter").value = ip || "";
@@ -1666,7 +1784,13 @@ async function exportAuditCSV() {
 }
 
 $("#btn-audit-refresh").onclick = () => loadAudit(false);
-$("#btn-audit-ai").onclick = () => loadAudit(true);
+$("#btn-audit-ai").onclick = () => {
+  if (auditAILoading) {
+    auditAIAbort = true;
+  } else {
+    runProgressiveAIReview();
+  }
+};
 $("#btn-audit-export-csv").onclick = () => exportAuditCSV();
 $("#btn-audit-blocklist-toggle").onclick = () => {
   const drawer = $("#audit-blocklist-drawer");

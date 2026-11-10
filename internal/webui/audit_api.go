@@ -260,3 +260,40 @@ func (s *Server) handleAuditAIConfigPost(w http.ResponseWriter, r *http.Request)
 		"model":   cfg.Audit.AI.Model,
 	})
 }
+
+type auditAIReviewRequest struct {
+	Flows []audit.FlowRecord `json:"flows"`
+}
+
+// handleAuditAIReviewPost 针对前端传入的一批连接记录（最多 12 条/批）执行 L2 AI 深度研判，支持全量渐进式分批点亮与单行按需研判。
+func (s *Server) handleAuditAIReviewPost(w http.ResponseWriter, r *http.Request) {
+	if !s.auditLimiter.allow(r, 180) {
+		writeJSONError(w, http.StatusTooManyRequests, "AI 研判请求过于频繁，请稍后再试")
+		return
+	}
+
+	var req auditAIReviewRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "无效的 JSON 请求体")
+		return
+	}
+
+	cfg, _ := config.Load(s.opts.ConfigPath)
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
+
+	callerHost, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err != nil || callerHost == "" {
+		callerHost = strings.TrimSpace(r.RemoteAddr)
+	}
+
+	advisor := audit.NewAdvisor(cfg.Audit.AI)
+	results, usedRemote := advisor.ReviewFlowBatch(r.Context(), req.Flows, callerHost)
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":         true,
+		"usedRemote": usedRemote,
+		"results":    results,
+	})
+}

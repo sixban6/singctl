@@ -127,6 +127,50 @@ func (a *Advisor) ReviewSuspiciousFlows(ctx context.Context, flows []FlowRecord,
 	}
 }
 
+// ReviewFlowBatch 对前端传入的指定批次流（最多 12 条/批）执行大模型深度研判，支持渐进式全量分批点亮与单行按需研判。
+func (a *Advisor) ReviewFlowBatch(ctx context.Context, flows []FlowRecord, callerIP string) (map[string]*AIReviewResult, bool) {
+	out := make(map[string]*AIReviewResult, len(flows))
+	if len(flows) == 0 {
+		return out, false
+	}
+	if len(flows) > 12 {
+		flows = flows[:12]
+	}
+
+	indices := make([]int, len(flows))
+	for i := range flows {
+		indices[i] = i
+		if flows[i].Key == "" {
+			flows[i].Key = fmt.Sprintf("%s|%s|%s", flows[i].DeviceIP, flows[i].Target, flows[i].Network)
+		}
+	}
+
+	llmCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 35*time.Second)
+	defer cancel()
+
+	usedRemote := false
+	for _, ep := range a.candidateEndpoints(strings.TrimSpace(callerIP)) {
+		if !probeEndpointReachable(ep, 600*time.Millisecond) {
+			continue
+		}
+		if results, err := a.queryRemoteLLM(llmCtx, ep, flows, indices); err == nil && len(results) > 0 {
+			for k, v := range results {
+				out[k] = v
+			}
+			usedRemote = true
+			break
+		}
+	}
+
+	for i := range flows {
+		k := flows[i].Key
+		if out[k] == nil {
+			out[k] = evaluateBuiltinExpert(&flows[i])
+		}
+	}
+	return out, usedRemote
+}
+
 func (a *Advisor) candidateEndpoints(callerIP string) []string {
 	var list []string
 	add := func(raw string) {
