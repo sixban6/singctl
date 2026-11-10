@@ -30,84 +30,95 @@
 * 📊 **实时流量与双出口分流雷达 (`singctl sr top`)**：本地回环零公网暴露采集上下行吞吐波形、Hysteria2 / VLESS Reality 协议负载、原生直出 / WARP 分流占比与活跃目标域名去向。
 * 🌍 **无 Agent 全球多节点舰队编排 (`singctl fleet`)**：零子节点常驻开销，新购裸机只需提供 **IP + 初始密码**，自动继承主控凭据、按归属地分配代号、自动创建 Cloudflare 灰云 DNS、完成 `22 → 2222` 免密加固并汇入单一主控总订阅。
 * 🛡️ **三层自动化安全漏洞自愈 (`singctl sr heal` / `fl heal`)**：零常驻内存（原生 `systemd timer` 凌晨窗口唤醒），覆盖核心代理组件（金丝雀预检 + 15s 异常秒级回滚）、系统安全补丁与残留 `.so` 动态库热重载、以及多节点内核单台串行滚动重启与故障熔断。
+* 🔍 **家庭局域网设备安全/隐私双轴审计与双层拉黑 (`:8090` WebUI / `singctl audit`)**：内置安全风险轴（后门木马/矿池/扫描/异常直连 IP）与隐私防泄漏轴（智能电视 ACR 截图遥测/路由器后台上报/广告追踪），支持本地 AI 深度研判、域名/IP 一键双层封禁（Sing-Box 顶层路由阻断 + AdGuard Home DNS 拦截 + 实时掐断活跃连接）以及 `.srs` / `.json` 规则集整包导入拉黑。
 
 ---
 
 ## 🚀 1 分钟极速上手
 
+`SingCtl` 采用单二进制架构，同一套安装脚本可根据运行环境**智能置顶默认模式**：
+- 在 **OpenWrt 软路由 / macOS** 上自动将 **`1) 客户端模式`** 置顶为回车默认项；
+- 在 **云端 Linux VPS** 上自动将 **`1) 服务端模式`** 置顶为回车默认项。
+
+---
+
+### 一、客户端部署（OpenWrt 软路由 / macOS / Linux / Windows）
+
+#### 1. OpenWrt 软路由 / Linux 透明网关（推荐）
+
+内置全量 46 个离线规则集快照（零网络依赖秒级启动）、自动部署本地防劫持 **AdGuard Home DNS**，并在安装完成后自动启动 **`:8090` 本地 Web 图形管理后台**：
+
+```bash
+# 国内裸机软路由首次安装（多镜像加速，零代理直装）
+curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/sixban6/singctl/main/install.sh | sh
+
+# 海外或已有代理环境（GitHub 官方直连）
+curl -fsSL https://raw.githubusercontent.com/sixban6/singctl/main/install.sh | sh
+```
+
+#### 2. macOS 客户端
+
+```bash
+brew tap sixban6/singctl
+brew install sixban6/singctl/singctl
+```
+
+#### 3. Windows 11 客户端（管理员 PowerShell）
+
+```powershell
+powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "[System.IO.File]::WriteAllText('install.ps1', (irm https://raw.githubusercontent.com/sixban6/singctl/main/install.ps1 -UseBasicParsing), [System.Text.Encoding]::UTF8); & .\install.ps1"
+```
+
+#### 4. 客户端常用操作与 `:8090` Web 控制台
+
+安装完成后，可直接打开浏览器访问 **`http://<软路由或本机IP>:8090`**，在图形界面完成**订阅配置、节点切换、iOS 扫码导出、局域网设备安全/隐私审计、规则集黑名单管理与一键自更新**；也可使用命令行：
+
+```bash
+singctl w status     # 查看本地 :8090 Web 管理后台运行状态与访问地址
+singctl dns status   # 查看本地防劫持 AdGuard Home 运行状态、面板地址与登录密码
+singctl sb gen       # 拉取订阅并生成客户端配置 (内置离线规则集自愈 + 自动对接 dns_local)
+singctl sb start     # 启动客户端路由引擎与看门狗守护进程
+singctl sb stop      # 停止客户端路由引擎与看门狗守护进程
+singctl u s          # 一键升级 SingCtl 至最新版并自动热重启 WebUI
+```
+
+---
+
+### 二、服务端部署（云端 VPS 节点与多机舰队）
+
 > [!TIP]
-> **单节点与多节点怎么选？**
-> - **只有 1 台 VPS**：直接按【场景一】跑完即可，全部功能一步到位。
-> - **有 2 台及以上 VPS**：只在**第 1 台主控机（Master）**跑一次【场景一】；买第 2~N 台新机时**切勿再登新机跑 `install.sh`**，直接按【场景二】在主控机一条命令远程开荒，新节点会自动汇入第 1 台的同一条总订阅链接！
+> - **只有 1 台 VPS**：直接按下方 **「1. 单节点 / 首台主控部署」** 跑完即可，全部功能一步到位。
+> - **有 2 台及以上 VPS**：只在**第 1 台主控机（Master）**跑一次 `install.sh`；买第 2~N 台新机时**无需登录新机**，直接按 **「2. 多节点舰队扩容」** 在主控机一条命令远程开荒，新节点会自动汇入同一条总订阅链接！
 
-### 场景一：【单节点 VPS / 舰队首台主控部署】
+#### 1. 单节点 VPS / 舰队首台主控部署（Master）
 
-登录你的**唯一一台 VPS**（或多节点架构中的**第 1 台主控 VPS**，支持 Debian / Ubuntu / CentOS），执行自动化部署向导：
+登录你的 VPS（支持 Debian / Ubuntu / CentOS），执行一键安装向导并回车选择默认的 `1) 服务端模式`：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sixban6/singctl/main/install.sh | sh
 ```
 
 > **全流程一气呵成**（完整图文排障见 [👉 单节点实战全解](docs/guide-single-node.md)）：
-> 1. 选择 `1) 服务端模式 (Server Mode)`，按向导填写解析域名与 Cloudflare Token；
-> 2. 回车确认立即执行四核全量部署，完成后终端直接呈现 **专属 HTTPS 管理后台入口** 与 **唯一总订阅链接**；
-> 3. 支持登录专属控制台一键导入客户端或调取二维码，开启双出口智能分流体验。
+> 1. 按向导填写解析域名与 Cloudflare API Token；
+> 2. 回车确认执行四核（`sing-box + Caddy + SubHub + WARP`）全量部署；
+> 3. 部署完成后终端直接输出 **专属 HTTPS 隐蔽管理后台入口** 与 **唯一总订阅链接**。
 
----
+#### 2. 多节点舰队扩容（第 2~N 台新 VPS 零配置开荒）
 
-### 场景二：【第 2~N 台新 VPS 扩容组网】（多节点舰队 — 零配置复用主控信息）
-
-新买第 2、第 3 台空白裸机 VPS 时，**无需手动登录新机，也无需提前去 Cloudflare 配解析**，直接在**第 1 台主控 VPS** 上只需提供**新机 IP 与初始密码**即可一键开荒（或在主控自适应 Web 后台点击「新机零配置开荒」）：
+新买第 2、第 3 台空白裸机 VPS 时，**无需手动登录新机，也无需提前去 Cloudflare 配解析**，直接在**第 1 台主控 VPS** 上提供**新机 IP 与初始密码**即可一键纳管（或在主控 Web 后台点击「新机零配置开荒」）：
 
 ```bash
-# 方式 A：零参数交互向导（最推荐：密码免回显，不留命令历史，回车前自动预览分配的代号与域名）
+# 方式 A：零参数交互向导（最推荐：密码免回显，回车前自动预览分配的地区代号与域名）
 singctl fl new
 
-# 方式 B：极简一行非交互命令（仅需新机 IP 与初始密码，其余全部自动复用主控配置）
+# 方式 B：极简一行非交互命令（自动探测国家分配代号、自动创建 .cdn 灰云 DNS、自动加固并汇入总订阅）
 singctl fl new 203.0.113.10 --password '<新机root初始密码>'
 
-# 方式 C：共享 IP 的 NAT 小鸡一行开荒（直接用 ip:port 指定 SSH 端口，并指定 HY2 / VLESS 节点端口）
+# 方式 C：共享 IP 的 NAT 小鸡一行开荒（指定商家分配的 SSH 端口及 HY2 / VLESS 节点端口）
 singctl fl new 203.0.113.10:15500 --hy2-port 11501 --vless-port 11502 --password '<新机root初始密码>'
 ```
 
-> **全自动智能闭环说明**（亦支持 `singctl fl new jp1 --domain ...` 手动指定，详见 [👉 多节点舰队全解](docs/guide-multi-node-fleet.md)）：
-> - **自动归属地命名 + 自动 `.cdn` 灰云 DNS**：自动探测新机 IP 所在国家/城市分配唯一编号代号（如 `sg1` / `新加坡`，同国第 2 台自动递增为 `sg2`），并复用主控 `cf_dns_key` 在根域名下自动创建 `<id>.cdn.<根域名>`（如 `sg1.cdn.example.com`）灰云（仅 DNS）解析记录（退租执行 `singctl fl rm sg1` 时自动同步清理 DNS）。
-> - **防锁死加固 + 汇入唯一总订阅**：自动注入双公钥、验证切换 SSH `22 → 2222` 免密禁密码（销毁明文密码） → 部署四核组件 → 自动提取新节点并入**第 1 台主控的总订阅链接**，家里软路由与随身手机无需改配置自动热同步上线。
-> - **原生兼容共享 IP 的 NAT 小鸡**：通过 `--port 15500` 指定商家映射的初始 SSH 端口（若 `2222` 未分配会自动退回 `15500` 原地完成免密禁密码加固，并智能保留机内 `Port 22` 防止母鸡 DNAT 转发断联），同时通过 `--hy2-port 11501` / `--vless-port 11502` 将 Hysteria2 (UDP) 与 VLESS-Reality (TCP) 分别绑定至商家分配的可用端口并自动汇入总订阅。
-
----
-
-### 场景三：【客户端路由中枢】（Mac / Linux / 软路由 / Windows 本地透明路由）
-
-**macOS (Homebrew)**
-```bash
-brew tap sixban6/singctl
-brew install sixban6/singctl/singctl
-```
-
-**Linux / OpenWrt 软路由网关**（自动识别软路由/macOS 并默认置顶客户端模式，全量内嵌离线规则集快照与多镜像加速）
-```bash
-# 海外或已有代理环境（官方直连）
-curl -fsSL https://raw.githubusercontent.com/sixban6/singctl/main/install.sh | sh
-
-# 国内裸机软路由首次安装（多镜像加速，零代理直装）
-curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/sixban6/singctl/main/install.sh | sh
-```
-
-**Windows 11 (管理员 PowerShell)**
-```powershell
-powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "[System.IO.File]::WriteAllText('install.ps1', (irm https://raw.githubusercontent.com/sixban6/singctl/main/install.ps1 -UseBasicParsing), [System.Text.Encoding]::UTF8); & .\install.ps1"
-```
-
-**日常运维常用命令**：
-```bash
-singctl dns status   # 查看本地防劫持 AdGuard Home 运行状态、局域网面板地址与登录密码
-singctl sb gen       # 拉取订阅并生成客户端配置 (已安装 AdGuard Home 时自动对接 dns_local)
-singctl sb start     # 启动客户端路由引擎与看门狗 (看门狗自动静默热同步订阅变更并守护本地 DNS)
-singctl sb stop      # 停止客户端路由引擎与看门狗 (Linux / 软路由后台模式)
-singctl w start      # 后台启动本地可视化 Web 控制台 (默认监听 :8090，本机访问 http://127.0.0.1:8090)
-singctl doctor       # 运行客户端全链路健康体检
-```
+> 详见 [👉 多节点舰队全解](docs/guide-multi-node-fleet.md)。
 
 ---
 
