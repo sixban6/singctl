@@ -102,6 +102,31 @@ func TestNonlinearEngine_MultiFactorScoringAndTrustDamping(t *testing.T) {
 		t.Fatalf("expected telemetry beacon to score >=60, got score=%d threat=%s",
 			telemetryBeacon.RiskScore, telemetryBeacon.Threat)
 	}
+
+	// 5. 纯隐私追踪场景：单次流量仅 18KB（逃避带宽阈值），但命中遥测指纹 + 凌晨熄屏定时上报 -> 隐私分高，主导轴为 privacy
+	smallPrivacyTracker := &audit.FlowRecord{
+		DeviceIP:      "192.168.1.77",
+		DeviceName:    "Smart-Speaker",
+		Target:        "applog.umeng.example.com",
+		DestPort:      80,
+		Network:       "tcp",
+		UploadBytes:   18 * 1024,
+		DownloadBytes: 64 * 1024,
+		ConnCount:     20,
+		NightHits:     4,
+		IntervalCV:    0.04,
+	}
+	eng.EvaluateFlow(smallPrivacyTracker)
+	if smallPrivacyTracker.PrivacyScore < 65 || smallPrivacyTracker.PrivacyScore <= smallPrivacyTracker.SecurityScore || smallPrivacyTracker.DominantAxis != "privacy" {
+		t.Fatalf("expected small-packet tracker to have high PrivacyScore & dominantAxis=privacy, got sec=%d priv=%d total=%d axis=%s",
+			smallPrivacyTracker.SecurityScore, smallPrivacyTracker.PrivacyScore, smallPrivacyTracker.RiskScore, smallPrivacyTracker.DominantAxis)
+	}
+	if app := audit.IdentifyApp("api.telegram.org", "", ""); app != "Telegram" {
+		t.Fatalf("expected IdentifyApp telegram -> Telegram, got %q", app)
+	}
+	if app := audit.IdentifyApp("hm.baidu.com", "", ""); app != "百度 Baidu" {
+		t.Fatalf("expected IdentifyApp baidu -> 百度 Baidu, got %q", app)
+	}
 }
 
 func TestValidateTargetSafety_AntiLockout(t *testing.T) {
@@ -417,5 +442,28 @@ func TestWebUI_AuditEndpointsAndAntiScraper(t *testing.T) {
 	}
 	if !strings.HasPrefix(csvBuf.String(), "first_seen,last_seen,device_name,device_ip") {
 		t.Fatalf("unexpected CSV header: %s", csvBuf.String())
+	}
+
+	// 4. 验证 AI 网关配置接口默认模型为 antigravity/gemini-3.8-flash 且支持保存 BaseURL / APIKey / Model
+	aiCfgBody, _ := json.Marshal(map[string]string{
+		"baseUrl": "http://127.0.0.1:3425/v1",
+		"apiKey":  "sk-magpie-test-key",
+		"model":   "",
+	})
+	reqAICfg, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/audit/ai-config", bytes.NewReader(aiCfgBody))
+	reqAICfg.Header.Set("Authorization", "Bearer "+token)
+	reqAICfg.Header.Set("Content-Type", "application/json")
+	respAICfg, err := http.DefaultClient.Do(reqAICfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	respAICfg.Body.Close()
+	if respAICfg.StatusCode != http.StatusOK {
+		t.Fatalf("expected POST /api/audit/ai-config 200, got %d", respAICfg.StatusCode)
+	}
+
+	reloadedCfg, err := config.Load(cfgPath)
+	if err != nil || reloadedCfg.Audit.AI.Endpoint != "http://127.0.0.1:3425/v1" || reloadedCfg.Audit.AI.Model != "antigravity/gemini-3.8-flash" {
+		t.Fatalf("expected AI gateway config persisted with default model antigravity/gemini-3.8-flash, got %+v (err=%v)", reloadedCfg.Audit.AI, err)
 	}
 }

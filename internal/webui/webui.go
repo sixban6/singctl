@@ -92,6 +92,8 @@ func New(opts Options) *Server {
 
 	// 局域网设备行为审计与双层一键拉黑 API
 	s.Mux.HandleFunc("GET /api/audit", s.guard(s.handleAuditGet))
+	s.Mux.HandleFunc("GET /api/audit/ai-config", s.guard(s.handleAuditAIConfigGet))
+	s.Mux.HandleFunc("POST /api/audit/ai-config", s.guard(s.handleAuditAIConfigPost))
 	s.Mux.HandleFunc("POST /api/audit/block", s.guard(s.handleAuditBlock))
 	s.Mux.HandleFunc("POST /api/audit/unblock", s.guard(s.handleAuditUnblock))
 

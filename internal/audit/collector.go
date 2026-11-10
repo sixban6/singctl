@@ -156,6 +156,7 @@ type CollectOptions struct {
 	DeviceFilter string // 仅筛选特定内网设备 IP 或主机名关键字
 	OnlySuspect  bool   // 仅返回关注/可疑/高危流 (RiskScore >= 35)
 	EnableAI     bool   // 是否触发 L2 AI / 专家顾问研判
+	CallerIP     string // 触发请求的客户端局域网 IP（用于自适应探测调用方本机 Magpie :3425 网关）
 	Limit        int    // 最大返回流数量 (默认 100)
 }
 
@@ -225,6 +226,7 @@ func (c *Collector) Collect(ctx context.Context, opts CollectOptions) *Report {
 			DeviceMAC:     devMAC,
 			DeviceRole:    InferDeviceRole(devName),
 			Target:        entry.Target,
+			AppName:       IdentifyApp(entry.Target, entry.DestIP, entry.Rule),
 			RawHost:       entry.RawHost,
 			DestIP:        entry.DestIP,
 			DestPort:      entry.DestPort,
@@ -259,6 +261,12 @@ func (c *Collector) Collect(ctx context.Context, opts CollectOptions) *Report {
 		ds.DownloadBytes += rec.DownloadBytes
 		ds.FlowCount++
 		ds.ActiveConns += rec.ActiveConns
+		if rec.SecurityScore > ds.MaxSecurityScore {
+			ds.MaxSecurityScore = rec.SecurityScore
+		}
+		if rec.PrivacyScore > ds.MaxPrivacyScore {
+			ds.MaxPrivacyScore = rec.PrivacyScore
+		}
 		if rec.RiskScore > ds.MaxRiskScore {
 			ds.MaxRiskScore = rec.RiskScore
 		}
@@ -272,10 +280,12 @@ func (c *Collector) Collect(ctx context.Context, opts CollectOptions) *Report {
 			rep.SuspiciousFlows++
 		}
 
-		// 过滤条件检查
+		// 过滤条件检查（支持按设备 IP、设备名称、目标域名或识别出的应用名如 Telegram/Baidu 过滤）
 		if filter := strings.ToLower(strings.TrimSpace(opts.DeviceFilter)); filter != "" {
 			if !strings.Contains(strings.ToLower(rec.DeviceIP), filter) &&
-				!strings.Contains(strings.ToLower(rec.DeviceName), filter) {
+				!strings.Contains(strings.ToLower(rec.DeviceName), filter) &&
+				!strings.Contains(strings.ToLower(rec.Target), filter) &&
+				!strings.Contains(strings.ToLower(rec.AppName), filter) {
 				continue
 			}
 		}
@@ -325,7 +335,7 @@ func (c *Collector) Collect(ctx context.Context, opts CollectOptions) *Report {
 	advisor := NewAdvisor(c.auditAIConfig())
 	rep.AIEnabled = opts.EnableAI || advisor.IsRemoteLLMConfigured()
 	if opts.EnableAI {
-		advisor.ReviewSuspiciousFlows(ctx, allFlows)
+		advisor.ReviewSuspiciousFlows(ctx, allFlows, opts.CallerIP)
 	}
 
 	rep.Flows = allFlows

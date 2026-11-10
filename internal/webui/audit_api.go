@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"cmp"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -86,10 +87,16 @@ func (s *Server) handleAuditGet(w http.ResponseWriter, r *http.Request) {
 		limit = 0 // 导出明细时不截断条数，返回全量流记录
 	}
 
+	callerHost, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err != nil || callerHost == "" {
+		callerHost = strings.TrimSpace(r.RemoteAddr)
+	}
+
 	opts := audit.CollectOptions{
 		DeviceFilter: strings.TrimSpace(q.Get("device")),
 		OnlySuspect:  q.Get("suspicious") == "1" || q.Get("suspicious") == "true",
 		EnableAI:     q.Get("ai") == "1" || q.Get("ai") == "true" || exportFormat != "",
+		CallerIP:     callerHost,
 		Limit:        limit,
 	}
 
@@ -186,4 +193,70 @@ func (s *Server) handleAuditUnblock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+type auditAIConfigPayload struct {
+	BaseURL         string `json:"baseUrl"`
+	APIKey          string `json:"apiKey"`
+	Model           string `json:"model"`
+	SuggestedLANURL string `json:"suggestedLanUrl,omitempty"`
+}
+
+// handleAuditAIConfigGet 返回当前配置的 AI 网关地址、密钥与模型（默认 antigravity/gemini-3.8-flash）。
+func (s *Server) handleAuditAIConfigGet(w http.ResponseWriter, r *http.Request) {
+	cfg, _ := config.Load(s.opts.ConfigPath)
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
+
+	callerHost, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err != nil || callerHost == "" {
+		callerHost = strings.TrimSpace(r.RemoteAddr)
+	}
+	suggested := "http://127.0.0.1:3425/v1"
+	if ip := net.ParseIP(callerHost); ip != nil && !ip.IsLoopback() && !ip.IsUnspecified() {
+		suggested = "http://" + net.JoinHostPort(ip.String(), "3425") + "/v1"
+	}
+
+	writeJSON(w, http.StatusOK, auditAIConfigPayload{
+		BaseURL:         strings.TrimSpace(cfg.Audit.AI.Endpoint),
+		APIKey:          strings.TrimSpace(cfg.Audit.AI.APIKey),
+		Model:           cmp.Or(strings.TrimSpace(cfg.Audit.AI.Model), "antigravity/gemini-3.8-flash"),
+		SuggestedLANURL: suggested,
+	})
+}
+
+// handleAuditAIConfigPost 保存用户自定义的 AI 网关请求地址 BaseURL、网关密钥与访问模型至 singctl.yaml (0600)。
+func (s *Server) handleAuditAIConfigPost(w http.ResponseWriter, r *http.Request) {
+	if !s.auditLimiter.allow(r, 30) {
+		writeJSONError(w, http.StatusTooManyRequests, "操作过于频繁，请稍后再试")
+		return
+	}
+
+	var req auditAIConfigPayload
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "无效的 JSON 请求体")
+		return
+	}
+
+	cfg, err := config.Load(s.opts.ConfigPath)
+	if err != nil || cfg == nil {
+		cfg = &config.Config{}
+	}
+
+	cfg.Audit.AI.Endpoint = strings.TrimSpace(req.BaseURL)
+	cfg.Audit.AI.APIKey = strings.TrimSpace(req.APIKey)
+	cfg.Audit.AI.Model = cmp.Or(strings.TrimSpace(req.Model), "antigravity/gemini-3.8-flash")
+	cfg.Audit.AI.Enabled = cfg.Audit.AI.Endpoint != "" || cfg.Audit.AI.APIKey != ""
+
+	if err := config.Save(s.opts.ConfigPath, cfg); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "保存 AI 网关配置失败: "+err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"message": "AI 网关配置已保存生效",
+		"model":   cfg.Audit.AI.Model,
+	})
 }

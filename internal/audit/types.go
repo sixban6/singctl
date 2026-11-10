@@ -99,6 +99,7 @@ type FlowRecord struct {
 	DeviceMAC        string             `json:"deviceMac,omitempty"`
 	DeviceRole       string             `json:"deviceRole,omitempty"` // "iot" / "desktop" / "mobile" / "unknown"
 	Target           string             `json:"target"`               // 规范化后的目标域名或目的 IP
+	AppName          string             `json:"appName,omitempty"`    // 基于本地 sing-box 规则集识别出的归属应用 (如 Telegram / 百度 / Apple)
 	RawHost          string             `json:"rawHost,omitempty"`
 	DestIP           string             `json:"destIp,omitempty"`
 	DestPort         int                `json:"destPort"`
@@ -117,7 +118,10 @@ type FlowRecord struct {
 	NightHits        int                `json:"nightHits"`        // 凌晨 01:00-05:30 活跃采样次数
 	IntervalCV       float64            `json:"intervalCv"`       // 建连时间间隔变异系数 (越小越像机器定时心跳)
 	DomainEntropy    float64            `json:"domainEntropy"`    // 域名香农信息熵
-	RiskScore        int                `json:"riskScore"`        // 非线性综合风险评分 (0-100)
+	SecurityScore    int                `json:"securityScore"`    // 🛡️ 安全风险轴评分 (0-100)
+	PrivacyScore     int                `json:"privacyScore"`     // 👁️ 隐私泄露轴评分 (0-100)
+	DominantAxis     string             `json:"dominantAxis"`     // 主导风险维度: "security" / "privacy" / "both" / "normal"
+	RiskScore        int                `json:"riskScore"`        // 非线性极值包络综合风险评分 (0-100)
 	Threat           ThreatLevel        `json:"threat"`           // normal / notice / suspicious / high_risk
 	ThreatLabel      string             `json:"threatLabel"`      // 中文威胁等级
 	State            EnforcementState   `json:"state"`            // observed / blocked / whitelisted
@@ -128,18 +132,20 @@ type FlowRecord struct {
 
 // DeviceSummary 汇总单台局域网设备的流量与可疑行为统计。
 type DeviceSummary struct {
-	DeviceIP        string  `json:"deviceIp"`
-	DeviceName      string  `json:"deviceName"`
-	DeviceMAC       string  `json:"deviceMac,omitempty"`
-	DeviceRole      string  `json:"deviceRole,omitempty"`
-	UploadBytes     int64   `json:"uploadBytes"`
-	DownloadBytes   int64   `json:"downloadBytes"`
-	UploadRatio     float64 `json:"uploadRatio"`
-	FlowCount       int     `json:"flowCount"`
-	ActiveConns     int     `json:"activeConns"`
-	SuspiciousCount int     `json:"suspiciousCount"`
-	HighRiskCount   int     `json:"highRiskCount"`
-	MaxRiskScore    int     `json:"maxRiskScore"`
+	DeviceIP         string  `json:"deviceIp"`
+	DeviceName       string  `json:"deviceName"`
+	DeviceMAC        string  `json:"deviceMac,omitempty"`
+	DeviceRole       string  `json:"deviceRole,omitempty"`
+	UploadBytes      int64   `json:"uploadBytes"`
+	DownloadBytes    int64   `json:"downloadBytes"`
+	UploadRatio      float64 `json:"uploadRatio"`
+	FlowCount        int     `json:"flowCount"`
+	ActiveConns      int     `json:"activeConns"`
+	SuspiciousCount  int     `json:"suspiciousCount"`
+	HighRiskCount    int     `json:"highRiskCount"`
+	MaxSecurityScore int     `json:"maxSecurityScore"`
+	MaxPrivacyScore  int     `json:"maxPrivacyScore"`
+	MaxRiskScore     int     `json:"maxRiskScore"`
 }
 
 // Report 汇总完整的设备审计分析报告与当前黑名单状态。
@@ -181,6 +187,7 @@ func (r *Report) WriteCSV(w io.Writer) error {
 		"device_mac",
 		"device_role",
 		"target",
+		"app_name",
 		"dest_ip",
 		"dest_port",
 		"is_direct_ip",
@@ -193,6 +200,9 @@ func (r *Report) WriteCSV(w io.Writer) error {
 		"active_conns",
 		"interval_cv",
 		"domain_entropy",
+		"security_score",
+		"privacy_score",
+		"dominant_axis",
 		"risk_score",
 		"threat_level",
 		"threat_label",
@@ -224,6 +234,7 @@ func (r *Report) WriteCSV(w io.Writer) error {
 			f.DeviceMAC,
 			f.DeviceRole,
 			f.Target,
+			f.AppName,
 			f.DestIP,
 			strconv.Itoa(f.DestPort),
 			strconv.FormatBool(f.IsDirectIP),
@@ -236,6 +247,9 @@ func (r *Report) WriteCSV(w io.Writer) error {
 			strconv.Itoa(f.ActiveConns),
 			fmt.Sprintf("%.4f", f.IntervalCV),
 			fmt.Sprintf("%.4f", f.DomainEntropy),
+			strconv.Itoa(f.SecurityScore),
+			strconv.Itoa(f.PrivacyScore),
+			f.DominantAxis,
 			strconv.Itoa(f.RiskScore),
 			string(f.Threat),
 			f.ThreatLabel,

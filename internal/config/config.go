@@ -110,7 +110,11 @@ type AuditConfig struct {
 }
 
 func (a AuditConfig) IsEmpty() bool {
-	return len(a.Whitelist) == 0 && !a.AI.Enabled && strings.TrimSpace(a.AI.Endpoint) == "" && strings.TrimSpace(a.AI.APIKey) == ""
+	return len(a.Whitelist) == 0 &&
+		!a.AI.Enabled &&
+		strings.TrimSpace(a.AI.Endpoint) == "" &&
+		strings.TrimSpace(a.AI.APIKey) == "" &&
+		strings.TrimSpace(a.AI.Model) == ""
 }
 
 // AuditAIConfig 定义用于二次确认可疑上传的 OpenAI 兼容大模型接口参数。
@@ -1410,6 +1414,27 @@ func filterRoleNodesBeforeMerge(dstRoot, srcRoot *yaml.Node, cfg *Config) {
 				}
 				crMap.Content = newCR
 				if len(crMap.Content) == 0 && cfg.CustomRules.IsEmpty() {
+					dstDoc.Content = append(dstDoc.Content[:i], dstDoc.Content[i+2:]...)
+				}
+				break
+			}
+		}
+	}
+
+	// 当 audit.ai 字段被修改或清空时，移除 dstDoc 中旧的 ai 子节点以保证置空字段（如清空 api_key / endpoint）能真实生效
+	if cfg != nil {
+		for i := 0; i+1 < len(dstDoc.Content); i += 2 {
+			if dstDoc.Content[i].Value == "audit" && dstDoc.Content[i+1].Kind == yaml.MappingNode {
+				auditMap := dstDoc.Content[i+1]
+				newAudit := make([]*yaml.Node, 0, len(auditMap.Content))
+				for j := 0; j+1 < len(auditMap.Content); j += 2 {
+					if auditMap.Content[j].Value == "ai" {
+						continue
+					}
+					newAudit = append(newAudit, auditMap.Content[j], auditMap.Content[j+1])
+				}
+				auditMap.Content = newAudit
+				if len(auditMap.Content) == 0 && cfg.Audit.IsEmpty() {
 					dstDoc.Content = append(dstDoc.Content[:i], dstDoc.Content[i+2:]...)
 				}
 				break

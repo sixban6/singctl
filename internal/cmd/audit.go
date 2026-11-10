@@ -30,6 +30,7 @@ func newAuditCmd(defaultConfigPath string) *cobra.Command {
 		Long: `基于多维非线性风险引擎（上下行对数不对称度、建连时间变异系数 CV、域名香农信息熵、多维交叉放大与白名单阻尼）
 实时审计局域网各设备的上传行为，并支持 --ai 调用 L2 智能顾问评估拉黑影响。`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			audit.WarmupAppIndex("")
 			cfg := loadCmdConfigOrDefault(cmd, defaultConfigPath)
 			collector := audit.NewCollector(cfg)
 			effLimit := limit
@@ -148,25 +149,26 @@ func renderAuditReport(rep *audit.Report, showAI bool) {
 
 	if len(rep.Devices) > 0 {
 		fmt.Println("──────────────────────────────────────────────────────────────────────────────────────────────")
-		fmt.Println(" 📊 局域网设备上传排行:")
-		fmt.Printf("   %-26s %-8s %11s %11s %8s %7s %8s\n",
-			"DEVICE (NAME / IP)", "ROLE", "UPLOAD ↑", "DOWNLOAD ↓", "U/D比", "可疑数", "最高风险")
+		fmt.Println(" 📊 局域网设备上传排行 (双轴正交评分: 🛡️安全 × 👁️隐私):")
+		fmt.Printf("   %-24s %-8s %10s %10s %7s %6s %15s\n",
+			"DEVICE (NAME / IP)", "ROLE", "UPLOAD ↑", "DOWNLOAD ↓", "U/D比", "可疑数", "总分(🛡️安/👁️隐)")
 		for i, d := range rep.Devices {
 			if i >= 10 {
 				break
 			}
 			devLabel := d.DeviceIP
 			if d.DeviceName != "" && d.DeviceName != d.DeviceIP {
-				devLabel = fmt.Sprintf("%s (%s)", truncateText(d.DeviceName, 11), d.DeviceIP)
+				devLabel = fmt.Sprintf("%s (%s)", truncateText(d.DeviceName, 10), d.DeviceIP)
 			}
-			fmt.Printf("   %-26s %-8s %11s %11s %7.1fx %7d %7d分\n",
-				truncateText(devLabel, 26),
+			scoreCol := fmt.Sprintf("%2d分(%2d/%2d)", d.MaxRiskScore, d.MaxSecurityScore, d.MaxPrivacyScore)
+			fmt.Printf("   %-24s %-8s %10s %10s %6.1fx %6d %15s\n",
+				truncateText(devLabel, 24),
 				cmp.Or(d.DeviceRole, "unknown"),
 				telemetry.FormatBytes(d.UploadBytes),
 				telemetry.FormatBytes(d.DownloadBytes),
 				d.UploadRatio,
 				d.SuspiciousCount+d.HighRiskCount,
-				d.MaxRiskScore,
+				scoreCol,
 			)
 		}
 	}
@@ -176,8 +178,8 @@ func renderAuditReport(rep *audit.Report, showAI bool) {
 	if len(rep.Flows) == 0 {
 		fmt.Println("   (暂无匹配条件的连接流量记录)")
 	} else {
-		fmt.Printf("   %-6s %-4s %-15s %-28s %-5s %9s %9s %6s  %s\n",
-			"等级", "评分", "源设备IP", "目标地址 (HOST/IP)", "协议", "上传 ↑", "下载 ↓", "比值", "非线性诊断原因")
+		fmt.Printf("   %-6s %-11s %-15s %-26s %-4s %9s %9s %6s  %s\n",
+			"等级", "总(安/隐)", "源设备IP", "目标地址 (HOST/IP)", "协议", "上传 ↑", "下载 ↓", "比值", "双轴非线性诊断原因")
 		for _, f := range rep.Flows {
 			badge := "[" + f.ThreatLabel + "]"
 			if f.State == audit.EnforcementBlocked {
@@ -187,12 +189,16 @@ func renderAuditReport(rep *audit.Report, showAI bool) {
 			if f.DestPort > 0 && f.IsDirectIP {
 				target = fmt.Sprintf("%s:%d", f.Target, f.DestPort)
 			}
+			if f.AppName != "" {
+				target = fmt.Sprintf("[%s] %s", f.AppName, target)
+			}
+			scoreStr := fmt.Sprintf("%2d(%2d/%2d)", f.RiskScore, f.SecurityScore, f.PrivacyScore)
 			reasonStr := strings.Join(f.Reasons, "; ")
-			fmt.Printf("   %-6s %3d  %-15s %-28s %-5s %9s %9s %5.1fx  %s\n",
+			fmt.Printf("   %-6s %-11s %-15s %-26s %-4s %9s %9s %5.1fx  %s\n",
 				badge,
-				f.RiskScore,
+				scoreStr,
 				truncateText(f.DeviceIP, 15),
-				truncateText(target, 28),
+				truncateText(target, 26),
 				strings.ToUpper(f.Network),
 				telemetry.FormatBytes(f.UploadBytes),
 				telemetry.FormatBytes(f.DownloadBytes),
@@ -200,8 +206,9 @@ func renderAuditReport(rep *audit.Report, showAI bool) {
 				truncateText(reasonStr, 42),
 			)
 			if showAI && f.AIReview != nil {
-				fmt.Printf("          └─ 🤖 AI研判 [%s]: %s | 影响: %s\n",
-					f.AIReview.VerdictText, f.AIReview.Category, f.AIReview.Impact)
+				src := cmp.Or(f.AIReview.Source, "expert")
+				fmt.Printf("          └─ 🤖 AI研判 [%s · %s]: %s | 影响: %s\n",
+					src, f.AIReview.VerdictText, f.AIReview.Category, f.AIReview.Impact)
 			}
 		}
 	}

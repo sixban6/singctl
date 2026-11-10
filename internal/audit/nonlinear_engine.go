@@ -56,6 +56,22 @@ var suspiciousKeywords = []string{
 	"pcdn", "xycdn", "onething", "szbdyd", "mcdn", "bcdn", "uhabo",
 	"log.", "logs.", "ulog", "applog", "sdklog", "crashlog", "stat.", "stats.",
 	"metric", "metrics", "report.", "analytics", "adlog", "adtrack", "stun.",
+	"umeng", "appsflyer", "adjust.", "jpush", "getui", "sensorsdata", "miaozhen",
+	"psmartcloud", "tuyaus", "tuyacn", "iot-log",
+}
+
+// pcdnKeywords 属于安全/带宽盗用维度的 PCDN 与 NAT 穿透特征词。
+var pcdnKeywords = []string{
+	"pcdn", "xycdn", "onething", "szbdyd", "mcdn", "bcdn", "uhabo", "stun.",
+}
+
+// privacyTrackerKeywords 属于隐私窥探/行为画像/云端遥测维度的特征词（即使单次上传仅几 KB 也会触发隐私评分）。
+var privacyTrackerKeywords = []string{
+	"telemetry", "collect", "collector", "beacon", "tracker", "track",
+	"log.", "logs.", "ulog", "applog", "sdklog", "crashlog", "stat.", "stats.",
+	"metric", "metrics", "report.", "analytics", "adlog", "adtrack",
+	"umeng", "appsflyer", "adjust.", "jpush", "getui", "sensorsdata", "miaozhen",
+	"psmartcloud", "tuyaus", "tuyacn", "iot-log",
 }
 
 // iotDeviceKeywords 智能家居/电视/摄像头主机名特征词（用于推断设备角色）。
@@ -232,45 +248,75 @@ func (e *NonlinearEngine) EvaluateFlow(flow *FlowRecord) {
 		flow.DeviceRole = InferDeviceRole(flow.DeviceName)
 	}
 
-	// 1. 各独立非线性算子打分
-	var baseSum float64
+	// 1. 各独立非线性算子打分，并正交投射到「🛡️ 安全轴 (Security)」与「👁️ 隐私轴 (Privacy)」
+	var secBase, privBase float64
 	var reasons []string
 	for _, det := range e.detectors {
 		s, r := det.Evaluate(flow)
 		if s > 0 {
 			flow.NonlinearFactors[det.Name()] = math.Round(s*100) / 100
-			baseSum += s
+			switch det.Name() {
+			case "upload_asymmetry", "direct_ip_upload", "domain_entropy":
+				secBase += s
+			case "beacon_heartbeat":
+				// 机器定时心跳既是远控信标特征(安全)，更是全天候状态打点画像特征(隐私)
+				secBase += s * 0.55
+				privBase += s * 0.85
+			case "telemetry_fingerprint":
+				if matchesAnyKeyword(flow.Target, pcdnKeywords) {
+					secBase += s
+				} else {
+					privBase += s
+				}
+			default:
+				secBase += s
+			}
 			if r != "" && !slices.Contains(reasons, r) {
 				reasons = append(reasons, r)
 			}
 		}
 	}
 
-	// 2. 多维特征交叉倍增项 (Multiplicative Interaction Terms)
-	interaction := 1.0
+	// 补充专属隐私轴算子（针对几 KB 的小包高频遥测、凌晨作息窥探、明文 HTTP 裸奔）
+	privExtra, privReasons := evaluatePrivacyAxisExtras(flow)
+	if privExtra > 0 {
+		privBase += privExtra
+		flow.NonlinearFactors["privacy_axis_extra"] = math.Round(privExtra*100) / 100
+		for _, pr := range privReasons {
+			reasons = appendUniqueReason(reasons, pr)
+		}
+	}
+
+	// 2. 双轴多维特征交叉倍增项 (Orthogonal Multiplicative Interaction Terms)
+	secInteraction := 1.0
+	privInteraction := 1.0
 	isUploadDominant := flow.UploadBytes >= 256*1024 && flow.UploadRatio >= 1.8
 	isNonStdPort := flow.DestPort > 0 && flow.DestPort != 80 && flow.DestPort != 443 && flow.DestPort != 53 && flow.DestPort != 123
+	isPeriodicBeacon := flow.ConnCount >= 6 && flow.IntervalCV > 0 && flow.IntervalCV < 0.30
 
-	// 交叉项 A: [无域名直连 IP] × [非标端口] × [上行主导] -> 典型 PCDN 偷跑或木马回传
+	// 安全交叉项 A: [无域名直连 IP] × [非标端口] × [上行主导] -> 典型 PCDN 偷跑或木马暗道回传
 	if flow.IsDirectIP && isNonStdPort && isUploadDominant {
-		interaction *= 1.75
+		secInteraction *= 1.75
 		reasons = appendUniqueReason(reasons, "多维交叉: 直连IP+非标端口+持续上行(疑似PCDN/暗道回传)")
 	}
-	// 交叉项 B: [凌晨 01:00-05:30 活跃] × [上行主导 或 规律心跳]
-	if flow.NightHits > 0 && (isUploadDominant || (flow.ConnCount >= 8 && flow.IntervalCV > 0 && flow.IntervalCV < 0.28)) {
-		interaction *= 1.40
+	// 安全/隐私交叉项 B: [凌晨 01:00-05:30 活跃] × [上行主导 或 规律心跳]
+	if flow.NightHits > 0 && (isUploadDominant || isPeriodicBeacon) {
+		secInteraction *= 1.30
+		privInteraction *= 1.45
 		reasons = appendUniqueReason(reasons, "多维交叉: 凌晨闲时静默上传活跃")
 	}
-	// 交叉项 C: [IoT/智能电视设备] × [上行主导]
-	if flow.DeviceRole == "iot" && isUploadDominant {
-		interaction *= 1.35
+	// 安全/隐私交叉项 C: [IoT/智能电视设备] × [上行主导 或 规律心跳]
+	if flow.DeviceRole == "iot" && (isUploadDominant || isPeriodicBeacon) {
+		secInteraction *= 1.35
+		privInteraction *= 1.35
 		reasons = appendUniqueReason(reasons, "多维交叉: 智能家居/IoT设备异常外发数据")
 	}
-	// 交叉项 D: [高信息熵域名] × [高频建连或上行主导]
+	// 安全交叉项 D: [高信息熵域名] × [高频建连或上行主导]
 	if flow.DomainEntropy >= 3.65 && (flow.ConnCount >= 10 || isUploadDominant) {
-		interaction *= 1.30
+		secInteraction *= 1.35
 	}
-	flow.NonlinearFactors["interaction_multiplier"] = math.Round(interaction*100) / 100
+	flow.NonlinearFactors["sec_interaction"] = math.Round(secInteraction*100) / 100
+	flow.NonlinearFactors["priv_interaction"] = math.Round(privInteraction*100) / 100
 
 	// 3. 信任白名单阻尼衰减因子 (Trust Damping)
 	trustDamping := 1.0
@@ -281,21 +327,30 @@ func (e *NonlinearEngine) EvaluateFlow(flow *FlowRecord) {
 	}
 	flow.NonlinearFactors["trust_damping"] = trustDamping
 
-	rawCombined := baseSum * interaction * trustDamping
-	flow.NonlinearFactors["raw_combined"] = math.Round(rawCombined*100) / 100
+	rawSec := secBase * secInteraction * trustDamping
+	rawPriv := privBase * privInteraction * trustDamping
+	flow.NonlinearFactors["raw_security"] = math.Round(rawSec*100) / 100
+	flow.NonlinearFactors["raw_privacy"] = math.Round(rawPriv*100) / 100
 
-	// 4. 非线性 Sigmoid 归一化映射至 [0, 100]
-	var finalScore int
-	if rawCombined <= 1.0 {
-		finalScore = 0
-	} else {
-		// 当 rawCombined = 45 时约 60 分(可疑)，rawCombined = 75 时约 85 分(高危)
-		sig := 1.0 / (1.0 + math.Exp(-(rawCombined-38.0)/16.5))
-		sigZero := 1.0 / (1.0 + math.Exp(38.0/16.5))
-		normalized := (sig - sigZero) / (1.0 - sigZero)
-		finalScore = int(math.Round(min(100.0, max(0.0, normalized*100.0))))
-	}
+	// 4. 双轴 Sigmoid 归一化 + Soft-Max 极值包络合成总分 (绝不因求平均而互相稀释)
+	flow.SecurityScore = mapRawToSigmoidScore(rawSec, 36.0, 16.0)
+	flow.PrivacyScore = mapRawToSigmoidScore(rawPriv, 32.0, 15.0)
+
+	hiAxis := float64(max(flow.SecurityScore, flow.PrivacyScore))
+	loAxis := float64(min(flow.SecurityScore, flow.PrivacyScore))
+	finalScore := int(math.Round(min(100.0, hiAxis+0.25*loAxis)))
 	flow.RiskScore = finalScore
+
+	switch {
+	case flow.SecurityScore < 15 && flow.PrivacyScore < 15:
+		flow.DominantAxis = "normal"
+	case flow.SecurityScore >= 35 && flow.PrivacyScore >= 35 && math.Abs(float64(flow.SecurityScore-flow.PrivacyScore)) <= 15:
+		flow.DominantAxis = "both"
+	case flow.PrivacyScore > flow.SecurityScore:
+		flow.DominantAxis = "privacy"
+	default:
+		flow.DominantAxis = "security"
+	}
 
 	// 5. 显式威胁等级状态流转
 	switch {
@@ -429,19 +484,73 @@ type telemetryFingerprintDetector struct{}
 func (d *telemetryFingerprintDetector) Name() string { return "telemetry_fingerprint" }
 
 func (d *telemetryFingerprintDetector) Evaluate(f *FlowRecord) (float64, string) {
-	if f.UploadBytes < 16*1024 {
+	if f.UploadBytes < 2048 {
 		return 0, ""
 	}
 	lower := strings.ToLower(f.Target)
 	for _, kw := range suspiciousKeywords {
 		if strings.Contains(lower, kw) {
 			if strings.Contains(kw, "cdn") || kw == "stun." || kw == "uhabo" || kw == "onething" || kw == "szbdyd" {
-				return 22.0, "命中PCDN/NAT穿透节点特征 (" + strings.Trim(kw, ".") + ")"
+				if f.UploadBytes < 16*1024 {
+					return 0, ""
+				}
+				return 24.0, "命中PCDN/NAT穿透节点特征 (" + strings.Trim(kw, ".") + ")"
 			}
-			return 18.0, "命中遥测/日志上报域名指纹 (" + strings.Trim(kw, ".") + ")"
+			return 24.0, "命中隐私遥测/画像上报指纹 (" + strings.Trim(kw, ".") + ")"
 		}
 	}
 	return 0, ""
+}
+
+// evaluatePrivacyAxisExtras 评估专为「👁️ 隐私审计轴」设计的碎包高频打点、睡眠时段作息窥探与明文裸奔算子。
+func evaluatePrivacyAxisExtras(f *FlowRecord) (float64, []string) {
+	var score float64
+	var reasons []string
+
+	// 1. 睡眠时段作息窥探算子 (凌晨 01:00-05:30 无人操作时段的后台活跃上传)
+	if f.NightHits > 0 && f.UploadBytes >= 2048 {
+		nightScore := 16.0 + 4.5*math.Log1p(float64(f.NightHits))
+		if f.DeviceRole == "iot" {
+			nightScore *= 1.35
+		}
+		score += math.Min(28.0, nightScore)
+		reasons = append(reasons, "凌晨熄屏时段后台静默上传 (作息窥探风险)")
+	}
+
+	// 2. 小包高频画像打点算子 (单次流量虽小，但建连频繁或周期固定)
+	if f.ConnCount >= 8 && f.UploadBytes >= 1024 && f.UploadBytes < 512*1024 {
+		freqScore := math.Min(18.0, 4.2*math.Log1p(float64(f.ConnCount)/5.0))
+		score += freqScore
+		reasons = append(reasons, "高频碎包持续回传 ("+strconv.Itoa(f.ConnCount)+"次连接)")
+	}
+
+	// 3. 明文 HTTP 端口裸奔算子 (端口 80 / 8080 未加密上传，极易被链路嗅探)
+	if (f.DestPort == 80 || f.DestPort == 8080) && f.UploadBytes >= 4096 {
+		score += 18.0
+		reasons = append(reasons, "明文HTTP端口未加密上传 (隐私易被嗅探)")
+	}
+
+	return score, reasons
+}
+
+func mapRawToSigmoidScore(raw, center, scale float64) int {
+	if raw <= 1.0 {
+		return 0
+	}
+	sig := 1.0 / (1.0 + math.Exp(-(raw-center)/scale))
+	sigZero := 1.0 / (1.0 + math.Exp(center/scale))
+	normalized := (sig - sigZero) / (1.0 - sigZero)
+	return int(math.Round(min(100.0, max(0.0, normalized*100.0))))
+}
+
+func matchesAnyKeyword(target string, keywords []string) bool {
+	lower := strings.ToLower(target)
+	for _, kw := range keywords {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
 }
 
 // ───────────────────────── 辅助数学与特征函数 ─────────────────────────
