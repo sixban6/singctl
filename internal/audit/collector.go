@@ -130,6 +130,7 @@ func (c *Collector) SetEndpointsForTest(endpoints []string, secret, statePath st
 	c.secret = secret
 	if statePath != "" {
 		c.statePath = statePath
+		ResetAICacheForTest(statePath + ".ai-cache.json")
 	}
 }
 

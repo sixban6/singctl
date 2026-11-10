@@ -33,8 +33,21 @@ type persistedAICacheEntry struct {
 var (
 	aiTargetCacheMu   sync.RWMutex
 	aiTargetCacheOnce sync.Once
+	aiTargetCachePath = defaultAICachePath
 	aiTargetCache     = make(map[string]persistedAICacheEntry)
 )
+
+// ResetAICacheForTest 供单元测试隔离 AI 缓存文件路径并清空内存缓存。
+func ResetAICacheForTest(customPath string) {
+	aiTargetCacheMu.Lock()
+	defer aiTargetCacheMu.Unlock()
+	if customPath != "" {
+		aiTargetCachePath = customPath
+	} else {
+		aiTargetCachePath = defaultAICachePath
+	}
+	aiTargetCache = make(map[string]persistedAICacheEntry)
+}
 
 func normalizeTargetKey(target string) string {
 	return strings.ToLower(strings.TrimSpace(target))
@@ -42,7 +55,10 @@ func normalizeTargetKey(target string) string {
 
 func ensureAICacheLoaded() {
 	aiTargetCacheOnce.Do(func() {
-		data, err := os.ReadFile(defaultAICachePath)
+		aiTargetCacheMu.RLock()
+		path := aiTargetCachePath
+		aiTargetCacheMu.RUnlock()
+		data, err := os.ReadFile(path)
 		if err != nil || len(data) == 0 {
 			return
 		}
@@ -122,10 +138,14 @@ func StoreCachedAIReviews(entries map[string]*AIReviewResult) {
 	}
 	aiTargetCacheMu.Unlock()
 
+	aiTargetCacheMu.RLock()
+	path := aiTargetCachePath
+	aiTargetCacheMu.RUnlock()
+
 	if data, err := json.Marshal(list); err == nil {
-		tmpPath := defaultAICachePath + ".tmp"
+		tmpPath := path + ".tmp"
 		if err := os.WriteFile(tmpPath, data, 0600); err == nil {
-			_ = os.Rename(tmpPath, defaultAICachePath)
+			_ = os.Rename(tmpPath, path)
 		}
 	}
 }

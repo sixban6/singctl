@@ -304,12 +304,17 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; ba
 .audit-tbl .col-nowrap { white-space: nowrap; }
 .app-pill { display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border-radius: 6px; font-size: 11px; font-weight: 600; background: rgba(59,130,246,.14); color: var(--accent); border: 1px solid rgba(59,130,246,.28); white-space: nowrap; margin-top: 3px; }
 .axis-sub { font-size: 11px; color: var(--muted); margin-top: 4px; white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-.ai-card { margin-top: 7px; padding: 7px 10px; border-radius: 8px; background: var(--card-2); border: 1px solid var(--border); border-left: 3px solid var(--accent); font-size: 12px; line-height: 1.5; max-width: 400px; }
+.ai-card { padding: 6px 10px; border-radius: 8px; background: var(--card-2); border: 1px solid var(--border); border-left: 3px solid var(--accent); font-size: 12px; line-height: 1.48; max-width: 360px; }
 .ai-card.safe { border-left-color: var(--ok); }
 .ai-card.caution { border-left-color: var(--warn); }
 .ai-card-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; flex-wrap: wrap; margin-bottom: 3px; }
 .ai-card-src { font-size: 10.5px; color: var(--muted); font-family: ui-monospace, Menlo, monospace; }
 .ai-card-impact { color: var(--muted); font-size: 11.5px; word-break: break-word; white-space: normal; }
+tr.dual-alert-row td { background: linear-gradient(90deg, rgba(239, 68, 68, .13) 0%, rgba(245, 158, 11, .07) 50%, rgba(239, 68, 68, .10) 100%) !important; }
+tr.dual-alert-row:hover td { background: linear-gradient(90deg, rgba(239, 68, 68, .19) 0%, rgba(245, 158, 11, .11) 50%, rgba(239, 68, 68, .15) 100%) !important; }
+tr.dual-alert-row td:first-child { box-shadow: inset 4px 0 0 var(--err); }
+.dual-alert-pill { display: inline-flex; align-items: center; gap: 4px; margin-top: 5px; padding: 2px 7px; border-radius: 6px; font-size: 11px; font-weight: 700; color: #fff; background: linear-gradient(135deg, #ef4444, #d97706); box-shadow: 0 2px 8px rgba(239, 68, 68, .35); white-space: nowrap; }
+.btn-danger-pulse { box-shadow: 0 0 0 2px rgba(239, 68, 68, .35), 0 3px 10px rgba(239, 68, 68, .32); font-weight: 700; }
 </style>
 </head>
 <body>
@@ -1470,6 +1475,26 @@ function setCachedAIReview(fOrKey, target, rev, skipStorage = false) {
   }
 }
 
+// 判断是否触发“程序诊断 + AI 诊断”双重高危共振告警
+function isDualAlertRow(f) {
+  if (!f || f.state === "blocked") return false;
+  const progBad = (f.riskScore || 0) >= 35 ||
+                  f.threat === "high_risk" ||
+                  f.threat === "suspicious" ||
+                  (f.securityScore || 0) >= 25 ||
+                  (f.privacyScore || 0) >= 25;
+  if (!progBad) return false;
+  const aiRev = getCachedAIReview(f);
+  if (!aiRev) return false;
+  return aiRev.verdict === "safe_to_block" || (aiRev.verdict === "caution" && (f.riskScore || 0) >= 60);
+}
+
+function buildDualAlertBadgeHTML(f) {
+  return isDualAlertRow(f)
+    ? `<div class="dual-alert-pill" title="程序双轴评分与 AI 语义研判同时认定该连接存在不良上报/风险，且可安全阻断">🚨 双重高危确诊 · 建议拉黑</div>`
+    : "";
+}
+
 function buildAIRowSlotHTML(f) {
   const flowKey = getFlowCacheKey(f);
   const tgtKey = getFlowTargetKey(f);
@@ -1491,12 +1516,12 @@ function buildAIRowSlotHTML(f) {
     </div>`;
   }
   if (auditPendingTargets.has(tgtKey)) {
-    return `<div style="margin-top:5px;font-size:11.5px;color:var(--muted);display:flex;align-items:center;gap:6px;"><span class="spin-inline"></span> 🤖 AI 正在研判此目标…</div>`;
+    return `<div style="font-size:11.5px;color:var(--muted);display:flex;align-items:center;gap:6px;"><span class="spin-inline"></span> 🤖 AI 正在研判此目标…</div>`;
   }
-  return `<div style="margin-top:4px;"><button class="btn btn-sm" style="padding:2px 8px;font-size:11px;" onclick="reviewSingleAuditFlow('${esc(flowKey)}', this, false)">🤖 AI 研判此条</button></div>`;
+  return `<div><button class="btn btn-sm" style="padding:2px 8px;font-size:11px;" onclick="reviewSingleAuditFlow('${esc(flowKey)}', this, false)">🤖 AI 研判此条</button></div>`;
 }
 
-// 局部无感更新各行的 AI 研判卡片槽位（不重建 table，保持滚动条零抖动）
+// 局部无感更新各行的 AI 诊断列与双重高危醒目高亮（不重建 table，保持滚动条零抖动）
 function updateAISlotsInDOM() {
   const slots = $$("#audit-flows-box [data-ai-row-idx]");
   for (const slot of slots) {
@@ -1506,6 +1531,21 @@ function updateAISlotsInDOM() {
     const html = buildAIRowSlotHTML(f);
     if (slot.innerHTML !== html) {
       slot.innerHTML = html;
+    }
+    const dualBad = isDualAlertRow(f);
+    const tr = slot.closest("tr[data-flow-idx]");
+    if (tr) {
+      tr.classList.toggle("dual-alert-row", dualBad);
+    }
+    const badgeBox = $(`#audit-flows-box [data-dual-badge-idx="${idx}"]`);
+    if (badgeBox) {
+      const badgeHtml = buildDualAlertBadgeHTML(f);
+      if (badgeBox.innerHTML !== badgeHtml) badgeBox.innerHTML = badgeHtml;
+    }
+    const blockBtn = $(`#audit-flows-box [data-block-btn-idx="${idx}"]`);
+    if (blockBtn) {
+      blockBtn.classList.toggle("btn-danger-pulse", dualBad);
+      blockBtn.textContent = dualBad ? "🚨 立即拉黑" : "一键拉黑";
     }
   }
 }
@@ -1521,33 +1561,38 @@ function renderAuditFlowsTable() {
 
   $("#audit-flows-box").innerHTML = `
     <div class="table-wrap"><table class="tbl audit-tbl">
-      <thead><tr><th>双轴评分</th><th>源设备</th><th>目标域名 / IP & 归属应用</th><th>协议</th><th>上传 ↑</th><th>下载 ↓</th><th>比值</th><th>双轴非线性诊断原因 & AI 顾问研判</th><th>一键拉黑 (路由+DNS)</th></tr></thead>
+      <thead><tr><th>双轴评分</th><th>源设备</th><th>目标域名 / IP & 归属应用</th><th>协议</th><th>上传 ↑</th><th>下载 ↓</th><th>比值</th><th>程序诊断</th><th>AI 诊断</th><th>一键拉黑 (路由+DNS)</th></tr></thead>
       <tbody>${flows.map((f, idx) => {
         const cls = f.state === "blocked" ? "dim" : (f.threat === "high_risk" ? "err" : (f.threat === "suspicious" ? "warn" : (f.threat === "notice" ? "info" : "ok")));
         const label = f.state === "blocked" ? "已拉黑" : (f.threatLabel || "正常");
         const targetDisp = f.isDirectIp && f.destPort ? `${f.target}:${f.destPort}` : f.target;
         const appPillHtml = f.appName ? `<div><span class="app-pill">🏷️ ${esc(f.appName)}</span></div>` : "";
         const aiSlotHtml = buildAIRowSlotHTML(f);
+        const dualBad = isDualAlertRow(f);
+        const dualBadgeHtml = buildDualAlertBadgeHTML(f);
         const reasonText = (f.reasons || []).join("；");
         const actionHtml = f.state === "blocked"
           ? `<button class="btn btn-sm" onclick="unblockAuditTarget('${esc(f.target)}','')">解封</button>`
-          : `<button class="btn btn-sm btn-danger" onclick="blockAuditTarget('${esc(f.target)}','','${esc(reasonText)}')">一键拉黑</button>`;
-        return `<tr data-flow-idx="${idx}">
+          : `<button data-block-btn-idx="${idx}" class="btn btn-sm btn-danger${dualBad ? " btn-danger-pulse" : ""}" onclick="blockAuditTarget('${esc(f.target)}','','${esc(reasonText)}')">${dualBad ? "🚨 立即拉黑" : "一键拉黑"}</button>`;
+        return `<tr data-flow-idx="${idx}" class="${dualBad ? "dual-alert-row" : ""}">
           <td class="col-nowrap">
             <span class="badge ${cls}">${esc(label)} · ${f.riskScore}分</span>
             <div class="axis-sub">🛡️安:${f.securityScore || 0} · 👁️隐:${f.privacyScore || 0}</div>
+            <div data-dual-badge-idx="${idx}">${dualBadgeHtml}</div>
           </td>
           <td class="col-nowrap"><div><b>${esc(f.deviceName || f.deviceIp)}</b></div><div class="mono" style="font-size:11px;color:var(--muted);">${esc(f.deviceIp)}</div></td>
           <td>
-            <div class="mono" style="word-break:break-all;max-width:250px;">${esc(targetDisp)}</div>
+            <div class="mono" style="word-break:break-all;max-width:240px;">${esc(targetDisp)}</div>
             ${appPillHtml}
           </td>
           <td class="mono col-nowrap">${esc((f.network || "").toUpperCase())}</td>
           <td class="mono col-nowrap">${fmtBytes(f.uploadBytes)}</td>
           <td class="mono col-nowrap">${fmtBytes(dOrZero(f.downloadBytes))}</td>
           <td class="mono col-nowrap">${Number(f.uploadRatio || 0).toFixed(1)}x</td>
-          <td style="min-width:260px;max-width:400px;font-size:12px;word-break:break-word;white-space:normal;">
+          <td style="min-width:190px;max-width:270px;font-size:12px;word-break:break-word;white-space:normal;">
             <div>${esc(reasonText)}</div>
+          </td>
+          <td style="min-width:250px;max-width:350px;font-size:12px;word-break:break-word;white-space:normal;">
             <div data-ai-row-idx="${idx}">${aiSlotHtml}</div>
           </td>
           <td class="col-nowrap">${actionHtml}</td>
