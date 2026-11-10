@@ -244,6 +244,7 @@ func (c *Collector) Collect(ctx context.Context, opts CollectOptions) *Report {
 			LastSeen:      time.Unix(entry.LastSeenUnix, 0).Format("15:04:05"),
 			NightHits:     entry.NightHits,
 			IntervalCV:    computeIntervalCV(entry.ArrivalsUnix),
+			AIReview:      LookupCachedAIReview(entry.Target),
 		}
 		engine.EvaluateFlow(&rec)
 

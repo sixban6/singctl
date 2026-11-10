@@ -1395,43 +1395,78 @@ function fmtBytes(b) {
 
 const auditAICache = new Map();
 const auditPendingTargets = new Set();
+const AUDIT_AI_STORAGE_KEY = "sc_audit_ai_cache_v1";
 let suggestedMagpieLanURL = "http://127.0.0.1:3425/v1";
 let auditAILoading = false;
 let auditAINeedsReschedule = false;
 let lastRenderedFlows = [];
 let lastEmptyFlowMsg = "暂无符合过滤条件的流量记录";
 
-// 初始化恢复 AI 深度研判勾选状态 (默认选中)
-(function initAuditAIToggle() {
+// 初始化恢复 AI 深度研判勾选状态与浏览器本地持久化 AI 缓存
+(function initAuditAIToggleAndCache() {
   const el = $("#audit-ai-enable");
-  if (!el) return;
-  const saved = localStorage.getItem("sc_audit_ai_enable");
-  if (saved === "0") el.checked = false;
-  else el.checked = true;
+  if (el) {
+    const saved = localStorage.getItem("sc_audit_ai_enable");
+    el.checked = saved !== "0";
+  }
+  try {
+    const raw = localStorage.getItem(AUDIT_AI_STORAGE_KEY);
+    if (raw) {
+      const obj = JSON.parse(raw);
+      if (obj && typeof obj === "object") {
+        for (const [tgt, rev] of Object.entries(obj)) {
+          if (rev && rev.source && rev.source !== "builtin_expert") {
+            auditAICache.set("tgt:" + tgt.toLowerCase(), rev);
+          }
+        }
+      }
+    }
+  } catch {}
 })();
+
+function persistAuditAICacheToStorage() {
+  try {
+    const obj = {};
+    let count = 0;
+    const entries = Array.from(auditAICache.entries()).reverse();
+    for (const [k, rev] of entries) {
+      if (!k.startsWith("tgt:")) continue;
+      if (!rev || !rev.source || rev.source === "builtin_expert") continue;
+      const tgt = k.slice(4);
+      if (!obj[tgt]) {
+        obj[tgt] = rev;
+        if (++count >= 500) break;
+      }
+    }
+    localStorage.setItem(AUDIT_AI_STORAGE_KEY, JSON.stringify(obj));
+  } catch {}
+}
 
 function getFlowCacheKey(f) {
   return f.key || f.id || `${f.deviceIp}|${f.target}|${f.network}`;
 }
 
 function getFlowTargetKey(f) {
-  return f.target || getFlowCacheKey(f);
+  return (f.target || getFlowCacheKey(f)).toLowerCase();
 }
 
 function getCachedAIReview(f) {
   const k = getFlowCacheKey(f);
-  return auditAICache.get(k) || (f.target ? auditAICache.get("tgt:" + f.target) : null) || f.aiReview || null;
+  const tgt = (f.target || "").toLowerCase();
+  return auditAICache.get(k) || (tgt ? auditAICache.get("tgt:" + tgt) : null) || f.aiReview || null;
 }
 
-function setCachedAIReview(fOrKey, target, rev) {
+function setCachedAIReview(fOrKey, target, rev, skipStorage = false) {
   if (!rev) return;
   const k = typeof fOrKey === "string" ? fOrKey : getFlowCacheKey(fOrKey);
-  const prev = auditAICache.get(k);
+  const tgt = (target || "").toLowerCase();
+  const prev = auditAICache.get(k) || (tgt ? auditAICache.get("tgt:" + tgt) : null);
   const isNewLLM = rev.source && rev.source !== "builtin_expert";
   const hadPrevLLM = prev && prev.source && prev.source !== "builtin_expert";
   if (isNewLLM || !hadPrevLLM) {
     auditAICache.set(k, rev);
-    if (target) auditAICache.set("tgt:" + target, rev);
+    if (tgt) auditAICache.set("tgt:" + tgt, rev);
+    if (isNewLLM && !skipStorage) persistAuditAICacheToStorage();
   }
 }
 
@@ -1445,8 +1480,8 @@ function buildAIRowSlotHTML(f) {
     const isRealLLM = aiRev.source && aiRev.source !== "builtin_expert";
     const srcLabel = isRealLLM ? aiRev.source : "离线专家库";
     const retryBtn = !isRealLLM
-      ? `<button class="btn btn-sm" style="padding:1px 6px;font-size:10.5px;margin-left:6px;" onclick="reviewSingleAuditFlow('${esc(flowKey)}', this)">🤖 重试AI</button>`
-      : "";
+      ? `<button class="btn btn-sm" style="padding:1px 6px;font-size:10.5px;margin-left:6px;" onclick="reviewSingleAuditFlow('${esc(flowKey)}', this, true)">🤖 重试AI</button>`
+      : `<button class="btn btn-sm" style="padding:0 5px;font-size:10px;margin-left:5px;opacity:.72;" title="忽略缓存，强制重新调用 AI 研判此目标" onclick="reviewSingleAuditFlow('${esc(flowKey)}', this, true)">🔄</button>`;
     return `<div class="ai-card ${cardCls}">
       <div class="ai-card-head">
         <span><span class="badge ${vBadgeCls}" style="margin-right:5px;">🤖 ${esc(aiRev.verdictText)}</span><b>${esc(aiRev.category)}</b></span>
@@ -1458,7 +1493,7 @@ function buildAIRowSlotHTML(f) {
   if (auditPendingTargets.has(tgtKey)) {
     return `<div style="margin-top:5px;font-size:11.5px;color:var(--muted);display:flex;align-items:center;gap:6px;"><span class="spin-inline"></span> 🤖 AI 正在研判此目标…</div>`;
   }
-  return `<div style="margin-top:4px;"><button class="btn btn-sm" style="padding:2px 8px;font-size:11px;" onclick="reviewSingleAuditFlow('${esc(flowKey)}', this)">🤖 AI 研判此条</button></div>`;
+  return `<div style="margin-top:4px;"><button class="btn btn-sm" style="padding:2px 8px;font-size:11px;" onclick="reviewSingleAuditFlow('${esc(flowKey)}', this, false)">🤖 AI 研判此条</button></div>`;
 }
 
 // 局部无感更新各行的 AI 研判卡片槽位（不重建 table，保持滚动条零抖动）
@@ -1634,8 +1669,9 @@ async function scheduleViewportAIPrefetch() {
     batch.forEach(f => {
       const k = getFlowCacheKey(f);
       const rev = results[k];
-      if (rev) setCachedAIReview(f, f.target, rev);
+      if (rev) setCachedAIReview(f, f.target, rev, true);
     });
+    persistAuditAICacheToStorage();
   } catch {
     // 静默容错，不弹窗打断用户滚动浏览
   } finally {
@@ -1741,9 +1777,14 @@ async function loadAudit(withAI = false, silent = false) {
 
     // 2. 连接行为与可疑上传明细 (支持按安全/隐私轴过滤)
     const rawFlows = rep.flows || [];
+    let syncedFromServer = false;
     rawFlows.forEach(f => {
-      if (f.aiReview) setCachedAIReview(f, f.target, f.aiReview);
+      if (f.aiReview) {
+        setCachedAIReview(f, f.target, f.aiReview, true);
+        syncedFromServer = true;
+      }
     });
+    if (syncedFromServer) persistAuditAICacheToStorage();
 
     lastEmptyFlowMsg = rep.message || "暂无符合过滤条件的流量记录";
     lastRenderedFlows = rawFlows.filter(f => {
@@ -1770,24 +1811,24 @@ async function loadAudit(withAI = false, silent = false) {
         </table></div>`;
     }
 
-    // 触发当前可视区 P0 + 向下 1:1 预取区 P1 自动研判
+    // 触发当前可视区 P0 + 向下 2x 可视区预取缓冲 P1 自动研判（命中缓存的目标 0 请求跳过）
     scheduleViewportAIPrefetch();
   } catch (e) {
     if (!silent) toast("err", "加载设备审计失败: " + e.message);
   }
 }
 
-window.reviewSingleAuditFlow = async function(flowKey, btnEl) {
+window.reviewSingleAuditFlow = async function(flowKey, btnEl, force = false) {
   const f = lastRenderedFlows.find(it => getFlowCacheKey(it) === flowKey);
   if (!f) return;
   if (btnEl) {
     btnEl.disabled = true;
-    btnEl.innerHTML = '<span class="spin-inline"></span> 研判中…';
+    btnEl.innerHTML = '<span class="spin-inline"></span>';
   }
   try {
     const res = await api("/api/audit/ai-review", {
       method: "POST",
-      body: JSON.stringify({ flows: [f] }),
+      body: JSON.stringify({ flows: [f], force: Boolean(force) }),
     });
     const rev = res && res.results && res.results[getFlowCacheKey(f)];
     if (rev) {
@@ -1798,7 +1839,7 @@ window.reviewSingleAuditFlow = async function(flowKey, btnEl) {
     toast("err", "单条 AI 研判失败: " + e.message);
     if (btnEl) {
       btnEl.disabled = false;
-      btnEl.textContent = "🤖 AI 研判此条";
+      btnEl.textContent = force ? "🔄" : "🤖 AI 研判此条";
     }
   }
 };

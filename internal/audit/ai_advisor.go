@@ -12,12 +12,123 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"singctl/internal/config"
 )
 
-const defaultMagpieLoopbackEndpoint = "http://127.0.0.1:3425/v1/chat/completions"
+const (
+	defaultMagpieLoopbackEndpoint = "http://127.0.0.1:3425/v1/chat/completions"
+	defaultAICachePath            = "/tmp/singctl-audit-ai-cache.json"
+	maxCachedAITargets            = 600
+)
+
+type persistedAICacheEntry struct {
+	Target    string          `json:"target"`
+	Review    *AIReviewResult `json:"review"`
+	UpdatedAt int64           `json:"updated_at"`
+}
+
+var (
+	aiTargetCacheMu   sync.RWMutex
+	aiTargetCacheOnce sync.Once
+	aiTargetCache     = make(map[string]persistedAICacheEntry)
+)
+
+func normalizeTargetKey(target string) string {
+	return strings.ToLower(strings.TrimSpace(target))
+}
+
+func ensureAICacheLoaded() {
+	aiTargetCacheOnce.Do(func() {
+		data, err := os.ReadFile(defaultAICachePath)
+		if err != nil || len(data) == 0 {
+			return
+		}
+		var list []persistedAICacheEntry
+		if err := json.Unmarshal(data, &list); err != nil {
+			return
+		}
+		aiTargetCacheMu.Lock()
+		defer aiTargetCacheMu.Unlock()
+		for _, item := range list {
+			k := normalizeTargetKey(item.Target)
+			if k != "" && item.Review != nil && item.Review.Source != "" && item.Review.Source != "builtin_expert" {
+				aiTargetCache[k] = item
+			}
+		}
+	})
+}
+
+// LookupCachedAIReview 查询目标域名/IP 是否已有持久化的真实 AI 大模型研判结果（0ms 命中）。
+func LookupCachedAIReview(target string) *AIReviewResult {
+	ensureAICacheLoaded()
+	k := normalizeTargetKey(target)
+	if k == "" {
+		return nil
+	}
+	aiTargetCacheMu.RLock()
+	entry, ok := aiTargetCache[k]
+	aiTargetCacheMu.RUnlock()
+	if !ok || entry.Review == nil {
+		return nil
+	}
+	cp := *entry.Review
+	return &cp
+}
+
+// StoreCachedAIReviews 将新获得的真实大模型研判结果写入内存与 /tmp/singctl-audit-ai-cache.json (0600)。
+func StoreCachedAIReviews(entries map[string]*AIReviewResult) {
+	if len(entries) == 0 {
+		return
+	}
+	ensureAICacheLoaded()
+	now := time.Now().Unix()
+	changed := false
+
+	aiTargetCacheMu.Lock()
+	for target, rev := range entries {
+		k := normalizeTargetKey(target)
+		if k == "" || rev == nil || rev.Source == "" || rev.Source == "builtin_expert" {
+			continue
+		}
+		cp := *rev
+		aiTargetCache[k] = persistedAICacheEntry{
+			Target:    k,
+			Review:    &cp,
+			UpdatedAt: now,
+		}
+		changed = true
+	}
+	if !changed {
+		aiTargetCacheMu.Unlock()
+		return
+	}
+
+	list := make([]persistedAICacheEntry, 0, len(aiTargetCache))
+	for _, v := range aiTargetCache {
+		list = append(list, v)
+	}
+	if len(list) > maxCachedAITargets {
+		slices.SortFunc(list, func(a, b persistedAICacheEntry) int {
+			return cmp.Compare(b.UpdatedAt, a.UpdatedAt)
+		})
+		list = list[:maxCachedAITargets]
+		aiTargetCache = make(map[string]persistedAICacheEntry, len(list))
+		for _, item := range list {
+			aiTargetCache[item.Target] = item
+		}
+	}
+	aiTargetCacheMu.Unlock()
+
+	if data, err := json.Marshal(list); err == nil {
+		tmpPath := defaultAICachePath + ".tmp"
+		if err := os.WriteFile(tmpPath, data, 0600); err == nil {
+			_ = os.Rename(tmpPath, defaultAICachePath)
+		}
+	}
+}
 
 // Advisor 提供 L2 深度语义研判能力：支持对接本地 Magpie 反代网关 (:3425)、外部 OpenAI 兼容大模型（自动脱敏）与内置离线专家知识库回退。
 type Advisor struct {
@@ -96,26 +207,40 @@ func (a *Advisor) ReviewSuspiciousFlows(ctx context.Context, flows []FlowRecord,
 		return
 	}
 
-	var callerIP string
-	if len(callerIPs) > 0 {
-		callerIP = strings.TrimSpace(callerIPs[0])
-	}
-
-	llmCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 35*time.Second)
-	defer cancel()
-
-	// 1. 按三级自适应优先级尝试请求 Magpie (:3425) 或自定义 OpenAI 兼容网关
-	for _, ep := range a.candidateEndpoints(callerIP) {
-		if !probeEndpointReachable(ep, 600*time.Millisecond) {
+	var uncachedIdx []int
+	for _, idx := range candidatesIdx {
+		if cached := LookupCachedAIReview(flows[idx].Target); cached != nil {
+			flows[idx].AIReview = cached
 			continue
 		}
-		if results, err := a.queryRemoteLLM(llmCtx, ep, flows, candidatesIdx); err == nil && len(results) > 0 {
-			for _, idx := range candidatesIdx {
-				if rev, ok := results[flows[idx].Key]; ok {
-					flows[idx].AIReview = rev
-				}
+		uncachedIdx = append(uncachedIdx, idx)
+	}
+
+	if len(uncachedIdx) > 0 {
+		var callerIP string
+		if len(callerIPs) > 0 {
+			callerIP = strings.TrimSpace(callerIPs[0])
+		}
+
+		llmCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 35*time.Second)
+		defer cancel()
+
+		// 1. 按三级自适应优先级尝试请求 Magpie (:3425) 或自定义 OpenAI 兼容网关
+		for _, ep := range a.candidateEndpoints(callerIP) {
+			if !probeEndpointReachable(ep, 600*time.Millisecond) {
+				continue
 			}
-			break
+			if results, err := a.queryRemoteLLM(llmCtx, ep, flows, uncachedIdx); err == nil && len(results) > 0 {
+				toCache := make(map[string]*AIReviewResult, len(results))
+				for _, idx := range uncachedIdx {
+					if rev, ok := results[flows[idx].Key]; ok && rev != nil {
+						flows[idx].AIReview = rev
+						toCache[flows[idx].Target] = rev
+					}
+				}
+				StoreCachedAIReviews(toCache)
+				break
+			}
 		}
 	}
 
@@ -127,8 +252,8 @@ func (a *Advisor) ReviewSuspiciousFlows(ctx context.Context, flows []FlowRecord,
 	}
 }
 
-// ReviewFlowBatch 对前端传入的指定批次流（最多 12 条/批）执行大模型深度研判，支持渐进式全量分批点亮与单行按需研判。
-func (a *Advisor) ReviewFlowBatch(ctx context.Context, flows []FlowRecord, callerIP string) (map[string]*AIReviewResult, bool) {
+// ReviewFlowBatch 对前端传入的指定批次流（最多 12 条/批）执行大模型深度研判，支持服务端持久化缓存命中、渐进式分批点亮与单行强制重判。
+func (a *Advisor) ReviewFlowBatch(ctx context.Context, flows []FlowRecord, callerIP string, forceRefresh ...bool) (map[string]*AIReviewResult, bool) {
 	out := make(map[string]*AIReviewResult, len(flows))
 	if len(flows) == 0 {
 		return out, false
@@ -137,28 +262,45 @@ func (a *Advisor) ReviewFlowBatch(ctx context.Context, flows []FlowRecord, calle
 		flows = flows[:12]
 	}
 
-	indices := make([]int, len(flows))
+	force := len(forceRefresh) > 0 && forceRefresh[0]
+	var uncachedIndices []int
+	usedRemote := false
+
 	for i := range flows {
-		indices[i] = i
 		if flows[i].Key == "" {
 			flows[i].Key = fmt.Sprintf("%s|%s|%s", flows[i].DeviceIP, flows[i].Target, flows[i].Network)
 		}
+		if !force {
+			if cached := LookupCachedAIReview(flows[i].Target); cached != nil {
+				out[flows[i].Key] = cached
+				usedRemote = true
+				continue
+			}
+		}
+		uncachedIndices = append(uncachedIndices, i)
 	}
 
-	llmCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 35*time.Second)
-	defer cancel()
+	if len(uncachedIndices) > 0 {
+		llmCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 35*time.Second)
+		defer cancel()
 
-	usedRemote := false
-	for _, ep := range a.candidateEndpoints(strings.TrimSpace(callerIP)) {
-		if !probeEndpointReachable(ep, 600*time.Millisecond) {
-			continue
-		}
-		if results, err := a.queryRemoteLLM(llmCtx, ep, flows, indices); err == nil && len(results) > 0 {
-			for k, v := range results {
-				out[k] = v
+		for _, ep := range a.candidateEndpoints(strings.TrimSpace(callerIP)) {
+			if !probeEndpointReachable(ep, 600*time.Millisecond) {
+				continue
 			}
-			usedRemote = true
-			break
+			if results, err := a.queryRemoteLLM(llmCtx, ep, flows, uncachedIndices); err == nil && len(results) > 0 {
+				toCache := make(map[string]*AIReviewResult, len(results))
+				for _, idx := range uncachedIndices {
+					k := flows[idx].Key
+					if v, ok := results[k]; ok && v != nil {
+						out[k] = v
+						toCache[flows[idx].Target] = v
+					}
+				}
+				StoreCachedAIReviews(toCache)
+				usedRemote = true
+				break
+			}
 		}
 	}
 

@@ -263,6 +263,7 @@ func (s *Server) handleAuditAIConfigPost(w http.ResponseWriter, r *http.Request)
 
 type auditAIReviewRequest struct {
 	Flows []audit.FlowRecord `json:"flows"`
+	Force bool               `json:"force,omitempty"`
 }
 
 // handleAuditAIReviewPost 针对前端传入的一批连接记录（最多 12 条/批）执行 L2 AI 深度研判，支持全量渐进式分批点亮与单行按需研判。
@@ -289,7 +290,7 @@ func (s *Server) handleAuditAIReviewPost(w http.ResponseWriter, r *http.Request)
 	}
 
 	advisor := audit.NewAdvisor(cfg.Audit.AI)
-	results, usedRemote := advisor.ReviewFlowBatch(r.Context(), req.Flows, callerHost)
+	results, usedRemote := advisor.ReviewFlowBatch(r.Context(), req.Flows, callerHost, req.Force)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":         true,
