@@ -1506,10 +1506,7 @@ async function loadAudit(withAI = false, silent = false) {
             const reasonText = (f.reasons || []).join("；");
             const actionHtml = f.state === "blocked"
               ? `<button class="btn btn-sm" onclick="unblockAuditTarget('${esc(f.target)}','')">解封</button>`
-              : `<div class="btn-row" style="flex-wrap:nowrap;">
-                   <button class="btn btn-sm btn-danger" onclick="blockAuditTarget('${esc(f.target)}','','${esc(reasonText)}')">全局拉黑</button>
-                   <button class="btn btn-sm" title="仅禁止该内网设备访问此目标" onclick="blockAuditTarget('${esc(f.target)}','${esc(f.deviceIp)}','${esc(reasonText)}')">仅此设备</button>
-                 </div>`;
+              : `<button class="btn btn-sm btn-danger" onclick="blockAuditTarget('${esc(f.target)}','','${esc(reasonText)}')">一键拉黑</button>`;
             return `<tr>
               <td class="col-nowrap">
                 <span class="badge ${cls}">${esc(label)} · ${f.riskScore}分</span>
