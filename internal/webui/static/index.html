@@ -1526,7 +1526,7 @@ function renderAuditFlowsTable() {
 
 function dOrZero(n) { return n || 0; }
 
-// 计算当前屏幕可见行区间 P0 [firstVis, lastVis] 与向下 1:1 预取缓冲区 P1 [lastVis+1, lastVis+N]
+// 计算当前屏幕可见行区间 P0 [firstVis, lastVis] 与向下 2x 可视区预取缓冲 P1 [lastVis+1, lastVis+2*N]
 function computeViewportAndLookaheadWindow() {
   const total = lastRenderedFlows.length;
   if (!total) return { p0: [], p1: [] };
@@ -1554,7 +1554,8 @@ function computeViewportAndLookaheadWindow() {
   }
 
   const visibleCount = Math.max(12, lastVis - firstVis + 1);
-  const prefetchEnd = Math.min(total - 1, lastVis + visibleCount);
+  // 向下预取 2 倍可视区域行数 (2 * N)，确保快速连续滚屏也能全程 0 延迟命中缓存
+  const prefetchEnd = Math.min(total - 1, lastVis + visibleCount * 2);
 
   const p0 = [];
   for (let i = firstVis; i <= lastVis; i++) {
@@ -1581,7 +1582,7 @@ function extractUncachedUniqueBatch(flowSlice, maxBatch = 8) {
   return batch;
 }
 
-// 双级优先级单飞调度器：P0 (当前屏幕可见区) 优先 -> P1 (向下 1:1 预取缓冲区) 紧随其后
+// 双级优先级单飞调度器：P0 (当前屏幕可见区) 优先 -> P1 (向下 2x 可视区预取缓冲) 紧随其后
 async function scheduleViewportAIPrefetch() {
   const aiToggle = $("#audit-ai-enable");
   const statusEl = $("#audit-ai-status");
@@ -1605,7 +1606,7 @@ async function scheduleViewportAIPrefetch() {
   let batch = extractUncachedUniqueBatch(p0, 8);
   let phaseLabel = "可视区";
   if (!batch.length) {
-    batch = extractUncachedUniqueBatch(p1, 8);
+    batch = extractUncachedUniqueBatch(p1, 10);
     phaseLabel = "预取区";
   }
   if (!batch.length) {
