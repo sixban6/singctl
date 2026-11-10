@@ -479,7 +479,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; ba
           <label class="btn btn-sm" style="cursor:pointer;"><input type="checkbox" id="audit-only-suspect" style="accent-color:var(--accent);"> 仅看关注/高危</label>
           <button class="btn btn-sm" id="btn-audit-blocklist-toggle" title="展开/收起双层黑名单管理抽屉">🚫 黑名单管理 <span class="badge dim" id="audit-block-count-badge" style="margin-left:3px;">0</span></button>
           <button class="btn btn-sm" id="btn-audit-ai-cfg" title="配置 AI 网关 BaseURL、密钥与模型">⚙️ AI 网关配置</button>
-          <button class="btn btn-sm" id="btn-audit-ai">🤖 AI 深度研判</button>
+          <label class="btn btn-sm" style="cursor:pointer;" title="开启后自动对当前屏幕可见行及向下 1:1 预取缓冲区执行 AI 深度研判"><input type="checkbox" id="audit-ai-enable" checked style="accent-color:var(--accent);"> 🤖 AI 深度研判 <span id="audit-ai-status" style="font-size:11px;color:var(--muted);"></span></label>
           <button class="btn btn-sm" id="btn-audit-export-csv" title="导出纯 UTF-8 (无 BOM) CSV 明细表">📥 导出 CSV</button>
           <button class="btn btn-sm btn-primary" id="btn-audit-refresh">立即采样刷新</button>
           <label class="btn btn-sm" style="cursor:pointer;"><input type="checkbox" id="audit-auto" checked style="accent-color:var(--accent);"> 自动刷新 (5秒)</label>
@@ -1394,14 +1394,28 @@ function fmtBytes(b) {
 }
 
 const auditAICache = new Map();
+const auditPendingTargets = new Set();
 let suggestedMagpieLanURL = "http://127.0.0.1:3425/v1";
 let auditAILoading = false;
-let auditAIAbort = false;
+let auditAINeedsReschedule = false;
 let lastRenderedFlows = [];
 let lastEmptyFlowMsg = "暂无符合过滤条件的流量记录";
 
+// 初始化恢复 AI 深度研判勾选状态 (默认选中)
+(function initAuditAIToggle() {
+  const el = $("#audit-ai-enable");
+  if (!el) return;
+  const saved = localStorage.getItem("sc_audit_ai_enable");
+  if (saved === "0") el.checked = false;
+  else el.checked = true;
+})();
+
 function getFlowCacheKey(f) {
   return f.key || f.id || `${f.deviceIp}|${f.target}|${f.network}`;
+}
+
+function getFlowTargetKey(f) {
+  return f.target || getFlowCacheKey(f);
 }
 
 function getCachedAIReview(f) {
@@ -1421,46 +1435,69 @@ function setCachedAIReview(fOrKey, target, rev) {
   }
 }
 
+function buildAIRowSlotHTML(f) {
+  const flowKey = getFlowCacheKey(f);
+  const tgtKey = getFlowTargetKey(f);
+  const aiRev = getCachedAIReview(f);
+  if (aiRev) {
+    const cardCls = aiRev.verdict === "safe_to_block" ? "safe" : (aiRev.verdict === "caution" ? "caution" : "keep");
+    const vBadgeCls = aiRev.verdict === "safe_to_block" ? "ok" : (aiRev.verdict === "caution" ? "warn" : "info");
+    const isRealLLM = aiRev.source && aiRev.source !== "builtin_expert";
+    const srcLabel = isRealLLM ? aiRev.source : "离线专家库";
+    const retryBtn = !isRealLLM
+      ? `<button class="btn btn-sm" style="padding:1px 6px;font-size:10.5px;margin-left:6px;" onclick="reviewSingleAuditFlow('${esc(flowKey)}', this)">🤖 重试AI</button>`
+      : "";
+    return `<div class="ai-card ${cardCls}">
+      <div class="ai-card-head">
+        <span><span class="badge ${vBadgeCls}" style="margin-right:5px;">🤖 ${esc(aiRev.verdictText)}</span><b>${esc(aiRev.category)}</b></span>
+        <span class="ai-card-src">${esc(srcLabel)}${retryBtn}</span>
+      </div>
+      <div class="ai-card-impact">${esc(aiRev.impact)}</div>
+    </div>`;
+  }
+  if (auditPendingTargets.has(tgtKey)) {
+    return `<div style="margin-top:5px;font-size:11.5px;color:var(--muted);display:flex;align-items:center;gap:6px;"><span class="spin-inline"></span> 🤖 AI 正在研判此目标…</div>`;
+  }
+  return `<div style="margin-top:4px;"><button class="btn btn-sm" style="padding:2px 8px;font-size:11px;" onclick="reviewSingleAuditFlow('${esc(flowKey)}', this)">🤖 AI 研判此条</button></div>`;
+}
+
+// 局部无感更新各行的 AI 研判卡片槽位（不重建 table，保持滚动条零抖动）
+function updateAISlotsInDOM() {
+  const slots = $$("#audit-flows-box [data-ai-row-idx]");
+  for (const slot of slots) {
+    const idx = Number(slot.getAttribute("data-ai-row-idx"));
+    const f = lastRenderedFlows[idx];
+    if (!f) continue;
+    const html = buildAIRowSlotHTML(f);
+    if (slot.innerHTML !== html) {
+      slot.innerHTML = html;
+    }
+  }
+}
+
 function renderAuditFlowsTable() {
   const flows = lastRenderedFlows || [];
   if (!flows.length) {
     $("#audit-flows-box").innerHTML = '<div class="empty">' + esc(lastEmptyFlowMsg) + '</div>';
     return;
   }
+  const prevWrap = $("#audit-flows-box .table-wrap");
+  const prevScrollLeft = prevWrap ? prevWrap.scrollLeft : 0;
+
   $("#audit-flows-box").innerHTML = `
     <div class="table-wrap"><table class="tbl audit-tbl">
       <thead><tr><th>双轴评分</th><th>源设备</th><th>目标域名 / IP & 归属应用</th><th>协议</th><th>上传 ↑</th><th>下载 ↓</th><th>比值</th><th>双轴非线性诊断原因 & AI 顾问研判</th><th>一键拉黑 (路由+DNS)</th></tr></thead>
-      <tbody>${flows.map(f => {
+      <tbody>${flows.map((f, idx) => {
         const cls = f.state === "blocked" ? "dim" : (f.threat === "high_risk" ? "err" : (f.threat === "suspicious" ? "warn" : (f.threat === "notice" ? "info" : "ok")));
         const label = f.state === "blocked" ? "已拉黑" : (f.threatLabel || "正常");
         const targetDisp = f.isDirectIp && f.destPort ? `${f.target}:${f.destPort}` : f.target;
         const appPillHtml = f.appName ? `<div><span class="app-pill">🏷️ ${esc(f.appName)}</span></div>` : "";
-        const flowKey = getFlowCacheKey(f);
-        const aiRev = getCachedAIReview(f);
-        let aiHtml = "";
-        if (aiRev) {
-          const cardCls = aiRev.verdict === "safe_to_block" ? "safe" : (aiRev.verdict === "caution" ? "caution" : "keep");
-          const vBadgeCls = aiRev.verdict === "safe_to_block" ? "ok" : (aiRev.verdict === "caution" ? "warn" : "info");
-          const isRealLLM = aiRev.source && aiRev.source !== "builtin_expert";
-          const srcLabel = isRealLLM ? aiRev.source : "离线专家库";
-          const retryBtn = !isRealLLM
-            ? `<button class="btn btn-sm" style="padding:1px 6px;font-size:10.5px;margin-left:6px;" onclick="reviewSingleAuditFlow('${esc(flowKey)}', this)">🤖 重试AI</button>`
-            : "";
-          aiHtml = `<div class="ai-card ${cardCls}">
-            <div class="ai-card-head">
-              <span><span class="badge ${vBadgeCls}" style="margin-right:5px;">🤖 ${esc(aiRev.verdictText)}</span><b>${esc(aiRev.category)}</b></span>
-              <span class="ai-card-src">${esc(srcLabel)}${retryBtn}</span>
-            </div>
-            <div class="ai-card-impact">${esc(aiRev.impact)}</div>
-          </div>`;
-        } else {
-          aiHtml = `<div style="margin-top:4px;"><button class="btn btn-sm" style="padding:2px 8px;font-size:11px;" onclick="reviewSingleAuditFlow('${esc(flowKey)}', this)">🤖 AI 研判此条</button></div>`;
-        }
+        const aiSlotHtml = buildAIRowSlotHTML(f);
         const reasonText = (f.reasons || []).join("；");
         const actionHtml = f.state === "blocked"
           ? `<button class="btn btn-sm" onclick="unblockAuditTarget('${esc(f.target)}','')">解封</button>`
           : `<button class="btn btn-sm btn-danger" onclick="blockAuditTarget('${esc(f.target)}','','${esc(reasonText)}')">一键拉黑</button>`;
-        return `<tr>
+        return `<tr data-flow-idx="${idx}">
           <td class="col-nowrap">
             <span class="badge ${cls}">${esc(label)} · ${f.riskScore}分</span>
             <div class="axis-sub">🛡️安:${f.securityScore || 0} · 👁️隐:${f.privacyScore || 0}</div>
@@ -1474,14 +1511,152 @@ function renderAuditFlowsTable() {
           <td class="mono col-nowrap">${fmtBytes(f.uploadBytes)}</td>
           <td class="mono col-nowrap">${fmtBytes(dOrZero(f.downloadBytes))}</td>
           <td class="mono col-nowrap">${Number(f.uploadRatio || 0).toFixed(1)}x</td>
-          <td style="min-width:260px;max-width:400px;font-size:12px;word-break:break-word;white-space:normal;"><div>${esc(reasonText)}</div>${aiHtml}</td>
+          <td style="min-width:260px;max-width:400px;font-size:12px;word-break:break-word;white-space:normal;">
+            <div>${esc(reasonText)}</div>
+            <div data-ai-row-idx="${idx}">${aiSlotHtml}</div>
+          </td>
           <td class="col-nowrap">${actionHtml}</td>
         </tr>`;
       }).join("")}</tbody>
     </table></div>`;
+
+  const newWrap = $("#audit-flows-box .table-wrap");
+  if (newWrap && prevScrollLeft > 0) newWrap.scrollLeft = prevScrollLeft;
 }
 
 function dOrZero(n) { return n || 0; }
+
+// 计算当前屏幕可见行区间 P0 [firstVis, lastVis] 与向下 1:1 预取缓冲区 P1 [lastVis+1, lastVis+N]
+function computeViewportAndLookaheadWindow() {
+  const total = lastRenderedFlows.length;
+  if (!total) return { p0: [], p1: [] };
+
+  const rows = $$("#audit-flows-box tr[data-flow-idx]");
+  const vh = window.innerHeight || document.documentElement.clientHeight || 800;
+  let firstVis = -1;
+  let lastVis = -1;
+
+  for (const tr of rows) {
+    const rect = tr.getBoundingClientRect();
+    if (rect.height === 0) continue;
+    // 与屏幕可视区域存在交集
+    if (rect.bottom >= -40 && rect.top <= vh + 40) {
+      const idx = Number(tr.getAttribute("data-flow-idx"));
+      if (firstVis === -1 || idx < firstVis) firstVis = idx;
+      if (idx > lastVis) lastVis = idx;
+    }
+  }
+
+  // 若用户尚未滚到明细表（例如刚打开页面停留在顶部概览），默认将前 15 行作为首屏可见区 P0
+  if (firstVis === -1) {
+    firstVis = 0;
+    lastVis = Math.min(total - 1, 14);
+  }
+
+  const visibleCount = Math.max(12, lastVis - firstVis + 1);
+  const prefetchEnd = Math.min(total - 1, lastVis + visibleCount);
+
+  const p0 = [];
+  for (let i = firstVis; i <= lastVis; i++) {
+    if (lastRenderedFlows[i]) p0.push(lastRenderedFlows[i]);
+  }
+  const p1 = [];
+  for (let i = lastVis + 1; i <= prefetchEnd; i++) {
+    if (lastRenderedFlows[i]) p1.push(lastRenderedFlows[i]);
+  }
+  return { p0, p1 };
+}
+
+function extractUncachedUniqueBatch(flowSlice, maxBatch = 8) {
+  const seen = new Set();
+  const batch = [];
+  for (const f of flowSlice) {
+    const tgtKey = getFlowTargetKey(f);
+    if (seen.has(tgtKey)) continue;
+    if (getCachedAIReview(f)) continue; // 已在缓存中（含已预取），直接命中跳过
+    seen.add(tgtKey);
+    batch.push(f);
+    if (batch.length >= maxBatch) break;
+  }
+  return batch;
+}
+
+// 双级优先级单飞调度器：P0 (当前屏幕可见区) 优先 -> P1 (向下 1:1 预取缓冲区) 紧随其后
+async function scheduleViewportAIPrefetch() {
+  const aiToggle = $("#audit-ai-enable");
+  const statusEl = $("#audit-ai-status");
+  const panel = $("#panel-audit");
+  if (!aiToggle || !aiToggle.checked || !panel || !panel.classList.contains("active")) {
+    if (statusEl) statusEl.textContent = "";
+    return;
+  }
+  if (!lastRenderedFlows.length) {
+    if (statusEl) statusEl.textContent = "";
+    return;
+  }
+
+  // 单飞锁：若已有批次正在请求 Magpie，标记需要在当前批次结束后立即按最新滚动位置重调度
+  if (auditAILoading) {
+    auditAINeedsReschedule = true;
+    return;
+  }
+
+  const { p0, p1 } = computeViewportAndLookaheadWindow();
+  let batch = extractUncachedUniqueBatch(p0, 8);
+  let phaseLabel = "可视区";
+  if (!batch.length) {
+    batch = extractUncachedUniqueBatch(p1, 8);
+    phaseLabel = "预取区";
+  }
+  if (!batch.length) {
+    if (statusEl) statusEl.textContent = "";
+    return;
+  }
+
+  auditAILoading = true;
+  auditAINeedsReschedule = false;
+  batch.forEach(f => auditPendingTargets.add(getFlowTargetKey(f)));
+  if (phaseLabel === "可视区") {
+    // 仅可视区显示行内加载微动画；预取区在屏幕下方静默完成，完全不打扰用户视线
+    updateAISlotsInDOM();
+  }
+  if (statusEl) {
+    statusEl.innerHTML = `<span class="spin-inline"></span> ${phaseLabel}${batch.length}条…`;
+  }
+
+  try {
+    const res = await api("/api/audit/ai-review", {
+      method: "POST",
+      body: JSON.stringify({ flows: batch }),
+    });
+    const results = (res && res.results) || {};
+    batch.forEach(f => {
+      const k = getFlowCacheKey(f);
+      const rev = results[k];
+      if (rev) setCachedAIReview(f, f.target, rev);
+    });
+  } catch {
+    // 静默容错，不弹窗打断用户滚动浏览
+  } finally {
+    batch.forEach(f => auditPendingTargets.delete(getFlowTargetKey(f)));
+    auditAILoading = false;
+    updateAISlotsInDOM();
+
+    // 若当前 [P0 可视区 + P1 预取区] 仍有未缓存项，或滚动位置已更新，立即无缝衔接下一批
+    const nextCheck = computeViewportAndLookaheadWindow();
+    const hasMore = extractUncachedUniqueBatch(nextCheck.p0, 1).length > 0 ||
+                    extractUncachedUniqueBatch(nextCheck.p1, 1).length > 0;
+    if ((auditAINeedsReschedule || hasMore) && aiToggle && aiToggle.checked) {
+      setTimeout(() => scheduleViewportAIPrefetch(), 40);
+    } else if (statusEl) {
+      statusEl.textContent = "";
+    }
+  }
+}
+
+const debouncedViewportPrefetch = debounce(() => scheduleViewportAIPrefetch(), 180);
+window.addEventListener("scroll", debouncedViewportPrefetch, { passive: true });
+window.addEventListener("resize", debouncedViewportPrefetch, { passive: true });
 
 async function loadAuditAIConfig() {
   try {
@@ -1508,6 +1683,7 @@ async function saveAuditAIConfig() {
     $("#audit-ai-model").value = res.model || model;
     if ($("#audit-ai-cfg-box")) $("#audit-ai-cfg-box").style.display = "none";
     toast("ok", res.message || "AI 网关配置已保存并收起");
+    scheduleViewportAIPrefetch();
   } catch (e) {
     toast("err", "保存 AI 网关配置失败: " + e.message);
   }
@@ -1515,7 +1691,7 @@ async function saveAuditAIConfig() {
 
 async function loadAudit(withAI = false, silent = false) {
   const panel = $("#panel-audit");
-  if (silent && (!panel || !panel.classList.contains("active") || auditAILoading)) return;
+  if (silent && (!panel || !panel.classList.contains("active"))) return;
 
   const dev = ($("#audit-device-filter").value || "").trim();
   const susp = $("#audit-only-suspect").checked ? "1" : "";
@@ -1593,101 +1769,10 @@ async function loadAudit(withAI = false, silent = false) {
         </table></div>`;
     }
 
-    if (withAI) {
-      await runProgressiveAIReview();
-    }
+    // 触发当前可视区 P0 + 向下 1:1 预取区 P1 自动研判
+    scheduleViewportAIPrefetch();
   } catch (e) {
     if (!silent) toast("err", "加载设备审计失败: " + e.message);
-  }
-}
-
-// 渐进式全量分批 AI 研判：按独立 target 去重，每批 8 条流式点亮整表，支持中途随时点击按钮暂停
-async function runProgressiveAIReview() {
-  const aiBtn = $("#btn-audit-ai");
-  if (auditAILoading) {
-    auditAIAbort = true;
-    return;
-  }
-  if (!lastRenderedFlows.length) {
-    toast("info", "当前列表暂无可研判的流量记录");
-    return;
-  }
-
-  // 收集待研判的独立 target 代表流（优先挑选尚未经过远程大模型研判的记录）
-  const collectUniqueTargets = (forceAll) => {
-    const seenTargets = new Set();
-    const list = [];
-    for (const f of lastRenderedFlows) {
-      const tgtKey = f.target || getFlowCacheKey(f);
-      if (seenTargets.has(tgtKey)) continue;
-      const cached = getCachedAIReview(f);
-      const hasRealLLM = cached && cached.source && cached.source !== "builtin_expert";
-      if (!forceAll && hasRealLLM) continue;
-      seenTargets.add(tgtKey);
-      list.push(f);
-    }
-    return list;
-  };
-
-  let todoList = collectUniqueTargets(false);
-  if (!todoList.length) {
-    todoList = collectUniqueTargets(true);
-  }
-  if (!todoList.length) return;
-
-  auditAILoading = true;
-  auditAIAbort = false;
-  const total = todoList.length;
-  const batchSize = 8;
-  let done = 0;
-  let remoteHit = 0;
-  let remoteSource = "";
-
-  try {
-    for (let i = 0; i < total; i += batchSize) {
-      if (auditAIAbort) {
-        toast("info", `⏹️ 已暂停批量 AI 研判（已完成 ${done}/${total} 个独立目标）`);
-        break;
-      }
-      const chunk = todoList.slice(i, i + batchSize);
-      if (aiBtn) {
-        aiBtn.innerHTML = `<span class="spin-inline"></span> 研判中 (${done}/${total}) · 点击停止`;
-      }
-      const res = await api("/api/audit/ai-review", {
-        method: "POST",
-        body: JSON.stringify({ flows: chunk }),
-      });
-      const results = (res && res.results) || {};
-      chunk.forEach(f => {
-        const k = getFlowCacheKey(f);
-        const rev = results[k];
-        if (rev) {
-          setCachedAIReview(f, f.target, rev);
-          if (rev.source && rev.source !== "builtin_expert") {
-            remoteHit++;
-            if (!remoteSource) remoteSource = rev.source;
-          }
-        }
-      });
-      done += chunk.length;
-      renderAuditFlowsTable();
-    }
-    if (!auditAIAbort) {
-      if (remoteHit > 0) {
-        toast("ok", `🤖 全量深度研判完成：已通过 ${remoteSource} 点亮 ${done} 个独立目标`);
-      } else {
-        toast("info", `🤖 已使用内置离线专家库完成 ${done} 个目标兜底研判`);
-      }
-    }
-  } catch (e) {
-    toast("err", "批量 AI 研判中断: " + e.message);
-  } finally {
-    auditAILoading = false;
-    auditAIAbort = false;
-    if (aiBtn) {
-      aiBtn.disabled = false;
-      aiBtn.textContent = "🤖 AI 深度研判";
-    }
   }
 }
 
@@ -1706,7 +1791,7 @@ window.reviewSingleAuditFlow = async function(flowKey, btnEl) {
     const rev = res && res.results && res.results[getFlowCacheKey(f)];
     if (rev) {
       setCachedAIReview(f, f.target, rev);
-      renderAuditFlowsTable();
+      updateAISlotsInDOM();
     }
   } catch (e) {
     toast("err", "单条 AI 研判失败: " + e.message);
@@ -1784,11 +1869,13 @@ async function exportAuditCSV() {
 }
 
 $("#btn-audit-refresh").onclick = () => loadAudit(false);
-$("#btn-audit-ai").onclick = () => {
-  if (auditAILoading) {
-    auditAIAbort = true;
-  } else {
-    runProgressiveAIReview();
+$("#audit-ai-enable").onchange = () => {
+  const checked = $("#audit-ai-enable").checked;
+  localStorage.setItem("sc_audit_ai_enable", checked ? "1" : "0");
+  if (checked) {
+    scheduleViewportAIPrefetch();
+  } else if ($("#audit-ai-status")) {
+    $("#audit-ai-status").textContent = "";
   }
 };
 $("#btn-audit-export-csv").onclick = () => exportAuditCSV();
