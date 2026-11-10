@@ -480,10 +480,18 @@ tr.dual-alert-row td:first-child { box-shadow: inset 4px 0 0 var(--err); }
         <div class="card-title"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>局域网设备上传审计与一键双层拉黑 <span class="card-note" id="audit-summary-note"></span></div>
         <div class="btn-row">
           <input type="text" id="audit-device-filter" placeholder="过滤设备名或内网IP…" style="padding:6px 10px;border-radius:9px;border:1px solid var(--border);background:var(--input-bg);color:var(--text);font-size:12.5px;width:150px;">
-          <select id="audit-axis-filter" class="btn btn-sm" style="padding:5.5px 8px;">
+          <select id="audit-axis-filter" class="btn btn-sm" style="padding:5.5px 8px;" title="按程序诊断维度筛选">
             <option value="">全部维度 (🛡️安全 + 👁️隐私)</option>
             <option value="security">🛡️ 仅看安全异常</option>
             <option value="privacy">👁️ 仅看隐私追踪</option>
+          </select>
+          <select id="audit-ai-filter" class="btn btn-sm" style="padding:5.5px 8px;" title="按 AI 诊断结论分类筛选">
+            <option value="">🤖 AI诊断: 全部结论</option>
+            <option value="dual_alert">🚨 双重高危确诊 (程序+AI)</option>
+            <option value="safe_to_block">🟢 可安全拉黑</option>
+            <option value="caution">🟡 谨慎拉黑</option>
+            <option value="blockable">🎯 可拉黑 + 谨慎拉黑</option>
+            <option value="do_not_block">🔵 建议放行</option>
           </select>
           <label class="btn btn-sm" style="cursor:pointer;"><input type="checkbox" id="audit-only-suspect" style="accent-color:var(--accent);"> 仅看关注/高危</label>
           <button class="btn btn-sm" id="btn-audit-blocklist-toggle" title="展开/收起双层黑名单管理抽屉">🚫 黑名单管理 <span class="badge dim" id="audit-block-count-badge" style="margin-left:3px;">0</span></button>
@@ -1425,7 +1433,9 @@ const AUDIT_AI_STORAGE_KEY = "sc_audit_ai_cache_v1";
 let suggestedMagpieLanURL = "http://127.0.0.1:3425/v1";
 let auditAILoading = false;
 let auditAINeedsReschedule = false;
+let lastRawFlows = [];
 let lastRenderedFlows = [];
+let lastBaseEmptyMsg = "暂无符合过滤条件的流量记录";
 let lastEmptyFlowMsg = "暂无符合过滤条件的流量记录";
 
 // 初始化恢复 AI 深度研判勾选状态与浏览器本地持久化 AI 缓存
@@ -1536,7 +1546,7 @@ function buildAIRowSlotHTML(f) {
       : `<button class="btn btn-sm" style="padding:0 5px;font-size:10px;opacity:.72;" title="重新调用 AI 研判此目标" onclick="reviewSingleAuditFlow('${esc(flowKey)}', this, true)">🔄</button>`;
     return `<div class="ai-card ${cardCls}">
       <div class="ai-card-head">
-        <span><span class="badge ${vBadgeCls}" style="margin-right:5px;">🤖 ${esc(aiRev.verdictText)}</span><b>${esc(aiRev.category)}</b></span>
+        <span><span class="badge ${vBadgeCls}" style="margin-right:5px;cursor:pointer;" title="点击按「${esc(aiRev.verdictText)}」筛选表格（再次点击恢复全部）" onclick="toggleAuditAIVerdictFilter('${esc(aiRev.verdict)}')">🤖 ${esc(aiRev.verdictText)}</span><b>${esc(aiRev.category)}</b></span>
         <span class="ai-card-src">${retryBtn}</span>
       </div>
       <div class="ai-card-impact">${esc(aiRev.impact)}</div>
@@ -1548,8 +1558,93 @@ function buildAIRowSlotHTML(f) {
   return `<div><button class="btn btn-sm" style="padding:2px 8px;font-size:11px;" onclick="reviewSingleAuditFlow('${esc(flowKey)}', this, false)">🤖 AI 研判此条</button></div>`;
 }
 
+// 动态统计并刷新 #audit-ai-filter 下拉框各分类的实时条数，让用户一眼看清各结论分布
+function updateAIFilterOptionCounts(baseFlows) {
+  const sel = $("#audit-ai-filter");
+  if (!sel) return;
+  const list = baseFlows || lastRawFlows || [];
+  let dualCnt = 0, safeCnt = 0, cautionCnt = 0, keepCnt = 0;
+  for (const f of list) {
+    if (isDualAlertRow(f)) dualCnt++;
+    const rev = getCachedAIReview(f);
+    if (!rev) continue;
+    if (rev.verdict === "safe_to_block") safeCnt++;
+    else if (rev.verdict === "caution") cautionCnt++;
+    else if (rev.verdict === "do_not_block") keepCnt++;
+  }
+  const blockableCnt = safeCnt + cautionCnt;
+  const labels = {
+    "": `🤖 AI诊断: 全部结论 (${list.length})`,
+    "dual_alert": `🚨 双重高危确诊 (${dualCnt})`,
+    "safe_to_block": `🟢 可安全拉黑 (${safeCnt})`,
+    "caution": `🟡 谨慎拉黑 (${cautionCnt})`,
+    "blockable": `🎯 可拉黑 + 谨慎拉黑 (${blockableCnt})`,
+    "do_not_block": `🔵 建议放行 (${keepCnt})`,
+  };
+  for (const opt of sel.options) {
+    if (labels[opt.value] !== undefined) {
+      opt.textContent = labels[opt.value];
+    }
+  }
+  sel.style.borderColor = sel.value ? "var(--accent)" : "";
+}
+
+function matchAIFilter(f, aiFilter) {
+  if (!aiFilter) return true;
+  if (aiFilter === "dual_alert") return isDualAlertRow(f);
+  const rev = getCachedAIReview(f);
+  if (!rev) return false;
+  if (aiFilter === "blockable") return rev.verdict === "safe_to_block" || rev.verdict === "caution";
+  return rev.verdict === aiFilter;
+}
+
+function applyAuditClientFilters() {
+  const axisFilter = ($("#audit-axis-filter") && $("#audit-axis-filter").value) || "";
+  const aiFilter = ($("#audit-ai-filter") && $("#audit-ai-filter").value) || "";
+
+  const axisFiltered = (lastRawFlows || []).filter(f => {
+    if (axisFilter === "security") return (f.securityScore || 0) >= 15 || f.dominantAxis === "security" || f.dominantAxis === "both";
+    if (axisFilter === "privacy") return (f.privacyScore || 0) >= 15 || f.dominantAxis === "privacy" || f.dominantAxis === "both";
+    return true;
+  });
+
+  updateAIFilterOptionCounts(axisFiltered);
+
+  const aiEmptyMessages = {
+    "dual_alert": "当前暂无「🚨 双重高危确诊」的连接记录",
+    "safe_to_block": "当前已研判记录中暂无「🟢 可安全拉黑」的目标",
+    "caution": "当前已研判记录中暂无「🟡 谨慎拉黑」的目标",
+    "blockable": "当前已研判记录中暂无「可拉黑 / 谨慎拉黑」的目标",
+    "do_not_block": "当前已研判记录中暂无「🔵 建议放行」的目标",
+  };
+  lastEmptyFlowMsg = (aiFilter && aiEmptyMessages[aiFilter]) || lastBaseEmptyMsg || "暂无符合过滤条件的流量记录";
+  lastRenderedFlows = axisFiltered.filter(f => matchAIFilter(f, aiFilter));
+  renderAuditFlowsTable();
+}
+
+window.toggleAuditAIVerdictFilter = function(verdict) {
+  const sel = $("#audit-ai-filter");
+  if (!sel || !verdict) return;
+  sel.value = sel.value === verdict ? "" : verdict;
+  applyAuditClientFilters();
+  scheduleViewportAIPrefetch();
+};
+
 // 局部无感更新各行的 AI 诊断列与双重高危醒目高亮（不重建 table，保持滚动条零抖动）
 function updateAISlotsInDOM() {
+  const axisFilter = ($("#audit-axis-filter") && $("#audit-axis-filter").value) || "";
+  const aiFilter = ($("#audit-ai-filter") && $("#audit-ai-filter").value) || "";
+  if (aiFilter) {
+    applyAuditClientFilters();
+    return;
+  }
+  const axisFiltered = (lastRawFlows || []).filter(f => {
+    if (axisFilter === "security") return (f.securityScore || 0) >= 15 || f.dominantAxis === "security" || f.dominantAxis === "both";
+    if (axisFilter === "privacy") return (f.privacyScore || 0) >= 15 || f.dominantAxis === "privacy" || f.dominantAxis === "both";
+    return true;
+  });
+  updateAIFilterOptionCounts(axisFiltered);
+
   const slots = $$("#audit-flows-box [data-ai-row-idx]");
   for (const slot of slots) {
     const idx = Number(slot.getAttribute("data-ai-row-idx"));
@@ -1715,12 +1810,17 @@ async function scheduleViewportAIPrefetch() {
     return;
   }
 
-  const { p0, p1 } = computeViewportAndLookaheadWindow();
-  let batch = extractUncachedUniqueBatch(p0, 8);
+  const visibleZone = computeViewportAndLookaheadWindow();
+  let batch = extractUncachedUniqueBatch(visibleZone.p0, 8);
   let phaseLabel = "可视区";
   if (!batch.length) {
-    batch = extractUncachedUniqueBatch(p1, 10);
+    batch = extractUncachedUniqueBatch(visibleZone.p1, 10);
     phaseLabel = "预取区";
+  }
+  // 若当前开启了 AI 分类筛选（如仅看谨慎拉黑），对尚未研判的后台流继续静默预取，以便自动浮现新命中行
+  if (!batch.length && $("#audit-ai-filter") && $("#audit-ai-filter").value) {
+    batch = extractUncachedUniqueBatch(lastRawFlows || [], 8);
+    phaseLabel = "筛选扫描";
   }
   if (!batch.length) {
     if (statusEl) statusEl.textContent = "";
@@ -1864,13 +1964,9 @@ async function loadAudit(withAI = false, silent = false) {
     });
     if (syncedFromServer) persistAuditAICacheToStorage();
 
-    lastEmptyFlowMsg = rep.message || "暂无符合过滤条件的流量记录";
-    lastRenderedFlows = rawFlows.filter(f => {
-      if (axisFilter === "security") return (f.securityScore || 0) >= 15 || f.dominantAxis === "security" || f.dominantAxis === "both";
-      if (axisFilter === "privacy") return (f.privacyScore || 0) >= 15 || f.dominantAxis === "privacy" || f.dominantAxis === "both";
-      return true;
-    });
-    renderAuditFlowsTable();
+    lastRawFlows = rawFlows;
+    lastBaseEmptyMsg = rep.message || "暂无符合过滤条件的流量记录";
+    applyAuditClientFilters();
 
     // 3. 当前生效黑名单 (顶部折叠抽屉内渲染，规则集保持单行折叠胶囊，绝不展开刷屏)
     const rules = rep.blockRules || [];
@@ -2060,7 +2156,14 @@ $("#btn-audit-fill-lan").onclick = () => {
 };
 $("#btn-audit-ai-save").onclick = () => saveAuditAIConfig();
 $("#audit-only-suspect").onchange = () => loadAudit(false);
-$("#audit-axis-filter").onchange = () => loadAudit(false);
+$("#audit-axis-filter").onchange = () => {
+  applyAuditClientFilters();
+  scheduleViewportAIPrefetch();
+};
+$("#audit-ai-filter").onchange = () => {
+  applyAuditClientFilters();
+  scheduleViewportAIPrefetch();
+};
 $("#audit-device-filter").oninput = debounce(() => loadAudit(false), 350);
 $("#audit-auto").onchange = () => { if ($("#audit-auto").checked) loadAudit(false, true); };
 setInterval(() => { if ($("#audit-auto") && $("#audit-auto").checked) loadAudit(false, true); }, 5000);

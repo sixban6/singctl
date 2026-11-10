@@ -267,10 +267,12 @@ func (g *ConfigGenerator) InjectCustomRules(rawJSON string) (string, error) {
 		applyCustomDNSRules(root, allDNS)
 	}
 
-	// 4. 注入路由规则 (custom_rules.block + custom_rules.route)
-	allRoute := append(blockRoute, g.config.CustomRules.Route...)
-	if len(allRoute) > 0 {
-		applyCustomRouteRules(root, allRoute)
+	// 4. 注入路由规则 (custom_rules.block 挂在最前，custom_rules.route 按标准位置注入)
+	if len(blockRoute) > 0 {
+		applyBlockRouteRules(root, blockRoute)
+	}
+	if len(g.config.CustomRules.Route) > 0 {
+		applyCustomRouteRules(root, g.config.CustomRules.Route)
 	}
 
 	data, err := json.Marshal(root)
@@ -479,7 +481,7 @@ func SyncBlockRulesInConfigJSON(rawJSON string, oldBlocks, newBlocks []config.Bl
 		applyCustomDNSRules(root, newDNS)
 	}
 	if len(newRoute) > 0 {
-		applyCustomRouteRules(root, newRoute)
+		applyBlockRouteRules(root, newRoute)
 	}
 
 	data, err := json.Marshal(root)
@@ -783,6 +785,41 @@ func applyCustomDNSRules(root map[string]any, customDNS []map[string]any) {
 	}
 	newRules = append(newRules, existingRules[insertIdx:]...)
 	dnsMap["rules"] = newRules
+}
+
+// applyBlockRouteRules 将黑名单阻断规则挂载在 route.rules 最前面（紧随 sniff / hijack-dns / ip_is_private / clash_mode 之后，
+// 排在所有业务域名与 geosite-hok 等规则集之前），确保黑名单拥有最高拦截优先级。
+func applyBlockRouteRules(root map[string]any, blockRoute []map[string]any) {
+	routeMap, ok := root["route"].(map[string]any)
+	if !ok {
+		return
+	}
+	var existingRules []any
+	if r, ok := routeMap["rules"].([]any); ok {
+		existingRules = r
+	}
+
+	insertIdx := 0
+	for i, r := range existingRules {
+		rMap, ok := r.(map[string]any)
+		if !ok {
+			continue
+		}
+		act, _ := rMap["action"].(string)
+		_, hasPrivate := rMap["ip_is_private"]
+		_, hasClashMode := rMap["clash_mode"]
+		if act == "sniff" || act == "hijack-dns" || hasPrivate || hasClashMode {
+			insertIdx = i + 1
+		}
+	}
+
+	newRules := make([]any, 0, len(existingRules)+len(blockRoute))
+	newRules = append(newRules, existingRules[:insertIdx]...)
+	for _, r := range blockRoute {
+		newRules = append(newRules, r)
+	}
+	newRules = append(newRules, existingRules[insertIdx:]...)
+	routeMap["rules"] = newRules
 }
 
 func applyCustomRouteRules(root map[string]any, customRoute []map[string]any) {
