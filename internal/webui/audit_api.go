@@ -67,7 +67,7 @@ func (l *auditRateLimiter) allow(r *http.Request, maxPerMin int) bool {
 	return win.count <= maxPerMin
 }
 
-// handleAuditGet 返回局域网设备行为审计报告（支持 ?device=...&suspicious=1&ai=1）。
+// handleAuditGet 返回局域网设备行为审计报告（支持 ?device=...&suspicious=1&ai=1&format=csv|json）。
 func (s *Server) handleAuditGet(w http.ResponseWriter, r *http.Request) {
 	if !s.auditLimiter.allow(r, 60) {
 		writeJSONError(w, http.StatusTooManyRequests, "请求过于频繁或触发反爬虫保护，请稍后再试")
@@ -80,16 +80,43 @@ func (s *Server) handleAuditGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	q := r.URL.Query()
+	exportFormat := strings.ToLower(strings.TrimSpace(q.Get("format")))
+	limit := 100
+	if exportFormat == "csv" || exportFormat == "json" {
+		limit = 0 // 导出明细时不截断条数，返回全量流记录
+	}
+
 	opts := audit.CollectOptions{
 		DeviceFilter: strings.TrimSpace(q.Get("device")),
 		OnlySuspect:  q.Get("suspicious") == "1" || q.Get("suspicious") == "true",
-		EnableAI:     q.Get("ai") == "1" || q.Get("ai") == "true",
-		Limit:        100,
+		EnableAI:     q.Get("ai") == "1" || q.Get("ai") == "true" || exportFormat != "",
+		Limit:        limit,
 	}
 
 	collector := audit.NewCollector(cfg)
 	rep := collector.Collect(r.Context(), opts)
-	writeJSON(w, http.StatusOK, rep)
+
+	ts := time.Now().Format("20060102-150405")
+	switch exportFormat {
+	case "csv":
+		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+		w.Header().Set("Content-Disposition", `attachment; filename="singctl-audit-`+ts+`.csv"`)
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusOK)
+		_ = rep.WriteCSV(w)
+		return
+	case "json":
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Content-Disposition", `attachment; filename="singctl-audit-`+ts+`.json"`)
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusOK)
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(rep)
+		return
+	default:
+		writeJSON(w, http.StatusOK, rep)
+	}
 }
 
 type auditBlockRequest struct {

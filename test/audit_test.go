@@ -398,4 +398,24 @@ func TestWebUI_AuditEndpointsAndAntiScraper(t *testing.T) {
 	if err != nil || len(loadedCfg.CustomRules.Block) != 1 || loadedCfg.CustomRules.Block[0].Target != "bad-upload.example.com" {
 		t.Fatalf("expected block rule persisted to singctl.yaml, got %+v (err=%v)", loadedCfg, err)
 	}
+
+	// 3. 验证导出 CSV 接口返回纯正 UTF-8（绝对不带 UTF-8 BOM \xEF\xBB\xBF）
+	reqCSV, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/audit?format=csv", nil)
+	reqCSV.Header.Set("Authorization", "Bearer "+token)
+	respCSV, err := http.DefaultClient.Do(reqCSV)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var csvBuf bytes.Buffer
+	_, _ = csvBuf.ReadFrom(respCSV.Body)
+	respCSV.Body.Close()
+	if respCSV.StatusCode != http.StatusOK {
+		t.Fatalf("expected GET /api/audit?format=csv 200, got %d", respCSV.StatusCode)
+	}
+	if bytes.HasPrefix(csvBuf.Bytes(), []byte{0xEF, 0xBB, 0xBF}) {
+		t.Fatalf("expected pure UTF-8 CSV without BOM, but found UTF-8 BOM prefix")
+	}
+	if !strings.HasPrefix(csvBuf.String(), "first_seen,last_seen,device_name,device_ip") {
+		t.Fatalf("unexpected CSV header: %s", csvBuf.String())
+	}
 }

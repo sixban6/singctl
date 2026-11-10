@@ -21,6 +21,7 @@ func newAuditCmd(defaultConfigPath string) *cobra.Command {
 	var enableAI bool
 	var limit int
 	var jsonOut bool
+	var csvOut bool
 
 	cmd := &cobra.Command{
 		Use:     "audit",
@@ -31,13 +32,20 @@ func newAuditCmd(defaultConfigPath string) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg := loadCmdConfigOrDefault(cmd, defaultConfigPath)
 			collector := audit.NewCollector(cfg)
+			effLimit := limit
+			if (jsonOut || csvOut) && !cmd.Flags().Changed("limit") {
+				effLimit = 0
+			}
 			rep := collector.Collect(cmd.Context(), audit.CollectOptions{
 				DeviceFilter: deviceFilter,
 				OnlySuspect:  onlySuspect,
 				EnableAI:     enableAI,
-				Limit:        limit,
+				Limit:        effLimit,
 			})
 
+			if csvOut {
+				return rep.WriteCSV(os.Stdout)
+			}
 			if jsonOut {
 				enc := json.NewEncoder(os.Stdout)
 				enc.SetIndent("", "  ")
@@ -53,7 +61,8 @@ func newAuditCmd(defaultConfigPath string) *cobra.Command {
 	cmd.Flags().BoolVarP(&onlySuspect, "suspicious", "s", false, "仅显示关注/可疑/高危上传记录")
 	cmd.Flags().BoolVar(&enableAI, "ai", false, "启用 L2 AI/专家顾问研判每个可疑目标的用途与拉黑影响")
 	cmd.Flags().IntVarP(&limit, "limit", "n", 30, "最多显示的流量记录条数")
-	cmd.Flags().BoolVar(&jsonOut, "json", false, "以 JSON 格式输出完整审计报告")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "以纯 UTF-8 (无 BOM) JSON 格式输出完整审计报告")
+	cmd.Flags().BoolVar(&csvOut, "csv", false, "以纯 UTF-8 (无 BOM) CSV 格式输出完整审计明细")
 	return cmd
 }
 

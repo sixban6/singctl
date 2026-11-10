@@ -463,6 +463,8 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; ba
           <input type="text" id="audit-device-filter" placeholder="过滤设备名或内网IP…" style="padding:6px 10px;border-radius:9px;border:1px solid var(--border);background:var(--input-bg);color:var(--text);font-size:12.5px;width:160px;">
           <label class="btn btn-sm" style="cursor:pointer;"><input type="checkbox" id="audit-only-suspect" style="accent-color:var(--accent);"> 仅看可疑/关注</label>
           <button class="btn btn-sm" id="btn-audit-ai">🤖 AI 深度研判</button>
+          <button class="btn btn-sm" id="btn-audit-export-csv" title="导出纯 UTF-8 (无 BOM) CSV 明细表">📥 导出 CSV</button>
+          <button class="btn btn-sm" id="btn-audit-export-json" title="导出纯 UTF-8 (无 BOM) JSON 完整报告">📥 导出 JSON</button>
           <button class="btn btn-sm btn-primary" id="btn-audit-refresh">立即采样刷新</button>
           <label class="btn btn-sm" style="cursor:pointer;"><input type="checkbox" id="audit-auto" checked style="accent-color:var(--accent);"> 自动刷新 (5秒)</label>
         </div>
@@ -1479,8 +1481,44 @@ window.unblockAuditTarget = async function(target, sourceIp) {
   }
 };
 
+async function exportAuditData(format) {
+  const dev = ($("#audit-device-filter").value || "").trim();
+  const susp = $("#audit-only-suspect").checked ? "1" : "";
+  const qs = new URLSearchParams();
+  if (dev) qs.set("device", dev);
+  if (susp) qs.set("suspicious", "1");
+  qs.set("ai", "1");
+  qs.set("format", format);
+
+  try {
+    const headers = {};
+    const savedToken = localStorage.getItem("sc_token");
+    if (savedToken) headers["Authorization"] = "Bearer " + savedToken;
+    const r = await fetch("/api/audit?" + qs.toString(), { headers });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    // 直接使用后端生成的纯正 UTF-8 文本流（不含任何 BOM 字节）
+    const text = await r.text();
+    const mime = format === "csv" ? "text/csv;charset=utf-8" : "application/json;charset=utf-8";
+    const blob = new Blob([text], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `singctl-audit-${ts}.${format}`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 3000);
+    toast("ok", `已导出纯 UTF-8 (无 BOM) ${format.toUpperCase()} 明细`);
+  } catch (e) {
+    toast("err", "导出失败: " + e.message);
+  }
+}
+
 $("#btn-audit-refresh").onclick = () => loadAudit(false);
 $("#btn-audit-ai").onclick = () => { toast("info", "正在调用 L2 审计顾问分析可疑上传影响…", 2200); loadAudit(true); };
+$("#btn-audit-export-csv").onclick = () => exportAuditData("csv");
+$("#btn-audit-export-json").onclick = () => exportAuditData("json");
 $("#audit-only-suspect").onchange = () => loadAudit(false);
 $("#audit-device-filter").oninput = debounce(() => loadAudit(false), 350);
 $("#audit-auto").onchange = () => { if ($("#audit-auto").checked) loadAudit(false, true); };

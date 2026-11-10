@@ -1,6 +1,12 @@
 package audit
 
 import (
+	"encoding/csv"
+	"fmt"
+	"io"
+	"strconv"
+	"strings"
+
 	"singctl/internal/config"
 )
 
@@ -162,4 +168,87 @@ type BlockActionResult struct {
 	DNSMode           string `json:"dnsMode,omitempty"`
 	KilledConnections int    `json:"killedConnections"`
 	Message           string `json:"message"`
+}
+
+// WriteCSV 将审计明细流导出为纯正 UTF-8（不带 BOM）的 CSV 格式。
+func (r *Report) WriteCSV(w io.Writer) error {
+	cw := csv.NewWriter(w)
+	header := []string{
+		"first_seen",
+		"last_seen",
+		"device_name",
+		"device_ip",
+		"device_mac",
+		"device_role",
+		"target",
+		"dest_ip",
+		"dest_port",
+		"is_direct_ip",
+		"network",
+		"outbound",
+		"upload_bytes",
+		"download_bytes",
+		"upload_ratio",
+		"conn_count",
+		"active_conns",
+		"interval_cv",
+		"domain_entropy",
+		"risk_score",
+		"threat_level",
+		"threat_label",
+		"state",
+		"reasons",
+		"ai_verdict",
+		"ai_category",
+		"ai_impact",
+	}
+	if err := cw.Write(header); err != nil {
+		return err
+	}
+	if r == nil {
+		cw.Flush()
+		return cw.Error()
+	}
+	for _, f := range r.Flows {
+		aiVerdict, aiCategory, aiImpact := "", "", ""
+		if f.AIReview != nil {
+			aiVerdict = f.AIReview.VerdictText
+			aiCategory = f.AIReview.Category
+			aiImpact = f.AIReview.Impact
+		}
+		row := []string{
+			f.FirstSeen,
+			f.LastSeen,
+			f.DeviceName,
+			f.DeviceIP,
+			f.DeviceMAC,
+			f.DeviceRole,
+			f.Target,
+			f.DestIP,
+			strconv.Itoa(f.DestPort),
+			strconv.FormatBool(f.IsDirectIP),
+			f.Network,
+			f.Outbound,
+			strconv.FormatInt(f.UploadBytes, 10),
+			strconv.FormatInt(f.DownloadBytes, 10),
+			fmt.Sprintf("%.2f", f.UploadRatio),
+			strconv.Itoa(f.ConnCount),
+			strconv.Itoa(f.ActiveConns),
+			fmt.Sprintf("%.4f", f.IntervalCV),
+			fmt.Sprintf("%.4f", f.DomainEntropy),
+			strconv.Itoa(f.RiskScore),
+			string(f.Threat),
+			f.ThreatLabel,
+			string(f.State),
+			strings.Join(f.Reasons, "; "),
+			aiVerdict,
+			aiCategory,
+			aiImpact,
+		}
+		if err := cw.Write(row); err != nil {
+			return err
+		}
+	}
+	cw.Flush()
+	return cw.Error()
 }
