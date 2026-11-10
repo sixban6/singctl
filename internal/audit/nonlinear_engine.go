@@ -31,7 +31,8 @@ type NonlinearEngine struct {
 	blockedKeys    map[string]struct{}
 }
 
-// defaultTrustedDomains 内置常见正常高上传办公/云同步/代码托管白名单域名（触发信任阻尼衰减，防止误报）。
+// defaultTrustedDomains 内置常见正常高上传办公/云同步/代码托管与底层网络加密握手/DoH/连通性探测白名单域名（触发信任阻尼衰减，防止误报）。
+// 注意：严禁将 akamai.net / fastly.net / cloudfront.net 等通用商业 CDN 放入此列表，防止挂靠其上的第三方追踪器被洗白。
 var defaultTrustedDomains = []string{
 	"github.com",
 	"githubusercontent.com",
@@ -39,15 +40,27 @@ var defaultTrustedDomains = []string{
 	"icloud.com",
 	"icloud-content.com",
 	"apple.com",
+	"apple-dns.net",
+	"captive.apple.com",
 	"mzstatic.com",
 	"onedrive.live.com",
 	"sharepoint.com",
 	"dropbox.com",
 	"drive.google.com",
 	"googleapis.com",
+	"connectivitycheck.gstatic.com",
+	"msftconnecttest.com",
+	"msftncsi.com",
 	"tailscale.com",
 	"tailscale.io",
 	"cloudflare.com",
+	"cloudflare-ech.com",
+	"cloudflare-dns.com",
+	"one.one.one.one",
+	"dns.google",
+	"dns.alidns.com",
+	"doh.pub",
+	"dot.pub",
 }
 
 // suspiciousKeywords 遥测、广告回传、PCDN 与远控信标常见子域名特征词。
@@ -514,18 +527,26 @@ func evaluatePrivacyAxisExtras(f *FlowRecord) (float64, []string) {
 	var score float64
 	var reasons []string
 
+	hasSuspiciousKW := matchesAnyKeyword(f.Target, suspiciousKeywords)
+	// 下行显著大于上行（下载超过上传 2 倍且平滑比值 < 0.6）且未命中任何遥测/PCDN 词根时，属于正常网页浏览/流媒体/下载
+	isDownloadDominantBrowsing := !hasSuspiciousKW && !f.IsDirectIP &&
+		f.DownloadBytes > f.UploadBytes*2 && f.UploadRatio < 0.6
+
 	// 1. 睡眠时段作息窥探算子 (凌晨 01:00-05:30 无人操作时段的后台活跃上传)
-	if f.NightHits > 0 && f.UploadBytes >= 2048 {
-		nightScore := 16.0 + 4.5*math.Log1p(float64(f.NightHits))
-		if f.DeviceRole == "iot" {
-			nightScore *= 1.35
+	if f.NightHits > 0 && f.UploadBytes >= 2048 && !isDownloadDominantBrowsing {
+		isPeriodic := f.IntervalCV > 0 && f.IntervalCV < 0.30
+		if f.DeviceRole == "iot" || hasSuspiciousKW || f.UploadRatio >= 0.8 || isPeriodic {
+			nightScore := 16.0 + 4.5*math.Log1p(float64(f.NightHits))
+			if f.DeviceRole == "iot" {
+				nightScore *= 1.35
+			}
+			score += math.Min(28.0, nightScore)
+			reasons = append(reasons, "凌晨熄屏时段后台静默上传 (作息窥探风险)")
 		}
-		score += math.Min(28.0, nightScore)
-		reasons = append(reasons, "凌晨熄屏时段后台静默上传 (作息窥探风险)")
 	}
 
 	// 2. 小包高频画像打点算子 (单次流量虽小，但建连频繁或周期固定)
-	if f.ConnCount >= 8 && f.UploadBytes >= 1024 && f.UploadBytes < 512*1024 {
+	if f.ConnCount >= 8 && f.UploadBytes >= 1024 && f.UploadBytes < 512*1024 && !isDownloadDominantBrowsing {
 		freqScore := math.Min(18.0, 4.2*math.Log1p(float64(f.ConnCount)/5.0))
 		score += freqScore
 		reasons = append(reasons, "高频碎包持续回传 ("+strconv.Itoa(f.ConnCount)+"次连接)")

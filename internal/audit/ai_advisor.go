@@ -20,7 +20,8 @@ import (
 
 const (
 	defaultMagpieLoopbackEndpoint = "http://127.0.0.1:3425/v1/chat/completions"
-	defaultAICachePath            = "/tmp/singctl-audit-ai-cache.json"
+	legacyAICachePath             = "/tmp/singctl-audit-ai-cache.json"
+	defaultAICachePath            = "/tmp/singctl-audit-ai-cache-v2.json"
 	maxCachedAITargets            = 600
 )
 
@@ -55,6 +56,7 @@ func normalizeTargetKey(target string) string {
 
 func ensureAICacheLoaded() {
 	aiTargetCacheOnce.Do(func() {
+		_ = os.Remove(legacyAICachePath)
 		aiTargetCacheMu.RLock()
 		path := aiTargetCachePath
 		aiTargetCacheMu.RUnlock()
@@ -229,6 +231,10 @@ func (a *Advisor) ReviewSuspiciousFlows(ctx context.Context, flows []FlowRecord,
 
 	var uncachedIdx []int
 	for _, idx := range candidatesIdx {
+		if sc := shortCircuitTrustedReview(&flows[idx]); sc != nil {
+			flows[idx].AIReview = sc
+			continue
+		}
 		if cached := LookupCachedAIReview(flows[idx].Target); cached != nil {
 			flows[idx].AIReview = cached
 			continue
@@ -289,6 +295,10 @@ func (a *Advisor) ReviewFlowBatch(ctx context.Context, flows []FlowRecord, calle
 	for i := range flows {
 		if flows[i].Key == "" {
 			flows[i].Key = fmt.Sprintf("%s|%s|%s", flows[i].DeviceIP, flows[i].Target, flows[i].Network)
+		}
+		if sc := shortCircuitTrustedReview(&flows[i]); sc != nil {
+			out[flows[i].Key] = sc
+			continue
 		}
 		if !force {
 			if cached := LookupCachedAIReview(flows[i].Target); cached != nil {
@@ -421,7 +431,11 @@ func (a *Advisor) queryRemoteLLM(ctx context.Context, endpoint string, flows []F
 	}
 
 	payloadJSON, _ := json.Marshal(digests)
-	sysPrompt := `你是一名资深的家庭网关网络安全审计专家。请分析以下已脱敏的局域网设备上传流量摘要，判断每个目标的真实用途，并重点评估“在路由器 DNS 和 sing-box 中拉黑它是否会导致设备正常功能受损”。
+	sysPrompt := `你是一名资深的家庭网关网络安全审计专家。请分析以下已脱敏的局域网设备流量摘要，判断每个目标的真实用途并给出处置建议。
+你必须严格遵守以下 verdict 判定铁律：
+1. "safe_to_block"（可安全拉黑）：【仅限】明确属于「广告追踪、隐私遥测/埋点日志、商业 PCDN 偷跑、恶意远控/扫描」的不良连接，且拉黑后不影响设备与 App 核心功能。
+2. "do_not_block"（建议放行）：凡属正常网络基础设施、TLS ECH 加密握手（如 cloudflare-ech.com）、公共 DNS/DoH、CDN 静态资源、系统更新、即时通讯或正常网页/业务通信，【即使拉黑后存在协议降级机制，也必须一律返回 "do_not_block"（recommend: "keep"）】！严禁将正当协议或正常网站标为 safe_to_block。
+3. "caution"（谨慎拉黑）：疑似异常上传（如未知裸 IP 大流量上行），但可能与正常业务混用，建议按单设备观察。
 严格只输出 JSON 数组，不要输出 Markdown 代码块以外的解释，格式为:
 [{"id":"原样返回输入中的id", "category":"归属与用途简述(15字内)", "verdict":"safe_to_block|caution|do_not_block", "impact":"拉黑后的影响说明(25字内)", "recommend":"block_global|block_device|keep"}]`
 
@@ -567,8 +581,29 @@ func shortModelLabel(m string) string {
 	return m
 }
 
+// shortCircuitTrustedReview 对已命中可信白名单基线或核心底层加密握手/DoH 基础设施域名的流直接返回确定性的“建议放行”，避免浪费远程大模型 Token 或产生幻觉误报。
+func shortCircuitTrustedReview(f *FlowRecord) *AIReviewResult {
+	if f == nil {
+		return nil
+	}
+	if f.State == EnforcementWhitelisted || IsProtectedBootstrapDomain(f.Target) {
+		return &AIReviewResult{
+			Source:      "builtin_expert",
+			Category:    "核心网络协议 / 可信基础服务",
+			Verdict:     AIDoNotBlock,
+			VerdictText: AIDoNotBlock.Label(),
+			Impact:      "属于正常的底层加密握手或可信基础服务，拉黑会导致网页无法访问或隐私保护降级",
+			Recommend:   "keep",
+		}
+	}
+	return nil
+}
+
 // evaluateBuiltinExpert 内置离线专家决策树：无需外网 API Key 即可对常见遥测、PCDN、直连偷跑给出秒级研判与防误杀评估。
 func evaluateBuiltinExpert(f *FlowRecord) *AIReviewResult {
+	if sc := shortCircuitTrustedReview(f); sc != nil {
+		return sc
+	}
 	lower := strings.ToLower(f.Target)
 
 	// 1. PCDN / 商业边缘节点偷跑特征

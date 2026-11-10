@@ -48,6 +48,7 @@ config.json
 # Temporary files
 tmp/
 temp/
+bugfix/
 
 # Sensitive configuration & SSH keys
 ssh-init.yaml

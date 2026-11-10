@@ -1438,7 +1438,9 @@ function fmtBytes(b) {
 
 const auditAICache = new Map();
 const auditPendingTargets = new Set();
-const AUDIT_AI_STORAGE_KEY = "sc_audit_ai_cache_v1";
+const LEGACY_AUDIT_AI_STORAGE_KEY = "sc_audit_ai_cache_v1";
+const AUDIT_AI_STORAGE_KEY = "sc_audit_ai_cache_v2";
+try { localStorage.removeItem(LEGACY_AUDIT_AI_STORAGE_KEY); } catch {}
 let suggestedMagpieLanURL = "http://127.0.0.1:3425/v1";
 let auditAILoading = false;
 let auditAINeedsReschedule = false;
@@ -1522,16 +1524,15 @@ function buildAppPillHTML(f) {
 
 // 判断是否触发“程序诊断 + AI 诊断”双重高危共振告警
 function isDualAlertRow(f) {
-  if (!f || f.state === "blocked") return false;
-  const progBad = (f.riskScore || 0) >= 35 ||
+  if (!f || f.state === "blocked" || f.state === "whitelisted") return false;
+  const aiRev = getCachedAIReview(f);
+  if (!aiRev || aiRev.verdict !== "safe_to_block") return false;
+  const progBad = (f.riskScore || 0) >= 45 ||
                   f.threat === "high_risk" ||
                   f.threat === "suspicious" ||
-                  (f.securityScore || 0) >= 25 ||
-                  (f.privacyScore || 0) >= 25;
-  if (!progBad) return false;
-  const aiRev = getCachedAIReview(f);
-  if (!aiRev) return false;
-  return aiRev.verdict === "safe_to_block" || (aiRev.verdict === "caution" && (f.riskScore || 0) >= 60);
+                  (f.securityScore || 0) >= 40 ||
+                  (f.privacyScore || 0) >= 40;
+  return progBad;
 }
 
 function buildDualAlertBadgeHTML(f) {

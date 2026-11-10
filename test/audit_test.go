@@ -495,3 +495,80 @@ func TestSortFlows(t *testing.T) {
 		t.Fatalf("risk desc failed: %+v", flows)
 	}
 }
+
+func TestAuditCloudflareECHAndNightBrowsingNoFalsePositive(t *testing.T) {
+	cfg := &config.Config{}
+	eng := audit.NewNonlinearEngine(cfg)
+
+	// 1. 验证 cloudflare-ech.com 在凌晨高频连接时命中可信白名单，不会误报为高危，且 AI 直接短路为 AIDoNotBlock
+	echFlow := audit.FlowRecord{
+		Key:           "192.168.1.50|cloudflare-ech.com|udp",
+		DeviceIP:      "192.168.1.50",
+		DeviceName:    "MacBook-Pro",
+		Target:        "cloudflare-ech.com",
+		DestPort:      443,
+		Network:       "udp",
+		UploadBytes:   45 * 1024,
+		DownloadBytes: 1500 * 1024,
+		ConnCount:     30,
+		NightHits:     12,
+	}
+	eng.EvaluateFlow(&echFlow)
+	if echFlow.State != audit.EnforcementWhitelisted {
+		t.Fatalf("expected cloudflare-ech.com to be whitelisted, got state=%s", echFlow.State)
+	}
+	if echFlow.Threat != audit.ThreatNormal || echFlow.RiskScore >= 15 {
+		t.Fatalf("expected cloudflare-ech.com normal threat (<15), got threat=%s score=%d", echFlow.Threat, echFlow.RiskScore)
+	}
+
+	adv := audit.NewAdvisor(config.AuditAIConfig{})
+	batchRes, _ := adv.ReviewFlowBatch(t.Context(), []audit.FlowRecord{echFlow}, "127.0.0.1")
+	if rev := batchRes[echFlow.Key]; rev == nil || rev.Verdict != audit.AIDoNotBlock {
+		t.Fatalf("expected cloudflare-ech.com AI review short-circuited to do_not_block, got %+v", rev)
+	}
+
+	if _, _, err := audit.ValidateTargetSafety(cfg, "cloudflare-ech.com"); err == nil {
+		t.Fatalf("expected ValidateTargetSafety to reject blocking cloudflare-ech.com")
+	}
+
+	// 2. 验证普通未知网站在凌晨正常下行浏览（下载远大于上传）不触发“凌晨熄屏静默上传”或“高频碎包持续回传”误报
+	browsingFlow := audit.FlowRecord{
+		Key:           "192.168.1.50|news.example.com|tcp",
+		DeviceIP:      "192.168.1.50",
+		DeviceName:    "iPhone",
+		Target:        "news.example.com",
+		DestPort:      443,
+		Network:       "tcp",
+		UploadBytes:   40 * 1024,
+		DownloadBytes: 1800 * 1024,
+		ConnCount:     15,
+		NightHits:     8,
+	}
+	eng.EvaluateFlow(&browsingFlow)
+	if browsingFlow.Threat != audit.ThreatNormal || browsingFlow.RiskScore >= 35 {
+		t.Fatalf("expected normal night browsing to stay normal (<35), got threat=%s score=%d reasons=%v",
+			browsingFlow.Threat, browsingFlow.RiskScore, browsingFlow.Reasons)
+	}
+
+	// 3. 验证真实小包隐私遥测域名依然正常检出并被判定为 AISafeToBlock
+	telemetryFlow := audit.FlowRecord{
+		Key:           "192.168.1.60|wetelemetry.example.com|tcp",
+		DeviceIP:      "192.168.1.60",
+		DeviceName:    "Xiaomi-TV",
+		Target:        "wetelemetry.example.com",
+		DestPort:      443,
+		Network:       "tcp",
+		UploadBytes:   18 * 1024,
+		DownloadBytes: 2 * 1024,
+		ConnCount:     12,
+		NightHits:     5,
+	}
+	eng.EvaluateFlow(&telemetryFlow)
+	if telemetryFlow.PrivacyScore == 0 {
+		t.Fatalf("expected telemetryFlow to have non-zero PrivacyScore")
+	}
+	telBatch, _ := adv.ReviewFlowBatch(t.Context(), []audit.FlowRecord{telemetryFlow}, "127.0.0.1")
+	if rev := telBatch[telemetryFlow.Key]; rev == nil || rev.Verdict != audit.AISafeToBlock {
+		t.Fatalf("expected wetelemetry.example.com AI review to be safe_to_block, got %+v", rev)
+	}
+}

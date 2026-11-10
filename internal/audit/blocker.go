@@ -30,6 +30,32 @@ var ProtectedBootstrapIPs = []string{
 	"1.1.1.1", "8.8.8.8",
 }
 
+// ProtectedBootstrapDomains 禁止被误拉黑的核心加密握手 (TLS ECH) 与公共 DoH 基础设施域名（防断网与降级攻击）。
+var ProtectedBootstrapDomains = []string{
+	"cloudflare-ech.com",
+	"cloudflare-dns.com",
+	"one.one.one.one",
+	"dns.google",
+	"dns.alidns.com",
+	"doh.pub",
+	"dot.pub",
+}
+
+// IsProtectedBootstrapDomain 判断目标域名是否属于核心加密握手或公共 DNS 基础设施域名。
+func IsProtectedBootstrapDomain(raw string) bool {
+	d := strings.ToLower(strings.TrimSpace(raw))
+	d = strings.TrimSuffix(d, ".")
+	if d == "" {
+		return false
+	}
+	for _, p := range ProtectedBootstrapDomains {
+		if d == p || strings.HasSuffix(d, "."+p) {
+			return true
+		}
+	}
+	return false
+}
+
 // Enforcer 负责执行“Sing-Box 路由阻断 + 自建 AdGuard Home DNS 黑名单 + 存量活跃连接秒级掐断”三位一体联动封禁。
 type Enforcer struct {
 	cfg            *config.Config
@@ -100,6 +126,8 @@ func ValidateTargetSafety(cfg *config.Config, rawTarget string) (normalized stri
 		if lanIP := netinfo.GetPrimaryLANIPv4(); lanIP != "" && plain == lanIP {
 			return "", false, fmt.Errorf("安全拦截: 禁止拉黑本机局域网网关 IP (%s)", plain)
 		}
+	} else if IsProtectedBootstrapDomain(plain) {
+		return "", false, fmt.Errorf("安全拦截: 禁止拉黑核心加密握手/公共 DNS 基础设施域名 (%s)，防止连接中断或隐私降级", plain)
 	}
 
 	// 检查是否误伤用户自身的订阅域名或自建节点域名
