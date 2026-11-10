@@ -1,5 +1,3 @@
-//go:build !lite
-
 // Package ruleset_snapshot 提供编译期内置的规则集兜底快照。
 package ruleset_snapshot
 

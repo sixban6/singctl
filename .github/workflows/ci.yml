@@ -53,9 +53,8 @@ jobs:
       - name: Integration Smoke Tests
         run: go test -short ./test/...
 
-      - name: Cross-Platform & Lite Build Smoke Check
+      - name: Cross-Platform Build Smoke Check
         run: |
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o /tmp/singctl-linux ./cmd/singctl
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -tags lite -o /tmp/singctl-lite ./cmd/singctl
           CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -o /tmp/singctl-darwin ./cmd/singctl
           CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -o /tmp/singctl.exe ./cmd/singctl

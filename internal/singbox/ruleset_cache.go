@@ -100,7 +100,7 @@ type RuleSetStats struct {
 }
 
 func (s RuleSetStats) HasLocalChange() bool {
-	return s.Localized > 0 || s.Fallback > 0 || s.Snapshot > 0
+	return s.Localized > 0 || s.Fallback > 0 || s.Snapshot > 0 || s.Kept > 0
 }
 
 // ruleSetManifest 缓存清单：tag → 原始条目信息，用于刷新与还原
@@ -138,8 +138,12 @@ func LocalizeRuleSets(jsonStr string, opts LocalizeOptions) (string, RuleSetStat
 	}
 	arr, _ := route["rule_set"].([]any)
 
-	// 1. 收集 remote 任务
+	manifest := loadManifest(opts.CacheDir)
+	snap := rssnapshot.Load()
+
+	// 1. 收集 remote 任务，并自检已是 type: local 但磁盘文件缺失/损坏的规则集条目
 	var tasks []ruleSetTask
+	repairedLocalOnDisk := false
 	for i, raw := range arr {
 		entry, ok := raw.(map[string]any)
 		if !ok {
@@ -148,17 +152,73 @@ func LocalizeRuleSets(jsonStr string, opts LocalizeOptions) (string, RuleSetStat
 		typ, _ := entry["type"].(string)
 		url, _ := entry["url"].(string)
 		tag, _ := entry["tag"].(string)
-		if typ != "remote" || url == "" || tag == "" {
+		if tag == "" {
 			continue
 		}
 		format, _ := entry["format"].(string)
 		if format == "" {
 			format = "binary"
 		}
+
+		if typ == "local" {
+			path, _ := entry["path"].(string)
+			if path == "" {
+				path = cacheFilePath(opts.CacheDir, tag, format)
+			}
+			if cachedFileValid(path, format) {
+				continue
+			}
+			// 磁盘文件缺失或损坏：1) 优先从内置离线快照毫秒级恢复
+			meta := manifest[tag]
+			if snapTag, _, snapFormat, ok := snap.Lookup(tag, meta.URL); ok && snapFormat == format {
+				if data, err := snap.Extract(snapTag); err == nil &&
+					validateRuleSet(data, snapFormat) == nil {
+					_ = os.MkdirAll(filepath.Dir(path), 0755)
+					if atomicWriteFile(path, data, 0644) == nil {
+						stats.Snapshot++
+						repairedLocalOnDisk = true
+						entry["path"] = path
+						if !opts.Silent {
+							log.Info("📦 检测到本地规则集文件缺失 (%s)，已从内置离线快照自动恢复: %s", tag, path)
+						}
+						continue
+					}
+				}
+			}
+			// 2) 若不在内置快照中，根据 manifest 记录的原始 URL 自动加入重新下载队列
+			dlURL := meta.URL
+			if dlURL == "" && meta.Original != nil {
+				dlURL, _ = meta.Original["url"].(string)
+			}
+			if dlURL != "" {
+				if !opts.Silent {
+					log.Warn("⚠️ 检测到本地规则集文件缺失 (%s)，正在尝试从远程重新下载恢复...", tag)
+				}
+				tasks = append(tasks, ruleSetTask{
+					idx:             i,
+					tag:             tag,
+					url:             dlURL,
+					format:          format,
+					entry:           entry,
+					wasMissingLocal: true,
+				})
+			}
+			continue
+		}
+
+		if typ != "remote" || url == "" {
+			continue
+		}
 		stats.Remote++
 		tasks = append(tasks, ruleSetTask{idx: i, tag: tag, url: url, format: format, entry: entry})
 	}
 	if len(tasks) == 0 {
+		if repairedLocalOnDisk {
+			out, err := json.Marshal(cfg)
+			if err == nil {
+				return string(out), stats, nil
+			}
+		}
 		return jsonStr, stats, nil
 	}
 
@@ -166,21 +226,18 @@ func LocalizeRuleSets(jsonStr string, opts LocalizeOptions) (string, RuleSetStat
 		return jsonStr, stats, fmt.Errorf("ruleset localize: create cache dir failed: %w", err)
 	}
 
-	manifest := loadManifest(opts.CacheDir)
 	for _, t := range tasks {
 		// 无论成败都预先记录 manifest 元信息，供下载期间增量落盘及 sb cache update/clear 使用
 		meta := manifest[t.tag]
 		meta.URL = t.url
 		meta.Format = t.format
-		if meta.Original == nil {
+		if meta.Original == nil && !t.wasMissingLocal {
 			// 必须深拷贝：t.entry 后续会被 localizeEntry 原地改写，
 			// 直接存引用会把改写后的 local 条目写入 manifest，导致无法还原
 			meta.Original = copyRuleSetEntry(t.entry)
 		}
 		manifest[t.tag] = meta
 	}
-
-	snap := rssnapshot.Load()
 
 	// OfflineFirst 模式（用于 sb gen / sb start）：
 	// 优先直接复用本地已有 .srs 缓存或解压程序内置快照，完全不发起网络请求，做到毫秒级生成；
@@ -218,7 +275,11 @@ func LocalizeRuleSets(jsonStr string, opts LocalizeOptions) (string, RuleSetStat
 					continue
 				}
 				stats.Kept++
-				sanitizeKeptRemoteEntry(t.entry)
+				if t.wasMissingLocal {
+					revertMissingLocalToRemote(t.entry, t.url, t.format)
+				} else {
+					sanitizeKeptRemoteEntry(t.entry)
+				}
 				if !opts.Silent && !results[t.idx].aborted {
 					log.Warn("⚠️ 自定义规则集 %q 下载失败且无内置快照(%v)，保留远程引用", t.tag, results[t.idx].err)
 				}
@@ -274,7 +335,11 @@ func LocalizeRuleSets(jsonStr string, opts LocalizeOptions) (string, RuleSetStat
 			}
 		}
 		stats.Kept++
-		sanitizeKeptRemoteEntry(t.entry)
+		if t.wasMissingLocal {
+			revertMissingLocalToRemote(t.entry, t.url, t.format)
+		} else {
+			sanitizeKeptRemoteEntry(t.entry)
+		}
 		if !opts.Silent && !results[t.idx].aborted {
 			log.Warn("⚠️ 规则集 %q 下载失败且无任何兑底(%v)，保留远程引用", t.tag, results[t.idx].err)
 		}
@@ -586,11 +651,12 @@ type fetchOutcome struct {
 
 // ruleSetTask 单个规则集下载任务；entry 仅在需要改写配置的场景使用（刷新场景可为 nil）。
 type ruleSetTask struct {
-	idx    int
-	tag    string
-	url    string
-	format string
-	entry  map[string]any
+	idx             int
+	tag             string
+	url             string
+	format          string
+	entry           map[string]any
+	wasMissingLocal bool
 }
 
 func (t ruleSetTask) fields() (int, string, string, string) {
@@ -978,6 +1044,48 @@ func sanitizeKeptRemoteEntry(entry map[string]any) {
 	if detour, _ := entry["download_detour"].(string); strings.EqualFold(detour, "direct") || strings.EqualFold(detour, "DirectConn") {
 		delete(entry, "download_detour")
 	}
+}
+
+// revertMissingLocalToRemote 当 type=local 的规则集磁盘文件缺失且重下失败时，
+// 将其回退为合法的 type=remote 条目（不含空 direct detour），防止 sing-box 启动因找不到本地文件而崩溃。
+func revertMissingLocalToRemote(entry map[string]any, url, format string) {
+	delete(entry, "path")
+	delete(entry, "download_detour")
+	entry["type"] = "remote"
+	entry["url"] = url
+	if format != "" {
+		entry["format"] = format
+	}
+}
+
+// RecordRuleSetManifest 供外部模块（如审计黑名单导入规则集）登记规则集 URL 到 manifest.json，
+// 以便后续本地 .srs 文件缺失或执行 cache update 时能够自动重下恢复。
+func RecordRuleSetManifest(cacheDir, tag, url, format string) {
+	if tag == "" || url == "" {
+		return
+	}
+	if cacheDir == "" {
+		cacheDir = RuleSetCacheDir()
+	}
+	if format == "" {
+		format = "binary"
+	}
+	_ = os.MkdirAll(cacheDir, 0755)
+	manifest := loadManifest(cacheDir)
+	meta := manifest[tag]
+	meta.URL = url
+	meta.Format = format
+	meta.UpdatedAt = time.Now().Format(time.RFC3339)
+	if meta.Original == nil {
+		meta.Original = map[string]any{
+			"tag":    tag,
+			"type":   "remote",
+			"format": format,
+			"url":    url,
+		}
+	}
+	manifest[tag] = meta
+	_ = saveManifest(cacheDir, manifest)
 }
 
 // replaceMapEntry 用原始条目内容完整覆盖现有 map（原地替换，保持引用）。

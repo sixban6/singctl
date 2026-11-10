@@ -17,7 +17,7 @@ NC='\033[0m' # No Color
 
 # 配置变量
 GITHUB_REPO="sixban6/singctl"
-# OpenWrt 使用 /usr/bin 及 -lite 轻量包，其他系统使用 /usr/local/bin
+# OpenWrt 使用 /usr/bin，其他系统使用 /usr/local/bin
 IS_OPENWRT="false"
 if [ -f "/etc/openwrt_release" ] || [ -f "/etc/openwrt_version" ]; then
     IS_OPENWRT="true"
@@ -198,12 +198,9 @@ get_latest_version() {
     echo_success "最新版本: $LATEST_VERSION"
 }
 
-# 构建下载URL（直连 GitHub 优先，不可达时自动回退多镜像；OpenWrt 自动优先选用 -lite 轻量包）
+# 构建下载URL（直连 GitHub 优先，不可达时自动回退多镜像；全平台内置离线规则集快照）
 build_download_url() {
     PACKAGE_FILENAME="singctl-${OS}-${ARCH}.tar.gz"
-    if [ "$IS_OPENWRT" = "true" ] && [ "$OS" = "linux" ] && { [ "$ARCH" = "amd64" ] || [ "$ARCH" = "arm64" ]; }; then
-        PACKAGE_FILENAME="singctl-${OS}-${ARCH}-lite.tar.gz"
-    fi
     DIRECT_URL="https://github.com/$GITHUB_REPO/releases/download/$LATEST_VERSION/$PACKAGE_FILENAME"
     MIRROR_URL_1="https://ghfast.top/$DIRECT_URL"
     MIRROR_URL_2="https://gh-proxy.com/$DIRECT_URL"

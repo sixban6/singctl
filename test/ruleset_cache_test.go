@@ -783,3 +783,48 @@ func TestLocalizeRuleSets_OfflineFirst_AndBackgroundRefresh(t *testing.T) {
 		t.Fatal("NeedsCacheRefresh should return false after fresh background update")
 	}
 }
+
+func TestLocalizeRuleSets_RepairMissingLocalFiles(t *testing.T) {
+	srv := serveRuleSet(t, http.StatusOK, validSRS("repaired-custom"))
+	cacheDir := t.TempDir()
+
+	// 登记一个自定义规则集到 manifest.json，但不创建磁盘 .srs 文件（模拟磁盘文件被误删）
+	singbox.RecordRuleSetManifest(cacheDir, "block-custom-test", srv.URL+"/custom.srs", "binary")
+
+	missingBuiltInPath := filepath.Join(cacheDir, "geosite-playstation.srs")
+	missingCustomPath := filepath.Join(cacheDir, "block-custom-test.srs")
+
+	in := buildConfig(t,
+		map[string]any{
+			"tag":    "geosite-playstation",
+			"type":   "local",
+			"format": "binary",
+			"path":   missingBuiltInPath,
+		},
+		map[string]any{
+			"tag":    "block-custom-test",
+			"type":   "local",
+			"format": "binary",
+			"path":   missingCustomPath,
+		},
+	)
+
+	opts := singbox.LocalizeOptions{
+		CacheDir:     cacheDir,
+		Client:       &http.Client{Timeout: 5 * time.Second},
+		OfflineFirst: true,
+	}
+	_, stats, err := singbox.LocalizeRuleSets(in, opts)
+	if err != nil {
+		t.Fatalf("LocalizeRuleSets repair: %v", err)
+	}
+	if stats.Snapshot != 1 || stats.Localized != 1 {
+		t.Fatalf("stats = %+v, want Snapshot=1 Localized=1", stats)
+	}
+	if fi, err := os.Stat(missingBuiltInPath); err != nil || fi.Size() == 0 {
+		t.Fatalf("expected built-in missing .srs restored from snapshot at %s, err=%v", missingBuiltInPath, err)
+	}
+	if fi, err := os.Stat(missingCustomPath); err != nil || fi.Size() == 0 {
+		t.Fatalf("expected custom missing .srs re-downloaded at %s, err=%v", missingCustomPath, err)
+	}
+}

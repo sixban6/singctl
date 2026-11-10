@@ -85,7 +85,7 @@ brew tap sixban6/singctl
 brew install sixban6/singctl/singctl
 ```
 
-**Linux / OpenWrt 软路由网关**（自动识别软路由/macOS 并默认置顶客户端模式，选用 `-lite` 轻量包与多镜像加速）
+**Linux / OpenWrt 软路由网关**（自动识别软路由/macOS 并默认置顶客户端模式，全量内嵌离线规则集快照与多镜像加速）
 ```bash
 # 海外或已有代理环境（官方直连）
 curl -fsSL https://raw.githubusercontent.com/sixban6/singctl/main/install.sh | sh

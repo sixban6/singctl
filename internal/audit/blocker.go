@@ -465,6 +465,9 @@ func (e *Enforcer) ImportAndBlockRuleSet(ctx context.Context, rawInput, customTa
 		_ = os.Remove(tmpDst)
 		return nil, fmt.Errorf("保存规则集文件失败: %w", err)
 	}
+	if sourceURL != "" && !isJSON {
+		singbox.RecordRuleSetManifest(ruleSetDir, tag, sourceURL, "binary")
+	}
 	if summaryBytes, err := json.Marshal(parsed); err == nil {
 		_ = os.WriteFile(blockedRuleSetSummaryPath(tag), summaryBytes, 0600)
 	}

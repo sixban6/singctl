@@ -148,21 +148,14 @@ jobs:
           GIT_COMMIT="$(git rev-parse --short HEAD)"
           LDFLAGS="-X main.Version=${VERSION} -X main.BuildTime=${BUILD_TIME} -X main.GitCommit=${GIT_COMMIT} -s -w"
 
-          mkdir -p dist/{linux-amd64,linux-arm64,linux-amd64-lite,linux-arm64-lite,darwin-arm64,darwin-amd64,windows-amd64,windows-arm64}
+          mkdir -p dist/{linux-amd64,linux-arm64,darwin-arm64,darwin-amd64,windows-amd64,windows-arm64}
 
-          # Linux Standard (with embedded rule snapshots)
+          # Linux / OpenWrt (with embedded rule snapshots)
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "${LDFLAGS}" -o dist/linux-amd64/singctl ./cmd/singctl
           upx --best --lzma dist/linux-amd64/singctl
 
           CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "${LDFLAGS}" -o dist/linux-arm64/singctl ./cmd/singctl
           upx --best --lzma dist/linux-arm64/singctl
-
-          # Linux Lite (OpenWrt / flash-constrained devices)
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -tags lite -ldflags "${LDFLAGS}" -o dist/linux-amd64-lite/singctl ./cmd/singctl
-          upx --best --lzma dist/linux-amd64-lite/singctl
-
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -tags lite -ldflags "${LDFLAGS}" -o dist/linux-arm64-lite/singctl ./cmd/singctl
-          upx --best --lzma dist/linux-arm64-lite/singctl
 
           # macOS (Apple Silicon & Intel — un-UPX'd for macOS Gatekeeper compatibility)
           CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "${LDFLAGS}" -o dist/darwin-arm64/singctl ./cmd/singctl
@@ -197,7 +190,7 @@ jobs:
           set -euo pipefail
           cd dist
 
-          for platform_dir in linux-amd64 linux-arm64 linux-amd64-lite linux-arm64-lite darwin-arm64 darwin-amd64; do
+          for platform_dir in linux-amd64 linux-arm64 darwin-arm64 darwin-amd64; do
             package_name="singctl-${platform_dir}"
             mkdir -p "${package_name}"
             cp "${platform_dir}/singctl" "${package_name}/"
