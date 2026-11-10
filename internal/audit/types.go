@@ -100,7 +100,6 @@ type FlowRecord struct {
 	DeviceRole       string             `json:"deviceRole,omitempty"` // "iot" / "desktop" / "mobile" / "unknown"
 	Target           string             `json:"target"`               // 规范化后的目标域名或目的 IP
 	AppName          string             `json:"appName,omitempty"`    // 基于本地 sing-box 规则集识别出的归属应用 (如 Telegram / 百度 / Apple)
-	IsGame           bool               `json:"isGame,omitempty"`     // 是否命中主流游戏规则集或游戏特征库
 	RawHost          string             `json:"rawHost,omitempty"`
 	DestIP           string             `json:"destIp,omitempty"`
 	DestPort         int                `json:"destPort"`

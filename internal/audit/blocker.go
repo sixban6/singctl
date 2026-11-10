@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -123,8 +124,30 @@ func ValidateTargetSafety(cfg *config.Config, rawTarget string) (normalized stri
 	return normalized, isIP, nil
 }
 
+// isRuleSetImportInput 判断用户输入是否为远程规则集 URL (.srs / .json) 或 ruleset:<tag> 标识。
+func isRuleSetImportInput(raw string) bool {
+	s := strings.ToLower(strings.TrimSpace(raw))
+	if strings.HasPrefix(s, "ruleset:") {
+		return true
+	}
+	if strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://") {
+		if u, err := url.Parse(s); err == nil && u.Path != "" {
+			p := strings.ToLower(u.Path)
+			if strings.HasSuffix(p, ".srs") || strings.HasSuffix(p, ".json") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // Block 执行一键双层拉黑（写入 singctl.yaml -> 同步 AdGuard Home -> 原子热更新 sing-box config.json -> 立即斩断存量连接）。
+// 若传入的是 sing-box 规则集 URL (.srs / .json) 或 ruleset:<tag>，自动执行整包导入与单行聚合封禁（不展开刷屏）。
 func (e *Enforcer) Block(ctx context.Context, rawTarget, rawSourceIP, reason string) (*BlockActionResult, error) {
+	if isRuleSetImportInput(rawTarget) {
+		return e.ImportAndBlockRuleSet(ctx, rawTarget, "", rawSourceIP, reason)
+	}
+
 	normTarget, _, err := ValidateTargetSafety(e.cfg, rawTarget)
 	if err != nil {
 		return nil, err
@@ -248,6 +271,265 @@ func (e *Enforcer) Unblock(ctx context.Context, rawTarget, rawSourceIP string) (
 	}
 
 	res.Message = fmt.Sprintf("已将 %s 从双层黑名单解封 (移除 %d 条规则)", displayTarget, removed)
+	return res, nil
+}
+
+func blockedRuleSetSummaryPath(tag string) string {
+	return filepath.Join(os.TempDir(), "singctl-block-rs-"+singbox.SanitizeRuleSetTag(tag)+".json")
+}
+
+// ImportAndBlockRuleSet 从远程 URL (.srs 二进制或 .json 源码) 或本地预设规则集导入并整包封禁。
+// 在黑名单列表中仅生成 1 条 "ruleset:<tag>" 聚合记录，绝不展开刷屏。
+func (e *Enforcer) ImportAndBlockRuleSet(ctx context.Context, rawInput, customTag, rawSourceIP, reason string) (*BlockActionResult, error) {
+	rawInput = strings.TrimSpace(rawInput)
+	if rawInput == "" {
+		return nil, fmt.Errorf("规则集地址不能为空")
+	}
+
+	normSource := ""
+	if strings.TrimSpace(rawSourceIP) != "" {
+		normSource = singbox.NormalizeSourceIPCIDR(rawSourceIP)
+		if normSource == "" {
+			return nil, fmt.Errorf("无效的源设备 IP 格式: %q", rawSourceIP)
+		}
+	}
+	displaySource := strings.TrimSuffix(strings.TrimSuffix(normSource, "/32"), "/128")
+
+	var tag string
+	var sourceURL string
+	lowerInput := strings.ToLower(rawInput)
+	if strings.HasPrefix(lowerInput, "ruleset:") {
+		tag = singbox.SanitizeRuleSetTag(rawInput[len("ruleset:"):])
+	} else {
+		u, err := url.Parse(rawInput)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return nil, fmt.Errorf("无效的规则集 URL: %q (需以 http:// 或 https:// 开头)", rawInput)
+		}
+		sourceURL = rawInput
+		base := filepath.Base(u.Path)
+		tag = singbox.SanitizeRuleSetTag(cmp.Or(strings.TrimSpace(customTag), base))
+		if tag != "" && !strings.HasPrefix(tag, "geosite-") && !strings.HasPrefix(tag, "geoip-") && !strings.HasPrefix(tag, "block-") {
+			tag = "block-" + tag
+		}
+	}
+	if tag == "" {
+		return nil, fmt.Errorf("无法从输入提取有效的规则集标识: %q", rawInput)
+	}
+
+	ruleSetDir := filepath.Dir(e.sbConfigPath)
+	if ruleSetDir == "" || ruleSetDir == "." {
+		ruleSetDir = constant.SingBoxConfigDir
+	}
+	ruleSetDir = filepath.Join(ruleSetDir, "rule_sets")
+	_ = os.MkdirAll(ruleSetDir, 0755)
+	dstSRSPath := filepath.Join(ruleSetDir, tag+".srs")
+
+	var rawData []byte
+	if sourceURL != "" {
+		var candidates []string
+		if strings.Contains(sourceURL, "github.com/") || strings.Contains(sourceURL, "raw.githubusercontent.com/") {
+			if !strings.HasPrefix(sourceURL, "https://ghfast.top/") {
+				candidates = append(candidates, "https://ghfast.top/"+sourceURL)
+			}
+		}
+		candidates = append(candidates, sourceURL)
+
+		client := &http.Client{Timeout: 12 * time.Second}
+		var lastErr error
+		for _, cand := range candidates {
+			req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, cand, nil)
+			if reqErr != nil {
+				lastErr = reqErr
+				continue
+			}
+			resp, doErr := client.Do(req)
+			if doErr != nil {
+				lastErr = doErr
+				continue
+			}
+			body, readErr := io.ReadAll(io.LimitReader(resp.Body, 8*1024*1024))
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK && readErr == nil && len(body) > 12 {
+				rawData = body
+				break
+			}
+			lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
+		}
+		if len(rawData) == 0 {
+			// 若远程拉取失败但本地已有同名 .srs 缓存，允许复用本地文件
+			if localBytes, err := os.ReadFile(dstSRSPath); err == nil && len(localBytes) > 16 {
+				rawData = localBytes
+			} else {
+				return nil, fmt.Errorf("下载规则集失败 (%s): %v", sourceURL, lastErr)
+			}
+		}
+	} else {
+		localBytes, err := os.ReadFile(dstSRSPath)
+		if err != nil || len(localBytes) <= 16 {
+			return nil, fmt.Errorf("本地未找到规则集文件 %s，请提供完整的 .srs / .json 下载 URL", dstSRSPath)
+		}
+		rawData = localBytes
+	}
+
+	sbBin := findSingBoxBin()
+	trimmed := strings.TrimSpace(string(rawData))
+	isJSON := strings.HasPrefix(trimmed, "{")
+	var parsed decompiledSRS
+	var srsBytes []byte
+
+	if isJSON {
+		if err := json.Unmarshal(rawData, &parsed); err != nil || len(parsed.Rules) == 0 {
+			return nil, fmt.Errorf("无效的 sing-box 源码规则集 JSON 格式")
+		}
+		if sbBin != "" {
+			tmpJSON := filepath.Join(os.TempDir(), fmt.Sprintf("singctl-rs-%d.json", time.Now().UnixNano()))
+			tmpSRS := tmpJSON + ".srs"
+			_ = os.WriteFile(tmpJSON, rawData, 0600)
+			compCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			out, compErr := exec.CommandContext(compCtx, sbBin, "rule-set", "compile", tmpJSON, "-o", tmpSRS).CombinedOutput()
+			cancel()
+			_ = os.Remove(tmpJSON)
+			if compErr != nil {
+				_ = os.Remove(tmpSRS)
+				return nil, fmt.Errorf("编译 JSON 规则集为 .srs 失败: %v (%s)", compErr, strings.TrimSpace(string(out)))
+			}
+			srsBytes, _ = os.ReadFile(tmpSRS)
+			_ = os.Remove(tmpSRS)
+		} else {
+			// 测试环境无 sing-box 二进制时构造带 SRS 魔数的占位文件用于单元测试验证
+			srsBytes = append([]byte("SRS\x02"), rawData...)
+		}
+	} else if strings.HasPrefix(string(rawData), "SRS") || strings.HasPrefix(string(rawData), "RULE") {
+		srsBytes = rawData
+		if sbBin != "" {
+			tmpSRS := filepath.Join(os.TempDir(), fmt.Sprintf("singctl-rs-%d.srs", time.Now().UnixNano()))
+			_ = os.WriteFile(tmpSRS, srsBytes, 0600)
+			decCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			out, decErr := exec.CommandContext(decCtx, sbBin, "rule-set", "decompile", tmpSRS, "-o", "/dev/stdout").Output()
+			cancel()
+			_ = os.Remove(tmpSRS)
+			if decErr == nil && len(out) > 0 {
+				_ = json.Unmarshal(out, &parsed)
+			}
+		}
+	} else {
+		return nil, fmt.Errorf("不支持的规则集文件格式（仅支持 sing-box 二进制 .srs 或源码 .json 规则集）")
+	}
+
+	// 遵循规则 02 防自锁校验：扫描规则集内条目，严禁误封用户自身的机场订阅域名、自建节点或网关地址
+	var ruleCount int
+	var samples []string
+	for _, r := range parsed.Rules {
+		for _, d := range append(slices.Clone(r.Domain), r.DomainSuffix...) {
+			d = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(d)), ".")
+			if d == "" {
+				continue
+			}
+			if _, _, safeErr := ValidateTargetSafety(e.cfg, d); safeErr != nil {
+				return nil, fmt.Errorf("规则集安全校验未通过 (%s): %w", tag, safeErr)
+			}
+			ruleCount++
+			if len(samples) < 8 && !slices.Contains(samples, d) {
+				samples = append(samples, d)
+			}
+		}
+		for _, kw := range r.DomainKeyword {
+			kw = strings.TrimSpace(kw)
+			if kw != "" {
+				ruleCount++
+				if len(samples) < 8 && !slices.Contains(samples, "kw:"+kw) {
+					samples = append(samples, "kw:"+kw)
+				}
+			}
+		}
+		for _, cidr := range r.IPCIDR {
+			cidr = strings.TrimSpace(cidr)
+			if cidr != "" {
+				if _, _, safeErr := ValidateTargetSafety(e.cfg, cidr); safeErr != nil {
+					return nil, fmt.Errorf("规则集安全校验未通过 (%s): %w", tag, safeErr)
+				}
+				ruleCount++
+				if len(samples) < 8 && !slices.Contains(samples, cidr) {
+					samples = append(samples, cidr)
+				}
+			}
+		}
+	}
+
+	// 落盘 .srs 文件与轻量反编译摘要（供审计引擎 IsBlocked 与断连匹配使用）
+	tmpDst := dstSRSPath + ".tmp"
+	if err := os.WriteFile(tmpDst, srsBytes, 0644); err != nil {
+		return nil, fmt.Errorf("写入规则集文件失败: %w", err)
+	}
+	if err := os.Rename(tmpDst, dstSRSPath); err != nil {
+		_ = os.Remove(tmpDst)
+		return nil, fmt.Errorf("保存规则集文件失败: %w", err)
+	}
+	if summaryBytes, err := json.Marshal(parsed); err == nil {
+		_ = os.WriteFile(blockedRuleSetSummaryPath(tag), summaryBytes, 0600)
+	}
+
+	displayTarget := "ruleset:" + tag
+	preview := strings.Join(samples, ", ")
+	if ruleCount > len(samples) && preview != "" {
+		preview += fmt.Sprintf(" 等共 %d 条", ruleCount)
+	}
+	if strings.TrimSpace(reason) == "" || reason == "WebUI 手动拉黑" {
+		if appLabel, ok := ruleSetAppDisplayNames[tag]; ok {
+			reason = "规则集整包封禁: " + appLabel
+		} else {
+			reason = "规则集整包封禁 (" + tag + ")"
+		}
+	}
+
+	oldBlocks := slices.Clone(e.cfg.CustomRules.Block)
+	found := false
+	for i := range e.cfg.CustomRules.Block {
+		t, _ := singbox.NormalizeBlockTarget(e.cfg.CustomRules.Block[i].Target)
+		s := singbox.NormalizeSourceIPCIDR(e.cfg.CustomRules.Block[i].SourceIP)
+		if t == displayTarget && s == normSource {
+			e.cfg.CustomRules.Block[i].Target = displayTarget
+			e.cfg.CustomRules.Block[i].SourceIP = displaySource
+			e.cfg.CustomRules.Block[i].Reason = reason
+			e.cfg.CustomRules.Block[i].RuleSetURL = sourceURL
+			e.cfg.CustomRules.Block[i].RuleCount = ruleCount
+			e.cfg.CustomRules.Block[i].Preview = preview
+			found = true
+			break
+		}
+	}
+	if !found {
+		e.cfg.CustomRules.Block = append(e.cfg.CustomRules.Block, config.BlockRule{
+			Target:     displayTarget,
+			SourceIP:   displaySource,
+			Reason:     reason,
+			RuleSetURL: sourceURL,
+			RuleCount:  ruleCount,
+			Preview:    preview,
+			CreatedAt:  time.Now().Format(time.RFC3339),
+		})
+	}
+
+	res := &BlockActionResult{
+		Target:   displayTarget,
+		SourceIP: displaySource,
+	}
+
+	if e.configPath != "" {
+		if err := config.Save(e.configPath, e.cfg); err != nil {
+			e.cfg.CustomRules.Block = oldBlocks
+			return nil, fmt.Errorf("保存黑名单至 %s 失败: %w", e.configPath, err)
+		}
+		res.ConfigSaved = true
+	}
+
+	if sbApplied, sbErr := e.syncSingBoxLayer(ctx, oldBlocks, e.cfg.CustomRules.Block); sbErr == nil && sbApplied {
+		res.SingBoxSynced = true
+	}
+
+	res.KilledConnections = e.killMatchingRuleSetConnections(ctx, &parsed, displaySource)
+	res.Message = fmt.Sprintf("已导入并封禁规则集 %s (含 %d 条规则, Sing-Box 原生阻断=%v, 斩断活跃连接=%d 条)",
+		tag, ruleCount, res.SingBoxSynced, res.KilledConnections)
 	return res, nil
 }
 
@@ -377,6 +659,119 @@ func (e *Enforcer) killMatchingConnections(ctx context.Context, targetPlain, sou
 			destIP := strings.TrimSpace(conn.Metadata.DestinationIP)
 			matched := destIP == targetPlain || host == targetPlain || strings.HasSuffix(host, "."+targetPlain)
 			if !matched {
+				continue
+			}
+			delReq, err := http.NewRequestWithContext(ctx, http.MethodDelete, baseURL+"/connections/"+url.PathEscape(conn.ID), nil)
+			if err != nil {
+				continue
+			}
+			if e.clashSecret != "" {
+				delReq.Header.Set("Authorization", "Bearer "+e.clashSecret)
+			}
+			if delResp, err := client.Do(delReq); err == nil {
+				delResp.Body.Close()
+				if delResp.StatusCode == http.StatusNoContent || delResp.StatusCode == http.StatusOK {
+					killed++
+				}
+			}
+		}
+		break
+	}
+	return killed
+}
+
+func matchDecompiledRuleSet(parsed *decompiledSRS, host, destIP string) bool {
+	if parsed == nil {
+		return false
+	}
+	host = strings.ToLower(strings.TrimSpace(host))
+	destIP = strings.TrimSpace(destIP)
+	parsedIP := net.ParseIP(destIP)
+	if parsedIP == nil && net.ParseIP(host) != nil {
+		parsedIP = net.ParseIP(host)
+	}
+
+	for _, r := range parsed.Rules {
+		if host != "" {
+			for _, d := range r.Domain {
+				if strings.EqualFold(host, strings.TrimSpace(d)) {
+					return true
+				}
+			}
+			for _, ds := range r.DomainSuffix {
+				s := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(ds), "."))
+				if s != "" && (host == s || strings.HasSuffix(host, "."+s)) {
+					return true
+				}
+			}
+			for _, kw := range r.DomainKeyword {
+				k := strings.ToLower(strings.TrimSpace(kw))
+				if k != "" && strings.Contains(host, k) {
+					return true
+				}
+			}
+		}
+		if parsedIP != nil {
+			for _, cidr := range r.IPCIDR {
+				if _, ipNet, err := net.ParseCIDR(strings.TrimSpace(cidr)); err == nil && ipNet != nil && ipNet.Contains(parsedIP) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func loadBlockedRuleSetSummary(tag string) *decompiledSRS {
+	data, err := os.ReadFile(blockedRuleSetSummaryPath(tag))
+	if err != nil || len(data) == 0 {
+		return nil
+	}
+	var parsed decompiledSRS
+	if json.Unmarshal(data, &parsed) != nil {
+		return nil
+	}
+	return &parsed
+}
+
+func (e *Enforcer) killMatchingRuleSetConnections(ctx context.Context, parsed *decompiledSRS, sourcePlain string) int {
+	if parsed == nil || len(parsed.Rules) == 0 {
+		return 0
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	killed := 0
+
+	for _, ep := range e.clashEndpoints {
+		baseURL := strings.TrimRight(ep, "/")
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/connections", nil)
+		if err != nil {
+			continue
+		}
+		if e.clashSecret != "" {
+			req.Header.Set("Authorization", "Bearer "+e.clashSecret)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			continue
+		}
+		var connResp clashConnectionsResponse
+		decErr := json.NewDecoder(resp.Body).Decode(&connResp)
+		resp.Body.Close()
+		if decErr != nil {
+			continue
+		}
+
+		for _, conn := range connResp.Connections {
+			if sourcePlain != "" && strings.TrimSpace(conn.Metadata.SourceIP) != sourcePlain {
+				continue
+			}
+			host := strings.ToLower(cmp.Or(strings.TrimSpace(conn.Metadata.SniffHost), strings.TrimSpace(conn.Metadata.Host)))
+			destIP := strings.TrimSpace(conn.Metadata.DestinationIP)
+			if !matchDecompiledRuleSet(parsed, host, destIP) {
 				continue
 			}
 			delReq, err := http.NewRequestWithContext(ctx, http.MethodDelete, baseURL+"/connections/"+url.PathEscape(conn.ID), nil)

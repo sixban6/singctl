@@ -484,27 +484,43 @@ tr.dual-alert-row td:first-child { box-shadow: inset 4px 0 0 var(--err); }
             <option value="">全部维度 (🛡️安全 + 👁️隐私)</option>
             <option value="security">🛡️ 仅看安全异常</option>
             <option value="privacy">👁️ 仅看隐私追踪</option>
-            <option value="game">🎮 只看游戏相关</option>
           </select>
           <label class="btn btn-sm" style="cursor:pointer;"><input type="checkbox" id="audit-only-suspect" style="accent-color:var(--accent);"> 仅看关注/高危</label>
           <button class="btn btn-sm" id="btn-audit-blocklist-toggle" title="展开/收起双层黑名单管理抽屉">🚫 黑名单管理 <span class="badge dim" id="audit-block-count-badge" style="margin-left:3px;">0</span></button>
           <button class="btn btn-sm" id="btn-audit-ai-cfg" title="配置 AI 网关 BaseURL、密钥与模型">⚙️ AI 网关配置</button>
-          <label class="btn btn-sm" style="cursor:pointer;" title="开启后自动对当前屏幕可见行及向下 1:1 预取缓冲区执行 AI 深度研判"><input type="checkbox" id="audit-ai-enable" checked style="accent-color:var(--accent);"> 🤖 AI 深度研判 <span id="audit-ai-status" style="font-size:11px;color:var(--muted);"></span></label>
-          <button class="btn btn-sm" id="btn-audit-export-csv" title="导出纯 UTF-8 (无 BOM) CSV 明细表">📥 导出 CSV</button>
-          <button class="btn btn-sm btn-primary" id="btn-audit-refresh">立即采样刷新</button>
           <label class="btn btn-sm" style="cursor:pointer;"><input type="checkbox" id="audit-auto" checked style="accent-color:var(--accent);"> 自动刷新 (5秒)</label>
+          <label class="btn btn-sm" style="cursor:pointer;" title="开启后自动对当前屏幕可见行及向下 2x 预取缓冲区执行 AI 深度研判"><input type="checkbox" id="audit-ai-enable" checked style="accent-color:var(--accent);"> 🤖 AI 深度研判 <span id="audit-ai-status" style="font-size:11px;color:var(--muted);"></span></label>
+          <button class="btn btn-sm" id="btn-audit-export-csv" title="导出纯 UTF-8 (无 BOM) CSV 明细表">📥 导出 CSV</button>
         </div>
       </div>
 
-      <!-- 顶部可折叠抽屉 1：双层黑名单管理 (无需滚到底部，随时一键管理与手动拉黑) -->
+      <!-- 顶部可折叠抽屉 1：双层黑名单管理 (支持单条域名/IP 与远程 .srs/.json 规则集整包导入，单行聚合不展开) -->
       <div id="audit-blocklist-drawer" style="display:none;margin-bottom:14px;padding:12px 14px;border-radius:12px;border:1px solid var(--border);background:var(--card-2);">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px;">
           <div style="font-weight:600;font-size:13px;display:flex;align-items:center;gap:6px;">
-            <span>🚫 双层黑名单管理 (Sing-Box 路由阻断 + AdGuard DNS 拦截)</span>
+            <span>🚫 双层黑名单管理 (支持单条域名/IP & 网上 <code>.srs / .json</code> 规则集整包导入)</span>
           </div>
-          <div class="btn-row">
-            <input type="text" id="manual-block-target" placeholder="输入域名或IP (如 bad.example.com)" style="padding:6px 10px;border-radius:9px;border:1px solid var(--border);background:var(--input-bg);color:var(--text);font-size:12.5px;width:230px;">
-            <button class="btn btn-sm btn-danger" id="btn-manual-block" type="button">+ 手动拉黑</button>
+          <div class="btn-row" style="flex-wrap:wrap;">
+            <select id="preset-ruleset-select" class="btn btn-sm" style="padding:5.5px 8px;max-width:225px;" title="选择主流 GitHub 规则集一键填入导入">
+              <option value="">📦 常用规则集快捷导入…</option>
+              <option value="https://raw.githubusercontent.com/sixban6/rulesets/main/rule/hok.srs" data-reason="规则集封禁: 🎮 王者荣耀 (hok.srs)">🎮 王者荣耀 (hok.srs)</option>
+              <option value="https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/tencent-games.srs" data-reason="规则集封禁: 🎮 腾讯游戏全家桶">🎮 腾讯游戏全家桶 (tencent-games.srs)</option>
+              <option value="https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/mihoyo.srs" data-reason="规则集封禁: 🎮 米哈游 (原神/崩铁/绝区零)">🎮 米哈游 原神/崩铁 (mihoyo.srs)</option>
+              <option value="https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/netease.srs" data-reason="规则集封禁: 🎮 网易游戏">🎮 网易游戏 (netease.srs)</option>
+              <option value="https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/roblox.srs" data-reason="规则集封禁: 🎮 Roblox 罗布乐思">🎮 Roblox 罗布乐思 (roblox.srs)</option>
+              <option value="https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/supercell.srs" data-reason="规则集封禁: 🎮 Supercell 部落冲突/荒野乱斗">🎮 Supercell 部落冲突 (supercell.srs)</option>
+              <option value="https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/riot.srs" data-reason="规则集封禁: 🎮 拳头游戏 (LOL/无畏契约)">🎮 拳头 LOL/无畏契约 (riot.srs)</option>
+              <option value="https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/blizzard.srs" data-reason="规则集封禁: 🎮 暴雪战网">🎮 暴雪战网 (blizzard.srs)</option>
+              <option value="https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/steam.srs" data-reason="规则集封禁: 🎮 Steam 平台">🎮 Steam 平台 (steam.srs)</option>
+              <option value="https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/epicgames.srs" data-reason="规则集封禁: 🎮 Epic Games">🎮 Epic Games (epicgames.srs)</option>
+              <option value="https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/nintendo.srs" data-reason="规则集封禁: 🎮 Nintendo Switch">🎮 Nintendo Switch (nintendo.srs)</option>
+              <option value="https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/category-games-cn.srs" data-reason="规则集封禁: 🎮 国内主流网游/手游合集">🎮 国内主流游戏合集 (category-games-cn.srs)</option>
+              <option value="https://raw.githubusercontent.com/sixban6/rulesets/main/rule/douyin.srs" data-reason="规则集封禁: 📱 抖音短视频 (douyin.srs)">📱 抖音短视频 (douyin.srs)</option>
+              <option value="https://raw.githubusercontent.com/sixban6/rulesets/main/rule/wx_shortvideo.srs" data-reason="规则集封禁: 📱 微信视频号 (wx_shortvideo.srs)">📱 微信视频号 (wx_shortvideo.srs)</option>
+            </select>
+            <input type="text" id="manual-block-target" placeholder="输入域名/IP 或粘贴网上 .srs / .json 规则集 URL…" style="padding:6px 10px;border-radius:9px;border:1px solid var(--border);background:var(--input-bg);color:var(--text);font-size:12.5px;width:320px;">
+            <input type="text" id="manual-block-device" placeholder="限定设备IP (可留空=全局)" style="padding:6px 10px;border-radius:9px;border:1px solid var(--border);background:var(--input-bg);color:var(--text);font-size:12.5px;width:155px;">
+            <button class="btn btn-sm btn-danger" id="btn-manual-block" type="button">+ 导入 / 拉黑</button>
             <button class="btn btn-sm" id="btn-audit-blocklist-close" type="button">收起 ▲</button>
           </div>
         </div>
@@ -1480,52 +1496,11 @@ function setCachedAIReview(fOrKey, target, rev, skipStorage = false) {
   }
 }
 
-// 判断是否为游戏相关连接（结合后端主流游戏 .srs 规则集 + 内置特征 + AI 语义分类）
-function isGameFlow(f) {
-  if (!f) return false;
-  if (f.isGame) return true;
-  if (f.appName && f.appName.startsWith("游戏")) return true;
-  const aiRev = getCachedAIReview(f);
-  if (aiRev && aiRev.category) {
-    const cat = aiRev.category.toLowerCase();
-    for (const kw of ["游戏", "手游", "网游", "端游", "联机", "王者荣耀", "原神", "steam", "epic", "roblox", "对战"]) {
-      if (cat.includes(kw)) return true;
-    }
-  }
-  return false;
-}
-
 function buildAppPillHTML(f) {
-  if (isGameFlow(f)) {
-    const aiRev = getCachedAIReview(f);
-    let label = f.appName || (aiRev && aiRev.category) || "游戏服务";
-    label = label.replace(/^游戏\s*·\s*/, "");
-    return `<div><span class="game-pill">🎮 游戏 · ${esc(label)}</span></div>`;
-  }
-  if (f.appName) {
+  if (f && f.appName) {
     return `<div><span class="app-pill">🏷️ ${esc(f.appName)}</span></div>`;
   }
   return "";
-}
-
-// 针对游戏子域名提取可连根拉黑的游戏主域名后缀（保护 qq.com / 163.com 等通用母域名不被误伤）
-function extractGameRootDomain(target) {
-  const t = String(target || "").trim().toLowerCase();
-  if (!t || /^\d+\.\d+\.\d+\.\d+$/.test(t) || t.includes(":")) return t;
-  const parts = t.split(".");
-  if (parts.length <= 2) return t;
-  const last2 = parts.slice(-2).join(".");
-  const last3 = parts.slice(-3).join(".");
-  // 共享大厂母域名（不能直接封 qq.com / 163.com / netease.com），保留三级游戏专属根域名
-  if (last2 === "qq.com" || last2 === "163.com" || last2 === "netease.com") {
-    return last3;
-  }
-  // 复合顶级后缀 (如 .com.cn / .net.cn)
-  if ((parts[parts.length - 1] === "cn" || parts[parts.length - 1] === "hk") &&
-      ["com", "net", "org", "gov"].includes(parts[parts.length - 2])) {
-    return parts.length >= 3 ? last3 : t;
-  }
-  return last2;
 }
 
 // 判断是否触发“程序诊断 + AI 诊断”双重高危共振告警
@@ -1599,11 +1574,10 @@ function updateAISlotsInDOM() {
       const pillHtml = buildAppPillHTML(f);
       if (appPillBox.innerHTML !== pillHtml) appPillBox.innerHTML = pillHtml;
     }
-    const gameFlag = isGameFlow(f);
     const blockBtn = $(`#audit-flows-box [data-block-btn-idx="${idx}"]`);
     if (blockBtn) {
       blockBtn.classList.toggle("btn-danger-pulse", dualBad);
-      blockBtn.textContent = dualBad ? "🚨 立即拉黑" : (gameFlag ? "🎮 封禁游戏" : "一键拉黑");
+      blockBtn.textContent = dualBad ? "🚨 立即拉黑" : "一键拉黑";
     }
   }
 }
@@ -1615,7 +1589,7 @@ function renderAuditFlowsTable() {
     return;
   }
   const prevWrap = $("#audit-flows-box .table-wrap");
-  const prevScrollLeft = prevWrap ? prevWrap.scrollLeft : 0;
+  const prevScrollLeft = prevWrap ? prevScrollLeft.scrollLeft : 0;
 
   $("#audit-flows-box").innerHTML = `
     <div class="table-wrap"><table class="tbl audit-tbl">
@@ -1627,13 +1601,12 @@ function renderAuditFlowsTable() {
         const appPillHtml = buildAppPillHTML(f);
         const aiSlotHtml = buildAIRowSlotHTML(f);
         const dualBad = isDualAlertRow(f);
-        const gameFlag = isGameFlow(f);
         const dualBadgeHtml = buildDualAlertBadgeHTML(f);
         const reasonText = (f.reasons || []).join("；");
-        const btnText = dualBad ? "🚨 立即拉黑" : (gameFlag ? "🎮 封禁游戏" : "一键拉黑");
+        const btnText = dualBad ? "🚨 立即拉黑" : "一键拉黑";
         const actionHtml = f.state === "blocked"
           ? `<button class="btn btn-sm" onclick="unblockAuditTarget('${esc(f.target)}','')">解封</button>`
-          : `<button data-block-btn-idx="${idx}" class="btn btn-sm btn-danger${dualBad ? " btn-danger-pulse" : ""}" onclick="blockAuditTarget('${esc(f.target)}','','${esc(reasonText)}', ${gameFlag})">${btnText}</button>`;
+          : `<button data-block-btn-idx="${idx}" class="btn btn-sm btn-danger${dualBad ? " btn-danger-pulse" : ""}" onclick="blockAuditTarget('${esc(f.target)}','','${esc(reasonText)}')">${btnText}</button>`;
         return `<tr data-flow-idx="${idx}" class="${dualBad ? "dual-alert-row" : ""}">
           <td class="col-nowrap">
             <span class="badge ${cls}">${esc(label)} · ${f.riskScore}分</span>
@@ -1891,31 +1864,46 @@ async function loadAudit(withAI = false, silent = false) {
     });
     if (syncedFromServer) persistAuditAICacheToStorage();
 
-    lastEmptyFlowMsg = axisFilter === "game"
-      ? "当前暂无局域网设备活跃的游戏相关连接"
-      : (rep.message || "暂无符合过滤条件的流量记录");
+    lastEmptyFlowMsg = rep.message || "暂无符合过滤条件的流量记录";
     lastRenderedFlows = rawFlows.filter(f => {
       if (axisFilter === "security") return (f.securityScore || 0) >= 15 || f.dominantAxis === "security" || f.dominantAxis === "both";
       if (axisFilter === "privacy") return (f.privacyScore || 0) >= 15 || f.dominantAxis === "privacy" || f.dominantAxis === "both";
-      if (axisFilter === "game") return isGameFlow(f);
       return true;
     });
     renderAuditFlowsTable();
 
-    // 3. 当前生效黑名单 (顶部折叠抽屉内渲染)
+    // 3. 当前生效黑名单 (顶部折叠抽屉内渲染，规则集保持单行折叠胶囊，绝不展开刷屏)
     const rules = rep.blockRules || [];
     if (!rules.length) {
-      $("#audit-blocklist-box").innerHTML = '<div class="empty" style="padding:14px;">当前暂无拉黑规则</div>';
+      $("#audit-blocklist-box").innerHTML = '<div class="empty" style="padding:14px;">当前暂无拉黑规则（支持在上方输入域名/IP，或直接粘贴/选择 sing-box .srs/.json 规则集 URL 整包导入）</div>';
     } else {
       $("#audit-blocklist-box").innerHTML = `
         <div class="table-wrap"><table class="tbl">
-          <thead><tr><th>被拉黑目标 (域名 / IP)</th><th>作用范围</th><th>拉黑原因</th><th style="width:90px;">操作</th></tr></thead>
-          <tbody>${rules.map(r => `<tr>
-            <td class="mono"><b>${esc(r.target)}</b></td>
-            <td class="mono col-nowrap">${esc(r.source_ip || "全局 (所有设备)")}</td>
-            <td style="font-size:12px;color:var(--muted);">${esc(r.reason || "-")}</td>
-            <td class="col-nowrap"><button class="btn btn-sm" onclick="unblockAuditTarget('${esc(r.target)}','${esc(r.source_ip || "")}')">一键解封</button></td>
-          </tr>`).join("")}</tbody>
+          <thead><tr><th>被拉黑目标 (单条域名 / IP / 整包规则集)</th><th>作用范围</th><th>拉黑原因 & 来源</th><th style="width:140px;">操作</th></tr></thead>
+          <tbody>${rules.map(r => {
+            const isRS = String(r.target || "").toLowerCase().startsWith("ruleset:");
+            const rsTag = isRS ? String(r.target).slice(8) : "";
+            const cntText = r.rule_count ? `含 ${r.rule_count} 条规则` : "原生 .srs 挂载";
+            const targetCell = isRS
+              ? `<div>
+                   <span class="mono"><b>📦 ${esc(rsTag)}</b></span>
+                   <span class="game-pill" style="margin-left:6px;cursor:help;" title="已作为 sing-box 原生 rule_set 挂载阻断（不展开刷屏）&#10;涵盖预览: ${esc(r.preview || rsTag)}">规则集整包 · ${esc(cntText)}</span>
+                 </div>
+                 ${r.preview ? `<div class="mono" style="font-size:11px;color:var(--muted);margin-top:3px;max-width:520px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="预览摘要 (悬停查看，不展开列表): ${esc(r.preview)}">摘要: ${esc(r.preview)}</div>` : ""}`
+              : `<span class="mono"><b>${esc(r.target)}</b></span>`;
+            const urlHint = isRS && r.ruleset_url
+              ? `<div class="mono" style="font-size:11px;color:var(--muted);margin-top:2px;max-width:380px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(r.ruleset_url)}">${esc(r.ruleset_url)}</div>`
+              : "";
+            const refreshBtn = isRS && r.ruleset_url
+              ? `<button class="btn btn-sm" style="margin-right:5px;padding:3px 7px;" title="从远程 URL 重新拉取更新此规则集" onclick="refreshBlockedRuleSet('${esc(r.ruleset_url)}','${esc(r.source_ip || "")}','${esc(r.reason || "")}', this)">🔄</button>`
+              : "";
+            return `<tr>
+              <td style="white-space:normal;">${targetCell}</td>
+              <td class="mono col-nowrap">${esc(r.source_ip || "全局 (所有设备)")}</td>
+              <td style="font-size:12.5px;color:var(--muted);white-space:normal;"><div>${esc(r.reason || "-")}</div>${urlHint}</td>
+              <td class="col-nowrap">${refreshBtn}<button class="btn btn-sm" onclick="unblockAuditTarget('${esc(r.target)}','${esc(r.source_ip || "")}')">一键解封</button></td>
+            </tr>`;
+          }).join("")}</tbody>
         </table></div>`;
     }
 
@@ -1957,30 +1945,40 @@ window.filterAuditByDevice = function(ip) {
   loadAudit(false);
 };
 
-window.blockAuditTarget = async function(target, sourceIp, reason, isGame = false) {
-  let finalTarget = target;
+window.blockAuditTarget = async function(target, sourceIp, reason) {
   const scopeText = sourceIp ? `仅针对设备 ${sourceIp}` : "全局所有局域网设备";
-  if (isGame) {
-    const rootDomain = extractGameRootDomain(target);
-    if (rootDomain && rootDomain !== target) {
-      if (!confirm(`🎮 检测到游戏子域名 (${target})。\n\n为防止游戏客户端自动切换备用节点，将直接按游戏主域名后缀【${rootDomain}】(${scopeText}) 连根拉黑到 sing-box 与 AdGuard DNS 并立即掐断活跃游戏连接，确认继续？`)) return;
-      finalTarget = rootDomain;
-      reason = reason ? `[游戏连根封禁] ${reason}` : "游戏主域名连根封禁";
-    } else {
-      if (!confirm(`🎮 确认将游戏目标 ${finalTarget} (${scopeText}) 一键拉黑到 sing-box 与 AdGuard DNS 并立即掐断活跃连接?`)) return;
-    }
-  } else {
-    if (!confirm(`确认将 ${finalTarget} (${scopeText}) 一键拉黑到 sing-box 与 AdGuard DNS 并立即掐断活跃连接?`)) return;
-  }
+  if (!confirm(`确认将 ${target} (${scopeText}) 一键拉黑到 sing-box 与 AdGuard DNS 并立即掐断活跃连接?`)) return;
   try {
     const res = await api("/api/audit/block", {
       method: "POST",
-      body: JSON.stringify({ target: finalTarget, sourceIp, reason }),
+      body: JSON.stringify({ target, sourceIp, reason }),
     });
     toast("ok", res.message || "已加入双层黑名单");
     loadAudit(false);
   } catch (e) {
     toast("err", "拉黑失败: " + e.message);
+  }
+};
+
+window.refreshBlockedRuleSet = async function(url, sourceIp, reason, btnEl) {
+  if (!url) return;
+  if (btnEl) {
+    btnEl.disabled = true;
+    btnEl.innerHTML = '<span class="spin-inline"></span>';
+  }
+  try {
+    const res = await api("/api/audit/block", {
+      method: "POST",
+      body: JSON.stringify({ target: url, sourceIp, reason }),
+    });
+    toast("ok", res.message || "规则集已更新");
+    loadAudit(false);
+  } catch (e) {
+    toast("err", "更新规则集失败: " + e.message);
+    if (btnEl) {
+      btnEl.disabled = false;
+      btnEl.textContent = "🔄";
+    }
   }
 };
 
@@ -2030,7 +2028,6 @@ async function exportAuditCSV() {
   }
 }
 
-$("#btn-audit-refresh").onclick = () => loadAudit(false);
 $("#audit-ai-enable").onchange = () => {
   const checked = $("#audit-ai-enable").checked;
   localStorage.setItem("sc_audit_ai_enable", checked ? "1" : "0");
@@ -2067,12 +2064,39 @@ $("#audit-axis-filter").onchange = () => loadAudit(false);
 $("#audit-device-filter").oninput = debounce(() => loadAudit(false), 350);
 $("#audit-auto").onchange = () => { if ($("#audit-auto").checked) loadAudit(false, true); };
 setInterval(() => { if ($("#audit-auto") && $("#audit-auto").checked) loadAudit(false, true); }, 5000);
-$("#btn-manual-block").onclick = () => {
+$("#preset-ruleset-select").onchange = () => {
+  const sel = $("#preset-ruleset-select");
+  if (!sel.value) return;
+  $("#manual-block-target").value = sel.value;
+};
+$("#btn-manual-block").onclick = async () => {
   const t = ($("#manual-block-target").value || "").trim();
-  if (!t) { toast("warn", "请输入要拉黑的域名或 IP"); return; }
-  window.blockAuditTarget(t, "", "WebUI 手动拉黑").then(() => {
+  const srcIp = ($("#manual-block-device") && $("#manual-block-device").value || "").trim();
+  if (!t) { toast("warn", "请输入域名/IP 或粘贴/选择 .srs/.json 规则集 URL"); return; }
+  const sel = $("#preset-ruleset-select");
+  const selectedOpt = sel && sel.selectedOptions && sel.selectedOptions[0];
+  const presetReason = (selectedOpt && sel.value === t && selectedOpt.getAttribute("data-reason")) || "";
+  const isRS = t.toLowerCase().startsWith("http://") || t.toLowerCase().startsWith("https://") || t.toLowerCase().startsWith("ruleset:");
+  const reason = presetReason || (isRS ? "WebUI 导入规则集封禁" : "WebUI 手动拉黑");
+  const btn = $("#btn-manual-block");
+  const origText = btn.textContent;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spin-inline"></span> 处理中…';
+  try {
+    const res = await api("/api/audit/block", {
+      method: "POST",
+      body: JSON.stringify({ target: t, sourceIp: srcIp, reason }),
+    });
+    toast("ok", res.message || "已加入黑名单");
     $("#manual-block-target").value = "";
-  });
+    if (sel) sel.value = "";
+    loadAudit(false);
+  } catch (e) {
+    toast("err", "操作失败: " + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = origText;
+  }
 };
 
 /* ═══════════════════════ 启动 ═══════════════════════ */

@@ -221,6 +221,13 @@ func (e *NonlinearEngine) IsBlocked(deviceIP, target string) bool {
 			if kSrc != "" && kSrc != srcCIDR {
 				continue
 			}
+			if strings.HasPrefix(kDom, "ruleset:") {
+				tag := strings.TrimPrefix(kDom, "ruleset:")
+				if rs := loadBlockedRuleSetSummary(tag); rs != nil && matchDecompiledRuleSet(rs, plain, plain) {
+					return true
+				}
+				continue
+			}
 			if strings.HasSuffix(plain, "."+kDom) {
 				return true
 			}

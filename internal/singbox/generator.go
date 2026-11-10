@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"maps"
 	"net"
+	"os"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"slices"
@@ -256,6 +258,7 @@ func (g *ConfigGenerator) InjectCustomRules(rawJSON string) (string, error) {
 	}
 
 	// 2. 编译设备审计黑名单规则 (custom_rules.block)，作为最高优先级阻断规则注入
+	syncBlockRuleSetDefinitions(root, nil, g.config.CustomRules.Block)
 	blockDNS, blockRoute := CompileBlockRules(g.config.CustomRules.Block)
 
 	// 3. 注入 DNS 规则 (custom_rules.block + custom_rules.dns)
@@ -278,8 +281,16 @@ func (g *ConfigGenerator) InjectCustomRules(rawJSON string) (string, error) {
 }
 
 // NormalizeBlockTarget 规范化拉黑目标（去除协议头、端口、首尾通配符与空格），并判定其是否为 IP/CIDR。
+// 若以 "ruleset:<tag>" 开头，规范化为 "ruleset:<sanitized_tag>"。
 func NormalizeBlockTarget(raw string) (cleaned string, isIPOrCIDR bool) {
 	s := strings.TrimSpace(raw)
+	if strings.HasPrefix(strings.ToLower(s), "ruleset:") {
+		tag := SanitizeRuleSetTag(s[len("ruleset:"):])
+		if tag == "" {
+			return "", false
+		}
+		return "ruleset:" + tag, false
+	}
 	s = strings.TrimPrefix(s, "||")
 	s = strings.TrimSuffix(s, "^")
 	if idx := strings.Index(s, "://"); idx >= 0 {
@@ -336,6 +347,26 @@ func NormalizeSourceIPCIDR(raw string) string {
 	return ""
 }
 
+// SanitizeRuleSetTag 过滤规则集 tag 仅保留字母、数字、连字符与下划线，防路径穿越或命令注入。
+func SanitizeRuleSetTag(raw string) string {
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	raw = strings.TrimSuffix(raw, ".srs")
+	raw = strings.TrimSuffix(raw, ".json")
+	var b strings.Builder
+	for _, r := range raw {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			b.WriteRune(r)
+		} else if r == '.' || r == ' ' {
+			b.WriteByte('-')
+		}
+	}
+	out := strings.Trim(b.String(), "-_")
+	if len(out) > 48 {
+		out = out[:48]
+	}
+	return out
+}
+
 // CompileBlockRules 将语义化 BlockRule 列表编译为 sing-box 原生 DNS 阻断规则与路由阻断规则。
 // 按 source_ip_cidr 分组聚合，保证生成的 JSON 紧凑、高效且完全符合 sing-box v1.12+/v1.14 规范。
 func CompileBlockRules(blocks []config.BlockRule) (dnsRules []map[string]any, routeRules []map[string]any) {
@@ -345,6 +376,7 @@ func CompileBlockRules(blocks []config.BlockRule) (dnsRules []map[string]any, ro
 
 	type groupBucket struct {
 		sourceCIDR string
+		ruleSets   []string
 		domains    []string
 		ipCIDRs    []string
 	}
@@ -363,7 +395,12 @@ func CompileBlockRules(blocks []config.BlockRule) (dnsRules []map[string]any, ro
 			bySource[srcCIDR] = bucket
 			groups = append(groups, bucket)
 		}
-		if isIP {
+		if strings.HasPrefix(target, "ruleset:") {
+			tag := strings.TrimPrefix(target, "ruleset:")
+			if tag != "" && !slices.Contains(bucket.ruleSets, tag) {
+				bucket.ruleSets = append(bucket.ruleSets, tag)
+			}
+		} else if isIP {
 			if !slices.Contains(bucket.ipCIDRs, target) {
 				bucket.ipCIDRs = append(bucket.ipCIDRs, target)
 			}
@@ -375,6 +412,22 @@ func CompileBlockRules(blocks []config.BlockRule) (dnsRules []map[string]any, ro
 	}
 
 	for _, g := range groups {
+		if len(g.ruleSets) > 0 {
+			dr := map[string]any{
+				"action":   "reject",
+				"rule_set": g.ruleSets,
+			}
+			rr := map[string]any{
+				"action":   "reject",
+				"rule_set": g.ruleSets,
+			}
+			if g.sourceCIDR != "" {
+				dr["source_ip_cidr"] = []string{g.sourceCIDR}
+				rr["source_ip_cidr"] = []string{g.sourceCIDR}
+			}
+			dnsRules = append(dnsRules, dr)
+			routeRules = append(routeRules, rr)
+		}
 		if len(g.domains) > 0 {
 			dr := map[string]any{
 				"action":        "reject",
@@ -412,6 +465,8 @@ func SyncBlockRulesInConfigJSON(rawJSON string, oldBlocks, newBlocks []config.Bl
 		return "", fmt.Errorf("failed to parse config.json: %w", err)
 	}
 
+	syncBlockRuleSetDefinitions(root, oldBlocks, newBlocks)
+
 	oldDNS, oldRoute := CompileBlockRules(oldBlocks)
 	newDNS, newRoute := CompileBlockRules(newBlocks)
 
@@ -432,6 +487,82 @@ func SyncBlockRulesInConfigJSON(rawJSON string, oldBlocks, newBlocks []config.Bl
 		return "", err
 	}
 	return PrettyJSON(string(data))
+}
+
+func syncBlockRuleSetDefinitions(root map[string]any, oldBlocks, newBlocks []config.BlockRule) {
+	routeMap, ok := root["route"].(map[string]any)
+	if !ok {
+		routeMap = make(map[string]any)
+		root["route"] = routeMap
+	}
+
+	activeTags := make(map[string]config.BlockRule)
+	for _, b := range newBlocks {
+		norm, _ := NormalizeBlockTarget(b.Target)
+		if strings.HasPrefix(norm, "ruleset:") {
+			tag := strings.TrimPrefix(norm, "ruleset:")
+			if tag != "" {
+				activeTags[tag] = b
+			}
+		}
+	}
+
+	removedBlockTags := make(map[string]bool)
+	for _, b := range oldBlocks {
+		norm, _ := NormalizeBlockTarget(b.Target)
+		if strings.HasPrefix(norm, "ruleset:") {
+			tag := strings.TrimPrefix(norm, "ruleset:")
+			if strings.HasPrefix(tag, "block-") {
+				if _, stillActive := activeTags[tag]; !stillActive {
+					removedBlockTags[tag] = true
+				}
+			}
+		}
+	}
+
+	existingList, _ := routeMap["rule_set"].([]any)
+	kept := make([]any, 0, len(existingList)+len(activeTags))
+	presentTags := make(map[string]bool)
+
+	for _, item := range existingList {
+		m, ok := item.(map[string]any)
+		if !ok {
+			kept = append(kept, item)
+			continue
+		}
+		tag, _ := m["tag"].(string)
+		if removedBlockTags[tag] {
+			continue
+		}
+		presentTags[tag] = true
+		kept = append(kept, item)
+	}
+
+	for tag, b := range activeTags {
+		if presentTags[tag] {
+			continue
+		}
+		localPath := filepath.Join(RuleSetCacheDir(), tag+".srs")
+		if info, err := os.Stat(localPath); err == nil && info.Size() > 16 {
+			kept = append(kept, map[string]any{
+				"tag":    tag,
+				"type":   "local",
+				"format": "binary",
+				"path":   localPath,
+			})
+		} else if strings.TrimSpace(b.RuleSetURL) != "" {
+			kept = append(kept, map[string]any{
+				"tag":    tag,
+				"type":   "remote",
+				"format": "binary",
+				"url":    strings.TrimSpace(b.RuleSetURL),
+			})
+		}
+	}
+
+	if len(kept) > 0 {
+		routeMap["rule_set"] = kept
+	}
 }
 
 func removeMatchingRules(root map[string]any, section string, toRemove []map[string]any) {

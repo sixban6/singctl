@@ -223,10 +223,6 @@ func (c *Collector) Collect(ctx context.Context, opts CollectOptions) *Report {
 		activeIDs := activeByKey[entry.Key]
 		appName := IdentifyApp(entry.Target, entry.DestIP, entry.Rule)
 		cachedAI := LookupCachedAIReview(entry.Target)
-		var aiCat string
-		if cachedAI != nil {
-			aiCat = cachedAI.Category
-		}
 		rec := FlowRecord{
 			Key:           entry.Key,
 			DeviceIP:      normDevIP,
@@ -235,7 +231,6 @@ func (c *Collector) Collect(ctx context.Context, opts CollectOptions) *Report {
 			DeviceRole:    InferDeviceRole(devName),
 			Target:        entry.Target,
 			AppName:       appName,
-			IsGame:        IsGameApp(appName, aiCat),
 			RawHost:       entry.RawHost,
 			DestIP:        entry.DestIP,
 			DestPort:      entry.DestPort,

@@ -127,11 +127,15 @@ type AuditAIConfig struct {
 
 // BlockRule 定义由设备审计或用户一键拉黑生成的阻断规则。
 // 同时作用于 sing-box 路由层 (action: reject)、sing-box DNS 层与自建 AdGuard Home 黑名单。
+// 当 Target 以 "ruleset:<tag>" 开头时，代表整包导入并封禁的 sing-box 规则集（单行聚合展示，不展开刷屏）。
 type BlockRule struct {
-	Target    string `yaml:"target" json:"target"`                           // 被拉黑的目标域名或 IP/CIDR
-	SourceIP  string `yaml:"source_ip,omitempty" json:"source_ip,omitempty"` // 可选：仅限制特定局域网设备 IP
-	Reason    string `yaml:"reason,omitempty" json:"reason,omitempty"`       // 拉黑原因备注
-	CreatedAt string `yaml:"created_at,omitempty" json:"created_at,omitempty"`
+	Target     string `yaml:"target" json:"target"`                               // 被拉黑的目标域名、IP/CIDR 或 "ruleset:<tag>"
+	SourceIP   string `yaml:"source_ip,omitempty" json:"source_ip,omitempty"`     // 可选：仅限制特定局域网设备 IP
+	Reason     string `yaml:"reason,omitempty" json:"reason,omitempty"`           // 拉黑原因备注
+	RuleSetURL string `yaml:"ruleset_url,omitempty" json:"ruleset_url,omitempty"` // 规则集原始导入 URL (支持一键刷新)
+	RuleCount  int    `yaml:"rule_count,omitempty" json:"rule_count,omitempty"`   // 规则集包含的规则总数摘要
+	Preview    string `yaml:"preview,omitempty" json:"preview,omitempty"`         // 规则集前几条域名预览摘要
+	CreatedAt  string `yaml:"created_at,omitempty" json:"created_at,omitempty"`
 }
 
 type CustomRulesConfig struct {
@@ -770,7 +774,7 @@ var knownYAMLKeys = []string{
 	"web_terminal", "mtls_ca", "ssh_tunnel_port", "ssh_tunnel_path", "ssh_port",
 	"web_admin", "enabled", "port", "path", "username", "password", "password_pending_ack",
 	"watchdog", "interval", "confirm_wait", "max_restarts", "sub_sync_interval",
-	"custom_rules", "block", "target", "source_ip", "reason", "created_at",
+	"custom_rules", "block", "target", "source_ip", "reason", "ruleset_url", "rule_count", "preview", "created_at",
 	"outbounds", "tag", "default", "tolerance", "interrupt_exist_connections",
 	"route", "dns", "dns_port", "web_port",
 	"audit", "whitelist", "ai", "endpoint", "api_key", "model",

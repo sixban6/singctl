@@ -27,7 +27,12 @@ const (
 //   - 全局域名/IP 拦截: ||example.com^$important
 //   - 指定内网设备拦截: ||example.com^$client=192.168.1.55,important
 func FormatAdGuardBlockRule(b config.BlockRule) string {
-	target := normalizeAdGuardTarget(b.Target)
+	raw := strings.TrimSpace(b.Target)
+	if strings.HasPrefix(strings.ToLower(raw), "ruleset:") {
+		// 规则集封禁由 sing-box 原生 rule_set (DNS + Route 双层 reject) 承载，不在 AdGuard Home 中展开成千上万行
+		return ""
+	}
+	target := normalizeAdGuardTarget(raw)
 	if target == "" {
 		return ""
 	}
