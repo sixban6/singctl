@@ -35,7 +35,7 @@ func NewAdvisor(cfg config.AuditAIConfig) *Advisor {
 	}
 	return &Advisor{
 		cfg:        cfg,
-		httpClient: &http.Client{Timeout: 15 * time.Second},
+		httpClient: &http.Client{Timeout: 35 * time.Second},
 	}
 }
 
@@ -73,20 +73,20 @@ func (a *Advisor) ReviewSuspiciousFlows(ctx context.Context, flows []FlowRecord,
 	for i := range flows {
 		if flows[i].RiskScore >= 35 || flows[i].Threat != ThreatNormal {
 			candidatesIdx = append(candidatesIdx, i)
-			if len(candidatesIdx) >= 12 {
+			if len(candidatesIdx) >= 8 {
 				break
 			}
 		}
 	}
-	// 当用户主动触发 AI 研判但当前最高分尚未达到 35 分时，自动纳入排名前 10 的非白名单上传流进行深度研判
-	if len(candidatesIdx) < 10 {
+	// 当用户主动触发 AI 研判但当前最高分尚未达到 35 分时，自动纳入排名前 8 的非白名单上传流进行深度研判
+	if len(candidatesIdx) < 8 {
 		for i := range flows {
 			if slices.Contains(candidatesIdx, i) {
 				continue
 			}
 			if flows[i].State != EnforcementWhitelisted && (flows[i].RiskScore >= 8 || flows[i].UploadBytes >= 16384) {
 				candidatesIdx = append(candidatesIdx, i)
-				if len(candidatesIdx) >= 10 {
+				if len(candidatesIdx) >= 8 {
 					break
 				}
 			}
@@ -101,12 +101,15 @@ func (a *Advisor) ReviewSuspiciousFlows(ctx context.Context, flows []FlowRecord,
 		callerIP = strings.TrimSpace(callerIPs[0])
 	}
 
+	llmCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 35*time.Second)
+	defer cancel()
+
 	// 1. 按三级自适应优先级尝试请求 Magpie (:3425) 或自定义 OpenAI 兼容网关
 	for _, ep := range a.candidateEndpoints(callerIP) {
-		if !probeEndpointReachable(ep, 450*time.Millisecond) {
+		if !probeEndpointReachable(ep, 600*time.Millisecond) {
 			continue
 		}
-		if results, err := a.queryRemoteLLM(ctx, ep, flows, candidatesIdx); err == nil && len(results) > 0 {
+		if results, err := a.queryRemoteLLM(llmCtx, ep, flows, candidatesIdx); err == nil && len(results) > 0 {
 			for _, idx := range candidatesIdx {
 				if rev, ok := results[flows[idx].Key]; ok {
 					flows[idx].AIReview = rev
@@ -262,27 +265,40 @@ func (a *Advisor) queryRemoteLLM(ctx context.Context, endpoint string, flows []F
 }
 
 func (a *Advisor) callChatCompletions(ctx context.Context, endpoint, model, sysPrompt, userPayload string) (string, string, error) {
-	reqBody, _ := json.Marshal(map[string]any{
-		"model":       model,
-		"temperature": 0.1,
-		"messages": []map[string]string{
-			{"role": "system", "content": sysPrompt},
-			{"role": "user", "content": userPayload},
-		},
-	})
+	doPost := func(withLowReasoning bool) (*http.Response, error) {
+		payload := map[string]any{
+			"model":       model,
+			"temperature": 0.1,
+			"messages": []map[string]string{
+				{"role": "system", "content": sysPrompt},
+				{"role": "user", "content": userPayload},
+			},
+		}
+		if withLowReasoning {
+			payload["reasoning_effort"] = "low"
+		}
+		reqBody, _ := json.Marshal(payload)
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(reqBody))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if a.cfg.APIKey != "" {
+			req.Header.Set("Authorization", "Bearer "+a.cfg.APIKey)
+		}
+		return a.httpClient.Do(req)
+	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(reqBody))
+	resp, err := doPost(true)
 	if err != nil {
 		return "", model, err
 	}
-	req.Header.Set("Content-Type", "application/json")
-	if a.cfg.APIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+a.cfg.APIKey)
-	}
-
-	resp, err := a.httpClient.Do(req)
-	if err != nil {
-		return "", model, err
+	if resp.StatusCode == http.StatusBadRequest {
+		_ = resp.Body.Close()
+		resp, err = doPost(false)
+		if err != nil {
+			return "", model, err
+		}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {

@@ -477,6 +477,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; ba
             <option value="privacy">👁️ 仅看隐私追踪</option>
           </select>
           <label class="btn btn-sm" style="cursor:pointer;"><input type="checkbox" id="audit-only-suspect" style="accent-color:var(--accent);"> 仅看关注/高危</label>
+          <button class="btn btn-sm" id="btn-audit-blocklist-toggle" title="展开/收起双层黑名单管理抽屉">🚫 黑名单管理 <span class="badge dim" id="audit-block-count-badge" style="margin-left:3px;">0</span></button>
           <button class="btn btn-sm" id="btn-audit-ai-cfg" title="配置 AI 网关 BaseURL、密钥与模型">⚙️ AI 网关配置</button>
           <button class="btn btn-sm" id="btn-audit-ai">🤖 AI 深度研判</button>
           <button class="btn btn-sm" id="btn-audit-export-csv" title="导出纯 UTF-8 (无 BOM) CSV 明细表">📥 导出 CSV</button>
@@ -484,12 +485,30 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; ba
           <label class="btn btn-sm" style="cursor:pointer;"><input type="checkbox" id="audit-auto" checked style="accent-color:var(--accent);"> 自动刷新 (5秒)</label>
         </div>
       </div>
+
+      <!-- 顶部可折叠抽屉 1：双层黑名单管理 (无需滚到底部，随时一键管理与手动拉黑) -->
+      <div id="audit-blocklist-drawer" style="display:none;margin-bottom:14px;padding:12px 14px;border-radius:12px;border:1px solid var(--border);background:var(--card-2);">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px;">
+          <div style="font-weight:600;font-size:13px;display:flex;align-items:center;gap:6px;">
+            <span>🚫 双层黑名单管理 (Sing-Box 路由阻断 + AdGuard DNS 拦截)</span>
+          </div>
+          <div class="btn-row">
+            <input type="text" id="manual-block-target" placeholder="输入域名或IP (如 bad.example.com)" style="padding:6px 10px;border-radius:9px;border:1px solid var(--border);background:var(--input-bg);color:var(--text);font-size:12.5px;width:230px;">
+            <button class="btn btn-sm btn-danger" id="btn-manual-block" type="button">+ 手动拉黑</button>
+            <button class="btn btn-sm" id="btn-audit-blocklist-close" type="button">收起 ▲</button>
+          </div>
+        </div>
+        <div id="audit-blocklist-box"></div>
+      </div>
+
+      <!-- 顶部可折叠抽屉 2：AI 审计网关配置 (保存后自动收起) -->
       <div id="audit-ai-cfg-box" style="display:none;margin-bottom:14px;padding:12px 14px;border-radius:12px;border:1px solid var(--border);background:var(--card-2);">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px;">
           <div style="font-weight:600;font-size:13px;">⚙️ AI 审计网关配置 (支持本地 Magpie 反代网关 / OpenAI 兼容接口)</div>
           <div class="btn-row">
             <button class="btn btn-sm" id="btn-audit-fill-lan" type="button">填入本机 Magpie 局域网地址</button>
-            <button class="btn btn-sm btn-primary" id="btn-audit-ai-save" type="button">保存网关配置</button>
+            <button class="btn btn-sm btn-primary" id="btn-audit-ai-save" type="button">保存并收起</button>
+            <button class="btn btn-sm" id="btn-audit-ai-close" type="button">收起 ▲</button>
           </div>
         </div>
         <div class="grid c3" style="margin-bottom:6px;">
@@ -506,31 +525,20 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; ba
             <input type="text" id="audit-ai-model" value="antigravity/gemini-3.8-flash" placeholder="antigravity/gemini-3.8-flash">
           </div>
         </div>
-        <div class="hint" style="margin-top:4px;">默认使用 <code>antigravity/gemini-3.8-flash</code> 模型。若留空 BaseURL，系统将按「127.0.0.1:3425 → 当前电脑局域网IP:3425 → 离线专家库」自动探测。</div>
+        <div class="hint" style="margin-top:4px;">默认使用 <code>antigravity/gemini-3.8-flash</code> 模型。若留空 BaseURL，系统将按「配置网关 → 127.0.0.1:3425 → 当前电脑局域网IP:3425 → 离线专家库」自动探测。</div>
       </div>
+
       <div class="hint" style="margin-top:0;margin-bottom:12px;">
         采用 <b>🛡️ 安全 × 👁️ 隐私 双轴正交非线性风险引擎</b>（极值包络合成，互不稀释），点击「一键拉黑」将同时写入 <code>sing-box reject</code> 与 <code>AdGuard Home DNS</code> 并立即掐断活跃连接。
       </div>
       <div id="audit-devices-box"></div>
     </div>
 
-    <div class="card" style="margin-bottom:14px;">
+    <div class="card">
       <div class="card-head">
         <div class="card-title"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>连接行为与可疑上传明细</div>
       </div>
       <div id="audit-flows-box"><div class="empty"><span class="spin-inline"></span></div></div>
-    </div>
-
-    <div class="card">
-      <div class="card-head" style="flex-wrap:wrap;">
-        <div class="card-title"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m4.9 4.9 14.2 14.2"/></svg>双层黑名单管理 (Sing-Box 路由 + AdGuard DNS)</div>
-        <div class="btn-row">
-          <input type="text" id="manual-block-target" placeholder="输入域名或IP (如 bad.example.com)" style="padding:6px 10px;border-radius:9px;border:1px solid var(--border);background:var(--input-bg);color:var(--text);font-size:12.5px;width:210px;">
-          <input type="text" id="manual-block-device" placeholder="限定设备IP (可选)" style="padding:6px 10px;border-radius:9px;border:1px solid var(--border);background:var(--input-bg);color:var(--text);font-size:12.5px;width:135px;">
-          <button class="btn btn-sm btn-danger" id="btn-manual-block">+ 手动拉黑</button>
-        </div>
-      </div>
-      <div id="audit-blocklist-box"></div>
     </div>
   </section>
 
@@ -1387,6 +1395,7 @@ function fmtBytes(b) {
 
 const auditAICache = new Map();
 let suggestedMagpieLanURL = "http://127.0.0.1:3425/v1";
+let auditAILoading = false;
 
 async function loadAuditAIConfig() {
   try {
@@ -1411,7 +1420,8 @@ async function saveAuditAIConfig() {
       body: JSON.stringify({ baseUrl, apiKey, model }),
     });
     $("#audit-ai-model").value = res.model || model;
-    toast("ok", res.message || "AI 网关配置已保存");
+    if ($("#audit-ai-cfg-box")) $("#audit-ai-cfg-box").style.display = "none";
+    toast("ok", res.message || "AI 网关配置已保存并收起");
   } catch (e) {
     toast("err", "保存 AI 网关配置失败: " + e.message);
   }
@@ -1419,7 +1429,7 @@ async function saveAuditAIConfig() {
 
 async function loadAudit(withAI = false, silent = false) {
   const panel = $("#panel-audit");
-  if (silent && (!panel || !panel.classList.contains("active"))) return;
+  if (silent && (!panel || !panel.classList.contains("active") || auditAILoading)) return;
 
   const dev = ($("#audit-device-filter").value || "").trim();
   const susp = $("#audit-only-suspect").checked ? "1" : "";
@@ -1430,16 +1440,24 @@ async function loadAudit(withAI = false, silent = false) {
   if (withAI) qs.set("ai", "1");
 
   const aiBtn = $("#btn-audit-ai");
-  if (withAI && aiBtn) {
-    aiBtn.disabled = true;
-    aiBtn.innerHTML = '<span class="spin-inline"></span> AI 研判中…';
+  if (withAI) {
+    auditAILoading = true;
+    if (aiBtn) {
+      aiBtn.disabled = true;
+      aiBtn.innerHTML = '<span class="spin-inline"></span> AI 研判中…';
+    }
   }
 
   try {
     const rep = await api("/api/audit?" + qs.toString());
     const nowStr = new Date().toLocaleTimeString();
+    const blockCnt = rep.blockedCount || (rep.blockRules ? rep.blockRules.length : 0);
     $("#audit-summary-note").textContent =
-      `总流 ${rep.totalFlows || 0} 条 · 可疑/高危 ${rep.suspiciousFlows || 0} 条 · 已封禁 ${rep.blockedCount || 0} 条 · 更新于 ${nowStr}`;
+      `总流 ${rep.totalFlows || 0} 条 · 可疑/高危 ${rep.suspiciousFlows || 0} 条 · 已封禁 ${blockCnt} 条 · 更新于 ${nowStr}`;
+    if ($("#audit-block-count-badge")) {
+      $("#audit-block-count-badge").textContent = String(blockCnt);
+      $("#audit-block-count-badge").className = "badge " + (blockCnt > 0 ? "warn" : "dim");
+    }
 
     // 1. 设备上传排行
     const devs = rep.devices || [];
@@ -1470,6 +1488,31 @@ async function loadAudit(withAI = false, silent = false) {
 
     // 2. 连接行为与可疑上传明细 (支持按安全/隐私轴过滤)
     const rawFlows = rep.flows || [];
+    let llmHitCount = 0;
+    let llmSourceName = "";
+    rawFlows.forEach(f => {
+      const cacheKey = f.key || f.id || `${f.deviceIp}->${f.target}`;
+      if (f.aiReview) {
+        const prev = auditAICache.get(cacheKey);
+        const isNewLLM = f.aiReview.source && f.aiReview.source !== "builtin_expert";
+        const hadPrevLLM = prev && prev.source && prev.source !== "builtin_expert";
+        if (isNewLLM || !hadPrevLLM) {
+          auditAICache.set(cacheKey, f.aiReview);
+        }
+        if (isNewLLM) {
+          llmHitCount++;
+          if (!llmSourceName) llmSourceName = f.aiReview.source;
+        }
+      }
+    });
+    if (withAI) {
+      if (llmHitCount > 0) {
+        toast("ok", `🤖 已通过 ${llmSourceName} 完成 ${llmHitCount} 条高优流深度研判`);
+      } else {
+        toast("info", "🤖 AI 网关未响应，已使用内置离线专家库完成兜底研判");
+      }
+    }
+
     const flows = rawFlows.filter(f => {
       if (axisFilter === "security") return (f.securityScore || 0) >= 15 || f.dominantAxis === "security" || f.dominantAxis === "both";
       if (axisFilter === "privacy") return (f.privacyScore || 0) >= 15 || f.dominantAxis === "privacy" || f.dominantAxis === "both";
@@ -1488,8 +1531,7 @@ async function loadAudit(withAI = false, silent = false) {
             const targetDisp = f.isDirectIp && f.destPort ? `${f.target}:${f.destPort}` : f.target;
             const appPillHtml = f.appName ? `<div><span class="app-pill">🏷️ ${esc(f.appName)}</span></div>` : "";
             const cacheKey = f.key || f.id || `${f.deviceIp}->${f.target}`;
-            if (f.aiReview) auditAICache.set(cacheKey, f.aiReview);
-            const aiRev = f.aiReview || auditAICache.get(cacheKey);
+            const aiRev = auditAICache.get(cacheKey) || f.aiReview;
             let aiHtml = "";
             if (aiRev) {
               const cardCls = aiRev.verdict === "safe_to_block" ? "safe" : (aiRev.verdict === "caution" ? "caution" : "keep");
@@ -1528,28 +1570,31 @@ async function loadAudit(withAI = false, silent = false) {
         </table></div>`;
     }
 
-    // 3. 当前生效黑名单
+    // 3. 当前生效黑名单 (顶部折叠抽屉内渲染)
     const rules = rep.blockRules || [];
     if (!rules.length) {
-      $("#audit-blocklist-box").innerHTML = '<div class="empty">当前暂无拉黑规则</div>';
+      $("#audit-blocklist-box").innerHTML = '<div class="empty" style="padding:14px;">当前暂无拉黑规则</div>';
     } else {
       $("#audit-blocklist-box").innerHTML = `
         <div class="table-wrap"><table class="tbl">
-          <thead><tr><th>被拉黑目标 (域名 / IP)</th><th>作用设备范围</th><th>拉黑原因</th><th>操作</th></tr></thead>
+          <thead><tr><th>被拉黑目标 (域名 / IP)</th><th>作用范围</th><th>拉黑原因</th><th style="width:90px;">操作</th></tr></thead>
           <tbody>${rules.map(r => `<tr>
             <td class="mono"><b>${esc(r.target)}</b></td>
-            <td class="mono">${esc(r.source_ip || "全局 (所有设备)")}</td>
+            <td class="mono col-nowrap">${esc(r.source_ip || "全局 (所有设备)")}</td>
             <td style="font-size:12px;color:var(--muted);">${esc(r.reason || "-")}</td>
-            <td><button class="btn btn-sm" onclick="unblockAuditTarget('${esc(r.target)}','${esc(r.source_ip || "")}')">一键解封</button></td>
+            <td class="col-nowrap"><button class="btn btn-sm" onclick="unblockAuditTarget('${esc(r.target)}','${esc(r.source_ip || "")}')">一键解封</button></td>
           </tr>`).join("")}</tbody>
         </table></div>`;
     }
   } catch (e) {
     if (!silent) toast("err", "加载设备审计失败: " + e.message);
   } finally {
-    if (withAI && aiBtn) {
-      aiBtn.disabled = false;
-      aiBtn.textContent = "🤖 AI 深度研判";
+    if (withAI) {
+      auditAILoading = false;
+      if (aiBtn) {
+        aiBtn.disabled = false;
+        aiBtn.textContent = "🤖 AI 深度研判";
+      }
     }
   }
 }
@@ -1623,11 +1668,22 @@ async function exportAuditCSV() {
 $("#btn-audit-refresh").onclick = () => loadAudit(false);
 $("#btn-audit-ai").onclick = () => loadAudit(true);
 $("#btn-audit-export-csv").onclick = () => exportAuditCSV();
+$("#btn-audit-blocklist-toggle").onclick = () => {
+  const drawer = $("#audit-blocklist-drawer");
+  const isHidden = drawer.style.display === "none";
+  drawer.style.display = isHidden ? "block" : "none";
+};
+$("#btn-audit-blocklist-close").onclick = () => {
+  $("#audit-blocklist-drawer").style.display = "none";
+};
 $("#btn-audit-ai-cfg").onclick = () => {
   const box = $("#audit-ai-cfg-box");
   const isHidden = box.style.display === "none";
   box.style.display = isHidden ? "block" : "none";
   if (isHidden) loadAuditAIConfig();
+};
+$("#btn-audit-ai-close").onclick = () => {
+  $("#audit-ai-cfg-box").style.display = "none";
 };
 $("#btn-audit-fill-lan").onclick = () => {
   $("#audit-ai-baseurl").value = suggestedMagpieLanURL;
@@ -1640,9 +1696,8 @@ $("#audit-auto").onchange = () => { if ($("#audit-auto").checked) loadAudit(fals
 setInterval(() => { if ($("#audit-auto") && $("#audit-auto").checked) loadAudit(false, true); }, 5000);
 $("#btn-manual-block").onclick = () => {
   const t = ($("#manual-block-target").value || "").trim();
-  const d = ($("#manual-block-device").value || "").trim();
   if (!t) { toast("warn", "请输入要拉黑的域名或 IP"); return; }
-  window.blockAuditTarget(t, d, "WebUI 手动拉黑").then(() => {
+  window.blockAuditTarget(t, "", "WebUI 手动拉黑").then(() => {
     $("#manual-block-target").value = "";
   });
 };

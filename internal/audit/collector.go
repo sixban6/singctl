@@ -178,13 +178,14 @@ func (c *Collector) Collect(ctx context.Context, opts CollectOptions) *Report {
 
 	state := c.loadStateLocked()
 	devDirectory := c.resolveLANDevicesLocked()
+	selfIPs := collectLocalInterfaceIPs()
 
 	connsResp, usedAddr, err := c.fetchConnectionsLocked(ctx)
 	activeByKey := make(map[string][]string)
 	if err == nil && connsResp != nil {
 		rep.Reachable = true
 		rep.ControllerAddr = usedAddr
-		c.ingestConnectionsLocked(state, connsResp.Connections, devDirectory, activeByKey, now)
+		c.ingestConnectionsLocked(state, connsResp.Connections, devDirectory, selfIPs, activeByKey, now)
 		c.saveStateLocked(state, now)
 	} else {
 		rep.Reachable = false
@@ -201,8 +202,9 @@ func (c *Collector) Collect(ctx context.Context, opts CollectOptions) *Report {
 	deviceAgg := make(map[string]*DeviceSummary)
 
 	for _, entry := range state.Flows {
+		normDevIP := normalizeSourceDeviceIP(entry.DeviceIP, selfIPs)
 		devName, devMAC := entry.DeviceName, entry.DeviceMAC
-		if info, ok := devDirectory[entry.DeviceIP]; ok {
+		if info, ok := devDirectory[normDevIP]; ok {
 			if info.Name != "" {
 				devName = info.Name
 			}
@@ -210,18 +212,17 @@ func (c *Collector) Collect(ctx context.Context, opts CollectOptions) *Report {
 				devMAC = info.MAC
 			}
 		}
-		if devName == "" {
-			if entry.DeviceIP == "127.0.0.1" || entry.DeviceIP == "::1" {
-				devName = "本机网关 (Localhost)"
-			} else {
-				devName = entry.DeviceIP
-			}
+		if normDevIP == "127.0.0.1" || normDevIP == "::1" {
+			devName = "本机网关 (Localhost)"
+			devMAC = ""
+		} else if devName == "" {
+			devName = normDevIP
 		}
 
 		activeIDs := activeByKey[entry.Key]
 		rec := FlowRecord{
 			Key:           entry.Key,
-			DeviceIP:      entry.DeviceIP,
+			DeviceIP:      normDevIP,
 			DeviceName:    devName,
 			DeviceMAC:     devMAC,
 			DeviceRole:    InferDeviceRole(devName),
@@ -390,6 +391,7 @@ func (c *Collector) ingestConnectionsLocked(
 	state *persistedAuditState,
 	conns []clashConnection,
 	devDir map[string]lanDeviceInfo,
+	selfIPs map[string]bool,
 	activeByKey map[string][]string,
 	now time.Time,
 ) {
@@ -398,7 +400,8 @@ func (c *Collector) ingestConnectionsLocked(
 	isNight := hour >= 1 && hour <= 5
 
 	for _, conn := range conns {
-		srcIP := cmp.Or(strings.TrimSpace(conn.Metadata.SourceIP), "127.0.0.1")
+		rawSrc := cmp.Or(strings.TrimSpace(conn.Metadata.SourceIP), "127.0.0.1")
+		srcIP := normalizeSourceDeviceIP(rawSrc, selfIPs)
 		rawHost := cmp.Or(strings.TrimSpace(conn.Metadata.SniffHost), strings.TrimSpace(conn.Metadata.Host))
 		destIP := strings.TrimSpace(conn.Metadata.DestinationIP)
 		network := strings.ToLower(cmp.Or(strings.TrimSpace(conn.Metadata.Network), "tcp"))
@@ -673,4 +676,53 @@ func (c *Collector) saveStateLocked(st *persistedAuditState, now time.Time) {
 		_ = os.Chmod(tmpPath, 0600)
 		_ = os.Rename(tmpPath, c.statePath)
 	}
+}
+
+// collectLocalInterfaceIPs 枚举当前软路由/主机所有网卡绑定的本机 IP（含 pppoe-wan 公网 IP、br-lan 网关 IP 等）。
+func collectLocalInterfaceIPs() map[string]bool {
+	out := map[string]bool{
+		"127.0.0.1": true,
+		"::1":       true,
+	}
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return out
+	}
+	for _, a := range addrs {
+		switch v := a.(type) {
+		case *net.IPNet:
+			if v.IP != nil {
+				out[v.IP.String()] = true
+			}
+		case *net.IPAddr:
+			if v.IP != nil {
+				out[v.IP.String()] = true
+			}
+		}
+	}
+	return out
+}
+
+// normalizeSourceDeviceIP 将软路由本机发出的连接（源 IP 为本机 WAN 公网 IP 或网关自身接口 IP）统一归并为 127.0.0.1 (本机网关)。
+func normalizeSourceDeviceIP(rawIP string, selfIPs map[string]bool) string {
+	ipStr := strings.TrimSpace(rawIP)
+	if ipStr == "" || selfIPs[ipStr] {
+		return "127.0.0.1"
+	}
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return ipStr
+	}
+	if ip.IsLoopback() {
+		return "127.0.0.1"
+	}
+	// 局域网私有网段 (10/8, 172.16/12, 192.168/16, fc00::/7) 与 Tailscale CGNAT (100.64/10) 保留真实内网设备 IP
+	if ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+		return ipStr
+	}
+	if ip4 := ip.To4(); ip4 != nil && ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127 {
+		return ipStr
+	}
+	// 其余非私网公网源 IP 均来自软路由 pppoe-wan 本机 output 链透明劫持，统一归入本机网关
+	return "127.0.0.1"
 }
