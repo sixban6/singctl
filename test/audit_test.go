@@ -467,3 +467,31 @@ func TestWebUI_AuditEndpointsAndAntiScraper(t *testing.T) {
 		t.Fatalf("expected AI gateway config persisted with default model antigravity/gemini-3.8-flash, got %+v (err=%v)", reloadedCfg.Audit.AI, err)
 	}
 }
+
+func TestSortFlows(t *testing.T) {
+	flows := []audit.FlowRecord{
+		{Target: "a.example.com", Threat: audit.ThreatNormal, RiskScore: 10, UploadBytes: 5000, DownloadBytes: 900000, UploadRatio: 0.1},
+		{Target: "b.example.com", Threat: audit.ThreatHighRisk, RiskScore: 88, UploadBytes: 1000, DownloadBytes: 2000, UploadRatio: 0.5},
+		{Target: "c.example.com", Threat: audit.ThreatSuspicious, RiskScore: 60, UploadBytes: 99000, DownloadBytes: 1000, UploadRatio: 99.0},
+	}
+
+	audit.SortFlows(flows, "upload", false)
+	if flows[0].Target != "c.example.com" || flows[2].Target != "b.example.com" {
+		t.Fatalf("upload desc failed: %+v", flows)
+	}
+
+	audit.SortFlows(flows, "download", false)
+	if flows[0].Target != "a.example.com" {
+		t.Fatalf("download desc failed: %+v", flows)
+	}
+
+	audit.SortFlows(flows, "ratio", true)
+	if flows[0].Target != "a.example.com" || flows[2].Target != "c.example.com" {
+		t.Fatalf("ratio asc failed: %+v", flows)
+	}
+
+	audit.SortFlows(flows, "risk", false)
+	if flows[0].Target != "b.example.com" {
+		t.Fatalf("risk desc failed: %+v", flows)
+	}
+}

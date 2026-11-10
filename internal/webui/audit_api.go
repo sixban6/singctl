@@ -98,6 +98,8 @@ func (s *Server) handleAuditGet(w http.ResponseWriter, r *http.Request) {
 		EnableAI:     q.Get("ai") == "1" || q.Get("ai") == "true" || exportFormat != "",
 		CallerIP:     callerHost,
 		Limit:        limit,
+		SortBy:       strings.ToLower(strings.TrimSpace(q.Get("sort"))),
+		SortAsc:      strings.EqualFold(strings.TrimSpace(q.Get("dir")), "asc"),
 	}
 
 	collector := audit.NewCollector(cfg)

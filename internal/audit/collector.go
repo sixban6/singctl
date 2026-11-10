@@ -159,6 +159,8 @@ type CollectOptions struct {
 	EnableAI     bool   // 是否触发 L2 AI / 专家顾问研判
 	CallerIP     string // 触发请求的客户端局域网 IP（用于自适应探测调用方本机 Magpie :3425 网关）
 	Limit        int    // 最大返回流数量 (默认 100)
+	SortBy       string // 排序字段: "risk" (默认) | "upload" | "download" | "ratio"
+	SortAsc      bool   // 是否升序排列 (默认 false 即降序)
 }
 
 // Collect 采样当前活跃连接、合并历史增量窗口、运行非线性风险引擎并生成完整审计报告。
@@ -318,16 +320,8 @@ func (c *Collector) Collect(ctx context.Context, opts CollectOptions) *Report {
 		return cmp.Compare(b.UploadBytes, a.UploadBytes)
 	})
 
-	// 流量列表按威胁等级 -> 风险分 -> 上传流量降序排列
-	slices.SortFunc(allFlows, func(a, b FlowRecord) int {
-		if c := cmp.Compare(b.Threat.SeverityRank(), a.Threat.SeverityRank()); c != 0 {
-			return c
-		}
-		if c := cmp.Compare(b.RiskScore, a.RiskScore); c != 0 {
-			return c
-		}
-		return cmp.Compare(b.UploadBytes, a.UploadBytes)
-	})
+	// 流量列表在截断 Top-N 前按指定字段（默认：威胁等级 -> 评分 -> 上传流量）排序
+	SortFlows(allFlows, opts.SortBy, opts.SortAsc)
 
 	limit := opts.Limit
 	if limit <= 0 {
@@ -729,4 +723,62 @@ func normalizeSourceDeviceIP(rawIP string, selfIPs map[string]bool) string {
 	}
 	// 其余非私网公网源 IP 均来自软路由 pppoe-wan 本机 output 链透明劫持，统一归入本机网关
 	return "127.0.0.1"
+}
+
+// SortFlows 对审计流记录按指定字段（"risk" | "upload" | "download" | "ratio"）执行稳定排序。
+func SortFlows(flows []FlowRecord, sortBy string, asc bool) {
+	key := strings.ToLower(strings.TrimSpace(sortBy))
+	slices.SortFunc(flows, func(a, b FlowRecord) int {
+		var c int
+		switch key {
+		case "upload":
+			c = cmp.Compare(b.UploadBytes, a.UploadBytes)
+			if asc {
+				c = -c
+			}
+			if c != 0 {
+				return c
+			}
+			if r := cmp.Compare(b.RiskScore, a.RiskScore); r != 0 {
+				return r
+			}
+			return cmp.Compare(b.DownloadBytes, a.DownloadBytes)
+		case "download":
+			c = cmp.Compare(b.DownloadBytes, a.DownloadBytes)
+			if asc {
+				c = -c
+			}
+			if c != 0 {
+				return c
+			}
+			if r := cmp.Compare(b.RiskScore, a.RiskScore); r != 0 {
+				return r
+			}
+			return cmp.Compare(b.UploadBytes, a.UploadBytes)
+		case "ratio":
+			c = cmp.Compare(b.UploadRatio, a.UploadRatio)
+			if asc {
+				c = -c
+			}
+			if c != 0 {
+				return c
+			}
+			if u := cmp.Compare(b.UploadBytes, a.UploadBytes); u != 0 {
+				return u
+			}
+			return cmp.Compare(b.RiskScore, a.RiskScore)
+		default: // "risk"
+			if t := cmp.Compare(b.Threat.SeverityRank(), a.Threat.SeverityRank()); t != 0 {
+				c = t
+			} else if r := cmp.Compare(b.RiskScore, a.RiskScore); r != 0 {
+				c = r
+			} else {
+				c = cmp.Compare(b.UploadBytes, a.UploadBytes)
+			}
+			if asc {
+				c = -c
+			}
+			return c
+		}
+	})
 }

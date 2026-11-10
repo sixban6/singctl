@@ -319,6 +319,11 @@ tr.dual-alert-row:hover td { background: linear-gradient(90deg, rgba(239, 68, 68
 tr.dual-alert-row td:first-child { box-shadow: inset 4px 0 0 var(--err); }
 .dual-alert-pill { display: inline-flex; align-items: center; gap: 4px; margin-top: 5px; padding: 2px 7px; border-radius: 6px; font-size: 11px; font-weight: 700; color: #fff; background: linear-gradient(135deg, #ef4444, #d97706); box-shadow: 0 2px 8px rgba(239, 68, 68, .35); white-space: nowrap; }
 .btn-danger-pulse { box-shadow: 0 0 0 2px rgba(239, 68, 68, .35), 0 3px 10px rgba(239, 68, 68, .32); font-weight: 700; }
+th.th-sort { cursor: pointer; user-select: none; transition: color .15s, background .15s; }
+th.th-sort:hover { color: var(--text); background: var(--border); }
+th.th-sort.active { color: var(--accent); }
+th.th-sort .sort-ind { display: inline-block; margin-left: 3px; font-size: 11px; opacity: .55; }
+th.th-sort.active .sort-ind { opacity: 1; font-weight: 800; }
 </style>
 </head>
 <body>
@@ -480,16 +485,16 @@ tr.dual-alert-row td:first-child { box-shadow: inset 4px 0 0 var(--err); }
   <section class="panel" id="panel-audit">
     <div class="card" style="margin-bottom:14px;">
       <div class="card-head" style="flex-wrap:wrap;">
-        <div class="card-title"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>局域网设备上传审计与一键双层拉黑 <span class="card-note" id="audit-summary-note"></span></div>
+        <div class="card-title"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>局域网设备流量审计与一键拉黑 <span class="card-note" id="audit-summary-note"></span></div>
         <div class="btn-row">
           <input type="text" id="audit-device-filter" placeholder="过滤设备名或内网IP…" style="padding:6px 10px;border-radius:9px;border:1px solid var(--border);background:var(--input-bg);color:var(--text);font-size:12.5px;width:150px;">
           <select id="audit-axis-filter" class="btn btn-sm" style="padding:5.5px 8px;">
-            <option value="">全部维度 (🛡️安全 + 👁️隐私)</option>
+            <option value="">全部类型 (安全 + 隐私)</option>
             <option value="security">🛡️ 仅看安全异常</option>
             <option value="privacy">👁️ 仅看隐私追踪</option>
           </select>
           <label class="btn btn-sm" style="cursor:pointer;"><input type="checkbox" id="audit-only-suspect" style="accent-color:var(--accent);"> 仅看关注/高危</label>
-          <button class="btn btn-sm" id="btn-audit-blocklist-toggle" title="展开/收起双层黑名单管理抽屉">🚫 黑名单管理 <span class="badge dim" id="audit-block-count-badge" style="margin-left:3px;">0</span></button>
+          <button class="btn btn-sm" id="btn-audit-blocklist-toggle" title="展开/收起黑名单管理抽屉">🚫 黑名单管理 <span class="badge dim" id="audit-block-count-badge" style="margin-left:3px;">0</span></button>
           <button class="btn btn-sm" id="btn-audit-ai-cfg" title="配置 AI 网关 BaseURL、密钥与模型">⚙️ AI 网关配置</button>
           <label class="btn btn-sm" style="cursor:pointer;"><input type="checkbox" id="audit-auto" checked style="accent-color:var(--accent);"> 自动刷新 (5秒)</label>
           <label class="btn btn-sm" style="cursor:pointer;" title="开启后自动对当前屏幕可见行及向下 2x 预取缓冲区执行 AI 深度研判"><input type="checkbox" id="audit-ai-enable" checked style="accent-color:var(--accent);"> 🤖 AI 深度研判 <span id="audit-ai-status" style="font-size:11px;color:var(--muted);"></span></label>
@@ -497,11 +502,11 @@ tr.dual-alert-row td:first-child { box-shadow: inset 4px 0 0 var(--err); }
         </div>
       </div>
 
-      <!-- 顶部可折叠抽屉 1：双层黑名单管理 (支持单条域名/IP 与远程 .srs/.json 规则集整包导入，单行聚合不展开) -->
+      <!-- 顶部可折叠抽屉 1：黑名单管理 (支持单条域名/IP 与远程 .srs/.json 规则集整包导入，单行聚合不展开) -->
       <div id="audit-blocklist-drawer" style="display:none;margin-bottom:14px;padding:12px 14px;border-radius:12px;border:1px solid var(--border);background:var(--card-2);">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px;">
           <div style="font-weight:600;font-size:13px;display:flex;align-items:center;gap:6px;">
-            <span>🚫 双层黑名单管理 (支持单条域名/IP & 网上 <code>.srs / .json</code> 规则集整包导入)</span>
+            <span>🚫 黑名单管理 (支持单条域名/IP & 网上 <code>.srs / .json</code> 规则集整包导入)</span>
           </div>
           <div class="btn-row" style="flex-wrap:wrap;">
             <select id="preset-ruleset-select" class="btn btn-sm" style="padding:5.5px 8px;max-width:225px;" title="选择主流 GitHub 规则集一键填入导入">
@@ -558,7 +563,7 @@ tr.dual-alert-row td:first-child { box-shadow: inset 4px 0 0 var(--err); }
       </div>
 
       <div class="hint" style="margin-top:0;margin-bottom:12px;">
-        采用 <b>🛡️ 安全 × 👁️ 隐私 双轴正交非线性风险引擎</b>（极值包络合成，互不稀释），点击「一键拉黑」将同时写入 <code>sing-box reject</code> 与 <code>AdGuard Home DNS</code> 并立即掐断活跃连接。
+        自动识别内网设备的安全异常与隐私追踪行为，点击「一键拉黑」将同时在 <code>sing-box</code> 路由与 <code>AdGuard Home DNS</code> 拦截并立即断开活跃连接。
       </div>
       <div id="audit-devices-box"></div>
     </div>
@@ -1531,7 +1536,7 @@ function isDualAlertRow(f) {
 
 function buildDualAlertBadgeHTML(f) {
   return isDualAlertRow(f)
-    ? `<div class="dual-alert-pill" title="程序双轴评分与 AI 语义研判同时认定该连接存在不良上报/风险，且可安全阻断">🚨 双重高危确诊 · 建议拉黑</div>`
+    ? `<div class="dual-alert-pill" title="程序评分与 AI 研判同时认定该连接存在不良上报/风险，且可安全阻断">🚨 双重高危确诊 · 建议拉黑</div>`
     : "";
 }
 
@@ -1599,6 +1604,74 @@ function updateAISlotsInDOM() {
 
 let auditActionInFlight = 0;
 let auditPointerDownUntil = 0;
+let auditSortBy = "risk";   // "risk" | "upload" | "download" | "ratio"
+let auditSortDir = "desc";  // "desc" | "asc"
+
+function threatSeverityRank(t) {
+  if (t === "high_risk") return 3;
+  if (t === "suspicious") return 2;
+  if (t === "notice") return 1;
+  return 0;
+}
+
+function sortFlowsInPlace(flows) {
+  if (!Array.isArray(flows) || flows.length <= 1) return flows;
+  const asc = auditSortDir === "asc";
+  const sign = asc ? -1 : 1;
+  flows.sort((a, b) => {
+    if (auditSortBy === "upload") {
+      const c = ((b.uploadBytes || 0) - (a.uploadBytes || 0)) * sign;
+      if (c !== 0) return c;
+      const r = (b.riskScore || 0) - (a.riskScore || 0);
+      if (r !== 0) return r;
+      return (b.downloadBytes || 0) - (a.downloadBytes || 0);
+    }
+    if (auditSortBy === "download") {
+      const c = ((b.downloadBytes || 0) - (a.downloadBytes || 0)) * sign;
+      if (c !== 0) return c;
+      const r = (b.riskScore || 0) - (a.riskScore || 0);
+      if (r !== 0) return r;
+      return (b.uploadBytes || 0) - (a.uploadBytes || 0);
+    }
+    if (auditSortBy === "ratio") {
+      const c = ((b.uploadRatio || 0) - (a.uploadRatio || 0)) * sign;
+      if (c !== 0) return c;
+      const u = (b.uploadBytes || 0) - (a.uploadBytes || 0);
+      if (u !== 0) return u;
+      return (b.riskScore || 0) - (a.riskScore || 0);
+    }
+    // 默认按评分排序
+    let c = threatSeverityRank(b.threat) - threatSeverityRank(a.threat);
+    if (c === 0) c = (b.riskScore || 0) - (a.riskScore || 0);
+    if (c === 0) c = (b.uploadBytes || 0) - (a.uploadBytes || 0);
+    return c * sign;
+  });
+  return flows;
+}
+
+function buildSortTh(field, label, tip) {
+  const active = auditSortBy === field;
+  const arrow = active ? (auditSortDir === "asc" ? "▲" : "▼") : "↕";
+  return `<th class="th-sort${active ? " active" : ""}" onclick="toggleAuditSort('${field}')" title="${esc(tip || "点击切换排序")}">${esc(label)}<span class="sort-ind">${arrow}</span></th>`;
+}
+
+window.toggleAuditSort = function(field) {
+  if (auditSortBy !== field) {
+    auditSortBy = field;
+    auditSortDir = "desc";
+  } else if (auditSortDir === "desc") {
+    auditSortDir = "asc";
+  } else if (field !== "risk") {
+    auditSortBy = "risk";
+    auditSortDir = "desc";
+  } else {
+    auditSortDir = "desc";
+  }
+  sortFlowsInPlace(lastRenderedFlows);
+  renderAuditFlowsTable();
+  scheduleViewportAIPrefetch();
+  loadAudit(false, true);
+};
 
 function renderAuditFlowsTable() {
   const flows = lastRenderedFlows || [];
@@ -1611,7 +1684,12 @@ function renderAuditFlowsTable() {
 
   $("#audit-flows-box").innerHTML = `
     <div class="table-wrap"><table class="tbl audit-tbl">
-      <thead><tr><th>双轴评分</th><th>源设备</th><th>目标域名 / IP & 归属应用</th><th>协议</th><th>上传 ↑</th><th>下载 ↓</th><th>比值</th><th>程序诊断</th><th>AI 诊断</th><th>一键拉黑 (路由+DNS)</th></tr></thead>
+      <thead><tr>${buildSortTh("risk", "评分", "点击按评分排序")}` +
+      `<th>源设备</th><th>目标域名 / IP & 归属应用</th><th>协议</th>` +
+      `${buildSortTh("upload", "上传", "点击按上传流量排序 (降序 → 升序 → 恢复默认)")}` +
+      `${buildSortTh("download", "下载", "点击按下载流量排序 (降序 → 升序 → 恢复默认)")}` +
+      `${buildSortTh("ratio", "比值", "点击按上传/下载比值排序 (降序 → 升序 → 恢复默认)")}` +
+      `<th>程序诊断</th><th>AI 诊断</th><th>一键拉黑 (路由+DNS)</th></tr></thead>
       <tbody>${flows.map((f, idx) => {
         const cls = f.state === "blocked" ? "dim" : (f.threat === "high_risk" ? "err" : (f.threat === "suspicious" ? "warn" : (f.threat === "notice" ? "info" : "ok")));
         const label = f.state === "blocked" ? "已拉黑" : (f.threatLabel || "正常");
@@ -1834,6 +1912,8 @@ async function loadAudit(withAI = false, silent = false) {
   const qs = new URLSearchParams();
   if (dev) qs.set("device", dev);
   if (susp) qs.set("suspicious", "1");
+  if (auditSortBy) qs.set("sort", auditSortBy);
+  if (auditSortDir) qs.set("dir", auditSortDir);
 
   try {
     const rep = await api("/api/audit?" + qs.toString());
@@ -1854,7 +1934,7 @@ async function loadAudit(withAI = false, silent = false) {
     } else {
       $("#audit-devices-box").innerHTML = `
         <div class="table-wrap"><table class="tbl audit-tbl">
-          <thead><tr><th>局域网设备</th><th>角色</th><th>累计上传 ↑</th><th>累计下载 ↓</th><th>上/下比值</th><th>可疑目标</th><th>双轴最高风险 (🛡️安 / 👁️隐)</th><th>筛选</th></tr></thead>
+          <thead><tr><th>局域网设备</th><th>角色</th><th>累计上传 ↑</th><th>累计下载 ↓</th><th>上/下比值</th><th>可疑目标</th><th>最高评分</th><th>筛选</th></tr></thead>
           <tbody>${devs.slice(0, 12).map(d => {
             const badgeCls = d.maxRiskScore >= 80 ? "err" : (d.maxRiskScore >= 60 ? "warn" : (d.maxRiskScore >= 35 ? "info" : "ok"));
             return `<tr>
@@ -1891,6 +1971,7 @@ async function loadAudit(withAI = false, silent = false) {
       if (axisFilter === "privacy") return (f.privacyScore || 0) >= 15 || f.dominantAxis === "privacy" || f.dominantAxis === "both";
       return true;
     });
+    sortFlowsInPlace(lastRenderedFlows);
     renderAuditFlowsTable();
 
     // 3. 当前生效黑名单 (顶部折叠抽屉内渲染，规则集保持单行折叠胶囊，绝不展开刷屏)
@@ -2072,6 +2153,8 @@ async function exportAuditCSV() {
   const qs = new URLSearchParams();
   if (dev) qs.set("device", dev);
   if (susp) qs.set("suspicious", "1");
+  if (auditSortBy) qs.set("sort", auditSortBy);
+  if (auditSortDir) qs.set("dir", auditSortDir);
   qs.set("ai", "1");
   qs.set("format", "csv");
 
