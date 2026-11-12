@@ -494,7 +494,7 @@ th.th-sort.active .sort-ind { opacity: 1; font-weight: 800; }
             <option value="privacy">👁️ 仅看隐私追踪</option>
           </select>
           <label class="btn btn-sm" style="cursor:pointer;"><input type="checkbox" id="audit-only-suspect" style="accent-color:var(--accent);"> 仅看关注/高危</label>
-          <button class="btn btn-sm" id="btn-audit-blocklist-toggle" title="展开/收起黑名单管理抽屉">🚫 黑名单管理 <span class="badge dim" id="audit-block-count-badge" style="margin-left:3px;">0</span></button>
+          <button class="btn btn-sm" id="btn-audit-blocklist-toggle" title="展开/收起黑白名单管理抽屉">🚫 黑/白名单 <span class="badge dim" id="audit-block-count-badge" style="margin-left:3px;">0</span></button>
           <button class="btn btn-sm" id="btn-audit-ai-cfg" title="配置 AI 网关 BaseURL、密钥与模型">⚙️ AI 网关配置</button>
           <label class="btn btn-sm" style="cursor:pointer;"><input type="checkbox" id="audit-auto" checked style="accent-color:var(--accent);"> 自动刷新 (5秒)</label>
           <label class="btn btn-sm" style="cursor:pointer;" title="开启后自动对当前屏幕可见行及向下 2x 预取缓冲区执行 AI 深度研判"><input type="checkbox" id="audit-ai-enable" checked style="accent-color:var(--accent);"> 🤖 AI 深度研判 <span id="audit-ai-status" style="font-size:11px;color:var(--muted);"></span></label>
@@ -526,13 +526,15 @@ th.th-sort.active .sort-ind { opacity: 1; font-weight: 800; }
               <option value="https://raw.githubusercontent.com/sixban6/rulesets/main/rule/douyin.srs" data-reason="规则集封禁: 📱 抖音短视频 (douyin.srs)">📱 抖音短视频 (douyin.srs)</option>
               <option value="https://raw.githubusercontent.com/sixban6/rulesets/main/rule/wx_shortvideo.srs" data-reason="规则集封禁: 📱 微信视频号 (wx_shortvideo.srs)">📱 微信视频号 (wx_shortvideo.srs)</option>
             </select>
-            <input type="text" id="manual-block-target" placeholder="输入域名/IP 或粘贴网上 .srs / .json 规则集 URL…" style="padding:6px 10px;border-radius:9px;border:1px solid var(--border);background:var(--input-bg);color:var(--text);font-size:12.5px;width:320px;">
-            <input type="text" id="manual-block-device" placeholder="限定设备IP (可留空=全局)" style="padding:6px 10px;border-radius:9px;border:1px solid var(--border);background:var(--input-bg);color:var(--text);font-size:12.5px;width:155px;">
+            <input type="text" id="manual-block-target" placeholder="输入域名/IP 或粘贴网上 .srs / .json 规则集 URL…" style="padding:6px 10px;border-radius:9px;border:1px solid var(--border);background:var(--input-bg);color:var(--text);font-size:12.5px;width:300px;">
+            <input type="text" id="manual-block-device" placeholder="限定设备IP (可留空=全局)" style="padding:6px 10px;border-radius:9px;border:1px solid var(--border);background:var(--input-bg);color:var(--text);font-size:12.5px;width:150px;">
             <button class="btn btn-sm btn-danger" id="btn-manual-block" type="button">+ 导入 / 拉黑</button>
+            <button class="btn btn-sm" id="btn-manual-whitelist" type="button" title="将上方输入的域名或 IP 加入信任放行白名单">+ 加入白名单</button>
             <button class="btn btn-sm" id="btn-audit-blocklist-close" type="button">收起 ▲</button>
           </div>
         </div>
         <div id="audit-blocklist-box"></div>
+        <div id="audit-whitelist-box" style="margin-top:10px;"></div>
       </div>
 
       <!-- 顶部可折叠抽屉 2：AI 审计网关配置 (保存后自动收起) -->
@@ -1541,6 +1543,113 @@ function buildDualAlertBadgeHTML(f) {
     : "";
 }
 
+let lastAuditWhitelist = [];
+
+const PROTECTED_BOOTSTRAP_DOMAINS = [
+  "cloudflare-ech.com", "cloudflare-dns.com", "one.one.one.one",
+  "dns.google", "dns.alidns.com", "doh.pub", "dot.pub"
+];
+const PROTECTED_BOOTSTRAP_IPS = new Set([
+  "127.0.0.1", "::1", "0.0.0.0", "223.5.5.5", "223.6.6.6",
+  "119.29.29.29", "1.12.12.12", "120.53.53.53", "1.1.1.1", "8.8.8.8"
+]);
+
+function isProtectedBootstrapTarget(raw) {
+  const t = String(raw || "").trim().toLowerCase().replace(/\.$/, "");
+  if (!t) return false;
+  if (PROTECTED_BOOTSTRAP_IPS.has(t)) return true;
+  return PROTECTED_BOOTSTRAP_DOMAINS.some(d => t === d || t.endsWith("." + d));
+}
+
+function isUserWhitelistedTarget(raw) {
+  const t = String(raw || "").trim().toLowerCase().replace(/\.$/, "");
+  if (!t || !lastAuditWhitelist.length) return false;
+  return lastAuditWhitelist.some(w => {
+    const nw = String(w || "").trim().toLowerCase().replace(/\/(32|128)$/, "").replace(/\.$/, "");
+    return nw && (t === nw || t.endsWith("." + nw));
+  });
+}
+
+// 当真实远程大模型给出 do_not_block 结论时，在当前 DOM 帧立即执行闭环降权（无需等待下一次 5s 轮询）
+function applyLiveAIDampingToFlow(f) {
+  if (!f || f.state === "blocked" || f.state === "whitelisted") return false;
+  const aiRev = getCachedAIReview(f);
+  if (!aiRev || aiRev.verdict !== "do_not_block") return false;
+  if (!aiRev.source || aiRev.source === "builtin_expert" || aiRev.source === "trusted_baseline") return false;
+
+  const port = Number(f.destPort || 0);
+  const isNonStdPort = port > 0 && port !== 80 && port !== 443 && port !== 53 && port !== 123;
+  const isUploadDom = (f.uploadBytes || 0) >= 262144 && (f.uploadRatio || 0) >= 1.8;
+  const lowerTgt = String(f.target || "").toLowerCase();
+  const hasPcdnKw = ["pcdn", "xycdn", "onething", "szbdyd", "mcdn", "bcdn", "uhabo", "stun."].some(k => lowerTgt.includes(k));
+  const isHardAnomaly = (f.isDirectIp && isNonStdPort && isUploadDom) ||
+                        hasPcdnKw ||
+                        ((f.uploadBytes || 0) >= 104857600 && (f.uploadRatio || 0) >= 4.0);
+  if (isHardAnomaly) return false;
+
+  let changed = false;
+  if ((f.riskScore || 0) > 28) {
+    f.riskScore = Math.min(28, Math.round((f.riskScore || 0) * 0.32));
+    f.securityScore = Math.min(24, Math.round((f.securityScore || 0) * 0.32));
+    f.privacyScore = Math.min(24, Math.round((f.privacyScore || 0) * 0.32));
+    f.threat = "normal";
+    f.threatLabel = "正常";
+    changed = true;
+  }
+  const dampNote = "AI 深度复核确认正常业务 (已自动降权)";
+  if (Array.isArray(f.reasons) && !f.reasons.some(r => String(r).includes("AI 深度复核确认正常业务"))) {
+    const firstOrig = f.reasons[0] ? ["原启发式观察: " + f.reasons[0]] : [];
+    f.reasons = [dampNote, ...firstOrig];
+    changed = true;
+  }
+  return changed;
+}
+
+function buildScoreCellInnerHTML(f, idx) {
+  const cls = f.state === "blocked"
+    ? "dim"
+    : (f.state === "whitelisted"
+        ? "ok"
+        : (f.threat === "high_risk" ? "err" : (f.threat === "suspicious" ? "warn" : (f.threat === "notice" ? "info" : "ok"))));
+  const label = f.state === "blocked"
+    ? "已拉黑"
+    : (f.state === "whitelisted" ? "已放行" : (f.threatLabel || "正常"));
+  const dualBadgeHtml = buildDualAlertBadgeHTML(f);
+  return `<span class="badge ${cls}">${esc(label)} · ${f.riskScore || 0}分</span>
+    <div class="axis-sub">🛡️安:${f.securityScore || 0} · 👁️隐:${f.privacyScore || 0}</div>
+    <div data-dual-badge-idx="${idx}">${dualBadgeHtml}</div>`;
+}
+
+function buildFlowActionHTML(f, idx) {
+  if (f.state === "blocked") {
+    return `<button class="btn btn-sm" onclick="unblockAuditFlowByIdx(${idx}, this)">解封</button>`;
+  }
+  if (f.state === "whitelisted") {
+    if (isUserWhitelistedTarget(f.target)) {
+      return `<button class="btn btn-sm" onclick="unwhitelistAuditFlowByIdx(${idx}, this)" title="从自定义信任白名单中移除">取消放行</button>`;
+    }
+    if (isProtectedBootstrapTarget(f.target)) {
+      return `<span class="badge dim" title="核心加密握手或公共 DNS 基础设施，防断网保护">🔒 核心保护</span>`;
+    }
+    return `<span class="badge dim" title="命中内置可信云服务基线">✓ 系统基线</span>`;
+  }
+  if (isProtectedBootstrapTarget(f.target)) {
+    return `<span class="badge dim" title="核心加密握手或公共 DNS 基础设施，防断网保护">🔒 核心保护</span>`;
+  }
+  const dualBad = isDualAlertRow(f);
+  const aiRev = getCachedAIReview(f);
+  const btnText = dualBad ? "🚨 立即拉黑" : "一键拉黑";
+  const canDeviceScope = f.deviceIp && f.deviceIp !== "127.0.0.1" && f.deviceIp !== "::1";
+  const preferDevice = aiRev && aiRev.recommend === "block_device";
+  const devBtn = canDeviceScope
+    ? `<button class="btn btn-sm${preferDevice ? " btn-danger" : ""}" style="padding:4px 7px;font-size:11.5px;" onclick="blockAuditFlowDeviceByIdx(${idx}, this)" title="仅拦截设备 ${esc(f.deviceIp)} 访问该目标，不影响局域网其他设备">${preferDevice ? "🎯 仅此设备" : "仅此设备"}</button>`
+    : "";
+  const wlBtn = `<button class="btn btn-sm" style="padding:4px 7px;font-size:11.5px;" onclick="whitelistAuditFlowByIdx(${idx}, this)" title="将 ${esc(f.target)} 加入信任白名单，自动降权放行">放行</button>`;
+  return `<div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap;">
+    <button data-block-btn-idx="${idx}" class="btn btn-sm btn-danger${dualBad ? " btn-danger-pulse" : ""}" onclick="blockAuditFlowByIdx(${idx}, this)" title="全局双层拉黑 (Sing-Box + DNS)">${btnText}</button>${devBtn}${wlBtn}
+  </div>`;
+}
+
 function buildAIRowSlotHTML(f) {
   const flowKey = getFlowCacheKey(f);
   const tgtKey = getFlowTargetKey(f);
@@ -1566,13 +1675,14 @@ function buildAIRowSlotHTML(f) {
   return `<div><button class="btn btn-sm" style="padding:2px 8px;font-size:11px;" onclick="reviewSingleAuditFlow('${esc(flowKey)}', this, false)">🤖 AI 研判此条</button></div>`;
 }
 
-// 局部无感更新各行的 AI 诊断列与双重高危醒目高亮（不重建 table，保持滚动条零抖动）
+// 局部无感更新各行的 AI 诊断列、闭环降权徽章与双重高危醒目高亮（不重建 table，保持滚动条零抖动）
 function updateAISlotsInDOM() {
   const slots = $$("#audit-flows-box [data-ai-row-idx]");
   for (const slot of slots) {
     const idx = Number(slot.getAttribute("data-ai-row-idx"));
     const f = lastRenderedFlows[idx];
     if (!f) continue;
+    const dampedChanged = applyLiveAIDampingToFlow(f);
     const html = buildAIRowSlotHTML(f);
     if (slot.innerHTML !== html) {
       slot.innerHTML = html;
@@ -1582,22 +1692,31 @@ function updateAISlotsInDOM() {
     if (tr) {
       tr.classList.toggle("dual-alert-row", dualBad);
     }
-    const badgeBox = $(`#audit-flows-box [data-dual-badge-idx="${idx}"]`);
-    if (badgeBox) {
-      const badgeHtml = buildDualAlertBadgeHTML(f);
-      if (badgeBox.innerHTML !== badgeHtml) badgeBox.innerHTML = badgeHtml;
+    const scoreCell = $(`#audit-flows-box [data-score-cell-idx="${idx}"]`);
+    if (scoreCell && dampedChanged) {
+      scoreCell.innerHTML = buildScoreCellInnerHTML(f, idx);
+    } else {
+      const badgeBox = $(`#audit-flows-box [data-dual-badge-idx="${idx}"]`);
+      if (badgeBox) {
+        const badgeHtml = buildDualAlertBadgeHTML(f);
+        if (badgeBox.innerHTML !== badgeHtml) badgeBox.innerHTML = badgeHtml;
+      }
+    }
+    const reasonCell = $(`#audit-flows-box [data-reason-cell-idx="${idx}"]`);
+    if (reasonCell && dampedChanged) {
+      reasonCell.textContent = (f.reasons || []).join("；");
     }
     const appPillBox = $(`#audit-flows-box [data-app-pill-idx="${idx}"]`);
     if (appPillBox) {
       const pillHtml = buildAppPillHTML(f);
       if (appPillBox.innerHTML !== pillHtml) appPillBox.innerHTML = pillHtml;
     }
+    const actionBox = $(`#audit-flows-box [data-action-cell-idx="${idx}"]`);
     const blockBtn = $(`#audit-flows-box [data-block-btn-idx="${idx}"]`);
-    if (blockBtn && !blockBtn.disabled) {
-      blockBtn.classList.toggle("btn-danger-pulse", dualBad);
-      const nextBtnText = dualBad ? "🚨 立即拉黑" : "一键拉黑";
-      if (blockBtn.textContent !== nextBtnText) {
-        blockBtn.textContent = nextBtnText;
+    if (actionBox && (!blockBtn || !blockBtn.disabled)) {
+      const nextActHtml = buildFlowActionHTML(f, idx);
+      if (actionBox.innerHTML !== nextActHtml) {
+        actionBox.innerHTML = nextActHtml;
       }
     }
   }
@@ -1613,6 +1732,12 @@ function threatSeverityRank(t) {
   if (t === "suspicious") return 2;
   if (t === "notice") return 1;
   return 0;
+}
+
+function enforcementStateRank(s) {
+  if (s === "blocked") return 1;
+  if (s === "whitelisted") return 0;
+  return 2; // observed 待关注流量优先置顶
 }
 
 function sortFlowsInPlace(flows) {
@@ -1641,8 +1766,9 @@ function sortFlowsInPlace(flows) {
       if (u !== 0) return u;
       return (b.riskScore || 0) - (a.riskScore || 0);
     }
-    // 默认按评分排序
-    let c = threatSeverityRank(b.threat) - threatSeverityRank(a.threat);
+    // 默认按待处置状态 -> 威胁等级 -> 评分 -> 上传流量排序
+    let c = enforcementStateRank(b.state) - enforcementStateRank(a.state);
+    if (c === 0) c = threatSeverityRank(b.threat) - threatSeverityRank(a.threat);
     if (c === 0) c = (b.riskScore || 0) - (a.riskScore || 0);
     if (c === 0) c = (b.uploadBytes || 0) - (a.uploadBytes || 0);
     return c * sign;
@@ -1690,26 +1816,18 @@ function renderAuditFlowsTable() {
       `${buildSortTh("upload", "上传", "点击按上传流量排序 (降序 → 升序 → 恢复默认)")}` +
       `${buildSortTh("download", "下载", "点击按下载流量排序 (降序 → 升序 → 恢复默认)")}` +
       `${buildSortTh("ratio", "比值", "点击按上传/下载比值排序 (降序 → 升序 → 恢复默认)")}` +
-      `<th>程序诊断</th><th>AI 诊断</th><th>一键拉黑 (路由+DNS)</th></tr></thead>
+      `<th>程序诊断</th><th>AI 诊断</th><th>处置操作 (拦截 / 放行)</th></tr></thead>
       <tbody>${flows.map((f, idx) => {
-        const cls = f.state === "blocked" ? "dim" : (f.threat === "high_risk" ? "err" : (f.threat === "suspicious" ? "warn" : (f.threat === "notice" ? "info" : "ok")));
-        const label = f.state === "blocked" ? "已拉黑" : (f.threatLabel || "正常");
+        applyLiveAIDampingToFlow(f);
         const targetDisp = f.isDirectIp && f.destPort ? `${f.target}:${f.destPort}` : f.target;
         const appPillHtml = buildAppPillHTML(f);
         const aiSlotHtml = buildAIRowSlotHTML(f);
-        const dualBad = isDualAlertRow(f) && f.state !== "blocked";
-        const dualBadgeHtml = buildDualAlertBadgeHTML(f);
+        const dualBad = isDualAlertRow(f) && f.state !== "blocked" && f.state !== "whitelisted";
         const reasonText = (f.reasons || []).join("；");
-        const btnText = dualBad ? "🚨 立即拉黑" : "一键拉黑";
-        const actionHtml = f.state === "blocked"
-          ? `<button class="btn btn-sm" onclick="unblockAuditFlowByIdx(${idx}, this)">解封</button>`
-          : `<button data-block-btn-idx="${idx}" class="btn btn-sm btn-danger${dualBad ? " btn-danger-pulse" : ""}" onclick="blockAuditFlowByIdx(${idx}, this)">${btnText}</button>`;
+        const scoreInnerHtml = buildScoreCellInnerHTML(f, idx);
+        const actionHtml = buildFlowActionHTML(f, idx);
         return `<tr data-flow-idx="${idx}" class="${dualBad ? "dual-alert-row" : ""}">
-          <td class="col-nowrap">
-            <span class="badge ${cls}">${esc(label)} · ${f.riskScore}分</span>
-            <div class="axis-sub">🛡️安:${f.securityScore || 0} · 👁️隐:${f.privacyScore || 0}</div>
-            <div data-dual-badge-idx="${idx}">${dualBadgeHtml}</div>
-          </td>
+          <td class="col-nowrap" data-score-cell-idx="${idx}">${scoreInnerHtml}</td>
           <td class="col-nowrap"><div><b>${esc(f.deviceName || f.deviceIp)}</b></div><div class="mono" style="font-size:11.5px;color:var(--muted);">${esc(f.deviceIp)}</div></td>
           <td style="min-width:210px;white-space:normal;">
             <div class="mono" style="word-break:break-all;font-size:13px;font-weight:500;">${esc(targetDisp)}</div>
@@ -1720,12 +1838,12 @@ function renderAuditFlowsTable() {
           <td class="mono col-nowrap">${fmtBytes(dOrZero(f.downloadBytes))}</td>
           <td class="mono col-nowrap">${Number(f.uploadRatio || 0).toFixed(1)}x</td>
           <td style="min-width:240px;width:23%;font-size:13px;line-height:1.58;word-break:break-word;white-space:normal;">
-            <div>${esc(reasonText)}</div>
+            <div data-reason-cell-idx="${idx}">${esc(reasonText)}</div>
           </td>
           <td style="min-width:300px;width:28%;font-size:12.5px;word-break:break-word;white-space:normal;">
             <div data-ai-row-idx="${idx}">${aiSlotHtml}</div>
           </td>
-          <td class="col-nowrap">${actionHtml}</td>
+          <td class="col-nowrap" data-action-cell-idx="${idx}">${actionHtml}</td>
         </tr>`;
       }).join("")}</tbody>
     </table></div>`;
@@ -1921,21 +2039,32 @@ async function loadAudit(withAI = false, silent = false) {
     if (silent && (auditActionInFlight > 0 || Date.now() < auditPointerDownUntil)) return;
     const nowStr = new Date().toLocaleTimeString();
     const blockCnt = rep.blockedCount || (rep.blockRules ? rep.blockRules.length : 0);
+    lastAuditWhitelist = Array.isArray(rep.whitelist) ? rep.whitelist : [];
+    const wlCnt = rep.whitelistCount || lastAuditWhitelist.length;
     $("#audit-summary-note").textContent =
-      `总流 ${rep.totalFlows || 0} 条 · 可疑/高危 ${rep.suspiciousFlows || 0} 条 · 已封禁 ${blockCnt} 条 · 更新于 ${nowStr}`;
+      `总流 ${rep.totalFlows || 0} 条 · 待关注可疑/高危 ${rep.suspiciousFlows || 0} 条 · 已封禁 ${blockCnt} 条${wlCnt > 0 ? " · 已放行 " + wlCnt + " 条" : ""} · 更新于 ${nowStr}`;
     if ($("#audit-block-count-badge")) {
-      $("#audit-block-count-badge").textContent = String(blockCnt);
+      $("#audit-block-count-badge").textContent = wlCnt > 0 ? `${blockCnt}/${wlCnt}` : String(blockCnt);
       $("#audit-block-count-badge").className = "badge " + (blockCnt > 0 ? "warn" : "dim");
     }
 
-    // 1. 设备上传排行
+    // 1. 设备上传排行（智能识别二级路由 NAT 流量汇聚并给出无打扰提示）
     const devs = rep.devices || [];
     if (!devs.length) {
       $("#audit-devices-box").innerHTML = '<div class="empty">暂无局域网设备活跃流量</div>';
     } else {
-      $("#audit-devices-box").innerHTML = `
+      const totalFlowCnt = Number(rep.totalFlows || 0);
+      const natSubRouter = totalFlowCnt >= 20
+        ? devs.find(d => d.deviceRole === "router" && d.deviceIp !== "127.0.0.1" && ((d.flowCount || 0) / totalFlowCnt) >= 0.70)
+        : null;
+      const natHintHtml = natSubRouter
+        ? `<div style="margin-bottom:10px;padding:9px 12px;border-radius:10px;border:1px solid var(--border);background:var(--card-2);font-size:12.5px;line-height:1.55;color:var(--muted);">
+             💡 <b style="color:var(--text);">下级路由 NAT 汇聚提示：</b>检测到下级路由 <b>${esc(natSubRouter.deviceName || natSubRouter.deviceIp)} (${esc(natSubRouter.deviceIp)})</b> 汇聚了全网 <b>${Math.round(((natSubRouter.flowCount || 0) / totalFlowCnt) * 100)}%</b> 的连接（${natSubRouter.flowCount}/${totalFlowCnt} 条）。这说明下级路由处于 NAT 模式，主旁路网关仅能看到下级路由的源 IP；若需精准区分每台手机/电视流量或按单台终端拉黑，建议将下级路由切换为 <b>AP（无线交换机/桥接）模式</b>。
+           </div>`
+        : "";
+      $("#audit-devices-box").innerHTML = natHintHtml + `
         <div class="table-wrap"><table class="tbl audit-tbl">
-          <thead><tr><th>局域网设备</th><th>角色</th><th>累计上传 ↑</th><th>累计下载 ↓</th><th>上/下比值</th><th>可疑目标</th><th>最高评分</th><th>筛选</th></tr></thead>
+          <thead><tr><th>局域网设备</th><th>角色</th><th>累计上传 ↑</th><th>累计下载 ↓</th><th>上/下比值</th><th>待处置可疑</th><th>最高活跃评分</th><th>筛选</th></tr></thead>
           <tbody>${devs.slice(0, 12).map(d => {
             const badgeCls = d.maxRiskScore >= 80 ? "err" : (d.maxRiskScore >= 60 ? "warn" : (d.maxRiskScore >= 35 ? "info" : "ok"));
             return `<tr>
@@ -2010,6 +2139,24 @@ async function loadAudit(withAI = false, silent = false) {
         </table></div>`;
     }
 
+    // 4. 当前自定义审计信任白名单 (抽屉下半区紧凑胶囊展示，支持一键移除)
+    const wlBox = $("#audit-whitelist-box");
+    if (wlBox) {
+      if (!lastAuditWhitelist.length) {
+        wlBox.innerHTML = `<div style="font-size:12px;color:var(--muted);padding-top:4px;">✅ 自定义信任放行白名单：暂无（可在明细表点击「放行」或在上方输入域名/IP 点击「+ 加入白名单」）</div>`;
+      } else {
+        wlBox.innerHTML = `<div style="padding:8px 10px;border-radius:9px;border:1px dashed var(--border);background:var(--bg);">
+          <div style="font-size:12px;font-weight:600;margin-bottom:6px;">✅ 自定义信任放行白名单 (${lastAuditWhitelist.length} 条，自动豁免告警)：</div>
+          <div style="display:flex;flex-wrap:wrap;gap:6px;">${lastAuditWhitelist.map(item =>
+            `<span class="badge ok" style="display:inline-flex;align-items:center;gap:6px;padding:3px 8px;font-family:var(--mono);">
+               ${esc(item)}
+               <button type="button" style="border:none;background:transparent;color:inherit;cursor:pointer;font-weight:700;padding:0 2px;line-height:1;" title="移除此白名单" onclick="auditWhitelistAction('remove','${esc(item)}', this)">×</button>
+             </span>`
+          ).join("")}</div>
+        </div>`;
+      }
+    }
+
     // 触发当前可视区 P0 + 向下 2x 可视区预取缓冲 P1 自动研判（命中缓存的目标 0 请求跳过）
     scheduleViewportAIPrefetch();
   } catch (e) {
@@ -2055,10 +2202,76 @@ window.blockAuditFlowByIdx = function(idx, btnEl) {
   return window.blockAuditTarget(f.target, "", reasonText, btnEl);
 };
 
+window.blockAuditFlowDeviceByIdx = function(idx, btnEl) {
+  const f = lastRenderedFlows && lastRenderedFlows[idx];
+  if (!f || !f.deviceIp) return;
+  const devLabel = f.deviceName && f.deviceName !== f.deviceIp ? `${f.deviceName}(${f.deviceIp})` : f.deviceIp;
+  const reasonText = `[仅限设备 ${devLabel}] ` + ((f.reasons || []).join("；") || "按设备拉黑");
+  return window.blockAuditTarget(f.target, f.deviceIp, reasonText, btnEl);
+};
+
 window.unblockAuditFlowByIdx = function(idx, btnEl) {
   const f = lastRenderedFlows && lastRenderedFlows[idx];
   if (!f) return;
   return window.unblockAuditTarget(f.target, "", btnEl);
+};
+
+window.whitelistAuditFlowByIdx = function(idx, btnEl) {
+  const f = lastRenderedFlows && lastRenderedFlows[idx];
+  if (!f || !f.target) return;
+  return window.auditWhitelistAction("add", f.target, btnEl);
+};
+
+window.unwhitelistAuditFlowByIdx = function(idx, btnEl) {
+  const f = lastRenderedFlows && lastRenderedFlows[idx];
+  if (!f || !f.target) return;
+  return window.auditWhitelistAction("remove", f.target, btnEl);
+};
+
+window.auditWhitelistAction = async function(action, target, btnEl) {
+  if (!target) return;
+  const origHtml = btnEl ? btnEl.innerHTML : "";
+  if (btnEl) {
+    btnEl.disabled = true;
+    btnEl.innerHTML = '<span class="spin-inline"></span>';
+  }
+  auditActionInFlight++;
+  try {
+    const res = await api("/api/audit/whitelist", {
+      method: "POST",
+      body: JSON.stringify({ action, target }),
+    });
+    if (res && Array.isArray(res.whitelist)) {
+      lastAuditWhitelist = res.whitelist;
+    }
+    const normTgt = String((res && res.target) || target).toLowerCase();
+    (lastRenderedFlows || []).forEach(it => {
+      if (!it || !it.target) return;
+      const t = String(it.target).toLowerCase();
+      if (t === normTgt || t.endsWith("." + normTgt)) {
+        if (action === "add") {
+          it.state = "whitelisted";
+          it.riskScore = Math.min(it.riskScore || 0, 8);
+          it.threat = "normal";
+          it.threatLabel = "正常";
+        } else if (it.state === "whitelisted") {
+          it.state = "observed";
+        }
+      }
+    });
+    sortFlowsInPlace(lastRenderedFlows);
+    renderAuditFlowsTable();
+    toast("ok", (res && res.message) || (action === "add" ? `已信任放行 ${target}` : `已移出白名单 ${target}`));
+  } catch (e) {
+    toast("err", (action === "add" ? "放行失败: " : "移除白名单失败: ") + e.message);
+    if (btnEl) {
+      btnEl.disabled = false;
+      btnEl.innerHTML = origHtml || (action === "add" ? "放行" : "取消放行");
+    }
+  } finally {
+    auditActionInFlight = Math.max(0, auditActionInFlight - 1);
+    loadAudit(false, true);
+  }
 };
 
 window.blockAuditTarget = async function(target, sourceIp, reason, btnEl) {
@@ -2077,8 +2290,11 @@ window.blockAuditTarget = async function(target, sourceIp, reason, btnEl) {
     });
     // 乐观更新当前已渲染列表，毫秒级切换为「已拉黑 / 解封」状态
     (lastRenderedFlows || []).forEach(it => {
-      if (it && it.target === target) it.state = "blocked";
+      if (it && it.target === target && (!sourceIp || it.deviceIp === sourceIp)) {
+        it.state = "blocked";
+      }
     });
+    sortFlowsInPlace(lastRenderedFlows);
     renderAuditFlowsTable();
     toast("ok", res.message || `已将 ${target} 加入双层黑名单`);
   } catch (e) {
@@ -2132,8 +2348,11 @@ window.unblockAuditTarget = async function(target, sourceIp, btnEl) {
       body: JSON.stringify({ target, sourceIp }),
     });
     (lastRenderedFlows || []).forEach(it => {
-      if (it && it.target === target) it.state = "normal";
+      if (it && it.target === target && (!sourceIp || it.deviceIp === sourceIp)) {
+        it.state = "observed";
+      }
     });
+    sortFlowsInPlace(lastRenderedFlows);
     renderAuditFlowsTable();
     toast("ok", res.message || `已解封 ${target}`);
   } catch (e) {
@@ -2258,6 +2477,14 @@ $("#btn-manual-block").onclick = async () => {
     btn.textContent = origText;
   }
 };
+if ($("#btn-manual-whitelist")) {
+  $("#btn-manual-whitelist").onclick = async () => {
+    const t = ($("#manual-block-target").value || "").trim();
+    if (!t) { toast("warn", "请在输入框填写要信任放行的域名或 IP/CIDR"); return; }
+    await window.auditWhitelistAction("add", t, $("#btn-manual-whitelist"));
+    $("#manual-block-target").value = "";
+  };
+}
 
 /* ═══════════════════════ 启动 ═══════════════════════ */
 const urlParams = new URLSearchParams(location.search);

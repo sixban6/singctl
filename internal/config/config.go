@@ -1425,14 +1425,18 @@ func filterRoleNodesBeforeMerge(dstRoot, srcRoot *yaml.Node, cfg *Config) {
 		}
 	}
 
-	// 当 audit.ai 字段被修改或清空时，移除 dstDoc 中旧的 ai 子节点以保证置空字段（如清空 api_key / endpoint）能真实生效
+	// 当 audit.ai 或 audit.whitelist 字段被修改或清空时，移除 dstDoc 中旧的子节点以保证置空字段或清空最后一条白名单能真实生效
 	if cfg != nil {
 		for i := 0; i+1 < len(dstDoc.Content); i += 2 {
 			if dstDoc.Content[i].Value == "audit" && dstDoc.Content[i+1].Kind == yaml.MappingNode {
 				auditMap := dstDoc.Content[i+1]
 				newAudit := make([]*yaml.Node, 0, len(auditMap.Content))
 				for j := 0; j+1 < len(auditMap.Content); j += 2 {
-					if auditMap.Content[j].Value == "ai" {
+					kVal := auditMap.Content[j].Value
+					if kVal == "ai" {
+						continue
+					}
+					if kVal == "whitelist" && len(cfg.Audit.Whitelist) == 0 {
 						continue
 					}
 					newAudit = append(newAudit, auditMap.Content[j], auditMap.Content[j+1])

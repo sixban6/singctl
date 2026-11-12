@@ -97,6 +97,7 @@ func New(opts Options) *Server {
 	s.Mux.HandleFunc("POST /api/audit/ai-review", s.guard(s.handleAuditAIReviewPost))
 	s.Mux.HandleFunc("POST /api/audit/block", s.guard(s.handleAuditBlock))
 	s.Mux.HandleFunc("POST /api/audit/unblock", s.guard(s.handleAuditUnblock))
+	s.Mux.HandleFunc("POST /api/audit/whitelist", s.guard(s.handleAuditWhitelist))
 
 	// clash 控制面板与 API 反向代理(/clash/* 及根路径直通)
 	s.setupClashProxy()

@@ -72,3 +72,11 @@ watchdog:                                      # (可选) 看门狗守护进程�
 #   dns:
 #     - domain_suffix: [example.com, internal.example.org]
 #       server: dns_local
+
+# audit:                                        # (可选) 客户端局域网设备流量审计与 AI 研判配置
+#   whitelist:                                  # 信任放行域名后缀或 IP/CIDR 白名单 (singctl sb whitelist 自动维护)
+#     - "sync.example.com"
+#   ai:                                         # L2 大模型语义研判 (支持本地 Magpie :3425 或 OpenAI 兼容接口)
+#     endpoint: "http://127.0.0.1:3425/v1"
+#     api_key: ""
+#     model: "antigravity/gemini-3.8-flash"

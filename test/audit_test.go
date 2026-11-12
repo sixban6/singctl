@@ -572,3 +572,329 @@ func TestAuditCloudflareECHAndNightBrowsingNoFalsePositive(t *testing.T) {
 		t.Fatalf("expected wetelemetry.example.com AI review to be safe_to_block, got %+v", rev)
 	}
 }
+
+func TestOpenWrtTimezone_CertCNFallback_And_StateV2Migration(t *testing.T) {
+	t.Setenv("TZ", "")
+	locCST := audit.ParsePOSIXTZLocation("CST-8")
+	if locCST == nil {
+		t.Fatal("expected ParsePOSIXTZLocation(\"CST-8\") to return non-nil CST+8 location")
+	}
+	// UTC 06:06 对应北京时间 14:06（白天，绝非凌晨 01:00-05:59）
+	dayUTC := time.Date(2026, 11, 12, 6, 6, 0, 0, time.UTC).In(locCST)
+	if dayUTC.Hour() != 14 {
+		t.Fatalf("expected CST-8 to map 06:06 UTC -> 14:06 CST (+8h), got hour=%d", dayUTC.Hour())
+	}
+	if locBracket := audit.ParsePOSIXTZLocation("<+08>-8"); locBracket == nil || time.Date(2026, 11, 12, 18, 30, 0, 0, time.UTC).In(locBracket).Hour() != 2 {
+		t.Fatalf("expected <+08>-8 to map 18:30 UTC -> 02:30 local")
+	}
+	if locEST := audit.ParsePOSIXTZLocation("EST5EDT"); locEST == nil || time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC).In(locEST).Hour() != 5 {
+		t.Fatalf("expected EST5EDT to map 10:00 UTC -> 05:00 EST (-5h)")
+	}
+
+	tmpDir := t.TempDir()
+	tzFile := filepath.Join(tmpDir, "TZ")
+	if err := os.WriteFile(tzFile, []byte("CST-8\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	resolvedLoc := audit.ResolveLocalLocationFromFiles(tzFile, "")
+	if resolvedLoc == nil || time.Date(2026, 11, 12, 6, 0, 0, 0, time.UTC).In(resolvedLoc).Hour() != 14 {
+		t.Fatalf("expected ResolveLocalLocationFromFiles to honor OpenWrt /etc/TZ CST-8")
+	}
+
+	// 构造旧版 (SchemaVersion=0) 状态快照：包含白天误记的 NightHits、非法证书 CN "mijia cloud" 以及超过 24h 的过期流
+	nowSim := time.Date(2026, 11, 12, 6, 10, 0, 0, time.UTC).In(resolvedLoc) // 14:10 CST
+	statePath := filepath.Join(tmpDir, "legacy-state.json")
+	legacyJSON := `{
+		"updatedUnix": 1794463000,
+		"flows": {
+			"192.168.1.20|mijia cloud|tcp": {
+				"key": "192.168.1.20|mijia cloud|tcp",
+				"deviceIp": "192.168.1.20",
+				"target": "mijia cloud",
+				"rawHost": "Mijia Cloud",
+				"destIp": "203.0.113.45",
+				"destPort": 443,
+				"isDirectIp": false,
+				"network": "tcp",
+				"uploadBytes": 120000,
+				"downloadBytes": 240000,
+				"connCount": 5,
+				"firstSeenUnix": ` + strings.TrimSpace(jsonNumber(nowSim.Unix()-600)) + `,
+				"lastSeenUnix": ` + strings.TrimSpace(jsonNumber(nowSim.Unix()-60)) + `,
+				"nightHits": 88
+			},
+			"192.168.1.20|stale.example.com|tcp": {
+				"key": "192.168.1.20|stale.example.com|tcp",
+				"deviceIp": "192.168.1.20",
+				"target": "stale.example.com",
+				"destIp": "198.51.100.12",
+				"destPort": 443,
+				"network": "tcp",
+				"uploadBytes": 900000,
+				"downloadBytes": 100000,
+				"connCount": 10,
+				"firstSeenUnix": ` + strings.TrimSpace(jsonNumber(nowSim.Unix()-100000)) + `,
+				"lastSeenUnix": ` + strings.TrimSpace(jsonNumber(nowSim.Unix()-90000)) + `,
+				"nightHits": 5
+			}
+		}
+	}`
+	if err := os.WriteFile(statePath, []byte(legacyJSON), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	clashSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"connections": []map[string]any{
+				{
+					"id":       "conn-daytime-cn",
+					"upload":   32 * 1024,
+					"download": 64 * 1024,
+					"start":    "2026-11-12T06:09:30Z",
+					"chains":   []string{"DIRECT"},
+					"metadata": map[string]any{
+						"network":         "tcp",
+						"sourceIP":        "192.168.1.20",
+						"destinationIP":   "198.51.100.77",
+						"destinationPort": "443",
+						"sniffHost":       "Mijia Cloud",
+					},
+				},
+			},
+		})
+	}))
+	defer clashSrv.Close()
+
+	leaseFile := filepath.Join(tmpDir, "dhcp.leases")
+	_ = os.WriteFile(leaseFile, []byte("1794500000 aa:bb:cc:dd:ee:01 192.168.1.20 ImmortalWrt *\n"), 0600)
+
+	collector := audit.NewCollector(&config.Config{})
+	collector.SetEndpointsForTest([]string{clashSrv.URL}, "", statePath)
+	collector.SetLeaseFilesForTest([]string{leaseFile}, "", "")
+	collector.SetTimezoneFilesForTest(tzFile, "")
+	collector.SetNowFuncForTest(func() time.Time { return nowSim })
+
+	rep := collector.Collect(t.Context(), audit.CollectOptions{})
+	if len(rep.Devices) != 1 || rep.Devices[0].DeviceRole != "router" {
+		t.Fatalf("expected ImmortalWrt to be inferred as role=router, got %+v", rep.Devices)
+	}
+	if len(rep.Flows) != 2 {
+		t.Fatalf("expected 2 active flows (24h stale flow pruned), got %d: %+v", len(rep.Flows), rep.Flows)
+	}
+	for _, f := range rep.Flows {
+		if strings.Contains(f.Target, " ") || f.Target == "stale.example.com" {
+			t.Fatalf("unexpected invalid or stale target %q in flows", f.Target)
+		}
+		if f.NightHits != 0 {
+			t.Fatalf("expected daytime CST flow %s to have NightHits=0 after v2 migration, got %d", f.Target, f.NightHits)
+		}
+		if f.AppName != "小米 / 米家" {
+			t.Fatalf("expected RawHost 'Mijia Cloud' fallback to identify app '小米 / 米家', got %q", f.AppName)
+		}
+		if _, _, err := audit.ValidateTargetSafety(&config.Config{}, f.Target); err != nil {
+			t.Fatalf("expected fallback IP target %q to pass ValidateTargetSafety, got %v", f.Target, err)
+		}
+	}
+}
+
+func TestQUIC443Exemption_MultiDayRate_And_AIClosedLoopDamping(t *testing.T) {
+	eng := audit.NewNonlinearEngine(&config.Config{})
+
+	// 1. Apple / Cloudflare 标准 UDP :443 QUIC 直连流不应误判为绕过 DNS 直连上传
+	if gotApp := audit.IdentifyApp("172.64.0.1", "172.64.0.1", ""); gotApp != "Cloudflare" {
+		t.Fatalf("expected 172.64.0.1 to identify as Cloudflare, got %q", gotApp)
+	}
+	cfQuic := &audit.FlowRecord{
+		DeviceIP:      "192.168.1.30",
+		DeviceName:    "iPhone",
+		Target:        "172.64.0.1",
+		DestIP:        "172.64.0.1",
+		AppName:       "Cloudflare",
+		IsDirectIP:    true,
+		DestPort:      443,
+		Network:       "udp",
+		UploadBytes:   1500 * 1024,
+		DownloadBytes: 1200 * 1024,
+		ConnCount:     18,
+	}
+	eng.EvaluateFlow(cfQuic)
+	if cfQuic.Threat != audit.ThreatNormal || cfQuic.RiskScore >= 35 {
+		t.Fatalf("expected Cloudflare UDP:443 QUIC to stay ThreatNormal (<35), got score=%d reasons=%v", cfQuic.RiskScore, cfQuic.Reasons)
+	}
+
+	// 2. 跨 48 小时累计 2200 次连接但每小时速率温和、间隔不规律的正常社交浏览 (如 x.com) 不应误判为机器信标
+	multiDaySocial := &audit.FlowRecord{
+		DeviceIP:      "192.168.1.30",
+		DeviceName:    "MacBook-Pro",
+		Target:        "x.com",
+		AppName:       "X (Twitter)",
+		DestPort:      443,
+		Network:       "tcp",
+		UploadBytes:   1500 * 1024,
+		DownloadBytes: 1400 * 1024,
+		ConnCount:     2200,
+		ActiveSpanSec: 48 * 3600,
+		IntervalCV:    1.45,
+	}
+	eng.EvaluateFlow(multiDaySocial)
+	if multiDaySocial.Threat != audit.ThreatNormal || multiDaySocial.RiskScore >= 35 {
+		t.Fatalf("expected multi-day normal social browsing to stay ThreatNormal (<35), got score=%d reasons=%v",
+			multiDaySocial.RiskScore, multiDaySocial.Reasons)
+	}
+
+	// 3. L1 × L2 AI 闭环降权：当启发式高分域名经真实远程大模型复核为 AIDoNotBlock 时，自动闭环降权至正常 (<29分)
+	syncFlow := &audit.FlowRecord{
+		DeviceIP:      "192.168.1.30",
+		DeviceName:    "MacBook-Pro",
+		Target:        "sync-v2.brave.example.com",
+		DestPort:      443,
+		Network:       "tcp",
+		UploadBytes:   12 * 1024 * 1024,
+		DownloadBytes: 512 * 1024,
+		ConnCount:     40,
+		IntervalCV:    0.15,
+		AIReview: &audit.AIReviewResult{
+			Source:      "llm_api",
+			Category:    "浏览器书签加密同步",
+			Verdict:     audit.AIDoNotBlock,
+			VerdictText: "建议放行",
+			Recommend:   "keep",
+		},
+	}
+	eng.EvaluateFlow(syncFlow)
+	if syncFlow.Threat != audit.ThreatNormal || syncFlow.RiskScore > 28 {
+		t.Fatalf("expected remote LLM do_not_block to damp heuristic false positive to <=28 ThreatNormal, got score=%d threat=%s reasons=%v",
+			syncFlow.RiskScore, syncFlow.Threat, syncFlow.Reasons)
+	}
+
+	// 4. 安全护栏：对直连非标高危端口的大流量上传 (如 203.0.113.88:54321)，即使 AI 返回 do_not_block 也不允许洗白
+	hardAnomaly := &audit.FlowRecord{
+		DeviceIP:      "192.168.1.55",
+		DeviceName:    "Xiaomi-TV",
+		Target:        "203.0.113.88",
+		IsDirectIP:    true,
+		DestPort:      54321,
+		Network:       "udp",
+		UploadBytes:   50 * 1024 * 1024,
+		DownloadBytes: 256 * 1024,
+		ConnCount:     25,
+		AIReview: &audit.AIReviewResult{
+			Source:  "llm_api",
+			Verdict: audit.AIDoNotBlock,
+		},
+	}
+	eng.EvaluateFlow(hardAnomaly)
+	if hardAnomaly.RiskScore < 70 {
+		t.Fatalf("expected hard non-std-port direct-IP upload guardrail to prevent AI whitewashing, got score=%d", hardAnomaly.RiskScore)
+	}
+}
+
+func TestClosedLoopAlertCounts_And_WebUIWhitelistAPI(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "singctl.yaml")
+	if err := os.WriteFile(cfgPath, configs.ClientConfigYAML, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := webui.New(webui.Options{
+		ConfigPath: cfgPath,
+		Listen:     "127.0.0.1:0",
+		Password:   "secret123",
+		Version:    "v1.15.0",
+	})
+	ts := httptest.NewServer(srv.Mux)
+	defer ts.Close()
+	token := srv.SessionToken()
+
+	// 1. 测试 POST /api/audit/whitelist 添加与移除，验证 0600 落盘及清空后无残留
+	addBody, _ := json.Marshal(map[string]string{"action": "add", "target": "sync.trusted-app.example.com"})
+	reqAdd, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/audit/whitelist", bytes.NewReader(addBody))
+	reqAdd.Header.Set("Authorization", "Bearer "+token)
+	reqAdd.Header.Set("Content-Type", "application/json")
+	respAdd, err := http.DefaultClient.Do(reqAdd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	respAdd.Body.Close()
+	if respAdd.StatusCode != http.StatusOK {
+		t.Fatalf("expected whitelist add 200, got %d", respAdd.StatusCode)
+	}
+
+	info, err := os.Stat(cfgPath)
+	if err != nil || info.Mode().Perm() != 0600 {
+		t.Fatalf("expected singctl.yaml mode 0600 after whitelist save, got %v (err=%v)", info.Mode().Perm(), err)
+	}
+	cfgAfterAdd, err := config.Load(cfgPath)
+	if err != nil || len(cfgAfterAdd.Audit.Whitelist) != 1 || cfgAfterAdd.Audit.Whitelist[0] != "sync.trusted-app.example.com" {
+		t.Fatalf("expected whitelist entry persisted, got %+v (err=%v)", cfgAfterAdd.Audit.Whitelist, err)
+	}
+
+	// 2. 验证已拉黑 (blocked) 和已放行 (whitelisted) 的流不再计入活跃可疑告警数，且排序位于活跃观察流之后
+	cfgAfterAdd.CustomRules.Block = []config.BlockRule{
+		{Target: "already-blocked.example.com", Reason: "已拉黑测试"},
+	}
+	clashSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"connections": []map[string]any{
+				{
+					"id":       "c-blocked",
+					"upload":   20 * 1024 * 1024,
+					"download": 64 * 1024,
+					"start":    "2026-11-12T04:00:00Z",
+					"metadata": map[string]any{"network": "tcp", "sourceIP": "192.168.1.88", "destinationIP": "203.0.113.10", "destinationPort": "443", "host": "already-blocked.example.com"},
+				},
+				{
+					"id":       "c-whitelisted",
+					"upload":   30 * 1024 * 1024,
+					"download": 64 * 1024,
+					"start":    "2026-11-12T04:00:00Z",
+					"metadata": map[string]any{"network": "tcp", "sourceIP": "192.168.1.88", "destinationIP": "203.0.113.11", "destinationPort": "443", "host": "sync.trusted-app.example.com"},
+				},
+				{
+					"id":       "c-active-suspect",
+					"upload":   8 * 1024 * 1024,
+					"download": 32 * 1024,
+					"start":    "2026-11-12T04:00:00Z",
+					"metadata": map[string]any{"network": "tcp", "sourceIP": "192.168.1.88", "destinationIP": "203.0.113.12", "destinationPort": "443", "host": "telemetry.active.example.com"},
+				},
+			},
+		})
+	}))
+	defer clashSrv.Close()
+
+	col := audit.NewCollector(cfgAfterAdd)
+	col.SetEndpointsForTest([]string{clashSrv.URL}, "", filepath.Join(tmpDir, "closed-loop-state.json"))
+	col.SetNowFuncForTest(func() time.Time { return time.Date(2026, 11, 12, 14, 0, 0, 0, time.FixedZone("CST", 8*3600)) })
+
+	rep := col.Collect(t.Context(), audit.CollectOptions{})
+	if rep.SuspiciousFlows != 1 {
+		t.Fatalf("expected only 1 active suspicious flow (excluding blocked & whitelisted), got %d", rep.SuspiciousFlows)
+	}
+	if len(rep.Flows) != 3 || rep.Flows[0].Target != "telemetry.active.example.com" {
+		t.Fatalf("expected active observed threat sorted first ahead of blocked/whitelisted, got order: %s, %s, %s",
+			rep.Flows[0].Target, rep.Flows[1].Target, rep.Flows[2].Target)
+	}
+
+	// 3. 移除最后一条白名单并确认 YAML 中彻底清空
+	rmBody, _ := json.Marshal(map[string]string{"action": "remove", "target": "sync.trusted-app.example.com"})
+	reqRm, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/audit/whitelist", bytes.NewReader(rmBody))
+	reqRm.Header.Set("Authorization", "Bearer "+token)
+	reqRm.Header.Set("Content-Type", "application/json")
+	respRm, err := http.DefaultClient.Do(reqRm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	respRm.Body.Close()
+	if respRm.StatusCode != http.StatusOK {
+		t.Fatalf("expected whitelist remove 200, got %d", respRm.StatusCode)
+	}
+	cfgAfterRm, err := config.Load(cfgPath)
+	if err != nil || len(cfgAfterRm.Audit.Whitelist) != 0 {
+		t.Fatalf("expected empty whitelist after removing last item, got %+v (err=%v)", cfgAfterRm.Audit.Whitelist, err)
+	}
+}
+
+func jsonNumber(v int64) string {
+	b, _ := json.Marshal(v)
+	return string(b)
+}

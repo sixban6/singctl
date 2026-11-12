@@ -332,18 +332,36 @@ func (e *NonlinearEngine) EvaluateFlow(flow *FlowRecord) {
 		reasons = appendUniqueReason(reasons, "多维交叉: 智能家居/IoT设备异常外发数据")
 	}
 	// 安全交叉项 D: [高信息熵域名] × [高频建连或上行主导]
-	if flow.DomainEntropy >= 3.65 && (flow.ConnCount >= 10 || isUploadDominant) {
+	effConns := effectiveConnCountPerHour(flow)
+	if flow.DomainEntropy >= 3.65 && (effConns >= 10 || isUploadDominant) {
 		secInteraction *= 1.35
 	}
 	flow.NonlinearFactors["sec_interaction"] = math.Round(secInteraction*100) / 100
 	flow.NonlinearFactors["priv_interaction"] = math.Round(privInteraction*100) / 100
 
-	// 3. 信任白名单阻尼衰减因子 (Trust Damping)
+	// 3. 信任白名单与 L2 AI 深度复核闭环阻尼衰减因子 (Trust & AI Damping)
 	trustDamping := 1.0
 	trusted := e.IsTrusted(flow.Target) || strings.EqualFold(flow.Outbound, "block")
+	aiDamped := false
 	if trusted {
 		trustDamping = 0.08
 		reasons = []string{"命中可信白名单基线 (自动阻尼降权)"}
+	} else if flow.AIReview != nil && flow.AIReview.Verdict == AIDoNotBlock &&
+		flow.AIReview.Source != "" && flow.AIReview.Source != "builtin_expert" && flow.AIReview.Source != "trusted_baseline" {
+		// 安全护栏：对直连非标端口大上传、明确 PCDN 节点或极端百兆倒挂上传保留警觉，其余经真实大模型确认正常的业务自动闭环降权
+		isHardAnomaly := (flow.IsDirectIP && isNonStdPort && isUploadDominant) ||
+			matchesAnyKeyword(flow.Target, pcdnKeywords) ||
+			(flow.UploadBytes >= 100*1024*1024 && flow.UploadRatio >= 4.0)
+		if !isHardAnomaly {
+			trustDamping = 0.25
+			aiDamped = true
+			flow.NonlinearFactors["ai_damping"] = 0.25
+			if len(reasons) > 0 {
+				reasons = []string{"AI 深度复核确认正常业务 (已自动降权)", "原启发式观察: " + reasons[0]}
+			} else {
+				reasons = []string{"AI 深度复核确认正常业务 (已自动降权)"}
+			}
+		}
 	}
 	flow.NonlinearFactors["trust_damping"] = trustDamping
 
@@ -355,10 +373,17 @@ func (e *NonlinearEngine) EvaluateFlow(flow *FlowRecord) {
 	// 4. 双轴 Sigmoid 归一化 + Soft-Max 极值包络合成总分 (绝不因求平均而互相稀释)
 	flow.SecurityScore = mapRawToSigmoidScore(rawSec, 36.0, 16.0)
 	flow.PrivacyScore = mapRawToSigmoidScore(rawPriv, 32.0, 15.0)
+	if aiDamped {
+		flow.SecurityScore = min(flow.SecurityScore, 24)
+		flow.PrivacyScore = min(flow.PrivacyScore, 24)
+	}
 
 	hiAxis := float64(max(flow.SecurityScore, flow.PrivacyScore))
 	loAxis := float64(min(flow.SecurityScore, flow.PrivacyScore))
 	finalScore := int(math.Round(min(100.0, hiAxis+0.25*loAxis)))
+	if aiDamped {
+		finalScore = min(finalScore, 28)
+	}
 	flow.RiskScore = finalScore
 
 	switch {
@@ -433,6 +458,30 @@ func (d *uploadAsymmetryDetector) Evaluate(f *FlowRecord) (float64, string) {
 	return score, "持续大流量上传 (↑" + formatBytesShort(f.UploadBytes) + ")"
 }
 
+// isKnownStandardHTTPSInfraApp 判断是否属于主流云厂商/操作系统基础设施服务（用于豁免标准 443 端口 HTTP/3 QUIC 无 SNI 迁移连接误报）。
+func isKnownStandardHTTPSInfraApp(appName string) bool {
+	switch strings.TrimSpace(appName) {
+	case "Apple", "iCloud", "Cloudflare", "Cloudflare DNS", "Google", "Google DNS", "YouTube",
+		"Microsoft", "OneDrive", "GitHub", "Telegram", "OpenAI", "Claude / Anthropic",
+		"Tailscale", "Tailscale 组网":
+		return true
+	default:
+		return false
+	}
+}
+
+// effectiveConnCountPerHour 将累计连接次数按流存活时长归一化为每小时连接速率（<=1小时或未记录跨度时保持原始值）。
+func effectiveConnCountPerHour(f *FlowRecord) float64 {
+	if f == nil || f.ConnCount <= 0 {
+		return 0
+	}
+	if f.ActiveSpanSec <= 3600 {
+		return float64(f.ConnCount)
+	}
+	hours := float64(f.ActiveSpanSec) / 3600.0
+	return float64(f.ConnCount) / hours
+}
+
 // 2. directIPUploadDetector: 绕过 DNS 直连公网 IP 上传算子
 type directIPUploadDetector struct{}
 
@@ -442,9 +491,22 @@ func (d *directIPUploadDetector) Evaluate(f *FlowRecord) (float64, string) {
 	if !f.IsDirectIP || f.UploadBytes < 64*1024 {
 		return 0, ""
 	}
+	// 标准 443 端口下，Apple / Cloudflare / Google 等主流基础设施的 HTTP/3 QUIC 会话迁移常无明文 SNI，只要未出现显著上行倒挂即属正常加密传输
+	if f.DestPort == 443 {
+		if isKnownStandardHTTPSInfraApp(f.AppName) && f.UploadRatio < 1.8 {
+			return 0, ""
+		}
+		if f.DownloadBytes > f.UploadBytes*2 && f.UploadRatio < 0.5 {
+			return 6.0, "直连443端口加密传输 (下行主导)"
+		}
+	}
 	score := 16.0
 	if strings.EqualFold(f.Network, "udp") {
-		score += 8.0
+		if f.DestPort == 443 {
+			score += 4.0
+		} else {
+			score += 8.0
+		}
 	}
 	if f.DestPort > 1024 && f.DestPort != 8080 && f.DestPort != 8443 {
 		score += 7.0
@@ -470,8 +532,16 @@ func (d *beaconHeartbeatDetector) Evaluate(f *FlowRecord) (float64, string) {
 		score += 24.0 * regularity
 		reason = "固定周期机器心跳信标 (CV=" + strconv.FormatFloat(f.IntervalCV, 'f', 2, 64) + ")"
 	}
-	if f.ConnCount >= 25 && f.UploadBytes >= 64*1024 {
-		freqBonus := math.Min(16.0, 4.5*math.Log1p(float64(f.ConnCount)/10.0))
+
+	effConns := effectiveConnCountPerHour(f)
+	isKnownQUIC443 := f.IsDirectIP && f.DestPort == 443 && isKnownStandardHTTPSInfraApp(f.AppName) && f.UploadRatio < 1.8
+	hasSuspectTrait := f.UploadRatio >= 1.35 ||
+		(f.IsDirectIP && !isKnownQUIC443) ||
+		matchesAnyKeyword(f.Target, suspiciousKeywords) ||
+		(f.IntervalCV > 0 && f.IntervalCV < 0.45)
+
+	if effConns >= 25 && f.UploadBytes >= 64*1024 && hasSuspectTrait {
+		freqBonus := math.Min(16.0, 4.5*math.Log1p(effConns/10.0))
 		score += freqBonus
 		if reason == "" {
 			reason = "高频重复建连上报 (" + strconv.Itoa(f.ConnCount) + "次)"
@@ -545,11 +615,15 @@ func evaluatePrivacyAxisExtras(f *FlowRecord) (float64, []string) {
 		}
 	}
 
-	// 2. 小包高频画像打点算子 (单次流量虽小，但建连频繁或周期固定)
-	if f.ConnCount >= 8 && f.UploadBytes >= 1024 && f.UploadBytes < 512*1024 && !isDownloadDominantBrowsing {
-		freqScore := math.Min(18.0, 4.2*math.Log1p(float64(f.ConnCount)/5.0))
-		score += freqScore
-		reasons = append(reasons, "高频碎包持续回传 ("+strconv.Itoa(f.ConnCount)+"次连接)")
+	// 2. 小包高频画像打点算子 (仅在未触发固定周期信标算子时补充评估，避免同一连接频次双重扣分)
+	alreadyScoredBeacon := f.ConnCount >= 6 && f.IntervalCV > 0 && f.IntervalCV < 0.35
+	effConns := effectiveConnCountPerHour(f)
+	if !alreadyScoredBeacon && effConns >= 10 && f.UploadBytes >= 1024 && f.UploadBytes < 512*1024 && !isDownloadDominantBrowsing {
+		if hasSuspiciousKW || f.UploadRatio >= 0.90 || f.DeviceRole == "iot" {
+			freqScore := math.Min(18.0, 4.2*math.Log1p(effConns/5.0))
+			score += freqScore
+			reasons = append(reasons, "高频碎包持续回传 ("+strconv.Itoa(f.ConnCount)+"次连接)")
+		}
 	}
 
 	// 3. 明文 HTTP 端口裸奔算子 (端口 80 / 8080 未加密上传，极易被链路嗅探)
@@ -623,11 +697,16 @@ func extractPrimaryLabel(domain string) string {
 	return strings.Join(parts[:len(parts)-2], "")
 }
 
-// InferDeviceRole 根据局域网设备名推断设备角色 ("iot" / "desktop" / "mobile" / "unknown")。
+// InferDeviceRole 根据局域网设备名推断设备角色 ("router" / "iot" / "desktop" / "mobile" / "unknown")。
 func InferDeviceRole(deviceName string) string {
 	lower := strings.ToLower(strings.TrimSpace(deviceName))
 	if lower == "" {
 		return "unknown"
+	}
+	for _, kw := range []string{"immortalwrt", "openwrt", "istoreos", "router", "ikuai", "mikrotik", "routeros", "padavan", "asuswrt", "merlin", "gl-inet", "glinet"} {
+		if strings.Contains(lower, kw) {
+			return "router"
+		}
 	}
 	for _, kw := range iotDeviceKeywords {
 		if strings.Contains(lower, kw) {

@@ -115,7 +115,8 @@ type FlowRecord struct {
 	ActiveConnIDs    []string           `json:"-"`
 	FirstSeen        string             `json:"firstSeen"`
 	LastSeen         string             `json:"lastSeen"`
-	NightHits        int                `json:"nightHits"`        // 凌晨 01:00-05:30 活跃采样次数
+	ActiveSpanSec    int64              `json:"activeSpanSec,omitempty"` // 首次到末次观测跨度秒数（用于按小时归一化连接频率）
+	NightHits        int                `json:"nightHits"`               // 凌晨 01:00-05:59 本地时间活跃采样次数
 	IntervalCV       float64            `json:"intervalCv"`       // 建连时间间隔变异系数 (越小越像机器定时心跳)
 	DomainEntropy    float64            `json:"domainEntropy"`    // 域名香农信息熵
 	SecurityScore    int                `json:"securityScore"`    // 🛡️ 安全风险轴评分 (0-100)
@@ -158,10 +159,12 @@ type Report struct {
 	SuspiciousFlows int                `json:"suspiciousFlows"`
 	HighRiskFlows   int                `json:"highRiskFlows"`
 	BlockedCount    int                `json:"blockedCount"`
+	WhitelistCount  int                `json:"whitelistCount"`
 	AIEnabled       bool               `json:"aiEnabled"`
 	Devices         []DeviceSummary    `json:"devices"`
 	Flows           []FlowRecord       `json:"flows"`
 	BlockRules      []config.BlockRule `json:"blockRules"`
+	Whitelist       []string           `json:"whitelist,omitempty"`
 }
 
 // BlockActionResult 记录执行“一键双层拉黑”或“解封”后的各层执行反馈。

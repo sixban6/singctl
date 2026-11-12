@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"math"
 	"net"
 	"net/http"
@@ -21,9 +22,11 @@ import (
 )
 
 const (
-	maxPersistedFlows    = 400
-	maxTrackedConnDeltas = 1500
-	maxArrivalSamples    = 16
+	maxPersistedFlows       = 400
+	maxTrackedConnDeltas    = 1500
+	maxArrivalSamples       = 16
+	flowIdleTTLSeconds      = 86400 // 超过 24 小时无流量活动的陈旧流自动淘汰
+	currentAuditStateSchema = 2
 )
 
 // defaultStatePath 返回设备审计增量快照文件的默认路径（位于 /tmp 内存盘，绝不磨损 OpenWrt 闪存）。
@@ -88,9 +91,10 @@ type connByteCursor struct {
 }
 
 type persistedAuditState struct {
-	UpdatedUnix int64                         `json:"updatedUnix"`
-	Flows       map[string]*persistedFlowEntry `json:"flows"`
-	ConnCursors map[string]connByteCursor     `json:"connCursors"`
+	SchemaVersion int                           `json:"schemaVersion,omitempty"`
+	UpdatedUnix   int64                         `json:"updatedUnix"`
+	Flows         map[string]*persistedFlowEntry `json:"flows"`
+	ConnCursors   map[string]connByteCursor     `json:"connCursors"`
 }
 
 // Collector 负责从 sing-box Clash API 采集连接、关联局域网 DHCP/ARP 设备名并执行多维非线性分析。
@@ -104,22 +108,37 @@ type Collector struct {
 	leaseFiles     []string
 	arpFile        string
 	hostsFile      string
+	tzFile         string
+	uciSystemFile  string
 	nowFunc        func() time.Time
 }
 
-// NewCollector 创建默认客户端审计采集器。
+// NewCollector 创建默认客户端审计采集器（自动兼容 OpenWrt /etc/TZ 与 /etc/config/system 本地时区）。
 func NewCollector(cfg *config.Config) *Collector {
-	return &Collector{
-		cfg:        cfg,
-		statePath:  defaultStatePath(),
-		endpoints:  singbox.ClashAPIEndpoints(),
-		secret:     singbox.ClashAPISecret(),
-		httpClient: &http.Client{Timeout: 2500 * time.Millisecond},
-		leaseFiles: []string{"/tmp/dhcp.leases", "/var/lib/misc/dnsmasq.leases", "/tmp/dnsmasq.leases"},
-		arpFile:    "/proc/net/arp",
-		hostsFile:  "/etc/hosts",
-		nowFunc:    time.Now,
+	c := &Collector{
+		cfg:           cfg,
+		statePath:     defaultStatePath(),
+		endpoints:     singbox.ClashAPIEndpoints(),
+		secret:        singbox.ClashAPISecret(),
+		httpClient:    &http.Client{Timeout: 2500 * time.Millisecond},
+		leaseFiles:    []string{"/tmp/dhcp.leases", "/var/lib/misc/dnsmasq.leases", "/tmp/dnsmasq.leases"},
+		arpFile:       "/proc/net/arp",
+		hostsFile:     "/etc/hosts",
+		tzFile:        "/etc/TZ",
+		uciSystemFile: "/etc/config/system",
 	}
+	c.nowFunc = func() time.Time {
+		return time.Now().In(c.resolveLocalLocation())
+	}
+	return c
+}
+
+// SetTimezoneFilesForTest 供单元测试注入模拟的 OpenWrt /etc/TZ 与 /etc/config/system 路径。
+func (c *Collector) SetTimezoneFilesForTest(tzFile, uciSystemFile string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.tzFile = tzFile
+	c.uciSystemFile = uciSystemFile
 }
 
 // SetEndpointsForTest 供单元测试注入模拟 Clash API 地址与状态文件路径。
@@ -177,9 +196,11 @@ func (c *Collector) Collect(ctx context.Context, opts CollectOptions) *Report {
 	if c.cfg != nil {
 		rep.BlockRules = slices.Clone(c.cfg.CustomRules.Block)
 		rep.BlockedCount = len(rep.BlockRules)
+		rep.Whitelist = slices.Clone(c.cfg.Audit.Whitelist)
+		rep.WhitelistCount = len(rep.Whitelist)
 	}
 
-	state := c.loadStateLocked()
+	state := c.loadStateLocked(now.Unix())
 	devDirectory := c.resolveLANDevicesLocked()
 	selfIPs := collectLocalInterfaceIPs()
 
@@ -223,8 +244,10 @@ func (c *Collector) Collect(ctx context.Context, opts CollectOptions) *Report {
 		}
 
 		activeIDs := activeByKey[entry.Key]
-		appName := IdentifyApp(entry.Target, entry.DestIP, entry.Rule)
+		appName := IdentifyApp(entry.Target, entry.DestIP, entry.Rule, entry.RawHost)
 		cachedAI := LookupCachedAIReview(entry.Target)
+		activeSpanSec := max(int64(60), entry.LastSeenUnix-entry.FirstSeenUnix)
+		displayLoc := now.Location()
 		rec := FlowRecord{
 			Key:           entry.Key,
 			DeviceIP:      normDevIP,
@@ -245,15 +268,16 @@ func (c *Collector) Collect(ctx context.Context, opts CollectOptions) *Report {
 			ConnCount:     entry.ConnCount,
 			ActiveConns:   len(activeIDs),
 			ActiveConnIDs: activeIDs,
-			FirstSeen:     time.Unix(entry.FirstSeenUnix, 0).Format("15:04:05"),
-			LastSeen:      time.Unix(entry.LastSeenUnix, 0).Format("15:04:05"),
+			FirstSeen:     time.Unix(entry.FirstSeenUnix, 0).In(displayLoc).Format("15:04:05"),
+			LastSeen:      time.Unix(entry.LastSeenUnix, 0).In(displayLoc).Format("15:04:05"),
+			ActiveSpanSec: activeSpanSec,
 			NightHits:     entry.NightHits,
 			IntervalCV:    computeIntervalCV(entry.ArrivalsUnix),
 			AIReview:      cachedAI,
 		}
 		engine.EvaluateFlow(&rec)
 
-		// 更新设备维度汇总
+		// 更新设备维度汇总（已拉黑或白名单放行的目标不再计入活跃告警数与设备最高风险分，形成治理闭环）
 		ds, ok := deviceAgg[rec.DeviceIP]
 		if !ok {
 			ds = &DeviceSummary{
@@ -268,23 +292,25 @@ func (c *Collector) Collect(ctx context.Context, opts CollectOptions) *Report {
 		ds.DownloadBytes += rec.DownloadBytes
 		ds.FlowCount++
 		ds.ActiveConns += rec.ActiveConns
-		if rec.SecurityScore > ds.MaxSecurityScore {
-			ds.MaxSecurityScore = rec.SecurityScore
-		}
-		if rec.PrivacyScore > ds.MaxPrivacyScore {
-			ds.MaxPrivacyScore = rec.PrivacyScore
-		}
-		if rec.RiskScore > ds.MaxRiskScore {
-			ds.MaxRiskScore = rec.RiskScore
-		}
-		switch rec.Threat {
-		case ThreatHighRisk:
-			ds.HighRiskCount++
-			rep.HighRiskFlows++
-			rep.SuspiciousFlows++
-		case ThreatSuspicious:
-			ds.SuspiciousCount++
-			rep.SuspiciousFlows++
+		if rec.State == EnforcementObserved {
+			if rec.SecurityScore > ds.MaxSecurityScore {
+				ds.MaxSecurityScore = rec.SecurityScore
+			}
+			if rec.PrivacyScore > ds.MaxPrivacyScore {
+				ds.MaxPrivacyScore = rec.PrivacyScore
+			}
+			if rec.RiskScore > ds.MaxRiskScore {
+				ds.MaxRiskScore = rec.RiskScore
+			}
+			switch rec.Threat {
+			case ThreatHighRisk:
+				ds.HighRiskCount++
+				rep.HighRiskFlows++
+				rep.SuspiciousFlows++
+			case ThreatSuspicious:
+				ds.SuspiciousCount++
+				rep.SuspiciousFlows++
+			}
 		}
 
 		// 过滤条件检查（支持按设备 IP、设备名称、目标域名或识别出的应用名如 Telegram/Baidu 过滤）
@@ -296,7 +322,7 @@ func (c *Collector) Collect(ctx context.Context, opts CollectOptions) *Report {
 				continue
 			}
 		}
-		if opts.OnlySuspect && rec.RiskScore < 35 && rec.Threat == ThreatNormal {
+		if opts.OnlySuspect && (rec.State != EnforcementObserved || (rec.RiskScore < 35 && rec.Threat == ThreatNormal)) {
 			continue
 		}
 		allFlows = append(allFlows, rec)
@@ -335,6 +361,19 @@ func (c *Collector) Collect(ctx context.Context, opts CollectOptions) *Report {
 	rep.AIEnabled = opts.EnableAI || advisor.IsRemoteLLMConfigured()
 	if opts.EnableAI {
 		advisor.ReviewSuspiciousFlows(ctx, allFlows, opts.CallerIP)
+		// 当同步开启 --ai 时，若真实大模型复核结论为 AIDoNotBlock，立即执行闭环降权重算并重排
+		reEvaluated := false
+		for i := range allFlows {
+			if rev := allFlows[i].AIReview; rev != nil && rev.Verdict == AIDoNotBlock &&
+				rev.Source != "" && rev.Source != "builtin_expert" && rev.Source != "trusted_baseline" &&
+				allFlows[i].RiskScore > 28 {
+				engine.EvaluateFlow(&allFlows[i])
+				reEvaluated = true
+			}
+		}
+		if reEvaluated {
+			SortFlows(allFlows, opts.SortBy, opts.SortAsc)
+		}
 	}
 
 	rep.Flows = allFlows
@@ -406,13 +445,17 @@ func (c *Collector) ingestConnectionsLocked(
 		destPort, _ := strconv.Atoi(strings.TrimSpace(conn.Metadata.DestinationPort))
 
 		isDirectIP := false
-		target := strings.ToLower(rawHost)
+		target := strings.TrimSuffix(strings.ToLower(rawHost), ".")
 		if h, _, err := net.SplitHostPort(target); err == nil && h != "" {
-			target = h
+			target = strings.TrimSuffix(h, ".")
 		}
 		if target == "" || net.ParseIP(target) != nil {
 			isDirectIP = true
 			target = cmp.Or(destIP, target)
+		} else if !isValidAuditDomain(target) {
+			// 过滤 TLS 证书 Subject CN 非域名字符串（例如 "Mijia Cloud"），保留 rawHost 供应用识别，目标回退为真实目的 IP
+			isDirectIP = true
+			target = destIP
 		}
 		if target == "" {
 			continue
@@ -465,6 +508,9 @@ func (c *Collector) ingestConnectionsLocked(
 		entry.LastSeenUnix = nowUnix
 		entry.UploadBytes += deltaUp
 		entry.DownloadBytes += deltaDown
+		if entry.RawHost == "" && rawHost != "" {
+			entry.RawHost = rawHost
+		}
 		if destPort > 0 {
 			entry.DestPort = destPort
 		}
@@ -611,10 +657,11 @@ func (c *Collector) resolveLANDevicesLocked() map[string]lanDeviceInfo {
 	return out
 }
 
-func (c *Collector) loadStateLocked() *persistedAuditState {
+func (c *Collector) loadStateLocked(nowUnix int64) *persistedAuditState {
 	st := &persistedAuditState{
-		Flows:       make(map[string]*persistedFlowEntry),
-		ConnCursors: make(map[string]connByteCursor),
+		SchemaVersion: currentAuditStateSchema,
+		Flows:         make(map[string]*persistedFlowEntry),
+		ConnCursors:   make(map[string]connByteCursor),
 	}
 	if c.statePath == "" {
 		return st
@@ -623,12 +670,58 @@ func (c *Collector) loadStateLocked() *persistedAuditState {
 	if err != nil {
 		return st
 	}
+	st.SchemaVersion = 0
 	_ = json.Unmarshal(raw, st)
 	if st.Flows == nil {
 		st.Flows = make(map[string]*persistedFlowEntry)
 	}
 	if st.ConnCursors == nil {
 		st.ConnCursors = make(map[string]connByteCursor)
+	}
+
+	// Schema v2 一次性平滑自愈迁移：
+	// 1) 清零旧版 OpenWrt UTC 时区回退导致的白天误记 NightHits（保留累计上下行流量）
+	// 2) 将旧快照中因证书 CN 嗅探混入的非法非域名 Target（如 "mijia cloud"）回退并归并至真实 DestIP
+	if st.SchemaVersion < currentAuditStateSchema {
+		migrated := make(map[string]*persistedFlowEntry, len(st.Flows))
+		for _, e := range st.Flows {
+			if e == nil {
+				continue
+			}
+			e.NightHits = 0
+			if !e.IsDirectIP && net.ParseIP(e.Target) == nil && !isValidAuditDomain(e.Target) {
+				e.RawHost = cmp.Or(e.RawHost, e.Target)
+				if net.ParseIP(e.DestIP) == nil {
+					continue
+				}
+				e.Target = e.DestIP
+				e.IsDirectIP = true
+				e.Key = e.DeviceIP + "|" + e.Target + "|" + e.Network
+			}
+			if prev, exists := migrated[e.Key]; exists {
+				prev.UploadBytes += e.UploadBytes
+				prev.DownloadBytes += e.DownloadBytes
+				prev.ConnCount += e.ConnCount
+				if e.FirstSeenUnix > 0 && (prev.FirstSeenUnix == 0 || e.FirstSeenUnix < prev.FirstSeenUnix) {
+					prev.FirstSeenUnix = e.FirstSeenUnix
+				}
+				if e.LastSeenUnix > prev.LastSeenUnix {
+					prev.LastSeenUnix = e.LastSeenUnix
+				}
+				prev.RawHost = cmp.Or(prev.RawHost, e.RawHost)
+			} else {
+				migrated[e.Key] = e
+			}
+		}
+		st.Flows = migrated
+		st.SchemaVersion = currentAuditStateSchema
+	}
+
+	// 24 小时滑动窗口：淘汰超过 24 小时无活动的陈旧流记录，避免跨日长尾连接无限累积
+	if nowUnix > 0 {
+		maps.DeleteFunc(st.Flows, func(_ string, e *persistedFlowEntry) bool {
+			return e == nil || (e.LastSeenUnix > 0 && nowUnix-e.LastSeenUnix > flowIdleTTLSeconds)
+		})
 	}
 	return st
 }
@@ -638,16 +731,20 @@ func (c *Collector) saveStateLocked(st *persistedAuditState, now time.Time) {
 		return
 	}
 	nowUnix := now.Unix()
+	st.SchemaVersion = currentAuditStateSchema
 	st.UpdatedUnix = nowUnix
 
 	// 修剪过期连接游标 (超过 2 小时未活动或超出容量上限)
 	if len(st.ConnCursors) > maxTrackedConnDeltas {
-		for id, cur := range st.ConnCursors {
-			if nowUnix-cur.SeenUnix > 7200 {
-				delete(st.ConnCursors, id)
-			}
-		}
+		maps.DeleteFunc(st.ConnCursors, func(_ string, cur connByteCursor) bool {
+			return nowUnix-cur.SeenUnix > 7200
+		})
 	}
+
+	// 淘汰超过 24 小时未活跃的陈旧流
+	maps.DeleteFunc(st.Flows, func(_ string, e *persistedFlowEntry) bool {
+		return e == nil || (e.LastSeenUnix > 0 && nowUnix-e.LastSeenUnix > flowIdleTTLSeconds)
+	})
 
 	// 修剪聚合流桶 (最多保留 maxPersistedFlows 条高价值记录，恒定内存 < 1MB)
 	if len(st.Flows) > maxPersistedFlows {
@@ -725,6 +822,17 @@ func normalizeSourceDeviceIP(rawIP string, selfIPs map[string]bool) string {
 	return "127.0.0.1"
 }
 
+func enforcementActiveRank(s EnforcementState) int {
+	switch s {
+	case EnforcementBlocked:
+		return 1
+	case EnforcementWhitelisted:
+		return 0
+	default: // EnforcementObserved 或未填充态优先排在待处置前列
+		return 2
+	}
+}
+
 // SortFlows 对审计流记录按指定字段（"risk" | "upload" | "download" | "ratio"）执行稳定排序。
 func SortFlows(flows []FlowRecord, sortBy string, asc bool) {
 	key := strings.ToLower(strings.TrimSpace(sortBy))
@@ -768,7 +876,9 @@ func SortFlows(flows []FlowRecord, sortBy string, asc bool) {
 			}
 			return cmp.Compare(b.RiskScore, a.RiskScore)
 		default: // "risk"
-			if t := cmp.Compare(b.Threat.SeverityRank(), a.Threat.SeverityRank()); t != 0 {
+			if s := cmp.Compare(enforcementActiveRank(b.State), enforcementActiveRank(a.State)); s != 0 {
+				c = s
+			} else if t := cmp.Compare(b.Threat.SeverityRank(), a.Threat.SeverityRank()); t != 0 {
 				c = t
 			} else if r := cmp.Compare(b.RiskScore, a.RiskScore); r != 0 {
 				c = r
@@ -781,4 +891,190 @@ func SortFlows(flows []FlowRecord, sortBy string, asc bool) {
 			return c
 		}
 	})
+}
+
+// isValidAuditDomain 校验嗅探出的字符串是否为合法 FQDN 域名（拒绝类似 "Mijia Cloud" 的 TLS 证书 Subject CN 非域名文本）。
+func isValidAuditDomain(s string) bool {
+	s = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(s)), ".")
+	if s == "" || len(s) > 253 || net.ParseIP(s) != nil {
+		return false
+	}
+	if !strings.Contains(s, ".") {
+		return false
+	}
+	lastLabel := ""
+	for label := range strings.SplitSeq(s, ".") {
+		if len(label) == 0 || len(label) > 63 {
+			return false
+		}
+		if label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for i := range len(label) {
+			ch := label[i]
+			isAlphaNum := (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')
+			if !isAlphaNum && ch != '-' && ch != '_' {
+				return false
+			}
+		}
+		lastLabel = label
+	}
+	if len(lastLabel) < 2 || strings.Contains(lastLabel, "_") {
+		return false
+	}
+	allDigits := true
+	for i := range len(lastLabel) {
+		if lastLabel[i] < '0' || lastLabel[i] > '9' {
+			allDigits = false
+			break
+		}
+	}
+	return !allDigits
+}
+
+func (c *Collector) resolveLocalLocation() *time.Location {
+	// 当测试注入了自定义 tzFile / uciSystemFile，或运行在缺少 /usr/share/zoneinfo 导致 time.Local 回退为 UTC 的 OpenWrt 固件上时，主动解析 /etc/TZ 与 /etc/config/system
+	if (c.tzFile != "" && c.tzFile != "/etc/TZ") || (c.uciSystemFile != "" && c.uciSystemFile != "/etc/config/system") {
+		return ResolveLocalLocationFromFiles(c.tzFile, c.uciSystemFile)
+	}
+	if time.Local != nil && time.Local.String() != "UTC" {
+		return time.Local
+	}
+	return ResolveLocalLocationFromFiles(c.tzFile, c.uciSystemFile)
+}
+
+// ResolveLocalLocationFromFiles 按 TZ 环境变量 -> OpenWrt /etc/TZ -> UCI /etc/config/system -> time.Local 顺序解析真实本地时区。
+func ResolveLocalLocationFromFiles(tzFile, uciSystemFile string) *time.Location {
+	if envTZ := strings.TrimSpace(os.Getenv("TZ")); envTZ != "" {
+		if loc := ParsePOSIXTZLocation(envTZ); loc != nil {
+			return loc
+		}
+	}
+	if tzFile != "" {
+		if raw, err := os.ReadFile(tzFile); err == nil {
+			for line := range strings.SplitSeq(string(raw), "\n") {
+				if line = strings.TrimSpace(line); line != "" {
+					if loc := ParsePOSIXTZLocation(line); loc != nil {
+						return loc
+					}
+				}
+			}
+		}
+	}
+	if uciSystemFile != "" {
+		if raw, err := os.ReadFile(uciSystemFile); err == nil {
+			var zoneName, posixTZ string
+			for line := range strings.SplitSeq(string(raw), "\n") {
+				fields := strings.Fields(strings.TrimSpace(line))
+				if len(fields) >= 3 && fields[0] == "option" {
+					val := strings.Trim(fields[2], "'\"")
+					switch fields[1] {
+					case "zonename":
+						zoneName = val
+					case "timezone":
+						posixTZ = val
+					}
+				}
+			}
+			for _, candidate := range []string{zoneName, posixTZ} {
+				if loc := ParsePOSIXTZLocation(candidate); loc != nil {
+					return loc
+				}
+			}
+		}
+	}
+	return time.Local
+}
+
+// ParsePOSIXTZLocation 解析 IANA 时区名或 OpenWrt / musl POSIX TZ 字符串（如 "CST-8", "<+08>-8", "EST5EDT", "IST-5:30"）。
+// 注意 POSIX TZ 规范符号定义：偏移量表示“本地时间加上该值得到 UTC”，因此 "CST-8" 代表东八区 UTC+8 (+8*3600)。
+func ParsePOSIXTZLocation(spec string) *time.Location {
+	s := strings.TrimSpace(spec)
+	if s == "" {
+		return nil
+	}
+	if loc, err := time.LoadLocation(s); err == nil && loc != nil {
+		return loc
+	}
+
+	switch strings.ToLower(strings.ReplaceAll(s, " ", "_")) {
+	case "asia/shanghai", "asia/chongqing", "asia/harbin", "asia/urumqi", "asia/hong_kong", "asia/macau", "asia/taipei", "asia/singapore", "prc":
+		return time.FixedZone("CST", 8*3600)
+	case "asia/tokyo", "asia/seoul":
+		return time.FixedZone("JST", 9*3600)
+	}
+
+	var tzName, rest string
+	if strings.HasPrefix(s, "<") {
+		end := strings.IndexByte(s, '>')
+		if end <= 1 {
+			return nil
+		}
+		tzName = s[1:end]
+		rest = s[end+1:]
+	} else {
+		i := 0
+		for i < len(s) && ((s[i] >= 'A' && s[i] <= 'Z') || (s[i] >= 'a' && s[i] <= 'z')) {
+			i++
+		}
+		if i == 0 {
+			return nil
+		}
+		tzName = s[:i]
+		rest = s[i:]
+	}
+
+	if rest == "" {
+		if strings.EqualFold(tzName, "UTC") || strings.EqualFold(tzName, "GMT") {
+			return time.UTC
+		}
+		return nil
+	}
+
+	westSign := 1
+	switch rest[0] {
+	case '-':
+		westSign = -1
+		rest = rest[1:]
+	case '+':
+		westSign = 1
+		rest = rest[1:]
+	}
+
+	// 提取 hh[:mm[:ss]]，忽略后续可能附带的夏令时规则（如 EDT,M3.2.0/2）
+	numEnd := 0
+	for numEnd < len(rest) && ((rest[numEnd] >= '0' && rest[numEnd] <= '9') || rest[numEnd] == ':') {
+		numEnd++
+	}
+	if numEnd == 0 {
+		return nil
+	}
+	parts := strings.Split(rest[:numEnd], ":")
+	if len(parts) > 3 {
+		return nil
+	}
+	hh, err := strconv.Atoi(parts[0])
+	if err != nil || hh > 14 {
+		return nil
+	}
+	mm, ss := 0, 0
+	if len(parts) >= 2 {
+		mm, err = strconv.Atoi(parts[1])
+		if err != nil || mm < 0 || mm >= 60 {
+			return nil
+		}
+	}
+	if len(parts) == 3 {
+		ss, err = strconv.Atoi(parts[2])
+		if err != nil || ss < 0 || ss >= 60 {
+			return nil
+		}
+	}
+
+	westSeconds := westSign * (hh*3600 + mm*60 + ss)
+	eastSeconds := -westSeconds
+	if eastSeconds == 0 && (strings.EqualFold(tzName, "UTC") || strings.EqualFold(tzName, "GMT")) {
+		return time.UTC
+	}
+	return time.FixedZone(tzName, eastSeconds)
 }

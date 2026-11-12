@@ -577,6 +577,7 @@ func NewSingboxCommand(configPath string) *cobra.Command {
 		newAuditCmd(configPath),
 		newBlockCmd(configPath),
 		newUnblockCmd(configPath),
+		newWhitelistCmd(configPath),
 	)
 	return cmd
 }

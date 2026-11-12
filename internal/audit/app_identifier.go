@@ -112,35 +112,50 @@ func defaultAppIndexCachePath() string {
 }
 
 // IdentifyApp 根据本地下载的 sing-box 规则集 (.srs)、连接命中规则及内置常见服务特征识别目标所属应用。
-func IdentifyApp(target, destIP, ruleStr string) string {
+// 可选传入 rawHints（如非域名的 TLS 证书 CN 字符串 "Mijia Cloud"），用于在回退为直连 IP 时辅助识别设备/厂商归属。
+func IdentifyApp(target, destIP, ruleStr string, rawHints ...string) string {
 	target = strings.ToLower(strings.TrimSpace(target))
 	destIP = strings.TrimSpace(destIP)
 
-	// 1. 尝试从本地已下载的 sing-box rule_sets 索引匹配精确域名后缀或 GeoIP 网段
+	// 1. 尝试从本地已下载的 sing-box rule_sets 索引匹配精确域名或域名后缀 / GeoIP 网段
 	idx := getOrLoadAppIndex()
 	if idx != nil {
-		if app := idx.match(target, destIP); app != "" {
+		if app := idx.matchExactOrSuffixOrCIDR(target, destIP); app != "" {
 			return app
 		}
 	}
 
-	// 2. 内置常见基础服务/智能硬件云快速识别（补充未单独拆出 srs 的常见服务）
+	// 2. 内置常见基础服务/智能硬件云快速识别（优先于模糊短词根，避免 3~4 字母 keyword 误命中）
 	if app := matchBuiltinService(target, destIP); app != "" {
 		return app
 	}
+	for _, hint := range rawHints {
+		if h := strings.ToLower(strings.TrimSpace(hint)); h != "" && h != target {
+			if app := matchBuiltinService(h, ""); app != "" {
+				return app
+			}
+		}
+	}
 
-	// 3. 回退解析 sing-box Clash API 返回的单条 rule_set 标签
+	// 3. 回退匹配 srs 中的长关键字 (>=5 字符)
+	if idx != nil {
+		if app := idx.matchKeywords(target); app != "" {
+			return app
+		}
+	}
+
+	// 4. 回退解析 sing-box Clash API 返回的单条 rule_set 标签
 	if app := extractSingleRuleSetApp(ruleStr); app != "" {
 		return app
 	}
 	return ""
 }
 
-func (c *appIdentifierCache) match(target, destIP string) string {
+func (c *appIdentifierCache) matchExactOrSuffixOrCIDR(target, destIP string) string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	// 域名匹配：先精确匹配，再逐级后缀匹配 (例如 a.b.baidu.com -> b.baidu.com -> baidu.com)
+	// 域名匹配：精确匹配 + 逐级后缀匹配 (例如 a.b.baidu.com -> b.baidu.com -> baidu.com)
 	if target != "" && net.ParseIP(target) == nil {
 		if app, ok := c.exactDomains[target]; ok {
 			return app
@@ -155,11 +170,6 @@ func (c *appIdentifierCache) match(target, destIP string) string {
 				break
 			}
 			cur = cur[dot+1:]
-		}
-		for _, kw := range c.keywords {
-			if kw.Keyword != "" && strings.Contains(target, kw.Keyword) {
-				return kw.App
-			}
 		}
 	}
 
@@ -176,6 +186,20 @@ func (c *appIdentifierCache) match(target, destIP string) string {
 			if cr.net != nil && cr.net.Contains(ip) {
 				return cr.app
 			}
+		}
+	}
+	return ""
+}
+
+func (c *appIdentifierCache) matchKeywords(target string) string {
+	if target == "" || net.ParseIP(target) != nil {
+		return ""
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for _, kw := range c.keywords {
+		if len(kw.Keyword) >= 5 && strings.Contains(target, kw.Keyword) {
+			return kw.App
 		}
 	}
 	return ""
@@ -392,9 +416,42 @@ func applyPersistedIndex(dst *appIdentifierCache, p *persistedAppIndex) {
 	dst.mu.Unlock()
 }
 
+var builtinCloudflareNets = sync.OnceValue(func() []*net.IPNet {
+	cidrs := []string{
+		"104.16.0.0/12",
+		"172.64.0.0/13",
+		"162.158.0.0/15",
+		"173.245.48.0/20",
+		"103.21.244.0/22",
+		"103.22.200.0/22",
+		"103.31.4.0/22",
+		"141.101.64.0/18",
+		"108.162.192.0/18",
+		"190.93.240.0/20",
+		"188.114.96.0/20",
+		"197.234.240.0/22",
+		"198.41.128.0/17",
+		"2606:4700::/32",
+	}
+	out := make([]*net.IPNet, 0, len(cidrs))
+	for _, c := range cidrs {
+		if _, ipNet, err := net.ParseCIDR(c); err == nil && ipNet != nil {
+			out = append(out, ipNet)
+		}
+	}
+	return out
+})
+
+func hasDomainOrSubdomain(target, domain string) bool {
+	return target == domain || strings.HasSuffix(target, "."+domain)
+}
+
 func matchBuiltinService(target, destIP string) string {
-	// 1. 常见知名公网 DNS / 组网 IP
+	// 1. 常见知名公网 DNS / 组网 / Anycast 云网络 IP
 	for _, ipStr := range []string{destIP, target} {
+		if ipStr == "" {
+			continue
+		}
 		switch ipStr {
 		case "223.5.5.5", "223.6.6.6":
 			return "阿里公共 DNS"
@@ -416,6 +473,12 @@ func matchBuiltinService(target, destIP string) string {
 			if ip4 := ip.To4(); ip4 != nil && ip4[0] == 17 {
 				return "Apple"
 			}
+			// Cloudflare Anycast CDN / QUIC 边缘网段
+			for _, cfNet := range builtinCloudflareNets() {
+				if cfNet.Contains(ip) {
+					return "Cloudflare"
+				}
+			}
 		}
 	}
 
@@ -425,30 +488,46 @@ func matchBuiltinService(target, destIP string) string {
 		return "Telegram"
 	case strings.Contains(target, "baidu") || strings.HasSuffix(target, ".bdimg.com") || strings.HasSuffix(target, ".bdstatic.com"):
 		return "百度 Baidu"
-	case strings.Contains(target, "qq.com") || strings.Contains(target, "weixin") || strings.Contains(target, "wechat") || strings.Contains(target, "tencent") || strings.Contains(target, "qpic.cn") || strings.Contains(target, "gtimg.cn"):
+	case hasDomainOrSubdomain(target, "qq.com") || strings.Contains(target, "weixin") || strings.Contains(target, "wechat") ||
+		hasDomainOrSubdomain(target, "wxgateway.com") || strings.Contains(target, "tencent") ||
+		hasDomainOrSubdomain(target, "qpic.cn") || hasDomainOrSubdomain(target, "gtimg.cn") || hasDomainOrSubdomain(target, "tenpay.com"):
 		return "腾讯 / 微信"
 	case strings.Contains(target, "alicdn") || strings.Contains(target, "aliyun") || strings.Contains(target, "taobao") || strings.Contains(target, "tmall") || strings.Contains(target, "alipay"):
 		return "阿里 / 淘宝"
-	case strings.Contains(target, "bytedance") || strings.Contains(target, "douyin") || strings.Contains(target, "snssdk") || strings.Contains(target, "toutiao") || strings.Contains(target, "volces.com") || strings.Contains(target, "byteimg"):
+	case strings.Contains(target, "bytedance") || strings.Contains(target, "douyin") || strings.Contains(target, "snssdk") || strings.Contains(target, "toutiao") || hasDomainOrSubdomain(target, "volces.com") || strings.Contains(target, "byteimg"):
 		return "字节 / 抖音"
 	case strings.Contains(target, "bilibili") || strings.HasSuffix(target, ".bilivideo.com") || strings.HasSuffix(target, ".hdslb.com"):
 		return "哔哩哔哩 Bilibili"
 	case strings.Contains(target, "xiaohongshu") || strings.Contains(target, "xhscdn"):
 		return "小红书"
-	case strings.Contains(target, "xiaomi") || strings.Contains(target, "mi.com") || strings.Contains(target, "miui.com") || strings.Contains(target, "mijia"):
+	case strings.Contains(target, "xiaomi") || hasDomainOrSubdomain(target, "mi.com") || hasDomainOrSubdomain(target, "miui.com") || strings.Contains(target, "mijia"):
 		return "小米 / 米家"
 	case strings.Contains(target, "psmartcloud"):
 		return "智能家居云 (PSmart)"
 	case strings.Contains(target, "tuya"):
 		return "涂鸦智能 Tuya"
-	case strings.Contains(target, "apple.com") || strings.Contains(target, "icloud.com") || strings.Contains(target, "mzstatic.com") || strings.Contains(target, "aaplimg.com"):
+	case hasDomainOrSubdomain(target, "apple.com") || hasDomainOrSubdomain(target, "apple.com.cn") || hasDomainOrSubdomain(target, "icloud.com") || hasDomainOrSubdomain(target, "mzstatic.com") || hasDomainOrSubdomain(target, "aaplimg.com"):
 		return "Apple"
-	case strings.Contains(target, "google") || strings.Contains(target, "gstatic.com") || strings.Contains(target, "1e100.net"):
+	case strings.Contains(target, "google") || hasDomainOrSubdomain(target, "gstatic.com") || hasDomainOrSubdomain(target, "1e100.net"):
 		return "Google"
 	case strings.Contains(target, "github"):
 		return "GitHub"
-	case strings.Contains(target, "microsoft") || strings.Contains(target, "live.com") || strings.Contains(target, "office"):
+	case strings.Contains(target, "microsoft") || hasDomainOrSubdomain(target, "live.com") || strings.Contains(target, "office"):
 		return "Microsoft"
+	case hasDomainOrSubdomain(target, "brave.com"):
+		return "Brave"
+	case hasDomainOrSubdomain(target, "tradingview.com"):
+		return "TradingView"
+	case hasDomainOrSubdomain(target, "grok.com") || hasDomainOrSubdomain(target, "x.ai"):
+		return "xAI / Grok"
+	case hasDomainOrSubdomain(target, "x.com") || hasDomainOrSubdomain(target, "twitter.com") || hasDomainOrSubdomain(target, "twimg.com"):
+		return "X (Twitter)"
+	case hasDomainOrSubdomain(target, "openai.com") || hasDomainOrSubdomain(target, "chatgpt.com") || hasDomainOrSubdomain(target, "oaistatic.com"):
+		return "OpenAI"
+	case hasDomainOrSubdomain(target, "anthropic.com") || hasDomainOrSubdomain(target, "claude.ai"):
+		return "Claude / Anthropic"
+	case hasDomainOrSubdomain(target, "meta.ai") || hasDomainOrSubdomain(target, "facebook.com") || hasDomainOrSubdomain(target, "fbcdn.net") || hasDomainOrSubdomain(target, "instagram.com") || hasDomainOrSubdomain(target, "whatsapp.net"):
+		return "Meta"
 	case strings.Contains(target, "tailscale"):
 		return "Tailscale"
 	case strings.Contains(target, "cloudflare"):

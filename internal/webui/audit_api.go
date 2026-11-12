@@ -197,6 +197,65 @@ func (s *Server) handleAuditUnblock(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
+type auditWhitelistRequest struct {
+	Action string `json:"action"` // "add" | "remove"
+	Target string `json:"target"`
+}
+
+// handleAuditWhitelist 管理设备行为审计的信任放行白名单（写入 singctl.yaml audit.whitelist，0600 权限）。
+func (s *Server) handleAuditWhitelist(w http.ResponseWriter, r *http.Request) {
+	if !s.auditLimiter.allow(r, 30) {
+		writeJSONError(w, http.StatusTooManyRequests, "操作过于频繁，请稍后再试")
+		return
+	}
+
+	var req auditWhitelistRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "无效的 JSON 请求体")
+		return
+	}
+	if strings.TrimSpace(req.Target) == "" {
+		writeJSONError(w, http.StatusBadRequest, "target 不能为空")
+		return
+	}
+
+	cfg, err := config.Load(s.opts.ConfigPath)
+	if err != nil || cfg == nil {
+		cfg = &config.Config{}
+	}
+
+	enforcer := audit.NewEnforcer(cfg, s.opts.ConfigPath)
+	action := strings.ToLower(cmp.Or(strings.TrimSpace(req.Action), "add"))
+	switch action {
+	case "add":
+		normalized, err := enforcer.WhitelistAdd(req.Target)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":        true,
+			"target":    normalized,
+			"whitelist": cfg.Audit.Whitelist,
+			"message":   "已将 " + normalized + " 加入审计信任白名单 (自动豁免告警)",
+		})
+	case "remove", "delete", "rm":
+		normalized, err := enforcer.WhitelistRemove(req.Target)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":        true,
+			"target":    normalized,
+			"whitelist": cfg.Audit.Whitelist,
+			"message":   "已将 " + normalized + " 移出审计信任白名单",
+		})
+	default:
+		writeJSONError(w, http.StatusBadRequest, "不支持的 action 参数 (支持 add / remove)")
+	}
+}
+
 type auditAIConfigPayload struct {
 	BaseURL         string `json:"baseUrl"`
 	APIKey          string `json:"apiKey"`

@@ -302,6 +302,72 @@ func (e *Enforcer) Unblock(ctx context.Context, rawTarget, rawSourceIP string) (
 	return res, nil
 }
 
+// WhitelistAdd 将指定域名或 IP/CIDR 加入客户端审计信任白名单（持久化至 singctl.yaml，权限 0600）。
+func (e *Enforcer) WhitelistAdd(rawTarget string) (string, error) {
+	normTarget, isIP := singbox.NormalizeBlockTarget(rawTarget)
+	if normTarget == "" {
+		return "", fmt.Errorf("无效的白名单目标: %q", rawTarget)
+	}
+	if strings.ContainsAny(normTarget, " \t\r\n;|&$`\"'<>") {
+		return "", fmt.Errorf("目标包含非法字符: %q", rawTarget)
+	}
+	if !isIP && !isValidAuditDomain(normTarget) {
+		return "", fmt.Errorf("无效的白名单域名或 IP/CIDR: %q", rawTarget)
+	}
+	displayTarget := strings.TrimSuffix(strings.TrimSuffix(normTarget, "/32"), "/128")
+
+	oldList := slices.Clone(e.cfg.Audit.Whitelist)
+	exists := slices.ContainsFunc(e.cfg.Audit.Whitelist, func(item string) bool {
+		t, _ := singbox.NormalizeBlockTarget(item)
+		return t == normTarget || strings.EqualFold(strings.TrimSpace(item), displayTarget)
+	})
+	if !exists {
+		e.cfg.Audit.Whitelist = append(e.cfg.Audit.Whitelist, displayTarget)
+	}
+
+	if e.configPath != "" {
+		if err := config.Save(e.configPath, e.cfg); err != nil {
+			e.cfg.Audit.Whitelist = oldList
+			return "", fmt.Errorf("保存信任白名单至 %s 失败: %w", e.configPath, err)
+		}
+	}
+	return displayTarget, nil
+}
+
+// WhitelistRemove 从客户端审计信任白名单中移除指定域名或 IP/CIDR（持久化至 singctl.yaml，权限 0600）。
+func (e *Enforcer) WhitelistRemove(rawTarget string) (string, error) {
+	normTarget, _ := singbox.NormalizeBlockTarget(rawTarget)
+	trimmed := strings.ToLower(strings.TrimSpace(rawTarget))
+	if normTarget == "" && trimmed == "" {
+		return "", fmt.Errorf("无效的白名单目标: %q", rawTarget)
+	}
+	displayTarget := cmp.Or(strings.TrimSuffix(strings.TrimSuffix(normTarget, "/32"), "/128"), trimmed)
+
+	oldList := slices.Clone(e.cfg.Audit.Whitelist)
+	kept := make([]string, 0, len(oldList))
+	removed := 0
+	for _, item := range oldList {
+		t, _ := singbox.NormalizeBlockTarget(item)
+		if (normTarget != "" && t == normTarget) || strings.EqualFold(strings.TrimSpace(item), displayTarget) {
+			removed++
+			continue
+		}
+		kept = append(kept, item)
+	}
+	if removed == 0 {
+		return "", fmt.Errorf("未在信任白名单中找到目标: %s", displayTarget)
+	}
+
+	e.cfg.Audit.Whitelist = kept
+	if e.configPath != "" {
+		if err := config.Save(e.configPath, e.cfg); err != nil {
+			e.cfg.Audit.Whitelist = oldList
+			return "", fmt.Errorf("更新配置文件 %s 失败: %w", e.configPath, err)
+		}
+	}
+	return displayTarget, nil
+}
+
 func blockedRuleSetSummaryPath(tag string) string {
 	return filepath.Join(os.TempDir(), "singctl-block-rs-"+singbox.SanitizeRuleSetTag(tag)+".json")
 }

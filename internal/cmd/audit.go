@@ -136,6 +136,53 @@ func newUnblockCmd(defaultConfigPath string) *cobra.Command {
 	return cmd
 }
 
+func newWhitelistCmd(defaultConfigPath string) *cobra.Command {
+	var removeFlag bool
+
+	cmd := &cobra.Command{
+		Use:     "whitelist <target-domain-or-ip | list>",
+		Aliases: []string{"wl"},
+		Short:   "管理设备流量审计信任白名单 (一键放行误报域名或 IP) / Manage audit trust whitelist",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			target := strings.TrimSpace(args[0])
+			resolvedPath := resolveCmdConfigPath(cmd, defaultConfigPath)
+			cfg := loadCmdConfigOrDefault(cmd, defaultConfigPath)
+
+			if strings.EqualFold(target, "list") || strings.EqualFold(target, "ls") {
+				if len(cfg.Audit.Whitelist) == 0 {
+					logger.Info("当前自定义审计白名单为空（可通过 'singctl sb whitelist <域名或IP>' 添加）")
+					return nil
+				}
+				fmt.Printf(" ✅ 当前自定义审计信任白名单 (%d 条):\n", len(cfg.Audit.Whitelist))
+				for _, w := range cfg.Audit.Whitelist {
+					fmt.Printf("   • %s\n", w)
+				}
+				return nil
+			}
+
+			enforcer := audit.NewEnforcer(cfg, resolvedPath)
+			if removeFlag {
+				removed, err := enforcer.WhitelistRemove(target)
+				if err != nil {
+					return err
+				}
+				logger.Success("✅ 已将 %s 移出审计信任白名单", removed)
+				return nil
+			}
+			added, err := enforcer.WhitelistAdd(target)
+			if err != nil {
+				return err
+			}
+			logger.Success("✅ 已将 %s 加入审计信任白名单 (后续流量自动降权豁免)", added)
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVarP(&removeFlag, "remove", "r", false, "从信任白名单中移除该目标")
+	return cmd
+}
+
 func renderAuditReport(rep *audit.Report, showAI bool) {
 	fmt.Println("══════════════════════════════════════════════════════════════════════════════════════════════")
 	fmt.Printf(" 🛡️  SINGCTL 局域网设备行为审计报告 (多维非线性风险引擎)   [%s]\n", rep.GeneratedAt)
@@ -182,8 +229,11 @@ func renderAuditReport(rep *audit.Report, showAI bool) {
 			"等级", "总(安/隐)", "源设备IP", "目标地址 (HOST/IP)", "协议", "上传 ↑", "下载 ↓", "比值", "双轴非线性诊断原因")
 		for _, f := range rep.Flows {
 			badge := "[" + f.ThreatLabel + "]"
-			if f.State == audit.EnforcementBlocked {
+			switch f.State {
+			case audit.EnforcementBlocked:
 				badge = "[已封]"
+			case audit.EnforcementWhitelisted:
+				badge = "[放行]"
 			}
 			target := f.Target
 			if f.DestPort > 0 && f.IsDirectIP {

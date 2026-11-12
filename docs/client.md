@@ -215,5 +215,25 @@ Linux / OpenWrt 客户端网关可通过 `singctl dns install` 一键部署本�
 
 > 📘 完整架构说明、配置项与子命令手册请参阅：**[👉 本地防劫持 DNS (AdGuard Home) 指南](dns.md)**
 
+### 3. 局域网设备流量行为审计与双层拉黑 (`singctl sb audit`)
+
+客户端内置正交双轴（🛡️安全 × 👁️隐私）非线性风险评估引擎与可选 L2 AI 深度复核闭环，支持在客户端 WebUI（`:8090`）或命令行一键治理：
+
+```bash
+# 查看局域网设备行为审计报告（支持 --suspicious、--device 192.168.1.50、--ai、--json、--csv）
+singctl sb audit --suspicious --ai
+
+# 一键双层拉黑（同时写入 sing-box reject 路由 + AdGuard Home DNS 黑名单 + 秒级斩断活跃连接）
+singctl sb block bad-telemetry.example.com
+singctl sb block bad-telemetry.example.com --device 192.168.1.50   # 仅限制单台局域网设备
+singctl sb unblock bad-telemetry.example.com                       # 一键解封
+
+# 管理审计信任放行白名单（自动豁免误报告警）
+singctl sb whitelist sync.example.com
+singctl sb whitelist sync.example.com --remove
+singctl sb whitelist list
+```
+
+
 
 
