@@ -867,12 +867,14 @@ func TestClosedLoopAlertCounts_And_WebUIWhitelistAPI(t *testing.T) {
 	col.SetNowFuncForTest(func() time.Time { return time.Date(2026, 11, 12, 14, 0, 0, 0, time.FixedZone("CST", 8*3600)) })
 
 	rep := col.Collect(t.Context(), audit.CollectOptions{})
+	if rep.BlockedCount != 1 {
+		t.Fatalf("expected BlockedCount=1, got %d", rep.BlockedCount)
+	}
 	if rep.SuspiciousFlows != 1 {
 		t.Fatalf("expected only 1 active suspicious flow (excluding blocked & whitelisted), got %d", rep.SuspiciousFlows)
 	}
-	if len(rep.Flows) != 3 || rep.Flows[0].Target != "telemetry.active.example.com" {
-		t.Fatalf("expected active observed threat sorted first ahead of blocked/whitelisted, got order: %s, %s, %s",
-			rep.Flows[0].Target, rep.Flows[1].Target, rep.Flows[2].Target)
+	if len(rep.Flows) != 2 || rep.Flows[0].Target != "telemetry.active.example.com" || rep.Flows[1].Target != "sync.trusted-app.example.com" {
+		t.Fatalf("expected blocked flow hidden from detail list and active threat sorted first, got flows=%+v", rep.Flows)
 	}
 
 	// 3. 移除最后一条白名单并确认 YAML 中彻底清空

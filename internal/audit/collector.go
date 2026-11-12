@@ -203,15 +203,22 @@ func (c *Collector) Collect(ctx context.Context, opts CollectOptions) *Report {
 	state := c.loadStateLocked(now.Unix())
 	devDirectory := c.resolveLANDevicesLocked()
 	selfIPs := collectLocalInterfaceIPs()
+	engine := NewNonlinearEngine(c.cfg)
 
 	connsResp, usedAddr, err := c.fetchConnectionsLocked(ctx)
 	activeByKey := make(map[string][]string)
 	if err == nil && connsResp != nil {
 		rep.Reachable = true
 		rep.ControllerAddr = usedAddr
-		c.ingestConnectionsLocked(state, connsResp.Connections, devDirectory, selfIPs, activeByKey, now)
+		c.ingestConnectionsLocked(state, connsResp.Connections, devDirectory, selfIPs, activeByKey, engine, now)
+		maps.DeleteFunc(state.Flows, func(_ string, e *persistedFlowEntry) bool {
+			return e == nil || engine.IsBlocked(normalizeSourceDeviceIP(e.DeviceIP, selfIPs), e.Target)
+		})
 		c.saveStateLocked(state, now)
 	} else {
+		maps.DeleteFunc(state.Flows, func(_ string, e *persistedFlowEntry) bool {
+			return e == nil || engine.IsBlocked(normalizeSourceDeviceIP(e.DeviceIP, selfIPs), e.Target)
+		})
 		rep.Reachable = false
 		if len(state.Flows) > 0 {
 			rep.Message = "当前 sing-box 控制端口不可达，正在展示最近缓存的设备审计快照"
@@ -221,12 +228,14 @@ func (c *Collector) Collect(ctx context.Context, opts CollectOptions) *Report {
 		}
 	}
 
-	engine := NewNonlinearEngine(c.cfg)
 	allFlows := make([]FlowRecord, 0, len(state.Flows))
 	deviceAgg := make(map[string]*DeviceSummary)
 
 	for _, entry := range state.Flows {
 		normDevIP := normalizeSourceDeviceIP(entry.DeviceIP, selfIPs)
+		if engine.IsBlocked(normDevIP, entry.Target) {
+			continue
+		}
 		devName, devMAC := entry.DeviceName, entry.DeviceMAC
 		if info, ok := devDirectory[normDevIP]; ok {
 			if info.Name != "" {
@@ -430,6 +439,7 @@ func (c *Collector) ingestConnectionsLocked(
 	devDir map[string]lanDeviceInfo,
 	selfIPs map[string]bool,
 	activeByKey map[string][]string,
+	engine *NonlinearEngine,
 	now time.Time,
 ) {
 	nowUnix := now.Unix()
@@ -458,6 +468,12 @@ func (c *Collector) ingestConnectionsLocked(
 			target = destIP
 		}
 		if target == "" {
+			continue
+		}
+		if len(conn.Chains) > 0 && strings.EqualFold(conn.Chains[0], "block") {
+			continue
+		}
+		if engine != nil && engine.IsBlocked(srcIP, target) {
 			continue
 		}
 

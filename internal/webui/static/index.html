@@ -494,7 +494,7 @@ th.th-sort.active .sort-ind { opacity: 1; font-weight: 800; }
             <option value="privacy">👁️ 仅看隐私追踪</option>
           </select>
           <label class="btn btn-sm" style="cursor:pointer;"><input type="checkbox" id="audit-only-suspect" style="accent-color:var(--accent);"> 仅看关注/高危</label>
-          <button class="btn btn-sm" id="btn-audit-blocklist-toggle" title="展开/收起黑白名单管理抽屉">🚫 黑/白名单 <span class="badge dim" id="audit-block-count-badge" style="margin-left:3px;">0</span></button>
+          <button class="btn btn-sm" id="btn-audit-blocklist-toggle" title="展开/收起黑名单与白名单管理抽屉">🚫 黑名单管理 <span class="badge dim" id="audit-block-count-badge" style="margin-left:3px;">0</span></button>
           <button class="btn btn-sm" id="btn-audit-ai-cfg" title="配置 AI 网关 BaseURL、密钥与模型">⚙️ AI 网关配置</button>
           <label class="btn btn-sm" style="cursor:pointer;"><input type="checkbox" id="audit-auto" checked style="accent-color:var(--accent);"> 自动刷新 (5秒)</label>
           <label class="btn btn-sm" style="cursor:pointer;" title="开启后自动对当前屏幕可见行及向下 2x 预取缓冲区执行 AI 深度研判"><input type="checkbox" id="audit-ai-enable" checked style="accent-color:var(--accent);"> 🤖 AI 深度研判 <span id="audit-ai-status" style="font-size:11px;color:var(--muted);"></span></label>
@@ -1621,33 +1621,12 @@ function buildScoreCellInnerHTML(f, idx) {
 }
 
 function buildFlowActionHTML(f, idx) {
-  if (f.state === "blocked") {
-    return `<button class="btn btn-sm" onclick="unblockAuditFlowByIdx(${idx}, this)">解封</button>`;
-  }
-  if (f.state === "whitelisted") {
-    if (isUserWhitelistedTarget(f.target)) {
-      return `<button class="btn btn-sm" onclick="unwhitelistAuditFlowByIdx(${idx}, this)" title="从自定义信任白名单中移除">取消放行</button>`;
-    }
-    if (isProtectedBootstrapTarget(f.target)) {
-      return `<span class="badge dim" title="核心加密握手或公共 DNS 基础设施，防断网保护">🔒 核心保护</span>`;
-    }
-    return `<span class="badge dim" title="命中内置可信云服务基线">✓ 系统基线</span>`;
-  }
   if (isProtectedBootstrapTarget(f.target)) {
-    return `<span class="badge dim" title="核心加密握手或公共 DNS 基础设施，防断网保护">🔒 核心保护</span>`;
+    return `<span class="badge dim" title="核心加密握手或公共 DNS 基础设施，防断网保护">核心保护</span>`;
   }
   const dualBad = isDualAlertRow(f);
-  const aiRev = getCachedAIReview(f);
   const btnText = dualBad ? "🚨 立即拉黑" : "一键拉黑";
-  const canDeviceScope = f.deviceIp && f.deviceIp !== "127.0.0.1" && f.deviceIp !== "::1";
-  const preferDevice = aiRev && aiRev.recommend === "block_device";
-  const devBtn = canDeviceScope
-    ? `<button class="btn btn-sm${preferDevice ? " btn-danger" : ""}" style="padding:4px 7px;font-size:11.5px;" onclick="blockAuditFlowDeviceByIdx(${idx}, this)" title="仅拦截设备 ${esc(f.deviceIp)} 访问该目标，不影响局域网其他设备">${preferDevice ? "🎯 仅此设备" : "仅此设备"}</button>`
-    : "";
-  const wlBtn = `<button class="btn btn-sm" style="padding:4px 7px;font-size:11.5px;" onclick="whitelistAuditFlowByIdx(${idx}, this)" title="将 ${esc(f.target)} 加入信任白名单，自动降权放行">放行</button>`;
-  return `<div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap;">
-    <button data-block-btn-idx="${idx}" class="btn btn-sm btn-danger${dualBad ? " btn-danger-pulse" : ""}" onclick="blockAuditFlowByIdx(${idx}, this)" title="全局双层拉黑 (Sing-Box + DNS)">${btnText}</button>${devBtn}${wlBtn}
-  </div>`;
+  return `<button data-block-btn-idx="${idx}" class="btn btn-sm btn-danger${dualBad ? " btn-danger-pulse" : ""}" onclick="blockAuditFlowByIdx(${idx}, this)">${btnText}</button>`;
 }
 
 function buildAIRowSlotHTML(f) {
@@ -1816,7 +1795,7 @@ function renderAuditFlowsTable() {
       `${buildSortTh("upload", "上传", "点击按上传流量排序 (降序 → 升序 → 恢复默认)")}` +
       `${buildSortTh("download", "下载", "点击按下载流量排序 (降序 → 升序 → 恢复默认)")}` +
       `${buildSortTh("ratio", "比值", "点击按上传/下载比值排序 (降序 → 升序 → 恢复默认)")}` +
-      `<th>程序诊断</th><th>AI 诊断</th><th>处置操作 (拦截 / 放行)</th></tr></thead>
+      `<th>程序诊断</th><th>AI 诊断</th><th>一键拉黑 (路由+DNS)</th></tr></thead>
       <tbody>${flows.map((f, idx) => {
         applyLiveAIDampingToFlow(f);
         const targetDisp = f.isDirectIp && f.destPort ? `${f.target}:${f.destPort}` : f.target;
@@ -2044,7 +2023,7 @@ async function loadAudit(withAI = false, silent = false) {
     $("#audit-summary-note").textContent =
       `总流 ${rep.totalFlows || 0} 条 · 待关注可疑/高危 ${rep.suspiciousFlows || 0} 条 · 已封禁 ${blockCnt} 条${wlCnt > 0 ? " · 已放行 " + wlCnt + " 条" : ""} · 更新于 ${nowStr}`;
     if ($("#audit-block-count-badge")) {
-      $("#audit-block-count-badge").textContent = wlCnt > 0 ? `${blockCnt}/${wlCnt}` : String(blockCnt);
+      $("#audit-block-count-badge").textContent = String(blockCnt);
       $("#audit-block-count-badge").className = "badge " + (blockCnt > 0 ? "warn" : "dim");
     }
 
@@ -2097,6 +2076,7 @@ async function loadAudit(withAI = false, silent = false) {
 
     lastEmptyFlowMsg = rep.message || "暂无符合过滤条件的流量记录";
     lastRenderedFlows = rawFlows.filter(f => {
+      if (!f || f.state === "blocked") return false;
       if (axisFilter === "security") return (f.securityScore || 0) >= 15 || f.dominantAxis === "security" || f.dominantAxis === "both";
       if (axisFilter === "privacy") return (f.privacyScore || 0) >= 15 || f.dominantAxis === "privacy" || f.dominantAxis === "both";
       return true;
@@ -2143,7 +2123,7 @@ async function loadAudit(withAI = false, silent = false) {
     const wlBox = $("#audit-whitelist-box");
     if (wlBox) {
       if (!lastAuditWhitelist.length) {
-        wlBox.innerHTML = `<div style="font-size:12px;color:var(--muted);padding-top:4px;">✅ 自定义信任放行白名单：暂无（可在明细表点击「放行」或在上方输入域名/IP 点击「+ 加入白名单」）</div>`;
+        wlBox.innerHTML = `<div style="font-size:12px;color:var(--muted);padding-top:4px;">✅ 自定义信任放行白名单：暂无（可在上方输入域名/IP 点击「+ 加入白名单」）</div>`;
       } else {
         wlBox.innerHTML = `<div style="padding:8px 10px;border-radius:9px;border:1px dashed var(--border);background:var(--bg);">
           <div style="font-size:12px;font-weight:600;margin-bottom:6px;">✅ 自定义信任放行白名单 (${lastAuditWhitelist.length} 条，自动豁免告警)：</div>
@@ -2288,15 +2268,18 @@ window.blockAuditTarget = async function(target, sourceIp, reason, btnEl) {
       method: "POST",
       body: JSON.stringify({ target, sourceIp, reason }),
     });
-    // 乐观更新当前已渲染列表，毫秒级切换为「已拉黑 / 解封」状态
-    (lastRenderedFlows || []).forEach(it => {
-      if (it && it.target === target && (!sourceIp || it.deviceIp === sourceIp)) {
-        it.state = "blocked";
-      }
-    });
-    sortFlowsInPlace(lastRenderedFlows);
+    // 乐观更新：拉黑瞬间直接从实时连接明细表移除该行，并同步递增顶部黑名单计数徽章
+    lastRenderedFlows = (lastRenderedFlows || []).filter(it =>
+      !(it && it.target === target && (!sourceIp || it.deviceIp === sourceIp))
+    );
+    const badgeEl = $("#audit-block-count-badge");
+    if (badgeEl) {
+      const nextCnt = (parseInt(badgeEl.textContent, 10) || 0) + 1;
+      badgeEl.textContent = String(nextCnt);
+      badgeEl.className = "badge warn";
+    }
     renderAuditFlowsTable();
-    toast("ok", res.message || `已将 ${target} 加入双层黑名单`);
+    toast("ok", res.message || `已将 ${target} 加入双层黑名单（可在顶部「黑名单管理」中解封）`);
   } catch (e) {
     toast("err", "拉黑失败: " + e.message);
     if (btnEl) {
