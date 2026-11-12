@@ -17,3 +17,9 @@ func (d *Daemon) setProcAttrs(cmd *exec.Cmd) {
 		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP | detachedProcess,
 	}
 }
+
+func installReloadSignal(_ func()) {}
+
+func notifyPidReload(_ int) bool {
+	return false
+}

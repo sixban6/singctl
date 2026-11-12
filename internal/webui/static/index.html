@@ -324,6 +324,31 @@ th.th-sort:hover { color: var(--text); background: var(--border); }
 th.th-sort.active { color: var(--accent); }
 th.th-sort .sort-ind { display: inline-block; margin-left: 3px; font-size: 11px; opacity: .55; }
 th.th-sort.active .sort-ind { opacity: 1; font-weight: 800; }
+.form-grid.c3 { grid-template-columns: repeat(3, 1fr); }
+@media (max-width: 860px) { .form-grid.c3 { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 580px) { .form-grid.c3 { grid-template-columns: 1fr; } }
+.wd-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 12px 15px; border-radius: 13px; margin-bottom: 14px; font-size: 13px; line-height: 1.55; border: 1px solid var(--border); background: var(--card-2); }
+.wd-banner.warn { background: var(--warn-soft); border-color: rgba(245, 158, 11, .35); color: var(--warn); }
+.wd-banner.ok { background: var(--ok-soft); border-color: rgba(16, 185, 129, .32); color: var(--ok); }
+.guard-list { display: flex; flex-direction: column; gap: 8px; }
+.guard-item { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 12px; border-radius: 11px; background: var(--card-2); border: 1px solid var(--border); }
+.guard-main { min-width: 0; }
+.guard-title { font-size: 13px; font-weight: 650; color: var(--text); display: flex; align-items: center; gap: 7px; }
+.guard-desc { font-size: 11.5px; color: var(--muted); margin-top: 2px; line-height: 1.45; }
+.fo-chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 10px; }
+.fo-chip { display: inline-flex; align-items: center; gap: 7px; padding: 7px 12px; border-radius: 10px; border: 1.5px solid var(--border); background: var(--card-2); color: var(--text); font-size: 12.5px; font-weight: 600; cursor: pointer; user-select: none; transition: all .16s ease; font-family: inherit; }
+.fo-chip:hover { border-color: var(--accent); transform: translateY(-1px); }
+.fo-chip.sel { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.fo-chip .fo-check { width: 15px; height: 15px; border-radius: 4px; border: 1.5px solid var(--border-strong); display: inline-grid; place-items: center; font-size: 10px; line-height: 1; flex: none; }
+.fo-chip.sel .fo-check { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.fo-chip .fo-now { font-size: 11px; font-weight: 500; color: var(--muted); max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fo-chip .fo-tag { font-size: 10.5px; padding: 1px 6px; border-radius: 999px; background: var(--warn-soft); color: var(--warn); font-weight: 700; }
+.fo-disabled-mask { opacity: .56; transition: opacity .2s ease; }
+.ev-list { display: flex; flex-direction: column; }
+.ev-row { display: flex; align-items: flex-start; gap: 10px; padding: 9.5px 2px; border-bottom: 1px dashed var(--border); font-size: 12.5px; line-height: 1.55; }
+.ev-row:last-child { border-bottom: none; }
+.ev-time { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; color: var(--muted); white-space: nowrap; padding-top: 2px; }
+.ev-msg { flex: 1; min-width: 0; word-break: break-word; color: var(--text); }
 </style>
 </head>
 <body>
@@ -580,20 +605,171 @@ th.th-sort.active .sort-ind { opacity: 1; font-weight: 800; }
 
   <!-- ═════════ 看门狗 ═════════ -->
   <section class="panel" id="panel-dm">
+    <div id="dm-stale-banner" class="wd-banner warn" style="display:none;">
+      <div>
+        <strong style="display:block;margin-bottom:2px;">⚠️ 检测到看门狗进程仍运行旧版本二进制</strong>
+        <span id="dm-stale-text" style="font-size:12px;opacity:.92;">平滑重启守护进程即可热加载最新代码与磁盘配置（零断网，不影响 sing-box 代理连接）。</span>
+      </div>
+      <button class="btn btn-sm btn-primary" data-action="dm-restart">立即平滑重启守护</button>
+    </div>
+
     <div class="grid c2">
       <div class="card">
-        <div class="card-head"><div class="card-title"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>看门狗守护</div></div>
-        <div class="btn-row">
-          <button class="btn btn-primary" data-action="dm-start">启动守护</button>
-          <button class="btn btn-danger" data-action="dm-stop">停止守护</button>
-          <a class="btn" href="#" data-goto="logs">查看日志</a>
+        <div class="card-head">
+          <div class="card-title"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>看门狗守护控制台</div>
+          <span id="dm-run-badge" class="badge dim">加载中…</span>
         </div>
-        <div class="hint">守护进程会持续监控 sing-box,进程退出或 DNS 卡死时自动重启(频率限制见下方状态)。</div>
+        <div class="btn-row" id="dm-ctrl-btns">
+          <button class="btn btn-sm btn-primary" id="btn-dm-start" data-action="dm-start">启动守护</button>
+          <button class="btn btn-sm" id="btn-dm-restart" data-action="dm-restart" style="display:none;">平滑重启守护</button>
+          <button class="btn btn-sm btn-danger" id="btn-dm-stop" data-action="dm-stop" style="display:none;">停止守护</button>
+          <button class="btn btn-sm" id="btn-dm-health" type="button">⚡ 立即健康检测</button>
+          <button class="btn btn-sm" id="btn-dm-refresh" type="button">刷新</button>
+          <a class="btn btn-sm" href="#" id="btn-dm-goto-events">关键事件日志</a>
+        </div>
+        <div id="dm-health-box" style="display:none;"></div>
+        <div style="margin-top:12px;" id="dm-info"><div class="empty"><span class="spin-inline"></span></div></div>
       </div>
+
       <div class="card">
-        <div class="card-head"><div class="card-title"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4"/><path d="m16.24 7.76-2.12 2.12"/><circle cx="12" cy="14" r="6"/><path d="M2 14h2"/><path d="M20 14h2"/></svg>运行状态</div></div>
-        <div id="dm-info"><div class="empty"><span class="spin-inline"></span></div></div>
+        <div class="card-head">
+          <div class="card-title"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4"/><path d="m16.24 7.76-2.12 2.12"/><circle cx="12" cy="14" r="6"/><path d="M2 14h2"/><path d="M20 14h2"/></svg>五大自愈防线实时状态</div>
+          <span class="card-note">7×24 全自动无人值守</span>
+        </div>
+        <div id="dm-guards-box" class="guard-list"><div class="empty"><span class="spin-inline"></span></div></div>
       </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap;">
+          <div class="card-title"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg>策略组自动故障切换（容灾自愈）</div>
+          <span id="fo-status-badge" class="badge ok">默认开启</span>
+        </div>
+        <div class="btn-row" style="align-items:center;">
+          <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;font-weight:600;user-select:none;" title="切换后立即保存并热通知看门狗生效">
+            <span id="fo-toggle-label">开启故障切换</span>
+            <span class="switch"><input type="checkbox" id="fo-enabled" checked><span class="track"></span></span>
+          </label>
+          <button class="btn btn-sm" id="btn-fo-patrol" type="button" title="立即对受保护策略组执行一轮节点连通性巡检与容灾判决">⚡ 立即巡检线路</button>
+        </div>
+      </div>
+
+      <div class="hint" style="margin-top:0;margin-bottom:12px;">
+        默认开启。当受保护策略组的当前主选节点连续探测超时/断流时，自动并发测速组内候选节点并无缝切往最低延迟可用节点；原主选恢复稳定且延迟达标后自动切回。<strong>所有修改保存即热生效，零断网。</strong>
+      </div>
+
+      <div id="fo-active-box" style="display:none;"></div>
+
+      <div id="fo-cfg-body">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-top:4px;">
+          <div class="sec-title" style="margin:0;">受保护策略组（点击自由勾选 · <span id="fo-groups-count">0</span> 个已启用）</div>
+          <button class="btn btn-sm" id="btn-fo-reset-groups" type="button">恢复默认分组</button>
+        </div>
+        <div id="fo-groups-chips" class="fo-chips"></div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;">
+          <input type="text" id="fo-custom-group" placeholder="输入自定义 Selector 策略组名称（如 Streaming / Telegram）" style="flex:1;min-width:220px;max-width:360px;padding:7.5px 11px;border-radius:9px;border:1px solid var(--border);background:var(--input-bg);color:var(--text);font-size:12.5px;">
+          <button class="btn btn-sm" id="btn-fo-add-group" type="button">+ 添加自定义分组</button>
+        </div>
+
+        <div class="sec-title">巡检灵敏度与防抖回切参数</div>
+        <div class="form-grid c3">
+          <div class="field">
+            <label>巡检间隔 (秒，默认 30)</label>
+            <input type="number" id="fo-patrol-interval" min="10" max="3600" step="5" value="30">
+          </div>
+          <div class="field">
+            <label>单次探测超时 (毫秒，默认 2800)</label>
+            <input type="number" id="fo-probe-timeout" min="500" max="15000" step="100" value="2800">
+          </div>
+          <div class="field">
+            <label>切备前复测确认次数 (默认 1 次防瞬断)</label>
+            <select id="fo-confirm-retries">
+              <option value="0">0 次（首次超时立即切备，极速模式）</option>
+              <option value="1" selected>1 次（间隔 1.5s 复测确认，推荐）</option>
+              <option value="2">2 次（连续 3 次超时才切备，保守）</option>
+              <option value="3">3 次（高容忍度）</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>原主选恢复自动回切</label>
+            <label style="display:flex;align-items:center;gap:9px;height:40px;padding:0 12px;border-radius:11px;border:1px solid var(--border);background:var(--input-bg);cursor:pointer;font-size:13px;">
+              <span class="switch"><input type="checkbox" id="fo-auto-failback" checked><span class="track"></span></span>
+              <span id="fo-failback-txt">原节点恢复稳定后自动回切</span>
+            </label>
+          </div>
+          <div class="field">
+            <label>回切冷却观察期 (秒，默认 180)</label>
+            <input type="number" id="fo-cooldown" min="10" max="86400" step="10" value="180">
+          </div>
+          <div class="field">
+            <label>允许回切最高延迟 (毫秒，默认 600)</label>
+            <input type="number" id="fo-max-delay" min="100" max="5000" step="50" value="600">
+          </div>
+        </div>
+
+        <div style="margin-top:2px;margin-bottom:12px;">
+          <button class="ghost-btn" id="btn-fo-adv-toggle" type="button">自定义探测目标 URL ▾</button>
+          <div id="fo-adv-box" style="display:none;margin-top:10px;">
+            <div class="field" style="margin-bottom:8px;">
+              <label>探测目标 URL（每行一个 HTTP/HTTPS 204 测速地址，按顺序兜底）</label>
+              <textarea id="fo-probe-urls" spellcheck="false" style="min-height:76px;" placeholder="https://www.gstatic.com/generate_204&#10;http://cp.cloudflare.com/generate_204"></textarea>
+            </div>
+            <button class="btn btn-sm" id="btn-fo-reset-urls" type="button">恢复默认探测 URL</button>
+          </div>
+        </div>
+
+        <div class="btn-row" style="align-items:center;">
+          <button class="btn btn-primary" id="btn-fo-save" type="button">保存故障切换配置</button>
+          <button class="btn" id="btn-fo-reset-all" type="button">恢复全部推荐默认值</button>
+          <span class="hint" style="margin:0;">保存后自动写入 <code>singctl.yaml</code> 并即时热通知看门狗生效</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head" style="margin-bottom:0;">
+        <div class="card-title"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>基础看门狗与订阅热同步参数</div>
+        <button class="btn btn-sm" id="btn-wd-basic-toggle" type="button">展开配置 ▾</button>
+      </div>
+      <div id="wd-basic-body" hidden style="margin-top:14px;">
+        <div class="form-grid c3">
+          <div class="field">
+            <label>进程/DNS 健康检查间隔 (秒，默认 180)</label>
+            <input type="number" id="wd-interval" min="15" max="86400" step="15" value="180">
+          </div>
+          <div class="field">
+            <label>异常二次确认等待 (秒，默认 30)</label>
+            <input type="number" id="wd-confirm-wait" min="5" max="600" step="5" value="30">
+          </div>
+          <div class="field">
+            <label>每小时最大自愈重启次数 (默认 3)</label>
+            <input type="number" id="wd-max-restarts" min="1" max="50" value="3">
+          </div>
+          <div class="field">
+            <label>订阅节点无感热同步</label>
+            <label style="display:flex;align-items:center;gap:9px;height:40px;padding:0 12px;border-radius:11px;border:1px solid var(--border);background:var(--input-bg);cursor:pointer;font-size:13px;">
+              <span class="switch"><input type="checkbox" id="wd-subsync-enabled" checked><span class="track"></span></span>
+              <span>后台自动比对订阅并热重载节点</span>
+            </label>
+          </div>
+          <div class="field">
+            <label>订阅热同步间隔 (秒，默认 600)</label>
+            <input type="number" id="wd-subsync-interval" min="60" max="86400" step="60" value="600">
+          </div>
+        </div>
+        <div class="btn-row">
+          <button class="btn btn-primary btn-sm" id="btn-wd-basic-save" type="button">保存基础守护参数</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <div class="card-title"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>最近看门狗与容灾事件时间线</div>
+        <a class="btn btn-sm" href="#" id="btn-ev-more">查看完整事件日志</a>
+      </div>
+      <div id="dm-events-box"><div class="empty">加载中…</div></div>
     </div>
   </section>
 
@@ -709,7 +885,9 @@ th.th-sort.active .sort-ind { opacity: 1; font-weight: 800; }
         <div class="card-title"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m4 4 6 16 2.5-7.5L20 10z"/><path d="M13 13 20 20"/></svg>日志查看</div>
         <div class="btn-row">
           <select id="log-name" class="btn" style="padding:6.5px 10px;">
-            <option value="daemon">守护日志(含看门狗事件)</option>
+            <option value="events">看门狗与容灾关键事件</option>
+            <option value="daemon" selected>守护进程完整日志</option>
+            <option value="webui">WebUI 运行日志</option>
           </select>
           <select id="log-tail" class="btn" style="padding:6.5px 10px;">
             <option value="100">100 行</option>
@@ -872,6 +1050,7 @@ function showTab(id) {
   localStorage.setItem("sc-tab", id);
   if (id === "config") loadConfig();
   if (id === "dash") loadIOSCard();
+  if (id === "dm") loadWatchdog(false);
   if (id === "logs") loadLogs();
   if (id === "sb") { loadSbConfig(); if (!$("#cache-body").hidden) loadCache(); }
   if (id === "audit") loadAudit(false);
@@ -964,6 +1143,7 @@ async function runAction(name, params = {}) {
     setBusy(false);
     refreshStatus();
     if ($("#panel-sb").classList.contains("active")) loadCache();
+    if ($("#panel-dm").classList.contains("active")) loadWatchdog(true);
     loadLogs(true);
   }
 }
@@ -1042,14 +1222,18 @@ function renderStatus(st) {
     statCard({
       icon: ICONS.dog,
       icoState: dm.running ? "on" : "off",
-      badge: dm.running ? "守护中" : "未运行",
-      badgeCls: dm.running ? "run" : "stop",
+      badge: dm.running
+        ? (dm.activeFailoverCount > 0 ? `${dm.activeFailoverCount} 组容灾中` : (dm.versionMismatch ? "待重启升级" : "守护中"))
+        : "未运行",
+      badgeCls: dm.running ? ((dm.activeFailoverCount > 0 || dm.versionMismatch) ? "warn" : "run") : "stop",
       dotCls: dm.running ? "ok" : "",
       name: "看门狗守护",
-      meta: dm.running ? `最近 1 小时重启 ${dm.restarts}/${dm.maxRestarts} 次` : "sing-box 异常时不会自动恢复",
+      meta: dm.running
+        ? ((dm.failoverEnabled !== false ? "故障切换已开启" : "故障切换已关闭") + ` · 1h重启 ${dm.restarts}/${dm.maxRestarts}`)
+        : "sing-box 异常或节点断流时不会自动恢复",
       actions: dm.running
-        ? '<button class="btn btn-sm btn-danger" data-action="dm-stop">停止</button>'
-        : '<button class="btn btn-sm" data-action="dm-start">启动</button>',
+        ? '<button class="btn btn-sm" data-action="dm-restart">重启</button><button class="btn btn-sm btn-danger" data-action="dm-stop">停止</button>'
+        : '<button class="btn btn-sm btn-primary" data-action="dm-start">启动</button>',
     }) +
     statCard({
       icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="6" r="3"/><path d="M12 6h5a2 2 0 0 1 2 2v7"/><path d="m15 9 3-3-3-3"/><circle cx="18" cy="17" r="3"/></svg>',
@@ -1101,14 +1285,16 @@ function renderStatus(st) {
   $("#sb-panel-link").href = sb.panelURL || "#";
   $("#sb-panel-link").style.display = sb.running ? "" : "none";
 
-  // 看门狗页
-  $("#dm-info").innerHTML = [
-    ["守护进程", dm.running ? '<span style="color:var(--ok);font-weight:600;">运行中</span>' : '<span style="color:var(--muted);">未运行</span>'],
-    ["sing-box 进程", sb.running ? '<span style="color:var(--ok);font-weight:600;">运行中</span>' : '<span style="color:var(--err);font-weight:600;">未运行</span>'],
-    ["累计重启", dm.totalRestarts + " 次"],
-    ["熔断保护", "最近 1 小时 " + dm.restarts + " / " + dm.maxRestarts + " 次"],
-    ["日志文件", '<span class="mono" style="font-size:11.5px;">' + esc(dm.logPath) + "</span>"],
-  ].map(([k, v]) => `<div class="kv"><span class="k">${k}</span><span class="v">${v}</span></div>`).join("");
+  // 看门狗页（仅在专页详细数据尚未加载时用基础状态兜底，避免覆盖实时指标）
+  if (!window._wdReportLoaded && $("#dm-info")) {
+    $("#dm-info").innerHTML = [
+      ["守护进程", dm.running ? '<span style="color:var(--ok);font-weight:600;">运行中</span>' : '<span style="color:var(--muted);">未运行</span>'],
+      ["sing-box 进程", sb.running ? '<span style="color:var(--ok);font-weight:600;">运行中</span>' : '<span style="color:var(--err);font-weight:600;">未运行</span>'],
+      ["累计重启", dm.totalRestarts + " 次"],
+      ["熔断保护", "最近 1 小时 " + dm.restarts + " / " + dm.maxRestarts + " 次"],
+      ["日志文件", '<span class="mono" style="font-size:11.5px;">' + esc(dm.logPath) + "</span>"],
+    ].map(([k, v]) => `<div class="kv"><span class="k">${k}</span><span class="v">${v}</span></div>`).join("");
+  }
 
   // 组网页
   $("#ts-ver").textContent = ts.version ? "v" + ts.version : (ts.installed ? "" : "未安装");
@@ -2469,6 +2655,507 @@ if ($("#btn-manual-whitelist")) {
   };
 }
 
+/* ═══════════════════════ 看门狗与策略组自动故障切换 ═══════════════════════ */
+const DEFAULT_FO_GROUPS = ["#VPS", "Game-TCP", "Game-UDP", "Game", "Proxy", "AI"];
+const DEFAULT_FO_URLS = [
+  "https://www.gstatic.com/generate_204",
+  "http://cp.cloudflare.com/generate_204",
+];
+const wdState = {
+  report: null,
+  selectedGroups: [...DEFAULT_FO_GROUPS],
+  selectorGroups: [],
+  formDirty: false,
+  saving: false,
+};
+
+function fmtKB(bytes) {
+  const n = Number(bytes) || 0;
+  if (n < 1024) return n + " B";
+  return (n / 1024).toFixed(1) + " KB";
+}
+
+function syncFailbackInputs() {
+  const auto = $("#fo-auto-failback").checked;
+  $("#fo-cooldown").disabled = !auto;
+  $("#fo-max-delay").disabled = !auto;
+  $("#fo-failback-txt").textContent = auto ? "原节点恢复稳定后自动回切" : "不自动回切（保持备用节点）";
+}
+
+function syncSubSyncInputs() {
+  const en = $("#wd-subsync-enabled").checked;
+  $("#wd-subsync-interval").disabled = !en;
+}
+
+function syncFailoverBodyMask() {
+  const en = $("#fo-enabled").checked;
+  $("#fo-toggle-label").textContent = en ? "已开启故障切换" : "已关闭故障切换";
+  $("#fo-cfg-body").classList.toggle("fo-disabled-mask", !en);
+}
+
+function renderFailoverGroupChips() {
+  const box = $("#fo-groups-chips");
+  if (!box) return;
+  const liveMap = new Map();
+  const orderedNames = [];
+  for (const g of (wdState.selectorGroups || [])) {
+    if (!g || !g.name) continue;
+    liveMap.set(g.name, g);
+    if (!orderedNames.includes(g.name)) orderedNames.push(g.name);
+  }
+  for (const name of (wdState.selectedGroups || [])) {
+    if (name && !orderedNames.includes(name)) orderedNames.push(name);
+  }
+  for (const name of DEFAULT_FO_GROUPS) {
+    if (!orderedNames.includes(name) && orderedNames.length === 0) orderedNames.push(name);
+  }
+  if (!orderedNames.length) {
+    orderedNames.push(...DEFAULT_FO_GROUPS);
+  }
+
+  $("#fo-groups-count").textContent = String((wdState.selectedGroups || []).length);
+  box.innerHTML = orderedNames.map(name => {
+    const sel = wdState.selectedGroups.includes(name);
+    const live = liveMap.get(name);
+    const nowTxt = live && live.now ? `<span class="fo-now" title="当前选中: ${esc(live.now)}">→ ${esc(live.now)}</span>` : "";
+    const foTag = live && live.failedOver ? '<span class="fo-tag">容灾中</span>' : "";
+    return `<button type="button" class="fo-chip ${sel ? "sel" : ""}" data-fo-group="${esc(name)}">
+      <span class="fo-check">${sel ? "✓" : ""}</span>
+      <span>${esc(name)}</span>
+      ${nowTxt}
+      ${foTag}
+    </button>`;
+  }).join("");
+}
+
+$("#fo-groups-chips").addEventListener("click", e => {
+  const chip = e.target.closest("[data-fo-group]");
+  if (!chip) return;
+  const g = chip.getAttribute("data-fo-group");
+  if (!g) return;
+  const idx = wdState.selectedGroups.indexOf(g);
+  if (idx >= 0) {
+    if (wdState.selectedGroups.length === 1) {
+      toast("warn", "至少保留 1 个受保护策略组；如需停用请直接关闭右上角总开关");
+      return;
+    }
+    wdState.selectedGroups.splice(idx, 1);
+  } else {
+    wdState.selectedGroups.push(g);
+  }
+  wdState.formDirty = true;
+  renderFailoverGroupChips();
+});
+
+function addCustomFailoverGroup() {
+  const input = $("#fo-custom-group");
+  const val = (input.value || "").trim();
+  if (!val) return;
+  if (!wdState.selectedGroups.includes(val)) {
+    wdState.selectedGroups.push(val);
+    wdState.formDirty = true;
+    renderFailoverGroupChips();
+    toast("ok", "已添加受保护策略组: " + val + "（请点击保存生效）");
+  } else {
+    toast("info", "分组「" + val + "」已在受保护列表中");
+  }
+  input.value = "";
+}
+$("#btn-fo-add-group").onclick = addCustomFailoverGroup;
+$("#fo-custom-group").addEventListener("keydown", e => {
+  if (e.key === "Enter") { e.preventDefault(); addCustomFailoverGroup(); }
+});
+$("#btn-fo-reset-groups").onclick = () => {
+  wdState.selectedGroups = [...DEFAULT_FO_GROUPS];
+  wdState.formDirty = true;
+  renderFailoverGroupChips();
+  toast("info", "已恢复默认策略组列表，点击「保存故障切换配置」后生效");
+};
+
+function renderWatchdogReport(data, preserveForm) {
+  window._wdReportLoaded = true;
+  wdState.report = data || {};
+  const dm = data.daemon || {};
+  const cfg = data.config || {};
+  const fo = cfg.failover || {};
+  const rt = data.runtime || {};
+  const agh = data.adguard || {};
+  wdState.selectorGroups = data.selectorGroups || [];
+
+  // 1. 旧二进制告警条
+  const staleBanner = $("#dm-stale-banner");
+  if (dm.versionMismatch) {
+    staleBanner.style.display = "flex";
+    const verDetail = dm.daemonVersion ? `（守护进程 v${String(dm.daemonVersion).replace(/^v/, "")} → 当前系统 v${String(dm.singctlVersion || "").replace(/^v/, "")}）` : "";
+    $("#dm-stale-text").textContent = "平滑重启守护进程即可热加载最新二进制与磁盘配置" + verDetail + "，全程零断网。";
+  } else {
+    staleBanner.style.display = "none";
+  }
+
+  // 2. 控制台按钮与顶部状态徽章
+  const runBadge = $("#dm-run-badge");
+  if (dm.running) {
+    runBadge.className = "badge ok";
+    runBadge.textContent = "守护运行中" + (dm.pid ? " · PID " + dm.pid : "");
+    $("#btn-dm-start").style.display = "none";
+    $("#btn-dm-restart").style.display = "";
+    $("#btn-dm-stop").style.display = "";
+  } else {
+    runBadge.className = "badge dim";
+    runBadge.textContent = "未运行";
+    $("#btn-dm-start").style.display = "";
+    $("#btn-dm-restart").style.display = "none";
+    $("#btn-dm-stop").style.display = "none";
+  }
+
+  // 3. 控制台详细 KV 指标
+  const healthStr = rt.lastHealthAt
+    ? (rt.lastHealthOK
+        ? `<span style="color:var(--ok);font-weight:600;">✓ 正常</span>${rt.lastHealthDelayMs ? ` (${rt.lastHealthDelayMs}ms)` : ""} · <span class="mono">${esc(rt.lastHealthAt)}</span>`
+        : `<span style="color:var(--err);font-weight:600;">✗ 异常</span> (${esc(rt.lastHealthDetail || "检测失败")}) · <span class="mono">${esc(rt.lastHealthAt)}</span>`)
+    : '<span style="color:var(--muted);">等待首轮巡检或点击上方「立即健康检测」</span>';
+
+  const verTxt = dm.daemonVersion ? " · v" + esc(String(dm.daemonVersion).replace(/^v/, "")) : "";
+  $("#dm-info").innerHTML = [
+    ["守护进程", dm.running
+      ? `<span style="color:var(--ok);font-weight:600;">运行中</span>${dm.pid ? ` <span class="mono">(PID ${dm.pid}${verTxt})</span>` : ""}`
+      : '<span style="color:var(--muted);">未运行</span>'],
+    ["上次健康巡检", healthStr],
+    ["熔断与重启", `最近 1 小时 <strong>${dm.restarts || 0} / ${dm.maxRestarts || 3}</strong> 次 · 累计自愈 <strong>${dm.totalRestarts || 0}</strong> 次`],
+    ["守护日志", `<span class="mono" style="font-size:11.5px;">${esc(dm.logPath || "-")}</span> · ${fmtKB(dm.logSizeBytes)} / ${fmtKB(dm.logMaxBytes || 524288)}`],
+  ].map(([k, v]) => `<div class="kv"><span class="k">${k}</span><span class="v">${v}</span></div>`).join("");
+
+  // 4. 五大自愈防线矩阵
+  const activeFO = rt.activeFailovers || [];
+  const foGuardBadge = !fo.enabled
+    ? '<span class="badge dim">已关闭</span>'
+    : (activeFO.length > 0
+        ? `<span class="badge warn">${activeFO.length} 组容灾接管中</span>`
+        : (dm.running ? '<span class="badge ok">巡检守护中</span>' : '<span class="badge dim">待启动</span>'));
+  const subGuardBadge = !cfg.sub_sync_enabled
+    ? '<span class="badge dim">已关闭</span>'
+    : (dm.running ? '<span class="badge ok">已启用</span>' : '<span class="badge dim">待启动</span>');
+  const aghBadge = !agh.supported
+    ? '<span class="badge dim">仅 Linux 网关</span>'
+    : (!agh.enabled ? '<span class="badge dim">已禁用</span>'
+      : (agh.healthy ? '<span class="badge ok">53 端口健康</span>'
+        : (agh.installed ? '<span class="badge warn">待自愈拉起</span>' : '<span class="badge dim">未安装</span>')));
+
+  $("#dm-guards-box").innerHTML = [
+    {
+      title: "① 进程与内部 DNS 自愈",
+      desc: `每 ${cfg.interval || 180}s 检测 sing-box 进程与 Clash DNS 解析，异常 ${cfg.confirm_wait || 30}s 复核后自动平滑拉起`,
+      badge: dm.running ? '<span class="badge ok">守护中</span>' : '<span class="badge dim">未运行</span>',
+    },
+    {
+      title: "② 策略组自动故障切换",
+      desc: fo.enabled
+        ? `每 ${fo.patrol_interval || 30}s 巡检 ${(fo.groups || DEFAULT_FO_GROUPS).length} 个策略组 · 复测 ${fo.confirm_retries ?? 1} 次确认 · 冷却 ${fo.auto_failback !== false ? (fo.failback_cooldown || 180) + "s 回切" : "不自动回切"}`
+        : "已手动关闭策略组节点容灾切换",
+      badge: foGuardBadge,
+    },
+    {
+      title: "③ 订阅节点无感热同步",
+      desc: cfg.sub_sync_enabled
+        ? `每 ${Math.round((cfg.sub_sync_interval || 600) / 60)} 分钟静默比对远程订阅，节点变更时 SIGHUP 热重载不断流` + (rt.lastSubSyncAt ? ` · 上次: ${esc(rt.lastSubSyncAt)}` : "")
+        : "已关闭后台订阅自动同步",
+      badge: subGuardBadge,
+    },
+    {
+      title: "④ 规则集 (.srs) 静默刷新",
+      desc: "每 24 小时后台校验并刷新本地分流规则集缓存" + (rt.lastRuleSetAt ? ` · 上次更新: ${esc(rt.lastRuleSetAt)}` : ""),
+      badge: dm.running ? '<span class="badge ok">定时守护</span>' : '<span class="badge dim">待启动</span>',
+    },
+    {
+      title: "⑤ 本地 AdGuard DNS 保活",
+      desc: agh.supported ? "联动巡检网关本地 AdGuard Home 上游解析器，异常自动重启恢复" : "当前非 Linux 路由环境，自动跳过",
+      badge: aghBadge,
+    },
+  ].map(g => `<div class="guard-item">
+    <div class="guard-main">
+      <div class="guard-title">${esc(g.title)}</div>
+      <div class="guard-desc">${g.desc}</div>
+    </div>
+    <div style="flex:none;">${g.badge}</div>
+  </div>`).join("");
+
+  // 5. 故障切换状态徽章 & 当前活跃容灾横幅
+  const foBadge = $("#fo-status-badge");
+  if (!fo.enabled) {
+    foBadge.className = "badge dim";
+    foBadge.textContent = "已关闭";
+  } else if (activeFO.length > 0) {
+    foBadge.className = "badge warn";
+    foBadge.textContent = activeFO.length + " 个策略组容灾接管中";
+  } else {
+    foBadge.className = "badge ok";
+    foBadge.textContent = dm.running ? "默认开启 · 守护中" : "默认开启（启动看门狗后生效）";
+  }
+
+  const activeBox = $("#fo-active-box");
+  if (activeFO.length > 0) {
+    activeBox.style.display = "block";
+    activeBox.className = "wd-banner warn";
+    activeBox.innerHTML = `<div style="width:100%;">
+      <strong style="display:block;margin-bottom:4px;">🔀 当前共有 ${activeFO.length} 个策略组正由备用健康节点容灾接管（原主选恢复稳定后将自动切回）：</strong>
+      ${activeFO.map(item => `<div style="font-size:12.5px;margin-top:3px;">• <strong>${esc(item.group)}</strong>：原主选 <code>${esc(item.origin)}</code> 异常 → 当前由 <code>${esc(item.current)}</code> 接管${item.lastDelayMs ? ` (${item.lastDelayMs}ms)` : ""}${item.since ? ` · 切换于 <span class="mono">${esc(item.since)}</span>` : ""}</div>`).join("")}
+    </div>`;
+  } else {
+    activeBox.style.display = "none";
+  }
+
+  // 6. 表单回显（若 preserveForm && wdState.formDirty 则保留用户未保存的编辑）
+  if (!preserveForm || !wdState.formDirty) {
+    $("#fo-enabled").checked = fo.enabled !== false;
+    wdState.selectedGroups = Array.isArray(fo.groups) && fo.groups.length ? [...fo.groups] : [...DEFAULT_FO_GROUPS];
+    $("#fo-patrol-interval").value = fo.patrol_interval || 30;
+    $("#fo-probe-timeout").value = fo.probe_timeout_ms || 2800;
+    $("#fo-confirm-retries").value = String(fo.confirm_retries ?? 1);
+    $("#fo-auto-failback").checked = fo.auto_failback !== false;
+    $("#fo-cooldown").value = fo.failback_cooldown || 180;
+    $("#fo-max-delay").value = fo.max_failback_delay_ms || 600;
+    $("#fo-probe-urls").value = (fo.probe_urls && fo.probe_urls.length ? fo.probe_urls : DEFAULT_FO_URLS).join("\n");
+
+    $("#wd-interval").value = cfg.interval || 180;
+    $("#wd-confirm-wait").value = cfg.confirm_wait || 30;
+    $("#wd-max-restarts").value = cfg.max_restarts || 3;
+    $("#wd-subsync-enabled").checked = cfg.sub_sync_enabled !== false;
+    $("#wd-subsync-interval").value = cfg.sub_sync_interval || 600;
+    wdState.formDirty = false;
+  }
+  syncFailoverBodyMask();
+  syncFailbackInputs();
+  syncSubSyncInputs();
+  renderFailoverGroupChips();
+
+  // 7. 最近事件时间线（按时间倒序展示最新 15 条）
+  const events = Array.isArray(rt.recentEvents) ? [...rt.recentEvents].reverse().slice(0, 15) : [];
+  const evBox = $("#dm-events-box");
+  if (!events.length) {
+    evBox.innerHTML = '<div class="empty" style="padding:18px 0;">近期运行平稳，暂无故障切备、订阅变更或异常自愈事件</div>';
+  } else {
+    const actionMeta = {
+      GROUP_FAILOVER:  ["warn", "🔀 故障切备"],
+      GROUP_FAILBACK:  ["ok", "✅ 恢复回切"],
+      SUB_SYNC:        ["info", "🔄 订阅热同步"],
+      RULESET:         ["info", "📦 规则集更新"],
+      RULESET_REFRESH: ["info", "📦 规则集更新"],
+      RESTART_OK:      ["ok", "🛠️ 自愈重启"],
+      RESTART:         ["ok", "🛠️ 自愈重启"],
+      CHECK_FAIL:      ["err", "⚠️ 健康异常"],
+      RESTART_FAIL:    ["err", "❌ 重启失败"],
+      SKIP_RESTART:    ["err", "🛑 熔断保护"],
+      CIRCUIT_BREAK:   ["err", "🛑 熔断保护"],
+    };
+    evBox.innerHTML = '<div class="ev-list">' + events.map(ev => {
+      const [cls, label] = actionMeta[ev.action] || (ev.healthy ? ["ok", esc(ev.action || "事件")] : ["warn", esc(ev.action || "告警")]);
+      return `<div class="ev-row">
+        <span class="ev-time">${esc(ev.time || "-")}</span>
+        <span class="badge ${cls}" style="flex:none;">${label}</span>
+        <div class="ev-msg">${esc(ev.summary || "")}</div>
+      </div>`;
+    }).join("") + "</div>";
+  }
+}
+
+async function loadWatchdog(preserveForm = false) {
+  try {
+    const data = await api("/api/watchdog");
+    renderWatchdogReport(data, preserveForm);
+  } catch (e) {
+    if (!preserveForm) toast("err", "加载看门狗状态失败: " + e.message);
+  }
+}
+
+// 标记表单编辑脏状态，防止后台轮询冲掉用户正在填写的参数
+["#fo-patrol-interval", "#fo-probe-timeout", "#fo-confirm-retries", "#fo-cooldown", "#fo-max-delay", "#fo-probe-urls",
+ "#wd-interval", "#wd-confirm-wait", "#wd-max-restarts", "#wd-subsync-interval"].forEach(sel => {
+  const el = $(sel);
+  if (el) el.addEventListener("input", () => { wdState.formDirty = true; });
+});
+$("#fo-auto-failback").onchange = () => { wdState.formDirty = true; syncFailbackInputs(); };
+$("#wd-subsync-enabled").onchange = () => { wdState.formDirty = true; syncSubSyncInputs(); };
+
+// 右上角故障切换总开关：一键切换立即保存并热通知看门狗！
+$("#fo-enabled").onchange = async () => {
+  const enabled = $("#fo-enabled").checked;
+  syncFailoverBodyMask();
+  try {
+    const res = await api("/api/watchdog/config", {
+      method: "PUT",
+      body: JSON.stringify({ failover: { enabled } }),
+    });
+    toast("ok", res.message || (enabled ? "已开启策略组自动故障切换（已热生效）" : "已关闭策略组自动故障切换（已热生效）"));
+    if (res.report) renderWatchdogReport(res.report, true);
+    refreshStatus();
+  } catch (e) {
+    $("#fo-enabled").checked = !enabled;
+    syncFailoverBodyMask();
+    toast("err", "切换失败: " + e.message);
+  }
+};
+
+function collectFailoverPayload() {
+  const urls = ($("#fo-probe-urls").value || "")
+    .split(/[\n,]+/)
+    .map(s => s.trim())
+    .filter(Boolean);
+  return {
+    enabled: $("#fo-enabled").checked,
+    groups: [...wdState.selectedGroups],
+    has_groups: true,
+    patrol_interval: parseInt($("#fo-patrol-interval").value, 10) || 30,
+    probe_timeout_ms: parseInt($("#fo-probe-timeout").value, 10) || 2800,
+    confirm_retries: parseInt($("#fo-confirm-retries").value, 10) || 0,
+    auto_failback: $("#fo-auto-failback").checked,
+    failback_cooldown: parseInt($("#fo-cooldown").value, 10) || 180,
+    max_failback_delay_ms: parseInt($("#fo-max-delay").value, 10) || 600,
+    probe_urls: urls,
+    has_probe_urls: true,
+  };
+}
+
+$("#btn-fo-save").onclick = async () => {
+  if (wdState.saving) return;
+  const btn = $("#btn-fo-save");
+  const orig = btn.textContent;
+  wdState.saving = true;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spin-inline"></span> 保存中…';
+  try {
+    const res = await api("/api/watchdog/config", {
+      method: "PUT",
+      body: JSON.stringify({ failover: collectFailoverPayload() }),
+    });
+    wdState.formDirty = false;
+    if (res.report) renderWatchdogReport(res.report, false);
+    refreshStatus();
+    toast("ok", res.message || "故障切换策略已保存并热生效");
+  } catch (e) {
+    toast("err", "保存失败: " + e.message);
+  } finally {
+    wdState.saving = false;
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+};
+
+$("#btn-fo-reset-all").onclick = async () => {
+  $("#fo-enabled").checked = true;
+  wdState.selectedGroups = [...DEFAULT_FO_GROUPS];
+  $("#fo-patrol-interval").value = 30;
+  $("#fo-probe-timeout").value = 2800;
+  $("#fo-confirm-retries").value = "1";
+  $("#fo-auto-failback").checked = true;
+  $("#fo-cooldown").value = 180;
+  $("#fo-max-delay").value = 600;
+  $("#fo-probe-urls").value = DEFAULT_FO_URLS.join("\n");
+  syncFailoverBodyMask();
+  syncFailbackInputs();
+  renderFailoverGroupChips();
+  $("#btn-fo-save").click();
+};
+
+$("#btn-fo-adv-toggle").onclick = () => {
+  const box = $("#fo-adv-box");
+  const willShow = box.style.display === "none";
+  box.style.display = willShow ? "block" : "none";
+  $("#btn-fo-adv-toggle").textContent = willShow ? "收起探测目标 URL ▴" : "自定义探测目标 URL ▾";
+};
+$("#btn-fo-reset-urls").onclick = () => {
+  $("#fo-probe-urls").value = DEFAULT_FO_URLS.join("\n");
+  wdState.formDirty = true;
+  toast("info", "已恢复默认探测 URL，点击保存后生效");
+};
+
+$("#btn-wd-basic-toggle").onclick = () => {
+  const body = $("#wd-basic-body");
+  const willOpen = body.hidden;
+  body.hidden = !willOpen;
+  $("#btn-wd-basic-toggle").textContent = willOpen ? "收起配置 ▴" : "展开配置 ▾";
+};
+
+$("#btn-wd-basic-save").onclick = async () => {
+  const btn = $("#btn-wd-basic-save");
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spin-inline"></span> 保存中…';
+  try {
+    const res = await api("/api/watchdog/config", {
+      method: "PUT",
+      body: JSON.stringify({
+        interval: parseInt($("#wd-interval").value, 10) || 180,
+        confirm_wait: parseInt($("#wd-confirm-wait").value, 10) || 30,
+        max_restarts: parseInt($("#wd-max-restarts").value, 10) || 3,
+        sub_sync_enabled: $("#wd-subsync-enabled").checked,
+        sub_sync_interval: parseInt($("#wd-subsync-interval").value, 10) || 600,
+      }),
+    });
+    wdState.formDirty = false;
+    if (res.report) renderWatchdogReport(res.report, false);
+    refreshStatus();
+    toast("ok", res.message || "基础守护参数已保存并热生效");
+  } catch (e) {
+    toast("err", "保存失败: " + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+};
+
+$("#btn-dm-refresh").onclick = () => loadWatchdog(false);
+
+$("#btn-dm-health").onclick = async () => {
+  const box = $("#dm-health-box");
+  const btn = $("#btn-dm-health");
+  box.style.display = "block";
+  box.className = "health-result";
+  box.innerHTML = '<span class="spin-inline"></span> 正在检测 sing-box 进程与内部 DNS 解析…';
+  btn.disabled = true;
+  try {
+    const h = await api("/api/health");
+    box.className = "health-result " + (h.healthy ? "ok" : "bad");
+    box.innerHTML = (h.healthy ? "✓ 健康 — " : "✗ 异常 — ") + esc(h.details || h.failedReason || "") +
+      '<div style="opacity:.78;font-size:11.5px;margin-top:3px;">检测时间: ' + esc(h.checkTime || "") + "</div>";
+  } catch (e) {
+    box.className = "health-result bad";
+    box.textContent = "检测失败: " + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+$("#btn-fo-patrol").onclick = async () => {
+  const btn = $("#btn-fo-patrol");
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spin-inline"></span> 巡检测速中…';
+  try {
+    const res = await api("/api/watchdog/patrol", { method: "POST" });
+    if (res.report) renderWatchdogReport(res.report, true);
+    else await loadWatchdog(true);
+    const evs = res.events || [];
+    if (evs.length > 0) {
+      toast("warn", "线路巡检完成：" + evs.map(e => e.summary).join("；"), 5500);
+    } else {
+      toast("ok", res.message || "线路巡检完成：所有受保护策略组当前节点均健康");
+    }
+  } catch (e) {
+    toast("err", "线路巡检失败: " + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = orig;
+  }
+};
+
+function gotoEventsLog(e) {
+  if (e) e.preventDefault();
+  $("#log-name").value = "events";
+  showTab("logs");
+}
+$("#btn-dm-goto-events").onclick = gotoEventsLog;
+$("#btn-ev-more").onclick = gotoEventsLog;
+
 /* ═══════════════════════ 启动 ═══════════════════════ */
 const urlParams = new URLSearchParams(location.search);
 if (urlParams.get("theme") === "light" || urlParams.get("theme") === "dark")
@@ -2480,7 +3167,12 @@ showTab(urlTab && TABS.some(t => t.id === urlTab)
       ? localStorage.getItem("sc-tab") : "dash"));
 refreshStatus();
 loadCache();
-setInterval(() => { if (!state.running) refreshStatus(); }, 8000);
+setInterval(() => {
+  if (!state.running) {
+    refreshStatus();
+    if ($("#panel-dm").classList.contains("active")) loadWatchdog(true);
+  }
+}, 8000);
 </script>
 </body>
 </html>

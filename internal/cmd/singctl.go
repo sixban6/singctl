@@ -72,6 +72,12 @@ func NewUpdateCmd(configPath string, version string) *cobra.Command {
 				if serverweb.IsRunning(resolvedPath) {
 					_ = serverweb.RestartService()
 				}
+				if daemon.IsDaemonRunning() {
+					logger.Info("Restarting watchdog daemon to apply new version...")
+					if rErr := daemon.RestartDaemon(resolvedPath); rErr != nil {
+						logger.Warn("Failed to restart watchdog daemon: %v", rErr)
+					}
+				}
 				if os.Getenv("SINGCTL_FROM_WEBUI") != "1" {
 					if _, running := webui.WebStatus(); running {
 						logger.Info("Restarting client WebUI daemon to apply new version...")

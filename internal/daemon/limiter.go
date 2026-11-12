@@ -76,23 +76,27 @@ func (rl *RestartLimiter) loadTimes(ts []int64) {
 	}
 }
 
-// persist 将重启记录写入状态文件（调用方需持有锁）
-// 格式: {"total":累计总数,"times":窗口内时间戳}; 兼容读取旧格式(纯数组)
+// persist 将重启记录合并写入状态文件（调用方需持有 rl.mu 锁），保留状态文件中的其他运行态字段。
 func (rl *RestartLimiter) persist() {
 	ts := make([]int64, 0, len(rl.restartTimes))
 	for _, t := range rl.restartTimes {
 		ts = append(ts, t.Unix())
 	}
-	b, err := json.Marshal(struct {
-		Total int64   `json:"total"`
-		Times []int64 `json:"times"`
-	}{Total: rl.totalRestarts, Times: ts})
-	if err != nil {
-		return
-	}
-	tmp := GetStateFilePath() + ".tmp"
-	if os.WriteFile(tmp, b, 0644) == nil {
-		_ = os.Rename(tmp, GetStateFilePath())
+	total := rl.totalRestarts
+	UpdateRuntimeState(func(snap *DaemonRuntimeSnapshot) {
+		snap.Total = total
+		snap.Times = ts
+	})
+}
+
+// SetMaxRestarts 动态更新每小时最大重启次数上限（用于配置热重载）。
+func (rl *RestartLimiter) SetMaxRestarts(max int) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	if max > 0 {
+		rl.maxRestarts = max
+	} else {
+		rl.maxRestarts = DefaultMaxRestarts
 	}
 }
 

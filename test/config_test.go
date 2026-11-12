@@ -6,6 +6,7 @@ import (
 	"singctl/internal/config"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoad(t *testing.T) {
@@ -1151,5 +1152,109 @@ func TestRoleSpecificTemplatesAndSaveMigrate(t *testing.T) {
 	cliMigrated, _ := os.ReadFile(cliPath)
 	if strings.Contains(string(cliMigrated), "\nserver:") || strings.HasPrefix(string(cliMigrated), "server:") {
 		t.Fatalf("migrated client config must not contain server block, got:\n%s", string(cliMigrated))
+	}
+}
+
+func TestWatchdogFailoverConfig_LoadSaveAndMigrate(t *testing.T) {
+	// 1. Default zero-value config enables failover with production defaults
+	var defCfg config.Config
+	if !defCfg.Watchdog.Failover.IsEnabled() {
+		t.Fatal("expected Watchdog.Failover.IsEnabled() to default to true")
+	}
+	if len(defCfg.Watchdog.Failover.EffectiveGroups()) != len(config.DefaultWatchdogFailoverGroups) {
+		t.Fatalf("unexpected default groups: %v", defCfg.Watchdog.Failover.EffectiveGroups())
+	}
+	if defCfg.Watchdog.Failover.EffectiveConfirmRetries() != 1 {
+		t.Fatalf("expected default confirm_retries=1, got %d", defCfg.Watchdog.Failover.EffectiveConfirmRetries())
+	}
+	if defCfg.Watchdog.Failover.EffectiveFailbackCooldown() != 180*time.Second {
+		t.Fatalf("expected default failback_cooldown=180s, got %v", defCfg.Watchdog.Failover.EffectiveFailbackCooldown())
+	}
+	if defCfg.Watchdog.Failover.EffectiveMaxFailbackDelayMs() != 600 {
+		t.Fatalf("expected default max_failback_delay_ms=600, got %d", defCfg.Watchdog.Failover.EffectiveMaxFailbackDelayMs())
+	}
+
+	// 2. UnmarshalYAML decodes sub_sync_interval (including -1) and failover string/int fields
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "singctl.yaml")
+	rawYAML := `subs:
+  - name: "main"
+    url: "https://example.com/sub"
+watchdog:
+  interval: "120"
+  confirm_wait: "25"
+  max_restarts: "4"
+  sub_sync_interval: "-1"
+  failover:
+    enabled: false
+    groups:
+      - "#VPS"
+      - "Streaming"
+    patrol_interval: "45"
+    probe_timeout_ms: "3200"
+    confirm_retries: "-1"
+    failback_cooldown: "-1"
+    max_failback_delay_ms: "450"
+    probe_urls:
+      - "https://example.com/generate_204"
+`
+	if err := os.WriteFile(cfgPath, []byte(rawYAML), 0600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if loaded.Watchdog.SubSyncInterval != -1 {
+		t.Fatalf("expected sub_sync_interval=-1, got %d", loaded.Watchdog.SubSyncInterval)
+	}
+	if loaded.Watchdog.Failover.IsEnabled() {
+		t.Fatal("expected failover.enabled=false")
+	}
+	if loaded.Watchdog.Failover.EffectiveConfirmRetries() != 0 {
+		t.Fatalf("expected confirm_retries=-1 to yield 0 retries, got %d", loaded.Watchdog.Failover.EffectiveConfirmRetries())
+	}
+	if loaded.Watchdog.Failover.AutoFailbackEnabled() {
+		t.Fatal("expected failback_cooldown=-1 to disable auto-failback")
+	}
+	if len(loaded.Watchdog.Failover.EffectiveGroups()) != 2 || loaded.Watchdog.Failover.EffectiveGroups()[1] != "Streaming" {
+		t.Fatalf("unexpected custom groups: %v", loaded.Watchdog.Failover.EffectiveGroups())
+	}
+
+	// 3. MigrateConfig preserves sub_sync_interval and failover block
+	fullTpl, err := os.ReadFile("../configs/singctl.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := config.MigrateConfig(cfgPath, fullTpl); err != nil {
+		t.Fatalf("MigrateConfig failed: %v", err)
+	}
+	afterMigrate, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load after MigrateConfig failed: %v", err)
+	}
+	if afterMigrate.Watchdog.SubSyncInterval != -1 || afterMigrate.Watchdog.Failover.IsEnabled() {
+		t.Fatalf("MigrateConfig lost watchdog fields: %+v", afterMigrate.Watchdog)
+	}
+
+	// 4. Resetting failover back to defaults and calling Save cleans stale sub-keys and keeps 0600 mode
+	afterMigrate.Watchdog.SubSyncInterval = 600
+	afterMigrate.Watchdog.Failover = config.WatchdogFailoverConfig{}
+	if err := config.Save(cfgPath, afterMigrate); err != nil {
+		t.Fatalf("Save after reset failed: %v", err)
+	}
+	fi, err := os.Stat(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0600 {
+		t.Fatalf("expected saved config mode 0600, got %o", fi.Mode().Perm())
+	}
+	reloaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Reload after reset failed: %v", err)
+	}
+	if !reloaded.Watchdog.Failover.IsEnabled() || len(reloaded.Watchdog.Failover.Groups) != 0 {
+		t.Fatalf("expected failover reset to clean defaults, got %+v", reloaded.Watchdog.Failover)
 	}
 }

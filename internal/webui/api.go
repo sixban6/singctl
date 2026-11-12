@@ -36,7 +36,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"sessionToken":   s.SessionToken(),
 		"host":           hostInfo(),
 		"singbox":        singboxStatus(),
-		"daemon":         daemonStatus(s.watchdogMaxRestarts()),
+		"daemon":         s.daemonStatusSummary(),
 		"tailscale":      tailscaleStatus(s.opts.ConfigPath),
 		"firewall":       firewallStatus(),
 		"config":         configSummary(s.opts.ConfigPath),
@@ -44,12 +44,36 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, status)
 }
 
-// watchdogMaxRestarts 从配置读取看门狗每小时重启上限（用于状态展示）
-func (s *Server) watchdogMaxRestarts() int {
-	if cfg, err := config.Load(s.opts.ConfigPath); err == nil {
-		return cfg.Watchdog.MaxRestarts
+// daemonStatusSummary 汇总看门狗守护与故障切换摘要（供概览卡片与顶栏轮询展示）
+func (s *Server) daemonStatusSummary() map[string]any {
+	maxRestartsCfg := 0
+	failoverEnabled := true
+	if loaded, err := config.Load(s.opts.ConfigPath); err == nil && loaded != nil {
+		maxRestartsCfg = loaded.Watchdog.MaxRestarts
+		failoverEnabled = loaded.Watchdog.Failover.IsEnabled()
 	}
-	return 0
+	running := daemon.IsDaemonRunning()
+	limiter := daemon.NewRestartLimiterFromState(maxRestartsCfg)
+	snap := daemon.LoadRuntimeSnapshot()
+	stale := running && daemon.IsDaemonBinaryStale()
+	curVer := strings.TrimPrefix(strings.TrimSpace(s.opts.Version), "v")
+	dmVer := strings.TrimPrefix(strings.TrimSpace(snap.DaemonVersion), "v")
+	versionMismatch := running && (stale || (curVer != "" && curVer != "dev" && dmVer != "" && dmVer != "dev" && curVer != dmVer))
+
+	return map[string]any{
+		"running":             running,
+		"restarts":            limiter.GetRestartCount(),
+		"maxRestarts":         limiter.GetMaxRestarts(),
+		"totalRestarts":       limiter.GetTotalRestarts(),
+		"logPath":             daemon.GetDaemonLogPath(),
+		"daemonVersion":       snap.DaemonVersion,
+		"staleBinary":         stale,
+		"versionMismatch":     versionMismatch,
+		"lastHealthAt":        snap.LastHealthAt,
+		"lastHealthOK":        snap.LastHealthOK,
+		"failoverEnabled":     failoverEnabled,
+		"activeFailoverCount": len(snap.ActiveFailovers),
+	}
 }
 
 func hostInfo() map[string]any {
@@ -417,6 +441,7 @@ func (s *Server) handleConfigPut(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "保存配置失败: "+err.Error())
 		return
 	}
+	_ = daemon.NotifyReload()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -516,6 +541,7 @@ func (s *Server) handleConfigRawPut(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "写入配置失败: "+err.Error())
 		return
 	}
+	_ = daemon.NotifyReload()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -840,9 +866,14 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var path string
+	eventsOnly := false
 	switch name {
-	case "watchdog":
+	case "watchdog", "events":
+		name = "events"
 		path = daemon.GetDaemonLogPath()
+		eventsOnly = true
+	case "webui":
+		path = WebLogPath()
 	default:
 		name = "daemon"
 		path = daemon.GetDaemonLogPath()
@@ -850,11 +881,38 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 
 	content := ""
 	if data, err := os.ReadFile(path); err == nil {
-		lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+		var lines []string
+		for line := range strings.SplitSeq(strings.TrimRight(string(data), "\n"), "\n") {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			// 过滤旧版本遗留的订阅比对噪音行
+			if strings.Contains(line, "[INFO] Platform for singgen:") ||
+				strings.Contains(line, "已将 sing-box dns_local 指向本地 AdGuard Home") {
+				continue
+			}
+			if eventsOnly {
+				if !strings.Contains(line, "[WATCHDOG]") &&
+					!strings.Contains(line, "[GroupFailover]") &&
+					!strings.Contains(line, "[SubSync]") &&
+					!strings.Contains(line, "[RuleSet]") &&
+					!strings.Contains(line, "[Watchdog]") &&
+					!strings.Contains(line, "Daemon ") &&
+					!strings.Contains(line, "[WARN]") &&
+					!strings.Contains(line, "[ERROR]") {
+					continue
+				}
+			}
+			lines = append(lines, line)
+		}
 		if len(lines) > tail {
 			lines = lines[len(lines)-tail:]
 		}
-		content = strings.Join(lines, "\n")
+		if len(lines) == 0 && eventsOnly {
+			content = "(暂无看门狗/容灾/热同步事件记录，运行平稳)"
+		} else {
+			content = strings.Join(lines, "\n")
+		}
 	} else {
 		content = "(日志文件不存在,启动相应服务后才会生成)"
 	}

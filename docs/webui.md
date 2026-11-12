@@ -84,11 +84,11 @@ chmod +x /etc/init.d/singctl-web
 | :--- | :--- |
 | **概览** | sing-box / 看门狗 / Tailscale / 防火墙状态卡片,快捷操作,健康检测,主机与订阅信息 |
 | **sing-box** | 启动/停止/重启/生成配置,安装/更新,规则集缓存状态与管理 |
-| **看门狗** | 守护进程启停、重启统计、日志路径 |
+| **看门狗** | 守护进程启停/平滑重启、五大自愈防线实时状态、**策略组自动故障切换（默认开启）一键开关与自由参数配置**、一键立即巡检线路、容灾事件时间线 |
 | **组网** | Tailscale 模式选择(路由器/出口节点/网关)、启停、安装更新 |
 | **防火墙** | 安全封锁规则启用/禁用 |
 | **配置** | 订阅、镜像、Hysteria2 带宽、Tailscale、服务端配置的表单编辑;也可直接编辑 YAML 源码 |
-| **日志** | 守护进程日志 / 看门狗日志查看,支持自动刷新 |
+| **日志** | 看门狗关键事件日志 / 守护进程完整日志 / WebUI 运行日志查看,支持自动刷新 |
 | **系统** | 版本信息、singctl 自更新、带宽测速 |
 
 ### 健康检测
@@ -113,7 +113,10 @@ WebUI 后端提供简洁的 REST API,可用于自动化:
 | GET/PUT | `/api/config` | 配置读取/保存(JSON) |
 | GET/PUT | `/api/config/raw` | 配置原文读取/保存(YAML) |
 | GET | `/api/cache` | 规则集缓存状态 |
-| GET | `/api/logs?name=daemon\|watchdog&tail=200` | 日志尾部 |
+| GET | `/api/watchdog` | 看门狗全景运行状态、策略组实时列表、容灾配置与最近事件时间线 |
+| PUT | `/api/watchdog/config` | 更新看门狗及策略组自动故障切换配置（`0600` 落盘并即时 `SIGHUP` 热通知守护进程） |
+| POST | `/api/watchdog/patrol` | 立即触发一轮策略组连通性巡检与容灾判决 |
+| GET | `/api/logs?name=events\|daemon\|webui&tail=300` | 日志尾部查看 |
 | POST | `/api/action` | 执行动作(NDJSON 流式返回) |
 | GET | `/api/gen/ios` | 生成并下载 iOS (sing-box App) 配置,支持 `?password=` 鉴权 |
 | GET | `/api/gen/ios/url` | 返回手机可直接访问的下载地址(供二维码使用) |
@@ -127,7 +130,7 @@ curl -N -X POST http://127.0.0.1:8090/api/action \
 ```
 
 可用动作:`sb-start/stop/restart/gen/install/update`、`cache-update/clear`、
-`dm-start/stop`、`ts-start/stop/install/update`(ts-start 支持
+`dm-start/stop/restart`、`ts-start/stop/install/update`(ts-start 支持
 `{"params":{"mode":"router","acceptRoutes":true}}`)、`fw-enable/disable`、
 `update-self`、`speedtest`。
 

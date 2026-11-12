@@ -47,6 +47,11 @@ watchdog:                                      # (可选) 看门狗守护进程�
   confirm_wait: 30                              # 检测失败后二次确认等待(秒), 默认 30
   max_restarts: 3                               # 每小时最大自动重启次数, 默认 3
   sub_sync_interval: 600                        # 订阅节点变化自动无感同步间隔(秒), 默认 600 (10分钟; 设为 -1 关闭)
+  # failover:                                   # (可选) 策略组自动故障切换配置 (默认开启, 可在 WebUI 看门狗页可视化配置)
+  #   enabled: true                             # 是否启用故障切换与恢复回切, 默认 true
+  #   groups: ["#VPS", "Game-TCP", "Game-UDP", "Game", "Proxy", "AI"]
+  #   patrol_interval: 30                       # 巡检间隔(秒), 默认 30
+  #   failback_cooldown: 180                    # 切备后自动回切冷却期(秒), 默认 180 (设为 -1 关闭自动回切)
 
 # custom_rules:                                 # (可选) 自定义策略组、路由与 DNS 规则注入扩展
 #   outbounds:                                  # 按 tag 定制或过滤策略组候选节点池与测速参数

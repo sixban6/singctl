@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"singctl/internal/config"
 	"singctl/internal/daemon"
 	"strconv"
 	"strings"
@@ -379,9 +380,11 @@ func withTestPaths(t *testing.T) {
 	dir := t.TempDir()
 	daemon.PidFilePathOverride = filepath.Join(dir, daemon.PidFileName)
 	daemon.StateFilePathOverride = filepath.Join(dir, daemon.StateFileName)
+	daemon.DaemonLogPathOverride = filepath.Join(dir, "singctl-daemon.log")
 	t.Cleanup(func() {
 		daemon.PidFilePathOverride = ""
 		daemon.StateFilePathOverride = ""
+		daemon.DaemonLogPathOverride = ""
 	})
 }
 
@@ -669,4 +672,265 @@ func TestGroupFailover_AutoSwitchAndAutoRestore(t *testing.T) {
 		t.Fatalf("expected Game to auto-restore back to #Auto once recovered, got %s", gameNow)
 	}
 	mu.Unlock()
+}
+
+func TestCheckDNSHealthAgainstEndpoints_WithSecretAndLatency(t *testing.T) {
+	const secret = "test-clash-secret-token"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/dns/query" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer "+secret {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"Status": 0,
+			"Answer": []map[string]any{{"type": 1, "data": "198.51.100.10"}},
+		})
+	}))
+	defer srv.Close()
+
+	// Without secret -> 401 -> unhealthy
+	badOK, _, _ := daemon.CheckDNSHealthAgainstEndpoints([]string{srv.URL}, "")
+	if badOK {
+		t.Fatal("expected DNS check without secret to fail against authenticated Clash API")
+	}
+
+	// With secret -> 200 Status=0 -> healthy + non-negative latency
+	okFlag, latencyMs, errMsg := daemon.CheckDNSHealthAgainstEndpoints([]string{srv.URL}, secret)
+	if !okFlag {
+		t.Fatalf("expected DNS check with secret to succeed, got error: %s", errMsg)
+	}
+	if latencyMs < 0 {
+		t.Fatalf("expected non-negative LatencyMs, got %d", latencyMs)
+	}
+}
+
+func TestGroupFailover_AntiFlapRetryCooldownAndLatencyHysteresis(t *testing.T) {
+	withTestPaths(t)
+	var mu sync.Mutex
+	vpsCurrent := "node-primary"
+	primaryProbes := 0
+	primaryBehavior := "transient_once" // transient_once | dead | high_delay | healthy
+	nowTime := time.Date(2026, 11, 12, 15, 0, 0, 0, time.Local)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		path := r.URL.Path
+
+		if r.Method == http.MethodGet && path == "/proxies" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"proxies": map[string]any{
+					"#VPS": map[string]any{
+						"type": "Selector",
+						"now":  vpsCurrent,
+						"all":  []string{"node-primary", "node-backup"},
+					},
+				},
+			})
+			return
+		}
+		if r.Method == http.MethodGet && strings.HasSuffix(path, "/delay") {
+			if strings.Contains(path, "/node-primary/delay") {
+				primaryProbes++
+				switch primaryBehavior {
+				case "transient_once":
+					if primaryProbes == 1 {
+						w.WriteHeader(http.StatusGatewayTimeout)
+						return
+					}
+					_ = json.NewEncoder(w).Encode(map[string]int{"delay": 110})
+					return
+				case "dead":
+					w.WriteHeader(http.StatusGatewayTimeout)
+					return
+				case "high_delay":
+					_ = json.NewEncoder(w).Encode(map[string]int{"delay": 811})
+					return
+				case "healthy":
+					_ = json.NewEncoder(w).Encode(map[string]int{"delay": 135})
+					return
+				}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]int{"delay": 180})
+			return
+		}
+		if r.Method == http.MethodPut && strings.HasPrefix(path, "/proxies/") {
+			var body struct {
+				Name string `json:"name"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			vpsCurrent = body.Name
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	state := daemon.NewGroupFailoverState()
+	state.ApplyConfig(config.WatchdogFailoverConfig{
+		Groups:             []string{"#VPS"},
+		ProbeTimeoutMs:     500,
+		ConfirmRetries:     1,
+		FailbackCooldown:   180,
+		MaxFailbackDelayMs: 600,
+		ProbeURLs:          []string{"http://example.com/generate_204"},
+	})
+	state.ConfirmRetryDelay = 5 * time.Millisecond
+	state.NowFn = func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return nowTime
+	}
+
+	// 1. Transient single packet loss: retry succeeds -> must NOT fail over!
+	state.Patrol(t.Context(), []string{srv.URL}, "")
+	if vpsCurrent != "node-primary" || len(state.ActiveSnapshot()) != 0 {
+		t.Fatalf("transient 1x timeout should not trigger failover, got current=%s", vpsCurrent)
+	}
+
+	// 2. Persistent outage: initial + retry both timeout -> switches to node-backup
+	mu.Lock()
+	primaryBehavior = "dead"
+	mu.Unlock()
+	state.Patrol(t.Context(), []string{srv.URL}, "")
+	if vpsCurrent != "node-backup" {
+		t.Fatalf("expected failover to node-backup, got current=%s", vpsCurrent)
+	}
+	if len(state.ActiveSnapshot()) != 1 || state.ActiveSnapshot()[0].Origin != "node-primary" {
+		t.Fatalf("expected ActiveSnapshot to track node-primary, got %+v", state.ActiveSnapshot())
+	}
+
+	// 3. Within 180s cooldown: even if primary is healthy, must hold backup (no ping-pong)
+	mu.Lock()
+	primaryBehavior = "healthy"
+	nowTime = nowTime.Add(30 * time.Second)
+	mu.Unlock()
+	state.Patrol(t.Context(), []string{srv.URL}, "")
+	if vpsCurrent != "node-backup" {
+		t.Fatalf("must not fail back during cooldown, got current=%s", vpsCurrent)
+	}
+
+	// 4. Cooldown passed, but primary latency is 811ms (> 600ms cap) -> must reject failback!
+	mu.Lock()
+	primaryBehavior = "high_delay"
+	nowTime = nowTime.Add(200 * time.Second)
+	mu.Unlock()
+	state.Patrol(t.Context(), []string{srv.URL}, "")
+	if vpsCurrent != "node-backup" {
+		t.Fatalf("must reject high-latency (811ms > 600ms) failback, got current=%s", vpsCurrent)
+	}
+
+	// 5. Primary recovers with healthy low latency (135ms): requires 2 consecutive patrol streaks
+	mu.Lock()
+	primaryBehavior = "healthy"
+	mu.Unlock()
+	state.Patrol(t.Context(), []string{srv.URL}, "")
+	if vpsCurrent != "node-backup" {
+		t.Fatalf("first healthy probe after cooldown should build streak (1/2) before switching, got current=%s", vpsCurrent)
+	}
+	state.Patrol(t.Context(), []string{srv.URL}, "")
+	if vpsCurrent != "node-primary" {
+		t.Fatalf("second consecutive healthy probe should fail back, got current=%s", vpsCurrent)
+	}
+	if len(state.ActiveSnapshot()) != 0 {
+		t.Fatalf("expected ActiveSnapshot empty after failback, got %+v", state.ActiveSnapshot())
+	}
+	snap := daemon.LoadRuntimeSnapshot()
+	if len(snap.RecentEvents) == 0 || snap.RecentEvents[len(snap.RecentEvents)-1].Action != "GROUP_FAILBACK" || !snap.RecentEvents[len(snap.RecentEvents)-1].Healthy {
+		t.Fatalf("expected GROUP_FAILBACK with Healthy=true in recentEvents, got %+v", snap.RecentEvents)
+	}
+
+	// 6. Disabling failover via ApplyConfig turns Patrol into a safe no-op
+	disabled := false
+	state.ApplyConfig(config.WatchdogFailoverConfig{Enabled: &disabled})
+	mu.Lock()
+	primaryBehavior = "dead"
+	mu.Unlock()
+	state.Patrol(t.Context(), []string{srv.URL}, "")
+	if vpsCurrent != "node-primary" {
+		t.Fatalf("disabled failover should not switch groups, got current=%s", vpsCurrent)
+	}
+}
+
+func TestCleanAndTrimDaemonLog_ScrubsSpamAndCaps512KB(t *testing.T) {
+	withTestPaths(t)
+	logPath := daemon.GetDaemonLogPath()
+
+	var sb strings.Builder
+	sb.WriteString("Platform for singgen:linux\n")
+	sb.WriteString("2026-11-12 10:00:00 [INFO] 已将 sing-box dns_local 指向本地 AdGuard Home (127.0.0.1:53)\n")
+	chunk := "2026-11-12 10:01:00 [INFO] [RuleSet] 规则集后台定时更新完成\n"
+	for sb.Len() < daemon.MaxDaemonLogBytes+64*1024 {
+		sb.WriteString(chunk)
+	}
+	sb.WriteString("2026-11-12 15:30:00 [WATCHDOG] CHECK_OK healthy=true restarts=0/3 | 正常\n")
+
+	if err := os.WriteFile(logPath, []byte(sb.String()), 0644); err != nil {
+		t.Fatal(err)
+	}
+	daemon.CleanAndTrimDaemonLog(logPath, daemon.MaxDaemonLogBytes)
+
+	fi, err := os.Stat(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Size() > daemon.MaxDaemonLogBytes {
+		t.Fatalf("expected trimmed log <= %d bytes, got %d", daemon.MaxDaemonLogBytes, fi.Size())
+	}
+	if fi.Mode().Perm() != 0600 {
+		t.Fatalf("expected log permissions 0600, got %o", fi.Mode().Perm())
+	}
+	after, _ := os.ReadFile(logPath)
+	afterStr := string(after)
+	if strings.Contains(afterStr, "Platform for singgen:") || strings.Contains(afterStr, "指向本地 AdGuard Home") {
+		t.Fatal("expected legacy generator spam lines to be scrubbed")
+	}
+	if !strings.Contains(afterStr, "[WATCHDOG] CHECK_OK") {
+		t.Fatal("expected recent [WATCHDOG] tail event to be preserved")
+	}
+}
+
+func TestDaemonRuntimeSnapshot_CoexistsWithRestartLimiter(t *testing.T) {
+	withTestPaths(t)
+
+	daemon.UpdateRuntimeState(func(snap *daemon.DaemonRuntimeSnapshot) {
+		snap.DaemonVersion = "1.14.102"
+		snap.LastHealthAt = "2026-11-12 15:30:00"
+		snap.LastHealthOK = true
+		snap.LastHealthDetail = "DNS正常 (12ms)"
+		snap.LastHealthDelayMs = 12
+	})
+	daemon.AppendRuntimeEvent(daemon.WatchdogEventRecord{
+		Action:  "GROUP_FAILOVER",
+		Healthy: false,
+		Summary: "策略组 [#VPS] 原节点超时 -> 自动切往备用节点",
+	})
+
+	rl := daemon.NewRestartLimiter()
+	rl.RecordRestart()
+
+	snap := daemon.LoadRuntimeSnapshot()
+	if snap.Total != 1 || len(snap.Times) != 1 {
+		t.Fatalf("expected restart limiter count preserved in snapshot, got total=%d times=%v", snap.Total, snap.Times)
+	}
+	if snap.DaemonVersion != "1.14.102" || !snap.LastHealthOK || snap.LastHealthDelayMs != 12 {
+		t.Fatalf("expected runtime fields preserved across RecordRestart, got %+v", snap)
+	}
+	if len(snap.RecentEvents) != 1 || snap.RecentEvents[0].Action != "GROUP_FAILOVER" {
+		t.Fatalf("expected recentEvents preserved, got %+v", snap.RecentEvents)
+	}
+	fi, err := os.Stat(daemon.GetStateFilePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0600 {
+		t.Fatalf("expected state file mode 0600, got %o", fi.Mode().Perm())
+	}
 }

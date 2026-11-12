@@ -90,6 +90,11 @@ func New(opts Options) *Server {
 	s.Mux.HandleFunc("PUT /api/sbconfig", s.guard(s.handleSbConfigPut))
 	s.Mux.HandleFunc("POST /api/sbconfig/restore", s.guard(s.handleSbConfigRestore))
 
+	// 看门狗守护与策略组容灾控制 API
+	s.Mux.HandleFunc("GET /api/watchdog", s.guard(s.handleWatchdogGet))
+	s.Mux.HandleFunc("PUT /api/watchdog/config", s.guard(s.handleWatchdogConfigPut))
+	s.Mux.HandleFunc("POST /api/watchdog/patrol", s.guard(s.handleWatchdogPatrolPost))
+
 	// 局域网设备行为审计与双层一键拉黑 API
 	s.Mux.HandleFunc("GET /api/audit", s.guard(s.handleAuditGet))
 	s.Mux.HandleFunc("GET /api/audit/ai-config", s.guard(s.handleAuditAIConfigGet))

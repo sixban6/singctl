@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"singctl/internal/audit"
 	"singctl/internal/cmd"
 	"singctl/internal/config"
 	"singctl/internal/logger"
@@ -27,6 +28,7 @@ const (
 var configPath string
 
 func init() {
+	audit.InitProcessLocalTimezone()
 	configPath = resolveDefaultConfigPath()
 }
 
@@ -188,7 +190,7 @@ DNS optimization, and complete service lifecycle management.`,
 	updateCmd.GroupID = "system"
 	versionCmd := cmd.NewVersionCmd(Version, BuildTime, GitCommit)
 	versionCmd.GroupID = "system"
-	daemonCmd := cmd.NewDaemonCommand()
+	daemonCmd := cmd.NewDaemonCommand(Version)
 	daemonCmd.GroupID = "system"
 	terminalCmd := cmd.NewTerminalCmd(configPath)
 	terminalCmd.GroupID = "system"

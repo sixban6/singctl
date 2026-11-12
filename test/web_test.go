@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"singctl/internal/config"
 	"singctl/internal/constant"
+	"singctl/internal/daemon"
 	"singctl/internal/webui"
 	"strconv"
 	"strings"
@@ -851,5 +852,142 @@ func TestConfigDTOApplyPreservesNodeRules(t *testing.T) {
 	got = cfg.Subs[0]
 	if got.Include != "US" || got.Exclude != "" || len(got.Rename) != 0 {
 		t.Fatalf("expected explicit node rule overrides to apply, got: %+v", got)
+	}
+}
+
+func TestWatchdogWebAPI_GetPutToggleAndLogsFilter(t *testing.T) {
+	withTestPaths(t)
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "singctl.yaml")
+	initCfg := &config.Config{
+		Subs: []config.Subscription{
+			{Name: "main", URL: "https://example.com/sub"},
+		},
+	}
+	if err := config.Save(cfgPath, initCfg); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := webui.New(webui.Options{
+		ConfigPath: cfgPath,
+		Version:    "1.14.102",
+	})
+
+	// 1. GET /api/watchdog defaults to failover.enabled = true
+	{
+		req := httptest.NewRequest(http.MethodGet, "/api/watchdog", nil)
+		rec := httptest.NewRecorder()
+		srv.Mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /api/watchdog failed: %d %s", rec.Code, rec.Body.String())
+		}
+		var body struct {
+			Config struct {
+				Failover struct {
+					Enabled bool     `json:"enabled"`
+					Groups  []string `json:"groups"`
+				} `json:"failover"`
+			} `json:"config"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if !body.Config.Failover.Enabled {
+			t.Fatal("expected failover.enabled=true by default")
+		}
+		if len(body.Config.Failover.Groups) != len(config.DefaultWatchdogFailoverGroups) {
+			t.Fatalf("expected default groups, got %v", body.Config.Failover.Groups)
+		}
+	}
+
+	// 2. PUT /api/watchdog/config: customize groups & parameters, then toggle enabled=false
+	{
+		payload := `{
+			"interval": 120,
+			"sub_sync_enabled": false,
+			"failover": {
+				"enabled": false,
+				"groups": ["#VPS", "Game", "Streaming"],
+				"has_groups": true,
+				"patrol_interval": 45,
+				"probe_timeout_ms": 3000,
+				"confirm_retries": 2,
+				"auto_failback": true,
+				"failback_cooldown": 240,
+				"max_failback_delay_ms": 500,
+				"probe_urls": ["https://example.com/generate_204"],
+				"has_probe_urls": true
+			}
+		}`
+		req := httptest.NewRequest(http.MethodPut, "/api/watchdog/config", strings.NewReader(payload))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		srv.Mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("PUT /api/watchdog/config failed: %d %s", rec.Code, rec.Body.String())
+		}
+
+		fi, err := os.Stat(cfgPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode().Perm() != 0600 {
+			t.Fatalf("expected singctl.yaml mode 0600, got %o", fi.Mode().Perm())
+		}
+
+		saved, err := config.Load(cfgPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if saved.Watchdog.Failover.IsEnabled() {
+			t.Fatal("expected failover disabled after PUT")
+		}
+		if saved.Watchdog.SubSyncInterval != -1 {
+			t.Fatalf("expected sub_sync_interval=-1, got %d", saved.Watchdog.SubSyncInterval)
+		}
+		if len(saved.Watchdog.Failover.EffectiveGroups()) != 3 || saved.Watchdog.Failover.EffectiveConfirmRetries() != 2 {
+			t.Fatalf("unexpected saved failover config: %+v", saved.Watchdog.Failover)
+		}
+	}
+
+	// 3. PUT /api/watchdog/config: 1-click toggle enabled=true preserves custom groups
+	{
+		req := httptest.NewRequest(http.MethodPut, "/api/watchdog/config", strings.NewReader(`{"failover":{"enabled":true}}`))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		srv.Mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("toggle enabled=true failed: %d %s", rec.Code, rec.Body.String())
+		}
+		saved, _ := config.Load(cfgPath)
+		if !saved.Watchdog.Failover.IsEnabled() || len(saved.Watchdog.Failover.EffectiveGroups()) != 3 {
+			t.Fatalf("expected enabled=true while keeping custom groups, got %+v", saved.Watchdog.Failover)
+		}
+	}
+
+	// 4. GET /api/logs?name=events filters key watchdog events cleanly
+	{
+		sampleLog := strings.Join([]string{
+			"Platform for singgen:linux",
+			"2026-11-12 15:00:00 [INFO] 守护进程启动...",
+			"2026-11-12 15:05:00 [WATCHDOG] GROUP_FAILOVER healthy=false restarts=0/3 | 策略组 [#VPS] 切备",
+		}, "\n") + "\n"
+		if err := os.WriteFile(daemon.GetDaemonLogPath(), []byte(sampleLog), 0600); err != nil {
+			t.Fatal(err)
+		}
+
+		req := httptest.NewRequest(http.MethodGet, "/api/logs?name=events&tail=100", nil)
+		rec := httptest.NewRecorder()
+		srv.Mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /api/logs?name=events failed: %d", rec.Code)
+		}
+		var out struct {
+			Content string `json:"content"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &out)
+		if !strings.Contains(out.Content, "GROUP_FAILOVER") || strings.Contains(out.Content, "Platform for singgen:") {
+			t.Fatalf("unexpected events log output: %q", out.Content)
+		}
 	}
 }

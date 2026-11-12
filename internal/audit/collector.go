@@ -959,6 +959,17 @@ func (c *Collector) resolveLocalLocation() *time.Location {
 	return ResolveLocalLocationFromFiles(c.tzFile, c.uciSystemFile)
 }
 
+// InitProcessLocalTimezone 在缺少 /usr/share/zoneinfo 的精简 Linux/OpenWrt 系统上（Go 默认回退为 UTC），
+// 自动读取 /etc/TZ 与 /etc/config/system 修正全局 time.Local，确保 logger、看门狗与 WebUI 时间戳一致。
+func InitProcessLocalTimezone() {
+	if time.Local != nil && time.Local.String() != "UTC" {
+		return
+	}
+	if loc := ResolveLocalLocationFromFiles("/etc/TZ", "/etc/config/system"); loc != nil && loc.String() != "UTC" {
+		time.Local = loc
+	}
+}
+
 // ResolveLocalLocationFromFiles 按 TZ 环境变量 -> OpenWrt /etc/TZ -> UCI /etc/config/system -> time.Local 顺序解析真实本地时区。
 func ResolveLocalLocationFromFiles(tzFile, uciSystemFile string) *time.Location {
 	if envTZ := strings.TrimSpace(os.Getenv("TZ")); envTZ != "" {

@@ -11,6 +11,7 @@ import (
 
 	"singctl/internal/audit"
 	"singctl/internal/config"
+	"singctl/internal/daemon"
 )
 
 // auditRateLimiter 针对审计与拉黑接口提供轻量滑动窗口防爬虫/防高频扫描限流。
@@ -162,6 +163,7 @@ func (s *Server) handleAuditBlock(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	_ = daemon.NotifyReload()
 	writeJSON(w, http.StatusOK, res)
 }
 
@@ -194,6 +196,7 @@ func (s *Server) handleAuditUnblock(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	_ = daemon.NotifyReload()
 	writeJSON(w, http.StatusOK, res)
 }
 

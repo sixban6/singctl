@@ -32,6 +32,7 @@ var ErrDaemonAlreadyRunning = errors.New("daemon already running")
 var (
 	PidFilePathOverride   string
 	StateFilePathOverride string
+	DaemonLogPathOverride string
 	// expectedProcNameFn 返回守护进程期望的进程名（默认取当前可执行文件名）
 	ExpectedProcNameFn = defaultProcName
 )
@@ -68,6 +69,9 @@ func GetStateFilePath() string {
 
 // GetDaemonLogPath 获取守护进程日志文件路径
 func GetDaemonLogPath() string {
+	if DaemonLogPathOverride != "" {
+		return DaemonLogPathOverride
+	}
 	if runtime.GOOS == "windows" {
 		return filepath.Join(os.Getenv("TEMP"), logFileName)
 	}
@@ -123,9 +127,10 @@ func WritePidFile() error {
 	pidFile := GetPidFilePath()
 	pid := strconv.Itoa(os.Getpid())
 	tmp := pidFile + ".tmp"
-	if err := os.WriteFile(tmp, []byte(pid), 0644); err != nil {
+	if err := os.WriteFile(tmp, []byte(pid), 0600); err != nil {
 		return err
 	}
+	_ = os.Chmod(tmp, 0600)
 	return os.Rename(tmp, pidFile)
 }
 
@@ -292,6 +297,82 @@ func waitProcessExit(pid int, timeout time.Duration) bool {
 		time.Sleep(100 * time.Millisecond)
 	}
 	return !ProcessExists(pid)
+}
+
+// IsDaemonBinaryStale 检测运行中的看门狗进程是否指向已被覆盖删除的旧版二进制（如 Linux "/usr/bin/singctl (deleted)"）。
+func IsDaemonBinaryStale() bool {
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	pid, err := ReadDaemonPid()
+	if err != nil || !DaemonProcessMatches(pid) {
+		return false
+	}
+	link, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
+	if err != nil {
+		return false
+	}
+	return strings.HasSuffix(link, " (deleted)") || strings.HasSuffix(link, ".backup")
+}
+
+// NotifyReload 向运行中的看门狗进程发送 SIGHUP，通知其立即热重载磁盘最新 singctl.yaml 配置。
+func NotifyReload() bool {
+	pid, err := ReadDaemonPid()
+	if err != nil || !DaemonProcessMatches(pid) {
+		return false
+	}
+	return notifyPidReload(pid)
+}
+
+func resolveOnDiskExecutable() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		for _, p := range []string{"/usr/bin/singctl", "/usr/local/bin/singctl"} {
+			if _, stErr := os.Stat(p); stErr == nil {
+				return p, nil
+			}
+		}
+		return "", err
+	}
+	p := strings.TrimSpace(exe)
+	p = strings.TrimSuffix(p, " (deleted)")
+	for strings.HasSuffix(p, ".backup") {
+		p = strings.TrimSuffix(p, ".backup")
+	}
+	if _, stErr := os.Stat(p); stErr != nil {
+		for _, fb := range []string{"/usr/bin/singctl", "/usr/local/bin/singctl"} {
+			if _, fbErr := os.Stat(fb); fbErr == nil {
+				return fb, nil
+			}
+		}
+	}
+	return p, nil
+}
+
+// RestartDaemon 平滑重启看门狗守护进程（不影响运行中的 sing-box 透明代理，全程零断网）。
+func RestartDaemon(configPath string) error {
+	if IsDaemonRunning() {
+		if err := StopDaemon(); err != nil {
+			return err
+		}
+	}
+	exe, err := resolveOnDiskExecutable()
+	if err != nil {
+		return err
+	}
+	var args []string
+	if strings.TrimSpace(configPath) != "" {
+		args = append(args, "--config", configPath)
+	}
+	args = append(args, "dm", "start")
+	cmd := exec.Command(exe, args...)
+	if devNull, nErr := os.OpenFile(os.DevNull, os.O_RDWR, 0); nErr == nil {
+		cmd.Stdin = devNull
+		defer devNull.Close()
+	}
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }
 
 // IsSingBoxRunning 检查sing-box进程是否运行

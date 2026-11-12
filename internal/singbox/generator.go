@@ -33,6 +33,7 @@ type ConfigGenerator struct {
 	netInfo       *netinfo.NetInfoResult
 	defaultTplVer string
 	cacheDir      string
+	silent        bool
 }
 
 // 支持的目标平台
@@ -77,6 +78,26 @@ func NewConfigGenerator(cfg *config.Config) *ConfigGenerator {
 // SetCacheDir 覆盖订阅缓存目录（传空字符串可禁用订阅缓存回退，主要用于测试或无状态场景）。
 func (g *ConfigGenerator) SetCacheDir(dir string) {
 	g.cacheDir = dir
+}
+
+// SetSilent 开启静默生成模式（供看门狗后台定时订阅指纹比对调用，避免无变化巡检刷屏守护日志）。
+func (g *ConfigGenerator) SetSilent(silent bool) {
+	g.silent = silent
+}
+
+var sensitiveURLRe = regexp.MustCompile(`https?://[^\s"'<>)\]]+`)
+
+// MaskSensitiveText 将错误消息或文本中可能包含凭据的完整 HTTP(S) URL 脱敏遮蔽。
+func MaskSensitiveText(s string) string {
+	if s == "" {
+		return ""
+	}
+	return sensitiveURLRe.ReplaceAllStringFunc(s, func(raw string) string {
+		if strings.HasPrefix(strings.ToLower(raw), "http://") {
+			return "http://******"
+		}
+		return "https://******"
+	})
 }
 
 func getWebUIAddress(ipv4 string) string {
@@ -229,7 +250,9 @@ func (g *ConfigGenerator) InjectLocalDNS(rawJSON, platform string) (string, erro
 		}
 	}
 
-	log.Info("已将 sing-box dns_local 指向本地 AdGuard Home (127.0.0.1:%d)，并交由 AdGuard Home 统一管理 DNS 缓存", dnsPort)
+	if !g.silent {
+		log.Info("已将 sing-box dns_local 指向本地 AdGuard Home (127.0.0.1:%d)，并交由 AdGuard Home 统一管理 DNS 缓存", dnsPort)
+	}
 
 	data, err := json.Marshal(root)
 	if err != nil {
@@ -889,7 +912,9 @@ func ruleSetContains(raw any, target string) bool {
 // generateSingleSubscription 处理单个订阅
 func (g *ConfigGenerator) generateSingleSubscription(ctx context.Context, dnsServer, platform string) (string, error) {
 	sub := g.config.Subs[0]
-	log.Info("Platform for singgen:%s", platform)
+	if !g.silent {
+		log.Info("Platform for singgen:%s", platform)
+	}
 	authKey, lanIpcidr := "", ""
 	clientSubnet := ""
 	webui := g.webuiForPlatform(platform)
@@ -898,7 +923,7 @@ func (g *ConfigGenerator) generateSingleSubscription(ctx context.Context, dnsSer
 		clientSubnet = g.getSubnetFromIP(dnsServer)
 	}
 
-	handler := newSubLogHandler()
+	handler := newSubLogHandlerWithSilent(g.silent)
 	logger := slog.New(handler)
 
 	opts := []singgen.Option{
@@ -995,7 +1020,9 @@ func (g *ConfigGenerator) generateMultiSubscription(ctx context.Context, dnsServ
 		Subscriptions: make([]singgen.SubscriptionConfig, 0, len(g.config.Subs)),
 	}
 
-	log.Info("Platform for singgen:%s", platform)
+	if !g.silent {
+		log.Info("Platform for singgen:%s", platform)
+	}
 
 	// 添加所有订阅
 	for _, sub := range g.config.Subs {
@@ -1025,7 +1052,7 @@ func (g *ConfigGenerator) generateMultiSubscription(ctx context.Context, dnsServ
 		multiConfig.Subscriptions = append(multiConfig.Subscriptions, subConfig)
 	}
 
-	handler := newSubLogHandler()
+	handler := newSubLogHandlerWithSilent(g.silent)
 	logger := slog.New(handler)
 
 	multiOpts := []singgen.Option{singgen.WithLogger(logger)}
@@ -1055,12 +1082,14 @@ func (g *ConfigGenerator) generateMultiSubscription(ctx context.Context, dnsServ
 
 type subLogHandler struct {
 	mu          sync.Mutex
+	silent      bool
 	failedSubs  map[string]string // sub name -> failure reason
 	successSubs map[string]int    // sub name -> node count
 }
 
-func newSubLogHandler() *subLogHandler {
+func newSubLogHandlerWithSilent(silent bool) *subLogHandler {
 	return &subLogHandler{
+		silent:      silent,
 		failedSubs:  make(map[string]string),
 		successSubs: make(map[string]int),
 	}
@@ -1084,71 +1113,99 @@ func (h *subLogHandler) Handle(_ context.Context, r slog.Record) error {
 
 	switch r.Message {
 	case "Processing subscription":
-		url, _ := attrs["url"].(string)
-		log.Info("正在解析订阅 [%s] (%s)...", name, url)
+		if !h.silent {
+			url, _ := attrs["url"].(string)
+			log.Info("正在解析订阅 [%s] (%s)...", name, MaskSensitiveText(url))
+		}
 	case "Failed to parse subscription":
 		errVal := attrs["error"]
-		errStr := fmt.Sprintf("%v", errVal)
+		errStr := MaskSensitiveText(fmt.Sprintf("%v", errVal))
 		h.failedSubs[name] = errStr
-		log.Warn("订阅 [%s] 获取或解析失败 (原因: %v)，已跳过该订阅", name, errVal)
+		if !h.silent {
+			log.Warn("订阅 [%s] 获取或解析失败 (原因: %s)，已跳过该订阅", name, errStr)
+		}
 	case "No nodes found in subscription":
 		h.failedSubs[name] = "未获取到有效节点"
-		log.Warn("订阅 [%s] 未获取到有效节点，已跳过该订阅", name)
+		if !h.silent {
+			log.Warn("订阅 [%s] 未获取到有效节点，已跳过该订阅", name)
+		}
 	case "Node rules applied":
-		dropped := attrInt(attrs, "dropped")
-		kept := attrInt(attrs, "kept")
-		log.Info("订阅 [%s] 节点过滤规则已生效: 保留 %d 个，剔除 %d 个", name, kept, dropped)
+		if !h.silent {
+			dropped := attrInt(attrs, "dropped")
+			kept := attrInt(attrs, "kept")
+			log.Info("订阅 [%s] 节点过滤规则已生效: 保留 %d 个，剔除 %d 个", name, kept, dropped)
+		}
 	case "All nodes were filtered out by node rules":
 		h.failedSubs[name] = "所有节点均被过滤规则剔除"
-		log.Warn("订阅 [%s] 所有节点均被过滤规则剔除，已跳过该订阅", name)
+		if !h.silent {
+			log.Warn("订阅 [%s] 所有节点均被过滤规则剔除，已跳过该订阅", name)
+		}
 	case "Failed to transform nodes":
 		errVal := attrs["error"]
 		errStr := fmt.Sprintf("节点转换失败: %v", errVal)
 		h.failedSubs[name] = errStr
-		log.Warn("订阅 [%s] 节点转换失败 (原因: %v)，已跳过该订阅", name, errVal)
+		if !h.silent {
+			log.Warn("订阅 [%s] 节点转换失败 (原因: %v)，已跳过该订阅", name, errVal)
+		}
 	case "Successfully processed subscription":
 		nodeCount := attrInt(attrs, "node_count")
 		outboundCount := attrInt(attrs, "outbound_count")
 		h.successSubs[name] = nodeCount
-		log.Success("订阅 [%s] 成功解析 %d 个有效节点 (生成 %d 个出站)", name, nodeCount, outboundCount)
+		if !h.silent {
+			log.Success("订阅 [%s] 成功解析 %d 个有效节点 (生成 %d 个出站)", name, nodeCount, outboundCount)
+		}
 	case "Removed duplicate nodes across subscriptions":
-		removed := attrInt(attrs, "removed")
-		log.Info("跨订阅节点去重: 已移除 %d 个重复节点", removed)
+		if !h.silent {
+			removed := attrInt(attrs, "removed")
+			log.Info("跨订阅节点去重: 已移除 %d 个重复节点", removed)
+		}
 	case "Merged all subscriptions":
-		total := attrInt(attrs, "total_outbounds")
-		log.Info("所有可用订阅合并完成，有效出站节点总计: %d 个", total)
+		if !h.silent {
+			total := attrInt(attrs, "total_outbounds")
+			log.Info("所有可用订阅合并完成，有效出站节点总计: %d 个", total)
+		}
 	case "Subscription usage":
-		u, _ := attrs["url"].(string)
-		used, _ := attrs["used"].(string)
-		total, _ := attrs["total"].(string)
-		remaining, _ := attrs["remaining"].(string)
-		expire, _ := attrs["expire"].(string)
-		summary := fmt.Sprintf("已用 %s", used)
-		if total != "" {
-			summary += fmt.Sprintf(" / 总计 %s (剩余 %s)", total, remaining)
+		if !h.silent {
+			u, _ := attrs["url"].(string)
+			used, _ := attrs["used"].(string)
+			total, _ := attrs["total"].(string)
+			remaining, _ := attrs["remaining"].(string)
+			expire, _ := attrs["expire"].(string)
+			summary := fmt.Sprintf("已用 %s", used)
+			if total != "" {
+				summary += fmt.Sprintf(" / 总计 %s (剩余 %s)", total, remaining)
+			}
+			if expire != "" {
+				summary += fmt.Sprintf(", 到期 %s", expire)
+			}
+			log.Info("订阅用量 (%s): %s", MaskSensitiveText(u), summary)
 		}
-		if expire != "" {
-			summary += fmt.Sprintf(", 到期 %s", expire)
-		}
-		log.Info("订阅用量 (%s): %s", u, summary)
 	case "Subscription traffic is running low":
-		u, _ := attrs["url"].(string)
-		remaining, _ := attrs["remaining"].(string)
-		total, _ := attrs["total"].(string)
-		log.Warn("⚠️ 订阅流量即将耗尽 (%s): 剩余 %s / 总计 %s", u, remaining, total)
+		if !h.silent {
+			u, _ := attrs["url"].(string)
+			remaining, _ := attrs["remaining"].(string)
+			total, _ := attrs["total"].(string)
+			log.Warn("⚠️ 订阅流量即将耗尽 (%s): 剩余 %s / 总计 %s", MaskSensitiveText(u), remaining, total)
+		}
 	case "Subscription has expired":
-		u, _ := attrs["url"].(string)
-		expire, _ := attrs["expire"].(string)
-		log.Warn("⚠️ 订阅已过期 (%s): 到期日 %s", u, expire)
+		if !h.silent {
+			u, _ := attrs["url"].(string)
+			expire, _ := attrs["expire"].(string)
+			log.Warn("⚠️ 订阅已过期 (%s): 到期日 %s", MaskSensitiveText(u), expire)
+		}
 	case "Subscription expires soon":
-		u, _ := attrs["url"].(string)
-		expire, _ := attrs["expire"].(string)
-		log.Warn("⚠️ 订阅即将到期 (%s): 到期日 %s", u, expire)
+		if !h.silent {
+			u, _ := attrs["url"].(string)
+			expire, _ := attrs["expire"].(string)
+			log.Warn("⚠️ 订阅即将到期 (%s): 到期日 %s", MaskSensitiveText(u), expire)
+		}
 	case "Subscription fetch failed, using cached copy":
-		u, _ := attrs["url"].(string)
-		age, _ := attrs["age"].(string)
-		errVal := attrs["error"]
-		log.Warn("⚠️ 订阅拉取失败 (%s)，已回退使用本地缓存副本 (缓存距今 %s, 原因: %v)", u, age, errVal)
+		if !h.silent {
+			u, _ := attrs["url"].(string)
+			age, _ := attrs["age"].(string)
+			errVal := attrs["error"]
+			log.Warn("⚠️ 订阅拉取失败 (%s)，已回退使用本地缓存副本 (缓存距今 %s, 原因: %s)", MaskSensitiveText(u), age, MaskSensitiveText(fmt.Sprintf("%v", errVal)))
+		}
 	}
 
 	return nil

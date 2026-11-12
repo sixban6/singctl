@@ -18,17 +18,23 @@ import (
 )
 
 // NewDaemonCommand creates the daemon command with subcommands
-func NewDaemonCommand() *cobra.Command {
+func NewDaemonCommand(version ...string) *cobra.Command {
+	ver := "dev"
+	if len(version) > 0 && strings.TrimSpace(version[0]) != "" {
+		ver = strings.TrimSpace(version[0])
+	}
+
 	cmd := &cobra.Command{
 		Use:     "daemon",
-		Aliases: []string{"dm"}, // 添加快捷命令 singctl dm
+		Aliases: []string{"dm"},
 		Short:   "看门狗: 守护singbox(简写singctl dm)",
-		Long:    "管理 singctl 守护进程，自动监控和重启 sing-box / Manage the singctl daemon for automatic sing-box monitoring and restart",
+		Long:    "管理 singctl 守护进程，自动监控自愈 sing-box、策略组自动故障切换与订阅无感热同步",
 	}
 
 	cmd.AddCommand(
-		newDaemonStartCommand(),
+		newDaemonStartCommand(ver),
 		newDaemonStopCommand(),
+		newDaemonRestartCommand(),
 		newDaemonStatusCommand(),
 		newDaemonLogsCommand(),
 	)
@@ -36,12 +42,11 @@ func NewDaemonCommand() *cobra.Command {
 	return cmd
 }
 
-// newDaemonStartCommand creates daemon start subcommand
-func newDaemonStartCommand() *cobra.Command {
+func newDaemonStartCommand(ver string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "start",
 		Short: "启动守护进程 / Start the daemon",
-		Long:  "启动 singctl 守护进程，监控 sing-box 进程并在需要时自动重启 / Start the singctl daemon to monitor sing-box process and automatically restart it when needed",
+		Long:  "启动 singctl 守护进程，监控 sing-box 进程并在需要时自动重启与切换备选线路",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			configPath := cmd.Flag("config").Value.String()
 
@@ -50,13 +55,12 @@ func newDaemonStartCommand() *cobra.Command {
 				return fmt.Errorf("failed to load config: %w", err)
 			}
 
-			d := daemon.NewDaemon(cfg)
+			d := daemon.NewDaemonWithMeta(cfg, configPath, ver)
 			return d.Start()
 		},
 	}
 }
 
-// newDaemonStopCommand creates daemon stop subcommand
 func newDaemonStopCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "stop",
@@ -78,12 +82,27 @@ func newDaemonStopCommand() *cobra.Command {
 	}
 }
 
-// newDaemonStatusCommand creates daemon status subcommand
+func newDaemonRestartCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "restart",
+		Short: "平滑重启守护进程(不中断 sing-box) / Restart the daemon seamlessly",
+		Long:  "平滑重启 singctl 看门狗守护进程以加载新配置或新版本，不影响正在运行的 sing-box 代理连接",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			configPath := cmd.Flag("config").Value.String()
+			if err := daemon.RestartDaemon(configPath); err != nil {
+				return fmt.Errorf("failed to restart daemon: %w", err)
+			}
+			logger.Success("Daemon restarted seamlessly")
+			return nil
+		},
+	}
+}
+
 func newDaemonStatusCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
 		Short: "查看守护进程状态 / Show daemon status",
-		Long:  "查看 singctl 守护进程和被监控服务的当前状态 / Show the current status of the singctl daemon and monitored services",
+		Long:  "查看 singctl 守护进程、故障切换与被监控服务的当前状态",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			configPath := cmd.Flag("config").Value.String()
 
@@ -94,18 +113,56 @@ func newDaemonStatusCommand() *cobra.Command {
 
 			monitor := daemon.NewMonitor(cfg)
 			status := monitor.GetStatus()
+			snap := daemon.LoadRuntimeSnapshot()
 
-			// 显示状态信息
 			logger.Info("Daemon Status:")
-			logger.Info("├─ %s", status.String())
+			if status.DaemonRunning {
+				verTag := ""
+				if snap.DaemonVersion != "" {
+					verTag = " (" + snap.DaemonVersion + ")"
+				}
+				if daemon.IsDaemonBinaryStale() {
+					verTag += " [待重启应用新版本]"
+				}
+				logger.Info("├─ Daemon: Running ✓%s", verTag)
+			} else {
+				logger.Info("├─ Daemon: Stopped ✗")
+			}
 
-			// 显示重启统计（从持久化状态恢复，无论 daemon 是否运行都可读）
+			if status.ProcessRunning {
+				logger.Info("├─ SingBox: Running ✓")
+			} else {
+				logger.Info("├─ SingBox: Stopped ✗")
+			}
+
+			foCfg := cfg.Watchdog.Failover
+			if foCfg.IsEnabled() {
+				if len(snap.ActiveFailovers) > 0 {
+					var parts []string
+					for _, a := range snap.ActiveFailovers {
+						parts = append(parts, fmt.Sprintf("%s(%s->%s)", a.Group, a.Origin, a.Current))
+					}
+					logger.Info("├─ Group failover: Enabled (接管中: %s)", strings.Join(parts, ", "))
+				} else {
+					logger.Info("├─ Group failover: Enabled (%d groups watched, all primary healthy)", len(foCfg.EffectiveGroups()))
+				}
+			} else {
+				logger.Info("├─ Group failover: Disabled")
+			}
+
+			if snap.LastHealthAt != "" {
+				detail := snap.LastHealthDetail
+				if detail != "" {
+					logger.Info("├─ Last check: %s (%s)", snap.LastHealthAt, detail)
+				} else {
+					logger.Info("├─ Last check: %s", snap.LastHealthAt)
+				}
+			}
+
 			limiter := daemon.NewRestartLimiterFromState(cfg.Watchdog.MaxRestarts)
 			logger.Info("├─ Restarts: %d/%d (last hour)",
 				limiter.GetRestartCount(), limiter.GetMaxRestarts())
 			logger.Info("├─ Total restarts: %d", limiter.GetTotalRestarts())
-
-			// 显示守护日志路径
 			logger.Info("└─ Daemon log: %s", daemon.GetDaemonLogPath())
 
 			return nil
@@ -113,48 +170,59 @@ func newDaemonStatusCommand() *cobra.Command {
 	}
 }
 
-// newDaemonLogsCommand creates daemon logs subcommand
+func IsKeyWatchdogLogLine(line string) bool {
+	return strings.Contains(line, "[WATCHDOG]") ||
+		strings.Contains(line, "[GroupFailover]") ||
+		strings.Contains(line, "[SubSync]") ||
+		strings.Contains(line, "[RuleSet]") ||
+		strings.Contains(line, "[Watchdog]") ||
+		strings.Contains(line, "Daemon started") ||
+		strings.Contains(line, "Daemon stopped") ||
+		strings.Contains(line, "[WARN]") ||
+		strings.Contains(line, "[ERROR]")
+}
+
 func newDaemonLogsCommand() *cobra.Command {
 	var tail int
 	var follow bool
+	var eventsOnly bool
 
 	cmd := &cobra.Command{
 		Use:   "logs",
 		Short: "查看守护进程日志 / Show daemon logs",
-		Long:  "查看 singctl 守护进程日志 / Show the singctl daemon logs",
+		Long:  "查看 singctl 守护进程与看门狗事件日志",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logPath := daemon.GetDaemonLogPath()
 
-			// 检查日志文件是否存在
 			if _, err := os.Stat(logPath); os.IsNotExist(err) {
 				logger.Warn("Log file does not exist: %s", logPath)
 				logger.Info("Start the daemon to generate logs: singctl daemon start")
 				return nil
 			}
 
-			// 读取日志文件
 			content, err := os.ReadFile(logPath)
 			if err != nil {
 				return fmt.Errorf("failed to read log file: %w", err)
 			}
 
-			// 过滤空行后取末尾 tail 行(与 tail -n 行为一致)
 			var nonEmpty []string
-			for _, line := range strings.Split(string(content), "\n") {
-				if strings.TrimSpace(line) != "" {
-					nonEmpty = append(nonEmpty, line)
+			for line := range strings.SplitSeq(string(content), "\n") {
+				if strings.TrimSpace(line) == "" {
+					continue
 				}
+				if eventsOnly && !IsKeyWatchdogLogLine(line) {
+					continue
+				}
+				nonEmpty = append(nonEmpty, line)
 			}
 			if tail > 0 && len(nonEmpty) > tail {
 				nonEmpty = nonEmpty[len(nonEmpty)-tail:]
 			}
 
-			// 输出日志内容
 			for _, line := range nonEmpty {
 				fmt.Println(line)
 			}
 
-			// follow 模式：持续跟踪新增日志（类似 tail -f）
 			if follow {
 				return followFile(cmd.Context(), logPath, int64(len(content)))
 			}
@@ -165,12 +233,11 @@ func newDaemonLogsCommand() *cobra.Command {
 
 	cmd.Flags().IntVarP(&tail, "tail", "n", 100, "Number of lines to show from the end of the log")
 	cmd.Flags().BoolVarP(&follow, "follow", "f", false, "Follow log output (like tail -f)")
+	cmd.Flags().BoolVarP(&eventsOnly, "events", "e", false, "Only show watchdog/failover/sync key events")
 
 	return cmd
 }
 
-// followFile 从 offset 起持续输出文件新增内容，直到日志被删除或收到中断信号(Ctrl+C)。
-// 兼容日志轮转：检测到文件被截断/重建时从头重新读取。
 func followFile(ctx context.Context, path string, offset int64) error {
 	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -188,7 +255,7 @@ func followFile(ctx context.Context, path string, offset int64) error {
 		f, err := os.Open(path)
 		if err != nil {
 			if os.IsNotExist(err) {
-				return nil // 日志被清理，结束跟踪
+				return nil
 			}
 			return fmt.Errorf("failed to open log file: %w", err)
 		}
@@ -199,7 +266,6 @@ func followFile(ctx context.Context, path string, offset int64) error {
 			return fmt.Errorf("failed to stat log file: %w", err)
 		}
 
-		// 文件被轮转(截断或重建)：从头读取
 		if info.Size() < offset {
 			offset = 0
 		}

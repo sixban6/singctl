@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -598,9 +599,11 @@ func (h *Hy2Config) UnmarshalYAML(node *yaml.Node) error {
 
 func (w *WatchdogConfig) UnmarshalYAML(node *yaml.Node) error {
 	var a struct {
-		Interval    any `yaml:"interval"`
-		ConfirmWait any `yaml:"confirm_wait"`
-		MaxRestarts any `yaml:"max_restarts"`
+		Interval        any                    `yaml:"interval"`
+		ConfirmWait     any                    `yaml:"confirm_wait"`
+		MaxRestarts     any                    `yaml:"max_restarts"`
+		SubSyncInterval any                    `yaml:"sub_sync_interval"`
+		Failover        WatchdogFailoverConfig `yaml:"failover"`
 	}
 	if err := node.Decode(&a); err != nil {
 		return err
@@ -620,7 +623,75 @@ func (w *WatchdogConfig) UnmarshalYAML(node *yaml.Node) error {
 			w.MaxRestarts = v
 		}
 	}
+	if a.SubSyncInterval != nil {
+		if v, err := parseIntAny(a.SubSyncInterval); err == nil {
+			w.SubSyncInterval = v
+		}
+	}
+	w.Failover = a.Failover
 	return nil
+}
+
+func (f *WatchdogFailoverConfig) UnmarshalYAML(node *yaml.Node) error {
+	var raw struct {
+		Enabled            *bool    `yaml:"enabled"`
+		Groups             []string `yaml:"groups"`
+		PatrolInterval     any      `yaml:"patrol_interval"`
+		ProbeTimeoutMs     any      `yaml:"probe_timeout_ms"`
+		ConfirmRetries     any      `yaml:"confirm_retries"`
+		FailbackCooldown   any      `yaml:"failback_cooldown"`
+		MaxFailbackDelayMs any      `yaml:"max_failback_delay_ms"`
+		ProbeURLs          []string `yaml:"probe_urls"`
+	}
+	if err := node.Decode(&raw); err != nil {
+		return err
+	}
+	f.Enabled = raw.Enabled
+	f.Groups = cleanStringSlice(raw.Groups)
+	f.ProbeURLs = cleanStringSlice(raw.ProbeURLs)
+	if raw.PatrolInterval != nil {
+		if v, err := parseIntAny(raw.PatrolInterval); err == nil {
+			f.PatrolInterval = v
+		}
+	}
+	if raw.ProbeTimeoutMs != nil {
+		if v, err := parseIntAny(raw.ProbeTimeoutMs); err == nil {
+			f.ProbeTimeoutMs = v
+		}
+	}
+	if raw.ConfirmRetries != nil {
+		if v, err := parseIntAny(raw.ConfirmRetries); err == nil {
+			f.ConfirmRetries = v
+		}
+	}
+	if raw.FailbackCooldown != nil {
+		if v, err := parseIntAny(raw.FailbackCooldown); err == nil {
+			f.FailbackCooldown = v
+		}
+	}
+	if raw.MaxFailbackDelayMs != nil {
+		if v, err := parseIntAny(raw.MaxFailbackDelayMs); err == nil {
+			f.MaxFailbackDelayMs = v
+		}
+	}
+	return nil
+}
+
+func cleanStringSlice(items []string) []string {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(items))
+	for _, raw := range items {
+		s := strings.TrimSpace(raw)
+		if s != "" && !slices.Contains(out, s) {
+			out = append(out, s)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 var (
@@ -757,11 +828,109 @@ func (s *ServerConfig) GetNodeTag() string {
 	return "node"
 }
 
+// DefaultWatchdogFailoverGroups 默认参与自动故障切换守护的核心 Selector 策略组列表。
+var DefaultWatchdogFailoverGroups = []string{"#VPS", "Game-TCP", "Game-UDP", "Game", "Proxy", "AI"}
+
+// DefaultWatchdogProbeURLs 默认策略组存活探测 URL 列表。
+var DefaultWatchdogProbeURLs = []string{
+	"https://captive.apple.com/hotspot-detect.html",
+	"http://www.gstatic.com/generate_204",
+}
+
+// WatchdogFailoverConfig 策略组自动故障切换与恢复回切配置（默认开启）。
+type WatchdogFailoverConfig struct {
+	Enabled            *bool    `yaml:"enabled,omitempty" json:"enabled,omitempty"`                             // 是否启用策略组自动故障切换, 默认 true
+	Groups             []string `yaml:"groups,omitempty" json:"groups,omitempty"`                               // 守护的 Selector 策略组列表, 留空使用默认核心组
+	PatrolInterval     int      `yaml:"patrol_interval,omitempty" json:"patrol_interval,omitempty"`             // 巡检间隔(秒), 默认 30
+	ProbeTimeoutMs     int      `yaml:"probe_timeout_ms,omitempty" json:"probe_timeout_ms,omitempty"`           // 单次测速超时(毫秒), 默认 2800
+	ConfirmRetries     int      `yaml:"confirm_retries,omitempty" json:"confirm_retries,omitempty"`             // 切备前复测确认次数, 默认 1 (设为 -1 表示不复测立即切)
+	FailbackCooldown   int      `yaml:"failback_cooldown,omitempty" json:"failback_cooldown,omitempty"`         // 切备后自动回切冷却期(秒), 默认 180 (设为 -1 关闭自动回切)
+	MaxFailbackDelayMs int      `yaml:"max_failback_delay_ms,omitempty" json:"max_failback_delay_ms,omitempty"` // 原主选恢复回切最高允许延迟(毫秒), 默认 600
+	ProbeURLs          []string `yaml:"probe_urls,omitempty" json:"probe_urls,omitempty"`                       // 自定义测速探测 URL, 留空使用默认列表
+}
+
+func (f WatchdogFailoverConfig) IsEmpty() bool {
+	return f.Enabled == nil &&
+		len(f.Groups) == 0 &&
+		f.PatrolInterval == 0 &&
+		f.ProbeTimeoutMs == 0 &&
+		f.ConfirmRetries == 0 &&
+		f.FailbackCooldown == 0 &&
+		f.MaxFailbackDelayMs == 0 &&
+		len(f.ProbeURLs) == 0
+}
+
+// IsEnabled 返回是否开启故障切换（默认开启）。
+func (f WatchdogFailoverConfig) IsEnabled() bool {
+	return f.Enabled == nil || *f.Enabled
+}
+
+func (f WatchdogFailoverConfig) EffectiveGroups() []string {
+	if cleaned := cleanStringSlice(f.Groups); len(cleaned) > 0 {
+		return cleaned
+	}
+	return slices.Clone(DefaultWatchdogFailoverGroups)
+}
+
+func (f WatchdogFailoverConfig) EffectivePatrolInterval() time.Duration {
+	if f.PatrolInterval <= 0 {
+		return 30 * time.Second
+	}
+	return time.Duration(max(10, f.PatrolInterval)) * time.Second
+}
+
+func (f WatchdogFailoverConfig) EffectiveProbeTimeout() time.Duration {
+	if f.ProbeTimeoutMs <= 0 {
+		return 2800 * time.Millisecond
+	}
+	ms := min(max(500, f.ProbeTimeoutMs), 15000)
+	return time.Duration(ms) * time.Millisecond
+}
+
+func (f WatchdogFailoverConfig) EffectiveConfirmRetries() int {
+	if f.ConfirmRetries < 0 {
+		return 0
+	}
+	if f.ConfirmRetries == 0 {
+		return 1
+	}
+	return min(f.ConfirmRetries, 5)
+}
+
+func (f WatchdogFailoverConfig) AutoFailbackEnabled() bool {
+	return f.FailbackCooldown >= 0
+}
+
+func (f WatchdogFailoverConfig) EffectiveFailbackCooldown() time.Duration {
+	if f.FailbackCooldown < 0 {
+		return -1
+	}
+	if f.FailbackCooldown == 0 {
+		return 180 * time.Second
+	}
+	return time.Duration(f.FailbackCooldown) * time.Second
+}
+
+func (f WatchdogFailoverConfig) EffectiveMaxFailbackDelayMs() int {
+	if f.MaxFailbackDelayMs <= 0 {
+		return 600
+	}
+	return min(max(100, f.MaxFailbackDelayMs), 5000)
+}
+
+func (f WatchdogFailoverConfig) EffectiveProbeURLs() []string {
+	if cleaned := cleanStringSlice(f.ProbeURLs); len(cleaned) > 0 {
+		return cleaned
+	}
+	return slices.Clone(DefaultWatchdogProbeURLs)
+}
+
 type WatchdogConfig struct {
-	Interval        int `yaml:"interval"`                    // 检查间隔(秒), 默认 180
-	ConfirmWait     int `yaml:"confirm_wait"`                // 二次确认等待(秒), 默认 30
-	MaxRestarts     int `yaml:"max_restarts"`                // 每小时最大自动重启次数, 默认 3
-	SubSyncInterval int `yaml:"sub_sync_interval,omitempty"` // 订阅节点指纹自动热同步间隔(秒), 默认 600; 设为 -1 关闭
+	Interval        int                    `yaml:"interval"`                    // 检查间隔(秒), 默认 180
+	ConfirmWait     int                    `yaml:"confirm_wait"`                // 二次确认等待(秒), 默认 30
+	MaxRestarts     int                    `yaml:"max_restarts"`                // 每小时最大自动重启次数, 默认 3
+	SubSyncInterval int                    `yaml:"sub_sync_interval,omitempty"` // 订阅节点指纹自动热同步间隔(秒), 默认 600; 设为 -1 关闭
+	Failover        WatchdogFailoverConfig `yaml:"failover,omitempty"`          // 策略组自动故障切换配置(默认开启)
 }
 
 var knownYAMLKeys = []string{
@@ -774,6 +943,7 @@ var knownYAMLKeys = []string{
 	"web_terminal", "mtls_ca", "ssh_tunnel_port", "ssh_tunnel_path", "ssh_port",
 	"web_admin", "enabled", "port", "path", "username", "password", "password_pending_ack",
 	"watchdog", "interval", "confirm_wait", "max_restarts", "sub_sync_interval",
+	"failover", "groups", "patrol_interval", "probe_timeout_ms", "confirm_retries", "failback_cooldown", "max_failback_delay_ms", "probe_urls",
 	"custom_rules", "block", "target", "source_ip", "reason", "ruleset_url", "rule_count", "preview", "created_at",
 	"outbounds", "tag", "default", "tolerance", "interrupt_exist_connections",
 	"route", "dns", "dns_port", "web_port",
@@ -1267,6 +1437,12 @@ func MigrateConfig(configPath string, templateData []byte) error {
 		if hasYAMLKey(oldWD, "max_restarts") {
 			setOrAddField(docNode, "watchdog", "max_restarts", strconv.Itoa(oldCfg.Watchdog.MaxRestarts))
 		}
+		if hasYAMLKey(oldWD, "sub_sync_interval") {
+			setOrAddField(docNode, "watchdog", "sub_sync_interval", strconv.Itoa(oldCfg.Watchdog.SubSyncInterval))
+		}
+		if hasYAMLKey(oldWD, "failover") && !oldCfg.Watchdog.Failover.IsEmpty() {
+			setOrAddMapping(docNode, "watchdog", "failover", oldCfg.Watchdog.Failover)
+		}
 	}
 
 	// 7. Merge CustomRules (only when uncommented in old config, never triggered by `# custom_rules:` comments)
@@ -1445,6 +1621,38 @@ func filterRoleNodesBeforeMerge(dstRoot, srcRoot *yaml.Node, cfg *Config) {
 				if len(auditMap.Content) == 0 && cfg.Audit.IsEmpty() {
 					dstDoc.Content = append(dstDoc.Content[:i], dstDoc.Content[i+2:]...)
 				}
+				break
+			}
+		}
+	}
+
+	// 当 watchdog.failover 被修改或恢复默认时，清理 dstDoc 与 srcDoc 中旧的 failover 子节点以保证置空字段真实生效
+	if cfg != nil {
+		for i := 0; i+1 < len(srcDoc.Content); i += 2 {
+			if srcDoc.Content[i].Value == "watchdog" && srcDoc.Content[i+1].Kind == yaml.MappingNode && cfg.Watchdog.Failover.IsEmpty() {
+				wdMap := srcDoc.Content[i+1]
+				newWD := make([]*yaml.Node, 0, len(wdMap.Content))
+				for j := 0; j+1 < len(wdMap.Content); j += 2 {
+					if wdMap.Content[j].Value == "failover" {
+						continue
+					}
+					newWD = append(newWD, wdMap.Content[j], wdMap.Content[j+1])
+				}
+				wdMap.Content = newWD
+				break
+			}
+		}
+		for i := 0; i+1 < len(dstDoc.Content); i += 2 {
+			if dstDoc.Content[i].Value == "watchdog" && dstDoc.Content[i+1].Kind == yaml.MappingNode {
+				wdMap := dstDoc.Content[i+1]
+				newWD := make([]*yaml.Node, 0, len(wdMap.Content))
+				for j := 0; j+1 < len(wdMap.Content); j += 2 {
+					if wdMap.Content[j].Value == "failover" {
+						continue
+					}
+					newWD = append(newWD, wdMap.Content[j], wdMap.Content[j+1])
+				}
+				wdMap.Content = newWD
 				break
 			}
 		}

@@ -8,26 +8,20 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"singctl/internal/config"
 	"singctl/internal/doctor"
 	"singctl/internal/logger"
 	"singctl/internal/singbox"
 )
 
 const (
-	groupFailoverInterval = 30 * time.Second
-	groupProbeTimeout     = 2800 * time.Millisecond
-)
-
-var (
-	defaultWatchedSelectorGroups = []string{"#VPS", "Game-TCP", "Game-UDP", "Game", "Proxy", "AI"}
-	defaultProbeURLs             = []string{
-		"https://captive.apple.com/hotspot-detect.html",
-		"http://www.gstatic.com/generate_204",
-	}
+	defaultGroupFailoverInterval = 30 * time.Second
+	groupProbeTimeout            = 2800 * time.Millisecond
 )
 
 type clashProxyItem struct {
@@ -40,31 +34,149 @@ type clashProxiesDocument struct {
 	Proxies map[string]clashProxyItem `json:"proxies"`
 }
 
-// GroupFailoverState tracks automatic selector failover so groups automatically
-// restore to their primary selection once the primary outbound/group recovers.
+// SelectorGroupSummary 供 WebUI 展示的 Clash Selector 策略组实时状态与容灾守护状态。
+type SelectorGroupSummary struct {
+	Name       string   `json:"name"`
+	Now        string   `json:"now"`
+	Candidates int      `json:"candidates"`
+	Watched    bool     `json:"watched"`
+	FailedOver bool     `json:"failedOver"`
+	Origin     string   `json:"origin,omitempty"`
+	Since      string   `json:"since,omitempty"`
+	All        []string `json:"all,omitempty"`
+}
+
+// GroupFailoverState tracks automatic selector failover with anti-flap confirmation,
+// cooldown, and latency hysteresis so groups smoothly fail over and recover without ping-ponging.
 type GroupFailoverState struct {
 	mu              sync.Mutex
-	failoverOrigin  map[string]string // group -> original target before failover (e.g. "Game" -> "#Auto")
-	failoverCurrent map[string]string // group -> target set by failover (e.g. "Game" -> "#VPS")
-	ProbeURLs       []string
-	ProbeTimeout    time.Duration
+	failoverOrigin  map[string]string    // group -> original target before failover (e.g. "Game" -> "#Auto")
+	failoverCurrent map[string]string    // group -> target set by failover (e.g. "Game" -> "#VPS")
+	failoverSince   map[string]time.Time // group -> timestamp when failover started
+	failoverDelay   map[string]int       // group -> backup delay ms at switch time
+	recoverStreak   map[string]int       // group -> consecutive healthy probes of origin
+
+	Enabled               bool
+	WatchedGroups         []string
+	ProbeURLs             []string
+	ProbeTimeout          time.Duration
+	ConfirmRetries        int
+	ConfirmRetryDelay     time.Duration
+	AutoFailback          bool
+	FailbackCooldown      time.Duration
+	FailbackHealthyStreak int
+	MaxFailbackDelayMs    int
+	NowFn                 func() time.Time
 }
 
 // NewGroupFailoverState creates a new failover state tracker.
 func NewGroupFailoverState() *GroupFailoverState {
 	return &GroupFailoverState{
-		failoverOrigin:  make(map[string]string),
-		failoverCurrent: make(map[string]string),
-		ProbeURLs:       defaultProbeURLs,
-		ProbeTimeout:    groupProbeTimeout,
+		failoverOrigin:        make(map[string]string),
+		failoverCurrent:       make(map[string]string),
+		failoverSince:         make(map[string]time.Time),
+		failoverDelay:         make(map[string]int),
+		recoverStreak:         make(map[string]int),
+		Enabled:               true,
+		WatchedGroups:         slices.Clone(config.DefaultWatchdogFailoverGroups),
+		ProbeURLs:             slices.Clone(config.DefaultWatchdogProbeURLs),
+		ProbeTimeout:          groupProbeTimeout,
+		AutoFailback:          true,
+		FailbackHealthyStreak: 1,
+		NowFn:                 time.Now,
 	}
 }
 
-func (d *Daemon) maybePatrolGroupFailoverAsync() {
-	if d.config != nil && doctor.IsServerEnvironment(d.config) && len(d.config.Subs) == 0 {
-		return
+// ApplyConfig 将 singctl.yaml 中的 watchdog.failover 配置热更新至内存状态机。
+func (s *GroupFailoverState) ApplyConfig(fc config.WatchdogFailoverConfig) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.Enabled = fc.IsEnabled()
+	s.WatchedGroups = fc.EffectiveGroups()
+	s.ProbeURLs = fc.EffectiveProbeURLs()
+	s.ProbeTimeout = fc.EffectiveProbeTimeout()
+	s.ConfirmRetries = fc.EffectiveConfirmRetries()
+	if s.ConfirmRetries > 0 && s.ConfirmRetryDelay == 0 {
+		s.ConfirmRetryDelay = 2 * time.Second
 	}
-	if !IsSingBoxRunning() {
+	s.AutoFailback = fc.AutoFailbackEnabled()
+	if s.AutoFailback {
+		s.FailbackCooldown = fc.EffectiveFailbackCooldown()
+		if s.FailbackCooldown > 0 {
+			s.FailbackHealthyStreak = 2
+		} else {
+			s.FailbackHealthyStreak = 1
+		}
+	} else {
+		s.FailbackCooldown = -1
+		s.FailbackHealthyStreak = 1
+	}
+	s.MaxFailbackDelayMs = fc.EffectiveMaxFailbackDelayMs()
+
+	// 若总开关关闭或移除了某些受控组，清理已不再受控组的残留状态
+	for grp := range s.failoverOrigin {
+		if !s.Enabled || !slices.Contains(s.WatchedGroups, grp) {
+			delete(s.failoverOrigin, grp)
+			delete(s.failoverCurrent, grp)
+			delete(s.failoverSince, grp)
+			delete(s.failoverDelay, grp)
+			delete(s.recoverStreak, grp)
+		}
+	}
+}
+
+// ActiveSnapshot 返回当前处于故障切备接管状态的策略组快照。
+func (s *GroupFailoverState) ActiveSnapshot() []FailoverActiveItem {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.failoverOrigin) == 0 {
+		return nil
+	}
+	out := make([]FailoverActiveItem, 0, len(s.failoverOrigin))
+	for grp, orig := range s.failoverOrigin {
+		cur := s.failoverCurrent[grp]
+		if orig == "" || cur == "" {
+			continue
+		}
+		sinceStr := ""
+		if t := s.failoverSince[grp]; !t.IsZero() {
+			sinceStr = t.Format(time.DateTime)
+		}
+		out = append(out, FailoverActiveItem{
+			Group:     grp,
+			Origin:    orig,
+			Current:   cur,
+			Since:     sinceStr,
+			LastDelay: s.failoverDelay[grp],
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Group < out[j].Group })
+	return out
+}
+
+func (s *GroupFailoverState) now() time.Time {
+	if s.NowFn != nil {
+		return s.NowFn()
+	}
+	return time.Now()
+}
+
+func (d *Daemon) maybePatrolGroupFailoverAsync() {
+	cfg := d.currentConfig()
+	if cfg != nil {
+		if doctor.IsServerEnvironment(cfg) && len(cfg.Subs) == 0 {
+			return
+		}
+		if !cfg.Watchdog.Failover.IsEnabled() {
+			UpdateRuntimeState(func(snap *DaemonRuntimeSnapshot) {
+				snap.ActiveFailovers = nil
+			})
+			return
+		}
+	}
+	if d.reloading.Load() || !IsSingBoxRunning() {
 		return
 	}
 	if !d.failoverRunning.CompareAndSwap(false, true) {
@@ -72,25 +184,43 @@ func (d *Daemon) maybePatrolGroupFailoverAsync() {
 	}
 	go func() {
 		defer d.failoverRunning.Store(false)
-		ctx, cancel := context.WithTimeout(d.ctx, 25*time.Second)
+		ctx, cancel := context.WithTimeout(d.ctx, 35*time.Second)
 		defer cancel()
 		if d.failover == nil {
 			return
 		}
 		d.failover.Patrol(ctx, singbox.ClashAPIEndpoints(), singbox.ClashAPISecret())
+		nowStr := time.Now().Format(time.DateTime)
+		active := d.failover.ActiveSnapshot()
+		UpdateRuntimeState(func(snap *DaemonRuntimeSnapshot) {
+			snap.LastFailoverAt = nowStr
+			snap.ActiveFailovers = active
+		})
 	}()
 }
 
 // Patrol inspects watched Selector groups via the Clash API, automatically fails over
 // dead targets (such as when all airport nodes in #Auto go down), and automatically
-// restores the original target once it recovers.
+// restores the original target once it stably recovers.
 func (s *GroupFailoverState) Patrol(ctx context.Context, endpoints []string, secret string) {
+	s.mu.Lock()
+	enabled := s.Enabled
+	groups := slices.Clone(s.WatchedGroups)
+	s.mu.Unlock()
+
+	if !enabled {
+		return
+	}
+	if len(groups) == 0 {
+		groups = slices.Clone(config.DefaultWatchdogFailoverGroups)
+	}
+
 	base, doc, err := fetchClashProxiesDoc(ctx, endpoints, secret)
 	if err != nil || len(doc.Proxies) == 0 {
 		return
 	}
 
-	for _, groupName := range defaultWatchedSelectorGroups {
+	for _, groupName := range groups {
 		select {
 		case <-ctx.Done():
 			return
@@ -102,6 +232,14 @@ func (s *GroupFailoverState) Patrol(ctx context.Context, endpoints []string, sec
 
 func isDirectOutboundTag(tag string) bool {
 	return strings.EqualFold(tag, "#DC") || strings.EqualFold(tag, "DirectConn") || strings.EqualFold(tag, "direct")
+}
+
+func (s *GroupFailoverState) clearGroupLocked(groupName string) {
+	delete(s.failoverOrigin, groupName)
+	delete(s.failoverCurrent, groupName)
+	delete(s.failoverSince, groupName)
+	delete(s.failoverDelay, groupName)
+	delete(s.recoverStreak, groupName)
 }
 
 func (s *GroupFailoverState) checkAndHealGroup(
@@ -119,43 +257,80 @@ func (s *GroupFailoverState) checkAndHealGroup(
 		return
 	}
 
+	now := s.now()
 	s.mu.Lock()
 	origin := s.failoverOrigin[groupName]
 	expectedCur := s.failoverCurrent[groupName]
+	since := s.failoverSince[groupName]
+	autoFailback := s.AutoFailback
+	cooldown := s.FailbackCooldown
+	needStreak := max(1, s.FailbackHealthyStreak)
+	maxDelayMs := s.MaxFailbackDelayMs
+	confirmRetries := max(0, s.ConfirmRetries)
+	confirmDelay := s.ConfirmRetryDelay
 	// 若用户在面板中手动切换到了其他分组，尊重用户手动选择并清除旧自动切换标记
 	if origin != "" && expectedCur != "" && cur != expectedCur {
-		delete(s.failoverOrigin, groupName)
-		delete(s.failoverCurrent, groupName)
+		s.clearGroupLocked(groupName)
 		origin = ""
 	}
 	s.mu.Unlock()
 
-	// 1. 若当前处于故障切备状态，优先探测原主选分组 (如 #Auto) 是否已恢复
-	if origin != "" && origin != cur && slices.Contains(grp.All, origin) {
-		if delay, ok := s.probeOutboundAlive(ctx, base, secret, origin); ok {
-			if err := switchClashSelector(ctx, base, secret, groupName, origin); err == nil {
+	// 1. 若当前处于故障切备状态且开启自动回切，满足冷却窗与健康滞回门槛后切回原主选分组
+	if autoFailback && origin != "" && origin != cur && slices.Contains(grp.All, origin) {
+		cooldownReady := cooldown <= 0 || since.IsZero() || now.Sub(since) >= cooldown
+		if cooldownReady {
+			if delay, ok := s.probeOutboundAlive(ctx, base, secret, origin); ok && (maxDelayMs <= 0 || delay <= maxDelayMs) {
 				s.mu.Lock()
-				delete(s.failoverOrigin, groupName)
-				delete(s.failoverCurrent, groupName)
+				s.recoverStreak[groupName]++
+				streak := s.recoverStreak[groupName]
 				s.mu.Unlock()
-				logger.Success("[GroupFailover] 分流组 [%s] 原主选线路 [%s] 已恢复健康 (delay=%dms)，自动切回: %s -> %s",
-					groupName, origin, delay, cur, origin)
-				LogWatchdogEvent(WatchdogEvent{
-					Time:          time.Now(),
-					Action:        "GROUP_FAILBACK",
-					RestartResult: fmt.Sprintf("%s: %s -> %s (%dms)", groupName, cur, origin, delay),
-				})
-				return
+
+				if streak >= needStreak {
+					if err := switchClashSelector(ctx, base, secret, groupName, origin); err == nil {
+						s.mu.Lock()
+						s.clearGroupLocked(groupName)
+						s.mu.Unlock()
+						logger.Success("[GroupFailover] 分流组 [%s] 原主选线路 [%s] 已稳定恢复 (delay=%dms)，自动切回: %s -> %s",
+							groupName, origin, delay, cur, origin)
+						LogWatchdogEvent(WatchdogEvent{
+							Time:   now,
+							Action: "GROUP_FAILBACK",
+							CheckResult: HealthCheckResult{
+								Healthy:   true,
+								CheckTime: now,
+								Details:   fmt.Sprintf("%s 原线路 %s 恢复健康", groupName, origin),
+							},
+							RestartResult: fmt.Sprintf("%s: %s -> %s (%dms)", groupName, cur, origin, delay),
+						})
+						return
+					}
+				}
+			} else {
+				s.mu.Lock()
+				s.recoverStreak[groupName] = 0
+				s.mu.Unlock()
 			}
 		}
 	}
 
-	// 2. 探测当前选中的目标线路是否存活
+	// 2. 探测当前选中的目标线路是否存活（首次超时可按配置复测确认，过滤跨境瞬时丢包）
 	if _, ok := s.probeOutboundAlive(ctx, base, secret, cur); ok {
 		return
 	}
+	for retry := 0; retry < confirmRetries; retry++ {
+		if confirmDelay > 0 {
+			select {
+			case <-time.After(confirmDelay):
+			case <-ctx.Done():
+				return
+			}
+		}
+		if _, ok := s.probeOutboundAlive(ctx, base, secret, cur); ok {
+			return
+		}
+	}
 
-	// 3. 当前线路两次确认探测均超时失败，遍历候选列表寻找最佳可用备选线路
+	// 3. 当前线路确认不可达，遍历候选列表寻找最佳可用备选线路
 	for _, cand := range grp.All {
 		cand = strings.TrimSpace(cand)
 		if cand == "" || cand == cur || isDirectOutboundTag(cand) {
@@ -168,19 +343,29 @@ func (s *GroupFailoverState) checkAndHealGroup(
 
 		if delay, ok := s.probeOutboundAlive(ctx, base, secret, cand); ok {
 			if err := switchClashSelector(ctx, base, secret, groupName, cand); err == nil {
+				switchAt := s.now()
 				s.mu.Lock()
 				if s.failoverOrigin[groupName] == "" {
 					s.failoverOrigin[groupName] = cur
 				}
 				s.failoverCurrent[groupName] = cand
+				s.failoverSince[groupName] = switchAt
+				s.failoverDelay[groupName] = delay
+				s.recoverStreak[groupName] = 0
 				origRecorded := s.failoverOrigin[groupName]
 				s.mu.Unlock()
 
-				logger.Warn("[GroupFailover] 分流组 [%s] 当前线路 [%s] 不可达，已自动故障切换至 [%s] (delay=%dms, 待 [%s] 恢复后自动切回)",
+				logger.Warn("[GroupFailover] 分流组 [%s] 当前线路 [%s] 不可达，已自动故障切换至 [%s] (delay=%dms, 原主选 [%s])",
 					groupName, cur, cand, delay, origRecorded)
 				LogWatchdogEvent(WatchdogEvent{
-					Time:          time.Now(),
-					Action:        "GROUP_FAILOVER",
+					Time:   switchAt,
+					Action: "GROUP_FAILOVER",
+					CheckResult: HealthCheckResult{
+						Healthy:      false,
+						CheckTime:    switchAt,
+						FailedReason: "outbound_unreachable",
+						Details:      fmt.Sprintf("%s 当前线路 %s 超时", groupName, cur),
+					},
 					RestartResult: fmt.Sprintf("%s: %s -> %s (%dms)", groupName, cur, cand, delay),
 				})
 				return
@@ -213,11 +398,14 @@ func (s *GroupFailoverState) ensureSubSelectorHealthy(
 }
 
 func (s *GroupFailoverState) probeOutboundAlive(ctx context.Context, base, secret, target string) (int, bool) {
-	urls := s.ProbeURLs
-	if len(urls) == 0 {
-		urls = defaultProbeURLs
-	}
+	s.mu.Lock()
+	urls := slices.Clone(s.ProbeURLs)
 	timeout := s.ProbeTimeout
+	s.mu.Unlock()
+
+	if len(urls) == 0 {
+		urls = config.DefaultWatchdogProbeURLs
+	}
 	if timeout <= 0 {
 		timeout = groupProbeTimeout
 	}
@@ -252,6 +440,67 @@ func (s *GroupFailoverState) probeOutboundAlive(ctx context.Context, base, secre
 		}
 	}
 	return 0, false
+}
+
+// InspectClashSelectors 查询 Clash API 当前所有可手动切换的 Selector 策略组及其容灾守护状态。
+func InspectClashSelectors(
+	ctx context.Context,
+	endpoints []string,
+	secret string,
+	watched []string,
+	active []FailoverActiveItem,
+) ([]SelectorGroupSummary, error) {
+	_, doc, err := fetchClashProxiesDoc(ctx, endpoints, secret)
+	if err != nil {
+		return nil, err
+	}
+
+	activeMap := make(map[string]FailoverActiveItem, len(active))
+	for _, a := range active {
+		activeMap[a.Group] = a
+	}
+
+	orderIndex := make(map[string]int, len(watched))
+	for idx, g := range watched {
+		orderIndex[g] = idx
+	}
+
+	var list []SelectorGroupSummary
+	for name, item := range doc.Proxies {
+		if !strings.EqualFold(item.Type, "Selector") {
+			continue
+		}
+		isWatched := slices.Contains(watched, name)
+		if strings.EqualFold(name, "GLOBAL") && !isWatched {
+			continue
+		}
+		act, failed := activeMap[name]
+		list = append(list, SelectorGroupSummary{
+			Name:       name,
+			Now:        item.Now,
+			Candidates: len(item.All),
+			Watched:    isWatched,
+			FailedOver: failed,
+			Origin:     act.Origin,
+			Since:      act.Since,
+		})
+	}
+
+	sort.Slice(list, func(i, j int) bool {
+		idxI, okI := orderIndex[list[i].Name]
+		idxJ, okJ := orderIndex[list[j].Name]
+		switch {
+		case okI && okJ:
+			return idxI < idxJ
+		case okI:
+			return true
+		case okJ:
+			return false
+		default:
+			return list[i].Name < list[j].Name
+		}
+	})
+	return list, nil
 }
 
 func fetchClashProxiesDoc(ctx context.Context, endpoints []string, secret string) (string, clashProxiesDocument, error) {

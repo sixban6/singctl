@@ -40,8 +40,9 @@ var Actions = map[string]ActionDef{
 	"cache-clear":  {Title: "清空规则集缓存", Build: fixed("sb", "cache", "clear")},
 
 	// 守护进程
-	"dm-start": {Title: "启动守护进程", Build: fixed("dm", "start")},
-	"dm-stop":  {Title: "停止守护进程", Build: fixed("dm", "stop")},
+	"dm-start":   {Title: "启动守护进程", Build: fixed("dm", "start")},
+	"dm-stop":    {Title: "停止守护进程", Build: fixed("dm", "stop")},
+	"dm-restart": {Title: "重启守护进程", Build: fixed("dm", "restart")},
 
 	// Tailscale
 	"ts-start":   {Title: "启动 Tailscale", Build: TsStartArgs},
