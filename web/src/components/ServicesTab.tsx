@@ -64,7 +64,7 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
         delete next[service];
         return next;
       });
-      setTimeout(onRefresh, 1500);
+      setTimeout(onRefresh, res.willRestartUI ? 2800 : 1500);
     } catch (err: any) {
       error(err.message || `${service} 升级失败`);
     } finally {
@@ -223,11 +223,23 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
 
   return (
     <div className="space-y-6">
-      <div className="p-5 rounded-2xl glass-card">
-        <h2 className="text-lg font-semibold text-white tracking-tight">四核服务运维控制台</h2>
-        <p className="text-xs text-slate-400 mt-1">
-          支持对每个核心服务进行独立进程管理、实时日志调取以及在线编辑配置
-        </p>
+      <div className="p-5 rounded-2xl glass-card flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-semibold text-white tracking-tight flex items-center gap-2 flex-wrap">
+            <span>四核服务运维控制台</span>
+            {status?.version && (
+              <span className="px-2 py-0.5 rounded-md bg-purple-500/15 text-purple-300 border border-purple-500/30 text-xs font-mono">
+                SingCtl {status.version.startsWith('v') ? status.version : `v${status.version}`}
+              </span>
+            )}
+          </h2>
+          <p className="text-xs text-slate-400 mt-1">
+            支持对 SingCtl 主程序与四大核心服务进行版本巡检、平滑热升级、实时日志调取以及配置预检编辑
+          </p>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          {renderUpgradeAction('singctl', 'purple')}
+        </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
@@ -513,6 +525,7 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
           </div>
 
           <div className="mt-5 pt-4 border-t border-slate-800 flex flex-wrap gap-2">
+            {renderUpgradeAction('singctl', 'purple')}
             <button
               onClick={() => handleAction('subhub', 'restart')}
               disabled={loading === 'subhub-restart'}

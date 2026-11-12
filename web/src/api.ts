@@ -5,6 +5,9 @@ import {
   SourceUpsertInput,
   SubscriptionPreviewResponse,
   SubscriptionAccessLogItem,
+  SubscriptionRiskSummary,
+  CertHealthItem,
+  BackupExportResponse,
   WarpDiagnoseResponse,
   ReturnSummary,
   BannedIP,
@@ -127,7 +130,7 @@ export const api = {
     request<CheckUpdateResponse>(`/api/server/service/check-update?service=${encodeURIComponent(service)}`),
 
   upgradeService: (service: string) =>
-    request<{ message: string; results?: any[] }>('/api/server/service/upgrade', {
+    request<{ message: string; willRestartUI?: boolean; results?: any[] }>('/api/server/service/upgrade', {
       method: 'POST',
       body: JSON.stringify({ service }),
     }),
@@ -182,7 +185,8 @@ export const api = {
       body: JSON.stringify({ username, password }),
     }),
 
-  getBans: () => request<{ bans: BannedIP[] }>('/api/server/bans'),
+  getBans: () =>
+    request<{ bans: BannedIP[]; loginFailCount?: number; manualSniffCount?: number }>('/api/server/bans'),
 
   getSniffers: (node = 'all', refresh = false) =>
     request<SniffSummary>(
@@ -200,10 +204,25 @@ export const api = {
 
   getAuditLogs: () => request<{ logs: AuditLogItem[] }>('/api/server/audit-logs'),
 
-  unban: (ip: string) =>
-    request<{ message: string; unbanned: string }>('/api/server/unban', {
+  unban: (ip: string, node = 'all', viewNode = 'all') =>
+    request<{ message: string; unbanned: string; appliedNodes?: number; summary?: SniffSummary }>('/api/server/unban', {
       method: 'POST',
-      body: JSON.stringify({ ip }),
+      body: JSON.stringify({ ip, node, viewNode }),
+    }),
+
+  getCerts: (refresh = false) =>
+    request<{ certs: CertHealthItem[] }>(`/api/server/certs${refresh ? '?refresh=1' : ''}`),
+
+  exportBackup: (passphrase: string) =>
+    request<BackupExportResponse>('/api/server/backup/export', {
+      method: 'POST',
+      body: JSON.stringify({ passphrase }),
+    }),
+
+  restoreBackup: (passphrase: string, data: string) =>
+    request<{ message: string; restoredItems: string[] }>('/api/server/backup/restore', {
+      method: 'POST',
+      body: JSON.stringify({ passphrase, data }),
     }),
 
   getDoctorReport: () => request<DoctorReport>('/api/server/doctor'),
@@ -219,7 +238,9 @@ export const api = {
     }),
 
   getSubscriptionAuditLogs: () =>
-    request<{ logs: SubscriptionAccessLogItem[] }>('/api/server/subscriptions/audit'),
+    request<{ logs: SubscriptionAccessLogItem[]; riskSummary?: SubscriptionRiskSummary; bannedIps?: string[] }>(
+      '/api/server/subscriptions/audit'
+    ),
 
   clearSubscriptionAuditLogs: () =>
     request<{ message: string }>('/api/server/subscriptions/audit', {

@@ -317,6 +317,53 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ status, onRefresh, onN
         </div>
       </div>
 
+      {/* TLS Certificate Health Strip */}
+      {status?.certs && status.certs.length > 0 && (
+        <div className="p-4 rounded-2xl glass-card border border-slate-800/80 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5">
+            <div className="p-2 rounded-xl bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 shrink-0">
+              <Globe className="w-4 h-4" />
+            </div>
+            <div>
+              <div className="text-xs font-semibold text-white">ACME TLS 证书健康度</div>
+              <div className="text-[11px] text-slate-400">自动巡检节点与订阅域名证书到期时间</div>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {status.certs.map((cert) => {
+              const badgeClass =
+                cert.status === 'healthy'
+                  ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/25'
+                  : cert.status === 'expiring'
+                  ? 'bg-amber-500/15 text-amber-300 border-amber-500/30 animate-pulse'
+                  : cert.status === 'expired'
+                  ? 'bg-rose-500/20 text-rose-300 border-rose-500/35 animate-pulse'
+                  : 'bg-slate-800/80 text-slate-400 border-slate-700';
+              const statusText =
+                cert.status === 'healthy'
+                  ? `剩余 ${cert.daysRemaining} 天`
+                  : cert.status === 'expiring'
+                  ? `即将到期 (${cert.daysRemaining} 天)`
+                  : cert.status === 'expired'
+                  ? '已过期'
+                  : '待签发/外部反代';
+              return (
+                <button
+                  key={cert.domain}
+                  type="button"
+                  onClick={() => onNavigate('security')}
+                  title={cert.message || ''}
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl border text-xs font-mono transition-colors ${badgeClass}`}
+                >
+                  <span className="font-semibold">{cert.domain}</span>
+                  <span className="opacity-80">· {statusText}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* Live Telemetry Cockpit */}
       {telemetry && !telemetry.enabled ? (
         <div className="p-5 rounded-2xl glass-card border border-emerald-500/25 bg-gradient-to-r from-emerald-950/20 via-slate-900/60 to-slate-900/60 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">

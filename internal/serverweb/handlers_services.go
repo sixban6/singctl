@@ -2,6 +2,7 @@ package serverweb
 
 import (
 	"bufio"
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 
 	"singctl/internal/config"
 	"singctl/internal/deploy"
+	"singctl/internal/updater"
 )
 
 func (s *Server) handleServiceAction(w http.ResponseWriter, r *http.Request) {
@@ -52,7 +54,7 @@ func (s *Server) handleServiceAction(w http.ResponseWriter, r *http.Request) {
 			action = "restart"
 		}
 		cmdErr = exec.Command("systemctl", action, "sing-box").Run()
-	case "subhub":
+	case "subhub", "substore":
 		if action == "reload" {
 			action = "restart"
 		}
@@ -98,6 +100,16 @@ func (s *Server) handleCheckServiceUpdate(w http.ResponseWriter, r *http.Request
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if res.Component == "singctl" && (res.CurrentVersion == "" || res.CurrentVersion == "unknown") && s.opts.Version != "" {
+		curr := strings.TrimPrefix(strings.TrimSpace(s.opts.Version), "v")
+		res.CurrentVersion = curr
+		res.HasUpdate = deploy.IsNewerVersion(curr, res.LatestVersion)
+		if res.HasUpdate {
+			res.Message = fmt.Sprintf("发现 SingCtl 新版本: v%s (当前: v%s)", res.LatestVersion, curr)
+		} else {
+			res.Message = fmt.Sprintf("SingCtl 主程序与 SubHub 已是最新版本 (v%s)", curr)
+		}
+	}
 
 	writeJSON(w, http.StatusOK, res)
 }
@@ -113,6 +125,59 @@ func (s *Server) handleUpgradeService(w http.ResponseWriter, r *http.Request) {
 
 	target := strings.ToLower(strings.TrimSpace(body.Service))
 	cfg, _ := config.Load(s.opts.ConfigPath)
+
+	if target == "singctl" || target == "subhub" || target == "substore" {
+		mirror := ""
+		if cfg != nil {
+			mirror = cfg.GitHub.MirrorURL
+		}
+		oldVer := cmp.Or(strings.TrimPrefix(strings.TrimSpace(s.opts.Version), "v"), deploy.GetInstalledSubhubVersion())
+		checkRes, _ := deploy.CheckComponentUpdate("singctl", cfg)
+		if checkRes != nil && checkRes.LatestVersion != "" && !deploy.IsNewerVersion(oldVer, checkRes.LatestVersion) {
+			msg := fmt.Sprintf("SingCtl 当前已是最新版本 (v%s)，无需重复更新", oldVer)
+			writeJSON(w, http.StatusOK, map[string]any{
+				"message": msg,
+				"results": []*deploy.UpgradeResult{{
+					Component:   "singctl",
+					DisplayName: "SingCtl 主程序 (WebUI + SubHub)",
+					OldVersion:  oldVer,
+					NewVersion:  oldVer,
+					Message:     msg,
+					Updated:     false,
+				}},
+			})
+			return
+		}
+
+		up := updater.New(mirror, "")
+		if err := up.UpdateSelf(s.opts.ConfigPath, oldVer); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "SingCtl 自更新失败: "+err.Error())
+			return
+		}
+		newVer := deploy.GetInstalledSubhubVersion()
+		if checkServiceRunning("singctl-sub") {
+			_ = exec.Command("systemctl", "restart", "singctl-sub").Run()
+		}
+		msg := fmt.Sprintf("SingCtl 已平滑升级至 %s，后台面板将在 1 秒后自动热重启", cmp.Or(newVer, "最新版"))
+		s.recordAudit(r, fmt.Sprintf("平滑自升级 SingCtl 主程序 [%s -> %s]", oldVer, cmp.Or(newVer, "latest")))
+		writeJSON(w, http.StatusOK, map[string]any{
+			"message":       msg,
+			"willRestartUI": true,
+			"results": []*deploy.UpgradeResult{{
+				Component:   "singctl",
+				DisplayName: "SingCtl 主程序 (WebUI + SubHub)",
+				OldVersion:  oldVer,
+				NewVersion:  cmp.Or(newVer, oldVer),
+				Message:     msg,
+				Updated:     true,
+			}},
+		})
+		time.AfterFunc(1200*time.Millisecond, func() {
+			_ = RestartService()
+		})
+		return
+	}
+
 	results, err := deploy.UpgradeComponent(target, cfg)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "组件升级失败: "+err.Error())
@@ -335,6 +400,20 @@ func (s *Server) handleUpdateServiceConfig(w http.ResponseWriter, r *http.Reques
 			writeJSONError(w, http.StatusBadRequest, "sing-box 配置必须是合法的 JSON 格式: "+err.Error())
 			return
 		}
+		if sbBin, lookErr := locateSingBoxBinary(); lookErr == nil && sbBin != "" {
+			tmp, err := os.CreateTemp("", "singbox-validate-*.json")
+			if err == nil {
+				tmpName := tmp.Name()
+				defer os.Remove(tmpName)
+				_ = tmp.Chmod(0600)
+				_, _ = tmp.WriteString(content)
+				_ = tmp.Close()
+				if out, err := exec.Command(sbBin, "check", "-c", tmpName).CombinedOutput(); err != nil {
+					writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("sing-box 配置预校验未通过（已拦截写入以防断网）: %s", strings.TrimSpace(string(out))))
+					return
+				}
+			}
+		}
 	case "caddy":
 		path = "/etc/caddy/Caddyfile"
 		tmp, err := os.CreateTemp("", "caddyfile-validate-*.caddy")
@@ -357,19 +436,19 @@ func (s *Server) handleUpdateServiceConfig(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	if old, err := os.ReadFile(path); err == nil {
-		_ = WriteConfigBackup(path, old)
+	oldBytes, hadOld := os.ReadFile(path)
+	if hadOld == nil {
+		_ = WriteConfigBackup(path, oldBytes)
 	}
 
 	mode := os.FileMode(0600)
 	if service == "caddy" {
 		mode = 0640
 	}
-	if err := os.WriteFile(path, []byte(content), mode); err != nil {
+	if err := writeConfigAtomically(path, []byte(content), mode); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "保存配置文件失败: "+err.Error())
 		return
 	}
-	_ = os.Chmod(path, mode)
 	if service == "caddy" {
 		if g, err := user.LookupGroup("caddy"); err == nil {
 			if gid, convErr := strconv.Atoi(g.Gid); convErr == nil {
@@ -378,17 +457,66 @@ func (s *Server) handleUpdateServiceConfig(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	var reloadErr error
 	switch service {
 	case "caddy":
-		_ = exec.Command("caddy", "reload", "--config", path).Run()
+		reloadErr = exec.Command("caddy", "reload", "--config", path).Run()
 	case "singbox":
-		_ = exec.Command("systemctl", "restart", "sing-box").Run()
+		if _, err := exec.LookPath("systemctl"); err == nil {
+			reloadErr = exec.Command("systemctl", "restart", "sing-box").Run()
+		}
 	case "warp":
-		_ = exec.Command("systemctl", "restart", "wireproxy").Run()
+		if _, err := exec.LookPath("systemctl"); err == nil {
+			reloadErr = exec.Command("systemctl", "restart", "wireproxy").Run()
+		}
+	}
+	if reloadErr != nil && hadOld == nil {
+		_ = writeConfigAtomically(path, oldBytes, mode)
+		if service == "singbox" {
+			_ = exec.Command("systemctl", "restart", "sing-box").Run()
+		} else if service == "caddy" {
+			_ = exec.Command("caddy", "reload", "--config", path).Run()
+		} else if service == "warp" {
+			_ = exec.Command("systemctl", "restart", "wireproxy").Run()
+		}
+		writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("服务 %s 重载失败 (%v)，已自动回滚至原配置确保不断连", service, reloadErr))
+		return
 	}
 
 	s.recordAudit(r, fmt.Sprintf("修改并保存 %s 服务配置", service))
 	writeJSON(w, http.StatusOK, map[string]string{
-		"message": fmt.Sprintf("服务 %s 配置文件已成功保存并重新加载", service),
+		"message": fmt.Sprintf("服务 %s 配置文件已通过预检、安全保存并重新加载", service),
 	})
+}
+
+func locateSingBoxBinary() (string, error) {
+	if p, err := exec.LookPath("sing-box"); err == nil {
+		return p, nil
+	}
+	for _, candidate := range []string{"/usr/local/bin/sing-box", "/usr/bin/sing-box"} {
+		if st, err := os.Stat(candidate); err == nil && !st.IsDir() {
+			return candidate, nil
+		}
+	}
+	return "", os.ErrNotExist
+}
+
+func writeConfigAtomically(path string, data []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	tmp := fmt.Sprintf("%s.%d.tmp", path, time.Now().UnixNano())
+	if err := os.WriteFile(tmp, data, mode); err != nil {
+		return err
+	}
+	_ = os.Chmod(tmp, mode)
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		if wErr := os.WriteFile(path, data, mode); wErr != nil {
+			return wErr
+		}
+		_ = os.Chmod(path, mode)
+	}
+	return nil
 }

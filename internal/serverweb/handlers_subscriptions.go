@@ -23,12 +23,23 @@ func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	hy2Port := cfg.Server.GetHy2Port()
+	vlessPort := cfg.Server.GetVlessPort()
 	var hy2Link, vlessLink string
 	sbs, _ := deploy.NewSingBoxServer(cfg)
 	if sbs != nil {
+		if s.opts.SingBoxConfigPath != "" {
+			sbs.ConfigFile = s.opts.SingBoxConfigPath
+		}
 		_ = sbs.LoadExistingCredentials()
 		hy2Link = sbs.ShareLinkHy2
 		vlessLink = sbs.ShareLinkVless
+		if sbs.Hy2Port() > 0 {
+			hy2Port = sbs.Hy2Port()
+		}
+		if sbs.VlessPort() > 0 {
+			vlessPort = sbs.VlessPort()
+		}
 	}
 
 	sbt := deploy.NewSubstore(cfg, "")
@@ -80,12 +91,12 @@ func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 			"hy2": map[string]any{
 				"link":   hy2Link,
 				"domain": cfg.Server.GetNodeDomain(),
-				"port":   443,
+				"port":   hy2Port,
 			},
 			"vless": map[string]any{
 				"link": vlessLink,
 				"sni":  cfg.Server.Sni,
-				"port": 443,
+				"port": vlessPort,
 			},
 		},
 	}
@@ -277,9 +288,120 @@ func (s *Server) handleListSubscriptionAccessLogs(w http.ResponseWriter, r *http
 		}
 		enriched[i] = item
 	}
+	bannedSet := make(map[string]bool)
+	if s.limiter != nil {
+		for ip := range s.limiter.ListBans() {
+			bannedSet[ip] = true
+		}
+	}
+	bannedIPs := make([]string, 0, len(bannedSet))
+	for ip := range bannedSet {
+		bannedIPs = append(bannedIPs, ip)
+	}
+
+	riskSummary := evaluateSubscriptionAccessRisk(enriched)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"logs": enriched,
+		"logs":        enriched,
+		"riskSummary": riskSummary,
+		"bannedIps":   bannedIPs,
 	})
+}
+
+// SubscriptionRiskSummary 订阅拉取防盗刷态势摘要
+type SubscriptionRiskSummary struct {
+	Level              string   `json:"level"` // "safe" | "warn" | "high"
+	UniqueIPs24h       int      `json:"uniqueIps24h"`
+	UniqueCountries24h int      `json:"uniqueCountries24h"`
+	DeniedHits24h      int      `json:"deniedHits24h"`
+	SuspiciousUAHits   int      `json:"suspiciousUaHits24h"`
+	Reasons            []string `json:"reasons"`
+}
+
+func isSuspiciousSubUA(ua string) bool {
+	lower := strings.ToLower(strings.TrimSpace(ua))
+	if lower == "" {
+		return true
+	}
+	for _, kw := range []string{"python-requests", "python-urllib", "curl/", "wget/", "go-http-client", "axios/", "node-fetch", "headless", "spider", "censys", "shodan", "scrapy"} {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+func evaluateSubscriptionAccessRisk(logs []subhub.AccessLogEntry) SubscriptionRiskSummary {
+	cutoff := time.Now().Add(-24 * time.Hour)
+	ipSet := make(map[string]struct{})
+	countrySet := make(map[string]struct{})
+	deniedHits := 0
+	suspiciousUA := 0
+
+	for _, entry := range logs {
+		ts, err := time.Parse(time.RFC3339, entry.Timestamp)
+		if err == nil && ts.Before(cutoff) {
+			continue
+		}
+		if entry.Status == "denied" {
+			deniedHits++
+			continue
+		}
+		if entry.IP != "" {
+			ipSet[entry.IP] = struct{}{}
+		}
+		if cc := strings.ToUpper(strings.TrimSpace(entry.CountryCode)); cc != "" && cc != "XX" && cc != "LOCAL" {
+			countrySet[cc] = struct{}{}
+		}
+		if isSuspiciousSubUA(entry.UserAgent) {
+			suspiciousUA++
+		}
+	}
+
+	uniqueIPs := len(ipSet)
+	uniqueCountries := len(countrySet)
+	var reasons []string
+	level := "safe"
+
+	if uniqueIPs >= 10 {
+		level = "high"
+		reasons = append(reasons, fmt.Sprintf("24 小时内共有 %d 个不同公网 IP 成功拉取订阅，远超个人多设备常规范围", uniqueIPs))
+	} else if uniqueIPs >= 6 {
+		level = "warn"
+		reasons = append(reasons, fmt.Sprintf("24 小时内共有 %d 个不同公网 IP 拉取订阅，建议核对是否均为本人设备", uniqueIPs))
+	}
+
+	if uniqueCountries >= 4 {
+		level = "high"
+		reasons = append(reasons, fmt.Sprintf("24 小时内跨 %d 个国家/地区拉取订阅，存在订阅链接外泄或被第三方测速台抓取风险", uniqueCountries))
+	} else if uniqueCountries >= 3 && level == "safe" {
+		level = "warn"
+		reasons = append(reasons, fmt.Sprintf("24 小时内跨 %d 个国家/地区拉取订阅（若设备挂代理更新订阅属正常现象）", uniqueCountries))
+	}
+
+	if suspiciousUA >= 2 && uniqueIPs >= 4 {
+		level = "high"
+		reasons = append(reasons, fmt.Sprintf("检测到 %d 次脚本/爬虫特征 User-Agent 批量拉取订阅", suspiciousUA))
+	} else if suspiciousUA >= 1 && level == "safe" {
+		level = "warn"
+		reasons = append(reasons, fmt.Sprintf("检测到 %d 次非标准客户端（脚本/空 UA）拉取订阅", suspiciousUA))
+	}
+
+	if deniedHits >= 3 && level == "safe" {
+		level = "warn"
+		reasons = append(reasons, fmt.Sprintf("24 小时内拦截了 %d 次错误订阅密钥试探", deniedHits))
+	}
+
+	if reasons == nil {
+		reasons = []string{}
+	}
+	return SubscriptionRiskSummary{
+		Level:              level,
+		UniqueIPs24h:       uniqueIPs,
+		UniqueCountries24h: uniqueCountries,
+		DeniedHits24h:      deniedHits,
+		SuspiciousUAHits:   suspiciousUA,
+		Reasons:            reasons,
+	}
 }
 
 func (s *Server) handleClearSubscriptionAccessLogs(w http.ResponseWriter, r *http.Request) {

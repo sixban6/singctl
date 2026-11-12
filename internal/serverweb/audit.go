@@ -10,7 +10,23 @@ import (
 	"time"
 )
 
-const MaxAuditLogs = 50
+const MaxAuditLogs = 200
+
+// ClassifyAuditCategory 根据操作描述自动归类审计记录，便于前端筛选定位
+func ClassifyAuditCategory(action string) string {
+	switch {
+	case strings.Contains(action, "登录") || strings.Contains(action, "密码") || strings.Contains(action, "凭证") || strings.Contains(action, "路径"):
+		return "login"
+	case strings.Contains(action, "拉黑") || strings.Contains(action, "封禁") || strings.Contains(action, "解封") || strings.Contains(action, "自愈") || strings.Contains(action, "抗探测") || strings.Contains(action, "备份") || strings.Contains(action, "灾备") || strings.Contains(action, "快照") || strings.Contains(action, "恢复"):
+		return "security"
+	case strings.Contains(action, "舰队") || strings.Contains(action, "子节点"):
+		return "fleet"
+	case strings.Contains(action, "订阅"):
+		return "subscription"
+	default:
+		return "service"
+	}
+}
 
 // AuditEntry 最近管理操作审计记录 (绝对不记录任何密码、会话令牌或敏感秘钥)
 type AuditEntry struct {

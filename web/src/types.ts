@@ -23,6 +23,17 @@ export interface ServiceDetail {
   socksPort?: number;
 }
 
+export interface CertHealthItem {
+  domain: string;
+  role: string;
+  status: 'healthy' | 'expiring' | 'expired' | 'missing' | string;
+  issuer?: string;
+  notAfter?: string;
+  daysRemaining: number;
+  source?: string;
+  message?: string;
+}
+
 export interface ServerStatusResponse {
   version: string;
   authEnabled: boolean;
@@ -52,6 +63,7 @@ export interface ServerStatusResponse {
     sni: string;
     hasCFToken: boolean;
   };
+  certs?: CertHealthItem[];
   auditLogs?: AuditLogItem[];
 }
 
@@ -59,6 +71,7 @@ export interface AuditLogItem {
   time: string;
   action: string;
   ip: string;
+  category?: 'login' | 'security' | 'fleet' | 'subscription' | 'service' | string;
   geo?: string;
   isp?: string;
   country?: string;
@@ -174,6 +187,12 @@ export interface BannedIP {
   ip: string;
   remainingSeconds: number;
   remainingMinutes: number;
+  remainingText?: string;
+  bannedUntil?: string;
+  failCount?: number;
+  source?: 'login_fail' | 'manual_sniff' | string;
+  sourceLabel?: string;
+  reason?: string;
   geo?: string;
   isp?: string;
   country?: string;
@@ -369,6 +388,25 @@ export interface SubscriptionAccessLogItem {
   collection?: string;
   nodeCount: number;
   status: 'ok' | 'denied';
+}
+
+export interface SubscriptionRiskSummary {
+  level: 'safe' | 'warn' | 'high';
+  uniqueIps24h: number;
+  uniqueCountries24h: number;
+  deniedHits24h: number;
+  suspiciousUaHits24h: number;
+  reasons: string[];
+}
+
+export interface BackupExportResponse {
+  message: string;
+  filename: string;
+  data: string;
+  hasSingctlCfg: boolean;
+  hasFleet: boolean;
+  fleetKeyCount: number;
+  hasSubStore: boolean;
 }
 
 export type FleetAuthType = 'inline_key' | 'key_file' | 'ssh_alias' | 'password';

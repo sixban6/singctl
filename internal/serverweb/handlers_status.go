@@ -93,15 +93,17 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			"sni":              cfg.Server.Sni,
 			"hasCFToken":       cfg.Server.CFDNSKey != "",
 		},
+		"certs": InspectServerCerts(cfg, false),
 	}
 	if s.audit != nil {
 		rawLogs := s.audit.List()
 		enriched := make([]map[string]any, 0, len(rawLogs))
 		for _, entry := range rawLogs {
 			item := map[string]any{
-				"time":   entry.Time,
-				"action": entry.Action,
-				"ip":     entry.IP,
+				"time":     entry.Time,
+				"action":   entry.Action,
+				"ip":       entry.IP,
+				"category": ClassifyAuditCategory(entry.Action),
 			}
 			if s.geo != nil {
 				geo := s.geo.Resolve(entry.IP)

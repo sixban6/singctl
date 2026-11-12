@@ -1,6 +1,7 @@
 package serverweb
 
 import (
+	"cmp"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
@@ -439,34 +440,71 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleUnban(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		IP string `json:"ip"`
+		IP       string `json:"ip"`
+		Target   string `json:"target"`
+		Node     string `json:"node"`
+		ViewNode string `json:"viewNode"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 
-	targetIP := strings.TrimSpace(body.IP)
+	targetIP := strings.TrimSpace(cmp.Or(body.IP, body.Target))
 	if targetIP == "" {
 		targetIP = "all"
 	}
+	nodeScope := cmp.Or(strings.TrimSpace(body.Node), "all")
+	viewScope := cmp.Or(strings.TrimSpace(body.ViewNode), nodeScope)
 
 	s.limiter.Unban(targetIP)
-	s.recordAudit(r, fmt.Sprintf("解除 IP 封禁: %s", targetIP))
-	writeJSON(w, http.StatusOK, map[string]any{
-		"message":  fmt.Sprintf("已成功解封 IP: %s", targetIP),
-		"unbanned": targetIP,
-	})
+	appliedNodes := 1
+	canonicalTarget := targetIP
+	if s.sniff != nil {
+		if unblocked, n, err := s.sniff.UnblockTargetForNode(r.Context(), targetIP, nodeScope); err == nil {
+			canonicalTarget = unblocked
+			if n > 0 {
+				appliedNodes = n
+			}
+		} else if targetIP != "all" && targetIP != "*" {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+
+	s.recordAudit(r, fmt.Sprintf("全链路解除封禁 [%s] (范围: %s, 生效主机: %d 台)", canonicalTarget, nodeScope, appliedNodes))
+	resp := map[string]any{
+		"message":      fmt.Sprintf("已全链路解除封禁: %s（同步清理防火墙与限流表，共 %d 台主机）", canonicalTarget, appliedNodes),
+		"unbanned":     canonicalTarget,
+		"appliedNodes": appliedNodes,
+	}
+	if s.sniff != nil {
+		resp["summary"] = s.sniff.SnapshotForNode(r.Context(), viewScope, false)
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleListBans(w http.ResponseWriter, r *http.Request) {
-	bans := s.limiter.ListBans()
-	banList := make([]map[string]any, 0, len(bans))
-	for ip, rem := range bans {
+	details := s.limiter.ListBanDetails()
+	banList := make([]map[string]any, 0, len(details))
+	loginFailCount := 0
+	manualSniffCount := 0
+	for _, d := range details {
+		if d.Source == BanSourceManualSniff {
+			manualSniffCount++
+		} else {
+			loginFailCount++
+		}
 		item := map[string]any{
-			"ip":               ip,
-			"remainingSeconds": int(rem.Seconds()),
-			"remainingMinutes": int(rem.Minutes()) + 1,
+			"ip":               d.IP,
+			"remainingSeconds": int(d.Remaining.Seconds()),
+			"remainingMinutes": int(d.Remaining.Minutes()) + 1,
+			"remainingText":    FormatDurationCN(d.Remaining),
+			"bannedUntil":      d.BannedUntil.Local().Format("2006-01-02 15:04:05"),
+			"failCount":        d.FailCount,
+			"source":           d.Source,
+			"sourceLabel":      d.SourceLabel,
+			"reason":           d.Reason,
 		}
 		if s.geo != nil {
-			geo := s.geo.Resolve(ip)
+			geo := s.geo.Resolve(d.IP)
 			item["geo"] = geo.Geo
 			item["isp"] = geo.ISP
 			item["country"] = geo.Country
@@ -476,7 +514,9 @@ func (s *Server) handleListBans(w http.ResponseWriter, r *http.Request) {
 		banList = append(banList, item)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"bans": banList,
+		"bans":             banList,
+		"loginFailCount":   loginFailCount,
+		"manualSniffCount": manualSniffCount,
 	})
 }
 
@@ -490,9 +530,10 @@ func (s *Server) handleListAuditLogs(w http.ResponseWriter, r *http.Request) {
 	logs := make([]map[string]any, 0, len(rawLogs))
 	for _, entry := range rawLogs {
 		item := map[string]any{
-			"time":   entry.Time,
-			"action": entry.Action,
-			"ip":     entry.IP,
+			"time":     entry.Time,
+			"action":   entry.Action,
+			"ip":       entry.IP,
+			"category": ClassifyAuditCategory(entry.Action),
 		}
 		if s.geo != nil {
 			geo := s.geo.Resolve(entry.IP)

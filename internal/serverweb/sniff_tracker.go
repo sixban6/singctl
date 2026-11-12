@@ -872,6 +872,245 @@ func applyNFTBlockCIDR(cidr string, isIPv4 bool) {
 	}
 }
 
+// UnblockTargetForNode 在指定主机 ("local" | "<node_id>" | "all") 全链路解除单个 IP、/24 网段或全部 ("all") 封禁
+func (t *SniffTracker) UnblockTargetForNode(ctx context.Context, target, nodeScope string) (string, int, error) {
+	target = strings.TrimSpace(target)
+	if target == "" || target == "*" {
+		target = "all"
+	}
+	nodeScope = cmp.Or(strings.TrimSpace(nodeScope), "all")
+
+	t.mu.RLock()
+	fleetMgr := t.fleetMgr
+	t.mu.RUnlock()
+
+	applyLocal := nodeScope == "all" || nodeScope == "local"
+	var remoteNodes []fleet.Node
+	if fleetMgr != nil && fleetMgr.Store != nil && (nodeScope == "all" || nodeScope != "local") {
+		if allNodes, err := fleetMgr.Store.List(); err == nil {
+			for _, n := range allNodes {
+				if !n.Enabled {
+					continue
+				}
+				if nodeScope == "all" || n.ID == nodeScope {
+					remoteNodes = append(remoteNodes, n)
+				}
+			}
+		}
+	}
+
+	if target == "all" {
+		t.mu.Lock()
+		if nodeScope == "all" || nodeScope == "local" {
+			clear(t.manualBlockedCIDRs)
+		}
+		if nodeScope == "all" {
+			clear(t.nodeBlockedCIDRs)
+			for _, nodeMap := range t.recordsByNode {
+				for _, rec := range nodeMap {
+					if rec.status == "banned" {
+						rec.status = "observing"
+					}
+				}
+			}
+		} else {
+			delete(t.nodeBlockedCIDRs, nodeScope)
+			if nodeMap, ok := t.recordsByNode[nodeScope]; ok {
+				for _, rec := range nodeMap {
+					if rec.status == "banned" {
+						rec.status = "observing"
+					}
+				}
+			}
+		}
+		t.dirty = true
+		t.SaveLocked(true)
+		t.mu.Unlock()
+
+		appliedNodes := 0
+		if applyLocal {
+			appliedNodes++
+			if t.limiter != nil {
+				t.limiter.Unban("all")
+			}
+			applyNFTFlushAll()
+		}
+		if len(remoteNodes) > 0 && fleetMgr != nil {
+			appliedNodes += runRemoteUnblockAcross(ctx, fleetMgr, remoteNodes, buildRemoteNFTFlushScript())
+		}
+		return "all", appliedNodes, nil
+	}
+
+	isCIDR := strings.Contains(target, "/")
+	var canonicalTarget string
+	var parsedNet *net.IPNet
+	var isIPv4 bool
+
+	if isCIDR {
+		ip, ipNet, err := net.ParseCIDR(target)
+		if err != nil || ip == nil || ipNet == nil {
+			return "", 0, fmt.Errorf("无效的 CIDR 网段格式: %s", target)
+		}
+		bits := len(ipNet.Mask) * 8
+		canonicalTarget = ipNet.String()
+		parsedNet = ipNet
+		isIPv4 = bits == 32
+	} else {
+		ipStr := normalizeIPString(target)
+		if ipStr == "" {
+			return "", 0, fmt.Errorf("无效的 IP 地址格式: %s", target)
+		}
+		canonicalTarget = ipStr
+		parsedIP := net.ParseIP(ipStr)
+		isIPv4 = parsedIP != nil && parsedIP.To4() != nil
+	}
+
+	t.mu.Lock()
+	if isCIDR {
+		if nodeScope == "all" || nodeScope == "local" {
+			delete(t.manualBlockedCIDRs, canonicalTarget)
+		}
+		if nodeScope == "all" {
+			for nid := range t.nodeBlockedCIDRs {
+				delete(t.nodeBlockedCIDRs[nid], canonicalTarget)
+			}
+			for _, nodeMap := range t.recordsByNode {
+				for _, rec := range nodeMap {
+					if recIP := net.ParseIP(rec.ip); recIP != nil && parsedNet.Contains(recIP) && rec.status == "banned" {
+						rec.status = "observing"
+					}
+				}
+			}
+		} else {
+			if m, ok := t.nodeBlockedCIDRs[nodeScope]; ok {
+				delete(m, canonicalTarget)
+			}
+			if nodeMap, ok := t.recordsByNode[nodeScope]; ok {
+				for _, rec := range nodeMap {
+					if recIP := net.ParseIP(rec.ip); recIP != nil && parsedNet.Contains(recIP) && rec.status == "banned" {
+						rec.status = "observing"
+					}
+				}
+			}
+		}
+	} else {
+		if nodeScope == "all" {
+			for _, nodeMap := range t.recordsByNode {
+				if rec, ok := nodeMap[canonicalTarget]; ok && rec.status == "banned" {
+					rec.status = "observing"
+				}
+			}
+		} else if nodeMap, ok := t.recordsByNode[nodeScope]; ok {
+			if rec, ok := nodeMap[canonicalTarget]; ok && rec.status == "banned" {
+				rec.status = "observing"
+			}
+		}
+	}
+	t.dirty = true
+	t.SaveLocked(true)
+	t.mu.Unlock()
+
+	appliedNodes := 0
+	if applyLocal {
+		appliedNodes++
+		if isCIDR {
+			applyNFTUnblockCIDR(canonicalTarget, isIPv4)
+		} else {
+			if t.limiter != nil {
+				t.limiter.Unban(canonicalTarget)
+			}
+			applyNFTUnblockIP(canonicalTarget, isIPv4)
+		}
+	}
+
+	if len(remoteNodes) > 0 && fleetMgr != nil {
+		script := buildRemoteNFTUnblockScript(canonicalTarget, isCIDR, isIPv4)
+		if script != "" {
+			appliedNodes += runRemoteUnblockAcross(ctx, fleetMgr, remoteNodes, script)
+		}
+	}
+
+	return canonicalTarget, appliedNodes, nil
+}
+
+func runRemoteUnblockAcross(ctx context.Context, fleetMgr *fleet.Manager, remoteNodes []fleet.Node, script string) int {
+	runner := fleetMgr.Runner
+	if runner == nil {
+		runner = fleet.DefaultSSHRunner
+	}
+	var wg sync.WaitGroup
+	var remoteOK atomic.Int32
+	for _, rn := range remoteNodes {
+		node := rn
+		wg.Go(func() {
+			rCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+			defer cancel()
+			if _, _, err := runner(rCtx, node, script); err == nil {
+				remoteOK.Add(1)
+			}
+		})
+	}
+	wg.Wait()
+	return int(remoteOK.Load())
+}
+
+func buildRemoteNFTUnblockScript(canonicalTarget string, isCIDR, isIPv4 bool) string {
+	if isCIDR {
+		if isIPv4 {
+			return fmt.Sprintf("if command -v nft >/dev/null 2>&1; then nft delete element inet security blocklist_ip4_forever '{ %s }' 2>/dev/null || true; fi\n", canonicalTarget)
+		}
+		return ""
+	}
+	setName := "blocklist_ip6"
+	if isIPv4 {
+		setName = "blocklist_ip4"
+	}
+	return fmt.Sprintf("if command -v nft >/dev/null 2>&1; then nft delete element inet security %s '{ %s }' 2>/dev/null || true; fi\nif command -v fail2ban-client >/dev/null 2>&1; then fail2ban-client unban %s >/dev/null 2>&1 || true; fi\n", setName, canonicalTarget, canonicalTarget)
+}
+
+func buildRemoteNFTFlushScript() string {
+	return "if command -v nft >/dev/null 2>&1; then nft flush set inet security blocklist_ip4 2>/dev/null || true; nft flush set inet security blocklist_ip6 2>/dev/null || true; nft flush set inet security blocklist_ip4_forever 2>/dev/null || true; fi\n"
+}
+
+func applyNFTUnblockIP(ipStr string, isIPv4 bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := exec.LookPath("nft"); err == nil {
+		setName := "blocklist_ip6"
+		if isIPv4 {
+			setName = "blocklist_ip4"
+		}
+		elem := fmt.Sprintf("{ %s }", ipStr)
+		_ = exec.CommandContext(ctx, "nft", "delete", "element", "inet", "security", setName, elem).Run()
+	}
+	if _, err := exec.LookPath("fail2ban-client"); err == nil {
+		_ = exec.CommandContext(ctx, "fail2ban-client", "unban", ipStr).Run()
+	}
+}
+
+func applyNFTUnblockCIDR(cidr string, isIPv4 bool) {
+	if _, err := exec.LookPath("nft"); err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if isIPv4 {
+		elem := fmt.Sprintf("{ %s }", cidr)
+		_ = exec.CommandContext(ctx, "nft", "delete", "element", "inet", "security", "blocklist_ip4_forever", elem).Run()
+	}
+}
+
+func applyNFTFlushAll() {
+	if _, err := exec.LookPath("nft"); err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = exec.CommandContext(ctx, "nft", "flush", "set", "inet", "security", "blocklist_ip4").Run()
+	_ = exec.CommandContext(ctx, "nft", "flush", "set", "inet", "security", "blocklist_ip6").Run()
+	_ = exec.CommandContext(ctx, "nft", "flush", "set", "inet", "security", "blocklist_ip4_forever").Run()
+}
+
 // Snapshot 采集并生成默认视角（全集群/本机）的活跃嗅探态势快照 (用于 SSE 遥测与兼容调用)
 func (t *SniffTracker) Snapshot(ctx context.Context, activeProxyClientIPs ...string) SniffSummary {
 	// 在高频 SSE 调用中异步触发远程子节点采集，避免阻塞实时波形流
@@ -886,12 +1125,12 @@ func (t *SniffTracker) SnapshotForNode(ctx context.Context, nodeScope string, fo
 		t.MarkTrustedClientIPs(activeProxyClientIPs...)
 	}
 
-	// 1. 同步本机 Web IPLimiter 中的密码试探与封禁记录
+	// 1. 同步本机 Web IPLimiter 中的密码试探与封禁记录（跳过嗅探手动拉黑记录，避免污染原探测攻击向量）
 	if t.limiter != nil {
 		attempts := t.limiter.ListAllAttempts()
 		t.mu.Lock()
 		for _, att := range attempts {
-			if isIgnoredInternalIP(att.IP) {
+			if isIgnoredInternalIP(att.IP) || att.Source == BanSourceManualSniff {
 				continue
 			}
 			st := "observing"

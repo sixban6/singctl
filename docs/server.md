@@ -36,7 +36,7 @@ Caddy 负责统一监听 443 端口（TCP 与 UDP），基于 Layer 4 SNI 进行
 ```yaml
 server:
   node_tag: "los"                         # (可选) 节点地区/名称标识 (例如: los, sg, hk)，留空自动根据公网 IP 智能识别
-  node_domain: "node.yourdomain.com"      # 节点主域名（用于 Sub-Store 面板与 Hysteria 2，必填）
+  node_domain: "node.example.com"         # 节点主域名（用于 Sub-Store 面板与 Hysteria 2，必填）
   substore_domain: ""                     # (可选) Sub-Store 专属域名，留空默认使用 node_domain
   cf_dns_key: "your_cloudflare_api_token" # Cloudflare API Token，用于自动申请 TLS 证书（必填）
   sni: "swdist.apple.com"                 # TLS SNI 伪装域名，默认 swdist.apple.com（可选）
@@ -246,7 +246,13 @@ singctl term uninstall
 
 ### `singctl sr web` — 服务端专属隐蔽控制台与安全运维
 
-采用 **无特征 16 位随机安全路径** (`/sr/<random-token>/`) + Caddy 动态反向代理，默认公网端口严密关闭（仅监听 127.0.0.1:8092），全网爬虫探测一律返回 404 或静态伪装站点。
+采用 **无特征 24 位随机安全路径** (`/<24-hex-token>/`) + Caddy 动态反向代理，默认公网端口严密关闭（仅监听 `127.0.0.1:8092`），全网爬虫探测一律返回静态伪装站点。内置增强运维能力：
+
+- **精准封禁归因与全链路联动解封**：清晰区分「登录密码爆破（15 分钟）」与「嗅探雷达手动封禁（7 天）」，在安全页或嗅探雷达点击解封时同步清理内存限流器、嗅探状态与本机/子节点内核 `nftables` 黑名单（含单 IP 与 `/24` 网段）。
+- **TLS 证书健康度倒计时**：零网络开销读取本机 Caddy ACME 证书并展示剩余天数，到期不足 14 天或异常时主动预警。
+- **配置保存防断网与面板平滑自升级**：在线编辑 `sing-box` 配置强制先过 `sing-box check` 预检，重启异常自动回滚 `.bak`；服务页支持一键检测并平滑热升级 `SingCtl` 自身与 `SubHub`。
+- **订阅防盗刷告警与一键拉黑**：自动分析 24 小时订阅拉取的多国 IP 扩散与爬虫 UA 特征，支持一键轮换订阅密钥或直接封禁可疑 IP。
+- **AES-256-GCM 加密灾备快照**：使用 `PBKDF2-HMAC-SHA256`（21 万次迭代）+ `AES-256-GCM` 纯内存打包导出/恢复 `singctl.yaml`、`fleet.yaml`、`fleet_keys/*`、`sub-store` 与主控 SSH 密钥（落盘强制 `0600` 权限并自动对齐密钥路径）。
 
 ```bash
 # 启动 Web 管理面板
@@ -258,8 +264,8 @@ singctl sr web status
 # 停止 Web 管理面板
 singctl sr web stop
 
-# 解除被防爆破机制拦截的 IP (3次密码错误自动封禁15分钟)
-singctl sr web unban <IP地址>
+# 解除被防爆破或手动拦截的 IP
+singctl sr web unban 198.51.100.10
 
 # 一键解封所有受限 IP
 singctl sr web unban all

@@ -165,8 +165,29 @@ func CheckComponentUpdate(target string, cfg *config.Config) (*CheckUpdateResult
 			Message:        msg,
 		}, nil
 
+	case "singctl", "subhub", "substore":
+		curr := cleanVersion(GetInstalledSubhubVersion())
+		tag, err := fetcher.FetchLatestTag("sixban6/singctl")
+		latest := cleanVersion(tag)
+		if err != nil || latest == "" {
+			latest = curr
+		}
+		hasUp := IsNewerVersion(curr, latest)
+		msg := fmt.Sprintf("SingCtl 主程序与 SubHub 已是最新版本 (v%s)", curr)
+		if hasUp {
+			msg = fmt.Sprintf("发现 SingCtl 新版本: v%s (当前: v%s)", latest, curr)
+		}
+		return &CheckUpdateResult{
+			Component:      "singctl",
+			DisplayName:    "SingCtl 主程序 (WebUI + SubHub)",
+			CurrentVersion: curr,
+			LatestVersion:  latest,
+			HasUpdate:      hasUp,
+			Message:        msg,
+		}, nil
+
 	default:
-		return nil, fmt.Errorf("未知的服务组件: %s (支持: singbox, caddy, warp)", target)
+		return nil, fmt.Errorf("未知的服务组件: %s (支持: singctl, singbox, caddy, warp)", target)
 	}
 }
 

@@ -6,6 +6,7 @@ import {
   HealStatusReport,
   FleetHealReport,
   SniffSummary,
+  CertHealthItem,
 } from '../types';
 import { api } from '../api';
 import { useToast } from './Toast';
@@ -36,6 +37,9 @@ import {
   Ban,
   Search,
   Server,
+  Download,
+  Upload,
+  Globe,
 } from 'lucide-react';
 
 interface SecurityTabProps {
@@ -63,8 +67,19 @@ export const SecurityTab: React.FC<SecurityTabProps> = ({ status, onRefresh }) =
 
   // 防爆破封禁 IP 列表状态
   const [bans, setBans] = useState<BannedIP[]>([]);
+  const [banSourceFilter, setBanSourceFilter] = useState<'all' | 'login_fail' | 'manual_sniff'>('all');
   const [loadingBans, setLoadingBans] = useState(false);
   const [unbanningIP, setUnbanningIP] = useState<string | null>(null);
+
+  // TLS 证书巡检与主控加密灾备快照状态
+  const [certs, setCerts] = useState<CertHealthItem[]>(status?.certs || []);
+  const [loadingCerts, setLoadingCerts] = useState(false);
+  const [backupPassphrase, setBackupPassphrase] = useState('');
+  const [exportingBackup, setExportingBackup] = useState(false);
+  const [restorePassphrase, setRestorePassphrase] = useState('');
+  const [restoreFileContent, setRestoreFileContent] = useState('');
+  const [restoreFileName, setRestoreFileName] = useState('');
+  const [restoringBackup, setRestoringBackup] = useState(false);
 
   // 外部活跃嗅探与探测追踪状态 (支持集群分主机查看、搜索、排序与分页)
   const [sniffSummary, setSniffSummary] = useState<SniffSummary | null>(null);
@@ -82,6 +97,7 @@ export const SecurityTab: React.FC<SecurityTabProps> = ({ status, onRefresh }) =
 
   // 最近管理操作审计状态
   const [auditLogs, setAuditLogs] = useState<AuditLogItem[]>(status?.auditLogs || []);
+  const [auditCategoryFilter, setAuditCategoryFilter] = useState<string>('all');
   const [loadingAudit, setLoadingAudit] = useState(false);
 
   const fetchHealStatus = async (silent = false) => {
@@ -151,6 +167,92 @@ export const SecurityTab: React.FC<SecurityTabProps> = ({ status, onRefresh }) =
     }
   }, [status?.auditLogs]);
 
+  useEffect(() => {
+    if (status?.certs) {
+      setCerts(status.certs);
+    }
+  }, [status?.certs]);
+
+  const fetchCerts = async (force = true) => {
+    setLoadingCerts(true);
+    try {
+      const res = await api.getCerts(force);
+      setCerts(res.certs || []);
+    } catch (err: any) {
+      error(err.message || '读取证书状态失败');
+    } finally {
+      setLoadingCerts(false);
+    }
+  };
+
+  const handleExportBackup = async () => {
+    const pass = backupPassphrase.trim();
+    if (pass.length < 8) {
+      error('备份加密口令长度至少需要 8 位字符');
+      return;
+    }
+    setExportingBackup(true);
+    try {
+      const res = await api.exportBackup(pass);
+      const blob = new Blob([res.data], { type: 'application/json;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = res.filename || 'singctl-master-backup.enc.json';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      success(res.message || '加密灾备快照已下载');
+      setBackupPassphrase('');
+      await fetchAuditLogs();
+    } catch (err: any) {
+      error(err.message || '导出加密快照失败');
+    } finally {
+      setExportingBackup(false);
+    }
+  };
+
+  const handleSelectRestoreFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    setRestoreFileName(f.name);
+    const reader = new FileReader();
+    reader.onload = () => {
+      setRestoreFileContent(typeof reader.result === 'string' ? reader.result : '');
+    };
+    reader.readAsText(f);
+  };
+
+  const handleRestoreBackup = async () => {
+    const pass = restorePassphrase.trim();
+    if (pass.length < 8 || !restoreFileContent.trim()) {
+      error('请先选择加密快照文件并输入至少 8 位解密口令');
+      return;
+    }
+    if (
+      !window.confirm(
+        `确定要使用快照文件「${restoreFileName || '加密快照'}」恢复本机配置、舰队节点与聚合订阅吗？\n\n恢复前系统会自动以 0600 权限备份现有配置文件。`
+      )
+    ) {
+      return;
+    }
+    setRestoringBackup(true);
+    try {
+      const res = await api.restoreBackup(pass, restoreFileContent);
+      success(res.message || '灾备快照已成功恢复');
+      setRestorePassphrase('');
+      setRestoreFileContent('');
+      setRestoreFileName('');
+      onRefresh();
+      await fetchAuditLogs();
+    } catch (err: any) {
+      error(err.message || '恢复灾备快照失败');
+    } finally {
+      setRestoringBackup(false);
+    }
+  };
+
   const handleRunHeal = async (scope: 'local' | 'fleet') => {
     if (scope === 'fleet') {
       if (
@@ -201,12 +303,21 @@ export const SecurityTab: React.FC<SecurityTabProps> = ({ status, onRefresh }) =
   };
 
   const handleUnban = async (ip: string) => {
+    if (ip === 'all' && !window.confirm('确定要全链路解封所有当前拦截 IP 及手动封禁网段吗？')) {
+      return;
+    }
     setUnbanningIP(ip);
     try {
-      const res = await api.unban(ip);
-      success(res.message || `已成功解除 IP ${ip} 的封锁`);
+      const unbanScope = syncBlockCluster ? 'all' : selectedSniffNode;
+      const res = await api.unban(ip, unbanScope, selectedSniffNode);
+      success(res.message || `已成功解除 ${ip} 的封锁`);
+      if (res.summary) {
+        setSniffSummary(res.summary);
+      } else {
+        await fetchSniffers(selectedSniffNode, false);
+      }
       await fetchBans();
-      await fetchSniffers(selectedSniffNode, false);
+      await fetchAuditLogs();
     } catch (err: any) {
       error(err.message || '解封失败');
     } finally {
@@ -328,6 +439,35 @@ export const SecurityTab: React.FC<SecurityTabProps> = ({ status, onRefresh }) =
     sniffPageSize > 0
       ? filteredSniffSubnets.slice((safeSubnetPage - 1) * sniffPageSize, safeSubnetPage * sniffPageSize)
       : filteredSniffSubnets;
+
+  const loginBanCount = React.useMemo(
+    () => bans.filter((b) => (b.source || 'login_fail') !== 'manual_sniff').length,
+    [bans]
+  );
+  const manualBanCount = React.useMemo(
+    () => bans.filter((b) => b.source === 'manual_sniff').length,
+    [bans]
+  );
+  const filteredBans = React.useMemo(() => {
+    if (banSourceFilter === 'all') return bans;
+    if (banSourceFilter === 'manual_sniff') return bans.filter((b) => b.source === 'manual_sniff');
+    return bans.filter((b) => (b.source || 'login_fail') !== 'manual_sniff');
+  }, [bans, banSourceFilter]);
+
+  const inferAuditCategory = (log: AuditLogItem): string => {
+    if (log.category) return log.category;
+    const act = log.action || '';
+    if (act.includes('登录') || act.includes('密码') || act.includes('凭证') || act.includes('路径')) return 'login';
+    if (act.includes('拉黑') || act.includes('封禁') || act.includes('解封') || act.includes('自愈') || act.includes('抗探测') || act.includes('快照')) return 'security';
+    if (act.includes('舰队') || act.includes('子节点')) return 'fleet';
+    if (act.includes('订阅')) return 'subscription';
+    return 'service';
+  };
+
+  const filteredAuditLogs = React.useMemo(() => {
+    if (auditCategoryFilter === 'all') return auditLogs;
+    return auditLogs.filter((l) => inferAuditCategory(l) === auditCategoryFilter);
+  }, [auditLogs, auditCategoryFilter]);
 
   // 密码规则校验
   const hasMinLength = newPassword.length >= 8;
@@ -1225,7 +1365,16 @@ export const SecurityTab: React.FC<SecurityTabProps> = ({ status, onRefresh }) =
                             </td>
                             <td className="py-3 px-3 text-right whitespace-nowrap">
                               <div className="inline-flex items-center justify-end gap-1.5 flex-wrap">
-                                {item.status !== 'banned' && (
+                                {item.status === 'banned' ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleUnban(item.ip)}
+                                    disabled={unbanningIP === item.ip}
+                                    className="px-2.5 py-1 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/30 text-emerald-300 text-[11px] font-sans font-medium transition-all disabled:opacity-50"
+                                  >
+                                    {unbanningIP === item.ip ? '解封中...' : '解除封禁'}
+                                  </button>
+                                ) : (
                                   <button
                                     type="button"
                                     onClick={() => handleBlockSniffer(item.ip)}
@@ -1364,7 +1513,14 @@ export const SecurityTab: React.FC<SecurityTabProps> = ({ status, onRefresh }) =
                             </td>
                             <td className="py-3 px-3 text-right whitespace-nowrap">
                               {sub.status === 'banned' ? (
-                                <span className="text-slate-500 text-[11px] font-sans">已写入防火墙黑名单</span>
+                                <button
+                                  type="button"
+                                  onClick={() => handleUnban(sub.cidr)}
+                                  disabled={unbanningIP === sub.cidr}
+                                  className="px-3 py-1.5 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/30 text-emerald-300 text-xs font-sans font-medium transition-all disabled:opacity-50"
+                                >
+                                  {unbanningIP === sub.cidr ? '正在解封网段...' : `解除网段封禁`}
+                                </button>
                               ) : (
                                 <button
                                   type="button"
@@ -1454,20 +1610,25 @@ export const SecurityTab: React.FC<SecurityTabProps> = ({ status, onRefresh }) =
         </div>
       </div>
 
-      {/* ═══════════════════════ 4. IP Rate Limiting & Anti-Brute-Force Card (Mobile Cards + Desktop Table) ═══════════════════════ */}
+      {/* ═══════════════════════ 4. IP Rate Limiting & Manual Block Card (Mobile Cards + Desktop Table) ═══════════════════════ */}
       <div className="p-4 sm:p-6 rounded-2xl glass-card">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-800">
           <div>
             <div className="flex items-center gap-2 text-rose-400 text-xs font-semibold uppercase tracking-wider mb-1">
               <AlertOctagon className="w-3.5 h-3.5" />
-              <span>智能防御与防暴力破解</span>
+              <span>智能防御与封禁池明细</span>
             </div>
             <h3 className="text-lg sm:text-xl font-bold text-white tracking-tight flex flex-wrap items-center gap-2">
-              <span>登录失败 IP 拦截看板</span>
+              <span>安全封禁与防爆破看板</span>
               {bans.length > 0 ? (
-                <span className="px-2.5 py-0.5 rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/30 text-xs font-semibold">
-                  拦截中: {bans.length} 个 IP
-                </span>
+                <>
+                  <span className="px-2.5 py-0.5 rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/30 text-xs font-semibold">
+                    密码试错拦截: {loginBanCount}
+                  </span>
+                  <span className="px-2.5 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30 text-xs font-semibold">
+                    嗅探手动拉黑: {manualBanCount}
+                  </span>
+                </>
               ) : (
                 <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-xs font-semibold">
                   全绿无拦截
@@ -1475,11 +1636,33 @@ export const SecurityTab: React.FC<SecurityTabProps> = ({ status, onRefresh }) =
               )}
             </h3>
             <p className="text-xs text-slate-400 mt-0.5">
-              规则：10 分钟内累计输错密码 3 次，自动封锁源 IP 15 分钟并返回 HTTP 429。
+              清晰区分「后台输错密码 3 次自动封锁 15 分钟」与「嗅探雷达手动拉黑 7 天」；点击解封将全链路清理内核防火墙与限流表。
             </p>
           </div>
 
-          <div className="flex items-center gap-2 self-start sm:self-auto">
+          <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
+            {bans.length > 0 && (
+              <div className="inline-flex rounded-xl bg-slate-950 border border-slate-800 p-0.5 text-xs">
+                {[
+                  { id: 'all', label: `全部 (${bans.length})` },
+                  { id: 'login_fail', label: `密码试错 (${loginBanCount})` },
+                  { id: 'manual_sniff', label: `嗅探手动 (${manualBanCount})` },
+                ].map((tab) => (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    onClick={() => setBanSourceFilter(tab.id as any)}
+                    className={`px-2.5 py-1 rounded-lg transition-colors ${
+                      banSourceFilter === tab.id
+                        ? 'bg-slate-800 text-white font-semibold'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+            )}
             <button
               onClick={fetchBans}
               disabled={loadingBans}
@@ -1495,53 +1678,67 @@ export const SecurityTab: React.FC<SecurityTabProps> = ({ status, onRefresh }) =
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/30 text-xs text-rose-200 font-semibold transition-all disabled:opacity-50"
               >
                 <Unlock className="w-3.5 h-3.5" />
-                <span>解封全部</span>
+                <span>全链路解封全部</span>
               </button>
             )}
           </div>
         </div>
 
         <div className="mt-4">
-          {bans.length === 0 ? (
+          {filteredBans.length === 0 ? (
             <div className="py-8 text-center rounded-xl bg-slate-950/40 border border-slate-800/80">
               <ShieldCheck className="w-9 h-9 text-emerald-400 mx-auto mb-2 opacity-80" />
-              <div className="text-sm font-semibold text-slate-200">当前系统安全，未拦截任何异常 IP</div>
+              <div className="text-sm font-semibold text-slate-200">
+                {bans.length === 0 ? '当前系统安全，无活跃封禁 IP' : '当前筛选分类下暂无记录'}
+              </div>
               <p className="text-xs text-slate-500 mt-1 max-w-md mx-auto px-3">
-                实时守护运行中。发生恶意密码试探时，受限 IP 将在此处展示并支持一键解除。
+                实时守护运行中。无论是后台密码爆破拦截还是嗅探雷达手动拉黑，均在此处透明区分来源并支持全链路解封。
               </p>
             </div>
           ) : (
             <>
               {/* Mobile Stacked Cards (< 768px) */}
               <div className="md:hidden space-y-2.5">
-                {bans.map((b) => (
-                  <div
-                    key={b.ip}
-                    className="p-3.5 rounded-xl bg-slate-950/70 border border-slate-800 space-y-2 text-xs font-mono"
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-white font-semibold break-all">{b.ip}</span>
-                      <span className="px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 text-[10px] shrink-0">
-                        已封锁 (429)
-                      </span>
-                    </div>
-                    {(b.flag || b.geo || b.isp) && (
-                      <div className="text-[11px] text-slate-400 font-sans">
-                        {b.flag} {b.geo} {b.isp ? `· ${b.isp}` : ''}
+                {filteredBans.map((b) => {
+                  const isManual = b.source === 'manual_sniff';
+                  return (
+                    <div
+                      key={b.ip}
+                      className="p-3.5 rounded-xl bg-slate-950/70 border border-slate-800 space-y-2 text-xs font-mono"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-white font-semibold break-all">{b.ip}</span>
+                        <span
+                          className={`px-2 py-0.5 rounded text-[10px] font-sans font-semibold shrink-0 border ${
+                            isManual
+                              ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                              : 'bg-rose-500/20 text-rose-300 border-rose-500/30'
+                          }`}
+                        >
+                          {b.sourceLabel || (isManual ? '嗅探手动封禁' : '密码试错拦截')}
+                        </span>
                       </div>
-                    )}
-                    <div className="flex items-center justify-between pt-1">
-                      <span className="text-amber-300 text-[11px]">剩余约 {b.remainingMinutes} 分钟</span>
-                      <button
-                        onClick={() => handleUnban(b.ip)}
-                        disabled={unbanningIP === b.ip}
-                        className="px-3 py-1.5 rounded-lg bg-emerald-500/20 border border-emerald-500/30 text-emerald-300 text-xs font-sans font-medium"
-                      >
-                        {unbanningIP === b.ip ? '解封中...' : '立即解封'}
-                      </button>
+                      {(b.flag || b.geo || b.isp) && (
+                        <div className="text-[11px] text-slate-400 font-sans">
+                          {b.flag} {b.geo} {b.isp ? `· ${b.isp}` : ''}
+                        </div>
+                      )}
+                      {b.reason && <div className="text-[11px] text-slate-400 font-sans">原因: {b.reason}</div>}
+                      <div className="flex items-center justify-between pt-1">
+                        <span className="text-amber-300 text-[11px]">
+                          剩余 {b.remainingText || `约 ${b.remainingMinutes} 分钟`}
+                        </span>
+                        <button
+                          onClick={() => handleUnban(b.ip)}
+                          disabled={unbanningIP === b.ip}
+                          className="px-3 py-1.5 rounded-lg bg-emerald-500/20 border border-emerald-500/30 text-emerald-300 text-xs font-sans font-medium"
+                        >
+                          {unbanningIP === b.ip ? '解封中...' : '全链路解封'}
+                        </button>
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
 
               {/* Desktop Table (>= 768px) */}
@@ -1550,46 +1747,69 @@ export const SecurityTab: React.FC<SecurityTabProps> = ({ status, onRefresh }) =
                   <thead>
                     <tr className="border-b border-slate-800 text-slate-400">
                       <th className="py-2.5 px-3">受限源 IP</th>
-                      <th className="py-2.5 px-3">状态</th>
-                      <th className="py-2.5 px-3">剩余封锁时间</th>
+                      <th className="py-2.5 px-3">封禁来源与原因</th>
+                      <th className="py-2.5 px-3">剩余时长 / 解封时间</th>
                       <th className="py-2.5 px-3 text-right">运维操作</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800/60">
-                    {bans.map((b) => (
-                      <tr key={b.ip} className="hover:bg-slate-900/40 transition-colors">
-                        <td className="py-3 px-3 text-white font-semibold">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse shrink-0"></span>
-                            <span>{b.ip}</span>
-                            {(b.flag || b.geo || b.isp) && (
-                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-slate-800/90 border border-slate-700/60 text-[10px] text-slate-300 font-sans font-normal">
-                                {b.flag && <span>{b.flag}</span>}
-                                {b.geo && <span>{b.geo}</span>}
-                                {b.isp && <span className="text-slate-500">· {b.isp}</span>}
+                    {filteredBans.map((b) => {
+                      const isManual = b.source === 'manual_sniff';
+                      return (
+                        <tr key={b.ip} className="hover:bg-slate-900/40 transition-colors">
+                          <td className="py-3 px-3 text-white font-semibold">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span
+                                className={`w-2 h-2 rounded-full shrink-0 ${
+                                  isManual ? 'bg-amber-400' : 'bg-rose-500 animate-pulse'
+                                }`}
+                              ></span>
+                              <span>{b.ip}</span>
+                              {(b.flag || b.geo || b.isp) && (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-slate-800/90 border border-slate-700/60 text-[10px] text-slate-300 font-sans font-normal">
+                                  {b.flag && <span>{b.flag}</span>}
+                                  {b.geo && <span>{b.geo}</span>}
+                                  {b.isp && <span className="text-slate-500">· {b.isp}</span>}
+                                </span>
+                              )}
+                            </div>
+                          </td>
+                          <td className="py-3 px-3 font-sans">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span
+                                className={`px-2 py-0.5 rounded-md text-[11px] font-semibold border ${
+                                  isManual
+                                    ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                                    : 'bg-rose-500/20 text-rose-300 border-rose-500/30'
+                                }`}
+                              >
+                                {b.sourceLabel || (isManual ? '嗅探手动封禁' : '密码试错拦截')}
                               </span>
+                              <span className="text-slate-400 text-xs">
+                                {b.reason || (isManual ? '嗅探雷达手动拉黑 (nftables + 429)' : '后台登录密码连续输错')}
+                              </span>
+                            </div>
+                          </td>
+                          <td className="py-3 px-3">
+                            <div className="text-amber-300 font-medium">
+                              {b.remainingText || `约 ${b.remainingMinutes} 分钟`}
+                            </div>
+                            {b.bannedUntil && (
+                              <div className="text-[11px] text-slate-500">至 {b.bannedUntil}</div>
                             )}
-                          </div>
-                        </td>
-                        <td className="py-3 px-3">
-                          <span className="px-2 py-0.5 rounded-md bg-rose-500/20 text-rose-300 border border-rose-500/30 text-[11px]">
-                            已封锁 (429)
-                          </span>
-                        </td>
-                        <td className="py-3 px-3 text-amber-300 font-medium">
-                          约 {b.remainingMinutes} 分钟 ({b.remainingSeconds} 秒)
-                        </td>
-                        <td className="py-3 px-3 text-right">
-                          <button
-                            onClick={() => handleUnban(b.ip)}
-                            disabled={unbanningIP === b.ip}
-                            className="px-3 py-1.5 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/30 text-emerald-300 text-xs font-sans font-medium transition-all disabled:opacity-50"
-                          >
-                            {unbanningIP === b.ip ? '正在解封...' : '立即解封'}
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
+                          </td>
+                          <td className="py-3 px-3 text-right">
+                            <button
+                              onClick={() => handleUnban(b.ip)}
+                              disabled={unbanningIP === b.ip}
+                              className="px-3 py-1.5 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/30 text-emerald-300 text-xs font-sans font-medium transition-all disabled:opacity-50"
+                            >
+                              {unbanningIP === b.ip ? '正在解封...' : '全链路解封'}
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -1598,7 +1818,163 @@ export const SecurityTab: React.FC<SecurityTabProps> = ({ status, onRefresh }) =
         </div>
       </div>
 
-      {/* ═══════════════════════ 5. Recent Management Operations Audit Card (Mobile Cards + Desktop Table) ═══════════════════════ */}
+      {/* ═══════════════════════ 5. TLS Certificate Health & Encrypted Master Backup Grid ═══════════════════════ */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+        {/* TLS Certificate Health Card */}
+        <div className="p-4 sm:p-6 rounded-2xl glass-card flex flex-col justify-between">
+          <div>
+            <div className="flex items-center justify-between gap-2 pb-4 border-b border-slate-800">
+              <div>
+                <div className="flex items-center gap-2 text-cyan-400 text-xs font-semibold uppercase tracking-wider mb-1">
+                  <Globe className="w-3.5 h-3.5" />
+                  <span>ACME 证书健康与续签预警</span>
+                </div>
+                <h3 className="text-lg font-bold text-white tracking-tight">TLS 证书到期监控</h3>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  直读本机 Caddy 证书链与回环握手状态，剩余不足 14 天自动高亮提醒
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => fetchCerts(true)}
+                disabled={loadingCerts}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-xs text-slate-300 transition-all shrink-0 disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${loadingCerts ? 'animate-spin' : ''}`} />
+                <span>立即巡检</span>
+              </button>
+            </div>
+
+            <div className="mt-4 space-y-2.5">
+              {certs.length === 0 ? (
+                <div className="p-5 text-center rounded-xl bg-slate-950/40 border border-slate-800/80 text-xs text-slate-400">
+                  暂未配置服务端域名或点击右上角「立即巡检」获取实时证书有效期
+                </div>
+              ) : (
+                certs.map((c) => {
+                  const statusBadge =
+                    c.status === 'healthy'
+                      ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/25'
+                      : c.status === 'expiring'
+                      ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                      : c.status === 'expired'
+                      ? 'bg-rose-500/20 text-rose-300 border-rose-500/35'
+                      : 'bg-slate-800 text-slate-400 border-slate-700';
+                  return (
+                    <div
+                      key={c.domain}
+                      className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800/80 space-y-1.5"
+                    >
+                      <div className="flex items-center justify-between gap-2 flex-wrap">
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono font-semibold text-xs text-white">{c.domain}</span>
+                          <span className="px-2 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] text-slate-400">
+                            {c.role}
+                          </span>
+                        </div>
+                        <span className={`px-2 py-0.5 rounded-md border text-[11px] font-mono font-semibold ${statusBadge}`}>
+                          {c.status === 'healthy'
+                            ? `有效 · 剩余 ${c.daysRemaining} 天`
+                            : c.status === 'expiring'
+                            ? `即将到期 · 剩 ${c.daysRemaining} 天`
+                            : c.status === 'expired'
+                            ? '已过期'
+                            : '未检出本地证书'}
+                        </span>
+                      </div>
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400">
+                        <span>签发机构: {c.issuer || '-'}</span>
+                        {c.notAfter && <span className="font-mono">到期: {c.notAfter}</span>}
+                      </div>
+                      {c.message && c.status !== 'healthy' && (
+                        <div className="text-[11px] text-amber-300">{c.message}</div>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Encrypted Disaster-Recovery Backup & Restore Card */}
+        <div className="p-4 sm:p-6 rounded-2xl glass-card flex flex-col justify-between">
+          <div>
+            <div className="pb-4 border-b border-slate-800">
+              <div className="flex items-center gap-2 text-emerald-400 text-xs font-semibold uppercase tracking-wider mb-1">
+                <Lock className="w-3.5 h-3.5" />
+                <span>AES-256-GCM 零明文落盘灾备</span>
+              </div>
+              <h3 className="text-lg font-bold text-white tracking-tight">主控与舰队加密快照备份 / 恢复</h3>
+              <p className="text-xs text-slate-400 mt-0.5">
+                一键加密打包主控配置、SubHub 全部订阅源、舰队节点清单与 SSH 管理私钥；换机时上传即可满血迁移
+              </p>
+            </div>
+
+            <div className="mt-4 space-y-3">
+              {/* Export Box */}
+              <div className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800/80 space-y-2.5">
+                <div className="text-xs font-semibold text-slate-200">1. 导出加密快照文件 (.enc.json)</div>
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <input
+                    type="password"
+                    value={backupPassphrase}
+                    onChange={(e) => setBackupPassphrase(e.target.value)}
+                    placeholder="设置加密口令 (至少 8 位字符，请牢记)"
+                    className="flex-1 bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-emerald-500 font-mono"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleExportBackup}
+                    disabled={exportingBackup || backupPassphrase.trim().length < 8}
+                    className="inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-slate-950 text-xs font-bold transition-all shrink-0 disabled:opacity-50"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>{exportingBackup ? '正在加密导出...' : '加密导出快照'}</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Restore Box */}
+              <div className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800/80 space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-semibold text-slate-200">2. 从加密快照恢复迁移</span>
+                  <label className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-[11px] text-slate-200 cursor-pointer transition-colors">
+                    <Upload className="w-3 h-3 text-sky-400" />
+                    <span>{restoreFileName ? `已选: ${restoreFileName}` : '选择 .enc.json 文件'}</span>
+                    <input
+                      type="file"
+                      accept=".json,application/json"
+                      onChange={handleSelectRestoreFile}
+                      className="hidden"
+                    />
+                  </label>
+                </div>
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <input
+                    type="password"
+                    value={restorePassphrase}
+                    onChange={(e) => setRestorePassphrase(e.target.value)}
+                    placeholder="输入导出时设置的解密口令"
+                    className="flex-1 bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-sky-500 font-mono"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleRestoreBackup}
+                    disabled={restoringBackup || !restoreFileContent || restorePassphrase.trim().length < 8}
+                    className="inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-xl bg-sky-500/20 hover:bg-sky-500/30 border border-sky-500/35 text-sky-200 text-xs font-semibold transition-all shrink-0 disabled:opacity-50"
+                  >
+                    <Upload className="w-3.5 h-3.5" />
+                    <span>{restoringBackup ? '正在解密恢复...' : '解密并恢复'}</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ═══════════════════════ 6. Recent Management Operations Audit Card (Mobile Cards + Desktop Table) ═══════════════════════ */}
       <div className="p-4 sm:p-6 rounded-2xl glass-card">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-800">
           <div>
@@ -1609,15 +1985,40 @@ export const SecurityTab: React.FC<SecurityTabProps> = ({ status, onRefresh }) =
             <h3 className="text-lg sm:text-xl font-bold text-white tracking-tight flex items-center gap-2">
               <span>最近管理操作</span>
               <span className="px-2.5 py-0.5 rounded-full bg-indigo-500/10 text-indigo-300 border border-indigo-500/20 text-xs font-semibold">
-                共 {auditLogs.length} 条记录
+                {auditCategoryFilter === 'all'
+                  ? `共 ${auditLogs.length} 条记录`
+                  : `筛选 ${filteredAuditLogs.length} / ${auditLogs.length} 条`}
               </span>
             </h3>
             <p className="text-xs text-slate-400 mt-0.5">
-              记录最近管理操作的时间、动作与来源 IP，绝不记录任何明文密码或会话秘钥。
+              保留最近 200 条关键管理操作的时间、动作与来源 IP，绝不记录任何明文密码或会话秘钥。
             </p>
           </div>
 
-          <div className="flex items-center gap-2 self-start sm:self-auto">
+          <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
+            <div className="flex flex-wrap gap-1 bg-slate-950 border border-slate-800 rounded-xl p-0.5 text-xs">
+              {[
+                { id: 'all', label: '全部' },
+                { id: 'login', label: '登录认证' },
+                { id: 'security', label: '安全封禁' },
+                { id: 'fleet', label: '舰队编排' },
+                { id: 'subscription', label: '订阅管理' },
+                { id: 'service', label: '服务运维' },
+              ].map((cat) => (
+                <button
+                  key={cat.id}
+                  type="button"
+                  onClick={() => setAuditCategoryFilter(cat.id)}
+                  className={`px-2 py-1 rounded-lg transition-colors ${
+                    auditCategoryFilter === cat.id
+                      ? 'bg-indigo-500/25 text-indigo-200 font-semibold'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  {cat.label}
+                </button>
+              ))}
+            </div>
             <button
               onClick={fetchAuditLogs}
               disabled={loadingAudit}
@@ -1630,16 +2031,16 @@ export const SecurityTab: React.FC<SecurityTabProps> = ({ status, onRefresh }) =
         </div>
 
         <div className="mt-4">
-          {auditLogs.length === 0 ? (
+          {filteredAuditLogs.length === 0 ? (
             <div className="py-8 text-center rounded-xl bg-slate-950/40 border border-slate-800/80">
               <ClipboardList className="w-9 h-9 text-slate-600 mx-auto mb-2 opacity-80" />
-              <div className="text-sm font-semibold text-slate-400">暂无管理操作记录</div>
+              <div className="text-sm font-semibold text-slate-400">暂无匹配的管理操作记录</div>
             </div>
           ) : (
             <>
               {/* Mobile Stacked Audit Cards (< 768px) */}
               <div className="md:hidden space-y-2 max-h-80 overflow-y-auto pr-1">
-                {auditLogs.map((log, idx) => (
+                {filteredAuditLogs.map((log, idx) => (
                   <div
                     key={`${log.time}-${idx}`}
                     className="p-3 rounded-xl bg-slate-950/60 border border-slate-800/80 space-y-1 text-xs"
@@ -1657,7 +2058,7 @@ export const SecurityTab: React.FC<SecurityTabProps> = ({ status, onRefresh }) =
               </div>
 
               {/* Desktop Audit Table (>= 768px) */}
-              <div className="hidden md:block overflow-x-auto max-h-80 overflow-y-auto">
+              <div className="hidden md:block overflow-x-auto max-h-96 overflow-y-auto">
                 <table className="w-full text-left text-xs font-mono">
                   <thead className="sticky top-0 bg-slate-900/90 backdrop-blur-md z-10">
                     <tr className="border-b border-slate-800 text-slate-400">
@@ -1667,7 +2068,7 @@ export const SecurityTab: React.FC<SecurityTabProps> = ({ status, onRefresh }) =
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800/60">
-                    {auditLogs.map((log, idx) => (
+                    {filteredAuditLogs.map((log, idx) => (
                       <tr key={`${log.time}-${idx}`} className="hover:bg-slate-900/40 transition-colors">
                         <td className="py-3 px-3 text-slate-400 whitespace-nowrap">{log.time}</td>
                         <td className="py-3 px-3 text-slate-200">
