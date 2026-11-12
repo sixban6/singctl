@@ -1258,3 +1258,84 @@ watchdog:
 		t.Fatalf("expected failover reset to clean defaults, got %+v", reloaded.Watchdog.Failover)
 	}
 }
+
+func TestSaveAndMigrateWarpRouting_NoStaleResidue(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "singctl.yaml")
+
+	initialYAML := `server:
+  node_domain: "node.example.com"
+  cf_dns_key: "cf-test-token"
+  warp_routing:
+    mode: "split"
+    presets:
+      reddit: false
+      missav: true
+    warp_domains:
+      - "custom.example.com"
+    warp_cidrs:
+      - "198.51.100.0/24"
+`
+	if err := os.WriteFile(cfgPath, []byte(initialYAML), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if loaded.Server.WarpRouting.IsPresetEnabled("reddit", true) {
+		t.Fatal("expected reddit preset=false to load cleanly")
+	}
+	if !loaded.Server.WarpRouting.IsPresetEnabled("missav", false) {
+		t.Fatal("expected missav preset=true to load cleanly")
+	}
+
+	// MigrateConfig 应完整保留 warp_routing
+	fullTpl, err := os.ReadFile("../configs/singctl.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := config.MigrateConfig(cfgPath, fullTpl); err != nil {
+		t.Fatalf("MigrateConfig failed: %v", err)
+	}
+	afterMigrate, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterMigrate.Server.WarpRouting.IsPresetEnabled("reddit", true) ||
+		!afterMigrate.Server.WarpRouting.IsPresetEnabled("missav", false) ||
+		len(afterMigrate.Server.WarpRouting.WarpDomains) != 1 {
+		t.Fatalf("MigrateConfig lost warp_routing state: %+v", afterMigrate.Server.WarpRouting)
+	}
+
+	// 清空 warp_domains 并恢复默认，验证 Save 后 YAML 无任何旧列表残留且保持 0600
+	afterMigrate.Server.WarpRouting = config.WarpRoutingConfig{}
+	if err := config.Save(cfgPath, afterMigrate); err != nil {
+		t.Fatalf("Save after reset failed: %v", err)
+	}
+	rawBytes, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(rawBytes), "custom.example.com") ||
+		strings.Contains(string(rawBytes), "\n  warp_routing:") ||
+		strings.Contains(string(rawBytes), "\n    warp_domains:") ||
+		strings.Contains(string(rawBytes), "\n    warp_cidrs:") {
+		t.Fatalf("expected cleared warp_routing entries not to leave stale YAML residue:\n%s", string(rawBytes))
+	}
+	reloaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reloaded.Server.WarpRouting.IsEmpty() {
+		t.Fatalf("expected reloaded WarpRouting to be empty, got %+v", reloaded.Server.WarpRouting)
+	}
+	fi, err := os.Stat(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0600 {
+		t.Fatalf("expected 0600 config permission, got %o", fi.Mode().Perm())
+	}
+}

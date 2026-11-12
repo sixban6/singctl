@@ -86,4 +86,10 @@ var ServerConfigYAML = []byte(`server: # 服务器部署配置
   #   path: "" # (留空首次部署自动生成随机安全路径如 /sr/k9X2Mn8Pq4Rw7T1Z)
   #   username: "singctl"
   #   password: "" # (留空首次部署自动生成高强度随机密码)
+  # warp_routing: # (可选) 服务端 WARP 智能分流策略 (可在 WebUI WARP 分流中心可视化管理)
+  #   mode: "split" # split | global_warp | bypass
+  #   presets:
+  #     reddit: true
+  #   warp_domains: ["example.com"]
+  #   warp_cidrs: ["198.51.100.0/24"]
 `)

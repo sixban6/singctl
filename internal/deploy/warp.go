@@ -296,6 +296,140 @@ func IsWarpTunnelHealthy(timeout time.Duration) bool {
 	return strings.Contains(trace, "warp=on") || strings.Contains(trace, "warp=plus")
 }
 
+// FetchWarpExitInfo 通过本地 SOCKS5 (127.0.0.1:40000) 查询当前 WARP 出口 IP、地区代码及 warp 状态
+func FetchWarpExitInfo(timeout time.Duration) (ip, loc, warpState string, ok bool) {
+	if timeout <= 0 {
+		timeout = 3 * time.Second
+	}
+	proxyURL, err := url.Parse("socks5://127.0.0.1:40000")
+	if err != nil {
+		return "", "", "", false
+	}
+	client := &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(proxyURL),
+		},
+	}
+	resp, err := client.Get("https://cloudflare.com/cdn-cgi/trace")
+	if err != nil {
+		return "", "", "", false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", "", "", false
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if err != nil {
+		return "", "", "", false
+	}
+	for line := range strings.SplitSeq(string(body), "\n") {
+		k, v, found := strings.Cut(line, "=")
+		if !found {
+			continue
+		}
+		k = strings.TrimSpace(k)
+		v = strings.TrimSpace(v)
+		switch k {
+		case "ip":
+			ip = v
+		case "loc":
+			loc = v
+		case "warp":
+			warpState = v
+		}
+	}
+	ok = warpState == "on" || warpState == "plus"
+	return ip, loc, warpState, ok
+}
+
+// RotateWarpIdentity 重新注册 Cloudflare WARP 设备密钥并热切换本地 wireproxy 出口 IP（带 0600 备份与失败自动回滚）
+func RotateWarpIdentity() (newIP, newLoc string, err error) {
+	const primaryConf = "/etc/wireproxy/wireproxy.conf"
+	const compatConf = "/etc/wireguard/proxy.conf"
+
+	oldPrimary, errPrimary := os.ReadFile(primaryConf)
+	if errPrimary != nil {
+		return "", "", fmt.Errorf("未检测到已部署的 WARP 配置 (%s): %w", primaryConf, errPrimary)
+	}
+	oldCompat, errCompat := os.ReadFile(compatConf)
+
+	// 1. 以 0600 备份现网 wireproxy 配置
+	bakPath := fmt.Sprintf("%s.%d.bak", primaryConf, time.Now().UnixNano())
+	_ = os.WriteFile(bakPath, oldPrimary, 0600)
+	_ = os.Chmod(bakPath, 0600)
+
+	// 2. 生成新 X25519 密钥对并向 Cloudflare 注册新身份
+	privKey, pubKey, kErr := GenerateWireguardKeypair()
+	if kErr != nil {
+		return "", "", fmt.Errorf("生成 WireGuard 密钥对失败: %w", kErr)
+	}
+	reg, rErr := registerCloudflareWarp(pubKey)
+	if rErr != nil {
+		return "", "", fmt.Errorf("注册 Cloudflare WARP 新身份失败: %w", rErr)
+	}
+
+	v4Addr := reg.Config.Interface.Addresses.V4
+	if !strings.Contains(v4Addr, "/") && v4Addr != "" {
+		v4Addr += "/32"
+	}
+	v6Addr := reg.Config.Interface.Addresses.V6
+	if !strings.Contains(v6Addr, "/") && v6Addr != "" {
+		v6Addr += "/128"
+	}
+	addressLine := v4Addr
+	if v6Addr != "" {
+		if addressLine != "" {
+			addressLine += ", " + v6Addr
+		} else {
+			addressLine = v6Addr
+		}
+	}
+	if addressLine == "" {
+		addressLine = "172.16.0.2/32"
+	}
+	peerPubKey := "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
+	if len(reg.Config.Peers) > 0 && reg.Config.Peers[0].PublicKey != "" {
+		peerPubKey = reg.Config.Peers[0].PublicKey
+	}
+
+	freshConf := BuildWireproxyConfig(addressLine, privKey, peerPubKey, hasGlobalIPv6())
+
+	rollback := func() {
+		_ = writeFileAtomic0600(primaryConf, oldPrimary)
+		if errCompat == nil {
+			_ = writeFileAtomic0600(compatConf, oldCompat)
+		}
+		_ = runCmd("systemctl", "restart", "wireproxy")
+	}
+
+	// 3. 以 0600 原子写入新配置并重启 wireproxy
+	if err := writeFileAtomic0600(primaryConf, []byte(freshConf)); err != nil {
+		return "", "", fmt.Errorf("写入新 wireproxy 配置失败: %w", err)
+	}
+	if errCompat == nil {
+		_ = writeFileAtomic0600(compatConf, []byte(freshConf))
+	}
+
+	if err := runCmd("systemctl", "restart", "wireproxy"); err != nil {
+		rollback()
+		return "", "", fmt.Errorf("重启 wireproxy 失败，已回滚原配置: %w", err)
+	}
+
+	// 4. 轮询验证新隧道握手就绪并读取新出口 IP
+	for range 6 {
+		time.Sleep(800 * time.Millisecond)
+		if isWarpSocksRunning() {
+			if ip, loc, _, ok := FetchWarpExitInfo(3 * time.Second); ok && ip != "" {
+				return ip, loc, nil
+			}
+		}
+	}
+
+	rollback()
+	return "", "", fmt.Errorf("新 WARP 身份握手超时，已自动回滚保留原有出口隧道")
+}
+
 // NormalizeWireproxyConfigContent 修正既有 wireproxy 配置中的 ResolveStrategy=auto、域名 Endpoint 与会导致启动抢跑死锁的 PersistentKeepalive
 func NormalizeWireproxyConfigContent(content string) (string, bool) {
 	lines := strings.Split(content, "\n")

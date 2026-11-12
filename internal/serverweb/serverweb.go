@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"singctl/internal/config"
+	"singctl/internal/deploy"
 	"singctl/internal/fleet"
 	"singctl/internal/logger"
 	"singctl/internal/subhub"
@@ -56,6 +57,13 @@ type Server struct {
 	passwordPendingAck bool
 	gatewayToken       string
 	cliToken           string
+	warpMu             sync.Mutex
+	warpDeps           *deploy.LiveWarpApplyDeps
+	warpDaemonProbe    func(forceRefresh bool) WarpDaemonStatus
+	warpCacheMu        sync.Mutex
+	warpCachedIP       string
+	warpCachedLoc      string
+	warpCachedAt       time.Time
 }
 
 type SessionRecord struct {
@@ -190,6 +198,11 @@ func (s *Server) registerRoutes() {
 	s.Mux.HandleFunc("POST /api/server/net/return", s.guard(s.handleNetReturn))
 	s.Mux.HandleFunc("POST /api/server/bbr", s.guard(s.handleEnableBBR))
 	s.Mux.HandleFunc("GET /api/server/warp/diagnose", s.guard(s.handleWarpDiagnose))
+	s.Mux.HandleFunc("GET /api/server/warp/routing", s.guard(s.handleGetWarpRouting))
+	s.Mux.HandleFunc("PUT /api/server/warp/routing", s.guard(s.handleUpdateWarpRouting))
+	s.Mux.HandleFunc("POST /api/server/warp/quick-switch", s.guard(s.handleQuickSwitchWarp))
+	s.Mux.HandleFunc("GET /api/server/warp/connections", s.guard(s.handleGetWarpConnections))
+	s.Mux.HandleFunc("POST /api/server/warp/action", s.guard(s.handleWarpAction))
 	s.Mux.HandleFunc("POST /api/server/path/regenerate", s.guard(s.handleRegeneratePath))
 	s.Mux.HandleFunc("POST /api/server/mask-site/regenerate", s.guard(s.handleRegenerateMaskSite))
 	s.Mux.HandleFunc("PUT /api/server/sni", s.guard(s.handleUpdateSNI))

@@ -12,6 +12,7 @@ import { LogsTab } from './components/LogsTab';
 import { DiagnosticsTab } from './components/DiagnosticsTab';
 import { SecurityTab } from './components/SecurityTab';
 import { CamouflageTab } from './components/CamouflageTab';
+import { WarpTab } from './components/WarpTab';
 import { LoginModal } from './components/LoginModal';
 import { Activity } from 'lucide-react';
 
@@ -191,8 +192,11 @@ const DashboardContent: React.FC = () => {
               status={status}
               onRefresh={() => fetchStatus(false)}
               onOpenLogs={handleOpenLogsForService}
+              onNavigate={setCurrentTab}
             />
           )}
+
+          {currentTab === 'warp' && <WarpTab onRefreshParent={() => fetchStatus(false)} />}
 
           {currentTab === 'subscriptions' && <SubscriptionsTab />}
 
@@ -200,7 +204,7 @@ const DashboardContent: React.FC = () => {
 
           {currentTab === 'logs' && <LogsTab initialService={logService} />}
 
-          {currentTab === 'diagnostics' && <DiagnosticsTab status={status} />}
+          {currentTab === 'diagnostics' && <DiagnosticsTab status={status} onNavigate={setCurrentTab} />}
 
           {currentTab === 'camouflage' && <CamouflageTab status={status} />}
 

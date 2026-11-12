@@ -28,6 +28,12 @@ import {
   CamouflageDefaultsResponse,
   CamouflageReport,
   SniffSummary,
+  WarpRoutingConfig,
+  WarpRoutingStatusResponse,
+  WarpRoutingUpdateResponse,
+  WarpQuickSwitchResponse,
+  WarpConnectionsResponse,
+  WarpDaemonStatus,
 } from './types';
 
 export const getBasePath = (): string => {
@@ -312,6 +318,32 @@ export const api = {
     request<CamouflageReport>('/api/server/camouflage/probe', {
       method: 'POST',
       body: JSON.stringify(input),
+    }),
+
+  getWarpRouting: (refresh = false) =>
+    request<WarpRoutingStatusResponse>(`/api/server/warp/routing${refresh ? '?refresh=1' : ''}`),
+
+  updateWarpRouting: (routing: WarpRoutingConfig) =>
+    request<WarpRoutingUpdateResponse>('/api/server/warp/routing', {
+      method: 'PUT',
+      body: JSON.stringify(routing),
+    }),
+
+  quickSwitchWarpTarget: (target: string, outbound: 'WARP' | 'DC') =>
+    request<WarpQuickSwitchResponse>('/api/server/warp/quick-switch', {
+      method: 'POST',
+      body: JSON.stringify({ target, outbound }),
+    }),
+
+  getWarpConnections: (query = '', outbound: 'all' | 'DC' | 'WARP' = 'all') =>
+    request<WarpConnectionsResponse>(
+      `/api/server/warp/connections?q=${encodeURIComponent(query)}&outbound=${encodeURIComponent(outbound)}`
+    ),
+
+  runWarpAction: (action: 'rekey' | 'ensure') =>
+    request<{ message: string; warpIp?: string; warpLoc?: string; daemon: WarpDaemonStatus }>('/api/server/warp/action', {
+      method: 'POST',
+      body: JSON.stringify({ action }),
     }),
 
   logout: () =>

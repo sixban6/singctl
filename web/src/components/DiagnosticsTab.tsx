@@ -2,13 +2,15 @@ import React, { useState } from 'react';
 import { WarpDiagnoseResponse, ServerStatusResponse, ReturnSummary, MediaUnlockReport, ExitProfile } from '../types';
 import { api } from '../api';
 import { useToast } from './Toast';
-import { Globe, Activity, RefreshCw, CheckCircle2, AlertTriangle, ArrowUpDown, ChevronDown, ChevronUp, Sparkles, Tv, Bot, Search, PlaySquare, ShieldCheck, Shield } from 'lucide-react';
+import { Globe, Activity, RefreshCw, CheckCircle2, AlertTriangle, ArrowUpDown, ChevronDown, ChevronUp, Sparkles, Tv, Bot, Search, PlaySquare, ShieldCheck, Shield, Split } from 'lucide-react';
+import { TabKey } from './Navigation';
 
 interface DiagnosticsTabProps {
   status: ServerStatusResponse | null;
+  onNavigate?: (tab: TabKey) => void;
 }
 
-export const DiagnosticsTab: React.FC<DiagnosticsTabProps> = ({ status }) => {
+export const DiagnosticsTab: React.FC<DiagnosticsTabProps> = ({ status, onNavigate }) => {
   const { success, error } = useToast();
   const [warpData, setWarpData] = useState<WarpDiagnoseResponse | null>(null);
   const [testingWarp, setTestingWarp] = useState(false);
@@ -392,9 +394,21 @@ export const DiagnosticsTab: React.FC<DiagnosticsTabProps> = ({ status }) => {
         {/* Unlock Results */}
         {unlockData ? (
           <div className="mt-5 space-y-4 animate-fade-in">
-            <div className="text-[11px] font-mono text-slate-400 flex items-center justify-between">
+            <div className="text-[11px] font-mono text-slate-400 flex flex-wrap items-center justify-between gap-2">
               <span>探测时间: {unlockData.testedAt}</span>
-              <span className="text-purple-300">双出口链路对比 (VPS 原生 vs WARP 分流)</span>
+              <div className="flex items-center gap-3">
+                <span className="text-purple-300">双出口链路对比 (VPS 原生 vs WARP 分流)</span>
+                {onNavigate && (
+                  <button
+                    type="button"
+                    onClick={() => onNavigate('warp')}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-amber-300 font-sans font-semibold transition-colors"
+                  >
+                    <Split className="w-3 h-3" />
+                    <span>前往 WARP 分流中心 →</span>
+                  </button>
+                )}
+              </div>
             </div>
 
             {/* 1. VPS 原生直连出口 */}

@@ -313,6 +313,7 @@ type ServerConfig struct {
 	CorsAllowedOrigins string            `yaml:"cors_allowed_origins,omitempty"`
 	WebTerminal        WebTerminalConfig `yaml:"web_terminal,omitempty"`
 	WebAdmin           WebAdminConfig    `yaml:"web_admin,omitempty"`
+	WarpRouting        WarpRoutingConfig `yaml:"warp_routing,omitempty"`
 }
 
 type WebAdminConfig struct {
@@ -942,6 +943,7 @@ var knownYAMLKeys = []string{
 	"cf_dns_key", "sni", "cors_allowed_origins",
 	"web_terminal", "mtls_ca", "ssh_tunnel_port", "ssh_tunnel_path", "ssh_port",
 	"web_admin", "enabled", "port", "path", "username", "password", "password_pending_ack",
+	"warp_routing", "mode", "presets", "warp_domains", "warp_cidrs", "direct_domains", "direct_cidrs",
 	"watchdog", "interval", "confirm_wait", "max_restarts", "sub_sync_interval",
 	"failover", "groups", "patrol_interval", "probe_timeout_ms", "confirm_retries", "failback_cooldown", "max_failback_delay_ms", "probe_urls",
 	"custom_rules", "block", "target", "source_ip", "reason", "ruleset_url", "rule_count", "preview", "created_at",
@@ -1424,6 +1426,10 @@ func MigrateConfig(configPath string, templateData []byte) error {
 		if hasYAMLKey(oldServer, "web_admin") && (oldCfg.Server.WebAdmin.Path != "" || oldCfg.Server.WebAdmin.Enabled || oldCfg.Server.WebAdmin.Password != "") {
 			setOrAddMapping(docNode, "server", "web_admin", oldCfg.Server.WebAdmin)
 		}
+
+		if hasYAMLKey(oldServer, "warp_routing") && !oldCfg.Server.WarpRouting.IsEmpty() {
+			setOrAddMapping(docNode, "server", "warp_routing", oldCfg.Server.WarpRouting)
+		}
 	}
 
 	// 6. Merge Watchdog
@@ -1653,6 +1659,40 @@ func filterRoleNodesBeforeMerge(dstRoot, srcRoot *yaml.Node, cfg *Config) {
 					newWD = append(newWD, wdMap.Content[j], wdMap.Content[j+1])
 				}
 				wdMap.Content = newWD
+				break
+			}
+		}
+	}
+
+	// 当 server.warp_routing 被修改、清空列表或恢复默认时，清理 dstDoc 与 srcDoc 中旧的 warp_routing 子节点以防止合并残留
+	if cfg != nil && !isClientDoc {
+		if cfg.Server.WarpRouting.IsEmpty() {
+			for i := 0; i+1 < len(srcDoc.Content); i += 2 {
+				if srcDoc.Content[i].Value == "server" && srcDoc.Content[i+1].Kind == yaml.MappingNode {
+					srvMap := srcDoc.Content[i+1]
+					newSrv := make([]*yaml.Node, 0, len(srvMap.Content))
+					for j := 0; j+1 < len(srvMap.Content); j += 2 {
+						if srvMap.Content[j].Value == "warp_routing" {
+							continue
+						}
+						newSrv = append(newSrv, srvMap.Content[j], srvMap.Content[j+1])
+					}
+					srvMap.Content = newSrv
+					break
+				}
+			}
+		}
+		for i := 0; i+1 < len(dstDoc.Content); i += 2 {
+			if dstDoc.Content[i].Value == "server" && dstDoc.Content[i+1].Kind == yaml.MappingNode {
+				srvMap := dstDoc.Content[i+1]
+				newSrv := make([]*yaml.Node, 0, len(srvMap.Content))
+				for j := 0; j+1 < len(srvMap.Content); j += 2 {
+					if srvMap.Content[j].Value == "warp_routing" {
+						continue
+					}
+					newSrv = append(newSrv, srvMap.Content[j], srvMap.Content[j+1])
+				}
+				srvMap.Content = newSrv
 				break
 			}
 		}

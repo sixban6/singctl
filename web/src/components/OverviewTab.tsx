@@ -63,6 +63,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ status, onRefresh, onN
   const [telemetryStreamLive, setTelemetryStreamLive] = useState(false);
   const [enablingTelemetry, setEnablingTelemetry] = useState(false);
   const [sniffTab, setSniffTab] = useState<'ip' | 'subnet' | 'country'>('ip');
+  const [switchingDomain, setSwitchingDomain] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -174,6 +175,22 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ status, onRefresh, onN
       error(err.message || '重启失败');
     } finally {
       setLoadingAction(null);
+    }
+  };
+
+  const handleQuickSwitchDomain = async (domain: string, currentOutbound: string) => {
+    if (!domain || domain === 'unknown') return;
+    const nextOutbound: 'WARP' | 'DC' = currentOutbound === 'WARP' ? 'DC' : 'WARP';
+    setSwitchingDomain(domain);
+    try {
+      const res = await api.quickSwitchWarpTarget(domain, nextOutbound);
+      success(res.message);
+      const snap = await api.getTelemetrySnapshot().catch(() => null);
+      if (snap) setTelemetry(snap);
+    } catch (err: any) {
+      error(err.message || '切换目标出口失败');
+    } finally {
+      setSwitchingDomain(null);
     }
   };
 
@@ -564,6 +581,14 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ status, onRefresh, onN
                   <Globe className="w-3.5 h-3.5 text-purple-400" />
                   活跃目标域名分流追踪 (Top {telemetry.topDomains?.length || 0})
                 </span>
+                <button
+                  type="button"
+                  onClick={() => onNavigate('warp')}
+                  className="text-[11px] font-medium text-amber-400 hover:text-amber-300 flex items-center gap-1 transition-colors"
+                >
+                  <span>WARP 分流中心</span>
+                  <ArrowRight className="w-3 h-3" />
+                </button>
               </div>
               {!telemetry.topDomains || telemetry.topDomains.length === 0 ? (
                 <div className="flex-1 flex items-center justify-center text-center text-xs text-slate-500 py-6 font-mono">
@@ -571,28 +596,47 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ status, onRefresh, onN
                 </div>
               ) : (
                 <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
-                  {telemetry.topDomains.map((d) => (
-                    <div
-                      key={d.domain}
-                      className="px-2.5 py-1.5 rounded-lg bg-slate-900/70 border border-slate-800/70 flex items-center justify-between gap-2 text-[11px] font-mono"
-                    >
-                      <span className="text-slate-200 truncate" title={d.domain}>
-                        {d.domain}
-                      </span>
-                      <div className="flex items-center gap-1.5 shrink-0">
-                        <span
-                          className={`px-1.5 py-0.5 rounded text-[10px] ${
-                            d.outbound === 'WARP'
-                              ? 'bg-amber-500/15 text-amber-300 border border-amber-500/25'
-                              : 'bg-sky-500/15 text-sky-300 border border-sky-500/25'
-                          }`}
-                        >
-                          {d.outbound === 'WARP' ? 'WARP' : '直出'}
+                  {telemetry.topDomains.map((d) => {
+                    const isWarp = d.outbound === 'WARP';
+                    const isBusy = switchingDomain === d.domain;
+                    return (
+                      <div
+                        key={d.domain}
+                        className="px-2.5 py-1.5 rounded-lg bg-slate-900/70 border border-slate-800/70 flex items-center justify-between gap-2 text-[11px] font-mono"
+                      >
+                        <span className="text-slate-200 truncate" title={d.domain}>
+                          {d.domain}
                         </span>
-                        <span className="text-slate-400">{formatBytes(d.bytes)}</span>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <span
+                            className={`px-1.5 py-0.5 rounded text-[10px] ${
+                              isWarp
+                                ? 'bg-amber-500/15 text-amber-300 border border-amber-500/25'
+                                : 'bg-sky-500/15 text-sky-300 border border-sky-500/25'
+                            }`}
+                          >
+                            {isWarp ? 'WARP' : '直出'}
+                          </span>
+                          <span className="text-slate-400">{formatBytes(d.bytes)}</span>
+                          {d.domain !== 'unknown' && (
+                            <button
+                              type="button"
+                              disabled={isBusy}
+                              onClick={() => handleQuickSwitchDomain(d.domain, d.outbound)}
+                              className={`px-1.5 py-0.5 rounded text-[10px] font-sans font-medium border transition-colors disabled:opacity-45 ${
+                                isWarp
+                                  ? 'bg-sky-500/10 hover:bg-sky-500/20 text-sky-300 border-sky-500/30'
+                                  : 'bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border-amber-500/30'
+                              }`}
+                              title={isWarp ? `将 ${d.domain} 切回原生直出` : `将 ${d.domain} 一键切走 WARP`}
+                            >
+                              {isBusy ? '切换中' : isWarp ? '↩ 切直出' : '⚡ 切 WARP'}
+                            </button>
+                          )}
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>

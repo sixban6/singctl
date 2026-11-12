@@ -47,6 +47,16 @@ server: # (可选) 服务器部署配置.当需要部署singbox服务端的时�
   #   path: "" # (留空首次部署自动生成随机安全路径如 /sr/k9X2Mn8Pq4Rw7T1Z)
   #   username: "singctl"
   #   password: "" # (留空首次部署自动生成高强度随机密码)
+  # warp_routing: # (可选) 服务端 WARP 智能分流策略 (可在 WebUI WARP 分流中心可视化管理)
+  #   mode: "split" # split (按需分流) | global_warp (全局 WARP) | bypass (全直出旁路)
+  #   presets:
+  #     reddit: true
+  #   warp_domains:
+  #     - "example.com"
+  #   warp_cidrs:
+  #     - "198.51.100.0/24"
+  #   direct_domains:
+  #     - "direct.example.com"
 
 watchdog:                                      # (可选) 看门狗守护进程配置 (singctl dm)
   interval: 180                                 # 检查间隔(秒), 默认 180

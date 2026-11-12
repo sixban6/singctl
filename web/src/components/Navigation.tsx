@@ -8,12 +8,13 @@ import {
   Globe,
   Shield,
   Radar,
+  Split,
   MoreHorizontal,
   X,
   Check,
 } from 'lucide-react';
 
-export type TabKey = 'overview' | 'services' | 'subscriptions' | 'fleet' | 'camouflage' | 'logs' | 'diagnostics' | 'security';
+export type TabKey = 'overview' | 'services' | 'warp' | 'subscriptions' | 'fleet' | 'camouflage' | 'logs' | 'diagnostics' | 'security';
 
 interface NavigationProps {
   currentTab: TabKey;
@@ -26,6 +27,7 @@ export const Navigation: React.FC<NavigationProps> = ({ currentTab, onChangeTab 
   const allTabs = [
     { key: 'overview' as TabKey, label: '总览与监控', shortLabel: '总览', icon: LayoutDashboard, desc: '实时流量遥测、健康评分与解锁看板' },
     { key: 'services' as TabKey, label: '核心服务管控', shortLabel: '服务', icon: Server, desc: '四核守护进程生命周期与配置在线编辑' },
+    { key: 'warp' as TabKey, label: 'WARP 智能分流', shortLabel: 'WARP 分流', icon: Split, desc: 'MissAV / AI / 流媒体秒切 WARP 与实时连接调度' },
     { key: 'subscriptions' as TabKey, label: '节点与订阅分发', shortLabel: '订阅', icon: Link2, desc: '全平台订阅链接、防盗刷审计与二维码' },
     { key: 'fleet' as TabKey, label: '全球节点舰队', shortLabel: '舰队', icon: Network, desc: '新机零配置开荒、全网体检与凭据换血' },
     { key: 'security' as TabKey, label: '安全与自愈中心', shortLabel: '安全自愈', icon: Shield, desc: '三层漏洞自动热修复、隐蔽入口与防爆破' },

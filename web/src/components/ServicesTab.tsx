@@ -2,15 +2,17 @@ import React, { useState } from 'react';
 import { ServerStatusResponse } from '../types';
 import { api } from '../api';
 import { useToast } from './Toast';
-import { Play, Square, RotateCw, FileText, Code2, ExternalLink, CheckCircle2, XCircle, X, Save, Edit3, ShieldCheck, Zap, RefreshCw, Sparkles, Globe, ArrowUpCircle } from 'lucide-react';
+import { Play, Square, RotateCw, FileText, Code2, ExternalLink, CheckCircle2, XCircle, X, Save, Edit3, ShieldCheck, Zap, RefreshCw, Sparkles, Globe, ArrowUpCircle, Split } from 'lucide-react';
+import { TabKey } from './Navigation';
 
 interface ServicesTabProps {
   status: ServerStatusResponse | null;
   onRefresh: () => void;
   onOpenLogs: (service: string) => void;
+  onNavigate?: (tab: TabKey) => void;
 }
 
-export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onOpenLogs }) => {
+export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onOpenLogs, onNavigate }) => {
   const { success, error } = useToast();
   const [loading, setLoading] = useState<string | null>(null);
   const [viewingConfig, setViewingConfig] = useState<{ service: string; path: string; content: string } | null>(null);
@@ -626,6 +628,16 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
               <FileText className="w-3.5 h-3.5 text-blue-400" />
               <span>实时日志</span>
             </button>
+            {onNavigate && (
+              <button
+                type="button"
+                onClick={() => onNavigate('warp')}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/35 text-xs font-semibold text-amber-300 transition-colors ml-auto"
+              >
+                <Split className="w-3.5 h-3.5" />
+                <span>配置分流规则 →</span>
+              </button>
+            )}
           </div>
         </div>
       </div>

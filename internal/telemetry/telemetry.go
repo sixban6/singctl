@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -17,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"singctl/internal/config"
 	"singctl/internal/constant"
 )
 
@@ -62,6 +64,20 @@ type DomainStat struct {
 	Rule        string `json:"rule,omitempty"`
 	Connections int    `json:"connections"`
 	Bytes       int64  `json:"bytes"`
+}
+
+// ActiveDestinationGroup 汇总远端目标站点（域名或目标 IP）的实时活跃连接详情，不包含客户端来源 IP。
+type ActiveDestinationGroup struct {
+	Target        string `json:"target"`
+	RootDomain    string `json:"rootDomain"`
+	IsIP          bool   `json:"isIP"`
+	Protocol      string `json:"protocol"`
+	Outbound      string `json:"outbound"` // "WARP" | "Direct"
+	Rule          string `json:"rule,omitempty"`
+	Connections   int    `json:"connections"`
+	UploadBytes   int64  `json:"uploadBytes"`
+	DownloadBytes int64  `json:"downloadBytes"`
+	TotalBytes    int64  `json:"totalBytes"`
 }
 
 // Snapshot represents a point-in-time server telemetry reading.
@@ -288,34 +304,9 @@ func (c *Collector) Collect(ctx context.Context) Snapshot {
 		return snap
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://%s/connections", addr), nil)
-	if err != nil {
-		snap.Message = err.Error()
-		return snap
-	}
-	if secret != "" {
-		req.Header.Set("Authorization", "Bearer "+secret)
-	}
-
-	client := c.HTTPClient
-	if client == nil {
-		client = &http.Client{Timeout: 1500 * time.Millisecond}
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		snap.Message = "无法连接 sing-box 遥测接口，请确认 sing-box 正在运行"
-		return snap
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		snap.Message = fmt.Sprintf("sing-box 遥测接口返回 HTTP %d", resp.StatusCode)
-		return snap
-	}
-
-	var payload clashConnectionsResp
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		snap.Message = "解析遥测数据失败"
+	payload, msgErr := c.fetchConnections(ctx, addr, secret)
+	if msgErr != nil {
+		snap.Message = msgErr.Error()
 		return snap
 	}
 
@@ -446,6 +437,173 @@ func (c *Collector) Collect(ctx context.Context) Snapshot {
 		}
 	}
 	return snap
+}
+
+func (c *Collector) httpClient() *http.Client {
+	if c != nil && c.HTTPClient != nil {
+		return c.HTTPClient
+	}
+	return &http.Client{Timeout: 1500 * time.Millisecond}
+}
+
+func (c *Collector) fetchConnections(ctx context.Context, addr, secret string) (clashConnectionsResp, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://%s/connections", addr), nil)
+	if err != nil {
+		return clashConnectionsResp{}, err
+	}
+	if secret != "" {
+		req.Header.Set("Authorization", "Bearer "+secret)
+	}
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return clashConnectionsResp{}, errors.New("无法连接 sing-box 遥测接口，请确认 sing-box 正在运行")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return clashConnectionsResp{}, fmt.Errorf("sing-box 遥测接口返回 HTTP %d", resp.StatusCode)
+	}
+	var payload clashConnectionsResp
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return clashConnectionsResp{}, errors.New("解析遥测数据失败")
+	}
+	return payload, nil
+}
+
+// GetActiveDestinations 查询本地 127.0.0.1:9099 遥测接口并返回按远端目标聚合的活跃连接列表（零客户端隐私 IP 暴露）。
+func (c *Collector) GetActiveDestinations(ctx context.Context, query, outboundFilter string) ([]ActiveDestinationGroup, error) {
+	addr, secret, enabled := ResolveConfig(c.ConfigPath)
+	if !enabled {
+		return []ActiveDestinationGroup{}, errors.New("当前 sing-box 配置尚未开启本地流量遥测 (127.0.0.1:9099)")
+	}
+	if !isLoopbackAddr(addr) {
+		return []ActiveDestinationGroup{}, errors.New("遥测地址非本地回环，已拒绝连接以保护安全")
+	}
+
+	payload, err := c.fetchConnections(ctx, addr, secret)
+	if err != nil {
+		return []ActiveDestinationGroup{}, err
+	}
+
+	q := strings.ToLower(strings.TrimSpace(query))
+	obFilter := strings.ToUpper(strings.TrimSpace(outboundFilter))
+	if obFilter == "DC" {
+		obFilter = "DIRECT"
+	}
+
+	groupMap := make(map[string]*ActiveDestinationGroup)
+	for _, conn := range payload.Connections {
+		host := strings.TrimSpace(conn.Metadata.Host)
+		dstIP := strings.TrimSpace(conn.Metadata.DestinationIP)
+		target := cmp.Or(host, dstIP, "unknown")
+		if target == "unknown" {
+			continue
+		}
+		outLabel := classifyOutbound(conn.Chains)
+		if obFilter != "" && obFilter != "ALL" && !strings.EqualFold(outLabel, obFilter) {
+			continue
+		}
+		root := config.ExtractRootDomain(target)
+		if q != "" &&
+			!strings.Contains(strings.ToLower(target), q) &&
+			!strings.Contains(strings.ToLower(root), q) &&
+			!strings.Contains(strings.ToLower(dstIP), q) &&
+			!strings.Contains(strings.ToLower(conn.Rule), q) {
+			continue
+		}
+
+		_, parseErr := netip.ParseAddr(target)
+		isIP := host == "" || parseErr == nil
+		proto := classifyProtocol(conn.Metadata.Type)
+		key := target + "|" + outLabel
+
+		if existing, ok := groupMap[key]; ok {
+			existing.Connections++
+			existing.UploadBytes += conn.Upload
+			existing.DownloadBytes += conn.Download
+			existing.TotalBytes += conn.Upload + conn.Download
+			if existing.Rule == "" && conn.Rule != "" {
+				existing.Rule = conn.Rule
+			}
+		} else {
+			groupMap[key] = &ActiveDestinationGroup{
+				Target:        target,
+				RootDomain:    cmp.Or(root, target),
+				IsIP:          isIP,
+				Protocol:      proto,
+				Outbound:      outLabel,
+				Rule:          conn.Rule,
+				Connections:   1,
+				UploadBytes:   conn.Upload,
+				DownloadBytes: conn.Download,
+				TotalBytes:    conn.Upload + conn.Download,
+			}
+		}
+	}
+
+	items := make([]ActiveDestinationGroup, 0, len(groupMap))
+	for _, g := range groupMap {
+		items = append(items, *g)
+	}
+	slices.SortFunc(items, func(a, b ActiveDestinationGroup) int {
+		if a.TotalBytes != b.TotalBytes {
+			return cmp.Compare(b.TotalBytes, a.TotalBytes)
+		}
+		if a.Connections != b.Connections {
+			return cmp.Compare(b.Connections, a.Connections)
+		}
+		return strings.Compare(a.Target, b.Target)
+	})
+	if len(items) > 100 {
+		items = items[:100]
+	}
+	return items, nil
+}
+
+// EvictMismatchedConnections 遍历当前活跃连接，对满足 matchFn 的存量长连接逐条调用 DELETE /connections/{id} 踢断，
+// 使 Hysteria2 / HTTP2 / QUIC 多路复用流在热重载后毫秒级切换至最新出站。
+func (c *Collector) EvictMismatchedConnections(ctx context.Context, matchFn func(host, dstIP, rule, currentOutbound string) bool) (int, error) {
+	if matchFn == nil {
+		return 0, nil
+	}
+	addr, secret, enabled := ResolveConfig(c.ConfigPath)
+	if !enabled || !isLoopbackAddr(addr) {
+		return 0, nil
+	}
+	payload, err := c.fetchConnections(ctx, addr, secret)
+	if err != nil {
+		return 0, err
+	}
+
+	evicted := 0
+	client := c.httpClient()
+	for _, conn := range payload.Connections {
+		if conn.ID == "" {
+			continue
+		}
+		host := strings.TrimSpace(conn.Metadata.Host)
+		dstIP := strings.TrimSpace(conn.Metadata.DestinationIP)
+		outLabel := classifyOutbound(conn.Chains)
+		if !matchFn(host, dstIP, conn.Rule, outLabel) {
+			continue
+		}
+
+		delCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		req, reqErr := http.NewRequestWithContext(delCtx, http.MethodDelete, fmt.Sprintf("http://%s/connections/%s", addr, conn.ID), nil)
+		if reqErr == nil {
+			if secret != "" {
+				req.Header.Set("Authorization", "Bearer "+secret)
+			}
+			resp, doErr := client.Do(req)
+			if doErr == nil {
+				_ = resp.Body.Close()
+				if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+					evicted++
+				}
+			}
+		}
+		cancel()
+	}
+	return evicted, nil
 }
 
 func classifyProtocol(metaType string) string {
