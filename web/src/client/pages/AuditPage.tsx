@@ -1181,7 +1181,7 @@ export const AuditPage: React.FC = () => {
               type="checkbox"
               checked={onlySuspect}
               onChange={(e) => setOnlySuspect(e.target.checked)}
-              className="accent-sky-500"
+              className="accent-emerald-500"
             />
             仅看关注/高危
           </label>
@@ -1191,7 +1191,7 @@ export const AuditPage: React.FC = () => {
               type="checkbox"
               checked={autoRefresh}
               onChange={(e) => setAutoRefresh(e.target.checked)}
-              className="accent-sky-500"
+              className="accent-emerald-500"
             />
             自动刷新 (5s)
           </label>
@@ -1201,7 +1201,7 @@ export const AuditPage: React.FC = () => {
               type="checkbox"
               checked={aiEnabled}
               onChange={(e) => handleToggleAI(e.target.checked)}
-              className="accent-sky-500"
+              className="accent-emerald-500"
             />
             AI 深度研判
           </label>
@@ -1471,7 +1471,7 @@ export const AuditPage: React.FC = () => {
       >
         <div className="space-y-4">
           {aiConfig.suggestedLanUrl && (
-            <div className="rounded-xl border border-sky-500/25 bg-sky-500/10 p-3 flex items-center justify-between gap-2">
+            <div className="rounded-xl border border-emerald-500/25 bg-emerald-500/10 p-3 flex items-center justify-between gap-2">
               <div className="text-xs text-secondary">
                 检测到局域网 Magpie 候选地址：
                 <span className="font-mono text-primary ml-1">{aiConfig.suggestedLanUrl}</span>

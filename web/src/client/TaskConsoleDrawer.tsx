@@ -39,9 +39,9 @@ export const TaskConsoleDrawer: React.FC<TaskConsoleDrawerProps> = ({
         <div className="flex items-center justify-between gap-3 px-4 py-2.5 border-b border-white/10 bg-[#0d121d]">
           <div className="flex items-center gap-2.5 min-w-0">
             {running ? (
-              <Loader2 className="w-4 h-4 animate-spin text-sky-400 shrink-0" />
+              <Loader2 className="w-4 h-4 animate-spin text-emerald-400 shrink-0" />
             ) : (
-              <Terminal className="w-4 h-4 text-sky-400 shrink-0" />
+              <Terminal className="w-4 h-4 text-emerald-400 shrink-0" />
             )}
             <span className="text-xs font-semibold text-white truncate">{title || '任务控制台'}</span>
             {cmd && (

@@ -22,7 +22,7 @@ export function SegmentedTabs<T extends string = string>({
 }: SegmentedTabsProps<T>) {
   return (
     <div
-      className={`inline-flex flex-wrap items-center gap-1 p-1 rounded-xl bg-surface2 border border-subtle ${className}`}
+      className={`inline-flex flex-wrap items-center gap-1 p-1 rounded-xl bg-slate-950/70 border border-slate-800/80 ${className}`}
       role="tablist"
     >
       {items.map((item) => {
@@ -34,17 +34,10 @@ export function SegmentedTabs<T extends string = string>({
             role="tab"
             aria-selected={active}
             onClick={() => onChange(item.key)}
-            style={
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-all whitespace-nowrap cursor-pointer ${
               active
-                ? {
-                    backgroundColor: 'var(--bg-surface-1)',
-                    color: 'var(--accent)',
-                    borderColor: 'var(--border-subtle)',
-                  }
-                : undefined
-            }
-            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-transparent transition-all whitespace-nowrap cursor-pointer ${
-              active ? 'shadow-sm font-semibold' : 'text-secondary hover:text-primary'
+                ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30 shadow-sm font-semibold'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/60 border-transparent'
             }`}
           >
             {item.icon && <span className="shrink-0 flex items-center">{item.icon}</span>}

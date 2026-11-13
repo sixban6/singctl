@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Share2, Flame } from 'lucide-react';
-import { Badge, Button, PageHeader, SectionCard } from '../../ui';
+import { Badge, Button, PageHeader, SectionCard, SegmentedTabs } from '../../ui';
 import { ClientStatusResponse } from '../types';
 
 export interface TailscalePageProps {
@@ -180,6 +180,66 @@ export const FirewallPage: React.FC<FirewallPageProps> = ({ status, busy, onActi
           )}
         </div>
       </SectionCard>
+    </div>
+  );
+};
+
+export interface NetworkHubPageProps {
+  status: ClientStatusResponse | null;
+  busy: boolean;
+  initialSub?: string;
+  onSubChange?: (sub: 'ts' | 'fw') => void;
+  onAction: (name: string, params?: Record<string, unknown>, confirmMsg?: string) => void;
+  onNavigate: (tab: string) => void;
+}
+
+export const NetworkHubPage: React.FC<NetworkHubPageProps> = ({
+  status,
+  busy,
+  initialSub,
+  onSubChange,
+  onAction,
+  onNavigate,
+}) => {
+  const [sub, setSub] = useState<'ts' | 'fw'>(initialSub === 'fw' ? 'fw' : 'ts');
+
+  useEffect(() => {
+    if (initialSub === 'fw' || initialSub === 'ts') {
+      setSub(initialSub);
+    }
+  }, [initialSub]);
+
+  const handleSelect = (next: 'ts' | 'fw') => {
+    setSub(next);
+    onSubChange?.(next);
+  };
+
+  return (
+    <div className="space-y-5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <SegmentedTabs
+          value={sub}
+          onChange={handleSelect}
+          items={[
+            {
+              key: 'ts',
+              label: 'Tailscale 异地组网',
+              icon: <Share2 className="w-3.5 h-3.5" />,
+            },
+            {
+              key: 'fw',
+              label: 'nftables 防火墙加固',
+              icon: <Flame className="w-3.5 h-3.5" />,
+            },
+          ]}
+        />
+      </div>
+
+      {sub === 'ts' ? (
+        <TailscalePage status={status} busy={busy} onAction={onAction} onNavigate={onNavigate} />
+      ) : (
+        <FirewallPage status={status} busy={busy} onAction={onAction} />
+      )}
     </div>
   );
 };

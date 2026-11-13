@@ -1,15 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import {
-  Zap,
-  PanelLeftClose,
-  PanelLeftOpen,
-  Search,
-  Sun,
-  Moon,
-  MoreHorizontal,
-  X,
-  Check,
-} from 'lucide-react';
+import { Activity, Search, MoreHorizontal, X, Check } from 'lucide-react';
 import { ThemeMode } from '../hooks/useTheme';
 import { CommandPalette, CommandItem } from './CommandPalette';
 
@@ -38,26 +28,11 @@ export interface AppShellProps<T extends string = string> {
   statusPill?: React.ReactNode;
   topbarActions?: React.ReactNode;
   banner?: React.ReactNode;
-  theme: ThemeMode;
-  onToggleTheme: () => void;
+  footerText?: string;
+  theme?: ThemeMode;
+  onToggleTheme?: () => void;
   extraCommandItems?: CommandItem[];
   children: React.ReactNode;
-}
-
-const SIDEBAR_STORAGE_KEY = 'sc-sidebar-collapsed';
-
-function readInitialCollapsed(): boolean {
-  try {
-    const saved = localStorage.getItem(SIDEBAR_STORAGE_KEY);
-    if (saved === '1') return true;
-    if (saved === '0') return false;
-  } catch {
-    // ignore
-  }
-  if (typeof window !== 'undefined') {
-    return window.innerWidth < 1280;
-  }
-  return false;
 }
 
 export function AppShell<T extends string = string>({
@@ -71,17 +46,17 @@ export function AppShell<T extends string = string>({
   statusPill,
   topbarActions,
   banner,
-  theme,
-  onToggleTheme,
+  footerText = 'SingCtl Client Gateway · 极简零外部依赖 · 单二进制内嵌静态控制台',
   extraCommandItems = [],
   children,
 }: AppShellProps<T>) {
-  const [collapsed, setCollapsed] = useState<boolean>(readInitialCollapsed);
   const [moreOpen, setMoreOpen] = useState(false);
   const [cmdOpen, setCmdOpen] = useState(false);
 
-  const flatItems = useMemo(() => groups.flatMap((g) => g.items.map((item) => ({ ...item, groupTitle: g.title }))), [groups]);
-  const activeItem = flatItems.find((i) => i.key === activeTab) || flatItems[0];
+  const flatItems = useMemo(
+    () => groups.flatMap((g) => g.items.map((item) => ({ ...item, groupTitle: g.title }))),
+    [groups],
+  );
 
   const { primaryMobile, overflowMobile } = useMemo(() => {
     if (mobilePrimaryKeys && mobilePrimaryKeys.length > 0) {
@@ -97,6 +72,7 @@ export function AppShell<T extends string = string>({
   }, [flatItems, mobilePrimaryKeys]);
 
   const activeOverflow = overflowMobile.find((i) => i.key === activeTab);
+  const isOverflowActive = Boolean(activeOverflow);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -108,18 +84,6 @@ export function AppShell<T extends string = string>({
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, []);
-
-  const toggleCollapsed = () => {
-    setCollapsed((prev) => {
-      const next = !prev;
-      try {
-        localStorage.setItem(SIDEBAR_STORAGE_KEY, next ? '1' : '0');
-      } catch {
-        // ignore
-      }
-      return next;
-    });
-  };
 
   const commandItems = useMemo<CommandItem[]>(() => {
     const navCommands: CommandItem[] = flatItems.map((item) => {
@@ -138,334 +102,238 @@ export function AppShell<T extends string = string>({
   }, [flatItems, extraCommandItems, onSelectTab]);
 
   return (
-    <div className="min-h-dvh flex bg-canvas text-primary">
-      {/* Desktop Collapsible Sidebar (>= 768px) */}
-      <aside
-        className={`hidden md:flex flex-col shrink-0 border-r border-subtle bg-surface1 sticky top-0 h-screen transition-[width] duration-200 z-30 ${
-          collapsed ? 'w-[68px]' : 'w-[232px]'
-        }`}
-      >
-        {/* Brand Row */}
-        <div
-          className={`h-14 flex items-center border-b border-subtle shrink-0 ${
-            collapsed ? 'justify-center px-2' : 'justify-between px-4'
-          }`}
-        >
-          <div className="flex items-center gap-2.5 min-w-0">
-            <div
-              className="w-8 h-8 rounded-xl flex items-center justify-center shrink-0 shadow-sm"
-              style={{ backgroundColor: 'var(--accent-soft)', color: 'var(--accent)' }}
-            >
-              <Zap className="w-4 h-4" />
-            </div>
-            {!collapsed && (
-              <div className="min-w-0">
-                <div className="flex items-center gap-1.5">
-                  <span className="text-sm font-bold tracking-tight text-primary truncate">{brandTitle}</span>
-                  {version && (
-                    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-surface2 text-secondary border border-subtle tnum">
-                      v{String(version).replace(/^v/, '')}
-                    </span>
-                  )}
-                </div>
-                {brandSubtitle && (
-                  <p className="text-[11px] font-mono text-muted truncate max-w-[140px]">{brandSubtitle}</p>
-                )}
-              </div>
-            )}
-          </div>
-          {!collapsed && (
-            <button
-              type="button"
-              onClick={toggleCollapsed}
-              title="收起侧边栏"
-              className="p-1.5 rounded-lg text-muted hover:text-primary hover:bg-surfaceHover transition-colors"
-            >
-              <PanelLeftClose className="w-4 h-4" />
-            </button>
-          )}
-        </div>
-
-        {/* Navigation Groups */}
-        <nav className="flex-1 overflow-y-auto px-2.5 py-3 space-y-4">
-          {groups.map((group) => (
-            <div key={group.title} className="space-y-1">
-              {!collapsed ? (
-                <div className="px-2.5 pb-1 text-[10px] font-semibold uppercase tracking-wider text-muted">
-                  {group.title}
-                </div>
-              ) : (
-                <div className="h-px bg-[var(--border-subtle)] mx-2 my-1.5" />
-              )}
-              {group.items.map((item) => {
-                const Icon = item.icon;
-                const active = activeTab === item.key;
-                return (
-                  <button
-                    key={item.key}
-                    type="button"
-                    title={collapsed ? `${item.label} · ${item.desc}` : undefined}
-                    onClick={() => onSelectTab(item.key)}
-                    style={
-                      active
-                        ? {
-                            backgroundColor: 'var(--accent-soft)',
-                            color: 'var(--accent)',
-                          }
-                        : undefined
-                    }
-                    className={`w-full flex items-center ${
-                      collapsed ? 'justify-center px-0 py-2.5' : 'justify-between px-2.5 py-2'
-                    } rounded-xl text-xs font-medium transition-colors cursor-pointer ${
-                      active ? 'font-semibold' : 'text-secondary hover:text-primary hover:bg-surfaceHover/70'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2.5 min-w-0">
-                      <Icon className="w-4 h-4 shrink-0" />
-                      {!collapsed && <span className="truncate">{item.label}</span>}
-                    </div>
-                    {!collapsed && item.badge}
-                  </button>
-                );
-              })}
-            </div>
-          ))}
-        </nav>
-
-        {/* Bottom Collapse Expand & Command Hint */}
-        <div className="p-2.5 border-t border-subtle space-y-1.5 shrink-0">
-          {collapsed ? (
-            <button
-              type="button"
-              onClick={toggleCollapsed}
-              title="展开侧边栏"
-              className="w-full flex items-center justify-center py-2 rounded-xl text-muted hover:text-primary hover:bg-surfaceHover transition-colors"
-            >
-              <PanelLeftOpen className="w-4 h-4" />
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={() => setCmdOpen(true)}
-              className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-xl bg-surface2 border border-subtle text-[11px] text-muted hover:text-primary hover:border-strong transition-colors"
-            >
-              <span className="flex items-center gap-1.5">
-                <Search className="w-3.5 h-3.5" />
-                <span>快速跳转 / 指令</span>
-              </span>
-              <kbd className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-surface1 border border-subtle">⌘K</kbd>
-            </button>
-          )}
-        </div>
-      </aside>
-
-      {/* Main Content Area */}
-      <div className="flex-1 min-w-0 flex flex-col">
-        {/* Compact Sticky Topbar */}
-        <header className="sticky top-0 z-30 h-14 border-b border-subtle bg-surface1/85 backdrop-blur-xl px-3.5 sm:px-6 flex items-center justify-between gap-2.5">
-          {/* Left: Mobile Brand OR Desktop Active Breadcrumb */}
-          <div className="flex items-center gap-2.5 min-w-0">
-            <div
-              className="md:hidden w-8 h-8 rounded-xl flex items-center justify-center shrink-0"
-              style={{ backgroundColor: 'var(--accent-soft)', color: 'var(--accent)' }}
-            >
-              <Zap className="w-4 h-4" />
+    <div className="min-h-dvh flex flex-col bg-[#080d1a] text-slate-100 animate-sc-in">
+      {/* Sticky Frosted Glass Header — 1:1 Aligned with Server Console */}
+      <header className="sticky top-0 z-40 w-full border-b border-slate-800/80 bg-slate-950/80 backdrop-blur-xl">
+        <div className="max-w-[1440px] mx-auto px-3.5 sm:px-6 lg:px-8 h-14 sm:h-16 flex items-center justify-between gap-2">
+          {/* Brand */}
+          <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
+            <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center shrink-0 glow-green">
+              <Activity className="w-4 h-4 sm:w-5 sm:h-5 text-emerald-400" />
             </div>
             <div className="min-w-0">
-              <div className="flex items-center gap-2 text-xs sm:text-sm font-semibold text-primary truncate">
-                <span className="md:hidden">{brandTitle}</span>
-                {activeItem && (
-                  <span className="hidden md:inline-flex items-center gap-1.5 text-secondary font-normal">
-                    <span>{activeItem.groupTitle}</span>
-                    <span className="text-muted">/</span>
-                    <span className="text-primary font-semibold">{activeItem.label}</span>
-                  </span>
-                )}
+              <div className="flex items-center gap-1.5 sm:gap-2">
+                <span className="font-bold text-sm sm:text-base tracking-tight text-white truncate">
+                  {brandTitle}
+                </span>
                 {version && (
-                  <span className="md:hidden text-[10px] font-mono px-1.5 py-0.5 rounded bg-surface2 text-secondary border border-subtle tnum">
-                    v{String(version).replace(/^v/, '')}
+                  <span className="text-[10px] sm:text-xs px-1.5 sm:px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono font-medium shrink-0">
+                    {version.startsWith('v') ? version : `v${version}`}
                   </span>
                 )}
               </div>
               {brandSubtitle && (
-                <p className="md:hidden text-[11px] font-mono text-muted truncate max-w-[160px]">{brandSubtitle}</p>
+                <p className="text-[11px] text-slate-400 font-mono truncate max-w-[180px] sm:max-w-xs">
+                  {brandSubtitle}
+                </p>
               )}
             </div>
           </div>
 
-          {/* Right Controls */}
-          <div className="flex items-center gap-2 shrink-0">
+          {/* Right Status Chips & Actions */}
+          <div className="flex items-center gap-2 sm:gap-2.5 shrink-0">
             {statusPill}
 
             <button
               type="button"
               onClick={() => setCmdOpen(true)}
-              title="快速指令面板 (Cmd/Ctrl + K)"
-              className="md:hidden p-2 rounded-lg bg-surface2 border border-subtle text-secondary hover:text-primary transition-colors"
+              title="快捷跳转与操作 (⌘K)"
+              className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-800 hover:border-emerald-500/30 text-xs text-slate-300 transition-colors cursor-pointer"
             >
-              <Search className="w-4 h-4" />
+              <Search className="w-3.5 h-3.5 text-emerald-400" />
+              <span className="hidden lg:inline text-slate-400">快捷指令</span>
+              <kbd className="text-[10px] font-mono text-slate-500 px-1 rounded bg-slate-950 border border-slate-800">
+                ⌘K
+              </kbd>
             </button>
 
             <button
               type="button"
-              onClick={onToggleTheme}
-              title={theme === 'dark' ? '切换浅色模式' : '切换暗色模式'}
-              className="p-2 rounded-lg bg-surface2 border border-subtle text-secondary hover:text-primary hover:border-strong transition-colors"
-              aria-label="切换明暗主题"
+              onClick={() => setCmdOpen(true)}
+              title="快捷跳转"
+              aria-label="快捷跳转"
+              className="sm:hidden p-1.5 rounded-lg bg-slate-900 border border-slate-800 text-slate-300"
             >
-              {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+              <Search className="w-3.5 h-3.5 text-emerald-400" />
             </button>
 
-            {topbarActions}
+            {topbarActions && (
+              <div className="flex items-center gap-1.5 sm:gap-2 pl-2 border-l border-slate-800">
+                {topbarActions}
+              </div>
+            )}
           </div>
-        </header>
+        </div>
+      </header>
 
+      {/* Main Container matching Server Console max-w-[1440px] */}
+      <main className="flex-1 max-w-[1440px] w-full mx-auto px-3.5 sm:px-6 lg:px-8 py-4 sm:py-6 pb-mobile-nav md:pb-8 space-y-5 sm:space-y-6">
         {banner}
 
-        <main className="flex-1 w-full max-w-[1480px] mx-auto px-3.5 sm:px-6 lg:px-8 py-4 sm:py-6 pb-mobile-nav md:pb-8 space-y-5 animate-sc-in">
-          {activeOverflow && (
-            <div
-              className="md:hidden flex items-center justify-between px-3.5 py-2 rounded-xl border text-xs"
-              style={{
-                backgroundColor: 'var(--accent-soft)',
-                borderColor: 'color-mix(in srgb, var(--accent) 25%, transparent)',
-                color: 'var(--accent)',
-              }}
-            >
-              <div className="flex items-center gap-2 font-medium">
-                <activeOverflow.icon className="w-4 h-4" />
-                <span>当前视图：{activeOverflow.label}</span>
-              </div>
-              <button type="button" onClick={() => setMoreOpen(true)} className="text-[11px] underline">
-                切换
-              </button>
-            </div>
-          )}
-
-          {children}
-        </main>
-      </div>
-
-      {/* Mobile Frosted Bottom Tab Bar (< 768px) */}
-      <nav
-        aria-label="移动端主导航"
-        className="md:hidden fixed bottom-0 left-0 right-0 z-40 border-t border-subtle bg-surface1/92 backdrop-blur-2xl pb-safe"
-      >
-        <div className="grid grid-cols-5 h-16 px-1">
-          {primaryMobile.map((item) => {
-            const Icon = item.icon;
-            const active = activeTab === item.key;
+        {/* Desktop & Tablet Horizontal Tab Strip (>= 768px) */}
+        <nav
+          aria-label="主导航"
+          className="hidden md:flex items-center gap-1.5 lg:gap-2 border-b border-slate-800/80 overflow-x-auto py-2 no-scrollbar"
+        >
+          {flatItems.map((tab) => {
+            const Icon = tab.icon;
+            const active = activeTab === tab.key;
             return (
               <button
-                key={item.key}
+                key={tab.key}
+                type="button"
+                onClick={() => onSelectTab(tab.key)}
+                className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs lg:text-sm font-medium whitespace-nowrap transition-all duration-150 cursor-pointer ${
+                  active
+                    ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/60 border border-transparent'
+                }`}
+              >
+                <Icon className={`w-4 h-4 ${active ? 'text-emerald-400' : 'text-slate-400'}`} />
+                <span>{tab.label}</span>
+                {tab.badge && <span className="ml-0.5 flex items-center">{tab.badge}</span>}
+              </button>
+            );
+          })}
+        </nav>
+
+        {/* Mobile Active Overflow Indicator (< 768px) */}
+        {activeOverflow && (
+          <div className="md:hidden flex items-center justify-between px-3.5 py-2 rounded-xl bg-emerald-500/10 border border-emerald-500/25 text-xs text-emerald-300">
+            <div className="flex items-center gap-2 font-medium">
+              <activeOverflow.icon className="w-4 h-4 text-emerald-400" />
+              <span>当前视图：{activeOverflow.label}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setMoreOpen(true)}
+              className="text-[11px] font-mono text-slate-300 underline cursor-pointer"
+            >
+              切换功能
+            </button>
+          </div>
+        )}
+
+        <div className="pt-1 sm:pt-2">{children}</div>
+      </main>
+
+      <footer className="hidden md:block border-t border-slate-900 py-5 text-center text-xs text-slate-600 font-mono">
+        {footerText}
+      </footer>
+
+      {/* Mobile Frosted-Glass Bottom Tab Bar (< 768px, iOS Safe-Area Adapted) */}
+      <nav
+        aria-label="移动端主导航"
+        className="md:hidden fixed bottom-0 left-0 right-0 z-40 border-t border-slate-800/90 bg-slate-950/90 backdrop-blur-2xl pb-safe"
+      >
+        <div className="grid grid-cols-5 h-16 px-1">
+          {primaryMobile.map((tab) => {
+            const Icon = tab.icon;
+            const active = activeTab === tab.key;
+            return (
+              <button
+                key={tab.key}
                 type="button"
                 onClick={() => {
                   setMoreOpen(false);
-                  onSelectTab(item.key);
+                  onSelectTab(tab.key);
                 }}
-                style={active ? { color: 'var(--accent)' } : undefined}
                 className={`flex flex-col items-center justify-center gap-1 rounded-xl transition-colors ${
-                  active ? '' : 'text-secondary'
+                  active ? 'text-emerald-400' : 'text-slate-400 active:text-slate-200'
                 }`}
               >
                 <div
-                  style={active ? { backgroundColor: 'var(--accent-soft)' } : undefined}
-                  className="px-3 py-1 rounded-full transition-colors"
+                  className={`px-3 py-1 rounded-full transition-colors relative ${
+                    active ? 'bg-emerald-500/15' : 'bg-transparent'
+                  }`}
                 >
                   <Icon className="w-4 h-4" />
                 </div>
-                <span className="text-[11px] font-medium leading-none">{item.shortLabel}</span>
+                <span className="text-[11px] font-medium leading-none">{tab.shortLabel}</span>
               </button>
             );
           })}
 
-          <button
-            type="button"
-            onClick={() => setMoreOpen((v) => !v)}
-            style={activeOverflow || moreOpen ? { color: 'var(--accent)' } : undefined}
-            className={`flex flex-col items-center justify-center gap-1 rounded-xl transition-colors ${
-              activeOverflow || moreOpen ? '' : 'text-secondary'
-            }`}
-          >
-            <div
-              style={activeOverflow || moreOpen ? { backgroundColor: 'var(--accent-soft)' } : undefined}
-              className="px-3 py-1 rounded-full transition-colors"
+          {overflowMobile.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setMoreOpen((v) => !v)}
+              className={`flex flex-col items-center justify-center gap-1 rounded-xl transition-colors ${
+                isOverflowActive || moreOpen ? 'text-emerald-400' : 'text-slate-400 active:text-slate-200'
+              }`}
             >
-              <MoreHorizontal className="w-4 h-4" />
-            </div>
-            <span className="text-[11px] font-medium leading-none">
-              {activeOverflow ? activeOverflow.shortLabel : '更多'}
-            </span>
-          </button>
+              <div
+                className={`px-3 py-1 rounded-full transition-colors ${
+                  isOverflowActive || moreOpen ? 'bg-emerald-500/15' : 'bg-transparent'
+                }`}
+              >
+                <MoreHorizontal className="w-4 h-4" />
+              </div>
+              <span className="text-[11px] font-medium leading-none">
+                {activeOverflow ? activeOverflow.shortLabel : '更多'}
+              </span>
+            </button>
+          )}
         </div>
       </nav>
 
       {/* Mobile Bottom Sheet for Overflow Tabs */}
       {moreOpen && (
         <div
-          className="md:hidden fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-end"
+          className="md:hidden fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-end"
           onClick={() => setMoreOpen(false)}
         >
           <div
-            className="w-full bg-surface1 border-t border-strong rounded-t-3xl p-5 pb-safe space-y-3 shadow-2xl max-h-[80vh] overflow-y-auto"
+            className="w-full bg-slate-900 border-t border-slate-800 rounded-t-3xl p-5 pb-safe space-y-3 shadow-2xl max-h-[82vh] overflow-y-auto"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="w-10 h-1 rounded-full bg-[var(--border-strong)] mx-auto mb-1" />
+            <div className="w-10 h-1 rounded-full bg-slate-700 mx-auto mb-1" />
             <div className="flex items-center justify-between">
-              <span className="text-sm font-semibold text-primary">全部功能模块</span>
+              <span className="text-sm font-bold text-white">更多网关管理与运维功能</span>
               <button
                 type="button"
                 onClick={() => setMoreOpen(false)}
-                className="p-1.5 rounded-lg bg-surface2 text-secondary hover:text-primary"
+                className="p-1.5 rounded-xl text-slate-400 hover:text-white bg-slate-800/70"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
-            <div className="space-y-3">
-              {groups.map((g) => (
-                <div key={g.title} className="space-y-1.5">
-                  <div className="text-[10px] font-semibold uppercase tracking-wider text-muted px-1">{g.title}</div>
-                  {g.items.map((item) => {
-                    const Icon = item.icon;
-                    const active = activeTab === item.key;
-                    return (
-                      <button
-                        key={item.key}
-                        type="button"
-                        onClick={() => {
-                          onSelectTab(item.key);
-                          setMoreOpen(false);
-                        }}
-                        style={
-                          active
-                            ? {
-                                backgroundColor: 'var(--accent-soft)',
-                                borderColor: 'color-mix(in srgb, var(--accent) 30%, transparent)',
-                              }
-                            : undefined
-                        }
-                        className={`w-full flex items-center justify-between p-3 rounded-2xl border transition-all text-left ${
-                          active ? 'text-primary' : 'bg-surface2 border-subtle text-secondary'
+
+            <div className="space-y-2 pt-1 pb-3">
+              {overflowMobile.map((tab) => {
+                const Icon = tab.icon;
+                const active = activeTab === tab.key;
+                return (
+                  <button
+                    key={tab.key}
+                    type="button"
+                    onClick={() => {
+                      onSelectTab(tab.key);
+                      setMoreOpen(false);
+                    }}
+                    className={`w-full flex items-center justify-between p-3.5 rounded-2xl border text-left transition-colors ${
+                      active
+                        ? 'bg-emerald-500/10 border-emerald-500/35 text-emerald-300'
+                        : 'bg-slate-950/70 border-slate-800 text-slate-200 active:bg-slate-800'
+                    }`}
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div
+                        className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
+                          active ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-900 text-slate-400'
                         }`}
                       >
-                        <div className="flex items-center gap-3 min-w-0">
-                          <div
-                            className="p-2 rounded-xl bg-surface1"
-                            style={active ? { color: 'var(--accent)' } : undefined}
-                          >
-                            <Icon className="w-4 h-4" />
-                          </div>
-                          <div className="min-w-0">
-                            <div className="text-sm font-semibold text-primary">{item.label}</div>
-                            <div className="text-[11px] text-secondary truncate">{item.desc}</div>
-                          </div>
-                        </div>
-                        {active && <Check className="w-4 h-4 shrink-0" style={{ color: 'var(--accent)' }} />}
-                      </button>
-                    );
-                  })}
-                </div>
-              ))}
+                        <Icon className="w-4 h-4" />
+                      </div>
+                      <div className="min-w-0">
+                        <div className="text-sm font-semibold truncate">{tab.label}</div>
+                        <div className="text-[11px] text-slate-400 mt-0.5 truncate">{tab.desc}</div>
+                      </div>
+                    </div>
+                    {active && <Check className="w-4 h-4 text-emerald-400 shrink-0" />}
+                  </button>
+                );
+              })}
             </div>
           </div>
         </div>

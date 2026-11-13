@@ -1,166 +1,175 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import {
-  Ban,
-  Check,
-  Copy,
-  Download,
-  Edit3,
-  ExternalLink,
-  Eye,
-  FileText,
-  Globe,
-  Link2,
-  Plus,
-  QrCode,
-  RefreshCw,
-  RotateCcw,
-  Server,
-  ShieldAlert,
-  ShieldCheck,
-  Trash2,
-} from 'lucide-react';
-import { api } from '../api';
-import {
-  SourceUpsertInput,
-  SubscriptionAccessLogItem,
-  SubscriptionPreviewResponse,
-  SubscriptionRiskSummary,
-  SubscriptionSourceItem,
   SubscriptionsResponse,
+  SubscriptionSourceItem,
+  SourceUpsertInput,
+  SubscriptionPreviewResponse,
+  SubscriptionAccessLogItem,
+  SubscriptionRiskSummary,
 } from '../types';
+import { api } from '../api';
+import { useToast } from './Toast';
 import {
-  Badge,
-  Button,
-  CardSkeleton,
-  ConfirmDialog,
-  DataColumn,
-  DataTable,
-  PageHeader,
-  QRCodeBox,
-  SectionCard,
-  SegmentedTabs,
-  SlideDrawer,
-  useToast,
-} from '../ui';
+  Copy,
+  QrCode,
+  Check,
+  Download,
+  Sparkles,
+  X,
+  RefreshCw,
+  Info,
+  Plus,
+  Trash2,
+  Edit3,
+  KeyRound,
+  FileCode2,
+  Globe,
+  Server,
+  Layers,
+  ShieldCheck,
+  ShieldAlert,
+  Ban,
+} from 'lucide-react';
+import QRCode from 'qrcode';
 
 const PREVIEW_TARGETS = [
-  { key: 'ClashMeta', label: 'Clash / Mihomo' },
-  { key: 'Sing-Box', label: 'Sing-Box 1.14' },
-  { key: 'Shadowrocket', label: 'Shadowrocket' },
+  { key: 'ClashMeta', label: 'Clash.Meta / Mihomo' },
+  { key: 'Sing-Box', label: 'Sing-box v1.14' },
+  { key: 'Shadowrocket', label: 'Base64 通用订阅' },
   { key: 'Surge', label: 'Surge' },
   { key: 'Loon', label: 'Loon' },
-  { key: 'plain', label: '明文 URI' },
-];
-
-const UA_PRESETS = [
-  { value: 'auto', label: '自动自适应探测 (推荐：v2rayNG → Shadowrocket → Mihomo)' },
-  { value: 'v2rayng', label: '强制伪装 v2rayNG' },
-  { value: 'shadowrocket', label: '强制伪装 Shadowrocket (iOS)' },
-  { value: 'clashmeta', label: '强制伪装 ClashMeta / Mihomo' },
-  { value: 'singbox', label: '强制伪装 Sing-Box (SFA)' },
-  { value: 'custom', label: '自定义 User-Agent 字符串…' },
-];
-
-const PROXY_MODE_OPTIONS = [
-  { value: 'auto', label: '自动回退 (直连失败时切换 WARP)' },
-  { value: 'direct', label: '仅直连拉取' },
-  { value: 'warp', label: '强制经由本机 WARP 拉取' },
+  { key: 'plain', label: '明文 URI 列表' },
 ];
 
 const formatEffectiveUA = (ua?: string): string => {
   if (!ua) return '';
-  const low = ua.toLowerCase();
-  if (low.includes('v2rayng')) return 'v2rayNG';
-  if (low.includes('shadowrocket')) return 'Shadowrocket';
-  if (low.includes('clash') || low.includes('mihomo')) return 'ClashMeta';
-  if (low.includes('sfa') || low.includes('sfi') || low.includes('sing-box')) return 'Sing-Box';
-  return ua.length > 20 ? `${ua.slice(0, 18)}…` : ua;
+  const lower = ua.toLowerCase();
+  if (lower.includes('v2rayng')) return 'v2rayNG';
+  if (lower.includes('shadowrocket')) return 'Shadowrocket';
+  if (lower.includes('clash') || lower.includes('mihomo')) return 'Clash.Meta';
+  if (lower.includes('sing-box') || lower.includes('sfa/') || lower.includes('sfi/')) return 'Sing-box';
+  return ua.length > 20 ? `${ua.slice(0, 20)}...` : ua;
 };
-
-type ConfirmState =
-  | { kind: 'rotateKey' }
-  | { kind: 'deleteSource'; item: SubscriptionSourceItem }
-  | { kind: 'clearAudit' }
-  | null;
 
 export const SubscriptionsTab: React.FC = () => {
   const { success, error } = useToast();
   const [data, setData] = useState<SubscriptionsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
-  const [qrModal, setQrModal] = useState<{ title: string; url: string } | null>(null);
+  const [qrModalURL, setQrModalURL] = useState<string | null>(null);
+  const qrCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
+  // Source CRUD modal state
   const [editingSource, setEditingSource] = useState<SourceUpsertInput | null>(null);
-  const [customUAInput, setCustomUAInput] = useState('');
   const [isAutoManagedEdit, setIsAutoManagedEdit] = useState(false);
   const [savingSource, setSavingSource] = useState(false);
   const [refreshingSource, setRefreshingSource] = useState<string | null>(null);
   const [rotatingKey, setRotatingKey] = useState(false);
 
-  const [showPreviewDrawer, setShowPreviewDrawer] = useState(false);
+  // Live conversion preview modal state
+  const [showPreviewModal, setShowPreviewModal] = useState(false);
   const [previewTarget, setPreviewTarget] = useState('ClashMeta');
   const [previewData, setPreviewData] = useState<SubscriptionPreviewResponse | null>(null);
   const [loadingPreview, setLoadingPreview] = useState(false);
 
+  // Subscription access audit state
   const [auditLogs, setAuditLogs] = useState<SubscriptionAccessLogItem[]>([]);
   const [riskSummary, setRiskSummary] = useState<SubscriptionRiskSummary | null>(null);
   const [bannedIps, setBannedIps] = useState<Set<string>>(new Set());
   const [blockingIP, setBlockingIP] = useState<string | null>(null);
   const [loadingAudit, setLoadingAudit] = useState(false);
   const [clearingAudit, setClearingAudit] = useState(false);
-  const [confirmAction, setConfirmAction] = useState<ConfirmState>(null);
 
-  const loadData = async (silent = false) => {
-    if (!silent) setLoading(true);
+  useEffect(() => {
+    loadData();
+    loadAuditLogs();
+  }, []);
+
+  const loadData = async () => {
+    setLoading(true);
     try {
       const res = await api.getSubscriptions();
       setData(res);
-    } catch (err: unknown) {
-      error(err instanceof Error ? err.message : '加载订阅配置失败');
+    } catch (err: any) {
+      error(err.message || '获取订阅信息失败');
     } finally {
-      if (!silent) setLoading(false);
+      setLoading(false);
     }
   };
 
-  const loadAuditLogs = async (silent = false) => {
-    if (!silent) setLoadingAudit(true);
+  const loadAuditLogs = async () => {
+    setLoadingAudit(true);
     try {
       const res = await api.getSubscriptionAuditLogs();
       setAuditLogs(res.logs || []);
       setRiskSummary(res.riskSummary || null);
       setBannedIps(new Set(res.bannedIps || []));
-    } catch (err: unknown) {
-      if (!silent) {
-        error(err instanceof Error ? err.message : '加载订阅审计记录失败');
-      }
+    } catch {
+      // non-fatal
     } finally {
-      if (!silent) setLoadingAudit(false);
+      setLoadingAudit(false);
     }
+  };
+
+  const handleBlockSubIP = async (ip: string) => {
+    const trimmed = ip.trim();
+    if (!trimmed || trimmed === '-') return;
+    setBlockingIP(trimmed);
+    try {
+      const res = await api.blockSniffer(trimmed, 'all', 'all');
+      success(res.message || `已全集群拉黑异常订阅拉取 IP: ${trimmed}`);
+      setBannedIps((prev) => new Set([...prev, trimmed]));
+    } catch (err: any) {
+      error(err.message || '拉黑 IP 失败');
+    } finally {
+      setBlockingIP(null);
+    }
+  };
+
+  const handleClearAuditLogs = async () => {
+    if (!window.confirm('确定要清空近期订阅拉取与拦截记录吗？')) return;
+    setClearingAudit(true);
+    try {
+      const res = await api.clearSubscriptionAuditLogs();
+      success(res.message || '订阅审计记录已清空');
+      setAuditLogs([]);
+      setRiskSummary(null);
+    } catch (err: any) {
+      error(err.message || '清空审计记录失败');
+    } finally {
+      setClearingAudit(false);
+    }
+  };
+
+  const copyText = (text: string, key: string) => {
+    navigator.clipboard.writeText(text);
+    setCopiedKey(key);
+    success('已复制到剪贴板');
+    setTimeout(() => setCopiedKey(null), 2000);
+  };
+
+  const showQRCode = (url: string) => {
+    setQrModalURL(url);
   };
 
   useEffect(() => {
-    void loadData();
-    void loadAuditLogs(true);
-  }, []);
-
-  const copyText = async (text: string, key: string) => {
-    if (!text) return;
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopiedKey(key);
-      success('已复制到剪贴板');
-      window.setTimeout(() => setCopiedKey((prev) => (prev === key ? null : prev)), 2000);
-    } catch {
-      error('复制失败，请手动复制');
+    if (qrModalURL && qrCanvasRef.current) {
+      QRCode.toCanvas(qrCanvasRef.current, qrModalURL, {
+        width: 256,
+        margin: 2,
+        color: {
+          dark: '#0f172a',
+          light: '#ffffff',
+        },
+      });
     }
-  };
+  }, [qrModalURL]);
 
   const openAddSourceModal = () => {
     setIsAutoManagedEdit(false);
-    setCustomUAInput('');
     setEditingSource({
       displayName: '',
-      source: 'remote',
+      source: 'local',
       url: '',
       content: '',
       remark: '',
@@ -171,18 +180,15 @@ export const SubscriptionsTab: React.FC = () => {
   };
 
   const openEditSourceModal = (item: SubscriptionSourceItem) => {
-    const rawUA = item.userAgent || 'auto';
-    const isPreset = ['auto', 'v2rayng', 'shadowrocket', 'clashmeta', 'singbox'].includes(rawUA);
-    setIsAutoManagedEdit(Boolean(item.autoManaged));
-    setCustomUAInput(isPreset ? '' : rawUA);
+    setIsAutoManagedEdit(item.autoManaged);
     setEditingSource({
       name: item.name,
       displayName: item.displayName,
       source: item.source,
-      url: item.url || '',
-      content: item.content || '',
-      remark: item.remark || '',
-      userAgent: isPreset ? rawUA : 'custom',
+      url: item.url,
+      content: item.content,
+      remark: item.remark,
+      userAgent: item.userAgent || 'auto',
       proxyMode: item.proxyMode || 'auto',
       enabled: item.enabled,
     });
@@ -191,36 +197,31 @@ export const SubscriptionsTab: React.FC = () => {
   const handleSaveSource = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingSource) return;
-
-    const ua =
-      editingSource.userAgent === 'custom'
-        ? customUAInput.trim() || 'auto'
-        : editingSource.userAgent || 'auto';
-
     setSavingSource(true);
     try {
-      const res = await api.upsertSubSource({
-        ...editingSource,
-        userAgent: ua,
-      });
+      const res = await api.upsertSubSource(editingSource);
       success(res.message || '订阅源已保存');
       setEditingSource(null);
-      await loadData(true);
-    } catch (err: unknown) {
-      error(err instanceof Error ? err.message : '保存订阅源失败');
+      await loadData();
+    } catch (err: any) {
+      error(err.message || '保存订阅源失败');
     } finally {
       setSavingSource(false);
     }
   };
 
   const handleRefreshSources = async (targetName?: string) => {
-    setRefreshingSource(targetName || '__all__');
+    const key = targetName || '__all__';
+    setRefreshingSource(key);
     try {
       const res = await api.refreshSubSources(targetName);
-      success(res.message || '订阅源已刷新');
-      await loadData(true);
-    } catch (err: unknown) {
-      error(err instanceof Error ? err.message : '刷新订阅源失败');
+      if (res.sources) {
+        setData((prev) => (prev ? { ...prev, sources: res.sources } : prev));
+      }
+      success(res.message || '远程订阅源已刷新');
+    } catch (err: any) {
+      error(err.message || '刷新远程订阅源失败');
+      await loadData();
     } finally {
       setRefreshingSource(null);
     }
@@ -235,71 +236,55 @@ export const SubscriptionsTab: React.FC = () => {
         url: item.url,
         content: item.content,
         remark: item.remark,
-        userAgent: item.userAgent || 'auto',
-        proxyMode: item.proxyMode || 'auto',
         enabled: !item.enabled,
       });
-      success(`${item.displayName} 已${item.enabled ? '停用' : '启用'}`);
-      await loadData(true);
-    } catch (err: unknown) {
-      error(err instanceof Error ? err.message : '切换状态失败');
+      success(item.enabled ? `已停用订阅源「${item.displayName}」` : `已启用订阅源「${item.displayName}」`);
+      await loadData();
+    } catch (err: any) {
+      error(err.message || '更新状态失败');
     }
   };
 
-  const executeConfirm = async () => {
-    if (!confirmAction) return;
-    if (confirmAction.kind === 'deleteSource') {
-      const { item } = confirmAction;
-      setConfirmAction(null);
-      try {
-        const res = await api.deleteSubSource(item.name);
-        success(res.message || '订阅源已移除');
-        await loadData(true);
-      } catch (err: unknown) {
-        error(err instanceof Error ? err.message : '删除订阅源失败');
-      }
+  const handleDeleteSource = async (item: SubscriptionSourceItem) => {
+    if (!window.confirm(`确定要从聚合节点池中移除「${item.displayName}」吗？`)) return;
+    try {
+      const res = await api.deleteSubSource(item.name);
+      success(res.message || '已删除订阅源');
+      await loadData();
+    } catch (err: any) {
+      error(err.message || '删除订阅源失败');
+    }
+  };
+
+  const handleRotateKey = async () => {
+    if (
+      !window.confirm(
+        '确定要轮换订阅访问密钥吗？\n\n轮换后，旧订阅链接将立即失效，所有手机/电脑客户端需重新复制或扫码导入新订阅地址。'
+      )
+    ) {
       return;
     }
-
-    if (confirmAction.kind === 'rotateKey') {
-      setConfirmAction(null);
-      setRotatingKey(true);
-      try {
-        const res = await api.rotateSubKey();
-        success(res.message || '订阅密钥已轮换');
-        await loadData(true);
-      } catch (err: unknown) {
-        error(err instanceof Error ? err.message : '轮换密钥失败');
-      } finally {
-        setRotatingKey(false);
-      }
-      return;
-    }
-
-    if (confirmAction.kind === 'clearAudit') {
-      setConfirmAction(null);
-      setClearingAudit(true);
-      try {
-        const res = await api.clearSubscriptionAuditLogs();
-        success(res.message || '订阅拉取记录已清空');
-        await loadAuditLogs(true);
-      } catch (err: unknown) {
-        error(err instanceof Error ? err.message : '清空审计记录失败');
-      } finally {
-        setClearingAudit(false);
-      }
+    setRotatingKey(true);
+    try {
+      const res = await api.rotateSubKey();
+      success(res.message || '订阅密钥已轮换');
+      await loadData();
+    } catch (err: any) {
+      error(err.message || '轮换订阅密钥失败');
+    } finally {
+      setRotatingKey(false);
     }
   };
 
   const fetchPreview = async (target: string) => {
     setPreviewTarget(target);
-    setShowPreviewDrawer(true);
+    setShowPreviewModal(true);
     setLoadingPreview(true);
     try {
       const res = await api.previewSubscription(target);
       setPreviewData(res);
-    } catch (err: unknown) {
-      error(err instanceof Error ? err.message : '生成实时预览失败');
+    } catch (err: any) {
+      error(err.message || '生成预览失败');
     } finally {
       setLoadingPreview(false);
     }
@@ -307,386 +292,288 @@ export const SubscriptionsTab: React.FC = () => {
 
   const handleDownloadPreview = () => {
     if (!previewData) return;
-    const blob = new Blob([previewData.content], {
-      type: previewData.contentType || 'text/plain;charset=utf-8',
-    });
+    const blob = new Blob([previewData.content], { type: previewData.contentType || 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = previewData.filename || `singctl-${previewTarget}.txt`;
-    document.body.appendChild(a);
+    a.download = previewData.filename || `subhub-${previewData.target}.txt`;
     a.click();
-    a.remove();
     URL.revokeObjectURL(url);
-  };
-
-  const handleBlockSubIP = async (ip: string) => {
-    const trimmed = ip.trim();
-    if (!trimmed) return;
-    setBlockingIP(trimmed);
-    try {
-      const res = await api.blockSniffer(trimmed, 'all', 'all');
-      success(res.message || `已拉黑 IP: ${trimmed}`);
-      setBannedIps((prev) => new Set(prev).add(trimmed));
-      await loadAuditLogs(true);
-    } catch (err: unknown) {
-      error(err instanceof Error ? err.message : '拉黑 IP 失败');
-    } finally {
-      setBlockingIP(null);
-    }
+    success(`已下载 ${previewData.filename}`);
   };
 
   if (loading && !data) {
     return (
-      <div className="space-y-4">
-        <CardSkeleton rows={3} />
-        <CardSkeleton rows={5} />
+      <div className="p-12 text-center text-slate-400 glass-card rounded-2xl">
+        <div className="animate-spin w-6 h-6 border-2 border-emerald-500 border-t-transparent rounded-full mx-auto mb-3"></div>
+        <span>正在读取节点与订阅配置...</span>
       </div>
     );
   }
 
-  const sources = data?.sources || [];
-  const totalNodes = sources.reduce((acc, s) => (s.enabled ? acc + (s.nodeCount || 0) : acc), 0);
-
   const clients = [
     {
-      key: 'shadowrocket',
       name: 'Shadowrocket',
       desc: 'iOS 跨协议网络客户端',
       icon: '🚀',
-      scheme: data?.importLinks?.shadowrocket || '',
+      scheme: data?.importLinks?.shadowrocket,
     },
     {
-      key: 'clash',
       name: 'Clash Verge / Mihomo',
       desc: '跨平台 Clash.Meta 内核客户端',
       icon: '⚡',
-      scheme: data?.importLinks?.clash || '',
+      scheme: data?.importLinks?.clash,
     },
     {
-      key: 'singbox',
-      name: 'Sing-Box 官方客户端',
+      name: 'Sing-box 官方客户端',
       desc: 'iOS SFI / Android SFA / 桌面端 v1.14',
       icon: '📦',
-      scheme: data?.importLinks?.singbox || '',
+      scheme: data?.importLinks?.singbox,
     },
     {
-      key: 'surge',
       name: 'Surge',
       desc: '高级网络分析与托管配置客户端',
       icon: '🌊',
-      scheme: data?.importLinks?.surge || '',
+      scheme: data?.importLinks?.surge,
     },
     {
-      key: 'loon',
       name: 'Loon',
       desc: '支持 VLESS Reality 与 Hysteria2',
       icon: '🎈',
-      scheme: data?.importLinks?.loon || '',
+      scheme: data?.importLinks?.loon,
     },
   ];
 
-  const auditColumns: DataColumn<SubscriptionAccessLogItem>[] = [
-    {
-      key: 'time',
-      header: '时间',
-      render: (log) => {
-        const d = new Date(log.timestamp);
-        return (
-          <span className="font-mono text-xs text-secondary tnum whitespace-nowrap">
-            {Number.isNaN(d.getTime()) ? log.timestamp : d.toLocaleString()}
-          </span>
-        );
-      },
-    },
-    {
-      key: 'client',
-      header: '客户端 / UA',
-      render: (log) => (
-        <span
-          className="inline-flex px-2 py-0.5 rounded-md bg-surface2 border border-subtle text-[11px] font-mono text-primary"
-          title={log.userAgent || ''}
-        >
-          {log.clientApp || 'Unknown'}
-        </span>
-      ),
-    },
-    {
-      key: 'ip',
-      header: '来源 IP / 归属地',
-      render: (log) => (
-        <div className="font-mono text-xs text-primary whitespace-nowrap">
-          <span className="mr-1.5">{log.flag || '🌐'}</span>
-          <span>{log.ip || '-'}</span>
-          {log.geo && <span className="text-muted ml-1.5">({log.geo})</span>}
-        </div>
-      ),
-    },
-    {
-      key: 'target',
-      header: '格式 / 节点数',
-      render: (log) => (
-        <span className="font-mono text-xs text-secondary whitespace-nowrap">
-          {log.target}
-          {log.status !== 'denied' && log.nodeCount > 0 ? ` · ${log.nodeCount} 节点` : ''}
-        </span>
-      ),
-    },
-    {
-      key: 'status',
-      header: '状态与处置',
-      align: 'right',
-      render: (log) => {
-        const isDenied = log.status === 'denied';
-        return (
-          <div className="inline-flex items-center justify-end gap-1.5 whitespace-nowrap">
-            <Badge tone={isDenied ? 'danger' : 'ok'}>
-              {isDenied ? '密钥拦截' : '正常下发'}
-            </Badge>
-            {log.ip &&
-              (bannedIps.has(log.ip) ? (
-                <Badge tone="neutral">已拉黑</Badge>
-              ) : (
-                <Button
-                  size="xs"
-                  variant="danger"
-                  loading={blockingIP === log.ip}
-                  onClick={() => handleBlockSubIP(log.ip)}
-                  icon={<Ban className="w-3 h-3" />}
-                >
-                  拉黑 IP
-                </Button>
-              ))}
-          </div>
-        );
-      },
-    },
-  ];
-
-  const sourceTypeBadge = (item: SubscriptionSourceItem) => {
-    if (item.autoManaged) return <Badge tone="ok">本机自动同步</Badge>;
-    if (item.name.startsWith('fleet_')) return <Badge tone="accent">舰队自动同步</Badge>;
-    if (item.source === 'remote') return <Badge tone="accent">远程订阅</Badge>;
-    return <Badge tone="neutral">自定义节点</Badge>;
-  };
+  const sources = data?.sources || [];
+  const totalNodes = sources.reduce((acc, s) => (s.enabled ? acc + (s.nodeCount || 0) : acc), 0);
 
   return (
     <div className="space-y-6">
-      <PageHeader
-        title="订阅分发中心"
-        description="Native Go SubHub · 单链接自适应渲染多端格式并聚合节点源池"
-        badge={
-          <Badge tone={totalNodes > 0 ? 'ok' : 'warn'} dot pulse={totalNodes > 0}>
-            {totalNodes} 节点已聚合
-          </Badge>
-        }
-        actions={
-          <>
-            <Button
-              size="sm"
-              variant="secondary"
-              loading={refreshingSource === '__all__'}
-              onClick={() => handleRefreshSources()}
-              icon={<RefreshCw className="w-3.5 h-3.5" />}
-            >
-              刷新远程源
-            </Button>
-            <Button
-              size="sm"
-              variant="secondary"
-              onClick={() => fetchPreview(previewTarget)}
-              icon={<Eye className="w-3.5 h-3.5" />}
-            >
-              实时渲染预览
-            </Button>
-            <Button
-              size="sm"
-              variant="primary"
-              onClick={openAddSourceModal}
-              icon={<Plus className="w-3.5 h-3.5" />}
-            >
-              添加节点源
-            </Button>
-          </>
-        }
-      />
+      {/* Top Card: Unified Subscription */}
+      <div className="p-6 rounded-2xl glass-card relative overflow-hidden">
+        <div className="absolute top-0 right-0 w-64 h-64 bg-emerald-500/10 rounded-full blur-3xl pointer-events-none"></div>
 
-      {/* Unified Subscription Hero Card */}
-      <div
-        className="console-card rounded-2xl p-5 sm:p-6 relative overflow-hidden"
-        style={{
-          backgroundImage:
-            'radial-gradient(ellipse at top right, var(--accent-soft), transparent 60%)',
-        }}
-      >
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-          <div className="space-y-1.5 min-w-0">
-            <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-accent">
-              <Link2 className="w-3.5 h-3.5" />
-              <span>统一全平台订阅链接</span>
-            </div>
-            <p className="text-xs sm:text-sm text-secondary leading-relaxed">
-              根据客户端 <span className="font-mono text-primary">User-Agent</span> 或{' '}
-              <span className="font-mono text-primary">?target=</span> 自动下发最优内核配置（Sing-Box 1.14 / Mihomo / Shadowrocket / Surge / Loon）。
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+          <div className="flex items-center gap-2 text-emerald-400 text-xs font-semibold uppercase tracking-wider">
+            <Sparkles className="w-3.5 h-3.5" />
+            <span>Go 原生聚合分发中枢 (SubHub · 零容器依赖)</span>
+          </div>
+          <span className="px-2.5 py-0.5 rounded-full text-[11px] font-mono bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">
+            已聚合 {totalNodes} 个可用节点
+          </span>
+        </div>
+
+        <h2 className="text-xl font-bold text-white tracking-tight">统一全平台订阅链接</h2>
+        <p className="text-xs text-slate-400 mt-1 max-w-2xl">
+          由 SingCtl 内置 Go 引擎实时聚合本机 Reality / Hysteria2 节点与自定义外部订阅源，支持根据客户端类型自动下发对应格式配置
+        </p>
+
+        {/* URL Bar */}
+        <div className="mt-5 p-3 rounded-xl bg-slate-950/70 border border-slate-800 flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-3 font-mono text-xs text-slate-300">
+          <span className="truncate select-all">{data?.subscriptionUrl || '订阅地址生成中...'}</span>
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <button
+              onClick={() => copyText(data?.subscriptionUrl || '', 'sub-url')}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-semibold text-xs transition-colors"
+            >
+              {copiedKey === 'sub-url' ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+              <span>{copiedKey === 'sub-url' ? '已复制' : '复制订阅'}</span>
+            </button>
+            <button
+              onClick={() => showQRCode(data?.subscriptionUrl || '')}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs transition-colors"
+            >
+              <QrCode className="w-3.5 h-3.5" />
+              <span>二维码</span>
+            </button>
+            <button
+              onClick={() => fetchPreview('ClashMeta')}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-purple-500/20 hover:bg-purple-500/30 border border-purple-500/30 text-purple-200 text-xs font-semibold transition-colors"
+              title="在线预览 Clash.Meta、Sing-box、Surge、Loon 等目标转换结果"
+            >
+              <FileCode2 className="w-3.5 h-3.5 text-purple-400" />
+              <span>预览转换配置</span>
+            </button>
+            <button
+              onClick={handleRotateKey}
+              disabled={rotatingKey}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 text-amber-300 text-xs font-medium transition-colors disabled:opacity-50"
+              title="重置随机订阅路径密钥，使泄露的旧订阅链接立即失效"
+            >
+              <KeyRound className={`w-3.5 h-3.5 ${rotatingKey ? 'animate-spin' : ''}`} />
+              <span>轮换密钥</span>
+            </button>
+            <button
+              onClick={loadData}
+              title="刷新订阅状态"
+              className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white transition-colors"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+            </button>
+          </div>
+        </div>
+
+        {/* Sync Hint Banner */}
+        <div className="mt-3.5 flex items-center gap-2 text-xs text-slate-400 bg-emerald-950/20 border border-emerald-500/20 rounded-xl px-3.5 py-2">
+          <Info className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+          <span>
+            支持通过 URL 参数强制指定输出格式：<code className="text-emerald-300">?target=ClashMeta</code>、
+            <code className="text-emerald-300">?target=Sing-Box</code>、<code className="text-emerald-300">?target=Surge</code>、
+            <code className="text-emerald-300">?target=Loon</code> 或按客户端 User-Agent 自动识别。
+          </span>
+        </div>
+      </div>
+
+      {/* Multi-Source Aggregation Pool Manager */}
+      <div className="p-5 rounded-2xl glass-card space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-800">
+          <div>
+            <h3 className="text-sm font-semibold text-white flex items-center gap-2">
+              <Layers className="w-4 h-4 text-emerald-400" />
+              <span>多源聚合节点池 (Aggregated Sources)</span>
+            </h3>
+            <p className="text-xs text-slate-400 mt-0.5">
+              除本机自动同步节点外，可添加其他自建 VPS 节点链接或第三方远程订阅链接统一合并下发
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2 shrink-0">
-            <Button
-              size="sm"
-              variant="secondary"
-              onClick={() =>
-                setQrModal({
-                  title: '统一订阅二维码',
-                  url: data?.subscriptionUrl || '',
-                })
-              }
-              icon={<QrCode className="w-3.5 h-3.5" />}
+            {sources.some((s) => s.source === 'remote') && (
+              <button
+                type="button"
+                onClick={() => handleRefreshSources()}
+                disabled={refreshingSource !== null}
+                className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/30 text-blue-300 text-xs font-semibold transition-colors disabled:opacity-50"
+                title="使用自适应客户端 UA 重新拉取并解析全部外部订阅"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${refreshingSource === '__all__' ? 'animate-spin' : ''}`} />
+                <span>刷新远程源</span>
+              </button>
+            )}
+            <button
+              onClick={openAddSourceModal}
+              className="flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 text-xs font-semibold transition-colors"
             >
-              扫码导入
-            </Button>
-            <Button
-              size="sm"
-              variant="danger"
-              loading={rotatingKey}
-              onClick={() => setConfirmAction({ kind: 'rotateKey' })}
-              icon={<RotateCcw className="w-3.5 h-3.5" />}
-            >
-              轮换订阅密钥
-            </Button>
+              <Plus className="w-3.5 h-3.5" />
+              <span>添加节点源 / 外部订阅</span>
+            </button>
           </div>
         </div>
 
-        <div className="mt-4 p-3 rounded-xl bg-surface2 border border-subtle flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <code className="font-mono text-xs text-primary break-all select-all flex-1">
-            {data?.subscriptionUrl || '尚未生成订阅地址，请检查域名与 SubHub 配置'}
-          </code>
-          <Button
-            size="xs"
-            variant="primary"
-            disabled={!data?.subscriptionUrl}
-            onClick={() => copyText(data?.subscriptionUrl || '', 'main-sub')}
-            icon={
-              copiedKey === 'main-sub' ? (
-                <Check className="w-3.5 h-3.5" />
-              ) : (
-                <Copy className="w-3.5 h-3.5" />
-              )
-            }
-          >
-            {copiedKey === 'main-sub' ? '已复制' : '复制订阅链接'}
-          </Button>
-        </div>
-
-        {data?.substoreAdminUrl && (
-          <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-muted">
-            <span>原生内置引擎：{data.engine || 'native-go'}（零外部 Node.js / Sub-Store 依赖）</span>
-            <a
-              href={data.substoreAdminUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center gap-1 text-accent hover:underline font-mono"
-            >
-              <span>Web 管理入口</span>
-              <ExternalLink className="w-3 h-3" />
-            </a>
-          </div>
-        )}
-      </div>
-
-      {/* Aggregation Sources */}
-      <SectionCard
-        title="聚合节点源池 (SubHub Sources)"
-        subtitle={`共 ${sources.length} 个订阅源 · ${sources.filter((s) => s.enabled).length} 个已启用 · 当前聚合 ${totalNodes} 条出站节点`}
-        icon={<Server className="w-4 h-4" />}
-      >
         {sources.length === 0 ? (
-          <div className="p-6 text-center text-xs text-muted bg-surface2 rounded-xl border border-subtle">
-            当前暂无订阅源记录，点击右上角「添加节点源」或执行{' '}
-            <code className="text-primary font-mono">singctl sr sync</code> 同步本机节点
+          <div className="p-6 text-center text-xs text-slate-500 bg-slate-950/40 rounded-xl border border-slate-800/70">
+            当前暂无订阅源记录，点击右上角「添加节点源」或执行 <code className="text-slate-300">singctl sr sync</code> 同步本机节点
           </div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             {sources.map((item) => (
               <div
                 key={item.name}
-                className={`p-4 rounded-xl border transition-all flex flex-col justify-between gap-3 bg-surface2 ${
-                  item.enabled ? 'border-subtle hover:border-strong' : 'border-subtle opacity-60'
+                className={`p-4 rounded-xl border transition-all flex flex-col justify-between gap-3 ${
+                  item.enabled
+                    ? 'bg-slate-950/60 border-slate-800'
+                    : 'bg-slate-950/30 border-slate-800/50 opacity-65'
                 }`}
               >
-                <div className="space-y-2">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-1.5 flex-wrap">
-                        <span className="font-semibold text-sm text-primary truncate">
-                          {item.displayName}
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-semibold text-sm text-white truncate">{item.displayName}</span>
+                      {item.autoManaged ? (
+                        <span className="px-2 py-0.5 rounded-md text-[10px] font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                          本机自动同步
                         </span>
-                        {sourceTypeBadge(item)}
-                        <Badge tone={item.nodeCount > 0 ? 'neutral' : 'warn'}>
-                          {item.nodeCount} 节点
-                        </Badge>
-                        {item.source === 'remote' && item.effectiveUa && (
-                          <Badge tone="neutral">
-                            {formatEffectiveUA(item.effectiveUa)}
-                            {item.usedProxy === 'warp' ? ' · WARP' : ''}
-                          </Badge>
-                        )}
-                      </div>
-                      <p className="text-[11px] text-muted font-mono mt-1.5 truncate">
-                        {item.source === 'remote' ? item.url : item.remark || `标识: ${item.name}`}
-                      </p>
+                      ) : item.name.startsWith('fleet_') ? (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-mono bg-cyan-500/10 text-cyan-300 border border-cyan-500/25">
+                          <Server className="w-2.5 h-2.5" />
+                          舰队自动同步
+                        </span>
+                      ) : item.source === 'remote' ? (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-mono bg-blue-500/10 text-blue-400 border border-blue-500/20">
+                          <Globe className="w-2.5 h-2.5" />
+                          远程订阅
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-mono bg-purple-500/10 text-purple-300 border border-purple-500/20">
+                          <Server className="w-2.5 h-2.5" />
+                          自定义节点
+                        </span>
+                      )}
+                      <span
+                        className={`px-2 py-0.5 rounded-md text-[10px] font-mono ${
+                          item.nodeCount > 0 ? 'bg-slate-800 text-slate-200' : 'bg-amber-500/15 text-amber-300 border border-amber-500/25'
+                        }`}
+                      >
+                        {item.nodeCount} 节点
+                      </span>
+                      {item.source === 'remote' && item.effectiveUa && (
+                        <span
+                          className="px-2 py-0.5 rounded-md text-[10px] font-mono bg-slate-900 text-slate-400 border border-slate-800"
+                          title={`协商客户端 UA: ${item.effectiveUa}${item.usedProxy ? ` (${item.usedProxy})` : ''}`}
+                        >
+                          {formatEffectiveUA(item.effectiveUa)}
+                          {item.usedProxy === 'warp' ? ' · WARP' : ''}
+                        </span>
+                      )}
                     </div>
+                    <p className="text-[11px] text-slate-500 font-mono mt-1 truncate">
+                      {item.source === 'remote' ? item.url : item.remark || `标识: ${item.name}`}
+                    </p>
+                    {item.source === 'remote' && item.lastError && (
+                      <p className="text-[11px] text-amber-300/90 font-mono mt-1.5 px-2 py-1 rounded-lg bg-amber-500/10 border border-amber-500/20 break-all">
+                        拉取提示: {item.lastError}
+                      </p>
+                    )}
                   </div>
 
-                  {item.lastError && (
-                    <div className="text-[11px] px-2.5 py-1.5 rounded-lg bg-[var(--status-danger-soft)] text-[var(--status-danger)] border border-rose-500/20 break-words">
-                      最近拉取异常: {item.lastError}
-                    </div>
-                  )}
+                  <button
+                    type="button"
+                    onClick={() => handleToggleSourceEnabled(item)}
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-mono border shrink-0 transition-colors ${
+                      item.enabled
+                        ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/20'
+                        : 'bg-slate-900 text-slate-400 border-slate-700 hover:text-white'
+                    }`}
+                  >
+                    {item.enabled ? '已启用' : '已停用'}
+                  </button>
                 </div>
 
-                <div className="pt-2.5 border-t border-subtle flex flex-wrap items-center justify-between gap-2 text-xs">
-                  <span className="text-[11px] font-mono text-muted truncate">
-                    {item.lastFetchedAt
-                      ? `更新: ${new Date(item.lastFetchedAt).toLocaleString()}`
-                      : item.autoManaged
-                      ? '由核心配置实时生成'
-                      : '本地静态 / 手动维护'}
+                <div className="pt-2.5 border-t border-slate-800/70 flex items-center justify-between gap-2 text-xs">
+                  <span className="text-[11px] text-slate-500 font-mono truncate">
+                    {item.source === 'remote' && item.lastFetchedAt
+                      ? `更新于 ${new Date(item.lastFetchedAt).toLocaleTimeString()}`
+                      : item.name}
                   </span>
-                  <div className="flex items-center gap-1 shrink-0">
-                    <Button
-                      size="xs"
-                      variant={item.enabled ? 'secondary' : 'primary'}
-                      onClick={() => handleToggleSourceEnabled(item)}
-                    >
-                      {item.enabled ? '停用' : '启用'}
-                    </Button>
+                  <div className="flex items-center gap-1.5 shrink-0">
                     {item.source === 'remote' && (
-                      <Button
-                        size="xs"
-                        variant="ghost"
-                        loading={refreshingSource === item.name}
+                      <button
+                        type="button"
                         onClick={() => handleRefreshSources(item.name)}
-                        icon={<RefreshCw className="w-3 h-3" />}
+                        disabled={refreshingSource !== null}
+                        className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/25 text-blue-300 transition-colors disabled:opacity-50"
+                        title="立即重新拉取此远程订阅"
                       >
-                        拉取
-                      </Button>
+                        <RefreshCw className={`w-3 h-3 ${refreshingSource === item.name ? 'animate-spin' : ''}`} />
+                        <span>刷新</span>
+                      </button>
                     )}
-                    <Button
-                      size="xs"
-                      variant="ghost"
+                    <button
+                      type="button"
                       onClick={() => openEditSourceModal(item)}
-                      icon={<Edit3 className="w-3 h-3" />}
+                      className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white transition-colors"
                     >
-                      编辑
-                    </Button>
-                    {!item.autoManaged && !item.name.startsWith('fleet_') && (
-                      <Button
-                        size="xs"
-                        variant="ghost"
-                        onClick={() => setConfirmAction({ kind: 'deleteSource', item })}
-                        icon={<Trash2 className="w-3 h-3 text-rose-400" />}
-                        aria-label="删除订阅源"
-                      />
+                      <Edit3 className="w-3 h-3" />
+                      <span>编辑</span>
+                    </button>
+                    {!item.autoManaged && (
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteSource(item)}
+                        className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/20 text-rose-300 transition-colors"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                        <span>移除</span>
+                      </button>
                     )}
                   </div>
                 </div>
@@ -694,523 +581,572 @@ export const SubscriptionsTab: React.FC = () => {
             ))}
           </div>
         )}
-      </SectionCard>
+      </div>
 
-      {/* One-Click Client Import Cards */}
-      <SectionCard
-        title="客户端一键导入 (URL Scheme)"
-        subtitle="支持移动端及桌面端直接拉起客户端或复制对应协议导入链接"
-        icon={<Globe className="w-4 h-4" />}
-      >
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5">
+      {/* One-Click Import Clients Grid */}
+      <div>
+        <h3 className="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-3 px-1">
+          客户端一键导入 (DeepLink 唤醒)
+        </h3>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {clients.map((c) => (
-            <div
-              key={c.key}
-              className="p-4 rounded-xl bg-surface2 border border-subtle hover:border-strong transition-colors flex flex-col justify-between gap-3"
-            >
-              <div className="flex items-start gap-2.5">
-                <span className="text-xl leading-none mt-0.5">{c.icon}</span>
-                <div className="min-w-0">
-                  <div className="font-semibold text-sm text-primary">{c.name}</div>
-                  <div className="text-xs text-muted mt-0.5">{c.desc}</div>
+            <div key={c.name} className="p-4 rounded-2xl glass-card glass-card-hover flex flex-col justify-between">
+              <div>
+                <div className="flex items-center gap-2.5">
+                  <span className="text-2xl">{c.icon}</span>
+                  <div>
+                    <h4 className="font-semibold text-sm text-white">{c.name}</h4>
+                    <p className="text-[11px] text-slate-400">{c.desc}</p>
+                  </div>
                 </div>
               </div>
-              <div className="flex items-center gap-1.5 pt-2 border-t border-subtle">
-                <Button
-                  size="xs"
-                  variant="primary"
-                  disabled={!c.scheme}
-                  onClick={() => {
-                    if (c.scheme) window.location.href = c.scheme;
-                  }}
-                  className="flex-1"
+              <div className="mt-4 pt-3 border-t border-slate-800 flex items-center justify-between">
+                <a
+                  href={c.scheme}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border border-emerald-500/20 text-xs font-semibold transition-all"
                 >
-                  一键导入
-                </Button>
-                <Button
-                  size="xs"
-                  variant="secondary"
-                  disabled={!c.scheme}
-                  onClick={() => copyText(c.scheme, `client-${c.key}`)}
-                  icon={
-                    copiedKey === `client-${c.key}` ? (
-                      <Check className="w-3 h-3" />
-                    ) : (
-                      <Copy className="w-3 h-3" />
-                    )
-                  }
+                  <Download className="w-3.5 h-3.5" />
+                  <span>一键导入配置</span>
+                </a>
+                <button
+                  onClick={() => showQRCode(c.scheme || '')}
+                  className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors"
+                  title="查看导入二维码"
                 >
-                  复制
-                </Button>
-                <Button
-                  size="xs"
-                  variant="ghost"
-                  disabled={!c.scheme}
-                  onClick={() => setQrModal({ title: `${c.name} 导入二维码`, url: c.scheme })}
-                  icon={<QrCode className="w-3.5 h-3.5" />}
-                  aria-label="二维码"
-                />
+                  <QrCode className="w-4 h-4" />
+                </button>
               </div>
             </div>
           ))}
         </div>
-      </SectionCard>
+      </div>
 
-      {/* Local Direct URIs */}
-      {(data?.nodes?.hy2?.link || data?.nodes?.vless?.link) && (
-        <SectionCard
-          title="本机单节点直连链接 (URI)"
-          subtitle="适合单节点临时测试或不支持托管订阅的客户端"
-          icon={<FileText className="w-4 h-4" />}
-        >
-          <div className="space-y-3">
-            {data.nodes?.hy2?.link && (
-              <div className="p-3.5 rounded-xl bg-surface2 border border-subtle space-y-2">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
-                    <Badge tone="ok">Hysteria2</Badge>
-                    <span className="font-mono text-xs text-secondary">
-                      {data.nodes.hy2.domain}:{data.nodes.hy2.port}
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <Button
-                      size="xs"
-                      variant="secondary"
-                      onClick={() => copyText(data.nodes.hy2.link, 'hy2')}
-                      icon={copiedKey === 'hy2' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
-                    >
-                      复制 URI
-                    </Button>
-                    <Button
-                      size="xs"
-                      variant="ghost"
-                      onClick={() =>
-                        setQrModal({ title: 'Hysteria2 节点二维码', url: data.nodes.hy2.link })
-                      }
-                      icon={<QrCode className="w-3.5 h-3.5" />}
-                    />
-                  </div>
-                </div>
-                <div className="font-mono text-[11px] text-muted break-all select-all">
-                  {data.nodes.hy2.link}
-                </div>
+      {/* Direct Node Links */}
+      <div className="p-5 rounded-2xl glass-card space-y-4">
+        <h3 className="text-sm font-semibold text-white">本机单节点直连链接 (URI)</h3>
+        <div className="space-y-3">
+          {data?.nodes?.hy2?.link && (
+            <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800 flex items-center justify-between gap-3 text-xs font-mono">
+              <div className="truncate text-slate-300">
+                <span className="text-emerald-400 font-semibold mr-2">[Hysteria 2]</span>
+                {data.nodes.hy2.link}
               </div>
-            )}
+              <button
+                onClick={() => copyText(data.nodes.hy2.link, 'hy2')}
+                className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 shrink-0 text-xs flex items-center gap-1"
+              >
+                {copiedKey === 'hy2' ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+                <span>复制</span>
+              </button>
+            </div>
+          )}
+          {data?.nodes?.vless?.link && (
+            <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800 flex items-center justify-between gap-3 text-xs font-mono">
+              <div className="truncate text-slate-300">
+                <span className="text-purple-400 font-semibold mr-2">[VLESS Reality]</span>
+                {data.nodes.vless.link}
+              </div>
+              <button
+                onClick={() => copyText(data.nodes.vless.link, 'vless')}
+                className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 shrink-0 text-xs flex items-center gap-1"
+              >
+                {copiedKey === 'vless' ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+                <span>复制</span>
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
 
-            {data.nodes?.vless?.link && (
-              <div className="p-3.5 rounded-xl bg-surface2 border border-subtle space-y-2">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
-                    <Badge tone="accent">VLESS Reality</Badge>
-                    <span className="font-mono text-xs text-secondary">
-                      SNI: {data.nodes.vless.sni} · Port {data.nodes.vless.port}
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <Button
-                      size="xs"
-                      variant="secondary"
-                      onClick={() => copyText(data.nodes.vless.link, 'vless')}
-                      icon={
-                        copiedKey === 'vless' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />
-                      }
-                    >
-                      复制 URI
-                    </Button>
-                    <Button
-                      size="xs"
-                      variant="ghost"
-                      onClick={() =>
-                        setQrModal({
-                          title: 'VLESS Reality 节点二维码',
-                          url: data.nodes.vless.link,
-                        })
-                      }
-                      icon={<QrCode className="w-3.5 h-3.5" />}
-                    />
-                  </div>
-                </div>
-                <div className="font-mono text-[11px] text-muted break-all select-all">
-                  {data.nodes.vless.link}
-                </div>
-              </div>
+      {/* Subscription Anti-Theft Access Audit */}
+      <div className="p-5 rounded-2xl glass-card space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-800">
+          <div>
+            <h3 className="text-sm font-semibold text-white flex items-center gap-2">
+              <ShieldCheck className="w-4 h-4 text-emerald-400" />
+              <span>订阅拉取防盗刷审计 (Access Audit)</span>
+              {auditLogs.some((item) => item.status === 'denied') && (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-mono bg-rose-500/15 text-rose-300 border border-rose-500/30">
+                  <ShieldAlert className="w-3 h-3" />
+                  检测到异常探测
+                </span>
+              )}
+            </h3>
+            <p className="text-xs text-slate-400 mt-0.5">
+              自动记录每次客户端订阅拉取与错误密钥试探（保留最近 100 条）。如发现陌生海外 IP 盗刷，点击顶部「轮换密钥」即可一键熔断旧链接
+            </p>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={loadAuditLogs}
+              disabled={loadingAudit}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700/70 text-xs text-slate-200 transition-colors"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${loadingAudit ? 'animate-spin' : ''}`} />
+              <span>刷新审计</span>
+            </button>
+            {auditLogs.length > 0 && (
+              <button
+                type="button"
+                onClick={handleClearAuditLogs}
+                disabled={clearingAudit}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/25 text-xs text-rose-300 transition-colors disabled:opacity-50"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>清空记录</span>
+              </button>
             )}
           </div>
-        </SectionCard>
-      )}
+        </div>
 
-      {/* Subscription Access Audit */}
-      <SectionCard
-        title="订阅拉取与防盗刷审计"
-        subtitle="实时记录每次订阅密钥下发与拦截详情，异常并发 IP 可一键全集群拉黑"
-        icon={<ShieldCheck className="w-4 h-4" />}
-        noPadding
-        actions={
-          <div className="flex items-center gap-2">
-            <Button
-              size="xs"
-              variant="secondary"
-              loading={loadingAudit}
-              onClick={() => loadAuditLogs()}
-              icon={<RefreshCw className="w-3 h-3" />}
-            >
-              刷新
-            </Button>
-            <Button
-              size="xs"
-              variant="danger"
-              loading={clearingAudit}
-              disabled={auditLogs.length === 0}
-              onClick={() => setConfirmAction({ kind: 'clearAudit' })}
-              icon={<Trash2 className="w-3 h-3" />}
-            >
-              清空记录
-            </Button>
-          </div>
-        }
-      >
         {riskSummary && riskSummary.level !== 'safe' && (
           <div
-            className="mx-4 mt-4 p-3.5 rounded-xl border text-xs space-y-1.5"
-            style={{
-              backgroundColor:
-                riskSummary.level === 'high'
-                  ? 'var(--status-danger-soft)'
-                  : 'var(--status-warn-soft)',
-              borderColor:
-                riskSummary.level === 'high' ? 'var(--status-danger)' : 'var(--status-warn)',
-            }}
+            className={`p-3.5 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+              riskSummary.level === 'high'
+                ? 'bg-rose-500/10 border-rose-500/35 text-rose-200'
+                : 'bg-amber-500/10 border-amber-500/30 text-amber-200'
+            }`}
           >
-            <div className="flex flex-wrap items-center justify-between gap-2 font-semibold text-primary">
-              <span className="inline-flex items-center gap-1.5">
-                <ShieldAlert className="w-4 h-4" />
-                {riskSummary.level === 'high'
-                  ? '检测到高风险订阅拉取行为，建议立即轮换订阅密钥'
-                  : '检测到异常拉取特征，请核对是否为本人设备'}
-              </span>
-              <span className="font-mono text-[11px] text-secondary">
-                24h 独立 IP: {riskSummary.uniqueIps24h} · 国家/地区: {riskSummary.uniqueCountries24h}
-              </span>
-            </div>
-            {riskSummary.reasons.length > 0 && (
-              <ul className="list-disc pl-5 text-secondary space-y-0.5">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2 text-xs font-bold">
+                <ShieldAlert className="w-4 h-4 shrink-0" />
+                <span>
+                  {riskSummary.level === 'high'
+                    ? '高危防盗刷告警：检测到疑似订阅泄露或爬虫批量拉取'
+                    : '订阅访问风险提示：检测到多地域或非标客户端拉取'}
+                </span>
+                <span className="px-2 py-0.5 rounded-full bg-slate-950/60 text-[10px] font-mono">
+                  24h 独立 IP: {riskSummary.uniqueIps24h} · 国家/地区: {riskSummary.uniqueCountries24h}
+                </span>
+              </div>
+              <ul className="text-[11px] opacity-90 list-disc list-inside space-y-0.5">
                 {riskSummary.reasons.map((r, i) => (
                   <li key={i}>{r}</li>
                 ))}
               </ul>
-            )}
+            </div>
+            <button
+              type="button"
+              onClick={handleRotateKey}
+              disabled={rotatingKey}
+              className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl bg-rose-500 hover:bg-rose-600 text-white text-xs font-bold shrink-0 transition-colors disabled:opacity-50"
+            >
+              <KeyRound className="w-3.5 h-3.5" />
+              <span>{rotatingKey ? '正在轮换...' : '立即轮换密钥熔断'}</span>
+            </button>
           </div>
         )}
 
-        <DataTable
-          columns={auditColumns}
-          rows={auditLogs}
-          rowKey={(log, idx) => `${log.timestamp}-${log.ip}-${idx}`}
-          loading={loadingAudit}
-          emptyText="近期暂无客户端订阅拉取或密钥拦截记录"
-          compact
-        />
-      </SectionCard>
-
-      {/* Add / Edit Source SlideDrawer */}
-      <SlideDrawer
-        open={Boolean(editingSource)}
-        onClose={() => setEditingSource(null)}
-        title={editingSource?.name ? `编辑节点源 · ${editingSource.displayName}` : '添加节点源 / 外部订阅'}
-        subtitle="支持远程机场订阅自动更新或手动粘贴节点 URI"
-        size="lg"
-        footer={
-          <div className="flex justify-end gap-2">
-            <Button variant="secondary" onClick={() => setEditingSource(null)}>
-              取消
-            </Button>
-            <Button
-              variant="primary"
-              loading={savingSource}
-              onClick={() => {
-                const form = document.getElementById('sc-source-form') as HTMLFormElement | null;
-                form?.requestSubmit();
-              }}
-            >
-              保存订阅源
-            </Button>
+        {auditLogs.length === 0 ? (
+          <div className="p-6 text-center text-xs text-slate-500 bg-slate-950/40 rounded-xl border border-slate-800/70 font-mono">
+            暂无客户端订阅拉取记录。当手机或桌面客户端更新订阅时，此处将实时记录设备软件类型与来源地区
           </div>
-        }
-      >
-        {editingSource && (
-          <form id="sc-source-form" onSubmit={handleSaveSource} className="space-y-4 text-xs sm:text-sm">
-            <div>
-              <label className="block text-xs font-medium text-secondary mb-1.5">显示名称</label>
-              <input
-                type="text"
-                required
-                value={editingSource.displayName}
-                onChange={(e) =>
-                  setEditingSource({ ...editingSource, displayName: e.target.value })
-                }
-                placeholder="例如：日本备用机场 / 自建中转组"
-                className="sc-input w-full px-3 py-2 text-sm"
-              />
+        ) : (
+          <>
+            {/* Mobile Stacked Audit Cards (< 768px) */}
+            <div className="md:hidden space-y-2">
+              {auditLogs.slice(0, 25).map((log, idx) => {
+                const formattedTime = (() => {
+                  const d = new Date(log.timestamp);
+                  return Number.isNaN(d.getTime()) ? log.timestamp : d.toLocaleString();
+                })();
+                const isDenied = log.status === 'denied';
+                return (
+                  <div
+                    key={`m-${log.timestamp}-${idx}`}
+                    className="p-3 rounded-xl bg-slate-950/60 border border-slate-800/80 space-y-1.5 text-xs font-mono"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="px-2 py-0.5 rounded bg-slate-900 border border-slate-700/80 text-slate-200 text-[11px] truncate">
+                        {log.clientApp || 'Unknown'} · {log.target}
+                      </span>
+                      {isDenied ? (
+                        <span className="px-2 py-0.5 rounded text-[10px] bg-rose-500/15 text-rose-300 border border-rose-500/30 shrink-0">
+                          密钥拦截
+                        </span>
+                      ) : (
+                        <span className="px-2 py-0.5 rounded text-[10px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/25 shrink-0">
+                          正常下发
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap items-center justify-between gap-1 text-[11px] text-slate-400">
+                      <span>
+                        {log.flag || '🌐'} {log.ip || '-'} {log.geo ? `(${log.geo})` : ''}
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <span>{formattedTime}</span>
+                        {log.ip &&
+                          (bannedIps.has(log.ip) ? (
+                            <span className="px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-300 text-[10px] font-sans">
+                              已拉黑
+                            </span>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => handleBlockSubIP(log.ip)}
+                              disabled={blockingIP === log.ip}
+                              className="px-2 py-0.5 rounded bg-rose-500/15 border border-rose-500/30 text-rose-300 text-[10px] font-sans"
+                            >
+                              {blockingIP === log.ip ? '拉黑中...' : '拉黑'}
+                            </button>
+                          ))}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
 
-            {!editingSource.name && (
-              <div>
-                <label className="block text-xs font-medium text-secondary mb-1.5">节点源类型</label>
-                <div className="grid grid-cols-2 gap-2.5">
-                  {[
-                    { key: 'remote', title: '远程订阅 URL', desc: '定时或手动从外部订阅地址拉取' },
-                    { key: 'local', title: '自定义节点 URI', desc: '直接粘贴 vless:// / hysteria2:// 链接' },
-                  ].map((opt) => {
-                    const active = editingSource.source === opt.key;
-                    return (
-                      <button
-                        key={opt.key}
-                        type="button"
-                        onClick={() =>
-                          setEditingSource({
-                            ...editingSource,
-                            source: opt.key as 'remote' | 'local',
-                          })
-                        }
-                        style={
-                          active
-                            ? { backgroundColor: 'var(--accent-soft)', borderColor: 'var(--accent)' }
-                            : undefined
-                        }
-                        className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
-                          active ? '' : 'bg-surface2 border-subtle hover:border-strong'
-                        }`}
-                      >
-                        <div className="font-semibold text-xs text-primary">{opt.title}</div>
-                        <div className="text-[11px] text-muted mt-0.5">{opt.desc}</div>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
+            {/* Desktop Table (>= 768px) */}
+            <div className="hidden md:block overflow-x-auto">
+              <table className="w-full text-left border-collapse text-xs">
+              <thead>
+                <tr className="border-b border-slate-800/80 text-[11px] text-slate-400 font-mono">
+                  <th className="py-2.5 pr-3">拉取时间</th>
+                  <th className="py-2.5 px-3">客户端软件</th>
+                  <th className="py-2.5 px-3">来源 IP / 地区</th>
+                  <th className="py-2.5 px-3">转换目标</th>
+                  <th className="py-2.5 pl-3 text-right">状态</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/50 font-mono">
+                {auditLogs.slice(0, 25).map((log, idx) => {
+                  const formattedTime = (() => {
+                    const d = new Date(log.timestamp);
+                    return Number.isNaN(d.getTime()) ? log.timestamp : d.toLocaleString();
+                  })();
+                  const isDenied = log.status === 'denied';
+                  return (
+                    <tr key={`${log.timestamp}-${idx}`} className="hover:bg-slate-900/40 transition-colors">
+                      <td className="py-2.5 pr-3 text-slate-400 whitespace-nowrap">{formattedTime}</td>
+                      <td className="py-2.5 px-3 whitespace-nowrap">
+                        <span
+                          className="px-2 py-0.5 rounded-md bg-slate-900 border border-slate-700/80 text-slate-200 text-[11px]"
+                          title={log.userAgent || ''}
+                        >
+                          {log.clientApp || 'Unknown'}
+                        </span>
+                      </td>
+                      <td className="py-2.5 px-3 whitespace-nowrap text-slate-200">
+                        <span className="mr-1.5">{log.flag || '🌐'}</span>
+                        <span>{log.ip || '-'}</span>
+                        {log.geo && <span className="text-slate-500 ml-1.5">({log.geo})</span>}
+                      </td>
+                      <td className="py-2.5 px-3 whitespace-nowrap text-slate-300">
+                        <span>{log.target}</span>
+                        {!isDenied && log.nodeCount > 0 && (
+                          <span className="text-slate-500 ml-1.5">· {log.nodeCount} 节点</span>
+                        )}
+                      </td>
+                      <td className="py-2.5 pl-3 text-right whitespace-nowrap">
+                        <div className="inline-flex items-center justify-end gap-1.5">
+                          {isDenied ? (
+                            <span className="px-2 py-0.5 rounded-md text-[10px] bg-rose-500/15 text-rose-300 border border-rose-500/30">
+                              密钥拦截
+                            </span>
+                          ) : (
+                            <span className="px-2 py-0.5 rounded-md text-[10px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/25">
+                              正常下发
+                            </span>
+                          )}
+                          {log.ip &&
+                            (bannedIps.has(log.ip) ? (
+                              <span className="px-2 py-0.5 rounded-md text-[10px] bg-slate-800 text-slate-400 border border-slate-700 font-sans">
+                                已拉黑
+                              </span>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => handleBlockSubIP(log.ip)}
+                                disabled={blockingIP === log.ip}
+                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 font-sans transition-colors disabled:opacity-50"
+                                title="将该 IP 加入全集群防火墙黑名单"
+                              >
+                                <Ban className="w-2.5 h-2.5" />
+                                <span>{blockingIP === log.ip ? '拉黑中...' : '拉黑 IP'}</span>
+                              </button>
+                            ))}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            </div>
+          </>
+        )}
+      </div>
 
-            {editingSource.source === 'remote' ? (
-              <>
+      {/* Add / Edit Subscription Source Modal */}
+      {editingSource && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center sm:p-4 bg-slate-950/85 backdrop-blur-md">
+          <form
+            onSubmit={handleSaveSource}
+            className="bg-slate-900 border-t sm:border border-slate-800 rounded-t-3xl sm:rounded-3xl w-full max-w-xl max-h-[92dvh] overflow-y-auto shadow-2xl pb-safe"
+          >
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800">
+              <div>
+                <h4 className="text-base font-bold text-white">
+                  {editingSource.name ? '编辑聚合节点源' : '添加节点源 / 外部订阅'}
+                </h4>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  保存后无需重启容器，SubHub 将立即合并进全平台订阅链接
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingSource(null)}
+                className="p-1.5 rounded-xl hover:bg-slate-800 text-slate-400 hover:text-white"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-4">
+              {!isAutoManagedEdit && (
+                <div className="grid grid-cols-2 gap-2 p-1 rounded-xl bg-slate-950 border border-slate-800 text-xs">
+                  <button
+                    type="button"
+                    onClick={() => setEditingSource({ ...editingSource, source: 'local' })}
+                    className={`py-2 rounded-lg font-semibold transition-colors ${
+                      editingSource.source === 'local'
+                        ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    粘贴节点链接 (Local URIs)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEditingSource({ ...editingSource, source: 'remote' })}
+                    className={`py-2 rounded-lg font-semibold transition-colors ${
+                      editingSource.source === 'remote'
+                        ? 'bg-blue-500/20 text-blue-300 border border-blue-500/30'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    远程外部订阅 (HTTP/HTTPS)
+                  </button>
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs font-medium text-secondary mb-1.5">远程订阅 URL</label>
+                  <label className="block text-xs text-slate-400 mb-1">显示名称 *</label>
                   <input
-                    type="url"
+                    type="text"
                     required
-                    disabled={isAutoManagedEdit}
-                    value={editingSource.url || ''}
-                    onChange={(e) => setEditingSource({ ...editingSource, url: e.target.value })}
-                    placeholder="https://sub.example.com/api/v1/client/subscribe?token=your_token"
-                    className="sc-input w-full px-3 py-2 text-xs font-mono"
+                    value={editingSource.displayName}
+                    onChange={(e) => setEditingSource({ ...editingSource, displayName: e.target.value })}
+                    placeholder="例如: 日本备用 VPS / 主力机场"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-emerald-500"
                   />
                 </div>
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1">备注说明 (可选)</label>
+                  <input
+                    type="text"
+                    value={editingSource.remark || ''}
+                    onChange={(e) => setEditingSource({ ...editingSource, remark: e.target.value })}
+                    placeholder="例如: 东京 CN2 GIA"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+              </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {editingSource.source === 'remote' ? (
+                <div className="space-y-3.5">
                   <div>
-                    <label className="block text-xs font-medium text-secondary mb-1.5">
-                      拉取伪装 User-Agent
-                    </label>
-                    <select
-                      value={editingSource.userAgent || 'auto'}
-                      onChange={(e) =>
-                        setEditingSource({ ...editingSource, userAgent: e.target.value })
-                      }
-                      className="sc-input w-full px-3 py-2 text-xs"
-                    >
-                      {UA_PRESETS.map((u) => (
-                        <option key={u.value} value={u.value}>
-                          {u.label}
-                        </option>
-                      ))}
-                    </select>
+                    <label className="block text-xs text-slate-400 mb-1">远程订阅 URL *</label>
+                    <input
+                      type="url"
+                      required
+                      value={editingSource.url || ''}
+                      onChange={(e) => setEditingSource({ ...editingSource, url: e.target.value })}
+                      placeholder="https://example.com/api/v1/client/subscribe?token=..."
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs font-mono text-emerald-300 focus:outline-none focus:border-blue-500"
+                    />
+                    <p className="text-[11px] text-slate-500 mt-1.5">
+                      全格式支持 Base64 URI、Clash YAML 与 Sing-box JSON，内置反爬 UA 自动协商与 10 分钟容灾缓存。
+                    </p>
                   </div>
-                  <div>
-                    <label className="block text-xs font-medium text-secondary mb-1.5">
-                      拉取出口网络路径
-                    </label>
-                    <select
-                      value={editingSource.proxyMode || 'auto'}
-                      onChange={(e) =>
-                        setEditingSource({ ...editingSource, proxyMode: e.target.value })
-                      }
-                      className="sc-input w-full px-3 py-2 text-xs"
-                    >
-                      {PROXY_MODE_OPTIONS.map((p) => (
-                        <option key={p.value} value={p.value}>
-                          {p.label}
-                        </option>
-                      ))}
-                    </select>
+
+                  <div className="p-3.5 rounded-xl bg-slate-950/70 border border-slate-800/80 space-y-3">
+                    <div className="text-[11px] font-semibold text-slate-300">反爬伪装与拉取通道策略 (Anti-WAF Options)</div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-[11px] text-slate-400 mb-1">客户端 User-Agent 伪装</label>
+                        <select
+                          value={editingSource.userAgent || 'auto'}
+                          onChange={(e) => setEditingSource({ ...editingSource, userAgent: e.target.value })}
+                          className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-blue-500"
+                        >
+                          <option value="auto">智能自适应协商 (推荐)</option>
+                          <option value="v2rayng">v2rayNG (轻量 Base64 URI)</option>
+                          <option value="shadowrocket">Shadowrocket (iOS CFNetwork)</option>
+                          <option value="clashmeta">Clash.Meta / Mihomo (YAML)</option>
+                          <option value="singbox">Sing-box SFA (JSON)</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-[11px] text-slate-400 mb-1">拉取出口通道</label>
+                        <select
+                          value={editingSource.proxyMode || 'auto'}
+                          onChange={(e) => setEditingSource({ ...editingSource, proxyMode: e.target.value })}
+                          className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-blue-500"
+                        >
+                          <option value="auto">智能容灾 (直连优先 · 失败转 WARP)</option>
+                          <option value="direct">强制本机直连 (Direct)</option>
+                          <option value="warp">强制走 WARP SOCKS5 (127.0.0.1:40000)</option>
+                        </select>
+                      </div>
+                    </div>
                   </div>
                 </div>
-
-                {editingSource.userAgent === 'custom' && (
-                  <div>
-                    <label className="block text-xs font-medium text-secondary mb-1.5">
-                      自定义 User-Agent 内容
-                    </label>
-                    <input
-                      type="text"
-                      value={customUAInput}
-                      onChange={(e) => setCustomUAInput(e.target.value)}
-                      placeholder="例如：ClashMetaForAndroid/2.10.1.Meta"
-                      className="sc-input w-full px-3 py-2 text-xs font-mono"
-                    />
-                  </div>
-                )}
-              </>
-            ) : (
-              <div>
-                <label className="block text-xs font-medium text-secondary mb-1.5">
-                  节点 URI 列表（每行一条或 Base64）
-                </label>
-                <textarea
-                  rows={6}
-                  required={!isAutoManagedEdit}
-                  disabled={isAutoManagedEdit}
-                  value={editingSource.content || ''}
-                  onChange={(e) => setEditingSource({ ...editingSource, content: e.target.value })}
-                  placeholder={
-                    'vless://11111111-1111-1111-1111-111111111111@node.example.com:443?security=reality&sni=www.bing.com#Node-1\nhysteria2://password@203.0.113.10:443/?sni=node.example.com#Node-2'
-                  }
-                  className="sc-input w-full px-3 py-2 text-xs font-mono"
-                />
-              </div>
-            )}
-
-            <div>
-              <label className="block text-xs font-medium text-secondary mb-1.5">备注</label>
-              <input
-                type="text"
-                value={editingSource.remark || ''}
-                onChange={(e) => setEditingSource({ ...editingSource, remark: e.target.value })}
-                placeholder="可选备注说明"
-                className="sc-input w-full px-3 py-2 text-xs"
-              />
+              ) : (
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1">
+                    节点分享链接 (每行一条 URI，或粘贴 Base64 / Clash YAML / Sing-box JSON) *
+                  </label>
+                  <textarea
+                    rows={6}
+                    required
+                    value={editingSource.content || ''}
+                    onChange={(e) => setEditingSource({ ...editingSource, content: e.target.value })}
+                    placeholder={'vless://uuid@host:443?security=reality&sni=...#Node-1\nhysteria2://pass@host:443/?sni=...#Node-2'}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs font-mono text-emerald-300 focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+              )}
             </div>
 
-            <label className="inline-flex items-center gap-2 text-xs text-primary cursor-pointer select-none">
-              <input
-                type="checkbox"
-                checked={editingSource.enabled !== false}
-                onChange={(e) => setEditingSource({ ...editingSource, enabled: e.target.checked })}
-                className="accent-[var(--accent)] w-4 h-4"
-              />
-              <span>启用并参与聚合下发</span>
-            </label>
+            <div className="px-6 py-4 bg-slate-950/60 border-t border-slate-800 flex items-center justify-end gap-2.5">
+              <button
+                type="button"
+                onClick={() => setEditingSource(null)}
+                className="px-4 py-2 rounded-xl text-xs text-slate-400 hover:text-white hover:bg-slate-800"
+              >
+                取消
+              </button>
+              <button
+                type="submit"
+                disabled={savingSource}
+                className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-semibold text-xs transition-colors disabled:opacity-50"
+              >
+                {savingSource && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
+                <span>{savingSource ? '正在校验并保存...' : '保存节点源'}</span>
+              </button>
+            </div>
           </form>
-        )}
-      </SlideDrawer>
+        </div>
+      )}
 
-      {/* Live Preview SlideDrawer */}
-      <SlideDrawer
-        open={showPreviewDrawer}
-        onClose={() => setShowPreviewDrawer(false)}
-        title="多端订阅配置实时预览"
-        subtitle={previewData?.filename || '选择目标格式查看 SubHub 实时渲染结果'}
-        size="xl"
-        headerExtra={
-          previewData && (
-            <div className="flex items-center gap-2">
-              <Badge tone="neutral">{previewData.nodeCount} 节点</Badge>
-              <Button
-                size="xs"
-                variant="secondary"
-                onClick={() => copyText(previewData.content, 'preview-copy')}
-                icon={
-                  copiedKey === 'preview-copy' ? (
-                    <Check className="w-3.5 h-3.5" />
-                  ) : (
-                    <Copy className="w-3.5 h-3.5" />
-                  )
-                }
-              >
-                复制内容
-              </Button>
-              <Button
-                size="xs"
-                variant="primary"
-                onClick={handleDownloadPreview}
-                icon={<Download className="w-3.5 h-3.5" />}
-              >
-                下载配置
-              </Button>
-            </div>
-          )
-        }
-      >
-        <div className="space-y-4">
-          <SegmentedTabs
-            items={PREVIEW_TARGETS}
-            value={previewTarget}
-            onChange={(t) => void fetchPreview(t)}
-          />
-          <div className="rounded-xl border border-subtle bg-[#060913] text-slate-200 font-mono text-xs p-4 min-h-[360px] max-h-[65vh] overflow-y-auto">
-            {loadingPreview ? (
-              <div className="py-16 text-center text-slate-400">
-                <RefreshCw className="w-5 h-5 animate-spin mx-auto mb-2 text-accent" />
-                <span>正在实时生成 {previewTarget} 配置…</span>
+      {/* Live Target Config Preview Modal */}
+      {showPreviewModal && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center sm:p-4 bg-slate-950/85 backdrop-blur-md">
+          <div className="bg-slate-900 border-t sm:border border-slate-800 rounded-t-3xl sm:rounded-3xl w-full max-w-4xl max-h-[90dvh] flex flex-col overflow-hidden shadow-2xl pb-safe">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800">
+              <div>
+                <h4 className="text-base font-bold text-white flex items-center gap-2">
+                  <FileCode2 className="w-4 h-4 text-purple-400" />
+                  <span>多客户端订阅实时转换预览</span>
+                  {previewData && (
+                    <span className="px-2 py-0.5 rounded-md text-[11px] font-mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                      {previewData.nodeCount} 个节点
+                    </span>
+                  )}
+                </h4>
+                <p className="text-xs text-slate-400 mt-0.5 font-mono">
+                  {previewData?.filename || '选择目标格式查看 SubHub 实时渲染结果'}
+                </p>
               </div>
-            ) : (
-              <pre className="whitespace-pre-wrap break-all leading-relaxed select-text">
-                {previewData?.content || ''}
-              </pre>
-            )}
+              <button
+                onClick={() => setShowPreviewModal(false)}
+                className="p-1.5 rounded-xl hover:bg-slate-800 text-slate-400 hover:text-white"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="px-6 py-3 bg-slate-950/60 border-b border-slate-800 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-1.5">
+                {PREVIEW_TARGETS.map((t) => (
+                  <button
+                    key={t.key}
+                    onClick={() => fetchPreview(t.key)}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-mono transition-colors ${
+                      previewTarget === t.key
+                        ? 'bg-purple-500/20 text-purple-200 border border-purple-500/40 font-semibold'
+                        : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
+                    }`}
+                  >
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+              {previewData && (
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => copyText(previewData.content, 'preview-copy')}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs"
+                  >
+                    {copiedKey === 'preview-copy' ? (
+                      <Check className="w-3.5 h-3.5 text-emerald-400" />
+                    ) : (
+                      <Copy className="w-3.5 h-3.5" />
+                    )}
+                    <span>复制内容</span>
+                  </button>
+                  <button
+                    onClick={handleDownloadPreview}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 text-xs font-semibold"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>下载文件</span>
+                  </button>
+                </div>
+              )}
+            </div>
+
+            <div className="p-5 flex-1 overflow-y-auto bg-[#060913] font-mono text-xs text-slate-300">
+              {loadingPreview ? (
+                <div className="py-16 text-center text-slate-400">
+                  <RefreshCw className="w-5 h-5 animate-spin mx-auto mb-2 text-purple-400" />
+                  <span>正在实时生成 {previewTarget} 配置...</span>
+                </div>
+              ) : (
+                <pre className="whitespace-pre-wrap break-all leading-relaxed">{previewData?.content || ''}</pre>
+              )}
+            </div>
           </div>
         </div>
-      </SlideDrawer>
+      )}
 
-      {/* QR Code SlideDrawer */}
-      <SlideDrawer
-        open={Boolean(qrModal)}
-        onClose={() => setQrModal(null)}
-        title={qrModal?.title || '扫码导入'}
-        subtitle="使用 Shadowrocket / Sing-Box / Clash 客户端扫描下方二维码"
-        size="md"
-      >
-        {qrModal && (
-          <div className="flex flex-col items-center text-center space-y-4 py-4">
-            <div className="p-4 rounded-2xl bg-white border border-subtle shadow-sm">
-              <QRCodeBox value={qrModal.url} size={220} />
-            </div>
-            <p className="font-mono text-[11px] text-secondary break-all bg-surface2 border border-subtle rounded-xl p-3 w-full text-left select-all">
-              {qrModal.url}
-            </p>
-            <Button
-              variant="primary"
-              size="sm"
-              onClick={() => copyText(qrModal.url, 'qr-copy')}
-              icon={copiedKey === 'qr-copy' ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+      {/* QR Code Modal */}
+      {qrModalURL && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 max-w-sm w-full flex flex-col items-center text-center shadow-2xl relative">
+            <button
+              onClick={() => setQrModalURL(null)}
+              className="absolute top-4 right-4 p-1.5 rounded-xl hover:bg-slate-800 text-slate-400 hover:text-white transition-colors"
             >
-              复制链接地址
-            </Button>
+              <X className="w-4 h-4" />
+            </button>
+            <h4 className="text-base font-bold text-white mt-1">手机扫码快速导入</h4>
+            <p className="text-xs text-slate-400 mt-1">使用 Shadowrocket 或支持二维码的客户端扫码</p>
+            <div className="mt-5 p-3 bg-white rounded-2xl shadow-inner">
+              <canvas ref={qrCanvasRef} className="rounded-lg"></canvas>
+            </div>
+            <p className="text-[11px] font-mono text-slate-400 mt-4 break-all max-w-xs line-clamp-2">
+              {qrModalURL}
+            </p>
           </div>
-        )}
-      </SlideDrawer>
-
-      {/* ConfirmDialog */}
-      <ConfirmDialog
-        open={Boolean(confirmAction)}
-        title={
-          confirmAction?.kind === 'rotateKey'
-            ? '确认轮换订阅访问密钥？'
-            : confirmAction?.kind === 'clearAudit'
-            ? '确认清空订阅拉取审计日志？'
-            : `确认移除订阅源「${confirmAction?.kind === 'deleteSource' ? confirmAction.item.displayName : ''}」？`
-        }
-        description={
-          confirmAction?.kind === 'rotateKey'
-            ? '轮换后将生成全新随机订阅密钥，所有设备原旧订阅链接会立即失效，需重新扫码或导入新链接。'
-            : confirmAction?.kind === 'clearAudit'
-            ? '清空后近期订阅下发与密钥拦截记录将不可恢复，已触发的防火墙 IP 封禁不受影响。'
-            : '移除后该订阅源包含的节点将从下次及实时聚合下发中移除。'
-        }
-        confirmText={confirmAction?.kind === 'rotateKey' ? '确认轮换' : '确认移除'}
-        danger
-        onConfirm={executeConfirm}
-        onCancel={() => setConfirmAction(null)}
-      />
+        </div>
+      )}
     </div>
   );
 };

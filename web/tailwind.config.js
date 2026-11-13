@@ -9,34 +9,32 @@ export default {
   theme: {
     extend: {
       colors: {
-        canvas: 'var(--bg-canvas)',
-        surface1: 'var(--bg-surface-1)',
-        surface2: 'var(--bg-surface-2)',
-        surfaceHover: 'var(--bg-surface-hover)',
-        accent: 'var(--accent)',
-        accentStrong: 'var(--accent-strong)',
         brand: {
-          50: '#f0f9ff',
-          400: '#38bdf8',
-          500: '#0ea5e9',
-          600: '#0284c7',
+          50: '#f0fdf4',
+          400: '#4ade80',
+          500: '#22c55e',
+          600: '#16a34a',
         },
         slate: {
           850: '#151e2e',
           900: '#0f172a',
-          950: '#090c12',
+          950: '#080d1a',
         },
-      },
-      borderColor: {
-        subtle: 'var(--border-subtle)',
-        strong: 'var(--border-strong)',
+        canvas: 'var(--bg-canvas)',
+        surface1: 'var(--bg-surface-1)',
+        surface2: 'var(--bg-surface-2)',
+        surfaceHover: 'var(--bg-surface-hover)',
       },
       textColor: {
         primary: 'var(--text-primary)',
         secondary: 'var(--text-secondary)',
         muted: 'var(--text-muted)',
       },
+      borderColor: {
+        subtle: 'var(--border-subtle)',
+        strong: 'var(--border-strong)',
+      },
     },
   },
   plugins: [],
-};
+}

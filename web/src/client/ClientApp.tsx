@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import {
   Activity,
   FileText,
@@ -6,7 +6,6 @@ import {
   Sliders,
   ShieldAlert,
   HeartPulse,
-  Shield,
   Network,
   FileCode2,
   Wrench,
@@ -27,7 +26,7 @@ import {
   ToastProvider,
   useToast,
 } from '../ui';
-import { useCachedQuery, useHashRoute, useTheme } from '../hooks';
+import { useCachedQuery, useHashRoute } from '../hooks';
 import { clientApi } from './api';
 import { ClientStatusResponse } from './types';
 import { TaskConsoleDrawer } from './TaskConsoleDrawer';
@@ -36,12 +35,12 @@ import { SingBoxPage } from './pages/SingBoxPage';
 import { PanelPage } from './pages/PanelPage';
 import { AuditPage } from './pages/AuditPage';
 import { WatchdogPage } from './pages/WatchdogPage';
-import { FirewallPage, TailscalePage } from './pages/NetworkPage';
+import { NetworkHubPage } from './pages/NetworkPage';
 import { ConfigPage } from './pages/ConfigPage';
 import { LogsPage } from './pages/LogsPage';
 import { SystemPage } from './pages/SystemPage';
 
-const CLIENT_TABS = ['dash', 'logs', 'sb', 'panel', 'audit', 'dm', 'fw', 'ts', 'config', 'sys'] as const;
+const CLIENT_TABS = ['dash', 'sb', 'audit', 'dm', 'panel', 'net', 'config', 'logs', 'sys'] as const;
 type ClientTab = (typeof CLIENT_TABS)[number];
 
 const MOBILE_PRIMARY_TABS: readonly ClientTab[] = ['dash', 'sb', 'audit', 'dm'];
@@ -54,8 +53,19 @@ interface ConfirmState {
 
 const ClientShell: React.FC = () => {
   const { success, error, toast } = useToast();
-  const { theme, toggleTheme } = useTheme();
   const { tab, sub, navigate } = useHashRoute<ClientTab>(CLIENT_TABS, 'dash');
+
+  // 兼容旧版 #/fw 与 #/ts 书签跳转至「网络与组网」对应子页
+  useEffect(() => {
+    const normalizeLegacyHash = () => {
+      const h = (window.location.hash || '').replace(/^#\/?/, '').split('?')[0];
+      if (h === 'fw') navigate('net', 'fw');
+      else if (h === 'ts') navigate('net', 'ts');
+    };
+    normalizeLegacyHash();
+    window.addEventListener('hashchange', normalizeLegacyHash);
+    return () => window.removeEventListener('hashchange', normalizeLegacyHash);
+  }, [navigate]);
 
   const {
     data: status,
@@ -179,92 +189,80 @@ const ClientShell: React.FC = () => {
 
     return [
       {
-        title: '运行监控',
+        title: '运行与核心',
         items: [
           {
             key: 'dash',
-            label: '系统总览',
+            label: '总览与监控',
             shortLabel: '总览',
-            desc: '核心服务运行状态与快速操作',
+            desc: '核心服务运行状态与一键运维操作',
             icon: Activity,
           },
           {
-            key: 'logs',
-            label: '运行日志',
-            shortLabel: '日志',
-            desc: '查看守护进程、事件与 Web 审计日志',
-            icon: FileText,
-          },
-        ],
-      },
-      {
-        title: '代理核心',
-        items: [
-          {
             key: 'sb',
-            label: 'sing-box',
+            label: 'Sing-Box 核心',
             shortLabel: '核心',
             desc: '内核生命周期、规则集缓存与配置文件编辑器',
             icon: Zap,
             badge: sbBadge,
           },
           {
-            key: 'panel',
-            label: '控制面板',
-            shortLabel: '面板',
-            desc: '内置 Zashboard 实时节点测速与连接监控',
-            icon: Sliders,
-          },
-        ],
-      },
-      {
-        title: '安全守护',
-        items: [
-          {
             key: 'audit',
-            label: '设备审计',
+            label: '行为与审计',
             shortLabel: '审计',
             desc: '局域网异常流量识别、AI 研判与一键封禁',
             icon: ShieldAlert,
           },
           {
             key: 'dm',
-            label: '看门狗',
+            label: '看门狗自愈',
             shortLabel: '看门狗',
             desc: '自动巡检保活、订阅同步与故障切换配置',
             icon: HeartPulse,
             badge: dmBadge,
           },
+        ],
+      },
+      {
+        title: '代理与网络',
+        items: [
           {
-            key: 'fw',
-            label: '防火墙',
-            shortLabel: '防火墙',
-            desc: 'macOS / Linux 透明代理网关转发策略',
-            icon: Shield,
+            key: 'panel',
+            label: 'Clash 面板',
+            shortLabel: '面板',
+            desc: '内置 Zashboard 实时节点测速与连接监控',
+            icon: Sliders,
           },
           {
-            key: 'ts',
-            label: '组网',
+            key: 'net',
+            label: '网络与组网',
             shortLabel: '组网',
-            desc: 'Tailscale 异地子网与出口节点状态',
+            desc: 'Tailscale 异地子网组网与 nftables 防火墙加固',
             icon: Network,
           },
         ],
       },
       {
-        title: '配置系统',
+        title: '配置与维护',
         items: [
           {
             key: 'config',
-            label: '配置管理',
+            label: '配置与订阅',
             shortLabel: '配置',
             desc: '订阅源、GitHub 加速镜像与 singctl.yaml 编辑',
             icon: FileCode2,
           },
           {
+            key: 'logs',
+            label: '系统日志',
+            shortLabel: '日志',
+            desc: '查看守护进程、事件与 Web 审计日志',
+            icon: FileText,
+          },
+          {
             key: 'sys',
             label: '系统维护',
-            shortLabel: '系统',
+            shortLabel: '运维',
             desc: '版本信息、一键更新与移动设备授权连接',
             icon: Wrench,
           },
@@ -317,6 +315,14 @@ const ClientShell: React.FC = () => {
 
   const navigateSafe = useCallback(
     (next: string) => {
+      if (next === 'fw') {
+        navigate('net', 'fw');
+        return;
+      }
+      if (next === 'ts') {
+        navigate('net', 'ts');
+        return;
+      }
       if (CLIENT_TABS.includes(next as ClientTab)) {
         navigate(next as ClientTab);
       }
@@ -325,15 +331,26 @@ const ClientShell: React.FC = () => {
   );
 
   const statusPill = status ? (
-    <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-full bg-surface2 border border-subtle text-xs">
-      <StatusDot tone={status.singbox.running ? 'ok' : 'danger'} pulse={status.singbox.running} />
-      <span className="font-medium text-primary hidden sm:inline">
-        {status.singbox.running ? '代理运行中' : '代理已停止'}
-      </span>
-      <span className="font-mono text-[11px] text-muted hidden md:inline">
-        {status.host.hostname}
-        {status.host.lanIP ? ` · ${status.host.lanIP}` : ''}
-      </span>
+    <div className="hidden md:flex items-center gap-2 text-xs font-mono text-slate-400">
+      <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-800">
+        <StatusDot tone={status.singbox.running ? 'ok' : 'danger'} pulse={status.singbox.running} />
+        <span className="text-slate-400">核心</span>
+        <span className={status.singbox.running ? 'text-emerald-400 font-semibold' : 'text-rose-400 font-semibold'}>
+          {status.singbox.running ? '运行中' : '已停止'}
+        </span>
+      </div>
+      <div className="hidden lg:flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-800">
+        <span className="text-slate-400">看门狗</span>
+        <span className={status.daemon.running ? 'text-emerald-400 font-semibold' : 'text-slate-300 font-semibold'}>
+          {status.daemon.running ? '守护中' : '未运行'}
+        </span>
+      </div>
+      {status.host.lanIP && (
+        <div className="hidden xl:flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-800">
+          <span className="text-slate-400">网关</span>
+          <span className="text-slate-200 font-semibold">{status.host.lanIP}</span>
+        </div>
+      )}
     </div>
   ) : null;
 
@@ -343,7 +360,7 @@ const ClientShell: React.FC = () => {
         <Button
           size="sm"
           variant={drawerOpen ? 'primary' : 'secondary'}
-          icon={<Terminal className={`w-3.5 h-3.5 ${busy ? 'animate-pulse text-sky-400' : ''}`} />}
+          icon={<Terminal className={`w-3.5 h-3.5 ${busy ? 'animate-pulse text-emerald-400' : ''}`} />}
           onClick={() => setDrawerOpen((v) => !v)}
         >
           <span className="hidden sm:inline">{busy ? '任务执行中' : '任务控制台'}</span>
@@ -355,17 +372,19 @@ const ClientShell: React.FC = () => {
         variant="ghost"
         title="刷新系统状态"
         onClick={() => refreshStatus(false)}
-        icon={<RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />}
+        icon={<RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin text-emerald-400' : ''}`} />}
       />
 
       {status?.authEnabled && (
-        <Button
-          size="sm"
-          variant="ghost"
-          title="退出登录"
+        <button
+          type="button"
           onClick={handleLogout}
-          icon={<LogOut className="w-3.5 h-3.5" />}
-        />
+          title="退出登录"
+          className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/20 text-rose-300 text-xs font-medium transition-all cursor-pointer"
+        >
+          <LogOut className="w-3.5 h-3.5" />
+          <span className="hidden sm:inline">退出</span>
+        </button>
       )}
     </div>
   );
@@ -373,7 +392,7 @@ const ClientShell: React.FC = () => {
   const banner = (
     <>
       {restartingBanner && (
-        <div className="rounded-xl border border-sky-500/30 bg-sky-500/10 px-4 py-2.5 text-xs text-sky-300 flex items-center gap-2">
+        <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-2.5 text-xs text-emerald-300 flex items-center gap-2">
           <RefreshCw className="w-4 h-4 animate-spin shrink-0" />
           <span>程序已完成自我更新并正在重启服务，控制台将在恢复后自动刷新…</span>
         </div>
@@ -400,8 +419,12 @@ const ClientShell: React.FC = () => {
   return (
     <>
       <AppShell
-        brandTitle="SingCtl"
-        brandSubtitle="客户端控制台"
+        brandTitle="网关控制台"
+        brandSubtitle={
+          status?.host?.lanIP
+            ? `${status.host.hostname || 'Router'} · ${status.host.lanIP}`
+            : status?.host?.hostname || 'SingCtl Client Gateway'
+        }
         version={status?.singctlVersion}
         groups={navGroups}
         activeTab={tab}
@@ -410,8 +433,6 @@ const ClientShell: React.FC = () => {
         statusPill={statusPill}
         topbarActions={topbarActions}
         banner={banner}
-        theme={theme}
-        onToggleTheme={toggleTheme}
         extraCommandItems={extraCommands}
       >
         {tab === 'dash' && (
@@ -440,16 +461,15 @@ const ClientShell: React.FC = () => {
             onOpenEventsLog={() => navigate('logs', 'events')}
           />
         )}
-        {tab === 'ts' && (
-          <TailscalePage
+        {tab === 'net' && (
+          <NetworkHubPage
             status={status ?? null}
             busy={busy}
+            initialSub={sub}
+            onSubChange={(nextSub) => navigate('net', nextSub)}
             onAction={requestAction}
             onNavigate={navigateSafe}
           />
-        )}
-        {tab === 'fw' && (
-          <FirewallPage status={status ?? null} busy={busy} onAction={requestAction} />
         )}
         {tab === 'config' && <ConfigPage onSaved={() => refreshStatus(true)} />}
         {tab === 'logs' && <LogsPage initialLogName={sub} />}
