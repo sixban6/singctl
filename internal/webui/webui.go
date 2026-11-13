@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"singctl/internal/logger"
 	"singctl/internal/util/netinfo"
@@ -52,8 +53,23 @@ type Server struct {
 	iosCacheKey string // singctl.yaml 的 path|mtime|size 指纹
 	iosCacheVal string
 
-	routingMu    sync.Mutex
+	cfgMu        sync.Mutex
 	auditLimiter *auditRateLimiter
+
+	// Clash 控制接口（endpoint + secret）短缓存，避免高频轮询重复探测 /version
+	clashMu          sync.Mutex
+	clashFingerprint string
+	clashEndpoint    string
+	clashSecret      string
+	clashCachedAt    time.Time
+
+	// /api/sb/traffic 按需后台采样器（无请求 15s 自动停止）
+	trafficMu                  sync.Mutex
+	trafficState               sbTrafficResponse
+	trafficSampledAt           time.Time
+	trafficLastReqAt           time.Time
+	trafficRunning             bool
+	trafficMemUnsupportedUntil time.Time
 }
 
 // New 创建 Web 服务
@@ -206,8 +222,9 @@ func (s *Server) guard(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		s.setAuthCookie(w, r)
-		// 轻量 CSRF 防护:写操作要求 JSON Content-Type(跨站表单无法伪造)
+		// 轻量 CSRF 与包体上限防护: 写操作限制请求体 <= 4MB 并要求 JSON Content-Type(跨站表单无法伪造)
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			r.Body = http.MaxBytesReader(w, r.Body, 4<<20)
 			if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
 				writeJSONError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
 				return

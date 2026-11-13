@@ -153,6 +153,9 @@ func (s *Server) handleAuditBlock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
+
 	cfg, err := config.Load(s.opts.ConfigPath)
 	if err != nil || cfg == nil {
 		cfg = &config.Config{}
@@ -164,6 +167,7 @@ func (s *Server) handleAuditBlock(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	s.invalidateIOSCache()
 	_ = daemon.NotifyReload()
 	writeJSON(w, http.StatusOK, res)
 }
@@ -185,6 +189,9 @@ func (s *Server) handleAuditUnblock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
+
 	cfg, err := config.Load(s.opts.ConfigPath)
 	if err != nil || cfg == nil {
 		writeJSONError(w, http.StatusBadRequest, "加载配置文件失败")
@@ -197,6 +204,7 @@ func (s *Server) handleAuditUnblock(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	s.invalidateIOSCache()
 	_ = daemon.NotifyReload()
 	writeJSON(w, http.StatusOK, res)
 }
@@ -222,6 +230,9 @@ func (s *Server) handleAuditWhitelist(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "target 不能为空")
 		return
 	}
+
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
 
 	cfg, err := config.Load(s.opts.ConfigPath)
 	if err != nil || cfg == nil {
@@ -303,6 +314,9 @@ func (s *Server) handleAuditAIConfigPost(w http.ResponseWriter, r *http.Request)
 		writeJSONError(w, http.StatusBadRequest, "无效的 JSON 请求体")
 		return
 	}
+
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
 
 	cfg, err := config.Load(s.opts.ConfigPath)
 	if err != nil || cfg == nil {

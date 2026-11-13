@@ -106,12 +106,12 @@ export function AppShell<T extends string = string>({
   }, [flatItems, extraCommandItems, onSelectTab]);
 
   return (
-    <div className="min-h-dvh flex flex-col bg-[#080d1a] text-slate-100">
+    <div className="min-h-dvh flex flex-col bg-[#080d1a] text-slate-100 overflow-x-clip">
       {/* Sticky Frosted Glass Header — 1:1 Aligned with Server Console */}
-      <header className="sticky top-0 z-40 w-full border-b border-slate-800/80 bg-slate-950/80 backdrop-blur-xl">
-        <div className="max-w-[1440px] mx-auto px-3.5 sm:px-6 lg:px-8 h-14 sm:h-16 flex items-center justify-between gap-2">
+      <header className="sticky top-0 z-40 w-full border-b border-slate-800/80 bg-slate-950/80 backdrop-blur-xl pt-safe pl-safe pr-safe">
+        <div className="max-w-[1440px] mx-auto px-3 sm:px-6 lg:px-8 h-14 sm:h-16 flex items-center justify-between gap-2">
           {/* Brand */}
-          <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
+          <div className="flex items-center gap-2 sm:gap-3 min-w-0">
             <div
               className={`w-8 h-8 sm:w-9 sm:h-9 rounded-xl flex items-center justify-center shrink-0 ${
                 brandIconClassName || 'bg-emerald-500/10 border border-emerald-500/20 glow-green'
@@ -121,17 +121,25 @@ export function AppShell<T extends string = string>({
             </div>
             <div className="min-w-0">
               <div className="flex items-center gap-1.5 sm:gap-2">
-                <span className="font-bold text-sm sm:text-base tracking-tight text-white truncate">
+                <span className="font-bold text-sm sm:text-base tracking-tight text-white whitespace-nowrap shrink-0">
                   {brandTitle}
                 </span>
                 {version && (
-                  <span className="text-[10px] sm:text-xs px-1.5 sm:px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono font-medium shrink-0">
-                    {version.startsWith('v') ? version : `v${version}`}
+                  <span
+                    title={version}
+                    className="text-[10px] sm:text-xs px-1.5 sm:px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono font-medium max-w-[96px] sm:max-w-none truncate"
+                  >
+                    <span className="sm:hidden">
+                      {(version.startsWith('v') ? version : `v${version}`).replace(/\+.*$/, '')}
+                    </span>
+                    <span className="hidden sm:inline">
+                      {version.startsWith('v') ? version : `v${version}`}
+                    </span>
                   </span>
                 )}
               </div>
               {brandSubtitle && (
-                <p className="text-[11px] text-slate-400 font-mono truncate max-w-[180px] sm:max-w-xs">
+                <p className="text-[11px] text-slate-400 font-mono truncate max-w-[150px] xs:max-w-[200px] sm:max-w-xs">
                   {brandSubtitle}
                 </p>
               )}
@@ -139,8 +147,8 @@ export function AppShell<T extends string = string>({
           </div>
 
           {/* Right Status Chips & Actions */}
-          <div className="flex items-center gap-2 sm:gap-2.5 shrink-0">
-            {statusPill}
+          <div className="flex items-center gap-1.5 sm:gap-2.5 shrink-0">
+            {statusPill && <div className="hidden sm:flex items-center">{statusPill}</div>}
 
             <button
               type="button"
@@ -175,7 +183,7 @@ export function AppShell<T extends string = string>({
       </header>
 
       {/* Main Container matching Server Console max-w-[1440px] */}
-      <main className="flex-1 max-w-[1440px] w-full mx-auto px-3.5 sm:px-6 lg:px-8 py-4 sm:py-6 pb-mobile-nav md:pb-8 space-y-5 sm:space-y-6">
+      <main className="flex-1 max-w-[1440px] w-full mx-auto px-3.5 sm:px-6 lg:px-8 pl-safe pr-safe py-4 sm:py-6 pb-mobile-nav md:pb-8 space-y-5 sm:space-y-6">
         {banner}
 
         {/* Desktop & Tablet Horizontal Tab Strip (>= 768px) */}
@@ -292,7 +300,7 @@ export function AppShell<T extends string = string>({
           onClick={() => setMoreOpen(false)}
         >
           <div
-            className="w-full bg-slate-900 border-t border-slate-800 rounded-t-3xl p-5 pb-safe space-y-3 shadow-2xl max-h-[82vh] overflow-y-auto"
+            className="w-full bg-slate-900 border-t border-slate-800 rounded-t-3xl p-5 pb-safe pl-safe pr-safe space-y-3 shadow-2xl max-h-[calc(82dvh-env(safe-area-inset-top,0px))] overflow-y-auto"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="w-10 h-1 rounded-full bg-slate-700 mx-auto mb-1" />

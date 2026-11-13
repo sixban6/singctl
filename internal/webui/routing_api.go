@@ -43,8 +43,8 @@ type trafficRoutingPutRequest struct {
 }
 
 func (s *Server) handleTrafficRoutingGet(w http.ResponseWriter, _ *http.Request) {
-	s.routingMu.Lock()
-	defer s.routingMu.Unlock()
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
 
 	cfg, err := config.Load(configPathFor(s))
 	if err != nil || cfg == nil {
@@ -63,8 +63,8 @@ func (s *Server) handleTrafficRoutingPut(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	s.routingMu.Lock()
-	defer s.routingMu.Unlock()
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
 
 	cfgPath := configPathFor(s)
 	origCfgBytes, origReadErr := os.ReadFile(cfgPath)

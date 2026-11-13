@@ -41,7 +41,7 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   return (
     <ToastContext.Provider value={{ toast, success, error, warn }}>
       {children}
-      <div className="fixed bottom-20 md:bottom-5 right-4 z-[70] flex flex-col gap-2 max-w-sm w-[calc(100vw-2rem)] sm:w-full pointer-events-none">
+      <div className="fixed bottom-mobile-toast md:bottom-5 left-3 right-3 sm:left-auto sm:right-4 z-[70] flex flex-col gap-2 sm:max-w-sm sm:w-full pointer-events-none">
         {toasts.map((t) => {
           const borderStyle =
             t.type === 'success'

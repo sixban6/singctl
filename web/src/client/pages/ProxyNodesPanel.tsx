@@ -193,24 +193,52 @@ export const ProxyNodesPanel: React.FC<ProxyNodesPanelProps> = ({
     saveExpandedPrefs(next);
   };
 
+  const resolveGroupChainOptimistically = (
+    groupName: string,
+    byName: Map<string, SbProxyGroup>,
+    nodes: Record<string, SbProxyNodeMeta>,
+  ) => {
+    const chain: string[] = [];
+    const visited = new Set<string>();
+    let curName = groupName;
+    while (curName && !visited.has(curName)) {
+      visited.add(curName);
+      const grp = byName.get(curName);
+      if (!grp || !grp.now) break;
+      chain.push(grp.now);
+      if (!byName.has(grp.now)) break;
+      curName = grp.now;
+    }
+    const leaf = chain.length > 0 ? chain[chain.length - 1] : undefined;
+    const leafDelay = leaf ? nodes[leaf]?.delay ?? 0 : 0;
+    return { resolvedChain: chain, resolvedNode: leaf, resolvedDelay: leafDelay };
+  };
+
   const handleSelectNode = async (group: SbProxyGroup, target: string) => {
     if (!group.canSelect || group.now === target || switchingKey) return;
     const prevSnapshot = snapshot;
 
-    // 乐观切换：立刻高亮新节点，避免点击等待感
+    // 乐观切换：同步递归解析当前分组与引用该分组的上层父分组链表
     if (snapshot) {
-      const updatedGroups = snapshot.groups.map((g) => {
-        if (g.name !== group.name) return g;
-        const nextDelay = snapshot.nodes[target]?.delay ?? 0;
+      const staged = snapshot.groups.map((g) =>
+        g.name === group.name
+          ? {
+              ...g,
+              now: target,
+              failedOver: false,
+              failoverFrom: undefined,
+              failoverSince: undefined,
+            }
+          : g,
+      );
+      const byName = new Map(staged.map((g) => [g.name, g]));
+      const updatedGroups = staged.map((g) => {
+        if (g.name !== group.name && g.now !== group.name && !g.resolvedChain?.includes(group.name)) {
+          return g;
+        }
         return {
           ...g,
-          now: target,
-          resolvedChain: [target],
-          resolvedNode: target,
-          resolvedDelay: nextDelay,
-          failedOver: false,
-          failoverFrom: undefined,
-          failoverSince: undefined,
+          ...resolveGroupChainOptimistically(g.name, byName, snapshot.nodes),
         };
       });
       onSnapshotChange({ ...snapshot, groups: updatedGroups });
@@ -451,7 +479,7 @@ export const ProxyNodesPanel: React.FC<ProxyNodesPanelProps> = ({
               <button
                 type="button"
                 onClick={() => setSortByDelay((v) => !v)}
-                className={`inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg text-xs border transition-colors cursor-pointer ${
+                className={`inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg text-xs border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                   sortByDelay
                     ? 'bg-[var(--accent-soft)] text-emerald-300 border-emerald-500/35'
                     : 'bg-surface2 text-secondary border-subtle hover:text-primary'
@@ -464,7 +492,7 @@ export const ProxyNodesPanel: React.FC<ProxyNodesPanelProps> = ({
               <button
                 type="button"
                 onClick={() => setOnlyAvailable((v) => !v)}
-                className={`inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg text-xs border transition-colors cursor-pointer ${
+                className={`inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg text-xs border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                   onlyAvailable
                     ? 'bg-[var(--accent-soft)] text-emerald-300 border-emerald-500/35'
                     : 'bg-surface2 text-secondary border-subtle hover:text-primary'
@@ -479,14 +507,14 @@ export const ProxyNodesPanel: React.FC<ProxyNodesPanelProps> = ({
                   <button
                     type="button"
                     onClick={() => setAllGroupsExpanded(true)}
-                    className="h-8 px-2.5 rounded-lg text-xs bg-surface2 text-secondary border border-subtle hover:text-primary transition-colors cursor-pointer"
+                    className="h-8 px-2.5 rounded-lg text-xs bg-surface2 text-secondary border border-subtle hover:text-primary transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                   >
                     全部展开
                   </button>
                   <button
                     type="button"
                     onClick={() => setAllGroupsExpanded(false)}
-                    className="h-8 px-2.5 rounded-lg text-xs bg-surface2 text-secondary border border-subtle hover:text-primary transition-colors cursor-pointer"
+                    className="h-8 px-2.5 rounded-lg text-xs bg-surface2 text-secondary border border-subtle hover:text-primary transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                   >
                     收起
                   </button>
@@ -498,7 +526,7 @@ export const ProxyNodesPanel: React.FC<ProxyNodesPanelProps> = ({
           {loading && !snapshot ? (
             <div className="py-10 text-center text-xs text-muted">正在加载策略组与节点列表…</div>
           ) : snapshot?.error && groupsCount === 0 ? (
-            <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-xs text-amber-200 flex items-center justify-between gap-2">
+            <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-xs text-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
               <span>{snapshot.error}</span>
               <Button size="xs" onClick={() => void onRefresh()}>
                 重试

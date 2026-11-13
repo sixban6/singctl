@@ -8,11 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -116,9 +116,36 @@ type sbTrafficResponse struct {
 	Error         string `json:"error,omitempty"`
 }
 
+func sbConfigFingerprint(path string) string {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "missing"
+	}
+	return fmt.Sprintf("%d:%d", info.Size(), info.ModTime().UnixNano())
+}
+
+func (s *Server) invalidateClashCache() {
+	s.clashMu.Lock()
+	s.clashEndpoint = ""
+	s.clashSecret = ""
+	s.clashCachedAt = time.Time{}
+	s.clashMu.Unlock()
+}
+
 func (s *Server) clashEndpointAndSecret(ctx context.Context) (string, string, error) {
-	endpoints := singbox.ClashAPIEndpointsForConfig(s.sbConfigPath())
-	secret := singbox.ClashAPISecretForConfig(s.sbConfigPath())
+	sbPath := s.sbConfigPath()
+	fp := sbConfigFingerprint(sbPath)
+
+	s.clashMu.Lock()
+	if s.clashEndpoint != "" && s.clashFingerprint == fp && time.Since(s.clashCachedAt) < 30*time.Second {
+		ep, sec := s.clashEndpoint, s.clashSecret
+		s.clashMu.Unlock()
+		return ep, sec, nil
+	}
+	s.clashMu.Unlock()
+
+	endpoints := singbox.ClashAPIEndpointsForConfig(sbPath)
+	secret := singbox.ClashAPISecretForConfig(sbPath)
 
 	client := &http.Client{Timeout: 1200 * time.Millisecond}
 	for _, base := range endpoints {
@@ -140,9 +167,17 @@ func (s *Server) clashEndpointAndSecret(ctx context.Context) (string, string, er
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		_ = resp.Body.Close()
 		if resp.StatusCode == http.StatusOK {
+			s.clashMu.Lock()
+			s.clashFingerprint = fp
+			s.clashEndpoint = base
+			s.clashSecret = secret
+			s.clashCachedAt = time.Now()
+			s.clashMu.Unlock()
 			return base, secret, nil
 		}
 	}
+
+	s.invalidateClashCache()
 	return "", "", errClashUnreachable
 }
 
@@ -251,13 +286,11 @@ func (s *Server) buildSbProxiesSnapshot(ctx context.Context, base, secret string
 		}
 	}
 
-	sort.Slice(groups, func(i, j int) bool {
-		wi := groupSortWeight(groups[i].Name, groups[i].Type, mode)
-		wj := groupSortWeight(groups[j].Name, groups[j].Type, mode)
-		if wi != wj {
-			return wi < wj
+	slices.SortFunc(groups, func(a, b SbProxyGroup) int {
+		if c := cmp.Compare(groupSortWeight(a.Name, a.Type, mode), groupSortWeight(b.Name, b.Type, mode)); c != 0 {
+			return c
 		}
-		return groups[i].Name < groups[j].Name
+		return cmp.Compare(a.Name, b.Name)
 	})
 
 	nodes := make(map[string]SbProxyNodeMeta, len(referencedNodes))
@@ -613,12 +646,9 @@ func (s *Server) handleSbProxyDelayPost(w http.ResponseWriter, r *http.Request) 
 	testURL := strings.TrimSpace(body.URL)
 	if testURL == "" {
 		testURL = defaultClashDelayURL
-	} else {
-		parsedURL, err := url.ParseRequestURI(testURL)
-		if err != nil || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") || parsedURL.Host == "" {
-			writeJSONError(w, http.StatusBadRequest, "测速 URL 必须为合法的 http/https 地址")
-			return
-		}
+	} else if err := validateProbeURL(testURL); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	timeoutMs := body.TimeoutMs
@@ -810,44 +840,112 @@ func (s *Server) handleSbModePut(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+const (
+	trafficIdleStopWindow   = 15 * time.Second
+	trafficCacheFreshWindow = 4 * time.Second
+	trafficMemRetryCooldown = 5 * time.Minute
+)
+
+func validateProbeURL(raw string) error {
+	parsed, err := url.ParseRequestURI(raw)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return errors.New("测速 URL 必须为合法的 http/https 地址")
+	}
+	if parsed.User != nil {
+		return errors.New("测速 URL 不允许包含认证凭据")
+	}
+	host := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(parsed.Hostname()), "."))
+	if host == "" {
+		return errors.New("测速 URL 缺少合法主机名")
+	}
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") || strings.HasSuffix(host, ".local") {
+		return errors.New("出于安全策略禁止测速本机或内网保留域名")
+	}
+	if ip := net.ParseIP(host); ip != nil && isBlockedProbeIP(ip) {
+		return errors.New("出于安全策略禁止测速回环、内网或链路本地 IP 地址")
+	}
+	return nil
+}
+
+func isBlockedProbeIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+		return true
+	}
+	if ip4 := ip.To4(); ip4 != nil {
+		// CGNAT 100.64.0.0/10
+		if ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127 {
+			return true
+		}
+		// THIS-NET 0.0.0.0/8 & Benchmarking 198.18.0.0/15
+		if ip4[0] == 0 || (ip4[0] == 198 && (ip4[1] == 18 || ip4[1] == 19)) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) handleSbTrafficGet(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 2200*time.Millisecond)
+	now := time.Now()
+	s.trafficMu.Lock()
+	s.trafficLastReqAt = now
+	if !s.trafficSampledAt.IsZero() && now.Sub(s.trafficSampledAt) < trafficCacheFreshWindow {
+		snap := s.trafficState
+		if snap.Running && !s.trafficRunning {
+			s.startTrafficSamplerLocked()
+		}
+		s.trafficMu.Unlock()
+		writeJSON(w, http.StatusOK, snap)
+		return
+	}
+	s.trafficMu.Unlock()
+
+	snap := s.sampleClashTrafficOnce(r.Context())
+
+	s.trafficMu.Lock()
+	s.trafficLastReqAt = time.Now()
+	s.trafficState = snap
+	s.trafficSampledAt = time.Now()
+	if snap.Running && !s.trafficRunning {
+		s.startTrafficSamplerLocked()
+	}
+	s.trafficMu.Unlock()
+
+	writeJSON(w, http.StatusOK, snap)
+}
+
+func (s *Server) sampleClashTrafficOnce(parentCtx context.Context) sbTrafficResponse {
+	ctx, cancel := context.WithTimeout(parentCtx, 2200*time.Millisecond)
 	defer cancel()
 
 	base, secret, err := s.clashEndpointAndSecret(ctx)
 	if err != nil {
-		writeJSON(w, http.StatusOK, sbTrafficResponse{
+		return sbTrafficResponse{
 			Running: false,
 			Error:   err.Error(),
-		})
-		return
+		}
 	}
+
+	s.trafficMu.Lock()
+	skipMem := time.Now().Before(s.trafficMemUnsupportedUntil)
+	s.trafficMu.Unlock()
 
 	var (
 		connUp, connDown int64
 		connCount        int
+		connOK           bool
 		rateUp, rateDown int64
+		tickOK           bool
 		memInuse         int64
+		memOK            bool
 		wg               sync.WaitGroup
 	)
 
 	// 1. 活跃连接总数与累计流量
 	wg.Go(func() {
-		c := &http.Client{Timeout: 1200 * time.Millisecond}
-		code, raw, reqErr := doClashRequest(ctx, c, http.MethodGet, base+"/connections", secret, nil)
-		if reqErr != nil || code != http.StatusOK {
-			return
-		}
-		var connDoc struct {
-			UploadTotal   int64 `json:"uploadTotal"`
-			DownloadTotal int64 `json:"downloadTotal"`
-			Connections   []any `json:"connections"`
-		}
-		if json.Unmarshal(raw, &connDoc) == nil {
-			connUp = connDoc.UploadTotal
-			connDown = connDoc.DownloadTotal
-			connCount = len(connDoc.Connections)
-		}
+		connUp, connDown, connCount, connOK = fetchClashConnections(ctx, base, secret)
 	})
 
 	// 2. 瞬时上下行速率（Clash /traffic 为流式 NDJSON，读取首条后立即释放连接）
@@ -861,23 +959,46 @@ func (s *Server) handleSbTrafficGet(w http.ResponseWriter, r *http.Request) {
 		if readFirstClashStreamObject(tickCtx, base+"/traffic", secret, &tick) {
 			rateUp = tick.Up
 			rateDown = tick.Down
+			tickOK = true
 		}
 	})
 
-	// 3. sing-box 内核内存占用
-	wg.Go(func() {
-		memCtx, memCancel := context.WithTimeout(ctx, 1200*time.Millisecond)
-		defer memCancel()
-		var mem struct {
-			Inuse int64 `json:"inuse"`
-		}
-		if readFirstClashStreamObject(memCtx, base+"/memory", secret, &mem) {
-			memInuse = mem.Inuse
-		}
-	})
+	// 3. sing-box 内核内存占用（若内核不支持 /memory 则冷却退避，避免阻塞采样）
+	if !skipMem {
+		wg.Go(func() {
+			memCtx, memCancel := context.WithTimeout(ctx, 250*time.Millisecond)
+			defer memCancel()
+			var mem struct {
+				Inuse int64 `json:"inuse"`
+			}
+			if readFirstClashStreamObject(memCtx, base+"/memory", secret, &mem) {
+				memInuse = mem.Inuse
+				memOK = true
+			}
+		})
+	}
 
 	wg.Wait()
-	writeJSON(w, http.StatusOK, sbTrafficResponse{
+
+	if connOK && !skipMem {
+		s.trafficMu.Lock()
+		if memOK {
+			s.trafficMemUnsupportedUntil = time.Time{}
+		} else {
+			s.trafficMemUnsupportedUntil = time.Now().Add(trafficMemRetryCooldown)
+		}
+		s.trafficMu.Unlock()
+	}
+
+	if !connOK && !tickOK {
+		s.invalidateClashCache()
+		return sbTrafficResponse{
+			Running: false,
+			Error:   errClashUnreachable.Error(),
+		}
+	}
+
+	return sbTrafficResponse{
 		Running:       true,
 		Up:            rateUp,
 		Down:          rateDown,
@@ -885,7 +1006,191 @@ func (s *Server) handleSbTrafficGet(w http.ResponseWriter, r *http.Request) {
 		DownloadTotal: connDown,
 		Connections:   connCount,
 		Memory:        memInuse,
+	}
+}
+
+func (s *Server) startTrafficSamplerLocked() {
+	if s.trafficRunning {
+		return
+	}
+	s.trafficRunning = true
+	go s.runTrafficSampler()
+}
+
+func (s *Server) runTrafficSampler() {
+	streamCtx, streamCancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	defer func() {
+		streamCancel()
+		wg.Wait()
+		s.trafficMu.Lock()
+		s.trafficRunning = false
+		s.trafficMu.Unlock()
+	}()
+
+	// 后台持续读取 Clash /traffic 流式 NDJSON 推送实时速率
+	wg.Go(func() {
+		consecutiveFail := 0
+		for streamCtx.Err() == nil {
+			probeCtx, probeCancel := context.WithTimeout(streamCtx, 1500*time.Millisecond)
+			base, secret, err := s.clashEndpointAndSecret(probeCtx)
+			probeCancel()
+			if err != nil {
+				consecutiveFail++
+				if consecutiveFail >= 2 {
+					return
+				}
+				select {
+				case <-streamCtx.Done():
+					return
+				case <-time.After(time.Second):
+					continue
+				}
+			}
+
+			req, reqErr := http.NewRequestWithContext(streamCtx, http.MethodGet, base+"/traffic", nil)
+			if reqErr != nil {
+				return
+			}
+			if secret != "" {
+				req.Header.Set("Authorization", "Bearer "+secret)
+			}
+			resp, doErr := (&http.Client{}).Do(req)
+			if doErr != nil || resp.StatusCode != http.StatusOK {
+				if resp != nil {
+					_ = resp.Body.Close()
+				}
+				consecutiveFail++
+				if consecutiveFail >= 2 {
+					return
+				}
+				select {
+				case <-streamCtx.Done():
+					return
+				case <-time.After(time.Second):
+					continue
+				}
+			}
+			consecutiveFail = 0
+			dec := json.NewDecoder(resp.Body)
+			for streamCtx.Err() == nil {
+				var tick struct {
+					Up   int64 `json:"up"`
+					Down int64 `json:"down"`
+				}
+				if dec.Decode(&tick) != nil {
+					break
+				}
+				s.trafficMu.Lock()
+				s.trafficState.Running = true
+				s.trafficState.Up = tick.Up
+				s.trafficState.Down = tick.Down
+				s.trafficSampledAt = time.Now()
+				s.trafficMu.Unlock()
+			}
+			_ = resp.Body.Close()
+			select {
+			case <-streamCtx.Done():
+				return
+			case <-time.After(time.Second):
+			}
+		}
 	})
+
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
+	consecutiveConnFail := 0
+	tickCount := 0
+	for range ticker.C {
+		s.trafficMu.Lock()
+		idle := time.Since(s.trafficLastReqAt) > trafficIdleStopWindow
+		skipMem := time.Now().Before(s.trafficMemUnsupportedUntil)
+		s.trafficMu.Unlock()
+		if idle {
+			return
+		}
+
+		tickCount++
+		ctx, cancel := context.WithTimeout(streamCtx, 1500*time.Millisecond)
+		base, secret, err := s.clashEndpointAndSecret(ctx)
+		if err != nil {
+			cancel()
+			consecutiveConnFail++
+			if consecutiveConnFail >= 2 {
+				s.trafficMu.Lock()
+				s.trafficState = sbTrafficResponse{Running: false, Error: err.Error()}
+				s.trafficSampledAt = time.Now()
+				s.trafficMu.Unlock()
+				return
+			}
+			continue
+		}
+
+		connUp, connDown, connCount, connOK := fetchClashConnections(ctx, base, secret)
+		if !connOK {
+			cancel()
+			consecutiveConnFail++
+			if consecutiveConnFail >= 2 {
+				s.invalidateClashCache()
+				s.trafficMu.Lock()
+				s.trafficState = sbTrafficResponse{Running: false, Error: errClashUnreachable.Error()}
+				s.trafficSampledAt = time.Now()
+				s.trafficMu.Unlock()
+				return
+			}
+			continue
+		}
+		consecutiveConnFail = 0
+
+		var memInuse int64
+		var hasMemUpdate bool
+		if !skipMem && tickCount%5 == 0 {
+			memCtx, memCancel := context.WithTimeout(ctx, 250*time.Millisecond)
+			var mem struct {
+				Inuse int64 `json:"inuse"`
+			}
+			if readFirstClashStreamObject(memCtx, base+"/memory", secret, &mem) {
+				memInuse = mem.Inuse
+				hasMemUpdate = true
+			} else {
+				s.trafficMu.Lock()
+				s.trafficMemUnsupportedUntil = time.Now().Add(trafficMemRetryCooldown)
+				s.trafficMu.Unlock()
+			}
+			memCancel()
+		}
+		cancel()
+
+		s.trafficMu.Lock()
+		s.trafficState.Running = true
+		s.trafficState.Error = ""
+		s.trafficState.UploadTotal = connUp
+		s.trafficState.DownloadTotal = connDown
+		s.trafficState.Connections = connCount
+		if hasMemUpdate {
+			s.trafficState.Memory = memInuse
+		}
+		s.trafficSampledAt = time.Now()
+		s.trafficMu.Unlock()
+	}
+}
+
+func fetchClashConnections(ctx context.Context, base, secret string) (upTotal, downTotal int64, count int, ok bool) {
+	c := &http.Client{Timeout: 1200 * time.Millisecond}
+	code, raw, reqErr := doClashRequest(ctx, c, http.MethodGet, base+"/connections", secret, nil)
+	if reqErr != nil || code != http.StatusOK {
+		return 0, 0, 0, false
+	}
+	var connDoc struct {
+		UploadTotal   int64 `json:"uploadTotal"`
+		DownloadTotal int64 `json:"downloadTotal"`
+		Connections   []any `json:"connections"`
+	}
+	if json.Unmarshal(raw, &connDoc) != nil {
+		return 0, 0, 0, false
+	}
+	return connDoc.UploadTotal, connDoc.DownloadTotal, len(connDoc.Connections), true
 }
 
 func readFirstClashStreamObject(ctx context.Context, fullURL, secret string, dst any) bool {

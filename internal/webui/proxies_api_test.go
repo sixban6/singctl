@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"singctl/internal/daemon"
 )
@@ -326,5 +327,116 @@ func TestHandleSbProxies_SwitchDelayModeTrafficAndAuth(t *testing.T) {
 	_ = json.Unmarshal([]byte(raw), &traffic)
 	if !traffic.Running || traffic.Up != 12345 || traffic.Down != 67890 || traffic.Connections != 3 || traffic.Memory != 33554432 {
 		t.Fatalf("unexpected traffic payload: %+v", traffic)
+	}
+}
+
+func TestProxiesDelay_RejectsSSRFTargets(t *testing.T) {
+	dir := t.TempDir()
+	s := New(Options{
+		ConfigPath:        filepath.Join(dir, "singctl.yaml"),
+		SingBoxConfigPath: filepath.Join(dir, "config.json"),
+		Password:          "test-pass",
+	})
+	tok := s.SessionToken()
+
+	badURLs := []string{
+		"http://127.0.0.1:8080/health",
+		"http://[::1]:8080/",
+		"http://169.254.169.254/latest/meta-data/",
+		"http://10.0.0.1/status",
+		"http://192.168.1.1/",
+		"http://100.64.0.1/",
+		"http://localhost:8090/api/status",
+		"http://router.local/probe",
+		"file:///etc/passwd",
+		"ftp://example.com/resource",
+		"https://user:pass@example.com/204",
+	}
+
+	for _, targetURL := range badURLs {
+		t.Run(targetURL, func(t *testing.T) {
+			payload, _ := json.Marshal(map[string]any{
+				"node": "hk-node",
+				"url":  targetURL,
+			})
+			req := httptest.NewRequest(http.MethodPost, "/api/sb/proxies/delay", bytes.NewReader(payload))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", "Bearer "+tok)
+			rec := httptest.NewRecorder()
+			s.Mux.ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400 SSRF rejection for %q, got %d (%s)", targetURL, rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestHandleSbTraffic_CacheAndMemoryBackoff(t *testing.T) {
+	var memHits, connHits int
+	var mu sync.Mutex
+
+	mockClash := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/version":
+			_, _ = w.Write([]byte(`{"version":"1.14.0"}`))
+		case "/connections":
+			mu.Lock()
+			connHits++
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{"uploadTotal":100,"downloadTotal":200,"connections":[{}]}`))
+		case "/traffic":
+			_, _ = w.Write([]byte(`{"up":11,"down":22}` + "\n"))
+		case "/memory":
+			mu.Lock()
+			memHits++
+			mu.Unlock()
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer mockClash.Close()
+
+	dir := t.TempDir()
+	sbPath := filepath.Join(dir, "config.json")
+	extAddr := strings.TrimPrefix(mockClash.URL, "http://")
+	if err := os.WriteFile(sbPath, []byte(fmt.Sprintf(`{"experimental":{"clash_api":{"external_controller":%q,"secret":""}}}`, extAddr)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s := New(Options{
+		ConfigPath:        filepath.Join(dir, "singctl.yaml"),
+		SingBoxConfigPath: sbPath,
+	})
+
+	req1 := httptest.NewRequest(http.MethodGet, "/api/sb/traffic", nil)
+	rec1 := httptest.NewRecorder()
+	s.Mux.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("first traffic get failed: %d", rec1.Code)
+	}
+
+	// Second request within cache window must return instantaneously from cache
+	start := time.Now()
+	req2 := httptest.NewRequest(http.MethodGet, "/api/sb/traffic", nil)
+	rec2 := httptest.NewRecorder()
+	s.Mux.ServeHTTP(rec2, req2)
+	elapsed := time.Since(start)
+	if rec2.Code != http.StatusOK || elapsed > 50*time.Millisecond {
+		t.Fatalf("expected fast cached traffic response, code=%d elapsed=%v", rec2.Code, elapsed)
+	}
+
+	var resp sbTrafficResponse
+	if err := json.Unmarshal(rec2.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if !resp.Running || resp.Up != 11 || resp.Down != 22 || resp.Connections != 1 {
+		t.Fatalf("unexpected cached traffic response: %+v", resp)
+	}
+
+	mu.Lock()
+	cHits, mHits := connHits, memHits
+	mu.Unlock()
+	if cHits == 0 || mHits != 1 {
+		t.Fatalf("expected connHits>0 and /memory probed once with backoff, got conn=%d mem=%d", cHits, mHits)
 	}
 }

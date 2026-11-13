@@ -107,12 +107,34 @@
   min-height: 100dvh;
 }
 
+.pt-safe {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+
+.pl-safe {
+  padding-left: env(safe-area-inset-left, 0px);
+}
+
+.pr-safe {
+  padding-right: env(safe-area-inset-right, 0px);
+}
+
 .pb-safe {
   padding-bottom: env(safe-area-inset-bottom, 0px);
 }
 
 .pb-mobile-nav {
   padding-bottom: calc(5.25rem + env(safe-area-inset-bottom, 0px));
+}
+
+@media (max-width: 767px) {
+  .bottom-mobile-nav {
+    bottom: calc(4rem + env(safe-area-inset-bottom, 0px));
+  }
+
+  .bottom-mobile-toast {
+    bottom: calc(5rem + env(safe-area-inset-bottom, 0px));
+  }
 }
 
 /* Prevent iOS Safari forced page zoom when focusing inputs (< 16px triggers auto-zoom on WebKit) */

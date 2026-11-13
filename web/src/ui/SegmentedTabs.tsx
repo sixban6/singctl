@@ -22,7 +22,7 @@ export function SegmentedTabs<T extends string = string>({
 }: SegmentedTabsProps<T>) {
   return (
     <div
-      className={`inline-flex flex-wrap items-center gap-1 p-1 rounded-xl bg-slate-950/70 border border-slate-800/80 ${className}`}
+      className={`flex sm:inline-flex items-center gap-1 p-1 rounded-xl bg-slate-950/70 border border-slate-800/80 max-w-full overflow-x-auto no-scrollbar ${className}`}
       role="tablist"
     >
       {items.map((item) => {

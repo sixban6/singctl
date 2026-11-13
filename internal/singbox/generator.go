@@ -175,13 +175,13 @@ func (g *ConfigGenerator) GenerateForPlatform(platform string) (string, error) {
 	}
 
 	// 注入自定义规则（DNS 与路由）
-	withCustomRules, err := g.InjectCustomRules(withLocalDNS)
+	withCustomRules, err := g.InjectCustomRulesForPlatform(withLocalDNS, resolved)
 	if err != nil {
 		return "", err
 	}
 
 	// 应用客户端「智能分流开关中心」策略（AI 默认走 #VPS、业务默认走 Proxy、办公生态默认直连 #DC）
-	withTrafficRouting, err := g.InjectTrafficRouting(withCustomRules)
+	withTrafficRouting, err := g.InjectTrafficRoutingForPlatform(withCustomRules, resolved)
 	if err != nil {
 		return "", err
 	}
@@ -196,6 +196,18 @@ func (g *ConfigGenerator) GenerateForPlatform(platform string) (string, error) {
 	hardened, err := HardenClientClashAPI(withWarnLog, resolved)
 	if err != nil {
 		return "", err
+	}
+
+	// iOS SFI 专属适配：清理沙盒不兼容字段/1.14 新特性字段，剥离失效镜像前缀并裁剪超高内存规则集（50MB 内存红线）
+	if isIOS {
+		mirrorURL := ""
+		if g.config != nil {
+			mirrorURL = g.config.GitHub.MirrorURL
+		}
+		hardened, err = AdaptIOSConfig(hardened, mirrorURL)
+		if err != nil {
+			return "", err
+		}
 	}
 
 	// 格式化为可读 JSON
@@ -297,10 +309,15 @@ func HardenClientClashAPI(rawJSON, platform string) (string, error) {
 
 // InjectTrafficRouting 将 singctl.yaml 中的客户端「智能分流开关中心」预设覆盖策略应用到生成配置中。
 func (g *ConfigGenerator) InjectTrafficRouting(rawJSON string) (string, error) {
+	return g.InjectTrafficRoutingForPlatform(rawJSON, "")
+}
+
+// InjectTrafficRoutingForPlatform 按目标平台将客户端「智能分流开关中心」预设覆盖策略应用到生成配置中。
+func (g *ConfigGenerator) InjectTrafficRoutingForPlatform(rawJSON, platform string) (string, error) {
 	if g == nil || g.config == nil {
 		return rawJSON, nil
 	}
-	return ApplyTrafficRoutingToConfigJSON(rawJSON, g.config.TrafficRouting, g.config.CustomRules)
+	return ApplyTrafficRoutingForPlatform(rawJSON, g.config.TrafficRouting, g.config.CustomRules, platform)
 }
 
 // NormalizeClientLogLevel 将客户端 sing-box 配置中的默认 log.level 从 "info" 收敛为 "warn"，
@@ -415,6 +432,13 @@ func (g *ConfigGenerator) InjectLocalDNS(rawJSON, platform string) (string, erro
 // InjectCustomRules 将 singctl.yaml 中声明的 custom_rules（出站组定制、DNS 规则、路由规则）
 // 注入到生成的 sing-box 配置中，从而在不污染通用 singgen 模板的前提下实现高可维护性的策略扩展。
 func (g *ConfigGenerator) InjectCustomRules(rawJSON string) (string, error) {
+	return g.InjectCustomRulesForPlatform(rawJSON, "")
+}
+
+// InjectCustomRulesForPlatform 按目标平台注入 custom_rules。
+// 针对 iOS 平台：跳过局域网设备限定黑名单（SourceIP != ""）与本地物理磁盘规则集（allowLocal = false），
+// 防止引入 iPhone 沙盒不可读路径或无效规则引用。
+func (g *ConfigGenerator) InjectCustomRulesForPlatform(rawJSON, platform string) (string, error) {
 	if g.config == nil || g.config.CustomRules.IsEmpty() {
 		return rawJSON, nil
 	}
@@ -431,9 +455,26 @@ func (g *ConfigGenerator) InjectCustomRules(rawJSON string) (string, error) {
 		}
 	}
 
+	isIOS := strings.EqualFold(strings.TrimSpace(platform), PlatformIOS)
+	blocks := g.config.CustomRules.Block
+	if isIOS && len(blocks) > 0 {
+		filtered := make([]config.BlockRule, 0, len(blocks))
+		for _, b := range blocks {
+			if strings.TrimSpace(b.SourceIP) != "" {
+				continue
+			}
+			norm, _ := NormalizeBlockTarget(b.Target)
+			if strings.HasPrefix(norm, "ruleset:") && strings.TrimSpace(b.RuleSetURL) == "" {
+				continue
+			}
+			filtered = append(filtered, b)
+		}
+		blocks = filtered
+	}
+
 	// 2. 编译设备审计黑名单规则 (custom_rules.block)，作为最高优先级阻断规则注入
-	syncBlockRuleSetDefinitions(root, nil, g.config.CustomRules.Block)
-	blockDNS, blockRoute := CompileBlockRules(g.config.CustomRules.Block)
+	syncBlockRuleSetDefinitions(root, nil, blocks, !isIOS)
+	blockDNS, blockRoute := CompileBlockRules(blocks)
 
 	// 3. 注入 DNS 规则 (custom_rules.block + custom_rules.dns)
 	allDNS := append(blockDNS, g.config.CustomRules.DNS...)
@@ -641,7 +682,7 @@ func SyncBlockRulesInConfigJSON(rawJSON string, oldBlocks, newBlocks []config.Bl
 		return "", fmt.Errorf("failed to parse config.json: %w", err)
 	}
 
-	syncBlockRuleSetDefinitions(root, oldBlocks, newBlocks)
+	syncBlockRuleSetDefinitions(root, oldBlocks, newBlocks, true)
 
 	oldDNS, oldRoute := CompileBlockRules(oldBlocks)
 	newDNS, newRoute := CompileBlockRules(newBlocks)
@@ -665,7 +706,7 @@ func SyncBlockRulesInConfigJSON(rawJSON string, oldBlocks, newBlocks []config.Bl
 	return PrettyJSON(string(data))
 }
 
-func syncBlockRuleSetDefinitions(root map[string]any, oldBlocks, newBlocks []config.BlockRule) {
+func syncBlockRuleSetDefinitions(root map[string]any, oldBlocks, newBlocks []config.BlockRule, allowLocal bool) {
 	routeMap, ok := root["route"].(map[string]any)
 	if !ok {
 		routeMap = make(map[string]any)
@@ -718,15 +759,19 @@ func syncBlockRuleSetDefinitions(root map[string]any, oldBlocks, newBlocks []con
 		if presentTags[tag] {
 			continue
 		}
-		localPath := filepath.Join(RuleSetCacheDir(), tag+".srs")
-		if info, err := os.Stat(localPath); err == nil && info.Size() > 16 {
-			kept = append(kept, map[string]any{
-				"tag":    tag,
-				"type":   "local",
-				"format": "binary",
-				"path":   localPath,
-			})
-		} else if strings.TrimSpace(b.RuleSetURL) != "" {
+		if allowLocal {
+			localPath := filepath.Join(RuleSetCacheDir(), tag+".srs")
+			if info, err := os.Stat(localPath); err == nil && info.Size() > 16 {
+				kept = append(kept, map[string]any{
+					"tag":    tag,
+					"type":   "local",
+					"format": "binary",
+					"path":   localPath,
+				})
+				continue
+			}
+		}
+		if strings.TrimSpace(b.RuleSetURL) != "" {
 			kept = append(kept, map[string]any{
 				"tag":    tag,
 				"type":   "remote",
@@ -1571,24 +1616,303 @@ func PrettyJSON(jsonStr string) (string, error) {
 	return buf.String(), nil
 }
 
+// AdaptIOSConfig 对生成给 iOS SFI 客户端的配置进行沙盒兼容、版本降级、镜像剥离与内存裁剪：
+//   - 移除 services / http_clients / route.default_mark 与 clash_api.external_ui* 等不兼容或冗余字段；
+//   - 清理 dns.optimistic、独立缓存冲突及 v1.14 cache_file 持久化扩展字段；
+//   - 剔除体积最大的 geosite-ad2 与未被规则引用的僵尸规则集，控低冷启动 RSS（<50MB）；
+//   - 剥离国内 GitHub 反代镜像前缀（含显式 mirrorURL 与通用反代模式）并改用代理组拉取远程规则集，避免 403/超时启动失败。
+func AdaptIOSConfig(rawJSON, mirrorURL string) (string, error) {
+	if strings.TrimSpace(rawJSON) == "" {
+		return rawJSON, nil
+	}
+	var root map[string]any
+	if err := json.Unmarshal([]byte(rawJSON), &root); err != nil {
+		return "", fmt.Errorf("ios adapt: parse config JSON: %w", err)
+	}
+	if root == nil {
+		return rawJSON, nil
+	}
+
+	delete(root, "services")
+	delete(root, "http_clients")
+
+	if expMap, ok := root["experimental"].(map[string]any); ok && expMap != nil {
+		if clashAPI, ok := expMap["clash_api"].(map[string]any); ok && clashAPI != nil {
+			delete(clashAPI, "external_ui")
+			delete(clashAPI, "external_ui_download_url")
+			delete(clashAPI, "external_ui_download_detour")
+		}
+		if cf, ok := expMap["cache_file"].(map[string]any); ok && cf != nil {
+			enabled := true
+			if b, ok := cf["enabled"].(bool); ok {
+				enabled = b
+			}
+			expMap["cache_file"] = map[string]any{"enabled": enabled}
+		}
+	}
+
+	var dnsRules any
+	var hasDNS bool
+	var dnsMap map[string]any
+	if dm, ok := root["dns"].(map[string]any); ok && dm != nil {
+		dnsMap = dm
+		hasDNS = true
+		delete(dnsMap, "optimistic")
+		if dc, ok := dnsMap["disable_cache"].(bool); ok && dc {
+			delete(dnsMap, "independent_cache")
+		}
+		if rawRules, ok := dnsMap["rules"].([]any); ok {
+			cleanedDNS := stripRuleSetTagFromRules(rawRules, "geosite-ad2")
+			dnsMap["rules"] = cleanedDNS
+			dnsRules = cleanedDNS
+		}
+	}
+
+	if routeMap, ok := root["route"].(map[string]any); ok && routeMap != nil {
+		delete(routeMap, "default_mark")
+		var cleanedRoute []any
+		if rawRules, ok := routeMap["rules"].([]any); ok {
+			cleanedRoute = stripRuleSetTagFromRules(rawRules, "geosite-ad2")
+			routeMap["rules"] = cleanedRoute
+		}
+
+		referenced := make(map[string]bool)
+		collectReferencedRuleSetTags(cleanedRoute, referenced)
+		if hasDNS {
+			if dr, ok := dnsRules.([]any); ok {
+				collectReferencedRuleSetTags(dr, referenced)
+			}
+		}
+
+		preferredDetour := pickPreferredIOSDetour(root["outbounds"])
+		if rawRS, ok := routeMap["rule_set"].([]any); ok {
+			keptRS := make([]any, 0, len(rawRS))
+			for _, item := range rawRS {
+				rm, ok := item.(map[string]any)
+				if !ok || rm == nil {
+					continue
+				}
+				tag, _ := rm["tag"].(string)
+				tag = strings.TrimSpace(tag)
+				if tag == "geosite-ad2" {
+					continue
+				}
+				if len(referenced) > 0 && tag != "" && !referenced[tag] {
+					continue
+				}
+				typ, _ := rm["type"].(string)
+				rawURL, _ := rm["url"].(string)
+				if typ == "remote" || strings.TrimSpace(rawURL) != "" {
+					if cleanedURL := stripMirrorPrefix(rawURL, mirrorURL); cleanedURL != "" {
+						rm["url"] = cleanedURL
+					}
+					if preferredDetour != "" {
+						rm["download_detour"] = preferredDetour
+					}
+				}
+				keptRS = append(keptRS, rm)
+			}
+			routeMap["rule_set"] = keptRS
+		}
+	}
+
+	data, err := json.Marshal(root)
+	if err != nil {
+		return "", fmt.Errorf("ios adapt: marshal config JSON: %w", err)
+	}
+	return string(data), nil
+}
+
+func stripRuleSetTagFromRules(rules []any, dropTag string) []any {
+	out := make([]any, 0, len(rules))
+	for _, item := range rules {
+		rm, ok := item.(map[string]any)
+		if !ok || rm == nil {
+			out = append(out, item)
+			continue
+		}
+		if rawSub, hasSub := rm["rules"].([]any); hasSub {
+			cleanedSub := stripRuleSetTagFromRules(rawSub, dropTag)
+			if len(cleanedSub) == 0 {
+				continue
+			}
+			rm["rules"] = cleanedSub
+		}
+		if rawRS, hasRS := rm["rule_set"]; hasRS {
+			tags := extractStringOrSliceAny(rawRS)
+			if slices.Contains(tags, dropTag) {
+				filtered := make([]string, 0, len(tags))
+				for _, t := range tags {
+					if t != dropTag {
+						filtered = append(filtered, t)
+					}
+				}
+				if len(filtered) == 0 {
+					continue
+				}
+				if len(filtered) == 1 {
+					if _, wasStr := rawRS.(string); wasStr {
+						rm["rule_set"] = filtered[0]
+					} else {
+						rm["rule_set"] = filtered
+					}
+				} else {
+					rm["rule_set"] = filtered
+				}
+			}
+		}
+		out = append(out, rm)
+	}
+	return out
+}
+
+func extractStringOrSliceAny(raw any) []string {
+	switch v := raw.(type) {
+	case string:
+		if s := strings.TrimSpace(v); s != "" {
+			return []string{s}
+		}
+	case []string:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			if s := strings.TrimSpace(item); s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				if trimmed := strings.TrimSpace(s); trimmed != "" {
+					out = append(out, trimmed)
+				}
+			}
+		}
+		return out
+	}
+	return nil
+}
+
+func collectReferencedRuleSetTags(rules []any, out map[string]bool) {
+	for _, item := range rules {
+		rm, ok := item.(map[string]any)
+		if !ok || rm == nil {
+			continue
+		}
+		for _, tag := range extractStringOrSliceAny(rm["rule_set"]) {
+			out[tag] = true
+		}
+		if sub, ok := rm["rules"].([]any); ok {
+			collectReferencedRuleSetTags(sub, out)
+		}
+	}
+}
+
+func pickPreferredIOSDetour(rawOutbounds any) string {
+	list, ok := rawOutbounds.([]any)
+	if !ok {
+		return ""
+	}
+	var tags []string
+	var firstGroup string
+	for _, item := range list {
+		om, ok := item.(map[string]any)
+		if !ok || om == nil {
+			continue
+		}
+		tag := strings.TrimSpace(fmt.Sprint(om["tag"]))
+		if tag == "" || om["tag"] == nil {
+			continue
+		}
+		tags = append(tags, tag)
+		typ := strings.ToLower(strings.TrimSpace(fmt.Sprint(om["type"])))
+		if firstGroup == "" && (typ == "selector" || typ == "urltest" || typ == "fallback") {
+			firstGroup = tag
+		}
+	}
+	for _, candidate := range []string{"Proxy", "#Auto"} {
+		if slices.Contains(tags, candidate) {
+			return candidate
+		}
+	}
+	if firstGroup != "" {
+		return firstGroup
+	}
+	if slices.Contains(tags, "#DC") {
+		return "#DC"
+	}
+	return ""
+}
+
+func stripMirrorPrefix(rawURL, mirrorURL string) string {
+	u := strings.TrimSpace(rawURL)
+	if u == "" {
+		return ""
+	}
+	if m := strings.TrimRight(strings.TrimSpace(mirrorURL), "/"); m != "" {
+		if rest, ok := strings.CutPrefix(u, m+"/"); ok && (strings.HasPrefix(rest, "http://") || strings.HasPrefix(rest, "https://")) {
+			u = rest
+		} else if rest, ok := strings.CutPrefix(u, m); ok && (strings.HasPrefix(rest, "http://") || strings.HasPrefix(rest, "https://")) {
+			u = rest
+		}
+	}
+	for _, marker := range []string{"/https://", "/http://"} {
+		if schemeIdx := strings.Index(u, "://"); schemeIdx >= 0 {
+			searchFrom := schemeIdx + 3
+			if relIdx := strings.Index(u[searchFrom:], marker); relIdx >= 0 {
+				prefix := u[:searchFrom+relIdx]
+				if !strings.Contains(prefix, "?") && !strings.Contains(prefix, "#") {
+					u = strings.TrimPrefix(u[searchFrom+relIdx:], "/")
+					break
+				}
+			}
+		}
+	}
+	return u
+}
+
 // CheckIOSCompatibility 校验生成的配置是否适合导入 iOS SFI(沙盒环境)。
-// 目前检查: rule_set 不能有 type=local 条目 —— 本地绝对路径在 iPhone 沙盒内不可读,
-// 会导致 SFI 启动失败; iOS 配置必须保留远程规则集引用。
+// 检查项: rule_set 不能包含 type=local 或本地 path 条目、不得设置 route.default_mark、
+// 不得包含外置 clash_api.external_ui / cache_file.path 或 1.14 services 字段。
 func CheckIOSCompatibility(jsonStr string) error {
 	var cfg struct {
 		Route struct {
-			RuleSet []struct {
+			DefaultMark int `json:"default_mark"`
+			RuleSet     []struct {
 				Type string `json:"type"`
 				Tag  string `json:"tag"`
+				Path string `json:"path"`
 			} `json:"rule_set"`
 		} `json:"route"`
+		Experimental struct {
+			ClashAPI struct {
+				ExternalUI string `json:"external_ui"`
+			} `json:"clash_api"`
+			CacheFile struct {
+				Path string `json:"path"`
+			} `json:"cache_file"`
+		} `json:"experimental"`
+		Services []any `json:"services"`
 	}
 	if err := json.Unmarshal([]byte(jsonStr), &cfg); err != nil {
 		return fmt.Errorf("ios check: invalid JSON: %w", err)
 	}
+	if cfg.Route.DefaultMark != 0 {
+		return fmt.Errorf("ios check: route.default_mark (%d) 在 iOS SFI 沙盒中不受支持", cfg.Route.DefaultMark)
+	}
+	if ui := strings.TrimSpace(cfg.Experimental.ClashAPI.ExternalUI); ui != "" {
+		return fmt.Errorf("ios check: clash_api.external_ui (%q) 指向沙盒外路径，iOS SFI 无法读取", ui)
+	}
+	if cfPath := strings.TrimSpace(cfg.Experimental.CacheFile.Path); cfPath != "" {
+		return fmt.Errorf("ios check: cache_file.path (%q) 指向沙盒外路径，iOS SFI 无法读取", cfPath)
+	}
+	if len(cfg.Services) > 0 {
+		return fmt.Errorf("ios check: services 字段在 iOS SFI 中不兼容（包含 %d 项）", len(cfg.Services))
+	}
 	for _, rs := range cfg.Route.RuleSet {
-		if rs.Type == "local" {
-			return fmt.Errorf("ios check: 规则集 %q 使用了 type=local, iPhone 沙盒无法读取本地路径, 请用 --platform ios 重新生成(自动保留远程规则集)", rs.Tag)
+		if rs.Type == "local" || strings.TrimSpace(rs.Path) != "" {
+			return fmt.Errorf("ios check: 规则集 %q 使用了 type=local 或本地 path, iPhone 沙盒无法读取本地路径, 请用 --platform ios 重新生成(自动保留远程规则集)", rs.Tag)
 		}
 	}
 	return nil

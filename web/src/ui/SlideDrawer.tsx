@@ -58,7 +58,7 @@ export const SlideDrawer: React.FC<SlideDrawerProps> = ({
         className={`w-full ${SIZE_MAX_WIDTH[size]} h-full max-h-[100dvh] bg-slate-900/95 backdrop-blur-xl border-l border-slate-800 shadow-2xl flex flex-col`}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-slate-800/80 shrink-0">
+        <div className="flex items-start justify-between gap-3 px-4 sm:px-5 pt-[calc(1rem+env(safe-area-inset-top,0px))] pb-4 sm:py-4 pl-safe pr-safe border-b border-slate-800/80 shrink-0">
           <div className="min-w-0">
             <h3 className="text-base font-semibold text-white truncate">{title}</h3>
             {subtitle && <p className="text-xs text-slate-400 mt-0.5 break-all">{subtitle}</p>}
@@ -76,7 +76,13 @@ export const SlideDrawer: React.FC<SlideDrawerProps> = ({
           </div>
         </div>
 
-        <div className="flex-1 min-h-0 overflow-y-auto p-5 space-y-4">{children}</div>
+        <div
+          className={`flex-1 min-h-0 overflow-y-auto p-4 sm:p-5 space-y-4 ${
+            footer ? '' : 'pb-[calc(1.25rem+env(safe-area-inset-bottom,0px))]'
+          }`}
+        >
+          {children}
+        </div>
 
         {footer && (
           <div

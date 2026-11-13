@@ -529,7 +529,7 @@ export const SingBoxPage: React.FC<SingBoxPageProps> = ({
               : '加载分流规则列表…'
           }
           actions={
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               {routing && routing.customCount > 0 && (
                 <Badge tone="accent">已自定义 {routing.customCount} 项</Badge>
               )}
@@ -561,11 +561,11 @@ export const SingBoxPage: React.FC<SingBoxPageProps> = ({
             )}
 
             <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
-              <div className="flex flex-wrap items-center gap-1.5">
+              <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1 sm:pb-0 sm:flex-wrap">
                 <button
                   type="button"
                   onClick={() => setActiveCategory('all')}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer ${
+                  className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
                     activeCategory === 'all'
                       ? 'bg-[var(--accent)] text-white shadow-sm'
                       : 'bg-surface2 text-secondary hover:text-primary border border-subtle'
@@ -578,7 +578,7 @@ export const SingBoxPage: React.FC<SingBoxPageProps> = ({
                     key={cat.id}
                     type="button"
                     onClick={() => setActiveCategory(cat.id)}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer ${
+                    className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
                       activeCategory === cat.id
                         ? 'bg-[var(--accent)] text-white shadow-sm'
                         : 'bg-surface2 text-secondary hover:text-primary border border-subtle'
@@ -675,8 +675,8 @@ export const SingBoxPage: React.FC<SingBoxPageProps> = ({
                         <div className="text-[11px] font-mono text-muted truncate">{item.domainsSummary}</div>
                       </div>
 
-                      <div className="flex items-center justify-end gap-3 shrink-0">
-                        <div className="flex items-center gap-1.5">
+                      <div className="flex items-center justify-between sm:justify-end gap-3 w-full sm:w-auto shrink-0 pt-1 sm:pt-0">
+                        <div className="flex items-center gap-1.5 flex-1 min-w-0 sm:flex-initial">
                           <span className="text-[11px] text-muted hidden md:inline">节点组</span>
                           <select
                             aria-label={`${item.name} 目标策略组`}
@@ -695,7 +695,7 @@ export const SingBoxPage: React.FC<SingBoxPageProps> = ({
                                 ? `当前流量路由至 ${item.selectedGroup}，可独立切换其他分组`
                                 : `当前直连 ${routing?.directTag || '#DC'}，选择分组或开启右侧开关后即刻代理`
                             }
-                            className={`sc-input h-8 px-2.5 text-xs font-mono min-w-[104px] transition-opacity ${
+                            className={`sc-input h-8 px-2.5 text-xs font-mono w-full sm:w-auto min-w-[104px] transition-opacity ${
                               item.enabled ? 'text-primary' : 'text-muted opacity-70'
                             }`}
                           >

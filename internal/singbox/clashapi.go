@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net"
 	"os"
+	"slices"
 	"strings"
 
 	"singctl/internal/constant"
@@ -40,12 +41,9 @@ func ClashAPIEndpointsForConfig(sbConfigPath string) []string {
 	var out []string
 	add := func(addr string) {
 		if u := normalizeClashAddr(addr); u != "" {
-			for _, existing := range out {
-				if existing == u {
-					return
-				}
+			if !slices.Contains(out, u) {
+				out = append(out, u)
 			}
-			out = append(out, u)
 		}
 	}
 

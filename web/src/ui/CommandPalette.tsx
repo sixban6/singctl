@@ -70,7 +70,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
 
   return createPortal(
     <div
-      className="fixed inset-0 z-[65] flex items-start justify-center pt-[12vh] p-4 bg-slate-950/75 backdrop-blur-md animate-sc-in"
+      className="fixed inset-0 z-[65] flex items-start justify-center pt-[calc(3.5rem+env(safe-area-inset-top,0px))] sm:pt-[12vh] p-3 sm:p-4 pb-safe bg-slate-950/75 backdrop-blur-md animate-sc-in"
       onClick={onClose}
       role="dialog"
       aria-modal="true"
@@ -94,7 +94,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
           </kbd>
         </div>
 
-        <div className="max-h-[55vh] overflow-y-auto p-1.5">
+        <div className="max-h-[60dvh] overflow-y-auto p-1.5">
           {filtered.length === 0 ? (
             <div className="py-8 text-center text-xs text-slate-500">没有匹配的页面或指令</div>
           ) : (

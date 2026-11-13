@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 
+	"singctl/internal/singbox"
+
 	"github.com/sixban6/singgen/pkg/model"
 	"github.com/sixban6/singgen/pkg/singgen"
 	"gopkg.in/yaml.v3"
@@ -229,6 +231,14 @@ func renderSingBox(ctx context.Context, bundle *ResolvedBundle, opts RenderOptio
 	rawBytes, err := pipeline.ExecuteBytes(ctx, "in-memory-subhub")
 	if err != nil {
 		return nil, fmt.Errorf("singgen pipeline failed: %w", err)
+	}
+
+	if platform == "ios" {
+		adapted, adaptErr := singbox.AdaptIOSConfig(string(rawBytes), opts.MirrorURL)
+		if adaptErr != nil {
+			return nil, fmt.Errorf("ios config adaptation failed: %w", adaptErr)
+		}
+		rawBytes = []byte(adapted)
 	}
 
 	var pretty bytes.Buffer

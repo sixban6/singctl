@@ -16,21 +16,25 @@ export const Header: React.FC<HeaderProps> = ({ status, onLogout, lastOk, linkDo
   const loadAvg = status?.system?.loadAvg ? status.system.loadAvg.split(',')[0] : '0.00';
 
   return (
-    <header className="sticky top-0 z-40 w-full border-b border-slate-800/80 bg-slate-950/80 backdrop-blur-xl">
-      <div className="max-w-[1440px] mx-auto px-3.5 sm:px-6 lg:px-8 h-14 sm:h-16 flex items-center justify-between gap-2">
+    <header className="sticky top-0 z-40 w-full border-b border-slate-800/80 bg-slate-950/80 backdrop-blur-xl pt-safe pl-safe pr-safe">
+      <div className="max-w-[1440px] mx-auto px-3 sm:px-6 lg:px-8 h-14 sm:h-16 flex items-center justify-between gap-2">
         {/* Brand */}
-        <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
+        <div className="flex items-center gap-2 sm:gap-3 min-w-0">
           <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center shrink-0 glow-green">
             <Activity className="w-4 h-4 sm:w-5 sm:h-5 text-emerald-400" />
           </div>
           <div className="min-w-0">
             <div className="flex items-center gap-1.5 sm:gap-2">
-              <span className="font-bold text-sm sm:text-base tracking-tight text-white truncate">服务端控制台</span>
-              <span className="text-[10px] sm:text-xs px-1.5 sm:px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono font-medium shrink-0">
-                v{status?.version || '1.0.0'}
+              <span className="font-bold text-sm sm:text-base tracking-tight text-white whitespace-nowrap shrink-0">服务端控制台</span>
+              <span
+                title={`v${status?.version || '1.0.0'}`}
+                className="text-[10px] sm:text-xs px-1.5 sm:px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono font-medium max-w-[96px] sm:max-w-none truncate"
+              >
+                <span className="sm:hidden">v{(status?.version || '1.0.0').replace(/\+.*$/, '')}</span>
+                <span className="hidden sm:inline">v{status?.version || '1.0.0'}</span>
               </span>
             </div>
-            <p className="text-[11px] text-slate-400 font-mono truncate max-w-[160px] sm:max-w-xs">{nodeDomain}</p>
+            <p className="text-[11px] text-slate-400 font-mono truncate max-w-[140px] sm:max-w-xs">{nodeDomain}</p>
           </div>
         </div>
 

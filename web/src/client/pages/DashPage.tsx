@@ -12,6 +12,7 @@ import {
   XCircle,
   Zap,
   Globe,
+  ExternalLink,
 } from 'lucide-react';
 import {
   Badge,
@@ -52,6 +53,8 @@ export const DashPage: React.FC<DashPageProps> = ({ status, busy, onAction, onNa
   const [checkingHealth, setCheckingHealth] = useState(false);
   const [iosOpen, setIosOpen] = useState(false);
   const [iosUrl, setIosUrl] = useState('');
+  const [iosImportUrl, setIosImportUrl] = useState('');
+  const [iosQrMode, setIosQrMode] = useState<'import' | 'raw'>('import');
   const [iosLoading, setIosLoading] = useState(false);
   const [proxySnap, setProxySnap] = useState<SbProxiesSnapshot | null>(null);
 
@@ -94,11 +97,13 @@ export const DashPage: React.FC<DashPageProps> = ({ status, busy, onAction, onNa
 
   const openIOSDrawer = async () => {
     setIosOpen(true);
-    if (iosUrl) return;
     setIosLoading(true);
     try {
       const res = await clientApi.getIOSUrl();
       setIosUrl(res.url);
+      setIosImportUrl(
+        res.importUrl || `sing-box://import-remote-profile?url=${encodeURIComponent(res.url)}`,
+      );
     } catch (err: unknown) {
       error(err instanceof Error ? err.message : '获取 iOS 配置地址失败');
     } finally {
@@ -481,11 +486,42 @@ export const DashPage: React.FC<DashPageProps> = ({ status, busy, onAction, onNa
             <div className="w-44 h-44 rounded-2xl bg-surface2 animate-pulse" />
           ) : iosUrl ? (
             <>
-              <QRCodeBox value={iosUrl} size={184} />
+              <div className="inline-flex items-center p-1 rounded-xl bg-surface2 border border-subtle text-xs">
+                <button
+                  type="button"
+                  onClick={() => setIosQrMode('import')}
+                  className={`px-3 py-1 rounded-lg font-medium transition-colors cursor-pointer ${
+                    iosQrMode === 'import'
+                      ? 'bg-[var(--accent)] text-white shadow-sm'
+                      : 'text-secondary hover:text-primary'
+                  }`}
+                >
+                  SFI 一键扫码导入
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIosQrMode('raw')}
+                  className={`px-3 py-1 rounded-lg font-medium transition-colors cursor-pointer ${
+                    iosQrMode === 'raw'
+                      ? 'bg-[var(--accent)] text-white shadow-sm'
+                      : 'text-secondary hover:text-primary'
+                  }`}
+                >
+                  纯配置链接
+                </button>
+              </div>
+              <QRCodeBox value={iosQrMode === 'import' ? iosImportUrl : iosUrl} size={184} />
               <div className="w-full p-3 rounded-xl bg-surface2 border border-subtle font-mono text-xs text-primary break-all select-all">
                 {iosUrl}
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center justify-center gap-2">
+                <a
+                  href={iosImportUrl}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-emerald-500 hover:bg-emerald-400 text-slate-950 shadow-sm transition-colors"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  一键打开 Sing-Box 导入
+                </a>
                 <Button
                   variant="primary"
                   onClick={() => copyText(iosUrl, '已复制 iOS 配置同步地址')}
@@ -496,14 +532,7 @@ export const DashPage: React.FC<DashPageProps> = ({ status, busy, onAction, onNa
                 <Button
                   variant="secondary"
                   onClick={() => {
-                    let dlUrl = '/api/gen/ios';
-                    try {
-                      const tk = localStorage.getItem('sc_token');
-                      if (tk) dlUrl += `?token=${encodeURIComponent(tk)}`;
-                    } catch {
-                      // ignore
-                    }
-                    window.open(dlUrl, '_blank', 'noopener');
+                    window.open(iosUrl, '_blank', 'noopener');
                   }}
                 >
                   直接下载 JSON

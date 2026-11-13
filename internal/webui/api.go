@@ -400,6 +400,9 @@ func (s *Server) handleConfigPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
+
 	// 基于现有配置合并更新，避免丢失 custom_rules、watchdog、server 高级字段等非表单项
 	cfg, err := config.Load(configPathFor(s))
 	if err != nil || cfg == nil {
@@ -423,6 +426,7 @@ func (s *Server) handleConfigPut(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "保存配置失败: "+err.Error())
 		return
 	}
+	s.invalidateIOSCache()
 	_ = daemon.NotifyReload()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
@@ -514,15 +518,19 @@ func (s *Server) handleConfigRawPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
+
 	if err := backupConfig(configPathFor(s)); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "备份配置失败: "+err.Error())
 		return
 	}
-	// 0600:配置含订阅地址、auth_key 等敏感信息
-	if err := os.WriteFile(configPathFor(s), []byte(body.Content), 0600); err != nil {
+	// 0600 原子写入: 配置含订阅地址、auth_key 等敏感信息
+	if err := atomicWriteFile0600(configPathFor(s), []byte(body.Content)); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "写入配置失败: "+err.Error())
 		return
 	}
+	s.invalidateIOSCache()
 	_ = daemon.NotifyReload()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
@@ -590,7 +598,7 @@ func (s *Server) writeIOSConfig(w http.ResponseWriter, configJSON string) {
 	_, _ = w.Write([]byte(configJSON))
 }
 
-// handleIOSConfigURL 返回手机可直接访问的下载地址(含局域网 IP 与可选口令参数, 供二维码使用)
+// handleIOSConfigURL 返回手机可直接访问的下载地址（携带签名 ?token=，避免 URL 明文口令）及 SFI 一键导入链接
 func (s *Server) handleIOSConfigURL(w http.ResponseWriter, r *http.Request) {
 	ni, err := netinfo.Get()
 	if err != nil || ni.LANIPv4 == "" {
@@ -602,11 +610,15 @@ func (s *Server) handleIOSConfigURL(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "无法解析监听端口: "+s.opts.Listen)
 		return
 	}
-	url := fmt.Sprintf("http://%s:%s/api/gen/ios", ni.LANIPv4, port)
-	if s.opts.Password != "" {
-		url += "?password=" + s.opts.Password
+	targetURL := fmt.Sprintf("http://%s:%s/api/gen/ios", ni.LANIPv4, port)
+	if tok := s.SessionToken(); tok != "" {
+		targetURL += "?token=" + url.QueryEscape(tok)
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"url": url})
+	importURL := "sing-box://import-remote-profile?url=" + url.QueryEscape(targetURL)
+	writeJSON(w, http.StatusOK, map[string]string{
+		"url":       targetURL,
+		"importUrl": importURL,
+	})
 }
 
 // backupConfig 保存前备份(保留最近 3 份)
@@ -716,6 +728,38 @@ func (s *Server) handleSbConfigGet(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func atomicWriteFile0600(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if err := tmp.Chmod(0600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	cleanup = false
+	_ = os.Chmod(path, 0600)
+	return nil
+}
+
 func (s *Server) handleSbConfigPut(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Content string `json:"content"`
@@ -731,6 +775,9 @@ func (s *Server) handleSbConfigPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
+
 	// 有 sing-box 可执行文件时做语义校验,把住“改坏配置”这道门
 	checked := false
 	if exe := singboxBinaryPath(); exe != "" {
@@ -741,15 +788,22 @@ func (s *Server) handleSbConfigPut(w http.ResponseWriter, r *http.Request) {
 		checked = true
 	}
 
-	path := constant.SingBoxConfigFile
+	path := s.sbConfigPath()
 	if err := backupConfig(path); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "备份失败: "+err.Error())
 		return
 	}
-	if err := os.WriteFile(path, []byte(body.Content), preserveMode(path)); err != nil {
+	if err := atomicWriteFile0600(path, []byte(body.Content)); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "写入失败: "+err.Error())
 		return
 	}
+	if err := singbox.SyncSandboxWorkConfig(r.Context(), path, s.sbWorkConfigPath(), body.Content, ".webui.tmp"); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "同步沙盒配置失败: "+err.Error())
+		return
+	}
+	singbox.ReloadSingBoxProcess()
+	s.invalidateIOSCache()
+	s.invalidateClashCache()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "checked": checked})
 }
 
@@ -762,8 +816,11 @@ func (s *Server) handleSbConfigRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
+
 	// 防路径穿越:只允许本目录下、以备份前缀命名的基名
-	path := constant.SingBoxConfigFile
+	path := s.sbConfigPath()
 	prefix := filepath.Base(path) + ".webui-bak-"
 	name := filepath.Base(body.Name)
 	if name == "" || !strings.HasPrefix(name, prefix) {
@@ -781,16 +838,31 @@ func (s *Server) handleSbConfigRestore(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "备份内容不是合法的 JSON")
 		return
 	}
+	checked := false
+	if exe := singboxBinaryPath(); exe != "" {
+		if err := checkSingBoxConfig(exe, string(data)); err != nil {
+			writeJSONError(w, http.StatusBadRequest, "备份配置 sing-box check 未通过: "+err.Error())
+			return
+		}
+		checked = true
+	}
 
 	if err := backupConfig(path); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "备份当前配置失败: "+err.Error())
 		return
 	}
-	if err := os.WriteFile(path, data, preserveMode(path)); err != nil {
+	if err := atomicWriteFile0600(path, data); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "写入失败: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	if err := singbox.SyncSandboxWorkConfig(r.Context(), path, s.sbWorkConfigPath(), string(data), ".webui.tmp"); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "同步沙盒配置失败: "+err.Error())
+		return
+	}
+	singbox.ReloadSingBoxProcess()
+	s.invalidateIOSCache()
+	s.invalidateClashCache()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "checked": checked})
 }
 
 // ───────────────────────── 规则集缓存 ─────────────────────────

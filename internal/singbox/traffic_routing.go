@@ -584,6 +584,13 @@ func BuildClientRoutingReport(cfg *config.Config, rawConfigJSON string) ClientRo
 // 该函数同时清理 singgen 模板中同源规则集/域名条目的散落重复项，使开启选组或关闭直连（#DC）均 100% 精准生效，
 // 并同时同步 dns.rules（开启走 dns_proxy，关闭走 dns_local）。
 func ApplyTrafficRoutingToConfigJSON(rawJSON string, tr config.TrafficRoutingConfig, cr config.CustomRulesConfig) (string, error) {
+	return ApplyTrafficRoutingForPlatform(rawJSON, tr, cr, "")
+}
+
+// ApplyTrafficRoutingForPlatform 与 ApplyTrafficRoutingToConfigJSON 逻辑一致，额外感知目标平台：
+// 在 iOS 平台且 dns.final 已指向 proxyDNS 时，跳过开启（proxyDNS）预设中的 geosite-* DNS 规则，
+// 仅保留体积极小的 domain_suffix 及直连（directDNS）规则，以降低 SFI 沙盒规则匹配开销与内存峰值。
+func ApplyTrafficRoutingForPlatform(rawJSON string, tr config.TrafficRoutingConfig, cr config.CustomRulesConfig, platform string) (string, error) {
 	if strings.TrimSpace(rawJSON) == "" {
 		return rawJSON, nil
 	}
@@ -626,12 +633,14 @@ func ApplyTrafficRoutingToConfigJSON(rawJSON string, tr config.TrafficRoutingCon
 	routeMap["rules"] = finalRouteRules
 
 	// 2. 同步编译并注入 dns.rules（仅处理明确存在的 DNS server tag）
+	isIOS := strings.EqualFold(strings.TrimSpace(platform), PlatformIOS)
 	if dnsMap, ok := doc["dns"].(map[string]any); ok {
 		proxyDNS, directDNS := resolveClientDNSTags(dnsMap)
 		if proxyDNS != "" || directDNS != "" {
+			skipEnabledGeositeDNS := isIOS && proxyDNS != "" && strings.TrimSpace(stringField(dnsMap, "final")) == proxyDNS
 			existingDNSRules, _ := dnsMap["rules"].([]any)
 			strippedDNSRules := stripManagedDNSRules(existingDNSRules, managedSuffixes, managedRuleSets, customRouteSet)
-			managedDNSRules := compileManagedDNSRules(normTR, proxyDNS, directDNS, definedRuleSets, preserveNativeHoK)
+			managedDNSRules := compileManagedDNSRules(normTR, proxyDNS, directDNS, definedRuleSets, preserveNativeHoK, skipEnabledGeositeDNS)
 			insertDNSIdx := findTrafficDNSInsertIndex(strippedDNSRules)
 
 			finalDNSRules := make([]any, 0, len(strippedDNSRules)+len(managedDNSRules))
@@ -971,7 +980,7 @@ func compileManagedRouteRules(tr config.TrafficRoutingConfig, groupTags []string
 	return out
 }
 
-func compileManagedDNSRules(tr config.TrafficRoutingConfig, proxyDNS, directDNS string, definedRuleSets map[string]bool, preserveNativeHoK bool) []map[string]any {
+func compileManagedDNSRules(tr config.TrafficRoutingConfig, proxyDNS, directDNS string, definedRuleSets map[string]bool, preserveNativeHoK, skipEnabledGeosite bool) []map[string]any {
 	var staged []compiledMatcherRule
 	appendStaged := func(isRuleSet bool, values []string, server string) {
 		if len(values) == 0 || server == "" {
@@ -1007,7 +1016,7 @@ func compileManagedDNSRules(tr config.TrafficRoutingConfig, proxyDNS, directDNS 
 		if len(p.DomainSuffixes) > 0 {
 			appendStaged(false, p.DomainSuffixes, targetDNS)
 		}
-		if len(p.RuleSets) > 0 {
+		if len(p.RuleSets) > 0 && !(skipEnabledGeosite && enabled) {
 			// DNS pre-match 仅匹配域名类 geosite-* 规则集，跳过纯 IP 类的 geoip-*
 			filteredRS := filterExistingRuleSets(p.RuleSets, definedRuleSets, true)
 			appendStaged(true, filteredRS, targetDNS)

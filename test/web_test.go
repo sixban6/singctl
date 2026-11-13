@@ -7,12 +7,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"singctl/internal/config"
 	"singctl/internal/constant"
 	"singctl/internal/daemon"
+	"singctl/internal/singbox"
 	"singctl/internal/webui"
 	"strconv"
 	"strings"
@@ -477,30 +479,52 @@ func TestIOSConfigURLEndpoint(t *testing.T) {
 	cfgPath, restore := withIOSStub(t)
 	defer restore()
 
-	s := webui.New(webui.Options{ConfigPath: cfgPath, Listen: ":8090"})
+	s := webui.New(webui.Options{ConfigPath: cfgPath, Listen: ":8090", Password: "ios-test-secret"})
 	ts := httptest.NewServer(s.Mux)
 	defer ts.Close()
 
-	resp, err := http.Get(ts.URL + "/api/gen/ios/url")
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/gen/ios/url", nil)
+	req.Header.Set("Authorization", "Bearer "+s.SessionToken())
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	// 沙箱/无网环境可能拿不到局域网 IP(500), 此时只验证端点存活
-	if resp.StatusCode == 500 {
+	// 沙箱/无网环境可能拿不到局域网 IP(500), 此时仍继续验证带 token 直接下载 /api/gen/ios
+	if resp.StatusCode == 200 {
+		var d struct {
+			URL       string `json:"url"`
+			ImportURL string `json:"importUrl"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&d); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(d.URL, "/api/gen/ios?token=") || strings.Contains(d.URL, "password=") {
+			t.Fatalf("url should carry ?token= without plaintext password, got %q", d.URL)
+		}
+		if !strings.HasPrefix(d.ImportURL, "sing-box://import-remote-profile?url=") {
+			t.Fatalf("expected SFI importUrl scheme, got %q", d.ImportURL)
+		}
+		parsedDL, err := url.Parse(d.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dlResp, err := http.Get(ts.URL + parsedDL.RequestURI())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer dlResp.Body.Close()
+		if dlResp.StatusCode != 200 {
+			t.Fatalf("GET /api/gen/ios with returned ?token= failed: %d", dlResp.StatusCode)
+		}
+		dlBody, _ := io.ReadAll(dlResp.Body)
+		if err := singbox.CheckIOSCompatibility(string(dlBody)); err != nil {
+			t.Fatalf("CheckIOSCompatibility failed: %v", err)
+		}
 		return
 	}
-	if resp.StatusCode != 200 {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
-	}
-	var d struct {
-		URL string `json:"url"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&d); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(d.URL, "/api/gen/ios") {
-		t.Fatalf("url should point to /api/gen/ios, got %q", d.URL)
+	if resp.StatusCode != 500 {
+		t.Fatalf("expected 200 or 500, got %d", resp.StatusCode)
 	}
 }
 
@@ -515,14 +539,18 @@ func withOverrides(t *testing.T) (sbConfigPath string) {
 	// 指向不存在的路径 → 视为未安装 sing-box;同时屏蔽 PATH 兜底,
 	// 避免测试机上真实安装的 sing-box 干扰确定性
 	constant.SingBoxInstallDir = filepath.Join(dir, "sing-box-not-exist")
-	oldLook := webui.LookPathFunc
-	webui.LookPathFunc = func(string) (string, error) {
+	oldWebLook := webui.LookPathFunc
+	oldSBLook := singbox.LookPathFunc
+	stubNotFound := func(string) (string, error) {
 		return "", fmt.Errorf("not found in test")
 	}
+	webui.LookPathFunc = stubNotFound
+	singbox.LookPathFunc = stubNotFound
 	t.Cleanup(func() {
 		constant.SingBoxConfigFile = oldCfg
 		constant.SingBoxInstallDir = oldBin
-		webui.LookPathFunc = oldLook
+		webui.LookPathFunc = oldWebLook
+		singbox.LookPathFunc = oldSBLook
 	})
 	return sbConfigPath
 }
@@ -569,10 +597,13 @@ func TestSbConfigHandlers(t *testing.T) {
 		t.Fatalf("expected 400 for invalid json, got %d", code)
 	}
 
-	// 3. PUT 合法 JSON → ok(未安装 sing-box → checked=false)
+	// 3. PUT 合法 JSON → ok(未安装 sing-box → checked=false, 强制 0600)
 	code, body = doJSON(t, "PUT", ts.URL+"/api/sbconfig", `{"content":"{\"log\":{\"level\":\"info\"}}"}`)
 	if code != 200 || !strings.Contains(body, `"checked":false`) {
 		t.Fatalf("expected 200 checked:false, got %d %s", code, body)
+	}
+	if info, statErr := os.Stat(sbConfigPath); statErr != nil || info.Mode().Perm() != 0600 {
+		t.Fatalf("expected sb config mode 0600 after PUT, err=%v mode=%v", statErr, info.Mode().Perm())
 	}
 
 	// 4. 再改一次 → 产生 1 个备份
@@ -612,6 +643,9 @@ func TestSbConfigHandlers(t *testing.T) {
 	_, body = doJSON(t, "GET", ts.URL+"/api/sbconfig", "")
 	if !strings.Contains(body, `\"level\":\"info\"`) {
 		t.Fatalf("expected restored content, got %s", body)
+	}
+	if info, statErr := os.Stat(sbConfigPath); statErr != nil || info.Mode().Perm() != 0600 {
+		t.Fatalf("expected sb config mode 0600 after restore, err=%v mode=%v", statErr, info.Mode().Perm())
 	}
 }
 
