@@ -7,7 +7,15 @@ import {
   WarpRoutingStatusResponse,
 } from '../types';
 import { api } from '../api';
-import { useToast } from './Toast';
+import {
+  Badge,
+  Button,
+  CardSkeleton,
+  PageHeader,
+  SectionCard,
+  SegmentedTabs,
+  useToast,
+} from '../ui';
 import {
   AlertTriangle,
   Bot,
@@ -65,7 +73,7 @@ function previewCleanRuleTarget(raw: string): { kind: 'cidr' | 'domain'; value: 
   const trimmed = raw.trim();
   if (!trimmed) return null;
   if (isLikelyIPOrCIDR(trimmed)) {
-    return { kind: 'cidr', value: trimmed.includes('/') ? trimmed : trimmed };
+    return { kind: 'cidr', value: trimmed };
   }
   const lower = trimmed.toLowerCase();
   if (lower.startsWith('full:') || lower.startsWith('keyword:')) {
@@ -100,7 +108,6 @@ export const WarpTab: React.FC<WarpTabProps> = ({ onRefreshParent }) => {
   const [saving, setSaving] = useState(false);
   const [acting, setActing] = useState<'rekey' | 'ensure' | null>(null);
 
-  // Active live connections state
   const [connEnabled, setConnEnabled] = useState(true);
   const [connMsg, setConnMsg] = useState('');
   const [connections, setConnections] = useState<ActiveDestinationGroup[]>([]);
@@ -110,24 +117,25 @@ export const WarpTab: React.FC<WarpTabProps> = ({ onRefreshParent }) => {
   const [loadingConn, setLoadingConn] = useState(false);
   const [switchingTarget, setSwitchingTarget] = useState<string | null>(null);
 
-  // Custom rule inputs
   const [warpInput, setWarpInput] = useState('');
   const [directInput, setDirectInput] = useState('');
 
-  // Debounce timer for rapid preset toggles
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const rollbackSnapshotRef = useRef<WarpRoutingStatusResponse | null>(null);
 
-  const loadRouting = useCallback(async (forceRefresh = false) => {
-    try {
-      const res = await api.getWarpRouting(forceRefresh);
-      setData(res);
-    } catch (err: any) {
-      error(err.message || '获取 WARP 分流配置失败');
-    } finally {
-      setLoading(false);
-    }
-  }, [error]);
+  const loadRouting = useCallback(
+    async (forceRefresh = false) => {
+      try {
+        const res = await api.getWarpRouting(forceRefresh);
+        setData(res);
+      } catch (err: unknown) {
+        error(err instanceof Error ? err.message : '获取 WARP 分流配置失败');
+      } finally {
+        setLoading(false);
+      }
+    },
+    [error],
+  );
 
   const loadConnections = useCallback(async () => {
     setLoadingConn(true);
@@ -137,7 +145,7 @@ export const WarpTab: React.FC<WarpTabProps> = ({ onRefreshParent }) => {
       setConnMsg(res.message || '');
       setConnections(res.destinations || []);
     } catch {
-      // Keep quiet on background poll error
+      // ignore background poll error
     } finally {
       setLoadingConn(false);
     }
@@ -153,10 +161,10 @@ export const WarpTab: React.FC<WarpTabProps> = ({ onRefreshParent }) => {
 
   useEffect(() => {
     if (!autoRefreshConn) return;
-    const timer = setInterval(() => {
+    const timer = window.setInterval(() => {
       loadConnections();
     }, 5000);
-    return () => clearInterval(timer);
+    return () => window.clearInterval(timer);
   }, [autoRefreshConn, loadConnections]);
 
   useEffect(() => {
@@ -180,17 +188,15 @@ export const WarpTab: React.FC<WarpTabProps> = ({ onRefreshParent }) => {
         rollbackSnapshotRef.current = null;
         success(res.message);
         loadConnections();
-      } catch (err: any) {
-        if (snapshotForRollback) {
-          setData(snapshotForRollback);
-        }
+      } catch (err: unknown) {
+        if (snapshotForRollback) setData(snapshotForRollback);
         rollbackSnapshotRef.current = null;
-        error(err.message || '更新 WARP 分流配置失败');
+        error(err instanceof Error ? err.message : '更新 WARP 分流配置失败');
       } finally {
         setSaving(false);
       }
     },
-    [error, loadConnections, success]
+    [error, loadConnections, success],
   );
 
   const scheduleOptimisticUpdate = (
@@ -198,18 +204,12 @@ export const WarpTab: React.FC<WarpTabProps> = ({ onRefreshParent }) => {
       nextRouting: WarpRoutingConfig;
       nextPresets: WarpPresetItem[];
     },
-    immediate = false
+    immediate = false,
   ) => {
     if (!data) return;
-    if (!rollbackSnapshotRef.current) {
-      rollbackSnapshotRef.current = data;
-    }
+    if (!rollbackSnapshotRef.current) rollbackSnapshotRef.current = data;
     const { nextRouting, nextPresets } = mutator(data);
-    setData({
-      ...data,
-      routing: nextRouting,
-      presets: nextPresets,
-    });
+    setData({ ...data, routing: nextRouting, presets: nextPresets });
 
     if (debounceTimerRef.current) {
       clearTimeout(debounceTimerRef.current);
@@ -234,7 +234,7 @@ export const WarpTab: React.FC<WarpTabProps> = ({ onRefreshParent }) => {
         nextRouting: { ...prev.routing, mode },
         nextPresets: prev.presets,
       }),
-      true
+      true,
     );
   };
 
@@ -247,10 +247,7 @@ export const WarpTab: React.FC<WarpTabProps> = ({ onRefreshParent }) => {
 
       const nextPresets = prev.presets.map((p) => (p.id === presetId ? { ...p, enabled: nextVal } : p));
       return {
-        nextRouting: {
-          ...prev.routing,
-          presets: currentPresetsMap,
-        },
+        nextRouting: { ...prev.routing, presets: currentPresetsMap },
         nextPresets,
       };
     });
@@ -303,7 +300,7 @@ export const WarpTab: React.FC<WarpTabProps> = ({ onRefreshParent }) => {
         nextRouting,
         nextPresets: prev.presets,
       }),
-      true
+      true,
     );
   };
 
@@ -330,7 +327,7 @@ export const WarpTab: React.FC<WarpTabProps> = ({ onRefreshParent }) => {
         nextRouting,
         nextPresets: prev.presets,
       }),
-      true
+      true,
     );
   };
 
@@ -347,8 +344,8 @@ export const WarpTab: React.FC<WarpTabProps> = ({ onRefreshParent }) => {
       });
       success(res.message);
       loadConnections();
-    } catch (err: any) {
-      error(err.message || '切换失败');
+    } catch (err: unknown) {
+      error(err instanceof Error ? err.message : '切换失败');
     } finally {
       setSwitchingTarget(null);
     }
@@ -361,8 +358,8 @@ export const WarpTab: React.FC<WarpTabProps> = ({ onRefreshParent }) => {
       success(res.message);
       await loadRouting(true);
       onRefreshParent?.();
-    } catch (err: any) {
-      error(err.message || 'WARP 操作执行失败');
+    } catch (err: unknown) {
+      error(err instanceof Error ? err.message : 'WARP 操作执行失败');
     } finally {
       setActing(null);
     }
@@ -373,8 +370,8 @@ export const WarpTab: React.FC<WarpTabProps> = ({ onRefreshParent }) => {
       const res = await api.enableTelemetry();
       success(res.message || '实时流量遥测已开启');
       loadConnections();
-    } catch (err: any) {
-      error(err.message || '开启实时遥测失败');
+    } catch (err: unknown) {
+      error(err instanceof Error ? err.message : '开启实时遥测失败');
     }
   };
 
@@ -401,179 +398,123 @@ export const WarpTab: React.FC<WarpTabProps> = ({ onRefreshParent }) => {
 
   if (loading && !data) {
     return (
-      <div className="p-10 rounded-2xl glass-card flex items-center justify-center gap-3 text-slate-400 text-xs font-mono">
-        <RefreshCw className="w-4 h-4 animate-spin text-amber-400" />
-        <span>正在加载 WARP 智能分流控制中心...</span>
+      <div className="space-y-4">
+        <CardSkeleton />
+        <CardSkeleton />
       </div>
     );
   }
 
   return (
-    <div className="space-y-6">
-      {/* 1. 隧道 offline/未安装 防黑洞引导横幅 */}
+    <div className="space-y-5">
+      {/* Anti-blackhole protection banner */}
       {daemon && !daemon.tunnelHealthy && (
-        <div className="p-4 sm:p-5 rounded-2xl border border-amber-500/40 bg-amber-950/25 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div className="rounded-2xl border border-amber-500/40 bg-amber-500/10 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div className="flex items-start gap-3">
-            <div className="p-2 rounded-xl bg-amber-500/15 text-amber-400 border border-amber-500/30 shrink-0">
-              <AlertTriangle className="w-5 h-5" />
-            </div>
+            <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
             <div>
-              <h3 className="text-sm font-bold text-amber-200">
+              <h3 className="text-sm font-bold text-primary">
                 本地 WARP 隧道 (127.0.0.1:40000) 当前未就绪
               </h3>
-              <p className="text-xs text-amber-200/80 mt-1">
-                {daemon.error || 'wireproxy 尚未安装或已停止运行'}。为防止流量切换后断网，系统已自动开启防黑洞保护，请先一键部署或拉起 WARP 服务。
+              <p className="text-xs text-secondary mt-1">
+                {daemon.error || 'wireproxy 尚未安装或已停止运行'}。为防止流量切换后断网，系统已启用防黑洞保护。
               </p>
             </div>
           </div>
-          <button
-            type="button"
+          <Button
+            size="sm"
+            variant="primary"
+            loading={acting === 'ensure'}
+            icon={<Wrench className="w-3.5 h-3.5" />}
             onClick={() => handleWarpAction('ensure')}
-            disabled={acting === 'ensure'}
-            className="flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-xs transition-all shrink-0 disabled:opacity-50"
           >
-            <Wrench className={`w-3.5 h-3.5 ${acting === 'ensure' ? 'animate-spin' : ''}`} />
-            <span>{acting === 'ensure' ? '正在部署修复...' : '一键部署 / 修复 WARP 隧道'}</span>
-          </button>
+            {acting === 'ensure' ? '部署修复中…' : '一键部署 / 修复 WARP'}
+          </Button>
         </div>
       )}
 
-      {/* 2. 顶部双出口态势与全局分流模式 Hero Bar */}
-      <div className="p-5 rounded-2xl glass-card space-y-5">
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-          {/* 左侧：WARP 隧道信息与换 IP 操作 */}
-          <div className="space-y-2.5">
-            <div className="flex flex-wrap items-center gap-2.5">
-              <div className="p-2 rounded-xl bg-amber-500/10 text-amber-400 border border-amber-500/20">
-                <Split className="w-5 h-5" />
-              </div>
-              <div>
-                <h2 className="text-lg font-semibold text-white tracking-tight flex items-center gap-2 flex-wrap">
-                  <span>WARP 智能分流中心</span>
-                  <span
-                    className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-mono border ${
-                      daemon?.tunnelHealthy
-                        ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/25'
-                        : 'bg-rose-500/10 text-rose-300 border-rose-500/25'
-                    }`}
-                  >
-                    <span
-                      className={`w-1.5 h-1.5 rounded-full ${
-                        daemon?.tunnelHealthy ? 'bg-emerald-400 animate-pulse' : 'bg-rose-400'
-                      }`}
-                    />
-                    {daemon?.tunnelHealthy ? '127.0.0.1:40000 就绪' : '隧道未连通'}
-                  </span>
-                  {saving && (
-                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-mono bg-sky-500/10 text-sky-300 border border-sky-500/25">
-                      <RefreshCw className="w-3 h-3 animate-spin" />
-                      正在热更新...
-                    </span>
-                  )}
-                </h2>
-                <p className="text-xs text-slate-400 mt-0.5">
-                  采用 SIGHUP 零断流热重载 + 逐流精准切换，修改域名/预设后毫秒级生效且不影响其它活跃连接
-                </p>
-              </div>
-            </div>
+      <PageHeader
+        title="WARP 智能分流中心"
+        description="采用 SIGHUP 零断流热重载 + 逐流精准切换，修改预设或自定义域名后毫秒级生效且不影响其它活跃连接"
+        badge={
+          <div className="flex items-center gap-1.5">
+            <Badge tone={daemon?.tunnelHealthy ? 'ok' : 'danger'} dot pulse={daemon?.tunnelHealthy}>
+              {daemon?.tunnelHealthy ? '127.0.0.1:40000 就绪' : '隧道未连通'}
+            </Badge>
+            {saving && <Badge tone="accent">热更新中…</Badge>}
+          </div>
+        }
+        actions={
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              size="sm"
+              variant="secondary"
+              loading={acting === 'rekey'}
+              disabled={acting !== null || !daemon?.installed}
+              icon={<RotateCcw className="w-3.5 h-3.5" />}
+              onClick={() => handleWarpAction('rekey')}
+              title="重新注册 WireGuard 身份更换 Cloudflare WARP 出口 IP"
+            >
+              {acting === 'rekey' ? '换 IP 中…' : '更换 WARP IP'}
+            </Button>
+            <Button
+              size="sm"
+              variant="secondary"
+              icon={<RefreshCw className="w-3.5 h-3.5" />}
+              onClick={() => loadRouting(true)}
+            >
+              刷新
+            </Button>
+          </div>
+        }
+      />
 
-            <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
-              <span className="px-2.5 py-1 rounded-lg bg-slate-950/70 border border-slate-800 text-amber-300">
-                WARP 出口: {daemon?.warpIp ? `${daemon.warpIp}${daemon.warpLoc ? ` (${daemon.warpLoc})` : ''}` : '待探测'}
-              </span>
-              <span className="px-2.5 py-1 rounded-lg bg-slate-950/70 border border-slate-800 text-sky-300">
-                直出 DC: {data?.dcConnCount ?? 0} 连
-              </span>
-              <span className="px-2.5 py-1 rounded-lg bg-slate-950/70 border border-slate-800 text-amber-300">
-                WARP 分流: {data?.warpConnCount ?? 0} 连
-              </span>
-              <button
-                type="button"
-                onClick={() => handleWarpAction('rekey')}
-                disabled={acting !== null || !daemon?.installed}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700/70 text-slate-200 transition-colors disabled:opacity-40"
-                title="重新注册 WireGuard 身份以更换全新 Cloudflare WARP 出口 IP（失败自动回滚）"
-              >
-                <RotateCcw className={`w-3 h-3 text-amber-400 ${acting === 'rekey' ? 'animate-spin' : ''}`} />
-                <span>{acting === 'rekey' ? '正在换 IP...' : '更换 WARP IP'}</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => loadRouting(true)}
-                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700/70 text-slate-300 transition-colors"
-              >
-                <RefreshCw className="w-3 h-3" />
-                <span>刷新</span>
-              </button>
-            </div>
+      {/* Global Mode & Daemon Telemetry */}
+      <SectionCard>
+        <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4">
+          <div className="flex flex-wrap items-center gap-2 text-xs font-mono tnum">
+            <Badge tone="warn">
+              WARP 出口: {daemon?.warpIp ? `${daemon.warpIp}${daemon.warpLoc ? ` (${daemon.warpLoc})` : ''}` : '待探测'}
+            </Badge>
+            <Badge tone="accent">直出 DC: {data?.dcConnCount ?? 0} 连</Badge>
+            <Badge tone="ok">WARP 分流: {data?.warpConnCount ?? 0} 连</Badge>
           </div>
 
-          {/* 右侧：三段式全局分流模式切换器 */}
-          <div className="flex flex-col items-stretch sm:items-end gap-2 shrink-0">
-            <div className="inline-flex flex-wrap sm:flex-nowrap p-1 rounded-xl bg-slate-950/90 border border-slate-800 gap-1">
-              <button
-                type="button"
-                onClick={() => handleModeChange('split')}
-                className={`flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold transition-all ${
-                  routing.mode === 'split'
-                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/35 shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200 border border-transparent'
-                }`}
-              >
-                <Split className="w-3.5 h-3.5" />
-                <span>原生优先 · 按需分流</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => handleModeChange('global_warp')}
-                className={`flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold transition-all ${
-                  routing.mode === 'global_warp'
-                    ? 'bg-amber-500/20 text-amber-300 border border-amber-500/35 shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200 border border-transparent'
-                }`}
-              >
-                <Shield className="w-3.5 h-3.5" />
-                <span>全局 WARP 接管</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => handleModeChange('bypass')}
-                className={`flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold transition-all ${
-                  routing.mode === 'bypass'
-                    ? 'bg-rose-500/20 text-rose-300 border border-rose-500/35 shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200 border border-transparent'
-                }`}
-              >
-                <PauseCircle className="w-3.5 h-3.5" />
-                <span>紧急全直出旁路</span>
-              </button>
-            </div>
-            <p className="text-[11px] text-slate-400 text-left sm:text-right">
+          <div className="flex flex-col sm:items-end gap-1.5">
+            <SegmentedTabs
+              value={routing.mode}
+              onChange={(m) => handleModeChange(m as WarpRoutingMode)}
+              items={[
+                { key: 'split', label: '原生优先 · 按需分流', icon: <Split className="w-3.5 h-3.5" /> },
+                { key: 'global_warp', label: '全局 WARP 接管', icon: <Shield className="w-3.5 h-3.5" /> },
+                { key: 'bypass', label: '紧急全直出旁路', icon: <PauseCircle className="w-3.5 h-3.5" /> },
+              ]}
+            />
+            <p className="text-[11px] text-muted">
               {routing.mode === 'split' && '未命中 WARP 规则的流量默认走 VPS 原生直出，兼顾速度与关键服务解锁'}
-              {routing.mode === 'global_warp' && '除右下方「强制直出白名单」外，全站出站流量默认经 WARP 隐匿源站 IP'}
-              {routing.mode === 'bypass' && '紧急旁路中：所有 WARP 分流规则已临时挂起（配置安全保留，可随时一键恢复）'}
+              {routing.mode === 'global_warp' && '除「强制原生直出白名单」外，全站出站默认经 WARP 隐匿源站 IP'}
+              {routing.mode === 'bypass' && '紧急旁路中：所有 WARP 分流规则已临时挂起（配置保留，可随时恢复）'}
             </p>
           </div>
         </div>
-      </div>
+      </SectionCard>
 
-      {/* 3. 15 项场景化预设矩阵 */}
+      {/* Preset Matrix */}
       <div className="space-y-4">
         {groupedPresets.map((group) => (
-          <div key={group.key} className="p-5 rounded-2xl glass-card space-y-3.5">
-            <div className="flex items-center justify-between pb-2.5 border-b border-slate-800/80">
-              <div className="flex items-center gap-2">
-                {group.icon}
-                <h3 className="text-sm font-semibold text-white">{group.label}</h3>
-                <span className="px-2 py-0.5 rounded-md bg-slate-900 border border-slate-800 text-[10px] font-mono text-slate-400">
-                  {group.items.filter((i) => i.enabled).length} / {group.items.length} 走 WARP
-                </span>
-              </div>
-              {routing.mode === 'bypass' && (
-                <span className="text-[11px] font-mono text-rose-300">旁路模式生效中</span>
-              )}
-            </div>
-
+          <SectionCard
+            key={group.key}
+            title={group.label}
+            icon={group.icon}
+            badge={
+              <Badge tone="neutral">
+                {group.items.filter((i) => i.enabled).length} / {group.items.length} 走 WARP
+              </Badge>
+            }
+            actions={
+              routing.mode === 'bypass' ? <Badge tone="danger">旁路模式生效中</Badge> : undefined
+            }
+          >
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
               {group.items.map((preset) => {
                 const isMissAV = preset.id === 'missav';
@@ -581,167 +522,124 @@ export const WarpTab: React.FC<WarpTabProps> = ({ onRefreshParent }) => {
                 return (
                   <div
                     key={preset.id}
-                    className={`p-3.5 rounded-xl border transition-all flex flex-col justify-between gap-3 ${
+                    className={`p-3.5 rounded-xl border transition-colors flex flex-col justify-between gap-3 ${
                       active
-                        ? 'bg-amber-500/8 border-amber-500/35 shadow-sm shadow-amber-500/5'
-                        : 'bg-slate-950/55 border-slate-800/80 hover:border-slate-700'
+                        ? 'bg-amber-500/10 border-amber-500/35'
+                        : 'bg-surface2/60 border-subtle'
                     }`}
                   >
-                    <div className="space-y-1.5">
-                      <div className="flex items-start justify-between gap-2">
-                        <div>
-                          <div className="flex items-center gap-1.5 flex-wrap">
-                            <span className="text-sm font-semibold text-white">{preset.name}</span>
-                            {isMissAV && (
-                              <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-amber-500/15 text-amber-300 border border-amber-500/30">
-                                6 域全覆盖
-                              </span>
-                            )}
-                          </div>
-                          <p className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">
-                            {preset.description}
-                          </p>
+                    <div className="flex items-start justify-between gap-2.5">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="text-sm font-semibold text-primary">{preset.name}</span>
+                          {isMissAV && <Badge tone="warn">6 域全覆盖</Badge>}
                         </div>
-
-                        <button
-                          type="button"
-                          role="switch"
-                          aria-checked={active}
-                          onClick={() => handleTogglePreset(preset.id)}
-                          className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border transition-colors duration-200 focus:outline-none ${
-                            active
-                              ? 'bg-amber-500 border-amber-400'
-                              : 'bg-slate-800 border-slate-700'
-                          }`}
-                          title={active ? '点击切换回原生直出' : '点击切走 WARP 出口'}
-                        >
-                          <span
-                            className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow transition duration-200 ${
-                              active ? 'translate-x-5' : 'translate-x-0'
-                            }`}
-                          />
-                        </button>
+                        <p className="text-[11px] text-secondary mt-1 leading-relaxed">
+                          {preset.description}
+                        </p>
                       </div>
+
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={active}
+                        onClick={() => handleTogglePreset(preset.id)}
+                        className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border transition-colors duration-200 ${
+                          active ? 'bg-amber-500 border-amber-400' : 'bg-surface2 border-strong'
+                        }`}
+                        title={active ? '点击切换回原生直出' : '点击切走 WARP 出口'}
+                      >
+                        <span
+                          className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow transition duration-200 ${
+                            active ? 'translate-x-5' : 'translate-x-0'
+                          }`}
+                        />
+                      </button>
                     </div>
 
-                    <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-800/60 text-[10px] font-mono">
-                      <span className="text-slate-500 truncate" title={preset.domainsSummary}>
+                    <div className="flex items-center justify-between gap-2 pt-2 border-t border-subtle text-[10.5px] font-mono">
+                      <span className="text-muted truncate" title={preset.domainsSummary}>
                         {preset.domainsSummary}
                       </span>
-                      <span
-                        className={`px-1.5 py-0.5 rounded shrink-0 border ${
-                          routing.mode === 'bypass'
-                            ? 'bg-slate-900 text-slate-500 border-slate-800'
-                            : active
-                            ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
-                            : 'bg-sky-500/10 text-sky-300 border-sky-500/25'
-                        }`}
+                      <Badge
+                        tone={routing.mode === 'bypass' ? 'neutral' : active ? 'warn' : 'accent'}
                       >
-                        {routing.mode === 'bypass' ? '已旁路' : active ? '⚡ WARP' : '原生直出'}
-                      </span>
+                        {routing.mode === 'bypass' ? '已旁路' : active ? 'WARP' : '直出'}
+                      </Badge>
                     </div>
                   </div>
                 );
               })}
             </div>
-          </div>
+          </SectionCard>
         ))}
       </div>
 
-      {/* 4. 实时活跃连接透视与行内秒切面板 */}
-      <div className="p-5 rounded-2xl glass-card space-y-4">
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 pb-3 border-b border-slate-800/80">
-          <div className="flex items-center gap-2.5">
-            <div className="p-1.5 rounded-xl bg-purple-500/10 text-purple-400 border border-purple-500/20">
-              <Globe className="w-4 h-4" />
-            </div>
-            <div>
-              <h3 className="text-sm font-semibold text-white flex items-center gap-2">
-                <span>实时活跃连接透视与行内秒切</span>
-                <span className="px-2 py-0.5 rounded-full bg-slate-900 border border-slate-800 text-[10px] font-mono text-slate-400">
-                  {connections.length} 个活跃目标
-                </span>
-              </h3>
-              <p className="text-[11px] text-slate-400">
-                实时追踪当前节点访问的远端站点与出口（不展示客户端源 IP），发现卡顿/弹验证可直接点选切走 WARP
-              </p>
-            </div>
-          </div>
-
+      {/* Live Connections & Inline Quick Switch */}
+      <SectionCard
+        title="实时活跃连接透视与行内秒切"
+        subtitle="实时追踪当前节点访问的远端站点与出口，发现卡顿或验证可立即切换出口"
+        icon={<Globe className="w-4 h-4" />}
+        badge={<Badge tone="neutral">{connections.length} 活跃目标</Badge>}
+        actions={
           <div className="flex flex-wrap items-center gap-2">
             <div className="relative">
-              <Search className="w-3.5 h-3.5 text-slate-500 absolute left-2.5 top-1/2 -translate-y-1/2" />
+              <Search className="w-3.5 h-3.5 text-muted absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
               <input
                 type="text"
                 value={connQuery}
                 onChange={(e) => setConnQuery(e.target.value)}
-                placeholder="筛选域名 / IP / 规则..."
-                className="bg-slate-950 border border-slate-800 rounded-xl pl-8 pr-3 py-1.5 text-xs text-slate-200 placeholder:text-slate-500 focus:outline-none focus:border-amber-500/50 w-44 sm:w-56"
+                placeholder="筛选域名 / IP / 规则…"
+                className="sc-input pl-8 pr-3 py-1.5 text-xs w-40 sm:w-52"
               />
             </div>
 
-            <div className="inline-flex rounded-xl bg-slate-950 p-0.5 border border-slate-800 text-[11px]">
-              {(['all', 'DC', 'WARP'] as const).map((f) => (
-                <button
-                  key={f}
-                  type="button"
-                  onClick={() => setConnFilter(f)}
-                  className={`px-2.5 py-1 rounded-lg font-medium transition-colors ${
-                    connFilter === f
-                      ? 'bg-slate-800 text-white'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                >
-                  {f === 'all' ? '全部' : f === 'DC' ? '直出 DC' : 'WARP'}
-                </button>
-              ))}
-            </div>
+            <SegmentedTabs
+              value={connFilter}
+              onChange={(v) => setConnFilter(v as 'all' | 'DC' | 'WARP')}
+              items={[
+                { key: 'all', label: '全部' },
+                { key: 'DC', label: '直出 DC' },
+                { key: 'WARP', label: 'WARP' },
+              ]}
+            />
 
-            <button
-              type="button"
+            <Button
+              size="xs"
+              variant={autoRefreshConn ? 'primary' : 'secondary'}
               onClick={() => setAutoRefreshConn((v) => !v)}
-              className={`px-2.5 py-1.5 rounded-xl border text-[11px] font-mono transition-colors ${
-                autoRefreshConn
-                  ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
-                  : 'bg-slate-900 border-slate-800 text-slate-400'
-              }`}
             >
-              {autoRefreshConn ? '5s 自动刷新' : '已暂停刷新'}
-            </button>
+              {autoRefreshConn ? '5s 自动刷新' : '已暂停'}
+            </Button>
 
-            <button
-              type="button"
+            <Button
+              size="xs"
+              variant="secondary"
+              loading={loadingConn}
+              icon={<RefreshCw className="w-3.5 h-3.5" />}
               onClick={loadConnections}
-              className="p-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300"
-              title="立即刷新活跃连接"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${loadingConn ? 'animate-spin' : ''}`} />
-            </button>
+            />
           </div>
-        </div>
-
+        }
+      >
         {!connEnabled ? (
-          <div className="p-5 rounded-xl bg-slate-950/60 border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div className="text-xs text-slate-300">
+          <div className="p-4 rounded-xl bg-surface2/60 border border-subtle flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="text-xs text-secondary">
               {connMsg || '当前 sing-box 尚未开启本地回环遥测接口 (127.0.0.1:9099)，无法透视实时连接。'}
             </div>
-            <button
-              type="button"
-              onClick={handleEnableTelemetry}
-              className="px-3.5 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-semibold text-xs shrink-0"
-            >
+            <Button size="sm" variant="primary" onClick={handleEnableTelemetry}>
               一键开启本地遥测
-            </button>
+            </Button>
           </div>
         ) : connections.length === 0 ? (
-          <div className="py-8 text-center text-xs font-mono text-slate-500">
+          <div className="py-8 text-center text-xs font-mono text-muted">
             当前无符合条件的活跃目标连接，客户端发起访问后将实时出现在此处
           </div>
         ) : (
           <div className="space-y-2 max-h-96 overflow-y-auto pr-1">
             {connections.map((item) => {
               const isWarp = item.outbound === 'WARP';
-              const showRootBtn = !item.isIP && item.rootDomain && item.rootDomain !== item.target;
+              const showRootBtn = Boolean(!item.isIP && item.rootDomain && item.rootDomain !== item.target);
               const primaryTarget = showRootBtn ? item.rootDomain : item.target;
               const busyPrimary = switchingTarget === primaryTarget;
               const busyExact = switchingTarget === item.target;
@@ -749,71 +647,51 @@ export const WarpTab: React.FC<WarpTabProps> = ({ onRefreshParent }) => {
               return (
                 <div
                   key={`${item.target}-${item.outbound}`}
-                  className="px-3.5 py-2.5 rounded-xl bg-slate-950/65 border border-slate-800/80 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs"
+                  className="px-3.5 py-2.5 rounded-xl bg-surface2/60 border border-subtle flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs"
                 >
                   <div className="min-w-0 flex-1 space-y-1">
                     <div className="flex items-center gap-2 flex-wrap">
-                      <span className="font-mono font-semibold text-slate-100 truncate" title={item.target}>
+                      <span className="font-mono font-semibold text-primary truncate" title={item.target}>
                         {item.target}
                       </span>
-                      {showRootBtn && (
-                        <span className="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] font-mono text-slate-400">
-                          主域 {item.rootDomain}
-                        </span>
-                      )}
-                      <span className="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] font-mono text-purple-300">
-                        {item.protocol}
-                      </span>
-                      <span
-                        className={`px-1.5 py-0.5 rounded text-[10px] font-mono border ${
-                          isWarp
-                            ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
-                            : 'bg-sky-500/15 text-sky-300 border-sky-500/30'
-                        }`}
-                      >
-                        {isWarp ? 'WARP' : '直出 DC'}
-                      </span>
+                      {showRootBtn && <Badge tone="neutral">主域 {item.rootDomain}</Badge>}
+                      <Badge tone="neutral">{item.protocol}</Badge>
+                      <Badge tone={isWarp ? 'warn' : 'accent'}>{isWarp ? 'WARP' : '直出 DC'}</Badge>
                     </div>
-                    <div className="flex items-center gap-3 text-[11px] font-mono text-slate-400 flex-wrap">
+                    <div className="flex items-center gap-3 text-[11px] font-mono tnum text-muted flex-wrap">
                       <span>{item.connections} 条连接</span>
                       <span>累计 {formatBytes(item.totalBytes)}</span>
-                      {item.rule && <span className="text-slate-500 truncate">命中: {item.rule}</span>}
+                      {item.rule && <span className="truncate">命中: {item.rule}</span>}
                     </div>
                   </div>
 
                   <div className="flex items-center gap-1.5 shrink-0">
-                    <button
-                      type="button"
-                      disabled={busyPrimary || routing.mode === 'bypass'}
+                    <Button
+                      size="xs"
+                      variant="secondary"
+                      loading={busyPrimary}
+                      disabled={routing.mode === 'bypass'}
+                      icon={<Zap className="w-3 h-3" />}
                       onClick={() => handleQuickSwitch(primaryTarget, isWarp ? 'DC' : 'WARP')}
-                      className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold border transition-colors disabled:opacity-45 ${
-                        isWarp
-                          ? 'bg-sky-500/10 hover:bg-sky-500/20 text-sky-300 border-sky-500/30'
-                          : 'bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border-amber-500/35'
-                      }`}
                     >
-                      <Zap className={`w-3 h-3 ${busyPrimary ? 'animate-spin' : ''}`} />
-                      <span>
-                        {showRootBtn
-                          ? isWarp
-                            ? `主域切回直出`
-                            : `主域切 WARP`
-                          : isWarp
-                          ? '切回直出'
-                          : '切走 WARP'}
-                      </span>
-                    </button>
-
+                      {showRootBtn
+                        ? isWarp
+                          ? '主域切回直出'
+                          : '主域切 WARP'
+                        : isWarp
+                        ? '切回直出'
+                        : '切走 WARP'}
+                    </Button>
                     {showRootBtn && (
-                      <button
-                        type="button"
-                        disabled={busyExact || routing.mode === 'bypass'}
+                      <Button
+                        size="xs"
+                        variant="ghost"
+                        loading={busyExact}
+                        disabled={routing.mode === 'bypass'}
                         onClick={() => handleQuickSwitch(`full:${item.target}`, isWarp ? 'DC' : 'WARP')}
-                        className="px-2 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700/70 text-[10px] font-mono text-slate-300 disabled:opacity-45"
-                        title={`仅对精确域名 ${item.target} 进行分流`}
                       >
                         仅此子域
-                      </button>
+                      </Button>
                     )}
                   </div>
                 </div>
@@ -821,28 +699,21 @@ export const WarpTab: React.FC<WarpTabProps> = ({ onRefreshParent }) => {
             })}
           </div>
         )}
-      </div>
+      </SectionCard>
 
-      {/* 5. 自定义域名 / 网址 / IP-CIDR 规则仓 */}
+      {/* Custom Domain / CIDR Rules */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-        {/* 强制走 WARP 名单 */}
-        <div className="p-5 rounded-2xl glass-card space-y-4">
-          <div className="flex items-center justify-between pb-3 border-b border-slate-800/80">
-            <div className="flex items-center gap-2">
-              <Sparkles className="w-4 h-4 text-amber-400" />
-              <div>
-                <h3 className="text-sm font-semibold text-white">强制走 WARP 名单</h3>
-                <p className="text-[11px] text-slate-400">
-                  支持直接粘贴完整网址（自动提取域名）、<code className="text-amber-300">full:</code>、<code className="text-amber-300">keyword:</code> 或 IP/CIDR
-                </p>
-              </div>
-            </div>
-            <span className="px-2 py-0.5 rounded-md bg-amber-500/10 border border-amber-500/25 text-[11px] font-mono text-amber-300">
+        <SectionCard
+          title="强制走 WARP 名单"
+          subtitle="支持粘贴网址自动提取域名、full:、keyword: 或 IP/CIDR"
+          icon={<Sparkles className="w-4 h-4" />}
+          badge={
+            <Badge tone="warn">
               {(routing.warpDomains?.length || 0) + (routing.warpCidrs?.length || 0)} 项
-            </span>
-          </div>
-
-          <div className="space-y-2">
+            </Badge>
+          }
+        >
+          <div className="space-y-3">
             <div className="flex gap-2">
               <input
                 type="text"
@@ -854,86 +725,77 @@ export const WarpTab: React.FC<WarpTabProps> = ({ onRefreshParent }) => {
                     handleAddRules('warp', warpInput);
                   }
                 }}
-                placeholder="例如: missav.ws 或粘贴 https://missav.ws/dm13/... 或 198.51.100.0/24"
-                className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs font-mono text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-amber-500/60"
+                placeholder="例如: missav.ws 或 198.51.100.0/24"
+                className="sc-input flex-1 px-3 py-2 text-xs font-mono"
               />
-              <button
-                type="button"
-                onClick={() => handleAddRules('warp', warpInput)}
+              <Button
+                size="sm"
+                variant="primary"
                 disabled={!warpInput.trim()}
-                className="inline-flex items-center gap-1 px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-xs disabled:opacity-40 shrink-0"
+                icon={<Plus className="w-3.5 h-3.5" />}
+                onClick={() => handleAddRules('warp', warpInput)}
               >
-                <Plus className="w-3.5 h-3.5" />
-                <span>添加</span>
-              </button>
+                添加
+              </Button>
             </div>
             {warpPreview && (
-              <div className="text-[11px] font-mono text-amber-300/90 flex items-center gap-1.5">
+              <div className="text-[11px] font-mono text-amber-400 flex items-center gap-1.5">
                 <CheckCircle2 className="w-3 h-3" />
                 <span>
-                  将添加{warpPreview.kind === 'cidr' ? ' IP/CIDR 规则' : '域名规则'}: <strong>{warpPreview.value}</strong>
+                  将添加{warpPreview.kind === 'cidr' ? ' IP/CIDR' : '域名'}: <strong>{warpPreview.value}</strong>
                 </span>
               </div>
             )}
-          </div>
 
-          <div className="flex flex-wrap gap-1.5 min-h-[44px] items-start">
-            {(routing.warpDomains || []).map((d) => (
-              <span
-                key={`wd-${d}`}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-500/10 border border-amber-500/30 text-xs font-mono text-amber-200"
-              >
-                <span>{d}</span>
-                <button
-                  type="button"
-                  onClick={() => handleRemoveRule('warp', 'domain', d)}
-                  className="text-amber-300/70 hover:text-rose-300"
-                  title="移除规则"
+            <div className="flex flex-wrap gap-1.5 min-h-[40px] items-start">
+              {(routing.warpDomains || []).map((d) => (
+                <span
+                  key={`wd-${d}`}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-500/12 border border-amber-500/25 text-xs font-mono text-amber-300"
                 >
-                  <Trash2 className="w-3 h-3" />
-                </button>
-              </span>
-            ))}
-            {(routing.warpCidrs || []).map((c) => (
-              <span
-                key={`wc-${c}`}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-orange-500/10 border border-orange-500/30 text-xs font-mono text-orange-200"
-              >
-                <span>CIDR {c}</span>
-                <button
-                  type="button"
-                  onClick={() => handleRemoveRule('warp', 'cidr', c)}
-                  className="text-orange-300/70 hover:text-rose-300"
-                  title="移除规则"
+                  <span>{d}</span>
+                  <button
+                    type="button"
+                    onClick={() => handleRemoveRule('warp', 'domain', d)}
+                    className="hover:text-rose-400 cursor-pointer"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                  </button>
+                </span>
+              ))}
+              {(routing.warpCidrs || []).map((c) => (
+                <span
+                  key={`wc-${c}`}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-orange-500/12 border border-orange-500/25 text-xs font-mono text-orange-300"
                 >
-                  <Trash2 className="w-3 h-3" />
-                </button>
-              </span>
-            ))}
-            {(routing.warpDomains?.length || 0) + (routing.warpCidrs?.length || 0) === 0 && (
-              <span className="text-xs font-mono text-slate-500">暂无自定义 WARP 规则</span>
-            )}
-          </div>
-        </div>
-
-        {/* 强制原生直出白名单 */}
-        <div className="p-5 rounded-2xl glass-card space-y-4">
-          <div className="flex items-center justify-between pb-3 border-b border-slate-800/80">
-            <div className="flex items-center gap-2">
-              <ShieldCheck className="w-4 h-4 text-sky-400" />
-              <div>
-                <h3 className="text-sm font-semibold text-white">强制原生直出白名单 (最高优先级)</h3>
-                <p className="text-[11px] text-slate-400">
-                  优先于全局 WARP 与预设规则执行，适合国内直连服务、银行或内部接口放行原生出口
-                </p>
-              </div>
+                  <span>CIDR {c}</span>
+                  <button
+                    type="button"
+                    onClick={() => handleRemoveRule('warp', 'cidr', c)}
+                    className="hover:text-rose-400 cursor-pointer"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                  </button>
+                </span>
+              ))}
+              {(routing.warpDomains?.length || 0) + (routing.warpCidrs?.length || 0) === 0 && (
+                <span className="text-xs font-mono text-muted">暂无自定义 WARP 规则</span>
+              )}
             </div>
-            <span className="px-2 py-0.5 rounded-md bg-sky-500/10 border border-sky-500/25 text-[11px] font-mono text-sky-300">
-              {(routing.directDomains?.length || 0) + (routing.directCidrs?.length || 0)} 项
-            </span>
           </div>
+        </SectionCard>
 
-          <div className="space-y-2">
+        <SectionCard
+          title="强制原生直出白名单 (最高优先级)"
+          subtitle="优先于全局 WARP 与预设规则执行，适合国内服务或银行站点直连"
+          icon={<ShieldCheck className="w-4 h-4" />}
+          badge={
+            <Badge tone="accent">
+              {(routing.directDomains?.length || 0) + (routing.directCidrs?.length || 0)} 项
+            </Badge>
+          }
+        >
+          <div className="space-y-3">
             <div className="flex gap-2">
               <input
                 type="text"
@@ -946,66 +808,65 @@ export const WarpTab: React.FC<WarpTabProps> = ({ onRefreshParent }) => {
                   }
                 }}
                 placeholder="例如: direct.example.com 或 203.0.113.0/24"
-                className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs font-mono text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-sky-500/60"
+                className="sc-input flex-1 px-3 py-2 text-xs font-mono"
               />
-              <button
-                type="button"
-                onClick={() => handleAddRules('direct', directInput)}
+              <Button
+                size="sm"
+                variant="primary"
                 disabled={!directInput.trim()}
-                className="inline-flex items-center gap-1 px-3.5 py-2 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-semibold text-xs disabled:opacity-40 shrink-0"
+                icon={<Plus className="w-3.5 h-3.5" />}
+                onClick={() => handleAddRules('direct', directInput)}
               >
-                <Plus className="w-3.5 h-3.5" />
-                <span>添加</span>
-              </button>
+                添加
+              </Button>
             </div>
             {directPreview && (
-              <div className="text-[11px] font-mono text-sky-300/90 flex items-center gap-1.5">
+              <div className="text-[11px] font-mono text-accent flex items-center gap-1.5">
                 <CheckCircle2 className="w-3 h-3" />
                 <span>
-                  将添加{directPreview.kind === 'cidr' ? ' IP/CIDR 白名单' : '直出域名白名单'}: <strong>{directPreview.value}</strong>
+                  将添加{directPreview.kind === 'cidr' ? ' IP/CIDR 白名单' : '直出域名白名单'}:{' '}
+                  <strong>{directPreview.value}</strong>
                 </span>
               </div>
             )}
-          </div>
 
-          <div className="flex flex-wrap gap-1.5 min-h-[44px] items-start">
-            {(routing.directDomains || []).map((d) => (
-              <span
-                key={`dd-${d}`}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-sky-500/10 border border-sky-500/30 text-xs font-mono text-sky-200"
-              >
-                <span>{d}</span>
-                <button
-                  type="button"
-                  onClick={() => handleRemoveRule('direct', 'domain', d)}
-                  className="text-sky-300/70 hover:text-rose-300"
-                  title="移除白名单"
+            <div className="flex flex-wrap gap-1.5 min-h-[40px] items-start">
+              {(routing.directDomains || []).map((d) => (
+                <span
+                  key={`dd-${d}`}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-sky-500/12 border border-sky-500/25 text-xs font-mono text-accent"
                 >
-                  <Trash2 className="w-3 h-3" />
-                </button>
-              </span>
-            ))}
-            {(routing.directCidrs || []).map((c) => (
-              <span
-                key={`dc-${c}`}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-cyan-500/10 border border-cyan-500/30 text-xs font-mono text-cyan-200"
-              >
-                <span>CIDR {c}</span>
-                <button
-                  type="button"
-                  onClick={() => handleRemoveRule('direct', 'cidr', c)}
-                  className="text-cyan-300/70 hover:text-rose-300"
-                  title="移除白名单"
+                  <span>{d}</span>
+                  <button
+                    type="button"
+                    onClick={() => handleRemoveRule('direct', 'domain', d)}
+                    className="hover:text-rose-400 cursor-pointer"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                  </button>
+                </span>
+              ))}
+              {(routing.directCidrs || []).map((c) => (
+                <span
+                  key={`dc-${c}`}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-cyan-500/12 border border-cyan-500/25 text-xs font-mono text-cyan-400"
                 >
-                  <Trash2 className="w-3 h-3" />
-                </button>
-              </span>
-            ))}
-            {(routing.directDomains?.length || 0) + (routing.directCidrs?.length || 0) === 0 && (
-              <span className="text-xs font-mono text-slate-500">暂无强制直出白名单</span>
-            )}
+                  <span>CIDR {c}</span>
+                  <button
+                    type="button"
+                    onClick={() => handleRemoveRule('direct', 'cidr', c)}
+                    className="hover:text-rose-400 cursor-pointer"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                  </button>
+                </span>
+              ))}
+              {(routing.directDomains?.length || 0) + (routing.directCidrs?.length || 0) === 0 && (
+                <span className="text-xs font-mono text-muted">暂无强制直出白名单</span>
+              )}
+            </div>
           </div>
-        </div>
+        </SectionCard>
       </div>
     </div>
   );

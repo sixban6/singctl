@@ -1,25 +1,35 @@
 <!DOCTYPE html>
-<html lang="zh-CN" class="dark">
+<html lang="zh-CN" class="dark" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <title>服务端控制台</title>
-    <meta name="theme-color" content="#080d1a" />
-    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2322c55e' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polygon points='13 2 3 14 12 14 11 22 21 10 12 10 13 2'/></svg>" />
+    <title>SingCtl · 服务端控制台</title>
+    <meta name="theme-color" content="#090c12" />
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2338bdf8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polygon points='13 2 3 14 12 14 11 22 21 10 12 10 13 2'/></svg>" />
     <script>
-      // 彻底清理同域名下可能存在的其他 ServiceWorker (如 Sub-Store PWA)，杜绝路由与静态资源劫持
-      if ('serviceWorker' in navigator) {
-        navigator.serviceWorker.getRegistrations().then(function(registrations) {
-          for (var i = 0; i < registrations.length; i++) {
-            registrations[i].unregister();
-          }
-        });
-      }
+      // 同步初始化暗/亮主题，避免首屏闪烁
+      (function () {
+        try {
+          var t = localStorage.getItem('sc-theme') || 'dark';
+          document.documentElement.dataset.theme = t;
+          document.documentElement.classList.toggle('dark', t === 'dark');
+          var m = document.querySelector('meta[name="theme-color"]');
+          if (m) m.setAttribute('content', t === 'dark' ? '#090c12' : '#f3f6fb');
+        } catch (e) {}
+        // 彻底清理同域名下可能存在的其他 ServiceWorker (如 Sub-Store PWA)，杜绝路由与静态资源劫持
+        if ('serviceWorker' in navigator) {
+          navigator.serviceWorker.getRegistrations().then(function (registrations) {
+            for (var i = 0; i < registrations.length; i++) {
+              registrations[i].unregister();
+            }
+          });
+        }
+      })();
     </script>
-    <script type="module" crossorigin src="./assets/index--dJiUxOX.js"></script>
-    <link rel="stylesheet" crossorigin href="./assets/index-BGFVTIZ_.css">
+    <script type="module" crossorigin src="./assets/index-DqmMF7yS.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-vX-o8QwW.css">
   </head>
-  <body class="bg-[#080d1a] text-slate-100 min-h-screen antialiased selection:bg-emerald-500/30 selection:text-emerald-300">
+  <body class="bg-canvas text-primary min-h-screen antialiased selection:bg-sky-500/25 selection:text-sky-300">
     <div id="root"></div>
   </body>
 </html>

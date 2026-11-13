@@ -1,11 +1,14 @@
 {
   "name": "web",
-  "version": "1.0.0",
-  "description": "",
+  "version": "2.0.0",
+  "description": "SingCtl Unified Server & Client WebUI",
   "main": "index.js",
   "scripts": {
-    "dev": "vite",
-    "build": "vite build"
+    "dev": "VITE_APP_TARGET=server vite",
+    "dev:client": "VITE_APP_TARGET=client vite --port 5174",
+    "build:server": "VITE_APP_TARGET=server vite build",
+    "build:client": "VITE_APP_TARGET=client vite build",
+    "build": "npm run build:server && npm run build:client"
   },
   "keywords": [],
   "author": "",

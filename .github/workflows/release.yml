@@ -39,7 +39,7 @@ jobs:
           cache: 'npm'
           cache-dependency-path: web/package-lock.json
 
-      - name: Typecheck & Build Server WebUI
+      - name: Typecheck & Build WebUI (Server & Client)
         working-directory: web
         run: |
           npm ci
@@ -57,11 +57,18 @@ jobs:
           go test -race ./internal/...
           go test -short ./test/...
 
-      - name: Upload Built WebUI Static Assets
+      - name: Upload Built Server WebUI Static Assets
         uses: actions/upload-artifact@v7
         with:
           name: serverweb-static
           path: internal/serverweb/static
+          if-no-files-found: error
+
+      - name: Upload Built Client WebUI Static Assets
+        uses: actions/upload-artifact@v7
+        with:
+          name: webui-static
+          path: internal/webui/static
           if-no-files-found: error
 
       - name: Determine Release Eligibility & Next Version
@@ -124,11 +131,17 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Restore Built WebUI Static Assets
+      - name: Restore Built Server WebUI Static Assets
         uses: actions/download-artifact@v8
         with:
           name: serverweb-static
           path: internal/serverweb/static
+
+      - name: Restore Built Client WebUI Static Assets
+        uses: actions/download-artifact@v8
+        with:
+          name: webui-static
+          path: internal/webui/static
 
       - name: Setup Go
         uses: actions/setup-go@v7
