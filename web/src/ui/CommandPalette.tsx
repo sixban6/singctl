@@ -70,7 +70,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
 
   return createPortal(
     <div
-      className="fixed inset-0 z-[65] flex items-start justify-center pt-[calc(3.5rem+env(safe-area-inset-top,0px))] sm:pt-[12vh] p-3 sm:p-4 pb-safe bg-slate-950/75 backdrop-blur-md animate-sc-in"
+      className="fixed inset-0 z-[65] flex items-start justify-center palette-safe bg-slate-950/75 backdrop-blur-md animate-sc-in"
       onClick={onClose}
       role="dialog"
       aria-modal="true"

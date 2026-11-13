@@ -1169,7 +1169,7 @@ export const FleetTab: React.FC = () => {
               )}
             </div>
 
-            <div className="px-5 sm:px-6 py-4 pb-safe bg-slate-950/80 border-t border-slate-800 flex items-center justify-end gap-2.5 shrink-0">
+            <div className="drawer-footer-safe bg-slate-950/80 border-t border-slate-800 flex items-center justify-end gap-2.5 shrink-0">
               <button
                 type="button"
                 onClick={() => setShowModal(false)}

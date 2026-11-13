@@ -85,9 +85,9 @@ export const Navigation: React.FC<NavigationProps> = ({ currentTab, onChangeTab 
       {/* Mobile Frosted-Glass Bottom Tab Bar (< 768px, iOS Safe-Area Adapted) */}
       <nav
         aria-label="移动端主导航"
-        className="md:hidden fixed bottom-0 left-0 right-0 z-40 border-t border-slate-800/90 bg-slate-950/90 backdrop-blur-2xl pb-safe"
+        className="md:hidden fixed bottom-0 left-0 right-0 z-40 border-t border-slate-800/90 bg-slate-950/90 backdrop-blur-2xl pb-safe pl-safe pr-safe"
       >
-        <div className="grid grid-cols-5 h-16 px-1">
+        <div className="grid grid-cols-5 h-16 px-2">
           {primaryMobileTabs.map((tab) => {
             const Icon = tab.icon;
             const active = currentTab === tab.key;
@@ -143,7 +143,7 @@ export const Navigation: React.FC<NavigationProps> = ({ currentTab, onChangeTab 
           onClick={() => setMoreOpen(false)}
         >
           <div
-            className="w-full bg-slate-900 border-t border-slate-800 rounded-t-3xl p-5 pb-safe space-y-3 shadow-2xl"
+            className="w-full bg-slate-900 border-t border-slate-800 rounded-t-3xl sheet-safe space-y-3 shadow-2xl max-h-[calc(82dvh-env(safe-area-inset-top,0px))] overflow-y-auto"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="w-10 h-1 rounded-full bg-slate-700 mx-auto mb-1" />

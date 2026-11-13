@@ -34,7 +34,7 @@ export const TaskConsoleDrawer: React.FC<TaskConsoleDrawerProps> = ({
   if (!open) return null;
 
   return (
-    <div className="fixed bottom-mobile-nav md:bottom-0 left-0 right-0 z-50 px-2 sm:px-6 pl-safe pr-safe pb-2 sm:pb-4 pointer-events-none">
+    <div className="fixed bottom-mobile-nav md:bottom-0 left-0 right-0 z-50 px-page-safe pb-3 sm:pb-4 pointer-events-none">
       <div className="max-w-5xl mx-auto pointer-events-auto rounded-2xl border border-strong shadow-2xl overflow-hidden bg-[#070a10] text-slate-200 animate-sc-in">
         <div className="flex items-center justify-between gap-3 px-4 py-2.5 border-b border-white/10 bg-[#0d121d]">
           <div className="flex items-center gap-2.5 min-w-0">

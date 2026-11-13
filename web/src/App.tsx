@@ -107,7 +107,7 @@ const DashboardContent: React.FC = () => {
   // 1. Initial Auth Checking Screen (Sleek dark minimal loading)
   if (isCheckingAuth) {
     return (
-      <div className="min-h-screen flex flex-col items-center justify-center bg-[#080d1a] text-slate-400 select-none">
+      <div className="min-h-dvh flex flex-col items-center justify-center px-page-safe bg-[#080d1a] text-slate-400 select-none">
         <div className="w-12 h-12 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400 mb-4 animate-pulse glow-green">
           <Activity className="w-6 h-6" />
         </div>
@@ -145,7 +145,7 @@ const DashboardContent: React.FC = () => {
         </div>
       )}
 
-      <main className="flex-1 max-w-[1440px] w-full mx-auto px-3.5 sm:px-6 lg:px-8 py-4 sm:py-6 pb-mobile-nav md:pb-8 space-y-5 sm:space-y-6">
+      <main className="flex-1 max-w-[1440px] w-full mx-auto px-page-safe py-4 sm:py-6 pb-mobile-nav md:pb-8 space-y-5 sm:space-y-6">
         {status?.initialCredentials?.pending && (
           <div className="p-5 rounded-2xl border border-amber-500/30 bg-amber-500/10 space-y-3">
             <div>

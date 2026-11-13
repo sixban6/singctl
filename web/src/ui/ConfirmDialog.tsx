@@ -39,7 +39,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
 
   return createPortal(
     <div
-      className="fixed inset-0 z-[60] flex items-center justify-center p-4 pt-safe pb-safe bg-slate-950/75 backdrop-blur-md animate-sc-in"
+      className="fixed inset-0 z-[60] flex items-center justify-center modal-safe bg-slate-950/75 backdrop-blur-md animate-sc-in"
       onClick={() => !loading && onCancel()}
       role="alertdialog"
       aria-modal="true"

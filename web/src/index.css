@@ -123,17 +123,135 @@
   padding-bottom: env(safe-area-inset-bottom, 0px);
 }
 
-.pb-mobile-nav {
-  padding-bottom: calc(5.25rem + env(safe-area-inset-bottom, 0px));
+/* Unified horizontal gutters for header inner bar, <main>, and task drawer (safe-area additive):
+   - < 390px compact phones: 16px (1rem)
+   - 390px..639px standard phones: 20px (1.25rem)
+   - >= 640px tablets: 24px (1.5rem)
+   - >= 1024px desktop: 32px (2rem) */
+.px-page-safe {
+  padding-left: calc(1rem + env(safe-area-inset-left, 0px));
+  padding-right: calc(1rem + env(safe-area-inset-right, 0px));
+}
+
+@media (min-width: 390px) {
+  .px-page-safe {
+    padding-left: calc(1.25rem + env(safe-area-inset-left, 0px));
+    padding-right: calc(1.25rem + env(safe-area-inset-right, 0px));
+  }
+}
+
+@media (min-width: 640px) {
+  .px-page-safe {
+    padding-left: calc(1.5rem + env(safe-area-inset-left, 0px));
+    padding-right: calc(1.5rem + env(safe-area-inset-right, 0px));
+  }
+}
+
+@media (min-width: 1024px) {
+  .px-page-safe {
+    padding-left: calc(2rem + env(safe-area-inset-left, 0px));
+    padding-right: calc(2rem + env(safe-area-inset-right, 0px));
+  }
+}
+
+/* Mobile overflow bottom sheet */
+.sheet-safe {
+  padding-top: 1.25rem;
+  padding-left: calc(1.25rem + env(safe-area-inset-left, 0px));
+  padding-right: calc(1.25rem + env(safe-area-inset-right, 0px));
+  padding-bottom: calc(1.25rem + env(safe-area-inset-bottom, 0px));
+}
+
+/* SlideDrawer header/body/footer with additive safe-area insets */
+.drawer-header-safe {
+  padding-top: calc(1rem + env(safe-area-inset-top, 0px));
+  padding-bottom: 1rem;
+  padding-left: calc(1.125rem + env(safe-area-inset-left, 0px));
+  padding-right: calc(1.125rem + env(safe-area-inset-right, 0px));
+}
+
+.drawer-body-safe {
+  padding-top: 1rem;
+  padding-left: calc(1.125rem + env(safe-area-inset-left, 0px));
+  padding-right: calc(1.125rem + env(safe-area-inset-right, 0px));
+  padding-bottom: 1rem;
+}
+
+.drawer-body-safe-end {
+  padding-bottom: calc(1.25rem + env(safe-area-inset-bottom, 0px));
+}
+
+.drawer-footer-safe {
+  padding-top: 0.875rem;
+  padding-left: calc(1.125rem + env(safe-area-inset-left, 0px));
+  padding-right: calc(1.125rem + env(safe-area-inset-right, 0px));
+  padding-bottom: calc(0.875rem + env(safe-area-inset-bottom, 0px));
+}
+
+@media (min-width: 640px) {
+  .drawer-header-safe {
+    padding-top: calc(1rem + env(safe-area-inset-top, 0px));
+    padding-bottom: 1rem;
+    padding-left: calc(1.25rem + env(safe-area-inset-left, 0px));
+    padding-right: calc(1.25rem + env(safe-area-inset-right, 0px));
+  }
+
+  .drawer-body-safe {
+    padding-top: 1.25rem;
+    padding-left: calc(1.25rem + env(safe-area-inset-left, 0px));
+    padding-right: calc(1.25rem + env(safe-area-inset-right, 0px));
+    padding-bottom: 1.25rem;
+  }
+
+  .drawer-body-safe-end {
+    padding-bottom: calc(1.25rem + env(safe-area-inset-bottom, 0px));
+  }
+
+  .drawer-footer-safe {
+    padding-left: calc(1.25rem + env(safe-area-inset-left, 0px));
+    padding-right: calc(1.25rem + env(safe-area-inset-right, 0px));
+  }
+}
+
+/* Centered modal & command palette safe backdrop margins */
+.modal-safe {
+  padding-top: calc(1rem + env(safe-area-inset-top, 0px));
+  padding-right: calc(1rem + env(safe-area-inset-right, 0px));
+  padding-bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
+  padding-left: calc(1rem + env(safe-area-inset-left, 0px));
+}
+
+.palette-safe {
+  padding-top: calc(3.5rem + env(safe-area-inset-top, 0px));
+  padding-right: calc(1rem + env(safe-area-inset-right, 0px));
+  padding-bottom: calc(1.25rem + env(safe-area-inset-bottom, 0px));
+  padding-left: calc(1rem + env(safe-area-inset-left, 0px));
+}
+
+@media (min-width: 640px) {
+  .palette-safe {
+    padding-top: 12vh;
+  }
 }
 
 @media (max-width: 767px) {
+  .pb-mobile-nav {
+    padding-bottom: calc(5.25rem + env(safe-area-inset-bottom, 0px));
+  }
+
   .bottom-mobile-nav {
     bottom: calc(4rem + env(safe-area-inset-bottom, 0px));
   }
 
   .bottom-mobile-toast {
     bottom: calc(5rem + env(safe-area-inset-bottom, 0px));
+  }
+}
+
+@media (max-width: 639px) {
+  .bottom-mobile-toast {
+    left: calc(1rem + env(safe-area-inset-left, 0px));
+    right: calc(1rem + env(safe-area-inset-right, 0px));
   }
 }
 

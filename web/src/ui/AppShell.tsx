@@ -108,8 +108,8 @@ export function AppShell<T extends string = string>({
   return (
     <div className="min-h-dvh flex flex-col bg-[#080d1a] text-slate-100 overflow-x-clip">
       {/* Sticky Frosted Glass Header — 1:1 Aligned with Server Console */}
-      <header className="sticky top-0 z-40 w-full border-b border-slate-800/80 bg-slate-950/80 backdrop-blur-xl pt-safe pl-safe pr-safe">
-        <div className="max-w-[1440px] mx-auto px-3 sm:px-6 lg:px-8 h-14 sm:h-16 flex items-center justify-between gap-2">
+      <header className="sticky top-0 z-40 w-full border-b border-slate-800/80 bg-slate-950/80 backdrop-blur-xl pt-safe">
+        <div className="max-w-[1440px] mx-auto px-page-safe h-14 sm:h-16 flex items-center justify-between gap-2">
           {/* Brand */}
           <div className="flex items-center gap-2 sm:gap-3 min-w-0">
             <div
@@ -183,7 +183,7 @@ export function AppShell<T extends string = string>({
       </header>
 
       {/* Main Container matching Server Console max-w-[1440px] */}
-      <main className="flex-1 max-w-[1440px] w-full mx-auto px-3.5 sm:px-6 lg:px-8 pl-safe pr-safe py-4 sm:py-6 pb-mobile-nav md:pb-8 space-y-5 sm:space-y-6">
+      <main className="flex-1 max-w-[1440px] w-full mx-auto px-page-safe py-4 sm:py-6 pb-mobile-nav md:pb-8 space-y-5 sm:space-y-6">
         {banner}
 
         {/* Desktop & Tablet Horizontal Tab Strip (>= 768px) */}
@@ -240,9 +240,9 @@ export function AppShell<T extends string = string>({
       {/* Mobile Frosted-Glass Bottom Tab Bar (< 768px, iOS Safe-Area Adapted) */}
       <nav
         aria-label="移动端主导航"
-        className="md:hidden fixed bottom-0 left-0 right-0 z-40 border-t border-slate-800/90 bg-slate-950/90 backdrop-blur-2xl pb-safe"
+        className="md:hidden fixed bottom-0 left-0 right-0 z-40 border-t border-slate-800/90 bg-slate-950/90 backdrop-blur-2xl pb-safe pl-safe pr-safe"
       >
-        <div className="grid grid-cols-5 h-16 px-1">
+        <div className="grid grid-cols-5 h-16 px-2">
           {primaryMobile.map((tab) => {
             const Icon = tab.icon;
             const active = activeTab === tab.key;
@@ -300,7 +300,7 @@ export function AppShell<T extends string = string>({
           onClick={() => setMoreOpen(false)}
         >
           <div
-            className="w-full bg-slate-900 border-t border-slate-800 rounded-t-3xl p-5 pb-safe pl-safe pr-safe space-y-3 shadow-2xl max-h-[calc(82dvh-env(safe-area-inset-top,0px))] overflow-y-auto"
+            className="w-full bg-slate-900 border-t border-slate-800 rounded-t-3xl sheet-safe space-y-3 shadow-2xl max-h-[calc(82dvh-env(safe-area-inset-top,0px))] overflow-y-auto"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="w-10 h-1 rounded-full bg-slate-700 mx-auto mb-1" />

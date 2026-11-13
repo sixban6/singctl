@@ -16,8 +16,8 @@ export const Header: React.FC<HeaderProps> = ({ status, onLogout, lastOk, linkDo
   const loadAvg = status?.system?.loadAvg ? status.system.loadAvg.split(',')[0] : '0.00';
 
   return (
-    <header className="sticky top-0 z-40 w-full border-b border-slate-800/80 bg-slate-950/80 backdrop-blur-xl pt-safe pl-safe pr-safe">
-      <div className="max-w-[1440px] mx-auto px-3 sm:px-6 lg:px-8 h-14 sm:h-16 flex items-center justify-between gap-2">
+    <header className="sticky top-0 z-40 w-full border-b border-slate-800/80 bg-slate-950/80 backdrop-blur-xl pt-safe">
+      <div className="max-w-[1440px] mx-auto px-page-safe h-14 sm:h-16 flex items-center justify-between gap-2">
         {/* Brand */}
         <div className="flex items-center gap-2 sm:gap-3 min-w-0">
           <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center shrink-0 glow-green">
