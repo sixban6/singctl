@@ -64,7 +64,7 @@ func New(opts Options) *Server {
 		auditLimiter: newAuditRateLimiter(),
 	}
 
-	// 静态资源(同样受鉴权保护;不限方法,避免与 /clash/* 全方法代理模式冲突)
+	// 静态资源（统一受 WebUI 口令鉴权保护）
 	staticContent, _ := fs.Sub(staticFS, "static")
 	fileServer := http.FileServer(http.FS(staticContent))
 	s.Mux.Handle("/", s.authOnly(fileServer))
@@ -109,8 +109,12 @@ func New(opts Options) *Server {
 	s.Mux.HandleFunc("POST /api/audit/unblock", s.guard(s.handleAuditUnblock))
 	s.Mux.HandleFunc("POST /api/audit/whitelist", s.guard(s.handleAuditWhitelist))
 
-	// clash 控制面板与 API 反向代理(/clash/* 及根路径直通)
-	s.setupClashProxy()
+	// 原生 sing-box 策略组切换、测速、运行模式与实时速率 API（全部经由 WebUI 登录态统一鉴权）
+	s.Mux.HandleFunc("GET /api/sb/proxies", s.guard(s.handleSbProxiesGet))
+	s.Mux.HandleFunc("PUT /api/sb/proxies/switch", s.guard(s.handleSbProxySwitchPut))
+	s.Mux.HandleFunc("POST /api/sb/proxies/delay", s.guard(s.handleSbProxyDelayPost))
+	s.Mux.HandleFunc("PUT /api/sb/mode", s.guard(s.handleSbModePut))
+	s.Mux.HandleFunc("GET /api/sb/traffic", s.guard(s.handleSbTrafficGet))
 
 	// 动作 API(流式输出)
 	s.Mux.HandleFunc("POST /api/action", s.guard(s.handleAction))

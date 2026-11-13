@@ -11,6 +11,9 @@ import {
   ClientRoutingReport,
   ClientStatusResponse,
   SbConfigResponse,
+  SbProxiesSnapshot,
+  SbProxyMode,
+  SbTrafficSnapshot,
   WatchdogReport,
 } from './types';
 
@@ -144,6 +147,31 @@ export const clientApi = {
       method: 'POST',
       body: JSON.stringify({ name }),
     }),
+
+  getSbProxies: () => request<SbProxiesSnapshot>('/api/sb/proxies'),
+  switchSbProxy: (group: string, target: string) =>
+    request<{ ok: boolean; group: string; target: string; message: string; snapshot?: SbProxiesSnapshot }>(
+      '/api/sb/proxies/switch',
+      { method: 'PUT', body: JSON.stringify({ group, target }) },
+    ),
+  testSbProxyDelay: (payload: { group?: string; node?: string; url?: string; timeoutMs?: number }) =>
+    request<{
+      ok: boolean;
+      url: string;
+      delays: Record<string, number>;
+      testedCount: number;
+      okCount: number;
+      snapshot?: SbProxiesSnapshot;
+    }>('/api/sb/proxies/delay', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  setSbMode: (mode: SbProxyMode) =>
+    request<{ ok: boolean; mode: string; message: string; snapshot?: SbProxiesSnapshot }>('/api/sb/mode', {
+      method: 'PUT',
+      body: JSON.stringify({ mode }),
+    }),
+  getSbTraffic: () => request<SbTrafficSnapshot>('/api/sb/traffic'),
 
   getTrafficRouting: () => request<ClientRoutingReport>('/api/traffic-routing'),
   updateTrafficRouting: (payload: {

@@ -12,7 +12,54 @@ export interface ClientSingBoxStatus {
   version: string;
   configExists: boolean;
   configPath: string;
-  panelURL: string;
+}
+
+export type SbProxyMode = 'rule' | 'global' | 'direct' | string;
+
+export interface SbProxyNodeMeta {
+  name: string;
+  type: string;
+  delay: number;
+  tested?: boolean;
+  udp?: boolean;
+}
+
+export interface SbProxyGroup {
+  name: string;
+  type: 'Selector' | 'URLTest' | 'Fallback' | 'LoadBalance' | string;
+  canSelect: boolean;
+  now?: string;
+  resolvedChain?: string[];
+  resolvedNode?: string;
+  resolvedDelay?: number;
+  all: string[];
+  usedBy?: string[];
+  usedByCount?: number;
+  failedOver?: boolean;
+  failoverFrom?: string;
+  failoverSince?: string;
+}
+
+export interface SbProxiesSnapshot {
+  running: boolean;
+  mode: SbProxyMode;
+  primaryGroup?: string;
+  primaryNode?: string;
+  primaryDelay?: number;
+  groups: SbProxyGroup[];
+  nodes: Record<string, SbProxyNodeMeta>;
+  error?: string;
+}
+
+export interface SbTrafficSnapshot {
+  running: boolean;
+  up: number;
+  down: number;
+  uploadTotal: number;
+  downloadTotal: number;
+  connections: number;
+  memory: number;
+  error?: string;
 }
 
 export interface ClientDaemonStatus {

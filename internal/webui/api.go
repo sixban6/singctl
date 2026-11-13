@@ -114,30 +114,12 @@ func singboxStatus() map[string]any {
 		}
 	}
 
-	// 控制面板地址:以 sing-box 配置文件中的 external_controller 为权威
-	// (与 /clash 反代同源;配置缺失时按平台默认值兑底)
-	panelURL := ""
-	for _, ep := range singbox.ClashAPIEndpoints() {
-		panelURL = ep + "/ui"
-		break
-	}
-	if panelURL == "" {
-		panelHost := "127.0.0.1"
-		if runtime.GOOS == "linux" {
-			if ni, err := netinfo.Get(); err == nil && ni.LANIPv4 != "" {
-				panelHost = ni.LANIPv4
-			}
-		}
-		panelURL = fmt.Sprintf("http://%s:9090/ui", panelHost)
-	}
-
 	return map[string]any{
 		"running":      daemon.IsSingBoxRunning(),
 		"installed":    installed,
 		"version":      version,
 		"configExists": fileExists(constant.SingBoxConfigFile),
 		"configPath":   constant.SingBoxConfigFile,
-		"panelURL":     panelURL,
 	}
 }
 

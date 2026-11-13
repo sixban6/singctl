@@ -74,7 +74,7 @@ func (sb *SingBox) Start() error {
 	}
 
 	logger.Success("🚀🚀🚀Sing-box started successfully")
-	logger.Info("🎉🎉🎉SingBox 控制面板地址: http://%s", sb.configGenerator.GetWebUIAddress())
+	logger.Info("Sing-Box 本地控制面已监听: %s (外置 Clash 面板已移除，请使用 SingCtl WebUI 原生节点控制台)", sb.configGenerator.GetWebUIAddress())
 	return nil
 }
 

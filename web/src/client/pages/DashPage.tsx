@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Activity,
   Box,
@@ -6,7 +6,7 @@ import {
   Share2,
   Flame,
   QrCode,
-  ExternalLink,
+  SlidersHorizontal,
   Copy,
   CheckCircle2,
   XCircle,
@@ -23,13 +23,13 @@ import {
   useToast,
 } from '../../ui';
 import { clientApi } from '../api';
-import { ClientHealthResponse, ClientStatusResponse } from '../types';
+import { ClientHealthResponse, ClientStatusResponse, SbProxiesSnapshot } from '../types';
 
 export interface DashPageProps {
   status: ClientStatusResponse | null;
   busy: boolean;
   onAction: (name: string, params?: Record<string, unknown>, confirmMsg?: string) => void;
-  onNavigate: (tab: string) => void;
+  onNavigate: (tab: string, sub?: string) => void;
 }
 
 function getTailscaleBadge(ts: ClientStatusResponse['tailscale']): {
@@ -53,6 +53,27 @@ export const DashPage: React.FC<DashPageProps> = ({ status, busy, onAction, onNa
   const [iosOpen, setIosOpen] = useState(false);
   const [iosUrl, setIosUrl] = useState('');
   const [iosLoading, setIosLoading] = useState(false);
+  const [proxySnap, setProxySnap] = useState<SbProxiesSnapshot | null>(null);
+
+  const sbRunning = !!status?.singbox?.running;
+  useEffect(() => {
+    if (!sbRunning) {
+      setProxySnap(null);
+      return;
+    }
+    let cancelled = false;
+    clientApi
+      .getSbProxies()
+      .then((res) => {
+        if (!cancelled) setProxySnap(res);
+      })
+      .catch(() => {
+        if (!cancelled) setProxySnap(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sbRunning]);
 
   const runHealthCheck = async () => {
     setCheckingHealth(true);
@@ -105,6 +126,13 @@ export const DashPage: React.FC<DashPageProps> = ({ status, busy, onAction, onNa
   const { singbox: sb, daemon: dm, tailscale: ts, firewall: fw, host, config } = status;
   const tsBadgeInfo = getTailscaleBadge(ts);
   const subs = config?.subs || [];
+  const primaryExitText = !sb.running
+    ? 'sing-box 启动后可用'
+    : proxySnap?.primaryNode
+      ? `${proxySnap.primaryGroup || 'Proxy'} → ${proxySnap.primaryNode}${proxySnap.primaryDelay && proxySnap.primaryDelay > 0 ? ` (${proxySnap.primaryDelay}ms)` : ''}`
+      : proxySnap?.error
+        ? '节点状态暂不可用'
+        : '读取中…';
 
   return (
     <div className="space-y-5">
@@ -377,8 +405,12 @@ export const DashPage: React.FC<DashPageProps> = ({ status, busy, onAction, onNa
           icon={<Globe className="w-4 h-4" />}
           actions={
             sb.running ? (
-              <Button size="xs" onClick={() => onNavigate('panel')} icon={<ExternalLink className="w-3 h-3" />}>
-                打开 Clash 面板
+              <Button
+                size="xs"
+                onClick={() => onNavigate('sb', 'nodes')}
+                icon={<SlidersHorizontal className="w-3 h-3" />}
+              >
+                选择节点
               </Button>
             ) : undefined
           }
@@ -389,7 +421,7 @@ export const DashPage: React.FC<DashPageProps> = ({ status, busy, onAction, onNa
               ['运行架构', `${host.os} / ${host.arch}${host.openwrt ? ' · OpenWrt' : ''}`],
               ['局域网 IP', host.lanIP || '-'],
               ['SingCtl 版本', `v${String(status.singctlVersion || 'dev').replace(/^v/, '')}`],
-              ['外置面板地址', sb.running ? sb.panelURL : 'sing-box 启动后可用'],
+              ['当前主出口', primaryExitText],
             ].map(([k, v]) => (
               <div key={k} className="flex items-center justify-between gap-4 py-2.5">
                 <span className="text-secondary shrink-0">{k}</span>

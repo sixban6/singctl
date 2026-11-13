@@ -1593,10 +1593,12 @@ func TestGenerator_PlatformExternalControllerAndSingBoxCheck(t *testing.T) {
 	cases := []struct {
 		platform       string
 		wantController string
+		expectHardened bool
 	}{
-		{platform: singbox.PlatformIOS, wantController: "127.0.0.1:9095"},
-		{platform: "darwin", wantController: "127.0.0.1:9090"},
-		{platform: "windows", wantController: "127.0.0.1:9090"},
+		{platform: singbox.PlatformIOS, wantController: "127.0.0.1:9095", expectHardened: false},
+		{platform: "linux", wantController: "127.0.0.1:9090", expectHardened: true},
+		{platform: "darwin", wantController: "127.0.0.1:9090", expectHardened: true},
+		{platform: "windows", wantController: "127.0.0.1:9090", expectHardened: true},
 	}
 
 	for _, tc := range cases {
@@ -1610,8 +1612,12 @@ func TestGenerator_PlatformExternalControllerAndSingBoxCheck(t *testing.T) {
 				Experimental struct {
 					ClashAPI struct {
 						ExternalController string `json:"external_controller"`
+						ExternalUI         string `json:"external_ui"`
+						ExternalUIDownload string `json:"external_ui_download_url"`
+						Secret             string `json:"secret"`
 					} `json:"clash_api"`
 				} `json:"experimental"`
+				Services []map[string]any `json:"services"`
 			}
 			if err := json.Unmarshal([]byte(out), &parsed); err != nil {
 				t.Fatalf("unmarshal generated JSON: %v", err)
@@ -1621,13 +1627,36 @@ func TestGenerator_PlatformExternalControllerAndSingBoxCheck(t *testing.T) {
 					tc.platform, parsed.Experimental.ClashAPI.ExternalController, tc.wantController)
 			}
 
+			if tc.expectHardened {
+				if parsed.Experimental.ClashAPI.ExternalUI != "" || parsed.Experimental.ClashAPI.ExternalUIDownload != "" {
+					t.Fatalf("%s expected external_ui stripped, got ui=%q url=%q",
+						tc.platform, parsed.Experimental.ClashAPI.ExternalUI, parsed.Experimental.ClashAPI.ExternalUIDownload)
+				}
+				if len(parsed.Experimental.ClashAPI.Secret) < 16 {
+					t.Fatalf("%s expected hardened random clash_api.secret, got %q", tc.platform, parsed.Experimental.ClashAPI.Secret)
+				}
+				for _, svc := range parsed.Services {
+					if typ, _ := svc["type"].(string); typ == "api" {
+						if _, hasDash := svc["dashboard"]; hasDash {
+							t.Fatalf("%s expected api service dashboard stripped", tc.platform)
+						}
+						if listen, _ := svc["listen"].(string); listen != "127.0.0.1" {
+							t.Fatalf("%s expected api service listen 127.0.0.1, got %q", tc.platform, listen)
+						}
+						if sec, _ := svc["secret"].(string); sec != parsed.Experimental.ClashAPI.Secret {
+							t.Fatalf("%s expected api service secret %q, got %q", tc.platform, parsed.Experimental.ClashAPI.Secret, sec)
+						}
+					}
+				}
+			}
+
 			if tc.platform == singbox.PlatformIOS {
 				if err := singbox.CheckIOSCompatibility(out); err != nil {
 					t.Fatalf("CheckIOSCompatibility failed: %v", err)
 				}
 			}
 
-			if hasSingBox == nil && sbBin != "" {
+			if hasSingBox == nil && sbBin != "" && (tc.platform != "linux" || runtime.GOOS == "linux") {
 				cfgFile := filepath.Join(t.TempDir(), "config.json")
 				if err := os.WriteFile(cfgFile, []byte(out), 0600); err != nil {
 					t.Fatal(err)

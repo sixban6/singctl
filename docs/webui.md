@@ -83,7 +83,7 @@ chmod +x /etc/init.d/singctl-web
 | 页面 | 功能 |
 | :--- | :--- |
 | **概览** | sing-box / 看门狗 / Tailscale / 防火墙状态卡片,快捷操作,健康检测,主机与订阅信息 |
-| **sing-box** | 启动/停止/重启/生成配置、安装/更新、**客户端 25 项智能分流开关中心（独立开关与节点组切换即时热生效）**、config.json 编辑器 |
+| **sing-box** | 启动/停止/重启/生成配置、全局模式切换（Rule/Global/Direct）与实时速率/连接数；内置 **25 项智能分流开关（默认首页）**、**原生策略组节点选择与并发延迟测速**、config.json 编辑器 |
 | **看门狗** | 守护进程启停/平滑重启、五大自愈防线实时状态、**规则集 (.srs) 就绪状态与一键校准更新**、**策略组自动故障切换（默认开启）一键开关与自由参数配置**、一键立即巡检线路、容灾事件时间线 |
 | **组网** | Tailscale 模式选择(路由器/出口节点/网关)、启停、安装更新 |
 | **防火墙** | 安全封锁规则启用/禁用 |
@@ -114,6 +114,11 @@ WebUI 后端提供简洁的 REST API,可用于自动化:
 | GET/PUT | `/api/config/raw` | 配置原文读取/保存(YAML) |
 | GET | `/api/cache` | 规则集缓存状态 |
 | GET/PUT | `/api/traffic-routing` | 获取或更新客户端 25 项智能分流开关与目标策略组（`0600` 落盘并触发 `SIGHUP` 热重载） |
+| GET | `/api/sb/proxies` | 获取全量策略组、嵌套链路解析节点、延迟与分流引用映射 |
+| PUT | `/api/sb/proxies/switch` | 切换指定 `Selector` 策略组的当前节点 |
+| POST | `/api/sb/proxies/delay` | 对单节点或指定策略组发起有界并发 URL 延迟测速 |
+| PUT | `/api/sb/mode` | 切换 sing-box 代理模式（`rule` / `global` / `direct`） |
+| GET | `/api/sb/traffic` | 采样实时上下行速率、活跃连接数与核心内存占用 |
 | GET | `/api/watchdog` | 看门狗全景运行状态、策略组实时列表、容灾配置与最近事件时间线 |
 | PUT | `/api/watchdog/config` | 更新看门狗及策略组自动故障切换配置（`0600` 落盘并即时 `SIGHUP` 热通知守护进程） |
 | POST | `/api/watchdog/patrol` | 立即触发一轮策略组连通性巡检与容灾判决 |
@@ -135,7 +140,7 @@ curl -N -X POST http://127.0.0.1:8090/api/action \
 `{"params":{"mode":"router","acceptRoutes":true}}`)、`fw-enable/disable`、
 `update-self`、`speedtest`。
 
-另有 clash API 反向代理:`/clash/*`(面板与 API)及 `/connections`、`/proxies` 等 clash API 根路径直通(供内嵌面板的页面同源请求使用)。
+外置 Clash/Zashboard 面板与未鉴权 `/clash/*` 反向代理已移除；Linux/桌面客户端生成的 sing-box Clash API 强制绑定 `127.0.0.1:9090` 并自动注入随机 `secret`（iOS SFI 本地配置保持 `127.0.0.1:9095` 不变），WebUI 全量通过带会话鉴权的 `/api/sb/*` 接口访问本机回环控制面。
 
 同一时刻仅允许一个动作执行,并发请求返回 `409`。
 

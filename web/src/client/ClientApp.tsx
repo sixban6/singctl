@@ -4,7 +4,6 @@ import {
   Router,
   FileText,
   Zap,
-  Sliders,
   ShieldAlert,
   HeartPulse,
   Network,
@@ -33,7 +32,6 @@ import { ClientStatusResponse } from './types';
 import { TaskConsoleDrawer } from './TaskConsoleDrawer';
 import { DashPage } from './pages/DashPage';
 import { SingBoxPage } from './pages/SingBoxPage';
-import { PanelPage } from './pages/PanelPage';
 import { AuditPage } from './pages/AuditPage';
 import { WatchdogPage } from './pages/WatchdogPage';
 import { NetworkHubPage } from './pages/NetworkPage';
@@ -41,7 +39,7 @@ import { ConfigPage } from './pages/ConfigPage';
 import { LogsPage } from './pages/LogsPage';
 import { SystemPage } from './pages/SystemPage';
 
-const CLIENT_TABS = ['dash', 'sb', 'audit', 'dm', 'panel', 'net', 'config', 'logs', 'sys'] as const;
+const CLIENT_TABS = ['dash', 'sb', 'audit', 'dm', 'net', 'config', 'logs', 'sys'] as const;
 type ClientTab = (typeof CLIENT_TABS)[number];
 
 const MOBILE_PRIMARY_TABS: readonly ClientTab[] = ['dash', 'sb', 'audit', 'dm'];
@@ -62,6 +60,7 @@ const ClientShell: React.FC = () => {
       const h = (window.location.hash || '').replace(/^#\/?/, '').split('?')[0];
       if (h === 'fw') navigate('net', 'fw');
       else if (h === 'ts') navigate('net', 'ts');
+      else if (h === 'panel') navigate('sb', 'nodes');
     };
     normalizeLegacyHash();
     window.addEventListener('hashchange', normalizeLegacyHash);
@@ -201,9 +200,9 @@ const ClientShell: React.FC = () => {
           },
           {
             key: 'sb',
-            label: 'Sing-Box 核心',
+            label: 'sing-box',
             shortLabel: '核心',
-            desc: '内核生命周期、25 项智能分流开关与配置文件编辑器',
+            desc: '智能分流开关、策略组节点选择测速、模式切换与内核控制',
             icon: Zap,
             badge: sbBadge,
           },
@@ -227,13 +226,6 @@ const ClientShell: React.FC = () => {
       {
         title: '代理与网络',
         items: [
-          {
-            key: 'panel',
-            label: 'Clash 面板',
-            shortLabel: '面板',
-            desc: '内置 Zashboard 实时节点测速与连接监控',
-            icon: Sliders,
-          },
           {
             key: 'net',
             label: '网络与组网',
@@ -315,7 +307,7 @@ const ClientShell: React.FC = () => {
   );
 
   const navigateSafe = useCallback(
-    (next: string) => {
+    (next: string, nextSub?: string) => {
       if (next === 'fw') {
         navigate('net', 'fw');
         return;
@@ -324,8 +316,12 @@ const ClientShell: React.FC = () => {
         navigate('net', 'ts');
         return;
       }
+      if (next === 'panel') {
+        navigate('sb', 'nodes');
+        return;
+      }
       if (CLIENT_TABS.includes(next as ClientTab)) {
-        navigate(next as ClientTab);
+        navigate(next as ClientTab, nextSub);
       }
     },
     [navigate],
@@ -450,11 +446,12 @@ const ClientShell: React.FC = () => {
           <SingBoxPage
             status={status ?? null}
             busy={busy}
+            initialSub={sub}
+            onSubChange={(nextSub) => navigate('sb', nextSub === 'routing' ? undefined : nextSub)}
             onAction={requestAction}
             onNavigate={navigateSafe}
           />
         )}
-        {tab === 'panel' && <PanelPage status={status ?? null} />}
         {tab === 'audit' && <AuditPage />}
         {tab === 'dm' && (
           <WatchdogPage

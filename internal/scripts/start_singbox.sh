@@ -349,20 +349,12 @@ start_singbox() {
     echo_succ "准备沙盒环境..."
     mkdir -p /tmp/sing-box-work
     
-    # 创建沙盒专用配置，修改路径到可写目录
+    # 创建沙盒专用配置，修改状态缓存路径到可写 tmpfs 目录并清理历史外置 UI 残留
+    rm -rf /tmp/sing-box-work/ui /tmp/sing-box-work/dashboard 2>/dev/null || true
     if [ -f "/etc/sing-box/config.json" ]; then
-        # 复制配置并修改路径到临时目录（兼容 ui 与 sing-box 1.14 dashboard 目录）
-        sed 's|"/etc/sing-box/cache.db"|"/tmp/sing-box-work/cache.db"|g; s|"/etc/sing-box/ui"|"/tmp/sing-box-work/ui"|g; s|"/etc/sing-box/dashboard"|"/tmp/sing-box-work/dashboard"|g' \
+        sed 's|"/etc/sing-box/cache.db"|"/tmp/sing-box-work/cache.db"|g' \
             /etc/sing-box/config.json > /tmp/sing-box-work/config.json
         chmod 0600 /tmp/sing-box-work/config.json 2>/dev/null || true
-        
-        # 复制UI/Dashboard文件到临时目录(如果存在)
-        if [ -d "/etc/sing-box/ui" ]; then
-            cp -r /etc/sing-box/ui /tmp/sing-box-work/
-        fi
-        if [ -d "/etc/sing-box/dashboard" ]; then
-            cp -r /etc/sing-box/dashboard /tmp/sing-box-work/
-        fi
     else
         echo_warn "配置文件不存在，使用原路径"
         cp /etc/sing-box/config.json /tmp/sing-box-work/config.json 2>/dev/null || true

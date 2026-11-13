@@ -3,6 +3,8 @@ package singbox
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -100,26 +102,15 @@ func MaskSensitiveText(s string) string {
 	})
 }
 
-func getWebUIAddress(ipv4 string) string {
-	const localhost = "127.0.0.1"
-	if runtime.GOOS == "linux" && ipv4 != "" {
-		return fmt.Sprintf("%s:9090", ipv4)
-	}
-	return fmt.Sprintf("%s:9090", localhost)
+func getWebUIAddress(_ string) string {
+	return "127.0.0.1:9090"
 }
 
 func (g *ConfigGenerator) webuiForPlatform(platform string) string {
-	switch platform {
-	case PlatformIOS:
+	if platform == PlatformIOS {
 		return "127.0.0.1:9095"
-	case "linux":
-		if g.netInfo != nil && g.netInfo.LANIPv4 != "" {
-			return fmt.Sprintf("%s:9090", g.netInfo.LANIPv4)
-		}
-		return "127.0.0.1:9090"
-	default:
-		return "127.0.0.1:9090"
 	}
+	return "127.0.0.1:9090"
 }
 
 func (c *ConfigGenerator) getSubnetFromIP(ip string) string {
@@ -201,8 +192,107 @@ func (g *ConfigGenerator) GenerateForPlatform(platform string) (string, error) {
 		return "", err
 	}
 
+	// 收口非 iOS 客户端 Clash API 至本机回环 + 强随机 secret，移除外置 Clash UI 下载/挂载以消除未授权暴露并节省空间
+	hardened, err := HardenClientClashAPI(withWarnLog, resolved)
+	if err != nil {
+		return "", err
+	}
+
 	// 格式化为可读 JSON
-	return PrettyJSON(withWarnLog)
+	return PrettyJSON(hardened)
+}
+
+func generateRandomClashSecret() (string, error) {
+	buf := make([]byte, 12)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
+}
+
+// HardenClientClashAPI 收紧客户端（非 iOS）sing-box 配置的控制平面暴露面：
+//   - 将 clash_api.external_controller 固定为 127.0.0.1:9090，禁止局域网明文监听；
+//   - 若未设置 secret，则自动注入随机 24 位十六进制密钥，统一由 SingCtl WebUI 鉴权代理访问；
+//   - 移除外置 Clash 面板（external_ui*）及 1.14 api service dashboard，节省路由器内存与闪存。
+//
+// iOS (SFI) 配置保持原样，确保 App 内置控制台兼容。
+func HardenClientClashAPI(rawJSON, platform string) (string, error) {
+	resolved, err := ResolvePlatform(platform)
+	if err != nil {
+		resolved = strings.ToLower(strings.TrimSpace(platform))
+	}
+	if resolved == PlatformIOS {
+		return rawJSON, nil
+	}
+
+	var root map[string]any
+	if err := json.Unmarshal([]byte(rawJSON), &root); err != nil {
+		return "", fmt.Errorf("failed to parse config JSON for Clash API hardening: %w", err)
+	}
+	if root == nil {
+		return rawJSON, nil
+	}
+
+	changed := false
+	sharedSecret := ""
+	if expMap, ok := root["experimental"].(map[string]any); ok && expMap != nil {
+		if clashAPI, ok := expMap["clash_api"].(map[string]any); ok && clashAPI != nil {
+			clashAPI["external_controller"] = "127.0.0.1:9090"
+			delete(clashAPI, "external_ui")
+			delete(clashAPI, "external_ui_download_url")
+			delete(clashAPI, "external_ui_download_detour")
+
+			if sec, _ := clashAPI["secret"].(string); strings.TrimSpace(sec) != "" {
+				sharedSecret = strings.TrimSpace(sec)
+			} else {
+				sec, secErr := generateRandomClashSecret()
+				if secErr != nil {
+					return "", fmt.Errorf("generate clash api secret: %w", secErr)
+				}
+				clashAPI["secret"] = sec
+				sharedSecret = sec
+			}
+			changed = true
+		}
+	}
+
+	if services, ok := root["services"].([]any); ok {
+		for _, item := range services {
+			svc, ok := item.(map[string]any)
+			if !ok || svc == nil {
+				continue
+			}
+			typ, _ := svc["type"].(string)
+			if strings.EqualFold(strings.TrimSpace(typ), "api") {
+				svc["listen"] = "127.0.0.1"
+				delete(svc, "dashboard")
+				if sec, _ := svc["secret"].(string); strings.TrimSpace(sec) != "" {
+					if sharedSecret == "" {
+						sharedSecret = strings.TrimSpace(sec)
+					}
+				} else {
+					if sharedSecret == "" {
+						sec, secErr := generateRandomClashSecret()
+						if secErr != nil {
+							return "", fmt.Errorf("generate api service secret: %w", secErr)
+						}
+						sharedSecret = sec
+					}
+					svc["secret"] = sharedSecret
+				}
+				changed = true
+			}
+		}
+	}
+
+	if !changed {
+		return rawJSON, nil
+	}
+	data, err := json.Marshal(root)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal config JSON after Clash API hardening: %w", err)
+	}
+	return string(data), nil
 }
 
 // InjectTrafficRouting 将 singctl.yaml 中的客户端「智能分流开关中心」预设覆盖策略应用到生成配置中。

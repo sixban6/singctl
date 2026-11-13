@@ -649,75 +649,48 @@ exit 0
 	}
 }
 
-func TestClashProxy(t *testing.T) {
+func TestClashProxyRemovedAndNativeSbProxies(t *testing.T) {
 	sbConfigPath := withOverrides(t)
 
-	// 上游伪 clash API
+	// 上游伪 clash API（要求 Bearer 鉴权）
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/version":
-			_, _ = w.Write([]byte(`{"version":"fake-1.0","meta":true}`))
-		case strings.HasPrefix(r.URL.Path, "/ui/"):
-			_, _ = w.Write([]byte("hello-panel"))
+		if r.Header.Get("Authorization") != "Bearer topsecret" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/version":
+			_, _ = w.Write([]byte(`{"version":"1.14.4","meta":true}`))
+		case "/configs":
+			_, _ = w.Write([]byte(`{"mode":"rule"}`))
+		case "/proxies":
+			_, _ = w.Write([]byte(`{"proxies":{"Proxy":{"type":"Selector","now":"Node-A","all":["Node-A","#DC"]},"Node-A":{"type":"VLESS","history":[{"delay":42}]},"#DC":{"type":"Direct"}}}`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
 	}))
 	t.Cleanup(up.Close)
 
-	// 生成配置指向伪上游,验证 ClashAPIEndpoints 解析链路
-	cfgJSON := fmt.Sprintf(`{"experimental":{"clash_api":{"external_controller":%q,"secret":"s3cret"}}}`,
+	cfgJSON := fmt.Sprintf(`{"experimental":{"clash_api":{"external_controller":%q,"secret":"topsecret"}}}`,
 		strings.TrimPrefix(up.URL, "http://"))
 	if err := os.WriteFile(sbConfigPath, []byte(cfgJSON), 0600); err != nil {
 		t.Fatal(err)
 	}
 
-	// 清空代理目标缓存
-	webui.ClashCacheMu.Lock()
-	webui.ClashCacheURL, webui.ClashCacheSec, webui.ClashCachedAt = nil, "", time.Time{}
-	webui.ClashCacheMu.Unlock()
-
 	ts := newTestServer(t, sbConfigPath)
 
-	// /clash/version 走前缀代理
-	code, body := doJSON(t, "GET", ts.URL+"/clash/version", "")
-	if code != 200 || !strings.Contains(body, "fake-1.0") {
-		t.Fatalf("clash prefix proxy failed: %d %s", code, body)
+	// 原免鉴权 /clash/* 与根路径反代应已下线（返回 404，不再透传上游）
+	for _, oldPath := range []string{"/clash/version", "/clash/ui/", "/version", "/proxies"} {
+		code, body := doJSON(t, "GET", ts.URL+oldPath, "")
+		if code == 200 || strings.Contains(body, "1.14.4") {
+			t.Fatalf("legacy clash proxy route %s should be removed, got %d %s", oldPath, code, body)
+		}
 	}
 
-	// /version 根路径直通
-	code, body = doJSON(t, "GET", ts.URL+"/version", "")
-	if code != 200 || !strings.Contains(body, "fake-1.0") {
-		t.Fatalf("clash root proxy failed: %d %s", code, body)
-	}
-
-	// /clash/ui/ 面板页面
-	code, body = doJSON(t, "GET", ts.URL+"/clash/ui/", "")
-	if code != 200 || !strings.Contains(body, "hello-panel") {
-		t.Fatalf("clash ui proxy failed: %d %s", code, body)
-	}
-
-	// 验证 secret 已随请求透传(上游校验 Authorization)
-	// (简单起见:再起一个要求鉴权的上游确认)
-	var gotAuth string
-	authUp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAuth = r.Header.Get("Authorization")
-		_, _ = w.Write([]byte(`{}`))
-	}))
-	t.Cleanup(authUp.Close)
-
-	if err := os.WriteFile(sbConfigPath, []byte(fmt.Sprintf(
-		`{"experimental":{"clash_api":{"external_controller":%q,"secret":"topsecret"}}}`,
-		strings.TrimPrefix(authUp.URL, "http://"))), 0600); err != nil {
-		t.Fatal(err)
-	}
-	webui.ClashCacheMu.Lock()
-	webui.ClashCacheURL = nil
-	webui.ClashCacheMu.Unlock()
-
-	_, _ = doJSON(t, "GET", ts.URL+"/clash/version", "")
-	if gotAuth != "Bearer topsecret" {
-		t.Fatalf("expected bearer secret forwarded, got %q", gotAuth)
+	// 新版原生聚合接口走 /api/sb/proxies 并由服务端携带 secret 访问回环 Clash API
+	code, body := doJSON(t, "GET", ts.URL+"/api/sb/proxies", "")
+	if code != 200 || !strings.Contains(body, `"primaryNode":"Node-A"`) {
+		t.Fatalf("expected /api/sb/proxies to return Node-A snapshot, got %d %s", code, body)
 	}
 }
 
