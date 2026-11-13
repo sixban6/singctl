@@ -354,6 +354,7 @@ start_singbox() {
         # 复制配置并修改路径到临时目录（兼容 ui 与 sing-box 1.14 dashboard 目录）
         sed 's|"/etc/sing-box/cache.db"|"/tmp/sing-box-work/cache.db"|g; s|"/etc/sing-box/ui"|"/tmp/sing-box-work/ui"|g; s|"/etc/sing-box/dashboard"|"/tmp/sing-box-work/dashboard"|g' \
             /etc/sing-box/config.json > /tmp/sing-box-work/config.json
+        chmod 0600 /tmp/sing-box-work/config.json 2>/dev/null || true
         
         # 复制UI/Dashboard文件到临时目录(如果存在)
         if [ -d "/etc/sing-box/ui" ]; then
@@ -365,6 +366,7 @@ start_singbox() {
     else
         echo_warn "配置文件不存在，使用原路径"
         cp /etc/sing-box/config.json /tmp/sing-box-work/config.json 2>/dev/null || true
+        chmod 0600 /tmp/sing-box-work/config.json 2>/dev/null || true
     fi
     
     # 找到sing-box的绝对路径
@@ -409,6 +411,7 @@ start_singbox() {
     
     # 尝试最简单的沙盒模式 - 添加必要的证书和配置访问
     echo_succ "尝试基础沙盒模式(证书+配置访问)..."
+    : > /tmp/sing-box-basic.log && chmod 0600 /tmp/sing-box-basic.log
     ujail -n sing-box \
           -w /tmp \
           -r /etc/ssl \
@@ -417,7 +420,7 @@ start_singbox() {
           -r /etc/hosts \
           -r /etc/resolv.conf \
           -r /proc \
-          -- "$SINGBOX_EXEC" run -c /tmp/sing-box-work/config.json >/tmp/sing-box-basic.log 2>&1 &
+          -- "$SINGBOX_EXEC" run -c /tmp/sing-box-work/config.json >>/tmp/sing-box-basic.log 2>&1 &
     UJAIL_PID=$!
     
     sleep 3
@@ -432,7 +435,8 @@ start_singbox() {
     kill $UJAIL_PID 2>/dev/null || true
     pkill -f "ujail.*sing-box" 2>/dev/null || true
     
-    ujail -n sing-box -p -r /etc/sing-box -- "$SINGBOX_EXEC" run -c /etc/sing-box/config.json >/tmp/sing-box-simple.log 2>&1 &
+    : > /tmp/sing-box-simple.log && chmod 0600 /tmp/sing-box-simple.log
+    ujail -n sing-box -p -r /etc/sing-box -- "$SINGBOX_EXEC" run -c /etc/sing-box/config.json >>/tmp/sing-box-simple.log 2>&1 &
     UJAIL_PID=$!
     
     sleep 3

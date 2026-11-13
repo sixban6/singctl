@@ -322,17 +322,12 @@ func newGenCmd(defaultConfigPath string) *cobra.Command {
 				PruneConfigBackups(targetPath, 3)
 			}
 
-			// 写入新配置(iOS 配置含节点凭据且放在 Downloads 等公共目录, 收紧为 0600)
-			perm := os.FileMode(0644)
-			if isIOS {
-				perm = 0600
-			}
+			// 写入新配置(包含节点凭据/密钥, 强制收紧为 0600)
+			const perm = os.FileMode(0600)
 			if err := os.WriteFile(targetPath, []byte(configJSON), perm); err != nil {
 				return fmt.Errorf("写入配置文件失败: %w", err)
 			}
-			if perm == 0600 {
-				_ = os.Chmod(targetPath, perm) // 防止已存在文件保留了旧权限
-			}
+			_ = os.Chmod(targetPath, perm) // 防止已存在文件保留了旧权限
 
 			if isIOS {
 				logger.Success("配置已生成: %s", targetPath)

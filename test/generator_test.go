@@ -1687,3 +1687,249 @@ func TestProxyOutboundsFingerprintDeterministic(t *testing.T) {
 		t.Fatal("expected password rotation to change proxy outbound fingerprint")
 	}
 }
+
+func TestNormalizeClientLogLevel_AndGeneratedDefault(t *testing.T) {
+	cases := []struct {
+		name         string
+		input        string
+		wantLevel    string
+		wantDisabled bool
+	}{
+		{
+			name:      "info downgraded to warn",
+			input:     `{"log":{"disabled":false,"level":"info","timestamp":true},"outbounds":[]}`,
+			wantLevel: "warn",
+		},
+		{
+			name:      "missing log block populated with warn",
+			input:     `{"outbounds":[]}`,
+			wantLevel: "warn",
+		},
+		{
+			name:      "explicit error preserved",
+			input:     `{"log":{"disabled":false,"level":"error","timestamp":true}}`,
+			wantLevel: "error",
+		},
+		{
+			name:      "explicit debug preserved",
+			input:     `{"log":{"disabled":false,"level":"debug"}}`,
+			wantLevel: "debug",
+		},
+		{
+			name:         "disabled log preserved",
+			input:        `{"log":{"disabled":true,"level":"info"}}`,
+			wantLevel:    "info",
+			wantDisabled: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := singbox.NormalizeClientLogLevel(tc.input)
+			if err != nil {
+				t.Fatalf("NormalizeClientLogLevel returned error: %v", err)
+			}
+			var parsed struct {
+				Log struct {
+					Disabled  bool   `json:"disabled"`
+					Level     string `json:"level"`
+					Timestamp bool   `json:"timestamp"`
+				} `json:"log"`
+			}
+			if err := json.Unmarshal([]byte(out), &parsed); err != nil {
+				t.Fatalf("unmarshal output: %v", err)
+			}
+			if parsed.Log.Disabled != tc.wantDisabled {
+				t.Fatalf("log.disabled = %v, want %v", parsed.Log.Disabled, tc.wantDisabled)
+			}
+			if parsed.Log.Level != tc.wantLevel {
+				t.Fatalf("log.level = %q, want %q", parsed.Log.Level, tc.wantLevel)
+			}
+		})
+	}
+
+	// End-to-end check on generated single-sub Linux/OpenWrt gateway config.
+	payload := encodeURISub(
+		"hysteria2://dummy-pass@sg1.example.com:443?sni=sg1.example.com#SG-Node",
+	)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(payload))
+	}))
+	defer ts.Close()
+
+	cfg := &config.Config{
+		Subs: []config.Subscription{
+			{Name: "main", URL: ts.URL, RemoveEmoji: true},
+		},
+	}
+	gen := singbox.NewConfigGenerator(cfg)
+	gen.SetCacheDir(t.TempDir())
+
+	out, err := gen.GenerateForPlatform("linux")
+	if err != nil {
+		t.Fatalf("GenerateForPlatform(linux) failed: %v", err)
+	}
+	var parsed struct {
+		Log struct {
+			Disabled  bool   `json:"disabled"`
+			Level     string `json:"level"`
+			Timestamp bool   `json:"timestamp"`
+		} `json:"log"`
+	}
+	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
+		t.Fatalf("unmarshal generated config: %v", err)
+	}
+	if parsed.Log.Disabled || parsed.Log.Level != "warn" || !parsed.Log.Timestamp {
+		t.Fatalf("unexpected generated log config: %+v (want disabled=false level=warn timestamp=true)", parsed.Log)
+	}
+}
+
+func TestTrafficRouting_CompilerPrecedenceIdempotencyAndRoundTrip(t *testing.T) {
+	// 1. 测试 ResolvePresetDefaultOutbound 回退链：AI 组 #VPS -> AI -> Proxy
+	if got := singbox.ResolvePresetDefaultOutbound(true, false, []string{"Proxy", "AI", "#VPS"}); got != "#VPS" {
+		t.Fatalf("AI with #VPS available = %q, want #VPS", got)
+	}
+	if got := singbox.ResolvePresetDefaultOutbound(true, false, []string{"Proxy", "AI"}); got != "AI" {
+		t.Fatalf("AI without #VPS = %q, want AI", got)
+	}
+	if got := singbox.ResolvePresetDefaultOutbound(true, false, []string{"Proxy"}); got != "Proxy" {
+		t.Fatalf("AI fallback = %q, want Proxy", got)
+	}
+	if got := singbox.ResolvePresetDefaultOutbound(false, false, []string{"#VPS", "Proxy"}); got != "Proxy" {
+		t.Fatalf("non-AI default = %q, want Proxy", got)
+	}
+
+	// 2. 测试幂等性与规则优先级（custom_rules.block / custom_rules.route / ad1 > 25 项智能分流 > cn / !cn）
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "singctl.yaml")
+	enabledTrue := true
+	enabledFalse := false
+	cfg := &config.Config{
+		Subs: []config.Subscription{
+			{Name: "main", URL: "https://example.com/sub"},
+		},
+		CustomRules: config.CustomRulesConfig{
+			Block: []config.BlockRule{
+				{Target: "telemetry.example.com", Reason: "test-block"},
+			},
+			Route: []map[string]any{
+				{"action": "route", "domain_suffix": []string{"openai.com"}, "outbound": "#Nodes"},
+			},
+		},
+		TrafficRouting: config.TrafficRoutingConfig{
+			Presets: map[string]config.TrafficRuleOverride{
+				"openai": {Enabled: &enabledFalse},
+				"apple":  {Enabled: &enabledTrue, Outbound: "Proxy"},
+			},
+		},
+	}
+
+	// 保存 -> 重载 -> 清空再保存：验证 YAML 往返与清空节点移除
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("save cfg: %v", err)
+	}
+	loaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load cfg: %v", err)
+	}
+	if loaded.TrafficRouting.IsEmpty() || loaded.TrafficRouting.Presets["apple"].Outbound != "Proxy" {
+		t.Fatalf("unexpected loaded TrafficRouting: %+v", loaded.TrafficRouting)
+	}
+
+	payload := encodeURISub(
+		"hysteria2://dummy-pass@sg1.example.com:443?sni=sg1.example.com#SG-Node",
+		"vless://11111111-1111-1111-1111-111111111111@vps.example.com:443?security=reality&sni=swdist.apple.com&pbk=testpbk#sec_vps_us",
+	)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(payload))
+	}))
+	defer ts.Close()
+	loaded.Subs[0].URL = ts.URL
+
+	gen := singbox.NewConfigGenerator(loaded)
+	gen.SetCacheDir(dir)
+	out, err := gen.GenerateForPlatform("linux")
+	if err != nil {
+		t.Fatalf("GenerateForPlatform failed: %v", err)
+	}
+
+	// 二次幂等执行不得产生重复规则
+	out2, err := singbox.ApplyTrafficRoutingToConfigJSON(out, loaded.TrafficRouting, loaded.CustomRules)
+	if err != nil {
+		t.Fatalf("idempotent re-apply failed: %v", err)
+	}
+	if out != out2 {
+		lines1 := strings.Split(out, "\n")
+		lines2 := strings.Split(out2, "\n")
+		for idx := 0; idx < len(lines1) && idx < len(lines2); idx++ {
+			if lines1[idx] != lines2[idx] {
+				t.Fatalf("ApplyTrafficRoutingToConfigJSON not idempotent at line %d:\nfirst:  %s\nsecond: %s",
+					idx+1, lines1[idx], lines2[idx])
+			}
+		}
+		t.Fatalf("ApplyTrafficRoutingToConfigJSON is not idempotent (len1=%d len2=%d)", len(lines1), len(lines2))
+	}
+
+	var parsed struct {
+		Route struct {
+			Rules []map[string]any `json:"rules"`
+		} `json:"route"`
+	}
+	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
+		t.Fatalf("unmarshal generated config: %v", err)
+	}
+
+	customOpenAIIdx, adIdx, geminiIdx, googleIdx, appleIdx, notCNIdx := -1, -1, -1, -1, -1, -1
+	for i, r := range parsed.Route.Rules {
+		ob, _ := r["outbound"].(string)
+		act, _ := r["action"].(string)
+		if ds, ok := r["domain_suffix"].([]any); ok {
+			for _, item := range ds {
+				if item == "openai.com" && ob == "#Nodes" && customOpenAIIdx == -1 {
+					customOpenAIIdx = i
+				}
+				if item == "gemini.google.com" && ob == "#VPS" && geminiIdx == -1 {
+					geminiIdx = i
+				}
+			}
+		}
+		if rs, ok := r["rule_set"].([]any); ok {
+			for _, item := range rs {
+				if item == "geosite-ad1" && act == "reject" {
+					adIdx = i
+				}
+				if item == "geosite-google" && ob == "Proxy" && googleIdx == -1 {
+					googleIdx = i
+				}
+				if item == "geosite-apple" && ob == "Proxy" && appleIdx == -1 {
+					appleIdx = i
+				}
+			}
+		}
+		if rsStr, ok := r["rule_set"].(string); ok && rsStr == "geosite-geolocation-!cn" {
+			notCNIdx = i
+		}
+	}
+
+	if customOpenAIIdx < 0 || adIdx < 0 || geminiIdx < 0 || googleIdx < 0 || appleIdx < 0 || notCNIdx < 0 {
+		t.Fatalf("missing expected rules: custom=%d ad=%d gemini=%d google=%d apple=%d !cn=%d",
+			customOpenAIIdx, adIdx, geminiIdx, googleIdx, appleIdx, notCNIdx)
+	}
+	if !(customOpenAIIdx < adIdx && adIdx < geminiIdx && geminiIdx < googleIdx && appleIdx < notCNIdx) {
+		t.Fatalf("rule precedence violated: custom=%d ad=%d gemini=%d google=%d apple=%d !cn=%d",
+			customOpenAIIdx, adIdx, geminiIdx, googleIdx, appleIdx, notCNIdx)
+	}
+
+	// 清空 TrafficRouting 后再次 Save：应彻底移除 traffic_routing 节点
+	loaded.TrafficRouting = config.TrafficRoutingConfig{}
+	if err := config.Save(cfgPath, loaded); err != nil {
+		t.Fatalf("save cleared cfg: %v", err)
+	}
+	reloadedEmpty, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("reload cleared cfg: %v", err)
+	}
+	if !reloadedEmpty.TrafficRouting.IsEmpty() {
+		t.Fatalf("expected empty TrafficRouting after clear & save, got %+v", reloadedEmpty.TrafficRouting)
+	}
+}

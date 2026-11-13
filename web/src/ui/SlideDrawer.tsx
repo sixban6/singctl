@@ -1,4 +1,5 @@
 import React, { useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
 
 export type DrawerSize = 'md' | 'lg' | 'xl';
@@ -46,7 +47,7 @@ export const SlideDrawer: React.FC<SlideDrawerProps> = ({
 
   if (!open) return null;
 
-  return (
+  return createPortal(
     <div
       className="fixed inset-0 z-50 flex justify-end bg-slate-950/75 backdrop-blur-sm animate-sc-in"
       onClick={onClose}
@@ -54,7 +55,7 @@ export const SlideDrawer: React.FC<SlideDrawerProps> = ({
       aria-modal="true"
     >
       <div
-        className={`w-full ${SIZE_MAX_WIDTH[size]} h-full bg-slate-900/95 backdrop-blur-xl border-l border-slate-800 shadow-2xl flex flex-col`}
+        className={`w-full ${SIZE_MAX_WIDTH[size]} h-full max-h-[100dvh] bg-slate-900/95 backdrop-blur-xl border-l border-slate-800 shadow-2xl flex flex-col`}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-slate-800/80 shrink-0">
@@ -75,14 +76,18 @@ export const SlideDrawer: React.FC<SlideDrawerProps> = ({
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-5 space-y-4">{children}</div>
+        <div className="flex-1 min-h-0 overflow-y-auto p-5 space-y-4">{children}</div>
 
         {footer && (
-          <div className="px-5 py-3.5 border-t border-slate-800/80 bg-slate-950/60 flex items-center justify-end gap-2.5 shrink-0 pb-safe">
-            {footer}
+          <div
+            className="px-5 pt-3.5 border-t border-slate-800/80 bg-slate-950/80 flex items-center justify-end gap-2.5 shrink-0"
+            style={{ paddingBottom: 'calc(0.875rem + env(safe-area-inset-bottom, 0px))' }}
+          >
+            <div className="w-full">{footer}</div>
           </div>
         )}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 };

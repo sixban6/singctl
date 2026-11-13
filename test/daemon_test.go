@@ -597,7 +597,7 @@ func TestGroupFailover_AutoSwitchAndAutoRestore(t *testing.T) {
 		if r.Method == http.MethodGet && path == "/proxies" {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"proxies": map[string]any{
-					"Game-TCP": map[string]any{
+					"Proxy": map[string]any{
 						"type": "Selector",
 						"now":  gameNow,
 						"all":  []string{"#Auto", "#VPS", "#Nodes"},
@@ -638,7 +638,7 @@ func TestGroupFailover_AutoSwitchAndAutoRestore(t *testing.T) {
 				Name string `json:"name"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
-			if strings.HasSuffix(path, "/Game-TCP") || strings.HasSuffix(path, "/Game") {
+			if strings.HasSuffix(path, "/Proxy") {
 				gameNow = body.Name
 			}
 			w.WriteHeader(http.StatusNoContent)
@@ -676,6 +676,7 @@ func TestGroupFailover_AutoSwitchAndAutoRestore(t *testing.T) {
 
 func TestCheckDNSHealthAgainstEndpoints_WithSecretAndLatency(t *testing.T) {
 	const secret = "test-clash-secret-token"
+	var queriedDomains []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/dns/query" {
 			w.WriteHeader(http.StatusNotFound)
@@ -685,6 +686,7 @@ func TestCheckDNSHealthAgainstEndpoints_WithSecretAndLatency(t *testing.T) {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
+		queriedDomains = append(queriedDomains, r.URL.Query().Get("name"))
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"Status": 0,
@@ -706,6 +708,12 @@ func TestCheckDNSHealthAgainstEndpoints_WithSecretAndLatency(t *testing.T) {
 	}
 	if latencyMs < 0 {
 		t.Fatalf("expected non-negative LatencyMs, got %d", latencyMs)
+	}
+	if len(queriedDomains) != 1 || queriedDomains[0] != "cn.bing.com" {
+		t.Fatalf("expected first probed domain to be cn.bing.com, got %v", queriedDomains)
+	}
+	if !strings.Contains(errMsg, "cn.bing.com") || strings.Contains(errMsg, "www.baidu.com") {
+		t.Fatalf("expected detail to report cn.bing.com instead of www.baidu.com, got %q", errMsg)
 	}
 }
 
@@ -932,5 +940,55 @@ func TestDaemonRuntimeSnapshot_CoexistsWithRestartLimiter(t *testing.T) {
 	}
 	if fi.Mode().Perm() != 0600 {
 		t.Fatalf("expected state file mode 0600, got %o", fi.Mode().Perm())
+	}
+}
+
+func TestTrimLogInPlace_PreservesTailAndCleansLargeFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := filepath.Join(tmpDir, "sing-box-basic.log")
+
+	if trimmed, err := daemon.TrimLogInPlace(logPath, 64*1024); err != nil || trimmed {
+		t.Fatalf("expected missing file no-op, got trimmed=%v err=%v", trimmed, err)
+	}
+
+	var sb strings.Builder
+	line := "+0000 2026-11-13 15:19:18 INFO inbound connection example\n"
+	for sb.Len() < 96*1024 {
+		sb.WriteString(line)
+	}
+	tailMarker := "+0000 2026-11-13 15:20:00 INFO latest-iot-connection-preserved\n"
+	sb.WriteString(tailMarker)
+
+	if err := os.WriteFile(logPath, []byte(sb.String()), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	trimmed, err := daemon.TrimLogInPlace(logPath, 64*1024)
+	if err != nil || !trimmed {
+		t.Fatalf("expected TrimLogInPlace trimmed=true, got trimmed=%v err=%v", trimmed, err)
+	}
+
+	fi, err := os.Stat(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Size() > 64*1024 {
+		t.Fatalf("expected trimmed file <= 65536 bytes, got %d", fi.Size())
+	}
+	if fi.Mode().Perm() != 0600 {
+		t.Fatalf("expected trimmed file mode 0600, got %o", fi.Mode().Perm())
+	}
+	after, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(after), tailMarker) {
+		t.Fatal("expected trailing log line to be preserved")
+	}
+
+	// 再次调用应返回 false（未超限跳过）
+	trimmedAgain, err := daemon.TrimLogInPlace(logPath, 64*1024)
+	if err != nil || trimmedAgain {
+		t.Fatalf("expected second trim no-op, got trimmed=%v err=%v", trimmedAgain, err)
 	}
 }

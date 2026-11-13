@@ -100,8 +100,9 @@ type Config struct {
 	Tailscale   TailscaleConfig   `yaml:"tailscale"`
 	Server      ServerConfig      `yaml:"server"`
 	Watchdog    WatchdogConfig    `yaml:"watchdog"`
-	Audit       AuditConfig       `yaml:"audit,omitempty" json:"audit,omitempty"`
-	CustomRules CustomRulesConfig `yaml:"custom_rules,omitempty"`
+	Audit          AuditConfig          `yaml:"audit,omitempty" json:"audit,omitempty"`
+	CustomRules    CustomRulesConfig    `yaml:"custom_rules,omitempty"`
+	TrafficRouting TrafficRoutingConfig `yaml:"traffic_routing,omitempty" json:"traffic_routing,omitempty"`
 }
 
 // AuditConfig 定义客户端设备行为审计与可选 AI 深度研判配置。
@@ -830,7 +831,7 @@ func (s *ServerConfig) GetNodeTag() string {
 }
 
 // DefaultWatchdogFailoverGroups 默认参与自动故障切换守护的核心 Selector 策略组列表。
-var DefaultWatchdogFailoverGroups = []string{"#VPS", "Game-TCP", "Game-UDP", "Game", "Proxy", "AI"}
+var DefaultWatchdogFailoverGroups = []string{"#VPS", "Proxy", "AI", "#Nodes"}
 
 // DefaultWatchdogProbeURLs 默认策略组存活探测 URL 列表。
 var DefaultWatchdogProbeURLs = []string{
@@ -842,7 +843,7 @@ var DefaultWatchdogProbeURLs = []string{
 type WatchdogFailoverConfig struct {
 	Enabled            *bool    `yaml:"enabled,omitempty" json:"enabled,omitempty"`                             // 是否启用策略组自动故障切换, 默认 true
 	Groups             []string `yaml:"groups,omitempty" json:"groups,omitempty"`                               // 守护的 Selector 策略组列表, 留空使用默认核心组
-	PatrolInterval     int      `yaml:"patrol_interval,omitempty" json:"patrol_interval,omitempty"`             // 巡检间隔(秒), 默认 30
+	PatrolInterval     int      `yaml:"patrol_interval,omitempty" json:"patrol_interval,omitempty"`             // 巡检间隔(秒), 默认 300 (5分钟)
 	ProbeTimeoutMs     int      `yaml:"probe_timeout_ms,omitempty" json:"probe_timeout_ms,omitempty"`           // 单次测速超时(毫秒), 默认 2800
 	ConfirmRetries     int      `yaml:"confirm_retries,omitempty" json:"confirm_retries,omitempty"`             // 切备前复测确认次数, 默认 1 (设为 -1 表示不复测立即切)
 	FailbackCooldown   int      `yaml:"failback_cooldown,omitempty" json:"failback_cooldown,omitempty"`         // 切备后自动回切冷却期(秒), 默认 180 (设为 -1 关闭自动回切)
@@ -875,7 +876,7 @@ func (f WatchdogFailoverConfig) EffectiveGroups() []string {
 
 func (f WatchdogFailoverConfig) EffectivePatrolInterval() time.Duration {
 	if f.PatrolInterval <= 0 {
-		return 30 * time.Second
+		return 300 * time.Second
 	}
 	return time.Duration(max(10, f.PatrolInterval)) * time.Second
 }
@@ -950,6 +951,7 @@ var knownYAMLKeys = []string{
 	"outbounds", "tag", "default", "tolerance", "interrupt_exist_connections",
 	"route", "dns", "dns_port", "web_port",
 	"audit", "whitelist", "ai", "endpoint", "api_key", "model",
+	"traffic_routing", "outbound",
 }
 
 var colonSpaceFixRegex = regexp.MustCompile(
@@ -1458,6 +1460,9 @@ func MigrateConfig(configPath string, templateData []byte) error {
 	if hasYAMLKey(oldDocNode, "audit") && !oldCfg.Audit.IsEmpty() {
 		replaceNode(docNode, "audit", oldCfg.Audit)
 	}
+	if hasYAMLKey(oldDocNode, "traffic_routing") && !oldCfg.TrafficRouting.IsEmpty() {
+		replaceNode(docNode, "traffic_routing", oldCfg.TrafficRouting)
+	}
 
 	newData, err := yaml.Marshal(&rootNode)
 	if err != nil {
@@ -1570,6 +1575,9 @@ func filterRoleNodesBeforeMerge(dstRoot, srcRoot *yaml.Node, cfg *Config) {
 			continue
 		}
 		if key == "custom_rules" && (cfg == nil || cfg.CustomRules.IsEmpty()) {
+			continue
+		}
+		if key == "traffic_routing" && (cfg == nil || cfg.TrafficRouting.IsEmpty()) {
 			continue
 		}
 		if isServerDoc {
@@ -1696,6 +1704,18 @@ func filterRoleNodesBeforeMerge(dstRoot, srcRoot *yaml.Node, cfg *Config) {
 				break
 			}
 		}
+	}
+
+	// 当 traffic_routing 被修改或恢复默认时，清理 dstDoc 中旧的 traffic_routing 节点，防止被删除的预设键在合并时残留
+	if cfg != nil && !isServerDoc {
+		newDst := make([]*yaml.Node, 0, len(dstDoc.Content))
+		for i := 0; i+1 < len(dstDoc.Content); i += 2 {
+			if dstDoc.Content[i].Value == "traffic_routing" {
+				continue
+			}
+			newDst = append(newDst, dstDoc.Content[i], dstDoc.Content[i+1])
+		}
+		dstDoc.Content = newDst
 	}
 
 	// 若 server.web_admin 已激活，清理 dstDoc 中 sni 节点尾部残留的 `# web_admin:` 注释块，避免重复

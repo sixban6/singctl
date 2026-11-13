@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Dog,
   RefreshCw,
@@ -11,13 +11,23 @@ import {
 } from 'lucide-react';
 import { Badge, Button, PageHeader, SectionCard, Skeleton, useToast } from '../../ui';
 import { clientApi } from '../api';
-import { ClientHealthResponse, WatchdogReport } from '../types';
+import { CacheResponse, ClientHealthResponse, WatchdogReport } from '../types';
 
-const DEFAULT_FO_GROUPS = ['#VPS', 'Game-TCP', 'Game-UDP', 'Game', 'Proxy', 'AI'];
+const DEFAULT_FO_GROUPS = ['#VPS', 'Proxy', 'AI', '#Nodes'];
 const DEFAULT_FO_URLS = [
   'https://www.gstatic.com/generate_204',
   'http://cp.cloudflare.com/generate_204',
 ];
+
+function parseClampedInt(raw: string, fallback: number, minVal: number, maxVal: number): number {
+  const n = Number.parseInt(raw.trim(), 10);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(maxVal, Math.max(minVal, n));
+}
+
+function sanitizeDigits(raw: string): string {
+  return raw.replace(/[^\d]/g, '');
+}
 
 function fmtKB(bytes: number): string {
   const n = Number(bytes) || 0;
@@ -46,54 +56,60 @@ export const WatchdogPage: React.FC<WatchdogPageProps> = ({
   const [savingBasic, setSavingBasic] = useState(false);
   const [healthChecking, setHealthChecking] = useState(false);
   const [healthRes, setHealthRes] = useState<ClientHealthResponse | null>(null);
+  const [cacheSummary, setCacheSummary] = useState<CacheResponse | null>(null);
 
-  // Failover form state
+  // Failover form state (numeric fields use string drafts so users can freely clear/edit without snapping to 0)
   const [foEnabled, setFoEnabled] = useState(true);
   const [selectedGroups, setSelectedGroups] = useState<string[]>(DEFAULT_FO_GROUPS);
   const [customGroupInput, setCustomGroupInput] = useState('');
-  const [patrolInterval, setPatrolInterval] = useState(30);
-  const [probeTimeoutMs, setProbeTimeoutMs] = useState(2800);
+  const [patrolInterval, setPatrolInterval] = useState('300');
+  const [probeTimeoutMs, setProbeTimeoutMs] = useState('2800');
   const [confirmRetries, setConfirmRetries] = useState(1);
   const [autoFailback, setAutoFailback] = useState(true);
-  const [cooldownSec, setCooldownSec] = useState(180);
-  const [maxFailbackDelayMs, setMaxFailbackDelayMs] = useState(600);
+  const [cooldownSec, setCooldownSec] = useState('180');
+  const [maxFailbackDelayMs, setMaxFailbackDelayMs] = useState('600');
   const [probeUrlsText, setProbeUrlsText] = useState(DEFAULT_FO_URLS.join('\n'));
   const [showAdvURLs, setShowAdvURLs] = useState(false);
 
   // Basic watchdog form state
-  const [wdInterval, setWdInterval] = useState(180);
-  const [wdConfirmWait, setWdConfirmWait] = useState(30);
-  const [wdMaxRestarts, setWdMaxRestarts] = useState(3);
+  const [wdInterval, setWdInterval] = useState('180');
+  const [wdConfirmWait, setWdConfirmWait] = useState('30');
+  const [wdMaxRestarts, setWdMaxRestarts] = useState('3');
   const [wdSubSyncEnabled, setWdSubSyncEnabled] = useState(true);
-  const [wdSubSyncInterval, setWdSubSyncInterval] = useState(600);
+  const [wdSubSyncInterval, setWdSubSyncInterval] = useState('600');
 
   const [dirty, setDirty] = useState(false);
+  const dirtyRef = useRef(false);
+  const markDirty = useCallback((next: boolean) => {
+    dirtyRef.current = next;
+    setDirty(next);
+  }, []);
 
   const applyReport = useCallback(
     (data: WatchdogReport, preserveForm: boolean) => {
       setReport(data);
       const cfg = data.config;
       const fo = cfg.failover;
-      if (!preserveForm || !dirty) {
+      if (!preserveForm || !dirtyRef.current) {
         setFoEnabled(fo.enabled !== false);
         setSelectedGroups(fo.groups?.length ? [...fo.groups] : [...DEFAULT_FO_GROUPS]);
-        setPatrolInterval(fo.patrol_interval || 30);
-        setProbeTimeoutMs(fo.probe_timeout_ms || 2800);
+        setPatrolInterval(String(fo.patrol_interval || 300));
+        setProbeTimeoutMs(String(fo.probe_timeout_ms || 2800));
         setConfirmRetries(fo.confirm_retries ?? 1);
         setAutoFailback(fo.auto_failback !== false);
-        setCooldownSec(fo.failback_cooldown || 180);
-        setMaxFailbackDelayMs(fo.max_failback_delay_ms || 600);
+        setCooldownSec(String(fo.failback_cooldown || 180));
+        setMaxFailbackDelayMs(String(fo.max_failback_delay_ms || 600));
         setProbeUrlsText((fo.probe_urls?.length ? fo.probe_urls : DEFAULT_FO_URLS).join('\n'));
 
-        setWdInterval(cfg.interval || 180);
-        setWdConfirmWait(cfg.confirm_wait || 30);
-        setWdMaxRestarts(cfg.max_restarts || 3);
+        setWdInterval(String(cfg.interval || 180));
+        setWdConfirmWait(String(cfg.confirm_wait || 30));
+        setWdMaxRestarts(String(cfg.max_restarts || 3));
         setWdSubSyncEnabled(cfg.sub_sync_enabled !== false);
-        setWdSubSyncInterval(cfg.sub_sync_interval || 600);
-        setDirty(false);
+        setWdSubSyncInterval(String(cfg.sub_sync_interval || 600));
+        markDirty(false);
       }
     },
-    [dirty],
+    [markDirty],
   );
 
   const loadWatchdog = useCallback(
@@ -110,9 +126,27 @@ export const WatchdogPage: React.FC<WatchdogPageProps> = ({
     [applyReport, error],
   );
 
+  const loadCacheSummary = useCallback(async () => {
+    try {
+      setCacheSummary(await clientApi.getCache());
+    } catch {
+      // 规则集摘要属辅助信息，失败时不阻塞看门狗主体展示
+    }
+  }, []);
+
   useEffect(() => {
     void loadWatchdog(false);
-  }, [loadWatchdog]);
+    void loadCacheSummary();
+  }, [loadWatchdog, loadCacheSummary]);
+
+  const prevBusyRef = useRef(busy);
+  useEffect(() => {
+    if (prevBusyRef.current && !busy) {
+      void loadCacheSummary();
+      void loadWatchdog(true);
+    }
+    prevBusyRef.current = busy;
+  }, [busy, loadCacheSummary, loadWatchdog]);
 
   const handleImmediateHealth = async () => {
     setHealthChecking(true);
@@ -171,10 +205,10 @@ export const WatchdogPage: React.FC<WatchdogPageProps> = ({
           toast('至少保留 1 个受保护策略组；如需停用请关闭右上角总开关', 'warn');
           return prev;
         }
-        setDirty(true);
+        markDirty(true);
         return prev.filter((g) => g !== name);
       }
-      setDirty(true);
+      markDirty(true);
       return [...prev, name];
     });
   };
@@ -186,7 +220,7 @@ export const WatchdogPage: React.FC<WatchdogPageProps> = ({
       toast(`分组「${val}」已在受保护列表中`, 'info');
     } else {
       setSelectedGroups((prev) => [...prev, val]);
-      setDirty(true);
+      markDirty(true);
       success(`已添加受保护策略组：${val}`);
     }
     setCustomGroupInput('');
@@ -195,6 +229,15 @@ export const WatchdogPage: React.FC<WatchdogPageProps> = ({
   const saveFailover = async (overridePayload?: Record<string, unknown>) => {
     setSavingFO(true);
     try {
+      const nextPatrol = parseClampedInt(patrolInterval, 300, 10, 3600);
+      const nextTimeout = parseClampedInt(probeTimeoutMs, 2800, 500, 15000);
+      const nextCooldown = parseClampedInt(cooldownSec, 180, 10, 86400);
+      const nextMaxDelay = parseClampedInt(maxFailbackDelayMs, 600, 100, 5000);
+      setPatrolInterval(String(nextPatrol));
+      setProbeTimeoutMs(String(nextTimeout));
+      setCooldownSec(String(nextCooldown));
+      setMaxFailbackDelayMs(String(nextMaxDelay));
+
       const urls = probeUrlsText
         .split(/[\n,]+/)
         .map((s) => s.trim())
@@ -203,17 +246,17 @@ export const WatchdogPage: React.FC<WatchdogPageProps> = ({
         enabled: foEnabled,
         groups: selectedGroups,
         has_groups: true,
-        patrol_interval: patrolInterval,
-        probe_timeout_ms: probeTimeoutMs,
+        patrol_interval: nextPatrol,
+        probe_timeout_ms: nextTimeout,
         confirm_retries: confirmRetries,
         auto_failback: autoFailback,
-        failback_cooldown: cooldownSec,
-        max_failback_delay_ms: maxFailbackDelayMs,
+        failback_cooldown: nextCooldown,
+        max_failback_delay_ms: nextMaxDelay,
         probe_urls: urls,
         has_probe_urls: true,
       };
       const res = await clientApi.updateWatchdogConfig({ failover: failoverPayload });
-      setDirty(false);
+      markDirty(false);
       if (res.daemon || res.config) applyReport((res.report || res) as WatchdogReport, false);
       onRefreshStatus();
       success(res.message || '故障切换策略已保存并热生效');
@@ -224,21 +267,25 @@ export const WatchdogPage: React.FC<WatchdogPageProps> = ({
     }
   };
 
+  const defaultGroupList = report?.config?.failover?.default_groups?.length
+    ? report.config.failover.default_groups
+    : DEFAULT_FO_GROUPS;
+
   const resetAllFailover = async () => {
     setFoEnabled(true);
-    setSelectedGroups([...DEFAULT_FO_GROUPS]);
-    setPatrolInterval(30);
-    setProbeTimeoutMs(2800);
+    setSelectedGroups([...defaultGroupList]);
+    setPatrolInterval('300');
+    setProbeTimeoutMs('2800');
     setConfirmRetries(1);
     setAutoFailback(true);
-    setCooldownSec(180);
-    setMaxFailbackDelayMs(600);
+    setCooldownSec('180');
+    setMaxFailbackDelayMs('600');
     setProbeUrlsText(DEFAULT_FO_URLS.join('\n'));
     await saveFailover({
       enabled: true,
-      groups: [...DEFAULT_FO_GROUPS],
+      groups: [...defaultGroupList],
       has_groups: true,
-      patrol_interval: 30,
+      patrol_interval: 300,
       probe_timeout_ms: 2800,
       confirm_retries: 1,
       auto_failback: true,
@@ -252,14 +299,23 @@ export const WatchdogPage: React.FC<WatchdogPageProps> = ({
   const saveBasicConfig = async () => {
     setSavingBasic(true);
     try {
+      const nextInterval = parseClampedInt(wdInterval, 180, 15, 86400);
+      const nextConfirm = parseClampedInt(wdConfirmWait, 30, 5, 600);
+      const nextMaxRestarts = parseClampedInt(wdMaxRestarts, 3, 1, 50);
+      const nextSubSync = parseClampedInt(wdSubSyncInterval, 600, 60, 86400);
+      setWdInterval(String(nextInterval));
+      setWdConfirmWait(String(nextConfirm));
+      setWdMaxRestarts(String(nextMaxRestarts));
+      setWdSubSyncInterval(String(nextSubSync));
+
       const res = await clientApi.updateWatchdogConfig({
-        interval: wdInterval,
-        confirm_wait: wdConfirmWait,
-        max_restarts: wdMaxRestarts,
+        interval: nextInterval,
+        confirm_wait: nextConfirm,
+        max_restarts: nextMaxRestarts,
         sub_sync_enabled: wdSubSyncEnabled,
-        sub_sync_interval: wdSubSyncInterval,
+        sub_sync_interval: nextSubSync,
       });
-      setDirty(false);
+      markDirty(false);
       if (res.daemon || res.config) applyReport((res.report || res) as WatchdogReport, false);
       onRefreshStatus();
       success(res.message || '基础守护参数已保存并热生效');
@@ -289,14 +345,23 @@ export const WatchdogPage: React.FC<WatchdogPageProps> = ({
   const activeFO = rt?.activeFailovers || [];
   const events = [...(rt?.recentEvents || [])].reverse().slice(0, 15);
 
-  const liveGroupMap = new Map((report?.selectorGroups || []).map((g) => [g.name, g]));
-  const orderedGroupNames = Array.from(
-    new Set([
-      ...(report?.selectorGroups || []).map((g) => g.name).filter(Boolean),
-      ...selectedGroups,
-      ...(selectedGroups.length === 0 ? DEFAULT_FO_GROUPS : []),
-    ]),
-  );
+  const liveSelectors = report?.selectorGroups || [];
+  const hasLiveSelectors = liveSelectors.length > 0;
+  const liveGroupMap = new Map(liveSelectors.map((g) => [g.name, g]));
+  const orderedGroupNames = hasLiveSelectors
+    ? Array.from(new Set(liveSelectors.map((g) => g.name).filter(Boolean)))
+    : Array.from(
+        new Set([
+          ...selectedGroups,
+          ...(selectedGroups.length === 0 ? defaultGroupList : []),
+        ]),
+      );
+  const staleSelectedGroups = hasLiveSelectors
+    ? selectedGroups.filter((name) => !liveGroupMap.has(name))
+    : [];
+  const activeSelectedCount = hasLiveSelectors
+    ? selectedGroups.filter((name) => liveGroupMap.has(name)).length
+    : selectedGroups.length;
 
   return (
     <div className="space-y-5">
@@ -430,7 +495,7 @@ export const WatchdogPage: React.FC<WatchdogPageProps> = ({
               {
                 title: '② 策略组自动故障切换',
                 desc: cfg?.failover.enabled
-                  ? `每 ${cfg.failover.patrol_interval || 30}s 巡检 ${(cfg.failover.groups || DEFAULT_FO_GROUPS).length} 组 · 复测 ${cfg.failover.confirm_retries ?? 1} 次`
+                  ? `每 ${cfg.failover.patrol_interval || 300}s 巡检 ${(cfg.failover.groups || DEFAULT_FO_GROUPS).length} 组 · 复测 ${cfg.failover.confirm_retries ?? 1} 次`
                   : '已手动关闭策略组节点容灾切换',
                 badge: !cfg?.failover.enabled ? (
                   <Badge>已关闭</Badge>
@@ -449,8 +514,36 @@ export const WatchdogPage: React.FC<WatchdogPageProps> = ({
               },
               {
                 title: '④ 规则集 (.srs) 静默刷新',
-                desc: `每 24 小时校准本地规则集${rt?.lastRuleSetAt ? ` · 上次: ${rt.lastRuleSetAt}` : ''}`,
-                badge: <Badge tone={dm?.running ? 'ok' : 'neutral'}>{dm?.running ? '定时守护' : '待启动'}</Badge>,
+                desc: (() => {
+                  const entries = cacheSummary?.entries || [];
+                  const total = entries.length;
+                  const ready = entries.filter((e) => e.state === 'ok' || e.state === 'snapshot').length;
+                  const local = entries.filter((e) => e.state === 'ok').length;
+                  const parts = ['每 24 小时自动校准'];
+                  if (total > 0) parts.push(`就绪 ${ready}/${total} (本地 ${local})`);
+                  else if (cacheSummary?.snapshotCount) parts.push(`内置兜底 ${cacheSummary.snapshotCount} 项`);
+                  if (rt?.lastRuleSetAt) parts.push(`上次: ${rt.lastRuleSetAt}`);
+                  return parts.join(' · ');
+                })(),
+                badge: (() => {
+                  const entries = cacheSummary?.entries || [];
+                  const total = entries.length;
+                  const ready = entries.filter((e) => e.state === 'ok' || e.state === 'snapshot').length;
+                  const missing = entries.filter((e) => e.state === 'missing').length;
+                  if (missing > 0) return <Badge tone="warn">缺 {missing} 项</Badge>;
+                  if (total > 0) return <Badge tone="ok">{ready}/{total} 就绪</Badge>;
+                  return <Badge tone={dm?.running ? 'ok' : 'neutral'}>{dm?.running ? '定时守护' : '待启动'}</Badge>;
+                })(),
+                action: (
+                  <Button
+                    size="xs"
+                    disabled={busy}
+                    onClick={() => onAction('cache-update')}
+                    icon={<RefreshCw className="w-3 h-3" />}
+                  >
+                    立即更新
+                  </Button>
+                ),
               },
               {
                 title: '⑤ 本地 AdGuard DNS 保活',
@@ -474,7 +567,10 @@ export const WatchdogPage: React.FC<WatchdogPageProps> = ({
                   <div className="text-xs font-semibold text-primary">{item.title}</div>
                   <div className="text-[11px] text-secondary truncate">{item.desc}</div>
                 </div>
-                {item.badge}
+                <div className="flex items-center gap-2 shrink-0">
+                  {item.action}
+                  {item.badge}
+                </div>
               </div>
             ))}
           </div>
@@ -534,18 +630,36 @@ export const WatchdogPage: React.FC<WatchdogPageProps> = ({
             <div className="space-y-2.5">
               <div className="flex items-center justify-between gap-2 flex-wrap">
                 <span className="text-xs font-semibold text-primary">
-                  受保护策略组（已启用 {selectedGroups.length} 个）
+                  受保护策略组（已启用 {activeSelectedCount} 个
+                  {staleSelectedGroups.length > 0
+                    ? ` · ${staleSelectedGroups.length} 个未在 sing-box 中`
+                    : ''}
+                  ）
                 </span>
-                <Button
-                  size="xs"
-                  variant="ghost"
-                  onClick={() => {
-                    setSelectedGroups([...DEFAULT_FO_GROUPS]);
-                    setDirty(true);
-                  }}
-                >
-                  恢复默认分组
-                </Button>
+                <div className="flex items-center gap-1.5">
+                  {staleSelectedGroups.length > 0 && (
+                    <Button
+                      size="xs"
+                      variant="ghost"
+                      onClick={() => {
+                        setSelectedGroups((prev) => prev.filter((g) => liveGroupMap.has(g)));
+                        markDirty(true);
+                      }}
+                    >
+                      清理无效分组
+                    </Button>
+                  )}
+                  <Button
+                    size="xs"
+                    variant="ghost"
+                    onClick={() => {
+                      setSelectedGroups([...defaultGroupList]);
+                      markDirty(true);
+                    }}
+                  >
+                    恢复默认分组
+                  </Button>
+                </div>
               </div>
               <div className="flex flex-wrap gap-2">
                 {orderedGroupNames.map((name) => {
@@ -577,6 +691,22 @@ export const WatchdogPage: React.FC<WatchdogPageProps> = ({
                   );
                 })}
               </div>
+              {staleSelectedGroups.length > 0 && (
+                <div className="flex flex-wrap items-center gap-2 text-xs text-amber-300/90 bg-amber-500/10 border border-amber-500/25 rounded-xl px-3 py-2">
+                  <span>未在当前 sing-box 中找到的自定义/旧分组（点击移除）：</span>
+                  {staleSelectedGroups.map((name) => (
+                    <button
+                      key={name}
+                      type="button"
+                      onClick={() => toggleGroupChip(name)}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-amber-500/15 border border-amber-500/30 font-mono hover:bg-amber-500/25 cursor-pointer"
+                    >
+                      <span>{name}</span>
+                      <span>×</span>
+                    </button>
+                  ))}
+                </div>
+              )}
               <div className="flex gap-2 max-w-md">
                 <input
                   type="text"
@@ -600,17 +730,17 @@ export const WatchdogPage: React.FC<WatchdogPageProps> = ({
             {/* Sensitivity Grid */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5">
               <label className="block space-y-1 text-xs">
-                <span className="text-secondary">巡检间隔（秒，默认 30）</span>
+                <span className="text-secondary">巡检间隔（秒，默认 300 / 5 分钟 · 范围 10~3600）</span>
                 <input
-                  type="number"
-                  min={10}
-                  max={3600}
-                  step={5}
+                  type="text"
+                  inputMode="numeric"
                   value={patrolInterval}
                   onChange={(e) => {
-                    setPatrolInterval(Number(e.target.value));
-                    setDirty(true);
+                    setPatrolInterval(sanitizeDigits(e.target.value));
+                    markDirty(true);
                   }}
+                  onBlur={() => setPatrolInterval(String(parseClampedInt(patrolInterval, 300, 10, 3600)))}
+                  placeholder="300"
                   className="w-full h-9 px-3 rounded-xl bg-surface2 border border-subtle text-primary font-mono tnum focus:outline-none focus:border-strong"
                 />
               </label>
@@ -618,15 +748,15 @@ export const WatchdogPage: React.FC<WatchdogPageProps> = ({
               <label className="block space-y-1 text-xs">
                 <span className="text-secondary">单次探测超时（毫秒，默认 2800）</span>
                 <input
-                  type="number"
-                  min={500}
-                  max={15000}
-                  step={100}
+                  type="text"
+                  inputMode="numeric"
                   value={probeTimeoutMs}
                   onChange={(e) => {
-                    setProbeTimeoutMs(Number(e.target.value));
-                    setDirty(true);
+                    setProbeTimeoutMs(sanitizeDigits(e.target.value));
+                    markDirty(true);
                   }}
+                  onBlur={() => setProbeTimeoutMs(String(parseClampedInt(probeTimeoutMs, 2800, 500, 15000)))}
+                  placeholder="2800"
                   className="w-full h-9 px-3 rounded-xl bg-surface2 border border-subtle text-primary font-mono tnum focus:outline-none focus:border-strong"
                 />
               </label>
@@ -637,7 +767,7 @@ export const WatchdogPage: React.FC<WatchdogPageProps> = ({
                   value={confirmRetries}
                   onChange={(e) => {
                     setConfirmRetries(Number(e.target.value));
-                    setDirty(true);
+                    markDirty(true);
                   }}
                   className="w-full h-9 px-3 rounded-xl bg-surface2 border border-subtle text-primary focus:outline-none focus:border-strong"
                 >
@@ -656,7 +786,7 @@ export const WatchdogPage: React.FC<WatchdogPageProps> = ({
                     checked={autoFailback}
                     onChange={(e) => {
                       setAutoFailback(e.target.checked);
-                      setDirty(true);
+                      markDirty(true);
                     }}
                     className="accent-[var(--accent)]"
                   />
@@ -667,16 +797,16 @@ export const WatchdogPage: React.FC<WatchdogPageProps> = ({
               <label className="block space-y-1 text-xs">
                 <span className="text-secondary">回切冷却期（秒，默认 180）</span>
                 <input
-                  type="number"
-                  min={10}
-                  max={86400}
-                  step={10}
+                  type="text"
+                  inputMode="numeric"
                   disabled={!autoFailback}
                   value={cooldownSec}
                   onChange={(e) => {
-                    setCooldownSec(Number(e.target.value));
-                    setDirty(true);
+                    setCooldownSec(sanitizeDigits(e.target.value));
+                    markDirty(true);
                   }}
+                  onBlur={() => setCooldownSec(String(parseClampedInt(cooldownSec, 180, 10, 86400)))}
+                  placeholder="180"
                   className="w-full h-9 px-3 rounded-xl bg-surface2 border border-subtle text-primary font-mono tnum disabled:opacity-50 focus:outline-none focus:border-strong"
                 />
               </label>
@@ -684,16 +814,16 @@ export const WatchdogPage: React.FC<WatchdogPageProps> = ({
               <label className="block space-y-1 text-xs">
                 <span className="text-secondary">允许回切最高延迟（ms，默认 600）</span>
                 <input
-                  type="number"
-                  min={100}
-                  max={5000}
-                  step={50}
+                  type="text"
+                  inputMode="numeric"
                   disabled={!autoFailback}
                   value={maxFailbackDelayMs}
                   onChange={(e) => {
-                    setMaxFailbackDelayMs(Number(e.target.value));
-                    setDirty(true);
+                    setMaxFailbackDelayMs(sanitizeDigits(e.target.value));
+                    markDirty(true);
                   }}
+                  onBlur={() => setMaxFailbackDelayMs(String(parseClampedInt(maxFailbackDelayMs, 600, 100, 5000)))}
+                  placeholder="600"
                   className="w-full h-9 px-3 rounded-xl bg-surface2 border border-subtle text-primary font-mono tnum disabled:opacity-50 focus:outline-none focus:border-strong"
                 />
               </label>
@@ -710,7 +840,7 @@ export const WatchdogPage: React.FC<WatchdogPageProps> = ({
                     value={probeUrlsText}
                     onChange={(e) => {
                       setProbeUrlsText(e.target.value);
-                      setDirty(true);
+                      markDirty(true);
                     }}
                     className="w-full p-3 rounded-xl bg-surface2 border border-subtle font-mono text-xs text-primary focus:outline-none focus:border-strong"
                   />
@@ -718,7 +848,7 @@ export const WatchdogPage: React.FC<WatchdogPageProps> = ({
                     size="xs"
                     onClick={() => {
                       setProbeUrlsText(DEFAULT_FO_URLS.join('\n'));
-                      setDirty(true);
+                      markDirty(true);
                     }}
                   >
                     恢复默认探测 URL
@@ -734,6 +864,7 @@ export const WatchdogPage: React.FC<WatchdogPageProps> = ({
               <Button disabled={savingFO} onClick={resetAllFailover} icon={<RotateCcw className="w-3.5 h-3.5" />}>
                 恢复全部默认值
               </Button>
+              {dirty && <Badge tone="warn">有未保存修改</Badge>}
             </div>
           </div>
         </div>
@@ -746,44 +877,45 @@ export const WatchdogPage: React.FC<WatchdogPageProps> = ({
             <label className="block space-y-1">
               <span className="text-secondary">健康检查间隔（秒，默认 180）</span>
               <input
-                type="number"
-                min={15}
-                max={86400}
-                step={15}
+                type="text"
+                inputMode="numeric"
                 value={wdInterval}
                 onChange={(e) => {
-                  setWdInterval(Number(e.target.value));
-                  setDirty(true);
+                  setWdInterval(sanitizeDigits(e.target.value));
+                  markDirty(true);
                 }}
+                onBlur={() => setWdInterval(String(parseClampedInt(wdInterval, 180, 15, 86400)))}
+                placeholder="180"
                 className="w-full h-9 px-3 rounded-xl bg-surface2 border border-subtle text-primary font-mono tnum"
               />
             </label>
             <label className="block space-y-1">
               <span className="text-secondary">异常二次确认等待（秒，默认 30）</span>
               <input
-                type="number"
-                min={5}
-                max={600}
-                step={5}
+                type="text"
+                inputMode="numeric"
                 value={wdConfirmWait}
                 onChange={(e) => {
-                  setWdConfirmWait(Number(e.target.value));
-                  setDirty(true);
+                  setWdConfirmWait(sanitizeDigits(e.target.value));
+                  markDirty(true);
                 }}
+                onBlur={() => setWdConfirmWait(String(parseClampedInt(wdConfirmWait, 30, 5, 600)))}
+                placeholder="30"
                 className="w-full h-9 px-3 rounded-xl bg-surface2 border border-subtle text-primary font-mono tnum"
               />
             </label>
             <label className="block space-y-1">
               <span className="text-secondary">每小时最大自愈重启次数（默认 3）</span>
               <input
-                type="number"
-                min={1}
-                max={50}
+                type="text"
+                inputMode="numeric"
                 value={wdMaxRestarts}
                 onChange={(e) => {
-                  setWdMaxRestarts(Number(e.target.value));
-                  setDirty(true);
+                  setWdMaxRestarts(sanitizeDigits(e.target.value));
+                  markDirty(true);
                 }}
+                onBlur={() => setWdMaxRestarts(String(parseClampedInt(wdMaxRestarts, 3, 1, 50)))}
+                placeholder="3"
                 className="w-full h-9 px-3 rounded-xl bg-surface2 border border-subtle text-primary font-mono tnum"
               />
             </label>
@@ -795,7 +927,7 @@ export const WatchdogPage: React.FC<WatchdogPageProps> = ({
                   checked={wdSubSyncEnabled}
                   onChange={(e) => {
                     setWdSubSyncEnabled(e.target.checked);
-                    setDirty(true);
+                    markDirty(true);
                   }}
                   className="accent-[var(--accent)]"
                 />
@@ -805,16 +937,16 @@ export const WatchdogPage: React.FC<WatchdogPageProps> = ({
             <label className="block space-y-1">
               <span className="text-secondary">订阅同步间隔（秒，默认 600）</span>
               <input
-                type="number"
-                min={60}
-                max={86400}
-                step={60}
+                type="text"
+                inputMode="numeric"
                 disabled={!wdSubSyncEnabled}
                 value={wdSubSyncInterval}
                 onChange={(e) => {
-                  setWdSubSyncInterval(Number(e.target.value));
-                  setDirty(true);
+                  setWdSubSyncInterval(sanitizeDigits(e.target.value));
+                  markDirty(true);
                 }}
+                onBlur={() => setWdSubSyncInterval(String(parseClampedInt(wdSubSyncInterval, 600, 60, 86400)))}
+                placeholder="600"
                 className="w-full h-9 px-3 rounded-xl bg-surface2 border border-subtle text-primary font-mono tnum disabled:opacity-50"
               />
             </label>

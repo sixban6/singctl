@@ -135,6 +135,30 @@ func (s *Server) buildWatchdogReport(cfg *config.Config) map[string]any {
 		cancel()
 	}
 
+	// 若 sing-box 在线且处于默认策略组模式，则按实际存在的 Selector 自动对齐，避免展示不存在的历史分组
+	if len(selectorGroups) > 0 && dto.Failover.IsDefaultGroups {
+		liveSet := make(map[string]bool, len(selectorGroups))
+		liveNames := make([]string, 0, len(selectorGroups))
+		for _, g := range selectorGroups {
+			liveSet[g.Name] = true
+			liveNames = append(liveNames, g.Name)
+		}
+		var synced []string
+		for _, g := range dto.Failover.Groups {
+			if liveSet[g] {
+				synced = append(synced, g)
+			}
+		}
+		if len(synced) == 0 {
+			synced = liveNames
+		}
+		dto.Failover.Groups = synced
+		dto.Failover.DefaultGroups = slices.Clone(synced)
+		for i := range selectorGroups {
+			selectorGroups[i].Watched = slices.Contains(synced, selectorGroups[i].Name)
+		}
+	}
+
 	aghInfo := map[string]any{
 		"supported": runtime.GOOS == "linux",
 		"enabled":   cfg != nil && cfg.DNS.IsEnabled(),
@@ -277,7 +301,7 @@ func (s *Server) handleWatchdogConfigPut(w http.ResponseWriter, r *http.Request)
 		}
 		if req.Failover.PatrolInterval != nil {
 			v := min(max(10, *req.Failover.PatrolInterval), 3600)
-			if v == 30 {
+			if v == 300 {
 				fo.PatrolInterval = 0
 			} else {
 				fo.PatrolInterval = v

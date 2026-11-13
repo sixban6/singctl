@@ -82,16 +82,14 @@
 @keyframes sc-fade-in {
   from {
     opacity: 0;
-    transform: translateY(4px);
   }
   to {
     opacity: 1;
-    transform: translateY(0);
   }
 }
 
 .animate-sc-in {
-  animation: sc-fade-in 0.16s ease-out both;
+  animation: sc-fade-in 0.16s ease-out;
 }
 
 /* Hide scrollbars cleanly on horizontal tab strips */

@@ -11,6 +11,9 @@ var (
 	SingBoxInstallDir     string
 	SingBoxConfigDir      string
 	SingBoxConfigFile     string
+	SingBoxWorkConfigFile string
+	SingBoxBasicLogFile   string
+	SingBoxSimpleLogFile  string
 	SingBoxSystemdService string
 	SingBoxNftablesFile   string
 
@@ -45,6 +48,9 @@ func init() {
 	if runtime.GOOS == "linux" {
 		SingBoxConfigDir = "/etc/sing-box"
 		SingBoxConfigFile = "/etc/sing-box/config.json"
+		SingBoxWorkConfigFile = "/tmp/sing-box-work/config.json"
+		SingBoxBasicLogFile = "/tmp/sing-box-basic.log"
+		SingBoxSimpleLogFile = "/tmp/sing-box-simple.log"
 		SingBoxSystemdService = "/etc/systemd/system/sing-box.service"
 		SingBoxNftablesFile = "/etc/sing-box/sec_block.nft"
 

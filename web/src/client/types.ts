@@ -282,6 +282,47 @@ export interface AuditAIConfig {
   suggestedLanUrl?: string;
 }
 
+export interface ClientRoutingGroupInfo {
+  tag: string;
+  type: string;
+  default?: string;
+  count: number;
+}
+
+export interface TrafficCategoryInfo {
+  id: string;
+  label: string;
+  description: string;
+  defaultDest: string;
+}
+
+export interface ClientRoutingPresetState {
+  id: string;
+  name: string;
+  category: string;
+  categoryLabel: string;
+  description: string;
+  domainsSummary: string;
+  defaultOn: boolean;
+  defaultOutbound: string;
+  enabled: boolean;
+  selectedGroup: string;
+  effectiveDest: string;
+  customized: boolean;
+}
+
+export interface ClientRoutingReport {
+  groups: ClientRoutingGroupInfo[];
+  directTag: string;
+  categories: TrafficCategoryInfo[];
+  items: ClientRoutingPresetState[];
+  enabledCount: number;
+  customCount: number;
+  totalCount: number;
+  hasConfig: boolean;
+  lastError?: string;
+}
+
 export interface ActionStreamEvent {
   t: 'start' | 'out' | 'exit';
   title?: string;

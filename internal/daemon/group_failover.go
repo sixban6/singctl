@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	defaultGroupFailoverInterval = 30 * time.Second
+	defaultGroupFailoverInterval = 300 * time.Second
 	groupProbeTimeout            = 2800 * time.Millisecond
 )
 

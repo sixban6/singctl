@@ -1,6 +1,7 @@
 import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import {
   Activity,
+  Router,
   FileText,
   Zap,
   Sliders,
@@ -202,7 +203,7 @@ const ClientShell: React.FC = () => {
             key: 'sb',
             label: 'Sing-Box 核心',
             shortLabel: '核心',
-            desc: '内核生命周期、规则集缓存与配置文件编辑器',
+            desc: '内核生命周期、25 项智能分流开关与配置文件编辑器',
             icon: Zap,
             badge: sbBadge,
           },
@@ -425,6 +426,8 @@ const ClientShell: React.FC = () => {
             ? `${status.host.hostname || 'Router'} · ${status.host.lanIP}`
             : status?.host?.hostname || 'SingCtl Client Gateway'
         }
+        brandIcon={<Router className="w-4 h-4 sm:w-5 sm:h-5 text-cyan-400" />}
+        brandIconClassName="bg-gradient-to-br from-emerald-500/15 to-cyan-500/15 border border-cyan-400/25 shadow-[0_0_16px_-2px_rgba(34,211,238,0.35)]"
         version={status?.singctlVersion}
         groups={navGroups}
         activeTab={tab}

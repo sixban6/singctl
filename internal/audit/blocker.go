@@ -58,12 +58,13 @@ func IsProtectedBootstrapDomain(raw string) bool {
 
 // Enforcer 负责执行“Sing-Box 路由阻断 + 自建 AdGuard Home DNS 黑名单 + 存量活跃连接秒级掐断”三位一体联动封禁。
 type Enforcer struct {
-	cfg            *config.Config
-	configPath     string
-	sbConfigPath   string
-	aghConfigPath  string
-	clashEndpoints []string
-	clashSecret    string
+	cfg              *config.Config
+	configPath       string
+	sbConfigPath     string
+	sbWorkConfigPath string
+	aghConfigPath    string
+	clashEndpoints   []string
+	clashSecret      string
 }
 
 // NewEnforcer 创建默认三位一体封禁执行器。
@@ -72,21 +73,28 @@ func NewEnforcer(cfg *config.Config, singctlConfigPath string) *Enforcer {
 		cfg = &config.Config{}
 	}
 	return &Enforcer{
-		cfg:            cfg,
-		configPath:     singctlConfigPath,
-		sbConfigPath:   constant.SingBoxConfigFile,
-		aghConfigPath:  constant.AdGuardConfigFile,
-		clashEndpoints: singbox.ClashAPIEndpoints(),
-		clashSecret:    singbox.ClashAPISecret(),
+		cfg:              cfg,
+		configPath:       singctlConfigPath,
+		sbConfigPath:     constant.SingBoxConfigFile,
+		sbWorkConfigPath: constant.SingBoxWorkConfigFile,
+		aghConfigPath:    constant.AdGuardConfigFile,
+		clashEndpoints:   singbox.ClashAPIEndpoints(),
+		clashSecret:      singbox.ClashAPISecret(),
 	}
 }
 
 // SetPathsForTest 供单元测试注入临时配置文件路径与模拟 Clash API 端点。
 func (e *Enforcer) SetPathsForTest(sbConfigPath, aghConfigPath string, clashEndpoints []string, secret string) {
 	e.sbConfigPath = sbConfigPath
+	e.sbWorkConfigPath = ""
 	e.aghConfigPath = aghConfigPath
 	e.clashEndpoints = clashEndpoints
 	e.clashSecret = secret
+}
+
+// SetWorkConfigPathForTest 供单元测试注入临时沙盒运行时配置路径（例如模拟 /tmp/sing-box-work/config.json）。
+func (e *Enforcer) SetWorkConfigPathForTest(sbWorkConfigPath string) {
+	e.sbWorkConfigPath = sbWorkConfigPath
 }
 
 // ValidateTargetSafety 严格校验待拉黑目标是否安全（遵循规则 02 防自锁断网红线，拒绝拉黑网关自身、Tailscale 及机场订阅节点域名）。
@@ -465,7 +473,7 @@ func (e *Enforcer) ImportAndBlockRuleSet(ctx context.Context, rawInput, customTa
 		rawData = localBytes
 	}
 
-	sbBin := findSingBoxBin()
+	sbBin := singbox.FindSingBoxBin()
 	trimmed := strings.TrimSpace(string(rawData))
 	isJSON := strings.HasPrefix(trimmed, "{")
 	var parsed decompiledSRS
@@ -644,7 +652,7 @@ func (e *Enforcer) syncDNSLayer(ctx context.Context, blocks []config.BlockRule) 
 }
 
 // syncSingBoxLayer 遵循规则 02（两阶段原子切换 + 预校验 + 自动回滚）：
-// 在 /tmp 预生成新配置并通过 sing-box check 后，才原子替换 /etc/sing-box/config.json 并发送 SIGHUP 热重载。
+// 在校验通过后原子替换主配置（及存在时的沙盒运行时配置）并发送 SIGHUP 热重载。
 func (e *Enforcer) syncSingBoxLayer(ctx context.Context, oldBlocks, newBlocks []config.BlockRule) (bool, error) {
 	if e.sbConfigPath == "" {
 		return false, nil
@@ -659,64 +667,10 @@ func (e *Enforcer) syncSingBoxLayer(ctx context.Context, oldBlocks, newBlocks []
 		return false, err
 	}
 
-	tmpFile := filepath.Join(os.TempDir(), fmt.Sprintf("singctl-sb-audit-%d.json", os.Getpid()))
-	defer os.Remove(tmpFile)
-	if err := os.WriteFile(tmpFile, []byte(updatedJSON), 0600); err != nil {
+	if err := singbox.ApplyLiveSingBoxConfig(ctx, e.sbConfigPath, e.sbWorkConfigPath, updatedJSON, "audit"); err != nil {
 		return false, err
 	}
-	_ = os.Chmod(tmpFile, 0600)
-
-	// 若系统安装了 sing-box，先执行离线语法校验，未通过绝不覆盖线上配置
-	if sbBin := findSingBoxBin(); sbBin != "" {
-		checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		cmd := exec.CommandContext(checkCtx, sbBin, "check", "-c", tmpFile)
-		out, checkErr := cmd.CombinedOutput()
-		cancel()
-		if checkErr != nil {
-			return false, fmt.Errorf("sing-box check failed: %w (%s)", checkErr, strings.TrimSpace(string(out)))
-		}
-	}
-
-	// 备份原配置 (0600) 并执行同目录原子替换
-	bakPath := e.sbConfigPath + ".audit.bak"
-	_ = os.WriteFile(bakPath, rawBytes, 0600)
-	_ = os.Chmod(bakPath, 0600)
-
-	atomicTmp := e.sbConfigPath + ".audit.tmp"
-	if err := os.WriteFile(atomicTmp, []byte(updatedJSON), 0600); err != nil {
-		return false, err
-	}
-	_ = os.Chmod(atomicTmp, 0600)
-	if err := os.Rename(atomicTmp, e.sbConfigPath); err != nil {
-		_ = os.Remove(atomicTmp)
-		return false, err
-	}
-	_ = os.Chmod(e.sbConfigPath, 0600)
-
-	// 发送 SIGHUP 热重载信号（无损加载新路由规则，不断开正常代理连接）
-	reloadSingBoxProcess()
 	return true, nil
-}
-
-func findSingBoxBin() string {
-	if info, err := os.Stat(constant.SingBoxInstallDir); err == nil && !info.IsDir() {
-		return constant.SingBoxInstallDir
-	}
-	if p, err := exec.LookPath("sing-box"); err == nil {
-		return p
-	}
-	return ""
-}
-
-func reloadSingBoxProcess() {
-	if _, err := exec.LookPath("pkill"); err == nil {
-		if exec.Command("pkill", "-HUP", "-x", "sing-box").Run() == nil {
-			return
-		}
-	}
-	if _, err := exec.LookPath("killall"); err == nil {
-		_ = exec.Command("killall", "-HUP", "sing-box").Run()
-	}
 }
 
 // killMatchingConnections 遍历 Clash API /connections，将所有命中被拉黑目标的存量活跃连接立即调用 DELETE /connections/{id} 斩断。

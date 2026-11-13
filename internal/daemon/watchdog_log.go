@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,9 @@ import (
 
 // MaxDaemonLogBytes 守护日志文件大小上限（512 KB），防止 OpenWrt /tmp (tmpfs) 长期运行膨胀占满内存。
 const MaxDaemonLogBytes = 512 * 1024
+
+// MaxSingBoxLogBytes sing-box 运行标准输出日志上限（16 MB），防止 info 日志长期写入将 OpenWrt /tmp (tmpfs) 撑爆导致 DNS/DHCP 异常。
+const MaxSingBoxLogBytes = 16 * 1024 * 1024
 
 // WatchdogEvent 看门狗事件
 type WatchdogEvent struct {
@@ -124,5 +128,58 @@ func CleanAndTrimDaemonLog(logPath string, maxBytes int64) (bool, error) {
 		_ = os.Remove(tmp)
 		return false, err
 	}
+	return true, nil
+}
+
+// TrimLogInPlace 原地截断超大外部进程日志文件（保留尾部最新记录），保持原 inode 不变并释放 tmpfs 空间。
+func TrimLogInPlace(logPath string, maxBytes int64) (bool, error) {
+	if strings.TrimSpace(logPath) == "" {
+		return false, nil
+	}
+	if maxBytes <= 0 {
+		maxBytes = MaxSingBoxLogBytes
+	}
+	info, err := os.Stat(logPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if info.Size() <= maxBytes {
+		return false, nil
+	}
+
+	f, err := os.OpenFile(logPath, os.O_RDWR, 0600)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+
+	keepTarget := max(maxBytes/4, 4096)
+	offset := max(info.Size()-keepTarget, 0)
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return false, err
+	}
+	tail, err := io.ReadAll(io.LimitReader(f, keepTarget))
+	if err != nil {
+		return false, err
+	}
+	if offset > 0 {
+		if nl := bytes.IndexByte(tail, '\n'); nl >= 0 && nl+1 < len(tail) {
+			tail = tail[nl+1:]
+		}
+	}
+
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return false, err
+	}
+	if _, err := f.Write(tail); err != nil {
+		return false, err
+	}
+	if err := f.Truncate(int64(len(tail))); err != nil {
+		return false, err
+	}
+	_ = f.Chmod(0600)
 	return true, nil
 }

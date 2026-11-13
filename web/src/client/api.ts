@@ -8,6 +8,7 @@ import {
   ClientConfigDTO,
   ClientHealthResponse,
   ClientLogsResponse,
+  ClientRoutingReport,
   ClientStatusResponse,
   SbConfigResponse,
   WatchdogReport,
@@ -143,6 +144,17 @@ export const clientApi = {
       method: 'POST',
       body: JSON.stringify({ name }),
     }),
+
+  getTrafficRouting: () => request<ClientRoutingReport>('/api/traffic-routing'),
+  updateTrafficRouting: (payload: {
+    reset?: boolean;
+    replace?: boolean;
+    presets?: Record<string, { enabled?: boolean; outbound?: string }>;
+  }) =>
+    request<{ ok: boolean; applied: boolean; message: string; report: ClientRoutingReport }>(
+      '/api/traffic-routing',
+      { method: 'PUT', body: JSON.stringify(payload) },
+    ),
 
   getWatchdog: () => request<WatchdogReport>('/api/watchdog'),
   updateWatchdogConfig: (payload: Record<string, unknown>) =>

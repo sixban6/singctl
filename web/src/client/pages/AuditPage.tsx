@@ -350,12 +350,14 @@ export const AuditPage: React.FC = () => {
     [aiRevTick],
   );
 
+  const hasLoadedReportRef = useRef(false);
+
   const loadAudit = useCallback(
     async (silent = false) => {
       if (silent && (actionInFlightRef.current > 0 || Date.now() < pointerDownUntilRef.current)) {
         return;
       }
-      if (!silent) setLoading((prev) => prev && !report);
+      if (!silent) setLoading((prev) => prev && !hasLoadedReportRef.current);
       const qs = new URLSearchParams();
       if (deviceFilter.trim()) qs.set('device', deviceFilter.trim());
       if (onlySuspect) qs.set('suspicious', '1');
@@ -375,6 +377,7 @@ export const AuditPage: React.FC = () => {
           }
         });
         if (synced) persistAICache(aiCacheRef.current);
+        hasLoadedReportRef.current = true;
         setReport(rep);
         setLastUpdated(new Date().toLocaleTimeString());
         if (synced) setAiRevTick((t) => t + 1);
@@ -386,7 +389,7 @@ export const AuditPage: React.FC = () => {
         setLoading(false);
       }
     },
-    [deviceFilter, onlySuspect, sortBy, sortDir, setCachedReview, error, report],
+    [deviceFilter, onlySuspect, sortBy, sortDir, setCachedReview, error],
   );
 
   useEffect(() => {
@@ -976,12 +979,20 @@ export const AuditPage: React.FC = () => {
         const isBusy = busyFlowKeys.has(fk);
         return (
           <div
-            className="flex justify-end gap-1.5"
+            className="flex justify-end gap-1.5 whitespace-nowrap"
             onPointerDown={() => {
               pointerDownUntilRef.current = Date.now() + 1200;
             }}
             onClick={(e) => e.stopPropagation()}
           >
+            <Button
+              size="xs"
+              variant="secondary"
+              disabled={isBusy}
+              onClick={() => handleWhitelist('add', f.target)}
+            >
+              白名单
+            </Button>
             <Button
               size="xs"
               variant="danger"

@@ -32,11 +32,13 @@ var staticFS embed.FS
 
 // Options Web 服务配置
 type Options struct {
-	ConfigPath string                  // singctl 配置文件路径
-	Listen     string                  // 监听地址,如 ":8090"
-	Password   string                  // 可选的访问口令(空=不启用鉴权,建议仅在可信内网使用)
-	Version    string                  // singctl 版本号
-	OnReady    func(listenAddr string) // Listen 成功后的回调(后台子进程用于就绪握手)
+	ConfigPath            string                  // singctl 配置文件路径
+	SingBoxConfigPath     string                  // 可选：测试/定制 sing-box config.json 路径（留空使用 constant.SingBoxConfigFile）
+	SingBoxWorkConfigPath string                  // 可选：测试/定制沙盒副本 config.json 路径
+	Listen                string                  // 监听地址,如 ":8090"
+	Password              string                  // 可选的访问口令(空=不启用鉴权,建议仅在可信内网使用)
+	Version               string                  // singctl 版本号
+	OnReady               func(listenAddr string) // Listen 成功后的回调(后台子进程用于就绪握手)
 }
 
 // Server Web 管理服务
@@ -50,6 +52,7 @@ type Server struct {
 	iosCacheKey string // singctl.yaml 的 path|mtime|size 指纹
 	iosCacheVal string
 
+	routingMu    sync.Mutex
 	auditLimiter *auditRateLimiter
 }
 
@@ -85,10 +88,12 @@ func New(opts Options) *Server {
 	s.Mux.HandleFunc("GET /api/gen/ios/{$}", s.guardIOSDownload(s.handleIOSConfig))
 	s.Mux.HandleFunc("GET /api/gen/ios/url", s.guard(s.handleIOSConfigURL))
 
-	// sing-box 配置文件编辑
+	// sing-box 配置文件编辑 & 客户端智能分流开关中心
 	s.Mux.HandleFunc("GET /api/sbconfig", s.guard(s.handleSbConfigGet))
 	s.Mux.HandleFunc("PUT /api/sbconfig", s.guard(s.handleSbConfigPut))
 	s.Mux.HandleFunc("POST /api/sbconfig/restore", s.guard(s.handleSbConfigRestore))
+	s.Mux.HandleFunc("GET /api/traffic-routing", s.guard(s.handleTrafficRoutingGet))
+	s.Mux.HandleFunc("PUT /api/traffic-routing", s.guard(s.handleTrafficRoutingPut))
 
 	// 看门狗守护与策略组容灾控制 API
 	s.Mux.HandleFunc("GET /api/watchdog", s.guard(s.handleWatchdogGet))

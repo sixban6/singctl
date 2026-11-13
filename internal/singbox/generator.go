@@ -189,8 +189,69 @@ func (g *ConfigGenerator) GenerateForPlatform(platform string) (string, error) {
 		return "", err
 	}
 
+	// 应用客户端「智能分流开关中心」策略（AI 默认走 #VPS、业务默认走 Proxy、办公生态默认直连 #DC）
+	withTrafficRouting, err := g.InjectTrafficRouting(withCustomRules)
+	if err != nil {
+		return "", err
+	}
+
+	// 客户端默认将 log.level 从 "info" 收敛为 "warn"，从源头避免写爆 OpenWrt /tmp
+	withWarnLog, err := NormalizeClientLogLevel(withTrafficRouting)
+	if err != nil {
+		return "", err
+	}
+
 	// 格式化为可读 JSON
-	return PrettyJSON(withCustomRules)
+	return PrettyJSON(withWarnLog)
+}
+
+// InjectTrafficRouting 将 singctl.yaml 中的客户端「智能分流开关中心」预设覆盖策略应用到生成配置中。
+func (g *ConfigGenerator) InjectTrafficRouting(rawJSON string) (string, error) {
+	if g == nil || g.config == nil {
+		return rawJSON, nil
+	}
+	return ApplyTrafficRoutingToConfigJSON(rawJSON, g.config.TrafficRouting, g.config.CustomRules)
+}
+
+// NormalizeClientLogLevel 将客户端 sing-box 配置中的默认 log.level 从 "info" 收敛为 "warn"，
+// 避免路由器网关海量连接/DNS INFO 日志写爆 OpenWrt /tmp (tmpfs) 导致断网，同时保留 warn/error 故障日志。
+// 若配置已显式禁用日志或设为非 info 级别（如 debug/warn/error/fatal/panic），则保持原样。
+func NormalizeClientLogLevel(rawJSON string) (string, error) {
+	var root map[string]any
+	if err := json.Unmarshal([]byte(rawJSON), &root); err != nil {
+		return "", fmt.Errorf("failed to parse config JSON for log level normalization: %w", err)
+	}
+	if root == nil {
+		root = make(map[string]any)
+	}
+
+	logMap, ok := root["log"].(map[string]any)
+	if !ok || logMap == nil {
+		root["log"] = map[string]any{
+			"disabled":  false,
+			"level":     "warn",
+			"timestamp": true,
+		}
+	} else {
+		if disabled, _ := logMap["disabled"].(bool); disabled {
+			return rawJSON, nil
+		}
+		level, _ := logMap["level"].(string)
+		trimmed := strings.TrimSpace(strings.ToLower(level))
+		if trimmed != "" && trimmed != "info" {
+			return rawJSON, nil
+		}
+		logMap["level"] = "warn"
+		if _, hasTS := logMap["timestamp"]; !hasTS {
+			logMap["timestamp"] = true
+		}
+	}
+
+	data, err := json.Marshal(root)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal config JSON after log level normalization: %w", err)
+	}
+	return string(data), nil
 }
 
 // InjectLocalDNS 在 Linux/OpenWrt 客户端网关平台且启用并安装了 AdGuard Home 时，

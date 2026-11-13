@@ -20,6 +20,8 @@ export interface NavGroupConfig<T extends string = string> {
 export interface AppShellProps<T extends string = string> {
   brandTitle: string;
   brandSubtitle?: string;
+  brandIcon?: React.ReactNode;
+  brandIconClassName?: string;
   version?: string;
   groups: NavGroupConfig<T>[];
   activeTab: T;
@@ -38,6 +40,8 @@ export interface AppShellProps<T extends string = string> {
 export function AppShell<T extends string = string>({
   brandTitle,
   brandSubtitle,
+  brandIcon,
+  brandIconClassName,
   version,
   groups,
   activeTab,
@@ -102,14 +106,18 @@ export function AppShell<T extends string = string>({
   }, [flatItems, extraCommandItems, onSelectTab]);
 
   return (
-    <div className="min-h-dvh flex flex-col bg-[#080d1a] text-slate-100 animate-sc-in">
+    <div className="min-h-dvh flex flex-col bg-[#080d1a] text-slate-100">
       {/* Sticky Frosted Glass Header — 1:1 Aligned with Server Console */}
       <header className="sticky top-0 z-40 w-full border-b border-slate-800/80 bg-slate-950/80 backdrop-blur-xl">
         <div className="max-w-[1440px] mx-auto px-3.5 sm:px-6 lg:px-8 h-14 sm:h-16 flex items-center justify-between gap-2">
           {/* Brand */}
           <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
-            <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center shrink-0 glow-green">
-              <Activity className="w-4 h-4 sm:w-5 sm:h-5 text-emerald-400" />
+            <div
+              className={`w-8 h-8 sm:w-9 sm:h-9 rounded-xl flex items-center justify-center shrink-0 ${
+                brandIconClassName || 'bg-emerald-500/10 border border-emerald-500/20 glow-green'
+              }`}
+            >
+              {brandIcon || <Activity className="w-4 h-4 sm:w-5 sm:h-5 text-emerald-400" />}
             </div>
             <div className="min-w-0">
               <div className="flex items-center gap-1.5 sm:gap-2">

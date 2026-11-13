@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 import { Search, CornerDownLeft } from 'lucide-react';
 
 export interface CommandItem {
@@ -67,7 +68,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
 
   if (!open) return null;
 
-  return (
+  return createPortal(
     <div
       className="fixed inset-0 z-[65] flex items-start justify-center pt-[12vh] p-4 bg-slate-950/75 backdrop-blur-md animate-sc-in"
       onClick={onClose}
@@ -139,6 +140,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
           )}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 };

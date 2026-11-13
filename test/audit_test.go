@@ -896,6 +896,122 @@ func TestClosedLoopAlertCounts_And_WebUIWhitelistAPI(t *testing.T) {
 	}
 }
 
+func TestAuditEnforcer_SyncsSandboxWorkConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgDir := filepath.Join(tmpDir, "etc-singctl")
+	if err := os.MkdirAll(cfgDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	singctlPath := filepath.Join(cfgDir, "singctl.yaml")
+	if err := os.WriteFile(singctlPath, configs.ClientConfigYAML, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(singctlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sbConfigPath := filepath.Join(tmpDir, "config.json")
+	initialSBJSON := `{
+  "experimental": {
+    "cache_file": {"enabled": true, "path": "/etc/sing-box/cache.db"},
+    "clash_api": {"external_controller": "127.0.0.1:9090", "external_ui": "/etc/sing-box/ui"}
+  },
+  "dns": {
+    "servers": [{"tag": "dns_local", "type": "udp", "server": "223.5.5.5"}],
+    "rules": [{"clash_mode": "Direct", "server": "dns_local"}]
+  },
+  "route": {
+    "rules": [
+      {"ip_is_private": true, "outbound": "#DC"}
+    ]
+  },
+  "services": [{"type": "api", "dashboard": {"path": "/etc/sing-box/dashboard"}}]
+}`
+	if err := os.WriteFile(sbConfigPath, []byte(initialSBJSON), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	workDir := filepath.Join(tmpDir, "sing-box-work")
+	if err := os.MkdirAll(workDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	workConfigPath := filepath.Join(workDir, "config.json")
+	if err := os.WriteFile(workConfigPath, []byte(`{"route":{"rules":[{"action":"reject","ip_cidr":["198.51.100.99/32"]}]}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	aghConfigPath := filepath.Join(tmpDir, "AdGuardHome.yaml")
+	passHash, _ := config.HashPassword("testpass123456")
+	aghBytes, err := adguard.BuildInitialConfigYAML(adguard.ConfigParams{
+		LANIP:        "192.0.2.1",
+		WebPort:      3000,
+		DNSPort:      5353,
+		Username:     "root",
+		PasswordHash: passHash,
+		SubURLs:      []string{"https://sub.example.com/s"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(aghConfigPath, aghBytes, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	enforcer := audit.NewEnforcer(cfg, singctlPath)
+	enforcer.SetPathsForTest(sbConfigPath, aghConfigPath, nil, "")
+	enforcer.SetWorkConfigPathForTest(workConfigPath)
+
+	blockRes, err := enforcer.Block(t.Context(), "203.0.113.88", "", "test-iot-block")
+	if err != nil {
+		t.Fatalf("Enforcer.Block failed: %v", err)
+	}
+	if !blockRes.SingBoxSynced {
+		t.Fatalf("expected SingBoxSynced=true, got %+v", blockRes)
+	}
+
+	workAfterBlockBytes, err := os.ReadFile(workConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workAfterBlock := string(workAfterBlockBytes)
+	if !strings.Contains(workAfterBlock, `"203.0.113.88/32"`) {
+		t.Fatalf("expected sandbox work config to receive block rule, got:\n%s", workAfterBlock)
+	}
+	if strings.Contains(workAfterBlock, `"198.51.100.99/32"`) {
+		t.Fatalf("expected stale sandbox work config rule to be replaced cleanly, got:\n%s", workAfterBlock)
+	}
+	for _, name := range []string{"cache.db", "ui", "dashboard"} {
+		wantPath := filepath.ToSlash(filepath.Join(workDir, name))
+		if !strings.Contains(workAfterBlock, `"`+wantPath+`"`) {
+			t.Fatalf("expected sandbox work config to preserve rewritten path %q, got:\n%s", wantPath, workAfterBlock)
+		}
+	}
+
+	unblockRes, err := enforcer.Unblock(t.Context(), "203.0.113.88", "")
+	if err != nil {
+		t.Fatalf("Enforcer.Unblock failed: %v", err)
+	}
+	if !unblockRes.SingBoxSynced {
+		t.Fatalf("expected Unblock SingBoxSynced=true, got %+v", unblockRes)
+	}
+
+	workAfterUnblockBytes, err := os.ReadFile(workConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(workAfterUnblockBytes), "203.0.113.88") {
+		t.Fatalf("expected sandbox work config to remove unblocked IP rule, got:\n%s", string(workAfterUnblockBytes))
+	}
+	fi, err := os.Stat(workConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0600 {
+		t.Fatalf("expected sandbox work config mode 0600, got %o", fi.Mode().Perm())
+	}
+}
+
 func jsonNumber(v int64) string {
 	b, _ := json.Marshal(v)
 	return string(b)

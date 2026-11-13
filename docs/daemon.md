@@ -76,8 +76,8 @@ singctl dm logs -f
 | `max_restarts` | `3` | 每小时最大自动重启次数（超出后触发熔断保护） |
 | `sub_sync_interval` | `600` | 订阅节点指纹自动静默巡检与无感热同步间隔（秒），设为 `-1` 关闭 |
 | `failover.enabled` | `true` | 是否开启策略组自动故障切换与恢复回切（默认开启） |
-| `failover.groups` | `["#VPS", "Game-TCP", "Game-UDP", "Game", "Proxy", "AI"]` | 受保护的 Clash Selector 策略组名称列表 |
-| `failover.patrol_interval` | `30` | 策略组节点健康巡检间隔（秒） |
+| `failover.groups` | `["#VPS", "Proxy", "AI", "#Nodes"]` | 受保护的 Clash Selector 策略组名称列表 |
+| `failover.patrol_interval` | `300` | 策略组节点健康巡检间隔（秒） |
 | `failover.probe_timeout_ms` | `2800` | 单节点连通性探测超时时间（毫秒） |
 | `failover.confirm_retries` | `1` | 切备前复测确认次数（默认间隔 1.5s 复测 1 次防瞬时抖动；设为 `-1` 表示首次失败立即切备） |
 | `failover.failback_cooldown` | `180` | 原主选节点恢复后的观察冷却期（秒，且需连续 2 轮健康；设为 `-1` 关闭自动回切） |
@@ -93,4 +93,5 @@ singctl dm logs -f
 
 - 运行态快照与重启计数持久化在 `/tmp/singctl-daemon.state`（`0600` 权限，OpenWrt 上 tmpfs，系统重启自动清零）
 - 守护进程日志：`/tmp/singctl-daemon.log`（`0600` 权限，超过 `512 KB` 自动保留尾部精华并清理冗余刷屏）
+- `sing-box` 日志防护：客户端配置默认收敛为 `log.level: "warn"`，且看门狗对 `/tmp/sing-box-basic.log`（及 fallback `/tmp/sing-box-simple.log`）实施 `16 MB` 原地尾部截断兜底，防止写满 OpenWrt `/tmp`（tmpfs）导致断网
 - 健康检测通过 sing-box 的 Clash API（`/dns/query`，自动携带 `secret` 鉴权）进行，并在拉起前执行 `sing-box check` 语法兜底校验

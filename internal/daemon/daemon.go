@@ -724,6 +724,11 @@ func (d *Daemon) setupLogFile() error {
 }
 
 func (d *Daemon) maybeRotateLogFile() {
+	for _, sbLog := range []string{constant.SingBoxBasicLogFile, constant.SingBoxSimpleLogFile} {
+		if sbLog != "" {
+			_, _ = TrimLogInPlace(sbLog, MaxSingBoxLogBytes)
+		}
+	}
 	logPath := GetDaemonLogPath()
 	trimmed, err := CleanAndTrimDaemonLog(logPath, MaxDaemonLogBytes)
 	if err != nil || !trimmed {

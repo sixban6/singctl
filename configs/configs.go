@@ -49,8 +49,8 @@ watchdog:                                      # (可选) 看门狗守护进程�
   sub_sync_interval: 600                        # 订阅节点变化自动无感同步间隔(秒), 默认 600 (10分钟; 设为 -1 关闭)
   # failover:                                   # (可选) 策略组自动故障切换配置 (默认开启, 可在 WebUI 看门狗页可视化配置)
   #   enabled: true                             # 是否启用故障切换与恢复回切, 默认 true
-  #   groups: ["#VPS", "Game-TCP", "Game-UDP", "Game", "Proxy", "AI"]
-  #   patrol_interval: 30                       # 巡检间隔(秒), 默认 30
+  #   groups: ["#VPS", "Proxy", "AI", "#Nodes"]
+  #   patrol_interval: 300                      # 巡检间隔(秒), 默认 300 (5分钟)
   #   failback_cooldown: 180                    # 切备后自动回切冷却期(秒), 默认 180 (设为 -1 关闭自动回切)
 
 # custom_rules:                                 # (可选) 自定义策略组、路由与 DNS 规则注入扩展
@@ -68,6 +68,14 @@ watchdog:                                      # (可选) 看门狗守护进程�
 #   dns:
 #     - domain_suffix: [example.com, internal.example.org]
 #       server: dns_local
+
+# traffic_routing:                              # (可选) 客户端「智能分流开关中心」预设覆盖 (建议在 WebUI 面板可视化切换)
+#   presets:
+#     openai:
+#       enabled: true
+#       outbound: "#VPS"
+#     apple:
+#       enabled: false
 `)
 
 // ServerConfigYAML is the concise server-only singctl.yaml template (only server section).

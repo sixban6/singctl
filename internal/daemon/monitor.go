@@ -102,7 +102,7 @@ func CheckDNSHealthAgainstEndpoints(endpoints []string, secret string) (ok bool,
 		Timeout: 5 * time.Second,
 	}
 
-	domains := []string{"www.baidu.com", "www.google.com"}
+	domains := []string{"cn.bing.com", "www.google.com"}
 	var lastErr string
 
 	for _, base := range endpoints {
