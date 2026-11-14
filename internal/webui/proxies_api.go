@@ -375,14 +375,14 @@ func groupSortWeight(name, typ, mode string) int {
 		return 50
 	}
 	if strings.EqualFold(typ, "Selector") {
-		switch name {
-		case "Proxy":
+		switch {
+		case strings.EqualFold(name, "Proxy"):
 			return 1
-		case "#VPS":
+		case strings.EqualFold(name, "AI"):
 			return 2
-		case "AI":
+		case strings.EqualFold(name, "#VPS"):
 			return 3
-		case "#Nodes":
+		case strings.EqualFold(name, "#Nodes"):
 			return 4
 		default:
 			return 10

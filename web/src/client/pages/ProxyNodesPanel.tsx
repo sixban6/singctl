@@ -56,10 +56,25 @@ function saveExpandedPrefs(next: Record<string, boolean>) {
 function defaultExpandedForGroup(g: SbProxyGroup): boolean {
   return (
     g.name === 'Proxy' ||
+    g.name === 'AI' ||
     g.name === '#VPS' ||
     g.name === 'GLOBAL' ||
     Boolean(g.failedOver)
   );
+}
+
+function groupDisplayRank(g: SbProxyGroup, mode?: string): number {
+  const n = g.name.trim().toLowerCase();
+  if (n === 'global') return mode === 'global' ? 0 : 50;
+  if (g.type === 'Selector') {
+    if (n === 'proxy') return 1;
+    if (n === 'ai') return 2;
+    if (n === '#vps') return 3;
+    if (n === '#nodes') return 4;
+    return 10;
+  }
+  if (g.name === '#Auto') return 20;
+  return 30;
 }
 
 function isDirectOrUtilityNode(name: string, meta?: SbProxyNodeMeta): boolean {
@@ -335,7 +350,11 @@ export const ProxyNodesPanel: React.FC<ProxyNodesPanelProps> = ({
   };
 
   const filteredGroups = useMemo(() => {
-    const groups = snapshot?.groups || [];
+    const mode = snapshot?.mode;
+    const groups = [...(snapshot?.groups || [])].sort((a, b) => {
+      const diff = groupDisplayRank(a, mode) - groupDisplayRank(b, mode);
+      return diff !== 0 ? diff : a.name.localeCompare(b.name);
+    });
     const nodesMap = snapshot?.nodes || {};
     const q = searchQuery.trim().toLowerCase();
 

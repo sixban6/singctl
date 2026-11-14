@@ -87,6 +87,11 @@ func TestHandleSbProxies_SwitchDelayModeTrafficAndAuth(t *testing.T) {
 						"now":  curVPSNow,
 						"all":  []string{"🇸🇬 SG-VPS", "🇺🇸 US-VPS"},
 					},
+					"AI": map[string]any{
+						"type": "Selector",
+						"now":  "#VPS",
+						"all":  []string{"#VPS", "🇺🇸 US-VPS"},
+					},
 					"#Auto": map[string]any{
 						"type": "URLTest",
 						"now":  "🇭🇰 HK-01",
@@ -249,8 +254,8 @@ func TestHandleSbProxies_SwitchDelayModeTrafficAndAuth(t *testing.T) {
 	if !snap.Running || snap.Mode != "rule" {
 		t.Fatalf("unexpected running/mode: %+v", snap)
 	}
-	if len(snap.Groups) != 3 || snap.Groups[0].Name != "Proxy" || snap.Groups[1].Name != "#VPS" || snap.Groups[2].Name != "#Auto" {
-		t.Fatalf("unexpected groups order (GLOBAL should be hidden in rule mode): %+v", snap.Groups)
+	if len(snap.Groups) != 4 || snap.Groups[0].Name != "Proxy" || snap.Groups[1].Name != "AI" || snap.Groups[2].Name != "#VPS" || snap.Groups[3].Name != "#Auto" {
+		t.Fatalf("unexpected groups order (expect Proxy -> AI -> #VPS -> #Auto, GLOBAL hidden in rule mode): %+v", snap.Groups)
 	}
 	if snap.PrimaryGroup != "Proxy" || snap.PrimaryNode != "🇭🇰 HK-01" || snap.PrimaryDelay != 62 {
 		t.Fatalf("unexpected resolved primary: group=%s node=%s delay=%d", snap.PrimaryGroup, snap.PrimaryNode, snap.PrimaryDelay)
@@ -258,7 +263,7 @@ func TestHandleSbProxies_SwitchDelayModeTrafficAndAuth(t *testing.T) {
 	if !snap.Groups[0].FailedOver || snap.Groups[0].UsedByCount == 0 {
 		t.Fatalf("expected Proxy group failedOver=true and usedBy populated, got %+v", snap.Groups[0])
 	}
-	if snap.Groups[2].CanSelect {
+	if snap.Groups[3].CanSelect {
 		t.Fatalf("#Auto URLTest group should have CanSelect=false")
 	}
 

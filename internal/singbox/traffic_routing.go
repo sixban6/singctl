@@ -413,8 +413,8 @@ func LookupClientRoutingPreset(id string) (TrafficPresetDef, bool) {
 func DefaultClientRoutingGroups() []ClientRoutingGroupInfo {
 	return []ClientRoutingGroupInfo{
 		{Tag: "Proxy", Type: "selector"},
-		{Tag: "#VPS", Type: "selector"},
 		{Tag: "AI", Type: "selector"},
+		{Tag: "#VPS", Type: "selector"},
 		{Tag: "#Auto", Type: "urltest"},
 		{Tag: "#Nodes", Type: "selector"},
 	}
