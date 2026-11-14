@@ -52,6 +52,7 @@ type backupPayload struct {
 	SubStoreKey   string            `json:"subStoreKey,omitempty"`
 	MasterSSHPriv []byte            `json:"masterSshPriv,omitempty"`
 	MasterSSHPub  []byte            `json:"masterSshPub,omitempty"`
+	MtlsFiles     map[string][]byte `json:"mtlsFiles,omitzero"`
 }
 
 // EncryptBackupBundle 使用 PBKDF2-HMAC-SHA256 + AES-256-GCM 在内存中加密备份载荷
@@ -209,6 +210,10 @@ func (s *Server) buildBackupPayload() backupPayload {
 		}
 	}
 
+	if mtlsBundle := deploy.LoadMtlsBundleFromVault(); len(mtlsBundle) > 0 {
+		p.MtlsFiles = mtlsBundle
+	}
+
 	return p
 }
 
@@ -297,6 +302,16 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var restoredItems []string
+
+	// 0. 若快照包含 Web 终端 mTLS 证书，优先恢复至持久化 0700/0600 主库，确保后续 SyncCaddyfile 可立即投射 ca.crt
+	if len(payload.MtlsFiles) > 0 {
+		if mErr := deploy.SaveMtlsBundleToVault(payload.MtlsFiles); mErr != nil {
+			writeJSONError(w, http.StatusInternalServerError, "恢复 Web 终端 mTLS 证书失败: "+mErr.Error())
+			return
+		}
+		_, _, _ = deploy.EnsureCaddyMtlsTrustPool("")
+		restoredItems = append(restoredItems, "Web终端mTLS证书")
+	}
 
 	// 1. 恢复 singctl.yaml 与主控 SSH 密钥 (强制 0700 目录 + 0600 文件)
 	if payload.SingctlYAML != "" && s.opts.ConfigPath != "" {

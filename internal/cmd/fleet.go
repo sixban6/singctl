@@ -386,6 +386,7 @@ func NewFleetCmd(configPath string) *cobra.Command {
 	bootstrapCmd.Flags().StringVar(&bsIn.NodeTag, "tag", "", "(可选) 节点代号，留空与自动推导的 <id> 一致")
 	bootstrapCmd.Flags().StringVar(&bsIn.SNI, "sni", "", "(可选) Reality SNI 伪装域名，留空自动复用主控配置")
 	bootstrapCmd.Flags().BoolVar(&bsIn.SkipDNS, "skip-dns", false, "跳过自动调用 Cloudflare API 创建/更新 DNS 记录")
+	bootstrapCmd.Flags().BoolVar(&bsIn.Reprovision, "reprovision", false, "针对已重装系统的已纳管节点执行原地重开（复用原代号与域名，重写配置并轮换节点凭据）")
 	bootstrapCmd.Flags().BoolVarP(&bsYes, "yes", "y", false, "交互模式下跳过最终确认直接执行")
 
 	// 6. heal (fleet-wide 3-layer security self-healing + availability-safe rolling reboot)

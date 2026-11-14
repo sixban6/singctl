@@ -1,12 +1,14 @@
 package doctor
 
 import (
+	"cmp"
 	"crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -93,6 +95,9 @@ func RunServerDoctor(cfg *config.Config) *DoctorReport {
 
 	// 8. WARP 状态与出口流媒体解锁
 	checkWARPAndUnlock(report)
+
+	// 9. Web 终端 mTLS 证书与守护进程一致性体检
+	checkWebTerminal(cfg, report)
 
 	finalizeReport(report, "🎉 系统运行状态极佳！所有核心组件、TLS 证书与高可用链路均处于健康状态。")
 	return report
@@ -675,4 +680,70 @@ func PrintDoctorReport(r *DoctorReport) {
 		logger.Error("结论: %s", r.Summary)
 	}
 	logger.Info("═══════════════════════════════════════════════════════════\n")
+}
+
+func checkWebTerminal(cfg *config.Config, r *DoctorReport) {
+	if cfg == nil || !cfg.Server.WebTerminal.Enabled {
+		return
+	}
+
+	caPath := cmp.Or(strings.TrimSpace(cfg.Server.WebTerminal.MtlsCA), deploy.DefaultCaddyMtlsCACertPath())
+	vaultCA := filepath.Join(deploy.MtlsVaultDir(), "ca.crt")
+
+	caOK := fileNonEmpty(caPath)
+	vaultCAOK := fileNonEmpty(vaultCA)
+
+	switch {
+	case caOK:
+		r.Items = append(r.Items, DoctorItem{
+			Category: "security",
+			Name:     "Web 终端 mTLS 证书",
+			Status:   "ok",
+			Summary:  fmt.Sprintf("CA 信任池正常 (%s)", caPath),
+		})
+	case vaultCAOK:
+		r.Items = append(r.Items, DoctorItem{
+			Category: "security",
+			Name:     "Web 终端 mTLS 证书",
+			Status:   "warn",
+			Summary:  fmt.Sprintf("Caddy 信任池缺失，但保险库 %s 完整", vaultCA),
+			Detail:   fmt.Sprintf("目标路径 %s 缺失，运行 'singctl sr sync' 或 'singctl sr install caddy' 可自动从保险库投影修复", caPath),
+		})
+	default:
+		r.Items = append(r.Items, DoctorItem{
+			Category: "security",
+			Name:     "Web 终端 mTLS 证书",
+			Status:   "fail",
+			Summary:  fmt.Sprintf("Web 终端已启用，但 mTLS CA 证书缺失 (%s)", caPath),
+			Detail:   fmt.Sprintf("工作路径 %s 与保险库 %s 均不存在，请运行 'singctl sr term install' 重新生成 mTLS 证书并恢复 Caddy 网关", caPath, vaultCA),
+		})
+	}
+
+	gottyActive := isServiceActive("gotty")
+	wstunnelActive := isServiceActive("wstunnel")
+	switch {
+	case gottyActive && wstunnelActive:
+		r.Items = append(r.Items, DoctorItem{
+			Category: "services",
+			Name:     "Web 终端后台服务 (gotty/wstunnel)",
+			Status:   "ok",
+			Summary:  "gotty 与 wstunnel 均运行中",
+		})
+	default:
+		r.Items = append(r.Items, DoctorItem{
+			Category: "services",
+			Name:     "Web 终端后台服务 (gotty/wstunnel)",
+			Status:   "warn",
+			Summary:  fmt.Sprintf("gotty=%v, wstunnel=%v", gottyActive, wstunnelActive),
+			Detail:   "运行 'singctl sr term status' 或 'singctl sr term install' 检查/启动 Web 终端服务",
+		})
+	}
+}
+
+func fileNonEmpty(path string) bool {
+	if strings.TrimSpace(path) == "" {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir() && info.Size() > 0
 }

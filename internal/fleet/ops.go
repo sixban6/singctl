@@ -687,7 +687,66 @@ type BootstrapPlan struct {
 
 // PreviewBootstrapNode resolves omitted ID, Name, Domain, CF Token, SNI, and HY2 bandwidth from GeoIP + Master config.
 func (m *Manager) PreviewBootstrapNode(ctx context.Context, in BootstrapInput) (BootstrapPlan, error) {
-	hostTarget := cmp.Or(strings.TrimSpace(in.Host), strings.TrimSpace(in.SSHAlias))
+	reqID := strings.ToLower(strings.TrimSpace(in.ID))
+	rawHostInput := cmp.Or(strings.TrimSpace(in.Host), strings.TrimSpace(in.SSHAlias))
+	reqHost := normalizeFleetTargetHost(in.Host)
+
+	var existingNodes []Node
+	if m.Store != nil {
+		if existing, err := m.Store.List(); err == nil {
+			existingNodes = existing
+		}
+	}
+
+	var matchedByID, matchedByHost *Node
+	for i := range existingNodes {
+		n := &existingNodes[i]
+		if reqID != "" && strings.EqualFold(strings.TrimSpace(n.ID), reqID) {
+			matchedByID = n
+		}
+		nHost := normalizeFleetTargetHost(n.Host)
+		if reqHost != "" && nHost != "" && nHost == reqHost {
+			matchedByHost = n
+		} else if in.Host == "" && strings.TrimSpace(in.SSHAlias) != "" && strings.EqualFold(strings.TrimSpace(n.SSHAlias), strings.TrimSpace(in.SSHAlias)) {
+			matchedByHost = n
+		}
+	}
+
+	if matchedByID != nil && matchedByHost != nil && !strings.EqualFold(matchedByID.ID, matchedByHost.ID) {
+		return BootstrapPlan{}, fmt.Errorf("指定代号 %q 与目标主机 %s 分别属于不同已纳管节点 (%s vs %s)",
+			in.ID, cmp.Or(reqHost, rawHostInput), matchedByID.ID, matchedByHost.ID)
+	}
+
+	matchedNode := matchedByID
+	if matchedNode == nil {
+		matchedNode = matchedByHost
+	}
+
+	if matchedNode != nil && !in.Reprovision {
+		return BootstrapPlan{}, fmt.Errorf(
+			"节点 %s (%s) 已在舰队清单中纳管：若服务器未重装系统、仅需修复网关或终端服务，请直接登录节点执行修复（如 'singctl sr term install' / 'singctl sr doctor'）；若该 VPS 已重装空白系统需原地重开并轮换凭据，请显式加上 --reprovision 参数",
+			matchedNode.ID, cmp.Or(strings.TrimSpace(matchedNode.Host), matchedNode.Name),
+		)
+	}
+
+	if matchedNode != nil && in.Reprovision {
+		if strings.TrimSpace(in.ID) == "" {
+			in.ID = matchedNode.ID
+		}
+		if strings.TrimSpace(in.Name) == "" {
+			in.Name = matchedNode.Name
+		}
+		if rawHostInput == "" {
+			in.Host = matchedNode.Host
+			in.SSHAlias = matchedNode.SSHAlias
+			rawHostInput = cmp.Or(strings.TrimSpace(in.Host), strings.TrimSpace(in.SSHAlias))
+		}
+		if strings.TrimSpace(in.NodeDomain) == "" && strings.TrimSpace(matchedNode.Domain) != "" {
+			in.NodeDomain = matchedNode.Domain
+		}
+	}
+
+	hostTarget := rawHostInput
 	if err := ValidateHostTarget(hostTarget); err != nil {
 		return BootstrapPlan{}, err
 	}
@@ -702,12 +761,11 @@ func (m *Manager) PreviewBootstrapNode(ctx context.Context, in BootstrapInput) (
 	if mTag := strings.ToLower(strings.TrimSpace(masterCfg.Server.NodeTag)); mTag != "" {
 		takenIDs[mTag] = true
 	}
-	if m.Store != nil {
-		if existing, err := m.Store.List(); err == nil {
-			for _, n := range existing {
-				takenIDs[strings.ToLower(strings.TrimSpace(n.ID))] = true
-			}
+	for _, n := range existingNodes {
+		if in.Reprovision && matchedNode != nil && strings.EqualFold(n.ID, matchedNode.ID) {
+			continue
 		}
+		takenIDs[strings.ToLower(strings.TrimSpace(n.ID))] = true
 	}
 
 	var geo GeoInfo
@@ -802,12 +860,26 @@ func (m *Manager) PreviewBootstrapNode(ctx context.Context, in BootstrapInput) (
 //  3. Auto-allocates and provisions a grey-cloud Cloudflare A/AAAA DNS record (collision-free) before certificate issuance
 //  4. Installs SingCtl (with SHA-256 verification), deploys the 4-core server stack, and syncs endpoints into Master SubHub
 func (m *Manager) BootstrapNode(ctx context.Context, in BootstrapInput) (NodeActionResult, error) {
+	var prevReprovisionNode *Node
+	reprovisionAutoDNS := false
+	reprovisionOrigDomain := strings.TrimSpace(in.NodeDomain) == ""
+
 	plan, err := m.PreviewBootstrapNode(ctx, in)
 	if err != nil {
 		return NodeActionResult{}, err
 	}
 	in.ID = plan.ID
 	in.Name = plan.Name
+	if strings.TrimSpace(in.Host) == "" && strings.TrimSpace(in.SSHAlias) == "" {
+		in.Host = plan.Host
+	}
+	if in.Reprovision && m.Store != nil {
+		if prev, ok, _ := m.Store.Get(plan.ID); ok {
+			prevCopy := prev
+			prevReprovisionNode = &prevCopy
+			reprovisionAutoDNS = prev.DNSAutoManaged && reprovisionOrigDomain && strings.TrimSpace(prev.Domain) != ""
+		}
+	}
 
 	initialNode, err := NormalizeUpsertInput(in.UpsertInput)
 	if err != nil {
@@ -851,6 +923,10 @@ func (m *Manager) BootstrapNode(ctx context.Context, in BootstrapInput) (NodeAct
 	finalDomain := plan.Domain
 	dnsAutoManaged := false
 	dnsMsg := ""
+	explicitDNSArg := in.NodeDomain
+	if explicitDNSArg == "" && in.Reprovision && prevReprovisionNode != nil && strings.TrimSpace(prevReprovisionNode.Domain) != "" {
+		explicitDNSArg = prevReprovisionNode.Domain
+	}
 	if !in.SkipDNS && m.CFClient != nil && strings.TrimSpace(in.Host) != "" {
 		dnsCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		provDom, autoManaged, dnsErr := m.CFClient.ProvisionNodeDNS(
@@ -858,7 +934,7 @@ func (m *Manager) BootstrapNode(ctx context.Context, in BootstrapInput) (NodeAct
 			plan.CFDNSKey,
 			plan.MasterDomain,
 			plan.ID,
-			in.NodeDomain,
+			explicitDNSArg,
 			in.Host,
 		)
 		cancel()
@@ -868,8 +944,8 @@ func (m *Manager) BootstrapNode(ctx context.Context, in BootstrapInput) (NodeAct
 			}
 		} else if provDom != "" {
 			finalDomain = provDom
-			dnsAutoManaged = autoManaged
-			if autoManaged {
+			dnsAutoManaged = autoManaged || reprovisionAutoDNS
+			if dnsAutoManaged {
 				dnsMsg = fmt.Sprintf("（DNS %s 已自动绑定灰云解析）", finalDomain)
 			}
 		}
@@ -1070,4 +1146,21 @@ func truncateLine(s string, maxLen int) string {
 		return s[:maxLen] + "..."
 	}
 	return s
+}
+
+func normalizeFleetTargetHost(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	if _, after, ok := strings.Cut(s, "@"); ok {
+		s = after
+	}
+	if host, _, err := net.SplitHostPort(s); err == nil {
+		s = host
+	}
+	s = strings.TrimPrefix(s, "[")
+	s = strings.TrimSuffix(s, "]")
+	s = strings.TrimSuffix(s, ".")
+	return strings.ToLower(strings.TrimSpace(s))
 }

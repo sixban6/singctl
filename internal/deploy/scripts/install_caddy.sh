@@ -84,3 +84,12 @@ if [ -d "/var/lib/singctl/caddy_certs_backup" ]; then
     cp -rn /var/lib/singctl/caddy_certs_backup/* /var/lib/caddy/.local/share/caddy/certificates/ 2>/dev/null || true
     chown -R caddy:caddy /var/lib/caddy 2>/dev/null || true
 fi
+
+# 5. Restore public mTLS CA cert (caddy-readable only) from persistent vault
+if [ -s "/etc/singctl/mtls/ca.crt" ]; then
+    mkdir -p /etc/caddy/mtls
+    cp -f /etc/singctl/mtls/ca.crt /etc/caddy/mtls/ca.crt 2>/dev/null || true
+    chown -R root:caddy /etc/caddy/mtls 2>/dev/null || true
+    chmod 750 /etc/caddy/mtls 2>/dev/null || chmod 755 /etc/caddy/mtls 2>/dev/null || true
+    chmod 640 /etc/caddy/mtls/ca.crt 2>/dev/null || chmod 644 /etc/caddy/mtls/ca.crt 2>/dev/null || true
+fi

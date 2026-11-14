@@ -2,6 +2,7 @@ package terminal
 
 import (
 	"archive/tar"
+	"cmp"
 	"compress/gzip"
 	"crypto/rand"
 	"encoding/base64"
@@ -13,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -41,10 +43,11 @@ const (
 
 // InstallOptions contains options for terminal deployment
 type InstallOptions struct {
-	Path     string
-	Port     int
-	Password string
-	Force    bool
+	Path            string
+	Port            int
+	Password        string
+	Force           bool
+	SkipCaddyDeploy bool // 由 sr install / sr ri all 在 DeployCaddy 前置调用时置为 true，避免重复跑 DeployCaddy
 }
 
 // InstallResult contains deployment details
@@ -149,7 +152,7 @@ func Install(cfg *config.Config, configPath string, opts InstallOptions) (*Insta
 			password = cfg.Server.WebTerminal.Password
 		} else {
 			password = GenerateRandomPassword(10)
-			if _, err := os.Stat(DefaultClientP12); err == nil {
+			if _, ok := resolveMtlsArtifact("client.p12", DefaultClientP12); ok {
 				forceCert = true
 			}
 		}
@@ -194,12 +197,26 @@ func Install(cfg *config.Config, configPath string, opts InstallOptions) (*Insta
 		return nil, fmt.Errorf("创建 GoTTY Systemd 服务失败: %w", err)
 	}
 
-	// 6. 安装并配置 wstunnel (Native SSH over WSS)
-	sshPort := DetectSSHPort()
+	// 6. 安装并配置 wstunnel (Native SSH over WSS)，保留已配置的端口/路径
+	sshPort := resolveWebTerminalSSHPort(cfg, DetectSSHPort)
+	sshTunnelPort := DefaultSSHTunnelPort
+	if cfg != nil && cfg.Server.WebTerminal.SSHTunnelPort > 0 {
+		sshTunnelPort = cfg.Server.WebTerminal.SSHTunnelPort
+	}
+	sshTunnelPath := DefaultSSHTunnelPath
+	if cfg != nil && strings.TrimSpace(cfg.Server.WebTerminal.SSHTunnelPath) != "" {
+		sshTunnelPath = strings.TrimSpace(cfg.Server.WebTerminal.SSHTunnelPath)
+	}
+	mtlsCA := cmp.Or(deploy.DefaultCaddyMtlsCACertPath(), DefaultMtlsCACert)
+	if cfg != nil && strings.TrimSpace(cfg.Server.WebTerminal.MtlsCA) != "" {
+		mtlsCA = strings.TrimSpace(cfg.Server.WebTerminal.MtlsCA)
+	}
+	_, _, _ = deploy.EnsureCaddyMtlsTrustPool(mtlsCA)
+
 	if err := installWstunnel(cfg, arch); err != nil {
 		logger.Warn("安装 wstunnel 失败 (Native SSH 穿透可能不可用): %v", err)
 	} else {
-		if err := createWstunnelSystemdService(DefaultSSHTunnelPort, sshPort); err != nil {
+		if err := createWstunnelSystemdService(sshTunnelPort, sshPort); err != nil {
 			logger.Warn("启动 wstunnel 守护进程失败: %v", err)
 		}
 	}
@@ -210,10 +227,10 @@ func Install(cfg *config.Config, configPath string, opts InstallOptions) (*Insta
 			Enabled:       true,
 			Port:          port,
 			Path:          termPath,
-			MtlsCA:        DefaultMtlsCACert,
+			MtlsCA:        mtlsCA,
 			Password:      password,
-			SSHTunnelPort: DefaultSSHTunnelPort,
-			SSHTunnelPath: DefaultSSHTunnelPath,
+			SSHTunnelPort: sshTunnelPort,
+			SSHTunnelPath: sshTunnelPath,
 			SSHPort:       sshPort,
 		}
 		if err := config.Save(configPath, cfg); err != nil {
@@ -223,15 +240,21 @@ func Install(cfg *config.Config, configPath string, opts InstallOptions) (*Insta
 		}
 	}
 
-	// 8. 渲染 Caddyfile 并平滑重载 Caddy
-	logger.Info("正在更新 Caddyfile 并重载 Caddy 路由...")
-	if err := deploy.DeployCaddy(cfg); err != nil {
-		return nil, fmt.Errorf("更新 Caddy 配置失败: %w", err)
+	// 8. 渲染 Caddyfile 并平滑重载 Caddy (sr install 前置准备场景可通过 SkipCaddyDeploy 跳过重复部署)
+	if !opts.SkipCaddyDeploy {
+		logger.Info("正在更新 Caddyfile 并重载 Caddy 路由...")
+		if err := deploy.DeployCaddy(cfg); err != nil {
+			return nil, fmt.Errorf("更新 Caddy 配置失败: %w", err)
+		}
 	}
 
 	// 9. 读取客户端证书 client.p12 并编码为 Base64
+	p12Path, _ := resolveMtlsArtifact("client.p12", DefaultClientP12)
+	crtPath, _ := resolveMtlsArtifact("client.crt", DefaultClientCrt)
+	keyPath, _ := resolveMtlsArtifact("client.key", DefaultClientKey)
+
 	var p12Base64 string
-	if p12Bytes, err := os.ReadFile(DefaultClientP12); err == nil {
+	if p12Bytes, err := os.ReadFile(p12Path); err == nil {
 		p12Base64 = base64.StdEncoding.EncodeToString(p12Bytes)
 	}
 
@@ -249,14 +272,14 @@ func Install(cfg *config.Config, configPath string, opts InstallOptions) (*Insta
 		Domain:        domain,
 		Path:          termPath,
 		Port:          port,
-		SSHTunnelPath: DefaultSSHTunnelPath,
-		SSHTunnelPort: DefaultSSHTunnelPort,
+		SSHTunnelPath: sshTunnelPath,
+		SSHTunnelPort: sshTunnelPort,
 		SSHPort:       sshPort,
 		Password:      password,
-		P12Path:       DefaultClientP12,
+		P12Path:       p12Path,
 		P12Base64:     p12Base64,
-		ClientCrtPath: DefaultClientCrt,
-		ClientKeyPath: DefaultClientKey,
+		ClientCrtPath: crtPath,
+		ClientKeyPath: keyPath,
 		NodeTag:       nodeTag,
 	}
 
@@ -279,7 +302,9 @@ func Uninstall(cfg *config.Config, configPath string) error {
 	_ = exec.Command("systemctl", "daemon-reload").Run()
 
 	logger.Info("正在清理 mTLS 证书目录...")
-	_ = os.RemoveAll(DefaultMtlsCADir)
+	if err := deploy.RemoveMtlsAll(); err != nil {
+		logger.Warn("清理 mTLS 证书警告: %v", err)
+	}
 
 	if cfg != nil {
 		cfg.Server.WebTerminal.Enabled = false
@@ -298,14 +323,20 @@ func Uninstall(cfg *config.Config, configPath string) error {
 
 // Status checks the status of Web Terminal
 func Status(cfg *config.Config) (*StatusResult, error) {
+	p12Path, p12Exists := resolveMtlsArtifact("client.p12", DefaultClientP12)
+	crtPath, crtExists := resolveMtlsArtifact("client.crt", DefaultClientCrt)
+	keyPath, _ := resolveMtlsArtifact("client.key", DefaultClientKey)
+
 	res := &StatusResult{
-		P12Path:       DefaultClientP12,
-		ClientCrtPath: DefaultClientCrt,
-		ClientKeyPath: DefaultClientKey,
-		SSHTunnelPath: DefaultSSHTunnelPath,
-		SSHTunnelPort: DefaultSSHTunnelPort,
-		SSHPort:       22,
-		NodeTag:       "node",
+		P12Path:         p12Path,
+		P12Exists:       p12Exists,
+		ClientCrtPath:   crtPath,
+		ClientCrtExists: crtExists,
+		ClientKeyPath:   keyPath,
+		SSHTunnelPath:   DefaultSSHTunnelPath,
+		SSHTunnelPort:   DefaultSSHTunnelPort,
+		SSHPort:         22,
+		NodeTag:         "node",
 	}
 
 	if cfg != nil {
@@ -322,11 +353,7 @@ func Status(cfg *config.Config) (*StatusResult, error) {
 		if cfg.Server.WebTerminal.SSHTunnelPort > 0 {
 			res.SSHTunnelPort = cfg.Server.WebTerminal.SSHTunnelPort
 		}
-		if cfg.Server.WebTerminal.SSHPort > 0 {
-			res.SSHPort = cfg.Server.WebTerminal.SSHPort
-		} else {
-			res.SSHPort = DetectSSHPort()
-		}
+		res.SSHPort = resolveWebTerminalSSHPort(cfg, DetectSSHPort)
 		domain := cfg.Server.GetNodeDomain()
 		if domain == "" {
 			domain = cfg.Server.GetSubstoreDomain()
@@ -337,13 +364,6 @@ func Status(cfg *config.Config) (*StatusResult, error) {
 		}
 	} else {
 		res.SSHPort = DetectSSHPort()
-	}
-
-	if _, err := os.Stat(DefaultClientP12); err == nil {
-		res.P12Exists = true
-	}
-	if _, err := os.Stat(DefaultClientCrt); err == nil {
-		res.ClientCrtExists = true
 	}
 
 	if runtime.GOOS == "linux" {
@@ -362,14 +382,28 @@ func Status(cfg *config.Config) (*StatusResult, error) {
 
 // ExportCert reads the client.p12 certificate file and returns base64 string
 func ExportCert() (string, error) {
-	if _, err := os.Stat(DefaultClientP12); err != nil {
-		return "", fmt.Errorf("客户端证书文件 %s 不存在，请先执行 singctl term install", DefaultClientP12)
+	p12Path, ok := resolveMtlsArtifact("client.p12", DefaultClientP12)
+	if !ok {
+		return "", fmt.Errorf("客户端证书文件 %s 不存在，请先执行 singctl term install", p12Path)
 	}
-	bytes, err := os.ReadFile(DefaultClientP12)
+	bytes, err := os.ReadFile(p12Path)
 	if err != nil {
 		return "", fmt.Errorf("读取证书失败: %w", err)
 	}
 	return base64.StdEncoding.EncodeToString(bytes), nil
+}
+
+func resolveMtlsArtifact(name, legacyPath string) (string, bool) {
+	vaultPath := deploy.VaultMtlsFilePath(name)
+	if info, err := os.Stat(vaultPath); err == nil && !info.IsDir() && info.Size() > 0 {
+		return vaultPath, true
+	}
+	if legacyPath != "" {
+		if info, err := os.Stat(legacyPath); err == nil && !info.IsDir() && info.Size() > 0 {
+			return legacyPath, true
+		}
+	}
+	return vaultPath, false
 }
 
 func installDependencies() error {
@@ -499,12 +533,19 @@ func installGoTTY(cfg *config.Config, arch string) error {
 }
 
 func generateMTLSCertificates(password string, force bool) error {
-	if err := os.MkdirAll(DefaultMtlsCADir, 0755); err != nil {
+	if err := deploy.MigrateLegacyCaddyMtlsToVault(); err != nil {
 		return err
 	}
 
-	if _, err := os.Stat(DefaultClientP12); err == nil && !force {
-		if _, err := os.Stat(DefaultMtlsCACert); err == nil {
+	vaultP12 := deploy.VaultMtlsFilePath("client.p12")
+	vaultCA := deploy.VaultMtlsFilePath("ca.crt")
+	if !force {
+		p12Info, pErr := os.Stat(vaultP12)
+		caInfo, cErr := os.Stat(vaultCA)
+		if pErr == nil && p12Info.Size() > 0 && cErr == nil && caInfo.Size() > 0 {
+			if _, _, err := deploy.EnsureCaddyMtlsTrustPool(""); err != nil {
+				return err
+			}
 			logger.Success("检测到已有 mTLS 证书，复用现有证书 (如需重建可加 --force)")
 			return nil
 		}
@@ -623,17 +664,36 @@ extendedKeyUsage = clientAuth
 		}
 	}
 
-	// 6. 将 ca.crt 与 client.p12, client.crt, client.key 复制到正式目录
-	if err := CopyFile(caCrt, DefaultMtlsCACert, 0644); err != nil {
-		return fmt.Errorf("保存 ca.crt 失败: %w", err)
+	// 6. 将全套凭据存入持久化 0700/0600 主库，并只读投射公钥 ca.crt 给 Caddy
+	bundle := make(map[string][]byte, 4)
+	for _, spec := range []struct {
+		name string
+		src  string
+		req  bool
+	}{
+		{"ca.crt", caCrt, true},
+		{"client.p12", clientP12, true},
+		{"client.crt", clientCrt, false},
+		{"client.key", clientKey, false},
+	} {
+		data, rErr := os.ReadFile(spec.src)
+		if rErr != nil {
+			if spec.req {
+				return fmt.Errorf("读取生成的 %s 失败: %w", spec.name, rErr)
+			}
+			continue
+		}
+		bundle[spec.name] = data
 	}
-	if err := CopyFile(clientP12, DefaultClientP12, 0600); err != nil {
-		return fmt.Errorf("保存 client.p12 失败: %w", err)
-	}
-	_ = CopyFile(clientCrt, DefaultClientCrt, 0644)
-	_ = CopyFile(clientKey, DefaultClientKey, 0600)
 
-	logger.Success("mTLS 证书生成成功：已就绪 ca.crt、client.p12 以及原生证书私钥 client.crt / client.key。")
+	if err := deploy.SaveMtlsBundleToVault(bundle); err != nil {
+		return fmt.Errorf("保存 mTLS 证书至主库失败: %w", err)
+	}
+	if _, _, err := deploy.EnsureCaddyMtlsTrustPool(""); err != nil {
+		return fmt.Errorf("投射 Caddy ca.crt 失败: %w", err)
+	}
+
+	logger.Success("mTLS 证书生成成功：主库 %s 与 Caddy 只读 ca.crt 已就绪。", deploy.MtlsVaultDir())
 	return nil
 }
 
@@ -697,51 +757,91 @@ func CopyFile(src, dst string, perm os.FileMode) error {
 }
 
 // DetectSSHPort tries to detect the SSH daemon port on the server
+// DetectSSHPort resolves the effective SSH listening port, preferring hardened drop-in configs over default port 22.
 func DetectSSHPort() int {
-	// 1. Check SSH_CONNECTION environment variable (e.g., "client_ip client_port server_ip server_port")
-	if conn := os.Getenv("SSH_CONNECTION"); conn != "" {
+	return detectSSHPortFrom(os.Getenv("SSH_CONNECTION"), "/etc/ssh/sshd_config.d/*.conf", "/etc/ssh/sshd_config")
+}
+
+func resolveWebTerminalSSHPort(cfg *config.Config, detector func() int) int {
+	if cfg != nil && cfg.Server.WebTerminal.SSHPort > 0 {
+		return cfg.Server.WebTerminal.SSHPort
+	}
+	if detector != nil {
+		if p := detector(); p > 0 {
+			return p
+		}
+	}
+	return 22
+}
+
+func detectSSHPortFrom(envConn, configDGlob, mainConfigPath string) int {
+	fallbackPort := 0
+
+	// 1. 优先扫描 /etc/ssh/sshd_config.d/*.conf (如 00-singctl-hardening.conf 中的非 22 端口)
+	if configDGlob != "" {
+		matches, _ := filepath.Glob(configDGlob)
+		slices.Sort(matches)
+		for _, match := range matches {
+			for _, p := range scanSSHDConfigPorts(match) {
+				if p != 22 {
+					return p
+				}
+				if fallbackPort == 0 {
+					fallbackPort = p
+				}
+			}
+		}
+	}
+
+	// 2. 检查当前会话环境变量 SSH_CONNECTION ("client_ip client_port server_ip server_port")
+	if conn := strings.TrimSpace(envConn); conn != "" {
 		parts := strings.Fields(conn)
 		if len(parts) >= 4 {
-			if p, err := strconv.Atoi(parts[3]); err == nil && p > 0 {
+			if p, err := strconv.Atoi(parts[3]); err == nil && p > 0 && p <= 65535 {
 				return p
 			}
 		}
 	}
 
-	// 2. Check /etc/ssh/sshd_config
-	if data, err := os.ReadFile("/etc/ssh/sshd_config"); err == nil {
-		for _, line := range strings.Split(string(data), "\n") {
-			line = strings.TrimSpace(line)
-			if strings.HasPrefix(strings.ToLower(line), "port ") {
-				fields := strings.Fields(line)
-				if len(fields) >= 2 {
-					if p, err := strconv.Atoi(fields[1]); err == nil && p > 0 {
-						return p
-					}
-				}
+	// 3. 回退检查主配置文件 /etc/ssh/sshd_config
+	if mainConfigPath != "" {
+		for _, p := range scanSSHDConfigPorts(mainConfigPath) {
+			if p != 22 {
+				return p
+			}
+			if fallbackPort == 0 {
+				fallbackPort = p
 			}
 		}
 	}
 
-	// 3. Check /etc/ssh/sshd_config.d/*.conf
-	matches, _ := filepath.Glob("/etc/ssh/sshd_config.d/*.conf")
-	for _, match := range matches {
-		if data, err := os.ReadFile(match); err == nil {
-			for _, line := range strings.Split(string(data), "\n") {
-				line = strings.TrimSpace(line)
-				if strings.HasPrefix(strings.ToLower(line), "port ") {
-					fields := strings.Fields(line)
-					if len(fields) >= 2 {
-						if p, err := strconv.Atoi(fields[1]); err == nil && p > 0 {
-							return p
-						}
-					}
-				}
-			}
-		}
+	if fallbackPort > 0 {
+		return fallbackPort
 	}
-
 	return 22
+}
+
+func scanSSHDConfigPorts(path string) []int {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var ports []int
+	for line := range strings.SplitSeq(string(data), "\n") {
+		if idx := strings.IndexByte(line, '#'); idx >= 0 {
+			line = line[:idx]
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 || !strings.EqualFold(fields[0], "port") {
+			continue
+		}
+		for _, rawPort := range fields[1:] {
+			if p, pErr := strconv.Atoi(rawPort); pErr == nil && p > 0 && p <= 65535 {
+				ports = append(ports, p)
+			}
+		}
+	}
+	return ports
 }
 
 func installWstunnel(cfg *config.Config, arch string) error {

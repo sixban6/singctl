@@ -93,6 +93,7 @@ singctl fl new 203.0.113.99:15500 --hy2-port 11501 --vless-port 11502 --password
 | `--cf-token` | **可选（自动继承主控）** | 省略时自动复用主控 `/etc/singctl/singctl.yaml` 中的 `server.cf_dns_key`。 |
 | `--sni` | 可选（自动继承主控） | 省略时自动复用主控的 Reality SNI 伪装域名与 HY2 带宽配置。 |
 | `--port` / `--hy2-port` / `--vless-port` | 可选（适配 NAT 小鸡） | 初始 SSH 端口默认 `22`（NAT 小鸡可传 `--port 15500`，若 `2222` 未映射会自动原地免密加固并保留机内 DNAT 端口）；HY2 (UDP) 与 VLESS (TCP) 节点端口默认均为 `443`，可分开指定（如 `--hy2-port 11501 --vless-port 11502`）。 |
+| `--reprovision` | 可选（仅重装系统用） | 默认会拒绝与 `fleet.yaml` 中已有同代号或同 IP 的节点重复开荒（避免误创建 `-2` 影子记录并轮换凭据）；仅当已纳管机器**重装系统（OS wipe）**后，加 `--reprovision` 按原代号与原域名原地重装收编。<br>⚠️ 若在线节点仅需修复 Caddy 或 Web 终端，**请勿使用 `fl new`**，直接在节点执行 `singctl sr term install` 或通过 `singctl fl sync <id>` 修复。 |
 
 #### 这一条命令在后台自动帮你干了哪 4 件大事？（约 40～60 秒）
 

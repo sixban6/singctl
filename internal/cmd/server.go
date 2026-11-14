@@ -10,6 +10,7 @@ import (
 	"singctl/internal/doctor"
 	"singctl/internal/logger"
 	"singctl/internal/serverweb"
+	"singctl/internal/terminal"
 
 	"github.com/spf13/cobra"
 )
@@ -42,6 +43,14 @@ func newInstallServerCmd(configPath, version string) *cobra.Command {
 				}
 				if err := deploy.DeployWarp(); err != nil {
 					return err
+				}
+				if cfg.Server.WebTerminal.Enabled {
+					logger.Info("检测到配置已启用 Web 终端，正在前置准备 mTLS 证书与终端服务...")
+					if _, tErr := terminal.Install(cfg, resolvedPath, terminal.InstallOptions{SkipCaddyDeploy: true}); tErr != nil {
+						logger.Warn("前置恢复 Web 终端警告 (Caddy 将自动安全降级保护网关): %v", tErr)
+					} else if refreshed, lErr := config.Load(resolvedPath); lErr == nil && refreshed != nil {
+						cfg = refreshed
+					}
 				}
 				if err := deploy.DeployCaddy(cfg); err != nil {
 					return err

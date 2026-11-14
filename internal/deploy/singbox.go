@@ -336,6 +336,20 @@ func (sbs *SingBoxServer) initCaddyCertPath() {
 	nodeDomain := sbs.cfg.Server.GetNodeDomain()
 	sbs.crtPath, sbs.keyPath = findCaddyCertForDomain(nodeDomain)
 }
+
+// RefreshCaddyCertPath re-resolves the Caddy TLS certificate path after Caddy deployment/renewal
+// without clearing already loaded credentials.
+func (sbs *SingBoxServer) RefreshCaddyCertPath() {
+	sbs.initCaddyCertPath()
+}
+
+// SetConfig updates the underlying config reference on an already-initialized SingBoxServer instance.
+func (sbs *SingBoxServer) SetConfig(cfg *config.Config) {
+	if cfg != nil {
+		sbs.cfg = cfg
+		sbs.updateShareLinks()
+	}
+}
 func (sbs *SingBoxServer) initVRParams() error {
 	// If credentials were already loaded (e.g. via LoadExistingCredentials), skip generation.
 	if sbs.hyUUID != "" {

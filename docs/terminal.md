@@ -37,7 +37,7 @@ server:
     enabled: true                               # 是否启用 Web 终端与 SSH 穿透
     port: 18080                                 # GoTTY 本地监听端口 (仅监听 127.0.0.1)
     path: "/term-8f9a2b"                        # Web 终端隐蔽访问路径
-    mtls_ca: "/etc/caddy/mtls/ca.crt"           # CA 证书路径
+    mtls_ca: "/etc/caddy/mtls/ca.crt"           # Caddy 公开 CA 信任池路径（私钥保管在 /etc/singctl/mtls）
     password: "YourExportPassword123"           # client.p12 客户端证书导出密码
     ssh_tunnel_port: 18081                      # wstunnel 本地监听端口
     ssh_tunnel_path: "/ssh-ws"                  # SSH WebSocket 穿透路径
@@ -81,17 +81,19 @@ singctl term cert
 ```
 
 输出示例：
+> 🔐 **双层证书目录说明**：私钥与客户端证书持久化保管在 `0700`/`0600` 权限的 `/etc/singctl/mtls/` 保险库中；`/etc/caddy/mtls/ca.crt` 仅投影公开 CA 信任池供 Caddy 读取，即使重装或卸载 Caddy 也不会丢失客户端证书。
+
 ```bash
-📁 证书路径: /etc/caddy/mtls/client.p12
+📁 证书路径: /etc/singctl/mtls/client.p12
 🔑 导入密码: A3k9mP2x9L1q
 
 📱【方案一：Web 终端 (.p12 证书)】
-  scp -P 2222 root@cdn.example.com:/etc/caddy/mtls/client.p12 ./los-client.p12
+  scp -P 2222 root@cdn.example.com:/etc/singctl/mtls/client.p12 ./los-client.p12
 
 ⚡【方案二：WezTerm 原生 SSH (client.crt + client.key)】
   mkdir -p ~/.ssh
-  scp -P 2222 root@cdn.example.com:/etc/caddy/mtls/client.crt ~/.ssh/los-client.crt
-  scp -P 2222 root@cdn.example.com:/etc/caddy/mtls/client.key ~/.ssh/los-client.key
+  scp -P 2222 root@cdn.example.com:/etc/singctl/mtls/client.crt ~/.ssh/los-client.crt
+  scp -P 2222 root@cdn.example.com:/etc/singctl/mtls/client.key ~/.ssh/los-client.key
 
   追加到本地 ~/.ssh/config:
   cat << 'EOF' >> ~/.ssh/config
@@ -135,7 +137,7 @@ singctl term uninstall
 
 1. 从 VPS 下载客户端证书到本地：
    ```bash
-   scp -P 2222 root@你的域名:/etc/caddy/mtls/client.p12 ./client.p12
+   scp -P 2222 root@你的域名:/etc/singctl/mtls/client.p12 ./client.p12
    ```
 2. **导入证书**：
    - **macOS**：双击 `client.p12`，输入安装时生成的密码，将其导入系统的「钥匙串访问 (Keychain)」中（存储在“登录”钥匙串）；
@@ -171,8 +173,8 @@ singctl term uninstall
 ```bash
 mkdir -p ~/.ssh
 # 自动带上节点标签（如 los），避免多服务器互相覆盖
-scp -P 2222 root@你的域名:/etc/caddy/mtls/client.crt ~/.ssh/los-client.crt
-scp -P 2222 root@你的域名:/etc/caddy/mtls/client.key ~/.ssh/los-client.key
+scp -P 2222 root@你的域名:/etc/singctl/mtls/client.crt ~/.ssh/los-client.crt
+scp -P 2222 root@你的域名:/etc/singctl/mtls/client.key ~/.ssh/los-client.key
 ```
 
 #### 3. 配置本地 `~/.ssh/config`

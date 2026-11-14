@@ -112,6 +112,7 @@ type BootstrapInput struct {
 	HardenSSH           *bool  `json:"hardenSsh,omitzero"`
 	TargetSSHPort       int    `json:"targetSshPort,omitzero"`
 	ExtraAuthorizedKeys string `json:"extraAuthorizedKeys,omitzero"`
+	Reprovision         bool   `json:"reprovision,omitzero"`
 }
 
 // BootstrapDefaults exposes sanitized Master configuration defaults so CLI and WebUI can guide zero-config bootstrap.

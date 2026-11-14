@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"singctl/internal/config"
+	"singctl/internal/constant"
 	"singctl/internal/deploy"
 	"singctl/internal/deploy/masksite"
 	"singctl/internal/scripts"
@@ -1111,5 +1112,84 @@ ResolveStrategy = auto
 	_, changedAgain := deploy.NormalizeWireproxyConfigContent(normalized)
 	if changedAgain {
 		t.Errorf("expected NormalizeWireproxyConfigContent to be idempotent")
+	}
+}
+
+func TestSyncCaddyfile_MissingMtlsCAPreservesGateway(t *testing.T) {
+	base := t.TempDir()
+	vaultDir := filepath.Join(base, "singctl-mtls")
+	caddyConfDir := filepath.Join(base, "caddy")
+	caddyMtlsDir := filepath.Join(caddyConfDir, "mtls")
+
+	origVault := constant.SingctlMtlsDir
+	origCaddyConf := constant.CaddyConfigDir
+	origCaddyMtls := constant.CaddyMtlsDir
+	origCaddyCA := constant.CaddyMtlsCACert
+	t.Cleanup(func() {
+		constant.SingctlMtlsDir = origVault
+		constant.CaddyConfigDir = origCaddyConf
+		constant.CaddyMtlsDir = origCaddyMtls
+		constant.CaddyMtlsCACert = origCaddyCA
+	})
+
+	constant.SingctlMtlsDir = vaultDir
+	constant.CaddyConfigDir = caddyConfDir
+	constant.CaddyMtlsDir = caddyMtlsDir
+	constant.CaddyMtlsCACert = filepath.Join(caddyMtlsDir, "ca.crt")
+
+	if err := os.MkdirAll(caddyConfDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	caddyfilePath := filepath.Join(caddyConfDir, "Caddyfile")
+	if err := os.WriteFile(caddyfilePath, []byte("placeholder\n"), 0640); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	_ = os.WriteFile(filepath.Join(binDir, "caddy"), []byte("#!/bin/sh\nexit 0\n"), 0755)
+	_ = os.WriteFile(filepath.Join(binDir, "systemctl"), []byte("#!/bin/sh\nexit 0\n"), 0755)
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			NodeDomain: "node.example.com",
+			CFDNSKey:   "cf-test-token",
+			Sni:        "swdist.apple.com",
+			WebTerminal: config.WebTerminalConfig{
+				Enabled:       true,
+				Port:          18080,
+				Path:          "/term-safe",
+				SSHTunnelPort: 18081,
+				SSHTunnelPath: "/ssh-ws",
+				SSHPort:       2222,
+			},
+		},
+	}
+
+	// Verify PreviewCaddyfile remains pure (still emits default trust_pool even without disk files).
+	purePreview, err := deploy.PreviewCaddyfile(cfg)
+	if err != nil {
+		t.Fatalf("PreviewCaddyfile failed: %v", err)
+	}
+	if !strings.Contains(purePreview, "trust_pool file /etc/caddy/mtls/ca.crt") {
+		t.Fatalf("expected PreviewCaddyfile purity to include trust_pool, got:\n%s", purePreview)
+	}
+
+	// Verify runtime SyncCaddyfile skips trust_pool when both vault & Caddy CA are missing so Caddy stays up.
+	if err := deploy.SyncCaddyfile(cfg); err != nil {
+		t.Fatalf("SyncCaddyfile should recover cleanly when CA missing: %v", err)
+	}
+	if !cfg.Server.WebTerminal.Enabled {
+		t.Fatal("SyncCaddyfile must not mutate caller config WebTerminal.Enabled")
+	}
+	diskCaddyfile, err := os.ReadFile(caddyfilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(diskCaddyfile), "trust_pool") || strings.Contains(string(diskCaddyfile), "client_auth") {
+		t.Fatalf("expected runtime Caddyfile to strip mTLS trust_pool when CA is absent, got:\n%s", string(diskCaddyfile))
+	}
+	if !strings.Contains(string(diskCaddyfile), "node.example.com") {
+		t.Fatalf("expected runtime Caddyfile to preserve core node domain, got:\n%s", string(diskCaddyfile))
 	}
 }

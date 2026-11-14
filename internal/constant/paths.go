@@ -42,6 +42,12 @@ var (
 
 	// Mask site
 	MaskSiteDir string
+
+	// mTLS Vault & Caddy runtime projection
+	SingctlMtlsDir  string
+	CaddyConfigDir  string
+	CaddyMtlsDir    string
+	CaddyMtlsCACert string
 )
 
 func init() {
@@ -71,6 +77,9 @@ func init() {
 		AdGuardSystemdService = "/etc/systemd/system/AdGuardHome.service"
 		AdGuardInitdScript = "/etc/init.d/AdGuardHome"
 		MaskSiteDir = "/var/www/mask-site"
+		SingctlMtlsDir = "/etc/singctl/mtls"
+		CaddyConfigDir = "/etc/caddy"
+		CaddyMtlsDir = "/etc/caddy/mtls"
 	} else if runtime.GOOS == "windows" {
 		SingBoxInstallDir = filepath.Join(os.Getenv("LOCALAPPDATA"), "Programs", "sing-box", "sing-box.exe")
 		SingBoxConfigDir = filepath.Join(os.Getenv("LOCALAPPDATA"), "sing-box")
@@ -81,6 +90,9 @@ func init() {
 		AdGuardConfigDir = filepath.Join(os.Getenv("LOCALAPPDATA"), "AdGuardHome")
 		AdGuardConfigFile = filepath.Join(AdGuardConfigDir, "AdGuardHome.yaml")
 		AdGuardWorkDir = AdGuardConfigDir
+		SingctlMtlsDir = filepath.Join(os.TempDir(), "singctl-mtls-vault")
+		CaddyConfigDir = filepath.Join(os.TempDir(), "singctl-caddy")
+		CaddyMtlsDir = filepath.Join(CaddyConfigDir, "mtls")
 	} else if runtime.GOOS == "darwin" {
 		home, _ := os.UserHomeDir()
 		SingBoxInstallDir = "/usr/local/bin/sing-box"
@@ -93,6 +105,9 @@ func init() {
 		AdGuardConfigFile = "/etc/AdGuardHome/AdGuardHome.yaml"
 		AdGuardWorkDir = "/etc/AdGuardHome"
 		MaskSiteDir = filepath.Join(os.TempDir(), "mask-site")
+		SingctlMtlsDir = filepath.Join(os.TempDir(), "singctl-mtls-vault")
+		CaddyConfigDir = filepath.Join(os.TempDir(), "singctl-caddy")
+		CaddyMtlsDir = filepath.Join(CaddyConfigDir, "mtls")
 	} else {
 		SubStoreDir = filepath.Join(os.TempDir(), "singctl-sub-store")
 		SubStoreFile = filepath.Join(SubStoreDir, "sub-store.json")
@@ -101,7 +116,12 @@ func init() {
 		AdGuardConfigFile = "/etc/AdGuardHome/AdGuardHome.yaml"
 		AdGuardWorkDir = "/etc/AdGuardHome"
 		MaskSiteDir = filepath.Join(os.TempDir(), "mask-site")
+		SingctlMtlsDir = filepath.Join(os.TempDir(), "singctl-mtls-vault")
+		CaddyConfigDir = filepath.Join(os.TempDir(), "singctl-caddy")
+		CaddyMtlsDir = filepath.Join(CaddyConfigDir, "mtls")
 	}
+
+	CaddyMtlsCACert = filepath.Join(CaddyMtlsDir, "ca.crt")
 
 	// Dynamic linux check for SingBoxInstallDir & AdGuardInstallPath
 	if runtime.GOOS == "linux" {

@@ -16,6 +16,18 @@ if [ -d "/var/lib/caddy/.local/share/caddy/certificates" ]; then
     cp -a /var/lib/caddy/.local/share/caddy/certificates/* /var/lib/singctl/caddy_certs_backup/ 2>/dev/null || true
 fi
 
+# Preserve mTLS certificates and client credentials in persistent root vault before wiping /etc/caddy
+if [ -d "/etc/caddy/mtls" ]; then
+    mkdir -p -m 700 /etc/singctl/mtls
+    for f in ca.crt client.p12 client.crt client.key; do
+        if [ -s "/etc/caddy/mtls/${f}" ] && [ ! -s "/etc/singctl/mtls/${f}" ]; then
+            cp -p "/etc/caddy/mtls/${f}" "/etc/singctl/mtls/${f}" 2>/dev/null || true
+        fi
+    done
+    chmod 700 /etc/singctl/mtls 2>/dev/null || true
+    chmod 600 /etc/singctl/mtls/* 2>/dev/null || true
+fi
+
 # Remove caddy package (use remove instead of purge to avoid wiping valid ACME state)
 apt-get remove -y caddy || true
 apt-get autoremove -y || true
