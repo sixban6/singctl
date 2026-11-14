@@ -89,18 +89,22 @@ type OverviewSnapshot struct {
 	WebURL                       string         `json:"webUrl"`
 	Username                     string         `json:"username"`
 	HasPassword                  bool           `json:"hasPassword"`
-	ProtectionEnabled            bool           `json:"protectionEnabled"`
-	ProtectionDisabledDurationMs int64          `json:"protectionDisabledDurationMs,omitempty"`
-	ProtectionDisabledUntil      string         `json:"protectionDisabledUntil,omitempty"`
-	UpstreamLatencyMs            int64          `json:"upstreamLatencyMs,omitempty"`
-	Stats                        ControlStats   `json:"stats"`
-	Filters                      []FilterItem   `json:"filters"`
-	TotalRulesCount              int            `json:"totalRulesCount"`
-	Presets                      []PresetStatus `json:"presets"`
-	WhitelistedDomains           []string       `json:"whitelistedDomains"`
-	AutoWhitelistedSubs          []string       `json:"autoWhitelistedSubs"`
-	AuditManagedCount            int            `json:"auditManagedCount"`
-	Rewrites                     []RewriteEntry `json:"rewrites"`
+	ProtectionEnabled            bool                 `json:"protectionEnabled"`
+	ProtectionDisabledDurationMs int64                `json:"protectionDisabledDurationMs,omitempty"`
+	ProtectionDisabledUntil      string               `json:"protectionDisabledUntil,omitempty"`
+	UpstreamLatencyMs            int64                `json:"upstreamLatencyMs,omitempty"`
+	UpstreamMode                 string               `json:"upstreamMode"`
+	UpstreamModeLabel            string               `json:"upstreamModeLabel"`
+	Upstreams                    []UpstreamServerInfo `json:"upstreams"`
+	UpstreamPresets              []UpstreamPreset     `json:"upstreamPresets"`
+	Stats                        ControlStats         `json:"stats"`
+	Filters                      []FilterItem         `json:"filters"`
+	TotalRulesCount              int                  `json:"totalRulesCount"`
+	Presets                      []PresetStatus       `json:"presets"`
+	WhitelistedDomains           []string             `json:"whitelistedDomains"`
+	AutoWhitelistedSubs          []string             `json:"autoWhitelistedSubs"`
+	AuditManagedCount            int                  `json:"auditManagedCount"`
+	Rewrites                     []RewriteEntry       `json:"rewrites"`
 }
 
 // CuratedFilterPresets 返回面向家庭网关与软路由精选的低误杀规则库预设列表。
@@ -214,6 +218,10 @@ func (m *Manager) Overview(ctx context.Context, singboxLinked bool) *OverviewSna
 		Username:            st.Username,
 		HasPassword:         st.Password != "",
 		ProtectionEnabled:   true,
+		UpstreamMode:        "parallel",
+		UpstreamModeLabel:   UpstreamModeDescription("parallel"),
+		Upstreams:           []UpstreamServerInfo{},
+		UpstreamPresets:     CuratedUpstreamPresets(),
 		Filters:             []FilterItem{},
 		Presets:             buildPresetStatuses(nil),
 		WhitelistedDomains:  []string{},
@@ -310,11 +318,40 @@ func (m *Manager) Overview(ctx context.Context, singboxLinked bool) *OverviewSna
 		if _, err := m.controlRequest(ctx, http.MethodGet, "/control/rewrite/list", nil, &rewrites); err == nil && rewrites != nil {
 			snap.Rewrites = rewrites
 		}
+
+		var dnsInfo struct {
+			UpstreamDNS  []string `json:"upstream_dns"`
+			UpstreamMode string   `json:"upstream_mode"`
+		}
+		if _, err := m.controlRequest(ctx, http.MethodGet, "/control/dns_info", nil, &dnsInfo); err == nil {
+			mode := NormalizeUpstreamMode(dnsInfo.UpstreamMode)
+			snap.UpstreamMode = mode
+			snap.UpstreamModeLabel = UpstreamModeDescription(mode)
+			cleaned := filterNonCommentUpstreams(dnsInfo.UpstreamDNS)
+			infos := make([]UpstreamServerInfo, 0, len(cleaned))
+			for _, u := range cleaned {
+				infos = append(infos, DescribeUpstream(u))
+			}
+			snap.Upstreams = infos
+		}
 	}
 
 	// 若服务未运行或 API 暂不可达，从磁盘 AdGuardHome.yaml 回退读取静态规则/过滤器/重写列表
 	if !apiOK {
 		m.populateSnapshotFromYAML(snap, autoSubs)
+	}
+	if len(snap.Upstreams) == 0 {
+		list, mode := readUpstreamsFromYAML(m.aghConfigFile)
+		if len(list) == 0 {
+			list = DefaultUpstreams()
+		}
+		snap.UpstreamMode = mode
+		snap.UpstreamModeLabel = UpstreamModeDescription(mode)
+		infos := make([]UpstreamServerInfo, 0, len(list))
+		for _, u := range list {
+			infos = append(infos, DescribeUpstream(u))
+		}
+		snap.Upstreams = infos
 	}
 
 	return snap

@@ -181,26 +181,16 @@ const ClientShell: React.FC = () => {
   }, [error]);
 
   const navGroups: NavGroupConfig<ClientTab>[] = useMemo(() => {
-    const sbBadge = status ? (
-      <StatusDot tone={status.singbox.running ? 'ok' : 'danger'} pulse={status.singbox.running} />
-    ) : undefined;
-    const dmBadge = status?.daemon?.staleBinary ? (
-      <Badge tone="warn">旧版</Badge>
-    ) : status ? (
-      <StatusDot tone={status.daemon.running ? 'ok' : 'neutral'} pulse={status.daemon.running} />
-    ) : undefined;
-    const dnsBadge = status?.adguard?.installed ? (
-      <StatusDot
-        tone={
-          !status.adguard.dnsHealthy
-            ? 'danger'
-            : status.adguard.singboxLinked
-              ? 'ok'
-              : 'warn'
-        }
-        pulse={status.adguard.dnsHealthy && status.adguard.singboxLinked}
-      />
-    ) : undefined;
+    // 遵循「常态零绿点、仅异常微标提醒」规范：健康运行时 9 个选项卡视觉完全统一对称
+    const sbBadge =
+      status && status.singbox.installed && !status.singbox.running ? (
+        <StatusDot tone="danger" />
+      ) : undefined;
+    const dmBadge = status?.daemon?.staleBinary ? <StatusDot tone="warn" /> : undefined;
+    const dnsBadge =
+      status?.adguard?.installed && status.adguard.enabled && !status.adguard.dnsHealthy ? (
+        <StatusDot tone="danger" />
+      ) : undefined;
 
     return [
       {

@@ -134,6 +134,17 @@ init_env() {
 setup_nft() {
     # 创建防火墙规则文件
     echo_succ "创建防火墙规则文件..."
+    AGH_BYPASS_IPS="223.5.5.5 223.6.6.6 1.12.12.12 120.53.53.53"
+    if [ -f /etc/AdGuardHome/AdGuardHome.yaml ]; then
+        EXTRA_AGH_IPS=$(sed -n 's#.*\(https\|tls\)://\([0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\).*#\2#p' /etc/AdGuardHome/AdGuardHome.yaml 2>/dev/null || true)
+        for extra_ip in $EXTRA_AGH_IPS; do
+            case " $AGH_BYPASS_IPS " in
+                *" $extra_ip "*) ;;
+                *) AGH_BYPASS_IPS="$AGH_BYPASS_IPS $extra_ip" ;;
+            esac
+        done
+    fi
+    AGH_BYPASS_NFT=$(echo "$AGH_BYPASS_IPS" | sed 's/ /, /g')
     nft flush table inet sing-box 2>/dev/null || true
     nft delete table inet sing-box 2>/dev/null || true
     nft add table inet sing-box 2>/dev/null || true
@@ -191,7 +202,7 @@ setup_nft() {
             oifname "tailscale*" accept comment "Bypass outbound traffic to tailscale interface"
 
             # 放行本地 AdGuard Home 加密上游 (DoH/DoT) 直连流量，防止冷启动或 Global 全局模式下产生解析死锁
-            ip daddr { 223.5.5.5, 223.6.6.6, 1.12.12.12, 120.53.53.53 } tcp dport { 443, 853 } accept comment "Bypass AdGuard Home encrypted DNS upstreams"
+            ip daddr { $AGH_BYPASS_NFT } tcp dport { 443, 853 } accept comment "Bypass AdGuard Home encrypted DNS upstreams"
 
             # 2.放行ipv6的icmp基础流量
             meta l4proto ipv6-icmp accept comment "Allow ICMPv6 traffic"

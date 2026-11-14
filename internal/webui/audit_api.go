@@ -340,6 +340,66 @@ func (s *Server) handleAuditAIConfigPost(w http.ResponseWriter, r *http.Request)
 	})
 }
 
+// handleAuditAIModelsPost 动态连接用户填写（或自动探测）的 AI 网关拉取可用模型列表，失败时优雅降级供前端手动输入。
+func (s *Server) handleAuditAIModelsPost(w http.ResponseWriter, r *http.Request) {
+	if !s.auditLimiter.allow(r, "write", 120) {
+		writeJSONError(w, http.StatusTooManyRequests, "操作过于频繁，请稍后再试")
+		return
+	}
+
+	var req struct {
+		BaseURL string `json:"baseUrl"`
+		APIKey  string `json:"apiKey"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	cfg, _ := config.Load(s.opts.ConfigPath)
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
+
+	baseURL := strings.TrimSpace(req.BaseURL)
+	apiKey := strings.TrimSpace(req.APIKey)
+	if apiKey == "" && (baseURL == "" || baseURL == strings.TrimSpace(cfg.Audit.AI.Endpoint)) {
+		apiKey = strings.TrimSpace(cfg.Audit.AI.APIKey)
+	}
+
+	callerHost, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err != nil || callerHost == "" {
+		callerHost = strings.TrimSpace(r.RemoteAddr)
+	}
+
+	// 注意：此处若前端刻意清空了 BaseURL，则按空 BaseURL 走 :3425 自动探测，不被旧配置覆盖
+	aiCfg := config.AuditAIConfig{
+		Enabled:  true,
+		Endpoint: baseURL,
+		APIKey:   apiKey,
+	}
+	advisor := audit.NewAdvisor(aiCfg)
+	if baseURL == "" {
+		// 显式清空 Endpoint 以允许拉取默认探测网关模型（防止环境变量在用户自定义测探时干扰，但保留未填时的合理回退）
+	}
+	models, resolvedURL, fetchErr := advisor.FetchAvailableModels(r.Context(), callerHost)
+	if fetchErr != nil || len(models) == 0 {
+		errMsg := "未能自动获取模型列表，请手动填写模型名称"
+		if fetchErr != nil {
+			errMsg = fetchErr.Error()
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":     false,
+			"models": []string{},
+			"error":  errMsg,
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":          true,
+		"models":      models,
+		"resolvedUrl": resolvedURL,
+	})
+}
+
 type auditAIReviewRequest struct {
 	Flows []audit.FlowRecord `json:"flows"`
 	Force bool               `json:"force,omitempty"`

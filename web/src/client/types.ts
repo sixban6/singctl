@@ -134,6 +134,32 @@ export interface AdGuardRewriteEntry {
   answer: string;
 }
 
+export type AdGuardUpstreamMode = 'parallel' | 'fastest_addr' | 'load_balance' | string;
+
+export interface AdGuardUpstreamPreset {
+  address: string;
+  name: string;
+  protocol: string;
+  recommended: boolean;
+}
+
+export interface AdGuardUpstreamServerInfo {
+  address: string;
+  name: string;
+  protocol: string;
+}
+
+export interface AdGuardUpstreamProbeItem {
+  address: string;
+  name: string;
+  protocol: string;
+  healthy: boolean;
+  latencyMs: number;
+  resolved?: string;
+  fastest?: boolean;
+  error?: string;
+}
+
 export interface AdGuardOverviewSnapshot {
   supported: boolean;
   installed: boolean;
@@ -153,6 +179,10 @@ export interface AdGuardOverviewSnapshot {
   protectionDisabledDurationMs?: number;
   protectionDisabledUntil?: string;
   upstreamLatencyMs?: number;
+  upstreamMode: AdGuardUpstreamMode;
+  upstreamModeLabel: string;
+  upstreams: AdGuardUpstreamServerInfo[];
+  upstreamPresets: AdGuardUpstreamPreset[];
   stats: {
     numDnsQueries: number;
     numBlockedFiltering: number;
@@ -176,6 +206,12 @@ export interface AdGuardProbeResult {
   domain?: string;
   resolved?: string;
   latencyMs?: number;
+  upstreamMode?: AdGuardUpstreamMode;
+  upstreamModeLabel?: string;
+  fastestUpstream?: string;
+  fastestName?: string;
+  fastestLatencyMs?: number;
+  upstreams?: AdGuardUpstreamProbeItem[];
   error?: string;
 }
 
@@ -422,6 +458,13 @@ export interface AuditAIConfig {
   apiKey: string;
   model: string;
   suggestedLanUrl?: string;
+}
+
+export interface AuditAIModelsResponse {
+  ok: boolean;
+  models: string[];
+  resolvedUrl?: string;
+  error?: string;
 }
 
 export interface ClientRoutingGroupInfo {

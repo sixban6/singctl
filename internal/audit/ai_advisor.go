@@ -381,6 +381,151 @@ func normalizeChatCompletionsURL(raw string) string {
 	return ep + "/v1/chat/completions"
 }
 
+func candidateModelListURLs(rawBase string, callerIP string) []string {
+	var urls []string
+	addURL := func(u string) {
+		if u != "" && !slices.Contains(urls, u) {
+			urls = append(urls, u)
+		}
+	}
+
+	trimmed := strings.TrimRight(strings.TrimSpace(rawBase), "/")
+	if trimmed != "" {
+		trimmed = strings.TrimSuffix(trimmed, "/chat/completions")
+		trimmed = strings.TrimSuffix(trimmed, "/models")
+		trimmed = strings.TrimRight(trimmed, "/")
+		if strings.HasSuffix(trimmed, "/v1") || strings.Contains(trimmed, "/v1beta") || strings.Contains(trimmed, "/api/v") {
+			addURL(trimmed + "/models")
+		} else {
+			addURL(trimmed + "/v1/models")
+			addURL(trimmed + "/models")
+		}
+		return urls
+	}
+
+	addURL("http://127.0.0.1:3425/v1/models")
+	if ip := net.ParseIP(strings.TrimSpace(callerIP)); ip != nil && !ip.IsLoopback() && !ip.IsUnspecified() {
+		addURL("http://" + net.JoinHostPort(ip.String(), "3425") + "/v1/models")
+	}
+	return urls
+}
+
+// FetchAvailableModels 向 OpenAI 兼容网关（或自动探测的本地/局域网 :3425 网关）拉取可用模型 ID 列表。
+func (a *Advisor) FetchAvailableModels(ctx context.Context, callerIP string) ([]string, string, error) {
+	rawBase := ""
+	apiKey := ""
+	if a != nil {
+		rawBase = strings.TrimSpace(a.cfg.Endpoint)
+		apiKey = strings.TrimSpace(a.cfg.APIKey)
+	}
+
+	candidates := candidateModelListURLs(rawBase, callerIP)
+	if len(candidates) == 0 {
+		return nil, "", fmt.Errorf("未配置网关地址")
+	}
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	var lastErr error
+
+	for _, targetURL := range candidates {
+		parsed, pErr := url.Parse(targetURL)
+		if pErr != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			lastErr = fmt.Errorf("网关地址格式不合法: %s", targetURL)
+			continue
+		}
+		// 自动探测默认 :3425 时先快速探测端口，避免在未运行网关时长时间阻塞
+		if rawBase == "" && !probeEndpointReachable(targetURL, 600*time.Millisecond) {
+			lastErr = fmt.Errorf("未检测到在线 :3425 AI 网关")
+			continue
+		}
+
+		reqCtx, cancel := context.WithTimeout(ctx, 4500*time.Millisecond)
+		req, rErr := http.NewRequestWithContext(reqCtx, http.MethodGet, targetURL, nil)
+		if rErr != nil {
+			cancel()
+			lastErr = rErr
+			continue
+		}
+		req.Header.Set("Accept", "application/json")
+		if apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+		}
+
+		resp, doErr := client.Do(req)
+		if doErr != nil {
+			cancel()
+			lastErr = doErr
+			continue
+		}
+
+		var bodyBuf bytes.Buffer
+		_, _ = bodyBuf.ReadFrom(http.MaxBytesReader(nil, resp.Body, 2<<20))
+		_ = resp.Body.Close()
+		cancel()
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			lastErr = fmt.Errorf("网关返回 HTTP %d", resp.StatusCode)
+			continue
+		}
+
+		models := parseModelListPayload(bodyBuf.Bytes())
+		if len(models) > 0 {
+			return models, targetURL, nil
+		}
+		lastErr = fmt.Errorf("网关未返回可用模型列表")
+	}
+
+	if lastErr == nil {
+		lastErr = fmt.Errorf("无法连接 AI 网关拉取模型")
+	}
+	return nil, "", lastErr
+}
+
+func parseModelListPayload(raw []byte) []string {
+	var parsed struct {
+		Data   []json.RawMessage `json:"data"`
+		Models []json.RawMessage `json:"models"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return nil
+	}
+
+	items := parsed.Data
+	if len(items) == 0 {
+		items = parsed.Models
+	}
+
+	seen := make(map[string]struct{}, len(items))
+	out := make([]string, 0, len(items))
+	addID := func(id string) {
+		clean := strings.TrimSpace(id)
+		if clean == "" {
+			return
+		}
+		if _, ok := seen[clean]; !ok {
+			seen[clean] = struct{}{}
+			out = append(out, clean)
+		}
+	}
+
+	for _, rawItem := range items {
+		var s string
+		if json.Unmarshal(rawItem, &s) == nil && s != "" {
+			addID(s)
+			continue
+		}
+		var obj struct {
+			ID    string `json:"id"`
+			Name  string `json:"name"`
+			Model string `json:"model"`
+		}
+		if json.Unmarshal(rawItem, &obj) == nil {
+			addID(cmp.Or(obj.ID, obj.Model, obj.Name))
+		}
+	}
+	return out
+}
+
 func probeEndpointReachable(endpoint string, timeout time.Duration) bool {
 	u, err := url.Parse(endpoint)
 	if err != nil || u.Host == "" {

@@ -36,8 +36,9 @@ type Options struct {
 	ConfigPath            string                  // singctl 配置文件路径
 	SingBoxConfigPath     string                  // 可选：测试/定制 sing-box config.json 路径（留空使用 constant.SingBoxConfigFile）
 	SingBoxWorkConfigPath string                  // 可选：测试/定制沙盒副本 config.json 路径
-	AdGuardBinPath        string                  // 可选：测试/定制 AdGuardHome 二进制路径
-	AdGuardConfigPath     string                  // 可选：测试/定制 AdGuardHome.yaml 路径
+	AdGuardBinPath          string                  // 可选：测试/定制 AdGuardHome 二进制路径
+	AdGuardConfigPath       string                  // 可选：测试/定制 AdGuardHome.yaml 路径
+	SkipAdGuardProbeForTest bool                    // 仅供离线单元测试跳过公网上游实测
 	Listen                string                  // 监听地址,如 ":8090"
 	Password              string                  // 可选的访问口令(空=不启用鉴权,建议仅在可信内网使用)
 	Version               string                  // singctl 版本号
@@ -130,6 +131,7 @@ func New(opts Options) *Server {
 	s.Mux.HandleFunc("POST /api/adguard/protection", s.guard(s.handleAdGuardProtectionPost))
 	s.Mux.HandleFunc("POST /api/adguard/cache/clear", s.guard(s.handleAdGuardCacheClearPost))
 	s.Mux.HandleFunc("POST /api/adguard/probe", s.guard(s.handleAdGuardProbePost))
+	s.Mux.HandleFunc("POST /api/adguard/upstreams", s.guard(s.handleAdGuardUpstreamsPost))
 	s.Mux.HandleFunc("POST /api/adguard/whitelist", s.guard(s.handleAdGuardWhitelistPost))
 	s.Mux.HandleFunc("POST /api/adguard/rewrites", s.guard(s.handleAdGuardRewritesPost))
 	s.Mux.HandleFunc("POST /api/adguard/filters", s.guard(s.handleAdGuardFiltersPost))
@@ -138,6 +140,7 @@ func New(opts Options) *Server {
 	s.Mux.HandleFunc("GET /api/audit", s.guard(s.handleAuditGet))
 	s.Mux.HandleFunc("GET /api/audit/ai-config", s.guard(s.handleAuditAIConfigGet))
 	s.Mux.HandleFunc("POST /api/audit/ai-config", s.guard(s.handleAuditAIConfigPost))
+	s.Mux.HandleFunc("POST /api/audit/ai-models", s.guard(s.handleAuditAIModelsPost))
 	s.Mux.HandleFunc("POST /api/audit/ai-review", s.guard(s.handleAuditAIReviewPost))
 	s.Mux.HandleFunc("POST /api/audit/block", s.guard(s.handleAuditBlock))
 	s.Mux.HandleFunc("POST /api/audit/unblock", s.guard(s.handleAuditUnblock))

@@ -227,40 +227,51 @@ func (s *Server) handleAdGuardCacheClearPost(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// handleAdGuardProbePost 实测本地防劫持引擎及加密 DoH 上游端到端解析延迟。
+// handleAdGuardProbePost 并发实测本地防劫持引擎端到端延迟及每条已配置加密上游的独立响应耗时，标出当前最快上游。
 func (s *Server) handleAdGuardProbePost(w http.ResponseWriter, r *http.Request) {
 	cfg, err := config.Load(s.opts.ConfigPath)
 	if err != nil || cfg == nil {
 		cfg = &config.Config{}
 	}
-	dnsAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(cfg.DNS.GetDNSPort()))
-	if err := adguard.ProbeDNS(dnsAddr, 1200*time.Millisecond); err != nil {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"healthy": false,
-			"dnsAddr": dnsAddr,
-			"error":   fmt.Sprintf("本地引擎 %s 未响应: %v", dnsAddr, err),
-		})
+	report := s.newAdGuardManager(cfg).ProbeAllUpstreams(r.Context(), "qq.com")
+	writeJSON(w, http.StatusOK, report)
+}
+
+// handleAdGuardUpstreamsPost 配置加密上游 DNS 服务器列表与并发调度策略（支持一键恢复默认上游）。
+func (s *Server) handleAdGuardUpstreamsPost(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Upstreams    []string `json:"upstreams"`
+		UpstreamMode string   `json:"upstreamMode"`
+		ResetDefault bool     `json:"resetDefault"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "请求格式错误: "+err.Error())
 		return
 	}
-	ips, elapsed, err := adguard.ProbeUpstreamResolution(dnsAddr, "qq.com", 3500*time.Millisecond)
-	if err != nil || len(ips) == 0 {
-		errMsg := "上游未返回有效 IP"
-		if err != nil {
-			errMsg = err.Error()
-		}
-		writeJSON(w, http.StatusOK, map[string]any{
-			"healthy": false,
-			"dnsAddr": dnsAddr,
-			"error":   "加密 DoH 上游解析异常: " + errMsg,
-		})
+
+	targetUpstreams := body.Upstreams
+	targetMode := body.UpstreamMode
+	if body.ResetDefault {
+		targetUpstreams = adguard.DefaultUpstreams()
+		targetMode = "parallel"
+	}
+
+	cfg, err := config.Load(s.opts.ConfigPath)
+	if err != nil || cfg == nil {
+		cfg = &config.Config{}
+	}
+	mgr := s.newAdGuardManager(cfg)
+	infos, mode, notes, setErr := mgr.SetDNSUpstreams(r.Context(), targetUpstreams, targetMode, s.opts.SkipAdGuardProbeForTest)
+	if setErr != nil {
+		writeJSONError(w, http.StatusBadRequest, setErr.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"healthy":   true,
-		"dnsAddr":   dnsAddr,
-		"domain":    "qq.com",
-		"resolved":  ips[0],
-		"latencyMs": elapsed.Milliseconds(),
+		"ok":                true,
+		"upstreams":         infos,
+		"upstreamMode":      mode,
+		"upstreamModeLabel": adguard.UpstreamModeDescription(mode),
+		"notes":             notes,
 	})
 }
 

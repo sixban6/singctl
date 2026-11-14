@@ -124,6 +124,13 @@ func TestAdGuardWebUIAPI_EndToEnd(t *testing.T) {
 				return e.Domain == entry.Domain && e.Answer == entry.Answer
 			})
 			w.WriteHeader(http.StatusOK)
+		case "/control/dns_info":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"upstream_dns":  []string{"https://223.5.5.5/dns-query", "https://1.12.12.12/dns-query"},
+				"upstream_mode": "parallel",
+			})
+		case "/control/dns_config":
+			w.WriteHeader(http.StatusOK)
 		default:
 			http.NotFound(w, r)
 		}
@@ -171,10 +178,11 @@ func TestAdGuardWebUIAPI_EndToEnd(t *testing.T) {
 	}
 
 	srv := New(Options{
-		ConfigPath:        singctlCfgPath,
-		SingBoxConfigPath: sbCfgPath,
-		AdGuardBinPath:    fakeBin,
-		AdGuardConfigPath: aghCfgPath,
+		ConfigPath:              singctlCfgPath,
+		SingBoxConfigPath:       sbCfgPath,
+		AdGuardBinPath:          fakeBin,
+		AdGuardConfigPath:       aghCfgPath,
+		SkipAdGuardProbeForTest: true,
 	})
 
 	doJSON := func(method, path string, payload any) *httptest.ResponseRecorder {
@@ -250,9 +258,90 @@ func TestAdGuardWebUIAPI_EndToEnd(t *testing.T) {
 		t.Fatalf("cache clear failed: code=%d cleared=%v", rec.Code, cacheCleared)
 	}
 
-	// 6. Status endpoint includes adguard summary
+	// 6. Update encrypted DNS upstreams & reject loopback self-loop
+	rec = doJSON(http.MethodPost, "/api/adguard/upstreams", map[string]any{
+		"upstreams":    []string{"https://dns.alidns.com/dns-query", "tls://1.12.12.12"},
+		"upstreamMode": "parallel",
+	})
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "https://223.5.5.5/dns-query") {
+		t.Fatalf("POST /api/adguard/upstreams failed: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(http.MethodPost, "/api/adguard/upstreams", map[string]any{
+		"upstreams": []string{"https://127.0.0.1/dns-query"},
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 rejecting loopback upstream, got code=%d", rec.Code)
+	}
+
+	// 7. Status endpoint includes adguard summary
 	rec = doJSON(http.MethodGet, "/api/status", nil)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"adguard"`) {
 		t.Fatalf("GET /api/status missing adguard summary: %s", rec.Body.String())
+	}
+}
+
+func TestAuditAIModels_AutoFetchAndFallback(t *testing.T) {
+	mockLLM := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer sk-test-key" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"object": "list",
+			"data": []map[string]any{
+				{"id": "antigravity/gemini-3.8-flash"},
+				{"id": "claude-sonnet-4-6"},
+			},
+		})
+	}))
+	defer mockLLM.Close()
+
+	tmpDir := t.TempDir()
+	singctlCfgPath := filepath.Join(tmpDir, "singctl.yaml")
+	if err := config.Save(singctlCfgPath, &config.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	srv := New(Options{ConfigPath: singctlCfgPath})
+
+	// 1. 拉取成功场景
+	reqBody, _ := json.Marshal(map[string]any{
+		"baseUrl": mockLLM.URL,
+		"apiKey":  "sk-test-key",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/audit/ai-models", bytes.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/audit/ai-models status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var okResp struct {
+		OK     bool     `json:"ok"`
+		Models []string `json:"models"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &okResp); err != nil {
+		t.Fatal(err)
+	}
+	if !okResp.OK || len(okResp.Models) != 2 || okResp.Models[0] != "antigravity/gemini-3.8-flash" {
+		t.Fatalf("unexpected fetched models: %+v", okResp)
+	}
+
+	// 2. 网关不可达或密钥错误时优雅降级返回 ok:false 供前端切换手动填写
+	badBody, _ := json.Marshal(map[string]any{
+		"baseUrl": mockLLM.URL,
+		"apiKey":  "wrong-key",
+	})
+	badReq := httptest.NewRequest(http.MethodPost, "/api/audit/ai-models", bytes.NewReader(badBody))
+	badReq.Header.Set("Content-Type", "application/json")
+	badRec := httptest.NewRecorder()
+	srv.Mux.ServeHTTP(badRec, badReq)
+	if badRec.Code != http.StatusOK || strings.Contains(badRec.Body.String(), `"ok":true`) {
+		t.Fatalf("expected graceful fallback ok:false, got code=%d body=%s", badRec.Code, badRec.Body.String())
 	}
 }

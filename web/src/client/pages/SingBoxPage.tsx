@@ -2,15 +2,22 @@ import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import {
   ArrowDown,
   ArrowUp,
+  ArrowUpCircle,
   Box,
+  Check,
+  ChevronDown,
   Cpu,
   FileCode,
+  Play,
+  Power,
   RefreshCw,
   RotateCcw,
+  RotateCw,
   Save,
   Search,
   SlidersHorizontal,
   Sparkles,
+  Zap,
   X,
 } from 'lucide-react';
 import {
@@ -65,10 +72,26 @@ function formatMemMB(bytes: number): string {
   return `${mb.toFixed(0)} MB`;
 }
 
-const MODE_OPTIONS: { key: SbProxyMode; label: string; hint: string }[] = [
-  { key: 'rule', label: '智能分流', hint: 'Rule：按分流规则智能决定直连与代理（推荐）' },
-  { key: 'global', label: '全局代理', hint: 'Global：除基础放行外全部经 GLOBAL 主策略组代理' },
-  { key: 'direct', label: '全局直连', hint: 'Direct：所有流量暂走直连，便于对比排查' },
+const MODE_OPTIONS: { key: SbProxyMode; label: string; activePillLabel: string; hint: string; recommended?: boolean }[] = [
+  {
+    key: 'rule',
+    label: '智能分流',
+    activePillLabel: '智能分流',
+    hint: '按分流规则智能决定直连与代理（日常默认推荐）',
+    recommended: true,
+  },
+  {
+    key: 'global',
+    label: '全局代理',
+    activePillLabel: '全局代理中',
+    hint: '临时排障：除基础放行外全部流量经 GLOBAL 策略组代理',
+  },
+  {
+    key: 'direct',
+    label: '全局直连',
+    activePillLabel: '全局直连中',
+    hint: '临时对比：所有流量暂走宽带直连，排查代理链路问题',
+  },
 ];
 
 export const SingBoxPage: React.FC<SingBoxPageProps> = ({
@@ -93,10 +116,10 @@ export const SingBoxPage: React.FC<SingBoxPageProps> = ({
     onSubChange?.(next);
   };
 
-  // 智能分流开关状态
+  // 智能分流开关状态（默认聚焦最高频的 AI 大模型分类）
   const [routing, setRouting] = useState<ClientRoutingReport | null>(null);
   const [routingLoading, setRoutingLoading] = useState(true);
-  const [activeCategory, setActiveCategory] = useState<string>('all');
+  const [activeCategory, setActiveCategory] = useState<string>('ai');
   const [searchQuery, setSearchQuery] = useState('');
   const [savingId, setSavingId] = useState<string | null>(null);
   const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
@@ -107,6 +130,8 @@ export const SingBoxPage: React.FC<SingBoxPageProps> = ({
   const [proxiesLoading, setProxiesLoading] = useState(false);
   const [traffic, setTraffic] = useState<SbTrafficSnapshot | null>(null);
   const [switchingMode, setSwitchingMode] = useState(false);
+  const [modeMenuOpen, setModeMenuOpen] = useState(false);
+  const modeMenuRef = useRef<HTMLDivElement>(null);
   const [focusGroup, setFocusGroup] = useState<string | null>(null);
 
   // config.json 编辑器状态
@@ -209,7 +234,37 @@ export const SingBoxPage: React.FC<SingBoxPageProps> = ({
     }
   }, [sub, sbCfg, loadSbConfig]);
 
+  useEffect(() => {
+    if (!modeMenuOpen) return;
+    const onPointerDown = (e: MouseEvent) => {
+      if (modeMenuRef.current && !modeMenuRef.current.contains(e.target as Node)) {
+        setModeMenuOpen(false);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setModeMenuOpen(false);
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [modeMenuOpen]);
+
+  useEffect(() => {
+    if (
+      activeCategory !== 'all' &&
+      routing?.categories &&
+      routing.categories.length > 0 &&
+      !routing.categories.some((c) => c.id === activeCategory)
+    ) {
+      setActiveCategory(routing.categories[0].id);
+    }
+  }, [routing, activeCategory]);
+
   const handleModeSwitch = async (nextMode: SbProxyMode) => {
+    setModeMenuOpen(false);
     if (!sbRunning || switchingMode || proxiesSnap?.mode === nextMode) return;
     const prevSnap = proxiesSnap;
     if (proxiesSnap) {
@@ -378,17 +433,24 @@ export const SingBoxPage: React.FC<SingBoxPageProps> = ({
     const items = routing?.items || [];
     const q = searchQuery.trim().toLowerCase();
     return items.filter((it) => {
-      if (activeCategory !== 'all' && it.category !== activeCategory) return false;
+      // 输入搜索词时自动跨全部分类匹配，清空搜索词后回到当前选中的分类（默认 AI 大模型）
+      if (!q && activeCategory !== 'all' && it.category !== activeCategory) return false;
       if (!q) return true;
       return (
         it.name.toLowerCase().includes(q) ||
         it.id.toLowerCase().includes(q) ||
         it.description.toLowerCase().includes(q) ||
         it.domainsSummary.toLowerCase().includes(q) ||
-        it.effectiveDest.toLowerCase().includes(q)
+        it.effectiveDest.toLowerCase().includes(q) ||
+        it.categoryLabel.toLowerCase().includes(q)
       );
     });
   }, [routing, activeCategory, searchQuery]);
+
+  const currentMode: SbProxyMode = proxiesSnap?.mode || 'rule';
+  const currentModeMeta = MODE_OPTIONS.find((m) => m.key === currentMode) || MODE_OPTIONS[0];
+  const isNonDefaultMode = currentMode !== 'rule';
+  const isCrossCategoryView = activeCategory === 'all' || Boolean(searchQuery.trim());
 
   const memLabel = traffic?.memory ? formatMemMB(traffic.memory) : '';
 
@@ -415,43 +477,72 @@ export const SingBoxPage: React.FC<SingBoxPageProps> = ({
         }
       />
 
-      {/* 常驻紧凑控制条：核心启停 + 实时速率/连接数 + Rule/Global/Direct 模式胶囊 */}
+      {/* 常驻紧凑控制条：内核生命周期并列组 + 配置同步 + 实时遥测 + 收起式运行模式选择器 */}
       <div className="console-card rounded-2xl px-4 py-3 flex flex-col xl:flex-row xl:items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-2">
           {sbRunning ? (
             <>
-              <Button size="sm" variant="primary" disabled={busy} onClick={() => onAction('sb-restart')}>
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={busy}
+                icon={<RotateCw className="w-3.5 h-3.5" />}
+                onClick={() => onAction('sb-restart')}
+              >
                 重启内核
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={busy}
+                icon={<ArrowUpCircle className="w-3.5 h-3.5" />}
+                onClick={() => onAction(sb?.installed ? 'sb-update' : 'sb-install')}
+              >
+                {sb?.installed ? '更新内核' : '安装内核'}
               </Button>
               <Button
                 size="sm"
                 variant="danger"
                 disabled={busy}
+                icon={<Power className="w-3.5 h-3.5" />}
                 onClick={() => onAction('sb-stop', {}, '确认停止 sing-box？这会中断当前代理连接。')}
               >
                 停止内核
               </Button>
             </>
           ) : (
-            <Button size="sm" variant="primary" disabled={busy} onClick={() => onAction('sb-start')}>
-              启动内核
-            </Button>
+            <>
+              <Button
+                size="sm"
+                variant="primary"
+                disabled={busy}
+                icon={<Play className="w-3.5 h-3.5" />}
+                onClick={() => onAction('sb-start')}
+              >
+                启动内核
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={busy}
+                icon={<ArrowUpCircle className="w-3.5 h-3.5" />}
+                onClick={() => onAction(sb?.installed ? 'sb-update' : 'sb-install')}
+              >
+                {sb?.installed ? '更新内核' : '安装内核'}
+              </Button>
+            </>
           )}
+
+          <span className="hidden sm:inline-block h-4 w-px bg-slate-800 mx-0.5" aria-hidden="true" />
+
           <Button
             size="sm"
+            variant="secondary"
             disabled={busy}
             onClick={() => onAction('sb-gen')}
             icon={<Sparkles className="w-3.5 h-3.5" />}
           >
             从订阅生成配置
-          </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            disabled={busy}
-            onClick={() => onAction(sb?.installed ? 'sb-update' : 'sb-install')}
-          >
-            {sb?.installed ? '更新内核' : '安装 sing-box'}
           </Button>
         </div>
 
@@ -488,31 +579,71 @@ export const SingBoxPage: React.FC<SingBoxPageProps> = ({
               )}
             </div>
 
-            {/* 运行模式切换胶囊 */}
-            <div
-              role="group"
-              aria-label="代理运行模式"
-              className="inline-flex items-center p-0.5 rounded-xl bg-surface2 border border-subtle"
-            >
-              {MODE_OPTIONS.map((opt) => {
-                const active = (proxiesSnap?.mode || 'rule') === opt.key;
-                return (
-                  <button
-                    key={opt.key}
-                    type="button"
-                    disabled={switchingMode}
-                    title={opt.hint}
-                    onClick={() => void handleModeSwitch(opt.key)}
-                    className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-all cursor-pointer disabled:opacity-60 ${
-                      active
-                        ? 'bg-[var(--accent)] text-white shadow-sm'
-                        : 'text-secondary hover:text-primary'
-                    }`}
-                  >
-                    {opt.label}
-                  </button>
-                );
-              })}
+            {/* 运行模式紧凑单胶囊下拉（收起低频的全局代理/全局直连，非默认态琥珀色防呆提醒） */}
+            <div ref={modeMenuRef} className="relative">
+              <button
+                type="button"
+                disabled={switchingMode}
+                aria-haspopup="listbox"
+                aria-expanded={modeMenuOpen}
+                title={currentModeMeta.hint}
+                onClick={() => setModeMenuOpen((v) => !v)}
+                className={`inline-flex items-center gap-1.5 h-8 px-3 rounded-xl text-xs font-medium border transition-all cursor-pointer disabled:opacity-60 ${
+                  isNonDefaultMode
+                    ? 'bg-amber-500/15 text-amber-300 border-amber-500/35 hover:bg-amber-500/25'
+                    : 'bg-surface2 text-primary border-subtle hover:border-strong'
+                }`}
+              >
+                {isNonDefaultMode ? (
+                  <Zap className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                ) : (
+                  <SlidersHorizontal className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                )}
+                <span>{currentModeMeta.activePillLabel}</span>
+                <ChevronDown
+                  className={`w-3.5 h-3.5 opacity-75 transition-transform ${modeMenuOpen ? 'rotate-180' : ''}`}
+                />
+              </button>
+
+              {modeMenuOpen && (
+                <div
+                  role="listbox"
+                  aria-label="切换代理运行模式"
+                  className="absolute right-0 mt-1.5 w-64 rounded-2xl bg-slate-900 border border-slate-700/90 shadow-2xl p-1.5 z-30 space-y-1"
+                >
+                  {MODE_OPTIONS.map((opt) => {
+                    const active = currentMode === opt.key;
+                    return (
+                      <button
+                        key={opt.key}
+                        type="button"
+                        role="option"
+                        aria-selected={active}
+                        disabled={switchingMode}
+                        onClick={() => void handleModeSwitch(opt.key)}
+                        className={`w-full text-left px-3 py-2 rounded-xl transition-colors cursor-pointer flex items-start justify-between gap-2 ${
+                          active
+                            ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/25'
+                            : 'text-slate-200 hover:bg-slate-800/80 border border-transparent'
+                        }`}
+                      >
+                        <div className="min-w-0 space-y-0.5">
+                          <div className="flex items-center gap-1.5 text-xs font-semibold">
+                            <span>{opt.label}</span>
+                            {opt.recommended && (
+                              <span className="text-[10px] font-normal px-1.5 py-0.2 rounded bg-emerald-500/15 text-emerald-400">
+                                推荐默认
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-[11px] text-slate-400 leading-snug">{opt.hint}</div>
+                        </div>
+                        {active && <Check className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -562,24 +693,13 @@ export const SingBoxPage: React.FC<SingBoxPageProps> = ({
 
             <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
               <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1 sm:pb-0 sm:flex-wrap">
-                <button
-                  type="button"
-                  onClick={() => setActiveCategory('all')}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
-                    activeCategory === 'all'
-                      ? 'bg-[var(--accent)] text-white shadow-sm'
-                      : 'bg-surface2 text-secondary hover:text-primary border border-subtle'
-                  }`}
-                >
-                  全部 ({routing?.items.length ?? 0})
-                </button>
                 {(routing?.categories || []).map((cat) => (
                   <button
                     key={cat.id}
                     type="button"
                     onClick={() => setActiveCategory(cat.id)}
                     className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
-                      activeCategory === cat.id
+                      !searchQuery.trim() && activeCategory === cat.id
                         ? 'bg-[var(--accent)] text-white shadow-sm'
                         : 'bg-surface2 text-secondary hover:text-primary border border-subtle'
                     }`}
@@ -587,6 +707,17 @@ export const SingBoxPage: React.FC<SingBoxPageProps> = ({
                     {cat.label} ({categoryCounts[cat.id] || 0})
                   </button>
                 ))}
+                <button
+                  type="button"
+                  onClick={() => setActiveCategory('all')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
+                    !searchQuery.trim() && activeCategory === 'all'
+                      ? 'bg-[var(--accent)] text-white shadow-sm'
+                      : 'bg-surface2 text-secondary hover:text-primary border border-subtle'
+                  }`}
+                >
+                  全部 ({routing?.items.length ?? 0})
+                </button>
               </div>
 
               <div className="relative w-full lg:w-64 shrink-0">
@@ -611,7 +742,7 @@ export const SingBoxPage: React.FC<SingBoxPageProps> = ({
               </div>
             </div>
 
-            {activeCategory !== 'all' && routing?.categories && (
+            {!searchQuery.trim() && activeCategory !== 'all' && routing?.categories && (
               <div className="rounded-xl bg-surface2/70 border border-subtle px-3.5 py-2 text-xs text-secondary">
                 {routing.categories.find((c) => c.id === activeCategory)?.description}
               </div>
@@ -640,7 +771,7 @@ export const SingBoxPage: React.FC<SingBoxPageProps> = ({
                       <div className="min-w-0 space-y-1">
                         <div className="flex flex-wrap items-center gap-2">
                           <span className="text-sm font-semibold text-primary">{item.name}</span>
-                          {activeCategory === 'all' && (
+                          {isCrossCategoryView && (
                             <span className="text-[11px] px-2 py-0.5 rounded-md bg-surface2 text-secondary border border-subtle">
                               {item.categoryLabel}
                             </span>

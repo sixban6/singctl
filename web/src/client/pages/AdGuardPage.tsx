@@ -18,7 +18,11 @@ import {
   Layers,
   Download,
   RotateCw,
+  RotateCcw,
   Power,
+  Server,
+  Trophy,
+  Check,
 } from 'lucide-react';
 import {
   Badge,
@@ -33,6 +37,8 @@ import {
   AdGuardCredentialsResponse,
   AdGuardOverviewSnapshot,
   AdGuardProbeResult,
+  AdGuardUpstreamMode,
+  AdGuardUpstreamProbeItem,
   ClientStatusResponse,
 } from '../types';
 
@@ -60,6 +66,12 @@ function formatDurationSec(totalSec: number): string {
   if (m > 0) return `${m} 分 ${rem.toString().padStart(2, '0')} 秒`;
   return `${rem} 秒`;
 }
+
+const UPSTREAM_MODE_OPTIONS: { key: AdGuardUpstreamMode; label: string; shortDesc: string }[] = [
+  { key: 'parallel', label: '并行竞速 (推荐)', shortDesc: '同时请求全部上游，每次自动采用最快返回' },
+  { key: 'fastest_addr', label: '最快 IP 优选', shortDesc: '并发查询并优选网络延迟最低的目标地址' },
+  { key: 'load_balance', label: '负载均衡', shortDesc: '按响应质量在多条加密上游间动态分摊' },
+];
 
 export const AdGuardPage: React.FC<AdGuardPageProps> = ({
   status,
@@ -90,6 +102,10 @@ export const AdGuardPage: React.FC<AdGuardPageProps> = ({
   const [showCustomFilter, setShowCustomFilter] = useState(false);
   const [customFilterName, setCustomFilterName] = useState('');
   const [customFilterUrl, setCustomFilterUrl] = useState('');
+
+  // Upstream DNS management input & saving state
+  const [upstreamInput, setUpstreamInput] = useState('');
+  const [savingUpstreams, setSavingUpstreams] = useState(false);
 
   // Native Panel & Credentials Drawer
   const [credOpen, setCredOpen] = useState(false);
@@ -155,8 +171,12 @@ export const AdGuardPage: React.FC<AdGuardPageProps> = ({
         const res = await clientApi.probeAdGuardUpstream();
         setProbe(res);
         if (!silent) {
-          if (res.healthy) {
-            success(`加密 DoH 上游正常：${res.domain} → ${res.resolved} (${res.latencyMs}ms)`);
+          if (res.healthy && res.fastestUpstream) {
+            success(
+              `实测完成：当前最快为 ${res.fastestName || res.fastestUpstream} (${res.fastestLatencyMs}ms) · 本地端到端 ${res.latencyMs}ms`,
+            );
+          } else if (res.healthy) {
+            success(`加密上游解析正常：${res.domain} → ${res.resolved} (${res.latencyMs}ms)`);
           } else {
             error(res.error || '上游解析探测异常');
           }
@@ -360,6 +380,91 @@ export const AdGuardPage: React.FC<AdGuardPageProps> = ({
       error('复制失败，请手动复制');
     }
   };
+
+  const handleUpdateUpstreams = async (
+    nextList: string[],
+    nextMode?: AdGuardUpstreamMode,
+    resetDefault = false,
+  ) => {
+    setSavingUpstreams(true);
+    try {
+      const res = await clientApi.saveAdGuardUpstreams({
+        upstreams: resetDefault ? undefined : nextList,
+        upstreamMode: nextMode || snap?.upstreamMode || 'parallel',
+        resetDefault,
+      });
+      if (snap) {
+        setSnap({
+          ...snap,
+          upstreams: res.upstreams,
+          upstreamMode: res.upstreamMode,
+          upstreamModeLabel: res.upstreamModeLabel,
+        });
+      }
+      if (resetDefault) {
+        success('已恢复默认推荐的阿里 / 腾讯纯 IP 加密上游并热生效');
+      } else if (res.notes && res.notes.length > 0) {
+        success(`上游已热生效（${res.notes.join('；')}）`);
+      } else {
+        success('加密上游 DNS 配置已热生效');
+      }
+      await loadOverview(true);
+      void runProbe(true);
+    } catch (e) {
+      error((e as Error).message || '保存上游 DNS 配置失败');
+    } finally {
+      setSavingUpstreams(false);
+    }
+  };
+
+  const handleToggleUpstreamPreset = (presetAddr: string) => {
+    if (!snap) return;
+    const current = snap.upstreams.map((u) => u.address);
+    const exists = current.some((a) => a.toLowerCase() === presetAddr.toLowerCase());
+    if (exists) {
+      if (current.length <= 1) {
+        error('至少需保留 1 条加密上游 DNS 服务器');
+        return;
+      }
+      void handleUpdateUpstreams(
+        current.filter((a) => a.toLowerCase() !== presetAddr.toLowerCase()),
+      );
+    } else {
+      void handleUpdateUpstreams([...current, presetAddr]);
+    }
+  };
+
+  const handleAddCustomUpstream = (e: React.FormEvent) => {
+    e.preventDefault();
+    const raw = upstreamInput.trim();
+    if (!raw || !snap) return;
+    const current = snap.upstreams.map((u) => u.address);
+    void handleUpdateUpstreams([...current, raw]).then(() => {
+      setUpstreamInput('');
+    });
+  };
+
+  const handleRemoveUpstream = (addr: string) => {
+    if (!snap) return;
+    const current = snap.upstreams.map((u) => u.address);
+    if (current.length <= 1) {
+      error('至少需保留 1 条加密上游 DNS 服务器');
+      return;
+    }
+    void handleUpdateUpstreams(current.filter((a) => a !== addr));
+  };
+
+  const probeItemMap = useMemo(() => {
+    const map = new Map<string, AdGuardUpstreamProbeItem>();
+    for (const item of probe?.upstreams || []) {
+      map.set(item.address.toLowerCase(), item);
+    }
+    return map;
+  }, [probe?.upstreams]);
+
+  const activeUpstreamSet = useMemo(() => {
+    return new Set((snap?.upstreams || []).map((u) => u.address.toLowerCase()));
+  }, [snap?.upstreams]);
 
   const whitelistSet = useMemo(() => {
     return new Set((snap?.whitelistedDomains || []).map((d) => d.toLowerCase()));
@@ -684,10 +789,14 @@ export const AdGuardPage: React.FC<AdGuardPageProps> = ({
         </div>
 
         <div className="console-card rounded-2xl p-4 space-y-1">
-          <div className="text-xs text-secondary">加密 DoH 上游实测</div>
+          <div className="text-xs text-secondary">加密上游竞速实测</div>
           <div className="text-xl sm:text-2xl font-bold text-primary font-mono tnum">
             {probing ? (
-              <span className="text-sm text-secondary">探测中…</span>
+              <span className="text-sm text-secondary">并发测速中…</span>
+            ) : probe?.fastestLatencyMs ? (
+              <>
+                {probe.fastestLatencyMs} <span className="text-xs font-normal">ms</span>
+              </>
             ) : probe?.healthy ? (
               <>
                 {probe.latencyMs} <span className="text-xs font-normal">ms</span>
@@ -696,13 +805,231 @@ export const AdGuardPage: React.FC<AdGuardPageProps> = ({
               <span className="text-sm text-secondary">--</span>
             )}
           </div>
-          <div className="text-[11px] text-muted truncate">
-            {probe?.healthy
-              ? `${probe.domain} → ${probe.resolved}`
-              : probe?.error || '阿里 / 腾讯纯 IP DoH 并发'}
+          <div className="text-[11px] text-muted truncate" title={probe?.fastestUpstream || ''}>
+            {probe?.fastestName
+              ? `最快：${probe.fastestName}`
+              : probe?.healthy
+                ? `${probe.domain} → ${probe.resolved}`
+                : probe?.error || '点击「实测上游」对比各节点速度'}
           </div>
         </div>
       </div>
+
+      {/* 加密上游 DNS 服务器配置与并发竞速榜单 */}
+      <SectionCard
+        title="加密上游 DNS 服务器与竞速策略"
+        icon={<Server className="w-4 h-4" />}
+        subtitle="仅使用纯 IP 加密 DoH / DoT 直连上游，彻底规避运营商 53 端口劫持与透明代理冷启动回环"
+        actions={
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              size="xs"
+              variant="secondary"
+              loading={probing}
+              disabled={!snap?.dnsHealthy}
+              onClick={() => void runProbe(false)}
+              icon={<Zap className="w-3 h-3" />}
+            >
+              实测上游速度
+            </Button>
+            <Button
+              size="xs"
+              variant="ghost"
+              disabled={savingUpstreams || mutating}
+              onClick={() => void handleUpdateUpstreams([], 'parallel', true)}
+              icon={<RotateCcw className="w-3 h-3" />}
+            >
+              恢复默认上游
+            </Button>
+          </div>
+        }
+      >
+        <div className="space-y-4">
+          {/* 实时胜出与调度策略结论横幅 */}
+          <div className="rounded-xl border border-subtle bg-surface2/70 px-3.5 py-3 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+            <div className="space-y-1 min-w-0">
+              <div className="flex flex-wrap items-center gap-2 text-xs">
+                <Badge tone="ok">
+                  {snap?.upstreamMode === 'fastest_addr'
+                    ? '当前模式：最快 IP 优选'
+                    : snap?.upstreamMode === 'load_balance'
+                      ? '当前模式：负载均衡'
+                      : '当前模式：并行竞速 (谁快用谁)'}
+                </Badge>
+                {probe?.fastestUpstream && (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 font-medium">
+                    <Trophy className="w-3 h-3 text-emerald-400" />
+                    <span>
+                      最快响应：{probe.fastestName} ({probe.fastestLatencyMs}ms)
+                    </span>
+                  </span>
+                )}
+                {probe?.healthy && (
+                  <span className="text-[11px] font-mono text-muted">
+                    本地引擎端到端：{probe.domain} → {probe.resolved} ({probe.latencyMs}ms)
+                  </span>
+                )}
+              </div>
+              <p className="text-[11px] text-secondary">
+                {snap?.upstreamModeLabel ||
+                  '并行竞速（同时请求全部加密上游，每次自动采用最快返回的结果）'}
+              </p>
+            </div>
+
+            {/* 调度模式切换胶囊 */}
+            <div
+              role="group"
+              aria-label="上游查询调度策略"
+              className="inline-flex items-center p-0.5 rounded-xl bg-surface1 border border-subtle shrink-0 self-start lg:self-center"
+            >
+              {UPSTREAM_MODE_OPTIONS.map((m) => {
+                const active = (snap?.upstreamMode || 'parallel') === m.key;
+                return (
+                  <button
+                    key={m.key}
+                    type="button"
+                    disabled={savingUpstreams || mutating}
+                    title={m.shortDesc}
+                    onClick={() => {
+                      if (active || !snap) return;
+                      void handleUpdateUpstreams(
+                        snap.upstreams.map((u) => u.address),
+                        m.key,
+                      );
+                    }}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-colors cursor-pointer disabled:opacity-50 ${
+                      active
+                        ? 'bg-[var(--accent)] text-white shadow-sm'
+                        : 'text-secondary hover:text-primary'
+                    }`}
+                  >
+                    {m.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* 当前已启用加密上游列表 + 单节点延迟榜单 */}
+          <div className="divide-y divide-[var(--border-subtle)] rounded-xl border border-subtle bg-surface1 overflow-hidden">
+            {(snap?.upstreams || []).map((up) => {
+              const pItem = probeItemMap.get(up.address.toLowerCase());
+              const canRemove = (snap?.upstreams.length || 0) > 1;
+              return (
+                <div
+                  key={up.address}
+                  className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 px-3.5 py-2.5 hover:bg-surface2/40 transition-colors"
+                >
+                  <div className="min-w-0 flex flex-wrap items-center gap-2">
+                    <Badge tone={up.protocol === 'DoH' ? 'accent' : 'neutral'}>{up.protocol}</Badge>
+                    <span className="font-mono text-xs sm:text-sm font-semibold text-primary break-all">
+                      {up.address}
+                    </span>
+                    <span className="text-xs text-secondary">{up.name}</span>
+                  </div>
+
+                  <div className="flex items-center justify-between sm:justify-end gap-2 shrink-0">
+                    {probing ? (
+                      <span className="text-[11px] font-mono text-muted">测速中…</span>
+                    ) : pItem ? (
+                      pItem.healthy ? (
+                        <div className="flex items-center gap-1.5">
+                          {pItem.resolved && (
+                            <span className="hidden md:inline text-[11px] font-mono text-muted">
+                              → {pItem.resolved}
+                            </span>
+                          )}
+                          <span
+                            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-mono tnum border ${
+                              pItem.fastest
+                                ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/35 font-semibold'
+                                : pItem.latencyMs <= 60
+                                  ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                                  : pItem.latencyMs <= 150
+                                    ? 'bg-sky-500/10 text-sky-300 border-sky-500/20'
+                                    : 'bg-amber-500/10 text-amber-300 border-amber-500/20'
+                            }`}
+                          >
+                            {pItem.fastest && <Trophy className="w-3 h-3 text-emerald-400" />}
+                            <span>{pItem.latencyMs} ms</span>
+                            {pItem.fastest && <span className="font-sans text-[11px]">最快</span>}
+                          </span>
+                        </div>
+                      ) : (
+                        <Badge tone="danger">{pItem.error || '不可达'}</Badge>
+                      )
+                    ) : (
+                      <span className="text-[11px] text-muted">待测速</span>
+                    )}
+
+                    <Button
+                      size="xs"
+                      variant="ghost"
+                      disabled={savingUpstreams || !canRemove}
+                      title={canRemove ? '移除该上游' : '至少需保留 1 条加密上游'}
+                      onClick={() => handleRemoveUpstream(up.address)}
+                      icon={<Trash2 className="w-3.5 h-3.5" />}
+                    />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* 精选国内纯 IP 加密预设一键增删 + 自定义输入 */}
+          <div className="space-y-2.5 pt-1">
+            <div className="text-[11px] text-muted">
+              精选国内纯 IP 加密上游预设（已验证 IP 证书并豁免防火墙，点击即可启用或移除）：
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {(snap?.upstreamPresets || []).map((preset) => {
+                const active = activeUpstreamSet.has(preset.address.toLowerCase());
+                return (
+                  <button
+                    key={preset.address}
+                    type="button"
+                    disabled={savingUpstreams}
+                    onClick={() => handleToggleUpstreamPreset(preset.address)}
+                    title={preset.address}
+                    className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs transition-colors border cursor-pointer disabled:opacity-50 ${
+                      active
+                        ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/35 font-medium'
+                        : 'bg-surface2 text-secondary hover:text-primary border-subtle'
+                    }`}
+                  >
+                    {active ? (
+                      <Check className="w-3.5 h-3.5 text-emerald-400" />
+                    ) : (
+                      <Plus className="w-3.5 h-3.5 opacity-70" />
+                    )}
+                    <span>{preset.name}</span>
+                  </button>
+                );
+              })}
+            </div>
+
+            <form onSubmit={handleAddCustomUpstream} className="flex flex-col sm:flex-row gap-2 pt-1">
+              <input
+                type="text"
+                value={upstreamInput}
+                onChange={(e) => setUpstreamInput(e.target.value)}
+                placeholder="手动添加纯 IP 加密上游，如 https://223.5.5.5/dns-query 或 tls://1.12.12.12"
+                className="flex-1 min-w-0 h-9 px-3 rounded-xl bg-surface2 border border-subtle text-xs sm:text-sm text-primary font-mono focus:outline-none focus:border-strong"
+              />
+              <Button
+                type="submit"
+                size="sm"
+                variant="secondary"
+                loading={savingUpstreams}
+                disabled={!upstreamInput.trim()}
+                icon={<Plus className="w-3.5 h-3.5" />}
+              >
+                验证并添加上游
+              </Button>
+            </form>
+          </div>
+        </div>
+      </SectionCard>
 
       {/* 双栏工作区：误拦一键放行 + 局域网 DNS 重写 */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">

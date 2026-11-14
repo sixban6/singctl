@@ -3,7 +3,10 @@ import {
   AdGuardCredentialsResponse,
   AdGuardOverviewSnapshot,
   AdGuardProbeResult,
+  AdGuardUpstreamMode,
+  AdGuardUpstreamServerInfo,
   AuditAIConfig,
+  AuditAIModelsResponse,
   AuditAIReview,
   AuditFlowRecord,
   AuditReport,
@@ -215,6 +218,21 @@ export const clientApi = {
     request<{ ok: boolean }>('/api/adguard/cache/clear', { method: 'POST', body: '{}' }),
   probeAdGuardUpstream: () =>
     request<AdGuardProbeResult>('/api/adguard/probe', { method: 'POST', body: '{}' }),
+  saveAdGuardUpstreams: (payload: {
+    upstreams?: string[];
+    upstreamMode?: AdGuardUpstreamMode;
+    resetDefault?: boolean;
+  }) =>
+    request<{
+      ok: boolean;
+      upstreams: AdGuardUpstreamServerInfo[];
+      upstreamMode: AdGuardUpstreamMode;
+      upstreamModeLabel: string;
+      notes?: string[];
+    }>('/api/adguard/upstreams', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
   setAdGuardWhitelist: (action: 'add' | 'remove', domain: string) =>
     request<{ ok: boolean }>('/api/adguard/whitelist', {
       method: 'POST',
@@ -240,6 +258,11 @@ export const clientApi = {
   getAuditAIConfig: () => request<AuditAIConfig>('/api/audit/ai-config'),
   saveAuditAIConfig: (payload: { baseUrl: string; apiKey: string; model: string }) =>
     request<{ ok: boolean; message: string; model: string }>('/api/audit/ai-config', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  fetchAuditAIModels: (payload: { baseUrl: string; apiKey: string }) =>
+    request<AuditAIModelsResponse>('/api/audit/ai-models', {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
