@@ -133,7 +133,7 @@ export const SystemPage: React.FC<SystemPageProps> = ({ status, busy, onAction }
         open={pwaOpen}
         onClose={() => setPwaOpen(false)}
         title="手机免密主屏幕快捷入口"
-        subtitle="iPhone Safari 扫码打开并选择「添加到主屏幕」，即可享受 30 天免密直连"
+        subtitle="手机浏览器扫描打开并选择「添加到主屏幕」，即可享受 30 天免密直连"
       >
         <div className="flex flex-col items-center text-center space-y-4 py-2">
           {pwaLoading ? (

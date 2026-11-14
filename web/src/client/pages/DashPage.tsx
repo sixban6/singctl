@@ -106,7 +106,7 @@ export const DashPage: React.FC<DashPageProps> = ({ status, busy, onAction, onNa
         res.importUrl || `sing-box://import-remote-profile?url=${encodeURIComponent(res.url)}`,
       );
     } catch (err: unknown) {
-      error(err instanceof Error ? err.message : '获取 iOS 配置地址失败');
+      error(err instanceof Error ? err.message : '获取移动端配置地址失败');
     } finally {
       setIosLoading(false);
     }
@@ -167,7 +167,7 @@ export const DashPage: React.FC<DashPageProps> = ({ status, busy, onAction, onNa
               onClick={openIOSDrawer}
               icon={<QrCode className="w-3.5 h-3.5" />}
             >
-              iOS 扫码导入
+              移动端扫描导入
             </Button>
           </>
         }
@@ -542,12 +542,12 @@ export const DashPage: React.FC<DashPageProps> = ({ status, busy, onAction, onNa
         </SectionCard>
       </div>
 
-      {/* iOS SFI Import Drawer */}
+      {/* Mobile Sing-Box Import Drawer */}
       <SlideDrawer
         open={iosOpen}
         onClose={() => setIosOpen(false)}
-        title="iOS · Sing-Box (SFI) 扫码导入"
-        subtitle="同一局域网手机相机或 SFI App 扫描即可同步完整远程分流配置"
+        title="移动端 · Sing-Box 扫描导入"
+        subtitle="同一局域网下使用手机相机或 iOS / Android Sing-Box 客户端扫描即可同步完整分流配置"
       >
         <div className="flex flex-col items-center text-center space-y-4 py-2">
           {iosLoading ? (
@@ -564,7 +564,7 @@ export const DashPage: React.FC<DashPageProps> = ({ status, busy, onAction, onNa
                       : 'text-secondary hover:text-primary'
                   }`}
                 >
-                  SFI 一键扫码导入
+                  客户端一键扫描导入
                 </button>
                 <button
                   type="button"
@@ -592,7 +592,7 @@ export const DashPage: React.FC<DashPageProps> = ({ status, busy, onAction, onNa
                 </a>
                 <Button
                   variant="primary"
-                  onClick={() => copyText(iosUrl, '已复制 iOS 配置同步地址')}
+                  onClick={() => copyText(iosUrl, '已复制移动端配置同步地址')}
                   icon={<Copy className="w-3.5 h-3.5" />}
                 >
                   复制配置链接
