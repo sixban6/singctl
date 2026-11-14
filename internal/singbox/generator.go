@@ -369,6 +369,19 @@ func (g *ConfigGenerator) InjectLocalDNS(rawJSON, platform string) (string, erro
 		return rawJSON, nil
 	}
 
+	dnsPort := g.config.DNS.GetDNSPort()
+	// 生产环境（非单测安装桩）下校验 AdGuard Home 本地 DNS 实际可达（未运行时尝试自动拉起），
+	// 若拉起仍失败则保留内置加密/直连 dns_local，绝不生成指向死端口的配置导致网关断网。
+	if runtime.GOOS == "linux" && !adguard.HasInstalledCheckOverrideForTest() {
+		dnsAddr := fmt.Sprintf("127.0.0.1:%d", dnsPort)
+		if adguard.ProbeDNS(dnsAddr, 800*time.Millisecond) != nil {
+			if err := adguard.NewManager(g.config, "").EnsureHealthy(); err != nil {
+				log.Warn("AdGuard Home (%s) 未就绪 (%v)，本次配置保留内置 dns_local 以保障不断网", dnsAddr, err)
+				return rawJSON, nil
+			}
+		}
+	}
+
 	var root map[string]any
 	if err := json.Unmarshal([]byte(rawJSON), &root); err != nil {
 		return "", fmt.Errorf("failed to parse config JSON for local DNS injection: %w", err)
@@ -383,7 +396,6 @@ func (g *ConfigGenerator) InjectLocalDNS(rawJSON, platform string) (string, erro
 		return rawJSON, nil
 	}
 
-	dnsPort := g.config.DNS.GetDNSPort()
 	updated := false
 	for i, item := range servers {
 		srvMap, ok := item.(map[string]any)

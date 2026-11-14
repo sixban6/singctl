@@ -91,6 +91,100 @@ export interface ClientFirewallStatus {
   enabled: boolean;
 }
 
+export interface ClientAdGuardStatusSummary {
+  supported: boolean;
+  installed: boolean;
+  enabled: boolean;
+  running: boolean;
+  dnsHealthy: boolean;
+  webHealthy: boolean;
+  singboxLinked: boolean;
+  version: string;
+  dnsAddr: string;
+  webUrl: string;
+}
+
+export interface AdGuardDomainStat {
+  domain: string;
+  count: number;
+}
+
+export interface AdGuardFilterItem {
+  id: number;
+  enabled: boolean;
+  name: string;
+  url: string;
+  rulesCount: number;
+  lastUpdated?: string;
+}
+
+export interface AdGuardPresetStatus {
+  id: string;
+  name: string;
+  desc: string;
+  url: string;
+  recommended: boolean;
+  installed: boolean;
+  enabled: boolean;
+  rulesCount: number;
+}
+
+export interface AdGuardRewriteEntry {
+  domain: string;
+  answer: string;
+}
+
+export interface AdGuardOverviewSnapshot {
+  supported: boolean;
+  installed: boolean;
+  enabled: boolean;
+  running: boolean;
+  dnsHealthy: boolean;
+  webHealthy: boolean;
+  singboxLinked: boolean;
+  isOpenWrt: boolean;
+  version: string;
+  dnsAddr: string;
+  webAddr: string;
+  webUrl: string;
+  username: string;
+  hasPassword: boolean;
+  protectionEnabled: boolean;
+  protectionDisabledDurationMs?: number;
+  protectionDisabledUntil?: string;
+  upstreamLatencyMs?: number;
+  stats: {
+    numDnsQueries: number;
+    numBlockedFiltering: number;
+    blockedPercent: number;
+    avgProcessingMs: number;
+    topBlockedDomains: AdGuardDomainStat[];
+    topQueriedDomains: AdGuardDomainStat[];
+  };
+  filters: AdGuardFilterItem[];
+  totalRulesCount: number;
+  presets: AdGuardPresetStatus[];
+  whitelistedDomains: string[];
+  autoWhitelistedSubs: string[];
+  auditManagedCount: number;
+  rewrites: AdGuardRewriteEntry[];
+}
+
+export interface AdGuardProbeResult {
+  healthy: boolean;
+  dnsAddr: string;
+  domain?: string;
+  resolved?: string;
+  latencyMs?: number;
+  error?: string;
+}
+
+export interface AdGuardCredentialsResponse {
+  webUrl: string;
+  username: string;
+  password: string;
+}
+
 export interface ClientConfigSubSummary {
   name: string;
   urlHint: string;
@@ -103,6 +197,7 @@ export interface ClientStatusResponse {
   host: ClientHostInfo;
   singbox: ClientSingBoxStatus;
   daemon: ClientDaemonStatus;
+  adguard?: ClientAdGuardStatusSummary;
   tailscale: ClientTailscaleStatus;
   firewall: ClientFirewallStatus;
   config: {

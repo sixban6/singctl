@@ -36,6 +36,8 @@ type Options struct {
 	ConfigPath            string                  // singctl 配置文件路径
 	SingBoxConfigPath     string                  // 可选：测试/定制 sing-box config.json 路径（留空使用 constant.SingBoxConfigFile）
 	SingBoxWorkConfigPath string                  // 可选：测试/定制沙盒副本 config.json 路径
+	AdGuardBinPath        string                  // 可选：测试/定制 AdGuardHome 二进制路径
+	AdGuardConfigPath     string                  // 可选：测试/定制 AdGuardHome.yaml 路径
 	Listen                string                  // 监听地址,如 ":8090"
 	Password              string                  // 可选的访问口令(空=不启用鉴权,建议仅在可信内网使用)
 	Version               string                  // singctl 版本号
@@ -55,6 +57,11 @@ type Server struct {
 
 	cfgMu        sync.Mutex
 	auditLimiter *auditRateLimiter
+
+	// AdGuardHome 二进制版本短缓存（避免 /api/status 高频轮询每次 fork --version）
+	aghVerMu      sync.Mutex
+	aghVerBinKey  string
+	aghVerCached  string
 
 	// Clash 控制接口（endpoint + secret）短缓存，避免高频轮询重复探测 /version
 	clashMu          sync.Mutex
@@ -115,6 +122,17 @@ func New(opts Options) *Server {
 	s.Mux.HandleFunc("GET /api/watchdog", s.guard(s.handleWatchdogGet))
 	s.Mux.HandleFunc("PUT /api/watchdog/config", s.guard(s.handleWatchdogConfigPut))
 	s.Mux.HandleFunc("POST /api/watchdog/patrol", s.guard(s.handleWatchdogPatrolPost))
+
+	// 客户端本地防劫持 DNS (AdGuard Home) 管控中心 API
+	s.Mux.HandleFunc("GET /api/adguard", s.guard(s.handleAdGuardOverviewGet))
+	s.Mux.HandleFunc("GET /api/adguard/credentials", s.guard(s.handleAdGuardCredentialsGet))
+	s.Mux.HandleFunc("POST /api/adguard/credentials/reset", s.guard(s.handleAdGuardCredentialsResetPost))
+	s.Mux.HandleFunc("POST /api/adguard/protection", s.guard(s.handleAdGuardProtectionPost))
+	s.Mux.HandleFunc("POST /api/adguard/cache/clear", s.guard(s.handleAdGuardCacheClearPost))
+	s.Mux.HandleFunc("POST /api/adguard/probe", s.guard(s.handleAdGuardProbePost))
+	s.Mux.HandleFunc("POST /api/adguard/whitelist", s.guard(s.handleAdGuardWhitelistPost))
+	s.Mux.HandleFunc("POST /api/adguard/rewrites", s.guard(s.handleAdGuardRewritesPost))
+	s.Mux.HandleFunc("POST /api/adguard/filters", s.guard(s.handleAdGuardFiltersPost))
 
 	// 局域网设备行为审计与双层一键拉黑 API
 	s.Mux.HandleFunc("GET /api/audit", s.guard(s.handleAuditGet))

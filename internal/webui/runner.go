@@ -54,6 +54,14 @@ var Actions = map[string]ActionDef{
 	"fw-enable":  {Title: "启用防火墙加固", Build: fixed("fw", "enable")},
 	"fw-disable": {Title: "禁用防火墙加固", Build: fixed("fw", "disable")},
 
+	// 本地防劫持 DNS (AdGuard Home)
+	"dns-install":   {Title: "安装并启用防劫持 DNS (AdGuard Home)", Build: fixed("dns", "install", "--non-interactive")},
+	"dns-update":    {Title: "更新 AdGuard Home 核心版本", Build: fixed("dns", "install", "--non-interactive", "--force")},
+	"dns-start":     {Title: "启用防劫持 DNS 并接管 sing-box", Build: fixed("dns", "start")},
+	"dns-stop":      {Title: "安全停用防劫持 DNS (自动回退内置加密 DNS)", Build: fixed("dns", "stop")},
+	"dns-restart":   {Title: "重启 AdGuard Home 服务", Build: fixed("dns", "restart")},
+	"dns-uninstall": {Title: "安全卸载 AdGuard Home", Build: DnsUninstallArgs},
+
 	// 工具
 	"update-self": {Title: "更新 singctl 自身", Build: fixed("update", "self")},
 	"speedtest":   {Title: "带宽测速", Build: fixed("ut", "testbd")},
@@ -81,6 +89,15 @@ func TsStartArgs(p map[string]any) []string {
 	}
 	if paramBool(p, "acceptRoutes") {
 		args = append(args, "--accept-routes")
+	}
+	return args
+}
+
+// DnsUninstallArgs 将 Web 参数映射为 dns uninstall 命令行参数
+func DnsUninstallArgs(p map[string]any) []string {
+	args := []string{"dns", "uninstall"}
+	if paramBool(p, "purge") {
+		args = append(args, "--purge")
 	}
 	return args
 }

@@ -45,6 +45,18 @@ func SetInstalledCheckForTest(fn func() bool) {
 	installedCheckOverride = fn
 }
 
+// HasInstalledCheckOverrideForTest 返回当前是否处于单元测试安装桩模式。
+func HasInstalledCheckOverrideForTest() bool {
+	installedCheckMu.RLock()
+	defer installedCheckMu.RUnlock()
+	return installedCheckOverride != nil
+}
+
+// IsSupportedPlatform 返回当前操作系统是否支持客户端本地 AdGuard Home 托管。
+func IsSupportedPlatform() bool {
+	return runtime.GOOS == "linux" || runtime.GOOS == "darwin"
+}
+
 // IsInstalled 检测当前系统是否已安装 AdGuardHome 可执行文件。
 func IsInstalled() bool {
 	installedCheckMu.RLock()
@@ -111,6 +123,18 @@ func NewManager(cfg *config.Config, singctlConfigPath string) *Manager {
 		aghWorkDir:    constant.AdGuardWorkDir,
 		systemdUnit:   constant.AdGuardSystemdService,
 		initdScript:   constant.AdGuardInitdScript,
+	}
+}
+
+// SetPathsForTest 仅供单元测试覆盖 AdGuardHome 二进制与配置文件路径。
+func (m *Manager) SetPathsForTest(binPath, aghConfigFile string) {
+	if binPath != "" {
+		m.binPath = binPath
+	}
+	if aghConfigFile != "" {
+		m.aghConfigFile = aghConfigFile
+		m.aghConfigDir = filepath.Dir(aghConfigFile)
+		m.aghWorkDir = m.aghConfigDir
 	}
 }
 

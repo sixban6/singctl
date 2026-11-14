@@ -37,6 +37,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"host":           hostInfo(),
 		"singbox":        singboxStatus(),
 		"daemon":         s.daemonStatusSummary(),
+		"adguard":        s.adguardStatusSummary(),
 		"tailscale":      tailscaleStatus(s.opts.ConfigPath),
 		"firewall":       firewallStatus(),
 		"config":         configSummary(s.opts.ConfigPath),
@@ -427,6 +428,7 @@ func (s *Server) handleConfigPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.invalidateIOSCache()
+	s.syncAdGuardSubWhitelistAsync(cfg)
 	_ = daemon.NotifyReload()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
@@ -531,6 +533,7 @@ func (s *Server) handleConfigRawPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.invalidateIOSCache()
+	s.syncAdGuardSubWhitelistAsync(&cfg)
 	_ = daemon.NotifyReload()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }

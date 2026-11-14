@@ -4,6 +4,7 @@ import {
   Router,
   FileText,
   Zap,
+  ShieldCheck,
   ShieldAlert,
   HeartPulse,
   Network,
@@ -32,6 +33,7 @@ import { ClientStatusResponse } from './types';
 import { TaskConsoleDrawer } from './TaskConsoleDrawer';
 import { DashPage } from './pages/DashPage';
 import { SingBoxPage } from './pages/SingBoxPage';
+import { AdGuardPage } from './pages/AdGuardPage';
 import { AuditPage } from './pages/AuditPage';
 import { WatchdogPage } from './pages/WatchdogPage';
 import { NetworkHubPage } from './pages/NetworkPage';
@@ -39,10 +41,10 @@ import { ConfigPage } from './pages/ConfigPage';
 import { LogsPage } from './pages/LogsPage';
 import { SystemPage } from './pages/SystemPage';
 
-const CLIENT_TABS = ['dash', 'sb', 'audit', 'dm', 'net', 'config', 'logs', 'sys'] as const;
+const CLIENT_TABS = ['dash', 'sb', 'dns', 'audit', 'dm', 'net', 'config', 'logs', 'sys'] as const;
 type ClientTab = (typeof CLIENT_TABS)[number];
 
-const MOBILE_PRIMARY_TABS: readonly ClientTab[] = ['dash', 'sb', 'audit', 'dm'];
+const MOBILE_PRIMARY_TABS: readonly ClientTab[] = ['dash', 'sb', 'dns', 'audit'];
 
 interface ConfirmState {
   name: string;
@@ -60,6 +62,7 @@ const ClientShell: React.FC = () => {
       const h = (window.location.hash || '').replace(/^#\/?/, '').split('?')[0];
       if (h === 'fw') navigate('net', 'fw');
       else if (h === 'ts') navigate('net', 'ts');
+      else if (h === 'agh') navigate('dns');
       else if (h === 'panel') navigate('sb', 'nodes');
     };
     normalizeLegacyHash();
@@ -186,6 +189,18 @@ const ClientShell: React.FC = () => {
     ) : status ? (
       <StatusDot tone={status.daemon.running ? 'ok' : 'neutral'} pulse={status.daemon.running} />
     ) : undefined;
+    const dnsBadge = status?.adguard?.installed ? (
+      <StatusDot
+        tone={
+          !status.adguard.dnsHealthy
+            ? 'danger'
+            : status.adguard.singboxLinked
+              ? 'ok'
+              : 'warn'
+        }
+        pulse={status.adguard.dnsHealthy && status.adguard.singboxLinked}
+      />
+    ) : undefined;
 
     return [
       {
@@ -205,6 +220,14 @@ const ClientShell: React.FC = () => {
             desc: '智能分流开关、策略组节点选择测速、模式切换与内核控制',
             icon: Zap,
             badge: sbBadge,
+          },
+          {
+            key: 'dns',
+            label: '防劫持 DNS',
+            shortLabel: 'DNS',
+            desc: '本地 AdGuard Home 加密 DoH 防抢答、防误伤暂停与内网域名重写',
+            icon: ShieldCheck,
+            badge: dnsBadge,
           },
           {
             key: 'audit',
@@ -294,6 +317,15 @@ const ClientShell: React.FC = () => {
         onSelect: () => requestAction('dm-restart'),
       },
       {
+        id: 'act-dns-restart',
+        label: '重启本地 AdGuard Home 防劫持 DNS',
+        hint: 'dns',
+        group: '快捷操作',
+        icon: <ShieldCheck className="w-3.5 h-3.5" />,
+        keywords: 'adguard dns doh restart',
+        onSelect: () => requestAction('dns-restart'),
+      },
+      {
         id: 'act-open-console',
         label: '打开任务执行终端控制台',
         hint: 'console',
@@ -318,6 +350,10 @@ const ClientShell: React.FC = () => {
       }
       if (next === 'panel') {
         navigate('sb', 'nodes');
+        return;
+      }
+      if (next === 'agh') {
+        navigate('dns');
         return;
       }
       if (CLIENT_TABS.includes(next as ClientTab)) {
@@ -450,6 +486,14 @@ const ClientShell: React.FC = () => {
             onSubChange={(nextSub) => navigate('sb', nextSub === 'routing' ? undefined : nextSub)}
             onAction={requestAction}
             onNavigate={navigateSafe}
+          />
+        )}
+        {tab === 'dns' && (
+          <AdGuardPage
+            status={status ?? null}
+            busy={busy}
+            onAction={requestAction}
+            onRefreshStatus={() => refreshStatus(true)}
           />
         )}
         {tab === 'audit' && <AuditPage />}

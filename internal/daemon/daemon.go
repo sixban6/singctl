@@ -537,8 +537,17 @@ func (d *Daemon) runWatchdogCheck() {
 	}
 	cfg := d.currentConfig()
 	if runtime.GOOS == "linux" && cfg != nil && cfg.DNS.IsEnabled() && adguard.IsInstalled() {
+		dnsPort := cfg.DNS.GetDNSPort()
+		linked, _ := singbox.InspectSingBoxDNSLocal("")
 		if err := adguard.NewManager(cfg, d.configPath).EnsureHealthy(); err != nil {
 			logger.Warn("[Watchdog] AdGuard Home 自愈启动失败: %v", err)
+			if linked {
+				logger.Warn("[Watchdog] 触发 DNS 应急降级：将 sing-box dns_local 临时切回内置纯 IP 加密 DoH，保障全屋不断网")
+				_, _ = singbox.SyncLiveSingBoxDNSLocal(d.ctx, "", "", false, dnsPort)
+			}
+		} else if !linked {
+			logger.Info("[Watchdog] AdGuard Home 已恢复在线，自动将 sing-box dns_local 切回本地防劫持引擎 (127.0.0.1:%d)", dnsPort)
+			_, _ = singbox.SyncLiveSingBoxDNSLocal(d.ctx, "", "", true, dnsPort)
 		}
 	}
 

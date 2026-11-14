@@ -281,7 +281,7 @@ func UpgradeCaddy(cfg *config.Config) (*UpgradeResult, error) {
 	if _, err := os.Stat("/usr/local/bin/caddy"); err == nil {
 		_ = file.SafeReplace("/usr/local/bin/caddy", extractedCaddy)
 	}
-	_ = runCmd("apt-mark", "hold", "caddy")
+	DetachCaddyFromApt()
 	_ = runCmd("systemctl", "restart", "caddy")
 
 	newVer := GetInstalledCaddyVersion()

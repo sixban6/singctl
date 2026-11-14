@@ -1,9 +1,13 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
+	"runtime"
 	"singctl/internal/adguard"
+	"singctl/internal/config"
 	"singctl/internal/logger"
+	"singctl/internal/singbox"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -15,7 +19,7 @@ func NewDNSCmd(defaultConfigPath string) *cobra.Command {
 		Use:     "dns",
 		Aliases: []string{"agh"},
 		Short:   "DNS   : 管理客户端本地防劫持 AdGuard Home 服务 / Manage local AdGuard Home anti-hijack DNS",
-		Long:    "一键安装、免向导初始化配置并托管本地 AdGuard Home (127.0.0.1:5353 + 局域网管理面板)，彻底解决客户端 dns_local 明文劫持问题。",
+		Long:    "一键安装、免向导初始化配置并托管本地 AdGuard Home (127.0.0.1:5353 + 局域网管理面板)，自动原子切换 sing-box dns_local，彻底解决客户端明文 DNS 劫持问题。",
 	}
 
 	dnsCmd.AddCommand(
@@ -31,6 +35,19 @@ func NewDNSCmd(defaultConfigPath string) *cobra.Command {
 	return dnsCmd
 }
 
+func syncSingBoxLocalDNSLink(ctx context.Context, cfg *config.Config, useAdGuard bool) {
+	if runtime.GOOS != "linux" {
+		return
+	}
+	dnsPort := 5353
+	if cfg != nil {
+		dnsPort = cfg.DNS.GetDNSPort()
+	}
+	if _, err := singbox.SyncLiveSingBoxDNSLocal(ctx, "", "", useAdGuard, dnsPort); err != nil {
+		logger.Warn("同步更新 sing-box dns_local 失败: %v", err)
+	}
+}
+
 func newDNSInstallCmd(defaultConfigPath string) *cobra.Command {
 	var username string
 	var nonInteractive bool
@@ -38,20 +55,29 @@ func newDNSInstallCmd(defaultConfigPath string) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "install",
-		Short: "安装并初始化配置 AdGuard Home / Install and initialize AdGuard Home",
+		Short: "安装并无感启用 AdGuard Home 防劫持接管 / Install and enable AdGuard Home",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, resolvedPath, err := loadCmdConfig(cmd, defaultConfigPath)
 			if err != nil {
 				return err
 			}
 			mgr := adguard.NewManager(cfg, resolvedPath)
-			_, err = mgr.Install(adguard.InstallOptions{
+			st, err := mgr.Install(adguard.InstallOptions{
 				ConfigPath:     resolvedPath,
 				Username:       username,
 				NonInteractive: nonInteractive,
 				ForceDownload:  forceDownload,
 			})
-			return err
+			if err != nil {
+				return err
+			}
+			if st != nil && st.DNSHealthy {
+				if ips, elapsed, pErr := adguard.ProbeUpstreamResolution(st.DNSAddr, "qq.com", 4*time.Second); pErr == nil && len(ips) > 0 {
+					logger.Success("加密 DoH 上游实测通过: qq.com -> %s (%dms)", ips[0], elapsed.Milliseconds())
+				}
+				syncSingBoxLocalDNSLink(cmd.Context(), cfg, true)
+			}
+			return nil
 		},
 	}
 
@@ -64,16 +90,23 @@ func newDNSInstallCmd(defaultConfigPath string) *cobra.Command {
 func newDNSStartCmd(defaultConfigPath string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "start",
-		Short: "启动本地 AdGuard Home 服务 / Start local AdGuard Home service",
+		Short: "启动本地 AdGuard Home 并自动接管 sing-box dns_local / Start AdGuard Home",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, resolvedPath, err := loadCmdConfig(cmd, defaultConfigPath)
 			if err != nil {
 				return err
 			}
+			if !cfg.DNS.IsEnabled() {
+				cfg.DNS.SetEnabled(true)
+				if resolvedPath != "" {
+					_ = config.Save(resolvedPath, cfg)
+				}
+			}
 			mgr := adguard.NewManager(cfg, resolvedPath)
 			if err := mgr.Start(); err != nil {
 				return err
 			}
+			syncSingBoxLocalDNSLink(cmd.Context(), cfg, true)
 			mgr.PrintAccessSummary(mgr.Status())
 			return nil
 		},
@@ -83,14 +116,22 @@ func newDNSStartCmd(defaultConfigPath string) *cobra.Command {
 func newDNSStopCmd(defaultConfigPath string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "stop",
-		Short: "停止本地 AdGuard Home 服务 / Stop local AdGuard Home service",
+		Short: "零断网切回内置加密 DNS 并停止本地 AdGuard Home / Safely fallback DNS and stop AdGuard Home",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			resolvedPath := resolveCmdConfigPath(cmd, defaultConfigPath)
 			cfg := loadCmdConfigOrDefault(cmd, defaultConfigPath)
-			mgr := adguard.NewManager(cfg, resolveCmdConfigPath(cmd, defaultConfigPath))
+			cfg.DNS.SetEnabled(false)
+			if resolvedPath != "" {
+				_ = config.Save(resolvedPath, cfg)
+			}
+			// 零断网准则：必须先将 sing-box dns_local 切回内置纯 IP 加密 DoH，再停止 AdGuard Home 进程
+			syncSingBoxLocalDNSLink(cmd.Context(), cfg, false)
+
+			mgr := adguard.NewManager(cfg, resolvedPath)
 			if err := mgr.Stop(); err != nil {
 				return err
 			}
-			logger.Success("AdGuard Home 已停止")
+			logger.Success("已安全回退 sing-box 至内置加密 DNS 并停止 AdGuard Home（全程零断网）")
 			return nil
 		},
 	}
@@ -110,6 +151,9 @@ func newDNSRestartCmd(defaultConfigPath string) *cobra.Command {
 			if err := mgr.Restart(); err != nil {
 				return err
 			}
+			if cfg.DNS.IsEnabled() {
+				syncSingBoxLocalDNSLink(cmd.Context(), cfg, true)
+			}
 			mgr.PrintAccessSummary(mgr.Status())
 			return nil
 		},
@@ -125,6 +169,7 @@ func newDNSStatusCmd(defaultConfigPath string) *cobra.Command {
 			cfg := loadCmdConfigOrDefault(cmd, defaultConfigPath)
 			mgr := adguard.NewManager(cfg, resolveCmdConfigPath(cmd, defaultConfigPath))
 			st := mgr.Status()
+			linked, linkedPort := singbox.InspectSingBoxDNSLocal("")
 
 			logger.Info("═══════════════════════════════════════════════════════════")
 			logger.Success("           🛡️  AdGuard Home 状态面板")
@@ -149,6 +194,12 @@ func newDNSStatusCmd(defaultConfigPath string) *cobra.Command {
 				logger.Warn("DNS 引擎状态    : 进程运行中但 %s 未响应 ✗", st.DNSAddr)
 			} else {
 				logger.Warn("DNS 引擎状态    : 未运行 ✗")
+			}
+
+			if linked {
+				logger.Success("sing-box 联动   : 已接管 dns_local (127.0.0.1:%d) ✓", linkedPort)
+			} else {
+				logger.Info("sing-box 联动   : 未接管 (当前使用内置加密 DNS)")
 			}
 
 			if st.WebHealthy {
@@ -199,18 +250,21 @@ func newDNSUninstallCmd(defaultConfigPath string) *cobra.Command {
 	var purge bool
 	cmd := &cobra.Command{
 		Use:   "uninstall",
-		Short: "停止并卸载本地 AdGuard Home / Stop and uninstall local AdGuard Home",
+		Short: "零断网切回内置加密 DNS 并卸载 AdGuard Home / Safely fallback DNS and uninstall AdGuard Home",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, resolvedPath, err := loadCmdConfig(cmd, defaultConfigPath)
 			if err != nil {
 				cfg = loadCmdConfigOrDefault(cmd, defaultConfigPath)
 				resolvedPath = resolveCmdConfigPath(cmd, defaultConfigPath)
 			}
+			// 卸载前先将运行中的 sing-box 平滑切回内置纯 IP 加密 DoH，防止卸载瞬间断网
+			syncSingBoxLocalDNSLink(cmd.Context(), cfg, false)
+
 			mgr := adguard.NewManager(cfg, resolvedPath)
 			if err := mgr.Uninstall(purge); err != nil {
 				return err
 			}
-			logger.Success("已卸载 AdGuard Home；如需同步更新 sing-box 配置请执行: singctl sb gen && singctl sb restart")
+			logger.Success("已安全回退 sing-box 解析并完成 AdGuard Home 卸载（全程零断网）")
 			return nil
 		},
 	}

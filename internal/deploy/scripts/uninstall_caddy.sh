@@ -4,46 +4,29 @@ set -e
 echo "Starting Caddy uninstallation..."
 
 # Stop and disable caddy service
-systemctl stop caddy || true
-systemctl disable caddy || true
+systemctl stop caddy 2>/dev/null || true
+systemctl disable caddy 2>/dev/null || true
+rm -f /etc/systemd/system/caddy.service
+systemctl daemon-reload 2>/dev/null || true
 
-# Unhold caddy if held before removing
-apt-mark unhold caddy || true
-
-# Backup existing SSL certificates before package removal to prevent rate-limiting on reinstall
+# Backup existing SSL certificates before removal to prevent rate-limiting on reinstall
 if [ -d "/var/lib/caddy/.local/share/caddy/certificates" ]; then
     mkdir -p /var/lib/singctl/caddy_certs_backup
     cp -a /var/lib/caddy/.local/share/caddy/certificates/* /var/lib/singctl/caddy_certs_backup/ 2>/dev/null || true
 fi
 
-# Preserve mTLS certificates and client credentials in persistent root vault before wiping /etc/caddy
-if [ -d "/etc/caddy/mtls" ]; then
-    mkdir -p -m 700 /etc/singctl/mtls
-    for f in ca.crt client.p12 client.crt client.key; do
-        if [ -s "/etc/caddy/mtls/${f}" ] && [ ! -s "/etc/singctl/mtls/${f}" ]; then
-            cp -p "/etc/caddy/mtls/${f}" "/etc/singctl/mtls/${f}" 2>/dev/null || true
-        fi
-    done
-    chmod 700 /etc/singctl/mtls 2>/dev/null || true
-    chmod 600 /etc/singctl/mtls/* 2>/dev/null || true
-fi
-
-# Remove caddy package (use remove instead of purge to avoid wiping valid ACME state)
-apt-get remove -y caddy || true
-apt-get autoremove -y || true
-
-# Remove Caddy APT sources and keys
+# Clean up any legacy APT/dpkg Caddy book-keeping if present
+apt-mark unhold caddy 2>/dev/null || true
+apt-get remove -y caddy 2>/dev/null || true
 rm -f /etc/apt/sources.list.d/caddy-stable.list
 rm -f /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-apt-get update || true
+rm -f /var/lib/apt/lists/*caddy* 2>/dev/null || true
+apt-get update -qq 2>/dev/null || true
 
-# Remove Caddy configuration directory and lingering binary
+# Remove Caddy configuration directory and binary
 rm -rf /etc/caddy
-rm -f /usr/bin/caddy
+rm -f /usr/bin/caddy /usr/local/bin/caddy
 # Remove generic webroot marker created by singctl
 rm -f /var/www/html/index.html
-
-# Unhold caddy again to ensure it is completely unlocked in APT
-apt-mark unhold caddy || true
 
 echo "Caddy uninstallation completed successfully."

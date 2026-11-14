@@ -3,6 +3,7 @@ import {
   Activity,
   Box,
   Dog,
+  ShieldCheck,
   Share2,
   Flame,
   QrCode,
@@ -128,7 +129,7 @@ export const DashPage: React.FC<DashPageProps> = ({ status, busy, onAction, onNa
     );
   }
 
-  const { singbox: sb, daemon: dm, tailscale: ts, firewall: fw, host, config } = status;
+  const { singbox: sb, daemon: dm, adguard: agh, tailscale: ts, firewall: fw, host, config } = status;
   const tsBadgeInfo = getTailscaleBadge(ts);
   const subs = config?.subs || [];
   const primaryExitText = !sb.running
@@ -196,8 +197,8 @@ export const DashPage: React.FC<DashPageProps> = ({ status, busy, onAction, onNa
         </div>
       )}
 
-      {/* 4 Core KPI Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+      {/* Core KPI Cards */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
         {/* sing-box */}
         <div className="console-card rounded-2xl p-4 flex flex-col justify-between gap-4">
           <div className="flex items-start justify-between gap-2">
@@ -241,6 +242,73 @@ export const DashPage: React.FC<DashPageProps> = ({ status, busy, onAction, onNa
               </Button>
             )}
             <Button size="xs" variant="ghost" onClick={() => onNavigate('sb')}>
+              管理
+            </Button>
+          </div>
+        </div>
+
+        {/* AdGuard Home Anti-Hijack DNS */}
+        <div className="console-card rounded-2xl p-4 flex flex-col justify-between gap-4">
+          <div className="flex items-start justify-between gap-2">
+            <div
+              className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0"
+              style={{
+                backgroundColor: agh?.dnsHealthy ? 'var(--status-ok-soft)' : 'var(--bg-surface-2)',
+                color: agh?.dnsHealthy ? 'var(--status-ok)' : 'var(--text-secondary)',
+              }}
+            >
+              <ShieldCheck className="w-4.5 h-4.5" />
+            </div>
+            <Badge
+              tone={
+                !agh?.installed
+                  ? 'neutral'
+                  : !agh.dnsHealthy
+                    ? 'danger'
+                    : agh.singboxLinked
+                      ? 'ok'
+                      : 'warn'
+              }
+              dot={Boolean(agh?.dnsHealthy)}
+              pulse={Boolean(agh?.dnsHealthy && agh?.singboxLinked)}
+            >
+              {!agh?.installed
+                ? '未安装'
+                : !agh.dnsHealthy
+                  ? '已停止'
+                  : agh.singboxLinked
+                    ? '防劫持接管'
+                    : '待接管'}
+            </Badge>
+          </div>
+          <div>
+            <div className="text-sm font-semibold text-primary">防劫持 DNS</div>
+            <div className="text-xs text-secondary mt-1 tnum truncate">
+              {agh?.installed
+                ? `${agh.dnsAddr || '127.0.0.1:5353'} · ${agh.singboxLinked ? '已联动内核' : '内置 DoH 兜底'}`
+                : '本地 AdGuard Home 加密 DoH'}
+            </div>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap pt-1 border-t border-subtle">
+            {!agh?.installed ? (
+              <Button
+                size="xs"
+                variant="primary"
+                disabled={busy || agh?.supported === false}
+                onClick={() => onAction('dns-install')}
+              >
+                安装
+              </Button>
+            ) : agh.dnsHealthy && agh.singboxLinked ? (
+              <Button size="xs" disabled={busy} onClick={() => onAction('dns-restart')}>
+                重启
+              </Button>
+            ) : (
+              <Button size="xs" variant="primary" disabled={busy} onClick={() => onAction('dns-start')}>
+                接管
+              </Button>
+            )}
+            <Button size="xs" variant="ghost" onClick={() => onNavigate('dns')}>
               管理
             </Button>
           </div>

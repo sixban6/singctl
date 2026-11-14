@@ -201,14 +201,19 @@ func TestUninstallCaddyScript_UnholdScript(t *testing.T) {
 	}
 }
 
-// TestInstallCaddyScript_UnholdScript verifies that install_caddy.sh contains apt-mark unhold caddy before install.
-func TestInstallCaddyScript_UnholdScript(t *testing.T) {
+// TestInstallCaddyScript_StandaloneNoAptRepo verifies that install_caddy.sh deploys Caddy as a standalone
+// systemd service without registering caddy in APT/dpkg or adding caddy-stable.list.
+func TestInstallCaddyScript_StandaloneNoAptRepo(t *testing.T) {
 	content, err := os.ReadFile("../internal/deploy/scripts/install_caddy.sh")
 	if err != nil {
 		t.Fatalf("failed to read install_caddy.sh: %v", err)
 	}
-	if !strings.Contains(string(content), "apt-mark unhold caddy") {
-		t.Error("install_caddy.sh must contain 'apt-mark unhold caddy'")
+	script := string(content)
+	if !strings.Contains(script, "/etc/systemd/system/caddy.service") {
+		t.Error("install_caddy.sh must install standalone /etc/systemd/system/caddy.service")
+	}
+	if strings.Contains(script, "caddy-stable.list") || strings.Contains(script, "apt-get install -y caddy") {
+		t.Error("install_caddy.sh must not add caddy-stable.list or register caddy in APT/dpkg")
 	}
 }
 

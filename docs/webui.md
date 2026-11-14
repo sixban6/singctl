@@ -1,7 +1,7 @@
 # WebUI 网页管理
 
 `singctl web` 启动一个内嵌的 Web 管理界面,在浏览器中即可完成 singctl 的日常管理:
-状态总览、sing-box 启停/更新、客户端智能分流开关、看门狗守护与规则集状态、Tailscale 组网、防火墙加固、
+状态总览、sing-box 启停/更新、客户端智能分流开关、本地防劫持 DNS (AdGuard Home) 一体化管控、行为与审计、看门狗守护与规则集状态、Tailscale 组网、防火墙加固、
 配置编辑和日志查看。
 
 ![WebUI 概览](assets/webui-dash.png)

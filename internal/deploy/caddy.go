@@ -66,6 +66,7 @@ func SyncCaddyfile(cfg *config.Config) error {
 	}
 	if !changed && runCmd("systemctl", "is-active", "--quiet", "caddy") == nil {
 		CleanupLegacyCaddyMtlsDir()
+		DetachCaddyFromApt()
 		return nil
 	}
 	if err := runCmd("systemctl", "reload", "caddy"); err != nil {
@@ -77,6 +78,7 @@ func SyncCaddyfile(cfg *config.Config) error {
 		}
 	}
 	CleanupLegacyCaddyMtlsDir()
+	DetachCaddyFromApt()
 	return nil
 }
 
@@ -92,6 +94,7 @@ func RotateCloudflareToken(cfg *config.Config) error {
 		return err
 	}
 	CleanupLegacyCaddyMtlsDir()
+	DetachCaddyFromApt()
 	logger.Success("Cloudflare API token rotated and Caddy restarted successfully.")
 	return nil
 }
@@ -186,6 +189,7 @@ func DeployCaddy(cfg *config.Config) error {
 		return err
 	}
 	CleanupLegacyCaddyMtlsDir()
+	DetachCaddyFromApt()
 
 	logger.Success("Caddy deployment completed successfully.")
 	return nil
