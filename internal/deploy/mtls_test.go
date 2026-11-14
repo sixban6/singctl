@@ -10,10 +10,11 @@ import (
 	"singctl/internal/constant"
 )
 
-func withTempMtlsEnv(t *testing.T) (vaultDir, caddyConfDir, caddyMtlsDir string) {
+func withTempMtlsEnv(t *testing.T) (parentSingctlDir, vaultDir, caddyConfDir, caddyMtlsDir string) {
 	t.Helper()
 	base := t.TempDir()
-	vaultDir = filepath.Join(base, "singctl-mtls")
+	parentSingctlDir = filepath.Join(base, "singctl")
+	vaultDir = filepath.Join(parentSingctlDir, "mtls")
 	caddyConfDir = filepath.Join(base, "caddy")
 	caddyMtlsDir = filepath.Join(caddyConfDir, "mtls")
 
@@ -31,8 +32,8 @@ func withTempMtlsEnv(t *testing.T) (vaultDir, caddyConfDir, caddyMtlsDir string)
 	constant.SingctlMtlsDir = vaultDir
 	constant.CaddyConfigDir = caddyConfDir
 	constant.CaddyMtlsDir = caddyMtlsDir
-	constant.CaddyMtlsCACert = filepath.Join(caddyMtlsDir, "ca.crt")
-	return vaultDir, caddyConfDir, caddyMtlsDir
+	constant.CaddyMtlsCACert = filepath.Join(vaultDir, "ca.crt")
+	return parentSingctlDir, vaultDir, caddyConfDir, caddyMtlsDir
 }
 
 func newTestWebTerminalConfig() *config.Config {
@@ -54,7 +55,15 @@ func newTestWebTerminalConfig() *config.Config {
 }
 
 func TestMigrateLegacyCaddyMtlsToVault(t *testing.T) {
-	vaultDir, _, caddyMtlsDir := withTempMtlsEnv(t)
+	parentSingctlDir, vaultDir, _, caddyMtlsDir := withTempMtlsEnv(t)
+
+	// Simulate legacy 0700 /etc/singctl directory that previously blocked caddy user traversal.
+	if err := os.MkdirAll(parentSingctlDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(parentSingctlDir, 0700); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := os.MkdirAll(caddyMtlsDir, 0755); err != nil {
 		t.Fatal(err)
@@ -75,12 +84,12 @@ func TestMigrateLegacyCaddyMtlsToVault(t *testing.T) {
 		t.Fatalf("MigrateLegacyCaddyMtlsToVault failed: %v", err)
 	}
 
-	vInfo, err := os.Stat(vaultDir)
+	pInfo, err := os.Stat(parentSingctlDir)
 	if err != nil {
-		t.Fatalf("stat vault dir: %v", err)
+		t.Fatalf("stat parent dir: %v", err)
 	}
-	if vInfo.Mode().Perm() != 0700 {
-		t.Fatalf("expected vault dir perm 0700, got %o", vInfo.Mode().Perm())
+	if pInfo.Mode().Perm() != 0711 {
+		t.Fatalf("expected parent /etc/singctl perm upgraded from 0700 to 0711, got %o", pInfo.Mode().Perm())
 	}
 
 	for name, want := range legacy {
@@ -96,24 +105,23 @@ func TestMigrateLegacyCaddyMtlsToVault(t *testing.T) {
 		if sErr != nil {
 			t.Fatalf("stat %s: %v", vPath, sErr)
 		}
-		if fi.Mode().Perm() != 0600 {
-			t.Fatalf("expected 0600 on %s, got %o", vPath, fi.Mode().Perm())
-		}
-
-		cPath := filepath.Join(caddyMtlsDir, name)
-		_, cErr := os.Stat(cPath)
+		wantPerm := os.FileMode(0600)
 		if name == "ca.crt" {
-			if cErr != nil {
-				t.Fatalf("expected ca.crt retained in Caddy dir: %v", cErr)
-			}
-		} else if !os.IsNotExist(cErr) {
-			t.Fatalf("expected private artifact %s removed from Caddy dir, err=%v", name, cErr)
+			wantPerm = 0640
 		}
+		if fi.Mode().Perm() != wantPerm {
+			t.Fatalf("expected %o on %s, got %o", wantPerm, vPath, fi.Mode().Perm())
+		}
+	}
+
+	// Since no active Caddyfile referenced caddyMtlsDir, the deprecated directory must be removed completely.
+	if _, err := os.Stat(caddyMtlsDir); !os.IsNotExist(err) {
+		t.Fatalf("expected legacy %s removed completely, stat err=%v", caddyMtlsDir, err)
 	}
 }
 
-func TestEnsureCaddyMtlsTrustPool_HealsFromVault(t *testing.T) {
-	_, _, caddyMtlsDir := withTempMtlsEnv(t)
+func TestEnsureCaddyMtlsTrustPool_NormalizesLegacyAndSingleSource(t *testing.T) {
+	_, vaultDir, _, caddyMtlsDir := withTempMtlsEnv(t)
 
 	const caPEM = "-----BEGIN CERTIFICATE-----\nVAULT-CA\n-----END CERTIFICATE-----\n"
 	if err := SaveMtlsBundleToVault(map[string][]byte{
@@ -125,25 +133,19 @@ func TestEnsureCaddyMtlsTrustPool_HealsFromVault(t *testing.T) {
 		t.Fatalf("SaveMtlsBundleToVault failed: %v", err)
 	}
 
-	resolved, ready, err := EnsureCaddyMtlsTrustPool("")
+	resolved, ready, err := EnsureCaddyMtlsTrustPool("/etc/caddy/mtls/ca.crt")
 	if err != nil {
 		t.Fatalf("EnsureCaddyMtlsTrustPool failed: %v", err)
 	}
 	if !ready {
 		t.Fatal("expected ready=true when vault contains ca.crt")
 	}
-	wantCA := filepath.Join(caddyMtlsDir, "ca.crt")
+	wantCA := filepath.Join(vaultDir, "ca.crt")
 	if resolved != wantCA {
-		t.Fatalf("expected resolved CA %s, got %s", wantCA, resolved)
+		t.Fatalf("expected legacy /etc/caddy/mtls/ca.crt normalized to %s, got %s", wantCA, resolved)
 	}
-	gotCA, err := os.ReadFile(wantCA)
-	if err != nil || string(gotCA) != caPEM {
-		t.Fatalf("expected ca.crt projected to %s, got %q err=%v", wantCA, string(gotCA), err)
-	}
-	for _, priv := range []string{"client.p12", "client.crt", "client.key"} {
-		if _, err := os.Stat(filepath.Join(caddyMtlsDir, priv)); !os.IsNotExist(err) {
-			t.Fatalf("private artifact %s must NOT be projected into %s", priv, caddyMtlsDir)
-		}
+	if _, err := os.Stat(caddyMtlsDir); !os.IsNotExist(err) {
+		t.Fatalf("deprecated %s must NOT be created", caddyMtlsDir)
 	}
 }
 
@@ -168,14 +170,17 @@ func TestPrepareRuntimeCaddyConfig_DegradesWithoutCA(t *testing.T) {
 	}
 }
 
-func TestSyncCaddyfile_AtomicValidationAndRollback(t *testing.T) {
-	_, caddyConfDir, caddyMtlsDir := withTempMtlsEnv(t)
-	if err := os.MkdirAll(caddyConfDir, 0755); err != nil {
+func TestSyncCaddyfile_AtomicValidationRollbackAndLegacyCleanup(t *testing.T) {
+	_, vaultDir, caddyConfDir, caddyMtlsDir := withTempMtlsEnv(t)
+	if err := os.MkdirAll(caddyMtlsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(caddyMtlsDir, "ca.crt"), []byte("-----BEGIN CERTIFICATE-----\nLEGACY-CA\n-----END CERTIFICATE-----\n"), 0640); err != nil {
 		t.Fatal(err)
 	}
 
 	caddyfile := filepath.Join(caddyConfDir, "Caddyfile")
-	const initialContent = "initial-valid-caddyfile\n"
+	initialContent := "trust_pool file " + filepath.Join(caddyMtlsDir, "ca.crt") + "\n"
 	if err := os.WriteFile(caddyfile, []byte(initialContent), 0640); err != nil {
 		t.Fatal(err)
 	}
@@ -192,8 +197,9 @@ func TestSyncCaddyfile_AtomicValidationAndRollback(t *testing.T) {
 	}
 
 	cfg := newTestWebTerminalConfig()
+	cfg.Server.WebTerminal.MtlsCA = "/etc/caddy/mtls/ca.crt"
 
-	// 1. Failing caddy validate must reject replacement cleanly before overwriting Caddyfile.
+	// 1. Failing caddy validate must reject replacement cleanly before overwriting Caddyfile or deleting legacy CA.
 	writeStub("caddy", "#!/bin/sh\necho 'invalid syntax' >&2\nexit 1\n")
 	writeStub("systemctl", "#!/bin/sh\nexit 0\n")
 	if err := SyncCaddyfile(cfg); err == nil {
@@ -219,22 +225,20 @@ func TestSyncCaddyfile_AtomicValidationAndRollback(t *testing.T) {
 		t.Fatalf("expected Caddyfile rolled back to %q, got %q", initialContent, string(gotAfterRollback))
 	}
 
-	// 3. Seed CA in vault + passing systemctl -> SyncCaddyfile self-heals ca.crt and renders trust_pool.
-	if err := SaveMtlsBundleToVault(map[string][]byte{
-		"ca.crt": []byte("-----BEGIN CERTIFICATE-----\nHEALED-CA\n-----END CERTIFICATE-----\n"),
-	}); err != nil {
-		t.Fatal(err)
-	}
+	// 3. Passing validate + passing systemctl -> Caddyfile points to /etc/singctl/mtls/ca.crt and legacy /etc/caddy/mtls is deleted.
 	writeStub("systemctl", "#!/bin/sh\nexit 0\n")
 	if err := SyncCaddyfile(cfg); err != nil {
-		t.Fatalf("expected SyncCaddyfile to succeed with healed CA: %v", err)
+		t.Fatalf("expected SyncCaddyfile to succeed: %v", err)
 	}
 	finalCaddyfile, err := os.ReadFile(caddyfile)
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantTrustPool := "trust_pool file " + filepath.Join(caddyMtlsDir, "ca.crt")
+	wantTrustPool := "trust_pool file " + filepath.Join(vaultDir, "ca.crt")
 	if !strings.Contains(string(finalCaddyfile), wantTrustPool) {
-		t.Fatalf("expected healed trust_pool %q in Caddyfile, got:\n%s", wantTrustPool, string(finalCaddyfile))
+		t.Fatalf("expected unified trust_pool %q in Caddyfile, got:\n%s", wantTrustPool, string(finalCaddyfile))
+	}
+	if _, err := os.Stat(caddyMtlsDir); !os.IsNotExist(err) {
+		t.Fatalf("expected deprecated %s deleted after successful Caddy reload, stat err=%v", caddyMtlsDir, err)
 	}
 }

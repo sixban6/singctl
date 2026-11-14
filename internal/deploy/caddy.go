@@ -65,6 +65,7 @@ func SyncCaddyfile(cfg *config.Config) error {
 		}
 	}
 	if !changed && runCmd("systemctl", "is-active", "--quiet", "caddy") == nil {
+		CleanupLegacyCaddyMtlsDir()
 		return nil
 	}
 	if err := runCmd("systemctl", "reload", "caddy"); err != nil {
@@ -75,6 +76,7 @@ func SyncCaddyfile(cfg *config.Config) error {
 			return rErr
 		}
 	}
+	CleanupLegacyCaddyMtlsDir()
 	return nil
 }
 
@@ -89,6 +91,7 @@ func RotateCloudflareToken(cfg *config.Config) error {
 		rollbackCaddyfile(caddyfilePath(), prev, hadPrev)
 		return err
 	}
+	CleanupLegacyCaddyMtlsDir()
 	logger.Success("Cloudflare API token rotated and Caddy restarted successfully.")
 	return nil
 }
@@ -182,6 +185,7 @@ func DeployCaddy(cfg *config.Config) error {
 		rollbackCaddyfile(caddyfilePath(), prev, hadPrev)
 		return err
 	}
+	CleanupLegacyCaddyMtlsDir()
 
 	logger.Success("Caddy deployment completed successfully.")
 	return nil
@@ -281,10 +285,7 @@ func PreviewCaddyfile(cfg *config.Config) (string, error) {
 				sshTunnelPort = cfg.Server.WebTerminal.SSHTunnelPort
 			}
 
-			mtlsCA = strings.TrimSpace(cfg.Server.WebTerminal.MtlsCA)
-			if mtlsCA == "" {
-				mtlsCA = "/etc/caddy/mtls/ca.crt"
-			}
+			mtlsCA = NormalizeMtlsCAPath(cfg.Server.WebTerminal.MtlsCA)
 		}
 	}
 
@@ -353,7 +354,7 @@ func prepareRuntimeCaddyConfig(cfg *config.Config) *config.Config {
 		effective.Server.WebTerminal.Enabled = false
 		return &effective
 	}
-	if strings.TrimSpace(cfg.Server.WebTerminal.MtlsCA) == "" && resolvedCA != "" {
+	if strings.TrimSpace(cfg.Server.WebTerminal.MtlsCA) != resolvedCA && resolvedCA != "" {
 		effective := *cfg
 		effective.Server.WebTerminal.MtlsCA = resolvedCA
 		return &effective

@@ -515,7 +515,7 @@ type WebTerminalConfig struct {
 	Enabled       bool   `yaml:"enabled"`
 	Port          int    `yaml:"port,omitempty"`            // 默认 18080 (GoTTY)
 	Path          string `yaml:"path,omitempty"`            // 隐蔽访问路径，如 /ops-shell-8f9a
-	MtlsCA        string `yaml:"mtls_ca,omitempty"`         // CA 证书路径，默认 /etc/caddy/mtls/ca.crt
+	MtlsCA        string `yaml:"mtls_ca,omitempty"`         // CA 证书路径，默认 /etc/singctl/mtls/ca.crt
 	Password      string `yaml:"password,omitempty"`        // client.p12 证书导出密码
 	SSHTunnelPort int    `yaml:"ssh_tunnel_port,omitempty"` // wstunnel 本地监听端口，默认 18081
 	SSHTunnelPath string `yaml:"ssh_tunnel_path,omitempty"` // wstunnel 访问路径，默认 /ssh-ws

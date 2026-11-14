@@ -37,7 +37,7 @@ server:
     enabled: true                               # 是否启用 Web 终端与 SSH 穿透
     port: 18080                                 # GoTTY 本地监听端口 (仅监听 127.0.0.1)
     path: "/term-8f9a2b"                        # Web 终端隐蔽访问路径
-    mtls_ca: "/etc/caddy/mtls/ca.crt"           # Caddy 公开 CA 信任池路径（私钥保管在 /etc/singctl/mtls）
+    mtls_ca: "/etc/singctl/mtls/ca.crt"         # mTLS 根证书路径（与 Caddy 目录彻底解耦）
     password: "YourExportPassword123"           # client.p12 客户端证书导出密码
     ssh_tunnel_port: 18081                      # wstunnel 本地监听端口
     ssh_tunnel_path: "/ssh-ws"                  # SSH WebSocket 穿透路径
@@ -81,7 +81,7 @@ singctl term cert
 ```
 
 输出示例：
-> 🔐 **双层证书目录说明**：私钥与客户端证书持久化保管在 `0700`/`0600` 权限的 `/etc/singctl/mtls/` 保险库中；`/etc/caddy/mtls/ca.crt` 仅投影公开 CA 信任池供 Caddy 读取，即使重装或卸载 Caddy 也不会丢失客户端证书。
+> 🔐 **单目录最小权限隔离说明**：所有 mTLS 证书统一持久化保管在 `/etc/singctl/mtls/`（`0710 root:caddy`）中——其中公开根证书 `ca.crt` 为 `0640 root:caddy` 供 Caddy 直读，客户端私钥与 `.p12` 强制 `0600 root:root` 隔离，与 `/etc/caddy/` 完全解耦，卸载或重装 Caddy 零影响。
 
 ```bash
 📁 证书路径: /etc/singctl/mtls/client.p12

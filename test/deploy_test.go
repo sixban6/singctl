@@ -420,7 +420,7 @@ func TestPreviewCaddyfile_WebTerminal(t *testing.T) {
 				Enabled: true,
 				Path:    "/ops-shell-test123",
 				Port:    18080,
-				MtlsCA:  "/etc/caddy/mtls/ca.crt",
+				MtlsCA:  "/etc/singctl/mtls/ca.crt",
 			},
 		},
 	}
@@ -431,7 +431,7 @@ func TestPreviewCaddyfile_WebTerminal(t *testing.T) {
 	}
 
 	// 1. Verify mTLS client_auth under NodeDomain
-	if !strings.Contains(content, "client_auth {") || !strings.Contains(content, "mode verify_if_given") || !strings.Contains(content, "trust_pool file /etc/caddy/mtls/ca.crt") {
+	if !strings.Contains(content, "client_auth {") || !strings.Contains(content, "mode verify_if_given") || !strings.Contains(content, "trust_pool file /etc/singctl/mtls/ca.crt") {
 		t.Errorf("expected mTLS client_auth block, got:\n%s", content)
 	}
 
@@ -1135,7 +1135,7 @@ func TestSyncCaddyfile_MissingMtlsCAPreservesGateway(t *testing.T) {
 	constant.SingctlMtlsDir = vaultDir
 	constant.CaddyConfigDir = caddyConfDir
 	constant.CaddyMtlsDir = caddyMtlsDir
-	constant.CaddyMtlsCACert = filepath.Join(caddyMtlsDir, "ca.crt")
+	constant.CaddyMtlsCACert = filepath.Join(vaultDir, "ca.crt")
 
 	if err := os.MkdirAll(caddyConfDir, 0755); err != nil {
 		t.Fatal(err)
@@ -1166,12 +1166,12 @@ func TestSyncCaddyfile_MissingMtlsCAPreservesGateway(t *testing.T) {
 		},
 	}
 
-	// Verify PreviewCaddyfile remains pure (still emits default trust_pool even without disk files).
+	// Verify PreviewCaddyfile remains pure (still emits canonical vault trust_pool even without disk files).
 	purePreview, err := deploy.PreviewCaddyfile(cfg)
 	if err != nil {
 		t.Fatalf("PreviewCaddyfile failed: %v", err)
 	}
-	if !strings.Contains(purePreview, "trust_pool file /etc/caddy/mtls/ca.crt") {
+	if !strings.Contains(purePreview, "trust_pool file "+filepath.Join(vaultDir, "ca.crt")) {
 		t.Fatalf("expected PreviewCaddyfile purity to include trust_pool, got:\n%s", purePreview)
 	}
 

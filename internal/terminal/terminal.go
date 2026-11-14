@@ -2,7 +2,6 @@ package terminal
 
 import (
 	"archive/tar"
-	"cmp"
 	"compress/gzip"
 	"crypto/rand"
 	"encoding/base64"
@@ -28,11 +27,11 @@ const (
 	DefaultTerminalPort  = 18080
 	DefaultSSHTunnelPort = 18081
 	DefaultSSHTunnelPath = "/ssh-ws"
-	DefaultMtlsCADir     = "/etc/caddy/mtls"
-	DefaultMtlsCACert    = "/etc/caddy/mtls/ca.crt"
-	DefaultClientP12     = "/etc/caddy/mtls/client.p12"
-	DefaultClientCrt     = "/etc/caddy/mtls/client.crt"
-	DefaultClientKey     = "/etc/caddy/mtls/client.key"
+	DefaultMtlsCADir     = "/etc/singctl/mtls"
+	DefaultMtlsCACert    = "/etc/singctl/mtls/ca.crt"
+	DefaultClientP12     = "/etc/singctl/mtls/client.p12"
+	DefaultClientCrt     = "/etc/singctl/mtls/client.crt"
+	DefaultClientKey     = "/etc/singctl/mtls/client.key"
 	GottyVersion         = "v1.5.0"
 	GottyBinaryPath      = "/usr/local/bin/gotty"
 	GottyServicePath     = "/etc/systemd/system/gotty.service"
@@ -207,10 +206,11 @@ func Install(cfg *config.Config, configPath string, opts InstallOptions) (*Insta
 	if cfg != nil && strings.TrimSpace(cfg.Server.WebTerminal.SSHTunnelPath) != "" {
 		sshTunnelPath = strings.TrimSpace(cfg.Server.WebTerminal.SSHTunnelPath)
 	}
-	mtlsCA := cmp.Or(deploy.DefaultCaddyMtlsCACertPath(), DefaultMtlsCACert)
-	if cfg != nil && strings.TrimSpace(cfg.Server.WebTerminal.MtlsCA) != "" {
-		mtlsCA = strings.TrimSpace(cfg.Server.WebTerminal.MtlsCA)
+	rawMtlsCA := ""
+	if cfg != nil {
+		rawMtlsCA = cfg.Server.WebTerminal.MtlsCA
 	}
+	mtlsCA := deploy.NormalizeMtlsCAPath(rawMtlsCA)
 	_, _, _ = deploy.EnsureCaddyMtlsTrustPool(mtlsCA)
 
 	if err := installWstunnel(cfg, arch); err != nil {

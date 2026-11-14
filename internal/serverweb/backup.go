@@ -332,6 +332,9 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 			_ = writeSecretFile0600(filepath.Join(cfgDir, "master_ed25519.pub"), payload.MasterSSHPub)
 		}
 		if cfg, lErr := config.Load(s.opts.ConfigPath); lErr == nil && cfg != nil {
+			if deploy.UpgradeLegacyMtlsConfig(cfg) {
+				_ = config.Save(s.opts.ConfigPath, cfg)
+			}
 			s.mu.Lock()
 			s.opts.Username = cmp.Or(cfg.Server.GetWebAdminUsername(), s.opts.Username)
 			if p := cfg.Server.GetWebAdminPassword(); p != "" {

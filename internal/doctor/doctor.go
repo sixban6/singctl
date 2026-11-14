@@ -1,14 +1,12 @@
 package doctor
 
 import (
-	"cmp"
 	"crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -687,27 +685,26 @@ func checkWebTerminal(cfg *config.Config, r *DoctorReport) {
 		return
 	}
 
-	caPath := cmp.Or(strings.TrimSpace(cfg.Server.WebTerminal.MtlsCA), deploy.DefaultCaddyMtlsCACertPath())
-	vaultCA := filepath.Join(deploy.MtlsVaultDir(), "ca.crt")
-
+	rawCA := strings.TrimSpace(cfg.Server.WebTerminal.MtlsCA)
+	caPath := deploy.NormalizeMtlsCAPath(rawCA)
 	caOK := fileNonEmpty(caPath)
-	vaultCAOK := fileNonEmpty(vaultCA)
+	legacyCfg := rawCA != "" && deploy.IsLegacyCaddyMtlsCAPath(rawCA)
 
 	switch {
-	case caOK:
+	case caOK && !legacyCfg:
 		r.Items = append(r.Items, DoctorItem{
 			Category: "security",
 			Name:     "Web 终端 mTLS 证书",
 			Status:   "ok",
 			Summary:  fmt.Sprintf("CA 信任池正常 (%s)", caPath),
 		})
-	case vaultCAOK:
+	case caOK && legacyCfg:
 		r.Items = append(r.Items, DoctorItem{
 			Category: "security",
 			Name:     "Web 终端 mTLS 证书",
 			Status:   "warn",
-			Summary:  fmt.Sprintf("Caddy 信任池缺失，但保险库 %s 完整", vaultCA),
-			Detail:   fmt.Sprintf("目标路径 %s 缺失，运行 'singctl sr sync' 或 'singctl sr install caddy' 可自动从保险库投影修复", caPath),
+			Summary:  fmt.Sprintf("CA 证书已在 %s 就绪，但配置仍指向旧路径 %s", caPath, rawCA),
+			Detail:   "运行 'singctl sr sync' 可自动收敛配置并清理废弃的 /etc/caddy/mtls 目录",
 		})
 	default:
 		r.Items = append(r.Items, DoctorItem{
@@ -715,7 +712,7 @@ func checkWebTerminal(cfg *config.Config, r *DoctorReport) {
 			Name:     "Web 终端 mTLS 证书",
 			Status:   "fail",
 			Summary:  fmt.Sprintf("Web 终端已启用，但 mTLS CA 证书缺失 (%s)", caPath),
-			Detail:   fmt.Sprintf("工作路径 %s 与保险库 %s 均不存在，请运行 'singctl sr term install' 重新生成 mTLS 证书并恢复 Caddy 网关", caPath, vaultCA),
+			Detail:   "请运行 'singctl sr term install' 重新生成 mTLS 证书并恢复 Caddy 网关",
 		})
 	}
 

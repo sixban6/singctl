@@ -121,7 +121,7 @@ func init() {
 		CaddyMtlsDir = filepath.Join(CaddyConfigDir, "mtls")
 	}
 
-	CaddyMtlsCACert = filepath.Join(CaddyMtlsDir, "ca.crt")
+	CaddyMtlsCACert = filepath.Join(SingctlMtlsDir, "ca.crt")
 
 	// Dynamic linux check for SingBoxInstallDir & AdGuardInstallPath
 	if runtime.GOOS == "linux" {

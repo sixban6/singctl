@@ -15,7 +15,7 @@ import (
 
 func TestBackupMtlsBundleRoundTripAndLegacyCompat(t *testing.T) {
 	base := t.TempDir()
-	vaultDir := filepath.Join(base, "singctl-mtls")
+	vaultDir := filepath.Join(base, "singctl", "mtls")
 	caddyConfDir := filepath.Join(base, "caddy")
 	caddyMtlsDir := filepath.Join(caddyConfDir, "mtls")
 
@@ -33,7 +33,7 @@ func TestBackupMtlsBundleRoundTripAndLegacyCompat(t *testing.T) {
 	constant.SingctlMtlsDir = vaultDir
 	constant.CaddyConfigDir = caddyConfDir
 	constant.CaddyMtlsDir = caddyMtlsDir
-	constant.CaddyMtlsCACert = filepath.Join(caddyMtlsDir, "ca.crt")
+	constant.CaddyMtlsCACert = filepath.Join(vaultDir, "ca.crt")
 
 	mtlsFixtures := map[string][]byte{
 		"ca.crt":     []byte("-----BEGIN CERTIFICATE-----\nBACKUP-CA\n-----END CERTIFICATE-----\n"),
@@ -50,7 +50,8 @@ func TestBackupMtlsBundleRoundTripAndLegacyCompat(t *testing.T) {
 	srcSbCfg := filepath.Join(srcDir, "singbox.json")
 	srcSubDir := filepath.Join(srcDir, "sub-store")
 	srcFleet := filepath.Join(srcDir, "fleet.yaml")
-	_ = os.WriteFile(srcCfg, []byte("server:\n  node_domain: \"src.example.com\"\n  cf_dns_key: \"cf-test-token\"\n  web_admin:\n    username: \"opsadmin\"\n    password: \"Password123\"\n"), 0600)
+	srcYAML := "server:\n  node_domain: \"src.example.com\"\n  cf_dns_key: \"cf-test-token\"\n  web_terminal:\n    enabled: true\n    mtls_ca: \"/etc/caddy/mtls/ca.crt\"\n  web_admin:\n    username: \"opsadmin\"\n    password: \"Password123\"\n"
+	_ = os.WriteFile(srcCfg, []byte(srcYAML), 0600)
 	_ = os.WriteFile(srcSbCfg, []byte(`{"inbounds":[]}`), 0600)
 
 	srcSrv := New(Options{
@@ -84,9 +85,8 @@ func TestBackupMtlsBundleRoundTripAndLegacyCompat(t *testing.T) {
 		t.Fatalf("decrypted mtls files count mismatch: got %d", len(decPayload.MtlsFiles))
 	}
 
-	// Simulate fresh target machine with wiped vault and Caddy mTLS dir.
+	// Simulate fresh target machine with wiped vault.
 	_ = os.RemoveAll(vaultDir)
-	_ = os.RemoveAll(caddyMtlsDir)
 
 	dstDir := t.TempDir()
 	dstCfg := filepath.Join(dstDir, "singctl.yaml")
@@ -122,10 +122,6 @@ func TestBackupMtlsBundleRoundTripAndLegacyCompat(t *testing.T) {
 		t.Fatalf("restore with mTLS bundle failed: %d %s", rec.Code, rec.Body.String())
 	}
 
-	vDirInfo, err := os.Stat(vaultDir)
-	if err != nil || vDirInfo.Mode().Perm() != 0700 {
-		t.Fatalf("expected vault dir 0700 after restore, got err=%v perm=%v", err, vDirInfo)
-	}
 	for name, want := range mtlsFixtures {
 		p := filepath.Join(vaultDir, name)
 		got, rErr := os.ReadFile(p)
@@ -133,20 +129,22 @@ func TestBackupMtlsBundleRoundTripAndLegacyCompat(t *testing.T) {
 			t.Fatalf("expected restored vault file %s with matching content, got err=%v", p, rErr)
 		}
 		st, _ := os.Stat(p)
-		if st.Mode().Perm() != 0600 {
-			t.Fatalf("expected 0600 mode on restored vault file %s, got %o", p, st.Mode().Perm())
+		wantPerm := os.FileMode(0600)
+		if name == "ca.crt" {
+			wantPerm = 0640
+		}
+		if st.Mode().Perm() != wantPerm {
+			t.Fatalf("expected %o mode on restored vault file %s, got %o", wantPerm, p, st.Mode().Perm())
 		}
 	}
 
-	projectedCA := filepath.Join(caddyMtlsDir, "ca.crt")
-	gotCA, err := os.ReadFile(projectedCA)
-	if err != nil || string(gotCA) != string(mtlsFixtures["ca.crt"]) {
-		t.Fatalf("expected ca.crt automatically projected to %s on restore, got err=%v", projectedCA, err)
+	if _, err := os.Stat(caddyMtlsDir); !os.IsNotExist(err) {
+		t.Fatalf("deprecated Caddy mTLS dir %s must not be created on restore", caddyMtlsDir)
 	}
-	for _, priv := range []string{"client.p12", "client.crt", "client.key"} {
-		if _, err := os.Stat(filepath.Join(caddyMtlsDir, priv)); !os.IsNotExist(err) {
-			t.Fatalf("did not expect private file %s projected into Caddy dir %s", priv, caddyMtlsDir)
-		}
+
+	restoredCfgBytes, _ := os.ReadFile(dstCfg)
+	if !strings.Contains(string(restoredCfgBytes), filepath.Join(vaultDir, "ca.crt")) {
+		t.Fatalf("expected restored singctl.yaml mtls_ca auto-upgraded to %s, got:\n%s", filepath.Join(vaultDir, "ca.crt"), string(restoredCfgBytes))
 	}
 
 	// Legacy backup payload without MtlsFiles must still restore cleanly.

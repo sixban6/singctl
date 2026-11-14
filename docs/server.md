@@ -44,7 +44,7 @@ server:
     enabled: true
     port: 18080
     path: "/term-8f9a2b"
-    mtls_ca: "/etc/caddy/mtls/ca.crt"
+    mtls_ca: "/etc/singctl/mtls/ca.crt"
     ssh_tunnel_port: 18081
     ssh_tunnel_path: "/ssh-ws"
     ssh_port: 22

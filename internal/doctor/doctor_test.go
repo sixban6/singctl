@@ -13,8 +13,8 @@ import (
 
 func TestCheckWebTerminal_MtlsVaultStates(t *testing.T) {
 	base := t.TempDir()
-	vaultDir := filepath.Join(base, "singctl-mtls")
-	caddyMtlsDir := filepath.Join(base, "caddy-mtls")
+	vaultDir := filepath.Join(base, "singctl", "mtls")
+	caddyMtlsDir := filepath.Join(base, "caddy", "mtls")
 
 	origVault := constant.SingctlMtlsDir
 	origCaddyMtls := constant.CaddyMtlsDir
@@ -26,7 +26,7 @@ func TestCheckWebTerminal_MtlsVaultStates(t *testing.T) {
 	})
 	constant.SingctlMtlsDir = vaultDir
 	constant.CaddyMtlsDir = caddyMtlsDir
-	constant.CaddyMtlsCACert = filepath.Join(caddyMtlsDir, "ca.crt")
+	constant.CaddyMtlsCACert = filepath.Join(vaultDir, "ca.crt")
 
 	binDir := t.TempDir()
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -58,7 +58,7 @@ func TestCheckWebTerminal_MtlsVaultStates(t *testing.T) {
 		},
 	}
 
-	// 2. Both Caddy CA and Vault CA missing -> fail with term install hint.
+	// 2. Vault CA missing -> fail with term install hint.
 	repFail := &DoctorReport{}
 	checkWebTerminal(cfg, repFail)
 	itemFail, ok := findMtlsItem(repFail)
@@ -66,27 +66,26 @@ func TestCheckWebTerminal_MtlsVaultStates(t *testing.T) {
 		t.Fatalf("expected fail status with term install guidance, got %+v ok=%v", itemFail, ok)
 	}
 
-	// 3. Caddy CA missing, Vault CA present -> warn with sync/repair hint.
+	// 3. Vault CA present, but config still references deprecated /etc/caddy/mtls/ca.crt -> warn with sync hint.
 	if err := deploy.SaveMtlsBundleToVault(map[string][]byte{
 		"ca.crt": []byte("-----BEGIN CERTIFICATE-----\nVAULT-CA\n-----END CERTIFICATE-----\n"),
 	}); err != nil {
 		t.Fatal(err)
 	}
+	cfg.Server.WebTerminal.MtlsCA = "/etc/caddy/mtls/ca.crt"
 	repWarn := &DoctorReport{}
 	checkWebTerminal(cfg, repWarn)
 	itemWarn, ok := findMtlsItem(repWarn)
 	if !ok || itemWarn.Status != "warn" || !strings.Contains(itemWarn.Detail, "singctl sr sync") {
-		t.Fatalf("expected warn status when vault CA present but Caddy CA missing, got %+v ok=%v", itemWarn, ok)
+		t.Fatalf("expected warn status when config still points to legacy Caddy path, got %+v ok=%v", itemWarn, ok)
 	}
 
-	// 4. Caddy CA projected -> ok.
-	if _, ready, err := deploy.EnsureCaddyMtlsTrustPool(""); err != nil || !ready {
-		t.Fatalf("EnsureCaddyMtlsTrustPool failed: ready=%v err=%v", ready, err)
-	}
+	// 4. Config upgraded to /etc/singctl/mtls/ca.crt -> ok.
+	deploy.UpgradeLegacyMtlsConfig(cfg)
 	repOK := &DoctorReport{}
 	checkWebTerminal(cfg, repOK)
 	itemOK, ok := findMtlsItem(repOK)
 	if !ok || itemOK.Status != "ok" {
-		t.Fatalf("expected ok status when Caddy CA exists, got %+v ok=%v", itemOK, ok)
+		t.Fatalf("expected ok status when unified mTLS CA exists, got %+v ok=%v", itemOK, ok)
 	}
 }

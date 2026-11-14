@@ -732,7 +732,7 @@ func TestMigrateConfig_PreservesWebTerminalAndCustomRules(t *testing.T) {
     enabled: true
     port: 18080
     path: "/ops-shell-test"
-    mtls_ca: "/etc/caddy/mtls/ca.crt"
+    mtls_ca: "/etc/singctl/mtls/ca.crt"
     password: "P12SecretPassword"
     ssh_tunnel_port: 18081
     ssh_tunnel_path: "/ssh-ws"

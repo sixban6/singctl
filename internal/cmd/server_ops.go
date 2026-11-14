@@ -115,6 +115,12 @@ func resetSingboxCredentials(configPath string) error {
 		return fmt.Errorf("server.node_domain (or sb_domain) is required in config (%s)", configPath)
 	}
 
+	if deploy.UpgradeLegacyMtlsConfig(cfg) {
+		if sErr := config.Save(configPath, cfg); sErr == nil {
+			logger.Info("已将 singctl.yaml 中的 web_terminal.mtls_ca 平滑收敛至 %s", cfg.Server.WebTerminal.MtlsCA)
+		}
+	}
+
 	logger.Info("Resetting sing-box server credentials for domain: %s...", cfg.Server.GetNodeDomain())
 
 	sbs, err := deploy.NewSingBoxServer(cfg)
@@ -219,6 +225,12 @@ func syncNodeToSubstore(configPath string, restart bool, tag string) error {
 		return fmt.Errorf("server.node_domain (or sb_domain) is required in config (%s)", configPath)
 	}
 
+	if deploy.UpgradeLegacyMtlsConfig(cfg) {
+		if sErr := config.Save(configPath, cfg); sErr == nil {
+			logger.Info("已将 singctl.yaml 中的 web_terminal.mtls_ca 平滑收敛至 %s", cfg.Server.WebTerminal.MtlsCA)
+		}
+	}
+
 	logger.Info("正在从本地 sing-box 配置文件读取实际节点凭证与参数...")
 
 	sbs, err := deploy.NewSingBoxServer(cfg)
@@ -268,6 +280,12 @@ func showServerInfo(configPath string) error {
 
 	if cfg.Server.GetNodeDomain() == "" {
 		return fmt.Errorf("server.node_domain (or sb_domain) is required in config (%s)", configPath)
+	}
+
+	if deploy.UpgradeLegacyMtlsConfig(cfg) {
+		if sErr := config.Save(configPath, cfg); sErr == nil {
+			logger.Info("已将 singctl.yaml 中的 web_terminal.mtls_ca 平滑收敛至 %s", cfg.Server.WebTerminal.MtlsCA)
+		}
 	}
 
 	if cfg.Server.EnsureWebAdminCredentials() {

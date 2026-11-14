@@ -85,11 +85,22 @@ if [ -d "/var/lib/singctl/caddy_certs_backup" ]; then
     chown -R caddy:caddy /var/lib/caddy 2>/dev/null || true
 fi
 
-# 5. Restore public mTLS CA cert (caddy-readable only) from persistent vault
-if [ -s "/etc/singctl/mtls/ca.crt" ]; then
-    mkdir -p /etc/caddy/mtls
-    cp -f /etc/singctl/mtls/ca.crt /etc/caddy/mtls/ca.crt 2>/dev/null || true
-    chown -R root:caddy /etc/caddy/mtls 2>/dev/null || true
-    chmod 750 /etc/caddy/mtls 2>/dev/null || chmod 755 /etc/caddy/mtls 2>/dev/null || true
-    chmod 640 /etc/caddy/mtls/ca.crt 2>/dev/null || chmod 644 /etc/caddy/mtls/ca.crt 2>/dev/null || true
+# 5. Ensure /etc/singctl/mtls ca.crt is readable by caddy user while private keys remain 0600 root:root
+if [ -d "/etc/singctl" ]; then
+    chmod a+x /etc/singctl 2>/dev/null || true
 fi
+if [ -d "/etc/singctl/mtls" ]; then
+    chown root:caddy /etc/singctl/mtls 2>/dev/null || true
+    chmod 710 /etc/singctl/mtls 2>/dev/null || true
+    if [ -f "/etc/singctl/mtls/ca.crt" ]; then
+        chown root:caddy /etc/singctl/mtls/ca.crt 2>/dev/null || true
+        chmod 640 /etc/singctl/mtls/ca.crt 2>/dev/null || true
+    fi
+    for f in client.p12 client.crt client.key; do
+        if [ -f "/etc/singctl/mtls/${f}" ]; then
+            chown root:root "/etc/singctl/mtls/${f}" 2>/dev/null || true
+            chmod 600 "/etc/singctl/mtls/${f}" 2>/dev/null || true
+        fi
+    done
+fi
+rm -rf /etc/caddy/mtls 2>/dev/null || true
