@@ -28,6 +28,10 @@ fi
 CONFIG_DIR="/etc/singctl"
 CONFIG_FILE="$CONFIG_DIR/singctl.yaml"
 TEMP_DIR="/tmp/singctl-install"
+IS_FIRST_INSTALL="false"
+if [ ! -f "$INSTALL_DIR/singctl" ] && [ ! -f "$CONFIG_FILE" ]; then
+    IS_FIRST_INSTALL="true"
+fi
 
 # 获取当前时间
 timestamp() {
@@ -567,9 +571,58 @@ version_ge() {
     fi
 }
 
+# 首次安装 SingCtl 时若检测到系统已有旧版/第三方 sing-box，自动停止服务并彻底删除，避免版本不兼容或双进程冲突
+purge_existing_singbox() {
+    if [ "$IS_FIRST_INSTALL" != "true" ]; then
+        return 0
+    fi
+
+    local sb_bin=""
+    sb_bin=$(command -v sing-box 2>/dev/null || true)
+    if [ -z "$sb_bin" ] && [ ! -f "/usr/bin/sing-box" ] && [ ! -f "/usr/local/bin/sing-box" ] && [ ! -x "/etc/init.d/sing-box" ]; then
+        return 0
+    fi
+
+    echo_warning "首次安装检测到系统已存在旧的 sing-box 环境，正在清理以避免内核版本冲突..."
+
+    # 1) 停止并禁用原有自启服务（兼容 OpenWrt procd 与 Linux systemd）
+    if [ -x "/etc/init.d/sing-box" ]; then
+        /etc/init.d/sing-box stop >/dev/null 2>&1 || true
+        /etc/init.d/sing-box disable >/dev/null 2>&1 || true
+    fi
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl stop sing-box >/dev/null 2>&1 || true
+        systemctl disable sing-box >/dev/null 2>&1 || true
+    fi
+    killall sing-box >/dev/null 2>&1 || pkill -x sing-box >/dev/null 2>&1 || true
+
+    # 2) 尝试通过包管理器卸载（OpenWrt opkg/apk、Debian/Ubuntu apt）
+    if command -v opkg >/dev/null 2>&1 && opkg status sing-box 2>/dev/null | grep -q "Status:.*installed"; then
+        echo_info "正在通过 opkg 卸载系统自带 sing-box..."
+        opkg remove sing-box >/dev/null 2>&1 || true
+    fi
+    if command -v apk >/dev/null 2>&1 && apk info -e sing-box >/dev/null 2>&1; then
+        echo_info "正在通过 apk 卸载系统自带 sing-box..."
+        apk del sing-box >/dev/null 2>&1 || true
+    fi
+    if command -v dpkg >/dev/null 2>&1 && dpkg -s sing-box >/dev/null 2>&1; then
+        echo_info "正在通过 apt-get 卸载系统已有 sing-box..."
+        DEBIAN_FRONTEND=noninteractive apt-get remove -y sing-box >/dev/null 2>&1 || true
+    fi
+
+    # 3) 兜底清理残留二进制与旧配置文件，后续将由 singctl 安装匹配的官方内核
+    if [ -n "$sb_bin" ] && [ -f "$sb_bin" ]; then
+        rm -f "$sb_bin"
+    fi
+    rm -f /usr/bin/sing-box /usr/local/bin/sing-box /etc/sing-box/config.json
+    hash -r 2>/dev/null || true
+
+    echo_success "已清理原有 sing-box，后续将自动安装 SingCtl 匹配的官方最新版内核"
+}
+
 # 检查 sing-box 是否需要安装或更新
 check_singbox_installation() {
-    local required_version="1.12.0"
+    local required_version="1.14.0"
     local current_version
     
     echo_info "检查 sing-box 安装状态..."
@@ -853,6 +906,7 @@ main() {
     build_download_url
     download_and_extract
     install_files
+    purge_existing_singbox
     select_mode_and_setup "$@"
 }
 

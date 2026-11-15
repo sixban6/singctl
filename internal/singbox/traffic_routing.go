@@ -571,13 +571,43 @@ func BuildClientRoutingReport(cfg *config.Config, rawConfigJSON string) ClientRo
 	return ClientRoutingReport{
 		Groups:       groups,
 		DirectTag:    directTag,
-		Categories:   ClientRoutingCategories(),
+		Categories:   resolveCategoriesForGroups(groupTags, directTag),
 		Items:        items,
 		EnabledCount: enabledCount,
 		CustomCount:  customCount,
 		TotalCount:   len(items),
 		HasConfig:    strings.TrimSpace(rawConfigJSON) != "",
 	}
+}
+
+func resolveCategoriesForGroups(groupTags []string, directTag string) []TrafficCategoryInfo {
+	cats := ClientRoutingCategories()
+	aiDest := ResolvePresetDefaultOutbound(true, false, groupTags)
+	commonDest := ResolvePresetDefaultOutbound(false, false, groupTags)
+	if directTag == "" {
+		directTag = "#DC"
+	}
+
+	for i := range cats {
+		switch cats[i].ID {
+		case "ai":
+			cats[i].DefaultDest = aiDest
+			if aiDest != "#VPS" {
+				cats[i].Description = fmt.Sprintf("OpenAI、Claude、Gemini 等 AI 服务，当前无 #VPS 自建组，默认自动走 %s 分组独立选线", aiDest)
+			}
+		case "streaming", "gaming", "social":
+			cats[i].DefaultDest = commonDest
+			if commonDest != "Proxy" {
+				cats[i].Description = strings.ReplaceAll(cats[i].Description, "默认走 Proxy", "默认走 "+commonDest)
+			}
+		case "office":
+			cats[i].DefaultDest = "直连 " + directTag
+			if directTag != "#DC" {
+				cats[i].Description = strings.ReplaceAll(cats[i].Description, "#DC", directTag)
+			}
+		}
+	}
+	return cats
 }
 
 // ApplyTrafficRoutingToConfigJSON 将客户端「智能分流开关中心」策略幂等地编译注入 sing-box config.json。

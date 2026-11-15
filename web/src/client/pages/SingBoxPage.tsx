@@ -511,6 +511,10 @@ export const SingBoxPage: React.FC<SingBoxPageProps> = ({
   const currentModeMeta = MODE_OPTIONS.find((m) => m.key === currentMode) || MODE_OPTIONS[0];
   const isNonDefaultMode = currentMode !== 'rule';
   const isCrossCategoryView = activeCategory === 'all' || Boolean(searchQuery.trim());
+  const aiDefaultDest = routing?.categories.find((c) => c.id === 'ai')?.defaultDest || '#VPS';
+  const commonDefaultDest =
+    routing?.categories.find((c) => c.id === 'streaming')?.defaultDest || 'Proxy';
+  const directLabel = routing?.directTag || '#DC';
 
   const memLabel = traffic?.memory ? formatMemMB(traffic.memory) : '';
 
@@ -853,11 +857,17 @@ export const SingBoxPage: React.FC<SingBoxPageProps> = ({
                             </span>
                           )}
                           {item.enabled ? (
-                            <Badge tone={item.effectiveDest === '#VPS' ? 'accent' : 'ok'}>
+                            <Badge
+                              tone={
+                                item.effectiveDest === '#VPS' || item.effectiveDest === 'AI'
+                                  ? 'accent'
+                                  : 'ok'
+                              }
+                            >
                               走 {item.effectiveDest}
                             </Badge>
                           ) : (
-                            <Badge tone="neutral">直连 {routing?.directTag || '#DC'}</Badge>
+                            <Badge tone="neutral">直连 {directLabel}</Badge>
                           )}
                           {item.enabled && sbRunning && resolvedLeaf && (
                             <button
@@ -1042,7 +1052,7 @@ export const SingBoxPage: React.FC<SingBoxPageProps> = ({
       <ConfirmDialog
         open={resetConfirmOpen}
         title="恢复默认分流策略"
-        description="确认将全部 25 项分流开关恢复为系统推荐默认？（AI 大模型默认走 #VPS，流媒体/游戏/社交默认走 Proxy 或 #Auto，Apple 与 Microsoft 默认直连 #DC）"
+        description={`确认将全部 ${routing?.totalCount || 25} 项分流开关恢复为系统推荐默认？（AI 大模型默认走 ${aiDefaultDest}，流媒体/游戏/社交默认走 ${commonDefaultDest} 或 #Auto，Apple 与 Microsoft 默认直连 ${directLabel}）`}
         confirmText="确认恢复默认"
         loading={resetting}
         onConfirm={() => void handleResetDefaults()}
