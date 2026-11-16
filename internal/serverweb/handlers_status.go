@@ -18,7 +18,10 @@ import (
 	"singctl/internal/subhub"
 )
 
-const statusCmdTimeout = 1200 * time.Millisecond
+const (
+	statusCmdTimeout     = 1200 * time.Millisecond
+	serviceProbeCacheTTL = 3 * time.Second
+)
 
 func runCommandWithTimeout(timeout time.Duration, name string, args ...string) ([]byte, error) {
 	if timeout <= 0 {
@@ -35,24 +38,86 @@ type serviceProbeSnapshot struct {
 	uptime  string
 }
 
-func probeSystemdService(unit string) serviceProbeSnapshot {
-	var snap serviceProbeSnapshot
-	var wg sync.WaitGroup
-	wg.Add(3)
-	go func() {
-		defer wg.Done()
-		snap.running = checkServiceRunning(unit)
-	}()
-	go func() {
-		defer wg.Done()
-		snap.pid = getServicePID(unit)
-	}()
-	go func() {
-		defer wg.Done()
-		snap.uptime = getServiceUptime(unit)
-	}()
-	wg.Wait()
-	return snap
+func formatServiceUptime(val string) string {
+	val = strings.TrimSpace(val)
+	if val == "" || val == "n/a" {
+		return ""
+	}
+	t, err := time.Parse("Mon 2006-01-02 15:04:05 MST", val)
+	if err != nil {
+		return val
+	}
+	return time.Since(t).Round(time.Second).String()
+}
+
+func parseSystemdShowBatchOutput(raw string) map[string]serviceProbeSnapshot {
+	out := make(map[string]serviceProbeSnapshot)
+	var curUnit string
+	var curSnap serviceProbeSnapshot
+
+	flush := func() {
+		if curUnit != "" {
+			out[curUnit] = curSnap
+		}
+		curUnit = ""
+		curSnap = serviceProbeSnapshot{}
+	}
+
+	for line := range strings.SplitSeq(raw, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			flush()
+			continue
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		k = strings.TrimSpace(k)
+		v = strings.TrimSpace(v)
+		switch k {
+		case "Id":
+			curUnit = strings.TrimSuffix(v, ".service")
+		case "ActiveState":
+			curSnap.running = v == "active"
+		case "MainPID":
+			if v != "" && v != "0" {
+				curSnap.pid = v
+			}
+		case "ActiveEnterTimestamp":
+			curSnap.uptime = formatServiceUptime(v)
+		}
+	}
+	flush()
+	return out
+}
+
+func probeSystemdServicesBatch(units ...string) map[string]serviceProbeSnapshot {
+	args := []string{"show", "--property=Id,ActiveState,MainPID,ActiveEnterTimestamp"}
+	args = append(args, units...)
+	out, err := runCommandWithTimeout(statusCmdTimeout, "systemctl", args...)
+	if err != nil && len(out) == 0 {
+		return map[string]serviceProbeSnapshot{}
+	}
+	return parseSystemdShowBatchOutput(string(out))
+}
+
+func (s *Server) getCachedServiceProbes() map[string]serviceProbeSnapshot {
+	s.serviceProbeMu.Lock()
+	if s.cachedServiceProbes != nil && time.Since(s.cachedServiceProbesAt) < serviceProbeCacheTTL {
+		cached := s.cachedServiceProbes
+		s.serviceProbeMu.Unlock()
+		return cached
+	}
+	s.serviceProbeMu.Unlock()
+
+	probes := probeSystemdServicesBatch("caddy", "sing-box", "singctl-sub", "wireproxy")
+
+	s.serviceProbeMu.Lock()
+	s.cachedServiceProbes = probes
+	s.cachedServiceProbesAt = time.Now()
+	s.serviceProbeMu.Unlock()
+	return probes
 }
 
 func (s *Server) getCachedServiceVersions() (caddyVer, singboxVer, subhubVer, warpVer string) {
@@ -116,17 +181,14 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		httpsURL = fmt.Sprintf("https://%s%s/", subDomain, adminPath)
 	}
 
-	var caddyProbe, singboxProbe, subhubProbe, warpProbe serviceProbeSnapshot
+	var probes map[string]serviceProbeSnapshot
 	var caddyVer, singboxVer, subhubVer, warpVer string
 	var sysMetrics map[string]any
 	var certs []CertHealth
 
 	var wg sync.WaitGroup
-	wg.Add(7)
-	go func() { defer wg.Done(); caddyProbe = probeSystemdService("caddy") }()
-	go func() { defer wg.Done(); singboxProbe = probeSystemdService("sing-box") }()
-	go func() { defer wg.Done(); subhubProbe = probeSystemdService("singctl-sub") }()
-	go func() { defer wg.Done(); warpProbe = probeSystemdService("wireproxy") }()
+	wg.Add(4)
+	go func() { defer wg.Done(); probes = s.getCachedServiceProbes() }()
 	go func() {
 		defer wg.Done()
 		caddyVer, singboxVer, subhubVer, warpVer = s.getCachedServiceVersions()
@@ -134,6 +196,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	go func() { defer wg.Done(); sysMetrics = getSystemMetrics() }()
 	go func() { defer wg.Done(); certs = InspectServerCerts(cfg, false) }()
 	wg.Wait()
+
+	caddyProbe := probes["caddy"]
+	singboxProbe := probes["sing-box"]
+	subhubProbe := probes["singctl-sub"]
+	warpProbe := probes["wireproxy"]
 
 	subhubRunning := subhubProbe.running || subhub.IsRunning()
 
@@ -296,17 +363,10 @@ func getSystemMetrics() map[string]any {
 		}
 	}
 
-	out, err := runCommandWithTimeout(statusCmdTimeout, "df", "-h", "/")
-	if err == nil {
-		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-		if len(lines) >= 2 {
-			fields := strings.Fields(lines[1])
-			if len(fields) >= 5 {
-				m["diskUsed"] = fields[2]
-				m["diskTotal"] = fields[1]
-				m["diskPercent"] = fields[4]
-			}
-		}
+	if used, total, pct, ok := getRootDiskUsage(); ok {
+		m["diskUsed"] = used
+		m["diskTotal"] = total
+		m["diskPercent"] = pct
 	}
 
 	return m
@@ -324,34 +384,6 @@ func getSystemUptime() string {
 		return dur.String()
 	}
 	return ""
-}
-
-func getServicePID(name string) string {
-	out, err := runCommandWithTimeout(statusCmdTimeout, "systemctl", "show", "--property", "MainPID", "--value", name)
-	if err != nil {
-		return ""
-	}
-	pid := strings.TrimSpace(string(out))
-	if pid == "0" {
-		return ""
-	}
-	return pid
-}
-
-func getServiceUptime(name string) string {
-	out, err := runCommandWithTimeout(statusCmdTimeout, "systemctl", "show", "--property", "ActiveEnterTimestamp", "--value", name)
-	if err != nil {
-		return ""
-	}
-	val := strings.TrimSpace(string(out))
-	if val == "" {
-		return ""
-	}
-	t, err := time.Parse("Mon 2006-01-02 15:04:05 MST", val)
-	if err != nil {
-		return val
-	}
-	return time.Since(t).Round(time.Second).String()
 }
 
 func checkServiceRunning(name string) bool {

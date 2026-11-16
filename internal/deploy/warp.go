@@ -303,7 +303,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=%s -c %s
+ExecStart=%s -s -c %s
 Restart=always
 RestartSec=2
 

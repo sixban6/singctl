@@ -65,7 +65,6 @@
     redir {{.AdminPath}} {{.AdminPath}}/ 308
     handle_path {{.AdminPath}}/* {
         header {
-            Clear-Site-Data "cache"
             Cache-Control "no-store, no-cache, must-revalidate"
         }
         reverse_proxy http://127.0.0.1:{{.AdminPort}} {

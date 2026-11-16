@@ -3,6 +3,7 @@ package serverweb
 import (
 	"bufio"
 	"cmp"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -78,6 +79,7 @@ func (s *Server) handleServiceAction(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("执行 %s %s 失败: %v", service, action, cmdErr))
 		return
 	}
+	s.invalidateStatusCaches()
 	s.recordAudit(r, fmt.Sprintf("执行服务操作 [%s -> %s]", service, action))
 	writeJSON(w, http.StatusOK, map[string]string{
 		"message": fmt.Sprintf("服务 %s 动作 %s 执行成功", service, action),
@@ -156,6 +158,7 @@ func (s *Server) handleUpgradeService(w http.ResponseWriter, r *http.Request) {
 			_ = exec.Command("systemctl", "restart", "singctl-sub").Run()
 		}
 		msg := fmt.Sprintf("SingCtl 已平滑升级至 %s，后台面板将在 1 秒后自动热重启", cmp.Or(newVer, "最新版"))
+		s.invalidateStatusCaches()
 		s.recordAudit(r, fmt.Sprintf("平滑自升级 SingCtl 主程序 [%s -> %s]", oldVer, cmp.Or(newVer, "latest")))
 		writeJSON(w, http.StatusOK, map[string]any{
 			"message":       msg,
@@ -188,6 +191,7 @@ func (s *Server) handleUpgradeService(w http.ResponseWriter, r *http.Request) {
 		msg = fmt.Sprintf("已成功平滑更新 %d 个核心服务组件", len(results))
 	}
 
+	s.invalidateStatusCaches()
 	s.recordAudit(r, fmt.Sprintf("平滑升级组件 [%s]", target))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"message": msg,
@@ -217,6 +221,7 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "未知操作: "+body.Action)
 		return
 	}
+	s.invalidateStatusCaches()
 	writeJSON(w, http.StatusOK, map[string]string{"message": "操作执行成功"})
 }
 
@@ -230,18 +235,20 @@ func (s *Server) handleServiceLogs(w http.ResponseWriter, r *http.Request) {
 
 	var output []byte
 	var err error
+	logCtx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
+	defer cancel()
 
 	switch service {
 	case "caddy":
-		output, err = exec.Command("journalctl", "-u", "caddy", "-n", strconv.Itoa(lines), "--no-pager").CombinedOutput()
+		output, err = exec.CommandContext(logCtx, "journalctl", "-u", "caddy", "--since", "-24h", "-n", strconv.Itoa(lines), "--no-pager").CombinedOutput()
 	case "singbox":
-		output, err = exec.Command("journalctl", "-u", "sing-box", "-n", strconv.Itoa(lines), "--no-pager").CombinedOutput()
+		output, err = exec.CommandContext(logCtx, "journalctl", "-u", "sing-box", "--since", "-24h", "-n", strconv.Itoa(lines), "--no-pager").CombinedOutput()
 	case "subhub":
-		output, err = exec.Command("journalctl", "-u", "singctl-sub", "-n", strconv.Itoa(lines), "--no-pager").CombinedOutput()
+		output, err = exec.CommandContext(logCtx, "journalctl", "-u", "singctl-sub", "--since", "-24h", "-n", strconv.Itoa(lines), "--no-pager").CombinedOutput()
 	case "warp":
-		output, err = exec.Command("journalctl", "-u", "wireproxy", "-n", strconv.Itoa(lines), "--no-pager").CombinedOutput()
+		output, err = exec.CommandContext(logCtx, "journalctl", "-u", "wireproxy", "--since", "-24h", "-n", strconv.Itoa(lines), "--no-pager").CombinedOutput()
 	default:
-		output, err = exec.Command("journalctl", "-n", strconv.Itoa(lines), "--no-pager").CombinedOutput()
+		output, err = exec.CommandContext(logCtx, "journalctl", "--since", "-24h", "-n", strconv.Itoa(lines), "--no-pager").CombinedOutput()
 	}
 
 	if err != nil && len(output) == 0 {

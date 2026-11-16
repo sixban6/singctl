@@ -481,6 +481,7 @@ func (s *Server) handleWarpAction(w http.ResponseWriter, r *http.Request) {
 
 		restoredFromDegraded := s.restoreSavedWarpRoutingIfDegraded()
 		evicted := s.evictAllWarpConnections(r.Context())
+		s.invalidateStatusCaches()
 
 		s.recordAudit(r, fmt.Sprintf("重新注册并切换 WARP 出口 IP [%s (%s)] (踢断旧流:%d)", newIP, cmp.Or(newLoc, "Unknown"), evicted))
 		msg := fmt.Sprintf("已更换全新 WARP 出口 IP：%s (%s)", newIP, cmp.Or(newLoc, "Anycast"))
@@ -506,6 +507,7 @@ func (s *Server) handleWarpAction(w http.ResponseWriter, r *http.Request) {
 		}
 		restoredFromDegraded := s.restoreSavedWarpRoutingIfDegraded()
 		evicted := s.evictAllWarpConnections(r.Context())
+		s.invalidateStatusCaches()
 		daemon := s.probeWarpDaemon(true)
 		s.recordAudit(r, fmt.Sprintf("一键部署并修复内置纯 Go WARP 隧道 (踢断旧流:%d)", evicted))
 		msg := "WARP (纯 Go wireproxy) 本地隧道已就绪，现可自由切换任意分流规则"

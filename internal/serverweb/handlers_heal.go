@@ -13,8 +13,51 @@ import (
 	"singctl/internal/heal"
 )
 
+const healStatusCacheTTL = 3 * time.Minute
+
+func (s *Server) storeHealStatusCache(rep *heal.StatusReport) {
+	if rep == nil {
+		return
+	}
+	cp := *rep
+	s.healCacheMu.Lock()
+	s.cachedHealReport = &cp
+	s.cachedHealAt = time.Now()
+	s.healCacheMu.Unlock()
+}
+
+func (s *Server) scanAndCacheHealStatus(ctx context.Context, force bool) heal.StatusReport {
+	if !force {
+		s.healCacheMu.Lock()
+		if s.cachedHealReport != nil && time.Since(s.cachedHealAt) < healStatusCacheTTL {
+			rep := *s.cachedHealReport
+			s.healCacheMu.Unlock()
+			return rep
+		}
+		s.healCacheMu.Unlock()
+	}
+
+	s.healScanMu.Lock()
+	defer s.healScanMu.Unlock()
+
+	if !force {
+		s.healCacheMu.Lock()
+		if s.cachedHealReport != nil && time.Since(s.cachedHealAt) < healStatusCacheTTL {
+			rep := *s.cachedHealReport
+			s.healCacheMu.Unlock()
+			return rep
+		}
+		s.healCacheMu.Unlock()
+	}
+
+	rep := heal.Scan(ctx, s.opts.ConfigPath, s.opts.Version)
+	s.storeHealStatusCache(&rep)
+	return rep
+}
+
 func (s *Server) handleHealStatus(w http.ResponseWriter, r *http.Request) {
-	rep := heal.Scan(r.Context(), s.opts.ConfigPath, s.opts.Version)
+	force := r.URL.Query().Get("refresh") == "1" || r.URL.Query().Get("refresh") == "true"
+	rep := s.scanAndCacheHealStatus(r.Context(), force)
 	writeJSON(w, http.StatusOK, rep)
 }
 
@@ -61,6 +104,7 @@ func (s *Server) handleHealPolicy(w http.ResponseWriter, r *http.Request) {
 
 	rep := heal.Scan(r.Context(), s.opts.ConfigPath, s.opts.Version)
 	rep.Timer = timerSt
+	s.storeHealStatusCache(&rep)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"message": fmt.Sprintf("自动安全自愈守护已%s%s", stateWord, fleetMsg),
 		"status":  rep,
@@ -109,6 +153,10 @@ func (s *Server) handleHealRun(w http.ResponseWriter, r *http.Request) {
 			Trigger:           "fleet",
 			AsyncWebRestart:   true,
 		})
+		s.storeHealStatusCache(&localRes.Status)
+		if !body.CheckOnly {
+			s.invalidateStatusCaches()
+		}
 
 		s.recordAudit(r, fmt.Sprintf("执行全舰队三层安全自愈 (子节点=%d, 滚动重启=%d, 熔断=%v)",
 			fleetRep.TotalNodes, fleetRep.RebootedNodes, fleetRep.CircuitBreakerHit))
@@ -140,7 +188,9 @@ func (s *Server) handleHealRun(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusConflict, err.Error())
 		return
 	}
+	s.storeHealStatusCache(&res.Status)
 	if !body.CheckOnly {
+		s.invalidateStatusCaches()
 		s.recordAudit(r, "执行本机三层安全自愈: "+res.Execution.Summary)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{

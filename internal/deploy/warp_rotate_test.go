@@ -345,7 +345,7 @@ func TestPurgeLegacyFscarmenWarp(t *testing.T) {
 	if uErr != nil {
 		t.Fatalf("expected rewritten unit file: %v", uErr)
 	}
-	if !strings.Contains(string(unitRaw), "ExecStart="+primaryBin+" -c "+primaryConf) {
+	if !strings.Contains(string(unitRaw), "ExecStart="+primaryBin+" -s -c "+primaryConf) {
 		t.Fatalf("expected unit rewritten to pure-Go ExecStart, got:\n%s", string(unitRaw))
 	}
 

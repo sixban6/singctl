@@ -65,7 +65,28 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ status, onRefresh, onN
   const [sniffTab, setSniffTab] = useState<'ip' | 'subnet' | 'country'>('ip');
   const [switchingDomain, setSwitchingDomain] = useState<string | null>(null);
 
+  const isTelemetryEnabled = Boolean(telemetry?.enabled);
+
   useEffect(() => {
+    let cancelled = false;
+    const fetchInitial = async () => {
+      try {
+        const snap = await api.getTelemetrySnapshot();
+        if (!cancelled) {
+          setTelemetry(snap);
+        }
+      } catch {
+        // silent
+      }
+    };
+    void fetchInitial();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isTelemetryEnabled) return;
     let cancelled = false;
     let es: EventSource | null = null;
     let fallbackTimer: ReturnType<typeof setInterval> | null = null;
@@ -76,63 +97,54 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ status, onRefresh, onN
         if (!cancelled) {
           setTelemetry(snap);
         }
-        return snap;
       } catch {
-        return null;
+        // silent
       }
     };
 
-    const startStream = () => {
-      try {
-        const streamUrl = `${getBasePath()}/api/server/telemetry/stream`;
-        es = new EventSource(streamUrl, { withCredentials: true });
-        es.onopen = () => {
-          if (!cancelled) setTelemetryStreamLive(true);
-        };
-        es.onmessage = (ev) => {
-          if (cancelled) return;
-          try {
-            const parsed: TelemetrySnapshot = JSON.parse(ev.data);
-            setTelemetry(parsed);
-            setTelemetryStreamLive(true);
-          } catch {
-            // ignore malformed frame
-          }
-        };
-        es.onerror = () => {
-          if (cancelled) return;
-          setTelemetryStreamLive(false);
-          if (es) {
-            es.close();
-            es = null;
-          }
-          if (!fallbackTimer) {
-            fallbackTimer = setInterval(() => {
-              fetchOnce();
-            }, 2500);
-          }
-        };
-      } catch {
+    try {
+      const streamUrl = `${getBasePath()}/api/server/telemetry/stream`;
+      es = new EventSource(streamUrl, { withCredentials: true });
+      es.onopen = () => {
+        if (!cancelled) setTelemetryStreamLive(true);
+      };
+      es.onmessage = (ev) => {
+        if (cancelled) return;
+        try {
+          const parsed: TelemetrySnapshot = JSON.parse(ev.data);
+          setTelemetry(parsed);
+          setTelemetryStreamLive(true);
+        } catch {
+          // ignore malformed frame
+        }
+      };
+      es.onerror = () => {
+        if (cancelled) return;
+        setTelemetryStreamLive(false);
+        if (es) {
+          es.close();
+          es = null;
+        }
         if (!fallbackTimer) {
           fallbackTimer = setInterval(() => {
-            fetchOnce();
+            void fetchOnce();
           }, 2500);
         }
+      };
+    } catch {
+      if (!fallbackTimer) {
+        fallbackTimer = setInterval(() => {
+          void fetchOnce();
+        }, 2500);
       }
-    };
-
-    fetchOnce().then((snap) => {
-      if (!cancelled && snap?.enabled) {
-        startStream();
-      }
-    });
+    }
 
     return () => {
       cancelled = true;
       if (es) es.close();
       if (fallbackTimer) clearInterval(fallbackTimer);
     };
-  }, [telemetry?.enabled]);
+  }, [isTelemetryEnabled]);
 
   const handleEnableTelemetry = async () => {
     setEnablingTelemetry(true);
