@@ -657,8 +657,8 @@ func (sbs *SingBoxServer) PreviewServerConfig() (string, error) {
 			1,
 		)
 	}
-	if sbs.cfg != nil && !sbs.cfg.Server.WarpRouting.IsEmpty() {
-		if compiled, applyErr := ApplyWarpRoutingToServerConfigJSON([]byte(rendered), sbs.cfg.Server.WarpRouting); applyErr == nil {
+	if sbs.cfg != nil {
+		if compiled, applyErr := ApplyWarpRoutingWithProtectedDomains([]byte(rendered), sbs.cfg.Server.WarpRouting, CollectServerProtectedDomains(sbs.cfg)); applyErr == nil {
 			rendered = string(compiled)
 		}
 	}

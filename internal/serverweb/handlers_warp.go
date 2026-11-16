@@ -2,6 +2,7 @@ package serverweb
 
 import (
 	"cmp"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,13 +21,16 @@ import (
 
 // WarpDaemonStatus 描述本地 Cloudflare WARP (wireproxy) 运行与隧道状态
 type WarpDaemonStatus struct {
-	Installed     bool   `json:"installed"`
-	Running       bool   `json:"running"`
-	TunnelHealthy bool   `json:"tunnelHealthy"`
-	SocksPort     int    `json:"socksPort"`
-	WarpIP        string `json:"warpIp,omitempty"`
-	WarpLoc       string `json:"warpLoc,omitempty"`
-	Error         string `json:"error,omitempty"`
+	Installed        bool   `json:"installed"`
+	Running          bool   `json:"running"`
+	TunnelHealthy    bool   `json:"tunnelHealthy"`
+	SocksPort        int    `json:"socksPort"`
+	WarpIP           string `json:"warpIp,omitempty"`
+	WarpLoc          string `json:"warpLoc,omitempty"`
+	Error            string `json:"error,omitempty"`
+	DegradedFallback bool   `json:"degradedFallback,omitempty"`
+	AutoHealStatus   string `json:"autoHealStatus,omitempty"`
+	LastHealedAt     string `json:"lastHealedAt,omitempty"`
 }
 
 // WarpRoutingStatusResponse 返回服务端 WARP 分流中心总览数据
@@ -38,21 +42,39 @@ type WarpRoutingStatusResponse struct {
 	WarpConnCount int                      `json:"warpConnCount"`
 }
 
+func (s *Server) applyWatchdogFieldsToDaemonStatus(status *WarpDaemonStatus) {
+	if status == nil {
+		return
+	}
+	s.warpWatchdogMu.Lock()
+	degraded := s.warpDegraded
+	healMsg := s.warpAutoHealStatus
+	healedAt := s.warpLastHealedAt
+	s.warpWatchdogMu.Unlock()
+
+	if !status.DegradedFallback {
+		status.DegradedFallback = degraded
+	}
+	if status.AutoHealStatus == "" {
+		status.AutoHealStatus = healMsg
+	}
+	if status.LastHealedAt == "" {
+		status.LastHealedAt = healedAt
+	}
+}
+
 func (s *Server) probeWarpDaemon(forceRefresh bool) WarpDaemonStatus {
 	if s.warpDaemonProbe != nil {
-		return s.warpDaemonProbe(forceRefresh)
+		st := s.warpDaemonProbe(forceRefresh)
+		s.applyWatchdogFieldsToDaemonStatus(&st)
+		return st
 	}
 
 	_, errBin := exec.LookPath("wireproxy")
 	_, _, hasConf := deploy.ResolveWireproxyConfigPaths()
-	installed := errBin == nil || hasConf
-	if !installed {
-		if _, stErr := os.Stat("/usr/local/bin/wireproxy"); stErr == nil {
-			installed = true
-		}
-	}
+	installed := errBin == nil || hasConf || deploy.IsWindtfWireproxyBinary(deploy.DefaultWireproxyBin)
 
-	running := checkServiceRunning("wireproxy") || checkServiceRunning("warp-svc")
+	running := checkServiceRunning("wireproxy")
 	portOpen := deploy.CheckWarpSocksPort()
 	if portOpen {
 		running = true
@@ -68,12 +90,13 @@ func (s *Server) probeWarpDaemon(forceRefresh bool) WarpDaemonStatus {
 
 	if !portOpen {
 		if !installed {
-			status.Error = "尚未安装 wireproxy (WARP) 服务"
+			status.Error = "尚未安装内置纯 Go wireproxy (WARP) 服务"
 		} else if !running {
 			status.Error = "wireproxy 服务未运行，127.0.0.1:40000 未监听"
 		} else {
 			status.Error = "wireproxy 已启动但 127.0.0.1:40000 尚未就绪"
 		}
+		s.applyWatchdogFieldsToDaemonStatus(&status)
 		return status
 	}
 
@@ -87,6 +110,7 @@ func (s *Server) probeWarpDaemon(forceRefresh bool) WarpDaemonStatus {
 	if cacheFresh {
 		status.WarpIP = cachedIP
 		status.WarpLoc = cachedLoc
+		s.applyWatchdogFieldsToDaemonStatus(&status)
 		return status
 	}
 
@@ -102,6 +126,7 @@ func (s *Server) probeWarpDaemon(forceRefresh bool) WarpDaemonStatus {
 		status.WarpIP = cachedIP
 		status.WarpLoc = cachedLoc
 	}
+	s.applyWatchdogFieldsToDaemonStatus(&status)
 	return status
 }
 
@@ -146,6 +171,31 @@ func (s *Server) handleGetWarpRouting(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+func (s *Server) liveWarpDepsForConfig(cfg *config.Config) *deploy.LiveWarpApplyDeps {
+	var deps deploy.LiveWarpApplyDeps
+	if s.warpDeps != nil {
+		deps = *s.warpDeps
+	}
+	protected := slices.Clone(deps.ProtectedDomains)
+	for _, dom := range deploy.CollectServerProtectedDomains(cfg) {
+		if !slices.Contains(protected, dom) {
+			protected = append(protected, dom)
+		}
+	}
+	deps.ProtectedDomains = protected
+	return &deps
+}
+
+func (s *Server) evictAllWarpConnections(ctx context.Context) int {
+	if s.telemetry == nil {
+		return 0
+	}
+	n, _ := s.telemetry.EvictMismatchedConnections(ctx, func(_, _, _, currentOutbound string) bool {
+		return currentOutbound == "WARP"
+	})
+	return n
+}
+
 func (s *Server) applyWarpRoutingConfig(r *http.Request, targetWR config.WarpRoutingConfig) (WarpRoutingStatusResponse, int, int, error) {
 	normalized, err := config.NormalizeWarpRouting(targetWR)
 	if err != nil {
@@ -161,7 +211,8 @@ func (s *Server) applyWarpRoutingConfig(r *http.Request, targetWR config.WarpRou
 	}
 
 	sbCfgPath := cmp.Or(strings.TrimSpace(s.opts.SingBoxConfigPath), constant.SingBoxConfigFile)
-	if _, applyErr := deploy.ApplyLiveWarpRouting(sbCfgPath, normalized, s.warpDeps); applyErr != nil {
+	liveDeps := s.liveWarpDepsForConfig(cfg)
+	if _, applyErr := deploy.ApplyLiveWarpRouting(sbCfgPath, normalized, liveDeps); applyErr != nil {
 		if errors.Is(applyErr, deploy.ErrWarpTunnelUnavailable) {
 			return WarpRoutingStatusResponse{}, http.StatusConflict, 0, applyErr
 		}
@@ -175,10 +226,17 @@ func (s *Server) applyWarpRoutingConfig(r *http.Request, targetWR config.WarpRou
 		return WarpRoutingStatusResponse{}, http.StatusInternalServerError, 0, fmt.Errorf("持久化 singctl.yaml 失败: %w", saveErr)
 	}
 
+	s.warpWatchdogMu.Lock()
+	s.warpDegraded = false
+	s.warpFailStreak = 0
+	s.warpBootSynced = true
+	s.warpWatchdogMu.Unlock()
+
 	evicted := 0
 	if s.telemetry != nil {
+		protected := deploy.CollectServerProtectedDomains(cfg)
 		n, _ := s.telemetry.EvictMismatchedConnections(r.Context(), func(host, dstIP, ruleTag, currentOutbound string) bool {
-			expected := deploy.ExpectedTargetOutbound(normalized, host, dstIP, ruleTag)
+			expected := deploy.ExpectedTargetOutbound(normalized, host, dstIP, ruleTag, protected...)
 			return expected != currentOutbound
 		})
 		evicted = n
@@ -421,12 +479,23 @@ func (s *Server) handleWarpAction(w http.ResponseWriter, r *http.Request) {
 		s.warpCachedAt = time.Now()
 		s.warpCacheMu.Unlock()
 
-		s.recordAudit(r, fmt.Sprintf("重新注册并切换 WARP 出口 IP [%s (%s)]", newIP, cmp.Or(newLoc, "Unknown")))
+		restoredFromDegraded := s.restoreSavedWarpRoutingIfDegraded()
+		evicted := s.evictAllWarpConnections(r.Context())
+
+		s.recordAudit(r, fmt.Sprintf("重新注册并切换 WARP 出口 IP [%s (%s)] (踢断旧流:%d)", newIP, cmp.Or(newLoc, "Unknown"), evicted))
+		msg := fmt.Sprintf("已更换全新 WARP 出口 IP：%s (%s)", newIP, cmp.Or(newLoc, "Anycast"))
+		if restoredFromDegraded {
+			msg += "，并已自动解除直出降级恢复原有分流策略"
+		}
+		if evicted > 0 {
+			msg += fmt.Sprintf("（已立即切换 %d 条存量连接）", evicted)
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"message": fmt.Sprintf("已更换全新 WARP 出口 IP：%s (%s)", newIP, cmp.Or(newLoc, "Anycast")),
-			"warpIp":  newIP,
-			"warpLoc": newLoc,
-			"daemon":  s.probeWarpDaemon(false),
+			"message":            msg,
+			"warpIp":             newIP,
+			"warpLoc":            newLoc,
+			"evictedConnections": evicted,
+			"daemon":             s.probeWarpDaemon(false),
 		})
 
 	case "ensure":
@@ -435,16 +504,49 @@ func (s *Server) handleWarpAction(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusInternalServerError, "一键部署/修复 WARP 失败: "+err.Error())
 			return
 		}
+		restoredFromDegraded := s.restoreSavedWarpRoutingIfDegraded()
+		evicted := s.evictAllWarpConnections(r.Context())
 		daemon := s.probeWarpDaemon(true)
-		s.recordAudit(r, "一键部署并修复本地 WARP (wireproxy) 隧道")
+		s.recordAudit(r, fmt.Sprintf("一键部署并修复内置纯 Go WARP 隧道 (踢断旧流:%d)", evicted))
+		msg := "WARP (纯 Go wireproxy) 本地隧道已就绪，现可自由切换任意分流规则"
+		if restoredFromDegraded {
+			msg = "WARP 本地隧道已修复，并已自动恢复原有分流策略"
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"message": "WARP (wireproxy) 本地隧道已就绪，现可自由切换任意分流规则",
-			"daemon":  daemon,
+			"message":            msg,
+			"evictedConnections": evicted,
+			"daemon":             daemon,
 		})
 
 	default:
 		writeJSONError(w, http.StatusBadRequest, "不支持的操作: "+action)
 	}
+}
+
+func (s *Server) restoreSavedWarpRoutingIfDegraded() bool {
+	s.warpWatchdogMu.Lock()
+	degraded := s.warpDegraded
+	s.warpFailStreak = 0
+	s.warpWatchdogMu.Unlock()
+	if !degraded {
+		return false
+	}
+
+	cfg, err := config.Load(s.opts.ConfigPath)
+	if err != nil || cfg == nil {
+		return false
+	}
+	sbCfgPath := cmp.Or(strings.TrimSpace(s.opts.SingBoxConfigPath), constant.SingBoxConfigFile)
+	if _, applyErr := deploy.ApplyLiveWarpRouting(sbCfgPath, cfg.Server.WarpRouting, s.liveWarpDepsForConfig(cfg)); applyErr != nil && !errors.Is(applyErr, os.ErrNotExist) {
+		return false
+	}
+
+	s.warpWatchdogMu.Lock()
+	s.warpDegraded = false
+	s.warpAutoHealStatus = "已手动恢复 WARP 隧道并切回原有分流策略"
+	s.warpLastHealedAt = time.Now().Format("2006-01-02 15:04:05")
+	s.warpWatchdogMu.Unlock()
+	return true
 }
 
 func removeStringFold(items []string, target string) []string {

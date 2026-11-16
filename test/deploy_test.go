@@ -1067,6 +1067,9 @@ func TestBuildAndNormalizeWireproxyConfig(t *testing.T) {
 	if !strings.Contains(confV4Only, "Endpoint = 162.159.192.1:2408") {
 		t.Fatalf("expected IPv4 endpoint in config: %s", confV4Only)
 	}
+	if !strings.Contains(confV4Only, "MTU = 1280") {
+		t.Fatalf("expected MTU = 1280 in wireproxy config: %s", confV4Only)
+	}
 	if strings.Contains(confV4Only, "PersistentKeepalive") {
 		t.Fatalf("did not expect PersistentKeepalive in wireproxy config: %s", confV4Only)
 	}
@@ -1097,6 +1100,9 @@ ResolveStrategy = auto
 	normalized, changed := deploy.NormalizeWireproxyConfigContent(legacyConf)
 	if !changed {
 		t.Fatalf("expected legacy wireproxy config to be marked changed")
+	}
+	if !strings.Contains(normalized, "MTU = 1280") {
+		t.Errorf("expected MTU normalized to 1280, got:\n%s", normalized)
 	}
 	if !strings.Contains(normalized, "Endpoint = 162.159.192.1:2408") {
 		t.Errorf("expected Endpoint normalized to IPv4, got:\n%s", normalized)

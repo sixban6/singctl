@@ -692,6 +692,9 @@ export interface WarpDaemonStatus {
   warpIp?: string;
   warpLoc?: string;
   error?: string;
+  degradedFallback?: boolean;
+  autoHealStatus?: string;
+  lastHealedAt?: string;
 }
 
 export interface WarpRoutingConfig {

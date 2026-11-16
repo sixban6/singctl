@@ -64,9 +64,6 @@ func (s *Server) handleServiceAction(w http.ResponseWriter, r *http.Request) {
 			action = "restart"
 		}
 		cmdErr = exec.Command("systemctl", action, "wireproxy").Run()
-		if cmdErr != nil {
-			cmdErr = exec.Command("systemctl", action, "warp-svc").Run()
-		}
 	case "all":
 		_ = exec.Command("systemctl", "restart", "sing-box").Run()
 		_ = exec.Command("systemctl", "restart", "caddy").Run()
@@ -243,9 +240,6 @@ func (s *Server) handleServiceLogs(w http.ResponseWriter, r *http.Request) {
 		output, err = exec.Command("journalctl", "-u", "singctl-sub", "-n", strconv.Itoa(lines), "--no-pager").CombinedOutput()
 	case "warp":
 		output, err = exec.Command("journalctl", "-u", "wireproxy", "-n", strconv.Itoa(lines), "--no-pager").CombinedOutput()
-		if err != nil || len(output) == 0 {
-			output, _ = exec.Command("journalctl", "-u", "warp-svc", "-n", strconv.Itoa(lines), "--no-pager").CombinedOutput()
-		}
 	default:
 		output, err = exec.Command("journalctl", "-n", strconv.Itoa(lines), "--no-pager").CombinedOutput()
 	}

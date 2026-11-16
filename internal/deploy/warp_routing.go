@@ -312,9 +312,60 @@ func CheckWarpSocksPort() bool {
 	return true
 }
 
+// ProtectedDNSResolverCIDRs 定义核心公共 DNS/DoH/DoT 解析器 IP 保护名单。
+// 无论管理员开启 google 预设 (含 rule-google-ip 覆盖 8.8.8.8) 还是全局 WARP 模式，
+// 指向这些核心解析器的 DNS 流量始终强制走原生直出 DC，彻底防止客户端 dns_proxy 被 WARP 故障连带阻断。
+var ProtectedDNSResolverCIDRs = []string{
+	"8.8.8.8/32",
+	"8.8.4.4/32",
+	"1.1.1.1/32",
+	"1.0.0.1/32",
+	"9.9.9.9/32",
+	"223.5.5.5/32",
+	"119.29.29.29/32",
+}
+
+// CollectServerProtectedDomains 从服务端配置中提取需要强制防回环豁免的本机管理/节点域名列表。
+func CollectServerProtectedDomains(cfg *config.Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	return normalizeProtectedDomains([]string{
+		cfg.Server.GetNodeDomain(),
+		cfg.Server.GetSubstoreDomain(),
+	})
+}
+
+func normalizeProtectedDomains(domains []string) []string {
+	out := make([]string, 0, len(domains))
+	for _, raw := range domains {
+		cleaned, err := config.CleanWarpDomainRule(raw)
+		if err != nil {
+			continue
+		}
+		if strings.HasPrefix(cleaned, "full:") || strings.HasPrefix(cleaned, "keyword:") {
+			continue
+		}
+		cleaned = strings.TrimPrefix(cleaned, "domain:")
+		if cleaned == "" || net.ParseIP(cleaned) != nil {
+			continue
+		}
+		if !slices.Contains(out, cleaned) {
+			out = append(out, cleaned)
+		}
+	}
+	return out
+}
+
 // ApplyWarpRoutingToServerConfigJSON 将 WarpRoutingConfig 编译并无损注入服务端 sing-box config.json 中，
 // 仅重编 route.rules / route.final / 按需增删可选 rule_set，完整保留 inbounds 凭据与 telemetry。
 func ApplyWarpRoutingToServerConfigJSON(rawJSON []byte, rawWR config.WarpRoutingConfig) ([]byte, error) {
+	return ApplyWarpRoutingWithProtectedDomains(rawJSON, rawWR, nil)
+}
+
+// ApplyWarpRoutingWithProtectedDomains 在基础分流编译之上，始终在 route.rules 最顶部注入公共 DNS/DoH 直出豁免
+// 与服务端自身管理/节点域名的防回环直出豁免（高于 global_warp 与 rule-google-ip 等所有 WARP 规则）。
+func ApplyWarpRoutingWithProtectedDomains(rawJSON []byte, rawWR config.WarpRoutingConfig, protectedDomains []string) ([]byte, error) {
 	wr, err := config.NormalizeWarpRouting(rawWR)
 	if err != nil {
 		return nil, err
@@ -402,6 +453,21 @@ func ApplyWarpRoutingToServerConfigJSON(rawJSON []byte, rawWR config.WarpRouting
 	// 3. 构建基础头部动作规则（sniff / hijack-dns / ip_is_private reject），防止私网/回环 SSRF 穿透
 	existingRules := extractSliceOfMaps(routeMap["rules"])
 	newRules := extractBaseProtectionRules(existingRules)
+
+	// 3.5 硬豁免保护规则（绝对最高优先，排在所有 WARP 预设、rule-google-ip 与 global_warp 之前）：
+	//  - 核心公共 DNS/DoH/DoT 解析器 (8.8.8.8 / 1.1.1.1 等) 永远走 DC，避免客户端 dns_proxy 因 WARP 异常/换 IP 阻断面板或 SSH；
+	//  - 服务端自身管理/订阅/节点域名永远走 DC，防止管理后台与 wstunnel SSH 发生回环锁死。
+	newRules = append(newRules, map[string]any{
+		"ip_cidr":  slices.Clone(ProtectedDNSResolverCIDRs),
+		"port":     []int{53, 443, 853},
+		"outbound": "DC",
+	})
+	if cleanProtected := normalizeProtectedDomains(protectedDomains); len(cleanProtected) > 0 {
+		newRules = append(newRules, map[string]any{
+			"domain_suffix": cleanProtected,
+			"outbound":      "DC",
+		})
+	}
 
 	// 4. 计算未走 WARP 的基础内置 rule_set（必须保持明确出口为 DC，尤其在 global_warp 下仍按基础分流或仅对未命中走 WARP？
 	// 注意：在 global_warp 模式下，未勾选为 WARP 的基础服务也应默认跟从兜底 WARP，仅显式 DirectDomains/DirectCIDRs 走 DC！
@@ -618,7 +684,19 @@ func buildDomainRouteRule(rules []string, outbound string) map[string]any {
 }
 
 // ExpectedTargetOutbound 根据当前 WARP 分流配置推断特定目标 (host, dstIP, ruleTag) 应当命中 "WARP" 还是 "Direct"
-func ExpectedTargetOutbound(wr config.WarpRoutingConfig, host, dstIP, ruleTag string) string {
+func ExpectedTargetOutbound(wr config.WarpRoutingConfig, host, dstIP, ruleTag string, protectedDomains ...string) string {
+	// 0. 公共 DNS 解析器与服务端自护域名强制 Direct，不触发 WARP 切换
+	for _, cidr := range ProtectedDNSResolverCIDRs {
+		if config.MatchCIDRRule(cidr, dstIP) {
+			return "Direct"
+		}
+	}
+	for _, dom := range normalizeProtectedDomains(protectedDomains) {
+		if config.MatchDomainRule(dom, host) {
+			return "Direct"
+		}
+	}
+
 	mode := wr.NormalizedMode()
 	if mode == config.WarpModeBypass {
 		return "Direct"
@@ -686,11 +764,12 @@ func ExpectedTargetOutbound(wr config.WarpRoutingConfig, host, dstIP, ruleTag st
 
 // LiveWarpApplyDeps 为 ApplyLiveWarpRouting 提供可测试的外部系统调用依赖注入
 type LiveWarpApplyDeps struct {
-	CheckWarpPort   func() bool
-	ValidateConfig  func(tmpPath string) error
-	IsServiceActive func() bool
-	ReloadService   func(wasActive bool) error
-	RestoreService  func(wasActive bool) error
+	ProtectedDomains []string
+	CheckWarpPort    func() bool
+	ValidateConfig   func(tmpPath string) error
+	IsServiceActive  func() bool
+	ReloadService    func(wasActive bool) error
+	RestoreService   func(wasActive bool) error
 }
 
 // ApplyLiveWarpRouting 对现有 sing-box config.json 执行防黑洞门禁、预检、0600 原子替换与 SIGHUP 零断流热重载（失败自动回滚）
@@ -706,7 +785,9 @@ func ApplyLiveWarpRouting(singboxConfigPath string, rawWR config.WarpRoutingConf
 	isActiveFn := defaultIsSingBoxActive
 	reloadFn := defaultReloadSingBoxService
 	restoreFn := defaultRestoreSingBoxService
+	var protectedDomains []string
 	if deps != nil {
+		protectedDomains = deps.ProtectedDomains
 		if deps.CheckWarpPort != nil {
 			checkPort = deps.CheckWarpPort
 		}
@@ -734,7 +815,7 @@ func ApplyLiveWarpRouting(singboxConfigPath string, rawWR config.WarpRoutingConf
 	if err != nil {
 		return false, fmt.Errorf("读取 %s 失败: %w", cfgPath, err)
 	}
-	newBytes, err := ApplyWarpRoutingToServerConfigJSON(oldBytes, wr)
+	newBytes, err := ApplyWarpRoutingWithProtectedDomains(oldBytes, wr, protectedDomains)
 	if err != nil {
 		return false, err
 	}
