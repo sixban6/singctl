@@ -64,6 +64,13 @@ type Server struct {
 	warpCachedIP       string
 	warpCachedLoc      string
 	warpCachedAt       time.Time
+	warpWatchdogMu     sync.Mutex
+	warpBootSynced     bool
+	warpFailStreak     int
+	warpDegraded       bool
+	warpAutoHealStatus string
+	warpLastHealedAt   string
+	warpWatchdogDeps   *WarpWatchdogDeps
 }
 
 type SessionRecord struct {
@@ -263,6 +270,7 @@ func (s *Server) ListenAndServe() error {
 	patrolCtx, cancelPatrol := context.WithCancel(context.Background())
 	defer cancelPatrol()
 	s.fleet.StartBackgroundPatrol(patrolCtx, fleet.DefaultPatrolInterval)
+	s.StartWarpWatchdog(patrolCtx, DefaultWarpWatchdogInterval)
 
 	srv := &http.Server{
 		Handler:           s.Mux,

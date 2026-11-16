@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"singctl/internal/config"
 	"singctl/internal/deploy"
@@ -154,5 +155,164 @@ server:
 	rec = doAuthReq(http.MethodGet, "/api/server/warp/connections?q=missav", "")
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "missav.ws") {
 		t.Fatalf("GET warp/connections failed: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestWarpWatchdog_ThreeStageSelfHealAndAutoRecovery(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "singctl.yaml")
+	sbCfgPath := filepath.Join(tmpDir, "config.json")
+	subDir := filepath.Join(tmpDir, "sub-store")
+	fleetFile := filepath.Join(tmpDir, "fleet.yaml")
+
+	if err := os.WriteFile(cfgPath, []byte(`
+server:
+  node_domain: "node.example.com"
+  substore_domain: "sub.example.com"
+  web_admin:
+    username: "opsadmin"
+    password: "Password123"
+  warp_routing:
+    mode: split
+    presets:
+      missav: true
+      x: true
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	tpl, err := deploy.TemplateFiles.ReadFile("templates/server_config.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	evictedIDs := []string{}
+	clashMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/connections":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"connections": []map[string]any{
+					{
+						"id":       "x-stream-1",
+						"upload":   100,
+						"download": 2048,
+						"chains":   []string{"WARP"},
+						"rule":     "rule-x",
+						"metadata": map[string]any{
+							"type":          "hysteria2",
+							"host":          "x.com",
+							"destinationIP": "198.51.100.40",
+						},
+					},
+					{
+						"id":       "dc-stream-1",
+						"upload":   50,
+						"download": 512,
+						"chains":   []string{"DC"},
+						"rule":     "final",
+						"metadata": map[string]any{
+							"type":          "vless",
+							"host":          "example.com",
+							"destinationIP": "203.0.113.50",
+						},
+					},
+				},
+			})
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/connections/"):
+			evictedIDs = append(evictedIDs, strings.TrimPrefix(r.URL.Path, "/connections/"))
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer clashMock.Close()
+
+	updatedTpl := strings.ReplaceAll(string(tpl), "127.0.0.1:9099", strings.TrimPrefix(clashMock.URL, "http://"))
+	if err := os.WriteFile(sbCfgPath, []byte(updatedTpl), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := New(Options{
+		ConfigPath:        cfgPath,
+		SingBoxConfigPath: sbCfgPath,
+		SubStoreDir:       subDir,
+		FleetFilePath:     fleetFile,
+		Username:          "opsadmin",
+		Password:          "Password123",
+	})
+	srv.sniff.EnableSystemProbe = false
+	srv.warpDeps = &deploy.LiveWarpApplyDeps{
+		CheckWarpPort:   func() bool { return true },
+		ValidateConfig:  func(string) error { return nil },
+		IsServiceActive: func() bool { return false },
+		ReloadService:   func(bool) error { return nil },
+	}
+
+	probeHealthy := false
+	switchCalls := 0
+	rotateCalls := 0
+	srv.warpWatchdogDeps = &WarpWatchdogDeps{
+		HasLegacyFscarmen: func() bool { return false },
+		ProbeRealTargets: func(_ time.Duration) (string, string, error) {
+			if probeHealthy {
+				return "198.51.100.99", "LAX", nil
+			}
+			return "", "", os.ErrDeadlineExceeded
+		},
+		SwitchEndpoint: func() (string, string, string, error) {
+			switchCalls++
+			return "", "", "", os.ErrDeadlineExceeded
+		},
+		RotateIdentity: func() (string, string, error) {
+			rotateCalls++
+			return "", "", os.ErrDeadlineExceeded
+		},
+	}
+
+	ctx := t.Context()
+
+	// 1. 第 1 次失败：防抖观察，不应立即触发阶段1/2/3，但应完成首次硬豁免路由同步
+	srv.RunWarpWatchdogTick(ctx)
+	if switchCalls != 0 || rotateCalls != 0 || srv.probeWarpDaemon(false).DegradedFallback {
+		t.Fatalf("expected tick 1 failure to debounce, got switch=%d rotate=%d degraded=%v", switchCalls, rotateCalls, srv.probeWarpDaemon(false).DegradedFallback)
+	}
+	rawSB, _ := os.ReadFile(sbCfgPath)
+	if !strings.Contains(string(rawSB), `"8.8.8.8/32"`) || !strings.Contains(string(rawSB), `"sub.example.com"`) {
+		t.Fatalf("expected boot sync to inject DNS and self-domain DC exemptions, got:\n%s", string(rawSB))
+	}
+
+	// 2. 第 2 次连续失败：触发 Stage 1 -> Stage 2 -> Stage 3 熔断降级至 DC，踢断 WARP 连接但保留 singctl.yaml 原配置
+	srv.RunWarpWatchdogTick(ctx)
+	if switchCalls != 1 || rotateCalls != 1 {
+		t.Fatalf("expected Stage 1 & Stage 2 attempts, got switch=%d rotate=%d", switchCalls, rotateCalls)
+	}
+	daemonSt := srv.probeWarpDaemon(false)
+	if !daemonSt.DegradedFallback {
+		t.Fatal("expected Stage 3 circuit breaker to enable DegradedFallback")
+	}
+	rawBypassed, _ := os.ReadFile(sbCfgPath)
+	if strings.Contains(string(rawBypassed), `"outbound": "WARP"`) {
+		t.Fatalf("expected live sing-box config to temporarily bypass all WARP rules during circuit break")
+	}
+	if len(evictedIDs) != 1 || evictedIDs[0] != "x-stream-1" {
+		t.Fatalf("expected only WARP connection x-stream-1 evicted, got %v", evictedIDs)
+	}
+	savedCfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if savedCfg.Server.WarpRouting.NormalizedMode() != config.WarpModeSplit || !savedCfg.Server.WarpRouting.IsPresetEnabled("x", false) {
+		t.Fatalf("expected singctl.yaml original warp_routing to remain intact during circuit break, got %+v", savedCfg.Server.WarpRouting)
+	}
+
+	// 3. 当 WARP 后续恢复健康后，后台巡检自动回切至原分流策略并解除 DegradedFallback
+	probeHealthy = true
+	srv.RunWarpWatchdogTick(ctx)
+	if srv.probeWarpDaemon(false).DegradedFallback {
+		t.Fatal("expected DegradedFallback to clear after WARP probe recovered")
+	}
+	rawRecovered, _ := os.ReadFile(sbCfgPath)
+	if !strings.Contains(string(rawRecovered), `"rule-x"`) || !strings.Contains(string(rawRecovered), `"outbound": "WARP"`) {
+		t.Fatalf("expected original WARP routing rules restored into config.json upon recovery, got:\n%s", string(rawRecovered))
 	}
 }

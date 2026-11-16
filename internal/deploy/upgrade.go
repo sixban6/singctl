@@ -297,6 +297,8 @@ func UpgradeCaddy(cfg *config.Config) (*UpgradeResult, error) {
 
 // UpgradeWarp atomically replaces wireproxy with the latest version and restarts the service.
 func UpgradeWarp(cfg *config.Config) (*UpgradeResult, error) {
+	_, _ = PurgeLegacyFscarmenWarp()
+
 	oldVer := GetInstalledWarpVersion()
 	logger.Info("Starting WARP (wireproxy) upgrade (current: %s)...", oldVer)
 
@@ -308,7 +310,7 @@ func UpgradeWarp(cfg *config.Config) (*UpgradeResult, error) {
 		latestTag = "latest"
 	}
 	latest := cleanVersion(latestTag)
-	if latest != "" && latest != "latest" && !IsNewerVersion(oldVer, latest) {
+	if IsWindtfWireproxyBinary(DefaultWireproxyBin) && latest != "" && latest != "latest" && !IsNewerVersion(oldVer, latest) {
 		logger.Success("WARP (wireproxy) 已是最新版本 (%s)，无需重复更新", oldVer)
 		return &UpgradeResult{
 			Component:   "warp",
@@ -344,12 +346,8 @@ func UpgradeWarp(cfg *config.Config) (*UpgradeResult, error) {
 		return nil, fmt.Errorf("failed to extract wireproxy: %w", err)
 	}
 
-	targetDest := "/usr/local/bin/wireproxy"
-	if _, err := os.Stat("/usr/bin/wireproxy"); err == nil {
-		targetDest = "/usr/bin/wireproxy"
-	}
-	if err := file.SafeReplace(targetDest, extractedWP); err != nil {
-		return nil, fmt.Errorf("failed to replace %s: %w", targetDest, err)
+	if err := file.SafeReplace(DefaultWireproxyBin, extractedWP); err != nil {
+		return nil, fmt.Errorf("failed to replace %s: %w", DefaultWireproxyBin, err)
 	}
 	_ = runCmd("systemctl", "restart", "wireproxy")
 

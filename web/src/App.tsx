@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { ServerStatusResponse } from './types';
 import { ApiError, api, setOnUnauthorized } from './api';
 import { ToastProvider, useToast } from './components/Toast';
@@ -14,7 +14,7 @@ import { SecurityTab } from './components/SecurityTab';
 import { CamouflageTab } from './components/CamouflageTab';
 import { WarpTab } from './components/WarpTab';
 import { LoginModal } from './components/LoginModal';
-import { Activity } from 'lucide-react';
+import { Activity, RefreshCw, WifiOff } from 'lucide-react';
 
 const DashboardContent: React.FC = () => {
   const { error, success } = useToast();
@@ -22,45 +22,66 @@ const DashboardContent: React.FC = () => {
   const [status, setStatus] = useState<ServerStatusResponse | null>(null);
   const [isCheckingAuth, setIsCheckingAuth] = useState(true);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const isAuthenticatedRef = useRef(false);
+  const [initNetError, setInitNetError] = useState<string | null>(null);
   const [logService, setLogService] = useState('singbox');
   const [linkDown, setLinkDown] = useState(false);
   const [lastOk, setLastOk] = useState<Date | null>(null);
   const [ackingPassword, setAckingPassword] = useState(false);
 
   const fetchStatus = useCallback(async (silent = false) => {
-    if (!silent && !isAuthenticated) setIsCheckingAuth(true);
+    if (!silent && !isAuthenticatedRef.current) setIsCheckingAuth(true);
     try {
       const data = await api.getStatus();
       setStatus(data);
+      isAuthenticatedRef.current = true;
       setIsAuthenticated(true);
+      setInitNetError(null);
       setLinkDown(false);
       setLastOk(new Date());
     } catch (err: unknown) {
       const unauthorized = err instanceof ApiError && err.status === 401;
-      if (unauthorized || !isAuthenticated) {
+      if (unauthorized) {
+        isAuthenticatedRef.current = false;
         setIsAuthenticated(false);
+        setInitNetError(null);
         setLinkDown(false);
+      } else if (!isAuthenticatedRef.current) {
+        // 仅 401 才弹出登录框；网络超时 / 502 / 504 等错误进入自动重连等待页，防止误踢回登录态
+        const msg = err instanceof Error && err.message ? err.message : '管理通道连接超时';
+        setInitNetError(msg);
       } else {
         setLinkDown(true);
       }
     } finally {
       setIsCheckingAuth(false);
     }
-  }, [isAuthenticated]);
+  }, []);
 
   useEffect(() => {
     setOnUnauthorized(() => {
+      isAuthenticatedRef.current = false;
       setIsAuthenticated(false);
+      setInitNetError(null);
       setIsCheckingAuth(false);
     });
-    fetchStatus();
+    void fetchStatus();
   }, [fetchStatus]);
+
+  // Initial network timeout auto-retry every 4 seconds
+  useEffect(() => {
+    if (isAuthenticated || initNetError === null || isCheckingAuth) return;
+    const timer = setTimeout(() => {
+      void fetchStatus(true);
+    }, 4000);
+    return () => clearTimeout(timer);
+  }, [isAuthenticated, initNetError, isCheckingAuth, fetchStatus]);
 
   // Periodic polling every 12 seconds only when authenticated
   useEffect(() => {
     if (!isAuthenticated) return;
     const timer = setInterval(() => {
-      fetchStatus(true);
+      void fetchStatus(true);
     }, 12000);
     return () => clearInterval(timer);
   }, [isAuthenticated, fetchStatus]);
@@ -70,7 +91,9 @@ const DashboardContent: React.FC = () => {
       await api.logout();
       success('已安全退出');
       setStatus(null);
+      isAuthenticatedRef.current = false;
       setIsAuthenticated(false);
+      setInitNetError(null);
       setLinkDown(false);
     } catch (err: any) {
       error(err.message || '登出失败');
@@ -119,14 +142,42 @@ const DashboardContent: React.FC = () => {
     );
   }
 
-  // 2. Unauthenticated Screen (Show ONLY Login Modal, zero dashboard leakage)
+  // 2. Network / Gateway Timeout on initial load (avoid false login prompt)
+  if (!isAuthenticated && initNetError !== null) {
+    return (
+      <div className="min-h-dvh flex items-center justify-center px-page-safe bg-[#080d1a] text-slate-200">
+        <div className="w-full max-w-md p-6 rounded-2xl border border-amber-500/30 bg-slate-900/90 space-y-4 text-center shadow-2xl">
+          <div className="w-12 h-12 mx-auto rounded-2xl bg-amber-500/10 border border-amber-500/25 flex items-center justify-center text-amber-400">
+            <WifiOff className="w-6 h-6" />
+          </div>
+          <div className="space-y-1.5">
+            <h2 className="text-base font-semibold text-white">管理通道连接超时，正在自动重试...</h2>
+            <p className="text-xs font-mono text-slate-400 break-words">{initNetError}</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => void fetchStatus(false)}
+            className="inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold text-xs transition-colors"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+            <span>立即重连</span>
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // 3. Unauthenticated Screen (Show ONLY Login Modal, zero dashboard leakage)
   if (!isAuthenticated) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-[#080d1a]">
         <LoginModal
           isOpen={true}
           onSuccess={() => {
-            fetchStatus();
+            isAuthenticatedRef.current = true;
+            setIsAuthenticated(true);
+            setInitNetError(null);
+            void fetchStatus(true);
           }}
         />
       </div>

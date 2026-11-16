@@ -438,6 +438,39 @@ export const WarpTab: React.FC<WarpTabProps> = ({ onRefreshParent }) => {
         </div>
       )}
 
+      {/* 1.5 后台巡检自动熔断降级保护横幅（已保护 singctl.yaml 原分流意向并保障不断网） */}
+      {daemon?.degradedFallback && (
+        <div className="p-4 sm:p-5 rounded-2xl border border-sky-500/40 bg-sky-950/25 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <div className="p-2 rounded-xl bg-sky-500/15 text-sky-400 border border-sky-500/30 shrink-0">
+              <ShieldCheck className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="text-sm font-bold text-sky-200 flex items-center gap-2 flex-wrap">
+                <span>自动熔断保护生效中：已临时切回原生直出 (DC)</span>
+                {daemon.lastHealedAt && (
+                  <span className="px-2 py-0.5 rounded bg-sky-500/10 border border-sky-500/30 text-[10px] font-mono text-sky-300">
+                    {daemon.lastHealedAt}
+                  </span>
+                )}
+              </h3>
+              <p className="text-xs text-sky-200/80 mt-1">
+                {daemon.autoHealStatus || 'WARP 出口异常且多节点自动重连未恢复，系统已临时降级至 DC 直出保障 x.com/AI 不断网，原有配置已安全保留，后台探测恢复后将自动回切。'}
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => handleWarpAction('rekey')}
+            disabled={acting !== null}
+            className="flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-semibold text-xs transition-all shrink-0 disabled:opacity-50"
+          >
+            <RotateCcw className={`w-3.5 h-3.5 ${acting === 'rekey' ? 'animate-spin' : ''}`} />
+            <span>{acting === 'rekey' ? '正在重试换 IP...' : '立即更换 WARP IP 尝试恢复'}</span>
+          </button>
+        </div>
+      )}
+
       {/* 2. 顶部双出口态势与全局分流模式 Hero Bar */}
       <div className="p-5 rounded-2xl glass-card space-y-5">
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
@@ -505,6 +538,15 @@ export const WarpTab: React.FC<WarpTabProps> = ({ onRefreshParent }) => {
                 <RefreshCw className="w-3 h-3" />
                 <span>刷新</span>
               </button>
+              {!daemon?.degradedFallback && daemon?.autoHealStatus && (
+                <span
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-500/10 border border-emerald-500/25 text-emerald-300 text-[11px]"
+                  title={daemon.lastHealedAt ? `时间: ${daemon.lastHealedAt}` : undefined}
+                >
+                  <ShieldCheck className="w-3 h-3 shrink-0" />
+                  <span>{daemon.autoHealStatus}</span>
+                </span>
+              )}
             </div>
           </div>
 

@@ -248,3 +248,61 @@ func TestApplyLiveWarpRouting_GuardsAndRollback(t *testing.T) {
 		t.Fatalf("expected rolled-back config.json mode 0600, got %o", fi.Mode().Perm())
 	}
 }
+
+func TestApplyWarpRouting_ProtectedDNSAndSelfDomainsAlwaysDC(t *testing.T) {
+	tpl := loadEmbeddedServerTemplate(t)
+
+	out, err := ApplyWarpRoutingWithProtectedDomains(tpl, config.WarpRoutingConfig{
+		Mode:    config.WarpModeGlobalWarp,
+		Presets: map[string]bool{"google": true},
+	}, []string{"node.example.com", "sub.example.com"})
+	if err != nil {
+		t.Fatalf("ApplyWarpRoutingWithProtectedDomains failed: %v", err)
+	}
+
+	var parsed struct {
+		Route struct {
+			Final string `json:"final"`
+			Rules []struct {
+				Outbound     string   `json:"outbound"`
+				IPCIDR       []string `json:"ip_cidr"`
+				Port         []int    `json:"port"`
+				DomainSuffix []string `json:"domain_suffix"`
+				RuleSet      []string `json:"rule_set"`
+			} `json:"rules"`
+		} `json:"route"`
+	}
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Route.Final != "WARP" {
+		t.Fatalf("expected final=WARP, got %s", parsed.Route.Final)
+	}
+
+	dnsIdx, selfDomainIdx, warpRuleIdx := -1, -1, -1
+	for idx, r := range parsed.Route.Rules {
+		if r.Outbound == "DC" && slices.Contains(r.IPCIDR, "8.8.8.8/32") && slices.Contains(r.IPCIDR, "1.1.1.1/32") && slices.Equal(r.Port, []int{53, 443, 853}) {
+			dnsIdx = idx
+		}
+		if r.Outbound == "DC" && slices.Contains(r.DomainSuffix, "node.example.com") && slices.Contains(r.DomainSuffix, "sub.example.com") {
+			selfDomainIdx = idx
+		}
+		if r.Outbound == "WARP" && warpRuleIdx < 0 {
+			warpRuleIdx = idx
+		}
+	}
+	if dnsIdx < 0 || selfDomainIdx < 0 || warpRuleIdx < 0 {
+		t.Fatalf("missing expected rules: dnsIdx=%d selfDomainIdx=%d warpRuleIdx=%d", dnsIdx, selfDomainIdx, warpRuleIdx)
+	}
+	if dnsIdx >= warpRuleIdx || selfDomainIdx >= warpRuleIdx {
+		t.Fatalf("expected DNS (%d) and self-domain (%d) DC exemptions BEFORE first WARP rule (%d)", dnsIdx, selfDomainIdx, warpRuleIdx)
+	}
+
+	globalWR := config.WarpRoutingConfig{Mode: config.WarpModeGlobalWarp}
+	if got := ExpectedTargetOutbound(globalWR, "", "8.8.8.8", ""); got != "Direct" {
+		t.Fatalf("expected 8.8.8.8 to resolve as Direct even in global_warp, got %q", got)
+	}
+	if got := ExpectedTargetOutbound(globalWR, "panel.sub.example.com", "203.0.113.10", "", "sub.example.com"); got != "Direct" {
+		t.Fatalf("expected protected domain to resolve as Direct in global_warp, got %q", got)
+	}
+}

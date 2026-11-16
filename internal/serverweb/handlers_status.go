@@ -35,7 +35,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	caddyRunning := checkServiceRunning("caddy")
 	singboxRunning := checkServiceRunning("sing-box")
 	subhubRunning := checkServiceRunning("singctl-sub") || subhub.IsRunning()
-	warpRunning := checkServiceRunning("wireproxy") || checkServiceRunning("warp-svc")
+	warpRunning := checkServiceRunning("wireproxy")
 
 	caddyVer := deploy.GetInstalledCaddyVersion()
 	singboxVer := deploy.GetInstalledSingBoxVersion()
