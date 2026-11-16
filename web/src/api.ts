@@ -297,7 +297,8 @@ export const api = {
       body: JSON.stringify(input),
     }),
 
-  getHealStatus: () => request<HealStatusReport>('/api/server/heal/status'),
+  getHealStatus: (refresh = false) =>
+    request<HealStatusReport>(`/api/server/heal/status${refresh ? '?refresh=1' : ''}`),
 
   runHeal: (opts: { scope?: 'local' | 'fleet'; checkOnly?: boolean; allowReboot?: boolean; enableTimers?: boolean; targetIds?: string[] }) =>
     request<HealRunResponse>('/api/server/heal/run', {

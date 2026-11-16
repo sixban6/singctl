@@ -2,9 +2,7 @@ package serverweb
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -37,9 +35,12 @@ type AuditEntry struct {
 
 // AuditManager 管理操作审计日志管理器 (支持 0600 小文件持久化)
 type AuditManager struct {
-	mu       sync.RWMutex
-	logs     []AuditEntry
-	filePath string
+	mu         sync.RWMutex
+	logs       []AuditEntry
+	filePath   string
+	diskMu     sync.Mutex
+	writeSeq   uint64
+	writtenSeq uint64
 }
 
 // NewAuditManager 创建审计日志管理器实例
@@ -71,14 +72,25 @@ func (m *AuditManager) Record(ip, action string) {
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	// 最新记录插入切片头部
 	m.logs = append([]AuditEntry{entry}, m.logs...)
 	if len(m.logs) > MaxAuditLogs {
 		m.logs = m.logs[:MaxAuditLogs]
 	}
-	m.SaveLocked()
+	var data []byte
+	var seq uint64
+	if m.filePath != "" {
+		if b, err := json.MarshalIndent(m.logs, "", "  "); err == nil {
+			m.writeSeq++
+			seq = m.writeSeq
+			data = b
+		}
+	}
+	m.mu.Unlock()
+
+	if len(data) > 0 {
+		m.persistSnapshot(data, seq)
+	}
 }
 
 // List 获取最近管理操作列表 (最新的在前)
@@ -113,25 +125,15 @@ func (m *AuditManager) loadLocked() {
 	m.logs = loaded
 }
 
-func (m *AuditManager) SaveLocked() {
-	if m.filePath == "" {
+func (m *AuditManager) persistSnapshot(data []byte, seq uint64) {
+	if m.filePath == "" || len(data) == 0 {
 		return
 	}
-	data, err := json.MarshalIndent(m.logs, "", "  ")
-	if err != nil {
-		return
-	}
-	dir := filepath.Dir(m.filePath)
-	_ = os.MkdirAll(dir, 0700)
-
-	tmp := fmt.Sprintf("%s.%d.tmp", m.filePath, time.Now().UnixNano())
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
-		return
-	}
-	_ = os.Chmod(tmp, 0600)
-	if err := os.Rename(tmp, m.filePath); err != nil {
-		_ = os.Remove(tmp)
-		_ = os.WriteFile(m.filePath, data, 0600)
-		_ = os.Chmod(m.filePath, 0600)
+	m.diskMu.Lock()
+	defer m.diskMu.Unlock()
+	if seq > m.writtenSeq {
+		if err := writeAtomicFile0600(m.filePath, data); err == nil {
+			m.writtenSeq = seq
+		}
 	}
 }

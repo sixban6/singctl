@@ -109,7 +109,10 @@ func scanCoreLayer(_ context.Context, cfg *config.Config, currentSingctlVer stri
 		}
 	}
 	if curSingctl == "" || curSingctl == "dev" {
-		if out, err := exec.Command("singctl", "version").CombinedOutput(); err == nil {
+		vCtx, vCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		out, err := exec.CommandContext(vCtx, "singctl", "version").CombinedOutput()
+		vCancel()
+		if err == nil {
 			for line := range strings.SplitSeq(string(out), "\n") {
 				if idx := strings.Index(line, "SingCtl v"); idx != -1 {
 					fields := strings.Fields(line[idx:])
@@ -221,7 +224,7 @@ func scanOSLayer(ctx context.Context) OSLayerStatus {
 		if fi, err := os.Stat("/var/cache/apt/pkgcache.bin"); err == nil {
 			st.LastAptCacheUpdate = fi.ModTime().Format(time.RFC3339)
 		}
-		cmd := exec.CommandContext(cCtx, "apt-get", "-s", "-o", "Debug::NoLocking=true", "upgrade")
+		cmd := exec.CommandContext(cCtx, "apt-get", "-s", "-o", "Debug::NoLocking=true", "-o", "Dir::Log::Planner=/dev/null", "upgrade")
 		cmd.Env = append(os.Environ(), "LC_ALL=C")
 		if out, err := cmd.CombinedOutput(); err == nil {
 			st.SecurityUpdates = ParseAptSimulateSecurityUpdates(string(out))
@@ -386,7 +389,10 @@ func scanKernelLayer() KernelLayerStatus {
 	st := KernelLayerStatus{
 		Healthy: true,
 	}
-	if out, err := exec.Command("uname", "-r").Output(); err == nil {
+	uCtx, uCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	out, err := exec.CommandContext(uCtx, "uname", "-r").Output()
+	uCancel()
+	if err == nil {
 		st.RunningKernel = strings.TrimSpace(string(out))
 	}
 	if runtime.GOOS != "linux" || isOpenWrtSystem() {

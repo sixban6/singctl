@@ -8,7 +8,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -24,9 +23,9 @@ const (
 	maxTrackedSniffIPs = 1000
 	sniffEntryTTL      = 24 * time.Hour
 	trustedClientTTL   = 2 * time.Hour
-	systemHarvestMinDT = 6 * time.Second
-	fleetHarvestMinDT  = 20 * time.Second
-	sniffSaveMinDT     = 3 * time.Second
+	systemHarvestMinDT = 15 * time.Second
+	fleetHarvestMinDT  = 30 * time.Second
+	sniffSaveMinDT     = 60 * time.Second
 	SniffTimeLayout    = "2006-01-02 15:04:05"
 )
 
@@ -329,6 +328,11 @@ type SniffTracker struct {
 	fleetMgr           *fleet.Manager
 	EnableSystemProbe  bool
 	fleetBgRunning     atomic.Bool
+	systemBgRunning    atomic.Bool
+	saveRunning        atomic.Bool
+	diskMu             sync.Mutex
+	writeSeq           uint64
+	writtenSeq         uint64
 }
 
 // NewSniffTracker 创建嗅探态势追踪器 (可选传入 0600 持久化文件路径)
@@ -383,14 +387,44 @@ func (t *SniffTracker) ensureNodeMetaLocked(nodeID string) *nodeHarvestMeta {
 
 // MarkTrustedClientIPs 标记已通过鉴权的合法客户端或集群白名单 IP (自动从所有主机嗅探列表中剔除)
 func (t *SniffTracker) MarkTrustedClientIPs(ips ...string) {
+	normIPs := make([]string, 0, len(ips))
+	for _, raw := range ips {
+		if ipStr := normalizeIPString(raw); ipStr != "" {
+			normIPs = append(normIPs, ipStr)
+		}
+	}
+	if len(normIPs) == 0 {
+		return
+	}
+
 	now := time.Now()
+	// 快路径：已在可信白名单（剩余 TTL > 30m）且各节点记录中无非封禁残留时，仅持 RLock 即可返回，零写锁竞争
+	t.mu.RLock()
+	needsUpdate := false
+	for _, ipStr := range normIPs {
+		exp, ok := t.trustedClients[ipStr]
+		if !ok || exp.Sub(now) <= 30*time.Minute {
+			needsUpdate = true
+			break
+		}
+		for _, nodeMap := range t.recordsByNode {
+			if rec, exists := nodeMap[ipStr]; exists && rec.status != "banned" {
+				needsUpdate = true
+				break
+			}
+		}
+		if needsUpdate {
+			break
+		}
+	}
+	t.mu.RUnlock()
+	if !needsUpdate {
+		return
+	}
+
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	for _, raw := range ips {
-		ipStr := normalizeIPString(raw)
-		if ipStr == "" {
-			continue
-		}
+	for _, ipStr := range normIPs {
 		t.trustedClients[ipStr] = now.Add(trustedClientTTL)
 		for _, nodeMap := range t.recordsByNode {
 			if rec, exists := nodeMap[ipStr]; exists && rec.status != "banned" {
@@ -444,9 +478,13 @@ func (t *SniffTracker) ObserveNodeAt(nodeID, nodeName, rawIP, vector, status str
 }
 
 func (t *SniffTracker) Flush() {
+	if t == nil || t.filePath == "" {
+		return
+	}
 	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.SaveLocked(true)
+	raw, seq := t.snapshotPersistBytesLocked(time.Now(), true)
+	t.mu.Unlock()
+	t.persistSnapshot(raw, seq)
 }
 
 func (t *SniffTracker) observeLocked(ipStr, vector, status string, hitsDelta int, setExactHits bool) {
@@ -789,8 +827,9 @@ func (t *SniffTracker) BlockTargetForNode(ctx context.Context, target, nodeScope
 		}
 	}
 	t.dirty = true
-	t.SaveLocked(true)
+	raw, seq := t.snapshotPersistBytesLocked(now, true)
 	t.mu.Unlock()
+	t.persistSnapshot(raw, seq)
 
 	appliedNodes := 0
 	if applyLocal {
@@ -924,8 +963,9 @@ func (t *SniffTracker) UnblockTargetForNode(ctx context.Context, target, nodeSco
 			}
 		}
 		t.dirty = true
-		t.SaveLocked(true)
+		raw, seq := t.snapshotPersistBytesLocked(time.Now(), true)
 		t.mu.Unlock()
+		t.persistSnapshot(raw, seq)
 
 		appliedNodes := 0
 		if applyLocal {
@@ -1007,8 +1047,9 @@ func (t *SniffTracker) UnblockTargetForNode(ctx context.Context, target, nodeSco
 		}
 	}
 	t.dirty = true
-	t.SaveLocked(true)
+	raw, seq := t.snapshotPersistBytesLocked(time.Now(), true)
 	t.mu.Unlock()
+	t.persistSnapshot(raw, seq)
 
 	appliedNodes := 0
 	if applyLocal {
@@ -1111,39 +1152,47 @@ func applyNFTFlushAll() {
 	_ = exec.CommandContext(ctx, "nft", "flush", "set", "inet", "security", "blocklist_ip4_forever").Run()
 }
 
-// Snapshot 采集并生成默认视角（全集群/本机）的活跃嗅探态势快照 (用于 SSE 遥测与兼容调用)
+// Snapshot 采集并生成默认视角（全集群/本机）的活跃嗅探态势快照 (用于 SSE 遥测，非阻塞纯内存快照 + 后台异步采集)
 func (t *SniffTracker) Snapshot(ctx context.Context, activeProxyClientIPs ...string) SniffSummary {
-	// 在高频 SSE 调用中异步触发远程子节点采集，避免阻塞实时波形流
+	if len(activeProxyClientIPs) > 0 {
+		t.MarkTrustedClientIPs(activeProxyClientIPs...)
+	}
+	t.triggerBackgroundSystemHarvestIfNeeded()
 	t.triggerBackgroundFleetHarvestIfNeeded()
-	return t.SnapshotForNode(ctx, "all", false, activeProxyClientIPs...)
+	return t.buildSnapshot(ctx, "all", false, true)
 }
 
 // SnapshotForNode 采集并生成指定主机视角 ("all" | "local" | "<node_id>") 的全量活跃嗅探三维态势快照
 func (t *SniffTracker) SnapshotForNode(ctx context.Context, nodeScope string, forceRefresh bool, activeProxyClientIPs ...string) SniffSummary {
-	nodeScope = cmp.Or(strings.TrimSpace(nodeScope), "all")
 	if len(activeProxyClientIPs) > 0 {
 		t.MarkTrustedClientIPs(activeProxyClientIPs...)
 	}
+	return t.buildSnapshot(ctx, nodeScope, forceRefresh, false)
+}
+
+func (t *SniffTracker) buildSnapshot(ctx context.Context, nodeScope string, forceRefresh, nonBlocking bool) SniffSummary {
+	nodeScope = cmp.Or(strings.TrimSpace(nodeScope), "all")
 
 	// 1. 同步本机 Web IPLimiter 中的密码试探与封禁记录（跳过嗅探手动拉黑记录，避免污染原探测攻击向量）
 	if t.limiter != nil {
-		attempts := t.limiter.ListAllAttempts()
-		t.mu.Lock()
-		for _, att := range attempts {
-			if isIgnoredInternalIP(att.IP) || att.Source == BanSourceManualSniff {
-				continue
+		if attempts := t.limiter.ListAllAttempts(); len(attempts) > 0 {
+			t.mu.Lock()
+			for _, att := range attempts {
+				if isIgnoredInternalIP(att.IP) || att.Source == BanSourceManualSniff {
+					continue
+				}
+				st := "observing"
+				if att.Banned {
+					st = "banned"
+				}
+				t.observeNodeAtLocked("local", "本机网关", att.IP, "Web 管理端密码试探", st, att.FailCount, true, att.LastFail, att.LastFail)
 			}
-			st := "observing"
-			if att.Banned {
-				st = "banned"
-			}
-			t.observeNodeAtLocked("local", "本机网关", att.IP, "Web 管理端密码试探", st, att.FailCount, true, att.LastFail, att.LastFail)
+			t.mu.Unlock()
 		}
-		t.mu.Unlock()
 	}
 
-	// 2. 采集本机系统级防火墙、fail2ban 与外部探测连接
-	if nodeScope == "all" || nodeScope == "local" {
+	// 2. 采集本机系统级防火墙、fail2ban 与外部探测连接 (SSE 热路径由后台协程异步采集，不阻塞请求)
+	if !nonBlocking && (nodeScope == "all" || nodeScope == "local") {
 		t.maybeHarvestSystemSources(ctx, forceRefresh)
 	}
 
@@ -1169,7 +1218,7 @@ func (t *SniffTracker) SnapshotForNode(ctx context.Context, nodeScope string, fo
 		}
 	}
 
-	if enableProbe && len(fleetNodes) > 0 && nodeScope != "local" {
+	if !nonBlocking && enableProbe && len(fleetNodes) > 0 && nodeScope != "local" {
 		t.maybeHarvestFleetNodes(ctx, fleetNodes, nodeScope, forceRefresh)
 	}
 
@@ -1189,9 +1238,6 @@ func (t *SniffTracker) SnapshotForNode(ctx context.Context, nodeScope string, fo
 				continue
 			}
 		}
-	}
-	if t.dirty {
-		t.SaveLocked(false)
 	}
 
 	// 构建主机节点元数据映射
@@ -1359,6 +1405,7 @@ func (t *SniffTracker) SnapshotForNode(ctx context.Context, nodeScope string, fo
 		}
 	}
 	t.mu.Unlock()
+	t.scheduleAsyncSaveIfNeeded()
 
 	type enrichedItem struct {
 		rec   sniffRecord
@@ -1373,7 +1420,11 @@ func (t *SniffTracker) SnapshotForNode(ctx context.Context, nodeScope string, fo
 		for ip := range mergedByIP {
 			ipList = append(ipList, ip)
 		}
-		geoMap = t.geo.ResolveBatch(ctx, ipList)
+		if nonBlocking {
+			geoMap = t.geo.ResolveCachedOrEnqueue(ipList)
+		} else {
+			geoMap = t.geo.ResolveBatch(ctx, ipList)
+		}
 	}
 
 	enriched := make([]enrichedItem, 0, len(mergedByIP))
@@ -1626,6 +1677,25 @@ func (t *SniffTracker) SnapshotForNode(ctx context.Context, nodeScope string, fo
 		TopSubnets:     subnets,
 		TopCountries:   countries,
 	}
+}
+
+func (t *SniffTracker) triggerBackgroundSystemHarvestIfNeeded() {
+	t.mu.RLock()
+	enableProbe := t.EnableSystemProbe
+	lastHarvest := t.lastSystemHarvest
+	t.mu.RUnlock()
+	if !enableProbe || (!lastHarvest.IsZero() && time.Since(lastHarvest) < systemHarvestMinDT) {
+		return
+	}
+	if !t.systemBgRunning.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer t.systemBgRunning.Store(false)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		t.maybeHarvestSystemSources(ctx, false)
+	}()
 }
 
 func (t *SniffTracker) triggerBackgroundFleetHarvestIfNeeded() {
@@ -2354,13 +2424,31 @@ func (t *SniffTracker) loadLocked() {
 	}
 }
 
-func (t *SniffTracker) SaveLocked(force bool) {
-	if t.filePath == "" {
+func (t *SniffTracker) scheduleAsyncSaveIfNeeded() {
+	if t == nil || t.filePath == "" {
 		return
 	}
-	now := time.Now()
-	if !force && !t.lastPersistAt.IsZero() && now.Sub(t.lastPersistAt) < sniffSaveMinDT {
+	t.mu.RLock()
+	need := t.dirty && (t.lastPersistAt.IsZero() || time.Since(t.lastPersistAt) >= sniffSaveMinDT)
+	t.mu.RUnlock()
+	if !need || !t.saveRunning.CompareAndSwap(false, true) {
 		return
+	}
+	go func() {
+		defer t.saveRunning.Store(false)
+		t.mu.Lock()
+		raw, seq := t.snapshotPersistBytesLocked(time.Now(), false)
+		t.mu.Unlock()
+		t.persistSnapshot(raw, seq)
+	}()
+}
+
+func (t *SniffTracker) snapshotPersistBytesLocked(now time.Time, force bool) ([]byte, uint64) {
+	if t.filePath == "" {
+		return nil, 0
+	}
+	if !force && (!t.dirty || (!t.lastPersistAt.IsZero() && now.Sub(t.lastPersistAt) < sniffSaveMinDT)) {
+		return nil, 0
 	}
 	t.lastPersistAt = now
 	t.dirty = false
@@ -2396,20 +2484,23 @@ func (t *SniffTracker) SaveLocked(force bool) {
 		}
 	}
 
-	raw, err := json.MarshalIndent(doc, "", "  ")
+	raw, err := json.Marshal(doc)
 	if err != nil {
+		return nil, 0
+	}
+	t.writeSeq++
+	return raw, t.writeSeq
+}
+
+func (t *SniffTracker) persistSnapshot(raw []byte, seq uint64) {
+	if t.filePath == "" || len(raw) == 0 {
 		return
 	}
-	dir := filepath.Dir(t.filePath)
-	_ = os.MkdirAll(dir, 0700)
-	tmp := fmt.Sprintf("%s.%d.tmp", t.filePath, now.UnixNano())
-	if err := os.WriteFile(tmp, raw, 0600); err != nil {
-		return
-	}
-	_ = os.Chmod(tmp, 0600)
-	if err := os.Rename(tmp, t.filePath); err != nil {
-		_ = os.Remove(tmp)
-		_ = os.WriteFile(t.filePath, raw, 0600)
-		_ = os.Chmod(t.filePath, 0600)
+	t.diskMu.Lock()
+	defer t.diskMu.Unlock()
+	if seq > t.writtenSeq {
+		if err := writeAtomicFile0600(t.filePath, raw); err == nil {
+			t.writtenSeq = seq
+		}
 	}
 }

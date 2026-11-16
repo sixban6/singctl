@@ -2,6 +2,7 @@ package heal
 
 import (
 	"cmp"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"time"
 
 	"singctl/internal/updater"
 )
@@ -52,15 +54,18 @@ func GetTimerStatus(fallbackSchedule string) TimerStatus {
 		}
 	}
 
-	if out, err := exec.Command("systemctl", "is-enabled", "singctl-heal.timer").Output(); err == nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if out, err := exec.CommandContext(ctx, "systemctl", "is-enabled", "singctl-heal.timer").Output(); err == nil {
 		s := strings.TrimSpace(string(out))
 		st.Enabled = s == "enabled" || s == "static"
 	}
-	if out, err := exec.Command("systemctl", "is-active", "singctl-heal.timer").Output(); err == nil {
+	if out, err := exec.CommandContext(ctx, "systemctl", "is-active", "singctl-heal.timer").Output(); err == nil {
 		st.Active = strings.TrimSpace(string(out)) == "active"
 	}
 
-	if out, err := exec.Command("systemctl", "show", "singctl-heal.timer",
+	if out, err := exec.CommandContext(ctx, "systemctl", "show", "singctl-heal.timer",
 		"--property=NextElapseUSecRealtime,LastTriggerUSec").Output(); err == nil {
 		for line := range strings.SplitSeq(string(out), "\n") {
 			line = strings.TrimSpace(line)

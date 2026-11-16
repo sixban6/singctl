@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"singctl/internal/config"
 	"singctl/internal/deploy"
 	"singctl/internal/fleet"
+	"singctl/internal/heal"
 	"singctl/internal/logger"
 	"singctl/internal/subhub"
 	"singctl/internal/telemetry"
@@ -70,10 +72,17 @@ type Server struct {
 	warpDegraded       bool
 	warpAutoHealStatus string
 	warpLastHealedAt   string
-	warpWatchdogDeps   *WarpWatchdogDeps
-	versionCacheMu     sync.Mutex
-	cachedVersions     map[string]string
-	cachedVersionsAt   time.Time
+	warpWatchdogDeps      *WarpWatchdogDeps
+	versionCacheMu        sync.Mutex
+	cachedVersions        map[string]string
+	cachedVersionsAt      time.Time
+	serviceProbeMu        sync.Mutex
+	cachedServiceProbes   map[string]serviceProbeSnapshot
+	cachedServiceProbesAt time.Time
+	healCacheMu           sync.Mutex
+	healScanMu            sync.Mutex
+	cachedHealReport      *heal.StatusReport
+	cachedHealAt          time.Time
 }
 
 type SessionRecord struct {
@@ -117,6 +126,9 @@ func New(opts Options) *Server {
 	}
 
 	banFile := resolveBanFilePath(opts)
+	if banFile != "" {
+		cleanupStaleServerWebTmpFiles(filepath.Dir(banFile))
+	}
 	auditFile := resolveAuditFilePath(opts)
 	cliToken := ensureCLIToken(ResolveCLITokenPath(opts.ConfigPath))
 
@@ -272,6 +284,14 @@ func (s *Server) ListenAndServe() error {
 
 	patrolCtx, cancelPatrol := context.WithCancel(context.Background())
 	defer cancelPatrol()
+	defer func() {
+		if s.sniff != nil {
+			s.sniff.Flush()
+		}
+		if s.geo != nil {
+			s.geo.Flush()
+		}
+	}()
 	s.fleet.StartBackgroundPatrol(patrolCtx, fleet.DefaultPatrolInterval)
 	s.StartWarpWatchdog(patrolCtx, DefaultWarpWatchdogInterval)
 
@@ -281,6 +301,18 @@ func (s *Server) ListenAndServe() error {
 		IdleTimeout:       120 * time.Second,
 	}
 	return srv.Serve(ln)
+}
+
+func (s *Server) invalidateStatusCaches() {
+	s.serviceProbeMu.Lock()
+	s.cachedServiceProbes = nil
+	s.cachedServiceProbesAt = time.Time{}
+	s.serviceProbeMu.Unlock()
+
+	s.versionCacheMu.Lock()
+	s.cachedVersions = nil
+	s.cachedVersionsAt = time.Time{}
+	s.versionCacheMu.Unlock()
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -47,6 +46,9 @@ type IPLimiter struct {
 	banDuration time.Duration
 	stopCleaner chan struct{}
 	filePath    string
+	diskMu      sync.Mutex
+	writeSeq    uint64
+	writtenSeq  uint64
 }
 
 // NewIPLimiter 创建 IPLimiter 实例 (默认 3 次失败、10 分钟窗口、15 分钟封禁，支持传入 0600 小文件持久化路径)
@@ -113,26 +115,28 @@ func (l *IPLimiter) loadLocked() {
 	}
 }
 
-func (l *IPLimiter) SaveLocked() {
+func (l *IPLimiter) snapshotLocked() ([]byte, uint64) {
 	if l.filePath == "" {
-		return
+		return nil, 0
 	}
 	data, err := json.MarshalIndent(l.attempts, "", "  ")
 	if err != nil {
-		return
+		return nil, 0
 	}
-	dir := filepath.Dir(l.filePath)
-	_ = os.MkdirAll(dir, 0700)
+	l.writeSeq++
+	return data, l.writeSeq
+}
 
-	tmp := fmt.Sprintf("%s.%d.tmp", l.filePath, time.Now().UnixNano())
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
+func (l *IPLimiter) persistSnapshot(data []byte, seq uint64) {
+	if l.filePath == "" || len(data) == 0 {
 		return
 	}
-	_ = os.Chmod(tmp, 0600)
-	if err := os.Rename(tmp, l.filePath); err != nil {
-		_ = os.Remove(tmp)
-		_ = os.WriteFile(l.filePath, data, 0600)
-		_ = os.Chmod(l.filePath, 0600)
+	l.diskMu.Lock()
+	defer l.diskMu.Unlock()
+	if seq > l.writtenSeq {
+		if err := writeAtomicFile0600(l.filePath, data); err == nil {
+			l.writtenSeq = seq
+		}
 	}
 }
 
@@ -186,8 +190,6 @@ func (l *IPLimiter) RecordFailure(ip string) (banned bool, remainingTime time.Du
 		return false, 0, 0
 	}
 	l.mu.Lock()
-	defer l.mu.Unlock()
-
 	now := time.Now()
 	att, exists := l.attempts[ip]
 	if !exists || now.Sub(att.LastFail) > l.window {
@@ -198,7 +200,9 @@ func (l *IPLimiter) RecordFailure(ip string) (banned bool, remainingTime time.Du
 			Reason:    "后台登录密码连续输错",
 		}
 		l.attempts[ip] = att
-		l.SaveLocked()
+		data, seq := l.snapshotLocked()
+		l.mu.Unlock()
+		l.persistSnapshot(data, seq)
 		return false, 0, 1
 	}
 
@@ -215,12 +219,19 @@ func (l *IPLimiter) RecordFailure(ip string) (banned bool, remainingTime time.Du
 		if now.After(att.BannedUntil) || att.BannedUntil.Sub(now) < l.banDuration {
 			att.BannedUntil = now.Add(l.banDuration)
 		}
-		l.SaveLocked()
-		return true, time.Until(att.BannedUntil), att.FailCount
+		remaining := time.Until(att.BannedUntil)
+		failCount := att.FailCount
+		data, seq := l.snapshotLocked()
+		l.mu.Unlock()
+		l.persistSnapshot(data, seq)
+		return true, remaining, failCount
 	}
 
-	l.SaveLocked()
-	return false, 0, att.FailCount
+	failCount := att.FailCount
+	data, seq := l.snapshotLocked()
+	l.mu.Unlock()
+	l.persistSnapshot(data, seq)
+	return false, 0, failCount
 }
 
 // RecordSuccess 登录成功时清空该 IP 的失败记录
@@ -229,29 +240,38 @@ func (l *IPLimiter) RecordSuccess(ip string) {
 		return
 	}
 	l.mu.Lock()
-	defer l.mu.Unlock()
+	var data []byte
+	var seq uint64
 	if _, exists := l.attempts[ip]; exists {
 		delete(l.attempts, ip)
-		l.SaveLocked()
+		data, seq = l.snapshotLocked()
 	}
+	l.mu.Unlock()
+	l.persistSnapshot(data, seq)
 }
 
 // Unban 解除指定 IP 或全部 IP 的封禁
 func (l *IPLimiter) Unban(ip string) bool {
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	if ip == "all" || ip == "*" || ip == "" {
+		var data []byte
+		var seq uint64
 		if len(l.attempts) > 0 {
 			l.attempts = make(map[string]*ipAttempt)
-			l.SaveLocked()
+			data, seq = l.snapshotLocked()
 		}
+		l.mu.Unlock()
+		l.persistSnapshot(data, seq)
 		return true
 	}
 	if _, exists := l.attempts[ip]; exists {
 		delete(l.attempts, ip)
-		l.SaveLocked()
+		data, seq := l.snapshotLocked()
+		l.mu.Unlock()
+		l.persistSnapshot(data, seq)
 		return true
 	}
+	l.mu.Unlock()
 	return false
 }
 
@@ -405,7 +425,6 @@ func (l *IPLimiter) BanManual(ip string, duration time.Duration, reason ...strin
 		note = strings.TrimSpace(reason[0])
 	}
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	now := time.Now()
 	att, exists := l.attempts[ip]
 	if !exists || att == nil {
@@ -422,7 +441,9 @@ func (l *IPLimiter) BanManual(ip string, duration time.Duration, reason ...strin
 	att.BannedUntil = now.Add(duration)
 	att.Source = BanSourceManualSniff
 	att.Reason = note
-	l.SaveLocked()
+	data, seq := l.snapshotLocked()
+	l.mu.Unlock()
+	l.persistSnapshot(data, seq)
 }
 
 // startCleaner 定时清理过期记录，杜绝内存泄漏
@@ -441,10 +462,13 @@ func (l *IPLimiter) startCleaner() {
 					changed = true
 				}
 			}
+			var data []byte
+			var seq uint64
 			if changed {
-				l.SaveLocked()
+				data, seq = l.snapshotLocked()
 			}
 			l.mu.Unlock()
+			l.persistSnapshot(data, seq)
 		case <-l.stopCleaner:
 			return
 		}

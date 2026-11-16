@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,7 +18,7 @@ import (
 const (
 	maxGeoCacheEntries = 5000
 	geoCacheTTL        = 7 * 24 * time.Hour
-	geoSaveMinDT       = 5 * time.Second
+	geoSaveMinDT       = 60 * time.Second
 )
 
 // IPGeoInfo IP 的地理位置与网络元数据
@@ -50,6 +49,10 @@ type IPGeoResolver struct {
 	lastSaveAt   time.Time
 	HTTPClient   *http.Client
 	batchRunning atomic.Bool
+	saveRunning  atomic.Bool
+	diskMu       sync.Mutex
+	writeSeq     uint64
+	writtenSeq   uint64
 }
 
 // 全球常见及高频扫描来源国家/地区 ISO-3166-1 二位码中文名称表
@@ -310,10 +313,22 @@ func (r *IPGeoResolver) SeedCountry(ipStr, countryCode string) {
 		return
 	}
 	countryCode = strings.ToUpper(strings.TrimSpace(countryCode))
+	if countryCode == "" {
+		return
+	}
+
+	r.mu.RLock()
+	entry, exists := r.Cache[ipStr]
+	if exists && entry.Info.CountryCode != "" && time.Until(entry.ExpiresAt) > 30*time.Minute {
+		r.mu.RUnlock()
+		return
+	}
+	r.mu.RUnlock()
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	entry, exists := r.Cache[ipStr]
-	if !exists || entry.Info.CountryCode == "" {
+	entry, exists = r.Cache[ipStr]
+	if !exists || entry.Info.CountryCode == "" || time.Until(entry.ExpiresAt) <= 30*time.Minute {
 		countryName := resolveCountryDisplayName(countryCode, countryCode)
 		r.storeResolvedLocked(ipStr, IPGeoInfo{
 			IP:          ipStr,
@@ -366,6 +381,60 @@ func (r *IPGeoResolver) Resolve(ipStr string) IPGeoInfo {
 		return cp
 	}
 	return IPGeoInfo{IP: ipStr}
+}
+
+// ResolveCachedOrEnqueue 非阻塞批量读取缓存：仅从内存/网段缓存返回已知 Geo，未命中 IP 异步入队后台解析（适用于 SSE 热路径）。
+func (r *IPGeoResolver) ResolveCachedOrEnqueue(ips []string) map[string]IPGeoInfo {
+	out := make(map[string]IPGeoInfo, len(ips))
+	if len(ips) == 0 {
+		return out
+	}
+
+	now := time.Now()
+	var missing []string
+	seenMissing := make(map[string]struct{})
+
+	r.mu.RLock()
+	for _, ip := range ips {
+		if isPrivateOrLoopbackIP(ip) {
+			out[ip] = IPGeoInfo{
+				IP:      ip,
+				Country: "本地",
+				City:    "内网/回环",
+				ISP:     "本机直连",
+				Geo:     "本地网络",
+			}
+			continue
+		}
+		if entry, ok := r.Cache[ip]; ok && entry.Info.CountryCode != "" {
+			out[ip] = entry.Info
+			if now.Before(entry.ExpiresAt) {
+				continue
+			}
+		} else if cidr := ComputeSubnetCIDR(ip); cidr != "" {
+			if subInfo, ok := r.subnetCache[cidr]; ok && subInfo.CountryCode != "" {
+				cp := subInfo
+				cp.IP = ip
+				out[ip] = cp
+			} else {
+				out[ip] = IPGeoInfo{IP: ip}
+			}
+		} else {
+			out[ip] = IPGeoInfo{IP: ip}
+		}
+		if !isRFC5737DocumentationIP(ip) {
+			if _, seen := seenMissing[ip]; !seen {
+				seenMissing[ip] = struct{}{}
+				missing = append(missing, ip)
+			}
+		}
+	}
+	r.mu.RUnlock()
+
+	for _, ip := range missing {
+		r.enqueueForBatch(ip)
+	}
+	return out
 }
 
 // ResolveBatch 批量解析一组 IP：对未缓存 IP 自动通过批量 API (100 IP/批) 快速补齐并共享同 /24 归属地
@@ -450,11 +519,9 @@ func (r *IPGeoResolver) ResolveBatch(ctx context.Context, ips []string) map[stri
 		}
 		out[ip] = IPGeoInfo{IP: ip}
 	}
-	if r.dirty {
-		r.SaveLocked(false)
-	}
 	r.mu.Unlock()
 
+	r.scheduleAsyncSaveIfNeeded()
 	return out
 }
 
@@ -480,10 +547,8 @@ func (r *IPGeoResolver) drainBatchLoop() {
 	for {
 		r.mu.Lock()
 		if len(r.pendingQueue) == 0 {
-			if r.dirty {
-				r.SaveLocked(false)
-			}
 			r.mu.Unlock()
+			r.scheduleAsyncSaveIfNeeded()
 			return
 		}
 		take := min(len(r.pendingQueue), 100)
@@ -666,31 +731,64 @@ func (r *IPGeoResolver) loadLocked() {
 	}
 }
 
-func (r *IPGeoResolver) SaveLocked(force bool) {
-	if r.filePath == "" {
+// Flush 同步将待持久化 Geo 缓存写入磁盘（锁外写盘）。
+func (r *IPGeoResolver) Flush() {
+	if r == nil || r.filePath == "" {
 		return
+	}
+	r.mu.Lock()
+	raw, seq := r.snapshotPersistBytesLocked(true)
+	r.mu.Unlock()
+	r.persistSnapshot(raw, seq)
+}
+
+func (r *IPGeoResolver) scheduleAsyncSaveIfNeeded() {
+	if r == nil || r.filePath == "" {
+		return
+	}
+	r.mu.RLock()
+	need := r.dirty && (r.lastSaveAt.IsZero() || time.Since(r.lastSaveAt) >= geoSaveMinDT)
+	r.mu.RUnlock()
+	if !need || !r.saveRunning.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer r.saveRunning.Store(false)
+		r.mu.Lock()
+		raw, seq := r.snapshotPersistBytesLocked(false)
+		r.mu.Unlock()
+		r.persistSnapshot(raw, seq)
+	}()
+}
+
+func (r *IPGeoResolver) snapshotPersistBytesLocked(force bool) ([]byte, uint64) {
+	if r.filePath == "" || !r.dirty {
+		return nil, 0
 	}
 	now := time.Now()
 	if !force && !r.lastSaveAt.IsZero() && now.Sub(r.lastSaveAt) < geoSaveMinDT {
-		return
+		return nil, 0
 	}
 	r.lastSaveAt = now
 	r.dirty = false
 
 	raw, err := json.Marshal(r.Cache)
 	if err != nil {
+		return nil, 0
+	}
+	r.writeSeq++
+	return raw, r.writeSeq
+}
+
+func (r *IPGeoResolver) persistSnapshot(raw []byte, seq uint64) {
+	if r.filePath == "" || len(raw) == 0 {
 		return
 	}
-	dir := filepath.Dir(r.filePath)
-	_ = os.MkdirAll(dir, 0700)
-	tmp := fmt.Sprintf("%s.%d.tmp", r.filePath, now.UnixNano())
-	if err := os.WriteFile(tmp, raw, 0600); err != nil {
-		return
-	}
-	_ = os.Chmod(tmp, 0600)
-	if err := os.Rename(tmp, r.filePath); err != nil {
-		_ = os.Remove(tmp)
-		_ = os.WriteFile(r.filePath, raw, 0600)
-		_ = os.Chmod(r.filePath, 0600)
+	r.diskMu.Lock()
+	defer r.diskMu.Unlock()
+	if seq > r.writtenSeq {
+		if err := writeAtomicFile0600(r.filePath, raw); err == nil {
+			r.writtenSeq = seq
+		}
 	}
 }

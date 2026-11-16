@@ -100,10 +100,10 @@ export const SecurityTab: React.FC<SecurityTabProps> = ({ status, onRefresh }) =
   const [auditCategoryFilter, setAuditCategoryFilter] = useState<string>('all');
   const [loadingAudit, setLoadingAudit] = useState(false);
 
-  const fetchHealStatus = async (silent = false) => {
+  const fetchHealStatus = async (silent = false, forceRefresh = false) => {
     if (!silent) setLoadingHeal(true);
     try {
-      const rep = await api.getHealStatus();
+      const rep = await api.getHealStatus(forceRefresh);
       setHealStatus(rep);
     } catch {
       // non-fatal
@@ -645,7 +645,7 @@ export const SecurityTab: React.FC<SecurityTabProps> = ({ status, onRefresh }) =
             </button>
             <button
               type="button"
-              onClick={() => fetchHealStatus(false)}
+              onClick={() => fetchHealStatus(false, true)}
               disabled={loadingHeal || !!runningHealScope}
               className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-xs text-slate-300 transition-all disabled:opacity-50"
             >
