@@ -244,3 +244,45 @@ func TestController_FW4IncludePersistenceAndCleanup(t *testing.T) {
 		}
 	}
 }
+
+func TestController_SideModeHealsProxyTableThrowRoutes(t *testing.T) {
+	var executed []string
+	ctrl := &Controller{
+		StateDir:       t.TempDir(),
+		FW4IncludeRoot: t.TempDir(),
+		Prober: func() TopologyInfo {
+			return TopologyInfo{
+				LANIP:                 "192.168.100.2",
+				LANCIDR:               "192.168.100.0/24",
+				LANIface:              "eth0",
+				CurrentGatewayIP:      "192.168.100.1",
+				SuggestedMainRouterIP: "192.168.100.1",
+			}
+		},
+		Exec: func(name string, args ...string) ([]byte, error) {
+			cmd := name + " " + strings.Join(args, " ")
+			executed = append(executed, cmd)
+			if cmd == "ip -4 route show table 100" {
+				return []byte("local default dev lo scope host\n"), nil
+			}
+			return nil, nil
+		},
+	}
+
+	if err := ctrl.Apply(t.Context(), config.GatewayConfig{
+		Mode:         ModeSide,
+		MainRouterIP: "192.168.100.1",
+	}); err != nil {
+		t.Fatalf("Apply(ModeSide) failed: %v", err)
+	}
+
+	for _, want := range []string{
+		"ip -4 route replace throw 192.168.0.0/16 table 100",
+		"ip -4 route replace throw 100.64.0.0/10 table 100",
+		"ip -4 route replace throw 192.168.100.0/24 table 100",
+	} {
+		if !slices.Contains(executed, want) {
+			t.Fatalf("expected %q to be executed, got:\n%s", want, strings.Join(executed, "\n"))
+		}
+	}
+}
