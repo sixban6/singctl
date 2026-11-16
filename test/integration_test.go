@@ -75,7 +75,7 @@ func TestFullWorkflow(t *testing.T) {
 	t.Run("start command", func(t *testing.T) {
 		cmd := exec.Command(binaryPath, "-c", configPath, "start")
 		output, err := cmd.CombinedOutput()
-		
+
 		// 预期会失败，因为订阅无效
 		t.Logf("Start command output: %s", string(output))
 		t.Logf("Start command error: %v (expected in test)", err)
@@ -84,7 +84,7 @@ func TestFullWorkflow(t *testing.T) {
 	t.Run("stop command", func(t *testing.T) {
 		cmd := exec.Command(binaryPath, "-c", configPath, "stop")
 		output, err := cmd.CombinedOutput()
-		
+
 		t.Logf("Stop command output: %s", string(output))
 		if err != nil {
 			t.Logf("Stop command failed: %v (expected if nothing running)", err)
@@ -98,10 +98,10 @@ func buildTestBinary(t *testing.T) string {
 	binaryPath := filepath.Join(tempDir, "singctl-test")
 
 	projectRoot := getProjectRoot(t)
-	
+
 	cmd := exec.Command("go", "build", "-o", binaryPath, "./cmd/singctl")
 	cmd.Dir = projectRoot
-	
+
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("Failed to build test binary: %v", err)
 	}
@@ -134,7 +134,7 @@ github:
 func createMockScripts(t *testing.T) string {
 	tempDir := t.TempDir()
 	scriptDir := filepath.Join(tempDir, "scripts")
-	
+
 	if err := os.MkdirAll(scriptDir, 0755); err != nil {
 		t.Fatalf("Failed to create script directory: %v", err)
 	}

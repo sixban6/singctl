@@ -141,7 +141,7 @@ printf 'nameserver %s\noptions timeout:2 attempts:2\n' > /etc/resolv.conf
 	//    - 加载真实 OpenWrt fw4 防火墙表（默认 input policy drop / forward policy drop）
 	//    - 故意在 resolv.conf.auto 写入自环地址 192.168.100.2（模拟主路由 DHCP 静态租约污染）
 	//    - 真实启动 OpenWrt dnsmasq 独占绑定 0.0.0.0:53（复现此前 EADDRINUSE 必挂场景！）
-	//    - 开启严格 rp_filter=1
+	//    - 开启严格 rp_filter=1，并启用 net.ipv4.conf.all.src_valid_mark=1（Tailscale/WireGuard 策略路由常见配置）
 	mustExec(t, ctx, sideC, fmt.Sprintf(`
 set -e
 cat << 'CAEOF' >> /etc/ssl/certs/ca-certificates.crt
@@ -154,6 +154,7 @@ printf 'nameserver %s\n' > /tmp/resolv.conf.d/resolv.conf.auto
 /sbin/fw4 print 2>/dev/null | nft -f -
 sysctl -w net.ipv4.conf.all.rp_filter=1 >/dev/null
 sysctl -w net.ipv4.conf.eth0.rp_filter=1 >/dev/null
+sysctl -w net.ipv4.conf.all.src_valid_mark=1 >/dev/null
 `, caCertPEM, mainLANIP, sideLANIP))
 
 	// 确认 OpenWrt dnsmasq 确实已独占绑定 0.0.0.0:53 (:0035)

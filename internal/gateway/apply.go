@@ -23,7 +23,18 @@ const (
 	ruleCommentTag        = "singctl-side"
 	legacySideChainFwd    = "SINGCTL_SIDE_FWD"
 	legacySideChainNat    = "SINGCTL_SIDE_NAT"
+	proxyRouteTable       = "100"
 )
+
+var defaultThrowCIDRs = []string{
+	"0.0.0.0/8",
+	"10.0.0.0/8",
+	"100.64.0.0/10",
+	"127.0.0.0/8",
+	"169.254.0.0/16",
+	"172.16.0.0/12",
+	"192.168.0.0/16",
+}
 
 // Controller 负责旁路由模式（Side Router）内核转发、默认路由自愈与防火墙规则的原子挂载与可逆卸载。
 type Controller struct {
@@ -138,6 +149,10 @@ func (c *Controller) Apply(ctx context.Context, cfg config.GatewayConfig) error 
 		c.applyIptablesFilterPassThrough(ctx, plan.LANIface)
 	}
 
+	// 5. 若 TProxy 策略路由表 100 已在运行（如 WebUI 热切旁路由模式），确保其包含私网/CGNAT throw 逃生路由，
+	// 避免宿主启用 net.ipv4.conf.all.src_valid_mark=1 时被内核 martian source 静默丢包。
+	c.ensureProxyTableThrowRoutes(ctx, plan.LANCIDR)
+
 	logger.Success("已启用旁路由模式 (本机单臂口: %s %s -> 上级主路由: %s)", plan.LANIface, plan.LANIP, plan.MainRouterIP)
 	return nil
 }
@@ -169,10 +184,25 @@ func isOpenWrtSystem() bool {
 	return false
 }
 
-// ensureSideRouterResolvUpstream 确保旁路由本机上游 resolv 文件非空且不指向旁路由自身 IP：
+// isRFC1918Private 判断地址是否属于 RFC1918 私网段（10/8、172.16/12、192.168/16）。
+func isRFC1918Private(addr netip.Addr) bool {
+	if !addr.Is4() {
+		return false
+	}
+	b := addr.As4()
+	return b[0] == 10 ||
+		(b[0] == 172 && b[1]&0xF0 == 16) ||
+		(b[0] == 192 && b[1] == 168)
+}
+
+// ensureSideRouterResolvUpstream 确保旁路由本机上游 resolv 文件可用，且不会绕过 sing-box 把 DNS 明文外发：
 //   - OpenWrt 单臂旁路由删除 WAN 口后 /tmp/resolv.conf.d/resolv.conf.auto 常为空，或被主路由 DHCP 静态租约写成本机 IP，
 //     会导致 dnsmasq 因无可用上游直接向局域网回 REFUSED（无法触发 output 链进入 sing-box -> AdGuard Home 闭环）；
-//   - 此处写入诱饵公共上游 223.5.5.5 触发 dnsmasq 发包，发出的 53 报文在 output 链即被 sing-box 透明接管分流。
+//   - 更关键的是：TProxy 策略路由表 100 为通过 Tailscale/WireGuard 的 src_valid_mark=1 反向源校验，必须携带 RFC1918
+//     throw 逃生路由。若 dnsmasq 上游是私网网关（如 192.168.1.1），其发往 :53 的报文会命中 throw 直接跳出表 100 明文外发，
+//     既绕过 sing-box/AdGuard Home 造成 DNS 泄漏，若主路由 DNS 又指回旁路由还会形成双向死循环；
+//   - 因此旁路由模式下把私网/回环/自身上游收敛为公网引导 DNS（223.5.5.5），让 output 链标记后的 :53 报文命中
+//     local default dev lo 回环进 sing-box。保留 CGNAT（100.64/10，如 Tailscale MagicDNS）等非 RFC1918 上游。
 func (c *Controller) ensureSideRouterResolvUpstream(ctx context.Context, lanIP string) {
 	targetPath := strings.TrimSpace(c.ResolvGuardPath)
 	isDnsmasqResolvFile := false
@@ -215,7 +245,7 @@ func (c *Controller) ensureSideRouterResolvUpstream(ctx context.Context, lanIP s
 		if lanIP != "" && addr.String() == lanIP {
 			continue
 		}
-		if isDnsmasqResolvFile && addr.IsLoopback() {
+		if isDnsmasqResolvFile && (addr.IsLoopback() || isRFC1918Private(addr)) {
 			continue
 		}
 		hasUsableUpstream = true
@@ -371,6 +401,18 @@ func (c *Controller) applyFW4PassThrough(ctx context.Context, lanIface string) {
 	_, _ = c.runCmd(ctx, "nft", "insert", "rule", "inet", "fw4", "input", "iifname", lanIface, "accept", "comment", ruleCommentTag)
 	_, _ = c.runCmd(ctx, "nft", "insert", "rule", "inet", "fw4", "forward", "iifname", lanIface, "accept", "comment", ruleCommentTag)
 	_, _ = c.runCmd(ctx, "nft", "insert", "rule", "inet", "fw4", "forward", "oifname", lanIface, "accept", "comment", ruleCommentTag)
+}
+func (c *Controller) ensureProxyTableThrowRoutes(ctx context.Context, lanCIDR string) {
+	out, err := c.runCmd(ctx, "ip", "-4", "route", "show", "table", proxyRouteTable)
+	if err != nil || !strings.Contains(string(out), "local ") {
+		return
+	}
+	for _, cidr := range defaultThrowCIDRs {
+		_, _ = c.runCmd(ctx, "ip", "-4", "route", "replace", "throw", cidr, "table", proxyRouteTable)
+	}
+	if trimmed := strings.TrimSpace(lanCIDR); trimmed != "" {
+		_, _ = c.runCmd(ctx, "ip", "-4", "route", "replace", "throw", trimmed, "table", proxyRouteTable)
+	}
 }
 
 func (c *Controller) applyLegacyIptablesSideRules(ctx context.Context, plan ResolvedPlan) error {

@@ -189,9 +189,9 @@ func verifyCloudflareToken(token string) (bool, string) {
 	}
 
 	type cfVerifyResponse struct {
-		Success  bool     `json:"success"`
-		Messages []any    `json:"messages"`
-		Errors   []any    `json:"errors"`
+		Success  bool  `json:"success"`
+		Messages []any `json:"messages"`
+		Errors   []any `json:"errors"`
 		Result   struct {
 			ID     string `json:"id"`
 			Status string `json:"status"`

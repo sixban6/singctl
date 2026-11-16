@@ -11,15 +11,15 @@ type Config struct {
 
 // Defaults contains default parameters for all hosts
 type Defaults struct {
-	User                   string `yaml:"user"`
-	CurrentPort            int    `yaml:"current_port"`
-	TargetPort             int    `yaml:"target_port"`
-	IdentityFile           string `yaml:"identity_file"`
-	PrivateKey             string `yaml:"private_key"`
-	DisablePasswordAuth    *bool  `yaml:"disable_password_auth"`
-	ManageFirewall         *bool  `yaml:"manage_firewall"`
-	StrictHostKeyChecking  *bool  `yaml:"strict_host_key_checking"`
-	TimeoutSeconds         int    `yaml:"timeout_seconds"`
+	User                  string `yaml:"user"`
+	CurrentPort           int    `yaml:"current_port"`
+	TargetPort            int    `yaml:"target_port"`
+	IdentityFile          string `yaml:"identity_file"`
+	PrivateKey            string `yaml:"private_key"`
+	DisablePasswordAuth   *bool  `yaml:"disable_password_auth"`
+	ManageFirewall        *bool  `yaml:"manage_firewall"`
+	StrictHostKeyChecking *bool  `yaml:"strict_host_key_checking"`
+	TimeoutSeconds        int    `yaml:"timeout_seconds"`
 }
 
 // AuthConfig defines the authentication method for a host
@@ -30,20 +30,20 @@ type AuthConfig struct {
 
 // HostItem represents a single host configuration from YAML
 type HostItem struct {
-	Name                  string      `yaml:"name"`
-	Host                  string      `yaml:"host"`
-	IP                    string      `yaml:"ip"`    // Kept for backward compatibility
-	Alias                 string      `yaml:"alias"` // Existing ~/.ssh/config alias (tunnel / proxy jump)
-	User                  string      `yaml:"user"`
-	CurrentPort           int         `yaml:"current_port"`
-	TargetPort            int         `yaml:"target_port"`
-	IdentityFile          string      `yaml:"identity_file"`
-	PrivateKey            string      `yaml:"private_key"`
-	DisablePasswordAuth   *bool       `yaml:"disable_password_auth"`
-	ManageFirewall        *bool       `yaml:"manage_firewall"`
-	StrictHostKeyChecking *bool       `yaml:"strict_host_key_checking"`
-	TimeoutSeconds        int         `yaml:"timeout_seconds"`
-	Auth                  AuthConfig  `yaml:"auth"`
+	Name                  string     `yaml:"name"`
+	Host                  string     `yaml:"host"`
+	IP                    string     `yaml:"ip"`    // Kept for backward compatibility
+	Alias                 string     `yaml:"alias"` // Existing ~/.ssh/config alias (tunnel / proxy jump)
+	User                  string     `yaml:"user"`
+	CurrentPort           int        `yaml:"current_port"`
+	TargetPort            int        `yaml:"target_port"`
+	IdentityFile          string     `yaml:"identity_file"`
+	PrivateKey            string     `yaml:"private_key"`
+	DisablePasswordAuth   *bool      `yaml:"disable_password_auth"`
+	ManageFirewall        *bool      `yaml:"manage_firewall"`
+	StrictHostKeyChecking *bool      `yaml:"strict_host_key_checking"`
+	TimeoutSeconds        int        `yaml:"timeout_seconds"`
+	Auth                  AuthConfig `yaml:"auth"`
 }
 
 // Host is the resolved runtime host model after applying defaults and env vars

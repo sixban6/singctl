@@ -206,11 +206,11 @@ func (s *Server) handleWatchdogGet(w http.ResponseWriter, r *http.Request) {
 }
 
 type watchdogConfigUpdateReq struct {
-	Interval        *int `json:"interval"`
-	ConfirmWait     *int `json:"confirm_wait"`
-	MaxRestarts     *int `json:"max_restarts"`
+	Interval        *int  `json:"interval"`
+	ConfirmWait     *int  `json:"confirm_wait"`
+	MaxRestarts     *int  `json:"max_restarts"`
 	SubSyncEnabled  *bool `json:"sub_sync_enabled"`
-	SubSyncInterval *int `json:"sub_sync_interval"`
+	SubSyncInterval *int  `json:"sub_sync_interval"`
 	Failover        *struct {
 		Enabled            *bool    `json:"enabled"`
 		Groups             []string `json:"groups"`

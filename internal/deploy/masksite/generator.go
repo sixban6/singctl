@@ -47,15 +47,15 @@ type SiteMeta struct {
 }
 
 type themePreset struct {
-	Category        string
-	BlogTitles      []string
-	Taglines        []string
-	Authors         []string
-	Roles           []string
-	Locations       []string
-	Bios            []string
-	ColorAccents    []colorPair
-	Articles        []Article
+	Category     string
+	BlogTitles   []string
+	Taglines     []string
+	Authors      []string
+	Roles        []string
+	Locations    []string
+	Bios         []string
+	ColorAccents []colorPair
+	Articles     []Article
 }
 
 type colorPair struct {
@@ -450,7 +450,7 @@ func getThemes() []themePreset {
 			},
 			ColorAccents: []colorPair{
 				{Accent: "#f59e0b", Secondary: "#b45309", Glow: "rgba(245, 158, 11, 0.14)"}, // Warm Amber
-				{Accent: "#d97706", Secondary: "#92400e", Glow: "rgba(217, 119, 6, 0.14)"}, // Roasted Caramel
+				{Accent: "#d97706", Secondary: "#92400e", Glow: "rgba(217, 119, 6, 0.14)"},  // Roasted Caramel
 				{Accent: "#10b981", Secondary: "#047857", Glow: "rgba(16, 185, 129, 0.14)"}, // Green Bean Emerald
 			},
 			Articles: []Article{
@@ -560,7 +560,7 @@ func getThemes() []themePreset {
 			},
 			ColorAccents: []colorPair{
 				{Accent: "#e2e8f0", Secondary: "#64748b", Glow: "rgba(226, 232, 240, 0.14)"}, // Silver Grain
-				{Accent: "#fbbf24", Secondary: "#d97706", Glow: "rgba(251, 191, 36, 0.14)"}, // Warm Darkroom Amber
+				{Accent: "#fbbf24", Secondary: "#d97706", Glow: "rgba(251, 191, 36, 0.14)"},  // Warm Darkroom Amber
 				{Accent: "#94a3b8", Secondary: "#475569", Glow: "rgba(148, 163, 184, 0.14)"}, // Monochrome Neutral
 			},
 			Articles: []Article{
@@ -670,8 +670,8 @@ func getThemes() []themePreset {
 			},
 			ColorAccents: []colorPair{
 				{Accent: "#10b981", Secondary: "#059669", Glow: "rgba(16, 185, 129, 0.14)"}, // Terminal Green
-				{Accent: "#06b6d4", Secondary: "#0891b2", Glow: "rgba(6, 182, 212, 0.14)"}, // Cyan Matrix
-				{Accent: "#f43f5e", Secondary: "#e11d48", Glow: "rgba(244, 63, 94, 0.14)"}, // Exploit Crimson
+				{Accent: "#06b6d4", Secondary: "#0891b2", Glow: "rgba(6, 182, 212, 0.14)"},  // Cyan Matrix
+				{Accent: "#f43f5e", Secondary: "#e11d48", Glow: "rgba(244, 63, 94, 0.14)"},  // Exploit Crimson
 			},
 			Articles: []Article{
 				{

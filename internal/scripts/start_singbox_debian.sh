@@ -342,13 +342,19 @@ setup_route() {
     echo_succ "配置路由规则..."
     
     # 清理现有规则
-    ip rule del table $PROXY_ROUTE_TABLE 2>/dev/null || true
-    ip -6 rule del table $PROXY_ROUTE_TABLE 2>/dev/null || true
+    while ip rule del table $PROXY_ROUTE_TABLE 2>/dev/null; do :; done
+    while ip -6 rule del table $PROXY_ROUTE_TABLE 2>/dev/null; do :; done
     
     # 添加 IPv4 路由规则
     ip rule add fwmark $PROXY_FWMARK table $PROXY_ROUTE_TABLE
     ip route flush table $PROXY_ROUTE_TABLE 2>/dev/null || true
     ip route add local default dev lo table $PROXY_ROUTE_TABLE
+    # 逃生路由：防止宿主启用 net.ipv4.conf.all.src_valid_mark=1（如 Tailscale/WireGuard）时，
+    # 局域网客户端源 IP 命中表 100 local default dev lo 被内核判定为 martian source 静默丢弃
+    for throw_cidr in 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16; do
+        ip route replace throw "$throw_cidr" table $PROXY_ROUTE_TABLE 2>/dev/null || \
+            ip route add throw "$throw_cidr" table $PROXY_ROUTE_TABLE 2>/dev/null || true
+    done
     
     # 添加 IPv6 路由规则（兼容禁用 IPv6 的内核或容器环境）
     ip -6 rule add fwmark $PROXY_FWMARK table $PROXY_ROUTE_TABLE 2>/dev/null || true

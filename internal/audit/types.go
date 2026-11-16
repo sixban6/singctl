@@ -117,17 +117,17 @@ type FlowRecord struct {
 	LastSeen         string             `json:"lastSeen"`
 	ActiveSpanSec    int64              `json:"activeSpanSec,omitempty"` // 首次到末次观测跨度秒数（用于按小时归一化连接频率）
 	NightHits        int                `json:"nightHits"`               // 凌晨 01:00-05:59 本地时间活跃采样次数
-	IntervalCV       float64            `json:"intervalCv"`       // 建连时间间隔变异系数 (越小越像机器定时心跳)
-	DomainEntropy    float64            `json:"domainEntropy"`    // 域名香农信息熵
-	SecurityScore    int                `json:"securityScore"`    // 🛡️ 安全风险轴评分 (0-100)
-	PrivacyScore     int                `json:"privacyScore"`     // 👁️ 隐私泄露轴评分 (0-100)
-	DominantAxis     string             `json:"dominantAxis"`     // 主导风险维度: "security" / "privacy" / "both" / "normal"
-	RiskScore        int                `json:"riskScore"`        // 非线性极值包络综合风险评分 (0-100)
-	Threat           ThreatLevel        `json:"threat"`           // normal / notice / suspicious / high_risk
-	ThreatLabel      string             `json:"threatLabel"`      // 中文威胁等级
-	State            EnforcementState   `json:"state"`            // observed / blocked / whitelisted
-	Reasons          []string           `json:"reasons"`          // 触发风险的具体诊断原因
-	NonlinearFactors map[string]float64 `json:"nonlinearFactors"` // 各非线性分量明细（供调试与前端透明展示）
+	IntervalCV       float64            `json:"intervalCv"`              // 建连时间间隔变异系数 (越小越像机器定时心跳)
+	DomainEntropy    float64            `json:"domainEntropy"`           // 域名香农信息熵
+	SecurityScore    int                `json:"securityScore"`           // 🛡️ 安全风险轴评分 (0-100)
+	PrivacyScore     int                `json:"privacyScore"`            // 👁️ 隐私泄露轴评分 (0-100)
+	DominantAxis     string             `json:"dominantAxis"`            // 主导风险维度: "security" / "privacy" / "both" / "normal"
+	RiskScore        int                `json:"riskScore"`               // 非线性极值包络综合风险评分 (0-100)
+	Threat           ThreatLevel        `json:"threat"`                  // normal / notice / suspicious / high_risk
+	ThreatLabel      string             `json:"threatLabel"`             // 中文威胁等级
+	State            EnforcementState   `json:"state"`                   // observed / blocked / whitelisted
+	Reasons          []string           `json:"reasons"`                 // 触发风险的具体诊断原因
+	NonlinearFactors map[string]float64 `json:"nonlinearFactors"`        // 各非线性分量明细（供调试与前端透明展示）
 	AIReview         *AIReviewResult    `json:"aiReview,omitempty"`
 }
 
