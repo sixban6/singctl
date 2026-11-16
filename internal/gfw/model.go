@@ -49,11 +49,11 @@ func (o ProbeOptions) GetHTTPSPort() int {
 type CheckItem struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
-	Score       int    `json:"score"`     // 命中风险增加的分数
-	MaxScore    int    `json:"max_score"` // 该项最高可能贡献的分数
-	Passed      bool   `json:"passed"`    // 是否安全通过
-	Details     string `json:"details"`   // 探测详情与观测到的行为
-	Mitigation  string `json:"mitigation"`// 针对该项的整改建议
+	Score       int    `json:"score"`      // 命中风险增加的分数
+	MaxScore    int    `json:"max_score"`  // 该项最高可能贡献的分数
+	Passed      bool   `json:"passed"`     // 是否安全通过
+	Details     string `json:"details"`    // 探测详情与观测到的行为
+	Mitigation  string `json:"mitigation"` // 针对该项的整改建议
 }
 
 // Category 探测维度分类
@@ -66,13 +66,13 @@ type Category struct {
 
 // Report 完整探测报告
 type Report struct {
-	TargetIP        string      `json:"target_ip"`
-	TargetSNI       string      `json:"target_sni,omitempty"`
-	TargetDomain    string      `json:"target_domain,omitempty"`
-	ScanTime        time.Time   `json:"scan_time"`
-	TotalScore      int         `json:"total_score"`
-	RiskLevel       RiskLevel   `json:"risk_level"`
-	Categories      []Category  `json:"categories"`
-	Findings        []string    `json:"findings"`
-	Recommendations []string    `json:"recommendations"`
+	TargetIP        string     `json:"target_ip"`
+	TargetSNI       string     `json:"target_sni,omitempty"`
+	TargetDomain    string     `json:"target_domain,omitempty"`
+	ScanTime        time.Time  `json:"scan_time"`
+	TotalScore      int        `json:"total_score"`
+	RiskLevel       RiskLevel  `json:"risk_level"`
+	Categories      []Category `json:"categories"`
+	Findings        []string   `json:"findings"`
+	Recommendations []string   `json:"recommendations"`
 }
