@@ -42,46 +42,83 @@ func (sb *SingBox) SetConfigPath(path string) {
 	sb.configPath = path
 }
 
-// Start 启动 sing-box（调用脚本）
-func (sb *SingBox) Start() error {
-	if runtime.GOOS == "linux" {
-		gwCfg := config.GatewayConfig{}
-		if sb.config != nil {
-			gwCfg = sb.config.Gateway
-		}
-		if err := gateway.NewController().Apply(context.Background(), gwCfg); err != nil {
+type gatewayOrchestrator interface {
+	Apply(ctx context.Context, cfg config.GatewayConfig) error
+	Teardown(ctx context.Context) error
+}
+
+func startWithGateway(
+	ctx context.Context,
+	isLinux bool,
+	gwCfg config.GatewayConfig,
+	gw gatewayOrchestrator,
+	runStartScript func() error,
+) error {
+	if isLinux {
+		if err := gw.Apply(ctx, gwCfg); err != nil {
 			return fmt.Errorf("apply gateway topology failed: %w", err)
 		}
 	}
+	if err := runStartScript(); err != nil {
+		if isLinux && gwCfg.IsSideRouter() {
+			if tdErr := gw.Teardown(ctx); tdErr != nil {
+				logger.Warn("启动 sing-box 失败后回滚旁路由规则异常: %v", tdErr)
+			} else {
+				logger.Warn("sing-box 启动失败，已自动回滚旁路由拦截与转发规则")
+			}
+		}
+		return err
+	}
+	return nil
+}
 
-	// Create temporary script file
-	tempDir := os.TempDir()
-	var scriptPath string
-	var cmd *exec.Cmd
-
-	if runtime.GOOS == "windows" {
-		scriptPath = filepath.Join(tempDir, "start_singbox.bat")
-	} else {
-		scriptPath = filepath.Join(tempDir, "start_singbox.sh")
+// Start 启动 sing-box（调用脚本）
+func (sb *SingBox) Start() error {
+	gwCfg := config.GatewayConfig{}
+	if sb.config != nil {
+		gwCfg = sb.config.Gateway
 	}
 
-	// Write embedded script to temporary file
-	if err := scripts.WriteStartScript(scriptPath); err != nil {
-		return fmt.Errorf("write start script failed: %w", err)
-	}
-	defer os.Remove(scriptPath)
+	err := startWithGateway(
+		context.Background(),
+		runtime.GOOS == "linux",
+		gwCfg,
+		gateway.NewController(),
+		func() error {
+			// Create temporary script file
+			tempDir := os.TempDir()
+			var scriptPath string
+			var cmd *exec.Cmd
 
-	// Execute script with appropriate command
-	if runtime.GOOS == "windows" {
-		cmd = exec.Command("cmd", "/C", scriptPath)
-	} else {
-		cmd = exec.Command("sh", scriptPath)
-	}
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+			if runtime.GOOS == "windows" {
+				scriptPath = filepath.Join(tempDir, "start_singbox.bat")
+			} else {
+				scriptPath = filepath.Join(tempDir, "start_singbox.sh")
+			}
 
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("start sing-box failed: %w", err)
+			// Write embedded script to temporary file
+			if err := scripts.WriteStartScript(scriptPath); err != nil {
+				return fmt.Errorf("write start script failed: %w", err)
+			}
+			defer os.Remove(scriptPath)
+
+			// Execute script with appropriate command
+			if runtime.GOOS == "windows" {
+				cmd = exec.Command("cmd", "/C", scriptPath)
+			} else {
+				cmd = exec.Command("sh", scriptPath)
+			}
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+
+			if err := cmd.Run(); err != nil {
+				return fmt.Errorf("start sing-box failed: %w", err)
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		return err
 	}
 
 	logger.Success("🚀🚀🚀Sing-box started successfully")

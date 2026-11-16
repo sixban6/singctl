@@ -800,6 +800,11 @@ func pruneWarpConfigBackups(cfgPath string, keep int) {
 }
 
 func writeFileAtomic0600(path string, data []byte) error {
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return err
+		}
+	}
 	tmp := fmt.Sprintf("%s.%d.rollback.tmp", path, time.Now().UnixNano())
 	if err := os.WriteFile(tmp, data, 0600); err != nil {
 		return err

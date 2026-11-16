@@ -318,7 +318,7 @@ func (s *Server) handleServiceConfig(w http.ResponseWriter, r *http.Request) {
 	case "caddy":
 		path = "/etc/caddy/Caddyfile"
 	case "warp":
-		path = "/etc/wireproxy/wireproxy.conf"
+		path, _, _ = deploy.ResolveWireproxyConfigPaths()
 	default:
 		writeJSONError(w, http.StatusBadRequest, "未知服务配置")
 		return
@@ -392,6 +392,7 @@ func (s *Server) handleUpdateServiceConfig(w http.ResponseWriter, r *http.Reques
 	}
 
 	var path string
+	var warpMirrorPaths []string
 	switch service {
 	case "singbox":
 		path = "/etc/sing-box/config.json"
@@ -430,7 +431,7 @@ func (s *Server) handleUpdateServiceConfig(w http.ResponseWriter, r *http.Reques
 			}
 		}
 	case "warp":
-		path = "/etc/wireproxy/wireproxy.conf"
+		path, warpMirrorPaths, _ = deploy.ResolveWireproxyConfigPaths()
 	default:
 		writeJSONError(w, http.StatusBadRequest, "不支持编辑此服务配置: "+service)
 		return
@@ -440,6 +441,12 @@ func (s *Server) handleUpdateServiceConfig(w http.ResponseWriter, r *http.Reques
 	if hadOld == nil {
 		_ = WriteConfigBackup(path, oldBytes)
 	}
+	oldMirrors := make(map[string][]byte, len(warpMirrorPaths))
+	for _, mp := range warpMirrorPaths {
+		if b, mErr := os.ReadFile(mp); mErr == nil {
+			oldMirrors[mp] = b
+		}
+	}
 
 	mode := os.FileMode(0600)
 	if service == "caddy" {
@@ -448,6 +455,13 @@ func (s *Server) handleUpdateServiceConfig(w http.ResponseWriter, r *http.Reques
 	if err := writeConfigAtomically(path, []byte(content), mode); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "保存配置文件失败: "+err.Error())
 		return
+	}
+	if service == "warp" {
+		for _, mp := range warpMirrorPaths {
+			if _, ok := oldMirrors[mp]; ok {
+				_ = writeConfigAtomically(mp, []byte(content), mode)
+			}
+		}
 	}
 	if service == "caddy" {
 		if g, err := user.LookupGroup("caddy"); err == nil {
@@ -472,6 +486,11 @@ func (s *Server) handleUpdateServiceConfig(w http.ResponseWriter, r *http.Reques
 	}
 	if reloadErr != nil && hadOld == nil {
 		_ = writeConfigAtomically(path, oldBytes, mode)
+		if service == "warp" {
+			for mp, prev := range oldMirrors {
+				_ = writeConfigAtomically(mp, prev, mode)
+			}
+		}
 		if service == "singbox" {
 			_ = exec.Command("systemctl", "restart", "sing-box").Run()
 		} else if service == "caddy" {

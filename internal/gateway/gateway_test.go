@@ -1,6 +1,8 @@
 package gateway
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -162,6 +164,83 @@ func TestController_MainModeDoesNotInjectSideRules(t *testing.T) {
 	for _, cmd := range executed {
 		if strings.Contains(cmd, "route replace default") || strings.Contains(cmd, "nft -f") {
 			t.Fatalf("main mode must NEVER apply side-router route or nft rules, got command: %s", cmd)
+		}
+	}
+}
+
+func TestController_FW4IncludePersistenceAndCleanup(t *testing.T) {
+	fw4Root := t.TempDir()
+	stateDir := t.TempDir()
+
+	ctrl := &Controller{
+		StateDir:       stateDir,
+		FW4IncludeRoot: fw4Root,
+		Prober: func() TopologyInfo {
+			return TopologyInfo{
+				LANIP:                 "192.168.100.2",
+				LANCIDR:               "192.168.100.0/24",
+				LANIface:              "br-lan",
+				CurrentGatewayIP:      "192.168.100.1",
+				SuggestedMainRouterIP: "192.168.100.1",
+			}
+		},
+		Exec: func(name string, args ...string) ([]byte, error) {
+			return nil, nil
+		},
+	}
+
+	if err := ctrl.Apply(t.Context(), config.GatewayConfig{
+		Mode:         ModeSide,
+		MainRouterIP: "192.168.100.1",
+	}); err != nil {
+		t.Fatalf("Apply(ModeSide) failed: %v", err)
+	}
+
+	checks := []struct {
+		chain        string
+		wantSnippets []string
+	}{
+		{
+			chain:        "input",
+			wantSnippets: []string{`meta mark 0x1 accept comment "singctl-side"`},
+		},
+		{
+			chain: "forward",
+			wantSnippets: []string{
+				`iifname "br-lan" accept comment "singctl-side"`,
+				`oifname "br-lan" accept comment "singctl-side"`,
+			},
+		},
+	}
+
+	for _, tc := range checks {
+		incPath := filepath.Join(fw4Root, "chain-pre", tc.chain, fw4IncludeFileName)
+		st, err := os.Stat(incPath)
+		if err != nil {
+			t.Fatalf("expected fw4 include %s to exist: %v", incPath, err)
+		}
+		if st.Mode().Perm() != 0600 {
+			t.Fatalf("expected fw4 include %s mode 0600, got %04o", incPath, st.Mode().Perm())
+		}
+		data, err := os.ReadFile(incPath)
+		if err != nil {
+			t.Fatalf("read fw4 include %s: %v", incPath, err)
+		}
+		content := string(data)
+		for _, want := range tc.wantSnippets {
+			if !strings.Contains(content, want) {
+				t.Fatalf("fw4 include %s missing %q:\n%s", incPath, want, content)
+			}
+		}
+	}
+
+	if err := ctrl.Teardown(t.Context()); err != nil {
+		t.Fatalf("Teardown failed: %v", err)
+	}
+	for _, tc := range checks {
+		incPath := filepath.Join(fw4Root, "chain-pre", tc.chain, fw4IncludeFileName)
+		if _, err := os.Stat(incPath); !os.IsNotExist(err) {
+			t.Fatalf("expected fw4 include %s to be removed after Teardown, got err: %v", incPath, err)
 		}
 	}
 }

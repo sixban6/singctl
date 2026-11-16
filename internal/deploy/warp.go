@@ -3,6 +3,7 @@ package deploy
 import (
 	"archive/tar"
 	"bytes"
+	"cmp"
 	"compress/gzip"
 	"context"
 	"crypto/ecdh"
@@ -18,6 +19,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -343,39 +345,137 @@ func FetchWarpExitInfo(timeout time.Duration) (ip, loc, warpState string, ok boo
 	return ip, loc, warpState, ok
 }
 
-// RotateWarpIdentity 重新注册 Cloudflare WARP 设备密钥并热切换本地 wireproxy 出口 IP（带 0600 备份与失败自动回滚）
-func RotateWarpIdentity() (newIP, newLoc string, err error) {
-	const primaryConf = "/etc/wireproxy/wireproxy.conf"
-	const compatConf = "/etc/wireguard/proxy.conf"
+const (
+	DefaultWireproxyConf = "/etc/wireproxy/wireproxy.conf"
+	LegacyWireproxyConf  = "/etc/wireguard/proxy.conf"
+)
 
-	oldPrimary, errPrimary := os.ReadFile(primaryConf)
-	if errPrimary != nil {
-		return "", "", fmt.Errorf("未检测到已部署的 WARP 配置 (%s): %w", primaryConf, errPrimary)
-	}
-	oldCompat, errCompat := os.ReadFile(compatConf)
+// WireproxyPathEnv 允许测试注入隔离的配置文件与 systemd unit 搜索路径。
+type WireproxyPathEnv struct {
+	PrimaryConf string
+	CompatConf  string
+	UnitFiles   []string
+}
 
-	// 1. 以 0600 备份现网 wireproxy 配置
-	bakPath := fmt.Sprintf("%s.%d.bak", primaryConf, time.Now().UnixNano())
-	_ = os.WriteFile(bakPath, oldPrimary, 0600)
-	_ = os.Chmod(bakPath, 0600)
+// ParseWireproxyConfFromUnit 从 systemd unit 内容中提取 ExecStart 的 -c / --config 参数路径。
+func ParseWireproxyConfFromUnit(unitContent string) string {
+	for line := range strings.SplitSeq(unitContent, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, ";") {
+			continue
+		}
+		rest, ok := strings.CutPrefix(trimmed, "ExecStart=")
+		if !ok {
+			continue
+		}
+		fields := strings.Fields(strings.TrimSpace(rest))
+		for i := 0; i < len(fields); i++ {
+			tok := strings.Trim(fields[i], `"'`)
+			if (tok == "-c" || tok == "--config") && i+1 < len(fields) {
+				cand := strings.Trim(fields[i+1], `"'`)
+				if strings.HasPrefix(cand, "/") {
+					return filepath.Clean(cand)
+				}
+			}
+			for _, prefix := range []string{"-c=", "--config="} {
+				if val, has := strings.CutPrefix(tok, prefix); has {
+					cand := strings.Trim(val, `"'`)
+					if strings.HasPrefix(cand, "/") {
+						return filepath.Clean(cand)
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
 
-	// 2. 生成新 X25519 密钥对并向 Cloudflare 注册新身份
-	privKey, pubKey, kErr := GenerateWireguardKeypair()
-	if kErr != nil {
-		return "", "", fmt.Errorf("生成 WireGuard 密钥对失败: %w", kErr)
-	}
-	reg, rErr := registerCloudflareWarp(pubKey)
-	if rErr != nil {
-		return "", "", fmt.Errorf("注册 Cloudflare WARP 新身份失败: %w", rErr)
+// ResolveWireproxyConfigPaths 解析当前宿主 wireproxy 真实生效的主配置文件路径、需同步的兼容镜像路径及文件是否已存在。
+func ResolveWireproxyConfigPaths() (activePath string, mirrorPaths []string, exists bool) {
+	return ResolveWireproxyConfigPathsWithEnv(WireproxyPathEnv{})
+}
+
+func ResolveWireproxyConfigPathsWithEnv(env WireproxyPathEnv) (activePath string, mirrorPaths []string, exists bool) {
+	primary := cmp.Or(strings.TrimSpace(env.PrimaryConf), DefaultWireproxyConf)
+	compat := cmp.Or(strings.TrimSpace(env.CompatConf), LegacyWireproxyConf)
+	unitFiles := env.UnitFiles
+	if unitFiles == nil {
+		unitFiles = []string{
+			"/etc/systemd/system/wireproxy.service",
+			"/lib/systemd/system/wireproxy.service",
+			"/usr/lib/systemd/system/wireproxy.service",
+		}
 	}
 
-	v4Addr := reg.Config.Interface.Addresses.V4
-	if !strings.Contains(v4Addr, "/") && v4Addr != "" {
-		v4Addr += "/32"
+	unitTarget := ""
+	for _, uf := range unitFiles {
+		raw, err := os.ReadFile(uf)
+		if err != nil {
+			continue
+		}
+		if parsed := ParseWireproxyConfFromUnit(string(raw)); parsed != "" {
+			unitTarget = parsed
+			if st, stErr := os.Stat(parsed); stErr == nil && !st.IsDir() {
+				activePath = parsed
+				exists = true
+			}
+			break
+		}
 	}
-	v6Addr := reg.Config.Interface.Addresses.V6
-	if !strings.Contains(v6Addr, "/") && v6Addr != "" {
-		v6Addr += "/128"
+
+	if activePath == "" {
+		if st, err := os.Stat(primary); err == nil && !st.IsDir() {
+			activePath = primary
+			exists = true
+		} else if st, err := os.Stat(compat); err == nil && !st.IsDir() {
+			activePath = compat
+			exists = true
+		} else {
+			activePath = cmp.Or(unitTarget, primary)
+			exists = false
+		}
+	}
+
+	addMirror := func(p string) {
+		if p != "" && p != activePath && !slices.Contains(mirrorPaths, p) {
+			mirrorPaths = append(mirrorPaths, p)
+		}
+	}
+	// 始终将标准主配置路径纳入同步镜像（老节点仅有 /etc/wireguard/proxy.conf 时可自动补齐 /etc/wireproxy/wireproxy.conf）
+	addMirror(primary)
+	if st, err := os.Stat(compat); err == nil && !st.IsDir() {
+		addMirror(compat)
+	}
+	return activePath, mirrorPaths, exists
+}
+
+// WarpRotateDeps 定义更换 WARP IP 时的可注入外部依赖（用于离线单元测试与模拟回滚）。
+type WarpRotateDeps struct {
+	PathEnv         WireproxyPathEnv
+	GenerateKeypair func() (privKey, pubKey string, err error)
+	RegisterWarp    func(pubKey string) (*warpRegResponse, error)
+	HasIPv6         func() bool
+	RestartService  func() error
+	FetchExitInfo   func(timeout time.Duration) (ip, loc, state string, ok bool)
+	DeployFallback  func() error
+	PollAttempts    int
+	PollInterval    time.Duration
+}
+
+func renderWireproxyConfigFromReg(privKey string, reg *warpRegResponse, hasIPv6 bool) string {
+	var v4Addr, v6Addr, peerPubKey string
+	if reg != nil {
+		v4Addr = reg.Config.Interface.Addresses.V4
+		if !strings.Contains(v4Addr, "/") && v4Addr != "" {
+			v4Addr += "/32"
+		}
+		v6Addr = reg.Config.Interface.Addresses.V6
+		if !strings.Contains(v6Addr, "/") && v6Addr != "" {
+			v6Addr += "/128"
+		}
+		if len(reg.Config.Peers) > 0 && reg.Config.Peers[0].PublicKey != "" {
+			peerPubKey = reg.Config.Peers[0].PublicKey
+		}
 	}
 	addressLine := v4Addr
 	if v6Addr != "" {
@@ -385,49 +485,153 @@ func RotateWarpIdentity() (newIP, newLoc string, err error) {
 			addressLine = v6Addr
 		}
 	}
-	if addressLine == "" {
-		addressLine = "172.16.0.2/32"
+	addressLine = cmp.Or(addressLine, "172.16.0.2/32")
+	peerPubKey = cmp.Or(peerPubKey, "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=")
+	return BuildWireproxyConfig(addressLine, privKey, peerPubKey, hasIPv6)
+}
+
+// RotateWarpIdentity 重新注册 Cloudflare WARP 设备密钥并热切换本地 wireproxy 出口 IP（带 0600 备份与失败自动回滚）
+func RotateWarpIdentity() (newIP, newLoc string, err error) {
+	return RotateWarpIdentityWithDeps(nil)
+}
+
+func RotateWarpIdentityWithDeps(deps *WarpRotateDeps) (newIP, newLoc string, err error) {
+	var d WarpRotateDeps
+	if deps != nil {
+		d = *deps
 	}
-	peerPubKey := "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
-	if len(reg.Config.Peers) > 0 && reg.Config.Peers[0].PublicKey != "" {
-		peerPubKey = reg.Config.Peers[0].PublicKey
+	if d.GenerateKeypair == nil {
+		d.GenerateKeypair = GenerateWireguardKeypair
+	}
+	if d.RegisterWarp == nil {
+		d.RegisterWarp = registerCloudflareWarp
+	}
+	if d.HasIPv6 == nil {
+		d.HasIPv6 = hasGlobalIPv6
+	}
+	if d.RestartService == nil {
+		d.RestartService = func() error {
+			return runCmd("systemctl", "restart", "wireproxy")
+		}
+	}
+	if d.FetchExitInfo == nil {
+		d.FetchExitInfo = func(timeout time.Duration) (string, string, string, bool) {
+			if !isWarpSocksRunning() {
+				return "", "", "", false
+			}
+			return FetchWarpExitInfo(timeout)
+		}
+	}
+	if d.DeployFallback == nil {
+		d.DeployFallback = func() error {
+			return DeployWarpWithConfig(nil)
+		}
+	}
+	if d.PollAttempts <= 0 {
+		d.PollAttempts = 6
+	}
+	if d.PollInterval <= 0 {
+		d.PollInterval = 800 * time.Millisecond
 	}
 
-	freshConf := BuildWireproxyConfig(addressLine, privKey, peerPubKey, hasGlobalIPv6())
+	activePath, mirrorPaths, exists := ResolveWireproxyConfigPathsWithEnv(d.PathEnv)
+	if !exists {
+		// 若尚未生成任何 WARP 配置文件，自动初始化部署并直接探测新出口 IP
+		if err := d.DeployFallback(); err != nil {
+			return "", "", fmt.Errorf("未检测到已部署的 WARP 配置 (%s)，且自动初始化失败: %w", activePath, err)
+		}
+		for range d.PollAttempts {
+			if ip, loc, _, ok := d.FetchExitInfo(3 * time.Second); ok && ip != "" {
+				return ip, loc, nil
+			}
+			time.Sleep(d.PollInterval)
+		}
+		return "", "", fmt.Errorf("WARP 已完成自动初始化，但暂未探测到出口 IP，请稍后刷新查看")
+	}
+
+	oldActive, errRead := os.ReadFile(activePath)
+	if errRead != nil {
+		return "", "", fmt.Errorf("读取现网 WARP 配置 (%s) 失败: %w", activePath, errRead)
+	}
+	_ = os.Chmod(activePath, 0600)
+
+	// 1. 以 0600 备份现网生效配置（保留最近 3 份备份）
+	bakPath := fmt.Sprintf("%s.%d.bak", activePath, time.Now().UnixNano())
+	_ = os.WriteFile(bakPath, oldActive, 0600)
+	_ = os.Chmod(bakPath, 0600)
+	pruneWireproxyBackups(activePath, 3)
+
+	existingMirrors := make(map[string][]byte, len(mirrorPaths))
+	var createdMirrors []string
+	for _, mp := range mirrorPaths {
+		if b, mErr := os.ReadFile(mp); mErr == nil {
+			existingMirrors[mp] = b
+		} else {
+			createdMirrors = append(createdMirrors, mp)
+		}
+	}
+
+	// 2. 生成新 X25519 密钥对并向 Cloudflare 注册新身份
+	privKey, pubKey, kErr := d.GenerateKeypair()
+	if kErr != nil {
+		return "", "", fmt.Errorf("生成 WireGuard 密钥对失败: %w", kErr)
+	}
+	reg, rErr := d.RegisterWarp(pubKey)
+	if rErr != nil {
+		return "", "", fmt.Errorf("注册 Cloudflare WARP 新身份失败: %w", rErr)
+	}
+
+	freshConf := renderWireproxyConfigFromReg(privKey, reg, d.HasIPv6())
 
 	rollback := func() {
-		_ = writeFileAtomic0600(primaryConf, oldPrimary)
-		if errCompat == nil {
-			_ = writeFileAtomic0600(compatConf, oldCompat)
+		_ = writeFileAtomic0600(activePath, oldActive)
+		for mp, oldBytes := range existingMirrors {
+			_ = writeFileAtomic0600(mp, oldBytes)
 		}
-		_ = runCmd("systemctl", "restart", "wireproxy")
+		for _, mp := range createdMirrors {
+			_ = os.Remove(mp)
+		}
+		_ = d.RestartService()
 	}
 
-	// 3. 以 0600 原子写入新配置并重启 wireproxy
-	if err := writeFileAtomic0600(primaryConf, []byte(freshConf)); err != nil {
-		return "", "", fmt.Errorf("写入新 wireproxy 配置失败: %w", err)
+	// 3. 以 0600 原子写入生效配置及兼容镜像，并重启 wireproxy
+	if err := writeFileAtomic0600(activePath, []byte(freshConf)); err != nil {
+		return "", "", fmt.Errorf("写入新 wireproxy 配置 (%s) 失败: %w", activePath, err)
 	}
-	if errCompat == nil {
-		_ = writeFileAtomic0600(compatConf, []byte(freshConf))
+	for _, mp := range mirrorPaths {
+		_ = writeFileAtomic0600(mp, []byte(freshConf))
 	}
 
-	if err := runCmd("systemctl", "restart", "wireproxy"); err != nil {
+	if err := d.RestartService(); err != nil {
 		rollback()
 		return "", "", fmt.Errorf("重启 wireproxy 失败，已回滚原配置: %w", err)
 	}
 
 	// 4. 轮询验证新隧道握手就绪并读取新出口 IP
-	for range 6 {
-		time.Sleep(800 * time.Millisecond)
-		if isWarpSocksRunning() {
-			if ip, loc, _, ok := FetchWarpExitInfo(3 * time.Second); ok && ip != "" {
-				return ip, loc, nil
-			}
+	for range d.PollAttempts {
+		time.Sleep(d.PollInterval)
+		if ip, loc, _, ok := d.FetchExitInfo(3 * time.Second); ok && ip != "" {
+			return ip, loc, nil
 		}
 	}
 
 	rollback()
 	return "", "", fmt.Errorf("新 WARP 身份握手超时，已自动回滚保留原有出口隧道")
+}
+
+func pruneWireproxyBackups(path string, keep int) {
+	if keep < 1 {
+		keep = 1
+	}
+	matches, err := filepath.Glob(path + ".*.bak")
+	if err != nil || len(matches) <= keep {
+		return
+	}
+	slices.Sort(matches)
+	slices.Reverse(matches)
+	for i := keep; i < len(matches); i++ {
+		_ = os.Remove(matches[i])
+	}
 }
 
 // NormalizeWireproxyConfigContent 修正既有 wireproxy 配置中的 ResolveStrategy=auto、域名 Endpoint 与会导致启动抢跑死锁的 PersistentKeepalive
@@ -468,10 +672,16 @@ func NormalizeWireproxyConfigContent(content string) (string, bool) {
 
 // SyncWarpConfigIfNeeded 检查并自愈本机 WARP (wireproxy) 配置与隧道握手状态
 func SyncWarpConfigIfNeeded() (healed bool, msg string, err error) {
-	confPaths := []string{"/etc/wireproxy/wireproxy.conf", "/etc/wireguard/proxy.conf"}
+	activePath, mirrorPaths, _ := ResolveWireproxyConfigPaths()
+	confPaths := make([]string, 0, 3+len(mirrorPaths))
+	for _, p := range append([]string{activePath, DefaultWireproxyConf, LegacyWireproxyConf}, mirrorPaths...) {
+		if p != "" && !slices.Contains(confPaths, p) {
+			confPaths = append(confPaths, p)
+		}
+	}
 	var existingPaths []string
 	for _, p := range confPaths {
-		if _, stErr := os.Stat(p); stErr == nil {
+		if st, stErr := os.Stat(p); stErr == nil && !st.IsDir() {
 			existingPaths = append(existingPaths, p)
 		}
 	}
@@ -487,7 +697,7 @@ func SyncWarpConfigIfNeeded() (healed bool, msg string, err error) {
 		}
 		normalized, changed := NormalizeWireproxyConfigContent(string(raw))
 		if changed {
-			if wErr := os.WriteFile(p, []byte(normalized), 0600); wErr != nil {
+			if wErr := writeFileAtomic0600(p, []byte(normalized)); wErr != nil {
 				return false, "", fmt.Errorf("写入 %s 失败: %w", p, wErr)
 			}
 			anyChanged = true
@@ -516,32 +726,9 @@ func SyncWarpConfigIfNeeded() (healed bool, msg string, err error) {
 	if rErr != nil {
 		return false, "", fmt.Errorf("WARP 隧道未连通且重新注册 Cloudflare WARP 失败: %w", rErr)
 	}
-	v4Addr := reg.Config.Interface.Addresses.V4
-	if !strings.Contains(v4Addr, "/") && v4Addr != "" {
-		v4Addr += "/32"
-	}
-	v6Addr := reg.Config.Interface.Addresses.V6
-	if !strings.Contains(v6Addr, "/") && v6Addr != "" {
-		v6Addr += "/128"
-	}
-	addressLine := v4Addr
-	if v6Addr != "" {
-		if addressLine != "" {
-			addressLine += ", " + v6Addr
-		} else {
-			addressLine = v6Addr
-		}
-	}
-	if addressLine == "" {
-		addressLine = "172.16.0.2/32"
-	}
-	peerPubKey := "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
-	if len(reg.Config.Peers) > 0 && reg.Config.Peers[0].PublicKey != "" {
-		peerPubKey = reg.Config.Peers[0].PublicKey
-	}
-	freshConf := BuildWireproxyConfig(addressLine, privKey, peerPubKey, hasGlobalIPv6())
+	freshConf := renderWireproxyConfigFromReg(privKey, reg, hasGlobalIPv6())
 	for _, p := range existingPaths {
-		_ = os.WriteFile(p, []byte(freshConf), 0600)
+		_ = writeFileAtomic0600(p, []byte(freshConf))
 	}
 	_ = runCmd("systemctl", "restart", "wireproxy")
 	for range 4 {

@@ -44,8 +44,8 @@ func (s *Server) probeWarpDaemon(forceRefresh bool) WarpDaemonStatus {
 	}
 
 	_, errBin := exec.LookPath("wireproxy")
-	_, errConf := os.Stat("/etc/wireproxy/wireproxy.conf")
-	installed := errBin == nil || os.IsExist(errConf) || errConf == nil
+	_, _, hasConf := deploy.ResolveWireproxyConfigPaths()
+	installed := errBin == nil || hasConf
 	if !installed {
 		if _, stErr := os.Stat("/usr/local/bin/wireproxy"); stErr == nil {
 			installed = true

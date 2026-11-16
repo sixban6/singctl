@@ -110,3 +110,86 @@ configure_gateway_mode "$@"
 		}
 	})
 }
+
+func TestInstallScript_PurgeExistingSingbox(t *testing.T) {
+	repoRoot, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatalf("resolve repo root: %v", err)
+	}
+	installSh := filepath.Join(repoRoot, "install.sh")
+
+	setupMockEnv := func(t *testing.T, osName string) (dir, binDir, rootfs, logFile string) {
+		t.Helper()
+		dir = t.TempDir()
+		binDir = filepath.Join(dir, "bin")
+		rootfs = filepath.Join(dir, "rootfs")
+		logFile = filepath.Join(dir, "calls.log")
+		if err := os.MkdirAll(binDir, 0755); err != nil {
+			t.Fatalf("mkdir bin: %v", err)
+		}
+		if err := os.MkdirAll(filepath.Join(rootfs, "etc", "sing-box"), 0755); err != nil {
+			t.Fatalf("mkdir etc/sing-box: %v", err)
+		}
+
+		if err := os.WriteFile(filepath.Join(binDir, "sing-box"), []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+			t.Fatalf("write mock sing-box: %v", err)
+		}
+		for _, tool := range []string{"nft", "ip", "iptables", "killall", "systemctl"} {
+			body := "#!/bin/sh\nprintf '%s %s\\n' \"" + tool + "\" \"$*\" >> \"" + logFile + "\"\nexit 0\n"
+			if err := os.WriteFile(filepath.Join(binDir, tool), []byte(body), 0755); err != nil {
+				t.Fatalf("write mock %s: %v", tool, err)
+			}
+		}
+
+		harness := filepath.Join(dir, "purge_test.sh")
+		script := `#!/bin/sh
+set -e
+export PATH="` + binDir + `:/bin:/usr/bin"
+export SINGCTL_INSTALL_LIB_ONLY=1
+export SINGCTL_ROOT_PREFIX="` + rootfs + `"
+. "` + installSh + `"
+OS="` + osName + `"
+IS_FIRST_INSTALL="true"
+purge_existing_singbox
+`
+		if err := os.WriteFile(harness, []byte(script), 0755); err != nil {
+			t.Fatalf("write harness: %v", err)
+		}
+		out, err := exec.CommandContext(t.Context(), "sh", harness).CombinedOutput()
+		if err != nil {
+			t.Fatalf("run purge_existing_singbox (%s) failed: %v\nOutput:\n%s", osName, err, string(out))
+		}
+		return dir, binDir, rootfs, logFile
+	}
+
+	t.Run("darwin_never_purges_existing_singbox", func(t *testing.T) {
+		_, binDir, _, logFile := setupMockEnv(t, "darwin")
+		if _, err := os.Stat(filepath.Join(binDir, "sing-box")); err != nil {
+			t.Fatalf("expected mock sing-box on darwin to remain untouched, got stat err: %v", err)
+		}
+		if _, err := os.Stat(logFile); !os.IsNotExist(err) {
+			t.Fatalf("expected zero firewall/process calls on darwin, got log file")
+		}
+	})
+
+	t.Run("linux_first_install_purges_binary_and_cleans_orphan_tproxy", func(t *testing.T) {
+		_, binDir, _, logFile := setupMockEnv(t, "linux")
+		if _, err := os.Stat(filepath.Join(binDir, "sing-box")); !os.IsNotExist(err) {
+			t.Fatalf("expected mock sing-box on linux to be removed, got err: %v", err)
+		}
+		rawLog, err := os.ReadFile(logFile)
+		if err != nil {
+			t.Fatalf("read calls.log: %v", err)
+		}
+		logText := string(rawLog)
+		for _, want := range []string{
+			"nft delete table inet sing-box",
+			"ip rule del fwmark 1 table 100",
+			"ip route flush table 100",
+		} {
+			if !strings.Contains(logText, want) {
+				t.Fatalf("expected calls.log to contain %q, got:\n%s", want, logText)
+			}
+		}
+	})
+}

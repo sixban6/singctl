@@ -16,29 +16,37 @@ import (
 )
 
 const (
-	defaultStateDir    = "/tmp/singctl-side-state"
-	ruleCommentTag     = "singctl-side"
-	legacySideChainFwd = "SINGCTL_SIDE_FWD"
-	legacySideChainNat = "SINGCTL_SIDE_NAT"
+	defaultStateDir       = "/tmp/singctl-side-state"
+	defaultFW4IncludeRoot = "/usr/share/nftables.d"
+	fw4IncludeFileName    = "singctl-side.nft"
+	ruleCommentTag        = "singctl-side"
+	legacySideChainFwd    = "SINGCTL_SIDE_FWD"
+	legacySideChainNat    = "SINGCTL_SIDE_NAT"
 )
 
 // Controller 负责旁路由模式（Side Router）内核转发、默认路由自愈与防火墙规则的原子挂载与可逆卸载。
 type Controller struct {
-	StateDir string
-	Prober   func() TopologyInfo
-	Exec     func(name string, args ...string) ([]byte, error)
+	StateDir       string
+	FW4IncludeRoot string
+	Prober         func() TopologyInfo
+	Exec           func(name string, args ...string) ([]byte, error)
 }
 
 // NewController 创建默认旁路由控制器。
 func NewController() *Controller {
 	return &Controller{
-		StateDir: defaultStateDir,
-		Prober:   ProbeTopology,
+		StateDir:       defaultStateDir,
+		FW4IncludeRoot: defaultFW4IncludeRoot,
+		Prober:         ProbeTopology,
 	}
 }
 
 func (c *Controller) stateDir() string {
 	return cmp.Or(strings.TrimSpace(c.StateDir), defaultStateDir)
+}
+
+func (c *Controller) fw4IncludeRoot() string {
+	return cmp.Or(strings.TrimSpace(c.FW4IncludeRoot), defaultFW4IncludeRoot)
 }
 
 func (c *Controller) probe() TopologyInfo {
@@ -208,6 +216,33 @@ func (c *Controller) applyIptablesFilterPassThrough(ctx context.Context, lanIfac
 }
 
 func (c *Controller) applyFW4PassThrough(ctx context.Context, lanIface string) {
+	if st, err := os.Stat(c.fw4IncludeRoot()); err == nil && st.IsDir() {
+		includes := []struct {
+			chain   string
+			content string
+		}{
+			{
+				chain:   "input",
+				content: fmt.Sprintf("meta mark 0x1 accept comment %q\n", ruleCommentTag),
+			},
+			{
+				chain:   "forward",
+				content: fmt.Sprintf("iifname %q accept comment %q\noifname %q accept comment %q\n", lanIface, ruleCommentTag, lanIface, ruleCommentTag),
+			},
+		}
+		for _, inc := range includes {
+			dir := filepath.Join(c.fw4IncludeRoot(), "chain-pre", inc.chain)
+			if mkErr := os.MkdirAll(dir, 0755); mkErr != nil {
+				logger.Warn("创建 fw4 include 目录 %s 失败: %v", dir, mkErr)
+				continue
+			}
+			path := filepath.Join(dir, fw4IncludeFileName)
+			if wErr := os.WriteFile(path, []byte(inc.content), 0600); wErr != nil {
+				logger.Warn("写入 fw4 持久化规则 %s 失败: %v", path, wErr)
+			}
+		}
+	}
+
 	if _, err := c.runCmd(ctx, "nft", "list", "table", "inet", "fw4"); err != nil {
 		return
 	}
@@ -234,6 +269,11 @@ func (c *Controller) applyLegacyIptablesSideRules(ctx context.Context, plan Reso
 }
 
 func (c *Controller) cleanupFirewallOnly(ctx context.Context) {
+	root := c.fw4IncludeRoot()
+	for _, chain := range []string{"input", "forward"} {
+		_ = os.Remove(filepath.Join(root, "chain-pre", chain, fw4IncludeFileName))
+	}
+
 	if c.hasCommand("nft") {
 		_, _ = c.runCmd(ctx, "nft", "delete", "table", "inet", "singctl-side")
 		// 清理 fw4 中带 singctl-side 注释的规则句柄

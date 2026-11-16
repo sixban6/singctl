@@ -861,18 +861,24 @@ purge_existing_singbox() {
         return 0
     fi
 
+    # macOS 客户端使用图形版 SFM.app 托管，不触碰系统/Homebrew 安装的 sing-box
+    if [ "$OS" != "linux" ]; then
+        return 0
+    fi
+
+    local root_prefix="${SINGCTL_ROOT_PREFIX:-}"
     local sb_bin=""
     sb_bin=$(command -v sing-box 2>/dev/null || true)
-    if [ -z "$sb_bin" ] && [ ! -f "/usr/bin/sing-box" ] && [ ! -f "/usr/local/bin/sing-box" ] && [ ! -x "/etc/init.d/sing-box" ]; then
+    if [ -z "$sb_bin" ] && [ ! -f "${root_prefix}/usr/bin/sing-box" ] && [ ! -f "${root_prefix}/usr/local/bin/sing-box" ] && [ ! -x "${root_prefix}/etc/init.d/sing-box" ]; then
         return 0
     fi
 
     echo_warning "首次安装检测到系统已存在旧的 sing-box 环境，正在清理以避免内核版本冲突..."
 
     # 1) 停止并禁用原有自启服务（兼容 OpenWrt procd 与 Linux systemd）
-    if [ -x "/etc/init.d/sing-box" ]; then
-        /etc/init.d/sing-box stop >/dev/null 2>&1 || true
-        /etc/init.d/sing-box disable >/dev/null 2>&1 || true
+    if [ -x "${root_prefix}/etc/init.d/sing-box" ]; then
+        "${root_prefix}/etc/init.d/sing-box" stop >/dev/null 2>&1 || true
+        "${root_prefix}/etc/init.d/sing-box" disable >/dev/null 2>&1 || true
     fi
     if command -v systemctl >/dev/null 2>&1; then
         systemctl stop sing-box >/dev/null 2>&1 || true
@@ -880,25 +886,45 @@ purge_existing_singbox() {
     fi
     killall sing-box >/dev/null 2>&1 || pkill -x sing-box >/dev/null 2>&1 || true
 
-    # 2) 尝试通过包管理器卸载（OpenWrt opkg/apk、Debian/Ubuntu apt）
-    if command -v opkg >/dev/null 2>&1 && opkg status sing-box 2>/dev/null | grep -q "Status:.*installed"; then
-        echo_info "正在通过 opkg 卸载系统自带 sing-box..."
-        opkg remove sing-box >/dev/null 2>&1 || true
+    # 清理旧版/第三方脚本可能残留的 TProxy 透明代理表与策略路由，防止停止旧进程后本机出站断网
+    if command -v nft >/dev/null 2>&1; then
+        nft delete table inet sing-box >/dev/null 2>&1 || true
     fi
-    if command -v apk >/dev/null 2>&1 && apk info -e sing-box >/dev/null 2>&1; then
-        echo_info "正在通过 apk 卸载系统自带 sing-box..."
-        apk del sing-box >/dev/null 2>&1 || true
+    if command -v iptables >/dev/null 2>&1; then
+        iptables -t mangle -D PREROUTING -j SING_BOX >/dev/null 2>&1 || true
+        iptables -t mangle -D OUTPUT -j SING_BOX >/dev/null 2>&1 || true
+        iptables -t mangle -F SING_BOX >/dev/null 2>&1 || true
+        iptables -t mangle -X SING_BOX >/dev/null 2>&1 || true
     fi
-    if command -v dpkg >/dev/null 2>&1 && dpkg -s sing-box >/dev/null 2>&1; then
-        echo_info "正在通过 apt-get 卸载系统已有 sing-box..."
-        DEBIAN_FRONTEND=noninteractive apt-get remove -y sing-box >/dev/null 2>&1 || true
+    if command -v ip >/dev/null 2>&1; then
+        ip rule del fwmark 1 table 100 >/dev/null 2>&1 || ip rule del table 100 >/dev/null 2>&1 || true
+        ip route flush table 100 >/dev/null 2>&1 || true
+        ip -6 rule del fwmark 1 table 100 >/dev/null 2>&1 || ip -6 rule del table 100 >/dev/null 2>&1 || true
+        ip -6 route flush table 100 >/dev/null 2>&1 || true
+    fi
+    rm -f "${root_prefix}/etc/sing-box/singbox.nft" 2>/dev/null || true
+
+    if [ -z "$root_prefix" ]; then
+        # 2) 尝试通过包管理器卸载（OpenWrt opkg/apk、Debian/Ubuntu apt）
+        if command -v opkg >/dev/null 2>&1 && opkg status sing-box 2>/dev/null | grep -q "Status:.*installed"; then
+            echo_info "正在通过 opkg 卸载系统自带 sing-box..."
+            opkg remove sing-box >/dev/null 2>&1 || true
+        fi
+        if command -v apk >/dev/null 2>&1 && apk info -e sing-box >/dev/null 2>&1; then
+            echo_info "正在通过 apk 卸载系统自带 sing-box..."
+            apk del sing-box >/dev/null 2>&1 || true
+        fi
+        if command -v dpkg >/dev/null 2>&1 && dpkg -s sing-box >/dev/null 2>&1; then
+            echo_info "正在通过 apt-get 卸载系统已有 sing-box..."
+            DEBIAN_FRONTEND=noninteractive apt-get remove -y sing-box >/dev/null 2>&1 || true
+        fi
     fi
 
     # 3) 兜底清理残留二进制与旧配置文件，后续将由 singctl 安装匹配的官方内核
     if [ -n "$sb_bin" ] && [ -f "$sb_bin" ]; then
-        rm -f "$sb_bin"
+        rm -f "$sb_bin" 2>/dev/null || true
     fi
-    rm -f /usr/bin/sing-box /usr/local/bin/sing-box /etc/sing-box/config.json
+    rm -f "${root_prefix}/usr/bin/sing-box" "${root_prefix}/usr/local/bin/sing-box" "${root_prefix}/etc/sing-box/config.json" 2>/dev/null || true
     hash -r 2>/dev/null || true
 
     echo_success "已清理原有 sing-box，后续将自动安装 SingCtl 匹配的官方最新版内核"
