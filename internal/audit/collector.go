@@ -91,26 +91,26 @@ type connByteCursor struct {
 }
 
 type persistedAuditState struct {
-	SchemaVersion int                           `json:"schemaVersion,omitempty"`
-	UpdatedUnix   int64                         `json:"updatedUnix"`
+	SchemaVersion int                            `json:"schemaVersion,omitempty"`
+	UpdatedUnix   int64                          `json:"updatedUnix"`
 	Flows         map[string]*persistedFlowEntry `json:"flows"`
-	ConnCursors   map[string]connByteCursor     `json:"connCursors"`
+	ConnCursors   map[string]connByteCursor      `json:"connCursors"`
 }
 
 // Collector 负责从 sing-box Clash API 采集连接、关联局域网 DHCP/ARP 设备名并执行多维非线性分析。
 type Collector struct {
-	mu             sync.Mutex
-	cfg            *config.Config
-	statePath      string
-	endpoints      []string
-	secret         string
-	httpClient     *http.Client
-	leaseFiles     []string
-	arpFile        string
-	hostsFile      string
-	tzFile         string
-	uciSystemFile  string
-	nowFunc        func() time.Time
+	mu            sync.Mutex
+	cfg           *config.Config
+	statePath     string
+	endpoints     []string
+	secret        string
+	httpClient    *http.Client
+	leaseFiles    []string
+	arpFile       string
+	hostsFile     string
+	tzFile        string
+	uciSystemFile string
+	nowFunc       func() time.Time
 }
 
 // NewCollector 创建默认客户端审计采集器（自动兼容 OpenWrt /etc/TZ 与 /etc/config/system 本地时区）。

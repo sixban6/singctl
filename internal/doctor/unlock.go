@@ -21,10 +21,10 @@ type ServiceUnlockStatus struct {
 
 // ExitProfile 单个网络出口链路的解锁画像
 type ExitProfile struct {
-	Name        string              `json:"name"`        // "VPS 原生出口 (Direct)" | "WARP 分流出口 (127.0.0.1:40000)"
-	Available   bool                `json:"available"`   // 该出口是否在线
-	ExitIP      string              `json:"exitIP"`      // 出口公网 IP
-	ExitLoc     string              `json:"exitLoc"`     // 出口国家/地区代码
+	Name        string              `json:"name"`      // "VPS 原生出口 (Direct)" | "WARP 分流出口 (127.0.0.1:40000)"
+	Available   bool                `json:"available"` // 该出口是否在线
+	ExitIP      string              `json:"exitIP"`    // 出口公网 IP
+	ExitLoc     string              `json:"exitLoc"`   // 出口国家/地区代码
 	OpenAI      ServiceUnlockStatus `json:"openai"`
 	Netflix     ServiceUnlockStatus `json:"netflix"`
 	YouTube     ServiceUnlockStatus `json:"youtube"`

@@ -75,20 +75,20 @@ type RewriteEntry struct {
 
 // OverviewSnapshot 汇总客户端控制台展示 AdGuard Home 所需的全部状态与配置。
 type OverviewSnapshot struct {
-	Supported                    bool           `json:"supported"`
-	Installed                    bool           `json:"installed"`
-	Enabled                      bool           `json:"enabled"`
-	Running                      bool           `json:"running"`
-	DNSHealthy                   bool           `json:"dnsHealthy"`
-	WebHealthy                   bool           `json:"webHealthy"`
-	SingBoxLinked                bool           `json:"singboxLinked"`
-	IsOpenWrt                    bool           `json:"isOpenWrt"`
-	Version                      string         `json:"version"`
-	DNSAddr                      string         `json:"dnsAddr"`
-	WebAddr                      string         `json:"webAddr"`
-	WebURL                       string         `json:"webUrl"`
-	Username                     string         `json:"username"`
-	HasPassword                  bool           `json:"hasPassword"`
+	Supported                    bool                 `json:"supported"`
+	Installed                    bool                 `json:"installed"`
+	Enabled                      bool                 `json:"enabled"`
+	Running                      bool                 `json:"running"`
+	DNSHealthy                   bool                 `json:"dnsHealthy"`
+	WebHealthy                   bool                 `json:"webHealthy"`
+	SingBoxLinked                bool                 `json:"singboxLinked"`
+	IsOpenWrt                    bool                 `json:"isOpenWrt"`
+	Version                      string               `json:"version"`
+	DNSAddr                      string               `json:"dnsAddr"`
+	WebAddr                      string               `json:"webAddr"`
+	WebURL                       string               `json:"webUrl"`
+	Username                     string               `json:"username"`
+	HasPassword                  bool                 `json:"hasPassword"`
 	ProtectionEnabled            bool                 `json:"protectionEnabled"`
 	ProtectionDisabledDurationMs int64                `json:"protectionDisabledDurationMs,omitempty"`
 	ProtectionDisabledUntil      string               `json:"protectionDisabledUntil,omitempty"`
@@ -279,8 +279,8 @@ func (m *Manager) Overview(ctx context.Context, singboxLinked bool) *OverviewSna
 		}
 
 		var filterResp struct {
-			Enabled   bool `json:"enabled"`
-			Filters   []struct {
+			Enabled bool `json:"enabled"`
+			Filters []struct {
 				ID          int64  `json:"id"`
 				Enabled     bool   `json:"enabled"`
 				URL         string `json:"url"`
