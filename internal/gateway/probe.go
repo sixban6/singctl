@@ -110,7 +110,81 @@ func ProbeTopology() TopologyInfo {
 		CurrentGatewayIP:      defGW,
 		SuggestedMainRouterIP: suggested,
 		SelfLooped:            looped,
+		HasLocalDNSListener:   ProbeHasLocalDNSListener(lanIP),
 	}
+}
+
+// ProbeHasLocalDNSListener 检测本机是否已有进程（如 OpenWrt dnsmasq）监听 0.0.0.0:53、[..]:53 或 <lanIP>:53。
+// 当已有本地局域网 53 监听时，旁路由沿用主路由同款路径（fib local 交给 dnsmasq -> output 链标记进 sing-box），避免 TProxy 回包 EADDRINUSE。
+func ProbeHasLocalDNSListener(lanIP string) bool {
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	rawUDP, _ := os.ReadFile("/proc/net/udp")
+	rawUDP6, _ := os.ReadFile("/proc/net/udp6")
+	return ParseProcNetUDPHasLANPort53(lanIP, string(rawUDP), string(rawUDP6))
+}
+
+// ParseProcNetUDPHasLANPort53 解析 /proc/net/udp 与 /proc/net/udp6 内容，识别是否存在非回环的 53 端口监听。
+// 仅监听在 127.0.0.1:53 / 127.0.0.53:53 (systemd-resolved stub) 的回环地址返回 false。
+func ParseProcNetUDPHasLANPort53(lanIP, procUDP, procUDP6 string) bool {
+	targetAddr, _ := netip.ParseAddr(strings.TrimSpace(lanIP))
+
+	decodeHexIPv4 := func(hexStr string) (netip.Addr, bool) {
+		if len(hexStr) != 8 {
+			return netip.Addr{}, false
+		}
+		b, err := hex.DecodeString(hexStr)
+		if err != nil || len(b) != 4 {
+			return netip.Addr{}, false
+		}
+		hostU32 := binary.BigEndian.Uint32(b)
+		var ipBytes [4]byte
+		binary.NativeEndian.PutUint32(ipBytes[:], hostU32)
+		return netip.AddrFrom4(ipBytes), true
+	}
+
+	for line := range strings.SplitSeq(procUDP, "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) < 3 || fields[2] != "00000000:0000" {
+			continue
+		}
+		ipHex, portHex, ok := strings.Cut(fields[1], ":")
+		if !ok || !strings.EqualFold(portHex, "0035") {
+			continue
+		}
+		addr, decOK := decodeHexIPv4(ipHex)
+		if !decOK || addr.IsLoopback() {
+			continue
+		}
+		if addr.IsUnspecified() || (targetAddr.IsValid() && addr == targetAddr) {
+			return true
+		}
+	}
+
+	for line := range strings.SplitSeq(procUDP6, "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) < 3 || fields[2] != "00000000000000000000000000000000:0000" {
+			continue
+		}
+		ipHex, portHex, ok := strings.Cut(fields[1], ":")
+		if !ok || !strings.EqualFold(portHex, "0035") {
+			continue
+		}
+		upperHex := strings.ToUpper(ipHex)
+		if upperHex == "00000000000000000000000000000000" {
+			return true
+		}
+		if v4Hex, hasPrefix := strings.CutPrefix(upperHex, "0000000000000000FFFF0000"); hasPrefix && len(v4Hex) == 8 {
+			if addr, decOK := decodeHexIPv4(v4Hex); decOK && !addr.IsLoopback() {
+				if addr.IsUnspecified() || (targetAddr.IsValid() && addr == targetAddr) {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
 }
 
 func probeRouteFallback() (iface, gw string) {

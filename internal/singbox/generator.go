@@ -139,9 +139,21 @@ func (g *ConfigGenerator) GenerateForPlatform(platform string) (string, error) {
 	// 检查 DNS 服务器是否可用(iOS 交给模板默认, 不探测本机局域网 DNS)
 	var dnsServer string
 	if !isIOS {
+		isSideRouter := g.config != nil && g.config.Gateway.IsSideRouter()
 		if g.netInfo != nil && len(g.netInfo.DNSServers) > 0 {
-			dnsServer = g.netInfo.DNSServers[0]
-		} else {
+			if isSideRouter {
+				// 旁路由模式下兜底 dns_local 严禁指向主路由等局域网私网 IP，彻底杜绝主旁 DNS 互指死循环
+				for _, cand := range g.netInfo.DNSServers {
+					if !netinfo.IsPrivateIP(cand) {
+						dnsServer = cand
+						break
+					}
+				}
+			} else {
+				dnsServer = g.netInfo.DNSServers[0]
+			}
+		}
+		if dnsServer == "" {
 			dnsServer = "223.5.5.5" // 默认国内 DNS
 		}
 	}
