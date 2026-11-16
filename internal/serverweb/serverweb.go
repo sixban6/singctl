@@ -71,6 +71,9 @@ type Server struct {
 	warpAutoHealStatus string
 	warpLastHealedAt   string
 	warpWatchdogDeps   *WarpWatchdogDeps
+	versionCacheMu     sync.Mutex
+	cachedVersions     map[string]string
+	cachedVersionsAt   time.Time
 }
 
 type SessionRecord struct {

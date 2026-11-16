@@ -316,3 +316,42 @@ server:
 		t.Fatalf("expected original WARP routing rules restored into config.json upon recovery, got:\n%s", string(rawRecovered))
 	}
 }
+
+func TestHandleStatus_FastAndBoundedTimeout(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "singctl.yaml")
+	if err := os.WriteFile(cfgPath, []byte(`
+server:
+  node_domain: "node.example.com"
+  web_admin:
+    username: "opsadmin"
+    password: "Password123"
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := New(Options{
+		ConfigPath:    cfgPath,
+		SubStoreDir:   filepath.Join(tmpDir, "sub-store"),
+		FleetFilePath: filepath.Join(tmpDir, "fleet.yaml"),
+		Username:      "opsadmin",
+		Password:      "Password123",
+	})
+	srv.sniff.EnableSystemProbe = false
+
+	start := time.Now()
+	req := httptest.NewRequest(http.MethodGet, "/api/server/status", nil)
+	req.SetBasicAuth("opsadmin", "Password123")
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("X-Real-IP", "192.0.2.1")
+	rec := httptest.NewRecorder()
+	srv.Mux.ServeHTTP(rec, req)
+	elapsed := time.Since(start)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/server/status failed: %d %s", rec.Code, rec.Body.String())
+	}
+	if elapsed > 3*time.Second {
+		t.Fatalf("expected /api/server/status within bounded timeout, took %v", elapsed)
+	}
+}

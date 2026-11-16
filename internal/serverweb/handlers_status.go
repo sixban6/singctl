@@ -1,6 +1,7 @@
 package serverweb
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -9,12 +10,95 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"singctl/internal/config"
 	"singctl/internal/deploy"
 	"singctl/internal/subhub"
 )
+
+const statusCmdTimeout = 1200 * time.Millisecond
+
+func runCommandWithTimeout(timeout time.Duration, name string, args ...string) ([]byte, error) {
+	if timeout <= 0 {
+		timeout = statusCmdTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return exec.CommandContext(ctx, name, args...).Output()
+}
+
+type serviceProbeSnapshot struct {
+	running bool
+	pid     string
+	uptime  string
+}
+
+func probeSystemdService(unit string) serviceProbeSnapshot {
+	var snap serviceProbeSnapshot
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		snap.running = checkServiceRunning(unit)
+	}()
+	go func() {
+		defer wg.Done()
+		snap.pid = getServicePID(unit)
+	}()
+	go func() {
+		defer wg.Done()
+		snap.uptime = getServiceUptime(unit)
+	}()
+	wg.Wait()
+	return snap
+}
+
+func (s *Server) getCachedServiceVersions() (caddyVer, singboxVer, subhubVer, warpVer string) {
+	s.versionCacheMu.Lock()
+	if len(s.cachedVersions) > 0 && time.Since(s.cachedVersionsAt) < 60*time.Second {
+		caddyVer = s.cachedVersions["caddy"]
+		singboxVer = s.cachedVersions["singbox"]
+		subhubVer = s.cachedVersions["subhub"]
+		warpVer = s.cachedVersions["warp"]
+		s.versionCacheMu.Unlock()
+		return
+	}
+	s.versionCacheMu.Unlock()
+
+	fetchWithTimeout := func(fn func() string) string {
+		ch := make(chan string, 1)
+		go func() {
+			ch <- fn()
+		}()
+		select {
+		case v := <-ch:
+			return v
+		case <-time.After(1500 * time.Millisecond):
+			return ""
+		}
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(4)
+	go func() { defer wg.Done(); caddyVer = fetchWithTimeout(deploy.GetInstalledCaddyVersion) }()
+	go func() { defer wg.Done(); singboxVer = fetchWithTimeout(deploy.GetInstalledSingBoxVersion) }()
+	go func() { defer wg.Done(); subhubVer = fetchWithTimeout(deploy.GetInstalledSubhubVersion) }()
+	go func() { defer wg.Done(); warpVer = fetchWithTimeout(deploy.GetInstalledWarpVersion) }()
+	wg.Wait()
+
+	s.versionCacheMu.Lock()
+	s.cachedVersions = map[string]string{
+		"caddy":   caddyVer,
+		"singbox": singboxVer,
+		"subhub":  subhubVer,
+		"warp":    warpVer,
+	}
+	s.cachedVersionsAt = time.Now()
+	s.versionCacheMu.Unlock()
+	return
+}
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	cfg, err := config.Load(s.opts.ConfigPath)
@@ -32,15 +116,26 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		httpsURL = fmt.Sprintf("https://%s%s/", subDomain, adminPath)
 	}
 
-	caddyRunning := checkServiceRunning("caddy")
-	singboxRunning := checkServiceRunning("sing-box")
-	subhubRunning := checkServiceRunning("singctl-sub") || subhub.IsRunning()
-	warpRunning := checkServiceRunning("wireproxy")
+	var caddyProbe, singboxProbe, subhubProbe, warpProbe serviceProbeSnapshot
+	var caddyVer, singboxVer, subhubVer, warpVer string
+	var sysMetrics map[string]any
+	var certs []CertHealth
 
-	caddyVer := deploy.GetInstalledCaddyVersion()
-	singboxVer := deploy.GetInstalledSingBoxVersion()
-	subhubVer := deploy.GetInstalledSubhubVersion()
-	warpVer := deploy.GetInstalledWarpVersion()
+	var wg sync.WaitGroup
+	wg.Add(7)
+	go func() { defer wg.Done(); caddyProbe = probeSystemdService("caddy") }()
+	go func() { defer wg.Done(); singboxProbe = probeSystemdService("sing-box") }()
+	go func() { defer wg.Done(); subhubProbe = probeSystemdService("singctl-sub") }()
+	go func() { defer wg.Done(); warpProbe = probeSystemdService("wireproxy") }()
+	go func() {
+		defer wg.Done()
+		caddyVer, singboxVer, subhubVer, warpVer = s.getCachedServiceVersions()
+	}()
+	go func() { defer wg.Done(); sysMetrics = getSystemMetrics() }()
+	go func() { defer wg.Done(); certs = InspectServerCerts(cfg, false) }()
+	wg.Wait()
+
+	subhubRunning := subhubProbe.running || subhub.IsRunning()
 
 	substoreAdminURL := ""
 	sbt := deploy.NewSubstore(cfg, "")
@@ -51,7 +146,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	status := map[string]any{
 		"version":     s.opts.Version,
 		"authEnabled": s.GetPassword() != "",
-		"system":      getSystemMetrics(),
+		"system":      sysMetrics,
 		"admin": map[string]any{
 			"username": s.GetUsername(),
 			"path":     adminPath,
@@ -60,28 +155,28 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		},
 		"services": map[string]any{
 			"caddy": map[string]any{
-				"running": caddyRunning,
+				"running": caddyProbe.running,
 				"version": caddyVer,
-				"pid":     getServicePID("caddy"),
-				"uptime":  getServiceUptime("caddy"),
+				"pid":     caddyProbe.pid,
+				"uptime":  caddyProbe.uptime,
 			},
 			"singbox": map[string]any{
-				"running": singboxRunning,
+				"running": singboxProbe.running,
 				"version": singboxVer,
-				"pid":     getServicePID("sing-box"),
-				"uptime":  getServiceUptime("sing-box"),
+				"pid":     singboxProbe.pid,
+				"uptime":  singboxProbe.uptime,
 			},
 			"subhub": map[string]any{
 				"running": subhubRunning,
 				"version": subhubVer,
-				"pid":     getServicePID("singctl-sub"),
-				"uptime":  getServiceUptime("singctl-sub"),
+				"pid":     subhubProbe.pid,
+				"uptime":  subhubProbe.uptime,
 				"engine":  "native-go",
 			},
 			"warp": map[string]any{
-				"running":   warpRunning,
+				"running":   warpProbe.running,
 				"version":   warpVer,
-				"pid":       getServicePID("wireproxy"),
+				"pid":       warpProbe.pid,
 				"socksPort": 40000,
 			},
 		},
@@ -93,7 +188,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			"sni":              cfg.Server.Sni,
 			"hasCFToken":       cfg.Server.CFDNSKey != "",
 		},
-		"certs": InspectServerCerts(cfg, false),
+		"certs": certs,
 	}
 	if s.audit != nil {
 		rawLogs := s.audit.List()
@@ -201,7 +296,7 @@ func getSystemMetrics() map[string]any {
 		}
 	}
 
-	out, err := exec.Command("df", "-h", "/").Output()
+	out, err := runCommandWithTimeout(statusCmdTimeout, "df", "-h", "/")
 	if err == nil {
 		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
 		if len(lines) >= 2 {
@@ -232,7 +327,7 @@ func getSystemUptime() string {
 }
 
 func getServicePID(name string) string {
-	out, err := exec.Command("systemctl", "show", "--property", "MainPID", "--value", name).Output()
+	out, err := runCommandWithTimeout(statusCmdTimeout, "systemctl", "show", "--property", "MainPID", "--value", name)
 	if err != nil {
 		return ""
 	}
@@ -244,7 +339,7 @@ func getServicePID(name string) string {
 }
 
 func getServiceUptime(name string) string {
-	out, err := exec.Command("systemctl", "show", "--property", "ActiveEnterTimestamp", "--value", name).Output()
+	out, err := runCommandWithTimeout(statusCmdTimeout, "systemctl", "show", "--property", "ActiveEnterTimestamp", "--value", name)
 	if err != nil {
 		return ""
 	}
@@ -260,9 +355,8 @@ func getServiceUptime(name string) string {
 }
 
 func checkServiceRunning(name string) bool {
-	cmd := exec.Command("systemctl", "is-active", name)
-	out, _ := cmd.Output()
-	return strings.TrimSpace(string(out)) == "active"
+	out, err := runCommandWithTimeout(statusCmdTimeout, "systemctl", "is-active", name)
+	return err == nil && strings.TrimSpace(string(out)) == "active"
 }
 
 func isBBREnabled() bool {
