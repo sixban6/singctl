@@ -185,7 +185,9 @@ purge_existing_singbox
 		for _, want := range []string{
 			"nft delete table inet sing-box",
 			"ip rule del fwmark 1 table 100",
+			"ip rule del fwmark 2 table 101",
 			"ip route flush table 100",
+			"ip route flush table 101",
 		} {
 			if !strings.Contains(logText, want) {
 				t.Fatalf("expected calls.log to contain %q, got:\n%s", want, logText)

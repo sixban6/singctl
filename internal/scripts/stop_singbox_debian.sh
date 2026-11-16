@@ -12,6 +12,7 @@ export PATH="/usr/local/bin:/usr/bin:$PATH"
 TPROXY_PORT=7895
 PROXY_FWMARK=1
 PROXY_ROUTE_TABLE=100
+PROXY_LOCAL_ROUTE_TABLE=101
 CYAN='\033[0;36m'
 YLW='\033[0;33m'
 RED='\033[0;31m'
@@ -153,10 +154,18 @@ cleanup_firewall() {
 # 清理路由规则
 cleanup_routes() {
     echo_info "清理路由规则..."
-    ip rule del fwmark $PROXY_FWMARK table $PROXY_ROUTE_TABLE 2>/dev/null || ip rule del table $PROXY_ROUTE_TABLE 2>/dev/null || true
+    local n=0
+    while [ $n -lt 16 ]; do ip rule del table $PROXY_ROUTE_TABLE 2>/dev/null || break; n=$((n + 1)); done
+    n=0
+    while [ $n -lt 16 ]; do ip rule del table $PROXY_LOCAL_ROUTE_TABLE 2>/dev/null || break; n=$((n + 1)); done
     ip route flush table $PROXY_ROUTE_TABLE 2>/dev/null || true
-    ip -6 rule del fwmark $PROXY_FWMARK table $PROXY_ROUTE_TABLE 2>/dev/null || ip -6 rule del table $PROXY_ROUTE_TABLE 2>/dev/null || true
+    ip route flush table $PROXY_LOCAL_ROUTE_TABLE 2>/dev/null || true
+    n=0
+    while [ $n -lt 16 ]; do ip -6 rule del table $PROXY_ROUTE_TABLE 2>/dev/null || break; n=$((n + 1)); done
+    n=0
+    while [ $n -lt 16 ]; do ip -6 rule del table $PROXY_LOCAL_ROUTE_TABLE 2>/dev/null || break; n=$((n + 1)); done
     ip -6 route flush table $PROXY_ROUTE_TABLE 2>/dev/null || true
+    ip -6 route flush table $PROXY_LOCAL_ROUTE_TABLE 2>/dev/null || true
 }
 
 # 清理配置文件

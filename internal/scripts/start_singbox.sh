@@ -10,6 +10,8 @@ export PATH="/usr/local/bin:/usr/bin:$PATH"
 TPROXY_PORT=7895  # sing-box tproxy 端口，和配置文件（规则模板）里的端口一致！
 PROXY_FWMARK=1
 PROXY_ROUTE_TABLE=100
+PROXY_LOCAL_FWMARK=2
+PROXY_LOCAL_ROUTE_TABLE=101
 MAX_RETRIES=3  # 最大重试次数
 RETRY_DELAY=3  # 重试间隔时间（秒）
 CONFIG_FILE="/etc/sing-box/config.json"
@@ -65,15 +67,34 @@ check_network() {
     fi
 }
 
-# 检查端口占用
+# 探测本地 TCP/UDP 端口是否处于监听状态（依次兼容 netstat / ss / 内核 /proc/net 套接字表，适配无 netstat 的精简固件）
+is_port_listening() {
+    local port=$1
+    if command -v netstat >/dev/null 2>&1; then
+        netstat -tuln 2>/dev/null | grep -Eq ":${port}([[:space:]]|\$)" && return 0
+    fi
+    if command -v ss >/dev/null 2>&1; then
+        ss -tuln 2>/dev/null | grep -Eq ":${port}([[:space:]]|\$)" && return 0
+    fi
+    local port_hex
+    port_hex=$(printf '%04X' "$port" 2>/dev/null || echo "")
+    if [ -n "$port_hex" ] && [ -r /proc/net/tcp ]; then
+        awk -v p=":$port_hex" '
+            FNR > 1 && toupper($2) ~ p"$" && $3 ~ /^0+:0+$/ { found = 1; exit }
+            END { exit !found }
+        ' /proc/net/tcp /proc/net/tcp6 /proc/net/udp /proc/net/udp6 2>/dev/null && return 0
+    fi
+    return 1
+}
+
 # 检查端口占用（停止残留 sing-box 后若仍被其他进程如 OpenClash 占用则及时报错触发回滚）
 check_port() {
     local port=$1
-    if netstat -tuln 2>/dev/null | grep -q ":$port "; then
+    if is_port_listening "$port"; then
         echo_warn "端口 $port 已被占用，正在清理残留 sing-box..."
         killall -9 sing-box 2>/dev/null || true
         sleep 1
-        if netstat -tuln 2>/dev/null | grep -q ":$port "; then
+        if is_port_listening "$port"; then
             error_exit "端口 $port 仍被其他进程占用，请先停止占用该端口的代理服务（如 OpenClash/PassWall）"
         fi
     fi
@@ -124,7 +145,6 @@ init_env() {
     
     check_command "ip"
     check_command "ping"
-    check_command "netstat"
 
     # 检查网络和端口
     check_network
@@ -184,6 +204,9 @@ setup_nft() {
             #
             fib daddr type local accept
 
+            # 优先承接本机 output 链 (mark 0x2 -> table 101) 回环进来的流量（含发往上级光猫/私网网关 192.168.x.1:53 的 DNS），避免命中表 100 throw 逃逸
+            iifname "lo" meta mark $PROXY_LOCAL_FWMARK meta l4proto { tcp, udp } tproxy to :$TPROXY_PORT meta mark set $PROXY_LOCAL_FWMARK accept
+
             # 先豁免回环与 Tailscale MagicDNS，防止内网域名解析受影响
             ip daddr { 127.0.0.0/8, 100.64.0.0/10 } accept
             ip6 daddr { ::1, fd7a:115c:a1e0::/48 } accept
@@ -205,8 +228,9 @@ setup_nft() {
         chain output {
             type route hook output priority mangle; policy accept;
 
-            # 1.放行标记过的流量.防止回环问题.
+            # 1.放行 sing-box 自身出站 (default_mark=0x1) 与已重路由标记流量，防止回环自锁
             meta mark 0x1 accept
+            meta mark $PROXY_LOCAL_FWMARK accept
 
             # 放行 Tailscale 进程自身发出的流量
             meta mark 0x80000 accept comment "Bypass Tailscale fwmark"
@@ -219,17 +243,17 @@ setup_nft() {
             # 2.放行ipv6的icmp基础流量
             meta l4proto ipv6-icmp accept comment "Allow ICMPv6 traffic"
 
-            # 3.先豁免回环与 Tailscale CGNAT/MagicDNS，再拦截所有发往外部/上级光猫的 53 端口明文 DNS
+            # 3.先豁免回环与 Tailscale CGNAT/MagicDNS，再以独立标记 0x2 (走纯 local 表 101) 拦截发往外部/上级光猫的 53 端口明文 DNS
             ip daddr { 127.0.0.0/8, 100.64.0.0/10 } accept
             ip6 daddr { ::1, fd7a:115c:a1e0::/48 } accept
-            meta l4proto { tcp, udp } th dport 53 meta mark set $PROXY_FWMARK accept
+            meta l4proto { tcp, udp } th dport 53 meta mark set $PROXY_LOCAL_FWMARK accept
 
             # 4.放行其余局域网流量
             ip daddr @LOCAL_IPV4_SET accept
             ip6 daddr { ::1, fc00::/7, fe80::/10, ff00::/8 } accept
 
-            # 5.标记其余流量
-            meta l4proto { tcp, udp } meta mark set $PROXY_FWMARK accept
+            # 5.标记其余本机出站流量 (走表 101 回环至 TProxy)
+            meta l4proto { tcp, udp } meta mark set $PROXY_LOCAL_FWMARK accept
         }
     }
 EOF
@@ -256,28 +280,29 @@ setup_iptables() {
     echo_succ "创建 SING_BOX 链..."
     iptables -t mangle -N SING_BOX
     
+    # 优先承接本机 OUTPUT 链 (mark 0x2 -> table 101) 回环进来的流量
+    iptables -t mangle -A SING_BOX -i lo -m mark --mark $PROXY_LOCAL_FWMARK -p tcp -j TPROXY --on-port $TPROXY_PORT --tproxy-mark $PROXY_LOCAL_FWMARK
+    iptables -t mangle -A SING_BOX -i lo -m mark --mark $PROXY_LOCAL_FWMARK -p udp -j TPROXY --on-port $TPROXY_PORT --tproxy-mark $PROXY_LOCAL_FWMARK
+
     # 放行局域网地址 (包含 Tailscale CGNAT 流量及 MagicDNS 流量)
     echo_succ "配置局域网地址放行规则..."
     iptables -t mangle -A SING_BOX -i tailscale+ -j RETURN
     iptables -t mangle -A SING_BOX -d 127.0.0.0/8 -j RETURN
+    iptables -t mangle -A SING_BOX -d 100.64.0.0/10 -j RETURN     # Tailscale CGNAT
+
+    # 放行 DHCP (67-68端口) 并优先劫持外部/光猫 53 端口 DNS
+    iptables -t mangle -A SING_BOX -p udp --dport 67:68 -j RETURN
+    iptables -t mangle -A SING_BOX -p udp --dport 53 -j TPROXY --on-port $TPROXY_PORT --tproxy-mark $PROXY_FWMARK
+    iptables -t mangle -A SING_BOX -p tcp --dport 53 -j TPROXY --on-port $TPROXY_PORT --tproxy-mark $PROXY_FWMARK
+
     iptables -t mangle -A SING_BOX -d 10.0.0.0/8 -j RETURN
     iptables -t mangle -A SING_BOX -d 172.16.0.0/12 -j RETURN
     iptables -t mangle -A SING_BOX -d 192.168.0.0/16 -j RETURN
     iptables -t mangle -A SING_BOX -d 169.254.0.0/16 -j RETURN
-    iptables -t mangle -A SING_BOX -d 100.64.0.0/10 -j RETURN     # Tailscale CGNAT
     iptables -t mangle -A SING_BOX -d 224.0.0.0/4 -j RETURN       # 组播地址
     iptables -t mangle -A SING_BOX -d 255.255.255.255/32 -j RETURN # 广播地址
 
-    # DHCP 和 DNS 规则
-    echo_succ "配置 DHCP 和 DNS 规则..."
-    # 放行 DHCP (67-68端口)
-    iptables -t mangle -A SING_BOX -p udp --dport 67:68 -j RETURN
-    
-    # 劫持 DNS 请求到 sing-box (53端口)
-    iptables -t mangle -A SING_BOX -p udp --dport 53 -j TPROXY --on-port $TPROXY_PORT --tproxy-mark $PROXY_FWMARK
-    iptables -t mangle -A SING_BOX -p tcp --dport 53 -j TPROXY --on-port $TPROXY_PORT --tproxy-mark $PROXY_FWMARK
-    
-    # 代理 TCP 和 UDP 流量
+    # 代理其余 TCP 和 UDP 流量
     echo_succ "配置 TProxy 代理规则..."
     iptables -t mangle -A SING_BOX -p tcp -j TPROXY --on-port $TPROXY_PORT --tproxy-mark $PROXY_FWMARK
     iptables -t mangle -A SING_BOX -p udp -j TPROXY --on-port $TPROXY_PORT --tproxy-mark $PROXY_FWMARK
@@ -290,8 +315,9 @@ setup_iptables() {
     echo_succ "配置 OUTPUT 链规则..."
     # 放行已标记的流量，防止回环
     iptables -t mangle -A OUTPUT -m mark --mark $PROXY_FWMARK -j RETURN
+    iptables -t mangle -A OUTPUT -m mark --mark $PROXY_LOCAL_FWMARK -j RETURN
 
-    # 【新增这两行！】放行 Tailscale 自身发出的流量
+    # 放行 Tailscale 自身发出的流量
     iptables -t mangle -A OUTPUT -m mark --mark 0x80000 -j RETURN
     iptables -t mangle -A OUTPUT -p udp --sport 41641 -j RETURN
     iptables -t mangle -A OUTPUT -o tailscale+ -j RETURN
@@ -302,23 +328,23 @@ setup_iptables() {
         iptables -t mangle -A OUTPUT -d "$agh_ip" -p tcp --dport 853 -j RETURN
     done
     
-    # 放行局域网地址 (包含 Tailscale CGNAT 流量及 MagicDNS 流量)
+    # 先豁免回环与 Tailscale MagicDNS，再拦截所有 53 端口明文 DNS (含上级光猫私网 DNS)
     iptables -t mangle -A OUTPUT -d 127.0.0.0/8 -j RETURN
+    iptables -t mangle -A OUTPUT -d 100.64.0.0/10 -j RETURN
+    iptables -t mangle -A OUTPUT -p udp --dport 53 -j MARK --set-mark $PROXY_LOCAL_FWMARK
+    iptables -t mangle -A OUTPUT -p tcp --dport 53 -j MARK --set-mark $PROXY_LOCAL_FWMARK
+
+    # 放行其余局域网地址
     iptables -t mangle -A OUTPUT -d 10.0.0.0/8 -j RETURN
     iptables -t mangle -A OUTPUT -d 172.16.0.0/12 -j RETURN
     iptables -t mangle -A OUTPUT -d 192.168.0.0/16 -j RETURN
     iptables -t mangle -A OUTPUT -d 169.254.0.0/16 -j RETURN
-    iptables -t mangle -A OUTPUT -d 100.64.0.0/10 -j RETURN
     iptables -t mangle -A OUTPUT -d 224.0.0.0/4 -j RETURN
     iptables -t mangle -A OUTPUT -d 255.255.255.255/32 -j RETURN
-
-    # 劫持 DNS 请求
-    iptables -t mangle -A OUTPUT -p udp --dport 53 -j MARK --set-mark $PROXY_FWMARK
-    iptables -t mangle -A OUTPUT -p tcp --dport 53 -j MARK --set-mark $PROXY_FWMARK
     
     # 标记其他 TCP 和 UDP 流量
-    iptables -t mangle -A OUTPUT -p tcp -j MARK --set-mark $PROXY_FWMARK
-    iptables -t mangle -A OUTPUT -p udp -j MARK --set-mark $PROXY_FWMARK
+    iptables -t mangle -A OUTPUT -p tcp -j MARK --set-mark $PROXY_LOCAL_FWMARK
+    iptables -t mangle -A OUTPUT -p udp -j MARK --set-mark $PROXY_LOCAL_FWMARK
     
     echo_succ "iptables 规则配置完成"
 }
@@ -332,13 +358,29 @@ setup_firewall() {
     fi
 }
 
+flush_ip_rules_for_table() {
+    local family="$1"
+    local tbl="$2"
+    local n=0
+    while [ $n -lt 16 ]; do
+        if [ "$family" = "-6" ]; then
+            ip -6 rule del table "$tbl" >/dev/null 2>&1 || break
+        else
+            ip rule del table "$tbl" >/dev/null 2>&1 || break
+        fi
+        n=$((n + 1))
+    done
+}
+
 setup_route() {
     echo_succ "初始化IPV4路由"
-    # 配置路由规则
-    while ip rule del table $PROXY_ROUTE_TABLE >/dev/null 2>&1; do :; done
+    # 配置外部转发流量策略路由表 100 (fwmark 0x1, 带私网/CGNAT throw 逃生路由兼容 src_valid_mark=1)
+    flush_ip_rules_for_table -4 "$PROXY_ROUTE_TABLE"
+    flush_ip_rules_for_table -4 "$PROXY_LOCAL_ROUTE_TABLE"
     ip rule add fwmark $PROXY_FWMARK table $PROXY_ROUTE_TABLE
+    ip rule add fwmark $PROXY_LOCAL_FWMARK table $PROXY_LOCAL_ROUTE_TABLE
 
-    # 清理并添加路由
+    # 清理并添加表 100 路由
     ip route flush table $PROXY_ROUTE_TABLE >/dev/null 2>&1
     ip route add local default dev lo table $PROXY_ROUTE_TABLE
 
@@ -350,20 +392,28 @@ setup_route() {
             ip route add throw "$throw_cidr" table $PROXY_ROUTE_TABLE >/dev/null 2>&1 || true
     done
 
+    # 配置本机出站重路由表 101 (fwmark 0x2, 纯 local default dev lo 不含 throw，确保主路由发往光猫 192.168.x.1:53 等私网 DNS 绝不逃逸)
+    ip route flush table $PROXY_LOCAL_ROUTE_TABLE >/dev/null 2>&1
+    ip route add local default dev lo table $PROXY_LOCAL_ROUTE_TABLE
+
     echo_succ "初始化IPV6路由"
     # 配置 IPv6 路由规则
-    while ip -6 rule del table $PROXY_ROUTE_TABLE >/dev/null 2>&1; do :; done
-    ip -6 rule add fwmark $PROXY_FWMARK table $PROXY_ROUTE_TABLE
+    flush_ip_rules_for_table -6 "$PROXY_ROUTE_TABLE"
+    flush_ip_rules_for_table -6 "$PROXY_LOCAL_ROUTE_TABLE"
+    ip -6 rule add fwmark $PROXY_FWMARK table $PROXY_ROUTE_TABLE 2>/dev/null || true
+    ip -6 rule add fwmark $PROXY_LOCAL_FWMARK table $PROXY_LOCAL_ROUTE_TABLE 2>/dev/null || true
 
     # 清理并添加 IPv6 路由
     ip -6 route flush table $PROXY_ROUTE_TABLE >/dev/null 2>&1
-    ip -6 route replace local default dev lo table $PROXY_ROUTE_TABLE
+    ip -6 route replace local default dev lo table $PROXY_ROUTE_TABLE 2>/dev/null || true
+    ip -6 route flush table $PROXY_LOCAL_ROUTE_TABLE >/dev/null 2>&1
+    ip -6 route replace local default dev lo table $PROXY_LOCAL_ROUTE_TABLE 2>/dev/null || true
 }
 
 wait_tproxy_ready() {
     local i=0
     while [ $i -lt 10 ]; do
-        if pgrep "sing-box" >/dev/null 2>&1 && netstat -tuln 2>/dev/null | grep -q ":$TPROXY_PORT "; then
+        if pgrep "sing-box" >/dev/null 2>&1 && is_port_listening "$TPROXY_PORT"; then
             return 0
         fi
         sleep 1

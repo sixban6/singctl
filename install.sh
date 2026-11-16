@@ -897,10 +897,30 @@ purge_existing_singbox() {
         iptables -t mangle -X SING_BOX >/dev/null 2>&1 || true
     fi
     if command -v ip >/dev/null 2>&1; then
-        ip rule del fwmark 1 table 100 >/dev/null 2>&1 || ip rule del table 100 >/dev/null 2>&1 || true
+        local rule_iter=0
+        while [ $rule_iter -lt 16 ]; do
+            ip rule del fwmark 1 table 100 >/dev/null 2>&1 || ip rule del table 100 >/dev/null 2>&1 || break
+            rule_iter=$((rule_iter + 1))
+        done
+        rule_iter=0
+        while [ $rule_iter -lt 16 ]; do
+            ip rule del fwmark 2 table 101 >/dev/null 2>&1 || ip rule del table 101 >/dev/null 2>&1 || break
+            rule_iter=$((rule_iter + 1))
+        done
         ip route flush table 100 >/dev/null 2>&1 || true
-        ip -6 rule del fwmark 1 table 100 >/dev/null 2>&1 || ip -6 rule del table 100 >/dev/null 2>&1 || true
+        ip route flush table 101 >/dev/null 2>&1 || true
+        rule_iter=0
+        while [ $rule_iter -lt 16 ]; do
+            ip -6 rule del fwmark 1 table 100 >/dev/null 2>&1 || ip -6 rule del table 100 >/dev/null 2>&1 || break
+            rule_iter=$((rule_iter + 1))
+        done
+        rule_iter=0
+        while [ $rule_iter -lt 16 ]; do
+            ip -6 rule del fwmark 2 table 101 >/dev/null 2>&1 || ip -6 rule del table 101 >/dev/null 2>&1 || break
+            rule_iter=$((rule_iter + 1))
+        done
         ip -6 route flush table 100 >/dev/null 2>&1 || true
+        ip -6 route flush table 101 >/dev/null 2>&1 || true
     fi
     rm -f "${root_prefix}/etc/sing-box/singbox.nft" 2>/dev/null || true
 
