@@ -221,6 +221,7 @@ func TestController_FW4IncludePersistenceAndCleanup(t *testing.T) {
 			chain: "input",
 			wantSnippets: []string{
 				`meta mark 0x1 accept comment "singctl-side"`,
+				`meta mark 0x2 accept comment "singctl-side"`,
 				`iifname "br-lan" accept comment "singctl-side"`,
 			},
 		},
@@ -300,6 +301,7 @@ func TestController_SideModeHealsProxyTableThrowRoutes(t *testing.T) {
 		"ip -4 route replace throw 192.168.0.0/16 table 100",
 		"ip -4 route replace throw 100.64.0.0/10 table 100",
 		"ip -4 route replace throw 192.168.100.0/24 table 100",
+		"ip -4 route replace local default dev lo table 101",
 	} {
 		if !slices.Contains(executed, want) {
 			t.Fatalf("expected %q to be executed, got:\n%s", want, strings.Join(executed, "\n"))
@@ -430,4 +432,53 @@ func TestController_SideModeConvergesPrivateDNSUpstream(t *testing.T) {
 	if err := ctrl2.Teardown(t.Context()); err != nil {
 		t.Fatalf("Teardown failed: %v", err)
 	}
+
+	// 3) 非 OpenWrt (Debian/Ubuntu) /etc/resolv.conf 场景：私网上游同样收敛为 223.5.5.5，而本机 stub 127.0.0.53 保持不变
+	debianResolv := filepath.Join(tmp, "resolv.conf")
+	newDebianCtrl := func() *Controller {
+		return &Controller{
+			StateDir:        filepath.Join(tmp, "state-deb"),
+			FW4IncludeRoot:  filepath.Join(tmp, "fw4-deb"),
+			ResolvGuardPath: debianResolv,
+			Prober: func() TopologyInfo {
+				return TopologyInfo{
+					LANIP:               "192.168.100.2",
+					LANCIDR:             "192.168.100.0/24",
+					LANIface:            "eth0",
+					CurrentGatewayIP:    "192.168.100.1",
+					HasLocalDNSListener: false,
+				}
+			},
+			Exec: func(name string, args ...string) ([]byte, error) {
+				return nil, nil
+			},
+		}
+	}
+
+	if err := os.WriteFile(debianResolv, []byte("nameserver 192.168.100.1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	debCtrl := newDebianCtrl()
+	if err := debCtrl.Apply(t.Context(), config.GatewayConfig{Mode: ModeSide, MainRouterIP: "192.168.100.1"}); err != nil {
+		t.Fatalf("Debian Apply failed: %v", err)
+	}
+	debHealed, err := os.ReadFile(debianResolv)
+	if err != nil || !strings.Contains(string(debHealed), "223.5.5.5") || strings.Contains(string(debHealed), "192.168.100.1") {
+		t.Fatalf("expected Debian private resolv.conf to converge to 223.5.5.5, got %q (err=%v)", string(debHealed), err)
+	}
+	_ = debCtrl.Teardown(t.Context())
+
+	origStub := "nameserver 127.0.0.53\n"
+	if err := os.WriteFile(debianResolv, []byte(origStub), 0644); err != nil {
+		t.Fatal(err)
+	}
+	debCtrlStub := newDebianCtrl()
+	if err := debCtrlStub.Apply(t.Context(), config.GatewayConfig{Mode: ModeSide, MainRouterIP: "192.168.100.1"}); err != nil {
+		t.Fatalf("Debian stub Apply failed: %v", err)
+	}
+	keptStub, err := os.ReadFile(debianResolv)
+	if err != nil || string(keptStub) != origStub {
+		t.Fatalf("expected Debian loopback stub 127.0.0.53 to be preserved, got %q (err=%v)", string(keptStub), err)
+	}
+	_ = debCtrlStub.Teardown(t.Context())
 }

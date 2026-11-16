@@ -7,6 +7,7 @@
 
 PROXY_FWMARK=1
 PROXY_ROUTE_TABLE=100
+PROXY_LOCAL_ROUTE_TABLE=101
 CYAN='\033[0;36m'
 RED='\033[0;31m'
 NC='\033[0m'
@@ -124,13 +125,22 @@ else
     iptables -t mangle -X SING_BOX 2>/dev/null && echo_succ "$(timestamp) 已删除 SING_BOX 链"
 fi
 
-# 删除路由规则和清理路由表（IPv4）
-ip rule del fwmark $PROXY_FWMARK table $PROXY_ROUTE_TABLE 2>/dev/null && echo_succ "$(timestamp) 已删除 IPv4 路由规则"
-ip route flush table $PROXY_ROUTE_TABLE 2>/dev/null && echo_succ "$(timestamp) 已清理 IPv4 路由表"
+# 循环删除路由规则和清理路由表（IPv4/IPv6，兼容历史重复规则与表 100/101，设置上限避免异常固件死循环）
+n=0
+while [ $n -lt 16 ]; do ip rule del table $PROXY_ROUTE_TABLE 2>/dev/null || break; n=$((n + 1)); done
+n=0
+while [ $n -lt 16 ]; do ip rule del table $PROXY_LOCAL_ROUTE_TABLE 2>/dev/null || break; n=$((n + 1)); done
+ip route flush table $PROXY_ROUTE_TABLE 2>/dev/null || true
+ip route flush table $PROXY_LOCAL_ROUTE_TABLE 2>/dev/null || true
+echo_succ "$(timestamp) 已清理 IPv4 策略路由与路由表"
 
-# 清理 IPv6 路由规则（如果有）
-ip -6 rule del fwmark $PROXY_FWMARK table $PROXY_ROUTE_TABLE 2>/dev/null && echo_succ "$(timestamp) 已删除 IPv6 路由规则"
-ip -6 route flush table $PROXY_ROUTE_TABLE 2>/dev/null && echo_succ "$(timestamp) 已清理 IPv6 路由表"
+n=0
+while [ $n -lt 16 ]; do ip -6 rule del table $PROXY_ROUTE_TABLE 2>/dev/null || break; n=$((n + 1)); done
+n=0
+while [ $n -lt 16 ]; do ip -6 rule del table $PROXY_LOCAL_ROUTE_TABLE 2>/dev/null || break; n=$((n + 1)); done
+ip -6 route flush table $PROXY_ROUTE_TABLE 2>/dev/null || true
+ip -6 route flush table $PROXY_LOCAL_ROUTE_TABLE 2>/dev/null || true
+echo_succ "$(timestamp) 已清理 IPv6 策略路由与路由表"
 
 # 删除缓存
 rm -f /etc/sing-box/cache.db && echo_succ "$(timestamp) 已清理缓存文件"

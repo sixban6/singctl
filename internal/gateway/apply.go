@@ -24,6 +24,7 @@ const (
 	legacySideChainFwd    = "SINGCTL_SIDE_FWD"
 	legacySideChainNat    = "SINGCTL_SIDE_NAT"
 	proxyRouteTable       = "100"
+	proxyLocalRouteTable  = "101"
 )
 
 var defaultThrowCIDRs = []string{
@@ -245,7 +246,10 @@ func (c *Controller) ensureSideRouterResolvUpstream(ctx context.Context, lanIP s
 		if lanIP != "" && addr.String() == lanIP {
 			continue
 		}
-		if isDnsmasqResolvFile && (addr.IsLoopback() || isRFC1918Private(addr)) {
+		if isRFC1918Private(addr) || addr.IsLinkLocalUnicast() {
+			continue
+		}
+		if isDnsmasqResolvFile && addr.IsLoopback() {
 			continue
 		}
 		hasUsableUpstream = true
@@ -350,13 +354,14 @@ func (c *Controller) restoreSysctls(ctx context.Context) {
 func (c *Controller) applyIptablesFilterPassThrough(ctx context.Context, lanIface string) {
 	rules := [][]string{
 		{"-I", "INPUT", "1", "-m", "mark", "--mark", "0x1", "-m", "comment", "--comment", ruleCommentTag, "-j", "ACCEPT"},
+		{"-I", "INPUT", "1", "-m", "mark", "--mark", "0x2", "-m", "comment", "--comment", ruleCommentTag, "-j", "ACCEPT"},
 		{"-I", "FORWARD", "1", "-i", lanIface, "-m", "comment", "--comment", ruleCommentTag, "-j", "ACCEPT"},
 		{"-I", "FORWARD", "1", "-o", lanIface, "-m", "comment", "--comment", ruleCommentTag, "-j", "ACCEPT"},
 	}
 	for _, r := range rules {
-		checkArgs := append([]string{"-C"}, r[1], r[3])
+		var checkArgs []string
 		if r[1] == "INPUT" {
-			checkArgs = []string{"-C", "INPUT", "-m", "mark", "--mark", "0x1", "-m", "comment", "--comment", ruleCommentTag, "-j", "ACCEPT"}
+			checkArgs = []string{"-C", "INPUT", "-m", "mark", "--mark", r[5], "-m", "comment", "--comment", ruleCommentTag, "-j", "ACCEPT"}
 		} else {
 			checkArgs = []string{"-C", "FORWARD", r[3], r[4], "-m", "comment", "--comment", ruleCommentTag, "-j", "ACCEPT"}
 		}
@@ -373,8 +378,11 @@ func (c *Controller) applyFW4PassThrough(ctx context.Context, lanIface string) {
 			content string
 		}{
 			{
-				chain:   "input",
-				content: fmt.Sprintf("meta mark 0x1 accept comment %q\niifname %q accept comment %q\n", ruleCommentTag, lanIface, ruleCommentTag),
+				chain: "input",
+				content: fmt.Sprintf(
+					"meta mark 0x1 accept comment %q\nmeta mark 0x2 accept comment %q\niifname %q accept comment %q\n",
+					ruleCommentTag, ruleCommentTag, lanIface, ruleCommentTag,
+				),
 			},
 			{
 				chain:   "forward",
@@ -398,10 +406,12 @@ func (c *Controller) applyFW4PassThrough(ctx context.Context, lanIface string) {
 		return
 	}
 	_, _ = c.runCmd(ctx, "nft", "insert", "rule", "inet", "fw4", "input", "meta", "mark", "0x1", "accept", "comment", ruleCommentTag)
+	_, _ = c.runCmd(ctx, "nft", "insert", "rule", "inet", "fw4", "input", "meta", "mark", "0x2", "accept", "comment", ruleCommentTag)
 	_, _ = c.runCmd(ctx, "nft", "insert", "rule", "inet", "fw4", "input", "iifname", lanIface, "accept", "comment", ruleCommentTag)
 	_, _ = c.runCmd(ctx, "nft", "insert", "rule", "inet", "fw4", "forward", "iifname", lanIface, "accept", "comment", ruleCommentTag)
 	_, _ = c.runCmd(ctx, "nft", "insert", "rule", "inet", "fw4", "forward", "oifname", lanIface, "accept", "comment", ruleCommentTag)
 }
+
 func (c *Controller) ensureProxyTableThrowRoutes(ctx context.Context, lanCIDR string) {
 	out, err := c.runCmd(ctx, "ip", "-4", "route", "show", "table", proxyRouteTable)
 	if err != nil || !strings.Contains(string(out), "local ") {
@@ -413,6 +423,7 @@ func (c *Controller) ensureProxyTableThrowRoutes(ctx context.Context, lanCIDR st
 	if trimmed := strings.TrimSpace(lanCIDR); trimmed != "" {
 		_, _ = c.runCmd(ctx, "ip", "-4", "route", "replace", "throw", trimmed, "table", proxyRouteTable)
 	}
+	_, _ = c.runCmd(ctx, "ip", "-4", "route", "replace", "local", "default", "dev", "lo", "table", proxyLocalRouteTable)
 }
 
 func (c *Controller) applyLegacyIptablesSideRules(ctx context.Context, plan ResolvedPlan) error {

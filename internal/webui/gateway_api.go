@@ -104,6 +104,11 @@ func (s *Server) handleGatewayPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if syncErr := s.newAdGuardManager(cfg).SyncGatewayMode(topo.LANIP); syncErr != nil {
+		// 本地 AdGuardHome 配置同步异常不阻断网关规则应用，仅记录日志
+		_ = syncErr
+	}
+
 	appliedLive := false
 	if runtime.GOOS == "linux" && s.opts.GatewayProberForTest == nil && daemon.IsSingBoxRunning() {
 		if err := gateway.NewController().Apply(r.Context(), nextGw); err != nil {

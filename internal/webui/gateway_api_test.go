@@ -7,8 +7,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"singctl/internal/adguard"
 	"singctl/internal/config"
 	"singctl/internal/gateway"
 )
@@ -20,9 +22,26 @@ func TestGatewayAPI_GetPutAndSelfLoopReject(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
+	aghPath := filepath.Join(dir, "AdGuardHome.yaml")
+	aghYAML, err := adguard.BuildInitialConfigYAML(adguard.ConfigParams{
+		LANIP:             "192.168.100.2",
+		WebPort:           3000,
+		DNSPort:           5353,
+		Username:          "root",
+		PasswordHash:      "$2a$10$111111111111111111111u1111111111111111111111111111111",
+		DisablePrivatePTR: false,
+	})
+	if err != nil {
+		t.Fatalf("BuildInitialConfigYAML: %v", err)
+	}
+	if err := os.WriteFile(aghPath, aghYAML, 0600); err != nil {
+		t.Fatalf("write AdGuardHome.yaml: %v", err)
+	}
+
 	srv := New(Options{
-		ConfigPath: cfgPath,
-		Version:    "v1.14.117-test",
+		ConfigPath:        cfgPath,
+		AdGuardConfigPath: aghPath,
+		Version:           "v1.14.122-test",
 		GatewayProberForTest: func() gateway.TopologyInfo {
 			return gateway.TopologyInfo{
 				LANIP:                 "192.168.100.2",
@@ -83,6 +102,13 @@ func TestGatewayAPI_GetPutAndSelfLoopReject(t *testing.T) {
 	if loaded.Gateway.EffectiveMode() != "side" || loaded.Gateway.MainRouterIP != "192.168.100.1" {
 		t.Fatalf("expected saved side gateway config, got %+v", loaded.Gateway)
 	}
+	aghSideRaw, err := os.ReadFile(aghPath)
+	if err != nil {
+		t.Fatalf("read synced AdGuardHome.yaml (side): %v", err)
+	}
+	if !strings.Contains(string(aghSideRaw), "use_private_ptr_resolvers: false") {
+		t.Fatalf("expected PUT /api/gateway mode=side to sync use_private_ptr_resolvers: false, got:\n%s", string(aghSideRaw))
+	}
 
 	// 4. PUT /api/gateway 切回主路由模式
 	backMain := `{"mode":"main"}`
@@ -99,5 +125,12 @@ func TestGatewayAPI_GetPutAndSelfLoopReject(t *testing.T) {
 	}
 	if loadedMain.Gateway.EffectiveMode() != "main" {
 		t.Fatalf("expected EffectiveMode=main after switch back, got %q", loadedMain.Gateway.EffectiveMode())
+	}
+	aghMainRaw, err := os.ReadFile(aghPath)
+	if err != nil {
+		t.Fatalf("read synced AdGuardHome.yaml (main): %v", err)
+	}
+	if !strings.Contains(string(aghMainRaw), "use_private_ptr_resolvers: true") {
+		t.Fatalf("expected PUT /api/gateway mode=main to restore use_private_ptr_resolvers: true, got:\n%s", string(aghMainRaw))
 	}
 }

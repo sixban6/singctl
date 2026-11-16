@@ -249,10 +249,15 @@ singctl sb start -c /etc/singctl/singctl.yaml
 		t.Fatalf("expected lan-client to resolve global.example.com -> %s via side-router, got:\n%s", wanGlobIP, nsGlob)
 	}
 
-	// 断言 4：在旁路由本机 (side-router) 终端直接执行 ping 域名，同样秒解秒通且绝不与主路由产生死循环！
+	// 断言 4：在旁路由本机 (side-router) 终端直接执行 ping 域名，以及显式向私网上级网关 (192.168.100.1:53) 发起 DNS 查询，
+	// 均经 output 链 (mark 0x2 -> table 101) 被本机 sing-box 透明接管秒解，绝不因 table 100 throw 逃逸外泄或与主路由死循环！
 	sideSelfPing := mustExec(t, ctx, sideC, "ping -c 2 -W 3 cn.example.com")
 	if !strings.Contains(sideSelfPing, wanCNIP) {
 		t.Fatalf("expected side-router self ping cn.example.com to resolve %s, got:\n%s", wanCNIP, sideSelfPing)
+	}
+	privateGWQuery := mustExec(t, ctx, sideC, "nslookup cn.example.com "+mainLANIP)
+	if !strings.Contains(privateGWQuery, wanCNIP) {
+		t.Fatalf("expected direct query to private gateway %s:53 to be intercepted by sing-box (not leaked via table 100 throw), got:\n%s", mainLANIP, privateGWQuery)
 	}
 
 	// 断言 5：验证完整闭环 `lan-client -> dnsmasq -> sing-box -> AdGuard Home -> 223.5.5.5 DoH` 真实命中（非绕过或直查）！
@@ -327,6 +332,10 @@ singctl sb restart -c /etc/singctl/singctl.yaml
 	restoredResolv := strings.TrimSpace(mustExec(t, ctx, sideC, "cat /tmp/resolv.conf.d/resolv.conf.auto"))
 	if restoredResolv != "nameserver "+sideLANIP {
 		t.Fatalf("expected resolv.conf.auto to restore original content, got %q", restoredResolv)
+	}
+	ipRulesAfterStop := mustExec(t, ctx, sideC, "ip rule show")
+	if strings.Contains(ipRulesAfterStop, "lookup 100") || strings.Contains(ipRulesAfterStop, "lookup 101") {
+		t.Fatalf("expected ip rule tables 100 & 101 to be cleaned on sb stop, got:\n%s", ipRulesAfterStop)
 	}
 }
 

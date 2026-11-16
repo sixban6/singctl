@@ -374,10 +374,7 @@ func (m *Manager) ensureConfigFile(lanIP string, updateAuth bool) error {
 	}
 
 	isSideRouter := m.cfg != nil && m.cfg.Gateway.IsSideRouter()
-	var disablePrivatePTROpt *bool
-	if isSideRouter {
-		disablePrivatePTROpt = new(true)
-	}
+	disablePrivatePTROpt := new(isSideRouter)
 
 	if _, statErr := os.Stat(m.aghConfigFile); statErr == nil {
 		logger.Info("检测到已有配置文件 %s，执行无损同步（保留既有自定义规则与过滤器）...", m.aghConfigFile)
@@ -531,17 +528,14 @@ func (m *Manager) Start() error {
 			return err
 		}
 	} else {
-		// 自动修正局域网 IP 漂移（例如 DHCP 旁路由更换了网段 IP）
+		// 自动修正局域网 IP 漂移（例如 DHCP 旁路由更换了网段 IP）以及主/旁路由私网 PTR 策略
 		lanIP := sanitizeWebBindIP(netinfo.GetPrimaryLANIPv4())
-		var disablePrivatePTROpt *bool
-		if m.cfg != nil && m.cfg.Gateway.IsSideRouter() {
-			disablePrivatePTROpt = new(true)
-		}
+		isSideRouter := m.cfg != nil && m.cfg.Gateway.IsSideRouter()
 		_, _ = SyncExistingConfig(m.aghConfigFile, SyncOptions{
 			LANIP:             lanIP,
 			WebPort:           m.cfg.DNS.GetWebPort(),
 			DNSPort:           m.cfg.DNS.GetDNSPort(),
-			DisablePrivatePTR: disablePrivatePTROpt,
+			DisablePrivatePTR: new(isSideRouter),
 		})
 	}
 
@@ -582,6 +576,31 @@ func (m *Manager) Stop() error {
 func (m *Manager) Restart() error {
 	_ = m.Stop()
 	return m.Start()
+}
+
+// SyncGatewayMode 在主路由/旁路由模式切换时同步 AdGuardHome.yaml 的 use_private_ptr_resolvers 开关，
+// 若配置发生变更且 AdGuard Home 当前正在运行，则自动平滑重启使其立即生效。
+func (m *Manager) SyncGatewayMode(lanIP string) error {
+	if _, err := os.Stat(m.aghConfigFile); err != nil {
+		return nil
+	}
+	if strings.TrimSpace(lanIP) == "" {
+		lanIP = netinfo.GetPrimaryLANIPv4()
+	}
+	isSideRouter := m.cfg != nil && m.cfg.Gateway.IsSideRouter()
+	changed, err := SyncExistingConfig(m.aghConfigFile, SyncOptions{
+		LANIP:             sanitizeWebBindIP(lanIP),
+		WebPort:           m.cfg.DNS.GetWebPort(),
+		DNSPort:           m.cfg.DNS.GetDNSPort(),
+		DisablePrivatePTR: new(isSideRouter),
+	})
+	if err != nil {
+		return err
+	}
+	if changed && m.isBinaryPresent() && isProcessRunning() {
+		return m.Restart()
+	}
+	return nil
 }
 
 // ResetCredentials 重置 AdGuard Home 管理员账号与随机密码（或指定新账号）。
