@@ -62,6 +62,7 @@ type Server struct {
 	warpMu             sync.Mutex
 	warpDeps           *deploy.LiveWarpApplyDeps
 	warpDaemonProbe    func(forceRefresh bool) WarpDaemonStatus
+	warpRotateIdentity func(previousIP string) (string, string, error)
 	warpCacheMu        sync.Mutex
 	warpCachedIP       string
 	warpCachedLoc      string

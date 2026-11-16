@@ -1074,10 +1074,15 @@ func TestBuildAndNormalizeWireproxyConfig(t *testing.T) {
 		t.Fatalf("did not expect PersistentKeepalive in wireproxy config: %s", confV4Only)
 	}
 	if !strings.Contains(confV4Only, "ResolveStrategy = ipv4") {
-		t.Fatalf("expected ResolveStrategy = ipv4 in config: %s", confV4Only)
+		t.Fatalf("expected ResolveStrategy = ipv4 in IPv4-only config: %s", confV4Only)
 	}
 	if strings.Contains(confV4Only, "2606:4700:4700::1111") {
 		t.Fatalf("did not expect IPv6 DNS on IPv4-only host: %s", confV4Only)
+	}
+
+	confDualStack := deploy.BuildWireproxyConfig("172.16.0.2/32, 2606:4700:110::1/128", "test-priv", "test-pub", false)
+	if !strings.Contains(confDualStack, "ResolveStrategy = ipv6") {
+		t.Fatalf("expected ResolveStrategy = ipv6 in dual-stack config: %s", confDualStack)
 	}
 
 	legacyConf := `[Interface]
@@ -1110,14 +1115,28 @@ ResolveStrategy = auto
 	if strings.Contains(normalized, "PersistentKeepalive = 25") {
 		t.Errorf("expected PersistentKeepalive = 25 removed, got:\n%s", normalized)
 	}
-	if !strings.Contains(normalized, "ResolveStrategy = ipv4") {
-		t.Errorf("expected ResolveStrategy = ipv4, got:\n%s", normalized)
+	if !strings.Contains(normalized, "ResolveStrategy = ipv6") {
+		t.Errorf("expected ResolveStrategy = ipv6 for dual-stack config, got:\n%s", normalized)
 	}
 
 	// Second pass should be idempotent
 	_, changedAgain := deploy.NormalizeWireproxyConfigContent(normalized)
 	if changedAgain {
 		t.Errorf("expected NormalizeWireproxyConfigContent to be idempotent")
+	}
+
+	// Non-domain literal IPv4 working Endpoint must be preserved during normalization
+	customEPConf := strings.ReplaceAll(normalized, "Endpoint = 162.159.192.1:2408", "Endpoint = 162.159.195.1:500")
+	customEPConf = strings.ReplaceAll(customEPConf, "ResolveStrategy = ipv6", "ResolveStrategy = ipv4")
+	preserved, preservedChanged := deploy.NormalizeWireproxyConfigContent(customEPConf)
+	if !preservedChanged {
+		t.Errorf("expected ResolveStrategy update for dual-stack config with custom literal endpoint")
+	}
+	if !strings.Contains(preserved, "Endpoint = 162.159.195.1:500") {
+		t.Errorf("expected custom literal IPv4 endpoint preserved, got:\n%s", preserved)
+	}
+	if !strings.Contains(preserved, "ResolveStrategy = ipv6") {
+		t.Errorf("expected ResolveStrategy = ipv6 after normalizing dual-stack config, got:\n%s", preserved)
 	}
 }
 

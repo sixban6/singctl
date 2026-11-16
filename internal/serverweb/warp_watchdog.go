@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -124,6 +125,27 @@ func (s *Server) syncBootWarpAndPurgeLegacy(ctx context.Context, cfg *config.Con
 			logger.Success("已自动清理旧版 fscarmen WARP 并迁移至纯 Go wireproxy")
 		} else {
 			logger.Warn("WARP Watchdog 迁移旧版 fscarmen 失败: %v", deployErr)
+		}
+	}
+
+	if s.warpWatchdogDeps == nil {
+		s.warpMu.Lock()
+		normalizedWireproxy := false
+		if raw, rErr := os.ReadFile(deploy.DefaultWireproxyConf); rErr == nil {
+			if normalized, changed := deploy.NormalizeWireproxyConfigContent(string(raw)); changed {
+				if wErr := writeAtomicFile0600(deploy.DefaultWireproxyConf, []byte(normalized)); wErr == nil {
+					_ = exec.Command("systemctl", "restart", "wireproxy").Run()
+					normalizedWireproxy = true
+				}
+			}
+		}
+		s.warpMu.Unlock()
+		if normalizedWireproxy {
+			s.warpCacheMu.Lock()
+			s.warpCachedIP = ""
+			s.warpCachedLoc = ""
+			s.warpCachedAt = time.Time{}
+			s.warpCacheMu.Unlock()
 		}
 	}
 

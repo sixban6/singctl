@@ -468,7 +468,20 @@ func (s *Server) handleWarpAction(w http.ResponseWriter, r *http.Request) {
 
 	switch action {
 	case "rekey":
-		newIP, newLoc, err := deploy.RotateWarpIdentity()
+		s.warpCacheMu.Lock()
+		prevIP := strings.TrimSpace(s.warpCachedIP)
+		s.warpCacheMu.Unlock()
+		if prevIP == "" {
+			if ip, _, _, ok := deploy.FetchWarpExitInfo(1200 * time.Millisecond); ok && ip != "" {
+				prevIP = strings.TrimSpace(ip)
+			}
+		}
+
+		rotateFn := s.warpRotateIdentity
+		if rotateFn == nil {
+			rotateFn = deploy.RotateWarpIdentityFrom
+		}
+		newIP, newLoc, err := rotateFn(prevIP)
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -480,11 +493,27 @@ func (s *Server) handleWarpAction(w http.ResponseWriter, r *http.Request) {
 		s.warpCacheMu.Unlock()
 
 		restoredFromDegraded := s.restoreSavedWarpRoutingIfDegraded()
+		if !restoredFromDegraded {
+			s.warpWatchdogMu.Lock()
+			if !s.warpDegraded {
+				s.warpAutoHealStatus = ""
+				s.warpLastHealedAt = ""
+			}
+			s.warpWatchdogMu.Unlock()
+		}
 		evicted := s.evictAllWarpConnections(r.Context())
 		s.invalidateStatusCaches()
 
 		s.recordAudit(r, fmt.Sprintf("重新注册并切换 WARP 出口 IP [%s (%s)] (踢断旧流:%d)", newIP, cmp.Or(newLoc, "Unknown"), evicted))
-		msg := fmt.Sprintf("已更换全新 WARP 出口 IP：%s (%s)", newIP, cmp.Or(newLoc, "Anycast"))
+		var msg string
+		switch {
+		case prevIP != "" && prevIP != newIP:
+			msg = fmt.Sprintf("已更换全新 WARP 出口 IP：%s → %s (%s)", prevIP, newIP, cmp.Or(newLoc, "Anycast"))
+		case prevIP != "" && prevIP == newIP:
+			msg = fmt.Sprintf("已重新注册 WARP 密钥，当前出口 IP 为 %s (%s)", newIP, cmp.Or(newLoc, "Anycast"))
+		default:
+			msg = fmt.Sprintf("已更换全新 WARP 出口 IP：%s (%s)", newIP, cmp.Or(newLoc, "Anycast"))
+		}
 		if restoredFromDegraded {
 			msg += "，并已自动解除直出降级恢复原有分流策略"
 		}

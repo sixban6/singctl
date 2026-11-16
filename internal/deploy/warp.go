@@ -16,10 +16,12 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"singctl/internal/config"
@@ -69,9 +71,18 @@ const (
 // WarpCandidateEndpoints 定义 Cloudflare WARP 多端口/多 Anycast Endpoint 备选池（IPv4 直连防 DNS 解析死锁）
 var WarpCandidateEndpoints = []string{
 	"162.159.192.1:2408",
-	"162.159.193.10:1701",
 	"162.159.195.1:500",
 	"188.114.96.1:4500",
+	"162.159.193.10:1701",
+}
+
+func isValidIPv4Endpoint(ep string) bool {
+	host, port, err := net.SplitHostPort(strings.TrimSpace(ep))
+	if err != nil || host == "" || port == "" || port == "0" {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.To4() != nil
 }
 
 // UninstallWarp uninstalls WARP (wireproxy) and any legacy fscarmen WARP leftovers.
@@ -369,7 +380,21 @@ func DeployWarpWithConfig(cfg *config.Config) error {
 	if err := os.MkdirAll(filepath.Dir(DefaultWireproxyConf), 0700); err != nil {
 		return fmt.Errorf("failed to create /etc/wireproxy: %w", err)
 	}
-	confContent := renderWireproxyConfigFromReg(privKey, reg, hasGlobalIPv6(), WarpCandidateEndpoints[0])
+	hasV6 := hasGlobalIPv6()
+	candidates := slices.Clone(WarpCandidateEndpoints)
+	if regEP := extractRegV4Endpoint(reg); regEP != "" && !slices.Contains(candidates, regEP) {
+		candidates = append(candidates, regEP)
+	}
+	confContent := renderWireproxyConfigFromReg(privKey, reg, hasV6, WarpCandidateEndpoints[0])
+	if IsWindtfWireproxyBinary(wireproxyBin) {
+		stageCtx, stageCancel := context.WithTimeout(context.Background(), 6*time.Second)
+		winEP, winConf, _, _, ok := stageSelectWorkingEndpoint(stageCtx, wireproxyBin, privKey, reg, hasV6, candidates, nil)
+		stageCancel()
+		if ok && winConf != "" {
+			confContent = winConf
+			logger.Info("WARP 预探测选定可用 Endpoint: %s", winEP)
+		}
+	}
 	if err := writeFileAtomic0600(DefaultWireproxyConf, []byte(confContent)); err != nil {
 		return fmt.Errorf("failed to write %s: %w", DefaultWireproxyConf, err)
 	}
@@ -389,16 +414,16 @@ func DeployWarpWithConfig(cfg *config.Config) error {
 	// 8. Wait for port 40000 to listen & verify tunnel handshake (auto-fallback endpoints if needed)
 	logger.Info("Verifying WARP SOCKS5 proxy on 127.0.0.1:40000...")
 	var success bool
-	for range 8 {
-		time.Sleep(800 * time.Millisecond)
-		if isWarpSocksRunning() && IsWarpTunnelHealthy(3*time.Second) {
+	for range 5 {
+		time.Sleep(600 * time.Millisecond)
+		if isWarpSocksRunning() && IsWarpTunnelHealthy(2*time.Second) {
 			success = true
 			break
 		}
 	}
 
 	if !success && isWarpSocksRunning() {
-		logger.Warn("默认 Endpoint (%s) 握手未就绪，尝试自动轮换备选 Endpoint...", WarpCandidateEndpoints[0])
+		logger.Warn("当前 Endpoint 握手未就绪，尝试自动轮换备选 Endpoint...")
 		if ep, _, _, swErr := SwitchWarpEndpoint(); swErr == nil {
 			logger.Success("已自动切换至可用 Endpoint (%s)", ep)
 			success = true
@@ -425,8 +450,7 @@ func isWarpSocksRunning() bool {
 
 // BuildWireproxyConfig 渲染标准纯 Go wireproxy 配置（MTU=1280，IPv4 直连 Endpoint）。
 // 注意：
-//  1. wireproxy 的 ResolveStrategy = auto 只要检测到 [Interface] Address 含虚拟 IPv6 地址就会强制转为 ipv6，
-//     在纯 IPv4 VPS 上会导致域名解析为 AAAA 记录并引发 WireGuard 握手 100% 超时黑洞。
+//  1. 绝不使用 ResolveStrategy = auto；若 [Interface] Address 包含虚拟 IPv6 地址则设为 ipv6（优先使用每次注册都会轮换的 WARP IPv6 出口，并对纯 IPv4 目标自动回退至 IPv4），纯 IPv4 配置则设为 ipv4。
 //  2. wireproxy 在启动阶段若配置了 PersistentKeepalive，会在 Routine: receive incoming v4 启动前抢先触发握手导致死锁。
 //  3. MTU 固定 1280，消除外层 Hysteria2/VLESS 与内层 WireGuard 叠加封装触发 PMTU 黑洞导致大包 TLS 握手超时（如 x.com）。
 func BuildWireproxyConfig(addressLine, privKey, peerPubKey string, hasIPv6 bool) string {
@@ -439,6 +463,10 @@ func BuildWireproxyConfigWithEndpoint(addressLine, privKey, peerPubKey, endpoint
 	dnsLine := "1.1.1.1,8.8.8.8,8.8.4.4"
 	if hasIPv6 {
 		dnsLine = "1.1.1.1,8.8.8.8,8.8.4.4,2606:4700:4700::1111,2001:4860:4860::8888,2001:4860:4860::8844"
+	}
+	resolveStrategy := "ipv4"
+	if strings.Contains(addressLine, ":") {
+		resolveStrategy = "ipv6"
 	}
 	return fmt.Sprintf(`[Interface]
 Address = %s
@@ -454,8 +482,8 @@ Endpoint = %s
 BindAddress = 127.0.0.1:40000
 
 [Resolve]
-ResolveStrategy = ipv4
-`, addressLine, privKey, dnsLine, peerPubKey, ep)
+ResolveStrategy = %s
+`, addressLine, privKey, dnsLine, peerPubKey, ep, resolveStrategy)
 }
 
 func hasGlobalIPv6() bool {
@@ -487,12 +515,12 @@ func hasGlobalIPv6() bool {
 	return false
 }
 
-// newWarpSocksHTTPClient 构建经过本地 wireproxy SOCKS5 (127.0.0.1:40000) 的短连接 HTTP 客户端。
-func newWarpSocksHTTPClient(timeout time.Duration) (*http.Client, error) {
+// newWarpSocksHTTPClientAt 构建经过指定 SOCKS5 地址的短连接 HTTP 客户端。
+func newWarpSocksHTTPClientAt(socksAddr string, timeout time.Duration) (*http.Client, error) {
 	if timeout <= 0 {
 		timeout = 3 * time.Second
 	}
-	proxyURL, err := url.Parse("socks5://127.0.0.1:40000")
+	proxyURL, err := url.Parse("socks5://" + cmp.Or(strings.TrimSpace(socksAddr), "127.0.0.1:40000"))
 	if err != nil {
 		return nil, err
 	}
@@ -507,21 +535,17 @@ func newWarpSocksHTTPClient(timeout time.Duration) (*http.Client, error) {
 	}, nil
 }
 
-// IsWarpTunnelHealthy 通过本地 SOCKS5 (127.0.0.1:40000) 探测 Cloudflare trace，确认底层 WireGuard 隧道已真实连通
-func IsWarpTunnelHealthy(timeout time.Duration) bool {
-	_, _, _, ok := FetchWarpExitInfo(timeout)
-	return ok
+// newWarpSocksHTTPClient 构建经过本地 wireproxy SOCKS5 (127.0.0.1:40000) 的短连接 HTTP 客户端。
+func newWarpSocksHTTPClient(timeout time.Duration) (*http.Client, error) {
+	return newWarpSocksHTTPClientAt("127.0.0.1:40000", timeout)
 }
 
-// FetchWarpExitInfo 通过本地 SOCKS5 (127.0.0.1:40000) 查询当前 WARP 出口 IP、地区代码及 warp 状态
-func FetchWarpExitInfo(timeout time.Duration) (ip, loc, warpState string, ok bool) {
-	client, err := newWarpSocksHTTPClient(timeout)
+func fetchCloudflareTraceURL(ctx context.Context, client *http.Client, traceURL string) (ip, loc, warpState string, ok bool) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, traceURL, nil)
 	if err != nil {
 		return "", "", "", false
 	}
-	defer client.CloseIdleConnections()
-
-	resp, err := client.Get("https://cloudflare.com/cdn-cgi/trace")
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", "", "", false
 	}
@@ -549,8 +573,193 @@ func FetchWarpExitInfo(timeout time.Duration) (ip, loc, warpState string, ok boo
 			warpState = v
 		}
 	}
-	ok = warpState == "on" || warpState == "plus"
+	ok = (warpState == "on" || warpState == "plus") && ip != ""
 	return ip, loc, warpState, ok
+}
+
+// IsWarpTunnelHealthy 通过本地 SOCKS5 (127.0.0.1:40000) 探测 Cloudflare trace，确认底层 WireGuard 隧道已真实连通
+func IsWarpTunnelHealthy(timeout time.Duration) bool {
+	_, _, _, ok := FetchWarpExitInfo(timeout)
+	return ok
+}
+
+// FetchWarpExitInfo 通过本地 SOCKS5 (127.0.0.1:40000) 查询当前 WARP 出口 IP、地区代码及 warp 状态
+func FetchWarpExitInfo(timeout time.Duration) (ip, loc, warpState string, ok bool) {
+	client, err := newWarpSocksHTTPClient(timeout)
+	if err != nil {
+		return "", "", "", false
+	}
+	defer client.CloseIdleConnections()
+	return fetchCloudflareTraceURL(context.Background(), client, "https://cloudflare.com/cdn-cgi/trace")
+}
+
+// fetchWarpTraceViaProxy 使用直连 IP 的 Cloudflare trace 端点探测指定 SOCKS5 代理的 WARP 出口状态。
+func fetchWarpTraceViaProxy(ctx context.Context, socksAddr string, preferIPv6 bool, timeout time.Duration) (ip, loc, warpState string, ok bool) {
+	client, err := newWarpSocksHTTPClientAt(socksAddr, timeout)
+	if err != nil {
+		return "", "", "", false
+	}
+	defer client.CloseIdleConnections()
+
+	urls := []string{"https://1.1.1.1/cdn-cgi/trace"}
+	if preferIPv6 {
+		urls = []string{"https://[2606:4700:4700::1111]/cdn-cgi/trace", "https://1.1.1.1/cdn-cgi/trace"}
+	}
+	for _, traceURL := range urls {
+		if ctx.Err() != nil {
+			return "", "", "", false
+		}
+		if ip, loc, state, ok := fetchCloudflareTraceURL(ctx, client, traceURL); ok {
+			return ip, loc, state, true
+		}
+	}
+	return "", "", "", false
+}
+
+// probeWireproxyEndpointStaging 启动隔离的临时端口 wireproxy 进程，离网预验证指定配置文件的握手与出口连通性。
+func probeWireproxyEndpointStaging(ctx context.Context, wireproxyBin, confContent string) (ip, loc string, ok bool) {
+	if ctx.Err() != nil {
+		return "", "", false
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return "", "", false
+	}
+	socksAddr := ln.Addr().String()
+	_ = ln.Close()
+
+	stagedConf := strings.ReplaceAll(confContent, "BindAddress = 127.0.0.1:40000", "BindAddress = "+socksAddr)
+	f, err := os.CreateTemp("", "singctl-warp-stage-*.conf")
+	if err != nil {
+		return "", "", false
+	}
+	tmpPath := f.Name()
+	_ = f.Chmod(0600)
+	_, writeErr := f.WriteString(stagedConf)
+	closeErr := f.Close()
+	defer os.Remove(tmpPath)
+	if writeErr != nil || closeErr != nil {
+		return "", "", false
+	}
+
+	procCtx, cancel := context.WithCancel(ctx)
+	cmd := exec.CommandContext(procCtx, wireproxyBin, "-s", "-c", tmpPath)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	if err := cmd.Start(); err != nil {
+		cancel()
+		return "", "", false
+	}
+	defer func() {
+		cancel()
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+	}()
+
+	listening := false
+	for range 15 {
+		if ctx.Err() != nil {
+			return "", "", false
+		}
+		conn, dialErr := net.DialTimeout("tcp", socksAddr, 120*time.Millisecond)
+		if dialErr == nil {
+			_ = conn.Close()
+			listening = true
+			break
+		}
+		time.Sleep(40 * time.Millisecond)
+	}
+	if !listening {
+		return "", "", false
+	}
+
+	preferIPv6 := strings.Contains(stagedConf, "ResolveStrategy = ipv6")
+	for attempt := range 2 {
+		if ctx.Err() != nil {
+			return "", "", false
+		}
+		if ip, loc, _, ok := fetchWarpTraceViaProxy(procCtx, socksAddr, preferIPv6, 1600*time.Millisecond); ok && ip != "" {
+			return ip, loc, true
+		}
+		if attempt == 0 {
+			time.Sleep(150 * time.Millisecond)
+		}
+	}
+	return "", "", false
+}
+
+// stageSelectWorkingEndpoint 优先串行验证首节点，若失败则并发竞速探测其余备选 Endpoint 并立刻取消落败者。
+func stageSelectWorkingEndpoint(
+	ctx context.Context,
+	wireproxyBin, privKey string,
+	reg *warpRegResponse,
+	hasIPv6 bool,
+	endpoints []string,
+	customProbe func(ep, conf string) (string, string, bool),
+) (winEP, winConf, ip, loc string, ok bool) {
+	if len(endpoints) == 0 {
+		return "", "", "", "", false
+	}
+
+	runOne := func(probeCtx context.Context, ep string) (string, string, string, string, bool) {
+		conf := renderWireproxyConfigFromReg(privKey, reg, hasIPv6, ep)
+		if customProbe != nil {
+			pIP, pLoc, pOK := customProbe(ep, conf)
+			return ep, conf, pIP, pLoc, pOK
+		}
+		pIP, pLoc, pOK := probeWireproxyEndpointStaging(probeCtx, wireproxyBin, conf)
+		return ep, conf, pIP, pLoc, pOK
+	}
+
+	firstCtx, firstCancel := context.WithTimeout(ctx, 2200*time.Millisecond)
+	ep0, conf0, ip0, loc0, ok0 := runOne(firstCtx, endpoints[0])
+	firstCancel()
+	if ok0 && ip0 != "" {
+		return ep0, conf0, ip0, loc0, true
+	}
+
+	if len(endpoints) <= 1 || ctx.Err() != nil {
+		return "", "", "", "", false
+	}
+
+	raceCtx, raceCancel := context.WithTimeout(ctx, 2800*time.Millisecond)
+	defer raceCancel()
+
+	var (
+		mu      sync.Mutex
+		won     bool
+		winIP   string
+		winLoc  string
+		wg      sync.WaitGroup
+	)
+	for _, ep := range endpoints[1:] {
+		wg.Add(1)
+		go func(candidate string) {
+			defer wg.Done()
+			cEP, cConf, cIP, cLoc, cOK := runOne(raceCtx, candidate)
+			if !cOK || cIP == "" {
+				return
+			}
+			mu.Lock()
+			if !won {
+				won = true
+				winEP = cEP
+				winConf = cConf
+				winIP = cIP
+				winLoc = cLoc
+				raceCancel()
+			}
+			mu.Unlock()
+		}(ep)
+	}
+	wg.Wait()
+
+	if won {
+		return winEP, winConf, winIP, winLoc, true
+	}
+	return "", "", "", "", false
 }
 
 // ProbeWarpRealTargets 校验 WARP 隧道真实可用性：不仅检查 cloudflare trace (warp=on|plus)，
@@ -672,11 +881,13 @@ type WarpRotateDeps struct {
 	PathEnv            WireproxyPathEnv
 	PurgeLegacy        func() (bool, error)
 	CandidateEndpoints []string
+	PreviousIP         string
 	GenerateKeypair    func() (privKey, pubKey string, err error)
 	RegisterWarp       func(pubKey string) (*warpRegResponse, error)
 	HasIPv6            func() bool
 	RestartService     func() error
 	FetchExitInfo      func(timeout time.Duration) (ip, loc, state string, ok bool)
+	StageProbe         func(endpoint, confContent string) (ip, loc string, ok bool)
 	DeployFallback     func() error
 	PollAttempts       int
 	PollInterval       time.Duration
@@ -728,11 +939,17 @@ func extractRegV4Endpoint(reg *warpRegResponse) string {
 	return v4
 }
 
-// RotateWarpIdentity 重新注册 Cloudflare WARP 设备密钥并热切换本地 wireproxy 出口 IP（带多 Endpoint 自动回退、0600 备份与失败自动回滚）
+// RotateWarpIdentity 重新注册 Cloudflare WARP 设备密钥并热切换本地 wireproxy 出口 IP（带离网预验证、多 Endpoint 自动回退、0600 备份与失败自动回滚）
 func RotateWarpIdentity() (newIP, newLoc string, err error) {
+	return RotateWarpIdentityFrom("")
+}
+
+// RotateWarpIdentityFrom 尝试换取与 previousIP 不同的全新 WARP 出口身份并热切换本地 wireproxy。
+func RotateWarpIdentityFrom(previousIP string) (newIP, newLoc string, err error) {
 	return RotateWarpIdentityWithDeps(&WarpRotateDeps{
 		PurgeLegacy:        PurgeLegacyFscarmenWarp,
 		CandidateEndpoints: WarpCandidateEndpoints,
+		PreviousIP:         strings.TrimSpace(previousIP),
 	})
 }
 
@@ -774,10 +991,10 @@ func RotateWarpIdentityWithDeps(deps *WarpRotateDeps) (newIP, newLoc string, err
 		}
 	}
 	if d.PollAttempts <= 0 {
-		d.PollAttempts = 6
+		d.PollAttempts = 2
 	}
 	if d.PollInterval <= 0 {
-		d.PollInterval = 800 * time.Millisecond
+		d.PollInterval = 350 * time.Millisecond
 	}
 
 	activePath, mirrorPaths, exists := ResolveWireproxyConfigPathsWithEnv(d.PathEnv)
@@ -787,7 +1004,7 @@ func RotateWarpIdentityWithDeps(deps *WarpRotateDeps) (newIP, newLoc string, err
 			return "", "", fmt.Errorf("未检测到已部署的 WARP 配置 (%s)，且自动初始化失败: %w", activePath, err)
 		}
 		for range d.PollAttempts {
-			if ip, loc, _, ok := d.FetchExitInfo(3 * time.Second); ok && ip != "" {
+			if ip, loc, _, ok := d.FetchExitInfo(2 * time.Second); ok && ip != "" {
 				return ip, loc, nil
 			}
 			time.Sleep(d.PollInterval)
@@ -817,21 +1034,33 @@ func RotateWarpIdentityWithDeps(deps *WarpRotateDeps) (newIP, newLoc string, err
 		}
 	}
 
-	// 2. 生成新 X25519 密钥对并向 Cloudflare 注册新身份
-	privKey, pubKey, kErr := d.GenerateKeypair()
-	if kErr != nil {
-		return "", "", fmt.Errorf("生成 WireGuard 密钥对失败: %w", kErr)
-	}
-	reg, rErr := d.RegisterWarp(pubKey)
-	if rErr != nil {
-		return "", "", fmt.Errorf("注册 Cloudflare WARP 新身份失败: %w", rErr)
-	}
-
-	endpoints := slices.Clone(d.CandidateEndpoints)
-	if len(endpoints) == 0 {
-		endpoints = []string{WarpCandidateEndpoints[0]}
-	} else if regEP := extractRegV4Endpoint(reg); regEP != "" && !slices.Contains(endpoints, regEP) {
-		endpoints = append(endpoints, regEP)
+	currentEP := ExtractWireproxyEndpoint(string(oldActive))
+	buildCandidateEndpoints := func(reg *warpRegResponse) []string {
+		var endpoints []string
+		addUnique := func(ep string) {
+			ep = strings.TrimSpace(ep)
+			if ep != "" && !slices.Contains(endpoints, ep) {
+				endpoints = append(endpoints, ep)
+			}
+		}
+		regEP := extractRegV4Endpoint(reg)
+		if len(d.CandidateEndpoints) == 0 {
+			if isValidIPv4Endpoint(currentEP) {
+				addUnique(currentEP)
+			} else {
+				addUnique(WarpCandidateEndpoints[0])
+			}
+			addUnique(regEP)
+			return endpoints
+		}
+		if isValidIPv4Endpoint(currentEP) {
+			addUnique(currentEP)
+		}
+		for _, ep := range d.CandidateEndpoints {
+			addUnique(ep)
+		}
+		addUnique(regEP)
+		return endpoints
 	}
 
 	rollback := func() {
@@ -845,10 +1074,115 @@ func RotateWarpIdentityWithDeps(deps *WarpRotateDeps) (newIP, newLoc string, err
 		_ = d.RestartService()
 	}
 
+	useStaging := d.StageProbe != nil || ((deps == nil || (deps.RestartService == nil && deps.FetchExitInfo == nil)) && IsWindtfWireproxyBinary(DefaultWireproxyBin))
+	if useStaging {
+		hasV6 := d.HasIPv6()
+		prevIP := strings.TrimSpace(d.PreviousIP)
+		maxReg := 1
+		if prevIP != "" {
+			maxReg = 2
+		}
+
+		var chosenConf, stageIP, stageLoc string
+		for attempt := range maxReg {
+			privKey, pubKey, kErr := d.GenerateKeypair()
+			if kErr != nil {
+				if attempt == 0 || chosenConf == "" {
+					_ = os.Remove(bakPath)
+					return "", "", fmt.Errorf("生成 WireGuard 密钥对失败: %w", kErr)
+				}
+				break
+			}
+			reg, rErr := d.RegisterWarp(pubKey)
+			if rErr != nil {
+				if attempt == 0 || chosenConf == "" {
+					_ = os.Remove(bakPath)
+					return "", "", fmt.Errorf("注册 Cloudflare WARP 新身份失败: %w", rErr)
+				}
+				break
+			}
+
+			endpoints := buildCandidateEndpoints(reg)
+			stageCtx, stageCancel := context.WithTimeout(context.Background(), 5500*time.Millisecond)
+			_, winConf, sIP, sLoc, ok := stageSelectWorkingEndpoint(stageCtx, DefaultWireproxyBin, privKey, reg, hasV6, endpoints, d.StageProbe)
+			stageCancel()
+			if !ok || winConf == "" {
+				if attempt == 0 || chosenConf == "" {
+					_ = os.Remove(bakPath)
+					return "", "", fmt.Errorf("新 WARP 身份在备选 Endpoint 握手超时，已保留原隧道不断流")
+				}
+				break
+			}
+
+			chosenConf = winConf
+			stageIP = sIP
+			stageLoc = sLoc
+			if prevIP == "" || stageIP != prevIP || attempt == maxReg-1 {
+				break
+			}
+		}
+
+		if err := writeFileAtomic0600(activePath, []byte(chosenConf)); err != nil {
+			return "", "", fmt.Errorf("写入新 wireproxy 配置 (%s) 失败: %w", activePath, err)
+		}
+		for _, mp := range mirrorPaths {
+			_ = writeFileAtomic0600(mp, []byte(chosenConf))
+		}
+
+		if err := d.RestartService(); err != nil {
+			rollback()
+			return "", "", fmt.Errorf("重启 wireproxy 失败，已回滚原配置: %w", err)
+		}
+
+		// 若单元测试仅注入 StageProbe 而未模拟本地 127.0.0.1:40000，则直接采信离网探测结果
+		if deps != nil && deps.StageProbe != nil && deps.FetchExitInfo == nil {
+			return stageIP, stageLoc, nil
+		}
+
+		preferIPv6 := strings.Contains(chosenConf, "ResolveStrategy = ipv6")
+		for attempt := range 4 {
+			if attempt == 0 {
+				time.Sleep(250 * time.Millisecond)
+			} else {
+				time.Sleep(300 * time.Millisecond)
+			}
+			if deps != nil && deps.FetchExitInfo != nil {
+				if liveIP, liveLoc, _, ok := d.FetchExitInfo(1800 * time.Millisecond); ok && liveIP != "" {
+					return liveIP, cmp.Or(liveLoc, stageLoc), nil
+				}
+				continue
+			}
+			if isWarpSocksRunning() {
+				if liveIP, liveLoc, _, ok := fetchWarpTraceViaProxy(context.Background(), "127.0.0.1:40000", preferIPv6, 1800*time.Millisecond); ok && liveIP != "" {
+					return liveIP, cmp.Or(liveLoc, stageLoc), nil
+				}
+				if liveIP, liveLoc, _, ok := d.FetchExitInfo(1800 * time.Millisecond); ok && liveIP != "" {
+					return liveIP, cmp.Or(liveLoc, stageLoc), nil
+				}
+			}
+		}
+
+		rollback()
+		return "", "", fmt.Errorf("新 WARP 身份加载后本地隧道未就绪，已自动回滚保留原有出口隧道")
+	}
+
+	// 2. 生成新 X25519 密钥对并向 Cloudflare 注册新身份（无本地 wireproxy 进程时的直接回退模式）
+	privKey, pubKey, kErr := d.GenerateKeypair()
+	if kErr != nil {
+		return "", "", fmt.Errorf("生成 WireGuard 密钥对失败: %w", kErr)
+	}
+	reg, rErr := d.RegisterWarp(pubKey)
+	if rErr != nil {
+		return "", "", fmt.Errorf("注册 Cloudflare WARP 新身份失败: %w", rErr)
+	}
+
+	endpoints := buildCandidateEndpoints(reg)
+
 	// 3. 按序尝试各 Endpoint：写入 0600 配置、重启 wireproxy 并验证握手成功
 	var lastRestartErr error
+	hasV6 := d.HasIPv6()
 	for _, ep := range endpoints {
-		freshConf := renderWireproxyConfigFromReg(privKey, reg, d.HasIPv6(), ep)
+		freshConf := renderWireproxyConfigFromReg(privKey, reg, hasV6, ep)
 		if err := writeFileAtomic0600(activePath, []byte(freshConf)); err != nil {
 			return "", "", fmt.Errorf("写入新 wireproxy 配置 (%s) 失败: %w", activePath, err)
 		}
@@ -863,7 +1197,7 @@ func RotateWarpIdentityWithDeps(deps *WarpRotateDeps) (newIP, newLoc string, err
 
 		for range d.PollAttempts {
 			time.Sleep(d.PollInterval)
-			if ip, loc, _, ok := d.FetchExitInfo(3 * time.Second); ok && ip != "" {
+			if ip, loc, _, ok := d.FetchExitInfo(1800 * time.Millisecond); ok && ip != "" {
 				return ip, loc, nil
 			}
 		}
@@ -891,9 +1225,25 @@ func pruneWireproxyBackups(path string, keep int) {
 	}
 }
 
-// NormalizeWireproxyConfigContent 修正既有 wireproxy 配置中的 MTU=1280、ResolveStrategy=ipv4、域名 Endpoint 与启动死锁 PersistentKeepalive
+// NormalizeWireproxyConfigContent 修正既有 wireproxy 配置中的 MTU=1280、双栈可轮换 ResolveStrategy、域名 Endpoint 与启动死锁 PersistentKeepalive
 func NormalizeWireproxyConfigContent(content string) (string, bool) {
 	lines := strings.Split(content, "\n")
+
+	targetStrategy := "ipv4"
+	inInterfaceScan := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			inInterfaceScan = strings.EqualFold(trimmed, "[Interface]")
+			continue
+		}
+		if inInterfaceScan && strings.HasPrefix(trimmed, "Address") && !strings.HasPrefix(trimmed, "#") {
+			if k, v, ok := strings.Cut(trimmed, "="); ok && strings.TrimSpace(k) == "Address" && strings.Contains(v, ":") {
+				targetStrategy = "ipv6"
+			}
+		}
+	}
+
 	changed := false
 	inInterface := false
 	sawMTU := false
@@ -933,8 +1283,8 @@ func NormalizeWireproxyConfigContent(content string) (string, bool) {
 		}
 		if strings.HasPrefix(trimmed, "ResolveStrategy") && !strings.HasPrefix(trimmed, "#") {
 			parts := strings.SplitN(trimmed, "=", 2)
-			if len(parts) == 2 && strings.TrimSpace(parts[1]) != "ipv4" {
-				line = "ResolveStrategy = ipv4"
+			if len(parts) == 2 && strings.TrimSpace(parts[1]) != targetStrategy {
+				line = "ResolveStrategy = " + targetStrategy
 				changed = true
 			}
 		}
@@ -957,7 +1307,7 @@ func NormalizeWireproxyConfigContent(content string) (string, bool) {
 		for len(out) > 0 && strings.TrimSpace(out[len(out)-1]) == "" {
 			out = out[:len(out)-1]
 		}
-		out = append(out, "", "[Resolve]", "ResolveStrategy = ipv4", "")
+		out = append(out, "", "[Resolve]", "ResolveStrategy = "+targetStrategy, "")
 		changed = true
 	}
 
@@ -1039,10 +1389,10 @@ func SwitchWarpEndpointWithDeps(deps *WarpEndpointSwitchDeps) (endpoint, ip, loc
 		d.ProbeTargets = ProbeWarpRealTargets
 	}
 	if d.PollAttempts <= 0 {
-		d.PollAttempts = 3
+		d.PollAttempts = 2
 	}
 	if d.PollInterval <= 0 {
-		d.PollInterval = 700 * time.Millisecond
+		d.PollInterval = 350 * time.Millisecond
 	}
 
 	origBytes, readErr := os.ReadFile(confPath)
@@ -1069,7 +1419,7 @@ func SwitchWarpEndpointWithDeps(deps *WarpEndpointSwitchDeps) (endpoint, ip, loc
 		}
 		for range d.PollAttempts {
 			time.Sleep(d.PollInterval)
-			if probeIP, probeLoc, pErr := d.ProbeTargets(4 * time.Second); pErr == nil && probeIP != "" {
+			if probeIP, probeLoc, pErr := d.ProbeTargets(2500 * time.Millisecond); pErr == nil && probeIP != "" {
 				return cand, probeIP, probeLoc, nil
 			} else if pErr != nil {
 				lastErr = pErr

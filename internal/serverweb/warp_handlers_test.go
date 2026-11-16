@@ -355,3 +355,92 @@ server:
 		t.Fatalf("expected /api/server/status within bounded timeout, took %v", elapsed)
 	}
 }
+
+func TestHandleWarpAction_RekeyClearsStaleHealBadge(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "singctl.yaml")
+	if err := os.WriteFile(cfgPath, []byte(`
+server:
+  node_domain: "node.example.com"
+  web_admin:
+    username: "opsadmin"
+    password: "Password123"
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := New(Options{
+		ConfigPath:    cfgPath,
+		SubStoreDir:   filepath.Join(tmpDir, "sub-store"),
+		FleetFilePath: filepath.Join(tmpDir, "fleet.yaml"),
+		Username:      "opsadmin",
+		Password:      "Password123",
+	})
+	srv.sniff.EnableSystemProbe = false
+
+	srv.warpCacheMu.Lock()
+	srv.warpCachedIP = "2001:db8::1"
+	srv.warpCachedLoc = "LAX"
+	srv.warpCachedAt = time.Now()
+	srv.warpCacheMu.Unlock()
+
+	srv.warpWatchdogMu.Lock()
+	srv.warpDegraded = false
+	srv.warpAutoHealStatus = "自动自愈成功：已更换 WARP IP 198.51.100.1 (LAX)"
+	srv.warpLastHealedAt = "2026-11-16 15:00:00"
+	srv.warpWatchdogMu.Unlock()
+
+	gotPrevIP := ""
+	srv.warpRotateIdentity = func(previousIP string) (string, string, error) {
+		gotPrevIP = previousIP
+		return "2001:db8::2", "SJC", nil
+	}
+	srv.warpDaemonProbe = func(bool) WarpDaemonStatus {
+		srv.warpCacheMu.Lock()
+		ip := srv.warpCachedIP
+		loc := srv.warpCachedLoc
+		srv.warpCacheMu.Unlock()
+		return WarpDaemonStatus{
+			Installed:     true,
+			Running:       true,
+			TunnelHealthy: true,
+			SocksPort:     40000,
+			WarpIP:        ip,
+			WarpLoc:       loc,
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/server/warp/action", strings.NewReader(`{"action":"rekey"}`))
+	req.SetBasicAuth("opsadmin", "Password123")
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("X-Real-IP", "192.0.2.1")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/server/warp/action rekey failed: %d %s", rec.Code, rec.Body.String())
+	}
+	if gotPrevIP != "2001:db8::1" {
+		t.Fatalf("expected previousIP 2001:db8::1 passed to rotate helper, got %q", gotPrevIP)
+	}
+
+	var payload struct {
+		Message string           `json:"message"`
+		WarpIP  string           `json:"warpIp"`
+		WarpLoc string           `json:"warpLoc"`
+		Daemon  WarpDaemonStatus `json:"daemon"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.WarpIP != "2001:db8::2" || payload.WarpLoc != "SJC" {
+		t.Fatalf("unexpected payload IP/Loc: %+v", payload)
+	}
+	if !strings.Contains(payload.Message, "2001:db8::1 → 2001:db8::2") {
+		t.Fatalf("expected before->after transition in message, got %q", payload.Message)
+	}
+	if payload.Daemon.AutoHealStatus != "" || payload.Daemon.LastHealedAt != "" {
+		t.Fatalf("expected stale watchdog heal badge cleared after manual rekey, got %+v", payload.Daemon)
+	}
+}

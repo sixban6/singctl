@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { api } from '../api';
 import { Lock, User, Activity, AlertCircle, ArrowRight } from 'lucide-react';
 
@@ -12,21 +12,38 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onSuccess }) => 
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
+  const abortRef = useRef<AbortController | null>(null);
 
   if (!isOpen) return null;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    abortRef.current?.abort();
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+
     setLoading(true);
     setErrorMsg('');
     try {
-      const res = await api.login(username.trim(), password);
+      const res = await api.login(username.trim(), password, ctrl.signal);
       onSuccess(res.username);
     } catch (err: any) {
-      setErrorMsg(err.message || '用户名或密码错误');
+      if (!ctrl.signal.aborted) {
+        setErrorMsg(err.message || '用户名或密码错误');
+      }
     } finally {
-      setLoading(false);
+      if (abortRef.current === ctrl) {
+        abortRef.current = null;
+        setLoading(false);
+      }
     }
+  };
+
+  const handleCancel = () => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setLoading(false);
+    setErrorMsg('已取消当前请求，请重新点击登录');
   };
 
   return (
@@ -82,7 +99,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onSuccess }) => 
             </div>
           </div>
 
-          <div className="pt-2">
+          <div className="pt-2 space-y-2">
             <button
               type="submit"
               disabled={loading}
@@ -91,6 +108,15 @@ export const LoginModal: React.FC<LoginModalProps> = ({ isOpen, onSuccess }) => 
               <span>{loading ? '正在验证...' : '登录管理后台'}</span>
               <ArrowRight className="w-4 h-4" />
             </button>
+            {loading && (
+              <button
+                type="button"
+                onClick={handleCancel}
+                className="w-full py-1.5 rounded-lg text-[11px] font-mono text-slate-400 hover:text-slate-200 transition-colors"
+              >
+                长时间无响应？点击中断并重试
+              </button>
+            )}
           </div>
         </form>
 
