@@ -362,3 +362,72 @@ func TestParseProcNetUDPHasLANPort53AndResolvSelfHeal(t *testing.T) {
 		t.Fatalf("expected resolv.conf.auto restored to %q, got %q (err=%v)", origContent, string(restored), err)
 	}
 }
+
+func TestController_SideModeConvergesPrivateDNSUpstream(t *testing.T) {
+	// 旁路由 TProxy 表 100 含 RFC1918 throw 逃生路由：若 dnsmasq 上游仍是私网主路由（如 192.168.100.1），
+	// 其 :53 报文会命中 throw 明文外发绕过 sing-box/AdGuard Home（甚至与主路由 DNS 互指死循环），
+	// 必须收敛为公网引导 DNS；同时 CGNAT 上游（Tailscale MagicDNS）保持不变。
+	tmp := t.TempDir()
+	resolvAuto := filepath.Join(tmp, "resolv.conf.auto")
+
+	newCtrl := func() *Controller {
+		return &Controller{
+			StateDir:        filepath.Join(tmp, "state"),
+			FW4IncludeRoot:  filepath.Join(tmp, "fw4"),
+			ResolvGuardPath: resolvAuto,
+			Prober: func() TopologyInfo {
+				return TopologyInfo{
+					LANIP:               "192.168.100.2",
+					LANCIDR:             "192.168.100.0/24",
+					LANIface:            "br-lan",
+					CurrentGatewayIP:    "192.168.100.1",
+					HasLocalDNSListener: true,
+				}
+			},
+			Exec: func(name string, args ...string) ([]byte, error) {
+				return nil, nil
+			},
+		}
+	}
+
+	// 1) 私网网关上游 -> 必须收敛为公网引导 DNS
+	origPrivate := "nameserver 192.168.100.1\n"
+	if err := os.WriteFile(resolvAuto, []byte(origPrivate), 0644); err != nil {
+		t.Fatal(err)
+	}
+	ctrl := newCtrl()
+	if err := ctrl.Apply(t.Context(), config.GatewayConfig{Mode: ModeSide, MainRouterIP: "192.168.100.1"}); err != nil {
+		t.Fatalf("Apply failed: %v", err)
+	}
+	healed, err := os.ReadFile(resolvAuto)
+	if err != nil || !strings.Contains(string(healed), "223.5.5.5") {
+		t.Fatalf("expected private-gateway upstream to converge to 223.5.5.5, got %q (err=%v)", string(healed), err)
+	}
+	if strings.Contains(string(healed), "192.168.100.1") {
+		t.Fatalf("private gateway upstream must be removed, got %q", string(healed))
+	}
+	if err := ctrl.Teardown(t.Context()); err != nil {
+		t.Fatalf("Teardown failed: %v", err)
+	}
+	restored, err := os.ReadFile(resolvAuto)
+	if err != nil || string(restored) != origPrivate {
+		t.Fatalf("expected resolv.conf.auto restored to %q, got %q (err=%v)", origPrivate, string(restored), err)
+	}
+
+	// 2) CGNAT（Tailscale MagicDNS）上游 -> 必须原样保留，不能被误收敛
+	origCGNAT := "nameserver 100.100.100.100\n"
+	if err := os.WriteFile(resolvAuto, []byte(origCGNAT), 0644); err != nil {
+		t.Fatal(err)
+	}
+	ctrl2 := newCtrl()
+	if err := ctrl2.Apply(t.Context(), config.GatewayConfig{Mode: ModeSide, MainRouterIP: "192.168.100.1"}); err != nil {
+		t.Fatalf("Apply failed: %v", err)
+	}
+	kept, err := os.ReadFile(resolvAuto)
+	if err != nil || string(kept) != origCGNAT {
+		t.Fatalf("expected CGNAT upstream to be preserved, got %q (err=%v)", string(kept), err)
+	}
+	if err := ctrl2.Teardown(t.Context()); err != nil {
+		t.Fatalf("Teardown failed: %v", err)
+	}
+}
