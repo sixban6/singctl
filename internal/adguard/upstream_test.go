@@ -116,23 +116,23 @@ func TestDNSWireformatBuildAndParseARecord(t *testing.T) {
 	// 构造带压缩指针 (0xC00C) 的标准 DNS 响应：先跟一条 CNAME 再跟一条 A 记录 (203.0.113.8)
 	var resp []byte
 	resp = append(resp, txid[0], txid[1])
-	resp = append(resp, 0x81, 0x80)       // QR=1, RCODE=0
-	resp = append(resp, 0x00, 0x01)       // QDCOUNT=1
-	resp = append(resp, 0x00, 0x02)       // ANCOUNT=2
+	resp = append(resp, 0x81, 0x80) // QR=1, RCODE=0
+	resp = append(resp, 0x00, 0x01) // QDCOUNT=1
+	resp = append(resp, 0x00, 0x02) // ANCOUNT=2
 	resp = append(resp, 0x00, 0x00, 0x00, 0x00)
-	resp = append(resp, query[12:]...)    // echo question
+	resp = append(resp, query[12:]...) // echo question
 
 	// Answer 1: CNAME -> alias (4 bytes dummy RDATA)
-	resp = append(resp, 0xC0, 0x0C)       // pointer to qname
-	resp = append(resp, 0x00, 0x05)       // TYPE=CNAME (5)
-	resp = append(resp, 0x00, 0x01)       // CLASS=IN
+	resp = append(resp, 0xC0, 0x0C) // pointer to qname
+	resp = append(resp, 0x00, 0x05) // TYPE=CNAME (5)
+	resp = append(resp, 0x00, 0x01) // CLASS=IN
 	resp = append(resp, 0x00, 0x00, 0x00, 0x3C)
 	resp = append(resp, 0x00, 0x02, 0xC0, 0x0C)
 
 	// Answer 2: A -> 203.0.113.8
 	resp = append(resp, 0xC0, 0x0C)
-	resp = append(resp, 0x00, 0x01)       // TYPE=A (1)
-	resp = append(resp, 0x00, 0x01)       // CLASS=IN
+	resp = append(resp, 0x00, 0x01) // TYPE=A (1)
+	resp = append(resp, 0x00, 0x01) // CLASS=IN
 	resp = append(resp, 0x00, 0x00, 0x00, 0x3C)
 	var rdLen [2]byte
 	binary.BigEndian.PutUint16(rdLen[:], 4)

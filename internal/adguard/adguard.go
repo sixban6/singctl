@@ -74,18 +74,18 @@ func IsInstalled() bool {
 
 // StatusInfo 汇总本地 AdGuard Home 的运行与配置状态。
 type StatusInfo struct {
-	Installed   bool
-	Running     bool
-	DNSHealthy  bool
-	WebHealthy  bool
-	BinaryPath  string
-	ConfigFile  string
-	Version     string
-	DNSAddr     string
-	WebAddr     string
-	WebURL      string
-	Username    string
-	Password    string
+	Installed  bool
+	Running    bool
+	DNSHealthy bool
+	WebHealthy bool
+	BinaryPath string
+	ConfigFile string
+	Version    string
+	DNSAddr    string
+	WebAddr    string
+	WebURL     string
+	Username   string
+	Password   string
 }
 
 // InstallOptions 控制安装与初始化行为。

@@ -330,13 +330,13 @@ type TailscaleConfig struct {
 }
 
 type ServerConfig struct {
-	NodeTag            string            `yaml:"node_tag"`                      // (可选) 节点地区/名称标识 (例如: los, sg, hk)，留空自动根据公网 IP 智能识别
-	SBDomain           string            `yaml:"sb_domain,omitempty"`           // 兼容旧配置：默认主域名
-	NodeDomain         string            `yaml:"node_domain"`                   // 节点主域名 (Hysteria 2 / VLESS 分享链接主机)
-	Hy2Port            int               `yaml:"hy2_port,omitempty"`            // (可选) Hysteria 2 (UDP QUIC) 对外监听与订阅端口，默认 443
-	VlessPort          int               `yaml:"vless_port,omitempty"`          // (可选) VLESS Reality (TCP) 与 HTTPS 伪装站对外监听与订阅端口，默认 443
-	SubstoreDomain     string            `yaml:"substore_domain"`               // Sub-Store 专属域名
-	ServerIP           string            `yaml:"server_ip"`                     // 公网 IP 地址（选填，未填写时自动探测用于申请 Let's Encrypt 原生 IP 证书）
+	NodeTag            string            `yaml:"node_tag"`             // (可选) 节点地区/名称标识 (例如: los, sg, hk)，留空自动根据公网 IP 智能识别
+	SBDomain           string            `yaml:"sb_domain,omitempty"`  // 兼容旧配置：默认主域名
+	NodeDomain         string            `yaml:"node_domain"`          // 节点主域名 (Hysteria 2 / VLESS 分享链接主机)
+	Hy2Port            int               `yaml:"hy2_port,omitempty"`   // (可选) Hysteria 2 (UDP QUIC) 对外监听与订阅端口，默认 443
+	VlessPort          int               `yaml:"vless_port,omitempty"` // (可选) VLESS Reality (TCP) 与 HTTPS 伪装站对外监听与订阅端口，默认 443
+	SubstoreDomain     string            `yaml:"substore_domain"`      // Sub-Store 专属域名
+	ServerIP           string            `yaml:"server_ip"`            // 公网 IP 地址（选填，未填写时自动探测用于申请 Let's Encrypt 原生 IP 证书）
 	CFDNSKey           string            `yaml:"cf_dns_key"`
 	Sni                string            `yaml:"sni"`
 	CorsAllowedOrigins string            `yaml:"cors_allowed_origins,omitempty"`

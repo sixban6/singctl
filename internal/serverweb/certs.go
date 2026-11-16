@@ -22,7 +22,7 @@ import (
 // CertHealth 单个域名的 TLS 证书健康度与剩余有效期详情
 type CertHealth struct {
 	Domain        string `json:"domain"`
-	Role          string `json:"role"` // "节点域名" | "订阅/面板域名" | "节点与订阅合一"
+	Role          string `json:"role"`   // "节点域名" | "订阅/面板域名" | "节点与订阅合一"
 	Status        string `json:"status"` // "healthy" | "expiring" | "expired" | "missing"
 	Issuer        string `json:"issuer,omitempty"`
 	NotAfter      string `json:"notAfter,omitempty"`

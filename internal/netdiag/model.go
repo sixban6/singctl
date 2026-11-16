@@ -136,23 +136,23 @@ type AdviceResult struct {
 	QualityLevel        RouteQuality `json:"quality_level"`
 	RecommendedProtocol ProtocolType `json:"recommended_protocol"`
 	ProtocolReason      string       `json:"protocol_reason"`
-	SuggestedHy2Up      int          `json:"suggested_hy2_up"`   // 建议填写到 singctl.yaml 的 hy2.up (Mbps)
-	SuggestedHy2Down    int          `json:"suggested_hy2_down"` // 建议填写到 singctl.yaml 的 hy2.down (Mbps)
-	CarrierMatchScore   int          `json:"carrier_match_score"`// 0-100 本地宽带与该 VPS 线路匹配度评分
-	CarrierAdvice       string       `json:"carrier_advice"`     // 选型与晚高峰稳定性分析
-	CanAutoApply        bool         `json:"can_auto_apply"`     // 是否可将参数直接应用到 singctl.yaml
+	SuggestedHy2Up      int          `json:"suggested_hy2_up"`    // 建议填写到 singctl.yaml 的 hy2.up (Mbps)
+	SuggestedHy2Down    int          `json:"suggested_hy2_down"`  // 建议填写到 singctl.yaml 的 hy2.down (Mbps)
+	CarrierMatchScore   int          `json:"carrier_match_score"` // 0-100 本地宽带与该 VPS 线路匹配度评分
+	CarrierAdvice       string       `json:"carrier_advice"`      // 选型与晚高峰稳定性分析
+	CanAutoApply        bool         `json:"can_auto_apply"`      // 是否可将参数直接应用到 singctl.yaml
 }
 
 // DiagReport 综合诊断报告
 type DiagReport struct {
-	Target     string       `json:"target"`
-	TargetIP   string       `json:"target_ip"`
-	TargetPort int          `json:"target_port"`
-	ScanTime   time.Time    `json:"scan_time"`
-	IsPeakHour bool         `json:"is_peak_hour"` // 是否晚高峰 (20:00-24:00)
-	LocalISP   *ISPInfo     `json:"local_isp"`
-	TargetISP  *ISPInfo     `json:"target_isp,omitempty"`
-	Ping       *PingResult  `json:"ping"`
-	Trace      *TraceResult `json:"trace,omitempty"`
-	Advice     *AdviceResult`json:"advice"`
+	Target     string        `json:"target"`
+	TargetIP   string        `json:"target_ip"`
+	TargetPort int           `json:"target_port"`
+	ScanTime   time.Time     `json:"scan_time"`
+	IsPeakHour bool          `json:"is_peak_hour"` // 是否晚高峰 (20:00-24:00)
+	LocalISP   *ISPInfo      `json:"local_isp"`
+	TargetISP  *ISPInfo      `json:"target_isp,omitempty"`
+	Ping       *PingResult   `json:"ping"`
+	Trace      *TraceResult  `json:"trace,omitempty"`
+	Advice     *AdviceResult `json:"advice"`
 }

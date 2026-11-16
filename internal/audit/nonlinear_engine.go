@@ -145,7 +145,7 @@ func NewNonlinearEngine(cfg *config.Config) *NonlinearEngine {
 			src := singbox.NormalizeSourceIPCIDR(b.SourceIP)
 			eng.blockedKeys[src+"|"+target] = struct{}{}
 			// 同时索引去掉 /32 的纯 IP 键以便快速匹配
-			if plainIP := strings.TrimSuffix( strings.TrimSuffix(target, "/32"), "/128"); plainIP != target {
+			if plainIP := strings.TrimSuffix(strings.TrimSuffix(target, "/32"), "/128"); plainIP != target {
 				eng.blockedKeys[src+"|"+plainIP] = struct{}{}
 			}
 		}

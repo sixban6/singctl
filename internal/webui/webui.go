@@ -34,17 +34,17 @@ var staticFS embed.FS
 
 // Options Web 服务配置
 type Options struct {
-	ConfigPath            string                  // singctl 配置文件路径
-	SingBoxConfigPath     string                  // 可选：测试/定制 sing-box config.json 路径（留空使用 constant.SingBoxConfigFile）
-	SingBoxWorkConfigPath string                  // 可选：测试/定制沙盒副本 config.json 路径
-	AdGuardBinPath          string                  // 可选：测试/定制 AdGuardHome 二进制路径
-	AdGuardConfigPath       string                  // 可选：测试/定制 AdGuardHome.yaml 路径
-	SkipAdGuardProbeForTest bool                    // 仅供离线单元测试跳过公网上游实测
+	ConfigPath              string                      // singctl 配置文件路径
+	SingBoxConfigPath       string                      // 可选：测试/定制 sing-box config.json 路径（留空使用 constant.SingBoxConfigFile）
+	SingBoxWorkConfigPath   string                      // 可选：测试/定制沙盒副本 config.json 路径
+	AdGuardBinPath          string                      // 可选：测试/定制 AdGuardHome 二进制路径
+	AdGuardConfigPath       string                      // 可选：测试/定制 AdGuardHome.yaml 路径
+	SkipAdGuardProbeForTest bool                        // 仅供离线单元测试跳过公网上游实测
 	GatewayProberForTest    func() gateway.TopologyInfo // 仅供单元测试注入网络拓扑探测结果
-	Listen                string                  // 监听地址,如 ":8090"
-	Password              string                  // 可选的访问口令(空=不启用鉴权,建议仅在可信内网使用)
-	Version               string                  // singctl 版本号
-	OnReady               func(listenAddr string) // Listen 成功后的回调(后台子进程用于就绪握手)
+	Listen                  string                      // 监听地址,如 ":8090"
+	Password                string                      // 可选的访问口令(空=不启用鉴权,建议仅在可信内网使用)
+	Version                 string                      // singctl 版本号
+	OnReady                 func(listenAddr string)     // Listen 成功后的回调(后台子进程用于就绪握手)
 }
 
 // Server Web 管理服务
@@ -62,9 +62,9 @@ type Server struct {
 	auditLimiter *auditRateLimiter
 
 	// AdGuardHome 二进制版本短缓存（避免 /api/status 高频轮询每次 fork --version）
-	aghVerMu      sync.Mutex
-	aghVerBinKey  string
-	aghVerCached  string
+	aghVerMu     sync.Mutex
+	aghVerBinKey string
+	aghVerCached string
 
 	// Clash 控制接口（endpoint + secret）短缓存，避免高频轮询重复探测 /version
 	clashMu          sync.Mutex

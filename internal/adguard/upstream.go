@@ -70,10 +70,10 @@ type ProbeReport struct {
 }
 
 var builtinBypassIPv4Set = map[string]struct{}{
-	"223.5.5.5":     {},
-	"223.6.6.6":     {},
-	"1.12.12.12":    {},
-	"120.53.53.53":  {},
+	"223.5.5.5":    {},
+	"223.6.6.6":    {},
+	"1.12.12.12":   {},
+	"120.53.53.53": {},
 }
 
 var validIPv4LiteralRe = regexp.MustCompile(`^(?:\d{1,3}\.){3}\d{1,3}$`)
