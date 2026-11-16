@@ -701,8 +701,8 @@ show_side_router_guide() {
     printf "\n"
     echo_info "📌 旁路由接入配置指引 (本机旁路由: $side_ip | 上级主路由: $main_ip):"
     echo "  • 单设备手动接入: 将手机/电脑的【默认网关】与【DNS】同时设为 $side_ip"
-    echo "  • 全屋 DHCP 自动生效: 在主路由 ($main_ip) DHCP 设置中将【默认网关】与【DNS】设为 $side_ip"
-    echo "  • 重要防坑提醒: 旁路由自身请使用静态 IP (或在主路由绑定静态租约)，并在主路由关闭 LAN 侧 IPv6 RA/DHCPv6 通告以防流量绕过旁路由"
+    echo "  • 全屋 DHCP 自动生效: 在主路由 ($main_ip) 的【LAN / DHCP 服务器】设置中将默认网关与 DNS 设为 $side_ip（切勿修改主路由 WAN 口上游 DNS）"
+    echo "  • 重要防坑提醒: 旁路由自身建议使用静态 IP，并在主路由关闭 LAN 侧 IPv6 RA/DHCPv6 通告以防流量绕过旁路由"
 }
 
 # 配置订阅

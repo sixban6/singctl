@@ -27,15 +27,17 @@ type TopologyInfo struct {
 	CurrentGatewayIP      string `json:"currentGatewayIP"`
 	SuggestedMainRouterIP string `json:"suggestedMainRouterIP"`
 	SelfLooped            bool   `json:"selfLooped"`
+	HasLocalDNSListener   bool   `json:"hasLocalDNSListener,omitempty"`
 }
 
 // ResolvedPlan 表示校验通过后的网关执行计划。
 type ResolvedPlan struct {
-	Mode         string
-	MainRouterIP string
-	LANIP        string
-	LANCIDR      string
-	LANIface     string
+	Mode              string
+	MainRouterIP      string
+	LANIP             string
+	LANCIDR           string
+	LANIface          string
+	InterceptLocalDNS bool
 }
 
 // SysctlKV 表示单条内核运行参数键值。
@@ -91,10 +93,11 @@ func ResolveAndValidate(cfg config.GatewayConfig, topo TopologyInfo) (ResolvedPl
 	}
 
 	return ResolvedPlan{
-		Mode:         ModeSide,
-		MainRouterIP: gwAddr.String(),
-		LANIP:        lanIP,
-		LANCIDR:      lanCIDR,
-		LANIface:     iface,
+		Mode:              ModeSide,
+		MainRouterIP:      gwAddr.String(),
+		LANIP:             lanIP,
+		LANCIDR:           lanCIDR,
+		LANIface:          iface,
+		InterceptLocalDNS: !topo.HasLocalDNSListener,
 	}, nil
 }

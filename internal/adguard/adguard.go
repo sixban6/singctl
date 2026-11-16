@@ -373,15 +373,22 @@ func (m *Manager) ensureConfigFile(lanIP string, updateAuth bool) error {
 		return fmt.Errorf("加密管理员密码失败: %w", err)
 	}
 
+	isSideRouter := m.cfg != nil && m.cfg.Gateway.IsSideRouter()
+	var disablePrivatePTROpt *bool
+	if isSideRouter {
+		disablePrivatePTROpt = new(true)
+	}
+
 	if _, statErr := os.Stat(m.aghConfigFile); statErr == nil {
 		logger.Info("检测到已有配置文件 %s，执行无损同步（保留既有自定义规则与过滤器）...", m.aghConfigFile)
 		_, syncErr := SyncExistingConfig(m.aghConfigFile, SyncOptions{
-			LANIP:        lanIP,
-			WebPort:      m.cfg.DNS.GetWebPort(),
-			DNSPort:      m.cfg.DNS.GetDNSPort(),
-			Username:     m.cfg.DNS.GetUsername(),
-			PasswordHash: passHash,
-			UpdateAuth:   updateAuth,
+			LANIP:             lanIP,
+			WebPort:           m.cfg.DNS.GetWebPort(),
+			DNSPort:           m.cfg.DNS.GetDNSPort(),
+			Username:          m.cfg.DNS.GetUsername(),
+			PasswordHash:      passHash,
+			UpdateAuth:        updateAuth,
+			DisablePrivatePTR: disablePrivatePTROpt,
 		})
 		if syncErr == nil {
 			return nil
@@ -398,13 +405,14 @@ func (m *Manager) ensureConfigFile(lanIP string, updateAuth bool) error {
 	}
 
 	yamlData, err := BuildInitialConfigYAML(ConfigParams{
-		LANIP:        lanIP,
-		WebPort:      m.cfg.DNS.GetWebPort(),
-		DNSPort:      m.cfg.DNS.GetDNSPort(),
-		Username:     m.cfg.DNS.GetUsername(),
-		PasswordHash: passHash,
-		IsOpenWrt:    netinfo.IsOpenWrt(),
-		SubURLs:      subURLs,
+		LANIP:             lanIP,
+		WebPort:           m.cfg.DNS.GetWebPort(),
+		DNSPort:           m.cfg.DNS.GetDNSPort(),
+		Username:          m.cfg.DNS.GetUsername(),
+		PasswordHash:      passHash,
+		IsOpenWrt:         netinfo.IsOpenWrt(),
+		DisablePrivatePTR: isSideRouter,
+		SubURLs:           subURLs,
 	})
 	if err != nil {
 		return err
@@ -445,8 +453,12 @@ func (m *Manager) installAndStartService() error {
 		_ = exec.Command(m.initdScript, "enable").Run()
 		if out, err := exec.Command(m.initdScript, "restart").CombinedOutput(); err != nil {
 			if out2, err2 := exec.Command(m.initdScript, "start").CombinedOutput(); err2 != nil {
-				return fmt.Errorf("启动 OpenWrt AdGuardHome 服务失败: %v (%s / %s)", err2, strings.TrimSpace(string(out)), strings.TrimSpace(string(out2)))
+				logger.Warn("procd 启动 AdGuardHome 返回异常 (%v: %s / %s)，尝试直接守护拉起", err2, strings.TrimSpace(string(out)), strings.TrimSpace(string(out2)))
 			}
+		}
+		time.Sleep(300 * time.Millisecond)
+		if !isProcessRunning() {
+			return startBackgroundDirect(m.binPath, m.aghConfigFile, m.aghWorkDir)
 		}
 		return nil
 	}
@@ -521,10 +533,15 @@ func (m *Manager) Start() error {
 	} else {
 		// 自动修正局域网 IP 漂移（例如 DHCP 旁路由更换了网段 IP）
 		lanIP := sanitizeWebBindIP(netinfo.GetPrimaryLANIPv4())
+		var disablePrivatePTROpt *bool
+		if m.cfg != nil && m.cfg.Gateway.IsSideRouter() {
+			disablePrivatePTROpt = new(true)
+		}
 		_, _ = SyncExistingConfig(m.aghConfigFile, SyncOptions{
-			LANIP:   lanIP,
-			WebPort: m.cfg.DNS.GetWebPort(),
-			DNSPort: m.cfg.DNS.GetDNSPort(),
+			LANIP:             lanIP,
+			WebPort:           m.cfg.DNS.GetWebPort(),
+			DNSPort:           m.cfg.DNS.GetDNSPort(),
+			DisablePrivatePTR: disablePrivatePTROpt,
 		})
 	}
 
