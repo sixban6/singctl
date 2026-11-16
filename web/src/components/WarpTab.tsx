@@ -358,8 +358,10 @@ export const WarpTab: React.FC<WarpTabProps> = ({ onRefreshParent }) => {
     setActing(action);
     try {
       const res = await api.runWarpAction(action);
+      setData((prev) => (prev ? { ...prev, daemon: res.daemon } : prev));
       success(res.message);
-      await loadRouting(true);
+      await loadRouting(false);
+      loadConnections();
       onRefreshParent?.();
     } catch (err: any) {
       error(err.message || 'WARP 操作执行失败');
@@ -511,7 +513,7 @@ export const WarpTab: React.FC<WarpTabProps> = ({ onRefreshParent }) => {
             </div>
 
             <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
-              <span className="px-2.5 py-1 rounded-lg bg-slate-950/70 border border-slate-800 text-amber-300">
+              <span className="px-2.5 py-1 rounded-lg bg-slate-950/70 border border-slate-800 text-amber-300 break-all sm:break-normal">
                 WARP 出口: {daemon?.warpIp ? `${daemon.warpIp}${daemon.warpLoc ? ` (${daemon.warpLoc})` : ''}` : '待探测'}
               </span>
               <span className="px-2.5 py-1 rounded-lg bg-slate-950/70 border border-slate-800 text-sky-300">

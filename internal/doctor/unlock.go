@@ -126,7 +126,7 @@ func runExitDiagnostics(name string, client *http.Client, isWarp bool) ExitProfi
 	}
 
 	// 探测出口 IP 与 Loc
-	exitIP, loc := probeExitIPAndLoc(client)
+	exitIP, loc := probeExitIPAndLoc(client, isWarp)
 	profile.ExitIP = exitIP
 	profile.ExitLoc = loc
 
@@ -162,31 +162,40 @@ func runExitDiagnostics(name string, client *http.Client, isWarp bool) ExitProfi
 	return profile
 }
 
-func probeExitIPAndLoc(client *http.Client) (string, string) {
+func probeExitIPAndLoc(client *http.Client, isWarp bool) (string, string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, "GET", "https://1.1.1.1/cdn-cgi/trace", nil)
-	if err != nil {
-		return "", ""
+	traceURLs := []string{"https://1.1.1.1/cdn-cgi/trace"}
+	if isWarp {
+		traceURLs = []string{"https://cloudflare.com/cdn-cgi/trace", "https://1.1.1.1/cdn-cgi/trace"}
 	}
 
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", ""
-	}
-	defer resp.Body.Close()
+	for _, traceURL := range traceURLs {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, traceURL, nil)
+		if err != nil {
+			continue
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			continue
+		}
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
-	var ip, loc string
-	for _, line := range strings.Split(string(body), "\n") {
-		if strings.HasPrefix(line, "ip=") {
-			ip = strings.TrimPrefix(line, "ip=")
-		} else if strings.HasPrefix(line, "loc=") {
-			loc = strings.TrimPrefix(line, "loc=")
+		var ip, loc string
+		for line := range strings.SplitSeq(string(body), "\n") {
+			if v, ok := strings.CutPrefix(line, "ip="); ok {
+				ip = strings.TrimSpace(v)
+			} else if v, ok := strings.CutPrefix(line, "loc="); ok {
+				loc = strings.TrimSpace(v)
+			}
+		}
+		if ip != "" {
+			return ip, loc
 		}
 	}
-	return ip, loc
+	return "", ""
 }
 
 func checkOpenAI(client *http.Client) ServiceUnlockStatus {

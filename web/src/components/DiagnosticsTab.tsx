@@ -345,7 +345,10 @@ export const DiagnosticsTab: React.FC<DiagnosticsTabProps> = ({ status, onNaviga
 
             <div className="p-4 rounded-xl bg-slate-950/70 border border-slate-800">
               <span className="text-xs text-slate-400">出口公网 IP</span>
-              <div className="text-sm font-bold text-white font-mono mt-2 truncate">
+              <div
+                className="text-xs sm:text-sm font-bold text-white font-mono mt-2 break-all"
+                title={warpData.ip || ''}
+              >
                 {warpData.ip || '未知'}
               </div>
             </div>
