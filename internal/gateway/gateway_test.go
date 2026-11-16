@@ -100,23 +100,40 @@ func TestValidate_BlocksSelfLoopAndInjection(t *testing.T) {
 }
 
 func TestBuildSideRouterNFTAndSysctls(t *testing.T) {
-	nft := BuildSideRouterNFT(ResolvedPlan{
-		Mode:         ModeSide,
-		MainRouterIP: "192.168.100.1",
-		LANIP:        "192.168.100.2",
-		LANCIDR:      "192.168.100.0/24",
-		LANIface:     "eth0",
+	// 场景 A：无本地 53 监听（裸 Debian）-> 生成 prerouting :53 -> tproxy :7895 兜底规则
+	nftIntercept := BuildSideRouterNFT(ResolvedPlan{
+		Mode:              ModeSide,
+		MainRouterIP:      "192.168.100.1",
+		LANIP:             "192.168.100.2",
+		LANCIDR:           "192.168.100.0/24",
+		LANIface:          "eth0",
+		InterceptLocalDNS: true,
 	})
-	mustContain := []string{
+	for _, want := range []string{
 		"table inet singctl-side",
 		"th dport 53 tproxy to :7895 meta mark set 0x1 accept",
 		"tcp flags syn tcp option maxseg size set rt mtu",
 		`oifname "eth0" ip saddr 192.168.100.0/24 ip daddr != 192.168.100.0/24 masquerade`,
-	}
-	for _, want := range mustContain {
-		if !strings.Contains(nft, want) {
-			t.Fatalf("generated nft missing %q:\n%s", want, nft)
+	} {
+		if !strings.Contains(nftIntercept, want) {
+			t.Fatalf("generated nft (InterceptLocalDNS=true) missing %q:\n%s", want, nftIntercept)
 		}
+	}
+
+	// 场景 B：已有本地 dnsmasq 监听 :53（如 OpenWrt）-> 绝不拦截 :53，沿用主路由 fib local -> dnsmasq -> output -> sing-box 链路
+	nftOpenWrt := BuildSideRouterNFT(ResolvedPlan{
+		Mode:              ModeSide,
+		MainRouterIP:      "192.168.100.1",
+		LANIP:             "192.168.100.2",
+		LANCIDR:           "192.168.100.0/24",
+		LANIface:          "br-lan",
+		InterceptLocalDNS: false,
+	})
+	if strings.Contains(nftOpenWrt, "dport 53") || strings.Contains(nftOpenWrt, "chain prerouting") {
+		t.Fatalf("OpenWrt with local :53 listener must NOT hijack :53 in prerouting (avoids EADDRINUSE), got:\n%s", nftOpenWrt)
+	}
+	if !strings.Contains(nftOpenWrt, `oifname "br-lan" ip saddr 192.168.100.0/24 ip daddr != 192.168.100.0/24 masquerade`) {
+		t.Fatalf("OpenWrt nft missing masquerade rule:\n%s", nftOpenWrt)
 	}
 
 	sysctls := BuildSideRouterSysctls("br-lan", true)
@@ -201,8 +218,11 @@ func TestController_FW4IncludePersistenceAndCleanup(t *testing.T) {
 		wantSnippets []string
 	}{
 		{
-			chain:        "input",
-			wantSnippets: []string{`meta mark 0x1 accept comment "singctl-side"`},
+			chain: "input",
+			wantSnippets: []string{
+				`meta mark 0x1 accept comment "singctl-side"`,
+				`iifname "br-lan" accept comment "singctl-side"`,
+			},
 		},
 		{
 			chain: "forward",
@@ -242,5 +262,61 @@ func TestController_FW4IncludePersistenceAndCleanup(t *testing.T) {
 		if _, err := os.Stat(incPath); !os.IsNotExist(err) {
 			t.Fatalf("expected fw4 include %s to be removed after Teardown, got err: %v", incPath, err)
 		}
+	}
+}
+
+func TestParseProcNetUDPHasLANPort53AndResolvSelfHeal(t *testing.T) {
+	// 1. 仅 127.0.0.53:53 (little-endian: 3500007F:0035) 回环监听 -> 不冲突，返回 false
+	stubOnly := "  sl  local_address rem_address   st\n   1: 3500007F:0035 00000000:0000 07\n"
+	if ParseProcNetUDPHasLANPort53("192.168.100.2", stubOnly, "") {
+		t.Fatal("expected systemd-resolved loopback 127.0.0.53:53 to return false")
+	}
+
+	// 2. OpenWrt dnsmasq 0.0.0.0:53 (00000000:0035) -> 返回 true
+	wildcardV4 := "  sl  local_address rem_address   st\n   1: 00000000:0035 00000000:0000 07\n"
+	if !ParseProcNetUDPHasLANPort53("192.168.100.2", wildcardV4, "") {
+		t.Fatal("expected wildcard 0.0.0.0:53 listener to return true")
+	}
+
+	// 3. OpenWrt resolv.conf.auto 被 DHCP 污染为旁路由本机 IP (192.168.100.2) 时自动修复并在卸载时还原
+	tmp := t.TempDir()
+	resolvAuto := filepath.Join(tmp, "resolv.conf.auto")
+	origContent := "nameserver 192.168.100.2\nnameserver 127.0.0.1\n"
+	if err := os.WriteFile(resolvAuto, []byte(origContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctrl := &Controller{
+		StateDir:        filepath.Join(tmp, "state"),
+		FW4IncludeRoot:  filepath.Join(tmp, "fw4"),
+		ResolvGuardPath: resolvAuto,
+		Prober: func() TopologyInfo {
+			return TopologyInfo{
+				LANIP:               "192.168.100.2",
+				LANCIDR:             "192.168.100.0/24",
+				LANIface:            "br-lan",
+				CurrentGatewayIP:    "192.168.100.1",
+				HasLocalDNSListener: true,
+			}
+		},
+		Exec: func(name string, args ...string) ([]byte, error) {
+			return nil, nil
+		},
+	}
+
+	if err := ctrl.Apply(t.Context(), config.GatewayConfig{Mode: ModeSide, MainRouterIP: "192.168.100.1"}); err != nil {
+		t.Fatalf("Apply failed: %v", err)
+	}
+	healed, err := os.ReadFile(resolvAuto)
+	if err != nil || !strings.Contains(string(healed), "223.5.5.5") {
+		t.Fatalf("expected resolv.conf.auto to be healed with 223.5.5.5, got %q (err=%v)", string(healed), err)
+	}
+
+	if err := ctrl.Teardown(t.Context()); err != nil {
+		t.Fatalf("Teardown failed: %v", err)
+	}
+	restored, err := os.ReadFile(resolvAuto)
+	if err != nil || string(restored) != origContent {
+		t.Fatalf("expected resolv.conf.auto restored to %q, got %q (err=%v)", origContent, string(restored), err)
 	}
 }

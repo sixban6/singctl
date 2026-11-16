@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,10 +27,11 @@ const (
 
 // Controller 负责旁路由模式（Side Router）内核转发、默认路由自愈与防火墙规则的原子挂载与可逆卸载。
 type Controller struct {
-	StateDir       string
-	FW4IncludeRoot string
-	Prober         func() TopologyInfo
-	Exec           func(name string, args ...string) ([]byte, error)
+	StateDir        string
+	FW4IncludeRoot  string
+	ResolvGuardPath string
+	Prober          func() TopologyInfo
+	Exec            func(name string, args ...string) ([]byte, error)
 }
 
 // NewController 创建默认旁路由控制器。
@@ -104,10 +106,11 @@ func (c *Controller) Apply(ctx context.Context, cfg config.GatewayConfig) error 
 		}
 	}
 
-	// 2. 快照并应用可逆 sysctl 内核转发参数
+	// 2. 快照并应用可逆 sysctl 内核转发参数，同时确保旁路由本机 DNS 上游文件非空且无自环污染
 	if err := c.applySysctls(ctx, plan.LANIface); err != nil {
 		logger.Warn("旁路由部分 sysctl 参数设置受限(容器只读项已跳过): %v", err)
 	}
+	c.ensureSideRouterResolvUpstream(ctx, plan.LANIP)
 
 	// 3. 清理旧表后挂载独立隔离的旁路由规则表 + 宿主跨表放行项
 	c.cleanupFirewallOnly(ctx)
@@ -139,15 +142,133 @@ func (c *Controller) Apply(ctx context.Context, cfg config.GatewayConfig) error 
 	return nil
 }
 
-// Teardown 卸载旁路由专属防火墙表、撤回跨表放行规则并按快照还原 sysctl 参数。
+// Teardown 卸载旁路由专属防火墙表、撤回跨表放行规则并按快照还原 sysctl 参数与上游 DNS 文件。
 func (c *Controller) Teardown(ctx context.Context) error {
 	if runtime.GOOS != "linux" && c.Exec == nil {
 		return nil
 	}
 	c.cleanupFirewallOnly(ctx)
+	c.restoreSideRouterResolvUpstream(ctx)
 	c.restoreSysctls(ctx)
 	_ = os.RemoveAll(c.stateDir())
 	return nil
+}
+
+type resolvOrigSnapshot struct {
+	Path    string `json:"path"`
+	Existed bool   `json:"existed"`
+	Content string `json:"content"`
+}
+
+func isOpenWrtSystem() bool {
+	for _, p := range []string{"/etc/openwrt_release", "/etc/openwrt_version"} {
+		if _, err := os.Stat(p); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// ensureSideRouterResolvUpstream 确保旁路由本机上游 resolv 文件非空且不指向旁路由自身 IP：
+//   - OpenWrt 单臂旁路由删除 WAN 口后 /tmp/resolv.conf.d/resolv.conf.auto 常为空，或被主路由 DHCP 静态租约写成本机 IP，
+//     会导致 dnsmasq 因无可用上游直接向局域网回 REFUSED（无法触发 output 链进入 sing-box -> AdGuard Home 闭环）；
+//   - 此处写入诱饵公共上游 223.5.5.5 触发 dnsmasq 发包，发出的 53 报文在 output 链即被 sing-box 透明接管分流。
+func (c *Controller) ensureSideRouterResolvUpstream(ctx context.Context, lanIP string) {
+	targetPath := strings.TrimSpace(c.ResolvGuardPath)
+	isDnsmasqResolvFile := false
+
+	if targetPath != "" {
+		isDnsmasqResolvFile = strings.HasSuffix(targetPath, "resolv.conf.auto")
+	} else {
+		if c.Exec != nil {
+			return
+		}
+		if isOpenWrtSystem() {
+			isDnsmasqResolvFile = true
+			if out, err := c.runCmd(ctx, "uci", "-q", "get", "dhcp.@dnsmasq[0].resolvfile"); err == nil {
+				targetPath = strings.TrimSpace(string(out))
+			}
+			targetPath = cmp.Or(targetPath, "/tmp/resolv.conf.d/resolv.conf.auto")
+		} else {
+			targetPath = "/etc/resolv.conf"
+		}
+	}
+
+	raw, readErr := os.ReadFile(targetPath)
+	existed := readErr == nil
+	content := string(raw)
+
+	hasUsableUpstream := false
+	for line := range strings.SplitSeq(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		fields := strings.Fields(trimmed)
+		if len(fields) < 2 || fields[0] != "nameserver" {
+			continue
+		}
+		addr, err := netip.ParseAddr(fields[1])
+		if err != nil || addr.IsUnspecified() {
+			continue
+		}
+		if lanIP != "" && addr.String() == lanIP {
+			continue
+		}
+		if isDnsmasqResolvFile && addr.IsLoopback() {
+			continue
+		}
+		hasUsableUpstream = true
+		break
+	}
+	if hasUsableUpstream {
+		return
+	}
+
+	snapPath := filepath.Join(c.stateDir(), "resolv.orig.json")
+	if _, err := os.Stat(snapPath); os.IsNotExist(err) {
+		snap := resolvOrigSnapshot{
+			Path:    targetPath,
+			Existed: existed,
+			Content: content,
+		}
+		if b, mErr := json.Marshal(snap); mErr == nil {
+			_ = os.WriteFile(snapPath, b, 0600)
+		}
+	}
+
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
+		return
+	}
+	guardContent := "# Managed by singctl side-router guard\nnameserver 223.5.5.5\nnameserver 119.29.29.29\n"
+	if err := os.WriteFile(targetPath, []byte(guardContent), 0644); err != nil {
+		logger.Warn("写入旁路由上游 DNS 引导文件 %s 失败: %v", targetPath, err)
+		return
+	}
+	if isDnsmasqResolvFile {
+		_, _ = c.runCmd(ctx, "killall", "-HUP", "dnsmasq")
+	}
+}
+
+func (c *Controller) restoreSideRouterResolvUpstream(ctx context.Context) {
+	snapPath := filepath.Join(c.stateDir(), "resolv.orig.json")
+	raw, err := os.ReadFile(snapPath)
+	if err != nil {
+		return
+	}
+	var snap resolvOrigSnapshot
+	if err := json.Unmarshal(raw, &snap); err != nil || snap.Path == "" {
+		return
+	}
+	if snap.Existed {
+		_ = os.WriteFile(snap.Path, []byte(snap.Content), 0644)
+	} else {
+		_ = os.Remove(snap.Path)
+	}
+	_ = os.Remove(snapPath)
+	if strings.HasSuffix(snap.Path, "resolv.conf.auto") || isOpenWrtSystem() {
+		_, _ = c.runCmd(ctx, "killall", "-HUP", "dnsmasq")
+	}
 }
 
 func (c *Controller) applySysctls(ctx context.Context, lanIface string) error {
@@ -223,7 +344,7 @@ func (c *Controller) applyFW4PassThrough(ctx context.Context, lanIface string) {
 		}{
 			{
 				chain:   "input",
-				content: fmt.Sprintf("meta mark 0x1 accept comment %q\n", ruleCommentTag),
+				content: fmt.Sprintf("meta mark 0x1 accept comment %q\niifname %q accept comment %q\n", ruleCommentTag, lanIface, ruleCommentTag),
 			},
 			{
 				chain:   "forward",
@@ -247,12 +368,13 @@ func (c *Controller) applyFW4PassThrough(ctx context.Context, lanIface string) {
 		return
 	}
 	_, _ = c.runCmd(ctx, "nft", "insert", "rule", "inet", "fw4", "input", "meta", "mark", "0x1", "accept", "comment", ruleCommentTag)
+	_, _ = c.runCmd(ctx, "nft", "insert", "rule", "inet", "fw4", "input", "iifname", lanIface, "accept", "comment", ruleCommentTag)
 	_, _ = c.runCmd(ctx, "nft", "insert", "rule", "inet", "fw4", "forward", "iifname", lanIface, "accept", "comment", ruleCommentTag)
 	_, _ = c.runCmd(ctx, "nft", "insert", "rule", "inet", "fw4", "forward", "oifname", lanIface, "accept", "comment", ruleCommentTag)
 }
 
 func (c *Controller) applyLegacyIptablesSideRules(ctx context.Context, plan ResolvedPlan) error {
-	if plan.LANIP != "" {
+	if plan.InterceptLocalDNS && plan.LANIP != "" {
 		_, _ = c.runCmd(ctx, "iptables", "-t", "mangle", "-I", "PREROUTING", "1", "!", "-i", "lo", "-d", plan.LANIP, "-p", "udp", "--dport", "53", "-m", "comment", "--comment", ruleCommentTag, "-j", "TPROXY", "--on-port", "7895", "--tproxy-mark", "0x1")
 		_, _ = c.runCmd(ctx, "iptables", "-t", "mangle", "-I", "PREROUTING", "1", "!", "-i", "lo", "-d", plan.LANIP, "-p", "tcp", "--dport", "53", "-m", "comment", "--comment", ruleCommentTag, "-j", "TPROXY", "--on-port", "7895", "--tproxy-mark", "0x1")
 	}

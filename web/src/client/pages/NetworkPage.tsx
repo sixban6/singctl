@@ -418,7 +418,7 @@ export const GatewayModePage: React.FC<GatewayModePageProps> = ({ busy, onSaved 
             <p>
               2. <strong className="text-primary">全屋自动透明生效</strong>：登录上级主路由（
               <code className="font-mono text-primary">{mainGwDisplay}</code>）后台，在 LAN 口 DHCP 设置中将下发的「默认网关」与「DNS 服务器」填写为{' '}
-              <code className="font-mono text-cyan-300">{sideLanDisplay}</code>。
+              <code className="font-mono text-cyan-300">{sideLanDisplay}</code>（切勿修改主路由 WAN 口上游 DNS）。
             </p>
             <p>
               3. <strong className="text-primary">防绕过与防自环提醒</strong>：请为旁路由本机固定静态 IP（或在主路由绑定静态租约），并在主路由关闭 LAN 侧{' '}

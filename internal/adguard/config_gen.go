@@ -17,23 +17,25 @@ import (
 
 // ConfigParams 定义生成初始 AdGuardHome.yaml 所需的参数。
 type ConfigParams struct {
-	LANIP        string   // Web 面板绑定的局域网 IPv4（严禁 0.0.0.0）
-	WebPort      int      // Web 面板端口，默认 3000
-	DNSPort      int      // 本地 DNS 监听端口，默认 5353
-	Username     string   // 管理面板登录用户名，默认 root
-	PasswordHash string   // bcrypt 哈希密码（非空，以直接跳过首次引导向导）
-	IsOpenWrt    bool     // OpenWrt 下默认关闭查询日志落盘以保护闪存
-	SubURLs      []string // 订阅链接列表（自动将其域名加入放行白名单，防止误拦截）
+	LANIP             string   // Web 面板绑定的局域网 IPv4（严禁 0.0.0.0）
+	WebPort           int      // Web 面板端口，默认 3000
+	DNSPort           int      // 本地 DNS 监听端口，默认 5353
+	Username          string   // 管理面板登录用户名，默认 root
+	PasswordHash      string   // bcrypt 哈希密码（非空，以直接跳过首次引导向导）
+	IsOpenWrt         bool     // OpenWrt 下默认关闭查询日志落盘以保护闪存
+	DisablePrivatePTR bool     // 旁路由模式下关闭私网 PTR 反向解析，防止向主路由回环查询
+	SubURLs           []string // 订阅链接列表（自动将其域名加入放行白名单，防止误拦截）
 }
 
 // SyncOptions 定义对已存在的 AdGuardHome.yaml 进行非破坏性同步的选项。
 type SyncOptions struct {
-	LANIP        string
-	WebPort      int
-	DNSPort      int
-	Username     string // 非空且 UpdateAuth=true 时同步更新用户名
-	PasswordHash string // 非空且 UpdateAuth=true 时同步更新密码哈希
-	UpdateAuth   bool
+	LANIP             string
+	WebPort           int
+	DNSPort           int
+	Username          string // 非空且 UpdateAuth=true 时同步更新用户名
+	PasswordHash      string // 非空且 UpdateAuth=true 时同步更新密码哈希
+	UpdateAuth        bool
+	DisablePrivatePTR *bool // 非 nil 时同步 use_private_ptr_resolvers（旁路由防回环）
 }
 
 // sanitizeWebBindIP 确保 Web 面板绑定的 IP 合法且绝不为 0.0.0.0 / ::。
@@ -184,7 +186,7 @@ func BuildInitialConfigYAML(p ConfigParams) ([]byte, error) {
 			"bootstrap_prefer_ipv6":     false,
 			"upstream_timeout":          "5s",
 			"private_networks":          []string{},
-			"use_private_ptr_resolvers": true,
+			"use_private_ptr_resolvers": !p.DisablePrivatePTR,
 			"local_ptr_upstreams":       []string{},
 			"use_dns64":                 false,
 			"dns64_prefixes":            []string{},
@@ -381,6 +383,11 @@ func SyncExistingConfig(configPath string, opts SyncOptions) (bool, error) {
 	}
 	if setYAMLStringSlice(dnsMap, "bind_hosts", []string{"127.0.0.1"}) {
 		changed = true
+	}
+	if opts.DisablePrivatePTR != nil {
+		if setYAMLScalar(dnsMap, "use_private_ptr_resolvers", strconv.FormatBool(!*opts.DisablePrivatePTR), "!!bool") {
+			changed = true
+		}
 	}
 
 	if opts.UpdateAuth && strings.TrimSpace(opts.Username) != "" && config.IsHashedPassword(opts.PasswordHash) {
