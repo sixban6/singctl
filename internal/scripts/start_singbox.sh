@@ -66,11 +66,16 @@ check_network() {
 }
 
 # 检查端口占用
+# 检查端口占用（停止残留 sing-box 后若仍被其他进程如 OpenClash 占用则及时报错触发回滚）
 check_port() {
     local port=$1
-    if netstat -tuln | grep -q ":$port "; then
-        echo_succ "端口 $port 已被占用.强制重启"
+    if netstat -tuln 2>/dev/null | grep -q ":$port "; then
+        echo_warn "端口 $port 已被占用，正在清理残留 sing-box..."
         killall -9 sing-box 2>/dev/null || true
+        sleep 1
+        if netstat -tuln 2>/dev/null | grep -q ":$port "; then
+            error_exit "端口 $port 仍被其他进程占用，请先停止占用该端口的代理服务（如 OpenClash/PassWall）"
+        fi
     fi
 }
 
@@ -330,16 +335,24 @@ setup_firewall() {
 setup_route() {
     echo_succ "初始化IPV4路由"
     # 配置路由规则
-    ip rule del table $PROXY_ROUTE_TABLE >/dev/null 2>&1  # 删除已存在的规则
+    while ip rule del table $PROXY_ROUTE_TABLE >/dev/null 2>&1; do :; done
     ip rule add fwmark $PROXY_FWMARK table $PROXY_ROUTE_TABLE
 
     # 清理并添加路由
     ip route flush table $PROXY_ROUTE_TABLE >/dev/null 2>&1
     ip route add local default dev lo table $PROXY_ROUTE_TABLE
 
+    # 逃生路由：当宿主启用 net.ipv4.conf.all.src_valid_mark=1（如 Tailscale/WireGuard 策略路由）时，
+    # 内核 fib_validate_source() 会带 fwmark 查表 100；必须对内网/CGNAT 网段配置 throw 穿透回 main/table 52，
+    # 否则即使 rp_filter=0，所有局域网设备报文也会因源 IP 命中 local default dev lo 被判定为 martian source 静默丢弃。
+    for throw_cidr in 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16; do
+        ip route replace throw "$throw_cidr" table $PROXY_ROUTE_TABLE >/dev/null 2>&1 || \
+            ip route add throw "$throw_cidr" table $PROXY_ROUTE_TABLE >/dev/null 2>&1 || true
+    done
+
     echo_succ "初始化IPV6路由"
     # 配置 IPv6 路由规则
-    ip -6 rule del table $PROXY_ROUTE_TABLE >/dev/null 2>&1  # 删除已存在的规则
+    while ip -6 rule del table $PROXY_ROUTE_TABLE >/dev/null 2>&1; do :; done
     ip -6 rule add fwmark $PROXY_FWMARK table $PROXY_ROUTE_TABLE
 
     # 清理并添加 IPv6 路由
@@ -347,16 +360,26 @@ setup_route() {
     ip -6 route replace local default dev lo table $PROXY_ROUTE_TABLE
 }
 
+wait_tproxy_ready() {
+    local i=0
+    while [ $i -lt 10 ]; do
+        if pgrep "sing-box" >/dev/null 2>&1 && netstat -tuln 2>/dev/null | grep -q ":$TPROXY_PORT "; then
+            return 0
+        fi
+        sleep 1
+        i=$((i + 1))
+    done
+    return 1
+}
+
 start_singbox() {
     # 检查ujail是否可用
     if ! command -v ujail >/dev/null 2>&1; then
-        echo_warn "ujail 不可用，使用普通模式启动 sing-box"
         sing-box run -c "/etc/sing-box/config.json" >/dev/null 2>&1 &
-        sleep 2
-        if pgrep "sing-box" > /dev/null; then
+        if wait_tproxy_ready; then
            echo_succ "sing-box 启动成功 运行模式--TProxy(普通模式)"
         else
-           error_exit "sing-box 启动失败，请检查日志"
+           error_exit "sing-box 启动失败或未监听 TProxy 端口 :$TPROXY_PORT，请检查日志"
         fi
         return
     fi
@@ -393,11 +416,10 @@ start_singbox() {
         echo_warn "找不到sing-box可执行文件，跳过沙盒模式"
         # 使用普通模式启动
         sing-box run -c "/etc/sing-box/config.json" >/dev/null 2>&1 &
-        sleep 2
-        if pgrep "sing-box" > /dev/null; then
+        if wait_tproxy_ready; then
            echo_succ "sing-box 启动成功 运行模式--TProxy(普通模式)"
         else
-           error_exit "sing-box 启动失败，请检查配置和日志"
+           error_exit "sing-box 启动失败或未监听 TProxy 端口 :$TPROXY_PORT，请检查配置和日志"
         fi
         return
     fi
@@ -410,11 +432,10 @@ start_singbox() {
         echo_warn "ujail基础功能异常，查看 /tmp/ujail-test.log"
         echo_warn "跳过沙盒模式，使用普通模式启动..."
         sing-box run -c "/etc/sing-box/config.json" >/dev/null 2>&1 &
-        sleep 2
-        if pgrep "sing-box" > /dev/null; then
+        if wait_tproxy_ready; then
            echo_succ "sing-box 启动成功 运行模式--TProxy(普通模式)"
         else
-           error_exit "sing-box 启动失败，请检查配置和日志"
+           error_exit "sing-box 启动失败或未监听 TProxy 端口 :$TPROXY_PORT，请检查配置和日志"
         fi
         return
     fi
@@ -422,35 +443,34 @@ start_singbox() {
     # 尝试最简单的沙盒模式 - 添加必要的证书和配置访问
     echo_succ "尝试基础沙盒模式(证书+配置访问)..."
     : > /tmp/sing-box-basic.log && chmod 0600 /tmp/sing-box-basic.log
-    ujail -n sing-box \
-          -w /tmp \
-          -r /etc/ssl \
-          -r /etc/sing-box \
-          -r /usr/share/ca-certificates \
-          -r /etc/hosts \
-          -r /etc/resolv.conf \
-          -r /proc \
-          -- "$SINGBOX_EXEC" run -c /tmp/sing-box-work/config.json >>/tmp/sing-box-basic.log 2>&1 &
+    set -- -n sing-box -w /tmp
+    for ro_path in /etc/ssl /etc/sing-box /usr/share/ca-certificates /etc/hosts /etc/resolv.conf /proc; do
+        if [ -e "$ro_path" ]; then
+            set -- "$@" -r "$ro_path"
+        fi
+    done
+    ujail "$@" -- "$SINGBOX_EXEC" run -c /tmp/sing-box-work/config.json >>/tmp/sing-box-basic.log 2>&1 &
     UJAIL_PID=$!
     
-    sleep 3
-    if ps | grep -v grep | grep "ujail.*sing-box" > /dev/null; then
+    if ps | grep -v grep | grep "ujail.*sing-box" > /dev/null && wait_tproxy_ready; then
        echo_succ "sing-box 启动成功 运行模式--TProxy(基础沙盒)"
        echo_succ "沙盒特性: 进程隔离 + 临时目录访问"
        return
     fi
     
-    # 基础沙盒失败，尝试无参数ujail
+    # 基础沙盒失败，尝试最简沙盒（仍保留 /tmp 可写与 TLS 证书只读挂载，防止 cache.db 与 DoH 失败）
     echo_warn "基础沙盒失败，尝试最简沙盒..."
     kill $UJAIL_PID 2>/dev/null || true
     pkill -f "ujail.*sing-box" 2>/dev/null || true
     
     : > /tmp/sing-box-simple.log && chmod 0600 /tmp/sing-box-simple.log
-    ujail -n sing-box -p -r /etc/sing-box -- "$SINGBOX_EXEC" run -c /etc/sing-box/config.json >>/tmp/sing-box-simple.log 2>&1 &
+    set -- -n sing-box -p -w /tmp -r /etc/sing-box
+    [ -e /etc/ssl ] && set -- "$@" -r /etc/ssl
+    [ -e /etc/resolv.conf ] && set -- "$@" -r /etc/resolv.conf
+    ujail "$@" -- "$SINGBOX_EXEC" run -c /tmp/sing-box-work/config.json >>/tmp/sing-box-simple.log 2>&1 &
     UJAIL_PID=$!
     
-    sleep 3
-    if ps | grep -v grep | grep "ujail.*sing-box" > /dev/null; then
+    if ps | grep -v grep | grep "ujail.*sing-box" > /dev/null && wait_tproxy_ready; then
        echo_succ "sing-box 启动成功 运行模式--TProxy(最简沙盒)"
        echo_succ "沙盒特性: 基础进程隔离"
        return
@@ -464,11 +484,10 @@ start_singbox() {
     
     # 使用普通模式启动
     sing-box run -c "/etc/sing-box/config.json" >/dev/null 2>&1 &
-    sleep 2
-    if pgrep "sing-box" > /dev/null; then
+    if wait_tproxy_ready; then
        echo_succ "sing-box 启动成功 运行模式--TProxy(普通模式)"
     else
-       error_exit "sing-box 启动失败，请检查配置和日志"
+       error_exit "sing-box 启动失败或未监听 TProxy 端口 :$TPROXY_PORT，请检查配置和日志"
     fi
 }
 

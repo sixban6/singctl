@@ -121,7 +121,7 @@ ip route replace default via %s
 printf 'nameserver %s\noptions timeout:2 attempts:1\n' > /etc/resolv.conf
 `, sideLANIP, sideLANIP))
 
-	// 8. 配置 side-router 初始恶劣环境：模拟装有 Docker 导致 FORWARD DROP 且开启严格 rp_filter=1，网关暂指向 main-router
+	// 8. 配置 side-router 初始恶劣环境：模拟装有 Docker 导致 FORWARD DROP、严格 rp_filter=1 且启用 src_valid_mark=1（Tailscale/OpenWrt 常见配置），网关暂指向 main-router
 	mustExec(t, ctx, sideC, fmt.Sprintf(`
 set -e
 ip route replace default via %s
@@ -129,6 +129,7 @@ printf 'nameserver %s\n' > /etc/resolv.conf
 iptables -P FORWARD DROP
 sysctl -w net.ipv4.conf.all.rp_filter=1 >/dev/null
 sysctl -w net.ipv4.conf.eth0.rp_filter=1 >/dev/null
+sysctl -w net.ipv4.conf.all.src_valid_mark=1 >/dev/null
 `, mainLANIP, wanSrvIP))
 
 	// 对照实验：未启用旁路由模式前，lan-client 因 FORWARD DROP 无法转发连接，curl 必然超时失败

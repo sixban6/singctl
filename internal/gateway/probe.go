@@ -195,21 +195,22 @@ func pickPrimaryLANInterface(preferredIface string) (ifaceName, ipStr, netCIDR, 
 		return "", "", "", false
 	}
 
+	// OpenWrt 多网口设备若仍残留 WAN 默认路由，优先识别 br-lan 作为单臂局域网口；
+	// 单网口设备（无 br-lan，如 x86 eth0）则继续按默认路由出口网卡识别。
+	for _, ifi := range ifaces {
+		if ifi.Name == "br-lan" {
+			if ip, cidr, hp, ok := inspectIface(ifi); ok {
+				return ifi.Name, ip, cidr, hp
+			}
+		}
+	}
+
 	if preferredIface != "" {
 		for _, ifi := range ifaces {
 			if ifi.Name == preferredIface {
 				if ip, cidr, hp, ok := inspectIface(ifi); ok {
 					return ifi.Name, ip, cidr, hp
 				}
-			}
-		}
-	}
-
-	// OpenWrt 优先选择 br-lan
-	for _, ifi := range ifaces {
-		if ifi.Name == "br-lan" {
-			if ip, cidr, hp, ok := inspectIface(ifi); ok {
-				return ifi.Name, ip, cidr, hp
 			}
 		}
 	}

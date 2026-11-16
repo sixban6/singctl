@@ -22,7 +22,18 @@ const (
 	ruleCommentTag        = "singctl-side"
 	legacySideChainFwd    = "SINGCTL_SIDE_FWD"
 	legacySideChainNat    = "SINGCTL_SIDE_NAT"
+	proxyRouteTable       = "100"
 )
+
+var defaultThrowCIDRs = []string{
+	"0.0.0.0/8",
+	"10.0.0.0/8",
+	"100.64.0.0/10",
+	"127.0.0.0/8",
+	"169.254.0.0/16",
+	"172.16.0.0/12",
+	"192.168.0.0/16",
+}
 
 // Controller 负责旁路由模式（Side Router）内核转发、默认路由自愈与防火墙规则的原子挂载与可逆卸载。
 type Controller struct {
@@ -134,6 +145,10 @@ func (c *Controller) Apply(ctx context.Context, cfg config.GatewayConfig) error 
 	if c.hasCommand("iptables") {
 		c.applyIptablesFilterPassThrough(ctx, plan.LANIface)
 	}
+
+	// 5. 若 TProxy 策略路由表 100 已在运行（如 WebUI 热切旁路由模式），确保其包含私网/CGNAT throw 逃生路由，
+	// 避免宿主启用 net.ipv4.conf.all.src_valid_mark=1 时被内核 martian source 静默丢包。
+	c.ensureProxyTableThrowRoutes(ctx, plan.LANCIDR)
 
 	logger.Success("已启用旁路由模式 (本机单臂口: %s %s -> 上级主路由: %s)", plan.LANIface, plan.LANIP, plan.MainRouterIP)
 	return nil
@@ -249,6 +264,18 @@ func (c *Controller) applyFW4PassThrough(ctx context.Context, lanIface string) {
 	_, _ = c.runCmd(ctx, "nft", "insert", "rule", "inet", "fw4", "input", "meta", "mark", "0x1", "accept", "comment", ruleCommentTag)
 	_, _ = c.runCmd(ctx, "nft", "insert", "rule", "inet", "fw4", "forward", "iifname", lanIface, "accept", "comment", ruleCommentTag)
 	_, _ = c.runCmd(ctx, "nft", "insert", "rule", "inet", "fw4", "forward", "oifname", lanIface, "accept", "comment", ruleCommentTag)
+}
+func (c *Controller) ensureProxyTableThrowRoutes(ctx context.Context, lanCIDR string) {
+	out, err := c.runCmd(ctx, "ip", "-4", "route", "show", "table", proxyRouteTable)
+	if err != nil || !strings.Contains(string(out), "local ") {
+		return
+	}
+	for _, cidr := range defaultThrowCIDRs {
+		_, _ = c.runCmd(ctx, "ip", "-4", "route", "replace", "throw", cidr, "table", proxyRouteTable)
+	}
+	if trimmed := strings.TrimSpace(lanCIDR); trimmed != "" {
+		_, _ = c.runCmd(ctx, "ip", "-4", "route", "replace", "throw", trimmed, "table", proxyRouteTable)
+	}
 }
 
 func (c *Controller) applyLegacyIptablesSideRules(ctx context.Context, plan ResolvedPlan) error {
