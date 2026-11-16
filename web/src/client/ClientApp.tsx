@@ -500,9 +500,10 @@ const ClientShell: React.FC = () => {
             status={status ?? null}
             busy={busy}
             initialSub={sub}
-            onSubChange={(nextSub) => navigate('net', nextSub)}
+            onSubChange={(nextSub) => navigate('net', nextSub === 'gw' ? undefined : nextSub)}
             onAction={requestAction}
             onNavigate={navigateSafe}
+            onRefreshStatus={() => refreshStatus(true)}
           />
         )}
         {tab === 'config' && <ConfigPage onSaved={() => refreshStatus(true)} />}

@@ -78,13 +78,11 @@ check_command() {
     fi
 }
 
-# 检查网络连接
+# 检查网络连接（快速 1s 探测，禁 Ping 环境仅提示不阻塞）
 check_network() {
-    local ping_count=3
-    local test_host="8.8.8.8"
     echo_succ "检查网络连接..."
-    if ! ping -c $ping_count $test_host >/dev/null 2>&1; then
-        echo_warn "网络连接检查失败，但将继续启动服务"
+    if ! ping -c 1 -W 1 223.5.5.5 >/dev/null 2>&1 && ! ping -c 1 -W 1 8.8.8.8 >/dev/null 2>&1; then
+        echo_warn "ICMP 探测未响应（可能处于禁 Ping 环境），继续启动服务"
     fi
 }
 
@@ -98,83 +96,27 @@ check_port() {
     fi
 }
 
-# 安装并配置 firejail 沙盒
-install_firejail() {
-    echo_info "检查 firejail 沙盒工具..."
-    
-    if ! command -v firejail >/dev/null 2>&1; then
-        echo_info "firejail 未安装，开始自动安装..."
-        
-        # 更新包索引
-        apt update -qq
-        
-        # 安装 firejail
-        if apt install -y firejail; then
-            echo_succ "firejail 安装成功"
-        else
-            echo_err "firejail 安装失败"
-            return 1
-        fi
-    else
-        echo_info "firejail 已安装"
-    fi
-    
-    return 0
-}
-
-# 创建沙盒配置文件
+# 创建沙盒配置文件（仅在宿主已预装 firejail 时生成，不在启动期执行 apt update 避免阻塞；保留 TProxy 所需网络命名空间与 CAP_NET_ADMIN 能力）
 create_debian_sandbox() {
-    echo_info "创建 Debian 沙盒配置..."
-    
-    # 安装 firejail
-    if ! install_firejail; then
-        echo_warn "firejail 安装失败，将使用普通模式"
+    if ! command -v firejail >/dev/null 2>&1; then
         return 1
     fi
-        # 创建 firejail 配置文件
-        cat > /etc/sing-box/sing-box.profile << 'EOF'
-# Firejail profile for sing-box
-# 核心网络协议安全配置
-
-# 网络访问
-net none
-netfilter
-
-# 文件系统访问
-private-etc sing-box,ssl,ca-certificates,nsswitch.conf,host.conf,hosts,resolv.conf
-private-tmp
-private-dev
-
-# 允许必要的系统调用
+    echo_info "检测到已安装的 firejail，生成 TProxy 兼容沙盒配置..."
+    cat > /etc/sing-box/sing-box.profile << 'EOF'
+# Firejail profile for sing-box (TProxy compatible)
 seccomp
-caps.drop all
 nonewprivs
-noroot
-
-# 禁用危险功能
+caps.keep net_admin,net_raw,net_bind_service,dac_read_search
 disable-mnt
-apparmor
 x11 none
-
-# 允许的目录
-whitelist /etc/sing-box
-whitelist /tmp
-whitelist /var/log
-whitelist /dev/urandom
-whitelist /dev/random
-
-# 只读系统目录
 read-only /usr
 read-only /lib
 read-only /lib64
 read-only /bin
 read-only /sbin
-
-# 进程限制
 rlimit-nofile 65536
-rlimit-nproc 100
 EOF
-    echo_info "Firejail 配置已创建: /etc/sing-box/sing-box.profile"
+    chmod 0600 /etc/sing-box/sing-box.profile 2>/dev/null || true
     return 0
 }
 
@@ -214,8 +156,8 @@ init_env() {
     # 创建配置目录
     mkdir -p /etc/sing-box
     
-    # 创建沙盒环境
-    create_debian_sandbox
+    # 创建沙盒环境（可选）
+    create_debian_sandbox || true
 
     # 验证配置
     if [ ! -f "$CONFIG_FILE" ]; then
@@ -408,10 +350,10 @@ setup_route() {
     ip route flush table $PROXY_ROUTE_TABLE 2>/dev/null || true
     ip route add local default dev lo table $PROXY_ROUTE_TABLE
     
-    # 添加 IPv6 路由规则
-    ip -6 rule add fwmark $PROXY_FWMARK table $PROXY_ROUTE_TABLE
+    # 添加 IPv6 路由规则（兼容禁用 IPv6 的内核或容器环境）
+    ip -6 rule add fwmark $PROXY_FWMARK table $PROXY_ROUTE_TABLE 2>/dev/null || true
     ip -6 route flush table $PROXY_ROUTE_TABLE 2>/dev/null || true
-    ip -6 route add local default dev lo table $PROXY_ROUTE_TABLE
+    ip -6 route add local default dev lo table $PROXY_ROUTE_TABLE 2>/dev/null || true
     
     echo_succ "路由规则配置完成"
 }
@@ -419,81 +361,67 @@ setup_route() {
 # 启动 sing-box (支持沙盒)
 start_singbox() {
     echo_succ "启动 sing-box 服务 (TProxy模式)..."
-    
-    # 尝试使用 firejail 沙盒
-    if command -v firejail >/dev/null 2>&1 && [ -f /etc/sing-box/sing-box.profile ]; then
-        echo_info "使用 firejail 沙盒模式启动..."
-        
-        # 使用 firejail 启动
-        nohup firejail --profile=/etc/sing-box/sing-box.profile \
-            --name=sing-box \
-            sing-box run -c "$CONFIG_FILE" \
-            >/var/log/sing-box.log 2>&1 &
-            
-        sleep 3
-        if pgrep -f "firejail.*sing-box" >/dev/null; then
-            echo_succ "sing-box 启动成功 (firejail 沙盒模式)"
-            echo_info "沙盒特性: 文件系统隔离 + 网络过滤 + 系统调用限制"
-            return 0
-        else
-            echo_warn "firejail 沙盒启动失败，尝试普通模式..."
-        fi
-    fi
-    
-    # 尝试使用 systemd 安全特性
-    if systemctl --version >/dev/null 2>&1; then
-        echo_info "使用 systemd 安全特性启动..."
-        
-        # 创建临时 systemd 服务
+    local singbox_bin
+    singbox_bin=$(command -v sing-box)
+    mkdir -p /var/log
+
+    # 1) 若宿主机 PID 1 为 systemd，优先采用带文件系统隔离与网络能力的 systemd 服务托管
+    if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+        echo_info "使用 systemd 安全托管模式启动..."
         cat > /etc/systemd/system/sing-box-temp.service << EOF
 [Unit]
-Description=sing-box temporary service
+Description=sing-box client TProxy service
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/sing-box run -c $CONFIG_FILE
+ExecStart=$singbox_bin run -c $CONFIG_FILE
 Restart=no
-User=nobody
-Group=nogroup
-
-# 安全限制
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/etc/sing-box /tmp /var/log
 PrivateTmp=true
-ProtectKernelTunables=true
 ProtectControlGroups=true
 RestrictRealtime=true
-MemoryDenyWriteExecute=true
-
-# 网络命名空间保持开放 (代理需要)
 PrivateNetwork=false
 EOF
 
         systemctl daemon-reload
-        systemctl start sing-box-temp
-        sleep 3
-        
-        if systemctl is-active --quiet sing-box-temp; then
-            echo_succ "sing-box 启动成功 (systemd 安全模式)"
-            echo_info "安全特性: 用户降权 + 文件系统保护 + 内存保护"
-            return 0
-        else
-            echo_warn "systemd 安全模式启动失败，使用普通模式..."
-            systemctl stop sing-box-temp 2>/dev/null || true
+        if systemctl start sing-box-temp 2>/dev/null; then
+            sleep 1
+            if systemctl is-active --quiet sing-box-temp; then
+                echo_succ "sing-box 启动成功 (systemd 安全模式)"
+                return 0
+            fi
         fi
+        echo_warn "systemd 托管启动未就绪，回退后台守护模式..."
+        systemctl stop sing-box-temp 2>/dev/null || true
     fi
-    
-    # 普通模式启动
-    echo_warn "使用普通模式启动 (无沙盒保护)..."
-    nohup sing-box run -c "$CONFIG_FILE" >/var/log/sing-box.log 2>&1 &
-    sleep 3
-    
-    if pgrep "sing-box" >/dev/null; then
-        echo_succ "sing-box 启动成功 (普通模式)"
-        echo_warn "注意: 未使用沙盒保护，建议安装 firejail"
+
+    # 2) 若已安装 firejail，尝试轻量沙盒
+    if command -v firejail >/dev/null 2>&1 && [ -f /etc/sing-box/sing-box.profile ]; then
+        echo_info "使用 firejail 沙盒模式启动..."
+        nohup firejail --profile=/etc/sing-box/sing-box.profile \
+            --name=sing-box \
+            "$singbox_bin" run -c "$CONFIG_FILE" \
+            </dev/null >/var/log/sing-box.log 2>&1 &
+        sleep 1
+        if pgrep -f "sing-box" >/dev/null; then
+            echo_succ "sing-box 启动成功 (firejail 沙盒模式)"
+            return 0
+        fi
+        echo_warn "firejail 沙盒启动失败，回退直接启动模式..."
+    fi
+
+    # 3) 标准后台守护模式（彻底脱离标准输入输出管道，防止阻塞调用方）
+    nohup "$singbox_bin" run -c "$CONFIG_FILE" </dev/null >/var/log/sing-box.log 2>&1 &
+    sleep 1
+
+    if pgrep -x "sing-box" >/dev/null 2>&1 || pgrep -f "$singbox_bin run" >/dev/null 2>&1; then
+        echo_succ "sing-box 启动成功 (TProxy 守护模式)"
     else
         error_exit "sing-box 启动失败，请检查日志: /var/log/sing-box.log"
     fi
@@ -514,8 +442,8 @@ main() {
     echo_info "代理端口: $TPROXY_PORT"
 }
 
-# 捕获退出信号
-trap cleanup EXIT INT TERM
+# 仅在收到中断/终止信号时回滚清理（严禁注册 EXIT，否则正常启动结束瞬间会误删刚创建的 nftables 与路由规则！）
+trap cleanup INT TERM
 
 # 执行主函数
 main "$@"

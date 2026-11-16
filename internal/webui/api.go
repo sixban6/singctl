@@ -40,6 +40,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"adguard":        s.adguardStatusSummary(),
 		"tailscale":      tailscaleStatus(s.opts.ConfigPath),
 		"firewall":       firewallStatus(),
+		"gateway":        s.gatewayStatusSummary(),
 		"config":         configSummary(s.opts.ConfigPath),
 	}
 	writeJSON(w, http.StatusOK, status)

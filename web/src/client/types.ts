@@ -91,6 +91,32 @@ export interface ClientFirewallStatus {
   enabled: boolean;
 }
 
+export type GatewayRoleMode = 'main' | 'side';
+
+export interface ClientGatewayTopology {
+  lanIP: string;
+  lanCIDR: string;
+  hostPrefix?: string;
+  lanIface: string;
+  currentGatewayIP: string;
+  suggestedMainRouterIP: string;
+  selfLooped: boolean;
+}
+
+export interface ClientGatewayStatusSummary {
+  supported: boolean;
+  mode: GatewayRoleMode;
+  mainRouterIP: string;
+}
+
+export interface ClientGatewayConfigResponse {
+  supported: boolean;
+  mode: GatewayRoleMode;
+  mainRouterIP: string;
+  lanIface?: string;
+  topology: ClientGatewayTopology;
+}
+
 export interface ClientAdGuardStatusSummary {
   supported: boolean;
   installed: boolean;
@@ -236,6 +262,7 @@ export interface ClientStatusResponse {
   adguard?: ClientAdGuardStatusSummary;
   tailscale: ClientTailscaleStatus;
   firewall: ClientFirewallStatus;
+  gateway?: ClientGatewayStatusSummary;
   config: {
     path: string;
     exists: boolean;

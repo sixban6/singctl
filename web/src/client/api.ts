@@ -12,10 +12,12 @@ import {
   AuditReport,
   CacheResponse,
   ClientConfigDTO,
+  ClientGatewayConfigResponse,
   ClientHealthResponse,
   ClientLogsResponse,
   ClientRoutingReport,
   ClientStatusResponse,
+  GatewayRoleMode,
   SbConfigResponse,
   SbProxiesSnapshot,
   SbProxyMode,
@@ -189,6 +191,19 @@ export const clientApi = {
       '/api/traffic-routing',
       { method: 'PUT', body: JSON.stringify(payload) },
     ),
+
+  getGateway: () => request<ClientGatewayConfigResponse>('/api/gateway'),
+  saveGateway: (payload: { mode: GatewayRoleMode; mainRouterIP?: string; lanIface?: string }) =>
+    request<
+      ClientGatewayConfigResponse & {
+        ok: boolean;
+        appliedLive: boolean;
+        message: string;
+      }
+    >('/api/gateway', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
 
   getWatchdog: () => request<WatchdogReport>('/api/watchdog'),
   updateWatchdogConfig: (payload: Record<string, unknown>) =>

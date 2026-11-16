@@ -57,7 +57,7 @@ detect_sandbox_processes() {
     fi
     
     # 检查 systemd 服务
-    if systemctl is-active --quiet sing-box-temp 2>/dev/null; then
+    if [ -d /run/systemd/system ] && systemctl is-active --quiet sing-box-temp 2>/dev/null; then
         echo_info "检测到 systemd 安全模式的 sing-box 服务"
         has_processes=true
     fi
@@ -91,7 +91,7 @@ stop_sandbox_processes() {
     fi
     
     # 停止 systemd 服务
-    if systemctl is-active --quiet sing-box-temp 2>/dev/null; then
+    if [ -d /run/systemd/system ] && systemctl is-active --quiet sing-box-temp 2>/dev/null; then
         echo_info "停止 systemd 临时服务..."
         systemctl stop sing-box-temp 2>/dev/null || true
         systemctl disable sing-box-temp 2>/dev/null || true
@@ -153,20 +153,10 @@ cleanup_firewall() {
 # 清理路由规则
 cleanup_routes() {
     echo_info "清理路由规则..."
-    
-    # 删除 IPv4 路由规则
-    if ip rule list | grep -q "fwmark 0x$PROXY_FWMARK lookup $PROXY_ROUTE_TABLE"; then
-        ip rule del table $PROXY_ROUTE_TABLE 2>/dev/null || true
-        ip route flush table $PROXY_ROUTE_TABLE 2>/dev/null || true
-        echo_info "IPv4 路由规则已清理"
-    fi
-    
-    # 删除 IPv6 路由规则  
-    if ip -6 rule list | grep -q "fwmark 0x$PROXY_FWMARK lookup $PROXY_ROUTE_TABLE"; then
-        ip -6 rule del table $PROXY_ROUTE_TABLE 2>/dev/null || true
-        ip -6 route flush table $PROXY_ROUTE_TABLE 2>/dev/null || true
-        echo_info "IPv6 路由规则已清理"
-    fi
+    ip rule del fwmark $PROXY_FWMARK table $PROXY_ROUTE_TABLE 2>/dev/null || ip rule del table $PROXY_ROUTE_TABLE 2>/dev/null || true
+    ip route flush table $PROXY_ROUTE_TABLE 2>/dev/null || true
+    ip -6 rule del fwmark $PROXY_FWMARK table $PROXY_ROUTE_TABLE 2>/dev/null || ip -6 rule del table $PROXY_ROUTE_TABLE 2>/dev/null || true
+    ip -6 route flush table $PROXY_ROUTE_TABLE 2>/dev/null || true
 }
 
 # 清理配置文件

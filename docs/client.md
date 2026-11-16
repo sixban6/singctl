@@ -34,7 +34,20 @@ dns:                                          # (可选) 客户端本地防劫�
   web_port: 3000                              # Web 管理面板端口 (仅绑定本机局域网 IP，如 192.168.1.1)
   username: "root"                            # 管理账号 (首次安装可输入自定义账号，直接回车默认 root)
   password: ""                                # 管理密码 (首次安装留空时自动生成 16 位随机强密码)
+
+gateway:                                      # (可选) 客户端网关拓扑模式配置
+  mode: "main"                                # "main" (默认主路由模式) | "side" (旁路由单臂网关模式)
+  main_router_ip: ""                          # (旁路由模式必填) 上级主路由/网关 IP，例如 "192.168.1.1"
+  # lan_iface: ""                             # (可选) 指定单臂局域网网卡名，留空自动探测
 ```
+
+### 主路由模式与旁路由模式（Side Router）说明
+
+- **`mode: "main"`（主路由模式，默认）**：适用于设备直接拨号或接光猫充当全屋主网关的场景，保持标准原生 TProxy 规则运行。
+- **`mode: "side"`（旁路由 / 单臂网关模式）**：适用于 N1、小主机、OpenWrt 盒子或 PVE LXC 单网口挂在主路由 LAN 口下的场景：
+  - **安装阶段引导**：运行 `install.sh` 选择客户端模式后，可选择 `2) 旁路由模式`；脚本会自动探测当前上级主路由 IP（支持**直接回车确认**或**手动修改**，并自动拦截填成旁路由本机 IP 的自环错误）。
+  - **内核与防火墙自动收口**：`singctl sb start` 启动时自动对齐上级默认路由、开启 `ip_forward=1` 并关闭单臂 `rp_filter` / `send_redirects` / `bridge-nf-call-iptables`，同时挂载独立可逆的 `table inet singctl-side`（含本机 `:53` 透明 DNS 接管、TCP MSS 自动钳制防止 PPPoE `1492` MTU 下 HTTPS 卡死、单臂 `masquerade` 消除主路由状态防火墙 `ct state invalid` 非对称丢包，并在 `sing-box` 内部完整保留终端真实局域网 IP 供行为审计使用）。`singctl sb stop` 时自动卸载并还原系统参数。
+  - **终端 / 主路由 DHCP 接入要求**：将内网终端（或主路由 DHCP 下发）的 **默认网关** 与 **DNS 服务器** 同时设为旁路由 IP（如 `192.168.1.2`），为旁路由固定静态 IP，并在主路由关闭 LAN 侧 IPv6 RA/DHCPv6 通告以防终端经主路由 IPv6 直出绕过旁路由。
 
 > **注意**：`singctl sb gen` 和 `singctl sb start`（首次启动）需要 `subs` 中至少有一条有效的订阅 URL，否则会提示配置错误。`singctl sb stop`、`singctl sb install`、`singctl sb update` 不依赖订阅配置。
 >

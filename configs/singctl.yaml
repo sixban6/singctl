@@ -27,6 +27,11 @@ dns:                                             # (可选) 客户端本地防�
   username: "root"                               # 管理面板账号 (安装时可自定义，回车默认 root)
   password: ""                                   # 管理面板密码 (留空首次安装自动生成随机强密码)
 
+gateway:                                         # (可选) 客户端网关部署模式配置
+  mode: "main"                                   # "main" (默认主路由模式) | "side" (旁路由单臂网关模式)
+  main_router_ip: ""                             # (旁路由模式必填) 上级主路由/网关 IP，例如 "192.168.1.1"
+  # lan_iface: ""                                # (可选) 指定单臂局域网网卡名，留空自动探测
+
 tailscale:                                      # (可选) Tailscale 部署配置
   auth_key: ""                                  # (可选) Tailscale 授权密钥。默认是: ""
   subnets: ""                                   # (可选) 配置通告的子网，默认为空，程序会自动获取

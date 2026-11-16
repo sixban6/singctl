@@ -23,7 +23,7 @@
 
 | 场景定位 | 核心能力亮点 |
 | :--- | :--- |
-| **🏠 客户端模式**<br>*(OpenWrt / macOS / Linux / Win)* | • **开箱即用透明网关**：内置全量 46 个离线规则集快照（断网也能秒起）+ 自动托管本地防劫持 **AdGuard Home DNS**。<br>• **`:8090` 可视化控制台**：浏览器一键完成订阅拉取、节点切换、iOS 扫码导出与版本热升级。<br>• **局域网安全/隐私双轴审计**：实时识别内网设备异常外联与电视/IoT 隐私遥测，支持域名/IP/规则集 **Sing-Box + DNS 双层一键拉黑**。 |
+| **🏠 客户端模式**<br>*(OpenWrt / macOS / Linux / Win)* | • **主路由 / 旁路由双模式透明网关**：默认主路由模式，安装向导支持一键切换**单臂旁路由模式**（自动探测主路由 IP、防自环校验、TCP MSS 钳制与防非对称丢包），内置 46 个离线规则集快照与本地防劫持 **AdGuard Home DNS**。<br>• **`:8090` 可视化控制台**：浏览器一键完成订阅拉取、节点切换、主/旁路由模式热切换、移动端扫描导入与版本热升级。<br>• **局域网安全/隐私双轴审计**：实时识别内网设备异常外联与电视/IoT 隐私遥测（旁路由模式下完整保留终端真实局域网 IP），支持域名/IP/规则集 **Sing-Box + DNS 双层一键拉黑**。 |
 | **☁️ 服务端模式**<br>*(单台 VPS / 全球多节点舰队)* | • **四核合一零特征隐蔽**：`sing-box + Caddy + SubHub + WARP` 一键协同，443 动态伪装站点 + 16 位隐蔽后台路径防探测。<br>• **60s 裸机舰队扩容 (`singctl fl new`)**：新买 VPS 只需给 **IP + 初始密码**，主控自动配 DNS、改 2222 端口免密并汇入**唯一总订阅**。<br>• **全自动巡检与漏洞自愈**：内置 `doctor` 全链路体检、三网回程路由画像（CN2/9929/CMI）与凌晨窗口零中断安全自愈。 |
 
 ---
@@ -46,8 +46,11 @@
 # 国内裸机软路由首次安装（多镜像加速，零代理直装）
 curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/sixban6/singctl/main/install.sh | sh
 
-# 海外或已有代理环境（GitHub 官方直连）
+# 海外或已有代理环境（GitHub 官方直连；安装引导默认主路由模式，亦可按提示选择 2 旁路由模式并回车确认主路由网关 IP）
 curl -fsSL https://raw.githubusercontent.com/sixban6/singctl/main/install.sh | sh
+
+# 非交互式一键安装为客户端旁路由模式（可选指定上级主路由 IP）
+curl -fsSL https://raw.githubusercontent.com/sixban6/singctl/main/install.sh | sh -s -- --client --side-router --main-router-ip 192.168.1.1
 ```
 
 #### 2. macOS 客户端

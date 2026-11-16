@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"singctl/internal/config"
 	"singctl/internal/constant"
+	"singctl/internal/gateway"
 	"singctl/internal/logger"
 	"singctl/internal/scripts"
 	"singctl/internal/util/file"
@@ -43,6 +44,16 @@ func (sb *SingBox) SetConfigPath(path string) {
 
 // Start 启动 sing-box（调用脚本）
 func (sb *SingBox) Start() error {
+	if runtime.GOOS == "linux" {
+		gwCfg := config.GatewayConfig{}
+		if sb.config != nil {
+			gwCfg = sb.config.Gateway
+		}
+		if err := gateway.NewController().Apply(context.Background(), gwCfg); err != nil {
+			return fmt.Errorf("apply gateway topology failed: %w", err)
+		}
+	}
+
 	// Create temporary script file
 	tempDir := os.TempDir()
 	var scriptPath string
@@ -108,6 +119,10 @@ func (sb *SingBox) Stop() error {
 
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("stop sing-box failed: %w", err)
+	}
+
+	if runtime.GOOS == "linux" {
+		_ = gateway.NewController().Teardown(context.Background())
 	}
 
 	logger.Success("Sing-box stopped successfully")

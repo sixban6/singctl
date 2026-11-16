@@ -14,9 +14,13 @@ NC='\033[0m'
 # 检测 OpenWrt 版本
 OPENWRT_MAIN_VERSION=$(sed -n 's/VERSION="\([0-9]*\).*/\1/p' /etc/os-release 2>/dev/null)
 
-# 如果无法检测到版本，默认为旧版本（使用 iptables）
+# 如果无法检测到数字版本号（如 SNAPSHOT 固件），按是否安装 nft 自动判定
 if [ -z "$OPENWRT_MAIN_VERSION" ]; then
-    OPENWRT_MAIN_VERSION=22
+    if command -v nft >/dev/null 2>&1; then
+        OPENWRT_MAIN_VERSION=23
+    else
+        OPENWRT_MAIN_VERSION=22
+    fi
 fi
 
 # 获取当前时间

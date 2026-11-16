@@ -91,8 +91,10 @@ cleanup() {
     fi
 }
 
-# 捕获退出信号进行清理
-trap cleanup EXIT
+# 捕获退出信号进行清理（作为测试函数库加载时不注册全局 trap）
+if [ "${SINGCTL_INSTALL_LIB_ONLY:-0}" != "1" ]; then
+    trap cleanup EXIT
+fi
 
 # 检查权限
 check_permissions() {
@@ -419,6 +421,288 @@ setup_path() {
         echo "  export PATH=\"/usr/local/bin:\$PATH\""
         echo "  或将此命令添加到您的 shell 配置文件中"
     fi
+}
+
+# 校验合法单播 IPv4 地址（排除 0.x / 127.x / 组播 >=224 / 全广播）
+is_valid_unicast_ipv4() {
+    local ip="$1"
+    case "$ip" in
+        *[!0-9.]*|""|*..*|.*|*.)
+            return 1
+            ;;
+    esac
+    local o1 o2 o3 o4 extra
+    IFS='.' read -r o1 o2 o3 o4 extra <<EOF
+$ip
+EOF
+    [ -n "$o1" ] && [ -n "$o2" ] && [ -n "$o3" ] && [ -n "$o4" ] && [ -z "$extra" ] || return 1
+    for oct in "$o1" "$o2" "$o3" "$o4"; do
+        [ "$oct" -ge 0 ] 2>/dev/null && [ "$oct" -le 255 ] 2>/dev/null || return 1
+    done
+    if [ "$o1" -eq 0 ] || [ "$o1" -eq 127 ] || [ "$o1" -ge 224 ]; then
+        return 1
+    fi
+    if [ "$ip" = "255.255.255.255" ]; then
+        return 1
+    fi
+    return 0
+}
+
+# 自动探测本机局域网 IP、网卡与推荐主路由网关 IP（若当前默认网关缺失或自环本机，自动回退同网段 .1 / .254）
+detect_lan_ip_and_iface() {
+    DETECTED_LAN_IP=""
+    DETECTED_LAN_IFACE=""
+    DETECTED_MAIN_GW=""
+
+    if command -v ip >/dev/null 2>&1; then
+        DETECTED_LAN_IFACE=$(ip -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
+        DETECTED_MAIN_GW=$(ip -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="via"){print $(i+1); exit}}')
+        if [ -z "$DETECTED_LAN_IFACE" ]; then
+            if ip link show br-lan >/dev/null 2>&1; then
+                DETECTED_LAN_IFACE="br-lan"
+            else
+                DETECTED_LAN_IFACE=$(ip -o -4 addr show up scope global 2>/dev/null | awk '$2 !~ /^(lo|tailscale|tun|utun|wg|docker|veth)/ {print $2; exit}')
+            fi
+        fi
+        if [ -n "$DETECTED_LAN_IFACE" ]; then
+            DETECTED_LAN_IP=$(ip -o -4 addr show dev "$DETECTED_LAN_IFACE" scope global 2>/dev/null | awk '{sub(/\/.*/, "", $4); print $4; exit}')
+        fi
+    elif [ "$OS" = "darwin" ] && command -v route >/dev/null 2>&1; then
+        DETECTED_LAN_IFACE=$(route -n get default 2>/dev/null | awk '/interface:/{print $2; exit}')
+        DETECTED_MAIN_GW=$(route -n get default 2>/dev/null | awk '/gateway:/{print $2; exit}')
+        if [ -n "$DETECTED_LAN_IFACE" ] && command -v ipconfig >/dev/null 2>&1; then
+            DETECTED_LAN_IP=$(ipconfig getifaddr "$DETECTED_LAN_IFACE" 2>/dev/null || true)
+        fi
+    fi
+
+    if [ -z "$DETECTED_LAN_IP" ] && command -v uci >/dev/null 2>&1; then
+        DETECTED_LAN_IP=$(uci -q get network.lan.ipaddr 2>/dev/null || true)
+        [ -z "$DETECTED_LAN_IFACE" ] && DETECTED_LAN_IFACE="br-lan"
+    fi
+
+    # 若默认网关为空或等于本机 IP（自环），自动推导同网段 .1（若本机即为 .1 则推导 .254）
+    if [ -z "$DETECTED_MAIN_GW" ] || [ "$DETECTED_MAIN_GW" = "$DETECTED_LAN_IP" ]; then
+        if [ -n "$DETECTED_LAN_IP" ]; then
+            local prefix
+            prefix=$(echo "$DETECTED_LAN_IP" | awk -F. '{print $1"."$2"."$3}')
+            if [ "${prefix}.1" != "$DETECTED_LAN_IP" ]; then
+                DETECTED_MAIN_GW="${prefix}.1"
+            else
+                DETECTED_MAIN_GW="${prefix}.254"
+            fi
+        fi
+    fi
+}
+
+# 探测上级主路由二层连通性
+probe_gateway_reachable() {
+    local target_ip="$1"
+    if command -v ping >/dev/null 2>&1; then
+        ping -c 1 -W 1 "$target_ip" >/dev/null 2>&1
+        return $?
+    fi
+    return 0
+}
+
+# 原子更新 singctl.yaml 中的 gateway 配置段（严格保持 0600 权限）
+write_gateway_config() {
+    local gw_mode="$1"
+    local main_gw_ip="$2"
+    [ -f "$CONFIG_FILE" ] || return 0
+
+    local tmp_cfg="${CONFIG_FILE}.gw.tmp"
+    if grep -Eq '^gateway:[[:space:]]*(#.*)?$' "$CONFIG_FILE"; then
+        awk -v m="$gw_mode" -v ip="$main_gw_ip" '
+            BEGIN { in_gw = 0; wrote_m = 0; wrote_ip = 0 }
+            /^gateway:[[:space:]]*(#.*)?$/ {
+                in_gw = 1
+                print
+                next
+            }
+            in_gw && /^[^[:space:]#]/ {
+                if (!wrote_m) { printf "  mode: \"%s\"\n", m; wrote_m = 1 }
+                if (!wrote_ip) { printf "  main_router_ip: \"%s\"\n", ip; wrote_ip = 1 }
+                in_gw = 0
+            }
+            in_gw && /^[[:space:]]+mode:/ {
+                printf "  mode: \"%s\"\n", m
+                wrote_m = 1
+                next
+            }
+            in_gw && /^[[:space:]]+main_router_ip:/ {
+                printf "  main_router_ip: \"%s\"\n", ip
+                wrote_ip = 1
+                next
+            }
+            { print }
+            END {
+                if (in_gw) {
+                    if (!wrote_m) printf "  mode: \"%s\"\n", m
+                    if (!wrote_ip) printf "  main_router_ip: \"%s\"\n", ip
+                }
+            }
+        ' "$CONFIG_FILE" > "$tmp_cfg"
+    else
+        cat "$CONFIG_FILE" > "$tmp_cfg"
+        printf "\ngateway:\n  mode: \"%s\"\n  main_router_ip: \"%s\"\n" "$gw_mode" "$main_gw_ip" >> "$tmp_cfg"
+    fi
+    chmod 600 "$tmp_cfg"
+    mv -f "$tmp_cfg" "$CONFIG_FILE"
+}
+
+# 客户端网关部署角色选择（默认主路由模式；选旁路由时自动探测上级网关并支持回车确认或手动修改）
+configure_gateway_mode() {
+    SELECTED_GW_MODE="main"
+    SELECTED_MAIN_ROUTER_IP=""
+
+    local cli_gw_mode=""
+    local cli_main_ip=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --side-router)
+                cli_gw_mode="side"
+                ;;
+            --main-router)
+                cli_gw_mode="main"
+                ;;
+            --main-router-ip)
+                shift
+                cli_main_ip="${1:-}"
+                ;;
+            --main-router-ip=*)
+                cli_main_ip="${1#*=}"
+                ;;
+        esac
+        shift
+    done
+
+    detect_lan_ip_and_iface
+
+    local tty_path="${SINGCTL_TTY_PATH:-/dev/tty}"
+    local has_tty="false"
+    if [ -n "${SINGCTL_TTY_PATH:-}" ] && [ -f "$SINGCTL_TTY_PATH" ]; then
+        has_tty="true"
+    elif [ -c "$tty_path" ]; then
+        has_tty="true"
+    fi
+
+    if [ -n "$cli_gw_mode" ]; then
+        SELECTED_GW_MODE="$cli_gw_mode"
+    elif [ "$has_tty" = "true" ] && [ "$OS" != "darwin" ]; then
+        exec 3< "$tty_path"
+        printf "\n"
+        if supports_color; then
+            printf "\033[0;36m====================================================\033[0m\n"
+            printf "\033[1;32m  请选择客户端网关部署角色:\033[0m\n"
+            printf "  \033[1;37m1) 主路由模式 (Main Router)\033[0m [回车默认]\n"
+            printf "     • 设备本身作为拨号/上级主网关，直接接管局域网\n"
+            printf "  \033[1;37m2) 旁路由模式 (Side Router / 单臂网关)\033[0m\n"
+            printf "     • 单网口挂在主路由 LAN 口下，接管指向它的终端流量\n"
+            printf "\033[0;36m====================================================\033[0m\n"
+            printf "\033[0;33m请输入选项 [1-2] (默认 1 主路由模式): \033[0m"
+        else
+            printf "====================================================\n"
+            printf "  请选择客户端网关部署角色:\n"
+            printf "  1) 主路由模式 (Main Router) [回车默认]\n"
+            printf "     • 设备本身作为拨号/上级主网关，直接接管局域网\n"
+            printf "  2) 旁路由模式 (Side Router / 单臂网关)\n"
+            printf "     • 单网口挂在主路由 LAN 口下，接管指向它的终端流量\n"
+            printf "====================================================\n"
+            printf "请输入选项 [1-2] (默认 1 主路由模式): "
+        fi
+
+        local gw_choice=""
+        read -r gw_choice <&3 || gw_choice="1"
+        case "$gw_choice" in
+            2|side|Side|SIDE)
+                SELECTED_GW_MODE="side"
+                ;;
+            *)
+                SELECTED_GW_MODE="main"
+                ;;
+        esac
+    fi
+
+    if [ "$SELECTED_GW_MODE" = "main" ]; then
+        if [ "$has_tty" = "true" ] && [ -z "$cli_gw_mode" ] && [ "$OS" != "darwin" ]; then
+            exec 3<&- 2>/dev/null || true
+        fi
+        write_gateway_config "main" ""
+        echo_info "已启用【主路由模式 (main)】"
+        return 0
+    fi
+
+    echo_info "已选择【旁路由模式 (side)】"
+    if [ -n "$DETECTED_LAN_IP" ]; then
+        echo_info "检测到本机局域网地址: $DETECTED_LAN_IP (网卡: ${DETECTED_LAN_IFACE:-未知})"
+    fi
+
+    if [ -n "$cli_main_ip" ]; then
+        if ! is_valid_unicast_ipv4 "$cli_main_ip"; then
+            error_exit "指定的 --main-router-ip ($cli_main_ip) 不是合法的 IPv4 单播地址"
+        fi
+        if [ -n "$DETECTED_LAN_IP" ] && [ "$cli_main_ip" = "$DETECTED_LAN_IP" ]; then
+            error_exit "上级主路由 IP 不能等于旁路由本机 IP ($DETECTED_LAN_IP)，否则会导致路由死循环"
+        fi
+        SELECTED_MAIN_ROUTER_IP="$cli_main_ip"
+    elif [ "$has_tty" = "true" ]; then
+        if [ -n "$cli_gw_mode" ]; then
+            exec 3< "$tty_path"
+        fi
+        while :; do
+            if [ -n "$DETECTED_MAIN_GW" ]; then
+                printf "➜ 请确认上级主路由(网关) IP [回车确认: %s / 输入新 IP 修改]: " "$DETECTED_MAIN_GW"
+            else
+                printf "➜ 请输入上级主路由(网关) IP (如 192.168.1.1): "
+            fi
+            local input_gw=""
+            if ! read -r input_gw <&3; then
+                input_gw=""
+            fi
+            input_gw=$(printf "%s" "$input_gw" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            if [ -z "$input_gw" ]; then
+                input_gw="$DETECTED_MAIN_GW"
+            fi
+            if [ -z "$input_gw" ]; then
+                echo_error "上级主路由 IP 不能为空，请重新输入！"
+                continue
+            fi
+            if ! is_valid_unicast_ipv4 "$input_gw"; then
+                echo_error "输入的 IP ($input_gw) 格式无效，请输入合法的局域网 IPv4 地址！"
+                continue
+            fi
+            if [ -n "$DETECTED_LAN_IP" ] && [ "$input_gw" = "$DETECTED_LAN_IP" ]; then
+                echo_error "上级主路由 IP 不能等于旁路由本机 IP ($DETECTED_LAN_IP)，否则会造成路由死循环，请重新输入！"
+                continue
+            fi
+            if ! probe_gateway_reachable "$input_gw"; then
+                echo_warning "暂未收到主路由 $input_gw 的 Ping 响应（若主路由开启了禁 Ping 可忽略）"
+            fi
+            SELECTED_MAIN_ROUTER_IP="$input_gw"
+            break
+        done
+        exec 3<&- 2>/dev/null || true
+    else
+        if [ -z "$DETECTED_MAIN_GW" ]; then
+            error_exit "非交互旁路由安装未能自动探测到默认网关，请通过 --main-router-ip <IP> 指定主路由地址"
+        fi
+        SELECTED_MAIN_ROUTER_IP="$DETECTED_MAIN_GW"
+    fi
+
+    write_gateway_config "side" "$SELECTED_MAIN_ROUTER_IP"
+    echo_success "旁路由模式已写入配置 (上级主路由网关: $SELECTED_MAIN_ROUTER_IP)"
+}
+
+# 打印旁路由专属终端/主路由 DHCP 接入指引
+show_side_router_guide() {
+    [ "$SELECTED_GW_MODE" = "side" ] || return 0
+    local side_ip="${DETECTED_LAN_IP:-<旁路由IP>}"
+    local main_ip="${SELECTED_MAIN_ROUTER_IP:-<主路由IP>}"
+    printf "\n"
+    echo_info "📌 旁路由接入配置指引 (本机旁路由: $side_ip | 上级主路由: $main_ip):"
+    echo "  • 单设备手动接入: 将手机/电脑的【默认网关】与【DNS】同时设为 $side_ip"
+    echo "  • 全屋 DHCP 自动生效: 在主路由 ($main_ip) DHCP 设置中将【默认网关】与【DNS】设为 $side_ip"
+    echo "  • 重要防坑提醒: 旁路由自身请使用静态 IP (或在主路由绑定静态租约)，并在主路由关闭 LAN 侧 IPv6 RA/DHCPv6 通告以防流量绕过旁路由"
 }
 
 # 配置订阅
@@ -815,6 +1099,7 @@ select_mode_and_setup() {
     fi
 
     echo_info "已选择【客户端模式】"
+    configure_gateway_mode "$@"
     configure_subscription
     verify_installation
     show_completion_info
@@ -865,6 +1150,7 @@ select_mode_and_setup() {
         if [ "$OS" = "linux" ]; then
             "$INSTALL_DIR/singctl" dns status --config "$CONFIG_FILE" 2>/dev/null || true
         fi
+        show_side_router_guide
     else
         echo_warning "配置文件中尚未配置有效订阅"
         
@@ -891,6 +1177,7 @@ select_mode_and_setup() {
         if [ "$OS" = "linux" ]; then
             "$INSTALL_DIR/singctl" dns status --config "$CONFIG_FILE" 2>/dev/null || true
         fi
+        show_side_router_guide
     fi
 }
 
@@ -910,5 +1197,7 @@ main() {
     select_mode_and_setup "$@"
 }
 
-# 执行主函数
-main "$@"
+# 执行主函数（支持测试按库加载）
+if [ "${SINGCTL_INSTALL_LIB_ONLY:-0}" != "1" ]; then
+    main "$@"
+fi

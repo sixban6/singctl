@@ -95,14 +95,42 @@ type Config struct {
 	Subs   []Subscription `yaml:"subs"`
 	GitHub GitHubConfig   `yaml:"github"`
 	//GUI       GUIConfig       `yaml:"gui"`
-	Hy2         Hy2Config         `yaml:"hy2"`
-	DNS         ClientDNSConfig   `yaml:"dns,omitempty"`
-	Tailscale   TailscaleConfig   `yaml:"tailscale"`
-	Server      ServerConfig      `yaml:"server"`
-	Watchdog    WatchdogConfig    `yaml:"watchdog"`
-	Audit          AuditConfig          `yaml:"audit,omitempty" json:"audit,omitempty"`
+	Hy2            Hy2Config            `yaml:"hy2"`
+	DNS            ClientDNSConfig      `yaml:"dns,omitempty"`
+	Gateway        GatewayConfig        `yaml:"gateway,omitempty" json:"gateway,omitzero"`
+	Tailscale      TailscaleConfig      `yaml:"tailscale"`
+	Server         ServerConfig         `yaml:"server"`
+	Watchdog       WatchdogConfig       `yaml:"watchdog"`
+	Audit          AuditConfig          `yaml:"audit,omitempty" json:"audit,omitzero"`
 	CustomRules    CustomRulesConfig    `yaml:"custom_rules,omitempty"`
-	TrafficRouting TrafficRoutingConfig `yaml:"traffic_routing,omitempty" json:"traffic_routing,omitempty"`
+	TrafficRouting TrafficRoutingConfig `yaml:"traffic_routing,omitempty" json:"traffic_routing,omitzero"`
+}
+
+// GatewayConfig 定义客户端网关部署拓扑模式（默认主路由 main，可选单臂旁路由 side）。
+type GatewayConfig struct {
+	Mode         string `yaml:"mode,omitempty" json:"mode,omitempty"`
+	MainRouterIP string `yaml:"main_router_ip,omitempty" json:"main_router_ip,omitempty"`
+	LANIface     string `yaml:"lan_iface,omitempty" json:"lan_iface,omitempty"`
+}
+
+// EffectiveMode 返回归一化后的生效模式：默认始终为 "main"，仅当显式配置为 "side" 时返回 "side"。
+func (g GatewayConfig) EffectiveMode() string {
+	if strings.EqualFold(strings.TrimSpace(g.Mode), "side") {
+		return "side"
+	}
+	return "main"
+}
+
+// IsSideRouter 判断当前配置是否显式启用了旁路由（单臂网关）模式。
+func (g GatewayConfig) IsSideRouter() bool {
+	return g.EffectiveMode() == "side"
+}
+
+// IsEmpty 判断是否未显式设置任何网关配置字段。
+func (g GatewayConfig) IsEmpty() bool {
+	return strings.TrimSpace(g.Mode) == "" &&
+		strings.TrimSpace(g.MainRouterIP) == "" &&
+		strings.TrimSpace(g.LANIface) == ""
 }
 
 // AuditConfig 定义客户端设备行为审计与可选 AI 深度研判配置。
@@ -950,6 +978,7 @@ var knownYAMLKeys = []string{
 	"custom_rules", "block", "target", "source_ip", "reason", "ruleset_url", "rule_count", "preview", "created_at",
 	"outbounds", "tag", "default", "tolerance", "interrupt_exist_connections",
 	"route", "dns", "dns_port", "web_port",
+	"gateway", "main_router_ip", "lan_iface",
 	"audit", "whitelist", "ai", "endpoint", "api_key", "model",
 	"traffic_routing", "outbound",
 }
@@ -1147,11 +1176,12 @@ func MigrateConfig(configPath string, templateData []byte) error {
 	// 防止升级迁移将客户端配置块重新注入服务端或将 server 块注入客户端。
 	if hasYAMLKey(docNode, "subs") && hasYAMLKey(docNode, "server") {
 		oldHasServer := hasYAMLKey(oldDocNode, "server")
-		oldHasClient := hasYAMLKey(oldDocNode, "subs") || hasYAMLKey(oldDocNode, "dns") ||
+		oldHasClient := hasYAMLKey(oldDocNode, "subs") || hasYAMLKey(oldDocNode, "dns") || hasYAMLKey(oldDocNode, "gateway") ||
 			hasYAMLKey(oldDocNode, "tailscale") || hasYAMLKey(oldDocNode, "watchdog") || hasYAMLKey(oldDocNode, "hy2")
 		hasRealSub := oldCfg.HasRealSubs()
 		hasRealServer := oldCfg.HasActiveServerConfig()
 		hasCustomClientFields := strings.TrimSpace(oldCfg.Tailscale.AuthKey) != "" ||
+			!oldCfg.Gateway.IsEmpty() ||
 			strings.TrimSpace(oldCfg.DNS.Password) != "" ||
 			(oldCfg.DNS.Enabled != nil && !*oldCfg.DNS.Enabled)
 
@@ -1463,6 +1493,9 @@ func MigrateConfig(configPath string, templateData []byte) error {
 	if hasYAMLKey(oldDocNode, "traffic_routing") && !oldCfg.TrafficRouting.IsEmpty() {
 		replaceNode(docNode, "traffic_routing", oldCfg.TrafficRouting)
 	}
+	if hasYAMLKey(oldDocNode, "gateway") && !oldCfg.Gateway.IsEmpty() {
+		replaceNode(docNode, "gateway", oldCfg.Gateway)
+	}
 
 	newData, err := yaml.Marshal(&rootNode)
 	if err != nil {
@@ -1580,6 +1613,9 @@ func filterRoleNodesBeforeMerge(dstRoot, srcRoot *yaml.Node, cfg *Config) {
 		if key == "traffic_routing" && (cfg == nil || cfg.TrafficRouting.IsEmpty()) {
 			continue
 		}
+		if key == "gateway" && (cfg == nil || cfg.Gateway.IsEmpty()) {
+			continue
+		}
 		if isServerDoc {
 			// 纯服务端配置：只保留原文件已有的顶层键、server 以及非空的 custom_rules
 			if !hasKey(dstDoc, key) && key != "server" && !(key == "custom_rules" && cfg != nil && !cfg.CustomRules.IsEmpty()) {
@@ -1610,6 +1646,16 @@ func filterRoleNodesBeforeMerge(dstRoot, srcRoot *yaml.Node, cfg *Config) {
 				if len(crMap.Content) == 0 && cfg.CustomRules.IsEmpty() {
 					dstDoc.Content = append(dstDoc.Content[:i], dstDoc.Content[i+2:]...)
 				}
+				break
+			}
+		}
+	}
+
+	// 当 gateway 模式切换（如从 side 切回 main 并清空 main_router_ip）时，先清理 dstDoc 旧的 gateway 映射节点，由 srcDoc 最新值完整覆盖
+	if cfg != nil {
+		for i := 0; i+1 < len(dstDoc.Content); i += 2 {
+			if dstDoc.Content[i].Value == "gateway" {
+				dstDoc.Content = append(dstDoc.Content[:i], dstDoc.Content[i+2:]...)
 				break
 			}
 		}

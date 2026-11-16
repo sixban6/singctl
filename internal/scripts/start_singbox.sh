@@ -17,7 +17,14 @@ CYAN='\033[0;36m'
 YLW='\033[0;33m'
 RED='\033[0;31m'
 NC='\033[0m'
-OPENWRT_MAIN_VERSION=$(sed -n 's/VERSION="\([0-9]*\).*/\1/p' /etc/os-release)
+OPENWRT_MAIN_VERSION=$(sed -n 's/VERSION="\([0-9]*\).*/\1/p' /etc/os-release 2>/dev/null)
+if [ -z "$OPENWRT_MAIN_VERSION" ]; then
+    if command -v nft >/dev/null 2>&1; then
+        OPENWRT_MAIN_VERSION=23
+    else
+        OPENWRT_MAIN_VERSION=22
+    fi
+fi
 LOCAL_IPV4='{127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 224.0.0.0/4, 255.255.255.255/32, 100.64.0.0/10}'
 # 获取当前时间
 timestamp() {
