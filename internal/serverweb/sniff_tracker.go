@@ -1,10 +1,12 @@
 package serverweb
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -442,10 +444,22 @@ func normalizeIPString(raw string) string {
 	}
 	if host, _, err := net.SplitHostPort(s); err == nil && host != "" {
 		s = host
+	} else if len(s) > 7 && strings.EqualFold(s[:7], "::ffff:") {
+		rest := s[7:]
+		if host, _, err := net.SplitHostPort(rest); err == nil && host != "" {
+			s = host
+		} else {
+			s = rest
+		}
 	}
 	s = strings.TrimPrefix(s, "[")
 	s = strings.TrimSuffix(s, "]")
-	s = strings.TrimPrefix(s, "::ffff:")
+	if len(s) > 7 && strings.EqualFold(s[:7], "::ffff:") {
+		s = s[7:]
+	}
+	if pct := strings.IndexByte(s, '%'); pct > 0 {
+		s = s[:pct]
+	}
 	ip := net.ParseIP(s)
 	if ip == nil {
 		return ""
@@ -1987,20 +2001,35 @@ type nftSetEntry struct {
 
 func parseNFTDuration(s string) time.Duration {
 	s = strings.TrimSpace(s)
-	if s == "" {
+	if s == "" || strings.HasPrefix(s, "-") {
 		return 0
 	}
+	const maxNFTDays = 3650
 	var total time.Duration
 	if before, after, hasDay := strings.Cut(s, "d"); hasDay {
-		if days, err := strconv.Atoi(before); err == nil && days > 0 {
-			total += time.Duration(days) * 24 * time.Hour
+		days, err := strconv.Atoi(before)
+		if err != nil || days <= 0 {
+			return 0
 		}
+		if days > maxNFTDays {
+			days = maxNFTDays
+		}
+		total += time.Duration(days) * 24 * time.Hour
 		s = after
 	}
 	if s != "" {
-		if rem, err := time.ParseDuration(s); err == nil {
+		if strings.HasPrefix(s, "-") {
+			return 0
+		}
+		if rem, err := time.ParseDuration(s); err == nil && rem > 0 {
+			if rem > maxNFTDays*24*time.Hour {
+				rem = maxNFTDays * 24 * time.Hour
+			}
 			total += rem
 		}
+	}
+	if total < 0 {
+		return 0
 	}
 	return total
 }
@@ -2148,6 +2177,11 @@ func harvestNFTKernelLogs(ctx context.Context, t *SniffTracker) {
 		if out, err := exec.CommandContext(ctx, "dmesg").Output(); err == nil && len(out) > 0 {
 			if len(out) > 64*1024 {
 				out = out[len(out)-64*1024:]
+				if nl := bytes.IndexByte(out, '\n'); nl >= 0 {
+					out = out[nl+1:]
+				} else {
+					out = nil
+				}
 			}
 			content = string(out)
 		}
@@ -2216,6 +2250,9 @@ func ingestNFTKernelLogContent(t *SniffTracker, nodeID, nodeName, content string
 }
 
 func readTailBytes(path string, maxBytes int64) ([]byte, error) {
+	if maxBytes <= 0 {
+		return nil, nil
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -2226,21 +2263,32 @@ func readTailBytes(path string, maxBytes int64) ([]byte, error) {
 		return nil, err
 	}
 	size := st.Size()
+	if size <= 0 {
+		return nil, nil
+	}
 	offset := int64(0)
 	if size > maxBytes {
 		offset = size - maxBytes
 	}
 	if offset > 0 {
-		if _, err := f.Seek(offset, 0); err != nil {
+		if _, err := f.Seek(offset, io.SeekStart); err != nil {
 			return nil, err
 		}
 	}
 	buf := make([]byte, size-offset)
-	n, err := f.Read(buf)
-	if err != nil && n == 0 {
+	n, err := io.ReadFull(f, buf)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF && n == 0 {
 		return nil, err
 	}
-	return buf[:n], nil
+	res := buf[:n]
+	if offset > 0 {
+		if nl := bytes.IndexByte(res, '\n'); nl >= 0 {
+			res = res[nl+1:]
+		} else {
+			return nil, nil
+		}
+	}
+	return res, nil
 }
 
 func parseFail2banBannedIPs(raw string) []string {

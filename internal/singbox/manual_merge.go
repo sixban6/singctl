@@ -237,11 +237,15 @@ func MergeManualConfig(baseJSON, currentJSON, freshJSON string) (string, int, er
 	}
 
 	// 6. dns (保留用户新增/修改的 dns.servers、dns.rules 及策略字段)
+	var validRuleSets map[string]bool
+	if fRouteMap, ok := freshRoot["route"].(map[string]any); ok {
+		validRuleSets = extractTaggedSet(fRouteMap["rule_set"])
+	}
 	bDNS, _ := baseRoot["dns"].(map[string]any)
 	cDNS, _ := curRoot["dns"].(map[string]any)
 	fDNS, _ := freshRoot["dns"].(map[string]any)
 	if cDNS != nil && fDNS != nil {
-		changes += mergeDNS3Way(bDNS, cDNS, fDNS, validOutbounds)
+		changes += mergeDNS3Way(bDNS, cDNS, fDNS, validOutbounds, validRuleSets)
 	}
 
 	out, err := PrettyJSON(mustMarshalJSON(freshRoot))
@@ -670,7 +674,7 @@ func mergeRoute3Way(bRoute, cRoute, fRoute map[string]any, validOutbounds map[st
 	return changes
 }
 
-func mergeDNS3Way(bDNS, cDNS, fDNS map[string]any, validOutbounds map[string]bool) int {
+func mergeDNS3Way(bDNS, cDNS, fDNS map[string]any, validOutbounds, validRuleSets map[string]bool) int {
 	changes := 0
 
 	// 1. dns.servers
@@ -745,7 +749,7 @@ func mergeDNS3Way(bDNS, cDNS, fDNS map[string]any, validOutbounds map[string]boo
 			if srvTag := strField(rule, "server"); srvTag != "" && !validServers[srvTag] {
 				return false
 			}
-			return true
+			return hasValidRuleSetRefs(rule, validRuleSets)
 		})
 		if cnt > 0 {
 			fDNS["rules"] = mergedRules
@@ -798,7 +802,11 @@ func mergeOrderedRules3Way(baseRules, curRules, freshRules []any, isValid func(m
 		if seenInCur[k] <= baseCounts[k] {
 			continue
 		}
-		if rm, ok := r.(map[string]any); ok && isValid != nil && !isValid(rm) {
+		rm, ok := r.(map[string]any)
+		if !ok {
+			continue
+		}
+		if isValid != nil && !isValid(rm) {
 			continue
 		}
 		// 若 Fresh 已经天然包含完全一致的规则，则不重复插入
