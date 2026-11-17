@@ -528,6 +528,17 @@ server:
 		t.Fatalf("expected /api/server/subscriptions to return without blocking on slow upstream warmup (<120ms), took %v", subElapsed)
 	}
 
+	// Case 4: Security Sniffers — default GET /api/server/security/sniffers (without ?refresh=1) must return
+	// memory snapshot immediately (<120ms) without blocking on external GeoIP batch HTTP or Fleet SSH harvest!
+	srv.sniff.Observe("198.51.100.222", "TLS/443 握手探测", "masqueraded", 4)
+	sniffRec, sniffElapsed := authedGet("/api/server/security/sniffers")
+	if sniffRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 from /api/server/security/sniffers, got %d", sniffRec.Code)
+	}
+	if sniffElapsed > 120*time.Millisecond {
+		t.Fatalf("expected /api/server/security/sniffers SWR GET to return immediately (<120ms), took %v", sniffElapsed)
+	}
+
 	// Wait for background single-flight refreshes to complete and verify caches updated cleanly
 	time.Sleep(550 * time.Millisecond)
 	warpAfter, _ := authedGet("/api/server/warp/routing")

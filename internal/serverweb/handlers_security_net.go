@@ -192,7 +192,7 @@ type camouflagePreset struct {
 }
 
 func (s *Server) resolveLocalCamouflageDefaults(ctx context.Context) (ip, domain, sni string) {
-	cfg, _ := config.Load(s.opts.ConfigPath)
+	cfg, _ := s.getConfigSnapshot(150 * time.Millisecond)
 	if cfg != nil {
 		domain = cfg.Server.GetNodeDomain()
 		if domain == "" {
