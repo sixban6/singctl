@@ -152,6 +152,8 @@ export const SingBoxPage: React.FC<SingBoxPageProps> = ({
   const [jsonText, setJsonText] = useState('');
   const [selectedBackup, setSelectedBackup] = useState('');
   const [savingCfg, setSavingCfg] = useState(false);
+  const [preserveManual, setPreserveManual] = useState(true);
+  const [togglingPreserve, setTogglingPreserve] = useState(false);
   const [restoreConfirmOpen, setRestoreConfirmOpen] = useState(false);
 
   const sb = status?.singbox;
@@ -197,6 +199,7 @@ export const SingBoxPage: React.FC<SingBoxPageProps> = ({
       const d = await clientApi.getSbConfig();
       setSbCfg(d);
       setJsonText(d.content || '');
+      setPreserveManual(d.preserveManualConfig !== false);
       if (!d.checkable) {
         warn('未检测到 sing-box 可执行文件，保存时将仅执行 JSON 语法校验');
       }
@@ -453,6 +456,28 @@ export const SingBoxPage: React.FC<SingBoxPageProps> = ({
       error(`保存失败：${err instanceof Error ? err.message : '未知错误'}`);
     } finally {
       setSavingCfg(false);
+    }
+  };
+
+  const handleTogglePreserve = async (nextVal: boolean) => {
+    if (togglingPreserve) return;
+    const prevVal = preserveManual;
+    setPreserveManual(nextVal);
+    setTogglingPreserve(true);
+    try {
+      const res = await clientApi.setSbConfigPreserve(nextVal);
+      const effective = res.preserveManualConfig !== false;
+      setPreserveManual(effective);
+      success(
+        effective
+          ? '已开启「保留手动修改」：定时刷新订阅或升级版本时将自动保留 config.json 手改内容'
+          : '已关闭「保留手动修改」：下次刷新或生成配置时将按最新订阅与默认模板全新覆盖',
+      );
+    } catch (err: unknown) {
+      setPreserveManual(prevVal);
+      error(`切换失败：${err instanceof Error ? err.message : '未知错误'}`);
+    } finally {
+      setTogglingPreserve(false);
     }
   };
 
@@ -980,6 +1005,36 @@ export const SingBoxPage: React.FC<SingBoxPageProps> = ({
           subtitle={sbCfg ? `${sbCfg.path}${sbCfg.exists ? '' : '（尚未生成）'}` : '加载中…'}
           actions={
             <>
+              <div
+                className="inline-flex items-center gap-2 px-2.5 h-7 rounded-lg bg-surface2 border border-subtle text-xs text-secondary select-none"
+                title="开启后，定时刷新订阅、更新版本或重新生成配置时自动合并保留你对 config.json 的改动；关闭则按最新订阅与默认模板全新覆盖"
+              >
+                <span
+                  className="cursor-pointer"
+                  onClick={() => void handleTogglePreserve(!preserveManual)}
+                >
+                  保留手动修改
+                </span>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={preserveManual}
+                  aria-label="切换是否保留 config.json 手动修改"
+                  disabled={togglingPreserve}
+                  onClick={() => void handleTogglePreserve(!preserveManual)}
+                  className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border transition-colors focus:outline-none disabled:opacity-50 ${
+                    preserveManual
+                      ? 'bg-[var(--accent)] border-transparent'
+                      : 'bg-surface1 border-strong'
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform ${
+                      preserveManual ? 'translate-x-4' : 'translate-x-0.5'
+                    }`}
+                  />
+                </button>
+              </div>
               <Button size="xs" onClick={loadSbConfig} icon={<RefreshCw className="w-3 h-3" />}>
                 重新加载
               </Button>
@@ -1033,7 +1088,7 @@ export const SingBoxPage: React.FC<SingBoxPageProps> = ({
               className="w-full p-3.5 rounded-xl bg-[var(--console-bg)] text-slate-200 border border-subtle font-mono text-xs leading-relaxed focus:outline-none focus:border-strong"
             />
             <p className="text-xs text-muted">
-              保存前自动创建 `.webui-bak-时间戳` 备份，并通过 `sing-box check` 校验语义合法性；保存后如运行中请手动点击上方「重启内核」应用生效。
+              保存前自动创建 `.webui-bak-时间戳` 备份，并通过 `sing-box check` 校验语义合法性后热重载生效；右上角「保留手动修改」开启时，定时刷新订阅与更新版本会自动合并保留手改内容。
             </p>
           </div>
         </SectionCard>

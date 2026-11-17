@@ -306,6 +306,17 @@ func newGenCmd(defaultConfigPath string) *cobra.Command {
 				targetPath = outputPath
 			}
 
+			pureBaseJSON := configJSON
+			preservedChanges := 0
+			if !isIOS && outputPath == "" {
+				configJSON, preservedChanges = singbox.PrepareRegeneratedConfig(
+					cmd.Context(),
+					targetPath,
+					pureBaseJSON,
+					effectiveCfg.Watchdog.ShouldPreserveManualConfig(),
+				)
+			}
+
 			// 创建目录
 			dir := filepath.Dir(targetPath)
 			if err := os.MkdirAll(dir, 0755); err != nil {
@@ -318,6 +329,7 @@ func newGenCmd(defaultConfigPath string) *cobra.Command {
 				if err := os.Rename(targetPath, backupPath); err != nil {
 					return fmt.Errorf("备份现有配置失败: %w", err)
 				}
+				_ = os.Chmod(backupPath, 0600)
 				logger.Info("已备份现有配置到: %s", backupPath)
 				PruneConfigBackups(targetPath, 3)
 			}
@@ -328,6 +340,12 @@ func newGenCmd(defaultConfigPath string) *cobra.Command {
 				return fmt.Errorf("写入配置文件失败: %w", err)
 			}
 			_ = os.Chmod(targetPath, perm) // 防止已存在文件保留了旧权限
+			if !isIOS && outputPath == "" {
+				_ = singbox.SaveBaseSnapshot(targetPath, pureBaseJSON)
+				if preservedChanges > 0 {
+					logger.Success("🛡️ 已自动合并保留 %d 处 config.json 手动修改", preservedChanges)
+				}
+			}
 
 			if isIOS {
 				logger.Success("配置已生成: %s", targetPath)

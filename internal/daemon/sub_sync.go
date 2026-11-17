@@ -86,8 +86,8 @@ func (d *Daemon) syncSubscriptionsIfChanged() {
 		return
 	}
 
-	newHash, newCount, err := singbox.ProxyOutboundsFingerprint(freshJSON)
-	if err != nil || newCount == 0 {
+	_, subNodeCount, err := singbox.ProxyOutboundsFingerprint(freshJSON)
+	if err != nil || subNodeCount == 0 {
 		logger.Warn("[SubSync] Upstream subscription returned 0 valid proxy outbounds, ignoring")
 		UpdateRuntimeState(func(snap *DaemonRuntimeSnapshot) {
 			snap.LastSubSyncAt = nowStr
@@ -97,7 +97,37 @@ func (d *Daemon) syncSubscriptionsIfChanged() {
 		return
 	}
 
+	pureBaseJSON := freshJSON
+	if localized, _, locErr := singbox.LocalizeRuleSets(freshJSON, singbox.LocalizeOptions{
+		MirrorURL:    cfg.GitHub.MirrorURL,
+		CacheTTL:     singbox.DefaultRuleSetCacheTTL,
+		OfflineFirst: true,
+		Silent:       true,
+	}); locErr == nil {
+		pureBaseJSON = localized
+	}
+
+	preserveManual := cfg.Watchdog.ShouldPreserveManualConfig()
+	baseSnap, _ := singbox.LoadBaseSnapshot(cfgPath)
+	candidateJSON := pureBaseJSON
+	preservedChanges := 0
+	if preserveManual {
+		if merged, cnt, mErr := singbox.MergeManualConfig(baseSnap, string(currentBytes), pureBaseJSON); mErr == nil {
+			candidateJSON = merged
+			preservedChanges = cnt
+		}
+	}
+
+	newHash, newCount, err := singbox.ProxyOutboundsFingerprint(candidateJSON)
+	if err != nil || newCount == 0 {
+		return
+	}
+
 	if newHash == oldHash {
+		// 首次升级尚无基线快照且订阅节点无变化时，静默补建纯模板基线，自动捕获存量 SSH 手改差异
+		if baseSnap == "" {
+			_ = singbox.SaveBaseSnapshot(cfgPath, pureBaseJSON)
+		}
 		UpdateRuntimeState(func(snap *DaemonRuntimeSnapshot) {
 			snap.LastSubSyncAt = nowStr
 			snap.LastSubSyncNodeCt = newCount
@@ -108,17 +138,8 @@ func (d *Daemon) syncSubscriptionsIfChanged() {
 
 	logger.Info("[SubSync] Detected subscription node change (%d -> %d proxy outbounds), pre-validating new config...", oldCount, newCount)
 
-	if localized, _, locErr := singbox.LocalizeRuleSets(freshJSON, singbox.LocalizeOptions{
-		MirrorURL:    cfg.GitHub.MirrorURL,
-		CacheTTL:     singbox.DefaultRuleSetCacheTTL,
-		OfflineFirst: true,
-		Silent:       true,
-	}); locErr == nil {
-		freshJSON = localized
-	}
-
 	tmpPath := cfgPath + ".subsync.tmp"
-	if err := os.WriteFile(tmpPath, []byte(freshJSON), 0600); err != nil {
+	if err := os.WriteFile(tmpPath, []byte(candidateJSON), 0600); err != nil {
 		logger.Warn("[SubSync] Write staged config failed: %v", err)
 		return
 	}
@@ -202,8 +223,13 @@ func (d *Daemon) syncSubscriptionsIfChanged() {
 		return
 	}
 
+	_ = singbox.SaveBaseSnapshot(cfgPath, pureBaseJSON)
 	singbox.RestoreClashSelections(savedSelections)
-	logger.Success("[SubSync] Subscription nodes auto-synced seamlessly (%d -> %d outbounds)", oldCount, newCount)
+	if preservedChanges > 0 {
+		logger.Success("[SubSync] Subscription nodes auto-synced (%d -> %d outbounds, preserved %d manual config edits)", oldCount, newCount, preservedChanges)
+	} else {
+		logger.Success("[SubSync] Subscription nodes auto-synced seamlessly (%d -> %d outbounds)", oldCount, newCount)
+	}
 	UpdateRuntimeState(func(snap *DaemonRuntimeSnapshot) {
 		snap.LastSubSyncAt = now.Format(time.DateTime)
 		snap.LastSubSyncNodeCt = newCount

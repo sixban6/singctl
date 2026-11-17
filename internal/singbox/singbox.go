@@ -206,7 +206,9 @@ func (sb *SingBox) GenerateConfig() error {
 
 	// 规则集本地化：预下载 remote 规则集并改写为本地引用，
 	// 使 sing-box 启动不依赖 GitHub；下载失败自动回退/保留 remote
-	configContent, networkAborted := sb.localizeRuleSets(configContent)
+	pureBaseJSON, networkAborted := sb.localizeRuleSets(configContent)
+	preserveManual := sb.config == nil || sb.config.Watchdog.ShouldPreserveManualConfig()
+	configContent, preservedChanges := PrepareRegeneratedConfig(context.Background(), sb.configPath, pureBaseJSON, preserveManual)
 
 	// 备份原配置文件（如果存在）
 	if _, err := os.Stat(sb.configPath); err == nil {
@@ -214,6 +216,7 @@ func (sb *SingBox) GenerateConfig() error {
 		if err := os.Rename(sb.configPath, backupPath); err != nil {
 			return fmt.Errorf("backup sing-box config file failed: %w", err)
 		}
+		_ = os.Chmod(backupPath, 0600)
 		logger.Success("backup sing-box config file successfully, backup path: %s", backupPath)
 	}
 
@@ -234,6 +237,10 @@ func (sb *SingBox) GenerateConfig() error {
 	err = os.Rename(tmp, sb.configPath)
 	if err != nil {
 		return fmt.Errorf("rename config file failed: %w", err)
+	}
+	_ = SaveBaseSnapshot(sb.configPath, pureBaseJSON)
+	if preservedChanges > 0 {
+		logger.Success("🛡️ 已自动合并保留 %d 处 config.json 手动修改", preservedChanges)
 	}
 
 	if runtime.GOOS == "linux" {

@@ -259,6 +259,11 @@ export const clientApi = {
       method: 'PUT',
       body: JSON.stringify({ content }),
     }),
+  setSbConfigPreserve: (preserve: boolean) =>
+    request<{ ok: boolean; preserveManualConfig: boolean }>('/api/sbconfig/preserve', {
+      method: 'PUT',
+      body: JSON.stringify({ preserve }),
+    }),
   restoreSbConfig: (name: string) =>
     request<{ ok: boolean }>('/api/sbconfig/restore', {
       method: 'POST',

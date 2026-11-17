@@ -716,19 +716,24 @@ func checkSingBoxConfig(exe, content string) error {
 }
 
 func (s *Server) handleSbConfigGet(w http.ResponseWriter, r *http.Request) {
-	path := constant.SingBoxConfigFile
+	path := s.sbConfigPath()
 	content := ""
 	data, err := os.ReadFile(path)
 	exists := err == nil
 	if exists {
 		content = string(data)
 	}
+	preserveManual := true
+	if cfg, cfgErr := config.Load(configPathFor(s)); cfgErr == nil && cfg != nil {
+		preserveManual = cfg.Watchdog.ShouldPreserveManualConfig()
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"path":      path,
-		"exists":    exists,
-		"content":   content,
-		"backups":   sbconfigBackups(path),
-		"checkable": singboxBinaryPath() != "",
+		"path":                 path,
+		"exists":               exists,
+		"content":              content,
+		"backups":              sbconfigBackups(path),
+		"checkable":            singboxBinaryPath() != "",
+		"preserveManualConfig": preserveManual,
 	})
 }
 
@@ -793,6 +798,7 @@ func (s *Server) handleSbConfigPut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	path := s.sbConfigPath()
+	singbox.EnsureInitialBaseSnapshot(path)
 	if err := backupConfig(path); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "备份失败: "+err.Error())
 		return
@@ -809,6 +815,35 @@ func (s *Server) handleSbConfigPut(w http.ResponseWriter, r *http.Request) {
 	s.invalidateIOSCache()
 	s.invalidateClashCache()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "checked": checked})
+}
+
+func (s *Server) handleSbConfigPreservePut(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Preserve bool `json:"preserve"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "请求格式错误: "+err.Error())
+		return
+	}
+
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
+
+	cfgPath := configPathFor(s)
+	cfg, err := config.Load(cfgPath)
+	if err != nil || cfg == nil {
+		cfg = &config.Config{}
+	}
+	cfg.Watchdog.SetPreserveManualConfig(body.Preserve)
+	if err := config.Save(cfgPath, cfg); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "保存配置失败: "+err.Error())
+		return
+	}
+	_ = daemon.NotifyReload()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":                   true,
+		"preserveManualConfig": cfg.Watchdog.ShouldPreserveManualConfig(),
+	})
 }
 
 func (s *Server) handleSbConfigRestore(w http.ResponseWriter, r *http.Request) {

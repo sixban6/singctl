@@ -52,6 +52,7 @@ watchdog:                                      # (可选) 看门狗守护进程�
   confirm_wait: 30                              # 检测失败后二次确认等待(秒), 默认 30
   max_restarts: 3                               # 每小时最大自动重启次数, 默认 3
   sub_sync_interval: 600                        # 订阅节点变化自动无感同步间隔(秒), 默认 600 (10分钟; 设为 -1 关闭)
+  # preserve_manual_config: true                # 刷新订阅或更新版本时是否自动保留 config.json 手动修改, 默认 true
   # failover:                                   # (可选) 策略组自动故障切换配置 (默认开启, 可在 WebUI 看门狗页可视化配置)
   #   enabled: true                             # 是否启用故障切换与恢复回切, 默认 true
   #   groups: ["Proxy", "AI", "#VPS"]           # 默认仅守护活跃核心组 (不含底层闲置单节点池 #Nodes)

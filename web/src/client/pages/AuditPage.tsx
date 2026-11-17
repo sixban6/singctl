@@ -173,6 +173,62 @@ function fmtBytes(n?: number): string {
   return `${(v / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
+const NONLINEAR_FACTOR_LABELS: Record<string, string> = {
+  upload_asymmetry: '上/下行流量倒挂',
+  direct_ip_upload: '绕过 DNS 纯 IP 外发',
+  beacon_heartbeat: '规律定时信标心跳',
+  domain_entropy: '高熵随机域名特征',
+  telemetry_fingerprint: '遥测 / PCDN 指纹命中',
+  privacy_axis_extra: '暗夜作息 / 明文隐私附加',
+};
+
+function formatDeviceRoleLabel(role?: string): string {
+  switch (role) {
+    case 'iot':
+      return '智能家居 / IoT';
+    case 'mobile':
+      return '移动终端';
+    case 'desktop':
+      return '电脑 / 工作站';
+    case 'router':
+      return '下级路由';
+    default:
+      return '局域网终端';
+  }
+}
+
+function formatOutboundMeta(outbound?: string): {
+  label: string;
+  tone: 'neutral' | 'ok' | 'danger' | 'accent';
+} {
+  const raw = String(outbound || '').trim();
+  const lower = raw.toLowerCase();
+  if (!raw || lower === 'direct' || raw === '直连') {
+    return { label: '直连 DIRECT', tone: 'neutral' };
+  }
+  if (lower === 'block' || lower === 'reject' || raw === '拦截') {
+    return { label: '阻断 BLOCK', tone: 'danger' };
+  }
+  return { label: raw, tone: 'ok' };
+}
+
+function formatRelativeSeen(seenStr?: string): string {
+  if (!seenStr) return '';
+  const normalized = seenStr.includes('T') ? seenStr : seenStr.replace(' ', 'T');
+  const ts = Date.parse(normalized);
+  if (!Number.isFinite(ts)) {
+    return seenStr.length >= 16 ? seenStr.slice(5, 16) : seenStr;
+  }
+  const diffSec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (diffSec < 15) return '刚刚';
+  if (diffSec < 60) return `${diffSec}秒前`;
+  const mins = Math.floor(diffSec / 60);
+  if (mins < 60) return `${mins}分前`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}小时前`;
+  return seenStr.length >= 16 ? seenStr.slice(5, 16) : seenStr;
+}
+
 function threatRank(t?: string): number {
   if (t === 'high_risk') return 3;
   if (t === 'suspicious') return 2;
@@ -269,6 +325,7 @@ function persistAICache(map: Map<string, AuditAIReview>) {
 }
 
 export const AUDIT_DEFAULT_CACHE_KEY = 'client:audit:default';
+const FLOW_RENDER_STEP = 80;
 
 export interface AuditPageProps {
   active?: boolean;
@@ -289,8 +346,9 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
       return true;
     }
   });
-  const [sortBy, setSortBy] = useState<'risk' | 'upload' | 'download' | 'ratio'>('risk');
+  const [sortBy, setSortBy] = useState<'active' | 'risk' | 'upload' | 'download' | 'ratio'>('active');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
+  const [visibleLimit, setVisibleLimit] = useState(FLOW_RENDER_STEP);
 
   // Data state (initialized synchronously from SWR cache for 0ms instant open)
   const [report, setReport] = useState<AuditReport | null>(
@@ -344,6 +402,7 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
   const lastFetchedSigRef = useRef<string>('');
 
   const tableContainerRef = useRef<HTMLDivElement>(null);
+  const flowScrollRef = useRef<HTMLDivElement>(null);
 
   const setCachedReview = useCallback(
     (flowOrKey: AuditFlowRecord | string, target: string, rev: AuditAIReview, skipStorage = false) => {
@@ -404,7 +463,7 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
       if (onlySuspect) qs.set('suspicious', '1');
       if (sortBy) qs.set('sort', sortBy);
       if (sortDir) qs.set('dir', sortDir);
-      const isDefaultQuery = !trimDev && !onlySuspect && sortBy === 'risk' && sortDir === 'desc';
+      const isDefaultQuery = !trimDev && !onlySuspect && sortBy === 'active' && sortDir === 'desc';
 
       try {
         const rep = await clientApi.getAudit(qs, ctrl.signal);
@@ -598,6 +657,15 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
         return withDamp;
       });
 
+    const compareRiskHierarchy = (a: AuditFlowRecord, b: AuditFlowRecord): number => {
+      let c = stateRank(b.state) - stateRank(a.state);
+      if (c === 0) c = threatRank(b.threat) - threatRank(a.threat);
+      if (c === 0) c = (b.riskScore || 0) - (a.riskScore || 0);
+      if (c === 0) c = (b.activeConns || 0) - (a.activeConns || 0);
+      if (c === 0) c = (b.uploadBytes || 0) - (a.uploadBytes || 0);
+      return c;
+    };
+
     const sign = sortDir === 'asc' ? -1 : 1;
     damped.sort((a, b) => {
       if (sortBy === 'upload') {
@@ -615,14 +683,59 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
         if (c !== 0) return c;
         return (b.uploadBytes || 0) - (a.uploadBytes || 0);
       }
-      let c = stateRank(b.state) - stateRank(a.state);
-      if (c === 0) c = threatRank(b.threat) - threatRank(a.threat);
-      if (c === 0) c = (b.riskScore || 0) - (a.riskScore || 0);
-      if (c === 0) c = (b.uploadBytes || 0) - (a.uploadBytes || 0);
+      if (sortBy === 'risk') {
+        return compareRiskHierarchy(a, b) * sign;
+      }
+      // 默认 sortBy === 'active'：当前活跃连接置顶 -> 组内按风险评分层级从高到低排序
+      const aAct = (a.activeConns || 0) > 0 ? 1 : 0;
+      const bAct = (b.activeConns || 0) > 0 ? 1 : 0;
+      let c = bAct - aAct;
+      if (c === 0) c = compareRiskHierarchy(a, b);
       return c * sign;
     });
     return damped;
   }, [report, axisFilter, sortBy, sortDir, getCachedReview]);
+
+  const activeFlowCount = useMemo(
+    () => processedFlows.reduce((acc, f) => acc + ((f.activeConns || 0) > 0 ? 1 : 0), 0),
+    [processedFlows],
+  );
+
+  // 仅当用户主动改变筛选条件或排序维度时重置渲染游标并回到顶部（5s 静默刷新不打断当前滚动位置）
+  useEffect(() => {
+    setVisibleLimit(FLOW_RENDER_STEP);
+    if (flowScrollRef.current) {
+      flowScrollRef.current.scrollTop = 0;
+    }
+  }, [deviceFilter, axisFilter, onlySuspect, sortBy, sortDir]);
+
+  const visibleFlows = useMemo(
+    () => processedFlows.slice(0, visibleLimit),
+    [processedFlows, visibleLimit],
+  );
+
+  // 超宽屏 / 大视口下若初始批次未填满滚动区，自动补齐下一批确保出现滚动条
+  useEffect(() => {
+    const el = flowScrollRef.current;
+    if (!el || visibleLimit >= processedFlows.length) return;
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < 200) {
+      setVisibleLimit((prev) => Math.min(processedFlows.length, prev + FLOW_RENDER_STEP));
+    }
+  }, [visibleLimit, processedFlows.length]);
+
+  const handleFlowTableScroll = useCallback(
+    (e: React.UIEvent<HTMLDivElement>) => {
+      pointerDownUntilRef.current = Math.max(pointerDownUntilRef.current, Date.now() + 500);
+      const el = e.currentTarget;
+      if (
+        visibleLimit < processedFlows.length &&
+        el.scrollHeight - el.scrollTop - el.clientHeight < 280
+      ) {
+        setVisibleLimit((prev) => Math.min(processedFlows.length, prev + FLOW_RENDER_STEP));
+      }
+    },
+    [visibleLimit, processedFlows.length],
+  );
 
   const isDualAlert = useCallback(
     (f: AuditFlowRecord): boolean => {
@@ -651,15 +764,19 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
       return;
     }
 
-    // Compute visible P0 slice and P1 2x lookahead
+    // Compute visible P0 slice and P1 2x lookahead (intersection of scroll container & window viewport)
     const vh = window.innerHeight || document.documentElement.clientHeight || 800;
-    const rows = tableContainerRef.current?.querySelectorAll('tbody tr') || [];
+    const containerEl = flowScrollRef.current;
+    const bounds = containerEl ? containerEl.getBoundingClientRect() : null;
+    const viewTop = bounds ? Math.max(0, bounds.top) : 0;
+    const viewBottom = bounds ? Math.min(vh, bounds.bottom) : vh;
+    const rows = (containerEl || tableContainerRef.current)?.querySelectorAll('tbody tr') || [];
     let firstVis = -1;
     let lastVis = -1;
     rows.forEach((tr, idx) => {
       const rect = tr.getBoundingClientRect();
       if (rect.height === 0) return;
-      if (rect.bottom >= -40 && rect.top <= vh + 40) {
+      if (rect.bottom >= viewTop - 40 && rect.top <= viewBottom + 40) {
         if (firstVis === -1) firstVis = idx;
         lastVis = idx;
       }
@@ -761,12 +878,15 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
       if (timer) window.clearTimeout(timer);
       timer = window.setTimeout(() => scheduleAIPrefetch(), 180);
     };
+    const scrollEl = flowScrollRef.current;
     window.addEventListener('scroll', onScroll, { passive: true });
+    scrollEl?.addEventListener('scroll', onScroll, { passive: true });
     return () => {
       window.removeEventListener('scroll', onScroll);
+      scrollEl?.removeEventListener('scroll', onScroll);
       if (timer) window.clearTimeout(timer);
     };
-  }, [active, aiEnabled, scheduleAIPrefetch]);
+  }, [active, aiEnabled, visibleFlows.length, scheduleAIPrefetch]);
 
   const handleToggleAI = (checked: boolean) => {
     setAiEnabled(checked);
@@ -800,18 +920,26 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
     }
   };
 
-  const handleBlockFlow = async (f: AuditFlowRecord) => {
+  const handleBlockFlow = async (f: AuditFlowRecord, deviceOnly = false) => {
     if (isProtectedBootstrapTarget(f.target)) {
       toast('受核心防断网基础设施保护，禁止拉黑此目标', 'info');
       return;
     }
     const fk = getFlowCacheKey(f);
+    const scopedSource =
+      deviceOnly && f.deviceIp && f.deviceIp !== '127.0.0.1' ? f.deviceIp : '';
     actionInFlightRef.current++;
     setBusyFlowKeys((prev) => new Set(prev).add(fk));
     try {
       const reason = (f.reasons && f.reasons[0]) || 'WebUI 安全审计拉黑';
-      const res = await clientApi.blockAuditTarget(f.target, '', reason);
-      success(res.message || `已拉黑 ${f.target}`);
+      const res = await clientApi.blockAuditTarget(f.target, scopedSource, reason);
+      success(
+        res.message ||
+          (scopedSource ? `已仅针对 ${scopedSource} 阻断 ${f.target}` : `已全局拉黑 ${f.target}`),
+      );
+      if (detailFlowKey === fk) {
+        setDetailFlowKey(null);
+      }
       emitClientInvalidate('adguard');
       await loadAudit(false);
     } catch (e) {
@@ -918,14 +1046,14 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
   };
 
   const handleSort = (key: string) => {
-    const k = key as 'risk' | 'upload' | 'download' | 'ratio';
+    const k = key as 'active' | 'risk' | 'upload' | 'download' | 'ratio';
     if (sortBy !== k) {
       setSortBy(k);
       setSortDir('desc');
     } else if (sortDir === 'desc') {
       setSortDir('asc');
     } else {
-      setSortBy('risk');
+      setSortBy('active');
       setSortDir('desc');
     }
   };
@@ -969,10 +1097,50 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
               {f.appName && <Badge tone="accent">{f.appName}</Badge>}
               {protectedTarget && <Badge tone="neutral">核心保护</Badge>}
             </div>
-            <div className="mt-1 flex items-center gap-2 text-[11px] text-muted">
+            <div className="mt-1 flex items-center gap-2 flex-wrap text-[11px] text-muted">
               <span className="font-medium text-secondary">{f.deviceName || f.deviceIp}</span>
               <span className="font-mono">{f.deviceIp}</span>
               <span className="uppercase">{f.network}</span>
+              {!f.isDirectIp && f.destIp && f.destIp !== f.target && (
+                <span className="font-mono text-[10.5px] text-muted/80 truncate max-w-[130px]" title={`解析目的 IP: ${f.destIp}`}>
+                  → {f.destIp}
+                </span>
+              )}
+            </div>
+          </div>
+        );
+      },
+    },
+    {
+      key: 'route',
+      header: '链路 / 活跃度',
+      sortKey: 'active',
+      render: (f) => {
+        const outMeta = formatOutboundMeta(f.outbound);
+        const activeCnt = Number(f.activeConns || 0);
+        const totalCnt = Math.max(activeCnt, Number(f.connCount || 1));
+        const relSeen = formatRelativeSeen(f.lastSeen);
+        const routeTip = `实际出站: ${f.outbound || 'DIRECT'}${f.rule ? ` · 命中规则: ${f.rule}` : ''}`;
+        return (
+          <div className="space-y-1 whitespace-nowrap" title={routeTip}>
+            <div className="flex items-center gap-1.5">
+              <Badge tone={outMeta.tone}>
+                <span className="max-w-[120px] truncate inline-block align-bottom">{outMeta.label}</span>
+              </Badge>
+            </div>
+            <div className="flex items-center gap-1.5 text-[10.5px] font-mono tnum text-muted">
+              <span
+                className={`inline-block w-1.5 h-1.5 rounded-full shrink-0 ${
+                  activeCnt > 0 ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'
+                }`}
+              />
+              {activeCnt > 0 ? (
+                <span className="text-emerald-400 font-semibold">{activeCnt}活跃</span>
+              ) : (
+                <span>历史</span>
+              )}
+              <span>/{totalCnt}次</span>
+              {relSeen && <span>· {relSeen}</span>}
             </div>
           </div>
         );
@@ -1162,8 +1330,16 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
     },
     {
       key: 'role',
-      header: '角色',
-      render: (d) => <Badge tone="neutral">{d.deviceRole || 'unknown'}</Badge>,
+      header: '角色 / 活跃',
+      render: (d) => (
+        <div className="space-y-0.5 whitespace-nowrap">
+          <Badge tone="neutral">{formatDeviceRoleLabel(d.deviceRole)}</Badge>
+          <div className="text-[10.5px] font-mono tnum text-muted">
+            {d.activeConns ? `${d.activeConns} 活跃 / ` : ''}
+            {d.flowCount || 0} 条流
+          </div>
+        </div>
+      ),
     },
     {
       key: 'up',
@@ -1401,7 +1577,7 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
         title="连接行为与可疑上传明细"
         subtitle={
           processedFlows.length > 0
-            ? `展示 ${processedFlows.length} 条记录，点击任意行查看完整诊断详情`
+            ? `共 ${processedFlows.length} 条记录（当前活跃 ${activeFlowCount} 条）· 点击任意行查看完整诊断详情`
             : report?.message || '等待数据采集中'
         }
         icon={<ShieldAlert className="w-4 h-4" />}
@@ -1413,7 +1589,7 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
         >
           <DataTable
             columns={flowColumns}
-            rows={processedFlows}
+            rows={visibleFlows}
             rowKey={(f) => getFlowCacheKey(f)}
             loading={loading}
             emptyText={report?.message || '暂无符合过滤条件的流量记录'}
@@ -1421,8 +1597,34 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
             sortDir={sortDir}
             onSort={handleSort}
             onRowClick={(f) => setDetailFlowKey(getFlowCacheKey(f))}
+            maxHeightClassName="max-h-[68vh] min-h-[420px] overflow-y-auto overscroll-contain"
+            stickyHeader
+            scrollContainerRef={flowScrollRef}
+            onContainerScroll={handleFlowTableScroll}
             rowClassName={(f) =>
               isDualAlert(f) ? 'bg-rose-500/[0.06] hover:bg-rose-500/[0.11]' : ''
+            }
+            footerSlot={
+              processedFlows.length > 0 ? (
+                <div className="border-t border-subtle bg-surface2/40 px-4 py-2.5 text-center text-[11px] text-muted flex items-center justify-center gap-3">
+                  {visibleFlows.length < processedFlows.length ? (
+                    <>
+                      <span>
+                        已展示 {visibleFlows.length} / {processedFlows.length} 条明细，继续向下滚动自动加载…
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setVisibleLimit(processedFlows.length)}
+                        className="text-accent hover:underline font-medium cursor-pointer"
+                      >
+                        立即展开全部
+                      </button>
+                    </>
+                  ) : (
+                    <span>已到底部 · 共 {processedFlows.length} 条连接明细</span>
+                  )}
+                </div>
+              ) : null
             }
           />
         </div>
@@ -1776,7 +1978,7 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
         }
         footer={
           detailFlow ? (
-            <div className="flex flex-wrap justify-between gap-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <Button
                 size="sm"
                 variant="secondary"
@@ -1785,7 +1987,7 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
               >
                 重新 AI 研判
               </Button>
-              <div className="flex gap-2">
+              <div className="flex flex-wrap gap-2">
                 <Button
                   size="sm"
                   variant="secondary"
@@ -1794,14 +1996,27 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
                 >
                   加入白名单
                 </Button>
+                {!isProtectedBootstrapTarget(detailFlow.target) &&
+                  detailFlow.deviceIp &&
+                  detailFlow.deviceIp !== '127.0.0.1' && (
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      className="border-rose-500/35 text-rose-300 hover:bg-rose-500/15"
+                      icon={<Ban className="w-3.5 h-3.5" />}
+                      onClick={() => handleBlockFlow(detailFlow, true)}
+                    >
+                      仅阻断此设备
+                    </Button>
+                  )}
                 {!isProtectedBootstrapTarget(detailFlow.target) && (
                   <Button
                     size="sm"
                     variant="danger"
                     icon={<Ban className="w-3.5 h-3.5" />}
-                    onClick={() => handleBlockFlow(detailFlow)}
+                    onClick={() => handleBlockFlow(detailFlow, false)}
                   >
-                    一键拉黑
+                    全局拉黑
                   </Button>
                 )}
               </div>
@@ -1811,26 +2026,183 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
       >
         {detailFlow && (
           <div className="space-y-4">
-            <div className="grid grid-cols-3 gap-2.5">
+            {/* 4-Card Core Telemetry Strip */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
               <div className="rounded-xl border border-subtle bg-surface2/60 p-3">
-                <div className="text-[11px] text-muted">累计上传</div>
+                <div className="text-[11px] text-muted">累计上传 ↑</div>
                 <div className="mt-1 font-mono tnum text-sm font-bold text-primary">
                   {fmtBytes(detailFlow.uploadBytes)}
                 </div>
               </div>
               <div className="rounded-xl border border-subtle bg-surface2/60 p-3">
-                <div className="text-[11px] text-muted">累计下载</div>
+                <div className="text-[11px] text-muted">累计下载 ↓</div>
                 <div className="mt-1 font-mono tnum text-sm font-bold text-primary">
                   {fmtBytes(detailFlow.downloadBytes)}
                 </div>
+                <div className="text-[10.5px] font-mono text-muted mt-0.5">
+                  上/下比 {Number(detailFlow.uploadRatio || 0).toFixed(2)}x
+                </div>
               </div>
               <div className="rounded-xl border border-subtle bg-surface2/60 p-3">
-                <div className="text-[11px] text-muted">风险综合分</div>
+                <div className="text-[11px] text-muted">安全 / 隐私轴</div>
+                <div className="mt-1 font-mono tnum text-sm font-bold text-primary">
+                  {detailFlow.securityScore || 0} / {detailFlow.privacyScore || 0}
+                </div>
+                <div className="text-[10.5px] text-muted mt-0.5">
+                  {detailFlow.dominantAxis === 'security'
+                    ? '安全风险主导'
+                    : detailFlow.dominantAxis === 'privacy'
+                    ? '隐私追踪主导'
+                    : detailFlow.dominantAxis === 'both'
+                    ? '双轴并发风险'
+                    : '基线平稳'}
+                </div>
+              </div>
+              <div className="rounded-xl border border-subtle bg-surface2/60 p-3">
+                <div className="text-[11px] text-muted">综合风险分</div>
                 <div className="mt-1 font-mono tnum text-sm font-bold text-primary">
                   {detailFlow.riskScore || 0} 分
                 </div>
+                <div className="text-[10.5px] text-muted mt-0.5">
+                  {detailFlow.threatLabel || '正常'}
+                </div>
               </div>
             </div>
+
+            {/* Route & Endpoint Identity Card */}
+            <div className="rounded-xl border border-subtle bg-surface2/50 p-3.5 space-y-2.5">
+              <div className="text-xs font-semibold text-primary">网络分流链路与终端画像</div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2 text-xs">
+                <div className="flex items-center justify-between gap-2 border-b border-subtle/60 pb-1.5">
+                  <span className="text-muted">来源终端</span>
+                  <span className="font-medium text-primary truncate">
+                    {detailFlow.deviceName || detailFlow.deviceIp}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-2 border-b border-subtle/60 pb-1.5">
+                  <span className="text-muted">终端类型 / MAC</span>
+                  <span className="font-mono text-[11px] text-secondary truncate">
+                    {formatDeviceRoleLabel(detailFlow.deviceRole)}
+                    {detailFlow.deviceMac ? ` · ${detailFlow.deviceMac}` : ''}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-2 border-b border-subtle/60 pb-1.5">
+                  <span className="text-muted">目的地址</span>
+                  <span className="font-mono text-[11px] text-primary truncate">
+                    {detailFlow.destIp || detailFlow.target}
+                    {detailFlow.destPort ? `:${detailFlow.destPort}` : ''} ({detailFlow.network.toUpperCase()})
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-2 border-b border-subtle/60 pb-1.5">
+                  <span className="text-muted">访问方式</span>
+                  <span>
+                    {detailFlow.isDirectIp ? (
+                      <Badge tone="warn">绕过 DNS 纯 IP 直连</Badge>
+                    ) : (
+                      <Badge tone="ok">标准域名解析{detailFlow.appName ? ` · ${detailFlow.appName}` : ''}</Badge>
+                    )}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-muted">实际出站 (Outbound)</span>
+                  <Badge tone={formatOutboundMeta(detailFlow.outbound).tone}>
+                    {formatOutboundMeta(detailFlow.outbound).label}
+                  </Badge>
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-muted">命中规则 (Rule)</span>
+                  <span className="font-mono text-[11px] text-secondary truncate max-w-[180px]" title={detailFlow.rule || 'final / 默认路由'}>
+                    {detailFlow.rule || 'final / 默认路由'}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Temporal & Behavioral Forensics Card */}
+            <div className="rounded-xl border border-subtle bg-surface2/50 p-3.5 space-y-2.5">
+              <div className="text-xs font-semibold text-primary">时间跨度与连接节律特征</div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2 text-xs">
+                <div className="flex items-center justify-between gap-2 border-b border-subtle/60 pb-1.5">
+                  <span className="text-muted">连接活跃态</span>
+                  <span className="font-mono tnum text-primary">
+                    <strong className={(detailFlow.activeConns || 0) > 0 ? 'text-emerald-400' : 'text-secondary'}>
+                      {detailFlow.activeConns || 0} 活跃
+                    </strong>{' '}
+                    / 累计 {detailFlow.connCount || 1} 次
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-2 border-b border-subtle/60 pb-1.5">
+                  <span className="text-muted">凌晨暗夜活跃</span>
+                  <span className="font-mono tnum">
+                    {(detailFlow.nightHits || 0) > 0 ? (
+                      <span className="text-amber-400 font-semibold">01:00–05:59 捕获 {detailFlow.nightHits} 次</span>
+                    ) : (
+                      <span className="text-muted">0 次 (无夜间异动)</span>
+                    )}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-2 border-b border-subtle/60 pb-1.5">
+                  <span className="text-muted">首次观测</span>
+                  <span className="font-mono text-[11px] text-secondary">{detailFlow.firstSeen || '—'}</span>
+                </div>
+                <div className="flex items-center justify-between gap-2 border-b border-subtle/60 pb-1.5">
+                  <span className="text-muted">最近活跃</span>
+                  <span className="font-mono text-[11px] text-secondary">{detailFlow.lastSeen || '—'}</span>
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-muted">心跳变异系数 (CV)</span>
+                  <span className="font-mono text-[11px] text-secondary">
+                    {typeof detailFlow.intervalCv === 'number' && detailFlow.intervalCv > 0
+                      ? `${detailFlow.intervalCv.toFixed(2)} (${detailFlow.intervalCv < 0.35 ? '疑似定时脚本心跳' : '自然离散'})`
+                      : '样本不足'}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-muted">域名信息熵</span>
+                  <span className="font-mono text-[11px] text-secondary">
+                    {detailFlow.isDirectIp
+                      ? '纯 IP (无域名)'
+                      : `${Number(detailFlow.domainEntropy || 0).toFixed(2)} bits${
+                          (detailFlow.domainEntropy || 0) >= 3.65 ? ' (偏高随机性)' : ''
+                        }`}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Nonlinear Factor Breakdown Bars (when triggered) */}
+            {(() => {
+              const rawFactors = detailFlow.nonlinearFactors || {};
+              const activeFactors = Object.entries(NONLINEAR_FACTOR_LABELS)
+                .map(([k, label]) => ({ key: k, label, score: Number(rawFactors[k] || 0) }))
+                .filter((item) => item.score > 0)
+                .sort((a, b) => b.score - a.score);
+              if (activeFactors.length === 0) return null;
+              return (
+                <div className="rounded-xl border border-subtle bg-surface2/50 p-3.5 space-y-2.5">
+                  <div className="text-xs font-semibold text-primary">非线性风险算子分量拆解</div>
+                  <div className="space-y-2">
+                    {activeFactors.map((item) => {
+                      const pct = Math.min(100, Math.max(6, Math.round((item.score / 50) * 100)));
+                      return (
+                        <div key={item.key} className="space-y-1">
+                          <div className="flex items-center justify-between text-[11px]">
+                            <span className="text-secondary">{item.label}</span>
+                            <span className="font-mono tnum text-primary">+{item.score.toFixed(1)}</span>
+                          </div>
+                          <div className="h-1.5 rounded-full bg-slate-800 overflow-hidden">
+                            <div
+                              className="h-full rounded-full bg-gradient-to-r from-amber-500/80 to-rose-500"
+                              style={{ width: `${pct}%` }}
+                            />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })()}
 
             {(() => {
               const rev = getCachedReview(detailFlow);
