@@ -3,6 +3,7 @@ package file
 import (
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -39,21 +40,50 @@ func SafeReplace(currentFile, newFile string) error {
 		return nil
 	}
 
-	// 非 Windows 平台，使用 .backup 机制
+	// 非 Windows 平台：先在同目录原子落盘 staging 副本并赋予 0755，再执行备份与原子 rename，
+	// 消除磁盘写满或断电导致目标可执行文件半截损坏或触发 ETXTBSY 的窗口。
+	dir := filepath.Dir(currentFile)
+	stagedTmp, err := os.CreateTemp(dir, "."+filepath.Base(currentFile)+".stage-*")
+	if err != nil {
+		return fmt.Errorf("create staged executable: %w", err)
+	}
+	stagedPath := stagedTmp.Name()
+	cleanupStage := true
+	defer func() {
+		if cleanupStage {
+			_ = os.Remove(stagedPath)
+		}
+	}()
+
+	srcFile, err := os.Open(newFile)
+	if err != nil {
+		_ = stagedTmp.Close()
+		return fmt.Errorf("open new file: %w", err)
+	}
+	_, copyErr := io.Copy(stagedTmp, srcFile)
+	_ = srcFile.Close()
+	closeErr := stagedTmp.Close()
+	if copyErr != nil {
+		return fmt.Errorf("stage new file: %w", copyErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close staged file: %w", closeErr)
+	}
+	if err := os.Chmod(stagedPath, 0755); err != nil {
+		return fmt.Errorf("set executable permissions: %w", err)
+	}
+
 	backupPath := currentFile + ".backup"
+	_ = os.Remove(backupPath)
 	if err := os.Rename(currentFile, backupPath); err != nil {
 		return fmt.Errorf("backup current file: %w", err)
 	}
 
-	if err := CopyFile(newFile, currentFile); err != nil {
+	if err := os.Rename(stagedPath, currentFile); err != nil {
 		_ = os.Rename(backupPath, currentFile) // 恢复备份
-		return fmt.Errorf("copy new file: %w", err)
+		return fmt.Errorf("atomic replace file: %w", err)
 	}
-
-	if err := os.Chmod(currentFile, 0755); err != nil {
-		return fmt.Errorf("set executable permissions: %w", err)
-	}
-
+	cleanupStage = false
 	_ = os.Remove(backupPath)
 	return nil
 }
@@ -223,39 +253,69 @@ func InstallOrReplace(newFile, targetFile string) error {
 	return nil
 }
 
-// MaskSubscriptionURL 对订阅URL进行脱敏处理
-func MaskSubscriptionURL(url string) string {
-	if url == "" {
+// MaskSubscriptionURL 对订阅URL进行脱敏处理（剥离 userinfo 凭据、隐藏公网 IP 段并保持合法 UTF-8）。
+func MaskSubscriptionURL(rawURL string) string {
+	if rawURL == "" {
 		return "未配置"
 	}
 
-	// 找到://后的部分
-	parts := strings.Split(url, "//")
-	if len(parts) < 2 {
+	schemeIdx := strings.Index(rawURL, "://")
+	if schemeIdx < 0 {
 		return "***"
 	}
 
-	scheme := parts[0] + "//"
-	remaining := parts[1]
-
-	// 按/分割获取域名部分
-	pathParts := strings.Split(remaining, "/")
-	if len(pathParts) == 0 {
+	scheme := rawURL[:schemeIdx+3]
+	remaining := rawURL[schemeIdx+3:]
+	if remaining == "" {
 		return "***"
 	}
 
-	domain := pathParts[0]
-
-	// 域名脱敏，保留第一个字符和顶级域名
-	domainParts := strings.Split(domain, ".")
-	if len(domainParts) >= 2 {
-		if len(domainParts[0]) > 1 {
-			domainParts[0] = string(domainParts[0][0]) + strings.Repeat("*", len(domainParts[0])-1)
+	authority := remaining
+	for _, sep := range []byte{'/', '?', '#'} {
+		if idx := strings.IndexByte(authority, sep); idx >= 0 {
+			authority = authority[:idx]
 		}
-		domain = strings.Join(domainParts, ".")
+	}
+	// 剥离 user:password@ 认证信息，严防凭据泄漏
+	if atIdx := strings.LastIndexByte(authority, '@'); atIdx >= 0 {
+		authority = authority[atIdx+1:]
+	}
+	if authority == "" {
+		return "***"
 	}
 
-	return scheme + domain + "/***"
+	host := authority
+	portSuffix := ""
+	if h, p, err := net.SplitHostPort(authority); err == nil && h != "" {
+		host = h
+		portSuffix = ":" + p
+	}
+	hostClean := strings.Trim(host, "[]")
+
+	// 若主机为 IP 地址，强制脱敏后段字节
+	if ip := net.ParseIP(hostClean); ip != nil {
+		if v4 := ip.To4(); v4 != nil {
+			parts := strings.Split(v4.String(), ".")
+			return scheme + parts[0] + ".***.***.***" + portSuffix + "/***"
+		}
+		return scheme + "[***]" + portSuffix + "/***"
+	}
+
+	// 域名脱敏：按 Unicode rune 切片保留首字符和顶级域名，防止截断多字节 UTF-8
+	domainParts := strings.Split(hostClean, ".")
+	if len(domainParts) >= 2 {
+		runes := []rune(domainParts[0])
+		if len(runes) > 1 {
+			domainParts[0] = string(runes[0]) + strings.Repeat("*", len(runes)-1)
+		}
+		return scheme + strings.Join(domainParts, ".") + portSuffix + "/***"
+	}
+
+	runes := []rune(hostClean)
+	if len(runes) > 1 {
+		return scheme + string(runes[0]) + strings.Repeat("*", len(runes)-1) + portSuffix + "/***"
+	}
+	return scheme + "***" + portSuffix + "/***"
 }
 
 // WriteAtomic 在目标同目录下创建随机唯一临时文件、显式锁定权限并原子替换目标路径，

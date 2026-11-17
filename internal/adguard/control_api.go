@@ -750,7 +750,11 @@ func (m *Manager) DeleteRewrite(ctx context.Context, domain, answer string) erro
 func validateFilterURL(raw string) (string, error) {
 	trimmed := strings.TrimSpace(raw)
 	u, err := url.Parse(trimmed)
-	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+	scheme := ""
+	if u != nil {
+		scheme = strings.ToLower(u.Scheme)
+	}
+	if err != nil || (scheme != "https" && scheme != "http") || strings.TrimSpace(u.Hostname()) == "" {
 		return "", errors.New("规则订阅地址必须为有效的 http:// 或 https:// URL")
 	}
 	return trimmed, nil

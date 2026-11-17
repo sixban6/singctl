@@ -20,15 +20,23 @@ const (
 	healTimerPath   = "/etc/systemd/system/singctl-heal.timer"
 )
 
-var validCalendarRe = regexp.MustCompile(`^[A-Za-z0-9*:,\-\s/._~]+$`)
+var validCalendarRe = regexp.MustCompile(`^[A-Za-z0-9*:,\- /._~]+$`)
 
-// ValidateSchedule guards against systemd unit injection in OnCalendar strings.
+var knownCalendarKeywords = map[string]bool{
+	"minutely": true, "hourly": true, "daily": true, "monthly": true,
+	"weekly": true, "yearly": true, "annually": true, "quarterly": true, "semiannually": true,
+}
+
+// ValidateSchedule guards against systemd unit injection and malformed OnCalendar strings.
 func ValidateSchedule(schedule string) error {
 	s := strings.TrimSpace(schedule)
 	if s == "" {
 		return errors.New("定时调度表达式不能为空")
 	}
-	if len(s) > 64 || strings.ContainsAny(s, "\r\n") || !validCalendarRe.MatchString(s) {
+	if len(s) > 64 || strings.ContainsAny(s, "\r\n\t") || !validCalendarRe.MatchString(s) {
+		return errors.New("无效的 systemd OnCalendar 表达式 (示例: *-*-* 04:00:00)")
+	}
+	if !knownCalendarKeywords[strings.ToLower(s)] && !strings.ContainsAny(s, "0123456789") {
 		return errors.New("无效的 systemd OnCalendar 表达式 (示例: *-*-* 04:00:00)")
 	}
 	return nil

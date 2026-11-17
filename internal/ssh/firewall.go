@@ -17,6 +17,9 @@ func NewFirewallManager(executor Executor) *FirewallManager {
 
 // AllowPort enables incoming TCP traffic on the given port across UFW, Firewalld, and SELinux.
 func (f *FirewallManager) AllowPort(port int) error {
+	if port <= 0 || port > 65535 {
+		return fmt.Errorf("invalid TCP port %d (must be 1..65535)", port)
+	}
 	// 1. SELinux configuration (RHEL/CentOS/Rocky/Fedora)
 	f.configureSELinux(port)
 
@@ -34,6 +37,9 @@ func (f *FirewallManager) AllowPort(port int) error {
 
 // DisallowPort removes incoming TCP traffic permission on the given port.
 func (f *FirewallManager) DisallowPort(port int) error {
+	if port <= 0 || port > 65535 {
+		return fmt.Errorf("invalid TCP port %d (must be 1..65535)", port)
+	}
 	// Remove from UFW
 	f.configureUFW(port, false)
 

@@ -107,8 +107,8 @@ fi
 
 // EnableDualPort configures sshd to listen on both currentPort and targetPort simultaneously.
 func (s *SshdHarden) EnableDualPort(currentPort, targetPort int) error {
-	if currentPort <= 0 || targetPort <= 0 {
-		return fmt.Errorf("ports must be greater than 0 (current: %d, target: %d)", currentPort, targetPort)
+	if currentPort <= 0 || currentPort > 65535 || targetPort <= 0 || targetPort > 65535 {
+		return fmt.Errorf("ports must be in 1..65535 (current: %d, target: %d)", currentPort, targetPort)
 	}
 
 	if err := s.PrepareSshdConfigEnv(); err != nil {
@@ -141,7 +141,7 @@ PubkeyAuthentication yes
 
 // RollbackToPort rolls back configuration to only listen on the specified safe port.
 func (s *SshdHarden) RollbackToPort(safePort int) error {
-	if safePort <= 0 {
+	if safePort <= 0 || safePort > 65535 {
 		safePort = 22
 	}
 
@@ -159,8 +159,8 @@ PubkeyAuthentication yes
 
 // FinalizeHardening transitions sshd to listen only on targetPort, and optionally disables password authentication.
 func (s *SshdHarden) FinalizeHardening(targetPort int, disablePassword bool) error {
-	if targetPort <= 0 {
-		return fmt.Errorf("target port must be greater than 0, got %d", targetPort)
+	if targetPort <= 0 || targetPort > 65535 {
+		return fmt.Errorf("target port must be in 1..65535, got %d", targetPort)
 	}
 
 	if err := s.PrepareSshdConfigEnv(); err != nil {
