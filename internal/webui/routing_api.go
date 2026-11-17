@@ -170,6 +170,11 @@ func (s *Server) handleTrafficRoutingPut(w http.ResponseWriter, r *http.Request)
 			writeJSONError(w, http.StatusBadRequest, "应用配置或 sing-box 校验失败: "+err.Error())
 			return
 		}
+		if baseRaw, bErr := singbox.LoadBaseSnapshot(sbPath); bErr == nil && strings.TrimSpace(baseRaw) != "" {
+			if updatedBase, uErr := singbox.ApplyTrafficRoutingToConfigJSON(baseRaw, cfg.TrafficRouting, cfg.CustomRules); uErr == nil {
+				_ = singbox.SaveBaseSnapshot(sbPath, updatedBase)
+			}
+		}
 		applied = true
 		liveJSON = updatedJSON
 	}

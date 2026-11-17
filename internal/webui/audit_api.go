@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -84,9 +85,13 @@ func (s *Server) handleAuditGet(w http.ResponseWriter, r *http.Request) {
 
 	q := r.URL.Query()
 	exportFormat := strings.ToLower(strings.TrimSpace(q.Get("format")))
-	limit := 100
-	if exportFormat == "csv" || exportFormat == "json" {
-		limit = 0 // 导出明细时不截断条数，返回全量流记录
+	limit := -1 // WebUI 与导出默认返回全量明细，支持前端表格无限滚动与本地秒级筛选
+	if exportFormat == "" {
+		if rawLimit := strings.TrimSpace(q.Get("limit")); rawLimit != "" {
+			if parsed, err := strconv.Atoi(rawLimit); err == nil && parsed > 0 {
+				limit = parsed
+			}
+		}
 	}
 
 	callerHost, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))

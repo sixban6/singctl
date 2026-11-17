@@ -121,6 +121,7 @@ func New(opts Options) *Server {
 	// sing-box 配置文件编辑 & 客户端智能分流开关中心
 	s.Mux.HandleFunc("GET /api/sbconfig", s.guard(s.handleSbConfigGet))
 	s.Mux.HandleFunc("PUT /api/sbconfig", s.guard(s.handleSbConfigPut))
+	s.Mux.HandleFunc("PUT /api/sbconfig/preserve", s.guard(s.handleSbConfigPreservePut))
 	s.Mux.HandleFunc("POST /api/sbconfig/restore", s.guard(s.handleSbConfigRestore))
 	s.Mux.HandleFunc("GET /api/traffic-routing", s.guard(s.handleTrafficRoutingGet))
 	s.Mux.HandleFunc("PUT /api/traffic-routing", s.guard(s.handleTrafficRoutingPut))

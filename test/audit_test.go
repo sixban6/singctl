@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1015,4 +1016,96 @@ func TestAuditEnforcer_SyncsSandboxWorkConfig(t *testing.T) {
 func jsonNumber(v int64) string {
 	b, _ := json.Marshal(v)
 	return string(b)
+}
+
+func TestSortFlows_ActiveThenRisk_And_FullListLimit(t *testing.T) {
+	flows := []audit.FlowRecord{
+		{
+			Target:      "hist-low.example.com",
+			State:       audit.EnforcementObserved,
+			Threat:      audit.ThreatNormal,
+			RiskScore:   15,
+			ActiveConns: 0,
+			UploadBytes: 500_000,
+		},
+		{
+			Target:      "hist-critical.example.com",
+			State:       audit.EnforcementObserved,
+			Threat:      audit.ThreatHighRisk,
+			RiskScore:   95,
+			ActiveConns: 0,
+			UploadBytes: 20_000_000,
+		},
+		{
+			Target:      "active-many-normal.example.com",
+			State:       audit.EnforcementObserved,
+			Threat:      audit.ThreatNormal,
+			RiskScore:   8,
+			ActiveConns: 6,
+			UploadBytes: 2_000_000,
+		},
+		{
+			Target:      "active-one-highrisk.example.com",
+			State:       audit.EnforcementObserved,
+			Threat:      audit.ThreatHighRisk,
+			RiskScore:   88,
+			ActiveConns: 1,
+			UploadBytes: 1_000_000,
+		},
+	}
+
+	// 默认 ("active" / "")：所有活跃连接置顶，且活跃组内按风险分降序 (1活跃·88分 > 6活跃·8分 > 0活跃·95分 > 0活跃·15分)
+	audit.SortFlows(flows, "", false)
+	wantOrder := []string{
+		"active-one-highrisk.example.com",
+		"active-many-normal.example.com",
+		"hist-critical.example.com",
+		"hist-low.example.com",
+	}
+	for i, want := range wantOrder {
+		if flows[i].Target != want {
+			t.Fatalf("default active+risk sort mismatch at [%d]: got %s, want %s", i, flows[i].Target, want)
+		}
+	}
+
+	// 显式按 "risk" 排序时：纯风险优先级 (95分历史高危 > 88分活跃高危 > 15分 > 8分)
+	audit.SortFlows(flows, "risk", false)
+	if flows[0].Target != "hist-critical.example.com" || flows[1].Target != "active-one-highrisk.example.com" {
+		t.Fatalf("explicit risk sort mismatch: got %s, %s", flows[0].Target, flows[1].Target)
+	}
+
+	// 验证 Limit = -1 返回超过 100 条的全量明细流，不发生 100 条硬截断
+	tmpDir := t.TempDir()
+	clashSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conns := make([]map[string]any, 0, 135)
+		for i := range 135 {
+			conns = append(conns, map[string]any{
+				"id":       "conn-" + strconv.Itoa(i),
+				"upload":   1024 * (i + 1),
+				"download": 2048,
+				"start":    "2026-11-12T06:00:00Z",
+				"chains":   []string{"DIRECT"},
+				"metadata": map[string]any{
+					"network":         "tcp",
+					"sourceIP":        "192.168.1.50",
+					"destinationIP":   "198.51.100.10",
+					"destinationPort": "443",
+					"host":            "node-" + strconv.Itoa(i) + ".example.com",
+				},
+			})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"connections": conns})
+	}))
+	defer clashSrv.Close()
+
+	col := audit.NewCollector(&config.Config{})
+	col.SetEndpointsForTest([]string{clashSrv.URL}, "", filepath.Join(tmpDir, "full-limit-state.json"))
+	repFull := col.Collect(t.Context(), audit.CollectOptions{Limit: -1})
+	if len(repFull.Flows) != 135 {
+		t.Fatalf("expected Limit=-1 to return all 135 flows without 100-row truncation, got %d", len(repFull.Flows))
+	}
+	repDefaultCLI := col.Collect(t.Context(), audit.CollectOptions{Limit: 0})
+	if len(repDefaultCLI.Flows) != 100 {
+		t.Fatalf("expected CLI default Limit=0 to cap at 100 flows, got %d", len(repDefaultCLI.Flows))
+	}
 }

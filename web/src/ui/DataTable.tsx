@@ -25,6 +25,11 @@ export interface DataTableProps<T> {
   sortDir?: 'asc' | 'desc';
   onSort?: (key: string) => void;
   compact?: boolean;
+  maxHeightClassName?: string;
+  stickyHeader?: boolean;
+  scrollContainerRef?: React.RefObject<HTMLDivElement | null>;
+  onContainerScroll?: React.UIEventHandler<HTMLDivElement>;
+  footerSlot?: React.ReactNode;
 }
 
 export function DataTable<T>({
@@ -40,6 +45,11 @@ export function DataTable<T>({
   sortDir,
   onSort,
   compact = false,
+  maxHeightClassName,
+  stickyHeader = false,
+  scrollContainerRef,
+  onContainerScroll,
+  footerSlot,
 }: DataTableProps<T>) {
   if (loading && rows.length === 0) {
     return <TableSkeleton rows={5} cols={Math.min(6, Math.max(3, columns.length))} />;
@@ -55,12 +65,19 @@ export function DataTable<T>({
   }
 
   const cellPad = compact ? 'px-3 py-2' : 'px-3.5 py-2.5 sm:px-4 sm:py-3';
+  const stickyThCls = stickyHeader
+    ? 'sticky top-0 z-10 bg-[var(--bg-surface-1)] backdrop-blur-md shadow-[inset_0_-1px_0_var(--border-subtle)]'
+    : '';
 
   return (
-    <div className="overflow-x-auto">
+    <div
+      ref={scrollContainerRef}
+      onScroll={onContainerScroll}
+      className={`overflow-x-auto ${maxHeightClassName || ''}`}
+    >
       <table className="w-full border-collapse text-left">
         <thead>
-          <tr className="border-b border-subtle bg-surface2/70">
+          <tr className={stickyHeader ? '' : 'border-b border-subtle bg-surface2/70'}>
             {columns.map((col) => {
               const sortable = Boolean(col.sortKey && onSort);
               const isActive = sortable && sortBy === col.sortKey;
@@ -70,7 +87,7 @@ export function DataTable<T>({
               return (
                 <th
                   key={col.key}
-                  className={`${cellPad} text-[11px] font-semibold uppercase tracking-wider text-muted whitespace-nowrap select-none ${alignClass} ${
+                  className={`${cellPad} text-[11px] font-semibold uppercase tracking-wider text-muted whitespace-nowrap select-none ${alignClass} ${stickyThCls} ${
                     col.headerClassName || ''
                   }`}
                 >
@@ -126,6 +143,7 @@ export function DataTable<T>({
           })}
         </tbody>
       </table>
+      {footerSlot}
     </div>
   );
 }

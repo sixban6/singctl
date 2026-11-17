@@ -75,6 +75,7 @@ singctl dm logs -f
 | `confirm_wait` | `30` | 首次检测失败后的二次确认等待（秒） |
 | `max_restarts` | `3` | 每小时最大自动重启次数（超出后触发熔断保护） |
 | `sub_sync_interval` | `600` | 订阅节点指纹自动静默巡检与无感热同步间隔（秒），设为 `-1` 关闭 |
+| `preserve_manual_config` | `true` | 定时刷新订阅、更新版本或重新生成配置时，是否自动合并保留用户对 `config.json` 的手动改动（设为 `false` 则按最新订阅与默认模板全新覆盖） |
 | `failover.enabled` | `true` | 是否开启策略组自动故障切换与恢复回切（默认开启，自带本机宽带直连前置门控与最低延迟并发择优） |
 | `failover.groups` | `["Proxy", "AI", "#VPS"]` | 受保护的 Clash Selector 策略组名称列表（自动跳过未在当前路由链路中引用的闲置分组） |
 | `failover.patrol_interval` | `300` | 策略组节点健康巡检间隔（秒） |

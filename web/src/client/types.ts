@@ -303,6 +303,7 @@ export interface SbConfigResponse {
   content: string;
   backups: string[];
   checkable: boolean;
+  preserveManualConfig?: boolean;
 }
 
 export interface CacheEntry {
@@ -425,6 +426,7 @@ export interface AuditDeviceSummary {
   deviceMac?: string;
   deviceRole?: string;
   flowCount: number;
+  activeConns?: number;
   uploadBytes: number;
   downloadBytes: number;
   uploadRatio: number;
@@ -440,13 +442,27 @@ export interface AuditFlowRecord {
   id?: string;
   deviceIp: string;
   deviceName?: string;
+  deviceMac?: string;
+  deviceRole?: string;
   target: string;
+  rawHost?: string;
+  destIp?: string;
   destPort?: number;
   isDirectIp?: boolean;
   network: string;
+  outbound?: string;
+  rule?: string;
   uploadBytes: number;
   downloadBytes: number;
   uploadRatio: number;
+  connCount?: number;
+  activeConns?: number;
+  firstSeen?: string;
+  lastSeen?: string;
+  activeSpanSec?: number;
+  nightHits?: number;
+  intervalCv?: number;
+  domainEntropy?: number;
   riskScore: number;
   securityScore: number;
   privacyScore: number;
@@ -456,6 +472,7 @@ export interface AuditFlowRecord {
   state?: 'observed' | 'blocked' | 'whitelisted' | string;
   appName?: string;
   reasons?: string[];
+  nonlinearFactors?: Record<string, number>;
   aiReview?: AuditAIReview | null;
 }
 

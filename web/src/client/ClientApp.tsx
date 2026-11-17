@@ -102,7 +102,7 @@ const ClientShell: React.FC = () => {
     if (target === 'dns' && !peekCachedQuery(ADGUARD_OVERVIEW_CACHE_KEY)) {
       void prefetchCachedQuery(ADGUARD_OVERVIEW_CACHE_KEY, () => clientApi.getAdGuardOverview());
     } else if (target === 'audit' && !peekCachedQuery(AUDIT_DEFAULT_CACHE_KEY)) {
-      const qs = new URLSearchParams({ sort: 'risk', dir: 'desc' });
+      const qs = new URLSearchParams({ sort: 'active', dir: 'desc' });
       void prefetchCachedQuery(AUDIT_DEFAULT_CACHE_KEY, () => clientApi.getAudit(qs));
     }
   }, []);
@@ -115,7 +115,7 @@ const ClientShell: React.FC = () => {
         void prefetchCachedQuery(ADGUARD_OVERVIEW_CACHE_KEY, () => clientApi.getAdGuardOverview());
       }
       if (tab !== 'audit' && status.singbox?.running && !peekCachedQuery(AUDIT_DEFAULT_CACHE_KEY)) {
-        const qs = new URLSearchParams({ sort: 'risk', dir: 'desc' });
+        const qs = new URLSearchParams({ sort: 'active', dir: 'desc' });
         void prefetchCachedQuery(AUDIT_DEFAULT_CACHE_KEY, () => clientApi.getAudit(qs));
       }
     }, 500);

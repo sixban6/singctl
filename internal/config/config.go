@@ -629,11 +629,12 @@ func (h *Hy2Config) UnmarshalYAML(node *yaml.Node) error {
 
 func (w *WatchdogConfig) UnmarshalYAML(node *yaml.Node) error {
 	var a struct {
-		Interval        any                    `yaml:"interval"`
-		ConfirmWait     any                    `yaml:"confirm_wait"`
-		MaxRestarts     any                    `yaml:"max_restarts"`
-		SubSyncInterval any                    `yaml:"sub_sync_interval"`
-		Failover        WatchdogFailoverConfig `yaml:"failover"`
+		Interval             any                    `yaml:"interval"`
+		ConfirmWait          any                    `yaml:"confirm_wait"`
+		MaxRestarts          any                    `yaml:"max_restarts"`
+		SubSyncInterval      any                    `yaml:"sub_sync_interval"`
+		PreserveManualConfig *bool                  `yaml:"preserve_manual_config"`
+		Failover             WatchdogFailoverConfig `yaml:"failover"`
 	}
 	if err := node.Decode(&a); err != nil {
 		return err
@@ -658,6 +659,7 @@ func (w *WatchdogConfig) UnmarshalYAML(node *yaml.Node) error {
 			w.SubSyncInterval = v
 		}
 	}
+	w.PreserveManualConfig = a.PreserveManualConfig
 	w.Failover = a.Failover
 	return nil
 }
@@ -956,11 +958,28 @@ func (f WatchdogFailoverConfig) EffectiveProbeURLs() []string {
 }
 
 type WatchdogConfig struct {
-	Interval        int                    `yaml:"interval"`                    // 检查间隔(秒), 默认 180
-	ConfirmWait     int                    `yaml:"confirm_wait"`                // 二次确认等待(秒), 默认 30
-	MaxRestarts     int                    `yaml:"max_restarts"`                // 每小时最大自动重启次数, 默认 3
-	SubSyncInterval int                    `yaml:"sub_sync_interval,omitempty"` // 订阅节点指纹自动热同步间隔(秒), 默认 600; 设为 -1 关闭
-	Failover        WatchdogFailoverConfig `yaml:"failover,omitempty"`          // 策略组自动故障切换配置(默认开启)
+	Interval             int                    `yaml:"interval"`                        // 检查间隔(秒), 默认 180
+	ConfirmWait          int                    `yaml:"confirm_wait"`                    // 二次确认等待(秒), 默认 30
+	MaxRestarts          int                    `yaml:"max_restarts"`                    // 每小时最大自动重启次数, 默认 3
+	SubSyncInterval      int                    `yaml:"sub_sync_interval,omitempty"`     // 订阅节点指纹自动热同步间隔(秒), 默认 600; 设为 -1 关闭
+	PreserveManualConfig *bool                  `yaml:"preserve_manual_config,omitempty"` // 刷新订阅或更新版本时是否自动保留 config.json 手动修改(默认 true)
+	Failover             WatchdogFailoverConfig `yaml:"failover,omitempty"`              // 策略组自动故障切换配置(默认开启)
+}
+
+func (w WatchdogConfig) ShouldPreserveManualConfig() bool {
+	if w.PreserveManualConfig == nil {
+		return true
+	}
+	return *w.PreserveManualConfig
+}
+
+func (w *WatchdogConfig) SetPreserveManualConfig(preserve bool) {
+	if preserve {
+		w.PreserveManualConfig = nil
+		return
+	}
+	v := false
+	w.PreserveManualConfig = &v
 }
 
 var knownYAMLKeys = []string{
@@ -973,7 +992,7 @@ var knownYAMLKeys = []string{
 	"web_terminal", "mtls_ca", "ssh_tunnel_port", "ssh_tunnel_path", "ssh_port",
 	"web_admin", "enabled", "port", "path", "username", "password", "password_pending_ack",
 	"warp_routing", "mode", "presets", "warp_domains", "warp_cidrs", "direct_domains", "direct_cidrs",
-	"watchdog", "interval", "confirm_wait", "max_restarts", "sub_sync_interval",
+	"watchdog", "interval", "confirm_wait", "max_restarts", "sub_sync_interval", "preserve_manual_config",
 	"failover", "groups", "patrol_interval", "probe_timeout_ms", "confirm_retries", "failback_cooldown", "max_failback_delay_ms", "probe_urls",
 	"custom_rules", "block", "target", "source_ip", "reason", "ruleset_url", "rule_count", "preview", "created_at",
 	"outbounds", "tag", "default", "tolerance", "interrupt_exist_connections",
@@ -1477,6 +1496,9 @@ func MigrateConfig(configPath string, templateData []byte) error {
 		}
 		if hasYAMLKey(oldWD, "sub_sync_interval") {
 			setOrAddField(docNode, "watchdog", "sub_sync_interval", strconv.Itoa(oldCfg.Watchdog.SubSyncInterval))
+		}
+		if hasYAMLKey(oldWD, "preserve_manual_config") && oldCfg.Watchdog.PreserveManualConfig != nil {
+			setOrAddField(docNode, "watchdog", "preserve_manual_config", strconv.FormatBool(*oldCfg.Watchdog.PreserveManualConfig))
 		}
 		if hasYAMLKey(oldWD, "failover") && !oldCfg.Watchdog.Failover.IsEmpty() {
 			setOrAddMapping(docNode, "watchdog", "failover", oldCfg.Watchdog.Failover)

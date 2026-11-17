@@ -670,6 +670,11 @@ func (e *Enforcer) syncSingBoxLayer(ctx context.Context, oldBlocks, newBlocks []
 	if err := singbox.ApplyLiveSingBoxConfig(ctx, e.sbConfigPath, e.sbWorkConfigPath, updatedJSON, "audit"); err != nil {
 		return false, err
 	}
+	if baseRaw, bErr := singbox.LoadBaseSnapshot(e.sbConfigPath); bErr == nil && strings.TrimSpace(baseRaw) != "" {
+		if updatedBase, uErr := singbox.SyncBlockRulesInConfigJSON(baseRaw, oldBlocks, newBlocks); uErr == nil {
+			_ = singbox.SaveBaseSnapshot(e.sbConfigPath, updatedBase)
+		}
+	}
 	return true, nil
 }
 

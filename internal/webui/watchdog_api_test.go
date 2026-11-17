@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"singctl/internal/config"
+	"singctl/internal/singbox"
 )
 
 func TestBuildWatchdogConfigDTO_MatchesModernSingBoxGroups(t *testing.T) {
@@ -120,5 +121,64 @@ func TestHandleWatchdogConfigPut_PersistsAndReloadsFailoverParams(t *testing.T) 
 	}
 	if report.Config.Failover.PatrolInterval != 15 || report.Config.Failover.ProbeTimeoutMs != 2000 || report.Config.Failover.ConfirmRetries != 3 {
 		t.Fatalf("GET /api/watchdog returned mismatched values: %+v", report.Config.Failover)
+	}
+}
+
+func TestHandleSbConfigPreserve_ToggleAndInitialBaseSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "singctl.yaml")
+	sbPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfgPath, []byte("watchdog:\n  interval: 180\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	origJSON := `{"log":{"level":"warn"},"outbounds":[{"tag":"#DC","type":"direct"}]}`
+	if err := os.WriteFile(sbPath, []byte(origJSON), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := New(Options{
+		ConfigPath:        cfgPath,
+		SingBoxConfigPath: sbPath,
+		Listen:            "127.0.0.1:0",
+		Password:          "test-pass-123",
+		Version:           "v1.14.132",
+	})
+	token := srv.SessionToken()
+
+	// 1. 默认开启 preserveManualConfig=true
+	getReq := httptest.NewRequest(http.MethodGet, "/api/sbconfig", nil)
+	getReq.Header.Set("Authorization", "Bearer "+token)
+	getRec := httptest.NewRecorder()
+	srv.Mux.ServeHTTP(getRec, getReq)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("GET /api/sbconfig failed: %d", getRec.Code)
+	}
+	var getResp struct {
+		PreserveManualConfig bool `json:"preserveManualConfig"`
+	}
+	if err := json.Unmarshal(getRec.Body.Bytes(), &getResp); err != nil || !getResp.PreserveManualConfig {
+		t.Fatalf("expected default preserveManualConfig=true, got %+v (err=%v)", getResp, err)
+	}
+
+	// 2. 切换为关闭 (false) 并校验 0600 落盘与二次读取
+	offBody, _ := json.Marshal(map[string]any{"preserve": false})
+	putReq := httptest.NewRequest(http.MethodPut, "/api/sbconfig/preserve", bytes.NewReader(offBody))
+	putReq.Header.Set("Authorization", "Bearer "+token)
+	putReq.Header.Set("Content-Type", "application/json")
+	putRec := httptest.NewRecorder()
+	srv.Mux.ServeHTTP(putRec, putReq)
+	if putRec.Code != http.StatusOK {
+		t.Fatalf("PUT /api/sbconfig/preserve failed: %d %s", putRec.Code, putRec.Body.String())
+	}
+	loadedCfg, err := config.Load(cfgPath)
+	if err != nil || loadedCfg.Watchdog.ShouldPreserveManualConfig() {
+		t.Fatalf("expected ShouldPreserveManualConfig=false after toggle off, err=%v", err)
+	}
+
+	// 3. 验证 EnsureInitialBaseSnapshot 在首次手动保存前自动固化原配置基线 (0600)
+	singbox.EnsureInitialBaseSnapshot(sbPath)
+	baseSnap, err := singbox.LoadBaseSnapshot(sbPath)
+	if err != nil || baseSnap != origJSON {
+		t.Fatalf("expected initial base snapshot %q, got %q (err=%v)", origJSON, baseSnap, err)
 	}
 }
