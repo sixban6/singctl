@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   FleetNode,
   FleetSummary,
@@ -10,7 +10,8 @@ import {
   FleetActionResult,
 } from '../types';
 import { api } from '../api';
-import { useToast } from './Toast';
+import { peekCachedQuery, prefetchCachedQuery, writeCachedQuery } from '../hooks';
+import { useToast } from '../ui';
 import {
   Network,
   Plus,
@@ -61,12 +62,34 @@ function authTypeLabel(t: FleetAuthType): string {
   }
 }
 
-export const FleetTab: React.FC = () => {
+const FLEET_CACHE_KEY = 'server:fleet:list';
+const FLEET_DEFAULTS_CACHE_KEY = 'server:fleet:defaults';
+const FLEET_PROBE_COOLDOWN_MS = 45_000;
+
+interface CachedFleetList {
+  nodes: FleetNode[];
+  summary: FleetSummary;
+}
+
+export function prefetchFleetTab(): void {
+  if (!peekCachedQuery(FLEET_CACHE_KEY)) {
+    void prefetchCachedQuery(FLEET_CACHE_KEY, () => api.getFleet());
+  }
+  if (!peekCachedQuery(FLEET_DEFAULTS_CACHE_KEY)) {
+    void prefetchCachedQuery(FLEET_DEFAULTS_CACHE_KEY, () => api.getFleetDefaults());
+  }
+}
+
+export const FleetTab: React.FC<{ active?: boolean }> = ({ active = true }) => {
   const { success, error } = useToast();
-  const [nodes, setNodes] = useState<FleetNode[]>([]);
-  const [summary, setSummary] = useState<FleetSummary>(DEFAULT_SUMMARY);
-  const [defaults, setDefaults] = useState<FleetBootstrapDefaults | null>(null);
-  const [loading, setLoading] = useState(true);
+  const cachedFleet = peekCachedQuery<CachedFleetList>(FLEET_CACHE_KEY);
+  const [nodes, setNodes] = useState<FleetNode[]>(() => cachedFleet?.nodes || []);
+  const [summary, setSummary] = useState<FleetSummary>(() => cachedFleet?.summary || DEFAULT_SUMMARY);
+  const [defaults, setDefaults] = useState<FleetBootstrapDefaults | null>(
+    () => peekCachedQuery<FleetBootstrapDefaults>(FLEET_DEFAULTS_CACHE_KEY) ?? null,
+  );
+  const [loading, setLoading] = useState(() => !cachedFleet);
+  const lastProbeAtRef = useRef<number>(0);
   const [runningKey, setRunningKey] = useState<string | null>(null);
   const [actionResults, setActionResults] = useState<FleetActionResult[] | null>(null);
   const [actionBannerTitle, setActionBannerTitle] = useState<string>('');
@@ -102,29 +125,19 @@ export const FleetTab: React.FC = () => {
     extraAuthorizedKeys: '',
   });
 
-  useEffect(() => {
-    loadFleet().then(() => {
-      triggerSilentProbe();
-    });
-    api
-      .getFleetDefaults()
-      .then((d) => setDefaults(d))
-      .catch(() => {});
-
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === 'visible') {
-        triggerSilentProbe();
-      }
-    }, 60_000);
-    return () => window.clearInterval(timer);
-  }, []);
-
-  const triggerSilentProbe = async () => {
+  const triggerSilentProbe = async (force = false) => {
+    const now = Date.now();
+    if (!force && now - lastProbeAtRef.current < FLEET_PROBE_COOLDOWN_MS) {
+      return;
+    }
+    lastProbeAtRef.current = now;
     try {
       const res = await api.probeFleet();
       if (res && Array.isArray(res.nodes)) {
+        const nextSummary = res.summary || DEFAULT_SUMMARY;
         setNodes(res.nodes);
-        if (res.summary) setSummary(res.summary);
+        setSummary(nextSummary);
+        writeCachedQuery(FLEET_CACHE_KEY, { nodes: res.nodes, summary: nextSummary });
       }
     } catch {
       // ignore silent patrol error
@@ -132,17 +145,44 @@ export const FleetTab: React.FC = () => {
   };
 
   const loadFleet = async (silent = false) => {
-    if (!silent) setLoading(true);
+    if (!silent && !peekCachedQuery(FLEET_CACHE_KEY)) setLoading(true);
     try {
       const res = await api.getFleet();
-      setNodes(res.nodes || []);
-      setSummary(res.summary || DEFAULT_SUMMARY);
+      const nextNodes = res.nodes || [];
+      const nextSummary = res.summary || DEFAULT_SUMMARY;
+      setNodes(nextNodes);
+      setSummary(nextSummary);
+      writeCachedQuery(FLEET_CACHE_KEY, { nodes: nextNodes, summary: nextSummary });
     } catch (err: any) {
       if (!silent) error(err.message || '加载节点舰队失败');
     } finally {
-      if (!silent) setLoading(false);
+      setLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (!active) return;
+    const hasCache = Boolean(peekCachedQuery(FLEET_CACHE_KEY));
+    void loadFleet(hasCache).then(() => {
+      void triggerSilentProbe(false);
+    });
+    if (!peekCachedQuery(FLEET_DEFAULTS_CACHE_KEY)) {
+      api
+        .getFleetDefaults()
+        .then((d) => {
+          setDefaults(d);
+          writeCachedQuery(FLEET_DEFAULTS_CACHE_KEY, d);
+        })
+        .catch(() => {});
+    }
+
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        void triggerSilentProbe(false);
+      }
+    }, 60_000);
+    return () => window.clearInterval(timer);
+  }, [active]);
 
   const openAddModal = (mode: ModalMode = 'bootstrap') => {
     setIsEditingExisting(false);

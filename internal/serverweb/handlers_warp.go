@@ -75,7 +75,11 @@ func (s *Server) probeWarpDaemon(forceRefresh bool) WarpDaemonStatus {
 	installed := errBin == nil || hasConf || deploy.IsWindtfWireproxyBinary(deploy.DefaultWireproxyBin)
 
 	running := checkServiceRunning("wireproxy")
-	portOpen := deploy.CheckWarpSocksPort()
+	portCheck := s.warpPortChecker
+	if portCheck == nil {
+		portCheck = deploy.CheckWarpSocksPort
+	}
+	portOpen := portCheck()
 	if portOpen {
 		running = true
 		installed = true
@@ -100,11 +104,11 @@ func (s *Server) probeWarpDaemon(forceRefresh bool) WarpDaemonStatus {
 		return status
 	}
 
-	// 读取 30 秒短期缓存的出口 IP，避免频繁请求 cloudflare trace 拖慢页面首屏
+	const warpExitCacheTTL = 5 * time.Minute
 	s.warpCacheMu.Lock()
 	cachedIP := s.warpCachedIP
 	cachedLoc := s.warpCachedLoc
-	cacheFresh := !forceRefresh && cachedIP != "" && time.Since(s.warpCachedAt) < 30*time.Second
+	cacheFresh := !forceRefresh && cachedIP != "" && time.Since(s.warpCachedAt) < warpExitCacheTTL
 	s.warpCacheMu.Unlock()
 
 	if cacheFresh {
@@ -114,14 +118,36 @@ func (s *Server) probeWarpDaemon(forceRefresh bool) WarpDaemonStatus {
 		return status
 	}
 
-	if ip, loc, _, ok := deploy.FetchWarpExitInfo(2500 * time.Millisecond); ok && ip != "" {
+	refreshWarpExit := func() (string, string, bool) {
+		exitFetch := s.warpExitFetcher
+		if exitFetch == nil {
+			exitFetch = deploy.FetchWarpExitInfo
+		}
+		ip, loc, _, ok := exitFetch(2500 * time.Millisecond)
+		if ok && ip != "" {
+			s.warpCacheMu.Lock()
+			s.warpCachedIP = ip
+			s.warpCachedLoc = loc
+			s.warpCachedAt = time.Now()
+			s.warpCacheMu.Unlock()
+		}
+		return ip, loc, ok && ip != ""
+	}
+
+	// SWR: 已有历史出口 IP 且非强制刷新时，0ms 秒回缓存并单飞后台更新，消除 2.5s 外网阻塞
+	if !forceRefresh && cachedIP != "" {
+		status.WarpIP = cachedIP
+		status.WarpLoc = cachedLoc
+		tryRunSingleFlight(&s.warpExitRefreshing, 4*time.Second, func(context.Context) {
+			refreshWarpExit()
+		})
+		s.applyWatchdogFieldsToDaemonStatus(&status)
+		return status
+	}
+
+	if ip, loc, ok := refreshWarpExit(); ok {
 		status.WarpIP = ip
 		status.WarpLoc = loc
-		s.warpCacheMu.Lock()
-		s.warpCachedIP = ip
-		s.warpCachedLoc = loc
-		s.warpCachedAt = time.Now()
-		s.warpCacheMu.Unlock()
 	} else if cachedIP != "" {
 		status.WarpIP = cachedIP
 		status.WarpLoc = cachedLoc

@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"singctl/internal/logger"
+	"singctl/internal/util/file"
 )
 
 // BaseSnapshotPath 返回与 config.json 同目录的受管基线快照路径（例如 /etc/sing-box/.config.json.singctl-base）。
@@ -46,38 +47,7 @@ func SaveBaseSnapshot(sbConfigPath, content string) error {
 	if p == "" || strings.TrimSpace(content) == "" {
 		return nil
 	}
-	dir := filepath.Dir(p)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(dir, ".singctl-base.tmp-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	cleanup := true
-	defer func() {
-		if cleanup {
-			_ = os.Remove(tmpName)
-		}
-	}()
-	if err := tmp.Chmod(0600); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err := tmp.WriteString(content); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpName, p); err != nil {
-		return err
-	}
-	cleanup = false
-	_ = os.Chmod(p, 0600)
-	return nil
+	return file.WriteAtomic0600(p, []byte(content))
 }
 
 // EnsureInitialBaseSnapshot 在用户通过 WebUI 编辑器首次保存手动修改前调用：

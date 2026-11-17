@@ -5,7 +5,7 @@ import {
   ServerStatusResponse,
 } from '../types';
 import { api } from '../api';
-import { useToast } from './Toast';
+import { useToast } from '../ui';
 import {
   Radar,
   RefreshCw,

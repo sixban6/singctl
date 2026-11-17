@@ -1,13 +1,15 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActiveDestinationGroup,
+  WarpConnectionsResponse,
   WarpPresetItem,
   WarpRoutingConfig,
   WarpRoutingMode,
   WarpRoutingStatusResponse,
 } from '../types';
 import { api } from '../api';
-import { useToast } from './Toast';
+import { peekCachedQuery, prefetchCachedQuery, writeCachedQuery } from '../hooks';
+import { formatBytes, useToast } from '../ui';
 import {
   AlertTriangle,
   Bot,
@@ -30,7 +32,20 @@ import {
 } from 'lucide-react';
 
 interface WarpTabProps {
+  active?: boolean;
   onRefreshParent?: () => void;
+}
+
+const WARP_ROUTING_CACHE_KEY = 'server:warp:routing';
+const WARP_CONNS_CACHE_KEY = 'server:warp:conns:default';
+
+export function prefetchWarpTab(): void {
+  if (!peekCachedQuery(WARP_ROUTING_CACHE_KEY)) {
+    void prefetchCachedQuery(WARP_ROUTING_CACHE_KEY, () => api.getWarpRouting(false));
+  }
+  if (!peekCachedQuery(WARP_CONNS_CACHE_KEY)) {
+    void prefetchCachedQuery(WARP_CONNS_CACHE_KEY, () => api.getWarpConnections('', 'all'));
+  }
 }
 
 const DEFAULT_ROUTING: WarpRoutingConfig = {
@@ -41,17 +56,6 @@ const DEFAULT_ROUTING: WarpRoutingConfig = {
   directDomains: [],
   directCidrs: [],
 };
-
-function formatBytes(bytes: number): string {
-  const val = Math.max(0, bytes);
-  const KB = 1024;
-  const MB = 1024 * KB;
-  const GB = 1024 * MB;
-  if (val >= GB) return `${(val / GB).toFixed(2)} GB`;
-  if (val >= MB) return `${(val / MB).toFixed(1)} MB`;
-  if (val >= KB) return `${(val / KB).toFixed(1)} KB`;
-  return `${Math.round(val)} B`;
-}
 
 function isLikelyIPOrCIDR(raw: string): boolean {
   const s = raw.trim();
@@ -92,18 +96,23 @@ function previewCleanRuleTarget(raw: string): { kind: 'cidr' | 'domain'; value: 
   return { kind: 'domain', value: s };
 }
 
-export const WarpTab: React.FC<WarpTabProps> = ({ onRefreshParent }) => {
+export const WarpTab: React.FC<WarpTabProps> = ({ active = true, onRefreshParent }) => {
   const { success, error } = useToast();
 
-  const [data, setData] = useState<WarpRoutingStatusResponse | null>(null);
-  const [loading, setLoading] = useState(true);
+  const cachedConns = peekCachedQuery<WarpConnectionsResponse>(WARP_CONNS_CACHE_KEY);
+  const [data, setData] = useState<WarpRoutingStatusResponse | null>(
+    () => peekCachedQuery<WarpRoutingStatusResponse>(WARP_ROUTING_CACHE_KEY) ?? null,
+  );
+  const [loading, setLoading] = useState(() => !peekCachedQuery(WARP_ROUTING_CACHE_KEY));
   const [saving, setSaving] = useState(false);
   const [acting, setActing] = useState<'rekey' | 'ensure' | null>(null);
 
   // Active live connections state
-  const [connEnabled, setConnEnabled] = useState(true);
-  const [connMsg, setConnMsg] = useState('');
-  const [connections, setConnections] = useState<ActiveDestinationGroup[]>([]);
+  const [connEnabled, setConnEnabled] = useState(() => cachedConns?.enabled ?? true);
+  const [connMsg, setConnMsg] = useState(() => cachedConns?.message ?? '');
+  const [connections, setConnections] = useState<ActiveDestinationGroup[]>(
+    () => cachedConns?.destinations ?? [],
+  );
   const [connQuery, setConnQuery] = useState('');
   const [connFilter, setConnFilter] = useState<'all' | 'DC' | 'WARP'>('all');
   const [autoRefreshConn, setAutoRefreshConn] = useState(true);
@@ -122,6 +131,7 @@ export const WarpTab: React.FC<WarpTabProps> = ({ onRefreshParent }) => {
     try {
       const res = await api.getWarpRouting(forceRefresh);
       setData(res);
+      writeCachedQuery(WARP_ROUTING_CACHE_KEY, res);
     } catch (err: any) {
       error(err.message || '获取 WARP 分流配置失败');
     } finally {
@@ -136,6 +146,9 @@ export const WarpTab: React.FC<WarpTabProps> = ({ onRefreshParent }) => {
       setConnEnabled(res.enabled);
       setConnMsg(res.message || '');
       setConnections(res.destinations || []);
+      if (!connQuery && connFilter === 'all') {
+        writeCachedQuery(WARP_CONNS_CACHE_KEY, res);
+      }
     } catch {
       // Keep quiet on background poll error
     } finally {
@@ -144,20 +157,20 @@ export const WarpTab: React.FC<WarpTabProps> = ({ onRefreshParent }) => {
   }, [connQuery, connFilter]);
 
   useEffect(() => {
-    loadRouting(false);
-  }, [loadRouting]);
+    if (!active) return;
+    void loadRouting(false);
+    void loadConnections();
+  }, [active, loadRouting, loadConnections]);
 
   useEffect(() => {
-    loadConnections();
-  }, [loadConnections]);
-
-  useEffect(() => {
-    if (!autoRefreshConn) return;
+    if (!active || !autoRefreshConn) return;
     const timer = setInterval(() => {
-      loadConnections();
+      if (document.visibilityState === 'visible') {
+        void loadConnections();
+      }
     }, 5000);
     return () => clearInterval(timer);
-  }, [autoRefreshConn, loadConnections]);
+  }, [active, autoRefreshConn, loadConnections]);
 
   useEffect(() => {
     return () => {
@@ -170,13 +183,15 @@ export const WarpTab: React.FC<WarpTabProps> = ({ onRefreshParent }) => {
       setSaving(true);
       try {
         const res = await api.updateWarpRouting(nextRouting);
-        setData({
+        const nextData: WarpRoutingStatusResponse = {
           daemon: res.daemon,
           routing: res.routing,
           presets: res.presets,
           dcConnCount: res.dcConnCount,
           warpConnCount: res.warpConnCount,
-        });
+        };
+        setData(nextData);
+        writeCachedQuery(WARP_ROUTING_CACHE_KEY, nextData);
         rollbackSnapshotRef.current = null;
         success(res.message);
         loadConnections();

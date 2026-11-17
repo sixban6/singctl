@@ -16,6 +16,7 @@ import (
 
 	"singctl/internal/config"
 	"singctl/internal/constant"
+	"singctl/internal/util/file"
 )
 
 // ErrWarpTunnelUnavailable 当配置需要走 WARP 出口但本地 127.0.0.1:40000 隧道不可用时返回（防黑洞保护）
@@ -881,24 +882,7 @@ func pruneWarpConfigBackups(cfgPath string, keep int) {
 }
 
 func writeFileAtomic0600(path string, data []byte) error {
-	if dir := filepath.Dir(path); dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0700); err != nil {
-			return err
-		}
-	}
-	tmp := fmt.Sprintf("%s.%d.rollback.tmp", path, time.Now().UnixNano())
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
-		return err
-	}
-	_ = os.Chmod(tmp, 0600)
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		if wErr := os.WriteFile(path, data, 0600); wErr != nil {
-			return wErr
-		}
-		_ = os.Chmod(path, 0600)
-	}
-	return nil
+	return file.WriteAtomic0600(path, data)
 }
 
 func defaultValidateSingBoxConfig(tmpPath string) error {

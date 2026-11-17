@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { ServerStatusResponse, DoctorReport, TelemetrySnapshot } from '../types';
 import { api, getBasePath } from '../api';
-import { useToast } from './Toast';
+import { formatBytes, useToast } from '../ui';
 import {
   Cpu,
   HardDrive,
@@ -36,19 +36,6 @@ function formatRate(bps: number): string {
   if (bits >= 1_000_000) return `${(bits / 1_000_000).toFixed(2)} Mbps`;
   if (bits >= 1_000) return `${(bits / 1_000).toFixed(1)} Kbps`;
   return `${Math.round(bits)} bps`;
-}
-
-function formatBytes(bytes: number): string {
-  const val = Math.max(0, bytes);
-  const KB = 1024;
-  const MB = 1024 * KB;
-  const GB = 1024 * MB;
-  const TB = 1024 * GB;
-  if (val >= TB) return `${(val / TB).toFixed(2)} TB`;
-  if (val >= GB) return `${(val / GB).toFixed(2)} GB`;
-  if (val >= MB) return `${(val / MB).toFixed(1)} MB`;
-  if (val >= KB) return `${(val / KB).toFixed(1)} KB`;
-  return `${Math.round(val)} B`;
 }
 
 export const OverviewTab: React.FC<OverviewTabProps> = ({ status, onRefresh, onNavigate }) => {

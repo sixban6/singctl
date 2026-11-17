@@ -2,6 +2,7 @@ package deploy
 
 import (
 	"bytes"
+	"cmp"
 	"crypto/ecdh"
 	"crypto/rand"
 	"crypto/x509"
@@ -48,6 +49,22 @@ func NewSingBoxServer(cfg *config.Config) (*SingBoxServer, error) {
 		return nil, err
 	}
 	return sbs, nil
+}
+
+// InspectExistingShareLinks 以纯本地只读方式读取已部署的 sing-box 凭据并组装分享链接（零外网探测、零证书轮询等待、零随机伪造密钥）。
+func InspectExistingShareLinks(cfg *config.Config, configFile string) (hy2Link, vlessLink string, hy2Port, vlessPort int) {
+	if cfg == nil {
+		return "", "", 443, 443
+	}
+	sbs := &SingBoxServer{
+		cfg:        cfg,
+		ConfigFile: configFile,
+	}
+	tagPrefix := cmp.Or(cfg.Server.FastNodeTag(), "node")
+	sbs.hy2Tag = fmt.Sprintf("sec_%s_hy2", tagPrefix)
+	sbs.vrTag = fmt.Sprintf("sec_%s_vr", tagPrefix)
+	_ = sbs.LoadExistingCredentials()
+	return sbs.ShareLinkHy2, sbs.ShareLinkVless, sbs.Hy2Port(), sbs.VlessPort()
 }
 
 func (sbs *SingBoxServer) init() error {

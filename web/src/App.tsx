@@ -1,24 +1,35 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { ServerStatusResponse } from './types';
 import { ApiError, api, setOnUnauthorized } from './api';
-import { ToastProvider, useToast } from './components/Toast';
+import { clearCachedQuery, useHashRoute } from './hooks';
+import { ToastProvider, useToast } from './ui';
 import { Header } from './components/Header';
-import { Navigation, TabKey } from './components/Navigation';
+import { Navigation, SERVER_TAB_KEYS, TabKey } from './components/Navigation';
 import { OverviewTab } from './components/OverviewTab';
 import { ServicesTab } from './components/ServicesTab';
-import { SubscriptionsTab } from './components/SubscriptionsTab';
-import { FleetTab } from './components/FleetTab';
+import { SubscriptionsTab, prefetchSubscriptionsTab } from './components/SubscriptionsTab';
+import { FleetTab, prefetchFleetTab } from './components/FleetTab';
 import { LogsTab } from './components/LogsTab';
 import { DiagnosticsTab } from './components/DiagnosticsTab';
-import { SecurityTab } from './components/SecurityTab';
+import { SecurityTab, prefetchSecurityTab } from './components/SecurityTab';
 import { CamouflageTab } from './components/CamouflageTab';
-import { WarpTab } from './components/WarpTab';
+import { WarpTab, prefetchWarpTab } from './components/WarpTab';
 import { LoginModal } from './components/LoginModal';
 import { Activity, RefreshCw, WifiOff } from 'lucide-react';
 
+// OCP 声明式保活与预热注册表：扩展新 Tab 时仅需在此注册 prefetch，无需修改外层调度逻辑
+const KEEP_ALIVE_PREFETCHERS: Partial<Record<TabKey, () => void>> = {
+  warp: prefetchWarpTab,
+  subscriptions: prefetchSubscriptionsTab,
+  fleet: prefetchFleetTab,
+  security: prefetchSecurityTab,
+};
+
 const DashboardContent: React.FC = () => {
   const { error, success } = useToast();
-  const [currentTab, setCurrentTab] = useState<TabKey>('overview');
+  const { tab: currentTab, navigate } = useHashRoute<TabKey>(SERVER_TAB_KEYS, 'overview');
+  const setCurrentTab = useCallback((next: TabKey) => navigate(next), [navigate]);
+  const [visitedTabs, setVisitedTabs] = useState<Set<TabKey>>(() => new Set([currentTab]));
   const [status, setStatus] = useState<ServerStatusResponse | null>(null);
   const [isCheckingAuth, setIsCheckingAuth] = useState(true);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -59,7 +70,21 @@ const DashboardContent: React.FC = () => {
   }, []);
 
   useEffect(() => {
+    setVisitedTabs((prev) => {
+      if (prev.has(currentTab)) return prev;
+      const next = new Set(prev);
+      next.add(currentTab);
+      return next;
+    });
+  }, [currentTab]);
+
+  const handleHoverTab = useCallback((tab: TabKey) => {
+    KEEP_ALIVE_PREFETCHERS[tab]?.();
+  }, []);
+
+  useEffect(() => {
     setOnUnauthorized(() => {
+      clearCachedQuery('server:');
       isAuthenticatedRef.current = false;
       setIsAuthenticated(false);
       setInitNetError(null);
@@ -67,6 +92,17 @@ const DashboardContent: React.FC = () => {
     });
     void fetchStatus();
   }, [fetchStatus]);
+
+  // 首屏认证与总览就绪 600ms 后，按注册表静默预热重度 Tab 缓存，实现首次点击 0ms 瞬开
+  useEffect(() => {
+    if (!isAuthenticated || !status) return;
+    const timer = window.setTimeout(() => {
+      (Object.entries(KEEP_ALIVE_PREFETCHERS) as [TabKey, () => void][]).forEach(([key, prefetch]) => {
+        if (key !== currentTab) prefetch();
+      });
+    }, 600);
+    return () => window.clearTimeout(timer);
+  }, [isAuthenticated, status, currentTab]);
 
   // Initial network timeout auto-retry every 4 seconds
   useEffect(() => {
@@ -89,6 +125,8 @@ const DashboardContent: React.FC = () => {
   const handleLogout = async () => {
     try {
       await api.logout();
+      clearCachedQuery('server:');
+      setVisitedTabs(new Set([currentTab]));
       success('已安全退出');
       setStatus(null);
       isAuthenticatedRef.current = false;
@@ -227,7 +265,11 @@ const DashboardContent: React.FC = () => {
           </div>
         )}
 
-        <Navigation currentTab={currentTab} onChangeTab={setCurrentTab} />
+        <Navigation
+          currentTab={currentTab}
+          onChangeTab={setCurrentTab}
+          onHoverTab={handleHoverTab}
+        />
 
         <div className="pt-2">
           {currentTab === 'overview' && (
@@ -247,11 +289,23 @@ const DashboardContent: React.FC = () => {
             />
           )}
 
-          {currentTab === 'warp' && <WarpTab onRefreshParent={() => fetchStatus(false)} />}
+          {visitedTabs.has('warp') && (
+            <div className={currentTab === 'warp' ? undefined : 'hidden'}>
+              <WarpTab active={currentTab === 'warp'} onRefreshParent={() => fetchStatus(false)} />
+            </div>
+          )}
 
-          {currentTab === 'subscriptions' && <SubscriptionsTab />}
+          {visitedTabs.has('subscriptions') && (
+            <div className={currentTab === 'subscriptions' ? undefined : 'hidden'}>
+              <SubscriptionsTab active={currentTab === 'subscriptions'} />
+            </div>
+          )}
 
-          {currentTab === 'fleet' && <FleetTab />}
+          {visitedTabs.has('fleet') && (
+            <div className={currentTab === 'fleet' ? undefined : 'hidden'}>
+              <FleetTab active={currentTab === 'fleet'} />
+            </div>
+          )}
 
           {currentTab === 'logs' && <LogsTab initialService={logService} />}
 
@@ -259,8 +313,14 @@ const DashboardContent: React.FC = () => {
 
           {currentTab === 'camouflage' && <CamouflageTab status={status} />}
 
-          {currentTab === 'security' && (
-            <SecurityTab status={status} onRefresh={() => fetchStatus(false)} />
+          {visitedTabs.has('security') && (
+            <div className={currentTab === 'security' ? undefined : 'hidden'}>
+              <SecurityTab
+                active={currentTab === 'security'}
+                status={status}
+                onRefresh={() => fetchStatus(false)}
+              />
+            </div>
           )}
         </div>
       </main>

@@ -2,7 +2,6 @@ package test
 
 import (
 	"singctl/internal/util/table"
-	"singctl/internal/util/terminalqr"
 	"strings"
 	"testing"
 )
@@ -42,18 +41,5 @@ func TestAnsiStrip(t *testing.T) {
 	colored := "\x1b[32mhello\x1b[0m"
 	if table.StringDisplayWidth(colored) != 5 {
 		t.Errorf("expected width 5 for colored hello, got %d", table.StringDisplayWidth(colored))
-	}
-}
-
-func TestRenderString(t *testing.T) {
-	out, err := terminalqr.RenderString("vless://test-sample-link")
-	if err != nil {
-		t.Fatalf("RenderString failed: %v", err)
-	}
-	if len(out) == 0 {
-		t.Fatalf("expected non-empty output")
-	}
-	if !strings.Contains(out, " ") && !strings.Contains(out, "▀") {
-		t.Fatalf("output does not appear to contain QR block characters: %q", out)
 	}
 }

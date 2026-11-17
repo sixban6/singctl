@@ -92,9 +92,8 @@ func (c *Config) HasActiveServerConfig() bool {
 }
 
 type Config struct {
-	Subs   []Subscription `yaml:"subs"`
-	GitHub GitHubConfig   `yaml:"github"`
-	//GUI       GUIConfig       `yaml:"gui"`
+	Subs           []Subscription       `yaml:"subs"`
+	GitHub         GitHubConfig         `yaml:"github"`
 	Hy2            Hy2Config            `yaml:"hy2"`
 	DNS            ClientDNSConfig      `yaml:"dns,omitempty"`
 	Gateway        GatewayConfig        `yaml:"gateway,omitempty" json:"gateway,omitzero"`
@@ -853,6 +852,27 @@ func (s *ServerConfig) GetNodeTag() string {
 			first, _, _ := strings.Cut(nodeDomain, ".")
 			first = sanitizeTag(first)
 			if first != "" {
+				return first
+			}
+		}
+	}
+	return "node"
+}
+
+// FastNodeTag 零网络阻塞返回节点标签（优先读取配置显式 node_tag 或已缓存地区代号，未命中时回退域名前缀或 "node"，绝不发起外网 IP 探测）。
+func (s *ServerConfig) FastNodeTag() string {
+	if s != nil && strings.TrimSpace(s.NodeTag) != "" {
+		if tag := sanitizeTag(s.NodeTag); tag != "" {
+			return tag
+		}
+	}
+	if discoveredLocationTag != "" {
+		return discoveredLocationTag
+	}
+	if s != nil {
+		if nodeDomain := s.GetNodeDomain(); nodeDomain != "" {
+			first, _, _ := strings.Cut(nodeDomain, ".")
+			if first = sanitizeTag(first); first != "" {
 				return first
 			}
 		}

@@ -1,13 +1,29 @@
 package serverweb
 
 import (
-	"fmt"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"singctl/internal/util/file"
 )
+
+// tryRunSingleFlight 以无锁单飞方式在后台执行异步保鲜任务（已有同类任务运行时直接跳过，零协程堆积）。
+func tryRunSingleFlight(flag *atomic.Bool, timeout time.Duration, fn func(context.Context)) {
+	if flag == nil || fn == nil || !flag.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer flag.Store(false)
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		fn(ctx)
+	}()
+}
 
 const (
 	defaultPersistFastWait  = 25 * time.Millisecond
@@ -190,22 +206,7 @@ func writeAtomicFile0600(filePath string, data []byte) error {
 	if strings.TrimSpace(filePath) == "" {
 		return nil
 	}
-	dir := filepath.Dir(filePath)
-	_ = os.MkdirAll(dir, 0700)
-
-	tmp := fmt.Sprintf("%s.%d.tmp", filePath, time.Now().UnixNano())
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
-		return err
-	}
-	_ = os.Chmod(tmp, 0600)
-	if err := os.Rename(tmp, filePath); err != nil {
-		_ = os.Remove(tmp)
-		if wErr := os.WriteFile(filePath, data, 0600); wErr != nil {
-			return wErr
-		}
-		_ = os.Chmod(filePath, 0600)
-	}
-	return nil
+	return file.WriteAtomic0600(filePath, data)
 }
 
 // cleanupStaleServerWebTmpFiles 清理因磁盘阻塞或进程异常重启遗留的 .serverweb_*.tmp 僵尸临时文件。

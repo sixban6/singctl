@@ -19,6 +19,7 @@ import (
 	"singctl/internal/config"
 	"singctl/internal/deploy"
 	"singctl/internal/updater"
+	"singctl/internal/util/file"
 )
 
 func (s *Server) handleServiceAction(w http.ResponseWriter, r *http.Request) {
@@ -522,21 +523,5 @@ func locateSingBoxBinary() (string, error) {
 }
 
 func writeConfigAtomically(path string, data []byte, mode os.FileMode) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-	tmp := fmt.Sprintf("%s.%d.tmp", path, time.Now().UnixNano())
-	if err := os.WriteFile(tmp, data, mode); err != nil {
-		return err
-	}
-	_ = os.Chmod(tmp, mode)
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		if wErr := os.WriteFile(path, data, mode); wErr != nil {
-			return wErr
-		}
-		_ = os.Chmod(path, mode)
-	}
-	return nil
+	return file.WriteAtomic(path, data, mode)
 }

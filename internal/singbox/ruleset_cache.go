@@ -18,6 +18,7 @@ import (
 	"singctl/internal/constant"
 	log "singctl/internal/logger"
 	rssnapshot "singctl/internal/singbox/ruleset_snapshot"
+	"singctl/internal/util/file"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1177,11 +1178,7 @@ func saveManifest(cacheDir string, m ruleSetManifest) error {
 }
 
 func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, mode); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return file.WriteAtomic(path, data, mode)
 }
 
 func configFileMode(path string) os.FileMode {

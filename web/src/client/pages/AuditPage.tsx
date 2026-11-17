@@ -23,6 +23,7 @@ import {
   PageHeader,
   SectionCard,
   SlideDrawer,
+  formatBytes as fmtBytes,
   useToast,
 } from '../../ui';
 import {
@@ -163,14 +164,6 @@ function getFlowCacheKey(f: AuditFlowRecord): string {
 
 function getFlowTargetKey(f: AuditFlowRecord): string {
   return (f.target || getFlowCacheKey(f)).toLowerCase();
-}
-
-function fmtBytes(n?: number): string {
-  const v = Number(n || 0);
-  if (v < 1024) return `${v} B`;
-  if (v < 1024 * 1024) return `${(v / 1024).toFixed(1)} KB`;
-  if (v < 1024 * 1024 * 1024) return `${(v / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(v / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
 const NONLINEAR_FACTOR_LABELS: Record<string, string> = {

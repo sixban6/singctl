@@ -14,14 +14,27 @@ import {
   Check,
 } from 'lucide-react';
 
-export type TabKey = 'overview' | 'services' | 'warp' | 'subscriptions' | 'fleet' | 'camouflage' | 'logs' | 'diagnostics' | 'security';
+export const SERVER_TAB_KEYS = [
+  'overview',
+  'services',
+  'warp',
+  'subscriptions',
+  'fleet',
+  'camouflage',
+  'logs',
+  'diagnostics',
+  'security',
+] as const;
+
+export type TabKey = (typeof SERVER_TAB_KEYS)[number];
 
 interface NavigationProps {
   currentTab: TabKey;
   onChangeTab: (tab: TabKey) => void;
+  onHoverTab?: (tab: TabKey) => void;
 }
 
-export const Navigation: React.FC<NavigationProps> = ({ currentTab, onChangeTab }) => {
+export const Navigation: React.FC<NavigationProps> = ({ currentTab, onChangeTab, onHoverTab }) => {
   const [moreOpen, setMoreOpen] = useState(false);
 
   const allTabs = [
@@ -51,6 +64,8 @@ export const Navigation: React.FC<NavigationProps> = ({ currentTab, onChangeTab 
           return (
             <button
               key={tab.key}
+              onMouseEnter={() => onHoverTab?.(tab.key)}
+              onTouchStart={() => onHoverTab?.(tab.key)}
               onClick={() => onChangeTab(tab.key)}
               className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs lg:text-sm font-medium whitespace-nowrap transition-all duration-150 ${
                 active
@@ -95,6 +110,7 @@ export const Navigation: React.FC<NavigationProps> = ({ currentTab, onChangeTab 
               <button
                 key={tab.key}
                 type="button"
+                onTouchStart={() => onHoverTab?.(tab.key)}
                 onClick={() => {
                   setMoreOpen(false);
                   onChangeTab(tab.key);
@@ -166,6 +182,8 @@ export const Navigation: React.FC<NavigationProps> = ({ currentTab, onChangeTab 
                   <button
                     key={tab.key}
                     type="button"
+                    onMouseEnter={() => onHoverTab?.(tab.key)}
+                    onTouchStart={() => onHoverTab?.(tab.key)}
                     onClick={() => {
                       onChangeTab(tab.key);
                       setMoreOpen(false);

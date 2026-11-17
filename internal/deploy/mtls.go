@@ -11,6 +11,7 @@ import (
 
 	"singctl/internal/config"
 	"singctl/internal/constant"
+	"singctl/internal/util/file"
 )
 
 const LegacyCaddyMtlsCACert = "/etc/caddy/mtls/ca.crt"
@@ -364,40 +365,5 @@ func applyCaddyReadableFile(path string) error {
 }
 
 func writeFileAtomicWithMode(path string, data []byte, perm os.FileMode) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp.*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	cleanup := true
-	defer func() {
-		if cleanup {
-			_ = os.Remove(tmpName)
-		}
-	}()
-
-	if err := tmp.Chmod(perm); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		return err
-	}
-	cleanup = false
-	return ensureFilePermissions(path, perm)
+	return file.WriteAtomic(path, data, perm)
 }

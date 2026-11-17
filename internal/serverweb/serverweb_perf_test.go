@@ -2,6 +2,7 @@ package serverweb
 
 import (
 	"bytes"
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +15,7 @@ import (
 
 	"singctl/internal/config"
 	"singctl/internal/heal"
+	"singctl/internal/subhub"
 )
 
 func TestSniffTrackerAndGeoConcurrency_NonBlockingAndFlush(t *testing.T) {
@@ -397,5 +399,149 @@ server:
 	}
 	if got := legacyChecks.Load(); got != 1 {
 		t.Fatalf("expected HasLegacyFscarmen check to run exactly once on boot, got %d calls across 5 ticks", got)
+	}
+}
+
+func TestServerTabs_StaleWhileRevalidate_NonBlocking(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "singctl.yaml")
+	if err := os.WriteFile(cfgPath, []byte(`
+server:
+  node_domain: "node.example.com"
+  substore_domain: "sub.example.com"
+  web_admin:
+    username: "opsadmin"
+    password: "Password123"
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := New(Options{
+		ConfigPath:    cfgPath,
+		SubStoreDir:   filepath.Join(tmpDir, "sub-store"),
+		FleetFilePath: filepath.Join(tmpDir, "fleet.yaml"),
+		Username:      "opsadmin",
+		Password:      "Password123",
+	})
+	srv.sniff.EnableSystemProbe = false
+	srv.SubStore().AllowLoopbackRemote = true
+
+	// Issue a valid admin session cookie
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/server/login", strings.NewReader(`{"username":"opsadmin","password":"Password123"}`))
+	loginReq.RemoteAddr = "198.51.100.88:50001"
+	loginReq.Header.Set("Content-Type", "application/json")
+	loginRec := httptest.NewRecorder()
+	srv.Mux.ServeHTTP(loginRec, loginReq)
+	cookies := loginRec.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("expected session cookie")
+	}
+	authedGet := func(url string) (*httptest.ResponseRecorder, time.Duration) {
+		t0 := time.Now()
+		req := httptest.NewRequest(http.MethodGet, url, nil)
+		req.RemoteAddr = "198.51.100.88:50002"
+		for _, c := range cookies {
+			req.AddCookie(c)
+		}
+		rec := httptest.NewRecorder()
+		srv.Mux.ServeHTTP(rec, req)
+		return rec, time.Since(t0)
+	}
+
+	// Case 1: WARP routing — expired exit IP cache must return stale IP immediately (<120ms) and refresh async
+	srv.warpPortChecker = func() bool { return true }
+	var warpFetchCalls atomic.Int32
+	srv.warpExitFetcher = func(time.Duration) (string, string, string, bool) {
+		warpFetchCalls.Add(1)
+		time.Sleep(450 * time.Millisecond)
+		return "198.51.100.200", "SJC", "", true
+	}
+	srv.warpCacheMu.Lock()
+	srv.warpCachedIP = "198.51.100.100"
+	srv.warpCachedLoc = "LAX"
+	srv.warpCachedAt = time.Now().Add(-10 * time.Minute) // expired beyond TTL
+	srv.warpCacheMu.Unlock()
+
+	warpRec, warpElapsed := authedGet("/api/server/warp/routing")
+	if warpRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 from /api/server/warp/routing, got %d", warpRec.Code)
+	}
+	if warpElapsed > 120*time.Millisecond {
+		t.Fatalf("expected stale WARP routing to return immediately (<120ms), took %v", warpElapsed)
+	}
+	if !strings.Contains(warpRec.Body.String(), "198.51.100.100") {
+		t.Fatalf("expected stale WARP IP 198.51.100.100 returned immediately, got: %s", warpRec.Body.String())
+	}
+
+	// Case 2: Security Heal — expired heal status cache must return stale snapshot (<120ms) and single-flight scan async
+	var healCalls atomic.Int32
+	srv.healScannerOverride = func(context.Context, string, string) heal.StatusReport {
+		healCalls.Add(1)
+		time.Sleep(450 * time.Millisecond)
+		return heal.StatusReport{Posture: heal.PostureHealthy, PostureLabel: "fresh-scan"}
+	}
+	srv.storeHealStatusCache(&heal.StatusReport{Posture: heal.PostureHealthy, PostureLabel: "stale-cached"})
+	srv.healCacheMu.Lock()
+	srv.cachedHealAt = time.Now().Add(-10 * time.Minute) // expired beyond 3m TTL
+	srv.healCacheMu.Unlock()
+
+	healRec, healElapsed := authedGet("/api/server/heal/status")
+	if healRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 from /api/server/heal/status, got %d", healRec.Code)
+	}
+	if healElapsed > 120*time.Millisecond {
+		t.Fatalf("expected stale heal status to return immediately (<120ms), took %v", healElapsed)
+	}
+	if !strings.Contains(healRec.Body.String(), "stale-cached") {
+		t.Fatalf("expected stale-cached heal posture returned immediately, got: %s", healRec.Body.String())
+	}
+
+	// Case 3: Subscriptions — expired remote subscription source must not block GET /api/server/subscriptions
+	var slowUpstream atomic.Bool
+	upstreamSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if slowUpstream.Load() {
+			time.Sleep(450 * time.Millisecond)
+		}
+		_, _ = w.Write([]byte("vless://11111111-1111-1111-1111-111111111111@198.51.100.10:443?security=none#DemoNode\n"))
+	}))
+	defer upstreamSrv.Close()
+
+	enabled := true
+	if _, err := srv.SubStore().UpsertSource(t.Context(), subhub.SourceUpsertInput{
+		Name:        "ext-sub",
+		DisplayName: "Ext Sub",
+		Source:      "remote",
+		URL:         upstreamSrv.URL + "/sub",
+		Enabled:     &enabled,
+	}); err != nil {
+		t.Fatalf("UpsertSource failed: %v", err)
+	}
+	srv.SubStore().CacheTTL = time.Millisecond
+	time.Sleep(5 * time.Millisecond)
+	slowUpstream.Store(true)
+
+	subRec, subElapsed := authedGet("/api/server/subscriptions")
+	if subRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 from /api/server/subscriptions, got %d", subRec.Code)
+	}
+	if subElapsed > 120*time.Millisecond {
+		t.Fatalf("expected /api/server/subscriptions to return without blocking on slow upstream warmup (<120ms), took %v", subElapsed)
+	}
+
+	// Wait for background single-flight refreshes to complete and verify caches updated cleanly
+	time.Sleep(550 * time.Millisecond)
+	warpAfter, _ := authedGet("/api/server/warp/routing")
+	if !strings.Contains(warpAfter.Body.String(), "198.51.100.200") {
+		t.Fatalf("expected async WARP refresh to update cached IP to 198.51.100.200, got: %s", warpAfter.Body.String())
+	}
+	healAfter, _ := authedGet("/api/server/heal/status")
+	if !strings.Contains(healAfter.Body.String(), "fresh-scan") {
+		t.Fatalf("expected async heal scan to update cached report to fresh-scan, got: %s", healAfter.Body.String())
+	}
+	if got := warpFetchCalls.Load(); got != 1 {
+		t.Fatalf("expected single-flight WARP background refresh (1 call), got %d", got)
+	}
+	if got := healCalls.Load(); got != 1 {
+		t.Fatalf("expected single-flight heal background refresh (1 call), got %d", got)
 	}
 }
