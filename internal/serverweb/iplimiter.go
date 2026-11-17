@@ -37,7 +37,7 @@ type BanDetail struct {
 	Reason      string
 }
 
-// IPLimiter IP 登录限流与防暴力破解器 (支持 0600 文件持久化)
+// IPLimiter IP 登录限流与防暴力破解器 (支持 0600 文件异步防阻塞持久化)
 type IPLimiter struct {
 	mu          sync.RWMutex
 	attempts    map[string]*ipAttempt
@@ -46,9 +46,8 @@ type IPLimiter struct {
 	banDuration time.Duration
 	stopCleaner chan struct{}
 	filePath    string
-	diskMu      sync.Mutex
 	writeSeq    uint64
-	writtenSeq  uint64
+	writer      *asyncSnapshotWriter
 }
 
 // NewIPLimiter 创建 IPLimiter 实例 (默认 3 次失败、10 分钟窗口、15 分钟封禁，支持传入 0600 小文件持久化路径)
@@ -75,6 +74,7 @@ func NewIPLimiter(maxAttempts int, window, banDuration time.Duration, filePath .
 		banDuration: banDuration,
 		stopCleaner: make(chan struct{}),
 		filePath:    fp,
+		writer:      newAsyncSnapshotWriter(fp, writeAtomicFile0600),
 	}
 	l.loadLocked()
 	go l.startCleaner()
@@ -119,7 +119,7 @@ func (l *IPLimiter) snapshotLocked() ([]byte, uint64) {
 	if l.filePath == "" {
 		return nil, 0
 	}
-	data, err := json.MarshalIndent(l.attempts, "", "  ")
+	data, err := json.Marshal(l.attempts)
 	if err != nil {
 		return nil, 0
 	}
@@ -128,16 +128,10 @@ func (l *IPLimiter) snapshotLocked() ([]byte, uint64) {
 }
 
 func (l *IPLimiter) persistSnapshot(data []byte, seq uint64) {
-	if l.filePath == "" || len(data) == 0 {
+	if l == nil || l.writer == nil || l.filePath == "" || len(data) == 0 {
 		return
 	}
-	l.diskMu.Lock()
-	defer l.diskMu.Unlock()
-	if seq > l.writtenSeq {
-		if err := writeAtomicFile0600(l.filePath, data); err == nil {
-			l.writtenSeq = seq
-		}
-	}
+	l.writer.Submit(data, seq, defaultPersistFastWait)
 }
 
 // GetClientIP 只在本机反代连接上信任 Caddy 覆写的 X-Real-IP。
@@ -468,19 +462,32 @@ func (l *IPLimiter) startCleaner() {
 				data, seq = l.snapshotLocked()
 			}
 			l.mu.Unlock()
-			l.persistSnapshot(data, seq)
+			if len(data) > 0 && l.writer != nil {
+				l.writer.Submit(data, seq, 0)
+			}
 		case <-l.stopCleaner:
 			return
 		}
 	}
 }
 
-// Close 停止后台清理协程
+// Flush 尝试在超时窗口内刷新尚未落盘的封禁记录快照
+func (l *IPLimiter) Flush() {
+	if l == nil || l.writer == nil {
+		return
+	}
+	l.writer.Flush(defaultPersistFlushWait)
+}
+
+// Close 停止后台清理协程并尝试刷新落盘
 func (l *IPLimiter) Close() {
 	select {
 	case <-l.stopCleaner:
 	default:
 		close(l.stopCleaner)
+	}
+	if l.writer != nil {
+		l.writer.Close(defaultPersistFlushWait)
 	}
 }
 

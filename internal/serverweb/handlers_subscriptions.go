@@ -188,6 +188,7 @@ func (s *Server) handleRotateSubscriptionKey(w http.ResponseWriter, r *http.Requ
 		writeJSONError(w, http.StatusInternalServerError, "轮换订阅密钥失败: "+err.Error())
 		return
 	}
+	s.invalidateConfigCache()
 
 	cfg, _ := config.Load(s.opts.ConfigPath)
 	if cfg != nil {

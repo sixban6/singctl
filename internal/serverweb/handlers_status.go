@@ -1,13 +1,17 @@
 package serverweb
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"io"
+	"maps"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,12 +19,17 @@ import (
 
 	"singctl/internal/config"
 	"singctl/internal/deploy"
-	"singctl/internal/subhub"
 )
 
 const (
-	statusCmdTimeout     = 1200 * time.Millisecond
-	serviceProbeCacheTTL = 3 * time.Second
+	statusCmdTimeout        = 1200 * time.Millisecond
+	statusSelectMaxWait     = 600 * time.Millisecond
+	configSelectMaxWait     = 150 * time.Millisecond
+	configCacheTTL          = 5 * time.Second
+	serviceProbeCacheTTL    = 5 * time.Second
+	serviceVersionCacheTTL  = 5 * time.Minute
+	certProbeCacheTTL       = 3 * time.Minute
+	rootDiskMetricsCacheTTL = 15 * time.Second
 )
 
 func runCommandWithTimeout(timeout time.Duration, name string, args ...string) ([]byte, error) {
@@ -30,6 +39,122 @@ func runCommandWithTimeout(timeout time.Duration, name string, args ...string) (
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	return exec.CommandContext(ctx, name, args...).Output()
+}
+
+func probeLoopbackTCP(addr string, timeout time.Duration) bool {
+	if timeout <= 0 {
+		timeout = 100 * time.Millisecond
+	}
+	conn, err := net.DialTimeout("tcp", addr, timeout)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
+func probeServicesByLoopbackPorts() map[string]serviceProbeSnapshot {
+	return map[string]serviceProbeSnapshot{
+		"caddy":       {running: probeLoopbackTCP("127.0.0.1:443", 80*time.Millisecond)},
+		"sing-box":    {running: probeLoopbackTCP("127.0.0.1:9099", 80*time.Millisecond)},
+		"singctl-sub": {running: probeLoopbackTCP("127.0.0.1:3001", 80*time.Millisecond)},
+		"wireproxy":   {running: probeLoopbackTCP("127.0.0.1:40000", 80*time.Millisecond)},
+	}
+}
+
+func (s *Server) resolveSubstoreAdminURLFast(cfg *config.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	sbt := deploy.NewSubstore(cfg, "")
+	if adminURL, err := sbt.GetAdminURL(); err == nil {
+		return adminURL
+	}
+	return ""
+}
+
+// loadConfigBounded 以单飞 + 硬超时读取最新配置；当底层磁盘发生 D 状态假死时立即回退内存缓存，绝不卡死请求或巡检。
+func (s *Server) loadConfigBounded(maxWait time.Duration) (*config.Config, error) {
+	s.configCacheMu.RLock()
+	fallbackCfg := s.cachedConfig
+	s.configCacheMu.RUnlock()
+
+	if strings.TrimSpace(s.opts.ConfigPath) == "" {
+		if fallbackCfg != nil {
+			return fallbackCfg, nil
+		}
+		return &config.Config{}, nil
+	}
+	if maxWait <= 0 {
+		maxWait = configSelectMaxWait
+	}
+
+	if !s.configRefreshRunning.CompareAndSwap(false, true) {
+		if fallbackCfg != nil {
+			return fallbackCfg, nil
+		}
+		return &config.Config{}, os.ErrDeadlineExceeded
+	}
+
+	type cfgRes struct {
+		cfg *config.Config
+		err error
+	}
+	doneCh := make(chan cfgRes, 1)
+	loader := config.Load
+	if s.configLoaderOverride != nil {
+		loader = s.configLoaderOverride
+	}
+	cfgPath := s.opts.ConfigPath
+	go func() {
+		defer s.configRefreshRunning.Store(false)
+		loaded, err := loader(cfgPath)
+		if err == nil && loaded != nil {
+			s.updateConfigCache(loaded)
+		}
+		doneCh <- cfgRes{cfg: loaded, err: err}
+	}()
+
+	timer := time.NewTimer(maxWait)
+	defer timer.Stop()
+	select {
+	case res := <-doneCh:
+		if res.err == nil && res.cfg != nil {
+			return res.cfg, nil
+		}
+		if fallbackCfg != nil {
+			return fallbackCfg, nil
+		}
+		return &config.Config{}, res.err
+	case <-timer.C:
+		if fallbackCfg != nil {
+			return fallbackCfg, nil
+		}
+		return &config.Config{}, os.ErrDeadlineExceeded
+	}
+}
+
+func (s *Server) getConfigSnapshot(maxWait time.Duration) (*config.Config, string) {
+	s.configCacheMu.RLock()
+	if s.cachedConfig != nil && time.Since(s.cachedConfigAt) < configCacheTTL {
+		cfg := s.cachedConfig
+		subURL := s.cachedSubAdminURL
+		s.configCacheMu.RUnlock()
+		return cfg, subURL
+	}
+	s.configCacheMu.RUnlock()
+
+	cfg, _ := s.loadConfigBounded(maxWait)
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
+	s.configCacheMu.RLock()
+	subURL := s.cachedSubAdminURL
+	s.configCacheMu.RUnlock()
+	if subURL == "" {
+		subURL = s.resolveSubstoreAdminURLFast(cfg)
+	}
+	return cfg, subURL
 }
 
 type serviceProbeSnapshot struct {
@@ -105,24 +230,61 @@ func probeSystemdServicesBatch(units ...string) map[string]serviceProbeSnapshot 
 func (s *Server) getCachedServiceProbes() map[string]serviceProbeSnapshot {
 	s.serviceProbeMu.Lock()
 	if s.cachedServiceProbes != nil && time.Since(s.cachedServiceProbesAt) < serviceProbeCacheTTL {
-		cached := s.cachedServiceProbes
+		cached := maps.Clone(s.cachedServiceProbes)
 		s.serviceProbeMu.Unlock()
 		return cached
 	}
+	fallback := maps.Clone(s.cachedServiceProbes)
 	s.serviceProbeMu.Unlock()
 
-	probes := probeSystemdServicesBatch("caddy", "sing-box", "singctl-sub", "wireproxy")
+	if !s.serviceProbeRunning.CompareAndSwap(false, true) {
+		if len(fallback) > 0 {
+			return fallback
+		}
+		return probeServicesByLoopbackPorts()
+	}
 
-	s.serviceProbeMu.Lock()
-	s.cachedServiceProbes = probes
-	s.cachedServiceProbesAt = time.Now()
-	s.serviceProbeMu.Unlock()
-	return probes
+	doneCh := make(chan map[string]serviceProbeSnapshot, 1)
+	prober := s.statusProberOverride
+	go func() {
+		defer s.serviceProbeRunning.Store(false)
+		var probes map[string]serviceProbeSnapshot
+		if prober != nil {
+			probes = prober()
+		} else {
+			probes = probeSystemdServicesBatch("caddy", "sing-box", "singctl-sub", "wireproxy")
+		}
+		if len(probes) > 0 {
+			s.serviceProbeMu.Lock()
+			s.cachedServiceProbes = maps.Clone(probes)
+			s.cachedServiceProbesAt = time.Now()
+			s.serviceProbeMu.Unlock()
+		}
+		doneCh <- probes
+	}()
+
+	timer := time.NewTimer(statusSelectMaxWait)
+	defer timer.Stop()
+	select {
+	case probes := <-doneCh:
+		if len(probes) > 0 {
+			return probes
+		}
+		if len(fallback) > 0 {
+			return fallback
+		}
+		return probeServicesByLoopbackPorts()
+	case <-timer.C:
+		if len(fallback) > 0 {
+			return fallback
+		}
+		return probeServicesByLoopbackPorts()
+	}
 }
 
 func (s *Server) getCachedServiceVersions() (caddyVer, singboxVer, subhubVer, warpVer string) {
 	s.versionCacheMu.Lock()
-	if len(s.cachedVersions) > 0 && time.Since(s.cachedVersionsAt) < 60*time.Second {
+	if len(s.cachedVersions) > 0 && time.Since(s.cachedVersionsAt) < serviceVersionCacheTTL {
 		caddyVer = s.cachedVersions["caddy"]
 		singboxVer = s.cachedVersions["singbox"]
 		subhubVer = s.cachedVersions["subhub"]
@@ -130,46 +292,157 @@ func (s *Server) getCachedServiceVersions() (caddyVer, singboxVer, subhubVer, wa
 		s.versionCacheMu.Unlock()
 		return
 	}
+	fallback := maps.Clone(s.cachedVersions)
 	s.versionCacheMu.Unlock()
 
-	fetchWithTimeout := func(fn func() string) string {
-		ch := make(chan string, 1)
-		go func() {
-			ch <- fn()
-		}()
-		select {
-		case v := <-ch:
-			return v
-		case <-time.After(1500 * time.Millisecond):
-			return ""
+	applyMap := func(m map[string]string) (string, string, string, string) {
+		return m["caddy"], m["singbox"], m["subhub"], m["warp"]
+	}
+
+	if !s.versionProbeRunning.CompareAndSwap(false, true) {
+		return applyMap(fallback)
+	}
+
+	doneCh := make(chan map[string]string, 1)
+	go func() {
+		defer s.versionProbeRunning.Store(false)
+		fetchWithTimeout := func(fn func() string) string {
+			ch := make(chan string, 1)
+			go func() {
+				ch <- fn()
+			}()
+			t := time.NewTimer(1500 * time.Millisecond)
+			defer t.Stop()
+			select {
+			case v := <-ch:
+				return v
+			case <-t.C:
+				return ""
+			}
 		}
+
+		var cV, sV, subV, wV string
+		var wg sync.WaitGroup
+		wg.Add(4)
+		go func() { defer wg.Done(); cV = fetchWithTimeout(deploy.GetInstalledCaddyVersion) }()
+		go func() { defer wg.Done(); sV = fetchWithTimeout(deploy.GetInstalledSingBoxVersion) }()
+		go func() { defer wg.Done(); subV = fetchWithTimeout(deploy.GetInstalledSubhubVersion) }()
+		go func() { defer wg.Done(); wV = fetchWithTimeout(deploy.GetInstalledWarpVersion) }()
+		wg.Wait()
+
+		res := map[string]string{
+			"caddy":   cmp.Or(cV, fallback["caddy"]),
+			"singbox": cmp.Or(sV, fallback["singbox"]),
+			"subhub":  cmp.Or(subV, fallback["subhub"]),
+			"warp":    cmp.Or(wV, fallback["warp"]),
+		}
+		s.versionCacheMu.Lock()
+		s.cachedVersions = maps.Clone(res)
+		s.cachedVersionsAt = time.Now()
+		s.versionCacheMu.Unlock()
+		doneCh <- res
+	}()
+
+	timer := time.NewTimer(statusSelectMaxWait)
+	defer timer.Stop()
+	select {
+	case res := <-doneCh:
+		return applyMap(res)
+	case <-timer.C:
+		return applyMap(fallback)
+	}
+}
+
+func (s *Server) getCachedCerts(cfg *config.Config) []CertHealth {
+	s.certProbeMu.Lock()
+	if s.cachedCerts != nil && time.Since(s.cachedCertsAt) < certProbeCacheTTL {
+		cached := slices.Clone(s.cachedCerts)
+		s.certProbeMu.Unlock()
+		return cached
+	}
+	fallback := slices.Clone(s.cachedCerts)
+	s.certProbeMu.Unlock()
+
+	if !s.certProbeRunning.CompareAndSwap(false, true) {
+		if fallback != nil {
+			return fallback
+		}
+		return []CertHealth{}
 	}
 
-	var wg sync.WaitGroup
-	wg.Add(4)
-	go func() { defer wg.Done(); caddyVer = fetchWithTimeout(deploy.GetInstalledCaddyVersion) }()
-	go func() { defer wg.Done(); singboxVer = fetchWithTimeout(deploy.GetInstalledSingBoxVersion) }()
-	go func() { defer wg.Done(); subhubVer = fetchWithTimeout(deploy.GetInstalledSubhubVersion) }()
-	go func() { defer wg.Done(); warpVer = fetchWithTimeout(deploy.GetInstalledWarpVersion) }()
-	wg.Wait()
+	doneCh := make(chan []CertHealth, 1)
+	go func() {
+		defer s.certProbeRunning.Store(false)
+		certs := InspectServerCerts(cfg, false)
+		s.certProbeMu.Lock()
+		s.cachedCerts = slices.Clone(certs)
+		s.cachedCertsAt = time.Now()
+		s.certProbeMu.Unlock()
+		doneCh <- certs
+	}()
 
-	s.versionCacheMu.Lock()
-	s.cachedVersions = map[string]string{
-		"caddy":   caddyVer,
-		"singbox": singboxVer,
-		"subhub":  subhubVer,
-		"warp":    warpVer,
+	timer := time.NewTimer(500 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case certs := <-doneCh:
+		return certs
+	case <-timer.C:
+		if fallback != nil {
+			return fallback
+		}
+		return []CertHealth{}
 	}
-	s.cachedVersionsAt = time.Now()
-	s.versionCacheMu.Unlock()
-	return
+}
+
+func (s *Server) getCachedRootDiskUsage() (used, total, pct string, ok bool) {
+	s.diskMetricsMu.Lock()
+	if !s.cachedDiskAt.IsZero() && time.Since(s.cachedDiskAt) < rootDiskMetricsCacheTTL {
+		used, total, pct, ok = s.cachedDiskUsed, s.cachedDiskTotal, s.cachedDiskPercent, s.cachedDiskOK
+		s.diskMetricsMu.Unlock()
+		return
+	}
+	fbUsed, fbTotal, fbPct, fbOK := s.cachedDiskUsed, s.cachedDiskTotal, s.cachedDiskPercent, s.cachedDiskOK
+	s.diskMetricsMu.Unlock()
+
+	if !s.diskProbeRunning.CompareAndSwap(false, true) {
+		return fbUsed, fbTotal, fbPct, fbOK
+	}
+
+	type diskSnap struct {
+		u, t, p string
+		ok      bool
+	}
+	doneCh := make(chan diskSnap, 1)
+	go func() {
+		defer s.diskProbeRunning.Store(false)
+		u, t, p, okVal := getRootDiskUsage()
+		if okVal {
+			s.diskMetricsMu.Lock()
+			s.cachedDiskUsed = u
+			s.cachedDiskTotal = t
+			s.cachedDiskPercent = p
+			s.cachedDiskOK = true
+			s.cachedDiskAt = time.Now()
+			s.diskMetricsMu.Unlock()
+		}
+		doneCh <- diskSnap{u: u, t: t, p: p, ok: okVal}
+	}()
+
+	timer := time.NewTimer(configSelectMaxWait)
+	defer timer.Stop()
+	select {
+	case d := <-doneCh:
+		if d.ok {
+			return d.u, d.t, d.p, true
+		}
+		return fbUsed, fbTotal, fbPct, fbOK
+	case <-timer.C:
+		return fbUsed, fbTotal, fbPct, fbOK
+	}
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	cfg, err := config.Load(s.opts.ConfigPath)
-	if err != nil || cfg == nil {
-		cfg = &config.Config{}
-	}
+	cfg, substoreAdminURL := s.getConfigSnapshot(configSelectMaxWait)
 
 	subDomain := cfg.Server.GetSubstoreDomain()
 	if subDomain == "" {
@@ -193,8 +466,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		defer wg.Done()
 		caddyVer, singboxVer, subhubVer, warpVer = s.getCachedServiceVersions()
 	}()
-	go func() { defer wg.Done(); sysMetrics = getSystemMetrics() }()
-	go func() { defer wg.Done(); certs = InspectServerCerts(cfg, false) }()
+	go func() { defer wg.Done(); sysMetrics = s.getSystemMetricsBounded() }()
+	go func() { defer wg.Done(); certs = s.getCachedCerts(cfg) }()
 	wg.Wait()
 
 	caddyProbe := probes["caddy"]
@@ -202,13 +475,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	subhubProbe := probes["singctl-sub"]
 	warpProbe := probes["wireproxy"]
 
-	subhubRunning := subhubProbe.running || subhub.IsRunning()
-
-	substoreAdminURL := ""
-	sbt := deploy.NewSubstore(cfg, "")
-	if adminURL, err := sbt.GetAdminURL(); err == nil && adminURL != "" {
-		substoreAdminURL = adminURL
-	}
+	subhubRunning := subhubProbe.running || probeLoopbackTCP("127.0.0.1:3001", 80*time.Millisecond)
 
 	status := map[string]any{
 		"version":     s.opts.Version,
@@ -326,7 +593,27 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
+func (s *Server) getSystemMetricsBounded() map[string]any {
+	m := readProcSystemMetrics()
+	if used, total, pct, ok := s.getCachedRootDiskUsage(); ok {
+		m["diskUsed"] = used
+		m["diskTotal"] = total
+		m["diskPercent"] = pct
+	}
+	return m
+}
+
 func getSystemMetrics() map[string]any {
+	m := readProcSystemMetrics()
+	if used, total, pct, ok := getRootDiskUsage(); ok {
+		m["diskUsed"] = used
+		m["diskTotal"] = total
+		m["diskPercent"] = pct
+	}
+	return m
+}
+
+func readProcSystemMetrics() map[string]any {
 	m := map[string]any{
 		"bbr":    isBBREnabled(),
 		"uptime": getSystemUptime(),
@@ -334,7 +621,7 @@ func getSystemMetrics() map[string]any {
 
 	if data, err := os.ReadFile("/proc/meminfo"); err == nil {
 		var total, available uint64
-		for _, line := range strings.Split(string(data), "\n") {
+		for line := range strings.SplitSeq(string(data), "\n") {
 			fields := strings.Fields(line)
 			if len(fields) >= 2 {
 				switch fields[0] {
@@ -361,12 +648,6 @@ func getSystemMetrics() map[string]any {
 			m["load5"] = fields[1]
 			m["load15"] = fields[2]
 		}
-	}
-
-	if used, total, pct, ok := getRootDiskUsage(); ok {
-		m["diskUsed"] = used
-		m["diskTotal"] = total
-		m["diskPercent"] = pct
 	}
 
 	return m

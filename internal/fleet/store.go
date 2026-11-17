@@ -131,11 +131,18 @@ type fleetFileDoc struct {
 	Nodes   []Node `json:"nodes" yaml:"nodes"`
 }
 
+type probeMemOverlay struct {
+	LastProbeAt   string
+	LatencyMs     int
+	LastPersisted time.Time
+}
+
 // Store persists fleet node metadata (fleet.yaml) and SSH key files with 0600 permissions.
 type Store struct {
 	FilePath string
 	KeysDir  string
 	mu       sync.RWMutex
+	probeMem map[string]probeMemOverlay
 }
 
 // ResolveFleetFilePath resolves fleet.yaml alongside singctl.yaml.
@@ -157,6 +164,7 @@ func NewStore(filePath string) *Store {
 	s := &Store{
 		FilePath: filePath,
 		KeysDir:  filepath.Join(filepath.Dir(filePath), "fleet_keys"),
+		probeMem: make(map[string]probeMemOverlay),
 	}
 	s.migrateLegacyJSONIfNeeded()
 	return s
@@ -246,20 +254,45 @@ func SubHubSourceName(nodeID string) string {
 	return "fleet_" + strings.TrimSpace(nodeID)
 }
 
+func (s *Store) applyProbeMemOverlayLocked(nodes []Node) []Node {
+	if len(s.probeMem) == 0 || len(nodes) == 0 {
+		return nodes
+	}
+	for i := range nodes {
+		if ov, ok := s.probeMem[nodes[i].ID]; ok {
+			if ov.LastProbeAt != "" && ov.LastProbeAt >= nodes[i].LastProbeAt {
+				nodes[i].LastProbeAt = ov.LastProbeAt
+				if ov.LatencyMs > 0 {
+					nodes[i].LatencyMs = ov.LatencyMs
+				}
+			}
+		}
+	}
+	return nodes
+}
+
 func (s *Store) readLocked() ([]Node, error) {
 	raw, err := os.ReadFile(s.FilePath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			if legacy := s.legacyJSONPath(); legacy != "" {
 				if legacyRaw, lErr := os.ReadFile(legacy); lErr == nil {
-					return parseFleetBytes(legacyRaw, legacy)
+					nodes, pErr := parseFleetBytes(legacyRaw, legacy)
+					if pErr != nil {
+						return nil, pErr
+					}
+					return s.applyProbeMemOverlayLocked(nodes), nil
 				}
 			}
 			return []Node{}, nil
 		}
 		return nil, err
 	}
-	return parseFleetBytes(raw, s.FilePath)
+	nodes, err := parseFleetBytes(raw, s.FilePath)
+	if err != nil {
+		return nil, err
+	}
+	return s.applyProbeMemOverlayLocked(nodes), nil
 }
 
 func (s *Store) writeLocked(nodes []Node) error {
@@ -532,6 +565,7 @@ func (s *Store) Upsert(in UpsertInput) (Node, error) {
 	if err := s.writeLocked(nodes); err != nil {
 		return Node{}, err
 	}
+	delete(s.probeMem, target.ID)
 	if legacy := s.legacyJSONPath(); legacy != "" {
 		_ = os.Remove(legacy)
 	}
@@ -540,6 +574,11 @@ func (s *Store) Upsert(in UpsertInput) (Node, error) {
 
 // UpdateRuntimeState updates telemetry/health fields on an existing node without touching credentials.
 func (s *Store) UpdateRuntimeState(id string, mutator func(*Node)) (Node, error) {
+	return s.UpdateProbeRuntimeState(id, mutator, 0)
+}
+
+// UpdateProbeRuntimeState updates node health fields and coalesces disk writes when state has not transitioned.
+func (s *Store) UpdateProbeRuntimeState(id string, mutator func(*Node), minPersistInterval time.Duration) (Node, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -551,11 +590,38 @@ func (s *Store) UpdateRuntimeState(id string, mutator func(*Node)) (Node, error)
 	if idx < 0 {
 		return Node{}, fmt.Errorf("未找到子节点 %q", id)
 	}
+	before := nodes[idx]
 	mutator(&nodes[idx])
-	if err := s.writeLocked(nodes); err != nil {
-		return Node{}, err
+	after := nodes[idx]
+
+	if s.probeMem == nil {
+		s.probeMem = make(map[string]probeMemOverlay)
 	}
-	return nodes[idx], nil
+	ov := s.probeMem[id]
+	stateChanged := before.Online != after.Online ||
+		before.ProbeStatus != after.ProbeStatus ||
+		before.CertDaysLeft != after.CertDaysLeft ||
+		before.LastError != after.LastError ||
+		before.SingctlVersion != after.SingctlVersion ||
+		before.LastSyncAt != after.LastSyncAt ||
+		before.LastProbeAt == ""
+
+	now := time.Now()
+	needPersist := minPersistInterval <= 0 ||
+		stateChanged ||
+		ov.LastPersisted.IsZero() ||
+		now.Sub(ov.LastPersisted) >= minPersistInterval
+
+	if needPersist {
+		if err := s.writeLocked(nodes); err != nil {
+			return Node{}, err
+		}
+		ov.LastPersisted = now
+	}
+	ov.LastProbeAt = after.LastProbeAt
+	ov.LatencyMs = after.LatencyMs
+	s.probeMem[id] = ov
+	return after, nil
 }
 
 // Delete removes a fleet node and shreds any managed inline SSH key file.
@@ -577,6 +643,7 @@ func (s *Store) Delete(id string) error {
 	if err := s.writeLocked(nodes); err != nil {
 		return err
 	}
+	delete(s.probeMem, id)
 	if removed.AuthType == AuthInlineKey {
 		_ = os.Remove(filepath.Join(s.KeysDir, id+".pem"))
 	}

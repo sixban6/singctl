@@ -33,14 +33,13 @@ type AuditEntry struct {
 	IP     string `json:"ip"`
 }
 
-// AuditManager 管理操作审计日志管理器 (支持 0600 小文件持久化)
+// AuditManager 管理操作审计日志管理器 (支持 0600 小文件异步防阻塞持久化)
 type AuditManager struct {
-	mu         sync.RWMutex
-	logs       []AuditEntry
-	filePath   string
-	diskMu     sync.Mutex
-	writeSeq   uint64
-	writtenSeq uint64
+	mu       sync.RWMutex
+	logs     []AuditEntry
+	filePath string
+	writeSeq uint64
+	writer   *asyncSnapshotWriter
 }
 
 // NewAuditManager 创建审计日志管理器实例
@@ -52,12 +51,13 @@ func NewAuditManager(filePath ...string) *AuditManager {
 	m := &AuditManager{
 		logs:     make([]AuditEntry, 0, MaxAuditLogs),
 		filePath: fp,
+		writer:   newAsyncSnapshotWriter(fp, writeAtomicFile0600),
 	}
 	m.loadLocked()
 	return m
 }
 
-// Record 记录一条管理操作 (自动生成时间，严格禁止写入密码/令牌)
+// Record 记录一条管理操作 (自动生成时间，严格禁止写入密码/令牌；磁盘卡死时绝不阻塞请求协程)
 func (m *AuditManager) Record(ip, action string) {
 	if m == nil {
 		return
@@ -80,7 +80,7 @@ func (m *AuditManager) Record(ip, action string) {
 	var data []byte
 	var seq uint64
 	if m.filePath != "" {
-		if b, err := json.MarshalIndent(m.logs, "", "  "); err == nil {
+		if b, err := json.Marshal(m.logs); err == nil {
 			m.writeSeq++
 			seq = m.writeSeq
 			data = b
@@ -105,6 +105,14 @@ func (m *AuditManager) List() []AuditEntry {
 	return res
 }
 
+// Flush 尝试在超时窗口内刷新尚未落盘的审计快照
+func (m *AuditManager) Flush() {
+	if m == nil || m.writer == nil {
+		return
+	}
+	m.writer.Flush(defaultPersistFlushWait)
+}
+
 func (m *AuditManager) loadLocked() {
 	if m.filePath == "" {
 		return
@@ -126,14 +134,8 @@ func (m *AuditManager) loadLocked() {
 }
 
 func (m *AuditManager) persistSnapshot(data []byte, seq uint64) {
-	if m.filePath == "" || len(data) == 0 {
+	if m == nil || m.writer == nil || m.filePath == "" || len(data) == 0 {
 		return
 	}
-	m.diskMu.Lock()
-	defer m.diskMu.Unlock()
-	if seq > m.writtenSeq {
-		if err := writeAtomicFile0600(m.filePath, data); err == nil {
-			m.writtenSeq = seq
-		}
-	}
+	m.writer.Submit(data, seq, defaultPersistFastWait)
 }
