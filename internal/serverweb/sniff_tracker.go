@@ -1172,12 +1172,18 @@ func (t *SniffTracker) Snapshot(ctx context.Context, activeProxyClientIPs ...str
 	return t.buildSnapshot(ctx, "all", false, true)
 }
 
-// SnapshotForNode 采集并生成指定主机视角 ("all" | "local" | "<node_id>") 的全量活跃嗅探三维态势快照
+// SnapshotForNode 采集并生成指定主机视角 ("all" | "local" | "<node_id>") 的全量活跃嗅探三维态势快照。
+// 默认 (forceRefresh=false) 采用 SWR 非阻塞模式立即返回内存快照并后台异步刷新；显式刷新 (?refresh=1) 执行同步采集。
 func (t *SniffTracker) SnapshotForNode(ctx context.Context, nodeScope string, forceRefresh bool, activeProxyClientIPs ...string) SniffSummary {
 	if len(activeProxyClientIPs) > 0 {
 		t.MarkTrustedClientIPs(activeProxyClientIPs...)
 	}
-	return t.buildSnapshot(ctx, nodeScope, forceRefresh, false)
+	if !forceRefresh {
+		t.triggerBackgroundSystemHarvestIfNeeded()
+		t.triggerBackgroundFleetHarvestIfNeeded()
+		return t.buildSnapshot(ctx, nodeScope, false, true)
+	}
+	return t.buildSnapshot(ctx, nodeScope, true, false)
 }
 
 func (t *SniffTracker) buildSnapshot(ctx context.Context, nodeScope string, forceRefresh, nonBlocking bool) SniffSummary {
