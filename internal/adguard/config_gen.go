@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"singctl/internal/config"
+	"singctl/internal/util/file"
 	"singctl/internal/util/netinfo"
 
 	"gopkg.in/yaml.v3"
@@ -327,17 +328,7 @@ func WriteConfigAtomically(configPath string, data []byte) error {
 		return fmt.Errorf("mkdir %s: %w", dir, err)
 	}
 	_ = os.Chmod(dir, 0700)
-
-	tmpPath := configPath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0600); err != nil {
-		return fmt.Errorf("write %s: %w", tmpPath, err)
-	}
-	_ = os.Chmod(tmpPath, 0600)
-	if err := os.Rename(tmpPath, configPath); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("rename %s -> %s: %w", tmpPath, configPath, err)
-	}
-	return os.Chmod(configPath, 0600)
+	return file.WriteAtomic0600(configPath, data)
 }
 
 // SyncExistingConfig 对已存在的 AdGuardHome.yaml 做最小 AST 更新（同步局域网监听地址、127.0.0.1 DNS 端口及可选账号密码），

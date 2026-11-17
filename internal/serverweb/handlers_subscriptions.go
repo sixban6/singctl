@@ -23,24 +23,7 @@ func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hy2Port := cfg.Server.GetHy2Port()
-	vlessPort := cfg.Server.GetVlessPort()
-	var hy2Link, vlessLink string
-	sbs, _ := deploy.NewSingBoxServer(cfg)
-	if sbs != nil {
-		if s.opts.SingBoxConfigPath != "" {
-			sbs.ConfigFile = s.opts.SingBoxConfigPath
-		}
-		_ = sbs.LoadExistingCredentials()
-		hy2Link = sbs.ShareLinkHy2
-		vlessLink = sbs.ShareLinkVless
-		if sbs.Hy2Port() > 0 {
-			hy2Port = sbs.Hy2Port()
-		}
-		if sbs.VlessPort() > 0 {
-			vlessPort = sbs.VlessPort()
-		}
-	}
+	hy2Link, vlessLink, hy2Port, vlessPort := deploy.InspectExistingShareLinks(cfg, s.opts.SingBoxConfigPath)
 
 	sbt := deploy.NewSubstore(cfg, "")
 	adminURL, _ := sbt.GetAdminURL()
@@ -62,9 +45,15 @@ func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 		rawSubURL = fmt.Sprintf("https://%s/%s/download/collection/all", subDomain, ssKey)
 	}
 
-	warmupCtx, cancelWarmup := context.WithTimeout(r.Context(), 6*time.Second)
-	s.subStore.WarmupUncachedSources(warmupCtx)
-	cancelWarmup()
+	if r.URL.Query().Get("refresh") == "1" {
+		warmupCtx, cancelWarmup := context.WithTimeout(r.Context(), 6*time.Second)
+		s.subStore.WarmupUncachedSources(warmupCtx)
+		cancelWarmup()
+	} else {
+		tryRunSingleFlight(&s.subWarmupRunning, 15*time.Second, func(bgCtx context.Context) {
+			s.subStore.WarmupUncachedSources(bgCtx)
+		})
+	}
 
 	sources, err := s.subStore.ListSources()
 	if err != nil || sources == nil {
@@ -80,12 +69,11 @@ func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	res := map[string]any{
-		"engine":            "native-go",
-		"substoreKey":       ssKey,
-		"substoreAdminUrl":  adminURL,
-		"substoreVercelUrl": "",
-		"subscriptionUrl":   rawSubURL,
-		"importLinks":       importLinks,
+		"engine":           "native-go",
+		"substoreKey":      ssKey,
+		"substoreAdminUrl": adminURL,
+		"subscriptionUrl":  rawSubURL,
+		"importLinks":      importLinks,
 		"sources":           sources,
 		"nodes": map[string]any{
 			"hy2": map[string]any{

@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { ServerStatusResponse } from '../types';
 import { api } from '../api';
-import { useToast } from './Toast';
+import { useToast } from '../ui';
 import { Play, Square, RotateCw, FileText, Code2, ExternalLink, CheckCircle2, XCircle, X, Save, Edit3, ShieldCheck, Zap, RefreshCw, Sparkles, Globe, ArrowUpCircle, Split } from 'lucide-react';
 import { TabKey } from './Navigation';
 

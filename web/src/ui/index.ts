@@ -11,3 +11,4 @@ export { DataTable, type DataTableProps, type DataColumn } from './DataTable';
 export { CommandPalette, type CommandPaletteProps, type CommandItem } from './CommandPalette';
 export { QRCodeBox, type QRCodeBoxProps } from './QRCodeBox';
 export { AppShell, type AppShellProps, type NavGroupConfig, type NavItemConfig } from './AppShell';
+export { formatBytes } from './format';

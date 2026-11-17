@@ -26,33 +26,36 @@ func (s *Server) storeHealStatusCache(rep *heal.StatusReport) {
 	s.healCacheMu.Unlock()
 }
 
-func (s *Server) scanAndCacheHealStatus(ctx context.Context, force bool) heal.StatusReport {
-	if !force {
-		s.healCacheMu.Lock()
-		if s.cachedHealReport != nil && time.Since(s.cachedHealAt) < healStatusCacheTTL {
-			rep := *s.cachedHealReport
-			s.healCacheMu.Unlock()
-			return rep
-		}
-		s.healCacheMu.Unlock()
-	}
-
+func (s *Server) runHealScanSync(ctx context.Context) heal.StatusReport {
 	s.healScanMu.Lock()
 	defer s.healScanMu.Unlock()
 
+	scanFn := s.healScannerOverride
+	if scanFn == nil {
+		scanFn = heal.Scan
+	}
+	rep := scanFn(ctx, s.opts.ConfigPath, s.opts.Version)
+	s.storeHealStatusCache(&rep)
+	return rep
+}
+
+func (s *Server) scanAndCacheHealStatus(ctx context.Context, force bool) heal.StatusReport {
 	if !force {
 		s.healCacheMu.Lock()
-		if s.cachedHealReport != nil && time.Since(s.cachedHealAt) < healStatusCacheTTL {
+		if s.cachedHealReport != nil {
 			rep := *s.cachedHealReport
+			fresh := time.Since(s.cachedHealAt) < healStatusCacheTTL
 			s.healCacheMu.Unlock()
+			if !fresh {
+				tryRunSingleFlight(&s.healRefreshing, 45*time.Second, func(bgCtx context.Context) {
+					s.runHealScanSync(bgCtx)
+				})
+			}
 			return rep
 		}
 		s.healCacheMu.Unlock()
 	}
-
-	rep := heal.Scan(ctx, s.opts.ConfigPath, s.opts.Version)
-	s.storeHealStatusCache(&rep)
-	return rep
+	return s.runHealScanSync(ctx)
 }
 
 func (s *Server) handleHealStatus(w http.ResponseWriter, r *http.Request) {

@@ -63,11 +63,14 @@ type Server struct {
 	warpMu             sync.Mutex
 	warpDeps           *deploy.LiveWarpApplyDeps
 	warpDaemonProbe    func(forceRefresh bool) WarpDaemonStatus
+	warpPortChecker    func() bool
+	warpExitFetcher    func(timeout time.Duration) (ip, loc, traceRaw string, ok bool)
 	warpRotateIdentity func(previousIP string) (string, string, error)
 	warpCacheMu        sync.Mutex
 	warpCachedIP       string
 	warpCachedLoc      string
 	warpCachedAt       time.Time
+	warpExitRefreshing atomic.Bool
 	warpWatchdogMu        sync.Mutex
 	warpLegacyChecked     bool
 	warpBootSynced        bool
@@ -106,6 +109,9 @@ type Server struct {
 	healScanMu            sync.Mutex
 	cachedHealReport      *heal.StatusReport
 	cachedHealAt          time.Time
+	healRefreshing        atomic.Bool
+	healScannerOverride   func(ctx context.Context, configPath, currentVer string) heal.StatusReport
+	subWarmupRunning      atomic.Bool
 }
 
 type SessionRecord struct {
@@ -328,6 +334,9 @@ func (s *Server) ListenAndServe() error {
 	}()
 	s.fleet.StartBackgroundPatrol(patrolCtx, fleet.DefaultPatrolInterval)
 	s.StartWarpWatchdog(patrolCtx, DefaultWarpWatchdogInterval)
+	tryRunSingleFlight(&s.healRefreshing, 45*time.Second, func(bgCtx context.Context) {
+		s.runHealScanSync(bgCtx)
+	})
 
 	srv := &http.Server{
 		Handler:           s.Mux,

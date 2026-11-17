@@ -121,7 +121,6 @@ export interface SubscriptionsResponse {
   engine?: string;
   substoreKey?: string;
   substoreAdminUrl: string;
-  substoreVercelUrl: string;
   subscriptionUrl: string;
   sources?: SubscriptionSourceItem[];
   importLinks: {

@@ -257,3 +257,59 @@ func MaskSubscriptionURL(url string) string {
 
 	return scheme + domain + "/***"
 }
+
+// WriteAtomic 在目标同目录下创建随机唯一临时文件、显式锁定权限并原子替换目标路径，
+// 防止并发写入互相踩踏或进程中断留下半截损坏配置。
+func WriteAtomic(targetPath string, data []byte, perm os.FileMode) error {
+	cleanPath := strings.TrimSpace(targetPath)
+	if cleanPath == "" {
+		return fmt.Errorf("empty target file path")
+	}
+	if perm == 0 {
+		perm = 0600
+	}
+	dir := filepath.Dir(cleanPath)
+	if dir != "" && dir != "." {
+		dirPerm := os.FileMode(0755)
+		if perm&0077 == 0 {
+			dirPerm = 0700
+		}
+		if err := os.MkdirAll(dir, dirPerm); err != nil {
+			return fmt.Errorf("mkdir %s: %w", dir, err)
+		}
+	}
+
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(cleanPath)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpName)
+		}
+	}()
+
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, cleanPath); err != nil {
+		return err
+	}
+	cleanup = false
+	return os.Chmod(cleanPath, perm)
+}
+
+// WriteAtomic0600 以强制 0600 敏感凭据权限原子写入目标文件。
+func WriteAtomic0600(targetPath string, data []byte) error {
+	return WriteAtomic(targetPath, data, 0600)
+}

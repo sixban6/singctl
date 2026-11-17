@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   SubscriptionsResponse,
   SubscriptionSourceItem,
@@ -8,7 +8,8 @@ import {
   SubscriptionRiskSummary,
 } from '../types';
 import { api } from '../api';
-import { useToast } from './Toast';
+import { peekCachedQuery, prefetchCachedQuery, writeCachedQuery } from '../hooks';
+import { QRCodeBox, useToast } from '../ui';
 import {
   Copy,
   QrCode,
@@ -30,7 +31,6 @@ import {
   ShieldAlert,
   Ban,
 } from 'lucide-react';
-import QRCode from 'qrcode';
 
 const PREVIEW_TARGETS = [
   { key: 'ClashMeta', label: 'Clash.Meta / Mihomo' },
@@ -51,13 +51,33 @@ const formatEffectiveUA = (ua?: string): string => {
   return ua.length > 20 ? `${ua.slice(0, 20)}...` : ua;
 };
 
-export const SubscriptionsTab: React.FC = () => {
+const SUBS_CACHE_KEY = 'server:subs:main';
+const SUBS_AUDIT_CACHE_KEY = 'server:subs:audit';
+
+interface CachedSubAudit {
+  logs: SubscriptionAccessLogItem[];
+  riskSummary?: SubscriptionRiskSummary;
+  bannedIps?: string[];
+}
+
+export function prefetchSubscriptionsTab(): void {
+  if (!peekCachedQuery(SUBS_CACHE_KEY)) {
+    void prefetchCachedQuery(SUBS_CACHE_KEY, () => api.getSubscriptions());
+  }
+  if (!peekCachedQuery(SUBS_AUDIT_CACHE_KEY)) {
+    void prefetchCachedQuery(SUBS_AUDIT_CACHE_KEY, () => api.getSubscriptionAuditLogs());
+  }
+}
+
+export const SubscriptionsTab: React.FC<{ active?: boolean }> = ({ active = true }) => {
   const { success, error } = useToast();
-  const [data, setData] = useState<SubscriptionsResponse | null>(null);
-  const [loading, setLoading] = useState(true);
+  const cachedAudit = peekCachedQuery<CachedSubAudit>(SUBS_AUDIT_CACHE_KEY);
+  const [data, setData] = useState<SubscriptionsResponse | null>(
+    () => peekCachedQuery<SubscriptionsResponse>(SUBS_CACHE_KEY) ?? null,
+  );
+  const [loading, setLoading] = useState(() => !peekCachedQuery(SUBS_CACHE_KEY));
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [qrModalURL, setQrModalURL] = useState<string | null>(null);
-  const qrCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   // Source CRUD modal state
   const [editingSource, setEditingSource] = useState<SourceUpsertInput | null>(null);
@@ -73,43 +93,55 @@ export const SubscriptionsTab: React.FC = () => {
   const [loadingPreview, setLoadingPreview] = useState(false);
 
   // Subscription access audit state
-  const [auditLogs, setAuditLogs] = useState<SubscriptionAccessLogItem[]>([]);
-  const [riskSummary, setRiskSummary] = useState<SubscriptionRiskSummary | null>(null);
-  const [bannedIps, setBannedIps] = useState<Set<string>>(new Set());
+  const [auditLogs, setAuditLogs] = useState<SubscriptionAccessLogItem[]>(
+    () => cachedAudit?.logs || [],
+  );
+  const [riskSummary, setRiskSummary] = useState<SubscriptionRiskSummary | null>(
+    () => cachedAudit?.riskSummary || null,
+  );
+  const [bannedIps, setBannedIps] = useState<Set<string>>(
+    () => new Set(cachedAudit?.bannedIps || []),
+  );
   const [blockingIP, setBlockingIP] = useState<string | null>(null);
   const [loadingAudit, setLoadingAudit] = useState(false);
   const [clearingAudit, setClearingAudit] = useState(false);
 
-  useEffect(() => {
-    loadData();
-    loadAuditLogs();
-  }, []);
-
-  const loadData = async () => {
-    setLoading(true);
+  const loadData = async (silent?: boolean | React.SyntheticEvent) => {
+    const isSilent = silent === true;
+    if (!isSilent && !data) setLoading(true);
     try {
       const res = await api.getSubscriptions();
       setData(res);
+      writeCachedQuery(SUBS_CACHE_KEY, res);
     } catch (err: any) {
-      error(err.message || '获取订阅信息失败');
+      if (!isSilent) error(err.message || '获取订阅信息失败');
     } finally {
       setLoading(false);
     }
   };
 
-  const loadAuditLogs = async () => {
-    setLoadingAudit(true);
+  const loadAuditLogs = async (silent?: boolean | React.SyntheticEvent) => {
+    const isSilent = silent === true;
+    if (!isSilent) setLoadingAudit(true);
     try {
       const res = await api.getSubscriptionAuditLogs();
       setAuditLogs(res.logs || []);
       setRiskSummary(res.riskSummary || null);
       setBannedIps(new Set(res.bannedIps || []));
+      writeCachedQuery(SUBS_AUDIT_CACHE_KEY, res);
     } catch {
       // non-fatal
     } finally {
-      setLoadingAudit(false);
+      if (!isSilent) setLoadingAudit(false);
     }
   };
+
+  useEffect(() => {
+    if (!active) return;
+    const hasCache = Boolean(peekCachedQuery(SUBS_CACHE_KEY));
+    void loadData(hasCache);
+    void loadAuditLogs(Boolean(peekCachedQuery(SUBS_AUDIT_CACHE_KEY)));
+  }, [active]);
 
   const handleBlockSubIP = async (ip: string) => {
     const trimmed = ip.trim();
@@ -151,19 +183,6 @@ export const SubscriptionsTab: React.FC = () => {
   const showQRCode = (url: string) => {
     setQrModalURL(url);
   };
-
-  useEffect(() => {
-    if (qrModalURL && qrCanvasRef.current) {
-      QRCode.toCanvas(qrCanvasRef.current, qrModalURL, {
-        width: 256,
-        margin: 2,
-        color: {
-          dark: '#0f172a',
-          light: '#ffffff',
-        },
-      });
-    }
-  }, [qrModalURL]);
 
   const openAddSourceModal = () => {
     setIsAutoManagedEdit(false);
@@ -1138,9 +1157,7 @@ export const SubscriptionsTab: React.FC = () => {
             </button>
             <h4 className="text-base font-bold text-white mt-1">手机扫码快速导入</h4>
             <p className="text-xs text-slate-400 mt-1">使用 Shadowrocket 或支持二维码的客户端扫码</p>
-            <div className="mt-5 p-3 bg-white rounded-2xl shadow-inner">
-              <canvas ref={qrCanvasRef} className="rounded-lg"></canvas>
-            </div>
+            <QRCodeBox value={qrModalURL} size={236} className="mt-5" />
             <p className="text-[11px] font-mono text-slate-400 mt-4 break-all max-w-xs line-clamp-2">
               {qrModalURL}
             </p>

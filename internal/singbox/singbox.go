@@ -187,8 +187,6 @@ func (sb *SingBox) ValidateConfig() error {
 
 	exe := constant.SingBoxInstallDir
 	cmd := exec.Command(exe, "check", "-c", sb.configPath)
-	// 使用 sing-box check 命令验证配置
-	//cmd := exec.Command("sing-box", "check", "-c", sb.configPath)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("config validation failed: %w", err)
 	}
@@ -206,7 +204,7 @@ func (sb *SingBox) GenerateConfig() error {
 
 	// 规则集本地化：预下载 remote 规则集并改写为本地引用，
 	// 使 sing-box 启动不依赖 GitHub；下载失败自动回退/保留 remote
-	pureBaseJSON, networkAborted := sb.localizeRuleSets(configContent)
+	pureBaseJSON := sb.localizeRuleSets(configContent)
 	preserveManual := sb.config == nil || sb.config.Watchdog.ShouldPreserveManualConfig()
 	configContent, preservedChanges := PrepareRegeneratedConfig(context.Background(), sb.configPath, pureBaseJSON, preserveManual)
 
@@ -220,35 +218,12 @@ func (sb *SingBox) GenerateConfig() error {
 		logger.Success("backup sing-box config file successfully, backup path: %s", backupPath)
 	}
 
-	// 确保目录存在
-	if err := os.MkdirAll(filepath.Dir(sb.configPath), 0755); err != nil {
-		return fmt.Errorf("create config directory failed: %w", err)
-	}
-
-	tmp := sb.configPath + ".tmp"
-	// 0600：生成的配置内含节点凭据/Tailscale auth key，不能让同机其它用户可读
-	if err := os.WriteFile(tmp, []byte(configContent), 0600); err != nil {
+	if err := file.WriteAtomic0600(sb.configPath, []byte(configContent)); err != nil {
 		return err
-	}
-	// rename 会继承 .tmp 的权限，确保落盘后也是 0600
-	if err := os.Chmod(tmp, 0600); err != nil {
-		return err
-	}
-	err = os.Rename(tmp, sb.configPath)
-	if err != nil {
-		return fmt.Errorf("rename config file failed: %w", err)
 	}
 	_ = SaveBaseSnapshot(sb.configPath, pureBaseJSON)
 	if preservedChanges > 0 {
 		logger.Success("🛡️ 已自动合并保留 %d 处 config.json 手动修改", preservedChanges)
-	}
-
-	if runtime.GOOS == "linux" {
-		if networkAborted {
-			logger.Warn("⚠️ 检测到 GitHub/镜像网络不可用，已跳过 Dashboard 在线预下载")
-		} else if err := ProvisionDashboard(configContent); err != nil {
-			logger.Warn("⚠️ Dashboard 预下载失败(不影响其他功能): %v", err)
-		}
 	}
 
 	logger.Success("Config generated: %s", sb.configPath)
@@ -257,7 +232,7 @@ func (sb *SingBox) GenerateConfig() error {
 
 // localizeRuleSets 将生成配置中的 remote 规则集替换为本地缓存引用（离线优先，不阻塞等待网络下载）。
 // 失败时返回原始内容，不影响配置生成流程。
-func (sb *SingBox) localizeRuleSets(configContent string) (string, bool) {
+func (sb *SingBox) localizeRuleSets(configContent string) string {
 	localized, stats, err := LocalizeRuleSets(configContent, LocalizeOptions{
 		MirrorURL:    sb.config.GitHub.MirrorURL,
 		CacheTTL:     DefaultRuleSetCacheTTL,
@@ -265,14 +240,14 @@ func (sb *SingBox) localizeRuleSets(configContent string) (string, bool) {
 	})
 	if err != nil {
 		logger.Warn("⚠️ 规则集本地化已跳过: %v", err)
-		return configContent, false
+		return configContent
 	}
 	if stats.Remote == 0 {
-		return configContent, false
+		return configContent
 	}
 	logger.Info("规则集本地化: 远程 %d → 本地缓存 %d, 内置快照 %d, 保留远程 %d",
 		stats.Remote, stats.Cached, stats.Snapshot, stats.Kept)
-	return localized, stats.Aborted
+	return localized
 }
 
 // Install 安装 sing-box
@@ -285,25 +260,13 @@ func (sb *SingBox) Install() error {
 
 // InstallGUI 安装 GUI 客户端
 func (sb *SingBox) InstallGUI() error {
-	var downloadURL string
-	if runtime.GOOS == "darwin" {
-		downloadURL = constant.MacURL
-	} else if runtime.GOOS == "windows" {
-		downloadURL = constant.WinURL
+	logger.Info("Dynamically resolving the latest GUI client address from GitHub...")
+	downloadURL, err := fetchLatestGUIAsset(runtime.GOOS)
+	if err != nil {
+		return fmt.Errorf("failed to fetch latest GUI asset: %w", err)
 	}
-
-	// If URL is empty or it's the old hardcoded default, fetch dynamically
-	if downloadURL == "" || strings.Contains(downloadURL, "SFM-1.13.0-rc.1-Apple.pkg") {
-		logger.Info("Dynamically resolving the latest GUI client address from GitHub...")
-		latestURL, err := fetchLatestGUIAsset(runtime.GOOS)
-		if err != nil {
-			return fmt.Errorf("failed to fetch latest GUI asset: %w", err)
-		}
-		downloadURL = latestURL
-	}
-
 	if downloadURL == "" {
-		return fmt.Errorf("GUI download URL not configured for %s and dynamic fetch failed", runtime.GOOS)
+		return fmt.Errorf("GUI download URL not found for %s", runtime.GOOS)
 	}
 
 	// 优化下载逻辑：检查Google连通性

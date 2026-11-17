@@ -273,7 +273,6 @@ func newGenCmd(defaultConfigPath string) *cobra.Command {
 			}
 
 			// iOS 配置不写入本机 sing-box 配置路径(看门狗会把 iPhone 配置跑在本机上), 且必须保留远程规则集
-			networkAborted := false
 			if isIOS {
 				if err := GuardIOSOutputPath(outputPath); err != nil {
 					return err
@@ -292,7 +291,6 @@ func newGenCmd(defaultConfigPath string) *cobra.Command {
 					logger.Warn("⚠️ 规则集本地化已跳过: %v", err)
 				} else {
 					configJSON = localized
-					networkAborted = stats.Aborted
 					if stats.Remote > 0 {
 						logger.Info("规则集本地化: 远程 %d → 本地缓存 %d, 内置快照 %d, 保留远程 %d",
 							stats.Remote, stats.Cached, stats.Snapshot, stats.Kept)
@@ -351,12 +349,6 @@ func newGenCmd(defaultConfigPath string) *cobra.Command {
 				logger.Success("配置已生成: %s", targetPath)
 				logger.Info("导入 iPhone: AirDrop/隔空投送该文件 → 文件 App → 分享给 sing-box App; 或在 sing-box App 中新建配置时选择该文件")
 				return nil
-			}
-			// 仅当配置中仍显式启用 api dashboard 时才预下载静态资源；默认安全加固已移除外置面板。
-			if target == "linux" && runtime.GOOS == "linux" && !networkAborted {
-				if err := singbox.ProvisionDashboard(configJSON); err != nil {
-					logger.Warn("⚠️ Dashboard 预下载失败(不影响其他功能, 可重试 gen): %v", err)
-				}
 			}
 			logger.Success("配置已生成: %s", targetPath)
 			if copied, err := CopyGeneratedConfigToClipboard(targetPath); err != nil {

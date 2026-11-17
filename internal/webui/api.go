@@ -21,6 +21,7 @@ import (
 	"singctl/internal/singbox"
 	ruleset_snapshot "singctl/internal/singbox/ruleset_snapshot"
 	"singctl/internal/tailscale"
+	"singctl/internal/util/file"
 	"singctl/internal/util/netinfo"
 	"singctl/internal/util/os"
 
@@ -738,35 +739,7 @@ func (s *Server) handleSbConfigGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func atomicWriteFile0600(path string, data []byte) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	cleanup := true
-	defer func() {
-		if cleanup {
-			_ = os.Remove(tmpName)
-		}
-	}()
-	if err := tmp.Chmod(0600); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		return err
-	}
-	cleanup = false
-	_ = os.Chmod(path, 0600)
-	return nil
+	return file.WriteAtomic0600(path, data)
 }
 
 func (s *Server) handleSbConfigPut(w http.ResponseWriter, r *http.Request) {

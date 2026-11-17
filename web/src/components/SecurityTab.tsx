@@ -9,7 +9,8 @@ import {
   CertHealthItem,
 } from '../types';
 import { api } from '../api';
-import { useToast } from './Toast';
+import { peekCachedQuery, prefetchCachedQuery, writeCachedQuery } from '../hooks';
+import { useToast } from '../ui';
 import {
   Shield,
   KeyRound,
@@ -43,11 +44,28 @@ import {
 } from 'lucide-react';
 
 interface SecurityTabProps {
+  active?: boolean;
   status: ServerStatusResponse | null;
   onRefresh: () => void;
 }
 
-export const SecurityTab: React.FC<SecurityTabProps> = ({ status, onRefresh }) => {
+const HEAL_CACHE_KEY = 'server:sec:heal';
+const BANS_CACHE_KEY = 'server:sec:bans';
+const SNIFF_CACHE_KEY = 'server:sec:sniff:all';
+
+export function prefetchSecurityTab(): void {
+  if (!peekCachedQuery(HEAL_CACHE_KEY)) {
+    void prefetchCachedQuery(HEAL_CACHE_KEY, () => api.getHealStatus(false));
+  }
+  if (!peekCachedQuery(BANS_CACHE_KEY)) {
+    void prefetchCachedQuery(BANS_CACHE_KEY, () => api.getBans());
+  }
+  if (!peekCachedQuery(SNIFF_CACHE_KEY)) {
+    void prefetchCachedQuery(SNIFF_CACHE_KEY, () => api.getSniffers('all', false));
+  }
+}
+
+export const SecurityTab: React.FC<SecurityTabProps> = ({ active = true, status, onRefresh }) => {
   const { success, error } = useToast();
   const [currentPassword, setCurrentPassword] = useState('');
   const [newUsername, setNewUsername] = useState('');
@@ -58,15 +76,19 @@ export const SecurityTab: React.FC<SecurityTabProps> = ({ status, onRefresh }) =
   const [loadingPath, setLoadingPath] = useState(false);
 
   // 3-Layer Security Self-Healing State
-  const [healStatus, setHealStatus] = useState<HealStatusReport | null>(null);
-  const [loadingHeal, setLoadingHeal] = useState(true);
+  const [healStatus, setHealStatus] = useState<HealStatusReport | null>(
+    () => peekCachedQuery<HealStatusReport>(HEAL_CACHE_KEY) ?? null,
+  );
+  const [loadingHeal, setLoadingHeal] = useState(() => !peekCachedQuery(HEAL_CACHE_KEY));
   const [runningHealScope, setRunningHealScope] = useState<'local' | 'fleet' | null>(null);
   const [savingPolicy, setSavingPolicy] = useState(false);
   const [syncPolicyToFleet, setSyncPolicyToFleet] = useState(true);
   const [lastFleetHeal, setLastFleetHeal] = useState<FleetHealReport | null>(null);
 
   // 防爆破封禁 IP 列表状态
-  const [bans, setBans] = useState<BannedIP[]>([]);
+  const [bans, setBans] = useState<BannedIP[]>(
+    () => peekCachedQuery<{ bans: BannedIP[] }>(BANS_CACHE_KEY)?.bans || [],
+  );
   const [banSourceFilter, setBanSourceFilter] = useState<'all' | 'login_fail' | 'manual_sniff'>('all');
   const [loadingBans, setLoadingBans] = useState(false);
   const [unbanningIP, setUnbanningIP] = useState<string | null>(null);
@@ -82,7 +104,9 @@ export const SecurityTab: React.FC<SecurityTabProps> = ({ status, onRefresh }) =
   const [restoringBackup, setRestoringBackup] = useState(false);
 
   // 外部活跃嗅探与探测追踪状态 (支持集群分主机查看、搜索、排序与分页)
-  const [sniffSummary, setSniffSummary] = useState<SniffSummary | null>(null);
+  const [sniffSummary, setSniffSummary] = useState<SniffSummary | null>(
+    () => peekCachedQuery<SniffSummary>(SNIFF_CACHE_KEY) ?? null,
+  );
   const [loadingSniff, setLoadingSniff] = useState(false);
   const [selectedSniffNode, setSelectedSniffNode] = useState<string>('all');
   const [sniffTab, setSniffTab] = useState<'ip' | 'subnet' | 'country'>('ip');
@@ -101,22 +125,25 @@ export const SecurityTab: React.FC<SecurityTabProps> = ({ status, onRefresh }) =
   const [loadingAudit, setLoadingAudit] = useState(false);
 
   const fetchHealStatus = async (silent = false, forceRefresh = false) => {
-    if (!silent) setLoadingHeal(true);
+    if (!silent && !peekCachedQuery(HEAL_CACHE_KEY)) setLoadingHeal(true);
     try {
       const rep = await api.getHealStatus(forceRefresh);
       setHealStatus(rep);
+      writeCachedQuery(HEAL_CACHE_KEY, rep);
     } catch {
       // non-fatal
     } finally {
-      if (!silent) setLoadingHeal(false);
+      setLoadingHeal(false);
     }
   };
 
-  const fetchBans = async () => {
-    setLoadingBans(true);
+  const fetchBans = async (silent?: boolean | React.SyntheticEvent) => {
+    const isSilent = silent === true;
+    if (!isSilent && !peekCachedQuery(BANS_CACHE_KEY)) setLoadingBans(true);
     try {
       const res = await api.getBans();
       setBans(res.bans || []);
+      writeCachedQuery(BANS_CACHE_KEY, res);
     } catch {
       // silent
     } finally {
@@ -124,11 +151,14 @@ export const SecurityTab: React.FC<SecurityTabProps> = ({ status, onRefresh }) =
     }
   };
 
-  const fetchSniffers = async (nodeScope = selectedSniffNode, forceRefresh = false) => {
-    setLoadingSniff(true);
+  const fetchSniffers = async (nodeScope = selectedSniffNode, forceRefresh = false, silent = false) => {
+    if (!silent && !sniffSummary) setLoadingSniff(true);
     try {
       const res = await api.getSniffers(nodeScope, forceRefresh);
       setSniffSummary(res);
+      if (nodeScope === 'all') {
+        writeCachedQuery(SNIFF_CACHE_KEY, res);
+      }
     } catch {
       // silent
     } finally {
@@ -139,11 +169,12 @@ export const SecurityTab: React.FC<SecurityTabProps> = ({ status, onRefresh }) =
   const handleSelectSniffNode = (nodeId: string) => {
     setSelectedSniffNode(nodeId);
     setSniffPage(1);
-    fetchSniffers(nodeId, false);
+    fetchSniffers(nodeId, false, false);
   };
 
-  const fetchAuditLogs = async () => {
-    setLoadingAudit(true);
+  const fetchAuditLogs = async (silent?: boolean | React.SyntheticEvent) => {
+    const isSilent = silent === true;
+    if (!isSilent) setLoadingAudit(true);
     try {
       const res = await api.getAuditLogs();
       setAuditLogs(res.logs || []);
@@ -155,11 +186,14 @@ export const SecurityTab: React.FC<SecurityTabProps> = ({ status, onRefresh }) =
   };
 
   useEffect(() => {
-    fetchHealStatus();
-    fetchBans();
-    fetchSniffers();
-    fetchAuditLogs();
-  }, []);
+    if (!active) return;
+    void fetchHealStatus(Boolean(peekCachedQuery(HEAL_CACHE_KEY)));
+    void fetchBans(Boolean(peekCachedQuery(BANS_CACHE_KEY)));
+    void fetchSniffers(selectedSniffNode, false, Boolean(sniffSummary));
+    if (!status?.auditLogs?.length) {
+      void fetchAuditLogs(true);
+    }
+  }, [active]);
 
   useEffect(() => {
     if (status?.auditLogs) {
