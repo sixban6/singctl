@@ -263,6 +263,7 @@ func (c *Collector) collectLocked(ctx context.Context, opts CollectOptions) *Rep
 
 	allFlows := make([]FlowRecord, 0, len(state.Flows))
 	deviceAgg := make(map[string]*DeviceSummary)
+	lowerFilter := strings.ToLower(strings.TrimSpace(opts.DeviceFilter))
 
 	for _, entry := range state.Flows {
 		normDevIP := normalizeSourceDeviceIP(entry.DeviceIP, selfIPs)
@@ -356,11 +357,11 @@ func (c *Collector) collectLocked(ctx context.Context, opts CollectOptions) *Rep
 		}
 
 		// 过滤条件检查（支持按设备 IP、设备名称、目标域名或识别出的应用名如 Telegram/Baidu 过滤）
-		if filter := strings.ToLower(strings.TrimSpace(opts.DeviceFilter)); filter != "" {
-			if !strings.Contains(strings.ToLower(rec.DeviceIP), filter) &&
-				!strings.Contains(strings.ToLower(rec.DeviceName), filter) &&
-				!strings.Contains(strings.ToLower(rec.Target), filter) &&
-				!strings.Contains(strings.ToLower(rec.AppName), filter) {
+		if lowerFilter != "" {
+			if !strings.Contains(strings.ToLower(rec.DeviceIP), lowerFilter) &&
+				!strings.Contains(strings.ToLower(rec.DeviceName), lowerFilter) &&
+				!strings.Contains(strings.ToLower(rec.Target), lowerFilter) &&
+				!strings.Contains(strings.ToLower(rec.AppName), lowerFilter) {
 				continue
 			}
 		}
