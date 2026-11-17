@@ -31,7 +31,46 @@ const (
 	minUpgradeInstallDiskMB = 45
 )
 
-var validUsernameRe = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,32}$`)
+var (
+	validUsernameRe = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,32}$`)
+
+	binVerCacheMu  sync.Mutex
+	binVerCacheKey string
+	binVerCached   string
+)
+
+// CachedBinaryVersion 按二进制文件指纹 (path|mtime|size) 缓存 AdGuardHome --version，
+// 二进制升级后 mtime/size 变化同一毫秒自动失效重读，避免高频接口每次 fork 35MB 子进程。
+func CachedBinaryVersion(binPath string) string {
+	info, err := os.Stat(binPath)
+	if err != nil || info.IsDir() {
+		return ""
+	}
+	key := fmt.Sprintf("%s|%d|%d", binPath, info.ModTime().UnixNano(), info.Size())
+
+	binVerCacheMu.Lock()
+	if binVerCacheKey == key && binVerCached != "" {
+		ver := binVerCached
+		binVerCacheMu.Unlock()
+		return ver
+	}
+	binVerCacheMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	out, err := exec.CommandContext(ctx, binPath, "--version").Output()
+	cancel()
+	if err != nil {
+		return ""
+	}
+	ver := strings.TrimSpace(string(out))
+	if ver != "" {
+		binVerCacheMu.Lock()
+		binVerCacheKey = key
+		binVerCached = ver
+		binVerCacheMu.Unlock()
+	}
+	return ver
+}
 
 var (
 	installedCheckMu       sync.RWMutex
@@ -697,15 +736,22 @@ func (m *Manager) Status() *StatusInfo {
 	}
 
 	if st.Installed {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		out, err := exec.CommandContext(ctx, m.binPath, "--version").Output()
-		cancel()
-		if err == nil {
-			st.Version = strings.TrimSpace(string(out))
-		}
-		st.DNSHealthy = ProbeDNS(dnsAddr, 1200*time.Millisecond) == nil
-		st.WebHealthy = ProbeTCPPort(webAddr, 1000*time.Millisecond)
-		st.Running = st.DNSHealthy || isProcessRunning()
+		var wg sync.WaitGroup
+		wg.Add(3)
+		go func() {
+			defer wg.Done()
+			st.Version = CachedBinaryVersion(m.binPath)
+		}()
+		go func() {
+			defer wg.Done()
+			st.DNSHealthy = ProbeDNS(dnsAddr, 450*time.Millisecond) == nil
+		}()
+		go func() {
+			defer wg.Done()
+			st.WebHealthy = ProbeTCPPort(webAddr, 350*time.Millisecond)
+		}()
+		wg.Wait()
+		st.Running = st.DNSHealthy || st.WebHealthy || isProcessRunning()
 	}
 
 	return st

@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"singctl/internal/util/netinfo"
@@ -22,7 +23,18 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-var validRewriteDomainRe = regexp.MustCompile(`^(\*\.)?[A-Za-z0-9_]([A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?(\.[A-Za-z0-9_]([A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?)*$`)
+var (
+	validRewriteDomainRe = regexp.MustCompile(`^(\*\.)?[A-Za-z0-9_]([A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?(\.[A-Za-z0-9_]([A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?)*$`)
+
+	adguardControlHTTPClient = &http.Client{
+		Timeout: 4 * time.Second,
+		Transport: &http.Transport{
+			MaxIdleConns:        16,
+			MaxIdleConnsPerHost: 8,
+			IdleConnTimeout:     60 * time.Second,
+		},
+	}
+)
 
 // FilterPreset 描述内置精选的去广告/防追踪规则集预设。
 type FilterPreset struct {
@@ -174,8 +186,7 @@ func (m *Manager) controlRequest(ctx context.Context, method, apiPath string, re
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	client := &http.Client{Timeout: 4 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := adguardControlHTTPClient.Do(req)
 	if err != nil {
 		return 0, err
 	}
@@ -237,17 +248,78 @@ func (m *Manager) Overview(ctx context.Context, singboxLinked bool) *OverviewSna
 		return snap
 	}
 
-	// 若 Web Control API 在线且拥有凭据，优先读取实时运行态数据
+	// 若 Web Control API 在线且拥有凭据，5 路并发读取实时运行态数据（无缓存滞后，耗时压缩至单次本地回环 RTT）
 	apiOK := false
 	if st.WebHealthy && st.Password != "" {
-		var statusResp struct {
+		type statusPayload struct {
 			Version                    string `json:"version"`
 			Running                    bool   `json:"running"`
 			ProtectionEnabled          bool   `json:"protection_enabled"`
 			ProtectionDisabledDuration int64  `json:"protection_disabled_duration"`
 			ProtectionDisabledUntil    string `json:"protection_disabled_until"`
 		}
-		if _, err := m.controlRequest(ctx, http.MethodGet, "/control/status", nil, &statusResp); err == nil {
+		type statsPayload struct {
+			NumDNSQueries       int64              `json:"num_dns_queries"`
+			NumBlockedFiltering int64              `json:"num_blocked_filtering"`
+			AvgProcessingTime   float64            `json:"avg_processing_time"`
+			TopBlockedDomains   []map[string]int64 `json:"top_blocked_domains"`
+			TopQueriedDomains   []map[string]int64 `json:"top_queried_domains"`
+		}
+		type filterPayload struct {
+			Enabled bool `json:"enabled"`
+			Filters []struct {
+				ID          int64  `json:"id"`
+				Enabled     bool   `json:"enabled"`
+				URL         string `json:"url"`
+				Name        string `json:"name"`
+				RulesCount  int    `json:"rules_count"`
+				LastUpdated string `json:"last_updated"`
+			} `json:"filters"`
+			UserRules []string `json:"user_rules"`
+		}
+		type dnsInfoPayload struct {
+			UpstreamDNS  []string `json:"upstream_dns"`
+			UpstreamMode string   `json:"upstream_mode"`
+		}
+
+		var (
+			statusResp statusPayload
+			statusErr  error
+			statsResp  statsPayload
+			statsErr   error
+			filterResp filterPayload
+			filterErr  error
+			rewrites   []RewriteEntry
+			rewriteErr error
+			dnsInfo    dnsInfoPayload
+			dnsInfoErr error
+			wg         sync.WaitGroup
+		)
+
+		wg.Add(5)
+		go func() {
+			defer wg.Done()
+			_, statusErr = m.controlRequest(ctx, http.MethodGet, "/control/status", nil, &statusResp)
+		}()
+		go func() {
+			defer wg.Done()
+			_, statsErr = m.controlRequest(ctx, http.MethodGet, "/control/stats", nil, &statsResp)
+		}()
+		go func() {
+			defer wg.Done()
+			_, filterErr = m.controlRequest(ctx, http.MethodGet, "/control/filtering/status", nil, &filterResp)
+		}()
+		go func() {
+			defer wg.Done()
+			_, rewriteErr = m.controlRequest(ctx, http.MethodGet, "/control/rewrite/list", nil, &rewrites)
+		}()
+		go func() {
+			defer wg.Done()
+			_, dnsInfoErr = m.controlRequest(ctx, http.MethodGet, "/control/dns_info", nil, &dnsInfo)
+		}()
+		wg.Wait()
+
+		if statusErr == nil {
 			apiOK = true
 			if statusResp.Version != "" {
 				snap.Version = statusResp.Version
@@ -257,14 +329,7 @@ func (m *Manager) Overview(ctx context.Context, singboxLinked bool) *OverviewSna
 			snap.ProtectionDisabledUntil = statusResp.ProtectionDisabledUntil
 		}
 
-		var statsResp struct {
-			NumDNSQueries       int64              `json:"num_dns_queries"`
-			NumBlockedFiltering int64              `json:"num_blocked_filtering"`
-			AvgProcessingTime   float64            `json:"avg_processing_time"`
-			TopBlockedDomains   []map[string]int64 `json:"top_blocked_domains"`
-			TopQueriedDomains   []map[string]int64 `json:"top_queried_domains"`
-		}
-		if _, err := m.controlRequest(ctx, http.MethodGet, "/control/stats", nil, &statsResp); err == nil {
+		if statsErr == nil {
 			snap.Stats.NumDNSQueries = statsResp.NumDNSQueries
 			snap.Stats.NumBlockedFiltering = statsResp.NumBlockedFiltering
 			if statsResp.NumDNSQueries > 0 {
@@ -278,19 +343,7 @@ func (m *Manager) Overview(ctx context.Context, singboxLinked bool) *OverviewSna
 			snap.Stats.TopQueriedDomains = flattenStatMapSlice(statsResp.TopQueriedDomains, 8)
 		}
 
-		var filterResp struct {
-			Enabled bool `json:"enabled"`
-			Filters []struct {
-				ID          int64  `json:"id"`
-				Enabled     bool   `json:"enabled"`
-				URL         string `json:"url"`
-				Name        string `json:"name"`
-				RulesCount  int    `json:"rules_count"`
-				LastUpdated string `json:"last_updated"`
-			} `json:"filters"`
-			UserRules []string `json:"user_rules"`
-		}
-		if _, err := m.controlRequest(ctx, http.MethodGet, "/control/filtering/status", nil, &filterResp); err == nil {
+		if filterErr == nil {
 			items := make([]FilterItem, 0, len(filterResp.Filters))
 			totalRules := 0
 			for _, f := range filterResp.Filters {
@@ -314,16 +367,11 @@ func (m *Manager) Overview(ctx context.Context, singboxLinked bool) *OverviewSna
 			snap.AuditManagedCount = auditCnt
 		}
 
-		var rewrites []RewriteEntry
-		if _, err := m.controlRequest(ctx, http.MethodGet, "/control/rewrite/list", nil, &rewrites); err == nil && rewrites != nil {
+		if rewriteErr == nil && rewrites != nil {
 			snap.Rewrites = rewrites
 		}
 
-		var dnsInfo struct {
-			UpstreamDNS  []string `json:"upstream_dns"`
-			UpstreamMode string   `json:"upstream_mode"`
-		}
-		if _, err := m.controlRequest(ctx, http.MethodGet, "/control/dns_info", nil, &dnsInfo); err == nil {
+		if dnsInfoErr == nil {
 			mode := NormalizeUpstreamMode(dnsInfo.UpstreamMode)
 			snap.UpstreamMode = mode
 			snap.UpstreamModeLabel = UpstreamModeDescription(mode)

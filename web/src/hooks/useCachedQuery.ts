@@ -1,6 +1,42 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 
 const queryCache = new Map<string, unknown>();
+const inFlightMap = new Map<string, Promise<unknown>>();
+
+export const CLIENT_INVALIDATE_EVENT = 'singctl:client-invalidate';
+export type ClientInvalidateScope = 'all' | 'adguard' | 'audit';
+
+export function emitClientInvalidate(scope: ClientInvalidateScope = 'all') {
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent<ClientInvalidateScope>(CLIENT_INVALIDATE_EVENT, { detail: scope }));
+  }
+}
+
+export function peekCachedQuery<T>(key: string): T | undefined {
+  return queryCache.has(key) ? (queryCache.get(key) as T) : undefined;
+}
+
+export function writeCachedQuery<T>(key: string, value: T): void {
+  queryCache.set(key, value);
+}
+
+export function prefetchCachedQuery<T>(key: string, fetcher: () => Promise<T>): Promise<T | undefined> {
+  const existing = inFlightMap.get(key) as Promise<T | undefined> | undefined;
+  if (existing) return existing;
+
+  const p = fetcher()
+    .then((res) => {
+      queryCache.set(key, res);
+      return res;
+    })
+    .catch(() => undefined)
+    .finally(() => {
+      inFlightMap.delete(key);
+    });
+
+  inFlightMap.set(key, p);
+  return p;
+}
 
 export function clearCachedQuery(keyPrefix?: string) {
   if (!keyPrefix) {

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ShieldCheck,
   PauseCircle,
@@ -32,6 +32,13 @@ import {
   SlideDrawer,
   useToast,
 } from '../../ui';
+import {
+  CLIENT_INVALIDATE_EVENT,
+  ClientInvalidateScope,
+  peekCachedQuery,
+  prefetchCachedQuery,
+  writeCachedQuery,
+} from '../../hooks';
 import { clientApi } from '../api';
 import {
   AdGuardCredentialsResponse,
@@ -42,7 +49,11 @@ import {
   ClientStatusResponse,
 } from '../types';
 
+export const ADGUARD_OVERVIEW_CACHE_KEY = 'client:adguard:overview';
+export const ADGUARD_PROBE_CACHE_KEY = 'client:adguard:probe';
+
 export interface AdGuardPageProps {
+  active?: boolean;
   status: ClientStatusResponse | null;
   busy: boolean;
   onAction: (name: string, params?: Record<string, unknown>, confirmMsg?: string) => void;
@@ -74,22 +85,41 @@ const UPSTREAM_MODE_OPTIONS: { key: AdGuardUpstreamMode; label: string; shortDes
 ];
 
 export const AdGuardPage: React.FC<AdGuardPageProps> = ({
+  active = true,
   status,
   busy,
   onAction,
   onRefreshStatus,
 }) => {
   const { success, error } = useToast();
-  const [snap, setSnap] = useState<AdGuardOverviewSnapshot | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [snap, setSnap] = useState<AdGuardOverviewSnapshot | null>(
+    () => peekCachedQuery<AdGuardOverviewSnapshot>(ADGUARD_OVERVIEW_CACHE_KEY) ?? null,
+  );
+  const [loading, setLoading] = useState<boolean>(
+    () => !peekCachedQuery<AdGuardOverviewSnapshot>(ADGUARD_OVERVIEW_CACHE_KEY),
+  );
   const [mutating, setMutating] = useState(false);
 
-  // Upstream live latency probe
-  const [probe, setProbe] = useState<AdGuardProbeResult | null>(null);
+  // Upstream live latency probe (preserved across tab switches)
+  const [probe, setProbe] = useState<AdGuardProbeResult | null>(
+    () => peekCachedQuery<AdGuardProbeResult>(ADGUARD_PROBE_CACHE_KEY) ?? null,
+  );
   const [probing, setProbing] = useState(false);
 
-  // Pause protection live countdown (seconds)
-  const [pauseRemainSec, setPauseRemainSec] = useState<number>(0);
+  // Pause protection live countdown backed by absolute deadline timestamp (immune to background timer drift)
+  const pauseDeadlineRef = useRef<number>(0);
+  const [pauseRemainSec, setPauseRemainSec] = useState<number>(() => {
+    const cached = peekCachedQuery<AdGuardOverviewSnapshot>(ADGUARD_OVERVIEW_CACHE_KEY);
+    if (
+      cached &&
+      !cached.protectionEnabled &&
+      cached.protectionDisabledDurationMs &&
+      cached.protectionDisabledDurationMs > 0
+    ) {
+      return Math.ceil(cached.protectionDisabledDurationMs / 1000);
+    }
+    return 0;
+  });
 
   // Whitelist quick input
   const [wlInput, setWlInput] = useState('');
@@ -116,59 +146,98 @@ export const AdGuardPage: React.FC<AdGuardPageProps> = ({
 
   const loadOverview = useCallback(
     async (silent = false) => {
-      if (!silent) setLoading(true);
+      if (!silent && !peekCachedQuery(ADGUARD_OVERVIEW_CACHE_KEY)) {
+        setLoading(true);
+      }
       try {
-        const res = await clientApi.getAdGuardOverview();
+        const res = silent
+          ? await clientApi.getAdGuardOverview()
+          : (await prefetchCachedQuery(ADGUARD_OVERVIEW_CACHE_KEY, () => clientApi.getAdGuardOverview())) ??
+            (await clientApi.getAdGuardOverview());
+        writeCachedQuery(ADGUARD_OVERVIEW_CACHE_KEY, res);
         setSnap(res);
         if (!res.protectionEnabled && res.protectionDisabledDurationMs && res.protectionDisabledDurationMs > 0) {
+          pauseDeadlineRef.current = Date.now() + res.protectionDisabledDurationMs;
           setPauseRemainSec(Math.ceil(res.protectionDisabledDurationMs / 1000));
         } else {
+          pauseDeadlineRef.current = 0;
           setPauseRemainSec(0);
         }
       } catch (e) {
         if (!silent) error((e as Error).message || '加载防劫持 DNS 状态失败');
       } finally {
-        if (!silent) setLoading(false);
+        setLoading(false);
       }
     },
     [error],
   );
 
-  // Initial & status-change reload
+  // Initial & status-change reload (SWR: instant cached frame + immediate background sync)
   useEffect(() => {
-    loadOverview(Boolean(snap));
+    void loadOverview(Boolean(snap));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status?.adguard?.installed, status?.adguard?.running, status?.adguard?.singboxLinked]);
 
-  // Periodic background refresh (15s) when installed
+  // Tab activation sync: 0ms instant view + 0ms unconditional background revalidation
+  const prevActiveRef = useRef<boolean>(active);
   useEffect(() => {
-    if (!snap?.installed) return;
+    const becameActive = !prevActiveRef.current && active;
+    prevActiveRef.current = active;
+    if (!becameActive) return;
+
+    if (pauseDeadlineRef.current > 0) {
+      const rem = Math.max(0, Math.ceil((pauseDeadlineRef.current - Date.now()) / 1000));
+      setPauseRemainSec(rem);
+    }
+    void loadOverview(true);
+  }, [active, loadOverview]);
+
+  // Cross-page invalidation listener (e.g. Audit block/unblock or Console task completion)
+  useEffect(() => {
+    const onInvalidate = (ev: Event) => {
+      const scope = (ev as CustomEvent<ClientInvalidateScope>).detail;
+      if (!scope || scope === 'all' || scope === 'adguard') {
+        void loadOverview(true);
+      }
+    };
+    window.addEventListener(CLIENT_INVALIDATE_EVENT, onInvalidate);
+    return () => window.removeEventListener(CLIENT_INVALIDATE_EVENT, onInvalidate);
+  }, [loadOverview]);
+
+  // Periodic background refresh (15s) strictly when tab is active & installed
+  useEffect(() => {
+    if (!active || !snap?.installed) return;
     const t = window.setInterval(() => {
-      loadOverview(true);
+      if (document.visibilityState === 'visible') {
+        void loadOverview(true);
+      }
     }, 15000);
     return () => window.clearInterval(t);
-  }, [snap?.installed, loadOverview]);
+  }, [active, snap?.installed, loadOverview]);
 
-  // Countdown tick when protection is temporarily paused
+  // Drift-free countdown tick computed from absolute deadline when protection is paused
   useEffect(() => {
-    if (pauseRemainSec <= 0) return;
+    if (!active || pauseRemainSec <= 0) return;
+    if (pauseDeadlineRef.current <= 0) {
+      pauseDeadlineRef.current = Date.now() + pauseRemainSec * 1000;
+    }
     const t = window.setInterval(() => {
-      setPauseRemainSec((prev) => {
-        if (prev <= 1) {
-          window.setTimeout(() => loadOverview(true), 600);
-          return 0;
-        }
-        return prev - 1;
-      });
+      const rem = Math.max(0, Math.ceil((pauseDeadlineRef.current - Date.now()) / 1000));
+      setPauseRemainSec(rem);
+      if (rem <= 0) {
+        pauseDeadlineRef.current = 0;
+        window.setTimeout(() => void loadOverview(true), 500);
+      }
     }, 1000);
     return () => window.clearInterval(t);
-  }, [pauseRemainSec, loadOverview]);
+  }, [active, pauseRemainSec, loadOverview]);
 
   const runProbe = useCallback(
     async (silent = false) => {
       setProbing(true);
       try {
         const res = await clientApi.probeAdGuardUpstream();
+        writeCachedQuery(ADGUARD_PROBE_CACHE_KEY, res);
         setProbe(res);
         if (!silent) {
           if (res.healthy && res.fastestUpstream) {
@@ -190,12 +259,12 @@ export const AdGuardPage: React.FC<AdGuardPageProps> = ({
     [success, error],
   );
 
-  // Auto-probe once when DNS becomes healthy
+  // Auto-probe once when DNS becomes healthy (only when tab is active)
   useEffect(() => {
-    if (snap?.installed && snap.dnsHealthy && !probe && !probing) {
-      runProbe(true);
+    if (active && snap?.installed && snap.dnsHealthy && !probe && !probing) {
+      void runProbe(true);
     }
-  }, [snap?.installed, snap?.dnsHealthy, probe, probing, runProbe]);
+  }, [active, snap?.installed, snap?.dnsHealthy, probe, probing, runProbe]);
 
   const handleProtection = async (enabled: boolean, durationMinutes = 0) => {
     setMutating(true);

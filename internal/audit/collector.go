@@ -99,28 +99,40 @@ type persistedAuditState struct {
 
 // Collector 负责从 sing-box Clash API 采集连接、关联局域网 DHCP/ARP 设备名并执行多维非线性分析。
 type Collector struct {
-	mu            sync.Mutex
-	cfg           *config.Config
-	statePath     string
-	endpoints     []string
-	secret        string
-	httpClient    *http.Client
-	leaseFiles    []string
-	arpFile       string
-	hostsFile     string
-	tzFile        string
-	uciSystemFile string
-	nowFunc       func() time.Time
+	mu              sync.Mutex
+	cfg             *config.Config
+	statePath       string
+	endpoints       []string
+	secret          string
+	customEndpoints bool
+	httpClient      *http.Client
+	leaseFiles      []string
+	arpFile         string
+	hostsFile       string
+	tzFile          string
+	uciSystemFile   string
+	nowFunc         func() time.Time
+	cachedState     *persistedAuditState
+	cachedStateFp   string
+	cachedLeaseFp   string
+	cachedLeaseDevs map[string]lanDeviceInfo
 }
 
 // NewCollector 创建默认客户端审计采集器（自动兼容 OpenWrt /etc/TZ 与 /etc/config/system 本地时区）。
 func NewCollector(cfg *config.Config) *Collector {
 	c := &Collector{
-		cfg:           cfg,
-		statePath:     defaultStatePath(),
-		endpoints:     singbox.ClashAPIEndpoints(),
-		secret:        singbox.ClashAPISecret(),
-		httpClient:    &http.Client{Timeout: 2500 * time.Millisecond},
+		cfg:       cfg,
+		statePath: defaultStatePath(),
+		endpoints: singbox.ClashAPIEndpoints(),
+		secret:    singbox.ClashAPISecret(),
+		httpClient: &http.Client{
+			Timeout: 2500 * time.Millisecond,
+			Transport: &http.Transport{
+				MaxIdleConns:        8,
+				MaxIdleConnsPerHost: 4,
+				IdleConnTimeout:     60 * time.Second,
+			},
+		},
 		leaseFiles:    []string{"/tmp/dhcp.leases", "/var/lib/misc/dnsmasq.leases", "/tmp/dnsmasq.leases"},
 		arpFile:       "/proc/net/arp",
 		hostsFile:     "/etc/hosts",
@@ -147,8 +159,11 @@ func (c *Collector) SetEndpointsForTest(endpoints []string, secret, statePath st
 	defer c.mu.Unlock()
 	c.endpoints = endpoints
 	c.secret = secret
+	c.customEndpoints = true
 	if statePath != "" {
 		c.statePath = statePath
+		c.cachedState = nil
+		c.cachedStateFp = ""
 		ResetAICacheForTest(statePath + ".ai-cache.json")
 	}
 }
@@ -160,6 +175,8 @@ func (c *Collector) SetLeaseFilesForTest(leaseFiles []string, arpFile, hostsFile
 	c.leaseFiles = leaseFiles
 	c.arpFile = arpFile
 	c.hostsFile = hostsFile
+	c.cachedLeaseDevs = nil
+	c.cachedLeaseFp = ""
 }
 
 // SetNowFuncForTest 供单元测试注入确定性时钟（例如模拟凌晨 03:00 行为）。
@@ -182,10 +199,26 @@ type CollectOptions struct {
 	SortAsc      bool   // 是否升序排列 (默认 false 即降序)
 }
 
+// CollectWithConfig 在常驻单例 Collector 上注入最新配置并采样实时连接与历史增量。
+func (c *Collector) CollectWithConfig(ctx context.Context, cfg *config.Config, opts CollectOptions) *Report {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cfg = cfg
+	if !c.customEndpoints {
+		c.endpoints = singbox.ClashAPIEndpoints()
+		c.secret = singbox.ClashAPISecret()
+	}
+	return c.collectLocked(ctx, opts)
+}
+
 // Collect 采样当前活跃连接、合并历史增量窗口、运行非线性风险引擎并生成完整审计报告。
 func (c *Collector) Collect(ctx context.Context, opts CollectOptions) *Report {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.collectLocked(ctx, opts)
+}
+
+func (c *Collector) collectLocked(ctx context.Context, opts CollectOptions) *Report {
 
 	now := c.nowFunc()
 	rep := &Report{
@@ -608,72 +641,110 @@ type lanDeviceInfo struct {
 	MAC  string
 }
 
-// resolveLANDevicesLocked 从 OpenWrt / Linux DHCP 租约、ARP 表与 /etc/hosts 解析内网 IP 对应的设备主机名与 MAC。
-func (c *Collector) resolveLANDevicesLocked() map[string]lanDeviceInfo {
-	out := make(map[string]lanDeviceInfo)
+func auditFileFingerprint(path string) string {
+	if strings.TrimSpace(path) == "" {
+		return ""
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return path + "|missing"
+	}
+	return fmt.Sprintf("%s|%d|%d", path, info.ModTime().UnixNano(), info.Size())
+}
 
-	// 1. 解析 /etc/hosts
-	if raw, err := os.ReadFile(c.hostsFile); err == nil {
-		for line := range strings.SplitSeq(string(raw), "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" || strings.HasPrefix(line, "#") {
-				continue
-			}
-			fields := strings.Fields(line)
-			if len(fields) >= 2 && net.ParseIP(fields[0]) != nil {
-				host := fields[1]
-				if host != "localhost" && !strings.HasPrefix(host, "ip6-") {
-					out[fields[0]] = lanDeviceInfo{Name: host}
+// resolveLANDevicesLocked 从 OpenWrt / Linux DHCP 租约、ARP 表与 /etc/hosts 解析内网 IP 对应的设备主机名与 MAC。
+// 对磁盘租约与 hosts 文件采用 mtime+size 指纹校验：未变更时 0 磁盘读取，变更瞬间立即失效重读。
+func (c *Collector) resolveLANDevicesLocked() map[string]lanDeviceInfo {
+	var fpBuilder strings.Builder
+	fpBuilder.WriteString(auditFileFingerprint(c.hostsFile))
+	for _, path := range c.leaseFiles {
+		fpBuilder.WriteByte(';')
+		fpBuilder.WriteString(auditFileFingerprint(path))
+	}
+	leaseFp := fpBuilder.String()
+
+	var base map[string]lanDeviceInfo
+	if c.cachedLeaseDevs != nil && c.cachedLeaseFp == leaseFp {
+		base = maps.Clone(c.cachedLeaseDevs)
+	} else {
+		base = make(map[string]lanDeviceInfo)
+		// 1. 解析 /etc/hosts
+		if raw, err := os.ReadFile(c.hostsFile); err == nil {
+			for line := range strings.SplitSeq(string(raw), "\n") {
+				line = strings.TrimSpace(line)
+				if line == "" || strings.HasPrefix(line, "#") {
+					continue
+				}
+				fields := strings.Fields(line)
+				if len(fields) >= 2 && net.ParseIP(fields[0]) != nil {
+					host := fields[1]
+					if host != "localhost" && !strings.HasPrefix(host, "ip6-") {
+						base[fields[0]] = lanDeviceInfo{Name: host}
+					}
 				}
 			}
 		}
-	}
 
-	// 2. 解析 dnsmasq / OpenWrt /tmp/dhcp.leases (<expiry> <mac> <ip> <hostname> <client-id>)
-	for _, path := range c.leaseFiles {
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		for line := range strings.SplitSeq(string(raw), "\n") {
-			fields := strings.Fields(strings.TrimSpace(line))
-			if len(fields) < 4 {
+		// 2. 解析 dnsmasq / OpenWrt /tmp/dhcp.leases (<expiry> <mac> <ip> <hostname> <client-id>)
+		for _, path := range c.leaseFiles {
+			raw, err := os.ReadFile(path)
+			if err != nil {
 				continue
 			}
-			mac, ip, host := fields[1], fields[2], fields[3]
-			if net.ParseIP(ip) == nil {
-				continue
-			}
-			if host == "*" {
-				host = ""
-			}
-			prev := out[ip]
-			out[ip] = lanDeviceInfo{
-				Name: cmp.Or(host, prev.Name),
-				MAC:  cmp.Or(mac, prev.MAC),
+			for line := range strings.SplitSeq(string(raw), "\n") {
+				fields := strings.Fields(strings.TrimSpace(line))
+				if len(fields) < 4 {
+					continue
+				}
+				mac, ip, host := fields[1], fields[2], fields[3]
+				if net.ParseIP(ip) == nil {
+					continue
+				}
+				if host == "*" {
+					host = ""
+				}
+				prev := base[ip]
+				base[ip] = lanDeviceInfo{
+					Name: cmp.Or(host, prev.Name),
+					MAC:  cmp.Or(mac, prev.MAC),
+				}
 			}
 		}
+		c.cachedLeaseDevs = maps.Clone(base)
+		c.cachedLeaseFp = leaseFp
 	}
 
-	// 3. 补充 /proc/net/arp 中的 MAC 地址
+	// 3. 实时补充 /proc/net/arp 中的动态 MAC 地址（内核虚拟内存文件，零磁盘开销）
 	if raw, err := os.ReadFile(c.arpFile); err == nil {
 		for line := range strings.SplitSeq(string(raw), "\n") {
 			fields := strings.Fields(strings.TrimSpace(line))
 			if len(fields) >= 4 && net.ParseIP(fields[0]) != nil && strings.Contains(fields[3], ":") {
 				ip, mac := fields[0], fields[3]
 				if mac != "00:00:00:00:00:00" {
-					prev := out[ip]
+					prev := base[ip]
 					prev.MAC = cmp.Or(prev.MAC, mac)
-					out[ip] = prev
+					base[ip] = prev
 				}
 			}
 		}
 	}
 
-	return out
+	return base
 }
 
 func (c *Collector) loadStateLocked(nowUnix int64) *persistedAuditState {
+	if c.statePath != "" {
+		fp := auditFileFingerprint(c.statePath)
+		if c.cachedState != nil && c.cachedStateFp == fp {
+			if nowUnix > 0 {
+				maps.DeleteFunc(c.cachedState.Flows, func(_ string, e *persistedFlowEntry) bool {
+					return e == nil || (e.LastSeenUnix > 0 && nowUnix-e.LastSeenUnix > flowIdleTTLSeconds)
+				})
+			}
+			return c.cachedState
+		}
+	}
+
 	st := &persistedAuditState{
 		SchemaVersion: currentAuditStateSchema,
 		Flows:         make(map[string]*persistedFlowEntry),
@@ -684,6 +755,8 @@ func (c *Collector) loadStateLocked(nowUnix int64) *persistedAuditState {
 	}
 	raw, err := os.ReadFile(c.statePath)
 	if err != nil {
+		c.cachedState = st
+		c.cachedStateFp = auditFileFingerprint(c.statePath)
 		return st
 	}
 	st.SchemaVersion = 0
@@ -739,6 +812,8 @@ func (c *Collector) loadStateLocked(nowUnix int64) *persistedAuditState {
 			return e == nil || (e.LastSeenUnix > 0 && nowUnix-e.LastSeenUnix > flowIdleTTLSeconds)
 		})
 	}
+	c.cachedState = st
+	c.cachedStateFp = auditFileFingerprint(c.statePath)
 	return st
 }
 
@@ -787,6 +862,8 @@ func (c *Collector) saveStateLocked(st *persistedAuditState, now time.Time) {
 		_ = os.Chmod(tmpPath, 0600)
 		_ = os.Rename(tmpPath, c.statePath)
 	}
+	c.cachedState = st
+	c.cachedStateFp = auditFileFingerprint(c.statePath)
 }
 
 // collectLocalInterfaceIPs 枚举当前软路由/主机所有网卡绑定的本机 IP（含 pppoe-wan 公网 IP、br-lan 网关 IP 等）。

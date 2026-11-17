@@ -104,8 +104,12 @@ func (s *Server) handleAuditGet(w http.ResponseWriter, r *http.Request) {
 		SortAsc:      strings.EqualFold(strings.TrimSpace(q.Get("dir")), "asc"),
 	}
 
-	collector := audit.NewCollector(cfg)
-	rep := collector.Collect(r.Context(), opts)
+	var rep *audit.Report
+	if s.auditCollector != nil {
+		rep = s.auditCollector.CollectWithConfig(r.Context(), cfg, opts)
+	} else {
+		rep = audit.NewCollector(cfg).Collect(r.Context(), opts)
+	}
 
 	ts := time.Now().Format("20060102-150405")
 	switch exportFormat {

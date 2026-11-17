@@ -25,6 +25,13 @@ import {
   SlideDrawer,
   useToast,
 } from '../../ui';
+import {
+  CLIENT_INVALIDATE_EVENT,
+  ClientInvalidateScope,
+  emitClientInvalidate,
+  peekCachedQuery,
+  writeCachedQuery,
+} from '../../hooks';
 import { clientApi } from '../api';
 import {
   AuditAIConfig,
@@ -261,7 +268,13 @@ function persistAICache(map: Map<string, AuditAIReview>) {
   }
 }
 
-export const AuditPage: React.FC = () => {
+export const AUDIT_DEFAULT_CACHE_KEY = 'client:audit:default';
+
+export interface AuditPageProps {
+  active?: boolean;
+}
+
+export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
   const { success, error, toast } = useToast();
 
   // Filters & controls
@@ -279,10 +292,18 @@ export const AuditPage: React.FC = () => {
   const [sortBy, setSortBy] = useState<'risk' | 'upload' | 'download' | 'ratio'>('risk');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
 
-  // Data state
-  const [report, setReport] = useState<AuditReport | null>(null);
-  const [loading, setLoading] = useState(true);
+  // Data state (initialized synchronously from SWR cache for 0ms instant open)
+  const [report, setReport] = useState<AuditReport | null>(
+    () => peekCachedQuery<AuditReport>(AUDIT_DEFAULT_CACHE_KEY) ?? null,
+  );
+  const [loading, setLoading] = useState<boolean>(
+    () => !peekCachedQuery<AuditReport>(AUDIT_DEFAULT_CACHE_KEY),
+  );
+  const [refreshing, setRefreshing] = useState(false);
+  const [filterTransitioning, setFilterTransitioning] = useState(false);
   const [lastUpdated, setLastUpdated] = useState('');
+  const requestSeqRef = useRef(0);
+  const abortCtrlRef = useRef<AbortController | null>(null);
 
   // AI cache + reactive version counter
   const aiCacheRef = useRef<Map<string, AuditAIReview>>(loadSavedAICache());
@@ -355,22 +376,41 @@ export const AuditPage: React.FC = () => {
     [aiRevTick],
   );
 
-  const hasLoadedReportRef = useRef(false);
+  const hasLoadedReportRef = useRef<boolean>(Boolean(peekCachedQuery(AUDIT_DEFAULT_CACHE_KEY)));
 
   const loadAudit = useCallback(
     async (silent = false) => {
       if (silent && (actionInFlightRef.current > 0 || Date.now() < pointerDownUntilRef.current)) {
         return;
       }
-      if (!silent) setLoading((prev) => prev && !hasLoadedReportRef.current);
+
+      abortCtrlRef.current?.abort();
+      const ctrl = new AbortController();
+      abortCtrlRef.current = ctrl;
+      const seq = ++requestSeqRef.current;
+
+      if (!silent) {
+        if (!hasLoadedReportRef.current) {
+          setLoading(true);
+        } else {
+          setFilterTransitioning(true);
+        }
+      }
+      setRefreshing(true);
+
+      const trimDev = deviceFilter.trim();
       const qs = new URLSearchParams();
-      if (deviceFilter.trim()) qs.set('device', deviceFilter.trim());
+      if (trimDev) qs.set('device', trimDev);
       if (onlySuspect) qs.set('suspicious', '1');
       if (sortBy) qs.set('sort', sortBy);
       if (sortDir) qs.set('dir', sortDir);
+      const isDefaultQuery = !trimDev && !onlySuspect && sortBy === 'risk' && sortDir === 'desc';
 
       try {
-        const rep = await clientApi.getAudit(qs);
+        const rep = await clientApi.getAudit(qs, ctrl.signal);
+        if (ctrl.signal.aborted || seq !== requestSeqRef.current) {
+          return;
+        }
         if (silent && (actionInFlightRef.current > 0 || Date.now() < pointerDownUntilRef.current)) {
           return;
         }
@@ -383,31 +423,69 @@ export const AuditPage: React.FC = () => {
         });
         if (synced) persistAICache(aiCacheRef.current);
         hasLoadedReportRef.current = true;
+        if (isDefaultQuery) {
+          writeCachedQuery(AUDIT_DEFAULT_CACHE_KEY, rep);
+        }
         setReport(rep);
         setLastUpdated(new Date().toLocaleTimeString());
         if (synced) setAiRevTick((t) => t + 1);
       } catch (e) {
+        if (ctrl.signal.aborted || (e as Error)?.name === 'AbortError') {
+          return;
+        }
         if (!silent) {
           error((e as Error).message || '加载审计数据失败');
         }
       } finally {
-        setLoading(false);
+        if (seq === requestSeqRef.current) {
+          setLoading(false);
+          setRefreshing(false);
+          setFilterTransitioning(false);
+        }
       }
     },
     [deviceFilter, onlySuspect, sortBy, sortDir, setCachedReview, error],
   );
 
+  // Initial & filter/sort change fetch (instant cached frame + immediate background sync)
   useEffect(() => {
-    loadAudit(false);
+    void loadAudit(hasLoadedReportRef.current && !deviceFilter.trim() && !onlySuspect && sortBy === 'risk' && sortDir === 'desc');
+    return () => {
+      abortCtrlRef.current?.abort();
+    };
+  }, [loadAudit, deviceFilter, onlySuspect, sortBy, sortDir]);
+
+  // Tab activation sync: 0ms instant view + 0ms unconditional background revalidation
+  const prevActiveRef = useRef<boolean>(active);
+  useEffect(() => {
+    const becameActive = !prevActiveRef.current && active;
+    prevActiveRef.current = active;
+    if (becameActive) {
+      void loadAudit(true);
+    }
+  }, [active, loadAudit]);
+
+  // Cross-page invalidation listener (e.g. Console task or Config save)
+  useEffect(() => {
+    const onInvalidate = (ev: Event) => {
+      const scope = (ev as CustomEvent<ClientInvalidateScope>).detail;
+      if (!scope || scope === 'all' || scope === 'audit') {
+        void loadAudit(true);
+      }
+    };
+    window.addEventListener(CLIENT_INVALIDATE_EVENT, onInvalidate);
+    return () => window.removeEventListener(CLIENT_INVALIDATE_EVENT, onInvalidate);
   }, [loadAudit]);
 
   useEffect(() => {
-    if (!autoRefresh) return;
+    if (!active || !autoRefresh) return;
     const timer = window.setInterval(() => {
-      loadAudit(true);
+      if (document.visibilityState === 'visible') {
+        void loadAudit(true);
+      }
     }, 5000);
     return () => window.clearInterval(timer);
-  }, [autoRefresh, loadAudit]);
+  }, [active, autoRefresh, loadAudit]);
 
   const fetchAIModels = useCallback(
     async (baseUrl: string, apiKey: string, silent = false) => {
@@ -666,18 +744,18 @@ export const AuditPage: React.FC = () => {
   }, [aiEnabled, processedFlows, getCachedReview, setCachedReview]);
 
   useEffect(() => {
-    if (!aiEnabled) {
-      setAiStatusText('');
+    if (!active || !aiEnabled) {
+      if (!aiEnabled) setAiStatusText('');
       return;
     }
     const timer = window.setTimeout(() => {
       scheduleAIPrefetch();
     }, 180);
     return () => window.clearTimeout(timer);
-  }, [aiEnabled, processedFlows.length, lastUpdated, scheduleAIPrefetch]);
+  }, [active, aiEnabled, processedFlows.length, lastUpdated, scheduleAIPrefetch]);
 
   useEffect(() => {
-    if (!aiEnabled) return;
+    if (!active || !aiEnabled) return;
     let timer: number | null = null;
     const onScroll = () => {
       if (timer) window.clearTimeout(timer);
@@ -688,7 +766,7 @@ export const AuditPage: React.FC = () => {
       window.removeEventListener('scroll', onScroll);
       if (timer) window.clearTimeout(timer);
     };
-  }, [aiEnabled, scheduleAIPrefetch]);
+  }, [active, aiEnabled, scheduleAIPrefetch]);
 
   const handleToggleAI = (checked: boolean) => {
     setAiEnabled(checked);
@@ -734,6 +812,7 @@ export const AuditPage: React.FC = () => {
       const reason = (f.reasons && f.reasons[0]) || 'WebUI 安全审计拉黑';
       const res = await clientApi.blockAuditTarget(f.target, '', reason);
       success(res.message || `已拉黑 ${f.target}`);
+      emitClientInvalidate('adguard');
       await loadAudit(false);
     } catch (e) {
       error((e as Error).message || '拉黑失败');
@@ -770,6 +849,7 @@ export const AuditPage: React.FC = () => {
         setPresetUrl('');
         setPresetReason('');
       }
+      emitClientInvalidate('adguard');
       await loadAudit(false);
     } catch (e) {
       error((e as Error).message || '添加拉黑规则失败');
@@ -784,6 +864,7 @@ export const AuditPage: React.FC = () => {
     try {
       const res = await clientApi.unblockAuditTarget(r.target, r.source_ip || '');
       success(res.message || `已解封 ${r.target}`);
+      emitClientInvalidate('adguard');
       await loadAudit(false);
     } catch (e) {
       error((e as Error).message || '解封失败');
@@ -803,6 +884,7 @@ export const AuditPage: React.FC = () => {
       const res = await clientApi.whitelistAuditTarget(action, target);
       success(res.message || (action === 'add' ? '已加入白名单' : '已移出白名单'));
       if (action === 'add' && !rawTarget) setManualTarget('');
+      emitClientInvalidate('adguard');
       await loadAudit(false);
     } catch (e) {
       error((e as Error).message || '白名单操作失败');
@@ -1043,7 +1125,7 @@ export const AuditPage: React.FC = () => {
             <Button
               size="xs"
               variant="secondary"
-              disabled={isBusy}
+              disabled={isBusy || filterTransitioning}
               onClick={() => handleWhitelist('add', f.target)}
             >
               白名单
@@ -1052,6 +1134,7 @@ export const AuditPage: React.FC = () => {
               size="xs"
               variant="danger"
               loading={isBusy}
+              disabled={filterTransitioning}
               className={dual ? 'animate-pulse' : ''}
               onClick={() => handleBlockFlow(f)}
             >
@@ -1200,7 +1283,7 @@ export const AuditPage: React.FC = () => {
             <Button
               size="sm"
               variant="primary"
-              icon={<RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />}
+              icon={<RefreshCw className={`w-3.5 h-3.5 ${loading || refreshing ? 'animate-spin' : ''}`} />}
               onClick={() => loadAudit(false)}
             >
               刷新
@@ -1324,7 +1407,10 @@ export const AuditPage: React.FC = () => {
         icon={<ShieldAlert className="w-4 h-4" />}
         noPadding
       >
-        <div ref={tableContainerRef}>
+        <div
+          ref={tableContainerRef}
+          className={`transition-opacity duration-150 ${filterTransitioning ? 'opacity-70' : 'opacity-100'}`}
+        >
           <DataTable
             columns={flowColumns}
             rows={processedFlows}

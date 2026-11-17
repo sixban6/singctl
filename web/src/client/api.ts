@@ -378,7 +378,8 @@ export const clientApi = {
       body: JSON.stringify(payload),
     }),
 
-  getAudit: (qs: URLSearchParams) => request<AuditReport>(`/api/audit?${qs.toString()}`),
+  getAudit: (qs: URLSearchParams, signal?: AbortSignal) =>
+    request<AuditReport>(`/api/audit?${qs.toString()}`, signal ? { signal } : {}),
   getAuditAIConfig: () => request<AuditAIConfig>('/api/audit/ai-config'),
   saveAuditAIConfig: (payload: { baseUrl: string; apiKey: string; model: string }) =>
     request<{ ok: boolean; message: string; model: string }>('/api/audit/ai-config', {
