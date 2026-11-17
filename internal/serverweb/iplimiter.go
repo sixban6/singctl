@@ -186,7 +186,7 @@ func (l *IPLimiter) RecordFailure(ip string) (banned bool, remainingTime time.Du
 	l.mu.Lock()
 	now := time.Now()
 	att, exists := l.attempts[ip]
-	if !exists || now.Sub(att.LastFail) > l.window {
+	if !exists || (now.After(att.BannedUntil) && now.Sub(att.LastFail) > l.window) {
 		att = &ipAttempt{
 			FailCount: 1,
 			LastFail:  now,

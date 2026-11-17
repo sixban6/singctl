@@ -2,12 +2,13 @@ package heal
 
 import (
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"singctl/internal/util/file"
 )
 
 // PostureLevel summarizes the overall 3-layer security state of a node.
@@ -181,22 +182,11 @@ func readStateUnlocked(statePath string) PersistedHealState {
 }
 
 func writeStateUnlocked(statePath string, st PersistedHealState) error {
-	if err := os.MkdirAll(filepath.Dir(statePath), 0700); err != nil {
-		return err
-	}
 	data, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := statePath + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmp, 0600); err != nil && !errors.Is(err, os.ErrNotExist) {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return os.Rename(tmp, statePath)
+	return file.WriteAtomic0600(statePath, data)
 }
 
 // SavePolicy updates the persisted HealPolicy with 0600 permissions.

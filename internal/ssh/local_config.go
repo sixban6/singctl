@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"singctl/internal/util/file"
 )
 
 // ManagedHost represents a host entry parsed from ~/.ssh/config.
@@ -85,8 +87,8 @@ func (m *LocalConfigManager) SyncHosts(hosts []*Host) error {
 		}
 	}
 
-	// Write back with 0600 permissions
-	if err := os.WriteFile(m.configPath, []byte(updatedContent), 0600); err != nil {
+	// Write back atomically with forced 0600 permissions (even if pre-existing file was 0644)
+	if err := file.WriteAtomic0600(m.configPath, []byte(updatedContent)); err != nil {
 		return fmt.Errorf("failed to write ~/.ssh/config: %w", err)
 	}
 
@@ -171,7 +173,7 @@ func (m *LocalConfigManager) CleanManagedHosts(targetName string) (int, error) {
 		cleaned += "\n"
 	}
 
-	if err := os.WriteFile(m.configPath, []byte(cleaned), 0600); err != nil {
+	if err := file.WriteAtomic0600(m.configPath, []byte(cleaned)); err != nil {
 		return 0, fmt.Errorf("failed to write cleaned ~/.ssh/config: %w", err)
 	}
 
@@ -205,5 +207,5 @@ func (m *LocalConfigManager) ensureDir() error {
 func (m *LocalConfigManager) backupFile(content string) error {
 	timestamp := time.Now().Format("20060102_150405")
 	backupPath := fmt.Sprintf("%s.bak.%s", m.configPath, timestamp)
-	return os.WriteFile(backupPath, []byte(content), 0600)
+	return file.WriteAtomic0600(backupPath, []byte(content))
 }
