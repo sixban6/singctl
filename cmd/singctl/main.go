@@ -101,7 +101,21 @@ func isStatelessCommand(args []string) bool {
 	return false
 }
 
+// sanitizeLegacyRestartArgs 自动修复旧版 (<= v1.14.126，如 v1.14.120) WebUI 点击自更新时热重启脚本遗漏 `shift` 导致的重复首参 bug：
+// 旧版执行 `sh -c '...; exec "$@"' -- "$exe" "$exe" --config ... web start` 时，
+// 会使磁盘新版收到的 os.Args 变为 [exe, exe, "--config", ..., "web", "start", ...]。
+func sanitizeLegacyRestartArgs(args []string) []string {
+	if len(args) >= 3 && args[0] != "" && (args[1] == args[0] || filepath.Base(args[1]) == filepath.Base(args[0])) {
+		out := make([]string, 0, len(args)-1)
+		out = append(out, args[0])
+		out = append(out, args[2:]...)
+		return out
+	}
+	return args
+}
+
 func main() {
+	os.Args = sanitizeLegacyRestartArgs(os.Args)
 	defaultConfigPath := resolveDefaultConfigPath()
 	configPath = parseEarlyConfigPath(os.Args, defaultConfigPath)
 

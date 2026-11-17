@@ -858,13 +858,13 @@ func (s *ServerConfig) GetNodeTag() string {
 	return "node"
 }
 
-// DefaultWatchdogFailoverGroups 默认参与自动故障切换守护的核心 Selector 策略组列表。
-var DefaultWatchdogFailoverGroups = []string{"#VPS", "Proxy", "AI", "#Nodes"}
+// DefaultWatchdogFailoverGroups 默认参与自动故障切换守护的核心 Selector 策略组列表（不含底层闲置单节点池 #Nodes，避免误报乱切）。
+var DefaultWatchdogFailoverGroups = []string{"Proxy", "AI", "#VPS"}
 
-// DefaultWatchdogProbeURLs 默认策略组存活探测 URL 列表。
+// DefaultWatchdogProbeURLs 默认策略组存活探测 URL 列表（前后端统一，采用轻量无反爬限流的 HTTPS 204 端点）。
 var DefaultWatchdogProbeURLs = []string{
-	"https://captive.apple.com/hotspot-detect.html",
-	"http://www.gstatic.com/generate_204",
+	"https://www.gstatic.com/generate_204",
+	"https://cp.cloudflare.com/generate_204",
 }
 
 // WatchdogFailoverConfig 策略组自动故障切换与恢复回切配置（默认开启）。
@@ -872,8 +872,8 @@ type WatchdogFailoverConfig struct {
 	Enabled            *bool    `yaml:"enabled,omitempty" json:"enabled,omitempty"`                             // 是否启用策略组自动故障切换, 默认 true
 	Groups             []string `yaml:"groups,omitempty" json:"groups,omitempty"`                               // 守护的 Selector 策略组列表, 留空使用默认核心组
 	PatrolInterval     int      `yaml:"patrol_interval,omitempty" json:"patrol_interval,omitempty"`             // 巡检间隔(秒), 默认 300 (5分钟)
-	ProbeTimeoutMs     int      `yaml:"probe_timeout_ms,omitempty" json:"probe_timeout_ms,omitempty"`           // 单次测速超时(毫秒), 默认 2800
-	ConfirmRetries     int      `yaml:"confirm_retries,omitempty" json:"confirm_retries,omitempty"`             // 切备前复测确认次数, 默认 1 (设为 -1 表示不复测立即切)
+	ProbeTimeoutMs     int      `yaml:"probe_timeout_ms,omitempty" json:"probe_timeout_ms,omitempty"`           // 单次测速超时(毫秒), 默认 5000
+	ConfirmRetries     int      `yaml:"confirm_retries,omitempty" json:"confirm_retries,omitempty"`             // 切备前复测确认次数, 默认 2 (设为 -1 表示不复测立即切)
 	FailbackCooldown   int      `yaml:"failback_cooldown,omitempty" json:"failback_cooldown,omitempty"`         // 切备后自动回切冷却期(秒), 默认 180 (设为 -1 关闭自动回切)
 	MaxFailbackDelayMs int      `yaml:"max_failback_delay_ms,omitempty" json:"max_failback_delay_ms,omitempty"` // 原主选恢复回切最高允许延迟(毫秒), 默认 600
 	ProbeURLs          []string `yaml:"probe_urls,omitempty" json:"probe_urls,omitempty"`                       // 自定义测速探测 URL, 留空使用默认列表
@@ -911,7 +911,7 @@ func (f WatchdogFailoverConfig) EffectivePatrolInterval() time.Duration {
 
 func (f WatchdogFailoverConfig) EffectiveProbeTimeout() time.Duration {
 	if f.ProbeTimeoutMs <= 0 {
-		return 2800 * time.Millisecond
+		return 5000 * time.Millisecond
 	}
 	ms := min(max(500, f.ProbeTimeoutMs), 15000)
 	return time.Duration(ms) * time.Millisecond
@@ -922,7 +922,7 @@ func (f WatchdogFailoverConfig) EffectiveConfirmRetries() int {
 		return 0
 	}
 	if f.ConfirmRetries == 0 {
-		return 1
+		return 2
 	}
 	return min(f.ConfirmRetries, 5)
 }

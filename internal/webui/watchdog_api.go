@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 
 	"singctl/internal/adguard"
 	"singctl/internal/config"
+	"singctl/internal/constant"
 	"singctl/internal/daemon"
 	"singctl/internal/singbox"
 )
@@ -309,7 +311,7 @@ func (s *Server) handleWatchdogConfigPut(w http.ResponseWriter, r *http.Request)
 		}
 		if req.Failover.ProbeTimeoutMs != nil {
 			v := min(max(500, *req.Failover.ProbeTimeoutMs), 15000)
-			if v == 2800 {
+			if v == 5000 {
 				fo.ProbeTimeoutMs = 0
 			} else {
 				fo.ProbeTimeoutMs = v
@@ -320,8 +322,8 @@ func (s *Server) handleWatchdogConfigPut(w http.ResponseWriter, r *http.Request)
 			switch v {
 			case 0:
 				fo.ConfirmRetries = -1 // 显式不复测
-			case 1:
-				fo.ConfirmRetries = 0 // 默认复测 1 次
+			case 2:
+				fo.ConfirmRetries = 0 // 默认复测 2 次，省略字段保持清爽
 			default:
 				fo.ConfirmRetries = v
 			}
@@ -423,10 +425,17 @@ func (s *Server) handleWatchdogPatrolPost(w http.ResponseWriter, r *http.Request
 		daemon.NotifyReload()
 		time.Sleep(800 * time.Millisecond)
 	} else {
+		prevSnap := daemon.LoadRuntimeSnapshot()
 		st := daemon.NewGroupFailoverState()
+		st.SingBoxConfigPath = cmp.Or(s.opts.SingBoxConfigPath, constant.SingBoxConfigFile)
+		st.EnableWANGate = true
 		st.ApplyConfig(cfg.Watchdog.Failover)
-		st.ConfirmRetries = 0
-		ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
+		st.RestoreSnapshot(prevSnap.ActiveFailovers)
+		if st.ConfirmRetries > 1 {
+			st.ConfirmRetries = 1
+		}
+		st.ConfirmRetryDelay = 1500 * time.Millisecond
+		ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
 		st.Patrol(ctx, singbox.ClashAPIEndpoints(), singbox.ClashAPISecret())
 		cancel()
 		nowStr := time.Now().Format(time.DateTime)

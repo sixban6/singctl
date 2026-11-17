@@ -171,7 +171,12 @@ func New(opts Options) *Server {
 
 // ListenAndServe 启动 HTTP 服务(阻塞)
 func (s *Server) ListenAndServe() error {
+	s.opts.Listen = NormalizeLegacyWildcardListen(s.opts.Listen)
 	ln, err := net.Listen("tcp", s.opts.Listen)
+	if err != nil && strings.HasPrefix(s.opts.Listen, ":") {
+		// 纯 IPv4 内核兜底
+		ln, err = net.Listen("tcp4", "0.0.0.0"+s.opts.Listen)
+	}
 	if err != nil {
 		return err
 	}

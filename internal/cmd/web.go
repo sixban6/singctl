@@ -73,10 +73,26 @@ OpenWrt 开机自启请参考 docs/webui.md 的 procd 配置。`,
 }
 
 func resolveWebPassword(password string) string {
-	if password == "" {
-		return os.Getenv("SINGCTL_WEB_PASSWORD")
+	if password != "" {
+		return password
 	}
-	return password
+	// 逆序扫描环境变量（兼容旧版 <= v1.14.126 ScheduleDetachedRestart 使用 append 追加同名 SINGCTL_WEB_PASSWORD 的场景，取最新非空值）
+	env := os.Environ()
+	for i := len(env) - 1; i >= 0; i-- {
+		if k, v, ok := cutEnv(env[i]); ok && k == "SINGCTL_WEB_PASSWORD" && v != "" {
+			return v
+		}
+	}
+	return os.Getenv("SINGCTL_WEB_PASSWORD")
+}
+
+func cutEnv(kv string) (string, string, bool) {
+	for i := 0; i < len(kv); i++ {
+		if kv[i] == '=' {
+			return kv[:i], kv[i+1:], true
+		}
+	}
+	return "", "", false
 }
 
 func newWebStartCmd(opts func() webui.Options) *cobra.Command {

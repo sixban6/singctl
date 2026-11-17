@@ -80,9 +80,31 @@ func WebLogPath() string {
 	return filepath.Join("/tmp", webLogName)
 }
 
-// IsBackgroundChild 当前进程是否为后台子进程
+// IsBackgroundChild 当前进程是否为新版 StartBackground 派生的合法后台守护子进程。
+// 关键升级自愈兼容：旧版 (<= v1.14.126，如 v1.14.120) 网页点击「检查并更新 singctl」时，
+// 旧版 ScheduleDetachedRestart 会误将父进程的 SINGCTL_WEB_BACKGROUND=1 遗传给新版 `singctl web start`，
+// 但旧版并未注入 SINGCTL_WEB_READY_FD 且将输出重定向到了 /dev/null。
+// 此处检测到缺少 SINGCTL_WEB_READY_FD 时自动剥离残留标记并返回 false，
+// 让新版无缝走正规 StartBackground 守护化流程（重建 0600 状态锁、恢复 /tmp/singctl-web.log 日志与原口令）。
 func IsBackgroundChild() bool {
-	return os.Getenv(envWebBackground) == "1"
+	if os.Getenv(envWebBackground) != "1" {
+		return false
+	}
+	if strings.TrimSpace(os.Getenv(envWebReadyFd)) == "" {
+		_ = os.Unsetenv(envWebBackground)
+		return false
+	}
+	return true
+}
+
+// NormalizeLegacyWildcardListen 将旧版状态文件中由内核展开的 "[::]:8090" 归一化回通用通配 ":8090"，
+// 防止软路由禁用 IPv6 后热重启绑定失败。
+func NormalizeLegacyWildcardListen(listen string) string {
+	s := strings.TrimSpace(listen)
+	if strings.HasPrefix(s, "[::]:") {
+		return ":" + strings.TrimPrefix(s, "[::]:")
+	}
+	return s
 }
 
 // BuildCleanSubprocessEnv 构造干净的子进程环境变量：
@@ -306,6 +328,7 @@ func InstallChildSignalCleanup() {
 
 // StartBackground 后台启动 WebUI(父进程路径)。
 func StartBackground(opts Options) error {
+	opts.Listen = NormalizeLegacyWildcardListen(opts.Listen)
 	if err := AcquireWebLock(WebState{
 		Pid:        os.Getpid(),
 		Listen:     opts.Listen,
