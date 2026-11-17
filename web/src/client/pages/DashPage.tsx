@@ -26,6 +26,7 @@ import {
 } from '../../ui';
 import { clientApi } from '../api';
 import { ClientHealthResponse, ClientStatusResponse, SbProxiesSnapshot } from '../types';
+import { TrafficFlowCard } from '../components/TrafficFlowCard';
 
 export interface DashPageProps {
   status: ClientStatusResponse | null;
@@ -77,7 +78,7 @@ export const DashPage: React.FC<DashPageProps> = ({ status, busy, onAction, onNa
     return () => {
       cancelled = true;
     };
-  }, [sbRunning]);
+  }, [sbRunning, status]);
 
   const runHealthCheck = async () => {
     setCheckingHealth(true);
@@ -470,6 +471,14 @@ export const DashPage: React.FC<DashPageProps> = ({ status, busy, onAction, onNa
           </div>
         </div>
       </div>
+
+      {/* Traffic Flow Visual SVG Topology */}
+      <TrafficFlowCard
+        status={status}
+        proxySnap={proxySnap}
+        health={health}
+        onNavigate={onNavigate}
+      />
 
       {/* Host & Subscriptions Two-Column Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
