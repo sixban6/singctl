@@ -45,32 +45,32 @@ type Options struct {
 
 // Server 服务端 Web 实例
 type Server struct {
-	opts               Options
-	Mux                *http.ServeMux
-	subStore           *subhub.Store
-	telemetry          *telemetry.Collector
-	fleet              *fleet.Manager
-	mu                 sync.RWMutex
-	Sessions           map[string]SessionRecord
-	SessionsMu         sync.Mutex
-	limiter            *IPLimiter
-	audit              *AuditManager
-	geo                *IPGeoResolver
-	sniff              *SniffTracker
-	passwordPendingAck bool
-	gatewayToken       string
-	cliToken           string
-	warpMu             sync.Mutex
-	warpDeps           *deploy.LiveWarpApplyDeps
-	warpDaemonProbe    func(forceRefresh bool) WarpDaemonStatus
-	warpPortChecker    func() bool
-	warpExitFetcher    func(timeout time.Duration) (ip, loc, traceRaw string, ok bool)
-	warpRotateIdentity func(previousIP string) (string, string, error)
-	warpCacheMu        sync.Mutex
-	warpCachedIP       string
-	warpCachedLoc      string
-	warpCachedAt       time.Time
-	warpExitRefreshing atomic.Bool
+	opts                  Options
+	Mux                   *http.ServeMux
+	subStore              *subhub.Store
+	telemetry             *telemetry.Collector
+	fleet                 *fleet.Manager
+	mu                    sync.RWMutex
+	Sessions              map[string]SessionRecord
+	SessionsMu            sync.Mutex
+	limiter               *IPLimiter
+	audit                 *AuditManager
+	geo                   *IPGeoResolver
+	sniff                 *SniffTracker
+	passwordPendingAck    bool
+	gatewayToken          string
+	cliToken              string
+	warpMu                sync.Mutex
+	warpDeps              *deploy.LiveWarpApplyDeps
+	warpDaemonProbe       func(forceRefresh bool) WarpDaemonStatus
+	warpPortChecker       func() bool
+	warpExitFetcher       func(timeout time.Duration) (ip, loc, traceRaw string, ok bool)
+	warpRotateIdentity    func(previousIP string) (string, string, error)
+	warpCacheMu           sync.Mutex
+	warpCachedIP          string
+	warpCachedLoc         string
+	warpCachedAt          time.Time
+	warpExitRefreshing    atomic.Bool
 	warpWatchdogMu        sync.Mutex
 	warpLegacyChecked     bool
 	warpBootSynced        bool

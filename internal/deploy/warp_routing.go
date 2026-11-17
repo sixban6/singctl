@@ -375,6 +375,7 @@ func ApplyWarpRoutingWithProtectedDomains(rawJSON []byte, rawWR config.WarpRouti
 	if routeMap == nil {
 		routeMap = make(map[string]any)
 	}
+	ensureServerDirectHTTPClient(doc, routeMap)
 
 	// 1. 收集启用的 WARP 预设对应的 rule_set 和 domain_suffix
 	mode := wr.NormalizedMode()
@@ -414,6 +415,8 @@ func ApplyWarpRoutingWithProtectedDomains(rawJSON []byte, rawWR config.WarpRouti
 			// 未启用的可选规则集不再保留，节省小内存 VPS 规则内存
 			continue
 		}
+		// 存量服务端配置无感迁移：清理 sing-box 1.14 弃用（1.16 移除）的 download_detour
+		delete(item, "download_detour")
 		if tag != "" {
 			presentTags[tag] = true
 		}
@@ -427,11 +430,10 @@ func ApplyWarpRoutingWithProtectedDomains(rawJSON []byte, rawWR config.WarpRouti
 			}
 			spec := optionalRuleSetSpecs[rs]
 			updatedRuleSets = append(updatedRuleSets, map[string]any{
-				"tag":             spec.Tag,
-				"type":            "remote",
-				"format":          "binary",
-				"download_detour": "DC",
-				"url":             spec.URL,
+				"tag":    spec.Tag,
+				"type":   "remote",
+				"format": "binary",
+				"url":    spec.URL,
 			})
 			presentTags[rs] = true
 		}
@@ -572,6 +574,31 @@ func ensureWarpAndDCOutbounds(doc map[string]any) {
 	}
 	if len(outbounds) > 0 {
 		doc["outbounds"] = outbounds
+	}
+}
+
+// ensureServerDirectHTTPClient 为服务端配置注入 sing-box 1.14+ 标准的顶层 hc-direct 与 route.default_http_client，
+// 同时剥离可能指向空 direct 出站 (DC) 的无效 detour，实现旧版配置无感平滑迁移。
+func ensureServerDirectHTTPClient(doc, routeMap map[string]any) {
+	httpClients := extractSliceOfMaps(doc["http_clients"])
+	hasDirectHC := false
+	for _, hc := range httpClients {
+		tag, _ := hc["tag"].(string)
+		if tag == "hc-direct" {
+			hasDirectHC = true
+			if detour, _ := hc["detour"].(string); strings.EqualFold(strings.TrimSpace(detour), "DC") || strings.EqualFold(strings.TrimSpace(detour), "direct") {
+				delete(hc, "detour")
+			}
+		}
+	}
+	if !hasDirectHC {
+		httpClients = append(httpClients, map[string]any{
+			"tag": "hc-direct",
+		})
+	}
+	doc["http_clients"] = httpClients
+	if dhc, _ := routeMap["default_http_client"].(string); strings.TrimSpace(dhc) == "" {
+		routeMap["default_http_client"] = "hc-direct"
 	}
 }
 

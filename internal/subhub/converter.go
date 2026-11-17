@@ -234,7 +234,7 @@ func renderSingBox(ctx context.Context, bundle *ResolvedBundle, opts RenderOptio
 	}
 
 	if platform == "ios" {
-		adapted, adaptErr := singbox.AdaptIOSConfig(string(rawBytes), opts.MirrorURL)
+		adapted, adaptErr := singbox.AdaptIOSConfigForVersion(string(rawBytes), opts.MirrorURL, tplVer)
 		if adaptErr != nil {
 			return nil, fmt.Errorf("ios config adaptation failed: %w", adaptErr)
 		}

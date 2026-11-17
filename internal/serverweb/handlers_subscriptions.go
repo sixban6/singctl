@@ -74,7 +74,7 @@ func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 		"substoreAdminUrl": adminURL,
 		"subscriptionUrl":  rawSubURL,
 		"importLinks":      importLinks,
-		"sources":           sources,
+		"sources":          sources,
 		"nodes": map[string]any{
 			"hy2": map[string]any{
 				"link":   hy2Link,

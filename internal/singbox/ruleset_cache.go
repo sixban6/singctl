@@ -137,6 +137,11 @@ func LocalizeRuleSets(jsonStr string, opts LocalizeOptions) (string, RuleSetStat
 	if route == nil {
 		return jsonStr, stats, nil
 	}
+	sanitizedHC := sanitizeRootHTTPClients(cfg)
+	hasDefaultHC := false
+	if dhc, _ := route["default_http_client"].(string); strings.TrimSpace(dhc) != "" {
+		hasDefaultHC = true
+	}
 	arr, _ := route["rule_set"].([]any)
 
 	manifest := loadManifest(opts.CacheDir)
@@ -214,7 +219,7 @@ func LocalizeRuleSets(jsonStr string, opts LocalizeOptions) (string, RuleSetStat
 		tasks = append(tasks, ruleSetTask{idx: i, tag: tag, url: url, format: format, entry: entry})
 	}
 	if len(tasks) == 0 {
-		if repairedLocalOnDisk {
+		if repairedLocalOnDisk || sanitizedHC {
 			out, err := json.Marshal(cfg)
 			if err == nil {
 				return string(out), stats, nil
@@ -279,7 +284,7 @@ func LocalizeRuleSets(jsonStr string, opts LocalizeOptions) (string, RuleSetStat
 				if t.wasMissingLocal {
 					revertMissingLocalToRemote(t.entry, t.url, t.format)
 				} else {
-					sanitizeKeptRemoteEntry(t.entry)
+					sanitizeKeptRemoteEntry(t.entry, hasDefaultHC)
 				}
 				if !opts.Silent && !results[t.idx].aborted {
 					log.Warn("⚠️ 自定义规则集 %q 下载失败且无内置快照(%v)，保留远程引用", t.tag, results[t.idx].err)
@@ -339,7 +344,7 @@ func LocalizeRuleSets(jsonStr string, opts LocalizeOptions) (string, RuleSetStat
 		if t.wasMissingLocal {
 			revertMissingLocalToRemote(t.entry, t.url, t.format)
 		} else {
-			sanitizeKeptRemoteEntry(t.entry)
+			sanitizeKeptRemoteEntry(t.entry, hasDefaultHC)
 		}
 		if !opts.Silent && !results[t.idx].aborted {
 			log.Warn("⚠️ 规则集 %q 下载失败且无任何兑底(%v)，保留远程引用", t.tag, results[t.idx].err)
@@ -1039,12 +1044,35 @@ func localizeEntry(entry map[string]any, path string) {
 }
 
 // sanitizeKeptRemoteEntry 清理保留为 remote 的规则集条目：
-// sing-box 1.14+ 严格禁止 remote 规则集的 download_detour 指向空的 direct 出站
-// （会直接报 FATAL: "detour to an empty direct outbound makes no sense" 导致整个 sing-box 启动失败）。
-func sanitizeKeptRemoteEntry(entry map[string]any) {
-	if detour, _ := entry["download_detour"].(string); strings.EqualFold(detour, "direct") || strings.EqualFold(detour, "DirectConn") {
+//   - 若配置已启用 v1.14+ route.default_http_client，直接移除弃用的 download_detour；
+//   - 否则剥离指向空 direct / DirectConn 出站的 download_detour，防止 sing-box 1.14+ 报 empty direct 致命错误。
+func sanitizeKeptRemoteEntry(entry map[string]any, hasDefaultHTTPClient bool) {
+	if hasDefaultHTTPClient {
+		delete(entry, "download_detour")
+		return
+	}
+	if detour, _ := entry["download_detour"].(string); strings.EqualFold(detour, "direct") || strings.EqualFold(detour, "DirectConn") || strings.EqualFold(detour, "#DC") {
 		delete(entry, "download_detour")
 	}
+}
+
+func sanitizeRootHTTPClients(cfg map[string]any) bool {
+	rawHC, ok := cfg["http_clients"].([]any)
+	if !ok || len(rawHC) == 0 {
+		return false
+	}
+	changed := false
+	for _, item := range rawHC {
+		hc, ok := item.(map[string]any)
+		if !ok || hc == nil {
+			continue
+		}
+		if detour, _ := hc["detour"].(string); isEmptyDirectOutboundTag(cfg["outbounds"], strings.TrimSpace(detour)) {
+			delete(hc, "detour")
+			changed = true
+		}
+	}
+	return changed
 }
 
 // revertMissingLocalToRemote 当 type=local 的规则集磁盘文件缺失且重下失败时，

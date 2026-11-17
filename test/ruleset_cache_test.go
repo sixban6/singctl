@@ -99,7 +99,8 @@ func remoteEntry(tag, url string) map[string]any {
 		"type":            "remote",
 		"format":          "binary",
 		"url":             url,
-		"download_detour": "direct", // 远程专属字段，本地化后应被删除
+		"download_detour": "direct",                      // 远程专属字段，本地化后应被删除
+		"http_client":     map[string]any{"detour": "p"}, // 1.14 远程字段，本地化后同样应被删除
 	}
 }
 
@@ -144,6 +145,9 @@ func TestLocalizeRuleSets_DownloadSuccess(t *testing.T) {
 		}
 		if _, has := e["download_detour"]; has {
 			t.Errorf("entry %v: download_detour should be removed", e["tag"])
+		}
+		if _, has := e["http_client"]; has {
+			t.Errorf("entry %v: http_client should be removed", e["tag"])
 		}
 	}
 

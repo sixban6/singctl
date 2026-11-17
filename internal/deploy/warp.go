@@ -728,11 +728,11 @@ func stageSelectWorkingEndpoint(
 	defer raceCancel()
 
 	var (
-		mu      sync.Mutex
-		won     bool
-		winIP   string
-		winLoc  string
-		wg      sync.WaitGroup
+		mu     sync.Mutex
+		won    bool
+		winIP  string
+		winLoc string
+		wg     sync.WaitGroup
 	)
 	for _, ep := range endpoints[1:] {
 		wg.Add(1)

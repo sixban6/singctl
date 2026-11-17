@@ -21,11 +21,14 @@ func loadEmbeddedServerTemplate(t *testing.T) []byte {
 }
 
 type parsedSingBoxRoute struct {
-	Route struct {
-		Final   string `json:"final"`
-		RuleSet []struct {
-			Tag string `json:"tag"`
-			URL string `json:"url"`
+	HTTPClients []map[string]any `json:"http_clients"`
+	Route       struct {
+		DefaultHTTPClient string `json:"default_http_client"`
+		Final             string `json:"final"`
+		RuleSet           []struct {
+			Tag            string `json:"tag"`
+			URL            string `json:"url"`
+			DownloadDetour string `json:"download_detour"`
 		} `json:"rule_set"`
 		Rules []struct {
 			Action        string   `json:"action"`
@@ -78,6 +81,20 @@ func TestApplyWarpRouting_DefaultMissavDisableRedditGlobalAndBypass(t *testing.T
 	}
 	if pDefault.Route.Final != "DC" {
 		t.Fatalf("expected default final=DC, got %s", pDefault.Route.Final)
+	}
+	if pDefault.Route.DefaultHTTPClient != "hc-direct" {
+		t.Fatalf("expected route.default_http_client=hc-direct, got %q", pDefault.Route.DefaultHTTPClient)
+	}
+	if len(pDefault.HTTPClients) == 0 || pDefault.HTTPClients[0]["tag"] != "hc-direct" {
+		t.Fatalf("expected top-level http_clients with tag=hc-direct, got %v", pDefault.HTTPClients)
+	}
+	if _, hasDetour := pDefault.HTTPClients[0]["detour"]; hasDetour {
+		t.Fatalf("server hc-direct must not set detour to empty direct DC outbound, got %v", pDefault.HTTPClients[0])
+	}
+	for _, rs := range pDefault.Route.RuleSet {
+		if rs.DownloadDetour != "" {
+			t.Fatalf("rule_set %s must not contain deprecated download_detour, got %q", rs.Tag, rs.DownloadDetour)
+		}
 	}
 	foundPrivateReject := false
 	foundRedditWarp := false
@@ -151,12 +168,34 @@ func TestApplyWarpRouting_DefaultMissavDisableRedditGlobalAndBypass(t *testing.T
 	_ = json.Unmarshal(outNetflix, &pNetflix)
 	hasNetflixRS := false
 	for _, rs := range pNetflix.Route.RuleSet {
+		if rs.DownloadDetour != "" {
+			t.Fatalf("rule_set %s must not contain deprecated download_detour, got %q", rs.Tag, rs.DownloadDetour)
+		}
 		if rs.Tag == "rule-netflix" {
 			hasNetflixRS = true
 		}
 	}
 	if !hasNetflixRS {
 		t.Fatal("expected optional rule-netflix to be injected into route.rule_set")
+	}
+
+	// 4.5 存量旧版服务端配置升级兼容：原有含 download_detour="DC" 且无 http_clients 的配置经过重编后自动完成迁移
+	legacyServerJSON := `{"outbounds":[{"type":"direct","tag":"DC"}],"route":{"final":"DC","rule_set":[{"tag":"rule-reddit","type":"remote","format":"binary","download_detour":"DC","url":"https://example.com/reddit.srs"}],"rules":[]}}`
+	migrated, err := ApplyWarpRoutingToServerConfigJSON([]byte(legacyServerJSON), config.WarpRoutingConfig{})
+	if err != nil {
+		t.Fatalf("migrate legacy server config failed: %v", err)
+	}
+	var pMigrated parsedSingBoxRoute
+	if err := json.Unmarshal(migrated, &pMigrated); err != nil {
+		t.Fatal(err)
+	}
+	if pMigrated.Route.DefaultHTTPClient != "hc-direct" || len(pMigrated.HTTPClients) == 0 {
+		t.Fatalf("expected legacy server config migrated to hc-direct, got hc=%v default=%q", pMigrated.HTTPClients, pMigrated.Route.DefaultHTTPClient)
+	}
+	for _, rs := range pMigrated.Route.RuleSet {
+		if rs.DownloadDetour != "" {
+			t.Fatalf("expected legacy download_detour stripped on %s, got %q", rs.Tag, rs.DownloadDetour)
+		}
 	}
 
 	// 5. global_warp 模式：DirectDomains / DirectCIDRs 白名单必须排在最前面 (DC) 且 final=WARP
