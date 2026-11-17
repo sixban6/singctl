@@ -121,14 +121,6 @@ start_service() {
 	return nil
 }
 
-// StartService starts the singctl-sub service.
-func StartService() error {
-	if isOpenWrt() {
-		return exec.Command(cmp.Or(constant.SubHubInitdScript, "/etc/init.d/singctl-sub"), "start").Run()
-	}
-	return exec.Command("systemctl", "start", ServiceName).Run()
-}
-
 // StopService stops the singctl-sub service.
 func StopService() error {
 	if isOpenWrt() {

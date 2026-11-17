@@ -58,11 +58,6 @@ type Daemon struct {
 	auditSampling       atomic.Bool
 }
 
-// NewDaemon 创建守护进程
-func NewDaemon(cfg *config.Config) *Daemon {
-	return NewDaemonWithMeta(cfg, "", "dev")
-}
-
 // NewDaemonWithMeta 创建带配置文件路径（支持热重载）与版本号标识的守护进程。
 func NewDaemonWithMeta(cfg *config.Config, configPath, version string) *Daemon {
 	if cfg == nil {
@@ -311,16 +306,6 @@ func notifyParentReady(ok bool) {
 	}
 	_, _ = f.Write(b)
 	_ = f.Close()
-}
-
-// Stop 停止守护进程
-func (d *Daemon) Stop() error {
-	return StopDaemon()
-}
-
-// Status 获取守护进程状态
-func (d *Daemon) Status() MonitorStatus {
-	return d.monitor.GetStatus()
 }
 
 func (d *Daemon) setupSignalHandler() {

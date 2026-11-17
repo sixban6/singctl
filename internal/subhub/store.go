@@ -1132,10 +1132,6 @@ func (s *Store) buildEgressChannels(proxyMode, lastUsedProxy string) ([]string, 
 	}
 }
 
-func (s *Store) fetchRemoteBody(ctx context.Context, rawURL string, forceRefresh bool) (string, error) {
-	return s.fetchRemoteAdaptive(ctx, rawURL, "auto", "auto", forceRefresh)
-}
-
 func (s *Store) fetchRemoteAdaptive(ctx context.Context, rawURL, uaStrategy, proxyMode string, forceRefresh bool) (string, error) {
 	if err := s.validateRemoteURL(rawURL); err != nil {
 		return "", err

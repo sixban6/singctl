@@ -1,7 +1,6 @@
 package config
 
 import (
-	"cmp"
 	"fmt"
 	"maps"
 	"net/netip"
@@ -346,9 +345,4 @@ func MatchCIDRRule(rule, dstIP string) bool {
 	}
 	targetAddr, err := netip.ParseAddr(r)
 	return err == nil && targetAddr.Unmap() == addr
-}
-
-// EffectiveTargetLabel 返回便于展示的目标标识
-func EffectiveTargetLabel(host, dstIP string) string {
-	return cmp.Or(strings.TrimSpace(host), strings.TrimSpace(dstIP), "unknown")
 }

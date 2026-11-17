@@ -9,11 +9,6 @@ import (
 	"singctl/internal/logger"
 )
 
-// DeployCommon env initializes base environment (UFW/nftables, sysctl, SSH dual-port hardening)
-func DeployCommon() error {
-	return DeployCommonWithConfig(nil)
-}
-
 // DeployCommonWithConfig initializes base environment with SSH port from config if provided
 func DeployCommonWithConfig(cfg *config.Config) error {
 	logger.Info("Running common deployment script (Firewall, Sysctl BBR, SSH hardening)...")

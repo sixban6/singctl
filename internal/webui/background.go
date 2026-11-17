@@ -283,11 +283,6 @@ func ProcessAlive(pid int) bool {
 
 // ───────────────────────── 子进程侧 ─────────────────────────
 
-// ChildReady 子进程就绪回调（兼容入口）：覆写状态文件并安全通知父进程管道。
-func ChildReady(listenAddr string) {
-	ChildReadyWithOptions(Options{Listen: listenAddr}, listenAddr)
-}
-
 // ChildReadyWithOptions 子进程就绪回调：记录完整启动参数（优先保留用户原始 Listen 如 :8090，
 // 避免被内核展开的 [::]:8090 覆盖导致无 IPv6 环境重启失败），清理自身后台标记环境变量，
 // 并仅在确认 fd3 为真实 FIFO 管道时写入握手字节。

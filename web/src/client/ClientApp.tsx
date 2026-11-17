@@ -19,7 +19,6 @@ import {
 } from 'lucide-react';
 import {
   AppShell,
-  Badge,
   Button,
   CommandItem,
   ConfirmDialog,

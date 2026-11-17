@@ -366,11 +366,6 @@ func prepareRuntimeCaddyConfig(cfg *config.Config) *config.Config {
 	return cfg
 }
 
-func renderCaddyfile(cfg *config.Config) error {
-	_, _, err := renderCaddyfileWithBackup(cfg)
-	return err
-}
-
 func renderCaddyfileWithBackup(cfg *config.Config) (prev []byte, hadPrev bool, err error) {
 	effectiveCfg := prepareRuntimeCaddyConfig(cfg)
 	content, err := PreviewCaddyfile(effectiveCfg)

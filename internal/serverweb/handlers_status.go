@@ -603,16 +603,6 @@ func (s *Server) getSystemMetricsBounded() map[string]any {
 	return m
 }
 
-func getSystemMetrics() map[string]any {
-	m := readProcSystemMetrics()
-	if used, total, pct, ok := getRootDiskUsage(); ok {
-		m["diskUsed"] = used
-		m["diskTotal"] = total
-		m["diskPercent"] = pct
-	}
-	return m
-}
-
 func readProcSystemMetrics() map[string]any {
 	m := map[string]any{
 		"bbr":    isBBREnabled(),

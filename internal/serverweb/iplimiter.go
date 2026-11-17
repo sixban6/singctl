@@ -471,14 +471,6 @@ func (l *IPLimiter) startCleaner() {
 	}
 }
 
-// Flush 尝试在超时窗口内刷新尚未落盘的封禁记录快照
-func (l *IPLimiter) Flush() {
-	if l == nil || l.writer == nil {
-		return
-	}
-	l.writer.Flush(defaultPersistFlushWait)
-}
-
 // Close 停止后台清理协程并尝试刷新落盘
 func (l *IPLimiter) Close() {
 	select {

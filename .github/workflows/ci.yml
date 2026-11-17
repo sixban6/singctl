@@ -47,6 +47,15 @@ jobs:
       - name: Go Vet
         run: go vet ./...
 
+      - name: Dead Code Guard
+        run: |
+          DEAD=$(go run golang.org/x/tools/cmd/deadcode@v0.53.0 -test ./...)
+          if [ -n "$DEAD" ]; then
+            echo "::error::Unreachable Go functions detected:"
+            echo "$DEAD"
+            exit 1
+          fi
+
       - name: Unit Tests (Race Detector)
         run: go test -race ./internal/...
 
