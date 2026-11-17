@@ -63,6 +63,9 @@ OpenWrt 开机自启请参考 docs/webui.md 的 procd 配置。`,
 			}
 		}),
 		newWebStopCmd(),
+		newWebRestartCmd(func() string {
+			return root.Flag("config").Value.String()
+		}),
 		newWebStatusCmd(),
 	)
 
@@ -81,15 +84,32 @@ func newWebStartCmd(opts func() webui.Options) *cobra.Command {
 		Use:   "start",
 		Short: "后台启动 WebUI / Start WebUI in background",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// 子进程路径:直接运行服务,Listen 成功后握手通知父进程
+			// 子进程路径:直接运行服务,Listen 成功后握手通知父进程并记录原始配置/监听/口令
 			if webui.IsBackgroundChild() {
 				webui.InstallChildSignalCleanup()
 				o := opts()
-				o.OnReady = webui.ChildReady
+				o.OnReady = func(actualListen string) {
+					webui.ChildReadyWithOptions(o, actualListen)
+				}
 				return webui.New(o).ListenAndServe()
 			}
 			// 父进程路径:fork 后台子进程并等待就绪
 			return webui.StartBackground(opts())
+		},
+	}
+}
+
+func newWebRestartCmd(configPath func() string) *cobra.Command {
+	return &cobra.Command{
+		Use:     "restart",
+		Aliases: []string{"r"},
+		Short:   "平滑重启后台 WebUI / Restart background WebUI",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if !webui.IsWebRunningOrManaged() {
+				logger.Warn("WebUI 未在运行，请使用: singctl web start")
+				return nil
+			}
+			return webui.RestartWeb(configPath())
 		},
 	}
 }

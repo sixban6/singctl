@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"singctl/internal/config"
 	"singctl/internal/constant"
 	"singctl/internal/daemon"
@@ -997,4 +999,441 @@ func TestWatchdogWebAPI_GetPutToggleAndLogsFilter(t *testing.T) {
 			t.Fatalf("unexpected events log output: %q", out.Content)
 		}
 	}
+}
+
+func TestWebStatePermissionsAndMetadata(t *testing.T) {
+	withWebStatePath(t)
+
+	st := webui.WebState{
+		Pid:        24680,
+		Listen:     ":8090",
+		ConfigPath: "/etc/singctl/singctl.yaml",
+		Password:   "test-pass-placeholder",
+	}
+	if err := webui.WriteWebStateAtomic(st); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" {
+		fi, err := os.Stat(webui.WebStatePath())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode().Perm() != 0600 {
+			t.Fatalf("expected 0600 permissions on web state file, got %o", fi.Mode().Perm())
+		}
+	}
+	got, err := webui.ReadWebState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != st {
+		t.Fatalf("state mismatch: got %+v, want %+v", got, st)
+	}
+}
+
+func TestBuildCleanSubprocessEnv(t *testing.T) {
+	t.Setenv("SINGCTL_WEB_BACKGROUND", "1")
+	t.Setenv("SINGCTL_WEB_READY_FD", "3")
+	t.Setenv("SINGCTL_FROM_WEBUI", "1")
+	t.Setenv("SINGCTL_WEB_PASSWORD", "old-pass")
+
+	env := webui.BuildCleanSubprocessEnv("SINGCTL_WEB_PASSWORD=new-pass", "CUSTOM_FLAG=ok")
+	var sawPass int
+	var sawCustom bool
+	for _, kv := range env {
+		switch {
+		case strings.HasPrefix(kv, "SINGCTL_WEB_BACKGROUND="):
+			t.Fatalf("SINGCTL_WEB_BACKGROUND must be stripped, got %q", kv)
+		case strings.HasPrefix(kv, "SINGCTL_WEB_READY_FD="):
+			t.Fatalf("SINGCTL_WEB_READY_FD must be stripped, got %q", kv)
+		case strings.HasPrefix(kv, "SINGCTL_FROM_WEBUI="):
+			t.Fatalf("SINGCTL_FROM_WEBUI must be stripped, got %q", kv)
+		case strings.HasPrefix(kv, "SINGCTL_WEB_PASSWORD="):
+			sawPass++
+			if kv != "SINGCTL_WEB_PASSWORD=new-pass" {
+				t.Fatalf("unexpected password env: %q", kv)
+			}
+		case kv == "CUSTOM_FLAG=ok":
+			sawCustom = true
+		}
+	}
+	if sawPass != 1 || !sawCustom {
+		t.Fatalf("expected deduplicated SINGCTL_WEB_PASSWORD (count=1) and CUSTOM_FLAG=ok, got count=%d custom=%v", sawPass, sawCustom)
+	}
+}
+
+func TestChildReadyWithOptions_PreservesListenAndProtectsNonPipeFd3(t *testing.T) {
+	withWebStatePath(t)
+
+	// 打开一个真实 TCP Listener，验证即便未预置管道，ChildReadyWithOptions 也绝不会误关 Socket FD，
+	// 同时会清除自身 SINGCTL_WEB_BACKGROUND 环境变量并保留用户原始 :8090 配置而非 [::]:8090。
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	t.Setenv("SINGCTL_WEB_BACKGROUND", "1")
+	t.Setenv("SINGCTL_WEB_READY_FD", "3")
+
+	webui.ChildReadyWithOptions(webui.Options{
+		Listen:     ":8090",
+		ConfigPath: "/tmp/example-singctl.yaml",
+		Password:   "unit-test-pass",
+	}, "[::]:8090")
+
+	if os.Getenv("SINGCTL_WEB_BACKGROUND") != "" {
+		t.Fatal("expected SINGCTL_WEB_BACKGROUND to be cleared in child")
+	}
+	st, err := webui.ReadWebState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Listen != ":8090" {
+		t.Fatalf("expected original Listen ':8090' preserved, got %q", st.Listen)
+	}
+	if st.Password != "unit-test-pass" || st.ConfigPath != "/tmp/example-singctl.yaml" {
+		t.Fatalf("expected metadata preserved in WebState, got %+v", st)
+	}
+
+	// 验证已有 TCP Listener 未被误关闭，仍可正常拨号连接
+	conn, dialErr := net.DialTimeout("tcp", ln.Addr().String(), 2*time.Second)
+	if dialErr != nil {
+		t.Fatalf("listener socket broken after ChildReadyWithOptions: %v", dialErr)
+	}
+	_ = conn.Close()
+}
+
+func TestWebUIEmbeddedLoginAndCacheControl(t *testing.T) {
+	const pass = "test-login-pass-2026"
+	srv := webui.New(webui.Options{
+		Password: pass,
+		Version:  "1.99.0",
+	})
+
+	// 1. 未授权访问首页 `/`：返回 401 + 自包含 HTML 登录页 + no-store + 不带 WWW-Authenticate（防浏览器乱弹窗/白屏）
+	{
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		rec := httptest.NewRecorder()
+		srv.Mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 on unauthenticated /, got %d", rec.Code)
+		}
+		if rec.Header().Get("WWW-Authenticate") != "" {
+			t.Fatalf("expected no WWW-Authenticate on HTML login gate, got %q", rec.Header().Get("WWW-Authenticate"))
+		}
+		if !strings.Contains(rec.Header().Get("Cache-Control"), "no-store") {
+			t.Fatalf("expected Cache-Control: no-store on /, got %q", rec.Header().Get("Cache-Control"))
+		}
+		if !strings.Contains(rec.Body.String(), "/api/auth/login") {
+			t.Fatalf("expected embedded login HTML form on unauthenticated /, got body len=%d", rec.Body.Len())
+		}
+	}
+
+	// 2. 前端 XHR 请求携带 X-Requested-With 访问受保护接口时，返回 401 JSON 且不含 WWW-Authenticate
+	{
+		req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+		req.Header.Set("X-Requested-With", "SingCtlWebUI")
+		rec := httptest.NewRecorder()
+		srv.Mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401, got %d", rec.Code)
+		}
+		if rec.Header().Get("WWW-Authenticate") != "" {
+			t.Fatalf("expected no WWW-Authenticate for XHR request, got %q", rec.Header().Get("WWW-Authenticate"))
+		}
+	}
+
+	// 3. 公开探测接口 /api/auth/check（未登录时不暴露版本号）
+	{
+		req := httptest.NewRequest(http.MethodGet, "/api/auth/check", nil)
+		rec := httptest.NewRecorder()
+		srv.Mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 on /api/auth/check, got %d", rec.Code)
+		}
+		var body map[string]any
+		_ = json.Unmarshal(rec.Body.Bytes(), &body)
+		if body["authRequired"] != true || body["authenticated"] != false {
+			t.Fatalf("unexpected /api/auth/check response: %+v", body)
+		}
+		if _, leaked := body["version"]; leaked {
+			t.Fatalf("unauthenticated /api/auth/check must not expose version: %+v", body)
+		}
+	}
+
+	// 4. 错误口令登录 -> 401；正确口令登录 -> 200 + 下发 30 天 Cookie + Token
+	var authCookie *http.Cookie
+	{
+		badReq := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"password":"wrong"}`))
+		badReq.Header.Set("Content-Type", "application/json")
+		badReq.RemoteAddr = "198.51.100.10:54321"
+		badRec := httptest.NewRecorder()
+		srv.Mux.ServeHTTP(badRec, badReq)
+		if badRec.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 for wrong password, got %d", badRec.Code)
+		}
+
+		okReq := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"password":"`+pass+`"}`))
+		okReq.Header.Set("Content-Type", "application/json")
+		okReq.RemoteAddr = "198.51.100.10:54321"
+		okRec := httptest.NewRecorder()
+		srv.Mux.ServeHTTP(okRec, okReq)
+		if okRec.Code != http.StatusOK {
+			t.Fatalf("expected 200 for valid password, got %d: %s", okRec.Code, okRec.Body.String())
+		}
+		for _, c := range okRec.Result().Cookies() {
+			if c.Name == webui.SessionCookieName {
+				authCookie = c
+				break
+			}
+		}
+		if authCookie == nil || authCookie.Value != srv.SessionToken() {
+			t.Fatalf("expected valid %s cookie after login", webui.SessionCookieName)
+		}
+	}
+
+	// 5. 登录后访问 `/` 返回 200 且强制 Cache-Control: no-store（确保升级新二进制后浏览器不读旧 index.html 缓存）
+	{
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.AddCookie(authCookie)
+		rec := httptest.NewRecorder()
+		srv.Mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 on authenticated /, got %d", rec.Code)
+		}
+		if !strings.Contains(rec.Header().Get("Cache-Control"), "no-store") {
+			t.Fatalf("expected no-store on authenticated /, got %q", rec.Header().Get("Cache-Control"))
+		}
+	}
+
+	// 6. 防爆破限流：同 IP 连续输错 8 次后触发 429 锁定
+	{
+		for i := 0; i < 8; i++ {
+			r := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"password":"bad"}`))
+			r.Header.Set("Content-Type", "application/json")
+			r.RemoteAddr = "203.0.113.99:40000"
+			w := httptest.NewRecorder()
+			srv.Mux.ServeHTTP(w, r)
+		}
+		lockedReq := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"password":"`+pass+`"}`))
+		lockedReq.Header.Set("Content-Type", "application/json")
+		lockedReq.RemoteAddr = "203.0.113.99:40000"
+		lockedRec := httptest.NewRecorder()
+		srv.Mux.ServeHTTP(lockedRec, lockedReq)
+		if lockedRec.Code != http.StatusTooManyRequests {
+			t.Fatalf("expected 429 after brute-force attempts, got %d", lockedRec.Code)
+		}
+	}
+}
+
+func TestWebUISelfUpdateDetachedRestart_EndToEnd(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX subprocess hot-restart e2e test runs on unix")
+	}
+
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "singctl-web.pid")
+	logPath := filepath.Join(tmpDir, "singctl-web.log")
+	cfgPath := filepath.Join(tmpDir, "singctl.yaml")
+	binPath := filepath.Join(tmpDir, "singctl")
+	binV2Path := filepath.Join(tmpDir, "singctl-v2")
+
+	if err := os.WriteFile(cfgPath, []byte("subs:\n  - name: test\n    url: https://example.com/sub\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// 选取空闲本地回环端口
+	probeLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listenAddr := probeLn.Addr().String()
+	_ = probeLn.Close()
+
+	repoRoot, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 编译模拟旧版 v1.99.1 与新版 v1.99.2 两个真实 singctl 二进制
+	buildV1 := exec.Command("go", "build", "-ldflags", "-X main.Version=1.99.1", "-o", binPath, "./cmd/singctl")
+	buildV1.Dir = repoRoot
+	if out, bErr := buildV1.CombinedOutput(); bErr != nil {
+		t.Fatalf("build v1 failed: %v\n%s", bErr, string(out))
+	}
+	buildV2 := exec.Command("go", "build", "-ldflags", "-X main.Version=1.99.2", "-o", binV2Path, "./cmd/singctl")
+	buildV2.Dir = repoRoot
+	if out, bErr := buildV2.CombinedOutput(); bErr != nil {
+		t.Fatalf("build v2 failed: %v\n%s", bErr, string(out))
+	}
+
+	baseEnv := append(os.Environ(),
+		"SINGCTL_WEB_STATE_PATH="+statePath,
+		"SINGCTL_WEB_LOG_PATH="+logPath,
+	)
+
+	t.Cleanup(func() {
+		stopCmd := exec.Command(binPath, "web", "stop")
+		stopCmd.Env = baseEnv
+		_ = stopCmd.Run()
+	})
+
+	const webPass = "e2e-update-pass"
+
+	// 1. 启动 v1.99.1 后台 WebUI 服务
+	startCmd := exec.Command(binPath, "--config", cfgPath, "web", "start", "-l", listenAddr, "--password", webPass)
+	startCmd.Env = baseEnv
+	if out, sErr := startCmd.CombinedOutput(); sErr != nil {
+		t.Fatalf("web start v1 failed: %v\n%s", sErr, string(out))
+	}
+
+	webui.WebStatePathOverride = statePath
+	webui.WebLogPathOverride = logPath
+	webui.ExecutablePathOverride = binPath
+	t.Cleanup(func() {
+		webui.WebStatePathOverride = ""
+		webui.WebLogPathOverride = ""
+		webui.ExecutablePathOverride = ""
+	})
+
+	st1, err := webui.ReadWebState()
+	if err != nil {
+		t.Fatalf("read web state v1 failed: %v", err)
+	}
+
+	// 2. 通过 /api/auth/login 登录 v1，拿到持久化 Cookie
+	client := &http.Client{Timeout: 3 * time.Second}
+	loginResp, err := client.Post(
+		"http://"+listenAddr+"/api/auth/login",
+		"application/json",
+		strings.NewReader(`{"password":"`+webPass+`"}`),
+	)
+	if err != nil {
+		t.Fatalf("login v1 failed: %v", err)
+	}
+	var sessionCookie *http.Cookie
+	for _, c := range loginResp.Cookies() {
+		if c.Name == webui.SessionCookieName {
+			sessionCookie = c
+			break
+		}
+	}
+	_ = loginResp.Body.Close()
+	if loginResp.StatusCode != http.StatusOK || sessionCookie == nil {
+		t.Fatalf("expected 200 and session cookie on v1 login, got status=%d cookie=%v", loginResp.StatusCode, sessionCookie)
+	}
+
+	// 3. 原子替换磁盘二进制为 v1.99.2，并在污染了 SINGCTL_WEB_BACKGROUND=1 的环境下触发 ScheduleDetachedRestart
+	if err := os.Rename(binV2Path, binPath); err != nil {
+		t.Fatalf("replace binary with v2 failed: %v", err)
+	}
+	t.Setenv("SINGCTL_WEB_STATE_PATH", statePath)
+	t.Setenv("SINGCTL_WEB_LOG_PATH", logPath)
+	t.Setenv("SINGCTL_WEB_BACKGROUND", "1")
+	t.Setenv("SINGCTL_WEB_READY_FD", "3")
+
+	// 注意：此处当前进程是 go test，不能传 go test 自身的 PID 给 oldpid，
+	// 因此先验证模拟 WebUI 自身触发异步重启（ScheduleDetachedRestart 停止 st1.Pid 并拉起新版 v1.99.2 后台守护进程）：
+	// 为避免测试进程自身被 $2 oldpid SIGTERM，这里先测 CLI RestartWeb，再在独立子进程内测 ScheduleDetachedRestart！
+	if err := webui.RestartWeb(cfgPath); err != nil {
+		logBytes, _ := os.ReadFile(logPath)
+		t.Fatalf("RestartWeb to v2 failed: %v\nlog:\n%s", err, string(logBytes))
+	}
+
+	st2, err := webui.ReadWebState()
+	if err != nil {
+		t.Fatalf("read web state v2 failed: %v", err)
+	}
+	if st2.Pid == st1.Pid || !webui.ProcessAlive(st2.Pid) {
+		t.Fatalf("expected new alive v2 pid (old=%d, new=%d)", st1.Pid, st2.Pid)
+	}
+
+	// 4. 验证升级重启后：原 Cookie 免重新登录直接访问 /api/status 返回 200 且版本已升为 1.99.2！
+	statusReq, _ := http.NewRequest(http.MethodGet, "http://"+listenAddr+"/api/status", nil)
+	statusReq.AddCookie(sessionCookie)
+	statusResp, err := client.Do(statusReq)
+	if err != nil {
+		logBytes, _ := os.ReadFile(logPath)
+		t.Fatalf("GET /api/status on v2 failed (port dead / FD3 bug?): %v\nlog:\n%s", err, string(logBytes))
+	}
+	var statusBody struct {
+		SingctlVersion string `json:"singctlVersion"`
+		AuthEnabled    bool   `json:"authEnabled"`
+	}
+	_ = json.NewDecoder(statusResp.Body).Decode(&statusBody)
+	_ = statusResp.Body.Close()
+	if statusResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK with pre-upgrade session cookie, got %d", statusResp.StatusCode)
+	}
+	if statusBody.SingctlVersion != "1.99.2" || !statusBody.AuthEnabled {
+		t.Fatalf("expected singctlVersion=1.99.2 & authEnabled=true, got %+v", statusBody)
+	}
+
+	// 5. 再通过真实子进程验证 ScheduleDetachedRestart（父进程带 SINGCTL_WEB_BACKGROUND=1 环境变量且无 fd3 管道）
+	testExe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	helperCmd := exec.Command(testExe, "-test.run=^TestHelperTriggerDetachedRestart$")
+	helperCmd.Env = append(baseEnv,
+		"GO_WANT_DETACHED_RESTART_HELPER=1",
+		"HELPER_BIN_PATH="+binPath,
+		"HELPER_CFG_PATH="+cfgPath,
+		"HELPER_LISTEN="+listenAddr,
+		"HELPER_PASS="+webPass,
+		"SINGCTL_WEB_BACKGROUND=1",
+		"SINGCTL_WEB_READY_FD=3",
+	)
+	if hErr := helperCmd.Start(); hErr != nil {
+		t.Fatalf("start helper ScheduleDetachedRestart failed: %v", hErr)
+	}
+	t.Cleanup(func() {
+		if helperCmd.Process != nil {
+			_ = helperCmd.Process.Kill()
+			_, _ = helperCmd.Process.Wait()
+		}
+	})
+
+	// 等待异步 ScheduleDetachedRestart (sleep 1 + stop + start) 完成并校验新 PID 存活、端口与鉴权完好
+	deadline := time.Now().Add(8 * time.Second)
+	var recovered bool
+	for time.Now().Before(deadline) {
+		time.Sleep(300 * time.Millisecond)
+		st3, rErr := webui.ReadWebState()
+		if rErr != nil || st3.Pid == st2.Pid || !webui.ProcessAlive(st3.Pid) {
+			continue
+		}
+		chkReq, _ := http.NewRequest(http.MethodGet, "http://"+listenAddr+"/api/auth/check", nil)
+		chkReq.AddCookie(sessionCookie)
+		chkResp, cErr := client.Do(chkReq)
+		if cErr != nil {
+			continue
+		}
+		var chk map[string]any
+		_ = json.NewDecoder(chkResp.Body).Decode(&chk)
+		_ = chkResp.Body.Close()
+		if chkResp.StatusCode == http.StatusOK && chk["authenticated"] == true && chk["version"] == "1.99.2" {
+			recovered = true
+			break
+		}
+	}
+	if !recovered {
+		logBytes, _ := os.ReadFile(logPath)
+		t.Fatalf("WebUI did not recover after ScheduleDetachedRestart under SINGCTL_WEB_BACKGROUND=1!\nlog:\n%s", string(logBytes))
+	}
+}
+
+func TestHelperTriggerDetachedRestart(t *testing.T) {
+	if os.Getenv("GO_WANT_DETACHED_RESTART_HELPER") != "1" {
+		return
+	}
+	webui.ExecutablePathOverride = os.Getenv("HELPER_BIN_PATH")
+	webui.ScheduleDetachedRestart(
+		os.Getenv("HELPER_CFG_PATH"),
+		os.Getenv("HELPER_LISTEN"),
+		os.Getenv("HELPER_PASS"),
+	)
+	// 模拟真实 WebUI 进程保持存活，等待 1 秒后被重启脚本平滑接管终止
+	time.Sleep(10 * time.Second)
 }

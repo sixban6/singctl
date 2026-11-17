@@ -15,3 +15,5 @@ func setWebSpawnAttrs(cmd *exec.Cmd) {
 		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP | detachedProcess,
 	}
 }
+
+func notifyReadyPipe(_ int) {}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"os"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -160,7 +159,7 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.Background(), actionTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, exe, args...)
-	cmd.Env = append(os.Environ(), "TERM=dumb", "SINGCTL_FROM_WEBUI=1")
+	cmd.Env = BuildCleanSubprocessEnv("TERM=dumb", "SINGCTL_FROM_WEBUI=1")
 
 	w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")

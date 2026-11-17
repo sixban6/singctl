@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -19,29 +21,34 @@ import (
 )
 
 // 后台运行机制与 daemon 包的看门狗一致:
-//   - 父进程以 O_EXCL 原子创建状态文件作为互斥锁(防并发 start)
+//   - 父进程以硬链接原子创建状态文件作为互斥锁(防并发 start)
 //   - fork 自身 + SINGCTL_WEB_BACKGROUND=1 环境变量标记(防二次 fork)
-//   - 子进程 Listen 成功后覆写状态文件并通过 fd3 回传就绪信号
+//   - 子进程 Listen 成功后覆写状态文件并通过 fd3 命名管道回传就绪信号
 //     (父进程因此能确认端口真的绑定成功,失败如实报错)
 //   - 停止时按 PID + 命令行特征校验后 SIGTERM → 等待 → SIGKILL 兜底
 
 const (
 	envWebBackground = "SINGCTL_WEB_BACKGROUND"
+	envWebReadyFd    = "SINGCTL_WEB_READY_FD"
 	webReadyFd       = 3
 	WebStateName     = "singctl-web.pid"
 	webLogName       = "singctl-web.log"
 )
 
-// webState 后台运行状态文件内容
+// WebState 后台运行状态文件内容（含运行配置路径与可选口令以保障热重启/CLI 自更新不丢鉴权，强制 0600 权限）
 type WebState struct {
-	Pid    int    `json:"pid"`
-	Listen string `json:"listen"`
+	Pid        int    `json:"pid"`
+	Listen     string `json:"listen"`
+	ConfigPath string `json:"config_path,omitempty"`
+	Password   string `json:"password,omitempty"`
 }
 
 var (
 	ErrWebAlreadyRunning = errors.New("webui already running")
 	// 测试钩子
 	WebStatePathOverride   string
+	WebLogPathOverride     string
+	ExecutablePathOverride string
 	webProcMatchesOverride func(pid int) bool
 )
 
@@ -49,6 +56,9 @@ var (
 func WebStatePath() string {
 	if WebStatePathOverride != "" {
 		return WebStatePathOverride
+	}
+	if v := strings.TrimSpace(os.Getenv("SINGCTL_WEB_STATE_PATH")); v != "" {
+		return v
 	}
 	if runtime.GOOS == "windows" {
 		return filepath.Join(os.Getenv("TEMP"), WebStateName)
@@ -58,6 +68,12 @@ func WebStatePath() string {
 
 // WebLogPath 后台运行日志路径
 func WebLogPath() string {
+	if WebLogPathOverride != "" {
+		return WebLogPathOverride
+	}
+	if v := strings.TrimSpace(os.Getenv("SINGCTL_WEB_LOG_PATH")); v != "" {
+		return v
+	}
 	if runtime.GOOS == "windows" {
 		return filepath.Join(os.Getenv("TEMP"), webLogName)
 	}
@@ -67,6 +83,52 @@ func WebLogPath() string {
 // IsBackgroundChild 当前进程是否为后台子进程
 func IsBackgroundChild() bool {
 	return os.Getenv(envWebBackground) == "1"
+}
+
+// BuildCleanSubprocessEnv 构造干净的子进程环境变量：
+// 强制剥离后台标记（SINGCTL_WEB_BACKGROUND / SINGCTL_WEB_READY_FD / SINGCTL_FROM_WEBUI），
+// 并对传入的 extra (KEY=VAL) 去重覆写；若传入 KEY=（空值）亦可显式移除父环境同名键。
+func BuildCleanSubprocessEnv(extra ...string) []string {
+	stripKeys := map[string]struct{}{
+		envWebBackground:     {},
+		envWebReadyFd:        {},
+		"SINGCTL_FROM_WEBUI": {},
+	}
+	for _, kv := range extra {
+		if k, _, ok := strings.Cut(kv, "="); ok && k != "" {
+			stripKeys[k] = struct{}{}
+		}
+	}
+
+	base := os.Environ()
+	out := make([]string, 0, len(base)+len(extra))
+	for _, kv := range base {
+		k, _, ok := strings.Cut(kv, "=")
+		if !ok {
+			continue
+		}
+		if _, drop := stripKeys[k]; drop {
+			continue
+		}
+		out = append(out, kv)
+	}
+	for _, kv := range extra {
+		if k, _, ok := strings.Cut(kv, "="); ok && k != "" {
+			out = append(out, kv)
+		}
+	}
+	return out
+}
+
+func buildRestartEnv(password string) []string {
+	if password != "" {
+		return BuildCleanSubprocessEnv("SINGCTL_WEB_PASSWORD=" + password)
+	}
+	// 显式剥离旧密码环境变量，避免已清空口令的场景被父环境残留污染
+	base := BuildCleanSubprocessEnv("SINGCTL_WEB_PASSWORD=")
+	return slices.DeleteFunc(base, func(kv string) bool {
+		return kv == "SINGCTL_WEB_PASSWORD="
+	})
 }
 
 // ───────────────────────── 状态文件 ─────────────────────────
@@ -83,21 +145,22 @@ func ReadWebState() (WebState, error) {
 	return st, nil
 }
 
-// writeWebStateAtomic 原子写入状态文件(先写临时文件再 rename,避免读到半截内容)
+// WriteWebStateAtomic 原子写入状态文件（强制 0600 权限，先写临时文件再 rename）
 func WriteWebStateAtomic(st WebState) error {
 	b, err := json.Marshal(st)
 	if err != nil {
 		return err
 	}
 	path := WebStatePath()
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0644); err != nil {
+	tmp := fmt.Sprintf("%s.tmp-%d", path, os.Getpid())
+	if err := os.WriteFile(tmp, b, 0600); err != nil {
 		return err
 	}
+	_ = os.Chmod(tmp, 0600)
 	return os.Rename(tmp, path)
 }
 
-// acquireWebLock 以硬链接原子创建状态文件作为互斥锁。
+// AcquireWebLock 以硬链接原子创建状态文件作为互斥锁（0600 权限）。
 // 实现：先写临时文件再 os.Link —— 目标存在时原子失败，避免 O_EXCL
 // “先建空文件后写内容”的窗口期被并发者误判为残留锁清除。
 // 文件已存在时:PID 存活且命令行含 web → 已在运行;否则视为残留锁清除后重试一次。
@@ -108,9 +171,10 @@ func AcquireWebLock(st WebState) error {
 	defer os.Remove(tmp)
 
 	for attempt := 0; attempt < 2; attempt++ {
-		if err := os.WriteFile(tmp, b, 0644); err != nil {
+		if err := os.WriteFile(tmp, b, 0600); err != nil {
 			return fmt.Errorf("failed to write web state tmp: %w", err)
 		}
+		_ = os.Chmod(tmp, 0600)
 		err := os.Link(tmp, target)
 		if err == nil {
 			return nil // 赢得锁
@@ -197,19 +261,34 @@ func ProcessAlive(pid int) bool {
 
 // ───────────────────────── 子进程侧 ─────────────────────────
 
-// ChildReady 子进程就绪回调:覆写状态文件(带上真实监听地址)并通知父进程。
+// ChildReady 子进程就绪回调（兼容入口）：覆写状态文件并安全通知父进程管道。
 func ChildReady(listenAddr string) {
-	_ = WriteWebStateAtomic(WebState{Pid: os.Getpid(), Listen: listenAddr})
+	ChildReadyWithOptions(Options{Listen: listenAddr}, listenAddr)
+}
+
+// ChildReadyWithOptions 子进程就绪回调：记录完整启动参数（优先保留用户原始 Listen 如 :8090，
+// 避免被内核展开的 [::]:8090 覆盖导致无 IPv6 环境重启失败），清理自身后台标记环境变量，
+// 并仅在确认 fd3 为真实 FIFO 管道时写入握手字节。
+func ChildReadyWithOptions(opts Options, actualListen string) {
+	listen := strings.TrimSpace(opts.Listen)
+	if listen == "" || strings.HasSuffix(listen, ":0") {
+		listen = actualListen
+	}
+	_ = WriteWebStateAtomic(WebState{
+		Pid:        os.Getpid(),
+		Listen:     listen,
+		ConfigPath: opts.ConfigPath,
+		Password:   opts.Password,
+	})
+
+	// 立即清除当前 WebUI 守护进程自身的后台标记环境变量，防止后续任何子进程误继承
+	_ = os.Unsetenv(envWebBackground)
+	_ = os.Unsetenv(envWebReadyFd)
 
 	if runtime.GOOS == "windows" {
 		return
 	}
-	f := os.NewFile(webReadyFd, "webui-ready")
-	if f == nil {
-		return
-	}
-	_, _ = f.Write([]byte{1})
-	_ = f.Close()
+	notifyReadyPipe(webReadyFd)
 }
 
 // InstallChildSignalCleanup 子进程安装信号清理:退出前移除状态文件。
@@ -227,7 +306,12 @@ func InstallChildSignalCleanup() {
 
 // StartBackground 后台启动 WebUI(父进程路径)。
 func StartBackground(opts Options) error {
-	if err := AcquireWebLock(WebState{Pid: os.Getpid(), Listen: opts.Listen}); err != nil {
+	if err := AcquireWebLock(WebState{
+		Pid:        os.Getpid(),
+		Listen:     opts.Listen,
+		ConfigPath: opts.ConfigPath,
+		Password:   opts.Password,
+	}); err != nil {
 		if errors.Is(err, ErrWebAlreadyRunning) {
 			if st, rerr := ReadWebState(); rerr == nil {
 				logger.Error("WebUI 已在后台运行 (pid=%d, %s)", st.Pid, st.Listen)
@@ -239,11 +323,18 @@ func StartBackground(opts Options) error {
 	}
 
 	cmd := exec.Command(os.Args[0], os.Args[1:]...)
-	cmd.Env = append(os.Environ(), envWebBackground+"=1")
+	extraEnv := []string{
+		envWebBackground + "=1",
+		envWebReadyFd + "=" + strconv.Itoa(webReadyFd),
+	}
+	if opts.Password != "" {
+		extraEnv = append(extraEnv, "SINGCTL_WEB_PASSWORD="+opts.Password)
+	}
+	cmd.Env = BuildCleanSubprocessEnv(extraEnv...)
 	setWebSpawnAttrs(cmd)
 
-	// 日志落盘;stdin/stdout/stderr 重定向
-	logFile, err := os.OpenFile(WebLogPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	// 日志落盘（0600 权限）;stdin/stdout/stderr 重定向
+	logFile, err := os.OpenFile(WebLogPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		_ = os.Remove(WebStatePath())
 		return fmt.Errorf("failed to open webui log: %w", err)
@@ -411,8 +502,42 @@ func WebStatus() (WebState, bool) {
 	return st, WebProcMatches(st.Pid)
 }
 
+// isProcdManagedWeb 判断是否由 OpenWrt procd (/etc/init.d/singctl-web) 托管运行
+func isProcdManagedWeb() bool {
+	if runtime.GOOS != "linux" || WebStatePathOverride != "" {
+		return false
+	}
+	fi, err := os.Stat("/etc/init.d/singctl-web")
+	if err != nil || fi.IsDir() {
+		return false
+	}
+	return exec.Command("/etc/init.d/singctl-web", "running").Run() == nil
+}
+
+// isSystemdManagedWeb 判断是否由 Linux systemd (singctl-web.service) 托管运行
+func isSystemdManagedWeb() bool {
+	if runtime.GOOS != "linux" || WebStatePathOverride != "" {
+		return false
+	}
+	if _, err := exec.LookPath("systemctl"); err != nil {
+		return false
+	}
+	return exec.Command("systemctl", "is-active", "--quiet", "singctl-web").Run() == nil
+}
+
+// IsWebRunningOrManaged 判断客户端 WebUI 是否正在运行（含 web start 守护、OpenWrt procd 或 systemd 托管）
+func IsWebRunningOrManaged() bool {
+	if _, running := WebStatus(); running {
+		return true
+	}
+	return isProcdManagedWeb() || isSystemdManagedWeb()
+}
+
 // resolveOnDiskExecutable 定位磁盘上最新的 singctl 可执行文件路径（剥离 Linux /proc/self/exe 的 " (deleted)" 或 ".backup" 后缀）
 func resolveOnDiskExecutable() (string, error) {
+	if ExecutablePathOverride != "" {
+		return ExecutablePathOverride, nil
+	}
 	exe, err := os.Executable()
 	if err != nil {
 		for _, p := range []string{"/usr/bin/singctl", "/usr/local/bin/singctl"} {
@@ -437,25 +562,35 @@ func resolveOnDiskExecutable() (string, error) {
 	return p, nil
 }
 
-// buildRestartArgs 根据之前的状态或回退参数构造重启 `singctl web start` 的命令行参数
-func buildRestartArgs(st WebState, configPath string, fallbackListen string) []string {
-	listen := st.Listen
-	if listen == "" {
-		listen = fallbackListen
-	}
-	if listen == "" {
-		listen = ":8090"
-	}
-	args := []string{}
-	if configPath != "" {
-		args = append(args, "--config", configPath)
+// buildRestartArgs 根据指定监听/配置或历史状态构造重启 `singctl web start` 的命令行参数
+func buildRestartArgs(st WebState, configPath string, preferredListen string) []string {
+	listen := cmp.Or(strings.TrimSpace(preferredListen), strings.TrimSpace(st.Listen), ":8090")
+	cfgPath := cmp.Or(strings.TrimSpace(configPath), strings.TrimSpace(st.ConfigPath))
+	args := make([]string, 0, 6)
+	if cfgPath != "" {
+		args = append(args, "--config", cfgPath)
 	}
 	args = append(args, "web", "start", "-l", listen)
 	return args
 }
 
-// RestartWeb 停止当前后台运行的 WebUI 并使用磁盘上的最新二进制重新拉起（供 CLI `singctl update self` 调用）
+// RestartWeb 停止当前运行的客户端 WebUI 并使用磁盘上的最新二进制重新拉起（供 CLI `singctl update self` 或 `singctl web restart` 调用）
 func RestartWeb(configPath string) error {
+	if isProcdManagedWeb() {
+		cmd := exec.Command("/etc/init.d/singctl-web", "restart")
+		cmd.Env = BuildCleanSubprocessEnv()
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		return cmd.Run()
+	}
+	if isSystemdManagedWeb() {
+		cmd := exec.Command("systemctl", "restart", "singctl-web")
+		cmd.Env = BuildCleanSubprocessEnv()
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		return cmd.Run()
+	}
+
 	st, running := WebStatus()
 	if !running {
 		return nil
@@ -469,36 +604,93 @@ func RestartWeb(configPath string) error {
 		return err
 	}
 	cmd := exec.Command(exe, args...)
+	cmd.Env = buildRestartEnv(st.Password)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
 
-// ScheduleDetachedRestart 供 WebUI 内部触发 `update-self` 成功后异步热重启自身：
-// 先让当前 HTTP 响应流完整返回给浏览器，1 秒后由独立会话子进程执行 stop + start。
-func ScheduleDetachedRestart(configPath string, listen string, password string) {
+// attachDetachedStdio 将异步热重启子进程的输入输出与当前 HTTP 会话彻底解耦，并把启动/错误日志追加至 WebLogPath
+func attachDetachedStdio(cmd *exec.Cmd) (cleanup func()) {
+	var closers []*os.File
+	devNull := os.DevNull
 	if runtime.GOOS == "windows" {
-		return
+		devNull = "NUL"
 	}
+	if nf, err := os.OpenFile(devNull, os.O_RDWR, 0); err == nil {
+		cmd.Stdin = nf
+		closers = append(closers, nf)
+	}
+	if lf, err := os.OpenFile(WebLogPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600); err == nil {
+		cmd.Stdout = lf
+		cmd.Stderr = lf
+		closers = append(closers, lf)
+	}
+	return func() {
+		for _, f := range closers {
+			_ = f.Close()
+		}
+	}
+}
+
+// ScheduleDetachedRestart 供 WebUI 内部触发 `update-self` 成功后异步热重启自身：
+// 先让当前 HTTP 响应流完整返回给浏览器，1 秒后由脱离后台标记的独立会话子进程执行平滑重启。
+// 自动兼容 OpenWrt procd、Linux systemd、singctl web start 守护进程、前台直跑及 Windows。
+func ScheduleDetachedRestart(configPath string, listen string, password string) {
 	st, _ := WebStatus()
-	exe, err := resolveOnDiskExecutable()
-	if err != nil || exe == "" {
+	effectiveCfg := cmp.Or(strings.TrimSpace(configPath), strings.TrimSpace(st.ConfigPath))
+	effectiveListen := cmp.Or(strings.TrimSpace(listen), strings.TrimSpace(st.Listen), ":8090")
+	effectivePassword := cmp.Or(password, st.Password)
+
+	if runtime.GOOS == "windows" {
+		exe, err := resolveOnDiskExecutable()
+		if err != nil || exe == "" {
+			return
+		}
+		oldPid := strconv.Itoa(os.Getpid())
+		winScript := `ping -n 2 127.0.0.1 >NUL 2>&1 & "%SINGCTL_RESTART_EXE%" web stop >NUL 2>&1 & taskkill /PID %SINGCTL_RESTART_OLDPID% /F >NUL 2>&1 & if defined SINGCTL_RESTART_CFG ("%SINGCTL_RESTART_EXE%" --config "%SINGCTL_RESTART_CFG%" web start -l "%SINGCTL_RESTART_LISTEN%") else ("%SINGCTL_RESTART_EXE%" web start -l "%SINGCTL_RESTART_LISTEN%")`
+		cmd := exec.Command("cmd.exe", "/C", winScript)
+		env := buildRestartEnv(effectivePassword)
+		env = append(env,
+			"SINGCTL_RESTART_EXE="+exe,
+			"SINGCTL_RESTART_OLDPID="+oldPid,
+			"SINGCTL_RESTART_CFG="+effectiveCfg,
+			"SINGCTL_RESTART_LISTEN="+effectiveListen,
+		)
+		cmd.Env = env
+		setWebSpawnAttrs(cmd)
+		cleanup := attachDetachedStdio(cmd)
+		defer cleanup()
+		_ = cmd.Start()
 		return
 	}
-	startArgs := buildRestartArgs(st, configPath, listen)
-	// 参数全部通过位置参数 ($1, "$@") 传递，绝不拼接 shell 字符串，杜绝命令注入
-	shArgs := []string{
-		"-c",
-		`sleep 1; "$1" web stop >/dev/null 2>&1 || true; exec "$@" >/dev/null 2>&1`,
-		"--",
-		exe,
-		exe,
+
+	var cmd *exec.Cmd
+	switch {
+	case isProcdManagedWeb():
+		cmd = exec.Command("/bin/sh", "-c", "sleep 1; exec /etc/init.d/singctl-web restart")
+		cmd.Env = BuildCleanSubprocessEnv()
+	case isSystemdManagedWeb():
+		cmd = exec.Command("/bin/sh", "-c", "sleep 1; exec systemctl restart singctl-web")
+		cmd.Env = BuildCleanSubprocessEnv()
+	default:
+		exe, err := resolveOnDiskExecutable()
+		if err != nil || exe == "" {
+			return
+		}
+		startArgs := buildRestartArgs(st, effectiveCfg, effectiveListen)
+		oldPid := strconv.Itoa(os.Getpid())
+		// 严格遵循 POSIX / OpenWrt BusyBox ash 语法，所有动态参数经位置参数 ($1, $2, "$@") 传递，零命令注入风险
+		posixScript := `exe="$1"; oldpid="$2"; shift 2; sleep 1; "$exe" web stop >/dev/null 2>&1 || true; if [ -n "$oldpid" ] && kill -0 "$oldpid" 2>/dev/null; then kill "$oldpid" 2>/dev/null || true; i=0; while [ "$i" -lt 30 ] && kill -0 "$oldpid" 2>/dev/null; do sleep 0.1 2>/dev/null || sleep 1; i=$((i + 1)); done; fi; exec "$@"`
+		shArgs := make([]string, 0, 6+len(startArgs))
+		shArgs = append(shArgs, "-c", posixScript, "--", exe, oldPid, exe)
+		shArgs = append(shArgs, startArgs...)
+		cmd = exec.Command("/bin/sh", shArgs...)
+		cmd.Env = buildRestartEnv(effectivePassword)
 	}
-	shArgs = append(shArgs, startArgs...)
-	cmd := exec.Command("/bin/sh", shArgs...)
-	if password != "" {
-		cmd.Env = append(os.Environ(), "SINGCTL_WEB_PASSWORD="+password)
-	}
+
 	setWebSpawnAttrs(cmd)
+	cleanup := attachDetachedStdio(cmd)
+	defer cleanup()
 	_ = cmd.Start()
 }
