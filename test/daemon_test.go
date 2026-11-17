@@ -1,6 +1,7 @@
 package test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -990,5 +991,258 @@ func TestTrimLogInPlace_PreservesTailAndCleansLargeFile(t *testing.T) {
 	trimmedAgain, err := daemon.TrimLogInPlace(logPath, 64*1024)
 	if err != nil || trimmedAgain {
 		t.Fatalf("expected second trim no-op, got trimmed=%v err=%v", trimmedAgain, err)
+	}
+}
+
+func TestGroupFailover_SkipsIdleGroupsInfoPlaceholdersAndSelectsLowestLatency(t *testing.T) {
+	withTestPaths(t)
+
+	tmpDir := t.TempDir()
+	sbCfgPath := filepath.Join(tmpDir, "config.json")
+	// 路由仅引用 Proxy，且初始 Proxy -> #Auto，因此闲置的 #Nodes 绝不应被探测或误切
+	sbConfigJSON := `{"route":{"final":"Proxy","rules":[{"outbound":"Proxy"}]}}`
+	if err := os.WriteFile(sbCfgPath, []byte(sbConfigJSON), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	proxyNow := "#Auto"
+	vpsNow := "node-dead"
+	nodesNow := "官网：https://example.com"
+	probedTargets := make(map[string]int)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		path := r.URL.Path
+
+		if r.Method == http.MethodGet && path == "/proxies" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"proxies": map[string]any{
+					"Proxy": map[string]any{
+						"type": "Selector",
+						"now":  proxyNow,
+						"all":  []string{"#Auto", "#VPS", "#Nodes"},
+					},
+					"#Auto": map[string]any{
+						"type": "URLTest",
+						"now":  "hk-auto-1",
+						"all":  []string{"hk-auto-1"},
+					},
+					"#VPS": map[string]any{
+						"type": "Selector",
+						"now":  vpsNow,
+						"all":  []string{"node-dead", "官网：https://example.com", "剩余流量：100GB", "us-slow", "hk-fast"},
+					},
+					"#Nodes": map[string]any{
+						"type": "Selector",
+						"now":  nodesNow,
+						"all":  []string{"官网：https://example.com", "us-slow", "hk-fast"},
+					},
+				},
+			})
+			return
+		}
+
+		if r.Method == http.MethodGet && strings.HasSuffix(path, "/delay") {
+			target := strings.TrimSuffix(strings.TrimPrefix(path, "/proxies/"), "/delay")
+			probedTargets[target]++
+			switch target {
+			case "#Auto":
+				_ = json.NewEncoder(w).Encode(map[string]int{"delay": 42})
+			case "%23VPS", "#VPS":
+				if vpsNow == "hk-fast" {
+					_ = json.NewEncoder(w).Encode(map[string]int{"delay": 38})
+				} else {
+					w.WriteHeader(http.StatusGatewayTimeout)
+				}
+			case "node-dead":
+				w.WriteHeader(http.StatusGatewayTimeout)
+			case "us-slow":
+				_ = json.NewEncoder(w).Encode(map[string]int{"delay": 1192})
+			case "hk-fast":
+				_ = json.NewEncoder(w).Encode(map[string]int{"delay": 38})
+			default:
+				w.WriteHeader(http.StatusGatewayTimeout)
+			}
+			return
+		}
+
+		if r.Method == http.MethodPut && strings.HasPrefix(path, "/proxies/") {
+			var body struct {
+				Name string `json:"name"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			grp := strings.TrimPrefix(path, "/proxies/")
+			switch grp {
+			case "Proxy":
+				proxyNow = body.Name
+			case "#VPS":
+				vpsNow = body.Name
+			case "#Nodes":
+				nodesNow = body.Name
+			}
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	state := daemon.NewGroupFailoverState()
+	state.SingBoxConfigPath = sbCfgPath
+	state.ApplyConfig(config.WatchdogFailoverConfig{
+		// 模拟旧配置仍含 #Nodes
+		Groups:         []string{"Proxy", "#VPS", "#Nodes"},
+		ProbeTimeoutMs: 500,
+		ConfirmRetries: 1,
+		ProbeURLs:      []string{"https://example.com/generate_204"},
+	})
+	state.ConfirmRetryDelay = 5 * time.Millisecond
+
+	// 1. Proxy -> #Auto 正常时，闲置的 #VPS 与 #Nodes 均不应被无故探测或切换
+	state.Patrol(t.Context(), []string{srv.URL}, "")
+	mu.Lock()
+	if vpsNow != "node-dead" || nodesNow != "官网：https://example.com" {
+		t.Fatalf("idle #VPS/#Nodes must NOT be mutated when unreferenced, got vps=%s nodes=%s", vpsNow, nodesNow)
+	}
+	mu.Unlock()
+
+	// 2. 当用户将 Proxy 切向 #VPS 后，#VPS 进入活跃链路：应跳过伪节点并择优切向 38ms 的 hk-fast（而非排前面的 1192ms us-slow）
+	mu.Lock()
+	proxyNow = "#VPS"
+	probedTargets = make(map[string]int)
+	mu.Unlock()
+
+	state.Patrol(t.Context(), []string{srv.URL}, "")
+	mu.Lock()
+	defer mu.Unlock()
+	if vpsNow != "hk-fast" {
+		t.Fatalf("expected #VPS to pick lowest-latency hk-fast (38ms) instead of first-alive us-slow (1192ms), got %s", vpsNow)
+	}
+	if proxyNow != "#VPS" {
+		t.Fatalf("expected parent Proxy to stay on #VPS once #VPS healed internally to hk-fast, got %s", proxyNow)
+	}
+	for target := range probedTargets {
+		if strings.Contains(target, "官网") || strings.Contains(target, "剩余流量") {
+			t.Fatalf("airport info placeholder node %q must never be probed", target)
+		}
+	}
+}
+
+func TestGroupFailover_WANGateAndConcurrentURLRaceAndRestoreSnapshot(t *testing.T) {
+	withTestPaths(t)
+
+	var mu sync.Mutex
+	vpsCurrent := "node-primary"
+	primaryAlive := false
+	wanAlive := false
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		path := r.URL.Path
+
+		if r.Method == http.MethodGet && path == "/proxies" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"proxies": map[string]any{
+					"#VPS": map[string]any{
+						"type": "Selector",
+						"now":  vpsCurrent,
+						"all":  []string{"node-primary", "node-backup"},
+					},
+				},
+			})
+			return
+		}
+		if r.Method == http.MethodGet && strings.HasSuffix(path, "/delay") {
+			probeTargetURL := r.URL.Query().Get("url")
+			// 模拟第 1 个探测 URL (bad-cdn) 抽风返回 504，第 2 个探测 URL 正常
+			if strings.Contains(probeTargetURL, "bad-cdn.example.com") {
+				w.WriteHeader(http.StatusGatewayTimeout)
+				return
+			}
+			if strings.Contains(path, "/node-primary/delay") {
+				if !primaryAlive {
+					w.WriteHeader(http.StatusGatewayTimeout)
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]int{"delay": 65})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]int{"delay": 120})
+			return
+		}
+		if r.Method == http.MethodPut && strings.HasPrefix(path, "/proxies/") {
+			var body struct {
+				Name string `json:"name"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			vpsCurrent = body.Name
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	state := daemon.NewGroupFailoverState()
+	state.ApplyConfig(config.WatchdogFailoverConfig{
+		Groups:           []string{"#VPS"},
+		ProbeTimeoutMs:   500,
+		ConfirmRetries:   1,
+		FailbackCooldown: 0,
+		ProbeURLs: []string{
+			"https://bad-cdn.example.com/generate_204",
+			"https://good-cdn.example.com/generate_204",
+		},
+	})
+	state.FailbackCooldown = 0
+	state.FailbackHealthyStreak = 1
+	state.ConfirmRetryDelay = 5 * time.Millisecond
+	state.CheckWANFn = func(context.Context) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return wanAlive
+	}
+
+	// 1. 自家宽带断网 (wanAlive=false) 时，即便主节点探测超时也严禁乱切节点
+	state.Patrol(t.Context(), []string{srv.URL}, "")
+	if vpsCurrent != "node-primary" {
+		t.Fatalf("WAN gate failed: must NOT switch nodes when local broadband is down, got %s", vpsCurrent)
+	}
+
+	// 2. 宽带恢复 (wanAlive=true) 且主节点确实不可达 -> 正常切向备用节点
+	mu.Lock()
+	wanAlive = true
+	mu.Unlock()
+	state.Patrol(t.Context(), []string{srv.URL}, "")
+	if vpsCurrent != "node-backup" {
+		t.Fatalf("expected switch to node-backup when WAN is up and primary is dead, got %s", vpsCurrent)
+	}
+
+	// 3. 模拟守护进程重启：从 ActiveSnapshot 恢复状态机到全新实例，主节点恢复且仅第 2 个探测 URL 可用时仍能正常切回原主选
+	savedSnap := state.ActiveSnapshot()
+	restartedState := daemon.NewGroupFailoverState()
+	restartedState.ApplyConfig(config.WatchdogFailoverConfig{
+		Groups:         []string{"#VPS"},
+		ProbeTimeoutMs: 500,
+		ProbeURLs: []string{
+			"https://bad-cdn.example.com/generate_204",
+			"https://good-cdn.example.com/generate_204",
+		},
+	})
+	restartedState.FailbackCooldown = 0
+	restartedState.FailbackHealthyStreak = 1
+	restartedState.RestoreSnapshot(savedSnap)
+
+	mu.Lock()
+	primaryAlive = true
+	mu.Unlock()
+	restartedState.Patrol(t.Context(), []string{srv.URL}, "")
+	if vpsCurrent != "node-primary" {
+		t.Fatalf("expected restored daemon state to fail back to node-primary despite 1 broken CDN URL, got %s", vpsCurrent)
 	}
 }

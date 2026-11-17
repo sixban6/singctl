@@ -1164,8 +1164,11 @@ func TestWatchdogFailoverConfig_LoadSaveAndMigrate(t *testing.T) {
 	if len(defCfg.Watchdog.Failover.EffectiveGroups()) != len(config.DefaultWatchdogFailoverGroups) {
 		t.Fatalf("unexpected default groups: %v", defCfg.Watchdog.Failover.EffectiveGroups())
 	}
-	if defCfg.Watchdog.Failover.EffectiveConfirmRetries() != 1 {
-		t.Fatalf("expected default confirm_retries=1, got %d", defCfg.Watchdog.Failover.EffectiveConfirmRetries())
+	if defCfg.Watchdog.Failover.EffectiveConfirmRetries() != 2 {
+		t.Fatalf("expected default confirm_retries=2, got %d", defCfg.Watchdog.Failover.EffectiveConfirmRetries())
+	}
+	if defCfg.Watchdog.Failover.EffectiveProbeTimeout() != 5000*time.Millisecond {
+		t.Fatalf("expected default probe_timeout=5000ms, got %v", defCfg.Watchdog.Failover.EffectiveProbeTimeout())
 	}
 	if defCfg.Watchdog.Failover.EffectiveFailbackCooldown() != 180*time.Second {
 		t.Fatalf("expected default failback_cooldown=180s, got %v", defCfg.Watchdog.Failover.EffectiveFailbackCooldown())

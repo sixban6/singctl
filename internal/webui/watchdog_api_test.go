@@ -22,15 +22,21 @@ func TestBuildWatchdogConfigDTO_MatchesModernSingBoxGroups(t *testing.T) {
 	if !dto.Failover.IsDefaultGroups {
 		t.Fatal("expected zero-value config to report IsDefaultGroups=true")
 	}
-	for _, legacy := range []string{"Game", "Game-TCP", "Game-UDP"} {
-		if slices.Contains(dto.Failover.Groups, legacy) {
-			t.Fatalf("legacy removed group %q must not appear in default failover groups: %v", legacy, dto.Failover.Groups)
+	if dto.Failover.ProbeTimeoutMs != 5000 {
+		t.Fatalf("expected default probe_timeout_ms=5000, got %d", dto.Failover.ProbeTimeoutMs)
+	}
+	if dto.Failover.ConfirmRetries != 2 {
+		t.Fatalf("expected default confirm_retries=2, got %d", dto.Failover.ConfirmRetries)
+	}
+	for _, excluded := range []string{"Game", "Game-TCP", "Game-UDP", "#Nodes"} {
+		if slices.Contains(dto.Failover.Groups, excluded) {
+			t.Fatalf("excluded/idle group %q must not appear in default failover groups: %v", excluded, dto.Failover.Groups)
 		}
-		if slices.Contains(dto.Failover.DefaultGroups, legacy) {
-			t.Fatalf("legacy removed group %q must not appear in default_groups: %v", legacy, dto.Failover.DefaultGroups)
+		if slices.Contains(dto.Failover.DefaultGroups, excluded) {
+			t.Fatalf("excluded/idle group %q must not appear in default_groups: %v", excluded, dto.Failover.DefaultGroups)
 		}
 	}
-	for _, expected := range []string{"#VPS", "Proxy", "AI", "#Nodes"} {
+	for _, expected := range []string{"#VPS", "Proxy", "AI"} {
 		if !slices.Contains(dto.Failover.Groups, expected) {
 			t.Fatalf("expected core sing-box group %q in default failover groups, got %v", expected, dto.Failover.Groups)
 		}
@@ -59,7 +65,7 @@ func TestHandleWatchdogConfigPut_PersistsAndReloadsFailoverParams(t *testing.T) 
 			"has_groups":            true,
 			"patrol_interval":       15,
 			"probe_timeout_ms":      2000,
-			"confirm_retries":       2,
+			"confirm_retries":       3,
 			"auto_failback":         true,
 			"failback_cooldown":     120,
 			"max_failback_delay_ms": 450,
@@ -84,8 +90,8 @@ func TestHandleWatchdogConfigPut_PersistsAndReloadsFailoverParams(t *testing.T) 
 	if loaded.Watchdog.Failover.ProbeTimeoutMs != 2000 {
 		t.Fatalf("expected probe_timeout_ms=2000 persisted, got %d", loaded.Watchdog.Failover.ProbeTimeoutMs)
 	}
-	if loaded.Watchdog.Failover.ConfirmRetries != 2 {
-		t.Fatalf("expected confirm_retries=2 persisted, got %d", loaded.Watchdog.Failover.ConfirmRetries)
+	if loaded.Watchdog.Failover.ConfirmRetries != 3 {
+		t.Fatalf("expected confirm_retries=3 persisted, got %d", loaded.Watchdog.Failover.ConfirmRetries)
 	}
 	if !slices.Equal(loaded.Watchdog.Failover.Groups, []string{"#VPS", "Proxy"}) {
 		t.Fatalf("expected groups [#VPS Proxy], got %v", loaded.Watchdog.Failover.Groups)
@@ -112,7 +118,7 @@ func TestHandleWatchdogConfigPut_PersistsAndReloadsFailoverParams(t *testing.T) 
 	if err := json.Unmarshal(getRec.Body.Bytes(), &report); err != nil {
 		t.Fatal(err)
 	}
-	if report.Config.Failover.PatrolInterval != 15 || report.Config.Failover.ProbeTimeoutMs != 2000 || report.Config.Failover.ConfirmRetries != 2 {
+	if report.Config.Failover.PatrolInterval != 15 || report.Config.Failover.ProbeTimeoutMs != 2000 || report.Config.Failover.ConfirmRetries != 3 {
 		t.Fatalf("GET /api/watchdog returned mismatched values: %+v", report.Config.Failover)
 	}
 }

@@ -13,10 +13,10 @@ import { Badge, Button, PageHeader, SectionCard, Skeleton, useToast } from '../.
 import { clientApi } from '../api';
 import { CacheResponse, ClientHealthResponse, WatchdogReport } from '../types';
 
-const DEFAULT_FO_GROUPS = ['#VPS', 'Proxy', 'AI', '#Nodes'];
+const DEFAULT_FO_GROUPS = ['Proxy', 'AI', '#VPS'];
 const DEFAULT_FO_URLS = [
   'https://www.gstatic.com/generate_204',
-  'http://cp.cloudflare.com/generate_204',
+  'https://cp.cloudflare.com/generate_204',
 ];
 
 function parseClampedInt(raw: string, fallback: number, minVal: number, maxVal: number): number {
@@ -63,8 +63,8 @@ export const WatchdogPage: React.FC<WatchdogPageProps> = ({
   const [selectedGroups, setSelectedGroups] = useState<string[]>(DEFAULT_FO_GROUPS);
   const [customGroupInput, setCustomGroupInput] = useState('');
   const [patrolInterval, setPatrolInterval] = useState('300');
-  const [probeTimeoutMs, setProbeTimeoutMs] = useState('2800');
-  const [confirmRetries, setConfirmRetries] = useState(1);
+  const [probeTimeoutMs, setProbeTimeoutMs] = useState('5000');
+  const [confirmRetries, setConfirmRetries] = useState(2);
   const [autoFailback, setAutoFailback] = useState(true);
   const [cooldownSec, setCooldownSec] = useState('180');
   const [maxFailbackDelayMs, setMaxFailbackDelayMs] = useState('600');
@@ -94,8 +94,8 @@ export const WatchdogPage: React.FC<WatchdogPageProps> = ({
         setFoEnabled(fo.enabled !== false);
         setSelectedGroups(fo.groups?.length ? [...fo.groups] : [...DEFAULT_FO_GROUPS]);
         setPatrolInterval(String(fo.patrol_interval || 300));
-        setProbeTimeoutMs(String(fo.probe_timeout_ms || 2800));
-        setConfirmRetries(fo.confirm_retries ?? 1);
+        setProbeTimeoutMs(String(fo.probe_timeout_ms || 5000));
+        setConfirmRetries(fo.confirm_retries ?? 2);
         setAutoFailback(fo.auto_failback !== false);
         setCooldownSec(String(fo.failback_cooldown || 180));
         setMaxFailbackDelayMs(String(fo.max_failback_delay_ms || 600));
@@ -230,7 +230,7 @@ export const WatchdogPage: React.FC<WatchdogPageProps> = ({
     setSavingFO(true);
     try {
       const nextPatrol = parseClampedInt(patrolInterval, 300, 10, 3600);
-      const nextTimeout = parseClampedInt(probeTimeoutMs, 2800, 500, 15000);
+      const nextTimeout = parseClampedInt(probeTimeoutMs, 5000, 500, 15000);
       const nextCooldown = parseClampedInt(cooldownSec, 180, 10, 86400);
       const nextMaxDelay = parseClampedInt(maxFailbackDelayMs, 600, 100, 5000);
       setPatrolInterval(String(nextPatrol));
@@ -275,8 +275,8 @@ export const WatchdogPage: React.FC<WatchdogPageProps> = ({
     setFoEnabled(true);
     setSelectedGroups([...defaultGroupList]);
     setPatrolInterval('300');
-    setProbeTimeoutMs('2800');
-    setConfirmRetries(1);
+    setProbeTimeoutMs('5000');
+    setConfirmRetries(2);
     setAutoFailback(true);
     setCooldownSec('180');
     setMaxFailbackDelayMs('600');
@@ -286,8 +286,8 @@ export const WatchdogPage: React.FC<WatchdogPageProps> = ({
       groups: [...defaultGroupList],
       has_groups: true,
       patrol_interval: 300,
-      probe_timeout_ms: 2800,
-      confirm_retries: 1,
+      probe_timeout_ms: 5000,
+      confirm_retries: 2,
       auto_failback: true,
       failback_cooldown: 180,
       max_failback_delay_ms: 600,
@@ -746,7 +746,7 @@ export const WatchdogPage: React.FC<WatchdogPageProps> = ({
               </label>
 
               <label className="block space-y-1 text-xs">
-                <span className="text-secondary">单次探测超时（毫秒，默认 2800）</span>
+                <span className="text-secondary">单次探测超时（毫秒，默认 5000）</span>
                 <input
                   type="text"
                   inputMode="numeric"
@@ -755,8 +755,8 @@ export const WatchdogPage: React.FC<WatchdogPageProps> = ({
                     setProbeTimeoutMs(sanitizeDigits(e.target.value));
                     markDirty(true);
                   }}
-                  onBlur={() => setProbeTimeoutMs(String(parseClampedInt(probeTimeoutMs, 2800, 500, 15000)))}
-                  placeholder="2800"
+                  onBlur={() => setProbeTimeoutMs(String(parseClampedInt(probeTimeoutMs, 5000, 500, 15000)))}
+                  placeholder="5000"
                   className="w-full h-9 px-3 rounded-xl bg-surface2 border border-subtle text-primary font-mono tnum focus:outline-none focus:border-strong"
                 />
               </label>
@@ -772,8 +772,8 @@ export const WatchdogPage: React.FC<WatchdogPageProps> = ({
                   className="w-full h-9 px-3 rounded-xl bg-surface2 border border-subtle text-primary focus:outline-none focus:border-strong"
                 >
                   <option value={0}>0 次（首次超时立即切换）</option>
-                  <option value={1}>1 次（间隔 1.5s 复测确认，推荐）</option>
-                  <option value={2}>2 次（连续 3 次超时才切换）</option>
+                  <option value={1}>1 次（间隔 5s 复测确认）</option>
+                  <option value={2}>2 次（5s → 8s 阶梯复测防抖动，推荐）</option>
                   <option value={3}>3 次（高容忍度）</option>
                 </select>
               </label>

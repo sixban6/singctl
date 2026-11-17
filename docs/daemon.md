@@ -75,14 +75,14 @@ singctl dm logs -f
 | `confirm_wait` | `30` | 首次检测失败后的二次确认等待（秒） |
 | `max_restarts` | `3` | 每小时最大自动重启次数（超出后触发熔断保护） |
 | `sub_sync_interval` | `600` | 订阅节点指纹自动静默巡检与无感热同步间隔（秒），设为 `-1` 关闭 |
-| `failover.enabled` | `true` | 是否开启策略组自动故障切换与恢复回切（默认开启） |
-| `failover.groups` | `["#VPS", "Proxy", "AI", "#Nodes"]` | 受保护的 Clash Selector 策略组名称列表 |
+| `failover.enabled` | `true` | 是否开启策略组自动故障切换与恢复回切（默认开启，自带本机宽带直连前置门控与最低延迟并发择优） |
+| `failover.groups` | `["Proxy", "AI", "#VPS"]` | 受保护的 Clash Selector 策略组名称列表（自动跳过未在当前路由链路中引用的闲置分组） |
 | `failover.patrol_interval` | `300` | 策略组节点健康巡检间隔（秒） |
-| `failover.probe_timeout_ms` | `2800` | 单节点连通性探测超时时间（毫秒） |
-| `failover.confirm_retries` | `1` | 切备前复测确认次数（默认间隔 1.5s 复测 1 次防瞬时抖动；设为 `-1` 表示首次失败立即切备） |
+| `failover.probe_timeout_ms` | `5000` | 单节点连通性并发探测超时时间（毫秒） |
+| `failover.confirm_retries` | `2` | 切备前复测确认次数（默认 `5s -> 8s` 阶梯退避复测 2 次过滤瞬时抖动；设为 `-1` 表示首次失败立即切备） |
 | `failover.failback_cooldown` | `180` | 原主选节点恢复后的观察冷却期（秒，且需连续 2 轮健康；设为 `-1` 关闭自动回切） |
 | `failover.max_failback_delay_ms` | `600` | 允许切回原主选节点的最高延迟上限（毫秒，拒绝高延迟假活乒乓回切） |
-| `failover.probe_urls` | `["https://www.gstatic.com/generate_204", "http://cp.cloudflare.com/generate_204"]` | 连通性探测目标 URL 列表 |
+| `failover.probe_urls` | `["https://www.gstatic.com/generate_204", "https://cp.cloudflare.com/generate_204"]` | 连通性并发竞速探测目标 URL 列表 |
 
 支持向运行中的看门狗进程发送 `SIGHUP`（或在 WebUI 保存配置时自动触发）即时热重载上述配置，无需重启 `sing-box`。
 

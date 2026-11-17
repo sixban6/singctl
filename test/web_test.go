@@ -1437,3 +1437,100 @@ func TestHelperTriggerDetachedRestart(t *testing.T) {
 	// 模拟真实 WebUI 进程保持存活，等待 1 秒后被重启脚本平滑接管终止
 	time.Sleep(10 * time.Second)
 }
+
+func TestLegacyV1_14_120_WebUIClickUpdateAutoHeals(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX v1.14.120 ScheduleDetachedRestart simulation runs on unix")
+	}
+
+	tmpDir := t.TempDir()
+	statePath := filepath.Join(tmpDir, "singctl-web.pid")
+	logPath := filepath.Join(tmpDir, "singctl-web.log")
+	cfgPath := filepath.Join(tmpDir, "singctl.yaml")
+	binPath := filepath.Join(tmpDir, "singctl")
+
+	if err := os.WriteFile(cfgPath, []byte("subs:\n  - name: test\n    url: https://example.com/sub\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	probeLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listenAddr := probeLn.Addr().String()
+	_ = probeLn.Close()
+
+	repoRoot, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	buildCmd := exec.Command("go", "build", "-ldflags", "-X main.Version=1.14.129", "-o", binPath, "./cmd/singctl")
+	buildCmd.Dir = repoRoot
+	if out, bErr := buildCmd.CombinedOutput(); bErr != nil {
+		t.Fatalf("build failed: %v\n%s", bErr, string(out))
+	}
+
+	baseEnv := append(os.Environ(),
+		"SINGCTL_WEB_STATE_PATH="+statePath,
+		"SINGCTL_WEB_LOG_PATH="+logPath,
+	)
+	t.Cleanup(func() {
+		stopCmd := exec.Command(binPath, "web", "stop")
+		stopCmd.Env = baseEnv
+		_ = stopCmd.Run()
+	})
+
+	const legacyPass = "legacy-120-pass"
+	expectedToken := webui.New(webui.Options{Password: legacyPass}).SessionToken()
+
+	// 1:1 复现 v1.14.120 的旧版 ScheduleDetachedRestart 命令：
+	// - 遗留 SINGCTL_WEB_BACKGROUND=1，且没有 SINGCTL_WEB_READY_FD
+	// - 把 stdout/stderr 重定向到了 >/dev/null 2>&1
+	// - 使用 append 追加 SINGCTL_WEB_PASSWORD
+	legacyShArgs := []string{
+		"-c",
+		`sleep 0.2; "$1" web stop >/dev/null 2>&1 || true; exec "$@" >/dev/null 2>&1`,
+		"--",
+		binPath,
+		binPath,
+		"--config", cfgPath,
+		"web", "start", "-l", listenAddr,
+	}
+	cmd := exec.Command("/bin/sh", legacyShArgs...)
+	cmd.Env = append(baseEnv,
+		"SINGCTL_WEB_BACKGROUND=1",
+		"SINGCTL_WEB_PASSWORD=",
+		"SINGCTL_WEB_PASSWORD="+legacyPass,
+	)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start legacy restart script failed: %v", err)
+	}
+
+	// 等待新版二进制自动识别旧版环境、剥离污染标记并完成正规后台守护启动
+	client := &http.Client{Timeout: 2 * time.Second}
+	deadline := time.Now().Add(8 * time.Second)
+	var healed bool
+	for time.Now().Before(deadline) {
+		time.Sleep(250 * time.Millisecond)
+		req, _ := http.NewRequest(http.MethodGet, "http://"+listenAddr+"/api/status", nil)
+		req.AddCookie(&http.Cookie{Name: webui.SessionCookieName, Value: expectedToken})
+		resp, rErr := client.Do(req)
+		if rErr != nil {
+			continue
+		}
+		var body struct {
+			SingctlVersion string `json:"singctlVersion"`
+			AuthEnabled    bool   `json:"authEnabled"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&body)
+		_ = resp.Body.Close()
+		if resp.StatusCode == http.StatusOK && body.SingctlVersion == "1.14.129" && body.AuthEnabled {
+			healed = true
+			break
+		}
+	}
+	if !healed {
+		logBytes, _ := os.ReadFile(logPath)
+		t.Fatalf("v1.14.120 click-update simulation failed to auto-heal!\nlog:\n%s", string(logBytes))
+	}
+}
