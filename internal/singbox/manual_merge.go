@@ -779,6 +779,8 @@ func mergeOrderedRules3Way(baseRules, curRules, freshRules []any, isValid func(m
 
 	changes := 0
 	out := make([]any, 0, len(freshRules)+len(curRules))
+	outKeys := make([]string, 0, len(freshRules)+len(curRules))
+	outKeySet := make(map[string]bool, len(freshRules)+len(curRules))
 	for _, r := range freshRules {
 		k := canonicalKey(r)
 		if deletedCounts[k] > 0 && !isEssentialBootstrapRule(r) {
@@ -787,6 +789,8 @@ func mergeOrderedRules3Way(baseRules, curRules, freshRules []any, isValid func(m
 			continue
 		}
 		out = append(out, deepCopyAny(r))
+		outKeys = append(outKeys, k)
+		outKeySet[k] = true
 	}
 
 	// 找出用户在 Current 中新增的规则 (出现次数超过 Base) 并按前驱锚点精确插入
@@ -810,10 +814,11 @@ func mergeOrderedRules3Way(baseRules, curRules, freshRules []any, isValid func(m
 			continue
 		}
 		// 若 Fresh 已经天然包含完全一致的规则，则不重复插入
-		if containsCanonical(out, k) {
+		if outKeySet[k] {
 			continue
 		}
-		out = insertRuleByNeighborAnchor(out, curKeys, idx, deepCopyAny(r))
+		out, outKeys = insertRuleByNeighborAnchor(out, outKeys, curKeys, idx, deepCopyAny(r), k)
+		outKeySet[k] = true
 		changes++
 	}
 
@@ -829,30 +834,35 @@ func isEssentialBootstrapRule(r any) bool {
 	return act == "sniff" || act == "hijack-dns"
 }
 
-func insertRuleByNeighborAnchor(out []any, curKeys []string, curIdx int, newRule any) []any {
+func insertRuleByNeighborAnchor(out []any, outKeys, curKeys []string, curIdx int, newRule any, newKey string) ([]any, []string) {
+	insertAt := func(pos int) ([]any, []string) {
+		res := make([]any, 0, len(out)+1)
+		res = append(res, out[:pos]...)
+		res = append(res, newRule)
+		res = append(res, out[pos:]...)
+
+		keys := make([]string, 0, len(outKeys)+1)
+		keys = append(keys, outKeys[:pos]...)
+		keys = append(keys, newKey)
+		keys = append(keys, outKeys[pos:]...)
+		return res, keys
+	}
+
 	// 优先紧跟在 Current 中前一条已存在于 out 的锚点规则之后
 	for prev := curIdx - 1; prev >= 0; prev-- {
 		anchorKey := curKeys[prev]
-		for i := len(out) - 1; i >= 0; i-- {
-			if canonicalKey(out[i]) == anchorKey {
-				res := make([]any, 0, len(out)+1)
-				res = append(res, out[:i+1]...)
-				res = append(res, newRule)
-				res = append(res, out[i+1:]...)
-				return res
+		for i := len(outKeys) - 1; i >= 0; i-- {
+			if outKeys[i] == anchorKey {
+				return insertAt(i + 1)
 			}
 		}
 	}
 	// 其次插在后一条锚点规则之前
 	for next := curIdx + 1; next < len(curKeys); next++ {
 		anchorKey := curKeys[next]
-		for i, item := range out {
-			if canonicalKey(item) == anchorKey {
-				res := make([]any, 0, len(out)+1)
-				res = append(res, out[:i]...)
-				res = append(res, newRule)
-				res = append(res, out[i:]...)
-				return res
+		for i, itemKey := range outKeys {
+			if itemKey == anchorKey {
+				return insertAt(i)
 			}
 		}
 	}
@@ -861,11 +871,7 @@ func insertRuleByNeighborAnchor(out []any, curKeys []string, curIdx int, newRule
 	for insertPos < len(out) && isEssentialBootstrapRule(out[insertPos]) {
 		insertPos++
 	}
-	res := make([]any, 0, len(out)+1)
-	res = append(res, out[:insertPos]...)
-	res = append(res, newRule)
-	res = append(res, out[insertPos:]...)
-	return res
+	return insertAt(insertPos)
 }
 
 func insertAtRelativeAnchor(out []any, curOrder []string, curIdx int, newItem any, tagKey string) []any {
@@ -1038,25 +1044,37 @@ func canonicalEqual(a, b any) bool {
 	return canonicalKey(a) == canonicalKey(b)
 }
 
-func containsCanonical(slice []any, targetKey string) bool {
-	for _, item := range slice {
-		if canonicalKey(item) == targetKey {
-			return true
-		}
-	}
-	return false
-}
-
 func deepCopyAny(v any) any {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return v
+	switch x := v.(type) {
+	case nil, string, float64, bool, int, int64:
+		return x
+	case map[string]any:
+		cp := make(map[string]any, len(x))
+		for k, val := range x {
+			cp[k] = deepCopyAny(val)
+		}
+		return cp
+	case []any:
+		cp := make([]any, len(x))
+		for i, val := range x {
+			cp[i] = deepCopyAny(val)
+		}
+		return cp
+	case []string:
+		return slices.Clone(x)
+	case map[string]string:
+		return maps.Clone(x)
+	default:
+		b, err := json.Marshal(v)
+		if err != nil {
+			return v
+		}
+		var out any
+		if err := json.Unmarshal(b, &out); err != nil {
+			return v
+		}
+		return out
 	}
-	var out any
-	if err := json.Unmarshal(b, &out); err != nil {
-		return v
-	}
-	return out
 }
 
 func mustMarshalJSON(v any) string {

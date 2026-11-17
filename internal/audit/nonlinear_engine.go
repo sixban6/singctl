@@ -24,11 +24,17 @@ type Detector interface {
 //
 //	RawLogit = (AsymmetryScore + BeaconScore + EntropyScore + FingerprintScore) * InteractionMultiplier * TrustDamping
 //	RiskScore = round(100 * Sigmoid((RawLogit - Center) / Scale))
+type blockedRulesetRef struct {
+	srcCIDR string
+	tag     string
+}
+
 type NonlinearEngine struct {
-	detectors      []Detector
-	trustedDomains map[string]struct{}
-	trustedCIDRs   []*net.IPNet
-	blockedKeys    map[string]struct{}
+	detectors       []Detector
+	trustedDomains  map[string]struct{}
+	trustedCIDRs    []*net.IPNet
+	blockedKeys     map[string]struct{}
+	blockedRulesets []blockedRulesetRef
 }
 
 // defaultTrustedDomains 内置常见正常高上传办公/云同步/代码托管与底层网络加密握手/DoH/连通性探测白名单域名（触发信任阻尼衰减，防止误报）。
@@ -143,6 +149,13 @@ func NewNonlinearEngine(cfg *config.Config) *NonlinearEngine {
 				continue
 			}
 			src := singbox.NormalizeSourceIPCIDR(b.SourceIP)
+			if strings.HasPrefix(target, "ruleset:") {
+				eng.blockedRulesets = append(eng.blockedRulesets, blockedRulesetRef{
+					srcCIDR: src,
+					tag:     strings.TrimPrefix(target, "ruleset:"),
+				})
+				continue
+			}
 			eng.blockedKeys[src+"|"+target] = struct{}{}
 			// 同时索引去掉 /32 的纯 IP 键以便快速匹配
 			if plainIP := strings.TrimSuffix(strings.TrimSuffix(target, "/32"), "/128"); plainIP != target {
@@ -198,8 +211,16 @@ func (e *NonlinearEngine) IsTrusted(target string) bool {
 		return false
 	}
 
-	for td := range e.trustedDomains {
-		if norm == td || strings.HasSuffix(norm, "."+td) {
+	if _, ok := e.trustedDomains[norm]; ok {
+		return true
+	}
+	for s := norm; ; {
+		idx := strings.IndexByte(s, '.')
+		if idx < 0 {
+			break
+		}
+		s = s[idx+1:]
+		if _, ok := e.trustedDomains[s]; ok {
 			return true
 		}
 	}
@@ -208,6 +229,9 @@ func (e *NonlinearEngine) IsTrusted(target string) bool {
 
 // IsBlocked 判断某条流是否已被納入自定义拉黑规则。
 func (e *NonlinearEngine) IsBlocked(deviceIP, target string) bool {
+	if len(e.blockedKeys) == 0 && len(e.blockedRulesets) == 0 {
+		return false
+	}
 	norm, _ := singbox.NormalizeBlockTarget(target)
 	if norm == "" {
 		return false
@@ -215,35 +239,40 @@ func (e *NonlinearEngine) IsBlocked(deviceIP, target string) bool {
 	plain := strings.TrimSuffix(strings.TrimSuffix(norm, "/32"), "/128")
 	srcCIDR := singbox.NormalizeSourceIPCIDR(deviceIP)
 
-	for _, candidateTarget := range []string{norm, plain} {
-		if _, ok := e.blockedKeys["|"+candidateTarget]; ok {
+	matchKey := func(t string) bool {
+		if _, ok := e.blockedKeys["|"+t]; ok {
 			return true
 		}
 		if srcCIDR != "" {
-			if _, ok := e.blockedKeys[srcCIDR+"|"+candidateTarget]; ok {
+			if _, ok := e.blockedKeys[srcCIDR+"|"+t]; ok {
 				return true
 			}
 		}
-		// 域名后缀匹配（如拉黑了 example.com，则 sub.example.com 也处于已拉黑态）
-		for k := range e.blockedKeys {
-			parts := strings.SplitN(k, "|", 2)
-			if len(parts) != 2 {
-				continue
-			}
-			kSrc, kDom := parts[0], parts[1]
-			if kSrc != "" && kSrc != srcCIDR {
-				continue
-			}
-			if strings.HasPrefix(kDom, "ruleset:") {
-				tag := strings.TrimPrefix(kDom, "ruleset:")
-				if rs := loadBlockedRuleSetSummary(tag); rs != nil && matchDecompiledRuleSet(rs, plain, plain) {
-					return true
-				}
-				continue
-			}
-			if strings.HasSuffix(plain, "."+kDom) {
-				return true
-			}
+		return false
+	}
+
+	if matchKey(norm) || (plain != norm && matchKey(plain)) {
+		return true
+	}
+
+	// 域名后缀零切片步进匹配（如拉黑了 example.com，则 sub.example.com 也处于已拉黑态）
+	for s := plain; ; {
+		idx := strings.IndexByte(s, '.')
+		if idx < 0 {
+			break
+		}
+		s = s[idx+1:]
+		if matchKey(s) {
+			return true
+		}
+	}
+
+	for _, br := range e.blockedRulesets {
+		if br.srcCIDR != "" && br.srcCIDR != srcCIDR {
+			continue
+		}
+		if rs := loadBlockedRuleSetSummary(br.tag); rs != nil && matchDecompiledRuleSet(rs, plain, plain) {
+			return true
 		}
 	}
 	return false
