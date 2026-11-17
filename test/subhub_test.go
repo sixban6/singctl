@@ -248,13 +248,28 @@ func TestDetectTargetAndRenderAllFormats(t *testing.T) {
 		t.Fatalf("unexpected ClashMeta structure: proxies=%d groups=%d", len(clashDoc.Proxies), len(clashDoc.ProxyGroups))
 	}
 
-	// 3. SingBox JSON (sandbox-safe remote rule_sets for iOS SFI / Android SFA)
+	// 3. SingBox JSON (sandbox-safe remote rule_sets for iOS SFI / Android SFA, v1.14+ http_clients without legacy download_detour)
 	resSB, err := subhub.RenderBundle(t.Context(), bundle, subhub.RenderOptions{Target: subhub.TargetSingBox})
 	if err != nil {
 		t.Fatalf("Render SingBox: %v", err)
 	}
 	if err := singbox.CheckIOSCompatibility(string(resSB.Body)); err != nil {
 		t.Fatalf("SingBox output failed CheckIOSCompatibility: %v", err)
+	}
+	if strings.Contains(string(resSB.Body), `"download_detour"`) {
+		t.Fatalf("SingBox v1.14+ output must not contain deprecated download_detour:\n%s", string(resSB.Body))
+	}
+	if !strings.Contains(string(resSB.Body), `"default_http_client"`) || !strings.Contains(string(resSB.Body), `"http_clients"`) {
+		t.Fatalf("SingBox v1.14+ output expected http_clients + default_http_client:\n%s", string(resSB.Body))
+	}
+
+	// 3b. SingBox v1.12 backward compatibility (?ver=v1.12)
+	resSB112, err := subhub.RenderBundle(t.Context(), bundle, subhub.RenderOptions{Target: subhub.TargetSingBox, SingBoxVersion: "v1.12"})
+	if err != nil {
+		t.Fatalf("Render SingBox v1.12: %v", err)
+	}
+	if !strings.Contains(string(resSB112.Body), `"download_detour"`) || strings.Contains(string(resSB112.Body), `"http_clients"`) {
+		t.Fatalf("SingBox v1.12 output expected legacy download_detour without http_clients:\n%s", string(resSB112.Body))
 	}
 
 	// 4. Surge

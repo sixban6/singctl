@@ -271,10 +271,14 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) loadRenderOptions(r *http.Request, target TargetFormat) RenderOptions {
 	q := r.URL.Query()
+	sbVer := strings.TrimSpace(q.Get("ver"))
+	if sbVer == "" {
+		sbVer = inferSingBoxTemplateFromUA(r.Header.Get("User-Agent"))
+	}
 	opts := RenderOptions{
 		Target:         target,
 		Platform:       q.Get("platform"),
-		SingBoxVersion: q.Get("ver"),
+		SingBoxVersion: sbVer,
 		RequestURL:     buildExternalRequestURL(r),
 	}
 
@@ -286,6 +290,24 @@ func (s *Server) loadRenderOptions(r *http.Request, target TargetFormat) RenderO
 		}
 	}
 	return opts
+}
+
+// inferSingBoxTemplateFromUA 在未显式指定 ?ver= 时，为旧版 SFI/SFA/SFM (1.12/1.13) 自动协商兼容模板，
+// 其余 1.14+ 或通用客户端默认走 v1.14 新标准。
+func inferSingBoxTemplateFromUA(userAgent string) string {
+	ua := strings.ToLower(strings.TrimSpace(userAgent))
+	for _, prefix := range []string{"sfi/", "sfa/", "sfm/", "sing-box/", "sing-box "} {
+		if idx := strings.Index(ua, prefix); idx >= 0 {
+			ver := ua[idx+len(prefix):]
+			if strings.HasPrefix(ver, "1.12") {
+				return "v1.12"
+			}
+			if strings.HasPrefix(ver, "1.13") {
+				return "v1.13"
+			}
+		}
+	}
+	return ""
 }
 
 func buildExternalRequestURL(r *http.Request) string {

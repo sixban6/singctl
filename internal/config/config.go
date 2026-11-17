@@ -978,12 +978,12 @@ func (f WatchdogFailoverConfig) EffectiveProbeURLs() []string {
 }
 
 type WatchdogConfig struct {
-	Interval             int                    `yaml:"interval"`                        // 检查间隔(秒), 默认 180
-	ConfirmWait          int                    `yaml:"confirm_wait"`                    // 二次确认等待(秒), 默认 30
-	MaxRestarts          int                    `yaml:"max_restarts"`                    // 每小时最大自动重启次数, 默认 3
-	SubSyncInterval      int                    `yaml:"sub_sync_interval,omitempty"`     // 订阅节点指纹自动热同步间隔(秒), 默认 600; 设为 -1 关闭
+	Interval             int                    `yaml:"interval"`                         // 检查间隔(秒), 默认 180
+	ConfirmWait          int                    `yaml:"confirm_wait"`                     // 二次确认等待(秒), 默认 30
+	MaxRestarts          int                    `yaml:"max_restarts"`                     // 每小时最大自动重启次数, 默认 3
+	SubSyncInterval      int                    `yaml:"sub_sync_interval,omitempty"`      // 订阅节点指纹自动热同步间隔(秒), 默认 600; 设为 -1 关闭
 	PreserveManualConfig *bool                  `yaml:"preserve_manual_config,omitempty"` // 刷新订阅或更新版本时是否自动保留 config.json 手动修改(默认 true)
-	Failover             WatchdogFailoverConfig `yaml:"failover,omitempty"`              // 策略组自动故障切换配置(默认开启)
+	Failover             WatchdogFailoverConfig `yaml:"failover,omitempty"`               // 策略组自动故障切换配置(默认开启)
 }
 
 func (w WatchdogConfig) ShouldPreserveManualConfig() bool {

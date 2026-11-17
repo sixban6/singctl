@@ -80,8 +80,13 @@ func TestAdaptIOSConfig_StripsSandboxMirrorAndHeavyRulesets(t *testing.T) {
 	if _, exists := doc["services"]; exists {
 		t.Fatalf("services should be stripped on iOS")
 	}
-	if _, exists := doc["http_clients"]; exists {
-		t.Fatalf("http_clients should be stripped on iOS")
+	httpClients, ok := doc["http_clients"].([]any)
+	if !ok || len(httpClients) != 1 {
+		t.Fatalf("expected 1 top-level http_clients entry on iOS v1.14+, got %v", doc["http_clients"])
+	}
+	hc0, _ := httpClients[0].(map[string]any)
+	if hc0["tag"] != "hc-proxy" || hc0["detour"] != "Proxy" {
+		t.Fatalf("expected http_clients[0]={tag:hc-proxy, detour:Proxy}, got %v", hc0)
 	}
 
 	dnsMap := doc["dns"].(map[string]any)
@@ -104,6 +109,9 @@ func TestAdaptIOSConfig_StripsSandboxMirrorAndHeavyRulesets(t *testing.T) {
 	if _, exists := routeMap["default_mark"]; exists {
 		t.Fatalf("route.default_mark should be removed on iOS")
 	}
+	if routeMap["default_http_client"] != "hc-proxy" {
+		t.Fatalf("expected route.default_http_client=hc-proxy, got %v", routeMap["default_http_client"])
+	}
 	routeRules := routeMap["rules"].([]any)
 	if len(routeRules) != 3 {
 		t.Fatalf("expected 3 route rules after dropping pure geosite-ad2 rule, got %d", len(routeRules))
@@ -117,15 +125,14 @@ func TestAdaptIOSConfig_StripsSandboxMirrorAndHeavyRulesets(t *testing.T) {
 		rm := item.(map[string]any)
 		tag := rm["tag"].(string)
 		u := rm["url"].(string)
-		detour := rm["download_detour"].(string)
 		if tag == "geosite-ad2" || tag == "geosite-unused" {
 			t.Fatalf("unexpected rule_set remaining: %s", tag)
 		}
 		if !strings.HasPrefix(u, "https://raw.githubusercontent.com/") {
 			t.Fatalf("expected mirror stripped from %s url, got %q", tag, u)
 		}
-		if detour != "Proxy" {
-			t.Fatalf("expected download_detour=Proxy for %s, got %q", tag, detour)
+		if _, hasLegacy := rm["download_detour"]; hasLegacy {
+			t.Fatalf("expected legacy download_detour removed on v1.14+ for %s, got %v", tag, rm["download_detour"])
 		}
 	}
 
@@ -144,13 +151,42 @@ func TestAdaptIOSConfig_StripsSandboxMirrorAndHeavyRulesets(t *testing.T) {
 }
 
 func TestAdaptIOSConfig_DetourFallbackPriority(t *testing.T) {
+	// 1) Proxy absent -> fallback to #Auto via http_clients + default_http_client (no legacy download_detour)
 	base := `{"outbounds":[{"type":"urltest","tag":"#Auto"},{"type":"direct","tag":"#DC"}],"route":{"rules":[{"rule_set":"geosite-cn","outbound":"#DC"}],"rule_set":[{"tag":"geosite-cn","type":"remote","url":"https://example.com/cn.srs","download_detour":"#DC"}]}}`
 	out, err := AdaptIOSConfig(base, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, `"download_detour":"#Auto"`) {
-		t.Fatalf("expected #Auto download_detour fallback when Proxy absent, got %s", out)
+	if strings.Contains(out, `"download_detour"`) {
+		t.Fatalf("v1.14+ output must not contain legacy download_detour, got %s", out)
+	}
+	if !strings.Contains(out, `"detour":"#Auto"`) || !strings.Contains(out, `"default_http_client":"hc-proxy"`) {
+		t.Fatalf("expected #Auto http_client detour fallback when Proxy absent, got %s", out)
+	}
+
+	// 2) Only empty direct #DC -> must emit {"tag":"hc-direct"} WITHOUT detour to avoid 1.14 empty-direct FATAL
+	onlyDirect := `{"outbounds":[{"type":"direct","tag":"#DC"}],"route":{"rules":[{"rule_set":"geosite-cn","outbound":"#DC"}],"rule_set":[{"tag":"geosite-cn","type":"remote","url":"https://example.com/cn.srs","download_detour":"#DC"}]}}`
+	outDirect, err := AdaptIOSConfig(onlyDirect, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(outDirect, `"download_detour"`) || strings.Contains(outDirect, `"detour"`) {
+		t.Fatalf("empty direct fallback must omit both download_detour and empty-direct detour, got %s", outDirect)
+	}
+	if !strings.Contains(outDirect, `"default_http_client":"hc-direct"`) {
+		t.Fatalf("expected default_http_client=hc-direct on direct fallback, got %s", outDirect)
+	}
+
+	// 3) Legacy v1.12/v1.13 compatibility -> keeps download_detour and omits http_clients / default_http_client
+	outLegacy, err := AdaptIOSConfigForVersion(base, "", "v1.12")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(outLegacy, `"download_detour":"#Auto"`) {
+		t.Fatalf("v1.12 legacy output expected download_detour=#Auto, got %s", outLegacy)
+	}
+	if strings.Contains(outLegacy, `"http_clients"`) || strings.Contains(outLegacy, `"default_http_client"`) {
+		t.Fatalf("v1.12 legacy output must not contain 1.14 http_clients fields, got %s", outLegacy)
 	}
 }
 
