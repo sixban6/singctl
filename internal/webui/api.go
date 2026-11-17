@@ -126,22 +126,6 @@ func singboxStatus() map[string]any {
 	}
 }
 
-func daemonStatus(cfgMaxRestarts int) map[string]any {
-	running := daemon.IsDaemonRunning()
-	// 无论 daemon 是否运行, 都从状态文件恢复计数(文件由看门狗落盘, 跨重启保留)
-	limiter := daemon.NewRestartLimiterFromState(cfgMaxRestarts)
-	restarts := limiter.GetRestartCount()
-	maxRestarts := limiter.GetMaxRestarts()
-	totalRestarts := limiter.GetTotalRestarts()
-	return map[string]any{
-		"running":       running,
-		"restarts":      restarts,
-		"maxRestarts":   maxRestarts,
-		"totalRestarts": totalRestarts,
-		"logPath":       daemon.GetDaemonLogPath(),
-	}
-}
-
 func tailscaleStatus(configPath string) map[string]any {
 	// OpenWrt 装在 /usr/sbin,发行版常在 /usr/bin,桌面端在 /usr/local/bin
 	binPath := ""
@@ -435,12 +419,6 @@ func (s *Server) handleConfigPut(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-func (dto ConfigDTO) toConfig() *config.Config {
-	cfg := &config.Config{}
-	dto.ApplyTo(cfg)
-	return cfg
-}
-
 func (dto ConfigDTO) ApplyTo(cfg *config.Config) {
 	prevByName := make(map[string]config.Subscription, len(cfg.Subs))
 	prevByURL := make(map[string]config.Subscription, len(cfg.Subs))
@@ -650,14 +628,6 @@ func backupConfig(path string) error {
 		}
 	}
 	return nil
-}
-
-// preserveMode 返回目标文件应使用的权限(存在则保持原样,否则 0600)
-func preserveMode(path string) os.FileMode {
-	if fi, err := os.Stat(path); err == nil {
-		return fi.Mode().Perm()
-	}
-	return 0600
 }
 
 // ───────────────────── sing-box 配置文件(config.json) ─────────────────────

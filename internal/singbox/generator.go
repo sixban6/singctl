@@ -319,11 +319,6 @@ func HardenClientClashAPI(rawJSON, platform string) (string, error) {
 	return string(data), nil
 }
 
-// InjectTrafficRouting 将 singctl.yaml 中的客户端「智能分流开关中心」预设覆盖策略应用到生成配置中。
-func (g *ConfigGenerator) InjectTrafficRouting(rawJSON string) (string, error) {
-	return g.InjectTrafficRoutingForPlatform(rawJSON, "")
-}
-
 // InjectTrafficRoutingForPlatform 按目标平台将客户端「智能分流开关中心」预设覆盖策略应用到生成配置中。
 func (g *ConfigGenerator) InjectTrafficRoutingForPlatform(rawJSON, platform string) (string, error) {
 	if g == nil || g.config == nil {

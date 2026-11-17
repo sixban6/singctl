@@ -233,17 +233,6 @@ var warpPresetRegistry = []WarpPresetDef{
 	},
 }
 
-// GetWarpPresets 返回全部 15 项内置预设的只读副本
-func GetWarpPresets() []WarpPresetDef {
-	out := make([]WarpPresetDef, len(warpPresetRegistry))
-	for i, p := range warpPresetRegistry {
-		p.RuleSets = slices.Clone(p.RuleSets)
-		p.DomainSuffixes = slices.Clone(p.DomainSuffixes)
-		out[i] = p
-	}
-	return out
-}
-
 // BuildPresetStateList 结合当前配置计算所有内置预设的启用状态
 func BuildPresetStateList(wr config.WarpRoutingConfig) []WarpPresetState {
 	out := make([]WarpPresetState, 0, len(warpPresetRegistry))

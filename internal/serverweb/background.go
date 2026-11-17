@@ -79,12 +79,6 @@ WantedBy=multi-user.target
 	return nil
 }
 
-// StartService starts the singctl-ui systemd service.
-func StartService() error {
-	cleanupLegacyProcessAndUnit()
-	return exec.Command("systemctl", "start", ServiceName).Run()
-}
-
 // StopService stops the singctl-ui systemd service and cleans up any legacy process.
 func StopService() error {
 	cleanupLegacyProcessAndUnit()

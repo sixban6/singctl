@@ -85,12 +85,6 @@ type clashDNSResponse struct {
 	} `json:"Answer"`
 }
 
-// CheckDNSHealth 通过 sing-box 的 clash API 检测 DNS 是否正常
-func (m *Monitor) CheckDNSHealth() (ok bool, detail string) {
-	ok, _, detail = m.CheckDNSHealthWithLatency()
-	return ok, detail
-}
-
 // CheckDNSHealthWithLatency 通过 sing-box 的 clash API 检测 DNS 是否正常并返回耗时毫秒。
 func (m *Monitor) CheckDNSHealthWithLatency() (ok bool, latencyMs int, detail string) {
 	return CheckDNSHealthAgainstEndpoints(singbox.ClashAPIEndpoints(), singbox.ClashAPISecret())

@@ -37,11 +37,6 @@ func New(cfg *config.Config) *SingBox {
 	}
 }
 
-// SetConfigPath 设置配置文件路径（主要用于测试）
-func (sb *SingBox) SetConfigPath(path string) {
-	sb.configPath = path
-}
-
 type gatewayOrchestrator interface {
 	Apply(ctx context.Context, cfg config.GatewayConfig) error
 	Teardown(ctx context.Context) error

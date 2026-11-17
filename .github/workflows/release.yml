@@ -54,6 +54,12 @@ jobs:
       - name: Go Vet & Tests
         run: |
           go vet ./...
+          DEAD=$(go run golang.org/x/tools/cmd/deadcode@v0.53.0 -test ./...)
+          if [ -n "$DEAD" ]; then
+            echo "::error::Unreachable Go functions detected:"
+            echo "$DEAD"
+            exit 1
+          fi
           go test -race ./internal/...
           go test -short ./test/...
 

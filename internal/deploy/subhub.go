@@ -132,21 +132,6 @@ func (sb *Substore) GetSubscriptionURL() string {
 	return fmt.Sprintf("https://%s/download/collection/all", sbDomain)
 }
 
-func (sb *Substore) ShowLoginInfo() {
-	subURL := sb.GetSubscriptionURL()
-	adminURL, _ := sb.GetAdminURL()
-	logger.Success("SubHub native subscription engine is ready!")
-	fmt.Println("\n========================================================")
-	fmt.Println("📦 SubHub 聚合订阅中心:")
-	if subURL != "" {
-		fmt.Printf("• 全平台聚合订阅链接:\n  %s\n", subURL)
-	}
-	if adminURL != "" {
-		fmt.Printf("• 内置管理面板 (添加外部订阅 / 预览配置 / 轮换密钥):\n  %s\n", adminURL)
-	}
-	fmt.Println("========================================================")
-}
-
 func UninstallSubstore() error {
 	logger.Info("Uninstalling SubHub subscription service...")
 	if err := subhub.UninstallService(true); err != nil {

@@ -105,12 +105,6 @@ func (c *Client) FetchLatest(ctx context.Context, repo string) (*Info, error) {
 	return c.fetchInfo(ctx, url)
 }
 
-// FetchByTag 直连获取指定 tag 的 Release 元数据（不走镜像）。
-func (c *Client) FetchByTag(ctx context.Context, repo, tag string) (*Info, error) {
-	url := fmt.Sprintf("%s/repos/%s/releases/tags/%s", c.apiBase(), repo, tag)
-	return c.fetchInfo(ctx, url)
-}
-
 func (c *Client) fetchInfo(ctx context.Context, url string) (*Info, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {

@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { WarpDiagnoseResponse, ServerStatusResponse, ReturnSummary, MediaUnlockReport, ExitProfile } from '../types';
 import { api } from '../api';
 import { useToast } from '../ui';
-import { Globe, Activity, RefreshCw, CheckCircle2, AlertTriangle, ArrowUpDown, ChevronDown, ChevronUp, Sparkles, Tv, Bot, Search, PlaySquare, ShieldCheck, Shield, Split } from 'lucide-react';
+import { Globe, Activity, RefreshCw, CheckCircle2, AlertTriangle, ArrowUpDown, ChevronDown, ChevronUp, Sparkles, Tv, Bot, Search, PlaySquare, Shield, Split } from 'lucide-react';
 import { TabKey } from './Navigation';
 
 interface DiagnosticsTabProps {

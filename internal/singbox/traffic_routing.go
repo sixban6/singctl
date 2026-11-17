@@ -385,17 +385,6 @@ func ClientRoutingCategories() []TrafficCategoryInfo {
 	return slices.Clone(clientRoutingCategories)
 }
 
-// AllClientRoutingPresets 返回客户端智能分流全部内置预设副本。
-func AllClientRoutingPresets() []TrafficPresetDef {
-	out := make([]TrafficPresetDef, len(clientRoutingPresets))
-	for i, p := range clientRoutingPresets {
-		p.DomainSuffixes = slices.Clone(p.DomainSuffixes)
-		p.RuleSets = slices.Clone(p.RuleSets)
-		out[i] = p
-	}
-	return out
-}
-
 // LookupClientRoutingPreset 根据 ID 查找内置预设定义。
 func LookupClientRoutingPreset(id string) (TrafficPresetDef, bool) {
 	key := strings.ToLower(strings.TrimSpace(id))

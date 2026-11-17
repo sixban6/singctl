@@ -487,10 +487,6 @@ func (t *SniffTracker) Flush() {
 	t.persistSnapshot(raw, seq)
 }
 
-func (t *SniffTracker) observeLocked(ipStr, vector, status string, hitsDelta int, setExactHits bool) {
-	t.observeNodeAtLocked("local", "本机网关", ipStr, vector, status, hitsDelta, setExactHits, time.Time{}, time.Time{})
-}
-
 func (t *SniffTracker) observeNodeAtLocked(nodeID, nodeName, ipStr, vector, status string, hitsDelta int, setExactHits bool, firstTime, lastTime time.Time) {
 	now := time.Now()
 	nodeID = cmp.Or(strings.TrimSpace(nodeID), "local")
@@ -2063,15 +2059,6 @@ func parseNFTSetEntries(raw string, refNow time.Time) []nftSetEntry {
 			ip:         ip,
 			observedAt: observedAt,
 		})
-	}
-	return out
-}
-
-func parseNFTSetIPs(raw string) []string {
-	entries := parseNFTSetEntries(raw, time.Now())
-	out := make([]string, 0, len(entries))
-	for _, e := range entries {
-		out = append(out, e.ip)
 	}
 	return out
 }
