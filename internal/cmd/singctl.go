@@ -79,7 +79,7 @@ func NewUpdateCmd(configPath string, version string) *cobra.Command {
 					}
 				}
 				if os.Getenv("SINGCTL_FROM_WEBUI") != "1" {
-					if _, running := webui.WebStatus(); running {
+					if webui.IsWebRunningOrManaged() {
 						logger.Info("Restarting client WebUI daemon to apply new version...")
 						if rErr := webui.RestartWeb(resolvedPath); rErr != nil {
 							logger.Warn("Failed to restart client WebUI daemon: %v", rErr)

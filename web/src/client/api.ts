@@ -26,6 +26,7 @@ import {
 } from './types';
 
 const CLIENT_TOKEN_KEY = 'sc_token';
+export const CLIENT_AUTH_EVENT = 'singctl:unauthorized';
 
 (function initClientSessionAuth() {
   if (typeof window === 'undefined') return;
@@ -33,14 +34,16 @@ const CLIENT_TOKEN_KEY = 'sc_token';
     const params = new URLSearchParams(window.location.search);
     const token = params.get('token');
     const pwd = params.get('password');
+    const bust = params.get('_t');
     if (token) {
       localStorage.setItem(CLIENT_TOKEN_KEY, token);
       document.cookie = `singctl_session=${token}; path=/; max-age=2592000; SameSite=Lax`;
     }
-    // 静默清除地址栏敏感参数，防止复制或截图泄漏凭据
-    if (token || pwd) {
+    // 静默清除地址栏敏感参数与刷新时间戳，防止复制或截图泄漏凭据
+    if (token || pwd || bust) {
       params.delete('token');
       params.delete('password');
+      params.delete('_t');
       const cleanSearch = params.toString() ? `?${params.toString()}` : '';
       window.history.replaceState(
         {},
@@ -61,7 +64,16 @@ function getSavedClientToken(): string {
   }
 }
 
-function clearSavedClientToken() {
+export function saveClientToken(token: string) {
+  if (!token) return;
+  try {
+    localStorage.setItem(CLIENT_TOKEN_KEY, token);
+  } catch {
+    // ignore
+  }
+}
+
+export function clearSavedClientToken() {
   try {
     localStorage.removeItem(CLIENT_TOKEN_KEY);
   } catch {
@@ -69,34 +81,74 @@ function clearSavedClientToken() {
   }
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const headers = new Headers(init.headers);
+function notifyUnauthorized() {
+  clearSavedClientToken();
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(CLIENT_AUTH_EVENT));
+  }
+}
+
+interface ClientRequestInit extends RequestInit {
+  timeoutMs?: number;
+}
+
+function defaultTimeoutForPath(path: string): number {
+  if (
+    path.startsWith('/api/health') ||
+    path.startsWith('/api/sb/proxies/delay') ||
+    path.startsWith('/api/adguard/probe') ||
+    path.startsWith('/api/adguard/filters') ||
+    path.startsWith('/api/audit/ai-') ||
+    path.startsWith('/api/watchdog/patrol')
+  ) {
+    return 35000;
+  }
+  return 15000;
+}
+
+async function request<T>(path: string, init: ClientRequestInit = {}): Promise<T> {
+  const { timeoutMs = defaultTimeoutForPath(path), ...fetchInit } = init;
+  const headers = new Headers(fetchInit.headers);
+  headers.set('X-Requested-With', 'SingCtlWebUI');
   const savedToken = getSavedClientToken();
   if (savedToken && !headers.has('Authorization')) {
     headers.set('Authorization', `Bearer ${savedToken}`);
   }
-  const method = (init.method || 'GET').toUpperCase();
+  const method = (fetchInit.method || 'GET').toUpperCase();
   if (method !== 'GET' && method !== 'HEAD') {
     // internal/webui guard 强制校验写请求必须为 application/json
     if (!headers.has('Content-Type')) {
       headers.set('Content-Type', 'application/json');
     }
   }
-  if (typeof init.body === 'undefined' && method !== 'GET' && method !== 'HEAD') {
-    init.body = '{}';
+  if (typeof fetchInit.body === 'undefined' && method !== 'GET' && method !== 'HEAD') {
+    fetchInit.body = '{}';
   }
 
-  const resp = await fetch(path, {
-    credentials: 'same-origin',
-    ...init,
-    method,
-    headers,
-  });
+  const ctrl = new AbortController();
+  const timer = window.setTimeout(() => ctrl.abort(), timeoutMs);
+  let resp: Response;
+  try {
+    resp = await fetch(path, {
+      credentials: 'same-origin',
+      cache: 'no-store',
+      ...fetchInit,
+      method,
+      headers,
+      signal: fetchInit.signal ?? ctrl.signal,
+    });
+  } catch (err) {
+    if ((err as Error)?.name === 'AbortError') {
+      throw new Error('请求网关超时，请稍后重试');
+    }
+    throw err;
+  } finally {
+    window.clearTimeout(timer);
+  }
 
   if (resp.status === 401) {
-    clearSavedClientToken();
-    window.location.reload();
-    throw new Error('会话已过期，正在重新验证');
+    notifyUnauthorized();
+    throw new Error('会话已过期或需要输入访问口令');
   }
 
   const text = await resp.text();
@@ -115,14 +167,71 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 export const clientApi = {
-  getStatus: async () => {
-    const res = await request<ClientStatusResponse>('/api/status');
-    if (res?.sessionToken) {
-      try {
-        localStorage.setItem(CLIENT_TOKEN_KEY, res.sessionToken);
-      } catch {
-        // ignore
+  checkAuth: async (timeoutMs = 2500) => {
+    const ctrl = new AbortController();
+    const timer = window.setTimeout(() => ctrl.abort(), timeoutMs);
+    const headers: Record<string, string> = { 'X-Requested-With': 'SingCtlWebUI' };
+    const savedToken = getSavedClientToken();
+    if (savedToken) {
+      headers['Authorization'] = `Bearer ${savedToken}`;
+    }
+    try {
+      const resp = await fetch('/api/auth/check', {
+        method: 'GET',
+        credentials: 'same-origin',
+        cache: 'no-store',
+        headers,
+        signal: ctrl.signal,
+      });
+      if (!resp.ok) {
+        throw new Error(`HTTP ${resp.status}`);
       }
+      return (await resp.json()) as {
+        ok: boolean;
+        authRequired: boolean;
+        authenticated: boolean;
+        version?: string;
+      };
+    } finally {
+      window.clearTimeout(timer);
+    }
+  },
+  login: async (password: string) => {
+    const ctrl = new AbortController();
+    const timer = window.setTimeout(() => ctrl.abort(), 10000);
+    try {
+      const resp = await fetch('/api/auth/login', {
+        method: 'POST',
+        credentials: 'same-origin',
+        cache: 'no-store',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Requested-With': 'SingCtlWebUI',
+        },
+        body: JSON.stringify({ password }),
+        signal: ctrl.signal,
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        throw new Error(data?.error || `验证失败 (HTTP ${resp.status})`);
+      }
+      if (data?.token) {
+        saveClientToken(data.token);
+      }
+      return data as { ok: boolean; token: string };
+    } catch (err) {
+      if ((err as Error)?.name === 'AbortError') {
+        throw new Error('登录请求超时，请检查网关连接后重试');
+      }
+      throw err;
+    } finally {
+      window.clearTimeout(timer);
+    }
+  },
+  getStatus: async (timeoutMs?: number) => {
+    const res = await request<ClientStatusResponse>('/api/status', { timeoutMs });
+    if (res?.sessionToken) {
+      saveClientToken(res.sessionToken);
     }
     return res;
   },
@@ -303,7 +412,7 @@ export const clientApi = {
     }),
 
   async downloadAuditCSV(qs: URLSearchParams): Promise<string> {
-    const headers: Record<string, string> = {};
+    const headers: Record<string, string> = { 'X-Requested-With': 'SingCtlWebUI' };
     try {
       const savedToken = localStorage.getItem('sc_token');
       if (savedToken) headers['Authorization'] = 'Bearer ' + savedToken;
@@ -312,8 +421,13 @@ export const clientApi = {
     }
     const resp = await fetch(`/api/audit?${qs.toString()}`, {
       credentials: 'same-origin',
+      cache: 'no-store',
       headers,
     });
+    if (resp.status === 401) {
+      notifyUnauthorized();
+      throw new Error('会话已过期或需要输入访问口令');
+    }
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     return resp.text();
   },
@@ -323,7 +437,10 @@ export const clientApi = {
     params: Record<string, unknown>,
     onEvent: (ev: ActionStreamEvent) => void,
   ): Promise<{ code: number; restarting: boolean }> {
-    const streamHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
+    const streamHeaders: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'X-Requested-With': 'SingCtlWebUI',
+    };
     const savedToken = getSavedClientToken();
     if (savedToken) {
       streamHeaders['Authorization'] = `Bearer ${savedToken}`;
@@ -331,13 +448,13 @@ export const clientApi = {
     const resp = await fetch('/api/action', {
       method: 'POST',
       credentials: 'same-origin',
+      cache: 'no-store',
       headers: streamHeaders,
       body: JSON.stringify({ name, params }),
     });
     if (resp.status === 401) {
-      clearSavedClientToken();
-      window.location.reload();
-      throw new Error('需要重新登录');
+      notifyUnauthorized();
+      throw new Error('会话已过期或需要输入访问口令');
     }
     if (resp.status === 409) {
       throw new Error('已有任务在执行中，请稍候');

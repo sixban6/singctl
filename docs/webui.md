@@ -21,24 +21,25 @@
 ```bash
 singctl web start              # 后台启动(推荐),监听 :8090
 singctl web status             # 查看后台运行状态
+singctl web restart            # 平滑重启后台 WebUI (简写 singctl w r)
 singctl web stop               # 停止(简写 singctl w s)
 singctl web                    # 前台运行(Ctrl+C 停止,适合调试)
-singctl web start -l :8080 --password xxx   # 自定义端口 + 口令(admin/xxx)
+singctl web start -l :8080 --password xxx   # 自定义端口 + 口令
 ```
 
-后台模式的机制与看门狗一致:启动时原子抢占状态文件(`/tmp/singctl-web.pid`)防止并发启动,
+后台模式的机制与看门狗一致:启动时以 `0600` 权限原子抢占状态文件(`/tmp/singctl-web.pid`)防止并发启动并保留监听与口令参数,
 fork 后等待子进程真正绑定端口成功才返回(失败如实报错);日志写入 `/tmp/singctl-web.log`。
 
-启动后浏览器访问 `http://<路由器IP>:8090`。
+启动后浏览器访问 `http://<路由器IP>:8090`。设置口令后访问页面会展示自包含口令登录框（验证成功后下发 30 天持久化 `HttpOnly` Cookie，同时兼容 Bearer Token、`?token=` 与 HTTP Basic Auth `admin/<password>`）。
 
 ## 参数
 
 | 参数 | 环境变量 | 说明 |
 | :--- | :--- | :--- |
 | `-l, --listen` | - | 监听地址,默认 `:8090`
-| `-p, --password` | `SINGCTL_WEB_PASSWORD` | 访问口令(用户名固定 `admin`,留空则不鉴权) |
+| `-p, --password` | `SINGCTL_WEB_PASSWORD` | 访问口令(支持网页内嵌口令框登录或 Basic Auth `admin`,留空则不鉴权) |
 
-子命令:`start`(后台启动)、`stop`(停止,别名 `s`)、`status`(状态,别名 `st`);
+子命令:`start`(后台启动)、`restart`(平滑重启,别名 `r`)、`stop`(停止,别名 `s`)、`status`(状态,别名 `st`);
 不带子命令时为前台运行。
 
 > ⚠️ **安全提示**:不设口令时任何能访问该端口的人都可以管理你的路由器,
@@ -109,6 +110,8 @@ WebUI 后端提供简洁的 REST API,可用于自动化:
 
 | 方法 | 路径 | 说明 |
 | :--- | :--- | :--- |
+| GET | `/api/auth/check` | 公开在线与鉴权状态探测（热重启恢复轮询与会话自检） |
+| POST | `/api/auth/login` | 内嵌口令验证登录（同 IP 防爆破限流，下发 30 天 `HttpOnly` Cookie 与会话 Token） |
 | GET | `/api/status` | 全量状态(sing-box/看门狗/组网/防火墙/主机/订阅摘要) |
 | GET | `/api/health` | 健康检测(进程 + DNS,最长约 20s) |
 | GET/PUT | `/api/config` | 配置读取/保存(JSON) |

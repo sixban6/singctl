@@ -15,6 +15,7 @@ import {
   LogOut,
   RotateCw,
   Download,
+  Lock,
 } from 'lucide-react';
 import {
   AppShell,
@@ -28,7 +29,7 @@ import {
   useToast,
 } from '../ui';
 import { useCachedQuery, useHashRoute } from '../hooks';
-import { clientApi } from './api';
+import { clientApi, CLIENT_AUTH_EVENT } from './api';
 import { ClientStatusResponse } from './types';
 import { TaskConsoleDrawer } from './TaskConsoleDrawer';
 import { DashPage } from './pages/DashPage';
@@ -86,6 +87,50 @@ const ClientShell: React.FC = () => {
   const [consoleLines, setConsoleLines] = useState<string[]>([]);
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   const [restartingBanner, setRestartingBanner] = useState(false);
+  const [restartTimedOut, setRestartTimedOut] = useState(false);
+
+  // 内嵌口令登录弹窗状态（会话过期或口令变更时免弹窗直登，彻底告别 401 无限刷新循环）
+  const [authModalOpen, setAuthModalOpen] = useState(false);
+  const [authPassword, setAuthPassword] = useState('');
+  const [authSubmitting, setAuthSubmitting] = useState(false);
+  const [authError, setAuthError] = useState('');
+
+  const reloadWithCacheBust = useCallback(() => {
+    const sep = window.location.pathname.includes('?') ? '&' : '?';
+    window.location.replace(
+      `${window.location.pathname}${sep}_t=${Date.now()}${window.location.hash || ''}`,
+    );
+  }, []);
+
+  useEffect(() => {
+    const onUnauthorized = () => {
+      if (restartingBanner) return;
+      setAuthModalOpen(true);
+    };
+    window.addEventListener(CLIENT_AUTH_EVENT, onUnauthorized);
+    return () => window.removeEventListener(CLIENT_AUTH_EVENT, onUnauthorized);
+  }, [restartingBanner]);
+
+  const handleInlineLogin = useCallback(
+    async (e: React.FormEvent) => {
+      e.preventDefault();
+      if (!authPassword || authSubmitting) return;
+      setAuthSubmitting(true);
+      setAuthError('');
+      try {
+        await clientApi.login(authPassword);
+        setAuthModalOpen(false);
+        setAuthPassword('');
+        success('验证成功，已恢复会话');
+        await refreshStatus(true);
+      } catch (err) {
+        setAuthError((err as Error).message || '访问口令验证失败');
+      } finally {
+        setAuthSubmitting(false);
+      }
+    },
+    [authPassword, authSubmitting, refreshStatus, success],
+  );
 
   const executeAction = useCallback(
     async (name: string, params: Record<string, unknown> = {}) => {
@@ -119,18 +164,26 @@ const ClientShell: React.FC = () => {
 
         if (res.restarting) {
           setRestartingBanner(true);
+          setRestartTimedOut(false);
           toast('程序已自更新，正在重启 Web 控制台并等待恢复…', 'info');
-          window.setTimeout(() => {
-            const poll = window.setInterval(async () => {
+          void (async () => {
+            // 等待 1.8s 让旧进程完成延时关闭与端口释放
+            await new Promise((r) => window.setTimeout(r, 1800));
+            const deadline = Date.now() + 25000;
+            while (Date.now() < deadline) {
               try {
-                await clientApi.getStatus();
-                window.clearInterval(poll);
-                window.location.reload();
+                const probe = await clientApi.checkAuth(2500);
+                if (probe?.ok) {
+                  reloadWithCacheBust();
+                  return;
+                }
               } catch {
-                // still restarting
+                // 新版进程仍在启动中
               }
-            }, 1200);
-          }, 3000);
+              await new Promise((r) => window.setTimeout(r, 1000));
+            }
+            setRestartTimedOut(true);
+          })();
           return;
         }
 
@@ -148,7 +201,7 @@ const ClientShell: React.FC = () => {
         setBusy(false);
       }
     },
-    [busy, refreshStatus, success, error, toast],
+    [busy, refreshStatus, reloadWithCacheBust, success, error, toast],
   );
 
   const requestAction = useCallback(
@@ -174,11 +227,11 @@ const ClientShell: React.FC = () => {
   const handleLogout = useCallback(async () => {
     try {
       await clientApi.logout();
-      window.location.reload();
+      reloadWithCacheBust();
     } catch (e) {
       error((e as Error).message || '退出登录失败');
     }
-  }, [error]);
+  }, [error, reloadWithCacheBust]);
 
   const navGroups: NavGroupConfig<ClientTab>[] = useMemo(() => {
     // 遵循「常态零绿点、仅异常微标提醒」规范：健康运行时 9 个选项卡视觉完全统一对称
@@ -415,9 +468,24 @@ const ClientShell: React.FC = () => {
   const banner = (
     <>
       {restartingBanner && (
-        <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-2.5 text-xs text-emerald-300 flex items-center gap-2">
-          <RefreshCw className="w-4 h-4 animate-spin shrink-0" />
-          <span>程序已完成自我更新并正在重启服务，控制台将在恢复后自动刷新…</span>
+        <div
+          className={`rounded-xl border px-4 py-2.5 text-xs flex flex-wrap items-center justify-between gap-2 ${
+            restartTimedOut
+              ? 'border-amber-500/35 bg-amber-500/10 text-amber-200'
+              : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            <RefreshCw className={`w-4 h-4 shrink-0 ${restartTimedOut ? '' : 'animate-spin'}`} />
+            <span>
+              {restartTimedOut
+                ? '服务重启等待超时，若新版进程已完成启动，可点击右侧按钮手动重连刷新。'
+                : '程序已完成自我更新并正在平滑重启 Web 服务，恢复后将自动刷新加载最新版本…'}
+            </span>
+          </div>
+          <Button size="xs" variant="secondary" onClick={reloadWithCacheBust}>
+            立即重连 / 刷新页面
+          </Button>
         </div>
       )}
       {status?.daemon?.staleBinary && (
@@ -539,6 +607,56 @@ const ClientShell: React.FC = () => {
           executeAction(next.name, next.params);
         }}
       />
+
+      {authModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/75 backdrop-blur-sm p-4">
+          <form
+            onSubmit={handleInlineLogin}
+            className="w-full max-w-sm rounded-2xl border border-slate-800 bg-slate-900 p-6 shadow-2xl space-y-4"
+          >
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-cyan-500/15 border border-cyan-400/25 flex items-center justify-center text-cyan-400 shrink-0">
+                <Lock className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-semibold text-slate-100">需要验证访问口令</h3>
+                <p className="text-xs text-slate-400">会话已过期或服务已启用口令保护</p>
+              </div>
+            </div>
+
+            {authError && (
+              <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">
+                {authError}
+              </div>
+            )}
+
+            <div className="space-y-1.5">
+              <label className="block text-xs font-medium text-slate-300">WebUI 访问口令</label>
+              <input
+                type="password"
+                value={authPassword}
+                onChange={(e) => setAuthPassword(e.target.value)}
+                placeholder="请输入访问口令"
+                autoFocus
+                required
+                className="w-full h-10 rounded-xl border border-slate-700 bg-slate-950 px-3 text-sm text-slate-100 placeholder:text-slate-500 focus:border-cyan-500 focus:outline-none"
+              />
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <Button
+                type="submit"
+                variant="primary"
+                loading={authSubmitting}
+                disabled={!authPassword || authSubmitting}
+                className="w-full justify-center"
+              >
+                {authSubmitting ? '正在验证...' : '验证并恢复控制台'}
+              </Button>
+            </div>
+          </form>
+        </div>
+      )}
     </>
   );
 };
