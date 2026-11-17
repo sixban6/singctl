@@ -342,6 +342,8 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 			}
 			s.gatewayToken = config.DeriveGatewayToken(cfg.Server.GetWebAdminPath())
 			s.mu.Unlock()
+			s.updateConfigCache(cfg)
+			s.invalidateStatusCaches()
 			if cErr := deploy.SyncCaddyfile(cfg); cErr != nil {
 				logger.Warn("灾备恢复后同步 Caddyfile 提示: %v", cErr)
 			}

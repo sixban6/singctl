@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"singctl/internal/config"
@@ -67,19 +68,40 @@ type Server struct {
 	warpCachedIP       string
 	warpCachedLoc      string
 	warpCachedAt       time.Time
-	warpWatchdogMu     sync.Mutex
-	warpBootSynced     bool
-	warpFailStreak     int
-	warpDegraded       bool
-	warpAutoHealStatus string
-	warpLastHealedAt   string
+	warpWatchdogMu        sync.Mutex
+	warpLegacyChecked     bool
+	warpBootSynced        bool
+	warpFailStreak        int
+	warpDegraded          bool
+	warpAutoHealStatus    string
+	warpLastHealedAt      string
 	warpWatchdogDeps      *WarpWatchdogDeps
+	configCacheMu         sync.RWMutex
+	cachedConfig          *config.Config
+	cachedConfigAt        time.Time
+	cachedSubAdminURL     string
+	configRefreshRunning  atomic.Bool
 	versionCacheMu        sync.Mutex
 	cachedVersions        map[string]string
 	cachedVersionsAt      time.Time
+	versionProbeRunning   atomic.Bool
 	serviceProbeMu        sync.Mutex
 	cachedServiceProbes   map[string]serviceProbeSnapshot
 	cachedServiceProbesAt time.Time
+	serviceProbeRunning   atomic.Bool
+	certProbeMu           sync.Mutex
+	cachedCerts           []CertHealth
+	cachedCertsAt         time.Time
+	certProbeRunning      atomic.Bool
+	diskMetricsMu         sync.Mutex
+	cachedDiskUsed        string
+	cachedDiskTotal       string
+	cachedDiskPercent     string
+	cachedDiskOK          bool
+	cachedDiskAt          time.Time
+	diskProbeRunning      atomic.Bool
+	statusProberOverride  func() map[string]serviceProbeSnapshot
+	configLoaderOverride  func(string) (*config.Config, error)
 	healCacheMu           sync.Mutex
 	healScanMu            sync.Mutex
 	cachedHealReport      *heal.StatusReport
@@ -101,11 +123,13 @@ const (
 func New(opts Options) *Server {
 	pendingAck := false
 	gatewayToken := ""
+	var initialCfg *config.Config
 	if opts.ConfigPath != "" {
 		if cfg, err := config.Load(opts.ConfigPath); err == nil && cfg != nil {
 			if cfg.Server.EnsureWebAdminCredentials() {
 				_ = config.Save(opts.ConfigPath, cfg)
 			}
+			initialCfg = cfg
 			if opts.Username == "" {
 				opts.Username = cfg.Server.GetWebAdminUsername()
 			}
@@ -163,6 +187,9 @@ func New(opts Options) *Server {
 		passwordPendingAck: pendingAck,
 		gatewayToken:       gatewayToken,
 		cliToken:           cliToken,
+	}
+	if initialCfg != nil {
+		s.updateConfigCache(initialCfg)
 	}
 
 	// 静态单页面：放行静态资源，敏感 API 均受 guard 保护
@@ -286,6 +313,12 @@ func (s *Server) ListenAndServe() error {
 	patrolCtx, cancelPatrol := context.WithCancel(context.Background())
 	defer cancelPatrol()
 	defer func() {
+		if s.audit != nil {
+			s.audit.Flush()
+		}
+		if s.limiter != nil {
+			s.limiter.Close()
+		}
 		if s.sniff != nil {
 			s.sniff.Flush()
 		}
@@ -314,6 +347,29 @@ func (s *Server) invalidateStatusCaches() {
 	s.cachedVersions = nil
 	s.cachedVersionsAt = time.Time{}
 	s.versionCacheMu.Unlock()
+
+	s.certProbeMu.Lock()
+	s.cachedCerts = nil
+	s.cachedCertsAt = time.Time{}
+	s.certProbeMu.Unlock()
+}
+
+func (s *Server) updateConfigCache(cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	subURL := s.resolveSubstoreAdminURLFast(cfg)
+	s.configCacheMu.Lock()
+	s.cachedConfig = cfg
+	s.cachedSubAdminURL = subURL
+	s.cachedConfigAt = time.Now()
+	s.configCacheMu.Unlock()
+}
+
+func (s *Server) invalidateConfigCache() {
+	s.configCacheMu.Lock()
+	s.cachedConfigAt = time.Time{}
+	s.configCacheMu.Unlock()
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

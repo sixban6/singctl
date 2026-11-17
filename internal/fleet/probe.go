@@ -15,8 +15,12 @@ import (
 	"time"
 )
 
-// DefaultPatrolInterval is the default low-frequency background HTTPS probe cadence.
-const DefaultPatrolInterval = 3 * time.Minute
+const (
+	// DefaultPatrolInterval is the default low-frequency background HTTPS probe cadence.
+	DefaultPatrolInterval = 3 * time.Minute
+	// patrolPersistMinInterval bounds steady-state fleet.yaml writes when node status has not changed.
+	patrolPersistMinInterval = 30 * time.Minute
+)
 
 // ProbeResult captures the outcome of a zero-SSH-log HTTPS :443 health check on a worker node.
 type ProbeResult struct {
@@ -194,13 +198,13 @@ func (m *Manager) httpProber() HTTPSProberFunc {
 	return DefaultHTTPSProber
 }
 
-func (m *Manager) probeSingleNode(ctx context.Context, node Node) ProbeResult {
+func (m *Manager) probeSingleNodeWithPersist(ctx context.Context, node Node, minPersistInterval time.Duration) ProbeResult {
 	prober := m.httpProber()
 	res := prober(ctx, node)
 	if res.Skipped {
 		return res
 	}
-	_, _ = m.Store.UpdateRuntimeState(node.ID, func(n *Node) {
+	_, _ = m.Store.UpdateProbeRuntimeState(node.ID, func(n *Node) {
 		n.Online = res.Online
 		n.LastProbeAt = res.CheckedAt
 		n.ProbeStatus = res.ProbeStatus
@@ -215,8 +219,12 @@ func (m *Manager) probeSingleNode(ctx context.Context, node Node) ProbeResult {
 		} else {
 			n.LastError = res.Message
 		}
-	})
+	}, minPersistInterval)
 	return res
+}
+
+func (m *Manager) probeSingleNode(ctx context.Context, node Node) ProbeResult {
+	return m.probeSingleNodeWithPersist(ctx, node, 0)
 }
 
 func (m *Manager) probeNodeActionObj(ctx context.Context, node Node) NodeActionResult {
@@ -240,6 +248,10 @@ func (m *Manager) probeNodeActionObj(ctx context.Context, node Node) NodeActionR
 
 // ProbeNodes runs concurrent zero-SSH-log HTTPS :443 probes across targetIDs (or all enabled nodes if empty).
 func (m *Manager) ProbeNodes(ctx context.Context, targetIDs []string) ([]ProbeResult, error) {
+	return m.probeNodesInternal(ctx, targetIDs, 0)
+}
+
+func (m *Manager) probeNodesInternal(ctx context.Context, targetIDs []string, minPersistInterval time.Duration) ([]ProbeResult, error) {
 	if m == nil || m.Store == nil {
 		return nil, nil
 	}
@@ -284,7 +296,7 @@ func (m *Manager) ProbeNodes(ctx context.Context, targetIDs []string) ([]ProbeRe
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			results[idx] = m.probeSingleNode(ctx, node)
+			results[idx] = m.probeSingleNodeWithPersist(ctx, node, minPersistInterval)
 		}(i, n)
 	}
 	wg.Wait()
@@ -316,7 +328,7 @@ func (m *Manager) StartBackgroundPatrol(ctx context.Context, interval time.Durat
 			return
 		case <-warmup.C:
 			pCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-			_, _ = m.ProbeNodes(pCtx, nil)
+			_, _ = m.probeNodesInternal(pCtx, nil, patrolPersistMinInterval)
 			cancel()
 		}
 
@@ -330,7 +342,7 @@ func (m *Manager) StartBackgroundPatrol(ctx context.Context, interval time.Durat
 				return
 			case <-timer.C:
 				pCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-				_, _ = m.ProbeNodes(pCtx, nil)
+				_, _ = m.probeNodesInternal(pCtx, nil, patrolPersistMinInterval)
 				cancel()
 			}
 		}

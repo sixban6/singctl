@@ -87,7 +87,7 @@ func (s *Server) StartWarpWatchdog(ctx context.Context, interval time.Duration) 
 
 // RunWarpWatchdogTick 执行单次 WARP 健康巡检、旧版 fscarmen 迁移及三阶段自动自愈。
 func (s *Server) RunWarpWatchdogTick(ctx context.Context) {
-	cfg, err := config.Load(s.opts.ConfigPath)
+	cfg, err := s.loadConfigBounded(200 * time.Millisecond)
 	if err != nil || cfg == nil {
 		return
 	}
@@ -115,43 +115,52 @@ func (s *Server) RunWarpWatchdogTick(ctx context.Context) {
 }
 
 func (s *Server) syncBootWarpAndPurgeLegacy(ctx context.Context, cfg *config.Config, d WarpWatchdogDeps) {
-	if d.HasLegacyFscarmen() {
-		s.warpMu.Lock()
-		deployErr := d.PurgeAndDeploy(cfg)
-		s.warpMu.Unlock()
-		if deployErr == nil {
-			_ = s.evictAllWarpConnections(ctx)
-			s.recordWatchdogAudit("检测到旧版 fscarmen WARP 残留，已自动清理并迁移至内置纯 Go wireproxy 引擎 (MTU=1280)")
-			logger.Success("已自动清理旧版 fscarmen WARP 并迁移至纯 Go wireproxy")
-		} else {
-			logger.Warn("WARP Watchdog 迁移旧版 fscarmen 失败: %v", deployErr)
-		}
-	}
-
-	if s.warpWatchdogDeps == nil {
-		s.warpMu.Lock()
-		normalizedWireproxy := false
-		if raw, rErr := os.ReadFile(deploy.DefaultWireproxyConf); rErr == nil {
-			if normalized, changed := deploy.NormalizeWireproxyConfigContent(string(raw)); changed {
-				if wErr := writeAtomicFile0600(deploy.DefaultWireproxyConf, []byte(normalized)); wErr == nil {
-					_ = exec.Command("systemctl", "restart", "wireproxy").Run()
-					normalizedWireproxy = true
-				}
-			}
-		}
-		s.warpMu.Unlock()
-		if normalizedWireproxy {
-			s.warpCacheMu.Lock()
-			s.warpCachedIP = ""
-			s.warpCachedLoc = ""
-			s.warpCachedAt = time.Time{}
-			s.warpCacheMu.Unlock()
-		}
-	}
-
 	s.warpWatchdogMu.Lock()
+	legacyChecked := s.warpLegacyChecked
 	alreadySynced := s.warpBootSynced || s.warpDegraded
 	s.warpWatchdogMu.Unlock()
+
+	if !legacyChecked {
+		if d.HasLegacyFscarmen() {
+			s.warpMu.Lock()
+			deployErr := d.PurgeAndDeploy(cfg)
+			s.warpMu.Unlock()
+			if deployErr == nil {
+				_ = s.evictAllWarpConnections(ctx)
+				s.recordWatchdogAudit("检测到旧版 fscarmen WARP 残留，已自动清理并迁移至内置纯 Go wireproxy 引擎 (MTU=1280)")
+				logger.Success("已自动清理旧版 fscarmen WARP 并迁移至纯 Go wireproxy")
+			} else {
+				logger.Warn("WARP Watchdog 迁移旧版 fscarmen 失败: %v", deployErr)
+			}
+		}
+
+		if s.warpWatchdogDeps == nil {
+			s.warpMu.Lock()
+			normalizedWireproxy := false
+			if raw, rErr := os.ReadFile(deploy.DefaultWireproxyConf); rErr == nil {
+				if normalized, changed := deploy.NormalizeWireproxyConfigContent(string(raw)); changed {
+					if wErr := writeAtomicFile0600(deploy.DefaultWireproxyConf, []byte(normalized)); wErr == nil {
+						_ = exec.Command("systemctl", "restart", "wireproxy").Run()
+						normalizedWireproxy = true
+					}
+				}
+			}
+			s.warpMu.Unlock()
+			if normalizedWireproxy {
+				s.warpCacheMu.Lock()
+				s.warpCachedIP = ""
+				s.warpCachedLoc = ""
+				s.warpCachedAt = time.Time{}
+				s.warpCacheMu.Unlock()
+			}
+		}
+
+		s.warpWatchdogMu.Lock()
+		s.warpLegacyChecked = true
+		alreadySynced = s.warpBootSynced || s.warpDegraded
+		s.warpWatchdogMu.Unlock()
+	}
+
 	if alreadySynced {
 		return
 	}

@@ -6,10 +6,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"singctl/internal/config"
 	"singctl/internal/heal"
 )
 
@@ -222,5 +225,177 @@ server:
 	}
 	if bytes.Contains(recRefresh.Body.Bytes(), []byte("cached-sentinel-label")) {
 		t.Fatalf("expected ?refresh=1 to bypass cache, still got sentinel: %s", recRefresh.Body.String())
+	}
+}
+
+func TestLoginAndStatus_SurviveTotalDiskAndSystemdStall(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "singctl.yaml")
+	auditPath := filepath.Join(tmpDir, ".serverweb_audit.json")
+	banPath := filepath.Join(tmpDir, ".serverweb_bans.json")
+
+	if err := os.WriteFile(cfgPath, []byte(`
+server:
+  node_domain: "node.example.com"
+  substore_domain: "sub.example.com"
+  web_admin:
+    path: "/sr/testpanel"
+    username: "opsadmin"
+    password: "Password123"
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := New(Options{
+		ConfigPath:    cfgPath,
+		SubStoreDir:   filepath.Join(tmpDir, "sub-store"),
+		FleetFilePath: filepath.Join(tmpDir, "fleet.yaml"),
+		AuditFilePath: auditPath,
+		BanFilePath:   banPath,
+		Username:      "opsadmin",
+		Password:      "Password123",
+	})
+	srv.sniff.EnableSystemProbe = false
+
+	// Seed cached component versions and certs so we focus on stalled disk + stalled systemd probes
+	srv.versionCacheMu.Lock()
+	srv.cachedVersions = map[string]string{"caddy": "2.9.1", "singbox": "1.12.0", "subhub": "1.14.130", "warp": "1.0.9"}
+	srv.cachedVersionsAt = time.Now()
+	srv.versionCacheMu.Unlock()
+	srv.certProbeMu.Lock()
+	srv.cachedCerts = []CertHealth{{Domain: "sub.example.com", Status: "healthy", DaysRemaining: 80}}
+	srv.cachedCertsAt = time.Now()
+	srv.certProbeMu.Unlock()
+
+	// Simulate kernel D-state freeze on disk writes, config reads, and systemctl child processes
+	blockDiskCh := make(chan struct{})
+	stalledWrite := func(path string, data []byte) error {
+		<-blockDiskCh
+		return writeAtomicFile0600(path, data)
+	}
+	srv.audit.writer.setWriteFunc(stalledWrite)
+	srv.limiter.writer.setWriteFunc(stalledWrite)
+	srv.configLoaderOverride = func(p string) (*config.Config, error) {
+		<-blockDiskCh
+		return config.Load(p)
+	}
+	srv.statusProberOverride = func() map[string]serviceProbeSnapshot {
+		<-blockDiskCh
+		return map[string]serviceProbeSnapshot{
+			"caddy":    {running: true, pid: "101"},
+			"sing-box": {running: true, pid: "102"},
+		}
+	}
+	// Force config cache TTL expiry so handleStatus hits the stalled configLoaderOverride
+	srv.invalidateConfigCache()
+
+	// 1. Trigger a background Watchdog audit write so the writer goroutine is already wedged in D-state
+	srv.audit.Record("127.0.0.1", "WARP 巡检模拟慢盘写入")
+
+	// 2. Wrong password login must still return 401 fast without blocking on stalled ban/audit disk writes
+	t0 := time.Now()
+	badReq := httptest.NewRequest(http.MethodPost, "/api/server/login", strings.NewReader(`{"username":"opsadmin","password":"WrongPassword"}`))
+	badReq.RemoteAddr = "198.51.100.42:54321"
+	badReq.Header.Set("Content-Type", "application/json")
+	badRec := httptest.NewRecorder()
+	srv.Mux.ServeHTTP(badRec, badReq)
+	if badRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 on wrong password during disk stall, got %d: %s", badRec.Code, badRec.Body.String())
+	}
+	if elapsed := time.Since(t0); elapsed > 300*time.Millisecond {
+		t.Fatalf("expected wrong-password login to complete fast during disk stall, took %v", elapsed)
+	}
+
+	// 3. Valid login must succeed with 200 + session cookie in <300ms despite 100% disk freeze
+	t1 := time.Now()
+	okReq := httptest.NewRequest(http.MethodPost, "/api/server/login", strings.NewReader(`{"username":"opsadmin","password":"Password123"}`))
+	okReq.RemoteAddr = "198.51.100.42:54322"
+	okReq.Header.Set("Content-Type", "application/json")
+	okRec := httptest.NewRecorder()
+	srv.Mux.ServeHTTP(okRec, okReq)
+	if okRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on valid login during disk stall, got %d: %s", okRec.Code, okRec.Body.String())
+	}
+	if elapsed := time.Since(t1); elapsed > 300*time.Millisecond {
+		t.Fatalf("expected valid login to complete fast during disk stall, took %v", elapsed)
+	}
+	cookies := okRec.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("expected session cookie to be issued during disk stall")
+	}
+
+	// 4. Post-login GET /api/server/status must return 200 within bounded select budget despite stalled config & systemctl
+	t2 := time.Now()
+	stReq := httptest.NewRequest(http.MethodGet, "/api/server/status", nil)
+	stReq.RemoteAddr = "198.51.100.42:54323"
+	for _, c := range cookies {
+		stReq.AddCookie(c)
+	}
+	stRec := httptest.NewRecorder()
+	srv.Mux.ServeHTTP(stRec, stReq)
+	if stRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 from /api/server/status during disk+systemd stall, got %d: %s", stRec.Code, stRec.Body.String())
+	}
+	if elapsed := time.Since(t2); elapsed > 1500*time.Millisecond {
+		t.Fatalf("expected /api/server/status within bounded fallback window, took %v", elapsed)
+	}
+	if !strings.Contains(stRec.Body.String(), "sub.example.com") {
+		t.Fatalf("expected fallback cached config domain in status response, got: %s", stRec.Body.String())
+	}
+
+	// 5. Unfreeze disk and verify coalesced snapshots flush cleanly with 0600 permissions
+	close(blockDiskCh)
+	srv.audit.Flush()
+	srv.limiter.Close()
+
+	stAudit, err := os.Stat(auditPath)
+	if err != nil || stAudit.Mode().Perm() != 0600 {
+		t.Fatalf("expected 0600 flushed audit file after stall recovery, err=%v", err)
+	}
+	reloadedAudit := NewAuditManager(auditPath)
+	if len(reloadedAudit.List()) < 3 {
+		t.Fatalf("expected all 3 audit entries coalesced and persisted after stall recovery, got %d", len(reloadedAudit.List()))
+	}
+}
+
+func TestWarpWatchdog_LegacyFscarmenCheckRunsOnceNotEveryTick(t *testing.T) {
+	ctx := t.Context()
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "singctl.yaml")
+	if err := os.WriteFile(cfgPath, []byte(`
+server:
+  node_domain: "node.example.com"
+  web_admin:
+    username: "opsadmin"
+    password: "Password123"
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := New(Options{
+		ConfigPath:    cfgPath,
+		SubStoreDir:   filepath.Join(tmpDir, "sub-store"),
+		FleetFilePath: filepath.Join(tmpDir, "fleet.yaml"),
+		Username:      "opsadmin",
+		Password:      "Password123",
+	})
+	srv.sniff.EnableSystemProbe = false
+
+	var legacyChecks atomic.Int32
+	srv.warpWatchdogDeps = &WarpWatchdogDeps{
+		HasLegacyFscarmen: func() bool {
+			legacyChecks.Add(1)
+			return false
+		},
+		ProbeRealTargets: func(time.Duration) (string, string, error) {
+			return "198.51.100.10", "LAX", nil
+		},
+	}
+
+	for range 5 {
+		srv.RunWarpWatchdogTick(ctx)
+	}
+	if got := legacyChecks.Load(); got != 1 {
+		t.Fatalf("expected HasLegacyFscarmen check to run exactly once on boot, got %d calls across 5 ticks", got)
 	}
 }

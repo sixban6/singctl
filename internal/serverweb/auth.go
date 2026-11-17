@@ -345,10 +345,10 @@ func (s *Server) recordAudit(r *http.Request, action string) {
 }
 
 func (s *Server) handleSessionURL(w http.ResponseWriter, r *http.Request) {
-	cfg, err := config.Load(s.opts.ConfigPath)
+	cfg, _ := s.getConfigSnapshot(150 * time.Millisecond)
 	subDomain := ""
 	adminPath := ""
-	if err == nil && cfg != nil {
+	if cfg != nil {
 		subDomain = cfg.Server.GetSubstoreDomain()
 		if subDomain == "" {
 			subDomain = cfg.Server.GetNodeDomain()
@@ -601,6 +601,7 @@ func (s *Server) handleUpdateCredentials(w http.ResponseWriter, r *http.Request)
 		writeJSONError(w, http.StatusInternalServerError, "保存配置文件失败: "+err.Error())
 		return
 	}
+	s.updateConfigCache(cfg)
 
 	s.mu.Lock()
 	s.opts.Username = newUsername
@@ -636,6 +637,7 @@ func (s *Server) handleAckCredentials(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "保存配置文件失败: "+err.Error())
 		return
 	}
+	s.updateConfigCache(cfg)
 	s.mu.Lock()
 	if hashedPass != "" {
 		s.opts.Password = hashedPass

@@ -225,6 +225,7 @@ func (s *Server) applyWarpRoutingConfig(r *http.Request, targetWR config.WarpRou
 	if saveErr := config.Save(s.opts.ConfigPath, cfg); saveErr != nil {
 		return WarpRoutingStatusResponse{}, http.StatusInternalServerError, 0, fmt.Errorf("持久化 singctl.yaml 失败: %w", saveErr)
 	}
+	s.updateConfigCache(cfg)
 
 	s.warpWatchdogMu.Lock()
 	s.warpDegraded = false
