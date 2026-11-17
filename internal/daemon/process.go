@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"time"
 
+	"singctl/internal/updater"
+	"singctl/internal/util/file"
 	"singctl/internal/util/os"
 )
 
@@ -39,10 +41,79 @@ var (
 
 func defaultProcName() string {
 	if p, err := os.Executable(); err == nil {
-		name := filepath.Base(p)
-		return strings.TrimSuffix(name, ".exe")
+		return sanitizeProcName(p)
 	}
 	return "singctl"
+}
+
+func sanitizeProcName(exePath string) string {
+	p := strings.TrimSpace(exePath)
+	for {
+		trimmed := strings.TrimSuffix(p, " (deleted)")
+		trimmed = strings.TrimSuffix(trimmed, ".backup")
+		trimmed = strings.TrimSuffix(trimmed, ".exe")
+		if trimmed == p {
+			break
+		}
+		p = trimmed
+	}
+	if p == "" {
+		return "singctl"
+	}
+	name := filepath.Base(p)
+	for {
+		trimmed := strings.TrimSuffix(name, " (deleted)")
+		trimmed = strings.TrimSuffix(trimmed, ".backup")
+		trimmed = strings.TrimSuffix(trimmed, ".exe")
+		if trimmed == name {
+			break
+		}
+		name = trimmed
+	}
+	if name == "" || name == "." || name == "/" {
+		return "singctl"
+	}
+	return name
+}
+
+func extractPositionalSubcommands(args []string) []string {
+	if len(args) <= 1 {
+		return nil
+	}
+	var out []string
+	for i := 1; i < len(args); i++ {
+		a := strings.TrimSpace(args[i])
+		if a == "" {
+			continue
+		}
+		if a == "-c" || a == "--config" || a == "-l" || a == "--listen" {
+			i++
+			continue
+		}
+		if strings.HasPrefix(a, "-") {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+func isDaemonStartCmdline(args []string) bool {
+	subs := extractPositionalSubcommands(args)
+	return len(subs) >= 2 && (subs[0] == "dm" || subs[0] == "daemon") && subs[1] == "start"
+}
+
+func isConflictingSingctlSubcommand(args []string) bool {
+	subs := extractPositionalSubcommands(args)
+	if len(subs) == 0 {
+		return false
+	}
+	switch subs[0] {
+	case "web", "w", "sr", "server", "sub", "subhub", "update", "u", "fleet", "fl":
+		return true
+	default:
+		return false
+	}
 }
 
 // getPidFilePath 获取PID文件路径
@@ -122,16 +193,11 @@ func AcquirePidLock() error {
 	return ErrDaemonAlreadyRunning
 }
 
-// WritePidFile 以原子方式写入PID文件（先写临时文件再 rename，避免读到半截内容）
+// WritePidFile 以原子方式写入PID文件（强制 0600 权限，先写临时文件再 rename，避免读到半截内容）
 func WritePidFile() error {
 	pidFile := GetPidFilePath()
 	pid := strconv.Itoa(os.Getpid())
-	tmp := pidFile + ".tmp"
-	if err := os.WriteFile(tmp, []byte(pid), 0600); err != nil {
-		return err
-	}
-	_ = os.Chmod(tmp, 0600)
-	return os.Rename(tmp, pidFile)
+	return file.WriteAtomic0600(pidFile, []byte(pid))
 }
 
 // RemovePidFile 删除PID文件
@@ -143,11 +209,16 @@ func RemovePidFile() error {
 	return os.Remove(pidFile)
 }
 
-// ReadDaemonPid 读取守护进程PID
+// ReadDaemonPid 读取守护进程PID；在 Linux 生产环境下若 PID 文件意外丢失，兜底扫描 /proc 定位孤儿 dm start 进程。
 func ReadDaemonPid() (int, error) {
 	pidFile := GetPidFilePath()
 	data, err := os.ReadFile(pidFile)
 	if err != nil {
+		if PidFilePathOverride == "" && runtime.GOOS == "linux" {
+			if orphanPid := findOrphanDaemonPid(); orphanPid > 0 {
+				return orphanPid, nil
+			}
+		}
 		return 0, fmt.Errorf("failed to read pid file: %w", err)
 	}
 
@@ -157,6 +228,32 @@ func ReadDaemonPid() (int, error) {
 	}
 
 	return pid, nil
+}
+
+func findOrphanDaemonPid() int {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return 0
+	}
+	selfPid := os.Getpid()
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || pid <= 0 || pid == selfPid {
+			continue
+		}
+		rawCmd, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+		if err != nil || len(rawCmd) == 0 {
+			continue
+		}
+		args := strings.Split(strings.TrimRight(string(rawCmd), "\x00"), "\x00")
+		if isDaemonStartCmdline(args) && DaemonProcessMatches(pid) {
+			return pid
+		}
+	}
+	return 0
 }
 
 // IsDaemonRunning 检查守护进程是否运行（PID 存活 + 进程名匹配，防 PID 回绕误判）
@@ -176,11 +273,21 @@ func DaemonProcessMatches(pid int) bool {
 
 	expected := ExpectedProcNameFn()
 
-	// Linux: /proc/<pid>/comm（最快且无副作用，内核限制最多 15 字符）
+	// Linux: /proc/<pid>/comm（最快且无副作用，内核限制最多 15 字符）+ /proc/<pid>/cmdline 排除 web/sr 等同二进制非 dm 子命令
 	if runtime.GOOS != "windows" {
 		if b, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid)); err == nil {
 			comm := strings.TrimSpace(string(b))
-			return comm == expected || (len(expected) > 15 && comm == expected[:15])
+			matched := comm == expected || (len(expected) > 15 && comm == expected[:15])
+			if !matched {
+				return false
+			}
+			if rawCmd, cErr := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid)); cErr == nil && len(rawCmd) > 0 {
+				args := strings.Split(strings.TrimRight(string(rawCmd), "\x00"), "\x00")
+				if isConflictingSingctlSubcommand(args) {
+					return false
+				}
+			}
+			return true
 		}
 	}
 
@@ -192,7 +299,15 @@ func DaemonProcessMatches(pid int) bool {
 			return true
 		}
 		name := filepath.Base(strings.TrimSpace(string(out)))
-		return name == expected || strings.HasPrefix(name, expected)
+		if !(name == expected || strings.HasPrefix(name, expected)) {
+			return false
+		}
+		if cmdOut, cErr := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output(); cErr == nil {
+			if isConflictingSingctlSubcommand(strings.Fields(string(cmdOut))) {
+				return false
+			}
+		}
+		return true
 	}
 
 	// Windows: 无法低成本校验进程名，仅依赖 Signal(0)
@@ -324,31 +439,6 @@ func NotifyReload() bool {
 	return notifyPidReload(pid)
 }
 
-func resolveOnDiskExecutable() (string, error) {
-	exe, err := os.Executable()
-	if err != nil {
-		for _, p := range []string{"/usr/bin/singctl", "/usr/local/bin/singctl"} {
-			if _, stErr := os.Stat(p); stErr == nil {
-				return p, nil
-			}
-		}
-		return "", err
-	}
-	p := strings.TrimSpace(exe)
-	p = strings.TrimSuffix(p, " (deleted)")
-	for strings.HasSuffix(p, ".backup") {
-		p = strings.TrimSuffix(p, ".backup")
-	}
-	if _, stErr := os.Stat(p); stErr != nil {
-		for _, fb := range []string{"/usr/bin/singctl", "/usr/local/bin/singctl"} {
-			if _, fbErr := os.Stat(fb); fbErr == nil {
-				return fb, nil
-			}
-		}
-	}
-	return p, nil
-}
-
 // RestartDaemon 平滑重启看门狗守护进程（不影响运行中的 sing-box 透明代理，全程零断网）。
 func RestartDaemon(configPath string) error {
 	if IsDaemonRunning() {
@@ -356,7 +446,7 @@ func RestartDaemon(configPath string) error {
 			return err
 		}
 	}
-	exe, err := resolveOnDiskExecutable()
+	exe, err := updater.ResolveExecutablePath()
 	if err != nil {
 		return err
 	}

@@ -164,15 +164,19 @@ func (u *Updater) UpdateSelf(configPath string, currentVersion string) error {
 func ResolveExecutablePath() (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
-		if _, stErr := os.Stat("/usr/local/bin/singctl"); stErr == nil {
-			return "/usr/local/bin/singctl", nil
+		for _, fb := range []string{"/usr/bin/singctl", "/usr/local/bin/singctl"} {
+			if _, stErr := os.Stat(fb); stErr == nil {
+				return fb, nil
+			}
 		}
 		return "", err
 	}
 	cleaned := SanitizeExecutablePath(exe)
 	if _, stErr := os.Stat(cleaned); stErr != nil {
-		if _, fbErr := os.Stat("/usr/local/bin/singctl"); fbErr == nil {
-			return "/usr/local/bin/singctl", nil
+		for _, fb := range []string{"/usr/bin/singctl", "/usr/local/bin/singctl"} {
+			if _, fbErr := os.Stat(fb); fbErr == nil {
+				return fb, nil
+			}
 		}
 	}
 	return cleaned, nil
@@ -181,9 +185,13 @@ func ResolveExecutablePath() (string, error) {
 // SanitizeExecutablePath strips ` (deleted)` and trailing `.backup` suffixes from an executable path.
 func SanitizeExecutablePath(exe string) string {
 	p := strings.TrimSpace(exe)
-	p = strings.TrimSuffix(p, " (deleted)")
-	for strings.HasSuffix(p, ".backup") {
-		p = strings.TrimSuffix(p, ".backup")
+	for {
+		next := strings.TrimSuffix(p, " (deleted)")
+		next = strings.TrimSuffix(next, ".backup")
+		if next == p {
+			break
+		}
+		p = next
 	}
 	return p
 }

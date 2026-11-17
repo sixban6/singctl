@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"singctl/internal/logger"
+	"singctl/internal/updater"
+	"singctl/internal/util/file"
 )
 
 // 后台运行机制与 daemon 包的看门狗一致:
@@ -173,13 +175,7 @@ func WriteWebStateAtomic(st WebState) error {
 	if err != nil {
 		return err
 	}
-	path := WebStatePath()
-	tmp := fmt.Sprintf("%s.tmp-%d", path, os.Getpid())
-	if err := os.WriteFile(tmp, b, 0600); err != nil {
-		return err
-	}
-	_ = os.Chmod(tmp, 0600)
-	return os.Rename(tmp, path)
+	return file.WriteAtomic0600(WebStatePath(), b)
 }
 
 // AcquireWebLock 以硬链接原子创建状态文件作为互斥锁（0600 权限）。
@@ -556,28 +552,7 @@ func resolveOnDiskExecutable() (string, error) {
 	if ExecutablePathOverride != "" {
 		return ExecutablePathOverride, nil
 	}
-	exe, err := os.Executable()
-	if err != nil {
-		for _, p := range []string{"/usr/bin/singctl", "/usr/local/bin/singctl"} {
-			if _, stErr := os.Stat(p); stErr == nil {
-				return p, nil
-			}
-		}
-		return "", err
-	}
-	p := strings.TrimSpace(exe)
-	p = strings.TrimSuffix(p, " (deleted)")
-	for strings.HasSuffix(p, ".backup") {
-		p = strings.TrimSuffix(p, ".backup")
-	}
-	if _, stErr := os.Stat(p); stErr != nil {
-		for _, fb := range []string{"/usr/bin/singctl", "/usr/local/bin/singctl"} {
-			if _, fbErr := os.Stat(fb); fbErr == nil {
-				return fb, nil
-			}
-		}
-	}
-	return p, nil
+	return updater.ResolveExecutablePath()
 }
 
 // buildRestartArgs 根据指定监听/配置或历史状态构造重启 `singctl web start` 的命令行参数
