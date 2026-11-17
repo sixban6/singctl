@@ -26,6 +26,7 @@ export interface AppShellProps<T extends string = string> {
   groups: NavGroupConfig<T>[];
   activeTab: T;
   onSelectTab: (tab: T) => void;
+  onHoverTab?: (tab: T) => void;
   mobilePrimaryKeys?: readonly T[];
   statusPill?: React.ReactNode;
   topbarActions?: React.ReactNode;
@@ -46,6 +47,7 @@ export function AppShell<T extends string = string>({
   groups,
   activeTab,
   onSelectTab,
+  onHoverTab,
   mobilePrimaryKeys,
   statusPill,
   topbarActions,
@@ -198,6 +200,8 @@ export function AppShell<T extends string = string>({
               <button
                 key={tab.key}
                 type="button"
+                onMouseEnter={() => onHoverTab?.(tab.key)}
+                onFocus={() => onHoverTab?.(tab.key)}
                 onClick={() => onSelectTab(tab.key)}
                 className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs lg:text-sm font-medium whitespace-nowrap transition-all duration-150 cursor-pointer ${
                   active
@@ -250,6 +254,8 @@ export function AppShell<T extends string = string>({
               <button
                 key={tab.key}
                 type="button"
+                onTouchStart={() => onHoverTab?.(tab.key)}
+                onMouseEnter={() => onHoverTab?.(tab.key)}
                 onClick={() => {
                   setMoreOpen(false);
                   onSelectTab(tab.key);

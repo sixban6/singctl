@@ -4,11 +4,9 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
-	"fmt"
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -35,33 +33,7 @@ func (s *Server) adguardConfigFilePath() string {
 }
 
 func (s *Server) cachedAdGuardVersion(binPath string) string {
-	info, err := os.Stat(binPath)
-	if err != nil || info.IsDir() {
-		return ""
-	}
-	key := fmt.Sprintf("%s|%d|%d", binPath, info.ModTime().UnixNano(), info.Size())
-
-	s.aghVerMu.Lock()
-	if s.aghVerBinKey == key && s.aghVerCached != "" {
-		ver := s.aghVerCached
-		s.aghVerMu.Unlock()
-		return ver
-	}
-	s.aghVerMu.Unlock()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
-	out, err := exec.CommandContext(ctx, binPath, "--version").Output()
-	cancel()
-	if err != nil {
-		return ""
-	}
-	ver := strings.TrimSpace(string(out))
-
-	s.aghVerMu.Lock()
-	s.aghVerBinKey = key
-	s.aghVerCached = ver
-	s.aghVerMu.Unlock()
-	return ver
+	return adguard.CachedBinaryVersion(binPath)
 }
 
 // adguardStatusSummary 返回轻量级 AdGuard Home 顶栏与总览卡片状态快照（控制在毫秒级，不阻塞 /api/status）。

@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"singctl/internal/audit"
 	"singctl/internal/gateway"
 	"singctl/internal/logger"
 	"singctl/internal/util/netinfo"
@@ -58,14 +59,10 @@ type Server struct {
 	iosCacheKey string // singctl.yaml 的 path|mtime|size 指纹
 	iosCacheVal string
 
-	cfgMu        sync.Mutex
-	auditLimiter *auditRateLimiter
-	loginLimiter *loginRateLimiter
-
-	// AdGuardHome 二进制版本短缓存（避免 /api/status 高频轮询每次 fork --version）
-	aghVerMu     sync.Mutex
-	aghVerBinKey string
-	aghVerCached string
+	cfgMu          sync.Mutex
+	auditLimiter   *auditRateLimiter
+	auditCollector *audit.Collector
+	loginLimiter   *loginRateLimiter
 
 	// Clash 控制接口（endpoint + secret）短缓存，避免高频轮询重复探测 /version
 	clashMu          sync.Mutex
@@ -86,10 +83,11 @@ type Server struct {
 // New 创建 Web 服务
 func New(opts Options) *Server {
 	s := &Server{
-		opts:         opts,
-		Mux:          http.NewServeMux(),
-		auditLimiter: newAuditRateLimiter(),
-		loginLimiter: newLoginRateLimiter(),
+		opts:           opts,
+		Mux:            http.NewServeMux(),
+		auditLimiter:   newAuditRateLimiter(),
+		auditCollector: audit.NewCollector(nil),
+		loginLimiter:   newLoginRateLimiter(),
 	}
 
 	// 静态资源（统一受 WebUI 口令鉴权保护，未授权访问 / 返回内嵌口令登录页而绝不弹窗卡死）

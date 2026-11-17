@@ -28,14 +28,21 @@ import {
   ToastProvider,
   useToast,
 } from '../ui';
-import { useCachedQuery, useHashRoute } from '../hooks';
+import {
+  clearCachedQuery,
+  emitClientInvalidate,
+  peekCachedQuery,
+  prefetchCachedQuery,
+  useCachedQuery,
+  useHashRoute,
+} from '../hooks';
 import { clientApi, CLIENT_AUTH_EVENT } from './api';
 import { ClientStatusResponse } from './types';
 import { TaskConsoleDrawer } from './TaskConsoleDrawer';
 import { DashPage } from './pages/DashPage';
 import { SingBoxPage } from './pages/SingBoxPage';
-import { AdGuardPage } from './pages/AdGuardPage';
-import { AuditPage } from './pages/AuditPage';
+import { AdGuardPage, ADGUARD_OVERVIEW_CACHE_KEY } from './pages/AdGuardPage';
+import { AuditPage, AUDIT_DEFAULT_CACHE_KEY } from './pages/AuditPage';
 import { WatchdogPage } from './pages/WatchdogPage';
 import { NetworkHubPage } from './pages/NetworkPage';
 import { ConfigPage } from './pages/ConfigPage';
@@ -78,6 +85,42 @@ const ClientShell: React.FC = () => {
   } = useCachedQuery<ClientStatusResponse>('client:status', () => clientApi.getStatus(), {
     pollMs: 12000,
   });
+
+  // 已访问的高频重页面保活记录（仅对已点开过的 dns/audit 保持 DOM 挂载，切页 0ms 瞬开）
+  const [visitedTabs, setVisitedTabs] = useState<Set<ClientTab>>(() => new Set([tab]));
+  useEffect(() => {
+    setVisitedTabs((prev) => {
+      if (prev.has(tab)) return prev;
+      const next = new Set(prev);
+      next.add(tab);
+      return next;
+    });
+  }, [tab]);
+
+  // 悬停 / 触控预热：鼠标滑过或手指触碰导航栏时提前在内存预热数据
+  const handleHoverTab = useCallback((target: ClientTab) => {
+    if (target === 'dns' && !peekCachedQuery(ADGUARD_OVERVIEW_CACHE_KEY)) {
+      void prefetchCachedQuery(ADGUARD_OVERVIEW_CACHE_KEY, () => clientApi.getAdGuardOverview());
+    } else if (target === 'audit' && !peekCachedQuery(AUDIT_DEFAULT_CACHE_KEY)) {
+      const qs = new URLSearchParams({ sort: 'risk', dir: 'desc' });
+      void prefetchCachedQuery(AUDIT_DEFAULT_CACHE_KEY, () => clientApi.getAudit(qs));
+    }
+  }, []);
+
+  // 首屏空闲静默预热：首屏核心 status 就绪后 500ms 自动预热防劫持 DNS 与行为审计默认快照，消除首次点击白屏
+  useEffect(() => {
+    if (!status) return;
+    const timer = window.setTimeout(() => {
+      if (tab !== 'dns' && !peekCachedQuery(ADGUARD_OVERVIEW_CACHE_KEY)) {
+        void prefetchCachedQuery(ADGUARD_OVERVIEW_CACHE_KEY, () => clientApi.getAdGuardOverview());
+      }
+      if (tab !== 'audit' && status.singbox?.running && !peekCachedQuery(AUDIT_DEFAULT_CACHE_KEY)) {
+        const qs = new URLSearchParams({ sort: 'risk', dir: 'desc' });
+        void prefetchCachedQuery(AUDIT_DEFAULT_CACHE_KEY, () => clientApi.getAudit(qs));
+      }
+    }, 500);
+    return () => window.clearTimeout(timer);
+  }, [status, tab]);
 
   // Action Runner & Console Drawer state
   const [busy, setBusy] = useState(false);
@@ -193,6 +236,7 @@ const ClientShell: React.FC = () => {
           error(`操作退出异常 (code ${res.code})`);
         }
         await refreshStatus(true);
+        emitClientInvalidate('all');
       } catch (e) {
         const msg = (e as Error).message || '执行失败';
         setConsoleLines((prev) => [...prev, `[ERROR] ${msg}`]);
@@ -227,6 +271,7 @@ const ClientShell: React.FC = () => {
   const handleLogout = useCallback(async () => {
     try {
       await clientApi.logout();
+      clearCachedQuery();
       reloadWithCacheBust();
     } catch (e) {
       error((e as Error).message || '退出登录失败');
@@ -522,6 +567,7 @@ const ClientShell: React.FC = () => {
         groups={navGroups}
         activeTab={tab}
         onSelectTab={(next) => navigate(next)}
+        onHoverTab={handleHoverTab}
         mobilePrimaryKeys={MOBILE_PRIMARY_TABS}
         statusPill={statusPill}
         topbarActions={topbarActions}
@@ -546,15 +592,22 @@ const ClientShell: React.FC = () => {
             onNavigate={navigateSafe}
           />
         )}
-        {tab === 'dns' && (
-          <AdGuardPage
-            status={status ?? null}
-            busy={busy}
-            onAction={requestAction}
-            onRefreshStatus={() => refreshStatus(true)}
-          />
+        {(tab === 'dns' || visitedTabs.has('dns')) && (
+          <div className={tab === 'dns' ? 'block' : 'hidden'} aria-hidden={tab !== 'dns'}>
+            <AdGuardPage
+              active={tab === 'dns'}
+              status={status ?? null}
+              busy={busy}
+              onAction={requestAction}
+              onRefreshStatus={() => refreshStatus(true)}
+            />
+          </div>
         )}
-        {tab === 'audit' && <AuditPage />}
+        {(tab === 'audit' || visitedTabs.has('audit')) && (
+          <div className={tab === 'audit' ? 'block' : 'hidden'} aria-hidden={tab !== 'audit'}>
+            <AuditPage active={tab === 'audit'} />
+          </div>
+        )}
         {tab === 'dm' && (
           <WatchdogPage
             busy={busy}
@@ -574,7 +627,14 @@ const ClientShell: React.FC = () => {
             onRefreshStatus={() => refreshStatus(true)}
           />
         )}
-        {tab === 'config' && <ConfigPage onSaved={() => refreshStatus(true)} />}
+        {tab === 'config' && (
+          <ConfigPage
+            onSaved={() => {
+              void refreshStatus(true);
+              emitClientInvalidate('all');
+            }}
+          />
+        )}
         {tab === 'logs' && <LogsPage initialLogName={sub} />}
         {tab === 'sys' && (
           <SystemPage status={status ?? null} busy={busy} onAction={requestAction} />

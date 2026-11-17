@@ -120,3 +120,96 @@ func TestAuditWhitelistUnaffectedByAuditGetBurst(t *testing.T) {
 		t.Fatalf("expected whitelist entry persisted in audit.whitelist, got %+v", loaded.Audit.Whitelist)
 	}
 }
+
+func TestAuditSingletonCollector_ZeroStaleConfigAndLeaseFingerprint(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "singctl.yaml")
+	leasePath := filepath.Join(dir, "dhcp.leases")
+	statePath := filepath.Join(dir, "audit-state.json")
+
+	if err := os.WriteFile(cfgPath, []byte("mode: router\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(leasePath, []byte("1799999999 aa:bb:cc:dd:ee:01 192.168.1.50 iphone-old *\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	clashSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"connections": []map[string]any{
+				{
+					"id":       "conn-1",
+					"upload":   2048,
+					"download": 4096,
+					"chains":   []string{"DIRECT"},
+					"metadata": map[string]any{
+						"network":         "tcp",
+						"sourceIP":        "192.168.1.50",
+						"destinationIP":   "198.51.100.10",
+						"destinationPort": "443",
+						"host":            "telemetry.example.com",
+					},
+				},
+			},
+		})
+	}))
+	defer clashSrv.Close()
+
+	srv := New(Options{
+		ConfigPath: cfgPath,
+		Listen:     "127.0.0.1:0",
+		Password:   "test-pass-123",
+		Version:    "v1.14.131",
+	})
+	srv.auditCollector.SetEndpointsForTest([]string{clashSrv.URL}, "", statePath)
+	srv.auditCollector.SetLeaseFilesForTest([]string{leasePath}, filepath.Join(dir, "no-arp"), filepath.Join(dir, "no-hosts"))
+	token := srv.SessionToken()
+
+	fetchAudit := func() map[string]any {
+		req := httptest.NewRequest(http.MethodGet, "/api/audit", nil)
+		req.RemoteAddr = "192.0.2.30:41000"
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("User-Agent", "Mozilla/5.0")
+		rec := httptest.NewRecorder()
+		srv.Mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /api/audit failed: %d %s", rec.Code, rec.Body.String())
+		}
+		var out map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+
+	// 1. Initial call warms singleton collector state + lease cache
+	rep1 := fetchAudit()
+	raw1, _ := json.Marshal(rep1)
+	if !bytes.Contains(raw1, []byte("iphone-old")) {
+		t.Fatalf("expected initial lease hostname iphone-old, got: %s", string(raw1))
+	}
+
+	// 2. Mutate dhcp.leases and whitelist via API -> next GET /api/audit must immediately reflect BOTH with 0 stale delay
+	if err := os.WriteFile(leasePath, []byte("1799999999 aa:bb:cc:dd:ee:01 192.168.1.50 iphone-renamed *\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	wlReq := httptest.NewRequest(http.MethodPost, "/api/audit/whitelist", bytes.NewReader([]byte(`{"action":"add","target":"telemetry.example.com"}`)))
+	wlReq.RemoteAddr = "192.0.2.30:41001"
+	wlReq.Header.Set("Authorization", "Bearer "+token)
+	wlReq.Header.Set("Content-Type", "application/json")
+	wlReq.Header.Set("User-Agent", "Mozilla/5.0")
+	wlRec := httptest.NewRecorder()
+	srv.Mux.ServeHTTP(wlRec, wlReq)
+	if wlRec.Code != http.StatusOK {
+		t.Fatalf("POST /api/audit/whitelist failed: %d", wlRec.Code)
+	}
+
+	rep2 := fetchAudit()
+	raw2, _ := json.Marshal(rep2)
+	if !bytes.Contains(raw2, []byte("iphone-renamed")) {
+		t.Fatalf("expected updated lease hostname iphone-renamed immediately on next poll, got: %s", string(raw2))
+	}
+	if !bytes.Contains(raw2, []byte("telemetry.example.com")) || !bytes.Contains(raw2, []byte("whitelisted")) {
+		t.Fatalf("expected newly whitelisted target reflected immediately, got: %s", string(raw2))
+	}
+}
