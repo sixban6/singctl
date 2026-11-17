@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"net"
 	"net/http"
 	"net/netip"
@@ -26,6 +27,7 @@ import (
 	"time"
 
 	"singctl/internal/constant"
+	"singctl/internal/util/file"
 
 	"github.com/sixban6/singgen/pkg/model"
 	"github.com/sixban6/singgen/pkg/singgen"
@@ -978,7 +980,8 @@ func (s *Store) validateRemoteURL(rawURL string) error {
 		return errors.New("远程订阅 URL 缺少主机名")
 	}
 	if !s.AllowLoopbackRemote {
-		if strings.EqualFold(host, "localhost") {
+		cleanHost := strings.TrimSuffix(strings.ToLower(host), ".")
+		if cleanHost == "localhost" || strings.HasSuffix(cleanHost, ".localhost") {
 			return errors.New("安全策略禁止拉取本机回环地址 (localhost)")
 		}
 		if addr, err := netip.ParseAddr(host); err == nil && isBlockedRemoteAddr(addr) {
@@ -1103,8 +1106,9 @@ func shortUALabel(ua string) string {
 	case strings.Contains(lower, "sing-box") || strings.Contains(lower, "sfa/") || strings.Contains(lower, "sfi/"):
 		return "Sing-box"
 	default:
-		if len(ua) > 28 {
-			return ua[:28] + "..."
+		runes := []rune(ua)
+		if len(runes) > 28 {
+			return string(runes[:28]) + "..."
 		}
 		return ua
 	}
@@ -1306,14 +1310,9 @@ func (s *Store) saveRemoteCacheLocked() {
 	if err != nil {
 		return
 	}
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, b, 0600); err == nil {
-		if err := os.Rename(tmp, p); err == nil {
-			if st, stErr := os.Stat(p); stErr == nil {
-				s.remoteCacheMtime = st.ModTime()
-			}
-		} else {
-			_ = os.Remove(tmp)
+	if err := file.WriteAtomic0600(p, b); err == nil {
+		if st, stErr := os.Stat(p); stErr == nil {
+			s.remoteCacheMtime = st.ModTime()
 		}
 	}
 }
@@ -1778,7 +1777,10 @@ func asString(v any) string {
 	case int64:
 		return strconv.FormatInt(x, 10)
 	case float64:
-		return strconv.Itoa(int(x))
+		if math.IsNaN(x) || math.IsInf(x, 0) || x < -1e15 || x > 1e15 {
+			return ""
+		}
+		return strconv.FormatInt(int64(x), 10)
 	default:
 		return ""
 	}
