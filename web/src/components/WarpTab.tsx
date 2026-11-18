@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ActiveDestinationGroup,
   WarpConnectionsResponse,
+  WarpNodeSummary,
   WarpPresetItem,
   WarpRoutingConfig,
   WarpRoutingMode,
@@ -21,6 +22,7 @@ import {
   RefreshCw,
   RotateCcw,
   Search,
+  Server,
   Shield,
   ShieldCheck,
   Sparkles,
@@ -36,15 +38,17 @@ interface WarpTabProps {
   onRefreshParent?: () => void;
 }
 
-const WARP_ROUTING_CACHE_KEY = 'server:warp:routing';
-const WARP_CONNS_CACHE_KEY = 'server:warp:conns:default';
+const WARP_ROUTING_CACHE_KEY = 'server:warp:routing:local';
+const WARP_CONNS_CACHE_KEY = 'server:warp:conns:local';
+const routingCacheKeyForNode = (node: string) => `server:warp:routing:${node || 'local'}`;
+const connsCacheKeyForNode = (node: string) => `server:warp:conns:${node || 'local'}`;
 
 export function prefetchWarpTab(): void {
   if (!peekCachedQuery(WARP_ROUTING_CACHE_KEY)) {
-    void prefetchCachedQuery(WARP_ROUTING_CACHE_KEY, () => api.getWarpRouting(false));
+    void prefetchCachedQuery(WARP_ROUTING_CACHE_KEY, () => api.getWarpRouting(false, 'local'));
   }
   if (!peekCachedQuery(WARP_CONNS_CACHE_KEY)) {
-    void prefetchCachedQuery(WARP_CONNS_CACHE_KEY, () => api.getWarpConnections('', 'all'));
+    void prefetchCachedQuery(WARP_CONNS_CACHE_KEY, () => api.getWarpConnections('', 'all', 'local'));
   }
 }
 
@@ -99,13 +103,18 @@ function previewCleanRuleTarget(raw: string): { kind: 'cidr' | 'domain'; value: 
 export const WarpTab: React.FC<WarpTabProps> = ({ active = true, onRefreshParent }) => {
   const { success, error } = useToast();
 
+  const [selectedNode, setSelectedNode] = useState<string>('local');
+  const [syncCluster, setSyncCluster] = useState<boolean>(false);
+  const [switchingNode, setSwitchingNode] = useState<boolean>(false);
+  const [actingNodeKey, setActingNodeKey] = useState<string | null>(null);
+
   const cachedConns = peekCachedQuery<WarpConnectionsResponse>(WARP_CONNS_CACHE_KEY);
   const [data, setData] = useState<WarpRoutingStatusResponse | null>(
     () => peekCachedQuery<WarpRoutingStatusResponse>(WARP_ROUTING_CACHE_KEY) ?? null,
   );
   const [loading, setLoading] = useState(() => !peekCachedQuery(WARP_ROUTING_CACHE_KEY));
   const [saving, setSaving] = useState(false);
-  const [acting, setActing] = useState<'rekey' | 'ensure' | null>(null);
+  const [acting, setActing] = useState<'rekey' | 'ensure' | 'enable_telemetry' | null>(null);
 
   // Active live connections state
   const [connEnabled, setConnEnabled] = useState(() => cachedConns?.enabled ?? true);
@@ -127,50 +136,95 @@ export const WarpTab: React.FC<WarpTabProps> = ({ active = true, onRefreshParent
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const rollbackSnapshotRef = useRef<WarpRoutingStatusResponse | null>(null);
 
-  const loadRouting = useCallback(async (forceRefresh = false) => {
-    try {
-      const res = await api.getWarpRouting(forceRefresh);
-      setData(res);
-      writeCachedQuery(WARP_ROUTING_CACHE_KEY, res);
-    } catch (err: any) {
-      error(err.message || '获取 WARP 分流配置失败');
-    } finally {
-      setLoading(false);
-    }
-  }, [error]);
-
-  const loadConnections = useCallback(async () => {
-    setLoadingConn(true);
-    try {
-      const res = await api.getWarpConnections(connQuery, connFilter);
-      setConnEnabled(res.enabled);
-      setConnMsg(res.message || '');
-      setConnections(res.destinations || []);
-      if (!connQuery && connFilter === 'all') {
-        writeCachedQuery(WARP_CONNS_CACHE_KEY, res);
+  const loadRouting = useCallback(
+    async (forceRefresh = false, nodeTarget = selectedNode) => {
+      try {
+        const res = await api.getWarpRouting(forceRefresh, nodeTarget);
+        setData(res);
+        writeCachedQuery(routingCacheKeyForNode(nodeTarget), res);
+      } catch (err: any) {
+        error(err.message || '获取 WARP 分流配置失败');
+      } finally {
+        setLoading(false);
+        setSwitchingNode(false);
       }
-    } catch {
-      // Keep quiet on background poll error
-    } finally {
-      setLoadingConn(false);
-    }
-  }, [connQuery, connFilter]);
+    },
+    [error, selectedNode],
+  );
+
+  const loadConnections = useCallback(
+    async (nodeTarget = selectedNode) => {
+      if (nodeTarget === 'all') {
+        setConnEnabled(true);
+        setConnMsg('');
+        setConnections([]);
+        return;
+      }
+      setLoadingConn(true);
+      try {
+        const res = await api.getWarpConnections(connQuery, connFilter, nodeTarget);
+        setConnEnabled(res.enabled);
+        setConnMsg(res.message || '');
+        setConnections(res.destinations || []);
+        if (!connQuery && connFilter === 'all') {
+          writeCachedQuery(connsCacheKeyForNode(nodeTarget), res);
+        }
+      } catch {
+        // Keep quiet on background poll error
+      } finally {
+        setLoadingConn(false);
+      }
+    },
+    [connQuery, connFilter, selectedNode],
+  );
+
+  const handleSelectNode = useCallback(
+    (nextNode: string) => {
+      if (nextNode === selectedNode) return;
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
+      }
+      rollbackSnapshotRef.current = null;
+      setSelectedNode(nextNode);
+      const cachedR = peekCachedQuery<WarpRoutingStatusResponse>(routingCacheKeyForNode(nextNode));
+      if (cachedR) {
+        setData((prev) => ({
+          ...cachedR,
+          nodes: cachedR.nodes && cachedR.nodes.length > 0 ? cachedR.nodes : prev?.nodes,
+        }));
+      } else {
+        setSwitchingNode(true);
+      }
+      const cachedC = peekCachedQuery<WarpConnectionsResponse>(connsCacheKeyForNode(nextNode));
+      if (cachedC && nextNode !== 'all') {
+        setConnEnabled(cachedC.enabled);
+        setConnMsg(cachedC.message || '');
+        setConnections(cachedC.destinations || []);
+      } else {
+        setConnections([]);
+      }
+      void loadRouting(false, nextNode);
+      void loadConnections(nextNode);
+    },
+    [loadConnections, loadRouting, selectedNode],
+  );
 
   useEffect(() => {
     if (!active) return;
-    void loadRouting(false);
-    void loadConnections();
-  }, [active, loadRouting, loadConnections]);
+    void loadRouting(false, selectedNode);
+    void loadConnections(selectedNode);
+  }, [active, selectedNode, loadRouting, loadConnections]);
 
   useEffect(() => {
-    if (!active || !autoRefreshConn) return;
+    if (!active || !autoRefreshConn || selectedNode === 'all') return;
     const timer = setInterval(() => {
       if (document.visibilityState === 'visible') {
-        void loadConnections();
+        void loadConnections(selectedNode);
       }
     }, 5000);
     return () => clearInterval(timer);
-  }, [active, autoRefreshConn, loadConnections]);
+  }, [active, autoRefreshConn, selectedNode, loadConnections]);
 
   useEffect(() => {
     return () => {
@@ -181,9 +235,16 @@ export const WarpTab: React.FC<WarpTabProps> = ({ active = true, onRefreshParent
   const commitRoutingUpdate = useCallback(
     async (nextRouting: WarpRoutingConfig, snapshotForRollback: WarpRoutingStatusResponse | null) => {
       setSaving(true);
+      const targetScope = selectedNode === 'all' ? 'all' : selectedNode;
       try {
-        const res = await api.updateWarpRouting(nextRouting);
+        const res = await api.updateWarpRouting(nextRouting, {
+          node: targetScope,
+          viewNode: selectedNode,
+          syncCluster: selectedNode === 'all' || syncCluster,
+        });
         const nextData: WarpRoutingStatusResponse = {
+          selectedNode: res.selectedNode || selectedNode,
+          nodes: res.nodes || snapshotForRollback?.nodes,
           daemon: res.daemon,
           routing: res.routing,
           presets: res.presets,
@@ -191,10 +252,10 @@ export const WarpTab: React.FC<WarpTabProps> = ({ active = true, onRefreshParent
           warpConnCount: res.warpConnCount,
         };
         setData(nextData);
-        writeCachedQuery(WARP_ROUTING_CACHE_KEY, nextData);
+        writeCachedQuery(routingCacheKeyForNode(selectedNode), nextData);
         rollbackSnapshotRef.current = null;
         success(res.message);
-        loadConnections();
+        void loadConnections(selectedNode);
       } catch (err: any) {
         if (snapshotForRollback) {
           setData(snapshotForRollback);
@@ -205,7 +266,7 @@ export const WarpTab: React.FC<WarpTabProps> = ({ active = true, onRefreshParent
         setSaving(false);
       }
     },
-    [error, loadConnections, success]
+    [error, loadConnections, selectedNode, success, syncCluster],
   );
 
   const scheduleOptimisticUpdate = (
@@ -352,16 +413,24 @@ export const WarpTab: React.FC<WarpTabProps> = ({ active = true, onRefreshParent
   const handleQuickSwitch = async (target: string, outbound: 'WARP' | 'DC') => {
     setSwitchingTarget(target);
     try {
-      const res = await api.quickSwitchWarpTarget(target, outbound);
-      setData({
+      const res = await api.quickSwitchWarpTarget(target, outbound, {
+        node: selectedNode,
+        viewNode: selectedNode,
+        syncCluster: selectedNode === 'all' || syncCluster,
+      });
+      const nextData: WarpRoutingStatusResponse = {
+        selectedNode: res.selectedNode || selectedNode,
+        nodes: res.nodes || data?.nodes,
         daemon: res.daemon,
         routing: res.routing,
         presets: res.presets,
         dcConnCount: res.dcConnCount,
         warpConnCount: res.warpConnCount,
-      });
+      };
+      setData(nextData);
+      writeCachedQuery(routingCacheKeyForNode(selectedNode), nextData);
       success(res.message);
-      loadConnections();
+      void loadConnections(selectedNode);
     } catch (err: any) {
       error(err.message || '切换失败');
     } finally {
@@ -369,31 +438,59 @@ export const WarpTab: React.FC<WarpTabProps> = ({ active = true, onRefreshParent
     }
   };
 
-  const handleWarpAction = async (action: 'rekey' | 'ensure') => {
-    setActing(action);
+  const handleWarpAction = async (action: 'rekey' | 'ensure', nodeOverride?: string) => {
+    const targetNode = nodeOverride || selectedNode;
+    if (nodeOverride) {
+      setActingNodeKey(`${nodeOverride}:${action}`);
+    } else {
+      setActing(action);
+    }
     try {
-      const res = await api.runWarpAction(action);
-      setData((prev) => (prev ? { ...prev, daemon: res.daemon } : prev));
+      const res = await api.runWarpAction(action, targetNode);
+      if (!nodeOverride) {
+        setData((prev) => (prev ? { ...prev, daemon: res.daemon } : prev));
+      }
       success(res.message);
-      await loadRouting(false);
-      loadConnections();
+      await loadRouting(true, selectedNode);
+      void loadConnections(selectedNode);
       onRefreshParent?.();
     } catch (err: any) {
       error(err.message || 'WARP 操作执行失败');
+    } finally {
+      if (nodeOverride) {
+        setActingNodeKey(null);
+      } else {
+        setActing(null);
+      }
+    }
+  };
+
+  const handleEnableTelemetry = async () => {
+    setActing('enable_telemetry');
+    try {
+      const res =
+        selectedNode === 'local'
+          ? await api.enableTelemetry()
+          : await api.runWarpAction('enable_telemetry', selectedNode);
+      success(res.message || '实时流量遥测已开启');
+      void loadConnections(selectedNode);
+    } catch (err: any) {
+      error(err.message || '开启实时遥测失败');
     } finally {
       setActing(null);
     }
   };
 
-  const handleEnableTelemetry = async () => {
-    try {
-      const res = await api.enableTelemetry();
-      success(res.message || '实时流量遥测已开启');
-      loadConnections();
-    } catch (err: any) {
-      error(err.message || '开启实时遥测失败');
-    }
-  };
+  const clusterNodes: WarpNodeSummary[] = data?.nodes || [];
+  const hasCluster = clusterNodes.length > 1;
+  const activeNodeMeta = useMemo(
+    () => clusterNodes.find((n) => n.id === selectedNode),
+    [clusterNodes, selectedNode],
+  );
+  const healthyNodeCount = useMemo(
+    () => clusterNodes.filter((n) => n.daemon?.tunnelHealthy).length,
+    [clusterNodes],
+  );
 
   const routing = data?.routing || DEFAULT_ROUTING;
   const daemon = data?.daemon;
@@ -425,10 +522,214 @@ export const WarpTab: React.FC<WarpTabProps> = ({ active = true, onRefreshParent
     );
   }
 
+  const currentScopeLabel =
+    selectedNode === 'all'
+      ? `全集群总览 (${clusterNodes.length} 台)`
+      : activeNodeMeta?.name || (selectedNode === 'local' ? '主控本机' : selectedNode);
+
   return (
     <div className="space-y-6">
+      {/* 0. 集群节点切换胶囊栏 + 全集群同步开关（仅在配置了多节点集群时展示） */}
+      {hasCluster && (
+        <div className="p-4 rounded-2xl glass-card space-y-3.5">
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => handleSelectNode('all')}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all ${
+                  selectedNode === 'all'
+                    ? 'bg-amber-500/20 text-amber-200 border-amber-500/40 shadow-sm'
+                    : 'bg-slate-950/70 text-slate-300 border-slate-800 hover:border-slate-700'
+                }`}
+              >
+                <Globe className="w-3.5 h-3.5 text-amber-400" />
+                <span>全集群总览</span>
+                <span className="px-1.5 py-0.5 rounded bg-slate-900/90 text-[10px] font-mono text-amber-300">
+                  {healthyNodeCount}/{clusterNodes.length}
+                </span>
+              </button>
+
+              {clusterNodes.map((n) => {
+                const isSelected = selectedNode === n.id;
+                const healthy = Boolean(n.daemon?.tunnelHealthy);
+                const installed = Boolean(n.daemon?.installed);
+                return (
+                  <button
+                    key={n.id}
+                    type="button"
+                    onClick={() => handleSelectNode(n.id)}
+                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-medium border transition-all ${
+                      isSelected
+                        ? 'bg-emerald-500/15 text-emerald-200 border-emerald-500/40 shadow-sm'
+                        : 'bg-slate-950/70 text-slate-300 border-slate-800 hover:border-slate-700'
+                    }`}
+                  >
+                    <span
+                      className={`w-2 h-2 rounded-full shrink-0 ${
+                        healthy
+                          ? 'bg-emerald-400'
+                          : installed
+                          ? 'bg-amber-400'
+                          : 'bg-slate-500'
+                      }`}
+                    />
+                    <span>{n.isLocal ? '🏠 主控本机' : n.name}</span>
+                    {n.daemon?.warpLoc && (
+                      <span className="px-1.5 py-0.5 rounded bg-slate-900/90 text-[10px] font-mono text-slate-300">
+                        {n.daemon.warpLoc}
+                      </span>
+                    )}
+                    {n.mode === 'global_warp' && (
+                      <span className="px-1.5 py-0.5 rounded bg-amber-500/15 text-[10px] font-mono text-amber-300">
+                        全局
+                      </span>
+                    )}
+                    {n.mode === 'bypass' && (
+                      <span className="px-1.5 py-0.5 rounded bg-rose-500/15 text-[10px] font-mono text-rose-300">
+                        旁路
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              {selectedNode !== 'all' ? (
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={syncCluster}
+                  onClick={() => setSyncCluster((v) => !v)}
+                  className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-medium border transition-all ${
+                    syncCluster
+                      ? 'bg-amber-500/20 text-amber-200 border-amber-500/45'
+                      : 'bg-slate-950/80 text-slate-400 border-slate-800 hover:text-slate-200'
+                  }`}
+                  title="开启后，在当前节点修改分流模式、预设或自定义规则将同步并发下发至全集群所有就绪节点"
+                >
+                  <span
+                    className={`w-2 h-2 rounded-full ${
+                      syncCluster ? 'bg-amber-400 animate-pulse' : 'bg-slate-600'
+                    }`}
+                  />
+                  <span>同步规则至全集群</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => handleWarpAction('rekey', 'all')}
+                  disabled={actingNodeKey === 'all:rekey' || acting !== null}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/35 text-amber-200 text-xs font-medium transition-colors disabled:opacity-45"
+                >
+                  <RotateCcw
+                    className={`w-3.5 h-3.5 ${actingNodeKey === 'all:rekey' ? 'animate-spin' : ''}`}
+                  />
+                  <span>{actingNodeKey === 'all:rekey' ? '全集群换 IP 中...' : '全集群批量换 IP'}</span>
+                </button>
+              )}
+
+              {switchingNode && (
+                <span className="inline-flex items-center gap-1 text-[11px] font-mono text-sky-300">
+                  <RefreshCw className="w-3 h-3 animate-spin" />
+                  切换中...
+                </span>
+              )}
+            </div>
+          </div>
+
+          {/* 全集群总览模式下的各节点健康矩阵 */}
+          {selectedNode === 'all' && (
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3 pt-2 border-t border-slate-800/80">
+              {clusterNodes.map((n) => {
+                const healthy = Boolean(n.daemon?.tunnelHealthy);
+                const busyRekey = actingNodeKey === `${n.id}:rekey`;
+                const busyEnsure = actingNodeKey === `${n.id}:ensure`;
+                const modeText =
+                  n.mode === 'global_warp'
+                    ? '全局 WARP'
+                    : n.mode === 'bypass'
+                    ? '紧急旁路'
+                    : '按需分流';
+                return (
+                  <div
+                    key={`card-${n.id}`}
+                    className="p-3.5 rounded-xl bg-slate-950/65 border border-slate-800/90 flex flex-col justify-between gap-2.5"
+                  >
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <Server className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                          <span className="text-xs font-semibold text-white truncate">
+                            {n.isLocal ? '主控本机' : n.name}
+                          </span>
+                        </div>
+                        <span
+                          className={`px-1.5 py-0.5 rounded text-[10px] font-mono border shrink-0 ${
+                            healthy
+                              ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/25'
+                              : 'bg-rose-500/10 text-rose-300 border-rose-500/25'
+                          }`}
+                        >
+                          {healthy ? 'WARP 就绪' : '未就绪'}
+                        </span>
+                      </div>
+                      <div className="text-[11px] font-mono text-slate-300 truncate">
+                        出口:{' '}
+                        {n.daemon?.warpIp
+                          ? `${n.daemon.warpIp}${n.daemon.warpLoc ? ` (${n.daemon.warpLoc})` : ''}`
+                          : n.daemon?.error || '未安装 / 待探测'}
+                      </div>
+                      <div className="flex items-center justify-between text-[10px] font-mono text-slate-400">
+                        <span>策略: {modeText}</span>
+                        <span>
+                          DC {n.dcConnCount} / WARP {n.warpConnCount}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between gap-1.5 pt-2 border-t border-slate-800/70">
+                      {healthy ? (
+                        <button
+                          type="button"
+                          onClick={() => handleWarpAction('rekey', n.id)}
+                          disabled={busyRekey || actingNodeKey !== null}
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700/70 text-[11px] text-slate-200 disabled:opacity-45"
+                        >
+                          <RotateCcw className={`w-3 h-3 text-amber-400 ${busyRekey ? 'animate-spin' : ''}`} />
+                          <span>{busyRekey ? '换 IP 中...' : '换 IP'}</span>
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => handleWarpAction('ensure', n.id)}
+                          disabled={busyEnsure || actingNodeKey !== null}
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/35 text-[11px] text-amber-200 disabled:opacity-45"
+                        >
+                          <Wrench className={`w-3 h-3 ${busyEnsure ? 'animate-spin' : ''}`} />
+                          <span>{busyEnsure ? '部署中...' : '一键部署 WARP'}</span>
+                        </button>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={() => handleSelectNode(n.id)}
+                        className="px-2 py-1 rounded-lg bg-slate-900/80 hover:bg-slate-800 border border-slate-800 text-[11px] text-sky-300"
+                      >
+                        单独配置 →
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* 1. 隧道 offline/未安装 防黑洞引导横幅 */}
-      {daemon && !daemon.tunnelHealthy && (
+      {daemon && !daemon.tunnelHealthy && selectedNode !== 'all' && (
         <div className="p-4 sm:p-5 rounded-2xl border border-amber-500/40 bg-amber-950/25 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div className="flex items-start gap-3">
             <div className="p-2 rounded-xl bg-amber-500/15 text-amber-400 border border-amber-500/30 shrink-0">
@@ -436,7 +737,7 @@ export const WarpTab: React.FC<WarpTabProps> = ({ active = true, onRefreshParent
             </div>
             <div>
               <h3 className="text-sm font-bold text-amber-200">
-                本地 WARP 隧道 (127.0.0.1:40000) 当前未就绪
+                [{currentScopeLabel}] WARP 隧道 (127.0.0.1:40000) 当前未就绪
               </h3>
               <p className="text-xs text-amber-200/80 mt-1">
                 {daemon.error || 'wireproxy 尚未安装或已停止运行'}。为防止流量切换后断网，系统已自动开启防黑洞保护，请先一键部署或拉起 WARP 服务。
@@ -450,7 +751,7 @@ export const WarpTab: React.FC<WarpTabProps> = ({ active = true, onRefreshParent
             className="flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-xs transition-all shrink-0 disabled:opacity-50"
           >
             <Wrench className={`w-3.5 h-3.5 ${acting === 'ensure' ? 'animate-spin' : ''}`} />
-            <span>{acting === 'ensure' ? '正在部署修复...' : '一键部署 / 修复 WARP 隧道'}</span>
+            <span>{acting === 'ensure' ? '正在部署修复...' : '一键部署 / 修复该节点 WARP'}</span>
           </button>
         </div>
       )}
@@ -500,6 +801,15 @@ export const WarpTab: React.FC<WarpTabProps> = ({ active = true, onRefreshParent
               <div>
                 <h2 className="text-lg font-semibold text-white tracking-tight flex items-center gap-2 flex-wrap">
                   <span>WARP 智能分流中心</span>
+                  {hasCluster && (
+                    <span className="px-2.5 py-0.5 rounded-full text-[11px] font-mono bg-amber-500/10 text-amber-200 border border-amber-500/30">
+                      {selectedNode === 'all'
+                        ? '🌐 全集群统一编排'
+                        : syncCluster
+                        ? `🎯 ${currentScopeLabel} + 全集群同步`
+                        : `🖥 当前控制: ${currentScopeLabel}`}
+                    </span>
+                  )}
                   <span
                     className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-mono border ${
                       daemon?.tunnelHealthy
@@ -512,7 +822,11 @@ export const WarpTab: React.FC<WarpTabProps> = ({ active = true, onRefreshParent
                         daemon?.tunnelHealthy ? 'bg-emerald-400 animate-pulse' : 'bg-rose-400'
                       }`}
                     />
-                    {daemon?.tunnelHealthy ? '127.0.0.1:40000 就绪' : '隧道未连通'}
+                    {selectedNode === 'all'
+                      ? daemon?.warpIp || '集群探测中'
+                      : daemon?.tunnelHealthy
+                      ? '127.0.0.1:40000 就绪'
+                      : '隧道未连通'}
                   </span>
                   {saving && (
                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-mono bg-sky-500/10 text-sky-300 border border-sky-500/25">
@@ -522,7 +836,9 @@ export const WarpTab: React.FC<WarpTabProps> = ({ active = true, onRefreshParent
                   )}
                 </h2>
                 <p className="text-xs text-slate-400 mt-0.5">
-                  采用 SIGHUP 零断流热重载 + 逐流精准切换，修改域名/预设后毫秒级生效且不影响其它活跃连接
+                  {selectedNode === 'all' || syncCluster
+                    ? '当前更改将并发下发至主控与全部就绪子节点，每台节点自动保护各自域名并执行零断流热重载'
+                    : '采用 SIGHUP 零断流热重载 + 逐流精准切换，修改域名/预设后毫秒级生效且不影响其它活跃连接'}
                 </p>
               </div>
             </div>
@@ -545,11 +861,17 @@ export const WarpTab: React.FC<WarpTabProps> = ({ active = true, onRefreshParent
                 title="重新注册 WireGuard 身份以更换全新 Cloudflare WARP 出口 IP（失败自动回滚）"
               >
                 <RotateCcw className={`w-3 h-3 text-amber-400 ${acting === 'rekey' ? 'animate-spin' : ''}`} />
-                <span>{acting === 'rekey' ? '正在换 IP...' : '更换 WARP IP'}</span>
+                <span>
+                  {acting === 'rekey'
+                    ? '正在换 IP...'
+                    : selectedNode === 'all'
+                    ? '全集群换 IP'
+                    : '更换 WARP IP'}
+                </span>
               </button>
               <button
                 type="button"
-                onClick={() => loadRouting(true)}
+                onClick={() => void loadRouting(true, selectedNode)}
                 className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700/70 text-slate-300 transition-colors"
               >
                 <RefreshCw className="w-3 h-3" />
@@ -770,7 +1092,7 @@ export const WarpTab: React.FC<WarpTabProps> = ({ active = true, onRefreshParent
 
             <button
               type="button"
-              onClick={loadConnections}
+              onClick={() => void loadConnections(selectedNode)}
               className="p-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300"
               title="立即刷新活跃连接"
             >
@@ -779,17 +1101,36 @@ export const WarpTab: React.FC<WarpTabProps> = ({ active = true, onRefreshParent
           </div>
         </div>
 
-        {!connEnabled ? (
+        {selectedNode === 'all' ? (
           <div className="p-5 rounded-xl bg-slate-950/60 border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="text-xs text-slate-300">
-              {connMsg || '当前 sing-box 尚未开启本地回环遥测接口 (127.0.0.1:9099)，无法透视实时连接。'}
+              当前处于「全集群总览」视角，活跃连接按单机实时采集。点击任意节点即可实时透视该主机的出站连接并一键秒切：
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+              {clusterNodes.map((n) => (
+                <button
+                  key={`jump-${n.id}`}
+                  type="button"
+                  onClick={() => handleSelectNode(n.id)}
+                  className="px-2.5 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700/80 text-xs text-sky-300 font-medium"
+                >
+                  {n.isLocal ? '主控本机' : n.name} ({n.dcConnCount + n.warpConnCount})
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : !connEnabled ? (
+          <div className="p-5 rounded-xl bg-slate-950/60 border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="text-xs text-slate-300">
+              {connMsg || '当前节点 sing-box 尚未开启本地回环遥测接口 (127.0.0.1:9099)，无法透视实时连接。'}
             </div>
             <button
               type="button"
               onClick={handleEnableTelemetry}
-              className="px-3.5 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-semibold text-xs shrink-0"
+              disabled={acting === 'enable_telemetry'}
+              className="px-3.5 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-semibold text-xs shrink-0 disabled:opacity-50"
             >
-              一键开启本地遥测
+              {acting === 'enable_telemetry' ? '正在开启...' : '一键开启该节点遥测'}
             </button>
           </div>
         ) : connections.length === 0 ? (
