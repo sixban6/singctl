@@ -257,6 +257,7 @@ func HardenClientClashAPI(rawJSON, platform string) (string, error) {
 	if root == nil {
 		return rawJSON, nil
 	}
+	sanitizeLegacyTransportProtocolRules(root)
 
 	changed := false
 	sharedSecret := ""
@@ -339,6 +340,7 @@ func NormalizeClientLogLevel(rawJSON string) (string, error) {
 	if root == nil {
 		root = make(map[string]any)
 	}
+	changedRules := sanitizeLegacyTransportProtocolRules(root)
 
 	logMap, ok := root["log"].(map[string]any)
 	if !ok || logMap == nil {
@@ -349,16 +351,22 @@ func NormalizeClientLogLevel(rawJSON string) (string, error) {
 		}
 	} else {
 		if disabled, _ := logMap["disabled"].(bool); disabled {
-			return rawJSON, nil
-		}
-		level, _ := logMap["level"].(string)
-		trimmed := strings.TrimSpace(strings.ToLower(level))
-		if trimmed != "" && trimmed != "info" {
-			return rawJSON, nil
-		}
-		logMap["level"] = "warn"
-		if _, hasTS := logMap["timestamp"]; !hasTS {
-			logMap["timestamp"] = true
+			if !changedRules {
+				return rawJSON, nil
+			}
+		} else {
+			level, _ := logMap["level"].(string)
+			trimmed := strings.TrimSpace(strings.ToLower(level))
+			if trimmed != "" && trimmed != "info" {
+				if !changedRules {
+					return rawJSON, nil
+				}
+			} else {
+				logMap["level"] = "warn"
+				if _, hasTS := logMap["timestamp"]; !hasTS {
+					logMap["timestamp"] = true
+				}
+			}
 		}
 	}
 
@@ -367,6 +375,49 @@ func NormalizeClientLogLevel(rawJSON string) (string, error) {
 		return "", fmt.Errorf("failed to marshal config JSON after log level normalization: %w", err)
 	}
 	return string(data), nil
+}
+
+// sanitizeLegacyTransportProtocolRules 将路由规则中误写为 `"protocol": "udp"|"tcp"` 的四层传输字段
+// 自动修正为 sing-box 标准 `"network": "udp"|"tcp"`，确保 QUIC (UDP 443) 拦截规则 100% 生效。
+func sanitizeLegacyTransportProtocolRules(root map[string]any) bool {
+	if root == nil {
+		return false
+	}
+	routeMap, ok := root["route"].(map[string]any)
+	if !ok || routeMap == nil {
+		return false
+	}
+	rules, ok := routeMap["rules"].([]any)
+	if !ok || len(rules) == 0 {
+		return false
+	}
+	return sanitizeRuleSliceTransportProtocol(rules)
+}
+
+func sanitizeRuleSliceTransportProtocol(rules []any) bool {
+	changed := false
+	for _, item := range rules {
+		rm, ok := item.(map[string]any)
+		if !ok || rm == nil {
+			continue
+		}
+		if sub, ok := rm["rules"].([]any); ok && len(sub) > 0 {
+			if sanitizeRuleSliceTransportProtocol(sub) {
+				changed = true
+			}
+		}
+		if pStr, ok := rm["protocol"].(string); ok {
+			lower := strings.ToLower(strings.TrimSpace(pStr))
+			if lower == "udp" || lower == "tcp" {
+				delete(rm, "protocol")
+				if _, hasNet := rm["network"]; !hasNet {
+					rm["network"] = lower
+				}
+				changed = true
+			}
+		}
+	}
+	return changed
 }
 
 // InjectLocalDNS 在 Linux/OpenWrt 客户端网关平台且启用并安装了 AdGuard Home 时，
@@ -1659,6 +1710,7 @@ func AdaptIOSConfigForVersion(rawJSON, mirrorURL, singBoxVer string) (string, er
 	if root == nil {
 		return rawJSON, nil
 	}
+	sanitizeLegacyTransportProtocolRules(root)
 
 	isLegacy := isLegacySingBoxPre114(singBoxVer)
 

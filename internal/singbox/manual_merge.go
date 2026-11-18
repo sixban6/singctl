@@ -114,6 +114,8 @@ func MergeManualConfig(baseJSON, currentJSON, freshJSON string) (string, int, er
 
 	// 始终复用当前运行态的 Clash API / Service Secret，避免每次生成随机密钥导致无意义重载或面板断连
 	preserveRuntimeSecrets(curRoot, freshRoot)
+	sanitizeLegacyTransportProtocolRules(curRoot)
+	sanitizeLegacyTransportProtocolRules(freshRoot)
 
 	// 若升级后首次运行尚无历史 Base 快照，仅安全保留确定性的用户增量（如自定义新增 tag 的 inbound / ntp / endpoints）
 	if strings.TrimSpace(baseJSON) == "" {
@@ -137,6 +139,7 @@ func MergeManualConfig(baseJSON, currentJSON, freshJSON string) (string, int, er
 		return freshJSON, 0, nil
 	}
 	preserveRuntimeSecrets(curRoot, baseRoot)
+	sanitizeLegacyTransportProtocolRules(baseRoot)
 
 	changes := 0
 

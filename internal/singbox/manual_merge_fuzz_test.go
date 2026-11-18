@@ -60,6 +60,33 @@ func TestMergeManualConfig_DropsMalformedRulesAndInvalidDNSRuleSet(t *testing.T)
 	}
 }
 
+func TestMergeManualConfig_MigratesLegacyProtocolUDPToNetworkUDP(t *testing.T) {
+	// Old auto-generated base + current disk config had invalid `"protocol": "udp"` on port 443 reject rule;
+	// fresh config from singgen v1.18.3+ has `"network": "udp"`. Merge must output `"network": "udp"` without leftover `"protocol": "udp"`.
+	oldCfg := `{"outbounds":[{"type":"direct","tag":"#DC"}],"route":{"rules":[{"action":"reject","port":443,"protocol":"udp"},{"action":"sniff"}]}}`
+	freshCfg := `{"outbounds":[{"type":"direct","tag":"#DC"}],"route":{"rules":[{"action":"reject","port":443,"network":"udp"},{"action":"sniff"}]}}`
+
+	merged, _, err := MergeManualConfig(oldCfg, oldCfg, freshCfg)
+	if err != nil {
+		t.Fatalf("MergeManualConfig failed: %v", err)
+	}
+	if strings.Contains(merged, `"protocol": "udp"`) || strings.Contains(merged, `"protocol":"udp"`) {
+		t.Fatalf("legacy protocol=udp should be migrated/stripped during merge, got:\n%s", merged)
+	}
+	if !strings.Contains(merged, `"network": "udp"`) {
+		t.Fatalf("expected network=udp in merged config, got:\n%s", merged)
+	}
+
+	// NormalizeClientLogLevel must also fix legacy protocol=udp in-place
+	norm, err := NormalizeClientLogLevel(oldCfg)
+	if err != nil {
+		t.Fatalf("NormalizeClientLogLevel failed: %v", err)
+	}
+	if strings.Contains(norm, `"protocol":"udp"`) || !strings.Contains(norm, `"network":"udp"`) {
+		t.Fatalf("expected NormalizeClientLogLevel to rewrite protocol=udp to network=udp, got:\n%s", norm)
+	}
+}
+
 func FuzzMergeManualConfig(f *testing.F) {
 	f.Add(
 		`{"outbounds":[{"type":"direct","tag":"direct"}],"route":{"rules":[{"action":"sniff"}]}}`,
