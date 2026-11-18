@@ -642,6 +642,9 @@ func (m *Manager) updateNodeObj(ctx context.Context, node Node) NodeActionResult
 	script := `
 set -e
 singctl update self >/dev/null 2>&1
+if [ -f /etc/sing-box/sec_block.nft ] && command -v nft >/dev/null 2>&1; then
+  singctl fw enable >/dev/null 2>&1 || true
+fi
 if systemctl list-unit-files singctl-sub.service >/dev/null 2>&1; then
   systemctl restart singctl-sub >/dev/null 2>&1 || true
 fi

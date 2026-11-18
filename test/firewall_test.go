@@ -31,3 +31,33 @@ func TestBuildSecurityNFT_SanitizedAndExcludesActiveSSH(t *testing.T) {
 		t.Fatalf("expected IPv6 SSH client to be added to whitelist_ip6:\n%s", nftCustomSSH)
 	}
 }
+
+func TestBuildFirewallSystemdUnit_PreloadsModuleAndRetriesBootNetlink(t *testing.T) {
+	unit := firewall.BuildFirewallSystemdUnit("/etc/sing-box/sec_block.nft")
+	if !strings.Contains(unit, "modprobe nf_tables") {
+		t.Fatalf("expected systemd unit to preload nf_tables module, got:\n%s", unit)
+	}
+	if !strings.Contains(unit, "while [") || !strings.Contains(unit, "/etc/sing-box/sec_block.nft") {
+		t.Fatalf("expected systemd unit ExecStart to retry nft -f on early boot Netlink race, got:\n%s", unit)
+	}
+}
+
+func TestBuildMinimalBlocklistNFT_ZeroPortTouchAndWhitelistsPrivate(t *testing.T) {
+	rules := firewall.BuildMinimalBlocklistNFT()
+	for _, required := range []string{
+		"table inet security",
+		"set blocklist_ip4_forever",
+		"set blocklist_ip4",
+		"set blocklist_ip6",
+		"set whitelist_ip",
+		"ct state established,related counter accept",
+		"100.64.0.0/10",
+	} {
+		if !strings.Contains(rules, required) {
+			t.Fatalf("minimal blocklist NFT missing %q:\n%s", required, rules)
+		}
+	}
+	if strings.Contains(rules, "protected_ports") {
+		t.Fatalf("minimal fallback blocklist NFT must not touch any ports:\n%s", rules)
+	}
+}

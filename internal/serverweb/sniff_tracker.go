@@ -18,7 +18,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"singctl/internal/constant"
+	"singctl/internal/firewall"
 	"singctl/internal/fleet"
+	"singctl/internal/logger"
 )
 
 const (
@@ -842,15 +845,20 @@ func (t *SniffTracker) BlockTargetForNode(ctx context.Context, target, nodeScope
 	t.persistSnapshot(raw, seq)
 
 	appliedNodes := 0
+	var localNFTErr error
 	if applyLocal {
-		appliedNodes++
 		if isCIDR {
-			applyNFTBlockCIDR(canonicalTarget, isIPv4)
+			localNFTErr = applyNFTBlockCIDR(canonicalTarget, isIPv4)
 		} else {
 			if t.limiter != nil {
 				t.limiter.BanManual(canonicalTarget, 7*24*time.Hour)
 			}
-			applyNFTBlockIP(canonicalTarget, isIPv4)
+			localNFTErr = applyNFTBlockIP(canonicalTarget, isIPv4)
+		}
+		if localNFTErr == nil || os.Geteuid() != 0 {
+			appliedNodes++
+		} else {
+			logger.Warn("本机 nftables 写入封禁规则失败 (%s): %v", canonicalTarget, localNFTErr)
 		}
 	}
 
@@ -866,7 +874,7 @@ func (t *SniffTracker) BlockTargetForNode(ctx context.Context, target, nodeScope
 			wg.Add(1)
 			go func(node fleet.Node) {
 				defer wg.Done()
-				rCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+				rCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 				defer cancel()
 				if _, _, err := runner(rCtx, node, script); err == nil {
 					remoteOK.Add(1)
@@ -877,14 +885,72 @@ func (t *SniffTracker) BlockTargetForNode(ctx context.Context, target, nodeScope
 		appliedNodes += int(remoteOK.Load())
 	}
 
+	if nodeScope == "local" && localNFTErr != nil && os.Geteuid() == 0 {
+		return canonicalTarget, 0, fmt.Errorf("本机内核防火墙写入封禁规则失败: %w", localNFTErr)
+	}
+
 	return canonicalTarget, appliedNodes, nil
 }
+
+const remoteEnsureSecurityNFTBlock = `if ! nft list table inet security >/dev/null 2>&1; then
+  modprobe nf_tables 2>/dev/null || /sbin/modprobe nf_tables 2>/dev/null || true
+  if [ -f /etc/sing-box/sec_block.nft ] && nft -c -f /etc/sing-box/sec_block.nft >/dev/null 2>&1; then
+    nft -f /etc/sing-box/sec_block.nft >/dev/null 2>&1 || true
+  fi
+  if ! nft list table inet security >/dev/null 2>&1; then
+    nft -f - <<'SINGCTL_NFT_EOF'
+` + `table inet security {
+    set blocklist_ip4_forever {
+        type ipv4_addr
+        flags interval
+        auto-merge
+        size 65535
+    }
+    set blocklist_ip4 {
+        type ipv4_addr
+        flags dynamic,timeout
+        size 65535
+        timeout 7d
+    }
+    set blocklist_ip6 {
+        type ipv6_addr
+        flags dynamic,timeout
+        size 65535
+        timeout 7d
+    }
+    set whitelist_ip {
+        type ipv4_addr
+        flags interval
+        auto-merge
+        elements = { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10 }
+    }
+    chain input {
+        type filter hook input priority 0; policy accept;
+        ct state established,related counter accept
+        iifname "lo" counter accept
+        iifname "tailscale0" counter accept
+        iifname "wg*" counter accept
+        iifname "tun*" counter accept
+        ip saddr @whitelist_ip counter accept
+        ip saddr @blocklist_ip4_forever log prefix "[NFT] Ban Forever IPv4 (listed): " counter drop
+        ip saddr @blocklist_ip4 log prefix "[NFT] Blocked IPv4 (listed): " counter drop
+        ip6 saddr @blocklist_ip6 log prefix "[NFT] Blocked IPv6 (listed): " counter drop
+    }
+}
+SINGCTL_NFT_EOF
+  fi
+  MASTER_IP=$(printf '%s' "${SSH_CLIENT:-}" | awk '{print $1}')
+  if [ -n "$MASTER_IP" ]; then
+    nft add element inet security whitelist_ip "{ $MASTER_IP }" 2>/dev/null || true
+  fi
+fi`
 
 func buildRemoteNFTBlockScript(canonicalTarget string, isCIDR, isIPv4 bool) string {
 	// canonicalTarget 已通过 net.ParseIP / net.ParseCIDR 严格校验，不含任何 Shell 元字符
 	if isCIDR {
 		if isIPv4 {
-			return fmt.Sprintf("if command -v nft >/dev/null 2>&1; then nft add element inet security blocklist_ip4_forever '{ %s }' 2>/dev/null || true; fi\n", canonicalTarget)
+			return fmt.Sprintf("if command -v nft >/dev/null 2>&1; then\n%s\nnft add element inet security blocklist_ip4_forever '{ %s }' 2>/dev/null || nft get element inet security blocklist_ip4_forever '{ %s }' >/dev/null 2>&1\nfi\n",
+				remoteEnsureSecurityNFTBlock, canonicalTarget, canonicalTarget)
 		}
 		return ""
 	}
@@ -892,33 +958,77 @@ func buildRemoteNFTBlockScript(canonicalTarget string, isCIDR, isIPv4 bool) stri
 	if isIPv4 {
 		setName = "blocklist_ip4"
 	}
-	return fmt.Sprintf("if command -v nft >/dev/null 2>&1; then nft add element inet security %s '{ %s timeout 7d }' 2>/dev/null || true; fi\n", setName, canonicalTarget)
+	return fmt.Sprintf("if command -v nft >/dev/null 2>&1; then\n%s\nnft delete element inet security %s '{ %s }' 2>/dev/null || true\nnft add element inet security %s '{ %s timeout 7d }'\nfi\n",
+		remoteEnsureSecurityNFTBlock, setName, canonicalTarget, setName, canonicalTarget)
 }
 
-func applyNFTBlockIP(ipStr string, isIPv4 bool) {
-	if _, err := exec.LookPath("nft"); err != nil {
-		return
+func ensureLocalSecurityNFTTable(ctx context.Context) error {
+	if exec.CommandContext(ctx, "nft", "list", "table", "inet", "security").Run() == nil {
+		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	for _, bin := range []string{"modprobe", "/sbin/modprobe", "/usr/sbin/modprobe"} {
+		if _, err := exec.LookPath(bin); err == nil {
+			_ = exec.CommandContext(ctx, bin, "nf_tables").Run()
+			break
+		}
+	}
+	if _, err := os.Stat(constant.SingBoxNftablesFile); err == nil {
+		if exec.CommandContext(ctx, "nft", "-c", "-f", constant.SingBoxNftablesFile).Run() == nil {
+			if exec.CommandContext(ctx, "nft", "-f", constant.SingBoxNftablesFile).Run() == nil {
+				return nil
+			}
+		}
+	}
+	cmd := exec.CommandContext(ctx, "nft", "-f", "-")
+	cmd.Stdin = strings.NewReader(firewall.BuildMinimalBlocklistNFT())
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("bootstrap inet security table: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func applyNFTBlockIP(ipStr string, isIPv4 bool) error {
+	if _, err := exec.LookPath("nft"); err != nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
+	if err := ensureLocalSecurityNFTTable(ctx); err != nil {
+		return err
+	}
 	setName := "blocklist_ip6"
 	if isIPv4 {
 		setName = "blocklist_ip4"
 	}
+	_ = exec.CommandContext(ctx, "nft", "delete", "element", "inet", "security", setName, fmt.Sprintf("{ %s }", ipStr)).Run()
 	elem := fmt.Sprintf("{ %s timeout 7d }", ipStr)
-	_ = exec.CommandContext(ctx, "nft", "add", "element", "inet", "security", setName, elem).Run()
+	if out, err := exec.CommandContext(ctx, "nft", "add", "element", "inet", "security", setName, elem).CombinedOutput(); err != nil {
+		return fmt.Errorf("nft add element %s: %w (%s)", setName, err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
-func applyNFTBlockCIDR(cidr string, isIPv4 bool) {
+func applyNFTBlockCIDR(cidr string, isIPv4 bool) error {
 	if _, err := exec.LookPath("nft"); err != nil {
-		return
+		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	if !isIPv4 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
-	if isIPv4 {
-		elem := fmt.Sprintf("{ %s }", cidr)
-		_ = exec.CommandContext(ctx, "nft", "add", "element", "inet", "security", "blocklist_ip4_forever", elem).Run()
+	if err := ensureLocalSecurityNFTTable(ctx); err != nil {
+		return err
 	}
+	elem := fmt.Sprintf("{ %s }", cidr)
+	if out, err := exec.CommandContext(ctx, "nft", "add", "element", "inet", "security", "blocklist_ip4_forever", elem).CombinedOutput(); err != nil {
+		// auto-merge interval set 中若已包含该网段，get element 返回 0 视为幂等成功
+		if exec.CommandContext(ctx, "nft", "get", "element", "inet", "security", "blocklist_ip4_forever", elem).Run() == nil {
+			return nil
+		}
+		return fmt.Errorf("nft add element blocklist_ip4_forever: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // UnblockTargetForNode 在指定主机 ("local" | "<node_id>" | "all") 全链路解除单个 IP、/24 网段或全部 ("all") 封禁

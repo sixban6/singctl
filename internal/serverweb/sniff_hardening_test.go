@@ -81,3 +81,55 @@ func TestSniffTracker_AntiLockoutGuardsAndConcurrentPersistence(t *testing.T) {
 		t.Fatal("expected non-empty remote NFT flush script")
 	}
 }
+
+func TestSniffTracker_NFTTableAutoBootstrapOnMissingSecurityTable(t *testing.T) {
+	// 1. Remote script must self-heal missing `table inet security` and preload nf_tables
+	remoteIPScript := buildRemoteNFTBlockScript("203.0.113.88", false, true)
+	for _, want := range []string{
+		"nft list table inet security",
+		"modprobe nf_tables",
+		"table inet security",
+		"blocklist_ip4",
+		"203.0.113.88",
+	} {
+		if !strings.Contains(remoteIPScript, want) {
+			t.Fatalf("remote block script missing %q:\n%s", want, remoteIPScript)
+		}
+	}
+
+	// 2. Local applyNFTBlockIP: simulate missing `table inet security` via fake nft binary in PATH
+	binDir := t.TempDir()
+	stateFile := filepath.Join(binDir, "table_loaded")
+	logFile := filepath.Join(binDir, "nft_calls.log")
+	fakeNFT := filepath.Join(binDir, "nft")
+	script := fmt.Sprintf(`#!/bin/sh
+echo "$@" >> %q
+if [ "$1" = "list" ] && [ "$2" = "table" ] && [ "$3" = "inet" ] && [ "$4" = "security" ]; then
+  [ -f %q ] && exit 0 || exit 1
+fi
+if [ "$1" = "-f" ]; then
+  touch %q
+  exit 0
+fi
+if [ "$1" = "add" ] && [ "$2" = "element" ]; then
+  [ -f %q ] && exit 0 || exit 1
+fi
+exit 0
+`, logFile, stateFile, stateFile, stateFile)
+	if err := os.WriteFile(fakeNFT, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	if err := applyNFTBlockIP("203.0.113.77", true); err != nil {
+		t.Fatalf("expected applyNFTBlockIP to auto-bootstrap missing security table and succeed, got: %v", err)
+	}
+	callsBytes, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := string(callsBytes)
+	if !strings.Contains(calls, "list table inet security") || !strings.Contains(calls, "-f") || !strings.Contains(calls, "add element inet security blocklist_ip4") {
+		t.Fatalf("expected list -> -f bootstrap -> add element sequence, got:\n%s", calls)
+	}
+}
