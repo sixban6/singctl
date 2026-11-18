@@ -13,6 +13,7 @@ import (
 
 	"singctl/internal/constant"
 	"singctl/internal/logger"
+	"singctl/internal/util/file"
 )
 
 var defaultBaseProtectedPorts = []int{
@@ -245,20 +246,70 @@ table inet security {
 `, strings.Join(whitelistV4, ", "), v6WhitelistSet, strings.Join(protected, ",\n            "), v6WhitelistRule)
 }
 
-const systemdService = `[Unit]
+// BuildMinimalBlocklistNFT 生成零端口拦截的最小安全黑名单表（仅包含私网/Tailscale 白名单、已建立连接放行与黑名单集合丢包）。
+// 供从未执行过 `singctl fw enable` 的主机在触发「一键拉黑」时按需初始化，彻底杜绝任何 SSH 端口误封锁死风险。
+func BuildMinimalBlocklistNFT() string {
+	return `table inet security {
+    set blocklist_ip4_forever {
+        type ipv4_addr
+        flags interval
+        auto-merge
+        size 65535
+    }
+    set blocklist_ip4 {
+        type ipv4_addr
+        flags dynamic,timeout
+        size 65535
+        timeout 7d
+    }
+    set blocklist_ip6 {
+        type ipv6_addr
+        flags dynamic,timeout
+        size 65535
+        timeout 7d
+    }
+    set whitelist_ip {
+        type ipv4_addr
+        flags interval
+        auto-merge
+        elements = { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10 }
+    }
+    chain input {
+        type filter hook input priority 0; policy accept;
+        ct state established,related counter accept
+        iifname "lo" counter accept
+        iifname "tailscale0" counter accept
+        iifname "wg*" counter accept
+        iifname "tun*" counter accept
+        ip saddr @whitelist_ip counter accept
+        ip saddr @blocklist_ip4_forever log prefix "[NFT] Ban Forever IPv4 (listed): " counter drop
+        ip saddr @blocklist_ip4 log prefix "[NFT] Blocked IPv4 (listed): " counter drop
+        ip6 saddr @blocklist_ip6 log prefix "[NFT] Blocked IPv6 (listed): " counter drop
+    }
+}
+`
+}
+
+// BuildFirewallSystemdUnit 生成带 nf_tables 内核模块预加载与开机 Netlink 重试机制的 systemd 单元。
+// 解决部分 KVM/Debian VPS 开机早期 nf_tables 模块尚未注册 Netlink 时 `nft -f` 报
+// "Unable to initialize Netlink socket: Protocol not supported" 退出导致丢表的问题。
+func BuildFirewallSystemdUnit(scriptPath string) string {
+	return fmt.Sprintf(`[Unit]
 Description=Singctl Security NFTables Rules
-# 确保在主流防火墙完成后加载，避免被冲刷
-After=network.target nftables.service firewalld.service ufw.service
+# 确保在网络、内核模块加载及主流防火墙就绪后加载，避免早期 Netlink 未初始化或规则被冲刷
+After=network.target systemd-modules-load.service nftables.service firewalld.service ufw.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/sbin/nft -f %s
-ExecStop=/usr/sbin/nft delete table inet security
+ExecStartPre=-/bin/sh -c 'modprobe nf_tables 2>/dev/null || /sbin/modprobe nf_tables 2>/dev/null || true'
+ExecStart=/bin/sh -c 'i=0; while [ "$i" -lt 5 ]; do /usr/sbin/nft -f "%s" && exit 0; modprobe nf_tables 2>/dev/null || /sbin/modprobe nf_tables 2>/dev/null || true; sleep 1; i=$((i + 1)); done; exec /usr/sbin/nft -f "%s"'
+ExecStop=-/usr/sbin/nft delete table inet security
 RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
-`
+`, scriptPath, scriptPath)
+}
 
 const openwrtInitScript = `#!/bin/sh /etc/rc.common
 
@@ -267,6 +318,7 @@ STOP=10
 
 start() {
 	echo "Loading singctl security firewall rules..."
+	modprobe nf_tables 2>/dev/null || true
 	/usr/sbin/nft -f %s
 }
 
@@ -310,9 +362,11 @@ func Enable() error {
 	}
 
 	nftRules := BuildSecurityNFT(os.Getenv("SSH_CONNECTION"), DetectSSHPorts())
-	if err := os.WriteFile(scriptPath, []byte(nftRules), 0600); err != nil {
+	if err := file.WriteAtomic0600(scriptPath, []byte(nftRules)); err != nil {
 		return fmt.Errorf("failed to write %s: %v", scriptPath, err)
 	}
+
+	preloadNFTablesModule()
 
 	// 1. 预校验语法并清理旧表，确保重复执行幂等且绝不追加重复规则
 	if out, err := exec.Command("nft", "-c", "-f", scriptPath).CombinedOutput(); err != nil {
@@ -375,15 +429,24 @@ func Disable() error {
 	return nil
 }
 
+func preloadNFTablesModule() {
+	for _, bin := range []string{"modprobe", "/sbin/modprobe", "/usr/sbin/modprobe"} {
+		if _, err := exec.LookPath(bin); err == nil {
+			_ = exec.Command(bin, "nf_tables").Run()
+			return
+		}
+	}
+}
+
 // ----------------- Systemd (Debian / Ubuntu) -----------------
 func setupSystemdService() error {
 	servicePath := constant.FirewallSystemdService
-	content := fmt.Sprintf(systemdService, constant.SingBoxNftablesFile)
+	content := BuildFirewallSystemdUnit(constant.SingBoxNftablesFile)
 	if err := os.WriteFile(servicePath, []byte(content), 0644); err != nil {
 		return err
 	}
 	_ = exec.Command("systemctl", "daemon-reload").Run()
-	if err := exec.Command("systemctl", "enable", "singctl-firewall.service").Run(); err != nil {
+	if err := exec.Command("systemctl", "enable", "--now", "singctl-firewall.service").Run(); err != nil {
 		return err
 	}
 	return nil
