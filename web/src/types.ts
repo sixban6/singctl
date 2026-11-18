@@ -718,7 +718,31 @@ export interface WarpPresetItem {
   domainSuffixes?: string[];
 }
 
+export interface WarpNodeSummary {
+  id: string;
+  name: string;
+  host?: string;
+  isLocal: boolean;
+  online: boolean;
+  mode: WarpRoutingMode | string;
+  daemon: WarpDaemonStatus;
+  dcConnCount: number;
+  warpConnCount: number;
+  updatedAt?: string;
+  error?: string;
+}
+
+export interface WarpClusterOpItem {
+  id: string;
+  name: string;
+  success: boolean;
+  skipped?: boolean;
+  message: string;
+}
+
 export interface WarpRoutingStatusResponse {
+  selectedNode?: string;
+  nodes?: WarpNodeSummary[];
   daemon: WarpDaemonStatus;
   routing: WarpRoutingConfig;
   presets: WarpPresetItem[];
@@ -729,6 +753,7 @@ export interface WarpRoutingStatusResponse {
 export interface WarpRoutingUpdateResponse extends WarpRoutingStatusResponse {
   message: string;
   evictedConnections: number;
+  results?: WarpClusterOpItem[];
 }
 
 export interface WarpQuickSwitchResponse extends WarpRoutingStatusResponse {
@@ -737,6 +762,7 @@ export interface WarpQuickSwitchResponse extends WarpRoutingStatusResponse {
   outbound: 'WARP' | 'DC';
   matchedPreset?: string;
   evictedConnections: number;
+  results?: WarpClusterOpItem[];
 }
 
 export interface ActiveDestinationGroup {

@@ -79,6 +79,9 @@ type Server struct {
 	warpAutoHealStatus    string
 	warpLastHealedAt      string
 	warpWatchdogDeps      *WarpWatchdogDeps
+	warpClusterMu         sync.Mutex
+	warpNodeCache         map[string]warpNodeCacheEntry
+	warpClusterRefreshing atomic.Bool
 	configCacheMu         sync.RWMutex
 	cachedConfig          *config.Config
 	cachedConfigAt        time.Time

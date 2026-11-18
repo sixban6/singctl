@@ -187,6 +187,7 @@ func NewServerCmd(configPath string, version ...string) *cobra.Command {
 	cmd.AddCommand(newMaskSiteCmd(configPath))
 	cmd.AddCommand(newServerUpdateCmd(configPath))
 	cmd.AddCommand(newServerCheckCmd(configPath))
+	cmd.AddCommand(newServerWarpCtlCmd(configPath))
 	return cmd
 }
 
