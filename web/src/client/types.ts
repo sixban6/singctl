@@ -552,6 +552,78 @@ export interface ClientRoutingReport {
   lastError?: string;
 }
 
+export interface GroupMacroInfo {
+  id: string;
+  label: string;
+  description: string;
+  pattern: string;
+}
+
+export interface GroupTemplateSnippet {
+  id: string;
+  name: string;
+  description: string;
+  content: string;
+}
+
+export interface LeafOutboundInfo {
+  tag: string;
+  type: string;
+  subs?: string[];
+}
+
+export interface CompiledGroupPreview {
+  name: string;
+  type: 'selector' | 'urltest' | string;
+  builtin: boolean;
+  customized: boolean;
+  fallbackUsed?: boolean;
+  fallbackTag?: string;
+  default?: string;
+  attachedTo?: string[];
+  failover?: boolean;
+  members: string[];
+  leafMatchCount: number;
+  totalCount: number;
+}
+
+export interface GroupsPreviewReport {
+  mode: 'merge' | 'replace' | string;
+  totalLeafNodes: number;
+  leafNodes: LeafOutboundInfo[];
+  subNames?: string[];
+  groups: CompiledGroupPreview[];
+  warnings?: string[];
+}
+
+export interface ClientGroupsGetResponse {
+  path: string;
+  exists: boolean;
+  content: string;
+  hasLiveConfig: boolean;
+  macros: GroupMacroInfo[];
+  templates: GroupTemplateSnippet[];
+  preview?: GroupsPreviewReport;
+  parseError?: string;
+}
+
+export interface ClientGroupsPreviewResponse {
+  ok: boolean;
+  hasLiveConfig?: boolean;
+  preview?: GroupsPreviewReport;
+  error?: string;
+}
+
+export interface ClientGroupsPutResponse {
+  ok: boolean;
+  exists: boolean;
+  applied: boolean;
+  content: string;
+  message: string;
+  preview?: GroupsPreviewReport;
+  routingReport?: ClientRoutingReport;
+}
+
 export interface ActionStreamEvent {
   t: 'start' | 'out' | 'exit';
   title?: string;

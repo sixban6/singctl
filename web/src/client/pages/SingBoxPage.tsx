@@ -9,6 +9,7 @@ import {
   ChevronDown,
   Cpu,
   FileCode,
+  Layers,
   Play,
   Power,
   RefreshCw,
@@ -42,6 +43,7 @@ import {
   SbTrafficSnapshot,
 } from '../types';
 import { ProxyNodesPanel } from './ProxyNodesPanel';
+import { GroupsOrchestratorPanel } from './GroupsOrchestratorPanel';
 
 export interface SingBoxPageProps {
   status: ClientStatusResponse | null;
@@ -52,10 +54,11 @@ export interface SingBoxPageProps {
   onNavigate: (tab: string, sub?: string) => void;
 }
 
-type SbSubTab = 'routing' | 'nodes' | 'editor';
+type SbSubTab = 'routing' | 'nodes' | 'groups' | 'editor';
 
 function normalizeSbSubTab(raw?: string): SbSubTab {
   if (raw === 'nodes') return 'nodes';
+  if (raw === 'groups') return 'groups';
   if (raw === 'editor') return 'editor';
   return 'routing';
 }
@@ -560,6 +563,7 @@ export const SingBoxPage: React.FC<SingBoxPageProps> = ({
             items={[
               { key: 'routing', label: '智能分流', icon: <SlidersHorizontal className="w-3.5 h-3.5" /> },
               { key: 'nodes', label: '节点选择', icon: <Cpu className="w-3.5 h-3.5" /> },
+              { key: 'groups', label: '分组编排', icon: <Layers className="w-3.5 h-3.5" /> },
               { key: 'editor', label: 'config.json', icon: <FileCode className="w-3.5 h-3.5" /> },
             ]}
           />
@@ -997,7 +1001,25 @@ export const SingBoxPage: React.FC<SingBoxPageProps> = ({
         />
       )}
 
-      {/* Sub-Tab 3: config.json 编辑器 */}
+      {/* Sub-Tab 3: 声明式分组编排 (groups.yaml + 实时干跑命中预览) */}
+      {sub === 'groups' && (
+        <GroupsOrchestratorPanel
+          busy={busy}
+          onApplied={(nextRouting) => {
+            if (nextRouting) setRouting(nextRouting);
+            else void loadRouting(true);
+            if (sbRunning) void loadProxies(true);
+            setSbCfg(null);
+          }}
+          onJumpToRouting={() => selectSubTab('routing')}
+          onJumpToGroup={(gName) => {
+            setFocusGroup(gName);
+            selectSubTab('nodes');
+          }}
+        />
+      )}
+
+      {/* Sub-Tab 4: config.json 编辑器 */}
       {sub === 'editor' && (
         <SectionCard
           title="sing-box config.json"

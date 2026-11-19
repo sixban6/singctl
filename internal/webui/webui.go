@@ -125,6 +125,9 @@ func New(opts Options) *Server {
 	s.Mux.HandleFunc("POST /api/sbconfig/restore", s.guard(s.handleSbConfigRestore))
 	s.Mux.HandleFunc("GET /api/traffic-routing", s.guard(s.handleTrafficRoutingGet))
 	s.Mux.HandleFunc("PUT /api/traffic-routing", s.guard(s.handleTrafficRoutingPut))
+	s.Mux.HandleFunc("GET /api/groups", s.guard(s.handleGroupsGet))
+	s.Mux.HandleFunc("POST /api/groups/preview", s.guard(s.handleGroupsPreviewPost))
+	s.Mux.HandleFunc("PUT /api/groups", s.guard(s.handleGroupsPut))
 	s.Mux.HandleFunc("GET /api/gateway", s.guard(s.handleGatewayGet))
 	s.Mux.HandleFunc("PUT /api/gateway", s.guard(s.handleGatewayPut))
 

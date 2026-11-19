@@ -533,6 +533,9 @@ func (s *Server) handleIOSConfig(w http.ResponseWriter, r *http.Request) {
 	cacheKey := ""
 	if fi, err := os.Stat(cfgPath); err == nil {
 		cacheKey = fmt.Sprintf("%s|%d|%d", cfgPath, fi.ModTime().UnixNano(), fi.Size())
+		if gfi, gErr := os.Stat(config.GroupsPathForConfig(cfgPath)); gErr == nil {
+			cacheKey += fmt.Sprintf("|g:%d|%d", gfi.ModTime().UnixNano(), gfi.Size())
+		}
 	}
 
 	s.iosMu.Lock()

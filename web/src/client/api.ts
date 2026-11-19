@@ -13,6 +13,9 @@ import {
   CacheResponse,
   ClientConfigDTO,
   ClientGatewayConfigResponse,
+  ClientGroupsGetResponse,
+  ClientGroupsPreviewResponse,
+  ClientGroupsPutResponse,
   ClientHealthResponse,
   ClientLogsResponse,
   ClientRoutingReport,
@@ -305,6 +308,18 @@ export const clientApi = {
       '/api/traffic-routing',
       { method: 'PUT', body: JSON.stringify(payload) },
     ),
+
+  getGroups: () => request<ClientGroupsGetResponse>('/api/groups'),
+  previewGroups: (content: string) =>
+    request<ClientGroupsPreviewResponse>('/api/groups/preview', {
+      method: 'POST',
+      body: JSON.stringify({ content }),
+    }),
+  saveGroups: (payload: { content?: string; reset?: boolean }) =>
+    request<ClientGroupsPutResponse>('/api/groups', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
 
   getGateway: () => request<ClientGatewayConfigResponse>('/api/gateway'),
   saveGateway: (payload: { mode: GatewayRoleMode; mainRouterIP?: string; lanIface?: string }) =>

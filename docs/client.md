@@ -247,6 +247,38 @@ singctl sb whitelist sync.example.com --remove
 singctl sb whitelist list
 ```
 
+### 4. 声明式策略组编排 (`groups.yaml` / `singctl sb groups`)
+
+通过与 `singctl.yaml` 同目录的 `/etc/singctl/groups.yaml`（零节点隐私信息），即可按地区语义宏、协议或订阅源动态构建自定义分组，并与客户端 WebUI「智能分流中心」及看门狗容灾无缝联动：
+
+```yaml
+# /etc/singctl/groups.yaml
+version: 1
+mode: merge   # merge (保留内置组并扩展) | replace (全量自定义接管)
+
+groups:
+  - name: "#HK"
+    type: urltest
+    match: ["@hk"]
+    exclude: ["@high_rate"]
+
+  - name: "Streaming"
+    type: selector
+    use: ["#SG", "#JP", "#HK", "#VPS"]
+    default: "#JP"
+    attach_to: []        # 独立供「智能分流中心」绑定，不混入顶层 Proxy
+    failover: true       # 纳入看门狗故障切换守护
+```
+
+支持在客户端 WebUI（`:8090` -> `sing-box` -> `分组编排`）在线编辑并实时预览节点命中，或使用命令行工具管理：
+
+```bash
+singctl sb groups init      # 生成默认注释模板 /etc/singctl/groups.yaml
+singctl sb groups preview   # 干跑预览各分组当前命中的节点清单
+singctl sb groups apply     # 经 sing-box check 校验后通过 SIGHUP 无损热重载生效
+```
+
+
 
 
 
