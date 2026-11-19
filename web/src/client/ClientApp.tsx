@@ -636,7 +636,15 @@ const ClientShell: React.FC = () => {
         )}
         {tab === 'logs' && <LogsPage initialLogName={sub} />}
         {tab === 'sys' && (
-          <SystemPage status={status ?? null} busy={busy} onAction={requestAction} />
+          <SystemPage
+            status={status ?? null}
+            busy={busy}
+            onAction={requestAction}
+            onRestored={() => {
+              void refreshStatus(true);
+              emitClientInvalidate('all');
+            }}
+          />
         )}
       </AppShell>
 

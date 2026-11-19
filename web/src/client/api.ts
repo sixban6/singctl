@@ -11,6 +11,8 @@ import {
   AuditFlowRecord,
   AuditReport,
   CacheResponse,
+  ClientBackupExportResponse,
+  ClientBackupRestoreResponse,
   ClientConfigDTO,
   ClientGatewayConfigResponse,
   ClientGroupsGetResponse,
@@ -335,6 +337,17 @@ export const clientApi = {
     }),
 
   getWatchdog: () => request<WatchdogReport>('/api/watchdog'),
+
+  exportBackup: (passphrase: string) =>
+    request<ClientBackupExportResponse>('/api/backup/export', {
+      method: 'POST',
+      body: JSON.stringify({ passphrase }),
+    }),
+  restoreBackup: (passphrase: string, data: string) =>
+    request<ClientBackupRestoreResponse>('/api/backup/restore', {
+      method: 'POST',
+      body: JSON.stringify({ passphrase, data }),
+    }),
   updateWatchdogConfig: (payload: Record<string, unknown>) =>
     request<WatchdogReport & { ok?: boolean; message?: string; report?: WatchdogReport }>(
       '/api/watchdog/config',
