@@ -278,6 +278,10 @@ singctl sb groups preview   # 干跑预览各分组当前命中的节点清单
 singctl sb groups apply     # 经 sing-box check 校验后通过 SIGHUP 无损热重载生效
 ```
 
+### 5. 网关配置加密备份与迁移（客户端 WebUI）
+
+在客户端 WebUI（`:8090` -> `系统与维护` -> `网关配置加密备份与迁移`）支持使用口令（PBKDF2-HMAC-SHA256 + AES-256-GCM 内存中强加密）一键导出/还原 `singctl.yaml`、`groups.yaml`、`AdGuardHome.yaml` 与 `config.json` 加密快照包（`.enc.json`），适用于 OpenWrt 固件升级或换机无痛迁移。
+
 
 
 

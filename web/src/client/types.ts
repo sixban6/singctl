@@ -626,6 +626,27 @@ export interface ClientGroupsPutResponse {
   routingReport?: ClientRoutingReport;
 }
 
+export interface ClientBackupSummary {
+  hasSingctlCfg: boolean;
+  hasGroups: boolean;
+  hasAdGuard: boolean;
+  hasSingBox: boolean;
+}
+
+export interface ClientBackupExportResponse {
+  ok: boolean;
+  message: string;
+  filename: string;
+  data: string;
+  summary: ClientBackupSummary;
+}
+
+export interface ClientBackupRestoreResponse {
+  ok: boolean;
+  message: string;
+  restoredItems: string[];
+}
+
 export interface ActionStreamEvent {
   t: 'start' | 'out' | 'exit';
   title?: string;

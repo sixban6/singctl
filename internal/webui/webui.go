@@ -108,6 +108,8 @@ func New(opts Options) *Server {
 	s.Mux.HandleFunc("PUT /api/config/raw", s.guard(s.handleConfigRawPut))
 	s.Mux.HandleFunc("GET /api/cache", s.guard(s.handleCache))
 	s.Mux.HandleFunc("GET /api/logs", s.guard(s.handleLogs))
+	s.Mux.HandleFunc("POST /api/backup/export", s.guard(s.handleClientBackupExport))
+	s.Mux.HandleFunc("POST /api/backup/restore", s.guard(s.handleClientBackupRestore))
 
 	// 登出 API (清除持久化 Cookie)
 	s.Mux.HandleFunc("POST /api/logout", s.handleLogout)
