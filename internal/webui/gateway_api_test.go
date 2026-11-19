@@ -2,6 +2,7 @@ package webui
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"singctl/internal/adguard"
 	"singctl/internal/config"
 	"singctl/internal/gateway"
+	"singctl/internal/netdiag"
 )
 
 func TestGatewayAPI_GetPutAndSelfLoopReject(t *testing.T) {
@@ -132,5 +134,113 @@ func TestGatewayAPI_GetPutAndSelfLoopReject(t *testing.T) {
 	}
 	if !strings.Contains(string(aghMainRaw), "use_private_ptr_resolvers: true") {
 		t.Fatalf("expected PUT /api/gateway mode=main to restore use_private_ptr_resolvers: true, got:\n%s", string(aghMainRaw))
+	}
+}
+
+func TestGatewayIPv6ModeAndDNSLeakTestAPI(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "singctl.yaml")
+	if err := os.WriteFile(cfgPath, []byte("subs:\n  - name: main\n    url: https://example.com/sub\n"), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	sbPath := filepath.Join(dir, "singbox.json")
+	sampleSB := `{
+  "dns": {
+    "strategy": "ipv4_only",
+    "servers": [
+      {"tag": "dns_local", "type": "udp", "server": "127.0.0.1"},
+      {"tag": "dns_proxy", "type": "https", "server": "8.8.8.8", "detour": "proxy-out"}
+    ],
+    "rules": [
+      {"rule_set": "geosite-cn", "server": "dns_local"},
+      {"rule_set": "geosite-geolocation-!cn", "server": "dns_proxy"}
+    ],
+    "final": "dns_proxy"
+  },
+  "outbounds": [
+    {"tag": "proxy-out", "type": "direct"},
+    {"tag": "direct", "type": "direct"}
+  ],
+  "route": {
+    "final": "direct",
+    "default_domain_resolver": "dns_local",
+    "rule_set": [
+      {"tag": "geosite-cn", "type": "inline", "rules": [{"domain_suffix": ["cn"]}]},
+      {"tag": "geosite-private", "type": "inline", "rules": [{"domain_suffix": ["local"]}]},
+      {"tag": "geosite-geolocation-!cn", "type": "inline", "rules": [{"domain_suffix": ["example.org"]}]}
+    ]
+  }
+}`
+	if err := os.WriteFile(sbPath, []byte(sampleSB), 0600); err != nil {
+		t.Fatalf("write singbox.json: %v", err)
+	}
+
+	var capturedMode string
+	var capturedRounds int
+	srv := New(Options{
+		ConfigPath:        cfgPath,
+		SingBoxConfigPath: sbPath,
+		Version:           "v1.14.144-test",
+		GatewayProberForTest: func() gateway.TopologyInfo {
+			return gateway.TopologyInfo{LANIP: "192.168.100.2", LANCIDR: "192.168.100.0/24", LANIface: "eth0", SuggestedMainRouterIP: "192.168.100.1"}
+		},
+		DNSLeakRunnerForTest: func(_ context.Context, opts netdiag.DNSLeakTestOptions) *netdiag.DNSLeakReport {
+			capturedMode = opts.IPv6Mode
+			capturedRounds = opts.GatewayRounds
+			return &netdiag.DNSLeakReport{
+				Verdict:       "safe",
+				IPv6Mode:      opts.IPv6Mode,
+				GatewayRounds: opts.GatewayRounds,
+				Checks: []netdiag.DNSLeakCheckItem{
+					{ID: "overseas_egress", Title: "海外代理 DNS 出口溯源", Status: "pass", Summary: "OK"},
+				},
+			}
+		},
+	})
+
+	// 1. PUT /api/gateway with side + cn_only must reject with 400
+	badReq := httptest.NewRequest(http.MethodPut, "/api/gateway", bytes.NewBufferString(`{"mode":"side","mainRouterIP":"192.168.100.1","ipv6Mode":"cn_only"}`))
+	badReq.Header.Set("Content-Type", "application/json")
+	badRec := httptest.NewRecorder()
+	srv.Mux.ServeHTTP(badRec, badReq)
+	if badRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 when enabling ipv6Mode on side router, got %d: %s", badRec.Code, badRec.Body.String())
+	}
+
+	// 2. PUT /api/gateway with main + cn_only persists singctl.yaml & rewrites singbox config.json
+	okReq := httptest.NewRequest(http.MethodPut, "/api/gateway", bytes.NewBufferString(`{"mode":"main","ipv6Mode":"cn_only"}`))
+	okReq.Header.Set("Content-Type", "application/json")
+	okRec := httptest.NewRecorder()
+	srv.Mux.ServeHTTP(okRec, okReq)
+	if okRec.Code != http.StatusOK {
+		t.Fatalf("PUT /api/gateway main+cn_only failed status=%d body=%s", okRec.Code, okRec.Body.String())
+	}
+	loaded, err := config.Load(cfgPath)
+	if err != nil || loaded.Gateway.EffectiveIPv6Mode() != "cn_only" {
+		t.Fatalf("expected persisted ipv6_mode=cn_only, got %+v err=%v", loaded, err)
+	}
+	sbUpdated, _ := os.ReadFile(sbPath)
+	if !strings.Contains(string(sbUpdated), `"prefer_ipv4"`) || !strings.Contains(string(sbUpdated), `"predefined"`) {
+		t.Fatalf("expected singbox config updated with prefer_ipv4 and predefined AAAA rule, got:\n%s", string(sbUpdated))
+	}
+
+	// 3. POST /api/dns/leak-test passes effective ipv6Mode & default rounds (8), and respects mode=deep (16)
+	leakReq := httptest.NewRequest(http.MethodPost, "/api/dns/leak-test", bytes.NewBufferString("{}"))
+	leakReq.Header.Set("Content-Type", "application/json")
+	leakRec := httptest.NewRecorder()
+	srv.Mux.ServeHTTP(leakRec, leakReq)
+	if leakRec.Code != http.StatusOK {
+		t.Fatalf("POST /api/dns/leak-test failed status=%d body=%s", leakRec.Code, leakRec.Body.String())
+	}
+	if capturedMode != "cn_only" || capturedRounds != 8 {
+		t.Fatalf("expected ipv6Mode=cn_only rounds=8, got mode=%q rounds=%d", capturedMode, capturedRounds)
+	}
+
+	deepReq := httptest.NewRequest(http.MethodPost, "/api/dns/leak-test", bytes.NewBufferString(`{"mode":"deep"}`))
+	deepReq.Header.Set("Content-Type", "application/json")
+	deepRec := httptest.NewRecorder()
+	srv.Mux.ServeHTTP(deepRec, deepReq)
+	if deepRec.Code != http.StatusOK || capturedRounds != 16 {
+		t.Fatalf("expected POST /api/dns/leak-test deep status=200 rounds=16, got status=%d rounds=%d", deepRec.Code, capturedRounds)
 	}
 }

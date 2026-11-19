@@ -40,6 +40,7 @@ import {
   writeCachedQuery,
 } from '../../hooks';
 import { clientApi } from '../api';
+import { DNSLeakTestCard } from '../components/DNSLeakTestCard';
 import {
   AdGuardCredentialsResponse,
   AdGuardOverviewSnapshot,
@@ -1099,6 +1100,8 @@ export const AdGuardPage: React.FC<AdGuardPageProps> = ({
           </div>
         </div>
       </SectionCard>
+
+      <DNSLeakTestCard />
 
       {/* 双栏工作区：误拦一键放行 + 局域网 DNS 重写 */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">

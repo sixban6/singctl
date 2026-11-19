@@ -22,6 +22,8 @@ import {
   ClientLogsResponse,
   ClientRoutingReport,
   ClientStatusResponse,
+  DNSLeakReport,
+  GatewayIPv6Mode,
   GatewayRoleMode,
   SbConfigResponse,
   SbProxiesSnapshot,
@@ -104,9 +106,10 @@ function defaultTimeoutForPath(path: string): number {
     path.startsWith('/api/adguard/probe') ||
     path.startsWith('/api/adguard/filters') ||
     path.startsWith('/api/audit/ai-') ||
-    path.startsWith('/api/watchdog/patrol')
+    path.startsWith('/api/watchdog/patrol') ||
+    path.startsWith('/api/dns/leak-test')
   ) {
-    return 35000;
+    return 25000;
   }
   return 15000;
 }
@@ -324,7 +327,12 @@ export const clientApi = {
     }),
 
   getGateway: () => request<ClientGatewayConfigResponse>('/api/gateway'),
-  saveGateway: (payload: { mode: GatewayRoleMode; mainRouterIP?: string; lanIface?: string }) =>
+  saveGateway: (payload: {
+    mode: GatewayRoleMode;
+    mainRouterIP?: string;
+    lanIface?: string;
+    ipv6Mode?: GatewayIPv6Mode;
+  }) =>
     request<
       ClientGatewayConfigResponse & {
         ok: boolean;
@@ -334,6 +342,11 @@ export const clientApi = {
     >('/api/gateway', {
       method: 'PUT',
       body: JSON.stringify(payload),
+    }),
+  runDNSLeakTest: (mode: 'standard' | 'deep' = 'standard') =>
+    request<DNSLeakReport>('/api/dns/leak-test', {
+      method: 'POST',
+      body: JSON.stringify({ mode }),
     }),
 
   getWatchdog: () => request<WatchdogReport>('/api/watchdog'),

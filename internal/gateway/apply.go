@@ -42,7 +42,9 @@ type Controller struct {
 	StateDir        string
 	FW4IncludeRoot  string
 	ResolvGuardPath string
+	IPv6BackupPath  string
 	Prober          func() TopologyInfo
+	IsOpenWrt       func() bool
 	Exec            func(name string, args ...string) ([]byte, error)
 }
 
@@ -86,11 +88,18 @@ func (c *Controller) hasCommand(name string) bool {
 }
 
 // Apply 根据客户端 gateway 配置执行模式对齐：
-//   - 当 mode == "main"（默认）时：绝不注入任何旁路由规则，仅清理可能残留的历史旁路由表与快照；
+//   - 当 mode == "main"（默认）时：绝不注入任何旁路由规则，仅清理可能残留的历史旁路由表与快照；若显式配置了 IPv6 模式则同步宿主 IPv6；
 //   - 当 mode == "side" 时：校验主路由 IP、自愈旁路由默认路由、快照并设置 sysctl、原子挂载 singctl-side 规则与跨表放行规则。
 func (c *Controller) Apply(ctx context.Context, cfg config.GatewayConfig) error {
 	if !cfg.IsSideRouter() {
-		return c.Teardown(ctx)
+		if err := c.Teardown(ctx); err != nil {
+			return err
+		}
+		if cfg.EffectiveIPv6Mode() != config.GatewayIPv6Off && (runtime.GOOS == "linux" || c.Exec != nil) {
+			_, err := c.SyncIPv6Host(ctx, cfg)
+			return err
+		}
+		return nil
 	}
 	if runtime.GOOS != "linux" && c.Exec == nil {
 		return nil

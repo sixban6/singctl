@@ -60,3 +60,6 @@ fleet.json
 *.key
 .env
 .env.*
+
+# Local-only design drafts
+docs/tailscale-p2p-defense-plan.md

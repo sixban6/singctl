@@ -92,6 +92,25 @@ export interface ClientFirewallStatus {
 }
 
 export type GatewayRoleMode = 'main' | 'side';
+export type GatewayIPv6Mode = 'off' | 'cn_only' | 'full';
+
+export interface IPv6StatusInfo {
+  supported: boolean;
+  isOpenWrt: boolean;
+  kernelEnabled: boolean;
+  forwardingEnabled: boolean;
+  wanHasGua: boolean;
+  wanHasDefaultV6: boolean;
+  pdPrefix?: string;
+  lanGua?: string;
+  lanPrefixes?: string[];
+  lanRaMode?: string;
+  lanDhcpv6Mode?: string;
+  dnsmasqFilterAaaa?: string;
+  raDnsAnnounce: boolean;
+  autoConfigurable: boolean;
+  warnings?: string[];
+}
 
 export interface ClientGatewayTopology {
   lanIP: string;
@@ -107,6 +126,7 @@ export interface ClientGatewayStatusSummary {
   supported: boolean;
   mode: GatewayRoleMode;
   mainRouterIP: string;
+  ipv6Mode?: GatewayIPv6Mode;
 }
 
 export interface ClientGatewayConfigResponse {
@@ -114,7 +134,75 @@ export interface ClientGatewayConfigResponse {
   mode: GatewayRoleMode;
   mainRouterIP: string;
   lanIface?: string;
+  ipv6Mode?: GatewayIPv6Mode;
+  ipv6Status?: IPv6StatusInfo;
+  ipv6Actions?: string[];
   topology: ClientGatewayTopology;
+}
+
+export interface DNSLeakCheckItem {
+  id: string;
+  title: string;
+  status: 'pass' | 'warn' | 'fail' | string;
+  latencyMs?: number;
+  summary: string;
+  detail?: string;
+}
+
+export interface DNSResolverProfile {
+  ip?: string;
+  country?: string;
+  countryCode?: string;
+  isp?: string;
+  ecs?: string;
+  ecsCountryCode?: string;
+}
+
+export interface EgressEndpoint {
+  ip?: string;
+  country?: string;
+  countryCode?: string;
+  region?: string;
+  city?: string;
+  isp?: string;
+  asn?: string;
+  latencyMs?: number;
+  reachable: boolean;
+  error?: string;
+}
+
+export interface EgressMatrix {
+  domesticIpv4?: EgressEndpoint;
+  domesticIpv6?: EgressEndpoint;
+  overseasIpv4?: EgressEndpoint;
+  overseasIpv6?: EgressEndpoint;
+}
+
+export interface DNSServerObservation {
+  ip: string;
+  country?: string;
+  countryCode?: string;
+  isp?: string;
+  ecs?: string;
+  ecsCountryCode?: string;
+  hits: number;
+  source: 'gateway' | 'port53_hijack' | string;
+  leaked: boolean;
+  leakReason?: string;
+}
+
+export interface DNSLeakReport {
+  verdict: 'safe' | 'warning' | 'leaked' | string;
+  ipv6Mode: GatewayIPv6Mode | string;
+  checkedAt: string;
+  durationMs: number;
+  homePublicIp?: string;
+  homeIsp?: string;
+  overseasResolver?: DNSResolverProfile | null;
+  egress?: EgressMatrix | null;
+  dnsServers?: DNSServerObservation[];
+  gatewayRounds?: number;
+  checks: DNSLeakCheckItem[];
 }
 
 export interface ClientAdGuardStatusSummary {

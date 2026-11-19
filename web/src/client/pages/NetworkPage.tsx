@@ -1,10 +1,12 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Share2, Flame, GitFork, RefreshCw, Save, AlertTriangle, CheckCircle2 } from 'lucide-react';
+import { Share2, Flame, GitFork, RefreshCw, Save, AlertTriangle, CheckCircle2, Network } from 'lucide-react';
 import { Badge, Button, PageHeader, SectionCard, SegmentedTabs, useToast } from '../../ui';
 import { clientApi } from '../api';
+import { DNSLeakTestCard } from '../components/DNSLeakTestCard';
 import {
   ClientGatewayConfigResponse,
   ClientStatusResponse,
+  GatewayIPv6Mode,
   GatewayRoleMode,
 } from '../types';
 
@@ -202,6 +204,8 @@ export const GatewayModePage: React.FC<GatewayModePageProps> = ({ busy, onSaved 
 
   const [mode, setMode] = useState<GatewayRoleMode>('main');
   const [mainRouterIP, setMainRouterIP] = useState('');
+  const [ipv6Mode, setIpv6Mode] = useState<GatewayIPv6Mode>('off');
+  const [ipv6Saving, setIpv6Saving] = useState(false);
 
   const loadGateway = useCallback(async () => {
     setLoading(true);
@@ -210,6 +214,7 @@ export const GatewayModePage: React.FC<GatewayModePageProps> = ({ busy, onSaved 
       setData(res);
       setMode(res.mode === 'side' ? 'side' : 'main');
       setMainRouterIP(res.mainRouterIP || res.topology?.suggestedMainRouterIP || '');
+      setIpv6Mode((res.ipv6Mode as GatewayIPv6Mode) || 'off');
     } catch (e: unknown) {
       error(e instanceof Error ? e.message : '读取网关模式配置失败');
     } finally {
@@ -222,17 +227,21 @@ export const GatewayModePage: React.FC<GatewayModePageProps> = ({ busy, onSaved 
   }, [loadGateway]);
 
   const topo = data?.topology;
+  const v6Status = data?.ipv6Status;
   const trimmedIP = mainRouterIP.trim();
   const isSelfLoop = Boolean(mode === 'side' && topo?.lanIP && trimmedIP === topo.lanIP);
 
   const handleSelectMode = (nextMode: GatewayRoleMode) => {
     setMode(nextMode);
-    if (nextMode === 'side' && !trimmedIP && topo?.suggestedMainRouterIP) {
-      setMainRouterIP(topo.suggestedMainRouterIP);
+    if (nextMode === 'side') {
+      setIpv6Mode('off');
+      if (!trimmedIP && topo?.suggestedMainRouterIP) {
+        setMainRouterIP(topo.suggestedMainRouterIP);
+      }
     }
   };
 
-  const handleSave = async () => {
+  const handleSave = async (forIPv6 = false) => {
     if (mode === 'side' && !trimmedIP) {
       error('旁路由模式请填写上级主路由(网关) IP');
       return;
@@ -241,21 +250,29 @@ export const GatewayModePage: React.FC<GatewayModePageProps> = ({ busy, onSaved 
       error(`上级主路由 IP 不能等于旁路由本机 IP (${topo?.lanIP})`);
       return;
     }
-    setSaving(true);
+    const effectiveV6: GatewayIPv6Mode = mode === 'side' ? 'off' : ipv6Mode;
+    if (forIPv6) {
+      setIpv6Saving(true);
+    } else {
+      setSaving(true);
+    }
     try {
       const res = await clientApi.saveGateway({
         mode,
         mainRouterIP: mode === 'side' ? trimmedIP : '',
+        ipv6Mode: effectiveV6,
       });
       setData(res);
       setMode(res.mode);
       setMainRouterIP(res.mainRouterIP || res.topology?.suggestedMainRouterIP || '');
+      setIpv6Mode((res.ipv6Mode as GatewayIPv6Mode) || effectiveV6);
       success(res.message || '网关模式已保存');
       onSaved?.();
     } catch (e: unknown) {
       error(e instanceof Error ? e.message : '保存网关模式失败');
     } finally {
       setSaving(false);
+      setIpv6Saving(false);
     }
   };
 
@@ -427,6 +444,156 @@ export const GatewayModePage: React.FC<GatewayModePageProps> = ({ busy, onSaved 
           </div>
         </SectionCard>
       )}
+
+      <SectionCard
+        title="IPv6 智能双栈分流 (自动探测与配置)"
+        icon={<Network className="w-4 h-4" />}
+        subtitle="主路由开启时自动探测 WAN 前缀，一键托管 OpenWrt RA/DHCPv6、dnsmasq 放行与本地防 DNS 泄漏策略"
+        actions={
+          <Badge
+            tone={
+              ipv6Mode === 'off'
+                ? 'neutral'
+                : ipv6Mode === 'cn_only'
+                  ? 'ok'
+                  : 'accent'
+            }
+          >
+            {ipv6Mode === 'cn_only'
+              ? '当前：智能双栈 (推荐)'
+              : ipv6Mode === 'full'
+                ? '当前：全量双栈'
+                : '当前：纯 IPv4'}
+          </Badge>
+        }
+      >
+        <div className="space-y-4">
+          {v6Status && (
+            <div className="rounded-xl border border-subtle bg-surface2/60 px-3.5 py-2.5 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs">
+              <div className="flex items-center gap-1.5">
+                <span className="text-muted">WAN IPv6:</span>
+                <Badge tone={v6Status.wanHasGua ? 'ok' : 'warn'}>
+                  {v6Status.wanHasGua
+                    ? v6Status.pdPrefix
+                      ? `已获公网 + PD ${v6Status.pdPrefix}`
+                      : '已获公网地址'
+                    : '未检测到公网 IPv6'}
+                </Badge>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span className="text-muted">LAN 前缀与 RA:</span>
+                <span className="font-mono text-primary">
+                  {v6Status.lanPrefixes && v6Status.lanPrefixes.length > 0
+                    ? v6Status.lanPrefixes.join(', ')
+                    : '未分配'}
+                </span>
+                {v6Status.isOpenWrt && (
+                  <span className="text-[11px] text-secondary">
+                    (RA={v6Status.lanRaMode || 'off'}, DHCPv6={v6Status.lanDhcpv6Mode || 'off'})
+                  </span>
+                )}
+              </div>
+              {v6Status.isOpenWrt && (
+                <div className="flex items-center gap-1.5">
+                  <span className="text-muted">dnsmasq AAAA:</span>
+                  <span className="font-mono text-primary">
+                    {v6Status.dnsmasqFilterAaaa === '1' ? '过滤关闭' : '正常解析'}
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
+
+          {v6Status?.warnings && v6Status.warnings.length > 0 && (
+            <div className="rounded-xl border border-amber-500/35 bg-amber-500/10 px-3.5 py-2.5 text-xs text-amber-200 space-y-1">
+              {v6Status.warnings.map((w, idx) => (
+                <div key={idx} className="flex items-start gap-2">
+                  <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
+                  <span>{w}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            {[
+              {
+                key: 'off' as GatewayIPv6Mode,
+                title: '关闭 (仅 IPv4)',
+                tag: '默认兼容',
+                desc: '屏蔽并还原 AAAA 解析（ipv4_only），最稳妥但局域网设备不使用宽带 IPv6。',
+                disabled: false,
+              },
+              {
+                key: 'cn_only' as GatewayIPv6Mode,
+                title: '智能双栈 (国内 IPv6 + 海外 IPv4)',
+                tag: '黄金推荐',
+                desc: '国内直连与 PT 原生 IPv6+IPv4；海外域名 0ms 本地空应答 AAAA 走 IPv4 隧道，彻底免去节点无 IPv6 导致的卡顿/弹盾与泄漏。',
+                disabled: mode === 'side',
+              },
+              {
+                key: 'full' as GatewayIPv6Mode,
+                title: '全量双栈 (国内外全部 IPv6)',
+                tag: '节点需双栈',
+                desc: '国内外域名均保留 A+AAAA 双栈解析。仅建议在自建/机场主力节点全部具备优质 IPv6 出站时启用。',
+                disabled: mode === 'side',
+              },
+            ].map((opt) => {
+              const selected = (mode === 'side' ? 'off' : ipv6Mode) === opt.key;
+              return (
+                <button
+                  key={opt.key}
+                  type="button"
+                  disabled={opt.disabled}
+                  onClick={() => setIpv6Mode(opt.key)}
+                  style={
+                    selected
+                      ? {
+                          backgroundColor: 'var(--accent-soft)',
+                          borderColor: 'var(--accent)',
+                        }
+                      : undefined
+                  }
+                  className={`p-3.5 rounded-xl border text-left transition-all ${
+                    opt.disabled
+                      ? 'opacity-45 cursor-not-allowed bg-surface2 border-subtle'
+                      : selected
+                        ? 'cursor-pointer'
+                        : 'bg-surface2 border-subtle hover:border-strong cursor-pointer'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs sm:text-sm font-semibold text-primary">{opt.title}</span>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-surface1 text-secondary border border-subtle shrink-0">
+                      {opt.tag}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-secondary mt-1.5 leading-relaxed">{opt.desc}</p>
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-subtle">
+            <span className="text-[11px] text-muted">
+              {mode === 'side'
+                ? '当前选择旁路由模式：为避免主路由 RA 绕过旁路由造成泄漏，IPv6 自动保持关闭。'
+                : '保存后自动同步 OpenWrt RA/DHCPv6、dnsmasq 与 sing-box 规则并零断网热重载（切回关闭会自动按备份还原）。'}
+            </span>
+            <Button
+              variant="primary"
+              loading={ipv6Saving}
+              disabled={busy || loading || isSelfLoop}
+              icon={<Save className="w-3.5 h-3.5" />}
+              onClick={() => void handleSave(true)}
+            >
+              保存并自动配置 IPv6
+            </Button>
+          </div>
+        </div>
+      </SectionCard>
+
+      <DNSLeakTestCard />
     </div>
   );
 };

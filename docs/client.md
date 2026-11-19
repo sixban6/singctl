@@ -39,6 +39,7 @@ gateway:                                      # (可选) 客户端网关拓扑�
   mode: "main"                                # "main" (默认主路由模式) | "side" (旁路由单臂网关模式)
   main_router_ip: ""                          # (旁路由模式必填) 上级主路由/网关 IP，例如 "192.168.1.1"
   # lan_iface: ""                             # (可选) 指定单臂局域网网卡名，留空自动探测
+  ipv6_mode: "off"                            # "off" (纯 IPv4) | "cn_only" (推荐：国内原生 IPv6 + 海外 0ms 静音 AAAA 防泄漏) | "full" (全量双栈；旁路由自动保持 off)
 ```
 
 ### 主路由模式与旁路由模式（Side Router）说明
@@ -48,6 +49,15 @@ gateway:                                      # (可选) 客户端网关拓扑�
   - **安装阶段引导**：运行 `install.sh` 选择客户端模式后，可选择 `2) 旁路由模式`；脚本会自动探测当前上级主路由 IP（支持**直接回车确认**或**手动修改**，并自动拦截填成旁路由本机 IP 的自环错误）。
   - **内核与防火墙自动收口**：`singctl sb start` 启动时自动对齐上级默认路由、开启 `ip_forward=1` 并关闭单臂 `rp_filter` / `send_redirects` / `bridge-nf-call-iptables`，同时挂载独立可逆的 `table inet singctl-side`（含本机 `:53` 透明 DNS 接管、TCP MSS 自动钳制防止 PPPoE `1492` MTU 下 HTTPS 卡死、单臂 `masquerade` 消除主路由状态防火墙 `ct state invalid` 非对称丢包，并在 `sing-box` 内部完整保留终端真实局域网 IP 供行为审计使用）。`singctl sb stop` 时自动卸载并还原系统参数。
   - **终端 / 主路由 DHCP 接入要求**：将内网终端（或主路由 DHCP 下发）的 **默认网关** 与 **DNS 服务器** 同时设为旁路由 IP（如 `192.168.1.2`），为旁路由固定静态 IP，并在主路由关闭 LAN 侧 IPv6 RA/DHCPv6 通告以防终端经主路由 IPv6 直出绕过旁路由。
+
+### IPv6 智能双栈分流与全景防泄漏体检（WebUI）
+
+- **三模式 IPv6 分流（`gateway.ipv6_mode`）**：
+  - **`off`（纯 IPv4，默认）**：全链路保持 `ipv4_only`，OpenWrt 保持 `dnsmasq filter_aaaa=1`。
+  - **`cn_only`（智能双栈 · 推荐）**：自动探测内核与 OpenWrt WAN PD 前缀并软重载配置 LAN RA/DHCPv6/RDNSS 与 `filter_aaaa=0`（修改前以 `0600` 权限备份原 UCI，切回 `off` 时自动还原，绝不中断 PPPoE WAN）；国内直连规则集对齐至本地 `dns_local` 放行原生 IPv6，海外代理规则前自动注入 `query_type: ["AAAA"]` → `predefined NOERROR` 本地 `0ms` 静音，杜绝海外 AAAA 回落或 DNS 泄漏。旁路由模式下强制保持关闭防绕过。
+  - **`full`（全量双栈）**：仅推荐在全节点均确认支持 IPv6 出站时开启。
+- **行为审计 IPv6 MAC 聚合**：自动关联 `/tmp/hosts/odhcpd` 与 `ip -6 neigh`，将同一终端的 IPv4 与公网 IPv6 流量合并审计。
+- **双端全景 DNS / IPv6 / WebRTC 防泄漏体检中心**：在 WebUI「网络架构 → 网关模式」与「防劫持 DNS」页面均内置类 `ipleak.net` 实测套件，支持 **标准体检（55 轮）** 与 **深度扫描（144 轮）**，从浏览器与网关双端并发探测四路出口 IP、多轮唯一随机子域 EDNS 解析器与 ECS、浏览器 WebRTC 反射及明文 `:53` 透明劫持基线。
 
 > **注意**：`singctl sb gen` 和 `singctl sb start`（首次启动）需要 `subs` 中至少有一条有效的订阅 URL，否则会提示配置错误。`singctl sb stop`、`singctl sb install`、`singctl sb update` 不依赖订阅配置。
 >
