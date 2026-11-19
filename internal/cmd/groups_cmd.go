@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"cmp"
 	"fmt"
 	"os"
 	"strings"
@@ -147,8 +148,8 @@ func printGroupsPreviewReport(gPath string, exists bool, report *singbox.GroupsP
 	if !exists {
 		statusLabel = "未创建 (当前展示默认内置分组)"
 	}
-	logger.Info("配置文件: %s [%s] | 模式: %s | 底层代理节点总数: %d",
-		gPath, statusLabel, report.Mode, report.TotalLeafNodes)
+	logger.Info("配置文件: %s [%s] | 模式: %s | 默认兜底: %s | 海外 DNS: %s | 底层代理节点总数: %d",
+		gPath, statusLabel, report.Mode, cmp.Or(report.DefaultOutbound, "Proxy"), cmp.Or(report.DNSDetour, "#VPS"), report.TotalLeafNodes)
 	for _, g := range report.Groups {
 		role := "自定义"
 		if g.Builtin && !g.Customized {

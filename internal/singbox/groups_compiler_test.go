@@ -221,6 +221,44 @@ groups:
 	if routeMap["final"] != "MainPool" {
 		t.Fatalf("expected route.final healed to MainPool, got %v", routeMap["final"])
 	}
+	if rep.DefaultOutbound != "MainPool" || rep.DNSDetour != "MainPool" {
+		t.Fatalf("expected DefaultOutbound=MainPool and DNSDetour=MainPool, got %+v", rep)
+	}
+
+	// Replace 模式应严格保持 YAML 顺序（哪怕首组带 # 前缀也不重排），且默认兜底/海外 DNS 跟随第 1 个组
+	orderedReplaceGC, err := config.ParseGroupsYAML([]byte(`
+version: 1
+mode: replace
+groups:
+  - name: "#Main"
+    type: urltest
+    match: ["@self", "@hk"]
+  - name: "Streaming"
+    type: selector
+    match: ["@jp"]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, ordRep, err := CompileGroupsIntoConfigJSON(sampleConfigWithLeafNodes(), orderedReplaceGC, nil, nil)
+	if err != nil {
+		t.Fatalf("ordered replace mode failed: %v", err)
+	}
+	if len(ordRep.Groups) != 2 || ordRep.Groups[0].Name != "#Main" {
+		t.Fatalf("expected replace mode to preserve #Main first order, got %+v", ordRep.Groups)
+	}
+	if ordRep.DefaultOutbound != "#Main" || ordRep.DNSDetour != "#Main" {
+		t.Fatalf("expected DefaultOutbound=#Main and DNSDetour=#Main, got %+v", ordRep)
+	}
+
+	// 空 merge 配置应透传默认约定 Proxy / #VPS
+	_, emptyRep, err := CompileGroupsIntoConfigJSON(sampleConfigWithLeafNodes(), &config.GroupsConfig{Version: 1, Mode: config.GroupsModeMerge}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if emptyRep.DefaultOutbound != "Proxy" || emptyRep.DNSDetour != "#VPS" {
+		t.Fatalf("expected empty merge conventions Proxy/#VPS, got %+v", emptyRep)
+	}
 }
 
 func TestGroupsFile_PermissionsAndEffectiveFailover(t *testing.T) {

@@ -589,6 +589,8 @@ export interface CompiledGroupPreview {
 
 export interface GroupsPreviewReport {
   mode: 'merge' | 'replace' | string;
+  defaultOutbound?: string;
+  dnsDetour?: string;
   totalLeafNodes: number;
   leafNodes: LeafOutboundInfo[];
   subNames?: string[];
