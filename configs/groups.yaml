@@ -11,7 +11,8 @@
 version: 1
 
 # merge (默认推荐)：保留内置 Proxy / AI / #VPS / #Auto / #Nodes / #DC 骨架，在此基础上新增或覆写分组
-# replace (高阶模式)：完全按本文件定义的 groups 构建代理策略组（仍自动保留 #DC 直连出站）
+# replace (高阶模式)：完全按本文件定义的 groups 顺序构建（仍保留 #DC）；约定优于配置：
+#                    存在 Proxy 则默认兜底走 Proxy，否则严格走第 1 个分组；海外 DNS 存在 #VPS 走 #VPS，否则跟随默认兜底组
 mode: merge
 
 groups: []

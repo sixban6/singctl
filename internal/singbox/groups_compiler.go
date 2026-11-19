@@ -53,12 +53,14 @@ type CompiledGroupPreview struct {
 
 // GroupsPreviewReport 汇总声明式分组编译与干跑预览结果。
 type GroupsPreviewReport struct {
-	Mode           string                 `json:"mode"`
-	TotalLeafNodes int                    `json:"totalLeafNodes"`
-	LeafNodes      []LeafOutboundInfo     `json:"leafNodes"`
-	SubNames       []string               `json:"subNames,omitempty"`
-	Groups         []CompiledGroupPreview `json:"groups"`
-	Warnings       []string               `json:"warnings,omitempty"`
+	Mode            string                 `json:"mode"`
+	DefaultOutbound string                 `json:"defaultOutbound,omitempty"`
+	DNSDetour       string                 `json:"dnsDetour,omitempty"`
+	TotalLeafNodes  int                    `json:"totalLeafNodes"`
+	LeafNodes       []LeafOutboundInfo     `json:"leafNodes"`
+	SubNames        []string               `json:"subNames,omitempty"`
+	Groups          []CompiledGroupPreview `json:"groups"`
+	Warnings        []string               `json:"warnings,omitempty"`
 }
 
 var builtinGroupNames = []string{"Proxy", "AI", "#VPS", "#Auto", "#Nodes"}
@@ -405,6 +407,7 @@ func CompileGroupsIntoConfigJSON(
 		}
 		prevWarns := len(report.Warnings)
 		healDanglingOutboundRefs(root, validInit, primaryInit, directFallback, report)
+		report.DefaultOutbound, report.DNSDetour = extractEffectiveRoutingConventions(root, directFallback)
 		report.Groups = buildPreviewFromGroupMaps(existingGroups, leafSet, nil, nil, nil)
 		if len(report.Warnings) > prevWarns {
 			encoded, err := json.MarshalIndent(root, "", "  ")
@@ -645,8 +648,11 @@ func CompileGroupsIntoConfigJSON(
 		}
 	}
 
-	// 第四遍：美化排序 —— 让顶层控制组 (Proxy / AI 及不带 # 的业务组) 排在前面，带 # 的底层池排在后面
-	workingGroups = orderCompiledGroups(workingGroups)
+	// 第四遍：排序整理 —— merge 模式下让顶层控制组 (Proxy / AI 及业务组) 排在前面，# 底层池排在后面；
+	// replace 模式下严格保持 YAML 编写顺序（约定：未定义 Proxy 时，排在第 1 位的分组即为默认兜底组）。
+	if mode == config.GroupsModeMerge {
+		workingGroups = orderCompiledGroups(workingGroups)
+	}
 
 	// 第五遍：拓扑环路安全检测（防止 A -> B -> A 循环引用导致 sing-box 启动失败）
 	if cyclePath := detectOutboundCycle(workingGroups); len(cyclePath) > 0 {
@@ -681,6 +687,7 @@ func CompileGroupsIntoConfigJSON(
 		primaryGroup = stringField(workingGroups[0], "tag")
 	}
 	healDanglingOutboundRefs(root, validAllTags, primaryGroup, directFallback, report)
+	report.DefaultOutbound, report.DNSDetour = extractEffectiveRoutingConventions(root, directFallback)
 
 	report.Groups = buildPreviewFromGroupMaps(workingGroups, leafSet, customizedSet, fallbackInfo, attachedRecord)
 	for i := range report.Groups {
@@ -814,15 +821,44 @@ func healDanglingOutboundRefs(
 				}
 				detour := strings.TrimSpace(stringField(sm, "detour"))
 				if detour != "" && !validTags[detour] {
+					serverTag := cmp.Or(strings.TrimSpace(stringField(sm, "tag")), "dns")
 					if primaryGroup != directTag {
 						sm["detour"] = primaryGroup
+						report.Warnings = append(report.Warnings,
+							fmt.Sprintf("DNS [%s] 原出口 [%s] 已不存在，已自动跟随默认兜底组 [%s]", serverTag, detour, primaryGroup))
 					} else {
 						delete(sm, "detour")
+						report.Warnings = append(report.Warnings,
+							fmt.Sprintf("DNS [%s] 原出口 [%s] 已不存在，已自动回退为直连", serverTag, detour))
 					}
 				}
 			}
 		}
 	}
+}
+
+func extractEffectiveRoutingConventions(root map[string]any, directTag string) (defaultOutbound, dnsDetour string) {
+	if routeMap, ok := root["route"].(map[string]any); ok {
+		defaultOutbound = strings.TrimSpace(stringField(routeMap, "final"))
+	}
+	if dnsMap, ok := root["dns"].(map[string]any); ok {
+		if servers, ok := dnsMap["servers"].([]any); ok {
+			for _, item := range servers {
+				sm, ok := item.(map[string]any)
+				if !ok {
+					continue
+				}
+				if strings.TrimSpace(stringField(sm, "tag")) == "dns_proxy" {
+					dnsDetour = strings.TrimSpace(stringField(sm, "detour"))
+					break
+				}
+			}
+		}
+	}
+	if dnsDetour == "" {
+		dnsDetour = directTag
+	}
+	return defaultOutbound, dnsDetour
 }
 
 func buildPreviewFromGroupMaps(
