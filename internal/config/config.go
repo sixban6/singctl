@@ -92,6 +92,7 @@ func (c *Config) HasActiveServerConfig() bool {
 }
 
 type Config struct {
+	sourcePath     string               `yaml:"-" json:"-"`
 	Subs           []Subscription       `yaml:"subs"`
 	GitHub         GitHubConfig         `yaml:"github"`
 	Hy2            Hy2Config            `yaml:"hy2"`
@@ -1070,6 +1071,7 @@ func Load(path string) (*Config, error) {
 	if cfg.Watchdog.SubSyncInterval == 0 {
 		cfg.Watchdog.SubSyncInterval = 600
 	}
+	cfg.sourcePath = path
 
 	return &cfg, nil
 }

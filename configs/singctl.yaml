@@ -112,3 +112,6 @@ watchdog:                                      # (可选) 看门狗守护进程�
 #       outbound: "#VPS"
 #     apple:
 #       enabled: false
+
+# 提示：如需新增自定义地区分组/业务策略组（如 #HK、#JP、Streaming），请编辑同目录下的 groups.yaml
+#       或在客户端 WebUI「Sing-Box -> 分组编排 (YAML)」页面可视化编辑并实时预览命中节点。

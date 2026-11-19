@@ -187,8 +187,14 @@ func (g *ConfigGenerator) GenerateForPlatform(platform string) (string, error) {
 		return "", err
 	}
 
+	// 编译声明式分组配置（同目录下的 groups.yaml，不存在或为空时零侵入原样透传）
+	withGroups, err := g.InjectGroupsForPlatform(withLocalDNS, resolved)
+	if err != nil {
+		return "", err
+	}
+
 	// 注入自定义规则（DNS 与路由）
-	withCustomRules, err := g.InjectCustomRulesForPlatform(withLocalDNS, resolved)
+	withCustomRules, err := g.InjectCustomRulesForPlatform(withGroups, resolved)
 	if err != nil {
 		return "", err
 	}

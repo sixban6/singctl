@@ -69,7 +69,7 @@ func NewDaemonWithMeta(cfg *config.Config, configPath, version string) *Daemon {
 	failover := NewGroupFailoverState()
 	failover.SingBoxConfigPath = constant.SingBoxConfigFile
 	failover.EnableWANGate = true
-	failover.ApplyConfig(cfg.Watchdog.Failover)
+	failover.ApplyConfig(cfg.EffectiveFailoverConfig())
 	failover.RestoreSnapshot(LoadRuntimeSnapshot().ActiveFailovers)
 
 	var modTime time.Time
@@ -145,7 +145,7 @@ func (d *Daemon) reloadConfigIfChanged(force bool) (bool, *config.Config) {
 
 	d.limiter.SetMaxRestarts(freshCfg.Watchdog.MaxRestarts)
 	if d.failover != nil {
-		d.failover.ApplyConfig(freshCfg.Watchdog.Failover)
+		d.failover.ApplyConfig(freshCfg.EffectiveFailoverConfig())
 	}
 	return true, freshCfg
 }

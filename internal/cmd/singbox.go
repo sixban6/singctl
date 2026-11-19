@@ -570,6 +570,7 @@ func NewSingboxCommand(configPath string) *cobra.Command {
 		newStopCmd(configPath),
 		newRestartCmd(configPath),
 		newGenCmd(configPath),
+		newGroupsCmd(configPath),
 		newInstallCmd(configPath),
 		newUpdateCmd(configPath),
 		newCacheCmd(configPath),

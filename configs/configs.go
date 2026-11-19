@@ -7,6 +7,11 @@ import _ "embed"
 //go:embed singctl.yaml
 var DefaultConfigYAML []byte
 
+// DefaultGroupsYAML embeds the starter /etc/singctl/groups.yaml template.
+//
+//go:embed groups.yaml
+var DefaultGroupsYAML []byte
+
 // ClientConfigYAML is the concise client-only singctl.yaml template (without server section).
 var ClientConfigYAML = []byte(`subs:
   - name: "main"                              # 订阅名称 (多订阅时必填)

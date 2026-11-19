@@ -1,0 +1,42 @@
+# /etc/singctl/groups.yaml —— 声明式策略组编排配置（零节点隐私信息，可跨设备复用）
+# 说明：
+#   1. 本文件仅描述「需要哪些分组、按什么条件筛选节点」，不含任何订阅 URL 或节点凭据。
+#   2. 每次刷新订阅、节点扩缩容或重生成配置时，SingCtl 会自动按规则动态归类节点。
+#   3. 若某个分组暂时匹配到 0 个节点，编译器会自动回退兜底出站（默认 #Auto / #DC），绝不断网。
+#
+# 内置语义宏（可直接写在 match / exclude 中，免手写复杂正则）：
+#   @hk (香港)  @tw (台湾)  @jp (日本)  @sg (新加坡)  @kr (韩国)  @us (美国)  @eu (欧洲)
+#   @self (sec_ 自建节点)   @home (家宽/原生住宅)     @iplc (IPLC/IEPL专线)  @high_rate (高倍率与流量提示节点)
+
+version: 1
+
+# merge (默认推荐)：保留内置 Proxy / AI / #VPS / #Auto / #Nodes / #DC 骨架，在此基础上新增或覆写分组
+# replace (高阶模式)：完全按本文件定义的 groups 构建代理策略组（仍自动保留 #DC 直连出站）
+mode: merge
+
+groups: []
+# 示例 1：新建地区自动测速组（默认自动挂载进顶层 Proxy 候选列表，并同步出现在「智能分流中心」下拉框）
+#  - name: "#HK"
+#    type: urltest
+#    match: ["@hk"]
+#    exclude: ["@high_rate"]
+#
+#  - name: "#JP"
+#    type: urltest
+#    match: ["@jp"]
+#    exclude: ["@high_rate"]
+#    tolerance: 50
+#
+# 示例 2：按订阅源 + 协议精准筛选（适合多机场 / 自建混合场景）
+#  - name: "#Self-Hy2"
+#    type: selector
+#    from_sub: ["main"]
+#    protocol: ["hysteria2"]
+#    failover: true
+#
+# 示例 3：组合上层业务专享分组（嵌套引用子分组；attach_to: [] 表示仅在「智能分流中心」调用，不塞入 Proxy）
+#  - name: "Streaming"
+#    type: selector
+#    use: ["#SG", "#JP", "#HK", "#VPS"]
+#    default: "#JP"
+#    attach_to: []
