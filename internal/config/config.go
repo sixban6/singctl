@@ -106,11 +106,33 @@ type Config struct {
 	TrafficRouting TrafficRoutingConfig `yaml:"traffic_routing,omitempty" json:"traffic_routing,omitzero"`
 }
 
-// GatewayConfig 定义客户端网关部署拓扑模式（默认主路由 main，可选单臂旁路由 side）。
+const (
+	GatewayIPv6Off    = "off"
+	GatewayIPv6CNOnly = "cn_only"
+	GatewayIPv6Full   = "full"
+)
+
+// NormalizeGatewayIPv6Mode 校验并归一化客户端 IPv6 双栈分流策略（off / cn_only / full）。
+// 空字符串视为默认值 off 并返回合法；其余未识别值返回 false。
+func NormalizeGatewayIPv6Mode(raw string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", GatewayIPv6Off:
+		return GatewayIPv6Off, true
+	case GatewayIPv6CNOnly, "cn", "cn-only":
+		return GatewayIPv6CNOnly, true
+	case GatewayIPv6Full, "all", "dual":
+		return GatewayIPv6Full, true
+	default:
+		return "", false
+	}
+}
+
+// GatewayConfig 定义客户端网关部署拓扑模式（默认主路由 main，可选单臂旁路由 side）与 IPv6 双栈分流策略。
 type GatewayConfig struct {
 	Mode         string `yaml:"mode,omitempty" json:"mode,omitempty"`
 	MainRouterIP string `yaml:"main_router_ip,omitempty" json:"main_router_ip,omitempty"`
 	LANIface     string `yaml:"lan_iface,omitempty" json:"lan_iface,omitempty"`
+	IPv6Mode     string `yaml:"ipv6_mode,omitempty" json:"ipv6_mode,omitempty"`
 }
 
 // EffectiveMode 返回归一化后的生效模式：默认始终为 "main"，仅当显式配置为 "side" 时返回 "side"。
@@ -119,6 +141,14 @@ func (g GatewayConfig) EffectiveMode() string {
 		return "side"
 	}
 	return "main"
+}
+
+// EffectiveIPv6Mode 返回归一化后的 IPv6 分流模式（off / cn_only / full），默认 "off"。
+func (g GatewayConfig) EffectiveIPv6Mode() string {
+	if norm, ok := NormalizeGatewayIPv6Mode(g.IPv6Mode); ok {
+		return norm
+	}
+	return GatewayIPv6Off
 }
 
 // IsSideRouter 判断当前配置是否显式启用了旁路由（单臂网关）模式。
@@ -130,7 +160,8 @@ func (g GatewayConfig) IsSideRouter() bool {
 func (g GatewayConfig) IsEmpty() bool {
 	return strings.TrimSpace(g.Mode) == "" &&
 		strings.TrimSpace(g.MainRouterIP) == "" &&
-		strings.TrimSpace(g.LANIface) == ""
+		strings.TrimSpace(g.LANIface) == "" &&
+		strings.TrimSpace(g.IPv6Mode) == ""
 }
 
 // AuditConfig 定义客户端设备行为审计与可选 AI 深度研判配置。
@@ -1018,7 +1049,7 @@ var knownYAMLKeys = []string{
 	"custom_rules", "block", "target", "source_ip", "reason", "ruleset_url", "rule_count", "preview", "created_at",
 	"outbounds", "tag", "default", "tolerance", "interrupt_exist_connections",
 	"route", "dns", "dns_port", "web_port",
-	"gateway", "main_router_ip", "lan_iface",
+	"gateway", "main_router_ip", "lan_iface", "ipv6_mode",
 	"audit", "whitelist", "ai", "endpoint", "api_key", "model",
 	"traffic_routing", "outbound",
 }

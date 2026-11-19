@@ -205,8 +205,18 @@ func (g *ConfigGenerator) GenerateForPlatform(platform string) (string, error) {
 		return "", err
 	}
 
+	// 应用客户端 IPv6 双栈分流策略（off / cn_only / full），必须在路由与规则集扩展后最后编译 DNS 孪生规则
+	ipv6Mode := config.GatewayIPv6Off
+	if g.config != nil {
+		ipv6Mode = g.config.Gateway.EffectiveIPv6Mode()
+	}
+	withIPv6, err := ApplyIPv6ModeToConfigJSON(withTrafficRouting, ipv6Mode)
+	if err != nil {
+		return "", err
+	}
+
 	// 客户端默认将 log.level 从 "info" 收敛为 "warn"，从源头避免写爆 OpenWrt /tmp
-	withWarnLog, err := NormalizeClientLogLevel(withTrafficRouting)
+	withWarnLog, err := NormalizeClientLogLevel(withIPv6)
 	if err != nil {
 		return "", err
 	}

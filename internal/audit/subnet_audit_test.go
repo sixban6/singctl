@@ -224,3 +224,77 @@ func TestEnforcer_BlockCIDR_KillsScopedConnections(t *testing.T) {
 		t.Fatalf("expected killed IDs %v, got %v", wantClosed, gotClosed)
 	}
 }
+
+func TestParseIPv6Neighbors_AndDualStackMACMerge(t *testing.T) {
+	neighOut := `2001:db8:1::1234 dev br-lan lladdr AA:BB:CC:DD:EE:01 REACHABLE
+2001:db8:1::9999 dev br-lan FAILED
+fe80::1 dev br-lan lladdr 00:00:00:00:00:00 STALE
+`
+	parsed := parseIPv6Neighbors(neighOut)
+	if parsed["2001:db8:1::1234"] != "aa:bb:cc:dd:ee:01" {
+		t.Fatalf("expected lowercase MAC for 2001:db8:1::1234, got %+v", parsed)
+	}
+	if _, exists := parsed["2001:db8:1::9999"]; exists {
+		t.Fatal("expected FAILED neighbor entry without lladdr to be skipped")
+	}
+	if _, exists := parsed["fe80::1"]; exists {
+		t.Fatal("expected zero MAC entry to be skipped")
+	}
+
+	dir := t.TempDir()
+	leasesPath := filepath.Join(dir, "dhcp.leases")
+	if err := os.WriteFile(leasesPath, []byte("1700000000 aa:bb:cc:dd:ee:01 192.168.1.33 MyPhone *\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	mockClash := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"connections": []map[string]any{
+				{
+					"id":       "v4-c1",
+					"upload":   1024,
+					"download": 4096,
+					"chains":   []string{"#DC"},
+					"metadata": map[string]string{
+						"network":         "tcp",
+						"sourceIP":        "192.168.1.33",
+						"destinationPort": "443",
+						"host":            "v4.example.com",
+					},
+				},
+				{
+					"id":       "v6-c1",
+					"upload":   2048,
+					"download": 8192,
+					"chains":   []string{"#DC"},
+					"metadata": map[string]string{
+						"network":         "tcp",
+						"sourceIP":        "2001:db8:1::1234",
+						"destinationPort": "443",
+						"host":            "v6.example.com",
+					},
+				},
+			},
+		})
+	}))
+	defer mockClash.Close()
+
+	c := NewCollector(&config.Config{})
+	c.SetEndpointsForTest([]string{mockClash.URL}, "", filepath.Join(dir, "audit-state.json"))
+	c.SetLeaseFilesForTest([]string{leasesPath}, "", "")
+	c.ipv6NeighCmdFunc = func() ([]byte, error) {
+		return []byte(neighOut), nil
+	}
+
+	rep := c.Collect(t.Context(), CollectOptions{})
+	if len(rep.Devices) != 1 {
+		t.Fatalf("expected dual-stack v4+v6 flows from same MAC to merge into 1 device summary, got %d: %+v", len(rep.Devices), rep.Devices)
+	}
+	dev := rep.Devices[0]
+	if dev.DeviceName != "MyPhone" || dev.DeviceIP != "192.168.1.33" || dev.DeviceMAC != "aa:bb:cc:dd:ee:01" || dev.FlowCount != 2 {
+		t.Fatalf("unexpected merged device summary: %+v", dev)
+	}
+	if dev.UploadBytes != 3072 || dev.DownloadBytes != 12288 {
+		t.Fatalf("expected combined upload=3072 download=12288, got %+v", dev)
+	}
+}

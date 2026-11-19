@@ -229,6 +229,29 @@ setup_nftables() {
         done
     fi
     AGH_BYPASS_NFT=$(echo "$AGH_BYPASS_IPS" | sed 's/ /, /g')
+    AGH_BYPASS_V6_IPS="2400:3200::1 2400:3200:baba::1"
+    if [ -f /etc/AdGuardHome/AdGuardHome.yaml ]; then
+        EXTRA_AGH_V6=$(sed -n 's#.*\(https\|tls\)://\[\([0-9a-fA-F:]\{2,\}\)\].*#\2#p' /etc/AdGuardHome/AdGuardHome.yaml 2>/dev/null || true)
+        for extra_v6 in $EXTRA_AGH_V6; do
+            case " $AGH_BYPASS_V6_IPS " in
+                *" $extra_v6 "*) ;;
+                *) AGH_BYPASS_V6_IPS="$AGH_BYPASS_V6_IPS $extra_v6" ;;
+            esac
+        done
+    fi
+    AGH_BYPASS_NFT6=$(echo "$AGH_BYPASS_V6_IPS" | sed 's/ /, /g')
+
+    LAN_IPV6_PFXS=""
+    for pfx in $(ip -6 route show proto kernel scope global 2>/dev/null | awk '$1 ~ /:/ && $1 !~ /^f[cd]/ && $0 !~ /tailscale|wg|tun/ {print $1}'); do
+        case " $LAN_IPV6_PFXS " in
+            *" $pfx "*) ;;
+            *) LAN_IPV6_PFXS="$LAN_IPV6_PFXS $pfx" ;;
+        esac
+    done
+    LOCAL_IPV6_ELEMS="::1/128, fc00::/7, fe80::/10, ff00::/8"
+    for pfx in $LAN_IPV6_PFXS; do
+        LOCAL_IPV6_ELEMS="$LOCAL_IPV6_ELEMS, $pfx"
+    done
     
     # 清理现有规则
     nft delete table inet sing-box 2>/dev/null || true
@@ -243,6 +266,13 @@ table inet sing-box {
         flags interval
         auto-merge
         elements = $LOCAL_IPV4
+    }
+
+    set LOCAL_IPV6_SET {
+        type ipv6_addr
+        flags interval
+        auto-merge
+        elements = { $LOCAL_IPV6_ELEMS }
     }
 
     chain prerouting {
@@ -270,7 +300,7 @@ table inet sing-box {
 
         # 放行其余局域网流量
         ip daddr @LOCAL_IPV4_SET accept
-        ip6 daddr { ::1, fc00::/7, fe80::/10, ff00::/8 } accept
+        ip6 daddr @LOCAL_IPV6_SET accept
 
         # TProxy 流量处理
         meta l4proto { tcp, udp } tproxy to :$TPROXY_PORT meta mark set $PROXY_FWMARK accept
@@ -288,6 +318,7 @@ table inet sing-box {
 
         # 放行本地 AdGuard Home 加密上游 (DoH/DoT) 直连流量，防止冷启动或 Global 全局模式下死锁
         ip daddr { $AGH_BYPASS_NFT } tcp dport { 443, 853 } accept comment "Bypass AdGuard Home encrypted DNS upstreams"
+        ip6 daddr { $AGH_BYPASS_NFT6 } tcp dport { 443, 853 } accept comment "Bypass AdGuard Home IPv6 encrypted DNS upstreams"
 
         # 放行 IPv6 ICMP
         meta l4proto ipv6-icmp accept
@@ -299,7 +330,7 @@ table inet sing-box {
 
         # 放行其余局域网流量
         ip daddr @LOCAL_IPV4_SET accept
-        ip6 daddr { ::1, fc00::/7, fe80::/10, ff00::/8 } accept
+        ip6 daddr @LOCAL_IPV6_SET accept
 
         # 标记其他本机出站流量 (走表 101 回环至 TProxy)
         meta l4proto { tcp, udp } meta mark set $PROXY_LOCAL_FWMARK accept
@@ -414,6 +445,9 @@ setup_route() {
     ip -6 rule add fwmark $PROXY_LOCAL_FWMARK table $PROXY_LOCAL_ROUTE_TABLE 2>/dev/null || true
     ip -6 route flush table $PROXY_ROUTE_TABLE 2>/dev/null || true
     ip -6 route add local default dev lo table $PROXY_ROUTE_TABLE 2>/dev/null || true
+    for throw_v6 in ::1/128 fc00::/7 fe80::/10 fd7a:115c:a1e0::/48 $LAN_IPV6_PFXS; do
+        ip -6 route replace throw "$throw_v6" table $PROXY_ROUTE_TABLE 2>/dev/null || true
+    done
     ip -6 route flush table $PROXY_LOCAL_ROUTE_TABLE 2>/dev/null || true
     ip -6 route add local default dev lo table $PROXY_LOCAL_ROUTE_TABLE 2>/dev/null || true
     

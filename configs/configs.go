@@ -46,6 +46,7 @@ gateway:                                         # (可选) 客户端网关部�
   mode: "main"                                   # "main" (默认主路由模式) | "side" (旁路由单臂网关模式)
   main_router_ip: ""                             # (旁路由模式必填) 上级主路由/网关 IP，例如 "192.168.1.1"
   # lan_iface: ""                                # (可选) 指定单臂局域网网卡名，留空自动探测
+  ipv6_mode: "off"                               # "off" (纯 IPv4) | "cn_only" (推荐：国内原生 IPv6 + 海外 0ms 静音 AAAA 防泄漏) | "full" (全量双栈；旁路由自动保持 off)
 
 tailscale:                                      # (可选) Tailscale 部署配置
   auth_key: ""                                  # (可选) Tailscale 授权密钥。默认是: ""

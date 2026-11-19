@@ -650,12 +650,21 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
     const raw = report?.flows || [];
     const whitelist = report?.whitelist || [];
     const q = deviceFilter.trim().toLowerCase();
+    const matchedDevMACs = new Set<string>();
+    if (q) {
+      for (const d of report?.devices || []) {
+        if (d.deviceMac && d.deviceIp.toLowerCase() === q) {
+          matchedDevMACs.add(d.deviceMac.toLowerCase());
+        }
+      }
+    }
     const damped = raw
       .filter((f) => {
         if (!f || f.state === 'blocked') return false;
         if (onlyActive && (f.activeConns || 0) <= 0) return false;
         if (networkFilter && (f.network || '').toLowerCase() !== networkFilter) return false;
         if (q) {
+          const macLower = (f.deviceMac || '').toLowerCase();
           const hit =
             (f.target || '').toLowerCase().includes(q) ||
             (f.destIp || '').toLowerCase().includes(q) ||
@@ -663,6 +672,8 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
             (f.destPort ? String(f.destPort).includes(q) : false) ||
             (f.deviceIp || '').toLowerCase().includes(q) ||
             (f.deviceName || '').toLowerCase().includes(q) ||
+            macLower.includes(q) ||
+            (macLower !== '' && matchedDevMACs.has(macLower)) ||
             (f.outbound || '').toLowerCase().includes(q) ||
             (f.chains || []).some((c) => c.toLowerCase().includes(q)) ||
             (f.rule || '').toLowerCase().includes(q) ||

@@ -177,6 +177,34 @@ setup_nft() {
         done
     fi
     AGH_BYPASS_NFT=$(echo "$AGH_BYPASS_IPS" | sed 's/ /, /g')
+    AGH_BYPASS_V6_IPS="2400:3200::1 2400:3200:baba::1"
+    if [ -f /etc/AdGuardHome/AdGuardHome.yaml ]; then
+        EXTRA_AGH_V6=$(sed -n 's#.*\(https\|tls\)://\[\([0-9a-fA-F:]\{2,\}\)\].*#\2#p' /etc/AdGuardHome/AdGuardHome.yaml 2>/dev/null || true)
+        for extra_v6 in $EXTRA_AGH_V6; do
+            case " $AGH_BYPASS_V6_IPS " in
+                *" $extra_v6 "*) ;;
+                *) AGH_BYPASS_V6_IPS="$AGH_BYPASS_V6_IPS $extra_v6" ;;
+            esac
+        done
+    fi
+    AGH_BYPASS_NFT6=$(echo "$AGH_BYPASS_V6_IPS" | sed 's/ /, /g')
+
+    LAN_IPV6_PFXS=""
+    for lan_if in br-lan eth0; do
+        if ip link show "$lan_if" >/dev/null 2>&1; then
+            for pfx in $(ip -6 route show dev "$lan_if" proto kernel scope global 2>/dev/null | awk '$1 ~ /:/ && $1 !~ /^f[cd]/ {print $1}'); do
+                case " $LAN_IPV6_PFXS " in
+                    *" $pfx "*) ;;
+                    *) LAN_IPV6_PFXS="$LAN_IPV6_PFXS $pfx" ;;
+                esac
+            done
+        fi
+    done
+    LOCAL_IPV6_ELEMS="::1/128, fc00::/7, fe80::/10, ff00::/8"
+    for pfx in $LAN_IPV6_PFXS; do
+        LOCAL_IPV6_ELEMS="$LOCAL_IPV6_ELEMS, $pfx"
+    done
+
     nft flush table inet sing-box 2>/dev/null || true
     nft delete table inet sing-box 2>/dev/null || true
     nft add table inet sing-box 2>/dev/null || true
@@ -190,6 +218,13 @@ setup_nft() {
             flags interval
             auto-merge
             elements = $LOCAL_IPV4
+        }
+
+        set LOCAL_IPV6_SET {
+            type ipv6_addr
+            flags interval
+            auto-merge
+            elements = { $LOCAL_IPV6_ELEMS }
         }
 
         chain prerouting {
@@ -219,7 +254,7 @@ setup_nft() {
 
             # 放行其余局域网、组播与广播流量
             ip daddr @LOCAL_IPV4_SET accept
-            ip6 daddr { ::1, fc00::/7, fe80::/10, ff00::/8 } accept
+            ip6 daddr @LOCAL_IPV6_SET accept
 
             # 3.将其他流量标记并转发到 TProxy
             meta l4proto { tcp, udp } tproxy to :$TPROXY_PORT meta mark set $PROXY_FWMARK accept
@@ -239,6 +274,7 @@ setup_nft() {
 
             # 放行本地 AdGuard Home 加密上游 (DoH/DoT) 直连流量，防止冷启动或 Global 全局模式下产生解析死锁
             ip daddr { $AGH_BYPASS_NFT } tcp dport { 443, 853 } accept comment "Bypass AdGuard Home encrypted DNS upstreams"
+            ip6 daddr { $AGH_BYPASS_NFT6 } tcp dport { 443, 853 } accept comment "Bypass AdGuard Home IPv6 encrypted DNS upstreams"
 
             # 2.放行ipv6的icmp基础流量
             meta l4proto ipv6-icmp accept comment "Allow ICMPv6 traffic"
@@ -250,7 +286,7 @@ setup_nft() {
 
             # 4.放行其余局域网流量
             ip daddr @LOCAL_IPV4_SET accept
-            ip6 daddr { ::1, fc00::/7, fe80::/10, ff00::/8 } accept
+            ip6 daddr @LOCAL_IPV6_SET accept
 
             # 5.标记其余本机出站流量 (走表 101 回环至 TProxy)
             meta l4proto { tcp, udp } meta mark set $PROXY_LOCAL_FWMARK accept
@@ -403,9 +439,12 @@ setup_route() {
     ip -6 rule add fwmark $PROXY_FWMARK table $PROXY_ROUTE_TABLE 2>/dev/null || true
     ip -6 rule add fwmark $PROXY_LOCAL_FWMARK table $PROXY_LOCAL_ROUTE_TABLE 2>/dev/null || true
 
-    # 清理并添加 IPv6 路由
+    # 清理并添加 IPv6 路由（同步注入内网与 Tailscale throw 逃生路由）
     ip -6 route flush table $PROXY_ROUTE_TABLE >/dev/null 2>&1
     ip -6 route replace local default dev lo table $PROXY_ROUTE_TABLE 2>/dev/null || true
+    for throw_v6 in ::1/128 fc00::/7 fe80::/10 fd7a:115c:a1e0::/48 $LAN_IPV6_PFXS; do
+        ip -6 route replace throw "$throw_v6" table $PROXY_ROUTE_TABLE >/dev/null 2>&1 || true
+    done
     ip -6 route flush table $PROXY_LOCAL_ROUTE_TABLE >/dev/null 2>&1
     ip -6 route replace local default dev lo table $PROXY_LOCAL_ROUTE_TABLE 2>/dev/null || true
 }
@@ -629,21 +668,29 @@ check_page_connect() {
     fi
 }
 
-# 当 sing-box 配置启用 ipv4_only 策略时，同步开启 OpenWrt dnsmasq 的 filter_aaaa，
-# 防止 sing-box 停机或切换间隙 dnsmasq 缓存并下发 IPv6 (AAAA) 记录导致连接超时或泄漏。
+# 双向同步 OpenWrt dnsmasq 的 filter_aaaa 与 sing-box DNS 策略：
+# ipv4_only 时设为 1 防止泄漏；启用双栈分流时自动恢复为 0 放行 AAAA，并刷新缓存。
 sync_dnsmasq_ipv4_only() {
+    if ! command -v uci >/dev/null 2>&1; then
+        killall -HUP dnsmasq 2>/dev/null || true
+        return 0
+    fi
+    local target_filter="0"
     if [ -f "$CONFIG_FILE" ] && grep -q '"ipv4_only"' "$CONFIG_FILE" 2>/dev/null; then
-        if command -v uci >/dev/null 2>&1; then
-            local current_filter
-            current_filter=$(uci -q get dhcp.@dnsmasq[0].filter_aaaa 2>/dev/null || echo "")
-            if [ "$current_filter" != "1" ]; then
-                echo_succ "检测到 ipv4_only 策略，同步开启 dnsmasq AAAA (IPv6) 记录过滤..."
-                uci set dhcp.@dnsmasq[0].filter_aaaa='1' 2>/dev/null || true
-                uci commit dhcp 2>/dev/null || true
-                if [ -x /etc/init.d/dnsmasq ]; then
-                    /etc/init.d/dnsmasq reload >/dev/null 2>&1 || /etc/init.d/dnsmasq restart >/dev/null 2>&1 || true
-                fi
-            fi
+        target_filter="1"
+    fi
+    local current_filter
+    current_filter=$(uci -q get dhcp.@dnsmasq[0].filter_aaaa 2>/dev/null || echo "")
+    if [ "$current_filter" != "$target_filter" ]; then
+        if [ "$target_filter" = "1" ]; then
+            echo_succ "检测到 ipv4_only 策略，同步开启 dnsmasq AAAA (IPv6) 记录过滤..."
+        else
+            echo_succ "检测到启用 IPv6 双栈分流策略，恢复 dnsmasq AAAA 记录解析..."
+        fi
+        uci set dhcp.@dnsmasq[0].filter_aaaa="$target_filter" 2>/dev/null || true
+        uci commit dhcp 2>/dev/null || true
+        if [ -x /etc/init.d/dnsmasq ]; then
+            /etc/init.d/dnsmasq reload >/dev/null 2>&1 || /etc/init.d/dnsmasq restart >/dev/null 2>&1 || true
         fi
     fi
     # 刷新 dnsmasq 缓存，清除启动前可能残留的旧记录
