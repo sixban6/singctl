@@ -14,10 +14,12 @@ import {
   X,
   Laptop,
   Network,
+  Unplug,
 } from 'lucide-react';
 import {
   Badge,
   Button,
+  ConfirmDialog,
   DataColumn,
   DataTable,
   PageHeader,
@@ -169,6 +171,7 @@ function getFlowTargetKey(f: AuditFlowRecord): string {
 const NONLINEAR_FACTOR_LABELS: Record<string, string> = {
   upload_asymmetry: '上/下行流量倒挂',
   direct_ip_upload: '绕过 DNS 纯 IP 外发',
+  direct_ip_subnet_cluster: '同网段裸 IP 聚集外连',
   beacon_heartbeat: '规律定时信标心跳',
   domain_entropy: '高熵随机域名特征',
   telemetry_fingerprint: '遥测 / PCDN 指纹命中',
@@ -203,6 +206,13 @@ function formatOutboundMeta(outbound?: string): {
     return { label: '阻断 BLOCK', tone: 'danger' };
   }
   return { label: raw, tone: 'ok' };
+}
+
+function formatFlowChainPath(f: AuditFlowRecord): string {
+  if (f.chains && f.chains.length > 0) {
+    return f.chains.join(' → ');
+  }
+  return f.outbound || 'DIRECT';
 }
 
 function formatRelativeSeen(seenStr?: string): string {
@@ -329,8 +339,10 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
 
   // Filters & controls
   const [deviceFilter, setDeviceFilter] = useState('');
+  const [networkFilter, setNetworkFilter] = useState<'' | 'tcp' | 'udp'>('');
   const [axisFilter, setAxisFilter] = useState<'' | 'security' | 'privacy'>('');
   const [onlySuspect, setOnlySuspect] = useState(false);
+  const [onlyActive, setOnlyActive] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [aiEnabled, setAiEnabled] = useState<boolean>(() => {
     try {
@@ -380,6 +392,16 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
   const [manualDevice, setManualDevice] = useState('');
   const [blockBusy, setBlockBusy] = useState(false);
   const [busyFlowKeys, setBusyFlowKeys] = useState<Set<string>>(() => new Set());
+  const [closingAll, setClosingAll] = useState(false);
+  const [closeAllConfirmOpen, setCloseAllConfirmOpen] = useState(false);
+  const [subnetBlockConfirm, setSubnetBlockConfirm] = useState<{
+    cidr: string;
+    sourceIp: string;
+    deviceLabel: string;
+    uniqueIps: number;
+    reason: string;
+  } | null>(null);
+  const [subnetBlocking, setSubnetBlocking] = useState(false);
 
   // AI config drawer inputs
   const [aiConfig, setAiConfig] = useState<AuditAIConfig>({
@@ -450,13 +472,11 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
       }
       setRefreshing(true);
 
-      const trimDev = deviceFilter.trim();
       const qs = new URLSearchParams();
-      if (trimDev) qs.set('device', trimDev);
       if (onlySuspect) qs.set('suspicious', '1');
       if (sortBy) qs.set('sort', sortBy);
       if (sortDir) qs.set('dir', sortDir);
-      const isDefaultQuery = !trimDev && !onlySuspect && sortBy === 'active' && sortDir === 'desc';
+      const isDefaultQuery = !onlySuspect && sortBy === 'active' && sortDir === 'desc';
 
       try {
         const rep = await clientApi.getAudit(qs, ctrl.signal);
@@ -496,16 +516,16 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
         }
       }
     },
-    [deviceFilter, onlySuspect, sortBy, sortDir, setCachedReview, error],
+    [onlySuspect, sortBy, sortDir, setCachedReview, error],
   );
 
   // Initial & filter/sort change fetch (instant cached frame + immediate background sync)
   useEffect(() => {
-    void loadAudit(hasLoadedReportRef.current && !deviceFilter.trim() && !onlySuspect && sortBy === 'risk' && sortDir === 'desc');
+    void loadAudit(hasLoadedReportRef.current && !onlySuspect && sortBy === 'active' && sortDir === 'desc');
     return () => {
       abortCtrlRef.current?.abort();
     };
-  }, [loadAudit, deviceFilter, onlySuspect, sortBy, sortDir]);
+  }, [loadAudit, onlySuspect, sortBy, sortDir]);
 
   // Tab activation sync: 0ms instant view + 0ms unconditional background revalidation
   const prevActiveRef = useRef<boolean>(active);
@@ -625,13 +645,31 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
     }
   };
 
-  // Filtered, damped, and sorted flows
+  // Filtered, damped, and sorted flows (全字段 0ms 本地即时筛选 + 协议/活跃状态筛选)
   const processedFlows = useMemo(() => {
     const raw = report?.flows || [];
     const whitelist = report?.whitelist || [];
+    const q = deviceFilter.trim().toLowerCase();
     const damped = raw
       .filter((f) => {
         if (!f || f.state === 'blocked') return false;
+        if (onlyActive && (f.activeConns || 0) <= 0) return false;
+        if (networkFilter && (f.network || '').toLowerCase() !== networkFilter) return false;
+        if (q) {
+          const hit =
+            (f.target || '').toLowerCase().includes(q) ||
+            (f.destIp || '').toLowerCase().includes(q) ||
+            (f.subnetCluster?.cidr || '').toLowerCase().includes(q) ||
+            (f.destPort ? String(f.destPort).includes(q) : false) ||
+            (f.deviceIp || '').toLowerCase().includes(q) ||
+            (f.deviceName || '').toLowerCase().includes(q) ||
+            (f.outbound || '').toLowerCase().includes(q) ||
+            (f.chains || []).some((c) => c.toLowerCase().includes(q)) ||
+            (f.rule || '').toLowerCase().includes(q) ||
+            (f.appName || '').toLowerCase().includes(q) ||
+            (f.network || '').toLowerCase().includes(q);
+          if (!hit) return false;
+        }
         if (axisFilter === 'security') {
           return (f.securityScore || 0) >= 15 || f.dominantAxis === 'security' || f.dominantAxis === 'both';
         }
@@ -687,7 +725,7 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
       return c * sign;
     });
     return damped;
-  }, [report, axisFilter, sortBy, sortDir, getCachedReview]);
+  }, [report, deviceFilter, networkFilter, onlyActive, axisFilter, sortBy, sortDir, getCachedReview]);
 
   const activeFlowCount = useMemo(
     () => processedFlows.reduce((acc, f) => acc + ((f.activeConns || 0) > 0 ? 1 : 0), 0),
@@ -700,7 +738,7 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
     if (flowScrollRef.current) {
       flowScrollRef.current.scrollTop = 0;
     }
-  }, [deviceFilter, axisFilter, onlySuspect, sortBy, sortDir]);
+  }, [deviceFilter, networkFilter, onlyActive, axisFilter, onlySuspect, sortBy, sortDir]);
 
   const visibleFlows = useMemo(
     () => processedFlows.slice(0, visibleLimit),
@@ -980,6 +1018,26 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
     }
   };
 
+  const handleConfirmSubnetBlock = async () => {
+    if (!subnetBlockConfirm) return;
+    const target = subnetBlockConfirm;
+    setSubnetBlocking(true);
+    actionInFlightRef.current++;
+    try {
+      const res = await clientApi.blockAuditTarget(target.cidr, target.sourceIp, target.reason);
+      success(res.message || `已仅针对 ${target.sourceIp} 封禁网段 ${target.cidr}`);
+      setSubnetBlockConfirm(null);
+      setDetailFlowKey(null);
+      emitClientInvalidate('adguard');
+      await loadAudit(false);
+    } catch (e) {
+      error((e as Error).message || '按设备封禁网段失败');
+    } finally {
+      setSubnetBlocking(false);
+      actionInFlightRef.current = Math.max(0, actionInFlightRef.current - 1);
+    }
+  };
+
   const handleUnblock = async (r: AuditBlockRule) => {
     actionInFlightRef.current++;
     try {
@@ -1014,10 +1072,60 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
     }
   };
 
+  const handleCloseFlowConnections = async (f: AuditFlowRecord) => {
+    const fk = getFlowCacheKey(f);
+    actionInFlightRef.current++;
+    setBusyFlowKeys((prev) => new Set(prev).add(fk));
+    try {
+      const res = await clientApi.closeAuditConnections({
+        connIds: f.activeConnIds,
+        deviceIp: f.deviceIp,
+        target: f.target,
+        network: f.network,
+      });
+      success(res.message || `已断开 ${f.target} 活跃连接`);
+      await loadAudit(false);
+    } catch (e) {
+      error((e as Error).message || '断开连接失败');
+    } finally {
+      actionInFlightRef.current = Math.max(0, actionInFlightRef.current - 1);
+      setBusyFlowKeys((prev) => {
+        const next = new Set(prev);
+        next.delete(fk);
+        return next;
+      });
+    }
+  };
+
+  const handleCloseAllConnections = async () => {
+    setClosingAll(true);
+    actionInFlightRef.current++;
+    try {
+      const res = await clientApi.closeAuditConnections({ all: true });
+      setCloseAllConfirmOpen(false);
+      success(res.message || '已断开所有活跃连接');
+      await loadAudit(false);
+    } catch (e) {
+      error((e as Error).message || '断开全部活跃连接失败');
+    } finally {
+      setClosingAll(false);
+      actionInFlightRef.current = Math.max(0, actionInFlightRef.current - 1);
+    }
+  };
+
   const handleExportCSV = async () => {
     try {
       const qs = new URLSearchParams();
-      if (deviceFilter.trim()) qs.set('device', deviceFilter.trim());
+      const q = deviceFilter.trim();
+      const isKnownDevice = Boolean(
+        q &&
+          (report?.devices || []).some(
+            (d) =>
+              d.deviceIp.toLowerCase() === q.toLowerCase() ||
+              (d.deviceName || '').toLowerCase() === q.toLowerCase(),
+          ),
+      );
+      if (isKnownDevice) qs.set('device', q);
       if (onlySuspect) qs.set('suspicious', '1');
       if (sortBy) qs.set('sort', sortBy);
       if (sortDir) qs.set('dir', sortDir);
@@ -1088,6 +1196,9 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
                 <span className="font-mono text-[10.5px] text-muted">:{f.destPort}</span>
               ) : null}
               {f.appName && <Badge tone="accent">{f.appName}</Badge>}
+              {f.subnetCluster?.suspicious && (
+                <Badge tone="warn">同段×{f.subnetCluster.uniqueIps}</Badge>
+              )}
               {protectedTarget && <Badge tone="neutral">核心保护</Badge>}
             </div>
             <div className="mt-1 flex items-center gap-2 flex-wrap text-[11px] text-muted">
@@ -1113,12 +1224,19 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
         const activeCnt = Number(f.activeConns || 0);
         const totalCnt = Math.max(activeCnt, Number(f.connCount || 1));
         const relSeen = formatRelativeSeen(f.lastSeen);
-        const routeTip = `实际出站: ${f.outbound || 'DIRECT'}${f.rule ? ` · 命中规则: ${f.rule}` : ''}`;
+        const chainPath = formatFlowChainPath(f);
+        const hasChainHops = Boolean(f.chains && f.chains.length > 1);
+        const compactChainLabel = hasChainHops
+          ? `${f.chains![0]} → ${f.chains![f.chains!.length - 1]}`
+          : outMeta.label;
+        const routeTip = `完整分流链: ${chainPath}${f.rule ? ` · 命中规则: ${f.rule}` : ''}`;
         return (
           <div className="space-y-1 whitespace-nowrap" title={routeTip}>
             <div className="flex items-center gap-1.5">
               <Badge tone={outMeta.tone}>
-                <span className="max-w-[120px] truncate inline-block align-bottom">{outMeta.label}</span>
+                <span className="max-w-[168px] truncate inline-block align-bottom">
+                  {compactChainLabel}
+                </span>
               </Badge>
             </div>
             <div className="flex items-center gap-1.5 text-[10.5px] font-mono tnum text-muted">
@@ -1270,11 +1388,34 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
       align: 'right',
       render: (f) => {
         const fk = getFlowCacheKey(f);
+        const hasActive = (f.activeConns || 0) > 0;
+        const isBusy = busyFlowKeys.has(fk);
         if (isProtectedBootstrapTarget(f.target)) {
-          return <Badge tone="neutral">受保护</Badge>;
+          return (
+            <div
+              className="flex justify-end items-center gap-1.5 whitespace-nowrap"
+              onPointerDown={() => {
+                pointerDownUntilRef.current = Date.now() + 1200;
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              {hasActive && (
+                <Button
+                  size="xs"
+                  variant="secondary"
+                  loading={isBusy}
+                  disabled={filterTransitioning}
+                  onClick={() => void handleCloseFlowConnections(f)}
+                  title="仅断开活跃连接强制重连，不影响访问"
+                >
+                  断开
+                </Button>
+              )}
+              <Badge tone="neutral">受保护</Badge>
+            </div>
+          );
         }
         const dual = isDualAlert(f);
-        const isBusy = busyFlowKeys.has(fk);
         return (
           <div
             className="flex justify-end gap-1.5 whitespace-nowrap"
@@ -1283,6 +1424,17 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
             }}
             onClick={(e) => e.stopPropagation()}
           >
+            {hasActive && (
+              <Button
+                size="xs"
+                variant="secondary"
+                disabled={isBusy || filterTransitioning}
+                onClick={() => void handleCloseFlowConnections(f)}
+                title="断开当前活跃连接以切换节点或重新握手"
+              >
+                断开
+              </Button>
+            )}
             <Button
               size="xs"
               variant="secondary"
@@ -1470,7 +1622,7 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
               type="text"
               value={deviceFilter}
               onChange={(e) => setDeviceFilter(e.target.value)}
-              placeholder="过滤设备名或内网 IP…"
+              placeholder="搜索域名、IP、设备、节点或规则…"
               className="sc-input w-full pl-8 pr-7 py-1.5 text-xs"
             />
             {deviceFilter && (
@@ -1485,6 +1637,17 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
           </div>
 
           <select
+            aria-label="按传输协议筛选"
+            value={networkFilter}
+            onChange={(e) => setNetworkFilter(e.target.value as '' | 'tcp' | 'udp')}
+            className="sc-input px-2.5 py-1.5 text-xs"
+          >
+            <option value="">全部协议</option>
+            <option value="tcp">仅 TCP</option>
+            <option value="udp">仅 UDP / QUIC</option>
+          </select>
+
+          <select
             value={axisFilter}
             onChange={(e) => setAxisFilter(e.target.value as '' | 'security' | 'privacy')}
             className="sc-input px-2.5 py-1.5 text-xs"
@@ -1493,6 +1656,16 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
             <option value="security">仅看安全异常</option>
             <option value="privacy">仅看隐私追踪</option>
           </select>
+
+          <label className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border border-subtle bg-surface2 text-xs text-secondary cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={onlyActive}
+              onChange={(e) => setOnlyActive(e.target.checked)}
+              className="accent-emerald-500"
+            />
+            仅看当前活跃
+          </label>
 
           <label className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border border-subtle bg-surface2 text-xs text-secondary cursor-pointer select-none">
             <input
@@ -1574,6 +1747,19 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
             : report?.message || '等待数据采集中'
         }
         icon={<ShieldAlert className="w-4 h-4" />}
+        actions={
+          activeFlowCount > 0 ? (
+            <Button
+              size="xs"
+              variant="secondary"
+              disabled={closingAll}
+              icon={<Unplug className="w-3 h-3" />}
+              onClick={() => setCloseAllConfirmOpen(true)}
+            >
+              断开全部活跃 ({activeFlowCount})
+            </Button>
+          ) : undefined
+        }
         noPadding
       >
         <div
@@ -1972,14 +2158,26 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
         footer={
           detailFlow ? (
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <Button
-                size="sm"
-                variant="secondary"
-                icon={<Bot className="w-3.5 h-3.5" />}
-                onClick={() => reviewSingleFlow(detailFlow, true)}
-              >
-                重新 AI 研判
-              </Button>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  icon={<Bot className="w-3.5 h-3.5" />}
+                  onClick={() => reviewSingleFlow(detailFlow, true)}
+                >
+                  重新 AI 研判
+                </Button>
+                {(detailFlow.activeConns || 0) > 0 && (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    icon={<Unplug className="w-3.5 h-3.5" />}
+                    onClick={() => void handleCloseFlowConnections(detailFlow)}
+                  >
+                    断开活跃 ({detailFlow.activeConns})
+                  </Button>
+                )}
+              </div>
               <div className="flex flex-wrap gap-2">
                 <Button
                   size="sm"
@@ -2096,20 +2294,121 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
                     )}
                   </span>
                 </div>
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-muted">实际出站 (Outbound)</span>
-                  <Badge tone={formatOutboundMeta(detailFlow.outbound).tone}>
-                    {formatOutboundMeta(detailFlow.outbound).label}
-                  </Badge>
+                <div className="flex items-start justify-between gap-2 sm:col-span-2">
+                  <span className="text-muted shrink-0 pt-0.5">完整分流链 (Chains)</span>
+                  <div className="flex flex-wrap items-center justify-end gap-1">
+                    {detailFlow.chains && detailFlow.chains.length > 0 ? (
+                      detailFlow.chains.map((hop, idx) => (
+                        <React.Fragment key={`${hop}-${idx}`}>
+                          {idx > 0 && <span className="text-muted text-[10px]">→</span>}
+                          <Badge
+                            tone={
+                              idx === detailFlow.chains!.length - 1
+                                ? formatOutboundMeta(hop).tone
+                                : 'neutral'
+                            }
+                          >
+                            {hop}
+                          </Badge>
+                        </React.Fragment>
+                      ))
+                    ) : (
+                      <Badge tone={formatOutboundMeta(detailFlow.outbound).tone}>
+                        {formatOutboundMeta(detailFlow.outbound).label}
+                      </Badge>
+                    )}
+                  </div>
                 </div>
-                <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center justify-between gap-2 sm:col-span-2">
                   <span className="text-muted">命中规则 (Rule)</span>
-                  <span className="font-mono text-[11px] text-secondary truncate max-w-[180px]" title={detailFlow.rule || 'final / 默认路由'}>
+                  <span className="font-mono text-[11px] text-secondary truncate max-w-[320px]" title={detailFlow.rule || 'final / 默认路由'}>
                     {detailFlow.rule || 'final / 默认路由'}
                   </span>
                 </div>
               </div>
             </div>
+
+            {detailFlow.isDirectIp && detailFlow.subnetCluster && (
+              <div className="rounded-xl border border-subtle bg-surface2/50 p-3.5 space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-semibold text-primary">目的网段聚集分析 (CIDR)</span>
+                  {detailFlow.subnetCluster.suspicious ? (
+                    <Badge tone="warn">聚集告警 · {detailFlow.subnetCluster.uniqueIps} IP</Badge>
+                  ) : detailFlow.subnetCluster.uniqueIps > 1 ? (
+                    <Badge tone="neutral">同段多 IP · {detailFlow.subnetCluster.uniqueIps} IP</Badge>
+                  ) : (
+                    <Badge tone="neutral">单 IP 直连</Badge>
+                  )}
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2 text-xs">
+                  <div className="flex items-center justify-between gap-2 border-b border-subtle/60 pb-1.5">
+                    <span className="text-muted">归属网段</span>
+                    <span className="font-mono text-[11px] font-semibold text-primary">
+                      {detailFlow.subnetCluster.cidr}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between gap-2 border-b border-subtle/60 pb-1.5">
+                    <span className="text-muted">网段累计与活跃</span>
+                    <span className="font-mono tnum text-[11px] text-secondary">
+                      ↑ {fmtBytes(detailFlow.subnetCluster.uploadBytes)} / ↓{' '}
+                      {fmtBytes(detailFlow.subnetCluster.downloadBytes)} ·{' '}
+                      {detailFlow.subnetCluster.flowCount} 流 ({detailFlow.subnetCluster.activeConns} 活跃)
+                    </span>
+                  </div>
+                </div>
+                {detailFlow.subnetCluster.sampleIps && detailFlow.subnetCluster.sampleIps.length > 0 && (
+                  <div className="space-y-1">
+                    <div className="text-[11px] text-muted">同网段命中 IP 样本</div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {detailFlow.subnetCluster.sampleIps.map((ip) => (
+                        <span
+                          key={ip}
+                          className="px-1.5 py-0.5 rounded bg-surface2 border border-subtle font-mono text-[10.5px] text-secondary"
+                        >
+                          {ip}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                <div className="flex flex-wrap items-center gap-2 pt-1">
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    icon={<Search className="w-3.5 h-3.5" />}
+                    onClick={() => {
+                      setDeviceFilter(detailFlow.subnetCluster!.cidr);
+                      setDetailFlowKey(null);
+                    }}
+                  >
+                    筛选同网段
+                  </Button>
+                  {detailFlow.deviceIp &&
+                    detailFlow.deviceIp !== '127.0.0.1' &&
+                    !isProtectedBootstrapTarget(detailFlow.target) && (
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        className="border-amber-500/35 text-amber-300 hover:bg-amber-500/15"
+                        icon={<Ban className="w-3.5 h-3.5" />}
+                        onClick={() =>
+                          setSubnetBlockConfirm({
+                            cidr: detailFlow.subnetCluster!.cidr,
+                            sourceIp: detailFlow.deviceIp,
+                            deviceLabel: detailFlow.deviceName || detailFlow.deviceIp,
+                            uniqueIps: detailFlow.subnetCluster!.uniqueIps,
+                            reason: detailFlow.subnetCluster!.suspicious
+                              ? `同网段裸IP聚集封禁 (${detailFlow.subnetCluster!.cidr}, ${detailFlow.subnetCluster!.uniqueIps} IP)`
+                              : `行为审计按设备封禁网段 (${detailFlow.subnetCluster!.cidr})`,
+                          })
+                        }
+                      >
+                        仅针对此设备封禁 {detailFlow.subnetCluster.cidr}
+                      </Button>
+                    )}
+                </div>
+              </div>
+            )}
 
             {/* Temporal & Behavioral Forensics Card */}
             <div className="rounded-xl border border-subtle bg-surface2/50 p-3.5 space-y-2.5">
@@ -2244,6 +2543,48 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
           </div>
         )}
       </SlideDrawer>
+
+      <ConfirmDialog
+        open={closeAllConfirmOpen}
+        title="断开全部活跃连接"
+        description="确认立即断开当前所有活跃连接？正在加载的网页或下载会瞬时重新握手并自动应用最新选路/分组规则，不会拉黑任何域名。"
+        confirmText="确认断开"
+        loading={closingAll}
+        onConfirm={() => void handleCloseAllConnections()}
+        onCancel={() => setCloseAllConfirmOpen(false)}
+      />
+
+      <ConfirmDialog
+        open={Boolean(subnetBlockConfirm)}
+        title={
+          subnetBlockConfirm
+            ? `仅针对设备封禁网段 ${subnetBlockConfirm.cidr}`
+            : '确认按设备封禁网段'
+        }
+        description={
+          subnetBlockConfirm ? (
+            <div className="space-y-2 text-xs leading-relaxed">
+              <p>
+                将向 <span className="font-mono font-semibold text-primary">{subnetBlockConfirm.cidr}</span> 添加路由{' '}
+                <code>reject</code> 规则，且<strong>仅作用于来源设备</strong>{' '}
+                <span className="font-semibold text-primary">
+                  {subnetBlockConfirm.deviceLabel} ({subnetBlockConfirm.sourceIp})
+                </span>
+                ，不会影响局域网内其他设备，并立即断开该设备落入此网段的活跃连接。
+              </p>
+              <p className="text-amber-300/90">
+                提示：若目标网段属于云厂商 / CDN 共享 IP 池，可能影响该设备访问同网段下的其他业务；如有误伤，可随时在「规则黑名单」中一键解除。
+              </p>
+            </div>
+          ) : (
+            ''
+          )
+        }
+        confirmText="确认按设备封禁网段"
+        loading={subnetBlocking}
+        onConfirm={() => void handleConfirmSubnetBlock()}
+        onCancel={() => setSubnetBlockConfirm(null)}
+      />
     </div>
   );
 };

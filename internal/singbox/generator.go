@@ -591,9 +591,9 @@ func NormalizeBlockTarget(raw string) (cleaned string, isIPOrCIDR bool) {
 		s = s[idx+3:]
 	}
 	if idx := strings.IndexByte(s, '/'); idx >= 0 {
-		// 保留合法 CIDR，剥离 URL 路径
-		if _, _, err := net.ParseCIDR(s); err == nil {
-			return s, true
+		// 保留合法 CIDR（规范化为网络地址），剥离 URL 路径
+		if _, ipNet, err := net.ParseCIDR(s); err == nil && ipNet != nil {
+			return ipNet.String(), true
 		}
 		s = s[:idx]
 	}

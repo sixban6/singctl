@@ -444,6 +444,17 @@ export const clientApi = {
       method: 'POST',
       body: JSON.stringify({ action, target }),
     }),
+  closeAuditConnections: (payload: {
+    all?: boolean;
+    connIds?: string[];
+    deviceIp?: string;
+    target?: string;
+    network?: string;
+  }) =>
+    request<{ ok: boolean; closed: number; all: boolean; message: string }>('/api/audit/close-connections', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
 
   async downloadAuditCSV(qs: URLSearchParams): Promise<string> {
     const headers: Record<string, string> = { 'X-Requested-With': 'SingCtlWebUI' };

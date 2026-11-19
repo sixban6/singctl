@@ -159,6 +159,7 @@ func New(opts Options) *Server {
 	s.Mux.HandleFunc("POST /api/audit/block", s.guard(s.handleAuditBlock))
 	s.Mux.HandleFunc("POST /api/audit/unblock", s.guard(s.handleAuditUnblock))
 	s.Mux.HandleFunc("POST /api/audit/whitelist", s.guard(s.handleAuditWhitelist))
+	s.Mux.HandleFunc("POST /api/audit/close-connections", s.guard(s.handleAuditCloseConnections))
 
 	// 原生 sing-box 策略组切换、测速、运行模式与实时速率 API（全部经由 WebUI 登录态统一鉴权）
 	s.Mux.HandleFunc("GET /api/sb/proxies", s.guard(s.handleSbProxiesGet))

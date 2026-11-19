@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/exec"
@@ -99,6 +100,52 @@ func (e *Enforcer) SetWorkConfigPathForTest(sbWorkConfigPath string) {
 
 // ValidateTargetSafety 严格校验待拉黑目标是否安全（遵循规则 02 防自锁断网红线，拒绝拉黑网关自身、Tailscale 及机场订阅节点域名）。
 func ValidateTargetSafety(cfg *config.Config, rawTarget string) (normalized string, isIP bool, err error) {
+	return validateTargetSafety(cfg, rawTarget, true)
+}
+
+// protectedReservedPrefixes 禁止拉黑的回环、局域网私网、Tailscale CGNAT、FakeIP 及保留地址段。
+var protectedReservedPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("10.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("127.0.0.0/8"),
+	netip.MustParsePrefix("169.254.0.0/16"),
+	netip.MustParsePrefix("172.16.0.0/12"),
+	netip.MustParsePrefix("192.168.0.0/16"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("224.0.0.0/4"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("::/128"),
+	netip.MustParsePrefix("::1/128"),
+	netip.MustParsePrefix("fc00::/7"),
+	netip.MustParsePrefix("fe80::/10"),
+	netip.MustParsePrefix("ff00::/8"),
+}
+
+// parseAuditIPPrefix 解析单个 IP 或 CIDR 为规范化后的 netip.Prefix（自动 unmap IPv4-in-IPv6）。
+func parseAuditIPPrefix(raw string) (netip.Prefix, bool) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return netip.Prefix{}, false
+	}
+	if p, err := netip.ParsePrefix(s); err == nil {
+		addr := p.Addr()
+		if addr.Is4In6() {
+			bits := p.Bits()
+			if bits >= 96 {
+				return netip.PrefixFrom(addr.Unmap(), bits-96).Masked(), true
+			}
+		}
+		return p.Masked(), true
+	}
+	if addr, err := netip.ParseAddr(s); err == nil {
+		addr = addr.Unmap()
+		return netip.PrefixFrom(addr, addr.BitLen()), true
+	}
+	return netip.Prefix{}, false
+}
+
+func validateTargetSafety(cfg *config.Config, rawTarget string, strictMask bool) (normalized string, isIP bool, err error) {
 	normalized, isIP = singbox.NormalizeBlockTarget(rawTarget)
 	if normalized == "" {
 		return "", false, fmt.Errorf("无效的拉黑目标: %q", rawTarget)
@@ -112,47 +159,88 @@ func ValidateTargetSafety(cfg *config.Config, rawTarget string) (normalized stri
 		return "", false, fmt.Errorf("安全拦截: 禁止拉黑本机主机名 (%s)，防止网关断网", plain)
 	}
 
+	var parsedPrefix netip.Prefix
 	if isIP {
-		ip := net.ParseIP(plain)
-		if ip == nil {
-			ip, _, _ = net.ParseCIDR(normalized)
+		var ok bool
+		parsedPrefix, ok = parseAuditIPPrefix(normalized)
+		if !ok {
+			return "", false, fmt.Errorf("无效的 IP 或 CIDR 目标格式: %q", rawTarget)
 		}
-		if ip != nil {
-			if ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() {
-				return "", false, fmt.Errorf("安全拦截: 禁止拉黑本机回环或未指定地址 (%s)", plain)
+		if !parsedPrefix.IsSingleIP() {
+			bits := parsedPrefix.Bits()
+			if parsedPrefix.Addr().Is4() {
+				minBits := 8
+				if strictMask {
+					minBits = 16
+				}
+				if bits < minBits {
+					return "", false, fmt.Errorf("安全拦截: 为防止大面积误伤断网，IPv4 网段掩码长度须在 /%d 至 /32 之间 (%s)", minBits, parsedPrefix)
+				}
+			} else {
+				minBits := 16
+				if strictMask {
+					minBits = 32
+				}
+				if bits < minBits {
+					return "", false, fmt.Errorf("安全拦截: 为防止大面积误伤断网，IPv6 网段掩码长度须在 /%d 至 /128 之间 (%s)", minBits, parsedPrefix)
+				}
 			}
-			if ip.IsPrivate() {
-				return "", false, fmt.Errorf("安全拦截: 禁止将局域网私网地址 (%s) 作为目标拉黑（若需限制内网设备，请使用 --device 指定源设备 IP）", plain)
+		}
+		for _, rp := range protectedReservedPrefixes {
+			if parsedPrefix.Overlaps(rp) {
+				if parsedPrefix.IsSingleIP() {
+					return "", false, fmt.Errorf("安全拦截: 禁止拉黑本机回环、局域网私网、Tailscale 或 FakeIP 保留地址 (%s)", plain)
+				}
+				return "", false, fmt.Errorf("安全拦截: 目标网段 (%s) 与本机回环、私网、Tailscale 或 FakeIP 保留网段重叠，已拒绝", parsedPrefix)
 			}
-			if _, tsNet, err := net.ParseCIDR("100.64.0.0/10"); err == nil && tsNet.Contains(ip) {
-				return "", false, fmt.Errorf("安全拦截: 禁止拉黑 Tailscale 组网地址 (%s)", plain)
+		}
+		for _, bIP := range ProtectedBootstrapIPs {
+			if bAddr, parseErr := netip.ParseAddr(bIP); parseErr == nil && parsedPrefix.Contains(bAddr.Unmap()) {
+				return "", false, fmt.Errorf("安全拦截: 目标 (%s) 包含核心基础 DNS 服务器 (%s)，禁止拉黑以防解析瘫痪", parsedPrefix, bIP)
 			}
 		}
-		if slices.Contains(ProtectedBootstrapIPs, plain) {
-			return "", false, fmt.Errorf("安全拦截: 禁止拉黑核心基础 DNS 服务器 (%s)，防止全局解析瘫痪", plain)
+		if lanIP := netinfo.GetPrimaryLANIPv4(); lanIP != "" {
+			if lanAddr, parseErr := netip.ParseAddr(lanIP); parseErr == nil && parsedPrefix.Contains(lanAddr.Unmap()) {
+				return "", false, fmt.Errorf("安全拦截: 目标 (%s) 包含本机局域网网关 IP (%s)，已拒绝", parsedPrefix, lanIP)
+			}
 		}
-		if lanIP := netinfo.GetPrimaryLANIPv4(); lanIP != "" && plain == lanIP {
-			return "", false, fmt.Errorf("安全拦截: 禁止拉黑本机局域网网关 IP (%s)", plain)
-		}
+		normalized = parsedPrefix.String()
 	} else if IsProtectedBootstrapDomain(plain) {
 		return "", false, fmt.Errorf("安全拦截: 禁止拉黑核心加密握手/公共 DNS 基础设施域名 (%s)，防止连接中断或隐私降级", plain)
 	}
 
-	// 检查是否误伤用户自身的订阅域名或自建节点域名
+	// 检查是否误伤用户自身的订阅域名、代理 IP 或自建节点
+	checkProtectedHostOrIP := func(rawHost, kind string) error {
+		host := strings.ToLower(strings.TrimSpace(rawHost))
+		if host == "" {
+			return nil
+		}
+		if isIP {
+			if hAddr, parseErr := netip.ParseAddr(host); parseErr == nil && parsedPrefix.Contains(hAddr.Unmap()) {
+				return fmt.Errorf("安全拦截: 目标 (%s) 包含您正在使用的%s (%s)，禁止拉黑以防断网", parsedPrefix, kind, host)
+			}
+			return nil
+		}
+		if plain == host || strings.HasSuffix(host, "."+plain) {
+			return fmt.Errorf("安全拦截: 目标 %q 命中您正在使用的%s (%s)，禁止拉黑以防断网", plain, kind, host)
+		}
+		return nil
+	}
 	if cfg != nil {
 		for _, sub := range cfg.Subs {
 			u, parseErr := url.Parse(strings.TrimSpace(sub.URL))
 			if parseErr == nil && u.Hostname() != "" {
-				subHost := strings.ToLower(u.Hostname())
-				if plain == subHost || strings.HasSuffix(subHost, "."+plain) {
-					return "", false, fmt.Errorf("安全拦截: 目标 %q 命中您正在使用的订阅域名 (%s)，禁止拉黑以防断网", plain, subHost)
+				if err := checkProtectedHostOrIP(u.Hostname(), "订阅节点"); err != nil {
+					return "", false, err
 				}
 			}
 		}
 		for _, srvDom := range []string{cfg.Server.GetNodeDomain(), cfg.Server.GetSubstoreDomain(), strings.TrimSpace(cfg.Server.ServerIP)} {
-			srvDom = strings.ToLower(strings.TrimSpace(srvDom))
-			if srvDom != "" && srvDom != "node.example.com" && (plain == srvDom || strings.HasSuffix(srvDom, "."+plain)) {
-				return "", false, fmt.Errorf("安全拦截: 目标 %q 命中自建代理节点 (%s)，禁止拉黑以防断网", plain, srvDom)
+			if strings.EqualFold(strings.TrimSpace(srvDom), "node.example.com") {
+				continue
+			}
+			if err := checkProtectedHostOrIP(srvDom, "自建代理节点"); err != nil {
+				return "", false, err
 			}
 		}
 	}
@@ -547,7 +635,7 @@ func (e *Enforcer) ImportAndBlockRuleSet(ctx context.Context, rawInput, customTa
 		for _, cidr := range r.IPCIDR {
 			cidr = strings.TrimSpace(cidr)
 			if cidr != "" {
-				if _, _, safeErr := ValidateTargetSafety(e.cfg, cidr); safeErr != nil {
+				if _, _, safeErr := validateTargetSafety(e.cfg, cidr, false); safeErr != nil {
 					return nil, fmt.Errorf("规则集安全校验未通过 (%s): %w", tag, safeErr)
 				}
 				ruleCount++
@@ -682,6 +770,7 @@ func (e *Enforcer) syncSingBoxLayer(ctx context.Context, oldBlocks, newBlocks []
 func (e *Enforcer) killMatchingConnections(ctx context.Context, targetPlain, sourcePlain string) int {
 	client := &http.Client{Timeout: 2 * time.Second}
 	killed := 0
+	targetPrefix, targetIsIPPrefix := parseAuditIPPrefix(targetPlain)
 
 	for _, ep := range e.clashEndpoints {
 		baseURL := strings.TrimRight(ep, "/")
@@ -714,6 +803,13 @@ func (e *Enforcer) killMatchingConnections(ctx context.Context, targetPlain, sou
 			host := strings.ToLower(cmp.Or(strings.TrimSpace(conn.Metadata.SniffHost), strings.TrimSpace(conn.Metadata.Host)))
 			destIP := strings.TrimSpace(conn.Metadata.DestinationIP)
 			matched := destIP == targetPlain || host == targetPlain || strings.HasSuffix(host, "."+targetPlain)
+			if !matched && targetIsIPPrefix {
+				if addr, parseErr := netip.ParseAddr(destIP); parseErr == nil {
+					matched = targetPrefix.Contains(addr.Unmap())
+				} else if addr, parseErr := netip.ParseAddr(host); parseErr == nil {
+					matched = targetPrefix.Contains(addr.Unmap())
+				}
+			}
 			if !matched {
 				continue
 			}

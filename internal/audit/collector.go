@@ -9,6 +9,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -63,25 +64,26 @@ type clashConnection struct {
 
 // persistedFlowEntry 保存单条聚合流的历史累计统计与建连时间序列（用于计算变异系数 CV）。
 type persistedFlowEntry struct {
-	Key           string  `json:"key"`
-	DeviceIP      string  `json:"deviceIp"`
-	DeviceName    string  `json:"deviceName,omitempty"`
-	DeviceMAC     string  `json:"deviceMac,omitempty"`
-	Target        string  `json:"target"`
-	RawHost       string  `json:"rawHost,omitempty"`
-	DestIP        string  `json:"destIp,omitempty"`
-	DestPort      int     `json:"destPort"`
-	IsDirectIP    bool    `json:"isDirectIp"`
-	Network       string  `json:"network"`
-	Outbound      string  `json:"outbound"`
-	Rule          string  `json:"rule,omitempty"`
-	UploadBytes   int64   `json:"uploadBytes"`
-	DownloadBytes int64   `json:"downloadBytes"`
-	ConnCount     int     `json:"connCount"`
-	FirstSeenUnix int64   `json:"firstSeenUnix"`
-	LastSeenUnix  int64   `json:"lastSeenUnix"`
-	NightHits     int     `json:"nightHits"`
-	ArrivalsUnix  []int64 `json:"arrivalsUnix,omitempty"`
+	Key           string   `json:"key"`
+	DeviceIP      string   `json:"deviceIp"`
+	DeviceName    string   `json:"deviceName,omitempty"`
+	DeviceMAC     string   `json:"deviceMac,omitempty"`
+	Target        string   `json:"target"`
+	RawHost       string   `json:"rawHost,omitempty"`
+	DestIP        string   `json:"destIp,omitempty"`
+	DestPort      int      `json:"destPort"`
+	IsDirectIP    bool     `json:"isDirectIp"`
+	Network       string   `json:"network"`
+	Outbound      string   `json:"outbound"`
+	Chains        []string `json:"chains,omitempty"`
+	Rule          string   `json:"rule,omitempty"`
+	UploadBytes   int64    `json:"uploadBytes"`
+	DownloadBytes int64    `json:"downloadBytes"`
+	ConnCount     int      `json:"connCount"`
+	FirstSeenUnix int64    `json:"firstSeenUnix"`
+	LastSeenUnix  int64    `json:"lastSeenUnix"`
+	NightHits     int      `json:"nightHits"`
+	ArrivalsUnix  []int64  `json:"arrivalsUnix,omitempty"`
 }
 
 type connByteCursor struct {
@@ -261,6 +263,7 @@ func (c *Collector) collectLocked(ctx context.Context, opts CollectOptions) *Rep
 		}
 	}
 
+	rawFlows := make([]FlowRecord, 0, len(state.Flows))
 	allFlows := make([]FlowRecord, 0, len(state.Flows))
 	deviceAgg := make(map[string]*DeviceSummary)
 	lowerFilter := strings.ToLower(strings.TrimSpace(opts.DeviceFilter))
@@ -291,7 +294,7 @@ func (c *Collector) collectLocked(ctx context.Context, opts CollectOptions) *Rep
 		cachedAI := LookupCachedAIReview(entry.Target)
 		activeSpanSec := max(int64(60), entry.LastSeenUnix-entry.FirstSeenUnix)
 		displayLoc := now.Location()
-		rec := FlowRecord{
+		rawFlows = append(rawFlows, FlowRecord{
 			Key:           entry.Key,
 			DeviceIP:      normDevIP,
 			DeviceName:    devName,
@@ -305,6 +308,7 @@ func (c *Collector) collectLocked(ctx context.Context, opts CollectOptions) *Rep
 			IsDirectIP:    entry.IsDirectIP,
 			Network:       entry.Network,
 			Outbound:      entry.Outbound,
+			Chains:        slices.Clone(entry.Chains),
 			Rule:          entry.Rule,
 			UploadBytes:   entry.UploadBytes,
 			DownloadBytes: entry.DownloadBytes,
@@ -317,8 +321,15 @@ func (c *Collector) collectLocked(ctx context.Context, opts CollectOptions) *Rep
 			NightHits:     entry.NightHits,
 			IntervalCV:    computeIntervalCV(entry.ArrivalsUnix),
 			AIReview:      cachedAI,
-		}
-		engine.EvaluateFlow(&rec)
+		})
+	}
+
+	// 先在全局层面按 (设备, 目的网段) 聚合标注纯裸 IP 同网段聚集簇，再逐条评分汇总
+	engine.AnnotateDirectIPSubnetClusters(rawFlows)
+
+	for i := range rawFlows {
+		engine.EvaluateFlow(&rawFlows[i])
+		rec := rawFlows[i]
 
 		// 更新设备维度汇总（已拉黑或白名单放行的目标不再计入活跃告警数与设备最高风险分，形成治理闭环）
 		ds, ok := deviceAgg[rec.DeviceIP]
@@ -356,9 +367,11 @@ func (c *Collector) collectLocked(ctx context.Context, opts CollectOptions) *Rep
 			}
 		}
 
-		// 过滤条件检查（支持按设备 IP、设备名称、目标域名或识别出的应用名如 Telegram/Baidu 过滤）
+		// 过滤条件检查（支持按设备 IP、设备名称、目标域名、所属目的网段 CIDR 或识别出的应用名过滤）
 		if lowerFilter != "" {
-			if !strings.Contains(strings.ToLower(rec.DeviceIP), lowerFilter) &&
+			cidrMatch := rec.SubnetCluster != nil && strings.Contains(strings.ToLower(rec.SubnetCluster.CIDR), lowerFilter)
+			if !cidrMatch &&
+				!strings.Contains(strings.ToLower(rec.DeviceIP), lowerFilter) &&
 				!strings.Contains(strings.ToLower(rec.DeviceName), lowerFilter) &&
 				!strings.Contains(strings.ToLower(rec.Target), lowerFilter) &&
 				!strings.Contains(strings.ToLower(rec.AppName), lowerFilter) {
@@ -483,24 +496,9 @@ func (c *Collector) ingestConnectionsLocked(
 	for _, conn := range conns {
 		rawSrc := cmp.Or(strings.TrimSpace(conn.Metadata.SourceIP), "127.0.0.1")
 		srcIP := normalizeSourceDeviceIP(rawSrc, selfIPs)
-		rawHost := cmp.Or(strings.TrimSpace(conn.Metadata.SniffHost), strings.TrimSpace(conn.Metadata.Host))
-		destIP := strings.TrimSpace(conn.Metadata.DestinationIP)
 		network := strings.ToLower(cmp.Or(strings.TrimSpace(conn.Metadata.Network), "tcp"))
 		destPort, _ := strconv.Atoi(strings.TrimSpace(conn.Metadata.DestinationPort))
-
-		isDirectIP := false
-		target := strings.TrimSuffix(strings.ToLower(rawHost), ".")
-		if h, _, err := net.SplitHostPort(target); err == nil && h != "" {
-			target = strings.TrimSuffix(h, ".")
-		}
-		if target == "" || net.ParseIP(target) != nil {
-			isDirectIP = true
-			target = cmp.Or(destIP, target)
-		} else if !isValidAuditDomain(target) {
-			// 过滤 TLS 证书 Subject CN 非域名字符串（例如 "Mijia Cloud"），保留 rawHost 供应用识别，目标回退为真实目的 IP
-			isDirectIP = true
-			target = destIP
-		}
+		rawHost, destIP, target, isDirectIP := resolveConnTarget(conn)
 		if target == "" {
 			continue
 		}
@@ -569,6 +567,16 @@ func (c *Collector) ingestConnectionsLocked(
 		}
 		if len(conn.Chains) > 0 {
 			entry.Outbound = conn.Chains[0]
+			chains := make([]string, 0, len(conn.Chains))
+			for i := len(conn.Chains) - 1; i >= 0; i-- {
+				hop := strings.TrimSpace(conn.Chains[i])
+				if hop != "" && !slices.Contains(chains, hop) {
+					chains = append(chains, hop)
+				}
+			}
+			if len(chains) > 0 {
+				entry.Chains = chains
+			}
 		}
 		if conn.Rule != "" {
 			if conn.RulePayload != "" {
@@ -1220,4 +1228,176 @@ func ParsePOSIXTZLocation(spec string) *time.Location {
 		return time.UTC
 	}
 	return time.FixedZone(tzName, eastSeconds)
+}
+
+// resolveConnTarget 从 Clash API 单条连接元数据提取规范化目标域名/IP（供采集与连接断开共享）。
+func resolveConnTarget(conn clashConnection) (rawHost, destIP, target string, isDirectIP bool) {
+	rawHost = cmp.Or(strings.TrimSpace(conn.Metadata.SniffHost), strings.TrimSpace(conn.Metadata.Host))
+	destIP = strings.TrimSpace(conn.Metadata.DestinationIP)
+	target = strings.TrimSuffix(strings.ToLower(rawHost), ".")
+	if h, _, err := net.SplitHostPort(target); err == nil && h != "" {
+		target = strings.TrimSuffix(h, ".")
+	}
+	if target == "" || net.ParseIP(target) != nil {
+		isDirectIP = true
+		target = cmp.Or(destIP, target)
+	} else if !isValidAuditDomain(target) {
+		isDirectIP = true
+		target = destIP
+	}
+	return rawHost, destIP, target, isDirectIP
+}
+
+// CloseConnectionsRequest 描述 WebUI 临时断开活跃连接的筛选条件。
+type CloseConnectionsRequest struct {
+	All      bool     `json:"all,omitempty"`
+	ConnIDs  []string `json:"connIds,omitempty"`
+	DeviceIP string   `json:"deviceIp,omitempty"`
+	Target   string   `json:"target,omitempty"`
+	Network  string   `json:"network,omitempty"`
+}
+
+// CloseConnectionsResult 返回本次踢断活跃连接的结果统计。
+type CloseConnectionsResult struct {
+	Closed int  `json:"closed"`
+	All    bool `json:"all"`
+}
+
+// CloseConnections 通过 sing-box Clash API 临时断开指定（或全部）活跃连接，触发客户端重新握手选路。
+func (c *Collector) CloseConnections(ctx context.Context, req CloseConnectionsRequest) (CloseConnectionsResult, error) {
+	c.mu.Lock()
+	if !c.customEndpoints {
+		c.endpoints = singbox.ClashAPIEndpoints()
+		c.secret = singbox.ClashAPISecret()
+	}
+	endpoints := slices.Clone(c.endpoints)
+	secret := c.secret
+	client := c.httpClient
+	c.mu.Unlock()
+
+	if len(endpoints) == 0 {
+		endpoints = []string{"http://127.0.0.1:9090"}
+	}
+	if client == nil {
+		client = &http.Client{Timeout: 2500 * time.Millisecond}
+	}
+
+	var lastErr error
+	for _, ep := range endpoints {
+		baseURL := strings.TrimRight(strings.TrimSpace(ep), "/")
+		if baseURL == "" {
+			continue
+		}
+
+		if req.All {
+			delReq, err := http.NewRequestWithContext(ctx, http.MethodDelete, baseURL+"/connections", nil)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			if secret != "" {
+				delReq.Header.Set("Authorization", "Bearer "+secret)
+			}
+			resp, err := client.Do(delReq)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusOK {
+				return CloseConnectionsResult{All: true}, nil
+			}
+			lastErr = fmt.Errorf("Clash API 返回状态 %d", resp.StatusCode)
+			continue
+		}
+
+		// 收集显式传入的连接 ID，并补充拉取一次活跃连接表以捕捉刚新建的同目标连接
+		targetIDs := make([]string, 0, len(req.ConnIDs))
+		for _, id := range req.ConnIDs {
+			cleanID := strings.TrimSpace(id)
+			if cleanID != "" && !slices.Contains(targetIDs, cleanID) {
+				targetIDs = append(targetIDs, cleanID)
+			}
+		}
+
+		wantTarget := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(req.Target)), ".")
+		wantDev := strings.TrimSpace(req.DeviceIP)
+		wantNet := strings.ToLower(strings.TrimSpace(req.Network))
+		reachable := false
+
+		if wantTarget != "" || wantDev != "" || len(targetIDs) == 0 {
+			getReq, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/connections", nil)
+			if err == nil {
+				if secret != "" {
+					getReq.Header.Set("Authorization", "Bearer "+secret)
+				}
+				getResp, err := client.Do(getReq)
+				if err != nil {
+					lastErr = err
+					continue
+				}
+				if getResp.StatusCode == http.StatusOK {
+					reachable = true
+					var parsed clashConnectionsResponse
+					if decErr := json.NewDecoder(getResp.Body).Decode(&parsed); decErr == nil {
+						selfIPs := collectLocalInterfaceIPs()
+						for _, conn := range parsed.Connections {
+							connSrc := normalizeSourceDeviceIP(strings.TrimSpace(conn.Metadata.SourceIP), selfIPs)
+							_, destIP, connTarget, _ := resolveConnTarget(conn)
+							connNet := strings.ToLower(cmp.Or(strings.TrimSpace(conn.Metadata.Network), "tcp"))
+							if wantDev != "" && connSrc != wantDev {
+								continue
+							}
+							if wantNet != "" && connNet != wantNet {
+								continue
+							}
+							if wantTarget != "" && !strings.EqualFold(connTarget, wantTarget) && destIP != wantTarget {
+								continue
+							}
+							if conn.ID != "" && !slices.Contains(targetIDs, conn.ID) {
+								targetIDs = append(targetIDs, conn.ID)
+							}
+						}
+					}
+				} else {
+					lastErr = fmt.Errorf("Clash API /connections 返回状态 %d", getResp.StatusCode)
+				}
+				getResp.Body.Close()
+				if !reachable && len(targetIDs) == 0 {
+					continue
+				}
+			}
+		}
+
+		closed := 0
+		anySucceeded := reachable
+		for _, id := range targetIDs {
+			delReq, err := http.NewRequestWithContext(ctx, http.MethodDelete, baseURL+"/connections/"+url.PathEscape(id), nil)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			if secret != "" {
+				delReq.Header.Set("Authorization", "Bearer "+secret)
+			}
+			delResp, err := client.Do(delReq)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			delResp.Body.Close()
+			anySucceeded = true
+			if delResp.StatusCode == http.StatusNoContent || delResp.StatusCode == http.StatusOK {
+				closed++
+			}
+		}
+		if anySucceeded {
+			return CloseConnectionsResult{Closed: closed}, nil
+		}
+	}
+
+	if lastErr == nil {
+		lastErr = fmt.Errorf("未找到可达的 sing-box Clash API 控制端口")
+	}
+	return CloseConnectionsResult{}, lastErr
 }

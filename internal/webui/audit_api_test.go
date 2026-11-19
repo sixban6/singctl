@@ -213,3 +213,125 @@ func TestAuditSingletonCollector_ZeroStaleConfigAndLeaseFingerprint(t *testing.T
 		t.Fatalf("expected newly whitelisted target reflected immediately, got: %s", string(raw2))
 	}
 }
+
+func TestAuditChainsAndCloseConnections(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "singctl.yaml")
+	if err := os.WriteFile(cfgPath, []byte("mode: router\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	var deletedIDs []string
+	deletedAll := false
+	clashSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer test-secret" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/connections":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"connections": []map[string]any{
+					{
+						"id":          "conn-gh-1",
+						"upload":      1200,
+						"download":    54000,
+						"chains":      []string{"sec_san_hy2", "#VPS", "Proxy"},
+						"rule":        "RuleSet",
+						"rulePayload": "geosite-github",
+						"metadata": map[string]any{
+							"network":         "tcp",
+							"sourceIP":        "192.168.1.88",
+							"destinationIP":   "198.51.100.44",
+							"destinationPort": "443",
+							"host":            "github.com",
+						},
+					},
+				},
+			})
+		case r.Method == http.MethodDelete && r.URL.Path == "/connections/conn-gh-1":
+			deletedIDs = append(deletedIDs, "conn-gh-1")
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodDelete && r.URL.Path == "/connections":
+			deletedAll = true
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer clashSrv.Close()
+
+	srv := New(Options{
+		ConfigPath: cfgPath,
+		Listen:     "127.0.0.1:0",
+		Password:   "test-pass-123",
+	})
+	srv.auditCollector.SetEndpointsForTest([]string{clashSrv.URL}, "test-secret", filepath.Join(dir, "audit-state.json"))
+	token := srv.SessionToken()
+
+	// 1. GET /api/audit 应将 Clash chains 反转整理为入口->出口顺序并输出 activeConnIds
+	req := httptest.NewRequest(http.MethodGet, "/api/audit", nil)
+	req.RemoteAddr = "192.0.2.40:42000"
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("User-Agent", "Mozilla/5.0")
+	rec := httptest.NewRecorder()
+	srv.Mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/audit failed: %d %s", rec.Code, rec.Body.String())
+	}
+	var auditResp struct {
+		Flows []struct {
+			Target        string   `json:"target"`
+			Outbound      string   `json:"outbound"`
+			Chains        []string `json:"chains"`
+			ActiveConnIDs []string `json:"activeConnIds"`
+		} `json:"flows"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &auditResp); err != nil {
+		t.Fatal(err)
+	}
+	if len(auditResp.Flows) != 1 {
+		t.Fatalf("expected 1 flow, got %+v", auditResp.Flows)
+	}
+	gotFlow := auditResp.Flows[0]
+	if !slices.Equal(gotFlow.Chains, []string{"Proxy", "#VPS", "sec_san_hy2"}) {
+		t.Fatalf("expected entry->exit chains [Proxy #VPS sec_san_hy2], got %v", gotFlow.Chains)
+	}
+	if !slices.Equal(gotFlow.ActiveConnIDs, []string{"conn-gh-1"}) {
+		t.Fatalf("expected activeConnIds [conn-gh-1], got %v", gotFlow.ActiveConnIDs)
+	}
+
+	// 2. POST /api/audit/close-connections 单流精确断开
+	postClose := func(payload string) *httptest.ResponseRecorder {
+		cReq := httptest.NewRequest(http.MethodPost, "/api/audit/close-connections", bytes.NewReader([]byte(payload)))
+		cReq.RemoteAddr = "192.0.2.40:42001"
+		cReq.Header.Set("Authorization", "Bearer "+token)
+		cReq.Header.Set("Content-Type", "application/json")
+		cReq.Header.Set("User-Agent", "Mozilla/5.0")
+		cRec := httptest.NewRecorder()
+		srv.Mux.ServeHTTP(cRec, cReq)
+		return cRec
+	}
+
+	recOne := postClose(`{"connIds":["conn-gh-1"],"deviceIp":"192.168.1.88","target":"github.com","network":"tcp"}`)
+	if recOne.Code != http.StatusOK {
+		t.Fatalf("close single flow failed: %d %s", recOne.Code, recOne.Body.String())
+	}
+	var oneResp struct {
+		OK     bool `json:"ok"`
+		Closed int  `json:"closed"`
+	}
+	_ = json.Unmarshal(recOne.Body.Bytes(), &oneResp)
+	if !oneResp.OK || oneResp.Closed != 1 || !slices.Equal(deletedIDs, []string{"conn-gh-1"}) {
+		t.Fatalf("unexpected close single response: resp=%+v deletedIDs=%v", oneResp, deletedIDs)
+	}
+
+	// 3. POST /api/audit/close-connections all=true 一键清空所有活跃连接
+	recAll := postClose(`{"all":true}`)
+	if recAll.Code != http.StatusOK {
+		t.Fatalf("close all flows failed: %d %s", recAll.Code, recAll.Body.String())
+	}
+	if !deletedAll {
+		t.Fatal("expected DELETE /connections to be called for all=true")
+	}
+}

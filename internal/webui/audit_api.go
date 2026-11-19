@@ -3,6 +3,7 @@ package webui
 import (
 	"cmp"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"strconv"
@@ -444,5 +445,48 @@ func (s *Server) handleAuditAIReviewPost(w http.ResponseWriter, r *http.Request)
 		"ok":         true,
 		"usedRemote": usedRemote,
 		"results":    results,
+	})
+}
+
+// handleAuditCloseConnections 临时断开单条流或全部活跃连接，促使客户端立即重新握手走新节点或策略组。
+func (s *Server) handleAuditCloseConnections(w http.ResponseWriter, r *http.Request) {
+	if !s.auditLimiter.allow(r, "write", 120) {
+		writeJSONError(w, http.StatusTooManyRequests, "操作过于频繁，请稍后再试")
+		return
+	}
+
+	var req audit.CloseConnectionsRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "无效的 JSON 请求体")
+		return
+	}
+	if !req.All && len(req.ConnIDs) == 0 && strings.TrimSpace(req.Target) == "" {
+		writeJSONError(w, http.StatusBadRequest, "请指定要断开的连接 ID、目标域名或 all=true")
+		return
+	}
+
+	collector := s.auditCollector
+	if collector == nil {
+		collector = audit.NewCollector(nil)
+	}
+	res, err := collector.CloseConnections(r.Context(), req)
+	if err != nil {
+		writeJSONError(w, http.StatusBadGateway, "断开活跃连接失败: "+err.Error())
+		return
+	}
+
+	msg := "已触发断开所有活跃连接，后续请求将重新选路"
+	if !res.All {
+		if res.Closed > 0 {
+			msg = "已断开 " + strconv.Itoa(res.Closed) + " 条活跃连接"
+		} else {
+			msg = "相关连接已自然结束或关闭"
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"closed":  res.Closed,
+		"all":     res.All,
+		"message": msg,
 	})
 }
