@@ -437,6 +437,17 @@ export interface AuditDeviceSummary {
   maxPrivacyScore: number;
 }
 
+export interface AuditDirectIPSubnetCluster {
+  cidr: string;
+  uniqueIps: number;
+  flowCount: number;
+  activeConns: number;
+  uploadBytes: number;
+  downloadBytes: number;
+  sampleIps?: string[];
+  suspicious: boolean;
+}
+
 export interface AuditFlowRecord {
   key?: string;
   id?: string;
@@ -449,14 +460,17 @@ export interface AuditFlowRecord {
   destIp?: string;
   destPort?: number;
   isDirectIp?: boolean;
+  subnetCluster?: AuditDirectIPSubnetCluster | null;
   network: string;
   outbound?: string;
+  chains?: string[];
   rule?: string;
   uploadBytes: number;
   downloadBytes: number;
   uploadRatio: number;
   connCount?: number;
   activeConns?: number;
+  activeConnIds?: string[];
   firstSeen?: string;
   lastSeen?: string;
   activeSpanSec?: number;

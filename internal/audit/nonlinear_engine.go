@@ -1,8 +1,11 @@
 package audit
 
 import (
+	"cmp"
+	"fmt"
 	"math"
 	"net"
+	"net/netip"
 	"net/url"
 	"slices"
 	"strconv"
@@ -29,11 +32,17 @@ type blockedRulesetRef struct {
 	tag     string
 }
 
+type blockedCIDRRef struct {
+	srcCIDR string
+	prefix  netip.Prefix
+}
+
 type NonlinearEngine struct {
 	detectors       []Detector
 	trustedDomains  map[string]struct{}
 	trustedCIDRs    []*net.IPNet
 	blockedKeys     map[string]struct{}
+	blockedCIDRs    []blockedCIDRRef
 	blockedRulesets []blockedRulesetRef
 }
 
@@ -108,6 +117,7 @@ func NewNonlinearEngine(cfg *config.Config) *NonlinearEngine {
 		detectors: []Detector{
 			&uploadAsymmetryDetector{},
 			&directIPUploadDetector{},
+			&directIPSubnetClusterDetector{},
 			&beaconHeartbeatDetector{},
 			&domainEntropyDetector{},
 			&telemetryFingerprintDetector{},
@@ -144,7 +154,7 @@ func NewNonlinearEngine(cfg *config.Config) *NonlinearEngine {
 			eng.addTrustedEntry(w)
 		}
 		for _, b := range cfg.CustomRules.Block {
-			target, _ := singbox.NormalizeBlockTarget(b.Target)
+			target, isIPTarget := singbox.NormalizeBlockTarget(b.Target)
 			if target == "" {
 				continue
 			}
@@ -155,6 +165,14 @@ func NewNonlinearEngine(cfg *config.Config) *NonlinearEngine {
 					tag:     strings.TrimPrefix(target, "ruleset:"),
 				})
 				continue
+			}
+			if isIPTarget {
+				if prefix, ok := parseAuditIPPrefix(target); ok && !prefix.IsSingleIP() {
+					eng.blockedCIDRs = append(eng.blockedCIDRs, blockedCIDRRef{
+						srcCIDR: src,
+						prefix:  prefix,
+					})
+				}
 			}
 			eng.blockedKeys[src+"|"+target] = struct{}{}
 			// 同时索引去掉 /32 的纯 IP 键以便快速匹配
@@ -229,7 +247,7 @@ func (e *NonlinearEngine) IsTrusted(target string) bool {
 
 // IsBlocked 判断某条流是否已被納入自定义拉黑规则。
 func (e *NonlinearEngine) IsBlocked(deviceIP, target string) bool {
-	if len(e.blockedKeys) == 0 && len(e.blockedRulesets) == 0 {
+	if len(e.blockedKeys) == 0 && len(e.blockedCIDRs) == 0 && len(e.blockedRulesets) == 0 {
 		return false
 	}
 	norm, _ := singbox.NormalizeBlockTarget(target)
@@ -253,6 +271,17 @@ func (e *NonlinearEngine) IsBlocked(deviceIP, target string) bool {
 
 	if matchKey(norm) || (plain != norm && matchKey(plain)) {
 		return true
+	}
+
+	if len(e.blockedCIDRs) > 0 {
+		if addr, err := netip.ParseAddr(plain); err == nil {
+			addr = addr.Unmap()
+			for _, bc := range e.blockedCIDRs {
+				if (bc.srcCIDR == "" || bc.srcCIDR == srcCIDR) && bc.prefix.Contains(addr) {
+					return true
+				}
+			}
+		}
 	}
 
 	// 域名后缀零切片步进匹配（如拉黑了 example.com，则 sub.example.com 也处于已拉黑态）
@@ -305,7 +334,7 @@ func (e *NonlinearEngine) EvaluateFlow(flow *FlowRecord) {
 		if s > 0 {
 			flow.NonlinearFactors[det.Name()] = math.Round(s*100) / 100
 			switch det.Name() {
-			case "upload_asymmetry", "direct_ip_upload", "domain_entropy":
+			case "upload_asymmetry", "direct_ip_upload", "direct_ip_subnet_cluster", "domain_entropy":
 				secBase += s
 			case "beacon_heartbeat":
 				// 机器定时心跳既是远控信标特征(安全)，更是全天候状态打点画像特征(隐私)
@@ -541,6 +570,153 @@ func (d *directIPUploadDetector) Evaluate(f *FlowRecord) (float64, string) {
 		score += 7.0
 	}
 	return score, "绕过DNS直连公网IP上传"
+}
+
+// directIPAuditSubnet 将公网直连 IP 归一化为用于聚集分析的 /24 (IPv4) 或 /48 (IPv6) 目的网段；
+// 自动过滤回环、私网、Tailscale、FakeIP、基础 DNS 等受保护保留段。
+func directIPAuditSubnet(rawIP string) (string, bool) {
+	addr, err := netip.ParseAddr(strings.TrimSpace(rawIP))
+	if err != nil {
+		return "", false
+	}
+	addr = addr.Unmap()
+	if !addr.IsGlobalUnicast() || addr.IsPrivate() || addr.IsLoopback() || addr.IsLinkLocalUnicast() || addr.IsMulticast() {
+		return "", false
+	}
+	for _, rp := range protectedReservedPrefixes {
+		if rp.Contains(addr) {
+			return "", false
+		}
+	}
+	if slices.Contains(ProtectedBootstrapIPs, addr.String()) {
+		return "", false
+	}
+	bits := 24
+	if addr.Is6() {
+		bits = 48
+	}
+	return netip.PrefixFrom(addr, bits).Masked().String(), true
+}
+
+// AnnotateDirectIPSubnetClusters 在单流评估前，按 (来源设备, 目的 /24 或 /48) 聚合并标注无域名纯裸 IP 的同网段访问簇。
+func (e *NonlinearEngine) AnnotateDirectIPSubnetClusters(flows []FlowRecord) {
+	type bucketKey struct {
+		deviceIP string
+		cidr     string
+	}
+	type ipUploadStat struct {
+		ip     string
+		upload int64
+	}
+	type bucket struct {
+		cidr               string
+		flowIndices        []int
+		ipUploads          map[string]int64
+		activeConns        int
+		uploadBytes        int64
+		downloadBytes      int64
+		hasNonStdPort      bool
+		allKnownInfraHTTPS bool
+	}
+
+	buckets := make(map[bucketKey]*bucket)
+	for i := range flows {
+		f := &flows[i]
+		if !f.IsDirectIP || e.IsTrusted(f.Target) || strings.EqualFold(f.Outbound, "block") {
+			continue
+		}
+		cidr, ok := directIPAuditSubnet(f.Target)
+		if !ok {
+			continue
+		}
+		addr, _ := netip.ParseAddr(strings.TrimSpace(f.Target))
+		plainIP := addr.Unmap().String()
+
+		bk := bucketKey{deviceIP: f.DeviceIP, cidr: cidr}
+		b, exists := buckets[bk]
+		if !exists {
+			b = &bucket{
+				cidr:               cidr,
+				ipUploads:          make(map[string]int64),
+				allKnownInfraHTTPS: true,
+			}
+			buckets[bk] = b
+		}
+		b.flowIndices = append(b.flowIndices, i)
+		b.ipUploads[plainIP] += f.UploadBytes
+		b.activeConns += f.ActiveConns
+		b.uploadBytes += f.UploadBytes
+		b.downloadBytes += f.DownloadBytes
+		if f.DestPort > 0 && f.DestPort != 80 && f.DestPort != 443 && f.DestPort != 53 && f.DestPort != 123 {
+			b.hasNonStdPort = true
+		}
+		if f.DestPort != 443 || !isKnownStandardHTTPSInfraApp(f.AppName) {
+			b.allKnownInfraHTTPS = false
+		}
+	}
+
+	for _, b := range buckets {
+		uniqueIPs := len(b.ipUploads)
+		denom := float64(b.downloadBytes) + 65536.0
+		clusterRatio := float64(b.uploadBytes) / denom
+		exemptKnownInfra := b.allKnownInfraHTTPS && clusterRatio < 1.8
+		suspicious := uniqueIPs >= 3 && !exemptKnownInfra &&
+			(b.hasNonStdPort || (b.uploadBytes >= 256*1024 && clusterRatio >= 1.2) || uniqueIPs >= 5)
+
+		var sampleIPs []string
+		if uniqueIPs > 1 {
+			stats := make([]ipUploadStat, 0, uniqueIPs)
+			for ip, up := range b.ipUploads {
+				stats = append(stats, ipUploadStat{ip: ip, upload: up})
+			}
+			slices.SortFunc(stats, func(a, b ipUploadStat) int {
+				if c := cmp.Compare(b.upload, a.upload); c != 0 {
+					return c
+				}
+				return cmp.Compare(a.ip, b.ip)
+			})
+			limit := min(6, len(stats))
+			sampleIPs = make([]string, 0, limit)
+			for _, st := range stats[:limit] {
+				sampleIPs = append(sampleIPs, st.ip)
+			}
+		}
+
+		cluster := DirectIPSubnetCluster{
+			CIDR:          b.cidr,
+			UniqueIPs:     uniqueIPs,
+			FlowCount:     len(b.flowIndices),
+			ActiveConns:   b.activeConns,
+			UploadBytes:   b.uploadBytes,
+			DownloadBytes: b.downloadBytes,
+			SampleIPs:     sampleIPs,
+			Suspicious:    suspicious,
+		}
+		for _, idx := range b.flowIndices {
+			cCopy := cluster
+			flows[idx].SubnetCluster = &cCopy
+		}
+	}
+}
+
+// 2b. directIPSubnetClusterDetector: 同网段裸 IP 聚集外连算子（捕获 PCDN/P2P 节点池、固件多 IP 轮换回连）
+type directIPSubnetClusterDetector struct{}
+
+func (d *directIPSubnetClusterDetector) Name() string { return "direct_ip_subnet_cluster" }
+
+func (d *directIPSubnetClusterDetector) Evaluate(f *FlowRecord) (float64, string) {
+	if f == nil || !f.IsDirectIP || f.SubnetCluster == nil || !f.SubnetCluster.Suspicious {
+		return 0, ""
+	}
+	c := f.SubnetCluster
+	score := 12.0 + math.Min(16.0, float64(c.UniqueIPs-2)*3.5)
+	denom := float64(c.DownloadBytes) + 65536.0
+	ratio := float64(c.UploadBytes) / denom
+	if c.UploadBytes >= 1024*1024 && ratio >= 1.5 {
+		score += 6.0
+	}
+	score = math.Min(32.0, score)
+	return score, fmt.Sprintf("同网段裸IP聚集: 连向 %s 共 %d 个不同IP", c.CIDR, c.UniqueIPs)
 }
 
 // 3. beaconHeartbeatDetector: 建连间隔变异系数 (CV) 机器心跳算子

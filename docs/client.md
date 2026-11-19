@@ -232,6 +232,10 @@ Linux / OpenWrt 客户端网关可通过 `singctl dns install` 一键部署本�
 
 客户端内置正交双轴（🛡️安全 × 👁️隐私）非线性风险评估引擎与可选 L2 AI 深度复核闭环，支持在客户端 WebUI（`:8090`）或命令行一键治理：
 
+- **全分流链路透视与即时检索**：记录每条聚合流的完整策略组链路（`Chains`，如 `Proxy -> #VPS -> node`），WebUI 支持全字段 0ms 本地筛选、协议过滤与仅看当前活跃流。
+- **单条/全量活跃连接秒级断开**：支持通过 WebUI 或 `POST /api/audit/close-connections` 立即关闭指定流或全部活跃连接，促使客户端瞬时重连并应用最新分组/选路规则，而不影响现有规则集。
+- **裸 IP 同网段聚集诊断与 CIDR 防自锁**：自动按 `(来源设备, 公网 /24 或 /48)` 聚合无域名纯裸 IP 外连，在详情抽屉提供同段样本核查与按单设备封禁网段入口；底层校验拦截过宽掩码、私网/Tailscale/FakeIP 重叠段、基础 DNS 与自建代理节点段，防止误伤自锁。
+
 ```bash
 # 查看局域网设备行为审计报告（支持 --suspicious、--device 192.168.1.50、--ai、--json、--csv）
 singctl sb audit --suspicious --ai
@@ -239,6 +243,7 @@ singctl sb audit --suspicious --ai
 # 一键双层拉黑（同时写入 sing-box reject 路由 + AdGuard Home DNS 黑名单 + 秒级斩断活跃连接）
 singctl sb block bad-telemetry.example.com
 singctl sb block bad-telemetry.example.com --device 192.168.1.50   # 仅限制单台局域网设备
+singctl sb block 203.0.113.0/24 --device 192.168.1.50              # 按设备封禁裸 IP 聚集网段
 singctl sb unblock bad-telemetry.example.com                       # 一键解封
 
 # 管理审计信任放行白名单（自动豁免误报告警）
