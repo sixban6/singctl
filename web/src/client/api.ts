@@ -511,6 +511,18 @@ export const clientApi = {
       method: 'POST',
       body: JSON.stringify({ enabled }),
     }),
+  setAuditThrottle: (payload: { target: string; port?: number; rateKbps: number; comment?: string }) =>
+    request<{
+      ok: boolean;
+      action: 'throttled' | 'removed' | string;
+      target: string;
+      port?: number;
+      rateKbps: number;
+      message?: string;
+    }>('/api/audit/throttle', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
   whitelistAuditTarget: (action: 'add' | 'remove', target: string) =>
     request<{ ok: boolean; target: string; whitelist: string[]; message: string }>('/api/audit/whitelist', {
       method: 'POST',

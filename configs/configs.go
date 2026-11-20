@@ -87,6 +87,10 @@ watchdog:                                      # (可选) 看门狗守护进程�
 #   pcdn_block: true                            # 默认开启内置防 PCDN 规则集拦截 (设为 false 可关闭)
 #   whitelist:                                  # 信任放行域名后缀或 IP/CIDR 白名单
 #     - "sync.example.com"
+#   throttles:                                  # 单目标上行限速防爆列表 (不断网封顶)
+#     - target: "iot-cloud.example.com"
+#       port: 443
+#       rate_kbps: 5
 
 # traffic_routing:                              # (可选) 客户端「智能分流开关中心」预设覆盖 (建议在 WebUI 面板可视化切换)
 #   presets:

@@ -164,11 +164,21 @@ func (g GatewayConfig) IsEmpty() bool {
 		strings.TrimSpace(g.IPv6Mode) == ""
 }
 
+// AuditThrottleRule 定义单目标"限速不拉黑"防护策略（通过 nftables limit 对特定域名/IP 上行速率封顶而不掐断连接）。
+type AuditThrottleRule struct {
+	Target    string `yaml:"target" json:"target"`
+	Port      int    `yaml:"port,omitempty" json:"port,omitempty"`
+	RateKBps  int    `yaml:"rate_kbps" json:"rateKbps"`
+	Comment   string `yaml:"comment,omitempty" json:"comment,omitempty"`
+	CreatedAt string `yaml:"created_at,omitempty" json:"createdAt,omitempty"`
+}
+
 // AuditConfig 定义客户端设备行为审计与可选 AI 深度研判配置。
 type AuditConfig struct {
-	Whitelist []string      `yaml:"whitelist,omitempty" json:"whitelist,omitempty"`   // 额外信任的域名后缀或 IP/CIDR 白名单
-	PCDNBlock *bool         `yaml:"pcdn_block,omitempty" json:"pcdn_block,omitempty"` // nil 或 true 默认开启内置防 PCDN 规则集拦截；显式 false 关闭
-	AI        AuditAIConfig `yaml:"ai,omitempty" json:"ai,omitempty"`                 // 可选 L2 AI 语义研判配置 (OpenAI 兼容接口)
+	Whitelist []string            `yaml:"whitelist,omitempty" json:"whitelist,omitempty"`   // 额外信任的域名后缀或 IP/CIDR 白名单
+	PCDNBlock *bool               `yaml:"pcdn_block,omitempty" json:"pcdn_block,omitempty"` // nil 或 true 默认开启内置防 PCDN 规则集拦截；显式 false 关闭
+	Throttles []AuditThrottleRule `yaml:"throttles,omitempty" json:"throttles,omitempty"`   // 按目标上行限速防爆列表（不断网限速）
+	AI        AuditAIConfig       `yaml:"ai,omitempty" json:"ai,omitempty"`                 // 可选 L2 AI 语义研判配置 (OpenAI 兼容接口)
 }
 
 // IsPCDNBlockEnabled 返回是否开启内置防 PCDN 规则集拦截（默认开启）。
@@ -189,6 +199,7 @@ func (a *AuditConfig) SetPCDNBlock(enabled bool) {
 func (a AuditConfig) IsEmpty() bool {
 	return len(a.Whitelist) == 0 &&
 		a.PCDNBlock == nil &&
+		len(a.Throttles) == 0 &&
 		!a.AI.Enabled &&
 		strings.TrimSpace(a.AI.Endpoint) == "" &&
 		strings.TrimSpace(a.AI.APIKey) == "" &&
@@ -1191,7 +1202,7 @@ var knownYAMLKeys = []string{
 	"outbounds", "tag", "default", "tolerance", "interrupt_exist_connections",
 	"route", "dns", "dns_port", "web_port",
 	"gateway", "main_router_ip", "lan_iface", "ipv6_mode",
-	"audit", "whitelist", "pcdn_block", "ai", "endpoint", "api_key", "model",
+	"audit", "whitelist", "pcdn_block", "throttles", "rate_kbps", "comment", "ai", "endpoint", "api_key", "model",
 	"traffic_routing", "outbound",
 }
 
@@ -1892,6 +1903,9 @@ func filterRoleNodesBeforeMerge(dstRoot, srcRoot *yaml.Node, cfg *Config) {
 						continue
 					}
 					if kVal == "whitelist" && len(cfg.Audit.Whitelist) == 0 {
+						continue
+					}
+					if kVal == "throttles" && len(cfg.Audit.Throttles) == 0 {
 						continue
 					}
 					if kVal == "pcdn_block" && cfg.Audit.PCDNBlock == nil {

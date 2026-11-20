@@ -262,6 +262,7 @@ Linux / OpenWrt 客户端网关可通过 `singctl dns install` 一键部署本�
 - **单条/全量活跃连接秒级断开**：支持通过 WebUI 或 `POST /api/audit/close-connections` 立即关闭指定流或全部活跃连接，促使客户端瞬时重连并应用最新分组/选路规则，而不影响现有规则集。
 - **裸 IP 同网段聚集诊断与 CIDR 防自锁**：自动按 `(来源设备, 公网 /24 或 /48)` 聚合无域名纯裸 IP 外连，在详情抽屉提供同段样本核查与按单设备封禁网段入口；底层校验拦截过宽掩码、私网/Tailscale/FakeIP 重叠段、基础 DNS 与自建代理节点段，防止误伤自锁。
 - **默认开启内置 PCDN 防护与跨段蜂群审计**：内置零外部依赖的商用 PCDN 域名规则集（`block-builtin-pcdn`，由 `audit.pcdn_block` 控制，默认开启），在 `sing-box` 中自动编译本地 `.srs`（或 iOS 内联规则）实现 DNS + 路由双层拦截，并支持在客户端 WebUI 顶部或 `POST /api/audit/pcdn-block` 一键启停；审计引擎同步区分 PCDN 偷跑上传、拉流下载与跨 `/16`（或 IPv6 `/32`）无域名高上传蜂群行为，并对合法厂商 CDN（如 Apple/Brave）及常见 IoT/摄像头/游戏 UDP 端口降噪防误报。
+- **单目标限速防爆（不断网）、15s 轻量采样与长时心跳降误报**：支持通过 `audit.throttles` 或 WebUI 详情抽屉 / `POST /api/audit/throttle` 在独立 `nftables` 表（`singctl_audit_throttle`）对指定域名/公网 IP 设置上行封顶速率（如 `5 / 20 / 100 KB/s`），在不切断智能设备长连接的前提下防止突发跑满宽带；守护进程以 15 秒轻量增量采样降低高速下载短连接漏计，明细表支持独立按 `上传 ↑` / `下载 ↓` 排序，并按存活跨度折算低速 IoT 心跳均速避免误判高危。
 
 ```bash
 # 查看局域网设备行为审计报告（支持 --suspicious、--device 192.168.1.50、--ai、--json、--csv）

@@ -368,6 +368,7 @@ func (e *NonlinearEngine) EvaluateFlow(flow *FlowRecord) {
 	// 计算基础衍生指标
 	denom := float64(flow.DownloadBytes) + 65536.0 // +64KB 平滑项，避免除零并容忍握手包
 	flow.UploadRatio = math.Round((float64(flow.UploadBytes)/denom)*100) / 100
+	flow.AvgUploadBps = math.Round(avgUploadBytesPerSec(flow)*10) / 10
 	if !flow.IsDirectIP && flow.Target != "" {
 		flow.DomainEntropy = math.Round(ShannonEntropy(extractPrimaryLabel(flow.Target))*100) / 100
 	}
@@ -417,7 +418,8 @@ func (e *NonlinearEngine) EvaluateFlow(flow *FlowRecord) {
 	// 2. 双轴多维特征交叉倍增项 (Orthogonal Multiplicative Interaction Terms)
 	secInteraction := 1.0
 	privInteraction := 1.0
-	isUploadDominant := flow.UploadBytes >= 256*1024 && flow.UploadRatio >= 1.8
+	slowTelemetry := isSlowLongSpanTelemetry(flow)
+	isUploadDominant := flow.UploadBytes >= 256*1024 && flow.UploadRatio >= 1.8 && !slowTelemetry
 	isNonStdPort := flow.DestPort > 0 && flow.DestPort != 80 && flow.DestPort != 443 && flow.DestPort != 53 && flow.DestPort != 123
 	isPeriodicBeacon := flow.ConnCount >= 6 && flow.IntervalCV > 0 && flow.IntervalCV < 0.30
 
@@ -561,6 +563,19 @@ func (d *uploadAsymmetryDetector) Evaluate(f *FlowRecord) (float64, string) {
 		return 0, ""
 	}
 
+	avgBps := avgUploadBytesPerSec(f)
+	if isSlowLongSpanTelemetry(f) {
+		// 长周期（>=6h）且平均速率 < 2KB/s 的 IoT 状态心跳，按 1 小时等效上传量折算评分，避免误报 100 分偷跑高危
+		effUpMB := (avgBps * 3600.0) / (1024.0 * 1024.0)
+		ratioTerm := math.Log1p(math.Max(0, f.UploadRatio-0.8))
+		volTerm := math.Log1p(effUpMB * 2.5)
+		score := math.Min(16.0, 6.0*ratioTerm*volTerm)
+		if score < 6.0 {
+			return 0, ""
+		}
+		return score, "长时低速心跳累计上传 (↑" + formatBytesShort(f.UploadBytes) + ", 均速 " + formatBytesPerSec(avgBps) + ")"
+	}
+
 	// 非线性对数压缩: log(1 + Ratio) * log(1 + UploadMB)
 	upMB := float64(f.UploadBytes) / (1024.0 * 1024.0)
 	ratioTerm := math.Log1p(math.Max(0, f.UploadRatio-0.8))
@@ -574,6 +589,32 @@ func (d *uploadAsymmetryDetector) Evaluate(f *FlowRecord) (float64, string) {
 		return score, "上下行流量严重倒挂 (" + strconv.FormatFloat(f.UploadRatio, 'f', 1, 64) + "x)"
 	}
 	return score, "持续大流量上传 (↑" + formatBytesShort(f.UploadBytes) + ")"
+}
+
+func avgUploadBytesPerSec(f *FlowRecord) float64 {
+	if f == nil || f.UploadBytes <= 0 {
+		return 0
+	}
+	span := max(int64(60), f.ActiveSpanSec)
+	return float64(f.UploadBytes) / float64(span)
+}
+
+func isSlowLongSpanTelemetry(f *FlowRecord) bool {
+	if f == nil || f.IsDirectIP || f.PCDNKind == "upload" || f.PCDNKind == "swarm" {
+		return false
+	}
+	return f.ActiveSpanSec >= 6*3600 && avgUploadBytesPerSec(f) < 2048.0
+}
+
+func formatBytesPerSec(bps float64) string {
+	switch {
+	case bps < 1024:
+		return fmt.Sprintf("%.0f B/s", bps)
+	case bps < 1024*1024:
+		return fmt.Sprintf("%.1f KB/s", bps/1024)
+	default:
+		return fmt.Sprintf("%.1f MB/s", bps/(1024*1024))
+	}
 }
 
 // isKnownStandardHTTPSInfraApp 判断是否属于主流云厂商/操作系统基础设施服务（用于豁免标准 443 端口 HTTP/3 QUIC 无 SNI 迁移连接误报）。

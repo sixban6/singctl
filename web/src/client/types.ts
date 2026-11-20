@@ -621,6 +621,8 @@ export interface AuditFlowRecord {
   uploadBytes: number;
   downloadBytes: number;
   uploadRatio: number;
+  avgUploadBps?: number;
+  throttledRateKbps?: number;
   connCount?: number;
   activeConns?: number;
   activeConnIds?: string[];
@@ -652,12 +654,21 @@ export interface AuditBlockRule {
   preview?: string;
 }
 
+export interface AuditThrottleRule {
+  target: string;
+  port?: number;
+  rateKbps: number;
+  comment?: string;
+  createdAt?: string;
+}
+
 export interface AuditReport {
   totalFlows: number;
   suspiciousFlows: number;
   blockedCount: number;
   whitelistCount: number;
   whitelist?: string[];
+  throttles?: AuditThrottleRule[];
   pcdnBlockEnabled?: boolean;
   pcdnRuleCount?: number;
   pcdnDetectedFlows?: number;

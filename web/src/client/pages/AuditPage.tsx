@@ -15,6 +15,7 @@ import {
   Laptop,
   Network,
   Unplug,
+  Gauge,
 } from 'lucide-react';
 import {
   Badge,
@@ -238,6 +239,22 @@ function formatRelativeSeen(seenStr?: string): string {
   return seenStr.length >= 16 ? seenStr.slice(5, 16) : seenStr;
 }
 
+function fmtBps(bps?: number): string {
+  const v = Number(bps || 0);
+  if (!Number.isFinite(v) || v <= 0) return '0 B/s';
+  if (v < 1024) return `${Math.round(v)} B/s`;
+  if (v < 1024 * 1024) return `${(v / 1024).toFixed(1)} KB/s`;
+  return `${(v / (1024 * 1024)).toFixed(2)} MB/s`;
+}
+
+function fmtDurationSpan(sec?: number): string {
+  const s = Number(sec || 0);
+  if (!Number.isFinite(s) || s <= 0) return '—';
+  if (s < 3600) return `${Math.max(1, Math.round(s / 60))} 分钟`;
+  if (s < 86400) return `${(s / 3600).toFixed(1)} 小时`;
+  return `${(s / 86400).toFixed(1)} 天`;
+}
+
 function threatRank(t?: string): number {
   if (t === 'high_risk') return 3;
   if (t === 'suspicious') return 2;
@@ -395,6 +412,7 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
   const [manualDevice, setManualDevice] = useState('');
   const [blockBusy, setBlockBusy] = useState(false);
   const [pcdnToggleBusy, setPcdnToggleBusy] = useState(false);
+  const [throttleBusy, setThrottleBusy] = useState(false);
   const [pcdnBannerDismissed, setPcdnBannerDismissed] = useState(false);
   const [busyFlowKeys, setBusyFlowKeys] = useState<Set<string>>(() => new Set());
   const [closingAll, setClosingAll] = useState(false);
@@ -1107,6 +1125,31 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
     }
   };
 
+  const handleSetThrottle = async (f: AuditFlowRecord, rateKbps: number) => {
+    setThrottleBusy(true);
+    actionInFlightRef.current++;
+    try {
+      const res = await clientApi.setAuditThrottle({
+        target: f.target,
+        port: f.destPort || 0,
+        rateKbps,
+        comment: rateKbps > 0 ? `审计限速 ${rateKbps} KB/s (${f.appName || f.deviceName || f.target})` : '',
+      });
+      success(
+        res.message ||
+          (rateKbps > 0
+            ? `已将 ${f.target} 上行限速为 ${rateKbps} KB/s`
+            : `已解除 ${f.target} 上行限速`),
+      );
+      await loadAudit(false);
+    } catch (e) {
+      error((e as Error).message || '配置目标限速失败');
+    } finally {
+      setThrottleBusy(false);
+      actionInFlightRef.current = Math.max(0, actionInFlightRef.current - 1);
+    }
+  };
+
   const handleCloseFlowConnections = async (f: AuditFlowRecord) => {
     const fk = getFlowCacheKey(f);
     actionInFlightRef.current++;
@@ -1241,6 +1284,9 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
               {f.subnetCluster?.suspicious && (
                 <Badge tone="warn">同段×{f.subnetCluster.uniqueIps}</Badge>
               )}
+              {(f.throttledRateKbps || 0) > 0 && (
+                <Badge tone="accent">限速 {f.throttledRateKbps} KB/s</Badge>
+              )}
               {protectedTarget && <Badge tone="neutral">核心保护</Badge>}
             </div>
             <div className="mt-1 flex items-center gap-2 flex-wrap text-[11px] text-muted">
@@ -1300,14 +1346,27 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
       },
     },
     {
-      key: 'traffic',
-      header: '上传 ↑ / 下载 ↓',
+      key: 'upload',
+      header: '上传 ↑',
       sortKey: 'upload',
       align: 'right',
       render: (f) => (
         <div className="text-right font-mono tnum text-xs whitespace-nowrap">
           <div className="text-primary font-semibold">↑ {fmtBytes(f.uploadBytes)}</div>
-          <div className="text-[11px] text-muted">↓ {fmtBytes(f.downloadBytes)}</div>
+          {(f.avgUploadBps || 0) > 0 && (f.activeSpanSec || 0) >= 300 && (
+            <div className="text-[10.5px] text-muted">均速 {fmtBps(f.avgUploadBps)}</div>
+          )}
+        </div>
+      ),
+    },
+    {
+      key: 'download',
+      header: '下载 ↓',
+      sortKey: 'download',
+      align: 'right',
+      render: (f) => (
+        <div className="text-right font-mono tnum text-xs whitespace-nowrap">
+          <div className="text-secondary font-medium">↓ {fmtBytes(f.downloadBytes)}</div>
         </div>
       ),
     },
@@ -2331,6 +2390,11 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
                 <div className="mt-1 font-mono tnum text-sm font-bold text-primary">
                   {fmtBytes(detailFlow.uploadBytes)}
                 </div>
+                {(detailFlow.avgUploadBps || 0) > 0 && (
+                  <div className="text-[10.5px] font-mono text-muted mt-0.5 truncate">
+                    均速 {fmtBps(detailFlow.avgUploadBps)} · 观测 {fmtDurationSpan(detailFlow.activeSpanSec)}
+                  </div>
+                )}
               </div>
               <div className="rounded-xl border border-subtle bg-surface2/60 p-3">
                 <div className="text-[11px] text-muted">累计下载 ↓</div>
@@ -2434,6 +2498,60 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
                 </div>
               </div>
             </div>
+
+            {!isProtectedBootstrapTarget(detailFlow.target) && (
+              <div className="rounded-xl border border-subtle bg-surface2/50 p-3.5 space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 text-xs font-semibold text-primary">
+                    <Gauge className="w-3.5 h-3.5 text-accent" />
+                    <span>限速防爆（不断网）</span>
+                  </div>
+                  {(detailFlow.throttledRateKbps || 0) > 0 ? (
+                    <Badge tone="accent">已限速 {detailFlow.throttledRateKbps} KB/s</Badge>
+                  ) : (
+                    <Badge tone="neutral">未限速</Badge>
+                  )}
+                </div>
+                <p className="text-[11px] text-muted leading-relaxed">
+                  锁定{' '}
+                  <span className="font-mono text-secondary">
+                    {detailFlow.target}
+                    {detailFlow.destPort ? `:${detailFlow.destPort}` : ''}
+                  </span>{' '}
+                  的网关上行封顶速率但不切断长连接，既防止后台突发跑满宽带，又不影响智能设备在线控制。
+                </p>
+                <div className="flex flex-wrap items-center gap-2">
+                  {[
+                    { rate: 5, label: '5 KB/s (IoT 心跳)' },
+                    { rate: 20, label: '20 KB/s' },
+                    { rate: 100, label: '100 KB/s' },
+                  ].map((preset) => {
+                    const active = detailFlow.throttledRateKbps === preset.rate;
+                    return (
+                      <Button
+                        key={preset.rate}
+                        size="xs"
+                        variant={active ? 'primary' : 'secondary'}
+                        disabled={throttleBusy}
+                        onClick={() => void handleSetThrottle(detailFlow, preset.rate)}
+                      >
+                        {preset.label}
+                      </Button>
+                    );
+                  })}
+                  {(detailFlow.throttledRateKbps || 0) > 0 && (
+                    <Button
+                      size="xs"
+                      variant="ghost"
+                      disabled={throttleBusy}
+                      onClick={() => void handleSetThrottle(detailFlow, 0)}
+                    >
+                      解除限速
+                    </Button>
+                  )}
+                </div>
+              </div>
+            )}
 
             {detailFlow.isDirectIp && detailFlow.subnetCluster && (
               <div className="rounded-xl border border-subtle bg-surface2/50 p-3.5 space-y-2.5">
