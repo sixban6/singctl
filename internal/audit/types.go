@@ -103,6 +103,17 @@ type DirectIPSubnetCluster struct {
 	Suspicious    bool     `json:"suspicious"`
 }
 
+// PCDNSwarmSummary 汇总单台局域网设备跨多个公网 /16 (或 IPv6 /32) 网段发起非标高端口 UDP 裸 IP 上行的蜂群特征。
+type PCDNSwarmSummary struct {
+	UniqueSlash16 int     `json:"uniqueSlash16"`
+	UniqueIPs     int     `json:"uniqueIps"`
+	FlowCount     int     `json:"flowCount"`
+	UploadBytes   int64   `json:"uploadBytes"`
+	DownloadBytes int64   `json:"downloadBytes"`
+	UploadRatio   float64 `json:"uploadRatio"`
+	Suspicious    bool    `json:"suspicious"`
+}
+
 // FlowRecord 表示按 (内网设备 IP, 目标域名/IP, 传输协议) 聚合后的连接行为画像。
 type FlowRecord struct {
 	Key              string                 `json:"key"`
@@ -117,6 +128,8 @@ type FlowRecord struct {
 	DestPort         int                    `json:"destPort"`
 	IsDirectIP       bool                   `json:"isDirectIp"` // 是否绕过域名直接访问 IP
 	SubnetCluster    *DirectIPSubnetCluster `json:"subnetCluster,omitempty"`
+	PCDNKind         string                 `json:"pcdnKind,omitempty"` // "" / "upload" / "download" / "swarm"
+	PCDNSwarm        *PCDNSwarmSummary      `json:"pcdnSwarm,omitempty"`
 	Network          string                 `json:"network"` // tcp / udp
 	Outbound         string                 `json:"outbound"`
 	Chains           []string               `json:"chains,omitempty"` // 完整策略组链路（入口 -> 出口，如 Proxy -> #VPS -> node）
@@ -165,20 +178,23 @@ type DeviceSummary struct {
 
 // Report 汇总完整的设备审计分析报告与当前黑名单状态。
 type Report struct {
-	GeneratedAt     string             `json:"generatedAt"`
-	Reachable       bool               `json:"reachable"`
-	ControllerAddr  string             `json:"controllerAddr,omitempty"`
-	Message         string             `json:"message,omitempty"`
-	TotalFlows      int                `json:"totalFlows"`
-	SuspiciousFlows int                `json:"suspiciousFlows"`
-	HighRiskFlows   int                `json:"highRiskFlows"`
-	BlockedCount    int                `json:"blockedCount"`
-	WhitelistCount  int                `json:"whitelistCount"`
-	AIEnabled       bool               `json:"aiEnabled"`
-	Devices         []DeviceSummary    `json:"devices"`
-	Flows           []FlowRecord       `json:"flows"`
-	BlockRules      []config.BlockRule `json:"blockRules"`
-	Whitelist       []string           `json:"whitelist,omitempty"`
+	GeneratedAt       string             `json:"generatedAt"`
+	Reachable         bool               `json:"reachable"`
+	ControllerAddr    string             `json:"controllerAddr,omitempty"`
+	Message           string             `json:"message,omitempty"`
+	TotalFlows        int                `json:"totalFlows"`
+	SuspiciousFlows   int                `json:"suspiciousFlows"`
+	HighRiskFlows     int                `json:"highRiskFlows"`
+	BlockedCount      int                `json:"blockedCount"`
+	WhitelistCount    int                `json:"whitelistCount"`
+	AIEnabled         bool               `json:"aiEnabled"`
+	PCDNBlockEnabled  bool               `json:"pcdnBlockEnabled"`
+	PCDNRuleCount     int                `json:"pcdnRuleCount"`
+	PCDNDetectedFlows int                `json:"pcdnDetectedFlows"`
+	Devices           []DeviceSummary    `json:"devices"`
+	Flows             []FlowRecord       `json:"flows"`
+	BlockRules        []config.BlockRule `json:"blockRules"`
+	Whitelist         []string           `json:"whitelist,omitempty"`
 }
 
 // BlockActionResult 记录执行“一键双层拉黑”或“解封”后的各层执行反馈。

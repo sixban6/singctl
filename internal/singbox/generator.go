@@ -526,7 +526,11 @@ func (g *ConfigGenerator) InjectCustomRules(rawJSON string) (string, error) {
 // 针对 iOS 平台：跳过局域网设备限定黑名单（SourceIP != ""）与本地物理磁盘规则集（allowLocal = false），
 // 防止引入 iPhone 沙盒不可读路径或无效规则引用。
 func (g *ConfigGenerator) InjectCustomRulesForPlatform(rawJSON, platform string) (string, error) {
-	if g.config == nil || g.config.CustomRules.IsEmpty() {
+	if g.config == nil {
+		return rawJSON, nil
+	}
+	blocks := EffectiveBlockRules(g.config)
+	if len(blocks) == 0 && len(g.config.CustomRules.Outbounds) == 0 && len(g.config.CustomRules.DNS) == 0 && len(g.config.CustomRules.Route) == 0 {
 		return rawJSON, nil
 	}
 
@@ -543,15 +547,21 @@ func (g *ConfigGenerator) InjectCustomRulesForPlatform(rawJSON, platform string)
 	}
 
 	isIOS := strings.EqualFold(strings.TrimSpace(platform), PlatformIOS)
-	blocks := g.config.CustomRules.Block
-	if isIOS && len(blocks) > 0 {
+	if !isIOS {
+		for _, b := range blocks {
+			if IsBuiltinPCDNTarget(b.Target) {
+				_, _, _ = EnsureBuiltinPCDNRuleSetFile(context.Background(), RuleSetCacheDir())
+				break
+			}
+		}
+	} else if len(blocks) > 0 {
 		filtered := make([]config.BlockRule, 0, len(blocks))
 		for _, b := range blocks {
 			if strings.TrimSpace(b.SourceIP) != "" {
 				continue
 			}
 			norm, _ := NormalizeBlockTarget(b.Target)
-			if strings.HasPrefix(norm, "ruleset:") && strings.TrimSpace(b.RuleSetURL) == "" {
+			if strings.HasPrefix(norm, "ruleset:") && strings.TrimSpace(b.RuleSetURL) == "" && !IsBuiltinPCDNTarget(norm) {
 				continue
 			}
 			filtered = append(filtered, b)
@@ -569,12 +579,12 @@ func (g *ConfigGenerator) InjectCustomRulesForPlatform(rawJSON, platform string)
 		applyCustomDNSRules(root, allDNS)
 	}
 
-	// 4. 注入路由规则 (custom_rules.block 挂在最前，custom_rules.route 按标准位置注入)
-	if len(blockRoute) > 0 {
-		applyBlockRouteRules(root, blockRoute)
-	}
+	// 4. 注入路由规则 (先按标准位置注入 custom_rules.route，再将黑名单阻断规则挂在最前确保最高拦截优先级)
 	if len(g.config.CustomRules.Route) > 0 {
 		applyCustomRouteRules(root, g.config.CustomRules.Route)
+	}
+	if len(blockRoute) > 0 {
+		applyBlockRouteRules(root, blockRoute)
 	}
 
 	data, err := json.Marshal(root)
@@ -592,6 +602,9 @@ func NormalizeBlockTarget(raw string) (cleaned string, isIPOrCIDR bool) {
 		tag := SanitizeRuleSetTag(s[len("ruleset:"):])
 		if tag == "" {
 			return "", false
+		}
+		if IsBuiltinPCDNTag(tag) {
+			tag = BuiltinPCDNRuleSetTag
 		}
 		return "ruleset:" + tag, false
 	}
@@ -838,6 +851,11 @@ func syncBlockRuleSetDefinitions(root map[string]any, oldBlocks, newBlocks []con
 		if removedBlockTags[tag] {
 			continue
 		}
+		if tag == BuiltinPCDNRuleSetTag {
+			if _, stillActive := activeTags[tag]; stillActive {
+				continue
+			}
+		}
 		presentTags[tag] = true
 		kept = append(kept, item)
 	}
@@ -858,6 +876,10 @@ func syncBlockRuleSetDefinitions(root map[string]any, oldBlocks, newBlocks []con
 				continue
 			}
 		}
+		if tag == BuiltinPCDNRuleSetTag {
+			kept = append(kept, BuiltinPCDNInlineRuleSet())
+			continue
+		}
 		if strings.TrimSpace(b.RuleSetURL) != "" {
 			kept = append(kept, map[string]any{
 				"tag":    tag,
@@ -870,6 +892,8 @@ func syncBlockRuleSetDefinitions(root map[string]any, oldBlocks, newBlocks []con
 
 	if len(kept) > 0 {
 		routeMap["rule_set"] = kept
+	} else if len(removedBlockTags) > 0 {
+		delete(routeMap, "rule_set")
 	}
 }
 

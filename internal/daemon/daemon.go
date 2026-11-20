@@ -265,6 +265,21 @@ func (d *Daemon) runForeground() error {
 
 	notifyParentReady(true)
 
+	go func() {
+		select {
+		case <-d.ctx.Done():
+			return
+		case <-time.After(1 * time.Second):
+		}
+		syncCtx, cancel := context.WithTimeout(d.ctx, 15*time.Second)
+		defer cancel()
+		if applied, syncErr := audit.NewEnforcer(d.currentConfig(), d.configPath).EnsureDefaultPCDNBlock(syncCtx); syncErr != nil {
+			logger.Warn("[Audit] 自动同步内置防 PCDN 规则集失败: %v", syncErr)
+		} else if applied {
+			logger.Info("[Audit] 已自动启用内置默认防 PCDN 规则集并热重载 sing-box")
+		}
+	}()
+
 	return d.monitorLoop()
 }
 

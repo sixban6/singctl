@@ -83,6 +83,11 @@ watchdog:                                      # (可选) 看门狗守护进程�
 #     - domain_suffix: [example.com, internal.example.org]
 #       server: dns_local
 
+# audit:                                        # (可选) 客户端局域网设备流量审计与防 PCDN 配置
+#   pcdn_block: true                            # 默认开启内置防 PCDN 规则集拦截 (设为 false 可关闭)
+#   whitelist:                                  # 信任放行域名后缀或 IP/CIDR 白名单
+#     - "sync.example.com"
+
 # traffic_routing:                              # (可选) 客户端「智能分流开关中心」预设覆盖 (建议在 WebUI 面板可视化切换)
 #   presets:
 #     openai:

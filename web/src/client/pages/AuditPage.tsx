@@ -50,6 +50,11 @@ const AUDIT_AI_ENABLE_KEY = 'sc_audit_ai_enable';
 
 const PRESET_RULESETS: { label: string; url: string; reason: string }[] = [
   {
+    label: '🛡️ 防 PCDN 偷跑与卡顿节点 (内置精校 · 零外网依赖)',
+    url: 'ruleset:block-builtin-pcdn',
+    reason: '内置默认防 PCDN 偷跑与卡顿节点规则集',
+  },
+  {
     label: '🎮 王者荣耀 (hok.srs)',
     url: 'https://raw.githubusercontent.com/sixban6/rulesets/main/rule/hok.srs',
     reason: '规则集封禁: 🎮 王者荣耀 (hok.srs)',
@@ -172,6 +177,7 @@ const NONLINEAR_FACTOR_LABELS: Record<string, string> = {
   upload_asymmetry: '上/下行流量倒挂',
   direct_ip_upload: '绕过 DNS 纯 IP 外发',
   direct_ip_subnet_cluster: '同网段裸 IP 聚集外连',
+  pcdn_swarm: 'PCDN/P2P 跨网段裸 IP 蜂群',
   beacon_heartbeat: '规律定时信标心跳',
   domain_entropy: '高熵随机域名特征',
   telemetry_fingerprint: '遥测 / PCDN 指纹命中',
@@ -258,13 +264,10 @@ function applyLiveAIDampingToFlow(
   const port = Number(f.destPort || 0);
   const isNonStdPort = port > 0 && port !== 80 && port !== 443 && port !== 53 && port !== 123;
   const isUploadDom = (f.uploadBytes || 0) >= 262144 && (f.uploadRatio || 0) >= 1.8;
-  const lowerTgt = String(f.target || '').toLowerCase();
-  const hasPcdnKw = ['pcdn', 'xycdn', 'onething', 'szbdyd', 'mcdn', 'bcdn', 'uhabo', 'stun.'].some((k) =>
-    lowerTgt.includes(k),
-  );
+  const isPcdnHard = f.pcdnKind === 'upload' || f.pcdnKind === 'swarm';
   const isHardAnomaly =
     Boolean(f.isDirectIp && isNonStdPort && isUploadDom) ||
-    hasPcdnKw ||
+    isPcdnHard ||
     ((f.uploadBytes || 0) >= 104857600 && (f.uploadRatio || 0) >= 4.0);
   if (isHardAnomaly) return f;
 
@@ -391,6 +394,8 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
   const [manualTarget, setManualTarget] = useState('');
   const [manualDevice, setManualDevice] = useState('');
   const [blockBusy, setBlockBusy] = useState(false);
+  const [pcdnToggleBusy, setPcdnToggleBusy] = useState(false);
+  const [pcdnBannerDismissed, setPcdnBannerDismissed] = useState(false);
   const [busyFlowKeys, setBusyFlowKeys] = useState<Set<string>>(() => new Set());
   const [closingAll, setClosingAll] = useState(false);
   const [closeAllConfirmOpen, setCloseAllConfirmOpen] = useState(false);
@@ -1009,7 +1014,8 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
     setBlockBusy(true);
     actionInFlightRef.current++;
     try {
-      const isRuleset = /^https?:\/\//i.test(target) || /\.(srs|json)(\?|#|$)/i.test(target);
+      const isRuleset =
+        /^ruleset:/i.test(target) || /^https?:\/\//i.test(target) || /\.(srs|json)(\?|#|$)/i.test(target);
       const reason = overrideReason || presetReason || (isRuleset ? 'WebUI 规则集整包导入' : 'WebUI 手动拉黑');
       const res = await clientApi.blockAuditTarget(target, manualDevice.trim(), reason);
       success(res.message || '已添加封禁规则');
@@ -1079,6 +1085,24 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
     } catch (e) {
       error((e as Error).message || '白名单操作失败');
     } finally {
+      actionInFlightRef.current = Math.max(0, actionInFlightRef.current - 1);
+    }
+  };
+
+  const handleTogglePCDNBlock = async (nextEnabled: boolean) => {
+    setPcdnToggleBusy(true);
+    actionInFlightRef.current++;
+    try {
+      const res = await clientApi.togglePCDNBlock(nextEnabled);
+      success(res.message || (nextEnabled ? '已开启内置防 PCDN 拦截' : '已关闭内置防 PCDN 拦截'));
+      if (nextEnabled) {
+        setPcdnBannerDismissed(false);
+      }
+      await loadAudit(false);
+    } catch (e) {
+      error((e as Error).message || '切换内置防 PCDN 拦截失败');
+    } finally {
+      setPcdnToggleBusy(false);
       actionInFlightRef.current = Math.max(0, actionInFlightRef.current - 1);
     }
   };
@@ -1207,6 +1231,13 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
                 <span className="font-mono text-[10.5px] text-muted">:{f.destPort}</span>
               ) : null}
               {f.appName && <Badge tone="accent">{f.appName}</Badge>}
+              {f.pcdnKind === 'upload' && <Badge tone="danger">PCDN 偷跑</Badge>}
+              {f.pcdnKind === 'swarm' && <Badge tone="danger">PCDN 蜂群</Badge>}
+              {f.pcdnKind === 'download' && (
+                <Badge tone={f.state === 'blocked' ? 'neutral' : 'warn'}>
+                  {f.state === 'blocked' ? 'PCDN 已拦截' : 'PCDN 拉流'}
+                </Badge>
+              )}
               {f.subnetCluster?.suspicious && (
                 <Badge tone="warn">同段×{f.subnetCluster.uniqueIps}</Badge>
               )}
@@ -1588,6 +1619,32 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
         }
         actions={
           <div className="flex flex-wrap items-center gap-2">
+            {(() => {
+              const pcdnOn = report?.pcdnBlockEnabled ?? true;
+              return (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  loading={pcdnToggleBusy}
+                  icon={
+                    pcdnOn ? (
+                      <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                    ) : (
+                      <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+                    )
+                  }
+                  className={
+                    pcdnOn
+                      ? 'border-emerald-500/35 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20'
+                      : 'border-amber-500/35 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20'
+                  }
+                  title={`内置精校防 PCDN 规则集（${report?.pcdnRuleCount || 0} 组调度与拉流域名），点击切换开关`}
+                  onClick={() => handleTogglePCDNBlock(!pcdnOn)}
+                >
+                  {pcdnOn ? '防 PCDN: 已开启' : '防 PCDN: 已关闭'}
+                </Button>
+              );
+            })()}
             <Button
               size="sm"
               variant="secondary"
@@ -1709,6 +1766,41 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
           </label>
         </div>
       </SectionCard>
+
+      {/* PCDN Detected Banner when builtin protection is turned off */}
+      {report &&
+        report.pcdnBlockEnabled === false &&
+        (report.pcdnDetectedFlows || 0) > 0 &&
+        !pcdnBannerDismissed && (
+          <div className="rounded-2xl border border-amber-500/35 bg-amber-500/10 p-4 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-start gap-3 text-xs leading-relaxed text-secondary">
+              <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+              <div>
+                <strong className="text-primary">检测到 {report.pcdnDetectedFlows} 条 PCDN 节点流量：</strong>
+                当前已关闭「内置防 PCDN 拦截」，部分视频请求正在经由商业 PCDN / MCDN 节点通信，可能造成跨网卡顿或后台上行占用。
+              </div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <Button
+                size="xs"
+                variant="primary"
+                loading={pcdnToggleBusy}
+                icon={<ShieldCheck className="w-3.5 h-3.5" />}
+                onClick={() => handleTogglePCDNBlock(true)}
+              >
+                一键重新开启防 PCDN
+              </Button>
+              <button
+                type="button"
+                onClick={() => setPcdnBannerDismissed(true)}
+                title="暂不提示"
+                className="text-muted hover:text-primary p-1 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        )}
 
       {/* NAT Sub-Router Aggregation Alert */}
       {natSubRouter && (

@@ -17,6 +17,7 @@ import (
 
 // ruleSetAppDisplayNames 将本地 sing-box 规则集 tag 映射为直观易读的应用/服务名称。
 var ruleSetAppDisplayNames = map[string]string{
+	"block-builtin-pcdn":     "内置防 PCDN 规则集",
 	"geosite-telegram":       "Telegram",
 	"geoip-telegram":         "Telegram",
 	"geosite-baidu":          "百度 Baidu",

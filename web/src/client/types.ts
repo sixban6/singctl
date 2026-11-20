@@ -589,6 +589,16 @@ export interface AuditDirectIPSubnetCluster {
   suspicious: boolean;
 }
 
+export interface AuditPCDNSwarmSummary {
+  uniqueSlash16: number;
+  uniqueIps: number;
+  flowCount: number;
+  uploadBytes: number;
+  downloadBytes: number;
+  uploadRatio: number;
+  suspicious: boolean;
+}
+
 export interface AuditFlowRecord {
   key?: string;
   id?: string;
@@ -602,6 +612,8 @@ export interface AuditFlowRecord {
   destPort?: number;
   isDirectIp?: boolean;
   subnetCluster?: AuditDirectIPSubnetCluster | null;
+  pcdnKind?: 'upload' | 'download' | 'swarm' | string;
+  pcdnSwarm?: AuditPCDNSwarmSummary | null;
   network: string;
   outbound?: string;
   chains?: string[];
@@ -646,6 +658,9 @@ export interface AuditReport {
   blockedCount: number;
   whitelistCount: number;
   whitelist?: string[];
+  pcdnBlockEnabled?: boolean;
+  pcdnRuleCount?: number;
+  pcdnDetectedFlows?: number;
   devices: AuditDeviceSummary[];
   flows: AuditFlowRecord[];
   blockRules: AuditBlockRule[];

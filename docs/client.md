@@ -261,6 +261,7 @@ Linux / OpenWrt 客户端网关可通过 `singctl dns install` 一键部署本�
 - **全分流链路透视与即时检索**：记录每条聚合流的完整策略组链路（`Chains`，如 `Proxy -> #VPS -> node`），WebUI 支持全字段 0ms 本地筛选、协议过滤与仅看当前活跃流。
 - **单条/全量活跃连接秒级断开**：支持通过 WebUI 或 `POST /api/audit/close-connections` 立即关闭指定流或全部活跃连接，促使客户端瞬时重连并应用最新分组/选路规则，而不影响现有规则集。
 - **裸 IP 同网段聚集诊断与 CIDR 防自锁**：自动按 `(来源设备, 公网 /24 或 /48)` 聚合无域名纯裸 IP 外连，在详情抽屉提供同段样本核查与按单设备封禁网段入口；底层校验拦截过宽掩码、私网/Tailscale/FakeIP 重叠段、基础 DNS 与自建代理节点段，防止误伤自锁。
+- **默认开启内置 PCDN 防护与跨段蜂群审计**：内置零外部依赖的商用 PCDN 域名规则集（`block-builtin-pcdn`，由 `audit.pcdn_block` 控制，默认开启），在 `sing-box` 中自动编译本地 `.srs`（或 iOS 内联规则）实现 DNS + 路由双层拦截，并支持在客户端 WebUI 顶部或 `POST /api/audit/pcdn-block` 一键启停；审计引擎同步区分 PCDN 偷跑上传、拉流下载与跨 `/16`（或 IPv6 `/32`）无域名高上传蜂群行为，并对合法厂商 CDN（如 Apple/Brave）及常见 IoT/摄像头/游戏 UDP 端口降噪防误报。
 
 ```bash
 # 查看局域网设备行为审计报告（支持 --suspicious、--device 192.168.1.50、--ai、--json、--csv）

@@ -374,24 +374,32 @@ func TestCustomRulesInjection(t *testing.T) {
 		t.Fatalf("unmarshal injected json failed: %v", err)
 	}
 
-	// Verify DNS rule was prepended
+	// Verify DNS rules include default builtin PCDN reject rule + custom dns_local rule
 	dnsMap := root["dns"].(map[string]any)
 	dnsRules := dnsMap["rules"].([]any)
-	if len(dnsRules) != 2 {
-		t.Fatalf("expected 2 dns rules, got %d", len(dnsRules))
+	if len(dnsRules) != 3 {
+		t.Fatalf("expected 3 dns rules (builtin pcdn + custom + geosite-cn), got %d", len(dnsRules))
 	}
 	firstDNS := dnsRules[0].(map[string]any)
-	if firstDNS["server"] != "dns_local" {
-		t.Errorf("expected first dns rule server to be dns_local, got %v", firstDNS["server"])
+	if firstDNS["action"] != "reject" {
+		t.Errorf("expected first dns rule action to be reject, got %v", firstDNS["action"])
+	}
+	secondDNS := dnsRules[1].(map[string]any)
+	if secondDNS["server"] != "dns_local" {
+		t.Errorf("expected second dns rule server to be dns_local, got %v", secondDNS["server"])
 	}
 
-	// Verify Route rule was inserted after ip_is_private
+	// Verify Route rules include default builtin PCDN reject rule and custom DirectConn rule after ip_is_private
 	routeMap := root["route"].(map[string]any)
 	routeRules := routeMap["rules"].([]any)
-	if len(routeRules) != 4 {
-		t.Fatalf("expected 4 route rules, got %d", len(routeRules))
+	if len(routeRules) != 5 {
+		t.Fatalf("expected 5 route rules (sniff + ip_is_private + builtin pcdn + custom + geosite-steam), got %d", len(routeRules))
 	}
-	customRoute := routeRules[2].(map[string]any)
+	pcdnRoute := routeRules[2].(map[string]any)
+	if pcdnRoute["action"] != "reject" {
+		t.Errorf("expected route[2] action to be reject (builtin pcdn), got %v", pcdnRoute["action"])
+	}
+	customRoute := routeRules[3].(map[string]any)
 	if customRoute["outbound"] != "DirectConn" {
 		t.Errorf("expected custom route outbound DirectConn, got %v", customRoute["outbound"])
 	}

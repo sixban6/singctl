@@ -868,8 +868,11 @@ func TestClosedLoopAlertCounts_And_WebUIWhitelistAPI(t *testing.T) {
 	col.SetNowFuncForTest(func() time.Time { return time.Date(2026, 11, 12, 14, 0, 0, 0, time.FixedZone("CST", 8*3600)) })
 
 	rep := col.Collect(t.Context(), audit.CollectOptions{})
-	if rep.BlockedCount != 1 {
-		t.Fatalf("expected BlockedCount=1, got %d", rep.BlockedCount)
+	if !rep.PCDNBlockEnabled {
+		t.Fatal("expected PCDNBlockEnabled=true by default")
+	}
+	if rep.BlockedCount != 2 {
+		t.Fatalf("expected BlockedCount=2 (1 builtin PCDN + 1 custom block), got %d", rep.BlockedCount)
 	}
 	if rep.SuspiciousFlows != 1 {
 		t.Fatalf("expected only 1 active suspicious flow (excluding blocked & whitelisted), got %d", rep.SuspiciousFlows)
