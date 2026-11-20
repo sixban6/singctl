@@ -166,12 +166,29 @@ func (g GatewayConfig) IsEmpty() bool {
 
 // AuditConfig 定义客户端设备行为审计与可选 AI 深度研判配置。
 type AuditConfig struct {
-	Whitelist []string      `yaml:"whitelist,omitempty" json:"whitelist,omitempty"` // 额外信任的域名后缀或 IP/CIDR 白名单
-	AI        AuditAIConfig `yaml:"ai,omitempty" json:"ai,omitempty"`               // 可选 L2 AI 语义研判配置 (OpenAI 兼容接口)
+	Whitelist []string      `yaml:"whitelist,omitempty" json:"whitelist,omitempty"`   // 额外信任的域名后缀或 IP/CIDR 白名单
+	PCDNBlock *bool         `yaml:"pcdn_block,omitempty" json:"pcdn_block,omitempty"` // nil 或 true 默认开启内置防 PCDN 规则集拦截；显式 false 关闭
+	AI        AuditAIConfig `yaml:"ai,omitempty" json:"ai,omitempty"`                 // 可选 L2 AI 语义研判配置 (OpenAI 兼容接口)
+}
+
+// IsPCDNBlockEnabled 返回是否开启内置防 PCDN 规则集拦截（默认开启）。
+func (a AuditConfig) IsPCDNBlockEnabled() bool {
+	return a.PCDNBlock == nil || *a.PCDNBlock
+}
+
+// SetPCDNBlock 设置内置防 PCDN 规则集开关（开启时置为 nil 回归默认，显式关闭写入 false）。
+func (a *AuditConfig) SetPCDNBlock(enabled bool) {
+	if enabled {
+		a.PCDNBlock = nil
+		return
+	}
+	v := false
+	a.PCDNBlock = &v
 }
 
 func (a AuditConfig) IsEmpty() bool {
 	return len(a.Whitelist) == 0 &&
+		a.PCDNBlock == nil &&
 		!a.AI.Enabled &&
 		strings.TrimSpace(a.AI.Endpoint) == "" &&
 		strings.TrimSpace(a.AI.APIKey) == "" &&
@@ -1174,7 +1191,7 @@ var knownYAMLKeys = []string{
 	"outbounds", "tag", "default", "tolerance", "interrupt_exist_connections",
 	"route", "dns", "dns_port", "web_port",
 	"gateway", "main_router_ip", "lan_iface", "ipv6_mode",
-	"audit", "whitelist", "ai", "endpoint", "api_key", "model",
+	"audit", "whitelist", "pcdn_block", "ai", "endpoint", "api_key", "model",
 	"traffic_routing", "outbound",
 }
 
@@ -1875,6 +1892,9 @@ func filterRoleNodesBeforeMerge(dstRoot, srcRoot *yaml.Node, cfg *Config) {
 						continue
 					}
 					if kVal == "whitelist" && len(cfg.Audit.Whitelist) == 0 {
+						continue
+					}
+					if kVal == "pcdn_block" && cfg.Audit.PCDNBlock == nil {
 						continue
 					}
 					newAudit = append(newAudit, auditMap.Content[j], auditMap.Content[j+1])

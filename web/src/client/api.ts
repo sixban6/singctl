@@ -498,6 +498,19 @@ export const clientApi = {
       method: 'POST',
       body: JSON.stringify({ target, sourceIp }),
     }),
+  togglePCDNBlock: (enabled: boolean) =>
+    request<{
+      ok?: boolean;
+      pcdnBlockEnabled?: boolean;
+      target?: string;
+      configSaved?: boolean;
+      singboxSynced?: boolean;
+      killedConnections?: number;
+      message?: string;
+    }>('/api/audit/pcdn-block', {
+      method: 'POST',
+      body: JSON.stringify({ enabled }),
+    }),
   whitelistAuditTarget: (action: 'add' | 'remove', target: string) =>
     request<{ ok: boolean; target: string; whitelist: string[]; message: string }>('/api/audit/whitelist', {
       method: 'POST',

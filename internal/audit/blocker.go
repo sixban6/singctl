@@ -98,6 +98,19 @@ func (e *Enforcer) SetWorkConfigPathForTest(sbWorkConfigPath string) {
 	e.sbWorkConfigPath = sbWorkConfigPath
 }
 
+// SetStoragePaths 按需覆写 Enforcer 使用的 sing-box / AdGuard 配置路径（保留 Clash API 端点与鉴权密钥不变）。
+func (e *Enforcer) SetStoragePaths(sbConfigPath, sbWorkConfigPath, aghConfigPath string) {
+	if strings.TrimSpace(sbConfigPath) != "" {
+		e.sbConfigPath = strings.TrimSpace(sbConfigPath)
+		e.sbWorkConfigPath = strings.TrimSpace(sbWorkConfigPath)
+	} else if strings.TrimSpace(sbWorkConfigPath) != "" {
+		e.sbWorkConfigPath = strings.TrimSpace(sbWorkConfigPath)
+	}
+	if strings.TrimSpace(aghConfigPath) != "" {
+		e.aghConfigPath = strings.TrimSpace(aghConfigPath)
+	}
+}
+
 // ValidateTargetSafety 严格校验待拉黑目标是否安全（遵循规则 02 防自锁断网红线，拒绝拉黑网关自身、Tailscale 及机场订阅节点域名）。
 func ValidateTargetSafety(cfg *config.Config, rawTarget string) (normalized string, isIP bool, err error) {
 	return validateTargetSafety(cfg, rawTarget, true)
@@ -290,6 +303,7 @@ func (e *Enforcer) Block(ctx context.Context, rawTarget, rawSourceIP, reason str
 	reason = cmp.Or(strings.TrimSpace(reason), "设备行为审计手动拉黑")
 
 	oldBlocks := slices.Clone(e.cfg.CustomRules.Block)
+	oldEffective := singbox.EffectiveBlockRules(e.cfg)
 
 	// 幂等检查：若已存在相同 (Target, SourceIP) 则更新原因与时间，否则追加
 	found := false
@@ -327,13 +341,15 @@ func (e *Enforcer) Block(ctx context.Context, rawTarget, rawSourceIP, reason str
 		res.ConfigSaved = true
 	}
 
+	newEffective := singbox.EffectiveBlockRules(e.cfg)
+
 	// 2. 同步至自建 DNS (AdGuard Home)
-	dnsApplied, dnsMode, _ := e.syncDNSLayer(ctx, e.cfg.CustomRules.Block)
+	dnsApplied, dnsMode, _ := e.syncDNSLayer(ctx, newEffective)
 	res.DNSBlocked = dnsApplied
 	res.DNSMode = dnsMode
 
 	// 3. 两阶段原子热更新 sing-box config.json
-	if sbApplied, sbErr := e.syncSingBoxLayer(ctx, oldBlocks, e.cfg.CustomRules.Block); sbErr == nil && sbApplied {
+	if sbApplied, sbErr := e.syncSingBoxLayer(ctx, oldEffective, newEffective); sbErr == nil && sbApplied {
 		res.SingBoxSynced = true
 	}
 
@@ -352,10 +368,14 @@ func (e *Enforcer) Unblock(ctx context.Context, rawTarget, rawSourceIP string) (
 		return nil, fmt.Errorf("无效的解封目标: %q", rawTarget)
 	}
 	normSource := singbox.NormalizeSourceIPCIDR(rawSourceIP)
+	if normSource == "" && singbox.IsBuiltinPCDNTarget(normTarget) {
+		return e.SetPCDNBlock(ctx, false)
+	}
 	displayTarget := strings.TrimSuffix(strings.TrimSuffix(normTarget, "/32"), "/128")
 	displaySource := strings.TrimSuffix(strings.TrimSuffix(normSource, "/32"), "/128")
 
 	oldBlocks := slices.Clone(e.cfg.CustomRules.Block)
+	oldEffective := singbox.EffectiveBlockRules(e.cfg)
 	kept := make([]config.BlockRule, 0, len(oldBlocks))
 	removed := 0
 	for _, b := range oldBlocks {
@@ -386,11 +406,13 @@ func (e *Enforcer) Unblock(ctx context.Context, rawTarget, rawSourceIP string) (
 		res.ConfigSaved = true
 	}
 
-	dnsApplied, dnsMode, _ := e.syncDNSLayer(ctx, e.cfg.CustomRules.Block)
+	newEffective := singbox.EffectiveBlockRules(e.cfg)
+
+	dnsApplied, dnsMode, _ := e.syncDNSLayer(ctx, newEffective)
 	res.DNSBlocked = dnsApplied
 	res.DNSMode = dnsMode
 
-	if sbApplied, sbErr := e.syncSingBoxLayer(ctx, oldBlocks, e.cfg.CustomRules.Block); sbErr == nil && sbApplied {
+	if sbApplied, sbErr := e.syncSingBoxLayer(ctx, oldEffective, newEffective); sbErr == nil && sbApplied {
 		res.SingBoxSynced = true
 	}
 
@@ -490,6 +512,9 @@ func (e *Enforcer) ImportAndBlockRuleSet(ctx context.Context, rawInput, customTa
 	lowerInput := strings.ToLower(rawInput)
 	if strings.HasPrefix(lowerInput, "ruleset:") {
 		tag = singbox.SanitizeRuleSetTag(rawInput[len("ruleset:"):])
+		if singbox.IsBuiltinPCDNTag(tag) {
+			tag = singbox.BuiltinPCDNRuleSetTag
+		}
 	} else {
 		u, err := url.Parse(rawInput)
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
@@ -505,17 +530,18 @@ func (e *Enforcer) ImportAndBlockRuleSet(ctx context.Context, rawInput, customTa
 	if tag == "" {
 		return nil, fmt.Errorf("无法从输入提取有效的规则集标识: %q", rawInput)
 	}
-
-	ruleSetDir := filepath.Dir(e.sbConfigPath)
-	if ruleSetDir == "" || ruleSetDir == "." {
-		ruleSetDir = constant.SingBoxConfigDir
+	if tag == singbox.BuiltinPCDNRuleSetTag && normSource == "" {
+		return e.SetPCDNBlock(ctx, true)
 	}
-	ruleSetDir = filepath.Join(ruleSetDir, "rule_sets")
+
+	ruleSetDir := e.ruleSetDir()
 	_ = os.MkdirAll(ruleSetDir, 0755)
 	dstSRSPath := filepath.Join(ruleSetDir, tag+".srs")
 
 	var rawData []byte
-	if sourceURL != "" {
+	if tag == singbox.BuiltinPCDNRuleSetTag {
+		rawData = singbox.BuiltinPCDNRuleSetJSON()
+	} else if sourceURL != "" {
 		var candidates []string
 		if strings.Contains(sourceURL, "github.com/") || strings.Contains(sourceURL, "raw.githubusercontent.com/") {
 			if !strings.HasPrefix(sourceURL, "https://ghfast.top/") {
@@ -676,6 +702,7 @@ func (e *Enforcer) ImportAndBlockRuleSet(ctx context.Context, rawInput, customTa
 	}
 
 	oldBlocks := slices.Clone(e.cfg.CustomRules.Block)
+	oldEffective := singbox.EffectiveBlockRules(e.cfg)
 	found := false
 	for i := range e.cfg.CustomRules.Block {
 		t, _ := singbox.NormalizeBlockTarget(e.cfg.CustomRules.Block[i].Target)
@@ -716,7 +743,8 @@ func (e *Enforcer) ImportAndBlockRuleSet(ctx context.Context, rawInput, customTa
 		res.ConfigSaved = true
 	}
 
-	if sbApplied, sbErr := e.syncSingBoxLayer(ctx, oldBlocks, e.cfg.CustomRules.Block); sbErr == nil && sbApplied {
+	newEffective := singbox.EffectiveBlockRules(e.cfg)
+	if sbApplied, sbErr := e.syncSingBoxLayer(ctx, oldEffective, newEffective); sbErr == nil && sbApplied {
 		res.SingBoxSynced = true
 	}
 
@@ -724,6 +752,185 @@ func (e *Enforcer) ImportAndBlockRuleSet(ctx context.Context, rawInput, customTa
 	res.Message = fmt.Sprintf("已导入并封禁规则集 %s (含 %d 条规则, Sing-Box 原生阻断=%v, 斩断活跃连接=%d 条)",
 		tag, ruleCount, res.SingBoxSynced, res.KilledConnections)
 	return res, nil
+}
+
+func (e *Enforcer) ruleSetDir() string {
+	dir := filepath.Dir(e.sbConfigPath)
+	if dir == "" || dir == "." {
+		dir = constant.SingBoxConfigDir
+	}
+	return filepath.Join(dir, "rule_sets")
+}
+
+// SetPCDNBlock 一键开启或关闭内置默认防 PCDN 规则集（持久化至 singctl.yaml 并热重载 sing-box）。
+func (e *Enforcer) SetPCDNBlock(ctx context.Context, enabled bool) (*BlockActionResult, error) {
+	oldBlocks := slices.Clone(e.cfg.CustomRules.Block)
+	oldPCDN := e.cfg.Audit.PCDNBlock
+	oldEffective := singbox.EffectiveBlockRules(e.cfg)
+
+	e.cfg.Audit.SetPCDNBlock(enabled)
+	if !enabled && len(e.cfg.CustomRules.Block) > 0 {
+		kept := make([]config.BlockRule, 0, len(e.cfg.CustomRules.Block))
+		for _, b := range e.cfg.CustomRules.Block {
+			norm, _ := singbox.NormalizeBlockTarget(b.Target)
+			if singbox.IsBuiltinPCDNTarget(norm) && strings.TrimSpace(b.SourceIP) == "" {
+				continue
+			}
+			kept = append(kept, b)
+		}
+		e.cfg.CustomRules.Block = kept
+	}
+	if enabled && e.sbConfigPath != "" {
+		_, _, _ = singbox.EnsureBuiltinPCDNRuleSetFile(ctx, e.ruleSetDir())
+	}
+
+	res := &BlockActionResult{
+		Target: singbox.BuiltinPCDNRuleSetTarget,
+	}
+
+	if e.configPath != "" {
+		if err := config.Save(e.configPath, e.cfg); err != nil {
+			e.cfg.CustomRules.Block = oldBlocks
+			e.cfg.Audit.PCDNBlock = oldPCDN
+			return nil, fmt.Errorf("保存防 PCDN 开关至 %s 失败: %w", e.configPath, err)
+		}
+		res.ConfigSaved = true
+	}
+
+	newEffective := singbox.EffectiveBlockRules(e.cfg)
+	if sbApplied, sbErr := e.syncSingBoxLayer(ctx, oldEffective, newEffective); sbErr == nil && sbApplied {
+		res.SingBoxSynced = true
+	} else if sbErr != nil && e.sbConfigPath != "" {
+		// 配置已保存，sing-box 同步失败时不静默吞掉
+		res.Message = fmt.Sprintf("防 PCDN 状态已保存，但 sing-box 同步异常: %v", sbErr)
+		return res, sbErr
+	}
+
+	if enabled {
+		res.KilledConnections = e.killMatchingBuiltinPCDNConnections(ctx)
+		res.Message = fmt.Sprintf("已开启内置防 PCDN 拦截 (%d 组调度与拉流域名, Sing-Box 原生阻断=%v, 斩断存量连接=%d 条)",
+			len(singbox.BuiltinPCDNDomainSuffixes), res.SingBoxSynced, res.KilledConnections)
+	} else {
+		res.Message = fmt.Sprintf("已关闭内置防 PCDN 拦截 (Sing-Box 已移除规则=%v)", res.SingBoxSynced)
+	}
+	return res, nil
+}
+
+// EnsureDefaultPCDNBlock 在守护进程或 WebUI 启动后幂等检查并将默认开启的防 PCDN 规则集同步到现有 sing-box 配置。
+func (e *Enforcer) EnsureDefaultPCDNBlock(ctx context.Context) (bool, error) {
+	if e == nil || e.cfg == nil || !e.cfg.Audit.IsPCDNBlockEnabled() || e.sbConfigPath == "" {
+		return false, nil
+	}
+	rawBytes, err := os.ReadFile(e.sbConfigPath)
+	if err != nil {
+		return false, nil
+	}
+	if hasActiveBuiltinPCDNRuleSet(rawBytes) {
+		return false, nil
+	}
+
+	_, _, _ = singbox.EnsureBuiltinPCDNRuleSetFile(ctx, e.ruleSetDir())
+	oldWithoutBuiltin := make([]config.BlockRule, 0, len(e.cfg.CustomRules.Block)+1)
+	oldWithoutBuiltin = append(oldWithoutBuiltin, singbox.BuiltinPCDNBlockRule())
+	for _, b := range e.cfg.CustomRules.Block {
+		norm, _ := singbox.NormalizeBlockTarget(b.Target)
+		if singbox.IsBuiltinPCDNTarget(norm) && strings.TrimSpace(b.SourceIP) == "" {
+			continue
+		}
+		oldWithoutBuiltin = append(oldWithoutBuiltin, b)
+	}
+	newWithBuiltin := singbox.EffectiveBlockRules(e.cfg)
+	sbApplied, sbErr := e.syncSingBoxLayer(ctx, oldWithoutBuiltin, newWithBuiltin)
+	if sbErr != nil {
+		return false, sbErr
+	}
+	if sbApplied {
+		_ = e.killMatchingBuiltinPCDNConnections(ctx)
+	}
+	return sbApplied, nil
+}
+
+func (e *Enforcer) killMatchingBuiltinPCDNConnections(ctx context.Context) int {
+	var parsed decompiledSRS
+	if err := json.Unmarshal(singbox.BuiltinPCDNRuleSetJSON(), &parsed); err != nil {
+		return 0
+	}
+	return e.killMatchingRuleSetConnections(ctx, &parsed, "")
+}
+
+func hasActiveBuiltinPCDNRuleSet(rawBytes []byte) bool {
+	var root struct {
+		DNS *struct {
+			Rules []map[string]any `json:"rules"`
+		} `json:"dns"`
+		Route struct {
+			RuleSet []map[string]any `json:"rule_set"`
+			Rules   []map[string]any `json:"rules"`
+		} `json:"route"`
+	}
+	if err := json.Unmarshal(rawBytes, &root); err != nil {
+		return false
+	}
+
+	hasDef := false
+	for _, rs := range root.Route.RuleSet {
+		tag, _ := rs["tag"].(string)
+		if tag != singbox.BuiltinPCDNRuleSetTag {
+			continue
+		}
+		typ, _ := rs["type"].(string)
+		switch typ {
+		case "local":
+			pathStr, _ := rs["path"].(string)
+			if pathStr != "" && singbox.IsBuiltinPCDNRuleSetFileCurrent(pathStr) {
+				hasDef = true
+			}
+		case "inline":
+			if rulesArr, ok := rs["rules"].([]any); ok && len(rulesArr) > 0 {
+				if firstRule, ok := rulesArr[0].(map[string]any); ok {
+					if ds, ok := firstRule["domain_suffix"].([]any); ok && len(ds) == len(singbox.BuiltinPCDNDomainSuffixes) {
+						hasDef = true
+					}
+				}
+			}
+		}
+	}
+	if !hasDef {
+		return false
+	}
+
+	ruleMatchesBuiltin := func(rules []map[string]any) bool {
+		for _, r := range rules {
+			act, _ := r["action"].(string)
+			if act != "reject" {
+				continue
+			}
+			if _, hasSrc := r["source_ip_cidr"]; hasSrc {
+				continue
+			}
+			switch rs := r["rule_set"].(type) {
+			case string:
+				if rs == singbox.BuiltinPCDNRuleSetTag {
+					return true
+				}
+			case []any:
+				for _, item := range rs {
+					if s, ok := item.(string); ok && s == singbox.BuiltinPCDNRuleSetTag {
+						return true
+					}
+				}
+			}
+		}
+		return false
+	}
+
+	if !ruleMatchesBuiltin(root.Route.Rules) {
+		return false
+	}
+	if root.DNS != nil && !ruleMatchesBuiltin(root.DNS.Rules) {
+		return false
+	}
+	return true
 }
 
 func (e *Enforcer) syncDNSLayer(ctx context.Context, blocks []config.BlockRule) (bool, string, error) {

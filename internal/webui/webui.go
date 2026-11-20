@@ -23,6 +23,8 @@ import (
 	"time"
 
 	"singctl/internal/audit"
+	"singctl/internal/config"
+	"singctl/internal/daemon"
 	"singctl/internal/gateway"
 	"singctl/internal/logger"
 	"singctl/internal/netdiag"
@@ -192,6 +194,7 @@ func New(opts Options) *Server {
 	s.Mux.HandleFunc("POST /api/audit/ai-review", s.guard(s.handleAuditAIReviewPost))
 	s.Mux.HandleFunc("POST /api/audit/block", s.guard(s.handleAuditBlock))
 	s.Mux.HandleFunc("POST /api/audit/unblock", s.guard(s.handleAuditUnblock))
+	s.Mux.HandleFunc("POST /api/audit/pcdn-block", s.guard(s.handleAuditPCDNBlock))
 	s.Mux.HandleFunc("POST /api/audit/whitelist", s.guard(s.handleAuditWhitelist))
 	s.Mux.HandleFunc("POST /api/audit/close-connections", s.guard(s.handleAuditCloseConnections))
 
@@ -228,8 +231,31 @@ func (s *Server) ListenAndServe() error {
 	}
 
 	s.printBanner(ln)
+	go s.ensureDefaultPCDNBlockAsync()
 	srv := &http.Server{Handler: s.Mux}
 	return srv.Serve(ln)
+}
+
+func (s *Server) ensureDefaultPCDNBlockAsync() {
+	time.Sleep(3 * time.Second)
+	if daemon.IsDaemonRunning() || strings.TrimSpace(s.opts.ConfigPath) == "" {
+		return
+	}
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
+
+	cfg, err := config.Load(s.opts.ConfigPath)
+	if err != nil || cfg == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	enforcer := s.newAuditEnforcer(cfg)
+	if applied, syncErr := enforcer.EnsureDefaultPCDNBlock(ctx); syncErr != nil {
+		logger.Warn("[Audit] WebUI 启动同步内置防 PCDN 规则集失败: %v", syncErr)
+	} else if applied {
+		logger.Info("[Audit] 已通过 WebUI 启动自检启用内置防 PCDN 规则集并热重载 sing-box")
+	}
 }
 
 func (s *Server) printBanner(ln net.Listener) {

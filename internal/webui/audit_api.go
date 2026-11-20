@@ -140,6 +140,16 @@ func (s *Server) handleAuditGet(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) newAuditEnforcer(cfg *config.Config) *audit.Enforcer {
+	enforcer := audit.NewEnforcer(cfg, s.opts.ConfigPath)
+	if strings.TrimSpace(s.opts.SingBoxConfigPath) != "" ||
+		strings.TrimSpace(s.opts.SingBoxWorkConfigPath) != "" ||
+		strings.TrimSpace(s.opts.AdGuardConfigPath) != "" {
+		enforcer.SetStoragePaths(s.opts.SingBoxConfigPath, s.opts.SingBoxWorkConfigPath, s.opts.AdGuardConfigPath)
+	}
+	return enforcer
+}
+
 type auditBlockRequest struct {
 	Target   string `json:"target"`
 	SourceIP string `json:"sourceIp"`
@@ -171,7 +181,7 @@ func (s *Server) handleAuditBlock(w http.ResponseWriter, r *http.Request) {
 		cfg = &config.Config{}
 	}
 
-	enforcer := audit.NewEnforcer(cfg, s.opts.ConfigPath)
+	enforcer := s.newAuditEnforcer(cfg)
 	res, err := enforcer.Block(r.Context(), req.Target, req.SourceIP, req.Reason)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
@@ -208,7 +218,7 @@ func (s *Server) handleAuditUnblock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	enforcer := audit.NewEnforcer(cfg, s.opts.ConfigPath)
+	enforcer := s.newAuditEnforcer(cfg)
 	res, err := enforcer.Unblock(r.Context(), req.Target, req.SourceIP)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
@@ -217,6 +227,50 @@ func (s *Server) handleAuditUnblock(w http.ResponseWriter, r *http.Request) {
 	s.invalidateIOSCache()
 	_ = daemon.NotifyReload()
 	writeJSON(w, http.StatusOK, res)
+}
+
+type auditPCDNBlockRequest struct {
+	Enabled bool `json:"enabled"`
+}
+
+// handleAuditPCDNBlock 一键切换内置默认防 PCDN 规则集的开启/关闭状态（持久落盘并热重载 sing-box）。
+func (s *Server) handleAuditPCDNBlock(w http.ResponseWriter, r *http.Request) {
+	if !s.auditLimiter.allow(r, "write", 120) {
+		writeJSONError(w, http.StatusTooManyRequests, "操作过于频繁，请稍后再试")
+		return
+	}
+
+	var req auditPCDNBlockRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "无效的 JSON 请求体")
+		return
+	}
+
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
+
+	cfg, err := config.Load(s.opts.ConfigPath)
+	if err != nil || cfg == nil {
+		cfg = &config.Config{}
+	}
+
+	enforcer := s.newAuditEnforcer(cfg)
+	res, err := enforcer.SetPCDNBlock(r.Context(), req.Enabled)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.invalidateIOSCache()
+	_ = daemon.NotifyReload()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":                true,
+		"pcdnBlockEnabled":  req.Enabled,
+		"target":            res.Target,
+		"configSaved":       res.ConfigSaved,
+		"singboxSynced":     res.SingBoxSynced,
+		"killedConnections": res.KilledConnections,
+		"message":           res.Message,
+	})
 }
 
 type auditWhitelistRequest struct {

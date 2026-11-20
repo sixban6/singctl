@@ -238,11 +238,17 @@ func (c *Collector) collectLocked(ctx context.Context, opts CollectOptions) *Rep
 		Flows:       []FlowRecord{},
 	}
 	if c.cfg != nil {
-		rep.BlockRules = slices.Clone(c.cfg.CustomRules.Block)
+		rep.BlockRules = singbox.EffectiveBlockRules(c.cfg)
 		rep.BlockedCount = len(rep.BlockRules)
 		rep.Whitelist = slices.Clone(c.cfg.Audit.Whitelist)
 		rep.WhitelistCount = len(rep.Whitelist)
+		rep.PCDNBlockEnabled = c.cfg.Audit.IsPCDNBlockEnabled()
+	} else {
+		rep.BlockRules = singbox.EffectiveBlockRules(nil)
+		rep.BlockedCount = len(rep.BlockRules)
+		rep.PCDNBlockEnabled = true
 	}
+	rep.PCDNRuleCount = len(singbox.BuiltinPCDNDomainSuffixes)
 
 	state := c.loadStateLocked(now.Unix())
 	devDirectory := c.resolveLANDevicesLocked()
@@ -333,12 +339,16 @@ func (c *Collector) collectLocked(ctx context.Context, opts CollectOptions) *Rep
 		})
 	}
 
-	// 先在全局层面按 (设备, 目的网段) 聚合标注纯裸 IP 同网段聚集簇，再逐条评分汇总
+	// 先在全局层面按 (设备, 目的网段) 聚合标注纯裸 IP 同网段聚集簇与跨网段 UDP 蜂群，再逐条评分汇总
 	engine.AnnotateDirectIPSubnetClusters(rawFlows)
+	engine.AnnotatePCDNSwarmBehaviors(rawFlows)
 
 	for i := range rawFlows {
 		engine.EvaluateFlow(&rawFlows[i])
 		rec := rawFlows[i]
+		if rec.PCDNKind != "" {
+			rep.PCDNDetectedFlows++
+		}
 
 		// 更新设备维度汇总（同 MAC 的双栈 IPv4/IPv6 流量归并至同一物理设备，优先展示 IPv4 地址；已拉黑或白名单目标不计入活跃告警）
 		macNorm := strings.ToLower(strings.TrimSpace(rec.DeviceMAC))

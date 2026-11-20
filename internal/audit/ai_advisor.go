@@ -751,22 +751,41 @@ func evaluateBuiltinExpert(f *FlowRecord) *AIReviewResult {
 	}
 	lower := strings.ToLower(f.Target)
 
-	// 1. PCDN / 商业边缘节点偷跑特征
-	for _, kw := range []string{"pcdn", "xycdn", "onething", "szbdyd", "mcdn", "bcdn", "uhabo", "stun."} {
-		if strings.Contains(lower, kw) {
+	// 1. PCDN / 商业边缘节点偷跑或拉流特征
+	if f.PCDNKind == "swarm" {
+		return &AIReviewResult{
+			Source:      "builtin_expert",
+			Category:    "PCDN/P2P 跨网段裸 IP 蜂群偷跑上传",
+			Verdict:     AISafeToBlock,
+			VerdictText: AISafeToBlock.Label(),
+			Impact:      "单设备向多运营商网段高频散点上行，开启「内置防 PCDN」或按设备限流可制止带宽盗用",
+			Recommend:   "block_device",
+		}
+	}
+	if matched, _ := matchPCDNDomain(f.Target); matched {
+		isDownloadOnly := f.PCDNKind == "download" || (f.UploadRatio < 0.8 && f.UploadBytes < 256*1024)
+		if isDownloadOnly {
 			return &AIReviewResult{
 				Source:      "builtin_expert",
-				Category:    "商业 PCDN 边缘计算 / P2P 穿透上报节点",
+				Category:    "商业 PCDN 下行拉流节点",
 				Verdict:     AISafeToBlock,
 				VerdictText: AISafeToBlock.Label(),
-				Impact:      "拉黑后仅阻断后台共享上传带宽，不影响正常视频点播与网页浏览",
+				Impact:      "拉黑后播放器自动回落官方正规 CDN，通常可减少跨网卡顿并防止后续被调度上传",
 				Recommend:   "block_global",
 			}
+		}
+		return &AIReviewResult{
+			Source:      "builtin_expert",
+			Category:    "商业 PCDN 边缘计算 / 偷跑上传节点",
+			Verdict:     AISafeToBlock,
+			VerdictText: AISafeToBlock.Label(),
+			Impact:      "拉黑后仅阻断后台共享上传带宽，不影响正常视频点播与网页浏览",
+			Recommend:   "block_global",
 		}
 	}
 
 	// 2. 明确遥测 / 日志 / 广告追踪 SDK
-	for _, kw := range []string{"telemetry", "collect", "beacon", "tracker", "track", "log.", "logs.", "applog", "sdklog", "crashlog", "stat.", "stats.", "metric", "report.", "analytics", "adlog", "adtrack"} {
+	for _, kw := range privacyTrackerKeywords {
 		if strings.Contains(lower, kw) {
 			return &AIReviewResult{
 				Source:      "builtin_expert",
@@ -779,7 +798,47 @@ func evaluateBuiltinExpert(f *FlowRecord) *AIReviewResult {
 		}
 	}
 
-	// 3. 绕过 DNS 的裸公网 IP + 非标端口大流量上传
+	// 3. 绕过 DNS 的裸公网 IP + 非标端口传输（区分 IoT/音视频/手游常用端口与不明高上行偷跑）
+	if f.IsDirectIP && strings.EqualFold(f.Network, "udp") {
+		switch {
+		case f.DestPort == 8053 && f.UploadBytes < 20*1024*1024:
+			return &AIReviewResult{
+				Source:      "builtin_expert",
+				Category:    "智能家居/米家 MiIO 设备直连心跳",
+				Verdict:     AICaution,
+				VerdictText: AICaution.Label(),
+				Impact:      "常见于小米/米家智能网关或插座加密控制保活，误封可能导致智能家居离线",
+				Recommend:   "keep",
+			}
+		case f.DestPort == 32100 && f.UploadBytes < 20*1024*1024:
+			return &AIReviewResult{
+				Source:      "builtin_expert",
+				Category:    "TUTK / 智能摄像机 P2P 视频穿透",
+				Verdict:     AICaution,
+				VerdictText: AICaution.Label(),
+				Impact:      "常见于家用智能摄像头实时预览 P2P 通道，误封可能导致手机无法看监控画面",
+				Recommend:   "keep",
+			}
+		case f.DestPort == 3478 && f.UploadBytes < 20*1024*1024:
+			return &AIReviewResult{
+				Source:      "builtin_expert",
+				Category:    "STUN/TURN 语音视频通话中继",
+				Verdict:     AICaution,
+				VerdictText: AICaution.Label(),
+				Impact:      "常见于微信/会议等音视频通话 NAT 穿透，误封可能影响语音视频通话接通",
+				Recommend:   "keep",
+			}
+		case isKnownGameUDPPort(f.DestPort) && f.UploadBytes < 20*1024*1024:
+			return &AIReviewResult{
+				Source:      "builtin_expert",
+				Category:    "手游联机 / 游戏加速直连 UDP 节点",
+				Verdict:     AICaution,
+				VerdictText: AICaution.Label(),
+				Impact:      "常见于王者荣耀国际服等手游实时对战加速通信，若确为游戏流量请勿拉黑",
+				Recommend:   "keep",
+			}
+		}
+	}
 	if f.IsDirectIP && f.UploadRatio >= 2.0 {
 		if strings.EqualFold(f.Network, "udp") && f.DestPort > 1024 {
 			return &AIReviewResult{

@@ -78,21 +78,6 @@ var defaultTrustedDomains = []string{
 	"dot.pub",
 }
 
-// suspiciousKeywords 遥测、广告回传、PCDN 与远控信标常见子域名特征词。
-var suspiciousKeywords = []string{
-	"telemetry", "collect", "collector", "beacon", "tracker", "track",
-	"pcdn", "xycdn", "onething", "szbdyd", "mcdn", "bcdn", "uhabo",
-	"log.", "logs.", "ulog", "applog", "sdklog", "crashlog", "stat.", "stats.",
-	"metric", "metrics", "report.", "analytics", "adlog", "adtrack", "stun.",
-	"umeng", "appsflyer", "adjust.", "jpush", "getui", "sensorsdata", "miaozhen",
-	"psmartcloud", "tuyaus", "tuyacn", "iot-log",
-}
-
-// pcdnKeywords 属于安全/带宽盗用维度的 PCDN 与 NAT 穿透特征词。
-var pcdnKeywords = []string{
-	"pcdn", "xycdn", "onething", "szbdyd", "mcdn", "bcdn", "uhabo", "stun.",
-}
-
 // privacyTrackerKeywords 属于隐私窥探/行为画像/云端遥测维度的特征词（即使单次上传仅几 KB 也会触发隐私评分）。
 var privacyTrackerKeywords = []string{
 	"telemetry", "collect", "collector", "beacon", "tracker", "track",
@@ -100,6 +85,57 @@ var privacyTrackerKeywords = []string{
 	"metric", "metrics", "report.", "analytics", "adlog", "adtrack",
 	"umeng", "appsflyer", "adjust.", "jpush", "getui", "sensorsdata", "miaozhen",
 	"psmartcloud", "tuyaus", "tuyacn", "iot-log",
+}
+
+// nonPCDNPureCDNParents 显式排除常规主流 CDN / 浏览器 / 苹果等服务父域，避免 "ipcdn"、"pcdn.brave.com"、"dmcdn.net" 等子串误报。
+var nonPCDNPureCDNParents = []string{
+	"apple.com", "brave.com", "dmcdn.net", "icloud.com",
+	"google.com", "googleapis.com", "cloudflare.com", "tailscale.com", "wechat.com",
+}
+
+var pcdnLabelExactTokens = map[string]struct{}{
+	"pcdn": {}, "mcdn": {}, "bcdn": {}, "xycdn": {},
+	"hcdn": {}, "tcdn": {}, "stun": {},
+}
+
+// matchPCDNDomain 精确识别商业 PCDN/MCDN 调度与节点域名，避免裸子串误伤常规合法域名。
+func matchPCDNDomain(target string) (bool, string) {
+	d := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(target)), ".")
+	if d == "" || net.ParseIP(strings.Trim(d, "[]")) != nil {
+		return false, ""
+	}
+	for _, p := range nonPCDNPureCDNParents {
+		if d == p || strings.HasSuffix(d, "."+p) {
+			return false, ""
+		}
+	}
+	if matched, suffix := singbox.MatchBuiltinPCDNDomain(d); matched {
+		return true, suffix
+	}
+	for lbl := range strings.SplitSeq(d, ".") {
+		if _, ok := pcdnLabelExactTokens[lbl]; ok {
+			return true, lbl
+		}
+		if strings.HasPrefix(lbl, "pcdn-") || strings.HasSuffix(lbl, "-pcdn") {
+			return true, lbl
+		}
+	}
+	return false, ""
+}
+
+func isKnownIoTOrVoIPUDPPort(port int) bool {
+	return port == 3478 || port == 8053 || port == 32100
+}
+
+func isKnownGameUDPPort(port int) bool {
+	if (port >= 6650 && port <= 6659) || (port >= 20000 && port <= 20002) {
+		return true
+	}
+	return port == 5010 || port == 12346 || port == 30000
+}
+
+func isKnownLegitUDPServicePort(port int) bool {
+	return port == 41641 || isKnownIoTOrVoIPUDPPort(port) || isKnownGameUDPPort(port)
 }
 
 // iotDeviceKeywords 智能家居/电视/摄像头主机名特征词（用于推断设备角色）。
@@ -118,6 +154,7 @@ func NewNonlinearEngine(cfg *config.Config) *NonlinearEngine {
 			&uploadAsymmetryDetector{},
 			&directIPUploadDetector{},
 			&directIPSubnetClusterDetector{},
+			&pcdnSwarmDetector{},
 			&beaconHeartbeatDetector{},
 			&domainEntropyDetector{},
 			&telemetryFingerprintDetector{},
@@ -153,32 +190,33 @@ func NewNonlinearEngine(cfg *config.Config) *NonlinearEngine {
 		for _, w := range cfg.Audit.Whitelist {
 			eng.addTrustedEntry(w)
 		}
-		for _, b := range cfg.CustomRules.Block {
-			target, isIPTarget := singbox.NormalizeBlockTarget(b.Target)
-			if target == "" {
-				continue
-			}
-			src := singbox.NormalizeSourceIPCIDR(b.SourceIP)
-			if strings.HasPrefix(target, "ruleset:") {
-				eng.blockedRulesets = append(eng.blockedRulesets, blockedRulesetRef{
+	}
+
+	for _, b := range singbox.EffectiveBlockRules(cfg) {
+		target, isIPTarget := singbox.NormalizeBlockTarget(b.Target)
+		if target == "" {
+			continue
+		}
+		src := singbox.NormalizeSourceIPCIDR(b.SourceIP)
+		if strings.HasPrefix(target, "ruleset:") {
+			eng.blockedRulesets = append(eng.blockedRulesets, blockedRulesetRef{
+				srcCIDR: src,
+				tag:     strings.TrimPrefix(target, "ruleset:"),
+			})
+			continue
+		}
+		if isIPTarget {
+			if prefix, ok := parseAuditIPPrefix(target); ok && !prefix.IsSingleIP() {
+				eng.blockedCIDRs = append(eng.blockedCIDRs, blockedCIDRRef{
 					srcCIDR: src,
-					tag:     strings.TrimPrefix(target, "ruleset:"),
+					prefix:  prefix,
 				})
-				continue
 			}
-			if isIPTarget {
-				if prefix, ok := parseAuditIPPrefix(target); ok && !prefix.IsSingleIP() {
-					eng.blockedCIDRs = append(eng.blockedCIDRs, blockedCIDRRef{
-						srcCIDR: src,
-						prefix:  prefix,
-					})
-				}
-			}
-			eng.blockedKeys[src+"|"+target] = struct{}{}
-			// 同时索引去掉 /32 的纯 IP 键以便快速匹配
-			if plainIP := strings.TrimSuffix(strings.TrimSuffix(target, "/32"), "/128"); plainIP != target {
-				eng.blockedKeys[src+"|"+plainIP] = struct{}{}
-			}
+		}
+		eng.blockedKeys[src+"|"+target] = struct{}{}
+		// 同时索引去掉 /32 的纯 IP 键以便快速匹配
+		if plainIP := strings.TrimSuffix(strings.TrimSuffix(target, "/32"), "/128"); plainIP != target {
+			eng.blockedKeys[src+"|"+plainIP] = struct{}{}
 		}
 	}
 
@@ -300,6 +338,12 @@ func (e *NonlinearEngine) IsBlocked(deviceIP, target string) bool {
 		if br.srcCIDR != "" && br.srcCIDR != srcCIDR {
 			continue
 		}
+		if br.tag == singbox.BuiltinPCDNRuleSetTag {
+			if matched, _ := singbox.MatchBuiltinPCDNDomain(plain); matched {
+				return true
+			}
+			continue
+		}
 		if rs := loadBlockedRuleSetSummary(br.tag); rs != nil && matchDecompiledRuleSet(rs, plain, plain) {
 			return true
 		}
@@ -314,6 +358,11 @@ func (e *NonlinearEngine) EvaluateFlow(flow *FlowRecord) {
 	}
 	if flow.NonlinearFactors == nil {
 		flow.NonlinearFactors = make(map[string]float64)
+	}
+	if flow.PCDNSwarm != nil && flow.PCDNSwarm.Suspicious {
+		flow.PCDNKind = "swarm"
+	} else {
+		flow.PCDNKind = ""
 	}
 
 	// 计算基础衍生指标
@@ -334,14 +383,14 @@ func (e *NonlinearEngine) EvaluateFlow(flow *FlowRecord) {
 		if s > 0 {
 			flow.NonlinearFactors[det.Name()] = math.Round(s*100) / 100
 			switch det.Name() {
-			case "upload_asymmetry", "direct_ip_upload", "direct_ip_subnet_cluster", "domain_entropy":
+			case "upload_asymmetry", "direct_ip_upload", "direct_ip_subnet_cluster", "pcdn_swarm", "domain_entropy":
 				secBase += s
 			case "beacon_heartbeat":
 				// 机器定时心跳既是远控信标特征(安全)，更是全天候状态打点画像特征(隐私)
 				secBase += s * 0.55
 				privBase += s * 0.85
 			case "telemetry_fingerprint":
-				if matchesAnyKeyword(flow.Target, pcdnKeywords) {
+				if flow.PCDNKind != "" {
 					secBase += s
 				} else {
 					privBase += s
@@ -372,10 +421,20 @@ func (e *NonlinearEngine) EvaluateFlow(flow *FlowRecord) {
 	isNonStdPort := flow.DestPort > 0 && flow.DestPort != 80 && flow.DestPort != 443 && flow.DestPort != 53 && flow.DestPort != 123
 	isPeriodicBeacon := flow.ConnCount >= 6 && flow.IntervalCV > 0 && flow.IntervalCV < 0.30
 
-	// 安全交叉项 A: [无域名直连 IP] × [非标端口] × [上行主导] -> 典型 PCDN 偷跑或木马暗道回传
+	// 安全交叉项 A: [无域名直连 IP] × [非标端口] × [上行主导] -> 区分已知 IoT/音视频/手游端口与不明 PCDN 偷跑
 	if flow.IsDirectIP && isNonStdPort && isUploadDominant {
-		secInteraction *= 1.75
-		reasons = appendUniqueReason(reasons, "多维交叉: 直连IP+非标端口+持续上行(疑似PCDN/暗道回传)")
+		isUDP := strings.EqualFold(flow.Network, "udp")
+		hasSwarm := flow.PCDNSwarm != nil && flow.PCDNSwarm.Suspicious
+		switch {
+		case isUDP && isKnownIoTOrVoIPUDPPort(flow.DestPort) && flow.UploadBytes < 20*1024*1024 && !hasSwarm:
+			reasons = appendUniqueReason(reasons, "已知 IoT/摄像头/音视频常用直连端口")
+		case isUDP && isKnownGameUDPPort(flow.DestPort) && flow.UploadBytes < 20*1024*1024 && !hasSwarm:
+			secInteraction *= 1.15
+			reasons = appendUniqueReason(reasons, "直连IP非标UDP上行 (常见于手游联机/加速节点，如非游戏请核查)")
+		default:
+			secInteraction *= 1.75
+			reasons = appendUniqueReason(reasons, "多维交叉: 直连IP+非标端口+持续上行(疑似PCDN/暗道回传)")
+		}
 	}
 	// 安全/隐私交叉项 B: [凌晨 01:00-05:30 活跃] × [上行主导 或 规律心跳]
 	if flow.NightHits > 0 && (isUploadDominant || isPeriodicBeacon) {
@@ -406,9 +465,10 @@ func (e *NonlinearEngine) EvaluateFlow(flow *FlowRecord) {
 		reasons = []string{"命中可信白名单基线 (自动阻尼降权)"}
 	} else if flow.AIReview != nil && flow.AIReview.Verdict == AIDoNotBlock &&
 		flow.AIReview.Source != "" && flow.AIReview.Source != "builtin_expert" && flow.AIReview.Source != "trusted_baseline" {
-		// 安全护栏：对直连非标端口大上传、明确 PCDN 节点或极端百兆倒挂上传保留警觉，其余经真实大模型确认正常的业务自动闭环降权
+		// 安全护栏：对直连非标端口大上传、确认 PCDN 偷跑/蜂群或极端百兆倒挂上传保留警觉，下行 PCDN 拉流允许 AI 闭环降权
+		isHardPCDN := flow.PCDNKind == "upload" || flow.PCDNKind == "swarm"
 		isHardAnomaly := (flow.IsDirectIP && isNonStdPort && isUploadDominant) ||
-			matchesAnyKeyword(flow.Target, pcdnKeywords) ||
+			isHardPCDN ||
 			(flow.UploadBytes >= 100*1024*1024 && flow.UploadRatio >= 4.0)
 		if !isHardAnomaly {
 			trustDamping = 0.25
@@ -559,41 +619,66 @@ func (d *directIPUploadDetector) Evaluate(f *FlowRecord) (float64, string) {
 		}
 	}
 	score := 16.0
+	isLightKnownUDP := strings.EqualFold(f.Network, "udp") && isKnownIoTOrVoIPUDPPort(f.DestPort) && f.UploadBytes < 10*1024*1024 && f.UploadRatio < 2.0
 	if strings.EqualFold(f.Network, "udp") {
 		if f.DestPort == 443 {
 			score += 4.0
+		} else if isLightKnownUDP {
+			score += 2.0
 		} else {
 			score += 8.0
 		}
 	}
-	if f.DestPort > 1024 && f.DestPort != 8080 && f.DestPort != 8443 {
+	if f.DestPort > 1024 && f.DestPort != 8080 && f.DestPort != 8443 && !isLightKnownUDP {
 		score += 7.0
 	}
 	return score, "绕过DNS直连公网IP上传"
 }
 
-// directIPAuditSubnet 将公网直连 IP 归一化为用于聚集分析的 /24 (IPv4) 或 /48 (IPv6) 目的网段；
-// 自动过滤回环、私网、Tailscale、FakeIP、基础 DNS 等受保护保留段。
-func directIPAuditSubnet(rawIP string) (string, bool) {
+// directIPPublicAddr 解析并过滤出非私网/非回环/非保留段的公网单播 IP。
+func directIPPublicAddr(rawIP string) (netip.Addr, bool) {
 	addr, err := netip.ParseAddr(strings.TrimSpace(rawIP))
 	if err != nil {
-		return "", false
+		return netip.Addr{}, false
 	}
 	addr = addr.Unmap()
 	if !addr.IsGlobalUnicast() || addr.IsPrivate() || addr.IsLoopback() || addr.IsLinkLocalUnicast() || addr.IsMulticast() {
-		return "", false
+		return netip.Addr{}, false
 	}
 	for _, rp := range protectedReservedPrefixes {
 		if rp.Contains(addr) {
-			return "", false
+			return netip.Addr{}, false
 		}
 	}
 	if slices.Contains(ProtectedBootstrapIPs, addr.String()) {
+		return netip.Addr{}, false
+	}
+	return addr, true
+}
+
+// directIPAuditSubnet 将公网直连 IP 归一化为用于聚集分析的 /24 (IPv4) 或 /48 (IPv6) 目的网段；
+// 自动过滤回环、私网、Tailscale、FakeIP、基础 DNS 等受保护保留段。
+func directIPAuditSubnet(rawIP string) (string, bool) {
+	addr, ok := directIPPublicAddr(rawIP)
+	if !ok {
 		return "", false
 	}
 	bits := 24
 	if addr.Is6() {
 		bits = 48
+	}
+	return netip.PrefixFrom(addr, bits).Masked().String(), true
+}
+
+// directIPPublicSlash16 将公网直连 IP 归一化为用于 PCDN 跨网段蜂群分析的 /16 (IPv4) 或 /32 (IPv6) 前缀。
+func directIPPublicSlash16(rawIP string) (string, bool) {
+	addr, ok := directIPPublicAddr(rawIP)
+	if !ok {
+		return "", false
+	}
+	bits := 16
+	if addr.Is6() {
+		bits = 32
 	}
 	return netip.PrefixFrom(addr, bits).Masked().String(), true
 }
@@ -719,6 +804,83 @@ func (d *directIPSubnetClusterDetector) Evaluate(f *FlowRecord) (float64, string
 	return score, fmt.Sprintf("同网段裸IP聚集: 连向 %s 共 %d 个不同IP", c.CIDR, c.UniqueIPs)
 }
 
+// AnnotatePCDNSwarmBehaviors 识别单台设备向大量分散公网 /16 (或 IPv6 /32) 网段发起非标高端口 UDP 裸 IP 上行的 PCDN/P2P 蜂群偷跑特征。
+func (e *NonlinearEngine) AnnotatePCDNSwarmBehaviors(flows []FlowRecord) {
+	type swarmBucket struct {
+		flowIndices   []int
+		slash16s      map[string]struct{}
+		uniqueIPs     map[string]struct{}
+		uploadBytes   int64
+		downloadBytes int64
+	}
+
+	buckets := make(map[string]*swarmBucket)
+	for i := range flows {
+		f := &flows[i]
+		if !f.IsDirectIP || !strings.EqualFold(f.Network, "udp") || e.IsTrusted(f.Target) || strings.EqualFold(f.Outbound, "block") {
+			continue
+		}
+		if f.DestPort <= 1024 || isKnownLegitUDPServicePort(f.DestPort) {
+			continue
+		}
+		slash16, ok := directIPPublicSlash16(f.Target)
+		if !ok {
+			continue
+		}
+		addr, _ := directIPPublicAddr(f.Target)
+		b, exists := buckets[f.DeviceIP]
+		if !exists {
+			b = &swarmBucket{
+				slash16s:  make(map[string]struct{}),
+				uniqueIPs: make(map[string]struct{}),
+			}
+			buckets[f.DeviceIP] = b
+		}
+		b.flowIndices = append(b.flowIndices, i)
+		b.slash16s[slash16] = struct{}{}
+		b.uniqueIPs[addr.String()] = struct{}{}
+		b.uploadBytes += f.UploadBytes
+		b.downloadBytes += f.DownloadBytes
+	}
+
+	for _, b := range buckets {
+		uniqueSlash16 := len(b.slash16s)
+		denom := float64(b.downloadBytes) + 65536.0
+		ratio := math.Round((float64(b.uploadBytes)/denom)*100) / 100
+		if uniqueSlash16 < 8 || b.uploadBytes < 5*1024*1024 || ratio < 1.2 {
+			continue
+		}
+		summary := PCDNSwarmSummary{
+			UniqueSlash16: uniqueSlash16,
+			UniqueIPs:     len(b.uniqueIPs),
+			FlowCount:     len(b.flowIndices),
+			UploadBytes:   b.uploadBytes,
+			DownloadBytes: b.downloadBytes,
+			UploadRatio:   ratio,
+			Suspicious:    true,
+		}
+		for _, idx := range b.flowIndices {
+			sCopy := summary
+			flows[idx].PCDNSwarm = &sCopy
+			flows[idx].PCDNKind = "swarm"
+		}
+	}
+}
+
+// 2c. pcdnSwarmDetector: PCDN/P2P 跨网段分散裸 IP 蜂群上传算子
+type pcdnSwarmDetector struct{}
+
+func (d *pcdnSwarmDetector) Name() string { return "pcdn_swarm" }
+
+func (d *pcdnSwarmDetector) Evaluate(f *FlowRecord) (float64, string) {
+	if f == nil || !f.IsDirectIP || f.PCDNSwarm == nil || !f.PCDNSwarm.Suspicious {
+		return 0, ""
+	}
+	s := f.PCDNSwarm
+	score := math.Min(36.0, 22.0+float64(s.UniqueSlash16-7)*1.8)
+	return score, fmt.Sprintf("PCDN/P2P 跨网段分散裸IP蜂群偷跑: 横跨 %d 个公网网段，累计上行 %.1fMB", s.UniqueSlash16, float64(s.UploadBytes)/1048576.0)
+}
+
 // 3. beaconHeartbeatDetector: 建连间隔变异系数 (CV) 机器心跳算子
 type beaconHeartbeatDetector struct{}
 
@@ -740,9 +902,11 @@ func (d *beaconHeartbeatDetector) Evaluate(f *FlowRecord) (float64, string) {
 
 	effConns := effectiveConnCountPerHour(f)
 	isKnownQUIC443 := f.IsDirectIP && f.DestPort == 443 && isKnownStandardHTTPSInfraApp(f.AppName) && f.UploadRatio < 1.8
+	matchedPCDN, _ := matchPCDNDomain(f.Target)
 	hasSuspectTrait := f.UploadRatio >= 1.35 ||
 		(f.IsDirectIP && !isKnownQUIC443) ||
-		matchesAnyKeyword(f.Target, suspiciousKeywords) ||
+		matchesAnyKeyword(f.Target, privacyTrackerKeywords) ||
+		matchedPCDN ||
 		(f.IntervalCV > 0 && f.IntervalCV < 0.45)
 
 	if effConns >= 25 && f.UploadBytes >= 64*1024 && hasSuspectTrait {
@@ -779,18 +943,27 @@ type telemetryFingerprintDetector struct{}
 func (d *telemetryFingerprintDetector) Name() string { return "telemetry_fingerprint" }
 
 func (d *telemetryFingerprintDetector) Evaluate(f *FlowRecord) (float64, string) {
+	if f == nil {
+		return 0, ""
+	}
+	if matched, label := matchPCDNDomain(f.Target); matched {
+		if f.UploadBytes < 2048 && f.DownloadBytes < 100*1024 {
+			return 0, ""
+		}
+		if (f.UploadBytes >= 256*1024 && f.UploadRatio >= 0.8) || (f.UploadBytes >= 64*1024 && f.UploadRatio >= 1.5) {
+			f.PCDNKind = "upload"
+			return 34.0, "命中商业 PCDN 偷跑上传节点 (" + label + ")"
+		}
+		f.PCDNKind = "download"
+		return 18.0, "命中 PCDN 下行拉流节点 (" + label + "，拦截可回落官方 CDN 减少卡顿)"
+	}
+
 	if f.UploadBytes < 2048 {
 		return 0, ""
 	}
 	lower := strings.ToLower(f.Target)
-	for _, kw := range suspiciousKeywords {
+	for _, kw := range privacyTrackerKeywords {
 		if strings.Contains(lower, kw) {
-			if strings.Contains(kw, "cdn") || kw == "stun." || kw == "uhabo" || kw == "onething" || kw == "szbdyd" {
-				if f.UploadBytes < 16*1024 {
-					return 0, ""
-				}
-				return 24.0, "命中PCDN/NAT穿透节点特征 (" + strings.Trim(kw, ".") + ")"
-			}
 			return 24.0, "命中隐私遥测/画像上报指纹 (" + strings.Trim(kw, ".") + ")"
 		}
 	}
@@ -802,15 +975,15 @@ func evaluatePrivacyAxisExtras(f *FlowRecord) (float64, []string) {
 	var score float64
 	var reasons []string
 
-	hasSuspiciousKW := matchesAnyKeyword(f.Target, suspiciousKeywords)
-	// 下行显著大于上行（下载超过上传 2 倍且平滑比值 < 0.6）且未命中任何遥测/PCDN 词根时，属于正常网页浏览/流媒体/下载
-	isDownloadDominantBrowsing := !hasSuspiciousKW && !f.IsDirectIP &&
+	hasPrivacyKW := matchesAnyKeyword(f.Target, privacyTrackerKeywords)
+	// 下行显著大于上行（下载超过上传 2 倍且平滑比值 < 0.6）且未命中任何隐私遥测词根时，属于正常网页浏览/流媒体/下载
+	isDownloadDominantBrowsing := !hasPrivacyKW && !f.IsDirectIP &&
 		f.DownloadBytes > f.UploadBytes*2 && f.UploadRatio < 0.6
 
 	// 1. 睡眠时段作息窥探算子 (凌晨 01:00-05:30 无人操作时段的后台活跃上传)
 	if f.NightHits > 0 && f.UploadBytes >= 2048 && !isDownloadDominantBrowsing {
 		isPeriodic := f.IntervalCV > 0 && f.IntervalCV < 0.30
-		if f.DeviceRole == "iot" || hasSuspiciousKW || f.UploadRatio >= 0.8 || isPeriodic {
+		if f.DeviceRole == "iot" || hasPrivacyKW || f.UploadRatio >= 0.8 || isPeriodic {
 			nightScore := 16.0 + 4.5*math.Log1p(float64(f.NightHits))
 			if f.DeviceRole == "iot" {
 				nightScore *= 1.35
@@ -824,7 +997,7 @@ func evaluatePrivacyAxisExtras(f *FlowRecord) (float64, []string) {
 	alreadyScoredBeacon := f.ConnCount >= 6 && f.IntervalCV > 0 && f.IntervalCV < 0.35
 	effConns := effectiveConnCountPerHour(f)
 	if !alreadyScoredBeacon && effConns >= 10 && f.UploadBytes >= 1024 && f.UploadBytes < 512*1024 && !isDownloadDominantBrowsing {
-		if hasSuspiciousKW || f.UploadRatio >= 0.90 || f.DeviceRole == "iot" {
+		if hasPrivacyKW || f.UploadRatio >= 0.90 || f.DeviceRole == "iot" {
 			freqScore := math.Min(18.0, 4.2*math.Log1p(effConns/5.0))
 			score += freqScore
 			reasons = append(reasons, "高频碎包持续回传 ("+strconv.Itoa(f.ConnCount)+"次连接)")
