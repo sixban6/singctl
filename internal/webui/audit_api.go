@@ -544,3 +544,93 @@ func (s *Server) handleAuditCloseConnections(w http.ResponseWriter, r *http.Requ
 		"message": msg,
 	})
 }
+
+type auditThrottleRequest struct {
+	Target   string `json:"target"`
+	Port     int    `json:"port"`
+	RateKBps int    `json:"rateKbps"`
+	Comment  string `json:"comment"`
+}
+
+// handleAuditThrottle 配置单目标“限速不拉黑”策略（rateKbps <= 0 解除限速），落盘 0600 并实时下发 nftables 隔离限速表。
+func (s *Server) handleAuditThrottle(w http.ResponseWriter, r *http.Request) {
+	if !s.auditLimiter.allow(r, "write", 120) {
+		writeJSONError(w, http.StatusTooManyRequests, "操作过于频繁，请稍后再试")
+		return
+	}
+
+	var req auditThrottleRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "无效的 JSON 请求体")
+		return
+	}
+
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
+
+	cfg, err := config.Load(s.opts.ConfigPath)
+	if err != nil || cfg == nil {
+		cfg = &config.Config{}
+	}
+
+	normTarget, _, err := audit.NormalizeThrottleTarget(cfg, req.Target, req.Port)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	action := "throttled"
+	var msg string
+	if req.RateKBps <= 0 {
+		action = "removed"
+		removed := audit.RemoveThrottleRule(cfg, normTarget, req.Port)
+		if !removed && req.Port > 0 {
+			removed = audit.RemoveThrottleRule(cfg, normTarget, 0)
+		}
+		if removed {
+			msg = "已解除 " + normTarget + " 的上行限速"
+		} else {
+			msg = normTarget + " 当前未启用上行限速"
+		}
+	} else {
+		rule, err := audit.UpsertThrottleRule(cfg, config.AuditThrottleRule{
+			Target:   normTarget,
+			Port:     req.Port,
+			RateKBps: req.RateKBps,
+			Comment:  strings.TrimSpace(req.Comment),
+		})
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		portSuffix := ""
+		if rule.Port > 0 {
+			portSuffix = ":" + strconv.Itoa(rule.Port)
+		}
+		msg = "已设置 " + rule.Target + portSuffix + " 上行限速 " + strconv.Itoa(rule.RateKBps) + " KB/s（不断网）"
+	}
+
+	if strings.TrimSpace(s.opts.ConfigPath) != "" {
+		if saveErr := config.Save(s.opts.ConfigPath, cfg); saveErr != nil {
+			writeJSONError(w, http.StatusInternalServerError, "保存配置失败: "+saveErr.Error())
+			return
+		}
+	}
+
+	applyRes := audit.ApplyThrottleRules(r.Context(), cfg)
+	if applyRes.Message != "" {
+		msg = msg + "；" + applyRes.Message
+	}
+	_ = daemon.NotifyReload()
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":          true,
+		"action":      action,
+		"target":      normTarget,
+		"port":        req.Port,
+		"rateKbps":    req.RateKBps,
+		"throttles":   cfg.Audit.Throttles,
+		"applyResult": applyRes,
+		"message":     msg,
+	})
+}

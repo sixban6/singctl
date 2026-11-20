@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net"
@@ -291,15 +292,44 @@ func computeRuleSetDirFingerprint(dir string) string {
 	if count == 0 {
 		return ""
 	}
-	return strconv.Itoa(count) + ":" + filepath.Base(dir) + ":" + time.Unix(maxMod, 0).UTC().Format("20060102150405")
+	return "v2:" + strconv.Itoa(count) + ":" + filepath.Base(dir) + ":" + time.Unix(maxMod, 0).UTC().Format("20060102150405")
+}
+
+// srsStringList 兼容 sing-box rule-set decompile 输出的单字符串或字符串数组字段。
+type srsStringList []string
+
+func (s *srsStringList) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		*s = nil
+		return nil
+	}
+	if trimmed[0] == '"' {
+		var single string
+		if err := json.Unmarshal(trimmed, &single); err != nil {
+			return err
+		}
+		if single != "" {
+			*s = srsStringList{single}
+		} else {
+			*s = nil
+		}
+		return nil
+	}
+	var list []string
+	if err := json.Unmarshal(trimmed, &list); err != nil {
+		return err
+	}
+	*s = srsStringList(list)
+	return nil
 }
 
 type decompiledSRS struct {
 	Rules []struct {
-		Domain        []string `json:"domain"`
-		DomainSuffix  []string `json:"domain_suffix"`
-		DomainKeyword []string `json:"domain_keyword"`
-		IPCIDR        []string `json:"ip_cidr"`
+		Domain        srsStringList `json:"domain"`
+		DomainSuffix  srsStringList `json:"domain_suffix"`
+		DomainKeyword srsStringList `json:"domain_keyword"`
+		IPCIDR        srsStringList `json:"ip_cidr"`
 	} `json:"rules"`
 }
 
@@ -509,6 +539,8 @@ func matchBuiltinService(target, destIP string) string {
 		return "涂鸦智能 Tuya"
 	case hasDomainOrSubdomain(target, "apple.com") || hasDomainOrSubdomain(target, "apple.com.cn") || hasDomainOrSubdomain(target, "icloud.com") || hasDomainOrSubdomain(target, "mzstatic.com") || hasDomainOrSubdomain(target, "aaplimg.com"):
 		return "Apple"
+	case hasDomainOrSubdomain(target, "youtube.com") || hasDomainOrSubdomain(target, "googlevideo.com") || hasDomainOrSubdomain(target, "ytimg.com") || hasDomainOrSubdomain(target, "youtu.be") || hasDomainOrSubdomain(target, "ggpht.com"):
+		return "YouTube"
 	case strings.Contains(target, "google") || hasDomainOrSubdomain(target, "gstatic.com") || hasDomainOrSubdomain(target, "1e100.net"):
 		return "Google"
 	case strings.Contains(target, "github"):

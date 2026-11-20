@@ -28,10 +28,12 @@ import (
 )
 
 const (
-	envDaemonized          = "SINGCTL_DAEMONIZED"
-	readyFd                = 3
-	ruleSetRetryCooldown   = 30 * time.Minute
-	p2pDirectEventInterval = 2 * time.Hour
+	envDaemonized                         = "SINGCTL_DAEMONIZED"
+	readyFd                               = 3
+	ruleSetRetryCooldown                  = 30 * time.Minute
+	p2pDirectEventInterval                = 2 * time.Hour
+	defaultAuditSampleInterval            = 15 * time.Second
+	defaultAuditThrottleReconcileInterval = 10 * time.Minute
 )
 
 type p2pEventGate struct {
@@ -91,7 +93,9 @@ type Daemon struct {
 	lastSubSyncCheckAt  time.Time
 	failoverRunning     atomic.Bool
 	failover            *GroupFailoverState
+	auditCollector      *audit.Collector
 	auditSampling       atomic.Bool
+	throttleReconciling atomic.Bool
 	p2pCtrl             *tailscale.P2PAssistController
 	p2pReconciling      atomic.Bool
 	p2pLastActive       atomic.Bool
@@ -164,6 +168,7 @@ func NewDaemonWithMeta(cfg *config.Config, configPath, version string) *Daemon {
 		reloadCh:           make(chan struct{}, 1),
 		lastSubSyncCheckAt: time.Now(), // 启动时配置已是最新或刚校验，等待首个周期后再静默比对
 		failover:           failover,
+		auditCollector:     audit.NewCollector(cfg),
 		p2pCtrl:            p2pCtrl,
 	}
 }
@@ -419,6 +424,8 @@ func (d *Daemon) monitorLoop() error {
 	watchdogTicker := time.NewTicker(curWDInterval)
 	failoverTicker := time.NewTicker(curFOInterval)
 	p2pAssistTicker := time.NewTicker(3 * time.Second)
+	auditSampleTicker := time.NewTicker(defaultAuditSampleInterval)
+	throttleReconcileTicker := time.NewTicker(defaultAuditThrottleReconcileInterval)
 	initHealthTimer := time.NewTimer(2 * time.Second)
 	initFailoverTimer := time.NewTimer(8 * time.Second)
 	initRefreshTimer := time.NewTimer(30 * time.Second)
@@ -427,6 +434,8 @@ func (d *Daemon) monitorLoop() error {
 		watchdogTicker.Stop()
 		failoverTicker.Stop()
 		p2pAssistTicker.Stop()
+		auditSampleTicker.Stop()
+		throttleReconcileTicker.Stop()
 		initHealthTimer.Stop()
 		initFailoverTimer.Stop()
 		initRefreshTimer.Stop()
@@ -475,14 +484,22 @@ func (d *Daemon) monitorLoop() error {
 			applyHotReload(true)
 			d.maybePatrolGroupFailoverAsync()
 			d.maybeReconcileTailscaleP2PAsync(true)
+			d.maybeReconcileAuditThrottlesAsync(true)
 
 		case <-initHealthTimer.C:
 			res := NewMonitor(d.currentConfig()).CheckHealth()
 			d.recordHealthResult(res)
 			d.maybeReconcileTailscaleP2PAsync(true)
+			d.maybeReconcileAuditThrottlesAsync(true)
 
 		case <-p2pAssistTicker.C:
 			d.maybeReconcileTailscaleP2PAsync(false)
+
+		case <-auditSampleTicker.C:
+			d.maybeSampleDeviceAuditAsync()
+
+		case <-throttleReconcileTicker.C:
+			d.maybeReconcileAuditThrottlesAsync(false)
 
 		case <-initFailoverTimer.C:
 			applyHotReload(false)
@@ -491,7 +508,6 @@ func (d *Daemon) monitorLoop() error {
 		case <-failoverTicker.C:
 			applyHotReload(false)
 			d.maybePatrolGroupFailoverAsync()
-			d.maybeSampleDeviceAuditAsync()
 
 		case <-initRefreshTimer.C:
 			if NewMonitor(d.currentConfig()).CheckHealth().Healthy {
@@ -524,11 +540,39 @@ func (d *Daemon) maybeSampleDeviceAuditAsync() {
 		return
 	}
 	cfg := d.currentConfig()
+	collector := d.auditCollector
+	if collector == nil {
+		collector = audit.NewCollector(cfg)
+		d.auditCollector = collector
+	}
 	go func() {
 		defer d.auditSampling.Store(false)
-		ctx, cancel := context.WithTimeout(d.ctx, 4*time.Second)
+		ctx, cancel := context.WithTimeout(d.ctx, 3*time.Second)
 		defer cancel()
-		_ = audit.NewCollector(cfg).Collect(ctx, audit.CollectOptions{Limit: 10})
+		collector.UpdateConfig(cfg)
+		_ = collector.SampleActiveConnections(ctx)
+	}()
+}
+
+func (d *Daemon) maybeReconcileAuditThrottlesAsync(force bool) {
+	if runtime.GOOS != "linux" {
+		return
+	}
+	cfg := d.currentConfig()
+	if cfg == nil || (!force && len(cfg.Audit.Throttles) == 0) {
+		return
+	}
+	if !d.throttleReconciling.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer d.throttleReconciling.Store(false)
+		ctx, cancel := context.WithTimeout(d.ctx, 6*time.Second)
+		defer cancel()
+		res := audit.ApplyThrottleRules(ctx, cfg)
+		if !res.Applied && len(cfg.Audit.Throttles) > 0 && res.Message != "" {
+			logger.Warn("[Audit-Throttle] 同步内核限速表异常: %s", res.Message)
+		}
 	}()
 }
 

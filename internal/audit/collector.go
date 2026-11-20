@@ -210,6 +210,17 @@ type CollectOptions struct {
 	SortAsc      bool   // 是否升序排列 (默认 false 即降序)
 }
 
+// UpdateConfig 在常驻采集器上刷新最新配置与 Clash API 访问凭据。
+func (c *Collector) UpdateConfig(cfg *config.Config) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cfg = cfg
+	if !c.customEndpoints {
+		c.endpoints = singbox.ClashAPIEndpoints()
+		c.secret = singbox.ClashAPISecret()
+	}
+}
+
 // CollectWithConfig 在常驻单例 Collector 上注入最新配置并采样实时连接与历史增量。
 func (c *Collector) CollectWithConfig(ctx context.Context, cfg *config.Config, opts CollectOptions) *Report {
 	c.mu.Lock()
@@ -222,11 +233,51 @@ func (c *Collector) CollectWithConfig(ctx context.Context, cfg *config.Config, o
 	return c.collectLocked(ctx, opts)
 }
 
+// SampleActiveConnections 执行轻量级活跃连接增量采样并持久化至内存快照，跳过全量排序/AI 评分以适配高频后台轮询。
+func (c *Collector) SampleActiveConnections(ctx context.Context) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, _, _, _, _, _, reachable := c.sampleActiveLocked(ctx, c.nowFunc())
+	return reachable
+}
+
 // Collect 采样当前活跃连接、合并历史增量窗口、运行非线性风险引擎并生成完整审计报告。
 func (c *Collector) Collect(ctx context.Context, opts CollectOptions) *Report {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.collectLocked(ctx, opts)
+}
+
+func (c *Collector) sampleActiveLocked(ctx context.Context, now time.Time) (
+	state *persistedAuditState,
+	activeByKey map[string][]string,
+	devDirectory map[string]lanDeviceInfo,
+	selfIPs map[string]bool,
+	engine *NonlinearEngine,
+	usedAddr string,
+	reachable bool,
+) {
+	state = c.loadStateLocked(now.Unix())
+	devDirectory = c.resolveLANDevicesLocked()
+	selfIPs = collectLocalInterfaceIPs()
+	engine = NewNonlinearEngine(c.cfg)
+	activeByKey = make(map[string][]string)
+
+	connsResp, addr, err := c.fetchConnectionsLocked(ctx)
+	if err == nil && connsResp != nil {
+		reachable = true
+		usedAddr = addr
+		c.ingestConnectionsLocked(state, connsResp.Connections, devDirectory, selfIPs, activeByKey, engine, now)
+		maps.DeleteFunc(state.Flows, func(_ string, e *persistedFlowEntry) bool {
+			return e == nil || engine.IsBlocked(normalizeSourceDeviceIP(e.DeviceIP, selfIPs, devDirectory), e.Target)
+		})
+		c.saveStateLocked(state, activeByKey, now)
+	} else {
+		maps.DeleteFunc(state.Flows, func(_ string, e *persistedFlowEntry) bool {
+			return e == nil || engine.IsBlocked(normalizeSourceDeviceIP(e.DeviceIP, selfIPs, devDirectory), e.Target)
+		})
+	}
+	return state, activeByKey, devDirectory, selfIPs, engine, usedAddr, reachable
 }
 
 func (c *Collector) collectLocked(ctx context.Context, opts CollectOptions) *Report {
@@ -240,6 +291,7 @@ func (c *Collector) collectLocked(ctx context.Context, opts CollectOptions) *Rep
 	if c.cfg != nil {
 		rep.BlockRules = singbox.EffectiveBlockRules(c.cfg)
 		rep.BlockedCount = len(rep.BlockRules)
+		rep.Throttles = slices.Clone(c.cfg.Audit.Throttles)
 		rep.Whitelist = slices.Clone(c.cfg.Audit.Whitelist)
 		rep.WhitelistCount = len(rep.Whitelist)
 		rep.PCDNBlockEnabled = c.cfg.Audit.IsPCDNBlockEnabled()
@@ -250,25 +302,11 @@ func (c *Collector) collectLocked(ctx context.Context, opts CollectOptions) *Rep
 	}
 	rep.PCDNRuleCount = len(singbox.BuiltinPCDNDomainSuffixes)
 
-	state := c.loadStateLocked(now.Unix())
-	devDirectory := c.resolveLANDevicesLocked()
-	selfIPs := collectLocalInterfaceIPs()
-	engine := NewNonlinearEngine(c.cfg)
-
-	connsResp, usedAddr, err := c.fetchConnectionsLocked(ctx)
-	activeByKey := make(map[string][]string)
-	if err == nil && connsResp != nil {
+	state, activeByKey, devDirectory, selfIPs, engine, usedAddr, reachable := c.sampleActiveLocked(ctx, now)
+	if reachable {
 		rep.Reachable = true
 		rep.ControllerAddr = usedAddr
-		c.ingestConnectionsLocked(state, connsResp.Connections, devDirectory, selfIPs, activeByKey, engine, now)
-		maps.DeleteFunc(state.Flows, func(_ string, e *persistedFlowEntry) bool {
-			return e == nil || engine.IsBlocked(normalizeSourceDeviceIP(e.DeviceIP, selfIPs, devDirectory), e.Target)
-		})
-		c.saveStateLocked(state, activeByKey, now)
 	} else {
-		maps.DeleteFunc(state.Flows, func(_ string, e *persistedFlowEntry) bool {
-			return e == nil || engine.IsBlocked(normalizeSourceDeviceIP(e.DeviceIP, selfIPs, devDirectory), e.Target)
-		})
 		rep.Reachable = false
 		if len(state.Flows) > 0 {
 			rep.Message = "当前 sing-box 控制端口不可达，正在展示最近缓存的设备审计快照"
@@ -310,32 +348,33 @@ func (c *Collector) collectLocked(ctx context.Context, opts CollectOptions) *Rep
 		activeSpanSec := max(int64(60), entry.LastSeenUnix-entry.FirstSeenUnix)
 		displayLoc := now.Location()
 		rawFlows = append(rawFlows, FlowRecord{
-			Key:           entry.Key,
-			DeviceIP:      normDevIP,
-			DeviceName:    devName,
-			DeviceMAC:     devMAC,
-			DeviceRole:    InferDeviceRole(devName),
-			Target:        entry.Target,
-			AppName:       appName,
-			RawHost:       entry.RawHost,
-			DestIP:        entry.DestIP,
-			DestPort:      entry.DestPort,
-			IsDirectIP:    entry.IsDirectIP,
-			Network:       entry.Network,
-			Outbound:      entry.Outbound,
-			Chains:        slices.Clone(entry.Chains),
-			Rule:          entry.Rule,
-			UploadBytes:   entry.UploadBytes,
-			DownloadBytes: entry.DownloadBytes,
-			ConnCount:     entry.ConnCount,
-			ActiveConns:   len(activeIDs),
-			ActiveConnIDs: activeIDs,
-			FirstSeen:     time.Unix(entry.FirstSeenUnix, 0).In(displayLoc).Format("15:04:05"),
-			LastSeen:      time.Unix(entry.LastSeenUnix, 0).In(displayLoc).Format("15:04:05"),
-			ActiveSpanSec: activeSpanSec,
-			NightHits:     entry.NightHits,
-			IntervalCV:    computeIntervalCV(entry.ArrivalsUnix),
-			AIReview:      cachedAI,
+			Key:               entry.Key,
+			DeviceIP:          normDevIP,
+			DeviceName:        devName,
+			DeviceMAC:         devMAC,
+			DeviceRole:        InferDeviceRole(devName),
+			Target:            entry.Target,
+			AppName:           appName,
+			RawHost:           entry.RawHost,
+			DestIP:            entry.DestIP,
+			DestPort:          entry.DestPort,
+			IsDirectIP:        entry.IsDirectIP,
+			Network:           entry.Network,
+			Outbound:          entry.Outbound,
+			Chains:            slices.Clone(entry.Chains),
+			Rule:              entry.Rule,
+			UploadBytes:       entry.UploadBytes,
+			DownloadBytes:     entry.DownloadBytes,
+			ThrottledRateKBps: matchThrottleRateKBps(c.cfg, entry.Target, entry.DestPort),
+			ConnCount:         entry.ConnCount,
+			ActiveConns:       len(activeIDs),
+			ActiveConnIDs:     activeIDs,
+			FirstSeen:         time.Unix(entry.FirstSeenUnix, 0).In(displayLoc).Format("15:04:05"),
+			LastSeen:          time.Unix(entry.LastSeenUnix, 0).In(displayLoc).Format("15:04:05"),
+			ActiveSpanSec:     activeSpanSec,
+			NightHits:         entry.NightHits,
+			IntervalCV:        computeIntervalCV(entry.ArrivalsUnix),
+			AIReview:          cachedAI,
 		})
 	}
 
@@ -1004,10 +1043,18 @@ func (c *Collector) saveStateLocked(st *persistedAuditState, activeByKey map[str
 	if err != nil {
 		return
 	}
-	tmpPath := c.statePath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0600); err == nil {
-		_ = os.Chmod(tmpPath, 0600)
-		_ = os.Rename(tmpPath, c.statePath)
+	if tmpFile, err := os.CreateTemp(filepath.Dir(c.statePath), ".singctl-audit-state-*.tmp"); err == nil {
+		tmpPath := tmpFile.Name()
+		_, writeErr := tmpFile.Write(data)
+		chmodErr := tmpFile.Chmod(0600)
+		closeErr := tmpFile.Close()
+		if writeErr == nil && chmodErr == nil && closeErr == nil {
+			if os.Rename(tmpPath, c.statePath) != nil {
+				_ = os.Remove(tmpPath)
+			}
+		} else {
+			_ = os.Remove(tmpPath)
+		}
 	}
 	c.cachedState = st
 	c.cachedStateFp = auditFileFingerprint(c.statePath)

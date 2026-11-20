@@ -115,6 +115,10 @@ watchdog:                                      # (可选) 看门狗守护进程�
 #   pcdn_block: true                            # 默认开启内置防 PCDN 规则集拦截 (设为 false 可关闭)
 #   whitelist:                                  # 信任放行域名后缀或 IP/CIDR 白名单 (singctl sb whitelist 自动维护)
 #     - "sync.example.com"
+#   throttles:                                  # 单目标上行限速防爆列表 (不断网封顶，由 WebUI 或 nftables 自动维护)
+#     - target: "iot-cloud.example.com"
+#       port: 443
+#       rate_kbps: 5
 #   ai:                                         # L2 大模型语义研判 (支持本地 Magpie :3425 或 OpenAI 兼容接口)
 #     endpoint: "http://127.0.0.1:3425/v1"
 #     api_key: ""
