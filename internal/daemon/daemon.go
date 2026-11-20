@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,6 +23,8 @@ import (
 	"singctl/internal/constant"
 	"singctl/internal/logger"
 	"singctl/internal/singbox"
+	"singctl/internal/tailscale"
+	"singctl/internal/util/netinfo"
 )
 
 const (
@@ -56,6 +60,11 @@ type Daemon struct {
 	failoverRunning     atomic.Bool
 	failover            *GroupFailoverState
 	auditSampling       atomic.Bool
+	p2pCtrl             *tailscale.P2PAssistController
+	p2pReconciling      atomic.Bool
+	p2pLastActive       atomic.Bool
+	p2pSnapMu           sync.Mutex
+	p2pLastSnapSummary  string
 }
 
 // NewDaemonWithMeta 创建带配置文件路径（支持热重载）与版本号标识的守护进程。
@@ -86,6 +95,25 @@ func NewDaemonWithMeta(cfg *config.Config, configPath, version string) *Daemon {
 		ver = "dev"
 	}
 
+	p2pCtrl := &tailscale.P2PAssistController{
+		BaseCtx: ctx,
+		DefaultLANCIDR: func() string {
+			s, err := netinfo.GetLANSubnet()
+			if err != nil {
+				return ""
+			}
+			return s
+		},
+		OnEvent: func(action string, healthy bool, summary string) {
+			logger.Info("[Tailscale-P2P] %s: %s", action, summary)
+			AppendRuntimeEvent(WatchdogEventRecord{
+				Action:  action,
+				Healthy: healthy,
+				Summary: summary,
+			})
+		},
+	}
+
 	return &Daemon{
 		config:             cfg,
 		configPath:         configPath,
@@ -100,6 +128,7 @@ func NewDaemonWithMeta(cfg *config.Config, configPath, version string) *Daemon {
 		reloadCh:           make(chan struct{}, 1),
 		lastSubSyncCheckAt: time.Now(), // 启动时配置已是最新或刚校验，等待首个周期后再静默比对
 		failover:           failover,
+		p2pCtrl:            p2pCtrl,
 	}
 }
 
@@ -338,6 +367,7 @@ func (d *Daemon) monitorLoop() error {
 
 	watchdogTicker := time.NewTicker(curWDInterval)
 	failoverTicker := time.NewTicker(curFOInterval)
+	p2pAssistTicker := time.NewTicker(3 * time.Second)
 	initHealthTimer := time.NewTimer(2 * time.Second)
 	initFailoverTimer := time.NewTimer(8 * time.Second)
 	initRefreshTimer := time.NewTimer(30 * time.Second)
@@ -345,6 +375,7 @@ func (d *Daemon) monitorLoop() error {
 	defer func() {
 		watchdogTicker.Stop()
 		failoverTicker.Stop()
+		p2pAssistTicker.Stop()
 		initHealthTimer.Stop()
 		initFailoverTimer.Stop()
 		initRefreshTimer.Stop()
@@ -392,10 +423,15 @@ func (d *Daemon) monitorLoop() error {
 		case <-d.reloadCh:
 			applyHotReload(true)
 			d.maybePatrolGroupFailoverAsync()
+			d.maybeReconcileTailscaleP2PAsync(true)
 
 		case <-initHealthTimer.C:
 			res := NewMonitor(d.currentConfig()).CheckHealth()
 			d.recordHealthResult(res)
+			d.maybeReconcileTailscaleP2PAsync(true)
+
+		case <-p2pAssistTicker.C:
+			d.maybeReconcileTailscaleP2PAsync(false)
 
 		case <-initFailoverTimer.C:
 			applyHotReload(false)
@@ -442,6 +478,53 @@ func (d *Daemon) maybeSampleDeviceAuditAsync() {
 		ctx, cancel := context.WithTimeout(d.ctx, 4*time.Second)
 		defer cancel()
 		_ = audit.NewCollector(cfg).Collect(ctx, audit.CollectOptions{Limit: 10})
+	}()
+}
+
+func (d *Daemon) maybeReconcileTailscaleP2PAsync(force bool) {
+	if runtime.GOOS != "linux" || d.p2pCtrl == nil {
+		return
+	}
+	cfg := d.currentConfig()
+	if cfg == nil {
+		return
+	}
+	p2pCfg := cfg.Tailscale.P2PAssist
+	if !p2pCfg.Enabled && !d.p2pLastActive.Load() && !force {
+		return
+	}
+	if !d.p2pReconciling.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer d.p2pReconciling.Store(false)
+		ctx, cancel := context.WithTimeout(d.ctx, 8*time.Second)
+		defer cancel()
+		res, err := d.p2pCtrl.Reconcile(ctx, p2pCfg)
+		if err != nil {
+			logger.Warn("[Tailscale-P2P] Reconcile error: %v", err)
+		}
+		d.p2pLastActive.Store(res.Enabled)
+
+		var peerParts []string
+		for _, k := range slices.Sorted(maps.Keys(res.PeerStates)) {
+			ps := res.PeerStates[k]
+			peerParts = append(peerParts, fmt.Sprintf("%s=%s:%d:%s", k, ps.LastResult, ps.ConsecutiveFails, ps.LastUpgradeAt))
+		}
+		summaryKey := fmt.Sprintf("%v|%s|%d|%s|%s", res.Enabled, res.ApplyMode, res.OpenPinholes, res.LastError, strings.Join(peerParts, ","))
+		d.p2pSnapMu.Lock()
+		changed := d.p2pLastSnapSummary != summaryKey || res.OpenPinholes > 0
+		if changed {
+			d.p2pLastSnapSummary = summaryKey
+		}
+		d.p2pSnapMu.Unlock()
+
+		if changed {
+			snapCopy := res
+			UpdateRuntimeState(func(snap *DaemonRuntimeSnapshot) {
+				snap.TailscaleP2P = &snapCopy
+			})
+		}
 	}()
 }
 

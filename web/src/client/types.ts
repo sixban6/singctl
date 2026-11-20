@@ -758,3 +758,92 @@ export interface ActionStreamEvent {
   code?: number;
   restarting?: boolean;
 }
+
+export type TailscaleAccessMode = 'outbound_only' | 'bidirectional_timed' | 'bidirectional';
+
+export interface TailscaleP2PPeerConfig {
+  id?: string;
+  name: string;
+  tailscale_ip?: string;
+  jit_enabled: boolean;
+  access_mode?: TailscaleAccessMode | string;
+  bidirectional_until?: string;
+  allowed_lan_targets?: string[];
+}
+
+export interface TailscaleP2PAssistConfig {
+  enabled: boolean;
+  jit_window_sec?: number;
+  cooldown_sec?: number;
+  payload_filter?: boolean;
+  sandbox_ujail?: boolean;
+  listen_port?: number;
+  peers?: TailscaleP2PPeerConfig[];
+}
+
+export interface TailscaleP2PPeerView {
+  id: string;
+  name: string;
+  shortName: string;
+  dnsName?: string;
+  hostName?: string;
+  tailscaleIPs?: string[];
+  primaryRoutes?: string[];
+  online: boolean;
+  active: boolean;
+  direct: boolean;
+  curAddr?: string;
+  relay?: string;
+  candidatePublicCount: number;
+  configured: boolean;
+  jitEnabled: boolean;
+  accessMode: TailscaleAccessMode | string;
+  effectiveAccessMode: TailscaleAccessMode | string;
+  bidirectionalUntil?: string;
+  bidirectionalRemainingSec: number;
+  allowedLanTargets?: string[];
+  pinholeActive: boolean;
+  cooldownRemainingSec: number;
+  lastUpgradeAt?: string;
+  lastResult?: string;
+}
+
+export interface TailscaleP2PRuntimeSnapshot {
+  enabled: boolean;
+  applyMode?: string;
+  openPinholes: number;
+  openPinholeIPs?: string[];
+  updatedAt?: string;
+  lastError?: string;
+}
+
+export interface TailscaleP2PReport {
+  supported: boolean;
+  isOpenWrt: boolean;
+  fw4Available: boolean;
+  ujailAvailable: boolean;
+  daemonRunning: boolean;
+  tailscaleRunning: boolean;
+  defaultLanCidr?: string;
+  openPinholes: number;
+  openPinholeIPs?: string[];
+  config: TailscaleP2PAssistConfig;
+  runtime: TailscaleP2PRuntimeSnapshot;
+  peers?: TailscaleP2PPeerView[];
+  ok?: boolean;
+  appliedLive?: boolean;
+  applyMode?: string;
+  message?: string;
+}
+
+export interface TailscaleP2PPokeResult {
+  ok: boolean;
+  direct: boolean;
+  curAddr?: string;
+  relay?: string;
+  latencyMs: number;
+  pinholeMs: number;
+  candidateCount: number;
+  message: string;
+  report?: TailscaleP2PReport;
+}

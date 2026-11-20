@@ -19,10 +19,10 @@
 
 使用 Tailscale 官方二进制，功能最完整，**优先选择此模式**。
 
-> **📦 安装包来源说明**：singctl 不直接从 Tailscale 官网下载，而是从 [sixban6/auto_fetch_tailscale](https://github.com/sixban6/auto_fetch_tailscale) 仓库的 Releases 拉取。该仓库由 CI 自动跟踪 [Tailscale 官方稳定版](https://pkgs.tailscale.com/stable/?mode=json)，下载**官方原版二进制**后重新打包：
-> - **ARM 架构包**（`*_arm64.tgz`）：对 `tailscale` / `tailscaled` 二进制使用 **UPX（LZMA 极限算法）加壳压缩**，最大化节省 OpenWrt/嵌入式设备的 ROM 空间；
-> - **amd64 架构包**（`*_amd64.tgz`）：官方原版，未加壳；
-> - 包名及内部目录结构与官方完全一致，且附带 `checksums.txt`，singctl 安装时会自动校验。
+> **📦 安装包来源说明**：singctl 不直接从 Tailscale 官网下载，而是从 [sixban6/auto_fetch_tailscale](https://github.com/sixban6/auto_fetch_tailscale) 仓库的 Releases 拉取：
+> - **ARM64 架构包**（`*_arm64.tgz`）：基于同版本 Tailscale 官方源码通过 `featuretags --min` 裁剪桌面冗余模块并启用 `ts_include_cli` 合体构建（`tailscale -> tailscaled` 软链接，**未 UPX 加壳**），大幅缩减体积同时减少小内存 OpenWrt 路由器的匿名内存驻留；
+> - **amd64 架构包**（`*_amd64.tgz`）：官方原版静态包；
+> - 发布包含校验文件 `checksums.txt`，singctl 安装/更新时自动校验。
 
 默认情况下无需配置 `tailscale` 字段，只有在需要授权密钥（`auth_key`）时才配置：
 
@@ -113,4 +113,34 @@ singctl ts stop
 
 ```bash
 singctl ts update
+```
+
+---
+
+## P2P 直连防线 · 零常驻暴露 (`tailscale.p2p_assist`)
+
+在保留 Tailscale P2P 直连高性能的同时，避免长期暴露公网 UDP `:41641` 并按节点精确收敛入向权限：
+
+- **JIT 瞬时打洞（Layer 1）**：闲置与已直连期间 `TS_JIT_ALLOW4` / `TS_JIT_ALLOW6` 保持空集；仅当已授权节点处于活跃转发且走 DERP 中继时，瞬时放行候选公网 IP `3~10` 秒并触发 DISCO 探活，升级直连后毫秒级撤销集合条目（由 Linux `nf_conntrack` 五元组维持已建立会话）。若连续 2 次失败则自动进入 DERP 冷却退避（默认 300 秒）。
+- **内核载荷魔法头过滤（Layer 2）**：可选开启 DISCO / WireGuard (Type 1–4) / STUN (RFC 5389) 魔法字节与长度校验 + `300/second` 限速。
+- **可选 `ujail` 沙盒（Layer 3）**：在支持 `/sbin/ujail` 的 OpenWrt 设备上可选启用 `sandbox_ujail: true`。
+- **3 态零信任双向控制（Layer 4）**：针对纳管节点支持 `outbound_only`（单向锁死）、`bidirectional_timed`（探亲限时双向，过期自动降级）与 `bidirectional`（长期双向，支持按 CIDR/`IP:port` 收窄至 `allowed_lan_targets`）；未纳入 `peers` 列表的个人终端（笔记本、手机等）不受限。
+
+可在 WebUI **「Tailscale 组网」** 页面可视化配置并测试瞬时打洞，或在 `singctl.yaml` 中配置：
+
+```yaml
+tailscale:
+  p2p_assist:
+    enabled: true
+    jit_window_sec: 5
+    cooldown_sec: 300
+    payload_filter: true
+    sandbox_ujail: false
+    peers:
+      - name: "router-remote"
+        jit_enabled: true
+        access_mode: "outbound_only"          # outbound_only | bidirectional_timed | bidirectional
+        bidirectional_until: ""               # RFC3339 时间戳（bidirectional_timed 时有效）
+        allowed_lan_targets:
+          - "192.168.1.0/24"
 ```

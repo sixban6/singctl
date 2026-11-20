@@ -29,6 +29,9 @@ import {
   SbProxiesSnapshot,
   SbProxyMode,
   SbTrafficSnapshot,
+  TailscaleP2PAssistConfig,
+  TailscaleP2PPokeResult,
+  TailscaleP2PReport,
   WatchdogReport,
 } from './types';
 
@@ -107,7 +110,8 @@ function defaultTimeoutForPath(path: string): number {
     path.startsWith('/api/adguard/filters') ||
     path.startsWith('/api/audit/ai-') ||
     path.startsWith('/api/watchdog/patrol') ||
-    path.startsWith('/api/dns/leak-test')
+    path.startsWith('/api/dns/leak-test') ||
+    path.startsWith('/api/tailscale/p2p/poke')
   ) {
     return 25000;
   }
@@ -347,6 +351,18 @@ export const clientApi = {
     request<DNSLeakReport>('/api/dns/leak-test', {
       method: 'POST',
       body: JSON.stringify({ mode }),
+    }),
+
+  getTailscaleP2P: () => request<TailscaleP2PReport>('/api/tailscale/p2p'),
+  saveTailscaleP2P: (payload: TailscaleP2PAssistConfig) =>
+    request<TailscaleP2PReport>('/api/tailscale/p2p', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+  pokeTailscaleP2P: (payload: { id?: string; name?: string }) =>
+    request<TailscaleP2PPokeResult>('/api/tailscale/p2p/poke', {
+      method: 'POST',
+      body: JSON.stringify(payload),
     }),
 
   getWatchdog: () => request<WatchdogReport>('/api/watchdog'),
