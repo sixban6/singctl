@@ -153,40 +153,47 @@ func tailscaleStatus(configPath string) map[string]any {
 	// 权威判定:`tailscale status --json` 能连通后端即 daemon 在运行,
 	// 并拿到 BackendState(Running/NeedsLogin/Stopped...)与当前启动模式。
 	// 注:不能用 pgrep -x 检测 —— busybox 1.36.1 上实测无法匹配 tailscaled(见 osutil.PgrepMatch)。
-	daemonUp, backendState, mode := queryTailscaleBackend(binPath)
+	daemonUp, backendState, mode, acceptRoutes, liveSubnets := queryTailscaleBackend(binPath)
 	if !daemonUp && binPath == "" {
 		// CLI 不存在时退化为进程检测(子串匹配,兼容 busybox)
 		daemonUp = osutil.PgrepMatch("tailscaled")
 	}
 
 	authKeySet := false
+	subnets := ""
 	if cfg, err := config.Load(configPath); err == nil {
 		authKeySet = strings.TrimSpace(cfg.Tailscale.AuthKey) != ""
+		subnets = strings.TrimSpace(cfg.Tailscale.Subnets)
+	}
+	if subnets == "" && liveSubnets != "" {
+		subnets = liveSubnets
 	}
 
 	return map[string]any{
-		"installed":  binPath != "",
-		"running":    daemonUp,
-		"state":      backendState,
-		"mode":       mode,
-		"version":    version,
-		"authKeySet": authKeySet,
+		"installed":    binPath != "",
+		"running":      daemonUp,
+		"state":        backendState,
+		"mode":         mode,
+		"acceptRoutes": acceptRoutes,
+		"subnets":      subnets,
+		"version":      version,
+		"authKeySet":   authKeySet,
 	}
 }
 
-// queryTailscaleBackend 通过 `tailscale status --json` 判定 daemon 是否存活及其后端状态。
-// daemon 存活时返回 (true, BackendState);不可达返回 (false, "")。
+// queryTailscaleBackend 通过 `tailscale status --json` 判定 daemon 是否存活及其后端状态，并读取 LocalAPI prefs 中的 RouteAll。
+// daemon 存活时返回 (true, BackendState, mode, acceptRoutes, liveSubnets);不可达返回 (false, "", "", false, "")。
 // 实测退出码:daemon 在(含 Stopped/NeedsLogin)rc=0,daemon 不在 rc=1。
-// 同时从 Self 提取启动模式: AdvertisedRoutes(广播的子网路由) + ExitNodeOption(出口节点)。
-func queryTailscaleBackend(binPath string) (bool, string, string) {
+// 同时从 Self 提取启动模式: AdvertisedRoutes(广播的非默认子网路由) + ExitNodeOption(出口节点)。
+func queryTailscaleBackend(binPath string) (bool, string, string, bool, string) {
 	if binPath == "" {
-		return false, "", ""
+		return false, "", "", false, ""
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, binPath, "status", "--json").Output()
 	if err != nil {
-		return false, "", ""
+		return false, "", "", false, ""
 	}
 	var st struct {
 		BackendState string `json:"BackendState"`
@@ -196,11 +203,20 @@ func queryTailscaleBackend(binPath string) (bool, string, string) {
 		} `json:"Self"`
 	}
 	if json.Unmarshal(out, &st) != nil || st.BackendState == "" {
-		return false, "", ""
+		return false, "", "", false, ""
 	}
-	// 与 WebUI 启动模式选项对应: 默认""/router/exit/gateway(router+exit)
+	// 过滤出非默认网关路由（排除 0.0.0.0/0 与 ::/0，仅保留广播的 LAN 子网）。
+	var lanRoutes []string
+	for _, r := range st.Self.AdvertisedRoutes {
+		trimmed := strings.TrimSpace(r)
+		if trimmed == "" || trimmed == "0.0.0.0/0" || trimmed == "::/0" {
+			continue
+		}
+		lanRoutes = append(lanRoutes, trimmed)
+	}
+	// 与 WebUI 启动模式选项对应: ""(或client)/router/exit/gateway(router+exit)
 	mode := ""
-	hasRoutes := len(st.Self.AdvertisedRoutes) > 0
+	hasRoutes := len(lanRoutes) > 0
 	switch {
 	case st.Self.ExitNodeOption && hasRoutes:
 		mode = "gateway"
@@ -209,7 +225,43 @@ func queryTailscaleBackend(binPath string) (bool, string, string) {
 	case hasRoutes:
 		mode = "router"
 	}
-	return true, st.BackendState, mode
+	acceptRoutes := queryTailscaleAcceptRoutes(ctx, binPath)
+	return true, st.BackendState, mode, acceptRoutes, strings.Join(lanRoutes, ", ")
+}
+
+func queryTailscaleAcceptRoutes(ctx context.Context, binPath string) bool {
+	// 优先直连 tailscaled LocalAPI /localapi/v0/prefs（兼容精简版无 debug CLI 场景）。
+	hc := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(dCtx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{Timeout: 2 * time.Second}).DialContext(dCtx, "unix", tailscale.DefaultTailscaledSocket)
+			},
+		},
+		Timeout: 2 * time.Second,
+	}
+	if req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://local-tailscaled.sock/localapi/v0/prefs", nil); err == nil {
+		if resp, err := hc.Do(req); err == nil {
+			defer resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				var prefs struct {
+					RouteAll bool `json:"RouteAll"`
+				}
+				if json.NewDecoder(resp.Body).Decode(&prefs) == nil {
+					return prefs.RouteAll
+				}
+			}
+		}
+	}
+	// 回退 CLI: tailscale debug prefs
+	if out, err := exec.CommandContext(ctx, binPath, "debug", "prefs").Output(); err == nil {
+		var prefs struct {
+			RouteAll bool `json:"RouteAll"`
+		}
+		if json.Unmarshal(out, &prefs) == nil {
+			return prefs.RouteAll
+		}
+	}
+	return false
 }
 
 func firewallStatus() map[string]any {
@@ -420,6 +472,19 @@ func (s *Server) handleConfigPut(w http.ResponseWriter, r *http.Request) {
 }
 
 func (dto ConfigDTO) ApplyTo(cfg *config.Config) {
+	applySubsToConfig(dto.Subs, cfg)
+	cfg.GitHub.MirrorURL = strings.TrimSpace(dto.GitHub.MirrorURL)
+	cfg.Hy2.Up = dto.Hy2.Up
+	cfg.Hy2.Down = dto.Hy2.Down
+	cfg.Tailscale.AuthKey = strings.TrimSpace(dto.Tailscale.AuthKey)
+	cfg.Tailscale.UseBuild = dto.Tailscale.UseBuild
+	cfg.Tailscale.Subnets = strings.TrimSpace(dto.Tailscale.Subnets)
+	cfg.Server.SBDomain = strings.TrimSpace(dto.Server.SBDomain)
+	cfg.Server.CFDNSKey = strings.TrimSpace(dto.Server.CFDNSKey)
+	cfg.Server.Sni = strings.TrimSpace(dto.Server.Sni)
+}
+
+func applySubsToConfig(subDTOs []SubDTO, cfg *config.Config) {
 	prevByName := make(map[string]config.Subscription, len(cfg.Subs))
 	prevByURL := make(map[string]config.Subscription, len(cfg.Subs))
 	for _, old := range cfg.Subs {
@@ -431,8 +496,8 @@ func (dto ConfigDTO) ApplyTo(cfg *config.Config) {
 		}
 	}
 
-	cfg.Subs = make([]config.Subscription, 0, len(dto.Subs))
-	for _, sub := range dto.Subs {
+	cfg.Subs = make([]config.Subscription, 0, len(subDTOs))
+	for _, sub := range subDTOs {
 		name := strings.TrimSpace(sub.Name)
 		u := strings.TrimSpace(sub.URL)
 		prev, ok := prevByName[name]
@@ -462,15 +527,6 @@ func (dto ConfigDTO) ApplyTo(cfg *config.Config) {
 		}
 		cfg.Subs = append(cfg.Subs, next)
 	}
-	cfg.GitHub.MirrorURL = strings.TrimSpace(dto.GitHub.MirrorURL)
-	cfg.Hy2.Up = dto.Hy2.Up
-	cfg.Hy2.Down = dto.Hy2.Down
-	cfg.Tailscale.AuthKey = strings.TrimSpace(dto.Tailscale.AuthKey)
-	cfg.Tailscale.UseBuild = dto.Tailscale.UseBuild
-	cfg.Tailscale.Subnets = strings.TrimSpace(dto.Tailscale.Subnets)
-	cfg.Server.SBDomain = strings.TrimSpace(dto.Server.SBDomain)
-	cfg.Server.CFDNSKey = strings.TrimSpace(dto.Server.CFDNSKey)
-	cfg.Server.Sni = strings.TrimSpace(dto.Server.Sni)
 }
 
 // ───────────────────────── 配置(原文 YAML) ─────────────────────────

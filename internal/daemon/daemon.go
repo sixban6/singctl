@@ -28,10 +28,42 @@ import (
 )
 
 const (
-	envDaemonized        = "SINGCTL_DAEMONIZED"
-	readyFd              = 3
-	ruleSetRetryCooldown = 30 * time.Minute
+	envDaemonized          = "SINGCTL_DAEMONIZED"
+	readyFd                = 3
+	ruleSetRetryCooldown   = 30 * time.Minute
+	p2pDirectEventInterval = 2 * time.Hour
 )
+
+type p2pEventGate struct {
+	mu       sync.Mutex
+	lastSent map[string]time.Time
+}
+
+func extractP2PPeerLabel(summary string) string {
+	trimmed := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(summary), "节点"))
+	fields := strings.Fields(trimmed)
+	if len(fields) > 0 {
+		return fields[0]
+	}
+	return "default"
+}
+
+func (g *p2pEventGate) shouldAppendRuntimeEvent(action, summary string, now time.Time) bool {
+	if action != "TS_P2P_DIRECT_OK" {
+		return true
+	}
+	peerKey := extractP2PPeerLabel(summary)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.lastSent == nil {
+		g.lastSent = make(map[string]time.Time)
+	}
+	if last, ok := g.lastSent[peerKey]; ok && now.Sub(last) < p2pDirectEventInterval {
+		return false
+	}
+	g.lastSent[peerKey] = now
+	return true
+}
 
 // Daemon 守护进程
 type Daemon struct {
@@ -95,6 +127,7 @@ func NewDaemonWithMeta(cfg *config.Config, configPath, version string) *Daemon {
 		ver = "dev"
 	}
 
+	eventGate := &p2pEventGate{}
 	p2pCtrl := &tailscale.P2PAssistController{
 		BaseCtx: ctx,
 		DefaultLANCIDR: func() string {
@@ -106,6 +139,9 @@ func NewDaemonWithMeta(cfg *config.Config, configPath, version string) *Daemon {
 		},
 		OnEvent: func(action string, healthy bool, summary string) {
 			logger.Info("[Tailscale-P2P] %s: %s", action, summary)
+			if !eventGate.shouldAppendRuntimeEvent(action, summary, time.Now()) {
+				return
+			}
 			AppendRuntimeEvent(WatchdogEventRecord{
 				Action:  action,
 				Healthy: healthy,

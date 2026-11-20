@@ -71,6 +71,9 @@ singctl ts start -e
 
 # 同时作为路由器 + 出口节点（并接收其他节点广播路由）
 singctl ts start -r -e -a
+
+# 在 tailscaled 运行期间热切换模式/路由策略（不重启守护进程）
+singctl ts start -m gateway --reconfigure
 ```
 
 | 参数 | 说明 |
@@ -79,6 +82,7 @@ singctl ts start -r -e -a
 | `--exit-node` / `-e` | 将本机设置为 Tailscale 网络的出口节点 |
 | `--accept-routes` / `-a` | 接收其他节点广播路由（例如访问异地内网 IP） |
 | `--mode` / `-m` | 快速模式：`client` / `router` / `exit` / `gateway` |
+| `--reconfigure` | 当 `tailscaled` 已在运行时跳过重启与二次 `auth_key` 认证，直接热切换模式并同步广播子网 / `--accept-routes` 策略 |
 
 快速模式说明：
 
@@ -109,11 +113,35 @@ singctl ts stop
 
 ---
 
-### `singctl ts update` — 更新 Tailscale
+### `singctl ts update` — 两阶段零失联安全更新 Tailscale
+
+支持 **OpenWrt (`procd`)** 与 **Linux (`systemd`)**（包括直接通过 Tailscale 隧道远程 SSH 或在 WebUI 控制台内发起更新）：
+
+- **Phase 1（在线零 `/tmp` 预落盘与预检）**：体检剩余 Flash 与内存 → 直连 GitHub API 获取官方 SHA256 digest → 单遍流式解压直写 `/usr/sbin/.tailscaled.new`（`0 MB` `/tmp` 占用，自动保留 ARM64 精简合体版 `tailscale -> tailscaled` 软链接）→ 离线预检 `--version` 可执行兼容性。
+- **Phase 2（脱离父进程原子切换与自动回滚）**：`setsid` 启动极简 POSIX `/bin/sh` 守护器（预留 2 秒缓冲刷新响应）→ 停旧服、同分区 `mv` 备份并原子替换、启新服 → 执行默认 `25s` 健康门禁校验（`BackendState == Running`）；若启动崩溃或超时未上线，自动回滚旧版并恢复隧道。
 
 ```bash
+# 标准交互式更新（等待后台健康门禁完成并输出最终结果）
 singctl ts update
+
+# 仅执行升级前体检（不下载、不修改系统）
+singctl ts update --dry-run
+
+# 同版本强制重刷（如从标准版/UPX版换装精简合体版，或修复二进制）
+singctl ts update --force
+
+# 自定义健康门禁超时（5~60 秒）或移交后台后立即返回
+singctl ts update --timeout 30 --no-wait
 ```
+
+| 参数 | 默认值 | 说明 |
+| :--- | :--- | :--- |
+| `--dry-run` | `false` | 仅执行版本、Flash 空间、内存、服务管理器体检并输出结果，不做修改 |
+| `--force` / `-f` | `false` | 即使已为最新版本也强制重新下载校验并重刷 |
+| `--timeout` | `25` | 后台切换健康门禁等待秒数（范围 `5~60`） |
+| `--no-wait` | `false` | 移交脱离进程后台守护器后立即返回 |
+
+> **WebUI 零失联集成**：在控制台 **「网络与组网 → Tailscale 异地组网」** 中可直接完成全生命周期操作（未安装时展示安装引导与内联 `auth_key`/`subnets` 表单；已安装后可修改运行模式与 `auth_key`/`subnets` 并通过确认弹窗点击 **「保存并热切换模式」** 在线热切换 `--reconfigure`，无需跳转其他菜单）。点击 **「零失联更新」** 会先展示升级前体检抽屉（含是否经 Tailscale 远程访问提示与可选「强制重刷当前版本」）；点击开始后即使隧道短暂重建 2~5 秒，页面也会保持静默自动重连并展示最终升级/回滚结果。
 
 ---
 

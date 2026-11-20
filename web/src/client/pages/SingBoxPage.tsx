@@ -10,6 +10,7 @@ import {
   Cpu,
   FileCode,
   Layers,
+  Link2,
   Play,
   Power,
   RefreshCw,
@@ -44,6 +45,7 @@ import {
 } from '../types';
 import { ProxyNodesPanel } from './ProxyNodesPanel';
 import { GroupsOrchestratorPanel } from './GroupsOrchestratorPanel';
+import { SubscriptionsPanel } from './SubscriptionsPanel';
 
 export interface SingBoxPageProps {
   status: ClientStatusResponse | null;
@@ -52,13 +54,15 @@ export interface SingBoxPageProps {
   onSubChange?: (sub: string) => void;
   onAction: (name: string, params?: Record<string, unknown>, confirmMsg?: string) => void;
   onNavigate: (tab: string, sub?: string) => void;
+  onRefreshStatus?: () => void;
 }
 
-type SbSubTab = 'routing' | 'nodes' | 'groups' | 'editor';
+type SbSubTab = 'routing' | 'nodes' | 'groups' | 'subs' | 'editor';
 
 function normalizeSbSubTab(raw?: string): SbSubTab {
   if (raw === 'nodes') return 'nodes';
   if (raw === 'groups') return 'groups';
+  if (raw === 'subs') return 'subs';
   if (raw === 'editor') return 'editor';
   return 'routing';
 }
@@ -115,6 +119,7 @@ export const SingBoxPage: React.FC<SingBoxPageProps> = ({
   onSubChange,
   onAction,
   onNavigate,
+  onRefreshStatus,
 }) => {
   const { success, error, warn, toast } = useToast();
   const [sub, setSub] = useState<SbSubTab>(() => normalizeSbSubTab(initialSub));
@@ -564,6 +569,7 @@ export const SingBoxPage: React.FC<SingBoxPageProps> = ({
               { key: 'routing', label: '智能分流', icon: <SlidersHorizontal className="w-3.5 h-3.5" /> },
               { key: 'nodes', label: '节点选择', icon: <Cpu className="w-3.5 h-3.5" /> },
               { key: 'groups', label: '分组编排', icon: <Layers className="w-3.5 h-3.5" /> },
+              { key: 'subs', label: '订阅源', icon: <Link2 className="w-3.5 h-3.5" /> },
               { key: 'editor', label: 'config.json', icon: <FileCode className="w-3.5 h-3.5" /> },
             ]}
           />
@@ -1015,6 +1021,18 @@ export const SingBoxPage: React.FC<SingBoxPageProps> = ({
           onJumpToGroup={(gName) => {
             setFocusGroup(gName);
             selectSubTab('nodes');
+          }}
+        />
+      )}
+
+      {/* Sub-Tab 3.5: 订阅源与 Hysteria2 带宽 */}
+      {sub === 'subs' && (
+        <SubscriptionsPanel
+          busy={busy}
+          onAction={onAction}
+          onSaved={() => {
+            setSbCfg(null);
+            onRefreshStatus?.();
           }}
         />
       )}

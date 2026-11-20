@@ -225,12 +225,13 @@ func TestP2PAssistController_ActiveDERPUpgradesAndClosesImmediately(t *testing.T
 	}
 
 	ctrl := &P2PAssistController{
-		LocalAPI:       api,
-		FW4:            fw4,
-		Now:            clk.Now,
-		Sleep:          clk.Sleep,
-		DefaultLANCIDR: func() string { return "192.168.180.0/24" },
-		HostSelfIPs:    func() []netip.Addr { return nil },
+		LocalAPI:        api,
+		FW4:             fw4,
+		Now:             clk.Now,
+		Sleep:           clk.Sleep,
+		MinAutoJITBytes: -1,
+		DefaultLANCIDR:  func() string { return "192.168.180.0/24" },
+		HostSelfIPs:     func() []netip.Addr { return nil },
 		OnEvent: func(action string, healthy bool, summary string) {
 			mu.Lock()
 			events = append(events, action+":"+summary)
@@ -293,12 +294,13 @@ func TestP2PAssistController_FailureCooldownTimedExpiryAndDisable(t *testing.T) 
 	}
 
 	ctrl := &P2PAssistController{
-		LocalAPI:       api,
-		FW4:            fw4,
-		Now:            clk.Now,
-		Sleep:          clk.Sleep,
-		DefaultLANCIDR: func() string { return "192.168.180.0/24" },
-		HostSelfIPs:    func() []netip.Addr { return nil },
+		LocalAPI:        api,
+		FW4:             fw4,
+		Now:             clk.Now,
+		Sleep:           clk.Sleep,
+		MinAutoJITBytes: -1,
+		DefaultLANCIDR:  func() string { return "192.168.180.0/24" },
+		HostSelfIPs:     func() []netip.Addr { return nil },
 	}
 
 	cfg := config.TailscaleP2PAssistConfig{
@@ -407,12 +409,13 @@ func TestP2PAssistController_RaceSafety(t *testing.T) {
 	}
 
 	ctrl := &P2PAssistController{
-		LocalAPI:       api,
-		FW4:            fw4,
-		Now:            clk.Now,
-		Sleep:          clk.Sleep,
-		DefaultLANCIDR: func() string { return "192.168.180.0/24" },
-		HostSelfIPs:    func() []netip.Addr { return nil },
+		LocalAPI:        api,
+		FW4:             fw4,
+		Now:             clk.Now,
+		Sleep:           clk.Sleep,
+		MinAutoJITBytes: -1,
+		DefaultLANCIDR:  func() string { return "192.168.180.0/24" },
+		HostSelfIPs:     func() []netip.Addr { return nil },
 	}
 	cfg := config.TailscaleP2PAssistConfig{
 		Enabled:      true,
@@ -465,10 +468,11 @@ func TestP2PAssistController_AsyncJITSurvivesCallerReconcileCancel(t *testing.T)
 	startedSleep := make(chan struct{}, 1)
 	releaseSleep := make(chan struct{})
 	ctrl := &P2PAssistController{
-		BaseCtx:  daemonCtx,
-		LocalAPI: api,
-		FW4:      fw4,
-		Now:      clk.Now,
+		BaseCtx:         daemonCtx,
+		LocalAPI:        api,
+		FW4:             fw4,
+		Now:             clk.Now,
+		MinAutoJITBytes: -1,
 		Sleep: func(ctx context.Context, d time.Duration) error {
 			select {
 			case startedSleep <- struct{}{}:
@@ -539,13 +543,14 @@ func TestP2PAssistController_DirectPeerClearsStaleCooldown(t *testing.T) {
 		netMap: &NetMapSnapshot{PeerEndpoints: map[string][]string{"p1": {"198.51.100.10:41641"}}},
 	}
 	ctrl := &P2PAssistController{
-		BaseCtx:        ctx,
-		LocalAPI:       api,
-		FW4:            fw4,
-		Now:            clk.Now,
-		Sleep:          clk.Sleep,
-		DefaultLANCIDR: func() string { return "192.168.180.0/24" },
-		HostSelfIPs:    func() []netip.Addr { return nil },
+		BaseCtx:         ctx,
+		LocalAPI:        api,
+		FW4:             fw4,
+		Now:             clk.Now,
+		Sleep:           clk.Sleep,
+		MinAutoJITBytes: -1,
+		DefaultLANCIDR:  func() string { return "192.168.180.0/24" },
+		HostSelfIPs:     func() []netip.Addr { return nil },
 	}
 	cfg := config.TailscaleP2PAssistConfig{
 		Enabled:      true,
@@ -565,5 +570,143 @@ func TestP2PAssistController_DirectPeerClearsStaleCooldown(t *testing.T) {
 	_, _ = ctrl.Reconcile(ctx, cfg)
 	if st := ctrl.PeerStates()["p1"]; st.ConsecutiveFails != 0 || st.CooldownRemainingSec != 0 || st.LastResult != "direct" {
 		t.Fatalf("expected direct peer in Reconcile to clear stale cooldown/fails, got %+v", st)
+	}
+}
+
+func TestP2PAssistController_AutoJITTrafficThreshold(t *testing.T) {
+	ctx := t.Context()
+	clk := newFakeClock()
+	fw4, rec := newRecordedFW4(t)
+
+	var (
+		mu      sync.Mutex
+		active  bool
+		curAddr string
+		relay   = "sfo"
+		rxBytes int64
+		txBytes int64
+	)
+
+	// Cold start: peer is already Active+DERP with historical byte counters (41272 total)
+	active = true
+	rxBytes = 24824
+	txBytes = 16448
+
+	api := &fakeLocalAPI{
+		statusFn: func(int) (*StatusSnapshot, error) {
+			rec.mu.Lock()
+			isOpenNow := len(rec.openV4) > len(rec.closeV4)
+			rec.mu.Unlock()
+			mu.Lock()
+			defer mu.Unlock()
+			if curAddr == "" && active && isOpenNow {
+				// Simulate quick upgrade only while a WAN pinhole is actively open
+				curAddr = "198.51.100.10:41641"
+				relay = ""
+			}
+			return &StatusSnapshot{
+				BackendState: "Running",
+				Self:         PeerStatus{ID: "nSelf", Addrs: []string{"203.0.113.1:41641"}},
+				Peers: []PeerStatus{
+					{
+						ID:           "p1",
+						ShortName:    "router-remote",
+						TailscaleIPs: []string{"100.64.200.2"},
+						Online:       true,
+						Active:       active,
+						CurAddr:      curAddr,
+						Relay:        relay,
+						RxBytes:      rxBytes,
+						TxBytes:      txBytes,
+					},
+				},
+			}, nil
+		},
+		netMap: &NetMapSnapshot{
+			SelfEndpoints: []string{"203.0.113.1:41641"},
+			PeerEndpoints: map[string][]string{
+				"p1": {"198.51.100.10:41641"},
+			},
+		},
+	}
+
+	ctrl := &P2PAssistController{
+		LocalAPI:       api,
+		FW4:            fw4,
+		Now:            clk.Now,
+		Sleep:          clk.Sleep,
+		DefaultLANCIDR: func() string { return "192.168.180.0/24" },
+		HostSelfIPs:    func() []netip.Addr { return nil },
+	}
+	cfg := config.TailscaleP2PAssistConfig{
+		Enabled:      true,
+		JITWindowSec: 5,
+		Peers:        []config.TailscaleP2PPeerConfig{{ID: "p1", Name: "router-remote", JITEnabled: true}},
+	}
+
+	// 1. Cold-start Active+DERP records baseline without opening a pinhole
+	if _, err := ctrl.Reconcile(ctx, cfg); err != nil {
+		t.Fatalf("cold-start Reconcile: %v", err)
+	}
+	waitControllerBackground(ctrl)
+
+	// 2. Repeated idle -> Active+DERP with small WireGuard handshake/keepalive (+400 bytes)
+	// stays suppressed across multiple active ticks, and returning idle resets the baseline so
+	// 15 cycles (6000 cumulative bytes) never trigger a pinhole.
+	for range 15 {
+		mu.Lock()
+		active = false
+		mu.Unlock()
+		_, _ = ctrl.Reconcile(ctx, cfg)
+		waitControllerBackground(ctrl)
+
+		mu.Lock()
+		active = true
+		rxBytes += 200
+		txBytes += 200
+		mu.Unlock()
+		_, _ = ctrl.Reconcile(ctx, cfg)
+		waitControllerBackground(ctrl)
+		_, _ = ctrl.Reconcile(ctx, cfg)
+		waitControllerBackground(ctrl)
+	}
+
+	rec.mu.Lock()
+	opensBeforeRealTraffic := len(rec.openV4)
+	rec.mu.Unlock()
+	if opensBeforeRealTraffic != 0 {
+		t.Fatalf("expected 0 automatic pinholes during tiny handshake bursts, got %d", opensBeforeRealTraffic)
+	}
+
+	// 3. Real business traffic (+6000 bytes >= 4096) triggers automatic JIT pinhole & direct upgrade
+	mu.Lock()
+	active = true
+	rxBytes += 4000
+	txBytes += 2000
+	mu.Unlock()
+	if _, err := ctrl.Reconcile(ctx, cfg); err != nil {
+		t.Fatalf("traffic Reconcile: %v", err)
+	}
+	waitControllerBackground(ctrl)
+
+	rec.mu.Lock()
+	opensAfterRealTraffic := len(rec.openV4)
+	closesAfterRealTraffic := len(rec.closeV4)
+	rec.mu.Unlock()
+	if opensAfterRealTraffic != 1 || closesAfterRealTraffic != 1 {
+		t.Fatalf("expected 1 open and 1 close on real traffic, got open=%d close=%d", opensAfterRealTraffic, closesAfterRealTraffic)
+	}
+
+	// 4. Manual PokePeer still works even when CurAddr returns to DERP with zero new traffic
+	mu.Lock()
+	curAddr = ""
+	relay = "sfo"
+	mu.Unlock()
+	_, _ = ctrl.Reconcile(ctx, cfg)
+	waitControllerBackground(ctrl)
+
+	res, err := ctrl.PokePeer(ctx, cfg, "p1")
+	if err != nil || res == nil || res.CandidateCount != 1 {
+		t.Fatalf("expected manual PokePeer to succeed regardless of traffic threshold, got res=%+v err=%v", res, err)
 	}
 }

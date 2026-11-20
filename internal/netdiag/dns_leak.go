@@ -1610,3 +1610,25 @@ func lookupTargetISPWithFallback(ctx context.Context, ip string) (*ISPInfo, erro
 	info.Type = CategorizeISP(info.ISP, info.Org, info.ASN, info.CountryCode)
 	return info, nil
 }
+
+// ProbeGatewayEDNSOnce 从路由器网关视角发起单次随机子域 EDNS 探测，返回实际触达海外权威的递归解析器画像。
+func ProbeGatewayEDNSOnce(ctx context.Context) (*DNSResolverProfile, error) {
+	probeCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+
+	client := &http.Client{Timeout: 4 * time.Second}
+	res, err := fetchOneEDNSProbe(probeCtx, client)
+	if err != nil {
+		return nil, err
+	}
+	c, cc, isp := parseEDNSGeo(res.DNSGeo)
+	_, ecsCC, _ := parseEDNSGeo(res.EDNSGeo)
+	return &DNSResolverProfile{
+		IP:             res.DNSIP,
+		Country:        c,
+		CountryCode:    cc,
+		ISP:            isp,
+		ECS:            res.EDNSIP,
+		ECSCountryCode: ecsCC,
+	}, nil
+}

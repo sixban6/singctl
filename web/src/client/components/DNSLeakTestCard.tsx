@@ -2,11 +2,14 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
   AlertTriangle,
+  Check,
+  Copy,
   Eye,
   EyeOff,
   Globe,
   Monitor,
   Radar,
+  RefreshCw,
   Router,
   ShieldAlert,
   ShieldCheck,
@@ -17,21 +20,33 @@ import { clientApi } from '../api';
 import {
   BrowserEDNSSample,
   BrowserWebRTCReport,
+  copyPlainText,
   countryFlag,
-  maskIP,
+  detectBrowserDoHGuide,
+  isLikelyTailscaleHost,
   probeBrowserDomesticIP,
   probeBrowserOverseasIP,
   runBrowserEDNSSweep,
   runBrowserWebRTCProbe,
+  runQuickBrowserEDNSProbe,
   sameIPv6Prefix48,
 } from '../lib/leakProbes';
-import { DNSLeakReport, EgressEndpoint } from '../types';
+import {
+  maskFullIP,
+  PRIVACY_MASK_EVENT,
+  readPrivacyMaskPref,
+  redactInlineSensitive,
+  writePrivacyMaskPref,
+} from '../lib/privacyMask';
+import { BrowserDoHCheckResponse, DNSLeakReport, EgressEndpoint } from '../types';
 
 export interface DNSLeakTestCardProps {
   title?: string;
   subtitle?: string;
   report?: DNSLeakReport | null;
   onReportChange?: (rep: DNSLeakReport) => void;
+  privacyMask?: boolean;
+  onPrivacyMaskChange?: (next: boolean) => void;
 }
 
 type SweepMode = 'standard' | 'deep';
@@ -68,6 +83,93 @@ interface MergedDNSRow {
 
 // Keep last completed scan across route/tab switches between NetworkPage and AdGuardPage.
 let cachedSuiteState: PanoramicSuiteState | null = null;
+
+export const BROWSER_DOH_EVENT = 'singctl:browser-doh-updated';
+let cachedBrowserDoH: BrowserDoHCheckResponse | null = null;
+let browserDoHInFlight: Promise<BrowserDoHCheckResponse | null> | null = null;
+
+export function getCachedBrowserDoH(): BrowserDoHCheckResponse | null {
+  return cachedBrowserDoH;
+}
+
+export async function runBrowserDoHCheckFlow(
+  existingSamples?: BrowserEDNSSample[],
+  attempted?: number,
+  failed?: number,
+  presetProbeId?: string,
+): Promise<BrowserDoHCheckResponse | null> {
+  const hasExplicit = existingSamples !== undefined;
+  if (!hasExplicit && browserDoHInFlight) {
+    return browserDoHInFlight;
+  }
+
+  const task = (async (): Promise<BrowserDoHCheckResponse | null> => {
+    try {
+      let samples: BrowserEDNSSample[] = [];
+      let probeAttempted = attempted ?? 0;
+      let probeFailed = failed ?? 0;
+      let probeId = presetProbeId;
+
+      if (hasExplicit) {
+        samples = existingSamples ?? [];
+      } else if (typeof window !== 'undefined' && isLikelyTailscaleHost(window.location.hostname)) {
+        probeAttempted = 0;
+        probeFailed = 0;
+      } else {
+        const begin = await clientApi.checkBrowserDoH({ phase: 'begin' }).catch(() => null);
+        if (begin?.status === 'skipped_remote') {
+          cachedBrowserDoH = begin;
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent<BrowserDoHCheckResponse>(BROWSER_DOH_EVENT, { detail: begin }));
+          }
+          return begin;
+        }
+        if (begin?.probeId) {
+          probeId = begin.probeId;
+        }
+        const quick = await runQuickBrowserEDNSProbe(3);
+        samples = quick.samples;
+        probeAttempted = quick.attempted;
+        probeFailed = quick.failed;
+      }
+
+      const compactMap = new Map<string, BrowserEDNSSample>();
+      for (const s of samples) {
+        if (s.dnsIp && !compactMap.has(s.dnsIp)) {
+          compactMap.set(s.dnsIp, {
+            dnsIp: s.dnsIp,
+            country: s.country,
+            countryCode: s.countryCode,
+            isp: s.isp,
+          });
+        }
+      }
+
+      const res = await clientApi.checkBrowserDoH({
+        phase: 'finish',
+        probeId,
+        browserSamples: Array.from(compactMap.values()),
+        browserProbeAttempted: probeAttempted,
+        browserProbeFailed: probeFailed,
+      });
+      cachedBrowserDoH = res;
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent<BrowserDoHCheckResponse>(BROWSER_DOH_EVENT, { detail: res }));
+      }
+      return res;
+    } catch {
+      return null;
+    }
+  })();
+
+  if (!hasExplicit) {
+    browserDoHInFlight = task.finally(() => {
+      browserDoHInFlight = null;
+    });
+    return browserDoHInFlight;
+  }
+  return task;
+}
 
 const VERDICT_META: Record<
   string,
@@ -109,13 +211,69 @@ export const DNSLeakTestCard: React.FC<DNSLeakTestCardProps> = ({
   subtitle = '同步从「当前浏览器视角」与「路由器网关视角」执行多轮随机子域 EDNS 扫探、四路双栈出口核验及 WebRTC 检测（类 ipleak.net）',
   report: controlledReport,
   onReportChange,
+  privacyMask,
+  onPrivacyMaskChange,
 }) => {
   const { success, error, toast } = useToast();
   const [suite, setSuite] = useState<PanoramicSuiteState | null>(() => cachedSuiteState);
   const [running, setRunning] = useState(false);
-  const [hideIP, setHideIP] = useState(false);
+  const [localMask, setLocalMask] = useState<boolean>(() => readPrivacyMaskPref());
+  const [browserDoH, setBrowserDoH] = useState<BrowserDoHCheckResponse | null>(() => getCachedBrowserDoH());
+  const [checkingDoH, setCheckingDoH] = useState(false);
+  const [copiedGuideUrl, setCopiedGuideUrl] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const runIdRef = useRef(0);
+
+  const isControlledMask = privacyMask !== undefined;
+  const hideIP = isControlledMask ? Boolean(privacyMask) : localMask;
+
+  useEffect(() => {
+    if (isControlledMask) return;
+    const onMaskChange = (ev: Event) => {
+      const detail = (ev as CustomEvent<boolean>).detail;
+      setLocalMask(typeof detail === 'boolean' ? detail : readPrivacyMaskPref());
+    };
+    window.addEventListener(PRIVACY_MASK_EVENT, onMaskChange);
+    return () => window.removeEventListener(PRIVACY_MASK_EVENT, onMaskChange);
+  }, [isControlledMask]);
+
+  useEffect(() => {
+    const onDoHUpdated = (ev: Event) => {
+      const detail = (ev as CustomEvent<BrowserDoHCheckResponse>).detail;
+      if (detail) setBrowserDoH(detail);
+    };
+    window.addEventListener(BROWSER_DOH_EVENT, onDoHUpdated);
+    return () => window.removeEventListener(BROWSER_DOH_EVENT, onDoHUpdated);
+  }, []);
+
+  const toggleMask = () => {
+    const next = !hideIP;
+    if (onPrivacyMaskChange) {
+      onPrivacyMaskChange(next);
+    } else {
+      setLocalMask(next);
+      writePrivacyMaskPref(next);
+    }
+  };
+
+  const handleCheckBrowserDoH = async () => {
+    setCheckingDoH(true);
+    try {
+      const res = await runBrowserDoHCheckFlow();
+      if (res) {
+        setBrowserDoH(res);
+        if (res.status === 'detected') {
+          toast(`检测到浏览器安全 DNS（${res.detectedProvider || 'DoH'}）`, 'warn');
+        } else if (res.status === 'suspected') {
+          toast('检测到浏览器与网关 DNS 出口存在分歧', 'warn');
+        } else if (res.status === 'clean') {
+          success('未检测到当前浏览器绕过网关使用安全 DNS');
+        }
+      }
+    } finally {
+      setCheckingDoH(false);
+    }
+  };
 
   useEffect(() => {
     return () => {
@@ -167,6 +325,8 @@ export const DNSLeakTestCard: React.FC<DNSLeakTestCardProps> = ({
     let localBrowserOv4: EgressEndpoint | null = null;
     let localBrowserOv6: EgressEndpoint | null = null;
     let localWebRTC: BrowserWebRTCReport | null = null;
+
+    const dohBegin = await clientApi.checkBrowserDoH({ phase: 'begin' }).catch(() => null);
 
     await Promise.allSettled([
       // 1. 网关后端：4 路双栈出口 + 多轮随机子域 EDNS + 5 项底层防线审计
@@ -239,6 +399,17 @@ export const DNSLeakTestCard: React.FC<DNSLeakTestCardProps> = ({
     const totalMs = Math.max(1, Math.round(performance.now() - t0));
     updateSuite((prev) => (prev ? { ...prev, totalDurationMs: totalMs } : prev));
     setRunning(false);
+
+    void runBrowserDoHCheckFlow(
+      localBrowserSamples,
+      browserRounds,
+      Math.max(0, browserRounds - localBrowserSamples.length),
+      dohBegin?.probeId,
+    ).then((res) => {
+      if (res && runIdRef.current === myRunId) {
+        setBrowserDoH(res);
+      }
+    });
 
     const gwSnap = localGwReport as DNSLeakReport | null;
     const homeV4 = gwSnap?.egress?.domesticIpv4?.ip || gwSnap?.homePublicIp || '';
@@ -467,6 +638,134 @@ export const DNSLeakTestCard: React.FC<DNSLeakTestCardProps> = ({
     (effectiveGatewayReport ? effectiveGatewayReport.gatewayRounds || 0 : 0);
   const progressPct = totalSweepTarget > 0 ? Math.min(100, Math.round((totalSweepDone / totalSweepTarget) * 100)) : 0;
 
+  const dohGuide = useMemo(() => detectBrowserDoHGuide(), []);
+
+  const handleCopyDoHGuideUrl = async () => {
+    try {
+      await copyPlainText(dohGuide.settingsUrl);
+      setCopiedGuideUrl(true);
+      success(`已复制 ${dohGuide.browserName} 安全 DNS 设置地址`);
+      window.setTimeout(() => setCopiedGuideUrl(false), 2000);
+    } catch {
+      toast('复制失败，请手动复制设置页地址', 'warn');
+    }
+  };
+
+  const renderBrowserDoHCard = () => {
+    const dohRisk = browserDoH?.status === 'detected' || browserDoH?.status === 'suspected';
+    const dohTone: 'ok' | 'warn' | 'danger' | 'neutral' =
+      browserDoH?.status === 'detected'
+        ? 'danger'
+        : browserDoH?.status === 'suspected'
+        ? 'warn'
+        : browserDoH?.status === 'clean'
+        ? 'ok'
+        : 'neutral';
+    const dohBadgeLabel = !browserDoH
+      ? checkingDoH
+        ? '检测中…'
+        : '待检测'
+      : browserDoH.status === 'detected'
+      ? '检测到安全 DNS 绕过'
+      : browserDoH.status === 'suspected'
+      ? '疑似启用外部安全 DNS'
+      : browserDoH.status === 'clean'
+      ? '正常 · 走网关统一解析'
+      : browserDoH.status === 'skipped_remote'
+      ? browserDoH.viaTailscale
+        ? '远程隧道访问已跳过'
+        : '非局域网直连已跳过'
+      : '暂不可用';
+
+    return (
+      <div
+        className={`rounded-xl border px-3.5 py-2.5 text-xs space-y-2 ${
+          browserDoH?.status === 'detected'
+            ? 'border-rose-500/40 bg-rose-500/10 text-rose-100'
+            : browserDoH?.status === 'suspected'
+            ? 'border-amber-500/35 bg-amber-500/10 text-amber-100'
+            : 'border-subtle bg-surface2/55 text-secondary'
+        }`}
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <Monitor className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+            <span className="font-semibold text-primary">浏览器安全 DNS (DoH) 绕过检测</span>
+            <Badge tone={dohTone}>{dohBadgeLabel}</Badge>
+            {browserDoH?.detectedProvider && dohRisk && (
+              <Badge tone="danger">{browserDoH.detectedProvider}</Badge>
+            )}
+          </div>
+          <Button
+            size="xs"
+            variant="ghost"
+            loading={checkingDoH}
+            disabled={running}
+            icon={<RefreshCw className="w-3 h-3" />}
+            onClick={() => void handleCheckBrowserDoH()}
+          >
+            {browserDoH ? '重新检测 DoH' : '检测浏览器 DoH'}
+          </Button>
+        </div>
+
+        {browserDoH && (
+          <div className="space-y-1.5 text-[11px] leading-relaxed">
+            <div className="text-primary/90">{redactInlineSensitive(browserDoH.summary, hideIP)}</div>
+            <div className="flex flex-wrap gap-x-4 gap-y-0.5 text-muted font-mono">
+              {browserDoH.clientIp && <span>本机终端: {maskFullIP(browserDoH.clientIp, hideIP)}</span>}
+              {browserDoH.gatewayResolver && (
+                <span>
+                  网关解析:{' '}
+                  {hideIP
+                    ? '•••••••• (已遮挡)'
+                    : `${browserDoH.gatewayResolver.isp || '-'} (${browserDoH.gatewayResolver.ip || '-'})`}
+                </span>
+              )}
+              {browserDoH.browserResolvers && browserDoH.browserResolvers.length > 0 && (
+                <span>
+                  浏览器解析:{' '}
+                  {hideIP
+                    ? '•••••••• (已遮挡)'
+                    : browserDoH.browserResolvers
+                        .map((r) => `${r.isp || '-'}${r.dnsIp ? ` (${r.dnsIp})` : ''}`)
+                        .join(', ')}
+                </span>
+              )}
+            </div>
+            {browserDoH.signals && browserDoH.signals.length > 0 && (
+              <ul className="list-disc pl-4 space-y-0.5 text-amber-200/90">
+                {browserDoH.signals.map((sig, idx) => (
+                  <li key={idx}>{redactInlineSensitive(sig, hideIP)}</li>
+                ))}
+              </ul>
+            )}
+            {dohRisk && (
+              <div className="rounded-lg border border-amber-400/30 bg-slate-950/60 px-3 py-2 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div className="space-y-0.5">
+                  <div className="font-semibold text-amber-200">
+                    建议关闭 {dohGuide.browserName} 的安全 DNS (DoH)
+                  </div>
+                  <div className="text-slate-300">
+                    {dohGuide.steps}（设置页：<code className="font-mono text-sky-300">{dohGuide.settingsUrl}</code>）
+                  </div>
+                </div>
+                <Button
+                  size="xs"
+                  variant="secondary"
+                  className="shrink-0"
+                  icon={copiedGuideUrl ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+                  onClick={() => void handleCopyDoHGuideUrl()}
+                >
+                  {copiedGuideUrl ? '已复制地址' : '复制设置地址'}
+                </Button>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   return (
     <SectionCard
       title={title}
@@ -474,14 +773,14 @@ export const DNSLeakTestCard: React.FC<DNSLeakTestCardProps> = ({
       subtitle={subtitle}
       actions={
         <div className="flex flex-wrap items-center gap-2">
-          {hasResult && (
+          {!isControlledMask && (hasResult || Boolean(browserDoH)) && (
             <Button
               size="sm"
-              variant="ghost"
+              variant={hideIP ? 'primary' : 'ghost'}
               icon={hideIP ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
-              onClick={() => setHideIP((v) => !v)}
+              onClick={toggleMask}
             >
-              {hideIP ? '显示完整 IP' : '隐私打码'}
+              {hideIP ? '已完全遮挡' : '隐私完全遮挡'}
             </Button>
           )}
           <Button
@@ -507,7 +806,10 @@ export const DNSLeakTestCard: React.FC<DNSLeakTestCardProps> = ({
         </div>
       }
     >
-      {!hasResult ? (
+      <div className="space-y-4">
+        {renderBrowserDoHCard()}
+
+        {!hasResult ? (
         <div className="rounded-xl border border-dashed border-subtle bg-surface2/40 px-4 py-5 text-xs text-secondary flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div className="space-y-1.5">
             <div className="font-medium text-primary">
@@ -572,7 +874,7 @@ export const DNSLeakTestCard: React.FC<DNSLeakTestCardProps> = ({
                   <div className="text-[11px] opacity-85 font-mono">
                     IPv6 策略: {analysis.ipv6Mode}
                     {suite?.totalDurationMs ? ` · 全景耗时 ${suite.totalDurationMs}ms` : ''}
-                    {analysis.homeIPv4 ? ` · 宽带基准 ${maskIP(analysis.homeIPv4, hideIP)}` : ''}
+                    {analysis.homeIPv4 ? ` · 宽带基准 ${maskFullIP(analysis.homeIPv4, hideIP)}` : ''}
                     {analysis.mergedDNSServers.length > 0
                       ? ` · 捕获 ${analysis.mergedDNSServers.length} 个出口 DNS 节点`
                       : ''}
@@ -597,7 +899,7 @@ export const DNSLeakTestCard: React.FC<DNSLeakTestCardProps> = ({
 
           {suite?.gatewayError && (
             <div className="rounded-xl border border-amber-500/35 bg-amber-500/10 px-3.5 py-2.5 text-xs text-amber-200">
-              网关后端深度体检返回异常：{suite.gatewayError}
+              网关后端深度体检返回异常：{redactInlineSensitive(suite.gatewayError, hideIP)}
             </div>
           )}
 
@@ -620,9 +922,22 @@ export const DNSLeakTestCard: React.FC<DNSLeakTestCardProps> = ({
                     ? { tone: 'ok', text: '直连正常' }
                     : { tone: 'warn', text: running ? '探测中' : '未检出' }
                 }
-                ipText={analysis.domV4?.reachable ? maskIP(analysis.domV4.ip, hideIP) : '未获取到'}
-                geoText={formatGeoLine(analysis.domV4)}
-                ispText={analysis.domV4?.isp || analysis.domV4?.asn || analysis.domV4?.error || ''}
+                ipText={analysis.domV4?.reachable ? maskFullIP(analysis.domV4.ip, hideIP) : '未获取到'}
+                geoText={
+                  hideIP
+                    ? analysis.domV4?.reachable
+                      ? '位置已遮挡'
+                      : ''
+                    : formatGeoLine(analysis.domV4)
+                }
+                ispText={
+                  hideIP
+                    ? analysis.domV4?.reachable
+                      ? '运营商 / ASN 已遮挡'
+                      : ''
+                    : analysis.domV4?.isp || analysis.domV4?.asn || analysis.domV4?.error || ''
+                }
+                hideTooltip={hideIP}
                 latencyMs={analysis.domV4?.latencyMs}
               />
 
@@ -639,17 +954,26 @@ export const DNSLeakTestCard: React.FC<DNSLeakTestCardProps> = ({
                 }
                 ipText={
                   analysis.domV6?.reachable
-                    ? maskIP(analysis.domV6.ip, hideIP)
+                    ? maskFullIP(analysis.domV6.ip, hideIP)
                     : analysis.ipv6Mode === 'off'
                       ? '未启用 (纯 IPv4)'
                       : '未获取到'
                 }
-                geoText={formatGeoLine(analysis.domV6)}
+                geoText={
+                  hideIP
+                    ? analysis.domV6?.reachable
+                      ? '位置已遮挡'
+                      : ''
+                    : formatGeoLine(analysis.domV6)
+                }
                 ispText={
                   analysis.domV6?.reachable
-                    ? `${analysis.domV6.isp || '原生 IPv6'}${suite?.browserDom?.usedIPv6 ? ' · 浏览器优先直连 IPv6 命中' : ''}`
+                    ? hideIP
+                      ? `运营商已遮挡${suite?.browserDom?.usedIPv6 ? ' · 浏览器优先直连 IPv6 命中' : ''}`
+                      : `${analysis.domV6.isp || '原生 IPv6'}${suite?.browserDom?.usedIPv6 ? ' · 浏览器优先直连 IPv6 命中' : ''}`
                     : analysis.domV6?.error || ''
                 }
+                hideTooltip={hideIP}
                 latencyMs={analysis.domV6?.latencyMs}
               />
 
@@ -664,13 +988,22 @@ export const DNSLeakTestCard: React.FC<DNSLeakTestCardProps> = ({
                       ? { tone: 'ok', text: '代理生效' }
                       : { tone: 'warn', text: running ? '探测中' : '不可达' }
                 }
-                ipText={analysis.ov4?.reachable ? maskIP(analysis.ov4.ip, hideIP) : '未响应'}
+                ipText={analysis.ov4?.reachable ? maskFullIP(analysis.ov4.ip, hideIP) : '未响应'}
                 geoText={
                   analysis.ov4?.reachable
-                    ? `${countryFlag(analysis.ov4.countryCode)} ${formatGeoLine(analysis.ov4)}`
+                    ? hideIP
+                      ? '地区已遮挡'
+                      : `${countryFlag(analysis.ov4.countryCode)} ${formatGeoLine(analysis.ov4)}`
                     : ''
                 }
-                ispText={analysis.ov4?.asn || analysis.ov4?.isp || analysis.ov4?.error || ''}
+                ispText={
+                  hideIP
+                    ? analysis.ov4?.reachable
+                      ? '运营商 / ASN 已遮挡'
+                      : ''
+                    : analysis.ov4?.asn || analysis.ov4?.isp || analysis.ov4?.error || ''
+                }
+                hideTooltip={hideIP}
                 latencyMs={analysis.ov4?.latencyMs}
                 danger={analysis.ov4Leaked}
               />
@@ -694,7 +1027,7 @@ export const DNSLeakTestCard: React.FC<DNSLeakTestCardProps> = ({
                 }
                 ipText={
                   analysis.ov6Target?.reachable
-                    ? maskIP(analysis.ov6Target.ip, hideIP)
+                    ? maskFullIP(analysis.ov6Target.ip, hideIP)
                     : analysis.ipv6Mode === 'full'
                       ? '当前节点无 IPv6 出站'
                       : analysis.ipv6Mode === 'cn_only' && analysis.clientIPv6Disabled
@@ -703,20 +1036,25 @@ export const DNSLeakTestCard: React.FC<DNSLeakTestCardProps> = ({
                 }
                 geoText={
                   analysis.ov6Target?.reachable
-                    ? `${countryFlag(analysis.ov6Target.countryCode)} ${formatGeoLine(analysis.ov6Target)}`
+                    ? hideIP
+                      ? '地区已遮挡'
+                      : `${countryFlag(analysis.ov6Target.countryCode)} ${formatGeoLine(analysis.ov6Target)}`
                     : ''
                 }
                 ispText={
                   analysis.ov6Leaked
                     ? '海外探测直接露出家庭宽带 IPv6，请检查 AAAA 屏蔽或透明代理规则'
                     : analysis.ov6Target?.reachable
-                      ? analysis.ov6Target.asn || analysis.ov6Target.isp || ''
+                      ? hideIP
+                        ? '运营商 / ASN 已遮挡'
+                        : analysis.ov6Target.asn || analysis.ov6Target.isp || ''
                       : analysis.ipv6Mode === 'full'
                         ? analysis.ov6Target?.error || '建议切换为「智能双栈」获得零延迟体验'
                         : analysis.ipv6Mode === 'cn_only' && analysis.clientIPv6Disabled
                           ? '当前浏览器所在终端未获取到 IPv6（国内 IPv6 未通），无法验证终端双栈回退；请在系统开启 IPv6 后复测'
                           : '海外域名不返回 AAAA/HTTPS 且路由层秒拒 ::/0，浏览器直走代理 IPv4'
                 }
+                hideTooltip={hideIP}
                 latencyMs={analysis.ov6Target?.latencyMs}
                 danger={analysis.ov6Leaked}
               />
@@ -765,22 +1103,35 @@ export const DNSLeakTestCard: React.FC<DNSLeakTestCardProps> = ({
                           className={row.leaked ? 'bg-rose-500/10' : 'hover:bg-white/[0.02]'}
                         >
                           <td className="py-2 px-3 font-mono font-semibold text-primary whitespace-nowrap">
-                            {maskIP(row.ip, hideIP)}
+                            {maskFullIP(row.ip, hideIP)}
                             {row.leaked && row.leakReason && (
                               <div className="text-[10.5px] font-sans font-normal text-rose-300 mt-0.5">
-                                {row.leakReason}
+                                {redactInlineSensitive(row.leakReason, hideIP)}
                               </div>
                             )}
                           </td>
                           <td className="py-2 px-3 whitespace-nowrap text-secondary">
-                            <span className="mr-1.5">{countryFlag(row.countryCode)}</span>
-                            <span>{row.country || row.countryCode || '-'}</span>
+                            {hideIP ? (
+                              '已遮挡'
+                            ) : (
+                              <>
+                                <span className="mr-1.5">{countryFlag(row.countryCode)}</span>
+                                <span>{row.country || row.countryCode || '-'}</span>
+                              </>
+                            )}
                           </td>
-                          <td className="py-2 px-3 text-secondary max-w-[220px] truncate" title={row.isp}>
-                            {row.isp || '-'}
+                          <td
+                            className="py-2 px-3 text-secondary max-w-[220px] truncate"
+                            title={hideIP ? undefined : row.isp}
+                          >
+                            {hideIP ? '已遮挡' : row.isp || '-'}
                           </td>
                           <td className="py-2 px-3 font-mono text-[11px] text-muted whitespace-nowrap">
-                            {row.ecs ? `${maskIP(row.ecs, hideIP)}${row.ecsCountryCode ? ` (${row.ecsCountryCode})` : ''}` : '未携带'}
+                            {row.ecs
+                              ? hideIP
+                                ? '已遮挡'
+                                : `${row.ecs}${row.ecsCountryCode ? ` (${row.ecsCountryCode})` : ''}`
+                              : '未携带'}
                           </td>
                           <td className="py-2 px-3 whitespace-nowrap">
                             {row.fromBrowser && row.fromGateway ? (
@@ -861,7 +1212,7 @@ export const DNSLeakTestCard: React.FC<DNSLeakTestCardProps> = ({
                   <span className="px-2 py-0.5 rounded bg-slate-900/60 border border-subtle text-muted">
                     局域网候选:{' '}
                     {analysis.rtc.localIPs.length > 0
-                      ? analysis.rtc.localIPs.map((ip) => maskIP(ip, hideIP)).join(', ')
+                      ? analysis.rtc.localIPs.map((ip) => maskFullIP(ip, hideIP)).join(', ')
                       : '无'}
                   </span>
                   <span
@@ -873,7 +1224,7 @@ export const DNSLeakTestCard: React.FC<DNSLeakTestCardProps> = ({
                   >
                     反射公网 IPv4:{' '}
                     {analysis.rtc.publicIPv4s.length > 0
-                      ? analysis.rtc.publicIPv4s.map((ip) => maskIP(ip, hideIP)).join(', ')
+                      ? analysis.rtc.publicIPv4s.map((ip) => maskFullIP(ip, hideIP)).join(', ')
                       : '无'}
                   </span>
                   <span
@@ -885,7 +1236,7 @@ export const DNSLeakTestCard: React.FC<DNSLeakTestCardProps> = ({
                   >
                     反射公网 IPv6:{' '}
                     {analysis.rtc.publicIPv6s.length > 0
-                      ? analysis.rtc.publicIPv6s.map((ip) => maskIP(ip, hideIP)).join(', ')
+                      ? analysis.rtc.publicIPv6s.map((ip) => maskFullIP(ip, hideIP)).join(', ')
                       : '无'}
                   </span>
                 </div>
@@ -923,9 +1274,13 @@ export const DNSLeakTestCard: React.FC<DNSLeakTestCardProps> = ({
                             <span className="font-mono tnum text-[10.5px] text-muted">{c.latencyMs}ms</span>
                           ) : null}
                         </div>
-                        <div className="text-secondary leading-relaxed">{c.summary}</div>
+                        <div className="text-secondary leading-relaxed">
+                          {redactInlineSensitive(c.summary, hideIP)}
+                        </div>
                         {c.detail && (
-                          <div className="text-[11px] text-muted font-mono break-all">{c.detail}</div>
+                          <div className="text-[11px] text-muted font-mono break-all">
+                            {redactInlineSensitive(c.detail, hideIP)}
+                          </div>
                         )}
                       </div>
                     </div>
@@ -936,6 +1291,7 @@ export const DNSLeakTestCard: React.FC<DNSLeakTestCardProps> = ({
           )}
         </div>
       )}
+      </div>
     </SectionCard>
   );
 };
@@ -947,6 +1303,7 @@ interface EgressTileProps {
   ipText: string;
   geoText?: string;
   ispText?: string;
+  hideTooltip?: boolean;
   latencyMs?: number;
   danger?: boolean;
 }
@@ -958,6 +1315,7 @@ const EgressTile: React.FC<EgressTileProps> = ({
   ipText,
   geoText,
   ispText,
+  hideTooltip,
   latencyMs,
   danger,
 }) => (
@@ -981,7 +1339,7 @@ const EgressTile: React.FC<EgressTileProps> = ({
     <div className="font-mono text-sm font-semibold text-primary break-all">{ipText}</div>
     {geoText && <div className="text-[11px] text-secondary">{geoText}</div>}
     {ispText && (
-      <div className="text-[11px] text-muted truncate" title={ispText}>
+      <div className="text-[11px] text-muted truncate" title={hideTooltip ? undefined : ispText}>
         {ispText}
       </div>
     )}

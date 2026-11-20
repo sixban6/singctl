@@ -511,3 +511,103 @@ export async function runBrowserWebRTCProbe(parentSignal?: AbortSignal): Promise
     }
   }
 }
+
+export async function runQuickBrowserEDNSProbe(
+  rounds = 2,
+  parentSignal?: AbortSignal,
+): Promise<{ samples: BrowserEDNSSample[]; attempted: number; failed: number }> {
+  const count = Math.max(1, Math.min(4, rounds));
+  const samples = await runBrowserEDNSSweep(count, () => undefined, parentSignal);
+  return {
+    samples,
+    attempted: count,
+    failed: Math.max(0, count - samples.length),
+  };
+}
+
+export function isLikelyTailscaleHost(hostname?: string): boolean {
+  const h = (hostname || '').trim().toLowerCase().replace(/^\[|\]$/g, '');
+  if (!h) return false;
+  if (h.endsWith('.ts.net')) return true;
+  if (h.startsWith('fd7a:115c:a1e0:')) return true;
+  const parts = h.split('.').map((p) => Number(p));
+  if (parts.length === 4 && parts.every((n) => Number.isInteger(n) && n >= 0 && n <= 255)) {
+    return parts[0] === 100 && parts[1] >= 64 && parts[1] <= 127;
+  }
+  return false;
+}
+
+export function detectBrowserDoHGuide(): {
+  browserName: string;
+  settingsUrl: string;
+  steps: string;
+} {
+  if (typeof navigator === 'undefined') {
+    return {
+      browserName: '当前浏览器',
+      settingsUrl: 'chrome://settings/security',
+      steps: '打开浏览器隐私与安全设置，关闭「使用安全 DNS（DoH）」后重试',
+    };
+  }
+  const ua = navigator.userAgent || '';
+  const hasBrave = Boolean((navigator as { brave?: unknown }).brave) || /Brave/i.test(ua);
+  if (hasBrave) {
+    return {
+      browserName: 'Brave',
+      settingsUrl: 'brave://settings/security',
+      steps: '复制下方地址到 Brave 地址栏打开 → 在「安全」设置中关闭「使用安全 DNS（Use secure DNS）」',
+    };
+  }
+  if (/Edg\//i.test(ua)) {
+    return {
+      browserName: 'Microsoft Edge',
+      settingsUrl: 'edge://settings/privacy',
+      steps: '复制下方地址到 Edge 地址栏打开 → 在「安全性」中关闭「使用安全的 DNS 指定如何查找网站的网络地址」',
+    };
+  }
+  if (/Firefox\//i.test(ua) || /FxiOS\//i.test(ua)) {
+    return {
+      browserName: 'Firefox',
+      settingsUrl: 'about:preferences#privacy',
+      steps: '复制下方地址到 Firefox 地址栏打开 → 滑到底部「基于 HTTPS 的 DNS」，选择「关闭」',
+    };
+  }
+  if (/Chrome\//i.test(ua) || /CriOS\//i.test(ua)) {
+    return {
+      browserName: 'Chrome',
+      settingsUrl: 'chrome://settings/security',
+      steps: '复制下方地址到 Chrome 地址栏打开 → 关闭「使用安全 DNS（Use secure DNS）」',
+    };
+  }
+  if (/Safari\//i.test(ua)) {
+    return {
+      browserName: 'Safari / macOS · iOS 系统',
+      settingsUrl: 'x-apple.systempreferences:com.apple.Network-Settings.extension',
+      steps: '请检查 Apple 设备是否开启了「iCloud 专用代理 / 限制 IP 地址跟踪」，或系统/浏览器安装了第三方加密 DNS 描述文件',
+    };
+  }
+  return {
+    browserName: '当前浏览器',
+    settingsUrl: 'chrome://settings/security',
+    steps: '请在浏览器「隐私与安全 → 安全」设置中关闭「使用安全 DNS（DoH）」，让域名解析交由路由器统一接管',
+  };
+}
+
+export async function copyPlainText(text: string): Promise<void> {
+  if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.setAttribute('readonly', '');
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  const ok = document.execCommand('copy');
+  document.body.removeChild(ta);
+  if (!ok) {
+    throw new Error('copy unsupported');
+  }
+}

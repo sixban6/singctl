@@ -1,11 +1,14 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Cpu,
   Copy,
   Download,
+  FileCode,
   Gauge,
+  Globe,
   LogOut,
   RefreshCw,
+  Save,
   ShieldCheck,
   Smartphone,
   Upload,
@@ -46,6 +49,86 @@ export const SystemPage: React.FC<SystemPageProps> = ({ status, busy, onAction, 
   const [restoring, setRestoring] = useState(false);
   const [restoreConfirmOpen, setRestoreConfirmOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // 全局 GitHub 镜像加速 + singctl.yaml 高级源码抽屉
+  const [mirrorUrl, setMirrorUrl] = useState('');
+  const [mirrorLoading, setMirrorLoading] = useState(true);
+  const [mirrorSaving, setMirrorSaving] = useState(false);
+  const [rawYamlOpen, setRawYamlOpen] = useState(false);
+  const [rawYamlPath, setRawYamlPath] = useState('');
+  const [rawYaml, setRawYaml] = useState('');
+  const [rawYamlLoading, setRawYamlLoading] = useState(false);
+  const [rawYamlSaving, setRawYamlSaving] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setMirrorLoading(true);
+    clientApi
+      .getConfig()
+      .then((res) => {
+        if (cancelled) return;
+        setMirrorUrl(res.config?.github?.mirror_url || '');
+        if (res.path) setRawYamlPath(res.path);
+      })
+      .catch(() => {
+        // ignore transient mount read error
+      })
+      .finally(() => {
+        if (!cancelled) setMirrorLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const handleSaveMirror = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setMirrorSaving(true);
+    try {
+      const res = await clientApi.saveSystemMirror(mirrorUrl.trim());
+      setMirrorUrl(res.mirrorUrl || '');
+      success('GitHub 加速镜像设置已保存');
+      onRestored?.();
+    } catch (err: unknown) {
+      error(`保存镜像地址失败：${err instanceof Error ? err.message : '未知错误'}`);
+    } finally {
+      setMirrorSaving(false);
+    }
+  };
+
+  const openRawYamlDrawer = async () => {
+    setRawYamlOpen(true);
+    setRawYamlLoading(true);
+    try {
+      const res = await clientApi.getConfigRaw();
+      setRawYamlPath(res.path || '');
+      setRawYaml(res.content || '');
+    } catch (err: unknown) {
+      error(`读取 singctl.yaml 原文失败：${err instanceof Error ? err.message : '未知错误'}`);
+    } finally {
+      setRawYamlLoading(false);
+    }
+  };
+
+  const handleSaveRawYaml = async () => {
+    setRawYamlSaving(true);
+    try {
+      await clientApi.saveConfigRaw(rawYaml);
+      success('YAML 配置已校验并保存（已自动备份原文件）');
+      try {
+        const res = await clientApi.getConfig();
+        setMirrorUrl(res.config?.github?.mirror_url || '');
+      } catch {
+        // ignore
+      }
+      setRawYamlOpen(false);
+      onRestored?.();
+    } catch (err: unknown) {
+      error(`保存 YAML 失败：${err instanceof Error ? err.message : '未知错误'}`);
+    } finally {
+      setRawYamlSaving(false);
+    }
+  };
 
   const openPwaDrawer = async () => {
     setPwaOpen(true);
@@ -239,6 +322,51 @@ export const SystemPage: React.FC<SystemPageProps> = ({ status, busy, onAction, 
         </div>
       </div>
 
+      {/* 全局下载加速与 singctl.yaml 主配置源码 */}
+      <SectionCard
+        title="全局加速与主配置"
+        icon={<Globe className="w-4 h-4" />}
+        subtitle="GitHub 加速镜像供内核/Tailscale/自更新共用；低频高级字段可直接通过 YAML 源码编辑"
+      >
+        <form onSubmit={(e) => void handleSaveMirror(e)} className="space-y-3 text-xs">
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-end">
+            <label className="md:col-span-7 block space-y-1">
+              <span className="text-secondary">GitHub 加速镜像 (`github.mirror_url`，留空直连)</span>
+              <input
+                type="text"
+                disabled={mirrorLoading}
+                value={mirrorUrl}
+                onChange={(e) => setMirrorUrl(e.target.value)}
+                placeholder="https://gh-proxy.com"
+                className="w-full h-9 px-3 rounded-xl bg-surface2 border border-subtle text-primary font-mono focus:outline-none focus:border-strong"
+              />
+            </label>
+            <div className="md:col-span-5 flex flex-wrap items-center gap-2">
+              <Button
+                type="submit"
+                size="sm"
+                variant="primary"
+                loading={mirrorSaving}
+                disabled={mirrorLoading || busy}
+                icon={<Save className="w-3.5 h-3.5" />}
+              >
+                保存镜像地址
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="secondary"
+                disabled={busy}
+                onClick={() => void openRawYamlDrawer()}
+                icon={<FileCode className="w-3.5 h-3.5" />}
+              >
+                编辑 singctl.yaml 源码
+              </Button>
+            </div>
+          </div>
+        </form>
+      </SectionCard>
+
       {/* 网关配置全量 AES-256-GCM 加密备份与一键迁移还原 */}
       <SectionCard
         title="网关配置加密备份与迁移"
@@ -380,6 +508,57 @@ export const SystemPage: React.FC<SystemPageProps> = ({ status, busy, onAction, 
         onConfirm={doLogout}
         onCancel={() => setLogoutOpen(false)}
       />
+
+      <SlideDrawer
+        open={rawYamlOpen}
+        onClose={() => setRawYamlOpen(false)}
+        title="编辑 singctl.yaml 主配置源码"
+        subtitle={
+          rawYamlPath
+            ? `${rawYamlPath} · 保留全部人工注释与高级字段，保存前自动校验 YAML 语法并创建备份`
+            : '保留全部人工注释与高级字段'
+        }
+        size="xl"
+        headerExtra={
+          <Button
+            size="xs"
+            variant="ghost"
+            onClick={() => void openRawYamlDrawer()}
+            disabled={rawYamlLoading || rawYamlSaving}
+            icon={<RefreshCw className={`w-3.5 h-3.5 ${rawYamlLoading ? 'animate-spin' : ''}`} />}
+          >
+            重新加载
+          </Button>
+        }
+        footer={
+          <div className="flex items-center justify-end gap-2">
+            <Button variant="secondary" onClick={() => setRawYamlOpen(false)} disabled={rawYamlSaving}>
+              取消
+            </Button>
+            <Button
+              variant="primary"
+              loading={rawYamlSaving}
+              disabled={rawYamlLoading}
+              onClick={() => void handleSaveRawYaml()}
+              icon={<Save className="w-3.5 h-3.5" />}
+            >
+              校验并保存 YAML
+            </Button>
+          </div>
+        }
+      >
+        {rawYamlLoading ? (
+          <div className="py-12 text-center text-xs text-slate-400">正在读取配置文件…</div>
+        ) : (
+          <textarea
+            value={rawYaml}
+            onChange={(e) => setRawYaml(e.target.value)}
+            spellCheck={false}
+            rows={24}
+            className="w-full p-3.5 rounded-xl bg-[var(--console-bg)] text-slate-200 border border-subtle font-mono text-xs leading-relaxed focus:outline-none focus:border-strong"
+          />
+        )}
+      </SlideDrawer>
     </div>
   );
 };

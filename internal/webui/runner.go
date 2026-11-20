@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"singctl/internal/tailscale"
 )
 
 // actionTimeout 单个动作最长执行时间(安装/更新含下载,放宽到 30 分钟)
@@ -47,7 +49,7 @@ var Actions = map[string]ActionDef{
 	"ts-start":   {Title: "启动 Tailscale", Build: TsStartArgs},
 	"ts-stop":    {Title: "停止 Tailscale", Build: fixed("ts", "stop")},
 	"ts-install": {Title: "安装 Tailscale", Build: fixed("ts", "install")},
-	"ts-update":  {Title: "更新 Tailscale", Build: fixed("ts", "update")},
+	"ts-update":  {Title: "零失联更新 Tailscale", Build: TsUpdateArgs},
 
 	// 防火墙
 	"fw-enable":  {Title: "启用防火墙加固", Build: fixed("fw", "enable")},
@@ -86,8 +88,28 @@ func TsStartArgs(p map[string]any) []string {
 			args = append(args, "--router")
 		}
 	}
-	if paramBool(p, "acceptRoutes") {
-		args = append(args, "--accept-routes")
+	if p != nil {
+		if raw, hasAccept := p["acceptRoutes"]; hasAccept {
+			if b, ok := raw.(bool); ok {
+				if b {
+					args = append(args, "--accept-routes")
+				} else {
+					args = append(args, "--accept-routes=false")
+				}
+			}
+		}
+	}
+	if paramBool(p, "reconfigure") {
+		args = append(args, "--reconfigure")
+	}
+	return args
+}
+
+// TsUpdateArgs 将 Web 参数映射为 ts update 命令行参数（强制 --no-wait 交由脱离进程执行）
+func TsUpdateArgs(p map[string]any) []string {
+	args := []string{"ts", "update", "--no-wait"}
+	if paramBool(p, "force") {
+		args = append(args, "--force")
 	}
 	return args
 }
@@ -189,7 +211,13 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		restarting = true
 		stream.emitLine("[INFO] 🔄 正在自动热重启 WebUI 服务以应用新版本，页面将在 3 秒后自动刷新...")
 	}
-	stream.write(map[string]any{"t": "exit", "code": code, "restarting": restarting})
+	tailscaleSwapping := body.Name == "ts-update" && code == 0 && stream.sawTailscaleSwapHandoff
+	stream.write(map[string]any{
+		"t":                 "exit",
+		"code":              code,
+		"restarting":        restarting,
+		"tailscaleSwapping": tailscaleSwapping,
+	})
 	if restarting {
 		ScheduleDetachedRestart(s.opts.ConfigPath, s.opts.Listen, s.opts.Password)
 	}
@@ -197,10 +225,11 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 
 // ndjsonWriter 将子进程输出按行转为 NDJSON 事件并立即刷新
 type ndjsonWriter struct {
-	w              http.ResponseWriter
-	flush          func()
-	buf            []byte
-	sawSelfUpdated bool
+	w                       http.ResponseWriter
+	flush                   func()
+	buf                     []byte
+	sawSelfUpdated          bool
+	sawTailscaleSwapHandoff bool
 }
 
 func NewNDJSONWriter(w http.ResponseWriter) *ndjsonWriter {
@@ -245,6 +274,10 @@ func (nw *ndjsonWriter) Write(p []byte) (int, error) {
 func (nw *ndjsonWriter) emitLine(line string) {
 	line = ansiRe.ReplaceAllString(line, "")
 	if strings.TrimSpace(line) == "" {
+		return
+	}
+	if strings.Contains(line, tailscale.TailscaleSwapHandoffMarker) {
+		nw.sawTailscaleSwapHandoff = true
 		return
 	}
 	if strings.Contains(line, "SingCtl updated successfully") {
