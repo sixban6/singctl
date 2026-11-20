@@ -54,8 +54,24 @@ gateway:                                      # (可选) 客户端网关拓扑�
 
 - **三模式 IPv6 分流（`gateway.ipv6_mode`）**：
   - **`off`（纯 IPv4，默认）**：全链路保持 `ipv4_only`，OpenWrt 保持 `dnsmasq filter_aaaa=1`。
-  - **`cn_only`（智能双栈 · 推荐）**：自动探测内核与 OpenWrt WAN PD 前缀并软重载配置 LAN RA/DHCPv6/RDNSS 与 `filter_aaaa=0`（修改前以 `0600` 权限备份原 UCI，切回 `off` 时自动还原，绝不中断 PPPoE WAN）；国内直连规则集对齐至本地 `dns_local` 放行原生 IPv6，海外代理规则前自动注入 `query_type: ["AAAA"]` → `predefined NOERROR` 本地 `0ms` 静音，杜绝海外 AAAA 回落或 DNS 泄漏。旁路由模式下强制保持关闭防绕过。
-  - **`full`（全量双栈）**：仅推荐在全节点均确认支持 IPv6 出站时开启。
+  - **`cn_only`（智能双栈 · 推荐）**：自动探测内核与 OpenWrt WAN PD 前缀，配置 LAN RA/DHCPv6 分配公网 IPv6 前缀同时显式关闭 IPv6 RDNSS（`ra_dns=0`、`dns_service=0`）使终端统一经受控 IPv4 `:53` 解析、将 `dnsmasq` `dnsforwardmax` 提升至 `1024` 并设 `filter_aaaa=0`（修改前以 `0600` 权限备份原 UCI，切回 `off` 时自动还原，绝不中断 PPPoE WAN）；国内直连规则集对齐至 `dns_local` 放行原生 IPv6，海外规则注入 `query_type: ["AAAA", "HTTPS"]` → `predefined NOERROR` 本地 `0ms` 静音，同时注入 DoT `:853` / 国内公共 DoH (`443/853`) / 海外 WebRTC STUN（`protocol: stun` 及常用 STUN UDP 端口）拦截，并在代理出站规则前注入逻辑与 `type: "logical", mode: "and"`（目标 ∧ `::/0`）快速拒接规则防挂死。旁路由模式下强制保持关闭防绕过。
+  - **`full`（全量双栈）**：保留 DoT `:853`、国内公共 DoH 与海外 STUN 防绕过拦截，国内外域名均保留双栈解析；仅推荐在全节点均确认支持 IPv6 出站时开启。
+- **开启 IPv6 后的手机端防 5G 蜂窝兜底泄漏指引**：
+  - 在 `cn_only` 模式下（海外域名 `AAAA`/`HTTPS` 静音），手机同时开着 Wi-Fi 与 5G 蜂窝时，部分系统的网络助理会将纯 IPv6 探针（如 `ipv6.ipleak.net`）自动切走 5G 基站发出运营商 IPv6 DNS 查询，绕过家用网关：
+  - **iPhone (iOS)**：打开 `设置 → 无线局域网 (WLAN)` 关闭 **「连接助理」**（部分 iOS 版本在 `设置 → 蜂窝网络 → 展开全部应用 → 拉至最底端` 关闭 **「无线局域网助理」**）。
+  - **华为 / 鸿蒙**：打开 `设置 → WLAN → 更多 WLAN 设置` 关闭 **「WLAN+」** 与 **「网络加速 / 双通道加速」**。
+  - **小米 / OPPO / vivo / 三星等安卓**：打开 `设置 → WLAN → WLAN 助理 / 智能选网` 关闭 **「自动切换移动数据」** 与 **「双通道加速」**。
+  - **二级无线路由加固与复测**：若下联还有二级无线路由器（如 OpenWrt / ImmortalWrt），请同步将其 `dhcp.@dnsmasq[0].dnsforwardmax=1024`、关闭非 WAN 接口的 IPv6 RDNSS（`ra_dns=0` / `dns_service=0`，以及未承载无线客户端接口的多余 NDP 中继）；开启 IPv6 后先断开并重连一次 Wi-Fi 再复测。SSH 登录二级路由后可直接复制粘贴执行以下无损命令（自动先以 `0600` 权限备份 `/etc/config/dhcp.bak` 且不中断 Wi-Fi/WAN）：
+    ```sh
+    cp -a /etc/config/dhcp /etc/config/dhcp.bak && chmod 600 /etc/config/dhcp.bak && \
+    uci set dhcp.@dnsmasq[0].dnsforwardmax=1024 && \
+    for s in $(uci show dhcp | sed -n 's/^dhcp\.\([^.=]*\)=dhcp$/\1/p'); do
+      [ "$s" = "wan" ] || [ "$s" = "wan6" ] && continue
+      uci set "dhcp.$s.ra_dns=0"
+      uci set "dhcp.$s.dns_service=0"
+    done && \
+    uci commit dhcp && /etc/init.d/odhcpd reload && /etc/init.d/dnsmasq reload
+    ```
 - **行为审计 IPv6 MAC 聚合**：自动关联 `/tmp/hosts/odhcpd` 与 `ip -6 neigh`，将同一终端的 IPv4 与公网 IPv6 流量合并审计。
 - **双端全景 DNS / IPv6 / WebRTC 防泄漏体检中心**：在 WebUI「网络架构 → 网关模式」与「防劫持 DNS」页面均内置类 `ipleak.net` 实测套件，支持 **标准体检（55 轮）** 与 **深度扫描（144 轮）**，从浏览器与网关双端并发探测四路出口 IP、多轮唯一随机子域 EDNS 解析器与 ECS、浏览器 WebRTC 反射及明文 `:53` 透明劫持基线。
 

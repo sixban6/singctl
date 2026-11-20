@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/netip"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,9 +24,10 @@ import (
 )
 
 const (
-	dnsTypeA    uint16 = 1
-	dnsTypeTXT  uint16 = 16
-	dnsTypeAAAA uint16 = 28
+	dnsTypeA     uint16 = 1
+	dnsTypeTXT   uint16 = 16
+	dnsTypeAAAA  uint16 = 28
+	dnsTypeHTTPS uint16 = 65
 )
 
 var fakeIPv4Prefix = netip.MustParsePrefix("198.18.0.0/15")
@@ -128,10 +130,11 @@ type DNSLeakTestOptions struct {
 }
 
 type dnsAnswerSet struct {
-	As    []string
-	AAAAs []string
-	TXTs  []string
-	RCode uint8
+	As         []string
+	AAAAs      []string
+	TXTs       []string
+	HTTPSCount int
+	RCode      uint8
 }
 
 func clampGatewayRounds(n int) int {
@@ -1170,21 +1173,29 @@ func checkIPv6Split(ctx context.Context, ipv6Mode string, opts DNSLeakTestOption
 		return item
 
 	default: // cn_only
+		overseasHTTPS, _ := queryGatewayDNS(ctx, opts.PrimaryDNS, "www.google.com", dnsTypeHTTPS)
+		item.LatencyMs = max(1, time.Since(t0).Milliseconds())
 		if ovCount > 0 {
 			item.Status = "fail"
 			item.Summary = fmt.Sprintf("智能双栈异常：海外域名返回了 AAAA (%s)，存在回落或泄露风险", overseasANS.AAAAs[0])
 			item.Detail = "sing-box dns_proxy 规则前的 query_type=[AAAA] predefined NOERROR 规则未命中，请重新保存应用 IPv6 模式"
 			return item
 		}
+		if overseasHTTPS.HTTPSCount > 0 {
+			item.Status = "fail"
+			item.Summary = fmt.Sprintf("智能双栈异常：海外域名返回了 %d 条 HTTPS (Type 65) 记录，可能携带 ipv6hint 引发 IPv6 卡顿或泄漏", overseasHTTPS.HTTPSCount)
+			item.Detail = "sing-box dns_proxy 规则前的 query_type=[AAAA,HTTPS] predefined NOERROR 规则未生效，请重新保存应用 IPv6 模式"
+			return item
+		}
 		if cnCount == 0 {
 			item.Status = "warn"
-			item.Summary = "海外 AAAA 已 0ms 拦截，但国内域名暂未返回 AAAA"
+			item.Summary = "海外 AAAA/HTTPS 已 0ms 拦截，但国内域名暂未返回 AAAA"
 			item.Detail = "请检查 OpenWrt dnsmasq filter_aaaa 是否为 0 以及上游加密 DNS 是否返回 IPv6"
 			return item
 		}
 		tcpNote := probeCNTCPv6(ctx, cnANS.AAAAs[0], opts.SkipTCP6Dial)
 		item.Status = "pass"
-		item.Summary = fmt.Sprintf("智能双栈分流正常：国内解析 %s · 海外 AAAA 已静音 (0 条)", cnANS.AAAAs[0])
+		item.Summary = fmt.Sprintf("智能双栈分流正常：国内解析 %s · 海外 AAAA/HTTPS 均已静音 (0 条)", cnANS.AAAAs[0])
 		item.Detail = cmp.Or(tcpNote, "国内站点直连 IPv6 双栈，海外站点纯走 IPv4 隧道防风控卡顿")
 		return item
 	}
@@ -1217,8 +1228,13 @@ func checkGatewayBaseline(ipv6Mode, gwMode string, opts DNSLeakTestOptions) DNSL
 			if st.DnsmasqFilterAAAA == "1" {
 				warns = append(warns, "OpenWrt dnsmasq.filter_aaaa 仍为 1，可能屏蔽国内 IPv6 解析")
 			}
-			if len(st.LANPrefixes) > 0 && !st.RADNSAnnounce {
-				warns = append(warns, "LAN 口已下发 IPv6 前缀，但 odhcpd 本地 RDNSS 通告未就绪")
+			if st.RADNSAnnounce {
+				warns = append(warns, "OpenWrt odhcpd 仍在通告 IPv6 DNS (ra_dns/dns_service 未关闭)，多级路由或链路本地 fe80:: DNS 易超时回退泄漏，建议重新保存 IPv6 模式自动关闭")
+			}
+			if st.DnsmasqForwardMax == "" {
+				warns = append(warns, "OpenWrt dnsmasq 未提高并发上限（默认 150），高并发 DNS 探测时易丢包触发手机回退蜂窝泄漏，建议重新保存 IPv6 模式自动提升至 1024")
+			} else if maxQ, err := strconv.Atoi(st.DnsmasqForwardMax); err == nil && maxQ < 512 {
+				warns = append(warns, fmt.Sprintf("OpenWrt dnsmasq 并发上限偏低 (dnsforwardmax=%d)，高并发 DNS 探测时易丢包触发手机回退蜂窝泄漏", maxQ))
 			}
 		}
 	}
@@ -1243,7 +1259,7 @@ func checkGatewayBaseline(ipv6Mode, gwMode string, opts DNSLeakTestOptions) DNSL
 		if ipv6Mode == config.GatewayIPv6Off {
 			notes = append(notes, "dnsmasq 已过滤 AAAA")
 		} else {
-			notes = append(notes, fmt.Sprintf("dnsmasq 已放行 AAAA · LAN=%s", cmp.Or(strings.Join(st.LANPrefixes, ","), "待分配")))
+			notes = append(notes, fmt.Sprintf("dnsmasq 已放行 AAAA (并发=%s · 已关闭 IPv6 RDNSS) · LAN=%s", cmp.Or(st.DnsmasqForwardMax, "1024"), cmp.Or(strings.Join(st.LANPrefixes, ","), "待分配")))
 		}
 	}
 	item.Status = "pass"
@@ -1525,6 +1541,8 @@ func parseDNSAnswerPacket(msg []byte, expectedTxID [2]byte) (dnsAnswerSet, error
 			if txtVal := strings.TrimSpace(txtBuilder.String()); txtVal != "" {
 				out.TXTs = append(out.TXTs, txtVal)
 			}
+		case dnsTypeHTTPS:
+			out.HTTPSCount++
 		}
 		offset = rdataStart + rdLen
 	}
