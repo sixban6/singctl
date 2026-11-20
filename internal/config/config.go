@@ -354,10 +354,133 @@ func (c *ClientDNSConfig) UnmarshalYAML(node *yaml.Node) error {
 	return nil
 }
 
+const (
+	TailscaleAccessOutboundOnly       = "outbound_only"
+	TailscaleAccessBidirectionalTimed = "bidirectional_timed"
+	TailscaleAccessBidirectional      = "bidirectional"
+)
+
+// NormalizeTailscaleAccessMode 校验并归一化 Tailscale 异地子网双向互访模式。
+// 空字符串视为默认值 outbound_only 并返回合法；其余未识别值返回 false。
+func NormalizeTailscaleAccessMode(raw string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", TailscaleAccessOutboundOnly:
+		return TailscaleAccessOutboundOnly, true
+	case TailscaleAccessBidirectionalTimed:
+		return TailscaleAccessBidirectionalTimed, true
+	case TailscaleAccessBidirectional:
+		return TailscaleAccessBidirectional, true
+	default:
+		return "", false
+	}
+}
+
+// TailscaleP2PPeerConfig 定义纳入 P2P 零常驻暴露与双向边界管控的远端设备策略。
+// 未列入此列表的管理员终端（笔记本、手机等）保持 24/7 全量放行不受限制。
+type TailscaleP2PPeerConfig struct {
+	ID                 string   `yaml:"id,omitempty" json:"id,omitempty"`
+	Name               string   `yaml:"name" json:"name"`
+	TailscaleIP        string   `yaml:"tailscale_ip,omitempty" json:"tailscale_ip,omitempty"`
+	JITEnabled         bool     `yaml:"jit_enabled" json:"jit_enabled"`
+	AccessMode         string   `yaml:"access_mode,omitempty" json:"access_mode,omitempty"`
+	BidirectionalUntil string   `yaml:"bidirectional_until,omitempty" json:"bidirectional_until,omitempty"`
+	AllowedLANTargets  []string `yaml:"allowed_lan_targets,omitempty" json:"allowed_lan_targets,omitempty"`
+}
+
+// RemainingBidirectional 返回限时双向探亲互访窗口在 now 时刻的剩余有效期；未启用或已过期返回 0。
+func (p TailscaleP2PPeerConfig) RemainingBidirectional(now time.Time) time.Duration {
+	norm, ok := NormalizeTailscaleAccessMode(p.AccessMode)
+	if !ok || norm != TailscaleAccessBidirectionalTimed {
+		return 0
+	}
+	raw := strings.TrimSpace(p.BidirectionalUntil)
+	if raw == "" {
+		return 0
+	}
+	until, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return 0
+	}
+	rem := until.Sub(now)
+	if rem <= 0 {
+		return 0
+	}
+	return rem
+}
+
+// EffectiveAccessMode 返回在 now 时刻真正生效的访问模式；限时过期或无效时间戳自动降级为 outbound_only。
+func (p TailscaleP2PPeerConfig) EffectiveAccessMode(now time.Time) string {
+	norm, ok := NormalizeTailscaleAccessMode(p.AccessMode)
+	if !ok {
+		return TailscaleAccessOutboundOnly
+	}
+	switch norm {
+	case TailscaleAccessBidirectional:
+		return TailscaleAccessBidirectional
+	case TailscaleAccessBidirectionalTimed:
+		if p.RemainingBidirectional(now) > 0 {
+			return TailscaleAccessBidirectionalTimed
+		}
+		return TailscaleAccessOutboundOnly
+	default:
+		return TailscaleAccessOutboundOnly
+	}
+}
+
+// TailscaleP2PAssistConfig 控制 Tailscale WAN 口零常驻暴露的 JIT 瞬时打洞与入向最小权限防护。
+type TailscaleP2PAssistConfig struct {
+	Enabled       bool                     `yaml:"enabled" json:"enabled"`
+	JITWindowSec  int                      `yaml:"jit_window_sec,omitempty" json:"jit_window_sec,omitempty"`
+	CooldownSec   int                      `yaml:"cooldown_sec,omitempty" json:"cooldown_sec,omitempty"`
+	PayloadFilter *bool                    `yaml:"payload_filter,omitempty" json:"payload_filter,omitempty"`
+	SandboxUjail  bool                     `yaml:"sandbox_ujail,omitempty" json:"sandbox_ujail,omitempty"`
+	ListenPort    int                      `yaml:"listen_port,omitempty" json:"listen_port,omitempty"`
+	Peers         []TailscaleP2PPeerConfig `yaml:"peers,omitempty" json:"peers,omitempty"`
+}
+
+func (c TailscaleP2PAssistConfig) IsZero() bool {
+	return !c.Enabled &&
+		c.JITWindowSec == 0 &&
+		c.CooldownSec == 0 &&
+		c.PayloadFilter == nil &&
+		!c.SandboxUjail &&
+		c.ListenPort == 0 &&
+		len(c.Peers) == 0
+}
+
+func (c TailscaleP2PAssistConfig) EffectiveJITWindowSec() int {
+	if c.JITWindowSec <= 0 {
+		return 5
+	}
+	return min(max(3, c.JITWindowSec), 10)
+}
+
+func (c TailscaleP2PAssistConfig) EffectiveCooldownSec() int {
+	if c.CooldownSec <= 0 {
+		return 300
+	}
+	return min(max(30, c.CooldownSec), 3600)
+}
+
+func (c TailscaleP2PAssistConfig) EffectivePayloadFilter() bool {
+	if c.PayloadFilter == nil {
+		return true
+	}
+	return *c.PayloadFilter
+}
+
+func (c TailscaleP2PAssistConfig) EffectiveListenPort() int {
+	if c.ListenPort <= 0 || c.ListenPort > 65535 {
+		return 41641
+	}
+	return c.ListenPort
+}
+
 type TailscaleConfig struct {
-	AuthKey  string `yaml:"auth_key"`
-	UseBuild bool   `yaml:"use_build"`
-	Subnets  string `yaml:"subnets"`
+	AuthKey   string                   `yaml:"auth_key"`
+	UseBuild  bool                     `yaml:"use_build"`
+	Subnets   string                   `yaml:"subnets"`
+	P2PAssist TailscaleP2PAssistConfig `yaml:"p2p_assist,omitempty" json:"p2p_assist,omitzero"`
 }
 
 type ServerConfig struct {
@@ -1039,6 +1162,7 @@ var knownYAMLKeys = []string{
 	"include", "exclude", "rename", "match", "replace",
 	"github", "mirror_url", "hy2", "up", "down",
 	"tailscale", "auth_key", "use_build", constant.TailscaleSubnets,
+	"p2p_assist", "jit_window_sec", "cooldown_sec", "payload_filter", "sandbox_ujail", "listen_port", "peers", "id", "tailscale_ip", "jit_enabled", "access_mode", "bidirectional_until", "allowed_lan_targets",
 	"server", "node_tag", "sb_domain", "node_domain", "hy2_port", "vless_port", "substore_domain", "server_ip",
 	"cf_dns_key", "sni", "cors_allowed_origins",
 	"web_terminal", "mtls_ca", "ssh_tunnel_port", "ssh_tunnel_path", "ssh_port",
@@ -1454,6 +1578,9 @@ func MigrateConfig(configPath string, templateData []byte) error {
 		if hasYAMLKey(oldTS, "use_build") {
 			setOrAddField(docNode, "tailscale", "use_build", strconv.FormatBool(oldCfg.Tailscale.UseBuild))
 		}
+		if hasYAMLKey(oldTS, "p2p_assist") && !oldCfg.Tailscale.P2PAssist.IsZero() {
+			setOrAddMapping(docNode, "tailscale", "p2p_assist", oldCfg.Tailscale.P2PAssist)
+		}
 	}
 
 	// 5. Merge Server (全量保留所有字段，包括 node_domain, substore_domain, web_terminal, web_admin 等)
@@ -1791,6 +1918,30 @@ func filterRoleNodesBeforeMerge(dstRoot, srcRoot *yaml.Node, cfg *Config) {
 				break
 			}
 		}
+	}
+
+	// 当 tailscale.p2p_assist 被修改或清空时，清理 dstDoc 与 srcDoc 中旧的 p2p_assist 子节点以保证置空字段和删除 peer 真实生效
+	if cfg != nil {
+		stripChild := func(doc *yaml.Node, parentKey, childKey string) {
+			for i := 0; i+1 < len(doc.Content); i += 2 {
+				if doc.Content[i].Value == parentKey && doc.Content[i+1].Kind == yaml.MappingNode {
+					sub := doc.Content[i+1]
+					next := make([]*yaml.Node, 0, len(sub.Content))
+					for j := 0; j+1 < len(sub.Content); j += 2 {
+						if sub.Content[j].Value == childKey {
+							continue
+						}
+						next = append(next, sub.Content[j], sub.Content[j+1])
+					}
+					sub.Content = next
+					break
+				}
+			}
+		}
+		if cfg.Tailscale.P2PAssist.IsZero() {
+			stripChild(srcDoc, "tailscale", "p2p_assist")
+		}
+		stripChild(dstDoc, "tailscale", "p2p_assist")
 	}
 
 	// 当 server.warp_routing 被修改、清空列表或恢复默认时，清理 dstDoc 与 srcDoc 中旧的 warp_routing 子节点以防止合并残留

@@ -143,6 +143,7 @@ func (t *Tailscale) Install() error {
 	if err := releasepkg.Extract(res.Path, extractDir); err != nil {
 		return fmt.Errorf("extract tailscale archive failed: %w", err)
 	}
+	_ = os.Remove(res.Path)
 
 	// 从下载的解压文件中查找二进制文件
 	tsBin, err := file.FindExecutable(extractDir, "tailscale")
@@ -155,11 +156,8 @@ func (t *Tailscale) Install() error {
 		return fmt.Errorf("tailscaled binary not found: %w", err)
 	}
 
-	// 拷贝文件
-	if err := file.InstallOrReplace(tsBin, filepath.Join(installDir, "tailscale")); err != nil {
-		return err
-	}
-	if err := file.InstallOrReplace(tsdBin, filepath.Join(installDir, "tailscaled")); err != nil {
+	// 拷贝/链接文件（ARM64 精简合体版保留 tailscale -> tailscaled 软链接以节省一半空间）
+	if err := installTailscaleBinaries(tsBin, tsdBin, installDir); err != nil {
 		return err
 	}
 
@@ -616,6 +614,7 @@ func (t *Tailscale) Update() error {
 	if err := releasepkg.Extract(res.Path, extractDir); err != nil {
 		return fmt.Errorf("extract tailscale archive failed: %w", err)
 	}
+	_ = os.Remove(res.Path)
 
 	tsBin, err := file.FindExecutable(extractDir, "tailscale")
 	if err != nil {
@@ -633,11 +632,8 @@ func (t *Tailscale) Update() error {
 		logger.Warn("Stop may be incomplete: %v", err)
 	}
 
-	if err := file.InstallOrReplace(tsBin, filepath.Join(installDir, "tailscale")); err != nil {
-		return fmt.Errorf("replace tailscale binary failed: %w", err)
-	}
-	if err := file.InstallOrReplace(tsdBin, filepath.Join(installDir, "tailscaled")); err != nil {
-		return fmt.Errorf("replace tailscaled binary failed: %w", err)
+	if err := installTailscaleBinaries(tsBin, tsdBin, installDir); err != nil {
+		return fmt.Errorf("replace tailscale binaries failed: %w", err)
 	}
 
 	logger.Info("Restarting tailscale service...")
@@ -652,6 +648,41 @@ func (t *Tailscale) Update() error {
 	}
 
 	logger.Success("Tailscale updated successfully")
+	return nil
+}
+
+// installTailscaleBinaries 安装或替换 tailscaled 与 tailscale；若包内 tailscale 为指向 tailscaled 的合体软链接，
+// 则保留相对软链接（避免把单二进制重复复制两份导致双倍 Flash 占用）。
+func installTailscaleBinaries(tsBin, tsdBin, targetDir string) error {
+	targetTSD := filepath.Join(targetDir, "tailscaled")
+	targetTS := filepath.Join(targetDir, "tailscale")
+
+	if err := file.InstallOrReplace(tsdBin, targetTSD); err != nil {
+		return fmt.Errorf("install tailscaled binary failed: %w", err)
+	}
+
+	linfo, lErr := os.Lstat(tsBin)
+	tsStat, sErr := os.Stat(tsBin)
+	tsdStat, dErr := os.Stat(tsdBin)
+	isCombined := (lErr == nil && linfo.Mode()&os.ModeSymlink != 0) ||
+		(sErr == nil && dErr == nil && os.SameFile(tsStat, tsdStat))
+
+	if isCombined {
+		tmpLink := filepath.Join(targetDir, ".tailscale.tmp-link")
+		_ = os.Remove(tmpLink)
+		if err := os.Symlink("tailscaled", tmpLink); err != nil {
+			return fmt.Errorf("create tailscale symlink: %w", err)
+		}
+		if err := os.Rename(tmpLink, targetTS); err != nil {
+			_ = os.Remove(tmpLink)
+			return fmt.Errorf("replace tailscale symlink: %w", err)
+		}
+		return nil
+	}
+
+	if err := file.InstallOrReplace(tsBin, targetTS); err != nil {
+		return fmt.Errorf("install tailscale binary failed: %w", err)
+	}
 	return nil
 }
 

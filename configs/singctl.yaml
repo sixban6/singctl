@@ -37,6 +37,19 @@ tailscale:                                      # (可选) Tailscale 部署配�
   auth_key: ""                                  # (可选) Tailscale 授权密钥。默认是: ""
   subnets: ""                                   # (可选) 配置通告的子网，默认为空，程序会自动获取
   use_build: false                              # (可选) 是否使用singbox内置的TailScale。默认：false, 不启用
+  # p2p_assist:                                 # (可选) Tailscale P2P 直连防线（零常驻公网暴露 + 3 态双向管控）
+  #   enabled: false
+  #   jit_window_sec: 5                         # 瞬时打洞白名单窗口（秒，3~10，默认 5）
+  #   cooldown_sec: 300                         # 连续失败退避冷却（秒，默认 300；退避期间继续经 DERP 转发）
+  #   payload_filter: true                      # Layer 2 内核 DISCO/WireGuard/STUN 魔法头校验
+  #   sandbox_ujail: false                      # (可选) Layer 3 OpenWrt ujail 沙盒隔离
+  #   peers:
+  #     - name: "router-remote"
+  #       jit_enabled: true
+  #       access_mode: "outbound_only"          # outbound_only | bidirectional_timed | bidirectional
+  #       bidirectional_until: ""
+  #       allowed_lan_targets:
+  #         - "192.168.1.0/24"
 
 server: # (可选) 服务器部署配置.当需要部署singbox服务端的时候配置
   node_tag: "" # (可选) 节点地区/代号 (例如: los, sg, hk)，留空自动根据公网 IP 智能识别

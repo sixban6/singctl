@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"singctl/internal/tailscale"
 )
 
 const maxRecentWatchdogEvents = 25
@@ -44,9 +46,10 @@ type DaemonRuntimeSnapshot struct {
 	LastSubSyncResult string                `json:"lastSubSyncResult,omitempty"`
 	LastRuleSetAt     string                `json:"lastRuleSetAt,omitempty"`
 	LastRuleSetResult string                `json:"lastRuleSetResult,omitempty"`
-	LastFailoverAt    string                `json:"lastFailoverAt,omitempty"`
-	ActiveFailovers   []FailoverActiveItem  `json:"activeFailovers,omitempty"`
-	RecentEvents      []WatchdogEventRecord `json:"recentEvents,omitempty"`
+	LastFailoverAt    string                        `json:"lastFailoverAt,omitempty"`
+	ActiveFailovers   []FailoverActiveItem          `json:"activeFailovers,omitempty"`
+	TailscaleP2P      *tailscale.P2PRuntimeSnapshot `json:"tailscaleP2P,omitempty"`
+	RecentEvents      []WatchdogEventRecord         `json:"recentEvents,omitempty"`
 }
 
 var stateFileMu sync.Mutex
