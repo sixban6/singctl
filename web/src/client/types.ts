@@ -107,6 +107,7 @@ export interface IPv6StatusInfo {
   lanRaMode?: string;
   lanDhcpv6Mode?: string;
   dnsmasqFilterAaaa?: string;
+  dnsmasqForwardMax?: string;
   raDnsAnnounce: boolean;
   autoConfigurable: boolean;
   warnings?: string[];

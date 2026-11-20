@@ -46,6 +46,7 @@ type IPv6StatusInfo struct {
 	LANRAMode         string   `json:"lanRaMode,omitempty"`
 	LANDHCPv6Mode     string   `json:"lanDhcpv6Mode,omitempty"`
 	DnsmasqFilterAAAA string   `json:"dnsmasqFilterAaaa,omitempty"`
+	DnsmasqForwardMax string   `json:"dnsmasqForwardMax,omitempty"`
 	RADNSAnnounce     bool     `json:"raDnsAnnounce"`
 	AutoConfigurable  bool     `json:"autoConfigurable"`
 	Warnings          []string `json:"warnings,omitempty"`
@@ -78,6 +79,7 @@ var managedOpenWrtIPv6UCIKeys = []string{
 	"dhcp.lan.ra_flags",
 	"dhcp.lan.ra_dns",
 	"dhcp.lan.dns_service",
+	"dhcp.@dnsmasq[0].dnsforwardmax",
 }
 
 func (c *Controller) ipv6BackupPath() string {
@@ -232,9 +234,10 @@ func (c *Controller) probeIPv6Status(ctx context.Context, gwCfg config.GatewayCo
 		info.LANRAMode = c.readUCIKey(ctx, "dhcp.lan.ra")
 		info.LANDHCPv6Mode = c.readUCIKey(ctx, "dhcp.lan.dhcpv6")
 		info.DnsmasqFilterAAAA = c.readUCIKey(ctx, "dhcp.@dnsmasq[0].filter_aaaa")
+		info.DnsmasqForwardMax = c.readUCIKey(ctx, "dhcp.@dnsmasq[0].dnsforwardmax")
 		raDNS := c.readUCIKey(ctx, "dhcp.lan.ra_dns")
 		dnsSvc := c.readUCIKey(ctx, "dhcp.lan.dns_service")
-		info.RADNSAnnounce = raDNS != "0" && dnsSvc != "0" && (info.LANRAMode == "server" || info.LANDHCPv6Mode == "server")
+		info.RADNSAnnounce = (raDNS != "0" || dnsSvc != "0") && (info.LANRAMode == "server" || info.LANDHCPv6Mode == "server")
 	}
 
 	mode := gwCfg.EffectiveIPv6Mode()
@@ -262,13 +265,22 @@ func (c *Controller) readUCIKey(ctx context.Context, key string) string {
 
 func (c *Controller) saveOpenWrtIPv6Backup(ctx context.Context) error {
 	path := c.ipv6BackupPath()
-	if _, err := os.Stat(path); err == nil {
-		return nil
+	var snap ipv6UCIBackup
+	fileExists := false
+	if raw, err := os.ReadFile(path); err == nil {
+		fileExists = true
+		_ = json.Unmarshal(raw, &snap)
 	}
-	snap := ipv6UCIBackup{
-		Keys: make(map[string]uciBackupValue, len(managedOpenWrtIPv6UCIKeys)),
+	if snap.Keys == nil {
+		snap.Keys = make(map[string]uciBackupValue, len(managedOpenWrtIPv6UCIKeys))
 	}
+
+	dirty := !fileExists
 	for _, key := range managedOpenWrtIPv6UCIKeys {
+		if _, exists := snap.Keys[key]; exists {
+			continue
+		}
+		dirty = true
 		out, err := c.runCmd(ctx, "uci", "-q", "get", key)
 		if err != nil {
 			snap.Keys[key] = uciBackupValue{Set: false}
@@ -278,6 +290,9 @@ func (c *Controller) saveOpenWrtIPv6Backup(ctx context.Context) error {
 			Set:   true,
 			Value: strings.TrimSpace(string(out)),
 		}
+	}
+	if !dirty {
+		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
@@ -395,9 +410,10 @@ func (c *Controller) SyncIPv6Host(ctx context.Context, gwCfg config.GatewayConfi
 		_, _ = c.runCmd(ctx, "uci", "-q", "delete", "dhcp.lan.ra_flags")
 		_, _ = c.runCmd(ctx, "uci", "add_list", "dhcp.lan.ra_flags=managed-config")
 		_, _ = c.runCmd(ctx, "uci", "add_list", "dhcp.lan.ra_flags=other-config")
-		_, _ = c.runCmd(ctx, "uci", "set", "dhcp.lan.ra_dns=1")
-		_, _ = c.runCmd(ctx, "uci", "set", "dhcp.lan.dns_service=1")
+		_, _ = c.runCmd(ctx, "uci", "set", "dhcp.lan.ra_dns=0")
+		_, _ = c.runCmd(ctx, "uci", "set", "dhcp.lan.dns_service=0")
 		_, _ = c.runCmd(ctx, "uci", "set", "dhcp.@dnsmasq[0].filter_aaaa=0")
+		_, _ = c.runCmd(ctx, "uci", "set", "dhcp.@dnsmasq[0].dnsforwardmax=1024")
 		_, _ = c.runCmd(ctx, "uci", "commit", "network")
 		_, _ = c.runCmd(ctx, "uci", "commit", "dhcp")
 		_, _ = c.runCmd(ctx, "ubus", "call", "network", "reload")
@@ -425,7 +441,7 @@ func (c *Controller) SyncIPv6Host(ctx context.Context, gwCfg config.GatewayConfi
 		_, _ = c.runCmd(ctx, "/etc/init.d/dnsmasq", "reload")
 		_, _ = c.runCmd(ctx, "killall", "-HUP", "dnsmasq")
 		res.OpenWrtAutoApplied = true
-		res.Actions = append(res.Actions, "已自动配置 OpenWrt LAN IPv6 前缀分配 (RA/DHCPv6 + 本地 RDNSS 防泄漏) 并开启 dnsmasq AAAA 解析")
+		res.Actions = append(res.Actions, "已自动配置 OpenWrt LAN IPv6 前缀分配 (关闭 IPv6 RDNSS 仅经 IPv4 DNS 防泄漏)、放行 dnsmasq AAAA 并提升并发上限至 1024")
 	}
 
 	// 热刷新 IPv6 策略路由表 100 throw 逃生路由与 nftables LOCAL_IPV6_SET 豁免（不重启 sing-box）

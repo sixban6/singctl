@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Share2, Flame, GitFork, RefreshCw, Save, AlertTriangle, CheckCircle2, Network } from 'lucide-react';
+import { Share2, Flame, GitFork, RefreshCw, Save, AlertTriangle, CheckCircle2, Network, Smartphone, Copy, Check } from 'lucide-react';
 import { Badge, Button, PageHeader, SectionCard, SegmentedTabs, useToast } from '../../ui';
 import { clientApi } from '../api';
 import { DNSLeakTestCard } from '../components/DNSLeakTestCard';
@@ -196,6 +196,15 @@ export interface GatewayModePageProps {
   onSaved?: () => void;
 }
 
+const SECONDARY_ROUTER_IPV6_CMD = `cp -a /etc/config/dhcp /etc/config/dhcp.bak && chmod 600 /etc/config/dhcp.bak && \\
+uci set dhcp.@dnsmasq[0].dnsforwardmax=1024 && \\
+for s in $(uci show dhcp | sed -n 's/^dhcp\\.\\([^.=]*\\)=dhcp$/\\1/p'); do
+  [ "$s" = "wan" ] || [ "$s" = "wan6" ] && continue
+  uci set "dhcp.$s.ra_dns=0"
+  uci set "dhcp.$s.dns_service=0"
+done && \\
+uci commit dhcp && /etc/init.d/odhcpd reload && /etc/init.d/dnsmasq reload`;
+
 export const GatewayModePage: React.FC<GatewayModePageProps> = ({ busy, onSaved }) => {
   const { success, error } = useToast();
   const [data, setData] = useState<ClientGatewayConfigResponse | null>(null);
@@ -206,6 +215,30 @@ export const GatewayModePage: React.FC<GatewayModePageProps> = ({ busy, onSaved 
   const [mainRouterIP, setMainRouterIP] = useState('');
   const [ipv6Mode, setIpv6Mode] = useState<GatewayIPv6Mode>('off');
   const [ipv6Saving, setIpv6Saving] = useState(false);
+  const [copiedSubCmd, setCopiedSubCmd] = useState(false);
+
+  const handleCopySubRouterCmd = async () => {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(SECONDARY_ROUTER_IPV6_CMD);
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = SECONDARY_ROUTER_IPV6_CMD;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+      setCopiedSubCmd(true);
+      success('已复制二级路由一键加固命令');
+      window.setTimeout(() => setCopiedSubCmd(false), 2000);
+    } catch {
+      error('复制失败，请手动选中下方命令复制');
+    }
+  };
 
   const loadGateway = useCallback(async () => {
     setLoading(true);
@@ -494,12 +527,26 @@ export const GatewayModePage: React.FC<GatewayModePageProps> = ({ busy, onSaved 
                 )}
               </div>
               {v6Status.isOpenWrt && (
-                <div className="flex items-center gap-1.5">
-                  <span className="text-muted">dnsmasq AAAA:</span>
-                  <span className="font-mono text-primary">
-                    {v6Status.dnsmasqFilterAaaa === '1' ? '过滤关闭' : '正常解析'}
-                  </span>
-                </div>
+                <>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-muted">dnsmasq AAAA:</span>
+                    <span className="font-mono text-primary">
+                      {v6Status.dnsmasqFilterAaaa === '1' ? '过滤关闭' : '正常解析'}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-muted">IPv6 DNS 通告:</span>
+                    <Badge tone={v6Status.raDnsAnnounce ? 'warn' : 'ok'}>
+                      {v6Status.raDnsAnnounce ? '仍在通告' : '已关闭(仅 IPv4 DNS)'}
+                    </Badge>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-muted">并发上限:</span>
+                    <span className="font-mono text-primary">
+                      {v6Status.dnsmasqForwardMax || '默认(150)'}
+                    </span>
+                  </div>
+                </>
               )}
             </div>
           )}
@@ -528,7 +575,7 @@ export const GatewayModePage: React.FC<GatewayModePageProps> = ({ busy, onSaved 
                 key: 'cn_only' as GatewayIPv6Mode,
                 title: '智能双栈 (国内 IPv6 + 海外 IPv4)',
                 tag: '黄金推荐',
-                desc: '国内直连与 PT 原生 IPv6+IPv4；海外域名 0ms 本地空应答 AAAA 走 IPv4 隧道，彻底免去节点无 IPv6 导致的卡顿/弹盾与泄漏。',
+                desc: '国内直连与 PT 原生 IPv6+IPv4；海外域名 0ms 静音海外 AAAA/HTTPS、拦截 DoT/国内 DoH 与代理侧 ::/0，彻底免去节点无 IPv6 导致的卡顿/弹盾与泄漏。',
                 disabled: mode === 'side',
               },
               {
@@ -573,6 +620,65 @@ export const GatewayModePage: React.FC<GatewayModePageProps> = ({ busy, onSaved 
               );
             })}
           </div>
+
+          {mode !== 'side' && ipv6Mode !== 'off' && (
+            <div className="rounded-xl border border-sky-500/35 bg-sky-500/10 px-3.5 py-3 space-y-2 text-xs text-sky-100">
+              <div className="flex items-center gap-2 font-semibold text-sky-200">
+                <Smartphone className="w-4 h-4 text-sky-400 shrink-0" />
+                <span>开启 IPv6 必看：如何彻底关闭手机端 5G 蜂窝兜底泄漏</span>
+              </div>
+              <p className="text-[11px] text-sky-100/90 leading-relaxed">
+                当路由器对海外 AAAA/HTTPS 做静音（或遭遇高并发 DNS 探测）时，手机若开启 Wi-Fi/蜂窝智能切网且同时开着 5G 数据，系统会误判 Wi-Fi 无 IPv6 而直接经 5G 基站发出运营商 IPv6 DNS 查询，绕过家用路由器：
+              </p>
+              <ul className="space-y-1 text-[11px] text-sky-100/90 list-disc pl-4 leading-relaxed">
+                <li>
+                  <span className="font-semibold text-white">iPhone (iOS)</span>：打开{' '}
+                  <code className="px-1 py-0.5 rounded bg-sky-950/60 border border-sky-400/20">设置 → 无线局域网 (WLAN)</code>{' '}
+                  关闭 <span className="font-semibold text-white">「连接助理」</span>（部分系统版本位于{' '}
+                  <code className="px-1 py-0.5 rounded bg-sky-950/60 border border-sky-400/20">设置 → 蜂窝网络 → 展开全部应用 → 拉至最底端</code>{' '}
+                  关闭 <span className="font-semibold text-white">「无线局域网助理」</span>）。
+                </li>
+                <li>
+                  <span className="font-semibold text-white">华为 / 鸿蒙</span>：打开{' '}
+                  <code className="px-1 py-0.5 rounded bg-sky-950/60 border border-sky-400/20">设置 → WLAN → 更多 WLAN 设置</code>{' '}
+                  关闭 <span className="font-semibold text-white">「WLAN+」</span> 与{' '}
+                  <span className="font-semibold text-white">「网络加速 / 双通道加速」</span>。
+                </li>
+                <li>
+                  <span className="font-semibold text-white">小米 / OPPO / vivo / 三星等安卓</span>：打开{' '}
+                  <code className="px-1 py-0.5 rounded bg-sky-950/60 border border-sky-400/20">设置 → WLAN → WLAN 助理 / 智能选网</code>{' '}
+                  关闭 <span className="font-semibold text-white">「自动切换移动数据」</span> 与{' '}
+                  <span className="font-semibold text-white">「双通道加速」</span>。
+                </li>
+                <li>
+                  <span className="font-semibold text-white">多级路由 &amp; 生效步骤</span>：若前端还接有二级无线路由器，请同步将其{' '}
+                  <code className="px-1 py-0.5 rounded bg-sky-950/60 border border-sky-400/20">dnsforwardmax</code> 调至{' '}
+                  <code className="px-1 py-0.5 rounded bg-sky-950/60 border border-sky-400/20">1024</code> 并关闭 IPv6 RDNSS（
+                  <code className="px-1 py-0.5 rounded bg-sky-950/60 border border-sky-400/20">ra_dns=0</code> /{' '}
+                  <code className="px-1 py-0.5 rounded bg-sky-950/60 border border-sky-400/20">dns_service=0</code>）；保存后请
+                  <span className="font-semibold text-white">断开并重连一次 Wi-Fi</span> 刷新租约后再复测。
+                </li>
+              </ul>
+              <div className="rounded-lg border border-sky-400/20 bg-slate-950/75 p-2.5 space-y-1.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-[11px] font-medium text-sky-200/95">
+                    二级 OpenWrt / ImmortalWrt 无线路由一键加固命令（SSH 登录二级路由后直接粘贴执行）
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => void handleCopySubRouterCmd()}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-sky-400/30 bg-sky-500/15 hover:bg-sky-500/25 text-[11px] text-sky-100 transition-colors cursor-pointer"
+                  >
+                    {copiedSubCmd ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+                    <span>{copiedSubCmd ? '已复制' : '复制命令'}</span>
+                  </button>
+                </div>
+                <pre className="overflow-x-auto text-[11px] font-mono text-sky-100/95 leading-relaxed select-all whitespace-pre">
+                  {SECONDARY_ROUTER_IPV6_CMD}
+                </pre>
+              </div>
+            </div>
+          )}
 
           <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-subtle">
             <span className="text-[11px] text-muted">

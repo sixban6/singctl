@@ -397,6 +397,13 @@ export const DNSLeakTestCard: React.FC<DNSLeakTestCardProps> = ({
         (ov6Target.countryCode === 'CN' || (homeIPv6 && sameIPv6Prefix48(ov6Target.ip, homeIPv6))),
     );
     const ov6Leaked = ipv6Mode !== 'full' && ov6IsHomeOrCN;
+    const browserHasIPv6 = Boolean(suite?.browserDom?.usedIPv6 || suite?.browserOv6?.reachable);
+    const clientIPv6Disabled = Boolean(
+      ipv6Mode !== 'off' &&
+        suite?.browserDom &&
+        !browserHasIPv6 &&
+        gw?.egress?.domesticIpv6?.reachable,
+    );
 
     // Evaluate WebRTC
     const rtc = suite?.webrtc || null;
@@ -443,6 +450,7 @@ export const DNSLeakTestCard: React.FC<DNSLeakTestCardProps> = ({
       ov6Target,
       ov6Leaked,
       ov6IsHomeOrCN,
+      clientIPv6Disabled,
       rtc,
       webrtcStatus,
       webrtcHeadline,
@@ -581,7 +589,7 @@ export const DNSLeakTestCard: React.FC<DNSLeakTestCardProps> = ({
               <div className="space-y-0.5">
                 <div className="font-semibold">双端归因：路由器网关零泄漏，异常来自你当前的终端或浏览器</div>
                 <p className="text-[11px] opacity-90 leading-relaxed">
-                  请检查浏览器设置中的「使用安全 DNS（DoH）」（例如 Brave / Chrome 内置或指向国内公共 DNS），或本机系统网卡是否手动固定了非路由器 IP 的 DNS。
+                  请检查浏览器设置中的「使用安全 DNS（DoH）」（例如 Brave / Chrome 内置或指向国内公共 DNS），或本机系统网卡是否手动固定了非路由器 IP 的 DNS。若在手机上检测：请关闭 iPhone「设置 → 无线局域网 → 连接助理」（或「蜂窝网络」最底部的「无线局域网助理」），以及华为「WLAN+」/ 安卓「自动切换移动数据」。
                 </p>
               </div>
             </div>
@@ -679,7 +687,9 @@ export const DNSLeakTestCard: React.FC<DNSLeakTestCardProps> = ({
                         ? { tone: 'ok', text: '全双栈出站' }
                         : { tone: 'warn', text: running ? '探测中' : '节点暂不支持 IPv6' }
                       : !analysis.ov6Target?.reachable
-                        ? { tone: 'ok', text: '已静音拦截 · 零泄漏' }
+                        ? analysis.ipv6Mode === 'cn_only' && analysis.clientIPv6Disabled
+                          ? { tone: 'warn', text: '本机未启用 IPv6' }
+                          : { tone: 'ok', text: '已静音拦截 · 零泄漏' }
                         : { tone: 'ok', text: '海外代理 IPv6 出站' }
                 }
                 ipText={
@@ -687,7 +697,9 @@ export const DNSLeakTestCard: React.FC<DNSLeakTestCardProps> = ({
                     ? maskIP(analysis.ov6Target.ip, hideIP)
                     : analysis.ipv6Mode === 'full'
                       ? '当前节点无 IPv6 出站'
-                      : '已按策略 0ms 拦截 AAAA'
+                      : analysis.ipv6Mode === 'cn_only' && analysis.clientIPv6Disabled
+                        ? '仅网关侧已静音拦截'
+                        : '已 0ms 拦截 AAAA/HTTPS 及 ::/0'
                 }
                 geoText={
                   analysis.ov6Target?.reachable
@@ -701,7 +713,9 @@ export const DNSLeakTestCard: React.FC<DNSLeakTestCardProps> = ({
                       ? analysis.ov6Target.asn || analysis.ov6Target.isp || ''
                       : analysis.ipv6Mode === 'full'
                         ? analysis.ov6Target?.error || '建议切换为「智能双栈」获得零延迟体验'
-                        : '海外域名不返回 AAAA，浏览器直接走代理 IPv4，无泄漏风险'
+                        : analysis.ipv6Mode === 'cn_only' && analysis.clientIPv6Disabled
+                          ? '当前浏览器所在终端未获取到 IPv6（国内 IPv6 未通），无法验证终端双栈回退；请在系统开启 IPv6 后复测'
+                          : '海外域名不返回 AAAA/HTTPS 且路由层秒拒 ::/0，浏览器直走代理 IPv4'
                 }
                 latencyMs={analysis.ov6Target?.latencyMs}
                 danger={analysis.ov6Leaked}

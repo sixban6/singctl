@@ -62,6 +62,15 @@ func startMockUDPServer(t *testing.T, handler func(qname string, qtype uint16) (
 			}
 			for _, txt := range txts {
 				resp = append(resp, 0xC0, 0x0C)
+				if qtype == dnsTypeHTTPS {
+					resp = binary.BigEndian.AppendUint16(resp, dnsTypeHTTPS)
+					resp = binary.BigEndian.AppendUint16(resp, 1)
+					resp = binary.BigEndian.AppendUint32(resp, 60)
+					resp = binary.BigEndian.AppendUint16(resp, 3)
+					resp = append(resp, 0x00, 0x01, 0x00) // SvcPriority=1, TargetName="."
+					_ = txt
+					continue
+				}
 				resp = binary.BigEndian.AppendUint16(resp, dnsTypeTXT)
 				resp = binary.BigEndian.AppendUint16(resp, 1)
 				resp = binary.BigEndian.AppendUint32(resp, 60)
@@ -138,8 +147,9 @@ func TestRunDNSLeakTest_SafeCNOnlyAndLeakedDetection(t *testing.T) {
 		IPv6Status: gateway.IPv6StatusInfo{
 			IsOpenWrt:         true,
 			DnsmasqFilterAAAA: "0",
+			DnsmasqForwardMax: "1024",
 			LANPrefixes:       []string{"2001:db8:1::/64"},
-			RADNSAnnounce:     true,
+			RADNSAnnounce:     false,
 		},
 	})
 	if rep.Verdict != "safe" {
@@ -176,6 +186,90 @@ func TestRunDNSLeakTest_SafeCNOnlyAndLeakedDetection(t *testing.T) {
 	})
 	if leakedRep.Verdict != "leaked" {
 		t.Fatalf("expected verdict=leaked when CN resolver and overseas AAAA leak occur, got %q (%+v)", leakedRep.Verdict, leakedRep.Checks)
+	}
+
+	// 3. Warn when OpenWrt still announces IPv6 RDNSS or keeps low dnsforwardmax
+	for _, tc := range []struct {
+		name string
+		st   gateway.IPv6StatusInfo
+	}{
+		{
+			name: "ra_dns_enabled",
+			st: gateway.IPv6StatusInfo{
+				IsOpenWrt:         true,
+				DnsmasqFilterAAAA: "0",
+				DnsmasqForwardMax: "1024",
+				LANPrefixes:       []string{"2001:db8:1::/64"},
+				RADNSAnnounce:     true,
+			},
+		},
+		{
+			name: "dnsforwardmax_missing",
+			st: gateway.IPv6StatusInfo{
+				IsOpenWrt:         true,
+				DnsmasqFilterAAAA: "0",
+				LANPrefixes:       []string{"2001:db8:1::/64"},
+				RADNSAnnounce:     false,
+			},
+		},
+		{
+			name: "dnsforwardmax_150",
+			st: gateway.IPv6StatusInfo{
+				IsOpenWrt:         true,
+				DnsmasqFilterAAAA: "0",
+				DnsmasqForwardMax: "150",
+				LANPrefixes:       []string{"2001:db8:1::/64"},
+				RADNSAnnounce:     false,
+			},
+		},
+	} {
+		warnRep := RunDNSLeakTest(t.Context(), DNSLeakTestOptions{
+			IPv6Mode:          "cn_only",
+			GatewayMode:       "main",
+			SingBoxRunning:    true,
+			AdGuardHealthy:    true,
+			PrimaryDNS:        mockSafeDNS,
+			PlaintextProbeDNS: mockSafeDNS,
+			SkipTCP6Dial:      true,
+			SkipMultiProbe:    true,
+			LookupISP:         lookupOverseas,
+			LookupHomeISP:     lookupHome,
+			IPv6Status:        tc.st,
+		})
+		if warnRep.Verdict != "warning" {
+			t.Fatalf("%s: expected verdict=warning, got %q (%+v)", tc.name, warnRep.Verdict, warnRep.Checks)
+		}
+	}
+
+	// 4. Catch overseas HTTPS (Type 65) leak even when AAAA is suppressed under cn_only
+	mockHTTPSLeakDNS := startMockUDPServer(t, func(qname string, qtype uint16) ([]net.IP, []string) {
+		switch {
+		case qtype == dnsTypeTXT && qname == "o-o.myaddr.l.google.com":
+			return nil, []string{"203.0.113.53", "edns0-client-subnet 198.51.100.0/24"}
+		case qtype == dnsTypeA && (qname == "www.google.com" || qname == "github.com"):
+			return []net.IP{net.ParseIP("203.0.113.80")}, nil
+		case qtype == dnsTypeAAAA && qname == "www.bilibili.com":
+			return []net.IP{netip.MustParseAddr("2001:db8:1::10").AsSlice()}, nil
+		case qtype == dnsTypeHTTPS && qname == "www.google.com":
+			return nil, []string{"https-rr"}
+		default:
+			return nil, nil
+		}
+	})
+	httpsLeakRep := RunDNSLeakTest(t.Context(), DNSLeakTestOptions{
+		IPv6Mode:          "cn_only",
+		GatewayMode:       "main",
+		SingBoxRunning:    true,
+		AdGuardHealthy:    true,
+		PrimaryDNS:        mockHTTPSLeakDNS,
+		PlaintextProbeDNS: mockHTTPSLeakDNS,
+		SkipTCP6Dial:      true,
+		SkipMultiProbe:    true,
+		LookupISP:         lookupOverseas,
+		LookupHomeISP:     lookupHome,
+	})
+	if httpsLeakRep.Verdict != "leaked" {
+		t.Fatalf("expected verdict=leaked when overseas HTTPS Type 65 leaks under cn_only, got %q (%+v)", httpsLeakRep.Verdict, httpsLeakRep.Checks)
 	}
 }
 
