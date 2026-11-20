@@ -342,7 +342,7 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
   const [networkFilter, setNetworkFilter] = useState<'' | 'tcp' | 'udp'>('');
   const [axisFilter, setAxisFilter] = useState<'' | 'security' | 'privacy'>('');
   const [onlySuspect, setOnlySuspect] = useState(false);
-  const [onlyActive, setOnlyActive] = useState(false);
+  const [onlyActive, setOnlyActive] = useState(true);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [aiEnabled, setAiEnabled] = useState<boolean>(() => {
     try {
@@ -1782,7 +1782,11 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
             rows={visibleFlows}
             rowKey={(f) => getFlowCacheKey(f)}
             loading={loading}
-            emptyText={report?.message || '暂无符合过滤条件的流量记录'}
+            emptyText={
+              onlyActive && (report?.flows?.length || 0) > 0 && processedFlows.length === 0
+                ? '当前暂无活跃连接（取消勾选「仅看当前活跃」可查看历史记录）'
+                : report?.message || '暂无符合过滤条件的流量记录'
+            }
             sortBy={sortBy}
             sortDir={sortDir}
             onSort={handleSort}

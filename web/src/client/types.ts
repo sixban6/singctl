@@ -82,8 +82,17 @@ export interface ClientTailscaleStatus {
   running: boolean;
   state: string;
   mode: '' | 'router' | 'exit' | 'gateway' | 'client' | string;
+  acceptRoutes?: boolean;
+  subnets?: string;
   version: string;
   authKeySet: boolean;
+}
+
+export interface TailscaleConfigResponse {
+  authKeySet: boolean;
+  authKeyHint?: string;
+  subnets: string;
+  useBuild: boolean;
 }
 
 export interface ClientFirewallStatus {
@@ -204,6 +213,49 @@ export interface DNSLeakReport {
   dnsServers?: DNSServerObservation[];
   gatewayRounds?: number;
   checks: DNSLeakCheckItem[];
+}
+
+export interface BrowserDoHEDNSSample {
+  dnsIp: string;
+  country?: string;
+  countryCode?: string;
+  isp?: string;
+}
+
+export interface BrowserDoHCheckRequest {
+  phase?: 'begin' | 'finish';
+  probeId?: string;
+  browserSamples?: BrowserDoHEDNSSample[];
+  browserProbeAttempted?: number;
+  browserProbeFailed?: number;
+}
+
+export interface BrowserDoHMatchedEndpoint {
+  provider: string;
+  host?: string;
+  destIp?: string;
+  destPort?: string;
+  sourceIp?: string;
+  network?: string;
+  rule?: string;
+}
+
+export interface BrowserDoHCheckResponse {
+  status: 'clean' | 'detected' | 'suspected' | 'skipped_remote' | 'unavailable' | 'pending' | string;
+  confidence: 'high' | 'medium' | 'none' | string;
+  probeId?: string;
+  idleLeftoverCount?: number;
+  clientIp?: string;
+  isLanClient: boolean;
+  viaTailscale: boolean;
+  detectedProvider?: string;
+  matchedEndpoints?: BrowserDoHMatchedEndpoint[];
+  gatewayResolver?: DNSResolverProfile | null;
+  browserResolvers?: BrowserDoHEDNSSample[];
+  signals?: string[];
+  summary: string;
+  recommendation?: string;
+  checkedAt: string;
 }
 
 export interface ClientAdGuardStatusSummary {
@@ -757,6 +809,7 @@ export interface ActionStreamEvent {
   line?: string;
   code?: number;
   restarting?: boolean;
+  tailscaleSwapping?: boolean;
 }
 
 export type TailscaleAccessMode = 'outbound_only' | 'bidirectional_timed' | 'bidirectional';
@@ -846,4 +899,66 @@ export interface TailscaleP2PPokeResult {
   candidateCount: number;
   message: string;
   report?: TailscaleP2PReport;
+}
+
+export type TailscaleUpgradePhase =
+  | 'idle'
+  | 'staging'
+  | 'swapping'
+  | 'verifying'
+  | 'succeeded'
+  | 'rolled_back'
+  | 'failed'
+  | string;
+
+export interface TailscaleUpgradeState {
+  phase: TailscaleUpgradePhase;
+  fromVersion?: string;
+  toVersion?: string;
+  arch?: string;
+  combined: boolean;
+  force: boolean;
+  startedAt?: string;
+  updatedAt?: string;
+  finishedAt?: string;
+  flashFreeBeforeBytes?: number;
+  flashFreeAfterBytes?: number;
+  message?: string;
+  error?: string;
+  rolledBack: boolean;
+  logTail?: string;
+  swapperPid?: number;
+}
+
+export interface TailscaleUpgradePreflight {
+  supported: boolean;
+  unsupportedReason?: string;
+  arch?: string;
+  isOpenWrt: boolean;
+  initSystem?: string;
+  currentVersion?: string;
+  latestVersion?: string;
+  upToDate: boolean;
+  assetName?: string;
+  assetSizeBytes?: number;
+  estimatedInstallBytes?: number;
+  requiredFreeBytes?: number;
+  combinedMinimal: boolean;
+  hasOfficialDigest: boolean;
+  flashFreeBytes: number;
+  memAvailableBytes: number;
+  swapFreeBytes: number;
+  tailscaleRunning: boolean;
+  backendState?: string;
+  canProceed: boolean;
+  canForceProceed: boolean;
+  blockedReasons?: string[];
+  warnings?: string[];
+  viaTailscale: boolean;
+  activeSwap?: TailscaleUpgradeState;
+}
+
+export interface TailscaleUpgradeStatusResponse {
+  state: TailscaleUpgradeState;
+  tailscale?: ClientStatusResponse['tailscale'];
 }

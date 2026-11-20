@@ -10,10 +10,13 @@ import {
   AuditAIReview,
   AuditFlowRecord,
   AuditReport,
+  BrowserDoHCheckRequest,
+  BrowserDoHCheckResponse,
   CacheResponse,
   ClientBackupExportResponse,
   ClientBackupRestoreResponse,
   ClientConfigDTO,
+  ClientConfigSubDTO,
   ClientGatewayConfigResponse,
   ClientGroupsGetResponse,
   ClientGroupsPreviewResponse,
@@ -29,9 +32,12 @@ import {
   SbProxiesSnapshot,
   SbProxyMode,
   SbTrafficSnapshot,
+  TailscaleConfigResponse,
   TailscaleP2PAssistConfig,
   TailscaleP2PPokeResult,
   TailscaleP2PReport,
+  TailscaleUpgradePreflight,
+  TailscaleUpgradeStatusResponse,
   WatchdogReport,
 } from './types';
 
@@ -111,7 +117,8 @@ function defaultTimeoutForPath(path: string): number {
     path.startsWith('/api/audit/ai-') ||
     path.startsWith('/api/watchdog/patrol') ||
     path.startsWith('/api/dns/leak-test') ||
-    path.startsWith('/api/tailscale/p2p/poke')
+    path.startsWith('/api/tailscale/p2p/poke') ||
+    path.startsWith('/api/tailscale/upgrade/preflight')
   ) {
     return 25000;
   }
@@ -254,6 +261,24 @@ export const clientApi = {
   getConfigRaw: () => request<{ path: string; content: string }>('/api/config/raw'),
   saveConfigRaw: (content: string) =>
     request<{ ok: boolean }>('/api/config/raw', { method: 'PUT', body: JSON.stringify({ content }) }),
+  saveSbSubs: (payload: { subs: ClientConfigSubDTO[]; hy2: { up: number; down: number } }) =>
+    request<{ ok: boolean }>('/api/sb/subs', { method: 'PUT', body: JSON.stringify(payload) }),
+  getTailscaleConfig: () => request<TailscaleConfigResponse>('/api/tailscale/config'),
+  saveTailscaleConfig: (payload: {
+    authKey?: string;
+    clearAuthKey?: boolean;
+    subnets?: string;
+    useBuild?: boolean;
+  }) =>
+    request<{ ok: boolean } & TailscaleConfigResponse>('/api/tailscale/config', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+  saveSystemMirror: (mirrorUrl: string) =>
+    request<{ ok: boolean; mirrorUrl: string }>('/api/system/mirror', {
+      method: 'PUT',
+      body: JSON.stringify({ mirrorUrl }),
+    }),
   getCache: () => request<CacheResponse>('/api/cache'),
   getLogs: (name: string, tail: number) =>
     request<ClientLogsResponse>(`/api/logs?name=${encodeURIComponent(name)}&tail=${tail}`),
@@ -351,6 +376,11 @@ export const clientApi = {
     request<DNSLeakReport>('/api/dns/leak-test', {
       method: 'POST',
       body: JSON.stringify({ mode }),
+    }),
+  checkBrowserDoH: (payload: BrowserDoHCheckRequest = {}) =>
+    request<BrowserDoHCheckResponse>('/api/dns/browser-doh', {
+      method: 'POST',
+      body: JSON.stringify(payload),
     }),
 
   getTailscaleP2P: () => request<TailscaleP2PReport>('/api/tailscale/p2p'),
@@ -485,6 +515,12 @@ export const clientApi = {
       body: JSON.stringify(payload),
     }),
 
+  getTailscaleUpgradePreflight: () =>
+    request<TailscaleUpgradePreflight>('/api/tailscale/upgrade/preflight'),
+
+  getTailscaleUpgradeStatus: (timeoutMs = 3000) =>
+    request<TailscaleUpgradeStatusResponse>('/api/tailscale/upgrade/status', { timeoutMs }),
+
   async downloadAuditCSV(qs: URLSearchParams): Promise<string> {
     const headers: Record<string, string> = { 'X-Requested-With': 'SingCtlWebUI' };
     try {
@@ -510,7 +546,7 @@ export const clientApi = {
     name: string,
     params: Record<string, unknown>,
     onEvent: (ev: ActionStreamEvent) => void,
-  ): Promise<{ code: number; restarting: boolean }> {
+  ): Promise<{ code: number; restarting: boolean; tailscaleSwapping: boolean }> {
     const streamHeaders: Record<string, string> = {
       'Content-Type': 'application/json',
       'X-Requested-With': 'SingCtlWebUI',
@@ -552,6 +588,7 @@ export const clientApi = {
     let buf = '';
     let exitCode = 0;
     let restarting = false;
+    let tailscaleSwapping = false;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -568,12 +605,13 @@ export const clientApi = {
           if (ev.t === 'exit') {
             exitCode = ev.code ?? 0;
             restarting = Boolean(ev.restarting);
+            tailscaleSwapping = Boolean(ev.tailscaleSwapping);
           }
         } catch {
           // ignore malformed chunk
         }
       }
     }
-    return { code: exitCode, restarting };
+    return { code: exitCode, restarting, tailscaleSwapping };
   },
 };

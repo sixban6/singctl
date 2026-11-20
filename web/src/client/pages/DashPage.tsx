@@ -406,20 +406,32 @@ export const DashPage: React.FC<DashPageProps> = ({ status, busy, onAction, onNa
           </div>
           <div className="flex items-center gap-2 flex-wrap pt-1 border-t border-subtle">
             {ts.installed ? (
-              <>
-                <Button size="xs" disabled={busy} onClick={() => onAction('ts-start')}>
-                  启动
-                </Button>
-                <Button size="xs" variant="danger" disabled={busy} onClick={() => onAction('ts-stop')}>
+              ts.running ? (
+                <Button
+                  size="xs"
+                  variant="danger"
+                  disabled={busy}
+                  onClick={() =>
+                    onAction(
+                      'ts-stop',
+                      {},
+                      '确认停止 Tailscale？若当前通过 Tailscale 远程访问控制台，停止后将立即断连。',
+                    )
+                  }
+                >
                   停止
                 </Button>
-              </>
+              ) : (
+                <Button size="xs" variant="primary" disabled={busy} onClick={() => onAction('ts-start')}>
+                  启动
+                </Button>
+              )
             ) : (
               <Button size="xs" variant="primary" disabled={busy} onClick={() => onAction('ts-install')}>
                 安装
               </Button>
             )}
-            <Button size="xs" variant="ghost" onClick={() => onNavigate('ts')}>
+            <Button size="xs" variant="ghost" onClick={() => onNavigate('net', 'ts')}>
               配置
             </Button>
           </div>
@@ -518,7 +530,7 @@ export const DashPage: React.FC<DashPageProps> = ({ status, busy, onAction, onNa
           icon={<Zap className="w-4 h-4" />}
           subtitle={config?.path || ''}
           actions={
-            <Button size="xs" onClick={() => onNavigate('config')}>
+            <Button size="xs" onClick={() => onNavigate('sb', 'subs')}>
               编辑订阅
             </Button>
           }
@@ -528,7 +540,7 @@ export const DashPage: React.FC<DashPageProps> = ({ status, busy, onAction, onNa
           ) : subs.length === 0 ? (
             <div className="py-6 text-center space-y-2">
               <p className="text-xs text-muted">尚未配置任何机场订阅</p>
-              <Button size="xs" variant="primary" onClick={() => onNavigate('config')}>
+              <Button size="xs" variant="primary" onClick={() => onNavigate('sb', 'subs')}>
                 去添加订阅
               </Button>
             </div>

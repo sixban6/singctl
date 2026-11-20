@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -20,7 +19,6 @@ import (
 
 	"singctl/internal/logger"
 	"singctl/internal/util/file"
-	"singctl/internal/util/github"
 	"singctl/internal/util/netinfo"
 	releasepkg "singctl/internal/util/release"
 )
@@ -47,26 +45,11 @@ func New(downloadURL string, config *config.TailscaleConfig) *Tailscale {
 
 // SelectTailscaleAsset 过滤合适的 Tailscale 发布包
 func (t *Tailscale) SelectTailscaleAsset(assetName string) bool {
-	name := strings.ToLower(assetName)
-
-	if !strings.Contains(name, "tailscale") {
-		return false
-	}
-
 	arch, err := t.GetSystemArchitecture()
 	if err != nil {
 		arch = "amd64" // fallback
 	}
-
-	if !strings.Contains(name, arch) {
-		return false
-	}
-
-	if !strings.Contains(name, ".tgz") && !strings.Contains(name, ".tar.gz") {
-		return false
-	}
-
-	return true
+	return selectTailscaleAssetForArch(assetName, arch)
 }
 
 // GetSystemArchitecture 检测系统架构并映射到 Tailscale 的架构命名
@@ -204,10 +187,20 @@ func (t *Tailscale) Install() error {
 	return nil
 }
 
-// Start brings up Tailscale and configures firewall/network rules.
-// advertiseExitNode=true also advertises this device as a Tailscale exit node.
-// acceptRoutesOverride, when non-nil, forces tailscale up --accept-routes=<value>.
-func (t *Tailscale) Start(advertiseExitNode bool, IsMainRouter bool, acceptRoutesOverride *bool) error {
+// StartOptions 控制 Tailscale 启动或在线热重配行为。
+type StartOptions struct {
+	AdvertiseExitNode    bool
+	IsMainRouter         bool
+	AcceptRoutesOverride *bool
+	Reconfigure          bool // 运行中时强制执行 tailscale up --reset 热切换模式/路由参数
+}
+
+// StartWithOptions 按给定选项启动 Tailscale；当 Reconfigure=true 时，允许在已 Running 状态在线热切换模式。
+func (t *Tailscale) StartWithOptions(opts StartOptions) error {
+	advertiseExitNode := opts.AdvertiseExitNode
+	IsMainRouter := opts.IsMainRouter
+	acceptRoutesOverride := opts.AcceptRoutesOverride
+
 	logger.Info("Starting Tailscale configuration...")
 
 	hasTun := CheckTunModule()
@@ -251,24 +244,23 @@ func (t *Tailscale) Start(advertiseExitNode bool, IsMainRouter bool, acceptRoute
 		return fmt.Errorf("tailscaled socket didn't become available at %s within timeout", socketPath)
 	}
 
-	// 2. Check current status for idempotency
+	// 2. Check current status for idempotency / online reconfigure
 	statusOut, statusErr := exec.Command(filepath.Join(installDir, "tailscale"), "status", "--json").Output()
 	var tsStatus struct {
 		BackendState string `json:"BackendState"`
 	}
-	isNeedsAuth := true
-	if statusErr == nil {
-		if err := json.Unmarshal(statusOut, &tsStatus); err == nil {
-			if tsStatus.BackendState == "Running" {
-				// 已经 Running 则无需重新 up
-				isNeedsAuth = false
-				logger.Success("Tailscale is already Running, skipping authorization step.")
-			}
+	alreadyRunning := statusErr == nil && json.Unmarshal(statusOut, &tsStatus) == nil && tsStatus.BackendState == "Running"
+	shouldRunUp := !alreadyRunning || opts.Reconfigure
+	if alreadyRunning {
+		if opts.Reconfigure {
+			logger.Info("🔄 正在在线热切换 Tailscale 启动模式与路由参数（无需重启服务）...")
+		} else {
+			logger.Success("Tailscale is already Running, skipping authorization step.")
 		}
 	}
 
 	// 3. Tailscale Up (Config and Online)
-	if isNeedsAuth {
+	if shouldRunUp {
 		args := []string{"up", "--reset", "--accept-dns=false"}
 		if acceptRoutesOverride != nil {
 			args = append(args, fmt.Sprintf("--accept-routes=%t", *acceptRoutesOverride))
@@ -281,9 +273,12 @@ func (t *Tailscale) Start(advertiseExitNode bool, IsMainRouter bool, acceptRoute
 		}
 
 		// Get LAN subnet to advertise (if it's a private network)
-		lanSubnet := t.config.Subnets
+		var lanSubnet string
+		if t.config != nil {
+			lanSubnet = strings.TrimSpace(t.config.Subnets)
+		}
 		var err error
-		if t.config.Subnets == "" && IsMainRouter {
+		if IsMainRouter && lanSubnet == "" {
 			logger.Warn("subnets not config will auto detect")
 			lanSubnet, err = netinfo.GetLANSubnet()
 		}
@@ -293,9 +288,9 @@ func (t *Tailscale) Start(advertiseExitNode bool, IsMainRouter bool, acceptRoute
 			if isOpenWrt {
 				args = append(args, "--snat-subnet-routes=false")
 			}
-		} else if err != nil {
+		} else if IsMainRouter && err != nil {
 			logger.Warn("Failed to detect LAN subnet: %v", err)
-		} else {
+		} else if IsMainRouter {
 			logger.Info("Detected subnet %s is not a private LAN, skipping advertise-routes", lanSubnet)
 		}
 		//if hasTun {
@@ -307,10 +302,11 @@ func (t *Tailscale) Start(advertiseExitNode bool, IsMainRouter bool, acceptRoute
 			logger.Info("Exit node advertisement enabled")
 		}
 
-		// Auth Key 改用环境变量传递，避免出现在命令行参数中被 ps aux 泄露
+		// Auth Key 改用环境变量传递，避免出现在命令行参数中被 ps aux 泄露；
+		// 仅首次/未认证时注入 TS_AUTHKEY，避免在线热切模式时重复提交可能已过期的一次性密钥。
 		cmdEnv := os.Environ()
-		if t.config.AuthKey != "" {
-			cmdEnv = append(cmdEnv, "TS_AUTHKEY="+t.config.AuthKey)
+		if !alreadyRunning && t.config != nil && strings.TrimSpace(t.config.AuthKey) != "" {
+			cmdEnv = append(cmdEnv, "TS_AUTHKEY="+strings.TrimSpace(t.config.AuthKey))
 			logger.Info("Using configured Auth Key for automatic authorization (via TS_AUTHKEY env)")
 		}
 
@@ -477,178 +473,19 @@ func ParseVersionOutput(out string) (string, error) {
 	return strings.TrimSpace(lines[0]), nil
 }
 
-// getInstalledVersionOf 运行指定二进制文件的 version 命令，返回版本号。
+// getInstalledVersionOf 运行指定二进制文件的版本命令（tailscaled 用 --version，tailscale CLI 用 version）。
 func (t *Tailscale) getInstalledVersionOf(binPath string) (string, error) {
-	out, err := exec.Command(binPath, "version").Output()
+	arg := "version"
+	if strings.Contains(filepath.Base(binPath), "tailscaled") {
+		arg = "--version"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, binPath, arg).Output()
 	if err != nil {
-		return "", fmt.Errorf("failed to run %s version: %w", binPath, err)
+		return "", fmt.Errorf("failed to run %s %s: %w", binPath, arg, err)
 	}
 	return ParseVersionOutput(string(out))
-}
-
-// getInstalledVersion 返回 tailscale 和 tailscaled 中较旧的版本号。
-// 两者都必须达到最新版本，Update() 才能軭行。
-func (t *Tailscale) getInstalledVersion() (string, error) {
-	clientVer, clientErr := t.getInstalledVersionOf(filepath.Join(installDir, "tailscale"))
-	daemonVer, daemonErr := t.getInstalledVersionOf(filepath.Join(installDir, "tailscaled"))
-
-	// 两者都失败，返回客户端的错误
-	if clientErr != nil && daemonErr != nil {
-		return "", clientErr
-	}
-	// 仅客户端失败，以守护进程版本为准（会触发更新）
-	if clientErr != nil {
-		return daemonVer, nil
-	}
-	// 仅守护进程失败，以客户端版本为准（会触发更新）
-	if daemonErr != nil {
-		return clientVer, nil
-	}
-	if clientVer != daemonVer {
-		// Log or handle version mismatch if necessary.
-		// For now returning clientVer to trigger update
-		return clientVer, nil
-	}
-	return clientVer, nil
-}
-
-// fetchLatestTailscaleVersion 从 auto_fetch_tailscale 的 GitHub Releases 获取最新版本号
-func (t *Tailscale) fetchLatestTailscaleVersion() (string, error) {
-	mirror := ""
-	if !netinfo.CheckGoogleConnectivity() && t.DownloadURL != "" {
-		mirror = t.DownloadURL
-	}
-	fetcher := github.NewReleaseFetcher(mirror, t.httpClient)
-
-	// auto_fetch_tailscale 仓库的 tag 是固定的 "latest"，
-	// 真正的版本号需要从下载文件名中解析 (例如 tailscale_1.94.2_amd64.tgz)
-	downloadURL, err := fetcher.FindAssetURL("sixban6/auto_fetch_tailscale", t.SelectTailscaleAsset)
-	if err != nil {
-		// 降级为直接取 tag（如果有别的上游结构变化）
-		return fetcher.FetchLatestTag("sixban6/auto_fetch_tailscale")
-	}
-
-	re := regexp.MustCompile(`tailscale_([\d\.]+)_`)
-	matches := re.FindStringSubmatch(downloadURL)
-	if len(matches) > 1 {
-		return matches[1], nil
-	}
-
-	return "latest", nil
-}
-
-// Update 将 Tailscale 更新到最新版
-func (t *Tailscale) Update() error {
-	if t.OpenWrtCheck != nil && !t.OpenWrtCheck() {
-		logger.Success("Tailscale update is skipped because system is not OpenWrt")
-		return nil
-	}
-
-	logger.Info("Checking for Tailscale updates...")
-
-	latestVersion, err := t.fetchLatestTailscaleVersion()
-	if err != nil {
-		// API 拉取失败时继续执行安装逻辑，安装最新版
-		logger.Warn("⚠️ 无法获取最新版本 (%v)，将继续尝试更新", err)
-		latestVersion = "unknown"
-	} else {
-		logger.Info("Latest Tailscale version: %s", latestVersion)
-	}
-
-	installedVer, installErr := t.getInstalledVersion()
-	if installErr != nil {
-		logger.Warn("Could not determine installed versions (%v), proceeding with update...", installErr)
-	} else if latestVersion != "unknown" && installedVer == latestVersion {
-		logger.Success("✅ Tailscale 已是最新版本 (当前: %s)", latestVersion)
-		return nil
-	} else if latestVersion != "unknown" {
-		logger.Info("⬆️ Tailscale 更新: %s -> %s ...", installedVer, latestVersion)
-	} else {
-		logger.Info("Updating Tailscale...")
-	}
-
-	ctx := context.Background()
-
-	// 创建临时目录
-	tempDir, err := os.MkdirTemp("", "tailscale-update-*")
-	if err != nil {
-		return fmt.Errorf("create temp dir: %w", err)
-	}
-	defer os.RemoveAll(tempDir)
-
-	// 直连获取发布元数据（信任锚，不走镜像）；压缩包按连通性选择直连/镜像
-	mirror := ""
-	if !netinfo.CheckGoogleConnectivity() {
-		mirror = t.DownloadURL
-		logger.Info("Google appears unreachable, applying mirror config: %s", mirror)
-	}
-	client := releasepkg.NewClient(mirror)
-	client.DirectFirst = netinfo.CheckGoogleConnectivity()
-	info, err := client.FetchLatest(ctx, "sixban6/auto_fetch_tailscale")
-	if err != nil {
-		return fmt.Errorf("无法直连 GitHub API 获取 tailscale 发布信息（为保证供应链安全，元数据不走镜像）: %w", err)
-	}
-
-	var asset *releasepkg.Asset
-	for i := range info.Assets {
-		if t.SelectTailscaleAsset(info.Assets[i].Name) {
-			asset = &info.Assets[i]
-			break
-		}
-	}
-	if asset == nil {
-		return fmt.Errorf("no suitable asset found for OS: %s, Arch: %s", runtime.GOOS, runtime.GOARCH)
-	}
-
-	res, err := client.Download(ctx, *asset, tempDir)
-	if err != nil {
-		return fmt.Errorf("download tailscale failed: %w", err)
-	}
-	if res.SHA256Verified {
-		logger.Success("✅ sha256 校验通过，与 GitHub 官方 digest 一致 (%s)", asset.Name)
-	} else if res.ViaMirror {
-		logger.Warn("⚠️ tailscale 经镜像下载；官方元数据无 digest，仅按大小校验（%d 字节），无法进行加密校验", asset.Size)
-	}
-
-	extractDir := filepath.Join(tempDir, "extracted")
-	if err := releasepkg.Extract(res.Path, extractDir); err != nil {
-		return fmt.Errorf("extract tailscale archive failed: %w", err)
-	}
-	_ = os.Remove(res.Path)
-
-	tsBin, err := file.FindExecutable(extractDir, "tailscale")
-	if err != nil {
-		return fmt.Errorf("tailscale binary not found: %w", err)
-	}
-
-	tsdBin, err := file.FindExecutable(extractDir, "tailscaled")
-	if err != nil {
-		return fmt.Errorf("tailscaled binary not found: %w", err)
-	}
-
-	// 6. 停止服务，替换二进制文件，重启服务
-	logger.Info("Stopping tailscale service before replacing binaries...")
-	if err := stopTailscaledProcess(t.OpenWrtCheck()); err != nil {
-		logger.Warn("Stop may be incomplete: %v", err)
-	}
-
-	if err := installTailscaleBinaries(tsBin, tsdBin, installDir); err != nil {
-		return fmt.Errorf("replace tailscale binaries failed: %w", err)
-	}
-
-	logger.Info("Restarting tailscale service...")
-	if t.OpenWrtCheck() {
-		if err := exec.Command(constant.TailscaleInitdScript, "start").Run(); err != nil {
-			return fmt.Errorf("restart service failed: %w", err)
-		}
-	} else {
-		if err := exec.Command("systemctl", "start", "tailscaled.service").Run(); err != nil {
-			return fmt.Errorf("restart systemd service failed: %w", err)
-		}
-	}
-
-	logger.Success("Tailscale updated successfully")
-	return nil
 }
 
 // installTailscaleBinaries 安装或替换 tailscaled 与 tailscale；若包内 tailscale 为指向 tailscaled 的合体软链接，
@@ -684,31 +521,6 @@ func installTailscaleBinaries(tsBin, tsdBin, targetDir string) error {
 		return fmt.Errorf("install tailscale binary failed: %w", err)
 	}
 	return nil
-}
-
-// stopTailscaledProcess 先通过 init.d 或 systemctl 优雅停止服务，再用 killall -9 确保进程退出，
-// 最后轮询等待 tailscaled 进程消失，防止替换二进制时出现 "text file busy" 错误。
-func stopTailscaledProcess(isOpenWrt bool) error {
-	// 1. 优雅停止
-	if isOpenWrt {
-		exec.Command(constant.TailscaleInitdScript, "stop").Run()
-	} else {
-		exec.Command("systemctl", "stop", "tailscaled.service").Run()
-	}
-
-	// 2. 强制杀掉仍在运行的 tailscaled（忽略 "no process" 错误）
-	exec.Command("killall", "-9", "tailscaled").Run()
-
-	// 3. 轮询等待进程彻底消失（最多 5 秒）
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		// "pgrep -x tailscaled" 退出码非 0 表示进程已不存在
-		if err := exec.Command("pgrep", "-x", "tailscaled").Run(); err != nil {
-			return nil // 进程已退出
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	return fmt.Errorf("tailscaled process did not exit within timeout")
 }
 
 // OptimizeUDPGRO configures UDP GRO settings for better Tailscale performance

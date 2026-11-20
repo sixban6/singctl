@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo, useEffect } from 'react';
+import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import {
   Activity,
   Router,
@@ -8,7 +8,6 @@ import {
   ShieldAlert,
   HeartPulse,
   Network,
-  FileCode2,
   Wrench,
   Terminal,
   RefreshCw,
@@ -43,12 +42,11 @@ import { SingBoxPage } from './pages/SingBoxPage';
 import { AdGuardPage, ADGUARD_OVERVIEW_CACHE_KEY } from './pages/AdGuardPage';
 import { AuditPage, AUDIT_DEFAULT_CACHE_KEY } from './pages/AuditPage';
 import { WatchdogPage } from './pages/WatchdogPage';
-import { NetworkHubPage } from './pages/NetworkPage';
-import { ConfigPage } from './pages/ConfigPage';
+import { GATEWAY_CACHE_KEY, NetworkHubPage } from './pages/NetworkPage';
 import { LogsPage } from './pages/LogsPage';
 import { SystemPage } from './pages/SystemPage';
 
-const CLIENT_TABS = ['dash', 'sb', 'dns', 'audit', 'dm', 'net', 'config', 'logs', 'sys'] as const;
+const CLIENT_TABS = ['dash', 'sb', 'dns', 'audit', 'dm', 'net', 'logs', 'sys'] as const;
 type ClientTab = (typeof CLIENT_TABS)[number];
 
 const MOBILE_PRIMARY_TABS: readonly ClientTab[] = ['dash', 'sb', 'dns', 'audit'];
@@ -60,7 +58,7 @@ interface ConfirmState {
 }
 
 const ClientShell: React.FC = () => {
-  const { success, error, toast } = useToast();
+  const { success, error, warn, toast } = useToast();
   const { tab, sub, navigate } = useHashRoute<ClientTab>(CLIENT_TABS, 'dash');
 
   // 兼容旧版 #/fw 与 #/ts 书签跳转至「网络与组网」对应子页
@@ -71,6 +69,7 @@ const ClientShell: React.FC = () => {
       else if (h === 'ts') navigate('net', 'ts');
       else if (h === 'agh') navigate('dns');
       else if (h === 'panel') navigate('sb', 'nodes');
+      else if (h === 'config') navigate('sb', 'subs');
     };
     normalizeLegacyHash();
     window.addEventListener('hashchange', normalizeLegacyHash);
@@ -103,10 +102,12 @@ const ClientShell: React.FC = () => {
     } else if (target === 'audit' && !peekCachedQuery(AUDIT_DEFAULT_CACHE_KEY)) {
       const qs = new URLSearchParams({ sort: 'active', dir: 'desc' });
       void prefetchCachedQuery(AUDIT_DEFAULT_CACHE_KEY, () => clientApi.getAudit(qs));
+    } else if (target === 'net' && !peekCachedQuery(GATEWAY_CACHE_KEY)) {
+      void prefetchCachedQuery(GATEWAY_CACHE_KEY, () => clientApi.getGateway());
     }
   }, []);
 
-  // 首屏空闲静默预热：首屏核心 status 就绪后 500ms 自动预热防劫持 DNS 与行为审计默认快照，消除首次点击白屏
+  // 首屏空闲静默预热：首屏核心 status 就绪后 500ms 自动预热防劫持 DNS、行为审计与网关拓扑快照，消除首次点击白屏与闪烁
   useEffect(() => {
     if (!status) return;
     const timer = window.setTimeout(() => {
@@ -116,6 +117,9 @@ const ClientShell: React.FC = () => {
       if (tab !== 'audit' && status.singbox?.running && !peekCachedQuery(AUDIT_DEFAULT_CACHE_KEY)) {
         const qs = new URLSearchParams({ sort: 'active', dir: 'desc' });
         void prefetchCachedQuery(AUDIT_DEFAULT_CACHE_KEY, () => clientApi.getAudit(qs));
+      }
+      if (tab !== 'net' && !peekCachedQuery(GATEWAY_CACHE_KEY)) {
+        void prefetchCachedQuery(GATEWAY_CACHE_KEY, () => clientApi.getGateway());
       }
     }, 500);
     return () => window.clearTimeout(timer);
@@ -130,6 +134,13 @@ const ClientShell: React.FC = () => {
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   const [restartingBanner, setRestartingBanner] = useState(false);
   const [restartTimedOut, setRestartTimedOut] = useState(false);
+  const [tsSwapBanner, setTsSwapBanner] = useState<{
+    active: boolean;
+    phase: string;
+    message: string;
+    timedOut: boolean;
+  } | null>(null);
+  const tsSwapPollSeqRef = useRef(0);
 
   // 内嵌口令登录弹窗状态（会话过期或口令变更时免弹窗直登，彻底告别 401 无限刷新循环）
   const [authModalOpen, setAuthModalOpen] = useState(false);
@@ -146,12 +157,12 @@ const ClientShell: React.FC = () => {
 
   useEffect(() => {
     const onUnauthorized = () => {
-      if (restartingBanner) return;
+      if (restartingBanner || tsSwapBanner?.active) return;
       setAuthModalOpen(true);
     };
     window.addEventListener(CLIENT_AUTH_EVENT, onUnauthorized);
     return () => window.removeEventListener(CLIENT_AUTH_EVENT, onUnauthorized);
-  }, [restartingBanner]);
+  }, [restartingBanner, tsSwapBanner?.active]);
 
   const handleInlineLogin = useCallback(
     async (e: React.FormEvent) => {
@@ -174,9 +185,95 @@ const ClientShell: React.FC = () => {
     [authPassword, authSubmitting, refreshStatus, success],
   );
 
+  const pollTailscaleUpgrade = useCallback(
+    async (withInitialWait: boolean) => {
+      const seq = ++tsSwapPollSeqRef.current;
+      setTsSwapBanner({
+        active: true,
+        phase: 'swapping',
+        message: '正在后台原子切换 Tailscale（健康门禁与自动回滚保护中，如通过 Tailscale 访问将短暂重连）…',
+        timedOut: false,
+      });
+
+      if (withInitialWait) {
+        await new Promise((r) => window.setTimeout(r, 2000));
+      }
+
+      const deadline = Date.now() + 50000;
+      while (Date.now() < deadline) {
+        if (tsSwapPollSeqRef.current !== seq) return;
+        try {
+          const resp = await clientApi.getTailscaleUpgradeStatus(3000);
+          if (tsSwapPollSeqRef.current !== seq) return;
+          const st = resp?.state;
+          if (st?.phase === 'swapping' || st?.phase === 'verifying') {
+            setTsSwapBanner({
+              active: true,
+              phase: st.phase,
+              message:
+                st.message ||
+                (st.phase === 'verifying'
+                  ? '新版已启动，正在等待健康门禁与隧道恢复…'
+                  : '正在停止旧版并原子替换二进制文件…'),
+              timedOut: false,
+            });
+          } else if (st?.phase === 'succeeded') {
+            setTsSwapBanner(null);
+            const summary = st.message || `Tailscale 已零失联升级至 ${st.toVersion || '最新版本'}`;
+            const logLines = st.logTail
+              ? st.logTail.split('\n').filter((l) => l.trim().length > 0)
+              : [];
+            setConsoleLines((prev) => [...prev, `[SUCCESS] ${summary}`, ...logLines].slice(-800));
+            success(summary);
+            await refreshStatus(true);
+            emitClientInvalidate('all');
+            window.dispatchEvent(new CustomEvent('singctl:ts-upgrade-done', { detail: st }));
+            return;
+          } else if (st?.phase === 'rolled_back' || st?.phase === 'failed') {
+            setTsSwapBanner(null);
+            const summary =
+              st.message || st.error || 'Tailscale 新版验证失败并已执行自动回滚';
+            const logLines = st.logTail
+              ? st.logTail.split('\n').filter((l) => l.trim().length > 0)
+              : [];
+            const levelTag = st.phase === 'rolled_back' ? '[WARN]' : '[ERROR]';
+            setConsoleLines((prev) =>
+              [
+                ...prev,
+                `${levelTag} ${summary}${st.error ? ` (${st.error})` : ''}`,
+                ...logLines,
+              ].slice(-800),
+            );
+            if (st.phase === 'rolled_back') {
+              warn(summary, 7000);
+            } else {
+              error(summary, 7000);
+            }
+            await refreshStatus(true);
+            emitClientInvalidate('all');
+            window.dispatchEvent(new CustomEvent('singctl:ts-upgrade-done', { detail: st }));
+            return;
+          }
+        } catch {
+          // 隧道重连期间短暂网络错误属于预期，继续静默重试
+        }
+        await new Promise((r) => window.setTimeout(r, 1500));
+      }
+
+      if (tsSwapPollSeqRef.current !== seq) return;
+      setTsSwapBanner({
+        active: true,
+        phase: 'timeout',
+        message: '后台切换轮询等待超时，若网络已恢复可点击右侧重新检测升级结果。',
+        timedOut: true,
+      });
+    },
+    [refreshStatus, success, warn, error],
+  );
+
   const executeAction = useCallback(
     async (name: string, params: Record<string, unknown> = {}) => {
-      if (busy) {
+      if (busy || tsSwapBanner?.active) {
         toast('已有任务在执行中，请稍候', 'info');
         return;
       }
@@ -203,6 +300,11 @@ const ClientShell: React.FC = () => {
             ]);
           }
         });
+
+        if (res.tailscaleSwapping) {
+          void pollTailscaleUpgrade(true);
+          return;
+        }
 
         if (res.restarting) {
           setRestartingBanner(true);
@@ -244,7 +346,7 @@ const ClientShell: React.FC = () => {
         setBusy(false);
       }
     },
-    [busy, refreshStatus, reloadWithCacheBust, success, error, toast],
+    [busy, tsSwapBanner?.active, pollTailscaleUpgrade, refreshStatus, reloadWithCacheBust, success, error, toast],
   );
 
   const requestAction = useCallback(
@@ -346,15 +448,8 @@ const ClientShell: React.FC = () => {
         ],
       },
       {
-        title: '配置与维护',
+        title: '运维与日志',
         items: [
-          {
-            key: 'config',
-            label: '配置与订阅',
-            shortLabel: '配置',
-            desc: '订阅源、GitHub 加速镜像与 singctl.yaml 编辑',
-            icon: FileCode2,
-          },
           {
             key: 'logs',
             label: '系统日志',
@@ -366,7 +461,7 @@ const ClientShell: React.FC = () => {
             key: 'sys',
             label: '系统维护',
             shortLabel: '运维',
-            desc: '版本信息、一键更新与移动设备授权连接',
+            desc: '全局加速、源码编辑、加密备份与自更新',
             icon: Wrench,
           },
         ],
@@ -443,6 +538,10 @@ const ClientShell: React.FC = () => {
         navigate('dns');
         return;
       }
+      if (next === 'config') {
+        navigate('sb', 'subs');
+        return;
+      }
       if (CLIENT_TABS.includes(next as ClientTab)) {
         navigate(next as ClientTab, nextSub);
       }
@@ -511,6 +610,30 @@ const ClientShell: React.FC = () => {
 
   const banner = (
     <>
+      {tsSwapBanner && (
+        <div
+          className={`rounded-xl border px-4 py-2.5 text-xs flex flex-wrap items-center justify-between gap-2 ${
+            tsSwapBanner.timedOut
+              ? 'border-amber-500/35 bg-amber-500/10 text-amber-200'
+              : 'border-sky-500/35 bg-sky-500/10 text-sky-200'
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            <RefreshCw className={`w-4 h-4 shrink-0 ${tsSwapBanner.timedOut ? '' : 'animate-spin'}`} />
+            <span>{tsSwapBanner.message}</span>
+          </div>
+          {tsSwapBanner.timedOut && (
+            <div className="flex items-center gap-2">
+              <Button size="xs" variant="secondary" onClick={() => void pollTailscaleUpgrade(false)}>
+                重新检测
+              </Button>
+              <Button size="xs" variant="ghost" onClick={() => setTsSwapBanner(null)}>
+                关闭
+              </Button>
+            </div>
+          )}
+        </div>
+      )}
       {restartingBanner && (
         <div
           className={`rounded-xl border px-4 py-2.5 text-xs flex flex-wrap items-center justify-between gap-2 ${
@@ -589,6 +712,7 @@ const ClientShell: React.FC = () => {
             onSubChange={(nextSub) => navigate('sb', nextSub === 'routing' ? undefined : nextSub)}
             onAction={requestAction}
             onNavigate={navigateSafe}
+            onRefreshStatus={() => void refreshStatus(true)}
           />
         )}
         {(tab === 'dns' || visitedTabs.has('dns')) && (
@@ -618,20 +742,12 @@ const ClientShell: React.FC = () => {
         {tab === 'net' && (
           <NetworkHubPage
             status={status ?? null}
-            busy={busy}
+            busy={busy || Boolean(tsSwapBanner?.active)}
             initialSub={sub}
             onSubChange={(nextSub) => navigate('net', nextSub === 'gw' ? undefined : nextSub)}
             onAction={requestAction}
             onNavigate={navigateSafe}
             onRefreshStatus={() => refreshStatus(true)}
-          />
-        )}
-        {tab === 'config' && (
-          <ConfigPage
-            onSaved={() => {
-              void refreshStatus(true);
-              emitClientInvalidate('all');
-            }}
           />
         )}
         {tab === 'logs' && <LogsPage initialLogName={sub} />}

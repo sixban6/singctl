@@ -15,6 +15,10 @@ import (
 const (
 	jitPollInterval     = 300 * time.Millisecond
 	jitFailureThreshold = 2
+
+	// DefaultMinAutoJITBytes 限制仅当 DERP 会话窗口内实际产生 >= 4 KiB 真实流量增量时才自动开孔，
+	// 过滤掉 Tailscale 长闲置后每 ~30 分钟偶发几百字节的 WireGuard 握手/保活噪声。
+	DefaultMinAutoJITBytes int64 = 4096
 )
 
 // P2PPeerRuntimeState 记录单个纳管节点在内存/状态文件中的运行时状态。
@@ -52,25 +56,29 @@ type PokeResult struct {
 }
 
 type peerStateEntry struct {
-	inFlight         bool
-	pinholeOpen      bool
-	consecutiveFails int
-	cooldownUntil    time.Time
-	lastAttemptAt    time.Time
-	lastUpgradeAt    time.Time
-	lastResult       string
+	inFlight           bool
+	pinholeOpen        bool
+	consecutiveFails   int
+	cooldownUntil      time.Time
+	lastAttemptAt      time.Time
+	lastUpgradeAt      time.Time
+	lastResult         string
+	trafficSeen        bool
+	derpBurstActive    bool
+	derpBurstBaseBytes int64
 }
 
 // P2PAssistController 协调 Tailscale LocalAPI 状态探测、fw4 JIT 瞬时打洞与 3 态防火墙收敛。
 type P2PAssistController struct {
-	BaseCtx        context.Context
-	LocalAPI       LocalAPIClient
-	FW4            *FW4Manager
-	Now            func() time.Time
-	Sleep          func(ctx context.Context, d time.Duration) error
-	DefaultLANCIDR func() string
-	HostSelfIPs    func() []netip.Addr
-	OnEvent        func(action string, healthy bool, summary string)
+	BaseCtx         context.Context
+	LocalAPI        LocalAPIClient
+	FW4             *FW4Manager
+	Now             func() time.Time
+	Sleep           func(ctx context.Context, d time.Duration) error
+	DefaultLANCIDR  func() string
+	HostSelfIPs     func() []netip.Addr
+	MinAutoJITBytes int64 // 0=默认 DefaultMinAutoJITBytes(4096); <0=禁用自动打洞流量门槛
+	OnEvent         func(action string, healthy bool, summary string)
 
 	mu    sync.Mutex
 	peers map[string]*peerStateEntry
@@ -227,13 +235,16 @@ func (c *P2PAssistController) Reconcile(ctx context.Context, cfg config.Tailscal
 		matched, ok := MatchConfiguredPeer(rule, peers, selfID)
 		acl := ResolvedPeerACL{Config: rule}
 		if ok && matched != nil {
+			key := peerRuntimeKey(rule, matched)
 			acl.TailscaleIPs = matched.TailscaleIPs
 			acl.PrimaryRoutes = matched.PrimaryRoutes
+			isActiveDERP := matched.CurAddr == "" && rule.JITEnabled && matched.Online && matched.Active && matched.Relay != ""
+			allowJIT := c.observePeerTraffic(key, *matched, isActiveDERP)
 			if matched.CurAddr != "" {
-				c.clearStaleCooldown(peerRuntimeKey(rule, matched), now)
-			} else if rule.JITEnabled && matched.Online && matched.Active && matched.Relay != "" {
+				c.clearStaleCooldown(key, now)
+			} else if isActiveDERP && allowJIT {
 				candidates = append(candidates, jitCandidate{
-					key:  peerRuntimeKey(rule, matched),
+					key:  key,
 					rule: rule,
 					peer: *matched,
 				})
@@ -286,6 +297,56 @@ func (c *P2PAssistController) Reconcile(ctx context.Context, cfg config.Tailscal
 		snap.LastError = statusErr.Error()
 	}
 	return snap, nil
+}
+
+func (c *P2PAssistController) effectiveMinAutoJITBytes() int64 {
+	if c.MinAutoJITBytes < 0 {
+		return -1
+	}
+	if c.MinAutoJITBytes > 0 {
+		return c.MinAutoJITBytes
+	}
+	return DefaultMinAutoJITBytes
+}
+
+func (c *P2PAssistController) observePeerTraffic(key string, peer PeerStatus, activeDERP bool) bool {
+	totalBytes := max(int64(0), peer.RxBytes) + max(int64(0), peer.TxBytes)
+	minBytes := c.effectiveMinAutoJITBytes()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	st := c.ensurePeerEntryLocked(key)
+	if !activeDERP {
+		st.trafficSeen = true
+		st.derpBurstActive = false
+		st.derpBurstBaseBytes = totalBytes
+		return false
+	}
+
+	if minBytes < 0 {
+		st.trafficSeen = true
+		st.derpBurstActive = true
+		return true
+	}
+
+	if !st.trafficSeen {
+		st.trafficSeen = true
+		st.derpBurstActive = true
+		st.derpBurstBaseBytes = totalBytes
+		return false
+	}
+
+	if !st.derpBurstActive {
+		st.derpBurstActive = true
+		if totalBytes < st.derpBurstBaseBytes {
+			st.derpBurstBaseBytes = 0
+		}
+	} else if totalBytes < st.derpBurstBaseBytes {
+		st.derpBurstBaseBytes = 0
+	}
+
+	return (totalBytes - st.derpBurstBaseBytes) >= minBytes
 }
 
 func (c *P2PAssistController) clearStaleCooldown(key string, now time.Time) {
@@ -551,6 +612,8 @@ func (c *P2PAssistController) recordAttemptOutcome(
 		st.cooldownUntil = time.Time{}
 		st.lastUpgradeAt = now
 		st.lastResult = "direct"
+		st.trafficSeen = false
+		st.derpBurstActive = false
 	} else {
 		st.consecutiveFails++
 		if !manual && st.consecutiveFails >= jitFailureThreshold {

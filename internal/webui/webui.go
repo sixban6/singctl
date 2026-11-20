@@ -46,7 +46,9 @@ type Options struct {
 	SkipAdGuardProbeForTest bool                                                                              // 仅供离线单元测试跳过公网上游实测
 	GatewayProberForTest    func() gateway.TopologyInfo                                                       // 仅供单元测试注入网络拓扑探测结果
 	DNSLeakRunnerForTest    func(ctx context.Context, opts netdiag.DNSLeakTestOptions) *netdiag.DNSLeakReport // 仅供单元测试注入离线 DNS 泄漏实测结果
+	BrowserDoHForTest       *BrowserDoHTestHooks                                                              // 仅供单元测试注入浏览器 DoH 旁路检测依赖
 	TailscaleP2PForTest     *TailscaleP2PTestHooks                                                            // 仅供单元测试注入 Tailscale P2P 防线依赖
+	TailscaleUpgradeForTest *TailscaleUpgradeTestHooks                                                        // 仅供单元测试注入 Tailscale 零失联升级体检与状态
 	Listen                  string                                                                            // 监听地址,如 ":8090"
 	Password                string                                                                            // 可选的访问口令(空=不启用鉴权,建议仅在可信内网使用)
 	Version                 string                                                                            // singctl 版本号
@@ -86,6 +88,13 @@ type Server struct {
 
 	tsP2PMu   sync.Mutex
 	tsP2PCtrl *tailscale.P2PAssistController
+
+	gwEDNSMu       sync.Mutex
+	gwEDNSProfile  *netdiag.DNSResolverProfile
+	gwEDNSCachedAt time.Time
+
+	dohProbeMu        sync.Mutex
+	dohProbeSnapshots map[string]dohProbeSnapshot
 }
 
 // New 创建 Web 服务
@@ -133,6 +142,7 @@ func New(opts Options) *Server {
 	s.Mux.HandleFunc("PUT /api/sbconfig", s.guard(s.handleSbConfigPut))
 	s.Mux.HandleFunc("PUT /api/sbconfig/preserve", s.guard(s.handleSbConfigPreservePut))
 	s.Mux.HandleFunc("POST /api/sbconfig/restore", s.guard(s.handleSbConfigRestore))
+	s.Mux.HandleFunc("PUT /api/sb/subs", s.guard(s.handleSbSubsPut))
 	s.Mux.HandleFunc("GET /api/traffic-routing", s.guard(s.handleTrafficRoutingGet))
 	s.Mux.HandleFunc("PUT /api/traffic-routing", s.guard(s.handleTrafficRoutingPut))
 	s.Mux.HandleFunc("GET /api/groups", s.guard(s.handleGroupsGet))
@@ -141,11 +151,21 @@ func New(opts Options) *Server {
 	s.Mux.HandleFunc("GET /api/gateway", s.guard(s.handleGatewayGet))
 	s.Mux.HandleFunc("PUT /api/gateway", s.guard(s.handleGatewayPut))
 	s.Mux.HandleFunc("POST /api/dns/leak-test", s.guard(s.handleDNSLeakTestPost))
+	s.Mux.HandleFunc("POST /api/dns/browser-doh", s.guard(s.handleBrowserDoHCheckPost))
 
-	// Tailscale P2P 直连防线与 3 态双向管控 API
+	// Tailscale 局部配置、P2P 直连防线与 3 态双向管控 API
+	s.Mux.HandleFunc("GET /api/tailscale/config", s.guard(s.handleTailscaleConfigGet))
+	s.Mux.HandleFunc("PUT /api/tailscale/config", s.guard(s.handleTailscaleConfigPut))
 	s.Mux.HandleFunc("GET /api/tailscale/p2p", s.guard(s.handleTailscaleP2PGet))
 	s.Mux.HandleFunc("PUT /api/tailscale/p2p", s.guard(s.handleTailscaleP2PPut))
 	s.Mux.HandleFunc("POST /api/tailscale/p2p/poke", s.guard(s.handleTailscaleP2PPokePost))
+
+	// 系统全局加速镜像局部更新 API
+	s.Mux.HandleFunc("PUT /api/system/mirror", s.guard(s.handleSystemMirrorPut))
+
+	// Tailscale 两阶段零失联升级体检与状态轮询 API
+	s.Mux.HandleFunc("GET /api/tailscale/upgrade/preflight", s.guard(s.handleTailscaleUpgradePreflightGet))
+	s.Mux.HandleFunc("GET /api/tailscale/upgrade/status", s.guard(s.handleTailscaleUpgradeStatusGet))
 
 	// 看门狗守护与策略组容灾控制 API
 	s.Mux.HandleFunc("GET /api/watchdog", s.guard(s.handleWatchdogGet))
