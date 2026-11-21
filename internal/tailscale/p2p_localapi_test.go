@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"singctl/internal/config"
@@ -221,5 +222,73 @@ func TestMatchConfiguredPeer_DisambiguatesDuplicateHostNames(t *testing.T) {
 	// Never match Self even if rule somehow matches Self ID/name
 	if m, ok := MatchConfiguredPeer(config.TailscaleP2PPeerConfig{ID: "nSelf111", Name: "n4120"}, peers, "nSelf111"); ok || m != nil {
 		t.Fatalf("expected Self ID to never match, got %+v", m)
+	}
+}
+
+func TestP2PAssistController_ReusesDefaultLocalAPIClient(t *testing.T) {
+	ctrl := &P2PAssistController{}
+	first := ctrl.localAPI()
+	second := ctrl.localAPI()
+	if first != DefaultLocalAPIClient() || second != DefaultLocalAPIClient() {
+		t.Fatalf("expected P2PAssistController.localAPI() to return singleton DefaultLocalAPIClient()")
+	}
+}
+
+func TestUnixLocalAPIClient_ReusesUnixConnectionAcrossCalls(t *testing.T) {
+	// Keep Unix socket path short under /tmp to avoid macOS 104-byte sun_path limit.
+	sockDir, err := os.MkdirTemp("/tmp", "ts-sock-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(sockDir) })
+	sockPath := filepath.Join(sockDir, "tailscaled.sock")
+
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	var newConns atomic.Int32
+	srv := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/localapi/v0/status" {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"BackendState":"Running","Self":{"ID":"self1","HostName":"router","DNSName":"router.tail.ts.net.","TailscaleIPs":["100.64.0.1"],"Online":true},"Peer":{}}`))
+		}),
+		ConnState: func(_ net.Conn, st http.ConnState) {
+			if st == http.StateNew {
+				newConns.Add(1)
+			}
+		},
+	}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	client := &UnixLocalAPIClient{SocketPath: sockPath}
+	tr, ok := client.client().Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("expected *http.Transport, got %T", client.client().Transport)
+	}
+	if tr.IdleConnTimeout <= 0 || tr.MaxIdleConns <= 0 {
+		t.Fatalf("expected positive IdleConnTimeout & MaxIdleConns, got IdleConnTimeout=%v MaxIdleConns=%d", tr.IdleConnTimeout, tr.MaxIdleConns)
+	}
+
+	const calls = 20
+	for i := range calls {
+		snap, err := client.Status(t.Context())
+		if err != nil {
+			t.Fatalf("call %d Status failed: %v", i, err)
+		}
+		if snap.BackendState != "Running" {
+			t.Fatalf("call %d unexpected BackendState=%q", i, snap.BackendState)
+		}
+	}
+
+	if got := newConns.Load(); got > 2 {
+		t.Fatalf("expected Unix socket keep-alive reuse (<= 2 connections across %d calls), got %d", calls, got)
 	}
 }

@@ -199,6 +199,16 @@ func New(opts Options) *Server {
 	s.Mux.HandleFunc("POST /api/audit/whitelist", s.guard(s.handleAuditWhitelist))
 	s.Mux.HandleFunc("POST /api/audit/close-connections", s.guard(s.handleAuditCloseConnections))
 
+	// nftables inet security 防火墙加固可视化与规则治理 API
+	s.Mux.HandleFunc("GET /api/firewall/overview", s.guard(s.handleFirewallOverviewGet))
+	s.Mux.HandleFunc("GET /api/firewall/logs", s.guard(s.handleFirewallLogsGet))
+	s.Mux.HandleFunc("POST /api/firewall/apply", s.guard(s.handleFirewallApplyPost))
+	s.Mux.HandleFunc("POST /api/firewall/disable", s.guard(s.handleFirewallDisablePost))
+	s.Mux.HandleFunc("POST /api/firewall/ban", s.guard(s.handleFirewallBanPost))
+	s.Mux.HandleFunc("POST /api/firewall/unban", s.guard(s.handleFirewallUnbanPost))
+	s.Mux.HandleFunc("POST /api/firewall/clear-dynamic", s.guard(s.handleFirewallClearDynamicPost))
+	s.Mux.HandleFunc("POST /api/firewall/whitelist", s.guard(s.handleFirewallWhitelistPost))
+
 	// 原生 sing-box 策略组切换、测速、运行模式与实时速率 API（全部经由 WebUI 登录态统一鉴权）
 	s.Mux.HandleFunc("GET /api/sb/proxies", s.guard(s.handleSbProxiesGet))
 	s.Mux.HandleFunc("PUT /api/sb/proxies/switch", s.guard(s.handleSbProxySwitchPut))

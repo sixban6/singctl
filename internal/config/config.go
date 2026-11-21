@@ -101,6 +101,7 @@ type Config struct {
 	Tailscale      TailscaleConfig      `yaml:"tailscale"`
 	Server         ServerConfig         `yaml:"server"`
 	Watchdog       WatchdogConfig       `yaml:"watchdog"`
+	Firewall       FirewallConfig       `yaml:"firewall,omitempty" json:"firewall,omitzero"`
 	Audit          AuditConfig          `yaml:"audit,omitempty" json:"audit,omitzero"`
 	CustomRules    CustomRulesConfig    `yaml:"custom_rules,omitempty"`
 	TrafficRouting TrafficRoutingConfig `yaml:"traffic_routing,omitempty" json:"traffic_routing,omitzero"`
@@ -212,6 +213,50 @@ type AuditAIConfig struct {
 	Endpoint string `yaml:"endpoint,omitempty" json:"endpoint,omitempty"` // 如 https://api.deepseek.com/v1 或 http://127.0.0.1:11434/v1
 	APIKey   string `yaml:"api_key,omitempty" json:"api_key,omitempty"`
 	Model    string `yaml:"model,omitempty" json:"model,omitempty"` // 如 deepseek-chat / gpt-4o-mini
+}
+
+// FirewallConfig 定义 nftables inet security 防火墙加固的持久化策略（模式、黑/白名单、诱捕端口与周期）。
+type FirewallConfig struct {
+	Mode            string   `yaml:"mode,omitempty" json:"mode,omitempty"`                          // "standard" (默认) | "minimal"
+	BanTimeoutDays  int      `yaml:"ban_timeout_days,omitempty" json:"banTimeoutDays,omitempty"`    // 默认 7 (范围 1~30)
+	PingLimitPerSec int      `yaml:"ping_limit_per_sec,omitempty" json:"pingLimitPerSec,omitempty"` // 默认 10 (范围 1~100)
+	Whitelist       []string `yaml:"whitelist,omitempty" json:"whitelist,omitempty"`                // 用户自定义信任 IP/CIDR
+	ExtraForeverBan []string `yaml:"extra_forever_ban,omitempty" json:"extraForeverBan,omitempty"`  // 用户自定义永久封禁 IPv4/CIDR
+	ProtectedPorts  []int    `yaml:"protected_ports,omitempty" json:"protectedPorts,omitempty"`     // 自定义高危诱捕端口列表（空表示使用默认高危端口集）
+}
+
+// EffectiveMode 返回归一化后的防火墙模式（"standard" | "minimal"）。
+func (f FirewallConfig) EffectiveMode() string {
+	if strings.EqualFold(strings.TrimSpace(f.Mode), "minimal") {
+		return "minimal"
+	}
+	return "standard"
+}
+
+// EffectiveBanTimeoutDays 返回动态黑名单封禁天数（默认 7，限定 1~30）。
+func (f FirewallConfig) EffectiveBanTimeoutDays() int {
+	if f.BanTimeoutDays <= 0 {
+		return 7
+	}
+	return min(30, max(1, f.BanTimeoutDays))
+}
+
+// EffectivePingLimitPerSec 返回每秒 ICMP Ping 放行上限（默认 10，限定 1~100）。
+func (f FirewallConfig) EffectivePingLimitPerSec() int {
+	if f.PingLimitPerSec <= 0 {
+		return 10
+	}
+	return min(100, max(1, f.PingLimitPerSec))
+}
+
+// IsEmpty 判断是否未显式设置任何防火墙自定义字段。
+func (f FirewallConfig) IsEmpty() bool {
+	return strings.TrimSpace(f.Mode) == "" &&
+		f.BanTimeoutDays == 0 &&
+		f.PingLimitPerSec == 0 &&
+		len(f.Whitelist) == 0 &&
+		len(f.ExtraForeverBan) == 0 &&
+		len(f.ProtectedPorts) == 0
 }
 
 // BlockRule 定义由设备审计或用户一键拉黑生成的阻断规则。
@@ -1203,6 +1248,7 @@ var knownYAMLKeys = []string{
 	"route", "dns", "dns_port", "web_port",
 	"gateway", "main_router_ip", "lan_iface", "ipv6_mode",
 	"audit", "whitelist", "pcdn_block", "throttles", "rate_kbps", "comment", "ai", "endpoint", "api_key", "model",
+	"firewall", "ban_timeout_days", "ping_limit_per_sec", "extra_forever_ban", "protected_ports",
 	"traffic_routing", "outbound",
 }
 
@@ -1915,6 +1961,30 @@ func filterRoleNodesBeforeMerge(dstRoot, srcRoot *yaml.Node, cfg *Config) {
 				}
 				auditMap.Content = newAudit
 				if len(auditMap.Content) == 0 && cfg.Audit.IsEmpty() {
+					dstDoc.Content = append(dstDoc.Content[:i], dstDoc.Content[i+2:]...)
+				}
+				break
+			}
+		}
+		for i := 0; i+1 < len(dstDoc.Content); i += 2 {
+			if dstDoc.Content[i].Value == "firewall" && dstDoc.Content[i+1].Kind == yaml.MappingNode {
+				fwMap := dstDoc.Content[i+1]
+				newFW := make([]*yaml.Node, 0, len(fwMap.Content))
+				for j := 0; j+1 < len(fwMap.Content); j += 2 {
+					kVal := fwMap.Content[j].Value
+					if kVal == "whitelist" && len(cfg.Firewall.Whitelist) == 0 {
+						continue
+					}
+					if kVal == "extra_forever_ban" && len(cfg.Firewall.ExtraForeverBan) == 0 {
+						continue
+					}
+					if kVal == "protected_ports" && len(cfg.Firewall.ProtectedPorts) == 0 {
+						continue
+					}
+					newFW = append(newFW, fwMap.Content[j], fwMap.Content[j+1])
+				}
+				fwMap.Content = newFW
+				if len(fwMap.Content) == 0 && cfg.Firewall.IsEmpty() {
 					dstDoc.Content = append(dstDoc.Content[:i], dstDoc.Content[i+2:]...)
 				}
 				break

@@ -68,6 +68,7 @@ import {
   TailscaleP2PReport,
   TailscaleUpgradePreflight,
 } from '../types';
+import { FirewallPanel } from './FirewallPanel';
 
 export const GATEWAY_CACHE_KEY = 'client:gateway';
 export const TAILSCALE_CFG_CACHE_KEY = 'client:tailscale:config';
@@ -1282,57 +1283,6 @@ export const TailscalePage: React.FC<TailscalePageProps> = ({
   );
 };
 
-export interface FirewallPageProps {
-  status: ClientStatusResponse | null;
-  busy: boolean;
-  onAction: (name: string, params?: Record<string, unknown>, confirmMsg?: string) => void;
-}
-
-export const FirewallPage: React.FC<FirewallPageProps> = ({ status, busy, onAction }) => {
-  const fw = status?.firewall;
-
-  return (
-    <div className="space-y-5">
-      <PageHeader
-        title="防火墙加固"
-        description="基于 nftables inet security 表的公网入口防护与开机自启"
-        badge={
-          <Badge tone={!fw?.supported ? 'warn' : fw.enabled ? 'ok' : 'neutral'} dot={Boolean(fw?.enabled)}>
-            {!fw?.supported ? '当前系统不支持' : fw.enabled ? '已启用加固' : '未启用'}
-          </Badge>
-        }
-      />
-
-      <SectionCard title="nftables 安全封锁规则" icon={<Flame className="w-4 h-4" />}>
-        <div className="space-y-4">
-          <p className="text-xs sm:text-sm text-secondary leading-relaxed">
-            加载安全封锁规则（`nftables inet security` 表）：自动拦截路由器高危管理端口的外部公网探测与访问、阻止伪造源地址报文进入、丢弃畸形包并注册系统自启服务。仅面向 WAN 公网侧防护，不影响内网与隧道正常流量。
-          </p>
-          <div className="flex flex-wrap items-center gap-2.5">
-            <Button
-              variant="primary"
-              disabled={busy || !fw?.supported}
-              onClick={() => onAction('fw-enable')}
-            >
-              启用防火墙加固
-            </Button>
-            <Button
-              variant="danger"
-              disabled={busy || !fw?.supported}
-              onClick={() => onAction('fw-disable', {}, '确认禁用并移除防火墙加固规则？')}
-            >
-              禁用并移除规则
-            </Button>
-          </div>
-          {!fw?.supported && (
-            <p className="text-xs text-muted">提示：该功能仅适用于 Linux / OpenWrt 网关系统。</p>
-          )}
-        </div>
-      </SectionCard>
-    </div>
-  );
-};
-
 export interface GatewayModePageProps {
   status?: ClientStatusResponse | null;
   busy: boolean;
@@ -2144,7 +2094,14 @@ export const NetworkHubPage: React.FC<NetworkHubPageProps> = ({
           onRefreshStatus={onRefreshStatus}
         />
       )}
-      {sub === 'fw' && <FirewallPage status={status} busy={busy} onAction={onAction} />}
+      {sub === 'fw' && (
+        <FirewallPanel
+          status={status}
+          busy={busy}
+          privacyMask={privacyMask}
+          onRefreshStatus={onRefreshStatus}
+        />
+      )}
     </div>
   );
 };

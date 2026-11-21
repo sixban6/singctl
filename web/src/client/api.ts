@@ -26,6 +26,9 @@ import {
   ClientRoutingReport,
   ClientStatusResponse,
   DNSLeakReport,
+  FirewallApplyPayload,
+  FirewallLogEvent,
+  FirewallOverviewResponse,
   GatewayIPv6Mode,
   GatewayRoleMode,
   SbConfigResponse,
@@ -545,6 +548,64 @@ export const clientApi = {
 
   getTailscaleUpgradeStatus: (timeoutMs = 3000) =>
     request<TailscaleUpgradeStatusResponse>('/api/tailscale/upgrade/status', { timeoutMs }),
+
+  getFirewallOverview: (params?: {
+    scope?: string;
+    search?: string;
+    sort?: string;
+    page?: number;
+    pageSize?: number;
+  }) => {
+    const qs = new URLSearchParams();
+    if (params?.scope && params.scope !== 'all') qs.set('scope', params.scope);
+    if (params?.search) qs.set('search', params.search);
+    if (params?.sort) qs.set('sort', params.sort);
+    if (params?.page) qs.set('page', String(params.page));
+    if (params?.pageSize) qs.set('pageSize', String(params.pageSize));
+    const q = qs.toString();
+    return request<FirewallOverviewResponse>(`/api/firewall/overview${q ? `?${q}` : ''}`);
+  },
+  getFirewallLogs: (limit = 50) =>
+    request<{ ok: boolean; events: FirewallLogEvent[] }>(`/api/firewall/logs?limit=${limit}`),
+  applyFirewall: (payload: FirewallApplyPayload) =>
+    request<{ ok: boolean; message: string; overview: FirewallOverviewResponse }>('/api/firewall/apply', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  disableFirewall: () =>
+    request<{ ok: boolean; message: string; overview: FirewallOverviewResponse }>('/api/firewall/disable', {
+      method: 'POST',
+      body: '{}',
+    }),
+  banFirewallTarget: (payload: { target: string; scope: 'dynamic' | 'forever'; timeoutDays?: number }) =>
+    request<{ ok: boolean; target: string; scope: string; message: string; overview: FirewallOverviewResponse }>(
+      '/api/firewall/ban',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      },
+    ),
+  unbanFirewallTarget: (payload: { target: string; scope?: string }) =>
+    request<{ ok: boolean; message: string; overview: FirewallOverviewResponse }>('/api/firewall/unban', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  clearDynamicFirewallBans: (family: 'all' | 'ipv4' | 'ipv6' = 'all') =>
+    request<{ ok: boolean; message: string; overview: FirewallOverviewResponse }>('/api/firewall/clear-dynamic', {
+      method: 'POST',
+      body: JSON.stringify({ family }),
+    }),
+  manageFirewallWhitelist: (action: 'add' | 'remove', target: string) =>
+    request<{
+      ok: boolean;
+      target: string;
+      whitelist: string[];
+      message: string;
+      overview: FirewallOverviewResponse;
+    }>('/api/firewall/whitelist', {
+      method: 'POST',
+      body: JSON.stringify({ action, target }),
+    }),
 
   async downloadAuditCSV(qs: URLSearchParams): Promise<string> {
     const headers: Record<string, string> = { 'X-Requested-With': 'SingCtlWebUI' };

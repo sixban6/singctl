@@ -35,12 +35,12 @@ type P2PPeerRuntimeState struct {
 
 // P2PRuntimeSnapshot 描述 Daemon / WebUI 观测到的 Tailscale P2P 防线全局运行态。
 type P2PRuntimeSnapshot struct {
-	Enabled        bool                            `json:"enabled"`
-	ApplyMode      string                          `json:"applyMode,omitempty"`
-	OpenPinholes   int                             `json:"openPinholes"`
-	OpenPinholeIPs []string                        `json:"openPinholeIPs,omitempty"`
-	UpdatedAt      string                          `json:"updatedAt,omitempty"`
-	LastError      string                          `json:"lastError,omitempty"`
+	Enabled        bool                           `json:"enabled"`
+	ApplyMode      string                         `json:"applyMode,omitempty"`
+	OpenPinholes   int                            `json:"openPinholes"`
+	OpenPinholeIPs []string                       `json:"openPinholeIPs,omitempty"`
+	UpdatedAt      string                         `json:"updatedAt,omitempty"`
+	LastError      string                         `json:"lastError,omitempty"`
 	PeerStates     map[string]P2PPeerRuntimeState `json:"peerStates,omitempty"`
 }
 
@@ -138,7 +138,7 @@ func (c *P2PAssistController) localAPI() LocalAPIClient {
 	if c.LocalAPI != nil {
 		return c.LocalAPI
 	}
-	return &UnixLocalAPIClient{}
+	return DefaultLocalAPIClient()
 }
 
 func (c *P2PAssistController) ensurePeerEntryLocked(key string) *peerStateEntry {

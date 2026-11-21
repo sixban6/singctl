@@ -83,6 +83,13 @@ watchdog:                                      # (可选) 看门狗守护进程�
 #     - domain_suffix: [example.com, internal.example.org]
 #       server: dns_local
 
+# firewall:                                     # (可选) nftables inet security 防火墙加固自定义配置
+#   mode: "standard"                            # standard (高危端口诱捕+黑段封禁) | minimal (极简黑名单)
+#   ban_timeout_days: 7                         # 动态黑名单封禁天数 (1~30)
+#   ping_limit_per_sec: 10                      # ICMP Ping 每秒限速阈值 (1~100)
+#   whitelist:                                  # 自定义放行 IP/CIDR 白名单
+#     - "203.0.113.10"
+
 # audit:                                        # (可选) 客户端局域网设备流量审计与防 PCDN 配置
 #   pcdn_block: true                            # 默认开启内置防 PCDN 规则集拦截 (设为 false 可关闭)
 #   whitelist:                                  # 信任放行域名后缀或 IP/CIDR 白名单

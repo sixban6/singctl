@@ -110,7 +110,7 @@ func (s *Server) buildTailscaleP2PReport(ctx context.Context, cfg *config.Config
 
 	api := ctrl.LocalAPI
 	if api == nil {
-		api = &tailscale.UnixLocalAPIClient{}
+		api = tailscale.DefaultLocalAPIClient()
 	}
 	statusSnap, statusErr := api.Status(ctx)
 	var netmapSnap *tailscale.NetMapSnapshot

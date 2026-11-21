@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -13,11 +14,13 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"singctl/internal/config"
 	"singctl/internal/constant"
 	"singctl/internal/daemon"
+	"singctl/internal/firewall"
 	"singctl/internal/singbox"
 	ruleset_snapshot "singctl/internal/singbox/ruleset_snapshot"
 	"singctl/internal/tailscale"
@@ -31,18 +34,41 @@ import (
 // ───────────────────────── 状态 ─────────────────────────
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	var (
+		host map[string]any
+		sb   map[string]any
+		dm   map[string]any
+		agh  map[string]any
+		ts   map[string]any
+		fw   firewall.QuickStatus
+		gw   map[string]any
+		cfg  map[string]any
+	)
+
+	var wg sync.WaitGroup
+	wg.Add(8)
+	go func() { defer wg.Done(); host = hostInfo() }()
+	go func() { defer wg.Done(); sb = singboxStatus() }()
+	go func() { defer wg.Done(); dm = s.daemonStatusSummary() }()
+	go func() { defer wg.Done(); agh = s.adguardStatusSummary() }()
+	go func() { defer wg.Done(); ts = tailscaleStatus(s.opts.ConfigPath) }()
+	go func() { defer wg.Done(); fw = firewallStatus() }()
+	go func() { defer wg.Done(); gw = s.gatewayStatusSummary() }()
+	go func() { defer wg.Done(); cfg = configSummary(s.opts.ConfigPath) }()
+	wg.Wait()
+
 	status := map[string]any{
 		"singctlVersion": s.opts.Version,
 		"authEnabled":    s.opts.Password != "",
 		"sessionToken":   s.SessionToken(),
-		"host":           hostInfo(),
-		"singbox":        singboxStatus(),
-		"daemon":         s.daemonStatusSummary(),
-		"adguard":        s.adguardStatusSummary(),
-		"tailscale":      tailscaleStatus(s.opts.ConfigPath),
-		"firewall":       firewallStatus(),
-		"gateway":        s.gatewayStatusSummary(),
-		"config":         configSummary(s.opts.ConfigPath),
+		"host":           host,
+		"singbox":        sb,
+		"daemon":         dm,
+		"adguard":        agh,
+		"tailscale":      ts,
+		"firewall":       fw,
+		"gateway":        gw,
+		"config":         cfg,
 	}
 	writeJSON(w, http.StatusOK, status)
 }
@@ -229,26 +255,34 @@ func queryTailscaleBackend(binPath string) (bool, string, string, bool, string) 
 	return true, st.BackendState, mode, acceptRoutes, strings.Join(lanRoutes, ", ")
 }
 
+var tailscaleLocalHTTPClient = &http.Client{
+	Transport: &http.Transport{
+		DialContext: func(dCtx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{Timeout: 2 * time.Second}).DialContext(dCtx, "unix", tailscale.DefaultTailscaledSocket)
+		},
+		MaxIdleConns:        2,
+		MaxIdleConnsPerHost: 2,
+		IdleConnTimeout:     30 * time.Second,
+	},
+	Timeout: 2 * time.Second,
+}
+
 func queryTailscaleAcceptRoutes(ctx context.Context, binPath string) bool {
 	// 优先直连 tailscaled LocalAPI /localapi/v0/prefs（兼容精简版无 debug CLI 场景）。
-	hc := &http.Client{
-		Transport: &http.Transport{
-			DialContext: func(dCtx context.Context, _, _ string) (net.Conn, error) {
-				return (&net.Dialer{Timeout: 2 * time.Second}).DialContext(dCtx, "unix", tailscale.DefaultTailscaledSocket)
-			},
-		},
-		Timeout: 2 * time.Second,
-	}
 	if req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://local-tailscaled.sock/localapi/v0/prefs", nil); err == nil {
-		if resp, err := hc.Do(req); err == nil {
+		if resp, err := tailscaleLocalHTTPClient.Do(req); err == nil {
 			defer resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
 				var prefs struct {
 					RouteAll bool `json:"RouteAll"`
 				}
-				if json.NewDecoder(resp.Body).Decode(&prefs) == nil {
+				decErr := json.NewDecoder(resp.Body).Decode(&prefs)
+				_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 16*1024))
+				if decErr == nil {
 					return prefs.RouteAll
 				}
+			} else {
+				_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 16*1024))
 			}
 		}
 	}
@@ -264,14 +298,8 @@ func queryTailscaleAcceptRoutes(ctx context.Context, binPath string) bool {
 	return false
 }
 
-func firewallStatus() map[string]any {
-	if runtime.GOOS != "linux" {
-		return map[string]any{"supported": false, "enabled": false}
-	}
-	enabled := fileExists(constant.SingBoxNftablesFile) ||
-		fileExists(constant.FirewallSystemdService) ||
-		fileExists(constant.FirewallInitdScript)
-	return map[string]any{"supported": true, "enabled": enabled}
+func firewallStatus() firewall.QuickStatus {
+	return firewall.InspectQuickStatus()
 }
 
 func configSummary(path string) map[string]any {

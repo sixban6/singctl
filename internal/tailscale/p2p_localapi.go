@@ -91,6 +91,13 @@ type UnixLocalAPIClient struct {
 	httpClient *http.Client
 }
 
+var defaultUnixLocalAPIClient = &UnixLocalAPIClient{}
+
+// DefaultLocalAPIClient 返回复用连接池的默认 tailscaled LocalAPI 客户端，避免高频轮询泄漏 Unix Socket。
+func DefaultLocalAPIClient() LocalAPIClient {
+	return defaultUnixLocalAPIClient
+}
+
 func (c *UnixLocalAPIClient) socketPath() string {
 	return cmp.Or(strings.TrimSpace(c.SocketPath), DefaultTailscaledSocket)
 }
@@ -102,6 +109,9 @@ func (c *UnixLocalAPIClient) client() *http.Client {
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 				return (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, "unix", sock)
 			},
+			MaxIdleConns:        4,
+			MaxIdleConnsPerHost: 2,
+			IdleConnTimeout:     30 * time.Second,
 		}
 		c.httpClient = &http.Client{
 			Transport: tr,
