@@ -30,26 +30,34 @@
 
 ## 🚀 1 分钟极速上手
 
-`SingCtl` 采用单二进制架构，同一套安装脚本可根据运行环境**智能置顶默认模式**：
-- 在 **OpenWrt 软路由 / macOS** 上自动将 **`1) 客户端模式`** 置顶为回车默认项；
-- 在 **云端 Linux VPS** 上自动将 **`1) 服务端模式`** 置顶为回车默认项。
+`SingCtl` 采用全栈单二进制架构：**软路由与云端 VPS 共用同一条安装命令，无需人工区分模式**。脚本会在本地零延迟识别当前机器环境，您只需**一路按回车**即可完成全部部署（交互界面同时保留单键切换与 `--client` / `--server` / `-y` 参数兜底）：
+
+| 运行环境 | 脚本自动识别结果 | 回车后自动完成流程 |
+| :--- | :--- | :--- |
+| **🏠 OpenWrt / 局域网网关 / macOS**<br>*(含 Armbian / PVE / Linux 软路由)* | 自动判定为 **客户端模式**（并按网卡拓扑自动推荐 **主路由** / **旁路由**） | 一路回车 → 自动装齐 46 个离线规则集、防劫持 AdGuard DNS、sing-box 与 `:8090` Web 控制台 |
+| **☁️ 云端 Linux VPS**<br>*(含公网 IP 裸机与 AWS / Oracle / 阿里云等 VPC 内网云机)* | 自动判定为 **服务端模式**（已有部署自动继承历史角色防串台） | 回车确认 → 输入解析域名 + Cloudflare Token 后一路回车 → 四核自动部署并输出后台与总订阅 |
+
+```bash
+# 国内裸机 / 软路由首次安装（多镜像加速，零代理直装，一路回车到底）
+curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/sixban6/singctl/main/install.sh | sh
+
+# 海外 VPS / 已有代理环境（GitHub 官方直连，一路回车到底）
+curl -fsSL https://raw.githubusercontent.com/sixban6/singctl/main/install.sh | sh
+```
 
 ---
 
-### 一、客户端部署（OpenWrt 软路由 / macOS / Linux / Windows）
+### 一、客户端部署（OpenWrt / Linux 软路由 / macOS / Windows）
 
-#### 1. OpenWrt 软路由 / Linux 透明网关（推荐）
+#### 1. OpenWrt / Debian / Ubuntu 软路由透明网关（推荐）
 
-内置全量 46 个离线规则集快照（零网络依赖秒级启动）、自动部署本地防劫持 **AdGuard Home DNS**，并在安装完成后自动启动 **`:8090` 本地 Web 图形管理后台**：
+执行上方一键命令后**全程回车**，即可自动完成 **46 个离线规则集初始化 + 本地防劫持 AdGuard Home DNS + `sing-box` 内核 + `:8090` 本地 Web 管理后台** 部署（单网口挂在主路由下时会自动推荐 **单臂旁路由模式** 并预填上级主路由 IP）：
 
 ```bash
-# 国内裸机软路由首次安装（多镜像加速，零代理直装）
-curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/sixban6/singctl/main/install.sh | sh
+# 如需无人值守全自动安装（零交互确认）
+curl -fsSL https://raw.githubusercontent.com/sixban6/singctl/main/install.sh | sh -s -- -y
 
-# 海外或已有代理环境（GitHub 官方直连；安装引导默认主路由模式，亦可按提示选择 2 旁路由模式并回车确认主路由网关 IP）
-curl -fsSL https://raw.githubusercontent.com/sixban6/singctl/main/install.sh | sh
-
-# 非交互式一键安装为客户端旁路由模式（可选指定上级主路由 IP）
+# 如需显式强制指定单臂旁路由及上级主路由 IP
 curl -fsSL https://raw.githubusercontent.com/sixban6/singctl/main/install.sh | sh -s -- --client --side-router --main-router-ip 192.168.1.1
 ```
 
@@ -68,7 +76,7 @@ powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "[System.IO.File]
 
 #### 4. 客户端常用操作与 `:8090` Web 控制台
 
-安装完成后，可直接打开浏览器访问 **`http://<软路由或本机IP>:8090`**，在图形界面完成**订阅配置、节点切换、iOS 扫码导出、局域网设备安全/隐私审计、规则集黑名单管理与一键自更新**；也可使用命令行：
+安装完成后，可直接打开浏览器访问 **`http://<软路由或本机IP>:8090`**，在图形界面完成**订阅配置、节点切换、主/旁路由与 IPv6 智能双栈切换、iOS 扫码导出、局域网设备安全/隐私审计、规则集黑名单管理与一键自更新**；也可使用命令行：
 
 ```bash
 singctl w status     # 查看本地 :8090 Web 管理后台运行状态与访问地址
@@ -89,16 +97,16 @@ singctl u s          # 一键升级 SingCtl 至最新版并自动热重启 WebUI
 
 #### 1. 单节点 VPS / 舰队首台主控部署（Master）
 
-登录你的 VPS（支持 Debian / Ubuntu / CentOS），执行一键安装向导并回车选择默认的 `1) 服务端模式`：
+登录你的 VPS（支持 Debian / Ubuntu / CentOS，无论公网 IP 直连还是 VPC 内网网卡，脚本均自动识别为 **☁️ 服务端模式**）：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sixban6/singctl/main/install.sh | sh
 ```
 
 > **全流程一气呵成**（完整图文排障见 [👉 单节点实战全解](docs/guide-single-node.md)）：
-> 1. 按向导填写解析域名与 Cloudflare API Token；
-> 2. 回车确认执行四核（`sing-box + Caddy + SubHub + WARP`）全量部署；
-> 3. 部署完成后终端直接输出 **专属 HTTPS 隐蔽管理后台入口** 与 **唯一总订阅链接**。
+> 1. 直接**回车**确认自动识别的服务端模式；
+> 2. 填写解析域名与 Cloudflare API Token，其余可选项均**回车默认**；
+> 3. 回车确认执行四核（`sing-box + Caddy + SubHub + WARP`）全量部署，终端直接输出 **专属 HTTPS 隐蔽管理后台入口** 与 **唯一总订阅链接**。
 
 #### 2. 多节点舰队扩容（第 2~N 台新 VPS 零配置开荒）
 

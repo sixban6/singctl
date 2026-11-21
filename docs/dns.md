@@ -2,7 +2,7 @@
 
 命令前缀：`singctl dns` / `singctl agh`
 
-> **平台支持**：适用于 **Linux / OpenWrt** 客户端透明代理网关（需 root 权限）。使用 `install.sh` 选择客户端模式时会自动完成安装、免向导配置与启动。
+> **平台支持**：适用于 **Linux / OpenWrt** 客户端透明代理网关（需 root 权限）。运行 `install.sh` 后脚本会自动识别客户端环境，用户全程回车即可自动完成安装、免向导配置与启动。
 
 一键部署并托管本地 AdGuard Home，接管 `sing-box` 的 `dns_local`（国内域名分流与代理节点域名引导解析），上游默认采用纯 IP 加密 DoH / DoT，彻底解决宽带运营商对明文 `UDP 53` 的旁路抢答与 DNS 劫持问题。
 
