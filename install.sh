@@ -550,13 +550,244 @@ write_gateway_config() {
     mv -f "$tmp_cfg" "$CONFIG_FILE"
 }
 
-# 客户端网关部署角色选择（默认主路由模式；选旁路由时自动探测上级网关并支持回车确认或手动修改）
+# 记录安装前是否已存在有效配置或系统服务（避免覆盖/模板拷贝后无法继承原角色）
+PRE_EXISTING_ROLE=""
+AUTO_YES="false"
+
+# 检测运行安装前宿主机是否已有明确的服务端/客户端配置或系统服务
+detect_existing_installed_role() {
+    local root_prefix="${SINGCTL_ROOT_PREFIX:-}"
+    local cfg_file="$CONFIG_FILE"
+    if [ -n "$root_prefix" ] && [ "$CONFIG_FILE" = "/etc/singctl/singctl.yaml" ]; then
+        cfg_file="${root_prefix}/etc/singctl/singctl.yaml"
+    fi
+
+    if [ -f "$cfg_file" ]; then
+        local clean_cfg
+        clean_cfg=$(sed 's/#.*//' "$cfg_file" 2>/dev/null || true)
+        local nd sbd cf_key
+        nd=$(printf '%s\n' "$clean_cfg" | awk '/^[[:space:]]*node_domain:/{gsub(/["'\''[:space:]]/, "", $2); print $2; exit}')
+        sbd=$(printf '%s\n' "$clean_cfg" | awk '/^[[:space:]]*sb_domain:/{gsub(/["'\''[:space:]]/, "", $2); print $2; exit}')
+        cf_key=$(printf '%s\n' "$clean_cfg" | awk '/^[[:space:]]*cf_dns_key:/{gsub(/["'\''[:space:]]/, "", $2); print $2; exit}')
+
+        if [ -n "$nd" ] && [ "$nd" != "node.example.com" ] && [ "$nd" != "node.yourdomain.com" ]; then
+            echo "server"
+            return 0
+        fi
+        if [ -n "$sbd" ] && [ "$sbd" != "sub.yourdomain.com" ] && [ "$sbd" != "node.example.com" ] && [ "$sbd" != "node.yourdomain.com" ]; then
+            echo "server"
+            return 0
+        fi
+        if [ -n "$cf_key" ] && [ "$cf_key" != "your_cloudflare_api_token" ]; then
+            echo "server"
+            return 0
+        fi
+
+        if printf '%s\n' "$clean_cfg" | grep -Eq '^[[:space:]]*url:[[:space:]]*["'"'"']?https?://' && \
+           ! printf '%s\n' "$clean_cfg" | grep -Eq '^[[:space:]]*url:[[:space:]]*["'"'"']?https://example\.com/subscription["'"'"']?[[:space:]]*$'; then
+            echo "client"
+            return 0
+        fi
+    fi
+
+    if [ -f "${root_prefix}/etc/systemd/system/singctl-sub.service" ] || [ -f "${root_prefix}/etc/systemd/system/singctl-ui.service" ]; then
+        echo "server"
+        return 0
+    fi
+    if [ -f "${root_prefix}/etc/init.d/singctl-firewall" ]; then
+        echo "client"
+        return 0
+    fi
+
+    echo ""
+}
+
+# 校验是否为合法公网单播 IPv4（排除 RFC1918 私网、100.64/10 CGNAT、169.254/16 链路本地与 198.18/15 基准测试网段）
+is_public_unicast_ipv4() {
+    local ip="$1"
+    is_valid_unicast_ipv4 "$ip" || return 1
+    local o1 o2 o3 o4
+    IFS='.' read -r o1 o2 o3 o4 <<EOF
+$ip
+EOF
+    # 10.0.0.0/8
+    [ "$o1" -eq 10 ] && return 1
+    # 172.16.0.0/12
+    [ "$o1" -eq 172 ] && [ "$o2" -ge 16 ] && [ "$o2" -le 31 ] && return 1
+    # 192.168.0.0/16
+    [ "$o1" -eq 192 ] && [ "$o2" -eq 168 ] && return 1
+    # 100.64.0.0/10 (Tailscale / CGNAT)
+    [ "$o1" -eq 100 ] && [ "$o2" -ge 64 ] && [ "$o2" -le 127 ] && return 1
+    # 169.254.0.0/16 (Link-Local)
+    [ "$o1" -eq 169 ] && [ "$o2" -eq 254 ] && return 1
+    # 198.18.0.0/15 (Benchmarking)
+    [ "$o1" -eq 198 ] && { [ "$o2" -eq 18 ] || [ "$o2" -eq 19 ]; } && return 1
+    return 0
+}
+
+# 读取物理/主网络接口上的全局 IPv4 地址列表（支持通过 SINGCTL_MOCK_IPV4_LIST 在单测中注入）
+list_global_ipv4_addrs() {
+    if [ -n "${SINGCTL_MOCK_IPV4_LIST+x}" ]; then
+        printf '%s\n' "$SINGCTL_MOCK_IPV4_LIST" | tr ', ' '\n\n' | grep -v '^$' || true
+        return 0
+    fi
+    if command -v ip >/dev/null 2>&1; then
+        ip -o -4 addr show up scope global 2>/dev/null | \
+            awk '$2 !~ /^(lo|tailscale|tun|utun|wg|docker|veth|virbr|cni|flannel)/ {sub(/\/.*/, "", $4); print $4}'
+    fi
+}
+
+# 检测是否运行在公有云 VPC（AWS/Oracle/GCP/Azure/阿里云/腾讯云/Vultr/DO/Linode/Hetzner 等）或 OpenVZ VPS
+detect_cloud_vendor() {
+    local root_prefix="${SINGCTL_ROOT_PREFIX:-}"
+    local cloud_regex='Amazon|EC2|Google Compute|GoogleCloud|OracleCloud|Alibaba Cloud|Aliyun|Tencent Cloud|Huawei Cloud|DigitalOcean|Vultr|Choopa|Linode|Akamai Connected Cloud|Hetzner|OVH|Scaleway|Contabo|RackNerd|CloudCone|DMIT|BHost|Microsoft Azure'
+
+    local dmi_file dmi_val
+    for dmi_file in \
+        "${root_prefix}/sys/class/dmi/id/sys_vendor" \
+        "${root_prefix}/sys/class/dmi/id/product_name" \
+        "${root_prefix}/sys/class/dmi/id/bios_vendor" \
+        "${root_prefix}/sys/class/dmi/id/board_vendor" \
+        "${root_prefix}/sys/class/dmi/id/chassis_asset_tag"; do
+        if [ -r "$dmi_file" ]; then
+            dmi_val=$(cat "$dmi_file" 2>/dev/null || true)
+            if printf '%s\n' "$dmi_val" | grep -Eiq "$cloud_regex"; then
+                printf '%s\n' "$dmi_val" | head -n 1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+                return 0
+            fi
+        fi
+    done
+
+    local ci_res="${root_prefix}/run/cloud-init/result.json"
+    if [ -r "$ci_res" ]; then
+        local ci_ds
+        ci_ds=$(cat "$ci_res" 2>/dev/null || true)
+        if printf '%s\n' "$ci_ds" | grep -Eiq 'DataSource(Ec2|GCE|Azure|Oracle|AliYun|TencentCloud|DigitalOcean|Vultr|Hetzner|Scaleway|OVH|OpenStack)'; then
+            echo "Cloud-Init VPS"
+            return 0
+        fi
+    fi
+
+    if [ -d "${root_prefix}/proc/vz" ] && [ ! -d "${root_prefix}/proc/bc" ]; then
+        echo "OpenVZ"
+        return 0
+    fi
+
+    echo ""
+}
+
+# 五层零延迟环境角色自动识别（P1 历史继承 -> P2 客户端固件/桌面 -> P3 公网IP/云厂商VPC -> P4 私有局域网网关）
+detect_runtime_role() {
+    local root_prefix="${SINGCTL_ROOT_PREFIX:-}"
+    DETECTED_ROLE=""
+    DETECTED_ROLE_REASON=""
+
+    if [ -n "${PRE_EXISTING_ROLE:-}" ]; then
+        DETECTED_ROLE="$PRE_EXISTING_ROLE"
+        DETECTED_ROLE_REASON="继承已有 SingCtl 配置角色"
+        return 0
+    fi
+
+    if [ "$OS" = "darwin" ]; then
+        DETECTED_ROLE="client"
+        DETECTED_ROLE_REASON="macOS 客户端环境"
+        return 0
+    fi
+
+    if [ "$IS_OPENWRT" = "true" ] || [ -f "${root_prefix}/etc/openwrt_release" ] || [ -f "${root_prefix}/etc/openwrt_version" ]; then
+        DETECTED_ROLE="client"
+        DETECTED_ROLE_REASON="OpenWrt / 软路由固件环境"
+        return 0
+    fi
+
+    if [ -f "${root_prefix}/etc/armbian-release" ] || \
+       { [ -r "${root_prefix}/proc/device-tree/model" ] && grep -Eiq 'Raspberry Pi|Orange Pi|NanoPi|FriendlyElec|Banana Pi|Rockchip' "${root_prefix}/proc/device-tree/model" 2>/dev/null; }; then
+        DETECTED_ROLE="client"
+        DETECTED_ROLE_REASON="Armbian / 开发板网关环境"
+        return 0
+    fi
+
+    if [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ] || \
+       { [ -d "${root_prefix}/usr/share/xsessions" ] && [ -n "$(ls "${root_prefix}/usr/share/xsessions" 2>/dev/null | head -n 1)" ]; }; then
+        DETECTED_ROLE="client"
+        DETECTED_ROLE_REASON="Linux 桌面图形环境"
+        return 0
+    fi
+
+    local ip_addr
+    for ip_addr in $(list_global_ipv4_addrs); do
+        if is_public_unicast_ipv4 "$ip_addr"; then
+            DETECTED_ROLE="server"
+            DETECTED_ROLE_REASON="公网 IPv4 环境 (${ip_addr})"
+            return 0
+        fi
+    done
+
+    local cloud_vendor
+    cloud_vendor=$(detect_cloud_vendor)
+    if [ -n "$cloud_vendor" ]; then
+        DETECTED_ROLE="server"
+        DETECTED_ROLE_REASON="云主机 VPC 环境 ($cloud_vendor)"
+        return 0
+    fi
+
+    if [ -n "$(list_global_ipv4_addrs | head -n 1)" ]; then
+        DETECTED_ROLE="client"
+        DETECTED_ROLE_REASON="局域网内网环境 (无公网 IP 且非云主机，判定为本地软路由/网关)"
+        return 0
+    fi
+
+    DETECTED_ROLE="server"
+    DETECTED_ROLE_REASON="标准 Linux 服务端环境"
+    return 0
+}
+
+# 智能推荐客户端网关拓扑模式（main 主路由 vs side 单臂旁路由）
+detect_recommended_gateway_mode() {
+    if [ -n "${SINGCTL_MOCK_GW_TOPOLOGY:-}" ]; then
+        echo "$SINGCTL_MOCK_GW_TOPOLOGY"
+        return 0
+    fi
+    if [ -z "${OS:-}" ] || [ "$OS" = "darwin" ]; then
+        echo "main"
+        return 0
+    fi
+    if [ "$IS_OPENWRT" = "true" ] && command -v uci >/dev/null 2>&1; then
+        if uci -q get network.wan >/dev/null 2>&1; then
+            echo "main"
+            return 0
+        fi
+        if [ -n "$(uci -q get network.lan.gateway 2>/dev/null || true)" ]; then
+            echo "side"
+            return 0
+        fi
+    fi
+    if command -v ip >/dev/null 2>&1; then
+        local nic_count
+        nic_count=$(ip -o -4 addr show up scope global 2>/dev/null | awk '$2 !~ /^(lo|tailscale|tun|utun|wg|docker|veth|virbr|cni|flannel|pppoe|wan)/ {print $2}' | sort -u | wc -l | tr -d ' ')
+        local has_wan_if
+        has_wan_if=$(ip -o link show up 2>/dev/null | awk -F': ' '$2 ~ /^(pppoe|wan)/ {print $2; exit}')
+        if [ "$nic_count" = "1" ] && [ -z "$has_wan_if" ] && [ -n "$DETECTED_MAIN_GW" ] && [ -n "$DETECTED_LAN_IP" ] && [ "$DETECTED_MAIN_GW" != "$DETECTED_LAN_IP" ]; then
+            local ip_prefix gw_prefix
+            ip_prefix=$(echo "$DETECTED_LAN_IP" | awk -F. '{print $1"."$2"."$3}')
+            gw_prefix=$(echo "$DETECTED_MAIN_GW" | awk -F. '{print $1"."$2"."$3}')
+            if [ "$ip_prefix" = "$gw_prefix" ] && ! is_public_unicast_ipv4 "$DETECTED_LAN_IP"; then
+                echo "side"
+                return 0
+            fi
+        fi
+    fi
+    echo "main"
+}
+
+# 客户端网关部署角色选择（自动识别主路由/旁路由并支持全程回车确认）
 configure_gateway_mode() {
     SELECTED_GW_MODE="main"
     SELECTED_MAIN_ROUTER_IP=""
 
     local cli_gw_mode=""
     local cli_main_ip=""
+    local gw_auto_yes="${AUTO_YES:-false}"
     while [ $# -gt 0 ]; do
         case "$1" in
             --side-router)
@@ -564,6 +795,9 @@ configure_gateway_mode() {
                 ;;
             --main-router)
                 cli_gw_mode="main"
+                ;;
+            --yes|-y|--non-interactive)
+                gw_auto_yes="true"
                 ;;
             --main-router-ip)
                 shift
@@ -577,6 +811,8 @@ configure_gateway_mode() {
     done
 
     detect_lan_ip_and_iface
+    local recommended_gw_mode
+    recommended_gw_mode=$(detect_recommended_gateway_mode)
 
     local tty_path="${SINGCTL_TTY_PATH:-/dev/tty}"
     local has_tty="false"
@@ -588,43 +824,50 @@ configure_gateway_mode() {
 
     if [ -n "$cli_gw_mode" ]; then
         SELECTED_GW_MODE="$cli_gw_mode"
-    elif [ "$has_tty" = "true" ] && [ "$OS" != "darwin" ]; then
+    elif [ "$gw_auto_yes" = "true" ] || [ "$has_tty" != "true" ] || [ "$OS" = "darwin" ]; then
+        SELECTED_GW_MODE="$recommended_gw_mode"
+    else
         exec 3< "$tty_path"
         printf "\n"
-        if supports_color; then
-            printf "\033[0;36m====================================================\033[0m\n"
-            printf "\033[1;32m  请选择客户端网关部署角色:\033[0m\n"
-            printf "  \033[1;37m1) 主路由模式 (Main Router)\033[0m [回车默认]\n"
-            printf "     • 设备本身作为拨号/上级主网关，直接接管局域网\n"
-            printf "  \033[1;37m2) 旁路由模式 (Side Router / 单臂网关)\033[0m\n"
-            printf "     • 单网口挂在主路由 LAN 口下，接管指向它的终端流量\n"
-            printf "\033[0;36m====================================================\033[0m\n"
-            printf "\033[0;33m请输入选项 [1-2] (默认 1 主路由模式): \033[0m"
+        if [ "$recommended_gw_mode" = "side" ]; then
+            echo_info "网关拓扑识别: 旁路由/单臂模式 (检测到单网口且存在上级主路由 ${DETECTED_MAIN_GW:-同网段网关})"
+            if supports_color; then
+                printf "\033[0;33m➜ 按 [回车] 确认使用旁路由模式 (输入 1 或 main 切换为主路由模式): \033[0m"
+            else
+                printf "➜ 按 [回车] 确认使用旁路由模式 (输入 1 或 main 切换为主路由模式): "
+            fi
+            local gw_choice=""
+            read -r gw_choice <&3 || gw_choice=""
+            case "$gw_choice" in
+                1|main|Main|MAIN)
+                    SELECTED_GW_MODE="main"
+                    ;;
+                *)
+                    SELECTED_GW_MODE="side"
+                    ;;
+            esac
         else
-            printf "====================================================\n"
-            printf "  请选择客户端网关部署角色:\n"
-            printf "  1) 主路由模式 (Main Router) [回车默认]\n"
-            printf "     • 设备本身作为拨号/上级主网关，直接接管局域网\n"
-            printf "  2) 旁路由模式 (Side Router / 单臂网关)\n"
-            printf "     • 单网口挂在主路由 LAN 口下，接管指向它的终端流量\n"
-            printf "====================================================\n"
-            printf "请输入选项 [1-2] (默认 1 主路由模式): "
+            echo_info "网关拓扑识别: 主路由模式 (Main Router)"
+            if supports_color; then
+                printf "\033[0;33m➜ 按 [回车] 确认使用主路由模式 (输入 2 或 side 切换为旁路由模式): \033[0m"
+            else
+                printf "➜ 按 [回车] 确认使用主路由模式 (输入 2 或 side 切换为旁路由模式): "
+            fi
+            local gw_choice=""
+            read -r gw_choice <&3 || gw_choice=""
+            case "$gw_choice" in
+                2|side|Side|SIDE)
+                    SELECTED_GW_MODE="side"
+                    ;;
+                *)
+                    SELECTED_GW_MODE="main"
+                    ;;
+            esac
         fi
-
-        local gw_choice=""
-        read -r gw_choice <&3 || gw_choice="1"
-        case "$gw_choice" in
-            2|side|Side|SIDE)
-                SELECTED_GW_MODE="side"
-                ;;
-            *)
-                SELECTED_GW_MODE="main"
-                ;;
-        esac
     fi
 
     if [ "$SELECTED_GW_MODE" = "main" ]; then
-        if [ "$has_tty" = "true" ] && [ -z "$cli_gw_mode" ] && [ "$OS" != "darwin" ]; then
+        if [ "$has_tty" = "true" ] && [ -z "$cli_gw_mode" ] && [ "$gw_auto_yes" != "true" ] && [ "$OS" != "darwin" ]; then
             exec 3<&- 2>/dev/null || true
         fi
         write_gateway_config "main" ""
@@ -632,7 +875,7 @@ configure_gateway_mode() {
         return 0
     fi
 
-    echo_info "已选择【旁路由模式 (side)】"
+    echo_info "已启用【旁路由模式 (side)】"
     if [ -n "$DETECTED_LAN_IP" ]; then
         echo_info "检测到本机局域网地址: $DETECTED_LAN_IP (网卡: ${DETECTED_LAN_IFACE:-未知})"
     fi
@@ -645,7 +888,7 @@ configure_gateway_mode() {
             error_exit "上级主路由 IP 不能等于旁路由本机 IP ($DETECTED_LAN_IP)，否则会导致路由死循环"
         fi
         SELECTED_MAIN_ROUTER_IP="$cli_main_ip"
-    elif [ "$has_tty" = "true" ]; then
+    elif [ "$gw_auto_yes" != "true" ] && [ "$has_tty" = "true" ]; then
         if [ -n "$cli_gw_mode" ]; then
             exec 3< "$tty_path"
         fi
@@ -707,27 +950,47 @@ show_side_router_guide() {
 
 # 配置订阅
 configure_subscription() {
+    local sub_auto_yes="${AUTO_YES:-false}"
+    for arg in "$@"; do
+        case "$arg" in
+            --yes|-y|--non-interactive)
+                sub_auto_yes="true"
+                ;;
+        esac
+    done
+
+    if [ -f "$CONFIG_FILE" ] && sed 's/#.*//' "$CONFIG_FILE" | grep -Eq 'url:[[:space:]]*["'"'"']?https?://' && \
+       ! sed 's/#.*//' "$CONFIG_FILE" | grep -Eq 'url:[[:space:]]*["'"'"']?https://example\.com/subscription["'"'"']?[[:space:]]*$'; then
+        echo_info "检测到已有订阅配置，自动保留现有订阅"
+        return 0
+    fi
+
+    if [ "$sub_auto_yes" = "true" ]; then
+        echo_info "非交互模式跳过订阅输入（安装后可在 :8090 WebUI 配置）"
+        return 0
+    fi
+
     echo_info "配置订阅连接..."
-    
+
     # 强制从终端读取输入，即使在管道中运行
     if supports_color; then
-        printf "\033[0;33m请输入您的订阅连接 (留空跳过):\033[0m\n"
+        printf "\033[0;33m请输入您的订阅连接 (直接回车跳过，稍后可在 :8090 WebUI 配置):\033[0m\n"
     else
-        printf "请输入您的订阅连接 (留空跳过):\n"
+        printf "请输入您的订阅连接 (直接回车跳过，稍后可在 :8090 WebUI 配置):\n"
     fi
-    
+
     printf "订阅URL: "
-    
+
     # 直接从 /dev/tty 读取，绕过管道限制
     if [ -c /dev/tty ]; then
-        read -r sub_url < /dev/tty
+        read -r sub_url < /dev/tty || sub_url=""
     else
         # 如果没有 /dev/tty，尝试其他方法
         exec < /dev/tty 2>/dev/null || {
             echo_warning "无法获取终端输入，请手动编辑配置文件: $CONFIG_FILE"
             return 0
         }
-        read -r sub_url
+        read -r sub_url || sub_url=""
     fi
 
     [ -z "$sub_url" ] && { echo_info "跳过订阅配置"; return 0; }
@@ -980,138 +1243,101 @@ init_singbox_config() {
   echo_info "已创建 /etc/sing-box 目录，配置文件将在首次启动时生成"
 }
 
-# 模式选择与后续引导
-select_mode_and_setup() {
-    local mode=""
+# 根据运行环境自动判定安装角色，交互场景仅需按回车确认（支持 1 键切换角色或 CLI 显式指定）
+resolve_install_mode() {
+    SELECTED_INSTALL_MODE=""
+    AUTO_YES="false"
+    local explicit_mode=""
+
     for arg in "$@"; do
         case "$arg" in
             --server|-s|server)
-                mode="server"
+                explicit_mode="server"
                 ;;
             --client|-c|client)
-                mode="client"
+                explicit_mode="client"
+                ;;
+            --yes|-y|--non-interactive)
+                AUTO_YES="true"
                 ;;
         esac
     done
 
-    if [ -z "$mode" ]; then
-        local prefer_client="false"
-        if [ "$IS_OPENWRT" = "true" ] || [ "$OS" = "darwin" ]; then
-            prefer_client="true"
-        fi
-
-        if [ -c /dev/tty ]; then
-            printf "\n"
-            if [ "$prefer_client" = "true" ]; then
-                if supports_color; then
-                    printf "\033[0;36m====================================================\033[0m\n"
-                    printf "\033[1;32m  请选择 SingCtl 运行模式 (检测到 OpenWrt/macOS 环境):\033[0m\n"
-                    printf "  \033[1;37m1) 客户端模式 (Client Mode)\033[0m [回车默认]\n"
-                    printf "     • 软路由 / macOS / Linux 透明代理网关 (TProxy)\n"
-                    printf "     • 内置 AdGuard Home 本地防劫持 DNS 与管理面板\n"
-                    printf "     • 自动转换订阅与看门狗静默热同步\n"
-                    printf "     • 本地轻量 Web 图形管理后台 (:8090)\n"
-                    printf "\n"
-                    printf "  \033[1;37m2) 服务端模式 (Server Mode)\033[0m\n"
-                    printf "     • VLESS Reality + Hysteria 2 节点承载\n"
-                    printf "     • Caddy 自动化 TLS / 原生 IP 证书 / 隐蔽反代\n"
-                    printf "     • 服务端专属 Web 控制台 (高熵安全随机路径)\n"
-                    printf "     • SubHub 原生节点管理与多客户端订阅聚合\n"
-                    printf "\033[0;36m====================================================\033[0m\n"
-                    printf "\033[0;33m请输入选项 [1-2] (默认 1 客户端模式): \033[0m"
-                else
-                    printf "====================================================\n"
-                    printf "  请选择 SingCtl 运行模式 (检测到 OpenWrt/macOS 环境):\n"
-                    printf "  1) 客户端模式 (Client Mode) [回车默认]\n"
-                    printf "     • 软路由 / macOS / Linux 透明代理网关 (TProxy)\n"
-                    printf "     • 内置 AdGuard Home 本地防劫持 DNS 与管理面板\n"
-                    printf "     • 自动转换订阅与看门狗静默热同步\n"
-                    printf "     • 本地轻量 Web 图形管理后台 (:8090)\n"
-                    printf "\n"
-                    printf "  2) 服务端模式 (Server Mode)\n"
-                    printf "     • VLESS Reality + Hysteria 2 节点承载\n"
-                    printf "     • Caddy 自动化 TLS / 原生 IP 证书 / 隐蔽反代\n"
-                    printf "     • 服务端专属 Web 控制台 (高熵安全随机路径)\n"
-                    printf "     • SubHub 原生节点管理与多客户端订阅聚合\n"
-                    printf "====================================================\n"
-                    printf "请输入选项 [1-2] (默认 1 客户端模式): "
-                fi
-
-                read -r choice < /dev/tty || choice="1"
-                case "$choice" in
-                    2|server|s|Server)
-                        mode="server"
-                        ;;
-                    *)
-                        mode="client"
-                        ;;
-                esac
-            else
-                if supports_color; then
-                    printf "\033[0;36m====================================================\033[0m\n"
-                    printf "\033[1;32m  请选择 SingCtl 运行模式:\033[0m\n"
-                    printf "  \033[1;37m1) 服务端模式 (Server Mode)\033[0m [回车默认]\n"
-                    printf "     • VLESS Reality + Hysteria 2 节点承载\n"
-                    printf "     • Caddy 自动化 TLS / 原生 IP 证书 / 隐蔽反代\n"
-                    printf "     • 服务端专属 Web 控制台 (高熵安全随机路径)\n"
-                    printf "     • SubHub 原生节点管理与多客户端订阅聚合\n"
-                    printf "\n"
-                    printf "  \033[1;37m2) 客户端模式 (Client Mode)\033[0m\n"
-                    printf "     • 软路由 / Linux 透明代理网关 (TProxy)\n"
-                    printf "     • 内置 AdGuard Home 本地防劫持 DNS 与管理面板\n"
-                    printf "     • 自动转换订阅与看门狗静默热同步\n"
-                    printf "     • 本地轻量 Web 图形管理后台 (:8090)\n"
-                    printf "\033[0;36m====================================================\033[0m\n"
-                    printf "\033[0;33m请输入选项 [1-2] (默认 1 服务端模式): \033[0m"
-                else
-                    printf "====================================================\n"
-                    printf "  请选择 SingCtl 运行模式:\n"
-                    printf "  1) 服务端模式 (Server Mode) [回车默认]\n"
-                    printf "     • VLESS Reality + Hysteria 2 节点承载\n"
-                    printf "     • Caddy 自动化 TLS / 原生 IP 证书 / 隐蔽反代\n"
-                    printf "     • 服务端专属 Web 控制台 (高熵安全随机路径)\n"
-                    printf "     • SubHub 原生节点管理与多客户端订阅聚合\n"
-                    printf "\n"
-                    printf "  2) 客户端模式 (Client Mode)\n"
-                    printf "     • 软路由 / Linux 透明代理网关 (TProxy)\n"
-                    printf "     • 内置 AdGuard Home 本地防劫持 DNS 与管理面板\n"
-                    printf "     • 自动转换订阅与看门狗静默热同步\n"
-                    printf "     • 本地轻量 Web 图形管理后台 (:8090)\n"
-                    printf "====================================================\n"
-                    printf "请输入选项 [1-2] (默认 1 服务端模式): "
-                fi
-
-                read -r choice < /dev/tty || choice="1"
-                case "$choice" in
-                    2|client|c|Client)
-                        mode="client"
-                        ;;
-                    *)
-                        mode="server"
-                        ;;
-                esac
-            fi
-        else
-            if [ "$prefer_client" = "true" ]; then
-                mode="client"
-            else
-                mode="server"
-            fi
-        fi
+    if [ -n "$explicit_mode" ]; then
+        SELECTED_INSTALL_MODE="$explicit_mode"
+        echo_info "使用命令行指定模式: $SELECTED_INSTALL_MODE"
+        return 0
     fi
 
+    detect_runtime_role
+    SELECTED_INSTALL_MODE="$DETECTED_ROLE"
+
+    local role_label="☁️ 服务端模式 (Server)"
+    local switch_hint="如需切换客户端请输入 c"
+    if [ "$DETECTED_ROLE" = "client" ]; then
+        role_label="🏠 客户端模式 (Client)"
+        switch_hint="如需切换服务端请输入 s"
+    fi
+
+    printf "\n"
+    echo_info "环境自动识别: ${role_label} — ${DETECTED_ROLE_REASON}"
+
+    local tty_path="${SINGCTL_TTY_PATH:-/dev/tty}"
+    local has_tty="false"
+    if [ -n "${SINGCTL_TTY_PATH:-}" ] && [ -f "$SINGCTL_TTY_PATH" ]; then
+        has_tty="true"
+    elif [ -c "$tty_path" ]; then
+        has_tty="true"
+    fi
+
+    if [ "$AUTO_YES" = "true" ] || [ "$has_tty" != "true" ]; then
+        return 0
+    fi
+
+    exec 3< "$tty_path"
+    if supports_color; then
+        printf "\033[0;33m➜ 按 [回车] 继续安装 (${switch_hint}): \033[0m"
+    else
+        printf "➜ 按 [回车] 继续安装 (%s): " "$switch_hint"
+    fi
+
+    local choice=""
+    read -r choice <&3 || choice=""
+    exec 3<&- 2>/dev/null || true
+
+    choice=$(printf "%s" "$choice" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    if [ "$DETECTED_ROLE" = "client" ]; then
+        case "$choice" in
+            s|S|server|Server|SERVER|2)
+                SELECTED_INSTALL_MODE="server"
+                ;;
+        esac
+    else
+        case "$choice" in
+            c|C|client|Client|CLIENT|2)
+                SELECTED_INSTALL_MODE="client"
+                ;;
+        esac
+    fi
+}
+
+# 模式选择与后续引导
+select_mode_and_setup() {
+    resolve_install_mode "$@"
+    local mode="$SELECTED_INSTALL_MODE"
+
     if [ "$mode" = "server" ]; then
-        echo_info "已选择【服务端模式】"
+        echo_info "进入【服务端模式】部署流程"
         echo_info "正在启动 SingCtl 服务端初始化向导..."
         printf "\n"
-        if [ -c /dev/tty ]; then
+        if [ -c /dev/tty ] && [ "$AUTO_YES" != "true" ]; then
             "$INSTALL_DIR/singctl" sr init < /dev/tty
         else
             "$INSTALL_DIR/singctl" sr init
         fi
 
         deploy_now="y"
-        if [ -c /dev/tty ]; then
+        if [ "$AUTO_YES" != "true" ] && [ -c /dev/tty ]; then
             printf "\n"
             if supports_color; then
                 printf "\033[0;33m是否立即执行四核组件全量部署 (singctl sr install)？[Y/n] (回车默认立即部署): \033[0m"
@@ -1132,7 +1358,7 @@ select_mode_and_setup() {
         if [ "$deploy_now" = "y" ]; then
             echo_info "正在启动四核组件全量部署..."
             printf "\n"
-            if [ -c /dev/tty ]; then
+            if [ -c /dev/tty ] && [ "$AUTO_YES" != "true" ]; then
                 exec "$INSTALL_DIR/singctl" sr install < /dev/tty
             else
                 exec "$INSTALL_DIR/singctl" sr install
@@ -1144,9 +1370,9 @@ select_mode_and_setup() {
         exit 0
     fi
 
-    echo_info "已选择【客户端模式】"
+    echo_info "进入【客户端模式】部署流程"
     configure_gateway_mode "$@"
-    configure_subscription
+    configure_subscription "$@"
     verify_installation
     show_completion_info
     init_singbox_config
@@ -1154,7 +1380,7 @@ select_mode_and_setup() {
     # Linux / OpenWrt 客户端自动安装、免向导配置并启动本地防劫持 AdGuard Home
     if [ "$OS" = "linux" ]; then
         echo_info "正在安装并初始化客户端防劫持 DNS (AdGuard Home)..."
-        if [ -c /dev/tty ]; then
+        if [ -c /dev/tty ] && [ "$AUTO_YES" != "true" ]; then
             "$INSTALL_DIR/singctl" dns install --config "$CONFIG_FILE" < /dev/tty || echo_warning "AdGuard Home 自动安装未完成 (将继续部署 sing-box，稍后可手动运行 singctl dns install)"
         else
             "$INSTALL_DIR/singctl" dns install --config "$CONFIG_FILE" --non-interactive || echo_warning "AdGuard Home 自动安装未完成 (将继续部署 sing-box，稍后可手动运行 singctl dns install)"
@@ -1231,10 +1457,11 @@ select_mode_and_setup() {
 main() {
     echo_info "开始安装 SingCtl..."
     printf "\n"
-    
+
     check_permissions
     check_dependencies
     detect_system
+    PRE_EXISTING_ROLE=$(detect_existing_installed_role)
     get_latest_version
     build_download_url
     download_and_extract

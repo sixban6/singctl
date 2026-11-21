@@ -195,3 +195,317 @@ purge_existing_singbox
 		}
 	})
 }
+
+func TestInstallScript_AutoRoleAndSmartTopologyDetection(t *testing.T) {
+	repoRoot, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatalf("resolve repo root: %v", err)
+	}
+	installSh := filepath.Join(repoRoot, "install.sh")
+
+	t.Run("detect_runtime_role_across_client_and_server_environments", func(t *testing.T) {
+		type roleCase struct {
+			name        string
+			osName      string
+			isOpenWrt   string
+			mockIPs     string
+			display     string
+			setupRootfs func(t *testing.T, rootfs, cfgPath string)
+			wantRole    string
+		}
+
+		cases := []roleCase{
+			{
+				name:   "openwrt_release_detected_as_client",
+				osName: "linux",
+				setupRootfs: func(t *testing.T, rootfs, _ string) {
+					if err := os.MkdirAll(filepath.Join(rootfs, "etc"), 0755); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(rootfs, "etc", "openwrt_release"), []byte("DISTRIB_ID='OpenWrt'\n"), 0644); err != nil {
+						t.Fatal(err)
+					}
+				},
+				wantRole: "client",
+			},
+			{
+				name:     "darwin_detected_as_client",
+				osName:   "darwin",
+				wantRole: "client",
+			},
+			{
+				name:   "armbian_sbc_detected_as_client",
+				osName: "linux",
+				setupRootfs: func(t *testing.T, rootfs, _ string) {
+					if err := os.MkdirAll(filepath.Join(rootfs, "etc"), 0755); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(rootfs, "etc", "armbian-release"), []byte("BOARD=orangepi\n"), 0644); err != nil {
+						t.Fatal(err)
+					}
+				},
+				wantRole: "client",
+			},
+			{
+				name:     "linux_desktop_detected_as_client",
+				osName:   "linux",
+				display:  ":0",
+				wantRole: "client",
+			},
+			{
+				name:    "lan_private_home_gateway_qemu_detected_as_client",
+				osName:  "linux",
+				mockIPs: "192.168.100.2",
+				setupRootfs: func(t *testing.T, rootfs, _ string) {
+					dmiDir := filepath.Join(rootfs, "sys", "class", "dmi", "id")
+					if err := os.MkdirAll(dmiDir, 0755); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(dmiDir, "sys_vendor"), []byte("QEMU\n"), 0644); err != nil {
+						t.Fatal(err)
+					}
+				},
+				wantRole: "client",
+			},
+			{
+				name:     "direct_public_ipv4_vps_detected_as_server",
+				osName:   "linux",
+				mockIPs:  "203.0.113.10",
+				wantRole: "server",
+			},
+			{
+				name:    "vpc_aws_cloud_vps_detected_as_server",
+				osName:  "linux",
+				mockIPs: "172.31.10.5",
+				setupRootfs: func(t *testing.T, rootfs, _ string) {
+					dmiDir := filepath.Join(rootfs, "sys", "class", "dmi", "id")
+					if err := os.MkdirAll(dmiDir, 0755); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(dmiDir, "sys_vendor"), []byte("Amazon EC2\n"), 0644); err != nil {
+						t.Fatal(err)
+					}
+				},
+				wantRole: "server",
+			},
+			{
+				name:    "vpc_oracle_cloud_vps_detected_as_server",
+				osName:  "linux",
+				mockIPs: "10.0.0.15",
+				setupRootfs: func(t *testing.T, rootfs, _ string) {
+					dmiDir := filepath.Join(rootfs, "sys", "class", "dmi", "id")
+					if err := os.MkdirAll(dmiDir, 0755); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(dmiDir, "sys_vendor"), []byte("OracleCloud.com\n"), 0644); err != nil {
+						t.Fatal(err)
+					}
+				},
+				wantRole: "server",
+			},
+			{
+				name:    "openvz_vps_detected_as_server",
+				osName:  "linux",
+				mockIPs: "172.16.5.2",
+				setupRootfs: func(t *testing.T, rootfs, _ string) {
+					if err := os.MkdirAll(filepath.Join(rootfs, "proc", "vz"), 0755); err != nil {
+						t.Fatal(err)
+					}
+				},
+				wantRole: "server",
+			},
+			{
+				name:    "pre_existing_server_config_overrides_private_ip",
+				osName:  "linux",
+				mockIPs: "192.168.100.2",
+				setupRootfs: func(t *testing.T, _ string, cfgPath string) {
+					seed := "server:\n  node_domain: \"us1.example.com\"\n  cf_dns_key: \"cf-test-token\"\n"
+					if err := os.WriteFile(cfgPath, []byte(seed), 0600); err != nil {
+						t.Fatal(err)
+					}
+				},
+				wantRole: "server",
+			},
+			{
+				name:    "pre_existing_client_config_overrides_public_ip",
+				osName:  "linux",
+				mockIPs: "203.0.113.10",
+				setupRootfs: func(t *testing.T, _ string, cfgPath string) {
+					seed := "subs:\n  - name: \"main\"\n    url: \"https://sub.example.com/1\"\n"
+					if err := os.WriteFile(cfgPath, []byte(seed), 0600); err != nil {
+						t.Fatal(err)
+					}
+				},
+				wantRole: "client",
+			},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				dir := t.TempDir()
+				rootfs := filepath.Join(dir, "rootfs")
+				cfgPath := filepath.Join(dir, "singctl.yaml")
+				if err := os.MkdirAll(rootfs, 0755); err != nil {
+					t.Fatal(err)
+				}
+				if tc.setupRootfs != nil {
+					tc.setupRootfs(t, rootfs, cfgPath)
+				}
+				isOW := tc.isOpenWrt
+				if isOW == "" {
+					isOW = "false"
+				}
+
+				harness := filepath.Join(dir, "role_test.sh")
+				script := `#!/bin/sh
+set -e
+unset DISPLAY WAYLAND_DISPLAY
+` + func() string {
+					if tc.display != "" {
+						return `export DISPLAY="` + tc.display + `"` + "\n"
+					}
+					return ""
+				}() + `export SINGCTL_INSTALL_LIB_ONLY=1
+export SINGCTL_ROOT_PREFIX="` + rootfs + `"
+export SINGCTL_MOCK_IPV4_LIST="` + tc.mockIPs + `"
+. "` + installSh + `"
+OS="` + tc.osName + `"
+IS_OPENWRT="` + isOW + `"
+CONFIG_FILE="` + cfgPath + `"
+PRE_EXISTING_ROLE=$(detect_existing_installed_role)
+detect_runtime_role
+printf "ROLE=%s REASON=%s\n" "$DETECTED_ROLE" "$DETECTED_ROLE_REASON"
+`
+				if err := os.WriteFile(harness, []byte(script), 0755); err != nil {
+					t.Fatal(err)
+				}
+				out, err := exec.CommandContext(t.Context(), "sh", harness).CombinedOutput()
+				if err != nil {
+					t.Fatalf("role detection failed: %v\nOutput:\n%s", err, string(out))
+				}
+				wantPrefix := "ROLE=" + tc.wantRole + " "
+				if !strings.Contains(string(out), wantPrefix) {
+					t.Fatalf("expected %q, got output:\n%s", wantPrefix, string(out))
+				}
+			})
+		}
+	})
+
+	t.Run("resolve_install_mode_enter_only_escape_hatch_and_flags", func(t *testing.T) {
+		runResolve := func(t *testing.T, mockIPs, ttyInput string, args ...string) string {
+			t.Helper()
+			dir := t.TempDir()
+			rootfs := filepath.Join(dir, "rootfs")
+			_ = os.MkdirAll(rootfs, 0755)
+			ttyFile := filepath.Join(dir, "mock_tty")
+			if err := os.WriteFile(ttyFile, []byte(ttyInput), 0600); err != nil {
+				t.Fatal(err)
+			}
+			harness := filepath.Join(dir, "resolve_test.sh")
+			script := `#!/bin/sh
+set -e
+unset DISPLAY WAYLAND_DISPLAY
+export SINGCTL_INSTALL_LIB_ONLY=1
+export SINGCTL_ROOT_PREFIX="` + rootfs + `"
+export SINGCTL_MOCK_IPV4_LIST="` + mockIPs + `"
+. "` + installSh + `"
+OS="linux"
+IS_OPENWRT="false"
+CONFIG_FILE="` + filepath.Join(dir, "singctl.yaml") + `"
+PRE_EXISTING_ROLE=""
+SINGCTL_TTY_PATH="` + ttyFile + `"
+resolve_install_mode "$@"
+printf "SELECTED=%s YES=%s\n" "$SELECTED_INSTALL_MODE" "$AUTO_YES"
+`
+			if err := os.WriteFile(harness, []byte(script), 0755); err != nil {
+				t.Fatal(err)
+			}
+			out, err := exec.CommandContext(t.Context(), "sh", append([]string{harness}, args...)...).CombinedOutput()
+			if err != nil {
+				t.Fatalf("resolve_install_mode failed: %v\nOutput:\n%s", err, string(out))
+			}
+			return string(out)
+		}
+
+		// Enter keeps auto-detected role
+		if out := runResolve(t, "192.168.100.2", "\n"); !strings.Contains(out, "SELECTED=client ") {
+			t.Fatalf("expected Enter on LAN IP to keep client, got:\n%s", out)
+		}
+		if out := runResolve(t, "203.0.113.10", "\n"); !strings.Contains(out, "SELECTED=server ") {
+			t.Fatalf("expected Enter on public IP to keep server, got:\n%s", out)
+		}
+		// Single-key escape switches role cleanly
+		if out := runResolve(t, "192.168.100.2", "s\n"); !strings.Contains(out, "SELECTED=server ") {
+			t.Fatalf("expected 's' on client to switch to server, got:\n%s", out)
+		}
+		if out := runResolve(t, "203.0.113.10", "c\n"); !strings.Contains(out, "SELECTED=client ") {
+			t.Fatalf("expected 'c' on server to switch to client, got:\n%s", out)
+		}
+		// Explicit flags & -y bypass TTY
+		if out := runResolve(t, "192.168.100.2", "", "--server"); !strings.Contains(out, "SELECTED=server ") {
+			t.Fatalf("expected --server flag override, got:\n%s", out)
+		}
+		if out := runResolve(t, "203.0.113.10", "", "--client"); !strings.Contains(out, "SELECTED=client ") {
+			t.Fatalf("expected --client flag override, got:\n%s", out)
+		}
+		if out := runResolve(t, "203.0.113.10", "", "-y"); !strings.Contains(out, "SELECTED=server YES=true") {
+			t.Fatalf("expected -y to accept server with AUTO_YES=true, got:\n%s", out)
+		}
+	})
+
+	t.Run("smart_gateway_side_router_enter_only_and_yes_flag", func(t *testing.T) {
+		runGW := func(t *testing.T, ttyInput string, args ...string) *config.Config {
+			t.Helper()
+			dir := t.TempDir()
+			cfgPath := filepath.Join(dir, "singctl.yaml")
+			if err := os.WriteFile(cfgPath, configs.ClientConfigYAML, 0600); err != nil {
+				t.Fatal(err)
+			}
+			ttyFile := filepath.Join(dir, "mock_tty")
+			if err := os.WriteFile(ttyFile, []byte(ttyInput), 0600); err != nil {
+				t.Fatal(err)
+			}
+			harness := filepath.Join(dir, "gw_auto_test.sh")
+			script := `#!/bin/sh
+set -e
+export SINGCTL_INSTALL_LIB_ONLY=1
+export SINGCTL_MOCK_GW_TOPOLOGY="side"
+. "` + installSh + `"
+OS="linux"
+CONFIG_FILE="` + cfgPath + `"
+SINGCTL_TTY_PATH="` + ttyFile + `"
+detect_lan_ip_and_iface() {
+    DETECTED_LAN_IP="192.168.100.2"
+    DETECTED_LAN_IFACE="eth0"
+    DETECTED_MAIN_GW="192.168.100.1"
+}
+probe_gateway_reachable() { return 0; }
+configure_gateway_mode "$@"
+`
+			if err := os.WriteFile(harness, []byte(script), 0755); err != nil {
+				t.Fatal(err)
+			}
+			out, err := exec.CommandContext(t.Context(), "sh", append([]string{harness}, args...)...).CombinedOutput()
+			if err != nil {
+				t.Fatalf("configure_gateway_mode failed: %v\nOutput:\n%s", err, string(out))
+			}
+			cfg, err := config.Load(cfgPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return cfg
+		}
+
+		// Recommended side-router: user only presses Enter twice!
+		cfgTTY := runGW(t, "\n\n")
+		if cfgTTY.Gateway.EffectiveMode() != "side" || cfgTTY.Gateway.MainRouterIP != "192.168.100.1" {
+			t.Fatalf("expected Enter-only recommended side mode with 192.168.100.1, got %+v", cfgTTY.Gateway)
+		}
+
+		// Non-interactive -y auto-applies recommended side mode & detected main gateway
+		cfgYes := runGW(t, "", "-y")
+		if cfgYes.Gateway.EffectiveMode() != "side" || cfgYes.Gateway.MainRouterIP != "192.168.100.1" {
+			t.Fatalf("expected -y recommended side mode with 192.168.100.1, got %+v", cfgYes.Gateway)
+		}
+	})
+}

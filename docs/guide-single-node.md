@@ -77,7 +77,7 @@ SSH 登录到你的 VPS 后，只需一行命令即可启动交互式安装向�
 curl -fsSL https://raw.githubusercontent.com/sixban6/singctl/main/install.sh | sh
 ```
 
-选择 **`1) 服务端模式 (Server Mode)`**，按提示依次输入：
+脚本会自动识别当前 VPS 为 **☁️ 服务端模式**，直接**按回车确认**后按提示依次输入：
 1. **节点绑定域名**：例如 `node.example.com`
 2. **Cloudflare DNS API Token**：粘贴刚才创建的 Token
 3. **节点地区代号（可选）**：例如 `sg`、`jp`、`us`（留空则自动根据公网 IP 识别）
