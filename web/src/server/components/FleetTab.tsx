@@ -10,8 +10,8 @@ import {
   FleetActionResult,
 } from '../types';
 import { api } from '../api';
-import { peekCachedQuery, prefetchCachedQuery, writeCachedQuery } from '../hooks';
-import { useToast } from '../ui';
+import { peekCachedQuery, prefetchCachedQuery, writeCachedQuery } from '../../hooks';
+import { useToast } from '../../ui';
 import {
   Network,
   Plus,

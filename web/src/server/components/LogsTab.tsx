@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { api } from '../api';
-import { useToast } from '../ui';
+import { useToast } from '../../ui';
 import { Terminal, RefreshCw, Trash2, Download, Pause, Play, Check } from 'lucide-react';
 
 interface LogsTabProps {

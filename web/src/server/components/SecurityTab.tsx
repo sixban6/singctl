@@ -9,8 +9,8 @@ import {
   CertHealthItem,
 } from '../types';
 import { api } from '../api';
-import { peekCachedQuery, prefetchCachedQuery, writeCachedQuery } from '../hooks';
-import { useToast } from '../ui';
+import { peekCachedQuery, prefetchCachedQuery, writeCachedQuery } from '../../hooks';
+import { useToast } from '../../ui';
 import {
   Shield,
   KeyRound,

@@ -8,8 +8,8 @@ import {
   SubscriptionRiskSummary,
 } from '../types';
 import { api } from '../api';
-import { peekCachedQuery, prefetchCachedQuery, writeCachedQuery } from '../hooks';
-import { QRCodeBox, useToast } from '../ui';
+import { peekCachedQuery, prefetchCachedQuery, writeCachedQuery } from '../../hooks';
+import { QRCodeBox, useToast } from '../../ui';
 import {
   Copy,
   QrCode,

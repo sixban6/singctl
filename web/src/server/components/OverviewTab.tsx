@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { ServerStatusResponse, DoctorReport, TelemetrySnapshot } from '../types';
 import { api, getBasePath } from '../api';
-import { formatBytes, useToast } from '../ui';
+import { formatBytes, useToast } from '../../ui';
 import {
   Cpu,
   HardDrive,

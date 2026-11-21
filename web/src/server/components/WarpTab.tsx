@@ -9,8 +9,8 @@ import {
   WarpRoutingStatusResponse,
 } from '../types';
 import { api } from '../api';
-import { peekCachedQuery, prefetchCachedQuery, writeCachedQuery } from '../hooks';
-import { formatBytes, useToast } from '../ui';
+import { peekCachedQuery, prefetchCachedQuery, writeCachedQuery } from '../../hooks';
+import { formatBytes, useToast } from '../../ui';
 import {
   AlertTriangle,
   Bot,
