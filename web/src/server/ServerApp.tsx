@@ -1,8 +1,8 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { ServerStatusResponse } from './types';
 import { ApiError, api, setOnUnauthorized } from './api';
-import { clearCachedQuery, useHashRoute } from './hooks';
-import { ToastProvider, useToast } from './ui';
+import { clearCachedQuery, useHashRoute } from '../hooks';
+import { ToastProvider, useToast } from '../ui';
 import { Header } from './components/Header';
 import { Navigation, SERVER_TAB_KEYS, TabKey } from './components/Navigation';
 import { OverviewTab } from './components/OverviewTab';
@@ -332,10 +332,12 @@ const DashboardContent: React.FC = () => {
   );
 };
 
-export const App: React.FC = () => {
+export const ServerApp: React.FC = () => {
   return (
     <ToastProvider>
       <DashboardContent />
     </ToastProvider>
   );
 };
+
+export default ServerApp;

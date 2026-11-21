@@ -5,29 +5,36 @@ import { resolve } from 'node:path';
 
 const rootDir = import.meta.dirname;
 const target = process.env.VITE_APP_TARGET === 'client' ? 'client' : 'server';
-const clientOutDir = resolve(rootDir, '../internal/webui/static');
+const entryHtml = target === 'client' ? 'client.html' : 'server.html';
+const outDir = resolve(rootDir, target === 'client' ? '../internal/webui/static' : '../internal/serverweb/static');
 
-// 将 client.html 在最终产物中重命名为 index.html，以兼容 http.FileServer("/")
-function renameClientEntryPlugin(): Plugin {
+// 统一将开发服务器 "/" 与构建产物的入口 HTML 映射为 "index.html"，以兼容 http.FileServer("/")
+function renameEntryHtmlPlugin(): Plugin {
   return {
-    name: 'singctl-rename-client-entry',
+    name: 'singctl-rename-entry-html',
     enforce: 'post',
+    configureServer(server) {
+      server.middlewares.use((req, _res, next) => {
+        if (req.url === '/' || req.url === '/index.html') {
+          req.url = '/' + entryHtml;
+        }
+        next();
+      });
+    },
     generateBundle(_options, bundle) {
-      if (target !== 'client') return;
-      const chunk = bundle['client.html'];
+      const chunk = bundle[entryHtml];
       if (chunk && chunk.type === 'asset') {
         this.emitFile({
           type: 'asset',
           fileName: 'index.html',
           source: chunk.source,
         });
-        delete bundle['client.html'];
+        delete bundle[entryHtml];
       }
     },
     closeBundle() {
-      if (target !== 'client') return;
-      const src = resolve(clientOutDir, 'client.html');
-      const dst = resolve(clientOutDir, 'index.html');
+      const src = resolve(outDir, entryHtml);
+      const dst = resolve(outDir, 'index.html');
       if (existsSync(src)) {
         renameSync(src, dst);
       }
@@ -36,13 +43,13 @@ function renameClientEntryPlugin(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [react(), renameClientEntryPlugin()],
+  plugins: [react(), renameEntryHtmlPlugin()],
   base: './', // CRITICAL: 全部静态资源使用相对路径，适配服务端 Caddy 随机前缀与客户端反代
   build: {
-    outDir: target === 'client' ? '../internal/webui/static' : '../internal/serverweb/static',
+    outDir,
     emptyOutDir: true,
     rollupOptions: {
-      input: resolve(rootDir, target === 'client' ? 'client.html' : 'index.html'),
+      input: resolve(rootDir, entryHtml),
     },
   },
   server: {
