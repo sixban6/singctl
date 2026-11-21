@@ -164,7 +164,7 @@ export const TailscalePage: React.FC<TailscalePageProps> = ({
   const [p2pSaving, setP2pSaving] = useState(false);
   const [pokingKey, setPokingKey] = useState('');
 
-  const [p2pEnabled, setP2pEnabled] = useState(() => Boolean(p2pReport?.config?.enabled));
+  const p2pLiveEnabled = Boolean(p2pReport?.config?.enabled);
   const [jitWindowSec, setJitWindowSec] = useState(() =>
     p2pReport?.config?.jit_window_sec && p2pReport.config.jit_window_sec > 0
       ? p2pReport.config.jit_window_sec
@@ -173,8 +173,13 @@ export const TailscalePage: React.FC<TailscalePageProps> = ({
   const [cooldownSec, setCooldownSec] = useState(() =>
     p2pReport?.config?.cooldown_sec && p2pReport.config.cooldown_sec > 0 ? p2pReport.config.cooldown_sec : 300,
   );
-  const [payloadFilter, setPayloadFilter] = useState(() => p2pReport?.config?.payload_filter !== false);
-  const [sandboxUjail, setSandboxUjail] = useState(() => Boolean(p2pReport?.config?.sandbox_ujail));
+  const [sandboxUjail, setSandboxUjail] = useState(() =>
+    p2pReport?.ujailAvailable
+      ? !p2pReport.config?.enabled
+        ? true
+        : Boolean(p2pReport.config?.sandbox_ujail)
+      : false,
+  );
   const [peerEdits, setPeerEdits] = useState<Record<string, EditableP2PPeer>>({});
 
   const [upgradeDrawerOpen, setUpgradeDrawerOpen] = useState(false);
@@ -269,11 +274,11 @@ export const TailscalePage: React.FC<TailscalePageProps> = ({
       if (updateCache) {
         setP2pReportData(rep);
       }
-      setP2pEnabled(Boolean(rep.config?.enabled));
       setJitWindowSec(rep.config?.jit_window_sec && rep.config.jit_window_sec > 0 ? rep.config.jit_window_sec : 5);
       setCooldownSec(rep.config?.cooldown_sec && rep.config.cooldown_sec > 0 ? rep.config.cooldown_sec : 300);
-      setPayloadFilter(rep.config?.payload_filter !== false);
-      setSandboxUjail(Boolean(rep.config?.sandbox_ujail));
+      setSandboxUjail(
+        rep.ujailAvailable ? (!rep.config?.enabled ? true : Boolean(rep.config?.sandbox_ujail)) : false,
+      );
 
       const nextEdits: Record<string, EditableP2PPeer> = {};
       for (const p of rep.peers || []) {
@@ -359,11 +364,11 @@ export const TailscalePage: React.FC<TailscalePageProps> = ({
         });
 
       const rep = await clientApi.saveTailscaleP2P({
-        enabled: p2pEnabled,
+        enabled: true,
         jit_window_sec: Math.min(10, Math.max(3, Number(jitWindowSec) || 5)),
         cooldown_sec: Math.min(3600, Math.max(30, Number(cooldownSec) || 300)),
-        payload_filter: payloadFilter,
-        sandbox_ujail: sandboxUjail,
+        payload_filter: true,
+        sandbox_ujail: Boolean(p2pReport?.ujailAvailable && sandboxUjail),
         peers: peersPayload,
       });
       p2pDirtyRef.current = false;
@@ -722,10 +727,10 @@ export const TailscalePage: React.FC<TailscalePageProps> = ({
         actions={
           <div className="flex items-center gap-2">
             {p2pReport && (
-              <Badge tone={p2pReport.openPinholes > 0 ? 'warn' : p2pEnabled ? 'ok' : 'neutral'} dot>
+              <Badge tone={p2pReport.openPinholes > 0 ? 'warn' : p2pLiveEnabled ? 'ok' : 'neutral'} dot>
                 {p2pReport.openPinholes > 0
                   ? `瞬时放行 ${p2pReport.openPinholes} 个 IP`
-                  : p2pEnabled
+                  : p2pLiveEnabled
                   ? '0 开放 · 零暴露'
                   : '未开启'}
               </Badge>
@@ -738,11 +743,19 @@ export const TailscalePage: React.FC<TailscalePageProps> = ({
         }
       >
         <div className="space-y-4">
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
-            <label className="flex items-center justify-between gap-3 p-3 rounded-xl border border-subtle bg-surface2 cursor-pointer">
-              <div>
-                <div className="font-semibold text-primary">启用防线守护</div>
-                <div className="text-[11px] text-secondary mt-0.5">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+            <div
+              className="flex items-center justify-between gap-3 p-3.5 rounded-xl border border-subtle bg-surface2 cursor-default"
+              title="核心防线默认强制开启，确保 UDP :41641 不长期裸露公网"
+            >
+              <div className="min-w-0">
+                <div className="font-semibold text-primary flex items-center gap-1.5 flex-wrap">
+                  <span>启用防线守护</span>
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--accent)]/15 text-[var(--accent)] font-medium">
+                    必选
+                  </span>
+                </div>
+                <div className="text-[11px] text-secondary mt-1 truncate">
                   {p2pReport?.fw4Available
                     ? p2pReport.runtime?.applyMode === 'nft_direct'
                       ? 'OpenWrt nftables 原子注入就绪'
@@ -752,15 +765,71 @@ export const TailscalePage: React.FC<TailscalePageProps> = ({
               </div>
               <input
                 type="checkbox"
-                checked={p2pEnabled}
+                checked
+                readOnly
+                tabIndex={-1}
+                aria-label="启用防线守护（必选）"
+                className="accent-[var(--accent)] w-4 h-4 shrink-0 pointer-events-none"
+              />
+            </div>
+
+            <div
+              className="flex items-center justify-between gap-3 p-3.5 rounded-xl border border-subtle bg-surface2 cursor-default"
+              title="核心安全拦截默认强制开启，仅放行 STUN / DISCO / WireGuard 合法载荷"
+            >
+              <div className="min-w-0">
+                <div className="font-semibold text-primary flex items-center gap-1.5 flex-wrap">
+                  <span>Layer 2 载荷魔法头过滤</span>
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--accent)]/15 text-[var(--accent)] font-medium">
+                    必选
+                  </span>
+                </div>
+                <div className="text-[11px] text-secondary mt-1 truncate">
+                  UDP :41641 仅放行 STUN / DISCO / WireGuard
+                </div>
+              </div>
+              <input
+                type="checkbox"
+                checked
+                readOnly
+                tabIndex={-1}
+                aria-label="Layer 2 载荷魔法头过滤（必选）"
+                className="accent-[var(--accent)] w-4 h-4 shrink-0 pointer-events-none"
+              />
+            </div>
+
+            <label
+              className={`flex items-center justify-between gap-3 p-3.5 rounded-xl border border-subtle bg-surface2 ${
+                p2pReport?.ujailAvailable ? 'cursor-pointer' : 'opacity-60 cursor-not-allowed'
+              }`}
+              title={p2pReport?.ujailAvailable ? '重启 tailscaled 进入 OpenWrt ujail 沙盒' : '当前环境无 /sbin/ujail'}
+            >
+              <div className="min-w-0">
+                <div className="font-semibold text-primary flex items-center gap-1.5 flex-wrap">
+                  <span>Layer 3 ujail 沙盒隔离</span>
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-surface1 text-secondary border border-subtle font-medium">
+                    {p2pReport?.ujailAvailable ? '默认开启 · 可取消' : '不可用'}
+                  </span>
+                </div>
+                <div className="text-[11px] text-secondary mt-1 truncate">
+                  {p2pReport?.ujailAvailable ? '裁剪 Capabilities 并隔离敏感配置目录' : '当前环境无 /sbin/ujail'}
+                </div>
+              </div>
+              <input
+                type="checkbox"
+                disabled={!p2pReport?.ujailAvailable}
+                checked={sandboxUjail}
                 onChange={(e) => {
                   p2pDirtyRef.current = true;
-                  setP2pEnabled(e.target.checked);
+                  setSandboxUjail(e.target.checked);
                 }}
+                aria-label="Layer 3 ujail 沙盒隔离"
                 className="accent-[var(--accent)] w-4 h-4 shrink-0"
               />
             </label>
+          </div>
 
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
             <div className="p-3 rounded-xl border border-subtle bg-surface2">
               <label className="block font-semibold text-primary mb-1">JIT 瞬时窗口（秒）</label>
               <input
@@ -789,39 +858,6 @@ export const TailscalePage: React.FC<TailscalePageProps> = ({
                 }}
                 className="w-full px-2.5 py-1.5 rounded-lg border border-subtle bg-surface1 font-mono text-xs text-primary focus:outline-none focus:border-[var(--accent)]"
               />
-            </div>
-
-            <div className="p-3 rounded-xl border border-subtle bg-surface2 space-y-2">
-              <label className="flex items-center justify-between gap-2 cursor-pointer">
-                <span className="font-semibold text-primary">Layer 2 载荷魔法头过滤</span>
-                <input
-                  type="checkbox"
-                  checked={payloadFilter}
-                  onChange={(e) => {
-                    p2pDirtyRef.current = true;
-                    setPayloadFilter(e.target.checked);
-                  }}
-                  className="accent-[var(--accent)] w-4 h-4"
-                />
-              </label>
-              <label
-                className={`flex items-center justify-between gap-2 ${
-                  p2pReport?.ujailAvailable ? 'cursor-pointer' : 'opacity-50 cursor-not-allowed'
-                }`}
-                title={p2pReport?.ujailAvailable ? '重启 tailscaled 进入 OpenWrt ujail 沙盒' : '当前环境无 /sbin/ujail'}
-              >
-                <span className="text-[11px] text-secondary">Layer 3 ujail 沙盒隔离（可选）</span>
-                <input
-                  type="checkbox"
-                  disabled={!p2pReport?.ujailAvailable}
-                  checked={sandboxUjail}
-                  onChange={(e) => {
-                    p2pDirtyRef.current = true;
-                    setSandboxUjail(e.target.checked);
-                  }}
-                  className="accent-[var(--accent)] w-3.5 h-3.5"
-                />
-              </label>
             </div>
           </div>
 
@@ -877,7 +913,7 @@ export const TailscalePage: React.FC<TailscalePageProps> = ({
                       <div className="flex items-center gap-2">
                         <Button
                           size="sm"
-                          disabled={!p2pEnabled || !ed.configured || !ed.jitEnabled || !p.online || pokingKey === k}
+                          disabled={!p2pLiveEnabled || !ed.configured || !ed.jitEnabled || !p.online || pokingKey === k}
                           onClick={() => handlePokePeer(p)}
                         >
                           <Zap className="w-3.5 h-3.5" />

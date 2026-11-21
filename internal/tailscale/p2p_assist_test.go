@@ -3,6 +3,7 @@ package tailscale
 import (
 	"context"
 	"net/netip"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -12,11 +13,12 @@ import (
 )
 
 type fakeLocalAPI struct {
-	mu           sync.Mutex
-	statusFn     func(call int) (*StatusSnapshot, error)
-	netMap       *NetMapSnapshot
-	pingCalls    []string
-	statusCalls  int
+	mu          sync.Mutex
+	statusFn    func(call int) (*StatusSnapshot, error)
+	pingFn      func(ctx context.Context, peerTSIP string) (*PingResult, error)
+	netMap      *NetMapSnapshot
+	pingCalls   []string
+	statusCalls int
 }
 
 func (f *fakeLocalAPI) Status(ctx context.Context) (*StatusSnapshot, error) {
@@ -40,7 +42,11 @@ func (f *fakeLocalAPI) NetMap(ctx context.Context) (*NetMapSnapshot, error) {
 func (f *fakeLocalAPI) PingDisco(ctx context.Context, peerTSIP string) (*PingResult, error) {
 	f.mu.Lock()
 	f.pingCalls = append(f.pingCalls, peerTSIP)
+	fn := f.pingFn
 	f.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, peerTSIP)
+	}
 	return &PingResult{IP: peerTSIP, DERPRegionCode: "sfo", LatencySeconds: 0.03}, nil
 }
 
@@ -110,12 +116,16 @@ func newRecordedFW4(t *testing.T) (*FW4Manager, *recordedNFT) {
 			if name == "nft" && len(args) >= 5 && args[0] == "add" && args[1] == "element" && args[4] == setTSJITAllow4 {
 				// args[5] = "{ 198.51.100.10 timeout 5s }"
 				rec.openV4 = append(rec.openV4, append([]string{}, args...))
-				rec.liveOpenSet[args[5]] = true
+				if f := strings.Fields(strings.Trim(args[5], "{} ")); len(f) > 0 {
+					rec.liveOpenSet[f[0]] = true
+				}
 				return nil, nil
 			}
 			if name == "nft" && len(args) >= 5 && args[0] == "delete" && args[1] == "element" && args[4] == setTSJITAllow4 {
 				rec.closeV4 = append(rec.closeV4, append([]string{}, args...))
-				delete(rec.liveOpenSet, args[5])
+				if f := strings.Fields(strings.Trim(args[5], "{} ")); len(f) > 0 {
+					delete(rec.liveOpenSet, f[0])
+				}
 				return nil, nil
 			}
 			if name == "nft" && len(args) >= 4 && args[0] == "-j" && args[1] == "list" && args[2] == "set" {
@@ -708,5 +718,102 @@ func TestP2PAssistController_AutoJITTrafficThreshold(t *testing.T) {
 	res, err := ctrl.PokePeer(ctx, cfg, "p1")
 	if err != nil || res == nil || res.CandidateCount != 1 {
 		t.Fatalf("expected manual PokePeer to succeed regardless of traffic threshold, got res=%+v err=%v", res, err)
+	}
+}
+
+func TestP2PAssist_AsyncDiscoAndPostCloseGraceDetectsDirect(t *testing.T) {
+	ctx := t.Context()
+	clk := newFakeClock()
+	startTime := clk.Now()
+	fw4, rec := newRecordedFW4(t)
+
+	var pingStarted atomic.Int32
+	var pingExited atomic.Int32
+
+	api := &fakeLocalAPI{
+		statusFn: func(_ int) (*StatusSnapshot, error) {
+			rec.mu.Lock()
+			closedCount := len(rec.closeV4)
+			stillOpen := len(rec.liveOpenSet)
+			rec.mu.Unlock()
+
+			// While JIT pinhole is open (0..3000ms), peer stays on DERP;
+			// only AFTER ClosePinhole has run cleanly and at least 600ms of
+			// post-close grace has elapsed does conntrack report CurAddr.
+			elapsed := clk.Now().Sub(startTime)
+			curAddr := ""
+			relay := "sfo"
+			if closedCount == 1 && stillOpen == 0 && elapsed >= 3600*time.Millisecond {
+				curAddr = "198.51.100.55:41641"
+				relay = ""
+			}
+			return &StatusSnapshot{
+				BackendState: "Running",
+				Self:         PeerStatus{ID: "nSelf", ShortName: "n4120"},
+				Peers: []PeerStatus{
+					{
+						ID:           "pLate",
+						ShortName:    "ax3000t",
+						TailscaleIPs: []string{"100.64.200.8"},
+						Online:       true,
+						Active:       true,
+						CurAddr:      curAddr,
+						Relay:        relay,
+					},
+				},
+			}, nil
+		},
+		pingFn: func(pCtx context.Context, _ string) (*PingResult, error) {
+			pingStarted.Add(1)
+			defer pingExited.Add(1)
+			<-pCtx.Done()
+			return nil, pCtx.Err()
+		},
+		netMap: &NetMapSnapshot{
+			PeerEndpoints: map[string][]string{"pLate": {"198.51.100.55:41641"}},
+		},
+	}
+
+	ctrl := &P2PAssistController{
+		LocalAPI:       api,
+		FW4:            fw4,
+		Now:            clk.Now,
+		Sleep:          clk.Sleep,
+		DefaultLANCIDR: func() string { return "192.168.180.0/24" },
+		HostSelfIPs:    func() []netip.Addr { return []netip.Addr{netip.MustParseAddr("203.0.113.1")} },
+	}
+	cfg := config.TailscaleP2PAssistConfig{
+		Enabled:      true,
+		JITWindowSec: 3,
+		Peers: []config.TailscaleP2PPeerConfig{
+			{ID: "pLate", Name: "ax3000t", JITEnabled: true, AccessMode: config.TailscaleAccessOutboundOnly},
+		},
+	}
+
+	wallStart := time.Now()
+	res, err := ctrl.PokePeer(ctx, cfg, "pLate")
+	wallElapsed := time.Since(wallStart)
+	if err != nil {
+		t.Fatalf("PokePeer returned error: %v", err)
+	}
+	if wallElapsed > time.Second {
+		t.Fatalf("blocking PingDisco delayed PokePeer wall time (%v)", wallElapsed)
+	}
+	if res == nil || !res.Direct || res.CurAddr != "198.51.100.55:41641" {
+		t.Fatalf("expected post-close grace to detect Direct upgrade, got %+v", res)
+	}
+	if res.PinholeMs != 3000 {
+		t.Fatalf("expected strict 3000ms pinhole open duration (async DISCO must not extend pinhole), got %dms", res.PinholeMs)
+	}
+	if !strings.Contains(res.Message, "conntrack") {
+		t.Fatalf("expected conntrack grace message, got %q", res.Message)
+	}
+	if pingStarted.Load() != 3 || pingExited.Load() != 3 {
+		t.Fatalf("expected all 3 async DISCO goroutines started & cleanly cancelled, started=%d exited=%d", pingStarted.Load(), pingExited.Load())
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.openV4) != 1 || len(rec.closeV4) != 1 || len(rec.liveOpenSet) != 0 {
+		t.Fatalf("expected strict 1 open / 1 close / 0 live pinholes, got open=%d close=%d live=%d", len(rec.openV4), len(rec.closeV4), len(rec.liveOpenSet))
 	}
 }

@@ -158,9 +158,9 @@ tailscale:
 		t.Fatalf("GET /api/tailscale/p2p status=%d body=%s", recGet.Code, recGet.Body.String())
 	}
 	var getResp struct {
-		Supported    bool   `json:"supported"`
-		FW4Available bool   `json:"fw4Available"`
-		OpenPinholes int    `json:"openPinholes"`
+		Supported    bool `json:"supported"`
+		FW4Available bool `json:"fw4Available"`
+		OpenPinholes int  `json:"openPinholes"`
 		Peers        []struct {
 			ID                   string `json:"id"`
 			ShortName            string `json:"shortName"`
@@ -246,5 +246,22 @@ tailscale:
 	finalCfg, _ := config.Load(cfgPath)
 	if !finalCfg.Tailscale.P2PAssist.Enabled || len(finalCfg.Tailscale.P2PAssist.Peers) != 1 {
 		t.Fatalf("expected PUT /api/config to preserve tailscale.p2p_assist, got %+v", finalCfg.Tailscale.P2PAssist)
+	}
+
+	// 7. Required security toggles (enabled & payload_filter) stay enforced while sandbox_ujail can be disabled
+	enforcedBody := `{"enabled":false,"payload_filter":false,"sandbox_ujail":false,"jit_window_sec":5,"cooldown_sec":300,"peers":[]}`
+	reqEnf := httptest.NewRequest(http.MethodPut, "/api/tailscale/p2p", bytes.NewBufferString(enforcedBody))
+	reqEnf.Header.Set("Content-Type", "application/json")
+	recEnf := httptest.NewRecorder()
+	srv.Mux.ServeHTTP(recEnf, reqEnf)
+	if recEnf.Code != http.StatusOK {
+		t.Fatalf("PUT /api/tailscale/p2p status=%d body=%s", recEnf.Code, recEnf.Body.String())
+	}
+	enfCfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("reload config after security enforcement: %v", err)
+	}
+	if !enfCfg.Tailscale.P2PAssist.Enabled || !enfCfg.Tailscale.P2PAssist.EffectivePayloadFilter() || enfCfg.Tailscale.P2PAssist.SandboxUjail {
+		t.Fatalf("expected enabled=true, payload_filter=true enforced and sandbox_ujail=false honored, got %+v", enfCfg.Tailscale.P2PAssist)
 	}
 }

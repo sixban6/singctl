@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -976,11 +977,19 @@ func (s *Server) handleCache(w http.ResponseWriter, r *http.Request) {
 
 // ───────────────────────── 日志 ─────────────────────────
 
+func resolveClientLogTarget(name string) (canonicalName, path string, eventsOnly bool) {
+	switch name {
+	case "watchdog", "events":
+		return "events", daemon.GetDaemonLogPath(), true
+	case "webui":
+		return "webui", WebLogPath(), false
+	default:
+		return "daemon", daemon.GetDaemonLogPath(), false
+	}
+}
+
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("name")
-	if name == "" {
-		name = "daemon"
-	}
 	tail := 200
 	if v := r.URL.Query().Get("tail"); v != "" {
 		if n, err := fmt.Sscanf(v, "%d", &tail); err != nil || n != 1 || tail <= 0 || tail > 5000 {
@@ -988,19 +997,7 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var path string
-	eventsOnly := false
-	switch name {
-	case "watchdog", "events":
-		name = "events"
-		path = daemon.GetDaemonLogPath()
-		eventsOnly = true
-	case "webui":
-		path = WebLogPath()
-	default:
-		name = "daemon"
-		path = daemon.GetDaemonLogPath()
-	}
+	name, path, eventsOnly := resolveClientLogTarget(name)
 
 	content := ""
 	if data, err := os.ReadFile(path); err == nil {
@@ -1031,8 +1028,13 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		if len(lines) > tail {
 			lines = lines[len(lines)-tail:]
 		}
-		if len(lines) == 0 && eventsOnly {
-			content = "(暂无看门狗/容灾/热同步事件记录，运行平稳)"
+		slices.Reverse(lines)
+		if len(lines) == 0 {
+			if eventsOnly {
+				content = "(暂无看门狗/容灾/热同步事件记录，运行平稳)"
+			} else {
+				content = "(暂无日志记录)"
+			}
 		} else {
 			content = strings.Join(lines, "\n")
 		}
@@ -1045,5 +1047,32 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		"path":    path,
 		"tail":    tail,
 		"content": content,
+	})
+}
+
+func (s *Server) handleLogsClear(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name string `json:"name"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&body)
+	}
+	name := strings.TrimSpace(body.Name)
+	if name == "" {
+		name = strings.TrimSpace(r.URL.Query().Get("name"))
+	}
+
+	canonicalName, path, _ := resolveClientLogTarget(name)
+	// 就地 truncate 保持 inode 不变，确保持续 O_APPEND 写入的 dm/web 守护进程无缝从 0 偏移续写。
+	if err := os.Truncate(path, 0); err != nil && !os.IsNotExist(err) {
+		writeJSONError(w, http.StatusInternalServerError, "清空日志失败: "+err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"name":    canonicalName,
+		"path":    path,
+		"message": "日志已清空",
 	})
 }

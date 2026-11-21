@@ -999,6 +999,84 @@ func TestWatchdogWebAPI_GetPutToggleAndLogsFilter(t *testing.T) {
 			t.Fatalf("unexpected events log output: %q", out.Content)
 		}
 	}
+
+	// 5. GET /api/logs returns newest lines first, and POST /api/logs/clear truncates daemon & webui logs in place
+	{
+		origWebLog := webui.WebLogPathOverride
+		webLogPath := filepath.Join(tmpDir, "webui.log")
+		webui.WebLogPathOverride = webLogPath
+		t.Cleanup(func() { webui.WebLogPathOverride = origWebLog })
+
+		orderedLog := strings.Join([]string{
+			"2026-11-21 15:00:00 [INFO] older entry",
+			"2026-11-21 15:05:00 [WARN] middle entry",
+			"2026-11-21 15:10:00 [ERROR] newest entry",
+		}, "\n") + "\n"
+		if err := os.WriteFile(daemon.GetDaemonLogPath(), []byte(orderedLog), 0600); err != nil {
+			t.Fatal(err)
+		}
+
+		reqRev := httptest.NewRequest(http.MethodGet, "/api/logs?name=daemon&tail=100", nil)
+		recRev := httptest.NewRecorder()
+		srv.Mux.ServeHTTP(recRev, reqRev)
+		if recRev.Code != http.StatusOK {
+			t.Fatalf("GET /api/logs?name=daemon failed: %d", recRev.Code)
+		}
+		var revOut struct {
+			Content string `json:"content"`
+		}
+		if err := json.Unmarshal(recRev.Body.Bytes(), &revOut); err != nil {
+			t.Fatal(err)
+		}
+		idxNewest := strings.Index(revOut.Content, "newest entry")
+		idxMiddle := strings.Index(revOut.Content, "middle entry")
+		idxOlder := strings.Index(revOut.Content, "older entry")
+		if idxNewest < 0 || idxMiddle <= idxNewest || idxOlder <= idxMiddle {
+			t.Fatalf("expected reverse chronological order (newest first), got:\n%s", revOut.Content)
+		}
+
+		reqClear := httptest.NewRequest(http.MethodPost, "/api/logs/clear", strings.NewReader(`{"name":"daemon"}`))
+		reqClear.Header.Set("Content-Type", "application/json")
+		recClear := httptest.NewRecorder()
+		srv.Mux.ServeHTTP(recClear, reqClear)
+		if recClear.Code != http.StatusOK {
+			t.Fatalf("POST /api/logs/clear daemon failed: %d %s", recClear.Code, recClear.Body.String())
+		}
+		info, err := os.Stat(daemon.GetDaemonLogPath())
+		if err != nil || info.Size() != 0 {
+			t.Fatalf("expected truncated 0-byte daemon log file, stat=%v size=%d", err, func() int64 {
+				if info != nil {
+					return info.Size()
+				}
+				return -1
+			}())
+		}
+
+		reqAfter := httptest.NewRequest(http.MethodGet, "/api/logs?name=daemon&tail=100", nil)
+		recAfter := httptest.NewRecorder()
+		srv.Mux.ServeHTTP(recAfter, reqAfter)
+		var afterOut struct {
+			Content string `json:"content"`
+		}
+		_ = json.Unmarshal(recAfter.Body.Bytes(), &afterOut)
+		if afterOut.Content != "(暂无日志记录)" {
+			t.Fatalf("expected empty placeholder after daemon clear, got %q", afterOut.Content)
+		}
+
+		if err := os.WriteFile(webLogPath, []byte("2026-11-21 15:11:00 [INFO] webui line\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		reqClearWeb := httptest.NewRequest(http.MethodPost, "/api/logs/clear", strings.NewReader(`{"name":"webui"}`))
+		reqClearWeb.Header.Set("Content-Type", "application/json")
+		recClearWeb := httptest.NewRecorder()
+		srv.Mux.ServeHTTP(recClearWeb, reqClearWeb)
+		if recClearWeb.Code != http.StatusOK {
+			t.Fatalf("POST /api/logs/clear webui failed: %d %s", recClearWeb.Code, recClearWeb.Body.String())
+		}
+		if wInfo, wErr := os.Stat(webLogPath); wErr != nil || wInfo.Size() != 0 {
+			t.Fatalf("expected truncated 0-byte webui log file, stat=%v", wErr)
+		}
+	}
 }
 
 func TestWebStatePermissionsAndMetadata(t *testing.T) {

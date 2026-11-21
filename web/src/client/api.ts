@@ -285,6 +285,11 @@ export const clientApi = {
   getCache: () => request<CacheResponse>('/api/cache'),
   getLogs: (name: string, tail: number) =>
     request<ClientLogsResponse>(`/api/logs?name=${encodeURIComponent(name)}&tail=${tail}`),
+  clearLogs: (name: string) =>
+    request<{ ok: boolean; name: string; path: string; message: string }>('/api/logs/clear', {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    }),
   getIOSUrl: () => request<{ url: string; importUrl?: string }>('/api/gen/ios/url'),
   getSessionUrl: () => request<{ url: string; token: string }>('/api/session/url'),
   logout: async () => {

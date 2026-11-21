@@ -336,7 +336,7 @@ func (s *Server) handleTailscaleP2PPut(w http.ResponseWriter, r *http.Request) {
 		appliedLive = true
 		applyMode = snap.ApplyMode
 
-		if prevP2P.SandboxUjail != normalized.SandboxUjail {
+		if prevP2P.SandboxUjail != normalized.SandboxUjail || (normalized.SandboxUjail && s.opts.TailscaleP2PForTest == nil) {
 			var ujailErr error
 			if s.opts.TailscaleP2PForTest != nil && s.opts.TailscaleP2PForTest.UjailApply != nil {
 				_, ujailErr = s.opts.TailscaleP2PForTest.UjailApply(ctx, normalized.SandboxUjail)
@@ -418,17 +418,14 @@ func (s *Server) handleTailscaleP2PPokePost(w http.ResponseWriter, r *http.Reque
 }
 
 func normalizeAndValidateP2PAssistConfig(raw config.TailscaleP2PAssistConfig) (config.TailscaleP2PAssistConfig, error) {
+	pf := true
 	out := config.TailscaleP2PAssistConfig{
-		Enabled:       raw.Enabled,
+		Enabled:       true,
 		JITWindowSec:  min(max(3, cmp.Or(raw.JITWindowSec, 5)), 10),
 		CooldownSec:   min(max(30, cmp.Or(raw.CooldownSec, 300)), 3600),
 		SandboxUjail:  raw.SandboxUjail,
 		ListenPort:    raw.EffectiveListenPort(),
-		PayloadFilter: raw.PayloadFilter,
-	}
-	if out.PayloadFilter == nil {
-		pf := true
-		out.PayloadFilter = &pf
+		PayloadFilter: &pf,
 	}
 
 	seen := make(map[string]struct{}, len(raw.Peers))
