@@ -19,6 +19,7 @@ import (
 	"singctl/internal/constant"
 	"singctl/internal/deploy"
 	"singctl/internal/fleet"
+	"singctl/internal/platform/servicemgr"
 	"singctl/internal/telemetry"
 )
 
@@ -355,7 +356,7 @@ func ExecuteLocalWarpCLI(ctx context.Context, subcommand string, payload []byte,
 				return nil, fmt.Errorf("启用实时流量遥测失败: %w", err)
 			}
 			if changed {
-				if runErr := runSystemCmdTimeout(defaultServerActionTimeout, "systemctl", "restart", "sing-box"); runErr != nil {
+				if runErr := servicemgr.NewSystemd(defaultServiceCmdRunner{}).Restart(ctx, "sing-box"); runErr != nil {
 					return nil, fmt.Errorf("已写入遥测配置，但重启 sing-box 失败: %w", runErr)
 				}
 				time.Sleep(350 * time.Millisecond)

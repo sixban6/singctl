@@ -2,9 +2,9 @@ package cmd
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
+	"singctl/internal/component"
 	"singctl/internal/config"
 	"singctl/internal/deploy"
 	"singctl/internal/doctor"
@@ -82,32 +82,18 @@ func newInstallServerCmd(configPath, version string) *cobra.Command {
 				return nil
 			}
 
-			switch args[0] {
-			case "common":
+			if args[0] == "common" {
 				return deploy.DeployCommonWithConfig(cfg)
-			case "caddy":
-				return deploy.DeployCaddy(cfg)
-			case "singbox":
-				sbs, err := deploy.NewSingBoxServer(cfg)
-				if err != nil {
-					return err
-				}
-				_ = sbs.LoadExistingCredentials()
-				if err := sbs.DeploySingbox(); err != nil {
-					return err
-				}
-				if _, err := os.Stat("/etc/sub-store"); err == nil {
-					sbt := deploy.NewSubstore(cfg, "")
-					if err := sbt.UpdateSubstoreConfig(sbs); err != nil {
-						logger.Warn("SubHub config sync failed (non-fatal): %v", err)
-					}
-				}
-				return nil
-			case "warp":
-				return deploy.DeployWarp()
-			default:
+			}
+			comp, resErr := deploy.ServerRegistry().Resolve(args[0])
+			if resErr != nil {
 				return fmt.Errorf("unknown target: %s (must be common, caddy, singbox, or warp)", args[0])
 			}
+			life, ok := comp.(component.ServerLifecycle)
+			if !ok {
+				return fmt.Errorf("unknown target: %s (must be common, caddy, singbox, or warp)", args[0])
+			}
+			return life.DeployServer(cfg)
 		},
 	}
 
@@ -140,16 +126,15 @@ func newUninstallServerCmd() *cobra.Command {
 			}
 
 			target := args[0]
-			switch target {
-			case "caddy":
-				return deploy.UninstallCaddy()
-			case "singbox":
-				return deploy.UninstallSingbox()
-			case "warp":
-				return deploy.UninstallWarp()
-			default:
+			comp, resErr := deploy.ServerRegistry().Resolve(target)
+			if resErr != nil {
 				return fmt.Errorf("unknown target: %s (must be caddy, singbox, or warp)", target)
 			}
+			life, ok := comp.(component.ServerLifecycle)
+			if !ok {
+				return fmt.Errorf("unknown target: %s (must be caddy, singbox, or warp)", target)
+			}
+			return life.UninstallServer()
 		},
 	}
 	return cmd
