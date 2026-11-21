@@ -2,204 +2,71 @@
 
 # ⚡ SingCtl
 
-**新一代极简、硬核、企业级跨地域云节点与客户端网络运维中枢**
-
-一条命令打通跨地域云主机边缘节点与 Mac / Linux / Windows 客户端全生命周期运维
+**纯 Go 单二进制 · 云端节点编排与本地透明网关一体化运维工具**
 
 [![Release](https://img.shields.io/github/v/release/sixban6/singctl?style=flat-square&color=22c55e)](https://github.com/sixban6/singctl/releases)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/sixban6/singctl?style=flat-square)](https://golang.org/)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-blue?style=flat-square)](https://github.com/sixban6/singctl)
 [![License](https://img.shields.io/github/license/sixban6/singctl?style=flat-square)](LICENSE)
 
-[快速上手](#-1-分钟极速上手) • [核心特性](#-为什么选择-singctl) • [控制台特性](#-专属隐蔽控制台与健康体检) • [文档导航](#-全功能深入文档导航) • [合规免责](#-合规与免责声明)
+[快速安装](#-快速安装) • [日常使用](#️-日常使用) • [文档导航](#-文档导航) • [合规与许可](#️-合规与许可)
 
 </div>
 
 ---
 
-## 💡 为什么选择 SingCtl？
+## ✨ 核心特性
 
-`SingCtl` 由纯 Go 单二进制打造（零 Docker 依赖，常驻内存仅 **10~20MB**），用**同一套工具**同时解决 **云端 VPS 节点编排** 与 **本地软路由/桌面透明网关** 的全生命周期运维：
-
-| 场景定位 | 核心能力亮点 |
-| :--- | :--- |
-| **🏠 客户端模式**<br>*(OpenWrt / macOS / Linux / Win)* | • **主路由 / 旁路由双模式透明网关**：默认主路由模式，安装向导支持一键切换**单臂旁路由模式**（自动探测主路由 IP、防自环校验、TCP MSS 钳制与防非对称丢包），内置 46 个离线规则集快照与本地防劫持 **AdGuard Home DNS**。<br>• **`:8090` 可视化控制台**：浏览器一键完成订阅拉取、节点切换、主/旁路由模式热切换、移动端扫描导入与版本热升级。<br>• **局域网安全/隐私双轴审计**：实时识别内网设备异常外联与电视/IoT 隐私遥测（旁路由模式下完整保留终端真实局域网 IP），支持域名/IP/规则集 **Sing-Box + DNS 双层一键拉黑**。 |
-| **☁️ 服务端模式**<br>*(单台 VPS / 全球多节点舰队)* | • **四核合一零特征隐蔽**：`sing-box + Caddy + SubHub + WARP` 一键协同，443 动态伪装站点 + 16 位隐蔽后台路径防探测。<br>• **60s 裸机舰队扩容 (`singctl fl new`)**：新买 VPS 只需给 **IP + 初始密码**，主控自动配 DNS、改 2222 端口免密并汇入**唯一总订阅**。<br>• **全自动巡检与漏洞自愈**：内置 `doctor` 全链路体检、三网回程路由画像（CN2/9929/CMI）与凌晨窗口零中断安全自愈。 |
+- **极简零依赖**：纯 Go 单二进制交付，无 Docker / 数据库外部依赖，常驻内存仅约 **10~15 MB**。
+- **🏠 本地透明网关（OpenWrt / Linux / macOS / Win）**：支持主路由与单臂旁路由模式，内置 46 个离线规则集、防劫持 AdGuard Home DNS、Tailscale 精简合体组网、局域网安全/隐私审计与 `:8090` Web 面板。
+- **☁️ 云端节点与舰队（VPS）**：一键协同部署 `sing-box + Caddy + SubHub + WARP`（443 动态伪装 + 隐蔽后台），支持 60 秒新机开荒自动汇入唯一总订阅，自带全链路体检与凌晨无感自愈。
 
 ---
 
-## 🚀 1 分钟极速上手
+## 🚀 快速安装
 
-`SingCtl` 采用全栈单二进制架构：**软路由与云端 VPS 共用同一条安装命令，无需人工区分模式**。脚本会在本地零延迟识别当前机器环境，您只需**一路按回车**即可完成全部部署（交互界面同时保留单键切换与 `--client` / `--server` / `-y` 参数兜底）：
-
-| 运行环境 | 脚本自动识别结果 | 回车后自动完成流程 |
-| :--- | :--- | :--- |
-| **🏠 OpenWrt / 局域网网关 / macOS**<br>*(含 Armbian / PVE / Linux 软路由)* | 自动判定为 **客户端模式**（并按网卡拓扑自动推荐 **主路由** / **旁路由**） | 一路回车 → 自动装齐 46 个离线规则集、防劫持 AdGuard DNS、sing-box 与 `:8090` Web 控制台 |
-| **☁️ 云端 Linux VPS**<br>*(含公网 IP 裸机与 AWS / Oracle / 阿里云等 VPC 内网云机)* | 自动判定为 **服务端模式**（已有部署自动继承历史角色防串台） | 回车确认 → 输入解析域名 + Cloudflare Token 后一路回车 → 四核自动部署并输出后台与总订阅 |
+**客户端与服务端共用同一条安装命令**，脚本自动探测当前环境与网络拓扑（软路由/桌面 → 客户端；云端 VPS → 服务端），首次安装全程按 **回车** 即可：
 
 ```bash
-# 国内裸机 / 软路由首次安装（多镜像加速，零代理直装，一路回车到底）
+# 海外 VPS / 已有代理环境（GitHub 官方直连）
+curl -fsSL https://raw.githubusercontent.com/sixban6/singctl/main/install.sh | sh
+
+# 国内软路由 / 裸机首次直装（镜像加速）
 curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/sixban6/singctl/main/install.sh | sh
-
-# 海外 VPS / 已有代理环境（GitHub 官方直连，一路回车到底）
-curl -fsSL https://raw.githubusercontent.com/sixban6/singctl/main/install.sh | sh
 ```
 
 ---
 
-### 一、客户端部署（OpenWrt / Linux 软路由 / macOS / Windows）
+## 🖥️ 日常使用
 
-#### 1. OpenWrt / Debian / Ubuntu 软路由透明网关（推荐）
-
-执行上方一键命令后**全程回车**，即可自动完成 **46 个离线规则集初始化 + 本地防劫持 AdGuard Home DNS + `sing-box` 内核 + `:8090` 本地 Web 管理后台** 部署（单网口挂在主路由下时会自动推荐 **单臂旁路由模式** 并预填上级主路由 IP）：
+- **客户端管理**：浏览器访问 **`http://<设备IP>:8090`**，即可一站完成订阅拉取、节点切换、主/旁路由与双栈切换、移动端扫码导出、局域网审计及在线自更新。
+- **单台 / 首台主控 VPS**：安装按提示输入解析域名与 Cloudflare API Token，部署完毕后终端直接输出 **专属 HTTPS 隐蔽后台地址** 与 **唯一总订阅链接**。
+- **第 2~N 台新 VPS 扩容**：**无需登录新机**，直接在首台主控 VPS 运行 `singctl fl new`（或点击主控 Web 后台），输入新机 IP 与初始密码即可自动配解析、加固 SSH 并并入同一条总订阅。
 
 ```bash
-# 如需无人值守全自动安装（零交互确认）
-curl -fsSL https://raw.githubusercontent.com/sixban6/singctl/main/install.sh | sh -s -- -y
-
-# 如需显式强制指定单臂旁路由及上级主路由 IP
-curl -fsSL https://raw.githubusercontent.com/sixban6/singctl/main/install.sh | sh -s -- --client --side-router --main-router-ip 192.168.1.1
-```
-
-#### 2. macOS 客户端
-
-```bash
-brew tap sixban6/singctl
-brew install sixban6/singctl/singctl
-```
-
-#### 3. Windows 11 客户端（管理员 PowerShell）
-
-```powershell
-powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "[System.IO.File]::WriteAllText('install.ps1', (irm https://raw.githubusercontent.com/sixban6/singctl/main/install.ps1 -UseBasicParsing), [System.Text.Encoding]::UTF8); & .\install.ps1"
-```
-
-#### 4. 客户端常用操作与 `:8090` Web 控制台
-
-安装完成后，可直接打开浏览器访问 **`http://<软路由或本机IP>:8090`**，在图形界面完成**订阅配置、节点切换、主/旁路由与 IPv6 智能双栈切换、iOS 扫码导出、局域网设备安全/隐私审计、规则集黑名单管理与一键自更新**；也可使用命令行：
-
-```bash
-singctl w status     # 查看本地 :8090 Web 管理后台运行状态与访问地址
-singctl dns status   # 查看本地防劫持 AdGuard Home 运行状态、面板地址与登录密码
-singctl sb gen       # 拉取订阅并生成客户端配置 (内置离线规则集自愈 + 自动对接 dns_local)
-singctl sb start     # 启动客户端路由引擎与看门狗守护进程
-singctl sb stop      # 停止客户端路由引擎与看门狗守护进程
-singctl u s          # 一键升级 SingCtl 至最新版并自动热重启 WebUI
+singctl u s            # 一键平滑自更新至最新版（自动校验 SHA256 并热重启服务）
+singctl sb start       # 启动本地透明网关核心与守护进程
+singctl w status       # 查看客户端 :8090 WebUI 地址与状态
+singctl sr web status  # 查看服务端专属 HTTPS 隐蔽后台地址与凭据
+singctl sr doctor      # 执行服务端端到端健康体检与出口解锁画像
+singctl fl new         # 在主控 VPS 上交互式 60 秒纳管新节点
 ```
 
 ---
 
-### 二、服务端部署（云端 VPS 节点与多机舰队）
+## 📚 文档导航
 
-> [!TIP]
-> - **只有 1 台 VPS**：直接按下方 **「1. 单节点 / 首台主控部署」** 跑完即可，全部功能一步到位。
-> - **有 2 台及以上 VPS**：只在**第 1 台主控机（Master）**跑一次 `install.sh`；买第 2~N 台新机时**无需登录新机**，直接按 **「2. 多节点舰队扩容」** 在主控机一条命令远程开荒，新节点会自动汇入同一条总订阅链接！
-
-#### 1. 单节点 VPS / 舰队首台主控部署（Master）
-
-登录你的 VPS（支持 Debian / Ubuntu / CentOS，无论公网 IP 直连还是 VPC 内网网卡，脚本均自动识别为 **☁️ 服务端模式**）：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/sixban6/singctl/main/install.sh | sh
-```
-
-> **全流程一气呵成**（完整图文排障见 [👉 单节点实战全解](docs/guide-single-node.md)）：
-> 1. 直接**回车**确认自动识别的服务端模式；
-> 2. 填写解析域名与 Cloudflare API Token，其余可选项均**回车默认**；
-> 3. 回车确认执行四核（`sing-box + Caddy + SubHub + WARP`）全量部署，终端直接输出 **专属 HTTPS 隐蔽管理后台入口** 与 **唯一总订阅链接**。
-
-#### 2. 多节点舰队扩容（第 2~N 台新 VPS 零配置开荒）
-
-新买第 2、第 3 台空白裸机 VPS 时，**无需手动登录新机，也无需提前去 Cloudflare 配解析**，直接在**第 1 台主控 VPS** 上提供**新机 IP 与初始密码**即可一键纳管（或在主控 Web 后台点击「新机零配置开荒」）：
-
-```bash
-# 方式 A：零参数交互向导（最推荐：密码免回显，回车前自动预览分配的地区代号与域名）
-singctl fl new
-
-# 方式 B：极简一行非交互命令（自动探测国家分配代号、自动创建 .cdn 灰云 DNS、自动加固并汇入总订阅）
-singctl fl new 203.0.113.10 --password '<新机root初始密码>'
-
-# 方式 C：共享 IP 的 NAT 小鸡一行开荒（指定商家分配的 SSH 端口及 HY2 / VLESS 节点端口）
-singctl fl new 203.0.113.10:15500 --hy2-port 11501 --vless-port 11502 --password '<新机root初始密码>'
-```
-
-> 详见 [👉 多节点舰队全解](docs/guide-multi-node-fleet.md)。
+| 分类 | 覆盖内容 | 深入指南 |
+| :--- | :--- | :--- |
+| **🚀 实战闭环** | 单节点部署排障、多节点舰队开荒 (`fleet.yaml` / 自动汇总订阅) | [单节点实战](docs/guide-single-node.md) · [多节点舰队](docs/guide-multi-node-fleet.md) |
+| **☁️ 服务端运维** | 四核组件运维、`2222` 防锁死 SSH 加固、mTLS 隐蔽 Web 终端 | [服务端指南](docs/server.md) · [SSH 加固](docs/ssh.md) · [隐蔽终端](docs/terminal.md) |
+| **🏠 客户端网关** | 透明路由与分流规则、`:8090` WebUI、本地防劫持 DNS、Tailscale 组网 | [客户端路由](docs/client.md) · [本地 WebUI](docs/webui.md) · [防劫持 DNS](docs/dns.md) · [Tailscale](docs/tailscale.md) |
+| **🩺 诊断与系统** | 回程骨干探测 (CN2/9929/CMI)、健壮性评估、看门狗、防火墙与工具集 | [网络诊断](docs/net.md) · [健壮性评估](docs/gfw.md) · [看门狗](docs/daemon.md) · [防火墙](docs/firewall.md) · [工具集](docs/utils.md) |
 
 ---
 
-## 🖥️ 专属隐蔽控制台与健康体检
+## ⚖️ 合规与许可
 
-SingCtl 服务端自带现代化 Web 控制台，基于 **Session Cookie** 严苛会话验证（浏览器标签关闭即自动注销），公网无裸露端口，流量均经由 Caddy HTTPS 网关进行隐蔽路径转发：
-
-```bash
-singctl sr web start   # 启动服务端管理后台
-singctl sr web status  # 查看专属访问 URL、随机路径与管理员凭据
-singctl sr top         # 终端实时观测上下行吞吐、协议负载与 WARP 分流雷达
-singctl sr doctor      # 终端执行端到端健康体检
-singctl sr heal        # 本机三层安全漏洞无感热修复 (--enable-timer 开启每日凌晨自动守护)
-singctl fl heal        # 全舰队协同安全自愈 (单台串行滚动重启新内核 + 异常自动熔断)
-singctl fl probe       # 并发对全球子节点发起零 SSH 日志 HTTPS :443 毫秒级探活与证书余量检测
-singctl fleet doctor   # 并发对全球多台纳管子节点执行健康体检
-singctl sr mask-site   # 重新生成或换一批随机伪装站点
-```
-
-```
-═══════════════════════════════════════════════════════════
-                 🩺 SINGCTL 全链路健康体检报告
-═══════════════════════════════════════════════════════════
-体检时间: 2026-11-03 02:04:06  |  综合健康指数: 100 / 100
-───────────────────────────────────────────────────────────
-  [✓] 基础运行环境             : Debian 12 (amd64), CPU: 1 核
-  [✓] TCP 拥塞控制算法         : Google BBR 加速 [已激活启用]
-  [✓] 网关与管理端口监听          : 核心端口 (80, 443, 8092) 均正常监听运行
-  [✓] Caddy 网关           : 服务处于活跃运行状态 (active)
-  [✓] sing-box 核心        : 服务处于活跃运行状态 (active)
-  [✓] SubHub 订阅引擎         : 原生 Go 服务处于活跃运行状态 (active)
-  [✓] WARP (wireproxy)     : 服务处于活跃运行状态 (active)
-  [✓] HTTPS 证书状态         : Let's Encrypt 原生证书正常 (剩余 89 天)
-  [✓] Reality 目标探测        : 目标 SNI [swdist.apple.com] 握手正常 (8 ms, TLS 1.3)
-  [✓] SubHub 订阅聚合         : 原生 Go 引擎响应正常 (HTTP 200)
-  [✓] VPS 原生出口画像         : OpenAI [SG] | Netflix [完整支持] | YouTube [原生]
-  [✓] WARP 分流出口画像        : OpenAI [SG] | Netflix [完整支持] | YouTube [原生]
-───────────────────────────────────────────────────────────
-结论: 🎉 系统运行状态极佳！所有核心组件、TLS 证书与高可用链路均处于健康状态。
-═══════════════════════════════════════════════════════════
-```
-
----
-
-## 📚 全功能深入文档导航
-
-全部进阶配置与排障手册均按四大场景归类于 `docs/` 目录：
-
-| 所属分类 | 模块与命令 | 核心能力说明 | 深入指南 |
-| :--- | :--- | :--- | :--- |
-| **🚀 实战教程** | **单节点开荒闭环**<br>`singctl ssh` / `sr` | 新机 SSH 防锁死加固、四核一键部署、客户端接入与防盗刷全流程 | [👉 单节点实战](docs/guide-single-node.md) |
-| **🚀 实战教程** | **多节点舰队闭环**<br>`singctl fl` / `dm` | 主从架构、`fleet.yaml` 纳管、60s 裸机开荒、巡检自愈与软路由无感热同步 | [👉 多节点舰队](docs/guide-multi-node-fleet.md) |
-| **☁️ 服务端运维** | **服务端全生命周期**<br>`singctl sr` | 四核组件安装升级、`sr top` 实时雷达、WARP 解锁与隐蔽 Web 管理后台 | [👉 服务端指南](docs/server.md) |
-| **☁️ 服务端运维** | **SSH 加固与隐蔽终端**<br>`singctl ssh` / `term` | 批量免密、端口平滑迁至 `2222`、mTLS 双向认证 Web 终端与 WSS 穿透 | [👉 SSH 加固](docs/ssh.md)<br>[👉 隐蔽终端](docs/terminal.md) |
-| **🏠 客户端网关** | **透明路由与可视化面板**<br>`singctl sb` / `web` | TProxy/TUN 网关、两层极简分流 (`Game`/`Game-UDP`)、规则集离线缓存、iOS 导出与本地 WebUI | [👉 客户端路由](docs/client.md)<br>[👉 本地 WebUI](docs/webui.md) |
-| **🏠 客户端网关** | **本地防劫持加密 DNS**<br>`singctl dns` | 一键托管 AdGuard Home (`127.0.0.1:5353` + 局域网面板)、纯 IP DoH 免向导部署 | [👉 防劫持 DNS](docs/dns.md) |
-| **🏠 客户端网关** | **Tailscale 私网互联**<br>`singctl ts` | 异地多机私网直连、家庭局域网 Subnet 路由通告与 Exit Node 配置 | [👉 Tailscale 指南](docs/tailscale.md) |
-| **🩺 诊断与系统** | **链路选型与健壮性评测**<br>`singctl net` / `gfw` | 三网回程骨干识别 (CN2/9929/CMI)、QUIC 丢包抖动测试与 5 维主动探测评分 | [👉 网络诊断](docs/net.md)<br>[👉 健壮性评估](docs/gfw.md) |
-| **🩺 诊断与系统** | **看门狗、防火墙与工具**<br>`singctl dm` / `fw` / `ut` | 进程与本地 DNS 崩溃自愈、最小权限防火墙加固、带宽测速与平滑自更新 | [👉 看门狗守护](docs/daemon.md)<br>[👉 防火墙加固](docs/firewall.md)<br>[👉 实用工具](docs/utils.md) |
-
----
-
-## ⚖️ 合规与免责声明
-
-1. 本项目为开源的网络工程辅助与分布式节点运维工具，旨在为多云网络调试、跨地域网络延迟优化、学术网络通信及网络安全研究提供自动化支持。
-2. 使用者在部署与运行本项目时，应严格遵守所在国家与地区的法律法规，严禁将本项目用于任何违反当地法律法规的活动。
-3. 项目维护者不对使用者因不当配置、违规使用所导致的直接或间接法律后果承担连带责任。
-
----
-
-## 🔒 安全与完整性校验
-
-SingCtl 在安装与升级时均严格执行 SHA256 完整性校验，配置文件（`singctl.yaml`）默认权限设为 `600`，严格杜绝配置与凭据泄露。
-
----
-
-## 📄 开源许可证
-
-本项目基于 [MIT License](LICENSE) 协议开源。
+- **安全机制**：安装与自更新全程执行官方 SHA256 强校验，配置与凭据文件默认权限 **`0600`** 落盘。
+- **免责声明**：本项目仅用于多云网络工程调试、跨地域延迟优化、学术通信及网络安全研究，使用者须严格遵守所在地法律法规，维护者不对任何违规或不当使用承担责任。
+- **开源协议**：基于 [MIT License](LICENSE) 开源。
