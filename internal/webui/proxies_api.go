@@ -28,7 +28,22 @@ const (
 	maxClashDelayConcurrency = 6
 )
 
-var errClashUnreachable = errors.New("sing-box 控制接口当前不可达，请确认核心已启动")
+var (
+	errClashUnreachable = errors.New("sing-box 控制接口当前不可达，请确认核心已启动")
+
+	// 共享本地回环 HTTP 连接池：
+	// 127.0.0.1 控制面接口（Clash API /traffic /connections /proxies）高频每秒调用，
+	// 复用 Keep-Alive TCP 连接并关闭无意义的回环 gzip，避免每次轮询重复三次握手与 TIME_WAIT 堆积。
+	sharedClashTransport = &http.Transport{
+		Proxy:               nil,
+		MaxIdleConns:        16,
+		MaxIdleConnsPerHost: 8,
+		IdleConnTimeout:     90 * time.Second,
+		DisableCompression:  true,
+	}
+	sharedClashHTTPClient   = &http.Client{Transport: sharedClashTransport, Timeout: 3 * time.Second}
+	sharedClashStreamClient = &http.Client{Transport: sharedClashTransport}
+)
 
 type sbProxyHistoryEntry struct {
 	Time  string `json:"time,omitempty"`
@@ -147,7 +162,6 @@ func (s *Server) clashEndpointAndSecret(ctx context.Context) (string, string, er
 	endpoints := singbox.ClashAPIEndpointsForConfig(sbPath)
 	secret := singbox.ClashAPISecretForConfig(sbPath)
 
-	client := &http.Client{Timeout: 1200 * time.Millisecond}
 	for _, base := range endpoints {
 		base = strings.TrimRight(strings.TrimSpace(base), "/")
 		if base == "" {
@@ -160,7 +174,7 @@ func (s *Server) clashEndpointAndSecret(ctx context.Context) (string, string, er
 		if secret != "" {
 			req.Header.Set("Authorization", "Bearer "+secret)
 		}
-		resp, err := client.Do(req)
+		resp, err := sharedClashHTTPClient.Do(req)
 		if err != nil {
 			continue
 		}
@@ -214,9 +228,7 @@ func doClashRequest(ctx context.Context, client *http.Client, method, fullURL, s
 }
 
 func (s *Server) buildSbProxiesSnapshot(ctx context.Context, base, secret string) (SbProxiesSnapshot, error) {
-	client := &http.Client{Timeout: 2500 * time.Millisecond}
-
-	code, rawProxies, err := doClashRequest(ctx, client, http.MethodGet, base+"/proxies", secret, nil)
+	code, rawProxies, err := doClashRequest(ctx, sharedClashHTTPClient, http.MethodGet, base+"/proxies", secret, nil)
 	if err != nil || code != http.StatusOK {
 		if err == nil {
 			err = fmt.Errorf("clash /proxies returned HTTP %d", code)
@@ -229,7 +241,7 @@ func (s *Server) buildSbProxiesSnapshot(ctx context.Context, base, secret string
 	}
 
 	mode := "rule"
-	if cCode, rawCfg, cErr := doClashRequest(ctx, client, http.MethodGet, base+"/configs", secret, nil); cErr == nil && cCode == http.StatusOK {
+	if cCode, rawCfg, cErr := doClashRequest(ctx, sharedClashHTTPClient, http.MethodGet, base+"/configs", secret, nil); cErr == nil && cCode == http.StatusOK {
 		var cfgDoc sbClashConfigsResp
 		if json.Unmarshal(rawCfg, &cfgDoc) == nil && strings.TrimSpace(cfgDoc.Mode) != "" {
 			mode = strings.ToLower(strings.TrimSpace(cfgDoc.Mode))
@@ -551,8 +563,7 @@ func (s *Server) handleSbProxySwitchPut(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	client := &http.Client{Timeout: 3 * time.Second}
-	code, rawProxies, err := doClashRequest(ctx, client, http.MethodGet, base+"/proxies", secret, nil)
+	code, rawProxies, err := doClashRequest(ctx, sharedClashHTTPClient, http.MethodGet, base+"/proxies", secret, nil)
 	if err != nil || code != http.StatusOK {
 		writeJSONError(w, http.StatusBadGateway, "读取策略组信息失败")
 		return
@@ -578,7 +589,7 @@ func (s *Server) handleSbProxySwitchPut(w http.ResponseWriter, r *http.Request) 
 	}
 
 	putURL := fmt.Sprintf("%s/proxies/%s", base, url.PathEscape(group))
-	putCode, putBody, putErr := doClashRequest(ctx, client, http.MethodPut, putURL, secret, map[string]string{"name": target})
+	putCode, putBody, putErr := doClashRequest(ctx, sharedClashHTTPClient, http.MethodPut, putURL, secret, map[string]string{"name": target})
 	if putErr != nil || putCode < 200 || putCode >= 300 {
 		msg := strings.TrimSpace(string(putBody))
 		if putErr != nil {
@@ -674,8 +685,7 @@ func (s *Server) handleSbProxyDelayPost(w http.ResponseWriter, r *http.Request) 
 		}
 		targets = []string{node}
 	} else {
-		infoClient := &http.Client{Timeout: 3 * time.Second}
-		code, rawProxies, err := doClashRequest(ctx, infoClient, http.MethodGet, base+"/proxies", secret, nil)
+		code, rawProxies, err := doClashRequest(ctx, sharedClashHTTPClient, http.MethodGet, base+"/proxies", secret, nil)
 		if err != nil || code != http.StatusOK {
 			writeJSONError(w, http.StatusBadGateway, "获取节点列表失败")
 			return
@@ -728,7 +738,7 @@ func (s *Server) handleSbProxyDelayPost(w http.ResponseWriter, r *http.Request) 
 
 	delays := make(map[string]int, len(targets))
 	if len(targets) > 0 {
-		httpClient := &http.Client{Timeout: time.Duration(timeoutMs+1000) * time.Millisecond}
+		httpClient := sharedClashStreamClient
 		jobs := make(chan string, len(targets))
 		for _, t := range targets {
 			jobs <- t
@@ -815,8 +825,7 @@ func (s *Server) handleSbModePut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := &http.Client{Timeout: 3 * time.Second}
-	code, raw, err := doClashRequest(ctx, client, http.MethodPatch, base+"/configs", secret, map[string]string{"mode": mode})
+	code, raw, err := doClashRequest(ctx, sharedClashHTTPClient, http.MethodPatch, base+"/configs", secret, map[string]string{"mode": mode})
 	if err != nil || code < 200 || code >= 300 {
 		msg := strings.TrimSpace(string(raw))
 		if err != nil {
@@ -1055,7 +1064,7 @@ func (s *Server) runTrafficSampler() {
 			if secret != "" {
 				req.Header.Set("Authorization", "Bearer "+secret)
 			}
-			resp, doErr := (&http.Client{}).Do(req)
+			resp, doErr := sharedClashStreamClient.Do(req)
 			if doErr != nil || resp.StatusCode != http.StatusOK {
 				if resp != nil {
 					_ = resp.Body.Close()
@@ -1177,20 +1186,96 @@ func (s *Server) runTrafficSampler() {
 }
 
 func fetchClashConnections(ctx context.Context, base, secret string) (upTotal, downTotal int64, count int, ok bool) {
-	c := &http.Client{Timeout: 1200 * time.Millisecond}
-	code, raw, reqErr := doClashRequest(ctx, c, http.MethodGet, base+"/connections", secret, nil)
-	if reqErr != nil || code != http.StatusOK {
+	reqCtx, cancel := context.WithTimeout(ctx, 1200*time.Millisecond)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, base+"/connections", nil)
+	if err != nil {
 		return 0, 0, 0, false
 	}
-	var connDoc struct {
-		UploadTotal   int64 `json:"uploadTotal"`
-		DownloadTotal int64 `json:"downloadTotal"`
-		Connections   []any `json:"connections"`
+	if secret != "" {
+		req.Header.Set("Authorization", "Bearer "+secret)
 	}
-	if json.Unmarshal(raw, &connDoc) != nil {
+	resp, err := sharedClashStreamClient.Do(req)
+	if err != nil {
 		return 0, 0, 0, false
 	}
-	return connDoc.UploadTotal, connDoc.DownloadTotal, len(connDoc.Connections), true
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		return 0, 0, 0, false
+	}
+	return decodeClashConnectionsSummary(io.LimitReader(resp.Body, 16<<20))
+}
+
+// decodeClashConnectionsSummary 流式统计 Clash /connections 中的累计上下行字节数与连接数组长度。
+// 性能优化原理：此前反序列化为 `Connections []any` 会为每秒数千条活跃连接的字段分配大量 map/slice 堆对象；
+// 本函数通过 json.Decoder + 复用同一块 json.RawMessage 缓冲区扫描数组元素，只统计数量与核心整数字段，
+// 在保持 100% 标准库 JSON 校验准确性的前提下将热点分配降至接近零。
+func decodeClashConnectionsSummary(r io.Reader) (upTotal, downTotal int64, count int, ok bool) {
+	dec := json.NewDecoder(r)
+	tok, err := dec.Token()
+	if err != nil || tok != json.Delim('{') {
+		return 0, 0, 0, false
+	}
+
+	var scratch json.RawMessage
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return 0, 0, 0, false
+		}
+		key, isStr := keyTok.(string)
+		if !isStr {
+			return 0, 0, 0, false
+		}
+		switch key {
+		case "uploadTotal":
+			if err := dec.Decode(&upTotal); err != nil {
+				return 0, 0, 0, false
+			}
+		case "downloadTotal":
+			if err := dec.Decode(&downTotal); err != nil {
+				return 0, 0, 0, false
+			}
+		case "connections":
+			arrTok, err := dec.Token()
+			if err != nil {
+				return 0, 0, 0, false
+			}
+			if arrTok == nil {
+				continue
+			}
+			if arrTok != json.Delim('[') {
+				return 0, 0, 0, false
+			}
+			for dec.More() {
+				scratch = scratch[:0]
+				if err := dec.Decode(&scratch); err != nil {
+					return 0, 0, 0, false
+				}
+				count++
+			}
+			endArr, err := dec.Token()
+			if err != nil || endArr != json.Delim(']') {
+				return 0, 0, 0, false
+			}
+		default:
+			scratch = scratch[:0]
+			if err := dec.Decode(&scratch); err != nil {
+				return 0, 0, 0, false
+			}
+		}
+	}
+
+	endObj, err := dec.Token()
+	if err != nil || endObj != json.Delim('}') {
+		return 0, 0, 0, false
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return 0, 0, 0, false
+	}
+	return upTotal, downTotal, count, true
 }
 
 func readFirstClashStreamObject(ctx context.Context, fullURL, secret string, dst any) bool {
@@ -1201,7 +1286,7 @@ func readFirstClashStreamObject(ctx context.Context, fullURL, secret string, dst
 	if secret != "" {
 		req.Header.Set("Authorization", "Bearer "+secret)
 	}
-	resp, err := (&http.Client{}).Do(req)
+	resp, err := sharedClashStreamClient.Do(req)
 	if err != nil {
 		return false
 	}

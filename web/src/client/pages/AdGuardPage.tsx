@@ -37,6 +37,7 @@ import {
   ClientInvalidateScope,
   peekCachedQuery,
   prefetchCachedQuery,
+  useVisibilityInterval,
   writeCachedQuery,
 } from '../../hooks';
 import { clientApi } from '../api';
@@ -203,16 +204,13 @@ export const AdGuardPage: React.FC<AdGuardPageProps> = ({
     return () => window.removeEventListener(CLIENT_INVALIDATE_EVENT, onInvalidate);
   }, [loadOverview]);
 
-  // Periodic background refresh (15s) strictly when tab is active & installed
-  useEffect(() => {
-    if (!active || !snap?.installed) return;
-    const t = window.setInterval(() => {
-      if (document.visibilityState === 'visible') {
-        void loadOverview(true);
-      }
-    }, 15000);
-    return () => window.clearInterval(t);
-  }, [active, snap?.installed, loadOverview]);
+  // Periodic background refresh (15s) strictly when tab is active, installed & visible
+  useVisibilityInterval(
+    () => {
+      void loadOverview(true);
+    },
+    active && snap?.installed ? 15000 : null,
+  );
 
   // Drift-free countdown tick computed from absolute deadline when protection is paused
   useEffect(() => {

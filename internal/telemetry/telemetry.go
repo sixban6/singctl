@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"singctl/internal/config"
@@ -159,6 +160,53 @@ func ResolveConfig(singboxConfigPath string) (addr string, secret string, enable
 	return ctrl, strings.TrimSpace(parsed.Experimental.ClashAPI.Secret), true
 }
 
+func (c *Collector) resolveConfigSnapshot() (string, string, bool) {
+	cfgPath := ""
+	if c != nil {
+		cfgPath = c.ConfigPath
+	}
+	cfgPath = cmp.Or(strings.TrimSpace(cfgPath), constant.SingBoxConfigFile)
+	info, err := os.Stat(cfgPath)
+	if err != nil {
+		if c != nil {
+			c.cfgMu.Lock()
+			c.cachedCfgValid = false
+			c.cfgMu.Unlock()
+		}
+		return "", "", false
+	}
+
+	statKey := configStatKey{
+		path:    cfgPath,
+		size:    info.Size(),
+		modNano: info.ModTime().UnixNano(),
+	}
+	if c != nil {
+		c.cfgMu.RLock()
+		if c.cachedCfgValid && c.cachedCfgKey == statKey {
+			addr, sec, en := c.cachedAddr, c.cachedSecret, c.cachedEnabled
+			c.cfgMu.RUnlock()
+			return addr, sec, en
+		}
+		c.cfgMu.RUnlock()
+
+		c.cfgMu.Lock()
+		defer c.cfgMu.Unlock()
+		if c.cachedCfgValid && c.cachedCfgKey == statKey {
+			return c.cachedAddr, c.cachedSecret, c.cachedEnabled
+		}
+		c.cfgDiskReads.Add(1)
+		addr, sec, en := ResolveConfig(cfgPath)
+		c.cachedCfgKey = statKey
+		c.cachedAddr = addr
+		c.cachedSecret = sec
+		c.cachedEnabled = en
+		c.cachedCfgValid = true
+		return addr, sec, en
+	}
+	return ResolveConfig(cfgPath)
+}
+
 // EnsureConfigTelemetry non-destructively injects loopback clash_api telemetry into an existing sing-box config.json.
 func EnsureConfigTelemetry(singboxConfigPath string) (changed bool, addr string, secret string, err error) {
 	singboxConfigPath = cmp.Or(strings.TrimSpace(singboxConfigPath), constant.SingBoxConfigFile)
@@ -235,6 +283,23 @@ func isLoopbackAddr(addr string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+type configStatKey struct {
+	path    string
+	size    int64
+	modNano int64
+}
+
+var sharedTelemetryHTTPClient = &http.Client{
+	Timeout: 1500 * time.Millisecond,
+	Transport: &http.Transport{
+		Proxy:               nil,
+		MaxIdleConns:        8,
+		MaxIdleConnsPerHost: 4,
+		IdleConnTimeout:     90 * time.Second,
+		DisableCompression:  true,
+	},
+}
+
 // Collector samples sing-box Clash API endpoints on loopback and maintains short-term rate history.
 type Collector struct {
 	ConfigPath string
@@ -247,15 +312,22 @@ type Collector struct {
 	lastUpBps   int64
 	lastDnBps   int64
 	history     []RatePoint
+
+	// 配置文件 stat 指纹缓存：1.5s SSE 遥测期间文件未变更时 0 磁盘读取与 JSON 解析开销
+	cfgMu          sync.RWMutex
+	cachedCfgKey   configStatKey
+	cachedAddr     string
+	cachedSecret   string
+	cachedEnabled  bool
+	cachedCfgValid bool
+	cfgDiskReads   atomic.Int64
 }
 
 // NewCollector creates a Collector bound to singboxConfigPath (defaults to constant.SingBoxConfigFile).
 func NewCollector(singboxConfigPath string) *Collector {
 	return &Collector{
 		ConfigPath: singboxConfigPath,
-		HTTPClient: &http.Client{
-			Timeout: 1500 * time.Millisecond,
-		},
+		HTTPClient: sharedTelemetryHTTPClient,
 	}
 }
 
@@ -292,7 +364,7 @@ func (c *Collector) Collect(ctx context.Context) Snapshot {
 		History:    []RatePoint{},
 	}
 
-	addr, secret, enabled := ResolveConfig(c.ConfigPath)
+	addr, secret, enabled := c.resolveConfigSnapshot()
 	snap.Enabled = enabled
 	snap.ControllerAddr = addr
 	if !enabled {
@@ -364,9 +436,10 @@ func (c *Collector) Collect(ctx context.Context) Snapshot {
 	snap.DownBps = dnBps
 	snap.History = historyCopy
 
-	domainMap := make(map[string]*DomainStat)
-	clientIPSet := make(map[string]struct{})
-	for _, conn := range payload.Connections {
+	domainMap := make(map[string]*DomainStat, min(len(payload.Connections), 64))
+	clientIPSet := make(map[string]struct{}, 8)
+	for i := range payload.Connections {
+		conn := &payload.Connections[i]
 		if srcIP := strings.TrimSpace(conn.Metadata.SourceIP); srcIP != "" {
 			clientIPSet[srcIP] = struct{}{}
 		}
@@ -443,7 +516,7 @@ func (c *Collector) httpClient() *http.Client {
 	if c != nil && c.HTTPClient != nil {
 		return c.HTTPClient
 	}
-	return &http.Client{Timeout: 1500 * time.Millisecond}
+	return sharedTelemetryHTTPClient
 }
 
 func (c *Collector) fetchConnections(ctx context.Context, addr, secret string) (clashConnectionsResp, error) {
@@ -471,7 +544,7 @@ func (c *Collector) fetchConnections(ctx context.Context, addr, secret string) (
 
 // GetActiveDestinations 查询本地 127.0.0.1:9099 遥测接口并返回按远端目标聚合的活跃连接列表（零客户端隐私 IP 暴露）。
 func (c *Collector) GetActiveDestinations(ctx context.Context, query, outboundFilter string) ([]ActiveDestinationGroup, error) {
-	addr, secret, enabled := ResolveConfig(c.ConfigPath)
+	addr, secret, enabled := c.resolveConfigSnapshot()
 	if !enabled {
 		return []ActiveDestinationGroup{}, errors.New("当前 sing-box 配置尚未开启本地流量遥测 (127.0.0.1:9099)")
 	}
@@ -565,7 +638,7 @@ func (c *Collector) EvictMismatchedConnections(ctx context.Context, matchFn func
 	if matchFn == nil {
 		return 0, nil
 	}
-	addr, secret, enabled := ResolveConfig(c.ConfigPath)
+	addr, secret, enabled := c.resolveConfigSnapshot()
 	if !enabled || !isLoopbackAddr(addr) {
 		return 0, nil
 	}

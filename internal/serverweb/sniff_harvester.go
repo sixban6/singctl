@@ -67,6 +67,7 @@ func (t *SniffTracker) maybeHarvestSystemSources(ctx context.Context, force bool
 	}
 	t.lastSystemHarvest = now
 	t.ensureNodeMetaLocked("local").lastHarvest = now
+	t.bumpDataRevLocked()
 	t.mu.Unlock()
 
 	hCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
@@ -195,6 +196,9 @@ func (t *SniffTracker) maybeHarvestFleetNodes(ctx context.Context, fleetNodes []
 		meta.lastHarvest = now
 		targets = append(targets, fn)
 	}
+	if len(targets) > 0 {
+		t.bumpDataRevLocked()
+	}
 	t.mu.Unlock()
 
 	if len(targets) == 0 {
@@ -216,11 +220,16 @@ func (t *SniffTracker) maybeHarvestFleetNodes(ctx context.Context, fleetNodes []
 			if err != nil {
 				t.mu.Lock()
 				t.ensureNodeMetaLocked(node.ID).lastError = err.Error()
+				t.bumpDataRevLocked()
 				t.mu.Unlock()
 				return
 			}
 			t.mu.Lock()
-			t.ensureNodeMetaLocked(node.ID).lastError = ""
+			meta := t.ensureNodeMetaLocked(node.ID)
+			if meta.lastError != "" {
+				meta.lastError = ""
+				t.bumpDataRevLocked()
+			}
 			t.mu.Unlock()
 			t.IngestRemoteSniffOutput(node.ID, cmp.Or(node.Name, node.ID), out)
 		}(fn)

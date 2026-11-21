@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { useVisibilityInterval } from './useVisibilityInterval';
 
 const queryCache = new Map<string, unknown>();
 const inFlightMap = new Map<string, Promise<unknown>>();
@@ -114,32 +115,12 @@ export function useCachedQuery<T>(
     }
   }, [enabled, key, refetch]);
 
-  useEffect(() => {
-    if (!enabled || !pollMs || pollMs <= 0) return;
-    let timer: ReturnType<typeof setInterval> | null = null;
-
-    const start = () => {
-      if (timer) clearInterval(timer);
-      timer = setInterval(() => {
-        if (document.visibilityState === 'visible') {
-          void refetch(true);
-        }
-      }, pollMs);
-    };
-
-    const onVisibility = () => {
-      if (document.visibilityState === 'visible') {
-        void refetch(true);
-      }
-    };
-
-    start();
-    document.addEventListener('visibilitychange', onVisibility);
-    return () => {
-      if (timer) clearInterval(timer);
-      document.removeEventListener('visibilitychange', onVisibility);
-    };
-  }, [enabled, pollMs, refetch]);
+  useVisibilityInterval(
+    () => {
+      void refetch(true);
+    },
+    enabled && pollMs && pollMs > 0 ? pollMs : null,
+  );
 
   return { data, loading, refreshing, error, refetch, setData };
 }

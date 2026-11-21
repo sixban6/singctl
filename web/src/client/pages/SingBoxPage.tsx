@@ -33,6 +33,7 @@ import {
   useToast,
 } from '../../ui';
 import { clientApi } from '../api';
+import { useVisibilityInterval } from '../../hooks';
 import {
   ClientRoutingPresetState,
   ClientRoutingReport,
@@ -231,15 +232,12 @@ export const SingBoxPage: React.FC<SingBoxPageProps> = ({
   }, [sbRunning, loadProxies, loadTraffic]);
 
   // 仅在停留在「智能分流」或「节点选择」且内核在线、标签页可见时轻量轮询速率与连接数
-  useEffect(() => {
-    if (!sbRunning || sub === 'editor') return;
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === 'visible') {
-        void loadTraffic();
-      }
-    }, 3000);
-    return () => window.clearInterval(timer);
-  }, [sbRunning, sub, loadTraffic]);
+  useVisibilityInterval(
+    () => {
+      void loadTraffic();
+    },
+    sbRunning && sub !== 'editor' ? 3000 : null,
+  );
 
   // 执行完生成配置/启动等动作后，自动同步最新策略组与分流状态
   const prevBusyRef = useRef(busy);

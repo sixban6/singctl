@@ -163,7 +163,7 @@ func (t *SniffTracker) BlockTargetForNode(ctx context.Context, target, nodeScope
 	now := time.Now()
 	t.mu.Lock()
 	t.applyBlockStateLocked(spec, nodeScope, applyLocal, remoteNodes, now)
-	t.dirty = true
+	t.markDirtyLocked()
 	raw, seq := t.snapshotPersistBytesLocked(now, true)
 	t.mu.Unlock()
 	t.persistSnapshot(raw, seq)
@@ -425,7 +425,7 @@ func (t *SniffTracker) UnblockTargetForNode(ctx context.Context, target, nodeSco
 	if target == "all" {
 		t.mu.Lock()
 		t.unblockAllLocked(nodeScope)
-		t.dirty = true
+		t.markDirtyLocked()
 		raw, seq := t.snapshotPersistBytesLocked(time.Now(), true)
 		t.mu.Unlock()
 		t.persistSnapshot(raw, seq)
@@ -451,7 +451,7 @@ func (t *SniffTracker) UnblockTargetForNode(ctx context.Context, target, nodeSco
 
 	t.mu.Lock()
 	t.unblockSpecLocked(spec, nodeScope)
-	t.dirty = true
+	t.markDirtyLocked()
 	raw, seq := t.snapshotPersistBytesLocked(time.Now(), true)
 	t.mu.Unlock()
 	t.persistSnapshot(raw, seq)

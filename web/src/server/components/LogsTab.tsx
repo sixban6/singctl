@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { api } from '../api';
+import { useVisibilityInterval } from '../../hooks';
 import { useToast } from '../../ui';
 import { Terminal, RefreshCw, Trash2, Download, Pause, Play, Check } from 'lucide-react';
 
@@ -33,15 +34,9 @@ export const LogsTab: React.FC<LogsTabProps> = ({ initialService = 'singbox' }) 
     fetchLogs();
   }, [service, lines]);
 
-  useEffect(() => {
-    let timer: any;
-    if (autoRefresh) {
-      timer = setInterval(() => {
-        fetchLogs(true);
-      }, 3000);
-    }
-    return () => clearInterval(timer);
-  }, [autoRefresh, service, lines]);
+  useVisibilityInterval(() => {
+    void fetchLogs(true);
+  }, autoRefresh ? 3000 : null);
 
   const handleCopyLogs = () => {
     navigator.clipboard.writeText(logs);

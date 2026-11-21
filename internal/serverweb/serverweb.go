@@ -118,6 +118,9 @@ type Server struct {
 	cmdRunner             serviceCmdRunner
 	serviceConfigPaths    map[string]string
 	singBoxBinOverride    string
+	sseMu                 sync.Mutex
+	sseCachedAt           time.Time
+	sseCachedFrame        []byte
 }
 
 type SessionRecord struct {
@@ -204,15 +207,28 @@ func New(opts Options) *Server {
 		s.updateConfigCache(initialCfg)
 	}
 
-	// 静态单页面：放行静态资源，敏感 API 均受 guard 保护
+	// 静态单页面：放行静态资源，敏感 API 均受 guard 保护；
+	// /assets/* 含构建期内容哈希，设置一年 immutable 强制浏览器长缓存；
+	// 首页 / 与 index.html 设置 no-store，保证版本升级后立刻加载新版前端。
 	staticContent, err := fs.Sub(staticFS, "static")
 	if err == nil {
 		fileServer := http.FileServer(http.FS(staticContent))
-		s.Mux.Handle("/", fileServer)
+		s.Mux.Handle("/", wrapStaticCacheHeaders(fileServer))
 	}
 
 	s.registerRoutes()
 	return s
+}
+
+func wrapStaticCacheHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/assets/") {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		} else if r.URL.Path == "/" || r.URL.Path == "/index.html" {
+			w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) registerRoutes() {

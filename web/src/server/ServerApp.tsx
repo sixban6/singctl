@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { ServerStatusResponse } from './types';
 import { ApiError, api, setOnUnauthorized } from './api';
-import { clearCachedQuery, useHashRoute } from '../hooks';
+import { clearCachedQuery, useHashRoute, useVisibilityInterval } from '../hooks';
 import { ToastProvider, CardSkeleton, lazyWithReload, useToast } from '../ui';
 import { Header } from './components/Header';
 import { Navigation, SERVER_TAB_KEYS, TabKey } from './components/Navigation';
@@ -152,14 +152,10 @@ const DashboardContent: React.FC = () => {
     return () => clearTimeout(timer);
   }, [isAuthenticated, initNetError, isCheckingAuth, fetchStatus]);
 
-  // Periodic polling every 12 seconds only when authenticated
-  useEffect(() => {
-    if (!isAuthenticated) return;
-    const timer = setInterval(() => {
-      void fetchStatus(true);
-    }, 12000);
-    return () => clearInterval(timer);
-  }, [isAuthenticated, fetchStatus]);
+  // Periodic polling every 12 seconds strictly while authenticated and tab is visible
+  useVisibilityInterval(() => {
+    void fetchStatus(true);
+  }, isAuthenticated ? 12000 : null);
 
   const handleLogout = async () => {
     try {

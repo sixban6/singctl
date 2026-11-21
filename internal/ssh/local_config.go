@@ -11,6 +11,12 @@ import (
 	"singctl/internal/util/file"
 )
 
+// 包级预编译静态区块正则，避免重复解析 ~/.ssh/config 时重编译表达式。
+var (
+	managedHostParseRe = regexp.MustCompile(`(?s)# === BEGIN SINGCTL MANAGED HOST: ([^\n]+) ===\n(.*?)\n# === END SINGCTL MANAGED HOST: [^\n]+ ===`)
+	managedHostAllRe   = regexp.MustCompile(`(?s)# === BEGIN SINGCTL MANAGED HOST: [^\n]+ ===\n.*?\n# === END SINGCTL MANAGED HOST: [^\n]+ ===\n?`)
+)
+
 // ManagedHost represents a host entry parsed from ~/.ssh/config.
 type ManagedHost struct {
 	Name         string
@@ -106,8 +112,7 @@ func (m *LocalConfigManager) ListManagedHosts() ([]ManagedHost, error) {
 	}
 
 	content := string(data)
-	pattern := regexp.MustCompile(`(?s)# === BEGIN SINGCTL MANAGED HOST: ([^\n]+) ===\n(.*?)\n# === END SINGCTL MANAGED HOST: [^\n]+ ===`)
-	matches := pattern.FindAllStringSubmatch(content, -1)
+	matches := managedHostParseRe.FindAllStringSubmatch(content, -1)
 
 	var list []ManagedHost
 	for _, m := range matches {
@@ -153,7 +158,7 @@ func (m *LocalConfigManager) CleanManagedHosts(targetName string) (int, error) {
 	content := string(data)
 	var pattern *regexp.Regexp
 	if targetName == "" {
-		pattern = regexp.MustCompile(`(?s)# === BEGIN SINGCTL MANAGED HOST: [^\n]+ ===\n.*?\n# === END SINGCTL MANAGED HOST: [^\n]+ ===\n?`)
+		pattern = managedHostAllRe
 	} else {
 		pattern = regexp.MustCompile(fmt.Sprintf(`(?s)# === BEGIN SINGCTL MANAGED HOST: %s ===\n.*?\n# === END SINGCTL MANAGED HOST: %s ===\n?`,
 			regexp.QuoteMeta(targetName), regexp.QuoteMeta(targetName)))

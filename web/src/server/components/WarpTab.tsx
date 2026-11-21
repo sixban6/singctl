@@ -10,7 +10,7 @@ import {
 } from '../types';
 import { api } from '../api';
 import { WARP_CONNS_CACHE_KEY, WARP_ROUTING_CACHE_KEY } from '../prefetch';
-import { peekCachedQuery, writeCachedQuery } from '../../hooks';
+import { peekCachedQuery, useVisibilityInterval, writeCachedQuery } from '../../hooks';
 import { formatBytes, useToast } from '../../ui';
 import {
   AlertTriangle,
@@ -206,15 +206,12 @@ export const WarpTab: React.FC<WarpTabProps> = ({ active = true, onRefreshParent
     void loadConnections(selectedNode);
   }, [active, selectedNode, loadRouting, loadConnections]);
 
-  useEffect(() => {
-    if (!active || !autoRefreshConn || selectedNode === 'all') return;
-    const timer = setInterval(() => {
-      if (document.visibilityState === 'visible') {
-        void loadConnections(selectedNode);
-      }
-    }, 5000);
-    return () => clearInterval(timer);
-  }, [active, autoRefreshConn, selectedNode, loadConnections]);
+  useVisibilityInterval(
+    () => {
+      void loadConnections(selectedNode);
+    },
+    active && autoRefreshConn && selectedNode !== 'all' ? 5000 : null,
+  );
 
   useEffect(() => {
     return () => {

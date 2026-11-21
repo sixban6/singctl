@@ -1,6 +1,10 @@
 export { useTheme, type ThemeMode } from './useTheme';
 export { useHashRoute, type HashRouteState } from './useHashRoute';
 export {
+  useVisibilityInterval,
+  type UseVisibilityIntervalOptions,
+} from './useVisibilityInterval';
+export {
   useCachedQuery,
   clearCachedQuery,
   peekCachedQuery,

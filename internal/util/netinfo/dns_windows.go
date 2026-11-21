@@ -9,6 +9,12 @@ import (
 	"strings"
 )
 
+// 包级预编译静态正则，避免轮询系统 DNS 期间反复编译正则。
+var (
+	winIPv4Re     = regexp.MustCompile(`(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})`)
+	winDNSSplitRe = regexp.MustCompile(`[,\s]+`)
+)
+
 func systemDNS() ([]string, error) {
 	// 尝试多种方式获取DNS服务器
 	methods := []func() ([]string, error){
@@ -45,8 +51,7 @@ func getDNSFromIPConfig() ([]string, error) {
 		if strings.Contains(strings.ToLower(line), "dns server") ||
 			strings.Contains(strings.ToLower(line), "dns 服务器") {
 			// 提取IP地址
-			ipRegex := regexp.MustCompile(`(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})`)
-			matches := ipRegex.FindAllString(line, -1)
+			matches := winIPv4Re.FindAllString(line, -1)
 			for _, match := range matches {
 				if ip := net.ParseIP(match); ip != nil && !ip.IsLoopback() {
 					servers = append(servers, match)
@@ -103,7 +108,7 @@ func getDNSFromRegistry() ([]string, error) {
 			if len(parts) > 1 {
 				dnsStr := strings.TrimSpace(parts[1])
 				// DNS服务器可能用逗号或空格分隔
-				dnsServers := regexp.MustCompile(`[,\s]+`).Split(dnsStr, -1)
+				dnsServers := winDNSSplitRe.Split(dnsStr, -1)
 				for _, dns := range dnsServers {
 					dns = strings.TrimSpace(dns)
 					if ip := net.ParseIP(dns); ip != nil && !ip.IsLoopback() {

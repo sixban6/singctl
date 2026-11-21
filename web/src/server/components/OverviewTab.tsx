@@ -78,6 +78,20 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ status, onRefresh, onN
     let es: EventSource | null = null;
     let fallbackTimer: ReturnType<typeof setInterval> | null = null;
 
+    const stopConnections = (markOffline: boolean) => {
+      if (es) {
+        es.close();
+        es = null;
+      }
+      if (fallbackTimer) {
+        clearInterval(fallbackTimer);
+        fallbackTimer = null;
+      }
+      if (markOffline && !cancelled) {
+        setTelemetryStreamLive(false);
+      }
+    };
+
     const fetchOnce = async () => {
       try {
         const snap = await api.getTelemetrySnapshot();
@@ -89,47 +103,61 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ status, onRefresh, onN
       }
     };
 
-    try {
-      const streamUrl = `${getBasePath()}/api/server/telemetry/stream`;
-      es = new EventSource(streamUrl, { withCredentials: true });
-      es.onopen = () => {
-        if (!cancelled) setTelemetryStreamLive(true);
-      };
-      es.onmessage = (ev) => {
-        if (cancelled) return;
-        try {
-          const parsed: TelemetrySnapshot = JSON.parse(ev.data);
-          setTelemetry(parsed);
-          setTelemetryStreamLive(true);
-        } catch {
-          // ignore malformed frame
-        }
-      };
-      es.onerror = () => {
-        if (cancelled) return;
-        setTelemetryStreamLive(false);
-        if (es) {
-          es.close();
-          es = null;
-        }
-        if (!fallbackTimer) {
-          fallbackTimer = setInterval(() => {
-            void fetchOnce();
-          }, 2500);
-        }
-      };
-    } catch {
-      if (!fallbackTimer) {
-        fallbackTimer = setInterval(() => {
+    const startFallbackPolling = () => {
+      if (fallbackTimer || cancelled || document.visibilityState !== 'visible') return;
+      void fetchOnce();
+      fallbackTimer = setInterval(() => {
+        if (document.visibilityState === 'visible') {
           void fetchOnce();
-        }, 2500);
+        }
+      }, 2500);
+    };
+
+    const startStream = () => {
+      stopConnections(false);
+      if (cancelled || document.visibilityState !== 'visible') return;
+      try {
+        const streamUrl = `${getBasePath()}/api/server/telemetry/stream`;
+        es = new EventSource(streamUrl, { withCredentials: true });
+        es.onopen = () => {
+          if (!cancelled) setTelemetryStreamLive(true);
+        };
+        es.onmessage = (ev) => {
+          if (cancelled) return;
+          try {
+            const parsed: TelemetrySnapshot = JSON.parse(ev.data);
+            setTelemetry(parsed);
+            setTelemetryStreamLive(true);
+          } catch {
+            // ignore malformed frame
+          }
+        };
+        es.onerror = () => {
+          if (cancelled) return;
+          stopConnections(true);
+          startFallbackPolling();
+        };
+      } catch {
+        startFallbackPolling();
       }
-    }
+    };
+
+    // 标签页切到后台隐藏时断开 SSE 持久推送与兜底轮询；回到前台时立刻重连恢复
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        startStream();
+      } else {
+        stopConnections(true);
+      }
+    };
+
+    startStream();
+    document.addEventListener('visibilitychange', onVisibilityChange);
 
     return () => {
       cancelled = true;
-      if (es) es.close();
-      if (fallbackTimer) clearInterval(fallbackTimer);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      stopConnections(false);
     };
   }, [isTelemetryEnabled]);
 

@@ -11,7 +11,7 @@ import {
 } from '../types';
 import { api } from '../api';
 import { FLEET_CACHE_KEY, FLEET_DEFAULTS_CACHE_KEY } from '../prefetch';
-import { peekCachedQuery, writeCachedQuery } from '../../hooks';
+import { peekCachedQuery, useVisibilityInterval, writeCachedQuery } from '../../hooks';
 import { useToast } from '../../ui';
 import {
   Network,
@@ -165,14 +165,15 @@ export const FleetTab: React.FC<{ active?: boolean }> = ({ active = true }) => {
         })
         .catch(() => {});
     }
-
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === 'visible') {
-        void triggerSilentProbe(false);
-      }
-    }, 60_000);
-    return () => window.clearInterval(timer);
   }, [active]);
+
+  useVisibilityInterval(
+    () => {
+      void triggerSilentProbe(false);
+    },
+    active ? 60_000 : null,
+    { refreshOnVisible: false },
+  );
 
   const openAddModal = (mode: ModalMode = 'bootstrap') => {
     setIsEditingExisting(false);

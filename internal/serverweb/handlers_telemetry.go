@@ -10,13 +10,20 @@ import (
 	"singctl/internal/telemetry"
 )
 
+func (s *Server) markRequestClientTrusted(r *http.Request) {
+	if s.sniff == nil {
+		return
+	}
+	clientIP := s.getClientIPAndSeedGeo(r)
+	if clientIP != "" && clientIP != "loopback-direct" {
+		s.sniff.MarkTrustedClientIPs(clientIP)
+	}
+}
+
 func (s *Server) collectEnrichedTelemetry(r *http.Request) telemetry.Snapshot {
 	snap := s.telemetry.Collect(r.Context())
 	if s.sniff != nil {
-		clientIP := s.getClientIPAndSeedGeo(r)
-		if clientIP != "" && clientIP != "loopback-direct" {
-			s.sniff.MarkTrustedClientIPs(clientIP)
-		}
+		s.markRequestClientTrusted(r)
 		snap.Sniffing = s.sniff.Snapshot(r.Context(), snap.ActiveClientIPs...)
 	}
 	return snap
@@ -25,6 +32,26 @@ func (s *Server) collectEnrichedTelemetry(r *http.Request) telemetry.Snapshot {
 func (s *Server) handleTelemetrySnapshot(w http.ResponseWriter, r *http.Request) {
 	snap := s.collectEnrichedTelemetry(r)
 	writeJSON(w, http.StatusOK, snap)
+}
+
+func (s *Server) getOrBuildTelemetrySSEFrame(r *http.Request) ([]byte, error) {
+	s.markRequestClientTrusted(r)
+
+	// SSE 帧级广播合并（900ms 窗口）：多管理员标签页并发开启实时看板时，
+	// 仅执行 1 次遥测采样 + 嗅探聚合 + JSON 序列化，其余订阅端直接复用帧字节流。
+	s.sseMu.Lock()
+	defer s.sseMu.Unlock()
+	if len(s.sseCachedFrame) > 0 && time.Since(s.sseCachedAt) < 900*time.Millisecond {
+		return s.sseCachedFrame, nil
+	}
+	snap := s.collectEnrichedTelemetry(r)
+	raw, err := json.Marshal(snap)
+	if err != nil {
+		return nil, err
+	}
+	s.sseCachedFrame = raw
+	s.sseCachedAt = time.Now()
+	return raw, nil
 }
 
 func (s *Server) handleTelemetrySSE(w http.ResponseWriter, r *http.Request) {
@@ -40,8 +67,7 @@ func (s *Server) handleTelemetrySSE(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no")
 
 	sendFrame := func() bool {
-		snap := s.collectEnrichedTelemetry(r)
-		raw, err := json.Marshal(snap)
+		raw, err := s.getOrBuildTelemetrySSEFrame(r)
 		if err != nil {
 			return false
 		}
