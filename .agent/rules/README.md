@@ -8,4 +8,4 @@
 
 1. [`01-security-and-github-sanitization.md`](./01-security-and-github-sanitization.md) —— **敏感信息脱敏与 GitHub 提交前强制扫描铁律**
 2. [`02-zero-downtime-live-ops.md`](./02-zero-downtime-live-ops.md) —— **软路由与线上 VPS 零断网、防失联操作铁律**
-3. [`03-code-quality-and-release-gates.md`](./03-code-quality-and-release-gates.md) —— **代码质量、文件权限安全与发布前测试门禁**
+3. [`03-code-quality-and-release-gates.md`](./03-code-quality-and-release-gates.md) —— **代码质量、务实设计原则（OCP/TDD）与发布前测试门禁**
