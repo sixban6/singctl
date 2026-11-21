@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"slices"
 	"strings"
 
 	"singctl/internal/constant"
@@ -14,7 +15,40 @@ import (
 const (
 	defaultFallbackDoHServer = "223.5.5.5"
 	defaultFallbackDoHPath   = "/dns-query"
+	dnsSDBrowseKeyword       = "_dns-sd._udp."
 )
+
+// privateReverseDNSSuffixes 覆盖 RFC 6303 标准私网/链路本地反查域，配合 _dns-sd._udp. 在 sing-box 侧就地返回 NXDOMAIN，
+// 既防止与 AdGuard/dnsmasq 形成回环放大，也杜绝内网 IP 段拓扑外泄到公网 DoH 或运营商 DNS。
+var privateReverseDNSSuffixes = []string{
+	"0.in-addr.arpa",
+	"10.in-addr.arpa",
+	"127.in-addr.arpa",
+	"168.192.in-addr.arpa",
+	"254.169.in-addr.arpa",
+	"16.172.in-addr.arpa",
+	"17.172.in-addr.arpa",
+	"18.172.in-addr.arpa",
+	"19.172.in-addr.arpa",
+	"20.172.in-addr.arpa",
+	"21.172.in-addr.arpa",
+	"22.172.in-addr.arpa",
+	"23.172.in-addr.arpa",
+	"24.172.in-addr.arpa",
+	"25.172.in-addr.arpa",
+	"26.172.in-addr.arpa",
+	"27.172.in-addr.arpa",
+	"28.172.in-addr.arpa",
+	"29.172.in-addr.arpa",
+	"30.172.in-addr.arpa",
+	"31.172.in-addr.arpa",
+	"c.f.ip6.arpa",
+	"d.f.ip6.arpa",
+	"8.e.f.ip6.arpa",
+	"9.e.f.ip6.arpa",
+	"a.e.f.ip6.arpa",
+	"b.e.f.ip6.arpa",
+}
 
 // PatchDNSLocalJSON 在现有 sing-box 配置 JSON 上无损切换 dns_local 解析器：
 //   - useAdGuard=true : 指向本地 AdGuard Home (udp://127.0.0.1:<dnsPort>) 并关闭 sing-box 重复缓存；
@@ -83,23 +117,26 @@ func PatchDNSLocalJSON(rawJSON string, useAdGuard bool, dnsPort int) (string, bo
 	curDisableCache, _ := dnsMap["disable_cache"].(bool)
 	curOptimistic, _ := dnsMap["optimistic"].(bool)
 	cacheMatch := curDisableCache == wantDisableCache && curOptimistic == wantOptimistic
+	ptrChanged := ensurePrivatePTRBlockRules(dnsMap)
 
-	if alreadyMatch && cacheMatch {
+	if alreadyMatch && cacheMatch && !ptrChanged {
 		return rawJSON, false, nil
 	}
 
-	servers[targetIdx] = desiredSrv
-	dnsMap["servers"] = servers
-	dnsMap["disable_cache"] = wantDisableCache
-	dnsMap["optimistic"] = wantOptimistic
+	if !alreadyMatch || !cacheMatch {
+		servers[targetIdx] = desiredSrv
+		dnsMap["servers"] = servers
+		dnsMap["disable_cache"] = wantDisableCache
+		dnsMap["optimistic"] = wantOptimistic
 
-	if expMap, ok := root["experimental"].(map[string]any); ok {
-		if cfMap, ok := expMap["cache_file"].(map[string]any); ok {
-			if useAdGuard {
-				cfMap["store_dns"] = false
-				cfMap["store_fakeip"] = false
-			} else {
-				cfMap["store_dns"] = true
+		if expMap, ok := root["experimental"].(map[string]any); ok {
+			if cfMap, ok := expMap["cache_file"].(map[string]any); ok {
+				if useAdGuard {
+					cfMap["store_dns"] = false
+					cfMap["store_fakeip"] = false
+				} else {
+					cfMap["store_dns"] = true
+				}
 			}
 		}
 	}
@@ -109,6 +146,99 @@ func PatchDNSLocalJSON(rawJSON string, useAdGuard bool, dnsPort int) (string, bo
 		return "", false, err
 	}
 	return formatted, true, nil
+}
+
+// InjectPrivatePTRBlockRules 在非 iOS 客户端 sing-box 配置中幂等前置 RFC 6303 私网反查与 DNS-SD 浏览域的本地 NXDOMAIN 规则。
+func InjectPrivatePTRBlockRules(rawJSON string) (string, error) {
+	if strings.TrimSpace(rawJSON) == "" {
+		return rawJSON, nil
+	}
+	var root map[string]any
+	if err := json.Unmarshal([]byte(rawJSON), &root); err != nil {
+		return "", err
+	}
+	dnsMap, ok := root["dns"].(map[string]any)
+	if !ok {
+		return rawJSON, nil
+	}
+	if !ensurePrivatePTRBlockRules(dnsMap) {
+		return rawJSON, nil
+	}
+	out, err := json.Marshal(root)
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
+func ensurePrivatePTRBlockRules(dnsMap map[string]any) bool {
+	if dnsMap == nil {
+		return false
+	}
+	existing, _ := dnsMap["rules"].([]any)
+	hasSuffixRule := false
+	hasKeywordRule := false
+	for _, item := range existing {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		act, _ := m["action"].(string)
+		rcode, _ := m["rcode"].(string)
+		if act != "predefined" || !strings.EqualFold(rcode, "NXDOMAIN") {
+			continue
+		}
+		if matchesStringSliceField(m["domain_suffix"], privateReverseDNSSuffixes) {
+			hasSuffixRule = true
+		}
+		if matchesStringSliceField(m["domain_keyword"], []string{dnsSDBrowseKeyword}) {
+			hasKeywordRule = true
+		}
+	}
+	if hasSuffixRule && hasKeywordRule {
+		return false
+	}
+
+	prepend := make([]any, 0, 2)
+	if !hasSuffixRule {
+		prepend = append(prepend, map[string]any{
+			"action":        "predefined",
+			"domain_suffix": slices.Clone(privateReverseDNSSuffixes),
+			"rcode":         "NXDOMAIN",
+		})
+	}
+	if !hasKeywordRule {
+		prepend = append(prepend, map[string]any{
+			"action":         "predefined",
+			"domain_keyword": []string{dnsSDBrowseKeyword},
+			"rcode":          "NXDOMAIN",
+		})
+	}
+	merged := make([]any, 0, len(prepend)+len(existing))
+	merged = append(merged, prepend...)
+	merged = append(merged, existing...)
+	dnsMap["rules"] = merged
+	return true
+}
+
+func matchesStringSliceField(raw any, want []string) bool {
+	items, ok := raw.([]any)
+	if !ok {
+		if strItems, okStr := raw.([]string); okStr {
+			return slices.Equal(strItems, want)
+		}
+		return false
+	}
+	if len(items) != len(want) {
+		return false
+	}
+	for i, item := range items {
+		s, ok := item.(string)
+		if !ok || s != want[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func dnsServerEqual(a, b map[string]any) bool {

@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -24,7 +25,7 @@ type ConfigParams struct {
 	Username          string   // 管理面板登录用户名，默认 root
 	PasswordHash      string   // bcrypt 哈希密码（非空，以直接跳过首次引导向导）
 	IsOpenWrt         bool     // OpenWrt 下默认关闭查询日志落盘以保护闪存
-	DisablePrivatePTR bool     // 旁路由模式下关闭私网 PTR 反向解析，防止向主路由回环查询
+	DisablePrivatePTR bool     // 已弃用（始终禁用私网 PTR 以防止与 dnsmasq 形成死循环）；保留字段以兼容既有调用方
 	SubURLs           []string // 订阅链接列表（自动将其域名加入放行白名单，防止误拦截）
 }
 
@@ -36,7 +37,7 @@ type SyncOptions struct {
 	Username          string // 非空且 UpdateAuth=true 时同步更新用户名
 	PasswordHash      string // 非空且 UpdateAuth=true 时同步更新密码哈希
 	UpdateAuth        bool
-	DisablePrivatePTR *bool // 非 nil 时同步 use_private_ptr_resolvers（旁路由防回环）
+	DisablePrivatePTR *bool // 保留字段以兼容调用方（SyncExistingConfig 始终强制关闭 use_private_ptr_resolvers 防回环）
 }
 
 // sanitizeWebBindIP 确保 Web 面板绑定的 IP 合法且绝不为 0.0.0.0 / ::。
@@ -187,7 +188,7 @@ func BuildInitialConfigYAML(p ConfigParams) ([]byte, error) {
 			"bootstrap_prefer_ipv6":     false,
 			"upstream_timeout":          "5s",
 			"private_networks":          []string{},
-			"use_private_ptr_resolvers": !p.DisablePrivatePTR,
+			"use_private_ptr_resolvers": false, // 无论主/旁路由均禁用私网 PTR 反查：AdGuard 位于 127.0.0.1:5353 后端，开启会导致 Bonjour PTR 经 dnsmasq ↔ sing-box 无限放大环路
 			"local_ptr_upstreams":       []string{},
 			"use_dns64":                 false,
 			"dns64_prefixes":            []string{},
@@ -213,18 +214,20 @@ func BuildInitialConfigYAML(p ConfigParams) ([]byte, error) {
 			"strict_sni_check":      false,
 		},
 		"querylog": map[string]any{
-			"dir_path":     "",
-			"ignored":      []string{},
-			"interval":     queryLogInterval,
-			"size_memory":  1000,
-			"enabled":      true,
-			"file_enabled": queryLogFileEnabled,
+			"dir_path":        "",
+			"ignored":         []string{"localhost"},
+			"ignored_enabled": true,
+			"interval":        queryLogInterval,
+			"size_memory":     1000,
+			"enabled":         true,
+			"file_enabled":    queryLogFileEnabled,
 		},
 		"statistics": map[string]any{
-			"dir_path": "",
-			"ignored":  []string{},
-			"interval": "24h",
-			"enabled":  true,
+			"dir_path":        "",
+			"ignored":         []string{"localhost"},
+			"ignored_enabled": true,
+			"interval":        "24h",
+			"enabled":         true,
 		},
 		"filters": []map[string]any{
 			{
@@ -375,8 +378,17 @@ func SyncExistingConfig(configPath string, opts SyncOptions) (bool, error) {
 	if setYAMLStringSlice(dnsMap, "bind_hosts", []string{"127.0.0.1"}) {
 		changed = true
 	}
-	if opts.DisablePrivatePTR != nil {
-		if setYAMLScalar(dnsMap, "use_private_ptr_resolvers", strconv.FormatBool(!*opts.DisablePrivatePTR), "!!bool") {
+	// 无论主路由还是旁路由，AdGuard Home 仅作为 sing-box dns_local 后端 (127.0.0.1:5353)；
+	// 若开启私网 PTR 解析且 resolv.conf 指向 dnsmasq (:53)，会与 sing-box 形成指数放大环路，因此始终强制关闭。
+	if setYAMLScalar(dnsMap, "use_private_ptr_resolvers", "false", "!!bool") {
+		changed = true
+	}
+	for _, section := range []string{"querylog", "statistics"} {
+		secMap := ensureYAMLSubMap(doc, section)
+		if setYAMLScalar(secMap, "ignored_enabled", "true", "!!bool") {
+			changed = true
+		}
+		if ensureYAMLStringSliceContains(secMap, "ignored", "localhost") {
 			changed = true
 		}
 	}
@@ -505,4 +517,55 @@ func setYAMLNode(parent *yaml.Node, key string, node *yaml.Node) {
 		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key},
 		node,
 	)
+}
+
+func ensureYAMLStringSliceContains(parent *yaml.Node, key, val string) bool {
+	for i := 0; i+1 < len(parent.Content); i += 2 {
+		if parent.Content[i].Value == key && parent.Content[i+1].Kind == yaml.SequenceNode {
+			seq := parent.Content[i+1]
+			for _, item := range seq.Content {
+				if item.Value == val {
+					return false
+				}
+			}
+			seq.Content = append(seq.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: val})
+			return true
+		}
+	}
+	return setYAMLStringSlice(parent, key, []string{val})
+}
+
+// NeedsHardeningSync 检测现有 AdGuardHome.yaml 是否仍存在易引发回环的 use_private_ptr_resolvers: true，
+// 或尚未过滤 localhost 探活统计噪声，供 Watchdog 自动无损自愈。
+func NeedsHardeningSync(configPath string) bool {
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		return false
+	}
+	var parsed struct {
+		DNS struct {
+			UsePrivatePTR *bool `yaml:"use_private_ptr_resolvers"`
+		} `yaml:"dns"`
+		QueryLog struct {
+			Ignored        []string `yaml:"ignored"`
+			IgnoredEnabled bool     `yaml:"ignored_enabled"`
+		} `yaml:"querylog"`
+		Statistics struct {
+			Ignored        []string `yaml:"ignored"`
+			IgnoredEnabled bool     `yaml:"ignored_enabled"`
+		} `yaml:"statistics"`
+	}
+	if err := yaml.Unmarshal(raw, &parsed); err != nil {
+		return false
+	}
+	if parsed.DNS.UsePrivatePTR == nil || *parsed.DNS.UsePrivatePTR {
+		return true
+	}
+	if !parsed.QueryLog.IgnoredEnabled || !slices.Contains(parsed.QueryLog.Ignored, "localhost") {
+		return true
+	}
+	if !parsed.Statistics.IgnoredEnabled || !slices.Contains(parsed.Statistics.Ignored, "localhost") {
+		return true
+	}
+	return false
 }

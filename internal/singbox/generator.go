@@ -215,6 +215,15 @@ func (g *ConfigGenerator) GenerateForPlatform(platform string) (string, error) {
 		return "", err
 	}
 
+	// 非 iOS 客户端在 dns.rules 最前端前置 RFC 6303 私网反查与 DNS-SD 浏览域本地 NXDOMAIN 规则，
+	// 防止与 AdGuard/dnsmasq 构成回环并避免内网网段反查外泄到公网 DoH
+	if !isIOS {
+		withIPv6, err = InjectPrivatePTRBlockRules(withIPv6)
+		if err != nil {
+			return "", err
+		}
+	}
+
 	// 客户端默认将 log.level 从 "info" 收敛为 "warn"，从源头避免写爆 OpenWrt /tmp
 	withWarnLog, err := NormalizeClientLogLevel(withIPv6)
 	if err != nil {

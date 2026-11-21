@@ -137,6 +137,25 @@ func ProbeDNS(addr string, timeout time.Duration) error {
 	return nil
 }
 
+// ProbeDNSWithRetry 在指定重试次数内执行局部 DNS 探活，避免瞬时调度抖动或单次 UDP 丢包误报异常。
+func ProbeDNSWithRetry(addr string, timeout time.Duration, attempts int, retryDelay time.Duration) error {
+	if attempts <= 1 {
+		return ProbeDNS(addr, timeout)
+	}
+	var lastErr error
+	for i := range attempts {
+		if err := ProbeDNS(addr, timeout); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		if i+1 < attempts && retryDelay > 0 {
+			time.Sleep(retryDelay)
+		}
+	}
+	return lastErr
+}
+
 // ProbeUpstreamResolution 通过本地 AdGuardHome (127.0.0.1:port) 实际解析指定域名，测量端到端 DoH 解析耗时。
 func ProbeUpstreamResolution(dnsAddr, domain string, timeout time.Duration) ([]string, time.Duration, error) {
 	if timeout <= 0 {

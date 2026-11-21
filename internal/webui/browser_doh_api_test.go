@@ -48,13 +48,13 @@ func TestBrowserDoHCheck_CleanSameOrgAnycastNoFalsePositive(t *testing.T) {
 			ClashConnections: func(context.Context) ([]BrowserDoHClashConn, error) {
 				return []BrowserDoHClashConn{
 					{
-						SourceIP:  "192.168.1.50",
-						DestIP:    "198.51.100.20",
-						DestPort:  "443",
-						Host:      "api.example.com",
-						Network:   "tcp",
-						Rule:      "Match",
-						Chains:    []string{"#VPS"},
+						SourceIP: "192.168.1.50",
+						DestIP:   "198.51.100.20",
+						DestPort: "443",
+						Host:     "api.example.com",
+						Network:  "tcp",
+						Rule:     "Match",
+						Chains:   []string{"#VPS"},
 					},
 				}, nil
 			},
