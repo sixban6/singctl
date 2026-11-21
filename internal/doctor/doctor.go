@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"net"
@@ -15,6 +16,7 @@ import (
 	"singctl/internal/constant"
 	"singctl/internal/deploy"
 	"singctl/internal/logger"
+	"singctl/internal/platform/servicemgr"
 	"singctl/internal/subhub"
 )
 
@@ -582,12 +584,13 @@ func formatProfileSummary(p *ExitProfile) string {
 }
 
 func isServiceActive(serviceName string) bool {
-	// 针对 SubHub 原生订阅引擎: 优先检查 singctl-sub systemd 服务及本地 3001 端口
+	ctx := context.Background()
+	mgr := servicemgr.Detect(nil)
+
+	// 针对 SubHub 原生订阅引擎: 优先检查 singctl-sub 服务及本地 3001 端口
 	if serviceName == "singctl-sub" || serviceName == "substore" || serviceName == "sub-store" {
-		if out, err := exec.Command("systemctl", "is-active", "singctl-sub").Output(); err == nil {
-			if strings.TrimSpace(string(out)) == "active" {
-				return true
-			}
+		if mgr.IsActive(ctx, "singctl-sub") {
+			return true
 		}
 		conn, err := net.DialTimeout("tcp", subhub.DefaultListenAddr, 300*time.Millisecond)
 		if err == nil {
@@ -603,14 +606,13 @@ func isServiceActive(serviceName string) bool {
 			_ = conn.Close()
 			return true
 		}
-		if out, err := exec.Command("systemctl", "is-active", "warp-svc").Output(); err == nil && strings.TrimSpace(string(out)) == "active" {
+		if mgr.IsActive(ctx, "warp-svc") {
 			return true
 		}
 	}
 
-	// 优先检查 systemctl
-	out, err := exec.Command("systemctl", "is-active", serviceName).Output()
-	if err == nil && strings.TrimSpace(string(out)) == "active" {
+	// 优先通过 servicemgr 检查宿主服务状态
+	if mgr.IsActive(ctx, serviceName) {
 		return true
 	}
 	// 回退检查进程名称

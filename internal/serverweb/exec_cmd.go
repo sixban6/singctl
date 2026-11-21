@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"singctl/internal/platform/servicemgr"
 )
 
 const (
@@ -70,6 +72,10 @@ func (s *Server) activeCmdRunner() serviceCmdRunner {
 		return s.cmdRunner
 	}
 	return defaultServiceCmdRunner{}
+}
+
+func (s *Server) serviceMgr() servicemgr.Manager {
+	return servicemgr.NewSystemd(s.activeCmdRunner())
 }
 
 func (s *Server) runCmd(ctx context.Context, timeout time.Duration, name string, args ...string) error {

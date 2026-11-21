@@ -3,6 +3,7 @@ package deploy
 import (
 	"bytes"
 	"cmp"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -932,20 +933,21 @@ func defaultIsSingBoxActive() bool {
 	if _, err := exec.LookPath("systemctl"); err != nil {
 		return false
 	}
-	out, err := exec.Command("systemctl", "is-active", "sing-box").Output()
-	return err == nil && strings.TrimSpace(string(out)) == "active"
+	return serviceMgr().IsActive(context.Background(), "sing-box")
 }
 
 func defaultReloadSingBoxService(wasActive bool) error {
 	if _, err := exec.LookPath("systemctl"); err != nil {
 		return nil
 	}
+	ctx := context.Background()
+	mgr := serviceMgr()
 	if !wasActive {
-		return exec.Command("systemctl", "restart", "sing-box").Run()
+		return mgr.Restart(ctx, "sing-box")
 	}
 	// 利用 sing-box.service 的 ExecReload=/bin/kill -HUP $MAINPID 实现零断流重载
-	if err := exec.Command("systemctl", "reload", "sing-box").Run(); err != nil {
-		if rErr := exec.Command("systemctl", "restart", "sing-box").Run(); rErr != nil {
+	if err := mgr.Reload(ctx, "sing-box"); err != nil {
+		if rErr := mgr.Restart(ctx, "sing-box"); rErr != nil {
 			return rErr
 		}
 	}
@@ -963,5 +965,5 @@ func defaultRestoreSingBoxService(wasActive bool) error {
 	if _, err := exec.LookPath("systemctl"); err != nil || !wasActive {
 		return nil
 	}
-	return exec.Command("systemctl", "restart", "sing-box").Run()
+	return serviceMgr().Restart(context.Background(), "sing-box")
 }

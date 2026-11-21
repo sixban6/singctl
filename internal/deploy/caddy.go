@@ -2,6 +2,7 @@ package deploy
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -31,11 +32,13 @@ func UninstallCaddy() error {
 // RestartCaddy restarts the caddy systemd service
 func RestartCaddy() error {
 	logger.Info("Restarting Caddy service...")
-	_ = runCmd("systemctl", "daemon-reload")
-	if err := runCmd("systemctl", "enable", "--now", "caddy"); err != nil {
+	ctx := context.Background()
+	mgr := serviceMgr()
+	_ = mgr.DaemonReload(ctx)
+	if err := mgr.Enable(ctx, "caddy"); err != nil {
 		return fmt.Errorf("failed to enable caddy: %w", err)
 	}
-	if err := runCmd("systemctl", "restart", "caddy"); err != nil {
+	if err := mgr.Restart(ctx, "caddy"); err != nil {
 		return fmt.Errorf("failed to restart caddy: %w", err)
 	}
 	return nil
@@ -64,12 +67,14 @@ func SyncCaddyfile(cfg *config.Config) error {
 			return err
 		}
 	}
-	if !changed && runCmd("systemctl", "is-active", "--quiet", "caddy") == nil {
+	ctx := context.Background()
+	mgr := serviceMgr()
+	if !changed && mgr.IsActive(ctx, "caddy") {
 		CleanupLegacyCaddyMtlsDir()
 		DetachCaddyFromApt()
 		return nil
 	}
-	if err := runCmd("systemctl", "reload", "caddy"); err != nil {
+	if err := mgr.Reload(ctx, "caddy"); err != nil {
 		if rErr := RestartCaddy(); rErr != nil {
 			if changed && hadPrev {
 				rollbackCaddyfile(targetPath, prev, hadPrev)

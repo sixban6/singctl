@@ -8,12 +8,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
 
-	"singctl/internal/util/netinfo"
+	"singctl/internal/platform/servicemgr"
 )
 
 // BuildSystemdUnit 生成 Debian/Ubuntu/Linux 标准 systemd 服务单元内容。
@@ -66,25 +65,11 @@ start_service() {
 }
 
 func hasSystemd() bool {
-	if runtime.GOOS != "linux" || netinfo.IsOpenWrt() {
-		return false
-	}
-	if _, err := os.Stat("/run/systemd/system"); err != nil {
-		return false
-	}
-	_, err := exec.LookPath("systemctl")
-	return err == nil
+	return servicemgr.DetectHost().Kind == servicemgr.InitSystemd
 }
 
 func hasOpenWrtProcd() bool {
-	if runtime.GOOS != "linux" {
-		return false
-	}
-	if !netinfo.IsOpenWrt() {
-		return false
-	}
-	_, err := os.Stat("/etc/rc.common")
-	return err == nil
+	return servicemgr.DetectHost().Kind == servicemgr.InitProcd
 }
 
 // ProbeDNS 向指定 UDP DNS 地址（如 127.0.0.1:5353）发送标准 RFC 1035 本地探测包（localhost. A），

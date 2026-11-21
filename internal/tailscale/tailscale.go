@@ -18,6 +18,7 @@ import (
 	"singctl/internal/constant"
 
 	"singctl/internal/logger"
+	"singctl/internal/platform/servicemgr"
 	"singctl/internal/util/file"
 	"singctl/internal/util/netinfo"
 	releasepkg "singctl/internal/util/release"
@@ -168,12 +169,13 @@ func (t *Tailscale) Install() error {
 		if err := CreateInitScript(hasTun); err != nil {
 			return err
 		}
-		// 4. Enable and Start Service
+		mgr := servicemgr.NewProcd(nil, filepath.Dir(constant.TailscaleInitdScript))
+		svcName := filepath.Base(constant.TailscaleInitdScript)
 		logger.Info("Enabling and starting service...")
-		if err := exec.Command(constant.TailscaleInitdScript, "enable").Run(); err != nil {
+		if err := mgr.Enable(ctx, svcName); err != nil {
 			return fmt.Errorf("enable service failed: %w", err)
 		}
-		if err := exec.Command(constant.TailscaleInitdScript, "start").Run(); err != nil {
+		if err := mgr.Start(ctx, svcName); err != nil {
 			return fmt.Errorf("start service failed: %w", err)
 		}
 	} else {
@@ -181,13 +183,16 @@ func (t *Tailscale) Install() error {
 		if err := createSystemdScript(hasTun); err != nil {
 			return err
 		}
-		// 4. Enable and Start Service
-		logger.Info("Enabling and starting service via systemctl...")
-		if err := exec.Command("systemctl", "daemon-reload").Run(); err != nil {
+		mgr := servicemgr.NewSystemd(nil)
+		logger.Info("Enabling and starting service via servicemgr...")
+		if err := mgr.DaemonReload(ctx); err != nil {
 			logger.Warn("systemctl daemon-reload failed: %v", err)
 		}
-		if err := exec.Command("systemctl", "enable", "--now", "tailscaled.service").Run(); err != nil {
-			return fmt.Errorf("systemctl enable and start service failed: %w", err)
+		if err := mgr.Enable(ctx, "tailscaled.service"); err != nil {
+			return fmt.Errorf("enable tailscaled service failed: %w", err)
+		}
+		if err := mgr.Start(ctx, "tailscaled.service"); err != nil {
+			return fmt.Errorf("start tailscaled service failed: %w", err)
 		}
 	}
 
@@ -223,13 +228,15 @@ func (t *Tailscale) StartWithOptions(opts StartOptions) error {
 
 	// 0. Ensure tailscaled service is running
 	logger.Info("Ensuring tailscaled service is running...")
+	svcCtx := context.Background()
 	if isOpenWrt {
-		if err := exec.Command(constant.TailscaleInitdScript, "start").Run(); err != nil {
+		mgr := servicemgr.NewProcd(nil, filepath.Dir(constant.TailscaleInitdScript))
+		if err := mgr.Start(svcCtx, filepath.Base(constant.TailscaleInitdScript)); err != nil {
 			logger.Warn("Failed to start tailscaled service: %v", err)
 		}
 	} else {
-		if err := exec.Command("systemctl", "start", "tailscaled.service").Run(); err != nil {
-			logger.Warn("Failed to start tailscaled service via systemctl: %v", err)
+		if err := servicemgr.NewSystemd(nil).Start(svcCtx, "tailscaled.service"); err != nil {
+			logger.Warn("Failed to start tailscaled service: %v", err)
 		}
 	}
 	// Give it a moment to start and wait for socket
@@ -453,12 +460,14 @@ func (t *Tailscale) Stop() error {
 	}
 
 	// 2. Stop the service
+	stopCtx := context.Background()
 	if t.OpenWrtCheck() {
-		if err := exec.Command(constant.TailscaleInitdScript, "stop").Run(); err != nil {
+		mgr := servicemgr.NewProcd(nil, filepath.Dir(constant.TailscaleInitdScript))
+		if err := mgr.Stop(stopCtx, filepath.Base(constant.TailscaleInitdScript)); err != nil {
 			return fmt.Errorf("stop service failed: %w", err)
 		}
 	} else {
-		if err := exec.Command("systemctl", "stop", "tailscaled.service").Run(); err != nil {
+		if err := servicemgr.NewSystemd(nil).Stop(stopCtx, "tailscaled.service"); err != nil {
 			return fmt.Errorf("stop systemd service failed: %w", err)
 		}
 	}

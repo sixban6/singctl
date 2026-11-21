@@ -20,6 +20,7 @@ import (
 	"singctl/internal/config"
 	"singctl/internal/constant"
 	"singctl/internal/logger"
+	"singctl/internal/platform/servicemgr"
 	"singctl/internal/util/file"
 	"singctl/internal/util/netinfo"
 	releasepkg "singctl/internal/util/release"
@@ -482,14 +483,15 @@ func (m *Manager) installAndStartService() error {
 
 	if hasOpenWrtProcd() && m.initdScript != "" {
 		sanitizeOpenWrtDnsmasqTTL()
-		scriptContent := BuildOpenWrtInitScript(m.binPath, m.aghConfigFile, m.aghWorkDir)
-		if err := os.WriteFile(m.initdScript, []byte(scriptContent), 0755); err != nil {
-			return fmt.Errorf("写入 OpenWrt 服务脚本 %s 失败: %w", m.initdScript, err)
+		mgr := servicemgr.NewProcd(nil, filepath.Dir(m.initdScript))
+		spec := servicemgr.UnitSpec{
+			Name:      "AdGuardHome",
+			ProcdPath: m.initdScript,
+			ProcdBody: BuildOpenWrtInitScript(m.binPath, m.aghConfigFile, m.aghWorkDir),
 		}
-		_ = exec.Command(m.initdScript, "enable").Run()
-		if out, err := exec.Command(m.initdScript, "restart").CombinedOutput(); err != nil {
-			if out2, err2 := exec.Command(m.initdScript, "start").CombinedOutput(); err2 != nil {
-				logger.Warn("procd 启动 AdGuardHome 返回异常 (%v: %s / %s)，尝试直接守护拉起", err2, strings.TrimSpace(string(out)), strings.TrimSpace(string(out2)))
+		if err := mgr.InstallUnit(context.Background(), spec); err != nil {
+			if startErr := mgr.Start(context.Background(), "AdGuardHome"); startErr != nil {
+				logger.Warn("procd 启动 AdGuardHome 返回异常 (%v / %v)，尝试直接守护拉起", err, startErr)
 			}
 		}
 		time.Sleep(300 * time.Millisecond)
@@ -500,14 +502,14 @@ func (m *Manager) installAndStartService() error {
 	}
 
 	if hasSystemd() && m.systemdUnit != "" {
-		unitContent := BuildSystemdUnit(m.binPath, m.aghConfigFile, m.aghWorkDir)
-		if err := os.WriteFile(m.systemdUnit, []byte(unitContent), 0644); err != nil {
-			return fmt.Errorf("写入 systemd 服务文件 %s 失败: %w", m.systemdUnit, err)
+		mgr := servicemgr.NewSystemdWithDir(nil, filepath.Dir(m.systemdUnit))
+		spec := servicemgr.UnitSpec{
+			Name:        "AdGuardHome",
+			SystemdPath: m.systemdUnit,
+			SystemdBody: BuildSystemdUnit(m.binPath, m.aghConfigFile, m.aghWorkDir),
 		}
-		_ = exec.Command("systemctl", "daemon-reload").Run()
-		_ = exec.Command("systemctl", "enable", "AdGuardHome").Run()
-		if out, err := exec.Command("systemctl", "restart", "AdGuardHome").CombinedOutput(); err != nil {
-			return fmt.Errorf("启动 systemd AdGuardHome 服务失败: %w\n%s", err, strings.TrimSpace(string(out)))
+		if err := mgr.InstallUnit(context.Background(), spec); err != nil {
+			return fmt.Errorf("启动 systemd AdGuardHome 服务失败: %w", err)
 		}
 		return nil
 	}
@@ -589,13 +591,12 @@ func (m *Manager) Start() error {
 
 // Stop 停止正在运行的 AdGuard Home 服务。
 func (m *Manager) Stop() error {
+	ctx := context.Background()
 	if hasOpenWrtProcd() && m.initdScript != "" {
-		if _, err := os.Stat(m.initdScript); err == nil {
-			_ = exec.Command(m.initdScript, "stop").Run()
-		}
+		_ = servicemgr.NewProcd(nil, filepath.Dir(m.initdScript)).Stop(ctx, "AdGuardHome")
 	}
 	if hasSystemd() {
-		_ = exec.Command("systemctl", "stop", "AdGuardHome").Run()
+		_ = servicemgr.NewSystemd(nil).Stop(ctx, "AdGuardHome")
 	}
 	if isProcessRunning() {
 		_ = exec.Command("pkill", "-f", "AdGuardHome").Run()
@@ -677,14 +678,18 @@ func (m *Manager) ResetCredentials(newUsername string) (string, string, error) {
 func (m *Manager) Uninstall(purgeConfig bool) error {
 	_ = m.Stop()
 
+	ctx := context.Background()
 	if hasOpenWrtProcd() && m.initdScript != "" {
-		_ = exec.Command(m.initdScript, "disable").Run()
-		_ = os.Remove(m.initdScript)
+		_ = servicemgr.NewProcd(nil, filepath.Dir(m.initdScript)).RemoveUnit(ctx, servicemgr.UnitSpec{
+			Name:      "AdGuardHome",
+			ProcdPath: m.initdScript,
+		})
 	}
 	if hasSystemd() && m.systemdUnit != "" {
-		_ = exec.Command("systemctl", "disable", "AdGuardHome").Run()
-		_ = os.Remove(m.systemdUnit)
-		_ = exec.Command("systemctl", "daemon-reload").Run()
+		_ = servicemgr.NewSystemdWithDir(nil, filepath.Dir(m.systemdUnit)).RemoveUnit(ctx, servicemgr.UnitSpec{
+			Name:        "AdGuardHome",
+			SystemdPath: m.systemdUnit,
+		})
 	}
 	if m.binPath != "" {
 		_ = os.Remove(m.binPath)

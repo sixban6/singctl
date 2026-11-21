@@ -14,8 +14,13 @@ import (
 
 	"singctl/internal/config"
 	"singctl/internal/deploy"
+	"singctl/internal/platform/servicemgr"
 	"singctl/internal/updater"
 )
+
+func healServiceMgr() servicemgr.Manager {
+	return servicemgr.NewSystemd(nil)
+}
 
 var healRunMu = make(chan struct{}, 1)
 
@@ -231,7 +236,7 @@ func healCoreComponent(ctx context.Context, cfg *config.Config, cfgPath string, 
 			if bakPath != "" {
 				_ = restoreBinary(bakPath, binPath)
 				if wasActive {
-					_ = exec.Command("systemctl", "restart", "sing-box").Run()
+					_ = healServiceMgr().Restart(ctx, "sing-box")
 				}
 				return LayerActionDetail{
 					Layer:      "core",
@@ -249,7 +254,7 @@ func healCoreComponent(ctx context.Context, cfg *config.Config, cfgPath string, 
 			if bakPath != "" {
 				_ = restoreBinary(bakPath, binPath)
 				if wasActive {
-					_ = exec.Command("systemctl", "restart", "sing-box").Run()
+					_ = healServiceMgr().Restart(ctx, "sing-box")
 				}
 			}
 			return LayerActionDetail{
@@ -279,7 +284,7 @@ func healCoreComponent(ctx context.Context, cfg *config.Config, cfgPath string, 
 			if bakPath != "" {
 				_ = restoreBinary(bakPath, binPath)
 				if wasActive {
-					_ = exec.Command("systemctl", "restart", "caddy").Run()
+					_ = healServiceMgr().Restart(ctx, "caddy")
 				}
 				return LayerActionDetail{
 					Layer:      "core",
@@ -296,7 +301,7 @@ func healCoreComponent(ctx context.Context, cfg *config.Config, cfgPath string, 
 			if bakPath != "" {
 				_ = restoreBinary(bakPath, binPath)
 				if wasActive {
-					_ = exec.Command("systemctl", "restart", "caddy").Run()
+					_ = healServiceMgr().Restart(ctx, "caddy")
 				}
 			}
 			return LayerActionDetail{
@@ -326,7 +331,7 @@ func healCoreComponent(ctx context.Context, cfg *config.Config, cfgPath string, 
 			if bakPath != "" {
 				_ = restoreBinary(bakPath, binPath)
 				if wasActive {
-					_ = exec.Command("systemctl", "restart", "wireproxy").Run()
+					_ = healServiceMgr().Restart(ctx, "wireproxy")
 				}
 			}
 			return LayerActionDetail{
@@ -340,7 +345,7 @@ func healCoreComponent(ctx context.Context, cfg *config.Config, cfgPath string, 
 		if wasActive && !waitServiceActive(ctx, "wireproxy", 12*time.Second) {
 			if bakPath != "" {
 				_ = restoreBinary(bakPath, binPath)
-				_ = exec.Command("systemctl", "restart", "wireproxy").Run()
+				_ = healServiceMgr().Restart(ctx, "wireproxy")
 			}
 			return LayerActionDetail{
 				Layer:      "core",
@@ -380,7 +385,7 @@ func healCoreComponent(ctx context.Context, cfg *config.Config, cfgPath string, 
 			}
 		}
 		if isServiceActive("singctl-sub") {
-			_ = exec.Command("systemctl", "restart", "singctl-sub").Run()
+			_ = healServiceMgr().Restart(ctx, "singctl-sub")
 		}
 		restartWebDaemonSafely(asyncWebRestart)
 		return LayerActionDetail{
@@ -504,21 +509,20 @@ func healOSLayer(ctx context.Context, asyncWebRestart bool) []LayerActionDetail 
 			switch svc {
 			case "sshd":
 				if verifySSHDConfig() {
-					if exec.Command("systemctl", "reload", "sshd").Run() != nil {
-						_ = exec.Command("systemctl", "reload", "ssh").Run()
+					mgr := healServiceMgr()
+					if mgr.Reload(ctx, "sshd") != nil {
+						_ = mgr.Reload(ctx, "ssh")
 					}
 					reloaded = append(reloaded, "sshd")
 				}
 			case "caddy":
-				if exec.Command("systemctl", "reload", "caddy").Run() != nil {
-					_ = exec.Command("systemctl", "restart", "caddy").Run()
-				}
+				_ = healServiceMgr().ReloadOrRestart(ctx, "caddy")
 				reloaded = append(reloaded, "caddy")
 			case "singctl-ui":
 				restartWebDaemonSafely(asyncWebRestart)
 				reloaded = append(reloaded, "singctl-ui")
 			default:
-				if exec.Command("systemctl", "restart", svc).Run() == nil {
+				if healServiceMgr().Restart(ctx, svc) == nil {
 					reloaded = append(reloaded, svc)
 				}
 			}
@@ -577,8 +581,7 @@ func isServiceActive(unit string) bool {
 	if !hasBinary("systemctl") {
 		return false
 	}
-	out, err := exec.Command("systemctl", "is-active", unit).Output()
-	return err == nil && strings.TrimSpace(string(out)) == "active"
+	return healServiceMgr().IsActive(context.Background(), unit)
 }
 
 func waitServiceActive(ctx context.Context, unit string, timeout time.Duration) bool {
@@ -601,7 +604,7 @@ func restartWebDaemonSafely(async bool) {
 		if async {
 			_ = exec.Command("sh", "-c", "sleep 2 && systemctl restart singctl-ui >/dev/null 2>&1").Start()
 		} else {
-			_ = exec.Command("systemctl", "restart", "singctl-ui").Run()
+			_ = healServiceMgr().Restart(context.Background(), "singctl-ui")
 		}
 		return
 	}

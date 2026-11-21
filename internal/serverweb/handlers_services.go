@@ -18,9 +18,23 @@ import (
 
 	"singctl/internal/config"
 	"singctl/internal/deploy"
+	"singctl/internal/platform/servicemgr"
 	"singctl/internal/updater"
 	"singctl/internal/util/file"
 )
+
+func dispatchManagerAction(ctx context.Context, mgr servicemgr.Manager, action, unit string) error {
+	switch action {
+	case "start":
+		return mgr.Start(ctx, unit)
+	case "stop":
+		return mgr.Stop(ctx, unit)
+	case "reload":
+		return mgr.Reload(ctx, unit)
+	default:
+		return mgr.Restart(ctx, unit)
+	}
+}
 
 func (s *Server) handleServiceAction(w http.ResponseWriter, r *http.Request) {
 	var body struct {
@@ -41,35 +55,36 @@ func (s *Server) handleServiceAction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var cmdErr error
+	mgr := s.serviceMgr()
 	switch service {
 	case "caddy":
 		if action == "reload" {
 			caddyCfg := s.resolveServiceConfigPath("caddy", "/etc/caddy/Caddyfile")
 			cmdErr = s.runCmd(context.Background(), defaultServerActionTimeout, "caddy", "reload", "--config", caddyCfg)
 			if cmdErr != nil {
-				cmdErr = s.runCmd(context.Background(), defaultServerActionTimeout, "systemctl", "reload", "caddy")
+				cmdErr = mgr.Reload(context.Background(), "caddy")
 			}
 		} else {
-			cmdErr = s.runCmd(context.Background(), defaultServerActionTimeout, "systemctl", action, "caddy")
+			cmdErr = dispatchManagerAction(context.Background(), mgr, action, "caddy")
 		}
 	case "singbox":
 		if action == "reload" {
 			action = "restart"
 		}
-		cmdErr = s.runCmd(context.Background(), defaultServerActionTimeout, "systemctl", action, "sing-box")
+		cmdErr = dispatchManagerAction(context.Background(), mgr, action, "sing-box")
 	case "subhub", "substore":
 		if action == "reload" {
 			action = "restart"
 		}
-		cmdErr = s.runCmd(context.Background(), defaultServerActionTimeout, "systemctl", action, "singctl-sub")
+		cmdErr = dispatchManagerAction(context.Background(), mgr, action, "singctl-sub")
 	case "warp":
 		if action == "reload" {
 			action = "restart"
 		}
-		cmdErr = s.runCmd(context.Background(), defaultServerActionTimeout, "systemctl", action, "wireproxy")
+		cmdErr = dispatchManagerAction(context.Background(), mgr, action, "wireproxy")
 	case "all":
 		for _, unit := range []string{"sing-box", "caddy", "singctl-sub", "wireproxy"} {
-			_ = s.runCmd(context.Background(), defaultServerActionTimeout, "systemctl", "restart", unit)
+			_ = mgr.Restart(context.Background(), unit)
 		}
 	default:
 		writeJSONError(w, http.StatusBadRequest, "未知服务: "+service)
@@ -156,7 +171,7 @@ func (s *Server) handleUpgradeService(w http.ResponseWriter, r *http.Request) {
 		}
 		newVer := deploy.GetInstalledSubhubVersion()
 		if checkServiceRunning("singctl-sub") {
-			_ = s.runCmd(context.Background(), defaultServerActionTimeout, "systemctl", "restart", "singctl-sub")
+			_ = s.serviceMgr().Restart(context.Background(), "singctl-sub")
 		}
 		msg := fmt.Sprintf("SingCtl 已平滑升级至 %s，后台面板将在 1 秒后自动热重启", cmp.Or(newVer, "最新版"))
 		s.invalidateStatusCaches()
@@ -209,15 +224,16 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	mgr := s.serviceMgr()
 	switch body.Action {
 	case "restart-caddy":
-		_ = s.runCmd(context.Background(), defaultServerActionTimeout, "systemctl", "restart", "caddy")
+		_ = mgr.Restart(context.Background(), "caddy")
 	case "restart-singbox":
-		_ = s.runCmd(context.Background(), defaultServerActionTimeout, "systemctl", "restart", "sing-box")
+		_ = mgr.Restart(context.Background(), "sing-box")
 	case "restart-subhub":
-		_ = s.runCmd(context.Background(), defaultServerActionTimeout, "systemctl", "restart", "singctl-sub")
+		_ = mgr.Restart(context.Background(), "singctl-sub")
 	case "restart-warp":
-		_ = s.runCmd(context.Background(), defaultServerActionTimeout, "systemctl", "restart", "wireproxy")
+		_ = mgr.Restart(context.Background(), "wireproxy")
 	default:
 		writeJSONError(w, http.StatusBadRequest, "未知操作: "+body.Action)
 		return
@@ -484,11 +500,11 @@ func (s *Server) handleUpdateServiceConfig(w http.ResponseWriter, r *http.Reques
 			return s.runCmd(context.Background(), defaultServerActionTimeout, "caddy", "reload", "--config", path)
 		case "singbox":
 			if s.canRunSystemctl() {
-				return s.runCmd(context.Background(), defaultServerActionTimeout, "systemctl", "restart", "sing-box")
+				return s.serviceMgr().Restart(context.Background(), "sing-box")
 			}
 		case "warp":
 			if s.canRunSystemctl() {
-				return s.runCmd(context.Background(), defaultServerActionTimeout, "systemctl", "restart", "wireproxy")
+				return s.serviceMgr().Restart(context.Background(), "wireproxy")
 			}
 		}
 		return nil
