@@ -37,6 +37,7 @@ import {
   writeCachedQuery,
 } from '../../hooks';
 import { clientApi } from '../api';
+import { AUDIT_DEFAULT_CACHE_KEY } from '../cacheKeys';
 import {
   AuditAIConfig,
   AuditAIReview,
@@ -347,7 +348,6 @@ function persistAICache(map: Map<string, AuditAIReview>) {
   }
 }
 
-export const AUDIT_DEFAULT_CACHE_KEY = 'client:audit:default';
 const FLOW_RENDER_STEP = 80;
 
 export interface AuditPageProps {

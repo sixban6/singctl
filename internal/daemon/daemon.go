@@ -91,6 +91,8 @@ type Daemon struct {
 	subSyncRunning      atomic.Bool
 	subSyncMu           sync.Mutex
 	lastSubSyncCheckAt  time.Time
+	subSyncCheckTimeout time.Duration
+	subSyncBinOverride  string
 	failoverRunning     atomic.Bool
 	failover            *GroupFailoverState
 	auditCollector      *audit.Collector
@@ -290,6 +292,7 @@ func (d *Daemon) runForeground() error {
 
 // spawn fork 后台子进程并等待就绪信号
 func (d *Daemon) spawn() error {
+	// Intentional bare exec.Command: detached background daemon child must outlive spawn().
 	cmd := exec.Command(os.Args[0], os.Args[1:]...)
 	cmd.Env = append(os.Environ(), envDaemonized+"=1")
 

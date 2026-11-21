@@ -115,6 +115,9 @@ type Server struct {
 	healRefreshing        atomic.Bool
 	healScannerOverride   func(ctx context.Context, configPath, currentVer string) heal.StatusReport
 	subWarmupRunning      atomic.Bool
+	cmdRunner             serviceCmdRunner
+	serviceConfigPaths    map[string]string
+	singBoxBinOverride    string
 }
 
 type SessionRecord struct {

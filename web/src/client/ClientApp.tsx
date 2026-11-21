@@ -19,11 +19,13 @@ import {
 import {
   AppShell,
   Button,
+  CardSkeleton,
   CommandItem,
   ConfirmDialog,
   NavGroupConfig,
   StatusDot,
   ToastProvider,
+  lazyWithReload,
   useToast,
 } from '../ui';
 import {
@@ -35,16 +37,39 @@ import {
   useHashRoute,
 } from '../hooks';
 import { clientApi, CLIENT_AUTH_EVENT } from './api';
+import { ADGUARD_OVERVIEW_CACHE_KEY, AUDIT_DEFAULT_CACHE_KEY, GATEWAY_CACHE_KEY } from './cacheKeys';
 import { ClientStatusResponse } from './types';
 import { TaskConsoleDrawer } from './TaskConsoleDrawer';
 import { DashPage } from './pages/DashPage';
-import { SingBoxPage } from './pages/SingBoxPage';
-import { AdGuardPage, ADGUARD_OVERVIEW_CACHE_KEY } from './pages/AdGuardPage';
-import { AuditPage, AUDIT_DEFAULT_CACHE_KEY } from './pages/AuditPage';
-import { WatchdogPage } from './pages/WatchdogPage';
-import { GATEWAY_CACHE_KEY, NetworkHubPage } from './pages/NetworkPage';
-import { LogsPage } from './pages/LogsPage';
-import { SystemPage } from './pages/SystemPage';
+
+const SingBoxPage = lazyWithReload(
+  () => import('./pages/SingBoxPage').then((m) => ({ default: m.SingBoxPage })),
+  'client-singbox',
+);
+const AdGuardPage = lazyWithReload(
+  () => import('./pages/AdGuardPage').then((m) => ({ default: m.AdGuardPage })),
+  'client-adguard',
+);
+const AuditPage = lazyWithReload(
+  () => import('./pages/AuditPage').then((m) => ({ default: m.AuditPage })),
+  'client-audit',
+);
+const WatchdogPage = lazyWithReload(
+  () => import('./pages/WatchdogPage').then((m) => ({ default: m.WatchdogPage })),
+  'client-watchdog',
+);
+const NetworkHubPage = lazyWithReload(
+  () => import('./pages/NetworkPage').then((m) => ({ default: m.NetworkHubPage })),
+  'client-network',
+);
+const LogsPage = lazyWithReload(
+  () => import('./pages/LogsPage').then((m) => ({ default: m.LogsPage })),
+  'client-logs',
+);
+const SystemPage = lazyWithReload(
+  () => import('./pages/SystemPage').then((m) => ({ default: m.SystemPage })),
+  'client-system',
+);
 
 const CLIENT_TABS = ['dash', 'sb', 'dns', 'audit', 'dm', 'net', 'logs', 'sys'] as const;
 type ClientTab = (typeof CLIENT_TABS)[number];
@@ -95,15 +120,40 @@ const ClientShell: React.FC = () => {
     });
   }, [tab]);
 
-  // 悬停 / 触控预热：鼠标滑过或手指触碰导航栏时提前在内存预热数据
+  // 悬停 / 触控预热：鼠标滑过或手指触碰导航栏时提前在内存预热数据与懒加载分包
   const handleHoverTab = useCallback((target: ClientTab) => {
-    if (target === 'dns' && !peekCachedQuery(ADGUARD_OVERVIEW_CACHE_KEY)) {
-      void prefetchCachedQuery(ADGUARD_OVERVIEW_CACHE_KEY, () => clientApi.getAdGuardOverview());
-    } else if (target === 'audit' && !peekCachedQuery(AUDIT_DEFAULT_CACHE_KEY)) {
-      const qs = new URLSearchParams({ sort: 'active', dir: 'desc' });
-      void prefetchCachedQuery(AUDIT_DEFAULT_CACHE_KEY, () => clientApi.getAudit(qs));
-    } else if (target === 'net' && !peekCachedQuery(GATEWAY_CACHE_KEY)) {
-      void prefetchCachedQuery(GATEWAY_CACHE_KEY, () => clientApi.getGateway());
+    switch (target) {
+      case 'sb':
+        void import('./pages/SingBoxPage');
+        break;
+      case 'dns':
+        void import('./pages/AdGuardPage');
+        if (!peekCachedQuery(ADGUARD_OVERVIEW_CACHE_KEY)) {
+          void prefetchCachedQuery(ADGUARD_OVERVIEW_CACHE_KEY, () => clientApi.getAdGuardOverview());
+        }
+        break;
+      case 'audit':
+        void import('./pages/AuditPage');
+        if (!peekCachedQuery(AUDIT_DEFAULT_CACHE_KEY)) {
+          const qs = new URLSearchParams({ sort: 'active', dir: 'desc' });
+          void prefetchCachedQuery(AUDIT_DEFAULT_CACHE_KEY, () => clientApi.getAudit(qs));
+        }
+        break;
+      case 'dm':
+        void import('./pages/WatchdogPage');
+        break;
+      case 'net':
+        void import('./pages/NetworkPage');
+        if (!peekCachedQuery(GATEWAY_CACHE_KEY)) {
+          void prefetchCachedQuery(GATEWAY_CACHE_KEY, () => clientApi.getGateway());
+        }
+        break;
+      case 'logs':
+        void import('./pages/LogsPage');
+        break;
+      case 'sys':
+        void import('./pages/SystemPage');
+        break;
     }
   }, []);
 
@@ -705,62 +755,78 @@ const ClientShell: React.FC = () => {
           />
         )}
         {tab === 'sb' && (
-          <SingBoxPage
-            status={status ?? null}
-            busy={busy}
-            initialSub={sub}
-            onSubChange={(nextSub) => navigate('sb', nextSub === 'routing' ? undefined : nextSub)}
-            onAction={requestAction}
-            onNavigate={navigateSafe}
-            onRefreshStatus={() => void refreshStatus(true)}
-          />
+          <React.Suspense fallback={<CardSkeleton rows={4} />}>
+            <SingBoxPage
+              status={status ?? null}
+              busy={busy}
+              initialSub={sub}
+              onSubChange={(nextSub) => navigate('sb', nextSub === 'routing' ? undefined : nextSub)}
+              onAction={requestAction}
+              onNavigate={navigateSafe}
+              onRefreshStatus={() => void refreshStatus(true)}
+            />
+          </React.Suspense>
         )}
         {(tab === 'dns' || visitedTabs.has('dns')) && (
           <div className={tab === 'dns' ? 'block' : 'hidden'} aria-hidden={tab !== 'dns'}>
-            <AdGuardPage
-              active={tab === 'dns'}
-              status={status ?? null}
-              busy={busy}
-              onAction={requestAction}
-              onRefreshStatus={() => refreshStatus(true)}
-            />
+            <React.Suspense fallback={<CardSkeleton rows={4} />}>
+              <AdGuardPage
+                active={tab === 'dns'}
+                status={status ?? null}
+                busy={busy}
+                onAction={requestAction}
+                onRefreshStatus={() => refreshStatus(true)}
+              />
+            </React.Suspense>
           </div>
         )}
         {(tab === 'audit' || visitedTabs.has('audit')) && (
           <div className={tab === 'audit' ? 'block' : 'hidden'} aria-hidden={tab !== 'audit'}>
-            <AuditPage active={tab === 'audit'} />
+            <React.Suspense fallback={<CardSkeleton rows={4} />}>
+              <AuditPage active={tab === 'audit'} />
+            </React.Suspense>
           </div>
         )}
         {tab === 'dm' && (
-          <WatchdogPage
-            busy={busy}
-            onAction={requestAction}
-            onRefreshStatus={() => refreshStatus(true)}
-            onOpenEventsLog={() => navigate('logs', 'events')}
-          />
+          <React.Suspense fallback={<CardSkeleton rows={4} />}>
+            <WatchdogPage
+              busy={busy}
+              onAction={requestAction}
+              onRefreshStatus={() => refreshStatus(true)}
+              onOpenEventsLog={() => navigate('logs', 'events')}
+            />
+          </React.Suspense>
         )}
         {tab === 'net' && (
-          <NetworkHubPage
-            status={status ?? null}
-            busy={busy || Boolean(tsSwapBanner?.active)}
-            initialSub={sub}
-            onSubChange={(nextSub) => navigate('net', nextSub === 'gw' ? undefined : nextSub)}
-            onAction={requestAction}
-            onNavigate={navigateSafe}
-            onRefreshStatus={() => refreshStatus(true)}
-          />
+          <React.Suspense fallback={<CardSkeleton rows={4} />}>
+            <NetworkHubPage
+              status={status ?? null}
+              busy={busy || Boolean(tsSwapBanner?.active)}
+              initialSub={sub}
+              onSubChange={(nextSub) => navigate('net', nextSub === 'gw' ? undefined : nextSub)}
+              onAction={requestAction}
+              onNavigate={navigateSafe}
+              onRefreshStatus={() => refreshStatus(true)}
+            />
+          </React.Suspense>
         )}
-        {tab === 'logs' && <LogsPage initialLogName={sub} />}
+        {tab === 'logs' && (
+          <React.Suspense fallback={<CardSkeleton rows={4} />}>
+            <LogsPage initialLogName={sub} />
+          </React.Suspense>
+        )}
         {tab === 'sys' && (
-          <SystemPage
-            status={status ?? null}
-            busy={busy}
-            onAction={requestAction}
-            onRestored={() => {
-              void refreshStatus(true);
-              emitClientInvalidate('all');
-            }}
-          />
+          <React.Suspense fallback={<CardSkeleton rows={4} />}>
+            <SystemPage
+              status={status ?? null}
+              busy={busy}
+              onAction={requestAction}
+              onRestored={() => {
+                void refreshStatus(true);
+                emitClientInvalidate('all');
+              }}
+            />
+          </React.Suspense>
         )}
       </AppShell>
 

@@ -1,10 +1,10 @@
 package serverweb
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os/exec"
 	"time"
 
 	"singctl/internal/telemetry"
@@ -78,7 +78,7 @@ func (s *Server) handleEnableTelemetry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if changed {
-		if runErr := exec.Command("systemctl", "restart", "sing-box").Run(); runErr != nil {
+		if runErr := s.runCmd(context.Background(), defaultServerActionTimeout, "systemctl", "restart", "sing-box"); runErr != nil {
 			writeJSONError(w, http.StatusInternalServerError, "已写入遥测配置，但重启 sing-box 失败: "+runErr.Error())
 			return
 		}

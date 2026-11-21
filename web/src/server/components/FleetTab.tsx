@@ -10,7 +10,8 @@ import {
   FleetActionResult,
 } from '../types';
 import { api } from '../api';
-import { peekCachedQuery, prefetchCachedQuery, writeCachedQuery } from '../../hooks';
+import { FLEET_CACHE_KEY, FLEET_DEFAULTS_CACHE_KEY } from '../prefetch';
+import { peekCachedQuery, writeCachedQuery } from '../../hooks';
 import { useToast } from '../../ui';
 import {
   Network,
@@ -62,22 +63,11 @@ function authTypeLabel(t: FleetAuthType): string {
   }
 }
 
-const FLEET_CACHE_KEY = 'server:fleet:list';
-const FLEET_DEFAULTS_CACHE_KEY = 'server:fleet:defaults';
 const FLEET_PROBE_COOLDOWN_MS = 45_000;
 
 interface CachedFleetList {
   nodes: FleetNode[];
   summary: FleetSummary;
-}
-
-export function prefetchFleetTab(): void {
-  if (!peekCachedQuery(FLEET_CACHE_KEY)) {
-    void prefetchCachedQuery(FLEET_CACHE_KEY, () => api.getFleet());
-  }
-  if (!peekCachedQuery(FLEET_DEFAULTS_CACHE_KEY)) {
-    void prefetchCachedQuery(FLEET_DEFAULTS_CACHE_KEY, () => api.getFleetDefaults());
-  }
 }
 
 export const FleetTab: React.FC<{ active?: boolean }> = ({ active = true }) => {

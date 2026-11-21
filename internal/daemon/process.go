@@ -2,10 +2,10 @@ package daemon
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -293,7 +293,7 @@ func DaemonProcessMatches(pid int) bool {
 
 	// macOS / 其他 Unix: ps 查询
 	if runtime.GOOS != "windows" {
-		out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
+		out, err := outputCmdTimeout(context.Background(), defaultDaemonCmdTimeout, "ps", "-p", strconv.Itoa(pid), "-o", "comm=")
 		if err != nil {
 			// ps 不可用时保守地认为匹配，避免完全失去检测能力
 			return true
@@ -302,7 +302,7 @@ func DaemonProcessMatches(pid int) bool {
 		if !(name == expected || strings.HasPrefix(name, expected)) {
 			return false
 		}
-		if cmdOut, cErr := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output(); cErr == nil {
+		if cmdOut, cErr := outputCmdTimeout(context.Background(), defaultDaemonCmdTimeout, "ps", "-p", strconv.Itoa(pid), "-o", "command="); cErr == nil {
 			if isConflictingSingctlSubcommand(strings.Fields(string(cmdOut))) {
 				return false
 			}
@@ -455,14 +455,12 @@ func RestartDaemon(configPath string) error {
 		args = append(args, "--config", configPath)
 	}
 	args = append(args, "dm", "start")
-	cmd := exec.Command(exe, args...)
-	if devNull, nErr := os.OpenFile(os.DevNull, os.O_RDWR, 0); nErr == nil {
-		cmd.Stdin = devNull
-		defer devNull.Close()
+	var devNull *os.File
+	if nFile, nErr := os.OpenFile(os.DevNull, os.O_RDWR, 0); nErr == nil {
+		devNull = nFile
+		defer nFile.Close()
 	}
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	return runCmdTimeoutIO(context.Background(), defaultDaemonRunTimeout, devNull, os.Stdout, os.Stderr, exe, args...)
 }
 
 // IsSingBoxRunning 检查sing-box进程是否运行
@@ -473,7 +471,7 @@ func IsSingBoxRunning() bool {
 // isSingBoxProcessRunning 检查sing-box进程（跨平台实现）
 func isSingBoxProcessRunning() bool {
 	if runtime.GOOS == "windows" {
-		output, err := exec.Command("tasklist", "/FI", "IMAGENAME eq sing-box.exe", "/NH").Output()
+		output, err := outputCmdTimeout(context.Background(), defaultDaemonCmdTimeout, "tasklist", "/FI", "IMAGENAME eq sing-box.exe", "/NH")
 		if err != nil {
 			return false
 		}

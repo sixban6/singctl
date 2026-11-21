@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"testing"
 	"time"
 
 	"singctl/internal/constant"
@@ -138,13 +139,24 @@ func SyncSandboxWorkConfig(ctx context.Context, sbConfigPath, sbWorkConfigPath, 
 
 // ReloadSingBoxProcess 向运行中的 sing-box 进程发送 SIGHUP 无损热重载配置。
 func ReloadSingBoxProcess() {
+	// 避免单测污染宿主机运行态或跨包并发误杀 `sing-box check` 子进程
+	if testing.Testing() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
 	if _, err := exec.LookPath("pkill"); err == nil {
-		if exec.Command("pkill", "-HUP", "-x", "sing-box").Run() == nil {
+		// 优先精确匹配 `sing-box run` 守护进程，防止误向并发执行的 `sing-box check` 临时进程发送 SIGHUP
+		if exec.CommandContext(ctx, "pkill", "-HUP", "-f", "sing-box run").Run() == nil {
+			return
+		}
+		if exec.CommandContext(ctx, "pkill", "-HUP", "-x", "sing-box").Run() == nil {
 			return
 		}
 	}
 	if _, err := exec.LookPath("killall"); err == nil {
-		_ = exec.Command("killall", "-HUP", "sing-box").Run()
+		_ = exec.CommandContext(ctx, "killall", "-HUP", "sing-box").Run()
 	}
 }
 

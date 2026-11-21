@@ -1,3 +1,8 @@
+// 文件职责：负责舰队（Fleet）节点清单（fleet.yaml / 历史 fleet.json 自动迁移）的持久化、主机防注入校验、脱敏视图及探测内存合并覆盖。
+//
+// 架构设计原则：
+//   - 策略解耦：认证凭据落盘策略下沉至 store_auth.go（applyAuthCredentialWithRegistry），保持 Upsert 主流程精简清晰。
+//   - 敏感落盘强制 0600：fleet.yaml 与私钥目录均使用原子写入并锁定权限。
 package fleet
 
 import (
@@ -209,21 +214,17 @@ func parseFleetBytes(raw []byte, sourcePath string) ([]Node, error) {
 	}
 
 	var doc fleetFileDoc
-	// Legacy JSON files use camelCase tags (authType, keyPath, syncedNodes), so decode JSON first when starting with '{'.
+	// 兼容旧版 JSON 清单中的 camelCase 字段（authType、keyPath、syncedNodes），优先按 JSON 解析
+	decoded := false
 	if trimmed[0] == '{' || strings.EqualFold(filepath.Ext(sourcePath), ".json") {
 		if err := json.Unmarshal(trimmed, &doc); err == nil {
-			for i := range doc.Nodes {
-				doc.Nodes[i].HasCredential = doc.Nodes[i].Password != "" || doc.Nodes[i].KeyPath != "" || doc.Nodes[i].SSHAlias != ""
-			}
-			if doc.Nodes == nil {
-				return []Node{}, nil
-			}
-			return doc.Nodes, nil
+			decoded = true
 		}
 	}
-
-	if err := yaml.Unmarshal(trimmed, &doc); err != nil {
-		return nil, fmt.Errorf("解析舰队配置 %s 失败: %w", filepath.Base(sourcePath), err)
+	if !decoded {
+		if err := yaml.Unmarshal(trimmed, &doc); err != nil {
+			return nil, fmt.Errorf("解析舰队配置 %s 失败: %w", filepath.Base(sourcePath), err)
+		}
 	}
 	for i := range doc.Nodes {
 		doc.Nodes[i].HasCredential = doc.Nodes[i].Password != "" || doc.Nodes[i].KeyPath != "" || doc.Nodes[i].SSHAlias != ""
@@ -509,49 +510,8 @@ func (s *Store) Upsert(in UpsertInput) (Node, error) {
 		target.Enabled = *in.Enabled
 	}
 
-	switch authType {
-	case AuthSSHAlias:
-		alias := cmp.Or(parsed.SSHAlias, parsed.Host)
-		target.SSHAlias = alias
-		target.Host = cmp.Or(parsed.Host, alias)
-		target.Password = ""
-	case AuthInlineKey:
-		target.Host = parsed.Host
-		target.SSHAlias = ""
-		if strings.TrimSpace(in.PrivateKey) != "" {
-			if err := os.MkdirAll(s.KeysDir, 0700); err != nil {
-				return Node{}, fmt.Errorf("创建密钥目录失败: %w", err)
-			}
-			keyFile := filepath.Join(s.KeysDir, id+".pem")
-			pem := strings.TrimSpace(in.PrivateKey) + "\n"
-			if err := os.WriteFile(keyFile, []byte(pem), 0600); err != nil {
-				return Node{}, fmt.Errorf("保存 SSH 私钥失败: %w", err)
-			}
-			_ = os.Chmod(keyFile, 0600)
-			target.KeyPath = keyFile
-			target.Password = ""
-		} else if target.KeyPath == "" {
-			return Node{}, errors.New("请提供 SSH 私钥内容")
-		}
-	case AuthKeyFile:
-		target.Host = parsed.Host
-		target.SSHAlias = ""
-		if parsed.KeyPath != "" {
-			target.KeyPath = parsed.KeyPath
-		} else if target.KeyPath == "" {
-			target.KeyPath = defaultLocalSSHKeyPath()
-		}
-		target.Password = ""
-	case AuthPassword:
-		target.Host = parsed.Host
-		target.SSHAlias = ""
-		if in.Password != "" {
-			target.Password = in.Password
-		} else if target.Password == "" {
-			return Node{}, errors.New("请提供 SSH 登录密码")
-		}
-	default:
-		return Node{}, fmt.Errorf("不支持的认证方式: %s", authType)
+	if err := applyAuthCredentialWithRegistry(s, id, in, parsed, &target, nil); err != nil {
+		return Node{}, err
 	}
 
 	target.HasCredential = target.Password != "" || target.KeyPath != "" || target.SSHAlias != ""

@@ -12,3 +12,4 @@ export { CommandPalette, type CommandPaletteProps, type CommandItem } from './Co
 export { QRCodeBox, type QRCodeBoxProps } from './QRCodeBox';
 export { AppShell, type AppShellProps, type NavGroupConfig, type NavItemConfig } from './AppShell';
 export { formatBytes } from './format';
+export { lazyWithReload } from './lazyWithReload';

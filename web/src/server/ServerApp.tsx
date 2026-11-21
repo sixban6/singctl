@@ -2,20 +2,51 @@ import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { ServerStatusResponse } from './types';
 import { ApiError, api, setOnUnauthorized } from './api';
 import { clearCachedQuery, useHashRoute } from '../hooks';
-import { ToastProvider, useToast } from '../ui';
+import { ToastProvider, CardSkeleton, lazyWithReload, useToast } from '../ui';
 import { Header } from './components/Header';
 import { Navigation, SERVER_TAB_KEYS, TabKey } from './components/Navigation';
 import { OverviewTab } from './components/OverviewTab';
-import { ServicesTab } from './components/ServicesTab';
-import { SubscriptionsTab, prefetchSubscriptionsTab } from './components/SubscriptionsTab';
-import { FleetTab, prefetchFleetTab } from './components/FleetTab';
-import { LogsTab } from './components/LogsTab';
-import { DiagnosticsTab } from './components/DiagnosticsTab';
-import { SecurityTab, prefetchSecurityTab } from './components/SecurityTab';
-import { CamouflageTab } from './components/CamouflageTab';
-import { WarpTab, prefetchWarpTab } from './components/WarpTab';
 import { LoginModal } from './components/LoginModal';
+import {
+  prefetchFleetTab,
+  prefetchSecurityTab,
+  prefetchSubscriptionsTab,
+  prefetchWarpTab,
+} from './prefetch';
 import { Activity, RefreshCw, WifiOff } from 'lucide-react';
+
+const ServicesTab = lazyWithReload(
+  () => import('./components/ServicesTab').then((m) => ({ default: m.ServicesTab })),
+  'server-services',
+);
+const SubscriptionsTab = lazyWithReload(
+  () => import('./components/SubscriptionsTab').then((m) => ({ default: m.SubscriptionsTab })),
+  'server-subscriptions',
+);
+const FleetTab = lazyWithReload(
+  () => import('./components/FleetTab').then((m) => ({ default: m.FleetTab })),
+  'server-fleet',
+);
+const LogsTab = lazyWithReload(
+  () => import('./components/LogsTab').then((m) => ({ default: m.LogsTab })),
+  'server-logs',
+);
+const DiagnosticsTab = lazyWithReload(
+  () => import('./components/DiagnosticsTab').then((m) => ({ default: m.DiagnosticsTab })),
+  'server-diagnostics',
+);
+const SecurityTab = lazyWithReload(
+  () => import('./components/SecurityTab').then((m) => ({ default: m.SecurityTab })),
+  'server-security',
+);
+const CamouflageTab = lazyWithReload(
+  () => import('./components/CamouflageTab').then((m) => ({ default: m.CamouflageTab })),
+  'server-camouflage',
+);
+const WarpTab = lazyWithReload(
+  () => import('./components/WarpTab').then((m) => ({ default: m.WarpTab })),
+  'server-warp',
+);
 
 // OCP 声明式保活与预热注册表：扩展新 Tab 时仅需在此注册 prefetch，无需修改外层调度逻辑
 const KEEP_ALIVE_PREFETCHERS: Partial<Record<TabKey, () => void>> = {
@@ -23,6 +54,13 @@ const KEEP_ALIVE_PREFETCHERS: Partial<Record<TabKey, () => void>> = {
   subscriptions: prefetchSubscriptionsTab,
   fleet: prefetchFleetTab,
   security: prefetchSecurityTab,
+};
+
+const HOVER_CHUNK_WARMERS: Partial<Record<TabKey, () => void>> = {
+  services: () => { void import('./components/ServicesTab'); },
+  logs: () => { void import('./components/LogsTab'); },
+  diagnostics: () => { void import('./components/DiagnosticsTab'); },
+  camouflage: () => { void import('./components/CamouflageTab'); },
 };
 
 const DashboardContent: React.FC = () => {
@@ -80,6 +118,7 @@ const DashboardContent: React.FC = () => {
 
   const handleHoverTab = useCallback((tab: TabKey) => {
     KEEP_ALIVE_PREFETCHERS[tab]?.();
+    HOVER_CHUNK_WARMERS[tab]?.();
   }, []);
 
   useEffect(() => {
@@ -281,45 +320,67 @@ const DashboardContent: React.FC = () => {
           )}
 
           {currentTab === 'services' && (
-            <ServicesTab
-              status={status}
-              onRefresh={() => fetchStatus(false)}
-              onOpenLogs={handleOpenLogsForService}
-              onNavigate={setCurrentTab}
-            />
+            <React.Suspense fallback={<CardSkeleton rows={4} />}>
+              <ServicesTab
+                status={status}
+                onRefresh={() => fetchStatus(false)}
+                onOpenLogs={handleOpenLogsForService}
+                onNavigate={setCurrentTab}
+              />
+            </React.Suspense>
           )}
 
           {visitedTabs.has('warp') && (
             <div className={currentTab === 'warp' ? undefined : 'hidden'}>
-              <WarpTab active={currentTab === 'warp'} onRefreshParent={() => fetchStatus(false)} />
+              <React.Suspense fallback={<CardSkeleton rows={4} />}>
+                <WarpTab active={currentTab === 'warp'} onRefreshParent={() => fetchStatus(false)} />
+              </React.Suspense>
             </div>
           )}
 
           {visitedTabs.has('subscriptions') && (
             <div className={currentTab === 'subscriptions' ? undefined : 'hidden'}>
-              <SubscriptionsTab active={currentTab === 'subscriptions'} />
+              <React.Suspense fallback={<CardSkeleton rows={4} />}>
+                <SubscriptionsTab active={currentTab === 'subscriptions'} />
+              </React.Suspense>
             </div>
           )}
 
           {visitedTabs.has('fleet') && (
             <div className={currentTab === 'fleet' ? undefined : 'hidden'}>
-              <FleetTab active={currentTab === 'fleet'} />
+              <React.Suspense fallback={<CardSkeleton rows={4} />}>
+                <FleetTab active={currentTab === 'fleet'} />
+              </React.Suspense>
             </div>
           )}
 
-          {currentTab === 'logs' && <LogsTab initialService={logService} />}
+          {currentTab === 'logs' && (
+            <React.Suspense fallback={<CardSkeleton rows={4} />}>
+              <LogsTab initialService={logService} />
+            </React.Suspense>
+          )}
 
-          {currentTab === 'diagnostics' && <DiagnosticsTab status={status} onNavigate={setCurrentTab} />}
+          {currentTab === 'diagnostics' && (
+            <React.Suspense fallback={<CardSkeleton rows={4} />}>
+              <DiagnosticsTab status={status} onNavigate={setCurrentTab} />
+            </React.Suspense>
+          )}
 
-          {currentTab === 'camouflage' && <CamouflageTab status={status} />}
+          {currentTab === 'camouflage' && (
+            <React.Suspense fallback={<CardSkeleton rows={4} />}>
+              <CamouflageTab status={status} />
+            </React.Suspense>
+          )}
 
           {visitedTabs.has('security') && (
             <div className={currentTab === 'security' ? undefined : 'hidden'}>
-              <SecurityTab
-                active={currentTab === 'security'}
-                status={status}
-                onRefresh={() => fetchStatus(false)}
-              />
+              <React.Suspense fallback={<CardSkeleton rows={4} />}>
+                <SecurityTab
+                  active={currentTab === 'security'}
+                  status={status}
+                  onRefresh={() => fetchStatus(false)}
+                />
+              </React.Suspense>
             </div>
           )}
         </div>

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -67,11 +66,11 @@ WantedBy=multi-user.target
 	if err := os.WriteFile(systemdUnitPath, []byte(content), 0644); err != nil {
 		return fmt.Errorf("write %s: %w", systemdUnitPath, err)
 	}
-	if out, err := exec.Command("systemctl", "daemon-reload").CombinedOutput(); err != nil {
+	if out, err := combinedOutputSystemCmdTimeout(defaultServerActionTimeout, "systemctl", "daemon-reload"); err != nil {
 		return fmt.Errorf("systemctl daemon-reload: %v (%s)", err, strings.TrimSpace(string(out)))
 	}
-	_ = exec.Command("systemctl", "enable", ServiceName).Run()
-	if out, err := exec.Command("systemctl", "restart", ServiceName).CombinedOutput(); err != nil {
+	_ = runSystemCmdTimeout(defaultServerActionTimeout, "systemctl", "enable", ServiceName)
+	if out, err := combinedOutputSystemCmdTimeout(defaultServerActionTimeout, "systemctl", "restart", ServiceName); err != nil {
 		return fmt.Errorf("systemctl restart %s: %v (%s)", ServiceName, err, strings.TrimSpace(string(out)))
 	}
 
@@ -85,7 +84,7 @@ func StopService() error {
 	if _, err := os.Stat(systemdUnitPath); err != nil {
 		return nil
 	}
-	return exec.Command("systemctl", "stop", ServiceName).Run()
+	return runSystemCmdTimeout(defaultServerActionTimeout, "systemctl", "stop", ServiceName)
 }
 
 // RestartService restarts the singctl-ui systemd service if installed.
@@ -94,17 +93,17 @@ func RestartService() error {
 	if _, err := os.Stat(systemdUnitPath); err != nil {
 		return nil
 	}
-	return exec.Command("systemctl", "restart", ServiceName).Run()
+	return runSystemCmdTimeout(defaultServerActionTimeout, "systemctl", "restart", ServiceName)
 }
 
 // UninstallService stops and removes the singctl-ui systemd service.
 func UninstallService() error {
 	cleanupLegacyProcessAndUnit()
 	if runtime.GOOS == "linux" {
-		_ = exec.Command("systemctl", "stop", ServiceName).Run()
-		_ = exec.Command("systemctl", "disable", ServiceName).Run()
+		_ = runSystemCmdTimeout(defaultServerActionTimeout, "systemctl", "stop", ServiceName)
+		_ = runSystemCmdTimeout(defaultServerActionTimeout, "systemctl", "disable", ServiceName)
 		_ = os.Remove(systemdUnitPath)
-		_ = exec.Command("systemctl", "daemon-reload").Run()
+		_ = runSystemCmdTimeout(defaultServerActionTimeout, "systemctl", "daemon-reload")
 	}
 	return nil
 }
@@ -112,7 +111,7 @@ func UninstallService() error {
 // IsRunning checks whether singctl-ui is active via systemd or listening on its configured address.
 func IsRunning(cfgPath ...string) bool {
 	if runtime.GOOS == "linux" {
-		if exec.Command("systemctl", "is-active", "--quiet", ServiceName).Run() == nil {
+		if runSystemCmdTimeout(defaultServerProbeTimeout, "systemctl", "is-active", "--quiet", ServiceName) == nil {
 			return true
 		}
 	}
@@ -154,10 +153,10 @@ func waitForReady(listenAddr string, maxWait time.Duration) {
 func cleanupLegacyProcessAndUnit() {
 	if runtime.GOOS == "linux" {
 		if _, err := os.Stat(legacyUnitPath); err == nil {
-			_ = exec.Command("systemctl", "stop", "singctl-serverweb.service").Run()
-			_ = exec.Command("systemctl", "disable", "singctl-serverweb.service").Run()
+			_ = runSystemCmdTimeout(defaultServerActionTimeout, "systemctl", "stop", "singctl-serverweb.service")
+			_ = runSystemCmdTimeout(defaultServerActionTimeout, "systemctl", "disable", "singctl-serverweb.service")
 			_ = os.Remove(legacyUnitPath)
-			_ = exec.Command("systemctl", "daemon-reload").Run()
+			_ = runSystemCmdTimeout(defaultServerActionTimeout, "systemctl", "daemon-reload")
 		}
 	}
 

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -140,7 +139,7 @@ func (s *Server) syncBootWarpAndPurgeLegacy(ctx context.Context, cfg *config.Con
 			if raw, rErr := os.ReadFile(deploy.DefaultWireproxyConf); rErr == nil {
 				if normalized, changed := deploy.NormalizeWireproxyConfigContent(string(raw)); changed {
 					if wErr := writeAtomicFile0600(deploy.DefaultWireproxyConf, []byte(normalized)); wErr == nil {
-						_ = exec.Command("systemctl", "restart", "wireproxy").Run()
+						_ = s.runCmd(context.Background(), defaultServerActionTimeout, "systemctl", "restart", "wireproxy")
 						normalizedWireproxy = true
 					}
 				}
