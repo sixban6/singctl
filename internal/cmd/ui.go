@@ -62,7 +62,7 @@ func NewServerWebCmd(configPath string, version ...string) *cobra.Command {
 	}
 
 	root.PersistentFlags().StringVarP(&listen, "listen", "l", serverweb.DefaultListenAddr,
-		"监听地址 / Listen address (默认 127.0.0.1:8092)")
+		fmt.Sprintf("监听地址 / Listen address (默认 %s)", serverweb.DefaultListenAddr))
 	root.PersistentFlags().StringVarP(&username, "username", "u", "",
 		"管理员账号(留空自动从配置读取或生成) / Server UI username")
 	root.PersistentFlags().StringVarP(&password, "password", "p", "",

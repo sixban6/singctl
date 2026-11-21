@@ -62,7 +62,7 @@ func NewUpdateCmd(configPath string, version string) *cobra.Command {
 
 			switch args[0] {
 			case "s", "self":
-				up := updater.New(cfg.GitHub.MirrorURL, "https://github.com/sixban6/singctl")
+				up := updater.New(cfg.GitHub.MirrorURL, constant.GitHubRepoURL)
 				if err := up.UpdateSelf(resolvedPath, version); err != nil {
 					return err
 				}

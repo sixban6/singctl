@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"singctl/internal/config"
+	"singctl/internal/constant"
 	"singctl/internal/deploy"
 	"singctl/internal/util/github"
 )
@@ -144,7 +145,7 @@ func scanCoreLayer(_ context.Context, cfg *config.Config, currentSingctlVer stri
 			defer wg.Done()
 			if spec.name == "singctl" {
 				latest := curSingctl
-				if tag, err := fetcher.FetchLatestTag("sixban6/singctl"); err == nil && strings.TrimSpace(tag) != "" {
+				if tag, err := fetcher.FetchLatestTag(constant.GitHubRepo); err == nil && strings.TrimSpace(tag) != "" {
 					latest = strings.TrimPrefix(strings.TrimSpace(tag), "v")
 				}
 				installed := curSingctl != ""

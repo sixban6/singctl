@@ -76,7 +76,7 @@ func (sb *Substore) DeploySubstore() error {
 		}
 	}
 
-	logger.Success("Native SubHub subscription engine deployed on 127.0.0.1:3001.")
+	logger.Success("Native SubHub subscription engine deployed on %s.", subhub.DefaultListenAddr)
 	return nil
 }
 

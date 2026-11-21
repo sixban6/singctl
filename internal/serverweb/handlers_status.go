@@ -19,6 +19,8 @@ import (
 
 	"singctl/internal/config"
 	"singctl/internal/deploy"
+	"singctl/internal/subhub"
+	"singctl/internal/telemetry"
 )
 
 const (
@@ -56,8 +58,8 @@ func probeLoopbackTCP(addr string, timeout time.Duration) bool {
 func probeServicesByLoopbackPorts() map[string]serviceProbeSnapshot {
 	return map[string]serviceProbeSnapshot{
 		"caddy":       {running: probeLoopbackTCP("127.0.0.1:443", 80*time.Millisecond)},
-		"sing-box":    {running: probeLoopbackTCP("127.0.0.1:9099", 80*time.Millisecond)},
-		"singctl-sub": {running: probeLoopbackTCP("127.0.0.1:3001", 80*time.Millisecond)},
+		"sing-box":    {running: probeLoopbackTCP(telemetry.DefaultControllerAddr, 80*time.Millisecond)},
+		"singctl-sub": {running: probeLoopbackTCP(subhub.DefaultListenAddr, 80*time.Millisecond)},
 		"wireproxy":   {running: probeLoopbackTCP("127.0.0.1:40000", 80*time.Millisecond)},
 	}
 }
@@ -475,7 +477,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	subhubProbe := probes["singctl-sub"]
 	warpProbe := probes["wireproxy"]
 
-	subhubRunning := subhubProbe.running || probeLoopbackTCP("127.0.0.1:3001", 80*time.Millisecond)
+	subhubRunning := subhubProbe.running || probeLoopbackTCP(subhub.DefaultListenAddr, 80*time.Millisecond)
 
 	status := map[string]any{
 		"version":     s.opts.Version,

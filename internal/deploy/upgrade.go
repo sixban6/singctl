@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"singctl/internal/config"
+	"singctl/internal/constant"
 	"singctl/internal/logger"
 	"singctl/internal/singbox"
 	"singctl/internal/util/file"
@@ -167,7 +168,7 @@ func CheckComponentUpdate(target string, cfg *config.Config) (*CheckUpdateResult
 
 	case "singctl", "subhub", "substore":
 		curr := cleanVersion(GetInstalledSubhubVersion())
-		tag, err := fetcher.FetchLatestTag("sixban6/singctl")
+		tag, err := fetcher.FetchLatestTag(constant.GitHubRepo)
 		latest := cleanVersion(tag)
 		if err != nil || latest == "" {
 			latest = curr
@@ -254,7 +255,7 @@ func UpgradeCaddy(cfg *config.Config) (*UpgradeResult, error) {
 
 	arch := runtime.GOARCH
 	caddyTar := fmt.Sprintf("caddy-custom-linux-%s.tar.gz", arch)
-	downloadURL := fmt.Sprintf("https://github.com/sixban6/singctl/releases/latest/download/%s", caddyTar)
+	downloadURL := fmt.Sprintf("%s/releases/latest/download/%s", constant.GitHubRepoURL, caddyTar)
 	if cfg != nil && cfg.GitHub.MirrorURL != "" {
 		downloadURL = fmt.Sprintf("%s/%s", strings.TrimRight(cfg.GitHub.MirrorURL, "/"), downloadURL)
 	}

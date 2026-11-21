@@ -151,7 +151,7 @@ func New(opts Options) *Server {
 			if opts.Password == "" {
 				opts.Password = cfg.Server.GetWebAdminPassword()
 			}
-			if opts.Listen == "" || opts.Listen == "127.0.0.1:8092" {
+			if opts.Listen == "" || opts.Listen == DefaultListenAddr {
 				opts.Listen = fmt.Sprintf("127.0.0.1:%d", cfg.Server.GetWebAdminPort())
 			}
 			pendingAck = cfg.Server.WebAdmin.PasswordPendingAck
@@ -159,7 +159,7 @@ func New(opts Options) *Server {
 		}
 	}
 	if opts.Listen == "" {
-		opts.Listen = "127.0.0.1:8092"
+		opts.Listen = DefaultListenAddr
 	}
 	if opts.Username == "" {
 		opts.Username = "singctl"

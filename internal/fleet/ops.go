@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"singctl/internal/config"
+	"singctl/internal/constant"
 	"singctl/internal/subhub"
 
 	"golang.org/x/crypto/ssh"
@@ -1006,8 +1007,8 @@ if ! command -v singctl >/dev/null 2>&1; then
     *) echo "Unsupported arch: $ARCH" >&2; exit 1 ;;
   esac
   TMPD=$(mktemp -d)
-  curl -fsSL "https://github.com/sixban6/singctl/releases/latest/download/checksums.txt" -o "${TMPD}/checksums.txt" || true
-  curl -fsSL "https://github.com/sixban6/singctl/releases/latest/download/${PKG}" -o "${TMPD}/${PKG}"
+  curl -fsSL "` + constant.GitHubRepoURL + `/releases/latest/download/checksums.txt" -o "${TMPD}/checksums.txt" || true
+  curl -fsSL "` + constant.GitHubRepoURL + `/releases/latest/download/${PKG}" -o "${TMPD}/${PKG}"
   if [ -s "${TMPD}/checksums.txt" ] && command -v sha256sum >/dev/null 2>&1; then
     EXPECTED=$(grep "  ${PKG}$" "${TMPD}/checksums.txt" | awk '{print $1}')
     ACTUAL=$(sha256sum "${TMPD}/${PKG}" | awk '{print $1}')
