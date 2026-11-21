@@ -79,10 +79,7 @@ func (s *Server) handleAuditGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg, _ := config.Load(s.opts.ConfigPath)
-	if cfg == nil {
-		cfg = &config.Config{}
-	}
+	cfg := s.readConfigOrEmpty()
 
 	q := r.URL.Query()
 	exportFormat := strings.ToLower(strings.TrimSpace(q.Get("format")))
@@ -344,10 +341,7 @@ type auditAIConfigPayload struct {
 
 // handleAuditAIConfigGet 返回当前配置的 AI 网关地址、密钥与模型（默认 antigravity/gemini-3.8-flash）。
 func (s *Server) handleAuditAIConfigGet(w http.ResponseWriter, r *http.Request) {
-	cfg, _ := config.Load(s.opts.ConfigPath)
-	if cfg == nil {
-		cfg = &config.Config{}
-	}
+	cfg := s.readConfigOrEmpty()
 
 	callerHost, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
 	if err != nil || callerHost == "" {
@@ -392,7 +386,7 @@ func (s *Server) handleAuditAIConfigPost(w http.ResponseWriter, r *http.Request)
 	cfg.Audit.AI.Model = cmp.Or(strings.TrimSpace(req.Model), "antigravity/gemini-3.8-flash")
 	cfg.Audit.AI.Enabled = cfg.Audit.AI.Endpoint != "" || cfg.Audit.AI.APIKey != ""
 
-	if err := config.Save(s.opts.ConfigPath, cfg); err != nil {
+	if err := s.saveConfig(cfg); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "保存 AI 网关配置失败: "+err.Error())
 		return
 	}
@@ -417,10 +411,7 @@ func (s *Server) handleAuditAIModelsPost(w http.ResponseWriter, r *http.Request)
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
 
-	cfg, _ := config.Load(s.opts.ConfigPath)
-	if cfg == nil {
-		cfg = &config.Config{}
-	}
+	cfg := s.readConfigOrEmpty()
 
 	baseURL := strings.TrimSpace(req.BaseURL)
 	apiKey := strings.TrimSpace(req.APIKey)
@@ -482,10 +473,7 @@ func (s *Server) handleAuditAIReviewPost(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	cfg, _ := config.Load(s.opts.ConfigPath)
-	if cfg == nil {
-		cfg = &config.Config{}
-	}
+	cfg := s.readConfigOrEmpty()
 
 	callerHost, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
 	if err != nil || callerHost == "" {
@@ -611,7 +599,7 @@ func (s *Server) handleAuditThrottle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if strings.TrimSpace(s.opts.ConfigPath) != "" {
-		if saveErr := config.Save(s.opts.ConfigPath, cfg); saveErr != nil {
+		if saveErr := s.saveConfig(cfg); saveErr != nil {
 			writeJSONError(w, http.StatusInternalServerError, "保存配置失败: "+saveErr.Error())
 			return
 		}

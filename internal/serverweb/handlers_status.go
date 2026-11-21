@@ -75,11 +75,12 @@ func (s *Server) resolveSubstoreAdminURLFast(cfg *config.Config) string {
 	return ""
 }
 
-// loadConfigBounded 以单飞 + 硬超时读取最新配置；当底层磁盘发生 D 状态假死时立即回退内存缓存，绝不卡死请求或巡检。
+// loadConfigBounded 以单飞 + 硬超时读取最新配置；当底层磁盘发生 D 状态假死时立即回退不可变快照，绝不卡死请求或巡检。
 func (s *Server) loadConfigBounded(maxWait time.Duration) (*config.Config, error) {
-	s.configCacheMu.RLock()
-	fallbackCfg := s.cachedConfig
-	s.configCacheMu.RUnlock()
+	var fallbackCfg *config.Config
+	if s.cfgStore != nil && s.cfgStore.Revision() > 0 {
+		fallbackCfg = s.cfgStore.Get()
+	}
 
 	if strings.TrimSpace(s.opts.ConfigPath) == "" {
 		if fallbackCfg != nil {
@@ -103,9 +104,14 @@ func (s *Server) loadConfigBounded(maxWait time.Duration) (*config.Config, error
 		err error
 	}
 	doneCh := make(chan cfgRes, 1)
-	loader := config.Load
-	if s.configLoaderOverride != nil {
-		loader = s.configLoaderOverride
+	loader := func(p string) (*config.Config, error) {
+		if s.configLoaderOverride != nil {
+			return s.configLoaderOverride(p)
+		}
+		if s.cfgStore != nil {
+			return s.cfgStore.LoadLatest()
+		}
+		return config.Load(p)
 	}
 	cfgPath := s.opts.ConfigPath
 	go func() {
@@ -138,20 +144,19 @@ func (s *Server) loadConfigBounded(maxWait time.Duration) (*config.Config, error
 
 func (s *Server) getConfigSnapshot(maxWait time.Duration) (*config.Config, string) {
 	s.configCacheMu.RLock()
-	if s.cachedConfig != nil && time.Since(s.cachedConfigAt) < configCacheTTL {
-		cfg := s.cachedConfig
-		subURL := s.cachedSubAdminURL
-		s.configCacheMu.RUnlock()
-		return cfg, subURL
-	}
+	cacheFresh := !s.cachedConfigAt.IsZero() && time.Since(s.cachedConfigAt) < configCacheTTL
+	subURL := s.cachedSubAdminURL
 	s.configCacheMu.RUnlock()
+	if cacheFresh && s.cfgStore != nil && s.cfgStore.Revision() > 0 {
+		return s.cfgStore.Get(), subURL
+	}
 
 	cfg, _ := s.loadConfigBounded(maxWait)
 	if cfg == nil {
 		cfg = &config.Config{}
 	}
 	s.configCacheMu.RLock()
-	subURL := s.cachedSubAdminURL
+	subURL = s.cachedSubAdminURL
 	s.configCacheMu.RUnlock()
 	if subURL == "" {
 		subURL = s.resolveSubstoreAdminURLFast(cfg)

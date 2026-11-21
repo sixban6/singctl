@@ -85,7 +85,7 @@ type Server struct {
 	warpNodeCache         map[string]warpNodeCacheEntry
 	warpClusterRefreshing atomic.Bool
 	configCacheMu         sync.RWMutex
-	cachedConfig          *config.Config
+	cfgStore              *config.Store
 	cachedConfigAt        time.Time
 	cachedSubAdminURL     string
 	configRefreshRunning  atomic.Bool
@@ -204,6 +204,7 @@ func New(opts Options) *Server {
 		passwordPendingAck: pendingAck,
 		gatewayToken:       gatewayToken,
 		cliToken:           cliToken,
+		cfgStore:           config.NewStore(opts.ConfigPath, config.WithInitialConfig(initialCfg)),
 	}
 	if initialCfg != nil {
 		s.updateConfigCache(initialCfg)
@@ -462,9 +463,11 @@ func (s *Server) updateConfigCache(cfg *config.Config) {
 	if cfg == nil {
 		return
 	}
+	if s.cfgStore != nil && s.cfgStore.Get() != cfg {
+		s.cfgStore.Set(cfg)
+	}
 	subURL := s.resolveSubstoreAdminURLFast(cfg)
 	s.configCacheMu.Lock()
-	s.cachedConfig = cfg
 	s.cachedSubAdminURL = subURL
 	s.cachedConfigAt = time.Now()
 	s.configCacheMu.Unlock()
@@ -474,6 +477,9 @@ func (s *Server) invalidateConfigCache() {
 	s.configCacheMu.Lock()
 	s.cachedConfigAt = time.Time{}
 	s.configCacheMu.Unlock()
+	if s.cfgStore != nil {
+		s.cfgStore.Invalidate()
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

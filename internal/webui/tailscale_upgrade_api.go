@@ -130,7 +130,7 @@ func (s *Server) handleTailscaleUpgradeStatusGet(w http.ResponseWriter, r *http.
 	if s.opts.TailscaleUpgradeForTest != nil && s.opts.TailscaleUpgradeForTest.StatusFn != nil {
 		tsStatus = s.opts.TailscaleUpgradeForTest.StatusFn(configPathFor(s))
 	} else {
-		tsStatus = tailscaleStatus(configPathFor(s))
+		tsStatus = s.tailscaleStatus(configPathFor(s))
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{

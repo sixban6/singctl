@@ -52,10 +52,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	go func() { defer wg.Done(); sb = singboxStatus() }()
 	go func() { defer wg.Done(); dm = s.daemonStatusSummary() }()
 	go func() { defer wg.Done(); agh = s.adguardStatusSummary() }()
-	go func() { defer wg.Done(); ts = tailscaleStatus(s.opts.ConfigPath) }()
+	go func() { defer wg.Done(); ts = s.tailscaleStatus(s.opts.ConfigPath) }()
 	go func() { defer wg.Done(); fw = firewallStatus() }()
 	go func() { defer wg.Done(); gw = s.gatewayStatusSummary() }()
-	go func() { defer wg.Done(); cfg = configSummary(s.opts.ConfigPath) }()
+	go func() { defer wg.Done(); cfg = s.configSummary(s.opts.ConfigPath) }()
 	wg.Wait()
 
 	status := map[string]any{
@@ -78,7 +78,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 func (s *Server) daemonStatusSummary() map[string]any {
 	maxRestartsCfg := 0
 	failoverEnabled := true
-	if loaded, err := config.Load(s.opts.ConfigPath); err == nil && loaded != nil {
+	if loaded, err := s.loadConfigSnapshot(); err == nil && loaded != nil {
 		maxRestartsCfg = loaded.Watchdog.MaxRestarts
 		failoverEnabled = loaded.Watchdog.Failover.IsEnabled()
 	}
@@ -153,7 +153,7 @@ func singboxStatus() map[string]any {
 	}
 }
 
-func tailscaleStatus(configPath string) map[string]any {
+func (s *Server) tailscaleStatus(configPath string) map[string]any {
 	// OpenWrt 装在 /usr/sbin,发行版常在 /usr/bin,桌面端在 /usr/local/bin
 	binPath := ""
 	for _, c := range []string{"/usr/sbin/tailscale", "/usr/bin/tailscale", "/usr/local/bin/tailscale"} {
@@ -188,7 +188,14 @@ func tailscaleStatus(configPath string) map[string]any {
 
 	authKeySet := false
 	subnets := ""
-	if cfg, err := config.Load(configPath); err == nil {
+	var cfg *config.Config
+	var err error
+	if configPath == configPathFor(s) {
+		cfg, err = s.loadConfigSnapshot()
+	} else {
+		cfg, err = config.Load(configPath)
+	}
+	if err == nil && cfg != nil {
 		authKeySet = strings.TrimSpace(cfg.Tailscale.AuthKey) != ""
 		subnets = strings.TrimSpace(cfg.Tailscale.Subnets)
 	}
@@ -303,13 +310,19 @@ func firewallStatus() firewall.QuickStatus {
 	return firewall.InspectQuickStatus()
 }
 
-func configSummary(path string) map[string]any {
+func (s *Server) configSummary(path string) map[string]any {
 	summary := map[string]any{
 		"path":   path,
 		"exists": fileExists(path),
 		"subs":   []map[string]any{},
 	}
-	cfg, err := config.Load(path)
+	var cfg *config.Config
+	var err error
+	if path == configPathFor(s) {
+		cfg, err = s.loadConfigSnapshot()
+	} else {
+		cfg, err = config.Load(path)
+	}
 	if err != nil {
 		summary["error"] = err.Error()
 		return summary
@@ -490,7 +503,7 @@ func (s *Server) handleConfigPut(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "备份配置失败: "+err.Error())
 		return
 	}
-	if err := config.Save(configPathFor(s), cfg); err != nil {
+	if err := s.saveConfig(cfg); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "保存配置失败: "+err.Error())
 		return
 	}
@@ -597,6 +610,7 @@ func (s *Server) handleConfigRawPut(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "写入配置失败: "+err.Error())
 		return
 	}
+	s.invalidateConfigStore()
 	s.invalidateIOSCache()
 	s.syncAdGuardSubWhitelistAsync(&cfg)
 	_ = daemon.NotifyReload()
@@ -866,7 +880,7 @@ func (s *Server) handleSbConfigPreservePut(w http.ResponseWriter, r *http.Reques
 		cfg = &config.Config{}
 	}
 	cfg.Watchdog.SetPreserveManualConfig(body.Preserve)
-	if err := config.Save(cfgPath, cfg); err != nil {
+	if err := s.saveConfig(cfg); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "保存配置失败: "+err.Error())
 		return
 	}

@@ -392,7 +392,7 @@ func (s *Server) handleWatchdogConfigPut(w http.ResponseWriter, r *http.Request)
 		writeJSONError(w, http.StatusInternalServerError, "备份配置失败: "+err.Error())
 		return
 	}
-	if err := config.Save(cfgPath, cfg); err != nil {
+	if err := s.saveConfig(cfg); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "保存配置失败: "+err.Error())
 		return
 	}
