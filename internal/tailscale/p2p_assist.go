@@ -14,6 +14,7 @@ import (
 
 const (
 	jitPollInterval     = 300 * time.Millisecond
+	jitPostCloseGrace   = 1200 * time.Millisecond
 	jitFailureThreshold = 2
 
 	// DefaultMinAutoJITBytes 限制仅当 DERP 会话窗口内实际产生 >= 4 KiB 真实流量增量时才自动开孔，
@@ -522,21 +523,30 @@ func (c *P2PAssistController) executeJITWindow(
 	defer closeOnce()
 
 	peerTSIP := pickPeerTSIP(initialPeer.TailscaleIPs)
-	sendDisco := func() {
+	discoCtx, discoCancel := context.WithCancel(ctx)
+	var discoWg sync.WaitGroup
+	defer func() {
+		discoCancel()
+		discoWg.Wait()
+	}()
+	sendDiscoAsync := func() {
 		if peerTSIP == "" {
 			return
 		}
-		pCtx, pCancel := context.WithTimeout(ctx, 2*time.Second)
-		defer pCancel()
-		_, _ = api.PingDisco(pCtx, peerTSIP)
+		discoWg.Go(func() {
+			pCtx, pCancel := context.WithTimeout(discoCtx, 2500*time.Millisecond)
+			defer pCancel()
+			_, _ = api.PingDisco(pCtx, peerTSIP)
+		})
 	}
 
-	sendDisco()
+	// 异步触发 DISCO 探活，避免跨洋 DERP 延迟阻塞主观察循环与关孔定时器。
+	sendDiscoAsync()
 	deadline := openedAt.Add(time.Duration(winSec) * time.Second)
 	direct := false
 	curAddr := ""
 	relay := initialPeer.Relay
-	secondDiscoSent := false
+	discoStage := 1
 
 	for {
 		if err := c.sleep(ctx, jitPollInterval); err != nil {
@@ -557,18 +567,53 @@ func (c *P2PAssistController) executeJITWindow(
 		if !now.Before(deadline) {
 			break
 		}
-		if !secondDiscoSent && now.Sub(openedAt) >= 600*time.Millisecond {
-			secondDiscoSent = true
-			sendDisco()
+		elapsed := now.Sub(openedAt)
+		if discoStage == 1 && elapsed >= 600*time.Millisecond {
+			discoStage = 2
+			sendDiscoAsync()
+		} else if discoStage == 2 && elapsed >= 2000*time.Millisecond {
+			discoStage = 3
+			sendDiscoAsync()
 		}
 	}
 
-	// Close pinhole immediately before computing metrics and recording state.
+	// 到点立即关孔以严格维持零常驻暴露；关孔后额外留 1.2s 宽限复查 conntrack 刚建成的直连状态。
 	closeOnce()
 	pinholeMs := max(int64(1), c.now().Sub(openedAt).Milliseconds())
+	postCloseDirect := false
+
+	if !direct {
+		graceDeadline := c.now().Add(jitPostCloseGrace)
+		for {
+			if err := c.sleep(ctx, jitPollInterval); err != nil {
+				break
+			}
+			stSnap, sErr := api.Status(ctx)
+			if sErr == nil && stSnap != nil {
+				if p, ok := MatchConfiguredPeer(rule, stSnap.Peers, stSnap.Self.ID); ok {
+					relay = p.Relay
+					if p.CurAddr != "" {
+						direct = true
+						curAddr = p.CurAddr
+						postCloseDirect = true
+						break
+					}
+				}
+			}
+			if !c.now().Before(graceDeadline) {
+				break
+			}
+		}
+	}
+
+	discoCancel()
+	discoWg.Wait()
 
 	if direct {
 		msg := fmt.Sprintf("P2P 直连升级成功（%dms 内自动关闭临时端口）", pinholeMs)
+		if postCloseDirect {
+			msg = fmt.Sprintf("P2P 直连升级成功（%dms 自动关孔，conntrack 握手已就绪）", pinholeMs)
+		}
 		c.recordAttemptOutcome(cfg, key, initialPeer.ShortName, true, curAddr, pinholeMs, manual, msg)
 		return &PokeResult{
 			Direct:         true,

@@ -25,6 +25,10 @@ func notifyReadyPipe(fd int) {
 	if (st.Mode & syscall.S_IFMT) != syscall.S_IFIFO {
 		return
 	}
-	_, _ = syscall.Write(fd, []byte{1})
+	// macOS XNU kqueue_stat() 也会对 kqueue FD 返回 S_IFIFO；仅在成功写入 1 字节就绪信号后才关闭 fd，
+	// 避免误关 Go runtime netpoller 的 kqueue 描述符。
+	if n, err := syscall.Write(fd, []byte{1}); err != nil || n != 1 {
+		return
+	}
 	_ = syscall.Close(fd)
 }

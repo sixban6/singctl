@@ -231,13 +231,36 @@ jobs:
           sha256sum *.tar.gz *.zip > checksums.txt
           cat checksums.txt
 
+      - name: Generate Release Notes from Commits
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+          TAG_NAME="${{ needs.verify.outputs.tag_name }}"
+          PREV_TAG=$(git tag --list 'v*' --sort=-v:refname | grep -Fxv "$TAG_NAME" | head -n 1 || true)
+          RANGE="${PREV_TAG:+${PREV_TAG}..HEAD}"
+          RANGE="${RANGE:-HEAD}"
+
+          {
+            echo "## What's Changed"
+            echo ""
+            COMMIT_LOG=$(git log "$RANGE" --no-merges --format="### %s (\`%h\`)%n%n%b%n---%n")
+            if [ -z "${COMMIT_LOG// }" ]; then
+              COMMIT_LOG=$(git log -1 --format="### %s (\`%h\`)%n%n%b%n")
+            fi
+            printf '%s\n' "$COMMIT_LOG"
+            if [ -n "$PREV_TAG" ]; then
+              echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREV_TAG}...${TAG_NAME}"
+            fi
+          } > /tmp/release-notes.md
+
       - name: Tag Commit & Publish GitHub Release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.verify.outputs.tag_name }}
           name: ${{ needs.verify.outputs.tag_name }}
           target_commitish: ${{ github.sha }}
-          generate_release_notes: true
+          body_path: /tmp/release-notes.md
+          generate_release_notes: false
           make_latest: true
           files: |
             dist/*.tar.gz

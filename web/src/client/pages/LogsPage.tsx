@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Terminal, RefreshCw } from 'lucide-react';
-import { Badge, Button, PageHeader, SectionCard, SegmentedTabs, useToast } from '../../ui';
+import { Terminal, RefreshCw, Trash2 } from 'lucide-react';
+import { Badge, Button, ConfirmDialog, PageHeader, SectionCard, SegmentedTabs, useToast } from '../../ui';
 import { clientApi } from '../api';
 import { ClientLogsResponse } from '../types';
 
@@ -9,7 +9,7 @@ export interface LogsPageProps {
 }
 
 export const LogsPage: React.FC<LogsPageProps> = ({ initialLogName }) => {
-  const { error } = useToast();
+  const { success, error } = useToast();
   const [name, setName] = useState<'events' | 'daemon' | 'webui'>(
     initialLogName === 'events' || initialLogName === 'webui' ? initialLogName : 'daemon',
   );
@@ -17,6 +17,8 @@ export const LogsPage: React.FC<LogsPageProps> = ({ initialLogName }) => {
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [logData, setLogData] = useState<ClientLogsResponse | null>(null);
   const [loading, setLoading] = useState(false);
+  const [clearing, setClearing] = useState(false);
+  const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
   const viewRef = useRef<HTMLPreElement>(null);
 
   useEffect(() => {
@@ -54,9 +56,26 @@ export const LogsPage: React.FC<LogsPageProps> = ({ initialLogName }) => {
 
   useEffect(() => {
     if (viewRef.current) {
-      viewRef.current.scrollTop = viewRef.current.scrollHeight;
+      viewRef.current.scrollTop = 0;
     }
-  }, [logData?.content]);
+  }, [name]);
+
+  const handleClearLogs = async () => {
+    setClearing(true);
+    try {
+      await clientApi.clearLogs(name);
+      setClearConfirmOpen(false);
+      success('运行日志已清空');
+      await fetchLogs(false);
+      if (viewRef.current) {
+        viewRef.current.scrollTop = 0;
+      }
+    } catch (err: unknown) {
+      error(err instanceof Error ? err.message : '清空日志失败');
+    } finally {
+      setClearing(false);
+    }
+  };
 
   const lines = (logData?.content || '').split('\n');
 
@@ -79,6 +98,15 @@ export const LogsPage: React.FC<LogsPageProps> = ({ initialLogName }) => {
             </select>
             <Button size="sm" onClick={() => setAutoRefresh((v) => !v)}>
               {autoRefresh ? '暂停自动刷新' : '开启自动刷新'}
+            </Button>
+            <Button
+              size="sm"
+              variant="danger"
+              disabled={clearing || loading}
+              onClick={() => setClearConfirmOpen(true)}
+              icon={<Trash2 className="w-3.5 h-3.5" />}
+            >
+              清空
             </Button>
             <Button size="sm" variant="primary" loading={loading} onClick={() => fetchLogs(false)} icon={<RefreshCw className="w-3.5 h-3.5" />}>
               刷新
@@ -105,6 +133,7 @@ export const LogsPage: React.FC<LogsPageProps> = ({ initialLogName }) => {
             终端日志输出
           </span>
         }
+        actions={<span className="text-[11px] text-secondary">最新日志置顶</span>}
       >
         <pre
           ref={viewRef}
@@ -128,6 +157,21 @@ export const LogsPage: React.FC<LogsPageProps> = ({ initialLogName }) => {
           })}
         </pre>
       </SectionCard>
+
+      <ConfirmDialog
+        open={clearConfirmOpen}
+        danger
+        title="确认清空当前运行日志？"
+        description={
+          name === 'events'
+            ? '看门狗与容灾事件筛选自守护进程日志文件；确认后将就地清空该守护进程日志文件内容（不影响后台服务继续写入）。'
+            : `确认就地清空 ${name === 'webui' ? 'WebUI 运行日志' : '守护进程完整日志'}？此操作不可撤销（不影响后台服务继续写入）。`
+        }
+        confirmText="确认清空"
+        loading={clearing}
+        onCancel={() => setClearConfirmOpen(false)}
+        onConfirm={() => void handleClearLogs()}
+      />
     </div>
   );
 };

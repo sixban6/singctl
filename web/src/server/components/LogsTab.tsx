@@ -69,6 +69,14 @@ export const LogsTab: React.FC<LogsTabProps> = ({ initialService = 'singbox' }) 
     { key: 'system', label: '系统日志' },
   ];
 
+  const displayLogs = logs
+    ? logs
+        .split('\n')
+        .filter((line, idx, arr) => !(idx === arr.length - 1 && line === ''))
+        .reverse()
+        .join('\n')
+    : '';
+
   return (
     <div className="space-y-4">
       {/* Controls Bar */}
@@ -167,14 +175,14 @@ export const LogsTab: React.FC<LogsTabProps> = ({ initialService = 'singbox' }) 
             <span className="ml-2 text-slate-300 font-medium">实时运行日志流 · {service}</span>
           </div>
           <span className="text-[11px] text-slate-500">
-            {autoRefresh ? '实时监听中 (每 3s)' : '静态快照'}
+            {autoRefresh ? '实时监听中 (每 3s · 最新在前)' : '静态快照 · 最新在前'}
           </span>
         </div>
 
         {/* Console Body */}
         <div className="p-4 overflow-x-auto max-h-[600px] overflow-y-auto font-mono text-xs text-slate-300 leading-relaxed space-y-1">
-          {logs ? (
-            <pre className="whitespace-pre-wrap break-all">{logs}</pre>
+          {displayLogs ? (
+            <pre className="whitespace-pre-wrap break-all">{displayLogs}</pre>
           ) : (
             <div className="text-slate-600 italic py-8 text-center">暂无日志内容</div>
           )}
