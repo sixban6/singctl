@@ -6,21 +6,29 @@
 - **敏感落盘强制 `0600`**：所有包含凭据、密钥、Token 或节点清单的持久化文件（`singctl.yaml`、`fleet.yaml`、`fleet_keys/*`、`config.json`、Token 文件）写入或原子替换时必须确保权限为 `0600`（目录 `0700`）。
 - **防命令注入与防越权**：所有拼入远程 Shell 或系统命令的参数必须做严格白名单校验或 Base64 管道解码传递；服务端遥测端口（如 Clash API `9099`）与后台服务（`8092`、`3001`）仅允许绑定 `127.0.0.1` 回环地址。
 - **遵循现代 Go 规范**：基于仓库 `go.mod` 目标版本使用标准库现代特性（`cmp.Or`、`slices`、`maps`、`strings.SplitSeq`、`atomic.Bool`、测试中使用 `t.Context()`）。
+- **务实开闭原则（OCP）与依赖可注入**：遵循 Rule of Three，不为假设性未来需求提前套接口或触犯 CI `deadcode` 门禁；当存在 **≥ 2 种** 真实平台/策略/实现时，优先用**小接口或表驱动（Table-Driven）**扩展，避免堆砌冗长 `if/else` / `switch`。涉及命令执行、网络探测、防火墙、时钟与外部 API 的模块通过结构体字段或函数选项注入依赖（如 `Runner`、`Now`、`Sleep`），并保持新增 YAML / JSON 配置字段的向后兼容安全默认值。
 
-## 2. 提交与发版前必跑验证门禁
+## 2. 分层测试驱动开发（Pragmatic TDD）
+
+- **Bug 修复（回归测试优先）**：修复任何故障前，先编写可稳定复现问题的失败单元测试，再修改实现使其转绿，杜绝无测试的“盲修”与后续回归。
+- **核心逻辑与安全/状态规则（先测边界再实现）**：新增配置解析/生成、状态机、防火墙与沙盒规则、API 校验时，先以表驱动测试覆盖空输入、非法/注入输入、超时重试、幂等重复调用、失败自动回滚及 `-race` 并发边界，再编写实现。
+- **明确豁免范围**：纯前端样式与文案微调、纯文档改动（`docs/`）及只读排查命令不强制先写单测（前端改动仍须通过 `tsc` 与 `npm run build`）。
+
+## 3. 提交与发版前必跑验证门禁
 
 每次修改代码准备提交前，必须本地实际运行并通过以下检查（不得跳过或伪造结果）：
 
-1. **若修改了 `web/` 前端代码**：必须执行 `cd web && npx tsc --noEmit && npm run build`，将最新构建产物同步至 `internal/serverweb/static/`。
-2. **Go 静态检查与竞态测试**：必须执行并通过：
+1. **若修改了 `web/` 前端代码**：必须执行 `cd web && npx tsc --noEmit && npm run build`，将最新构建产物同步至 `internal/serverweb/static/` 与 `internal/webui/static/`。
+2. **Go 静态检查、死代码检测与竞态测试**：必须执行并通过：
    ```bash
    go vet ./...
+   go run golang.org/x/tools/cmd/deadcode@v0.53.0 -test ./...
    go test -race ./internal/...
    go test -short ./test/...
    ```
 3. **注释与文档同步**：保留无关既有注释；若新增或变更 CLI 参数、配置字段（如 `knownYAMLKeys`），同步更新配置模板与 `docs/` 文档。
 
-## 3. Git Commit 信息规范（强制）
+## 4. Git Commit 信息规范（强制）
 
 每次执行 `git commit` 时，必须使用语义化前缀，并在标题与正文中清晰说明以下内容：
 
