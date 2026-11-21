@@ -7,6 +7,7 @@ package deploy
 import (
 	"bytes"
 	"cmp"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -20,11 +21,8 @@ import (
 // UninstallWarp uninstalls WARP (wireproxy) and any legacy fscarmen WARP leftovers.
 func UninstallWarp() error {
 	logger.Info("Uninstalling WARP (wireproxy)...")
-	_ = runCmd("systemctl", "stop", "wireproxy")
-	_ = runCmd("systemctl", "disable", "wireproxy")
+	_ = serviceMgr().RemoveUnit(context.Background(), servicemgrUnitSpec("wireproxy", DefaultWireproxyService))
 	_, _ = PurgeLegacyFscarmenWarp()
-	_ = os.Remove(DefaultWireproxyService)
-	_ = runCmd("systemctl", "daemon-reload")
 	_ = os.Remove(DefaultWireproxyBin)
 	_ = os.RemoveAll("/etc/wireproxy")
 	logger.Success("WARP uninstallation completed.")

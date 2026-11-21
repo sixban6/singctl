@@ -19,6 +19,7 @@ import (
 
 	"singctl/internal/config"
 	"singctl/internal/constant"
+	"singctl/internal/platform/servicemgr"
 	"singctl/internal/util/netinfo"
 )
 
@@ -177,7 +178,7 @@ var protectedPublicDNSIPs = []string{
 func InspectQuickStatus() QuickStatus {
 	st := QuickStatus{
 		Mode:      "standard",
-		IsOpenWrt: isOpenWrt(),
+		IsOpenWrt: servicemgr.IsOpenWrt(),
 	}
 	if runtime.GOOS != "linux" {
 		return st

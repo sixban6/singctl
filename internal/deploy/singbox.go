@@ -3,6 +3,7 @@ package deploy
 import (
 	"bytes"
 	"cmp"
+	"context"
 	"crypto/ecdh"
 	"crypto/rand"
 	"crypto/x509"
@@ -344,7 +345,7 @@ func SyncHysteria2CertIfNeeded(cfg *config.Config) (bool, string, error) {
 		return false, "", err
 	}
 	_ = os.Chmod(cfgFile, 0600)
-	_ = exec.Command("systemctl", "restart", "sing-box").Run()
+	_ = serviceMgr().Restart(context.Background(), "sing-box")
 	return true, healMsg, nil
 }
 
@@ -491,7 +492,7 @@ func (sbs *SingBoxServer) ensureSystemdService() error {
 			return fmt.Errorf("failed to write sing-box.service: %w", err)
 		}
 		logger.Info("Reloading systemd daemon...")
-		if err := runCmd("systemctl", "daemon-reload"); err != nil {
+		if err := serviceMgr().DaemonReload(context.Background()); err != nil {
 			return fmt.Errorf("failed to daemon-reload: %w", err)
 		}
 		logger.Success("sing-box.service is ready at %s", servicePath)
@@ -524,11 +525,11 @@ func (sbs *SingBoxServer) DeploySingbox() error {
 
 	// 4. Enable and restart sing-box service (使用 restart 确保加载新配置)
 	logger.Info("Restarting sing-box service...")
-
-	if err := runCmd("systemctl", "enable", "sing-box"); err != nil {
+	ctx := context.Background()
+	if err := serviceMgr().Enable(ctx, "sing-box"); err != nil {
 		return fmt.Errorf("failed to enable sing-box service: %w", err)
 	}
-	if err := runCmd("systemctl", "restart", "sing-box"); err != nil {
+	if err := serviceMgr().Restart(ctx, "sing-box"); err != nil {
 		return fmt.Errorf("failed to restart sing-box service: %w", err)
 	}
 	sbs.updateShareLinks()
@@ -580,10 +581,11 @@ func (sbs *SingBoxServer) ResetCredentials() error {
 
 	// 5. Restart sing-box service
 	logger.Info("Restarting sing-box service...")
-	if err := runCmd("systemctl", "enable", "sing-box"); err != nil {
+	ctx := context.Background()
+	if err := serviceMgr().Enable(ctx, "sing-box"); err != nil {
 		return fmt.Errorf("failed to enable sing-box service: %w", err)
 	}
-	if err := runCmd("systemctl", "restart", "sing-box"); err != nil {
+	if err := serviceMgr().Restart(ctx, "sing-box"); err != nil {
 		return fmt.Errorf("failed to restart sing-box service: %w", err)
 	}
 
@@ -763,15 +765,8 @@ func (sbs *SingBoxServer) LoadExistingCredentials() error {
 func UninstallSingbox() error {
 	logger.Info("Uninstalling sing-box server...")
 
-	// Stop and disable service
-	_ = exec.Command("systemctl", "stop", "sing-box").Run()
-	_ = exec.Command("systemctl", "disable", "sing-box").Run()
-
-	// Remove service file
-	if err := os.Remove(constant.SingBoxSystemdService); err != nil && !os.IsNotExist(err) {
-		logger.Warn("Failed to remove sing-box.service: %v", err)
-	}
-	_ = exec.Command("systemctl", "daemon-reload").Run()
+	// Stop and disable service and remove unit file
+	_ = serviceMgr().RemoveUnit(context.Background(), servicemgrUnitSpec("sing-box", constant.SingBoxSystemdService))
 
 	// Remove executable
 	exe := constant.SingBoxInstallDir

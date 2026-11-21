@@ -101,8 +101,8 @@ func DeployWarpWithConfig(cfg *config.Config) error {
 			if normalized, changed := NormalizeWireproxyConfigContent(string(raw)); changed {
 				_ = writeFileAtomic0600(DefaultWireproxyConf, []byte(normalized))
 				_ = writeWireproxySystemdUnit(DefaultWireproxyService, DefaultWireproxyBin, DefaultWireproxyConf)
-				_ = runCmd("systemctl", "daemon-reload")
-				_ = runCmd("systemctl", "restart", "wireproxy")
+				_ = serviceMgr().DaemonReload(context.Background())
+				_ = serviceMgr().Restart(context.Background(), "wireproxy")
 				time.Sleep(1500 * time.Millisecond)
 			}
 			if isWarpSocksRunning() && IsWarpTunnelHealthy(3*time.Second) {
@@ -156,11 +156,15 @@ func DeployWarpWithConfig(cfg *config.Config) error {
 	if err := writeWireproxySystemdUnit(DefaultWireproxyService, wireproxyBin, DefaultWireproxyConf); err != nil {
 		return fmt.Errorf("failed to write %s: %w", DefaultWireproxyService, err)
 	}
-	_ = runCmd("systemctl", "daemon-reload")
-	if err := runCmd("systemctl", "enable", "--now", "wireproxy"); err != nil {
-		return fmt.Errorf("failed to enable and start wireproxy service: %w", err)
+	ctx := context.Background()
+	mgr := serviceMgr()
+	_ = mgr.DaemonReload(ctx)
+	if err := mgr.Enable(ctx, "wireproxy"); err != nil {
+		return fmt.Errorf("failed to enable wireproxy service: %w", err)
 	}
-	_ = runCmd("systemctl", "restart", "wireproxy")
+	if err := mgr.Restart(ctx, "wireproxy"); err != nil {
+		return fmt.Errorf("failed to restart wireproxy service: %w", err)
+	}
 
 	// 6. 探测 SOCKS5 监听与隧道握手（失败时自动轮换备选 Endpoint）
 	logger.Info("Verifying WARP SOCKS5 proxy on 127.0.0.1:40000...")
@@ -268,7 +272,7 @@ func normalizeWarpRotateDeps(deps *WarpRotateDeps) WarpRotateDeps {
 	}
 	if d.RestartService == nil {
 		d.RestartService = func() error {
-			return runCmd("systemctl", "restart", "wireproxy")
+			return serviceMgr().Restart(context.Background(), "wireproxy")
 		}
 	}
 	if d.FetchExitInfo == nil {
@@ -530,7 +534,7 @@ func SwitchWarpEndpointWithDeps(deps *WarpEndpointSwitchDeps) (endpoint, ip, loc
 	}
 	if d.RestartService == nil {
 		d.RestartService = func() error {
-			return runCmd("systemctl", "restart", "wireproxy")
+			return serviceMgr().Restart(context.Background(), "wireproxy")
 		}
 	}
 	if d.ProbeTargets == nil {
@@ -621,8 +625,10 @@ func SyncWarpConfigIfNeeded() (healed bool, msg string, err error) {
 	}
 
 	_ = writeWireproxySystemdUnit(DefaultWireproxyService, DefaultWireproxyBin, activePath)
-	_ = runCmd("systemctl", "daemon-reload")
-	_ = runCmd("systemctl", "restart", "wireproxy")
+	ctx := context.Background()
+	mgr := serviceMgr()
+	_ = mgr.DaemonReload(ctx)
+	_ = mgr.Restart(ctx, "wireproxy")
 	for range 4 {
 		time.Sleep(800 * time.Millisecond)
 		if _, _, pErr := ProbeWarpRealTargets(3 * time.Second); pErr == nil {

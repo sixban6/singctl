@@ -7,7 +7,19 @@ import (
 
 	"singctl/internal/config"
 	"singctl/internal/logger"
+	"singctl/internal/platform/servicemgr"
 )
+
+func serviceMgr() servicemgr.Manager {
+	return servicemgr.NewSystemd(nil)
+}
+
+func servicemgrUnitSpec(name, unitPath string) servicemgr.UnitSpec {
+	return servicemgr.UnitSpec{
+		Name:        name,
+		SystemdPath: unitPath,
+	}
+}
 
 // DeployCommonWithConfig initializes base environment with SSH port from config if provided
 func DeployCommonWithConfig(cfg *config.Config) error {

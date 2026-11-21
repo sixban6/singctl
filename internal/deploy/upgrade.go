@@ -3,6 +3,7 @@ package deploy
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -220,7 +221,7 @@ func UpgradeSingbox(cfg *config.Config) (*UpgradeResult, error) {
 		}
 	}
 
-	_ = runCmd("systemctl", "restart", "sing-box")
+	_ = serviceMgr().Restart(context.Background(), "sing-box")
 	newVer := GetInstalledSingBoxVersion()
 
 	return &UpgradeResult{
@@ -283,7 +284,7 @@ func UpgradeCaddy(cfg *config.Config) (*UpgradeResult, error) {
 		_ = file.SafeReplace("/usr/local/bin/caddy", extractedCaddy)
 	}
 	DetachCaddyFromApt()
-	_ = runCmd("systemctl", "restart", "caddy")
+	_ = serviceMgr().Restart(context.Background(), "caddy")
 
 	newVer := GetInstalledCaddyVersion()
 	return &UpgradeResult{
@@ -350,7 +351,7 @@ func UpgradeWarp(cfg *config.Config) (*UpgradeResult, error) {
 	if err := file.SafeReplace(DefaultWireproxyBin, extractedWP); err != nil {
 		return nil, fmt.Errorf("failed to replace %s: %w", DefaultWireproxyBin, err)
 	}
-	_ = runCmd("systemctl", "restart", "wireproxy")
+	_ = serviceMgr().Restart(context.Background(), "wireproxy")
 
 	newVer := GetInstalledWarpVersion()
 	return &UpgradeResult{

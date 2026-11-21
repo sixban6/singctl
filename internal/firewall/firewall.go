@@ -2,6 +2,7 @@ package firewall
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"net"
 	"net/netip"
@@ -17,6 +18,7 @@ import (
 	"singctl/internal/config"
 	"singctl/internal/constant"
 	"singctl/internal/logger"
+	"singctl/internal/platform/servicemgr"
 	"singctl/internal/util/file"
 )
 
@@ -554,17 +556,6 @@ stop() {
 }
 `
 
-// isOpenWrt 检查是否为 OpenWrt 系统
-func isOpenWrt() bool {
-	if _, err := os.Stat("/etc/openwrt_release"); err == nil {
-		return true
-	}
-	if _, err := os.Stat("/etc/openwrt_version"); err == nil {
-		return true
-	}
-	return false
-}
-
 // Enable writes sec_block.nft to /etc/sing-box/ and loads it using nft, honoring saved firewall config if present.
 // It preserves currently jailed dynamic attacker elements across reloads and configures auto-start persistence.
 func Enable() error {
@@ -645,7 +636,7 @@ func EnableWithOptions(opts BuildOptions, preserveDynamic bool) error {
 
 	// 4. 部署跨平台开机自启
 	var persistErr error
-	if isOpenWrt() {
+	if servicemgr.IsOpenWrt() {
 		logger.Info("Detected OpenWrt system, setting up init.d service...")
 		persistErr = setupOpenWrtInit()
 	} else {
@@ -705,7 +696,7 @@ func Disable() error {
 	}
 
 	// 1. 清理自启服务
-	if isOpenWrt() {
+	if servicemgr.IsOpenWrt() {
 		teardownOpenWrtInit()
 	} else {
 		teardownSystemdService()
@@ -732,22 +723,25 @@ func preloadNFTablesModule() {
 
 // ----------------- Systemd (Debian / Ubuntu) -----------------
 func setupSystemdService() error {
+	ctx := context.Background()
 	servicePath := constant.FirewallSystemdService
 	content := BuildFirewallSystemdUnit(constant.SingBoxNftablesFile)
 	if err := os.WriteFile(servicePath, []byte(content), 0644); err != nil {
 		return err
 	}
-	_ = exec.Command("systemctl", "daemon-reload").Run()
-	if err := exec.Command("systemctl", "enable", "--now", "singctl-firewall.service").Run(); err != nil {
+	mgr := servicemgr.NewSystemd(nil)
+	_ = mgr.DaemonReload(ctx)
+	if err := mgr.Enable(ctx, "singctl-firewall.service"); err != nil {
 		return err
 	}
-	return nil
+	return mgr.Start(ctx, "singctl-firewall.service")
 }
 
 func teardownSystemdService() {
-	_ = exec.Command("systemctl", "disable", "--now", "singctl-firewall.service").Run()
-	_ = os.Remove(constant.FirewallSystemdService)
-	_ = exec.Command("systemctl", "daemon-reload").Run()
+	_ = servicemgr.NewSystemd(nil).RemoveUnit(context.Background(), servicemgr.UnitSpec{
+		Name:        "singctl-firewall.service",
+		SystemdPath: constant.FirewallSystemdService,
+	})
 }
 
 // ----------------- init.d (OpenWrt) -----------------
@@ -758,17 +752,16 @@ func setupOpenWrtInit() error {
 		return err
 	}
 	// 执行 /etc/init.d/singctl-firewall enable (相当于创建 /etc/rc.d/S99singctl-firewall)
-	if err := exec.Command(scriptPath, "enable").Run(); err != nil {
-		return err
-	}
-	return nil
+	return servicemgr.NewProcd(nil, filepath.Dir(scriptPath)).Enable(context.Background(), filepath.Base(scriptPath))
 }
 
 func teardownOpenWrtInit() {
 	scriptPath := constant.FirewallInitdScript
 	if _, err := os.Stat(scriptPath); err == nil {
-		_ = exec.Command(scriptPath, "disable").Run()
-		_ = os.Remove(scriptPath)
+		_ = servicemgr.NewProcd(nil, filepath.Dir(scriptPath)).RemoveUnit(context.Background(), servicemgr.UnitSpec{
+			Name:      filepath.Base(scriptPath),
+			ProcdPath: scriptPath,
+		})
 	}
 }
 

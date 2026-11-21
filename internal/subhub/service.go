@@ -2,20 +2,63 @@ package subhub
 
 import (
 	"cmp"
+	"context"
 	"fmt"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
 	"singctl/internal/constant"
+	"singctl/internal/platform/servicemgr"
 	"singctl/internal/updater"
 )
 
 const ServiceName = "singctl-sub"
+
+func subhubUnitSpec(exePath, cfgPath string) servicemgr.UnitSpec {
+	unitPath := cmp.Or(constant.SubHubSystemdService, "/etc/systemd/system/singctl-sub.service")
+	scriptPath := cmp.Or(constant.SubHubInitdScript, "/etc/init.d/singctl-sub")
+	return servicemgr.UnitSpec{
+		Name:        ServiceName,
+		SystemdPath: unitPath,
+		SystemdBody: fmt.Sprintf(`[Unit]
+Description=SingCtl Native Subscription Aggregation Engine (SubHub)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=%s -c %s sr sub --listen %s
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+`, exePath, cfgPath, DefaultListenAddr),
+		ProcdPath: scriptPath,
+		ProcdBody: fmt.Sprintf(`#!/bin/sh /etc/rc.common
+
+START=98
+STOP=10
+USE_PROCD=1
+
+start_service() {
+    procd_open_instance
+    procd_set_param command %s -c %s sr sub --listen %s
+    procd_set_param respawn
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_close_instance
+}
+`, exePath, cfgPath, DefaultListenAddr),
+	}
+}
 
 // InstallService installs the singctl-sub systemd/OpenWrt service,
 // enables and starts it, and waits briefly for HTTP readiness.
@@ -46,119 +89,45 @@ func InstallService(cfgPath string) error {
 		return fmt.Errorf("ensure subscription key: %w", err)
 	}
 
-	if isOpenWrt() {
-		if err := installOpenWrtService(exePath, absCfg); err != nil {
-			return err
-		}
-	} else {
-		if err := installSystemdService(exePath, absCfg); err != nil {
-			return err
-		}
+	mgr := servicemgr.Detect(nil)
+	if err := mgr.InstallUnit(context.Background(), subhubUnitSpec(exePath, absCfg)); err != nil {
+		return err
 	}
 
 	waitForReady(3 * time.Second)
 	return nil
 }
 
-func installSystemdService(exePath, cfgPath string) error {
-	unitPath := cmp.Or(constant.SubHubSystemdService, "/etc/systemd/system/singctl-sub.service")
-	content := fmt.Sprintf(`[Unit]
-Description=SingCtl Native Subscription Aggregation Engine (SubHub)
-After=network.target
-
-[Service]
-Type=simple
-User=root
-ExecStart=%s -c %s sr sub --listen %s
-Restart=always
-RestartSec=3
-NoNewPrivileges=true
-PrivateTmp=true
-LimitNOFILE=65535
-
-[Install]
-WantedBy=multi-user.target
-`, exePath, cfgPath, DefaultListenAddr)
-
-	if err := os.WriteFile(unitPath, []byte(content), 0644); err != nil {
-		return fmt.Errorf("write %s: %w", unitPath, err)
-	}
-	if out, err := exec.Command("systemctl", "daemon-reload").CombinedOutput(); err != nil {
-		return fmt.Errorf("systemctl daemon-reload: %v (%s)", err, strings.TrimSpace(string(out)))
-	}
-	_ = exec.Command("systemctl", "enable", ServiceName).Run()
-	if out, err := exec.Command("systemctl", "restart", ServiceName).CombinedOutput(); err != nil {
-		return fmt.Errorf("systemctl restart %s: %v (%s)", ServiceName, err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
-func installOpenWrtService(exePath, cfgPath string) error {
-	scriptPath := cmp.Or(constant.SubHubInitdScript, "/etc/init.d/singctl-sub")
-	content := fmt.Sprintf(`#!/bin/sh /etc/rc.common
-
-START=98
-STOP=10
-USE_PROCD=1
-
-start_service() {
-    procd_open_instance
-    procd_set_param command %s -c %s sr sub --listen %s
-    procd_set_param respawn
-    procd_set_param stdout 1
-    procd_set_param stderr 1
-    procd_close_instance
-}
-`, exePath, cfgPath, DefaultListenAddr)
-
-	if err := os.WriteFile(scriptPath, []byte(content), 0755); err != nil {
-		return fmt.Errorf("write %s: %w", scriptPath, err)
-	}
-	_ = exec.Command(scriptPath, "enable").Run()
-	if out, err := exec.Command(scriptPath, "restart").CombinedOutput(); err != nil {
-		return fmt.Errorf("restart %s: %v (%s)", scriptPath, err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
 // StopService stops the singctl-sub service.
 func StopService() error {
-	if isOpenWrt() {
-		return exec.Command(cmp.Or(constant.SubHubInitdScript, "/etc/init.d/singctl-sub"), "stop").Run()
-	}
-	return exec.Command("systemctl", "stop", ServiceName).Run()
+	return servicemgr.Detect(nil).Stop(context.Background(), ServiceName)
 }
 
 // RestartService restarts the singctl-sub service if installed.
 func RestartService() error {
-	if isOpenWrt() {
+	if servicemgr.IsOpenWrt() {
 		script := cmp.Or(constant.SubHubInitdScript, "/etc/init.d/singctl-sub")
 		if _, err := os.Stat(script); err != nil {
 			return nil
 		}
-		return exec.Command(script, "restart").Run()
+		return servicemgr.NewProcd(nil, filepath.Dir(script)).Restart(context.Background(), ServiceName)
 	}
 	unit := cmp.Or(constant.SubHubSystemdService, "/etc/systemd/system/singctl-sub.service")
 	if _, err := os.Stat(unit); err != nil {
 		return nil
 	}
-	return exec.Command("systemctl", "restart", ServiceName).Run()
+	return servicemgr.NewSystemd(nil).Restart(context.Background(), ServiceName)
 }
 
 // UninstallService stops and removes the singctl-sub service and optionally /etc/sub-store.
 func UninstallService(removeData bool) error {
 	if runtime.GOOS == "linux" {
-		if isOpenWrt() {
-			script := cmp.Or(constant.SubHubInitdScript, "/etc/init.d/singctl-sub")
-			_ = exec.Command(script, "stop").Run()
-			_ = exec.Command(script, "disable").Run()
-			_ = os.Remove(script)
-		} else {
-			_ = exec.Command("systemctl", "stop", ServiceName).Run()
-			_ = exec.Command("systemctl", "disable", ServiceName).Run()
-			_ = os.Remove(cmp.Or(constant.SubHubSystemdService, "/etc/systemd/system/singctl-sub.service"))
-			_ = exec.Command("systemctl", "daemon-reload").Run()
+		spec := servicemgr.UnitSpec{
+			Name:        ServiceName,
+			SystemdPath: cmp.Or(constant.SubHubSystemdService, "/etc/systemd/system/singctl-sub.service"),
+			ProcdPath:   cmp.Or(constant.SubHubInitdScript, "/etc/init.d/singctl-sub"),
 		}
+		_ = servicemgr.Detect(nil).RemoveUnit(context.Background(), spec)
 	}
 
 	if removeData && constant.SubStoreDir != "" {
@@ -171,8 +140,8 @@ func UninstallService(removeData bool) error {
 
 // IsRunning checks whether SubHub is active via systemd or responding on 127.0.0.1:3001/healthz.
 func IsRunning() bool {
-	if runtime.GOOS == "linux" && !isOpenWrt() {
-		if exec.Command("systemctl", "is-active", "--quiet", ServiceName).Run() == nil {
+	if runtime.GOOS == "linux" && !servicemgr.IsOpenWrt() {
+		if servicemgr.NewSystemd(nil).IsActive(context.Background(), ServiceName) {
 			return true
 		}
 	}
@@ -198,14 +167,4 @@ func waitForReady(maxWait time.Duration) {
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
-}
-
-func isOpenWrt() bool {
-	if _, err := os.Stat("/etc/openwrt_release"); err == nil {
-		return true
-	}
-	if _, err := os.Stat("/etc/openwrt_version"); err == nil {
-		return true
-	}
-	return false
 }

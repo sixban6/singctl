@@ -2,6 +2,7 @@ package webui
 
 import (
 	"cmp"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"singctl/internal/logger"
+	"singctl/internal/platform/servicemgr"
 	"singctl/internal/updater"
 	"singctl/internal/util/file"
 )
@@ -537,7 +539,7 @@ func isSystemdManagedWeb() bool {
 	if _, err := exec.LookPath("systemctl"); err != nil {
 		return false
 	}
-	return runWebCmdTimeout(defaultWebProbeTimeout, nil, nil, nil, "systemctl", "is-active", "--quiet", "singctl-web") == nil
+	return servicemgr.NewSystemd(nil).IsActive(context.Background(), "singctl-web")
 }
 
 // IsWebRunningOrManaged 判断客户端 WebUI 是否正在运行（含 web start 守护、OpenWrt procd 或 systemd 托管）
@@ -574,7 +576,7 @@ func RestartWeb(configPath string) error {
 		return runWebCmdTimeout(defaultWebRestartTimeout, BuildCleanSubprocessEnv(), os.Stdout, os.Stderr, "/etc/init.d/singctl-web", "restart")
 	}
 	if isSystemdManagedWeb() {
-		return runWebCmdTimeout(defaultWebRestartTimeout, BuildCleanSubprocessEnv(), os.Stdout, os.Stderr, "systemctl", "restart", "singctl-web")
+		return servicemgr.NewSystemd(nil).Restart(context.Background(), "singctl-web")
 	}
 
 	st, running := WebStatus()
