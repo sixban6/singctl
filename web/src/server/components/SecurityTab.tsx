@@ -9,7 +9,8 @@ import {
   CertHealthItem,
 } from '../types';
 import { api } from '../api';
-import { peekCachedQuery, prefetchCachedQuery, writeCachedQuery } from '../../hooks';
+import { BANS_CACHE_KEY, HEAL_CACHE_KEY, SNIFF_CACHE_KEY } from '../prefetch';
+import { peekCachedQuery, writeCachedQuery } from '../../hooks';
 import { useToast } from '../../ui';
 import {
   Shield,
@@ -47,22 +48,6 @@ interface SecurityTabProps {
   active?: boolean;
   status: ServerStatusResponse | null;
   onRefresh: () => void;
-}
-
-const HEAL_CACHE_KEY = 'server:sec:heal';
-const BANS_CACHE_KEY = 'server:sec:bans';
-const SNIFF_CACHE_KEY = 'server:sec:sniff:all';
-
-export function prefetchSecurityTab(): void {
-  if (!peekCachedQuery(HEAL_CACHE_KEY)) {
-    void prefetchCachedQuery(HEAL_CACHE_KEY, () => api.getHealStatus(false));
-  }
-  if (!peekCachedQuery(BANS_CACHE_KEY)) {
-    void prefetchCachedQuery(BANS_CACHE_KEY, () => api.getBans());
-  }
-  if (!peekCachedQuery(SNIFF_CACHE_KEY)) {
-    void prefetchCachedQuery(SNIFF_CACHE_KEY, () => api.getSniffers('all', false));
-  }
 }
 
 export const SecurityTab: React.FC<SecurityTabProps> = ({ active = true, status, onRefresh }) => {

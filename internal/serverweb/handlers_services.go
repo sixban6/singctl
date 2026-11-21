@@ -44,33 +44,33 @@ func (s *Server) handleServiceAction(w http.ResponseWriter, r *http.Request) {
 	switch service {
 	case "caddy":
 		if action == "reload" {
-			cmdErr = exec.Command("caddy", "reload", "--config", "/etc/caddy/Caddyfile").Run()
+			caddyCfg := s.resolveServiceConfigPath("caddy", "/etc/caddy/Caddyfile")
+			cmdErr = s.runCmd(context.Background(), defaultServerActionTimeout, "caddy", "reload", "--config", caddyCfg)
 			if cmdErr != nil {
-				cmdErr = exec.Command("systemctl", "reload", "caddy").Run()
+				cmdErr = s.runCmd(context.Background(), defaultServerActionTimeout, "systemctl", "reload", "caddy")
 			}
 		} else {
-			cmdErr = exec.Command("systemctl", action, "caddy").Run()
+			cmdErr = s.runCmd(context.Background(), defaultServerActionTimeout, "systemctl", action, "caddy")
 		}
 	case "singbox":
 		if action == "reload" {
 			action = "restart"
 		}
-		cmdErr = exec.Command("systemctl", action, "sing-box").Run()
+		cmdErr = s.runCmd(context.Background(), defaultServerActionTimeout, "systemctl", action, "sing-box")
 	case "subhub", "substore":
 		if action == "reload" {
 			action = "restart"
 		}
-		cmdErr = exec.Command("systemctl", action, "singctl-sub").Run()
+		cmdErr = s.runCmd(context.Background(), defaultServerActionTimeout, "systemctl", action, "singctl-sub")
 	case "warp":
 		if action == "reload" {
 			action = "restart"
 		}
-		cmdErr = exec.Command("systemctl", action, "wireproxy").Run()
+		cmdErr = s.runCmd(context.Background(), defaultServerActionTimeout, "systemctl", action, "wireproxy")
 	case "all":
-		_ = exec.Command("systemctl", "restart", "sing-box").Run()
-		_ = exec.Command("systemctl", "restart", "caddy").Run()
-		_ = exec.Command("systemctl", "restart", "singctl-sub").Run()
-		_ = exec.Command("systemctl", "restart", "wireproxy").Run()
+		for _, unit := range []string{"sing-box", "caddy", "singctl-sub", "wireproxy"} {
+			_ = s.runCmd(context.Background(), defaultServerActionTimeout, "systemctl", "restart", unit)
+		}
 	default:
 		writeJSONError(w, http.StatusBadRequest, "未知服务: "+service)
 		return
@@ -156,7 +156,7 @@ func (s *Server) handleUpgradeService(w http.ResponseWriter, r *http.Request) {
 		}
 		newVer := deploy.GetInstalledSubhubVersion()
 		if checkServiceRunning("singctl-sub") {
-			_ = exec.Command("systemctl", "restart", "singctl-sub").Run()
+			_ = s.runCmd(context.Background(), defaultServerActionTimeout, "systemctl", "restart", "singctl-sub")
 		}
 		msg := fmt.Sprintf("SingCtl 已平滑升级至 %s，后台面板将在 1 秒后自动热重启", cmp.Or(newVer, "最新版"))
 		s.invalidateStatusCaches()
@@ -211,13 +211,13 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 
 	switch body.Action {
 	case "restart-caddy":
-		_ = exec.Command("systemctl", "restart", "caddy").Run()
+		_ = s.runCmd(context.Background(), defaultServerActionTimeout, "systemctl", "restart", "caddy")
 	case "restart-singbox":
-		_ = exec.Command("systemctl", "restart", "sing-box").Run()
+		_ = s.runCmd(context.Background(), defaultServerActionTimeout, "systemctl", "restart", "sing-box")
 	case "restart-subhub":
-		_ = exec.Command("systemctl", "restart", "singctl-sub").Run()
+		_ = s.runCmd(context.Background(), defaultServerActionTimeout, "systemctl", "restart", "singctl-sub")
 	case "restart-warp":
-		_ = exec.Command("systemctl", "restart", "wireproxy").Run()
+		_ = s.runCmd(context.Background(), defaultServerActionTimeout, "systemctl", "restart", "wireproxy")
 	default:
 		writeJSONError(w, http.StatusBadRequest, "未知操作: "+body.Action)
 		return
@@ -316,9 +316,9 @@ func (s *Server) handleServiceConfig(w http.ResponseWriter, r *http.Request) {
 	var path string
 	switch service {
 	case "singbox":
-		path = "/etc/sing-box/config.json"
+		path = s.resolveServiceConfigPath("singbox", "/etc/sing-box/config.json")
 	case "caddy":
-		path = "/etc/caddy/Caddyfile"
+		path = s.resolveServiceConfigPath("caddy", "/etc/caddy/Caddyfile")
 	case "warp":
 		path, _, _ = deploy.ResolveWireproxyConfigPaths()
 	default:
@@ -397,13 +397,19 @@ func (s *Server) handleUpdateServiceConfig(w http.ResponseWriter, r *http.Reques
 	var warpMirrorPaths []string
 	switch service {
 	case "singbox":
-		path = "/etc/sing-box/config.json"
+		path = s.resolveServiceConfigPath("singbox", "/etc/sing-box/config.json")
 		var js json.RawMessage
 		if err := json.Unmarshal([]byte(content), &js); err != nil {
 			writeJSONError(w, http.StatusBadRequest, "sing-box 配置必须是合法的 JSON 格式: "+err.Error())
 			return
 		}
-		if sbBin, lookErr := locateSingBoxBinary(); lookErr == nil && sbBin != "" {
+		sbBin := ""
+		if s != nil && strings.TrimSpace(s.singBoxBinOverride) != "" {
+			sbBin = strings.TrimSpace(s.singBoxBinOverride)
+		} else if found, lookErr := locateSingBoxBinary(); lookErr == nil {
+			sbBin = found
+		}
+		if sbBin != "" {
 			tmp, err := os.CreateTemp("", "singbox-validate-*.json")
 			if err == nil {
 				tmpName := tmp.Name()
@@ -411,14 +417,14 @@ func (s *Server) handleUpdateServiceConfig(w http.ResponseWriter, r *http.Reques
 				_ = tmp.Chmod(0600)
 				_, _ = tmp.WriteString(content)
 				_ = tmp.Close()
-				if out, err := exec.Command(sbBin, "check", "-c", tmpName).CombinedOutput(); err != nil {
+				if out, err := s.combinedOutputCmd(r.Context(), defaultServerCheckTimeout, sbBin, "check", "-c", tmpName); err != nil {
 					writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("sing-box 配置预校验未通过（已拦截写入以防断网）: %s", strings.TrimSpace(string(out))))
 					return
 				}
 			}
 		}
 	case "caddy":
-		path = "/etc/caddy/Caddyfile"
+		path = s.resolveServiceConfigPath("caddy", "/etc/caddy/Caddyfile")
 		tmp, err := os.CreateTemp("", "caddyfile-validate-*.caddy")
 		if err == nil {
 			tmpName := tmp.Name()
@@ -426,8 +432,7 @@ func (s *Server) handleUpdateServiceConfig(w http.ResponseWriter, r *http.Reques
 			_ = tmp.Chmod(0600)
 			_, _ = tmp.WriteString(content)
 			_ = tmp.Close()
-			cmd := exec.Command("caddy", "validate", "--config", tmpName, "--adapter", "caddyfile")
-			if out, err := cmd.CombinedOutput(); err != nil {
+			if out, err := s.combinedOutputCmd(r.Context(), defaultServerCheckTimeout, "caddy", "validate", "--config", tmpName, "--adapter", "caddyfile"); err != nil {
 				writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("Caddy 语法校验失败: %s", string(out)))
 				return
 			}
@@ -473,19 +478,23 @@ func (s *Server) handleUpdateServiceConfig(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	var reloadErr error
-	switch service {
-	case "caddy":
-		reloadErr = exec.Command("caddy", "reload", "--config", path).Run()
-	case "singbox":
-		if _, err := exec.LookPath("systemctl"); err == nil {
-			reloadErr = exec.Command("systemctl", "restart", "sing-box").Run()
+	reloadService := func() error {
+		switch service {
+		case "caddy":
+			return s.runCmd(context.Background(), defaultServerActionTimeout, "caddy", "reload", "--config", path)
+		case "singbox":
+			if s.canRunSystemctl() {
+				return s.runCmd(context.Background(), defaultServerActionTimeout, "systemctl", "restart", "sing-box")
+			}
+		case "warp":
+			if s.canRunSystemctl() {
+				return s.runCmd(context.Background(), defaultServerActionTimeout, "systemctl", "restart", "wireproxy")
+			}
 		}
-	case "warp":
-		if _, err := exec.LookPath("systemctl"); err == nil {
-			reloadErr = exec.Command("systemctl", "restart", "wireproxy").Run()
-		}
+		return nil
 	}
+
+	reloadErr := reloadService()
 	if reloadErr != nil && hadOld == nil {
 		_ = writeConfigAtomically(path, oldBytes, mode)
 		if service == "warp" {
@@ -493,13 +502,7 @@ func (s *Server) handleUpdateServiceConfig(w http.ResponseWriter, r *http.Reques
 				_ = writeConfigAtomically(mp, prev, mode)
 			}
 		}
-		if service == "singbox" {
-			_ = exec.Command("systemctl", "restart", "sing-box").Run()
-		} else if service == "caddy" {
-			_ = exec.Command("caddy", "reload", "--config", path).Run()
-		} else if service == "warp" {
-			_ = exec.Command("systemctl", "restart", "wireproxy").Run()
-		}
+		_ = reloadService()
 		writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("服务 %s 重载失败 (%v)，已自动回滚至原配置确保不断连", service, reloadErr))
 		return
 	}

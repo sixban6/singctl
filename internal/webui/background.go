@@ -239,7 +239,7 @@ func WebProcMatches(pid int) bool {
 		return false
 	}
 	if runtime.GOOS == "darwin" {
-		out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
+		out, err := outputWebCmdTimeout(defaultWebProbeTimeout, "ps", "-p", strconv.Itoa(pid), "-o", "command=")
 		if err != nil {
 			return false
 		}
@@ -270,7 +270,7 @@ func ProcessAlive(pid int) bool {
 	}
 	// macOS:用 ps 判僵尸
 	if runtime.GOOS == "darwin" {
-		if out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "stat=").Output(); err == nil {
+		if out, err := outputWebCmdTimeout(defaultWebProbeTimeout, "ps", "-p", strconv.Itoa(pid), "-o", "stat="); err == nil {
 			return !strings.Contains(strings.TrimSpace(string(out)), "Z")
 		}
 	}
@@ -336,6 +336,7 @@ func StartBackground(opts Options) error {
 		return err
 	}
 
+	// Intentional bare exec.Command: detached background WebUI child must outlive StartBackground().
 	cmd := exec.Command(os.Args[0], os.Args[1:]...)
 	extraEnv := []string{
 		envWebBackground + "=1",
@@ -525,7 +526,7 @@ func isProcdManagedWeb() bool {
 	if err != nil || fi.IsDir() {
 		return false
 	}
-	return exec.Command("/etc/init.d/singctl-web", "running").Run() == nil
+	return runWebCmdTimeout(defaultWebProbeTimeout, nil, nil, nil, "/etc/init.d/singctl-web", "running") == nil
 }
 
 // isSystemdManagedWeb 判断是否由 Linux systemd (singctl-web.service) 托管运行
@@ -536,7 +537,7 @@ func isSystemdManagedWeb() bool {
 	if _, err := exec.LookPath("systemctl"); err != nil {
 		return false
 	}
-	return exec.Command("systemctl", "is-active", "--quiet", "singctl-web").Run() == nil
+	return runWebCmdTimeout(defaultWebProbeTimeout, nil, nil, nil, "systemctl", "is-active", "--quiet", "singctl-web") == nil
 }
 
 // IsWebRunningOrManaged 判断客户端 WebUI 是否正在运行（含 web start 守护、OpenWrt procd 或 systemd 托管）
@@ -570,18 +571,10 @@ func buildRestartArgs(st WebState, configPath string, preferredListen string) []
 // RestartWeb 停止当前运行的客户端 WebUI 并使用磁盘上的最新二进制重新拉起（供 CLI `singctl update self` 或 `singctl web restart` 调用）
 func RestartWeb(configPath string) error {
 	if isProcdManagedWeb() {
-		cmd := exec.Command("/etc/init.d/singctl-web", "restart")
-		cmd.Env = BuildCleanSubprocessEnv()
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		return cmd.Run()
+		return runWebCmdTimeout(defaultWebRestartTimeout, BuildCleanSubprocessEnv(), os.Stdout, os.Stderr, "/etc/init.d/singctl-web", "restart")
 	}
 	if isSystemdManagedWeb() {
-		cmd := exec.Command("systemctl", "restart", "singctl-web")
-		cmd.Env = BuildCleanSubprocessEnv()
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		return cmd.Run()
+		return runWebCmdTimeout(defaultWebRestartTimeout, BuildCleanSubprocessEnv(), os.Stdout, os.Stderr, "systemctl", "restart", "singctl-web")
 	}
 
 	st, running := WebStatus()
@@ -596,11 +589,7 @@ func RestartWeb(configPath string) error {
 	if _, err := StopWeb(); err != nil {
 		return err
 	}
-	cmd := exec.Command(exe, args...)
-	cmd.Env = buildRestartEnv(st.Password)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	return runWebCmdTimeout(defaultWebRestartTimeout, buildRestartEnv(st.Password), os.Stdout, os.Stderr, exe, args...)
 }
 
 // attachDetachedStdio 将异步热重启子进程的输入输出与当前 HTTP 会话彻底解耦，并把启动/错误日志追加至 WebLogPath
@@ -642,6 +631,7 @@ func ScheduleDetachedRestart(configPath string, listen string, password string) 
 		}
 		oldPid := strconv.Itoa(os.Getpid())
 		winScript := `ping -n 2 127.0.0.1 >NUL 2>&1 & "%SINGCTL_RESTART_EXE%" web stop >NUL 2>&1 & taskkill /PID %SINGCTL_RESTART_OLDPID% /F >NUL 2>&1 & if defined SINGCTL_RESTART_CFG ("%SINGCTL_RESTART_EXE%" --config "%SINGCTL_RESTART_CFG%" web start -l "%SINGCTL_RESTART_LISTEN%") else ("%SINGCTL_RESTART_EXE%" web start -l "%SINGCTL_RESTART_LISTEN%")`
+		// Intentional bare exec.Command: detached async restart helper must survive parent exit.
 		cmd := exec.Command("cmd.exe", "/C", winScript)
 		env := buildRestartEnv(effectivePassword)
 		env = append(env,
@@ -659,6 +649,7 @@ func ScheduleDetachedRestart(configPath string, listen string, password string) 
 	}
 
 	var cmd *exec.Cmd
+	// Intentional bare exec.Command: detached async restart helper must survive parent HTTP process shutdown.
 	switch {
 	case isProcdManagedWeb():
 		cmd = exec.Command("/bin/sh", "-c", "sleep 1; exec /etc/init.d/singctl-web restart")

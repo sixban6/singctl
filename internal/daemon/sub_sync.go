@@ -3,7 +3,6 @@ package daemon
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"time"
 
 	"singctl/internal/constant"
@@ -138,16 +137,8 @@ func (d *Daemon) syncSubscriptionsIfChanged() {
 
 	logger.Info("[SubSync] Detected subscription node change (%d -> %d proxy outbounds), pre-validating new config...", oldCount, newCount)
 
-	tmpPath := cfgPath + ".subsync.tmp"
-	if err := os.WriteFile(tmpPath, []byte(candidateJSON), 0600); err != nil {
-		logger.Warn("[SubSync] Write staged config failed: %v", err)
-		return
-	}
-	_ = os.Chmod(tmpPath, 0600)
-
-	checkCmd := exec.Command(constant.SingBoxInstallDir, "check", "-c", tmpPath)
-	if out, err := checkCmd.CombinedOutput(); err != nil {
-		_ = os.Remove(tmpPath)
+	tmpPath, out, err := d.preValidateSubSyncConfig(cfgPath, candidateJSON)
+	if err != nil {
 		logger.Warn("[SubSync] Pre-validation (sing-box check) failed, aborting sync: %v (%s)", err, string(out))
 		UpdateRuntimeState(func(snap *DaemonRuntimeSnapshot) {
 			snap.LastSubSyncAt = nowStr

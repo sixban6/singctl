@@ -9,7 +9,8 @@ import {
   WarpRoutingStatusResponse,
 } from '../types';
 import { api } from '../api';
-import { peekCachedQuery, prefetchCachedQuery, writeCachedQuery } from '../../hooks';
+import { WARP_CONNS_CACHE_KEY, WARP_ROUTING_CACHE_KEY } from '../prefetch';
+import { peekCachedQuery, writeCachedQuery } from '../../hooks';
 import { formatBytes, useToast } from '../../ui';
 import {
   AlertTriangle,
@@ -38,19 +39,8 @@ interface WarpTabProps {
   onRefreshParent?: () => void;
 }
 
-const WARP_ROUTING_CACHE_KEY = 'server:warp:routing:local';
-const WARP_CONNS_CACHE_KEY = 'server:warp:conns:local';
 const routingCacheKeyForNode = (node: string) => `server:warp:routing:${node || 'local'}`;
 const connsCacheKeyForNode = (node: string) => `server:warp:conns:${node || 'local'}`;
-
-export function prefetchWarpTab(): void {
-  if (!peekCachedQuery(WARP_ROUTING_CACHE_KEY)) {
-    void prefetchCachedQuery(WARP_ROUTING_CACHE_KEY, () => api.getWarpRouting(false, 'local'));
-  }
-  if (!peekCachedQuery(WARP_CONNS_CACHE_KEY)) {
-    void prefetchCachedQuery(WARP_CONNS_CACHE_KEY, () => api.getWarpConnections('', 'all', 'local'));
-  }
-}
 
 const DEFAULT_ROUTING: WarpRoutingConfig = {
   mode: 'split',

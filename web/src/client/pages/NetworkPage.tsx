@@ -41,6 +41,7 @@ import {
 } from '../../ui';
 import { useCachedQuery } from '../../hooks';
 import { clientApi } from '../api';
+import { GATEWAY_CACHE_KEY, TAILSCALE_CFG_CACHE_KEY, TAILSCALE_P2P_CACHE_KEY } from '../cacheKeys';
 import {
   BROWSER_DOH_EVENT,
   DNSLeakTestCard,
@@ -69,10 +70,6 @@ import {
   TailscaleUpgradePreflight,
 } from '../types';
 import { FirewallPanel } from './FirewallPanel';
-
-export const GATEWAY_CACHE_KEY = 'client:gateway';
-export const TAILSCALE_CFG_CACHE_KEY = 'client:tailscale:config';
-export const TAILSCALE_P2P_CACHE_KEY = 'client:tailscale:p2p';
 
 export interface TailscalePageProps {
   status: ClientStatusResponse | null;

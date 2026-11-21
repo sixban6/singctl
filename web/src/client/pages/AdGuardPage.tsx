@@ -40,6 +40,7 @@ import {
   writeCachedQuery,
 } from '../../hooks';
 import { clientApi } from '../api';
+import { ADGUARD_OVERVIEW_CACHE_KEY, ADGUARD_PROBE_CACHE_KEY } from '../cacheKeys';
 import { DNSLeakTestCard } from '../components/DNSLeakTestCard';
 import {
   AdGuardCredentialsResponse,
@@ -49,9 +50,6 @@ import {
   AdGuardUpstreamProbeItem,
   ClientStatusResponse,
 } from '../types';
-
-export const ADGUARD_OVERVIEW_CACHE_KEY = 'client:adguard:overview';
-export const ADGUARD_PROBE_CACHE_KEY = 'client:adguard:probe';
 
 export interface AdGuardPageProps {
   active?: boolean;

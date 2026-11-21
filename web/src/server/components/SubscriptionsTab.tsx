@@ -8,7 +8,8 @@ import {
   SubscriptionRiskSummary,
 } from '../types';
 import { api } from '../api';
-import { peekCachedQuery, prefetchCachedQuery, writeCachedQuery } from '../../hooks';
+import { SUBS_AUDIT_CACHE_KEY, SUBS_CACHE_KEY } from '../prefetch';
+import { peekCachedQuery, writeCachedQuery } from '../../hooks';
 import { QRCodeBox, useToast } from '../../ui';
 import {
   Copy,
@@ -51,22 +52,10 @@ const formatEffectiveUA = (ua?: string): string => {
   return ua.length > 20 ? `${ua.slice(0, 20)}...` : ua;
 };
 
-const SUBS_CACHE_KEY = 'server:subs:main';
-const SUBS_AUDIT_CACHE_KEY = 'server:subs:audit';
-
 interface CachedSubAudit {
   logs: SubscriptionAccessLogItem[];
   riskSummary?: SubscriptionRiskSummary;
   bannedIps?: string[];
-}
-
-export function prefetchSubscriptionsTab(): void {
-  if (!peekCachedQuery(SUBS_CACHE_KEY)) {
-    void prefetchCachedQuery(SUBS_CACHE_KEY, () => api.getSubscriptions());
-  }
-  if (!peekCachedQuery(SUBS_AUDIT_CACHE_KEY)) {
-    void prefetchCachedQuery(SUBS_AUDIT_CACHE_KEY, () => api.getSubscriptionAuditLogs());
-  }
 }
 
 export const SubscriptionsTab: React.FC<{ active?: boolean }> = ({ active = true }) => {
