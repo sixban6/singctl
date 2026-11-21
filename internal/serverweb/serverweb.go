@@ -4,6 +4,7 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net"
@@ -18,6 +19,7 @@ import (
 	"singctl/internal/deploy"
 	"singctl/internal/fleet"
 	"singctl/internal/heal"
+	"singctl/internal/lifecycle"
 	"singctl/internal/logger"
 	"singctl/internal/subhub"
 	"singctl/internal/telemetry"
@@ -322,8 +324,72 @@ func (s *Server) SubStore() *subhub.Store {
 	return s.subStore
 }
 
-// ListenAndServe 启动 HTTP 服务
+// ListenAndServe 启动 HTTP 服务（阻塞直至服务退出）。
 func (s *Server) ListenAndServe() error {
+	return s.ServeContext(context.Background())
+}
+
+// buildLifecycle 构建服务端后台协程与持久化落盘的确定性三阶段生命周期编排组。
+// 注册顺序决定关闭逆序：先停后台巡检，最后统一刷盘，避免后台协程向已关闭管理器继续写入。
+func (s *Server) buildLifecycle(patrolCtx context.Context, cancelPatrol context.CancelFunc) *lifecycle.Group {
+	g := lifecycle.NewGroup()
+	g.Add(
+		lifecycle.FuncService{
+			ServiceName: "persistence",
+			OnClose: func() error {
+				if s.audit != nil {
+					s.audit.Flush()
+				}
+				if s.limiter != nil {
+					s.limiter.Close()
+				}
+				if s.sniff != nil {
+					s.sniff.Flush()
+				}
+				if s.geo != nil {
+					s.geo.Flush()
+				}
+				return nil
+			},
+		},
+		lifecycle.FuncService{
+			ServiceName: "fleet-patrol",
+			OnStart: func(context.Context) error {
+				s.fleet.StartBackgroundPatrol(patrolCtx, fleet.DefaultPatrolInterval)
+				return nil
+			},
+			OnClose: func() error {
+				if cancelPatrol != nil {
+					cancelPatrol()
+				}
+				return nil
+			},
+		},
+		lifecycle.FuncService{
+			ServiceName: "warp-watchdog",
+			OnStart: func(context.Context) error {
+				s.StartWarpWatchdog(patrolCtx, DefaultWarpWatchdogInterval)
+				return nil
+			},
+		},
+		lifecycle.FuncService{
+			ServiceName: "heal-boot-scan",
+			OnPostStart: func(context.Context) error {
+				tryRunSingleFlight(&s.healRefreshing, 45*time.Second, func(bgCtx context.Context) {
+					s.runHealScanSync(bgCtx)
+				})
+				return nil
+			},
+		},
+	)
+	return g
+}
+
+// ServeContext 启动服务端 HTTP 面板与后台巡检编排组，并在 ctx 取消时优雅关闭及逆序刷盘。
+func (s *Server) ServeContext(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if strings.TrimSpace(s.GetPassword()) == "" {
 		return fmt.Errorf("服务端管理密码为空，拒绝启动。请在配置 web_admin.password 中设置密码")
 	}
@@ -338,34 +404,41 @@ func (s *Server) ListenAndServe() error {
 	logger.Success("SingCtl 服务端管理面板已启动")
 	logger.Info("  ➜  http://%s", ln.Addr().String())
 
-	patrolCtx, cancelPatrol := context.WithCancel(context.Background())
-	defer cancelPatrol()
+	patrolCtx, cancelPatrol := context.WithCancel(ctx)
+	lc := s.buildLifecycle(patrolCtx, cancelPatrol)
+	if err := lc.Start(patrolCtx); err != nil {
+		cancelPatrol()
+		_ = ln.Close()
+		return err
+	}
 	defer func() {
-		if s.audit != nil {
-			s.audit.Flush()
-		}
-		if s.limiter != nil {
-			s.limiter.Close()
-		}
-		if s.sniff != nil {
-			s.sniff.Flush()
-		}
-		if s.geo != nil {
-			s.geo.Flush()
-		}
+		cancelPatrol()
+		_ = lc.Close()
 	}()
-	s.fleet.StartBackgroundPatrol(patrolCtx, fleet.DefaultPatrolInterval)
-	s.StartWarpWatchdog(patrolCtx, DefaultWarpWatchdogInterval)
-	tryRunSingleFlight(&s.healRefreshing, 45*time.Second, func(bgCtx context.Context) {
-		s.runHealScanSync(bgCtx)
-	})
 
 	srv := &http.Server{
 		Handler:           s.Mux,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
-	return srv.Serve(ln)
+
+	serveDone := make(chan struct{})
+	defer close(serveDone)
+	go func() {
+		select {
+		case <-ctx.Done():
+			shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = srv.Shutdown(shutCtx)
+			shutCancel()
+		case <-serveDone:
+		}
+	}()
+
+	err = srv.Serve(ln)
+	if errors.Is(err, http.ErrServerClosed) && ctx.Err() != nil {
+		return nil
+	}
+	return err
 }
 
 func (s *Server) invalidateStatusCaches() {
