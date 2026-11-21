@@ -39,16 +39,12 @@ func parseOverviewQuery(r *http.Request) firewall.OverviewQuery {
 }
 
 func (s *Server) loadConfigOrEmpty() *config.Config {
-	cfg, _ := config.Load(s.opts.ConfigPath)
-	if cfg == nil {
-		return &config.Config{}
-	}
-	return cfg
+	return s.readConfigOrEmpty().Clone()
 }
 
 // handleFirewallOverviewGet 返回防火墙内核态、4格拦截战果、预检清单与分页规则列表。
 func (s *Server) handleFirewallOverviewGet(w http.ResponseWriter, r *http.Request) {
-	cfg := s.loadConfigOrEmpty()
+	cfg := s.readConfigOrEmpty()
 	ov := firewall.BuildOverview(r.Context(), cfg, extractCallerIP(r), parseOverviewQuery(r))
 	writeJSON(w, http.StatusOK, ov)
 }
@@ -116,7 +112,7 @@ func (s *Server) handleFirewallApplyPost(w http.ResponseWriter, r *http.Request)
 	}
 
 	if strings.TrimSpace(s.opts.ConfigPath) != "" {
-		if saveErr := config.Save(s.opts.ConfigPath, cfg); saveErr != nil {
+		if saveErr := s.saveConfig(cfg); saveErr != nil {
 			writeJSONError(w, http.StatusInternalServerError, "保存防火墙配置失败: "+saveErr.Error())
 			return
 		}
@@ -142,7 +138,7 @@ func (s *Server) handleFirewallDisablePost(w http.ResponseWriter, r *http.Reques
 		writeJSONError(w, http.StatusBadRequest, "移除防火墙规则失败: "+err.Error())
 		return
 	}
-	cfg := s.loadConfigOrEmpty()
+	cfg := s.readConfigOrEmpty()
 	ov := firewall.BuildOverview(r.Context(), cfg, extractCallerIP(r), firewall.OverviewQuery{Page: 1, PageSize: 25})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":       true,
@@ -188,7 +184,7 @@ func (s *Server) handleFirewallBanPost(w http.ResponseWriter, r *http.Request) {
 	if scope == "forever" && !slices.Contains(cfg.Firewall.ExtraForeverBan, norm) {
 		cfg.Firewall.ExtraForeverBan = append(cfg.Firewall.ExtraForeverBan, norm)
 		if strings.TrimSpace(s.opts.ConfigPath) != "" {
-			if saveErr := config.Save(s.opts.ConfigPath, cfg); saveErr != nil {
+			if saveErr := s.saveConfig(cfg); saveErr != nil {
 				writeJSONError(w, http.StatusInternalServerError, "持久化永久封禁列表失败: "+saveErr.Error())
 				return
 			}
@@ -234,7 +230,7 @@ func (s *Server) handleFirewallUnbanPost(w http.ResponseWriter, r *http.Request)
 		return strings.EqualFold(strings.TrimSpace(item), trimmed)
 	})
 	if len(cfg.Firewall.ExtraForeverBan) != beforeLen && strings.TrimSpace(s.opts.ConfigPath) != "" {
-		if saveErr := config.Save(s.opts.ConfigPath, cfg); saveErr != nil {
+		if saveErr := s.saveConfig(cfg); saveErr != nil {
 			writeJSONError(w, http.StatusInternalServerError, "更新配置失败: "+saveErr.Error())
 			return
 		}
@@ -260,7 +256,7 @@ func (s *Server) handleFirewallClearDynamicPost(w http.ResponseWriter, r *http.R
 		writeJSONError(w, http.StatusBadRequest, "清空动态黑名单失败: "+err.Error())
 		return
 	}
-	cfg := s.loadConfigOrEmpty()
+	cfg := s.readConfigOrEmpty()
 	ov := firewall.BuildOverview(r.Context(), cfg, extractCallerIP(r), firewall.OverviewQuery{Page: 1, PageSize: 25})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":       true,
@@ -318,7 +314,7 @@ func (s *Server) handleFirewallWhitelistPost(w http.ResponseWriter, r *http.Requ
 	}
 
 	if strings.TrimSpace(s.opts.ConfigPath) != "" {
-		if saveErr := config.Save(s.opts.ConfigPath, cfg); saveErr != nil {
+		if saveErr := s.saveConfig(cfg); saveErr != nil {
 			writeJSONError(w, http.StatusInternalServerError, "保存白名单失败: "+saveErr.Error())
 			return
 		}

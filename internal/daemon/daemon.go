@@ -71,15 +71,10 @@ func (g *p2pEventGate) shouldAppendRuntimeEvent(action, summary string, now time
 
 // Daemon 守护进程
 type Daemon struct {
-	cfgMu               sync.RWMutex
-	config              *config.Config
+	cfgStore            *config.Store
 	configPath          string
-	cfgModTime          time.Time
-	cfgSize             int64
 	version             string
-	monitor             *Monitor
 	limiter             *RestartLimiter
-	singbox             *singbox.SingBox
 	ctx                 context.Context
 	cancel              context.CancelFunc
 	logMu               sync.Mutex
@@ -127,14 +122,17 @@ func NewDaemonWithMeta(cfg *config.Config, configPath, version string) *Daemon {
 	failover.ApplyConfig(cfg.EffectiveFailoverConfig())
 	failover.RestoreSnapshot(LoadRuntimeSnapshot().ActiveFailovers)
 
-	var modTime time.Time
-	var fSize int64
-	if configPath != "" {
-		if fi, err := os.Stat(configPath); err == nil {
-			modTime = fi.ModTime()
-			fSize = fi.Size()
-		}
-	}
+	cfgStore := config.NewStore(
+		configPath,
+		config.WithInitialConfig(cfg),
+		config.WithLoader(func(p string) (*config.Config, error) {
+			loaded, err := config.Load(p)
+			if err != nil {
+				logger.Warn("[Watchdog] Hot-reload config failed (keeping active config): %v", err)
+			}
+			return loaded, err
+		}),
+	)
 
 	ver := strings.TrimSpace(version)
 	if ver == "" {
@@ -165,14 +163,10 @@ func NewDaemonWithMeta(cfg *config.Config, configPath, version string) *Daemon {
 	}
 
 	return &Daemon{
-		config:             cfg,
+		cfgStore:           cfgStore,
 		configPath:         configPath,
-		cfgModTime:         modTime,
-		cfgSize:            fSize,
 		version:            ver,
-		monitor:            NewMonitor(cfg),
 		limiter:            limiter,
-		singbox:            singbox.New(cfg),
 		ctx:                ctx,
 		cancel:             cancel,
 		reloadCh:           make(chan struct{}, 1),
@@ -191,39 +185,16 @@ func (d *Daemon) currentConfig() *config.Config {
 
 // reloadConfigIfChanged 检测磁盘 singctl.yaml 指纹（或 force=true 时强制重载）并热更新内存组件。
 func (d *Daemon) reloadConfigIfChanged(force bool) (bool, *config.Config) {
-	d.cfgMu.RLock()
-	path := d.configPath
-	oldMod := d.cfgModTime
-	oldSize := d.cfgSize
-	curCfg := d.config
-	d.cfgMu.RUnlock()
-
-	if path == "" {
-		return false, curCfg
+	if d.cfgStore == nil {
+		return false, &config.Config{}
 	}
-	fi, err := os.Stat(path)
-	if err != nil {
-		return false, curCfg
+	reloaded, freshCfg := d.cfgStore.ReloadIfChanged(force)
+	if !reloaded || freshCfg == nil {
+		return false, freshCfg
 	}
-	if !force && fi.ModTime().Equal(oldMod) && fi.Size() == oldSize {
-		return false, curCfg
+	if d.limiter != nil {
+		d.limiter.SetMaxRestarts(freshCfg.Watchdog.MaxRestarts)
 	}
-
-	freshCfg, err := config.Load(path)
-	if err != nil {
-		logger.Warn("[Watchdog] Hot-reload config failed (keeping active config): %v", err)
-		return false, curCfg
-	}
-
-	d.cfgMu.Lock()
-	d.config = freshCfg
-	d.cfgModTime = fi.ModTime()
-	d.cfgSize = fi.Size()
-	d.monitor = NewMonitor(freshCfg)
-	d.singbox = singbox.New(freshCfg)
-	d.cfgMu.Unlock()
-
-	d.limiter.SetMaxRestarts(freshCfg.Watchdog.MaxRestarts)
 	if d.failover != nil {
 		d.failover.ApplyConfig(freshCfg.EffectiveFailoverConfig())
 	}

@@ -299,6 +299,7 @@ func (s *Server) handleClientBackupRestore(w http.ResponseWriter, r *http.Reques
 			writeJSONError(w, http.StatusInternalServerError, "写入 singctl.yaml 失败: "+err.Error())
 			return
 		}
+		s.invalidateConfigStore()
 		restoredItems = append(restoredItems, "主配置 (singctl.yaml)")
 	}
 
@@ -315,7 +316,7 @@ func (s *Server) handleClientBackupRestore(w http.ResponseWriter, r *http.Reques
 		restoredItems = append(restoredItems, "分组编排 (groups.yaml)")
 	}
 
-	loadedCfg, cfgErr := config.Load(cfgPath)
+	loadedCfg, cfgErr := s.loadConfigSnapshot()
 	if cfgErr != nil || loadedCfg == nil {
 		loadedCfg = &config.Config{}
 		loadedCfg.SetSourcePath(cfgPath)

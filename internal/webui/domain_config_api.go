@@ -35,7 +35,7 @@ func (s *Server) savePartialConfig(syncAdGuard bool, mutate func(cfg *config.Con
 	if err := backupConfig(cfgPath); err != nil {
 		return &apiStatusError{status: http.StatusInternalServerError, msg: "备份配置失败: " + err.Error()}
 	}
-	if err := config.Save(cfgPath, cfg); err != nil {
+	if err := s.saveConfig(cfg); err != nil {
 		return &apiStatusError{status: http.StatusInternalServerError, msg: "保存配置失败: " + err.Error()}
 	}
 	if syncAdGuard {

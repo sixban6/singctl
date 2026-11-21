@@ -70,6 +70,7 @@ type Server struct {
 	iosCacheVal string
 
 	cfgMu          sync.Mutex
+	cfgStore       *config.Store
 	auditLimiter   *auditRateLimiter
 	auditCollector *audit.Collector
 	loginLimiter   *loginRateLimiter
@@ -105,6 +106,7 @@ func New(opts Options) *Server {
 	s := &Server{
 		opts:           opts,
 		Mux:            http.NewServeMux(),
+		cfgStore:       config.NewStore(opts.ConfigPath),
 		auditLimiter:   newAuditRateLimiter(),
 		auditCollector: audit.NewCollector(nil),
 		loginLimiter:   newLoginRateLimiter(),
@@ -224,6 +226,40 @@ func New(opts Options) *Server {
 	return s
 }
 
+func (s *Server) loadConfigSnapshot() (*config.Config, error) {
+	if s.cfgStore == nil {
+		return config.Load(configPathFor(s))
+	}
+	return s.cfgStore.LoadLatest()
+}
+
+func (s *Server) readConfigOrEmpty() *config.Config {
+	cfg, err := s.loadConfigSnapshot()
+	if err == nil && cfg != nil {
+		return cfg
+	}
+	if s.cfgStore != nil && s.cfgStore.Revision() > 0 {
+		return s.cfgStore.Get()
+	}
+	return &config.Config{}
+}
+
+func (s *Server) saveConfig(cfg *config.Config) error {
+	if err := config.Save(configPathFor(s), cfg); err != nil {
+		return err
+	}
+	if s.cfgStore != nil {
+		s.cfgStore.Set(cfg)
+	}
+	return nil
+}
+
+func (s *Server) invalidateConfigStore() {
+	if s.cfgStore != nil {
+		s.cfgStore.Invalidate()
+	}
+}
+
 // ListenAndServe 启动 HTTP 服务(阻塞)
 func (s *Server) ListenAndServe() error {
 	s.opts.Listen = NormalizeLegacyWildcardListen(s.opts.Listen)
@@ -257,7 +293,7 @@ func (s *Server) ensureDefaultPCDNBlockAsync() {
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
 
-	cfg, err := config.Load(s.opts.ConfigPath)
+	cfg, err := s.loadConfigSnapshot()
 	if err != nil || cfg == nil {
 		return
 	}
