@@ -15,6 +15,7 @@ import (
 	"singctl/internal/constant"
 	"singctl/internal/deploy"
 	"singctl/internal/logger"
+	"singctl/internal/subhub"
 )
 
 // DoctorItem 单个体检检查项
@@ -487,12 +488,12 @@ func checkRealitySNI(cfg *config.Config, r *DoctorReport) {
 
 func checkSubstore(r *DoctorReport) {
 	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get("http://127.0.0.1:3001/healthz")
+	resp, err := client.Get("http://" + subhub.DefaultListenAddr + "/healthz")
 	if err != nil || resp.StatusCode != http.StatusOK {
 		if resp != nil {
 			_ = resp.Body.Close()
 		}
-		resp, err = client.Get("http://127.0.0.1:3001/")
+		resp, err = client.Get("http://" + subhub.DefaultListenAddr + "/")
 	}
 	if err == nil && resp.StatusCode == http.StatusOK {
 		defer resp.Body.Close()
@@ -588,7 +589,7 @@ func isServiceActive(serviceName string) bool {
 				return true
 			}
 		}
-		conn, err := net.DialTimeout("tcp", "127.0.0.1:3001", 300*time.Millisecond)
+		conn, err := net.DialTimeout("tcp", subhub.DefaultListenAddr, 300*time.Millisecond)
 		if err == nil {
 			_ = conn.Close()
 			return true

@@ -34,7 +34,7 @@ const (
 
 	// tailscaleReleaseRepo 与 tailscaleReleaseTag 为本仓库统一托管的 Tailscale 精简合体包发布通道。
 	// 使用独立 prerelease tag（tailscale-latest）避免干扰 singctl 自身的 /releases/latest 自更新接口。
-	tailscaleReleaseRepo = "sixban6/singctl"
+	tailscaleReleaseRepo = constant.GitHubRepo
 	tailscaleReleaseTag  = "tailscale-latest"
 	// legacyAutoFetchRepo 为历史独立编译仓库，仅当主通道首次构建尚未就绪（HTTP 404）时平滑兜底。
 	legacyAutoFetchRepo = "sixban6/auto_fetch_tailscale"

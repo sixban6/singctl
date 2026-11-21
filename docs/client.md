@@ -6,6 +6,23 @@
 
 ---
 
+## 各平台安装方式
+
+- **OpenWrt / Linux 软路由（推荐）**：一键命令自动识别客户端与主/旁路由拓扑，全程按回车即可完成安装（附 `-y` 支持无人值守）：
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/sixban6/singctl/main/install.sh | sh
+  ```
+- **macOS 客户端（Homebrew）**：
+  ```bash
+  brew tap sixban6/singctl && brew install sixban6/singctl/singctl
+  ```
+- **Windows 11 原生客户端（管理员 PowerShell）**：
+  ```powershell
+  powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "[System.IO.File]::WriteAllText('install.ps1', (irm https://raw.githubusercontent.com/sixban6/singctl/main/install.ps1 -UseBasicParsing), [System.Text.Encoding]::UTF8); & .\install.ps1"
+  ```
+
+---
+
 ## 配置文件
 
 相关字段位于 `singctl.yaml`：

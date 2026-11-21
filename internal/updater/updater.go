@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"singctl/internal/config"
+	"singctl/internal/constant"
 	"singctl/internal/logger"
 	"singctl/internal/singbox/ruleset_snapshot"
 	"singctl/internal/util/file"
@@ -26,7 +27,7 @@ type Updater struct {
 
 func New(mirrorURL, repoURL string) *Updater {
 	if repoURL == "" {
-		repoURL = "https://github.com/sixban6/singctl" // 替换为实际仓库
+		repoURL = constant.GitHubRepoURL
 	}
 	return &Updater{
 		mirrorURL: mirrorURL,
@@ -43,7 +44,7 @@ func (u *Updater) UpdateSelf(configPath string, currentVersion string) error {
 	//    绝不经镜像，防止镜像篡改"最新版本"指向旧版或恶意资产）。
 	client := releasepkg.NewClient(u.mirrorURL)
 	client.SkipSHA256 = os.Getenv(SkipChecksumEnv) == "1"
-	info, err := client.FetchLatest(ctx, "sixban6/singctl")
+	info, err := client.FetchLatest(ctx, constant.GitHubRepo)
 	if err != nil {
 		return fmt.Errorf("无法直连 GitHub API 获取版本信息（为保证供应链安全，元数据不走镜像）: %w", err)
 	}
@@ -204,7 +205,7 @@ func (u *Updater) verifyChecksumsFile(ctx context.Context, client *releasepkg.Cl
 		return nil
 	}
 
-	sums, err := client.FetchChecksums(ctx, "sixban6/singctl", info.TagName, nil, info)
+	sums, err := client.FetchChecksums(ctx, constant.GitHubRepo, info.TagName, nil, info)
 	if err != nil {
 		return fmt.Errorf("无法直连 GitHub 获取 checksums.txt（校验必需，不走镜像）。请检查网络后重试；确要跳过请设置 %s=1: %w", SkipChecksumEnv, err)
 	}

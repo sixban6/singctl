@@ -70,18 +70,26 @@ func TestWindowsInstallationScript(t *testing.T) {
 	})
 }
 
-// TestREADMEWindowsInstructions 测试 README 中的 Windows 安装说明
+// TestREADMEWindowsInstructions 测试文档中的 Windows 安装说明（覆盖极简 README 与深入客户端文档）。
 func TestREADMEWindowsInstructions(t *testing.T) {
-	readmePath := filepath.Join("..", "README.md")
-
-	content, err := os.ReadFile(readmePath)
-	if err != nil {
-		t.Fatalf("Failed to read README.md: %v", err)
+	docPaths := []string{
+		filepath.Join("..", "README.md"),
+		filepath.Join("..", "docs", "client.md"),
 	}
 
-	contentStr := string(content)
+	var combined strings.Builder
+	for _, p := range docPaths {
+		content, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatalf("Failed to read %s: %v", p, err)
+		}
+		combined.Write(content)
+		combined.WriteByte('\n')
+	}
 
-	// README 中应包含的 Windows 安装相关元素
+	contentStr := combined.String()
+
+	// 文档中应包含的 Windows 安装相关元素
 	requiredElements := []string{
 		"Windows",
 		"install.ps1",
@@ -90,7 +98,7 @@ func TestREADMEWindowsInstructions(t *testing.T) {
 
 	for _, element := range requiredElements {
 		if !strings.Contains(contentStr, element) {
-			t.Errorf("README.md missing required Windows instruction element: %s", element)
+			t.Errorf("README.md + docs/client.md missing required Windows instruction element: %s", element)
 		} else {
 			t.Logf("✓ Found Windows instruction element: %s", element)
 		}
@@ -105,7 +113,7 @@ func TestREADMEWindowsInstructions(t *testing.T) {
 
 	for _, element := range outdatedElements {
 		if strings.Contains(contentStr, element) {
-			t.Errorf("README.md should not contain outdated WSL2 reference: %s", element)
+			t.Errorf("docs should not contain outdated WSL2 reference: %s", element)
 		}
 	}
 }

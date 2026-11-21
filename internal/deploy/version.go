@@ -11,6 +11,7 @@ import (
 	"singctl/internal/config"
 	"singctl/internal/constant"
 	"singctl/internal/singbox"
+	"singctl/internal/subhub"
 )
 
 // ReleaseClient is an optional HTTP client used for fetching GitHub releases (useful for testing).
@@ -142,7 +143,7 @@ func GetInstalledWarpVersion() string {
 // GetInstalledSubhubVersion returns the running SubHub version from local port 3001, falling back to the on-disk singctl binary version.
 func GetInstalledSubhubVersion() string {
 	client := http.Client{Timeout: 500 * time.Millisecond}
-	resp, err := client.Get("http://127.0.0.1:3001/")
+	resp, err := client.Get("http://" + subhub.DefaultListenAddr + "/")
 	if err == nil {
 		defer resp.Body.Close()
 		buf := make([]byte, 4096)
