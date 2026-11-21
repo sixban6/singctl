@@ -9,32 +9,18 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"os/user"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"singctl/internal/component"
 	"singctl/internal/config"
 	"singctl/internal/deploy"
-	"singctl/internal/platform/servicemgr"
 	"singctl/internal/updater"
 	"singctl/internal/util/file"
 )
-
-func dispatchManagerAction(ctx context.Context, mgr servicemgr.Manager, action, unit string) error {
-	switch action {
-	case "start":
-		return mgr.Start(ctx, unit)
-	case "stop":
-		return mgr.Stop(ctx, unit)
-	case "reload":
-		return mgr.Reload(ctx, unit)
-	default:
-		return mgr.Restart(ctx, unit)
-	}
-}
 
 func (s *Server) handleServiceAction(w http.ResponseWriter, r *http.Request) {
 	var body struct {
@@ -56,39 +42,23 @@ func (s *Server) handleServiceAction(w http.ResponseWriter, r *http.Request) {
 
 	var cmdErr error
 	mgr := s.serviceMgr()
-	switch service {
-	case "caddy":
-		if action == "reload" {
-			caddyCfg := s.resolveServiceConfigPath("caddy", "/etc/caddy/Caddyfile")
-			cmdErr = s.runCmd(context.Background(), defaultServerActionTimeout, "caddy", "reload", "--config", caddyCfg)
-			if cmdErr != nil {
-				cmdErr = mgr.Reload(context.Background(), "caddy")
-			}
-		} else {
-			cmdErr = dispatchManagerAction(context.Background(), mgr, action, "caddy")
+	if service == "all" {
+		for _, comp := range deploy.ServerRegistry().All() {
+			_ = mgr.Restart(context.Background(), comp.UnitName())
 		}
-	case "singbox":
-		if action == "reload" {
-			action = "restart"
+	} else {
+		comp, err := deploy.ServerRegistry().Resolve(service)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "未知服务: "+service)
+			return
 		}
-		cmdErr = dispatchManagerAction(context.Background(), mgr, action, "sing-box")
-	case "subhub", "substore":
-		if action == "reload" {
-			action = "restart"
-		}
-		cmdErr = dispatchManagerAction(context.Background(), mgr, action, "singctl-sub")
-	case "warp":
-		if action == "reload" {
-			action = "restart"
-		}
-		cmdErr = dispatchManagerAction(context.Background(), mgr, action, "wireproxy")
-	case "all":
-		for _, unit := range []string{"sing-box", "caddy", "singctl-sub", "wireproxy"} {
-			_ = mgr.Restart(context.Background(), unit)
-		}
-	default:
-		writeJSONError(w, http.StatusBadRequest, "未知服务: "+service)
-		return
+		cmdErr = comp.ExecuteServiceAction(
+			context.Background(),
+			action,
+			mgr,
+			s.activeCmdRunner(),
+			s.resolveServiceConfigPath(comp.ID(), ""),
+		)
 	}
 
 	if cmdErr != nil {
@@ -224,20 +194,17 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mgr := s.serviceMgr()
-	switch body.Action {
-	case "restart-caddy":
-		_ = mgr.Restart(context.Background(), "caddy")
-	case "restart-singbox":
-		_ = mgr.Restart(context.Background(), "sing-box")
-	case "restart-subhub":
-		_ = mgr.Restart(context.Background(), "singctl-sub")
-	case "restart-warp":
-		_ = mgr.Restart(context.Background(), "wireproxy")
-	default:
+	targetName, hasPrefix := strings.CutPrefix(strings.TrimSpace(body.Action), "restart-")
+	if !hasPrefix {
 		writeJSONError(w, http.StatusBadRequest, "未知操作: "+body.Action)
 		return
 	}
+	comp, err := deploy.ServerRegistry().Resolve(targetName)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "未知操作: "+body.Action)
+		return
+	}
+	_ = comp.ExecuteServiceAction(context.Background(), "restart", s.serviceMgr(), s.activeCmdRunner(), "")
 	s.invalidateStatusCaches()
 	writeJSON(w, http.StatusOK, map[string]string{"message": "操作执行成功"})
 }
@@ -250,21 +217,16 @@ func (s *Server) handleServiceLogs(w http.ResponseWriter, r *http.Request) {
 		lines = n
 	}
 
-	var output []byte
-	var err error
 	logCtx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
 	defer cancel()
 
-	switch service {
-	case "caddy":
-		output, err = exec.CommandContext(logCtx, "journalctl", "-u", "caddy", "--since", "-24h", "-n", strconv.Itoa(lines), "--no-pager").CombinedOutput()
-	case "singbox":
-		output, err = exec.CommandContext(logCtx, "journalctl", "-u", "sing-box", "--since", "-24h", "-n", strconv.Itoa(lines), "--no-pager").CombinedOutput()
-	case "subhub":
-		output, err = exec.CommandContext(logCtx, "journalctl", "-u", "singctl-sub", "--since", "-24h", "-n", strconv.Itoa(lines), "--no-pager").CombinedOutput()
-	case "warp":
-		output, err = exec.CommandContext(logCtx, "journalctl", "-u", "wireproxy", "--since", "-24h", "-n", strconv.Itoa(lines), "--no-pager").CombinedOutput()
-	default:
+	var (
+		output []byte
+		err    error
+	)
+	if comp, resErr := deploy.ServerRegistry().Resolve(service); resErr == nil {
+		output, err = exec.CommandContext(logCtx, "journalctl", "-u", comp.UnitName(), "--since", "-24h", "-n", strconv.Itoa(lines), "--no-pager").CombinedOutput()
+	} else {
 		output, err = exec.CommandContext(logCtx, "journalctl", "--since", "-24h", "-n", strconv.Itoa(lines), "--no-pager").CombinedOutput()
 	}
 
@@ -283,17 +245,13 @@ func (s *Server) handleServiceLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogsSSE(w http.ResponseWriter, r *http.Request) {
-	service := r.URL.Query().Get("service")
-	if service == "" {
-		service = "sing-box"
-	}
-	if service == "subhub" {
-		service = "singctl-sub"
-	}
-	if service != "sing-box" && service != "caddy" && service != "wireproxy" && service != "singctl-sub" {
+	rawService := cmp.Or(strings.TrimSpace(r.URL.Query().Get("service")), "singbox")
+	comp, resErr := deploy.ServerRegistry().Resolve(rawService)
+	if resErr != nil {
 		http.Error(w, "invalid service", http.StatusBadRequest)
 		return
 	}
+	unitName := comp.UnitName()
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -305,7 +263,7 @@ func (s *Server) handleLogsSSE(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	cmd := exec.CommandContext(r.Context(), "journalctl", "-u", service, "-n", "80", "-f", "--no-pager")
+	cmd := exec.CommandContext(r.Context(), "journalctl", "-u", unitName, "-n", "80", "-f", "--no-pager")
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		fmt.Fprintf(w, "data: 读取日志失败: %v\n\n", err)
@@ -329,28 +287,31 @@ func (s *Server) handleLogsSSE(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleServiceConfig(w http.ResponseWriter, r *http.Request) {
 	service := strings.TrimSpace(r.URL.Query().Get("service"))
-	var path string
-	switch service {
-	case "singbox":
-		path = s.resolveServiceConfigPath("singbox", "/etc/sing-box/config.json")
-	case "caddy":
-		path = s.resolveServiceConfigPath("caddy", "/etc/caddy/Caddyfile")
-	case "warp":
-		path, _, _ = deploy.ResolveWireproxyConfigPaths()
-	default:
+	comp, err := deploy.ServerRegistry().Resolve(service)
+	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, "未知服务配置")
 		return
 	}
-
-	content, err := os.ReadFile(path)
+	cfgComp, ok := comp.(component.Configurable)
+	if !ok {
+		writeJSONError(w, http.StatusBadRequest, "未知服务配置")
+		return
+	}
+	target, err := cfgComp.ResolveConfigTarget(s.resolveServiceConfigPath(comp.ID(), ""))
 	if err != nil {
-		writeJSONError(w, http.StatusNotFound, fmt.Sprintf("无法读取配置文件 %s: %v", path, err))
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	content, err := os.ReadFile(target.PrimaryPath)
+	if err != nil {
+		writeJSONError(w, http.StatusNotFound, fmt.Sprintf("无法读取配置文件 %s: %v", target.PrimaryPath, err))
 		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"service": service,
-		"path":    path,
+		"path":    target.PrimaryPath,
 		"content": string(content),
 	})
 }
@@ -409,116 +370,60 @@ func (s *Server) handleUpdateServiceConfig(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	var path string
-	var warpMirrorPaths []string
-	switch service {
-	case "singbox":
-		path = s.resolveServiceConfigPath("singbox", "/etc/sing-box/config.json")
-		var js json.RawMessage
-		if err := json.Unmarshal([]byte(content), &js); err != nil {
-			writeJSONError(w, http.StatusBadRequest, "sing-box 配置必须是合法的 JSON 格式: "+err.Error())
-			return
-		}
-		sbBin := ""
-		if s != nil && strings.TrimSpace(s.singBoxBinOverride) != "" {
-			sbBin = strings.TrimSpace(s.singBoxBinOverride)
-		} else if found, lookErr := locateSingBoxBinary(); lookErr == nil {
-			sbBin = found
-		}
-		if sbBin != "" {
-			tmp, err := os.CreateTemp("", "singbox-validate-*.json")
-			if err == nil {
-				tmpName := tmp.Name()
-				defer os.Remove(tmpName)
-				_ = tmp.Chmod(0600)
-				_, _ = tmp.WriteString(content)
-				_ = tmp.Close()
-				if out, err := s.combinedOutputCmd(r.Context(), defaultServerCheckTimeout, sbBin, "check", "-c", tmpName); err != nil {
-					writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("sing-box 配置预校验未通过（已拦截写入以防断网）: %s", strings.TrimSpace(string(out))))
-					return
-				}
-			}
-		}
-	case "caddy":
-		path = s.resolveServiceConfigPath("caddy", "/etc/caddy/Caddyfile")
-		tmp, err := os.CreateTemp("", "caddyfile-validate-*.caddy")
-		if err == nil {
-			tmpName := tmp.Name()
-			defer os.Remove(tmpName)
-			_ = tmp.Chmod(0600)
-			_, _ = tmp.WriteString(content)
-			_ = tmp.Close()
-			if out, err := s.combinedOutputCmd(r.Context(), defaultServerCheckTimeout, "caddy", "validate", "--config", tmpName, "--adapter", "caddyfile"); err != nil {
-				writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("Caddy 语法校验失败: %s", string(out)))
-				return
-			}
-		}
-	case "warp":
-		path, warpMirrorPaths, _ = deploy.ResolveWireproxyConfigPaths()
-	default:
+	comp, resErr := deploy.ServerRegistry().Resolve(service)
+	if resErr != nil {
 		writeJSONError(w, http.StatusBadRequest, "不支持编辑此服务配置: "+service)
 		return
 	}
-
-	oldBytes, hadOld := os.ReadFile(path)
-	if hadOld == nil {
-		_ = WriteConfigBackup(path, oldBytes)
+	cfgComp, ok := comp.(component.Configurable)
+	if !ok {
+		writeJSONError(w, http.StatusBadRequest, "不支持编辑此服务配置: "+service)
+		return
 	}
-	oldMirrors := make(map[string][]byte, len(warpMirrorPaths))
-	for _, mp := range warpMirrorPaths {
+	target, targetErr := cfgComp.ResolveConfigTarget(s.resolveServiceConfigPath(comp.ID(), ""))
+	if targetErr != nil {
+		writeJSONError(w, http.StatusInternalServerError, targetErr.Error())
+		return
+	}
+
+	sbOverride := ""
+	if s != nil {
+		sbOverride = s.singBoxBinOverride
+	}
+	if valErr := cfgComp.ValidateConfig(r.Context(), content, s.activeCmdRunner(), sbOverride); valErr != nil {
+		writeJSONError(w, http.StatusBadRequest, valErr.Error())
+		return
+	}
+
+	oldBytes, hadOld := os.ReadFile(target.PrimaryPath)
+	if hadOld == nil {
+		_ = WriteConfigBackup(target.PrimaryPath, oldBytes)
+	}
+	oldMirrors := make(map[string][]byte, len(target.MirrorPaths))
+	for _, mp := range target.MirrorPaths {
 		if b, mErr := os.ReadFile(mp); mErr == nil {
 			oldMirrors[mp] = b
 		}
 	}
 
-	mode := os.FileMode(0600)
-	if service == "caddy" {
-		mode = 0640
-	}
-	if err := writeConfigAtomically(path, []byte(content), mode); err != nil {
+	if err := writeConfigAtomically(target.PrimaryPath, []byte(content), target.FileMode); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "保存配置文件失败: "+err.Error())
 		return
 	}
-	if service == "warp" {
-		for _, mp := range warpMirrorPaths {
-			if _, ok := oldMirrors[mp]; ok {
-				_ = writeConfigAtomically(mp, []byte(content), mode)
-			}
+	for _, mp := range target.MirrorPaths {
+		if _, exists := oldMirrors[mp]; exists {
+			_ = writeConfigAtomically(mp, []byte(content), target.FileMode)
 		}
 	}
-	if service == "caddy" {
-		if g, err := user.LookupGroup("caddy"); err == nil {
-			if gid, convErr := strconv.Atoi(g.Gid); convErr == nil {
-				_ = os.Chown(path, 0, gid)
-			}
-		}
-	}
+	cfgComp.ApplyOwnership(target.PrimaryPath)
 
-	reloadService := func() error {
-		switch service {
-		case "caddy":
-			return s.runCmd(context.Background(), defaultServerActionTimeout, "caddy", "reload", "--config", path)
-		case "singbox":
-			if s.canRunSystemctl() {
-				return s.serviceMgr().Restart(context.Background(), "sing-box")
-			}
-		case "warp":
-			if s.canRunSystemctl() {
-				return s.serviceMgr().Restart(context.Background(), "wireproxy")
-			}
-		}
-		return nil
-	}
-
-	reloadErr := reloadService()
+	reloadErr := cfgComp.ReloadAfterSave(context.Background(), target.PrimaryPath, s.serviceMgr(), s.activeCmdRunner(), s.canRunSystemctl())
 	if reloadErr != nil && hadOld == nil {
-		_ = writeConfigAtomically(path, oldBytes, mode)
-		if service == "warp" {
-			for mp, prev := range oldMirrors {
-				_ = writeConfigAtomically(mp, prev, mode)
-			}
+		_ = writeConfigAtomically(target.PrimaryPath, oldBytes, target.FileMode)
+		for mp, prev := range oldMirrors {
+			_ = writeConfigAtomically(mp, prev, target.FileMode)
 		}
-		_ = reloadService()
+		_ = cfgComp.ReloadAfterSave(context.Background(), target.PrimaryPath, s.serviceMgr(), s.activeCmdRunner(), s.canRunSystemctl())
 		writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("服务 %s 重载失败 (%v)，已自动回滚至原配置确保不断连", service, reloadErr))
 		return
 	}
@@ -527,18 +432,6 @@ func (s *Server) handleUpdateServiceConfig(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, map[string]string{
 		"message": fmt.Sprintf("服务 %s 配置文件已通过预检、安全保存并重新加载", service),
 	})
-}
-
-func locateSingBoxBinary() (string, error) {
-	if p, err := exec.LookPath("sing-box"); err == nil {
-		return p, nil
-	}
-	for _, candidate := range []string{"/usr/local/bin/sing-box", "/usr/bin/sing-box"} {
-		if st, err := os.Stat(candidate); err == nil && !st.IsDir() {
-			return candidate, nil
-		}
-	}
-	return "", os.ErrNotExist
 }
 
 func writeConfigAtomically(path string, data []byte, mode os.FileMode) error {

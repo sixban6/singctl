@@ -2,8 +2,8 @@ package cmd
 
 import (
 	"fmt"
-	"os"
 
+	"singctl/internal/component"
 	"singctl/internal/config"
 	"singctl/internal/deploy"
 	"singctl/internal/logger"
@@ -39,64 +39,22 @@ func NewReinstallServerCmd(configPath string) *cobra.Command {
 				return reinstallAll(cfg, resolvedPath)
 			case "common":
 				return deploy.DeployCommonWithConfig(cfg)
-			case "caddy":
-				return reinstallCaddy(cfg)
-			case "singbox":
-				return reinstallSingbox(cfg)
-			case "warp":
-				return reinstallWarp()
 			default:
-				return fmt.Errorf("unknown target: %s (must be all, common, caddy, singbox, or warp)", target)
+				comp, resErr := deploy.ServerRegistry().Resolve(target)
+				if resErr != nil {
+					return fmt.Errorf("unknown target: %s (must be all, common, caddy, singbox, or warp)", target)
+				}
+				life, ok := comp.(component.ServerLifecycle)
+				if !ok {
+					return fmt.Errorf("unknown target: %s (must be all, common, caddy, singbox, or warp)", target)
+				}
+				return life.ReinstallServer(cfg)
 			}
 		},
 	}
 
 	cmd.Flags().BoolVarP(&force, "force", "f", false, "强制重装 / Force reinstall")
 	return cmd
-}
-
-func reinstallCaddy(cfg *config.Config) error {
-	logger.Info("Reinstalling Caddy...")
-	if err := deploy.MigrateLegacyCaddyMtlsToVault(); err != nil {
-		logger.Warn("Migrate mTLS vault warning: %v", err)
-	}
-	if err := deploy.UninstallCaddy(); err != nil {
-		logger.Warn("Failed to uninstall Caddy: %v", err)
-	}
-	return deploy.DeployCaddy(cfg)
-}
-
-func reinstallSingbox(cfg *config.Config) error {
-	logger.Info("Reinstalling sing-box...")
-	// Preload existing UUID / Reality keys BEFORE uninstalling /etc/sing-box so reinstall stays idempotent.
-	sbs, err := deploy.NewSingBoxServer(cfg)
-	if err != nil {
-		return err
-	}
-	_ = sbs.LoadExistingCredentials()
-
-	if err := deploy.UninstallSingbox(); err != nil {
-		logger.Warn("Failed to uninstall sing-box: %v", err)
-	}
-	sbs.RefreshCaddyCertPath()
-	if err := sbs.DeploySingbox(); err != nil {
-		return err
-	}
-	if _, err := os.Stat("/etc/sub-store"); err == nil {
-		sbt := deploy.NewSubstore(cfg, "")
-		if err := sbt.UpdateSubstoreConfig(sbs); err != nil {
-			logger.Warn("SubHub config sync failed (non-fatal): %v", err)
-		}
-	}
-	return nil
-}
-
-func reinstallWarp() error {
-	logger.Info("Reinstalling WARP...")
-	if err := deploy.UninstallWarp(); err != nil {
-		logger.Warn("Failed to uninstall WARP: %v", err)
-	}
-	return deploy.DeployWarp()
 }
 
 func reinstallAll(cfg *config.Config, resolvedPath string) error {

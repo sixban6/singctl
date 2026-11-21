@@ -78,14 +78,6 @@ func (s *Server) serviceMgr() servicemgr.Manager {
 	return servicemgr.NewSystemd(s.activeCmdRunner())
 }
 
-func (s *Server) runCmd(ctx context.Context, timeout time.Duration, name string, args ...string) error {
-	return s.activeCmdRunner().Run(ctx, timeout, name, args...)
-}
-
-func (s *Server) combinedOutputCmd(ctx context.Context, timeout time.Duration, name string, args ...string) ([]byte, error) {
-	return s.activeCmdRunner().CombinedOutput(ctx, timeout, name, args...)
-}
-
 func (s *Server) resolveServiceConfigPath(service, fallback string) string {
 	if s != nil && s.serviceConfigPaths != nil {
 		if override := strings.TrimSpace(s.serviceConfigPaths[service]); override != "" {

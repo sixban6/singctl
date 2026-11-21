@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"singctl/internal/component"
 	"singctl/internal/config"
 	"singctl/internal/constant"
 	"singctl/internal/logger"
@@ -99,75 +100,39 @@ func IsNewerVersion(localVer, remoteVer string) bool {
 	return false
 }
 
-// CheckComponentUpdate inspects if an external component (singbox, caddy, warp) has a newer version upstream.
+func upgradeResultToInfo(r *UpgradeResult) *component.UpgradeInfo {
+	if r == nil {
+		return nil
+	}
+	return &component.UpgradeInfo{
+		Component:   r.Component,
+		DisplayName: r.DisplayName,
+		OldVersion:  r.OldVersion,
+		NewVersion:  r.NewVersion,
+		Message:     r.Message,
+		Updated:     r.Updated,
+	}
+}
+
+func infoToUpgradeResult(info *component.UpgradeInfo) *UpgradeResult {
+	if info == nil {
+		return nil
+	}
+	return &UpgradeResult{
+		Component:   info.Component,
+		DisplayName: info.DisplayName,
+		OldVersion:  info.OldVersion,
+		NewVersion:  info.NewVersion,
+		Message:     info.Message,
+		Updated:     info.Updated,
+	}
+}
+
+// CheckComponentUpdate inspects if an external component (singbox, caddy, warp, singctl) has a newer version upstream.
 func CheckComponentUpdate(target string, cfg *config.Config) (*CheckUpdateResult, error) {
-	fetcher := github.NewReleaseFetcher(getMirrorURL(cfg), ReleaseClient)
-
-	switch strings.ToLower(target) {
-	case "singbox", "sb", "sing-box":
-		curr := GetInstalledSingBoxVersion()
-		tag, err := fetcher.FetchLatestTag("SagerNet/sing-box")
-		latest := cleanVersion(tag)
-		if err != nil || latest == "" {
-			latest = curr
-		}
-		hasUp := IsNewerVersion(curr, latest)
-		msg := fmt.Sprintf("sing-box 已是最新版本 (v%s)", curr)
-		if hasUp {
-			msg = fmt.Sprintf("发现 sing-box 新版本: v%s (当前: v%s)", latest, curr)
-		}
-		return &CheckUpdateResult{
-			Component:      "singbox",
-			DisplayName:    "sing-box 代理核心",
-			CurrentVersion: curr,
-			LatestVersion:  latest,
-			HasUpdate:      hasUp,
-			Message:        msg,
-		}, nil
-
-	case "caddy":
-		curr := GetInstalledCaddyVersion()
-		tag, err := fetcher.FetchLatestTag("caddyserver/caddy")
-		latest := cleanVersion(tag)
-		if err != nil || latest == "" {
-			latest = curr
-		}
-		hasUp := IsNewerVersion(curr, latest)
-		msg := fmt.Sprintf("Caddy 已是最新版本 (v%s)", curr)
-		if hasUp {
-			msg = fmt.Sprintf("发现 Caddy 新版本: v%s (当前: v%s)", latest, curr)
-		}
-		return &CheckUpdateResult{
-			Component:      "caddy",
-			DisplayName:    "Caddy 网关",
-			CurrentVersion: curr,
-			LatestVersion:  latest,
-			HasUpdate:      hasUp,
-			Message:        msg,
-		}, nil
-
-	case "warp", "wireproxy":
-		curr := GetInstalledWarpVersion()
-		tag, err := fetcher.FetchLatestTag("windtf/wireproxy")
-		latest := cleanVersion(tag)
-		if err != nil || latest == "" {
-			latest = curr
-		}
-		hasUp := IsNewerVersion(curr, latest)
-		msg := fmt.Sprintf("WARP (wireproxy) 已是最新版本 (v%s)", curr)
-		if hasUp {
-			msg = fmt.Sprintf("发现 WARP (wireproxy) 新版本: v%s (当前: v%s)", latest, curr)
-		}
-		return &CheckUpdateResult{
-			Component:      "warp",
-			DisplayName:    "WARP 出口",
-			CurrentVersion: curr,
-			LatestVersion:  latest,
-			HasUpdate:      hasUp,
-			Message:        msg,
-		}, nil
-
-	case "singctl", "subhub", "substore":
+	norm := strings.ToLower(strings.TrimSpace(target))
+	if norm == "singctl" || norm == "subhub" || norm == "substore" {
+		fetcher := github.NewReleaseFetcher(getMirrorURL(cfg), ReleaseClient)
 		curr := cleanVersion(GetInstalledSubhubVersion())
 		tag, err := fetcher.FetchLatestTag(constant.GitHubRepo)
 		latest := cleanVersion(tag)
@@ -187,10 +152,27 @@ func CheckComponentUpdate(target string, cfg *config.Config) (*CheckUpdateResult
 			HasUpdate:      hasUp,
 			Message:        msg,
 		}, nil
-
-	default:
-		return nil, fmt.Errorf("未知的服务组件: %s (支持: singctl, singbox, caddy, warp)", target)
 	}
+
+	comp, err := ServerRegistry().Resolve(target)
+	if err == nil {
+		if up, ok := comp.(component.Upgradable); ok {
+			info, checkErr := up.CheckUpdate(cfg)
+			if checkErr != nil {
+				return nil, checkErr
+			}
+			return &CheckUpdateResult{
+				Component:      info.Component,
+				DisplayName:    info.DisplayName,
+				CurrentVersion: info.CurrentVersion,
+				LatestVersion:  info.LatestVersion,
+				HasUpdate:      info.HasUpdate,
+				Message:        info.Message,
+			}, nil
+		}
+	}
+
+	return nil, fmt.Errorf("未知的服务组件: %s (支持: singctl, singbox, caddy, warp)", target)
 }
 
 // UpgradeSingbox updates sing-box to the latest version and restarts its service.
@@ -364,60 +346,40 @@ func UpgradeWarp(cfg *config.Config) (*UpgradeResult, error) {
 	}, nil
 }
 
-// UpgradeComponent coordinates the upgrade of the specified external service or all external services.
+// UpgradeComponent coordinates the upgrade of the specified external service or all registered upgradable services.
 func UpgradeComponent(target string, cfg *config.Config) ([]*UpgradeResult, error) {
-	switch strings.ToLower(target) {
-	case "singbox", "sb", "sing-box":
-		res, err := UpgradeSingbox(cfg)
-		if err != nil {
-			return nil, err
-		}
-		return []*UpgradeResult{res}, nil
-
-	case "caddy":
-		res, err := UpgradeCaddy(cfg)
-		if err != nil {
-			return nil, err
-		}
-		return []*UpgradeResult{res}, nil
-
-	case "warp", "wireproxy":
-		res, err := UpgradeWarp(cfg)
-		if err != nil {
-			return nil, err
-		}
-		return []*UpgradeResult{res}, nil
-
-	case "all":
+	if strings.EqualFold(strings.TrimSpace(target), "all") {
 		var results []*UpgradeResult
 		var errs []string
-
-		if res, err := UpgradeSingbox(cfg); err != nil {
-			errs = append(errs, fmt.Sprintf("sing-box: %v", err))
-		} else {
-			results = append(results, res)
+		for _, comp := range ServerRegistry().All() {
+			up, ok := comp.(component.Upgradable)
+			if !ok {
+				continue
+			}
+			info, err := up.Upgrade(cfg)
+			if err != nil {
+				errs = append(errs, fmt.Sprintf("%s: %v", comp.DisplayName(), err))
+			} else if info != nil {
+				results = append(results, infoToUpgradeResult(info))
+			}
 		}
-
-		if res, err := UpgradeCaddy(cfg); err != nil {
-			errs = append(errs, fmt.Sprintf("Caddy: %v", err))
-		} else {
-			results = append(results, res)
-		}
-
-		if res, err := UpgradeWarp(cfg); err != nil {
-			errs = append(errs, fmt.Sprintf("WARP: %v", err))
-		} else {
-			results = append(results, res)
-		}
-
 		if len(errs) > 0 && len(results) == 0 {
 			return nil, fmt.Errorf("全量更新失败: %s", strings.Join(errs, "; "))
 		}
 		return results, nil
-
-	default:
-		return nil, fmt.Errorf("未知的服务组件: %s (支持: singbox, caddy, warp, all)", target)
 	}
+
+	comp, err := ServerRegistry().Resolve(target)
+	if err == nil {
+		if up, ok := comp.(component.Upgradable); ok {
+			info, upErr := up.Upgrade(cfg)
+			if upErr != nil {
+				return nil, upErr
+			}
+			return []*UpgradeResult{infoToUpgradeResult(info)}, nil
+		}
+	}
+	return nil, fmt.Errorf("未知的服务组件: %s (支持: singbox, caddy, warp, all)", target)
 }
 
 func downloadToFile(url, destPath string) error {
