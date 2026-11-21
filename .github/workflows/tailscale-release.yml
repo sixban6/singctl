@@ -1,0 +1,239 @@
+name: Sync & Build Minimal Tailscale
+
+on:
+  schedule:
+    # 每 12 小时自动巡检一次上游 Tailscale 稳定版，无新版本时秒级跳过不浪费算力
+    - cron: '0 */12 * * *'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '指定 Tailscale 版本号（如 1.104.7，留空则自动检测官方最新稳定版）'
+        required: false
+        default: ''
+        type: string
+      force_rebuild:
+        description: '即使本仓库已是该最新版本也强制重新编译发布'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tailscale-release
+  cancel-in-progress: false
+
+jobs:
+  sync-tailscale:
+    name: Sync Official Tailscale Minimal Combined Builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check Upstream Tailscale Version (Zero-Waste Gate)
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_VERSION: ${{ inputs.version }}
+          FORCE_REBUILD: ${{ inputs.force_rebuild }}
+        run: |
+          set -euo pipefail
+
+          RAW_VER="${INPUT_VERSION#v}"
+          RAW_VER="${RAW_VER//[[:space:]]/}"
+          if [ -n "${RAW_VER}" ]; then
+            VERSION="${RAW_VER}"
+          else
+            VERSION=$(curl -fsSL --retry 3 --connect-timeout 10 "https://pkgs.tailscale.com/stable/?mode=json" | jq -r '.Version')
+          fi
+
+          if ! [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "::error::Invalid upstream Tailscale version resolved: '${VERSION}'"
+            exit 1
+          fi
+
+          echo "检查上游源码 Tag v${VERSION} 是否存在..."
+          if ! git ls-remote --exit-code --tags https://github.com/tailscale/tailscale.git "refs/tags/v${VERSION}" >/dev/null; then
+            echo "::error::Upstream Git tag v${VERSION} not found on tailscale/tailscale"
+            exit 1
+          fi
+
+          # 查询本仓库固定通道 Release（tailscale-latest）现有资产，对比版本与双架构产物是否齐全
+          EXISTING_ASSETS=$(gh release view tailscale-latest -R "${GITHUB_REPOSITORY}" --json assets -q '.assets[].name' 2>/dev/null || true)
+
+          HAS_AMD64=false
+          HAS_ARM64=false
+          HAS_SUMS=false
+          while IFS= read -r asset; do
+            case "${asset}" in
+              "tailscale_${VERSION}_amd64.tgz") HAS_AMD64=true ;;
+              "tailscale_${VERSION}_arm64.tgz") HAS_ARM64=true ;;
+              "checksums.txt") HAS_SUMS=true ;;
+            esac
+          done <<< "${EXISTING_ASSETS}"
+
+          if [ "${FORCE_REBUILD}" != "true" ] && [ "${HAS_AMD64}" = "true" ] && [ "${HAS_ARM64}" = "true" ] && [ "${HAS_SUMS}" = "true" ]; then
+            echo "✅ tailscale-latest 已包含官方最新稳定版 v${VERSION} 的双架构产物与 checksums.txt，跳过编译（零资源浪费）。"
+            {
+              echo "should_build=false"
+              echo "version=${VERSION}"
+            } >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          echo "🚀 检测到需要编译发布 Tailscale v${VERSION}（force_rebuild=${FORCE_REBUILD}）"
+          {
+            echo "should_build=true"
+            echo "version=${VERSION}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Clone Official Tailscale Source
+        if: steps.gate.outputs.should_build == 'true'
+        env:
+          TS_VERSION: ${{ steps.gate.outputs.version }}
+        run: |
+          set -euo pipefail
+          rm -rf tailscale-src dist
+          git clone --depth 1 --branch "v${TS_VERSION}" https://github.com/tailscale/tailscale.git tailscale-src
+
+      - name: Setup Go Matching Tailscale go.mod
+        if: steps.gate.outputs.should_build == 'true'
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: tailscale-src/go.mod
+          cache: false
+
+      - name: Build Minimal Combined AMD64 & ARM64 Packages
+        if: steps.gate.outputs.should_build == 'true'
+        env:
+          TS_VERSION: ${{ steps.gate.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          ABS_DIST="$(pwd)/dist"
+
+          cd tailscale-src
+
+          # 读取官方 mkversion 变量并兜底 VERSION_SHORT / VERSION_LONG，确保 --version 精确返回真实版本
+          eval "$(CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go run ./cmd/mkversion)"
+          VERSION_SHORT="${VERSION_SHORT:-${TS_VERSION}}"
+          VERSION_LONG="${VERSION_LONG:-${TS_VERSION}}"
+          echo "Embedded version: short=${VERSION_SHORT}, long=${VERSION_LONG}"
+
+          # 与当前 tailscale 源码支持的 feature list 取交集，避免未来版本重构 tag 名称导致编译中断
+          DESIRED_FEATURES="cli,osrouter,netstack,gro,iptables,sdnotify,advertiseroutes,advertiseexitnode,useroutes,useexitnode,nattraversal,portmapper,listenrawdisco,ipnbus,debug,bakedroots,cachenetmap,dns,dnsresolvecache,health,routecheck,useproxy,unixsocketidentity,tundevstats,linkspeed"
+          AVAILABLE_LIST=$(go run ./cmd/featuretags -list | awk -F: '{gsub(/^[ \t]+|[ \t]+$/, "", $1); if ($1 != "") print $1}')
+          KEEP_FEATURES=""
+          OLD_IFS="$IFS"
+          IFS=','
+          for feat in ${DESIRED_FEATURES}; do
+            if printf '%s\n' "${AVAILABLE_LIST}" | grep -Fxq "${feat}"; then
+              KEEP_FEATURES="${KEEP_FEATURES:+${KEEP_FEATURES},}${feat}"
+            else
+              echo "⚠️ 跳过当前上游版本已不存在的 feature tag: ${feat}"
+            fi
+          done
+          IFS="$OLD_IFS"
+
+          if [ -z "${KEEP_FEATURES}" ]; then
+            echo "::error::KEEP_FEATURES resolved to empty set"
+            exit 1
+          fi
+
+          TAGS=$(go run ./cmd/featuretags --min --add="${KEEP_FEATURES}")
+          echo "Keep features: ${KEEP_FEATURES}"
+          echo "Resolved build tags: ${TAGS}"
+
+          for ARCH in amd64 arm64; do
+            PKG_DIR="tailscale_${TS_VERSION}_${ARCH}"
+            PKG_PATH="${ABS_DIST}/${PKG_DIR}"
+            mkdir -p "${PKG_PATH}"
+
+            echo "==> 编译 linux/${ARCH} 无加壳精简合体二进制..."
+            CGO_ENABLED=0 GOOS=linux GOARCH="${ARCH}" go build \
+              -tags="${TAGS}" \
+              -trimpath \
+              -ldflags="-s -w -X tailscale.com/version.longStamp=${VERSION_LONG} -X tailscale.com/version.shortStamp=${VERSION_SHORT}" \
+              -o "${PKG_PATH}/tailscaled" \
+              ./cmd/tailscaled
+            chmod 0755 "${PKG_PATH}/tailscaled"
+            ln -s tailscaled "${PKG_PATH}/tailscale"
+
+            if [ "${ARCH}" = "amd64" ]; then
+              echo "==> Runner 真机冒烟验证 amd64 合体二进制与 symlink CLI 分发..."
+              TSD_VER=$("${PKG_PATH}/tailscaled" --version | head -n 1)
+              TS_VER=$("${PKG_PATH}/tailscale" version | head -n 1)
+              echo "  tailscaled --version -> ${TSD_VER}"
+              echo "  tailscale version    -> ${TS_VER}"
+              if [[ "${TSD_VER}" != *"${TS_VERSION}"* ]] || [[ "${TS_VER}" != *"${TS_VERSION}"* ]]; then
+                echo "::error::Smoke version mismatch! expected '${TS_VERSION}', got daemon='${TSD_VER}' cli='${TS_VER}'"
+                exit 1
+              fi
+            fi
+
+            GZIP=-9 tar -C "${ABS_DIST}" -czf "${ABS_DIST}/${PKG_DIR}.tgz" "${PKG_DIR}"
+            rm -rf "${PKG_PATH}"
+          done
+
+          cd "${ABS_DIST}"
+          sha256sum "tailscale_${TS_VERSION}_amd64.tgz" "tailscale_${TS_VERSION}_arm64.tgz" > checksums.txt
+          ls -lh
+          cat checksums.txt
+
+      - name: Publish Atomic Rolling Release (tailscale-latest)
+        if: steps.gate.outputs.should_build == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TS_VERSION: ${{ steps.gate.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          cat > /tmp/tailscale-notes.md <<EOF
+          ## Tailscale 官方源码精简合体离线包 v${TS_VERSION}
+
+          - **上游版本**: [tailscale/tailscale v${TS_VERSION}](https://github.com/tailscale/tailscale/releases/tag/v${TS_VERSION})
+          - **覆盖架构**: \`linux/amd64\`、\`linux/arm64\`
+          - **构建工艺**: 官方同版源码 \`featuretags --min\` 裁剪桌面冗余组件 + \`ts_include_cli\` 单二进制合体（\`tailscale -> tailscaled\` 软链接），仅 \`-trimpath -s -w\` 剥离符号表，**未 UPX 加壳**，显著节省 Flash 空间并降低小内存路由器/VPS 匿名内存驻留（已保留 \`sdnotify\` / \`netstack\` / \`gro\` / \`iptables\` / 子网路由 / Exit Node 能力）
+          - **发布通道**: 独立固定 \`prerelease\` 通道（\`--latest=false\`），绝不影响 \`singctl\` 主程序 \`/releases/latest\`
+
+          ### SHA256 Checksums
+          \`\`\`
+          $(cat dist/checksums.txt)
+          \`\`\`
+          EOF
+
+          PKG_AMD64="dist/tailscale_${TS_VERSION}_amd64.tgz"
+          PKG_ARM64="dist/tailscale_${TS_VERSION}_arm64.tgz"
+          PKG_SUMS="dist/checksums.txt"
+
+          if gh release view tailscale-latest -R "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "==> 更新现有 tailscale-latest Release（先上传新包再清理旧资产，零 404 窗口）..."
+            gh release upload tailscale-latest \
+              "${PKG_AMD64}" "${PKG_ARM64}" "${PKG_SUMS}" \
+              --clobber -R "${GITHUB_REPOSITORY}"
+
+            gh release edit tailscale-latest \
+              --prerelease \
+              --latest=false \
+              --title "Tailscale 精简合体离线包 (v${TS_VERSION})" \
+              --notes-file /tmp/tailscale-notes.md \
+              -R "${GITHUB_REPOSITORY}"
+
+            OLD_ASSETS=$(gh release view tailscale-latest -R "${GITHUB_REPOSITORY}" --json assets -q '.assets[].name' | grep -E '^tailscale_.*\.tgz$' || true)
+            for old_asset in ${OLD_ASSETS}; do
+              if [ "${old_asset}" != "tailscale_${TS_VERSION}_amd64.tgz" ] && [ "${old_asset}" != "tailscale_${TS_VERSION}_arm64.tgz" ]; then
+                echo "  - 清理旧版资产: ${old_asset}"
+                gh release delete-asset tailscale-latest "${old_asset}" -R "${GITHUB_REPOSITORY}" --yes || true
+              fi
+            done
+          else
+            echo "==> 首次创建 tailscale-latest Prerelease（latest=false）..."
+            gh release create tailscale-latest \
+              --target "${GITHUB_SHA}" \
+              --prerelease \
+              --latest=false \
+              --title "Tailscale 精简合体离线包 (v${TS_VERSION})" \
+              --notes-file /tmp/tailscale-notes.md \
+              "${PKG_AMD64}" "${PKG_ARM64}" "${PKG_SUMS}" \
+              -R "${GITHUB_REPOSITORY}"
+          fi

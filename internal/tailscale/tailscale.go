@@ -96,7 +96,7 @@ func (t *Tailscale) Install() error {
 	}
 	client := releasepkg.NewClient(mirror)
 	client.DirectFirst = netinfo.CheckGoogleConnectivity()
-	info, err := client.FetchLatest(ctx, "sixban6/auto_fetch_tailscale")
+	info, sourceRepo, _, err := fetchTailscaleReleaseInfo(ctx, client)
 	if err != nil {
 		return fmt.Errorf("无法直连 GitHub API 获取 tailscale 发布信息（为保证供应链安全，元数据不走镜像）: %w", err)
 	}
@@ -110,6 +110,15 @@ func (t *Tailscale) Install() error {
 	}
 	if asset == nil {
 		return fmt.Errorf("no suitable asset found for OS: %s, Arch: %s", runtime.GOOS, runtime.GOARCH)
+	}
+
+	// 若 GitHub API 资产对象暂未附带内联 sha256 digest，回填校验清单 checksums.txt 确保强校验。
+	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(asset.Digest)), "sha256:") {
+		if sums, err := client.FetchChecksums(ctx, sourceRepo, info.TagName, nil, info); err == nil {
+			if sum, ok := sums[asset.Name]; ok && sum != "" {
+				asset.Digest = "sha256:" + sum
+			}
+		}
 	}
 
 	res, err := client.Download(ctx, *asset, tempDir)
@@ -139,7 +148,7 @@ func (t *Tailscale) Install() error {
 		return fmt.Errorf("tailscaled binary not found: %w", err)
 	}
 
-	// 拷贝/链接文件（ARM64 精简合体版保留 tailscale -> tailscaled 软链接以节省一半空间）
+	// 拷贝/链接文件（精简合体版保留 tailscale -> tailscaled 软链接以节省一半空间）
 	if err := installTailscaleBinaries(tsBin, tsdBin, installDir); err != nil {
 		return err
 	}

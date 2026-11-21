@@ -16,6 +16,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -99,9 +100,39 @@ func (c *Client) httpClient() *http.Client {
 	return &http.Client{Timeout: 60 * time.Second}
 }
 
+// StatusError 表示直连 GitHub Release API 返回了非 200 HTTP 状态码。
+type StatusError struct {
+	StatusCode int
+	Status     string
+	URL        string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("github api returned status: %s (%s)", e.Status, e.URL)
+}
+
+// IsNotFound 判断错误是否为目标 GitHub Release 或 Tag 不存在（HTTP 404）。
+// 用于在主通道尚未首次构建时区分 404 与限流/网络异常，避免无意义盲目回退。
+func IsNotFound(err error) bool {
+	var se *StatusError
+	return errors.As(err, &se) && se.StatusCode == http.StatusNotFound
+}
+
 // FetchLatest 直连获取最新稳定 Release 元数据（不走镜像）。
 func (c *Client) FetchLatest(ctx context.Context, repo string) (*Info, error) {
 	url := fmt.Sprintf("%s/repos/%s/releases/latest", c.apiBase(), repo)
+	return c.fetchInfo(ctx, url)
+}
+
+// FetchTag 直连获取指定 Tag（包含 prerelease）的 Release 元数据（不走镜像）。
+// 独立发布的工具链通道（如 tailscale-latest）通过固定 Tag 获取，避免污染仓库 /releases/latest。
+func (c *Client) FetchTag(ctx context.Context, repo, tag string) (*Info, error) {
+	repo = strings.TrimSpace(repo)
+	tag = strings.TrimSpace(tag)
+	if repo == "" || tag == "" {
+		return nil, fmt.Errorf("repo and tag must not be empty")
+	}
+	url := fmt.Sprintf("%s/repos/%s/releases/tags/%s", c.apiBase(), repo, tag)
 	return c.fetchInfo(ctx, url)
 }
 
@@ -119,7 +150,11 @@ func (c *Client) fetchInfo(ctx context.Context, url string) (*Info, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("github api returned status: %s (%s)", resp.Status, url)
+		return nil, &StatusError{
+			StatusCode: resp.StatusCode,
+			Status:     resp.Status,
+			URL:        url,
+		}
 	}
 
 	var info Info

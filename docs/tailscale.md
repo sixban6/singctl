@@ -5,7 +5,7 @@
 在 Linux/OpenWrt 设备上管理 Tailscale 异地组网。
 
 **原理**:
-- 封装了 tailscale，使用 [Tailscale 官方安装包](https://github.com/sixban6/auto_fetch_tailscale)。
+- 封装了 tailscale，直接拉取本仓库统一编译托管的 [Tailscale 精简合体离线包](https://github.com/sixban6/singctl/releases/tag/tailscale-latest)。
 - 统一关闭netfilter，不让tailscale修改防火墙配置，防止冲突。
 - singctl ts统一接管tailscale的防火墙配置，保持稳定可靠。
 
@@ -19,10 +19,9 @@
 
 使用 Tailscale 官方二进制，功能最完整，**优先选择此模式**。
 
-> **📦 安装包来源说明**：singctl 不直接从 Tailscale 官网下载，而是从 [sixban6/auto_fetch_tailscale](https://github.com/sixban6/auto_fetch_tailscale) 仓库的 Releases 拉取：
-> - **ARM64 架构包**（`*_arm64.tgz`）：基于同版本 Tailscale 官方源码通过 `featuretags --min` 裁剪桌面冗余模块并启用 `ts_include_cli` 合体构建（`tailscale -> tailscaled` 软链接，**未 UPX 加壳**），大幅缩减体积同时减少小内存 OpenWrt 路由器的匿名内存驻留；
-> - **amd64 架构包**（`*_amd64.tgz`）：官方原版静态包；
-> - 发布包含校验文件 `checksums.txt`，singctl 安装/更新时自动校验。
+> **📦 安装包来源说明**：singctl 直接从本仓库独立发布的 [`tailscale-latest`](https://github.com/sixban6/singctl/releases/tag/tailscale-latest) Prerelease 通道拉取预编译产物（每 12 小时巡检官方稳定版，仅在上游发布新版时触发按需编译）：
+> - **AMD64 / ARM64 双架构统一精简合体包**（`tailscale_<ver>_amd64.tgz`、`tailscale_<ver>_arm64.tgz`）：基于同版本 Tailscale 官方源码使用 `featuretags --min` 裁剪桌面冗余模块并启用 `ts_include_cli` 合体构建（`tailscale -> tailscaled` 软链接，仅 `-trimpath -s -w` 剥离符号表，**未 UPX 加壳**），同时保留 `sdnotify`、`netstack`、`gro`、子网路由与 Exit Node 能力，兼顾极小体积与 VPS/OpenWrt 低匿名内存驻留；
+> - 发布附带官方 GitHub SHA256 digest 与 `checksums.txt` 双重强校验（当首次发布尚未就绪时可自动平滑回退旧渠道）。
 
 默认情况下无需配置 `tailscale` 字段，只有在需要授权密钥（`auth_key`）时才配置：
 
@@ -117,7 +116,7 @@ singctl ts stop
 
 支持 **OpenWrt (`procd`)** 与 **Linux (`systemd`)**（包括直接通过 Tailscale 隧道远程 SSH 或在 WebUI 控制台内发起更新）：
 
-- **Phase 1（在线零 `/tmp` 预落盘与预检）**：体检剩余 Flash 与内存 → 直连 GitHub API 获取官方 SHA256 digest → 单遍流式解压直写 `/usr/sbin/.tailscaled.new`（`0 MB` `/tmp` 占用，自动保留 ARM64 精简合体版 `tailscale -> tailscaled` 软链接）→ 离线预检 `--version` 可执行兼容性。
+- **Phase 1（在线零 `/tmp` 预落盘与预检）**：体检剩余 Flash 与内存 → 直连 GitHub API 获取官方 SHA256 digest → 单遍流式解压直写 `/usr/sbin/.tailscaled.new`（`0 MB` `/tmp` 占用，自动保留 AMD64/ARM64 精简合体版 `tailscale -> tailscaled` 软链接）→ 离线预检 `--version` 可执行兼容性。
 - **Phase 2（脱离父进程原子切换与自动回滚）**：`setsid` 启动极简 POSIX `/bin/sh` 守护器（预留 2 秒缓冲刷新响应）→ 停旧服、同分区 `mv` 备份并原子替换、启新服 → 执行默认 `25s` 健康门禁校验（`BackendState == Running`）；若启动崩溃或超时未上线，自动回滚旧版并恢复隧道。
 
 ```bash
