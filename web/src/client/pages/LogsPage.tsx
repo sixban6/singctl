@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Terminal, RefreshCw, Trash2 } from 'lucide-react';
 import { Badge, Button, ConfirmDialog, PageHeader, SectionCard, SegmentedTabs, useToast } from '../../ui';
+import { useVisibilityInterval } from '../../hooks';
 import { clientApi } from '../api';
 import { ClientLogsResponse } from '../types';
 
@@ -46,13 +47,12 @@ export const LogsPage: React.FC<LogsPageProps> = ({ initialLogName }) => {
     void fetchLogs(false);
   }, [fetchLogs]);
 
-  useEffect(() => {
-    if (!autoRefresh) return;
-    const t = setInterval(() => {
-      if (document.visibilityState === 'visible') void fetchLogs(true);
-    }, 5000);
-    return () => clearInterval(t);
-  }, [autoRefresh, fetchLogs]);
+  useVisibilityInterval(
+    () => {
+      void fetchLogs(true);
+    },
+    autoRefresh ? 5000 : null,
+  );
 
   useEffect(() => {
     if (viewRef.current) {

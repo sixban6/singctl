@@ -157,8 +157,7 @@ jobs:
       - name: Install Packaging Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y upx-ucl zip
-          upx --version
+          sudo apt-get install -y zip
 
       - name: Build Cross-Platform SingCtl Binaries
         run: |
@@ -171,11 +170,12 @@ jobs:
           mkdir -p dist/{linux-amd64,linux-arm64,darwin-arm64,darwin-amd64,windows-amd64,windows-arm64}
 
           # Linux / OpenWrt (with embedded rule snapshots)
+          # 性能架构说明：保留原生精简 ELF（-trimpath -s -w），不加 UPX 壳。
+          # UPX 运行时自解压会将 ~22MB 代码段和数据段全部灌入每进程的私有匿名内存（RssAnon），
+          # 无法在双守护进程（dm+web / ui+sub）间通过 mmap 共享只读文件页（RssFile），且增加 CLI 启动解压延迟。
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "${LDFLAGS}" -o dist/linux-amd64/singctl ./cmd/singctl
-          upx --best --lzma dist/linux-amd64/singctl
 
           CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "${LDFLAGS}" -o dist/linux-arm64/singctl ./cmd/singctl
-          upx --best --lzma dist/linux-arm64/singctl
 
           # macOS (Apple Silicon & Intel — un-UPX'd for macOS Gatekeeper compatibility)
           CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "${LDFLAGS}" -o dist/darwin-arm64/singctl ./cmd/singctl

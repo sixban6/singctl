@@ -9,6 +9,7 @@ import (
 	"singctl/internal/cmd"
 	"singctl/internal/config"
 	"singctl/internal/logger"
+	"singctl/internal/util/memlimit"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -116,6 +117,7 @@ func sanitizeLegacyRestartArgs(args []string) []string {
 
 func main() {
 	os.Args = sanitizeLegacyRestartArgs(os.Args)
+	memlimit.ApplyDefault(os.Args)
 	defaultConfigPath := resolveDefaultConfigPath()
 	configPath = parseEarlyConfigPath(os.Args, defaultConfigPath)
 

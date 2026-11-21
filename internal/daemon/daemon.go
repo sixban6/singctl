@@ -419,6 +419,17 @@ func calcIntervals(cfg *config.Config) (time.Duration, time.Duration) {
 	return wdInt, foInt
 }
 
+func shouldRunP2PAssistTicker(cfg *config.Config, p2pLastActive bool) bool {
+	if p2pLastActive {
+		return true
+	}
+	return cfg != nil && cfg.Tailscale.P2PAssist.Enabled
+}
+
+func shouldRunThrottleTicker(cfg *config.Config) bool {
+	return cfg != nil && len(cfg.Audit.Throttles) > 0
+}
+
 // monitorLoop 监控循环
 func (d *Daemon) monitorLoop() error {
 	cfg := d.currentConfig()
@@ -432,6 +443,31 @@ func (d *Daemon) monitorLoop() error {
 	initHealthTimer := time.NewTimer(2 * time.Second)
 	initFailoverTimer := time.NewTimer(8 * time.Second)
 	initRefreshTimer := time.NewTimer(30 * time.Second)
+
+	p2pTickerRunning := true
+	throttleTickerRunning := true
+	// 空闲休眠优化：未启用 Tailscale P2P 辅助或无内核限速规则时停用对应高频定时器，
+	// 避免守护进程每 3 秒无效唤醒；配置热重载开启后通过 Reset() 瞬间恢复。
+	syncOptionalTickers := func(curCfg *config.Config) {
+		wantP2P := shouldRunP2PAssistTicker(curCfg, d.p2pLastActive.Load())
+		if wantP2P && !p2pTickerRunning {
+			p2pAssistTicker.Reset(3 * time.Second)
+			p2pTickerRunning = true
+		} else if !wantP2P && p2pTickerRunning {
+			p2pAssistTicker.Stop()
+			p2pTickerRunning = false
+		}
+
+		wantThrottle := shouldRunThrottleTicker(curCfg)
+		if wantThrottle && !throttleTickerRunning {
+			throttleReconcileTicker.Reset(defaultAuditThrottleReconcileInterval)
+			throttleTickerRunning = true
+		} else if !wantThrottle && throttleTickerRunning {
+			throttleReconcileTicker.Stop()
+			throttleTickerRunning = false
+		}
+	}
+	syncOptionalTickers(cfg)
 
 	defer func() {
 		watchdogTicker.Stop()
@@ -474,6 +510,7 @@ func (d *Daemon) monitorLoop() error {
 				snap.ActiveFailovers = nil
 			})
 		}
+		syncOptionalTickers(latest)
 		logger.Info("[Watchdog] Config hot-reloaded (interval=%s, failover=%v/%s, sub_sync=%ds)",
 			curWDInterval, latest.Watchdog.Failover.IsEnabled(), curFOInterval, latest.Watchdog.SubSyncInterval)
 	}
@@ -497,6 +534,7 @@ func (d *Daemon) monitorLoop() error {
 
 		case <-p2pAssistTicker.C:
 			d.maybeReconcileTailscaleP2PAsync(false)
+			syncOptionalTickers(d.currentConfig())
 
 		case <-auditSampleTicker.C:
 			d.maybeSampleDeviceAuditAsync()

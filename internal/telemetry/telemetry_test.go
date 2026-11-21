@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestGetActiveDestinationsAndEvictMismatchedConnections(t *testing.T) {
@@ -128,5 +130,116 @@ func TestGetActiveDestinationsAndEvictMismatchedConnections(t *testing.T) {
 	}
 	if evicted != 2 || len(deletedIDs) != 2 {
 		t.Fatalf("expected 2 evicted connections (c1, c2), got evicted=%d deletedIDs=%v", evicted, deletedIDs)
+	}
+}
+
+func TestCollector_CachesResolvedConfigAndReloadsOnModify(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sec := r.Header.Get("Authorization")
+		if sec != "Bearer secret-one-123456" && sec != "Bearer secret-two-654321" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		_, _ = w.Write([]byte(`{"uploadTotal":100,"downloadTotal":200,"connections":[]}`))
+	}))
+	defer srv.Close()
+
+	ctrlAddr := strings.TrimPrefix(srv.URL, "http://")
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	writeCfg := func(sec string, enabled bool) {
+		t.Helper()
+		payload := map[string]any{"experimental": map[string]any{}}
+		if enabled {
+			payload["experimental"] = map[string]any{
+				"clash_api": map[string]any{
+					"external_controller": ctrlAddr,
+					"secret":              sec,
+				},
+			}
+		}
+		raw, _ := json.Marshal(payload)
+		if err := os.WriteFile(cfgPath, raw, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	writeCfg("secret-one-123456", true)
+	c := NewCollector(cfgPath)
+
+	for range 20 {
+		snap := c.Collect(t.Context())
+		if !snap.Enabled || !snap.Reachable {
+			t.Fatalf("expected reachable telemetry snapshot, got %+v", snap)
+		}
+	}
+	if reads := c.cfgDiskReads.Load(); reads != 1 {
+		t.Fatalf("expected unchanged config to read/parse disk exactly 1 time across 20 Collect calls, got %d", reads)
+	}
+
+	// 修改配置文件内容与 mtime -> 必须立即重新加载新配置
+	writeCfg("secret-two-654321", true)
+	nowFuture := time.Now().Add(2 * time.Second)
+	_ = os.Chtimes(cfgPath, nowFuture, nowFuture)
+
+	snap2 := c.Collect(t.Context())
+	if !snap2.Enabled || !snap2.Reachable {
+		t.Fatalf("expected reloaded config snapshot to succeed, got %+v", snap2)
+	}
+	if reads := c.cfgDiskReads.Load(); reads != 2 {
+		t.Fatalf("expected 2 disk reads after config modification, got %d", reads)
+	}
+
+	// 移除配置文件 -> 立即失效并反映 Enabled=false
+	_ = os.Remove(cfgPath)
+	snap3 := c.Collect(t.Context())
+	if snap3.Enabled {
+		t.Fatalf("expected removed config to report Enabled=false immediately, got %+v", snap3)
+	}
+}
+
+func BenchmarkCollector_Collect_300Conns(b *testing.B) {
+	var body strings.Builder
+	body.WriteString(`{"downloadTotal":987654321,"uploadTotal":12345678,"memory":33554432,"connections":[`)
+	for i := range 300 {
+		if i > 0 {
+			body.WriteByte(',')
+		}
+		fmt.Fprintf(&body,
+			`{"id":"t-%d","upload":%d,"download":%d,"chains":["WARP"],"rule":"final","metadata":{"network":"tcp","type":"hysteria2","sourceIP":"192.0.2.%d","host":"cdn%d.example.com","destinationIP":"198.51.100.%d","destinationPort":"443"}}`,
+			i, i*100, i*1000, (i%200)+1, i%25, (i%200)+1,
+		)
+	}
+	body.WriteString(`]}`)
+	payload := []byte(body.String())
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(payload)
+	}))
+	defer srv.Close()
+
+	cfgPath := filepath.Join(b.TempDir(), "config.json")
+	rawCfg, _ := json.Marshal(map[string]any{
+		"experimental": map[string]any{
+			"clash_api": map[string]any{
+				"external_controller": strings.TrimPrefix(srv.URL, "http://"),
+				"secret":              "bench-secret-123456",
+			},
+		},
+	})
+	if err := os.WriteFile(cfgPath, rawCfg, 0600); err != nil {
+		b.Fatal(err)
+	}
+
+	c := NewCollector(cfgPath)
+	ctx := b.Context()
+	c.Collect(ctx)
+
+	b.ReportAllocs()
+	for b.Loop() {
+		snap := c.Collect(ctx)
+		if !snap.Reachable || snap.ActiveConnections != 300 {
+			b.Fatalf("unexpected snap: reachable=%v active=%d", snap.Reachable, snap.ActiveConnections)
+		}
 	}
 }

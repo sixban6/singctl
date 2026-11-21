@@ -3,6 +3,8 @@ package serverweb
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +16,7 @@ import (
 	"time"
 
 	"singctl/internal/config"
+	"singctl/internal/fleet"
 	"singctl/internal/heal"
 	"singctl/internal/subhub"
 )
@@ -554,5 +557,211 @@ server:
 	}
 	if got := healCalls.Load(); got != 1 {
 		t.Fatalf("expected single-flight heal background refresh (1 call), got %d", got)
+	}
+}
+
+func TestSniffTracker_RevisionCacheAndAllInvalidationPaths(t *testing.T) {
+	ctx := t.Context()
+	tmpDir := t.TempDir()
+	geo := NewIPGeoResolver(filepath.Join(tmpDir, "geo.json"))
+	limiter := NewIPLimiter(3, 10*time.Minute, 15*time.Minute, filepath.Join(tmpDir, "ban.json"))
+	defer limiter.Close()
+
+	fleetStore := fleet.NewStore(filepath.Join(tmpDir, "fleet.yaml"))
+	fleetMgr := fleet.NewManager(fleetStore, subhub.NewStore(filepath.Join(tmpDir, "sub"), ""))
+
+	tracker := NewSniffTracker(geo, limiter, filepath.Join(tmpDir, "sniff.json"))
+	tracker.EnableSystemProbe = false
+	tracker.SetFleetManager(fleetMgr)
+
+	for i := range 200 {
+		ip := fmt.Sprintf("198.51.%d.%d", (i/250)+100, (i%250)+1)
+		geo.SeedCountry(ip, "US")
+		tracker.Observe(ip, "TLS/443 伪装回落嗅探", "masqueraded", i+1)
+	}
+
+	s1 := tracker.Snapshot(ctx)
+	if s1.TotalSniffIPs != 200 {
+		t.Fatalf("expected 200 IPs, got %d", s1.TotalSniffIPs)
+	}
+	rebuildsAfterFirst := tracker.snapshotRebuilds.Load()
+
+	// 连续 10 次同视角查询命中版本号记忆化缓存，不得触发完整重算
+	for range 10 {
+		sRepeat := tracker.Snapshot(ctx)
+		if sRepeat.TotalSniffIPs != 200 || sRepeat.TotalBannedIPs != s1.TotalBannedIPs {
+			t.Fatalf("unexpected cached snapshot mismatch: %+v", sRepeat)
+		}
+	}
+	if got := tracker.snapshotRebuilds.Load(); got != rebuildsAfterFirst {
+		t.Fatalf("expected 0 rebuilds on cached Snapshot() calls, went from %d to %d", rebuildsAfterFirst, got)
+	}
+
+	// (a) Observe / ObserveNode 立即失效
+	tracker.ObserveNode("node-a", "Node A", "203.0.113.45", "SSH 暴力破解", "observing", 2)
+	sAfterObserve := tracker.Snapshot(ctx)
+	if sAfterObserve.TotalSniffIPs != 201 {
+		t.Fatalf("expected 201 after ObserveNode, got %d", sAfterObserve.TotalSniffIPs)
+	}
+
+	// (b) BlockTargetForNode / UnblockTargetForNode 立即失效
+	if _, _, err := tracker.BlockTargetForNode(ctx, "203.0.113.45", "all", ""); err != nil {
+		t.Fatalf("BlockTargetForNode failed: %v", err)
+	}
+	sAfterBlock := tracker.Snapshot(ctx)
+	if sAfterBlock.TotalBannedIPs != 1 {
+		t.Fatalf("expected 1 banned IP immediately after Block, got %d", sAfterBlock.TotalBannedIPs)
+	}
+	if _, _, err := tracker.UnblockTargetForNode(ctx, "all", "all"); err != nil {
+		t.Fatalf("UnblockTargetForNode failed: %v", err)
+	}
+	sAfterUnblock := tracker.Snapshot(ctx)
+	if sAfterUnblock.TotalBannedIPs != 0 {
+		t.Fatalf("expected 0 banned IPs immediately after Unblock all, got %d", sAfterUnblock.TotalBannedIPs)
+	}
+
+	// (c) MarkTrustedClientIPs 剔除 observing IP 后立即失效
+	tracker.Observe("203.0.113.88", "TLS/443 伪装回落嗅探", "observing", 1)
+	if sBeforeTrust := tracker.Snapshot(ctx); sBeforeTrust.TotalSniffIPs < 201 {
+		t.Fatalf("expected >=201 before trusting IP, got %d", sBeforeTrust.TotalSniffIPs)
+	}
+	tracker.MarkTrustedClientIPs("203.0.113.88")
+	sAfterTrust := tracker.Snapshot(ctx)
+	for _, st := range sAfterTrust.TopIPs {
+		if st.IP == "203.0.113.88" {
+			t.Fatalf("expected trusted IP 203.0.113.88 to disappear immediately from snapshot")
+		}
+	}
+
+	// (d) GeoIP 变更后立即失效
+	tracker.Observe("203.0.113.99", "异常端口探测", "observing", 1)
+	_ = tracker.Snapshot(ctx)
+	geo.SeedCountry("203.0.113.99", "JP")
+	sAfterGeo := tracker.Snapshot(ctx)
+	var foundJP bool
+	for _, st := range sAfterGeo.TopIPs {
+		if st.IP == "203.0.113.99" && st.CountryCode == "JP" {
+			foundJP = true
+		}
+	}
+	if !foundJP {
+		t.Fatalf("expected GeoIP update to invalidate snapshot cache and reflect CountryCode=JP immediately")
+	}
+
+	// (e) IPLimiter 失败登录记录后立即失效
+	limiter.RecordFailure("203.0.113.105")
+	sAfterLimiter := tracker.Snapshot(ctx)
+	var foundLimiter bool
+	for _, st := range sAfterLimiter.TopIPs {
+		if st.IP == "203.0.113.105" {
+			foundLimiter = true
+		}
+	}
+	if !foundLimiter {
+		t.Fatalf("expected limiter failure to appear immediately in SniffTracker snapshot")
+	}
+
+	// (f) fleet.Store 新增节点后立即失效
+	if _, err := fleetStore.Upsert(fleet.UpsertInput{
+		ID:       "tokyo-1",
+		Name:     "Tokyo Node",
+		Host:     "203.0.113.150",
+		User:     "root",
+		Password: "pw",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sAfterFleet := tracker.Snapshot(ctx)
+	var foundTokyo bool
+	for _, n := range sAfterFleet.Nodes {
+		if n.ID == "tokyo-1" {
+			foundTokyo = true
+		}
+	}
+	if !foundTokyo {
+		t.Fatalf("expected fleet.Store Upsert to invalidate snapshot cache and expose node tokyo-1 immediately")
+	}
+}
+
+func TestServerWeb_StaticAssetImmutableCacheHeaders(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "singctl.yaml")
+	_ = os.WriteFile(cfgPath, []byte(`
+server:
+  node_domain: "node.example.com"
+  web_admin:
+    username: "opsadmin"
+    password: "Password123"
+`), 0600)
+
+	srv := New(Options{
+		ConfigPath:    cfgPath,
+		SubStoreDir:   filepath.Join(tmpDir, "sub-store"),
+		FleetFilePath: filepath.Join(tmpDir, "fleet.yaml"),
+		Username:      "opsadmin",
+		Password:      "Password123",
+	})
+	defer srv.limiter.Close()
+	srv.sniff.EnableSystemProbe = false
+
+	// 发现内嵌 static/assets/ 中的真实带 hash 静态资源路径
+	var assetPath string
+	staticRoot, err := fs.Sub(staticFS, "static")
+	if err == nil {
+		_ = fs.WalkDir(staticRoot, "assets", func(p string, d fs.DirEntry, wErr error) error {
+			if wErr == nil && d != nil && !d.IsDir() && strings.HasSuffix(p, ".js") && assetPath == "" {
+				assetPath = "/" + p
+			}
+			return nil
+		})
+	}
+	if assetPath == "" {
+		t.Fatal("expected at least one embedded static asset under static/assets/*.js")
+	}
+
+	assetReq := httptest.NewRequest(http.MethodGet, assetPath, nil)
+	assetRec := httptest.NewRecorder()
+	srv.Mux.ServeHTTP(assetRec, assetReq)
+	if assetRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for %s, got %d", assetPath, assetRec.Code)
+	}
+	if cc := assetRec.Header().Get("Cache-Control"); cc != "public, max-age=31536000, immutable" {
+		t.Fatalf("expected immutable Cache-Control on %s, got %q", assetPath, cc)
+	}
+
+	rootReq := httptest.NewRequest(http.MethodGet, "/", nil)
+	rootRec := httptest.NewRecorder()
+	srv.Mux.ServeHTTP(rootRec, rootReq)
+	if rootRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for /, got %d", rootRec.Code)
+	}
+	if cc := rootRec.Header().Get("Cache-Control"); !strings.Contains(cc, "no-store") {
+		t.Fatalf("expected no-store Cache-Control on /, got %q", cc)
+	}
+}
+
+func BenchmarkSniffTracker_Snapshot_500IPs(b *testing.B) {
+	tmpDir := b.TempDir()
+	geo := NewIPGeoResolver(filepath.Join(tmpDir, "geo.json"))
+	limiter := NewIPLimiter(3, 10*time.Minute, 15*time.Minute, filepath.Join(tmpDir, "ban.json"))
+	defer limiter.Close()
+	tracker := NewSniffTracker(geo, limiter, filepath.Join(tmpDir, "sniff.json"))
+	tracker.EnableSystemProbe = false
+
+	countries := []string{"US", "JP", "SG", "DE", "NL"}
+	for i := range 500 {
+		ip := fmt.Sprintf("198.51.%d.%d", (i/250)+10, (i%250)+1)
+		geo.SeedCountry(ip, countries[i%len(countries)])
+		tracker.Observe(ip, "TLS/443 伪装回落嗅探", "masqueraded", (i%20)+1)
+	}
+	ctx := b.Context()
+	_ = tracker.Snapshot(ctx)
+
+	b.ReportAllocs()
+	for b.Loop() {
+		snap := tracker.Snapshot(ctx)
+		if snap.TotalSniffIPs != 500 {
+			b.Fatalf("expected 500 IPs, got %d", snap.TotalSniffIPs)
+		}
 	}
 }

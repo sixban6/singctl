@@ -147,6 +147,16 @@ type nodeHarvestMeta struct {
 	lastError   string
 }
 
+type sniffSnapshotCacheEntry struct {
+	dataRev    uint64
+	geoRev     uint64
+	limiterRev uint64
+	fleetRev   uint64
+	fleetCount int
+	builtAt    time.Time
+	summary    SniffSummary
+}
+
 // SniffTracker 外部活跃嗅探与探测态势聚合器 (支持本机与多节点舰队分主机追踪)
 type SniffTracker struct {
 	mu                 sync.RWMutex
@@ -158,6 +168,8 @@ type SniffTracker struct {
 	lastSystemHarvest  time.Time
 	lastPersistAt      time.Time
 	dirty              bool
+	dataRev            uint64
+	snapCache          map[string]sniffSnapshotCacheEntry
 	filePath           string
 	geo                *IPGeoResolver
 	limiter            *IPLimiter
@@ -169,6 +181,7 @@ type SniffTracker struct {
 	diskMu             sync.Mutex
 	writeSeq           uint64
 	writtenSeq         uint64
+	snapshotRebuilds   atomic.Int64
 }
 
 // NewSniffTracker 创建嗅探态势追踪器 (可选传入 0600 持久化文件路径)
@@ -185,6 +198,7 @@ func NewSniffTracker(geo *IPGeoResolver, limiter *IPLimiter, filePath ...string)
 		trustedClients:     make(map[string]time.Time),
 		manualBlockedCIDRs: make(map[string]*net.IPNet),
 		nodeBlockedCIDRs:   make(map[string]map[string]*net.IPNet),
+		snapCache:          make(map[string]sniffSnapshotCacheEntry),
 		filePath:           fp,
 		geo:                geo,
 		limiter:            limiter,
@@ -192,6 +206,15 @@ func NewSniffTracker(geo *IPGeoResolver, limiter *IPLimiter, filePath ...string)
 	}
 	t.loadLocked()
 	return t
+}
+
+func (t *SniffTracker) markDirtyLocked() {
+	t.dirty = true
+	t.dataRev++
+}
+
+func (t *SniffTracker) bumpDataRevLocked() {
+	t.dataRev++
 }
 
 // SetFleetManager 绑定集群节点管理器以支持分主机嗅探采集与协同封禁
@@ -265,7 +288,7 @@ func (t *SniffTracker) MarkTrustedClientIPs(ips ...string) {
 		for _, nodeMap := range t.recordsByNode {
 			if rec, exists := nodeMap[ipStr]; exists && rec.status != "banned" {
 				delete(nodeMap, ipStr)
-				t.dirty = true
+				t.markDirtyLocked()
 			}
 		}
 	}
@@ -375,12 +398,13 @@ func (t *SniffTracker) observeNodeAtLocked(nodeID, nodeName, ipStr, vector, stat
 			lastSeen:   ls,
 		}
 		nodeMap[ipStr] = rec
-		t.dirty = true
+		t.markDirtyLocked()
 		return
 	}
 
 	if nodeName != "" && rec.nodeName != nodeName {
 		rec.nodeName = nodeName
+		t.bumpDataRevLocked()
 	}
 	if rec.firstSeen.IsZero() {
 		if !firstTime.IsZero() {
@@ -390,9 +414,10 @@ func (t *SniffTracker) observeNodeAtLocked(nodeID, nodeName, ipStr, vector, stat
 		} else {
 			rec.firstSeen = now
 		}
+		t.bumpDataRevLocked()
 	} else if !firstTime.IsZero() && firstTime.Before(rec.firstSeen) {
 		rec.firstSeen = firstTime
-		t.dirty = true
+		t.markDirtyLocked()
 	}
 
 	if setExactHits {
@@ -400,19 +425,19 @@ func (t *SniffTracker) observeNodeAtLocked(nodeID, nodeName, ipStr, vector, stat
 		if !firstTime.IsZero() && !lastTime.IsZero() && lastTime.Before(rec.lastSeen) && rec.lastSeen.Sub(firstTime) > time.Minute {
 			if rec.vector == "高危端口扫描拦截" || rec.vector == "SSH 暴力破解" {
 				rec.lastSeen = lastTime
-				t.dirty = true
+				t.markDirtyLocked()
 			}
 		}
 		if !lastTime.IsZero() && lastTime.After(rec.lastSeen) {
 			rec.lastSeen = lastTime
-			t.dirty = true
+			t.markDirtyLocked()
 		}
 		if hitsDelta > rec.hits {
 			rec.hits = hitsDelta
 			if lastTime.IsZero() {
 				rec.lastSeen = now
 			}
-			t.dirty = true
+			t.markDirtyLocked()
 		}
 	} else {
 		rec.hits += hitsDelta
@@ -421,13 +446,13 @@ func (t *SniffTracker) observeNodeAtLocked(nodeID, nodeName, ipStr, vector, stat
 		} else {
 			rec.lastSeen = now
 		}
-		t.dirty = true
+		t.markDirtyLocked()
 	}
 
 	if vector != "" && (rec.vector == "" || rec.vector == "异常端口探测" || status == "banned") {
 		if rec.vector != vector {
 			rec.vector = vector
-			t.dirty = true
+			t.markDirtyLocked()
 		}
 	}
 	if statusPriority(status) > statusPriority(rec.status) {
@@ -435,7 +460,7 @@ func (t *SniffTracker) observeNodeAtLocked(nodeID, nodeName, ipStr, vector, stat
 		if lastTime.IsZero() {
 			rec.lastSeen = now
 		}
-		t.dirty = true
+		t.markDirtyLocked()
 	}
 }
 
@@ -445,6 +470,7 @@ func (t *SniffTracker) evictOldestInMapLocked(nodeMap map[string]*sniffRecord, n
 	for ip, rec := range nodeMap {
 		if now.Sub(rec.lastSeen) > sniffEntryTTL {
 			delete(nodeMap, ip)
+			t.markDirtyLocked()
 			continue
 		}
 		if oldestIP == "" || rec.lastSeen.Before(oldestTime) {
@@ -454,6 +480,7 @@ func (t *SniffTracker) evictOldestInMapLocked(nodeMap map[string]*sniffRecord, n
 	}
 	if len(nodeMap) >= maxTrackedSniffIPs && oldestIP != "" {
 		delete(nodeMap, oldestIP)
+		t.markDirtyLocked()
 	}
 }
 

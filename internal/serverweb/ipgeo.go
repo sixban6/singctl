@@ -50,9 +50,18 @@ type IPGeoResolver struct {
 	HTTPClient   *http.Client
 	batchRunning atomic.Bool
 	saveRunning  atomic.Bool
+	rev          atomic.Uint64
 	diskMu       sync.Mutex
 	writeSeq     uint64
 	writtenSeq   uint64
+}
+
+// Revision 返回 GeoIP 缓存单调递增版本号（供上游嗅探快照缓存零开销判定失效）。
+func (r *IPGeoResolver) Revision() uint64 {
+	if r == nil {
+		return 0
+	}
+	return r.rev.Load()
 }
 
 // 全球常见及高频扫描来源国家/地区 ISO-3166-1 二位码中文名称表
@@ -305,6 +314,7 @@ func (r *IPGeoResolver) storeResolvedLocked(ipStr string, info IPGeoInfo, ttl ti
 		}
 	}
 	r.dirty = true
+	r.rev.Add(1)
 }
 
 // SeedCountry 根据请求头 (如 Cloudflare CF-IPCountry) 预置国家信息 (0 延迟)
@@ -728,6 +738,9 @@ func (r *IPGeoResolver) loadLocked() {
 				Geo:         ent.Info.Country,
 			}
 		}
+	}
+	if len(r.Cache) > 0 {
+		r.rev.Add(1)
 	}
 }
 

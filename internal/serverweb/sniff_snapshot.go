@@ -47,35 +47,85 @@ func (t *SniffTracker) SnapshotForNode(ctx context.Context, nodeScope string, fo
 	return t.buildSnapshot(ctx, nodeScope, true, false)
 }
 
+func (t *SniffTracker) currentDepsRevisions() (geoRev, limiterRev, fleetRev uint64) {
+	if t.geo != nil {
+		geoRev = t.geo.Revision()
+	}
+	if t.limiter != nil {
+		limiterRev = t.limiter.Revision()
+	}
+	t.mu.RLock()
+	fleetMgr := t.fleetMgr
+	t.mu.RUnlock()
+	if fleetMgr != nil && fleetMgr.Store != nil {
+		fleetRev = fleetMgr.Store.Revision()
+	}
+	return geoRev, limiterRev, fleetRev
+}
+
+func cloneSniffSummary(src SniffSummary) SniffSummary {
+	cp := src
+	cp.Nodes = slices.Clone(src.Nodes)
+	cp.TopIPs = slices.Clone(src.TopIPs)
+	cp.TopSubnets = slices.Clone(src.TopSubnets)
+	cp.TopCountries = slices.Clone(src.TopCountries)
+	return cp
+}
+
 func (t *SniffTracker) buildSnapshot(ctx context.Context, nodeScope string, forceRefresh, nonBlocking bool) SniffSummary {
 	nodeScope = cmp.Or(strings.TrimSpace(nodeScope), "all")
 
-	// 1. 同步本机 Web IPLimiter 中的密码试探与封禁记录（跳过嗅探手动拉黑记录，避免污染原探测攻击向量）
+	// 1. 先加载舰队清单（fleet.Store 走 mtime 缓存，~4us 即可感知外部 fleet.yaml 变更并同步刷新 fleetRev）
+	fleetNodes, enableProbe := t.loadClusterFleetNodes()
+
+	// 2. 快路径（SSE 1.5s 推流或 SWR 视图）：校验 dataRev / geoRev / limiterRev / fleetRev 四维版本号，
+	// 全部未变且处于 5s 缓存窗口内时直接 O(1) 返回只读快照副本，避免重复对 1000 IP 做全量排序与三维聚合。
+	if nonBlocking && !forceRefresh {
+		geoRev, limiterRev, fleetRev := t.currentDepsRevisions()
+		t.mu.RLock()
+		entry, hit := t.snapCache[nodeScope]
+		curDataRev := t.dataRev
+		t.mu.RUnlock()
+		if hit &&
+			entry.dataRev == curDataRev &&
+			entry.geoRev == geoRev &&
+			entry.limiterRev == limiterRev &&
+			entry.fleetRev == fleetRev &&
+			entry.fleetCount == len(fleetNodes) &&
+			time.Since(entry.builtAt) < 5*time.Second {
+			return cloneSniffSummary(entry.summary)
+		}
+	}
+
+	t.snapshotRebuilds.Add(1)
+
+	startGeoRev, startLimiterRev, startFleetRev := t.currentDepsRevisions()
+
+	// 3. 同步本机 Web IPLimiter 中的密码试探与封禁记录（跳过嗅探手动拉黑记录，避免污染原探测攻击向量）
 	t.syncLimiterAttempts()
 
-	// 2. 采集本机系统级防火墙、fail2ban 与外部探测连接 (SSE 热路径由后台协程异步采集，不阻塞请求)
+	// 4. 采集本机系统级防火墙、fail2ban 与外部探测连接 (SSE 热路径由后台协程异步采集，不阻塞请求)
 	if !nonBlocking && (nodeScope == "all" || nodeScope == "local") {
 		t.maybeHarvestSystemSources(ctx, forceRefresh)
 	}
 
-	// 3. 若配置了节点舰队且请求了子节点或全集群数据，按需并发采集子节点嗅探态势
-	fleetNodes, enableProbe := t.loadClusterFleetNodes()
+	// 5. 若配置了节点舰队且请求了子节点或全集群数据，按需并发采集子节点嗅探态势
 	if !nonBlocking && enableProbe && len(fleetNodes) > 0 && nodeScope != "local" {
 		t.maybeHarvestFleetNodes(ctx, fleetNodes, nodeScope, forceRefresh)
 	}
 
-	// 4. 清理过期条目并快照内存记录
+	// 6. 清理过期条目并快照内存记录
 	now := time.Now()
-	nodeSummaries, mergedByIP, blockedCIDRs := t.collectActiveSniffRecords(nodeScope, fleetNodes, now)
+	nodeSummaries, mergedByIP, blockedCIDRs, builtDataRev := t.collectActiveSniffRecords(nodeScope, fleetNodes, now)
 	t.scheduleAsyncSaveIfNeeded()
 
-	// 5. GeoIP 富化与 IP/网段/国家三维聚合
+	// 7. GeoIP 富化与 IP/网段/国家三维聚合
 	enriched, totalBanned := t.resolveAndSortSniffIPs(ctx, mergedByIP, nonBlocking)
 	topIPs := buildSniffIPStats(enriched)
 	subnets := aggregateSniffSubnets(enriched, blockedCIDRs)
 	countries := aggregateSniffCountries(enriched)
 
-	return SniffSummary{
+	summary := SniffSummary{
 		UpdatedAt:      now.Format(time.RFC3339),
 		SelectedNode:   nodeScope,
 		Nodes:          nodeSummaries,
@@ -87,6 +137,26 @@ func (t *SniffTracker) buildSnapshot(ctx context.Context, nodeScope string, forc
 		TopSubnets:     subnets,
 		TopCountries:   countries,
 	}
+
+	t.mu.Lock()
+	if t.snapCache == nil {
+		t.snapCache = make(map[string]sniffSnapshotCacheEntry)
+	}
+	if len(t.snapCache) >= 32 {
+		clear(t.snapCache)
+	}
+	t.snapCache[nodeScope] = sniffSnapshotCacheEntry{
+		dataRev:    builtDataRev,
+		geoRev:     startGeoRev,
+		limiterRev: startLimiterRev,
+		fleetRev:   startFleetRev,
+		fleetCount: len(fleetNodes),
+		builtAt:    time.Now(),
+		summary:    cloneSniffSummary(summary),
+	}
+	t.mu.Unlock()
+
+	return summary
 }
 
 func (t *SniffTracker) syncLimiterAttempts() {
@@ -145,7 +215,7 @@ func appendUniqueNodeRef(nodes []SniffNodeRef, ref SniffNodeRef) []SniffNodeRef 
 	return append(nodes, ref)
 }
 
-func (t *SniffTracker) collectActiveSniffRecords(nodeScope string, fleetNodes []fleet.Node, now time.Time) ([]SniffNodeSummary, map[string]*mergedSniffRecord, map[string]*net.IPNet) {
+func (t *SniffTracker) collectActiveSniffRecords(nodeScope string, fleetNodes []fleet.Node, now time.Time) ([]SniffNodeSummary, map[string]*mergedSniffRecord, map[string]*net.IPNet, uint64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -153,12 +223,12 @@ func (t *SniffTracker) collectActiveSniffRecords(nodeScope string, fleetNodes []
 		for ip, rec := range nodeMap {
 			if now.Sub(rec.lastSeen) > sniffEntryTTL {
 				delete(nodeMap, ip)
-				t.dirty = true
+				t.markDirtyLocked()
 				continue
 			}
 			if exp, trusted := t.trustedClients[ip]; trusted && now.Before(exp) && rec.status != "banned" {
 				delete(nodeMap, ip)
-				t.dirty = true
+				t.markDirtyLocked()
 				continue
 			}
 		}
@@ -311,7 +381,7 @@ func (t *SniffTracker) collectActiveSniffRecords(nodeScope string, fleetNodes []
 			}
 		}
 	}
-	return nodeSummaries, mergedByIP, blockedCIDRs
+	return nodeSummaries, mergedByIP, blockedCIDRs, t.dataRev
 }
 
 func (t *SniffTracker) resolveAndSortSniffIPs(ctx context.Context, mergedByIP map[string]*mergedSniffRecord, nonBlocking bool) ([]enrichedSniffItem, int) {

@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"encoding/json"
@@ -121,6 +122,12 @@ type Collector struct {
 	ipv6NeighCmdFunc   func() ([]byte, error)
 	cachedState        *persistedAuditState
 	cachedStateFp      string
+	stateDirty         bool
+	lastSavedUnix      int64
+	cachedEngine       *NonlinearEngine
+	cachedEngineFp     string
+	cachedSelfIPs      map[string]bool
+	selfIPsFetchedAt   time.Time
 	cachedLeaseFp      string
 	cachedLeaseDevs    map[string]lanDeviceInfo
 	ipv6NeighCache     map[string]string
@@ -137,9 +144,11 @@ func NewCollector(cfg *config.Config) *Collector {
 		httpClient: &http.Client{
 			Timeout: 2500 * time.Millisecond,
 			Transport: &http.Transport{
+				Proxy:               nil,
 				MaxIdleConns:        8,
 				MaxIdleConnsPerHost: 4,
-				IdleConnTimeout:     60 * time.Second,
+				IdleConnTimeout:     90 * time.Second,
+				DisableCompression:  true,
 			},
 		},
 		leaseFiles:      []string{"/tmp/dhcp.leases", "/var/lib/misc/dnsmasq.leases", "/tmp/dnsmasq.leases"},
@@ -259,25 +268,97 @@ func (c *Collector) sampleActiveLocked(ctx context.Context, now time.Time) (
 ) {
 	state = c.loadStateLocked(now.Unix())
 	devDirectory = c.resolveLANDevicesLocked()
-	selfIPs = collectLocalInterfaceIPs()
-	engine = NewNonlinearEngine(c.cfg)
+	selfIPs = c.resolveSelfIPsLocked()
+	engine = c.resolveEngineLocked()
 	activeByKey = make(map[string][]string)
 
 	connsResp, addr, err := c.fetchConnectionsLocked(ctx)
 	if err == nil && connsResp != nil {
 		reachable = true
 		usedAddr = addr
-		c.ingestConnectionsLocked(state, connsResp.Connections, devDirectory, selfIPs, activeByKey, engine, now)
+		ingestedMutated := c.ingestConnectionsLocked(state, connsResp.Connections, devDirectory, selfIPs, activeByKey, engine, now)
+		beforeBlockTrim := len(state.Flows)
 		maps.DeleteFunc(state.Flows, func(_ string, e *persistedFlowEntry) bool {
 			return e == nil || engine.IsBlocked(normalizeSourceDeviceIP(e.DeviceIP, selfIPs, devDirectory), e.Target)
 		})
-		c.saveStateLocked(state, activeByKey, now)
+		blockTrimmed := len(state.Flows) != beforeBlockTrim
+
+		// 脏写节流优化：15s 后台采样若无新连接、流量增量为 0、且未触发规则/TTL 清理时，
+		// 跳过 `/tmp` JSON 全量编码与原子 rename，仅每小时兜底刷盘保活时间戳，显著降低软路由 CPU 与 GC 分配。
+		if ingestedMutated || blockTrimmed {
+			c.stateDirty = true
+		}
+		stateMissingOnDisk := c.statePath != "" && (c.cachedStateFp == "" || strings.HasSuffix(c.cachedStateFp, "|missing"))
+		idleHeartbeatDue := c.lastSavedUnix > 0 && now.Unix()-c.lastSavedUnix >= 3600 && len(state.Flows) > 0
+		if c.stateDirty || (stateMissingOnDisk && len(state.Flows) > 0) || idleHeartbeatDue {
+			c.saveStateLocked(state, activeByKey, now)
+		}
 	} else {
+		beforeBlockTrim := len(state.Flows)
 		maps.DeleteFunc(state.Flows, func(_ string, e *persistedFlowEntry) bool {
 			return e == nil || engine.IsBlocked(normalizeSourceDeviceIP(e.DeviceIP, selfIPs, devDirectory), e.Target)
 		})
+		if len(state.Flows) != beforeBlockTrim {
+			c.stateDirty = true
+			if c.statePath != "" {
+				c.saveStateLocked(state, activeByKey, now)
+			}
+		}
 	}
 	return state, activeByKey, devDirectory, selfIPs, engine, usedAddr, reachable
+}
+
+func engineConfigFingerprint(cfg *config.Config) string {
+	if cfg == nil {
+		return "nil"
+	}
+	var b strings.Builder
+	if cfg.Audit.IsPCDNBlockEnabled() {
+		b.WriteByte('1')
+	} else {
+		b.WriteByte('0')
+	}
+	b.WriteByte('|')
+	b.WriteString(cfg.Server.GetNodeDomain())
+	b.WriteByte('|')
+	b.WriteString(cfg.Server.GetSubstoreDomain())
+	b.WriteByte('|')
+	b.WriteString(strings.TrimSpace(cfg.Server.ServerIP))
+	for _, sub := range cfg.Subs {
+		b.WriteString("|s:")
+		b.WriteString(sub.URL)
+	}
+	for _, w := range cfg.Audit.Whitelist {
+		b.WriteString("|w:")
+		b.WriteString(w)
+	}
+	for _, r := range cfg.CustomRules.Block {
+		b.WriteString("|b:")
+		b.WriteString(r.SourceIP)
+		b.WriteByte('@')
+		b.WriteString(r.Target)
+	}
+	return b.String()
+}
+
+func (c *Collector) resolveEngineLocked() *NonlinearEngine {
+	fp := engineConfigFingerprint(c.cfg)
+	if c.cachedEngine != nil && c.cachedEngineFp == fp {
+		return c.cachedEngine
+	}
+	c.cachedEngine = NewNonlinearEngine(c.cfg)
+	c.cachedEngineFp = fp
+	return c.cachedEngine
+}
+
+func (c *Collector) resolveSelfIPsLocked() map[string]bool {
+	now := time.Now()
+	if c.cachedSelfIPs != nil && now.Sub(c.selfIPsFetchedAt) < 30*time.Second {
+		return c.cachedSelfIPs
+	}
+	c.cachedSelfIPs = collectLocalInterfaceIPs()
+	c.selfIPsFetchedAt = now
+	return c.cachedSelfIPs
 }
 
 func (c *Collector) collectLocked(ctx context.Context, opts CollectOptions) *Report {
@@ -564,10 +645,11 @@ func (c *Collector) ingestConnectionsLocked(
 	activeByKey map[string][]string,
 	engine *NonlinearEngine,
 	now time.Time,
-) {
+) bool {
 	nowUnix := now.Unix()
 	hour := now.Hour()
 	isNight := hour >= 1 && hour <= 5
+	mutated := false
 
 	for _, conn := range conns {
 		rawSrc := cmp.Or(strings.TrimSpace(conn.Metadata.SourceIP), "127.0.0.1")
@@ -627,6 +709,11 @@ func (c *Collector) ingestConnectionsLocked(
 				FirstSeenUnix: nowUnix,
 			}
 			state.Flows[key] = entry
+			mutated = true
+		}
+
+		if isNewConn || deltaUp > 0 || deltaDown > 0 {
+			mutated = true
 		}
 
 		entry.LastSeenUnix = nowUnix
@@ -634,15 +721,21 @@ func (c *Collector) ingestConnectionsLocked(
 		entry.DownloadBytes += deltaDown
 		if entry.RawHost == "" && rawHost != "" {
 			entry.RawHost = rawHost
+			mutated = true
 		}
-		if destPort > 0 {
+		if destPort > 0 && entry.DestPort != destPort {
 			entry.DestPort = destPort
+			mutated = true
 		}
-		if destIP != "" {
+		if destIP != "" && entry.DestIP != destIP {
 			entry.DestIP = destIP
+			mutated = true
 		}
 		if len(conn.Chains) > 0 {
-			entry.Outbound = conn.Chains[0]
+			if entry.Outbound != conn.Chains[0] {
+				entry.Outbound = conn.Chains[0]
+				mutated = true
+			}
 			chains := make([]string, 0, len(conn.Chains))
 			for i := len(conn.Chains) - 1; i >= 0; i-- {
 				hop := strings.TrimSpace(conn.Chains[i])
@@ -650,20 +743,27 @@ func (c *Collector) ingestConnectionsLocked(
 					chains = append(chains, hop)
 				}
 			}
-			if len(chains) > 0 {
+			if len(chains) > 0 && !slices.Equal(entry.Chains, chains) {
 				entry.Chains = chains
+				mutated = true
 			}
 		}
 		if conn.Rule != "" {
+			newRule := conn.Rule
 			if conn.RulePayload != "" {
-				entry.Rule = conn.Rule + "(" + conn.RulePayload + ")"
-			} else {
-				entry.Rule = conn.Rule
+				newRule = conn.Rule + "(" + conn.RulePayload + ")"
+			}
+			if entry.Rule != newRule {
+				entry.Rule = newRule
+				mutated = true
 			}
 		}
 		if devInfo, ok := devDir[srcIP]; ok {
-			entry.DeviceName = devInfo.Name
-			entry.DeviceMAC = devInfo.MAC
+			if entry.DeviceName != devInfo.Name || entry.DeviceMAC != devInfo.MAC {
+				entry.DeviceName = devInfo.Name
+				entry.DeviceMAC = devInfo.MAC
+				mutated = true
+			}
 		}
 
 		if isNewConn {
@@ -681,6 +781,7 @@ func (c *Collector) ingestConnectionsLocked(
 			}
 		}
 	}
+	return mutated
 }
 
 // computeIntervalCV 计算建连时间序列的间隔变异系数 CV = sigma / mu。
@@ -881,23 +982,25 @@ func (c *Collector) resolveLANDevicesLocked() map[string]lanDeviceInfo {
 	}
 
 	// 按小写 MAC 回填主机名（优先使用 IPv4 记录的友好名称，使 IPv6 临时隐私地址直接识别为对应设备名）
-	macNames := make(map[string]string)
-	for ip, info := range base {
-		mac := strings.ToLower(strings.TrimSpace(info.MAC))
-		if mac == "" || info.Name == "" || info.Name == ip {
-			continue
+	if len(base) > 0 {
+		macNames := make(map[string]string, len(base))
+		for ip, info := range base {
+			mac := strings.ToLower(strings.TrimSpace(info.MAC))
+			if mac == "" || info.Name == "" || info.Name == ip {
+				continue
+			}
+			isV4 := net.ParseIP(ip) != nil && net.ParseIP(ip).To4() != nil
+			if existing, exists := macNames[mac]; !exists || (isV4 && existing != info.Name) {
+				macNames[mac] = info.Name
+			}
 		}
-		isV4 := net.ParseIP(ip) != nil && net.ParseIP(ip).To4() != nil
-		if existing, exists := macNames[mac]; !exists || (isV4 && existing != info.Name) {
-			macNames[mac] = info.Name
-		}
-	}
-	for ip, info := range base {
-		mac := strings.ToLower(strings.TrimSpace(info.MAC))
-		if mac != "" && info.Name == "" {
-			if name := macNames[mac]; name != "" {
-				info.Name = name
-				base[ip] = info
+		for ip, info := range base {
+			mac := strings.ToLower(strings.TrimSpace(info.MAC))
+			if mac != "" && info.Name == "" {
+				if name := macNames[mac]; name != "" {
+					info.Name = name
+					base[ip] = info
+				}
 			}
 		}
 	}
@@ -910,9 +1013,13 @@ func (c *Collector) loadStateLocked(nowUnix int64) *persistedAuditState {
 		fp := auditFileFingerprint(c.statePath)
 		if c.cachedState != nil && c.cachedStateFp == fp {
 			if nowUnix > 0 {
+				before := len(c.cachedState.Flows)
 				maps.DeleteFunc(c.cachedState.Flows, func(_ string, e *persistedFlowEntry) bool {
 					return e == nil || (e.LastSeenUnix > 0 && nowUnix-e.LastSeenUnix > flowIdleTTLSeconds)
 				})
+				if len(c.cachedState.Flows) != before {
+					c.stateDirty = true
+				}
 			}
 			return c.cachedState
 		}
@@ -990,6 +1097,12 @@ func (c *Collector) loadStateLocked(nowUnix int64) *persistedAuditState {
 	return st
 }
 
+var auditStateBufPool = sync.Pool{
+	New: func() any {
+		return bytes.NewBuffer(make([]byte, 0, 16<<10))
+	},
+}
+
 func (c *Collector) saveStateLocked(st *persistedAuditState, activeByKey map[string][]string, now time.Time) {
 	if c.statePath == "" || st == nil {
 		return
@@ -1039,25 +1152,36 @@ func (c *Collector) saveStateLocked(st *persistedAuditState, activeByKey map[str
 		st.Flows = trimmed
 	}
 
-	data, err := json.Marshal(st)
+	buf := auditStateBufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	enc := json.NewEncoder(buf)
+	enc.SetEscapeHTML(false)
+	err := enc.Encode(st)
+	if err == nil {
+		if tmpFile, crErr := os.CreateTemp(filepath.Dir(c.statePath), ".singctl-audit-state-*.tmp"); crErr == nil {
+			tmpPath := tmpFile.Name()
+			_, writeErr := tmpFile.Write(buf.Bytes())
+			chmodErr := tmpFile.Chmod(0600)
+			closeErr := tmpFile.Close()
+			if writeErr == nil && chmodErr == nil && closeErr == nil {
+				if os.Rename(tmpPath, c.statePath) != nil {
+					_ = os.Remove(tmpPath)
+				}
+			} else {
+				_ = os.Remove(tmpPath)
+			}
+		}
+	}
+	if buf.Cap() <= 2<<20 {
+		auditStateBufPool.Put(buf)
+	}
 	if err != nil {
 		return
 	}
-	if tmpFile, err := os.CreateTemp(filepath.Dir(c.statePath), ".singctl-audit-state-*.tmp"); err == nil {
-		tmpPath := tmpFile.Name()
-		_, writeErr := tmpFile.Write(data)
-		chmodErr := tmpFile.Chmod(0600)
-		closeErr := tmpFile.Close()
-		if writeErr == nil && chmodErr == nil && closeErr == nil {
-			if os.Rename(tmpPath, c.statePath) != nil {
-				_ = os.Remove(tmpPath)
-			}
-		} else {
-			_ = os.Remove(tmpPath)
-		}
-	}
 	c.cachedState = st
 	c.cachedStateFp = auditFileFingerprint(c.statePath)
+	c.stateDirty = false
+	c.lastSavedUnix = nowUnix
 }
 
 // collectLocalInterfaceIPs 枚举当前软路由/主机所有网卡绑定的本机 IP（含 pppoe-wan 公网 IP、br-lan 网关 IP 等）。

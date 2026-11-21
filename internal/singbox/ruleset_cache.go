@@ -174,22 +174,16 @@ func LocalizeRuleSets(jsonStr string, opts LocalizeOptions) (string, RuleSetStat
 			if cachedFileValid(path, format) {
 				continue
 			}
-			// 磁盘文件缺失或损坏：1) 优先从内置离线快照毫秒级恢复
+			// 磁盘文件缺失或损坏：1) 优先从内置离线快照毫秒级流式恢复
 			meta := manifest[tag]
-			if snapTag, _, snapFormat, ok := snap.Lookup(tag, meta.URL); ok && snapFormat == format {
-				if data, err := snap.Extract(snapTag); err == nil &&
-					validateRuleSet(data, snapFormat) == nil {
-					_ = os.MkdirAll(filepath.Dir(path), 0755)
-					if atomicWriteFile(path, data, 0644) == nil {
-						stats.Snapshot++
-						repairedLocalOnDisk = true
-						entry["path"] = path
-						if !opts.Silent {
-							log.Info("📦 检测到本地规则集文件缺失 (%s)，已从内置离线快照自动恢复: %s", tag, path)
-						}
-						continue
-					}
+			if tryRestoreRuleSetFromSnapshot(snap, tag, meta.URL, format, path) {
+				stats.Snapshot++
+				repairedLocalOnDisk = true
+				entry["path"] = path
+				if !opts.Silent {
+					log.Info("📦 检测到本地规则集文件缺失 (%s)，已从内置离线快照自动恢复: %s", tag, path)
 				}
+				continue
 			}
 			// 2) 若不在内置快照中，根据 manifest 记录的原始 URL 自动加入重新下载队列
 			dlURL := meta.URL
@@ -258,14 +252,10 @@ func LocalizeRuleSets(jsonStr string, opts LocalizeOptions) (string, RuleSetStat
 				localizeEntry(t.entry, path)
 				continue
 			}
-			if snapTag, _, snapFormat, ok := snap.Lookup(t.tag, t.url); ok && snapFormat == t.format {
-				if data, err := snap.Extract(snapTag); err == nil &&
-					validateRuleSet(data, snapFormat) == nil &&
-					atomicWriteFile(path, data, 0644) == nil {
-					stats.Snapshot++
-					localizeEntry(t.entry, path)
-					continue
-				}
+			if tryRestoreRuleSetFromSnapshot(snap, t.tag, t.url, t.format, path) {
+				stats.Snapshot++
+				localizeEntry(t.entry, path)
+				continue
 			}
 			netTasks = append(netTasks, t)
 		}
@@ -327,18 +317,14 @@ func LocalizeRuleSets(jsonStr string, opts LocalizeOptions) (string, RuleSetStat
 			}
 			continue
 		}
-		// 无本地缓存 → 程序内置快照兑底（格式必须一致，避免错配）
-		if snapTag, _, snapFormat, ok := snap.Lookup(t.tag, t.url); ok && snapFormat == t.format {
-			if data, err := snap.Extract(snapTag); err == nil &&
-				validateRuleSet(data, snapFormat) == nil &&
-				atomicWriteFile(path, data, 0644) == nil {
-				stats.Snapshot++
-				localizeEntry(t.entry, path)
-				if !opts.Silent && !results[t.idx].aborted {
-					log.Warn("📦 规则集 %q 下载失败且无缓存，已使用程序内置快照兑底: %s", t.tag, path)
-				}
-				continue
+		// 无本地缓存 → 程序内置快照兑底（流式解压校验直写，避免整块堆内存分配）
+		if tryRestoreRuleSetFromSnapshot(snap, t.tag, t.url, t.format, path) {
+			stats.Snapshot++
+			localizeEntry(t.entry, path)
+			if !opts.Silent && !results[t.idx].aborted {
+				log.Warn("📦 规则集 %q 下载失败且无缓存，已使用程序内置快照兑底: %s", t.tag, path)
 			}
+			continue
 		}
 		stats.Kept++
 		if t.wasMissingLocal {
@@ -1156,6 +1142,24 @@ func sanitizeTag(tag string) string {
 }
 
 // cachedFileValid 本地缓存文件是否存在且内容合法。
+func tryRestoreRuleSetFromSnapshot(snap *rssnapshot.Snapshot, tag, url, format, destPath string) bool {
+	if snap == nil {
+		return false
+	}
+	snapTag, _, snapFormat, ok := snap.Lookup(tag, url)
+	if !ok || snapFormat != format {
+		return false
+	}
+	if err := snap.ExtractToFile(snapTag, destPath, 0644); err != nil {
+		return false
+	}
+	if !cachedFileValid(destPath, snapFormat) {
+		_ = os.Remove(destPath)
+		return false
+	}
+	return true
+}
+
 func cachedFileValid(path, format string) bool {
 	fi, err := os.Stat(path)
 	if err != nil || fi.Size() == 0 {

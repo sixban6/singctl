@@ -28,6 +28,13 @@ const (
 	builtinAutoExcludeRegex = `网站|地址|剩余|过期|时间|有效|官网|流量|到期|[2-9]倍|[0-9]{2,}倍|倍率|[2-9][xX]|[xX][2-9]`
 )
 
+// 包级预编译固定正则，避免每次构建策略组骨架重复编译 NFA 状态机。
+var (
+	builtinVPSRe    = regexp.MustCompile(`(?i)sec_`)
+	builtinAutoExRe = regexp.MustCompile(`(?i)(` + builtinAutoExcludeRegex + `)`)
+	builtinNodesEx  = regexp.MustCompile(`(?i)(` + builtinExcludeKeywords + `)`)
+)
+
 // LeafOutboundInfo 描述一个底层真实代理出站节点的元信息（不含任何 IP/密钥凭据）。
 type LeafOutboundInfo struct {
 	Tag  string   `json:"tag"`
@@ -177,19 +184,15 @@ func nodeBelongsToSubs(tag string, subOrigins map[string][]string) []string {
 
 // buildStandardBuiltinSkeleton 根据底层真实节点列表重建标准 SingCtl 内置 5 组骨架。
 func buildStandardBuiltinSkeleton(leafTags []string) []map[string]any {
-	vpsRe := regexp.MustCompile(`(?i)sec_`)
-	autoExRe := regexp.MustCompile(`(?i)(` + builtinAutoExcludeRegex + `)`)
-	nodesExRe := regexp.MustCompile(`(?i)(` + builtinExcludeKeywords + `)`)
-
 	var vpsMembers, autoMembers, nodeMembers []string
 	for _, tag := range leafTags {
-		if vpsRe.MatchString(tag) {
+		if builtinVPSRe.MatchString(tag) {
 			vpsMembers = append(vpsMembers, tag)
 		}
-		if !autoExRe.MatchString(tag) {
+		if !builtinAutoExRe.MatchString(tag) {
 			autoMembers = append(autoMembers, tag)
 		}
-		if !nodesExRe.MatchString(tag) {
+		if !builtinNodesEx.MatchString(tag) {
 			nodeMembers = append(nodeMembers, tag)
 		}
 	}

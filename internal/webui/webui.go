@@ -29,6 +29,7 @@ import (
 	"singctl/internal/logger"
 	"singctl/internal/netdiag"
 	"singctl/internal/tailscale"
+	"singctl/internal/util/httpgzip"
 	"singctl/internal/util/netinfo"
 )
 
@@ -362,7 +363,11 @@ func (s *Server) guard(next http.HandlerFunc) http.HandlerFunc {
 				return
 			}
 		}
-		next(w, r)
+		if strings.HasSuffix(r.URL.Path, "/stream") || r.Header.Get("Upgrade") != "" || strings.Contains(strings.ToLower(r.Header.Get("Accept")), "text/event-stream") {
+			next(w, r)
+			return
+		}
+		httpgzip.Serve(w, r, next)
 	}
 }
 

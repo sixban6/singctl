@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -47,7 +48,16 @@ type IPLimiter struct {
 	stopCleaner chan struct{}
 	filePath    string
 	writeSeq    uint64
+	rev         atomic.Uint64
 	writer      *asyncSnapshotWriter
+}
+
+// Revision 返回登录限流/封禁状态的单调递增版本号（供嗅探快照缓存 O(1) 判定是否需要重新同步）。
+func (l *IPLimiter) Revision() uint64 {
+	if l == nil {
+		return 0
+	}
+	return l.rev.Load()
 }
 
 // NewIPLimiter 创建 IPLimiter 实例 (默认 3 次失败、10 分钟窗口、15 分钟封禁，支持传入 0600 小文件持久化路径)
@@ -113,9 +123,13 @@ func (l *IPLimiter) loadLocked() {
 			l.attempts[ip] = att
 		}
 	}
+	if len(l.attempts) > 0 {
+		l.rev.Add(1)
+	}
 }
 
 func (l *IPLimiter) snapshotLocked() ([]byte, uint64) {
+	l.rev.Add(1)
 	if l.filePath == "" {
 		return nil, 0
 	}

@@ -354,8 +354,7 @@ func (s *Server) fetchClashConnectionsForDoH(ctx context.Context) ([]BrowserDoHC
 	if err != nil {
 		return nil, err
 	}
-	client := &http.Client{Timeout: 1200 * time.Millisecond}
-	code, raw, err := doClashRequest(cCtx, client, http.MethodGet, base+"/connections", secret, nil)
+	code, raw, err := doClashRequest(cCtx, sharedClashHTTPClient, http.MethodGet, base+"/connections", secret, nil)
 	if err != nil {
 		return nil, err
 	}

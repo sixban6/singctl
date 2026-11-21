@@ -17,6 +17,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -142,12 +143,35 @@ type probeMemOverlay struct {
 	LastPersisted time.Time
 }
 
+type fleetFileStatKey struct {
+	path    string
+	exists  bool
+	size    int64
+	modNano int64
+}
+
 // Store persists fleet node metadata (fleet.yaml) and SSH key files with 0600 permissions.
 type Store struct {
-	FilePath string
-	KeysDir  string
-	mu       sync.RWMutex
-	probeMem map[string]probeMemOverlay
+	FilePath       string
+	KeysDir        string
+	mu             sync.RWMutex
+	probeMem       map[string]probeMemOverlay
+	rev            atomic.Uint64
+	diskParseCount atomic.Int64
+
+	// 文件 stat 指纹缓存：SSE 遥测/UI 高频调用 List() 时，若 fleet.yaml 未改动则跳过磁盘读取与 YAML 反序列化，
+	// 仅在内存中按需克隆并叠加最新的 probeMem 延迟状态。
+	cachedKey      fleetFileStatKey
+	cachedRawNodes []Node
+	cachedRawValid bool
+}
+
+// Revision 返回舰队配置或在线状态变化单调递增版本号（供上游快照缓存 O(1) 判定是否失效）。
+func (s *Store) Revision() uint64 {
+	if s == nil {
+		return 0
+	}
+	return s.rev.Load()
 }
 
 // ResolveFleetFilePath resolves fleet.yaml alongside singctl.yaml.
@@ -272,28 +296,74 @@ func (s *Store) applyProbeMemOverlayLocked(nodes []Node) []Node {
 	return nodes
 }
 
-func (s *Store) readLocked() ([]Node, error) {
+func statFleetFileKey(path string) fleetFileStatKey {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fleetFileStatKey{path: path, exists: false}
+	}
+	return fleetFileStatKey{
+		path:    path,
+		exists:  true,
+		size:    info.Size(),
+		modNano: info.ModTime().UnixNano(),
+	}
+}
+
+func cloneNodesDeep(nodes []Node) []Node {
+	out := slices.Clone(nodes)
+	for i := range out {
+		if len(out[i].Protocols) > 0 {
+			out[i].Protocols = slices.Clone(out[i].Protocols)
+		}
+	}
+	return out
+}
+
+func (s *Store) activeStatKey() fleetFileStatKey {
+	key := statFleetFileKey(s.FilePath)
+	if key.exists {
+		return key
+	}
+	if legacy := s.legacyJSONPath(); legacy != "" {
+		if lKey := statFleetFileKey(legacy); lKey.exists {
+			return lKey
+		}
+	}
+	return key
+}
+
+func (s *Store) parseRawFromDiskLocked() ([]Node, error) {
 	raw, err := os.ReadFile(s.FilePath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			if legacy := s.legacyJSONPath(); legacy != "" {
 				if legacyRaw, lErr := os.ReadFile(legacy); lErr == nil {
-					nodes, pErr := parseFleetBytes(legacyRaw, legacy)
-					if pErr != nil {
-						return nil, pErr
-					}
-					return s.applyProbeMemOverlayLocked(nodes), nil
+					s.diskParseCount.Add(1)
+					return parseFleetBytes(legacyRaw, legacy)
 				}
 			}
 			return []Node{}, nil
 		}
 		return nil, err
 	}
-	nodes, err := parseFleetBytes(raw, s.FilePath)
+	s.diskParseCount.Add(1)
+	return parseFleetBytes(raw, s.FilePath)
+}
+
+func (s *Store) readLocked() ([]Node, error) {
+	activeKey := s.activeStatKey()
+	if s.cachedRawValid && s.cachedKey == activeKey {
+		return s.applyProbeMemOverlayLocked(cloneNodesDeep(s.cachedRawNodes)), nil
+	}
+	rawNodes, err := s.parseRawFromDiskLocked()
 	if err != nil {
 		return nil, err
 	}
-	return s.applyProbeMemOverlayLocked(nodes), nil
+	s.cachedKey = activeKey
+	s.cachedRawNodes = cloneNodesDeep(rawNodes)
+	s.cachedRawValid = true
+	s.rev.Add(1)
+	return s.applyProbeMemOverlayLocked(cloneNodesDeep(rawNodes)), nil
 }
 
 func (s *Store) writeLocked(nodes []Node) error {
@@ -334,18 +404,31 @@ func (s *Store) writeLocked(nodes []Node) error {
 		_ = os.Remove(tmp)
 		return err
 	}
-	return os.Chmod(s.FilePath, 0600)
+	if err := os.Chmod(s.FilePath, 0600); err != nil {
+		return err
+	}
+	s.cachedKey = statFleetFileKey(s.FilePath)
+	s.cachedRawNodes = cloneNodesDeep(nodes)
+	s.cachedRawValid = true
+	s.rev.Add(1)
+	return nil
 }
 
 // List returns all fleet nodes (raw internal representation; call PublicView for HTTP responses).
 func (s *Store) List() ([]Node, error) {
+	activeKey := s.activeStatKey()
+
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-	nodes, err := s.readLocked()
-	if err != nil {
-		return nil, err
+	if s.cachedRawValid && s.cachedKey == activeKey {
+		nodes := s.applyProbeMemOverlayLocked(cloneNodesDeep(s.cachedRawNodes))
+		s.mu.RUnlock()
+		return nodes, nil
 	}
-	return slices.Clone(nodes), nil
+	s.mu.RUnlock()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.readLocked()
 }
 
 // ListPublic returns sanitized fleet nodes safe for UI/API serialization.
@@ -363,9 +446,7 @@ func (s *Store) ListPublic() ([]Node, error) {
 
 // Get returns a single fleet node by ID.
 func (s *Store) Get(id string) (Node, bool, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	nodes, err := s.readLocked()
+	nodes, err := s.List()
 	if err != nil {
 		return Node{}, false, err
 	}
@@ -381,7 +462,7 @@ func (s *Store) Get(id string) (Node, bool, error) {
 func NormalizeUpsertInput(in UpsertInput) (Node, error) {
 	id := strings.ToLower(strings.TrimSpace(in.ID))
 	if id == "" && strings.TrimSpace(in.Name) != "" {
-		slug := regexp.MustCompile(`[^a-z0-9_-]+`).ReplaceAllString(strings.ToLower(strings.TrimSpace(in.Name)), "-")
+		slug := cleanIDCharsRe.ReplaceAllString(strings.ToLower(strings.TrimSpace(in.Name)), "-")
 		id = strings.Trim(slug, "-")
 	}
 	if !validNodeIDRe.MatchString(id) {
@@ -581,6 +662,7 @@ func (s *Store) UpdateProbeRuntimeState(id string, mutator func(*Node), minPersi
 	ov.LastProbeAt = after.LastProbeAt
 	ov.LatencyMs = after.LatencyMs
 	s.probeMem[id] = ov
+	s.rev.Add(1)
 	return after, nil
 }
 

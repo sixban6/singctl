@@ -34,6 +34,7 @@ import {
   ClientInvalidateScope,
   emitClientInvalidate,
   peekCachedQuery,
+  useVisibilityInterval,
   writeCachedQuery,
 } from '../../hooks';
 import { clientApi } from '../api';
@@ -572,15 +573,12 @@ export const AuditPage: React.FC<AuditPageProps> = ({ active = true }) => {
     return () => window.removeEventListener(CLIENT_INVALIDATE_EVENT, onInvalidate);
   }, [loadAudit]);
 
-  useEffect(() => {
-    if (!active || !autoRefresh) return;
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === 'visible') {
-        void loadAudit(true);
-      }
-    }, 5000);
-    return () => window.clearInterval(timer);
-  }, [active, autoRefresh, loadAudit]);
+  useVisibilityInterval(
+    () => {
+      void loadAudit(true);
+    },
+    active && autoRefresh ? 5000 : null,
+  );
 
   const fetchAIModels = useCallback(
     async (baseUrl: string, apiKey: string, silent = false) => {
