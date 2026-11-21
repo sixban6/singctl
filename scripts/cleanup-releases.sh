@@ -15,8 +15,8 @@ fi
 
 echo "==> [1/3] Cleaning up GitHub Releases (keeping latest ${KEEP_RELEASES})..."
 
-# Fetch all release tags sorted by version descending (v1.14.97, v1.14.96, ...)
-ALL_RELEASE_TAGS=$(gh release list --limit 500 --json tagName -q '.[].tagName' | sort -V -r)
+# 仅筛选 singctl 语义化版本 Release (vX.Y.Z)，永久保留 tailscale-latest 等独立固定通道 Release
+ALL_RELEASE_TAGS=$(gh release list --limit 500 --json tagName -q '.[] | select(.tagName | test("^v[0-9]+\\.")) | .tagName' | sort -V -r)
 
 KEPT_TAGS=()
 DELETE_RELEASE_TAGS=()

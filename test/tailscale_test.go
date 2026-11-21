@@ -132,15 +132,15 @@ func TestTailscaleStartExample(t *testing.T) {
 	}
 }
 
-// TestTailscaleVersionFromAsset 验证当 Release Tag 固定为 "latest" 时，
+// TestTailscaleVersionFromAsset 验证当 Release Tag 固定为 "tailscale-latest" 时，
 // 能否从 Asset name (例如 tailscale_1.94.2_amd64.tgz) 里正确解析版本号。
 func TestTailscaleVersionFromAsset(t *testing.T) {
 	// 启动一个模拟 GitHub API 的 Web Server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// 返回 auto_fetch_tailscale 的特有结构：Tag 为 latest，但 Asset 里有真实版本
+		// 模拟本仓库统一发布的固定通道 Release 结构：Tag 固定为 tailscale-latest，真实版本保存在资产文件名中
 		releases := []github.Release{
 			{
-				TagName: "latest",
+				TagName: "tailscale-latest",
 				Assets: []github.Asset{
 					{
 						Name:               "tailscale_1.94.2_amd64.tgz",

@@ -441,7 +441,7 @@ func main() {
 	cert := makeSelfSignedTLS(*caPath)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/repos/sixban6/auto_fetch_tailscale/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/repos/sixban6/singctl/releases/tags/tailscale-latest", func(w http.ResponseWriter, r *http.Request) {
 		isBad := false
 		if _, err := os.Stat("/tmp/mock-mode-bad"); err == nil {
 			isBad = true
@@ -453,7 +453,7 @@ func main() {
 		name := fmt.Sprintf("tailscale_%s_%s.tgz", ver, *arch)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"tag_name": "latest",
+			"tag_name": "tailscale-latest",
 			"assets": []map[string]any{{
 				"name":                 name,
 				"browser_download_url": "https://api.github.com/assets/" + name,

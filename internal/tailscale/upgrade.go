@@ -32,7 +32,12 @@ const (
 	// detached POSIX swapper so WebUI / runner can detect the zero-lockout handoff cleanly.
 	TailscaleSwapHandoffMarker = "SINGCTL_TS_SWAP_HANDOFF"
 
-	autoFetchRepo = "sixban6/auto_fetch_tailscale"
+	// tailscaleReleaseRepo 与 tailscaleReleaseTag 为本仓库统一托管的 Tailscale 精简合体包发布通道。
+	// 使用独立 prerelease tag（tailscale-latest）避免干扰 singctl 自身的 /releases/latest 自更新接口。
+	tailscaleReleaseRepo = "sixban6/singctl"
+	tailscaleReleaseTag  = "tailscale-latest"
+	// legacyAutoFetchRepo 为历史独立编译仓库，仅当主通道首次构建尚未就绪（HTTP 404）时平滑兜底。
+	legacyAutoFetchRepo = "sixban6/auto_fetch_tailscale"
 
 	defaultUpgradeStateFile = "/tmp/singctl-ts-upgrade.state"
 	defaultUpgradeLogFile   = "/tmp/singctl-ts-upgrade.log"
@@ -374,7 +379,7 @@ func (t *Tailscale) PreflightUpgrade(ctx context.Context, opts UpgradeOptions) (
 
 	metaCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	info, err := client.FetchLatest(metaCtx, autoFetchRepo)
+	info, sourceRepo, unifiedChannel, err := fetchTailscaleReleaseInfo(metaCtx, client)
 	if err != nil {
 		pre.BlockedReasons = append(pre.BlockedReasons, fmt.Sprintf("无法直连 GitHub API 获取发布元数据: %v", err))
 		return pre, nil
@@ -396,13 +401,17 @@ func (t *Tailscale) PreflightUpgrade(ctx context.Context, opts UpgradeOptions) (
 
 	// Fallback to checksums.txt if GitHub Release API asset digest is empty.
 	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(matched.Digest)), "sha256:") {
-		if sums, err := client.FetchChecksums(metaCtx, autoFetchRepo, info.TagName, nil, info); err == nil {
+		if sums, err := client.FetchChecksums(metaCtx, sourceRepo, info.TagName, nil, info); err == nil {
 			if sum, ok := sums[matched.Name]; ok && sum != "" {
 				matched.Digest = "sha256:" + sum
 			}
 		}
 	}
 
+	// 本仓库统一通道下 AMD64 与 ARM64 均采用精简合体构建（<24 MiB 且 tailscale -> tailscaled）；
+	// 若走历史旧仓兜底，则按架构与包体积区分精简合体版与标准双二进制包。
+	isMinimal := unifiedChannel || arch == "arm64" || (matched.Size > 0 && matched.Size < 24<<20)
+	pre.CombinedMinimal = isMinimal
 	pre.selectedAsset = matched
 	pre.AssetName = matched.Name
 	pre.AssetSizeBytes = matched.Size
@@ -414,7 +423,7 @@ func (t *Tailscale) PreflightUpgrade(ctx context.Context, opts UpgradeOptions) (
 		pre.LatestVersion = strings.TrimPrefix(strings.TrimSpace(info.TagName), "v")
 	}
 
-	est := estimateUnpackedInstallBytes(matched.Size, arch)
+	est := estimateUnpackedInstallBytes(matched.Size, isMinimal)
 	pre.EstimatedInstallBytes = est
 	pre.RequiredFreeBytes = est + upgradeFlashSafetyMarginBytes
 
@@ -440,8 +449,25 @@ func (t *Tailscale) PreflightUpgrade(ctx context.Context, opts UpgradeOptions) (
 	return pre, nil
 }
 
-func estimateUnpackedInstallBytes(archiveSize int64, arch string) int64 {
-	if arch == "arm64" {
+// fetchTailscaleReleaseInfo 优先从本仓库 tailscale-latest 独立通道直连拉取发布元数据；
+// 仅当主通道首次构建尚未创建（HTTP 404）时平滑兜底旧仓库，其它网络/限流错误直接返回。
+func fetchTailscaleReleaseInfo(ctx context.Context, client *releasepkg.Client) (info *releasepkg.Info, sourceRepo string, unifiedChannel bool, err error) {
+	info, err = client.FetchTag(ctx, tailscaleReleaseRepo, tailscaleReleaseTag)
+	if err == nil {
+		return info, tailscaleReleaseRepo, true, nil
+	}
+	if releasepkg.IsNotFound(err) {
+		legacyInfo, legacyErr := client.FetchLatest(ctx, legacyAutoFetchRepo)
+		if legacyErr == nil {
+			return legacyInfo, legacyAutoFetchRepo, false, nil
+		}
+		return nil, "", false, legacyErr
+	}
+	return nil, "", false, err
+}
+
+func estimateUnpackedInstallBytes(archiveSize int64, combinedMinimal bool) int64 {
+	if combinedMinimal {
 		if archiveSize <= 0 {
 			return 16 << 20
 		}

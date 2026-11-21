@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -268,14 +269,14 @@ func TestStreamStageTailscaleArchive_SizeMismatch_RejectedAndCleaned(t *testing.
 }
 
 func TestPreflightUpgrade_FlashBlock_UpToDate_Force_Platform_And_InitSystems(t *testing.T) {
-	// Mock GitHub Releases API server
+	// Mock GitHub Releases API server（主通道为本仓库 tailscale-latest，双架构均为精简合体包）
 	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/repos/sixban6/auto_fetch_tailscale/releases/latest" {
+		if r.URL.Path != "/repos/sixban6/singctl/releases/tags/tailscale-latest" {
 			http.NotFound(w, r)
 			return
 		}
 		_ = json.NewEncoder(w).Encode(releasepkg.Info{
-			TagName: "latest",
+			TagName: "tailscale-latest",
 			Assets: []releasepkg.Asset{
 				{
 					Name:               "tailscale_1.104.7_arm64.tgz",
@@ -286,7 +287,7 @@ func TestPreflightUpgrade_FlashBlock_UpToDate_Force_Platform_And_InitSystems(t *
 				{
 					Name:               "tailscale_1.104.7_amd64.tgz",
 					BrowserDownloadURL: "https://example.com/tailscale_1.104.7_amd64.tgz",
-					Size:               40 * 1024 * 1024,
+					Size:               6500 * 1024,
 					Digest:             "sha256:" + strings.Repeat("b", 64),
 				},
 			},
@@ -375,7 +376,7 @@ func TestPreflightUpgrade_FlashBlock_UpToDate_Force_Platform_And_InitSystems(t *
 		t.Fatalf("expected UpToDate=true CanProceed=false CanForceProceed=true, got %+v", preUpToDate)
 	}
 
-	// 4. Older installed version + Linux systemd -> CanProceed=true, InitSystem="systemd", CombinedMinimal=false
+	// 4. Older installed version + Linux systemd (amd64) -> CanProceed=true, InitSystem="systemd", CombinedMinimal=true, RequiredFreeBytes < 40 MiB
 	if err := os.WriteFile(filepath.Join(installDir, "tailscaled"), []byte(fmt.Sprintf(fakeCombinedBinaryScript, "1.94.2", "1.94.2")), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -393,8 +394,11 @@ func TestPreflightUpgrade_FlashBlock_UpToDate_Force_Platform_And_InitSystems(t *
 	if err != nil {
 		t.Fatalf("PreflightUpgrade systemd error: %v", err)
 	}
-	if preSystemd.InitSystem != "systemd" || preSystemd.CombinedMinimal || preSystemd.UpToDate || !preSystemd.CanProceed {
-		t.Fatalf("unexpected systemd preflight: %+v", preSystemd)
+	if preSystemd.InitSystem != "systemd" || !preSystemd.CombinedMinimal || preSystemd.UpToDate || !preSystemd.CanProceed {
+		t.Fatalf("unexpected systemd preflight (expected CombinedMinimal=true on unified amd64 build): %+v", preSystemd)
+	}
+	if preSystemd.RequiredFreeBytes >= 40<<20 {
+		t.Fatalf("expected minimal amd64 RequiredFreeBytes < 40 MiB, got %d", preSystemd.RequiredFreeBytes)
 	}
 	if len(preSystemd.Warnings) == 0 {
 		t.Fatalf("expected low memory soft warning when memAvail < 24 MiB, got 0 warnings")
@@ -546,4 +550,233 @@ func TestVerifyStagedBinaries_And_SelectArchBoundaries(t *testing.T) {
 	if ver != "1.104.7" {
 		t.Fatalf("expected parsed version 1.104.7, got %q", ver)
 	}
+}
+
+func TestFetchTailscaleRelease_PrimaryAndLegacyFallback(t *testing.T) {
+	amd64Sum := strings.Repeat("c", 64)
+	legacySum := strings.Repeat("d", 64)
+
+	tests := []struct {
+		name               string
+		primaryStatus      int
+		legacyStatus       int
+		wantLegacyCalled   bool
+		wantBlocked        bool
+		wantCombined       bool
+		wantDigest         string
+		wantRequiredAtLeast int64
+	}{
+		{
+			name:               "主通道命中并从本仓库checksums回填SHA256",
+			primaryStatus:      http.StatusOK,
+			legacyStatus:       http.StatusOK,
+			wantLegacyCalled:   false,
+			wantBlocked:        false,
+			wantCombined:       true,
+			wantDigest:         "sha256:" + amd64Sum,
+			wantRequiredAtLeast: 16 << 20,
+		},
+		{
+			name:               "主通道404时平滑回退旧仓库且40MiB标准amd64包识别为非精简版",
+			primaryStatus:      http.StatusNotFound,
+			legacyStatus:       http.StatusOK,
+			wantLegacyCalled:   true,
+			wantBlocked:        false,
+			wantCombined:       false,
+			wantDigest:         "sha256:" + legacySum,
+			wantRequiredAtLeast: 100 << 20,
+		},
+		{
+			name:             "主通道500服务器异常不盲目回退旧仓库",
+			primaryStatus:    http.StatusInternalServerError,
+			legacyStatus:     http.StatusOK,
+			wantLegacyCalled: false,
+			wantBlocked:      true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var legacyCalled bool
+			var mu sync.Mutex
+
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/repos/sixban6/singctl/releases/tags/tailscale-latest":
+					if tc.primaryStatus != http.StatusOK {
+						http.Error(w, "primary status", tc.primaryStatus)
+						return
+					}
+					_ = json.NewEncoder(w).Encode(releasepkg.Info{
+						TagName: "tailscale-latest",
+						Assets: []releasepkg.Asset{
+							{
+								Name: "tailscale_1.104.7_amd64.tgz",
+								Size: 6500 * 1024,
+							},
+							{
+								ID:   101,
+								Name: "checksums.txt",
+							},
+						},
+					})
+				case "/repos/sixban6/singctl/releases/assets/101":
+					_, _ = fmt.Fprintf(w, "%s  tailscale_1.104.7_amd64.tgz\n", amd64Sum)
+				case "/repos/sixban6/auto_fetch_tailscale/releases/latest":
+					mu.Lock()
+					legacyCalled = true
+					mu.Unlock()
+					if tc.legacyStatus != http.StatusOK {
+						http.Error(w, "legacy error", tc.legacyStatus)
+						return
+					}
+					_ = json.NewEncoder(w).Encode(releasepkg.Info{
+						TagName: "latest",
+						Assets: []releasepkg.Asset{
+							{
+								Name: "tailscale_1.104.7_amd64.tgz",
+								Size: 40 * 1024 * 1024,
+							},
+							{
+								ID:   202,
+								Name: "checksums.txt",
+							},
+						},
+					})
+				case "/repos/sixban6/auto_fetch_tailscale/releases/assets/202":
+					_, _ = fmt.Fprintf(w, "%s  tailscale_1.104.7_amd64.tgz\n", legacySum)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+
+			dir := t.TempDir()
+			installDir := filepath.Join(dir, "sbin")
+			if err := os.MkdirAll(installDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			initScript := filepath.Join(dir, "init-tailscale")
+			if err := os.WriteFile(initScript, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(installDir, "tailscaled"), []byte(fmt.Sprintf(fakeCombinedBinaryScript, "1.94.2", "1.94.2")), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("tailscaled", filepath.Join(installDir, "tailscale")); err != nil {
+				t.Fatal(err)
+			}
+
+			ts := New("", &config.TailscaleConfig{})
+			ts.OpenWrtCheck = func() bool { return false }
+			client := &releasepkg.Client{
+				APIBase:     srv.URL,
+				DLBase:      srv.URL,
+				HTTP:        srv.Client(),
+				DirectFirst: true,
+			}
+
+			pre, err := ts.PreflightUpgrade(t.Context(), UpgradeOptions{
+				Paths: UpgradePaths{
+					InstallDir: installDir,
+					InitScript: initScript,
+					StateFile:  filepath.Join(dir, "state"),
+					LogFile:    filepath.Join(dir, "log"),
+					LockFile:   filepath.Join(dir, "lock"),
+					SocketPath: filepath.Join(dir, "missing.sock"),
+				},
+				ArchOverride:       "amd64",
+				LinuxCheck:         func() bool { return true },
+				InitSystemOverride: "systemd",
+				StatfsFn:           func(string) (uint64, error) { return 1 << 30, nil },
+				MemInfoFn:          func() (uint64, uint64) { return 256 << 20, 0 },
+				ReleaseClient:      client,
+			})
+			if err != nil {
+				t.Fatalf("PreflightUpgrade returned unexpected error: %v", err)
+			}
+
+			mu.Lock()
+			gotLegacy := legacyCalled
+			mu.Unlock()
+			if gotLegacy != tc.wantLegacyCalled {
+				t.Fatalf("legacyCalled = %v, want %v", gotLegacy, tc.wantLegacyCalled)
+			}
+
+			if tc.wantBlocked {
+				if len(pre.BlockedReasons) == 0 || pre.CanProceed {
+					t.Fatalf("expected BlockedReasons non-empty and CanProceed=false, got %+v", pre)
+				}
+				return
+			}
+
+			if pre.CombinedMinimal != tc.wantCombined {
+				t.Fatalf("CombinedMinimal = %v, want %v", pre.CombinedMinimal, tc.wantCombined)
+			}
+			if !pre.HasOfficialDigest || pre.selectedAsset == nil || pre.selectedAsset.Digest != tc.wantDigest {
+				t.Fatalf("expected checksum fallback digest %q, got asset=%+v", tc.wantDigest, pre.selectedAsset)
+			}
+			if pre.RequiredFreeBytes < tc.wantRequiredAtLeast {
+				t.Fatalf("RequiredFreeBytes = %d, want >= %d", pre.RequiredFreeBytes, tc.wantRequiredAtLeast)
+			}
+		})
+	}
+
+	// 并发竞态验证：多 goroutine 并行执行 PreflightUpgrade 不应触发数据竞争
+	t.Run("并发预检零数据竞争", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/repos/sixban6/singctl/releases/tags/tailscale-latest" {
+				http.NotFound(w, r)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(releasepkg.Info{
+				TagName: "tailscale-latest",
+				Assets: []releasepkg.Asset{
+					{
+						Name:   "tailscale_1.104.7_amd64.tgz",
+						Size:   6500 * 1024,
+						Digest: "sha256:" + amd64Sum,
+					},
+				},
+			})
+		}))
+		defer srv.Close()
+
+		dir := t.TempDir()
+		installDir := filepath.Join(dir, "sbin")
+		_ = os.MkdirAll(installDir, 0755)
+		_ = os.WriteFile(filepath.Join(installDir, "tailscaled"), []byte(fmt.Sprintf(fakeCombinedBinaryScript, "1.94.2", "1.94.2")), 0755)
+		_ = os.Symlink("tailscaled", filepath.Join(installDir, "tailscale"))
+
+		ts := New("", &config.TailscaleConfig{})
+		ts.OpenWrtCheck = func() bool { return false }
+		client := &releasepkg.Client{APIBase: srv.URL, DLBase: srv.URL, HTTP: srv.Client(), DirectFirst: true}
+
+		var wg sync.WaitGroup
+		for range 8 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				pre, err := ts.PreflightUpgrade(t.Context(), UpgradeOptions{
+					Paths: UpgradePaths{
+						InstallDir: installDir,
+						StateFile:  filepath.Join(dir, "state"),
+						LogFile:    filepath.Join(dir, "log"),
+						LockFile:   filepath.Join(dir, "lock"),
+						SocketPath: filepath.Join(dir, "missing.sock"),
+					},
+					ArchOverride:       "amd64",
+					LinuxCheck:         func() bool { return true },
+					InitSystemOverride: "systemd",
+					StatfsFn:           func(string) (uint64, error) { return 1 << 30, nil },
+					MemInfoFn:          func() (uint64, uint64) { return 256 << 20, 0 },
+					ReleaseClient:      client,
+				})
+				if err != nil || !pre.CanProceed || !pre.CombinedMinimal {
+					t.Errorf("concurrent PreflightUpgrade unexpected result: pre=%+v err=%v", pre, err)
+				}
+			}()
+		}
+		wg.Wait()
+	})
 }

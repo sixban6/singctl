@@ -498,7 +498,7 @@ export const TailscalePage: React.FC<TailscalePageProps> = ({
         <SectionCard
           title="安装并启用 Tailscale 组网"
           icon={<Share2 className="w-4 h-4" />}
-          subtitle="一键拉取架构适配安装包（ARM64 为精简合体版，含官方 SHA256 强校验），先配好 auth_key 再启动更省心"
+          subtitle="一键拉取架构适配安装包（AMD64/ARM64 均为精简合体无加壳版，含官方 SHA256 强校验），先配好 auth_key 再启动更省心"
         >
           <div className="space-y-4">
             <div className="p-3.5 rounded-xl bg-surface2 border border-subtle space-y-3">
