@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -21,6 +22,7 @@ import (
 	"singctl/internal/audit"
 	"singctl/internal/config"
 	"singctl/internal/constant"
+	"singctl/internal/lifecycle"
 	"singctl/internal/logger"
 	"singctl/internal/singbox"
 	"singctl/internal/tailscale"
@@ -103,6 +105,12 @@ type Daemon struct {
 	p2pLastActive       atomic.Bool
 	p2pSnapMu           sync.Mutex
 	p2pLastSnapSummary  string
+
+	// 测试注入钩子（留空回退生产实现，避免单测修改全局状态）
+	logPathOverride string
+	skipSignalSetup bool
+	pidWriter       func() error
+	pidRemover      func() error
 }
 
 // NewDaemonWithMeta 创建带配置文件路径（支持热重载）与版本号标识的守护进程。
@@ -238,54 +246,124 @@ func (d *Daemon) Start() error {
 	return d.spawn()
 }
 
-// runForeground 子进程主体：初始化并进入监控循环（阻塞）
+func (d *Daemon) closeLogFile() {
+	d.logMu.Lock()
+	if d.logFile != nil {
+		_ = d.logFile.Close()
+		d.logFile = nil
+	}
+	d.logMu.Unlock()
+}
+
+// buildForegroundLifecycle 构建守护进程前台运行时的三阶段确定性生命周期编排组。
+// 当后续阶段初始化失败（如写 PID 失败）时自动按逆序关闭先打开的日志文件，防止句柄泄漏。
+func (d *Daemon) buildForegroundLifecycle() *lifecycle.Group {
+	pidWrite := d.pidWriter
+	if pidWrite == nil {
+		pidWrite = WritePidFile
+	}
+	pidRemove := d.pidRemover
+	if pidRemove == nil {
+		pidRemove = RemovePidFile
+	}
+
+	g := lifecycle.NewGroup()
+	g.Add(
+		lifecycle.FuncService{
+			ServiceName: "daemon-log",
+			OnInit: func(context.Context) error {
+				return d.setupLogFile()
+			},
+			OnClose: func() error {
+				if d.logPathOverride == "" {
+					logger.Info("Daemon stopped")
+				}
+				d.closeLogFile()
+				return nil
+			},
+		},
+		lifecycle.FuncService{
+			ServiceName: "pid-file",
+			OnInit: func(context.Context) error {
+				return pidWrite()
+			},
+			OnClose: func() error {
+				return pidRemove()
+			},
+		},
+		lifecycle.FuncService{
+			ServiceName: "runtime-signals",
+			OnStart: func(context.Context) error {
+				if d.skipSignalSetup {
+					return nil
+				}
+				d.setupSignalHandler()
+				installReloadSignal(func() {
+					select {
+					case d.reloadCh <- struct{}{}:
+					default:
+					}
+				})
+
+				cfg := d.currentConfig()
+				startedAt := time.Now().Format(time.DateTime)
+				ver := d.version
+				UpdateRuntimeState(func(snap *DaemonRuntimeSnapshot) {
+					snap.DaemonVersion = ver
+					snap.StartedAt = startedAt
+				})
+				logger.Success("Daemon started successfully (version=%s, pid=%d, check every %ds)", ver, os.Getpid(), cfg.Watchdog.Interval)
+				return nil
+			},
+			OnClose: func() error {
+				if d.cancel != nil {
+					d.cancel()
+				}
+				return nil
+			},
+		},
+		lifecycle.FuncService{
+			ServiceName: "pcdn-default-sync",
+			OnPostStart: func(ctx context.Context) error {
+				if d.skipSignalSetup {
+					return nil
+				}
+				go func() {
+					select {
+					case <-d.ctx.Done():
+						return
+					case <-ctx.Done():
+						return
+					case <-time.After(1 * time.Second):
+					}
+					syncCtx, cancel := context.WithTimeout(d.ctx, 15*time.Second)
+					defer cancel()
+					if applied, syncErr := audit.NewEnforcer(d.currentConfig(), d.configPath).EnsureDefaultPCDNBlock(syncCtx); syncErr != nil {
+						logger.Warn("[Audit] 自动同步内置防 PCDN 规则集失败: %v", syncErr)
+					} else if applied {
+						logger.Info("[Audit] 已自动启用内置默认防 PCDN 规则集并热重载 sing-box")
+					}
+				}()
+				return nil
+			},
+		},
+	)
+	return g
+}
+
+// runForeground 子进程主体：通过确定性生命周期编排器初始化并进入监控循环（阻塞）
 func (d *Daemon) runForeground() error {
-	if err := d.setupLogFile(); err != nil {
+	lc := d.buildForegroundLifecycle()
+	if err := lc.Start(d.ctx); err != nil {
 		notifyParentReady(false)
-		logger.Error("failed to setup log file: %v", err)
-		return fmt.Errorf("failed to setup log file: %w", err)
+		logger.Error("failed to start daemon foreground lifecycle: %v", err)
+		return err
 	}
-
-	if err := WritePidFile(); err != nil {
-		notifyParentReady(false)
-		logger.Error("failed to write pid file: %v", err)
-		return fmt.Errorf("failed to write pid file: %w", err)
-	}
-
-	d.setupSignalHandler()
-	installReloadSignal(func() {
-		select {
-		case d.reloadCh <- struct{}{}:
-		default:
-		}
-	})
-
-	cfg := d.currentConfig()
-	startedAt := time.Now().Format(time.DateTime)
-	ver := d.version
-	UpdateRuntimeState(func(snap *DaemonRuntimeSnapshot) {
-		snap.DaemonVersion = ver
-		snap.StartedAt = startedAt
-	})
-
-	logger.Success("Daemon started successfully (version=%s, pid=%d, check every %ds)", ver, os.Getpid(), cfg.Watchdog.Interval)
+	defer func() {
+		_ = lc.Close()
+	}()
 
 	notifyParentReady(true)
-
-	go func() {
-		select {
-		case <-d.ctx.Done():
-			return
-		case <-time.After(1 * time.Second):
-		}
-		syncCtx, cancel := context.WithTimeout(d.ctx, 15*time.Second)
-		defer cancel()
-		if applied, syncErr := audit.NewEnforcer(d.currentConfig(), d.configPath).EnsureDefaultPCDNBlock(syncCtx); syncErr != nil {
-			logger.Warn("[Audit] 自动同步内置防 PCDN 规则集失败: %v", syncErr)
-		} else if applied {
-			logger.Info("[Audit] 已自动启用内置默认防 PCDN 规则集并热重载 sing-box")
-		}
-	}()
 
 	return d.monitorLoop()
 }
@@ -478,14 +556,6 @@ func (d *Daemon) monitorLoop() error {
 		initHealthTimer.Stop()
 		initFailoverTimer.Stop()
 		initRefreshTimer.Stop()
-		logger.Info("Daemon stopped")
-		RemovePidFile()
-		d.logMu.Lock()
-		if d.logFile != nil {
-			_ = d.logFile.Close()
-			d.logFile = nil
-		}
-		d.logMu.Unlock()
 	}()
 
 	logger.Info("Daemon watchdog started (check interval: %s, group failover: %v / %s)",
@@ -916,7 +986,7 @@ func (d *Daemon) doRestart(checkResult HealthCheckResult, reason string) {
 }
 
 func (d *Daemon) setupLogFile() error {
-	logPath := GetDaemonLogPath()
+	logPath := cmp.Or(d.logPathOverride, GetDaemonLogPath())
 	logDir := filepath.Dir(logPath)
 	if err := os.MkdirAll(logDir, 0755); err != nil {
 		return fmt.Errorf("failed to create log directory: %w", err)
@@ -932,8 +1002,10 @@ func (d *Daemon) setupLogFile() error {
 
 	d.logMu.Lock()
 	d.logFile = logFile
-	logger.SetOutput(logFile)
-	logger.SetColor(false)
+	if d.logPathOverride == "" {
+		logger.SetOutput(logFile)
+		logger.SetColor(false)
+	}
 	d.logMu.Unlock()
 
 	return nil
@@ -945,7 +1017,7 @@ func (d *Daemon) maybeRotateLogFile() {
 			_, _ = TrimLogInPlace(sbLog, MaxSingBoxLogBytes)
 		}
 	}
-	logPath := GetDaemonLogPath()
+	logPath := cmp.Or(d.logPathOverride, GetDaemonLogPath())
 	trimmed, err := CleanAndTrimDaemonLog(logPath, MaxDaemonLogBytes)
 	if err != nil || !trimmed {
 		return
@@ -957,7 +1029,9 @@ func (d *Daemon) maybeRotateLogFile() {
 		return
 	}
 	_ = newFile.Chmod(0600)
-	logger.SetOutput(newFile)
+	if d.logPathOverride == "" {
+		logger.SetOutput(newFile)
+	}
 	if d.logFile != nil {
 		_ = d.logFile.Close()
 	}
