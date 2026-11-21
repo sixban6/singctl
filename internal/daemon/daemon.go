@@ -1,23 +1,14 @@
+// 文件职责：实现客户端看门狗守护进程核心编排（生命周期托管、配置热重载、多维轮询调度与自愈重启控制）。
 package daemon
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"maps"
 	"os"
-	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"runtime"
-	"slices"
-	"strings"
-	"sync"
-	"sync/atomic"
-	"syscall"
-	"time"
-
 	"singctl/internal/adguard"
 	"singctl/internal/audit"
 	"singctl/internal/config"
@@ -27,6 +18,12 @@ import (
 	"singctl/internal/singbox"
 	"singctl/internal/tailscale"
 	"singctl/internal/util/netinfo"
+	"slices"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
+	"time"
 )
 
 const (
@@ -217,15 +214,6 @@ func (d *Daemon) Start() error {
 	return d.spawn()
 }
 
-func (d *Daemon) closeLogFile() {
-	d.logMu.Lock()
-	if d.logFile != nil {
-		_ = d.logFile.Close()
-		d.logFile = nil
-	}
-	d.logMu.Unlock()
-}
-
 // buildForegroundLifecycle 构建守护进程前台运行时的三阶段确定性生命周期编排组。
 // 当后续阶段初始化失败（如写 PID 失败）时自动按逆序关闭先打开的日志文件，防止句柄泄漏。
 func (d *Daemon) buildForegroundLifecycle() *lifecycle.Group {
@@ -338,113 +326,6 @@ func (d *Daemon) runForeground() error {
 
 	return d.monitorLoop()
 }
-
-// spawn fork 后台子进程并等待就绪信号
-func (d *Daemon) spawn() error {
-	// Intentional bare exec.Command: detached background daemon child must outlive spawn().
-	cmd := exec.Command(os.Args[0], os.Args[1:]...)
-	cmd.Env = append(os.Environ(), envDaemonized+"=1")
-
-	d.setProcAttrs(cmd)
-
-	devNull := "/dev/null"
-	if runtime.GOOS == "windows" {
-		devNull = "NUL"
-	}
-	nullFile, err := os.OpenFile(devNull, os.O_RDWR, 0)
-	if err != nil {
-		_ = RemovePidFile()
-		return err
-	}
-	defer nullFile.Close()
-
-	cmd.Stdin = nullFile
-	cmd.Stdout = nullFile
-	cmd.Stderr = nullFile
-
-	var readyR *os.File
-	if runtime.GOOS != "windows" {
-		var readyW *os.File
-		readyR, readyW, err = os.Pipe()
-		if err == nil {
-			cmd.ExtraFiles = []*os.File{readyW}
-		}
-	}
-
-	if err := cmd.Start(); err != nil {
-		logger.Error("failed to daemonize: %v", err)
-		_ = RemovePidFile()
-		return fmt.Errorf("failed to daemonize: %w", err)
-	}
-
-	if readyR == nil {
-		logger.Success("Daemon started in background (pid=%d)", cmd.Process.Pid)
-		return nil
-	}
-
-	if extra := cmd.ExtraFiles; len(extra) > 0 {
-		_ = extra[0].Close()
-	}
-
-	err = waitReady(readyR, 10*time.Second)
-	_ = readyR.Close()
-	switch {
-	case err == nil:
-		logger.Success("Daemon started in background (pid=%d)", cmd.Process.Pid)
-		return nil
-	case errors.Is(err, errChildDied):
-		_ = RemovePidFile()
-		logger.Error("daemon child exited during startup")
-		return err
-	default:
-		logger.Warn("daemon startup not confirmed within timeout; check %s", GetDaemonLogPath())
-		return nil
-	}
-}
-
-var errChildDied = errors.New("daemon child exited during startup")
-
-func waitReady(r *os.File, timeout time.Duration) error {
-	ch := make(chan error, 1)
-	go func() {
-		buf := make([]byte, 1)
-		n, err := r.Read(buf)
-		switch {
-		case n > 0 && buf[0] == 1:
-			ch <- nil
-		case n > 0:
-			ch <- fmt.Errorf("unexpected ready signal: %d", buf[0])
-		case err != nil:
-			ch <- errChildDied
-		default:
-			ch <- errChildDied
-		}
-	}()
-
-	select {
-	case err := <-ch:
-		return err
-	case <-time.After(timeout):
-		return fmt.Errorf("timeout waiting for daemon ready signal")
-	}
-}
-
-func notifyParentReady(ok bool) {
-	if runtime.GOOS == "windows" {
-		return
-	}
-	f := os.NewFile(readyFd, "ready-pipe")
-	if f == nil {
-		return
-	}
-	b := []byte{0}
-	if ok {
-		b[0] = 1
-	}
-	_, _ = f.Write(b)
-	_ = f.Close()
-}
-
 func (d *Daemon) setupSignalHandler() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
@@ -954,57 +835,4 @@ func (d *Daemon) doRestart(checkResult HealthCheckResult, reason string) {
 		},
 		RestartResult: "success",
 	})
-}
-
-func (d *Daemon) setupLogFile() error {
-	logPath := cmp.Or(d.logPathOverride, GetDaemonLogPath())
-	logDir := filepath.Dir(logPath)
-	if err := os.MkdirAll(logDir, 0755); err != nil {
-		return fmt.Errorf("failed to create log directory: %w", err)
-	}
-
-	_, _ = CleanAndTrimDaemonLog(logPath, MaxDaemonLogBytes)
-
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
-	if err != nil {
-		return fmt.Errorf("failed to open log file: %w", err)
-	}
-	_ = logFile.Chmod(0600)
-
-	d.logMu.Lock()
-	d.logFile = logFile
-	if d.logPathOverride == "" {
-		logger.SetOutput(logFile)
-		logger.SetColor(false)
-	}
-	d.logMu.Unlock()
-
-	return nil
-}
-
-func (d *Daemon) maybeRotateLogFile() {
-	for _, sbLog := range []string{constant.SingBoxBasicLogFile, constant.SingBoxSimpleLogFile} {
-		if sbLog != "" {
-			_, _ = TrimLogInPlace(sbLog, MaxSingBoxLogBytes)
-		}
-	}
-	logPath := cmp.Or(d.logPathOverride, GetDaemonLogPath())
-	trimmed, err := CleanAndTrimDaemonLog(logPath, MaxDaemonLogBytes)
-	if err != nil || !trimmed {
-		return
-	}
-	d.logMu.Lock()
-	defer d.logMu.Unlock()
-	newFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
-	if err != nil {
-		return
-	}
-	_ = newFile.Chmod(0600)
-	if d.logPathOverride == "" {
-		logger.SetOutput(newFile)
-	}
-	if d.logFile != nil {
-		_ = d.logFile.Close()
-	}
-	d.logFile = newFile
 }
