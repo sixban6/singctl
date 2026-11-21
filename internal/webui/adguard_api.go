@@ -67,7 +67,7 @@ func (s *Server) adguardStatusSummary() map[string]any {
 	webHealthy := false
 	version := ""
 	if installed {
-		dnsHealthy = adguard.ProbeDNS(dnsAddr, 300*time.Millisecond) == nil
+		dnsHealthy = adguard.ProbeDNSWithRetry(dnsAddr, 800*time.Millisecond, 2, 150*time.Millisecond) == nil
 		webHealthy = adguard.ProbeTCPPort(webAddr, 250*time.Millisecond)
 		version = s.cachedAdGuardVersion(binPath)
 	}

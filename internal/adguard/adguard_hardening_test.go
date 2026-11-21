@@ -7,11 +7,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"gopkg.in/yaml.v3"
 	"singctl/internal/config"
 )
 
@@ -245,5 +248,153 @@ func TestConfigGen_Blocklist_And_ControlAPI_EndToEnd(t *testing.T) {
 	}
 	if err := mgr.RemoveFilter(ctx, "https://anti-ad.net/easylist.txt"); err != nil {
 		t.Fatalf("RemoveFilter failed: %v", err)
+	}
+}
+
+func TestBuildInitialConfig_DisablesPrivatePTRAndSuppressesLocalhostNoise(t *testing.T) {
+	hash, err := config.HashPassword("TestPass123456")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := BuildInitialConfigYAML(ConfigParams{
+		LANIP:             "192.168.180.1",
+		WebPort:           3000,
+		DNSPort:           5353,
+		Username:          "root",
+		PasswordHash:      hash,
+		IsOpenWrt:         true,
+		DisablePrivatePTR: false,
+	})
+	if err != nil {
+		t.Fatalf("BuildInitialConfigYAML failed: %v", err)
+	}
+	s := string(raw)
+	if !strings.Contains(s, "use_private_ptr_resolvers: false") {
+		t.Fatalf("expected use_private_ptr_resolvers: false even with DisablePrivatePTR=false, got:\n%s", s)
+	}
+	if strings.Count(s, "ignored_enabled: true") < 2 || strings.Count(s, "- localhost") < 2 {
+		t.Fatalf("expected querylog and statistics ignored=[localhost] & ignored_enabled=true, got:\n%s", s)
+	}
+}
+
+func TestNeedsHardeningSync_HealsLegacyPrivatePTRAndIgnored(t *testing.T) {
+	dir := t.TempDir()
+	aghYAML := filepath.Join(dir, "AdGuardHome.yaml")
+	legacy := `http:
+  address: 192.168.180.1:3000
+dns:
+  bind_hosts:
+    - 127.0.0.1
+  port: 5353
+  use_private_ptr_resolvers: true
+querylog:
+  enabled: true
+  ignored_enabled: false
+  ignored:
+    - custom.lan
+statistics:
+  enabled: true
+  ignored_enabled: false
+  ignored: []
+schema_version: 29
+`
+	if err := os.WriteFile(aghYAML, []byte(legacy), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if !NeedsHardeningSync(aghYAML) {
+		t.Fatal("expected NeedsHardeningSync=true on legacy use_private_ptr_resolvers=true config")
+	}
+
+	changed, err := SyncExistingConfig(aghYAML, SyncOptions{
+		LANIP:   "192.168.180.1",
+		WebPort: 3000,
+		DNSPort: 5353,
+	})
+	if err != nil || !changed {
+		t.Fatalf("SyncExistingConfig = (%v, %v), want (true, nil)", changed, err)
+	}
+	if NeedsHardeningSync(aghYAML) {
+		t.Fatal("expected NeedsHardeningSync=false after SyncExistingConfig healed legacy YAML")
+	}
+
+	healedBytes, err := os.ReadFile(aghYAML)
+	if err != nil {
+		t.Fatal(err)
+	}
+	healed := string(healedBytes)
+	if !strings.Contains(healed, "use_private_ptr_resolvers: false") {
+		t.Fatalf("expected healed use_private_ptr_resolvers: false, got:\n%s", healed)
+	}
+	var parsedHealed struct {
+		QueryLog struct {
+			Ignored        []string `yaml:"ignored"`
+			IgnoredEnabled bool     `yaml:"ignored_enabled"`
+		} `yaml:"querylog"`
+		Statistics struct {
+			Ignored        []string `yaml:"ignored"`
+			IgnoredEnabled bool     `yaml:"ignored_enabled"`
+		} `yaml:"statistics"`
+	}
+	if err := yaml.Unmarshal(healedBytes, &parsedHealed); err != nil {
+		t.Fatalf("unmarshal healed YAML: %v", err)
+	}
+	if !parsedHealed.QueryLog.IgnoredEnabled ||
+		!slices.Contains(parsedHealed.QueryLog.Ignored, "custom.lan") ||
+		!slices.Contains(parsedHealed.QueryLog.Ignored, "localhost") {
+		t.Fatalf("expected querylog.ignored to preserve custom.lan and add localhost, got %+v", parsedHealed.QueryLog)
+	}
+	if !parsedHealed.Statistics.IgnoredEnabled ||
+		!slices.Contains(parsedHealed.Statistics.Ignored, "localhost") {
+		t.Fatalf("expected statistics.ignored to contain localhost with ignored_enabled=true, got %+v", parsedHealed.Statistics)
+	}
+
+	// Second sync is strictly a no-op.
+	changedAgain, err := SyncExistingConfig(aghYAML, SyncOptions{
+		LANIP:   "192.168.180.1",
+		WebPort: 3000,
+		DNSPort: 5353,
+	})
+	if err != nil || changedAgain {
+		t.Fatalf("expected idempotent second SyncExistingConfig = (false, nil), got (%v, %v)", changedAgain, err)
+	}
+}
+
+func TestProbeDNSWithRetry_ToleratesSingleTransientDrop(t *testing.T) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pc.Close()
+
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		buf := make([]byte, 512)
+		attempt := 0
+		for {
+			_ = pc.SetReadDeadline(time.Now().Add(2 * time.Second))
+			n, addr, rErr := pc.ReadFrom(buf)
+			if rErr != nil {
+				select {
+				case <-done:
+					return
+				default:
+					continue
+				}
+			}
+			attempt++
+			if attempt == 1 || n < 12 {
+				// Simulate single transient drop on first packet
+				continue
+			}
+			resp := make([]byte, n)
+			copy(resp, buf[:n])
+			resp[2] |= 0x80 // Set QR=1 response bit
+			_, _ = pc.WriteTo(resp, addr)
+		}
+	}()
+
+	if err := ProbeDNSWithRetry(pc.LocalAddr().String(), 120*time.Millisecond, 2, 10*time.Millisecond); err != nil {
+		t.Fatalf("expected ProbeDNSWithRetry to succeed on 2nd attempt after transient drop, got %v", err)
 	}
 }

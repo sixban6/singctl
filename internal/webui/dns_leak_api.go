@@ -47,7 +47,7 @@ func (s *Server) handleDNSLeakTestPost(w http.ResponseWriter, r *http.Request) {
 	gwMode := cfg.Gateway.EffectiveMode()
 
 	dnsAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(cfg.DNS.GetDNSPort()))
-	aghHealthy := adguard.ProbeDNS(dnsAddr, 300*time.Millisecond) == nil
+	aghHealthy := adguard.ProbeDNSWithRetry(dnsAddr, 800*time.Millisecond, 2, 150*time.Millisecond) == nil
 	sbRunning := daemon.IsSingBoxRunning()
 
 	var ipv6Status gateway.IPv6StatusInfo

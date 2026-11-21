@@ -132,8 +132,8 @@ func TestGatewayAPI_GetPutAndSelfLoopReject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read synced AdGuardHome.yaml (main): %v", err)
 	}
-	if !strings.Contains(string(aghMainRaw), "use_private_ptr_resolvers: true") {
-		t.Fatalf("expected PUT /api/gateway mode=main to restore use_private_ptr_resolvers: true, got:\n%s", string(aghMainRaw))
+	if !strings.Contains(string(aghMainRaw), "use_private_ptr_resolvers: false") {
+		t.Fatalf("expected PUT /api/gateway mode=main to keep use_private_ptr_resolvers: false (preventing PTR loop), got:\n%s", string(aghMainRaw))
 	}
 }
 

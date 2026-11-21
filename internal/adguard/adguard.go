@@ -412,8 +412,8 @@ func (m *Manager) ensureConfigFile(lanIP string, updateAuth bool) error {
 		return fmt.Errorf("加密管理员密码失败: %w", err)
 	}
 
-	isSideRouter := m.cfg != nil && m.cfg.Gateway.IsSideRouter()
-	disablePrivatePTROpt := new(isSideRouter)
+	// 无论主/旁路由模式，始终禁用私网 PTR 反查（AdGuard 位于 127.0.0.1:5353 后端，开启会导致 DNS-SD 查询经 dnsmasq ↔ sing-box 无限放大环路）。
+	disablePrivatePTROpt := new(true)
 
 	if _, statErr := os.Stat(m.aghConfigFile); statErr == nil {
 		logger.Info("检测到已有配置文件 %s，执行无损同步（保留既有自定义规则与过滤器）...", m.aghConfigFile)
@@ -447,7 +447,7 @@ func (m *Manager) ensureConfigFile(lanIP string, updateAuth bool) error {
 		Username:          m.cfg.DNS.GetUsername(),
 		PasswordHash:      passHash,
 		IsOpenWrt:         netinfo.IsOpenWrt(),
-		DisablePrivatePTR: isSideRouter,
+		DisablePrivatePTR: true,
 		SubURLs:           subURLs,
 	})
 	if err != nil {
@@ -567,14 +567,13 @@ func (m *Manager) Start() error {
 			return err
 		}
 	} else {
-		// 自动修正局域网 IP 漂移（例如 DHCP 旁路由更换了网段 IP）以及主/旁路由私网 PTR 策略
+		// 自动修正局域网 IP 漂移（例如 DHCP 更换网段 IP），并强制关闭私网 PTR 防回环及过滤 localhost 探活噪声
 		lanIP := sanitizeWebBindIP(netinfo.GetPrimaryLANIPv4())
-		isSideRouter := m.cfg != nil && m.cfg.Gateway.IsSideRouter()
 		_, _ = SyncExistingConfig(m.aghConfigFile, SyncOptions{
 			LANIP:             lanIP,
 			WebPort:           m.cfg.DNS.GetWebPort(),
 			DNSPort:           m.cfg.DNS.GetDNSPort(),
-			DisablePrivatePTR: new(isSideRouter),
+			DisablePrivatePTR: new(true),
 		})
 	}
 
@@ -617,7 +616,7 @@ func (m *Manager) Restart() error {
 	return m.Start()
 }
 
-// SyncGatewayMode 在主路由/旁路由模式切换时同步 AdGuardHome.yaml 的 use_private_ptr_resolvers 开关，
+// SyncGatewayMode 在主路由/旁路由模式切换时同步 AdGuardHome.yaml 基础运行参数（始终禁用私网 PTR 防回环），
 // 若配置发生变更且 AdGuard Home 当前正在运行，则自动平滑重启使其立即生效。
 func (m *Manager) SyncGatewayMode(lanIP string) error {
 	if _, err := os.Stat(m.aghConfigFile); err != nil {
@@ -626,12 +625,11 @@ func (m *Manager) SyncGatewayMode(lanIP string) error {
 	if strings.TrimSpace(lanIP) == "" {
 		lanIP = netinfo.GetPrimaryLANIPv4()
 	}
-	isSideRouter := m.cfg != nil && m.cfg.Gateway.IsSideRouter()
 	changed, err := SyncExistingConfig(m.aghConfigFile, SyncOptions{
 		LANIP:             sanitizeWebBindIP(lanIP),
 		WebPort:           m.cfg.DNS.GetWebPort(),
 		DNSPort:           m.cfg.DNS.GetDNSPort(),
-		DisablePrivatePTR: new(isSideRouter),
+		DisablePrivatePTR: new(true),
 	})
 	if err != nil {
 		return err
@@ -702,13 +700,25 @@ func (m *Manager) Uninstall(purgeConfig bool) error {
 	return nil
 }
 
-// EnsureHealthy 供看门狗守护进程调用：若已安装且启用但 DNS 端口失联，自动拉起恢复。
+// EnsureHealthy 供看门狗守护进程调用：自动自愈旧版私网 PTR 回环配置，并在 DNS 端口连续两次失联时自动拉起恢复。
 func (m *Manager) EnsureHealthy() error {
 	if !m.cfg.DNS.IsEnabled() || !m.isBinaryPresent() {
 		return nil
 	}
+	if NeedsHardeningSync(m.aghConfigFile) {
+		lanIP := sanitizeWebBindIP(netinfo.GetPrimaryLANIPv4())
+		if changed, err := SyncExistingConfig(m.aghConfigFile, SyncOptions{
+			LANIP:             lanIP,
+			WebPort:           m.cfg.DNS.GetWebPort(),
+			DNSPort:           m.cfg.DNS.GetDNSPort(),
+			DisablePrivatePTR: new(true),
+		}); err == nil && changed {
+			logger.Warn("[Watchdog] 检测到 AdGuard Home 存在旧版私网 PTR 回环或噪声配置，正在自动加固并平滑重启...")
+			return m.Restart()
+		}
+	}
 	dnsAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(m.cfg.DNS.GetDNSPort()))
-	if err := ProbeDNS(dnsAddr, 1500*time.Millisecond); err == nil {
+	if err := ProbeDNSWithRetry(dnsAddr, 1500*time.Millisecond, 2, 1*time.Second); err == nil {
 		return nil
 	}
 	logger.Warn("[Watchdog] AdGuard Home (%s) 未响应，正在自动拉起恢复...", dnsAddr)
@@ -744,7 +754,7 @@ func (m *Manager) Status() *StatusInfo {
 		}()
 		go func() {
 			defer wg.Done()
-			st.DNSHealthy = ProbeDNS(dnsAddr, 450*time.Millisecond) == nil
+			st.DNSHealthy = ProbeDNSWithRetry(dnsAddr, 800*time.Millisecond, 2, 150*time.Millisecond) == nil
 		}()
 		go func() {
 			defer wg.Done()
