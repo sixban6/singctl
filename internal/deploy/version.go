@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"singctl/internal/component"
 	"singctl/internal/config"
 	"singctl/internal/constant"
 	"singctl/internal/singbox"
@@ -180,12 +181,14 @@ func GetDiskSingctlVersion() string {
 
 // GetCoreServiceVersions collects the currently installed versions of all core services.
 func GetCoreServiceVersions() map[string]string {
-	return map[string]string{
-		"singbox": GetInstalledSingBoxVersion(),
-		"caddy":   GetInstalledCaddyVersion(),
-		"subhub":  GetInstalledSubhubVersion(),
-		"warp":    GetInstalledWarpVersion(),
+	all := ServerRegistry().All()
+	versions := make(map[string]string, len(all))
+	for _, comp := range all {
+		if ver, ok := comp.(component.Versioned); ok {
+			versions[comp.ID()] = ver.InstalledVersion()
+		}
 	}
+	return versions
 }
 
 func getMirrorURL(cfg *config.Config) string {

@@ -106,6 +106,10 @@ func (*singboxServerComponent) Upgrade(cfg *config.Config) (*component.UpgradeIn
 	return upgradeResultToInfo(res), nil
 }
 
+func (*singboxServerComponent) InstalledVersion() string {
+	return GetInstalledSingBoxVersion()
+}
+
 func (*singboxServerComponent) DeployServer(cfg *config.Config) error {
 	sbs, err := NewSingBoxServer(cfg)
 	if err != nil {

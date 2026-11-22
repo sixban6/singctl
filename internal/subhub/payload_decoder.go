@@ -28,17 +28,6 @@ type subscriptionPayloadDecoder struct {
 	Decode func(ctx context.Context, text string) ([]model.Node, []string)
 }
 
-var supportedURISchemes = []string{
-	"vless://",
-	"vmess://",
-	"trojan://",
-	"hysteria2://",
-	"hy2://",
-	"ss://",
-	"tuic://",
-	"anytls://",
-}
-
 // ParseRawSubscriptionPayload parses raw URI lists, Base64 URI blobs, Clash YAML, or Sing-box JSON into nodes and canonical URIs.
 func ParseRawSubscriptionPayload(ctx context.Context, raw []byte) ([]model.Node, []string) {
 	return decodeRawSubscriptionWithChain(ctx, raw)
@@ -153,13 +142,7 @@ func synthURIsFromNodes(nodes []model.Node) []string {
 }
 
 func hasSupportedScheme(line string) bool {
-	lower := strings.ToLower(strings.TrimSpace(line))
-	for _, p := range supportedURISchemes {
-		if strings.HasPrefix(lower, p) {
-			return true
-		}
-	}
-	return false
+	return defaultProtocols.hasSupportedScheme(line)
 }
 
 func decodeRawBase64Bytes(s string) ([]byte, bool) {
@@ -363,60 +346,7 @@ func parseSingBoxJSONOutbounds(jsonText string) []model.Node {
 			}
 		}
 
-		switch typ {
-		case "vless":
-			n.Type = "vless"
-			n.UUID = asString(ob["uuid"])
-			if flow := asString(ob["flow"]); flow != "" {
-				n.Extra["flow"] = flow
-			}
-		case "hysteria2":
-			n.Type = "hysteria2"
-			n.Password = asString(ob["password"])
-			n.Security.TLS = true
-			if obfsObj, ok := ob["obfs"].(map[string]any); ok {
-				if obfsType := asString(obfsObj["type"]); obfsType != "" {
-					n.Extra["obfs"] = map[string]string{
-						"type":     obfsType,
-						"password": asString(obfsObj["password"]),
-					}
-				}
-			}
-		case "anytls":
-			n.Type = "anytls"
-			n.Password = asString(ob["password"])
-			n.Security.TLS = true
-			for _, k := range []string{"idle_session_check_interval", "idle_session_timeout"} {
-				if v := asString(ob[k]); v != "" {
-					n.Extra[k] = v
-				}
-			}
-			if minIdle := asUint16(ob["min_idle_session"]); minIdle > 0 {
-				n.Extra["min_idle_session"] = int(minIdle)
-			}
-		case "shadowsocks", "ss":
-			n.Type = "shadowsocks"
-			n.Password = asString(ob["password"])
-			n.Extra["method"] = cmp.Or(asString(ob["method"]), "aes-256-gcm")
-		case "trojan":
-			n.Type = "trojan"
-			n.Password = asString(ob["password"])
-			n.Security.TLS = true
-		case "vmess":
-			n.Type = "vmess"
-			n.UUID = asString(ob["uuid"])
-		case "tuic":
-			n.Type = "tuic"
-			n.UUID = asString(ob["uuid"])
-			n.Password = asString(ob["password"])
-			n.Security.TLS = true
-			if cc := asString(ob["congestion_control"]); cc != "" {
-				n.Extra["congestion_control"] = cc
-			}
-			if udpMode := asString(ob["udp_relay_mode"]); udpMode != "" {
-				n.Extra["udp_relay_mode"] = udpMode
-			}
-		default:
+		if !defaultProtocols.decodeSingBox(typ, ob, &n) {
 			continue
 		}
 		nodes = append(nodes, n)
@@ -467,55 +397,7 @@ func parseClashYAMLProxies(yamlText string) []model.Node {
 			}
 		}
 
-		switch typ {
-		case "vless":
-			n.Type = "vless"
-			n.UUID = asString(p["uuid"])
-			n.Security.TLS = asBool(p["tls"])
-			if flow := asString(p["flow"]); flow != "" {
-				n.Extra["flow"] = flow
-			}
-			if fp := asString(p["client-fingerprint"]); fp != "" {
-				n.Extra["fingerprint"] = fp
-			}
-			if ro, ok := p["reality-opts"].(map[string]any); ok {
-				n.Security.TLS = true
-				n.Extra["security"] = "reality"
-				n.Extra["public_key"] = asString(ro["public-key"])
-				n.Extra["short_id"] = asString(ro["short-id"])
-			}
-		case "hysteria2":
-			n.Type = "hysteria2"
-			n.Password = asString(p["password"])
-			n.Security.TLS = true
-			if obfs := asString(p["obfs"]); obfs != "" {
-				n.Extra["obfs"] = map[string]string{
-					"type":     obfs,
-					"password": asString(p["obfs-password"]),
-				}
-			}
-		case "trojan":
-			n.Type = "trojan"
-			n.Password = asString(p["password"])
-			n.Security.TLS = true
-		case "ss":
-			n.Type = "shadowsocks"
-			n.Password = asString(p["password"])
-			n.Extra["method"] = asString(p["cipher"])
-		case "vmess":
-			n.Type = "vmess"
-			n.UUID = asString(p["uuid"])
-			n.Security.TLS = asBool(p["tls"])
-		case "tuic":
-			n.Type = "tuic"
-			n.UUID = asString(p["uuid"])
-			n.Password = asString(p["password"])
-			n.Security.TLS = true
-		case "anytls":
-			n.Type = "anytls"
-			n.Password = asString(p["password"])
-			n.Security.TLS = true
-		default:
+		if !defaultProtocols.decodeClash(typ, p, &n) {
 			continue
 		}
 		nodes = append(nodes, n)

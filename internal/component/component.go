@@ -78,6 +78,11 @@ type Upgradable interface {
 	Upgrade(cfg *config.Config) (*UpgradeInfo, error)
 }
 
+// Versioned 为支持查询本机已安装版本号的组件可选接口。
+type Versioned interface {
+	InstalledVersion() string
+}
+
 // ServerLifecycle 为支持服务端单组件部署、重装与卸载的组件可选接口。
 type ServerLifecycle interface {
 	DeployServer(cfg *config.Config) error

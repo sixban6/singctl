@@ -109,6 +109,10 @@ func (*caddyServerComponent) Upgrade(cfg *config.Config) (*component.UpgradeInfo
 	return upgradeResultToInfo(res), nil
 }
 
+func (*caddyServerComponent) InstalledVersion() string {
+	return GetInstalledCaddyVersion()
+}
+
 func (*caddyServerComponent) DeployServer(cfg *config.Config) error {
 	return DeployCaddy(cfg)
 }

@@ -78,6 +78,10 @@ func (*warpServerComponent) Upgrade(cfg *config.Config) (*component.UpgradeInfo,
 	return upgradeResultToInfo(res), nil
 }
 
+func (*warpServerComponent) InstalledVersion() string {
+	return GetInstalledWarpVersion()
+}
+
 func (*warpServerComponent) DeployServer(*config.Config) error {
 	return DeployWarp()
 }

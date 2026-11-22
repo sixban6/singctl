@@ -33,6 +33,7 @@
   - `Component`：`ID() string` / `DisplayName() string` / `UnitName() string` / `ServiceAction(ctx, action) (string, error)`；
   - `Configurable`（可选）：`ConfigTarget() ConfigTarget`；
   - `Upgradable`（可选）：`CheckUpdate(ctx) (CheckUpdateInfo, error)` / `Upgrade(ctx) (UpgradeInfo, error)`；
+  - `Versioned`（可选）：`InstalledVersion() string`；
   - `ServerLifecycle`（可选）：`Install` / `Uninstall` / `Reinstall`。
 - **服务端挂载点**：[`internal/deploy/comp_registry.go`](../internal/deploy/comp_registry.go) 默认注册 `sing-box`、`caddy`、`singctl-sub`、`warp`。
 - **新增服务组件**：只需在对应适配包新增一个实现 `Component` 的独立文件并在注册表注册，**禁止**回退到多处复制 `switch service { ... }`。

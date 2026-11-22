@@ -18,6 +18,18 @@ type Detector interface {
 	Evaluate(flow *FlowRecord) (score float64, reason string)
 }
 
+// AxisWeights 描述算子得分向安全轴与隐私轴的正交投射权重。
+type AxisWeights struct {
+	Security float64
+	Privacy  float64
+}
+
+// AxisProjector 为需要自定义安全/隐私双轴投射比例的检测算子可选接口；
+// 未实现该接口的 Detector 默认按纯安全轴（Security: 1.0, Privacy: 0.0）投射。
+type AxisProjector interface {
+	ProjectAxes(flow *FlowRecord) AxisWeights
+}
+
 // NonlinearEngine 实现多维特征交叉与非线性风险评估引擎。
 //
 // 核心数学模型:
@@ -348,6 +360,13 @@ func (e *NonlinearEngine) IsBlocked(deviceIP, target string) bool {
 	return false
 }
 
+func projectDetectorAxes(det Detector, flow *FlowRecord) AxisWeights {
+	if p, ok := det.(AxisProjector); ok {
+		return p.ProjectAxes(flow)
+	}
+	return AxisWeights{Security: 1.0}
+}
+
 // EvaluateFlow 对单条聚合流执行多维非线性评分并填充状态、威胁等级与可解释原因。
 func (e *NonlinearEngine) EvaluateFlow(flow *FlowRecord) {
 	if flow == nil {
@@ -380,22 +399,9 @@ func (e *NonlinearEngine) EvaluateFlow(flow *FlowRecord) {
 		s, r := det.Evaluate(flow)
 		if s > 0 {
 			flow.NonlinearFactors[det.Name()] = math.Round(s*100) / 100
-			switch det.Name() {
-			case "upload_asymmetry", "direct_ip_upload", "direct_ip_subnet_cluster", "pcdn_swarm", "domain_entropy":
-				secBase += s
-			case "beacon_heartbeat":
-				// 机器定时心跳既是远控信标特征(安全)，更是全天候状态打点画像特征(隐私)
-				secBase += s * 0.55
-				privBase += s * 0.85
-			case "telemetry_fingerprint":
-				if flow.PCDNKind != "" {
-					secBase += s
-				} else {
-					privBase += s
-				}
-			default:
-				secBase += s
-			}
+			w := projectDetectorAxes(det, flow)
+			secBase += s * w.Security
+			privBase += s * w.Privacy
 			if r != "" && !slices.Contains(reasons, r) {
 				reasons = append(reasons, r)
 			}

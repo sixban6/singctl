@@ -21,3 +21,7 @@ func (s *subhubServerComponent) ExecuteServiceAction(ctx context.Context, action
 	}
 	return component.DispatchServiceAction(ctx, mgr, action, s.UnitName())
 }
+
+func (*subhubServerComponent) InstalledVersion() string {
+	return GetInstalledSubhubVersion()
+}
