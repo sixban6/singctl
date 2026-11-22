@@ -1,4 +1,4 @@
-// 文件职责：提供客户端 WebUI 统一三引擎防劫持 DNS (/api/dns/* 与 /api/adguard/* 兼容别名) 接口、连接遥测采样与生命周期循环。
+// 文件职责：提供客户端 WebUI 统一双引擎防劫持 DNS (/api/dns/* 与 /api/adguard/* 兼容别名) 接口与 SmartDNS 审计日志采集循环。
 package webui
 
 import (
@@ -15,7 +15,6 @@ import (
 	"singctl/internal/constant"
 	"singctl/internal/daemon"
 	"singctl/internal/localdns"
-	"singctl/internal/singbox/clashapi"
 )
 
 func (s *Server) newDNSRegistry(cfg *config.Config) *localdns.Registry {
@@ -45,57 +44,12 @@ func (s *Server) newDNSRegistry(cfg *config.Config) *localdns.Registry {
 		ProbeUpstreamListFunc:   s.opts.DNSProbeUpstreamForTest,
 		ProbeDNSFunc:            s.opts.LocalDNSProbeDNSForTest,
 		ProbeResolutionFunc:     s.opts.LocalDNSProbeResForTest,
-		SyncSingBoxEnhancedFunc: s.opts.LocalDNSSyncSingBoxEnhancedForTest,
 		SyncSingBoxDNSLocalFunc: s.opts.LocalDNSSyncSingBoxDNSLocalForTest,
-		SingBoxRunningFunc:      daemon.IsSingBoxRunning,
 		NowFunc:                 s.now,
-		SingBoxStats:            s.dnsStatsRing,
 		SmartDNSStats:           s.smartDNSStatsRing,
 		SmartDNSTailer:          s.smartDNSTailer,
 	}
 	return localdns.NewRegistry(cfg, deps)
-}
-
-func isBlockedClashConnection(c clashapi.Connection) bool {
-	for _, ch := range c.Chains {
-		lower := strings.ToLower(strings.TrimSpace(ch))
-		if lower == "block" || lower == "reject" {
-			return true
-		}
-	}
-	rule := strings.ToLower(strings.TrimSpace(c.Rule + " " + c.RulePayload))
-	return strings.Contains(rule, "reject") ||
-		strings.Contains(rule, "geosite-ad") ||
-		strings.Contains(rule, "block-builtin-pcdn")
-}
-
-func (s *Server) sampleSingBoxDNSTelemetry(ctx context.Context) {
-	if s == nil || s.clash == nil || s.dnsTelemetry == nil {
-		return
-	}
-	snapCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
-	defer cancel()
-	baseURL, secret, err := s.clash.ResolveEndpoint(snapCtx)
-	if err != nil {
-		return
-	}
-	snap, err := s.clash.ConnectionsAt(snapCtx, baseURL, secret)
-	if err != nil || len(snap.Connections) == 0 {
-		return
-	}
-	events := make([]localdns.DomainEvent, 0, len(snap.Connections))
-	for _, c := range snap.Connections {
-		dom := cmp.Or(strings.TrimSpace(c.Metadata.SniffHost), strings.TrimSpace(c.Metadata.Host))
-		if dom == "" {
-			continue
-		}
-		events = append(events, localdns.DomainEvent{
-			ID:      c.ID,
-			Domain:  dom,
-			Blocked: isBlockedClashConnection(c),
-		})
-	}
-	s.dnsTelemetry.IngestEvents(s.now(), events)
 }
 
 func (s *Server) runDNSTelemetryLoop(ctx context.Context) {
@@ -111,14 +65,8 @@ func (s *Server) runDNSTelemetryLoop(ctx context.Context) {
 		cfg := s.readConfigOrEmpty()
 		reg := s.newDNSRegistry(cfg)
 		active := reg.ActiveEngine()
-		if active == nil {
-			continue
-		}
-		switch active.ID() {
-		case constant.DNSEngineSmartDNS:
+		if active != nil && active.ID() == constant.DNSEngineSmartDNS && active.IsInstalled() {
 			reg.DrainSmartDNSAuditLog()
-		case constant.DNSEngineSingBox:
-			s.sampleSingBoxDNSTelemetry(ctx)
 		}
 	}
 }
@@ -131,9 +79,6 @@ func (s *Server) dnsStatusSummary(ctx context.Context) map[string]any {
 func (s *Server) handleDNSOverviewGet(w http.ResponseWriter, r *http.Request) {
 	cfg := s.readConfigOrEmpty()
 	reg := s.newDNSRegistry(cfg)
-	if active := reg.ActiveEngine(); active != nil && active.ID() == constant.DNSEngineSingBox && !s.opts.SkipAdGuardProbeForTest {
-		s.sampleSingBoxDNSTelemetry(r.Context())
-	}
 	writeJSON(w, http.StatusOK, reg.Overview(r.Context()))
 }
 
@@ -399,29 +344,4 @@ func (s *Server) handleDNSFiltersPost(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = daemon.NotifyReload()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
-
-func (s *Server) handleDNSBlockAAAAPost(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Enabled bool `json:"enabled"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "请求格式错误: "+err.Error())
-		return
-	}
-
-	s.cfgMu.Lock()
-	defer s.cfgMu.Unlock()
-
-	cfg := s.loadMutableConfig()
-	eng := s.newDNSRegistry(cfg).ActiveEngine()
-	if err := eng.SetBlockAAAA(r.Context(), body.Enabled); err != nil {
-		writeJSONError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	_ = daemon.NotifyReload()
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":        true,
-		"blockAAAA": body.Enabled,
-	})
 }

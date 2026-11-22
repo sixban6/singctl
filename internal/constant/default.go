@@ -16,9 +16,8 @@ const (
 	TailscaleMode    = "mode"
 	TailscaleSubnets = "subnets"
 
-	// 客户端三引擎防劫持本地 DNS 标识常量（单一权威归属）。
+	// 客户端双引擎防劫持本地 DNS 标识常量（单一权威归属）。
 	DNSEngineAuto     = "auto"
-	DNSEngineSingBox  = "singbox"
 	DNSEngineAdGuard  = "adguard"
 	DNSEngineSmartDNS = "smartdns"
 

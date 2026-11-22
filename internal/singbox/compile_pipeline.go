@@ -70,7 +70,7 @@ func (d *CompileDoc) MarshalCount() int { return d.marshalCount }
 // defaultConfigCompileStages 按依赖先后顺序定义标准编译阶段：
 // 1. 出站去重 → 2. 策略分组 → 3. 自定义规则/黑名单 → 4. 智能分流预设 →
 // 5. IPv6 孪生规则 → 6. 私网 PTR NXDOMAIN 防环（非 iOS） → 7. 低内存规则集裁剪 →
-// 8. 本地三引擎防劫持 DNS（Linux：AdGuard/SmartDNS 或 sing-box 加强版加密 DoH） →
+// 8. 本地双引擎防劫持 DNS（Linux：AdGuard/SmartDNS 或应急纯 IP 加密 DoH，强制关闭 optimistic） →
 // 9. 日志级别收敛 → 10. Clash API 回环加固（非 iOS） → 11. iOS SFI 沙盒裁剪。
 var defaultConfigCompileStages = []CompileStage{
 	{

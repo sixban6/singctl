@@ -56,9 +56,9 @@ var privateReverseDNSSuffixes = []string{
 func PrivateReverseDNSSuffixes() []string { return slices.Clone(privateReverseDNSSuffixes) }
 
 // PatchDNSLocalJSON 在现有 sing-box 配置 JSON 上无损切换 dns_local 解析器：
-//   - useAdGuard=true : 指向本地 AdGuard Home (udp://127.0.0.1:<dnsPort>) 并关闭 sing-box 重复缓存；
-//   - useAdGuard=false: 恢复为纯 IP 加密 DoH (https://223.5.5.5/dns-query，已获 TProxy output 链豁免)，
-//     确保停用或卸载 AdGuard Home 时全屋网关零断网、无需依赖外部网络重新拉取订阅。
+//   - useAdGuard=true : 指向本地外部防劫持 DNS (udp://127.0.0.1:<dnsPort>) 并强制关闭 sing-box 缓存与乐观解析；
+//   - useAdGuard=false: 切为应急纯 IP 加密 DoH (https://223.5.5.5/dns-query，已获 TProxy output 链豁免)，
+//     同样强制 disable_cache=true、optimistic=false、store_dns=false，杜绝双层缓存与陈旧乐观记录。
 func PatchDNSLocalJSON(rawJSON string, useAdGuard bool, dnsPort int) (string, bool, error) {
 	if strings.TrimSpace(rawJSON) == "" {
 		return rawJSON, false, nil
@@ -71,8 +71,20 @@ func PatchDNSLocalJSON(rawJSON string, useAdGuard bool, dnsPort int) (string, bo
 	if err != nil {
 		return "", false, err
 	}
-	if doc.DNS == nil || len(doc.DNS.Servers) == 0 {
+	if !patchDNSLocalInDoc(doc, useAdGuard, dnsPort) {
 		return rawJSON, false, nil
+	}
+
+	formatted, err := doc.MarshalPretty()
+	if err != nil {
+		return "", false, err
+	}
+	return formatted + "\n", true, nil
+}
+
+func patchDNSLocalInDoc(doc *sboption.Document, useExternal bool, dnsPort int) bool {
+	if doc == nil || doc.DNS == nil || len(doc.DNS.Servers) == 0 {
+		return false
 	}
 
 	targetIdx := -1
@@ -83,11 +95,11 @@ func PatchDNSLocalJSON(rawJSON string, useAdGuard bool, dnsPort int) (string, bo
 		}
 	}
 	if targetIdx < 0 {
-		return rawJSON, false, nil
+		return false
 	}
 
 	var desiredSrv sboption.DNSServer
-	if useAdGuard {
+	if useExternal {
 		desiredSrv = sboption.DNSServer{
 			Tag:        "dns_local",
 			Type:       "udp",
@@ -107,38 +119,38 @@ func PatchDNSLocalJSON(rawJSON string, useAdGuard bool, dnsPort int) (string, bo
 	existingSrv := doc.DNS.Servers[targetIdx]
 	alreadyMatch := dnsServerStructEqual(existingSrv, desiredSrv)
 
-	wantDisableCache := useAdGuard
-	wantOptimistic := !useAdGuard
 	curDisableCache := doc.DNS.DisableCache != nil && *doc.DNS.DisableCache
 	curOptimistic := doc.DNS.Optimistic != nil && *doc.DNS.Optimistic
 	cacheMatch := doc.DNS.DisableCache != nil && doc.DNS.Optimistic != nil &&
-		curDisableCache == wantDisableCache && curOptimistic == wantOptimistic
+		curDisableCache && !curOptimistic
+	if doc.Experimental != nil && doc.Experimental.CacheFile != nil {
+		cf := doc.Experimental.CacheFile
+		if cf.StoreDNS == nil || *cf.StoreDNS {
+			cacheMatch = false
+		}
+		if useExternal && (cf.StoreFakeIP == nil || *cf.StoreFakeIP) {
+			cacheMatch = false
+		}
+	}
 
 	ptrChanged := ensurePrivatePTRBlockRulesInDoc(doc)
 	if alreadyMatch && cacheMatch && !ptrChanged {
-		return rawJSON, false, nil
+		return false
 	}
 
 	if !alreadyMatch || !cacheMatch {
 		doc.DNS.Servers[targetIdx] = desiredSrv
-		doc.DNS.DisableCache = new(wantDisableCache)
-		doc.DNS.Optimistic = new(wantOptimistic)
+		doc.DNS.DisableCache = new(true)
+		doc.DNS.Optimistic = new(false)
 
 		if doc.Experimental != nil && doc.Experimental.CacheFile != nil {
-			if useAdGuard {
-				doc.Experimental.CacheFile.StoreDNS = new(false)
+			doc.Experimental.CacheFile.StoreDNS = new(false)
+			if useExternal {
 				doc.Experimental.CacheFile.StoreFakeIP = new(false)
-			} else {
-				doc.Experimental.CacheFile.StoreDNS = new(true)
 			}
 		}
 	}
-
-	formatted, err := doc.MarshalPretty()
-	if err != nil {
-		return "", false, err
-	}
-	return formatted + "\n", true, nil
+	return true
 }
 
 // InjectPrivatePTRBlockRules 在非 iOS 客户端 sing-box 配置中幂等前置 RFC 6303 私网反查与 DNS-SD 浏览域的本地 NXDOMAIN 规则。
@@ -265,9 +277,9 @@ func SyncLiveSingBoxDNSLocal(ctx context.Context, sbConfigPath, sbWorkConfigPath
 		return false, err
 	}
 	if useAdGuard {
-		log.Success("已平滑热重载 sing-box：dns_local -> 本地 AdGuard Home (127.0.0.1:%d)", dnsPort)
+		log.Success("已平滑热重载 sing-box：dns_local -> 本地防劫持 DNS (127.0.0.1:%d)", dnsPort)
 	} else {
-		log.Success("已平滑热重载 sing-box：dns_local -> 内置纯 IP 加密 DoH (https://%s/dns-query)", defaultFallbackDoHServer)
+		log.Success("已平滑热重载 sing-box：dns_local -> 应急纯 IP 加密 DoH (https://%s/dns-query)", defaultFallbackDoHServer)
 	}
 	return true, nil
 }

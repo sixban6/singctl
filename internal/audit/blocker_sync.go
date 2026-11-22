@@ -101,7 +101,7 @@ func hasActiveBuiltinPCDNRuleSet(rawBytes []byte) bool {
 	return true
 }
 
-// DNSBlockSyncOptions 描述审计黑名单同步至三引擎本地 DNS 时可显式注入的路径与服务管理依赖。
+// DNSBlockSyncOptions 描述审计黑名单同步至双引擎本地 DNS 时可显式注入的路径与服务管理依赖。
 type DNSBlockSyncOptions struct {
 	ConfigPath         string
 	AdGuardBinPath     string
@@ -112,7 +112,7 @@ type DNSBlockSyncOptions struct {
 	ServiceMgr         servicemgr.Manager
 }
 
-// SyncDNSBlockRulesForEngine 按当前活跃本地 DNS 引擎（singbox / smartdns / adguard）路由同步审计封禁列表。
+// SyncDNSBlockRulesForEngine 按当前活跃本地 DNS 引擎（smartdns / adguard）路由同步审计封禁列表。
 func SyncDNSBlockRulesForEngine(
 	ctx context.Context,
 	cfg *config.Config,
@@ -124,8 +124,8 @@ func SyncDNSBlockRulesForEngine(
 	}
 
 	configured := cfg.DNS.GetEngine()
-	// 兼容既有基于临时 AdGuardHome.yaml 路径的单测场景：未显式指定 singbox/smartdns 且注入了自定义 aghConfigPath 时沿用直写 YAML
-	if configured != constant.DNSEngineSingBox && configured != constant.DNSEngineSmartDNS &&
+	// 兼容既有基于临时 AdGuardHome.yaml 路径的单测场景：未显式指定 smartdns 且注入了自定义 aghConfigPath 时沿用直写 YAML
+	if configured != constant.DNSEngineSmartDNS &&
 		opts.AdGuardConfigPath != "" && opts.AdGuardConfigPath != constant.AdGuardConfigFile {
 		if _, err := os.Stat(opts.AdGuardConfigPath); err == nil {
 			_, syncErr := adguard.SyncUserBlockRulesYAML(opts.AdGuardConfigPath, blocks)
@@ -147,8 +147,6 @@ func SyncDNSBlockRulesForEngine(
 	})
 
 	switch configured {
-	case constant.DNSEngineSingBox:
-		return true, "singbox_native", nil
 	case constant.DNSEngineSmartDNS:
 		eng, ok := reg.Get(constant.DNSEngineSmartDNS)
 		if !ok {
@@ -166,8 +164,8 @@ func SyncDNSBlockRulesForEngine(
 		return adguard.NewManager(cfg, opts.ConfigPath).SyncBlockRules(ctx, blocks)
 	default:
 		active := reg.ActiveEngine()
-		if active == nil {
-			return true, "singbox_native", nil
+		if active == nil || !active.IsInstalled() {
+			return false, "not_installed", nil
 		}
 		return active.SyncBlockRules(ctx, blocks)
 	}

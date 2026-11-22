@@ -1,4 +1,4 @@
-// 文件职责：提供三引擎共享的 24 小时有界滑动环形 DNS 统计器与实时连接遥测去重跟踪器。
+// 文件职责：提供 SmartDNS 内存盘逐包审计的 24 小时有界滑动环形 DNS 统计器（零闪存写入、防 OOM 硬上限）。
 package localdns
 
 import (
@@ -37,7 +37,6 @@ type StatsRing struct {
 	mu                  sync.Mutex
 	maxDomainsPerBucket int
 	buckets             [statsRingBuckets]hourBucket
-	fallbackLatencyMs   float64
 }
 
 // NewStatsRing 按低内存或标准模式创建 24 小时统计环形缓冲区。
@@ -182,10 +181,6 @@ func (r *StatsRing) Snapshot(now time.Time, fallbackAvgLatencyMs float64) adguar
 			blockedTotals[dom] += cnt
 		}
 	}
-	fallback := fallbackAvgLatencyMs
-	if fallback <= 0 {
-		fallback = r.fallbackLatencyMs
-	}
 	r.mu.Unlock()
 
 	out.NumDNSQueries = totalQueries
@@ -196,8 +191,8 @@ func (r *StatsRing) Snapshot(now time.Time, fallbackAvgLatencyMs float64) adguar
 	}
 	if latencySamples > 0 {
 		out.AvgProcessingMs = math.Round((latencySumMs/float64(latencySamples))*10) / 10
-	} else if fallback > 0 && !math.IsNaN(fallback) && !math.IsInf(fallback, 0) {
-		out.AvgProcessingMs = math.Round(fallback*10) / 10
+	} else if fallbackAvgLatencyMs > 0 && !math.IsNaN(fallbackAvgLatencyMs) && !math.IsInf(fallbackAvgLatencyMs, 0) {
+		out.AvgProcessingMs = math.Round(fallbackAvgLatencyMs*10) / 10
 	}
 
 	out.TopQueriedDomains = topDomainItems(queriedTotals, maxTopQueriedDomains)
@@ -237,86 +232,4 @@ func (r *StatsRing) Reset() {
 	for i := range r.buckets {
 		r.buckets[i] = hourBucket{}
 	}
-}
-
-// SetFallbackLatencyMs 缓存最近一次上游探测耗时，供无逐包延时的遥测模式展示。
-func (r *StatsRing) SetFallbackLatencyMs(ms float64) {
-	if r == nil || ms <= 0 || math.IsNaN(ms) || math.IsInf(ms, 0) {
-		return
-	}
-	r.mu.Lock()
-	r.fallbackLatencyMs = ms
-	r.mu.Unlock()
-}
-
-// FallbackLatencyMs 返回缓存的参考平均耗时（毫秒）。
-func (r *StatsRing) FallbackLatencyMs() float64 {
-	if r == nil {
-		return 0
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.fallbackLatencyMs
-}
-
-// DomainEvent 描述一条来自 sing-box 连接遥测的域名访问或拦截事件。
-type DomainEvent struct {
-	ID      string
-	Domain  string
-	Blocked bool
-}
-
-// DomainTelemetryTracker 对活跃连接 ID 执行有界去重，并将新增域名事件喂入 StatsRing。
-type DomainTelemetryTracker struct {
-	mu      sync.Mutex
-	ring    *StatsRing
-	maxSeen int
-	seen    map[string]struct{}
-}
-
-// NewDomainTelemetryTracker 创建绑定到指定 StatsRing 的连接域名增量遥测器。
-func NewDomainTelemetryTracker(ring *StatsRing, maxSeen int) *DomainTelemetryTracker {
-	if maxSeen <= 0 {
-		maxSeen = 1024
-	}
-	return &DomainTelemetryTracker{
-		ring:    ring,
-		maxSeen: maxSeen,
-		seen:    make(map[string]struct{}, min(128, maxSeen)),
-	}
-}
-
-// IngestEvents 消费当前活跃连接快照中的新增事件并返回本次新写入条数。
-func (t *DomainTelemetryTracker) IngestEvents(now time.Time, events []DomainEvent) int {
-	if t == nil || t.ring == nil || len(events) == 0 {
-		return 0
-	}
-	if now.IsZero() {
-		now = time.Now()
-	}
-
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	nextSeen := make(map[string]struct{}, min(len(events), t.maxSeen))
-	ingested := 0
-	for _, ev := range events {
-		id := strings.TrimSpace(ev.ID)
-		if id != "" {
-			if len(nextSeen) < t.maxSeen {
-				nextSeen[id] = struct{}{}
-			}
-			if _, already := t.seen[id]; already {
-				continue
-			}
-		}
-		dom := normalizeStatsDomain(ev.Domain)
-		if dom == "" {
-			continue
-		}
-		t.ring.Record(now, dom, ev.Blocked, 0)
-		ingested++
-	}
-	t.seen = nextSeen
-	return ingested
 }

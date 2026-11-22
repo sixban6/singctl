@@ -1,4 +1,4 @@
-// 文件职责：提供三引擎防劫持 DNS 声明式注册表、活跃引擎路由、状态聚合与 sing-box 探测桥接。
+// 文件职责：提供双引擎防劫持 DNS（SmartDNS / AdGuard Home）声明式注册表、活跃引擎路由、状态聚合与 sing-box 探测桥接。
 package localdns
 
 import (
@@ -17,45 +17,39 @@ import (
 )
 
 var engineOrder = []string{
-	constant.DNSEngineSingBox,
 	constant.DNSEngineSmartDNS,
 	constant.DNSEngineAdGuard,
 }
 
-// Registry 维护 singbox / smartdns / adguard 三引擎声明式注册与统一调度。
+// Registry 维护 smartdns / adguard 双引擎声明式注册与统一调度。
 type Registry struct {
 	cfg     *config.Config
 	deps    EngineDeps
 	engines map[string]Engine
 	order   []string
-	sbEng   *SingBoxEngine
 	sdEng   *SmartDNSEngine
 	aghEng  *AdGuardEngine
 }
 
-// NewRegistry 创建并注册三引擎防劫持 DNS 注册表。
+// NewRegistry 创建并注册双引擎防劫持 DNS 注册表。
 func NewRegistry(cfg *config.Config, deps EngineDeps) *Registry {
 	if cfg == nil {
 		cfg = &config.Config{}
 	}
-	sbEng := NewSingBoxEngine(cfg, deps)
 	sdEng := NewSmartDNSEngine(cfg, deps)
 	aghEng := NewAdGuardEngine(cfg, deps)
 
-	r := &Registry{
-		cfg:   cfg,
-		deps:  deps,
-		sbEng: sbEng,
-		sdEng: sdEng,
+	return &Registry{
+		cfg:    cfg,
+		deps:   deps,
+		sdEng:  sdEng,
 		aghEng: aghEng,
 		engines: map[string]Engine{
-			constant.DNSEngineSingBox:  sbEng,
 			constant.DNSEngineSmartDNS: sdEng,
 			constant.DNSEngineAdGuard:  aghEng,
 		},
 		order: engineOrder,
 	}
-	return r
 }
 
 // Get 按引擎标识获取对应实现。
@@ -81,7 +75,7 @@ func (r *Registry) All() []Engine {
 	return out
 }
 
-// InstalledMap 返回三引擎的安装状态映射。
+// InstalledMap 返回双引擎的安装状态映射。
 func (r *Registry) InstalledMap() map[string]bool {
 	all := r.All()
 	out := make(map[string]bool, len(all))
@@ -102,13 +96,13 @@ func (r *Registry) ResolveSelection() SelectionResult {
 	return ResolveActiveEngine(r.cfg.DNS.GetEngine(), r.cfg.DNS.IsEnabled(), r.ProbeHardware(), r.InstalledMap())
 }
 
-// ActiveEngine 返回当前活跃生效的 DNS 引擎实例（兜底始终返回 singbox）。
+// ActiveEngine 返回当前活跃生效的 DNS 引擎实例（始终为 smartdns 或 adguard）。
 func (r *Registry) ActiveEngine() Engine {
 	sel := r.ResolveSelection()
 	if eng, ok := r.engines[sel.ActiveEngine]; ok {
 		return eng
 	}
-	return r.sbEng
+	return r.sdEng
 }
 
 // DrainSmartDNSAuditLog 增量拉取 SmartDNS 内存盘审计日志喂入 24h 环形统计器。
@@ -123,6 +117,16 @@ func (r *Registry) sbConfigPath() string {
 	return cmp.Or(strings.TrimSpace(r.deps.SingBoxConfigPath), constant.SingBoxConfigFile)
 }
 
+func (r *Registry) sbWorkConfigPath() string {
+	if strings.TrimSpace(r.deps.SingBoxWorkConfigPath) != "" {
+		return strings.TrimSpace(r.deps.SingBoxWorkConfigPath)
+	}
+	if strings.TrimSpace(r.deps.SingBoxConfigPath) == "" || strings.TrimSpace(r.deps.SingBoxConfigPath) == constant.SingBoxConfigFile {
+		return constant.SingBoxWorkConfigFile
+	}
+	return ""
+}
+
 func (r *Registry) buildEngineOptions(ctx context.Context, sel SelectionResult, activeID string, activeVersion string) []EngineOption {
 	opts := make([]EngineOption, 0, len(r.order))
 	for _, id := range r.order {
@@ -133,7 +137,7 @@ func (r *Registry) buildEngineOptions(ctx context.Context, sel SelectionResult, 
 		ver := ""
 		if id == activeID {
 			ver = activeVersion
-		} else if installed && id != constant.DNSEngineSingBox {
+		} else if installed {
 			ver = eng.Status(ctx).Version
 		}
 		opts = append(opts, EngineOption{
@@ -153,12 +157,12 @@ func (r *Registry) buildEngineOptions(ctx context.Context, sel SelectionResult, 
 	return opts
 }
 
-// Overview 聚合当前活跃引擎完整工作台快照与三引擎卡片状态。
+// Overview 聚合当前活跃引擎完整工作台快照与双引擎下拉选项状态。
 func (r *Registry) Overview(ctx context.Context) *OverviewSnapshot {
 	sel := r.ResolveSelection()
 	active := r.engines[sel.ActiveEngine]
 	if active == nil {
-		active = r.sbEng
+		active = r.sdEng
 	}
 
 	linked, _ := singbox.InspectSingBoxDNSLocal(r.sbConfigPath())
@@ -178,6 +182,7 @@ func (r *Registry) Overview(ctx context.Context) *OverviewSnapshot {
 	snap.ActiveEngineLabel = active.Meta().Name
 	snap.RecommendedEngine = sel.RecommendedEngine
 	snap.RecommendedReason = sel.RecommendedReason
+	snap.FallbackDoHActive = !snap.Installed || !snap.Running || !r.cfg.DNS.IsEnabled() || !linked
 	snap.Capabilities = active.Capabilities()
 	snap.Engines = r.buildEngineOptions(ctx, sel, active.ID(), snap.Version)
 	return snap
@@ -188,13 +193,11 @@ func (r *Registry) StatusSummary(ctx context.Context) map[string]any {
 	sel := r.ResolveSelection()
 	active := r.engines[sel.ActiveEngine]
 	if active == nil {
-		active = r.sbEng
+		active = r.sdEng
 	}
 	st := active.Status(ctx)
 	linked, _ := singbox.InspectSingBoxDNSLocal(r.sbConfigPath())
-	if active.ID() == constant.DNSEngineSingBox {
-		linked = !linked
-	}
+	fallbackDoH := !st.Installed || !st.Running || !r.cfg.DNS.IsEnabled() || !linked
 	aghWarn := r.aghEng.LowMemoryGuardWarning()
 
 	return map[string]any{
@@ -205,6 +208,7 @@ func (r *Registry) StatusSummary(ctx context.Context) map[string]any {
 		"dnsHealthy":        st.DNSHealthy,
 		"webHealthy":        st.WebHealthy,
 		"singboxLinked":     linked,
+		"fallbackDoHActive": fallbackDoH,
 		"lowMemoryBlocked":  aghWarn != "",
 		"lowMemoryWarning":  aghWarn,
 		"version":           st.Version,

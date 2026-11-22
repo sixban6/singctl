@@ -18,13 +18,15 @@ func TestClientDNSConfig_EngineValidationAndDefaults(t *testing.T) {
 		raw  string
 		want bool
 	}{
+		{"", true},
+		{"   ", true},
 		{constant.DNSEngineAuto, true},
-		{constant.DNSEngineSingBox, true},
 		{constant.DNSEngineSmartDNS, true},
 		{constant.DNSEngineAdGuard, true},
-		{"  SINGBOX ", true},
 		{"SmartDNS", true},
-		{"", false},
+		{"  ADGUARD ", true},
+		{"singbox", false},
+		{"  SINGBOX ", false},
 		{"bind9", false},
 		{"dnsmasq", false},
 		{"singbox;rm -rf /", false},
@@ -58,6 +60,14 @@ func TestClientDNSConfig_EngineValidationAndDefaults(t *testing.T) {
 	d.SetEngine("invalid-engine")
 	if got := d.GetEngine(); got != constant.DNSEngineAuto {
 		t.Fatalf("invalid SetEngine should normalize to auto, got %q", got)
+	}
+	d.SetEngine("singbox")
+	if got := d.GetEngine(); got != constant.DNSEngineAuto {
+		t.Fatalf("legacy singbox SetEngine should normalize to auto, got %q", got)
+	}
+	d.Engine = "singbox"
+	if got := d.GetEngine(); got != constant.DNSEngineAuto {
+		t.Fatalf("legacy singbox Engine field should normalize to auto, got %q", got)
 	}
 	d.Engine = "bogus"
 	if got := d.GetEngine(); got != constant.DNSEngineAuto {
@@ -145,8 +155,8 @@ dns:
 	if err != nil {
 		t.Fatalf("config.Load failed: %v", err)
 	}
-	if cfg.DNS.GetEngine() != constant.DNSEngineSingBox {
-		t.Fatalf("Engine = %q, want singbox", cfg.DNS.GetEngine())
+	if cfg.DNS.GetEngine() != constant.DNSEngineAuto {
+		t.Fatalf("legacy YAML engine:singbox should normalize to auto, got %q", cfg.DNS.GetEngine())
 	}
 	if cfg.DNS.GetUpstreamMode() != config.DNSUpstreamModeParallel {
 		t.Fatalf("UpstreamMode = %q, want parallel", cfg.DNS.GetUpstreamMode())

@@ -1,4 +1,4 @@
-// 文件职责：验证三引擎防劫持 DNS 硬件准入评估、自动选型策略与运行态活跃引擎解析边界契约。
+// 文件职责：验证双引擎防劫持 DNS（SmartDNS / AdGuard Home）硬件准入评估、自动选型策略与运行态活跃引擎解析边界契约。
 package localdns_test
 
 import (
@@ -11,7 +11,7 @@ import (
 	"singctl/internal/localdns"
 )
 
-func TestRecommendEngine_HardwareMatrix(t *testing.T) {
+func TestRecommendEngine_DualEngineHardwareMatrix(t *testing.T) {
 	const mib = 1024 * 1024
 
 	cases := []struct {
@@ -28,109 +28,109 @@ func TestRecommendEngine_HardwareMatrix(t *testing.T) {
 		wantSmartMemBlock  bool
 	}{
 		{
-			name:               "high_spec_fresh_recommends_adguard_active_singbox",
-			hw:                 localdns.HardwareProfile{TotalRAMBytes: 2048 * mib, AvailRAMBytes: 1400 * mib, AvailDiskMB: 512},
-			installed:          map[string]bool{},
-			wantRecommended:    constant.DNSEngineAdGuard,
-			wantActive:         constant.DNSEngineSingBox,
-			wantAGHEligible:    true,
-			wantSmartEligible:  true,
+			name:              "high_spec_fresh_recommends_adguard",
+			hw:                localdns.HardwareProfile{TotalRAMBytes: 2048 * mib, AvailRAMBytes: 1400 * mib, AvailDiskMB: 512},
+			installed:         map[string]bool{},
+			wantRecommended:   constant.DNSEngineAdGuard,
+			wantActive:        constant.DNSEngineAdGuard,
+			wantAGHEligible:   true,
+			wantSmartEligible: true,
 		},
 		{
-			name:               "n60pro_480m_total_205m_avail_50mb_disk_recommends_smartdns",
-			hw:                 localdns.HardwareProfile{TotalRAMBytes: 491040 * 1024, AvailRAMBytes: 210260 * 1024, AvailDiskMB: 50},
-			installed:          map[string]bool{},
-			wantRecommended:    constant.DNSEngineSmartDNS,
-			wantActive:         constant.DNSEngineSingBox,
-			wantAGHEligible:    false,
-			wantAGHDiskBlock:   true,
-			wantAGHMemBlock:    true,
-			wantSmartEligible:  true,
+			name:              "n60pro_480m_total_205m_avail_50mb_disk_recommends_smartdns",
+			hw:                localdns.HardwareProfile{TotalRAMBytes: 491040 * 1024, AvailRAMBytes: 210260 * 1024, AvailDiskMB: 50},
+			installed:         map[string]bool{},
+			wantRecommended:   constant.DNSEngineSmartDNS,
+			wantActive:        constant.DNSEngineSmartDNS,
+			wantAGHEligible:   false,
+			wantAGHDiskBlock:  true,
+			wantAGHMemBlock:   true,
+			wantSmartEligible: true,
 		},
 		{
-			name:               "ax3000t_256m_recommends_singbox",
-			hw:                 localdns.HardwareProfile{TotalRAMBytes: 256 * mib, AvailRAMBytes: 120 * mib, AvailDiskMB: 40},
-			installed:          map[string]bool{},
-			wantRecommended:    constant.DNSEngineSingBox,
-			wantActive:         constant.DNSEngineSingBox,
-			wantAGHEligible:    false,
-			wantAGHDiskBlock:   true,
-			wantAGHMemBlock:    true,
-			wantSmartEligible:  false,
-			wantSmartMemBlock:  true,
+			name:              "ax3000t_256m_recommends_smartdns_marked_ineligible",
+			hw:                localdns.HardwareProfile{TotalRAMBytes: 256 * mib, AvailRAMBytes: 120 * mib, AvailDiskMB: 40},
+			installed:         map[string]bool{},
+			wantRecommended:   constant.DNSEngineSmartDNS,
+			wantActive:        constant.DNSEngineSmartDNS,
+			wantAGHEligible:   false,
+			wantAGHDiskBlock:  true,
+			wantAGHMemBlock:   true,
+			wantSmartEligible: false,
+			wantSmartMemBlock: true,
 		},
 		{
-			name:               "tiny_flash_8mb_blocks_both_external_even_with_2gb_ram",
+			name:               "tiny_flash_8mb_blocks_both_recommends_smartdns_ineligible",
 			hw:                 localdns.HardwareProfile{TotalRAMBytes: 2048 * mib, AvailRAMBytes: 1500 * mib, AvailDiskMB: 8},
 			installed:          map[string]bool{},
-			wantRecommended:    constant.DNSEngineSingBox,
-			wantActive:         constant.DNSEngineSingBox,
+			wantRecommended:    constant.DNSEngineSmartDNS,
+			wantActive:         constant.DNSEngineSmartDNS,
 			wantAGHEligible:    false,
 			wantAGHDiskBlock:   true,
 			wantSmartEligible:  false,
 			wantSmartDiskBlock: true,
 		},
 		{
-			name:               "exact_adguard_boundary_512m_not_gt_falls_to_smartdns",
-			hw:                 localdns.HardwareProfile{TotalRAMBytes: 512 * mib, AvailRAMBytes: 256 * mib, AvailDiskMB: 80},
-			installed:          map[string]bool{},
-			wantRecommended:    constant.DNSEngineSmartDNS,
-			wantActive:         constant.DNSEngineSingBox,
-			wantAGHEligible:    false,
-			wantAGHMemBlock:    true,
-			wantSmartEligible:  true,
+			name:              "exact_adguard_boundary_512m_not_gt_falls_to_smartdns",
+			hw:                localdns.HardwareProfile{TotalRAMBytes: 512 * mib, AvailRAMBytes: 256 * mib, AvailDiskMB: 80},
+			installed:         map[string]bool{},
+			wantRecommended:   constant.DNSEngineSmartDNS,
+			wantActive:        constant.DNSEngineSmartDNS,
+			wantAGHEligible:   false,
+			wantAGHMemBlock:   true,
+			wantSmartEligible: true,
 		},
 		{
-			name:               "exact_smartdns_lower_boundary_288m_not_gt_falls_to_singbox",
-			hw:                 localdns.HardwareProfile{TotalRAMBytes: 288 * mib, AvailRAMBytes: 128 * mib, AvailDiskMB: 10},
-			installed:          map[string]bool{},
-			wantRecommended:    constant.DNSEngineSingBox,
-			wantActive:         constant.DNSEngineSingBox,
-			wantAGHEligible:    false,
-			wantAGHDiskBlock:   true,
-			wantAGHMemBlock:    true,
-			wantSmartEligible:  false,
-			wantSmartMemBlock:  true,
+			name:              "exact_smartdns_lower_boundary_288m_marks_smartdns_ineligible",
+			hw:                localdns.HardwareProfile{TotalRAMBytes: 288 * mib, AvailRAMBytes: 128 * mib, AvailDiskMB: 10},
+			installed:         map[string]bool{},
+			wantRecommended:   constant.DNSEngineSmartDNS,
+			wantActive:        constant.DNSEngineSmartDNS,
+			wantAGHEligible:   false,
+			wantAGHDiskBlock:  true,
+			wantAGHMemBlock:   true,
+			wantSmartEligible: false,
+			wantSmartMemBlock: true,
 		},
 		{
-			name:               "exact_smartdns_pass_289m_128m_10mb",
-			hw:                 localdns.HardwareProfile{TotalRAMBytes: 289 * mib, AvailRAMBytes: 128 * mib, AvailDiskMB: 10},
-			installed:          map[string]bool{},
-			wantRecommended:    constant.DNSEngineSmartDNS,
-			wantActive:         constant.DNSEngineSingBox,
-			wantAGHEligible:    false,
-			wantAGHDiskBlock:   true,
-			wantAGHMemBlock:    true,
-			wantSmartEligible:  true,
+			name:              "exact_smartdns_pass_289m_128m_10mb",
+			hw:                localdns.HardwareProfile{TotalRAMBytes: 289 * mib, AvailRAMBytes: 128 * mib, AvailDiskMB: 10},
+			installed:         map[string]bool{},
+			wantRecommended:   constant.DNSEngineSmartDNS,
+			wantActive:        constant.DNSEngineSmartDNS,
+			wantAGHEligible:   false,
+			wantAGHDiskBlock:  true,
+			wantAGHMemBlock:   true,
+			wantSmartEligible: true,
 		},
 		{
-			name:               "legacy_installed_adguard_preserved",
-			hw:                 localdns.HardwareProfile{TotalRAMBytes: 1024 * mib, AvailRAMBytes: 600 * mib, AvailDiskMB: 200},
-			installed:          map[string]bool{constant.DNSEngineAdGuard: true, constant.DNSEngineSmartDNS: true},
-			wantRecommended:    constant.DNSEngineAdGuard,
-			wantActive:         constant.DNSEngineAdGuard,
-			wantAGHEligible:    true,
-			wantSmartEligible:  true,
+			name:              "legacy_installed_adguard_preserved",
+			hw:                localdns.HardwareProfile{TotalRAMBytes: 1024 * mib, AvailRAMBytes: 600 * mib, AvailDiskMB: 200},
+			installed:         map[string]bool{constant.DNSEngineAdGuard: true, constant.DNSEngineSmartDNS: true},
+			wantRecommended:   constant.DNSEngineAdGuard,
+			wantActive:        constant.DNSEngineAdGuard,
+			wantAGHEligible:   true,
+			wantSmartEligible: true,
 		},
 		{
-			name:               "legacy_installed_smartdns_preserved_on_n60pro",
-			hw:                 localdns.HardwareProfile{TotalRAMBytes: 491040 * 1024, AvailRAMBytes: 210260 * 1024, AvailDiskMB: 45},
-			installed:          map[string]bool{constant.DNSEngineSmartDNS: true},
-			wantRecommended:    constant.DNSEngineSmartDNS,
-			wantActive:         constant.DNSEngineSmartDNS,
-			wantAGHEligible:    false,
-			wantAGHDiskBlock:   true,
-			wantAGHMemBlock:    true,
-			wantSmartEligible:  true,
+			name:              "legacy_installed_smartdns_preserved_on_n60pro",
+			hw:                localdns.HardwareProfile{TotalRAMBytes: 491040 * 1024, AvailRAMBytes: 210260 * 1024, AvailDiskMB: 45},
+			installed:         map[string]bool{constant.DNSEngineSmartDNS: true},
+			wantRecommended:   constant.DNSEngineSmartDNS,
+			wantActive:        constant.DNSEngineSmartDNS,
+			wantAGHEligible:   false,
+			wantAGHDiskBlock:  true,
+			wantAGHMemBlock:   true,
+			wantSmartEligible: true,
 		},
 		{
-			name:               "unknown_nonlinux_ram_and_disk_recommends_adguard",
-			hw:                 localdns.HardwareProfile{DiskUnknown: true},
-			installed:          map[string]bool{},
-			wantRecommended:    constant.DNSEngineAdGuard,
-			wantActive:         constant.DNSEngineSingBox,
-			wantAGHEligible:    true,
-			wantSmartEligible:  true,
+			name:              "unknown_nonlinux_ram_and_disk_recommends_adguard",
+			hw:                localdns.HardwareProfile{DiskUnknown: true},
+			installed:         map[string]bool{},
+			wantRecommended:   constant.DNSEngineAdGuard,
+			wantActive:        constant.DNSEngineAdGuard,
+			wantAGHEligible:   true,
+			wantSmartEligible: true,
 		},
 	}
 
@@ -147,9 +147,11 @@ func TestRecommendEngine_HardwareMatrix(t *testing.T) {
 				t.Fatal("RecommendedReason must not be empty")
 			}
 
-			sbElig := res.Eligibility[constant.DNSEngineSingBox]
-			if !sbElig.Eligible || sbElig.DiskBlocked || sbElig.MemoryBlocked {
-				t.Fatalf("singbox must always be eligible, got %+v", sbElig)
+			if len(res.Eligibility) != 2 {
+				t.Fatalf("expected exactly 2 eligibility entries (smartdns + adguard), got %d: %+v", len(res.Eligibility), res.Eligibility)
+			}
+			if _, hasSB := res.Eligibility["singbox"]; hasSB {
+				t.Fatal("eligibility map must NOT contain removed singbox engine")
 			}
 
 			aghElig := res.Eligibility[constant.DNSEngineAdGuard]
@@ -171,7 +173,7 @@ func TestRecommendEngine_HardwareMatrix(t *testing.T) {
 	}
 }
 
-func TestResolveActiveEngine_PreferencesAndFallbacks(t *testing.T) {
+func TestResolveActiveEngine_DualEnginePreferencesAndLegacyCompat(t *testing.T) {
 	const mib = 1024 * 1024
 	highHW := localdns.HardwareProfile{TotalRAMBytes: 2048 * mib, AvailRAMBytes: 1200 * mib, AvailDiskMB: 500}
 
@@ -183,25 +185,39 @@ func TestResolveActiveEngine_PreferencesAndFallbacks(t *testing.T) {
 		wantActive string
 	}{
 		{
-			name:       "explicit_singbox_overrides_installed_adguard",
-			configured: constant.DNSEngineSingBox,
+			name:       "legacy_singbox_normalizes_to_auto_preserving_installed_adguard",
+			configured: "singbox",
 			dnsEnabled: true,
 			installed:  map[string]bool{constant.DNSEngineAdGuard: true},
-			wantActive: constant.DNSEngineSingBox,
+			wantActive: constant.DNSEngineAdGuard,
 		},
 		{
-			name:       "disabled_dns_falls_back_to_singbox",
+			name:       "legacy_singbox_uninstalled_high_hw_uses_recommended_adguard",
+			configured: "singbox",
+			dnsEnabled: true,
+			installed:  map[string]bool{},
+			wantActive: constant.DNSEngineAdGuard,
+		},
+		{
+			name:       "disabled_dns_keeps_configured_dual_engine_id",
 			configured: constant.DNSEngineAdGuard,
 			dnsEnabled: false,
 			installed:  map[string]bool{constant.DNSEngineAdGuard: true},
-			wantActive: constant.DNSEngineSingBox,
+			wantActive: constant.DNSEngineAdGuard,
 		},
 		{
-			name:       "configured_smartdns_not_installed_falls_back_to_singbox",
+			name:       "configured_smartdns_not_installed_keeps_smartdns_for_uninstalled_view",
 			configured: constant.DNSEngineSmartDNS,
 			dnsEnabled: true,
 			installed:  map[string]bool{},
-			wantActive: constant.DNSEngineSingBox,
+			wantActive: constant.DNSEngineSmartDNS,
+		},
+		{
+			name:       "configured_adguard_not_installed_keeps_adguard_for_uninstalled_view",
+			configured: constant.DNSEngineAdGuard,
+			dnsEnabled: true,
+			installed:  map[string]bool{constant.DNSEngineSmartDNS: true},
+			wantActive: constant.DNSEngineAdGuard,
 		},
 		{
 			name:       "configured_smartdns_installed_activates_smartdns",
