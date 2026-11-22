@@ -314,3 +314,72 @@ func TestComputeSingBoxMemoryEnv_And_UnitSpec_And_LogCap(t *testing.T) {
 		wg.Wait()
 	})
 }
+
+func TestPruneLowMemoryRuleSetsJSON(t *testing.T) {
+	t.Run("empty_and_whitespace_noop", func(t *testing.T) {
+		for _, in := range []string{"", "   \n\t  "} {
+			out, changed, err := singbox.PruneLowMemoryRuleSetsJSON(in)
+			if err != nil || changed || out != in {
+				t.Fatalf("input %q: got (%q, %v, %v), want (%q, false, nil)", in, out, changed, err, in)
+			}
+		}
+	})
+
+	t.Run("invalid_json_returns_error", func(t *testing.T) {
+		if _, _, err := singbox.PruneLowMemoryRuleSetsJSON("{bad-json"); err == nil {
+			t.Fatal("expected error for invalid JSON")
+		}
+	})
+
+	t.Run("no_geosite_ad2_returns_unchanged", func(t *testing.T) {
+		in := `{"route":{"rule_set":[{"tag":"geosite-ad1","type":"remote","format":"binary","url":"https://example.com/ad1.srs"}]}}`
+		out, changed, err := singbox.PruneLowMemoryRuleSetsJSON(in)
+		if err != nil || changed || out != in {
+			t.Fatalf("expected unchanged when geosite-ad2 absent, got changed=%v err=%v", changed, err)
+		}
+	})
+
+	t.Run("prunes_geosite_ad2_from_dns_route_and_ruleset_preserving_ad1", func(t *testing.T) {
+		in := `{
+			"dns": {
+				"servers": [{"tag": "dns_local", "type": "udp", "server": "223.5.5.5"}],
+				"rules": [
+					{"rule_set": ["geosite-ad1", "geosite-ad2"], "action": "reject"},
+					{"rule_set": "geosite-ad2", "action": "reject"},
+					{"type": "logical", "mode": "or", "rules": [{"rule_set": ["geosite-ad2"]}], "action": "reject"},
+					{"rule_set": "geosite-cn", "server": "dns_local"}
+				]
+			},
+			"route": {
+				"rules": [
+					{"action": "sniff"},
+					{"rule_set": ["geosite-ad1", "geosite-ad2"], "action": "reject"},
+					{"rule_set": "geosite-ad2", "action": "reject"},
+					{"rule_set": "geosite-cn", "outbound": "#DC"}
+				],
+				"rule_set": [
+					{"tag": "geosite-ad1", "type": "remote", "format": "binary", "url": "https://example.com/ad1.srs"},
+					{"tag": "geosite-ad2", "type": "remote", "format": "binary", "url": "https://example.com/ad2.srs"},
+					{"tag": "geosite-cn", "type": "remote", "format": "binary", "url": "https://example.com/cn.srs"}
+				]
+			}
+		}`
+		out, changed, err := singbox.PruneLowMemoryRuleSetsJSON(in)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !changed {
+			t.Fatal("expected changed=true when geosite-ad2 present")
+		}
+		if strings.Contains(out, "geosite-ad2") {
+			t.Fatalf("expected geosite-ad2 completely removed, got:\n%s", out)
+		}
+		if !strings.Contains(out, "geosite-ad1") || !strings.Contains(out, "geosite-cn") {
+			t.Fatalf("expected geosite-ad1 and geosite-cn preserved, got:\n%s", out)
+		}
+		out2, changed2, err2 := singbox.PruneLowMemoryRuleSetsJSON(out)
+		if err2 != nil || changed2 || out2 != out {
+			t.Fatalf("expected second call idempotent, got changed=%v err=%v", changed2, err2)
+		}
+	})
+}

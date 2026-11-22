@@ -12,8 +12,43 @@ import (
 	"singctl/internal/common/proc"
 	"singctl/internal/constant"
 	"singctl/internal/logger"
+	"strings"
 	"time"
 )
+
+// BuildDaemonSpawnEnv 构造守护后台子进程的环境变量：
+// 1. 去重设置 SINGCTL_DAEMONIZED=1；
+// 2. 若父进程由 WebUI 触发（SINGCTL_FROM_WEBUI=1）或已携带 SINGCTL_DEFER_WEB_HANDOFF=1，
+//    则显式透传 SINGCTL_DEFER_WEB_HANDOFF=1，让合体守护进程礼貌等待独立 WebUI 完成 HTTP 推流后让渡端口。
+func BuildDaemonSpawnEnv(parentEnv []string) []string {
+	out := make([]string, 0, len(parentEnv)+2)
+	deferHandoff := false
+	for _, kv := range parentEnv {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok {
+			out = append(out, kv)
+			continue
+		}
+		if k == EnvFromWebUI && v == "1" {
+			deferHandoff = true
+		}
+		if k == EnvDeferWebHandoff {
+			if v == "1" {
+				deferHandoff = true
+			}
+			continue
+		}
+		if k == envDaemonized {
+			continue
+		}
+		out = append(out, kv)
+	}
+	out = append(out, envDaemonized+"=1")
+	if deferHandoff {
+		out = append(out, EnvDeferWebHandoff+"=1")
+	}
+	return out
+}
 
 func (d *Daemon) closeLogFile() {
 	d.logMu.Lock()
@@ -28,7 +63,7 @@ func (d *Daemon) closeLogFile() {
 func (d *Daemon) spawn() error {
 	// Intentional bare exec.Command: detached background daemon child must outlive spawn().
 	cmd := exec.Command(os.Args[0], os.Args[1:]...)
-	cmd.Env = append(os.Environ(), envDaemonized+"=1")
+	cmd.Env = BuildDaemonSpawnEnv(os.Environ())
 
 	proc.SetDetachedAttr(cmd)
 

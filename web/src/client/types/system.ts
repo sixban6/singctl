@@ -90,6 +90,8 @@ export interface ClientBackupSummary {
   hasGroups: boolean;
   hasAdGuard: boolean;
   hasSingBox: boolean;
+  hasSingBoxBase?: boolean;
+  ruleSetCount?: number;
 }
 
 export interface ClientBackupExportResponse {
@@ -104,6 +106,8 @@ export interface ClientBackupRestoreResponse {
   ok: boolean;
   message: string;
   restoredItems: string[];
+  ruleSetCount?: number;
+  adaptations?: string[];
 }
 
 export interface ActionStreamEvent {

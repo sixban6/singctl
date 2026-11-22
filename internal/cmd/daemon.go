@@ -4,6 +4,7 @@ package cmd
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -21,15 +22,25 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// DaemonStartDeps 显式注入守护进程启动时的宿主内存探测、环境变量与路径覆盖（零全局状态篡改）。
+const (
+	defaultWebHandoffTimeout      = 12 * time.Second
+	defaultWebHandoffPollInterval = 100 * time.Millisecond
+)
+
+// DaemonStartDeps 显式注入守护进程启动时的宿主内存探测、环境变量、交接策略与路径覆盖（零全局状态篡改）。
 type DaemonStartDeps struct {
-	ReadMemInfo     func() (sysinfo.MemInfo, error)
-	UnifiedEnvValue *string
-	WebListen       string
-	WebPassword     string
-	Paths           daemon.Paths
-	SkipSignalSetup bool
-	OnWebReady      func(listenAddr string)
+	ReadMemInfo            func() (sysinfo.MemInfo, error)
+	UnifiedEnvValue        *string
+	WebListen              string
+	WebPassword            string
+	Paths                  daemon.Paths
+	SkipSignalSetup        bool
+	OnWebReady             func(listenAddr string)
+	DeferWebHandoff        *bool
+	IsStandaloneWebRunning func() bool
+	StopStandaloneWeb      func() (bool, error)
+	WebHandoffTimeout      time.Duration
+	WebHandoffPollInterval time.Duration
 }
 
 // BuildUnifiedDaemon 装配守护进程实例；当命中低内存设备或 SINGCTL_UNIFIED_DAEMON=1 时自动内嵌共享 config.Store 的 WebUI。
@@ -83,14 +94,12 @@ func BuildUnifiedDaemon(cfg *config.Config, configPath, ver string, deps DaemonS
 		WebEmbeddedListen: listen,
 		LowMemoryMode:     &lowMem,
 		EmbeddedService: func(ctx context.Context, cfgStore *config.Store) error {
-			if !isolatedTest {
-				_, _ = webui.StopWeb()
-			}
 			srv := webui.New(webui.Options{
 				ConfigPath:              configPath,
 				ConfigStore:             cfgStore,
 				AuditCollector:          d.AuditCollector(),
 				LowMemoryMode:           &lowMem,
+				EmbeddedInDaemon:        true,
 				Listen:                  listen,
 				Password:                password,
 				Version:                 ver,
@@ -102,10 +111,108 @@ func BuildUnifiedDaemon(cfg *config.Config, configPath, ver string, deps DaemonS
 					}
 				},
 			})
-			return srv.ServeContext(ctx)
+			return serveEmbeddedWebWithHandoff(ctx, srv, deps, isolatedTest)
 		},
 	})
 	return d, true
+}
+
+func shouldDeferWebHandoff(deps DaemonStartDeps) bool {
+	if deps.DeferWebHandoff != nil {
+		return *deps.DeferWebHandoff
+	}
+	return os.Getenv(daemon.EnvDeferWebHandoff) == "1" || os.Getenv(daemon.EnvFromWebUI) == "1"
+}
+
+func isAddrInUseError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.EADDRINUSE) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "address already in use") || strings.Contains(msg, "only one usage of each socket address")
+}
+
+func serveEmbeddedWebWithHandoff(ctx context.Context, srv *webui.Server, deps DaemonStartDeps, isolatedTest bool) error {
+	if isolatedTest && deps.IsStandaloneWebRunning == nil && deps.StopStandaloneWeb == nil {
+		return srv.ServeContext(ctx)
+	}
+
+	isStandalone := deps.IsStandaloneWebRunning
+	if isStandalone == nil {
+		isStandalone = webui.IsStandaloneWebRunning
+	}
+	stopStandalone := deps.StopStandaloneWeb
+	if stopStandalone == nil {
+		stopStandalone = webui.StopWeb
+	}
+
+	deferHandoff := shouldDeferWebHandoff(deps)
+	if !deferHandoff {
+		_, _ = stopStandalone()
+		return srv.ServeContext(ctx)
+	}
+
+	timeout := deps.WebHandoffTimeout
+	if timeout <= 0 {
+		timeout = defaultWebHandoffTimeout
+	}
+	pollInterval := deps.WebHandoffPollInterval
+	if pollInterval <= 0 {
+		pollInterval = defaultWebHandoffPollInterval
+	}
+
+	deadline := time.Now().Add(timeout)
+	stoppedFallback := false
+
+	if isStandalone() {
+		logger.Info("[Daemon] 检测到由独立 WebUI 触发单进程合体，礼貌等待其推流结束并主动让渡端口（最长 %v）...", timeout)
+		ticker := time.NewTicker(pollInterval)
+		for isStandalone() {
+			if !time.Now().Before(deadline) {
+				logger.Warn("[Daemon] 等待独立 WebUI 优雅让渡端口超时（%v），执行兜底停止接管", timeout)
+				_, _ = stopStandalone()
+				stoppedFallback = true
+				break
+			}
+			select {
+			case <-ctx.Done():
+				ticker.Stop()
+				return ctx.Err()
+			case <-ticker.C:
+			}
+		}
+		ticker.Stop()
+	}
+
+	for {
+		err := srv.ServeContext(ctx)
+		if err == nil || ctx.Err() != nil {
+			return err
+		}
+		if !isAddrInUseError(err) {
+			return err
+		}
+		if time.Now().Before(deadline) {
+			timer := time.NewTimer(pollInterval)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
+			continue
+		}
+		if !stoppedFallback {
+			logger.Warn("[Daemon] 内嵌 WebUI 绑定端口仍被占用且超过交接等待上限（%v），执行兜底停止后重试", timeout)
+			_, _ = stopStandalone()
+			stoppedFallback = true
+			continue
+		}
+		return err
+	}
 }
 
 // NewDaemonCommand creates the daemon command with subcommands

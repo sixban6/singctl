@@ -42,6 +42,7 @@ export const SystemPage: React.FC<SystemPageProps> = ({ status, busy, onAction, 
 
   // 网关全量配置加密备份与还原
   const [exportPass, setExportPass] = useState('');
+  const [includeRuleSets, setIncludeRuleSets] = useState(true);
   const [exporting, setExporting] = useState(false);
   const [restoreFileName, setRestoreFileName] = useState('');
   const [restoreData, setRestoreData] = useState('');
@@ -180,7 +181,7 @@ export const SystemPage: React.FC<SystemPageProps> = ({ status, busy, onAction, 
     }
     setExporting(true);
     try {
-      const res = await clientApi.exportBackup(pass);
+      const res = await clientApi.exportBackup(pass, includeRuleSets);
       const blob = new Blob([res.data], { type: 'application/json;charset=utf-8' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -196,8 +197,13 @@ export const SystemPage: React.FC<SystemPageProps> = ({ status, busy, onAction, 
       if (res.summary?.hasGroups) included.push('分组编排');
       if (res.summary?.hasAdGuard) included.push('AdGuard');
       if (res.summary?.hasSingBox) included.push('sing-box');
+      if (res.summary?.hasSingBoxBase) included.push('三路合并基线');
+      if ((res.summary?.ruleSetCount ?? 0) > 0) {
+        included.push(`${res.summary.ruleSetCount} 项离线规则集`);
+      }
       success(
         `${res.message || '加密备份快照已下载'}${included.length ? `（已打包: ${included.join(' / ')}）` : ''}`,
+        6000,
       );
       setExportPass('');
     } catch (err: unknown) {
@@ -211,8 +217,8 @@ export const SystemPage: React.FC<SystemPageProps> = ({ status, busy, onAction, 
     const file = e.target.files?.[0];
     e.target.value = '';
     if (!file) return;
-    if (file.size > 4 * 1024 * 1024) {
-      error('备份文件过大（不能超过 4 MB）');
+    if (file.size > 16 * 1024 * 1024) {
+      error('备份文件过大（不能超过 16 MB）');
       return;
     }
     try {
@@ -245,7 +251,14 @@ export const SystemPage: React.FC<SystemPageProps> = ({ status, busy, onAction, 
       setRestorePass('');
       setRestoreData('');
       setRestoreFileName('');
-      success(res.message || '网关加密备份快照已恢复并热应用生效');
+      const parts: string[] = [res.message || '网关加密备份快照已恢复并热应用生效'];
+      if ((res.ruleSetCount ?? 0) > 0 && !parts[0].includes('离线规则集')) {
+        parts.push(`离线规则集: ${res.ruleSetCount} 项`);
+      }
+      if (res.adaptations?.length) {
+        parts.push(`跨机硬件自适配: ${res.adaptations.join('；')}`);
+      }
+      success(parts.join(' ｜ '), res.adaptations?.length ? 8500 : 5500);
       onRestored?.();
     } catch (err: unknown) {
       error(`恢复备份失败：${err instanceof Error ? err.message : '未知错误'}`);
@@ -380,12 +393,23 @@ export const SystemPage: React.FC<SystemPageProps> = ({ status, busy, onAction, 
             className="p-4 rounded-xl bg-surface2 border border-subtle space-y-3"
           >
             <div className="space-y-1">
-              <div className="text-sm font-medium text-primary">导出加密备份包</div>
+              <div className="text-sm font-medium text-primary">导出 V2 加密备份包</div>
               <p className="text-xs text-secondary leading-relaxed">
                 自动打包 <code className="font-mono">singctl.yaml</code>、<code className="font-mono">groups.yaml</code>、
-                <code className="font-mono">AdGuardHome.yaml</code> 与 <code className="font-mono">config.json</code>。
+                <code className="font-mono">AdGuardHome.yaml</code>、<code className="font-mono">config.json</code> 及三路合并基线。
               </p>
             </div>
+            <label className="flex items-start gap-2 text-xs text-secondary cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={includeRuleSets}
+                onChange={(e) => setIncludeRuleSets(e.target.checked)}
+                className="mt-0.5 rounded border-subtle bg-surface1 accent-emerald-500"
+              />
+              <span className="leading-relaxed">
+                同时打包离线规则集（<code className="font-mono">.srs</code> + <code className="font-mono">manifest.json</code>，推荐，新机断网也能直接恢复）
+              </span>
+            </label>
             <label className="block space-y-1 text-xs">
               <span className="text-secondary">设置加密口令（至少 8 位）</span>
               <input
@@ -414,9 +438,9 @@ export const SystemPage: React.FC<SystemPageProps> = ({ status, busy, onAction, 
             className="p-4 rounded-xl bg-surface2 border border-subtle space-y-3"
           >
             <div className="space-y-1">
-              <div className="text-sm font-medium text-primary">从快照一键还原</div>
+              <div className="text-sm font-medium text-primary">从 V2 快照一键还原</div>
               <p className="text-xs text-secondary leading-relaxed">
-                写入前严格校验 YAML/JSON 与 <code className="font-mono">sing-box check</code>，还原前自动备份本机原配置（0600 权限）。
+                落盘前全量校验 YAML/JSON/规则集归档（上限 16 MB）与 <code className="font-mono">sing-box check</code>，支持跨硬件自适配与失败全事务原子回滚。
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">

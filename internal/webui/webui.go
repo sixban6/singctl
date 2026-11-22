@@ -60,6 +60,9 @@ type Options struct {
 	OnReady                 func(listenAddr string)                                                           // Listen 成功后的回调(后台子进程用于就绪握手)
 	ConfigStore             *config.Store                                                                     // 可选：与单进程合体守护进程共享同一个 config.Store
 	LowMemoryMode           *bool                                                                             // 可选：显式指定低内存模式（控制 256 KiB 日志截断）
+	EmbeddedInDaemon        bool                                                                              // 标记当前 WebUI 服务内嵌运行于单进程合体守护进程中
+	UnifiedHandoffCheck     func() bool                                                                       // 可选：测试注入单进程合体接管状态探测函数
+	HandoffShutdownDelay    time.Duration                                                                     // 可选：独立进程推流完毕后异步优雅关闭前的等待时长（默认 300ms）
 	IdleThreshold           time.Duration                                                                     // 可选：冷态闲置触发物理内存归还阈值（默认 3 分钟）
 	IdleCheckInterval       time.Duration                                                                     // 可选：冷态闲置巡检间隔（默认 30 秒）
 	NowFunc                 func() time.Time                                                                  // 可选：测试注入可控时钟（默认 time.Now）
@@ -102,6 +105,10 @@ type Server struct {
 	lastReqUnixNano atomic.Int64
 	activeEpoch     atomic.Uint64
 	scavengedEpoch  atomic.Uint64
+
+	shutdownOnce sync.Once
+	shutdownCh   chan struct{}
+	shutdownReq  atomic.Bool
 }
 
 // New 创建客户端 Web 服务并完成全部路由与领域组件装配。
@@ -130,6 +137,7 @@ func New(opts Options) *Server {
 		auditCollector: audCollector,
 		loginLimiter:   newLoginRateLimiter(),
 		clash:          clashCli,
+		shutdownCh:     make(chan struct{}),
 	}
 	s.lastReqUnixNano.Store(s.now().UnixNano())
 	s.activeEpoch.Store(1)
@@ -353,13 +361,37 @@ func (s *Server) buildLifecycle(bgCtx context.Context, cancelBg context.CancelFu
 	return g
 }
 
-// ServeContext 启动客户端 Web 面板与受控后台生命周期编排组，并在 ctx 取消时优雅关闭。
+// RequestShutdown 幂等、并发安全地请求当前 WebUI 服务优雅停止 HTTP 监听并释放端口。
+func (s *Server) RequestShutdown() {
+	if s == nil {
+		return
+	}
+	s.shutdownReq.Store(true)
+	s.shutdownOnce.Do(func() {
+		if s.shutdownCh != nil {
+			close(s.shutdownCh)
+		}
+	})
+}
+
+// ShutdownRequested 返回是否已触发优雅关闭请求。
+func (s *Server) ShutdownRequested() bool {
+	return s != nil && s.shutdownReq.Load()
+}
+
+// ServeContext 启动客户端 Web 面板与受控后台生命周期编排组，并在 ctx 取消或 RequestShutdown 时优雅关闭。
 func (s *Server) ServeContext(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if s.shutdownReq.Load() {
+		if !s.opts.EmbeddedInDaemon {
+			removeOwnWebStateFile()
+		}
+		return nil
 	}
 
 	s.opts.Listen = NormalizeLegacyWildcardListen(s.opts.Listen)
@@ -406,12 +438,19 @@ func (s *Server) ServeContext(ctx context.Context) error {
 			shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			_ = srv.Shutdown(shutCtx)
 			shutCancel()
+		case <-s.shutdownCh:
+			shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = srv.Shutdown(shutCtx)
+			shutCancel()
 		case <-serveDone:
 		}
 	}()
 
 	err = srv.Serve(ln)
-	if errors.Is(err, http.ErrServerClosed) && ctx.Err() != nil {
+	if errors.Is(err, http.ErrServerClosed) && (ctx.Err() != nil || s.shutdownReq.Load()) {
+		if s.shutdownReq.Load() && !s.opts.EmbeddedInDaemon {
+			removeOwnWebStateFile()
+		}
 		return nil
 	}
 	return err

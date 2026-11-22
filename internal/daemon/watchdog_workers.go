@@ -3,14 +3,17 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
+	"os/exec"
 	"runtime"
 	"singctl/internal/adguard"
 	"singctl/internal/audit"
 	"singctl/internal/constant"
 	"singctl/internal/logger"
 	"singctl/internal/singbox"
+	"singctl/internal/tailscale"
 	"slices"
 	"strings"
 	"time"
@@ -70,6 +73,51 @@ func (d *Daemon) maybeReconcileAuditThrottlesAsync(force bool) {
 	}()
 }
 
+// ReconcileTailscaleP2POnce 同步执行单次 Tailscale P2P 防线对账并按变化写回运行态快照。
+// 当宿主机缺失 nftables (nft) 时由控制器执行 30 分钟长退避，仅首次打印 1 次清晰告警并记录 LastError。
+func (d *Daemon) ReconcileTailscaleP2POnce(ctx context.Context, force bool) {
+	if d == nil || d.p2pCtrl == nil {
+		return
+	}
+	cfg := d.currentConfig()
+	if cfg == nil {
+		return
+	}
+	p2pCfg := cfg.Tailscale.P2PAssist
+	if !p2pCfg.Enabled && !d.p2pLastActive.Load() && !force {
+		return
+	}
+	res, err := d.p2pCtrl.Reconcile(ctx, p2pCfg)
+	if err != nil {
+		if errors.Is(err, tailscale.ErrNFTUnavailable) || errors.Is(err, exec.ErrNotFound) {
+			logger.Warn("[Tailscale-P2P] 当前宿主机未检测到 nftables (nft)，已跳过 fw4 P2P 防线并进入 30 分钟静默退避: %v", err)
+		} else {
+			logger.Warn("[Tailscale-P2P] Reconcile error: %v", err)
+		}
+	}
+	d.p2pLastActive.Store(res.Enabled)
+
+	var peerParts []string
+	for _, k := range slices.Sorted(maps.Keys(res.PeerStates)) {
+		ps := res.PeerStates[k]
+		peerParts = append(peerParts, fmt.Sprintf("%s=%s:%d:%s", k, ps.LastResult, ps.ConsecutiveFails, ps.LastUpgradeAt))
+	}
+	summaryKey := fmt.Sprintf("%v|%s|%d|%s|%s", res.Enabled, res.ApplyMode, res.OpenPinholes, res.LastError, strings.Join(peerParts, ","))
+	d.p2pSnapMu.Lock()
+	changed := d.p2pLastSnapSummary != summaryKey || res.OpenPinholes > 0
+	if changed {
+		d.p2pLastSnapSummary = summaryKey
+	}
+	d.p2pSnapMu.Unlock()
+
+	if changed {
+		snapCopy := res
+		d.effectiveStateStore().Update(func(snap *DaemonRuntimeSnapshot) {
+			snap.TailscaleP2P = &snapCopy
+		})
+	}
+}
+
 func (d *Daemon) maybeReconcileTailscaleP2PAsync(force bool) {
 	if runtime.GOOS != "linux" || d.p2pCtrl == nil {
 		return
@@ -89,31 +137,7 @@ func (d *Daemon) maybeReconcileTailscaleP2PAsync(force bool) {
 		defer d.p2pReconciling.Store(false)
 		ctx, cancel := context.WithTimeout(d.ctx, 8*time.Second)
 		defer cancel()
-		res, err := d.p2pCtrl.Reconcile(ctx, p2pCfg)
-		if err != nil {
-			logger.Warn("[Tailscale-P2P] Reconcile error: %v", err)
-		}
-		d.p2pLastActive.Store(res.Enabled)
-
-		var peerParts []string
-		for _, k := range slices.Sorted(maps.Keys(res.PeerStates)) {
-			ps := res.PeerStates[k]
-			peerParts = append(peerParts, fmt.Sprintf("%s=%s:%d:%s", k, ps.LastResult, ps.ConsecutiveFails, ps.LastUpgradeAt))
-		}
-		summaryKey := fmt.Sprintf("%v|%s|%d|%s|%s", res.Enabled, res.ApplyMode, res.OpenPinholes, res.LastError, strings.Join(peerParts, ","))
-		d.p2pSnapMu.Lock()
-		changed := d.p2pLastSnapSummary != summaryKey || res.OpenPinholes > 0
-		if changed {
-			d.p2pLastSnapSummary = summaryKey
-		}
-		d.p2pSnapMu.Unlock()
-
-		if changed {
-			snapCopy := res
-			UpdateRuntimeState(func(snap *DaemonRuntimeSnapshot) {
-				snap.TailscaleP2P = &snapCopy
-			})
-		}
+		d.ReconcileTailscaleP2POnce(ctx, force)
 	}()
 }
 
