@@ -28,4 +28,13 @@ const (
 	SmartDNSRulesDir     = "/etc/singctl/smartdns-rules.d"
 	SmartDNSAuditLogPath = "/tmp/singctl-smartdns-audit.log"
 	SmartDNSServiceName  = "singctl-smartdns"
+
+	// Safe Commit 远端安全回滚保险丝权威路径与超时边界常量（单一权威归属）。
+	SafeCommitDir              = "/tmp/singctl-safecommit"
+	SafeCommitStateFile        = SafeCommitDir + "/state.json"
+	SafeCommitLastRollbackFile = SafeCommitDir + "/last_rollback.json"
+	SafeCommitWatchLogFile     = SafeCommitDir + "/watch.log"
+	SafeCommitDefaultTTLSec    = 180
+	SafeCommitMinTTLSec        = 60
+	SafeCommitMaxTTLSec        = 600
 )
