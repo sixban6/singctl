@@ -82,12 +82,6 @@ const manageDNSFilter = (payload: {
     body: JSON.stringify(payload),
   });
 
-const setDNSBlockAAAA = (enabled: boolean) =>
-  request<{ ok: boolean; blockAAAA?: boolean }>('/api/dns/block-aaaa', {
-    method: 'POST',
-    body: JSON.stringify({ enabled }),
-  });
-
 export const dnsApi = {
   runDNSLeakTest: (mode: 'standard' | 'deep' = 'standard') =>
     request<DNSLeakReport>('/api/dns/leak-test', {
@@ -101,7 +95,7 @@ export const dnsApi = {
       body: JSON.stringify(payload),
     }),
 
-  // 统一三引擎 /api/dns/* 契约方法
+  // 统一双引擎 /api/dns/* 契约方法（SmartDNS / AdGuard Home）
   getDNSOverview,
   getDNSCredentials,
   resetDNSCredentials,
@@ -114,7 +108,6 @@ export const dnsApi = {
   setDNSWhitelist,
   manageDNSRewrite,
   manageDNSFilter,
-  setDNSBlockAAAA,
 
   // 向后兼容既有调用方的方法别名（全部指向 /api/dns/*）
   getAdGuardOverview: getDNSOverview,

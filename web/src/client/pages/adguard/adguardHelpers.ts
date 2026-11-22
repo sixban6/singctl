@@ -33,8 +33,6 @@ export function getStatusDNS(status?: ClientStatusResponse | null): ClientDNSSta
 export function getEngineDisplayName(engine?: string, label?: string): string {
   if (label && label.trim()) return label.trim();
   switch (engine) {
-    case 'singbox':
-      return 'sing-box 加强版';
     case 'smartdns':
       return 'SmartDNS';
     case 'adguard':
@@ -46,8 +44,6 @@ export function getEngineDisplayName(engine?: string, label?: string): string {
 
 export function getEngineShortName(engine?: string): string {
   switch (engine) {
-    case 'singbox':
-      return 'sing-box';
     case 'smartdns':
       return 'SmartDNS';
     case 'adguard':
@@ -58,28 +54,63 @@ export function getEngineShortName(engine?: string): string {
 }
 
 export function resolveActiveEngine(snap: DNSOverviewSnapshot | null): DNSEngineID {
-  if (snap?.activeEngine === 'singbox' || snap?.activeEngine === 'smartdns' || snap?.activeEngine === 'adguard') {
+  if (snap?.activeEngine === 'smartdns' || snap?.activeEngine === 'adguard') {
     return snap.activeEngine;
   }
-  return snap?.installed ? 'adguard' : 'singbox';
+  if (snap?.recommendedEngine === 'smartdns' || snap?.recommendedEngine === 'adguard') {
+    return snap.recommendedEngine;
+  }
+  return 'smartdns';
+}
+
+export function resolveRecommendedEngine(snap: DNSOverviewSnapshot | null): DNSEngineID {
+  if (snap?.recommendedEngine === 'smartdns' || snap?.recommendedEngine === 'adguard') {
+    return snap.recommendedEngine;
+  }
+  const marked = snap?.engines?.find(
+    (item) => item.recommended && (item.id === 'smartdns' || item.id === 'adguard'),
+  );
+  return marked?.id === 'adguard' ? 'adguard' : 'smartdns';
+}
+
+export function resolveEngineOptions(snap: DNSOverviewSnapshot | null): DNSEngineOption[] {
+  const active = resolveActiveEngine(snap);
+  const rec = resolveRecommendedEngine(snap);
+  const fromSnap = (snap?.engines || []).filter(
+    (opt): opt is DNSEngineOption => opt.id === 'smartdns' || opt.id === 'adguard',
+  );
+  if (fromSnap.length > 0) return fromSnap;
+
+  return [
+    {
+      id: 'smartdns',
+      name: 'SmartDNS',
+      tagline: '轻量极速并发测速 · ~3 MB 闪存 / ~10 MB 内存',
+      installed: active === 'smartdns' && Boolean(snap?.installed),
+      active: active === 'smartdns',
+      recommended: rec === 'smartdns',
+      eligible: Boolean(snap?.supported !== false),
+      diskHint: '~3 MB',
+      ramHint: '~10 MB',
+    },
+    {
+      id: 'adguard',
+      name: 'AdGuard Home',
+      tagline: '全功能可视化与海量规则 · ~80 MB 闪存',
+      installed: active === 'adguard' && Boolean(snap?.installed),
+      active: active === 'adguard',
+      recommended: rec === 'adguard',
+      eligible: Boolean(snap?.supported !== false && !snap?.lowMemoryBlocked),
+      blockedReason: snap?.lowMemoryBlocked ? snap.lowMemoryWarning : undefined,
+      diskHint: '~80 MB',
+      ramHint: '~100 MB',
+    },
+  ];
 }
 
 export function resolveDNSCapabilities(snap: DNSOverviewSnapshot | null): DNSCapabilities {
   if (snap?.capabilities) return snap.capabilities;
   const engine = resolveActiveEngine(snap);
-  if (engine === 'singbox') {
-    return {
-      hasNativeWebPanel: false,
-      hasConfigPreview: true,
-      hasQueryStats: true,
-      hasFilterLists: true,
-      hasCustomFilterURL: false,
-      hasPauseProtection: true,
-      hasBlockAAAA: true,
-      canClearCache: true,
-      canUninstall: false,
-    };
-  }
   if (engine === 'smartdns') {
     return {
       hasNativeWebPanel: false,
@@ -88,7 +119,6 @@ export function resolveDNSCapabilities(snap: DNSOverviewSnapshot | null): DNSCap
       hasFilterLists: true,
       hasCustomFilterURL: true,
       hasPauseProtection: true,
-      hasBlockAAAA: true,
       canClearCache: true,
       canUninstall: true,
     };
@@ -100,25 +130,23 @@ export function resolveDNSCapabilities(snap: DNSOverviewSnapshot | null): DNSCap
     hasFilterLists: true,
     hasCustomFilterURL: true,
     hasPauseProtection: true,
-    hasBlockAAAA: false,
     canClearCache: true,
     canUninstall: true,
   };
 }
 
 export function canMutateEngine(snap: DNSOverviewSnapshot | null): boolean {
-  if (!snap) return false;
+  if (!snap || !snap.installed) return false;
   const engine = resolveActiveEngine(snap);
-  if (engine === 'singbox') return true;
-  if (engine === 'smartdns') return Boolean(snap.installed);
+  if (engine === 'smartdns') return true;
   return Boolean(snap.webHealthy);
 }
 
 export function canClearEngineCache(snap: DNSOverviewSnapshot | null, caps: DNSCapabilities): boolean {
-  if (!snap || !caps.canClearCache) return false;
+  if (!snap || !snap.installed || !caps.canClearCache) return false;
   const engine = resolveActiveEngine(snap);
   if (engine === 'adguard') return Boolean(snap.webHealthy);
-  return Boolean(snap.dnsHealthy || engine === 'singbox');
+  return Boolean(snap.dnsHealthy);
 }
 
 export function isDiskOrPlatformBlocked(reason?: string): boolean {
@@ -149,40 +177,21 @@ export const UPSTREAM_MODE_OPTIONS: UpstreamModeOption[] = [
 
 export function getUpstreamModeOptions(engine: DNSEngineID): UpstreamModeOption[] {
   if (engine === 'adguard') return UPSTREAM_MODE_OPTIONS;
-  if (engine === 'smartdns') {
-    return [
-      {
-        key: 'fastest_ip',
-        label: '最快 IP 优选 (推荐)',
-        shortDesc: '并发查询全上游并实测响应延迟，自动返回最快目标 IP',
-      },
-      {
-        key: 'parallel',
-        label: '并行竞速',
-        shortDesc: '同时请求全部加密上游，优先采用最快返回的解析结果',
-      },
-      {
-        key: 'load_balance',
-        label: '负载均衡',
-        shortDesc: '在多条纯 IP 加密上游间均衡分担解析负载',
-      },
-    ];
-  }
   return [
     {
       key: 'fastest_ip',
-      label: '实测最快优选 (推荐)',
-      shortDesc: '自动选用实测最快加密上游，看门狗巡检失活时自动热切备用',
+      label: '最快 IP 优选 (推荐)',
+      shortDesc: '并发查询全上游并实测响应延迟，自动返回最快目标 IP',
     },
     {
       key: 'parallel',
-      label: '顺位热备',
-      shortDesc: '优先使用首位加密上游，异常时由守护进程自动切至备用上游',
+      label: '并行竞速',
+      shortDesc: '同时请求全部加密上游，优先采用最快返回的解析结果',
     },
     {
       key: 'load_balance',
-      label: '多上游备用池',
-      shortDesc: '维护多条纯 IP 加密上游池供实测择优与容灾切换',
+      label: '负载均衡',
+      shortDesc: '在多条纯 IP 加密上游间均衡分担解析负载',
     },
   ];
 }
@@ -190,16 +199,13 @@ export function getUpstreamModeOptions(engine: DNSEngineID): UpstreamModeOption[
 export function normalizeUpstreamMode(engine: DNSEngineID, mode?: DNSUpstreamMode): DNSUpstreamMode {
   if (!mode) return engine === 'adguard' ? 'parallel' : 'fastest_ip';
   if (engine === 'adguard' && mode === 'fastest_ip') return 'fastest_addr';
-  if (engine !== 'adguard' && mode === 'fastest_addr') return 'fastest_ip';
+  if (engine === 'smartdns' && mode === 'fastest_addr') return 'fastest_ip';
   return mode;
 }
 
 export function getUpstreamModeBadgeText(engine: DNSEngineID, mode?: DNSUpstreamMode): string {
   const m = normalizeUpstreamMode(engine, mode);
-  if (m === 'fastest_ip') {
-    return engine === 'singbox' ? '当前模式：实测最快优选 + 故障热切' : '当前模式：最快 IP 优选';
-  }
-  if (m === 'fastest_addr') return '当前模式：最快 IP 优选';
+  if (m === 'fastest_ip' || m === 'fastest_addr') return '当前模式：最快 IP 优选';
   if (m === 'load_balance') return '当前模式：负载均衡';
-  return engine === 'singbox' ? '当前模式：顺位热备' : '当前模式：并行竞速 (谁快用谁)';
+  return '当前模式：并行竞速 (谁快用谁)';
 }

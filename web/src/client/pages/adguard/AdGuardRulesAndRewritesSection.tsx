@@ -74,11 +74,9 @@ export const AdGuardRulesAndRewritesSection: React.FC<AdGuardRulesAndRewritesSec
   };
 
   const filterSubtitle =
-    activeEngine === 'singbox'
-      ? '管理 sing-box 内置轻量去广告与防 PCDN 规则集（零额外闪存与内存开销）'
-      : activeEngine === 'smartdns'
-        ? '可选叠加 SmartDNS 轻量过滤规则集（默认关闭以保持极低内存占用，按需开启）'
-        : '默认仅开启官方低误杀基础规则；可按需一键叠加中文增强与轻量规则';
+    activeEngine === 'smartdns'
+      ? '可选叠加 SmartDNS 轻量过滤规则集（默认关闭以保持极低内存占用，按需开启）'
+      : '默认仅开启官方低误杀基础规则；可按需一键叠加中文增强与轻量规则';
 
   return (
     <>
@@ -86,7 +84,7 @@ export const AdGuardRulesAndRewritesSection: React.FC<AdGuardRulesAndRewritesSec
         <SectionCard
           title="高优白名单与自动豁免保护"
           icon={<CheckCircle2 className="w-4 h-4" />}
-          subtitle="手动放行被误拦的业务域名，三引擎切换时自动同步迁移"
+          subtitle="手动放行被误拦的业务域名，切换 SmartDNS / AdGuard Home 时自动同步迁移"
         >
           <div className="space-y-4">
             <form onSubmit={(e) => void submitWhitelist(e)} className="flex items-center gap-2">

@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Check, Info, Plus, RotateCcw, Server, Trash2, Trophy, Zap } from 'lucide-react';
+import { Check, Plus, RotateCcw, Server, Trash2, Trophy, Zap } from 'lucide-react';
 import { Badge, Button, SectionCard } from '../../../ui';
 import {
   DNSOverviewSnapshot,
@@ -82,7 +82,7 @@ export const AdGuardUpstreamsCard: React.FC<AdGuardUpstreamsCardProps> = ({
             size="xs"
             variant="secondary"
             loading={probing}
-            disabled={!snap || (activeEngine !== 'singbox' && !snap.dnsHealthy)}
+            disabled={!snap || !snap.dnsHealthy}
             onClick={onRunProbe}
             icon={<Zap className="w-3 h-3" />}
           >
@@ -101,17 +101,6 @@ export const AdGuardUpstreamsCard: React.FC<AdGuardUpstreamsCardProps> = ({
       }
     >
       <div className="space-y-4">
-        {activeEngine === 'singbox' && (
-          <div className="rounded-xl border border-sky-500/25 bg-sky-500/10 px-3.5 py-2.5 flex items-start gap-2 text-xs text-secondary">
-            <Info className="w-4 h-4 text-sky-400 shrink-0 mt-0.5" />
-            <span>
-              <strong className="text-primary">sing-box 加强版热切机制：</strong>
-              启用 <code className="font-mono text-primary">fastest_ip</code>{' '}
-              时，保存上游将自动把实测最快的纯 IP 加密上游写入主解析器，并由守护巡检持续监控，主上游连续失活时自动无感热切至备用加密上游。
-            </span>
-          </div>
-        )}
-
         <div className="rounded-xl border border-subtle bg-surface2/70 px-3.5 py-3 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
           <div className="space-y-1 min-w-0">
             <div className="flex flex-wrap items-center gap-2 text-xs">

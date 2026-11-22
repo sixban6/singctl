@@ -1,4 +1,4 @@
-export type DNSEngineID = 'singbox' | 'smartdns' | 'adguard';
+export type DNSEngineID = 'smartdns' | 'adguard';
 export type DNSEnginePreference = 'auto' | DNSEngineID;
 
 export interface DNSCapabilities {
@@ -8,7 +8,6 @@ export interface DNSCapabilities {
   hasFilterLists: boolean;
   hasCustomFilterURL: boolean;
   hasPauseProtection: boolean;
-  hasBlockAAAA: boolean;
   canClearCache: boolean;
   canUninstall: boolean;
 }
@@ -44,6 +43,7 @@ export interface ClientDNSStatusSummary {
   activeEngine?: DNSEngineID;
   activeEngineLabel?: string;
   recommendedEngine?: DNSEngineID;
+  fallbackDoHActive?: boolean;
 }
 
 export type ClientAdGuardStatusSummary = ClientDNSStatusSummary;
@@ -162,8 +162,8 @@ export interface DNSOverviewSnapshot {
   activeEngineLabel: string;
   recommendedEngine: DNSEngineID;
   recommendedReason: string;
-  blockAAAA: boolean;
-  statsSource: 'adguard_api' | 'smartdns_audit' | 'singbox_telemetry' | string;
+  fallbackDoHActive?: boolean;
+  statsSource: 'adguard_api' | 'smartdns_audit';
   statsSourceLabel: string;
   capabilities: DNSCapabilities;
   engines: DNSEngineOption[];
