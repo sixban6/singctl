@@ -91,15 +91,20 @@ export function deriveTrafficFlowViewModel(
     Boolean(status.tailscale?.running) && status.tailscale?.state === 'Running';
   const gwRoleText = status.gateway?.mode === 'side' ? '旁路由' : '主路由';
 
-  const aghExpectedButDown = Boolean(
-    status.adguard?.installed && status.adguard?.enabled && !status.adguard?.dnsHealthy,
+  const dns = status.dns ?? status.adguard;
+  const dnsEngine = dns?.activeEngine || (dns?.installed ? 'adguard' : 'singbox');
+  const externalExpectedButDown = Boolean(
+    dnsEngine !== 'singbox' && dns?.installed && dns?.enabled && !dns?.dnsHealthy,
   );
   const dnsFault =
-    aghExpectedButDown ||
+    externalExpectedButDown ||
     (health !== null && !health.dnsOK) ||
     (sbRunning && dmHealthFailed);
-  const aghHealthy =
-    !dnsFault && Boolean(status.adguard?.dnsHealthy && status.adguard?.singboxLinked);
+  const externalHealthy =
+    !dnsFault &&
+    dnsEngine !== 'singbox' &&
+    Boolean(dns?.dnsHealthy && dns?.singboxLinked);
+  const singboxDnsHealthy = !dnsFault && dnsEngine === 'singbox' && sbRunning;
 
   const primaryNodeMeta =
     proxySnap?.primaryNode && proxySnap?.nodes
@@ -140,19 +145,29 @@ export function deriveTrafficFlowViewModel(
         ? '#fbbf24'
         : '#34d399';
 
-  const shieldTone = dnsFault ? ROSE : aghHealthy ? '#34d399' : '#38bdf8';
+  const shieldTone = dnsFault
+    ? ROSE
+    : externalHealthy || singboxDnsHealthy
+      ? '#34d399'
+      : '#38bdf8';
   const shieldFill = dnsFault
     ? ROSE_SOFT
-    : aghHealthy
+    : externalHealthy || singboxDnsHealthy
       ? 'rgba(16,185,129,0.18)'
       : 'rgba(56,189,248,0.15)';
   const shieldPillText = dnsFault
-    ? aghExpectedButDown
-      ? 'AdGuard 异常'
+    ? externalExpectedButDown
+      ? dnsEngine === 'smartdns'
+        ? 'SmartDNS 异常'
+        : 'AdGuard 异常'
       : '解析异常'
-    : aghHealthy
-      ? 'AdGuard 净化'
-      : '加密防抢答';
+    : externalHealthy
+      ? dnsEngine === 'smartdns'
+        ? 'SmartDNS 加速'
+        : 'AdGuard 净化'
+      : singboxDnsHealthy
+        ? 'sing-box 净化'
+        : '加密防抢答';
 
   const primaryNodeLabel = !sbRunning
     ? '核心已停止'

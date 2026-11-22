@@ -1,4 +1,4 @@
-import type { ClientAdGuardStatusSummary } from './adguard';
+import type { ClientAdGuardStatusSummary, ClientDNSStatusSummary } from './adguard';
 import type { ClientFirewallStatus } from './firewall';
 import type { ClientGatewayStatusSummary, ClientTailscaleStatus } from './network';
 import type { ClientSingBoxStatus } from './singbox';
@@ -24,6 +24,7 @@ export interface ClientStatusResponse {
   host: ClientHostInfo;
   singbox: ClientSingBoxStatus;
   daemon: ClientDaemonStatus;
+  dns?: ClientDNSStatusSummary;
   adguard?: ClientAdGuardStatusSummary;
   tailscale: ClientTailscaleStatus;
   firewall: ClientFirewallStatus;
