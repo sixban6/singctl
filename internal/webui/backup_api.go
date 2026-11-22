@@ -1,4 +1,4 @@
-// 文件职责：提供客户端网关配置加密灾备包导出与原子恢复（含失败自动回滚）接口。
+// 文件职责：提供客户端网关配置 V2 加密灾备包导出、跨硬件智能自适配与全事务原子回滚恢复接口。
 package webui
 
 import (
@@ -14,6 +14,7 @@ import (
 
 	"singctl/internal/common/cryptobak"
 	"singctl/internal/common/fsx"
+	"singctl/internal/common/sysinfo"
 	"singctl/internal/config"
 	"singctl/internal/daemon"
 	"singctl/internal/logger"
@@ -23,14 +24,14 @@ import (
 )
 
 const (
-	clientBackupFormatVersion = "SINGCTL-CLIENT-BAK-V1"
-	maxClientBackupUploadSize = 4 * 1024 * 1024 // 4 MiB
+	clientBackupFormatVersion = "SINGCTL-CLIENT-BAK-V2"
+	maxClientBackupUploadSize = 16 * 1024 * 1024 // 16 MiB
 )
 
 // ClientBackupEnvelope 为客户端网关加密灾备快照外层信封（复用 common/cryptobak.Envelope）。
 type ClientBackupEnvelope = cryptobak.Envelope
 
-// ClientBackupPayload 保存网关可迁出的完整核心配置状态。
+// ClientBackupPayload 保存网关可迁出的完整核心配置、三路合并基线与离线规则集归档。
 type ClientBackupPayload struct {
 	Version           string `json:"version"`
 	ExportedAt        string `json:"exportedAt"`
@@ -38,21 +39,25 @@ type ClientBackupPayload struct {
 	GroupsYAML        string `json:"groupsYaml,omitempty"`
 	AdGuardYAML       string `json:"adguardYaml,omitempty"`
 	SingBoxConfigJSON string `json:"singboxConfigJson,omitempty"`
+	SingBoxBaseJSON   string `json:"singboxBaseJson,omitempty"`
+	RuleSetsTarGz     []byte `json:"ruleSetsTarGz,omitempty"`
+	RuleSetCount      int    `json:"ruleSetCount,omitempty"`
 }
 
-// EncryptClientBackupBundle 使用 PBKDF2-HMAC-SHA256 + AES-256-GCM 加密网关备份载荷。
+// EncryptClientBackupBundle 使用 PBKDF2-HMAC-SHA256 + AES-256-GCM 加密网关 V2 备份载荷。
 func EncryptClientBackupBundle(passphrase string, payload ClientBackupPayload) ([]byte, error) {
 	return cryptobak.Encrypt(clientBackupFormatVersion, passphrase, payload)
 }
 
-// DecryptClientBackupBundle 在内存中校验并解密网关灾备快照。
+// DecryptClientBackupBundle 在内存中校验 V2 信封并解密网关灾备快照（拒绝非 V2 旧包）。
 func DecryptClientBackupBundle(passphrase string, rawEnvelope []byte) (*ClientBackupPayload, error) {
 	return cryptobak.Decrypt[ClientBackupPayload](clientBackupFormatVersion, passphrase, rawEnvelope)
 }
 
 func (s *Server) handleClientBackupExport(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Passphrase string `json:"passphrase"`
+		Passphrase      string `json:"passphrase"`
+		IncludeRuleSets *bool  `json:"includeRuleSets,omitempty"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&body); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "无效的请求格式")
@@ -63,12 +68,17 @@ func (s *Server) handleClientBackupExport(w http.ResponseWriter, r *http.Request
 		writeJSONError(w, http.StatusBadRequest, "为保障订阅与凭据安全，加密口令长度至少需要 8 位字符")
 		return
 	}
+	includeRuleSets := true
+	if body.IncludeRuleSets != nil {
+		includeRuleSets = *body.IncludeRuleSets
+	}
 
 	s.cfgMu.Lock()
 	cfgPath := configPathFor(s)
 	gPath := config.GroupsPathForConfig(cfgPath)
 	aghPath := s.adguardConfigFilePath()
 	sbPath := s.sbConfigPath()
+	rsDir := s.ruleSetCacheDir()
 
 	payload := ClientBackupPayload{
 		Version:    cmp.Or(s.opts.Version, "1.0"),
@@ -89,10 +99,22 @@ func (s *Server) handleClientBackupExport(w http.ResponseWriter, r *http.Request
 		if raw, err := os.ReadFile(sbPath); err == nil {
 			payload.SingBoxConfigJSON = string(raw)
 		}
+		if baseRaw, err := singbox.LoadBaseSnapshot(sbPath); err == nil && strings.TrimSpace(baseRaw) != "" {
+			payload.SingBoxBaseJSON = baseRaw
+		}
+	}
+	var packErr error
+	if includeRuleSets {
+		payload.RuleSetsTarGz, payload.RuleSetCount, packErr = packRuleSetsTarGz(rsDir)
 	}
 	s.cfgMu.Unlock()
 
-	if payload.SingctlYAML == "" && payload.GroupsYAML == "" && payload.AdGuardYAML == "" && payload.SingBoxConfigJSON == "" {
+	if packErr != nil {
+		writeJSONError(w, http.StatusInternalServerError, "打包离线规则集失败: "+packErr.Error())
+		return
+	}
+	if payload.SingctlYAML == "" && payload.GroupsYAML == "" && payload.AdGuardYAML == "" &&
+		payload.SingBoxConfigJSON == "" && payload.SingBoxBaseJSON == "" && len(payload.RuleSetsTarGz) == 0 {
 		writeJSONError(w, http.StatusNotFound, "当前无可导出的网关配置数据")
 		return
 	}
@@ -106,47 +128,105 @@ func (s *Server) handleClientBackupExport(w http.ResponseWriter, r *http.Request
 	filename := fmt.Sprintf("singctl-client-backup-%s.enc.json", time.Now().Format("20060102-150405"))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":       true,
-		"message":  "网关加密备份快照已生成，请妥善保管文件与解密口令",
+		"message":  "网关 V2 加密备份快照已生成，请妥善保管文件与解密口令",
 		"filename": filename,
 		"data":     string(encryptedBytes),
 		"summary": map[string]any{
-			"hasSingctlCfg": payload.SingctlYAML != "",
-			"hasGroups":     payload.GroupsYAML != "",
-			"hasAdGuard":    payload.AdGuardYAML != "",
-			"hasSingBox":    payload.SingBoxConfigJSON != "",
+			"hasSingctlCfg":  payload.SingctlYAML != "",
+			"hasGroups":      payload.GroupsYAML != "",
+			"hasAdGuard":     payload.AdGuardYAML != "",
+			"hasSingBox":     payload.SingBoxConfigJSON != "",
+			"hasSingBoxBase": payload.SingBoxBaseJSON != "",
+			"ruleSetCount":   payload.RuleSetCount,
 		},
 	})
 }
 
-func validateClientBackupPayload(p *ClientBackupPayload) error {
+func validateClientBackupPayload(p *ClientBackupPayload) ([]ruleSetArchiveEntry, error) {
 	if p.SingctlYAML != "" {
 		var checkMap map[string]any
 		if err := yaml.Unmarshal([]byte(p.SingctlYAML), &checkMap); err != nil {
-			return fmt.Errorf("快照中的 singctl.yaml 格式非法: %w", err)
+			return nil, fmt.Errorf("快照中的 singctl.yaml 格式非法: %w", err)
 		}
 		var checkCfg config.Config
 		if err := yaml.Unmarshal([]byte(p.SingctlYAML), &checkCfg); err != nil {
-			return fmt.Errorf("快照中的 singctl.yaml 结构非法: %w", err)
+			return nil, fmt.Errorf("快照中的 singctl.yaml 结构非法: %w", err)
 		}
 	}
 	if p.GroupsYAML != "" {
 		if _, err := config.ParseGroupsYAML([]byte(p.GroupsYAML)); err != nil {
-			return fmt.Errorf("快照中的 groups.yaml 校验失败: %w", err)
+			return nil, fmt.Errorf("快照中的 groups.yaml 校验失败: %w", err)
 		}
 	}
 	if p.AdGuardYAML != "" {
 		var checkMap map[string]any
 		if err := yaml.Unmarshal([]byte(p.AdGuardYAML), &checkMap); err != nil {
-			return fmt.Errorf("快照中的 AdGuardHome.yaml 格式非法: %w", err)
+			return nil, fmt.Errorf("快照中的 AdGuardHome.yaml 格式非法: %w", err)
 		}
 	}
 	if p.SingBoxConfigJSON != "" {
 		var checkObj map[string]any
 		if err := json.Unmarshal([]byte(p.SingBoxConfigJSON), &checkObj); err != nil {
-			return fmt.Errorf("快照中的 sing-box config.json 格式非法: %w", err)
+			return nil, fmt.Errorf("快照中的 sing-box config.json 格式非法: %w", err)
 		}
 	}
-	return nil
+	if p.SingBoxBaseJSON != "" {
+		var checkBase map[string]any
+		if err := json.Unmarshal([]byte(p.SingBoxBaseJSON), &checkBase); err != nil {
+			return nil, fmt.Errorf("快照中的 .config.json.singctl-base 格式非法: %w", err)
+		}
+	}
+	rsEntries, err := parseAndValidateRuleSetsTarGz(p.RuleSetsTarGz)
+	if err != nil {
+		return nil, err
+	}
+	return rsEntries, nil
+}
+
+func (s *Server) hostTotalRAMBytes() uint64 {
+	if s != nil && s.opts.AdGuardMemInfoForTest != nil {
+		return s.opts.AdGuardMemInfoForTest().TotalBytes
+	}
+	return sysinfo.TotalRAMBytes()
+}
+
+func (s *Server) isTargetLowMemory(cfg *config.Config) bool {
+	if cfg != nil {
+		if norm, ok := config.NormalizeLowMemoryMode(string(cfg.LowMemory)); ok {
+			switch norm {
+			case config.LowMemoryOn:
+				return true
+			case config.LowMemoryOff:
+				return false
+			}
+		}
+	}
+	if s != nil && s.opts.LowMemoryMode != nil {
+		return *s.opts.LowMemoryMode
+	}
+	return cfg.EffectiveLowMemory(s.hostTotalRAMBytes())
+}
+
+func (s *Server) hasAdGuardBinary() bool {
+	binPath := s.adguardBinPath()
+	if binPath == "" {
+		return false
+	}
+	info, err := os.Stat(binPath)
+	return err == nil && !info.IsDir()
+}
+
+func (s *Server) previewTargetConfig(singctlYAML string) *config.Config {
+	if strings.TrimSpace(singctlYAML) != "" {
+		var cfg config.Config
+		if err := yaml.Unmarshal([]byte(singctlYAML), &cfg); err == nil {
+			return &cfg
+		}
+	}
+	if snap, err := s.loadConfigSnapshot(); err == nil && snap != nil {
+		return snap
+	}
+	return &config.Config{}
 }
 
 func (s *Server) handleClientBackupRestore(w http.ResponseWriter, r *http.Request) {
@@ -155,7 +235,7 @@ func (s *Server) handleClientBackupRestore(w http.ResponseWriter, r *http.Reques
 		Data       string `json:"data"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, maxClientBackupUploadSize)).Decode(&body); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "无效的请求或备份文件超过 4MB 上限")
+		writeJSONError(w, http.StatusBadRequest, "无效的请求或备份文件超过 16MB 上限")
 		return
 	}
 	passphrase := strings.TrimSpace(body.Passphrase)
@@ -165,12 +245,14 @@ func (s *Server) handleClientBackupRestore(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// 前置全量解密与校验（动磁盘前完成全部 YAML/JSON/BaseJSON/tar.gz 安全校验）
 	payload, err := DecryptClientBackupBundle(passphrase, []byte(rawData))
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := validateClientBackupPayload(payload); err != nil {
+	rsEntries, err := validateClientBackupPayload(payload)
+	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -182,11 +264,35 @@ func (s *Server) handleClientBackupRestore(w http.ResponseWriter, r *http.Reques
 	gPath := config.GroupsPathForConfig(cfgPath)
 	aghPath := s.adguardConfigFilePath()
 	sbPath := s.sbConfigPath()
+	sbWorkPath := s.sbWorkConfigPath()
+	rsDir := s.ruleSetCacheDir()
 
-	var restoredItems []string
+	// 启动全事务原子回滚栈：后续任意步骤失败均完整回滚所有已写文件与规则集目录并刷新 cfgStore
+	tx := newRestoreTransaction(s)
+	defer tx.rollbackIfNeeded()
 
-	// 1. 恢复主配置 singctl.yaml (先备份现有文件再 0600 原子写入)
+	restoredItems := []string{}
+	adaptations := []string{}
+
+	previewCfg := s.previewTargetConfig(payload.SingctlYAML)
+	targetLowMem := s.isTargetLowMemory(previewCfg)
+
+	// 1. 先将离线规则集原子落盘至 rule_sets 目录（低内存目标跳过巨型 geosite-ad2.srs 节省闪存）
+	restoredRuleSetCount, skippedHeavyRS, writtenRS, rsErr := applyRuleSetEntriesToDir(tx, rsDir, rsEntries, targetLowMem)
+	if rsErr != nil {
+		writeJSONError(w, http.StatusInternalServerError, rsErr.Error())
+		return
+	}
+	if restoredRuleSetCount > 0 {
+		restoredItems = append(restoredItems, fmt.Sprintf("离线规则集 (%d 项)", restoredRuleSetCount))
+	}
+
+	// 2. 原子写入 singctl.yaml (0600)、groups.yaml、AdGuardHome.yaml (0600)、.config.json.singctl-base (0600)
 	if payload.SingctlYAML != "" && cfgPath != "" {
+		if err := tx.snapshotFile(cfgPath); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "快照现有 singctl.yaml 失败: "+err.Error())
+			return
+		}
 		if err := backupConfig(cfgPath); err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "备份现有 singctl.yaml 失败: "+err.Error())
 			return
@@ -199,8 +305,11 @@ func (s *Server) handleClientBackupRestore(w http.ResponseWriter, r *http.Reques
 		restoredItems = append(restoredItems, "主配置 (singctl.yaml)")
 	}
 
-	// 2. 恢复声明式策略组配置 groups.yaml
 	if payload.GroupsYAML != "" && gPath != "" {
+		if err := tx.snapshotFile(gPath); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "快照现有 groups.yaml 失败: "+err.Error())
+			return
+		}
 		if err := backupConfig(gPath); err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "备份现有 groups.yaml 失败: "+err.Error())
 			return
@@ -217,11 +326,16 @@ func (s *Server) handleClientBackupRestore(w http.ResponseWriter, r *http.Reques
 		loadedCfg = &config.Config{}
 		loadedCfg.SetSourcePath(cfgPath)
 	}
+	targetLowMem = s.isTargetLowMemory(loadedCfg)
 
-	// 3. 恢复本地防劫持 DNS 配置 AdGuardHome.yaml
+	adguardRestored := false
 	if payload.AdGuardYAML != "" && aghPath != "" {
-		if err := os.MkdirAll(filepath.Dir(aghPath), 0755); err != nil {
+		if err := tx.ensureDir(filepath.Dir(aghPath)); err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "创建 AdGuard 配置目录失败: "+err.Error())
+			return
+		}
+		if err := tx.snapshotFile(aghPath); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "快照现有 AdGuardHome.yaml 失败: "+err.Error())
 			return
 		}
 		if err := backupConfig(aghPath); err != nil {
@@ -232,47 +346,123 @@ func (s *Server) handleClientBackupRestore(w http.ResponseWriter, r *http.Reques
 			writeJSONError(w, http.StatusInternalServerError, "写入 AdGuardHome.yaml 失败: "+err.Error())
 			return
 		}
-		if !s.opts.SkipAdGuardProbeForTest {
-			if info, statErr := os.Stat(s.adguardBinPath()); statErr == nil && !info.IsDir() {
-				if rErr := s.newAdGuardManager(loadedCfg).Restart(); rErr != nil {
-					logger.Warn("恢复备份后重启 AdGuard Home 提示: %v", rErr)
-				}
-			}
-		}
+		adguardRestored = true
 		restoredItems = append(restoredItems, "AdGuard Home")
 	}
 
-	// 4. 恢复或无损重编译应用 sing-box config.json
+	if payload.SingBoxBaseJSON != "" && sbPath != "" {
+		basePath := singbox.BaseSnapshotPath(sbPath)
+		if err := tx.ensureDir(filepath.Dir(basePath)); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "创建 sing-box 基线目录失败: "+err.Error())
+			return
+		}
+		if err := tx.snapshotFile(basePath); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "快照现有 .singctl-base 失败: "+err.Error())
+			return
+		}
+		if err := singbox.SaveBaseSnapshot(sbPath, payload.SingBoxBaseJSON); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "写入 .config.json.singctl-base 失败: "+err.Error())
+			return
+		}
+		restoredItems = append(restoredItems, "三路合并基线 (.singctl-base)")
+	}
+
+	// 3. 跨硬件智能自适配并校验应用 sing-box config.json（备份优先，仅在缺失时回退本地旧 config.json）
+	didPruneAd2InConfig := false
 	if sbPath != "" {
 		existingSB, sbReadErr := os.ReadFile(sbPath)
 		hasLiveSB := sbReadErr == nil && strings.TrimSpace(string(existingSB)) != ""
-		if hasLiveSB {
+		targetJSON := strings.TrimSpace(payload.SingBoxConfigJSON)
+		if targetJSON == "" && hasLiveSB {
+			targetJSON = string(existingSB)
+		}
+
+		if targetJSON != "" {
+			if hasLiveSB && strings.TrimSpace(payload.SingBoxConfigJSON) != "" {
+				targetJSON = preserveLiveClashSecret(string(existingSB), targetJSON)
+			}
+
+			noAdGuard := !s.hasAdGuardBinary()
+			adaptedJSON, didFallbackDoH, didPruneAd2, adaptErr := adaptSingBoxJSONForTarget(
+				targetJSON, rsDir, writtenRS, noAdGuard, targetLowMem,
+			)
+			if adaptErr != nil {
+				writeJSONError(w, http.StatusBadRequest, adaptErr.Error())
+				return
+			}
+			didPruneAd2InConfig = didPruneAd2
+			if didFallbackDoH {
+				adaptations = append(adaptations, "目标机未安装 AdGuard Home，已自动将 dns_local 安全回退为内置纯 IP 加密 DoH (223.5.5.5)")
+			}
+			if didPruneAd2 {
+				if skippedHeavyRS {
+					adaptations = append(adaptations, "目标机处于低内存模式，已自动剥离重型广告规则集 geosite-ad2 并跳过落盘以节省内存与闪存")
+				} else {
+					adaptations = append(adaptations, "目标机处于低内存模式，已自动剥离重型广告规则集 geosite-ad2 以节省内存")
+				}
+			}
+
 			gc, _, _ := config.LoadGroupsFile(gPath)
-			recompiled, _, compErr := singbox.RecompileLiveConfigWithGroups(string(existingSB), loadedCfg, gc, "")
+			recompiled, _, compErr := singbox.RecompileLiveConfigWithGroups(adaptedJSON, loadedCfg, gc, "")
 			if compErr != nil {
 				writeJSONError(w, http.StatusBadRequest, "使用恢复策略重编译 sing-box 配置失败: "+compErr.Error())
 				return
 			}
-			if applyErr := singbox.ApplyLiveSingBoxConfig(r.Context(), sbPath, s.sbWorkConfigPath(), recompiled, "backup-restore"); applyErr != nil {
-				writeJSONError(w, http.StatusBadRequest, "sing-box 校验或热重载失败: "+applyErr.Error())
-				return
-			}
-			if baseRaw, bErr := singbox.LoadBaseSnapshot(sbPath); bErr == nil && strings.TrimSpace(baseRaw) != "" {
-				if updatedBase, _, uErr := singbox.RecompileLiveConfigWithGroups(baseRaw, loadedCfg, gc, ""); uErr == nil {
-					_ = singbox.SaveBaseSnapshot(sbPath, updatedBase)
-				}
-			}
-			restoredItems = append(restoredItems, "sing-box 策略热重载")
-		} else if payload.SingBoxConfigJSON != "" {
-			if err := os.MkdirAll(filepath.Dir(sbPath), 0755); err != nil {
+
+			if err := tx.ensureDir(filepath.Dir(sbPath)); err != nil {
 				writeJSONError(w, http.StatusInternalServerError, "创建 sing-box 配置目录失败: "+err.Error())
 				return
 			}
-			if err := singbox.ValidateAndReplaceSingBoxConfig(r.Context(), sbPath, payload.SingBoxConfigJSON, ".restore.tmp"); err != nil {
-				writeJSONError(w, http.StatusBadRequest, "快照中的 sing-box 配置校验失败: "+err.Error())
+			if err := tx.snapshotFile(sbPath); err != nil {
+				writeJSONError(w, http.StatusInternalServerError, "快照现有 sing-box 配置失败: "+err.Error())
 				return
 			}
-			restoredItems = append(restoredItems, "sing-box 配置")
+			if sbWorkPath != "" {
+				_ = tx.snapshotFile(sbWorkPath)
+			}
+
+			if hasLiveSB {
+				if applyErr := singbox.ApplyLiveSingBoxConfig(r.Context(), sbPath, sbWorkPath, recompiled, "backup-restore"); applyErr != nil {
+					writeJSONError(w, http.StatusBadRequest, "sing-box 校验或热重载失败: "+applyErr.Error())
+					return
+				}
+				restoredItems = append(restoredItems, "sing-box 策略热重载")
+			} else {
+				if err := singbox.ValidateAndReplaceSingBoxConfig(r.Context(), sbPath, recompiled, ".restore.tmp"); err != nil {
+					writeJSONError(w, http.StatusBadRequest, "快照中的 sing-box 配置校验失败: "+err.Error())
+					return
+				}
+				if sbWorkPath != "" {
+					if err := singbox.SyncSandboxWorkConfig(r.Context(), sbPath, sbWorkPath, recompiled, ".restore.tmp"); err != nil {
+						writeJSONError(w, http.StatusBadRequest, "同步 sing-box 沙盒配置失败: "+err.Error())
+						return
+					}
+				}
+				singbox.ReloadSingBoxProcess()
+				restoredItems = append(restoredItems, "sing-box 配置")
+			}
+
+			// 同步对齐 .config.json.singctl-base，保证后续三路合并基线与跨机自适配结果一致
+			if baseRaw, bErr := singbox.LoadBaseSnapshot(sbPath); bErr == nil && strings.TrimSpace(baseRaw) != "" {
+				if adaptedBase, _, _, aErr := adaptSingBoxJSONForTarget(baseRaw, rsDir, writtenRS, noAdGuard, targetLowMem); aErr == nil {
+					if updatedBase, _, uErr := singbox.RecompileLiveConfigWithGroups(adaptedBase, loadedCfg, gc, ""); uErr == nil {
+						_ = singbox.SaveBaseSnapshot(sbPath, updatedBase)
+					}
+				}
+			}
+		}
+	}
+
+	if skippedHeavyRS && !didPruneAd2InConfig {
+		adaptations = append(adaptations, "目标机处于低内存模式，已跳过将重型规则集 geosite-ad2.srs 写入闪存")
+	}
+
+	// 全部校验与落盘成功，正式提交事务（不再回滚）
+	tx.commit()
+
+	if adguardRestored && !s.opts.SkipAdGuardProbeForTest && s.hasAdGuardBinary() {
+		if rErr := s.newAdGuardManager(loadedCfg).Restart(); rErr != nil {
+			logger.Warn("恢复备份后重启 AdGuard Home 提示: %v", rErr)
 		}
 	}
 
@@ -287,5 +477,7 @@ func (s *Server) handleClientBackupRestore(w http.ResponseWriter, r *http.Reques
 		"ok":            true,
 		"message":       fmt.Sprintf("已成功从加密快照恢复：%s", summary),
 		"restoredItems": restoredItems,
+		"ruleSetCount":  restoredRuleSetCount,
+		"adaptations":   adaptations,
 	})
 }

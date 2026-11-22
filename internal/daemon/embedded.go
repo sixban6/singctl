@@ -21,6 +21,12 @@ const UnifiedDaemonMaxAvailBytes uint64 = sysinfo.LowMemoryAvailableThresholdByt
 // EnvUnifiedDaemon 控制守护进程是否启用单进程合体模式（"1" 强制开启，"0" 强制关闭）。
 const EnvUnifiedDaemon = "SINGCTL_UNIFIED_DAEMON"
 
+// EnvFromWebUI 标识当前 CLI 子命令是由 WebUI 动作执行器触发。
+const EnvFromWebUI = "SINGCTL_FROM_WEBUI"
+
+// EnvDeferWebHandoff 透传给后台 fork 的守护子进程，要求礼貌等待独立 WebUI 推流退出后再接管监听端口。
+const EnvDeferWebHandoff = "SINGCTL_DEFER_WEB_HANDOFF"
+
 // WebEmbeddedFileName 内嵌 WebUI 运行态标记文件名。
 const WebEmbeddedFileName = "singctl-web.embedded"
 

@@ -5,13 +5,17 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
 	"os/exec"
 	"regexp"
 	"strings"
 	"time"
 
+	"singctl/internal/daemon"
 	"singctl/internal/tailscale"
 )
+
+const defaultHandoffShutdownDelay = 300 * time.Millisecond
 
 // actionTimeout 单个动作最长执行时间(安装/更新含下载,放宽到 30 分钟)
 const actionTimeout = 30 * time.Minute
@@ -245,10 +249,13 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 			code = exitErr.ExitCode()
 		}
 	}
-	restarting := false
-	if body.Name == "update-self" && code == 0 && stream.sawSelfUpdated {
-		restarting = true
+	selfUpdateRestart := body.Name == "update-self" && code == 0 && stream.sawSelfUpdated
+	handoffToUnified := s.shouldHandoffToUnifiedDaemon(body.Name, code)
+	restarting := selfUpdateRestart || handoffToUnified
+	if selfUpdateRestart {
 		stream.emitLine("[INFO] 🔄 正在自动热重启 WebUI 服务以应用新版本，页面将在 3 秒后自动刷新...")
+	} else if handoffToUnified {
+		stream.emitLine("[INFO] 🔄 守护进程已启用单进程合体模式，独立 WebUI 将优雅让渡端口，页面即将自动重连...")
 	}
 	tailscaleSwapping := body.Name == "ts-update" && code == 0 && stream.sawTailscaleSwapHandoff
 	stream.write(map[string]any{
@@ -257,9 +264,39 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		"restarting":        restarting,
 		"tailscaleSwapping": tailscaleSwapping,
 	})
-	if restarting {
+	if selfUpdateRestart {
 		ScheduleDetachedRestart(s.opts.ConfigPath, s.opts.Listen, s.opts.Password)
+	} else if handoffToUnified {
+		delay := s.opts.HandoffShutdownDelay
+		if delay <= 0 {
+			delay = defaultHandoffShutdownDelay
+		}
+		go func() {
+			time.Sleep(delay)
+			s.RequestShutdown()
+		}()
 	}
+}
+
+func (s *Server) shouldHandoffToUnifiedDaemon(actionName string, code int) bool {
+	if code != 0 {
+		return false
+	}
+	switch actionName {
+	case "sb-start", "sb-restart", "dm-start", "dm-restart":
+	default:
+		return false
+	}
+	if s.opts.EmbeddedInDaemon || os.Getenv("SINGCTL_DAEMONIZED") == "1" {
+		return false
+	}
+	if s.opts.UnifiedHandoffCheck != nil {
+		return s.opts.UnifiedHandoffCheck()
+	}
+	if _, ok := daemon.ReadWebEmbeddedState(); ok {
+		return true
+	}
+	return daemon.IsDaemonRunning() && daemon.IsLowMemoryDevice()
 }
 
 // ndjsonWriter 将子进程输出按行转为 NDJSON 事件并立即刷新

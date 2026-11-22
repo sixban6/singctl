@@ -202,14 +202,34 @@ func NormalizeLegacyWildcardListen(listen string) string {
 }
 
 // BuildCleanSubprocessEnv 构造干净的子进程环境变量：
-// 强制剥离后台标记（SINGCTL_WEB_BACKGROUND / SINGCTL_WEB_READY_FD / SINGCTL_FROM_WEBUI），
+// 强制剥离后台标记（SINGCTL_WEB_BACKGROUND / SINGCTL_WEB_READY_FD / SINGCTL_FROM_WEBUI / SINGCTL_DEFER_WEB_HANDOFF），
 // 并对传入的 extra (KEY=VAL) 去重覆写；若传入 KEY=（空值）亦可显式移除父环境同名键。
 func BuildCleanSubprocessEnv(extra ...string) []string {
 	return execx.CleanEnv([]string{
 		envWebBackground,
 		envWebReadyFd,
-		"SINGCTL_FROM_WEBUI",
+		daemon.EnvFromWebUI,
+		daemon.EnvDeferWebHandoff,
 	}, extra...)
+}
+
+// IsStandaloneWebRunning 判断当前是否存在独立运行的后台 singctl web 进程（不含单进程合体守护内嵌实例）。
+func IsStandaloneWebRunning() bool {
+	st, err := ReadWebState()
+	if err != nil {
+		return false
+	}
+	return WebProcMatches(st.Pid)
+}
+
+func removeOwnWebStateFile() {
+	st, err := ReadWebState()
+	if err != nil {
+		return
+	}
+	if st.Pid == os.Getpid() {
+		_ = os.Remove(WebStatePath())
+	}
 }
 
 func buildRestartEnv(password string) []string {

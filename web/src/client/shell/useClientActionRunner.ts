@@ -156,7 +156,12 @@ export function useClientActionRunner(refreshStatus: (silent?: boolean) => Promi
         if (res.restarting) {
           setRestartingBanner(true);
           setRestartTimedOut(false);
-          toast('程序已自更新，正在重启 Web 控制台并等待恢复…', 'info');
+          toast(
+            name === 'update-self'
+              ? '程序已自更新，正在重启 Web 控制台并等待恢复…'
+              : 'Web 控制台正在平滑切换至守护进程并等待自动重连…',
+            'info',
+          );
           void (async () => {
             // 等待 1.8s 让旧进程完成延时关闭与端口释放
             await new Promise((r) => window.setTimeout(r, 1800));

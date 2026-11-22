@@ -4,8 +4,10 @@ package tailscale
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"net/netip"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -13,10 +15,16 @@ import (
 	"singctl/internal/config"
 )
 
+// ErrNFTUnavailable 表示当前宿主机未安装 nftables (nft) 命令（例如 OpenWrt 21.02 纯 iptables 固件）。
+var ErrNFTUnavailable = errors.New("nftables (nft) unavailable")
+
 const (
 	jitPollInterval     = 300 * time.Millisecond
 	jitPostCloseGrace   = 1200 * time.Millisecond
 	jitFailureThreshold = 2
+
+	// DefaultNFTUnavailableBackoff 缺失 nft 时进入长退避静默的默认时长，避免每 3 秒反复 fork 与刷屏。
+	DefaultNFTUnavailableBackoff = 30 * time.Minute
 
 	// DefaultMinAutoJITBytes 限制仅当 DERP 会话窗口内实际产生 >= 4 KiB 真实流量增量时才自动开孔，
 	// 过滤掉 Tailscale 长闲置后每 ~30 分钟偶发几百字节的 WireGuard 握手/保活噪声。
@@ -72,19 +80,68 @@ type peerStateEntry struct {
 
 // P2PAssistController 协调 Tailscale LocalAPI 状态探测、fw4 JIT 瞬时打洞与 3 态防火墙收敛。
 type P2PAssistController struct {
-	BaseCtx         context.Context
-	LocalAPI        LocalAPIClient
-	FW4             *FW4Manager
-	Now             func() time.Time
-	Sleep           func(ctx context.Context, d time.Duration) error
-	DefaultLANCIDR  func() string
-	HostSelfIPs     func() []netip.Addr
-	MinAutoJITBytes int64 // 0=默认 DefaultMinAutoJITBytes(4096); <0=禁用自动打洞流量门槛
-	OnEvent         func(action string, healthy bool, summary string)
+	BaseCtx               context.Context
+	LocalAPI              LocalAPIClient
+	FW4                   *FW4Manager
+	LookPath              func(file string) (string, error)
+	NFTUnavailableBackoff time.Duration
+	Now                   func() time.Time
+	Sleep                 func(ctx context.Context, d time.Duration) error
+	DefaultLANCIDR        func() string
+	HostSelfIPs           func() []netip.Addr
+	MinAutoJITBytes       int64 // 0=默认 DefaultMinAutoJITBytes(4096); <0=禁用自动打洞流量门槛
+	OnEvent               func(action string, healthy bool, summary string)
 
-	mu    sync.Mutex
-	peers map[string]*peerStateEntry
-	wg    sync.WaitGroup
+	mu                     sync.Mutex
+	peers                  map[string]*peerStateEntry
+	nftUnavailableUntil    time.Time
+	nftUnavailableErr      string
+	nftUnavailableReported bool
+	wg                     sync.WaitGroup
+}
+
+// ResetNFTUnavailableBackoff 清除缺失 nft 的静默退避状态（用于配置热重载后重新探测）。
+func (c *P2PAssistController) ResetNFTUnavailableBackoff() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.nftUnavailableUntil = time.Time{}
+	c.nftUnavailableErr = ""
+	c.nftUnavailableReported = false
+	c.mu.Unlock()
+}
+
+func (c *P2PAssistController) effectiveNFTUnavailableBackoff() time.Duration {
+	if c.NFTUnavailableBackoff > 0 {
+		return c.NFTUnavailableBackoff
+	}
+	return DefaultNFTUnavailableBackoff
+}
+
+func (c *P2PAssistController) probeNFTBinary() error {
+	if c.LookPath != nil {
+		_, err := c.LookPath("nft")
+		return err
+	}
+	// 当测试显式注入了自定义 FW4.Runner 时跳过宿主机 PATH 检查，避免非 Linux 测试机误判。
+	if c.FW4 != nil && c.FW4.Runner != nil {
+		return nil
+	}
+	_, err := exec.LookPath("nft")
+	return err
+}
+
+func (c *P2PAssistController) recordNFTUnavailable(now time.Time, cause error) (msg string, firstReport bool) {
+	backoff := c.effectiveNFTUnavailableBackoff()
+	msg = fmt.Sprintf("当前宿主机未检测到 nftables (nft) 命令（可能为纯 iptables 固件），已跳过 fw4 P2P 防线并静默退避 %v: %v", backoff, cause)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	firstReport = !c.nftUnavailableReported
+	c.nftUnavailableReported = true
+	c.nftUnavailableErr = msg
+	c.nftUnavailableUntil = now.Add(backoff)
+	return msg, firstReport
 }
 
 func (c *P2PAssistController) baseContext() context.Context {
@@ -215,6 +272,9 @@ func (c *P2PAssistController) Reconcile(ctx context.Context, cfg config.Tailscal
 		for _, st := range c.peers {
 			st.pinholeOpen = false
 		}
+		c.nftUnavailableUntil = time.Time{}
+		c.nftUnavailableErr = ""
+		c.nftUnavailableReported = false
 		c.mu.Unlock()
 		snap := P2PRuntimeSnapshot{
 			Enabled:    false,
@@ -226,6 +286,34 @@ func (c *P2PAssistController) Reconcile(ctx context.Context, cfg config.Tailscal
 		}
 		return snap, err
 	}
+
+	c.mu.Lock()
+	if !c.nftUnavailableUntil.IsZero() && now.Before(c.nftUnavailableUntil) {
+		cachedErr := c.nftUnavailableErr
+		c.mu.Unlock()
+		return P2PRuntimeSnapshot{
+			Enabled:    true,
+			UpdatedAt:  now.Format(time.DateTime),
+			LastError:  cachedErr,
+			PeerStates: c.PeerStates(),
+		}, nil
+	}
+	c.mu.Unlock()
+
+	if lookErr := c.probeNFTBinary(); lookErr != nil {
+		msg, firstReport := c.recordNFTUnavailable(now, lookErr)
+		snap := P2PRuntimeSnapshot{
+			Enabled:    true,
+			UpdatedAt:  now.Format(time.DateTime),
+			LastError:  msg,
+			PeerStates: c.PeerStates(),
+		}
+		if firstReport {
+			return snap, fmt.Errorf("%w: %w", ErrNFTUnavailable, lookErr)
+		}
+		return snap, nil
+	}
+	c.ResetNFTUnavailableBackoff()
 
 	api := c.localAPI()
 	statusSnap, statusErr := api.Status(ctx)
@@ -278,6 +366,19 @@ func (c *P2PAssistController) Reconcile(ctx context.Context, cfg config.Tailscal
 	}
 
 	applyMode, applyErr := fw4.Apply(ctx, dropIns)
+	if applyErr != nil && errors.Is(applyErr, exec.ErrNotFound) {
+		msg, firstReport := c.recordNFTUnavailable(now, applyErr)
+		snap := P2PRuntimeSnapshot{
+			Enabled:    true,
+			UpdatedAt:  now.Format(time.DateTime),
+			LastError:  msg,
+			PeerStates: c.PeerStates(),
+		}
+		if firstReport {
+			return snap, fmt.Errorf("%w: %w", ErrNFTUnavailable, applyErr)
+		}
+		return snap, nil
+	}
 	openCount, openIPs := fw4.CountOpenPinholes(ctx)
 
 	if applyErr == nil {

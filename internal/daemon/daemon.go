@@ -82,6 +82,7 @@ type DaemonOptions struct {
 	EmbeddedService     func(ctx context.Context, cfgStore *config.Store) error
 	WebEmbeddedListen   string
 	LowMemoryMode       *bool
+	P2PController       *tailscale.P2PAssistController
 }
 
 // Daemon 守护进程。
@@ -176,27 +177,30 @@ func NewDaemonWithOptions(cfg *config.Config, opts DaemonOptions) *Daemon {
 	)
 
 	ver := cmp.Or(strings.TrimSpace(opts.Version), "dev")
-	eventGate := NewP2PEventGate()
-	p2pCtrl := &tailscale.P2PAssistController{
-		BaseCtx: ctx,
-		DefaultLANCIDR: func() string {
-			s, err := netx.GetLANSubnet()
-			if err != nil {
-				return ""
-			}
-			return s
-		},
-		OnEvent: func(action string, healthy bool, summary string) {
-			logger.Info("[Tailscale-P2P] %s: %s", action, summary)
-			if !eventGate.ShouldAppendRuntimeEvent(action, summary, time.Now()) {
-				return
-			}
-			stateStore.AppendEvent(WatchdogEventRecord{
-				Action:  action,
-				Healthy: healthy,
-				Summary: summary,
-			})
-		},
+	p2pCtrl := opts.P2PController
+	if p2pCtrl == nil {
+		eventGate := NewP2PEventGate()
+		p2pCtrl = &tailscale.P2PAssistController{
+			BaseCtx: ctx,
+			DefaultLANCIDR: func() string {
+				s, err := netx.GetLANSubnet()
+				if err != nil {
+					return ""
+				}
+				return s
+			},
+			OnEvent: func(action string, healthy bool, summary string) {
+				logger.Info("[Tailscale-P2P] %s: %s", action, summary)
+				if !eventGate.ShouldAppendRuntimeEvent(action, summary, time.Now()) {
+					return
+				}
+				stateStore.AppendEvent(WatchdogEventRecord{
+					Action:  action,
+					Healthy: healthy,
+					Summary: summary,
+				})
+			},
+		}
 	}
 
 	return &Daemon{
@@ -334,6 +338,9 @@ func (d *Daemon) reloadConfigIfChanged(force bool) (bool, *config.Config) {
 	}
 	if d.failover != nil {
 		d.failover.ApplyConfig(freshCfg.EffectiveFailoverConfig())
+	}
+	if d.p2pCtrl != nil {
+		d.p2pCtrl.ResetNFTUnavailableBackoff()
 	}
 	return true, freshCfg
 }
@@ -639,6 +646,9 @@ func (d *Daemon) monitorLoop() error {
 			return nil
 		case <-d.reloadCh:
 			applyHotReload(true)
+			if d.p2pCtrl != nil {
+				d.p2pCtrl.ResetNFTUnavailableBackoff()
+			}
 			d.maybePatrolGroupFailoverAsync()
 			d.maybeReconcileTailscaleP2PAsync(true)
 			d.maybeReconcileAuditThrottlesAsync(true)

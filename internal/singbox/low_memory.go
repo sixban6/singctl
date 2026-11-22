@@ -61,6 +61,25 @@ func (g *ConfigGenerator) EffectiveLowMemory() bool {
 	return g.config.EffectiveLowMemory(readHostTotalRAMBytes()) || sysinfo.IsLowMemoryHost()
 }
 
+// PruneLowMemoryRuleSetsJSON 从给定 sing-box 配置 JSON 中无损剥离巨型广告规则集 geosite-ad2 及其引用（保留 geosite-ad1 等）。
+func PruneLowMemoryRuleSetsJSON(rawJSON string) (string, bool, error) {
+	if strings.TrimSpace(rawJSON) == "" {
+		return rawJSON, false, nil
+	}
+	doc, err := sboption.ParseDocument([]byte(rawJSON))
+	if err != nil {
+		return "", false, err
+	}
+	if !pruneLowMemoryRuleSetsInDoc(doc) {
+		return rawJSON, false, nil
+	}
+	formatted, err := doc.MarshalPretty()
+	if err != nil {
+		return "", false, err
+	}
+	return formatted + "\n", true, nil
+}
+
 // pruneLowMemoryRuleSetsInDoc 在低内存模式下从内存配置树安全剥离巨无霸规则集 geosite-ad2（立省 ~25-30 MB 堆内存），
 // 完整保留轻量高频广告集 geosite-ad1 与内置 PCDN 拦截集，并清理悬空规则引用。
 func pruneLowMemoryRuleSetsInDoc(doc *sboption.Document) bool {

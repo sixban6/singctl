@@ -82,10 +82,10 @@ export const systemApi = {
     return res;
   },
 
-  exportBackup: (passphrase: string) =>
+  exportBackup: (passphrase: string, includeRuleSets = true) =>
     request<ClientBackupExportResponse>('/api/backup/export', {
       method: 'POST',
-      body: JSON.stringify({ passphrase }),
+      body: JSON.stringify({ passphrase, includeRuleSets }),
     }),
 
   restoreBackup: (passphrase: string, data: string) =>
