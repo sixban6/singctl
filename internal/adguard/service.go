@@ -250,6 +250,27 @@ func (m *Manager) Stop() error {
 	return nil
 }
 
+// Disable 停止 AdGuard Home 并禁用开机自启（保留二进制与配置文件，供三引擎无损切换使用）。
+func (m *Manager) Disable() error {
+	_ = m.Stop()
+	ctx := context.Background()
+	if hasOpenWrtProcd() && m.initdScript != "" {
+		_ = servicemgr.NewProcd(nil, filepath.Dir(m.initdScript)).Disable(ctx, "AdGuardHome")
+	}
+	if hasSystemd() {
+		_ = servicemgr.NewSystemd(nil).Disable(ctx, "AdGuardHome")
+	}
+	return nil
+}
+
+// ConfigFilePath 返回当前管理器使用的 AdGuardHome.yaml 路径（只读辅助）。
+func (m *Manager) ConfigFilePath() string {
+	if m == nil {
+		return ""
+	}
+	return m.aghConfigFile
+}
+
 // Restart 重启 AdGuard Home。
 func (m *Manager) Restart() error {
 	_ = m.Stop()

@@ -3,17 +3,18 @@ package cmd
 
 import (
 	"cmp"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"singctl/configs"
-	"singctl/internal/adguard"
 	"singctl/internal/common/netx"
 	"singctl/internal/config"
 	"singctl/internal/constant"
 	"singctl/internal/daemon"
+	"singctl/internal/localdns"
 	"singctl/internal/logger"
 	"singctl/internal/singbox"
 	ruleset_snapshot "singctl/internal/singbox/ruleset_snapshot"
@@ -74,9 +75,12 @@ func CopyGeneratedConfigToClipboard(targetPath string) (bool, error) {
 }
 
 func runStartSingbox(cfg *config.Config, configPath string) error {
-	if runtime.GOOS == "linux" && cfg != nil && cfg.DNS.IsEnabled() && adguard.IsInstalled() {
-		if err := adguard.NewManager(cfg, configPath).EnsureHealthy(); err != nil {
-			logger.Warn("AdGuard Home 启动检查异常 (将继续启动 sing-box): %v", err)
+	if runtime.GOOS == "linux" && cfg != nil && cfg.DNS.IsEnabled() {
+		reg := localdns.NewRegistry(cfg, localdns.EngineDeps{ConfigPath: configPath})
+		if active := reg.ActiveEngine(); active != nil && active.ID() != constant.DNSEngineSingBox && active.IsInstalled() {
+			if err := active.EnsureHealthy(context.Background()); err != nil {
+				logger.Warn("%s 启动检查异常 (将继续启动 sing-box): %v", active.Meta().Name, err)
+			}
 		}
 	}
 
@@ -278,6 +282,7 @@ func newGenCmd(defaultConfigPath string) *cobra.Command {
 			isIOS := target == singbox.PlatformIOS
 
 			generator := singbox.NewConfigGenerator(effectiveCfg)
+			generator.SetLocalDNSProbe(localdns.NewRegistry(effectiveCfg, localdns.EngineDeps{}).MakeSingBoxProbe())
 			configJSON, err := generator.GenerateForPlatform(target)
 			if err != nil {
 				return err

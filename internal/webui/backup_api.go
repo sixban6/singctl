@@ -16,6 +16,7 @@ import (
 	"singctl/internal/common/fsx"
 	"singctl/internal/common/sysinfo"
 	"singctl/internal/config"
+	"singctl/internal/constant"
 	"singctl/internal/daemon"
 	"singctl/internal/logger"
 	"singctl/internal/singbox"
@@ -38,6 +39,7 @@ type ClientBackupPayload struct {
 	SingctlYAML       string `json:"singctlYaml,omitempty"`
 	GroupsYAML        string `json:"groupsYaml,omitempty"`
 	AdGuardYAML       string `json:"adguardYaml,omitempty"`
+	SmartDNSConf      string `json:"smartdnsConf,omitempty"`
 	SingBoxConfigJSON string `json:"singboxConfigJson,omitempty"`
 	SingBoxBaseJSON   string `json:"singboxBaseJson,omitempty"`
 	RuleSetsTarGz     []byte `json:"ruleSetsTarGz,omitempty"`
@@ -77,6 +79,7 @@ func (s *Server) handleClientBackupExport(w http.ResponseWriter, r *http.Request
 	cfgPath := configPathFor(s)
 	gPath := config.GroupsPathForConfig(cfgPath)
 	aghPath := s.adguardConfigFilePath()
+	smartDNSPath := s.smartDNSConfigFilePath()
 	sbPath := s.sbConfigPath()
 	rsDir := s.ruleSetCacheDir()
 
@@ -93,6 +96,11 @@ func (s *Server) handleClientBackupExport(w http.ResponseWriter, r *http.Request
 	if aghPath != "" {
 		if raw, err := os.ReadFile(aghPath); err == nil {
 			payload.AdGuardYAML = string(raw)
+		}
+	}
+	if smartDNSPath != "" {
+		if raw, err := os.ReadFile(smartDNSPath); err == nil {
+			payload.SmartDNSConf = string(raw)
 		}
 	}
 	if sbPath != "" {
@@ -113,7 +121,7 @@ func (s *Server) handleClientBackupExport(w http.ResponseWriter, r *http.Request
 		writeJSONError(w, http.StatusInternalServerError, "打包离线规则集失败: "+packErr.Error())
 		return
 	}
-	if payload.SingctlYAML == "" && payload.GroupsYAML == "" && payload.AdGuardYAML == "" &&
+	if payload.SingctlYAML == "" && payload.GroupsYAML == "" && payload.AdGuardYAML == "" && payload.SmartDNSConf == "" &&
 		payload.SingBoxConfigJSON == "" && payload.SingBoxBaseJSON == "" && len(payload.RuleSetsTarGz) == 0 {
 		writeJSONError(w, http.StatusNotFound, "当前无可导出的网关配置数据")
 		return
@@ -135,6 +143,7 @@ func (s *Server) handleClientBackupExport(w http.ResponseWriter, r *http.Request
 			"hasSingctlCfg":  payload.SingctlYAML != "",
 			"hasGroups":      payload.GroupsYAML != "",
 			"hasAdGuard":     payload.AdGuardYAML != "",
+			"hasSmartDNS":    payload.SmartDNSConf != "",
 			"hasSingBox":     payload.SingBoxConfigJSON != "",
 			"hasSingBoxBase": payload.SingBoxBaseJSON != "",
 			"ruleSetCount":   payload.RuleSetCount,
@@ -163,6 +172,9 @@ func validateClientBackupPayload(p *ClientBackupPayload) ([]ruleSetArchiveEntry,
 		if err := yaml.Unmarshal([]byte(p.AdGuardYAML), &checkMap); err != nil {
 			return nil, fmt.Errorf("快照中的 AdGuardHome.yaml 格式非法: %w", err)
 		}
+	}
+	if p.SmartDNSConf != "" && strings.ContainsRune(p.SmartDNSConf, '\x00') {
+		return nil, fmt.Errorf("快照中的 smartdns.conf 包含非法空字节")
 	}
 	if p.SingBoxConfigJSON != "" {
 		var checkObj map[string]any
@@ -209,6 +221,15 @@ func (s *Server) isTargetLowMemory(cfg *config.Config) bool {
 
 func (s *Server) hasAdGuardBinary() bool {
 	binPath := s.adguardBinPath()
+	if binPath == "" {
+		return false
+	}
+	info, err := os.Stat(binPath)
+	return err == nil && !info.IsDir()
+}
+
+func (s *Server) hasSmartDNSBinary() bool {
+	binPath := s.smartDNSBinPath()
 	if binPath == "" {
 		return false
 	}
@@ -263,6 +284,7 @@ func (s *Server) handleClientBackupRestore(w http.ResponseWriter, r *http.Reques
 	cfgPath := configPathFor(s)
 	gPath := config.GroupsPathForConfig(cfgPath)
 	aghPath := s.adguardConfigFilePath()
+	smartDNSPath := s.smartDNSConfigFilePath()
 	sbPath := s.sbConfigPath()
 	sbWorkPath := s.sbWorkConfigPath()
 	rsDir := s.ruleSetCacheDir()
@@ -350,6 +372,28 @@ func (s *Server) handleClientBackupRestore(w http.ResponseWriter, r *http.Reques
 		restoredItems = append(restoredItems, "AdGuard Home")
 	}
 
+	smartDNSRestored := false
+	if payload.SmartDNSConf != "" && smartDNSPath != "" {
+		if err := tx.ensureDir(filepath.Dir(smartDNSPath)); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "创建 SmartDNS 配置目录失败: "+err.Error())
+			return
+		}
+		if err := tx.snapshotFile(smartDNSPath); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "快照现有 smartdns.conf 失败: "+err.Error())
+			return
+		}
+		if err := backupConfig(smartDNSPath); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "备份现有 smartdns.conf 失败: "+err.Error())
+			return
+		}
+		if err := fsx.WriteAtomic0600(smartDNSPath, []byte(payload.SmartDNSConf)); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "写入 smartdns.conf 失败: "+err.Error())
+			return
+		}
+		smartDNSRestored = true
+		restoredItems = append(restoredItems, "SmartDNS")
+	}
+
 	if payload.SingBoxBaseJSON != "" && sbPath != "" {
 		basePath := singbox.BaseSnapshotPath(sbPath)
 		if err := tx.ensureDir(filepath.Dir(basePath)); err != nil {
@@ -382,9 +426,10 @@ func (s *Server) handleClientBackupRestore(w http.ResponseWriter, r *http.Reques
 				targetJSON = preserveLiveClashSecret(string(existingSB), targetJSON)
 			}
 
-			noAdGuard := !s.hasAdGuardBinary()
+			hasSmartDNSUsable := s.hasSmartDNSBinary() && (loadedCfg.DNS.GetEngine() == constant.DNSEngineSmartDNS || payload.SmartDNSConf != "")
+			noExternalDNS := !s.hasAdGuardBinary() && !hasSmartDNSUsable
 			adaptedJSON, didFallbackDoH, didPruneAd2, adaptErr := adaptSingBoxJSONForTarget(
-				targetJSON, rsDir, writtenRS, noAdGuard, targetLowMem,
+				targetJSON, rsDir, writtenRS, noExternalDNS, targetLowMem,
 			)
 			if adaptErr != nil {
 				writeJSONError(w, http.StatusBadRequest, adaptErr.Error())
@@ -392,7 +437,7 @@ func (s *Server) handleClientBackupRestore(w http.ResponseWriter, r *http.Reques
 			}
 			didPruneAd2InConfig = didPruneAd2
 			if didFallbackDoH {
-				adaptations = append(adaptations, "目标机未安装 AdGuard Home，已自动将 dns_local 安全回退为内置纯 IP 加密 DoH (223.5.5.5)")
+				adaptations = append(adaptations, "目标机未安装可用的外部本地 DNS 引擎（AdGuard Home / SmartDNS），已自动将 dns_local 安全回退为 sing-box 加强版内置纯 IP 加密 DoH (223.5.5.5)")
 			}
 			if didPruneAd2 {
 				if skippedHeavyRS {
@@ -444,7 +489,7 @@ func (s *Server) handleClientBackupRestore(w http.ResponseWriter, r *http.Reques
 
 			// 同步对齐 .config.json.singctl-base，保证后续三路合并基线与跨机自适配结果一致
 			if baseRaw, bErr := singbox.LoadBaseSnapshot(sbPath); bErr == nil && strings.TrimSpace(baseRaw) != "" {
-				if adaptedBase, _, _, aErr := adaptSingBoxJSONForTarget(baseRaw, rsDir, writtenRS, noAdGuard, targetLowMem); aErr == nil {
+				if adaptedBase, _, _, aErr := adaptSingBoxJSONForTarget(baseRaw, rsDir, writtenRS, noExternalDNS, targetLowMem); aErr == nil {
 					if updatedBase, _, uErr := singbox.RecompileLiveConfigWithGroups(adaptedBase, loadedCfg, gc, ""); uErr == nil {
 						_ = singbox.SaveBaseSnapshot(sbPath, updatedBase)
 					}
@@ -463,6 +508,13 @@ func (s *Server) handleClientBackupRestore(w http.ResponseWriter, r *http.Reques
 	if adguardRestored && !s.opts.SkipAdGuardProbeForTest && s.hasAdGuardBinary() {
 		if rErr := s.newAdGuardManager(loadedCfg).Restart(); rErr != nil {
 			logger.Warn("恢复备份后重启 AdGuard Home 提示: %v", rErr)
+		}
+	}
+	if smartDNSRestored && !s.opts.SkipAdGuardProbeForTest && s.hasSmartDNSBinary() {
+		if sdEng, ok := s.newDNSRegistry(loadedCfg).Get(constant.DNSEngineSmartDNS); ok {
+			if rErr := sdEng.Restart(r.Context()); rErr != nil {
+				logger.Warn("恢复备份后重启 SmartDNS 提示: %v", rErr)
+			}
 		}
 	}
 

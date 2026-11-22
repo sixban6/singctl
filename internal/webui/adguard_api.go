@@ -1,22 +1,15 @@
-// 文件职责：提供客户端 WebUI 对本地 AdGuard Home 防劫持 DNS 的状态、凭据、上游与规则管控接口。
+// 文件职责：提供客户端 WebUI 对本地 AdGuard Home / SmartDNS 路径解析与订阅白名单异步同步辅助方法（全部 HTTP 接口已收敛至 dns_api.go）。
 package webui
 
 import (
 	"cmp"
 	"context"
-	"encoding/json"
-	"net"
-	"net/http"
-	"os"
-	"strconv"
 	"strings"
 	"time"
 
 	"singctl/internal/adguard"
-	"singctl/internal/common/netx"
 	"singctl/internal/config"
 	"singctl/internal/constant"
-	"singctl/internal/singbox"
 )
 
 func (s *Server) newAdGuardManager(cfg *config.Config) *adguard.Manager {
@@ -36,60 +29,12 @@ func (s *Server) adguardConfigFilePath() string {
 	return cmp.Or(strings.TrimSpace(s.opts.AdGuardConfigPath), constant.AdGuardConfigFile)
 }
 
-func (s *Server) cachedAdGuardVersion(binPath string) string {
-	return adguard.CachedBinaryVersion(binPath)
+func (s *Server) smartDNSBinPath() string {
+	return cmp.Or(strings.TrimSpace(s.opts.SmartDNSBinPath), constant.SmartDNSInstallPath)
 }
 
-// adguardStatusSummary 返回轻量级 AdGuard Home 顶栏与总览卡片状态快照（控制在毫秒级，不阻塞 /api/status）。
-func (s *Server) adguardStatusSummary() map[string]any {
-	cfg := s.readConfigOrEmpty()
-	binPath := s.adguardBinPath()
-	aghCfgPath := s.adguardConfigFilePath()
-
-	installed := false
-	if binPath != "" {
-		if info, statErr := os.Stat(binPath); statErr == nil && !info.IsDir() {
-			installed = true
-		}
-	}
-
-	dnsPort := cfg.DNS.GetDNSPort()
-	dnsAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(dnsPort))
-	webAddr := adguard.ReadCurrentHTTPAddress(aghCfgPath)
-	if webAddr == "" {
-		lanIP := "127.0.0.1"
-		if ni, niErr := netx.Get(); niErr == nil && ni.LANIPv4 != "" {
-			lanIP = ni.LANIPv4
-		}
-		webAddr = net.JoinHostPort(lanIP, strconv.Itoa(cfg.DNS.GetWebPort()))
-	}
-
-	dnsHealthy := false
-	webHealthy := false
-	version := ""
-	if installed {
-		dnsHealthy = adguard.ProbeDNSWithRetry(dnsAddr, 800*time.Millisecond, 2, 150*time.Millisecond) == nil
-		webHealthy = adguard.ProbeTCPPort(webAddr, 250*time.Millisecond)
-		version = s.cachedAdGuardVersion(binPath)
-	}
-	sbCfgPath := cmp.Or(strings.TrimSpace(s.opts.SingBoxConfigPath), constant.SingBoxConfigFile)
-	singboxLinked, _ := singbox.InspectSingBoxDNSLocal(sbCfgPath)
-	lowMemWarn := s.newAdGuardManager(cfg).LowMemoryGuardWarning()
-
-	return map[string]any{
-		"supported":        adguard.IsSupportedPlatform(),
-		"installed":        installed,
-		"enabled":          cfg.DNS.IsEnabled(),
-		"running":          dnsHealthy || webHealthy,
-		"dnsHealthy":       dnsHealthy,
-		"webHealthy":       webHealthy,
-		"singboxLinked":    singboxLinked,
-		"lowMemoryBlocked": lowMemWarn != "",
-		"lowMemoryWarning": lowMemWarn,
-		"version":          version,
-		"dnsAddr":          dnsAddr,
-		"webUrl":           "http://" + webAddr,
-	}
+func (s *Server) smartDNSConfigFilePath() string {
+	return cmp.Or(strings.TrimSpace(s.opts.SmartDNSConfigPath), constant.SmartDNSConfigFile)
 }
 
 func (s *Server) syncAdGuardSubWhitelistAsync(cfg *config.Config) {
@@ -105,213 +50,14 @@ func (s *Server) syncAdGuardSubWhitelistAsync(cfg *config.Config) {
 	if len(urls) == 0 {
 		return
 	}
-	cfgCopy := *cfg
+	cfgCopy := cfg.Clone()
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = s.newAdGuardManager(&cfgCopy).SyncSubscriptionWhitelist(ctx, urls)
+		_ = s.newAdGuardManager(cfgCopy).SyncSubscriptionWhitelist(ctx, urls)
+		reg := s.newDNSRegistry(cfgCopy)
+		if active := reg.ActiveEngine(); active != nil && active.ID() == constant.DNSEngineSmartDNS && active.IsInstalled() {
+			_ = active.SyncCommonConfig(ctx)
+		}
 	}()
-}
-
-// handleAdGuardOverviewGet 返回 AdGuard Home 完整工作台快照。
-func (s *Server) handleAdGuardOverviewGet(w http.ResponseWriter, r *http.Request) {
-	cfg := s.readConfigOrEmpty()
-	sbCfgPath := cmp.Or(strings.TrimSpace(s.opts.SingBoxConfigPath), constant.SingBoxConfigFile)
-	linked, _ := singbox.InspectSingBoxDNSLocal(sbCfgPath)
-
-	mgr := s.newAdGuardManager(cfg)
-	snap := mgr.Overview(r.Context(), linked)
-	writeJSON(w, http.StatusOK, snap)
-}
-
-// handleAdGuardCredentialsGet 仅在用户主动点开「原生面板与凭据」抽屉时返回登录凭据。
-func (s *Server) handleAdGuardCredentialsGet(w http.ResponseWriter, r *http.Request) {
-	cfg := s.readConfigOrEmpty()
-	st := s.newAdGuardManager(cfg).Status()
-	writeJSON(w, http.StatusOK, map[string]any{
-		"webUrl":   st.WebURL,
-		"username": st.Username,
-		"password": st.Password,
-	})
-}
-
-// handleAdGuardCredentialsResetPost 一键轮换 16 位高强度随机密码并无损同步至 AdGuardHome.yaml。
-func (s *Server) handleAdGuardCredentialsResetPost(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Username string `json:"username"`
-	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
-
-	s.cfgMu.Lock()
-	defer s.cfgMu.Unlock()
-
-	cfg := s.readConfigOrEmpty()
-	mgr := s.newAdGuardManager(cfg)
-	user, pass, err := mgr.ResetCredentials(body.Username)
-	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	st := mgr.Status()
-	writeJSON(w, http.StatusOK, map[string]any{
-		"webUrl":   st.WebURL,
-		"username": user,
-		"password": pass,
-	})
-}
-
-// handleAdGuardProtectionPost 切换去广告规则保护状态（支持临时暂停 5/30/60 分钟，不断网）。
-func (s *Server) handleAdGuardProtectionPost(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Enabled         bool `json:"enabled"`
-		DurationMinutes int  `json:"durationMinutes"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "请求格式错误: "+err.Error())
-		return
-	}
-	cfg := s.readConfigOrEmpty()
-	if err := s.newAdGuardManager(cfg).SetProtection(r.Context(), body.Enabled, body.DurationMinutes); err != nil {
-		writeJSONError(w, http.StatusBadGateway, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
-
-// handleAdGuardCacheClearPost 清空 AdGuard Home 本地 DNS 缓存。
-func (s *Server) handleAdGuardCacheClearPost(w http.ResponseWriter, r *http.Request) {
-	cfg := s.readConfigOrEmpty()
-	if err := s.newAdGuardManager(cfg).ClearCache(r.Context()); err != nil {
-		writeJSONError(w, http.StatusBadGateway, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
-
-// handleAdGuardProbePost 并发实测本地防劫持引擎端到端延迟及每条已配置加密上游的独立响应耗时，标出当前最快上游。
-func (s *Server) handleAdGuardProbePost(w http.ResponseWriter, r *http.Request) {
-	cfg := s.readConfigOrEmpty()
-	report := s.newAdGuardManager(cfg).ProbeAllUpstreams(r.Context(), "qq.com")
-	writeJSON(w, http.StatusOK, report)
-}
-
-// handleAdGuardUpstreamsPost 配置加密上游 DNS 服务器列表与并发调度策略（支持一键恢复默认上游）。
-func (s *Server) handleAdGuardUpstreamsPost(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Upstreams    []string `json:"upstreams"`
-		UpstreamMode string   `json:"upstreamMode"`
-		ResetDefault bool     `json:"resetDefault"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "请求格式错误: "+err.Error())
-		return
-	}
-
-	targetUpstreams := body.Upstreams
-	targetMode := body.UpstreamMode
-	if body.ResetDefault {
-		targetUpstreams = adguard.DefaultUpstreams()
-		targetMode = "parallel"
-	}
-
-	cfg := s.readConfigOrEmpty()
-	mgr := s.newAdGuardManager(cfg)
-	infos, mode, notes, setErr := mgr.SetDNSUpstreams(r.Context(), targetUpstreams, targetMode, s.opts.SkipAdGuardProbeForTest)
-	if setErr != nil {
-		writeJSONError(w, http.StatusBadRequest, setErr.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":                true,
-		"upstreams":         infos,
-		"upstreamMode":      mode,
-		"upstreamModeLabel": adguard.UpstreamModeDescription(mode),
-		"notes":             notes,
-	})
-}
-
-// handleAdGuardWhitelistPost 一键加入或移除域名放行白名单。
-func (s *Server) handleAdGuardWhitelistPost(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Domain string `json:"domain"`
-		Action string `json:"action"` // "add" | "remove"
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "请求格式错误: "+err.Error())
-		return
-	}
-	allow := strings.ToLower(strings.TrimSpace(body.Action)) != "remove"
-	cfg := s.readConfigOrEmpty()
-	if err := s.newAdGuardManager(cfg).SetDomainWhitelist(r.Context(), body.Domain, allow); err != nil {
-		writeJSONError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
-
-// handleAdGuardRewritesPost 管理内网自定义域名解析重写规则。
-func (s *Server) handleAdGuardRewritesPost(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Action string `json:"action"` // "add" | "delete"
-		Domain string `json:"domain"`
-		Answer string `json:"answer"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "请求格式错误: "+err.Error())
-		return
-	}
-	cfg := s.readConfigOrEmpty()
-	mgr := s.newAdGuardManager(cfg)
-	switch strings.ToLower(strings.TrimSpace(body.Action)) {
-	case "delete", "remove":
-		if err := mgr.DeleteRewrite(r.Context(), body.Domain, body.Answer); err != nil {
-			writeJSONError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-	default:
-		if err := mgr.AddRewrite(r.Context(), body.Domain, body.Answer); err != nil {
-			writeJSONError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
-
-// handleAdGuardFiltersPost 管理去广告规则库（启用/停用预设、新增自定义订阅、删除、立即更新）。
-func (s *Server) handleAdGuardFiltersPost(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Action  string `json:"action"` // "toggle" | "add" | "remove" | "refresh"
-		URL     string `json:"url"`
-		Name    string `json:"name"`
-		Enabled bool   `json:"enabled"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "请求格式错误: "+err.Error())
-		return
-	}
-	cfg := s.readConfigOrEmpty()
-	mgr := s.newAdGuardManager(cfg)
-	switch strings.ToLower(strings.TrimSpace(body.Action)) {
-	case "refresh":
-		if err := mgr.RefreshFilters(r.Context()); err != nil {
-			writeJSONError(w, http.StatusBadGateway, err.Error())
-			return
-		}
-	case "remove", "delete":
-		if err := mgr.RemoveFilter(r.Context(), body.URL); err != nil {
-			writeJSONError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-	case "add":
-		if err := mgr.SetFilterState(r.Context(), body.URL, body.Name, true); err != nil {
-			writeJSONError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-	default: // "toggle"
-		if err := mgr.SetFilterState(r.Context(), body.URL, body.Name, body.Enabled); err != nil {
-			writeJSONError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }

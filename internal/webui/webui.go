@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"singctl/internal/adguard"
 	"singctl/internal/audit"
 	"singctl/internal/common/httpx"
 	"singctl/internal/common/sysinfo"
@@ -22,10 +23,13 @@ import (
 	"singctl/internal/daemon"
 	"singctl/internal/gateway"
 	"singctl/internal/lifecycle"
+	"singctl/internal/localdns"
 	"singctl/internal/logger"
 	"singctl/internal/netdiag"
 	"singctl/internal/netdiag/dohprobe"
+	"singctl/internal/platform/servicemgr"
 	"singctl/internal/singbox/clashapi"
+	"singctl/internal/smartdns"
 	"singctl/internal/tailscale"
 )
 
@@ -40,9 +44,23 @@ type Options struct {
 	ConfigPath              string                                                                            // singctl 配置文件路径
 	SingBoxConfigPath       string                                                                            // 可选：测试/定制 sing-box config.json 路径（留空使用 constant.SingBoxConfigFile）
 	SingBoxWorkConfigPath   string                                                                            // 可选：测试/定制沙盒副本 config.json 路径
-	AdGuardBinPath          string                                                                            // 可选：测试/定制 AdGuardHome 二进制路径
-	AdGuardConfigPath       string                                                                            // 可选：测试/定制 AdGuardHome.yaml 路径
-	AdGuardMemInfoForTest   func() sysinfo.MemInfo                                                            // 仅供离线单元测试注入宿主机内存信息（低内存防 OOM 护栏）
+	AdGuardBinPath                     string                                                                                                             // 可选：测试/定制 AdGuardHome 二进制路径
+	AdGuardConfigPath                  string                                                                                                             // 可选：测试/定制 AdGuardHome.yaml 路径
+	AdGuardMemInfoForTest              func() sysinfo.MemInfo                                                                                             // 仅供离线单元测试注入宿主机内存信息（低内存防 OOM 护栏）
+	SmartDNSBinPath                    string                                                                                                             // 可选：测试/定制 SmartDNS 二进制路径
+	SmartDNSConfigPath                 string                                                                                                             // 可选：测试/定制 smartdns.conf 路径
+	SmartDNSRulesDir                   string                                                                                                             // 可选：测试/定制 smartdns-rules.d 目录
+	SmartDNSAuditLogPath               string                                                                                                             // 可选：测试/定制 SmartDNS 审计日志路径
+	DiskSpaceForTest                   func(path string) (sysinfo.DiskSpace, error)                                                                       // 仅供离线单元测试注入磁盘剩余空间探测
+	LocalDNSServiceMgr                 servicemgr.Manager                                                                                                 // 可选：测试注入服务管理器替身
+	DNSProbeUpstreamForTest            func(ctx context.Context, upstreams []string, domain string, timeout time.Duration) []adguard.UpstreamProbeItem    // 仅供离线单元测试注入上游探测结果
+	LocalDNSProbeDNSForTest            func(addr string, timeout time.Duration) error                                                                     // 仅供离线单元测试注入本地 DNS 端口探活
+	LocalDNSProbeResForTest            func(addr, domain string, timeout time.Duration) ([]string, time.Duration, error)                                  // 仅供离线单元测试注入域名实测解析
+	LocalDNSSyncSingBoxEnhancedForTest func(ctx context.Context, sbCfgPath, workPath string, dnsCfg config.ClientDNSConfig, subDomains []string, now time.Time) (bool, error)
+	LocalDNSSyncSingBoxDNSLocalForTest func(ctx context.Context, sbCfgPath, workPath string, useExternal bool, dnsPort int) (bool, error)
+	SingBoxStatsRing                   *localdns.StatsRing                                                                                                // 可选：与单进程合体守护进程共享 sing-box DNS 遥测统计环
+	SmartDNSStatsRing                  *localdns.StatsRing                                                                                                // 可选：与单进程合体守护进程共享 SmartDNS 审计统计环
+	SmartDNSTailer                     *smartdns.AuditLogTailer                                                                                           // 可选：与单进程合体守护进程共享 SmartDNS 审计日志追踪器
 	ExecutablePath          string                                                                            // 可选：测试/定制 singctl 可执行文件路径
 	SingBoxLookPath         func(file string) (string, error)                                                 // 可选：测试/定制 sing-box 二进制查找函数
 	IOSGenerator            func(cfg *config.Config) (string, error)                                          // 可选：测试/定制 iOS 配置生成函数
@@ -88,8 +106,12 @@ type Server struct {
 	auditCollector *audit.Collector
 	loginLimiter   *loginRateLimiter
 
-	clash     *clashapi.Client
-	dohProber *dohprobe.Prober
+	clash             *clashapi.Client
+	dohProber         *dohprobe.Prober
+	dnsStatsRing      *localdns.StatsRing
+	smartDNSStatsRing *localdns.StatsRing
+	smartDNSTailer    *smartdns.AuditLogTailer
+	dnsTelemetry      *localdns.DomainTelemetryTracker
 
 	// /api/sb/traffic 按需后台采样器（无请求 15s 自动停止）
 	trafficMu                  sync.Mutex
@@ -129,15 +151,37 @@ func New(opts Options) *Server {
 		cfgStore = config.NewStore(opts.ConfigPath)
 	}
 
+	lowMemRing := opts.LowMemoryMode != nil && *opts.LowMemoryMode
+	sbRing := opts.SingBoxStatsRing
+	if sbRing == nil {
+		sbRing = localdns.NewStatsRing(lowMemRing)
+	}
+	sdRing := opts.SmartDNSStatsRing
+	if sdRing == nil {
+		sdRing = localdns.NewStatsRing(lowMemRing)
+	}
+	sdTailer := opts.SmartDNSTailer
+	if sdTailer == nil {
+		sdTailer = smartdns.NewAuditLogTailer(cmp.Or(strings.TrimSpace(opts.SmartDNSAuditLogPath), constant.SmartDNSAuditLogPath))
+	}
+	telemetryCap := 1024
+	if lowMemRing {
+		telemetryCap = 256
+	}
+
 	s := &Server{
-		opts:           opts,
-		Mux:            http.NewServeMux(),
-		cfgStore:       cfgStore,
-		auditLimiter:   audLimiter,
-		auditCollector: audCollector,
-		loginLimiter:   newLoginRateLimiter(),
-		clash:          clashCli,
-		shutdownCh:     make(chan struct{}),
+		opts:              opts,
+		Mux:               http.NewServeMux(),
+		cfgStore:          cfgStore,
+		auditLimiter:      audLimiter,
+		auditCollector:    audCollector,
+		loginLimiter:      newLoginRateLimiter(),
+		clash:             clashCli,
+		dnsStatsRing:      sbRing,
+		smartDNSStatsRing: sdRing,
+		smartDNSTailer:    sdTailer,
+		dnsTelemetry:      localdns.NewDomainTelemetryTracker(sbRing, telemetryCap),
+		shutdownCh:        make(chan struct{}),
 	}
 	s.lastReqUnixNano.Store(s.now().UnixNano())
 	s.activeEpoch.Store(1)
@@ -209,17 +253,32 @@ func (s *Server) registerRoutes() {
 	s.Mux.HandleFunc("PUT /api/watchdog/config", s.guard(s.handleWatchdogConfigPut))
 	s.Mux.HandleFunc("POST /api/watchdog/patrol", s.guard(s.handleWatchdogPatrolPost))
 
-	// AdGuard Home 管控中心 API
-	s.Mux.HandleFunc("GET /api/adguard", s.guard(s.handleAdGuardOverviewGet))
-	s.Mux.HandleFunc("GET /api/adguard/credentials", s.guard(s.handleAdGuardCredentialsGet))
-	s.Mux.HandleFunc("POST /api/adguard/credentials/reset", s.guard(s.handleAdGuardCredentialsResetPost))
-	s.Mux.HandleFunc("POST /api/adguard/protection", s.guard(s.handleAdGuardProtectionPost))
-	s.Mux.HandleFunc("POST /api/adguard/cache/clear", s.guard(s.handleAdGuardCacheClearPost))
-	s.Mux.HandleFunc("POST /api/adguard/probe", s.guard(s.handleAdGuardProbePost))
-	s.Mux.HandleFunc("POST /api/adguard/upstreams", s.guard(s.handleAdGuardUpstreamsPost))
-	s.Mux.HandleFunc("POST /api/adguard/whitelist", s.guard(s.handleAdGuardWhitelistPost))
-	s.Mux.HandleFunc("POST /api/adguard/rewrites", s.guard(s.handleAdGuardRewritesPost))
-	s.Mux.HandleFunc("POST /api/adguard/filters", s.guard(s.handleAdGuardFiltersPost))
+	// 统一三引擎防劫持 DNS 管控中心 API (/api/dns/* 主契约 + /api/adguard/* 向后兼容别名)
+	s.Mux.HandleFunc("GET /api/dns/overview", s.guard(s.handleDNSOverviewGet))
+	s.Mux.HandleFunc("GET /api/dns/credentials", s.guard(s.handleDNSCredentialsGet))
+	s.Mux.HandleFunc("POST /api/dns/credentials/reset", s.guard(s.handleDNSCredentialsResetPost))
+	s.Mux.HandleFunc("GET /api/dns/config-preview", s.guard(s.handleDNSConfigPreviewGet))
+	s.Mux.HandleFunc("POST /api/dns/engine", s.guard(s.handleDNSEngineSwitchPost))
+	s.Mux.HandleFunc("POST /api/dns/protection", s.guard(s.handleDNSProtectionPost))
+	s.Mux.HandleFunc("POST /api/dns/cache/clear", s.guard(s.handleDNSCacheClearPost))
+	s.Mux.HandleFunc("POST /api/dns/probe", s.guard(s.handleDNSProbePost))
+	s.Mux.HandleFunc("POST /api/dns/upstreams", s.guard(s.handleDNSUpstreamsPost))
+	s.Mux.HandleFunc("POST /api/dns/whitelist", s.guard(s.handleDNSWhitelistPost))
+	s.Mux.HandleFunc("POST /api/dns/rewrites", s.guard(s.handleDNSRewritesPost))
+	s.Mux.HandleFunc("POST /api/dns/filters", s.guard(s.handleDNSFiltersPost))
+	s.Mux.HandleFunc("POST /api/dns/block-aaaa", s.guard(s.handleDNSBlockAAAAPost))
+
+	// 向后兼容原有 AdGuard Home API 路由别名
+	s.Mux.HandleFunc("GET /api/adguard", s.guard(s.handleDNSOverviewGet))
+	s.Mux.HandleFunc("GET /api/adguard/credentials", s.guard(s.handleDNSCredentialsGet))
+	s.Mux.HandleFunc("POST /api/adguard/credentials/reset", s.guard(s.handleDNSCredentialsResetPost))
+	s.Mux.HandleFunc("POST /api/adguard/protection", s.guard(s.handleDNSProtectionPost))
+	s.Mux.HandleFunc("POST /api/adguard/cache/clear", s.guard(s.handleDNSCacheClearPost))
+	s.Mux.HandleFunc("POST /api/adguard/probe", s.guard(s.handleDNSProbePost))
+	s.Mux.HandleFunc("POST /api/adguard/upstreams", s.guard(s.handleDNSUpstreamsPost))
+	s.Mux.HandleFunc("POST /api/adguard/whitelist", s.guard(s.handleDNSWhitelistPost))
+	s.Mux.HandleFunc("POST /api/adguard/rewrites", s.guard(s.handleDNSRewritesPost))
+	s.Mux.HandleFunc("POST /api/adguard/filters", s.guard(s.handleDNSFiltersPost))
 
 	// 局域网设备行为审计与拉黑 API
 	s.Mux.HandleFunc("GET /api/audit", s.guard(s.handleAuditGet))
@@ -347,6 +406,13 @@ func (s *Server) buildLifecycle(bgCtx context.Context, cancelBg context.CancelFu
 			ServiceName: "webui-idle-scavenger",
 			OnStart: func(context.Context) error {
 				go s.runIdleScavengerLoop(bgCtx)
+				return nil
+			},
+		},
+		lifecycle.FuncService{
+			ServiceName: "webui-dns-telemetry",
+			OnStart: func(context.Context) error {
+				go s.runDNSTelemetryLoop(bgCtx)
 				return nil
 			},
 		},

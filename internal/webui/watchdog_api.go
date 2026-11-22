@@ -14,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"singctl/internal/adguard"
 	"singctl/internal/config"
 	"singctl/internal/constant"
 	"singctl/internal/daemon"
@@ -170,16 +169,20 @@ func (s *Server) buildWatchdogReport(cfg *config.Config) map[string]any {
 	}
 
 	aghInfo := map[string]any{
-		"supported": runtime.GOOS == "linux",
-		"enabled":   cfg != nil && cfg.DNS.IsEnabled(),
-		"installed": false,
-		"healthy":   false,
+		"supported":         runtime.GOOS == "linux",
+		"enabled":           cfg != nil && cfg.DNS.IsEnabled(),
+		"installed":         false,
+		"healthy":           false,
+		"activeEngine":      constant.DNSEngineSingBox,
+		"activeEngineLabel": "sing-box 加强版",
 	}
-	if runtime.GOOS == "linux" && cfg != nil {
-		installed := adguard.IsInstalled()
-		aghInfo["installed"] = installed
-		if installed {
-			st := adguard.NewManager(cfg, s.opts.ConfigPath).Status()
+	if cfg != nil {
+		reg := s.newDNSRegistry(cfg)
+		if active := reg.ActiveEngine(); active != nil {
+			st := active.Status(context.Background())
+			aghInfo["activeEngine"] = active.ID()
+			aghInfo["activeEngineLabel"] = active.Meta().Name
+			aghInfo["installed"] = st.Installed
 			aghInfo["healthy"] = st.DNSHealthy
 		}
 	}

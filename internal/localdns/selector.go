@@ -1,0 +1,216 @@
+// 文件职责：实现三引擎防劫持 DNS 的硬件准入评估、自动选型推荐与运行态活跃引擎解析。
+package localdns
+
+import (
+	"cmp"
+	"errors"
+	"fmt"
+	"strings"
+
+	"singctl/internal/common/sysinfo"
+	"singctl/internal/constant"
+)
+
+const (
+	AdGuardMinTotalRAMBytes  uint64 = 512 * 1024 * 1024
+	AdGuardMinAvailRAMBytes  uint64 = 256 * 1024 * 1024
+	AdGuardMinDiskMB         uint64 = 80
+	SmartDNSMinTotalRAMBytes uint64 = 288 * 1024 * 1024
+	SmartDNSMinAvailRAMBytes uint64 = 128 * 1024 * 1024
+	SmartDNSMinDiskMB        uint64 = 10
+)
+
+// HardwareProfile 描述目标宿主机的物理内存与闪存可用空间画像。
+type HardwareProfile struct {
+	TotalRAMBytes uint64
+	AvailRAMBytes uint64
+	AvailDiskMB   uint64
+	DiskUnknown   bool
+}
+
+// EngineEligibility 描述单个引擎在当前硬件条件下的准入评估与拦截原因。
+type EngineEligibility struct {
+	Eligible      bool
+	DiskBlocked   bool
+	MemoryBlocked bool
+	BlockedReason string
+}
+
+// SelectionResult 汇总自动选型结果：硬件推荐引擎、当前可直接运行的活跃引擎与三引擎准入详情。
+type SelectionResult struct {
+	RecommendedEngine string
+	RecommendedReason string
+	ActiveEngine      string
+	Eligibility       map[string]EngineEligibility
+}
+
+// ProbeHardwareProfile 采集宿主机物理内存与二进制所在分区的剩余空间画像。
+func ProbeHardwareProfile(
+	binPath string,
+	readMem func() (sysinfo.MemInfo, error),
+	readDisk func(string) (sysinfo.DiskSpace, error),
+) HardwareProfile {
+	var hp HardwareProfile
+
+	memFn := readMem
+	if memFn == nil {
+		memFn = sysinfo.ReadMemInfo
+	}
+	if mi, err := memFn(); err == nil {
+		hp.TotalRAMBytes = mi.TotalBytes
+		hp.AvailRAMBytes = mi.AvailableBytes
+	}
+
+	diskFn := readDisk
+	if diskFn == nil {
+		diskFn = sysinfo.Statfs
+	}
+	target := cmp.Or(strings.TrimSpace(binPath), "/usr/bin")
+	if ds, err := diskFn(target); err == nil {
+		hp.AvailDiskMB = ds.AvailBytes / (1024 * 1024)
+	} else if errors.Is(err, errors.ErrUnsupported) || err != nil {
+		hp.DiskUnknown = true
+	}
+	return hp
+}
+
+func evaluateAdGuardEligibility(hw HardwareProfile, isInstalled bool) EngineEligibility {
+	const mib = 1024 * 1024
+	var reasons []string
+	elig := EngineEligibility{Eligible: true}
+
+	if !isInstalled && !hw.DiskUnknown && hw.AvailDiskMB < AdGuardMinDiskMB {
+		elig.Eligible = false
+		elig.DiskBlocked = true
+		reasons = append(reasons, fmt.Sprintf("闪存可用空间不足（当前剩余 %d MB，安装 AdGuard Home 至少需要 %d MB）", hw.AvailDiskMB, AdGuardMinDiskMB))
+	}
+
+	memKnown := hw.TotalRAMBytes > 0 || hw.AvailRAMBytes > 0
+	if memKnown {
+		totalLow := hw.TotalRAMBytes > 0 && hw.TotalRAMBytes <= AdGuardMinTotalRAMBytes
+		availLow := hw.AvailRAMBytes > 0 && hw.AvailRAMBytes <= AdGuardMinAvailRAMBytes
+		if totalLow || availLow {
+			elig.Eligible = false
+			elig.MemoryBlocked = true
+			reasons = append(reasons, fmt.Sprintf(
+				"内存未达 AdGuard Home 推荐门槛（总内存 %d MB / 可用 %d MB；建议总内存 > 512 MB 且可用 > 256 MB）",
+				hw.TotalRAMBytes/mib, hw.AvailRAMBytes/mib,
+			))
+		}
+	}
+
+	if len(reasons) > 0 {
+		elig.BlockedReason = strings.Join(reasons, "；")
+	}
+	return elig
+}
+
+func evaluateSmartDNSEligibility(hw HardwareProfile, isInstalled bool) EngineEligibility {
+	const mib = 1024 * 1024
+	var reasons []string
+	elig := EngineEligibility{Eligible: true}
+
+	if !isInstalled && !hw.DiskUnknown && hw.AvailDiskMB < SmartDNSMinDiskMB {
+		elig.Eligible = false
+		elig.DiskBlocked = true
+		reasons = append(reasons, fmt.Sprintf("闪存可用空间不足（当前剩余 %d MB，安装 SmartDNS 至少需要 %d MB）", hw.AvailDiskMB, SmartDNSMinDiskMB))
+	}
+
+	memKnown := hw.TotalRAMBytes > 0 || hw.AvailRAMBytes > 0
+	if memKnown {
+		totalLow := hw.TotalRAMBytes > 0 && hw.TotalRAMBytes <= SmartDNSMinTotalRAMBytes
+		availLow := hw.AvailRAMBytes > 0 && hw.AvailRAMBytes < SmartDNSMinAvailRAMBytes
+		if totalLow || availLow {
+			elig.Eligible = false
+			elig.MemoryBlocked = true
+			reasons = append(reasons, fmt.Sprintf(
+				"内存未达 SmartDNS 推荐门槛（总内存 %d MB / 可用 %d MB；建议总内存 > 288 MB 且可用 >= 128 MB）",
+				hw.TotalRAMBytes/mib, hw.AvailRAMBytes/mib,
+			))
+		}
+	}
+
+	if len(reasons) > 0 {
+		elig.BlockedReason = strings.Join(reasons, "；")
+	}
+	return elig
+}
+
+// EvaluateEligibility 评估三个 DNS 引擎在当前硬件与安装状态下的准入性。
+func EvaluateEligibility(hw HardwareProfile, installed map[string]bool) map[string]EngineEligibility {
+	return map[string]EngineEligibility{
+		constant.DNSEngineSingBox: {
+			Eligible: true,
+		},
+		constant.DNSEngineSmartDNS: evaluateSmartDNSEligibility(hw, installed[constant.DNSEngineSmartDNS]),
+		constant.DNSEngineAdGuard:  evaluateAdGuardEligibility(hw, installed[constant.DNSEngineAdGuard]),
+	}
+}
+
+// RecommendEngine 按存量保护与硬件分级阈值输出 auto 策略推荐结果。
+func RecommendEngine(hw HardwareProfile, installed map[string]bool) SelectionResult {
+	elig := EvaluateEligibility(hw, installed)
+	res := SelectionResult{
+		Eligibility: elig,
+	}
+
+	// 1. 存量保护：已安装外部引擎时优先沿用，保障既有用户零惊喜升级。
+	if installed[constant.DNSEngineAdGuard] {
+		res.RecommendedEngine = constant.DNSEngineAdGuard
+		res.ActiveEngine = constant.DNSEngineAdGuard
+		res.RecommendedReason = "检测到本机已安装 AdGuard Home，自动沿用现有防劫持引擎并保留全部规则与查询统计"
+		return res
+	}
+	if installed[constant.DNSEngineSmartDNS] {
+		res.RecommendedEngine = constant.DNSEngineSmartDNS
+		res.ActiveEngine = constant.DNSEngineSmartDNS
+		res.RecommendedReason = "检测到本机已安装 SmartDNS，自动沿用极速多上游测速引擎与零闪存磨损审计"
+		return res
+	}
+
+	// 2. 全新设备未装外部引擎：运行态立即落 singbox 加强版开箱即用，同时给出精准硬件推荐。
+	res.ActiveEngine = constant.DNSEngineSingBox
+	if elig[constant.DNSEngineAdGuard].Eligible {
+		res.RecommendedEngine = constant.DNSEngineAdGuard
+		res.RecommendedReason = "设备内存与闪存充裕，推荐安装 AdGuard Home 获得独立 Web 面板、完整查询日志与丰富过滤规则库"
+		return res
+	}
+	if elig[constant.DNSEngineSmartDNS].Eligible {
+		res.RecommendedEngine = constant.DNSEngineSmartDNS
+		res.RecommendedReason = "检测到中小内存或紧张闪存设备，推荐安装 SmartDNS 极速版（~3 MB 闪存 / ~10 MB 内存），支持多上游毫秒级竞速与内存盘审计"
+		return res
+	}
+
+	res.RecommendedEngine = constant.DNSEngineSingBox
+	res.RecommendedReason = "检测到超低内存或极小闪存硬件环境，推荐零额外开销的 sing-box 加强版纯 IP 加密 DoH/DoT 引擎"
+	return res
+}
+
+// ResolveActiveEngine 结合用户配置偏好、启用开关、硬件画像与已安装状态解析最终活跃引擎。
+func ResolveActiveEngine(configured string, dnsEnabled bool, hw HardwareProfile, installed map[string]bool) SelectionResult {
+	res := RecommendEngine(hw, installed)
+	if !dnsEnabled {
+		res.ActiveEngine = constant.DNSEngineSingBox
+		return res
+	}
+
+	switch strings.ToLower(strings.TrimSpace(configured)) {
+	case constant.DNSEngineSingBox:
+		res.ActiveEngine = constant.DNSEngineSingBox
+	case constant.DNSEngineSmartDNS:
+		if installed[constant.DNSEngineSmartDNS] {
+			res.ActiveEngine = constant.DNSEngineSmartDNS
+		} else {
+			res.ActiveEngine = constant.DNSEngineSingBox
+		}
+	case constant.DNSEngineAdGuard:
+		if installed[constant.DNSEngineAdGuard] {
+			res.ActiveEngine = constant.DNSEngineAdGuard
+		} else {
+			res.ActiveEngine = constant.DNSEngineSingBox
+		}
+	default:
+		// "auto" / 空 / 非法值：沿用 RecommendEngine 解析结果
+	}
+	return res
+}

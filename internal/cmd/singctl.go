@@ -1,15 +1,16 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"runtime"
-	"singctl/internal/adguard"
 	"singctl/internal/common/redact"
 	"singctl/internal/config"
 	"singctl/internal/constant"
 	"singctl/internal/daemon"
 	"singctl/internal/doctor"
+	"singctl/internal/localdns"
 	"singctl/internal/logger"
 	"singctl/internal/subhub"
 	"singctl/internal/updater"
@@ -213,23 +214,30 @@ func showSystemInfo(configPath, version string) error {
 		logger.Info("日志文件路径    : %s (未生成)", logPath)
 	}
 
-	// 3.5 客户端本地防劫持 DNS (AdGuard Home) 信息
-	if runtime.GOOS == "linux" && cfg != nil && (adguard.IsInstalled() || cfg.DNS.Password != "") {
-		logger.Info("")
-		logger.Success("🛡️  AdGuard Home (本地防劫持 DNS)")
-		logger.Info("───────────────────────────────────────────────────────────")
-		st := adguard.NewManager(cfg, configPath).Status()
-		if st.DNSHealthy {
-			logger.Success("运行状态        : 运行中 (%s) ✓", st.DNSAddr)
-		} else if st.Installed {
-			logger.Warn("运行状态        : 未运行 (%s) ✗", st.DNSAddr)
-		} else {
-			logger.Warn("运行状态        : 未安装 ✗")
-		}
-		logger.Info("Web 管理面板    : %s", st.WebURL)
-		logger.Info("管理员账号      : %s", st.Username)
-		if st.Password != "" {
-			logger.Info("管理员密码      : %s", st.Password)
+	// 3.5 客户端本地防劫持 DNS 三引擎信息
+	if runtime.GOOS == "linux" && cfg != nil {
+		reg := localdns.NewRegistry(cfg, localdns.EngineDeps{ConfigPath: configPath})
+		active := reg.ActiveEngine()
+		if active != nil {
+			st := active.Status(context.Background())
+			logger.Info("")
+			logger.Success("🛡️  %s (本地防劫持 DNS)", active.Meta().Name)
+			logger.Info("───────────────────────────────────────────────────────────")
+			logger.Info("引擎策略        : configured=%s / active=%s", cfg.DNS.GetEngine(), active.ID())
+			if st.DNSHealthy {
+				logger.Success("运行状态        : 运行中 (%s) ✓", st.DNSAddr)
+			} else if st.Installed {
+				logger.Warn("运行状态        : 未运行 (%s) ✗", st.DNSAddr)
+			} else {
+				logger.Warn("运行状态        : 未安装 ✗")
+			}
+			if active.ID() == constant.DNSEngineAdGuard {
+				logger.Info("Web 管理面板    : %s", st.WebURL)
+				logger.Info("管理员账号      : %s", cfg.DNS.GetUsername())
+				if cfg.DNS.GetPassword() != "" {
+					logger.Info("管理员密码      : %s", cfg.DNS.GetPassword())
+				}
+			}
 		}
 	}
 

@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"singctl/internal/config"
+	"singctl/internal/constant"
 	"singctl/internal/daemon"
 	"singctl/internal/tailscale"
 )
@@ -59,13 +61,14 @@ var Actions = map[string]ActionDef{
 	"fw-enable":  {Title: "启用防火墙加固", Build: fixed("fw", "enable")},
 	"fw-disable": {Title: "禁用防火墙加固", Build: fixed("fw", "disable")},
 
-	// 本地防劫持 DNS (AdGuard Home)
-	"dns-install":   {Title: "安装并启用防劫持 DNS (AdGuard Home)", Build: DnsInstallArgs},
-	"dns-update":    {Title: "更新 AdGuard Home 核心版本", Build: DnsUpdateArgs},
-	"dns-start":     {Title: "启用防劫持 DNS 并接管 sing-box", Build: fixed("dns", "start")},
-	"dns-stop":      {Title: "安全停用防劫持 DNS (自动回退内置加密 DNS)", Build: fixed("dns", "stop")},
-	"dns-restart":   {Title: "重启 AdGuard Home 服务", Build: fixed("dns", "restart")},
-	"dns-uninstall": {Title: "安全卸载 AdGuard Home", Build: DnsUninstallArgs},
+	// 本地防劫持 DNS 三引擎统一控制（sing-box 加强版 / SmartDNS / AdGuard Home）
+	"dns-install":   {Title: "安装并启用防劫持 DNS 引擎", Build: DnsInstallArgs},
+	"dns-switch":    {Title: "零断网切换防劫持 DNS 引擎", Build: DnsSwitchArgs},
+	"dns-update":    {Title: "更新防劫持 DNS 引擎核心版本", Build: DnsUpdateArgs},
+	"dns-start":     {Title: "启用防劫持 DNS 并接管 sing-box", Build: DnsStartArgs},
+	"dns-stop":      {Title: "安全停用外部防劫持 DNS (自动回退 sing-box 加密 DNS)", Build: DnsStopArgs},
+	"dns-restart":   {Title: "重启防劫持 DNS 服务", Build: DnsRestartArgs},
+	"dns-uninstall": {Title: "安全卸载外部防劫持 DNS 引擎", Build: DnsUninstallArgs},
 
 	// 工具
 	"update-self": {Title: "更新 singctl 自身", Build: fixed("update", "self")},
@@ -118,9 +121,17 @@ func TsUpdateArgs(p map[string]any) []string {
 	return args
 }
 
-// DnsInstallArgs 将 Web 参数映射为 dns install 命令行参数（支持 force / forceLowMemory）。
+func appendValidDNSEngineArg(args []string, p map[string]any) []string {
+	if eng := paramString(p, "engine"); eng != "" && config.IsValidDNSEngine(eng) {
+		args = append(args, "--engine", eng)
+	}
+	return args
+}
+
+// DnsInstallArgs 将 Web 参数映射为 dns install 命令行参数（支持 engine / force / forceLowMemory）。
 func DnsInstallArgs(p map[string]any) []string {
 	args := []string{"dns", "install", "--non-interactive"}
+	args = appendValidDNSEngineArg(args, p)
 	if paramBool(p, "force") {
 		args = append(args, "--force")
 	}
@@ -130,18 +141,47 @@ func DnsInstallArgs(p map[string]any) []string {
 	return args
 }
 
-// DnsUpdateArgs 将 Web 参数映射为 dns install --force 命令行参数（支持 forceLowMemory）。
-func DnsUpdateArgs(p map[string]any) []string {
-	args := []string{"dns", "install", "--non-interactive", "--force"}
+// DnsSwitchArgs 将 Web 参数映射为 dns switch 命令行参数（用于流式输出下载、验活与零断网切换进度）。
+func DnsSwitchArgs(p map[string]any) []string {
+	eng := paramString(p, "engine")
+	if !config.IsValidDNSEngine(eng) {
+		eng = constant.DNSEngineAuto
+	}
+	args := []string{"dns", "switch", "--engine", eng}
 	if paramBool(p, "forceLowMemory") {
 		args = append(args, "--force-low-memory")
 	}
 	return args
 }
 
-// DnsUninstallArgs 将 Web 参数映射为 dns uninstall 命令行参数
+// DnsUpdateArgs 将 Web 参数映射为 dns install --force 命令行参数（支持 engine / forceLowMemory）。
+func DnsUpdateArgs(p map[string]any) []string {
+	args := []string{"dns", "install", "--non-interactive", "--force"}
+	args = appendValidDNSEngineArg(args, p)
+	if paramBool(p, "forceLowMemory") {
+		args = append(args, "--force-low-memory")
+	}
+	return args
+}
+
+// DnsStartArgs 将 Web 参数映射为 dns start 命令行参数。
+func DnsStartArgs(p map[string]any) []string {
+	return appendValidDNSEngineArg([]string{"dns", "start"}, p)
+}
+
+// DnsStopArgs 将 Web 参数映射为 dns stop 命令行参数。
+func DnsStopArgs(p map[string]any) []string {
+	return appendValidDNSEngineArg([]string{"dns", "stop"}, p)
+}
+
+// DnsRestartArgs 将 Web 参数映射为 dns restart 命令行参数。
+func DnsRestartArgs(p map[string]any) []string {
+	return appendValidDNSEngineArg([]string{"dns", "restart"}, p)
+}
+
+// DnsUninstallArgs 将 Web 参数映射为 dns uninstall 命令行参数。
 func DnsUninstallArgs(p map[string]any) []string {
-	args := []string{"dns", "uninstall"}
+	args := appendValidDNSEngineArg([]string{"dns", "uninstall"}, p)
 	if paramBool(p, "purge") {
 		args = append(args, "--purge")
 	}
@@ -217,18 +257,41 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		"cmd":   "singctl " + strings.Join(builtArgs, " "),
 	})
 
-	// AdGuard Home 超低内存防 OOM 前置护栏：未显式传入 forceLowMemory 时零子进程开销直接透传中文保护提示
-	if (body.Name == "dns-install" || body.Name == "dns-update") && !paramBool(body.Params, "forceLowMemory") {
-		if warn := s.newAdGuardManager(s.readConfigOrEmpty()).LowMemoryGuardWarning(); warn != "" {
-			stream.emitLine("[ERROR] 🛡️ " + warn)
-			stream.write(map[string]any{
-				"t":                "exit",
-				"code":             1,
-				"restarting":       false,
-				"lowMemoryBlocked": true,
-				"lowMemoryWarning": warn,
-			})
-			return
+	// 防劫持 DNS 引擎前置硬件护栏：零子进程开销直接透传中文保护提示
+	if body.Name == "dns-install" || body.Name == "dns-update" || body.Name == "dns-switch" {
+		targetEng := paramString(body.Params, "engine")
+		forceLowMem := paramBool(body.Params, "forceLowMemory")
+		cfg := s.readConfigOrEmpty()
+
+		if (body.Name == "dns-install" || body.Name == "dns-update") && (targetEng == "" || targetEng == constant.DNSEngineAdGuard) && !forceLowMem {
+			if warn := s.newAdGuardManager(cfg).LowMemoryGuardWarning(); warn != "" {
+				stream.emitLine("[ERROR] 🛡️ " + warn)
+				stream.write(map[string]any{
+					"t":                "exit",
+					"code":             1,
+					"restarting":       false,
+					"lowMemoryBlocked": true,
+					"lowMemoryWarning": warn,
+				})
+				return
+			}
+		} else if targetEng == constant.DNSEngineAdGuard || targetEng == constant.DNSEngineSmartDNS {
+			reg := s.newDNSRegistry(cfg)
+			sel := reg.ResolveSelection()
+			elig := sel.Eligibility[targetEng]
+			installed := reg.InstalledMap()[targetEng]
+			if !installed && (elig.DiskBlocked || (elig.MemoryBlocked && !forceLowMem)) {
+				warn := elig.BlockedReason
+				stream.emitLine("[ERROR] 🛡️ " + warn)
+				stream.write(map[string]any{
+					"t":                "exit",
+					"code":             1,
+					"restarting":       false,
+					"lowMemoryBlocked": elig.MemoryBlocked && !elig.DiskBlocked,
+					"lowMemoryWarning": warn,
+				})
+				return
+			}
 		}
 	}
 
