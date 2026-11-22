@@ -256,10 +256,15 @@ func (e *SmartDNSEngine) DrainAuditLog() int {
 	if err != nil || len(entries) == 0 {
 		return 0
 	}
+	recorded := 0
 	for _, entry := range entries {
+		if entry.Domain == "localhost" {
+			continue
+		}
 		e.stats.Record(entry.Timestamp, entry.Domain, entry.Blocked, entry.LatencyMs)
+		recorded++
 	}
-	return len(entries)
+	return recorded
 }
 
 func (e *SmartDNSEngine) saveConfig() error {

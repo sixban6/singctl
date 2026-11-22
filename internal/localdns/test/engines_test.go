@@ -246,7 +246,8 @@ func TestSmartDNSEngine_ControlsAuditStatsAndPreview(t *testing.T) {
 	}
 	now := time.Now().Truncate(time.Second)
 	auditContent := "[" + now.Format("2006-01-02 15:04:05.000") + "] 127.0.0.1 query example.com, type 1, time 12ms, result 192.0.2.10\n" +
-		"[" + now.Format("2006-01-02 15:04:05.000") + "] 127.0.0.1 query ads.example.com, type 1, time 1ms, result SOA\n"
+		"[" + now.Format("2006-01-02 15:04:05.000") + "] 127.0.0.1 query ads.example.com, type 1, time 1ms, result SOA\n" +
+		"[" + now.Format("2006-01-02 15:04:05.000") + "] 127.0.0.1 query localhost, type 1, time 0ms, speed: -0.1ms, group default, result 127.0.0.1\n"
 	if err := os.WriteFile(auditLog, []byte(auditContent), 0600); err != nil {
 		t.Fatal(err)
 	}

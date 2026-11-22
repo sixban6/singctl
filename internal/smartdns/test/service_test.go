@@ -79,6 +79,7 @@ func TestManager_ServiceLifecycleWithMockServiceMgr(t *testing.T) {
 
 	calls := mockSvc.Calls()
 	for _, expected := range []string{
+		"enable singctl-smartdns",
 		"start singctl-smartdns",
 		"reload singctl-smartdns",
 		"restart singctl-smartdns",
