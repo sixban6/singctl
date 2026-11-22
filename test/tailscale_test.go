@@ -6,7 +6,7 @@ import (
 	"net/http/httptest"
 	"regexp"
 	"singctl/internal/cmd"
-	"singctl/internal/util/github"
+	"singctl/internal/common/release"
 	"strings"
 	"testing"
 )
@@ -138,10 +138,10 @@ func TestTailscaleVersionFromAsset(t *testing.T) {
 	// 启动一个模拟 GitHub API 的 Web Server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// 模拟本仓库统一发布的固定通道 Release 结构：Tag 固定为 tailscale-latest，真实版本保存在资产文件名中
-		releases := []github.Release{
+		releases := []release.Info{
 			{
 				TagName: "tailscale-latest",
-				Assets: []github.Asset{
+				Assets: []release.Asset{
 					{
 						Name:               "tailscale_1.94.2_amd64.tgz",
 						BrowserDownloadURL: "https://example.com/tailscale_1.94.2_amd64.tgz",
@@ -158,8 +158,10 @@ func TestTailscaleVersionFromAsset(t *testing.T) {
 		return strings.HasPrefix(name, "tailscale_")
 	}
 
-	fetcher := github.NewReleaseFetcher("", server.Client())
-	downloadURL, err := fetcher.FindAssetURLFromURL(server.URL, filter)
+	client := release.NewClient("")
+	client.APIBase = server.URL
+	client.HTTP = server.Client()
+	downloadURL, err := client.FindAssetURL(t.Context(), "sixban6/singctl", filter)
 	if err != nil {
 		t.Fatalf("unexpected error finding asset: %v", err)
 	}

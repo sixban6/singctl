@@ -1,3 +1,4 @@
+// 文件职责：负责高熵随机数据包、变长时延侧信道与 L4 SNI 截断/ExEntropy 豁免边界主动探测。
 package gfw
 
 import (
@@ -106,7 +107,7 @@ func probeEntropy(ctx context.Context, opts ProbeOptions) Category {
 		itemVarLen.Details = fmt.Sprintf("服务端对高熵探针挂起较久后断开 (13B: %v, 64B: %v)，存在可疑等待行为。",
 			res13B.duration.Round(time.Millisecond), res64B.duration.Round(time.Millisecond))
 		itemVarLen.Mitigation = "缩短网关握手读取超时 (ReadHeaderTimeout)，防止主动探测器对连接存活时长画像。"
-	case res64B.err == nil && len(res64B.resp) > 0 && !isStandardRejectPayload(res64B.resp):
+	case res64B.err == nil && len(res64B.resp) > 0 && !IsStandardRejectPayload(res64B.resp):
 		itemVarLen.Score = 8
 		itemVarLen.Passed = false
 		itemVarLen.Details = fmt.Sprintf("服务端对高熵随机包返回了非标准回声数据 (首字节: 0x%02x, 长度: %d 字节)", res64B.resp[0], len(res64B.resp))
@@ -131,7 +132,7 @@ func probeEntropy(ctx context.Context, opts ProbeOptions) Category {
 	truncStallDelta := resTrunc.duration - res64B.duration
 
 	switch {
-	case asciiTimeout || (resASCII.err == nil && len(resASCII.resp) > 0 && !isStandardRejectPayload(resASCII.resp)):
+	case asciiTimeout || (resASCII.err == nil && len(resASCII.resp) > 0 && !IsStandardRejectPayload(resASCII.resp)):
 		itemBoundary.Score = 8
 		itemBoundary.Passed = false
 		itemBoundary.Details = fmt.Sprintf("ExEntropy ASCII 前缀边界探针触发异常挂起或非标响应 (耗时: %v)，协议嗅探器存在分流破绽！",
@@ -161,7 +162,7 @@ func probeEntropy(ctx context.Context, opts ProbeOptions) Category {
 	return cat
 }
 
-func isStandardRejectPayload(b []byte) bool {
+func IsStandardRejectPayload(b []byte) bool {
 	if len(b) == 0 {
 		return true
 	}

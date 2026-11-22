@@ -1,6 +1,8 @@
+// 文件职责：定义内置规则集快照的清单模型、标签检索与镜像前缀剥离纯函数。
 package ruleset_snapshot
 
 import (
+	"slices"
 	"strings"
 )
 
@@ -31,18 +33,22 @@ func (s *Snapshot) Count() int { return len(s.manifest.Entries) }
 // GeneratedAt 快照生成时间（RFC3339，可能为空）。
 func (s *Snapshot) GeneratedAt() string { return s.manifest.GeneratedAt }
 
+// EntrySize 返回指定规则集 tag 在快照清单中的解压后字节数。
+func (s *Snapshot) EntrySize(tag string) (int64, bool) {
+	e, ok := s.manifest.Entries[tag]
+	if !ok {
+		return 0, false
+	}
+	return e.Size, true
+}
+
 // Tags 返回快照包含的所有 tag（字典序）。
 func (s *Snapshot) Tags() []string {
 	tags := make([]string, 0, len(s.manifest.Entries))
 	for tag := range s.manifest.Entries {
 		tags = append(tags, tag)
 	}
-	// sort
-	for i := 1; i < len(tags); i++ {
-		for j := i; j > 0 && tags[j] < tags[j-1]; j-- {
-			tags[j], tags[j-1] = tags[j-1], tags[j]
-		}
-	}
+	slices.Sort(tags)
 	return tags
 }
 

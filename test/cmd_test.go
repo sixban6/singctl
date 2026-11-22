@@ -11,7 +11,7 @@ import (
 	"singctl/internal/config"
 	"singctl/internal/constant"
 	"singctl/internal/deploy"
-	"singctl/internal/util/netinfo"
+	"singctl/internal/common/netx"
 	"strings"
 	"testing"
 	"time"
@@ -332,13 +332,13 @@ func TestShowUnifiedServerPanel(t *testing.T) {
 }
 
 func TestAutoMeasureAndSaveHy2BandwidthOnClientInstall(t *testing.T) {
-	origSpeedTest := netinfo.SpeedTestFn
+	origSpeedTest := netx.SpeedTestFn
 	t.Cleanup(func() {
-		netinfo.SpeedTestFn = origSpeedTest
+		netx.SpeedTestFn = origSpeedTest
 	})
 
 	// Simulate 100 Mbps upload, 500 Mbps download -> 80% up = 80 Mbps, 90% down = 450 Mbps
-	netinfo.SpeedTestFn = func() (float64, float64, time.Duration, string, error) {
+	netx.SpeedTestFn = func() (float64, float64, time.Duration, string, error) {
 		return 100.0, 500.0, 12 * time.Millisecond, "MockServer", nil
 	}
 

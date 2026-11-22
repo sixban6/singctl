@@ -1,15 +1,9 @@
-// Package servicemgr 提供面向宿主服务管理器（systemd / OpenWrt procd）的统一适配契约。
-//
-// 架构职责：
-//   - 将原本散落在各业务包里的 `if isOpenWrt` 与裸 `systemctl` 调用收敛到唯一适配边界；
-//   - 通过 CmdRunner 接口注入命令执行替身，保障单元测试纯内存零宿主机副作用；
-//   - 对所有传入单元名称强制执行白名单校验，消除拼入系统命令的注入风险。
+// 文件职责：提供面向宿主服务管理器（systemd / OpenWrt procd）的统一适配契约，底层执行委托 common/execx 与 common/sysinfo。
 package servicemgr
 
 import (
 	"cmp"
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -17,11 +11,14 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"singctl/internal/common/execx"
+	"singctl/internal/common/sysinfo"
 )
 
 const (
 	defaultActionTimeout = 25 * time.Second
-	defaultProbeTimeout  = 3 * time.Second
+	defaultProbeTimeout  = execx.DefaultProbeTimeout
 )
 
 // InitKind 描述当前宿主机的进程管理体系类型。
@@ -40,56 +37,14 @@ type HostInfo struct {
 	Kind      InitKind
 }
 
-// CmdRunner 抽象带超时上限的同步系统命令执行器，便于业务与单测共享契约。
-type CmdRunner interface {
-	Run(ctx context.Context, timeout time.Duration, name string, args ...string) error
-	CombinedOutput(ctx context.Context, timeout time.Duration, name string, args ...string) ([]byte, error)
-}
+// CmdRunner 复用 common/execx.Runner 类型别名，保持全部消费侧与测试替身 100% 零改动兼容。
+type CmdRunner = execx.Runner
 
-// DefaultRunner 为生产环境默认的有界命令执行器（带 Context 超时与 WaitDelay 防僵尸等待）。
-type DefaultRunner struct{}
-
-func newBoundedCmd(ctx context.Context, timeout time.Duration, name string, args ...string) (*exec.Cmd, context.CancelFunc, error) {
-	if strings.TrimSpace(name) == "" {
-		return nil, func() {}, errors.New("empty command name")
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if timeout <= 0 {
-		timeout = defaultProbeTimeout
-	}
-	runCtx, cancel := context.WithTimeout(ctx, timeout)
-	cmd := exec.CommandContext(runCtx, name, args...)
-	cmd.WaitDelay = min(timeout/2+100*time.Millisecond, time.Second)
-	return cmd, cancel, nil
-}
-
-// Run 以给定超时执行系统命令。
-func (DefaultRunner) Run(ctx context.Context, timeout time.Duration, name string, args ...string) error {
-	cmd, cancel, err := newBoundedCmd(ctx, timeout, name, args...)
-	if err != nil {
-		return err
-	}
-	defer cancel()
-	return cmd.Run()
-}
-
-// CombinedOutput 以给定超时执行系统命令并捕获标准输出与标准错误。
-func (DefaultRunner) CombinedOutput(ctx context.Context, timeout time.Duration, name string, args ...string) ([]byte, error) {
-	cmd, cancel, err := newBoundedCmd(ctx, timeout, name, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer cancel()
-	return cmd.CombinedOutput()
-}
+// DefaultRunner 复用 common/execx.DefaultRunner。
+type DefaultRunner = execx.DefaultRunner
 
 func activeRunner(runner CmdRunner) CmdRunner {
-	if runner != nil {
-		return runner
-	}
-	return DefaultRunner{}
+	return execx.Active(runner)
 }
 
 // UnitSpec 描述一个托管守护服务在 systemd 与 OpenWrt procd 下的部署单元规格。
@@ -128,16 +83,9 @@ func ValidateUnitName(name string) error {
 	return nil
 }
 
-// IsOpenWrt 判断当前宿主机是否运行 OpenWrt / ImmortalWrt 固件系统。
+// IsOpenWrt 判断当前宿主机是否运行 OpenWrt / ImmortalWrt 固件系统（委托 common/sysinfo）。
 func IsOpenWrt() bool {
-	if runtime.GOOS != "linux" {
-		return false
-	}
-	if _, err := os.Stat("/etc/openwrt_release"); err == nil {
-		return true
-	}
-	_, err := os.Stat("/etc/openwrt_version")
-	return err == nil
+	return sysinfo.IsOpenWrt()
 }
 
 // DetectHost 识别当前宿主机的平台类型与初始化管理器。
@@ -194,9 +142,13 @@ func (n *NoopManager) unsupportedErr(action, name string) error {
 	return fmt.Errorf("service %s for %q is unsupported on host OS %s", action, name, n.osName)
 }
 
-func (n *NoopManager) Kind() InitKind                             { return InitUnknown }
-func (n *NoopManager) Start(_ context.Context, name string) error { return n.unsupportedErr("start", name) }
-func (n *NoopManager) Stop(_ context.Context, name string) error  { return n.unsupportedErr("stop", name) }
+func (n *NoopManager) Kind() InitKind { return InitUnknown }
+func (n *NoopManager) Start(_ context.Context, name string) error {
+	return n.unsupportedErr("start", name)
+}
+func (n *NoopManager) Stop(_ context.Context, name string) error {
+	return n.unsupportedErr("stop", name)
+}
 func (n *NoopManager) Restart(_ context.Context, name string) error {
 	return n.unsupportedErr("restart", name)
 }
@@ -212,8 +164,8 @@ func (n *NoopManager) Enable(_ context.Context, name string) error {
 func (n *NoopManager) Disable(_ context.Context, name string) error {
 	return n.unsupportedErr("disable", name)
 }
-func (n *NoopManager) DaemonReload(context.Context) error          { return nil }
-func (n *NoopManager) IsActive(context.Context, string) bool       { return false }
+func (n *NoopManager) DaemonReload(context.Context) error    { return nil }
+func (n *NoopManager) IsActive(context.Context, string) bool { return false }
 func (n *NoopManager) InstallUnit(_ context.Context, s UnitSpec) error {
 	return n.unsupportedErr("install-unit", s.Name)
 }

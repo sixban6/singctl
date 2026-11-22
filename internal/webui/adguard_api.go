@@ -1,3 +1,4 @@
+// 文件职责：提供客户端 WebUI 对本地 AdGuard Home 防劫持 DNS 的状态、凭据、上游与规则管控接口。
 package webui
 
 import (
@@ -12,10 +13,10 @@ import (
 	"time"
 
 	"singctl/internal/adguard"
+	"singctl/internal/common/netx"
 	"singctl/internal/config"
 	"singctl/internal/constant"
 	"singctl/internal/singbox"
-	"singctl/internal/util/netinfo"
 )
 
 func (s *Server) newAdGuardManager(cfg *config.Config) *adguard.Manager {
@@ -54,7 +55,7 @@ func (s *Server) adguardStatusSummary() map[string]any {
 	webAddr := adguard.ReadCurrentHTTPAddress(aghCfgPath)
 	if webAddr == "" {
 		lanIP := "127.0.0.1"
-		if ni, niErr := netinfo.Get(); niErr == nil && ni.LANIPv4 != "" {
+		if ni, niErr := netx.Get(); niErr == nil && ni.LANIPv4 != "" {
 			lanIP = ni.LANIPv4
 		}
 		webAddr = net.JoinHostPort(lanIP, strconv.Itoa(cfg.DNS.GetWebPort()))

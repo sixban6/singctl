@@ -1,47 +1,51 @@
-// Package webui 提供 singctl 的客户端 Web 管理界面与控制面生命周期托管。
-//
-// 设计原则:
-//   - 非侵入:所有"动作"通过重新执行 singctl 自身子命令完成,复用既有 CLI 逻辑;
-//   - 零依赖:仅使用 Go 标准库,前端资源内嵌,适配 OpenWrt 等嵌入式系统;
-//   - 单任务:同一时刻只允许一个动作执行,避免并发写配置冲突。
+// 文件职责：提供客户端 Web 管理服务实例初始化、77 个 HTTP 路由装配、config.Store 快照读写与生命周期托管。
 package webui
 
 import (
 	"cmp"
 	"context"
 	"embed"
-	"encoding/json"
 	"errors"
 	"io/fs"
 	"net"
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"singctl/internal/audit"
+	"singctl/internal/common/httpx"
 	"singctl/internal/config"
+	"singctl/internal/constant"
 	"singctl/internal/daemon"
 	"singctl/internal/gateway"
 	"singctl/internal/lifecycle"
 	"singctl/internal/logger"
 	"singctl/internal/netdiag"
+	"singctl/internal/netdiag/dohprobe"
+	"singctl/internal/singbox/clashapi"
 	"singctl/internal/tailscale"
 )
 
-// SessionCookieName 持久化 Cookie 键名,用于 Safari/PWA 独立沙盒免密免登
+// SessionCookieName 持久化 Cookie 键名，用于 Safari/PWA 独立沙盒免密免登。
 const SessionCookieName = "singctl_session"
 
 //go:embed static
 var staticFS embed.FS
 
-// Options Web 服务配置
+// Options Web 服务显式配置与测试依赖注入选项。
 type Options struct {
 	ConfigPath              string                                                                            // singctl 配置文件路径
 	SingBoxConfigPath       string                                                                            // 可选：测试/定制 sing-box config.json 路径（留空使用 constant.SingBoxConfigFile）
 	SingBoxWorkConfigPath   string                                                                            // 可选：测试/定制沙盒副本 config.json 路径
 	AdGuardBinPath          string                                                                            // 可选：测试/定制 AdGuardHome 二进制路径
 	AdGuardConfigPath       string                                                                            // 可选：测试/定制 AdGuardHome.yaml 路径
+	ExecutablePath          string                                                                            // 可选：测试/定制 singctl 可执行文件路径
+	SingBoxLookPath         func(file string) (string, error)                                                 // 可选：测试/定制 sing-box 二进制查找函数
+	IOSGenerator            func(cfg *config.Config) (string, error)                                          // 可选：测试/定制 iOS 配置生成函数
+	AuditCollector          *audit.Collector                                                                  // 可选：显式注入设备审计采集器
+	AuditLimiter            *AuditRateLimiter                                                                 // 可选：显式注入审计限流器
 	SkipAdGuardProbeForTest bool                                                                              // 仅供离线单元测试跳过公网上游实测
 	GatewayProberForTest    func() gateway.TopologyInfo                                                       // 仅供单元测试注入网络拓扑探测结果
 	DNSLeakRunnerForTest    func(ctx context.Context, opts netdiag.DNSLeakTestOptions) *netdiag.DNSLeakReport // 仅供单元测试注入离线 DNS 泄漏实测结果
@@ -54,33 +58,31 @@ type Options struct {
 	OnReady                 func(listenAddr string)                                                           // Listen 成功后的回调(后台子进程用于就绪握手)
 }
 
-// Server Web 管理服务
+// Server 客户端 Web 管理服务。
 type Server struct {
 	opts Options
 
 	Mux *http.ServeMux
 
+	actionBusy atomic.Bool
+
 	// iOS 配置生成缓存: 实时生成需拉订阅(秒级), 缓存让 SFI 同步/重复扫码瞬时返回
 	iosMu       sync.Mutex
-	iosCacheKey string // singctl.yaml 的 path|mtime|size 指纹
+	iosCacheKey string
 	iosCacheVal string
 
 	cfgMu          sync.Mutex
 	cfgStore       *config.Store
-	auditLimiter   *auditRateLimiter
+	auditLimiter   *AuditRateLimiter
 	auditCollector *audit.Collector
 	loginLimiter   *loginRateLimiter
 
-	// Clash 控制接口（endpoint + secret）短缓存，避免高频轮询重复探测 /version
-	clashMu          sync.Mutex
-	clashFingerprint string
-	clashEndpoint    string
-	clashSecret      string
-	clashCachedAt    time.Time
+	clash     *clashapi.Client
+	dohProber *dohprobe.Prober
 
 	// /api/sb/traffic 按需后台采样器（无请求 15s 自动停止）
 	trafficMu                  sync.Mutex
-	trafficState               sbTrafficResponse
+	trafficState               SbTrafficResponse
 	trafficSampledAt           time.Time
 	trafficLastReqAt           time.Time
 	trafficRunning             bool
@@ -88,36 +90,47 @@ type Server struct {
 
 	tsP2PMu   sync.Mutex
 	tsP2PCtrl *tailscale.P2PAssistController
-
-	gwEDNSMu       sync.Mutex
-	gwEDNSProfile  *netdiag.DNSResolverProfile
-	gwEDNSCachedAt time.Time
-
-	dohProbeMu        sync.Mutex
-	dohProbeSnapshots map[string]dohProbeSnapshot
 }
 
-// New 创建 Web 服务
+// New 创建客户端 Web 服务并完成全部路由与领域组件装配。
 func New(opts Options) *Server {
+	sbCfgPath := cmp.Or(strings.TrimSpace(opts.SingBoxConfigPath), constant.SingBoxConfigFile)
+	clashCli := clashapi.NewClient(clashapi.Options{ConfigPath: sbCfgPath})
+
+	audCollector := opts.AuditCollector
+	if audCollector == nil {
+		audCollector = audit.NewCollector(nil)
+	}
+	audLimiter := opts.AuditLimiter
+	if audLimiter == nil {
+		audLimiter = NewAuditRateLimiter()
+	}
+
 	s := &Server{
 		opts:           opts,
 		Mux:            http.NewServeMux(),
 		cfgStore:       config.NewStore(opts.ConfigPath),
-		auditLimiter:   newAuditRateLimiter(),
-		auditCollector: audit.NewCollector(nil),
+		auditLimiter:   audLimiter,
+		auditCollector: audCollector,
 		loginLimiter:   newLoginRateLimiter(),
+		clash:          clashCli,
 	}
+	s.dohProber = newBrowserDoHProber(opts.BrowserDoHForTest, clashCli)
 
-	// 静态资源（统一受 WebUI 口令鉴权保护，未授权访问 / 返回内嵌口令登录页而绝不弹窗卡死）
 	staticContent, _ := fs.Sub(staticFS, "static")
 	fileServer := http.FileServer(http.FS(staticContent))
 	s.Mux.Handle("/", s.authOnly(fileServer))
 
-	// 公开鉴权握手与登录 API（用于重启在线探测与内嵌登录，不泄漏敏感状态）
+	s.registerRoutes()
+	return s
+}
+
+func (s *Server) registerRoutes() {
+	// 公开鉴权握手与登录 API
 	s.Mux.HandleFunc("GET /api/auth/check", s.handleAuthCheck)
 	s.Mux.HandleFunc("POST /api/auth/login", s.handleAuthLogin)
 
-	// 只读 API
+	// 只读与基础配置 API
 	s.Mux.HandleFunc("GET /api/status", s.guard(s.handleStatus))
 	s.Mux.HandleFunc("GET /api/health", s.guard(s.handleHealth))
 	s.Mux.HandleFunc("GET /api/config", s.guard(s.handleConfigGet))
@@ -130,11 +143,11 @@ func New(opts Options) *Server {
 	s.Mux.HandleFunc("POST /api/backup/export", s.guard(s.handleClientBackupExport))
 	s.Mux.HandleFunc("POST /api/backup/restore", s.guard(s.handleClientBackupRestore))
 
-	// 登出 API (清除持久化 Cookie)
+	// 登出与会话 API
 	s.Mux.HandleFunc("POST /api/logout", s.handleLogout)
 	s.Mux.HandleFunc("GET /api/session/url", s.guard(s.handleSessionURL))
 
-	// iOS(sing-box App) 配置下载: 支持扫码 ?password= 鉴权(同时容忍尾斜杠)
+	// iOS(sing-box App) 配置下载
 	s.Mux.HandleFunc("GET /api/gen/ios", s.guardIOSDownload(s.handleIOSConfig))
 	s.Mux.HandleFunc("GET /api/gen/ios/{$}", s.guardIOSDownload(s.handleIOSConfig))
 	s.Mux.HandleFunc("GET /api/gen/ios/url", s.guard(s.handleIOSConfigURL))
@@ -155,17 +168,13 @@ func New(opts Options) *Server {
 	s.Mux.HandleFunc("POST /api/dns/leak-test", s.guard(s.handleDNSLeakTestPost))
 	s.Mux.HandleFunc("POST /api/dns/browser-doh", s.guard(s.handleBrowserDoHCheckPost))
 
-	// Tailscale 局部配置、P2P 直连防线与 3 态双向管控 API
+	// Tailscale 局部配置、P2P 直连防线与升级 API
 	s.Mux.HandleFunc("GET /api/tailscale/config", s.guard(s.handleTailscaleConfigGet))
 	s.Mux.HandleFunc("PUT /api/tailscale/config", s.guard(s.handleTailscaleConfigPut))
 	s.Mux.HandleFunc("GET /api/tailscale/p2p", s.guard(s.handleTailscaleP2PGet))
 	s.Mux.HandleFunc("PUT /api/tailscale/p2p", s.guard(s.handleTailscaleP2PPut))
 	s.Mux.HandleFunc("POST /api/tailscale/p2p/poke", s.guard(s.handleTailscaleP2PPokePost))
-
-	// 系统全局加速镜像局部更新 API
 	s.Mux.HandleFunc("PUT /api/system/mirror", s.guard(s.handleSystemMirrorPut))
-
-	// Tailscale 两阶段零失联升级体检与状态轮询 API
 	s.Mux.HandleFunc("GET /api/tailscale/upgrade/preflight", s.guard(s.handleTailscaleUpgradePreflightGet))
 	s.Mux.HandleFunc("GET /api/tailscale/upgrade/status", s.guard(s.handleTailscaleUpgradeStatusGet))
 
@@ -174,7 +183,7 @@ func New(opts Options) *Server {
 	s.Mux.HandleFunc("PUT /api/watchdog/config", s.guard(s.handleWatchdogConfigPut))
 	s.Mux.HandleFunc("POST /api/watchdog/patrol", s.guard(s.handleWatchdogPatrolPost))
 
-	// 客户端本地防劫持 DNS (AdGuard Home) 管控中心 API
+	// AdGuard Home 管控中心 API
 	s.Mux.HandleFunc("GET /api/adguard", s.guard(s.handleAdGuardOverviewGet))
 	s.Mux.HandleFunc("GET /api/adguard/credentials", s.guard(s.handleAdGuardCredentialsGet))
 	s.Mux.HandleFunc("POST /api/adguard/credentials/reset", s.guard(s.handleAdGuardCredentialsResetPost))
@@ -186,7 +195,7 @@ func New(opts Options) *Server {
 	s.Mux.HandleFunc("POST /api/adguard/rewrites", s.guard(s.handleAdGuardRewritesPost))
 	s.Mux.HandleFunc("POST /api/adguard/filters", s.guard(s.handleAdGuardFiltersPost))
 
-	// 局域网设备行为审计与双层一键拉黑 API
+	// 局域网设备行为审计与拉黑 API
 	s.Mux.HandleFunc("GET /api/audit", s.guard(s.handleAuditGet))
 	s.Mux.HandleFunc("GET /api/audit/ai-config", s.guard(s.handleAuditAIConfigGet))
 	s.Mux.HandleFunc("POST /api/audit/ai-config", s.guard(s.handleAuditAIConfigPost))
@@ -199,7 +208,7 @@ func New(opts Options) *Server {
 	s.Mux.HandleFunc("POST /api/audit/whitelist", s.guard(s.handleAuditWhitelist))
 	s.Mux.HandleFunc("POST /api/audit/close-connections", s.guard(s.handleAuditCloseConnections))
 
-	// nftables inet security 防火墙加固可视化与规则治理 API
+	// 防火墙加固可视化与规则治理 API
 	s.Mux.HandleFunc("GET /api/firewall/overview", s.guard(s.handleFirewallOverviewGet))
 	s.Mux.HandleFunc("GET /api/firewall/logs", s.guard(s.handleFirewallLogsGet))
 	s.Mux.HandleFunc("POST /api/firewall/apply", s.guard(s.handleFirewallApplyPost))
@@ -209,18 +218,34 @@ func New(opts Options) *Server {
 	s.Mux.HandleFunc("POST /api/firewall/clear-dynamic", s.guard(s.handleFirewallClearDynamicPost))
 	s.Mux.HandleFunc("POST /api/firewall/whitelist", s.guard(s.handleFirewallWhitelistPost))
 
-	// 原生 sing-box 策略组切换、测速、运行模式与实时速率 API（全部经由 WebUI 登录态统一鉴权）
+	// 原生 sing-box 策略组控制与实时速率 API
 	s.Mux.HandleFunc("GET /api/sb/proxies", s.guard(s.handleSbProxiesGet))
 	s.Mux.HandleFunc("PUT /api/sb/proxies/switch", s.guard(s.handleSbProxySwitchPut))
 	s.Mux.HandleFunc("POST /api/sb/proxies/delay", s.guard(s.handleSbProxyDelayPost))
 	s.Mux.HandleFunc("PUT /api/sb/mode", s.guard(s.handleSbModePut))
 	s.Mux.HandleFunc("GET /api/sb/traffic", s.guard(s.handleSbTrafficGet))
 
-	// 动作 API(流式输出)
+	// 流式动作执行 API
 	s.Mux.HandleFunc("POST /api/action", s.guard(s.handleAction))
-
-	return s
 }
+
+// ConfigStore 返回底层只读配置快照存储实例。
+func (s *Server) ConfigStore() *config.Store { return s.cfgStore }
+
+// AuditCollector 返回当前服务实例绑定的设备审计采集器。
+func (s *Server) AuditCollector() *audit.Collector { return s.auditCollector }
+
+// AuditLimiter 返回当前服务实例绑定的审计接口限流器。
+func (s *Server) AuditLimiter() *AuditRateLimiter { return s.auditLimiter }
+
+// LoadConfigSnapshot 读取最新不可变配置快照。
+func (s *Server) LoadConfigSnapshot() (*config.Config, error) { return s.loadConfigSnapshot() }
+
+// ReadConfigOrEmpty 读取最新不可变配置快照（不存在时返回零值配置）。
+func (s *Server) ReadConfigOrEmpty() *config.Config { return s.readConfigOrEmpty() }
+
+// SaveConfig 以 0600 原子落盘并立即写透更新内存快照。
+func (s *Server) SaveConfig(cfg *config.Config) error { return s.saveConfig(cfg) }
 
 func (s *Server) loadConfigSnapshot() (*config.Config, error) {
 	if s.cfgStore == nil {
@@ -240,7 +265,6 @@ func (s *Server) readConfigOrEmpty() *config.Config {
 	return &config.Config{}
 }
 
-// loadMutableConfig 返回独立深拷贝的可变配置实例，严禁原地修改共享只读快照指针。
 func (s *Server) loadMutableConfig() *config.Config {
 	cfgPath := configPathFor(s)
 	snap, err := s.loadConfigSnapshot()
@@ -316,7 +340,6 @@ func (s *Server) ServeContext(ctx context.Context) error {
 	s.opts.Listen = NormalizeLegacyWildcardListen(s.opts.Listen)
 	ln, err := net.Listen("tcp", s.opts.Listen)
 	if err != nil && strings.HasPrefix(s.opts.Listen, ":") {
-		// 纯 IPv4 内核兜底
 		ln, err = net.Listen("tcp4", "0.0.0.0"+s.opts.Listen)
 	}
 	if err != nil {
@@ -369,7 +392,7 @@ func (s *Server) ServeContext(ctx context.Context) error {
 	return err
 }
 
-// ListenAndServe 启动 HTTP 服务(阻塞)
+// ListenAndServe 启动 HTTP 服务(阻塞)。
 func (s *Server) ListenAndServe() error {
 	return s.ServeContext(context.Background())
 }
@@ -411,7 +434,6 @@ func (s *Server) printBanner(ln net.Listener) {
 	}
 }
 
-// lanIPv4 返回第一个非回环内网 IPv4(无则空串)
 func lanIPv4() string {
 	if ifaces, err := net.Interfaces(); err == nil {
 		for _, iface := range ifaces {
@@ -430,11 +452,9 @@ func lanIPv4() string {
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+	httpx.WriteJSON(w, status, v)
 }
 
 func writeJSONError(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, map[string]any{"error": cmp.Or(msg, "unknown error")})
+	httpx.WriteError(w, httpx.NewStatusError(status, cmp.Or(msg, "unknown error"), nil))
 }

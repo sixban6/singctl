@@ -107,7 +107,7 @@ func testQUICv1HandshakeAndSplitBrain(ctx context.Context, ip string, port int, 
 	}
 
 	udpLeaf := quicCerts[0]
-	udpIssuer := certIssuerDisplay(udpLeaf)
+	udpIssuer := CertIssuerDisplay(udpLeaf)
 
 	if IsSelfSignedOrInternalCA(udpLeaf) {
 		return false, 10, fmt.Sprintf("UDP %d (QUIC/H3) 暴露了内部自签证书 (CN: %s, Issuer: %s)！客户端在 insecure=0 下将无法连接且极易被主动探测识别！",
@@ -127,7 +127,7 @@ func testQUICv1HandshakeAndSplitBrain(ctx context.Context, ip string, port int, 
 		tcpSum := sha256.Sum256(tcpLeaf.Raw)
 		if udpSum != tcpSum {
 			return false, 10, fmt.Sprintf("检测到 TCP %d 与 UDP %d 双栈证书脑裂不一致！(TCP CN=%s [Issuer: %s] vs UDP CN=%s [Issuer: %s])，直接暴露独立 UDP 代理后端！",
-					port, port, tcpLeaf.Subject.CommonName, certIssuerDisplay(tcpLeaf), udpLeaf.Subject.CommonName, udpIssuer),
+					port, port, tcpLeaf.Subject.CommonName, CertIssuerDisplay(tcpLeaf), udpLeaf.Subject.CommonName, udpIssuer),
 				"确保 Hysteria2 与 Caddy HTTPS 共用同一张最新 ACME 证书文件，并在 Caddy 续期后自动同步重载 sing-box。"
 		}
 		if len(chainForVerify) == 1 && len(tcpCerts) > 1 {
@@ -222,8 +222,8 @@ func ProbeQUICv1Certificates(ctx context.Context, ip string, port int, serverNam
 	var (
 		hsKeys        *QuicKeys
 		serverSCID    []byte
-		initStream    = newCryptoReassembler()
-		hsStream      = newCryptoReassembler()
+		initStream    = NewCryptoReassembler()
+		hsStream      = NewCryptoReassembler()
 		receivedCerts []*x509.Certificate
 		negotiated    string
 		sentAck       bool
@@ -266,13 +266,13 @@ func ProbeQUICv1Certificates(ctx context.Context, ip string, port int, serverNam
 
 			for _, ch := range cryptoChunks {
 				if pktType == 0x00 { // Initial
-					initStream.push(ch.offset, ch.Data)
+					initStream.Push(ch.offset, ch.Data)
 				} else if pktType == 0x02 { // Handshake
-					hsStream.push(ch.offset, ch.Data)
+					hsStream.Push(ch.offset, ch.Data)
 				}
 			}
 
-			if avail := initStream.popContiguous(); len(avail) > 0 {
+			if avail := initStream.PopContiguous(); len(avail) > 0 {
 				if err := qconn.HandleData(tls.QUICEncryptionLevelInitial, avail); err != nil {
 					return nil, "", fmt.Errorf("initial TLS error: %w", err)
 				}
@@ -297,7 +297,7 @@ func ProbeQUICv1Certificates(ctx context.Context, ip string, port int, serverNam
 			}
 
 			if hsKeys != nil {
-				if avail := hsStream.popContiguous(); len(avail) > 0 {
+				if avail := hsStream.PopContiguous(); len(avail) > 0 {
 					_ = qconn.HandleData(tls.QUICEncryptionLevelHandshake, avail)
 					for {
 						ev := qconn.NextEvent()
@@ -313,7 +313,7 @@ func ProbeQUICv1Certificates(ctx context.Context, ip string, port int, serverNam
 					if len(st.PeerCertificates) > 0 {
 						return st.PeerCertificates, st.NegotiatedProtocol, nil
 					}
-					certs, complete := parseTLS13CertificateMsgFromStream(hsStream.allSeen())
+					certs, complete := ParseTLS13CertificateMsgFromStream(hsStream.AllSeen())
 					if len(certs) > 0 {
 						receivedCerts = certs
 						negotiated = cmp.Or(st.NegotiatedProtocol, "h3")
@@ -337,7 +337,7 @@ func ProbeQUICv1Certificates(ctx context.Context, ip string, port int, serverNam
 		}
 	}
 
-	if certs, _ := parseTLS13CertificateMsgFromStream(hsStream.allSeen()); len(certs) > 0 {
+	if certs, _ := ParseTLS13CertificateMsgFromStream(hsStream.AllSeen()); len(certs) > 0 {
 		return certs, cmp.Or(negotiated, "h3"), nil
 	}
 	return nil, "", fmt.Errorf("QUIC handshake timed out waiting for server Certificate")

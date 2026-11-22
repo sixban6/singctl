@@ -1,3 +1,4 @@
+// 文件职责：提供流媒体与 AI 服务（OpenAI/Netflix/YouTube/Disney+/Google）双出口（原生直连与 WARP）解锁探测。
 package doctor
 
 import (
@@ -59,7 +60,7 @@ func CheckMediaUnlock() *MediaUnlockReport {
 	go func() {
 		defer wg.Done()
 		directClient := newDirectClient(4 * time.Second)
-		report.Direct = runExitDiagnostics("VPS 原生直连出口 (Direct)", directClient, false)
+		report.Direct = RunExitDiagnostics("VPS 原生直连出口 (Direct)", directClient, false)
 	}()
 
 	// 2. 测试 WARP 40000 分流出口
@@ -79,7 +80,7 @@ func CheckMediaUnlock() *MediaUnlockReport {
 			report.WARP.ErrorReason = err.Error()
 			return
 		}
-		report.WARP = runExitDiagnostics("WARP 本地分流出口 (127.0.0.1:40000)", warpClient, true)
+		report.WARP = RunExitDiagnostics("WARP 本地分流出口 (127.0.0.1:40000)", warpClient, true)
 	}()
 
 	wg.Wait()
@@ -119,7 +120,8 @@ func newWarpClient(timeout time.Duration) (*http.Client, error) {
 	}, nil
 }
 
-func runExitDiagnostics(name string, client *http.Client, isWarp bool) ExitProfile {
+// RunExitDiagnostics 使用给定的 HTTP 客户端并发检测单条出口的流媒体与 AI 解锁状态。
+func RunExitDiagnostics(name string, client *http.Client, isWarp bool) ExitProfile {
 	profile := ExitProfile{
 		Name:      name,
 		Available: true,

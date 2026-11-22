@@ -198,7 +198,8 @@ func (m *Manager) DeleteRewrite(ctx context.Context, domain, answer string) erro
 	return err
 }
 
-func validateFilterURL(raw string) (string, error) {
+// ValidateFilterURL 校验去广告过滤规则源 URL 是否为合法的 HTTP(S) 地址。
+func ValidateFilterURL(raw string) (string, error) {
 	trimmed := strings.TrimSpace(raw)
 	u, err := url.Parse(trimmed)
 	scheme := ""
@@ -213,7 +214,7 @@ func validateFilterURL(raw string) (string, error) {
 
 // SetFilterState 启用、禁用或首次添加去广告过滤规则源。
 func (m *Manager) SetFilterState(ctx context.Context, rawURL, name string, enabled bool) error {
-	cleanURL, err := validateFilterURL(rawURL)
+	cleanURL, err := ValidateFilterURL(rawURL)
 	if err != nil {
 		return err
 	}
@@ -282,7 +283,7 @@ func (m *Manager) SetFilterState(ctx context.Context, rawURL, name string, enabl
 
 // RemoveFilter 移除指定的过滤规则订阅源。
 func (m *Manager) RemoveFilter(ctx context.Context, rawURL string) error {
-	cleanURL, err := validateFilterURL(rawURL)
+	cleanURL, err := ValidateFilterURL(rawURL)
 	if err != nil {
 		return err
 	}

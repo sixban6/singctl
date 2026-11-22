@@ -3,18 +3,16 @@ package tailscale
 
 import (
 	"archive/tar"
-	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
-	releasepkg "singctl/internal/util/release"
+	releasepkg "singctl/internal/common/release"
 	"strings"
 	"time"
 )
@@ -32,6 +30,11 @@ func (c *countingReader) Read(p []byte) (int, error) {
 
 // streamStageTailscaleArchive downloads, computes SHA256 on the fly, and unpacks directly into installDir/.tailscale*.new
 // with zero /tmp usage. If mirror verification fails, it removes staged files and falls back automatically.
+// StreamStageTailscaleArchive 流式下载、在线计算 SHA256 并直接解包至 installDir/.tailscale*.new。
+func StreamStageTailscaleArchive(ctx context.Context, client *releasepkg.Client, asset releasepkg.Asset, installDir string) (combinedSymlink bool, shaVerified bool, viaMirror bool, err error) {
+	return streamStageTailscaleArchive(ctx, client, asset, installDir)
+}
+
 func streamStageTailscaleArchive(ctx context.Context, client *releasepkg.Client, asset releasepkg.Asset, installDir string) (combinedSymlink bool, shaVerified bool, viaMirror bool, err error) {
 	if client == nil {
 		client = releasepkg.NewClient("")
@@ -105,44 +108,26 @@ func streamStageOnce(ctx context.Context, httpClient *http.Client, url, assetNam
 	hasher := sha256.New()
 	tee := io.TeeReader(cr, hasher)
 
-	gz, err := gzip.NewReader(tee)
-	if err != nil {
-		return false, false, fmt.Errorf("open gzip stream: %w", err)
-	}
-	defer gz.Close()
-
-	tr := tar.NewReader(gz)
 	var wroteTSD, wroteTS bool
-
-	for {
-		hdr, err := tr.Next()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return false, false, fmt.Errorf("read tar entry: %w", err)
-		}
-		if hdr == nil {
-			continue
-		}
+	err = releasepkg.WalkTarGzStream(tee, func(hdr *tar.Header, tr io.Reader) error {
 		cleanName := filepath.ToSlash(filepath.Clean(hdr.Name))
 		if strings.Contains(strings.ToLower(cleanName), "systemd") {
-			continue
+			return nil
 		}
 		base := filepath.Base(cleanName)
 		if base != "tailscaled" && base != "tailscale" {
-			continue
+			return nil
 		}
 
 		switch hdr.Typeflag {
-		case tar.TypeReg:
+		case tar.TypeReg, tar.TypeRegA:
 			dstName := stagedTailscaledName
 			if base == "tailscale" {
 				dstName = stagedTailscaleName
 			}
 			dstPath := filepath.Join(installDir, dstName)
 			if err := writeStreamedExecutable(dstPath, tr, hdr.Size); err != nil {
-				return false, false, fmt.Errorf("write %s: %w", dstName, err)
+				return fmt.Errorf("write %s: %w", dstName, err)
 			}
 			if base == "tailscaled" {
 				wroteTSD = true
@@ -157,10 +142,10 @@ func streamStageOnce(ctx context.Context, httpClient *http.Client, url, assetNam
 				}
 			}
 		}
-	}
-
-	if err := gz.Close(); err != nil {
-		return false, false, fmt.Errorf("finalize gzip stream: %w", err)
+		return nil
+	})
+	if err != nil {
+		return false, false, err
 	}
 	// Drain trailing gzip/padding bytes through tee so countingReader and sha256 see 100% of HTTP body.
 	if _, err := io.Copy(io.Discard, tee); err != nil {
@@ -222,6 +207,11 @@ func writeStreamedExecutable(dstPath string, r io.Reader, expectedSize int64) er
 func removeStagedFiles(installDir string) {
 	_ = os.Remove(filepath.Join(installDir, stagedTailscaledName))
 	_ = os.Remove(filepath.Join(installDir, stagedTailscaleName))
+}
+
+// VerifyStagedBinaries 对暂存的新版二进制执行版本自检，失败自动清理暂存文件。
+func VerifyStagedBinaries(ctx context.Context, installDir string, combinedSymlink bool) (string, error) {
+	return verifyStagedBinaries(ctx, installDir, combinedSymlink)
 }
 
 func verifyStagedBinaries(ctx context.Context, installDir string, combinedSymlink bool) (string, error) {

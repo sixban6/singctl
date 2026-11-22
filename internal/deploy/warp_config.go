@@ -106,10 +106,14 @@ func extractRegV4Endpoint(reg *warpRegResponse) string {
 	return v4
 }
 
-// buildOrderedWarpCandidateEndpoints 按优先级合并并去重 WARP Endpoint 候选列表：
+// BuildOrderedWarpCandidateEndpoints 按优先级合并并去重 WARP Endpoint 候选列表：
 // 1) 若现网正在使用的 currentEP 为有效 IPv4 Endpoint，优先保留以降低切换抖动；
 // 2) 依次追加配置的候选池（候选池为空时自动回退至 WarpCandidateEndpoints[0]）；
 // 3) 追加本次注册返回的新 V4 Endpoint（若有效且未重复）。
+func BuildOrderedWarpCandidateEndpoints(candidates []string, currentEP string, reg *WarpRegResponse) []string {
+	return buildOrderedWarpCandidateEndpoints(candidates, currentEP, reg)
+}
+
 func buildOrderedWarpCandidateEndpoints(candidates []string, currentEP string, reg *warpRegResponse) []string {
 	var endpoints []string
 	addUnique := func(ep string) {

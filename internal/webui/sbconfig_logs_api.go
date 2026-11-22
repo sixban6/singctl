@@ -10,11 +10,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"singctl/internal/common/fsx"
 	"singctl/internal/constant"
 	"singctl/internal/daemon"
 	"singctl/internal/singbox"
 	ruleset_snapshot "singctl/internal/singbox/ruleset_snapshot"
-	"singctl/internal/util/file"
 	"slices"
 	"sort"
 	"strings"
@@ -46,6 +46,16 @@ func singboxBinaryPath() string {
 		return p
 	}
 	return ""
+}
+
+func (s *Server) singboxBinaryPath() string {
+	if s.opts.SingBoxLookPath != nil {
+		if p, err := s.opts.SingBoxLookPath("sing-box"); err == nil {
+			return p
+		}
+		return ""
+	}
+	return singboxBinaryPath()
 }
 
 // checkSingBoxConfig 用 sing-box check 校验配置内容(15s 超时)
@@ -94,13 +104,13 @@ func (s *Server) handleSbConfigGet(w http.ResponseWriter, r *http.Request) {
 		"exists":               exists,
 		"content":              content,
 		"backups":              sbconfigBackups(path),
-		"checkable":            singboxBinaryPath() != "",
+		"checkable":            s.singboxBinaryPath() != "",
 		"preserveManualConfig": preserveManual,
 	})
 }
 
 func atomicWriteFile0600(path string, data []byte) error {
-	return file.WriteAtomic0600(path, data)
+	return fsx.WriteAtomic0600(path, data)
 }
 
 func (s *Server) handleSbConfigPut(w http.ResponseWriter, r *http.Request) {
@@ -123,7 +133,7 @@ func (s *Server) handleSbConfigPut(w http.ResponseWriter, r *http.Request) {
 
 	// 有 sing-box 可执行文件时做语义校验,把住“改坏配置”这道门
 	checked := false
-	if exe := singboxBinaryPath(); exe != "" {
+	if exe := s.singboxBinaryPath(); exe != "" {
 		if err := checkSingBoxConfig(exe, body.Content); err != nil {
 			writeJSONError(w, http.StatusBadRequest, "sing-box check 未通过: "+err.Error())
 			return
@@ -208,7 +218,7 @@ func (s *Server) handleSbConfigRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	checked := false
-	if exe := singboxBinaryPath(); exe != "" {
+	if exe := s.singboxBinaryPath(); exe != "" {
 		if err := checkSingBoxConfig(exe, string(data)); err != nil {
 			writeJSONError(w, http.StatusBadRequest, "备份配置 sing-box check 未通过: "+err.Error())
 			return
@@ -306,21 +316,11 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			// 过滤旧版本遗留的订阅比对噪音行
-			if strings.Contains(line, "[INFO] Platform for singgen:") ||
-				strings.Contains(line, "已将 sing-box dns_local 指向本地 AdGuard Home") {
+			if daemon.IsLegacyDaemonSpamLine(line) {
 				continue
 			}
-			if eventsOnly {
-				if !strings.Contains(line, "[WATCHDOG]") &&
-					!strings.Contains(line, "[GroupFailover]") &&
-					!strings.Contains(line, "[SubSync]") &&
-					!strings.Contains(line, "[RuleSet]") &&
-					!strings.Contains(line, "[Watchdog]") &&
-					!strings.Contains(line, "Daemon ") &&
-					!strings.Contains(line, "[WARN]") &&
-					!strings.Contains(line, "[ERROR]") {
-					continue
-				}
+			if eventsOnly && !daemon.IsKeyWatchdogLogLine(line) {
+				continue
 			}
 			lines = append(lines, line)
 		}

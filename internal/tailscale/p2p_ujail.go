@@ -1,3 +1,4 @@
+// 文件职责：管理 OpenWrt procd/ujail 最小权限沙盒注入、平滑升级与异常自动回滚。
 package tailscale
 
 import (
@@ -20,8 +21,10 @@ import (
 const (
 	DefaultUjailBin      = "/sbin/ujail"
 	DefaultUjailCapsPath = "/etc/capabilities/tailscale.json"
-	ujailMarker          = "# SINGCTL_UJAIL_SANDBOX"
-	ujailMarkerV2        = "# SINGCTL_UJAIL_SANDBOX_V2"
+	DefaultUjailMarker   = "# SINGCTL_UJAIL_SANDBOX"
+	DefaultUjailMarkerV2 = "# SINGCTL_UJAIL_SANDBOX_V2"
+	ujailMarker          = DefaultUjailMarker
+	ujailMarkerV2        = DefaultUjailMarkerV2
 )
 
 // UjailOptions 配置 Layer 3 OpenWrt ujail 沙盒注入与可回滚选项。

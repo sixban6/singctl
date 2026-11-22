@@ -10,9 +10,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"singctl/internal/common/fsx"
 	log "singctl/internal/logger"
 	rssnapshot "singctl/internal/singbox/ruleset_snapshot"
-	"singctl/internal/util/file"
 	"strings"
 	"sync"
 	"time"
@@ -439,12 +439,43 @@ func sanitizeRootHTTPClients(cfg map[string]any) bool {
 		if !ok || hc == nil {
 			continue
 		}
-		if detour, _ := hc["detour"].(string); isEmptyDirectOutboundTag(cfg["outbounds"], strings.TrimSpace(detour)) {
+		if detour, _ := hc["detour"].(string); isEmptyDirectRawOutboundTag(cfg["outbounds"], strings.TrimSpace(detour)) {
 			delete(hc, "detour")
 			changed = true
 		}
 	}
 	return changed
+}
+
+func isEmptyDirectRawOutboundTag(rawOutbounds any, targetTag string) bool {
+	if targetTag == "" {
+		return true
+	}
+	arr, ok := rawOutbounds.([]any)
+	if !ok {
+		return false
+	}
+	for _, item := range arr {
+		ob, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		tag, _ := ob["tag"].(string)
+		if strings.TrimSpace(tag) != targetTag {
+			continue
+		}
+		typ, _ := ob["type"].(string)
+		if !strings.EqualFold(strings.TrimSpace(typ), "direct") {
+			return false
+		}
+		for k := range ob {
+			if k != "type" && k != "tag" {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 // revertMissingLocalToRemote 当 type=local 的规则集磁盘文件缺失且重下失败时，
@@ -596,7 +627,7 @@ func saveManifest(cacheDir string, m ruleSetManifest) error {
 }
 
 func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
-	return file.WriteAtomic(path, data, mode)
+	return fsx.WriteAtomic(path, data, mode)
 }
 
 func configFileMode(path string) os.FileMode {

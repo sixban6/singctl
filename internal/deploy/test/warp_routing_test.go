@@ -1,0 +1,340 @@
+// 文件职责：覆盖服务端 WARP 场景路由编译、公共 DNS/自护域名硬豁免与热加载失败自动回滚单测。
+package deploy_test
+
+import (
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"slices"
+	"testing"
+
+	"singctl/internal/config"
+	"singctl/internal/deploy"
+)
+
+func loadEmbeddedServerTemplate(t *testing.T) []byte {
+	t.Helper()
+	raw, err := deploy.TemplateFiles.ReadFile("templates/server_config.json")
+	if err != nil {
+		t.Fatalf("read server_config.json: %v", err)
+	}
+	return raw
+}
+
+type parsedSingBoxRoute struct {
+	HTTPClients []map[string]any `json:"http_clients"`
+	Route       struct {
+		DefaultHTTPClient string `json:"default_http_client"`
+		Final             string `json:"final"`
+		RuleSet           []struct {
+			Tag            string `json:"tag"`
+			URL            string `json:"url"`
+			DownloadDetour string `json:"download_detour"`
+		} `json:"rule_set"`
+		Rules []struct {
+			Action        string   `json:"action"`
+			IPIsPrivate   bool     `json:"ip_is_private"`
+			Outbound      string   `json:"outbound"`
+			RuleSet       []string `json:"rule_set"`
+			DomainSuffix  []string `json:"domain_suffix"`
+			Domain        []string `json:"domain"`
+			DomainKeyword []string `json:"domain_keyword"`
+			IPCIDR        []string `json:"ip_cidr"`
+		} `json:"rules"`
+	} `json:"route"`
+}
+
+func TestNormalizeAndCleanWarpRules(t *testing.T) {
+	cleaned, err := config.CleanWarpDomainRule("https://missav.ws/dm13/cn/test?foo=1#bar")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cleaned != "missav.ws" {
+		t.Fatalf("expected 'missav.ws', got %q", cleaned)
+	}
+
+	cleanedWildcard, err := config.CleanWarpDomainRule("*.Sub.Example.COM:443")
+	if err != nil || cleanedWildcard != "sub.example.com" {
+		t.Fatalf("expected 'sub.example.com', got %q (err=%v)", cleanedWildcard, err)
+	}
+
+	if _, err := config.CleanWarpDomainRule("example.com; rm -rf /"); err == nil {
+		t.Fatal("expected shell metacharacter injection to fail")
+	}
+
+	cidr, err := config.CleanWarpCIDRRule("198.51.100.10")
+	if err != nil || cidr != "198.51.100.10/32" {
+		t.Fatalf("expected 198.51.100.10/32, got %q (err=%v)", cidr, err)
+	}
+}
+
+func TestApplyWarpRouting_DefaultMissavDisableRedditGlobalAndBypass(t *testing.T) {
+	tpl := loadEmbeddedServerTemplate(t)
+
+	outDefault, err := deploy.ApplyWarpRoutingToServerConfigJSON(tpl, config.WarpRoutingConfig{})
+	if err != nil {
+		t.Fatalf("default apply failed: %v", err)
+	}
+	var pDefault parsedSingBoxRoute
+	if err := json.Unmarshal(outDefault, &pDefault); err != nil {
+		t.Fatal(err)
+	}
+	if pDefault.Route.Final != "DC" {
+		t.Fatalf("expected default final=DC, got %s", pDefault.Route.Final)
+	}
+	if pDefault.Route.DefaultHTTPClient != "hc-direct" {
+		t.Fatalf("expected route.default_http_client=hc-direct, got %q", pDefault.Route.DefaultHTTPClient)
+	}
+	if len(pDefault.HTTPClients) == 0 || pDefault.HTTPClients[0]["tag"] != "hc-direct" {
+		t.Fatalf("expected top-level http_clients with tag=hc-direct, got %v", pDefault.HTTPClients)
+	}
+	if _, hasDetour := pDefault.HTTPClients[0]["detour"]; hasDetour {
+		t.Fatalf("server hc-direct must not set detour to empty direct DC outbound, got %v", pDefault.HTTPClients[0])
+	}
+	for _, rs := range pDefault.Route.RuleSet {
+		if rs.DownloadDetour != "" {
+			t.Fatalf("rule_set %s must not contain deprecated download_detour, got %q", rs.Tag, rs.DownloadDetour)
+		}
+	}
+	foundPrivateReject := false
+	foundRedditWarp := false
+	for _, r := range pDefault.Route.Rules {
+		if r.IPIsPrivate && r.Action == "reject" {
+			foundPrivateReject = true
+		}
+		if r.Outbound == "WARP" && slices.Contains(r.RuleSet, "rule-reddit") {
+			foundRedditWarp = true
+		}
+	}
+	if !foundPrivateReject || !foundRedditWarp {
+		t.Fatalf("default route missing reject or reddit->WARP: reject=%v reddit=%v", foundPrivateReject, foundRedditWarp)
+	}
+
+	outMissav, err := deploy.ApplyWarpRoutingToServerConfigJSON(tpl, config.WarpRoutingConfig{
+		Presets: map[string]bool{"missav": true},
+	})
+	if err != nil {
+		t.Fatalf("missav apply failed: %v", err)
+	}
+	var pMissav parsedSingBoxRoute
+	if err := json.Unmarshal(outMissav, &pMissav); err != nil {
+		t.Fatal(err)
+	}
+	var warpSuffixes []string
+	for _, r := range pMissav.Route.Rules {
+		if r.Outbound == "WARP" && len(r.DomainSuffix) > 0 {
+			warpSuffixes = append(warpSuffixes, r.DomainSuffix...)
+		}
+	}
+	for _, want := range []string{"missav.ws", "missav.ai", "missav.com", "missav.live", "surrit.com", "nineyu.com"} {
+		if !slices.Contains(warpSuffixes, want) {
+			t.Fatalf("expected missav suffix %q in WARP rules, got %v", want, warpSuffixes)
+		}
+	}
+
+	outNoReddit, err := deploy.ApplyWarpRoutingToServerConfigJSON(tpl, config.WarpRoutingConfig{
+		Presets: map[string]bool{"reddit": false},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pNoReddit parsedSingBoxRoute
+	if err := json.Unmarshal(outNoReddit, &pNoReddit); err != nil {
+		t.Fatal(err)
+	}
+	redditBackToDC := false
+	for _, r := range pNoReddit.Route.Rules {
+		if r.Outbound == "WARP" && slices.Contains(r.RuleSet, "rule-reddit") {
+			t.Fatal("expected rule-reddit NOT to route via WARP when explicitly disabled")
+		}
+		if r.Outbound == "DC" && slices.Contains(r.RuleSet, "rule-reddit") {
+			redditBackToDC = true
+		}
+	}
+	if !redditBackToDC {
+		t.Fatal("expected rule-reddit to fall back to DC")
+	}
+
+	outNetflix, err := deploy.ApplyWarpRoutingToServerConfigJSON(tpl, config.WarpRoutingConfig{
+		Presets: map[string]bool{"netflix": true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pNetflix parsedSingBoxRoute
+	_ = json.Unmarshal(outNetflix, &pNetflix)
+	hasNetflixRS := false
+	for _, rs := range pNetflix.Route.RuleSet {
+		if rs.DownloadDetour != "" {
+			t.Fatalf("rule_set %s must not contain deprecated download_detour, got %q", rs.Tag, rs.DownloadDetour)
+		}
+		if rs.Tag == "rule-netflix" {
+			hasNetflixRS = true
+		}
+	}
+	if !hasNetflixRS {
+		t.Fatal("expected optional rule-netflix to be injected into route.rule_set")
+	}
+
+	legacyServerJSON := `{"outbounds":[{"type":"direct","tag":"DC"}],"route":{"final":"DC","rule_set":[{"tag":"rule-reddit","type":"remote","format":"binary","download_detour":"DC","url":"https://example.com/reddit.srs"}],"rules":[]}}`
+	migrated, err := deploy.ApplyWarpRoutingToServerConfigJSON([]byte(legacyServerJSON), config.WarpRoutingConfig{})
+	if err != nil {
+		t.Fatalf("migrate legacy server config failed: %v", err)
+	}
+	var pMigrated parsedSingBoxRoute
+	if err := json.Unmarshal(migrated, &pMigrated); err != nil {
+		t.Fatal(err)
+	}
+	if pMigrated.Route.DefaultHTTPClient != "hc-direct" || len(pMigrated.HTTPClients) == 0 {
+		t.Fatalf("expected legacy server config migrated to hc-direct, got hc=%v default=%q", pMigrated.HTTPClients, pMigrated.Route.DefaultHTTPClient)
+	}
+	for _, rs := range pMigrated.Route.RuleSet {
+		if rs.DownloadDetour != "" {
+			t.Fatalf("expected legacy download_detour stripped on %s, got %q", rs.Tag, rs.DownloadDetour)
+		}
+	}
+
+	outGlobal, err := deploy.ApplyWarpRoutingToServerConfigJSON(tpl, config.WarpRoutingConfig{
+		Mode:          config.WarpModeGlobalWarp,
+		DirectDomains: []string{"direct.example.com", "full:exact.example.com"},
+		DirectCIDRs:   []string{"198.51.100.0/24"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pGlobal parsedSingBoxRoute
+	_ = json.Unmarshal(outGlobal, &pGlobal)
+	if pGlobal.Route.Final != "WARP" {
+		t.Fatalf("expected global_warp final=WARP, got %s", pGlobal.Route.Final)
+	}
+	directDomainIdx, directCIDRIdx := -1, -1
+	for idx, r := range pGlobal.Route.Rules {
+		if r.Outbound == "DC" && slices.Contains(r.DomainSuffix, "direct.example.com") && slices.Contains(r.Domain, "exact.example.com") {
+			directDomainIdx = idx
+		}
+		if r.Outbound == "DC" && slices.Contains(r.IPCIDR, "198.51.100.0/24") {
+			directCIDRIdx = idx
+		}
+	}
+	if directDomainIdx < 0 || directCIDRIdx < 0 || directDomainIdx >= directCIDRIdx {
+		t.Fatalf("expected Direct whitelist rules at top priority, got indices %d, %d", directDomainIdx, directCIDRIdx)
+	}
+
+	outBypass, err := deploy.ApplyWarpRoutingToServerConfigJSON(tpl, config.WarpRoutingConfig{
+		Mode:        config.WarpModeBypass,
+		Presets:     map[string]bool{"missav": true, "openai": true},
+		WarpDomains: []string{"example.com"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pBypass parsedSingBoxRoute
+	_ = json.Unmarshal(outBypass, &pBypass)
+	if pBypass.Route.Final != "DC" {
+		t.Fatalf("expected bypass final=DC, got %s", pBypass.Route.Final)
+	}
+	for _, r := range pBypass.Route.Rules {
+		if r.Outbound == "WARP" {
+			t.Fatalf("expected zero WARP rules in bypass mode, found %+v", r)
+		}
+	}
+}
+
+func TestApplyLiveWarpRouting_GuardsAndRollback(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.json")
+	tpl := loadEmbeddedServerTemplate(t)
+	if err := os.WriteFile(cfgPath, tpl, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := deploy.ApplyLiveWarpRouting(cfgPath, config.WarpRoutingConfig{
+		Presets: map[string]bool{"missav": true},
+	}, &deploy.LiveWarpApplyDeps{
+		CheckWarpPort: func() bool { return false },
+	})
+	if !errors.Is(err, deploy.ErrWarpTunnelUnavailable) {
+		t.Fatalf("expected ErrWarpTunnelUnavailable, got %v", err)
+	}
+
+	restoreCalled := false
+	_, err = deploy.ApplyLiveWarpRouting(cfgPath, config.WarpRoutingConfig{
+		Presets: map[string]bool{"missav": true},
+	}, &deploy.LiveWarpApplyDeps{
+		CheckWarpPort:   func() bool { return true },
+		ValidateConfig:  func(string) error { return nil },
+		IsServiceActive: func() bool { return true },
+		ReloadService:   func(bool) error { return errors.New("simulated sighup failure") },
+		RestoreService:  func(wasActive bool) error { restoreCalled = wasActive; return nil },
+	})
+	if err == nil || !restoreCalled {
+		t.Fatalf("expected reload failure with restore called, err=%v restoreCalled=%v", err, restoreCalled)
+	}
+	restored, _ := os.ReadFile(cfgPath)
+	if string(restored) != string(tpl) {
+		t.Fatal("expected config.json to be atomically rolled back to original content")
+	}
+	fi, _ := os.Stat(cfgPath)
+	if fi.Mode().Perm() != 0600 {
+		t.Fatalf("expected rolled-back config.json mode 0600, got %o", fi.Mode().Perm())
+	}
+}
+
+func TestApplyWarpRouting_ProtectedDNSAndSelfDomainsAlwaysDC(t *testing.T) {
+	tpl := loadEmbeddedServerTemplate(t)
+
+	out, err := deploy.ApplyWarpRoutingWithProtectedDomains(tpl, config.WarpRoutingConfig{
+		Mode:    config.WarpModeGlobalWarp,
+		Presets: map[string]bool{"google": true},
+	}, []string{"node.example.com", "sub.example.com"})
+	if err != nil {
+		t.Fatalf("ApplyWarpRoutingWithProtectedDomains failed: %v", err)
+	}
+
+	var parsed struct {
+		Route struct {
+			Final string `json:"final"`
+			Rules []struct {
+				Outbound     string   `json:"outbound"`
+				IPCIDR       []string `json:"ip_cidr"`
+				Port         []int    `json:"port"`
+				DomainSuffix []string `json:"domain_suffix"`
+				RuleSet      []string `json:"rule_set"`
+			} `json:"rules"`
+		} `json:"route"`
+	}
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Route.Final != "WARP" {
+		t.Fatalf("expected final=WARP, got %s", parsed.Route.Final)
+	}
+
+	dnsIdx, selfDomainIdx, warpRuleIdx := -1, -1, -1
+	for idx, r := range parsed.Route.Rules {
+		if r.Outbound == "DC" && slices.Contains(r.IPCIDR, "8.8.8.8/32") && slices.Contains(r.IPCIDR, "1.1.1.1/32") && slices.Equal(r.Port, []int{53, 443, 853}) {
+			dnsIdx = idx
+		}
+		if r.Outbound == "DC" && slices.Contains(r.DomainSuffix, "node.example.com") && slices.Contains(r.DomainSuffix, "sub.example.com") {
+			selfDomainIdx = idx
+		}
+		if r.Outbound == "WARP" && warpRuleIdx < 0 {
+			warpRuleIdx = idx
+		}
+	}
+	if dnsIdx < 0 || selfDomainIdx < 0 || warpRuleIdx < 0 {
+		t.Fatalf("missing expected rules: dnsIdx=%d selfDomainIdx=%d warpRuleIdx=%d", dnsIdx, selfDomainIdx, warpRuleIdx)
+	}
+	if dnsIdx >= warpRuleIdx || selfDomainIdx >= warpRuleIdx {
+		t.Fatalf("expected DNS (%d) and self-domain (%d) DC exemptions BEFORE first WARP rule (%d)", dnsIdx, selfDomainIdx, warpRuleIdx)
+	}
+
+	globalWR := config.WarpRoutingConfig{Mode: config.WarpModeGlobalWarp}
+	if got := deploy.ExpectedTargetOutbound(globalWR, "", "8.8.8.8", ""); got != "Direct" {
+		t.Fatalf("expected 8.8.8.8 to resolve as Direct even in global_warp, got %q", got)
+	}
+	if got := deploy.ExpectedTargetOutbound(globalWR, "panel.sub.example.com", "203.0.113.10", "", "sub.example.com"); got != "Direct" {
+		t.Fatalf("expected protected domain to resolve as Direct in global_warp, got %q", got)
+	}
+}

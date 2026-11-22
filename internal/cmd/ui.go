@@ -278,3 +278,19 @@ func newServerWebUnbanCmd(configPath string) *cobra.Command {
 		},
 	}
 }
+
+func installServerUIService(cfgPath string) error {
+	return serverweb.InstallService(cfgPath)
+}
+
+func uninstallServerUIService() error {
+	return serverweb.UninstallService()
+}
+
+func restartServerUIService() error {
+	return serverweb.RestartService()
+}
+
+func isServerUIServiceRunning(cfgPath string) bool {
+	return serverweb.IsRunning(cfgPath)
+}

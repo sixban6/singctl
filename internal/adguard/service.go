@@ -1,3 +1,4 @@
+// 文件职责：提供 AdGuard Home 系统服务单元生成、进程启停卸载、版本缓存与本地 DNS/TCP 探活。
 package adguard
 
 import (
@@ -10,10 +11,54 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"singctl/internal/common/netx"
+	"singctl/internal/common/proc"
+	"singctl/internal/config"
+	"singctl/internal/logger"
 	"singctl/internal/platform/servicemgr"
 )
+
+var (
+	binVerCacheMu  sync.Mutex
+	binVerCacheKey string
+	binVerCached   string
+)
+
+// CachedBinaryVersion 按二进制文件指纹 (path|mtime|size) 缓存 AdGuardHome --version，
+// 二进制升级后 mtime/size 变化同一毫秒自动失效重读，避免高频接口每次 fork 35MB 子进程。
+func CachedBinaryVersion(binPath string) string {
+	info, err := os.Stat(binPath)
+	if err != nil || info.IsDir() {
+		return ""
+	}
+	key := fmt.Sprintf("%s|%d|%d", binPath, info.ModTime().UnixNano(), info.Size())
+
+	binVerCacheMu.Lock()
+	if binVerCacheKey == key && binVerCached != "" {
+		ver := binVerCached
+		binVerCacheMu.Unlock()
+		return ver
+	}
+	binVerCacheMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	out, err := exec.CommandContext(ctx, binPath, "--version").Output()
+	cancel()
+	if err != nil {
+		return ""
+	}
+	ver := strings.TrimSpace(string(out))
+	if ver != "" {
+		binVerCacheMu.Lock()
+		binVerCacheKey = key
+		binVerCached = ver
+		binVerCacheMu.Unlock()
+	}
+	return ver
+}
 
 // BuildSystemdUnit 生成 Debian/Ubuntu/Linux 标准 systemd 服务单元内容。
 func BuildSystemdUnit(binPath, configFile, workDir string) string {
@@ -72,6 +117,176 @@ func hasOpenWrtProcd() bool {
 	return servicemgr.DetectHost().Kind == servicemgr.InitProcd
 }
 
+func (m *Manager) installAndStartService() error {
+	if err := os.MkdirAll(m.aghWorkDir, 0700); err != nil {
+		return err
+	}
+
+	if hasOpenWrtProcd() && m.initdScript != "" {
+		sanitizeOpenWrtDnsmasqTTL()
+		mgr := servicemgr.NewProcd(nil, filepath.Dir(m.initdScript))
+		spec := servicemgr.UnitSpec{
+			Name:      "AdGuardHome",
+			ProcdPath: m.initdScript,
+			ProcdBody: BuildOpenWrtInitScript(m.binPath, m.aghConfigFile, m.aghWorkDir),
+		}
+		if err := mgr.InstallUnit(context.Background(), spec); err != nil {
+			if startErr := mgr.Start(context.Background(), "AdGuardHome"); startErr != nil {
+				logger.Warn("procd 启动 AdGuardHome 返回异常 (%v / %v)，尝试直接守护拉起", err, startErr)
+			}
+		}
+		time.Sleep(300 * time.Millisecond)
+		if !isProcessRunning() {
+			return startBackgroundDirect(m.binPath, m.aghConfigFile, m.aghWorkDir)
+		}
+		return nil
+	}
+
+	if hasSystemd() && m.systemdUnit != "" {
+		mgr := servicemgr.NewSystemdWithDir(nil, filepath.Dir(m.systemdUnit))
+		spec := servicemgr.UnitSpec{
+			Name:        "AdGuardHome",
+			SystemdPath: m.systemdUnit,
+			SystemdBody: BuildSystemdUnit(m.binPath, m.aghConfigFile, m.aghWorkDir),
+		}
+		if err := mgr.InstallUnit(context.Background(), spec); err != nil {
+			return fmt.Errorf("启动 systemd AdGuardHome 服务失败: %w", err)
+		}
+		return nil
+	}
+
+	_ = m.Stop()
+	return startBackgroundDirect(m.binPath, m.aghConfigFile, m.aghWorkDir)
+}
+
+// sanitizeOpenWrtDnsmasqTTL 清理 OpenWrt/ImmortalWrt 固件自带 dnsmasq 中可能存在的强制 min_cache_ttl / mini_ttl，
+// 防止 1 秒 TTL 的动态节点域名被 dnsmasq 强行篡改缓存 3600 秒。
+func sanitizeOpenWrtDnsmasqTTL() {
+	if _, err := exec.LookPath("uci"); err != nil {
+		return
+	}
+	changed := false
+	for _, key := range []string{"min_cache_ttl", "mini_ttl", "minttl", "use_stale_cache"} {
+		target := "dhcp.@dnsmasq[0]." + key
+		if out, err := exec.Command("uci", "-q", "get", target).Output(); err == nil && len(strings.TrimSpace(string(out))) > 0 {
+			if exec.Command("uci", "-q", "delete", target).Run() == nil {
+				changed = true
+			}
+		}
+	}
+	if changed {
+		_ = exec.Command("uci", "commit", "dhcp").Run()
+		_ = exec.Command("/etc/init.d/dnsmasq", "reload").Run()
+	}
+}
+
+func (m *Manager) waitDNSReady(maxWait time.Duration) error {
+	dnsAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(m.cfg.DNS.GetDNSPort()))
+	deadline := time.Now().Add(maxWait)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		if err := ProbeDNS(dnsAddr, 800*time.Millisecond); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		time.Sleep(400 * time.Millisecond)
+	}
+	return fmt.Errorf("等待 AdGuard Home DNS 端口 (%s) 就绪超时: %v", dnsAddr, lastErr)
+}
+
+// Start 启动已安装的 AdGuard Home（若局域网 IP 发生变化会自动同步 Web 监听地址）。
+func (m *Manager) Start() error {
+	if !m.isBinaryPresent() {
+		return fmt.Errorf("AdGuard Home 尚未安装 (%s)，请先运行: singctl dns install", m.binPath)
+	}
+	if _, err := os.Stat(m.aghConfigFile); os.IsNotExist(err) {
+		m.cfg.DNS.EnsureCredentials("")
+		if m.configPath != "" {
+			_ = config.Save(m.configPath, m.cfg)
+		}
+		if err := m.ensureConfigFile(sanitizeWebBindIP(netx.GetPrimaryLANIPv4()), true); err != nil {
+			return err
+		}
+	} else {
+		lanIP := sanitizeWebBindIP(netx.GetPrimaryLANIPv4())
+		_, _ = SyncExistingConfig(m.aghConfigFile, SyncOptions{
+			LANIP:             lanIP,
+			WebPort:           m.cfg.DNS.GetWebPort(),
+			DNSPort:           m.cfg.DNS.GetDNSPort(),
+			DisablePrivatePTR: new(true),
+		})
+	}
+
+	if err := m.installAndStartService(); err != nil {
+		return err
+	}
+	if err := m.waitDNSReady(10 * time.Second); err != nil {
+		return err
+	}
+	_ = os.Chmod(m.aghConfigFile, 0600)
+	return nil
+}
+
+// Stop 停止正在运行的 AdGuard Home 服务。
+func (m *Manager) Stop() error {
+	ctx := context.Background()
+	if hasOpenWrtProcd() && m.initdScript != "" {
+		_ = servicemgr.NewProcd(nil, filepath.Dir(m.initdScript)).Stop(ctx, "AdGuardHome")
+	}
+	if hasSystemd() {
+		_ = servicemgr.NewSystemd(nil).Stop(ctx, "AdGuardHome")
+	}
+	if isProcessRunning() {
+		_ = exec.Command("pkill", "-f", "AdGuardHome").Run()
+		_ = exec.Command("killall", "AdGuardHome").Run()
+		for range 10 {
+			if !isProcessRunning() {
+				break
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+	}
+	return nil
+}
+
+// Restart 重启 AdGuard Home。
+func (m *Manager) Restart() error {
+	_ = m.Stop()
+	return m.Start()
+}
+
+// Uninstall 停止并卸载 AdGuard Home 服务与二进制（可选保留或清理配置目录）。
+func (m *Manager) Uninstall(purgeConfig bool) error {
+	_ = m.Stop()
+
+	ctx := context.Background()
+	if hasOpenWrtProcd() && m.initdScript != "" {
+		_ = servicemgr.NewProcd(nil, filepath.Dir(m.initdScript)).RemoveUnit(ctx, servicemgr.UnitSpec{
+			Name:      "AdGuardHome",
+			ProcdPath: m.initdScript,
+		})
+	}
+	if hasSystemd() && m.systemdUnit != "" {
+		_ = servicemgr.NewSystemdWithDir(nil, filepath.Dir(m.systemdUnit)).RemoveUnit(ctx, servicemgr.UnitSpec{
+			Name:        "AdGuardHome",
+			SystemdPath: m.systemdUnit,
+		})
+	}
+	if m.binPath != "" {
+		_ = os.Remove(m.binPath)
+	}
+	if purgeConfig && m.aghConfigDir != "" {
+		_ = os.RemoveAll(m.aghConfigDir)
+	}
+
+	m.cfg.DNS.SetEnabled(false)
+	if m.configPath != "" {
+		_ = config.Save(m.configPath, m.cfg)
+	}
+	return nil
+}
+
 // ProbeDNS 向指定 UDP DNS 地址（如 127.0.0.1:5353）发送标准 RFC 1035 本地探测包（localhost. A），
 // 验证 AdGuardHome DNS 引擎已完成绑定并正常响应，无需依赖外部互联网。
 func ProbeDNS(addr string, timeout time.Duration) error {
@@ -88,7 +303,6 @@ func ProbeDNS(addr string, timeout time.Duration) error {
 	var txid [2]byte
 	_, _ = rand.Read(txid[:])
 
-	// DNS query for "localhost." Type A (1) Class IN (1)
 	query := []byte{
 		txid[0], txid[1],
 		0x01, 0x00, // Standard query, RD=1
@@ -196,6 +410,9 @@ func SelectAvailableWebPort(bindIP string, preferredPort int) int {
 }
 
 func isProcessRunning() bool {
+	if proc.PgrepMatch("AdGuardHome") {
+		return true
+	}
 	if _, err := exec.LookPath("pgrep"); err == nil {
 		if err := exec.Command("pgrep", "-f", "AdGuardHome").Run(); err == nil {
 			return true
@@ -241,7 +458,7 @@ func startBackgroundDirect(binPath, configFile, workDir string) error {
 	cmd.Stdin = devNull
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	setDetachedSysProcAttr(cmd)
+	proc.SetDetachedAttr(cmd)
 
 	return cmd.Start()
 }

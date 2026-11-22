@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"singctl/internal/common/proc"
 	"singctl/internal/constant"
 	"singctl/internal/logger"
 	"time"
@@ -29,7 +30,7 @@ func (d *Daemon) spawn() error {
 	cmd := exec.Command(os.Args[0], os.Args[1:]...)
 	cmd.Env = append(os.Environ(), envDaemonized+"=1")
 
-	d.setProcAttrs(cmd)
+	proc.SetDetachedAttr(cmd)
 
 	devNull := "/dev/null"
 	if runtime.GOOS == "windows" {
@@ -86,47 +87,14 @@ func (d *Daemon) spawn() error {
 	}
 }
 
-var errChildDied = errors.New("daemon child exited during startup")
+var errChildDied = proc.ErrChildExited
 
 func waitReady(r *os.File, timeout time.Duration) error {
-	ch := make(chan error, 1)
-	go func() {
-		buf := make([]byte, 1)
-		n, err := r.Read(buf)
-		switch {
-		case n > 0 && buf[0] == 1:
-			ch <- nil
-		case n > 0:
-			ch <- fmt.Errorf("unexpected ready signal: %d", buf[0])
-		case err != nil:
-			ch <- errChildDied
-		default:
-			ch <- errChildDied
-		}
-	}()
-
-	select {
-	case err := <-ch:
-		return err
-	case <-time.After(timeout):
-		return fmt.Errorf("timeout waiting for daemon ready signal")
-	}
+	return proc.WaitReadyPipe(r, timeout)
 }
 
 func notifyParentReady(ok bool) {
-	if runtime.GOOS == "windows" {
-		return
-	}
-	f := os.NewFile(readyFd, "ready-pipe")
-	if f == nil {
-		return
-	}
-	b := []byte{0}
-	if ok {
-		b[0] = 1
-	}
-	_, _ = f.Write(b)
-	_ = f.Close()
+	proc.NotifyReadyPipeResult(readyFd, ok)
 }
 func (d *Daemon) setupLogFile() error {
 	logPath := cmp.Or(d.logPathOverride, GetDaemonLogPath())

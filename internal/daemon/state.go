@@ -1,6 +1,8 @@
+// 文件职责：管理守护进程运行态全景快照持久化（StateStore）、0600 原子落盘与历史看门狗事件回填。
 package daemon
 
 import (
+	"cmp"
 	"encoding/json"
 	"os"
 	"regexp"
@@ -8,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"singctl/internal/common/fsx"
 	"singctl/internal/tailscale"
 )
 
@@ -33,37 +36,59 @@ type WatchdogEventRecord struct {
 // DaemonRuntimeSnapshot 持久化在 /tmp/singctl-daemon.state 中的运行态全景快照。
 // 同时兼容旧版 RestartLimiter 的 total / times 字段，保证平滑升级零断层。
 type DaemonRuntimeSnapshot struct {
-	Total             int64                 `json:"total"`
-	Times             []int64               `json:"times"`
-	DaemonVersion     string                `json:"daemonVersion,omitempty"`
-	StartedAt         string                `json:"startedAt,omitempty"`
-	LastHealthAt      string                `json:"lastHealthAt,omitempty"`
-	LastHealthOK      bool                  `json:"lastHealthOK"`
-	LastHealthDetail  string                `json:"lastHealthDetail,omitempty"`
-	LastHealthDelayMs int                   `json:"lastHealthDelayMs,omitempty"`
-	LastSubSyncAt     string                `json:"lastSubSyncAt,omitempty"`
-	LastSubSyncNodeCt int                   `json:"lastSubSyncNodeCount,omitempty"`
-	LastSubSyncResult string                `json:"lastSubSyncResult,omitempty"`
-	LastRuleSetAt     string                `json:"lastRuleSetAt,omitempty"`
-	LastRuleSetResult string                `json:"lastRuleSetResult,omitempty"`
+	Total             int64                         `json:"total"`
+	Times             []int64                       `json:"times"`
+	DaemonVersion     string                        `json:"daemonVersion,omitempty"`
+	StartedAt         string                        `json:"startedAt,omitempty"`
+	LastHealthAt      string                        `json:"lastHealthAt,omitempty"`
+	LastHealthOK      bool                          `json:"lastHealthOK"`
+	LastHealthDetail  string                        `json:"lastHealthDetail,omitempty"`
+	LastHealthDelayMs int                           `json:"lastHealthDelayMs,omitempty"`
+	LastSubSyncAt     string                        `json:"lastSubSyncAt,omitempty"`
+	LastSubSyncNodeCt int                           `json:"lastSubSyncNodeCount,omitempty"`
+	LastSubSyncResult string                        `json:"lastSubSyncResult,omitempty"`
+	LastRuleSetAt     string                        `json:"lastRuleSetAt,omitempty"`
+	LastRuleSetResult string                        `json:"lastRuleSetResult,omitempty"`
 	LastFailoverAt    string                        `json:"lastFailoverAt,omitempty"`
 	ActiveFailovers   []FailoverActiveItem          `json:"activeFailovers,omitempty"`
 	TailscaleP2P      *tailscale.P2PRuntimeSnapshot `json:"tailscaleP2P,omitempty"`
 	RecentEvents      []WatchdogEventRecord         `json:"recentEvents,omitempty"`
 }
 
-var stateFileMu sync.Mutex
-
-// LoadRuntimeSnapshot 读取当前守护进程运行态快照（兼容旧版纯时间戳数组格式）。
-func LoadRuntimeSnapshot() DaemonRuntimeSnapshot {
-	stateFileMu.Lock()
-	defer stateFileMu.Unlock()
-	return loadRuntimeSnapshotUnlocked()
+// StateStore 以显式注入的 Paths 并发安全地读写守护进程运行态快照。
+type StateStore struct {
+	paths Paths
+	mu    sync.Mutex
 }
 
-func loadRuntimeSnapshotUnlocked() DaemonRuntimeSnapshot {
+// NewStateStore 创建隔离文件路径的守护进程状态存储器。
+func NewStateStore(paths Paths) *StateStore {
+	return &StateStore{paths: paths}
+}
+
+func (s *StateStore) effectivePaths() Paths {
+	def := DefaultPaths()
+	if s == nil {
+		return def
+	}
+	return Paths{
+		PidFile:   cmp.Or(strings.TrimSpace(s.paths.PidFile), def.PidFile),
+		StateFile: cmp.Or(strings.TrimSpace(s.paths.StateFile), def.StateFile),
+		LogFile:   cmp.Or(strings.TrimSpace(s.paths.LogFile), def.LogFile),
+	}
+}
+
+// Load 读取当前运行态快照（兼容旧版纯时间戳数组格式）。
+func (s *StateStore) Load() DaemonRuntimeSnapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.loadUnlocked()
+}
+
+func (s *StateStore) loadUnlocked() DaemonRuntimeSnapshot {
+	p := s.effectivePaths()
 	var snap DaemonRuntimeSnapshot
-	data, err := os.ReadFile(GetStateFilePath())
+	data, err := os.ReadFile(p.StateFile)
 	if err == nil && len(data) > 0 {
 		var legacy []int64
 		if json.Unmarshal(data, &legacy) == nil {
@@ -73,17 +98,21 @@ func loadRuntimeSnapshotUnlocked() DaemonRuntimeSnapshot {
 		}
 	}
 	if len(snap.RecentEvents) == 0 {
-		snap.RecentEvents = backfillRecentEventsFromDaemonLog(GetDaemonLogPath(), maxRecentWatchdogEvents)
+		snap.RecentEvents = backfillRecentEventsFromDaemonLog(p.LogFile, maxRecentWatchdogEvents)
 	}
 	return snap
 }
 
-// UpdateRuntimeState 以并发安全、0600 原子替换方式读取-修改-保存守护进程状态文件。
-func UpdateRuntimeState(mutator func(*DaemonRuntimeSnapshot)) {
-	stateFileMu.Lock()
-	defer stateFileMu.Unlock()
+// Update 以并发安全、0600 原子替换方式读取-修改-保存运行态快照。
+func (s *StateStore) Update(mutator func(*DaemonRuntimeSnapshot)) {
+	if mutator == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	snap := loadRuntimeSnapshotUnlocked()
+	p := s.effectivePaths()
+	snap := s.loadUnlocked()
 	mutator(&snap)
 	if len(snap.RecentEvents) > maxRecentWatchdogEvents {
 		snap.RecentEvents = snap.RecentEvents[len(snap.RecentEvents)-maxRecentWatchdogEvents:]
@@ -93,22 +122,34 @@ func UpdateRuntimeState(mutator func(*DaemonRuntimeSnapshot)) {
 	if err != nil {
 		return
 	}
-	target := GetStateFilePath()
-	tmp := target + ".tmp"
-	if os.WriteFile(tmp, b, 0600) == nil {
-		_ = os.Chmod(tmp, 0600)
-		_ = os.Rename(tmp, target)
+	_ = fsx.WriteAtomic0600(p.StateFile, b)
+}
+
+// AppendEvent 向状态快照追加一条结构化事件。
+func (s *StateStore) AppendEvent(ev WatchdogEventRecord) {
+	if ev.Time == "" {
+		ev.Time = time.Now().Format(time.DateTime)
 	}
+	s.Update(func(snap *DaemonRuntimeSnapshot) {
+		snap.RecentEvents = append(snap.RecentEvents, ev)
+	})
+}
+
+var defaultStateStore = &StateStore{}
+
+// LoadRuntimeSnapshot 读取当前守护进程运行态快照（兼容旧版纯时间戳数组格式）。
+func LoadRuntimeSnapshot() DaemonRuntimeSnapshot {
+	return defaultStateStore.Load()
+}
+
+// UpdateRuntimeState 以并发安全、0600 原子替换方式读取-修改-保存守护进程状态文件。
+func UpdateRuntimeState(mutator func(*DaemonRuntimeSnapshot)) {
+	defaultStateStore.Update(mutator)
 }
 
 // AppendRuntimeEvent 向状态快照追加一条结构化事件。
 func AppendRuntimeEvent(ev WatchdogEventRecord) {
-	if ev.Time == "" {
-		ev.Time = time.Now().Format(time.DateTime)
-	}
-	UpdateRuntimeState(func(snap *DaemonRuntimeSnapshot) {
-		snap.RecentEvents = append(snap.RecentEvents, ev)
-	})
+	defaultStateStore.AppendEvent(ev)
 }
 
 var (
@@ -116,19 +157,16 @@ var (
 	ruleSetLogLineRe  = regexp.MustCompile(`^([0-9/]+ [0-9:]+) \[INFO\] \[RuleSet\] Background silent refresh completed: (.*)$`)
 )
 
-// backfillRecentEventsFromDaemonLog 在状态快照尚无事件时，从已有 daemon.log 尾部提取历史看门狗事件。
 func backfillRecentEventsFromDaemonLog(logPath string, limit int) []WatchdogEventRecord {
 	data, err := os.ReadFile(logPath)
 	if err != nil || len(data) == 0 {
 		return nil
 	}
-	// 仅扫描文件末尾最多 128KB，避免大文件开销
 	if len(data) > 128*1024 {
 		data = data[len(data)-128*1024:]
 	}
-	lines := strings.Split(string(data), "\n")
 	var out []WatchdogEventRecord
-	for _, raw := range lines {
+	for raw := range strings.SplitSeq(string(data), "\n") {
 		line := strings.TrimSpace(raw)
 		if line == "" {
 			continue
@@ -138,11 +176,7 @@ func backfillRecentEventsFromDaemonLog(logPath string, limit int) []WatchdogEven
 			healthy := healthyStr == "true" || action == "GROUP_FAILBACK" || (action == "SUB_SYNC" && !strings.Contains(res, "rolled back"))
 			summary := res
 			if summary == "" || summary == "-" {
-				if detail != "" {
-					summary = detail
-				} else {
-					summary = reason
-				}
+				summary = cmp.Or(detail, reason)
 			}
 			out = append(out, WatchdogEventRecord{
 				Time:    ts,

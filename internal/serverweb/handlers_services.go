@@ -1,10 +1,10 @@
+// 文件职责：提供受管服务启停重载、平滑自升级、实时日志 SSE 流与配置文件两阶段原子预检回滚编辑接口。
 package serverweb
 
 import (
 	"bufio"
 	"cmp"
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -15,19 +15,20 @@ import (
 	"strings"
 	"time"
 
+	"singctl/internal/common/fsx"
+	"singctl/internal/common/httpx"
 	"singctl/internal/component"
 	"singctl/internal/deploy"
 	"singctl/internal/updater"
-	"singctl/internal/util/file"
 )
 
 func (s *Server) handleServiceAction(w http.ResponseWriter, r *http.Request) {
-	var body struct {
+	type reqBody struct {
 		Service string `json:"service"`
 		Action  string `json:"action"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "无效的 JSON 请求")
+	body, ok := decodeBodyJSON[reqBody](w, r, httpx.DefaultMaxBodyBytes, false, "无效的 JSON 请求")
+	if !ok {
 		return
 	}
 
@@ -99,10 +100,14 @@ func (s *Server) handleCheckServiceUpdate(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleUpgradeService(w http.ResponseWriter, r *http.Request) {
-	var body struct {
+	type reqBody struct {
 		Service string `json:"service"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.Service) == "" {
+	body, ok := decodeBodyJSON[reqBody](w, r, httpx.DefaultMaxBodyBytes, false, "缺少升级目标服务名称")
+	if !ok {
+		return
+	}
+	if strings.TrimSpace(body.Service) == "" {
 		writeJSONError(w, http.StatusBadRequest, "缺少升级目标服务名称")
 		return
 	}
@@ -185,11 +190,11 @@ func (s *Server) handleUpgradeService(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
-	var body struct {
+	type reqBody struct {
 		Action string `json:"action"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "无效的 JSON 请求")
+	body, ok := decodeBodyJSON[reqBody](w, r, httpx.DefaultMaxBodyBytes, false, "无效的 JSON 请求")
+	if !ok {
 		return
 	}
 
@@ -210,9 +215,8 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleServiceLogs(w http.ResponseWriter, r *http.Request) {
 	service := strings.TrimSpace(r.URL.Query().Get("service"))
-	linesStr := strings.TrimSpace(r.URL.Query().Get("lines"))
 	lines := 100
-	if n, err := strconv.Atoi(linesStr); err == nil && n > 0 && n <= 500 {
+	if n, err := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("lines"))); err == nil && n > 0 && n <= 500 {
 		lines = n
 	}
 
@@ -250,7 +254,6 @@ func (s *Server) handleLogsSSE(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid service", http.StatusBadRequest)
 		return
 	}
-	unitName := comp.UnitName()
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -262,7 +265,7 @@ func (s *Server) handleLogsSSE(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	cmd := exec.CommandContext(r.Context(), "journalctl", "-u", unitName, "-n", "80", "-f", "--no-pager")
+	cmd := exec.CommandContext(r.Context(), "journalctl", "-u", comp.UnitName(), "-n", "80", "-f", "--no-pager")
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		fmt.Fprintf(w, "data: 读取日志失败: %v\n\n", err)
@@ -277,8 +280,7 @@ func (s *Server) handleLogsSSE(w http.ResponseWriter, r *http.Request) {
 
 	scanner := bufio.NewScanner(stdout)
 	for scanner.Scan() {
-		line := scanner.Text()
-		fmt.Fprintf(w, "data: %s\n\n", line)
+		fmt.Fprintf(w, "data: %s\n\n", scanner.Text())
 		flusher.Flush()
 	}
 	_ = cmd.Wait()
@@ -315,6 +317,7 @@ func (s *Server) handleServiceConfig(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// WriteConfigBackup 以 0600 权限备份历史配置文件并仅保留最近 3 份快照。
 func WriteConfigBackup(path string, content []byte) error {
 	bak := fmt.Sprintf("%s.%d.bak", path, time.Now().UnixNano())
 	if err := os.WriteFile(bak, content, 0600); err != nil {
@@ -353,12 +356,12 @@ func pruneConfigBackups(path string, keep int) {
 }
 
 func (s *Server) handleUpdateServiceConfig(w http.ResponseWriter, r *http.Request) {
-	var body struct {
+	type reqBody struct {
 		Service string `json:"service"`
 		Content string `json:"content"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "无效的请求格式")
+	body, ok := decodeBodyJSON[reqBody](w, r, httpx.DefaultMaxBodyBytes, false, "无效的请求格式")
+	if !ok {
 		return
 	}
 
@@ -385,10 +388,7 @@ func (s *Server) handleUpdateServiceConfig(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	sbOverride := ""
-	if s != nil {
-		sbOverride = s.singBoxBinOverride
-	}
+	sbOverride := s.snapshotDeps().SingBoxBin
 	if valErr := cfgComp.ValidateConfig(r.Context(), content, s.activeCmdRunner(), sbOverride); valErr != nil {
 		writeJSONError(w, http.StatusBadRequest, valErr.Error())
 		return
@@ -405,22 +405,22 @@ func (s *Server) handleUpdateServiceConfig(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	if err := writeConfigAtomically(target.PrimaryPath, []byte(content), target.FileMode); err != nil {
+	if err := fsx.WriteAtomic(target.PrimaryPath, []byte(content), target.FileMode); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "保存配置文件失败: "+err.Error())
 		return
 	}
 	for _, mp := range target.MirrorPaths {
 		if _, exists := oldMirrors[mp]; exists {
-			_ = writeConfigAtomically(mp, []byte(content), target.FileMode)
+			_ = fsx.WriteAtomic(mp, []byte(content), target.FileMode)
 		}
 	}
 	cfgComp.ApplyOwnership(target.PrimaryPath)
 
 	reloadErr := cfgComp.ReloadAfterSave(context.Background(), target.PrimaryPath, s.serviceMgr(), s.activeCmdRunner(), s.canRunSystemctl())
 	if reloadErr != nil && hadOld == nil {
-		_ = writeConfigAtomically(target.PrimaryPath, oldBytes, target.FileMode)
+		_ = fsx.WriteAtomic(target.PrimaryPath, oldBytes, target.FileMode)
 		for mp, prev := range oldMirrors {
-			_ = writeConfigAtomically(mp, prev, target.FileMode)
+			_ = fsx.WriteAtomic(mp, prev, target.FileMode)
 		}
 		_ = cfgComp.ReloadAfterSave(context.Background(), target.PrimaryPath, s.serviceMgr(), s.activeCmdRunner(), s.canRunSystemctl())
 		writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("服务 %s 重载失败 (%v)，已自动回滚至原配置确保不断连", service, reloadErr))
@@ -431,8 +431,4 @@ func (s *Server) handleUpdateServiceConfig(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, map[string]string{
 		"message": fmt.Sprintf("服务 %s 配置文件已通过预检、安全保存并重新加载", service),
 	})
-}
-
-func writeConfigAtomically(path string, data []byte, mode os.FileMode) error {
-	return file.WriteAtomic(path, data, mode)
 }

@@ -5,7 +5,7 @@ import { useCachedQuery } from '../../../hooks';
 import { clientApi } from '../../api';
 import { GATEWAY_CACHE_KEY } from '../../cacheKeys';
 import { DNSLeakTestCard } from '../../components/DNSLeakTestCard';
-import { maskFullIP } from '../../lib/privacyMask';
+import { maskFullIP } from '../../../lib/privacyMask';
 import {
   ClientGatewayConfigResponse,
   ClientStatusResponse,

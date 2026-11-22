@@ -1,12 +1,12 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { ServerStatusResponse } from './types';
+import { SERVER_TAB_KEYS, ServerStatusResponse, TabKey } from './types';
 import { ApiError, api, setOnUnauthorized } from './api';
 import { clearCachedQuery, useHashRoute, useVisibilityInterval } from '../hooks';
 import { ToastProvider, CardSkeleton, lazyWithReload, useToast } from '../ui';
-import { Header } from './components/Header';
-import { Navigation, SERVER_TAB_KEYS, TabKey } from './components/Navigation';
-import { OverviewTab } from './components/OverviewTab';
-import { LoginModal } from './components/LoginModal';
+import { Header } from './shell/Header';
+import { Navigation } from './shell/Navigation';
+import { OverviewTab } from './pages/OverviewTab';
+import { LoginModal } from './shell/LoginModal';
 import {
   prefetchFleetTab,
   prefetchSecurityTab,
@@ -16,35 +16,35 @@ import {
 import { Activity, RefreshCw, WifiOff } from 'lucide-react';
 
 const ServicesTab = lazyWithReload(
-  () => import('./components/ServicesTab').then((m) => ({ default: m.ServicesTab })),
+  () => import('./pages/ServicesTab').then((m) => ({ default: m.ServicesTab })),
   'server-services',
 );
 const SubscriptionsTab = lazyWithReload(
-  () => import('./components/SubscriptionsTab').then((m) => ({ default: m.SubscriptionsTab })),
+  () => import('./pages/SubscriptionsTab').then((m) => ({ default: m.SubscriptionsTab })),
   'server-subscriptions',
 );
 const FleetTab = lazyWithReload(
-  () => import('./components/FleetTab').then((m) => ({ default: m.FleetTab })),
+  () => import('./pages/FleetTab').then((m) => ({ default: m.FleetTab })),
   'server-fleet',
 );
 const LogsTab = lazyWithReload(
-  () => import('./components/LogsTab').then((m) => ({ default: m.LogsTab })),
+  () => import('./pages/LogsTab').then((m) => ({ default: m.LogsTab })),
   'server-logs',
 );
 const DiagnosticsTab = lazyWithReload(
-  () => import('./components/DiagnosticsTab').then((m) => ({ default: m.DiagnosticsTab })),
+  () => import('./pages/DiagnosticsTab').then((m) => ({ default: m.DiagnosticsTab })),
   'server-diagnostics',
 );
 const SecurityTab = lazyWithReload(
-  () => import('./components/SecurityTab').then((m) => ({ default: m.SecurityTab })),
+  () => import('./pages/SecurityTab').then((m) => ({ default: m.SecurityTab })),
   'server-security',
 );
 const CamouflageTab = lazyWithReload(
-  () => import('./components/CamouflageTab').then((m) => ({ default: m.CamouflageTab })),
+  () => import('./pages/CamouflageTab').then((m) => ({ default: m.CamouflageTab })),
   'server-camouflage',
 );
 const WarpTab = lazyWithReload(
-  () => import('./components/WarpTab').then((m) => ({ default: m.WarpTab })),
+  () => import('./pages/WarpTab').then((m) => ({ default: m.WarpTab })),
   'server-warp',
 );
 
@@ -57,10 +57,10 @@ const KEEP_ALIVE_PREFETCHERS: Partial<Record<TabKey, () => void>> = {
 };
 
 const HOVER_CHUNK_WARMERS: Partial<Record<TabKey, () => void>> = {
-  services: () => { void import('./components/ServicesTab'); },
-  logs: () => { void import('./components/LogsTab'); },
-  diagnostics: () => { void import('./components/DiagnosticsTab'); },
-  camouflage: () => { void import('./components/CamouflageTab'); },
+  services: () => { void import('./pages/ServicesTab'); },
+  logs: () => { void import('./pages/LogsTab'); },
+  diagnostics: () => { void import('./pages/DiagnosticsTab'); },
+  camouflage: () => { void import('./pages/CamouflageTab'); },
 };
 
 const DashboardContent: React.FC = () => {

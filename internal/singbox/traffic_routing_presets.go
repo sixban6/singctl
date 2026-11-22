@@ -2,9 +2,10 @@
 package singbox
 
 import (
-	"encoding/json"
 	"slices"
 	"strings"
+
+	"singctl/internal/singbox/sboption"
 )
 
 // TrafficCategoryInfo 描述客户端智能分流的分组分类元信息。
@@ -413,31 +414,28 @@ func InspectClientRoutingOutbounds(rawJSON string) (groups []ClientRoutingGroupI
 	if strings.TrimSpace(rawJSON) == "" {
 		return DefaultClientRoutingGroups(), directTag
 	}
-	var doc map[string]any
-	if err := json.Unmarshal([]byte(rawJSON), &doc); err != nil {
+	doc, err := sboption.ParseDocument([]byte(rawJSON))
+	if err != nil {
 		return DefaultClientRoutingGroups(), directTag
 	}
-	return inspectOutboundsFromMap(doc)
+	return inspectOutboundsFromDoc(doc)
 }
 
-func inspectOutboundsFromMap(doc map[string]any) (groups []ClientRoutingGroupInfo, directTag string) {
+func inspectOutboundsFromDoc(doc *sboption.Document) (groups []ClientRoutingGroupInfo, directTag string) {
 	directTag = "#DC"
-	rawOutbounds, _ := doc["outbounds"].([]any)
+	if doc == nil {
+		return DefaultClientRoutingGroups(), directTag
+	}
 	seen := make(map[string]bool)
 	firstDirect := ""
 	hasHashDC := false
 
-	for _, item := range rawOutbounds {
-		om, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
-		typ, _ := om["type"].(string)
-		tag := strings.TrimSpace(stringField(om, "tag"))
+	for _, ob := range doc.Outbounds {
+		tag := strings.TrimSpace(ob.Tag)
 		if tag == "" {
 			continue
 		}
-		switch typ {
+		switch ob.Type {
 		case "direct":
 			if tag == "#DC" {
 				hasHashDC = true
@@ -450,13 +448,11 @@ func inspectOutboundsFromMap(doc map[string]any) (groups []ClientRoutingGroupInf
 				continue
 			}
 			seen[tag] = true
-			defTag := strings.TrimSpace(stringField(om, "default"))
-			memberList, _ := om["outbounds"].([]any)
 			groups = append(groups, ClientRoutingGroupInfo{
 				Tag:     tag,
-				Type:    typ,
-				Default: defTag,
-				Count:   len(memberList),
+				Type:    ob.Type,
+				Default: strings.TrimSpace(ob.Default),
+				Count:   len(ob.Outbounds),
 			})
 		}
 	}

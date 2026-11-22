@@ -2,18 +2,16 @@
 package terminal
 
 import (
-	"archive/tar"
-	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
+	"singctl/internal/common/release"
 	"singctl/internal/config"
 	"singctl/internal/logger"
 	"singctl/internal/platform/servicemgr"
@@ -109,57 +107,11 @@ func installWstunnel(cfg *config.Config, arch string) error {
 
 func downloadAndExtractTarGzBinary(url, targetBinName, destPath, label string) error {
 	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Get(url)
-	if err != nil {
-		return fmt.Errorf("下载 %s 失败: %w", label, err)
+	if err := release.DownloadAndExtractBinary(context.Background(), client, url, "", targetBinName, destPath); err != nil {
+		return fmt.Errorf("下载并安装 %s 失败: %w", label, err)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("下载 %s 返回状态码 %d", label, resp.StatusCode)
-	}
-
-	gzReader, err := gzip.NewReader(resp.Body)
-	if err != nil {
-		return fmt.Errorf("解压 gzip 失败: %w", err)
-	}
-	defer gzReader.Close()
-
-	tarReader := tar.NewReader(gzReader)
-	for {
-		header, err := tarReader.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return fmt.Errorf("读取 tar 失败: %w", err)
-		}
-
-		if header.Name == targetBinName || filepath.Base(header.Name) == targetBinName {
-			tmpBinary := destPath + ".tmp"
-			outFile, err := os.OpenFile(tmpBinary, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
-			if err != nil {
-				return fmt.Errorf("写入临时 %s 二进制失败: %w", targetBinName, err)
-			}
-			_, copyErr := io.Copy(outFile, tarReader)
-			outFile.Close()
-			if copyErr != nil {
-				_ = os.Remove(tmpBinary)
-				return fmt.Errorf("保存 %s 失败: %w", targetBinName, copyErr)
-			}
-			_ = os.Chmod(tmpBinary, 0755)
-			if err := os.Rename(tmpBinary, destPath); err != nil {
-				_ = os.Remove(destPath)
-				if err := os.Rename(tmpBinary, destPath); err != nil {
-					return fmt.Errorf("安装 %s 二进制失败: %w", targetBinName, err)
-				}
-			}
-			logger.Success("%s 二进制已成功安装至 %s", label, destPath)
-			return nil
-		}
-	}
-
-	return fmt.Errorf("在下载包中未找到 %s 可执行文件", targetBinName)
+	logger.Success("%s 二进制已成功安装至 %s", label, destPath)
+	return nil
 }
 
 func createGottySystemdService(port int, termPath, tmuxPath string) error {

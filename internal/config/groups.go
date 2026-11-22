@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"singctl/internal/util/file"
+	"singctl/internal/common/fsx"
 
 	"gopkg.in/yaml.v3"
 )
@@ -542,7 +542,7 @@ func SaveGroupsFile(path string, content []byte) (*GroupsConfig, error) {
 	if len(out) > 0 && out[len(out)-1] != '\n' {
 		out = append(slices.Clone(out), '\n')
 	}
-	if err := file.WriteAtomic0600(clean, out); err != nil {
+	if err := fsx.WriteAtomic0600(clean, out); err != nil {
 		return nil, fmt.Errorf("保存 %s 失败: %w", clean, err)
 	}
 	return parsed, nil

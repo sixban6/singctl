@@ -1,3 +1,4 @@
+// 文件职责：提供客户端 WebUI 流式 CLI 动作白名单编排、实例级并发互斥锁与 NDJSON 实时输出器。
 package webui
 
 import (
@@ -7,7 +8,6 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"singctl/internal/tailscale"
@@ -137,8 +137,12 @@ func paramBool(p map[string]any, key string) bool {
 	return false
 }
 
-// busyFlag 原子标记当前是否有动作在执行
-var busyFlag atomic.Bool
+func (s *Server) resolveExecutable() (string, error) {
+	if exe := strings.TrimSpace(s.opts.ExecutablePath); exe != "" {
+		return exe, nil
+	}
+	return resolveOnDiskExecutable()
+}
 
 // handleAction 执行动作并以 NDJSON 流式返回输出
 //
@@ -163,14 +167,14 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 同一时刻只允许一个动作
-	if !busyFlag.CompareAndSwap(false, true) {
+	// 同一服务实例同一时刻只允许一个动作
+	if !s.actionBusy.CompareAndSwap(false, true) {
 		writeJSONError(w, http.StatusConflict, "已有任务在执行中,请稍候")
 		return
 	}
-	defer busyFlag.Store(false)
+	defer s.actionBusy.Store(false)
 
-	exe, err := resolveOnDiskExecutable()
+	exe, err := s.resolveExecutable()
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "定位 singctl 可执行文件失败: "+err.Error())
 		return
@@ -238,6 +242,11 @@ func NewNDJSONWriter(w http.ResponseWriter) *ndjsonWriter {
 		flush = f.Flush
 	}
 	return &ndjsonWriter{w: w, flush: flush}
+}
+
+// SawTailscaleSwapHandoff 返回是否检测到 Tailscale 零失联热切换接力标记。
+func (nw *ndjsonWriter) SawTailscaleSwapHandoff() bool {
+	return nw != nil && nw.sawTailscaleSwapHandoff
 }
 
 func (nw *ndjsonWriter) write(v any) {

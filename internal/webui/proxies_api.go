@@ -1,4 +1,4 @@
-// 文件职责：提供客户端 WebUI 策略组拓扑快照构建、节点手动切换、并发延迟测速与运行模式切换接口。
+// 文件职责：提供客户端 WebUI 策略组拓扑快照构建、节点手动切换、并发延迟测速与运行模式切换接口（委托 clashapi）。
 package webui
 
 import (
@@ -7,37 +7,33 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
-	"net/url"
 	"os"
-	"singctl/internal/daemon"
-	"singctl/internal/singbox"
 	"slices"
 	"strings"
-	"sync"
 	"time"
+
+	"singctl/internal/daemon"
+	"singctl/internal/singbox"
+	"singctl/internal/singbox/clashapi"
+)
+
+const (
+	trafficIdleStopWindow   = 15 * time.Second
+	trafficCacheFreshWindow = 4 * time.Second
+	trafficMemRetryCooldown = 5 * time.Minute
 )
 
 func (s *Server) buildSbProxiesSnapshot(ctx context.Context, base, secret string) (SbProxiesSnapshot, error) {
-	code, rawProxies, err := doClashRequest(ctx, sharedClashHTTPClient, http.MethodGet, base+"/proxies", secret, nil)
-	if err != nil || code != http.StatusOK {
-		if err == nil {
-			err = fmt.Errorf("clash /proxies returned HTTP %d", code)
-		}
+	cli := s.clashClient()
+	proxies, err := cli.ProxiesAt(ctx, base, secret)
+	if err != nil {
 		return SbProxiesSnapshot{}, err
-	}
-	var proxiesDoc sbClashProxiesResp
-	if err := json.Unmarshal(rawProxies, &proxiesDoc); err != nil {
-		return SbProxiesSnapshot{}, fmt.Errorf("parse clash /proxies: %w", err)
 	}
 
 	mode := "rule"
-	if cCode, rawCfg, cErr := doClashRequest(ctx, sharedClashHTTPClient, http.MethodGet, base+"/configs", secret, nil); cErr == nil && cCode == http.StatusOK {
-		var cfgDoc sbClashConfigsResp
-		if json.Unmarshal(rawCfg, &cfgDoc) == nil && strings.TrimSpace(cfgDoc.Mode) != "" {
-			mode = strings.ToLower(strings.TrimSpace(cfgDoc.Mode))
-		}
+	if m, mErr := cli.ModeAt(ctx, base, secret); mErr == nil && m != "" {
+		mode = m
 	}
 
 	usageMap := s.buildRoutingGroupUsageMap()
@@ -49,23 +45,22 @@ func (s *Server) buildSbProxiesSnapshot(ctx context.Context, base, secret string
 	var groups []SbProxyGroup
 	referencedNodes := make(map[string]bool)
 
-	for name, item := range proxiesDoc.Proxies {
-		if !isClashProxyGroupType(item.Type) {
+	for name, item := range proxies {
+		if !clashapi.IsProxyGroupType(item.Type) {
 			continue
 		}
 		if strings.EqualFold(name, "GLOBAL") && !strings.EqualFold(mode, "global") {
 			continue
 		}
 
-		chain, leaf, leafDelay := resolveProxyOutboundChain(proxiesDoc.Proxies, item.Now)
+		chain, leaf, leafDelay := clashapi.ResolveOutboundChain(proxies, item.Now)
 		usedBy := usageMap[name]
 		act, hasFailover := failoverMap[name]
-		// 若用户已在 Clash 中手动切换到其他节点，不展示陈旧的容灾徽章
 		isFailedOver := hasFailover && strings.TrimSpace(item.Now) != "" && act.Current == item.Now
 
 		groups = append(groups, SbProxyGroup{
 			Name:          name,
-			Type:          canonicalGroupType(item.Type),
+			Type:          clashapi.CanonicalGroupType(item.Type),
 			CanSelect:     strings.EqualFold(item.Type, "Selector"),
 			Now:           item.Now,
 			ResolvedChain: chain,
@@ -99,12 +94,12 @@ func (s *Server) buildSbProxiesSnapshot(ctx context.Context, base, secret string
 
 	nodes := make(map[string]SbProxyNodeMeta, len(referencedNodes))
 	for name := range referencedNodes {
-		raw, ok := proxiesDoc.Proxies[name]
+		raw, ok := proxies[name]
 		if !ok {
 			nodes[name] = SbProxyNodeMeta{Name: name, Type: "Unknown"}
 			continue
 		}
-		delay, tested := latestProxyDelay(raw)
+		delay, tested := clashapi.LatestProxyDelay(raw)
 		nodes[name] = SbProxyNodeMeta{
 			Name:   name,
 			Type:   raw.Type,
@@ -144,30 +139,6 @@ func (s *Server) buildRoutingGroupUsageMap() map[string][]string {
 	return out
 }
 
-func isClashProxyGroupType(typ string) bool {
-	switch strings.ToLower(strings.TrimSpace(typ)) {
-	case "selector", "urltest", "fallback", "loadbalance":
-		return true
-	default:
-		return false
-	}
-}
-
-func canonicalGroupType(typ string) string {
-	switch strings.ToLower(strings.TrimSpace(typ)) {
-	case "selector":
-		return "Selector"
-	case "urltest":
-		return "URLTest"
-	case "fallback":
-		return "Fallback"
-	case "loadbalance":
-		return "LoadBalance"
-	default:
-		return typ
-	}
-}
-
 func groupSortWeight(name, typ, mode string) int {
 	if strings.EqualFold(name, "GLOBAL") {
 		if strings.EqualFold(mode, "global") {
@@ -193,61 +164,6 @@ func groupSortWeight(name, typ, mode string) int {
 		return 20
 	}
 	return 30
-}
-
-func latestProxyDelay(item sbProxyRawItem) (int, bool) {
-	if len(item.History) == 0 {
-		return 0, false
-	}
-	last := item.History[len(item.History)-1]
-	if last.Delay > 0 {
-		return last.Delay, true
-	}
-	return 0, true
-}
-
-func resolveProxyOutboundChain(proxies map[string]sbProxyRawItem, initialNow string) (chain []string, leaf string, delay int) {
-	cur := strings.TrimSpace(initialNow)
-	if cur == "" {
-		return nil, "", 0
-	}
-	seen := make(map[string]bool, 8)
-	for range 8 {
-		if cur == "" || seen[cur] {
-			break
-		}
-		seen[cur] = true
-		chain = append(chain, cur)
-
-		item, ok := proxies[cur]
-		if !ok || !isClashProxyGroupType(item.Type) {
-			leaf = cur
-			break
-		}
-		next := strings.TrimSpace(item.Now)
-		if next == "" {
-			leaf = cur
-			break
-		}
-		cur = next
-	}
-	if leaf == "" && len(chain) > 0 {
-		leaf = chain[len(chain)-1]
-	}
-	if leaf != "" {
-		if d, ok := latestProxyDelay(proxies[leaf]); ok && d > 0 {
-			delay = d
-		}
-	}
-	if delay == 0 {
-		for i := len(chain) - 1; i >= 0; i-- {
-			if d, ok := latestProxyDelay(proxies[chain[i]]); ok && d > 0 {
-				delay = d
-				break
-			}
-		}
-	}
-	return chain, leaf, delay
 }
 
 func pickPrimaryGroupSummary(groups []SbProxyGroup, mode string) (groupName, nodeName string, delay int) {
@@ -298,6 +214,13 @@ func ternaryStr(cond bool, a, b string) string {
 		return a
 	}
 	return b
+}
+
+func formatClashCallErr(prefix string, err error) string {
+	if se, ok := errors.AsType[*clashapi.StatusError](err); ok {
+		return fmt.Sprintf("%s (HTTP %d): %s", prefix, se.StatusCode, se.Body)
+	}
+	return fmt.Sprintf("%s: %v", prefix, err)
 }
 
 func (s *Server) handleSbProxiesGet(w http.ResponseWriter, r *http.Request) {
@@ -352,18 +275,14 @@ func (s *Server) handleSbProxySwitchPut(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	code, rawProxies, err := doClashRequest(ctx, sharedClashHTTPClient, http.MethodGet, base+"/proxies", secret, nil)
-	if err != nil || code != http.StatusOK {
+	cli := s.clashClient()
+	proxies, err := cli.ProxiesAt(ctx, base, secret)
+	if err != nil {
 		writeJSONError(w, http.StatusBadGateway, "读取策略组信息失败")
 		return
 	}
-	var proxiesDoc sbClashProxiesResp
-	if err := json.Unmarshal(rawProxies, &proxiesDoc); err != nil {
-		writeJSONError(w, http.StatusBadGateway, "解析策略组信息失败")
-		return
-	}
 
-	grp, exists := proxiesDoc.Proxies[group]
+	grp, exists := proxies[group]
 	if !exists {
 		writeJSONError(w, http.StatusNotFound, fmt.Sprintf("策略组「%s」不存在", group))
 		return
@@ -377,18 +296,11 @@ func (s *Server) handleSbProxySwitchPut(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	putURL := fmt.Sprintf("%s/proxies/%s", base, url.PathEscape(group))
-	putCode, putBody, putErr := doClashRequest(ctx, sharedClashHTTPClient, http.MethodPut, putURL, secret, map[string]string{"name": target})
-	if putErr != nil || putCode < 200 || putCode >= 300 {
-		msg := strings.TrimSpace(string(putBody))
-		if putErr != nil {
-			msg = putErr.Error()
-		}
-		writeJSONError(w, http.StatusBadGateway, fmt.Sprintf("切换节点失败 (HTTP %d): %s", putCode, msg))
+	if putErr := cli.SwitchSelectorAt(ctx, base, secret, group, target); putErr != nil {
+		writeJSONError(w, http.StatusBadGateway, formatClashCallErr("切换节点失败", putErr))
 		return
 	}
 
-	// 仅当看门狗快照中确实存在该组的过时容灾记录时再写入状态文件，保持界面一致同时避免冗余落盘
 	for _, act := range daemon.LoadRuntimeSnapshot().ActiveFailovers {
 		if act.Group == group && act.Current != target {
 			daemon.UpdateRuntimeState(func(snap *daemon.DaemonRuntimeSnapshot) {
@@ -445,15 +357,15 @@ func (s *Server) handleSbProxyDelayPost(w http.ResponseWriter, r *http.Request) 
 
 	testURL := strings.TrimSpace(body.URL)
 	if testURL == "" {
-		testURL = defaultClashDelayURL
-	} else if err := validateProbeURL(testURL); err != nil {
+		testURL = clashapi.DefaultDelayProbeURL
+	} else if err := clashapi.ValidateProbeURL(testURL); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	timeoutMs := body.TimeoutMs
 	if timeoutMs <= 0 {
-		timeoutMs = defaultClashDelayTimeout
+		timeoutMs = clashapi.DefaultDelayTimeoutMs
 	}
 	timeoutMs = min(8000, max(500, timeoutMs))
 
@@ -466,93 +378,14 @@ func (s *Server) handleSbProxyDelayPost(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	var targets []string
-	if node != "" {
-		if isUtilityDirectOrBlockTag(node) {
-			writeJSONError(w, http.StatusBadRequest, "内置直连/阻断出站不支持测速")
-			return
-		}
-		targets = []string{node}
-	} else {
-		code, rawProxies, err := doClashRequest(ctx, sharedClashHTTPClient, http.MethodGet, base+"/proxies", secret, nil)
-		if err != nil || code != http.StatusOK {
-			writeJSONError(w, http.StatusBadGateway, "获取节点列表失败")
-			return
-		}
-		var proxiesDoc sbClashProxiesResp
-		if err := json.Unmarshal(rawProxies, &proxiesDoc); err != nil {
-			writeJSONError(w, http.StatusBadGateway, "解析节点列表失败")
-			return
-		}
-
-		seen := make(map[string]bool)
-		addTarget := func(name string) {
-			name = strings.TrimSpace(name)
-			if name == "" || seen[name] || isUtilityDirectOrBlockTag(name) {
-				return
-			}
-			seen[name] = true
-			targets = append(targets, name)
-		}
-
-		if group == "__all__" {
-			for gName, item := range proxiesDoc.Proxies {
-				if !isClashProxyGroupType(item.Type) || strings.EqualFold(gName, "GLOBAL") {
-					continue
-				}
-				for _, child := range item.All {
-					if cItem, ok := proxiesDoc.Proxies[child]; ok && isClashProxyGroupType(cItem.Type) {
-						continue
-					}
-					addTarget(child)
-				}
-			}
-			// 兜底：若某些分组仅包含子分组，也纳入子分组探测
-			for gName, item := range proxiesDoc.Proxies {
-				if isClashProxyGroupType(item.Type) && !strings.EqualFold(gName, "GLOBAL") {
-					addTarget(gName)
-				}
-			}
-		} else {
-			grp, exists := proxiesDoc.Proxies[group]
-			if !exists {
-				writeJSONError(w, http.StatusNotFound, fmt.Sprintf("策略组「%s」不存在", group))
-				return
-			}
-			for _, child := range grp.All {
-				addTarget(child)
-			}
-		}
+	cli := s.clashClient()
+	targets, statusCode, errMsg := collectDelayTargets(ctx, cli, base, secret, group, node)
+	if statusCode != 0 {
+		writeJSONError(w, statusCode, errMsg)
+		return
 	}
 
-	delays := make(map[string]int, len(targets))
-	if len(targets) > 0 {
-		httpClient := sharedClashStreamClient
-		jobs := make(chan string, len(targets))
-		for _, t := range targets {
-			jobs <- t
-		}
-		close(jobs)
-
-		var mu sync.Mutex
-		var wg sync.WaitGroup
-		workers := min(maxClashDelayConcurrency, len(targets))
-		for range workers {
-			wg.Go(func() {
-				for targetName := range jobs {
-					if ctx.Err() != nil {
-						return
-					}
-					delay := probeSingleClashNodeDelay(ctx, httpClient, base, secret, targetName, testURL, timeoutMs)
-					mu.Lock()
-					delays[targetName] = delay
-					mu.Unlock()
-				}
-			})
-		}
-		wg.Wait()
-	}
-
+	delays := cli.ProbeDelaysBatchAt(ctx, base, secret, targets, testURL, timeoutMs, clashapi.DefaultDelayConcurrency)
 	okCount := 0
 	for _, d := range delays {
 		if d > 0 {
@@ -571,24 +404,58 @@ func (s *Server) handleSbProxyDelayPost(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
-func probeSingleClashNodeDelay(ctx context.Context, client *http.Client, base, secret, target, testURL string, timeoutMs int) int {
-	reqURL := fmt.Sprintf("%s/proxies/%s/delay?url=%s&timeout=%d",
-		base,
-		url.PathEscape(target),
-		url.QueryEscape(testURL),
-		timeoutMs,
-	)
-	code, raw, err := doClashRequest(ctx, client, http.MethodGet, reqURL, secret, nil)
-	if err != nil || code != http.StatusOK {
-		return 0
+func collectDelayTargets(ctx context.Context, cli *clashapi.Client, base, secret, group, node string) ([]string, int, string) {
+	if node != "" {
+		if isUtilityDirectOrBlockTag(node) {
+			return nil, http.StatusBadRequest, "内置直连/阻断出站不支持测速"
+		}
+		return []string{node}, 0, ""
 	}
-	var res struct {
-		Delay int `json:"delay"`
+
+	proxies, err := cli.ProxiesAt(ctx, base, secret)
+	if err != nil {
+		return nil, http.StatusBadGateway, "获取节点列表失败"
 	}
-	if json.Unmarshal(raw, &res) != nil || res.Delay <= 0 {
-		return 0
+
+	var targets []string
+	seen := make(map[string]bool)
+	addTarget := func(name string) {
+		name = strings.TrimSpace(name)
+		if name == "" || seen[name] || isUtilityDirectOrBlockTag(name) {
+			return
+		}
+		seen[name] = true
+		targets = append(targets, name)
 	}
-	return res.Delay
+
+	if group == "__all__" {
+		for gName, item := range proxies {
+			if !clashapi.IsProxyGroupType(item.Type) || strings.EqualFold(gName, "GLOBAL") {
+				continue
+			}
+			for _, child := range item.All {
+				if cItem, ok := proxies[child]; ok && clashapi.IsProxyGroupType(cItem.Type) {
+					continue
+				}
+				addTarget(child)
+			}
+		}
+		for gName, item := range proxies {
+			if clashapi.IsProxyGroupType(item.Type) && !strings.EqualFold(gName, "GLOBAL") {
+				addTarget(gName)
+			}
+		}
+		return targets, 0, ""
+	}
+
+	grp, exists := proxies[group]
+	if !exists {
+		return nil, http.StatusNotFound, fmt.Sprintf("策略组「%s」不存在", group)
+	}
+	for _, child := range grp.All {
+		addTarget(child)
+	}
+	return targets, 0, ""
 }
 
 func (s *Server) handleSbModePut(w http.ResponseWriter, r *http.Request) {
@@ -614,13 +481,8 @@ func (s *Server) handleSbModePut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	code, raw, err := doClashRequest(ctx, sharedClashHTTPClient, http.MethodPatch, base+"/configs", secret, map[string]string{"mode": mode})
-	if err != nil || code < 200 || code >= 300 {
-		msg := strings.TrimSpace(string(raw))
-		if err != nil {
-			msg = err.Error()
-		}
-		writeJSONError(w, http.StatusBadGateway, fmt.Sprintf("切换运行模式失败 (HTTP %d): %s", code, msg))
+	if patchErr := s.clashClient().PatchModeAt(ctx, base, secret, mode); patchErr != nil {
+		writeJSONError(w, http.StatusBadGateway, formatClashCallErr("切换运行模式失败", patchErr))
 		return
 	}
 
@@ -636,51 +498,4 @@ func (s *Server) handleSbModePut(w http.ResponseWriter, r *http.Request) {
 		"message":  "运行模式已切换为 " + modeLabel,
 		"snapshot": snapshot,
 	})
-}
-
-const (
-	trafficIdleStopWindow   = 15 * time.Second
-	trafficCacheFreshWindow = 4 * time.Second
-	trafficMemRetryCooldown = 5 * time.Minute
-)
-
-func validateProbeURL(raw string) error {
-	parsed, err := url.ParseRequestURI(raw)
-	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
-		return errors.New("测速 URL 必须为合法的 http/https 地址")
-	}
-	if parsed.User != nil {
-		return errors.New("测速 URL 不允许包含认证凭据")
-	}
-	host := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(parsed.Hostname()), "."))
-	if host == "" {
-		return errors.New("测速 URL 缺少合法主机名")
-	}
-	if host == "localhost" || strings.HasSuffix(host, ".localhost") || strings.HasSuffix(host, ".local") {
-		return errors.New("出于安全策略禁止测速本机或内网保留域名")
-	}
-	if ip := net.ParseIP(host); ip != nil && isBlockedProbeIP(ip) {
-		return errors.New("出于安全策略禁止测速回环、内网或链路本地 IP 地址")
-	}
-	return nil
-}
-
-func isBlockedProbeIP(ip net.IP) bool {
-	if ip == nil {
-		return true
-	}
-	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
-		return true
-	}
-	if ip4 := ip.To4(); ip4 != nil {
-		// CGNAT 100.64.0.0/10
-		if ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127 {
-			return true
-		}
-		// THIS-NET 0.0.0.0/8 & Benchmarking 198.18.0.0/15
-		if ip4[0] == 0 || (ip4[0] == 198 && (ip4[1] == 18 || ip4[1] == 19)) {
-			return true
-		}
-	}
-	return false
 }

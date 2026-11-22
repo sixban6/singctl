@@ -1,13 +1,13 @@
-// 文件职责：实现 /api/sb/traffic 按需低开销实时速率采样器及 Clash /connections 流式摘要解码。
+// 文件职责：实现 /api/sb/traffic 按需低开销实时速率采样器，流式解码与连接采样全部委托 clashapi。
 package webui
 
 import (
 	"context"
-	"encoding/json"
-	"io"
 	"net/http"
 	"sync"
 	"time"
+
+	"singctl/internal/singbox/clashapi"
 )
 
 func (s *Server) handleSbTrafficGet(w http.ResponseWriter, r *http.Request) {
@@ -39,13 +39,13 @@ func (s *Server) handleSbTrafficGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, snap)
 }
 
-func (s *Server) sampleClashTrafficOnce(parentCtx context.Context) sbTrafficResponse {
+func (s *Server) sampleClashTrafficOnce(parentCtx context.Context) SbTrafficResponse {
 	ctx, cancel := context.WithTimeout(parentCtx, 2200*time.Millisecond)
 	defer cancel()
 
 	base, secret, err := s.clashEndpointAndSecret(ctx)
 	if err != nil {
-		return sbTrafficResponse{
+		return SbTrafficResponse{
 			Running: false,
 			Error:   err.Error(),
 		}
@@ -55,6 +55,7 @@ func (s *Server) sampleClashTrafficOnce(parentCtx context.Context) sbTrafficResp
 	skipMem := time.Now().Before(s.trafficMemUnsupportedUntil)
 	s.trafficMu.Unlock()
 
+	cli := s.clashClient()
 	var (
 		connUp, connDown int64
 		connCount        int
@@ -66,12 +67,10 @@ func (s *Server) sampleClashTrafficOnce(parentCtx context.Context) sbTrafficResp
 		wg               sync.WaitGroup
 	)
 
-	// 1. 活跃连接总数与累计流量
 	wg.Go(func() {
-		connUp, connDown, connCount, connOK = fetchClashConnections(ctx, base, secret)
+		connUp, connDown, connCount, connOK = cli.ConnectionsSummaryAt(ctx, base, secret)
 	})
 
-	// 2. 瞬时上下行速率（Clash /traffic 为流式 NDJSON，读取首条后立即释放连接）
 	wg.Go(func() {
 		tickCtx, tickCancel := context.WithTimeout(ctx, 1400*time.Millisecond)
 		defer tickCancel()
@@ -79,14 +78,13 @@ func (s *Server) sampleClashTrafficOnce(parentCtx context.Context) sbTrafficResp
 			Up   int64 `json:"up"`
 			Down int64 `json:"down"`
 		}
-		if readFirstClashStreamObject(tickCtx, base+"/traffic", secret, &tick) {
+		if cli.ReadFirstStreamObjectAt(tickCtx, base, secret, "/traffic", &tick) {
 			rateUp = tick.Up
 			rateDown = tick.Down
 			tickOK = true
 		}
 	})
 
-	// 3. sing-box 内核内存占用（若内核不支持 /memory 则冷却退避，避免阻塞采样）
 	if !skipMem {
 		wg.Go(func() {
 			memCtx, memCancel := context.WithTimeout(ctx, 250*time.Millisecond)
@@ -94,7 +92,7 @@ func (s *Server) sampleClashTrafficOnce(parentCtx context.Context) sbTrafficResp
 			var mem struct {
 				Inuse int64 `json:"inuse"`
 			}
-			if readFirstClashStreamObject(memCtx, base+"/memory", secret, &mem) {
+			if cli.ReadFirstStreamObjectAt(memCtx, base, secret, "/memory", &mem) {
 				memInuse = mem.Inuse
 				memOK = true
 			}
@@ -115,13 +113,13 @@ func (s *Server) sampleClashTrafficOnce(parentCtx context.Context) sbTrafficResp
 
 	if !connOK && !tickOK {
 		s.invalidateClashCache()
-		return sbTrafficResponse{
+		return SbTrafficResponse{
 			Running: false,
-			Error:   errClashUnreachable.Error(),
+			Error:   clashapi.ErrUnreachable.Error(),
 		}
 	}
 
-	return sbTrafficResponse{
+	return SbTrafficResponse{
 		Running:       true,
 		Up:            rateUp,
 		Down:          rateDown,
@@ -151,7 +149,8 @@ func (s *Server) runTrafficSampler() {
 		s.trafficMu.Unlock()
 	}()
 
-	// 后台持续读取 Clash /traffic 流式 NDJSON 推送实时速率
+	cli := s.clashClient()
+
 	wg.Go(func() {
 		consecutiveFail := 0
 		for streamCtx.Err() == nil {
@@ -171,47 +170,24 @@ func (s *Server) runTrafficSampler() {
 				}
 			}
 
-			req, reqErr := http.NewRequestWithContext(streamCtx, http.MethodGet, base+"/traffic", nil)
-			if reqErr != nil {
-				return
-			}
-			if secret != "" {
-				req.Header.Set("Authorization", "Bearer "+secret)
-			}
-			resp, doErr := sharedClashStreamClient.Do(req)
-			if doErr != nil || resp.StatusCode != http.StatusOK {
-				if resp != nil {
-					_ = resp.Body.Close()
-				}
+			gotAny := false
+			streamErr := cli.StreamTrafficAt(streamCtx, base, secret, func(up, down int64) {
+				gotAny = true
+				s.trafficMu.Lock()
+				s.trafficState.Running = true
+				s.trafficState.Up = up
+				s.trafficState.Down = down
+				s.trafficSampledAt = time.Now()
+				s.trafficMu.Unlock()
+			})
+			if streamErr != nil && !gotAny {
 				consecutiveFail++
 				if consecutiveFail >= 2 {
 					return
 				}
-				select {
-				case <-streamCtx.Done():
-					return
-				case <-time.After(time.Second):
-					continue
-				}
+			} else {
+				consecutiveFail = 0
 			}
-			consecutiveFail = 0
-			dec := json.NewDecoder(resp.Body)
-			for streamCtx.Err() == nil {
-				var tick struct {
-					Up   int64 `json:"up"`
-					Down int64 `json:"down"`
-				}
-				if dec.Decode(&tick) != nil {
-					break
-				}
-				s.trafficMu.Lock()
-				s.trafficState.Running = true
-				s.trafficState.Up = tick.Up
-				s.trafficState.Down = tick.Down
-				s.trafficSampledAt = time.Now()
-				s.trafficMu.Unlock()
-			}
-			_ = resp.Body.Close()
 			select {
 			case <-streamCtx.Done():
 				return
@@ -242,7 +218,7 @@ func (s *Server) runTrafficSampler() {
 			consecutiveConnFail++
 			if consecutiveConnFail >= 2 {
 				s.trafficMu.Lock()
-				s.trafficState = sbTrafficResponse{Running: false, Error: err.Error()}
+				s.trafficState = SbTrafficResponse{Running: false, Error: err.Error()}
 				s.trafficSampledAt = time.Now()
 				s.trafficMu.Unlock()
 				return
@@ -250,14 +226,14 @@ func (s *Server) runTrafficSampler() {
 			continue
 		}
 
-		connUp, connDown, connCount, connOK := fetchClashConnections(ctx, base, secret)
+		connUp, connDown, connCount, connOK := cli.ConnectionsSummaryAt(ctx, base, secret)
 		if !connOK {
 			cancel()
 			consecutiveConnFail++
 			if consecutiveConnFail >= 2 {
 				s.invalidateClashCache()
 				s.trafficMu.Lock()
-				s.trafficState = sbTrafficResponse{Running: false, Error: errClashUnreachable.Error()}
+				s.trafficState = SbTrafficResponse{Running: false, Error: clashapi.ErrUnreachable.Error()}
 				s.trafficSampledAt = time.Now()
 				s.trafficMu.Unlock()
 				return
@@ -273,7 +249,7 @@ func (s *Server) runTrafficSampler() {
 			var mem struct {
 				Inuse int64 `json:"inuse"`
 			}
-			if readFirstClashStreamObject(memCtx, base+"/memory", secret, &mem) {
+			if cli.ReadFirstStreamObjectAt(memCtx, base, secret, "/memory", &mem) {
 				memInuse = mem.Inuse
 				hasMemUpdate = true
 			} else {
@@ -297,116 +273,4 @@ func (s *Server) runTrafficSampler() {
 		s.trafficSampledAt = time.Now()
 		s.trafficMu.Unlock()
 	}
-}
-
-func fetchClashConnections(ctx context.Context, base, secret string) (upTotal, downTotal int64, count int, ok bool) {
-	reqCtx, cancel := context.WithTimeout(ctx, 1200*time.Millisecond)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, base+"/connections", nil)
-	if err != nil {
-		return 0, 0, 0, false
-	}
-	if secret != "" {
-		req.Header.Set("Authorization", "Bearer "+secret)
-	}
-	resp, err := sharedClashStreamClient.Do(req)
-	if err != nil {
-		return 0, 0, 0, false
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		return 0, 0, 0, false
-	}
-	return decodeClashConnectionsSummary(io.LimitReader(resp.Body, 16<<20))
-}
-
-// decodeClashConnectionsSummary 流式统计 Clash /connections 中的累计上下行字节数与连接数组长度。
-// 性能优化原理：此前反序列化为 `Connections []any` 会为每秒数千条活跃连接的字段分配大量 map/slice 堆对象；
-// 本函数通过 json.Decoder + 复用同一块 json.RawMessage 缓冲区扫描数组元素，只统计数量与核心整数字段，
-// 在保持 100% 标准库 JSON 校验准确性的前提下将热点分配降至接近零。
-func decodeClashConnectionsSummary(r io.Reader) (upTotal, downTotal int64, count int, ok bool) {
-	dec := json.NewDecoder(r)
-	tok, err := dec.Token()
-	if err != nil || tok != json.Delim('{') {
-		return 0, 0, 0, false
-	}
-
-	var scratch json.RawMessage
-	for dec.More() {
-		keyTok, err := dec.Token()
-		if err != nil {
-			return 0, 0, 0, false
-		}
-		key, isStr := keyTok.(string)
-		if !isStr {
-			return 0, 0, 0, false
-		}
-		switch key {
-		case "uploadTotal":
-			if err := dec.Decode(&upTotal); err != nil {
-				return 0, 0, 0, false
-			}
-		case "downloadTotal":
-			if err := dec.Decode(&downTotal); err != nil {
-				return 0, 0, 0, false
-			}
-		case "connections":
-			arrTok, err := dec.Token()
-			if err != nil {
-				return 0, 0, 0, false
-			}
-			if arrTok == nil {
-				continue
-			}
-			if arrTok != json.Delim('[') {
-				return 0, 0, 0, false
-			}
-			for dec.More() {
-				scratch = scratch[:0]
-				if err := dec.Decode(&scratch); err != nil {
-					return 0, 0, 0, false
-				}
-				count++
-			}
-			endArr, err := dec.Token()
-			if err != nil || endArr != json.Delim(']') {
-				return 0, 0, 0, false
-			}
-		default:
-			scratch = scratch[:0]
-			if err := dec.Decode(&scratch); err != nil {
-				return 0, 0, 0, false
-			}
-		}
-	}
-
-	endObj, err := dec.Token()
-	if err != nil || endObj != json.Delim('}') {
-		return 0, 0, 0, false
-	}
-	if _, err := dec.Token(); err != io.EOF {
-		return 0, 0, 0, false
-	}
-	return upTotal, downTotal, count, true
-}
-
-func readFirstClashStreamObject(ctx context.Context, fullURL, secret string, dst any) bool {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fullURL, nil)
-	if err != nil {
-		return false
-	}
-	if secret != "" {
-		req.Header.Set("Authorization", "Bearer "+secret)
-	}
-	resp, err := sharedClashStreamClient.Do(req)
-	if err != nil {
-		return false
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return false
-	}
-	return json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(dst) == nil
 }

@@ -174,6 +174,21 @@ func (s *Store) Revision() uint64 {
 	return s.rev.Load()
 }
 
+// DiskParseCount 返回 Store 实际从磁盘读取并反序列化清单文件的累计次数（供缓存单测校验）。
+func (s *Store) DiskParseCount() int64 {
+	if s == nil {
+		return 0
+	}
+	return s.diskParseCount.Load()
+}
+
+// ResetDiskParseCount 重置磁盘解析计数器。
+func (s *Store) ResetDiskParseCount() {
+	if s != nil {
+		s.diskParseCount.Store(0)
+	}
+}
+
 // ResolveFleetFilePath resolves fleet.yaml alongside singctl.yaml.
 func ResolveFleetFilePath(configPath string) string {
 	if strings.TrimSpace(configPath) != "" {
@@ -229,6 +244,11 @@ func (s *Store) migrateLegacyJSONIfNeeded() {
 	if err := s.writeLocked(nodes); err == nil {
 		_ = os.Remove(legacyPath)
 	}
+}
+
+// ParseFleetBytes 解析 YAML 或旧版 JSON 格式的舰队节点清单原始字节。
+func ParseFleetBytes(raw []byte, sourcePath string) ([]Node, error) {
+	return parseFleetBytes(raw, sourcePath)
 }
 
 func parseFleetBytes(raw []byte, sourcePath string) ([]Node, error) {

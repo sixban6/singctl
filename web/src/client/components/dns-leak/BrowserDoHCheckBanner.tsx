@@ -2,7 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { Check, Copy, Monitor, RefreshCw } from 'lucide-react';
 import { Badge, Button, useToast } from '../../../ui';
 import { copyPlainText, detectBrowserDoHGuide } from '../../lib/leakProbes';
-import { maskFullIP, redactInlineSensitive } from '../../lib/privacyMask';
+import { maskFullIP, redactInlineSensitive } from '../../../lib/privacyMask';
 import { BrowserDoHCheckResponse } from '../../types';
 
 export interface BrowserDoHCheckBannerProps {

@@ -12,9 +12,9 @@ import {
   SbProxyMode,
   SbTrafficSnapshot,
 } from '../types';
-import { ProxyNodesPanel } from './ProxyNodesPanel';
-import { GroupsOrchestratorPanel } from './GroupsOrchestratorPanel';
-import { SubscriptionsPanel } from './SubscriptionsPanel';
+import { ProxyNodesPanel } from './singbox/ProxyNodesPanel';
+import { GroupsOrchestratorPanel } from './groups/GroupsOrchestratorPanel';
+import { SubscriptionsPanel } from './singbox/SubscriptionsPanel';
 import { SingBoxConfigEditorSection } from './singbox/SingBoxConfigEditorSection';
 import { SingBoxControlBar } from './singbox/SingBoxControlBar';
 import { SmartRoutingSection } from './singbox/SmartRoutingSection';

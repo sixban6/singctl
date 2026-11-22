@@ -1,3 +1,4 @@
+// 文件职责：提供局域网设备行为审计报告导出、一键双层拉黑/解封、上行限速与 L2 AI 研判接口。
 package webui
 
 import (
@@ -16,8 +17,8 @@ import (
 	"singctl/internal/daemon"
 )
 
-// auditRateLimiter 针对审计与拉黑接口提供轻量滑动窗口防爬虫/防高频扫描限流。
-type auditRateLimiter struct {
+// AuditRateLimiter 针对审计与拉黑接口提供轻量滑动窗口防爬虫/防高频扫描限流。
+type AuditRateLimiter struct {
 	mu      sync.Mutex
 	windows map[string]*ipWindow
 }
@@ -27,13 +28,15 @@ type ipWindow struct {
 	resetAt time.Time
 }
 
-func newAuditRateLimiter() *auditRateLimiter {
-	return &auditRateLimiter{
+// NewAuditRateLimiter 创建滑动窗口限流器实例。
+func NewAuditRateLimiter() *AuditRateLimiter {
+	return &AuditRateLimiter{
 		windows: make(map[string]*ipWindow),
 	}
 }
 
-func (l *auditRateLimiter) allow(r *http.Request, scope string, maxPerMin int) bool {
+// Allow 判断请求在给定 scope 内是否未超出每分钟配额且未命中恶意扫描器特征。
+func (l *AuditRateLimiter) Allow(r *http.Request, scope string, maxPerMin int) bool {
 	if l == nil {
 		return true
 	}
@@ -74,7 +77,7 @@ func (l *auditRateLimiter) allow(r *http.Request, scope string, maxPerMin int) b
 
 // handleAuditGet 返回局域网设备行为审计报告（支持 ?device=...&suspicious=1&ai=1&format=csv|json）。
 func (s *Server) handleAuditGet(w http.ResponseWriter, r *http.Request) {
-	if !s.auditLimiter.allow(r, "read", 180) {
+	if !s.auditLimiter.Allow(r, "read", 180) {
 		writeJSONError(w, http.StatusTooManyRequests, "请求过于频繁或触发反爬虫保护，请稍后再试")
 		return
 	}
@@ -155,7 +158,7 @@ type auditBlockRequest struct {
 
 // handleAuditBlock 执行一键双层拉黑（Sing-Box 路由阻断 + AdGuard Home DNS 黑名单 + 立即掐断活跃连接）。
 func (s *Server) handleAuditBlock(w http.ResponseWriter, r *http.Request) {
-	if !s.auditLimiter.allow(r, "write", 120) {
+	if !s.auditLimiter.Allow(r, "write", 120) {
 		writeJSONError(w, http.StatusTooManyRequests, "操作过于频繁，请稍后再试")
 		return
 	}
@@ -189,7 +192,7 @@ func (s *Server) handleAuditBlock(w http.ResponseWriter, r *http.Request) {
 
 // handleAuditUnblock 从 Sing-Box 与 AdGuard Home DNS 黑名单中一键解封目标。
 func (s *Server) handleAuditUnblock(w http.ResponseWriter, r *http.Request) {
-	if !s.auditLimiter.allow(r, "write", 120) {
+	if !s.auditLimiter.Allow(r, "write", 120) {
 		writeJSONError(w, http.StatusTooManyRequests, "操作过于频繁，请稍后再试")
 		return
 	}
@@ -232,7 +235,7 @@ type auditPCDNBlockRequest struct {
 
 // handleAuditPCDNBlock 一键切换内置默认防 PCDN 规则集的开启/关闭状态（持久落盘并热重载 sing-box）。
 func (s *Server) handleAuditPCDNBlock(w http.ResponseWriter, r *http.Request) {
-	if !s.auditLimiter.allow(r, "write", 120) {
+	if !s.auditLimiter.Allow(r, "write", 120) {
 		writeJSONError(w, http.StatusTooManyRequests, "操作过于频繁，请稍后再试")
 		return
 	}
@@ -275,7 +278,7 @@ type auditWhitelistRequest struct {
 
 // handleAuditWhitelist 管理设备行为审计的信任放行白名单（写入 singctl.yaml audit.whitelist，0600 权限）。
 func (s *Server) handleAuditWhitelist(w http.ResponseWriter, r *http.Request) {
-	if !s.auditLimiter.allow(r, "write", 120) {
+	if !s.auditLimiter.Allow(r, "write", 120) {
 		writeJSONError(w, http.StatusTooManyRequests, "操作过于频繁，请稍后再试")
 		return
 	}
@@ -359,7 +362,7 @@ func (s *Server) handleAuditAIConfigGet(w http.ResponseWriter, r *http.Request) 
 
 // handleAuditAIConfigPost 保存用户自定义的 AI 网关请求地址 BaseURL、网关密钥与访问模型至 singctl.yaml (0600)。
 func (s *Server) handleAuditAIConfigPost(w http.ResponseWriter, r *http.Request) {
-	if !s.auditLimiter.allow(r, "write", 120) {
+	if !s.auditLimiter.Allow(r, "write", 120) {
 		writeJSONError(w, http.StatusTooManyRequests, "操作过于频繁，请稍后再试")
 		return
 	}
@@ -394,7 +397,7 @@ func (s *Server) handleAuditAIConfigPost(w http.ResponseWriter, r *http.Request)
 
 // handleAuditAIModelsPost 动态连接用户填写（或自动探测）的 AI 网关拉取可用模型列表，失败时优雅降级供前端手动输入。
 func (s *Server) handleAuditAIModelsPost(w http.ResponseWriter, r *http.Request) {
-	if !s.auditLimiter.allow(r, "write", 120) {
+	if !s.auditLimiter.Allow(r, "write", 120) {
 		writeJSONError(w, http.StatusTooManyRequests, "操作过于频繁，请稍后再试")
 		return
 	}
@@ -456,7 +459,7 @@ type auditAIReviewRequest struct {
 
 // handleAuditAIReviewPost 针对前端传入的一批连接记录（最多 12 条/批）执行 L2 AI 深度研判，支持全量渐进式分批点亮与单行按需研判。
 func (s *Server) handleAuditAIReviewPost(w http.ResponseWriter, r *http.Request) {
-	if !s.auditLimiter.allow(r, "ai", 300) {
+	if !s.auditLimiter.Allow(r, "ai", 300) {
 		writeJSONError(w, http.StatusTooManyRequests, "AI 研判请求过于频繁，请稍后再试")
 		return
 	}
@@ -486,7 +489,7 @@ func (s *Server) handleAuditAIReviewPost(w http.ResponseWriter, r *http.Request)
 
 // handleAuditCloseConnections 临时断开单条流或全部活跃连接，促使客户端立即重新握手走新节点或策略组。
 func (s *Server) handleAuditCloseConnections(w http.ResponseWriter, r *http.Request) {
-	if !s.auditLimiter.allow(r, "write", 120) {
+	if !s.auditLimiter.Allow(r, "write", 120) {
 		writeJSONError(w, http.StatusTooManyRequests, "操作过于频繁，请稍后再试")
 		return
 	}
@@ -536,7 +539,7 @@ type auditThrottleRequest struct {
 
 // handleAuditThrottle 配置单目标“限速不拉黑”策略（rateKbps <= 0 解除限速），落盘 0600 并实时下发 nftables 隔离限速表。
 func (s *Server) handleAuditThrottle(w http.ResponseWriter, r *http.Request) {
-	if !s.auditLimiter.allow(r, "write", 120) {
+	if !s.auditLimiter.Allow(r, "write", 120) {
 		writeJSONError(w, http.StatusTooManyRequests, "操作过于频繁，请稍后再试")
 		return
 	}

@@ -1,3 +1,4 @@
+// 文件职责：负责宿主 IPv6 就绪状态探测（ProbeIPv6Status）及 OpenWrt LAN RA/DHCPv6/dnsmasq 与防火墙豁免的幂等同步与还原。
 package gateway
 
 import (
@@ -186,10 +187,11 @@ func probeInterfaceIPv6Summary(lanIface string) (wanHasGUA bool, lanGUA string, 
 // ProbeIPv6Status 只读探测当前系统内核 IPv6、WAN PD 前缀、LAN 分配与 OpenWrt RA/DHCPv6/dnsmasq 状态。
 func ProbeIPv6Status(ctx context.Context, gwCfg config.GatewayConfig, topo TopologyInfo) IPv6StatusInfo {
 	c := NewController()
-	return c.probeIPv6Status(ctx, gwCfg, topo)
+	return c.ProbeIPv6Status(ctx, gwCfg, topo)
 }
 
-func (c *Controller) probeIPv6Status(ctx context.Context, gwCfg config.GatewayConfig, topo TopologyInfo) IPv6StatusInfo {
+// ProbeIPv6Status 使用 Controller 上显式注入的 Exec/IsOpenWrt 依赖探测 IPv6 就绪状态。
+func (c *Controller) ProbeIPv6Status(ctx context.Context, gwCfg config.GatewayConfig, topo TopologyInfo) IPv6StatusInfo {
 	info := IPv6StatusInfo{
 		Supported: runtime.GOOS == "linux",
 		IsOpenWrt: c.isOpenWrt(),
@@ -365,7 +367,7 @@ func (c *Controller) SyncIPv6Host(ctx context.Context, gwCfg config.GatewayConfi
 	res := &IPv6ApplyResult{Mode: mode}
 
 	if runtime.GOOS != "linux" && c.Exec == nil {
-		res.Status = c.probeIPv6Status(ctx, gwCfg, topo)
+		res.Status = c.ProbeIPv6Status(ctx, gwCfg, topo)
 		return res, nil
 	}
 
@@ -384,7 +386,7 @@ func (c *Controller) SyncIPv6Host(ctx context.Context, gwCfg config.GatewayConfi
 				res.Actions = append(res.Actions, "已按安全备份还原 OpenWrt LAN IPv6 配置")
 			}
 		}
-		res.Status = c.probeIPv6Status(ctx, gwCfg, topo)
+		res.Status = c.ProbeIPv6Status(ctx, gwCfg, topo)
 		return res, nil
 	}
 
@@ -445,7 +447,7 @@ func (c *Controller) SyncIPv6Host(ctx context.Context, gwCfg config.GatewayConfi
 	}
 
 	// 热刷新 IPv6 策略路由表 100 throw 逃生路由与 nftables LOCAL_IPV6_SET 豁免（不重启 sing-box）
-	status := c.probeIPv6Status(ctx, gwCfg, topo)
+	status := c.ProbeIPv6Status(ctx, gwCfg, topo)
 	c.ensureIPv6ProxyTableThrowRoutes(ctx, status.LANPrefixes)
 	c.syncNFTLocalIPv6Exemptions(ctx, status.LANPrefixes)
 	if len(status.LANPrefixes) > 0 {

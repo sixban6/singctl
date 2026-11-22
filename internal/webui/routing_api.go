@@ -1,3 +1,4 @@
+// 文件职责：提供客户端智能分流预设查询、热编译校验与失败自动回滚接口。
 package webui
 
 import (
@@ -10,7 +11,6 @@ import (
 
 	"singctl/internal/config"
 	"singctl/internal/constant"
-	"singctl/internal/daemon"
 	"singctl/internal/singbox"
 )
 
@@ -60,122 +60,59 @@ func (s *Server) handleTrafficRoutingPut(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	s.cfgMu.Lock()
-	defer s.cfgMu.Unlock()
-
-	cfgPath := configPathFor(s)
-	origCfgBytes, origReadErr := os.ReadFile(cfgPath)
-	cfg := s.loadMutableConfig()
-
 	sbPath := s.sbConfigPath()
-	rawSBBytes, sbErr := os.ReadFile(sbPath)
-	rawSB := string(rawSBBytes)
-	hasLiveSB := sbErr == nil && strings.TrimSpace(rawSB) != ""
-
-	groups, _ := singbox.InspectClientRoutingOutbounds(rawSB)
-	groupTags := make([]string, len(groups))
-	for i, g := range groups {
-		groupTags[i] = g.Tag
-	}
-
-	nextPresets := make(map[string]config.TrafficRuleOverride)
-	if !body.Reset {
-		if !body.Replace {
-			for k, v := range cfg.TrafficRouting.Normalized().Presets {
-				nextPresets[k] = v
+	var (
+		applied  bool
+		liveJSON string
+	)
+	cfg, err := s.updateConfigTx(configTxOptions{
+		InvalidateIOS: true,
+		SaveErrPrefix: "保存 singctl.yaml 失败: ",
+		LiveApply: func(cfg *config.Config) error {
+			rawSBBytes, sbErr := os.ReadFile(sbPath)
+			rawSB := string(rawSBBytes)
+			liveJSON = rawSB
+			if sbErr != nil || strings.TrimSpace(rawSB) == "" {
+				return nil
 			}
+			updatedJSON, convErr := singbox.ApplyTrafficRoutingToConfigJSON(rawSB, cfg.TrafficRouting, cfg.CustomRules)
+			if convErr != nil {
+				return &apiStatusError{status: http.StatusInternalServerError, msg: "编译分流规则失败: " + convErr.Error()}
+			}
+			if applyErr := singbox.ApplyLiveSingBoxConfig(r.Context(), sbPath, s.sbWorkConfigPath(), updatedJSON, "routing"); applyErr != nil {
+				return &apiStatusError{status: http.StatusBadRequest, msg: "应用配置或 sing-box 校验失败: " + applyErr.Error()}
+			}
+			if baseRaw, bErr := singbox.LoadBaseSnapshot(sbPath); bErr == nil && strings.TrimSpace(baseRaw) != "" {
+				if updatedBase, uErr := singbox.ApplyTrafficRoutingToConfigJSON(baseRaw, cfg.TrafficRouting, cfg.CustomRules); uErr == nil {
+					_ = singbox.SaveBaseSnapshot(sbPath, updatedBase)
+				}
+			}
+			applied = true
+			liveJSON = updatedJSON
+			return nil
+		},
+	}, func(cfg *config.Config) error {
+		rawSBBytes, sbErr := os.ReadFile(sbPath)
+		rawSB := string(rawSBBytes)
+		hasLiveSB := sbErr == nil && strings.TrimSpace(rawSB) != ""
+
+		groups, _ := singbox.InspectClientRoutingOutbounds(rawSB)
+		groupTags := make([]string, len(groups))
+		for i, g := range groups {
+			groupTags[i] = g.Tag
 		}
-		for rawID, ov := range body.Presets {
-			id := strings.ToLower(strings.TrimSpace(rawID))
-			preset, ok := singbox.LookupClientRoutingPreset(id)
-			if !ok {
-				writeJSONError(w, http.StatusBadRequest, "未知的分流预设项: "+rawID)
-				return
-			}
-			cleanOutbound, err := config.CleanTrafficOutboundName(ov.Outbound)
-			if err != nil {
-				writeJSONError(w, http.StatusBadRequest, err.Error())
-				return
-			}
-			if cleanOutbound != "" && hasLiveSB && !slices.Contains(groupTags, cleanOutbound) {
-				writeJSONError(w, http.StatusBadRequest, "当前 sing-box 配置中不存在策略组: "+cleanOutbound)
-				return
-			}
 
-			defOutbound := singbox.ResolvePresetDefaultOutbound(preset.PreferVPS, preset.PreferAuto, groupTags)
-			prev := nextPresets[id]
-			mergedEnabled := preset.DefaultOn
-			if prev.Enabled != nil {
-				mergedEnabled = *prev.Enabled
-			}
-			if ov.Enabled != nil {
-				mergedEnabled = *ov.Enabled
-			}
-			mergedOutbound := prev.Outbound
-			if cleanOutbound != "" {
-				mergedOutbound = cleanOutbound
-			}
-			// 若与默认推荐值完全一致，则不冗余写入 singctl.yaml
-			isDefaultEnabled := mergedEnabled == preset.DefaultOn
-			isDefaultOutbound := mergedOutbound == "" || mergedOutbound == defOutbound
-			if isDefaultEnabled && isDefaultOutbound {
-				delete(nextPresets, id)
-				continue
-			}
-			enabledCopy := mergedEnabled
-			outCopy := mergedOutbound
-			if isDefaultOutbound {
-				outCopy = ""
-			}
-			nextPresets[id] = config.TrafficRuleOverride{
-				Enabled:  &enabledCopy,
-				Outbound: outCopy,
-			}
+		nextPresets, valErr := mergeTrafficRoutingPresets(cfg, body, hasLiveSB, groupTags)
+		if valErr != nil {
+			return valErr
 		}
-	}
-
-	cfg.TrafficRouting = config.TrafficRoutingConfig{Presets: nextPresets}.Normalized()
-
-	if err := backupConfig(cfgPath); err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "备份配置失败: "+err.Error())
+		cfg.TrafficRouting = config.TrafficRoutingConfig{Presets: nextPresets}.Normalized()
+		return nil
+	})
+	if err != nil {
+		writePartialSaveError(w, err)
 		return
 	}
-	if err := s.saveConfig(cfg); err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "保存 singctl.yaml 失败: "+err.Error())
-		return
-	}
-	s.invalidateIOSCache()
-
-	applied := false
-	liveJSON := rawSB
-	if hasLiveSB {
-		updatedJSON, err := singbox.ApplyTrafficRoutingToConfigJSON(rawSB, cfg.TrafficRouting, cfg.CustomRules)
-		if err != nil {
-			if origReadErr == nil {
-				_ = os.WriteFile(cfgPath, origCfgBytes, 0600)
-				s.invalidateConfigStore()
-			}
-			writeJSONError(w, http.StatusInternalServerError, "编译分流规则失败: "+err.Error())
-			return
-		}
-		if err := singbox.ApplyLiveSingBoxConfig(r.Context(), sbPath, s.sbWorkConfigPath(), updatedJSON, "routing"); err != nil {
-			if origReadErr == nil {
-				_ = os.WriteFile(cfgPath, origCfgBytes, 0600)
-				s.invalidateConfigStore()
-			}
-			writeJSONError(w, http.StatusBadRequest, "应用配置或 sing-box 校验失败: "+err.Error())
-			return
-		}
-		if baseRaw, bErr := singbox.LoadBaseSnapshot(sbPath); bErr == nil && strings.TrimSpace(baseRaw) != "" {
-			if updatedBase, uErr := singbox.ApplyTrafficRoutingToConfigJSON(baseRaw, cfg.TrafficRouting, cfg.CustomRules); uErr == nil {
-				_ = singbox.SaveBaseSnapshot(sbPath, updatedBase)
-			}
-		}
-		applied = true
-		liveJSON = updatedJSON
-	}
-
-	_ = daemon.NotifyReload()
 
 	msg := "分流策略已保存并触发热重载生效"
 	if body.Reset {
@@ -191,4 +128,65 @@ func (s *Server) handleTrafficRoutingPut(w http.ResponseWriter, r *http.Request)
 		"message": msg,
 		"report":  report,
 	})
+}
+
+func mergeTrafficRoutingPresets(
+	cfg *config.Config,
+	body trafficRoutingPutRequest,
+	hasLiveSB bool,
+	groupTags []string,
+) (map[string]config.TrafficRuleOverride, error) {
+	nextPresets := make(map[string]config.TrafficRuleOverride)
+	if body.Reset {
+		return nextPresets, nil
+	}
+	if !body.Replace {
+		for k, v := range cfg.TrafficRouting.Normalized().Presets {
+			nextPresets[k] = v
+		}
+	}
+	for rawID, ov := range body.Presets {
+		id := strings.ToLower(strings.TrimSpace(rawID))
+		preset, ok := singbox.LookupClientRoutingPreset(id)
+		if !ok {
+			return nil, &apiStatusError{status: http.StatusBadRequest, msg: "未知的分流预设项: " + rawID}
+		}
+		cleanOutbound, err := config.CleanTrafficOutboundName(ov.Outbound)
+		if err != nil {
+			return nil, &apiStatusError{status: http.StatusBadRequest, msg: err.Error()}
+		}
+		if cleanOutbound != "" && hasLiveSB && !slices.Contains(groupTags, cleanOutbound) {
+			return nil, &apiStatusError{status: http.StatusBadRequest, msg: "当前 sing-box 配置中不存在策略组: " + cleanOutbound}
+		}
+
+		defOutbound := singbox.ResolvePresetDefaultOutbound(preset.PreferVPS, preset.PreferAuto, groupTags)
+		prev := nextPresets[id]
+		mergedEnabled := preset.DefaultOn
+		if prev.Enabled != nil {
+			mergedEnabled = *prev.Enabled
+		}
+		if ov.Enabled != nil {
+			mergedEnabled = *ov.Enabled
+		}
+		mergedOutbound := prev.Outbound
+		if cleanOutbound != "" {
+			mergedOutbound = cleanOutbound
+		}
+		isDefaultEnabled := mergedEnabled == preset.DefaultOn
+		isDefaultOutbound := mergedOutbound == "" || mergedOutbound == defOutbound
+		if isDefaultEnabled && isDefaultOutbound {
+			delete(nextPresets, id)
+			continue
+		}
+		enabledCopy := mergedEnabled
+		outCopy := mergedOutbound
+		if isDefaultOutbound {
+			outCopy = ""
+		}
+		nextPresets[id] = config.TrafficRuleOverride{
+			Enabled:  &enabledCopy,
+			Outbound: outCopy,
+		}
+	}
+	return nextPresets, nil
 }

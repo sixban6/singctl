@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"singctl/internal/util/file"
+	"singctl/internal/common/fsx"
 )
 
 // 包级预编译静态区块正则，避免重复解析 ~/.ssh/config 时重编译表达式。
@@ -94,7 +94,7 @@ func (m *LocalConfigManager) SyncHosts(hosts []*Host) error {
 	}
 
 	// Write back atomically with forced 0600 permissions (even if pre-existing file was 0644)
-	if err := file.WriteAtomic0600(m.configPath, []byte(updatedContent)); err != nil {
+	if err := fsx.WriteAtomic0600(m.configPath, []byte(updatedContent)); err != nil {
 		return fmt.Errorf("failed to write ~/.ssh/config: %w", err)
 	}
 
@@ -178,7 +178,7 @@ func (m *LocalConfigManager) CleanManagedHosts(targetName string) (int, error) {
 		cleaned += "\n"
 	}
 
-	if err := file.WriteAtomic0600(m.configPath, []byte(cleaned)); err != nil {
+	if err := fsx.WriteAtomic0600(m.configPath, []byte(cleaned)); err != nil {
 		return 0, fmt.Errorf("failed to write cleaned ~/.ssh/config: %w", err)
 	}
 
@@ -212,5 +212,5 @@ func (m *LocalConfigManager) ensureDir() error {
 func (m *LocalConfigManager) backupFile(content string) error {
 	timestamp := time.Now().Format("20060102_150405")
 	backupPath := fmt.Sprintf("%s.bak.%s", m.configPath, timestamp)
-	return file.WriteAtomic0600(backupPath, []byte(content))
+	return fsx.WriteAtomic0600(backupPath, []byte(content))
 }

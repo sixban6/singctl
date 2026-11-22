@@ -8,10 +8,8 @@
 package deploy
 
 import (
-	"archive/tar"
 	"bytes"
 	"cmp"
-	"compress/gzip"
 	"context"
 	"crypto/ecdh"
 	"crypto/rand"
@@ -27,9 +25,10 @@ import (
 	"strings"
 	"time"
 
+	"singctl/internal/common/netx"
+	"singctl/internal/common/release"
 	"singctl/internal/config"
 	"singctl/internal/logger"
-	"singctl/internal/util/netinfo"
 )
 
 type warpRegRequest struct {
@@ -42,7 +41,8 @@ type warpRegRequest struct {
 	Locale       string `json:"locale"`
 }
 
-type warpRegResponse struct {
+// WarpRegResponse 表示 Cloudflare WARP 设备注册接口返回的 WireGuard 地址与 Peer 信息。
+type WarpRegResponse struct {
 	ID     string `json:"id"`
 	Type   string `json:"type"`
 	Token  string `json:"token"`
@@ -63,6 +63,8 @@ type warpRegResponse struct {
 		} `json:"peers"`
 	} `json:"config"`
 }
+
+type warpRegResponse = WarpRegResponse
 
 const (
 	DefaultWireproxyBin     = "/usr/local/bin/wireproxy"
@@ -508,145 +510,6 @@ func pruneWireproxyBackups(path string, keep int) {
 	}
 }
 
-// WarpEndpointSwitchDeps 允许测试注入 Endpoint 切换流程的外部依赖。
-type WarpEndpointSwitchDeps struct {
-	ConfPath           string
-	CandidateEndpoints []string
-	RestartService     func() error
-	ProbeTargets       func(timeout time.Duration) (ip, loc string, err error)
-	PollAttempts       int
-	PollInterval       time.Duration
-}
-
-// SwitchWarpEndpoint 轮换 wireproxy Endpoint 节点并重启隧道，直至真实外网探测连通（全部失败自动恢复原配置）。
-func SwitchWarpEndpoint() (endpoint, ip, loc string, err error) {
-	return SwitchWarpEndpointWithDeps(nil)
-}
-
-func SwitchWarpEndpointWithDeps(deps *WarpEndpointSwitchDeps) (endpoint, ip, loc string, err error) {
-	var d WarpEndpointSwitchDeps
-	if deps != nil {
-		d = *deps
-	}
-	confPath := cmp.Or(strings.TrimSpace(d.ConfPath), DefaultWireproxyConf)
-	if len(d.CandidateEndpoints) == 0 {
-		d.CandidateEndpoints = WarpCandidateEndpoints
-	}
-	if d.RestartService == nil {
-		d.RestartService = func() error {
-			return serviceMgr().Restart(context.Background(), "wireproxy")
-		}
-	}
-	if d.ProbeTargets == nil {
-		d.ProbeTargets = ProbeWarpRealTargets
-	}
-	if d.PollAttempts <= 0 {
-		d.PollAttempts = 2
-	}
-	if d.PollInterval <= 0 {
-		d.PollInterval = 350 * time.Millisecond
-	}
-
-	origBytes, readErr := os.ReadFile(confPath)
-	if readErr != nil {
-		return "", "", "", fmt.Errorf("读取 wireproxy 配置失败: %w", readErr)
-	}
-	origContent := string(origBytes)
-	currentEP := ExtractWireproxyEndpoint(origContent)
-	ordered := orderCandidateEndpointsAfterCurrent(d.CandidateEndpoints, currentEP)
-
-	var lastErr error
-	for _, cand := range ordered {
-		updated := ReplaceWireproxyEndpoint(origContent, cand)
-		if normalized, changed := NormalizeWireproxyConfigContent(updated); changed {
-			updated = normalized
-		}
-		if wErr := writeFileAtomic0600(confPath, []byte(updated)); wErr != nil {
-			lastErr = wErr
-			continue
-		}
-		if rErr := d.RestartService(); rErr != nil {
-			lastErr = rErr
-			continue
-		}
-		for range d.PollAttempts {
-			time.Sleep(d.PollInterval)
-			if probeIP, probeLoc, pErr := d.ProbeTargets(2500 * time.Millisecond); pErr == nil && probeIP != "" {
-				return cand, probeIP, probeLoc, nil
-			} else if pErr != nil {
-				lastErr = pErr
-			}
-		}
-	}
-
-	_ = writeFileAtomic0600(confPath, origBytes)
-	_ = d.RestartService()
-	return "", "", "", fmt.Errorf("所有备选 WARP Endpoint (%d 个) 均不可达: %v", len(ordered), lastErr)
-}
-
-// SyncWarpConfigIfNeeded 检查并自愈本机 WARP (wireproxy) 配置与隧道握手状态（同时自动清理遗留的 fscarmen 脚本产物）
-func SyncWarpConfigIfNeeded() (healed bool, msg string, err error) {
-	purged, _ := PurgeLegacyFscarmenWarp()
-
-	activePath, _, exists := ResolveWireproxyConfigPaths()
-	if purged && (!exists || !IsWindtfWireproxyBinary(DefaultWireproxyBin)) {
-		if dErr := DeployWarpWithConfig(nil); dErr != nil {
-			return false, "", fmt.Errorf("已清理旧版 fscarmen WARP，但重建纯 Go wireproxy 失败: %w", dErr)
-		}
-		return true, "已清理旧版 fscarmen WARP 并迁移至内置纯 Go wireproxy (MTU=1280)", nil
-	}
-
-	if !exists {
-		return false, "", nil
-	}
-	if !IsWindtfWireproxyBinary(DefaultWireproxyBin) {
-		if dErr := DeployWarpWithConfig(nil); dErr != nil {
-			return false, "", fmt.Errorf("升级为纯 Go wireproxy 失败: %w", dErr)
-		}
-		return true, "已替换升级为内置纯 Go windtf/wireproxy 引擎", nil
-	}
-
-	raw, rErr := os.ReadFile(activePath)
-	if rErr != nil {
-		return false, "", nil
-	}
-	anyChanged := purged
-	if normalized, changed := NormalizeWireproxyConfigContent(string(raw)); changed {
-		if wErr := writeFileAtomic0600(activePath, []byte(normalized)); wErr != nil {
-			return false, "", fmt.Errorf("写入 %s 失败: %w", activePath, wErr)
-		}
-		anyChanged = true
-	}
-
-	if !anyChanged && isWarpSocksRunning() {
-		if _, _, pErr := ProbeWarpRealTargets(3 * time.Second); pErr == nil {
-			return false, "", nil
-		}
-	}
-
-	_ = writeWireproxySystemdUnit(DefaultWireproxyService, DefaultWireproxyBin, activePath)
-	ctx := context.Background()
-	mgr := serviceMgr()
-	_ = mgr.DaemonReload(ctx)
-	_ = mgr.Restart(ctx, "wireproxy")
-	for range 4 {
-		time.Sleep(800 * time.Millisecond)
-		if _, _, pErr := ProbeWarpRealTargets(3 * time.Second); pErr == nil {
-			return true, "WARP (wireproxy) 已规范化 MTU=1280/IPv4 策略并恢复真实出口连通", nil
-		}
-	}
-
-	if ep, _, _, swErr := SwitchWarpEndpoint(); swErr == nil {
-		return true, fmt.Sprintf("WARP (wireproxy) 已自动切换至可用 Endpoint (%s)", ep), nil
-	}
-
-	if newIP, _, rErr := RotateWarpIdentity(); rErr == nil {
-		return true, fmt.Sprintf("WARP (wireproxy) 已自动重新注册身份并切换出口 IP (%s)", newIP), nil
-	} else {
-		return false, "", rErr
-	}
-}
-
 func GenerateWireguardKeypair() (string, string, error) {
 	priv, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
@@ -718,7 +581,7 @@ func ensureWireproxyBinary(cfg *config.Config) (string, error) {
 	}
 
 	downloadURL := fmt.Sprintf("https://github.com/windtf/wireproxy/releases/latest/download/wireproxy_linux_%s.tar.gz", arch)
-	reachableURL := netinfo.GetReachableURL(downloadURL, mirror)
+	reachableURL := netx.GetReachableURL(downloadURL, mirror)
 
 	logger.Info("Downloading windtf/wireproxy binary from: %s", reachableURL)
 	client := &http.Client{Timeout: 60 * time.Second}
@@ -732,55 +595,26 @@ func ensureWireproxyBinary(cfg *config.Config) (string, error) {
 		return "", fmt.Errorf("failed to download wireproxy (status %s)", resp.Status)
 	}
 
-	zr, err := gzip.NewReader(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to gunzip wireproxy: %w", err)
-	}
-	defer zr.Close()
-
-	tr := tar.NewReader(zr)
 	targetPath := DefaultWireproxyBin
-	found := false
-
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return "", fmt.Errorf("reading tar entry: %w", err)
-		}
-		baseName := filepath.Base(hdr.Name)
-		if baseName == "wireproxy" {
-			_ = os.MkdirAll(filepath.Dir(targetPath), 0755)
-			tmpBin := fmt.Sprintf("%s.%d.tmp", targetPath, time.Now().UnixNano())
-			outFile, err := os.OpenFile(tmpBin, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
-			if err != nil {
-				return "", fmt.Errorf("failed to create %s: %w", tmpBin, err)
-			}
-			if _, err := io.Copy(outFile, tr); err != nil {
-				outFile.Close()
-				_ = os.Remove(tmpBin)
-				return "", fmt.Errorf("failed to write %s: %w", tmpBin, err)
-			}
-			outFile.Close()
-			if !IsWindtfWireproxyBinary(tmpBin) {
-				_ = os.Remove(tmpBin)
-				return "", fmt.Errorf("downloaded wireproxy binary failed compatibility check (missing ResolveStrategy)")
-			}
-			if err := os.Rename(tmpBin, targetPath); err != nil {
-				_ = os.Remove(tmpBin)
-				return "", fmt.Errorf("failed to install %s: %w", targetPath, err)
-			}
-			_ = os.Chmod(targetPath, 0755)
-			found = true
-			break
-		}
+	_ = os.MkdirAll(filepath.Dir(targetPath), 0755)
+	stagedTmp, err := os.CreateTemp(filepath.Dir(targetPath), ".wireproxy.stage-*")
+	if err != nil {
+		return "", fmt.Errorf("failed to create staged wireproxy: %w", err)
 	}
+	stagedPath := stagedTmp.Name()
+	_ = stagedTmp.Close()
+	defer os.Remove(stagedPath)
 
-	if !found {
-		return "", fmt.Errorf("wireproxy binary not found inside archive")
+	if err := release.ExtractBinaryStream(resp.Body, "wireproxy", stagedPath, release.DefaultMaxBinaryBytes); err != nil {
+		return "", fmt.Errorf("failed to extract wireproxy: %w", err)
 	}
+	if !IsWindtfWireproxyBinary(stagedPath) {
+		return "", fmt.Errorf("downloaded wireproxy binary failed compatibility check (missing ResolveStrategy)")
+	}
+	if err := os.Rename(stagedPath, targetPath); err != nil {
+		return "", fmt.Errorf("failed to install %s: %w", targetPath, err)
+	}
+	_ = os.Chmod(targetPath, 0755)
 
 	logger.Success("Installed windtf/wireproxy binary to %s", targetPath)
 	return targetPath, nil

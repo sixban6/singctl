@@ -1,4 +1,4 @@
-// Package ruleset_snapshot 提供编译期内置的规则集兜底快照。
+// 文件职责：负责加载内嵌规则集快照清单，并提供流式解压、SHA-256 校验与原子落盘能力。
 package ruleset_snapshot
 
 import (

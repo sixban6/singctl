@@ -1,8 +1,6 @@
 package deploy
 
 import (
-	"archive/tar"
-	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
@@ -13,14 +11,22 @@ import (
 	"strings"
 	"time"
 
+	"singctl/internal/common/fsx"
+	"singctl/internal/common/release"
 	"singctl/internal/component"
 	"singctl/internal/config"
 	"singctl/internal/constant"
 	"singctl/internal/logger"
 	"singctl/internal/singbox"
-	"singctl/internal/util/file"
-	"singctl/internal/util/github"
 )
+
+func newDeployReleaseClient(cfg *config.Config) *release.Client {
+	c := release.NewClient(getMirrorURL(cfg))
+	if ReleaseClient != nil {
+		c.HTTP = ReleaseClient
+	}
+	return c
+}
 
 // UpgradeResult represents the outcome of a component upgrade.
 type UpgradeResult struct {
@@ -132,9 +138,9 @@ func infoToUpgradeResult(info *component.UpgradeInfo) *UpgradeResult {
 func CheckComponentUpdate(target string, cfg *config.Config) (*CheckUpdateResult, error) {
 	norm := strings.ToLower(strings.TrimSpace(target))
 	if norm == "singctl" || norm == "subhub" || norm == "substore" {
-		fetcher := github.NewReleaseFetcher(getMirrorURL(cfg), ReleaseClient)
+		fetcher := newDeployReleaseClient(cfg)
 		curr := cleanVersion(GetInstalledSubhubVersion())
-		tag, err := fetcher.FetchLatestTag(constant.GitHubRepo)
+		tag, err := fetcher.FetchLatestTag(context.Background(), constant.GitHubRepo)
 		latest := cleanVersion(tag)
 		if err != nil || latest == "" {
 			latest = curr
@@ -180,8 +186,8 @@ func UpgradeSingbox(cfg *config.Config) (*UpgradeResult, error) {
 	oldVer := GetInstalledSingBoxVersion()
 	logger.Info("Starting sing-box core upgrade (current: %s)...", oldVer)
 
-	fetcher := github.NewReleaseFetcher(getMirrorURL(cfg), ReleaseClient)
-	latestTag, _ := fetcher.FetchLatestTag("SagerNet/sing-box")
+	fetcher := newDeployReleaseClient(cfg)
+	latestTag, _ := fetcher.FetchLatestTag(context.Background(), "SagerNet/sing-box")
 	latest := cleanVersion(latestTag)
 	if latest != "" && !IsNewerVersion(oldVer, latest) {
 		logger.Success("sing-box 已是最新版本 (%s)，无需重复更新", oldVer)
@@ -221,8 +227,8 @@ func UpgradeCaddy(cfg *config.Config) (*UpgradeResult, error) {
 	oldVer := GetInstalledCaddyVersion()
 	logger.Info("Starting Caddy gateway upgrade (current: %s)...", oldVer)
 
-	fetcher := github.NewReleaseFetcher(getMirrorURL(cfg), ReleaseClient)
-	latestTag, _ := fetcher.FetchLatestTag("caddyserver/caddy")
+	fetcher := newDeployReleaseClient(cfg)
+	latestTag, _ := fetcher.FetchLatestTag(context.Background(), "caddyserver/caddy")
 	latest := cleanVersion(latestTag)
 	if latest != "" && !IsNewerVersion(oldVer, latest) {
 		logger.Success("Caddy 已是最新版本 (%s)，无需重复更新", oldVer)
@@ -255,15 +261,15 @@ func UpgradeCaddy(cfg *config.Config) (*UpgradeResult, error) {
 	}
 
 	extractedCaddy := filepath.Join(tmpDir, "caddy")
-	if err := extractFileFromTarGz(archivePath, "caddy", extractedCaddy); err != nil {
+	if err := release.ExtractBinary(archivePath, "caddy", extractedCaddy); err != nil {
 		return nil, fmt.Errorf("failed to extract caddy: %w", err)
 	}
 
-	if err := file.SafeReplace("/usr/bin/caddy", extractedCaddy); err != nil {
+	if err := fsx.SafeReplace("/usr/bin/caddy", extractedCaddy); err != nil {
 		return nil, fmt.Errorf("failed to replace /usr/bin/caddy: %w", err)
 	}
 	if _, err := os.Stat("/usr/local/bin/caddy"); err == nil {
-		_ = file.SafeReplace("/usr/local/bin/caddy", extractedCaddy)
+		_ = fsx.SafeReplace("/usr/local/bin/caddy", extractedCaddy)
 	}
 	DetachCaddyFromApt()
 	_ = serviceMgr().Restart(context.Background(), "caddy")
@@ -288,8 +294,8 @@ func UpgradeWarp(cfg *config.Config) (*UpgradeResult, error) {
 
 	arch := runtime.GOARCH
 	wireproxyTar := fmt.Sprintf("wireproxy_linux_%s.tar.gz", arch)
-	fetcher := github.NewReleaseFetcher(getMirrorURL(cfg), ReleaseClient)
-	latestTag, err := fetcher.FetchLatestTag("windtf/wireproxy")
+	fetcher := newDeployReleaseClient(cfg)
+	latestTag, err := fetcher.FetchLatestTag(context.Background(), "windtf/wireproxy")
 	if err != nil {
 		latestTag = "latest"
 	}
@@ -326,11 +332,11 @@ func UpgradeWarp(cfg *config.Config) (*UpgradeResult, error) {
 	}
 
 	extractedWP := filepath.Join(tmpDir, "wireproxy")
-	if err := extractFileFromTarGz(archivePath, "wireproxy", extractedWP); err != nil {
+	if err := release.ExtractBinary(archivePath, "wireproxy", extractedWP); err != nil {
 		return nil, fmt.Errorf("failed to extract wireproxy: %w", err)
 	}
 
-	if err := file.SafeReplace(DefaultWireproxyBin, extractedWP); err != nil {
+	if err := fsx.SafeReplace(DefaultWireproxyBin, extractedWP); err != nil {
 		return nil, fmt.Errorf("failed to replace %s: %w", DefaultWireproxyBin, err)
 	}
 	_ = serviceMgr().Restart(context.Background(), "wireproxy")
@@ -400,41 +406,4 @@ func downloadToFile(url, destPath string) error {
 	defer outFile.Close()
 	_, err = io.Copy(outFile, resp.Body)
 	return err
-}
-
-func extractFileFromTarGz(tarGzPath, targetFileName, destPath string) error {
-	f, err := os.Open(tarGzPath)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	gzr, err := gzip.NewReader(f)
-	if err != nil {
-		return err
-	}
-	defer gzr.Close()
-
-	tr := tar.NewReader(gzr)
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return err
-		}
-
-		baseName := filepath.Base(hdr.Name)
-		if baseName == targetFileName && (hdr.Typeflag == tar.TypeReg || hdr.Typeflag == tar.TypeRegA) {
-			out, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
-			if err != nil {
-				return err
-			}
-			defer out.Close()
-			_, err = io.Copy(out, tr)
-			return err
-		}
-	}
-	return fmt.Errorf("file %s not found in %s", targetFileName, tarGzPath)
 }

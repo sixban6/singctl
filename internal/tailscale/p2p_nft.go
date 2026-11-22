@@ -25,8 +25,9 @@ const (
 	jitCommentTag = "singctl-ts-jit"
 	aclCommentTag = "singctl-ts-acl"
 
-	setTSJITAllow4 = "TS_JIT_ALLOW4"
-	setTSJITAllow6 = "TS_JIT_ALLOW6"
+	SetTSJITAllow4Name = "TS_JIT_ALLOW4"
+	setTSJITAllow4     = SetTSJITAllow4Name
+	setTSJITAllow6     = "TS_JIT_ALLOW6"
 
 	chainJITGuard   = "singctl_ts_jit_guard"
 	chainInputACL   = "singctl_ts_input_acl"

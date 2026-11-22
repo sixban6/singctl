@@ -1,3 +1,4 @@
+// 文件职责：管理 singctl-ui 后台 systemd 单元安装、重启、卸载、就绪探测及旧版守护进程平滑清理。
 package serverweb
 
 import (
@@ -27,8 +28,7 @@ const (
 	legacyLogPath     = "/tmp/singctl-serverweb.log"
 )
 
-// InstallService cleans up any legacy background PID/service, installs the singctl-ui
-// systemd service, enables and starts it, and waits briefly for port readiness.
+// InstallService installs, enables and starts the singctl-ui systemd service.
 func InstallService(cfgPath string) error {
 	if runtime.GOOS != "linux" {
 		return fmt.Errorf("singctl-ui service installation is only supported on Linux (current: %s)", runtime.GOOS)
@@ -149,8 +149,6 @@ func waitForReady(listenAddr string, maxWait time.Duration) {
 	}
 }
 
-// cleanupLegacyProcessAndUnit stops and removes any legacy /tmp/singctl-serverweb.pid process
-// or singctl-serverweb.service unit so port 8092 is cleanly handed over to singctl-ui.service.
 func cleanupLegacyProcessAndUnit() {
 	if runtime.GOOS == "linux" {
 		if _, err := os.Stat(legacyUnitPath); err == nil {

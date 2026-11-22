@@ -1,3 +1,4 @@
+// 文件职责：提供客户端 WebUI 后台守护进程启停、硬链接状态锁、fd3 安全就绪握手与异步热重启编排。
 package webui
 
 import (
@@ -12,16 +13,17 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"singctl/internal/common/execx"
+	"singctl/internal/common/fsx"
+	"singctl/internal/common/proc"
 	"singctl/internal/logger"
 	"singctl/internal/platform/servicemgr"
 	"singctl/internal/updater"
-	"singctl/internal/util/file"
 )
 
 // 后台运行机制与 daemon 包的看门狗一致:
@@ -49,11 +51,10 @@ type WebState struct {
 
 var (
 	ErrWebAlreadyRunning = errors.New("webui already running")
-	// 测试钩子
+	// 测试钩子（供顶层 test/ 集成套件覆盖临时目录）
 	WebStatePathOverride   string
 	WebLogPathOverride     string
 	ExecutablePathOverride string
-	webProcMatchesOverride func(pid int) bool
 )
 
 // WebStatePath 状态文件路径
@@ -115,46 +116,18 @@ func NormalizeLegacyWildcardListen(listen string) string {
 // 强制剥离后台标记（SINGCTL_WEB_BACKGROUND / SINGCTL_WEB_READY_FD / SINGCTL_FROM_WEBUI），
 // 并对传入的 extra (KEY=VAL) 去重覆写；若传入 KEY=（空值）亦可显式移除父环境同名键。
 func BuildCleanSubprocessEnv(extra ...string) []string {
-	stripKeys := map[string]struct{}{
-		envWebBackground:     {},
-		envWebReadyFd:        {},
-		"SINGCTL_FROM_WEBUI": {},
-	}
-	for _, kv := range extra {
-		if k, _, ok := strings.Cut(kv, "="); ok && k != "" {
-			stripKeys[k] = struct{}{}
-		}
-	}
-
-	base := os.Environ()
-	out := make([]string, 0, len(base)+len(extra))
-	for _, kv := range base {
-		k, _, ok := strings.Cut(kv, "=")
-		if !ok {
-			continue
-		}
-		if _, drop := stripKeys[k]; drop {
-			continue
-		}
-		out = append(out, kv)
-	}
-	for _, kv := range extra {
-		if k, _, ok := strings.Cut(kv, "="); ok && k != "" {
-			out = append(out, kv)
-		}
-	}
-	return out
+	return execx.CleanEnv([]string{
+		envWebBackground,
+		envWebReadyFd,
+		"SINGCTL_FROM_WEBUI",
+	}, extra...)
 }
 
 func buildRestartEnv(password string) []string {
 	if password != "" {
 		return BuildCleanSubprocessEnv("SINGCTL_WEB_PASSWORD=" + password)
 	}
-	// 显式剥离旧密码环境变量，避免已清空口令的场景被父环境残留污染
-	base := BuildCleanSubprocessEnv("SINGCTL_WEB_PASSWORD=")
-	return slices.DeleteFunc(base, func(kv string) bool {
-		return kv == "SINGCTL_WEB_PASSWORD="
-	})
+	return BuildCleanSubprocessEnv("SINGCTL_WEB_PASSWORD=")
 }
 
 // ───────────────────────── 状态文件 ─────────────────────────
@@ -177,106 +150,38 @@ func WriteWebStateAtomic(st WebState) error {
 	if err != nil {
 		return err
 	}
-	return file.WriteAtomic0600(WebStatePath(), b)
+	return fsx.WriteAtomic0600(WebStatePath(), b)
 }
 
-// AcquireWebLock 以硬链接原子创建状态文件作为互斥锁（0600 权限）。
-// 实现：先写临时文件再 os.Link —— 目标存在时原子失败，避免 O_EXCL
-// “先建空文件后写内容”的窗口期被并发者误判为残留锁清除。
-// 文件已存在时:PID 存活且命令行含 web → 已在运行;否则视为残留锁清除后重试一次。
 func AcquireWebLock(st WebState) error {
 	b, _ := json.Marshal(st)
-	target := WebStatePath()
-	tmp := fmt.Sprintf("%s.new-%d", target, os.Getpid())
-	defer os.Remove(tmp)
-
-	for attempt := 0; attempt < 2; attempt++ {
-		if err := os.WriteFile(tmp, b, 0600); err != nil {
-			return fmt.Errorf("failed to write web state tmp: %w", err)
-		}
-		_ = os.Chmod(tmp, 0600)
-		err := os.Link(tmp, target)
-		if err == nil {
-			return nil // 赢得锁
-		}
-		if !os.IsExist(err) {
-			return fmt.Errorf("failed to claim web state: %w", err)
-		}
-
+	err := proc.AcquireLinkLock(WebStatePath(), b, func() bool {
 		old, rerr := ReadWebState()
-		if rerr == nil && WebProcMatches(old.Pid) {
-			return ErrWebAlreadyRunning
-		}
-		_ = os.Remove(target)
+		return rerr == nil && WebProcMatches(old.Pid)
+	})
+	if errors.Is(err, proc.ErrLockHeld) {
+		return ErrWebAlreadyRunning
 	}
-	return ErrWebAlreadyRunning
+	return err
 }
 
-// ───────────────────────── 进程校验 ─────────────────────────
-
-// webProcMatches 判断 PID 是否为运行中的 WebUI 进程。
-// 看门狗与 WebUI 同为 singctl 可执行文件,无法只靠进程名区分,
-// 因此校验完整命令行中是否含 web/w 子命令参数(防 PID 回绕误杀无关进程)。
 func WebProcMatches(pid int) bool {
-	if webProcMatchesOverride != nil {
-		return webProcMatchesOverride(pid)
-	}
 	if !ProcessAlive(pid) {
 		return false
 	}
-
-	hasWebArg := func(args []string) bool {
-		for _, a := range args {
-			if a == "web" || a == "w" {
-				return true
-			}
-		}
-		return false
+	if runtime.GOOS == "windows" {
+		return true
 	}
-
-	if runtime.GOOS == "linux" {
-		if b, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid)); err == nil {
-			return hasWebArg(strings.Split(strings.TrimRight(string(b), "\x00"), "\x00"))
+	for _, a := range proc.ReadCmdline(pid) {
+		if a == "web" || a == "w" {
+			return true
 		}
-		return false
 	}
-	if runtime.GOOS == "darwin" {
-		out, err := outputWebCmdTimeout(defaultWebProbeTimeout, "ps", "-p", strconv.Itoa(pid), "-o", "command=")
-		if err != nil {
-			return false
-		}
-		return hasWebArg(strings.Fields(string(out)))
-	}
-	// Windows 无法低成本校验,保守放行
-	return true
+	return false
 }
 
 func ProcessAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	// Linux: /proc/<pid>/stat 状态字段 Z=僵尸(已退出未被收尸,对存活判定而言就是已死)
-	if runtime.GOOS == "linux" {
-		if b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid)); err == nil {
-			if i := strings.LastIndexByte(string(b), ')'); i >= 0 && i+2 < len(b) {
-				return b[i+2] != 'Z'
-			}
-		}
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	if proc.Signal(syscall.Signal(0)) != nil {
-		return false
-	}
-	// macOS:用 ps 判僵尸
-	if runtime.GOOS == "darwin" {
-		if out, err := outputWebCmdTimeout(defaultWebProbeTimeout, "ps", "-p", strconv.Itoa(pid), "-o", "stat="); err == nil {
-			return !strings.Contains(strings.TrimSpace(string(out)), "Z")
-		}
-	}
-	return true
+	return proc.IsAlive(pid)
 }
 
 // ───────────────────────── 子进程侧 ─────────────────────────
@@ -303,7 +208,7 @@ func ChildReadyWithOptions(opts Options, actualListen string) {
 	if runtime.GOOS == "windows" {
 		return
 	}
-	notifyReadyPipe(webReadyFd)
+	proc.NotifyReadyPipe(webReadyFd)
 }
 
 // InstallChildSignalCleanup 子进程安装信号清理:退出前移除状态文件。
@@ -348,7 +253,7 @@ func StartBackground(opts Options) error {
 		extraEnv = append(extraEnv, "SINGCTL_WEB_PASSWORD="+opts.Password)
 	}
 	cmd.Env = BuildCleanSubprocessEnv(extraEnv...)
-	setWebSpawnAttrs(cmd)
+	proc.SetDetachedAttr(cmd)
 
 	// 日志落盘（0600 权限）;stdin/stdout/stderr 重定向
 	logFile, err := os.OpenFile(WebLogPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
@@ -419,28 +324,8 @@ func StartBackground(opts Options) error {
 	return nil
 }
 
-var errWebChildDied = errors.New("webui child exited during startup")
-
 func waitWebReady(r *os.File, timeout time.Duration) error {
-	ch := make(chan error, 1)
-	go func() {
-		buf := make([]byte, 1)
-		n, err := r.Read(buf)
-		switch {
-		case n > 0 && buf[0] == 1:
-			ch <- nil
-		case err != nil:
-			ch <- errWebChildDied
-		default:
-			ch <- errWebChildDied
-		}
-	}()
-	select {
-	case err := <-ch:
-		return err
-	case <-time.After(timeout):
-		return fmt.Errorf("timeout waiting for webui ready signal")
-	}
+	return proc.WaitReadyPipe(r, timeout)
 }
 
 // ListenURLs 把监听地址转成可访问的 URL 列表(导出版,供 cmd 层展示)
@@ -468,46 +353,15 @@ func FormatListenURLs(listen string) []string {
 func StopWeb() (bool, error) {
 	st, err := ReadWebState()
 	if err != nil {
-		return false, nil // 状态文件不存在 → 未在运行
+		return false, nil
 	}
-
 	if !WebProcMatches(st.Pid) {
-		// PID 已死或被无关进程复用 → 残留文件,清理即可
 		_ = os.Remove(WebStatePath())
 		return false, nil
 	}
-
-	proc, perr := os.FindProcess(st.Pid)
-	if perr != nil {
-		_ = os.Remove(WebStatePath())
-		return false, nil
-	}
-	send := func(sig syscall.Signal) {
-		if runtime.GOOS == "windows" {
-			_ = proc.Kill()
-			return
-		}
-		_ = proc.Signal(sig)
-	}
-
-	send(syscall.SIGTERM)
-	if !waitWebExit(st.Pid, 5*time.Second) {
-		send(syscall.SIGKILL)
-		waitWebExit(st.Pid, 3*time.Second)
-	}
+	_ = proc.TerminateGracefully(st.Pid, 5*time.Second, 3*time.Second)
 	_ = os.Remove(WebStatePath())
 	return true, nil
-}
-
-func waitWebExit(pid int, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if !ProcessAlive(pid) {
-			return true
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	return !ProcessAlive(pid)
 }
 
 // WebStatus 查询后台运行状态
@@ -643,7 +497,7 @@ func ScheduleDetachedRestart(configPath string, listen string, password string) 
 			"SINGCTL_RESTART_LISTEN="+effectiveListen,
 		)
 		cmd.Env = env
-		setWebSpawnAttrs(cmd)
+		proc.SetDetachedAttr(cmd)
 		cleanup := attachDetachedStdio(cmd)
 		defer cleanup()
 		_ = cmd.Start()
@@ -675,7 +529,7 @@ func ScheduleDetachedRestart(configPath string, listen string, password string) 
 		cmd.Env = buildRestartEnv(effectivePassword)
 	}
 
-	setWebSpawnAttrs(cmd)
+	proc.SetDetachedAttr(cmd)
 	cleanup := attachDetachedStdio(cmd)
 	defer cleanup()
 	_ = cmd.Start()

@@ -1,9 +1,9 @@
+// 文件职责：提供网络回程诊断、BBR/SNI/Token 变更、证书检视、伪装抗探测评估与嗅探雷达 HTTP 接口。
 package serverweb
 
 import (
 	"cmp"
 	"context"
-	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"singctl/internal/common/httpx"
 	"singctl/internal/config"
 	"singctl/internal/deploy"
 	"singctl/internal/doctor"
@@ -32,8 +33,21 @@ func (s *Server) handleNetReturn(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleWarpDiagnose(w http.ResponseWriter, r *http.Request) {
-	res := diagnoseWARP()
-	writeJSON(w, http.StatusOK, res)
+	writeJSON(w, http.StatusOK, deploy.DiagnoseWARP())
+}
+
+func (s *Server) handleInspectCerts(w http.ResponseWriter, r *http.Request) {
+	force := r.URL.Query().Get("refresh") == "1" || r.URL.Query().Get("refresh") == "true"
+	var certs []CertHealth
+	if force {
+		certs = deploy.InspectServerCerts(s.readConfigOrNil())
+		s.caches.certs.Set(certs)
+	} else {
+		certs = s.getCachedCerts()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"certs": certs,
+	})
 }
 
 func (s *Server) handleRegeneratePath(w http.ResponseWriter, r *http.Request) {
@@ -57,10 +71,7 @@ func (s *Server) handleRegeneratePath(w http.ResponseWriter, r *http.Request) {
 		logger.Warn("重新应用 Caddyfile 警告: %v", err)
 	}
 
-	subDomain := cfg.Server.GetSubstoreDomain()
-	if subDomain == "" {
-		subDomain = cfg.Server.GetNodeDomain()
-	}
+	subDomain := cmp.Or(cfg.Server.GetSubstoreDomain(), cfg.Server.GetNodeDomain())
 	newHTTPS := fmt.Sprintf("https://%s%s/", subDomain, newPath)
 
 	s.recordAudit(r, fmt.Sprintf("重新生成随机安全管理路径为 [%s]", newPath))
@@ -86,10 +97,14 @@ func (s *Server) handleRegenerateMaskSite(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleUpdateSNI(w http.ResponseWriter, r *http.Request) {
-	var body struct {
+	type reqBody struct {
 		SNI string `json:"sni"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.SNI) == "" {
+	body, ok := decodeBodyJSON[reqBody](w, r, httpx.DefaultMaxBodyBytes, false, "SNI 域名不能为空")
+	if !ok {
+		return
+	}
+	if strings.TrimSpace(body.SNI) == "" {
 		writeJSONError(w, http.StatusBadRequest, "SNI 域名不能为空")
 		return
 	}
@@ -110,11 +125,9 @@ func (s *Server) handleUpdateSNI(w http.ResponseWriter, r *http.Request) {
 		logger.Warn("更新 Caddy SNI 警告: %v", err)
 	}
 
-	sbs, err := deploy.NewSingBoxServer(cfg)
-	if err == nil {
+	if sbs, err := deploy.NewSingBoxServer(cfg); err == nil {
 		_ = sbs.LoadExistingCredentials()
 		_ = sbs.DeploySingbox()
-
 		sbt := deploy.NewSubstore(cfg, "")
 		_ = sbt.UpdateSubstoreConfig(sbs)
 	}
@@ -140,10 +153,14 @@ func (s *Server) handleEnableBBR(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpdateCFToken(w http.ResponseWriter, r *http.Request) {
-	var body struct {
+	type reqBody struct {
 		Token string `json:"token"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.Token) == "" {
+	body, ok := decodeBodyJSON[reqBody](w, r, httpx.DefaultMaxBodyBytes, false, "Cloudflare Token 不能为空")
+	if !ok {
+		return
+	}
+	if strings.TrimSpace(body.Token) == "" {
 		writeJSONError(w, http.StatusBadRequest, "Cloudflare Token 不能为空")
 		return
 	}
@@ -170,14 +187,11 @@ func (s *Server) handleUpdateCFToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDoctor(w http.ResponseWriter, r *http.Request) {
-	cfg := s.readConfigOrNil()
-	report := doctor.RunServerDoctor(cfg)
-	writeJSON(w, http.StatusOK, report)
+	writeJSON(w, http.StatusOK, doctor.RunServerDoctor(s.readConfigOrNil()))
 }
 
 func (s *Server) handleUnlockDiagnose(w http.ResponseWriter, r *http.Request) {
-	report := doctor.CheckMediaUnlock()
-	writeJSON(w, http.StatusOK, report)
+	writeJSON(w, http.StatusOK, doctor.CheckMediaUnlock())
 }
 
 type camouflagePreset struct {
@@ -191,10 +205,7 @@ type camouflagePreset struct {
 func (s *Server) resolveLocalCamouflageDefaults(ctx context.Context) (ip, domain, sni string) {
 	cfg, _ := s.getConfigSnapshot(150 * time.Millisecond)
 	if cfg != nil {
-		domain = cfg.Server.GetNodeDomain()
-		if domain == "" {
-			domain = cfg.Server.GetSubstoreDomain()
-		}
+		domain = cmp.Or(cfg.Server.GetNodeDomain(), cfg.Server.GetSubstoreDomain())
 		sni = cfg.Server.Sni
 		ip = strings.TrimSpace(cfg.Server.ServerIP)
 	}
@@ -248,14 +259,17 @@ func (s *Server) handleCamouflageDefaults(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleCamouflageProbe(w http.ResponseWriter, r *http.Request) {
-	var body struct {
+	type reqBody struct {
 		IP         string `json:"ip"`
 		Domain     string `json:"domain"`
 		SNI        string `json:"sni"`
 		Ports      string `json:"ports"`
 		TimeoutSec int    `json:"timeoutSec"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
+	body, ok := decodeBodyJSON[reqBody](w, r, httpx.DefaultMaxBodyBytes, true, "")
+	if !ok {
+		return
+	}
 
 	defaultIP, defaultDomain, defaultSNI := s.resolveLocalCamouflageDefaults(r.Context())
 	targetIP := strings.TrimSpace(body.IP)
@@ -264,15 +278,10 @@ func (s *Server) handleCamouflageProbe(w http.ResponseWriter, r *http.Request) {
 
 	if targetIP == "" {
 		targetIP = defaultIP
-		if targetDomain == "" {
-			targetDomain = defaultDomain
-		}
-		if targetSNI == "" {
-			targetSNI = defaultSNI
-		}
+		targetDomain = cmp.Or(targetDomain, defaultDomain)
+		targetSNI = cmp.Or(targetSNI, defaultSNI)
 	}
 
-	// 若用户在 IP 栏输入了域名，自动解析为 IP 并回填 Domain
 	if net.ParseIP(targetIP) == nil {
 		hostCandidate := targetIP
 		rCtx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
@@ -282,9 +291,7 @@ func (s *Server) handleCamouflageProbe(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("无法解析目标地址 %q: %v", hostCandidate, err))
 			return
 		}
-		if targetDomain == "" {
-			targetDomain = hostCandidate
-		}
+		targetDomain = cmp.Or(targetDomain, hostCandidate)
 		targetIP = ips[0]
 	}
 
@@ -309,8 +316,7 @@ func (s *Server) handleCamouflageProbe(w http.ResponseWriter, r *http.Request) {
 	timeoutSec := body.TimeoutSec
 	if timeoutSec <= 0 {
 		timeoutSec = 4
-	}
-	if timeoutSec > 10 {
+	} else if timeoutSec > 10 {
 		timeoutSec = 10
 	}
 
@@ -385,12 +391,16 @@ func (s *Server) handleGetSniffers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleBlockSniffer(w http.ResponseWriter, r *http.Request) {
-	var body struct {
+	type reqBody struct {
 		Target   string `json:"target"`
 		Node     string `json:"node"`
 		ViewNode string `json:"viewNode"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.Target) == "" {
+	body, ok := decodeBodyJSON[reqBody](w, r, httpx.DefaultMaxBodyBytes, false, "请提供要封禁的 IP 地址或 /24 网段")
+	if !ok {
+		return
+	}
+	if strings.TrimSpace(body.Target) == "" {
 		writeJSONError(w, http.StatusBadRequest, "请提供要封禁的 IP 地址或 /24 网段")
 		return
 	}

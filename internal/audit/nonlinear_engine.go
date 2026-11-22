@@ -6,10 +6,11 @@ import (
 	"net"
 	"net/netip"
 	"net/url"
-	"singctl/internal/config"
-	"singctl/internal/singbox"
 	"slices"
 	"strings"
+
+	"singctl/internal/config"
+	"singctl/internal/singbox"
 )
 
 // Detector 定义可插拔的行为检测算子接口，支持无限扩展自定义规则算子。
@@ -30,12 +31,6 @@ type AxisProjector interface {
 	ProjectAxes(flow *FlowRecord) AxisWeights
 }
 
-// NonlinearEngine 实现多维特征交叉与非线性风险评估引擎。
-//
-// 核心数学模型:
-//
-//	RawLogit = (AsymmetryScore + BeaconScore + EntropyScore + FingerprintScore) * InteractionMultiplier * TrustDamping
-//	RiskScore = round(100 * Sigmoid((RawLogit - Center) / Scale))
 type blockedRulesetRef struct {
 	srcCIDR string
 	tag     string
@@ -46,6 +41,7 @@ type blockedCIDRRef struct {
 	prefix  netip.Prefix
 }
 
+// NonlinearEngine 实现多维特征交叉与非线性风险评估引擎。
 type NonlinearEngine struct {
 	detectors       []Detector
 	trustedDomains  map[string]struct{}
@@ -55,8 +51,6 @@ type NonlinearEngine struct {
 	blockedRulesets []blockedRulesetRef
 }
 
-// defaultTrustedDomains 内置常见正常高上传办公/云同步/代码托管与底层网络加密握手/DoH/连通性探测白名单域名（触发信任阻尼衰减，防止误报）。
-// 注意：严禁将 akamai.net / fastly.net / cloudfront.net 等通用商业 CDN 放入此列表，防止挂靠其上的第三方追踪器被洗白。
 var defaultTrustedDomains = []string{
 	"github.com",
 	"githubusercontent.com",
@@ -87,7 +81,6 @@ var defaultTrustedDomains = []string{
 	"dot.pub",
 }
 
-// privacyTrackerKeywords 属于隐私窥探/行为画像/云端遥测维度的特征词（即使单次上传仅几 KB 也会触发隐私评分）。
 var privacyTrackerKeywords = []string{
 	"telemetry", "collect", "collector", "beacon", "tracker", "track",
 	"log.", "logs.", "ulog", "applog", "sdklog", "crashlog", "stat.", "stats.",
@@ -96,7 +89,6 @@ var privacyTrackerKeywords = []string{
 	"psmartcloud", "tuyaus", "tuyacn", "iot-log",
 }
 
-// nonPCDNPureCDNParents 显式排除常规主流 CDN / 浏览器 / 苹果等服务父域，避免 "ipcdn"、"pcdn.brave.com"、"dmcdn.net" 等子串误报。
 var nonPCDNPureCDNParents = []string{
 	"apple.com", "brave.com", "dmcdn.net", "icloud.com",
 	"google.com", "googleapis.com", "cloudflare.com", "tailscale.com", "wechat.com",
@@ -147,7 +139,6 @@ func isKnownLegitUDPServicePort(port int) bool {
 	return port == 41641 || isKnownIoTOrVoIPUDPPort(port) || isKnownGameUDPPort(port)
 }
 
-// iotDeviceKeywords 智能家居/电视/摄像头主机名特征词（用于推断设备角色）。
 var iotDeviceKeywords = []string{
 	"tv", "mitv", "xiaomi-tv", "bravia", "lgwebos", "hisense", "tcl",
 	"cam", "ipc", "camera", "mijia", "yeelink", "roborock", "dreame",
@@ -169,38 +160,42 @@ func NewNonlinearEngine(cfg *config.Config) *NonlinearEngine {
 			&telemetryFingerprintDetector{},
 		},
 	}
+	seedTrustedBaseline(eng, cfg)
+	indexEffectiveBlockRules(eng, cfg)
+	return eng
+}
 
+func seedTrustedBaseline(eng *NonlinearEngine, cfg *config.Config) {
 	for _, d := range defaultTrustedDomains {
 		eng.addTrustedEntry(d)
 	}
-	// 默认信任 Tailscale CGNAT 网段与本地回环
 	for _, cidr := range []string{"100.64.0.0/10", "127.0.0.0/8", "::1/128"} {
 		if _, ipNet, err := net.ParseCIDR(cidr); err == nil {
 			eng.trustedCIDRs = append(eng.trustedCIDRs, ipNet)
 		}
 	}
-
-	if cfg != nil {
-		// 自动提取用户订阅链接域名与自建服务端节点域名至信任基线
-		for _, sub := range cfg.Subs {
-			if u, err := url.Parse(strings.TrimSpace(sub.URL)); err == nil && u.Hostname() != "" {
-				eng.addTrustedEntry(u.Hostname())
-			}
-		}
-		if nd := cfg.Server.GetNodeDomain(); nd != "" && nd != "node.example.com" {
-			eng.addTrustedEntry(nd)
-		}
-		if sd := cfg.Server.GetSubstoreDomain(); sd != "" && sd != "node.example.com" {
-			eng.addTrustedEntry(sd)
-		}
-		if sip := strings.TrimSpace(cfg.Server.ServerIP); sip != "" {
-			eng.addTrustedEntry(sip)
-		}
-		for _, w := range cfg.Audit.Whitelist {
-			eng.addTrustedEntry(w)
+	if cfg == nil {
+		return
+	}
+	for _, sub := range cfg.Subs {
+		if u, err := url.Parse(strings.TrimSpace(sub.URL)); err == nil && u.Hostname() != "" {
+			eng.addTrustedEntry(u.Hostname())
 		}
 	}
+	for _, srv := range []string{cfg.Server.GetNodeDomain(), cfg.Server.GetSubstoreDomain()} {
+		if srv != "" && srv != "node.example.com" {
+			eng.addTrustedEntry(srv)
+		}
+	}
+	if sip := strings.TrimSpace(cfg.Server.ServerIP); sip != "" {
+		eng.addTrustedEntry(sip)
+	}
+	for _, w := range cfg.Audit.Whitelist {
+		eng.addTrustedEntry(w)
+	}
+}
 
+func indexEffectiveBlockRules(eng *NonlinearEngine, cfg *config.Config) {
 	for _, b := range singbox.EffectiveBlockRules(cfg) {
 		target, isIPTarget := singbox.NormalizeBlockTarget(b.Target)
 		if target == "" {
@@ -216,20 +211,14 @@ func NewNonlinearEngine(cfg *config.Config) *NonlinearEngine {
 		}
 		if isIPTarget {
 			if prefix, ok := parseAuditIPPrefix(target); ok && !prefix.IsSingleIP() {
-				eng.blockedCIDRs = append(eng.blockedCIDRs, blockedCIDRRef{
-					srcCIDR: src,
-					prefix:  prefix,
-				})
+				eng.blockedCIDRs = append(eng.blockedCIDRs, blockedCIDRRef{srcCIDR: src, prefix: prefix})
 			}
 		}
 		eng.blockedKeys[src+"|"+target] = struct{}{}
-		// 同时索引去掉 /32 的纯 IP 键以便快速匹配
 		if plainIP := strings.TrimSuffix(strings.TrimSuffix(target, "/32"), "/128"); plainIP != target {
 			eng.blockedKeys[src+"|"+plainIP] = struct{}{}
 		}
 	}
-
-	return eng
 }
 
 // RegisterDetector 允许外部动态注册新的自定义检测算子。
@@ -260,89 +249,81 @@ func (e *NonlinearEngine) IsTrusted(target string) bool {
 		return false
 	}
 	if isIP {
-		ipStr := strings.TrimSuffix(strings.TrimSuffix(norm, "/32"), "/128")
-		ip := net.ParseIP(ipStr)
-		if ip == nil {
-			return false
-		}
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
-			return true
-		}
-		for _, cidr := range e.trustedCIDRs {
-			if cidr.Contains(ip) {
-				return true
-			}
-		}
-		return false
+		return e.isTrustedIP(strings.TrimSuffix(strings.TrimSuffix(norm, "/32"), "/128"))
 	}
-
 	if _, ok := e.trustedDomains[norm]; ok {
 		return true
 	}
 	for s := norm; ; {
 		idx := strings.IndexByte(s, '.')
 		if idx < 0 {
-			break
+			return false
 		}
 		s = s[idx+1:]
 		if _, ok := e.trustedDomains[s]; ok {
 			return true
 		}
 	}
+}
+
+func (e *NonlinearEngine) isTrustedIP(ipStr string) bool {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+		return true
+	}
+	for _, cidr := range e.trustedCIDRs {
+		if cidr.Contains(ip) {
+			return true
+		}
+	}
 	return false
 }
 
-// IsBlocked 判断某条流是否已被納入自定义拉黑规则。
-func (e *NonlinearEngine) IsBlocked(deviceIP, target string) bool {
-	if len(e.blockedKeys) == 0 && len(e.blockedCIDRs) == 0 && len(e.blockedRulesets) == 0 {
-		return false
-	}
-	norm, _ := singbox.NormalizeBlockTarget(target)
-	if norm == "" {
-		return false
-	}
-	plain := strings.TrimSuffix(strings.TrimSuffix(norm, "/32"), "/128")
-	srcCIDR := singbox.NormalizeSourceIPCIDR(deviceIP)
-
-	matchKey := func(t string) bool {
-		if _, ok := e.blockedKeys["|"+t]; ok {
-			return true
-		}
-		if srcCIDR != "" {
-			if _, ok := e.blockedKeys[srcCIDR+"|"+t]; ok {
-				return true
-			}
-		}
-		return false
-	}
-
-	if matchKey(norm) || (plain != norm && matchKey(plain)) {
+func (e *NonlinearEngine) matchesBlockedKey(srcCIDR, target string) bool {
+	if _, ok := e.blockedKeys["|"+target]; ok {
 		return true
 	}
+	if srcCIDR == "" {
+		return false
+	}
+	_, ok := e.blockedKeys[srcCIDR+"|"+target]
+	return ok
+}
 
-	if len(e.blockedCIDRs) > 0 {
-		if addr, err := netip.ParseAddr(plain); err == nil {
-			addr = addr.Unmap()
-			for _, bc := range e.blockedCIDRs {
-				if (bc.srcCIDR == "" || bc.srcCIDR == srcCIDR) && bc.prefix.Contains(addr) {
-					return true
-				}
-			}
+func (e *NonlinearEngine) matchesBlockedCIDR(srcCIDR, plain string) bool {
+	if len(e.blockedCIDRs) == 0 {
+		return false
+	}
+	addr, err := netip.ParseAddr(plain)
+	if err != nil {
+		return false
+	}
+	addr = addr.Unmap()
+	for _, bc := range e.blockedCIDRs {
+		if (bc.srcCIDR == "" || bc.srcCIDR == srcCIDR) && bc.prefix.Contains(addr) {
+			return true
 		}
 	}
+	return false
+}
 
-	// 域名后缀零切片步进匹配（如拉黑了 example.com，则 sub.example.com 也处于已拉黑态）
+func (e *NonlinearEngine) matchesBlockedDomainSuffix(srcCIDR, plain string) bool {
 	for s := plain; ; {
 		idx := strings.IndexByte(s, '.')
 		if idx < 0 {
-			break
+			return false
 		}
 		s = s[idx+1:]
-		if matchKey(s) {
+		if e.matchesBlockedKey(srcCIDR, s) {
 			return true
 		}
 	}
+}
 
+func (e *NonlinearEngine) matchesBlockedRuleSet(srcCIDR, plain string) bool {
 	for _, br := range e.blockedRulesets {
 		if br.srcCIDR != "" && br.srcCIDR != srcCIDR {
 			continue
@@ -360,6 +341,26 @@ func (e *NonlinearEngine) IsBlocked(deviceIP, target string) bool {
 	return false
 }
 
+// IsBlocked 判断某条流是否已被纳入自定义拉黑规则。
+func (e *NonlinearEngine) IsBlocked(deviceIP, target string) bool {
+	if len(e.blockedKeys) == 0 && len(e.blockedCIDRs) == 0 && len(e.blockedRulesets) == 0 {
+		return false
+	}
+	norm, _ := singbox.NormalizeBlockTarget(target)
+	if norm == "" {
+		return false
+	}
+	plain := strings.TrimSuffix(strings.TrimSuffix(norm, "/32"), "/128")
+	srcCIDR := singbox.NormalizeSourceIPCIDR(deviceIP)
+
+	if e.matchesBlockedKey(srcCIDR, norm) || (plain != norm && e.matchesBlockedKey(srcCIDR, plain)) {
+		return true
+	}
+	return e.matchesBlockedCIDR(srcCIDR, plain) ||
+		e.matchesBlockedDomainSuffix(srcCIDR, plain) ||
+		e.matchesBlockedRuleSet(srcCIDR, plain)
+}
+
 func projectDetectorAxes(det Detector, flow *FlowRecord) AxisWeights {
 	if p, ok := det.(AxisProjector); ok {
 		return p.ProjectAxes(flow)
@@ -367,11 +368,7 @@ func projectDetectorAxes(det Detector, flow *FlowRecord) AxisWeights {
 	return AxisWeights{Security: 1.0}
 }
 
-// EvaluateFlow 对单条聚合流执行多维非线性评分并填充状态、威胁等级与可解释原因。
-func (e *NonlinearEngine) EvaluateFlow(flow *FlowRecord) {
-	if flow == nil {
-		return
-	}
+func initFlowDerivedMetrics(flow *FlowRecord) {
 	if flow.NonlinearFactors == nil {
 		flow.NonlinearFactors = make(map[string]float64)
 	}
@@ -380,9 +377,7 @@ func (e *NonlinearEngine) EvaluateFlow(flow *FlowRecord) {
 	} else {
 		flow.PCDNKind = ""
 	}
-
-	// 计算基础衍生指标
-	denom := float64(flow.DownloadBytes) + 65536.0 // +64KB 平滑项，避免除零并容忍握手包
+	denom := float64(flow.DownloadBytes) + 65536.0
 	flow.UploadRatio = math.Round((float64(flow.UploadBytes)/denom)*100) / 100
 	flow.AvgUploadBps = math.Round(avgUploadBytesPerSec(flow)*10) / 10
 	if !flow.IsDirectIP && flow.Target != "" {
@@ -391,24 +386,22 @@ func (e *NonlinearEngine) EvaluateFlow(flow *FlowRecord) {
 	if flow.DeviceRole == "" {
 		flow.DeviceRole = InferDeviceRole(flow.DeviceName)
 	}
+}
 
-	// 1. 各独立非线性算子打分，并正交投射到「🛡️ 安全轴 (Security)」与「👁️ 隐私轴 (Privacy)」
-	var secBase, privBase float64
-	var reasons []string
-	for _, det := range e.detectors {
+func scoreDetectorsOnAxes(detectors []Detector, flow *FlowRecord) (secBase, privBase float64, reasons []string) {
+	for _, det := range detectors {
 		s, r := det.Evaluate(flow)
-		if s > 0 {
-			flow.NonlinearFactors[det.Name()] = math.Round(s*100) / 100
-			w := projectDetectorAxes(det, flow)
-			secBase += s * w.Security
-			privBase += s * w.Privacy
-			if r != "" && !slices.Contains(reasons, r) {
-				reasons = append(reasons, r)
-			}
+		if s <= 0 {
+			continue
+		}
+		flow.NonlinearFactors[det.Name()] = math.Round(s*100) / 100
+		w := projectDetectorAxes(det, flow)
+		secBase += s * w.Security
+		privBase += s * w.Privacy
+		if r != "" && !slices.Contains(reasons, r) {
+			reasons = append(reasons, r)
 		}
 	}
-
-	// 补充专属隐私轴算子（针对几 KB 的小包高频遥测、凌晨作息窥探、明文 HTTP 裸奔）
 	privExtra, privReasons := evaluatePrivacyAxisExtras(flow)
 	if privExtra > 0 {
 		privBase += privExtra
@@ -417,83 +410,85 @@ func (e *NonlinearEngine) EvaluateFlow(flow *FlowRecord) {
 			reasons = appendUniqueReason(reasons, pr)
 		}
 	}
+	return secBase, privBase, reasons
+}
 
-	// 2. 双轴多维特征交叉倍增项 (Orthogonal Multiplicative Interaction Terms)
-	secInteraction := 1.0
-	privInteraction := 1.0
-	slowTelemetry := isSlowLongSpanTelemetry(flow)
-	isUploadDominant := flow.UploadBytes >= 256*1024 && flow.UploadRatio >= 1.8 && !slowTelemetry
-	isNonStdPort := flow.DestPort > 0 && flow.DestPort != 80 && flow.DestPort != 443 && flow.DestPort != 53 && flow.DestPort != 123
-	isPeriodicBeacon := flow.ConnCount >= 6 && flow.IntervalCV > 0 && flow.IntervalCV < 0.30
+func computeInteractionMultipliers(
+	flow *FlowRecord,
+	isUploadDominant, isNonStdPort, isPeriodicBeacon bool,
+	reasons []string,
+) (secInteraction, privInteraction float64, outReasons []string) {
+	secInteraction, privInteraction = 1.0, 1.0
+	outReasons = reasons
 
-	// 安全交叉项 A: [无域名直连 IP] × [非标端口] × [上行主导] -> 区分已知 IoT/音视频/手游端口与不明 PCDN 偷跑
 	if flow.IsDirectIP && isNonStdPort && isUploadDominant {
 		isUDP := strings.EqualFold(flow.Network, "udp")
 		hasSwarm := flow.PCDNSwarm != nil && flow.PCDNSwarm.Suspicious
 		switch {
 		case isUDP && isKnownIoTOrVoIPUDPPort(flow.DestPort) && flow.UploadBytes < 20*1024*1024 && !hasSwarm:
-			reasons = appendUniqueReason(reasons, "已知 IoT/摄像头/音视频常用直连端口")
+			outReasons = appendUniqueReason(outReasons, "已知 IoT/摄像头/音视频常用直连端口")
 		case isUDP && isKnownGameUDPPort(flow.DestPort) && flow.UploadBytes < 20*1024*1024 && !hasSwarm:
 			secInteraction *= 1.15
-			reasons = appendUniqueReason(reasons, "直连IP非标UDP上行 (常见于手游联机/加速节点，如非游戏请核查)")
+			outReasons = appendUniqueReason(outReasons, "直连IP非标UDP上行 (常见于手游联机/加速节点，如非游戏请核查)")
 		default:
 			secInteraction *= 1.75
-			reasons = appendUniqueReason(reasons, "多维交叉: 直连IP+非标端口+持续上行(疑似PCDN/暗道回传)")
+			outReasons = appendUniqueReason(outReasons, "多维交叉: 直连IP+非标端口+持续上行(疑似PCDN/暗道回传)")
 		}
 	}
-	// 安全/隐私交叉项 B: [凌晨 01:00-05:30 活跃] × [上行主导 或 规律心跳]
 	if flow.NightHits > 0 && (isUploadDominant || isPeriodicBeacon) {
 		secInteraction *= 1.30
 		privInteraction *= 1.45
-		reasons = appendUniqueReason(reasons, "多维交叉: 凌晨闲时静默上传活跃")
+		outReasons = appendUniqueReason(outReasons, "多维交叉: 凌晨闲时静默上传活跃")
 	}
-	// 安全/隐私交叉项 C: [IoT/智能电视设备] × [上行主导 或 规律心跳]
 	if flow.DeviceRole == "iot" && (isUploadDominant || isPeriodicBeacon) {
 		secInteraction *= 1.35
 		privInteraction *= 1.35
-		reasons = appendUniqueReason(reasons, "多维交叉: 智能家居/IoT设备异常外发数据")
+		outReasons = appendUniqueReason(outReasons, "多维交叉: 智能家居/IoT设备异常外发数据")
 	}
-	// 安全交叉项 D: [高信息熵域名] × [高频建连或上行主导]
-	effConns := effectiveConnCountPerHour(flow)
-	if flow.DomainEntropy >= 3.65 && (effConns >= 10 || isUploadDominant) {
+	if flow.DomainEntropy >= 3.65 && (effectiveConnCountPerHour(flow) >= 10 || isUploadDominant) {
 		secInteraction *= 1.35
 	}
-	flow.NonlinearFactors["sec_interaction"] = math.Round(secInteraction*100) / 100
-	flow.NonlinearFactors["priv_interaction"] = math.Round(privInteraction*100) / 100
+	return secInteraction, privInteraction, outReasons
+}
 
-	// 3. 信任白名单与 L2 AI 深度复核闭环阻尼衰减因子 (Trust & AI Damping)
-	trustDamping := 1.0
-	trusted := e.IsTrusted(flow.Target) || strings.EqualFold(flow.Outbound, "block")
-	aiDamped := false
+func computeTrustAndAIDamping(
+	e *NonlinearEngine,
+	flow *FlowRecord,
+	isNonStdPort, isUploadDominant bool,
+	reasons []string,
+) (trustDamping float64, trusted, aiDamped bool, outReasons []string) {
+	trusted = e.IsTrusted(flow.Target) || strings.EqualFold(flow.Outbound, "block")
 	if trusted {
-		trustDamping = 0.08
-		reasons = []string{"命中可信白名单基线 (自动阻尼降权)"}
-	} else if flow.AIReview != nil && flow.AIReview.Verdict == AIDoNotBlock &&
-		flow.AIReview.Source != "" && flow.AIReview.Source != "builtin_expert" && flow.AIReview.Source != "trusted_baseline" {
-		// 安全护栏：对直连非标端口大上传、确认 PCDN 偷跑/蜂群或极端百兆倒挂上传保留警觉，下行 PCDN 拉流允许 AI 闭环降权
-		isHardPCDN := flow.PCDNKind == "upload" || flow.PCDNKind == "swarm"
-		isHardAnomaly := (flow.IsDirectIP && isNonStdPort && isUploadDominant) ||
-			isHardPCDN ||
-			(flow.UploadBytes >= 100*1024*1024 && flow.UploadRatio >= 4.0)
-		if !isHardAnomaly {
-			trustDamping = 0.25
-			aiDamped = true
-			flow.NonlinearFactors["ai_damping"] = 0.25
-			if len(reasons) > 0 {
-				reasons = []string{"AI 深度复核确认正常业务 (已自动降权)", "原启发式观察: " + reasons[0]}
-			} else {
-				reasons = []string{"AI 深度复核确认正常业务 (已自动降权)"}
-			}
-		}
+		return 0.08, true, false, []string{"命中可信白名单基线 (自动阻尼降权)"}
 	}
-	flow.NonlinearFactors["trust_damping"] = trustDamping
 
-	rawSec := secBase * secInteraction * trustDamping
-	rawPriv := privBase * privInteraction * trustDamping
-	flow.NonlinearFactors["raw_security"] = math.Round(rawSec*100) / 100
-	flow.NonlinearFactors["raw_privacy"] = math.Round(rawPriv*100) / 100
+	rev := flow.AIReview
+	if rev == nil || rev.Verdict != AIDoNotBlock || rev.Source == "" || rev.Source == "builtin_expert" || rev.Source == "trusted_baseline" {
+		return 1.0, false, false, reasons
+	}
 
-	// 4. 双轴 Sigmoid 归一化 + Soft-Max 极值包络合成总分 (绝不因求平均而互相稀释)
+	isHardPCDN := flow.PCDNKind == "upload" || flow.PCDNKind == "swarm"
+	isHardAnomaly := (flow.IsDirectIP && isNonStdPort && isUploadDominant) ||
+		isHardPCDN ||
+		(flow.UploadBytes >= 100*1024*1024 && flow.UploadRatio >= 4.0)
+	if isHardAnomaly {
+		return 1.0, false, false, reasons
+	}
+
+	flow.NonlinearFactors["ai_damping"] = 0.25
+	if len(reasons) > 0 {
+		return 0.25, false, true, []string{"AI 深度复核确认正常业务 (已自动降权)", "原启发式观察: " + reasons[0]}
+	}
+	return 0.25, false, true, []string{"AI 深度复核确认正常业务 (已自动降权)"}
+}
+
+func finalizeAxisAndThreatState(
+	e *NonlinearEngine,
+	flow *FlowRecord,
+	rawSec, rawPriv float64,
+	trusted, aiDamped bool,
+	reasons []string,
+) {
 	flow.SecurityScore = mapRawToSigmoidScore(rawSec, 36.0, 16.0)
 	flow.PrivacyScore = mapRawToSigmoidScore(rawPriv, 32.0, 15.0)
 	if aiDamped {
@@ -520,7 +515,6 @@ func (e *NonlinearEngine) EvaluateFlow(flow *FlowRecord) {
 		flow.DominantAxis = "security"
 	}
 
-	// 5. 显式威胁等级状态流转
 	switch {
 	case finalScore >= 80:
 		flow.Threat = ThreatHighRisk
@@ -533,7 +527,6 @@ func (e *NonlinearEngine) EvaluateFlow(flow *FlowRecord) {
 	}
 	flow.ThreatLabel = flow.Threat.Label()
 
-	// 6. 显式封禁生命周期状态
 	switch {
 	case e.IsBlocked(flow.DeviceIP, flow.Target):
 		flow.State = EnforcementBlocked
@@ -547,4 +540,31 @@ func (e *NonlinearEngine) EvaluateFlow(flow *FlowRecord) {
 		reasons = []string{"上下行比例与建连行为正常"}
 	}
 	flow.Reasons = reasons
+}
+
+// EvaluateFlow 对单条聚合流执行多维非线性评分并填充状态、威胁等级与可解释原因。
+func (e *NonlinearEngine) EvaluateFlow(flow *FlowRecord) {
+	if flow == nil {
+		return
+	}
+	initFlowDerivedMetrics(flow)
+	secBase, privBase, reasons := scoreDetectorsOnAxes(e.detectors, flow)
+
+	isUploadDominant := flow.UploadBytes >= 256*1024 && flow.UploadRatio >= 1.8 && !isSlowLongSpanTelemetry(flow)
+	isNonStdPort := flow.DestPort > 0 && flow.DestPort != 80 && flow.DestPort != 443 && flow.DestPort != 53 && flow.DestPort != 123
+	isPeriodicBeacon := flow.ConnCount >= 6 && flow.IntervalCV > 0 && flow.IntervalCV < 0.30
+
+	secInteraction, privInteraction, reasons := computeInteractionMultipliers(flow, isUploadDominant, isNonStdPort, isPeriodicBeacon, reasons)
+	flow.NonlinearFactors["sec_interaction"] = math.Round(secInteraction*100) / 100
+	flow.NonlinearFactors["priv_interaction"] = math.Round(privInteraction*100) / 100
+
+	trustDamping, trusted, aiDamped, reasons := computeTrustAndAIDamping(e, flow, isNonStdPort, isUploadDominant, reasons)
+	flow.NonlinearFactors["trust_damping"] = trustDamping
+
+	rawSec := secBase * secInteraction * trustDamping
+	rawPriv := privBase * privInteraction * trustDamping
+	flow.NonlinearFactors["raw_security"] = math.Round(rawSec*100) / 100
+	flow.NonlinearFactors["raw_privacy"] = math.Round(rawPriv*100) / 100
+
+	finalizeAxisAndThreatState(e, flow, rawSec, rawPriv, trusted, aiDamped, reasons)
 }

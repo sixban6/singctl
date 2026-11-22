@@ -11,9 +11,10 @@ import (
 	"os/exec"
 	"runtime"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
+
+	"singctl/internal/common/sysinfo"
 )
 
 type lanDeviceInfo struct {
@@ -32,8 +33,8 @@ func auditFileFingerprint(path string) string {
 	return fmt.Sprintf("%s|%d|%d", path, info.ModTime().UnixNano(), info.Size())
 }
 
-// parseIPv6Neighbors 解析 `ip -6 neigh show` 输出，提取规范化 IPv6 地址到小写 MAC 的映射。
-func parseIPv6Neighbors(raw string) map[string]string {
+// ParseIPv6Neighbors 解析 `ip -6 neigh show` 输出，提取规范化 IPv6 地址到小写 MAC 的映射。
+func ParseIPv6Neighbors(raw string) map[string]string {
 	out := make(map[string]string)
 	for line := range strings.SplitSeq(raw, "\n") {
 		fields := strings.Fields(strings.TrimSpace(line))
@@ -164,7 +165,7 @@ func (c *Collector) resolveLANDevicesLocked() map[string]lanDeviceInfo {
 				out, err = exec.Command(ipBin, "-6", "neigh", "show").Output()
 			}
 			if err == nil {
-				c.ipv6NeighCache = parseIPv6Neighbors(string(out))
+				c.ipv6NeighCache = ParseIPv6Neighbors(string(out))
 				c.ipv6NeighFetchedAt = now
 			}
 		}
@@ -273,149 +274,17 @@ func (c *Collector) resolveLocalLocation() *time.Location {
 	return ResolveLocalLocationFromFiles(c.tzFile, c.uciSystemFile)
 }
 
-// InitProcessLocalTimezone 在缺少 /usr/share/zoneinfo 的精简 Linux/OpenWrt 系统上（Go 默认回退为 UTC），
-// 自动读取 /etc/TZ 与 /etc/config/system 修正全局 time.Local，确保 logger、看门狗与 WebUI 时间戳一致。
+// InitProcessLocalTimezone 委托 common/sysinfo.InitLocalTimezone 保持历史测试与调用兼容。
 func InitProcessLocalTimezone() {
-	if time.Local != nil && time.Local.String() != "UTC" {
-		return
-	}
-	if loc := ResolveLocalLocationFromFiles("/etc/TZ", "/etc/config/system"); loc != nil && loc.String() != "UTC" {
-		time.Local = loc
-	}
+	sysinfo.InitLocalTimezone()
 }
 
-// ResolveLocalLocationFromFiles 按 TZ 环境变量 -> OpenWrt /etc/TZ -> UCI /etc/config/system -> time.Local 顺序解析真实本地时区。
+// ResolveLocalLocationFromFiles 委托 common/sysinfo.ResolveLocalLocationFromFiles。
 func ResolveLocalLocationFromFiles(tzFile, uciSystemFile string) *time.Location {
-	if envTZ := strings.TrimSpace(os.Getenv("TZ")); envTZ != "" {
-		if loc := ParsePOSIXTZLocation(envTZ); loc != nil {
-			return loc
-		}
-	}
-	if tzFile != "" {
-		if raw, err := os.ReadFile(tzFile); err == nil {
-			for line := range strings.SplitSeq(string(raw), "\n") {
-				if line = strings.TrimSpace(line); line != "" {
-					if loc := ParsePOSIXTZLocation(line); loc != nil {
-						return loc
-					}
-				}
-			}
-		}
-	}
-	if uciSystemFile != "" {
-		if raw, err := os.ReadFile(uciSystemFile); err == nil {
-			var zoneName, posixTZ string
-			for line := range strings.SplitSeq(string(raw), "\n") {
-				fields := strings.Fields(strings.TrimSpace(line))
-				if len(fields) >= 3 && fields[0] == "option" {
-					val := strings.Trim(fields[2], "'\"")
-					switch fields[1] {
-					case "zonename":
-						zoneName = val
-					case "timezone":
-						posixTZ = val
-					}
-				}
-			}
-			for _, candidate := range []string{zoneName, posixTZ} {
-				if loc := ParsePOSIXTZLocation(candidate); loc != nil {
-					return loc
-				}
-			}
-		}
-	}
-	return time.Local
+	return sysinfo.ResolveLocalLocationFromFiles(tzFile, uciSystemFile)
 }
 
-// ParsePOSIXTZLocation 解析 IANA 时区名或 OpenWrt / musl POSIX TZ 字符串（如 "CST-8", "<+08>-8", "EST5EDT", "IST-5:30"）。
-// 注意 POSIX TZ 规范符号定义：偏移量表示“本地时间加上该值得到 UTC”，因此 "CST-8" 代表东八区 UTC+8 (+8*3600)。
+// ParsePOSIXTZLocation 委托 common/sysinfo.ParsePOSIXTZLocation。
 func ParsePOSIXTZLocation(spec string) *time.Location {
-	s := strings.TrimSpace(spec)
-	if s == "" {
-		return nil
-	}
-	if loc, err := time.LoadLocation(s); err == nil && loc != nil {
-		return loc
-	}
-
-	switch strings.ToLower(strings.ReplaceAll(s, " ", "_")) {
-	case "asia/shanghai", "asia/chongqing", "asia/harbin", "asia/urumqi", "asia/hong_kong", "asia/macau", "asia/taipei", "asia/singapore", "prc":
-		return time.FixedZone("CST", 8*3600)
-	case "asia/tokyo", "asia/seoul":
-		return time.FixedZone("JST", 9*3600)
-	}
-
-	var tzName, rest string
-	if strings.HasPrefix(s, "<") {
-		end := strings.IndexByte(s, '>')
-		if end <= 1 {
-			return nil
-		}
-		tzName = s[1:end]
-		rest = s[end+1:]
-	} else {
-		i := 0
-		for i < len(s) && ((s[i] >= 'A' && s[i] <= 'Z') || (s[i] >= 'a' && s[i] <= 'z')) {
-			i++
-		}
-		if i == 0 {
-			return nil
-		}
-		tzName = s[:i]
-		rest = s[i:]
-	}
-
-	if rest == "" {
-		if strings.EqualFold(tzName, "UTC") || strings.EqualFold(tzName, "GMT") {
-			return time.UTC
-		}
-		return nil
-	}
-
-	westSign := 1
-	switch rest[0] {
-	case '-':
-		westSign = -1
-		rest = rest[1:]
-	case '+':
-		westSign = 1
-		rest = rest[1:]
-	}
-
-	// 提取 hh[:mm[:ss]]，忽略后续可能附带的夏令时规则（如 EDT,M3.2.0/2）
-	numEnd := 0
-	for numEnd < len(rest) && ((rest[numEnd] >= '0' && rest[numEnd] <= '9') || rest[numEnd] == ':') {
-		numEnd++
-	}
-	if numEnd == 0 {
-		return nil
-	}
-	parts := strings.Split(rest[:numEnd], ":")
-	if len(parts) > 3 {
-		return nil
-	}
-	hh, err := strconv.Atoi(parts[0])
-	if err != nil || hh > 14 {
-		return nil
-	}
-	mm, ss := 0, 0
-	if len(parts) >= 2 {
-		mm, err = strconv.Atoi(parts[1])
-		if err != nil || mm < 0 || mm >= 60 {
-			return nil
-		}
-	}
-	if len(parts) == 3 {
-		ss, err = strconv.Atoi(parts[2])
-		if err != nil || ss < 0 || ss >= 60 {
-			return nil
-		}
-	}
-
-	westSeconds := westSign * (hh*3600 + mm*60 + ss)
-	eastSeconds := -westSeconds
-	if eastSeconds == 0 && (strings.EqualFold(tzName, "UTC") || strings.EqualFold(tzName, "GMT")) {
-		return time.UTC
-	}
-	return time.FixedZone(tzName, eastSeconds)
+	return sysinfo.ParsePOSIXTZLocation(spec)
 }

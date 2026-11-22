@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { AlertTriangle, Check, Copy, Network, Save, Smartphone } from 'lucide-react';
 import { Badge, Button, SectionCard, useToast } from '../../../ui';
 import { copyPlainText } from '../../lib/leakProbes';
-import { maskFullIP, redactInlineSensitive } from '../../lib/privacyMask';
+import { maskFullIP, redactInlineSensitive } from '../../../lib/privacyMask';
 import { GatewayIPv6Mode, GatewayRoleMode, IPv6StatusInfo } from '../../types';
 
 const SECONDARY_ROUTER_IPV6_CMD = `cp -a /etc/config/dhcp /etc/config/dhcp.bak && chmod 600 /etc/config/dhcp.bak && \\

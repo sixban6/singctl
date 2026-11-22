@@ -1,3 +1,4 @@
+// 文件职责：提供 SubHub HTTP 订阅转换服务端路由、密钥鉴权、多客户端模板协商与确定性生命周期管理。
 package subhub
 
 import (
@@ -313,6 +314,11 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			Status:      "ok",
 		})
 	}
+}
+
+// LoadRenderOptions resolves target rendering options from the HTTP request and ConfigStore snapshot.
+func (s *Server) LoadRenderOptions(r *http.Request, target TargetFormat) RenderOptions {
+	return s.loadRenderOptions(r, target)
 }
 
 func (s *Server) loadRenderOptions(r *http.Request, target TargetFormat) RenderOptions {

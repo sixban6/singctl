@@ -1,3 +1,4 @@
+// 文件职责：提供客户端主/旁路由网关拓扑探测、IPv6 智能双栈分流配置与热应用回滚接口。
 package webui
 
 import (
@@ -169,10 +170,7 @@ func (s *Server) handleGatewayPut(w http.ResponseWriter, r *http.Request) {
 
 	if isRealHost && (ipv6Changed || nextGw.EffectiveIPv6Mode() != config.GatewayIPv6Off) {
 		if v6Res, v6Err := gateway.NewController().SyncIPv6Host(r.Context(), nextGw); v6Err != nil {
-			if origReadErr == nil {
-				_ = os.WriteFile(cfgPath, origCfgBytes, 0600)
-				s.invalidateConfigStore()
-			}
+			s.rollbackSavedConfigFile(cfgPath, origCfgBytes, origReadErr)
 			writeJSONError(w, http.StatusInternalServerError, "自动配置宿主 IPv6 失败（已回滚）: "+v6Err.Error())
 			return
 		} else if v6Res != nil {
@@ -189,16 +187,12 @@ func (s *Server) handleGatewayPut(w http.ResponseWriter, r *http.Request) {
 		if ipv6Changed || nextGw.EffectiveIPv6Mode() != config.GatewayIPv6Off || body.IPv6Mode != nil {
 			updatedJSON, convErr := singbox.ApplyIPv6ModeToConfigJSON(string(rawSBBytes), nextGw.EffectiveIPv6Mode())
 			if convErr != nil {
-				if origReadErr == nil {
-					_ = os.WriteFile(cfgPath, origCfgBytes, 0600)
-				}
+				s.rollbackSavedConfigFile(cfgPath, origCfgBytes, origReadErr)
 				writeJSONError(w, http.StatusInternalServerError, "编译 sing-box IPv6 规则失败: "+convErr.Error())
 				return
 			}
 			if liveErr := singbox.ApplyLiveSingBoxConfig(r.Context(), sbPath, s.sbWorkConfigPath(), updatedJSON, "ipv6"); liveErr != nil {
-				if origReadErr == nil {
-					_ = os.WriteFile(cfgPath, origCfgBytes, 0600)
-				}
+				s.rollbackSavedConfigFile(cfgPath, origCfgBytes, origReadErr)
 				writeJSONError(w, http.StatusBadRequest, "sing-box 配置校验或热重载失败: "+liveErr.Error())
 				return
 			}

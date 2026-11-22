@@ -1,3 +1,4 @@
+// 文件职责：负责基于 YAML AST 的配置结构与注释无损迁移引擎（MigrateConfigBytes）及可扩展迁移阶段（ConfigMigrationStage）。
 package config
 
 import (
@@ -9,20 +10,21 @@ import (
 	"singctl/configs"
 )
 
-// configMigrationStage defines an extensible configuration migration step.
-type configMigrationStage struct {
+// ConfigMigrationStage defines an extensible configuration migration step.
+type ConfigMigrationStage struct {
 	Name  string
-	Apply func(mc *migrationContext)
+	Apply func(mc *MigrationContext)
 }
 
-type migrationContext struct {
+// MigrationContext 承载单次 YAML AST 配置迁移过程中的新旧文档节点上下文。
+type MigrationContext struct {
 	oldCfg     Config
 	oldDocNode *yaml.Node
 	rootNode   yaml.Node
 	docNode    *yaml.Node
 }
 
-var defaultMigrationStages = []configMigrationStage{
+var defaultMigrationStages = []ConfigMigrationStage{
 	{Name: "subs", Apply: migrateSubsStage},
 	{Name: "github", Apply: migrateGitHubStage},
 	{Name: "hy2", Apply: migrateHy2Stage},
@@ -33,9 +35,9 @@ var defaultMigrationStages = []configMigrationStage{
 	{Name: "client_top_level", Apply: migrateClientTopLevelStage},
 }
 
-// migrateConfigBytes merges oldData into templateData using YAML AST while preserving
+// MigrateConfigBytes merges oldData into templateData using YAML AST while preserving
 // template structure, comments, intentional zero values, and extra OCP stages.
-func migrateConfigBytes(oldData, templateData []byte, extraStages ...configMigrationStage) ([]byte, error) {
+func MigrateConfigBytes(oldData, templateData []byte, extraStages ...ConfigMigrationStage) ([]byte, error) {
 	// Pre-process the old YAML to fix common syntax errors such as missing spaces after colons.
 	cleanOldData := colonSpaceFixRegex.ReplaceAll(oldData, []byte("$1: $2"))
 
@@ -61,7 +63,7 @@ func migrateConfigBytes(oldData, templateData []byte, extraStages ...configMigra
 		return nil, fmt.Errorf("template AST is empty")
 	}
 
-	mc := &migrationContext{
+	mc := &MigrationContext{
 		oldCfg:     oldCfg,
 		oldDocNode: oldDocNode,
 		rootNode:   rootNode,
@@ -113,7 +115,7 @@ func getYAMLSubMap(mapNode *yaml.Node, key string) *yaml.Node {
 
 // selectRoleTemplate switches generic dual-role templates to the single-role baseline
 // matching the existing config so server/client fields never cross-pollinate on upgrade.
-func (mc *migrationContext) selectRoleTemplate() {
+func (mc *MigrationContext) selectRoleTemplate() {
 	if !hasYAMLKey(mc.docNode, "subs") || !hasYAMLKey(mc.docNode, "server") {
 		return
 	}
@@ -147,7 +149,7 @@ func (mc *migrationContext) selectRoleTemplate() {
 	}
 }
 
-func (mc *migrationContext) replaceNode(key string, val any) {
+func (mc *MigrationContext) replaceNode(key string, val any) {
 	var newNode yaml.Node
 	b, err := yaml.Marshal(val)
 	if err != nil {
@@ -189,7 +191,7 @@ func inferScalarTag(val string) string {
 	return "!!str"
 }
 
-func (mc *migrationContext) setOrAddField(parentKey, childKey, childVal string) {
+func (mc *MigrationContext) SetOrAddField(parentKey, childKey, childVal string) {
 	mapNode := getYAMLSubMap(mc.docNode, parentKey)
 	if mapNode == nil {
 		return
@@ -208,7 +210,7 @@ func (mc *migrationContext) setOrAddField(parentKey, childKey, childVal string) 
 	mapNode.Content = append(mapNode.Content, keyNode, valNode)
 }
 
-func (mc *migrationContext) setOrAddMapping(parentKey, childKey string, val any) {
+func (mc *MigrationContext) setOrAddMapping(parentKey, childKey string, val any) {
 	mapNode := getYAMLSubMap(mc.docNode, parentKey)
 	if mapNode == nil {
 		return
@@ -230,7 +232,7 @@ func (mc *migrationContext) setOrAddMapping(parentKey, childKey string, val any)
 	mapNode.Content = append(mapNode.Content, keyNode, childNode)
 }
 
-func (mc *migrationContext) removeField(parentKey, childKey string) {
+func (mc *MigrationContext) removeField(parentKey, childKey string) {
 	mapNode := getYAMLSubMap(mc.docNode, parentKey)
 	if mapNode == nil {
 		return
@@ -243,7 +245,7 @@ func (mc *migrationContext) removeField(parentKey, childKey string) {
 	}
 }
 
-func migrateSubsStage(mc *migrationContext) {
+func migrateSubsStage(mc *MigrationContext) {
 	for _, s := range mc.oldCfg.Subs {
 		if s.URL != "" || s.Name != "" {
 			mc.replaceNode("subs", mc.oldCfg.Subs)
@@ -252,75 +254,75 @@ func migrateSubsStage(mc *migrationContext) {
 	}
 }
 
-func migrateGitHubStage(mc *migrationContext) {
+func migrateGitHubStage(mc *MigrationContext) {
 	if oldGitHub := getYAMLSubMap(mc.oldDocNode, "github"); hasYAMLKey(oldGitHub, "mirror_url") {
-		mc.setOrAddField("github", "mirror_url", mc.oldCfg.GitHub.MirrorURL)
+		mc.SetOrAddField("github", "mirror_url", mc.oldCfg.GitHub.MirrorURL)
 	}
 }
 
-func migrateHy2Stage(mc *migrationContext) {
+func migrateHy2Stage(mc *MigrationContext) {
 	oldHy2 := getYAMLSubMap(mc.oldDocNode, "hy2")
 	if oldHy2 == nil {
 		return
 	}
 	if hasYAMLKey(oldHy2, "up") {
-		mc.setOrAddField("hy2", "up", strconv.Itoa(mc.oldCfg.Hy2.Up))
+		mc.SetOrAddField("hy2", "up", strconv.Itoa(mc.oldCfg.Hy2.Up))
 	}
 	if hasYAMLKey(oldHy2, "down") {
-		mc.setOrAddField("hy2", "down", strconv.Itoa(mc.oldCfg.Hy2.Down))
+		mc.SetOrAddField("hy2", "down", strconv.Itoa(mc.oldCfg.Hy2.Down))
 	}
 }
 
-func migrateDNSStage(mc *migrationContext) {
+func migrateDNSStage(mc *MigrationContext) {
 	oldDNS := getYAMLSubMap(mc.oldDocNode, "dns")
 	if oldDNS == nil {
 		return
 	}
 	if hasYAMLKey(oldDNS, "enabled") && mc.oldCfg.DNS.Enabled != nil {
-		mc.setOrAddField("dns", "enabled", strconv.FormatBool(*mc.oldCfg.DNS.Enabled))
+		mc.SetOrAddField("dns", "enabled", strconv.FormatBool(*mc.oldCfg.DNS.Enabled))
 	}
 	if hasYAMLKey(oldDNS, "dns_port") && mc.oldCfg.DNS.DNSPort > 0 {
-		mc.setOrAddField("dns", "dns_port", strconv.Itoa(mc.oldCfg.DNS.DNSPort))
+		mc.SetOrAddField("dns", "dns_port", strconv.Itoa(mc.oldCfg.DNS.DNSPort))
 	}
 	if hasYAMLKey(oldDNS, "web_port") && mc.oldCfg.DNS.WebPort > 0 {
-		mc.setOrAddField("dns", "web_port", strconv.Itoa(mc.oldCfg.DNS.WebPort))
+		mc.SetOrAddField("dns", "web_port", strconv.Itoa(mc.oldCfg.DNS.WebPort))
 	}
 	if hasYAMLKey(oldDNS, "username") && mc.oldCfg.DNS.Username != "" {
-		mc.setOrAddField("dns", "username", mc.oldCfg.DNS.Username)
+		mc.SetOrAddField("dns", "username", mc.oldCfg.DNS.Username)
 	}
 	if hasYAMLKey(oldDNS, "password") && mc.oldCfg.DNS.Password != "" {
-		mc.setOrAddField("dns", "password", mc.oldCfg.DNS.Password)
+		mc.SetOrAddField("dns", "password", mc.oldCfg.DNS.Password)
 	}
 }
 
-func migrateTailscaleStage(mc *migrationContext) {
+func migrateTailscaleStage(mc *MigrationContext) {
 	oldTS := getYAMLSubMap(mc.oldDocNode, "tailscale")
 	if oldTS == nil {
 		return
 	}
 	if hasYAMLKey(oldTS, "auth_key") {
-		mc.setOrAddField("tailscale", "auth_key", mc.oldCfg.Tailscale.AuthKey)
+		mc.SetOrAddField("tailscale", "auth_key", mc.oldCfg.Tailscale.AuthKey)
 	}
 	if hasYAMLKey(oldTS, "subnets") {
-		mc.setOrAddField("tailscale", "subnets", mc.oldCfg.Tailscale.Subnets)
+		mc.SetOrAddField("tailscale", "subnets", mc.oldCfg.Tailscale.Subnets)
 	}
 	if hasYAMLKey(oldTS, "use_build") {
-		mc.setOrAddField("tailscale", "use_build", strconv.FormatBool(mc.oldCfg.Tailscale.UseBuild))
+		mc.SetOrAddField("tailscale", "use_build", strconv.FormatBool(mc.oldCfg.Tailscale.UseBuild))
 	}
 	if hasYAMLKey(oldTS, "p2p_assist") && !mc.oldCfg.Tailscale.P2PAssist.IsZero() {
 		mc.setOrAddMapping("tailscale", "p2p_assist", mc.oldCfg.Tailscale.P2PAssist)
 	}
 }
 
-func setOrClearServerField(mc *migrationContext, oldServer *yaml.Node, key, val string) {
+func setOrClearServerField(mc *MigrationContext, oldServer *yaml.Node, key, val string) {
 	if val != "" {
-		mc.setOrAddField("server", key, val)
+		mc.SetOrAddField("server", key, val)
 	} else if hasYAMLKey(oldServer, key) {
-		mc.setOrAddField("server", key, "")
+		mc.SetOrAddField("server", key, "")
 	}
 }
 
-func migrateServerStage(mc *migrationContext) {
+func migrateServerStage(mc *MigrationContext) {
 	oldServer := getYAMLSubMap(mc.oldDocNode, "server")
 	if oldServer == nil {
 		return
@@ -336,12 +338,12 @@ func migrateServerStage(mc *migrationContext) {
 	setOrClearServerField(mc, oldServer, "node_domain", nodeDomain)
 
 	if mc.oldCfg.Server.Hy2Port > 0 && mc.oldCfg.Server.Hy2Port <= 65535 {
-		mc.setOrAddField("server", "hy2_port", strconv.Itoa(mc.oldCfg.Server.Hy2Port))
+		mc.SetOrAddField("server", "hy2_port", strconv.Itoa(mc.oldCfg.Server.Hy2Port))
 	} else if hasYAMLKey(oldServer, "hy2_port") {
 		mc.removeField("server", "hy2_port")
 	}
 	if mc.oldCfg.Server.VlessPort > 0 && mc.oldCfg.Server.VlessPort <= 65535 {
-		mc.setOrAddField("server", "vless_port", strconv.Itoa(mc.oldCfg.Server.VlessPort))
+		mc.SetOrAddField("server", "vless_port", strconv.Itoa(mc.oldCfg.Server.VlessPort))
 	} else if hasYAMLKey(oldServer, "vless_port") {
 		mc.removeField("server", "vless_port")
 	}
@@ -355,15 +357,15 @@ func migrateServerStage(mc *migrationContext) {
 	setOrClearServerField(mc, oldServer, "cf_dns_key", mc.oldCfg.Server.CFDNSKey)
 
 	if hasYAMLKey(oldServer, "sni") {
-		mc.setOrAddField("server", "sni", mc.oldCfg.Server.Sni)
+		mc.SetOrAddField("server", "sni", mc.oldCfg.Server.Sni)
 	}
 	if hasYAMLKey(oldServer, "cors_allowed_origins") {
-		mc.setOrAddField("server", "cors_allowed_origins", mc.oldCfg.Server.CorsAllowedOrigins)
+		mc.SetOrAddField("server", "cors_allowed_origins", mc.oldCfg.Server.CorsAllowedOrigins)
 	}
 
 	// 处理旧版兼容字段 sb_domain：若旧配置包含则保留，否则从模板中移除，绝不注入虚假默认域名
 	if hasYAMLKey(oldServer, "sb_domain") {
-		mc.setOrAddField("server", "sb_domain", mc.oldCfg.Server.SBDomain)
+		mc.SetOrAddField("server", "sb_domain", mc.oldCfg.Server.SBDomain)
 	} else {
 		mc.removeField("server", "sb_domain")
 	}
@@ -379,32 +381,32 @@ func migrateServerStage(mc *migrationContext) {
 	}
 }
 
-func migrateWatchdogStage(mc *migrationContext) {
+func migrateWatchdogStage(mc *MigrationContext) {
 	oldWD := getYAMLSubMap(mc.oldDocNode, "watchdog")
 	if oldWD == nil {
 		return
 	}
 	if hasYAMLKey(oldWD, "interval") {
-		mc.setOrAddField("watchdog", "interval", strconv.Itoa(mc.oldCfg.Watchdog.Interval))
+		mc.SetOrAddField("watchdog", "interval", strconv.Itoa(mc.oldCfg.Watchdog.Interval))
 	}
 	if hasYAMLKey(oldWD, "confirm_wait") {
-		mc.setOrAddField("watchdog", "confirm_wait", strconv.Itoa(mc.oldCfg.Watchdog.ConfirmWait))
+		mc.SetOrAddField("watchdog", "confirm_wait", strconv.Itoa(mc.oldCfg.Watchdog.ConfirmWait))
 	}
 	if hasYAMLKey(oldWD, "max_restarts") {
-		mc.setOrAddField("watchdog", "max_restarts", strconv.Itoa(mc.oldCfg.Watchdog.MaxRestarts))
+		mc.SetOrAddField("watchdog", "max_restarts", strconv.Itoa(mc.oldCfg.Watchdog.MaxRestarts))
 	}
 	if hasYAMLKey(oldWD, "sub_sync_interval") {
-		mc.setOrAddField("watchdog", "sub_sync_interval", strconv.Itoa(mc.oldCfg.Watchdog.SubSyncInterval))
+		mc.SetOrAddField("watchdog", "sub_sync_interval", strconv.Itoa(mc.oldCfg.Watchdog.SubSyncInterval))
 	}
 	if hasYAMLKey(oldWD, "preserve_manual_config") && mc.oldCfg.Watchdog.PreserveManualConfig != nil {
-		mc.setOrAddField("watchdog", "preserve_manual_config", strconv.FormatBool(*mc.oldCfg.Watchdog.PreserveManualConfig))
+		mc.SetOrAddField("watchdog", "preserve_manual_config", strconv.FormatBool(*mc.oldCfg.Watchdog.PreserveManualConfig))
 	}
 	if hasYAMLKey(oldWD, "failover") && !mc.oldCfg.Watchdog.Failover.IsEmpty() {
 		mc.setOrAddMapping("watchdog", "failover", mc.oldCfg.Watchdog.Failover)
 	}
 }
 
-func migrateClientTopLevelStage(mc *migrationContext) {
+func migrateClientTopLevelStage(mc *MigrationContext) {
 	if hasYAMLKey(mc.oldDocNode, "custom_rules") && !mc.oldCfg.CustomRules.IsEmpty() {
 		mc.replaceNode("custom_rules", mc.oldCfg.CustomRules)
 	}

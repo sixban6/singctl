@@ -288,7 +288,7 @@ func checkWARPAndUnlockItems(_ context.Context, _ *config.Config, deps Deps) []D
 		Name:     "VPS 原生出口画像",
 		Category: "network",
 		Status:   "ok",
-		Summary:  formatProfileSummary(&unlock.Direct),
+		Summary:  FormatProfileSummary(&unlock.Direct),
 		Detail:   fmt.Sprintf("出口公网 IP: %s (%s)", unlock.Direct.ExitIP, unlock.Direct.ExitLoc),
 	}}
 
@@ -297,7 +297,7 @@ func checkWARPAndUnlockItems(_ context.Context, _ *config.Config, deps Deps) []D
 			Name:     "WARP 分流出口画像",
 			Category: "network",
 			Status:   "ok",
-			Summary:  formatProfileSummary(&unlock.WARP),
+			Summary:  FormatProfileSummary(&unlock.WARP),
 			Detail:   fmt.Sprintf("出口公网 IP: %s (%s)", unlock.WARP.ExitIP, unlock.WARP.ExitLoc),
 		})
 	} else {
@@ -312,7 +312,8 @@ func checkWARPAndUnlockItems(_ context.Context, _ *config.Config, deps Deps) []D
 	return items
 }
 
-func formatProfileSummary(p *ExitProfile) string {
+// FormatProfileSummary 将单条出口解锁画像格式化为紧凑单行摘要。
+func FormatProfileSummary(p *ExitProfile) string {
 	list := make([]string, 0, 4)
 	if p.OpenAI.Status == "unlocked" {
 		list = append(list, fmt.Sprintf("OpenAI [%s]", cmp.Or(p.OpenAI.Region, "OK")))
@@ -336,10 +337,6 @@ func formatProfileSummary(p *ExitProfile) string {
 		list = append(list, "Google [无验证码]")
 	}
 	return strings.Join(list, " | ")
-}
-
-func checkWebTerminal(cfg *config.Config, r *DoctorReport) {
-	r.Items = append(r.Items, checkWebTerminalItems(context.Background(), cfg, DefaultDeps())...)
 }
 
 func checkWebTerminalItems(_ context.Context, cfg *config.Config, deps Deps) []DoctorItem {

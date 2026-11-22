@@ -3,8 +3,8 @@ package ssh
 import (
 	"fmt"
 
+	"singctl/internal/common/table"
 	"singctl/internal/logger"
-	"singctl/internal/util/table"
 )
 
 // PrintExecutionReport prints a summary table of the execution results across hosts.

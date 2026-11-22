@@ -1,4 +1,4 @@
-import { maskFullIP } from '../../lib/privacyMask';
+import { maskFullIP } from '../../../lib/privacyMask';
 
 export type BanScopeFilter = 'all' | 'dynamic_v4' | 'dynamic_v6' | 'forever';
 export type RuleTabKey = 'bans' | 'whitelist' | 'ports';

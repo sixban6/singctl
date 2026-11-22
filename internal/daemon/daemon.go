@@ -2,22 +2,24 @@
 package daemon
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"os"
 	"os/signal"
-	"singctl/internal/audit"
-	"singctl/internal/config"
-	"singctl/internal/constant"
-	"singctl/internal/lifecycle"
-	"singctl/internal/logger"
-	"singctl/internal/tailscale"
-	"singctl/internal/util/netinfo"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"singctl/internal/audit"
+	"singctl/internal/common/netx"
+	"singctl/internal/config"
+	"singctl/internal/constant"
+	"singctl/internal/lifecycle"
+	"singctl/internal/logger"
+	"singctl/internal/tailscale"
 )
 
 const (
@@ -29,9 +31,15 @@ const (
 	defaultAuditThrottleReconcileInterval = 10 * time.Minute
 )
 
-type p2pEventGate struct {
+// P2PEventGate 对高频重复的 TS_P2P_DIRECT_OK 成功事件按节点执行时间窗去重，保留告警与手动测试事件。
+type P2PEventGate struct {
 	mu       sync.Mutex
 	lastSent map[string]time.Time
+}
+
+// NewP2PEventGate 创建 P2P 事件节流门控实例。
+func NewP2PEventGate() *P2PEventGate {
+	return &P2PEventGate{lastSent: make(map[string]time.Time)}
 }
 
 func extractP2PPeerLabel(summary string) string {
@@ -43,7 +51,8 @@ func extractP2PPeerLabel(summary string) string {
 	return "default"
 }
 
-func (g *p2pEventGate) shouldAppendRuntimeEvent(action, summary string, now time.Time) bool {
+// ShouldAppendRuntimeEvent 判断该 P2P 事件是否应追加至状态快照时间线。
+func (g *P2PEventGate) ShouldAppendRuntimeEvent(action, summary string, now time.Time) bool {
 	if action != "TS_P2P_DIRECT_OK" {
 		return true
 	}
@@ -60,7 +69,19 @@ func (g *p2pEventGate) shouldAppendRuntimeEvent(action, summary string, now time
 	return true
 }
 
-// Daemon 守护进程
+// DaemonOptions 显式配置守护进程的运行参数与测试注入替身（无需篡改包级全局变量）。
+type DaemonOptions struct {
+	ConfigPath          string
+	Version             string
+	Paths               Paths
+	SkipSignalSetup     bool
+	PidWriter           func() error
+	PidRemover          func() error
+	SubSyncCheckTimeout time.Duration
+	SubSyncBinOverride  string
+}
+
+// Daemon 守护进程。
 type Daemon struct {
 	cfgStore            *config.Store
 	configPath          string
@@ -92,7 +113,6 @@ type Daemon struct {
 	p2pSnapMu           sync.Mutex
 	p2pLastSnapSummary  string
 
-	// 测试注入钩子（留空回退生产实现，避免单测修改全局状态）
 	logPathOverride string
 	skipSignalSetup bool
 	pidWriter       func() error
@@ -101,6 +121,14 @@ type Daemon struct {
 
 // NewDaemonWithMeta 创建带配置文件路径（支持热重载）与版本号标识的守护进程。
 func NewDaemonWithMeta(cfg *config.Config, configPath, version string) *Daemon {
+	return NewDaemonWithOptions(cfg, DaemonOptions{
+		ConfigPath: configPath,
+		Version:    version,
+	})
+}
+
+// NewDaemonWithOptions 使用显式选项创建守护进程实例。
+func NewDaemonWithOptions(cfg *config.Config, opts DaemonOptions) *Daemon {
 	if cfg == nil {
 		cfg = &config.Config{}
 	}
@@ -114,7 +142,7 @@ func NewDaemonWithMeta(cfg *config.Config, configPath, version string) *Daemon {
 	failover.RestoreSnapshot(LoadRuntimeSnapshot().ActiveFailovers)
 
 	cfgStore := config.NewStore(
-		configPath,
+		opts.ConfigPath,
 		config.WithInitialConfig(cfg),
 		config.WithLoader(func(p string) (*config.Config, error) {
 			loaded, err := config.Load(p)
@@ -125,16 +153,12 @@ func NewDaemonWithMeta(cfg *config.Config, configPath, version string) *Daemon {
 		}),
 	)
 
-	ver := strings.TrimSpace(version)
-	if ver == "" {
-		ver = "dev"
-	}
-
-	eventGate := &p2pEventGate{}
+	ver := cmp.Or(strings.TrimSpace(opts.Version), "dev")
+	eventGate := NewP2PEventGate()
 	p2pCtrl := &tailscale.P2PAssistController{
 		BaseCtx: ctx,
 		DefaultLANCIDR: func() string {
-			s, err := netinfo.GetLANSubnet()
+			s, err := netx.GetLANSubnet()
 			if err != nil {
 				return ""
 			}
@@ -142,7 +166,7 @@ func NewDaemonWithMeta(cfg *config.Config, configPath, version string) *Daemon {
 		},
 		OnEvent: func(action string, healthy bool, summary string) {
 			logger.Info("[Tailscale-P2P] %s: %s", action, summary)
-			if !eventGate.shouldAppendRuntimeEvent(action, summary, time.Now()) {
+			if !eventGate.ShouldAppendRuntimeEvent(action, summary, time.Now()) {
 				return
 			}
 			AppendRuntimeEvent(WatchdogEventRecord{
@@ -154,27 +178,41 @@ func NewDaemonWithMeta(cfg *config.Config, configPath, version string) *Daemon {
 	}
 
 	return &Daemon{
-		cfgStore:           cfgStore,
-		configPath:         configPath,
-		version:            ver,
-		limiter:            limiter,
-		ctx:                ctx,
-		cancel:             cancel,
-		reloadCh:           make(chan struct{}, 1),
-		lastSubSyncCheckAt: time.Now(),
-		failover:           failover,
-		auditCollector:     audit.NewCollector(cfg),
-		p2pCtrl:            p2pCtrl,
+		cfgStore:            cfgStore,
+		configPath:          opts.ConfigPath,
+		version:             ver,
+		limiter:             limiter,
+		ctx:                 ctx,
+		cancel:              cancel,
+		reloadCh:            make(chan struct{}, 1),
+		lastSubSyncCheckAt:  time.Now(),
+		subSyncCheckTimeout: opts.SubSyncCheckTimeout,
+		subSyncBinOverride:  opts.SubSyncBinOverride,
+		failover:            failover,
+		auditCollector:      audit.NewCollector(cfg),
+		p2pCtrl:             p2pCtrl,
+		logPathOverride:     strings.TrimSpace(opts.Paths.LogFile),
+		skipSignalSetup:     opts.SkipSignalSetup,
+		pidWriter:           opts.PidWriter,
+		pidRemover:          opts.PidRemover,
 	}
 }
 
-// currentConfig 获取最新配置（若磁盘上 singctl.yaml 已变更则自动热重载）。
+// HasOpenLogFile 返回当前守护实例是否持有已打开的日志文件句柄。
+func (d *Daemon) HasOpenLogFile() bool {
+	if d == nil {
+		return false
+	}
+	d.logMu.Lock()
+	defer d.logMu.Unlock()
+	return d.logFile != nil
+}
+
 func (d *Daemon) currentConfig() *config.Config {
 	_, cfg := d.reloadConfigIfChanged(false)
 	return cfg
 }
 
-// reloadConfigIfChanged 检测磁盘 singctl.yaml 指纹（或 force=true 时强制重载）并热更新内存组件。
 func (d *Daemon) reloadConfigIfChanged(force bool) (bool, *config.Config) {
 	if d.cfgStore == nil {
 		return false, &config.Config{}
@@ -197,19 +235,17 @@ func (d *Daemon) Start() error {
 	if os.Getenv(envDaemonized) == "1" {
 		return d.runForeground()
 	}
-
 	if err := AcquirePidLock(); err != nil {
 		if errors.Is(err, ErrDaemonAlreadyRunning) {
 			logger.Error("daemon already running")
 		}
 		return err
 	}
-
 	return d.spawn()
 }
 
-// buildForegroundLifecycle 构建守护进程前台运行时的三阶段确定性生命周期编排组。
-func (d *Daemon) buildForegroundLifecycle() *lifecycle.Group {
+// BuildForegroundLifecycle 构建守护进程前台运行时的三阶段确定性生命周期编排组。
+func (d *Daemon) BuildForegroundLifecycle() *lifecycle.Group {
 	pidWrite := d.pidWriter
 	if pidWrite == nil {
 		pidWrite = WritePidFile
@@ -303,9 +339,8 @@ func (d *Daemon) buildForegroundLifecycle() *lifecycle.Group {
 	return g
 }
 
-// runForeground 子进程主体：通过确定性生命周期编排器初始化并进入监控循环（阻塞）
 func (d *Daemon) runForeground() error {
-	lc := d.buildForegroundLifecycle()
+	lc := d.BuildForegroundLifecycle()
 	if err := lc.Start(d.ctx); err != nil {
 		notifyParentReady(false)
 		logger.Error("failed to start daemon foreground lifecycle: %v", err)
@@ -316,7 +351,6 @@ func (d *Daemon) runForeground() error {
 	}()
 
 	notifyParentReady(true)
-
 	return d.monitorLoop()
 }
 
@@ -344,17 +378,40 @@ func calcIntervals(cfg *config.Config) (time.Duration, time.Duration) {
 }
 
 func shouldRunP2PAssistTicker(cfg *config.Config, p2pLastActive bool) bool {
-	if p2pLastActive {
-		return true
-	}
-	return cfg != nil && cfg.Tailscale.P2PAssist.Enabled
+	return p2pLastActive || (cfg != nil && cfg.Tailscale.P2PAssist.Enabled)
 }
 
 func shouldRunThrottleTicker(cfg *config.Config) bool {
 	return cfg != nil && len(cfg.Audit.Throttles) > 0
 }
 
-// monitorLoop 监控循环
+type optionalTickerState struct {
+	p2pTicker      *time.Ticker
+	throttleTicker *time.Ticker
+	p2pRunning     bool
+	throtRunning   bool
+}
+
+func (ts *optionalTickerState) sync(cfg *config.Config, p2pLastActive bool) {
+	wantP2P := shouldRunP2PAssistTicker(cfg, p2pLastActive)
+	if wantP2P && !ts.p2pRunning {
+		ts.p2pTicker.Reset(3 * time.Second)
+		ts.p2pRunning = true
+	} else if !wantP2P && ts.p2pRunning {
+		ts.p2pTicker.Stop()
+		ts.p2pRunning = false
+	}
+
+	wantThrottle := shouldRunThrottleTicker(cfg)
+	if wantThrottle && !ts.throtRunning {
+		ts.throttleTicker.Reset(defaultAuditThrottleReconcileInterval)
+		ts.throtRunning = true
+	} else if !wantThrottle && ts.throtRunning {
+		ts.throttleTicker.Stop()
+		ts.throtRunning = false
+	}
+}
+
 func (d *Daemon) monitorLoop() error {
 	cfg := d.currentConfig()
 	curWDInterval, curFOInterval := calcIntervals(cfg)
@@ -368,28 +425,13 @@ func (d *Daemon) monitorLoop() error {
 	initFailoverTimer := time.NewTimer(8 * time.Second)
 	initRefreshTimer := time.NewTimer(30 * time.Second)
 
-	p2pTickerRunning := true
-	throttleTickerRunning := true
-	syncOptionalTickers := func(curCfg *config.Config) {
-		wantP2P := shouldRunP2PAssistTicker(curCfg, d.p2pLastActive.Load())
-		if wantP2P && !p2pTickerRunning {
-			p2pAssistTicker.Reset(3 * time.Second)
-			p2pTickerRunning = true
-		} else if !wantP2P && p2pTickerRunning {
-			p2pAssistTicker.Stop()
-			p2pTickerRunning = false
-		}
-
-		wantThrottle := shouldRunThrottleTicker(curCfg)
-		if wantThrottle && !throttleTickerRunning {
-			throttleReconcileTicker.Reset(defaultAuditThrottleReconcileInterval)
-			throttleTickerRunning = true
-		} else if !wantThrottle && throttleTickerRunning {
-			throttleReconcileTicker.Stop()
-			throttleTickerRunning = false
-		}
+	optTickers := &optionalTickerState{
+		p2pTicker:      p2pAssistTicker,
+		throttleTicker: throttleReconcileTicker,
+		p2pRunning:     true,
+		throtRunning:   true,
 	}
-	syncOptionalTickers(cfg)
+	optTickers.sync(cfg, d.p2pLastActive.Load())
 
 	defer func() {
 		watchdogTicker.Stop()
@@ -424,7 +466,7 @@ func (d *Daemon) monitorLoop() error {
 				snap.ActiveFailovers = nil
 			})
 		}
-		syncOptionalTickers(latest)
+		optTickers.sync(latest, d.p2pLastActive.Load())
 		logger.Info("[Watchdog] Config hot-reloaded (interval=%s, failover=%v/%s, sub_sync=%ds)",
 			curWDInterval, latest.Watchdog.Failover.IsEnabled(), curFOInterval, latest.Watchdog.SubSyncInterval)
 	}
@@ -433,42 +475,33 @@ func (d *Daemon) monitorLoop() error {
 		select {
 		case <-d.ctx.Done():
 			return nil
-
 		case <-d.reloadCh:
 			applyHotReload(true)
 			d.maybePatrolGroupFailoverAsync()
 			d.maybeReconcileTailscaleP2PAsync(true)
 			d.maybeReconcileAuditThrottlesAsync(true)
-
 		case <-initHealthTimer.C:
 			res := NewMonitor(d.currentConfig()).CheckHealth()
 			d.recordHealthResult(res)
 			d.maybeReconcileTailscaleP2PAsync(true)
 			d.maybeReconcileAuditThrottlesAsync(true)
-
 		case <-p2pAssistTicker.C:
 			d.maybeReconcileTailscaleP2PAsync(false)
-			syncOptionalTickers(d.currentConfig())
-
+			optTickers.sync(d.currentConfig(), d.p2pLastActive.Load())
 		case <-auditSampleTicker.C:
 			d.maybeSampleDeviceAuditAsync()
-
 		case <-throttleReconcileTicker.C:
 			d.maybeReconcileAuditThrottlesAsync(false)
-
 		case <-initFailoverTimer.C:
 			applyHotReload(false)
 			d.maybePatrolGroupFailoverAsync()
-
 		case <-failoverTicker.C:
 			applyHotReload(false)
 			d.maybePatrolGroupFailoverAsync()
-
 		case <-initRefreshTimer.C:
 			if NewMonitor(d.currentConfig()).CheckHealth().Healthy {
 				d.maybeRefreshRuleSetsAsync()
 			}
-
 		case <-watchdogTicker.C:
 			applyHotReload(false)
 			d.maybeRotateLogFile()

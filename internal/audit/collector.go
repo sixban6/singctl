@@ -7,13 +7,14 @@ import (
 	"maps"
 	"math"
 	"net"
-	"net/http"
-	"singctl/internal/config"
-	"singctl/internal/singbox"
 	"slices"
 	"strings"
 	"sync"
 	"time"
+
+	"singctl/internal/config"
+	"singctl/internal/singbox"
+	"singctl/internal/singbox/clashapi"
 )
 
 // Collector 负责从 sing-box Clash API 采集连接、关联局域网 DHCP/ARP 设备名并执行多维非线性分析。
@@ -24,7 +25,7 @@ type Collector struct {
 	endpoints          []string
 	secret             string
 	customEndpoints    bool
-	httpClient         *http.Client
+	clashClient        *clashapi.Client
 	leaseFiles         []string
 	arpFile            string
 	hostsFile          string
@@ -50,20 +51,11 @@ type Collector struct {
 // NewCollector 创建默认客户端审计采集器（自动兼容 OpenWrt /etc/TZ 与 /etc/config/system 本地时区）。
 func NewCollector(cfg *config.Config) *Collector {
 	c := &Collector{
-		cfg:       cfg,
-		statePath: defaultStatePath(),
-		endpoints: singbox.ClashAPIEndpoints(),
-		secret:    singbox.ClashAPISecret(),
-		httpClient: &http.Client{
-			Timeout: 2500 * time.Millisecond,
-			Transport: &http.Transport{
-				Proxy:               nil,
-				MaxIdleConns:        8,
-				MaxIdleConnsPerHost: 4,
-				IdleConnTimeout:     90 * time.Second,
-				DisableCompression:  true,
-			},
-		},
+		cfg:             cfg,
+		statePath:       defaultStatePath(),
+		endpoints:       singbox.ClashAPIEndpoints(),
+		secret:          singbox.ClashAPISecret(),
+		clashClient:     clashapi.NewClient(clashapi.Options{RequestTimeout: 2500 * time.Millisecond}),
 		leaseFiles:      []string{"/tmp/dhcp.leases", "/var/lib/misc/dnsmasq.leases", "/tmp/dnsmasq.leases"},
 		arpFile:         "/proc/net/arp",
 		hostsFile:       "/etc/hosts",
@@ -121,6 +113,14 @@ func (c *Collector) SetNowFuncForTest(fn func() time.Time) {
 	}
 }
 
+// SetIPv6NeighCmdForTest 供单元测试注入模拟的 `ip -6 neigh show` 输出，零宿主命令副作用。
+func (c *Collector) SetIPv6NeighCmdForTest(fn func() ([]byte, error)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ipv6NeighCmdFunc = fn
+	c.ipv6NeighCache = nil
+}
+
 // CollectOptions 控制审计报告生成的过滤与 AI 增强选项。
 type CollectOptions struct {
 	DeviceFilter string // 仅筛选特定内网设备 IP 或主机名关键字
@@ -170,6 +170,30 @@ func (c *Collector) Collect(ctx context.Context, opts CollectOptions) *Report {
 	return c.collectLocked(ctx, opts)
 }
 
+func purgeBlockedFlows(
+	state *persistedAuditState,
+	selfIPs map[string]bool,
+	devDirectory map[string]lanDeviceInfo,
+	engine *NonlinearEngine,
+) bool {
+	before := len(state.Flows)
+	maps.DeleteFunc(state.Flows, func(_ string, e *persistedFlowEntry) bool {
+		return e == nil || engine.IsBlocked(normalizeSourceDeviceIP(e.DeviceIP, selfIPs, devDirectory), e.Target)
+	})
+	return len(state.Flows) != before
+}
+
+func (c *Collector) shouldSaveSampledStateLocked(state *persistedAuditState, now time.Time) bool {
+	if c.stateDirty {
+		return true
+	}
+	stateMissingOnDisk := c.statePath != "" && (c.cachedStateFp == "" || strings.HasSuffix(c.cachedStateFp, "|missing"))
+	if stateMissingOnDisk && len(state.Flows) > 0 {
+		return true
+	}
+	return c.lastSavedUnix > 0 && now.Unix()-c.lastSavedUnix >= 3600 && len(state.Flows) > 0
+}
+
 func (c *Collector) sampleActiveLocked(ctx context.Context, now time.Time) (
 	state *persistedAuditState,
 	activeByKey map[string][]string,
@@ -186,39 +210,25 @@ func (c *Collector) sampleActiveLocked(ctx context.Context, now time.Time) (
 	activeByKey = make(map[string][]string)
 
 	connsResp, addr, err := c.fetchConnectionsLocked(ctx)
-	if err == nil && connsResp != nil {
-		reachable = true
-		usedAddr = addr
-		ingestedMutated := c.ingestConnectionsLocked(state, connsResp.Connections, devDirectory, selfIPs, activeByKey, engine, now)
-		beforeBlockTrim := len(state.Flows)
-		maps.DeleteFunc(state.Flows, func(_ string, e *persistedFlowEntry) bool {
-			return e == nil || engine.IsBlocked(normalizeSourceDeviceIP(e.DeviceIP, selfIPs, devDirectory), e.Target)
-		})
-		blockTrimmed := len(state.Flows) != beforeBlockTrim
-
-		// 脏写节流优化：15s 后台采样若无新连接、流量增量为 0、且未触发规则/TTL 清理时，
-		// 跳过 `/tmp` JSON 全量编码与原子 rename，仅每小时兜底刷盘保活时间戳，显著降低软路由 CPU 与 GC 分配。
-		if ingestedMutated || blockTrimmed {
-			c.stateDirty = true
-		}
-		stateMissingOnDisk := c.statePath != "" && (c.cachedStateFp == "" || strings.HasSuffix(c.cachedStateFp, "|missing"))
-		idleHeartbeatDue := c.lastSavedUnix > 0 && now.Unix()-c.lastSavedUnix >= 3600 && len(state.Flows) > 0
-		if c.stateDirty || (stateMissingOnDisk && len(state.Flows) > 0) || idleHeartbeatDue {
-			c.saveStateLocked(state, activeByKey, now)
-		}
-	} else {
-		beforeBlockTrim := len(state.Flows)
-		maps.DeleteFunc(state.Flows, func(_ string, e *persistedFlowEntry) bool {
-			return e == nil || engine.IsBlocked(normalizeSourceDeviceIP(e.DeviceIP, selfIPs, devDirectory), e.Target)
-		})
-		if len(state.Flows) != beforeBlockTrim {
+	if err != nil || connsResp == nil {
+		if purgeBlockedFlows(state, selfIPs, devDirectory, engine) {
 			c.stateDirty = true
 			if c.statePath != "" {
 				c.saveStateLocked(state, activeByKey, now)
 			}
 		}
+		return state, activeByKey, devDirectory, selfIPs, engine, "", false
 	}
-	return state, activeByKey, devDirectory, selfIPs, engine, usedAddr, reachable
+
+	ingestedMutated := c.ingestConnectionsLocked(state, connsResp.Connections, devDirectory, selfIPs, activeByKey, engine, now)
+	blockTrimmed := purgeBlockedFlows(state, selfIPs, devDirectory, engine)
+	if ingestedMutated || blockTrimmed {
+		c.stateDirty = true
+	}
+	if c.shouldSaveSampledStateLocked(state, now) {
+		c.saveStateLocked(state, activeByKey, now)
+	}
+	return state, activeByKey, devDirectory, selfIPs, engine, addr, true
 }
 
 func engineConfigFingerprint(cfg *config.Config) string {
@@ -274,73 +284,58 @@ func (c *Collector) resolveSelfIPsLocked() map[string]bool {
 	return c.cachedSelfIPs
 }
 
-func (c *Collector) collectLocked(ctx context.Context, opts CollectOptions) *Report {
-
-	now := c.nowFunc()
+func newBaseAuditReport(cfg *config.Config, now time.Time) *Report {
 	rep := &Report{
-		GeneratedAt: now.Format("2006-01-02 15:04:05"),
-		Devices:     []DeviceSummary{},
-		Flows:       []FlowRecord{},
+		GeneratedAt:   now.Format("2006-01-02 15:04:05"),
+		Devices:       []DeviceSummary{},
+		Flows:         []FlowRecord{},
+		PCDNRuleCount: len(singbox.BuiltinPCDNDomainSuffixes),
 	}
-	if c.cfg != nil {
-		rep.BlockRules = singbox.EffectiveBlockRules(c.cfg)
-		rep.BlockedCount = len(rep.BlockRules)
-		rep.Throttles = slices.Clone(c.cfg.Audit.Throttles)
-		rep.Whitelist = slices.Clone(c.cfg.Audit.Whitelist)
-		rep.WhitelistCount = len(rep.Whitelist)
-		rep.PCDNBlockEnabled = c.cfg.Audit.IsPCDNBlockEnabled()
-	} else {
+	if cfg == nil {
 		rep.BlockRules = singbox.EffectiveBlockRules(nil)
 		rep.BlockedCount = len(rep.BlockRules)
 		rep.PCDNBlockEnabled = true
+		return rep
 	}
-	rep.PCDNRuleCount = len(singbox.BuiltinPCDNDomainSuffixes)
+	rep.BlockRules = singbox.EffectiveBlockRules(cfg)
+	rep.BlockedCount = len(rep.BlockRules)
+	rep.Throttles = slices.Clone(cfg.Audit.Throttles)
+	rep.Whitelist = slices.Clone(cfg.Audit.Whitelist)
+	rep.WhitelistCount = len(rep.Whitelist)
+	rep.PCDNBlockEnabled = cfg.Audit.IsPCDNBlockEnabled()
+	return rep
+}
 
-	state, activeByKey, devDirectory, selfIPs, engine, usedAddr, reachable := c.sampleActiveLocked(ctx, now)
-	if reachable {
-		rep.Reachable = true
-		rep.ControllerAddr = usedAddr
-	} else {
-		rep.Reachable = false
-		if len(state.Flows) > 0 {
-			rep.Message = "当前 sing-box 控制端口不可达，正在展示最近缓存的设备审计快照"
-		} else {
-			rep.Message = "未检测到运行中的 sing-box 代理实例 (Clash API 不可达)"
-			return rep
-		}
+func resolveFlowDeviceIdentity(normDevIP string, entry *persistedFlowEntry, devDirectory map[string]lanDeviceInfo) (name, mac string) {
+	if normDevIP == "127.0.0.1" || normDevIP == "::1" {
+		return "本机网关 (Localhost)", ""
 	}
+	name, mac = entry.DeviceName, entry.DeviceMAC
+	if info, ok := devDirectory[normDevIP]; ok {
+		name = cmp.Or(info.Name, name)
+		mac = cmp.Or(info.MAC, mac)
+	}
+	return cmp.Or(name, normDevIP), mac
+}
 
+func buildRawFlowRecords(
+	cfg *config.Config,
+	state *persistedAuditState,
+	activeByKey map[string][]string,
+	devDirectory map[string]lanDeviceInfo,
+	selfIPs map[string]bool,
+	engine *NonlinearEngine,
+	now time.Time,
+) []FlowRecord {
 	rawFlows := make([]FlowRecord, 0, len(state.Flows))
-	allFlows := make([]FlowRecord, 0, len(state.Flows))
-	deviceAgg := make(map[string]*DeviceSummary)
-	lowerFilter := strings.ToLower(strings.TrimSpace(opts.DeviceFilter))
-
+	displayLoc := now.Location()
 	for _, entry := range state.Flows {
 		normDevIP := normalizeSourceDeviceIP(entry.DeviceIP, selfIPs, devDirectory)
 		if engine.IsBlocked(normDevIP, entry.Target) {
 			continue
 		}
-		devName, devMAC := entry.DeviceName, entry.DeviceMAC
-		if info, ok := devDirectory[normDevIP]; ok {
-			if info.Name != "" {
-				devName = info.Name
-			}
-			if info.MAC != "" {
-				devMAC = info.MAC
-			}
-		}
-		if normDevIP == "127.0.0.1" || normDevIP == "::1" {
-			devName = "本机网关 (Localhost)"
-			devMAC = ""
-		} else if devName == "" {
-			devName = normDevIP
-		}
-
+		devName, devMAC := resolveFlowDeviceIdentity(normDevIP, entry, devDirectory)
 		activeIDs := activeByKey[entry.Key]
-		appName := IdentifyApp(entry.Target, entry.DestIP, entry.Rule, entry.RawHost)
-		cachedAI := LookupCachedAIReview(entry.Target)
-		activeSpanSec := max(int64(60), entry.LastSeenUnix-entry.FirstSeenUnix)
-		displayLoc := now.Location()
 		rawFlows = append(rawFlows, FlowRecord{
 			Key:               entry.Key,
 			DeviceIP:          normDevIP,
@@ -348,7 +343,7 @@ func (c *Collector) collectLocked(ctx context.Context, opts CollectOptions) *Rep
 			DeviceMAC:         devMAC,
 			DeviceRole:        InferDeviceRole(devName),
 			Target:            entry.Target,
-			AppName:           appName,
+			AppName:           IdentifyApp(entry.Target, entry.DestIP, entry.Rule, entry.RawHost),
 			RawHost:           entry.RawHost,
 			DestIP:            entry.DestIP,
 			DestPort:          entry.DestPort,
@@ -359,110 +354,124 @@ func (c *Collector) collectLocked(ctx context.Context, opts CollectOptions) *Rep
 			Rule:              entry.Rule,
 			UploadBytes:       entry.UploadBytes,
 			DownloadBytes:     entry.DownloadBytes,
-			ThrottledRateKBps: matchThrottleRateKBps(c.cfg, entry.Target, entry.DestPort),
+			ThrottledRateKBps: matchThrottleRateKBps(cfg, entry.Target, entry.DestPort),
 			ConnCount:         entry.ConnCount,
 			ActiveConns:       len(activeIDs),
 			ActiveConnIDs:     activeIDs,
 			FirstSeen:         time.Unix(entry.FirstSeenUnix, 0).In(displayLoc).Format("15:04:05"),
 			LastSeen:          time.Unix(entry.LastSeenUnix, 0).In(displayLoc).Format("15:04:05"),
-			ActiveSpanSec:     activeSpanSec,
+			ActiveSpanSec:     max(int64(60), entry.LastSeenUnix-entry.FirstSeenUnix),
 			NightHits:         entry.NightHits,
 			IntervalCV:        computeIntervalCV(entry.ArrivalsUnix),
-			AIReview:          cachedAI,
+			AIReview:          LookupCachedAIReview(entry.Target),
 		})
 	}
+	return rawFlows
+}
 
-	// 先在全局层面按 (设备, 目的网段) 聚合标注纯裸 IP 同网段聚集簇与跨网段 UDP 蜂群，再逐条评分汇总
+func isIPv4Literal(ip string) bool {
+	p := net.ParseIP(strings.TrimSpace(ip))
+	return p != nil && p.To4() != nil
+}
+
+func accumulateDeviceSummary(deviceAgg map[string]*DeviceSummary, rec FlowRecord, rep *Report) {
+	macNorm := strings.ToLower(strings.TrimSpace(rec.DeviceMAC))
+	aggKey := rec.DeviceIP
+	if macNorm != "" {
+		aggKey = "mac:" + macNorm
+	}
+	ds, exists := deviceAgg[aggKey]
+	if !exists {
+		ds = &DeviceSummary{
+			DeviceIP:   rec.DeviceIP,
+			DeviceName: rec.DeviceName,
+			DeviceMAC:  macNorm,
+			DeviceRole: rec.DeviceRole,
+		}
+		deviceAgg[aggKey] = ds
+	} else {
+		if isIPv4Literal(rec.DeviceIP) && !isIPv4Literal(ds.DeviceIP) {
+			ds.DeviceIP = rec.DeviceIP
+		}
+		if rec.DeviceName != "" && rec.DeviceName != rec.DeviceIP && (ds.DeviceName == "" || ds.DeviceName == ds.DeviceIP) {
+			ds.DeviceName = rec.DeviceName
+			ds.DeviceRole = InferDeviceRole(ds.DeviceName)
+		}
+	}
+
+	ds.UploadBytes += rec.UploadBytes
+	ds.DownloadBytes += rec.DownloadBytes
+	ds.FlowCount++
+	ds.ActiveConns += rec.ActiveConns
+	if rec.State != EnforcementObserved {
+		return
+	}
+	ds.MaxSecurityScore = max(ds.MaxSecurityScore, rec.SecurityScore)
+	ds.MaxPrivacyScore = max(ds.MaxPrivacyScore, rec.PrivacyScore)
+	ds.MaxRiskScore = max(ds.MaxRiskScore, rec.RiskScore)
+	switch rec.Threat {
+	case ThreatHighRisk:
+		ds.HighRiskCount++
+		rep.HighRiskFlows++
+		rep.SuspiciousFlows++
+	case ThreatSuspicious:
+		ds.SuspiciousCount++
+		rep.SuspiciousFlows++
+	}
+}
+
+func flowMatchesCollectFilter(rec FlowRecord, lowerFilter string, onlySuspect bool) bool {
+	if onlySuspect && (rec.State != EnforcementObserved || (rec.RiskScore < 35 && rec.Threat == ThreatNormal)) {
+		return false
+	}
+	if lowerFilter == "" {
+		return true
+	}
+	if rec.SubnetCluster != nil && strings.Contains(strings.ToLower(rec.SubnetCluster.CIDR), lowerFilter) {
+		return true
+	}
+	for _, field := range []string{rec.DeviceIP, rec.DeviceName, rec.DeviceMAC, rec.Target, rec.AppName} {
+		if strings.Contains(strings.ToLower(field), lowerFilter) {
+			return true
+		}
+	}
+	return false
+}
+
+func evaluateAndFilterFlows(
+	engine *NonlinearEngine,
+	rawFlows []FlowRecord,
+	opts CollectOptions,
+	rep *Report,
+) ([]FlowRecord, map[string]*DeviceSummary) {
 	engine.AnnotateDirectIPSubnetClusters(rawFlows)
 	engine.AnnotatePCDNSwarmBehaviors(rawFlows)
 
+	lowerFilter := strings.ToLower(strings.TrimSpace(opts.DeviceFilter))
+	deviceAgg := make(map[string]*DeviceSummary)
+	filtered := make([]FlowRecord, 0, len(rawFlows))
 	for i := range rawFlows {
 		engine.EvaluateFlow(&rawFlows[i])
 		rec := rawFlows[i]
 		if rec.PCDNKind != "" {
 			rep.PCDNDetectedFlows++
 		}
-
-		// 更新设备维度汇总（同 MAC 的双栈 IPv4/IPv6 流量归并至同一物理设备，优先展示 IPv4 地址；已拉黑或白名单目标不计入活跃告警）
-		macNorm := strings.ToLower(strings.TrimSpace(rec.DeviceMAC))
-		aggKey := rec.DeviceIP
-		if macNorm != "" {
-			aggKey = "mac:" + macNorm
+		accumulateDeviceSummary(deviceAgg, rec, rep)
+		if flowMatchesCollectFilter(rec, lowerFilter, opts.OnlySuspect) {
+			filtered = append(filtered, rec)
 		}
-		ds, ok := deviceAgg[aggKey]
-		if !ok {
-			ds = &DeviceSummary{
-				DeviceIP:   rec.DeviceIP,
-				DeviceName: rec.DeviceName,
-				DeviceMAC:  macNorm,
-				DeviceRole: rec.DeviceRole,
-			}
-			deviceAgg[aggKey] = ds
-		} else {
-			recIsV4 := func(ip string) bool {
-				p := net.ParseIP(strings.TrimSpace(ip))
-				return p != nil && p.To4() != nil
-			}
-			if recIsV4(rec.DeviceIP) && !recIsV4(ds.DeviceIP) {
-				ds.DeviceIP = rec.DeviceIP
-			}
-			if rec.DeviceName != "" && rec.DeviceName != rec.DeviceIP && (ds.DeviceName == "" || ds.DeviceName == ds.DeviceIP) {
-				ds.DeviceName = rec.DeviceName
-				ds.DeviceRole = InferDeviceRole(ds.DeviceName)
-			}
-		}
-		ds.UploadBytes += rec.UploadBytes
-		ds.DownloadBytes += rec.DownloadBytes
-		ds.FlowCount++
-		ds.ActiveConns += rec.ActiveConns
-		if rec.State == EnforcementObserved {
-			if rec.SecurityScore > ds.MaxSecurityScore {
-				ds.MaxSecurityScore = rec.SecurityScore
-			}
-			if rec.PrivacyScore > ds.MaxPrivacyScore {
-				ds.MaxPrivacyScore = rec.PrivacyScore
-			}
-			if rec.RiskScore > ds.MaxRiskScore {
-				ds.MaxRiskScore = rec.RiskScore
-			}
-			switch rec.Threat {
-			case ThreatHighRisk:
-				ds.HighRiskCount++
-				rep.HighRiskFlows++
-				rep.SuspiciousFlows++
-			case ThreatSuspicious:
-				ds.SuspiciousCount++
-				rep.SuspiciousFlows++
-			}
-		}
-
-		// 过滤条件检查（支持按设备 IP、设备名称、MAC、目标域名、所属目的网段 CIDR 或识别出的应用名过滤）
-		if lowerFilter != "" {
-			cidrMatch := rec.SubnetCluster != nil && strings.Contains(strings.ToLower(rec.SubnetCluster.CIDR), lowerFilter)
-			if !cidrMatch &&
-				!strings.Contains(strings.ToLower(rec.DeviceIP), lowerFilter) &&
-				!strings.Contains(strings.ToLower(rec.DeviceName), lowerFilter) &&
-				!strings.Contains(strings.ToLower(rec.DeviceMAC), lowerFilter) &&
-				!strings.Contains(strings.ToLower(rec.Target), lowerFilter) &&
-				!strings.Contains(strings.ToLower(rec.AppName), lowerFilter) {
-				continue
-			}
-		}
-		if opts.OnlySuspect && (rec.State != EnforcementObserved || (rec.RiskScore < 35 && rec.Threat == ThreatNormal)) {
-			continue
-		}
-		allFlows = append(allFlows, rec)
 	}
+	return filtered, deviceAgg
+}
 
-	rep.TotalFlows = len(state.Flows)
-
-	// 设备排行按最高风险分 + 上传流量降序排列
+func buildSortedDeviceSummaries(deviceAgg map[string]*DeviceSummary) []DeviceSummary {
+	devices := make([]DeviceSummary, 0, len(deviceAgg))
 	for _, ds := range deviceAgg {
 		denom := float64(ds.DownloadBytes) + 65536.0
 		ds.UploadRatio = math.Round((float64(ds.UploadBytes)/denom)*100) / 100
-		rep.Devices = append(rep.Devices, *ds)
+		devices = append(devices, *ds)
 	}
-	slices.SortFunc(rep.Devices, func(a, b DeviceSummary) int {
+	slices.SortFunc(devices, func(a, b DeviceSummary) int {
 		if c := cmp.Compare(b.HighRiskCount, a.HighRiskCount); c != 0 {
 			return c
 		}
@@ -471,37 +480,73 @@ func (c *Collector) collectLocked(ctx context.Context, opts CollectOptions) *Rep
 		}
 		return cmp.Compare(b.UploadBytes, a.UploadBytes)
 	})
+	return devices
+}
 
-	// 流量列表在截断前按指定字段（默认 "active"：活跃置顶 -> 处置态 -> 威胁等级 -> 风险评分 -> 活跃连接数 -> 上传流量）排序
-	SortFlows(allFlows, opts.SortBy, opts.SortAsc)
-
-	if opts.Limit == 0 {
-		if len(allFlows) > 100 {
-			allFlows = allFlows[:100]
-		}
-	} else if opts.Limit > 0 && len(allFlows) > opts.Limit {
-		allFlows = allFlows[:opts.Limit]
+func truncateFlowsToLimit(flows []FlowRecord, limit int) []FlowRecord {
+	if limit == 0 && len(flows) > 100 {
+		return flows[:100]
 	}
+	if limit > 0 && len(flows) > limit {
+		return flows[:limit]
+	}
+	return flows
+}
+
+func reviewAndReEvaluateWithAI(
+	ctx context.Context,
+	advisor *Advisor,
+	engine *NonlinearEngine,
+	flows []FlowRecord,
+	opts CollectOptions,
+) []FlowRecord {
+	advisor.ReviewSuspiciousFlows(ctx, flows, opts.CallerIP)
+	reEvaluated := false
+	for i := range flows {
+		rev := flows[i].AIReview
+		if rev == nil || rev.Verdict != AIDoNotBlock || flows[i].RiskScore <= 28 {
+			continue
+		}
+		if rev.Source != "" && rev.Source != "builtin_expert" && rev.Source != "trusted_baseline" {
+			engine.EvaluateFlow(&flows[i])
+			reEvaluated = true
+		}
+	}
+	if reEvaluated {
+		SortFlows(flows, opts.SortBy, opts.SortAsc)
+	}
+	return flows
+}
+
+func (c *Collector) collectLocked(ctx context.Context, opts CollectOptions) *Report {
+	now := c.nowFunc()
+	rep := newBaseAuditReport(c.cfg, now)
+
+	state, activeByKey, devDirectory, selfIPs, engine, usedAddr, reachable := c.sampleActiveLocked(ctx, now)
+	if !reachable {
+		if len(state.Flows) == 0 {
+			rep.Message = "未检测到运行中的 sing-box 代理实例 (Clash API 不可达)"
+			return rep
+		}
+		rep.Message = "当前 sing-box 控制端口不可达，正在展示最近缓存的设备审计快照"
+	} else {
+		rep.Reachable = true
+		rep.ControllerAddr = usedAddr
+	}
+
+	rawFlows := buildRawFlowRecords(c.cfg, state, activeByKey, devDirectory, selfIPs, engine, now)
+	allFlows, deviceAgg := evaluateAndFilterFlows(engine, rawFlows, opts, rep)
+	rep.TotalFlows = len(state.Flows)
+	rep.Devices = buildSortedDeviceSummaries(deviceAgg)
+
+	SortFlows(allFlows, opts.SortBy, opts.SortAsc)
+	allFlows = truncateFlowsToLimit(allFlows, opts.Limit)
 
 	advisor := NewAdvisor(c.auditAIConfig())
 	rep.AIEnabled = opts.EnableAI || advisor.IsRemoteLLMConfigured()
 	if opts.EnableAI {
-		advisor.ReviewSuspiciousFlows(ctx, allFlows, opts.CallerIP)
-		// 当同步开启 --ai 时，若真实大模型复核结论为 AIDoNotBlock，立即执行闭环降权重算并重排
-		reEvaluated := false
-		for i := range allFlows {
-			if rev := allFlows[i].AIReview; rev != nil && rev.Verdict == AIDoNotBlock &&
-				rev.Source != "" && rev.Source != "builtin_expert" && rev.Source != "trusted_baseline" &&
-				allFlows[i].RiskScore > 28 {
-				engine.EvaluateFlow(&allFlows[i])
-				reEvaluated = true
-			}
-		}
-		if reEvaluated {
-			SortFlows(allFlows, opts.SortBy, opts.SortAsc)
-		}
+		allFlows = reviewAndReEvaluateWithAI(ctx, advisor, engine, allFlows, opts)
 	}
-
 	rep.Flows = allFlows
 	return rep
 }

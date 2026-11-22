@@ -1,3 +1,4 @@
+// 文件职责：提供看门狗守护进程 (`singctl daemon` / `singctl dm`) 的启停、平滑重启、状态与日志查看子命令。
 package cmd
 
 import (
@@ -170,16 +171,9 @@ func newDaemonStatusCommand() *cobra.Command {
 	}
 }
 
+// IsKeyWatchdogLogLine 判断日志行是否属于看门狗关键告警/容灾/同步事件（委托 daemon 权威实现）。
 func IsKeyWatchdogLogLine(line string) bool {
-	return strings.Contains(line, "[WATCHDOG]") ||
-		strings.Contains(line, "[GroupFailover]") ||
-		strings.Contains(line, "[SubSync]") ||
-		strings.Contains(line, "[RuleSet]") ||
-		strings.Contains(line, "[Watchdog]") ||
-		strings.Contains(line, "Daemon started") ||
-		strings.Contains(line, "Daemon stopped") ||
-		strings.Contains(line, "[WARN]") ||
-		strings.Contains(line, "[ERROR]")
+	return daemon.IsKeyWatchdogLogLine(line)
 }
 
 func newDaemonLogsCommand() *cobra.Command {

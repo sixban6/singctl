@@ -15,8 +15,10 @@ import (
 	"strings"
 )
 
-// authCredentialApplier 定义单个认证模式对目标 Node 的凭据写入策略。
-type authCredentialApplier func(s *Store, id string, in UpsertInput, parsed Node, target *Node) error
+// AuthCredentialApplier 定义单个认证模式对目标 Node 的凭据写入策略。
+type AuthCredentialApplier func(s *Store, id string, in UpsertInput, parsed Node, target *Node) error
+
+type authCredentialApplier = AuthCredentialApplier
 
 var defaultAuthAppliers = map[string]authCredentialApplier{
 	AuthSSHAlias:  applySSHAliasAuth,
@@ -80,6 +82,18 @@ func applyPasswordAuth(_ *Store, _ string, in UpsertInput, parsed Node, target *
 		return errors.New("请提供 SSH 登录密码")
 	}
 	return nil
+}
+
+// ApplyAuthCredentialWithRegistry 根据 parsed.AuthType 查找并执行认证凭据持久化策略，支持注入 overrides 覆盖或扩展。
+func ApplyAuthCredentialWithRegistry(
+	s *Store,
+	id string,
+	in UpsertInput,
+	parsed Node,
+	target *Node,
+	overrides map[string]AuthCredentialApplier,
+) error {
+	return applyAuthCredentialWithRegistry(s, id, in, parsed, target, overrides)
 }
 
 // applyAuthCredentialWithRegistry 根据 parsed.AuthType 查找并执行认证凭据持久化策略，支持测试注入 overrides 覆盖或扩展。

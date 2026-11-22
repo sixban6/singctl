@@ -15,7 +15,7 @@ export const FLEET_CACHE_KEY = 'server:fleet:list';
 export const FLEET_DEFAULTS_CACHE_KEY = 'server:fleet:defaults';
 
 export function prefetchSubscriptionsTab(): void {
-  void import('./components/SubscriptionsTab');
+  void import('./pages/SubscriptionsTab');
   if (!peekCachedQuery(SUBS_CACHE_KEY)) {
     void prefetchCachedQuery(SUBS_CACHE_KEY, () => api.getSubscriptions());
   }
@@ -25,7 +25,7 @@ export function prefetchSubscriptionsTab(): void {
 }
 
 export function prefetchSecurityTab(): void {
-  void import('./components/SecurityTab');
+  void import('./pages/SecurityTab');
   if (!peekCachedQuery(HEAL_CACHE_KEY)) {
     void prefetchCachedQuery(HEAL_CACHE_KEY, () => api.getHealStatus(false));
   }
@@ -38,7 +38,7 @@ export function prefetchSecurityTab(): void {
 }
 
 export function prefetchWarpTab(): void {
-  void import('./components/WarpTab');
+  void import('./pages/WarpTab');
   if (!peekCachedQuery(WARP_ROUTING_CACHE_KEY)) {
     void prefetchCachedQuery(WARP_ROUTING_CACHE_KEY, () => api.getWarpRouting(false, 'local'));
   }
@@ -48,7 +48,7 @@ export function prefetchWarpTab(): void {
 }
 
 export function prefetchFleetTab(): void {
-  void import('./components/FleetTab');
+  void import('./pages/FleetTab');
   if (!peekCachedQuery(FLEET_CACHE_KEY)) {
     void prefetchCachedQuery(FLEET_CACHE_KEY, () => api.getFleet());
   }

@@ -4,7 +4,7 @@ import { Badge, Button, SectionCard, SegmentedTabs, useToast } from '../../../ui
 import { useCachedQuery } from '../../../hooks';
 import { clientApi } from '../../api';
 import { TAILSCALE_P2P_CACHE_KEY } from '../../cacheKeys';
-import { redactInlineSensitive } from '../../lib/privacyMask';
+import { redactInlineSensitive } from '../../../lib/privacyMask';
 import {
   TailscaleAccessMode,
   TailscaleP2PPeerConfig,

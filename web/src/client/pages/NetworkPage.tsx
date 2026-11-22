@@ -24,9 +24,9 @@ import {
   readPrivacyMaskPref,
   redactInlineSensitive,
   writePrivacyMaskPref,
-} from '../lib/privacyMask';
+} from '../../lib/privacyMask';
 import { BrowserDoHCheckResponse, ClientStatusResponse } from '../types';
-import { FirewallPanel } from './FirewallPanel';
+import { FirewallPanel } from './firewall/FirewallPanel';
 import { GatewayModePage, GatewayModePageProps } from './network/GatewayModePage';
 import { TailscalePage, TailscalePageProps } from './network/TailscalePage';
 

@@ -14,7 +14,19 @@ import (
 	"singctl/internal/updater"
 )
 
-type binaryHealthProbe func(ctx context.Context, h *coreHealer, binPath string, wasActive bool) error
+// BinaryHealthProbe 定义核心组件升级后的存活与语法健康探针签名。
+type BinaryHealthProbe func(ctx context.Context, h *CoreHealer, binPath string, wasActive bool) error
+
+// CoreHealerDeps 定义核心组件金丝雀升级器的可替换依赖（nil 字段自动回退生产默认实现）。
+type CoreHealerDeps struct {
+	ServiceMgr       servicemgr.Manager
+	LocateBinaryFn   func(candidates []string, name string) string
+	UpgradeCompFn    func(id string, cfg *config.Config) (updated bool, newVersion string, err error)
+	ProbeOverride    map[string]BinaryHealthProbe
+	ResolveSelfExeFn func() (string, error)
+	SelfUpgradeFn    func(mirror, cfgPath, currentVer string) error
+	RestartWebFn     func(async bool)
+}
 
 type binaryCanarySpec struct {
 	componentID        string
@@ -25,17 +37,31 @@ type binaryCanarySpec struct {
 	requireBackupOnErr bool
 	probeFailFormat    string
 	successFormat      string
-	healthProbe        binaryHealthProbe
+	healthProbe        BinaryHealthProbe
 }
 
-type coreHealer struct {
+// CoreHealer 负责对单组件执行二进制备份、金丝雀升级、存活探针与失败秒级回滚。
+type CoreHealer struct {
 	svcMgr           servicemgr.Manager
 	locateBinaryFn   func(candidates []string, name string) string
 	upgradeCompFn    func(id string, cfg *config.Config) (updated bool, newVersion string, err error)
-	probeOverride    map[string]binaryHealthProbe
+	probeOverride    map[string]BinaryHealthProbe
 	resolveSelfExeFn func() (string, error)
 	selfUpgradeFn    func(mirror, cfgPath, currentVer string) error
 	restartWebFn     func(async bool)
+}
+
+// NewCoreHealer 基于给定依赖构造核心金丝雀升级器。
+func NewCoreHealer(deps CoreHealerDeps) *CoreHealer {
+	return &CoreHealer{
+		svcMgr:           deps.ServiceMgr,
+		locateBinaryFn:   deps.LocateBinaryFn,
+		upgradeCompFn:    deps.UpgradeCompFn,
+		probeOverride:    deps.ProbeOverride,
+		resolveSelfExeFn: deps.ResolveSelfExeFn,
+		selfUpgradeFn:    deps.SelfUpgradeFn,
+		restartWebFn:     deps.RestartWebFn,
+	}
 }
 
 var builtinCanarySpecs = map[string]binaryCanarySpec{
@@ -48,7 +74,7 @@ var builtinCanarySpecs = map[string]binaryCanarySpec{
 		requireBackupOnErr: true,
 		probeFailFormat:    "sing-box 新版健康自检未通过 (%v)，已秒级回滚至 v%s",
 		successFormat:      "sing-box 核心已安全升级 (v%s → v%s) 并通过健康校验",
-		healthProbe: func(ctx context.Context, _ *coreHealer, binPath string, wasActive bool) error {
+		healthProbe: func(ctx context.Context, _ *CoreHealer, binPath string, wasActive bool) error {
 			return verifySingBoxHealth(ctx, binPath, wasActive)
 		},
 	},
@@ -61,7 +87,7 @@ var builtinCanarySpecs = map[string]binaryCanarySpec{
 		requireBackupOnErr: true,
 		probeFailFormat:    "Caddy 新版网关校验未通过 (%v)，已秒级回滚至 v%s",
 		successFormat:      "Caddy 网关已安全升级 (v%s → v%s) 并通过配置与存活验证",
-		healthProbe: func(ctx context.Context, _ *coreHealer, binPath string, wasActive bool) error {
+		healthProbe: func(ctx context.Context, _ *CoreHealer, binPath string, wasActive bool) error {
 			return verifyCaddyHealth(ctx, binPath, wasActive)
 		},
 	},
@@ -74,7 +100,7 @@ var builtinCanarySpecs = map[string]binaryCanarySpec{
 		requireBackupOnErr: false,
 		probeFailFormat:    "WARP 新版进程未就绪，已自动回滚至稳定版",
 		successFormat:      "WARP (wireproxy) 已平滑升级至 v%s",
-		healthProbe: func(ctx context.Context, h *coreHealer, _ string, wasActive bool) error {
+		healthProbe: func(ctx context.Context, h *CoreHealer, _ string, wasActive bool) error {
 			if !wasActive {
 				return nil
 			}
@@ -97,32 +123,28 @@ var builtinCanarySpecs = map[string]binaryCanarySpec{
 	},
 }
 
-func defaultCoreHealer() *coreHealer {
-	return &coreHealer{}
-}
-
-func (h *coreHealer) serviceMgr() servicemgr.Manager {
+func (h *CoreHealer) serviceMgr() servicemgr.Manager {
 	if h != nil && h.svcMgr != nil {
 		return h.svcMgr
 	}
 	return healServiceMgr()
 }
 
-func (h *coreHealer) isActive(ctx context.Context, unit string) bool {
+func (h *CoreHealer) isActive(ctx context.Context, unit string) bool {
 	if h != nil && h.svcMgr != nil {
 		return h.svcMgr.IsActive(ctx, unit)
 	}
 	return isServiceActive(unit)
 }
 
-func (h *coreHealer) locate(candidates []string, name string) string {
+func (h *CoreHealer) locate(candidates []string, name string) string {
 	if h != nil && h.locateBinaryFn != nil {
 		return h.locateBinaryFn(candidates, name)
 	}
 	return locateBinary(candidates, name)
 }
 
-func (h *coreHealer) upgradeComponent(id string, cfg *config.Config) (bool, string, error) {
+func (h *CoreHealer) upgradeComponent(id string, cfg *config.Config) (bool, string, error) {
 	if h != nil && h.upgradeCompFn != nil {
 		return h.upgradeCompFn(id, cfg)
 	}
@@ -144,7 +166,8 @@ func (h *coreHealer) upgradeComponent(id string, cfg *config.Config) (bool, stri
 	return info.Updated, info.NewVersion, nil
 }
 
-func (h *coreHealer) healComponent(ctx context.Context, cfg *config.Config, cfgPath string, comp ComponentCheck, asyncWebRestart bool) LayerActionDetail {
+// HealComponent 对单个核心组件执行安全升级与异常自动回滚。
+func (h *CoreHealer) HealComponent(ctx context.Context, cfg *config.Config, cfgPath string, comp ComponentCheck, asyncWebRestart bool) LayerActionDetail {
 	if comp.Name == "singctl" {
 		return h.healSingCtl(ctx, cfg, cfgPath, comp, asyncWebRestart)
 	}
@@ -154,7 +177,7 @@ func (h *coreHealer) healComponent(ctx context.Context, cfg *config.Config, cfgP
 	return LayerActionDetail{Layer: "core", Target: comp.Name, Success: true, Message: "无需变更"}
 }
 
-func (h *coreHealer) rollbackBinary(ctx context.Context, bakPath, binPath, unit string, restart bool) {
+func (h *CoreHealer) rollbackBinary(ctx context.Context, bakPath, binPath, unit string, restart bool) {
 	if bakPath == "" {
 		return
 	}
@@ -164,7 +187,7 @@ func (h *coreHealer) rollbackBinary(ctx context.Context, bakPath, binPath, unit 
 	}
 }
 
-func (h *coreHealer) runBinaryCanaryUpgrade(ctx context.Context, cfg *config.Config, comp ComponentCheck, spec binaryCanarySpec) LayerActionDetail {
+func (h *CoreHealer) runBinaryCanaryUpgrade(ctx context.Context, cfg *config.Config, comp ComponentCheck, spec binaryCanarySpec) LayerActionDetail {
 	binPath := h.locate(spec.binCandidates, spec.binName)
 	bakPath := backupBinary(binPath)
 	defer cleanupBackup(bakPath)
@@ -230,7 +253,7 @@ func (h *coreHealer) runBinaryCanaryUpgrade(ctx context.Context, cfg *config.Con
 	}
 }
 
-func (h *coreHealer) healSingCtl(ctx context.Context, cfg *config.Config, cfgPath string, comp ComponentCheck, asyncWebRestart bool) LayerActionDetail {
+func (h *CoreHealer) healSingCtl(ctx context.Context, cfg *config.Config, cfgPath string, comp ComponentCheck, asyncWebRestart bool) LayerActionDetail {
 	mirror := ""
 	if cfg != nil {
 		mirror = cfg.GitHub.MirrorURL

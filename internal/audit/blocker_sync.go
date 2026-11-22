@@ -16,7 +16,7 @@ import (
 )
 
 func (e *Enforcer) killMatchingBuiltinPCDNConnections(ctx context.Context) int {
-	var parsed decompiledSRS
+	var parsed DecompiledSRS
 	if err := json.Unmarshal(singbox.BuiltinPCDNRuleSetJSON(), &parsed); err != nil {
 		return 0
 	}
@@ -156,7 +156,7 @@ func (e *Enforcer) killMatchingConnections(ctx context.Context, targetPlain, sou
 	})
 }
 
-func matchDecompiledRuleSet(parsed *decompiledSRS, host, destIP string) bool {
+func matchDecompiledRuleSet(parsed *DecompiledSRS, host, destIP string) bool {
 	if parsed == nil {
 		return false
 	}
@@ -198,19 +198,19 @@ func matchDecompiledRuleSet(parsed *decompiledSRS, host, destIP string) bool {
 	return false
 }
 
-func loadBlockedRuleSetSummary(tag string) *decompiledSRS {
+func loadBlockedRuleSetSummary(tag string) *DecompiledSRS {
 	data, err := os.ReadFile(blockedRuleSetSummaryPath(tag))
 	if err != nil || len(data) == 0 {
 		return nil
 	}
-	var parsed decompiledSRS
+	var parsed DecompiledSRS
 	if json.Unmarshal(data, &parsed) != nil {
 		return nil
 	}
 	return &parsed
 }
 
-func (e *Enforcer) killMatchingRuleSetConnections(ctx context.Context, parsed *decompiledSRS, sourcePlain string) int {
+func (e *Enforcer) killMatchingRuleSetConnections(ctx context.Context, parsed *DecompiledSRS, sourcePlain string) int {
 	if parsed == nil || len(parsed.Rules) == 0 {
 		return 0
 	}

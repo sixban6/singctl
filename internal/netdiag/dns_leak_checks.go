@@ -296,8 +296,8 @@ func aggregateDNSObservations(
 		if s == nil {
 			continue
 		}
-		c, cc, isp := parseEDNSGeo(s.DNSGeo)
-		_, ecsCC, _ := parseEDNSGeo(s.EDNSGeo)
+		c, cc, isp := ParseEDNSGeo(s.DNSGeo)
+		_, ecsCC, _ := ParseEDNSGeo(s.EDNSGeo)
 		addObs(s.DNSIP, c, cc, isp, s.EDNSIP, ecsCC, "gateway")
 	}
 	if strings.TrimSpace(txtResIP) != "" {
@@ -362,7 +362,7 @@ func evaluateObservationLeak(obs *DNSServerObservation, homeIPv4, homeIPv6 strin
 	if homeIPv4 != "" && obs.IP == homeIPv4 {
 		reasons = append(reasons, fmt.Sprintf("DNS 出口暴露为家庭本地公网 IPv4 (%s)", obs.IP))
 	}
-	if homeIPv6 != "" && (obs.IP == homeIPv6 || sameIPv6Prefix48(obs.IP, homeIPv6)) {
+	if homeIPv6 != "" && (obs.IP == homeIPv6 || SameIPv6Prefix48(obs.IP, homeIPv6)) {
 		reasons = append(reasons, fmt.Sprintf("DNS 出口暴露为家庭原生 IPv6 (%s)", obs.IP))
 	}
 	if obs.ECS != "" {
@@ -375,7 +375,7 @@ func evaluateObservationLeak(obs *DNSServerObservation, homeIPv4, homeIPv6 strin
 					reasons = append(reasons, fmt.Sprintf("ECS 子网 (%s) 直接包含家庭宽带 IP", obs.ECS))
 				}
 			}
-			if homeIPv6 != "" && sameIPv6Prefix48(ecsPrefix.Addr().String(), homeIPv6) {
+			if homeIPv6 != "" && SameIPv6Prefix48(ecsPrefix.Addr().String(), homeIPv6) {
 				reasons = append(reasons, fmt.Sprintf("ECS 子网 (%s) 命中家庭 IPv6 前缀", obs.ECS))
 			}
 		} else if ecsAddr, aErr := netip.ParseAddr(obs.ECS); aErr == nil {
@@ -387,7 +387,7 @@ func evaluateObservationLeak(obs *DNSServerObservation, homeIPv4, homeIPv6 strin
 					}
 				}
 			}
-			if homeIPv6 != "" && sameIPv6Prefix48(ecsUnmapped.String(), homeIPv6) {
+			if homeIPv6 != "" && SameIPv6Prefix48(ecsUnmapped.String(), homeIPv6) {
 				reasons = append(reasons, fmt.Sprintf("ECS 子网 (%s) 命中家庭 IPv6 前缀", obs.ECS))
 			}
 		}
@@ -475,7 +475,7 @@ func refineIPv6SplitWithEgress(item DNSLeakCheckItem, ipv6Mode string, egress *E
 	}
 	if ipv6Mode == config.GatewayIPv6Off || ipv6Mode == config.GatewayIPv6CNOnly {
 		ov6 := egress.OverseasIPv6
-		if strings.EqualFold(ov6.CountryCode, "CN") || (homeIPv6 != "" && sameIPv6Prefix48(ov6.IP, homeIPv6)) {
+		if strings.EqualFold(ov6.CountryCode, "CN") || (homeIPv6 != "" && SameIPv6Prefix48(ov6.IP, homeIPv6)) {
 			item.Status = "fail"
 			item.Summary = fmt.Sprintf("检测到海外 IPv6 出口泄漏了家庭宽带 IPv6 (%s)", ov6.IP)
 			item.Detail = "海外 HTTPS-IPv6 探针成功经原生 IPv6 直连并返回本地宽带前缀，请检查 AAAA 拦截与路由规则"
@@ -496,7 +496,7 @@ func checkPort53Hijack(
 		Title: "明文 :53 透明劫持防护",
 	}
 
-	ans, err := queryDNSWithFallback(ctx, []string{plaintextDNS}, "o-o.myaddr.l.google.com", dnsTypeTXT)
+	ans, err := queryDNSWithFallback(ctx, []string{plaintextDNS}, "o-o.myaddr.l.google.com", DNSTypeTXT)
 	item.LatencyMs = max(1, time.Since(t0).Milliseconds())
 	if err != nil {
 		item.Status = "warn"
@@ -545,7 +545,7 @@ func checkOverseasResolution(ctx context.Context, primaryDNS string) DNSLeakChec
 	targets := []string{"www.google.com", "github.com"}
 	resolvedParts := make([]string, 0, len(targets))
 	for _, domain := range targets {
-		ans, err := queryGatewayDNS(ctx, primaryDNS, domain, dnsTypeA)
+		ans, err := queryGatewayDNS(ctx, primaryDNS, domain, DNSTypeA)
 		if err != nil || len(ans.As) == 0 {
 			item.LatencyMs = max(1, time.Since(t0).Milliseconds())
 			item.Status = "fail"
@@ -587,13 +587,13 @@ func checkIPv6Split(ctx context.Context, ipv6Mode string, opts DNSLeakTestOption
 		Title: "IPv6 AAAA 分流与防泄漏实测",
 	}
 
-	cnANS, cnErr := queryGatewayDNS(ctx, opts.PrimaryDNS, "www.bilibili.com", dnsTypeAAAA)
+	cnANS, cnErr := queryGatewayDNS(ctx, opts.PrimaryDNS, "www.bilibili.com", DNSTypeAAAA)
 	if (cnErr != nil || len(cnANS.AAAAs) == 0) && strings.TrimSpace(opts.PrimaryDNS) == "" {
-		if fbANS, fbErr := queryGatewayDNS(ctx, opts.PrimaryDNS, "www.taobao.com", dnsTypeAAAA); fbErr == nil && len(fbANS.AAAAs) > 0 {
+		if fbANS, fbErr := queryGatewayDNS(ctx, opts.PrimaryDNS, "www.taobao.com", DNSTypeAAAA); fbErr == nil && len(fbANS.AAAAs) > 0 {
 			cnANS, cnErr = fbANS, nil
 		}
 	}
-	overseasANS, ovErr := queryGatewayDNS(ctx, opts.PrimaryDNS, "www.google.com", dnsTypeAAAA)
+	overseasANS, ovErr := queryGatewayDNS(ctx, opts.PrimaryDNS, "www.google.com", DNSTypeAAAA)
 	item.LatencyMs = max(1, time.Since(t0).Milliseconds())
 
 	cnCount := len(cnANS.AAAAs)
@@ -632,7 +632,7 @@ func checkIPv6Split(ctx context.Context, ipv6Mode string, opts DNSLeakTestOption
 		return item
 
 	default: // cn_only
-		overseasHTTPS, _ := queryGatewayDNS(ctx, opts.PrimaryDNS, "www.google.com", dnsTypeHTTPS)
+		overseasHTTPS, _ := queryGatewayDNS(ctx, opts.PrimaryDNS, "www.google.com", DNSTypeHTTPS)
 		item.LatencyMs = max(1, time.Since(t0).Milliseconds())
 		if ovCount > 0 {
 			item.Status = "fail"

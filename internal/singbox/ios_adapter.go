@@ -3,23 +3,19 @@
 // 架构设计原则：
 //   - 单一职责原则（SRP）：把苹果 SFI 扩展进程的特殊约束（禁用 external_ui、default_mark、
 //     裁剪 geosite-ad2、按内核版本切换 http_clients/download_detour）独立收敛在此文件，
-//     使手机端兼容逻辑的演进与路由器客户端完全解耦。
+//     在 *sboption.Document 上完成纯内存类型化变换。
 package singbox
 
 import (
-	"encoding/json"
 	"fmt"
 	"slices"
 	"strconv"
 	"strings"
+
+	"singctl/internal/singbox/sboption"
 )
 
-// AdaptIOSConfig 对生成给 iOS SFI / 移动端客户端的默认 (v1.14+) 配置进行沙盒兼容、镜像剥离与内存裁剪：
-//   - 移除 services / route.default_mark 与 clash_api.external_ui* 等不兼容或冗余字段；
-//   - 清理 dns.optimistic、独立缓存冲突及 v1.14 cache_file 持久化扩展字段；
-//   - 剔除体积最大的 geosite-ad2 与未被规则引用的僵尸规则集，控低冷启动 RSS（<50MB）；
-//   - 剥离国内 GitHub 反代镜像前缀（含显式 mirrorURL 与通用反代模式），并将远程规则集统一切换到
-//     v1.14+ 标准 http_clients + route.default_http_client（消除 1.14 弃用 / 1.16 移除的 download_detour 告警）。
+// AdaptIOSConfig 对生成给 iOS SFI / 移动端客户端的默认 (v1.14+) 配置进行沙盒兼容、镜像剥离与内存裁剪。
 func AdaptIOSConfig(rawJSON, mirrorURL string) (string, error) {
 	return AdaptIOSConfigForVersion(rawJSON, mirrorURL, "v1.14")
 }
@@ -30,146 +26,122 @@ func AdaptIOSConfigForVersion(rawJSON, mirrorURL, singBoxVer string) (string, er
 	if strings.TrimSpace(rawJSON) == "" {
 		return rawJSON, nil
 	}
-	var root map[string]any
-	if err := json.Unmarshal([]byte(rawJSON), &root); err != nil {
+	doc, err := sboption.ParseDocument([]byte(rawJSON))
+	if err != nil {
 		return "", fmt.Errorf("ios adapt: parse config JSON: %w", err)
 	}
-	if root == nil {
-		return rawJSON, nil
-	}
-	adaptIOSConfigInRoot(root, mirrorURL, singBoxVer)
-
-	data, err := json.Marshal(root)
-	if err != nil {
-		return "", fmt.Errorf("ios adapt: marshal config JSON: %w", err)
-	}
-	return string(data), nil
+	adaptIOSConfigInDoc(doc, mirrorURL, singBoxVer)
+	return doc.MarshalCompact()
 }
 
-// adaptIOSConfigInRoot 直接在内存树上完成 iOS SFI 沙盒裁剪，避免编译流水线内冗余 JSON 往返。
-func adaptIOSConfigInRoot(root map[string]any, mirrorURL, singBoxVer string) {
-	if root == nil {
+// adaptIOSConfigInDoc 直接在 *sboption.Document 内存树上完成 iOS SFI 沙盒裁剪，零冗余 JSON 往返。
+func adaptIOSConfigInDoc(doc *sboption.Document, mirrorURL, singBoxVer string) {
+	if doc == nil {
 		return
 	}
-	sanitizeLegacyTransportProtocolRules(root)
+	sanitizeLegacyTransportProtocolInDoc(doc)
 
 	isLegacy := isLegacySingBoxPre114(singBoxVer)
-
-	delete(root, "services")
+	doc.Services = nil
 	if isLegacy {
-		delete(root, "http_clients")
+		doc.HTTPClients = nil
 	}
 
-	if expMap, ok := root["experimental"].(map[string]any); ok && expMap != nil {
-		if clashAPI, ok := expMap["clash_api"].(map[string]any); ok && clashAPI != nil {
-			delete(clashAPI, "external_ui")
-			delete(clashAPI, "external_ui_download_url")
-			delete(clashAPI, "external_ui_download_detour")
+	if doc.Experimental != nil {
+		if ca := doc.Experimental.ClashAPI; ca != nil {
+			ca.ExternalUI = ""
+			ca.ExternalUIDownloadURL = ""
+			ca.ExternalUIDownloadDetour = ""
 		}
-		if cf, ok := expMap["cache_file"].(map[string]any); ok && cf != nil {
+		if cf := doc.Experimental.CacheFile; cf != nil {
 			enabled := true
-			if b, ok := cf["enabled"].(bool); ok {
-				enabled = b
+			if cf.Enabled != nil {
+				enabled = *cf.Enabled
 			}
-			expMap["cache_file"] = map[string]any{"enabled": enabled}
+			doc.Experimental.CacheFile = &sboption.CacheFileOptions{Enabled: new(enabled)}
 		}
 	}
 
-	var dnsRules any
-	var hasDNS bool
-	if dnsMap, ok := root["dns"].(map[string]any); ok && dnsMap != nil {
-		hasDNS = true
-		delete(dnsMap, "optimistic")
-		if dc, ok := dnsMap["disable_cache"].(bool); ok && dc {
-			delete(dnsMap, "independent_cache")
+	if doc.DNS != nil {
+		doc.DNS.Optimistic = nil
+		if doc.DNS.DisableCache != nil && *doc.DNS.DisableCache {
+			doc.DNS.IndependentCache = nil
 		}
-		if rawRules, ok := dnsMap["rules"].([]any); ok {
-			cleanedDNS := stripRuleSetTagFromRules(rawRules, "geosite-ad2")
-			dnsMap["rules"] = cleanedDNS
-			dnsRules = cleanedDNS
+		if doc.DNS.Rules != nil {
+			doc.DNS.Rules = stripRuleSetTagFromDNSRules(doc.DNS.Rules, "geosite-ad2")
 		}
+	}
+
+	if doc.Route == nil {
+		doc.HTTPClients = nil
+		return
+	}
+
+	doc.Route.DefaultMark = 0
+	if isLegacy {
+		doc.Route.DefaultHTTPClient = ""
+	}
+	if doc.Route.Rules != nil {
+		doc.Route.Rules = stripRuleSetTagFromRouteRules(doc.Route.Rules, "geosite-ad2")
+	}
+
+	referenced := make(map[string]bool)
+	collectReferencedRouteRuleSets(doc.Route.Rules, referenced)
+	if doc.DNS != nil {
+		collectReferencedDNSRuleSets(doc.DNS.Rules, referenced)
 	}
 
 	hasRemoteRS := false
-	preferredDetour := pickPreferredIOSDetour(root["outbounds"])
+	preferredDetour := pickPreferredIOSDetour(doc.Outbounds)
 
-	if routeMap, ok := root["route"].(map[string]any); ok && routeMap != nil {
-		delete(routeMap, "default_mark")
-		if isLegacy {
-			delete(routeMap, "default_http_client")
-		}
-		var cleanedRoute []any
-		if rawRules, ok := routeMap["rules"].([]any); ok {
-			cleanedRoute = stripRuleSetTagFromRules(rawRules, "geosite-ad2")
-			routeMap["rules"] = cleanedRoute
-		}
-
-		referenced := make(map[string]bool)
-		collectReferencedRuleSetTags(cleanedRoute, referenced)
-		if hasDNS {
-			if dr, ok := dnsRules.([]any); ok {
-				collectReferencedRuleSetTags(dr, referenced)
+	if doc.Route.RuleSet != nil {
+		keptRS := make([]sboption.RuleSet, 0, len(doc.Route.RuleSet))
+		for _, rs := range doc.Route.RuleSet {
+			tag := strings.TrimSpace(rs.Tag)
+			if tag == "geosite-ad2" {
+				continue
 			}
-		}
-
-		if rawRS, ok := routeMap["rule_set"].([]any); ok {
-			keptRS := make([]any, 0, len(rawRS))
-			for _, item := range rawRS {
-				rm, ok := item.(map[string]any)
-				if !ok || rm == nil {
-					continue
-				}
-				tag, _ := rm["tag"].(string)
-				tag = strings.TrimSpace(tag)
-				if tag == "geosite-ad2" {
-					continue
-				}
-				if len(referenced) > 0 && tag != "" && !referenced[tag] {
-					continue
-				}
-				typ, _ := rm["type"].(string)
-				rawURL, _ := rm["url"].(string)
-				if typ == "remote" || strings.TrimSpace(rawURL) != "" {
-					hasRemoteRS = true
-					if cleanedURL := stripMirrorPrefix(rawURL, mirrorURL); cleanedURL != "" {
-						rm["url"] = cleanedURL
-					}
-					if isLegacy {
-						delete(rm, "http_client")
-						if preferredDetour != "" {
-							rm["download_detour"] = preferredDetour
-						}
-					} else {
-						delete(rm, "download_detour")
-						delete(rm, "http_client")
-					}
-				}
-				keptRS = append(keptRS, rm)
+			if len(referenced) > 0 && tag != "" && !referenced[tag] {
+				continue
 			}
-			routeMap["rule_set"] = keptRS
-		}
-
-		if !isLegacy {
-			if hasRemoteRS {
-				if preferredDetour != "" && !isEmptyDirectOutboundTag(root["outbounds"], preferredDetour) {
-					root["http_clients"] = []map[string]any{
-						{"tag": "hc-proxy", "detour": preferredDetour},
+			cp := rs.Clone()
+			if cp.Type == "remote" || strings.TrimSpace(cp.URL) != "" {
+				hasRemoteRS = true
+				if cleanedURL := stripMirrorPrefix(cp.URL, mirrorURL); cleanedURL != "" {
+					cp.URL = cleanedURL
+				}
+				if isLegacy {
+					cp.HTTPClient = ""
+					if preferredDetour != "" {
+						cp.DownloadDetour = preferredDetour
 					}
-					routeMap["default_http_client"] = "hc-proxy"
 				} else {
-					// 当兜底为直连（如空 direct #DC）时必须省略 detour，防止 sing-box 1.14+ 报 empty direct 致命错误
-					root["http_clients"] = []map[string]any{
-						{"tag": "hc-direct"},
-					}
-					routeMap["default_http_client"] = "hc-direct"
+					cp.DownloadDetour = ""
+					cp.HTTPClient = ""
 				}
-			} else {
-				delete(root, "http_clients")
-				delete(routeMap, "default_http_client")
 			}
+			keptRS = append(keptRS, cp)
 		}
-	} else {
-		delete(root, "http_clients")
+		doc.Route.RuleSet = keptRS
+	}
+
+	if !isLegacy {
+		if hasRemoteRS {
+			if preferredDetour != "" && !isEmptyDirectOutboundTag(doc.Outbounds, preferredDetour) {
+				doc.HTTPClients = []sboption.HTTPClient{
+					{Tag: "hc-proxy", Detour: preferredDetour},
+				}
+				doc.Route.DefaultHTTPClient = "hc-proxy"
+			} else {
+				doc.HTTPClients = []sboption.HTTPClient{
+					{Tag: "hc-direct"},
+				}
+				doc.Route.DefaultHTTPClient = "hc-direct"
+			}
+		} else {
+			doc.HTTPClients = nil
+			doc.Route.DefaultHTTPClient = ""
+		}
 	}
 }
 
@@ -194,142 +166,108 @@ func isLegacySingBoxPre114(ver string) bool {
 	return major < 1 || (major == 1 && minor < 14)
 }
 
-func isEmptyDirectOutboundTag(rawOutbounds any, targetTag string) bool {
+func isEmptyDirectOutboundTag(outbounds []sboption.Outbound, targetTag string) bool {
 	if targetTag == "" {
 		return true
 	}
-	list, ok := rawOutbounds.([]any)
-	if !ok {
-		return false
-	}
-	for _, item := range list {
-		om, ok := item.(map[string]any)
-		if !ok || om == nil {
+	for _, ob := range outbounds {
+		if strings.TrimSpace(ob.Tag) != targetTag {
 			continue
 		}
-		tag := strings.TrimSpace(fmt.Sprint(om["tag"]))
-		if tag != targetTag {
-			continue
-		}
-		typ := strings.ToLower(strings.TrimSpace(fmt.Sprint(om["type"])))
-		if typ != "direct" {
+		if !strings.EqualFold(strings.TrimSpace(ob.Type), "direct") {
 			return false
 		}
-		for k, v := range om {
-			if k == "type" || k == "tag" || v == nil {
-				continue
-			}
-			return false
-		}
-		return true
+		return ob.Server == "" && ob.ServerPort == 0 && len(ob.Extra) == 0
 	}
 	return false
 }
 
-func stripRuleSetTagFromRules(rules []any, dropTag string) []any {
-	out := make([]any, 0, len(rules))
-	for _, item := range rules {
-		rm, ok := item.(map[string]any)
-		if !ok || rm == nil {
-			out = append(out, item)
-			continue
-		}
-		if rawSub, hasSub := rm["rules"].([]any); hasSub {
-			cleanedSub := stripRuleSetTagFromRules(rawSub, dropTag)
-			if len(cleanedSub) == 0 {
+func stripRuleSetTagFromRouteRules(rules []sboption.RouteRule, dropTag string) []sboption.RouteRule {
+	out := make([]sboption.RouteRule, 0, len(rules))
+	for _, r := range rules {
+		cp := r.Clone()
+		if r.Rules != nil {
+			cp.Rules = stripRuleSetTagFromRouteRules(r.Rules, dropTag)
+			if len(cp.Rules) == 0 {
 				continue
 			}
-			rm["rules"] = cleanedSub
 		}
-		if rawRS, hasRS := rm["rule_set"]; hasRS {
-			tags := extractStringOrSliceAny(rawRS)
-			if slices.Contains(tags, dropTag) {
-				filtered := make([]string, 0, len(tags))
-				for _, t := range tags {
-					if t != dropTag {
-						filtered = append(filtered, t)
-					}
-				}
-				if len(filtered) == 0 {
-					continue
-				}
-				if len(filtered) == 1 {
-					if _, wasStr := rawRS.(string); wasStr {
-						rm["rule_set"] = filtered[0]
-					} else {
-						rm["rule_set"] = filtered
-					}
-				} else {
-					rm["rule_set"] = filtered
+		if !cp.RuleSet.IsEmpty() && slices.Contains(cp.RuleSet.Slice(), dropTag) {
+			filtered := make([]string, 0, cp.RuleSet.Len())
+			for _, t := range cp.RuleSet.Slice() {
+				if t != dropTag {
+					filtered = append(filtered, t)
 				}
 			}
+			if len(filtered) == 0 {
+				continue
+			}
+			cp.RuleSet = sboption.Listable[string]{Items: filtered, Scalar: cp.RuleSet.Scalar}
 		}
-		out = append(out, rm)
+		out = append(out, cp)
 	}
 	return out
 }
 
-func extractStringOrSliceAny(raw any) []string {
-	switch v := raw.(type) {
-	case string:
-		if s := strings.TrimSpace(v); s != "" {
-			return []string{s}
-		}
-	case []string:
-		out := make([]string, 0, len(v))
-		for _, item := range v {
-			if s := strings.TrimSpace(item); s != "" {
-				out = append(out, s)
+func stripRuleSetTagFromDNSRules(rules []sboption.DNSRule, dropTag string) []sboption.DNSRule {
+	out := make([]sboption.DNSRule, 0, len(rules))
+	for _, r := range rules {
+		cp := r.Clone()
+		if r.Rules != nil {
+			cp.Rules = stripRuleSetTagFromDNSRules(r.Rules, dropTag)
+			if len(cp.Rules) == 0 {
+				continue
 			}
 		}
-		return out
-	case []any:
-		out := make([]string, 0, len(v))
-		for _, item := range v {
-			if s, ok := item.(string); ok {
-				if trimmed := strings.TrimSpace(s); trimmed != "" {
-					out = append(out, trimmed)
+		if !cp.RuleSet.IsEmpty() && slices.Contains(cp.RuleSet.Slice(), dropTag) {
+			filtered := make([]string, 0, cp.RuleSet.Len())
+			for _, t := range cp.RuleSet.Slice() {
+				if t != dropTag {
+					filtered = append(filtered, t)
 				}
 			}
+			if len(filtered) == 0 {
+				continue
+			}
+			cp.RuleSet = sboption.Listable[string]{Items: filtered, Scalar: cp.RuleSet.Scalar}
 		}
-		return out
+		out = append(out, cp)
 	}
-	return nil
+	return out
 }
 
-func collectReferencedRuleSetTags(rules []any, out map[string]bool) {
-	for _, item := range rules {
-		rm, ok := item.(map[string]any)
-		if !ok || rm == nil {
-			continue
-		}
-		for _, tag := range extractStringOrSliceAny(rm["rule_set"]) {
+func collectReferencedRouteRuleSets(rules []sboption.RouteRule, out map[string]bool) {
+	for _, r := range rules {
+		for _, tag := range r.RuleSet.Slice() {
 			out[tag] = true
 		}
-		if sub, ok := rm["rules"].([]any); ok {
-			collectReferencedRuleSetTags(sub, out)
+		if len(r.Rules) > 0 {
+			collectReferencedRouteRuleSets(r.Rules, out)
 		}
 	}
 }
 
-func pickPreferredIOSDetour(rawOutbounds any) string {
-	list, ok := rawOutbounds.([]any)
-	if !ok {
-		return ""
+func collectReferencedDNSRuleSets(rules []sboption.DNSRule, out map[string]bool) {
+	for _, r := range rules {
+		for _, tag := range r.RuleSet.Slice() {
+			out[tag] = true
+		}
+		if len(r.Rules) > 0 {
+			collectReferencedDNSRuleSets(r.Rules, out)
+		}
 	}
+}
+
+func pickPreferredIOSDetour(outbounds []sboption.Outbound) string {
 	var tags []string
 	var firstGroup string
-	for _, item := range list {
-		om, ok := item.(map[string]any)
-		if !ok || om == nil {
-			continue
-		}
-		tag := strings.TrimSpace(fmt.Sprint(om["tag"]))
-		if tag == "" || om["tag"] == nil {
+	for _, ob := range outbounds {
+		tag := strings.TrimSpace(ob.Tag)
+		if tag == "" {
 			continue
 		}
 		tags = append(tags, tag)
-		typ := strings.ToLower(strings.TrimSpace(fmt.Sprint(om["type"])))
+		typ := strings.ToLower(strings.TrimSpace(ob.Type))
 		if firstGroup == "" && (typ == "selector" || typ == "urltest" || typ == "fallback") {
 			firstGroup = tag
 		}
@@ -376,46 +314,34 @@ func stripMirrorPrefix(rawURL, mirrorURL string) string {
 }
 
 // CheckIOSCompatibility 校验生成的配置是否适合导入 iOS SFI(沙盒环境)。
-// 检查项: rule_set 不能包含 type=local 或本地 path 条目、不得设置 route.default_mark、
-// 不得包含外置 clash_api.external_ui / cache_file.path 或 1.14 services 字段。
 func CheckIOSCompatibility(jsonStr string) error {
-	var cfg struct {
-		Route struct {
-			DefaultMark int `json:"default_mark"`
-			RuleSet     []struct {
-				Type string `json:"type"`
-				Tag  string `json:"tag"`
-				Path string `json:"path"`
-			} `json:"rule_set"`
-		} `json:"route"`
-		Experimental struct {
-			ClashAPI struct {
-				ExternalUI string `json:"external_ui"`
-			} `json:"clash_api"`
-			CacheFile struct {
-				Path string `json:"path"`
-			} `json:"cache_file"`
-		} `json:"experimental"`
-		Services []any `json:"services"`
-	}
-	if err := json.Unmarshal([]byte(jsonStr), &cfg); err != nil {
+	doc, err := sboption.ParseDocument([]byte(jsonStr))
+	if err != nil {
 		return fmt.Errorf("ios check: invalid JSON: %w", err)
 	}
-	if cfg.Route.DefaultMark != 0 {
-		return fmt.Errorf("ios check: route.default_mark (%d) 在 iOS SFI 沙盒中不受支持", cfg.Route.DefaultMark)
+	if doc.Route != nil && doc.Route.DefaultMark != 0 {
+		return fmt.Errorf("ios check: route.default_mark (%d) 在 iOS SFI 沙盒中不受支持", doc.Route.DefaultMark)
 	}
-	if ui := strings.TrimSpace(cfg.Experimental.ClashAPI.ExternalUI); ui != "" {
-		return fmt.Errorf("ios check: clash_api.external_ui (%q) 指向沙盒外路径，iOS SFI 无法读取", ui)
+	if doc.Experimental != nil {
+		if doc.Experimental.ClashAPI != nil {
+			if ui := strings.TrimSpace(doc.Experimental.ClashAPI.ExternalUI); ui != "" {
+				return fmt.Errorf("ios check: clash_api.external_ui (%q) 指向沙盒外路径，iOS SFI 无法读取", ui)
+			}
+		}
+		if doc.Experimental.CacheFile != nil {
+			if cfPath := strings.TrimSpace(doc.Experimental.CacheFile.Path); cfPath != "" {
+				return fmt.Errorf("ios check: cache_file.path (%q) 指向沙盒外路径，iOS SFI 无法读取", cfPath)
+			}
+		}
 	}
-	if cfPath := strings.TrimSpace(cfg.Experimental.CacheFile.Path); cfPath != "" {
-		return fmt.Errorf("ios check: cache_file.path (%q) 指向沙盒外路径，iOS SFI 无法读取", cfPath)
+	if len(doc.Services) > 0 {
+		return fmt.Errorf("ios check: services 字段在 iOS SFI 中不兼容（包含 %d 项）", len(doc.Services))
 	}
-	if len(cfg.Services) > 0 {
-		return fmt.Errorf("ios check: services 字段在 iOS SFI 中不兼容（包含 %d 项）", len(cfg.Services))
-	}
-	for _, rs := range cfg.Route.RuleSet {
-		if rs.Type == "local" || strings.TrimSpace(rs.Path) != "" {
-			return fmt.Errorf("ios check: 规则集 %q 使用了 type=local 或本地 path, iPhone 沙盒无法读取本地路径, 请用 --platform ios 重新生成(自动保留远程规则集)", rs.Tag)
+	if doc.Route != nil {
+		for _, rs := range doc.Route.RuleSet {
+			if rs.Type == "local" || strings.TrimSpace(rs.Path) != "" {
+				return fmt.Errorf("ios check: 规则集 %q 使用了 type=local 或本地 path, iPhone 沙盒无法读取本地路径, 请用 --platform ios 重新生成(自动保留远程规则集)", rs.Tag)
+			}
 		}
 	}
 	return nil

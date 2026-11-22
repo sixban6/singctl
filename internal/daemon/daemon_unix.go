@@ -1,21 +1,13 @@
 //go:build !windows
-// +build !windows
 
+// 文件职责：提供 Unix 平台看门狗进程 SIGHUP 热重载信号监听与发送辅助。
 package daemon
 
 import (
 	"os"
-	"os/exec"
 	"os/signal"
 	"syscall"
 )
-
-// setProcAttrs 设置Unix系统的进程属性
-func (d *Daemon) setProcAttrs(cmd *exec.Cmd) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setsid: true, // 创建新会话
-	}
-}
 
 func installReloadSignal(onReload func()) {
 	ch := make(chan os.Signal, 1)
@@ -33,9 +25,9 @@ func notifyPidReload(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
-	proc, err := os.FindProcess(pid)
+	p, err := os.FindProcess(pid)
 	if err != nil {
 		return false
 	}
-	return proc.Signal(syscall.SIGHUP) == nil
+	return p.Signal(syscall.SIGHUP) == nil
 }

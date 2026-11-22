@@ -1,53 +1,29 @@
+// 文件职责：封装客户端 WebUI 有界子进程执行辅助函数，底层委托 common/execx。
 package webui
 
 import (
 	"context"
-	"errors"
 	"os"
-	"os/exec"
-	"strings"
 	"time"
+
+	"singctl/internal/common/execx"
 )
 
 const (
-	defaultWebProbeTimeout   = 3 * time.Second
+	defaultWebProbeTimeout   = execx.DefaultProbeTimeout
 	defaultWebRestartTimeout = 25 * time.Second
 )
 
-func newBoundedWebCmd(timeout time.Duration, name string, args ...string) (*exec.Cmd, context.CancelFunc, error) {
-	if strings.TrimSpace(name) == "" {
-		return nil, func() {}, errors.New("empty command name")
-	}
-	if timeout <= 0 {
-		timeout = defaultWebProbeTimeout
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.WaitDelay = min(timeout/2+100*time.Millisecond, time.Second)
-	return cmd, cancel, nil
+// OutputWebCmdTimeout 以指定超时执行外部命令并返回标准输出。
+func OutputWebCmdTimeout(timeout time.Duration, name string, args ...string) ([]byte, error) {
+	return execx.Output(context.Background(), timeout, name, args...)
 }
 
-// outputWebCmdTimeout runs a synchronous subprocess with bounded timeout and returns its stdout.
-func outputWebCmdTimeout(timeout time.Duration, name string, args ...string) ([]byte, error) {
-	cmd, cancel, err := newBoundedWebCmd(timeout, name, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer cancel()
-	return cmd.Output()
+// RunWebCmdTimeout 以指定超时和环境变量执行外部命令。
+func RunWebCmdTimeout(timeout time.Duration, env []string, stdout, stderr *os.File, name string, args ...string) error {
+	return execx.RunIO(context.Background(), timeout, env, nil, stdout, stderr, name, args...)
 }
 
-// runWebCmdTimeout runs a synchronous subprocess with bounded timeout, optional env, and stdio handles.
 func runWebCmdTimeout(timeout time.Duration, env []string, stdout, stderr *os.File, name string, args ...string) error {
-	cmd, cancel, err := newBoundedWebCmd(timeout, name, args...)
-	if err != nil {
-		return err
-	}
-	defer cancel()
-	if len(env) > 0 {
-		cmd.Env = env
-	}
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	return cmd.Run()
+	return RunWebCmdTimeout(timeout, env, stdout, stderr, name, args...)
 }

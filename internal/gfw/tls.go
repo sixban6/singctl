@@ -1,3 +1,4 @@
+// 文件职责：负责 TLS 与 Reality 伪装主动探测（随机 SNI 神谕、源站差分、TLS 1.2 降级、ALPN/H2 与 TLS Alert 规范性）。
 package gfw
 
 import (
@@ -76,7 +77,7 @@ func ProbeTLS(ctx context.Context, opts ProbeOptions) Category {
 			cert := randomCerts[0]
 			dnsNames := cert.DNSNames
 			commonName := cert.Subject.CommonName
-			issuerName := certIssuerDisplay(cert)
+			issuerName := CertIssuerDisplay(cert)
 			allNames := append([]string{}, dnsNames...)
 			if commonName != "" {
 				allNames = append(allNames, commonName)
@@ -139,7 +140,7 @@ func ProbeTLS(ctx context.Context, opts ProbeOptions) Category {
 				it.Mitigation = "检查 Caddy L4 路由与后端 TLS/Reality 服务是否正常监听。"
 			} else if len(probeRes.certs) > 0 {
 				cert := probeRes.certs[0]
-				issuerName := certIssuerDisplay(cert)
+				issuerName := CertIssuerDisplay(cert)
 
 				caValid, caReason := verifyCertificateChain(probeRes.certs, targetSNI)
 
@@ -443,7 +444,7 @@ func compareWithRealOrigin(ctx context.Context, targetIP, targetSNI string, node
 	if !strings.EqualFold(nodeLeaf.Issuer.CommonName, originLeaf.Issuer.CommonName) &&
 		strings.Join(nodeLeaf.Issuer.Organization, ",") != strings.Join(originLeaf.Issuer.Organization, ",") {
 		return true, fmt.Sprintf("证书签发机构不一致 (节点返回: %s, 真实源站: %s)",
-			certIssuerDisplay(nodeLeaf), certIssuerDisplay(originLeaf))
+			CertIssuerDisplay(nodeLeaf), CertIssuerDisplay(originLeaf))
 	}
 
 	if nodeRes.alpn != originRes.alpn {
@@ -485,7 +486,7 @@ func IsSelfSignedOrInternalCA(cert *x509.Certificate) bool {
 	return false
 }
 
-func certIssuerDisplay(cert *x509.Certificate) string {
+func CertIssuerDisplay(cert *x509.Certificate) string {
 	if cert == nil {
 		return "unknown"
 	}
@@ -557,7 +558,7 @@ func testRealityTLS12Downgrade(ctx context.Context, ip string, port int, serverN
 	state := tlsConn.ConnectionState()
 	if len(state.PeerCertificates) > 0 && IsSelfSignedOrInternalCA(state.PeerCertificates[0]) {
 		return false, 8, fmt.Sprintf("强制 TLS 1.2 降级握手返回了内部自签证书 (Issuer: %s)，暴露了 TLS 1.2 与 1.3 分流不一致破绽！",
-			certIssuerDisplay(state.PeerCertificates[0])), "确保 TLS 1.2 与 TLS 1.3 流量均路由至同一套有效证书或真实源站。"
+			CertIssuerDisplay(state.PeerCertificates[0])), "确保 TLS 1.2 与 TLS 1.3 流量均路由至同一套有效证书或真实源站。"
 	}
 	return true, 0, fmt.Sprintf("TLS 1.2 降级握手成功 (CipherSuite: 0x%04x)，证书主体: %s，回落机制表现平滑。",
 		state.CipherSuite, state.PeerCertificates[0].Subject.CommonName), ""

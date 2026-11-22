@@ -601,6 +601,15 @@ func TestOpenWrtTimezone_CertCNFallback_And_StateV2Migration(t *testing.T) {
 	if resolvedLoc == nil || time.Date(2026, 11, 12, 6, 0, 0, 0, time.UTC).In(resolvedLoc).Hour() != 14 {
 		t.Fatalf("expected ResolveLocalLocationFromFiles to honor OpenWrt /etc/TZ CST-8")
 	}
+	origLocal := time.Local
+	t.Cleanup(func() { time.Local = origLocal })
+	t.Setenv("TZ", "CST-8")
+	time.Local = time.UTC
+	audit.InitProcessLocalTimezone()
+	if time.Date(2026, 11, 12, 6, 0, 0, 0, time.UTC).In(time.Local).Hour() != 14 {
+		t.Fatalf("expected InitProcessLocalTimezone to initialize time.Local to CST-8")
+	}
+	t.Setenv("TZ", "")
 
 	// 构造旧版 (SchemaVersion=0) 状态快照：包含白天误记的 NightHits、非法证书 CN "mijia cloud" 以及超过 24h 的过期流
 	nowSim := time.Date(2026, 11, 12, 6, 10, 0, 0, time.UTC).In(resolvedLoc) // 14:10 CST

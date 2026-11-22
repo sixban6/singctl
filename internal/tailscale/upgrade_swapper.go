@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"time"
+
+	"singctl/internal/common/proc"
 )
 
 // launchDetachedSwapper spawns an isolated POSIX /bin/sh process (Setsid=true) that performs:
@@ -75,7 +77,7 @@ func launchDetachedSwapper(paths UpgradePaths, pre *UpgradePreflight, combined b
 	cmd.Stdin = nil
 	cmd.Stdout = logF
 	cmd.Stderr = logF
-	detachCmdAttrs(cmd)
+	proc.SetDetachedAttr(cmd)
 
 	if err := cmd.Start(); err != nil {
 		return 0, fmt.Errorf("start detached swapper: %w", err)

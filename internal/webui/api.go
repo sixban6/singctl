@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -13,14 +12,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"singctl/internal/common/netx"
+	"singctl/internal/common/proc"
+	"singctl/internal/common/sysinfo"
 	"singctl/internal/config"
 	"singctl/internal/constant"
 	"singctl/internal/daemon"
 	"singctl/internal/firewall"
 	"singctl/internal/singbox"
 	"singctl/internal/tailscale"
-	"singctl/internal/util/netinfo"
-	"singctl/internal/util/os"
 	"sort"
 	"strings"
 	"sync"
@@ -106,7 +106,7 @@ func (s *Server) daemonStatusSummary() map[string]any {
 func hostInfo() map[string]any {
 	hostname, _ := os.Hostname()
 	lanIP := ""
-	if ni, err := netinfo.Get(); err == nil && ni.LANIPv4 != "" {
+	if ni, err := netx.Get(); err == nil && ni.LANIPv4 != "" {
 		lanIP = ni.LANIPv4
 	}
 	return map[string]any{
@@ -119,11 +119,7 @@ func hostInfo() map[string]any {
 }
 
 func isOpenWrtSystem() bool {
-	if _, err := os.Stat("/etc/openwrt_release"); err == nil {
-		return true
-	}
-	_, err := os.Stat("/etc/openwrt_version")
-	return err == nil
+	return sysinfo.IsOpenWrt()
 }
 
 func singboxStatus() map[string]any {
@@ -151,42 +147,12 @@ func singboxStatus() map[string]any {
 }
 
 func (s *Server) tailscaleStatus(configPath string) map[string]any {
-	// OpenWrt 装在 /usr/sbin,发行版常在 /usr/bin,桌面端在 /usr/local/bin
-	binPath := ""
-	for _, c := range []string{"/usr/sbin/tailscale", "/usr/bin/tailscale", "/usr/local/bin/tailscale"} {
-		if fileExists(c) {
-			binPath = c
-			break
-		}
-	}
-	if binPath == "" {
-		if p, err := exec.LookPath("tailscale"); err == nil {
-			binPath = p
-		}
-	}
-
-	version := ""
-	if binPath != "" {
-		if out, err := shortCommand(3*time.Second, binPath, "version"); err == nil {
-			if v, err := tailscale.ParseVersionOutput(out); err == nil {
-				version = v
-			}
-		}
-	}
-
-	// 权威判定:`tailscale status --json` 能连通后端即 daemon 在运行,
-	// 并拿到 BackendState(Running/NeedsLogin/Stopped...)与当前启动模式。
-	// 注:不能用 pgrep -x 检测 —— busybox 1.36.1 上实测无法匹配 tailscaled(见 osutil.PgrepMatch)。
-	daemonUp, backendState, mode, acceptRoutes, liveSubnets := queryTailscaleBackend(binPath)
-	if !daemonUp && binPath == "" {
-		// CLI 不存在时退化为进程检测(子串匹配,兼容 busybox)
-		daemonUp = osutil.PgrepMatch("tailscaled")
-	}
-
 	authKeySet := false
 	subnets := ""
-	var cfg *config.Config
-	var err error
+	var (
+		cfg *config.Config
+		err error
+	)
 	if configPath == configPathFor(s) {
 		cfg, err = s.loadConfigSnapshot()
 	} else {
@@ -196,111 +162,16 @@ func (s *Server) tailscaleStatus(configPath string) map[string]any {
 		authKeySet = strings.TrimSpace(cfg.Tailscale.AuthKey) != ""
 		subnets = strings.TrimSpace(cfg.Tailscale.Subnets)
 	}
-	if subnets == "" && liveSubnets != "" {
-		subnets = liveSubnets
-	}
 
-	return map[string]any{
-		"installed":    binPath != "",
-		"running":      daemonUp,
-		"state":        backendState,
-		"mode":         mode,
-		"acceptRoutes": acceptRoutes,
-		"subnets":      subnets,
-		"version":      version,
-		"authKeySet":   authKeySet,
-	}
-}
-
-// queryTailscaleBackend 通过 `tailscale status --json` 判定 daemon 是否存活及其后端状态，并读取 LocalAPI prefs 中的 RouteAll。
-// daemon 存活时返回 (true, BackendState, mode, acceptRoutes, liveSubnets);不可达返回 (false, "", "", false, "")。
-// 实测退出码:daemon 在(含 Stopped/NeedsLogin)rc=0,daemon 不在 rc=1。
-// 同时从 Self 提取启动模式: AdvertisedRoutes(广播的非默认子网路由) + ExitNodeOption(出口节点)。
-func queryTailscaleBackend(binPath string) (bool, string, string, bool, string) {
-	if binPath == "" {
-		return false, "", "", false, ""
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, binPath, "status", "--json").Output()
-	if err != nil {
-		return false, "", "", false, ""
-	}
-	var st struct {
-		BackendState string `json:"BackendState"`
-		Self         struct {
-			AdvertisedRoutes []string `json:"AdvertisedRoutes"`
-			ExitNodeOption   bool     `json:"ExitNodeOption"`
-		} `json:"Self"`
-	}
-	if json.Unmarshal(out, &st) != nil || st.BackendState == "" {
-		return false, "", "", false, ""
-	}
-	// 过滤出非默认网关路由（排除 0.0.0.0/0 与 ::/0，仅保留广播的 LAN 子网）。
-	var lanRoutes []string
-	for _, r := range st.Self.AdvertisedRoutes {
-		trimmed := strings.TrimSpace(r)
-		if trimmed == "" || trimmed == "0.0.0.0/0" || trimmed == "::/0" {
-			continue
-		}
-		lanRoutes = append(lanRoutes, trimmed)
-	}
-	// 与 WebUI 启动模式选项对应: ""(或client)/router/exit/gateway(router+exit)
-	mode := ""
-	hasRoutes := len(lanRoutes) > 0
-	switch {
-	case st.Self.ExitNodeOption && hasRoutes:
-		mode = "gateway"
-	case st.Self.ExitNodeOption:
-		mode = "exit"
-	case hasRoutes:
-		mode = "router"
-	}
-	acceptRoutes := queryTailscaleAcceptRoutes(ctx, binPath)
-	return true, st.BackendState, mode, acceptRoutes, strings.Join(lanRoutes, ", ")
-}
-
-var tailscaleLocalHTTPClient = &http.Client{
-	Transport: &http.Transport{
-		DialContext: func(dCtx context.Context, _, _ string) (net.Conn, error) {
-			return (&net.Dialer{Timeout: 2 * time.Second}).DialContext(dCtx, "unix", tailscale.DefaultTailscaledSocket)
+	return tailscale.InspectHostStatus(ctx, tailscale.HostStatusOptions{
+		AuthKeyConfigured: authKeySet,
+		ConfiguredSubnets: subnets,
+		DaemonProcProbe: func() bool {
+			return proc.PgrepMatch("tailscaled")
 		},
-		MaxIdleConns:        2,
-		MaxIdleConnsPerHost: 2,
-		IdleConnTimeout:     30 * time.Second,
-	},
-	Timeout: 2 * time.Second,
-}
-
-func queryTailscaleAcceptRoutes(ctx context.Context, binPath string) bool {
-	// 优先直连 tailscaled LocalAPI /localapi/v0/prefs（兼容精简版无 debug CLI 场景）。
-	if req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://local-tailscaled.sock/localapi/v0/prefs", nil); err == nil {
-		if resp, err := tailscaleLocalHTTPClient.Do(req); err == nil {
-			defer resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				var prefs struct {
-					RouteAll bool `json:"RouteAll"`
-				}
-				decErr := json.NewDecoder(resp.Body).Decode(&prefs)
-				_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 16*1024))
-				if decErr == nil {
-					return prefs.RouteAll
-				}
-			} else {
-				_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 16*1024))
-			}
-		}
-	}
-	// 回退 CLI: tailscale debug prefs
-	if out, err := exec.CommandContext(ctx, binPath, "debug", "prefs").Output(); err == nil {
-		var prefs struct {
-			RouteAll bool `json:"RouteAll"`
-		}
-		if json.Unmarshal(out, &prefs) == nil {
-			return prefs.RouteAll
-		}
-	}
-	return false
+	})
 }
 
 func firewallStatus() firewall.QuickStatus {
@@ -478,32 +349,19 @@ func (s *Server) handleConfigPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.cfgMu.Lock()
-	defer s.cfgMu.Unlock()
-
-	// 基于现有配置合并更新，避免丢失 custom_rules、watchdog、server 高级字段等非表单项
-	cfg := s.loadMutableConfig()
-	dto.ApplyTo(cfg)
-
-	// 有订阅时做完整校验;允许暂存空订阅(首次使用)
-	if len(cfg.Subs) > 0 {
-		if err := cfg.ValidateSubs(); err != nil {
-			writeJSONError(w, http.StatusBadRequest, err.Error())
-			return
+	_, err := s.updateConfigTx(configTxOptions{SyncAdGuard: true}, func(cfg *config.Config) error {
+		dto.ApplyTo(cfg)
+		if len(cfg.Subs) > 0 {
+			if valErr := cfg.ValidateSubs(); valErr != nil {
+				return &apiStatusError{status: http.StatusBadRequest, msg: sanitizeSubErrorText(valErr)}
+			}
 		}
-	}
-
-	if err := backupConfig(configPathFor(s)); err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "备份配置失败: "+err.Error())
+		return nil
+	})
+	if err != nil {
+		writePartialSaveError(w, err)
 		return
 	}
-	if err := s.saveConfig(cfg); err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "保存配置失败: "+err.Error())
-		return
-	}
-	s.invalidateIOSCache()
-	s.syncAdGuardSubWhitelistAsync(cfg)
-	_ = daemon.NotifyReload()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -646,12 +504,16 @@ func (s *Server) handleIOSConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := cfg.ValidateSubs(); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "订阅未配置: "+err.Error())
+		writeJSONError(w, http.StatusBadRequest, "订阅未配置: "+sanitizeSubErrorText(err))
 		return
 	}
-	configJSON, err := IOSGenerate(cfg)
+	genFn := s.opts.IOSGenerator
+	if genFn == nil {
+		genFn = IOSGenerate
+	}
+	configJSON, err := genFn(cfg)
 	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "生成 iOS 配置失败: "+err.Error())
+		writeJSONError(w, http.StatusInternalServerError, "生成 iOS 配置失败: "+sanitizeSubErrorText(err))
 		return
 	}
 	// 双保险: 防止未来生成逻辑变化后把本地路径规则集发给 iPhone
@@ -679,7 +541,7 @@ func (s *Server) writeIOSConfig(w http.ResponseWriter, configJSON string) {
 
 // handleIOSConfigURL 返回手机可直接访问的下载地址（携带签名 ?token=，避免 URL 明文口令）及 SFI 一键导入链接
 func (s *Server) handleIOSConfigURL(w http.ResponseWriter, r *http.Request) {
-	ni, err := netinfo.Get()
+	ni, err := netx.Get()
 	if err != nil || ni.LANIPv4 == "" {
 		writeJSONError(w, http.StatusInternalServerError, "无法获取局域网 IP: "+err.Error())
 		return

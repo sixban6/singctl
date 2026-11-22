@@ -174,7 +174,7 @@ func (r *Registry) RunScope(ctx context.Context, scope Scope, cfg *config.Config
 		}
 		report.Items = append(report.Items, c.Run(ctx, cfg, deps)...)
 	}
-	finalizeReport(report, healthyMsg)
+	FinalizeReport(report, healthyMsg)
 	return report
 }
 
@@ -243,7 +243,8 @@ func RunClientDoctorWithDeps(ctx context.Context, cfg *config.Config, deps Deps)
 	return DefaultRegistry().RunScope(ctx, ScopeClient, cfg, deps, healthyMsg)
 }
 
-func finalizeReport(report *DoctorReport, healthyMsg string) {
+// FinalizeReport 根据体检项中的 fail/warn 数量汇总综合评分与总结结论。
+func FinalizeReport(report *DoctorReport, healthyMsg string) {
 	var fails, warns int
 	for _, item := range report.Items {
 		switch item.Status {

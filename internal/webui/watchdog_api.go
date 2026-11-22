@@ -1,3 +1,4 @@
+// 文件职责：提供客户端看门狗守护与策略组容灾状态报告、参数配置更新及手动巡检触发接口。
 package webui
 
 import (
@@ -20,7 +21,8 @@ import (
 	"singctl/internal/singbox"
 )
 
-type watchdogFailoverDTO struct {
+// WatchdogFailoverDTO 描述看门狗策略组容灾配置前端视图。
+type WatchdogFailoverDTO struct {
 	Enabled            bool     `json:"enabled"`
 	Groups             []string `json:"groups"`
 	IsDefaultGroups    bool     `json:"is_default_groups"`
@@ -35,16 +37,18 @@ type watchdogFailoverDTO struct {
 	IsDefaultProbeURLs bool     `json:"is_default_probe_urls"`
 }
 
-type watchdogConfigDTO struct {
+// WatchdogConfigDTO 描述看门狗守护参数前端视图。
+type WatchdogConfigDTO struct {
 	Interval        int                 `json:"interval"`
 	ConfirmWait     int                 `json:"confirm_wait"`
 	MaxRestarts     int                 `json:"max_restarts"`
 	SubSyncEnabled  bool                `json:"sub_sync_enabled"`
 	SubSyncInterval int                 `json:"sub_sync_interval"`
-	Failover        watchdogFailoverDTO `json:"failover"`
+	Failover        WatchdogFailoverDTO `json:"failover"`
 }
 
-func buildWatchdogConfigDTO(cfg *config.Config) watchdogConfigDTO {
+// BuildWatchdogConfigDTO 根据配置构建看门狗前端有效参数 DTO。
+func BuildWatchdogConfigDTO(cfg *config.Config) WatchdogConfigDTO {
 	if cfg == nil {
 		cfg = &config.Config{}
 	}
@@ -75,13 +79,13 @@ func buildWatchdogConfigDTO(cfg *config.Config) watchdogConfigDTO {
 		cooldownSec = fo.FailbackCooldown
 	}
 
-	return watchdogConfigDTO{
+	return WatchdogConfigDTO{
 		Interval:        interval,
 		ConfirmWait:     confirmWait,
 		MaxRestarts:     maxRestarts,
 		SubSyncEnabled:  subSyncEnabled,
 		SubSyncInterval: subSyncInterval,
-		Failover: watchdogFailoverDTO{
+		Failover: WatchdogFailoverDTO{
 			Enabled:            fo.IsEnabled(),
 			Groups:             effGroups,
 			IsDefaultGroups:    len(fo.Groups) == 0 || slices.Equal(effGroups, config.DefaultWatchdogFailoverGroups),
@@ -96,6 +100,10 @@ func buildWatchdogConfigDTO(cfg *config.Config) watchdogConfigDTO {
 			IsDefaultProbeURLs: len(fo.ProbeURLs) == 0 || slices.Equal(effURLs, config.DefaultWatchdogProbeURLs),
 		},
 	}
+}
+
+func buildWatchdogConfigDTO(cfg *config.Config) WatchdogConfigDTO {
+	return BuildWatchdogConfigDTO(cfg)
 }
 
 func (s *Server) buildWatchdogReport(cfg *config.Config) map[string]any {

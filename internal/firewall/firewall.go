@@ -1,3 +1,4 @@
+// 文件职责：提供防火墙配置归一化、SSH 防锁死端口探测、nftables 规则编译与跨平台启停持久化。
 package firewall
 
 import (
@@ -15,11 +16,11 @@ import (
 	"strconv"
 	"strings"
 
+	"singctl/internal/common/fsx"
 	"singctl/internal/config"
 	"singctl/internal/constant"
 	"singctl/internal/logger"
 	"singctl/internal/platform/servicemgr"
-	"singctl/internal/util/file"
 )
 
 const (
@@ -159,77 +160,97 @@ func DetectSSHPorts() []int {
 	if extra, err := filepath.Glob("/etc/ssh/sshd_config.d/*.conf"); err == nil {
 		files = append(files, extra...)
 	}
-	return detectSSHPortsFrom(os.Getenv("SSH_CONNECTION"), files, "/etc/config/dropbear")
+	return DetectSSHPortsFrom(os.Getenv("SSH_CONNECTION"), files, "/etc/config/dropbear")
 }
 
-func detectSSHPortsFrom(sshConn string, sshdFiles []string, dropbearFile string) []int {
+// DetectSSHPortsFrom 从指定的 SSH_CONNECTION 环境变量、OpenSSH 配置列表与 Dropbear 配置路径解析活跃 SSH 端口。
+func DetectSSHPortsFrom(sshConn string, sshdFiles []string, dropbearFile string) []int {
 	var ports []int
-	addPort := func(p int) {
-		if p > 0 && p <= 65535 && !slices.Contains(ports, p) {
-			ports = append(ports, p)
-		}
-	}
+	ports = appendUniquePort(ports, parseSSHConnServerPort(sshConn))
 
-	// 1. Inspect current SSH_CONNECTION ("<client_ip> <client_port> <server_ip> <server_port>")
-	fields := strings.Fields(sshConn)
-	if len(fields) == 4 {
-		if p, err := strconv.Atoi(fields[3]); err == nil {
-			addPort(p)
-		}
-	}
-
-	// 2. Inspect OpenSSH configs (/etc/ssh/sshd_config and /etc/ssh/sshd_config.d/*.conf)
-	foundExplicitPort := false
+	foundExplicit := false
 	for _, f := range sshdFiles {
 		raw, err := os.ReadFile(f)
 		if err != nil {
 			continue
 		}
-		for line := range strings.SplitSeq(string(raw), "\n") {
-			trimmed := strings.TrimSpace(line)
-			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-				continue
-			}
-			parts := strings.Fields(trimmed)
-			if len(parts) >= 2 && strings.EqualFold(parts[0], "Port") {
-				if p, err := strconv.Atoi(parts[1]); err == nil {
-					addPort(p)
-					foundExplicitPort = true
-				}
-			}
+		for _, p := range parseSSHDPortDirectives(string(raw)) {
+			ports = appendUniquePort(ports, p)
+			foundExplicit = true
 		}
 	}
 
-	// 3. Inspect OpenWrt /etc/config/dropbear (`option Port '2222'`)
 	if strings.TrimSpace(dropbearFile) != "" {
 		if raw, err := os.ReadFile(dropbearFile); err == nil {
-			for line := range strings.SplitSeq(string(raw), "\n") {
-				trimmed := strings.TrimSpace(line)
-				if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-					continue
-				}
-				parts := strings.Fields(trimmed)
-				if len(parts) >= 3 && strings.EqualFold(parts[0], "option") && strings.EqualFold(parts[1], "Port") {
-					val := strings.Trim(parts[2], `"'`)
-					if p, err := strconv.Atoi(val); err == nil {
-						addPort(p)
-						foundExplicitPort = true
-					}
-				}
+			for _, p := range parseDropbearPortDirectives(string(raw)) {
+				ports = appendUniquePort(ports, p)
+				foundExplicit = true
 			}
 		}
 	}
 
-	// Default OpenSSH/Dropbear port is 22 when no explicit Port directive is configured
-	if !foundExplicitPort && len(ports) == 0 {
-		addPort(22)
+	if !foundExplicit && len(ports) == 0 {
+		ports = appendUniquePort(ports, 22)
 	}
 	return ports
 }
 
+func appendUniquePort(ports []int, p int) []int {
+	if p <= 0 || p > 65535 || slices.Contains(ports, p) {
+		return ports
+	}
+	return append(ports, p)
+}
+
+func parseSSHConnServerPort(sshConn string) int {
+	fields := strings.Fields(sshConn)
+	if len(fields) != 4 {
+		return 0
+	}
+	p, err := strconv.Atoi(fields[3])
+	if err != nil {
+		return 0
+	}
+	return p
+}
+
+func parseSSHDPortDirectives(content string) []int {
+	var out []int
+	for line := range strings.SplitSeq(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		parts := strings.Fields(trimmed)
+		if len(parts) < 2 || !strings.EqualFold(parts[0], "Port") {
+			continue
+		}
+		if p, err := strconv.Atoi(parts[1]); err == nil {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func parseDropbearPortDirectives(content string) []int {
+	var out []int
+	for line := range strings.SplitSeq(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		parts := strings.Fields(trimmed)
+		if len(parts) < 3 || !strings.EqualFold(parts[0], "option") || !strings.EqualFold(parts[1], "Port") {
+			continue
+		}
+		if p, err := strconv.Atoi(strings.Trim(parts[2], `"'`)); err == nil {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // BuildSecurityNFT generates a sanitized nftables security ruleset with default options.
-// It whitelists RFC1918 + CGNAT/Tailscale ranges and the current SSH client IP (if any),
-// and excludes active SSH daemon ports from protected_ports to prevent self-lockout.
 func BuildSecurityNFT(sshConnection string, activeSSHPorts []int) string {
 	return BuildSecurityNFTWithOptions(BuildOptions{
 		SSHConnection:  sshConnection,
@@ -240,324 +261,122 @@ func BuildSecurityNFT(sshConnection string, activeSSHPorts []int) string {
 
 // BuildSecurityNFTWithOptions 根据结构化防火墙选项生成防自锁、支持双模式的 nftables `inet security` 规则脚本。
 func BuildSecurityNFTWithOptions(opts BuildOptions) string {
-	mode := "standard"
-	if strings.EqualFold(strings.TrimSpace(opts.Mode), "minimal") {
-		mode = "minimal"
-	}
-	timeoutDays := opts.BanTimeoutDays
-	if timeoutDays <= 0 {
-		timeoutDays = 7
-	}
-	timeoutDays = min(30, max(1, timeoutDays))
+	isMinimal := strings.EqualFold(strings.TrimSpace(opts.Mode), "minimal")
+	timeoutDays := clampDefaultInt(opts.BanTimeoutDays, 7, 1, 30)
+	pingLimit := clampDefaultInt(opts.PingLimitPerSec, 10, 1, 100)
 
-	pingLimit := opts.PingLimitPerSec
-	if pingLimit <= 0 {
-		pingLimit = 10
-	}
-	pingLimit = min(100, max(1, pingLimit))
+	whitelistV4, whitelistV6 := collectNormalizedWhitelists(opts)
+	foreverV4 := collectForeverBlocklistV4(opts.ExtraForeverBan)
+	protectedPorts := collectProtectedPorts(opts)
 
-	whitelistV4 := slices.Clone(defaultWhitelistV4)
-	var whitelistV6 []string
+	return renderSecurityNFT(nftSecurityTemplateData{
+		ForeverV4:       foreverV4,
+		BanTimeoutDays:  timeoutDays,
+		WhitelistV4:     whitelistV4,
+		WhitelistV6:     whitelistV6,
+		ProtectedPorts:  protectedPorts,
+		PingLimitPerSec: pingLimit,
+		EnableHoneypot:  !isMinimal && len(protectedPorts) > 0,
+	})
+}
 
-	appendPublicOrCustomWhitelist := func(raw string, allowPrivate bool) {
-		trimmed := strings.TrimSpace(raw)
-		if trimmed == "" {
-			return
-		}
-		if p, err := netip.ParsePrefix(trimmed); err == nil {
-			p = netip.PrefixFrom(p.Addr().Unmap(), p.Bits()).Masked()
-			s := p.String()
-			if p.IsSingleIP() {
-				s = p.Addr().String()
-			}
-			if p.Addr().Is4() {
-				if !slices.Contains(whitelistV4, s) {
-					whitelistV4 = append(whitelistV4, s)
-				}
-			} else if !slices.Contains(whitelistV6, s) {
-				whitelistV6 = append(whitelistV6, s)
-			}
-			return
-		}
-		if addr, err := netip.ParseAddr(trimmed); err == nil {
-			addr = addr.Unmap()
-			if !allowPrivate && (addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast()) {
-				return
-			}
-			s := addr.String()
-			if addr.Is4() {
-				if !slices.Contains(whitelistV4, s) {
-					whitelistV4 = append(whitelistV4, s)
-				}
-			} else if !slices.Contains(whitelistV6, s) {
-				whitelistV6 = append(whitelistV6, s)
-			}
-		}
+func clampDefaultInt(val, def, lo, hi int) int {
+	if val <= 0 {
+		val = def
 	}
+	return min(hi, max(lo, val))
+}
+
+func collectNormalizedWhitelists(opts BuildOptions) ([]string, []string) {
+	v4 := slices.Clone(defaultWhitelistV4)
+	var v6 []string
 
 	if fields := strings.Fields(strings.TrimSpace(opts.SSHConnection)); len(fields) >= 1 {
-		appendPublicOrCustomWhitelist(fields[0], false)
+		v4, v6 = appendWhitelistEntry(fields[0], false, v4, v6)
 	}
 	if opts.CallerIP != "" {
-		appendPublicOrCustomWhitelist(opts.CallerIP, false)
+		v4, v6 = appendWhitelistEntry(opts.CallerIP, false, v4, v6)
 	}
 	for _, w := range opts.CustomWhitelist {
-		appendPublicOrCustomWhitelist(w, true)
+		v4, v6 = appendWhitelistEntry(w, true, v4, v6)
 	}
+	return v4, v6
+}
 
+func appendWhitelistEntry(raw string, allowPrivate bool, v4, v6 []string) ([]string, []string) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return v4, v6
+	}
+	if p, err := netip.ParsePrefix(trimmed); err == nil {
+		p = netip.PrefixFrom(p.Addr().Unmap(), p.Bits()).Masked()
+		s := p.String()
+		if p.IsSingleIP() {
+			s = p.Addr().String()
+		}
+		if p.Addr().Is4() {
+			return appendUniqueString(v4, s), v6
+		}
+		return v4, appendUniqueString(v6, s)
+	}
+	addr, err := netip.ParseAddr(trimmed)
+	if err != nil {
+		return v4, v6
+	}
+	addr = addr.Unmap()
+	if !allowPrivate && (addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast()) {
+		return v4, v6
+	}
+	if addr.Is4() {
+		return appendUniqueString(v4, addr.String()), v6
+	}
+	return v4, appendUniqueString(v6, addr.String())
+}
+
+func appendUniqueString(list []string, val string) []string {
+	if slices.Contains(list, val) {
+		return list
+	}
+	return append(list, val)
+}
+
+func collectForeverBlocklistV4(extra []string) []string {
 	foreverV4 := slices.Clone(defaultForeverBlocklistV4)
-	for _, extra := range opts.ExtraForeverBan {
-		if norm, isV6, err := validateForeverBanCIDR(extra); err == nil && !isV6 && !slices.Contains(foreverV4, norm) {
-			foreverV4 = append(foreverV4, norm)
+	for _, raw := range extra {
+		if norm, isV6, err := validateForeverBanCIDR(raw); err == nil && !isV6 {
+			foreverV4 = appendUniqueString(foreverV4, norm)
 		}
 	}
+	return foreverV4
+}
 
-	var foreverBlock strings.Builder
-	for i, cidr := range foreverV4 {
-		if i > 0 {
-			foreverBlock.WriteString(",\n          ")
-		}
-		foreverBlock.WriteString(cidr)
-	}
-
-	var v6ElemsLine string
-	if len(whitelistV6) > 0 {
-		v6ElemsLine = fmt.Sprintf("\n        elements = { %s }", strings.Join(whitelistV6, ", "))
-	}
-
+func collectProtectedPorts(opts BuildOptions) []int {
 	basePorts := defaultBaseProtectedPorts
-	if len(opts.CustomProtectedPorts) > 0 {
+	hasCustom := len(opts.CustomProtectedPorts) > 0
+	if hasCustom {
 		basePorts = opts.CustomProtectedPorts
 	}
-	var protected []string
-	var seenPorts []int
+	var ports []int
 	for _, p := range basePorts {
-		if p <= 0 || p > 65535 || slices.Contains(seenPorts, p) {
+		if p <= 0 || p > 65535 || slices.Contains(ports, p) {
 			continue
 		}
 		if slices.Contains(opts.ActiveSSHPorts, p) || slices.Contains(criticalServiceExemptPorts, p) {
 			continue
 		}
-		seenPorts = append(seenPorts, p)
-		protected = append(protected, strconv.Itoa(p))
+		ports = append(ports, p)
 	}
-	sort.Slice(seenPorts, func(i, j int) bool { return seenPorts[i] < seenPorts[j] })
-	if len(opts.CustomProtectedPorts) > 0 {
-		protected = protected[:0]
-		for _, p := range seenPorts {
-			protected = append(protected, strconv.Itoa(p))
-		}
+	if hasCustom {
+		sort.Ints(ports)
 	}
-
-	protectedSetSection := ""
-	honeypotRulesSection := ""
-	if mode != "minimal" && len(protected) > 0 {
-		protectedSetSection = fmt.Sprintf(`
-    set protected_ports {
-        type inet_service
-        flags interval
-        elements = {
-            %s
-        }
-    }
-`, strings.Join(protected, ",\n            "))
-		honeypotRulesSection = `
-
-        # 记录并处理 IPv4 受保护端口的连接尝试 (TCP & UDP)
-        meta l4proto tcp tcp dport @protected_ports \
-            log prefix "[NFT] Blocked IPv4 TCP: " \
-            add @blocklist_ip4 { ip saddr limit rate 5/minute } \
-            counter drop
-        meta l4proto udp udp dport @protected_ports \
-            log prefix "[NFT] Blocked IPv4 UDP: " \
-            add @blocklist_ip4 { ip saddr limit rate 5/minute } \
-            counter drop
-
-        # 记录并处理 IPv6 受保护端口的连接尝试 (TCP & UDP)
-        meta l4proto tcp tcp dport @protected_ports \
-            log prefix "[NFT] Blocked IPv6 TCP: " \
-            add @blocklist_ip6 { ip6 saddr limit rate 5/minute } \
-            counter drop
-        meta l4proto udp udp dport @protected_ports \
-            log prefix "[NFT] Blocked IPv6 UDP: " \
-            add @blocklist_ip6 { ip6 saddr limit rate 5/minute } \
-            counter drop`
-	}
-
-	return fmt.Sprintf(`#!/usr/sbin/nft -f
-
-table inet security {
-
-    set blocklist_ip4_forever {
-        type ipv4_addr
-        flags interval
-        auto-merge
-        size 65535
-        elements = {
-          %s
-        }
-    }
-
-    set blocklist_ip4 {
-        type ipv4_addr
-        flags dynamic,timeout
-        size 65535
-        timeout %dd
-    }
-
-    set blocklist_ip6 {
-        type ipv6_addr
-        flags dynamic,timeout
-        size 65535
-        timeout %dd
-    }
-
-    set whitelist_ip {
-        type ipv4_addr
-        flags interval
-        auto-merge
-        elements = { %s }
-    }
-
-    set whitelist_ip6 {
-        type ipv6_addr
-        flags interval
-        auto-merge%s
-    }
-%s
-    chain input {
-        type filter hook input priority 0; policy accept;
-
-        # 优先处理已建立的连接，提高性能
-        ct state established,related counter accept
-
-        # 允许回环接口和常见虚拟网络接口的流量
-        iifname "lo" counter accept
-        iifname "tailscale0" counter accept
-        iifname "wg*" counter accept
-        iifname "tun*" counter accept
-        iifname "docker0" counter accept
-
-        # 限制 ICMP (Ping) 频率
-        ip protocol icmp icmp type echo-request limit rate %d/second counter accept
-        ip6 nexthdr icmpv6 icmpv6 type echo-request limit rate %d/second counter accept
-
-        # 允许来自白名单 IP 的所有连接
-        ip saddr @whitelist_ip counter accept
-        ip6 saddr @whitelist_ip6 counter accept
-
-        ip saddr @blocklist_ip4_forever log prefix "[NFT] Ban Forever IPv4 (listed): " counter drop
-
-        # 记录并丢弃来自 IPv4 黑名单的连接
-        ip saddr @blocklist_ip4 \
-            log prefix "[NFT] Blocked IPv4 (listed): " \
-            counter drop
-
-        # 记录并丢弃来自 IPv6 黑名单的连接
-        ip6 saddr @blocklist_ip6 \
-            log prefix "[NFT] Blocked IPv6 (listed): " \
-            counter drop%s
-    }
-
-}
-`, foreverBlock.String(), timeoutDays, timeoutDays, strings.Join(whitelistV4, ", "), v6ElemsLine, protectedSetSection, pingLimit, pingLimit, honeypotRulesSection)
+	return ports
 }
 
 func validateForeverBanCIDR(raw string) (string, bool, error) {
-	norm, isV6, err := ValidateBanTarget(raw, "forever", "", nil)
-	return norm, isV6, err
+	return ValidateBanTarget(raw, "forever", "", nil)
 }
-
-// BuildMinimalBlocklistNFT 生成零端口拦截的最小安全黑名单表（仅包含私网/Tailscale 白名单、已建立连接放行与黑名单集合丢包）。
-// 供从未执行过 `singctl fw enable` 的主机在触发「一键拉黑」时按需初始化，彻底杜绝任何 SSH 端口误封锁死风险。
-func BuildMinimalBlocklistNFT() string {
-	return `table inet security {
-    set blocklist_ip4_forever {
-        type ipv4_addr
-        flags interval
-        auto-merge
-        size 65535
-    }
-    set blocklist_ip4 {
-        type ipv4_addr
-        flags dynamic,timeout
-        size 65535
-        timeout 7d
-    }
-    set blocklist_ip6 {
-        type ipv6_addr
-        flags dynamic,timeout
-        size 65535
-        timeout 7d
-    }
-    set whitelist_ip {
-        type ipv4_addr
-        flags interval
-        auto-merge
-        elements = { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10 }
-    }
-    set whitelist_ip6 {
-        type ipv6_addr
-        flags interval
-        auto-merge
-    }
-    chain input {
-        type filter hook input priority 0; policy accept;
-        ct state established,related counter accept
-        iifname "lo" counter accept
-        iifname "tailscale0" counter accept
-        iifname "wg*" counter accept
-        iifname "tun*" counter accept
-        ip saddr @whitelist_ip counter accept
-        ip6 saddr @whitelist_ip6 counter accept
-        ip saddr @blocklist_ip4_forever log prefix "[NFT] Ban Forever IPv4 (listed): " counter drop
-        ip saddr @blocklist_ip4 log prefix "[NFT] Blocked IPv4 (listed): " counter drop
-        ip6 saddr @blocklist_ip6 log prefix "[NFT] Blocked IPv6 (listed): " counter drop
-    }
-}
-`
-}
-
-// BuildFirewallSystemdUnit 生成带 nf_tables 内核模块预加载与开机 Netlink 重试机制的 systemd 单元。
-// 解决部分 KVM/Debian VPS 开机早期 nf_tables 模块尚未注册 Netlink 时 `nft -f` 报
-// "Unable to initialize Netlink socket: Protocol not supported" 退出导致丢表的问题。
-func BuildFirewallSystemdUnit(scriptPath string) string {
-	return fmt.Sprintf(`[Unit]
-Description=Singctl Security NFTables Rules
-# 确保在网络、内核模块加载及主流防火墙就绪后加载，避免早期 Netlink 未初始化或规则被冲刷
-After=network.target systemd-modules-load.service nftables.service firewalld.service ufw.service
-
-[Service]
-Type=oneshot
-ExecStartPre=-/bin/sh -c 'modprobe nf_tables 2>/dev/null || /sbin/modprobe nf_tables 2>/dev/null || true'
-ExecStart=/bin/sh -c 'i=0; while [ "$i" -lt 5 ]; do /usr/sbin/nft -f "%s" && exit 0; modprobe nf_tables 2>/dev/null || /sbin/modprobe nf_tables 2>/dev/null || true; sleep 1; i=$((i + 1)); done; exec /usr/sbin/nft -f "%s"'
-ExecStop=-/usr/sbin/nft delete table inet security
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-`, scriptPath, scriptPath)
-}
-
-const openwrtInitScript = `#!/bin/sh /etc/rc.common
-
-START=99
-STOP=10
-
-start() {
-	echo "Loading singctl security firewall rules..."
-	modprobe nf_tables 2>/dev/null || true
-	/usr/sbin/nft -f %s
-}
-
-stop() {
-	echo "Removing singctl security firewall rules..."
-	/usr/sbin/nft delete table inet security 2>/dev/null || true
-}
-`
 
 // Enable writes sec_block.nft to /etc/sing-box/ and loads it using nft, honoring saved firewall config if present.
-// It preserves currently jailed dynamic attacker elements across reloads and configures auto-start persistence.
 func Enable() error {
 	var cfg *config.Config
 	if loaded, err := config.Load(DefaultConfigPath); err == nil {
@@ -568,25 +387,12 @@ func Enable() error {
 
 // EnableWithOptions 使用指定选项写盘、校验并热加载 `nftables inet security` 表；当 preserveDynamic=true 时迁移保留现有动态黑牢。
 func EnableWithOptions(opts BuildOptions, preserveDynamic bool) error {
-	if runtime.GOOS != "linux" {
-		return fmt.Errorf("firewall commands are only supported on Linux")
+	if err := ensureLinuxRootNFT(); err != nil {
+		return err
 	}
-
-	if os.Geteuid() != 0 {
-		return fmt.Errorf("this command requires root privileges (run with sudo)")
+	if err := os.MkdirAll(constant.SingBoxConfigDir, 0755); err != nil {
+		return fmt.Errorf("failed to create config directory %s: %v", constant.SingBoxConfigDir, err)
 	}
-
-	if _, err := exec.LookPath("nft"); err != nil {
-		return fmt.Errorf("nft command not found, please install nftables")
-	}
-
-	configDir := constant.SingBoxConfigDir
-	scriptPath := constant.SingBoxNftablesFile
-
-	if err := os.MkdirAll(configDir, 0755); err != nil {
-		return fmt.Errorf("failed to create config directory %s: %v", configDir, err)
-	}
-
 	if len(opts.ActiveSSHPorts) == 0 {
 		opts.ActiveSSHPorts = DetectSSHPorts()
 	}
@@ -594,95 +400,101 @@ func EnableWithOptions(opts BuildOptions, preserveDynamic bool) error {
 		opts.SSHConnection = os.Getenv("SSH_CONNECTION")
 	}
 
-	var dynamicV4, dynamicV6 []BanItem
-	if preserveDynamic {
-		if snap, err := readLiveSecurityTable(); err == nil && snap != nil {
-			for _, item := range snap.DynamicV4 {
-				dynamicV4 = append(dynamicV4, item)
-			}
-			for _, item := range snap.DynamicV6 {
-				dynamicV6 = append(dynamicV6, item)
-			}
-		}
-	}
-
-	nftRules := BuildSecurityNFTWithOptions(opts)
-	if err := file.WriteAtomic0600(scriptPath, []byte(nftRules)); err != nil {
+	dynamicV4, dynamicV6 := snapshotLiveDynamicBans(preserveDynamic)
+	scriptPath := constant.SingBoxNftablesFile
+	if err := fsx.WriteAtomic0600(scriptPath, []byte(BuildSecurityNFTWithOptions(opts))); err != nil {
 		return fmt.Errorf("failed to write %s: %v", scriptPath, err)
 	}
 
 	preloadNFTablesModule()
-
-	// 1. 预校验语法并清理旧表，确保重复执行幂等且绝不追加重复规则
 	if out, err := exec.Command("nft", "-c", "-f", scriptPath).CombinedOutput(); err != nil {
 		return fmt.Errorf("nftables syntax check failed: %v\nOutput: %s", err, string(out))
 	}
 	_ = exec.Command("nft", "delete", "table", "inet", "security").Run()
 
-	// 2. 本次执行，立即生效
 	logger.Info("Loading nftables rules from %s...", scriptPath)
-	cmd := exec.Command("nft", "-f", scriptPath)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("failed to load nftables rules: %v\nOutput: %s", err, string(output))
+	if out, err := exec.Command("nft", "-f", scriptPath).CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to load nftables rules: %v\nOutput: %s", err, string(out))
 	}
-
-	// 3. 热迁移回填原有的动态封禁黑名单（不清空已有扫描器 TTL）
 	if preserveDynamic && (len(dynamicV4) > 0 || len(dynamicV6) > 0) {
 		if restoreErr := restoreDynamicBans(dynamicV4, dynamicV6); restoreErr != nil {
 			logger.Warn("Dynamic ban snapshot restore partial/failed: %v", restoreErr)
 		}
 	}
-
-	// 4. 部署跨平台开机自启
-	var persistErr error
-	if servicemgr.IsOpenWrt() {
-		logger.Info("Detected OpenWrt system, setting up init.d service...")
-		persistErr = setupOpenWrtInit()
-	} else {
-		logger.Info("Setting up systemd service...")
-		persistErr = setupSystemdService()
-	}
-
-	if persistErr != nil {
-		logger.Warn("Rules applied, but failed to setup auto-start service: %v", persistErr)
-	} else {
-		logger.Success("Auto-start persistence configured successfully")
-	}
-
+	persistAutostartService()
 	logger.Success("Security block rules applied successfully")
 	return nil
 }
 
-func restoreDynamicBans(v4, v6 []BanItem) error {
-	restoreSet := func(setName string, items []BanItem) error {
-		const chunkSize = 400
-		for i := 0; i < len(items); i += chunkSize {
-			end := min(len(items), i+chunkSize)
-			var elems []string
-			for _, it := range items[i:end] {
-				if net.ParseIP(it.Target) == nil {
-					continue
-				}
-				ttl := max(int64(60), it.ExpiresSec)
-				elems = append(elems, fmt.Sprintf("%s timeout %ds", it.Target, ttl))
-			}
-			if len(elems) == 0 {
-				continue
-			}
-			script := fmt.Sprintf("add element inet security %s { %s }\n", setName, strings.Join(elems, ", "))
-			cmd := exec.Command("nft", "-f", "-")
-			cmd.Stdin = bytes.NewBufferString(script)
-			if out, err := cmd.CombinedOutput(); err != nil {
-				return fmt.Errorf("%s restore error: %v (%s)", setName, err, strings.TrimSpace(string(out)))
-			}
-		}
-		return nil
+func ensureLinuxRootNFT() error {
+	if runtime.GOOS != "linux" {
+		return fmt.Errorf("firewall commands are only supported on Linux")
 	}
-	if err := restoreSet("blocklist_ip4", v4); err != nil {
+	if os.Geteuid() != 0 {
+		return fmt.Errorf("this command requires root privileges (run with sudo)")
+	}
+	if _, err := exec.LookPath("nft"); err != nil {
+		return fmt.Errorf("nft command not found, please install nftables")
+	}
+	return nil
+}
+
+func snapshotLiveDynamicBans(preserve bool) ([]BanItem, []BanItem) {
+	if !preserve {
+		return nil, nil
+	}
+	snap, err := readLiveSecurityTable()
+	if err != nil || snap == nil {
+		return nil, nil
+	}
+	return slices.Clone(snap.DynamicV4), slices.Clone(snap.DynamicV6)
+}
+
+func persistAutostartService() {
+	var err error
+	if servicemgr.IsOpenWrt() {
+		logger.Info("Detected OpenWrt system, setting up init.d service...")
+		err = setupOpenWrtInit()
+	} else {
+		logger.Info("Setting up systemd service...")
+		err = setupSystemdService()
+	}
+	if err != nil {
+		logger.Warn("Rules applied, but failed to setup auto-start service: %v", err)
+		return
+	}
+	logger.Success("Auto-start persistence configured successfully")
+}
+
+func restoreDynamicBans(v4, v6 []BanItem) error {
+	if err := restoreDynamicBanSet("blocklist_ip4", v4); err != nil {
 		return err
 	}
-	return restoreSet("blocklist_ip6", v6)
+	return restoreDynamicBanSet("blocklist_ip6", v6)
+}
+
+func restoreDynamicBanSet(setName string, items []BanItem) error {
+	const chunkSize = 400
+	for i := 0; i < len(items); i += chunkSize {
+		end := min(len(items), i+chunkSize)
+		var elems []string
+		for _, it := range items[i:end] {
+			if net.ParseIP(it.Target) == nil {
+				continue
+			}
+			elems = append(elems, fmt.Sprintf("%s timeout %ds", it.Target, max(int64(60), it.ExpiresSec)))
+		}
+		if len(elems) == 0 {
+			continue
+		}
+		script := fmt.Sprintf("add element inet security %s { %s }\n", setName, strings.Join(elems, ", "))
+		cmd := exec.Command("nft", "-f", "-")
+		cmd.Stdin = bytes.NewBufferString(script)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("%s restore error: %v (%s)", setName, err, strings.TrimSpace(string(out)))
+		}
+	}
+	return nil
 }
 
 // Disable removes security rules and auto-start persistence.
@@ -690,24 +502,16 @@ func Disable() error {
 	if runtime.GOOS != "linux" {
 		return fmt.Errorf("firewall commands are only supported on Linux")
 	}
-
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("this command requires root privileges (run with sudo)")
 	}
-
-	// 1. 清理自启服务
 	if servicemgr.IsOpenWrt() {
 		teardownOpenWrtInit()
 	} else {
 		teardownSystemdService()
 	}
-
-	// 2. 从内存中销毁定制化表
 	_ = exec.Command("nft", "delete", "table", "inet", "security").Run()
-
-	// 3. 移除规则文件
 	_ = os.Remove(constant.SingBoxNftablesFile)
-
 	logger.Success("Security block rules disabled and removed")
 	return nil
 }
@@ -721,12 +525,10 @@ func preloadNFTablesModule() {
 	}
 }
 
-// ----------------- Systemd (Debian / Ubuntu) -----------------
 func setupSystemdService() error {
 	ctx := context.Background()
-	servicePath := constant.FirewallSystemdService
 	content := BuildFirewallSystemdUnit(constant.SingBoxNftablesFile)
-	if err := os.WriteFile(servicePath, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(constant.FirewallSystemdService, []byte(content), 0644); err != nil {
 		return err
 	}
 	mgr := servicemgr.NewSystemd(nil)
@@ -744,14 +546,12 @@ func teardownSystemdService() {
 	})
 }
 
-// ----------------- init.d (OpenWrt) -----------------
 func setupOpenWrtInit() error {
 	scriptPath := constant.FirewallInitdScript
-	content := fmt.Sprintf(openwrtInitScript, constant.SingBoxNftablesFile)
+	content := renderOpenWrtInitScript(constant.SingBoxNftablesFile)
 	if err := os.WriteFile(scriptPath, []byte(content), 0755); err != nil {
 		return err
 	}
-	// 执行 /etc/init.d/singctl-firewall enable (相当于创建 /etc/rc.d/S99singctl-firewall)
 	return servicemgr.NewProcd(nil, filepath.Dir(scriptPath)).Enable(context.Background(), filepath.Base(scriptPath))
 }
 

@@ -1,3 +1,4 @@
+// 文件职责：实现客户端 sing-box 进程启停、网关透明代理联动、核心版本下载升级与多平台包管理。
 package singbox
 
 import (
@@ -9,15 +10,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"singctl/internal/common/fsx"
+	"singctl/internal/common/netx"
+	releasepkg "singctl/internal/common/release"
 	"singctl/internal/config"
 	"singctl/internal/constant"
 	"singctl/internal/gateway"
 	"singctl/internal/logger"
-	"singctl/internal/scripts"
-	"singctl/internal/util/file"
-	"singctl/internal/util/github"
-	"singctl/internal/util/netinfo"
-	releasepkg "singctl/internal/util/release"
+	"singctl/internal/singbox/scripts"
 	"strings"
 	"time"
 )
@@ -37,16 +37,18 @@ func New(cfg *config.Config) *SingBox {
 	}
 }
 
-type gatewayOrchestrator interface {
+// GatewayOrchestrator 抽象 Linux 主/旁路由网关拓扑规则的消费侧接口。
+type GatewayOrchestrator interface {
 	Apply(ctx context.Context, cfg config.GatewayConfig) error
 	Teardown(ctx context.Context) error
 }
 
-func startWithGateway(
+// StartWithGateway 编排网关透明代理规则应用、sing-box 启动脚本执行及旁路由启动失败自动回滚。
+func StartWithGateway(
 	ctx context.Context,
 	isLinux bool,
 	gwCfg config.GatewayConfig,
-	gw gatewayOrchestrator,
+	gw GatewayOrchestrator,
 	runStartScript func() error,
 ) error {
 	if isLinux {
@@ -74,7 +76,7 @@ func (sb *SingBox) Start() error {
 		gwCfg = sb.config.Gateway
 	}
 
-	err := startWithGateway(
+	err := StartWithGateway(
 		context.Background(),
 		runtime.GOOS == "linux",
 		gwCfg,
@@ -213,7 +215,7 @@ func (sb *SingBox) GenerateConfig() error {
 		logger.Success("backup sing-box config file successfully, backup path: %s", backupPath)
 	}
 
-	if err := file.WriteAtomic0600(sb.configPath, []byte(configContent)); err != nil {
+	if err := fsx.WriteAtomic0600(sb.configPath, []byte(configContent)); err != nil {
 		return err
 	}
 	_ = SaveBaseSnapshot(sb.configPath, pureBaseJSON)
@@ -265,7 +267,7 @@ func (sb *SingBox) InstallGUI() error {
 	}
 
 	// 优化下载逻辑：检查Google连通性
-	downloadURL = netinfo.GetReachableURL(downloadURL, sb.config.GitHub.MirrorURL)
+	downloadURL = netx.GetReachableURL(downloadURL, sb.config.GitHub.MirrorURL)
 
 	logger.Info("Downloading GUI client from: %s", downloadURL)
 
@@ -400,7 +402,7 @@ func (sb *SingBox) installOrUpdate(targetPath string) error {
 
 	// 1. 直连获取发布元数据（资产名、大小、下载地址；信任锚，不走镜像）
 	client := releasepkg.NewClient(sb.config.GitHub.MirrorURL)
-	client.DirectFirst = netinfo.CheckGoogleConnectivity()
+	client.DirectFirst = netx.CheckGoogleConnectivity()
 	info, err := client.FetchLatest(ctx, "SagerNet/sing-box")
 	if err != nil {
 		return fmt.Errorf("无法直连 GitHub API 获取 sing-box 发布信息（为保证供应链安全，元数据不走镜像）: %w", err)
@@ -435,13 +437,13 @@ func (sb *SingBox) installOrUpdate(targetPath string) error {
 	}
 
 	// 找到下载的新执行文件
-	newExe, err := file.FindExecutable(extractDir, "sing-box")
+	newExe, err := fsx.FindExecutable(extractDir, "sing-box")
 	if err != nil {
 		return fmt.Errorf("new executable not found in downloaded package: %w", err)
 	}
 
 	// 安装或替换文件
-	if err := file.InstallOrReplace(newExe, targetPath); err != nil {
+	if err := fsx.InstallOrReplace(newExe, targetPath); err != nil {
 		return fmt.Errorf("install or replace failed: %w", err)
 	}
 
@@ -530,8 +532,7 @@ func (sb *SingBox) getCurrentVersion() (string, error) {
 
 // fetchLatestVersion 从 GitHub API 获取 sing-box 最新稳定 Release 的版本号。
 func (sb *SingBox) fetchLatestVersion() (string, error) {
-	fetcher := github.NewReleaseFetcher(sb.config.GitHub.MirrorURL, nil)
-	return fetcher.FetchLatestTag("SagerNet/sing-box")
+	return releasepkg.NewClient(sb.config.GitHub.MirrorURL).FetchLatestTag(context.Background(), "SagerNet/sing-box")
 }
 
 // Update 更新 sing-box（更新前对比版本，避免无意义的重复下载）。

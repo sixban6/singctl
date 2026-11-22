@@ -1,3 +1,4 @@
+// 文件职责：提供 sing-box 配置文件语法预校验、沙盒路径重写、两阶段原子替换与 SIGHUP 热重载原语。
 package singbox
 
 import (

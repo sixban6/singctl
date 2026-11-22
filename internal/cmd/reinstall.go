@@ -7,7 +7,6 @@ import (
 	"singctl/internal/config"
 	"singctl/internal/deploy"
 	"singctl/internal/logger"
-	"singctl/internal/serverweb"
 	"singctl/internal/terminal"
 
 	"github.com/spf13/cobra"
@@ -119,7 +118,7 @@ func reinstallAll(cfg *config.Config, resolvedPath string) error {
 		return err
 	}
 
-	if err := serverweb.InstallService(resolvedPath); err != nil {
+	if err := installServerUIService(resolvedPath); err != nil {
 		logger.Warn("重装服务端管理面板服务警告: %v", err)
 	}
 

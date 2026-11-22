@@ -1,4 +1,4 @@
-// 文件职责：定义 SubHub 多协议双向编解码契约（protocolCodec）与声明式协议注册表。
+// 文件职责：定义 SubHub 多协议双向编解码契约（ProtocolCodec）与声明式协议注册表。
 package subhub
 
 import (
@@ -8,9 +8,9 @@ import (
 	"github.com/sixban6/singgen/pkg/model"
 )
 
-// protocolCodec 描述单个代理协议在多格式入站解码与多客户端出站渲染上的正交能力钩子。
+// ProtocolCodec 描述单个代理协议在多格式入站解码与多客户端出站渲染上的正交能力钩子。
 // 某目标客户端不支持该协议时对应编码字段留 nil，避免强迫空实现。
-type protocolCodec struct {
+type ProtocolCodec struct {
 	Type            string
 	Aliases         []string
 	URISchemes      []string
@@ -22,16 +22,25 @@ type protocolCodec struct {
 	EncodeLoonLine  func(n model.Node, tag string, opts RenderOptions) (string, bool)
 }
 
-type protocolRegistry struct {
-	byType     map[string]*protocolCodec
+type protocolCodec = ProtocolCodec
+
+// ProtocolRegistry 维护协议及别名的快速查找表与受支持 URI Scheme 集合。
+type ProtocolRegistry struct {
+	byType     map[string]*ProtocolCodec
 	uriSchemes []string
 }
 
-var defaultProtocols = newProtocolRegistry(builtinProtocolCodecs()...)
+var defaultProtocols = NewProtocolRegistry(builtinProtocolCodecs()...)
 
-func newProtocolRegistry(codecs ...protocolCodec) *protocolRegistry {
-	reg := &protocolRegistry{
-		byType: make(map[string]*protocolCodec, len(codecs)*2),
+// DefaultProtocols 返回内置 7 协议注册表只读实例。
+func DefaultProtocols() *ProtocolRegistry {
+	return defaultProtocols
+}
+
+// NewProtocolRegistry 从一组 ProtocolCodec 构建新的协议注册表。
+func NewProtocolRegistry(codecs ...ProtocolCodec) *ProtocolRegistry {
+	reg := &ProtocolRegistry{
+		byType: make(map[string]*ProtocolCodec, len(codecs)*2),
 	}
 	for i := range codecs {
 		c := codecs[i]
@@ -57,7 +66,7 @@ func newProtocolRegistry(codecs ...protocolCodec) *protocolRegistry {
 	return reg
 }
 
-func (r *protocolRegistry) resolve(typ string) (*protocolCodec, bool) {
+func (r *ProtocolRegistry) Resolve(typ string) (*ProtocolCodec, bool) {
 	if r == nil {
 		return nil, false
 	}
@@ -65,7 +74,7 @@ func (r *protocolRegistry) resolve(typ string) (*protocolCodec, bool) {
 	return c, ok
 }
 
-func (r *protocolRegistry) hasSupportedScheme(line string) bool {
+func (r *ProtocolRegistry) HasSupportedScheme(line string) bool {
 	if r == nil {
 		return false
 	}
@@ -78,8 +87,8 @@ func (r *protocolRegistry) hasSupportedScheme(line string) bool {
 	return false
 }
 
-func (r *protocolRegistry) decodeSingBox(typ string, ob map[string]any, n *model.Node) bool {
-	c, ok := r.resolve(typ)
+func (r *ProtocolRegistry) DecodeSingBox(typ string, ob map[string]any, n *model.Node) bool {
+	c, ok := r.Resolve(typ)
 	if !ok || c.DecodeSingBox == nil || n == nil {
 		return false
 	}
@@ -90,8 +99,8 @@ func (r *protocolRegistry) decodeSingBox(typ string, ob map[string]any, n *model
 	return true
 }
 
-func (r *protocolRegistry) decodeClash(typ string, p map[string]any, n *model.Node) bool {
-	c, ok := r.resolve(typ)
+func (r *ProtocolRegistry) DecodeClash(typ string, p map[string]any, n *model.Node) bool {
+	c, ok := r.Resolve(typ)
 	if !ok || c.DecodeClash == nil || n == nil {
 		return false
 	}
@@ -102,34 +111,54 @@ func (r *protocolRegistry) decodeClash(typ string, p map[string]any, n *model.No
 	return true
 }
 
-func (r *protocolRegistry) encodeURI(n model.Node, hostPort, escapedFrag string) string {
-	c, ok := r.resolve(n.Type)
+func (r *ProtocolRegistry) EncodeURI(n model.Node, hostPort, escapedFrag string) string {
+	c, ok := r.Resolve(n.Type)
 	if !ok || c.EncodeURI == nil {
 		return ""
 	}
 	return c.EncodeURI(n, hostPort, escapedFrag)
 }
 
-func (r *protocolRegistry) encodeClash(n model.Node, base map[string]any, opts RenderOptions) (map[string]any, bool) {
-	c, ok := r.resolve(n.Type)
+func (r *ProtocolRegistry) EncodeClash(n model.Node, base map[string]any, opts RenderOptions) (map[string]any, bool) {
+	c, ok := r.Resolve(n.Type)
 	if !ok || c.EncodeClash == nil {
 		return nil, false
 	}
 	return c.EncodeClash(n, base, opts)
 }
 
-func (r *protocolRegistry) encodeSurgeLine(n model.Node, tag string, opts RenderOptions) (string, bool) {
-	c, ok := r.resolve(n.Type)
+func (r *ProtocolRegistry) EncodeSurgeLine(n model.Node, tag string, opts RenderOptions) (string, bool) {
+	c, ok := r.Resolve(n.Type)
 	if !ok || c.EncodeSurgeLine == nil {
 		return "", false
 	}
 	return c.EncodeSurgeLine(n, tag, opts)
 }
 
-func (r *protocolRegistry) encodeLoonLine(n model.Node, tag string, opts RenderOptions) (string, bool) {
-	c, ok := r.resolve(n.Type)
+func (r *ProtocolRegistry) EncodeLoonLine(n model.Node, tag string, opts RenderOptions) (string, bool) {
+	c, ok := r.Resolve(n.Type)
 	if !ok || c.EncodeLoonLine == nil {
 		return "", false
 	}
 	return c.EncodeLoonLine(n, tag, opts)
+}
+
+func (r *ProtocolRegistry) hasSupportedScheme(line string) bool { return r.HasSupportedScheme(line) }
+func (r *ProtocolRegistry) decodeSingBox(typ string, ob map[string]any, n *model.Node) bool {
+	return r.DecodeSingBox(typ, ob, n)
+}
+func (r *ProtocolRegistry) decodeClash(typ string, p map[string]any, n *model.Node) bool {
+	return r.DecodeClash(typ, p, n)
+}
+func (r *ProtocolRegistry) encodeURI(n model.Node, hostPort, escapedFrag string) string {
+	return r.EncodeURI(n, hostPort, escapedFrag)
+}
+func (r *ProtocolRegistry) encodeClash(n model.Node, base map[string]any, opts RenderOptions) (map[string]any, bool) {
+	return r.EncodeClash(n, base, opts)
+}
+func (r *ProtocolRegistry) encodeSurgeLine(n model.Node, tag string, opts RenderOptions) (string, bool) {
+	return r.EncodeSurgeLine(n, tag, opts)
+}
+func (r *ProtocolRegistry) encodeLoonLine(n model.Node, tag string, opts RenderOptions) (string, bool) {
+	return r.EncodeLoonLine(n, tag, opts)
 }

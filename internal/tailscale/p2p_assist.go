@@ -1,3 +1,4 @@
+// 文件职责：协调 Tailscale LocalAPI 状态观测、fw4 JIT 瞬时打洞窗口与 3 态双向访问防火墙收敛。
 package tailscale
 
 import (
@@ -133,6 +134,18 @@ func (c *P2PAssistController) fw4Manager() *FW4Manager {
 		return c.FW4
 	}
 	return &FW4Manager{}
+}
+
+// EffectiveLocalAPI 返回控制器当前绑定的 LocalAPI 客户端（未显式注入时回退默认连接池单例）。
+func (c *P2PAssistController) EffectiveLocalAPI() LocalAPIClient {
+	return c.localAPI()
+}
+
+// WaitBackground 等待当前已派发的异步打洞后台协程全部收敛结束。
+func (c *P2PAssistController) WaitBackground() {
+	if c != nil {
+		c.wg.Wait()
+	}
 }
 
 func (c *P2PAssistController) localAPI() LocalAPIClient {

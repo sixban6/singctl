@@ -1,3 +1,4 @@
+// 文件职责：提供管理操作审计日志分类、内存环形窗口与 0600 异步防阻塞落盘管理器。
 package serverweb
 
 import (
@@ -10,7 +11,7 @@ import (
 
 const MaxAuditLogs = 200
 
-// ClassifyAuditCategory 根据操作描述自动归类审计记录，便于前端筛选定位
+// ClassifyAuditCategory 根据操作描述自动归类审计记录，便于前端筛选定位。
 func ClassifyAuditCategory(action string) string {
 	switch {
 	case strings.Contains(action, "登录") || strings.Contains(action, "密码") || strings.Contains(action, "凭证") || strings.Contains(action, "路径"):
@@ -26,14 +27,14 @@ func ClassifyAuditCategory(action string) string {
 	}
 }
 
-// AuditEntry 最近管理操作审计记录 (绝对不记录任何密码、会话令牌或敏感秘钥)
+// AuditEntry 最近管理操作审计记录 (绝对不记录任何密码、会话令牌或敏感秘钥)。
 type AuditEntry struct {
 	Time   string `json:"time"`
 	Action string `json:"action"`
 	IP     string `json:"ip"`
 }
 
-// AuditManager 管理操作审计日志管理器 (支持 0600 小文件异步防阻塞持久化)
+// AuditManager 管理操作审计日志管理器 (支持 0600 小文件异步防阻塞持久化)。
 type AuditManager struct {
 	mu       sync.RWMutex
 	logs     []AuditEntry
@@ -42,7 +43,7 @@ type AuditManager struct {
 	writer   *asyncSnapshotWriter
 }
 
-// NewAuditManager 创建审计日志管理器实例
+// NewAuditManager 创建审计日志管理器实例。
 func NewAuditManager(filePath ...string) *AuditManager {
 	fp := ""
 	if len(filePath) > 0 {
@@ -57,7 +58,14 @@ func NewAuditManager(filePath ...string) *AuditManager {
 	return m
 }
 
-// Record 记录一条管理操作 (自动生成时间，严格禁止写入密码/令牌；磁盘卡死时绝不阻塞请求协程)
+// SetWriteFunc 注入测试用落盘写函数（用于模拟内核慢盘/D 状态卡死）。
+func (m *AuditManager) SetWriteFunc(fn func(string, []byte) error) {
+	if m != nil && m.writer != nil {
+		m.writer.setWriteFunc(fn)
+	}
+}
+
+// Record 记录一条管理操作 (自动生成时间，严格禁止写入密码/令牌；磁盘卡死时绝不阻塞请求协程)。
 func (m *AuditManager) Record(ip, action string) {
 	if m == nil {
 		return
@@ -72,7 +80,6 @@ func (m *AuditManager) Record(ip, action string) {
 	}
 
 	m.mu.Lock()
-	// 最新记录插入切片头部
 	m.logs = append([]AuditEntry{entry}, m.logs...)
 	if len(m.logs) > MaxAuditLogs {
 		m.logs = m.logs[:MaxAuditLogs]
@@ -93,7 +100,7 @@ func (m *AuditManager) Record(ip, action string) {
 	}
 }
 
-// List 获取最近管理操作列表 (最新的在前)
+// List 获取最近管理操作列表 (最新的在前)。
 func (m *AuditManager) List() []AuditEntry {
 	if m == nil {
 		return []AuditEntry{}
@@ -105,7 +112,7 @@ func (m *AuditManager) List() []AuditEntry {
 	return res
 }
 
-// Flush 尝试在超时窗口内刷新尚未落盘的审计快照
+// Flush 尝试在超时窗口内刷新尚未落盘的审计快照。
 func (m *AuditManager) Flush() {
 	if m == nil || m.writer == nil {
 		return

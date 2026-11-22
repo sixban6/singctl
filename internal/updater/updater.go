@@ -9,12 +9,12 @@ import (
 	"runtime"
 	"strings"
 
+	"singctl/internal/common/fsx"
+	releasepkg "singctl/internal/common/release"
 	"singctl/internal/config"
 	"singctl/internal/constant"
 	"singctl/internal/logger"
 	"singctl/internal/singbox/ruleset_snapshot"
-	"singctl/internal/util/file"
-	releasepkg "singctl/internal/util/release"
 )
 
 // SkipChecksumEnv 允许用户在无法直连 GitHub 时显式跳过校验（自担风险）。
@@ -104,7 +104,7 @@ func (u *Updater) UpdateSelf(configPath string, currentVersion string) error {
 	if err := releasepkg.Extract(res.Path, extractDir); err != nil {
 		return fmt.Errorf("extract archive failed: %w", err)
 	}
-	newExe, err := file.FindExecutable(extractDir, "singctl")
+	newExe, err := fsx.FindExecutable(extractDir, "singctl")
 	if err != nil {
 		return fmt.Errorf("new executable not found in downloaded package: %w", err)
 	}
@@ -122,7 +122,7 @@ func (u *Updater) UpdateSelf(configPath string, currentVersion string) error {
 	if configsSrc != "" && configPath != "" {
 		configDir := filepath.Dir(configPath)
 		logger.Info("Syncing default configurations to %s...", configDir)
-		if err := file.CopyDir(configsSrc, configDir); err != nil {
+		if err := fsx.CopyDir(configsSrc, configDir); err != nil {
 			logger.Warn("Failed to sync configs directory: %v", err)
 		}
 
@@ -150,7 +150,7 @@ func (u *Updater) UpdateSelf(configPath string, currentVersion string) error {
 	if err != nil {
 		return fmt.Errorf("get current executable: %w", err)
 	}
-	if err := file.SafeReplace(currentExe, newExe); err != nil {
+	if err := fsx.SafeReplace(currentExe, newExe); err != nil {
 		return err
 	}
 

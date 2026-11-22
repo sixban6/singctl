@@ -1,3 +1,4 @@
+// 文件职责：提供 IP 登录限流与防暴力破解状态机、X-Real-IP 信任边界及 0600 异步防阻塞落盘（原生实现 sniff.BanLimiter 契约）。
 package serverweb
 
 import (
@@ -27,7 +28,7 @@ type ipAttempt struct {
 	Reason      string    `json:"reason,omitempty"`
 }
 
-// BanDetail 结构化封禁详情（区分密码爆破拦截与嗅探手动封禁）
+// BanDetail 结构化封禁详情（区分密码爆破拦截与嗅探手动封禁）。
 type BanDetail struct {
 	IP          string
 	Remaining   time.Duration
@@ -38,7 +39,7 @@ type BanDetail struct {
 	Reason      string
 }
 
-// IPLimiter IP 登录限流与防暴力破解器 (支持 0600 文件异步防阻塞持久化)
+// IPLimiter IP 登录限流与防暴力破解器 (支持 0600 文件异步防阻塞持久化)。
 type IPLimiter struct {
 	mu          sync.RWMutex
 	attempts    map[string]*ipAttempt
@@ -60,7 +61,14 @@ func (l *IPLimiter) Revision() uint64 {
 	return l.rev.Load()
 }
 
-// NewIPLimiter 创建 IPLimiter 实例 (默认 3 次失败、10 分钟窗口、15 分钟封禁，支持传入 0600 小文件持久化路径)
+// SetWriteFunc 注入测试用落盘写函数（用于模拟内核慢盘/D 状态卡死）。
+func (l *IPLimiter) SetWriteFunc(fn func(string, []byte) error) {
+	if l != nil && l.writer != nil {
+		l.writer.setWriteFunc(fn)
+	}
+}
+
+// NewIPLimiter 创建 IPLimiter 实例。
 func NewIPLimiter(maxAttempts int, window, banDuration time.Duration, filePath ...string) *IPLimiter {
 	if maxAttempts <= 0 {
 		maxAttempts = 3
@@ -108,7 +116,6 @@ func (l *IPLimiter) loadLocked() {
 		if att == nil {
 			continue
 		}
-		// 兼容旧版未带 source 字段的持久化记录：封禁跨度超过 1 小时自动归类为嗅探手动拉黑
 		if att.Source == "" {
 			if !att.BannedUntil.IsZero() && att.BannedUntil.Sub(att.LastFail) > time.Hour {
 				att.Source = BanSourceManualSniff
@@ -118,7 +125,6 @@ func (l *IPLimiter) loadLocked() {
 				att.Reason = cmp.Or(att.Reason, "后台登录密码连续输错")
 			}
 		}
-		// 恢复封禁中或仍在失败统计窗口内的 IP
 		if now.Before(att.BannedUntil) || now.Sub(att.LastFail) <= l.window {
 			l.attempts[ip] = att
 		}
@@ -149,7 +155,6 @@ func (l *IPLimiter) persistSnapshot(data []byte, seq uint64) {
 }
 
 // GetClientIP 只在本机反代连接上信任 Caddy 覆写的 X-Real-IP。
-// 调用方自带的 CF-Connecting-IP 和 X-Forwarded-For 一律忽略。
 func GetClientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil || host == "" {
@@ -168,12 +173,11 @@ func GetClientIP(r *http.Request) string {
 	return host
 }
 
-// isWhitelisted 本地回环免锁保护
 func isWhitelisted(ip string) bool {
 	return ip == "127.0.0.1" || ip == "::1" || ip == "localhost"
 }
 
-// CheckBan 检查指定 IP 是否正处于封禁期，返回 (剩余封禁时间, 是否被封)
+// CheckBan 检查指定 IP 是否正处于封禁期。
 func (l *IPLimiter) CheckBan(ip string) (time.Duration, bool) {
 	if isWhitelisted(ip) {
 		return 0, false
@@ -192,7 +196,7 @@ func (l *IPLimiter) CheckBan(ip string) (time.Duration, bool) {
 	return 0, false
 }
 
-// RecordFailure 记录一次密码错误尝试，返回 (是否触发封禁, 剩余封锁时间, 累计失败次数)
+// RecordFailure 记录一次密码错误尝试。
 func (l *IPLimiter) RecordFailure(ip string) (banned bool, remainingTime time.Duration, fails int) {
 	if isWhitelisted(ip) {
 		return false, 0, 0
@@ -216,12 +220,8 @@ func (l *IPLimiter) RecordFailure(ip string) (banned bool, remainingTime time.Du
 
 	att.FailCount++
 	att.LastFail = now
-	if att.Source == "" {
-		att.Source = BanSourceLoginFail
-	}
-	if att.Reason == "" {
-		att.Reason = "后台登录密码连续输错"
-	}
+	att.Source = cmp.Or(att.Source, BanSourceLoginFail)
+	att.Reason = cmp.Or(att.Reason, "后台登录密码连续输错")
 
 	if att.FailCount >= l.maxAttempts {
 		if now.After(att.BannedUntil) || att.BannedUntil.Sub(now) < l.banDuration {
@@ -242,7 +242,7 @@ func (l *IPLimiter) RecordFailure(ip string) (banned bool, remainingTime time.Du
 	return false, 0, failCount
 }
 
-// RecordSuccess 登录成功时清空该 IP 的失败记录
+// RecordSuccess 登录成功时清空该 IP 的失败记录。
 func (l *IPLimiter) RecordSuccess(ip string) {
 	if isWhitelisted(ip) {
 		return
@@ -258,7 +258,7 @@ func (l *IPLimiter) RecordSuccess(ip string) {
 	l.persistSnapshot(data, seq)
 }
 
-// Unban 解除指定 IP 或全部 IP 的封禁
+// Unban 解除指定 IP 或全部 IP 的封禁。
 func (l *IPLimiter) Unban(ip string) bool {
 	l.mu.Lock()
 	if ip == "all" || ip == "*" || ip == "" {
@@ -283,7 +283,7 @@ func (l *IPLimiter) Unban(ip string) bool {
 	return false
 }
 
-// ListBans 获取当前所有活跃封禁中的 IP 及其剩余时间
+// ListBans 获取当前所有活跃封禁中的 IP 及其剩余时间。
 func (l *IPLimiter) ListBans() map[string]time.Duration {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -297,7 +297,7 @@ func (l *IPLimiter) ListBans() map[string]time.Duration {
 	return result
 }
 
-// BanSourceLabel 返回封禁来源的可读中文标签
+// BanSourceLabel 返回封禁来源的可读中文标签。
 func BanSourceLabel(source string) string {
 	if source == BanSourceManualSniff {
 		return "嗅探手动封禁"
@@ -305,7 +305,7 @@ func BanSourceLabel(source string) string {
 	return "密码试错拦截"
 }
 
-// FormatDurationCN 将时长格式化为友好的中文剩余时间（如 "6天14小时"、"12分钟"）
+// FormatDurationCN 将时长格式化为友好的中文剩余时间。
 func FormatDurationCN(d time.Duration) string {
 	if d <= 0 {
 		return "即将解封"
@@ -332,7 +332,7 @@ func FormatDurationCN(d time.Duration) string {
 	return fmt.Sprintf("%d 分钟", mins)
 }
 
-// ListBanDetails 获取当前所有活跃封禁记录的结构化详情（优先展示密码爆破拦截）
+// ListBanDetails 获取当前所有活跃封禁记录的结构化详情。
 func (l *IPLimiter) ListBanDetails() []BanDetail {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -386,16 +386,7 @@ func (l *IPLimiter) ListBanDetails() []BanDetail {
 	return out
 }
 
-// AttemptSnapshot 暴露给嗅探追踪器的只读失败记录快照
-type AttemptSnapshot struct {
-	IP        string
-	FailCount int
-	LastFail  time.Time
-	Banned    bool
-	Source    string
-}
-
-// ListAllAttempts 返回窗口内所有试探或已封禁的 IP 快照
+// ListAllAttempts 返回窗口内所有试探或已封禁的 IP 快照（满足 sniff.BanLimiter 接口）。
 func (l *IPLimiter) ListAllAttempts() []AttemptSnapshot {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -419,7 +410,7 @@ func (l *IPLimiter) ListAllAttempts() []AttemptSnapshot {
 	return out
 }
 
-// BanManual 手动封禁指定 IP 指定时长并持久化
+// BanManual 手动封禁指定 IP 指定时长并持久化。
 func (l *IPLimiter) BanManual(ip string, duration time.Duration, reason ...string) {
 	ip = strings.TrimSpace(ip)
 	if ip == "" || isWhitelisted(ip) {
@@ -454,7 +445,6 @@ func (l *IPLimiter) BanManual(ip string, duration time.Duration, reason ...strin
 	l.persistSnapshot(data, seq)
 }
 
-// startCleaner 定时清理过期记录，杜绝内存泄漏
 func (l *IPLimiter) startCleaner() {
 	ticker := time.NewTicker(3 * time.Minute)
 	defer ticker.Stop()
@@ -485,7 +475,7 @@ func (l *IPLimiter) startCleaner() {
 	}
 }
 
-// Close 停止后台清理协程并尝试刷新落盘
+// Close 停止后台清理协程并尝试刷新落盘。
 func (l *IPLimiter) Close() {
 	select {
 	case <-l.stopCleaner:
@@ -497,7 +487,7 @@ func (l *IPLimiter) Close() {
 	}
 }
 
-// UnbanPersistedIP 直接修改磁盘上的持久化封禁记录文件（供本地 CLI 兜底解封使用）
+// UnbanPersistedIP 直接修改磁盘上的持久化封禁记录文件（供本地 CLI 兜底解封使用）。
 func UnbanPersistedIP(banFilePath, targetIP string) error {
 	if strings.TrimSpace(banFilePath) == "" {
 		return nil
