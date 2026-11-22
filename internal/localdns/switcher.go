@@ -1,7 +1,8 @@
-// 文件职责：实现三引擎零断网两阶段原子切换、公共配置迁移与任意步骤失败自动回滚编排器。
+// 文件职责：实现双引擎（SmartDNS / AdGuard Home）零断网两阶段原子切换、端口冲突避让、公共配置迁移与失败自动回滚编排器。
 package localdns
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"net"
@@ -13,6 +14,7 @@ import (
 	"singctl/internal/config"
 	"singctl/internal/constant"
 	"singctl/internal/logger"
+	"singctl/internal/platform/servicemgr"
 	"singctl/internal/singbox"
 	"singctl/internal/smartdns"
 )
@@ -36,10 +38,6 @@ type SwitchResult struct {
 	Overview         *OverviewSnapshot `json:"overview,omitempty"`
 }
 
-func isExternalEngine(id string) bool {
-	return id == constant.DNSEngineSmartDNS || id == constant.DNSEngineAdGuard
-}
-
 var externalDNSFallbackPorts = []int{5354, 5355, 5335, 15353, 15354}
 
 func isLoopbackDNSPortFree(port int) bool {
@@ -60,6 +58,23 @@ func isLoopbackDNSPortFree(port int) bool {
 	return true
 }
 
+func (r *Registry) isTargetEngineRunning(ctx context.Context, desiredEngine string, targetEng Engine) bool {
+	if targetEng == nil || !targetEng.IsInstalled() {
+		return false
+	}
+	if desiredEngine == constant.DNSEngineSmartDNS {
+		svcMgr := r.deps.ServiceMgr
+		if svcMgr == nil {
+			svcMgr = servicemgr.Detect(nil)
+		}
+		if svcMgr != nil {
+			svcName := cmp.Or(strings.TrimSpace(r.deps.SmartDNSServiceName), constant.SmartDNSServiceName)
+			return svcMgr.IsActive(ctx, svcName)
+		}
+	}
+	return targetEng.Status(ctx).Running
+}
+
 func (r *Registry) ensureAvailableExternalDNSPort(
 	ctx context.Context,
 	origActive string,
@@ -67,8 +82,8 @@ func (r *Registry) ensureAvailableExternalDNSPort(
 	targetEng Engine,
 	currentPort int,
 ) (int, string, error) {
-	// 目标引擎已在当前端口健康运行时保留原端口，不做无谓迁移
-	if origActive == desiredEngine && targetEng.Status(ctx).DNSHealthy {
+	// 仅当目标引擎服务本身已在运行且健康响应时保留原端口（避免把其他进程占用的 5353 误判为自身）
+	if origActive == desiredEngine && r.isTargetEngineRunning(ctx, desiredEngine, targetEng) && targetEng.Status(ctx).DNSHealthy {
 		return currentPort, "", nil
 	}
 	checkFree := r.deps.CheckPortAvailableFunc
@@ -106,7 +121,7 @@ func (r *Registry) saveConfig() error {
 
 func (r *Registry) syncSingBoxDNSLocal(ctx context.Context, useExternal bool, dnsPort int) error {
 	sbPath := r.sbConfigPath()
-	workPath := r.sbEng.sbWorkConfigPath()
+	workPath := r.sbWorkConfigPath()
 	if r.deps.SyncSingBoxDNSLocalFunc != nil {
 		_, err := r.deps.SyncSingBoxDNSLocalFunc(ctx, sbPath, workPath, useExternal, dnsPort)
 		return err
@@ -184,9 +199,6 @@ func (r *Registry) describeMigratedItems(harvested []string) []string {
 	if len(r.cfg.DNS.Rewrites) > 0 && !hasPrefix("内网解析重写") {
 		items = append(items, fmt.Sprintf("内网解析重写 (%d 条)", len(r.cfg.DNS.Rewrites)))
 	}
-	if r.cfg.DNS.BlockAAAA {
-		items = append(items, "AAAA 屏蔽策略")
-	}
 	if len(r.cfg.CustomRules.Block) > 0 {
 		items = append(items, fmt.Sprintf("审计封禁规则 (%d 条)", len(r.cfg.CustomRules.Block)))
 	}
@@ -199,8 +211,11 @@ func (r *Registry) SwitchEngine(ctx context.Context, req SwitchRequest) (*Switch
 		ctx = context.Background()
 	}
 	targetPref := strings.ToLower(strings.TrimSpace(req.TargetEngine))
+	if targetPref == "" {
+		targetPref = constant.DNSEngineAuto
+	}
 	if !config.IsValidDNSEngine(targetPref) {
-		return nil, fmt.Errorf("不支持的目标 DNS 引擎 %q（仅允许 auto / singbox / smartdns / adguard）", req.TargetEngine)
+		return nil, fmt.Errorf("不支持的目标 DNS 引擎 %q（仅允许 auto / smartdns / adguard）", req.TargetEngine)
 	}
 
 	hw := r.ProbeHardware()
@@ -213,7 +228,7 @@ func (r *Registry) SwitchEngine(ctx context.Context, req SwitchRequest) (*Switch
 	desiredEngine := targetPref
 	if targetPref == constant.DNSEngineAuto {
 		autoSel := RecommendEngine(hw, installed)
-		desiredEngine = autoSel.ActiveEngine
+		desiredEngine = autoSel.RecommendedEngine
 	}
 
 	targetEng, ok := r.Get(desiredEngine)
@@ -222,62 +237,63 @@ func (r *Registry) SwitchEngine(ctx context.Context, req SwitchRequest) (*Switch
 	}
 
 	// 1. 硬件准入校验（闪存不足硬拦截绝不可绕过；仅内存偏低允许 ForceLowMemory 覆盖）
-	if isExternalEngine(desiredEngine) {
-		elig := origSel.Eligibility[desiredEngine]
-		if elig.DiskBlocked && !installed[desiredEngine] {
-			return nil, fmt.Errorf("硬件闪存护栏拦截：%s", elig.BlockedReason)
-		}
-		if elig.MemoryBlocked && !req.ForceLowMemory && !installed[desiredEngine] {
-			return nil, fmt.Errorf("硬件内存护栏拦截：%s（如需强行安装请启用 ForceLowMemory）", elig.BlockedReason)
-		}
+	elig := origSel.Eligibility[desiredEngine]
+	if elig.DiskBlocked && !installed[desiredEngine] {
+		return nil, fmt.Errorf("硬件闪存护栏拦截：%s", elig.BlockedReason)
+	}
+	if elig.MemoryBlocked && !req.ForceLowMemory && !installed[desiredEngine] {
+		return nil, fmt.Errorf("硬件内存护栏拦截：%s（如需强行安装请启用 ForceLowMemory）", elig.BlockedReason)
 	}
 
-	// 2. 切出前无损收集当前活跃引擎公共配置
+	// 2. 切出前无损收集当前活跃 AdGuard Home 公共配置
 	var harvested []string
-	if origActive == constant.DNSEngineAdGuard && desiredEngine != constant.DNSEngineAdGuard {
+	if origActive == constant.DNSEngineAdGuard && installed[constant.DNSEngineAdGuard] && desiredEngine != constant.DNSEngineAdGuard {
 		harvested = r.aghEng.HarvestCommonConfig(ctx)
 	}
 	migratedItems := r.describeMigratedItems(harvested)
 
 	dnsPort := r.cfg.DNS.GetDNSPort()
 	origDNSPort := r.cfg.DNS.DNSPort
+	targetWasRunning := r.isTargetEngineRunning(ctx, desiredEngine, targetEng)
+	targetWasHealthy := targetWasRunning && targetEng.Status(ctx).DNSHealthy
 	var warnings []string
 	stoppedOrigExternal := false
 	startedTargetExternal := false
 
 	rollback := func(cause error) (*SwitchResult, error) {
 		logger.Warn("[LocalDNS] 切换至 %s 失败 (%v)，正在执行零断网自动回滚...", desiredEngine, cause)
-		if startedTargetExternal && isExternalEngine(desiredEngine) && desiredEngine != origActive {
+		if startedTargetExternal && (!targetWasRunning || desiredEngine != origActive) {
 			_ = targetEng.Disable(ctx)
 		}
 		r.cfg.DNS.SetEngine(origConfigured)
 		r.cfg.DNS.SetEnabled(origEnabled)
 		r.cfg.DNS.DNSPort = origDNSPort
 		_ = r.saveConfig()
+		restorePort := r.cfg.DNS.GetDNSPort()
 
-		if stoppedOrigExternal && isExternalEngine(origActive) {
+		if stoppedOrigExternal && installed[origActive] {
 			if origEng, hasOrig := r.Get(origActive); hasOrig {
 				if startErr := origEng.Start(ctx); startErr == nil {
-					if verifyErr := r.verifyExternalDNSReady(ctx, origActive, dnsPort); verifyErr == nil {
-						_ = r.syncSingBoxDNSLocal(ctx, true, dnsPort)
+					if verifyErr := r.verifyExternalDNSReady(ctx, origActive, restorePort); verifyErr == nil {
+						_ = r.syncSingBoxDNSLocal(ctx, true, restorePort)
 						return nil, fmt.Errorf("切换至 %s 失败（已自动回滚恢复至 %s）: %w", desiredEngine, origActive, cause)
 					}
 				}
 			}
 		}
-		_ = r.sbEng.SyncCommonConfig(ctx)
-		return nil, fmt.Errorf("切换至 %s 失败（已维持 sing-box 加密 DoH 零断网兜底）: %w", desiredEngine, cause)
+		_ = r.syncSingBoxDNSLocal(ctx, false, restorePort)
+		return nil, fmt.Errorf("切换至 %s 失败（已维持 sing-box 纯 IP 加密 DoH 零断网兜底）: %w", desiredEngine, cause)
 	}
 
-	// 3. 零断网安全区：先将 sing-box dns_local 原子热切至 sing-box 加强版纯 IP 加密 DoH
-	if origActive != desiredEngine || desiredEngine == constant.DNSEngineSingBox {
-		if err := r.sbEng.SyncCommonConfig(ctx); err != nil {
-			warnings = append(warnings, fmt.Sprintf("同步 sing-box 加强版安全区配置告警: %v", err))
+	// 3. 零断网安全桥：先将 sing-box dns_local 原子热切至纯 IP 加密 DoH（optimistic: false / disable_cache: true）
+	if origActive != desiredEngine || !targetWasHealthy {
+		if err := r.syncSingBoxDNSLocal(ctx, false, dnsPort); err != nil {
+			warnings = append(warnings, fmt.Sprintf("切换 sing-box 纯 IP 加密 DoH 安全桥告警: %v", err))
 		}
 	}
 
-	// 4. 若原活跃引擎为其它外部引擎，先停止并禁用自启释放 127.0.0.1:<dnsPort>（完整保留原配置文件不删）
-	if isExternalEngine(origActive) && origActive != desiredEngine {
+	// 4. 若原活跃外部引擎与目标不同且已安装，先停止并禁用自启释放 127.0.0.1:<dnsPort>（完整保留原配置文件不删）
+	if origActive != desiredEngine && installed[origActive] {
 		if origEng, hasOrig := r.Get(origActive); hasOrig {
 			if err := origEng.Disable(ctx); err != nil {
 				warnings = append(warnings, fmt.Sprintf("停用旧引擎 %s 告警: %v", origActive, err))
@@ -286,49 +302,42 @@ func (r *Registry) SwitchEngine(ctx context.Context, req SwitchRequest) (*Switch
 		}
 	}
 
-	// 5. 若目标为外部引擎：检测回环端口冲突（如 avahi-daemon 占用 5353 mDNS）自动顺延 -> 按需安装 -> 同步公共配置 -> 启动 -> 实测解析 -> 原子切换 sing-box
-	if isExternalEngine(desiredEngine) {
-		chosenPort, portWarn, portErr := r.ensureAvailableExternalDNSPort(ctx, origActive, desiredEngine, targetEng, dnsPort)
-		if portErr != nil {
-			return rollback(portErr)
+	// 5. 检测回环端口冲突（如 avahi-daemon 占用 5353 mDNS）自动顺延 -> 按需安装 -> 同步公共配置 -> 启动 -> 实测解析 -> 原子切换 sing-box
+	chosenPort, portWarn, portErr := r.ensureAvailableExternalDNSPort(ctx, origActive, desiredEngine, targetEng, dnsPort)
+	if portErr != nil {
+		return rollback(portErr)
+	}
+	if chosenPort != dnsPort {
+		dnsPort = chosenPort
+		r.cfg.DNS.DNSPort = chosenPort
+		if portWarn != "" {
+			logger.Warn("[LocalDNS] %s", portWarn)
+			warnings = append(warnings, portWarn)
 		}
-		if chosenPort != dnsPort {
-			dnsPort = chosenPort
-			r.cfg.DNS.DNSPort = chosenPort
-			if portWarn != "" {
-				logger.Warn("[LocalDNS] %s", portWarn)
-				warnings = append(warnings, portWarn)
-			}
+	}
+	if !targetEng.IsInstalled() && !req.SkipInstall {
+		logger.Info("[LocalDNS] 正在安装目标防劫持 DNS 引擎: %s（当前由 sing-box 纯 IP 加密 DoH 兜底不断网）...", desiredEngine)
+		if err := targetEng.Install(ctx, InstallOptions{
+			NonInteractive: true,
+			ForceLowMemory: req.ForceLowMemory,
+			SkipWaitReady:  true,
+		}); err != nil {
+			return rollback(fmt.Errorf("安装 %s 失败: %w", desiredEngine, err))
 		}
-		if !targetEng.IsInstalled() && !req.SkipInstall {
-			logger.Info("[LocalDNS] 正在安装目标防劫持 DNS 引擎: %s（当前由 sing-box 加密 DoH 兜底不断网）...", desiredEngine)
-			if err := targetEng.Install(ctx, InstallOptions{
-				NonInteractive: true,
-				ForceLowMemory: req.ForceLowMemory,
-				SkipWaitReady:  true,
-			}); err != nil {
-				return rollback(fmt.Errorf("安装 %s 失败: %w", desiredEngine, err))
-			}
-		}
-		if err := targetEng.SyncCommonConfig(ctx); err != nil {
-			return rollback(fmt.Errorf("同步公共配置至 %s 失败: %w", desiredEngine, err))
-		}
-		if err := targetEng.Start(ctx); err != nil {
-			return rollback(fmt.Errorf("启动 %s 失败: %w", desiredEngine, err))
-		}
-		startedTargetExternal = true
+	}
+	if err := targetEng.SyncCommonConfig(ctx); err != nil {
+		return rollback(fmt.Errorf("同步公共配置至 %s 失败: %w", desiredEngine, err))
+	}
+	if err := targetEng.Start(ctx); err != nil {
+		return rollback(fmt.Errorf("启动 %s 失败: %w", desiredEngine, err))
+	}
+	startedTargetExternal = true
 
-		if err := r.verifyExternalDNSReady(ctx, desiredEngine, dnsPort); err != nil {
-			return rollback(err)
-		}
-		if err := r.syncSingBoxDNSLocal(ctx, true, dnsPort); err != nil {
-			return rollback(fmt.Errorf("切换 sing-box dns_local 指向 %s 失败: %w", desiredEngine, err))
-		}
-	} else {
-		// 目标为 singbox 加强版：确保增强 DNS 规则与 .singctl-base 已落盘生效
-		if err := r.sbEng.SyncCommonConfig(ctx); err != nil {
-			return rollback(fmt.Errorf("应用 sing-box 加强版加密 DNS 失败: %w", err))
-		}
+	if err := r.verifyExternalDNSReady(ctx, desiredEngine, dnsPort); err != nil {
+		return rollback(err)
+	}
+	if err := r.syncSingBoxDNSLocal(ctx, true, dnsPort); err != nil {
+		return rollback(fmt.Errorf("切换 sing-box dns_local 指向 %s 失败: %w", desiredEngine, err))
 	}
 
 	// 6. 原子持久化 cfg.DNS.Engine 至 singctl.yaml (0600)
@@ -343,7 +352,7 @@ func (r *Registry) SwitchEngine(ctx context.Context, req SwitchRequest) (*Switch
 		OK:               true,
 		ConfiguredEngine: targetPref,
 		ActiveEngine:     desiredEngine,
-		Switched:         origActive != desiredEngine || origConfigured != targetPref,
+		Switched:         origActive != desiredEngine || origConfigured != targetPref || !origEnabled,
 		MigratedItems:    migratedItems,
 		Warnings:         warnings,
 		Overview:         ov,

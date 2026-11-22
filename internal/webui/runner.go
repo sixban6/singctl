@@ -61,12 +61,12 @@ var Actions = map[string]ActionDef{
 	"fw-enable":  {Title: "启用防火墙加固", Build: fixed("fw", "enable")},
 	"fw-disable": {Title: "禁用防火墙加固", Build: fixed("fw", "disable")},
 
-	// 本地防劫持 DNS 三引擎统一控制（sing-box 加强版 / SmartDNS / AdGuard Home）
+	// 本地防劫持 DNS 双引擎统一控制（SmartDNS / AdGuard Home）
 	"dns-install":   {Title: "安装并启用防劫持 DNS 引擎", Build: DnsInstallArgs},
 	"dns-switch":    {Title: "零断网切换防劫持 DNS 引擎", Build: DnsSwitchArgs},
 	"dns-update":    {Title: "更新防劫持 DNS 引擎核心版本", Build: DnsUpdateArgs},
 	"dns-start":     {Title: "启用防劫持 DNS 并接管 sing-box", Build: DnsStartArgs},
-	"dns-stop":      {Title: "安全停用外部防劫持 DNS (自动回退 sing-box 加密 DNS)", Build: DnsStopArgs},
+	"dns-stop":      {Title: "安全停用外部防劫持 DNS (自动回退 sing-box 纯 IP 加密 DoH)", Build: DnsStopArgs},
 	"dns-restart":   {Title: "重启防劫持 DNS 服务", Build: DnsRestartArgs},
 	"dns-uninstall": {Title: "安全卸载外部防劫持 DNS 引擎", Build: DnsUninstallArgs},
 
@@ -144,7 +144,7 @@ func DnsInstallArgs(p map[string]any) []string {
 // DnsSwitchArgs 将 Web 参数映射为 dns switch 命令行参数（用于流式输出下载、验活与零断网切换进度）。
 func DnsSwitchArgs(p map[string]any) []string {
 	eng := paramString(p, "engine")
-	if !config.IsValidDNSEngine(eng) {
+	if eng == "" || !config.IsValidDNSEngine(eng) {
 		eng = constant.DNSEngineAuto
 	}
 	args := []string{"dns", "switch", "--engine", eng}

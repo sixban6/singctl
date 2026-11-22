@@ -131,13 +131,10 @@ type Daemon struct {
 	skipSignalSetup     bool
 	pidWriter           func() error
 	pidRemover          func() error
-	dnsDeps             *localdns.EngineDeps
-	dnsSingBoxStats     *localdns.StatsRing
-	dnsSmartStats       *localdns.StatsRing
-	smartDNSTailer      *smartdns.AuditLogTailer
-	dnsPrimaryFailMu    sync.Mutex
-	dnsPrimaryFailCount int
-	dnsTickRunning      atomic.Bool
+	dnsDeps         *localdns.EngineDeps
+	dnsSmartStats   *localdns.StatsRing
+	smartDNSTailer  *smartdns.AuditLogTailer
+	dnsTickRunning  atomic.Bool
 }
 
 // NewDaemonWithMeta 创建带配置文件路径（支持热重载）与版本号标识的守护进程。
@@ -217,13 +214,9 @@ func NewDaemonWithOptions(cfg *config.Config, opts DaemonOptions) *Daemon {
 	if opts.DNSDeps != nil && strings.TrimSpace(opts.DNSDeps.SmartDNSAuditLogPath) != "" {
 		auditLogPath = strings.TrimSpace(opts.DNSDeps.SmartDNSAuditLogPath)
 	}
-	sbStats := localdns.NewStatsRing(lowMem)
 	sdStats := localdns.NewStatsRing(lowMem)
 	sdTailer := smartdns.NewAuditLogTailer(auditLogPath)
 	if opts.DNSDeps != nil {
-		if opts.DNSDeps.SingBoxStats != nil {
-			sbStats = opts.DNSDeps.SingBoxStats
-		}
 		if opts.DNSDeps.SmartDNSStats != nil {
 			sdStats = opts.DNSDeps.SmartDNSStats
 		}
@@ -257,18 +250,9 @@ func NewDaemonWithOptions(cfg *config.Config, opts DaemonOptions) *Daemon {
 		pidWriter:           opts.PidWriter,
 		pidRemover:          opts.PidRemover,
 		dnsDeps:             opts.DNSDeps,
-		dnsSingBoxStats:     sbStats,
 		dnsSmartStats:       sdStats,
 		smartDNSTailer:      sdTailer,
 	}
-}
-
-// SingBoxStatsRing 返回守护进程持有的 sing-box 24h DNS 遥测统计环（供单进程合体 WebUI 共享）。
-func (d *Daemon) SingBoxStatsRing() *localdns.StatsRing {
-	if d == nil {
-		return nil
-	}
-	return d.dnsSingBoxStats
 }
 
 // SmartDNSStatsRing 返回守护进程持有的 SmartDNS 24h 审计统计环（供单进程合体 WebUI 共享）。

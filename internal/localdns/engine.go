@@ -1,4 +1,4 @@
-// 文件职责：定义三引擎防劫持 DNS 统一能力契约、引擎接口、凭据可选小接口与显式依赖注入配置。
+// 文件职责：定义双引擎防劫持 DNS（SmartDNS / AdGuard Home）统一能力契约、引擎接口、凭据可选小接口与显式依赖注入配置。
 package localdns
 
 import (
@@ -35,7 +35,7 @@ type EngineMeta struct {
 	RAMHint  string
 }
 
-// EngineOption 描述引擎切换器单张卡片的完整状态与硬件准入评估结果。
+// EngineOption 描述引擎下拉切换器单个引擎选项的完整状态与硬件准入评估结果。
 type EngineOption struct {
 	ID            string `json:"id"`
 	Name          string `json:"name"`
@@ -96,7 +96,7 @@ type UpstreamUpdateResult struct {
 	Notes             []string                     `json:"notes,omitempty"`
 }
 
-// OverviewSnapshot 100% 兼容原有 adguard.OverviewSnapshot JSON 字段，并扩展三引擎状态与能力字段。
+// OverviewSnapshot 100% 兼容原有 adguard.OverviewSnapshot JSON 字段，并扩展双引擎状态、纯 DoH 兜底标记与能力字段。
 type OverviewSnapshot struct {
 	adguard.OverviewSnapshot
 	ConfiguredEngine  string         `json:"configuredEngine"`
@@ -104,6 +104,7 @@ type OverviewSnapshot struct {
 	ActiveEngineLabel string         `json:"activeEngineLabel"`
 	RecommendedEngine string         `json:"recommendedEngine"`
 	RecommendedReason string         `json:"recommendedReason"`
+	FallbackDoHActive bool           `json:"fallbackDoHActive"`
 	BlockAAAA         bool           `json:"blockAAAA"`
 	StatsSource       string         `json:"statsSource"`
 	StatsSourceLabel  string         `json:"statsSourceLabel"`
@@ -111,7 +112,7 @@ type OverviewSnapshot struct {
 	Engines           []EngineOption `json:"engines"`
 }
 
-// Engine 定义三引擎防劫持本地 DNS（singbox / smartdns / adguard）的统一领域契约。
+// Engine 定义双引擎防劫持本地 DNS（smartdns / adguard）的统一领域契约。
 type Engine interface {
 	ID() string
 	Meta() EngineMeta
@@ -139,7 +140,6 @@ type Engine interface {
 	SetFilterState(ctx context.Context, filterURL, name string, enabled bool) error
 	RemoveFilter(ctx context.Context, filterURL string) error
 	RefreshFilters(ctx context.Context) error
-	SetBlockAAAA(ctx context.Context, enabled bool) error
 	SyncBlockRules(ctx context.Context, blocks []config.BlockRule) (applied bool, mode string, err error)
 	SyncCommonConfig(ctx context.Context) error
 }
@@ -150,7 +150,7 @@ type CredentialManager interface {
 	ResetCredentials(ctx context.Context, newUsername string) (*CredentialsInfo, error)
 }
 
-// EngineDeps 显式注入三引擎运行期所需的路径、持久化、探测与测试替身（零值自动回退生产默认）。
+// EngineDeps 显式注入双引擎运行期所需的路径、持久化、探测与测试替身（零值自动回退生产默认）。
 type EngineDeps struct {
 	ConfigPath            string
 	SaveConfig            func(cfg *config.Config) error
@@ -179,14 +179,9 @@ type EngineDeps struct {
 	ProbeDNSFunc            func(addr string, timeout time.Duration) error
 	ProbeResolutionFunc     func(addr, domain string, timeout time.Duration) ([]string, time.Duration, error)
 	CheckPortAvailableFunc  func(port int) bool
-	SyncSingBoxEnhancedFunc func(ctx context.Context, sbCfgPath, workPath string, dnsCfg config.ClientDNSConfig, subDomains []string, now time.Time) (bool, error)
 	SyncSingBoxDNSLocalFunc func(ctx context.Context, sbCfgPath, workPath string, useExternal bool, dnsPort int) (bool, error)
-	ClearSingBoxCacheFunc   func(ctx context.Context, sbCfgPath, workPath string) error
-	SingBoxRunningFunc      func() bool
-	SingBoxVersionFunc      func() string
 	NowFunc                 func() time.Time
 
-	SingBoxStats     *StatsRing
 	SmartDNSStats    *StatsRing
 	SmartDNSTailer   *smartdns.AuditLogTailer
 	SmartDNSManager  *smartdns.Manager

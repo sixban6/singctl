@@ -77,7 +77,7 @@ func CopyGeneratedConfigToClipboard(targetPath string) (bool, error) {
 func runStartSingbox(cfg *config.Config, configPath string) error {
 	if runtime.GOOS == "linux" && cfg != nil && cfg.DNS.IsEnabled() {
 		reg := localdns.NewRegistry(cfg, localdns.EngineDeps{ConfigPath: configPath})
-		if active := reg.ActiveEngine(); active != nil && active.ID() != constant.DNSEngineSingBox && active.IsInstalled() {
+		if active := reg.ActiveEngine(); active != nil && active.IsInstalled() {
 			if err := active.EnsureHealthy(context.Background()); err != nil {
 				logger.Warn("%s 启动检查异常 (将继续启动 sing-box): %v", active.Meta().Name, err)
 			}
