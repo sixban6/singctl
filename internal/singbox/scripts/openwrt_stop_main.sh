@@ -13,7 +13,7 @@ main() {
     cleanup_route
 
     # 清理持久化缓存与沙盒工作区
-    rm -f /etc/sing-box/cache.db 2>/dev/null && echo_succ "已清理缓存文件" || true
+    rm -f /etc/sing-box/cache.db /tmp/sing-box-cache.db 2>/dev/null && echo_succ "已清理缓存文件" || true
     cleanup_sandbox_work
 
     echo_succ "停止 sing-box 并清理完毕"

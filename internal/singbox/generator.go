@@ -36,6 +36,8 @@ type ConfigGenerator struct {
 	silent           bool
 	totalRAMOverride atomic.Pointer[uint64]
 	localDNSProbe    func(engine string, dnsPort int) bool
+	isOpenWrtProbe   func() bool
+	isLowFlashProbe  func() bool
 }
 
 // 支持的目标平台常量。
@@ -95,13 +97,24 @@ func (g *ConfigGenerator) SetLocalDNSProbe(fn func(engine string, dnsPort int) b
 	g.localDNSProbe = fn
 }
 
+// SetHostFlashProbes 显式注入 OpenWrt 与小闪存宿主机探测钩子（供离线编译与确定性单元测试使用）。
+func (g *ConfigGenerator) SetHostFlashProbes(isOpenWrt, isLowFlash func() bool) {
+	if g == nil {
+		return
+	}
+	g.isOpenWrtProbe = isOpenWrt
+	g.isLowFlashProbe = isLowFlash
+}
+
 // NewOfflineConfigGenerator 创建不主动探测宿主机网卡/公网环境的离线配置生成器（供纯内存编译流水线与单测使用）。
 func NewOfflineConfigGenerator(cfg *config.Config) *ConfigGenerator {
 	cg := &ConfigGenerator{
-		config:        cfg,
-		defaultTplVer: "v1.14",
-		webui:         "127.0.0.1:9090",
-		silent:        true,
+		config:          cfg,
+		defaultTplVer:   "v1.14",
+		webui:           "127.0.0.1:9090",
+		silent:          true,
+		isOpenWrtProbe:  func() bool { return false },
+		isLowFlashProbe: func() bool { return false },
 	}
 	zero := uint64(0)
 	cg.totalRAMOverride.Store(&zero)
