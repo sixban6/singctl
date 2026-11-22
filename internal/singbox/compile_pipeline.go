@@ -68,9 +68,10 @@ func (d *CompileDoc) UnmarshalCount() int { return d.unmarshalCount }
 func (d *CompileDoc) MarshalCount() int { return d.marshalCount }
 
 // defaultConfigCompileStages 按依赖先后顺序定义标准编译阶段：
-// 1. 出站去重 → 2. 本地 AdGuard DNS → 3. 策略分组 → 4. 自定义规则/黑名单 →
-// 5. 智能分流预设 → 6. IPv6 孪生规则 → 7. 私网 PTR NXDOMAIN 防环（非 iOS） →
-// 8. 日志级别收敛 → 9. Clash API 回环加固（非 iOS） → 10. iOS SFI 沙盒裁剪。
+// 1. 出站去重 → 2. 策略分组 → 3. 自定义规则/黑名单 → 4. 智能分流预设 →
+// 5. IPv6 孪生规则 → 6. 私网 PTR NXDOMAIN 防环（非 iOS） → 7. 低内存规则集裁剪 →
+// 8. 本地三引擎防劫持 DNS（Linux：AdGuard/SmartDNS 或 sing-box 加强版加密 DoH） →
+// 9. 日志级别收敛 → 10. Clash API 回环加固（非 iOS） → 11. iOS SFI 沙盒裁剪。
 var defaultConfigCompileStages = []CompileStage{
 	{
 		Name: "deduplicate_outbounds",
@@ -84,22 +85,6 @@ var defaultConfigCompileStages = []CompileStage{
 				return err
 			}
 			if changed {
-				doc.dirty = true
-			}
-			return nil
-		},
-	},
-	{
-		Name: "inject_local_dns",
-		AppliesTo: func(g *ConfigGenerator, doc *CompileDoc) bool {
-			return g != nil && shouldInjectLocalAdGuardDNS(g.config, doc.platform)
-		},
-		Apply: func(g *ConfigGenerator, doc *CompileDoc) error {
-			d, err := doc.EnsureDoc()
-			if err != nil {
-				return fmt.Errorf("failed to parse config JSON for local DNS injection: %w", err)
-			}
-			if injectLocalDNSInDoc(g, d) {
 				doc.dirty = true
 			}
 			return nil
@@ -202,6 +187,22 @@ var defaultConfigCompileStages = []CompileStage{
 				return err
 			}
 			if pruneLowMemoryRuleSetsInDoc(d) {
+				doc.dirty = true
+			}
+			return nil
+		},
+	},
+	{
+		Name: "inject_local_dns",
+		AppliesTo: func(_ *ConfigGenerator, doc *CompileDoc) bool {
+			return doc.platform == "linux"
+		},
+		Apply: func(g *ConfigGenerator, doc *CompileDoc) error {
+			d, err := doc.EnsureDoc()
+			if err != nil {
+				return fmt.Errorf("failed to parse config JSON for local DNS injection: %w", err)
+			}
+			if injectLocalDNSInDoc(g, d, doc.platform) {
 				doc.dirty = true
 			}
 			return nil

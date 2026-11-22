@@ -188,7 +188,7 @@ func stripRuleSetTagFromRouteRules(rules []sboption.RouteRule, dropTag string) [
 		cp := r.Clone()
 		if r.Rules != nil {
 			cp.Rules = stripRuleSetTagFromRouteRules(r.Rules, dropTag)
-			if len(cp.Rules) == 0 {
+			if len(cp.Rules) == 0 || (r.Type == "logical" && r.Mode == "and" && len(cp.Rules) < len(r.Rules)) {
 				continue
 			}
 		}
@@ -215,7 +215,7 @@ func stripRuleSetTagFromDNSRules(rules []sboption.DNSRule, dropTag string) []sbo
 		cp := r.Clone()
 		if r.Rules != nil {
 			cp.Rules = stripRuleSetTagFromDNSRules(r.Rules, dropTag)
-			if len(cp.Rules) == 0 {
+			if len(cp.Rules) == 0 || (r.Type == "logical" && r.Mode == "and" && len(cp.Rules) < len(r.Rules)) {
 				continue
 			}
 		}

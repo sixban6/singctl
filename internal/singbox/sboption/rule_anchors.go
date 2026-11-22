@@ -21,17 +21,28 @@ func IsPrivateIPRouteRule(r RouteRule) bool {
 	return r.IPIsPrivate != nil
 }
 
-// IsAdBlockRouteRule 判断是否为内置去广告规则集拦截规则（geosite-ad1 / geosite-ad2）。
+func routeRuleHasAnyRuleSetTag(r RouteRule, targets ...string) bool {
+	for _, tag := range r.RuleSet.Slice() {
+		if slices.Contains(targets, tag) {
+			return true
+		}
+	}
+	if r.Type == "logical" && r.Mode == "and" {
+		for _, sub := range r.Rules {
+			if routeRuleHasAnyRuleSetTag(sub, targets...) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// IsAdBlockRouteRule 判断是否为内置去广告规则集拦截规则（geosite-ad1 / geosite-ad2，含白名单逻辑反选包装态）。
 func IsAdBlockRouteRule(r RouteRule) bool {
 	if !strings.EqualFold(strings.TrimSpace(r.Action), "reject") {
 		return false
 	}
-	for _, tag := range r.RuleSet.Slice() {
-		if tag == "geosite-ad1" || tag == "geosite-ad2" {
-			return true
-		}
-	}
-	return false
+	return routeRuleHasAnyRuleSetTag(r, "geosite-ad1", "geosite-ad2")
 }
 
 // IsRegionSplitRouteRule 判断是否为国内/海外兜底分流规则（geosite-cn / geosite-geolocation-!cn / geoip-cn）。
@@ -76,7 +87,7 @@ func CustomRouteInsertIndex(rules []RouteRule) int {
 		if IsPrivateIPRouteRule(r) && privateIdx < 0 {
 			privateIdx = i + 1
 		}
-		if slices.Contains(r.RuleSet.Slice(), "geosite-ad1") {
+		if routeRuleHasAnyRuleSetTag(r, "geosite-ad1") {
 			return i
 		}
 	}
@@ -199,6 +210,9 @@ func hasOnlyRouteMatchers(r RouteRule, allowed ...string) bool {
 	if r.ClashMode != "" && !has("clash_mode") {
 		return false
 	}
+	if r.Invert != nil && !has("invert") {
+		return false
+	}
 	if r.IPIsPrivate != nil && !has("ip_is_private") {
 		return false
 	}
@@ -294,7 +308,7 @@ func IsManagedIPv6RejectRouteRule(r RouteRule) bool {
 
 // IsManagedAAAASuppressDNSRule 识别受管 AAAA / AAAA+HTTPS NOERROR 抑制规则（含旧版兼容）。
 func IsManagedAAAASuppressDNSRule(r DNSRule) bool {
-	if r.Action != "predefined" || !strings.EqualFold(r.Rcode, "NOERROR") {
+	if r.Action != "predefined" || !strings.EqualFold(r.Rcode, "NOERROR") || !r.Answer.IsEmpty() || r.Invert != nil {
 		return false
 	}
 	qts := upperTrimmedSlice(r.QueryType.Slice())
@@ -313,7 +327,7 @@ func IsManagedCNDirectDNSRule(r DNSRule, extraCNRuleSets []string) bool {
 	if r.Server != "dns_local" || r.Action != "" || r.ClashMode != "" || r.Type != "" || len(r.Rules) > 0 || len(r.Extra) > 0 {
 		return false
 	}
-	if r.Strategy != "" || r.DisableCache != nil || r.RewriteTTL != nil || r.Rcode != "" {
+	if r.Strategy != "" || r.DisableCache != nil || r.RewriteTTL != nil || r.Rcode != "" || !r.Answer.IsEmpty() || r.Invert != nil {
 		return false
 	}
 	if !r.Domain.IsEmpty() || !r.DomainSuffix.IsEmpty() || !r.DomainKeyword.IsEmpty() ||

@@ -157,6 +157,37 @@ var defaultSaveCleanupRules = []ASTSubtreeCleanupRule{
 		RemoveTopLevel: true,
 	},
 	{
+		// 当 dns 可选三引擎/规则/开关字段被清空或恢复默认时，从 dstDoc 移除陈旧键以防合并残留
+		Name:      "dns_stale_children",
+		When:      func(cfg *Config, _, _ bool) bool { return cfg != nil },
+		TargetDoc: "dst",
+		ParentKey: "dns",
+		DropChild: func(cfg *Config, childKey string) bool {
+			switch childKey {
+			case "engine":
+				return strings.TrimSpace(cfg.DNS.Engine) == ""
+			case "upstreams":
+				return len(cfg.DNS.Upstreams) == 0
+			case "upstream_mode":
+				return strings.TrimSpace(cfg.DNS.UpstreamMode) == ""
+			case "whitelist":
+				return len(cfg.DNS.Whitelist) == 0
+			case "rewrites":
+				return len(cfg.DNS.Rewrites) == 0
+			case "block_aaaa":
+				return !cfg.DNS.BlockAAAA
+			case "adblock_disabled_until":
+				return cfg.DNS.AdblockDisabledUntil == 0
+			case "disabled_ad_rule_sets":
+				return len(cfg.DNS.DisabledAdRuleSets) == 0
+			case "smartdns_filters":
+				return len(cfg.DNS.SmartDNSFilters) == 0
+			default:
+				return false
+			}
+		},
+	},
+	{
 		// 当 low_memory 清空恢复默认自动档时，从 dstDoc 移除陈旧的顶层 low_memory 键
 		Name:           "low_memory_clear",
 		When:           func(cfg *Config, _, _ bool) bool { return cfg != nil && strings.TrimSpace(string(cfg.LowMemory)) == "" },

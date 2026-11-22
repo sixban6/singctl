@@ -15,4 +15,18 @@ const (
 	AcceptRoutes     = "accept-routes"
 	TailscaleMode    = "mode"
 	TailscaleSubnets = "subnets"
+
+	// 客户端三引擎防劫持本地 DNS 标识常量（单一权威归属）。
+	DNSEngineAuto     = "auto"
+	DNSEngineSingBox  = "singbox"
+	DNSEngineAdGuard  = "adguard"
+	DNSEngineSmartDNS = "smartdns"
+
+	// SmartDNS 权威路径与服务常量（单一权威归属）。
+	SmartDNSInstallPath  = "/usr/bin/smartdns"
+	SmartDNSConfigDir    = "/etc/singctl"
+	SmartDNSConfigFile   = "/etc/singctl/smartdns.conf"
+	SmartDNSRulesDir     = "/etc/singctl/smartdns-rules.d"
+	SmartDNSAuditLogPath = "/tmp/singctl-smartdns-audit.log"
+	SmartDNSServiceName  = "singctl-smartdns"
 )

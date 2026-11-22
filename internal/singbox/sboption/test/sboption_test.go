@@ -403,3 +403,63 @@ func TestRuleAnchors_DeterministicPredicatesAndNoLenGuessing(t *testing.T) {
 		t.Fatalf("BeforeGeositeCNDNSInsertIndex = %d, want 3", got)
 	}
 }
+
+func TestDNSAndRouteRule_AnswerAndInvertRoundTripClone(t *testing.T) {
+	rawDNS := `{"domain":["nas.example.com"],"action":"predefined","rcode":"NOERROR","answer":["nas.example.com. 60 IN A 192.0.2.10"],"invert":true}`
+	var dr sboption.DNSRule
+	if err := json.Unmarshal([]byte(rawDNS), &dr); err != nil {
+		t.Fatalf("unmarshal DNSRule: %v", err)
+	}
+	if !slices.Equal(dr.Answer.Slice(), []string{"nas.example.com. 60 IN A 192.0.2.10"}) {
+		t.Fatalf("DNSRule.Answer = %v", dr.Answer.Slice())
+	}
+	if dr.Invert == nil || !*dr.Invert {
+		t.Fatalf("DNSRule.Invert = %v, want true", dr.Invert)
+	}
+	if len(dr.Extra) != 0 {
+		t.Fatalf("expected answer and invert to be known keys, got Extra=%v", dr.Extra)
+	}
+
+	drClone := dr.Clone()
+	drClone.Answer.Items[0] = "mutated"
+	*drClone.Invert = false
+	if dr.Answer.Items[0] != "nas.example.com. 60 IN A 192.0.2.10" || !*dr.Invert {
+		t.Fatalf("DNSRule.Clone mutated original: %+v", dr)
+	}
+
+	outDNS, err := json.Marshal(dr)
+	if err != nil {
+		t.Fatalf("marshal DNSRule: %v", err)
+	}
+	if !strings.Contains(string(outDNS), `"answer":["nas.example.com. 60 IN A 192.0.2.10"]`) ||
+		!strings.Contains(string(outDNS), `"invert":true`) {
+		t.Fatalf("unexpected marshaled DNSRule: %s", string(outDNS))
+	}
+
+	// Scalar answer round-trip
+	var scalarDR sboption.DNSRule
+	if err := json.Unmarshal([]byte(`{"action":"predefined","rcode":"NOERROR","answer":"nas.example.com. 60 IN A 192.0.2.10"}`), &scalarDR); err != nil {
+		t.Fatalf("unmarshal scalar answer: %v", err)
+	}
+	if b, err := json.Marshal(scalarDR); err != nil || !strings.Contains(string(b), `"answer":"nas.example.com. 60 IN A 192.0.2.10"`) {
+		t.Fatalf("expected scalar answer preserved, got %s err=%v", string(b), err)
+	}
+
+	// RouteRule.Invert round-trip and Clone isolation
+	rawRoute := `{"type":"logical","mode":"and","rules":[{"rule_set":["geosite-ad1"]},{"domain_suffix":["ok.example.com"],"invert":true}],"action":"reject"}`
+	var rr sboption.RouteRule
+	if err := json.Unmarshal([]byte(rawRoute), &rr); err != nil {
+		t.Fatalf("unmarshal RouteRule: %v", err)
+	}
+	if len(rr.Rules) != 2 || rr.Rules[1].Invert == nil || !*rr.Rules[1].Invert || len(rr.Rules[1].Extra) != 0 {
+		t.Fatalf("unexpected logical RouteRule with invert: %+v", rr)
+	}
+	rrClone := rr.Clone()
+	*rrClone.Rules[1].Invert = false
+	if !*rr.Rules[1].Invert {
+		t.Fatal("RouteRule.Clone mutated original Invert pointer")
+	}
+	if !sboption.IsAdBlockRouteRule(rr) {
+		t.Fatal("expected wrapped logical AND geosite-ad1 reject rule recognized by IsAdBlockRouteRule")
+	}
+}
