@@ -234,6 +234,7 @@ func (sb *SingBox) GenerateConfig() error {
 	if err := fsx.WriteAtomic0600(sb.configPath, []byte(configContent)); err != nil {
 		return err
 	}
+	CleanupLegacyFlashCacheDB(sb.configPath, configContent)
 	_ = SaveBaseSnapshot(sb.configPath, pureBaseJSON)
 	if preservedChanges > 0 {
 		logger.Success("🛡️ 已自动合并保留 %d 处 config.json 手动修改", preservedChanges)
