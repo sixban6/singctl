@@ -1,8 +1,41 @@
 import type { ClientAdGuardStatusSummary, ClientDNSStatusSummary } from './adguard';
 import type { ClientFirewallStatus } from './firewall';
 import type { ClientGatewayStatusSummary, ClientTailscaleStatus } from './network';
+import type { SafeCommitStatusReport } from './p0';
 import type { ClientSingBoxStatus } from './singbox';
 import type { ClientDaemonStatus } from './watchdog';
+
+export interface HostMemTelemetry {
+  totalBytes: number;
+  usedBytes: number;
+  availBytes: number;
+  swapTotalBytes: number;
+  swapUsedBytes: number;
+  usedPercent: number;
+  lowMemory: boolean;
+}
+
+export interface HostDiskTelemetry {
+  mountPath: string;
+  label: string;
+  totalBytes: number;
+  usedBytes: number;
+  availBytes: number;
+  usedPercent: number;
+}
+
+export interface HostTelemetry {
+  uptimeSec: number;
+  cpuCores: number;
+  cpuPercent: number;
+  cpuReady: boolean;
+  loadAvg: [number, number, number];
+  mem: HostMemTelemetry;
+  disk: HostDiskTelemetry;
+  tmpDisk?: HostDiskTelemetry;
+  isOpenWrt: boolean;
+  collectedAt: number;
+}
 
 export interface ClientHostInfo {
   hostname: string;
@@ -10,6 +43,7 @@ export interface ClientHostInfo {
   arch: string;
   openwrt: boolean;
   lanIP: string;
+  telemetry?: HostTelemetry;
 }
 
 export interface ClientConfigSubSummary {
@@ -29,6 +63,7 @@ export interface ClientStatusResponse {
   tailscale: ClientTailscaleStatus;
   firewall: ClientFirewallStatus;
   gateway?: ClientGatewayStatusSummary;
+  safeCommit?: SafeCommitStatusReport;
   config: {
     path: string;
     exists: boolean;
