@@ -32,6 +32,7 @@ import {
   buildClientNavGroups,
 } from './shell/clientNavConfig';
 import { ClientInlineAuthModal } from './shell/ClientInlineAuthModal';
+import { SafeCommitBanner } from './shell/SafeCommitBanner';
 import { useClientActionRunner } from './shell/useClientActionRunner';
 
 const SingBoxPage = lazyWithReload(
@@ -259,17 +260,23 @@ const ClientShell: React.FC = () => {
   );
 
   const banner = (
-    <ClientTopbarBanners
-      status={status}
-      busy={busy}
-      tsSwapBanner={tsSwapBanner}
-      restartingBanner={restartingBanner}
-      restartTimedOut={restartTimedOut}
-      onRepollTailscale={() => void pollTailscaleUpgrade(false)}
-      onDismissTsBanner={() => setTsSwapBanner(null)}
-      onReloadPage={reloadWithCacheBust}
-      onRestartDaemon={() => requestAction('dm-restart')}
-    />
+    <>
+      <SafeCommitBanner
+        safeCommit={status?.safeCommit}
+        onRefreshStatus={() => void refreshStatus(true)}
+      />
+      <ClientTopbarBanners
+        status={status}
+        busy={busy}
+        tsSwapBanner={tsSwapBanner}
+        restartingBanner={restartingBanner}
+        restartTimedOut={restartTimedOut}
+        onRepollTailscale={() => void pollTailscaleUpgrade(false)}
+        onDismissTsBanner={() => setTsSwapBanner(null)}
+        onReloadPage={reloadWithCacheBust}
+        onRestartDaemon={() => requestAction('dm-restart')}
+      />
+    </>
   );
 
   return (
@@ -300,6 +307,7 @@ const ClientShell: React.FC = () => {
             busy={busy}
             onAction={requestAction}
             onNavigate={navigateSafe}
+            onRefreshStatus={() => void refreshStatus(true)}
           />
         )}
         {tab === 'sb' && (
@@ -369,6 +377,7 @@ const ClientShell: React.FC = () => {
               status={status ?? null}
               busy={busy}
               onAction={requestAction}
+              onRefreshStatus={() => void refreshStatus(true)}
               onRestored={() => {
                 void refreshStatus(true);
                 emitClientInvalidate('all');

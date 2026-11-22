@@ -11,6 +11,7 @@ import {
   Save,
   ShieldCheck,
   Smartphone,
+  Stethoscope,
   Upload,
 } from 'lucide-react';
 import {
@@ -25,16 +26,27 @@ import {
 } from '../../ui';
 import { clientApi } from '../api';
 import { ClientStatusResponse } from '../types';
+import { DoctorDrawer } from './dash/DoctorDrawer';
+import { NotifyConfigCard } from './system/NotifyConfigCard';
+import { SafeCommitCard } from './system/SafeCommitCard';
 
 export interface SystemPageProps {
   status: ClientStatusResponse | null;
   busy: boolean;
   onAction: (name: string, params?: Record<string, unknown>, confirmMsg?: string) => void;
+  onRefreshStatus?: () => void;
   onRestored?: () => void;
 }
 
-export const SystemPage: React.FC<SystemPageProps> = ({ status, busy, onAction, onRestored }) => {
+export const SystemPage: React.FC<SystemPageProps> = ({
+  status,
+  busy,
+  onAction,
+  onRefreshStatus,
+  onRestored,
+}) => {
   const { success, error } = useToast();
+  const [doctorOpen, setDoctorOpen] = useState(false);
   const [pwaOpen, setPwaOpen] = useState(false);
   const [pwaUrl, setPwaUrl] = useState('');
   const [pwaLoading, setPwaLoading] = useState(false);
@@ -275,18 +287,28 @@ export const SystemPage: React.FC<SystemPageProps> = ({ status, busy, onAction, 
     <div className="space-y-5">
       <PageHeader
         title="系统与维护"
-        description="软件版本升级、链路带宽测速、网关加密灾备迁移与会话安全"
+        description="软件版本升级、安全回滚保险丝、主动告警推送、网关加密灾备迁移与会话安全"
         actions={
-          status?.authEnabled ? (
+          <>
             <Button
               size="sm"
-              variant="danger"
-              onClick={() => setLogoutOpen(true)}
-              icon={<LogOut className="w-3.5 h-3.5" />}
+              variant="secondary"
+              onClick={() => setDoctorOpen(true)}
+              icon={<Stethoscope className="w-3.5 h-3.5 text-emerald-400" />}
             >
-              退出登录
+              一键深度体检
             </Button>
-          ) : undefined
+            {status?.authEnabled && (
+              <Button
+                size="sm"
+                variant="danger"
+                onClick={() => setLogoutOpen(true)}
+                icon={<LogOut className="w-3.5 h-3.5" />}
+              >
+                退出登录
+              </Button>
+            )}
+          </>
         }
       />
 
@@ -334,6 +356,16 @@ export const SystemPage: React.FC<SystemPageProps> = ({ status, busy, onAction, 
           </SectionCard>
         </div>
       </div>
+
+      {/* 远端安全回滚保险丝与 tailscaled OOM 免疫 */}
+      <SafeCommitCard
+        liveSafeCommit={status?.safeCommit}
+        busy={busy}
+        onRefreshStatus={onRefreshStatus ?? onRestored}
+      />
+
+      {/* 多渠道主动消息推送与防刷屏 */}
+      <NotifyConfigCard busy={busy} />
 
       {/* 全局下载加速与 singctl.yaml 主配置源码 */}
       <SectionCard
@@ -583,6 +615,11 @@ export const SystemPage: React.FC<SystemPageProps> = ({ status, busy, onAction, 
           />
         )}
       </SlideDrawer>
+      <DoctorDrawer
+        open={doctorOpen}
+        onClose={() => setDoctorOpen(false)}
+        onFixed={onRefreshStatus ?? onRestored}
+      />
     </div>
   );
 };

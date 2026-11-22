@@ -3,6 +3,7 @@ import { actionStreamApi } from './actionStream';
 import { auditApi } from './audit';
 import { dnsApi } from './dns';
 import { networkApi } from './network';
+import { p0Api } from './p0';
 import {
   CLIENT_AUTH_EVENT,
   clearSavedClientToken,
@@ -25,6 +26,7 @@ export {
   dnsApi,
   auditApi,
   networkApi,
+  p0Api,
   actionStreamApi,
 };
 
@@ -34,5 +36,6 @@ export const clientApi = {
   ...dnsApi,
   ...auditApi,
   ...networkApi,
+  ...p0Api,
   ...actionStreamApi,
 };
