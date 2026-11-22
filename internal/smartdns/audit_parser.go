@@ -254,7 +254,7 @@ func parseClassicQueryAudit(ts time.Time, body string) (AuditEntry, bool) {
 		entry.LatencyMs = speedFallback
 	}
 	if hasResultField {
-		entry.Blocked = isBlockedAuditResult(resultValue)
+		entry.Blocked = classifyAuditBlocked(resultValue, entry.QueryType, entry.LatencyMs, hasTime)
 	}
 	return entry, true
 }
@@ -270,6 +270,11 @@ func parseColonResultAudit(ts time.Time, body string) (AuditEntry, bool) {
 		Domain:    domain,
 		QueryType: "A",
 	}
+	var (
+		hasTime        bool
+		hasResultField bool
+		resultValue    string
+	)
 	for seg := range strings.SplitSeq(remainder, ",") {
 		seg = strings.TrimSpace(seg)
 		if seg == "" {
@@ -282,10 +287,15 @@ func parseColonResultAudit(ts time.Time, body string) (AuditEntry, bool) {
 		case "time":
 			if ms, ok := parseDurationMs(v); ok {
 				entry.LatencyMs = ms
+				hasTime = true
 			}
 		case "answer", "result":
-			entry.Blocked = isBlockedAuditResult(v)
+			resultValue = v
+			hasResultField = true
 		}
+	}
+	if hasResultField {
+		entry.Blocked = classifyAuditBlocked(resultValue, entry.QueryType, entry.LatencyMs, hasTime)
 	}
 	return entry, true
 }
@@ -365,13 +375,20 @@ func parseDurationMs(raw string) (float64, bool) {
 	return f, true
 }
 
-func isBlockedAuditResult(raw string) bool {
+// localInstantBlockMaxMs 区分本地规则瞬时拦截 (0-2ms) 与真实上游 NODATA/NXDOMAIN/超时 (>2ms)。
+const localInstantBlockMaxMs = 2.0
+
+func classifyAuditBlocked(raw, queryType string, latencyMs float64, hasTime bool) bool {
 	trimmed := strings.TrimSpace(raw)
+	isLocalInstant := !hasTime || latencyMs <= localInstantBlockMaxMs
 	if trimmed == "" {
-		return true
+		return queryType != "AAAA" && isLocalInstant
 	}
 
 	hasValidAnswer := false
+	hasExplicitBlock := false
+	hasSOALike := false
+
 	for token := range strings.SplitSeq(trimmed, ",") {
 		tok := strings.TrimSpace(token)
 		if tok == "" {
@@ -379,13 +396,18 @@ func isBlockedAuditResult(raw string) bool {
 		}
 		upper := strings.ToUpper(tok)
 		switch {
-		case upper == "SOA", strings.HasPrefix(upper, "SOA "),
-			upper == "NXDOMAIN", upper == "REFUSED", upper == "SERVFAIL",
-			upper == "NONE", upper == "-":
+		case upper == "SERVFAIL":
+			return false
+		case upper == "NXDOMAIN", upper == "REFUSED":
+			hasExplicitBlock = true
+			continue
+		case upper == "SOA", strings.HasPrefix(upper, "SOA "), upper == "NONE", upper == "-":
+			hasSOALike = true
 			continue
 		}
 		if ip := net.ParseIP(tok); ip != nil {
 			if ip.IsUnspecified() {
+				hasExplicitBlock = true
 				continue
 			}
 			hasValidAnswer = true
@@ -394,5 +416,17 @@ func isBlockedAuditResult(raw string) bool {
 		// 非零 IP 且非拦截状态码（例如合法 CNAME 目标）视为正常解析放行。
 		hasValidAnswer = true
 	}
-	return !hasValidAnswer
+
+	if hasValidAnswer {
+		return false
+	}
+	if hasExplicitBlock {
+		return true
+	}
+	if hasSOALike {
+		// IPv4-only 站点、内网 A 重写与 force-AAAA-SOA 均会对 AAAA 返回 soa，绝不能误计为广告拦截；
+		// 仅将非 AAAA 查询的本地瞬时 SOA（0-2ms）判定为 address /domain/# 拦截。
+		return queryType != "AAAA" && isLocalInstant
+	}
+	return false
 }

@@ -1,54 +1,78 @@
-# 本地防劫持 DNS (AdGuard Home)
+# 本地防劫持 DNS 三引擎架构（sing-box 加强版 / SmartDNS / AdGuard Home）
 
 命令前缀：`singctl dns` / `singctl agh`
 
-> **平台支持**：适用于 **Linux / OpenWrt** 客户端透明代理网关（需 root 权限）。运行 `install.sh` 后脚本会自动识别客户端环境，用户全程回车即可自动完成安装、免向导配置与启动。
+> **平台支持**：适用于 **Linux / OpenWrt** 客户端透明代理网关（需 root 权限）。默认采用 `engine: auto` 按宿主机物理内存与闪存空间自动分级推荐引擎，全程两阶段零断网原子切换。
 
-一键部署并托管本地 AdGuard Home，接管 `sing-box` 的 `dns_local`（国内域名分流与代理节点域名引导解析），上游默认采用纯 IP 加密 DoH / DoT，彻底解决宽带运营商对明文 `UDP 53` 的旁路抢答与 DNS 劫持问题。
+SingCtl 将客户端本地防劫持 DNS 解耦为三引擎统一管控中心，彻底消除 `dns_local` 明文 `UDP 53` 劫持风险，并适配从 256MB 小闪存硬路由到高配 x86 软路由的全部硬件规格：
+
+1. **`sing-box` 加强版（零额外开销，开箱即用）**：内核直接内置纯 IP 加密 DoH/DoT（默认 `https://223.5.5.5/dns-query` + `optimistic` 乐观缓存）、自定义内网解析重写、白名单、AAAA 屏蔽与 `geosite-ad` 规则集分流去广告，零额外进程与闪存占用。
+2. **SmartDNS 极速版（中小内存 / 紧张闪存路由推荐）**：流式安装 `pymumu/smartdns` 官方静态单文件（`~5 MB` 闪存 / `~10 MB` 内存），支持多加密上游并发测速优选最快 IP、`/tmp` 内存盘审计零闪存磨损（`audit-enable yes` + `audit-SOA yes` + `cache-persist no`）、轻量 AdBlock 规则库、白名单、内网重写与 AAAA 屏蔽。
+3. **AdGuard Home 可视版（充裕内存 / 闪存网关推荐）**：全功能独立防劫持与多规则去广告中心，内置原生 Web 管理面板（仅绑定局域网私网 IP，免首次向导并自动生成 16 位强随机密码）。
 
 ---
 
 ## 核心特性与安全架构
 
-1. **回环隔离零冲突**：
-   - DNS 引擎仅监听 `127.0.0.1:5353`，不抢占 OpenWrt `dnsmasq` 或系统 `systemd-resolved` 的 `53` 端口，局域网 DHCP 主机名解析不受影响；
-   - 关闭单 IP 查询限流（`ratelimit: 0`），确保高并发网页加载不丢包。
-2. **Web 面板仅绑定局域网私网 IP**：
-   - 自动精准提取本机真实局域网私网 IPv4（如 `http://192.168.1.1:3000`），排除 PPPoE 公网口、TUN、Tailscale 与容器虚拟网卡，**绝不监听 `0.0.0.0` 或公网接口**；
-   - 若旁路由因 DHCP 更换了局域网 IP，执行 `singctl dns start` / `restart` 时会自动同步监听地址。
-3. **免首次引导向导 + 强随机密码**：
-   - 首次安装支持自定义管理员用户名（直接回车默认 `root`），自动生成 16 位高强度随机密码并回写至 `/etc/singctl/singctl.yaml`（权限 `0600`）；
-   - 启动前预置完整安全配置（`/etc/AdGuardHome/AdGuardHome.yaml`，权限 `0600`），跳过无鉴权的初始化引导向导，直接进入登录页。
-4. **全加密纯 IP 上游 + 软路由闪存保护**：
-   - 默认配置阿里（`223.5.5.5` / `223.6.6.6`）与腾讯（`1.12.12.12`）纯 IP DoH / DoT 并发查询，开启乐观缓存与 ECS 子网透传，禁用易被拦截的 HTTP/3；
-   - 安装前自动检测磁盘可用空间（`< 80MB` 自动安全中止），OpenWrt 下默认关闭查询日志落盘以保护闪存寿命；
-   - 自动将订阅域名加入放行白名单（`@@||sub.example.com^$important`），避免去广告规则误伤节点更新。
+1. **硬件自动分级与存量保护（`engine: auto`）**：
+   - 已安装 AdGuard Home 或 SmartDNS 的存量设备升级后自动沿用原引擎，零配置打扰；
+   - 全新设备按硬件画像分级推荐：`> 512MB RAM & > 256MB 可用 & >= 80MB 闪存` 推荐 AdGuard Home；`> 288MB RAM & >= 128MB 可用 & >= 10MB 闪存` 推荐 SmartDNS；其余超低规格推荐 `sing-box` 加强版；闪存不足硬拦截不可绕过。
+2. **两阶段零断网原子切换与自动回滚**：
+   - 切换外部引擎前先将 `sing-box` `dns_local` 热切至纯 IP 加密 DoH 安全区，再停旧引擎（保留原配置不删）、按需流式安装并启动目标引擎、实测 `127.0.0.1:5353` 解析可用后再原子切回 `dns_local`；任意一步失败自动回滚保住全屋网络。
+3. **回环隔离零冲突**：
+   - SmartDNS / AdGuard Home 仅监听 `127.0.0.1:5353`，绝不抢占 OpenWrt `dnsmasq` 或 `systemd-resolved` 的 `53` 端口；SmartDNS 内置 `address /localhost/127.0.0.1` 确保本地探活零上游请求。
+4. **全引擎统一 WebUI 工作台与 24h 有界统计**：
+   - 客户端控制台（`singctl web` -> 「防劫持 DNS」）统一接入 `/api/dns/*` 契约，支持三引擎切换卡片、24h 滑动环形统计（AdGuard 原生统计 / SmartDNS 内存盘审计 / sing-box 连接遥测）、加密上游测速与调度模式切换、AAAA 屏蔽、暂停去广告倒计时、白名单、内网重写与实时生效配置预览抽屉。
 5. **透明代理防回环死锁与看门狗零断网自愈**：
-   - TProxy 防火墙 `output` 链自动直通放行加密 DNS 上游端口，确保冷启动与全局模式下均无回环死锁；
-   - 安装/启用后自动验证解析就绪并热重载 `sing-box` 接管 `dns_local`；停用/卸载前自动先将 `sing-box` 平滑回退至内置纯 IP 加密 DoH（`https://223.5.5.5/dns-query`），全程零断网；
-   - `singctl dm` 看门狗自动监控 `127.0.0.1:5353`，异常退出时自动拉起，连续失败时自动触发应急降级保住全屋网络；
-   - 客户端控制台（`singctl web` -> 「防劫持 DNS」）原生集成**加密上游 DNS 服务器可视化管理与调度策略切换（并行竞速 / 最快 IP 优选 / 负载均衡）**、**逐条上游并发 RTT 测速与最快节点标记**、一键临时暂停去广告倒计时、Top 拦截域名一键白名单放行、局域网自定义域名重写（DNS Rewrites）与精选规则库开关，免登第二套后台即可完成日常全部操作。
+   - TProxy 防火墙 `output` 链自动直通放行加密 DNS 上游端口；`singctl dm` 看门狗持续巡检 `127.0.0.1:5353` 及 `sing-box` 主加密上游，异常时自动拉起、热切备用上游或应急降级至内置加密 DoH，暂停倒计时到期后自动恢复过滤。
 
 ---
 
 ## 配置字段 (`singctl.yaml`)
 
 ```yaml
-dns:                                             # 客户端本地防劫持 DNS (AdGuard Home) 配置
-  enabled: true                                  # 是否启用本地 AdGuard Home 接管 dns_local
-  dns_port: 5353                                 # 本地 DNS 监听端口 (仅绑定 127.0.0.1)
-  web_port: 3000                                 # Web 管理面板端口 (仅绑定本机局域网 IP)
-  username: "root"                               # 管理面板账号 (首次安装可自定义，回车默认 root)
-  password: ""                                   # 管理面板密码 (首次安装留空时自动生成 16 位随机强密码)
+dns:                                             # 客户端三引擎防劫持 DNS 统一配置
+  enabled: true                                  # 是否启用本地防劫持 DNS 管控
+  engine: "auto"                                 # 引擎偏好: auto | singbox | smartdns | adguard
+  dns_port: 5353                                 # 外部引擎本地回环监听端口 (仅绑定 127.0.0.1)
+  web_port: 3000                                 # AdGuard Home Web 面板端口 (仅绑定局域网私网 IP)
+  username: "root"                               # AdGuard Home 管理账号 (默认 root)
+  password: ""                                   # AdGuard Home 管理密码 (首次安装自动生成 16 位强密码)
+  upstream_mode: "fastest_ip"                    # 上游策略: fastest_ip | parallel | load_balance
+  upstreams:                                     # 统一加密上游列表 (仅允许 https/tls/quic/h3)
+    - "https://223.5.5.5/dns-query"
+    - "https://1.12.12.12/dns-query"
+    - "tls://223.6.6.6:853"
+    - "tls://120.53.53.53:853"
+  block_aaaa: false                              # 是否开启 AAAA (IPv6) 解析屏蔽 (singbox / smartdns)
+  whitelist:                                     # 自定义放行白名单域名
+    - "good.example.com"
+  rewrites:                                      # 内网自定义解析重写
+    - domain: "nas.example.com"
+      answer: "192.168.1.50"
+  smartdns_filters: []                           # SmartDNS 启用的轻量去广告规则集 URL 列表
 ```
 
 ---
 
 ## 命令详解
 
-### `singctl dns install` — 安装并初始化 AdGuard Home
+### `singctl dns switch` — 两阶段零断网切换底层引擎
 
-自动校验官方发布摘要（SHA256）、安装二进制、生成免向导配置、注册系统自启服务（OpenWrt `procd` / Linux `systemd`）并启动。
+```bash
+# 零断网切换至 SmartDNS（未安装时自动流式下载官方静态单文件并验活接管）
+singctl dns switch --engine smartdns
+
+# 零断网切换至零开销 sing-box 加强版（停用外部引擎但保留其配置）
+singctl dns switch --engine singbox
+
+# 恢复按硬件画像自动选型
+singctl dns switch --engine auto
+```
+
+### `singctl dns install` — 安装并初始化外部 DNS 引擎
+
+支持通过 `--engine smartdns` 或 `--engine adguard` 指定目标引擎（不指定时按硬件自动选型）。
 
 ```bash
 # 交互式安装（可直接回车使用默认账号 root）

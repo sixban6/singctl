@@ -256,9 +256,13 @@ func BuildConfig(input ConfigInput, rulesDir, auditLogPath, logFilePath string) 
 
 	b.WriteString("# Lightweight tmpfs audit log for 24h stats\n")
 	b.WriteString("audit-enable yes\n")
+	b.WriteString("audit-SOA yes\n")
 	fmt.Fprintf(&b, "audit-file %s\n", cleanAuditLog)
 	b.WriteString("audit-size 128k\n")
 	b.WriteString("audit-num 1\n")
+
+	b.WriteString("\n# Local health-probe loopback resolution (zero upstream traffic)\n")
+	b.WriteString("address /localhost/127.0.0.1\n")
 
 	if input.BlockAAAA {
 		b.WriteString("\n# IPv6 AAAA suppression\n")

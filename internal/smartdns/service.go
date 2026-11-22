@@ -150,6 +150,7 @@ func (m *Manager) Start() error {
 		}
 		return fmt.Errorf("启动服务 %s 失败: %w", m.serviceName, err)
 	}
+	_ = mgr.Enable(ctx, m.serviceName)
 	return nil
 }
 

@@ -12,7 +12,7 @@
   Layer 3: 高内聚领域引擎层（严禁反向依赖 cmd / webui / serverweb / daemon）
     [ singbox (+ sboption / clashapi / scripts / ruleset_snapshot)
       deploy | subhub | sniff | fleet | netdiag (+ ipgeo / dohprobe) | gateway
-      adguard | firewall | tailscale | audit | heal | doctor | telemetry | terminal | gfw | ssh | updater ]
+      localdns | smartdns | adguard | firewall | tailscale | audit | heal | doctor | telemetry | terminal | gfw | ssh | updater ]
                                            │
                                            ▼
   Layer 2: 基础契约与纯配置层（严禁反向依赖任何领域层与控制面层）
