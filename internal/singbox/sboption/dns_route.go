@@ -73,7 +73,9 @@ type DNSRule struct {
 	ClashMode     string                     `json:"clash_mode,omitempty"`
 	ClientSubnet  string                     `json:"client_subnet,omitempty"`
 	Rcode         string                     `json:"rcode,omitempty"`
+	Answer        Listable[string]           `json:"answer,omitzero"`
 	Strategy      string                     `json:"strategy,omitempty"`
+	Invert        *bool                      `json:"invert,omitempty"`
 	DisableCache  *bool                      `json:"disable_cache,omitempty"`
 	RewriteTTL    *uint32                    `json:"rewrite_ttl,omitempty"`
 	RuleSet       Listable[string]           `json:"rule_set,omitzero"`
@@ -88,8 +90,8 @@ type DNSRule struct {
 
 var knownDNSRuleKeys = map[string]bool{
 	"type": true, "mode": true, "rules": true, "action": true, "server": true,
-	"clash_mode": true, "client_subnet": true, "rcode": true, "strategy": true,
-	"disable_cache": true, "rewrite_ttl": true, "rule_set": true, "domain": true,
+	"clash_mode": true, "client_subnet": true, "rcode": true, "answer": true, "strategy": true,
+	"invert": true, "disable_cache": true, "rewrite_ttl": true, "rule_set": true, "domain": true,
 	"domain_suffix": true, "domain_keyword": true, "domain_regex": true,
 	"source_ip_cidr": true, "query_type": true,
 }
@@ -114,12 +116,16 @@ func (r DNSRule) Clone() DNSRule {
 			cp.Rules[i] = r.Rules[i].Clone()
 		}
 	}
+	if r.Invert != nil {
+		cp.Invert = new(*r.Invert)
+	}
 	if r.DisableCache != nil {
 		cp.DisableCache = new(*r.DisableCache)
 	}
 	if r.RewriteTTL != nil {
 		cp.RewriteTTL = new(*r.RewriteTTL)
 	}
+	cp.Answer = r.Answer.Clone()
 	cp.RuleSet = r.RuleSet.Clone()
 	cp.Domain = r.Domain.Clone()
 	cp.DomainSuffix = r.DomainSuffix.Clone()
@@ -218,6 +224,7 @@ type RouteRule struct {
 	Action        string                     `json:"action,omitempty"`
 	Outbound      string                     `json:"outbound,omitempty"`
 	ClashMode     string                     `json:"clash_mode,omitempty"`
+	Invert        *bool                      `json:"invert,omitempty"`
 	IPIsPrivate   *bool                      `json:"ip_is_private,omitempty"`
 	Network       Listable[string]           `json:"network,omitzero"`
 	Protocol      Listable[string]           `json:"protocol,omitzero"`
@@ -235,7 +242,7 @@ type RouteRule struct {
 
 var knownRouteRuleKeys = map[string]bool{
 	"type": true, "mode": true, "rules": true, "action": true, "outbound": true,
-	"clash_mode": true, "ip_is_private": true, "network": true, "protocol": true,
+	"clash_mode": true, "invert": true, "ip_is_private": true, "network": true, "protocol": true,
 	"port": true, "port_range": true, "rule_set": true, "domain": true,
 	"domain_suffix": true, "domain_keyword": true, "domain_regex": true,
 	"ip_cidr": true, "source_ip_cidr": true,
@@ -260,6 +267,9 @@ func (r RouteRule) Clone() RouteRule {
 		for i := range r.Rules {
 			cp.Rules[i] = r.Rules[i].Clone()
 		}
+	}
+	if r.Invert != nil {
+		cp.Invert = new(*r.Invert)
 	}
 	if r.IPIsPrivate != nil {
 		cp.IPIsPrivate = new(*r.IPIsPrivate)

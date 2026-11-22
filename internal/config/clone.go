@@ -96,6 +96,11 @@ func (c *Config) Clone() *Config {
 	}
 
 	out.DNS.Enabled = cloneBoolPtr(c.DNS.Enabled)
+	out.DNS.Upstreams = slices.Clone(c.DNS.Upstreams)
+	out.DNS.Whitelist = slices.Clone(c.DNS.Whitelist)
+	out.DNS.Rewrites = slices.Clone(c.DNS.Rewrites)
+	out.DNS.DisabledAdRuleSets = slices.Clone(c.DNS.DisabledAdRuleSets)
+	out.DNS.SmartDNSFilters = slices.Clone(c.DNS.SmartDNSFilters)
 
 	out.Tailscale.P2PAssist.PayloadFilter = cloneBoolPtr(c.Tailscale.P2PAssist.PayloadFilter)
 	if c.Tailscale.P2PAssist.Peers != nil {

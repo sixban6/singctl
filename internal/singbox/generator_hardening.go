@@ -12,12 +12,14 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"runtime"
 	"strings"
 	"time"
 
 	"singctl/internal/adguard"
 	"singctl/internal/config"
+	"singctl/internal/constant"
 	log "singctl/internal/logger"
 	"singctl/internal/singbox/sboption"
 )
@@ -190,16 +192,15 @@ func sanitizeRouteRulesTransportProtocol(rules []sboption.RouteRule) bool {
 	return changed
 }
 
-func shouldInjectLocalAdGuardDNS(cfg *config.Config, platform string) bool {
-	if platform != "linux" || cfg == nil || !cfg.DNS.IsEnabled() || !adguard.IsInstalled() {
+func isAdGuardLocalDNSReady(cfg *config.Config, dnsPort int) bool {
+	if !adguard.IsInstalled() {
 		return false
 	}
-	dnsPort := cfg.DNS.GetDNSPort()
 	if runtime.GOOS == "linux" && !adguard.HasInstalledCheckOverrideForTest() {
 		dnsAddr := fmt.Sprintf("127.0.0.1:%d", dnsPort)
 		if adguard.ProbeDNS(dnsAddr, 800*time.Millisecond) != nil {
 			if err := adguard.NewManager(cfg, "").EnsureHealthy(); err != nil {
-				log.Warn("AdGuard Home (%s) 未就绪 (%v)，本次配置保留内置 dns_local 以保障不断网", dnsAddr, err)
+				log.Warn("AdGuard Home (%s) 未就绪 (%v)，本次配置回退内置加密 DoH 以保障不断网", dnsAddr, err)
 				return false
 			}
 		}
@@ -207,47 +208,128 @@ func shouldInjectLocalAdGuardDNS(cfg *config.Config, platform string) bool {
 	return true
 }
 
-func injectLocalDNSInDoc(g *ConfigGenerator, doc *sboption.Document) bool {
-	if g == nil || g.config == nil || doc == nil || doc.DNS == nil || len(doc.DNS.Servers) == 0 {
+func isSmartDNSLocalDNSReady(dnsPort int) bool {
+	info, err := os.Stat(constant.SmartDNSInstallPath)
+	if err != nil || info.IsDir() {
 		return false
 	}
-	dnsPort := g.config.DNS.GetDNSPort()
-
-	updated := false
-	for i := range doc.DNS.Servers {
-		if doc.DNS.Servers[i].Tag == "dns_local" {
-			doc.DNS.Servers[i] = sboption.DNSServer{
-				Tag:        "dns_local",
-				Type:       "udp",
-				Server:     "127.0.0.1",
-				ServerPort: dnsPort,
-			}
-			updated = true
-			break
-		}
-	}
-	if !updated {
+	dnsAddr := fmt.Sprintf("127.0.0.1:%d", dnsPort)
+	if err := adguard.ProbeDNS(dnsAddr, 800*time.Millisecond); err != nil {
+		log.Warn("SmartDNS (%s) 未就绪 (%v)，本次配置回退内置加密 DoH 以保障不断网", dnsAddr, err)
 		return false
-	}
-
-	doc.DNS.DisableCache = new(true)
-	doc.DNS.Optimistic = new(false)
-
-	if doc.Experimental != nil && doc.Experimental.CacheFile != nil {
-		doc.Experimental.CacheFile.StoreDNS = new(false)
-		doc.Experimental.CacheFile.StoreFakeIP = new(false)
-	}
-
-	if !g.silent {
-		log.Info("已将 sing-box dns_local 指向本地 AdGuard Home (127.0.0.1:%d)，并交由 AdGuard Home 统一管理 DNS 缓存", dnsPort)
 	}
 	return true
 }
 
-// InjectLocalDNS 在 Linux/OpenWrt 客户端网关平台且启用并安装了 AdGuard Home 时，
-// 将 sing-box 配置中的 dns_local 解析器指向本地 127.0.0.1:<dns_port>（默认 5353）。
+func resolveExternalLocalDNSEngine(g *ConfigGenerator, cfg *config.Config, platform string) (engine string, useExternal bool) {
+	if platform != "linux" || cfg == nil || !cfg.DNS.IsEnabled() {
+		return "", false
+	}
+	dnsPort := cfg.DNS.GetDNSPort()
+	probe := func(eng string) bool {
+		if g != nil && g.localDNSProbe != nil {
+			return g.localDNSProbe(eng, dnsPort)
+		}
+		switch eng {
+		case constant.DNSEngineAdGuard:
+			return isAdGuardLocalDNSReady(cfg, dnsPort)
+		case constant.DNSEngineSmartDNS:
+			return isSmartDNSLocalDNSReady(dnsPort)
+		default:
+			return false
+		}
+	}
+
+	switch cfg.DNS.GetEngine() {
+	case constant.DNSEngineSingBox:
+		return "", false
+	case constant.DNSEngineAdGuard:
+		if probe(constant.DNSEngineAdGuard) {
+			return constant.DNSEngineAdGuard, true
+		}
+		return "", false
+	case constant.DNSEngineSmartDNS:
+		if probe(constant.DNSEngineSmartDNS) {
+			return constant.DNSEngineSmartDNS, true
+		}
+		return "", false
+	default: // auto
+		if probe(constant.DNSEngineAdGuard) {
+			return constant.DNSEngineAdGuard, true
+		}
+		if probe(constant.DNSEngineSmartDNS) {
+			return constant.DNSEngineSmartDNS, true
+		}
+		return "", false
+	}
+}
+
+func injectLocalDNSInDoc(g *ConfigGenerator, doc *sboption.Document, platform string) bool {
+	if platform != "linux" || doc == nil || doc.DNS == nil || len(doc.DNS.Servers) == 0 {
+		return false
+	}
+	var cfg *config.Config
+	if g != nil {
+		cfg = g.config
+	}
+
+	if engine, useExternal := resolveExternalLocalDNSEngine(g, cfg, platform); useExternal {
+		dnsPort := cfg.DNS.GetDNSPort()
+		updated := false
+		for i := range doc.DNS.Servers {
+			if doc.DNS.Servers[i].Tag == "dns_local" {
+				doc.DNS.Servers[i] = sboption.DNSServer{
+					Tag:        "dns_local",
+					Type:       "udp",
+					Server:     "127.0.0.1",
+					ServerPort: dnsPort,
+				}
+				updated = true
+				break
+			}
+		}
+		if !updated {
+			return false
+		}
+
+		doc.DNS.DisableCache = new(true)
+		doc.DNS.Optimistic = new(false)
+
+		if doc.Experimental != nil && doc.Experimental.CacheFile != nil {
+			doc.Experimental.CacheFile.StoreDNS = new(false)
+			doc.Experimental.CacheFile.StoreFakeIP = new(false)
+		}
+
+		if g == nil || !g.silent {
+			if engine == constant.DNSEngineSmartDNS {
+				log.Info("已将 sing-box dns_local 指向本地 SmartDNS (127.0.0.1:%d)，并交由 SmartDNS 统一管理 DNS 缓存与测速", dnsPort)
+			} else {
+				log.Info("已将 sing-box dns_local 指向本地 AdGuard Home (127.0.0.1:%d)，并交由 AdGuard Home 统一管理 DNS 缓存", dnsPort)
+			}
+		}
+		return true
+	}
+
+	var dnsCfg config.ClientDNSConfig
+	if cfg != nil {
+		dnsCfg = cfg.DNS
+	}
+	changed, err := ApplyEnhancedSingBoxDNSInDoc(doc, dnsCfg, ExtractSubscriptionDomains(cfg), time.Now())
+	if err != nil {
+		log.Warn("应用 sing-box 加强版加密 DNS 失败: %v", err)
+		return false
+	}
+	if changed && (g == nil || !g.silent) {
+		log.Info("已启用 sing-box 加强版防劫持加密 DNS（纯 IP DoH/DoT + 缓存乐观解析）")
+	}
+	return changed
+}
+
+// InjectLocalDNS 在 Linux/OpenWrt 客户端网关平台按三引擎策略配置本地 DNS：
+// 外部本地引擎（AdGuard Home / SmartDNS）启用且就绪时指向 127.0.0.1:<dns_port>；
+// 否则自动启用 sing-box 加强版纯 IP 加密 DoH/DoT，彻底杜绝明文 UDP 53 回退。
 func (g *ConfigGenerator) InjectLocalDNS(rawJSON, platform string) (string, error) {
-	if g == nil || !shouldInjectLocalAdGuardDNS(g.config, platform) {
+	if g == nil || platform != "linux" {
 		return rawJSON, nil
 	}
 
@@ -255,7 +337,7 @@ func (g *ConfigGenerator) InjectLocalDNS(rawJSON, platform string) (string, erro
 	if err != nil {
 		return "", fmt.Errorf("failed to parse config JSON for local DNS injection: %w", err)
 	}
-	if !injectLocalDNSInDoc(g, doc) {
+	if !injectLocalDNSInDoc(g, doc, platform) {
 		return rawJSON, nil
 	}
 	return doc.MarshalCompact()

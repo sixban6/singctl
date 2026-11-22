@@ -28,6 +28,30 @@ func TestSharedConstants_ContractsAndPaths(t *testing.T) {
 	}
 }
 
+func TestDNSEngineAndSmartDNSConstants(t *testing.T) {
+	cases := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{"DNSEngineAuto", constant.DNSEngineAuto, "auto"},
+		{"DNSEngineSingBox", constant.DNSEngineSingBox, "singbox"},
+		{"DNSEngineAdGuard", constant.DNSEngineAdGuard, "adguard"},
+		{"DNSEngineSmartDNS", constant.DNSEngineSmartDNS, "smartdns"},
+		{"SmartDNSInstallPath", constant.SmartDNSInstallPath, "/usr/bin/smartdns"},
+		{"SmartDNSConfigDir", constant.SmartDNSConfigDir, "/etc/singctl"},
+		{"SmartDNSConfigFile", constant.SmartDNSConfigFile, "/etc/singctl/smartdns.conf"},
+		{"SmartDNSRulesDir", constant.SmartDNSRulesDir, "/etc/singctl/smartdns-rules.d"},
+		{"SmartDNSAuditLogPath", constant.SmartDNSAuditLogPath, "/tmp/singctl-smartdns-audit.log"},
+		{"SmartDNSServiceName", constant.SmartDNSServiceName, "singctl-smartdns"},
+	}
+	for _, tc := range cases {
+		if tc.got != tc.want {
+			t.Errorf("%s = %q, want %q", tc.name, tc.got, tc.want)
+		}
+	}
+}
+
 func TestNoDuplicateSharedContractLiterals(t *testing.T) {
 	repoRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
 	if err != nil {

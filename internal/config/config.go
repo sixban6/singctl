@@ -122,6 +122,27 @@ func parseIntAny(v any) (int, error) {
 	}
 }
 
+func parseInt64Any(v any) (int64, error) {
+	switch val := v.(type) {
+	case int:
+		return int64(val), nil
+	case int64:
+		return val, nil
+	case uint64:
+		return int64(val), nil
+	case float64:
+		return int64(val), nil
+	case string:
+		trimmed := strings.TrimSpace(val)
+		if trimmed == "" {
+			return 0, nil
+		}
+		return strconv.ParseInt(trimmed, 10, 64)
+	default:
+		return 0, fmt.Errorf("unsupported type %T for int64 conversion", v)
+	}
+}
+
 func cleanStringSlice(items []string) []string {
 	if len(items) == 0 {
 		return nil
@@ -155,7 +176,7 @@ var knownYAMLKeys = []string{
 	"failover", "groups", "patrol_interval", "probe_timeout_ms", "confirm_retries", "failback_cooldown", "max_failback_delay_ms", "probe_urls",
 	"custom_rules", "block", "target", "source_ip", "reason", "ruleset_url", "rule_count", "preview", "created_at",
 	"outbounds", "tag", "default", "tolerance", "interrupt_exist_connections",
-	"route", "dns", "dns_port", "web_port",
+	"route", "dns", "dns_port", "web_port", "engine", "upstreams", "upstream_mode", "rewrites", "domain", "answer", "block_aaaa", "adblock_disabled_until", "disabled_ad_rule_sets", "smartdns_filters",
 	"gateway", "main_router_ip", "lan_iface", "ipv6_mode",
 	"audit", "whitelist", "pcdn_block", "throttles", "rate_kbps", "comment", "ai", "endpoint", "api_key", "model",
 	"firewall", "ban_timeout_days", "ping_limit_per_sec", "extra_forever_ban", "protected_ports",

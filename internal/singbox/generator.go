@@ -35,6 +35,7 @@ type ConfigGenerator struct {
 	cacheDir         string
 	silent           bool
 	totalRAMOverride atomic.Pointer[uint64]
+	localDNSProbe    func(engine string, dnsPort int) bool
 }
 
 // 支持的目标平台常量。
@@ -84,6 +85,14 @@ func (g *ConfigGenerator) SetCacheDir(dir string) {
 // SetSilent 开启静默生成模式（供看门狗后台定时订阅指纹比对调用，避免无变化巡检刷屏守护日志）。
 func (g *ConfigGenerator) SetSilent(silent bool) {
 	g.silent = silent
+}
+
+// SetLocalDNSProbe 显式注入外部本地 DNS（AdGuard / SmartDNS）就绪探活钩子（未注入时回退默认探测逻辑）。
+func (g *ConfigGenerator) SetLocalDNSProbe(fn func(engine string, dnsPort int) bool) {
+	if g == nil {
+		return
+	}
+	g.localDNSProbe = fn
 }
 
 // NewOfflineConfigGenerator 创建不主动探测宿主机网卡/公网环境的离线配置生成器（供纯内存编译流水线与单测使用）。
