@@ -101,7 +101,7 @@ export const dnsApi = {
       body: JSON.stringify(payload),
     }),
 
-  // 统一三引擎 /api/dns/* 契约方法
+  // 统一双引擎 /api/dns/* 契约方法（SmartDNS / AdGuard Home）
   getDNSOverview,
   getDNSCredentials,
   resetDNSCredentials,

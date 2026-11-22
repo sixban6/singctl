@@ -145,7 +145,7 @@ export function useAdGuardController(
     return () => window.removeEventListener(CLIENT_INVALIDATE_EVENT, onInvalidate);
   }, [loadOverview]);
 
-  const engineActiveOrReady = Boolean(snap?.installed || snap?.activeEngine === 'singbox');
+  const engineActiveOrReady = Boolean(snap?.installed);
   useVisibilityInterval(
     () => {
       void loadOverview(true);
@@ -204,12 +204,12 @@ export function useAdGuardController(
     prevEngineRef.current = curEngine;
     if (engineChanged) {
       setConfigPreview(null);
-      if ((snap.dnsHealthy || curEngine === 'singbox') && !probing) {
+      if (snap.installed && snap.dnsHealthy && !probing) {
         void runProbe(true);
       }
       return;
     }
-    if ((snap.installed || curEngine === 'singbox') && snap.dnsHealthy && !probe && !probing) {
+    if (snap.installed && snap.dnsHealthy && !probe && !probing) {
       void runProbe(true);
     }
   }, [active, snap, probe, probing, runProbe]);
@@ -224,7 +224,9 @@ export function useAdGuardController(
       if (res.overview) {
         applySnapshot(res.overview);
       }
-      const targetName = getEngineDisplayName(res.activeEngine || engine);
+      const targetName = getEngineDisplayName(
+        res.activeEngine || (engine === 'auto' ? snap?.recommendedEngine : engine),
+      );
       const migrated = res.migratedItems?.length
         ? `（已迁移：${res.migratedItems.join('、')}）`
         : '';

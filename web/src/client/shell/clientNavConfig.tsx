@@ -39,7 +39,7 @@ export function buildClientNavGroups(status?: ClientStatusResponse | null): NavG
   const dns = getStatusDNS(status);
   const dnsEngineLabel = getEngineDisplayName(dns?.activeEngine, dns?.activeEngineLabel);
   const dnsBadge =
-    dns && dns.activeEngine !== 'singbox' && dns.installed && dns.enabled && !dns.dnsHealthy ? (
+    dns && dns.installed && dns.enabled && !dns.dnsHealthy ? (
       <StatusDot tone="danger" />
     ) : undefined;
 
@@ -66,9 +66,9 @@ export function buildClientNavGroups(status?: ClientStatusResponse | null): NavG
           key: 'dns',
           label: '防劫持 DNS',
           shortLabel: 'DNS',
-          desc: dns?.activeEngine
-            ? `当前引擎：${dnsEngineLabel} · 三引擎防劫持、防误伤暂停与内网重写`
-            : '三引擎防劫持加密 DoH、防误伤暂停与内网域名重写',
+          desc: dns?.installed && dns?.activeEngine
+            ? `当前引擎：${dnsEngineLabel} · 加密防劫持、防误伤暂停与内网重写`
+            : 'SmartDNS / AdGuard Home 加密防劫持、防误伤暂停与内网域名重写',
           icon: ShieldCheck,
           badge: dnsBadge,
         },
@@ -161,7 +161,7 @@ export function buildClientExtraCommands(
       hint: 'dns',
       group: '快捷操作',
       icon: <ShieldCheck className="w-3.5 h-3.5" />,
-      keywords: 'dns singbox smartdns adguard doh restart',
+      keywords: 'dns smartdns adguard doh restart',
       onSelect: () => requestAction('dns-restart'),
     },
     {

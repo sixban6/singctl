@@ -92,9 +92,10 @@ export function deriveTrafficFlowViewModel(
   const gwRoleText = status.gateway?.mode === 'side' ? '旁路由' : '主路由';
 
   const dns = status.dns ?? status.adguard;
-  const dnsEngine = dns?.activeEngine || (dns?.installed ? 'adguard' : 'singbox');
+  const dnsEngine = dns?.activeEngine || dns?.recommendedEngine;
+  const dnsInstalled = Boolean(dns?.installed);
   const externalExpectedButDown = Boolean(
-    dnsEngine !== 'singbox' && dns?.installed && dns?.enabled && !dns?.dnsHealthy,
+    dnsInstalled && dns?.enabled && !dns?.dnsHealthy,
   );
   const dnsFault =
     externalExpectedButDown ||
@@ -102,9 +103,10 @@ export function deriveTrafficFlowViewModel(
     (sbRunning && dmHealthFailed);
   const externalHealthy =
     !dnsFault &&
-    dnsEngine !== 'singbox' &&
+    dnsInstalled &&
     Boolean(dns?.dnsHealthy && dns?.singboxLinked);
-  const singboxDnsHealthy = !dnsFault && dnsEngine === 'singbox' && sbRunning;
+  const fallbackDoHHealthy =
+    !dnsFault && !dnsInstalled && Boolean(dns?.fallbackDoHActive ?? sbRunning);
 
   const primaryNodeMeta =
     proxySnap?.primaryNode && proxySnap?.nodes
@@ -147,12 +149,12 @@ export function deriveTrafficFlowViewModel(
 
   const shieldTone = dnsFault
     ? ROSE
-    : externalHealthy || singboxDnsHealthy
+    : externalHealthy
       ? '#34d399'
       : '#38bdf8';
   const shieldFill = dnsFault
     ? ROSE_SOFT
-    : externalHealthy || singboxDnsHealthy
+    : externalHealthy
       ? 'rgba(16,185,129,0.18)'
       : 'rgba(56,189,248,0.15)';
   const shieldPillText = dnsFault
@@ -165,8 +167,8 @@ export function deriveTrafficFlowViewModel(
       ? dnsEngine === 'smartdns'
         ? 'SmartDNS 加速'
         : 'AdGuard 净化'
-      : singboxDnsHealthy
-        ? 'sing-box 净化'
+      : fallbackDoHHealthy
+        ? '内置 DoH 兜底'
         : '加密防抢答';
 
   const primaryNodeLabel = !sbRunning
