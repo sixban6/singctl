@@ -66,6 +66,8 @@ func TestIPTablesBackend_RenderScript_MultiportChunkingAndPrefixLimits(t *testin
 		"ipset create whitelist_ip hash:net family inet -exist",
 		"ipset create whitelist_ip6 hash:net family inet6 -exist",
 		"SINGCTL_SECURITY",
+		"iptables -w 5 -N SINGCTL_SECURITY",
+		"ip6tables -w 5 -N SINGCTL_SECURITY",
 		"-m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
 		"-i lo -j ACCEPT",
 		"-i tailscale0 -j ACCEPT",

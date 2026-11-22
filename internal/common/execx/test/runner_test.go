@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -135,4 +136,69 @@ func TestOutput_RunIO_CleanEnv_And_Concurrency(t *testing.T) {
 		})
 	}
 	wg.Wait()
+}
+
+func TestWithXtablesWait_TableDriven(t *testing.T) {
+	tests := []struct {
+		name string
+		bin  string
+		args []string
+		want []string
+	}{
+		{
+			name: "iptables_prepends_w5_without_mutating_input",
+			bin:  "iptables",
+			args: []string{"-A", "SINGCTL_TS_JIT", "-j", "ACCEPT"},
+			want: []string{"-w", "5", "-A", "SINGCTL_TS_JIT", "-j", "ACCEPT"},
+		},
+		{
+			name: "ip6tables_full_path_prepends_w5",
+			bin:  "/usr/sbin/ip6tables",
+			args: []string{"-L", "SINGCTL_SECURITY", "-n"},
+			want: []string{"-w", "5", "-L", "SINGCTL_SECURITY", "-n"},
+		},
+		{
+			name: "already_has_short_wait_flag_unchanged",
+			bin:  "iptables",
+			args: []string{"-w", "10", "-F", "SINGCTL_TS_JIT"},
+			want: []string{"-w", "10", "-F", "SINGCTL_TS_JIT"},
+		},
+		{
+			name: "already_has_long_wait_flag_unchanged",
+			bin:  "ip6tables",
+			args: []string{"--wait=3", "-F", "SINGCTL_TS_JIT"},
+			want: []string{"--wait=3", "-F", "SINGCTL_TS_JIT"},
+		},
+		{
+			name: "non_iptables_binary_unchanged",
+			bin:  "nft",
+			args: []string{"list", "tables"},
+			want: []string{"list", "tables"},
+		},
+		{
+			name: "empty_binary_and_nil_args",
+			bin:  "",
+			args: nil,
+			want: nil,
+		},
+		{
+			name: "iptables_with_nil_args",
+			bin:  "iptables",
+			args: nil,
+			want: []string{"-w", "5"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			origCopy := slices.Clone(tc.args)
+			got := execx.WithXtablesWait(tc.bin, tc.args)
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("WithXtablesWait(%q, %v) = %v, want %v", tc.bin, tc.args, got, tc.want)
+			}
+			if !slices.Equal(tc.args, origCopy) {
+				t.Fatalf("input args mutated: got %v want %v", tc.args, origCopy)
+			}
+		})
+	}
 }

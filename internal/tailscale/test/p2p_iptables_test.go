@@ -160,6 +160,9 @@ func TestRenderIPTablesP2P_3StateACLPayloadAndInjectionGuard(t *testing.T) {
 	if !strings.Contains(fwUserBlock, "# BEGIN SINGCTL_TS_P2P") || !strings.Contains(fwUserBlock, "# END SINGCTL_TS_P2P") {
 		t.Fatalf("missing managed markers in firewall.user block:\n%s", fwUserBlock)
 	}
+	if !strings.Contains(fwUserBlock, "iptables -w 5 -N SINGCTL_TS_JIT") || !strings.Contains(fwUserBlock, "ip6tables -w 5 -N SINGCTL_TS_JIT") {
+		t.Fatalf("firewall.user block must pass -w 5 to avoid xtables lock contention:\n%s", fwUserBlock)
+	}
 	if shBin, err := exec.LookPath("sh"); err == nil {
 		tmp := filepath.Join(t.TempDir(), "fw_user.sh")
 		if err := os.WriteFile(tmp, []byte(fwUserBlock), 0600); err != nil {

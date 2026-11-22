@@ -220,25 +220,26 @@ func writeFirewallUserFamily(b *strings.Builder, bin string, port int, jit, inAC
 	if bin == "ip6tables" {
 		indent = "        "
 	}
+	cmd := bin + " -w 5"
 	for _, ch := range []string{IPTablesChainTSJIT, IPTablesChainTSInACL, IPTablesChainTSFwdACL} {
-		fmt.Fprintf(b, "%s%s -N %s 2>/dev/null || true\n", indent, bin, ch)
-		fmt.Fprintf(b, "%s%s -F %s\n", indent, bin, ch)
+		fmt.Fprintf(b, "%s%s -N %s 2>/dev/null || true\n", indent, cmd, ch)
+		fmt.Fprintf(b, "%s%s -F %s\n", indent, cmd, ch)
 	}
 	for _, args := range jit {
-		fmt.Fprintf(b, "%s%s -A %s %s\n", indent, bin, IPTablesChainTSJIT, strings.Join(args, " "))
+		fmt.Fprintf(b, "%s%s -A %s %s\n", indent, cmd, IPTablesChainTSJIT, strings.Join(args, " "))
 	}
 	for _, args := range inACL {
-		fmt.Fprintf(b, "%s%s -A %s %s\n", indent, bin, IPTablesChainTSInACL, strings.Join(args, " "))
+		fmt.Fprintf(b, "%s%s -A %s %s\n", indent, cmd, IPTablesChainTSInACL, strings.Join(args, " "))
 	}
 	for _, args := range fwdACL {
-		fmt.Fprintf(b, "%s%s -A %s %s\n", indent, bin, IPTablesChainTSFwdACL, strings.Join(args, " "))
+		fmt.Fprintf(b, "%s%s -A %s %s\n", indent, cmd, IPTablesChainTSFwdACL, strings.Join(args, " "))
 	}
 	fmt.Fprintf(b, "%s%s -C INPUT -p udp --dport %d -m comment --comment %s -j %s 2>/dev/null || %s -I INPUT 1 -p udp --dport %d -m comment --comment %s -j %s\n",
-		indent, bin, port, jitCommentTag, IPTablesChainTSJIT, bin, port, jitCommentTag, IPTablesChainTSJIT)
+		indent, cmd, port, jitCommentTag, IPTablesChainTSJIT, cmd, port, jitCommentTag, IPTablesChainTSJIT)
 	fmt.Fprintf(b, "%s%s -C INPUT -i tailscale+ -m comment --comment %s -j %s 2>/dev/null || %s -I INPUT 1 -i tailscale+ -m comment --comment %s -j %s\n",
-		indent, bin, aclCommentTag, IPTablesChainTSInACL, bin, aclCommentTag, IPTablesChainTSInACL)
+		indent, cmd, aclCommentTag, IPTablesChainTSInACL, cmd, aclCommentTag, IPTablesChainTSInACL)
 	fmt.Fprintf(b, "%s%s -C FORWARD -i tailscale+ -m comment --comment %s -j %s 2>/dev/null || %s -I FORWARD 1 -i tailscale+ -m comment --comment %s -j %s\n",
-		indent, bin, aclCommentTag, IPTablesChainTSFwdACL, bin, aclCommentTag, IPTablesChainTSFwdACL)
+		indent, cmd, aclCommentTag, IPTablesChainTSFwdACL, cmd, aclCommentTag, IPTablesChainTSFwdACL)
 }
 
 // IPTablesP2PManager 实现基于 iptables + ip6tables + ipset 的 Tailscale P2P 防线独立后端。

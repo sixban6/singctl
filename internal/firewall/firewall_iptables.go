@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"singctl/internal/common/execx"
 	"singctl/internal/common/fsx"
 	"singctl/internal/constant"
 	"singctl/internal/logger"
@@ -65,7 +66,7 @@ const (
 type CmdRunner func(ctx context.Context, stdin string, name string, args ...string) ([]byte, error)
 
 func defaultFirewallCmdRunner(ctx context.Context, stdin string, name string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, name, args...)
+	cmd := exec.CommandContext(ctx, name, execx.WithXtablesWait(name, args)...)
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin)
 	}
@@ -219,9 +220,9 @@ func (b *IPTablesBackend) RenderScript(opts BuildOptions) string {
 	}
 	sb.WriteByte('\n')
 
-	writeSecurityChainScript(&sb, "iptables", false, data, pingBurst, portChunks)
+	writeSecurityChainScript(&sb, "iptables -w 5", false, data, pingBurst, portChunks)
 	sb.WriteString("\nif command -v ip6tables >/dev/null 2>&1; then\n")
-	writeSecurityChainScript(&sb, "ip6tables", true, data, pingBurst, portChunks)
+	writeSecurityChainScript(&sb, "ip6tables -w 5", true, data, pingBurst, portChunks)
 	sb.WriteString("fi\n")
 	return sb.String()
 }

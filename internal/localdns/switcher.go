@@ -81,6 +81,7 @@ func (r *Registry) ensureAvailableExternalDNSPort(
 	desiredEngine string,
 	targetEng Engine,
 	currentPort int,
+	waitForRelease bool,
 ) (int, string, error) {
 	// 仅当目标引擎服务本身已在运行且健康响应时保留原端口（避免把其他进程占用的 5353 误判为自身）
 	if origActive == desiredEngine && r.isTargetEngineRunning(ctx, desiredEngine, targetEng) && targetEng.Status(ctx).DNSHealthy {
@@ -96,6 +97,24 @@ func (r *Registry) ensureAvailableExternalDNSPort(
 	}
 	if checkFree(currentPort) {
 		return currentPort, "", nil
+	}
+	// 刚停用旧引擎（如 procd 异步停止 smartdns/AdGuardHome）时，等待最多 1.5s 让原进程彻底释放回环端口，
+	// 避免误判为 mDNS 占用而无故将 5353 顺延至 5354。
+	if waitForRelease {
+		pollInterval := r.deps.PortReleasePollInterval
+		if pollInterval <= 0 {
+			pollInterval = 100 * time.Millisecond
+		}
+		for range 15 {
+			select {
+			case <-ctx.Done():
+				return currentPort, "", ctx.Err()
+			case <-time.After(pollInterval):
+			}
+			if checkFree(currentPort) {
+				return currentPort, "", nil
+			}
+		}
 	}
 	for _, cand := range externalDNSFallbackPorts {
 		if cand == currentPort {
@@ -303,7 +322,7 @@ func (r *Registry) SwitchEngine(ctx context.Context, req SwitchRequest) (*Switch
 	}
 
 	// 5. 检测回环端口冲突（如 avahi-daemon 占用 5353 mDNS）自动顺延 -> 按需安装 -> 同步公共配置 -> 启动 -> 实测解析 -> 原子切换 sing-box
-	chosenPort, portWarn, portErr := r.ensureAvailableExternalDNSPort(ctx, origActive, desiredEngine, targetEng, dnsPort)
+	chosenPort, portWarn, portErr := r.ensureAvailableExternalDNSPort(ctx, origActive, desiredEngine, targetEng, dnsPort, stoppedOrigExternal)
 	if portErr != nil {
 		return rollback(portErr)
 	}

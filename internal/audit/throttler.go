@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"singctl/internal/common/netx"
+	"singctl/internal/common/execx"
 	"singctl/internal/config"
 	"singctl/internal/singbox"
 )
@@ -310,7 +311,7 @@ func NewThrottler() *Throttler {
 		deleteNFT:   defaultDeleteNFT,
 		lookPath:    exec.LookPath,
 		runCmd: func(ctx context.Context, name string, args ...string) ([]byte, error) {
-			return exec.CommandContext(ctx, name, args...).CombinedOutput()
+			return exec.CommandContext(ctx, name, execx.WithXtablesWait(name, args)...).CombinedOutput()
 		},
 		goos:  runtime.GOOS,
 		now:   time.Now,
