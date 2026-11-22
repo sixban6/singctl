@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"slices"
 	"strconv"
 	"strings"
@@ -20,6 +19,7 @@ import (
 	"singctl/internal/component"
 	"singctl/internal/config"
 	"singctl/internal/deploy"
+	"singctl/internal/platform/servicemgr"
 	"singctl/internal/subhub"
 	"singctl/internal/telemetry"
 )
@@ -34,15 +34,6 @@ const (
 	certProbeCacheTTL       = 3 * time.Minute
 	rootDiskMetricsCacheTTL = 15 * time.Second
 )
-
-func runCommandWithTimeout(timeout time.Duration, name string, args ...string) ([]byte, error) {
-	if timeout <= 0 {
-		timeout = statusCmdTimeout
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	return exec.CommandContext(ctx, name, args...).Output()
-}
 
 func probeLoopbackTCP(addr string, timeout time.Duration) bool {
 	if timeout <= 0 {
@@ -109,10 +100,7 @@ func (s *Server) loadConfigBounded(maxWait time.Duration) (*config.Config, error
 		if s.configLoaderOverride != nil {
 			return s.configLoaderOverride(p)
 		}
-		if s.cfgStore != nil {
-			return s.cfgStore.LoadLatest()
-		}
-		return config.Load(p)
+		return s.loadConfigSnapshot()
 	}
 	cfgPath := s.opts.ConfigPath
 	go func() {
@@ -184,55 +172,29 @@ func formatServiceUptime(val string) string {
 }
 
 func parseSystemdShowBatchOutput(raw string) map[string]serviceProbeSnapshot {
-	out := make(map[string]serviceProbeSnapshot)
-	var curUnit string
-	var curSnap serviceProbeSnapshot
-
-	flush := func() {
-		if curUnit != "" {
-			out[curUnit] = curSnap
-		}
-		curUnit = ""
-		curSnap = serviceProbeSnapshot{}
-	}
-
-	for line := range strings.SplitSeq(raw, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			flush()
-			continue
-		}
-		k, v, ok := strings.Cut(line, "=")
-		if !ok {
-			continue
-		}
-		k = strings.TrimSpace(k)
-		v = strings.TrimSpace(v)
-		switch k {
-		case "Id":
-			curUnit = strings.TrimSuffix(v, ".service")
-		case "ActiveState":
-			curSnap.running = v == "active"
-		case "MainPID":
-			if v != "" && v != "0" {
-				curSnap.pid = v
-			}
-		case "ActiveEnterTimestamp":
-			curSnap.uptime = formatServiceUptime(v)
+	parsed := servicemgr.ParseSystemdShowBatch(raw)
+	out := make(map[string]serviceProbeSnapshot, len(parsed))
+	for unit, st := range parsed {
+		out[unit] = serviceProbeSnapshot{
+			running: st.Running,
+			pid:     st.PID,
+			uptime:  formatServiceUptime(st.ActiveEnterTimestamp),
 		}
 	}
-	flush()
 	return out
 }
 
-func probeSystemdServicesBatch(units ...string) map[string]serviceProbeSnapshot {
-	args := []string{"show", "--property=Id,ActiveState,MainPID,ActiveEnterTimestamp"}
-	args = append(args, units...)
-	out, err := runCommandWithTimeout(statusCmdTimeout, "systemctl", args...)
-	if err != nil && len(out) == 0 {
-		return map[string]serviceProbeSnapshot{}
+func (s *Server) probeSystemdServicesBatch(units ...string) map[string]serviceProbeSnapshot {
+	parsed := servicemgr.NewSystemd(s.activeCmdRunner()).ShowUnitsBatch(context.Background(), statusCmdTimeout, units...)
+	out := make(map[string]serviceProbeSnapshot, len(parsed))
+	for unit, st := range parsed {
+		out[unit] = serviceProbeSnapshot{
+			running: st.Running,
+			pid:     st.PID,
+			uptime:  formatServiceUptime(st.ActiveEnterTimestamp),
+		}
 	}
-	return parseSystemdShowBatchOutput(string(out))
+	return out
 }
 
 func (s *Server) getCachedServiceProbes() map[string]serviceProbeSnapshot {
@@ -260,7 +222,7 @@ func (s *Server) getCachedServiceProbes() map[string]serviceProbeSnapshot {
 		if prober != nil {
 			probes = prober()
 		} else {
-			probes = probeSystemdServicesBatch("caddy", "sing-box", "singctl-sub", "wireproxy")
+			probes = s.probeSystemdServicesBatch("caddy", "sing-box", "singctl-sub", "wireproxy")
 		}
 		if len(probes) > 0 {
 			s.serviceProbeMu.Lock()
@@ -579,9 +541,17 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
-	cfg, err := config.Load(s.opts.ConfigPath)
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "加载配置失败: "+err.Error())
+	cfg, err := s.loadConfigSnapshot()
+	if err != nil && s.cfgStore != nil && s.cfgStore.Revision() > 0 {
+		cfg = s.cfgStore.Get()
+		err = nil
+	}
+	if err != nil || cfg == nil {
+		errMsg := "empty config"
+		if err != nil {
+			errMsg = err.Error()
+		}
+		writeJSONError(w, http.StatusInternalServerError, "加载配置失败: "+errMsg)
 		return
 	}
 
@@ -680,8 +650,9 @@ func getSystemUptime() string {
 }
 
 func checkServiceRunning(name string) bool {
-	out, err := runCommandWithTimeout(statusCmdTimeout, "systemctl", "is-active", name)
-	return err == nil && strings.TrimSpace(string(out)) == "active"
+	ctx, cancel := context.WithTimeout(context.Background(), statusCmdTimeout)
+	defer cancel()
+	return servicemgr.NewSystemd(nil).IsActive(ctx, name)
 }
 
 func isBBREnabled() bool {

@@ -272,10 +272,7 @@ func (s *Server) buildTailscaleP2PReport(ctx context.Context, cfg *config.Config
 }
 
 func (s *Server) handleTailscaleP2PGet(w http.ResponseWriter, r *http.Request) {
-	cfg, err := config.Load(configPathFor(s))
-	if err != nil || cfg == nil {
-		cfg = &config.Config{}
-	}
+	cfg := s.readConfigOrEmpty()
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	writeJSON(w, http.StatusOK, s.buildTailscaleP2PReport(ctx, cfg))
@@ -299,10 +296,7 @@ func (s *Server) handleTailscaleP2PPut(w http.ResponseWriter, r *http.Request) {
 
 	cfgPath := configPathFor(s)
 	origBytes, origReadErr := os.ReadFile(cfgPath)
-	cfg, err := config.Load(cfgPath)
-	if err != nil || cfg == nil {
-		cfg = &config.Config{}
-	}
+	cfg := s.loadMutableConfig()
 	prevP2P := cfg.Tailscale.P2PAssist
 	cfg.Tailscale.P2PAssist = normalized
 
@@ -390,7 +384,7 @@ func (s *Server) handleTailscaleP2PPokePost(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	cfg, err := config.Load(configPathFor(s))
+	cfg, err := s.loadConfigSnapshot()
 	if err != nil || cfg == nil {
 		writeJSONError(w, http.StatusInternalServerError, "读取配置失败")
 		return

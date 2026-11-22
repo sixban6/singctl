@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"os/signal"
 	"strings"
 	"syscall"
@@ -12,6 +11,7 @@ import (
 
 	"singctl/internal/constant"
 	"singctl/internal/logger"
+	"singctl/internal/platform/servicemgr"
 	"singctl/internal/telemetry"
 
 	"github.com/spf13/cobra"
@@ -39,7 +39,7 @@ func newServerTopCmd() *cobra.Command {
 				}
 				if changed {
 					logger.Info("已写入本地流量遥测配置 (%s)，正在重启 sing-box 生效...", addr)
-					if err := exec.Command("systemctl", "restart", "sing-box").Run(); err != nil {
+					if err := servicemgr.Detect(nil).Restart(cmd.Context(), "sing-box"); err != nil {
 						return fmt.Errorf("重启 sing-box 失败: %w", err)
 					}
 					time.Sleep(500 * time.Millisecond)

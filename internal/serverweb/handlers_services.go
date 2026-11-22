@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"singctl/internal/component"
-	"singctl/internal/config"
 	"singctl/internal/deploy"
 	"singctl/internal/updater"
 	"singctl/internal/util/file"
@@ -79,7 +78,7 @@ func (s *Server) handleCheckServiceUpdate(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	cfg, _ := config.Load(s.opts.ConfigPath)
+	cfg := s.readConfigOrNil()
 	res, err := deploy.CheckComponentUpdate(service, cfg)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
@@ -109,7 +108,7 @@ func (s *Server) handleUpgradeService(w http.ResponseWriter, r *http.Request) {
 	}
 
 	target := strings.ToLower(strings.TrimSpace(body.Service))
-	cfg, _ := config.Load(s.opts.ConfigPath)
+	cfg := s.readConfigOrNil()
 
 	if target == "singctl" || target == "subhub" || target == "substore" {
 		mirror := ""

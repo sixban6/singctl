@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"singctl/internal/config"
+	"singctl/internal/lifecycle"
 	"singctl/internal/logger"
 )
 
@@ -24,16 +26,19 @@ const DefaultListenAddr = "127.0.0.1:3001"
 type Options struct {
 	Listen              string
 	ConfigPath          string
+	ConfigStore         *config.Store
 	DataDir             string
 	FilePath            string
 	Version             string
 	AllowLoopbackRemote bool
+	OnReady             func(listenAddr string)
 }
 
 // Server serves dynamic multi-target subscriptions compatible with legacy Sub-Store download URLs.
 type Server struct {
-	opts  Options
-	store *Store
+	opts     Options
+	store    *Store
+	cfgStore *config.Store
 }
 
 // NewServer constructs a SubHub HTTP server.
@@ -42,9 +47,14 @@ func NewServer(opts Options) *Server {
 	opts.Version = cmp.Or(strings.TrimSpace(opts.Version), "dev")
 	st := NewStore(opts.DataDir, opts.FilePath)
 	st.AllowLoopbackRemote = opts.AllowLoopbackRemote
+	cfgStore := opts.ConfigStore
+	if cfgStore == nil && strings.TrimSpace(opts.ConfigPath) != "" {
+		cfgStore = config.NewStore(opts.ConfigPath)
+	}
 	return &Server{
-		opts:  opts,
-		store: st,
+		opts:     opts,
+		store:    st,
+		cfgStore: cfgStore,
 	}
 }
 
@@ -58,14 +68,44 @@ func (s *Server) Handler() http.Handler {
 	return http.HandlerFunc(s.serveHTTP)
 }
 
-// Start runs the SubHub HTTP server until SIGINT/SIGTERM is received.
-func (s *Server) Start() error {
-	if _, err := s.store.EnsureKey(); err != nil {
-		logger.Warn("SubHub failed to initialize key file: %v", err)
+func (s *Server) buildLifecycle() *lifecycle.Group {
+	g := lifecycle.NewGroup(lifecycle.WithCloseTimeout(5 * time.Second))
+	g.Add(lifecycle.FuncService{
+		ServiceName: "subhub-keystore",
+		OnInit: func(context.Context) error {
+			if _, err := s.store.EnsureKey(); err != nil {
+				logger.Warn("SubHub failed to initialize key file: %v", err)
+			}
+			return nil
+		},
+	})
+	return g
+}
+
+// ServeContext runs the SubHub HTTP server under deterministic lifecycle management until ctx is cancelled.
+func (s *Server) ServeContext(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	lc := s.buildLifecycle()
+	if err := lc.Start(ctx); err != nil {
+		return err
+	}
+	defer func() {
+		_ = lc.Close()
+	}()
+
+	ln, err := net.Listen("tcp", s.opts.Listen)
+	if err != nil {
+		return err
+	}
+	actualAddr := ln.Addr().String()
+	if s.opts.OnReady != nil {
+		s.opts.OnReady(actualAddr)
 	}
 
 	httpServer := &http.Server{
-		Addr:              s.opts.Listen,
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       20 * time.Second,
@@ -73,26 +113,32 @@ func (s *Server) Start() error {
 		IdleTimeout:       60 * time.Second,
 	}
 
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
-
-	errCh := make(chan error, 1)
+	serveDone := make(chan struct{})
+	defer close(serveDone)
 	go func() {
-		logger.Info("SubHub native subscription engine listening on http://%s (version=%s)", s.opts.Listen, s.opts.Version)
-		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			errCh <- err
+		select {
+		case <-ctx.Done():
+			logger.Info("Shutting down SubHub server...")
+			shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = httpServer.Shutdown(shutCtx)
+			cancel()
+		case <-serveDone:
 		}
 	}()
 
-	select {
-	case err := <-errCh:
-		return err
-	case <-stop:
-		logger.Info("Shutting down SubHub server...")
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		return httpServer.Shutdown(ctx)
+	logger.Info("SubHub native subscription engine listening on http://%s (version=%s)", actualAddr, s.opts.Version)
+	err = httpServer.Serve(ln)
+	if errors.Is(err, http.ErrServerClosed) && ctx.Err() != nil {
+		return nil
 	}
+	return err
+}
+
+// Start runs the SubHub HTTP server until SIGINT/SIGTERM is received.
+func (s *Server) Start() error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return s.ServeContext(ctx)
 }
 
 func isDirectLoopback(r *http.Request) bool {
@@ -282,8 +328,12 @@ func (s *Server) loadRenderOptions(r *http.Request, target TargetFormat) RenderO
 		RequestURL:     buildExternalRequestURL(r),
 	}
 
-	if s.opts.ConfigPath != "" {
-		if cfg, err := config.Load(s.opts.ConfigPath); err == nil && cfg != nil {
+	if s.cfgStore != nil {
+		cfg, err := s.cfgStore.LoadLatest()
+		if err != nil || cfg == nil {
+			cfg = s.cfgStore.Get()
+		}
+		if cfg != nil {
 			opts.MirrorURL = cfg.GitHub.MirrorURL
 			opts.UpMbps = cfg.Hy2.Up
 			opts.DownMbps = cfg.Hy2.Down

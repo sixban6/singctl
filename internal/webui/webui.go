@@ -1,4 +1,4 @@
-// Package webui 提供 singctl 的 Web 管理界面。
+// Package webui 提供 singctl 的客户端 Web 管理界面与控制面生命周期托管。
 //
 // 设计原则:
 //   - 非侵入:所有"动作"通过重新执行 singctl 自身子命令完成,复用既有 CLI 逻辑;
@@ -7,14 +7,11 @@
 package webui
 
 import (
+	"cmp"
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"crypto/subtle"
 	"embed"
-	"encoding/hex"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"io/fs"
 	"net"
 	"net/http"
@@ -26,14 +23,13 @@ import (
 	"singctl/internal/config"
 	"singctl/internal/daemon"
 	"singctl/internal/gateway"
+	"singctl/internal/lifecycle"
 	"singctl/internal/logger"
 	"singctl/internal/netdiag"
 	"singctl/internal/tailscale"
-	"singctl/internal/util/httpgzip"
-	"singctl/internal/util/netinfo"
 )
 
-// sessionCookieName 持久化 Cookie 键名,用于 Safari/PWA 独立沙盒免密免登
+// SessionCookieName 持久化 Cookie 键名,用于 Safari/PWA 独立沙盒免密免登
 const SessionCookieName = "singctl_session"
 
 //go:embed static
@@ -244,6 +240,31 @@ func (s *Server) readConfigOrEmpty() *config.Config {
 	return &config.Config{}
 }
 
+// loadMutableConfig 返回独立深拷贝的可变配置实例，严禁原地修改共享只读快照指针。
+func (s *Server) loadMutableConfig() *config.Config {
+	cfgPath := configPathFor(s)
+	snap, err := s.loadConfigSnapshot()
+	if err == nil && snap != nil {
+		cp := snap.Clone()
+		if cp.SourcePath() == "" && cfgPath != "" {
+			cp.SetSourcePath(cfgPath)
+		}
+		return cp
+	}
+	if s.cfgStore != nil && s.cfgStore.Revision() > 0 {
+		cp := s.cfgStore.GetClone()
+		if cp.SourcePath() == "" && cfgPath != "" {
+			cp.SetSourcePath(cfgPath)
+		}
+		return cp
+	}
+	empty := &config.Config{}
+	if cfgPath != "" {
+		empty.SetSourcePath(cfgPath)
+	}
+	return empty
+}
+
 func (s *Server) saveConfig(cfg *config.Config) error {
 	if err := config.Save(configPathFor(s), cfg); err != nil {
 		return err
@@ -260,8 +281,38 @@ func (s *Server) invalidateConfigStore() {
 	}
 }
 
-// ListenAndServe 启动 HTTP 服务(阻塞)
-func (s *Server) ListenAndServe() error {
+func (s *Server) buildLifecycle(bgCtx context.Context, cancelBg context.CancelFunc) *lifecycle.Group {
+	g := lifecycle.NewGroup(lifecycle.WithCloseTimeout(5 * time.Second))
+	g.Add(
+		lifecycle.FuncService{
+			ServiceName: "webui-runtime",
+			OnClose: func() error {
+				if cancelBg != nil {
+					cancelBg()
+				}
+				return nil
+			},
+		},
+		lifecycle.FuncService{
+			ServiceName: "webui-pcdn-boot-sync",
+			OnPostStart: func(context.Context) error {
+				go s.ensureDefaultPCDNBlockWithContext(bgCtx)
+				return nil
+			},
+		},
+	)
+	return g
+}
+
+// ServeContext 启动客户端 Web 面板与受控后台生命周期编排组，并在 ctx 取消时优雅关闭。
+func (s *Server) ServeContext(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	s.opts.Listen = NormalizeLegacyWildcardListen(s.opts.Listen)
 	ln, err := net.Listen("tcp", s.opts.Listen)
 	if err != nil && strings.HasPrefix(s.opts.Listen, ":") {
@@ -275,34 +326,77 @@ func (s *Server) ListenAndServe() error {
 	if strings.TrimSpace(s.opts.Listen) == "" || strings.HasSuffix(strings.TrimSpace(s.opts.Listen), ":0") {
 		s.opts.Listen = actualAddr
 	}
+
+	bgCtx, cancelBg := context.WithCancel(ctx)
+	lc := s.buildLifecycle(bgCtx, cancelBg)
+	if err := lc.Start(bgCtx); err != nil {
+		cancelBg()
+		_ = ln.Close()
+		return err
+	}
+	defer func() {
+		cancelBg()
+		_ = lc.Close()
+	}()
+
 	if s.opts.OnReady != nil {
 		s.opts.OnReady(actualAddr)
 	}
-
 	s.printBanner(ln)
-	go s.ensureDefaultPCDNBlockAsync()
-	srv := &http.Server{Handler: s.Mux}
-	return srv.Serve(ln)
+
+	srv := &http.Server{
+		Handler:           s.Mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+
+	serveDone := make(chan struct{})
+	defer close(serveDone)
+	go func() {
+		select {
+		case <-ctx.Done():
+			shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = srv.Shutdown(shutCtx)
+			shutCancel()
+		case <-serveDone:
+		}
+	}()
+
+	err = srv.Serve(ln)
+	if errors.Is(err, http.ErrServerClosed) && ctx.Err() != nil {
+		return nil
+	}
+	return err
 }
 
-func (s *Server) ensureDefaultPCDNBlockAsync() {
-	time.Sleep(3 * time.Second)
-	if daemon.IsDaemonRunning() || strings.TrimSpace(s.opts.ConfigPath) == "" {
+// ListenAndServe 启动 HTTP 服务(阻塞)
+func (s *Server) ListenAndServe() error {
+	return s.ServeContext(context.Background())
+}
+
+func (s *Server) ensureDefaultPCDNBlockWithContext(ctx context.Context) {
+	timer := time.NewTimer(3 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return
+	case <-timer.C:
+	}
+
+	if ctx.Err() != nil || daemon.IsDaemonRunning() || strings.TrimSpace(s.opts.ConfigPath) == "" {
 		return
 	}
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
 
-	cfg, err := s.loadConfigSnapshot()
-	if err != nil || cfg == nil {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	cfg := s.loadMutableConfig()
+	runCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	enforcer := s.newAuditEnforcer(cfg)
-	if applied, syncErr := enforcer.EnsureDefaultPCDNBlock(ctx); syncErr != nil {
+	if applied, syncErr := enforcer.EnsureDefaultPCDNBlock(runCtx); syncErr != nil {
 		logger.Warn("[Audit] WebUI 启动同步内置防 PCDN 规则集失败: %v", syncErr)
 	} else if applied {
+		s.invalidateConfigStore()
 		logger.Info("[Audit] 已通过 WebUI 启动自检启用内置防 PCDN 规则集并热重载 sing-box")
 	}
 }
@@ -335,598 +429,6 @@ func lanIPv4() string {
 	return ""
 }
 
-// sessionToken 根据访问口令派生无状态持久化 Token (HMAC-SHA256)
-func (s *Server) SessionToken() string {
-	if s.opts.Password == "" {
-		return ""
-	}
-	mac := hmac.New(sha256.New, []byte("singctl-webui-session-salt-v1"))
-	mac.Write([]byte(s.opts.Password))
-	return hex.EncodeToString(mac.Sum(nil))
-}
-
-// issueAuthCookie 强制下发 30 天持久化 Cookie
-func (s *Server) issueAuthCookie(w http.ResponseWriter) {
-	token := s.SessionToken()
-	if token == "" {
-		return
-	}
-	http.SetCookie(w, &http.Cookie{
-		Name:     SessionCookieName,
-		Value:    token,
-		Path:     "/",
-		MaxAge:   30 * 86400, // 30 天持久化,完美解决 iOS 添加到主屏幕后频繁要求输密码的问题
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-	})
-}
-
-// setAuthCookie 若客户端未携带或携带无效 Cookie, 在通过鉴权后下发 30 天持久化 Cookie
-func (s *Server) setAuthCookie(w http.ResponseWriter, r *http.Request) {
-	token := s.SessionToken()
-	if token == "" {
-		return
-	}
-	if c, err := r.Cookie(SessionCookieName); err == nil && subtle.ConstantTimeCompare([]byte(c.Value), []byte(token)) == 1 {
-		return
-	}
-	s.issueAuthCookie(w)
-}
-
-// guard 包装器:统一鉴权、反爬虫头注入、JSON 错误输出、方法校验
-func (s *Server) guard(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Robots-Tag", "noindex, nofollow, noarchive, nosnippet")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("Cache-Control", "no-store")
-		if !s.authorized(r) {
-			// 前端 XHR 请求携带 X-Requested-With 时不返回 WWW-Authenticate，避免浏览器乱弹原生 Basic Auth 框
-			if r.Header.Get("X-Requested-With") == "" {
-				w.Header().Set("WWW-Authenticate", `Basic realm="SingCtl WebUI"`)
-			}
-			writeJSON(w, http.StatusUnauthorized, map[string]any{
-				"error":        "unauthorized",
-				"authRequired": true,
-			})
-			return
-		}
-		s.setAuthCookie(w, r)
-		// 轻量 CSRF 与包体上限防护: 写操作限制请求体 <= 4MB 并要求 JSON Content-Type(跨站表单无法伪造)
-		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			r.Body = http.MaxBytesReader(w, r.Body, 4<<20)
-			if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
-				writeJSONError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
-				return
-			}
-		}
-		if strings.HasSuffix(r.URL.Path, "/stream") || r.Header.Get("Upgrade") != "" || strings.Contains(strings.ToLower(r.Header.Get("Accept")), "text/event-stream") {
-			next(w, r)
-			return
-		}
-		httpgzip.Serve(w, r, next)
-	}
-}
-
-// authOnly 仅鉴权(用于静态资源,不校验 Content-Type)。
-// 关键修复：
-//  1. 首页 `/` 与 `/index.html` 强制 `Cache-Control: no-store`，彻底消除自更新后浏览器缓存旧 index.html 导致白屏或 401 刷新死循环；
-//  2. 未授权访问首页时返回 401 状态码 + 自包含口令登录页（不发 WWW-Authenticate），彻底告别 Safari/PWA/移动端不弹 Basic Auth 框导致无法登录。
-func (s *Server) authOnly(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Robots-Tag", "noindex, nofollow, noarchive, nosnippet")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		if !s.authorized(r) {
-			w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
-			if (r.Method == http.MethodGet || r.Method == http.MethodHead) && (r.URL.Path == "/" || r.URL.Path == "/index.html") {
-				w.Header().Set("Content-Type", "text/html; charset=utf-8")
-				w.WriteHeader(http.StatusUnauthorized)
-				if r.Method != http.MethodHead {
-					_, _ = w.Write([]byte(embeddedLoginHTML))
-				}
-				return
-			}
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		s.setAuthCookie(w, r)
-		if strings.HasPrefix(r.URL.Path, "/assets/") {
-			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-		} else {
-			w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-// authorized 校验多通道凭据 (支持 Cookie、Bearer Token、URL 参数、Basic Auth)
-func (s *Server) authorized(r *http.Request) bool {
-	if s.opts.Password == "" {
-		return true
-	}
-	expectedToken := s.SessionToken()
-
-	// 1. 持久化 Cookie (最适合 iOS 桌面 WebApp 沙盒持久化)
-	if cookie, err := r.Cookie(SessionCookieName); err == nil && cookie.Value != "" {
-		if subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(expectedToken)) == 1 {
-			return true
-		}
-	}
-
-	// 2. Header: Authorization: Bearer <token>
-	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-		token := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
-		if subtle.ConstantTimeCompare([]byte(token), []byte(expectedToken)) == 1 {
-			return true
-		}
-	}
-
-	// 3. URL Query 参数 (?token=... 或 ?password=...), 方便添加到手机桌面时内嵌免密凭据
-	if qToken := r.URL.Query().Get("token"); qToken != "" {
-		if subtle.ConstantTimeCompare([]byte(qToken), []byte(expectedToken)) == 1 {
-			return true
-		}
-	}
-	if qPass := r.URL.Query().Get("password"); qPass != "" {
-		if subtle.ConstantTimeCompare([]byte(qPass), []byte(s.opts.Password)) == 1 {
-			return true
-		}
-	}
-
-	// 4. 标准 HTTP Basic Auth (admin / password)
-	user, pass, ok := r.BasicAuth()
-	if ok && user == "admin" {
-		if subtle.ConstantTimeCompare([]byte(pass), []byte(s.opts.Password)) == 1 {
-			return true
-		}
-	}
-
-	return false
-}
-
-// guardIOSDownload iOS 配置下载端点专用鉴权
-func (s *Server) guardIOSDownload(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if !s.authorized(r) {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		next(w, r)
-	}
-}
-
-// handleAuthCheck 公开鉴权在线探测接口（供前端自更新热重启重连探测及会话校验使用，未登录不泄漏敏感信息）
-func (s *Server) handleAuthCheck(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("X-Robots-Tag", "noindex, nofollow, noarchive, nosnippet")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Cache-Control", "no-store")
-
-	authed := s.authorized(r)
-	if authed {
-		s.setAuthCookie(w, r)
-	}
-	resp := map[string]any{
-		"ok":            true,
-		"authRequired":  s.opts.Password != "",
-		"authenticated": authed,
-	}
-	if authed && s.opts.Version != "" {
-		resp["version"] = s.opts.Version
-	}
-	writeJSON(w, http.StatusOK, resp)
-}
-
-// handleAuthLogin 内嵌口令登录接口：恒定时间校验口令、同 IP 限流防爆破，成功后下发 30 天 HttpOnly Cookie 及会话 Token
-func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("X-Robots-Tag", "noindex, nofollow, noarchive, nosnippet")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Cache-Control", "no-store")
-
-	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
-	if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
-		writeJSONError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
-		return
-	}
-
-	clientIP := remoteClientIP(r)
-	if s.loginLimiter != nil && !s.loginLimiter.allow(clientIP) {
-		writeJSONError(w, http.StatusTooManyRequests, "登录尝试过于频繁，请 5 分钟后再试")
-		return
-	}
-
-	var body struct {
-		Password string `json:"password"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "请求格式错误")
-		return
-	}
-
-	if s.opts.Password == "" {
-		if s.loginLimiter != nil {
-			s.loginLimiter.reset(clientIP)
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "token": ""})
-		return
-	}
-
-	if subtle.ConstantTimeCompare([]byte(body.Password), []byte(s.opts.Password)) != 1 {
-		if s.loginLimiter != nil {
-			s.loginLimiter.recordFailure(clientIP)
-		}
-		writeJSONError(w, http.StatusUnauthorized, "访问口令错误，请重试")
-		return
-	}
-
-	if s.loginLimiter != nil {
-		s.loginLimiter.reset(clientIP)
-	}
-	s.issueAuthCookie(w)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":    true,
-		"token": s.SessionToken(),
-	})
-}
-
-// handleLogout 登出并清理 Cookie
-func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     SessionCookieName,
-		Value:    "",
-		Path:     "/",
-		MaxAge:   -1,
-		HttpOnly: true,
-	})
-	writeJSON(w, http.StatusOK, map[string]string{"message": "已退出登录"})
-}
-
-// handleSessionURL 返回手机添加到主屏幕专用的免密访问 URL (含局域网 IP 与持久 Token)
-func (s *Server) handleSessionURL(w http.ResponseWriter, r *http.Request) {
-	lanIP := "127.0.0.1"
-	if ni, err := netinfo.Get(); err == nil && ni.LANIPv4 != "" {
-		lanIP = ni.LANIPv4
-	}
-	_, port, err := net.SplitHostPort(s.opts.Listen)
-	if err != nil || port == "" {
-		port = "8090"
-	}
-	targetURL := fmt.Sprintf("http://%s:%s/", lanIP, port)
-	token := s.SessionToken()
-	if token != "" {
-		targetURL += "?token=" + token
-	}
-	writeJSON(w, http.StatusOK, map[string]string{
-		"url":   targetURL,
-		"token": token,
-	})
-}
-
-// ───────────────────────── 登录防爆破限流器 ─────────────────────────
-
-type loginAttemptEntry struct {
-	failures    int
-	windowStart time.Time
-	lockedUntil time.Time
-}
-
-type loginRateLimiter struct {
-	mu      sync.Mutex
-	entries map[string]*loginAttemptEntry
-}
-
-func newLoginRateLimiter() *loginRateLimiter {
-	return &loginRateLimiter{entries: make(map[string]*loginAttemptEntry)}
-}
-
-func (l *loginRateLimiter) allow(ip string) bool {
-	now := time.Now()
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	if len(l.entries) > 256 {
-		for k, v := range l.entries {
-			if now.Sub(v.windowStart) > 10*time.Minute && now.After(v.lockedUntil) {
-				delete(l.entries, k)
-			}
-		}
-	}
-	ent, ok := l.entries[ip]
-	if !ok {
-		return true
-	}
-	if now.Before(ent.lockedUntil) {
-		return false
-	}
-	if now.Sub(ent.windowStart) > 5*time.Minute {
-		delete(l.entries, ip)
-	}
-	return true
-}
-
-func (l *loginRateLimiter) recordFailure(ip string) {
-	now := time.Now()
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	ent, ok := l.entries[ip]
-	if !ok || now.Sub(ent.windowStart) > 5*time.Minute {
-		ent = &loginAttemptEntry{windowStart: now}
-		l.entries[ip] = ent
-	}
-	ent.failures++
-	if ent.failures >= 8 {
-		ent.lockedUntil = now.Add(5 * time.Minute)
-	}
-}
-
-func (l *loginRateLimiter) reset(ip string) {
-	l.mu.Lock()
-	delete(l.entries, ip)
-	l.mu.Unlock()
-}
-
-func remoteClientIP(r *http.Request) string {
-	if host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr)); err == nil && host != "" {
-		return host
-	}
-	return strings.TrimSpace(r.RemoteAddr)
-}
-
-const embeddedLoginHTML = `<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <meta name="robots" content="noindex,nofollow" />
-  <title>SingCtl WebUI · 访问验证</title>
-  <style>
-    :root {
-      color-scheme: light dark;
-      --bg: #f4f6fb;
-      --card: #ffffff;
-      --border: rgba(15, 23, 42, 0.09);
-      --text: #0f172a;
-      --muted: #64748b;
-      --accent: #2563eb;
-      --accent-hover: #1d4ed8;
-      --danger: #dc2626;
-      --danger-bg: rgba(220, 38, 38, 0.08);
-      --input-bg: #f8fafc;
-      --shadow: 0 20px 50px rgba(15, 23, 42, 0.08);
-    }
-    @media (prefers-color-scheme: dark) {
-      :root {
-        --bg: #090d16;
-        --card: #111827;
-        --border: rgba(148, 163, 184, 0.16);
-        --text: #f8fafc;
-        --muted: #94a3b8;
-        --accent: #3b82f6;
-        --accent-hover: #2563eb;
-        --danger: #f87171;
-        --danger-bg: rgba(248, 113, 113, 0.12);
-        --input-bg: #0b1120;
-        --shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
-      }
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 20px;
-      background: radial-gradient(circle at 50% 0%, rgba(59, 130, 246, 0.12), transparent 55%), var(--bg);
-      color: var(--text);
-      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
-    }
-    .card {
-      width: 100%;
-      max-width: 390px;
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: 18px;
-      padding: 28px 24px;
-      box-shadow: var(--shadow);
-    }
-    .brand {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      margin-bottom: 18px;
-    }
-    .logo {
-      width: 40px;
-      height: 40px;
-      border-radius: 11px;
-      background: linear-gradient(135deg, #2563eb, #06b6d4);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      color: #fff;
-      font-weight: 700;
-      font-size: 18px;
-      flex-shrink: 0;
-    }
-    h1 {
-      margin: 0;
-      font-size: 18px;
-      font-weight: 700;
-      letter-spacing: -0.01em;
-    }
-    .sub {
-      margin: 2px 0 0;
-      font-size: 12.5px;
-      color: var(--muted);
-    }
-    label {
-      display: block;
-      font-size: 12.5px;
-      font-weight: 600;
-      margin-bottom: 8px;
-      color: var(--muted);
-    }
-    .field {
-      position: relative;
-      margin-bottom: 14px;
-    }
-    input {
-      width: 100%;
-      height: 42px;
-      padding: 0 62px 0 13px;
-      border-radius: 10px;
-      border: 1px solid var(--border);
-      background: var(--input-bg);
-      color: var(--text);
-      font-size: 14px;
-      outline: none;
-      transition: border-color 0.15s;
-    }
-    input:focus { border-color: var(--accent); }
-    .toggle {
-      position: absolute;
-      right: 8px;
-      top: 50%;
-      transform: translateY(-50%);
-      border: none;
-      background: transparent;
-      color: var(--muted);
-      font-size: 12px;
-      padding: 4px 6px;
-      cursor: pointer;
-    }
-    .err {
-      display: none;
-      margin-bottom: 14px;
-      padding: 9px 12px;
-      border-radius: 10px;
-      background: var(--danger-bg);
-      color: var(--danger);
-      font-size: 12.5px;
-      line-height: 1.45;
-    }
-    .btn {
-      width: 100%;
-      height: 42px;
-      border: none;
-      border-radius: 10px;
-      background: var(--accent);
-      color: #fff;
-      font-size: 14px;
-      font-weight: 600;
-      cursor: pointer;
-      transition: background 0.15s, opacity 0.15s;
-    }
-    .btn:hover:not(:disabled) { background: var(--accent-hover); }
-    .btn:disabled { opacity: 0.65; cursor: not-allowed; }
-    .hint {
-      margin-top: 14px;
-      font-size: 11.5px;
-      color: var(--muted);
-      text-align: center;
-    }
-  </style>
-</head>
-<body>
-  <form class="card" id="loginForm" autocomplete="on">
-    <div class="brand">
-      <div class="logo">S</div>
-      <div>
-        <h1>SingCtl 客户端控制台</h1>
-        <p class="sub">请输入 WebUI 访问口令继续</p>
-      </div>
-    </div>
-    <div class="err" id="errBox"></div>
-    <label for="pwdInput">访问口令</label>
-    <div class="field">
-      <input id="pwdInput" name="password" type="password" autocomplete="current-password" placeholder="输入启动时设置的口令" required autofocus />
-      <button type="button" class="toggle" id="toggleBtn">显示</button>
-    </div>
-    <button type="submit" class="btn" id="submitBtn">登录控制台</button>
-    <div class="hint">验证成功后自动保持 30 天免密登录态</div>
-  </form>
-  <script>
-    (function () {
-      var form = document.getElementById('loginForm');
-      var pwd = document.getElementById('pwdInput');
-      var btn = document.getElementById('submitBtn');
-      var errBox = document.getElementById('errBox');
-      var toggleBtn = document.getElementById('toggleBtn');
-
-      toggleBtn.addEventListener('click', function () {
-        var show = pwd.type === 'password';
-        pwd.type = show ? 'text' : 'password';
-        toggleBtn.textContent = show ? '隐藏' : '显示';
-        pwd.focus();
-      });
-
-      function showErr(msg) {
-        errBox.textContent = msg;
-        errBox.style.display = 'block';
-      }
-
-      form.addEventListener('submit', function (e) {
-        e.preventDefault();
-        var val = pwd.value || '';
-        if (!val) {
-          showErr('请输入访问口令');
-          return;
-        }
-        errBox.style.display = 'none';
-        btn.disabled = true;
-        btn.textContent = '正在验证...';
-
-        var ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
-        var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, 10000) : null;
-
-        fetch('/api/auth/login', {
-          method: 'POST',
-          credentials: 'same-origin',
-          cache: 'no-store',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Requested-With': 'SingCtlWebUI'
-          },
-          body: JSON.stringify({ password: val }),
-          signal: ctrl ? ctrl.signal : undefined
-        })
-          .then(function (resp) {
-            return resp.json().catch(function () { return {}; }).then(function (data) {
-              if (!resp.ok) {
-                throw new Error(data.error || ('验证失败 (HTTP ' + resp.status + ')'));
-              }
-              return data;
-            });
-          })
-          .then(function (data) {
-            try {
-              if (data && data.token) {
-                localStorage.setItem('sc_token', data.token);
-              }
-            } catch (_) {}
-            var sep = window.location.pathname.indexOf('?') >= 0 ? '&' : '?';
-            window.location.replace(window.location.pathname + sep + '_t=' + Date.now() + (window.location.hash || ''));
-          })
-          .catch(function (err) {
-            if (err && err.name === 'AbortError') {
-              showErr('登录请求超时，请检查网关连接后重试');
-            } else {
-              showErr((err && err.message) || '验证失败，请重试');
-            }
-            btn.disabled = false;
-            btn.textContent = '登录控制台';
-          })
-          .finally(function () {
-            if (timer) clearTimeout(timer);
-          });
-      });
-    })();
-  </script>
-</body>
-</html>`
-
-// ───────────────────────── 内部工具 ─────────────────────────
-
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
@@ -934,5 +436,5 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func writeJSONError(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, map[string]any{"error": msg})
+	writeJSON(w, status, map[string]any{"error": cmp.Or(msg, "unknown error")})
 }

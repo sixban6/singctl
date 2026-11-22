@@ -89,7 +89,7 @@ func (s *Server) handleTailscaleUpgradePreflightGet(w http.ResponseWriter, r *ht
 	} else {
 		mirror := ""
 		var tsCfg config.TailscaleConfig
-		if cfg, loadErr := config.Load(configPathFor(s)); loadErr == nil && cfg != nil {
+		if cfg, loadErr := s.loadConfigSnapshot(); loadErr == nil && cfg != nil {
 			mirror = cfg.GitHub.MirrorURL
 			tsCfg = cfg.Tailscale
 		}

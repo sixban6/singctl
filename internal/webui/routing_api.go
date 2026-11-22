@@ -46,10 +46,7 @@ func (s *Server) handleTrafficRoutingGet(w http.ResponseWriter, _ *http.Request)
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
 
-	cfg, err := config.Load(configPathFor(s))
-	if err != nil || cfg == nil {
-		cfg = &config.Config{}
-	}
+	cfg := s.readConfigOrEmpty()
 
 	rawSB, _ := os.ReadFile(s.sbConfigPath())
 	report := singbox.BuildClientRoutingReport(cfg, string(rawSB))
@@ -68,10 +65,7 @@ func (s *Server) handleTrafficRoutingPut(w http.ResponseWriter, r *http.Request)
 
 	cfgPath := configPathFor(s)
 	origCfgBytes, origReadErr := os.ReadFile(cfgPath)
-	cfg, err := config.Load(cfgPath)
-	if err != nil || cfg == nil {
-		cfg = &config.Config{}
-	}
+	cfg := s.loadMutableConfig()
 
 	sbPath := s.sbConfigPath()
 	rawSBBytes, sbErr := os.ReadFile(sbPath)
@@ -159,6 +153,7 @@ func (s *Server) handleTrafficRoutingPut(w http.ResponseWriter, r *http.Request)
 		if err != nil {
 			if origReadErr == nil {
 				_ = os.WriteFile(cfgPath, origCfgBytes, 0600)
+				s.invalidateConfigStore()
 			}
 			writeJSONError(w, http.StatusInternalServerError, "编译分流规则失败: "+err.Error())
 			return
@@ -166,6 +161,7 @@ func (s *Server) handleTrafficRoutingPut(w http.ResponseWriter, r *http.Request)
 		if err := singbox.ApplyLiveSingBoxConfig(r.Context(), sbPath, s.sbWorkConfigPath(), updatedJSON, "routing"); err != nil {
 			if origReadErr == nil {
 				_ = os.WriteFile(cfgPath, origCfgBytes, 0600)
+				s.invalidateConfigStore()
 			}
 			writeJSONError(w, http.StatusBadRequest, "应用配置或 sing-box 校验失败: "+err.Error())
 			return

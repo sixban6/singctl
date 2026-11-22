@@ -1,14 +1,12 @@
+// 文件职责：提供客户端审计 L2 深度语义研判顾问（Advisor）、持久化缓存与内置离线专家决策树回退。
 package audit
 
 import (
-	"bytes"
 	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"slices"
 	"strings"
@@ -96,7 +94,7 @@ func LookupCachedAIReview(target string) *AIReviewResult {
 	return &cp
 }
 
-// StoreCachedAIReviews 将新获得的真实大模型研判结果写入内存与 /tmp/singctl-audit-ai-cache.json (0600)。
+// StoreCachedAIReviews 将新获得的真实大模型研判结果写入内存与 /tmp/singctl-audit-ai-cache-v2.json (0600)。
 func StoreCachedAIReviews(entries map[string]*AIReviewResult) {
 	if len(entries) == 0 {
 		return
@@ -177,25 +175,6 @@ func (a *Advisor) IsRemoteLLMConfigured() bool {
 	return a != nil && a.cfg.Enabled && a.cfg.Endpoint != ""
 }
 
-// sanitizedFlowDigest 严格遵循规则 01 脱敏后的摘要结构，绝不包含内网真实 IP 或公网隐私 IP。
-type sanitizedFlowDigest struct {
-	ID            string  `json:"id"`
-	DeviceRole    string  `json:"device_role"`
-	Target        string  `json:"target"`
-	IsDirectIP    bool    `json:"is_direct_ip"`
-	Network       string  `json:"network"`
-	DestPort      int     `json:"dest_port"`
-	UploadMB      float64 `json:"upload_mb"`
-	DownloadMB    float64 `json:"download_mb"`
-	UploadRatio   float64 `json:"upload_ratio"`
-	ConnCount     int     `json:"conn_count"`
-	IntervalCV    float64 `json:"interval_cv"`
-	DomainEntropy float64 `json:"domain_entropy"`
-	SecurityScore int     `json:"security_score"`
-	PrivacyScore  int     `json:"privacy_score"`
-	RiskScore     int     `json:"risk_score"`
-}
-
 // ReviewSuspiciousFlows 对报告中的可疑/高危流（或前 N 条非白名单活跃上传流）执行 L2 深度研判与误杀影响评估。
 func (a *Advisor) ReviewSuspiciousFlows(ctx context.Context, flows []FlowRecord, callerIPs ...string) {
 	if len(flows) == 0 {
@@ -211,7 +190,6 @@ func (a *Advisor) ReviewSuspiciousFlows(ctx context.Context, flows []FlowRecord,
 			}
 		}
 	}
-	// 当用户主动触发 AI 研判但当前最高分尚未达到 35 分时，自动纳入排名前 8 的非白名单上传流进行深度研判
 	if len(candidatesIdx) < 8 {
 		for i := range flows {
 			if slices.Contains(candidatesIdx, i) {
@@ -251,7 +229,6 @@ func (a *Advisor) ReviewSuspiciousFlows(ctx context.Context, flows []FlowRecord,
 		llmCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 35*time.Second)
 		defer cancel()
 
-		// 1. 按三级自适应优先级尝试请求 Magpie (:3425) 或自定义 OpenAI 兼容网关
 		for _, ep := range a.candidateEndpoints(callerIP) {
 			if !probeEndpointReachable(ep, 600*time.Millisecond) {
 				continue
@@ -270,7 +247,6 @@ func (a *Advisor) ReviewSuspiciousFlows(ctx context.Context, flows []FlowRecord,
 		}
 	}
 
-	// 2. 对未命中大模型响应（或网关离线）的候选流，使用内置离线专家知识库补全精准研判
 	for _, idx := range candidatesIdx {
 		if flows[idx].AIReview == nil {
 			flows[idx].AIReview = evaluateBuiltinExpert(&flows[idx])
@@ -278,7 +254,7 @@ func (a *Advisor) ReviewSuspiciousFlows(ctx context.Context, flows []FlowRecord,
 	}
 }
 
-// ReviewFlowBatch 对前端传入的指定批次流（最多 12 条/批）执行大模型深度研判，支持服务端持久化缓存命中、渐进式分批点亮与单行强制重判。
+// ReviewFlowBatch 对前端传入的指定批次流（最多 12 条/批）执行大模型深度研判。
 func (a *Advisor) ReviewFlowBatch(ctx context.Context, flows []FlowRecord, callerIP string, forceRefresh ...bool) (map[string]*AIReviewResult, bool) {
 	out := make(map[string]*AIReviewResult, len(flows))
 	if len(flows) == 0 {
@@ -343,390 +319,6 @@ func (a *Advisor) ReviewFlowBatch(ctx context.Context, flows []FlowRecord, calle
 	return out, usedRemote
 }
 
-func (a *Advisor) candidateEndpoints(callerIP string) []string {
-	var list []string
-	add := func(raw string) {
-		raw = strings.TrimSpace(raw)
-		if raw == "" {
-			return
-		}
-		ep := normalizeChatCompletionsURL(raw)
-		if !slices.Contains(list, ep) {
-			list = append(list, ep)
-		}
-	}
-
-	// 优先级 1：用户在 singctl.yaml 或环境变量中显式配置的网关地址
-	if a != nil && a.cfg.Endpoint != "" {
-		add(a.cfg.Endpoint)
-	}
-	// 优先级 2：本机回环 Magpie 共享网关 (http://127.0.0.1:3425)
-	add(defaultMagpieLoopbackEndpoint)
-
-	// 优先级 3：触发当前 Web 请求的操作者电脑局域网 IP 上的 Magpie 共享网关 (http://<callerIP>:3425)
-	if ip := net.ParseIP(callerIP); ip != nil && !ip.IsLoopback() && !ip.IsUnspecified() {
-		add("http://" + net.JoinHostPort(ip.String(), "3425") + "/v1/chat/completions")
-	}
-	return list
-}
-
-func normalizeChatCompletionsURL(raw string) string {
-	ep := strings.TrimRight(strings.TrimSpace(raw), "/")
-	if strings.HasSuffix(ep, "/chat/completions") {
-		return ep
-	}
-	if strings.HasSuffix(ep, "/v1") {
-		return ep + "/chat/completions"
-	}
-	return ep + "/v1/chat/completions"
-}
-
-func candidateModelListURLs(rawBase string, callerIP string) []string {
-	var urls []string
-	addURL := func(u string) {
-		if u != "" && !slices.Contains(urls, u) {
-			urls = append(urls, u)
-		}
-	}
-
-	trimmed := strings.TrimRight(strings.TrimSpace(rawBase), "/")
-	if trimmed != "" {
-		trimmed = strings.TrimSuffix(trimmed, "/chat/completions")
-		trimmed = strings.TrimSuffix(trimmed, "/models")
-		trimmed = strings.TrimRight(trimmed, "/")
-		if strings.HasSuffix(trimmed, "/v1") || strings.Contains(trimmed, "/v1beta") || strings.Contains(trimmed, "/api/v") {
-			addURL(trimmed + "/models")
-		} else {
-			addURL(trimmed + "/v1/models")
-			addURL(trimmed + "/models")
-		}
-		return urls
-	}
-
-	addURL("http://127.0.0.1:3425/v1/models")
-	if ip := net.ParseIP(strings.TrimSpace(callerIP)); ip != nil && !ip.IsLoopback() && !ip.IsUnspecified() {
-		addURL("http://" + net.JoinHostPort(ip.String(), "3425") + "/v1/models")
-	}
-	return urls
-}
-
-// FetchAvailableModels 向 OpenAI 兼容网关（或自动探测的本地/局域网 :3425 网关）拉取可用模型 ID 列表。
-func (a *Advisor) FetchAvailableModels(ctx context.Context, callerIP string) ([]string, string, error) {
-	rawBase := ""
-	apiKey := ""
-	if a != nil {
-		rawBase = strings.TrimSpace(a.cfg.Endpoint)
-		apiKey = strings.TrimSpace(a.cfg.APIKey)
-	}
-
-	candidates := candidateModelListURLs(rawBase, callerIP)
-	if len(candidates) == 0 {
-		return nil, "", fmt.Errorf("未配置网关地址")
-	}
-
-	client := &http.Client{Timeout: 5 * time.Second}
-	var lastErr error
-
-	for _, targetURL := range candidates {
-		parsed, pErr := url.Parse(targetURL)
-		if pErr != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
-			lastErr = fmt.Errorf("网关地址格式不合法: %s", targetURL)
-			continue
-		}
-		// 自动探测默认 :3425 时先快速探测端口，避免在未运行网关时长时间阻塞
-		if rawBase == "" && !probeEndpointReachable(targetURL, 600*time.Millisecond) {
-			lastErr = fmt.Errorf("未检测到在线 :3425 AI 网关")
-			continue
-		}
-
-		reqCtx, cancel := context.WithTimeout(ctx, 4500*time.Millisecond)
-		req, rErr := http.NewRequestWithContext(reqCtx, http.MethodGet, targetURL, nil)
-		if rErr != nil {
-			cancel()
-			lastErr = rErr
-			continue
-		}
-		req.Header.Set("Accept", "application/json")
-		if apiKey != "" {
-			req.Header.Set("Authorization", "Bearer "+apiKey)
-		}
-
-		resp, doErr := client.Do(req)
-		if doErr != nil {
-			cancel()
-			lastErr = doErr
-			continue
-		}
-
-		var bodyBuf bytes.Buffer
-		_, _ = bodyBuf.ReadFrom(http.MaxBytesReader(nil, resp.Body, 2<<20))
-		_ = resp.Body.Close()
-		cancel()
-
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			lastErr = fmt.Errorf("网关返回 HTTP %d", resp.StatusCode)
-			continue
-		}
-
-		models := parseModelListPayload(bodyBuf.Bytes())
-		if len(models) > 0 {
-			return models, targetURL, nil
-		}
-		lastErr = fmt.Errorf("网关未返回可用模型列表")
-	}
-
-	if lastErr == nil {
-		lastErr = fmt.Errorf("无法连接 AI 网关拉取模型")
-	}
-	return nil, "", lastErr
-}
-
-func parseModelListPayload(raw []byte) []string {
-	var parsed struct {
-		Data   []json.RawMessage `json:"data"`
-		Models []json.RawMessage `json:"models"`
-	}
-	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return nil
-	}
-
-	items := parsed.Data
-	if len(items) == 0 {
-		items = parsed.Models
-	}
-
-	seen := make(map[string]struct{}, len(items))
-	out := make([]string, 0, len(items))
-	addID := func(id string) {
-		clean := strings.TrimSpace(id)
-		if clean == "" {
-			return
-		}
-		if _, ok := seen[clean]; !ok {
-			seen[clean] = struct{}{}
-			out = append(out, clean)
-		}
-	}
-
-	for _, rawItem := range items {
-		var s string
-		if json.Unmarshal(rawItem, &s) == nil && s != "" {
-			addID(s)
-			continue
-		}
-		var obj struct {
-			ID    string `json:"id"`
-			Name  string `json:"name"`
-			Model string `json:"model"`
-		}
-		if json.Unmarshal(rawItem, &obj) == nil {
-			addID(cmp.Or(obj.ID, obj.Model, obj.Name))
-		}
-	}
-	return out
-}
-
-func probeEndpointReachable(endpoint string, timeout time.Duration) bool {
-	u, err := url.Parse(endpoint)
-	if err != nil || u.Host == "" {
-		return false
-	}
-	hostPort := u.Host
-	if !strings.Contains(hostPort, ":") {
-		if strings.EqualFold(u.Scheme, "https") {
-			hostPort = net.JoinHostPort(hostPort, "443")
-		} else {
-			hostPort = net.JoinHostPort(hostPort, "80")
-		}
-	}
-	conn, err := net.DialTimeout("tcp", hostPort, timeout)
-	if err != nil {
-		return false
-	}
-	_ = conn.Close()
-	return true
-}
-
-func (a *Advisor) queryRemoteLLM(ctx context.Context, endpoint string, flows []FlowRecord, indices []int) (map[string]*AIReviewResult, error) {
-	digests := make([]sanitizedFlowDigest, 0, len(indices))
-	for _, idx := range indices {
-		f := flows[idx]
-		maskedTarget := f.Target
-		if f.IsDirectIP {
-			// 对纯公网 IP 脱敏最后一段，保护隐私同时保留网段特征
-			maskedTarget = maskIPv4Octet(f.Target)
-		}
-		digests = append(digests, sanitizedFlowDigest{
-			ID:            f.Key,
-			DeviceRole:    cmp.Or(f.DeviceRole, "unknown"),
-			Target:        maskedTarget,
-			IsDirectIP:    f.IsDirectIP,
-			Network:       f.Network,
-			DestPort:      f.DestPort,
-			UploadMB:      float64(f.UploadBytes) / (1024.0 * 1024.0),
-			DownloadMB:    float64(f.DownloadBytes) / (1024.0 * 1024.0),
-			UploadRatio:   f.UploadRatio,
-			ConnCount:     f.ConnCount,
-			IntervalCV:    f.IntervalCV,
-			DomainEntropy: f.DomainEntropy,
-			SecurityScore: f.SecurityScore,
-			PrivacyScore:  f.PrivacyScore,
-			RiskScore:     f.RiskScore,
-		})
-	}
-
-	payloadJSON, _ := json.Marshal(digests)
-	sysPrompt := `你是一名资深的家庭网关网络安全审计专家。请分析以下已脱敏的局域网设备流量摘要，判断每个目标的真实用途并给出处置建议。
-你必须严格遵守以下 verdict 判定铁律：
-1. "safe_to_block"（可安全拉黑）：【仅限】明确属于「广告追踪、隐私遥测/埋点日志、商业 PCDN 偷跑、恶意远控/扫描」的不良连接，且拉黑后不影响设备与 App 核心功能。
-2. "do_not_block"（建议放行）：凡属正常网络基础设施、TLS ECH 加密握手（如 cloudflare-ech.com）、公共 DNS/DoH、CDN 静态资源、系统更新、即时通讯或正常网页/业务通信，【即使拉黑后存在协议降级机制，也必须一律返回 "do_not_block"（recommend: "keep"）】！严禁将正当协议或正常网站标为 safe_to_block。
-3. "caution"（谨慎拉黑）：疑似异常上传（如未知裸 IP 大流量上行），但可能与正常业务混用，建议按单设备观察。
-严格只输出 JSON 数组，不要输出 Markdown 代码块以外的解释，格式为:
-[{"id":"原样返回输入中的id", "category":"归属与用途简述(15字内)", "verdict":"safe_to_block|caution|do_not_block", "impact":"拉黑后的影响说明(25字内)", "recommend":"block_global|block_device|keep"}]`
-
-	model := a.cfg.Model
-	content, usedModel, err := a.callChatCompletions(ctx, endpoint, model, sysPrompt, string(payloadJSON))
-	if err != nil {
-		// 若默认模型在该 Magpie 网关上未启用，自动查询 /v1/models 获取首个可用模型重试
-		if fallbackModel := a.discoverFirstModel(ctx, endpoint); fallbackModel != "" && fallbackModel != model {
-			content, usedModel, err = a.callChatCompletions(ctx, endpoint, fallbackModel, sysPrompt, string(payloadJSON))
-		}
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	rawContent := extractJSONArray(content)
-	var items []struct {
-		ID        string `json:"id"`
-		Category  string `json:"category"`
-		Verdict   string `json:"verdict"`
-		Impact    string `json:"impact"`
-		Recommend string `json:"recommend"`
-	}
-	if err := json.Unmarshal([]byte(rawContent), &items); err != nil {
-		return nil, err
-	}
-
-	sourceLabel := "Magpie · " + shortModelLabel(usedModel)
-	out := make(map[string]*AIReviewResult, len(items))
-	for _, it := range items {
-		v := AIVerdict(it.Verdict)
-		switch v {
-		case AISafeToBlock, AICaution, AIDoNotBlock:
-		default:
-			v = AICaution
-		}
-		out[it.ID] = &AIReviewResult{
-			Source:      sourceLabel,
-			Category:    it.Category,
-			Verdict:     v,
-			VerdictText: v.Label(),
-			Impact:      it.Impact,
-			Recommend:   cmp.Or(it.Recommend, "block_global"),
-		}
-	}
-	return out, nil
-}
-
-func (a *Advisor) callChatCompletions(ctx context.Context, endpoint, model, sysPrompt, userPayload string) (string, string, error) {
-	doPost := func(withLowReasoning bool) (*http.Response, error) {
-		payload := map[string]any{
-			"model":       model,
-			"temperature": 0.1,
-			"messages": []map[string]string{
-				{"role": "system", "content": sysPrompt},
-				{"role": "user", "content": userPayload},
-			},
-		}
-		if withLowReasoning {
-			payload["reasoning_effort"] = "low"
-		}
-		reqBody, _ := json.Marshal(payload)
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(reqBody))
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("Content-Type", "application/json")
-		if a.cfg.APIKey != "" {
-			req.Header.Set("Authorization", "Bearer "+a.cfg.APIKey)
-		}
-		return a.httpClient.Do(req)
-	}
-
-	resp, err := doPost(true)
-	if err != nil {
-		return "", model, err
-	}
-	if resp.StatusCode == http.StatusBadRequest {
-		_ = resp.Body.Close()
-		resp, err = doPost(false)
-		if err != nil {
-			return "", model, err
-		}
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", model, fmt.Errorf("llm status %d", resp.StatusCode)
-	}
-
-	var chatResp struct {
-		Model   string `json:"model"`
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil || len(chatResp.Choices) == 0 {
-		return "", model, fmt.Errorf("decode llm response failed")
-	}
-	return chatResp.Choices[0].Message.Content, cmp.Or(chatResp.Model, model), nil
-}
-
-func (a *Advisor) discoverFirstModel(ctx context.Context, chatEndpoint string) string {
-	modelsURL := strings.TrimSuffix(chatEndpoint, "/chat/completions") + "/models"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, modelsURL, nil)
-	if err != nil {
-		return ""
-	}
-	if a.cfg.APIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+a.cfg.APIKey)
-	}
-	resp, err := a.httpClient.Do(req)
-	if err != nil {
-		return ""
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return ""
-	}
-	var mResp struct {
-		FirstID string `json:"first_id"`
-		Data    []struct {
-			ID string `json:"id"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&mResp); err != nil {
-		return ""
-	}
-	if mResp.FirstID != "" {
-		return mResp.FirstID
-	}
-	if len(mResp.Data) > 0 {
-		return mResp.Data[0].ID
-	}
-	return ""
-}
-
-func shortModelLabel(m string) string {
-	if idx := strings.LastIndex(m, "/"); idx >= 0 && idx+1 < len(m) {
-		return m[idx+1:]
-	}
-	return m
-}
-
-// shortCircuitTrustedReview 对已命中可信白名单基线或核心底层加密握手/DoH 基础设施域名的流直接返回确定性的“建议放行”，避免浪费远程大模型 Token 或产生幻觉误报。
 func shortCircuitTrustedReview(f *FlowRecord) *AIReviewResult {
 	if f == nil {
 		return nil
@@ -798,7 +390,7 @@ func evaluateBuiltinExpert(f *FlowRecord) *AIReviewResult {
 		}
 	}
 
-	// 3. 绕过 DNS 的裸公网 IP + 非标端口传输（区分 IoT/音视频/手游常用端口与不明高上行偷跑）
+	// 3. 绕过 DNS 的裸公网 IP + 非标端口传输
 	if f.IsDirectIP && strings.EqualFold(f.Network, "udp") {
 		switch {
 		case f.DestPort == 8053 && f.UploadBytes < 20*1024*1024:
@@ -872,7 +464,7 @@ func evaluateBuiltinExpert(f *FlowRecord) *AIReviewResult {
 		}
 	}
 
-	// 5. 常规域名伴随高上传（可能是用户云盘/IM传输或未知后台上传）
+	// 5. 常规域名伴随高上传
 	if f.RiskScore >= 60 {
 		return &AIReviewResult{
 			Source:      "builtin_expert",
@@ -892,21 +484,4 @@ func evaluateBuiltinExpert(f *FlowRecord) *AIReviewResult {
 		Impact:      "未见明显恶意偷跑特征，强行拉黑可能影响正常联网服务",
 		Recommend:   "keep",
 	}
-}
-
-func maskIPv4Octet(ip string) string {
-	parts := strings.Split(ip, ".")
-	if len(parts) == 4 {
-		return parts[0] + "." + parts[1] + "." + parts[2] + ".xxx"
-	}
-	return ip
-}
-
-func extractJSONArray(s string) string {
-	start := strings.IndexByte(s, '[')
-	end := strings.LastIndexByte(s, ']')
-	if start >= 0 && end > start {
-		return s[start : end+1]
-	}
-	return s
 }

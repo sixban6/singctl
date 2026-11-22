@@ -200,10 +200,7 @@ func (s *Server) buildWatchdogReport(cfg *config.Config) map[string]any {
 }
 
 func (s *Server) handleWatchdogGet(w http.ResponseWriter, r *http.Request) {
-	cfg, err := config.Load(configPathFor(s))
-	if err != nil {
-		cfg = &config.Config{}
-	}
+	cfg := s.readConfigOrEmpty()
 	writeJSON(w, http.StatusOK, s.buildWatchdogReport(cfg))
 }
 
@@ -235,9 +232,15 @@ func (s *Server) handleWatchdogConfigPut(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
+
 	cfgPath := configPathFor(s)
-	cfg, err := config.Load(cfgPath)
-	if err != nil || cfg == nil {
+	snap, loadErr := s.loadConfigSnapshot()
+	var cfg *config.Config
+	if loadErr == nil && snap != nil {
+		cfg = snap.Clone()
+	} else {
 		cfg = &config.Config{
 			Watchdog: config.WatchdogConfig{
 				Interval:        180,
@@ -411,7 +414,7 @@ func (s *Server) handleWatchdogConfigPut(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleWatchdogPatrolPost(w http.ResponseWriter, r *http.Request) {
-	cfg, err := config.Load(configPathFor(s))
+	cfg, err := s.loadConfigSnapshot()
 	if err != nil || cfg == nil {
 		writeJSONError(w, http.StatusInternalServerError, "加载配置失败")
 		return

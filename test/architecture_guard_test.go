@@ -13,7 +13,10 @@ import (
 	"testing"
 )
 
-const maxProductionGoFileLines = 1000
+const (
+	maxProductionGoFileLines = 1000
+	maxFrontendFileLines     = 1000
+)
 
 func repoRootDir(t *testing.T) string {
 	t.Helper()
@@ -51,6 +54,35 @@ func collectProductionGoFiles(t *testing.T, root string) []string {
 		}); err != nil {
 			t.Fatalf("walk %s: %v", base, err)
 		}
+	}
+	return files
+}
+
+func collectFrontendSourceFiles(t *testing.T, root string) []string {
+	t.Helper()
+	base := filepath.Join(root, "web", "src")
+	var files []string
+	if err := filepath.WalkDir(base, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			if strings.HasPrefix(d.Name(), ".") || d.Name() == "node_modules" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(d.Name(), ".ts") && !strings.HasSuffix(d.Name(), ".tsx") {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		files = append(files, filepath.ToSlash(rel))
+		return nil
+	}); err != nil {
+		t.Fatalf("walk %s: %v", base, err)
 	}
 	return files
 }
@@ -111,6 +143,44 @@ func findRawSystemctlViolations(relPath string, fset *token.FileSet, file *ast.F
 				pos := fset.Position(call.Pos())
 				violations = append(violations, fmt.Sprintf("%s:%d calls %s(\"systemctl\", ...) outside servicemgr/allowlist", relPath, pos.Line, fnName))
 			}
+		}
+		return true
+	})
+	return violations
+}
+
+func findDirectConfigIOViolations(relPath string, fset *token.FileSet, file *ast.File, guardedPrefixes []string, allowlist map[string]bool) []string {
+	if allowlist[relPath] {
+		return nil
+	}
+	guarded := false
+	for _, prefix := range guardedPrefixes {
+		if strings.HasPrefix(relPath, prefix) {
+			guarded = true
+			break
+		}
+	}
+	if !guarded {
+		return nil
+	}
+
+	var violations []string
+	ast.Inspect(file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		pkgIdent, ok := sel.X.(*ast.Ident)
+		if !ok || pkgIdent.Name != "config" {
+			return true
+		}
+		if sel.Sel.Name == "Load" || sel.Sel.Name == "Save" {
+			pos := fset.Position(call.Pos())
+			violations = append(violations, fmt.Sprintf("%s:%d calls config.%s directly on hot-path server package (must route via config.Store snapshot/save helpers)", relPath, pos.Line, sel.Sel.Name))
 		}
 		return true
 	})
@@ -183,13 +253,8 @@ func TestArchGuard_NoDuplicateSharedLiterals(t *testing.T) {
 func TestArchGuard_SystemctlIsolatedToPlatformAllowlist(t *testing.T) {
 	root := repoRootDir(t)
 	allowlist := map[string]bool{
-		"internal/platform/servicemgr/systemd.go": true,
-		"internal/heal/timer.go":                  true,
-		"internal/serverweb/handlers_status.go":   true,
-		"internal/terminal/terminal.go":           true,
-		"internal/deploy/caddy_apt.go":            true,
-		"internal/deploy/warp_legacy.go":          true,
-		"internal/cmd/top.go":                     true,
+		"internal/platform/servicemgr/systemd.go":         true,
+		"internal/platform/servicemgr/systemd_inspect.go": true,
 	}
 
 	var violations []string
@@ -203,6 +268,37 @@ func TestArchGuard_SystemctlIsolatedToPlatformAllowlist(t *testing.T) {
 	}
 	if len(violations) > 0 {
 		t.Fatalf("unauthorized raw systemctl calls detected:\n%s", strings.Join(violations, "\n"))
+	}
+}
+
+// TestArchGuard_HotPathServersUseConfigStore 防止长驻 HTTP 服务 handler 绕过 config.Store 直接裸调 config.Load / config.Save。
+func TestArchGuard_HotPathServersUseConfigStore(t *testing.T) {
+	root := repoRootDir(t)
+	guardedPrefixes := []string{
+		"internal/subhub/",
+		"internal/webui/",
+		"internal/serverweb/",
+	}
+	// 仅放行各服务自身的 Store 桥接层与独立 CLI 辅助入口。
+	allowlist := map[string]bool{
+		"internal/webui/webui.go":              true,
+		"internal/webui/api.go":                true,
+		"internal/serverweb/serverweb.go":      true,
+		"internal/serverweb/background.go":     true,
+		"internal/serverweb/warp_local_cli.go": true,
+	}
+
+	var violations []string
+	fset := token.NewFileSet()
+	for _, relPath := range collectProductionGoFiles(t, root) {
+		file, err := parser.ParseFile(fset, filepath.Join(root, filepath.FromSlash(relPath)), nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", relPath, err)
+		}
+		violations = append(violations, findDirectConfigIOViolations(relPath, fset, file, guardedPrefixes, allowlist)...)
+	}
+	if len(violations) > 0 {
+		t.Fatalf("direct config.Load/config.Save calls in hot-path servers detected:\n%s", strings.Join(violations, "\n"))
 	}
 }
 
@@ -228,6 +324,24 @@ func TestArchGuard_MaxProductionFileLines(t *testing.T) {
 	}
 }
 
+// TestArchGuard_MaxFrontendFileLines 强制前端 TypeScript/React 源码单文件不超过 1,000 行。
+func TestArchGuard_MaxFrontendFileLines(t *testing.T) {
+	root := repoRootDir(t)
+	var violations []string
+	for _, relPath := range collectFrontendSourceFiles(t, root) {
+		src, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(relPath)))
+		if err != nil {
+			t.Fatalf("read %s: %v", relPath, err)
+		}
+		if v := findOversizedFileViolations(relPath, src, maxFrontendFileLines, nil); v != "" {
+			violations = append(violations, v)
+		}
+	}
+	if len(violations) > 0 {
+		t.Fatalf("oversized frontend files detected:\n%s", strings.Join(violations, "\n"))
+	}
+}
+
 // TestArchGuard_CoreContractPackagesAcyclic 防止基础契约层反向依赖上层业务实现产生循环依赖。
 func TestArchGuard_CoreContractPackagesAcyclic(t *testing.T) {
 	root := repoRootDir(t)
@@ -238,6 +352,7 @@ func TestArchGuard_CoreContractPackagesAcyclic(t *testing.T) {
 		"internal/platform/servicemgr/",
 	}
 	forbiddenImports := map[string]bool{
+		"singctl/internal/cmd":       true,
 		"singctl/internal/webui":     true,
 		"singctl/internal/serverweb": true,
 		"singctl/internal/daemon":    true,
@@ -246,6 +361,15 @@ func TestArchGuard_CoreContractPackagesAcyclic(t *testing.T) {
 		"singctl/internal/fleet":     true,
 		"singctl/internal/audit":     true,
 		"singctl/internal/subhub":    true,
+		"singctl/internal/adguard":   true,
+		"singctl/internal/firewall":  true,
+		"singctl/internal/tailscale": true,
+		"singctl/internal/netdiag":   true,
+		"singctl/internal/heal":      true,
+		"singctl/internal/doctor":    true,
+		"singctl/internal/gfw":       true,
+		"singctl/internal/terminal":  true,
+		"singctl/internal/telemetry": true,
 	}
 
 	var violations []string
@@ -267,12 +391,15 @@ func TestArchGuard_SyntheticViolationDetectors(t *testing.T) {
 	src := `package bad
 import (
 	"os/exec"
+	"singctl/internal/config"
 	"singctl/internal/webui"
 )
 func oops() {
 	_ = "sixban6/singctl"
 	_ = exec.Command("systemctl", "restart", "caddy")
 	_ = exec.LookPath("systemctl")
+	_, _ = config.Load("/tmp/singctl.yaml")
+	_ = config.Save("/tmp/singctl.yaml", nil)
 	_ = webui.SessionCookieName
 }
 `
@@ -290,6 +417,11 @@ func oops() {
 	sys := findRawSystemctlViolations("internal/bad/bad.go", fset, file, map[string]bool{})
 	if len(sys) != 1 {
 		t.Fatalf("expected 1 raw systemctl violation (and LookPath allowed), got %v", sys)
+	}
+
+	cfgViolations := findDirectConfigIOViolations("internal/webui/bad_api.go", fset, file, []string{"internal/webui/"}, map[string]bool{})
+	if len(cfgViolations) != 2 {
+		t.Fatalf("expected 2 direct config.Load/Save violations, got %v", cfgViolations)
 	}
 
 	oversized := findOversizedFileViolations("internal/bad/bad.go", []byte(strings.Repeat("line\n", 1001)), maxProductionGoFileLines, map[string]bool{})

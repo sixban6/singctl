@@ -374,7 +374,7 @@ func shortCommand(timeout time.Duration, name string, args ...string) (string, e
 // ───────────────────────── 健康检测 ─────────────────────────
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	cfg, err := config.Load(configPathFor(s))
+	cfg, err := s.loadConfigSnapshot()
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "加载配置失败: "+err.Error())
 		return
@@ -430,7 +430,7 @@ type ConfigDTO struct {
 func configPathFor(s *Server) string { return s.opts.ConfigPath }
 
 func (s *Server) handleConfigGet(w http.ResponseWriter, r *http.Request) {
-	cfg, err := config.Load(configPathFor(s))
+	cfg, err := s.loadConfigSnapshot()
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "加载配置失败: "+err.Error())
 		return
@@ -482,10 +482,7 @@ func (s *Server) handleConfigPut(w http.ResponseWriter, r *http.Request) {
 	defer s.cfgMu.Unlock()
 
 	// 基于现有配置合并更新，避免丢失 custom_rules、watchdog、server 高级字段等非表单项
-	cfg, err := config.Load(configPathFor(s))
-	if err != nil || cfg == nil {
-		cfg = &config.Config{}
-	}
+	cfg := s.loadMutableConfig()
 	dto.ApplyTo(cfg)
 
 	// 有订阅时做完整校验;允许暂存空订阅(首次使用)
@@ -643,7 +640,7 @@ func (s *Server) handleIOSConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	s.iosMu.Unlock()
 
-	cfg, err := config.Load(cfgPath)
+	cfg, err := s.loadConfigSnapshot()
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "读取配置失败: "+err.Error())
 		return

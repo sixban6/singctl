@@ -25,10 +25,7 @@ func (s *Server) savePartialConfig(syncAdGuard bool, mutate func(cfg *config.Con
 	defer s.cfgMu.Unlock()
 
 	cfgPath := configPathFor(s)
-	cfg, err := config.Load(cfgPath)
-	if err != nil || cfg == nil {
-		cfg = &config.Config{}
-	}
+	cfg := s.loadMutableConfig()
 	if err := mutate(cfg); err != nil {
 		return err
 	}
@@ -99,7 +96,7 @@ func tailscaleConfigResponse(cfg *config.Config) map[string]any {
 }
 
 func (s *Server) handleTailscaleConfigGet(w http.ResponseWriter, r *http.Request) {
-	cfg, err := config.Load(configPathFor(s))
+	cfg, err := s.loadConfigSnapshot()
 	if err != nil || cfg == nil {
 		writeJSONError(w, http.StatusInternalServerError, "加载配置失败")
 		return

@@ -132,11 +132,7 @@ func (s *Server) handleGroupsGet(w http.ResponseWriter, _ *http.Request) {
 	defer s.cfgMu.Unlock()
 
 	cfgPath := configPathFor(s)
-	cfg, err := config.Load(cfgPath)
-	if err != nil || cfg == nil {
-		cfg = &config.Config{}
-		cfg.SetSourcePath(cfgPath)
-	}
+	cfg := s.loadMutableConfig()
 	gPath := config.GroupsPathForConfig(cfgPath)
 
 	rawDisk, readErr := os.ReadFile(gPath)
@@ -187,12 +183,7 @@ func (s *Server) handleGroupsPreviewPost(w http.ResponseWriter, r *http.Request)
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
 
-	cfgPath := configPathFor(s)
-	cfg, err := config.Load(cfgPath)
-	if err != nil || cfg == nil {
-		cfg = &config.Config{}
-		cfg.SetSourcePath(cfgPath)
-	}
+	cfg := s.loadMutableConfig()
 
 	parsed, err := config.ParseGroupsYAML([]byte(body.Content))
 	if err != nil {
@@ -244,11 +235,7 @@ func (s *Server) handleGroupsPut(w http.ResponseWriter, r *http.Request) {
 	defer s.cfgMu.Unlock()
 
 	cfgPath := configPathFor(s)
-	cfg, err := config.Load(cfgPath)
-	if err != nil || cfg == nil {
-		cfg = &config.Config{}
-		cfg.SetSourcePath(cfgPath)
-	}
+	cfg := s.loadMutableConfig()
 	gPath := config.GroupsPathForConfig(cfgPath)
 	prevDiskBytes, prevDiskErr := os.ReadFile(gPath)
 
