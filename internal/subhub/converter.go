@@ -51,6 +51,70 @@ type RenderResult struct {
 	Format      TargetFormat
 }
 
+type targetRendererFunc func(ctx context.Context, bundle *ResolvedBundle, opts RenderOptions, baseName string) (*RenderResult, error)
+
+var targetRenderers = map[TargetFormat]targetRendererFunc{
+	TargetPlain: func(_ context.Context, bundle *ResolvedBundle, _ RenderOptions, baseName string) (*RenderResult, error) {
+		lines := bundleURIs(bundle)
+		return &RenderResult{
+			Body:        []byte(strings.Join(lines, "\n") + "\n"),
+			ContentType: "text/plain; charset=utf-8",
+			Filename:    baseName + ".txt",
+			Format:      TargetPlain,
+		}, nil
+	},
+	TargetBase64: func(_ context.Context, bundle *ResolvedBundle, _ RenderOptions, baseName string) (*RenderResult, error) {
+		lines := bundleURIs(bundle)
+		encoded := base64.StdEncoding.EncodeToString([]byte(strings.Join(lines, "\n")))
+		return &RenderResult{
+			Body:        []byte(encoded),
+			ContentType: "text/plain; charset=utf-8",
+			Filename:    baseName + ".txt",
+			Format:      TargetBase64,
+		}, nil
+	},
+	TargetClashMeta: func(_ context.Context, bundle *ResolvedBundle, opts RenderOptions, baseName string) (*RenderResult, error) {
+		data, err := renderClashMeta(bundle, opts)
+		if err != nil {
+			return nil, err
+		}
+		return &RenderResult{
+			Body:        data,
+			ContentType: "text/yaml; charset=utf-8",
+			Filename:    baseName + "-clash.yaml",
+			Format:      TargetClashMeta,
+		}, nil
+	},
+	TargetSingBox: func(ctx context.Context, bundle *ResolvedBundle, opts RenderOptions, baseName string) (*RenderResult, error) {
+		data, err := renderSingBox(ctx, bundle, opts)
+		if err != nil {
+			return nil, err
+		}
+		return &RenderResult{
+			Body:        data,
+			ContentType: "application/json; charset=utf-8",
+			Filename:    baseName + "-singbox.json",
+			Format:      TargetSingBox,
+		}, nil
+	},
+	TargetSurge: func(_ context.Context, bundle *ResolvedBundle, opts RenderOptions, baseName string) (*RenderResult, error) {
+		return &RenderResult{
+			Body:        renderSurge(bundle, opts),
+			ContentType: "text/plain; charset=utf-8",
+			Filename:    baseName + "-surge.conf",
+			Format:      TargetSurge,
+		}, nil
+	},
+	TargetLoon: func(_ context.Context, bundle *ResolvedBundle, opts RenderOptions, baseName string) (*RenderResult, error) {
+		return &RenderResult{
+			Body:        renderLoon(bundle, opts),
+			ContentType: "text/plain; charset=utf-8",
+			Filename:    baseName + "-loon.conf",
+			Format:      TargetLoon,
+		}, nil
+	},
+}
+
 // DetectTarget determines the target format from query parameters and User-Agent.
 func DetectTarget(queryTarget, rawParam, userAgent string) TargetFormat {
 	rawLower := strings.ToLower(strings.TrimSpace(rawParam))
@@ -101,78 +165,11 @@ func RenderBundle(ctx context.Context, bundle *ResolvedBundle, opts RenderOption
 	target := cmp.Or(opts.Target, TargetBase64)
 	baseName := cmp.Or(strings.TrimSpace(bundle.Name), DefaultCollectionName)
 
-	switch target {
-	case TargetPlain:
-		lines := bundleURIs(bundle)
-		return &RenderResult{
-			Body:        []byte(strings.Join(lines, "\n") + "\n"),
-			ContentType: "text/plain; charset=utf-8",
-			Filename:    baseName + ".txt",
-			Format:      TargetPlain,
-		}, nil
-
-	case TargetBase64:
-		lines := bundleURIs(bundle)
-		encoded := base64.StdEncoding.EncodeToString([]byte(strings.Join(lines, "\n")))
-		return &RenderResult{
-			Body:        []byte(encoded),
-			ContentType: "text/plain; charset=utf-8",
-			Filename:    baseName + ".txt",
-			Format:      TargetBase64,
-		}, nil
-
-	case TargetClashMeta:
-		data, err := renderClashMeta(bundle, opts)
-		if err != nil {
-			return nil, err
-		}
-		return &RenderResult{
-			Body:        data,
-			ContentType: "text/yaml; charset=utf-8",
-			Filename:    baseName + "-clash.yaml",
-			Format:      TargetClashMeta,
-		}, nil
-
-	case TargetSingBox:
-		data, err := renderSingBox(ctx, bundle, opts)
-		if err != nil {
-			return nil, err
-		}
-		return &RenderResult{
-			Body:        data,
-			ContentType: "application/json; charset=utf-8",
-			Filename:    baseName + "-singbox.json",
-			Format:      TargetSingBox,
-		}, nil
-
-	case TargetSurge:
-		data := renderSurge(bundle, opts)
-		return &RenderResult{
-			Body:        data,
-			ContentType: "text/plain; charset=utf-8",
-			Filename:    baseName + "-surge.conf",
-			Format:      TargetSurge,
-		}, nil
-
-	case TargetLoon:
-		data := renderLoon(bundle, opts)
-		return &RenderResult{
-			Body:        data,
-			ContentType: "text/plain; charset=utf-8",
-			Filename:    baseName + "-loon.conf",
-			Format:      TargetLoon,
-		}, nil
-
-	default:
-		lines := bundleURIs(bundle)
-		encoded := base64.StdEncoding.EncodeToString([]byte(strings.Join(lines, "\n")))
-		return &RenderResult{
-			Body:        []byte(encoded),
-			ContentType: "text/plain; charset=utf-8",
-			Filename:    baseName + ".txt",
-			Format:      TargetBase64,
-		}, nil
+	renderer, ok := targetRenderers[target]
+	if !ok {
+		renderer = targetRenderers[TargetBase64]
 	}
+	return renderer(ctx, bundle, opts, baseName)
 }
 
 func bundleURIs(bundle *ResolvedBundle) []string {
@@ -365,162 +362,13 @@ func nodeToClashProxy(n model.Node, opts RenderOptions) (map[string]any, bool) {
 	if n.Addr == "" || n.Port == 0 {
 		return nil, false
 	}
-	p := map[string]any{
+	base := map[string]any{
 		"name":   cmp.Or(n.Tag, fmt.Sprintf("%s-%s", n.Type, n.Addr)),
 		"server": n.Addr,
 		"port":   int(n.Port),
 		"udp":    true,
 	}
-
-	applyTransport := func() {
-		netType := strings.ToLower(n.Transport.Net)
-		if netType != "" && netType != "tcp" {
-			p["network"] = netType
-			switch netType {
-			case "ws":
-				wsOpts := map[string]any{}
-				if n.Transport.Path != "" {
-					wsOpts["path"] = n.Transport.Path
-				}
-				if n.Transport.Host != "" {
-					wsOpts["headers"] = map[string]string{"Host": n.Transport.Host}
-				}
-				if len(wsOpts) > 0 {
-					p["ws-opts"] = wsOpts
-				}
-			case "grpc":
-				if n.Transport.Path != "" {
-					p["grpc-opts"] = map[string]any{"grpc-service-name": n.Transport.Path}
-				}
-			}
-		}
-	}
-
-	switch n.Type {
-	case "vless":
-		p["type"] = "vless"
-		p["uuid"] = n.UUID
-		if flow, ok := n.Extra["flow"].(string); ok && flow != "" {
-			p["flow"] = flow
-		}
-		if n.Security.TLS {
-			p["tls"] = true
-			p["skip-cert-verify"] = n.Security.SkipVerify
-			if n.Security.ServerName != "" {
-				p["servername"] = n.Security.ServerName
-			}
-			if len(n.Security.ALPN) > 0 {
-				p["alpn"] = n.Security.ALPN
-			}
-			fp, _ := n.Extra["fingerprint"].(string)
-			p["client-fingerprint"] = cmp.Or(fp, "chrome")
-			if sec, _ := n.Extra["security"].(string); sec == "reality" {
-				ro := map[string]any{}
-				if pk, _ := n.Extra["public_key"].(string); pk != "" {
-					ro["public-key"] = pk
-				}
-				if sid, _ := n.Extra["short_id"].(string); sid != "" {
-					ro["short-id"] = sid
-				}
-				p["reality-opts"] = ro
-			}
-		}
-		applyTransport()
-		return p, true
-
-	case "hysteria2":
-		p["type"] = "hysteria2"
-		p["password"] = n.Password
-		p["skip-cert-verify"] = n.Security.SkipVerify
-		if n.Security.ServerName != "" {
-			p["sni"] = n.Security.ServerName
-		}
-		if len(n.Security.ALPN) > 0 {
-			p["alpn"] = n.Security.ALPN
-		}
-		if obfsMap, ok := n.Extra["obfs"].(map[string]string); ok && obfsMap["type"] != "" {
-			p["obfs"] = obfsMap["type"]
-			if obfsMap["password"] != "" {
-				p["obfs-password"] = obfsMap["password"]
-			}
-		}
-		if opts.UpMbps > 0 {
-			p["up"] = fmt.Sprintf("%d Mbps", opts.UpMbps)
-		}
-		if opts.DownMbps > 0 {
-			p["down"] = fmt.Sprintf("%d Mbps", opts.DownMbps)
-		}
-		return p, true
-
-	case "trojan":
-		p["type"] = "trojan"
-		p["password"] = n.Password
-		p["skip-cert-verify"] = n.Security.SkipVerify
-		if n.Security.ServerName != "" {
-			p["sni"] = n.Security.ServerName
-		}
-		if len(n.Security.ALPN) > 0 {
-			p["alpn"] = n.Security.ALPN
-		}
-		applyTransport()
-		return p, true
-
-	case "shadowsocks", "ss":
-		p["type"] = "ss"
-		cipher, _ := n.Extra["method"].(string)
-		p["cipher"] = cmp.Or(cipher, "aes-256-gcm")
-		p["password"] = n.Password
-		return p, true
-
-	case "vmess":
-		p["type"] = "vmess"
-		p["uuid"] = n.UUID
-		p["alterId"] = 0
-		p["cipher"] = "auto"
-		if n.Security.TLS {
-			p["tls"] = true
-			p["skip-cert-verify"] = n.Security.SkipVerify
-			if n.Security.ServerName != "" {
-				p["servername"] = n.Security.ServerName
-			}
-		}
-		applyTransport()
-		return p, true
-
-	case "tuic":
-		p["type"] = "tuic"
-		p["uuid"] = n.UUID
-		p["password"] = n.Password
-		p["skip-cert-verify"] = n.Security.SkipVerify
-		if n.Security.ServerName != "" {
-			p["sni"] = n.Security.ServerName
-		}
-		if len(n.Security.ALPN) > 0 {
-			p["alpn"] = n.Security.ALPN
-		} else {
-			p["alpn"] = []string{"h3"}
-		}
-		if cc, _ := n.Extra["congestion_control"].(string); cc != "" {
-			p["congestion-controller"] = cc
-		}
-		return p, true
-
-	case "anytls":
-		p["type"] = "anytls"
-		p["password"] = n.Password
-		p["skip-cert-verify"] = n.Security.SkipVerify
-		if n.Security.ServerName != "" {
-			p["sni"] = n.Security.ServerName
-		}
-		if len(n.Security.ALPN) > 0 {
-			p["alpn"] = n.Security.ALPN
-		}
-		p["client-fingerprint"] = "chrome"
-		return p, true
-
-	default:
-		return nil, false
-	}
+	return defaultProtocols.encodeClash(n, base, opts)
 }
 
 func sanitizeConfTag(tag string) string {
@@ -534,100 +382,8 @@ func renderSurge(bundle *ResolvedBundle, opts RenderOptions) []byte {
 
 	for _, n := range bundle.Nodes {
 		tag := sanitizeConfTag(cmp.Or(n.Tag, fmt.Sprintf("%s-%s", n.Type, n.Addr)))
-		switch n.Type {
-		case "hysteria2":
-			parts := []string{
-				fmt.Sprintf("%s = hysteria2", tag),
-				n.Addr,
-				strconv.Itoa(int(n.Port)),
-				fmt.Sprintf("password=%s", n.Password),
-			}
-			if n.Security.ServerName != "" {
-				parts = append(parts, fmt.Sprintf("sni=%s", n.Security.ServerName))
-			}
-			if n.Security.SkipVerify {
-				parts = append(parts, "skip-cert-verify=true")
-			}
-			if opts.DownMbps > 0 {
-				parts = append(parts, fmt.Sprintf("download-bandwidth=%d", opts.DownMbps))
-			}
-			proxyLines = append(proxyLines, strings.Join(parts, ", "))
-			proxyNames = append(proxyNames, tag)
-
-		case "trojan":
-			parts := []string{
-				fmt.Sprintf("%s = trojan", tag),
-				n.Addr,
-				strconv.Itoa(int(n.Port)),
-				fmt.Sprintf("password=%s", n.Password),
-			}
-			if n.Security.ServerName != "" {
-				parts = append(parts, fmt.Sprintf("sni=%s", n.Security.ServerName))
-			}
-			if n.Security.SkipVerify {
-				parts = append(parts, "skip-cert-verify=true")
-			}
-			proxyLines = append(proxyLines, strings.Join(parts, ", "))
-			proxyNames = append(proxyNames, tag)
-
-		case "shadowsocks", "ss":
-			method, _ := n.Extra["method"].(string)
-			parts := []string{
-				fmt.Sprintf("%s = ss", tag),
-				n.Addr,
-				strconv.Itoa(int(n.Port)),
-				fmt.Sprintf("encrypt-method=%s", cmp.Or(method, "aes-256-gcm")),
-				fmt.Sprintf("password=%s", n.Password),
-				"udp-relay=true",
-			}
-			proxyLines = append(proxyLines, strings.Join(parts, ", "))
-			proxyNames = append(proxyNames, tag)
-
-		case "tuic":
-			parts := []string{
-				fmt.Sprintf("%s = tuic-v5", tag),
-				n.Addr,
-				strconv.Itoa(int(n.Port)),
-				fmt.Sprintf("uuid=%s", n.UUID),
-				fmt.Sprintf("password=%s", n.Password),
-			}
-			if n.Security.ServerName != "" {
-				parts = append(parts, fmt.Sprintf("sni=%s", n.Security.ServerName))
-			}
-			proxyLines = append(proxyLines, strings.Join(parts, ", "))
-			proxyNames = append(proxyNames, tag)
-
-		case "vmess":
-			parts := []string{
-				fmt.Sprintf("%s = vmess", tag),
-				n.Addr,
-				strconv.Itoa(int(n.Port)),
-				fmt.Sprintf("username=%s", n.UUID),
-				"vmess-aead=true",
-			}
-			if n.Security.TLS {
-				parts = append(parts, "tls=true")
-				if n.Security.ServerName != "" {
-					parts = append(parts, fmt.Sprintf("sni=%s", n.Security.ServerName))
-				}
-			}
-			proxyLines = append(proxyLines, strings.Join(parts, ", "))
-			proxyNames = append(proxyNames, tag)
-
-		case "anytls":
-			parts := []string{
-				fmt.Sprintf("%s = anytls", tag),
-				n.Addr,
-				strconv.Itoa(int(n.Port)),
-				fmt.Sprintf("password=%s", n.Password),
-			}
-			if n.Security.ServerName != "" {
-				parts = append(parts, fmt.Sprintf("sni=%s", n.Security.ServerName))
-			}
-			if n.Security.SkipVerify {
-				parts = append(parts, "skip-cert-verify=true")
-			}
-			proxyLines = append(proxyLines, strings.Join(parts, ", "))
+		if line, ok := defaultProtocols.encodeSurgeLine(n, tag, opts); ok {
+			proxyLines = append(proxyLines, line)
 			proxyNames = append(proxyNames, tag)
 		}
 	}
@@ -668,82 +424,14 @@ func renderSurge(bundle *ResolvedBundle, opts RenderOptions) []byte {
 	return []byte(b.String())
 }
 
-func renderLoon(bundle *ResolvedBundle, _ RenderOptions) []byte {
+func renderLoon(bundle *ResolvedBundle, opts RenderOptions) []byte {
 	var proxyLines []string
 	var proxyNames []string
 
 	for _, n := range bundle.Nodes {
 		tag := sanitizeConfTag(cmp.Or(n.Tag, fmt.Sprintf("%s-%s", n.Type, n.Addr)))
-		switch n.Type {
-		case "hysteria2":
-			parts := []string{
-				fmt.Sprintf("%s = Hysteria2", tag),
-				n.Addr,
-				strconv.Itoa(int(n.Port)),
-				fmt.Sprintf("\"%s\"", n.Password),
-			}
-			if n.Security.ServerName != "" {
-				parts = append(parts, fmt.Sprintf("tls-name=%s", n.Security.ServerName))
-			}
-			parts = append(parts, fmt.Sprintf("skip-cert-verify=%t", n.Security.SkipVerify), "udp=true")
-			proxyLines = append(proxyLines, strings.Join(parts, ", "))
-			proxyNames = append(proxyNames, tag)
-
-		case "vless":
-			parts := []string{
-				fmt.Sprintf("%s = VLESS", tag),
-				n.Addr,
-				strconv.Itoa(int(n.Port)),
-				fmt.Sprintf("\"%s\"", n.UUID),
-				"transport=tcp",
-			}
-			if flow, _ := n.Extra["flow"].(string); flow != "" {
-				parts = append(parts, fmt.Sprintf("flow=%s", flow))
-			}
-			if n.Security.TLS {
-				parts = append(parts, "over-tls=true")
-				if n.Security.ServerName != "" {
-					parts = append(parts, fmt.Sprintf("tls-name=%s", n.Security.ServerName))
-				}
-				parts = append(parts, fmt.Sprintf("skip-cert-verify=%t", n.Security.SkipVerify))
-				if sec, _ := n.Extra["security"].(string); sec == "reality" {
-					if pk, _ := n.Extra["public_key"].(string); pk != "" {
-						parts = append(parts, fmt.Sprintf("public-key=\"%s\"", pk))
-					}
-					if sid, _ := n.Extra["short_id"].(string); sid != "" {
-						parts = append(parts, fmt.Sprintf("short-id=%s", sid))
-					}
-				}
-			}
-			parts = append(parts, "udp=true")
-			proxyLines = append(proxyLines, strings.Join(parts, ", "))
-			proxyNames = append(proxyNames, tag)
-
-		case "trojan":
-			parts := []string{
-				fmt.Sprintf("%s = trojan", tag),
-				n.Addr,
-				strconv.Itoa(int(n.Port)),
-				fmt.Sprintf("\"%s\"", n.Password),
-			}
-			if n.Security.ServerName != "" {
-				parts = append(parts, fmt.Sprintf("tls-name=%s", n.Security.ServerName))
-			}
-			parts = append(parts, fmt.Sprintf("skip-cert-verify=%t", n.Security.SkipVerify), "udp=true")
-			proxyLines = append(proxyLines, strings.Join(parts, ", "))
-			proxyNames = append(proxyNames, tag)
-
-		case "shadowsocks", "ss":
-			method, _ := n.Extra["method"].(string)
-			parts := []string{
-				fmt.Sprintf("%s = Shadowsocks", tag),
-				n.Addr,
-				strconv.Itoa(int(n.Port)),
-				cmp.Or(method, "aes-256-gcm"),
-				fmt.Sprintf("\"%s\"", n.Password),
-				"udp=true",
-			}
-			proxyLines = append(proxyLines, strings.Join(parts, ", "))
+		if line, ok := defaultProtocols.encodeLoonLine(n, tag, opts); ok {
+			proxyLines = append(proxyLines, line)
 			proxyNames = append(proxyNames, tag)
 		}
 	}
@@ -782,162 +470,5 @@ func renderLoon(bundle *ResolvedBundle, _ RenderOptions) []byte {
 func NodeToURI(n model.Node) string {
 	hostPort := net.JoinHostPort(n.Addr, strconv.Itoa(int(n.Port)))
 	frag := url.PathEscape(n.Tag)
-
-	switch n.Type {
-	case "hysteria2":
-		q := url.Values{}
-		if n.Security.ServerName != "" {
-			q.Set("sni", n.Security.ServerName)
-		}
-		if len(n.Security.ALPN) > 0 {
-			q.Set("alpn", strings.Join(n.Security.ALPN, ","))
-		}
-		if n.Security.SkipVerify {
-			q.Set("insecure", "1")
-		} else {
-			q.Set("insecure", "0")
-		}
-		if obfsMap, ok := n.Extra["obfs"].(map[string]string); ok && obfsMap["type"] != "" {
-			q.Set("obfs", obfsMap["type"])
-			if obfsMap["password"] != "" {
-				q.Set("obfs-password", obfsMap["password"])
-			}
-		}
-		return fmt.Sprintf("hysteria2://%s@%s/?%s#%s", url.User(n.Password).String(), hostPort, q.Encode(), frag)
-
-	case "vless":
-		q := url.Values{}
-		q.Set("encryption", "none")
-		q.Set("type", cmp.Or(n.Transport.Net, "tcp"))
-		if flow, _ := n.Extra["flow"].(string); flow != "" {
-			q.Set("flow", flow)
-		}
-		if sec, _ := n.Extra["security"].(string); sec == "reality" {
-			q.Set("security", "reality")
-			if pk, _ := n.Extra["public_key"].(string); pk != "" {
-				q.Set("pbk", pk)
-			}
-			if sid, _ := n.Extra["short_id"].(string); sid != "" {
-				q.Set("sid", sid)
-			}
-			fp, _ := n.Extra["fingerprint"].(string)
-			q.Set("fp", cmp.Or(fp, "chrome"))
-		} else if n.Security.TLS {
-			q.Set("security", "tls")
-			if n.Security.SkipVerify {
-				q.Set("allowInsecure", "1")
-			}
-		}
-		if n.Security.ServerName != "" {
-			q.Set("sni", n.Security.ServerName)
-		}
-		if len(n.Security.ALPN) > 0 {
-			q.Set("alpn", strings.Join(n.Security.ALPN, ","))
-		}
-		if n.Transport.Host != "" {
-			q.Set("host", n.Transport.Host)
-		}
-		if n.Transport.Path != "" {
-			q.Set("path", n.Transport.Path)
-		}
-		return fmt.Sprintf("vless://%s@%s?%s#%s", url.PathEscape(n.UUID), hostPort, q.Encode(), frag)
-
-	case "trojan":
-		q := url.Values{}
-		if n.Security.ServerName != "" {
-			q.Set("sni", n.Security.ServerName)
-		}
-		if len(n.Security.ALPN) > 0 {
-			q.Set("alpn", strings.Join(n.Security.ALPN, ","))
-		}
-		if n.Security.SkipVerify {
-			q.Set("allowInsecure", "1")
-		}
-		if n.Transport.Net != "" && n.Transport.Net != "tcp" {
-			q.Set("type", n.Transport.Net)
-			if n.Transport.Host != "" {
-				q.Set("host", n.Transport.Host)
-			}
-			if n.Transport.Path != "" {
-				q.Set("path", n.Transport.Path)
-			}
-		}
-		return fmt.Sprintf("trojan://%s@%s?%s#%s", url.User(n.Password).String(), hostPort, q.Encode(), frag)
-
-	case "shadowsocks", "ss":
-		method, _ := n.Extra["method"].(string)
-		b64 := base64.RawStdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", cmp.Or(method, "aes-256-gcm"), n.Password)))
-		cred := strings.ReplaceAll(b64, "/", "%2F")
-		return fmt.Sprintf("ss://%s@%s#%s", cred, hostPort, frag)
-
-	case "anytls":
-		q := url.Values{}
-		if n.Security.ServerName != "" {
-			q.Set("sni", n.Security.ServerName)
-		}
-		if len(n.Security.ALPN) > 0 {
-			q.Set("alpn", strings.Join(n.Security.ALPN, ","))
-		}
-		if n.Security.SkipVerify {
-			q.Set("insecure", "1")
-		} else {
-			q.Set("insecure", "0")
-		}
-		for _, extraKey := range []string{"idle_session_check_interval", "idle_session_timeout", "min_idle_session"} {
-			if val := strings.TrimSpace(fmt.Sprint(n.Extra[extraKey])); val != "" && val != "<nil>" && val != "0" {
-				q.Set(extraKey, val)
-			}
-		}
-		return fmt.Sprintf("anytls://%s@%s/?%s#%s", url.User(n.Password).String(), hostPort, q.Encode(), frag)
-
-	case "tuic":
-		q := url.Values{}
-		if n.Security.ServerName != "" {
-			q.Set("sni", n.Security.ServerName)
-		}
-		if len(n.Security.ALPN) > 0 {
-			q.Set("alpn", strings.Join(n.Security.ALPN, ","))
-		}
-		if n.Security.SkipVerify {
-			q.Set("insecure", "1")
-		}
-		if cc, _ := n.Extra["congestion_control"].(string); cc != "" {
-			q.Set("congestion_control", cc)
-		}
-		if udpMode, _ := n.Extra["udp_relay_mode"].(string); udpMode != "" {
-			q.Set("udp_relay_mode", udpMode)
-		}
-		return fmt.Sprintf("tuic://%s@%s/?%s#%s", url.UserPassword(n.UUID, n.Password).String(), hostPort, q.Encode(), frag)
-
-	case "vmess":
-		dto := map[string]any{
-			"v":    "2",
-			"ps":   n.Tag,
-			"add":  n.Addr,
-			"port": strconv.Itoa(int(n.Port)),
-			"id":   n.UUID,
-			"aid":  "0",
-			"scy":  "auto",
-			"net":  cmp.Or(n.Transport.Net, "tcp"),
-			"type": "none",
-			"host": n.Transport.Host,
-			"path": n.Transport.Path,
-			"tls":  "",
-			"sni":  n.Security.ServerName,
-		}
-		if n.Security.TLS {
-			dto["tls"] = "tls"
-		}
-		if len(n.Security.ALPN) > 0 {
-			dto["alpn"] = strings.Join(n.Security.ALPN, ",")
-		}
-		raw, err := json.Marshal(dto)
-		if err != nil {
-			return ""
-		}
-		return "vmess://" + base64.StdEncoding.EncodeToString(raw)
-
-	default:
-		return ""
-	}
+	return defaultProtocols.encodeURI(n, hostPort, frag)
 }

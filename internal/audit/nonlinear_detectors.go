@@ -392,6 +392,11 @@ type beaconHeartbeatDetector struct{}
 
 func (d *beaconHeartbeatDetector) Name() string { return "beacon_heartbeat" }
 
+func (d *beaconHeartbeatDetector) ProjectAxes(*FlowRecord) AxisWeights {
+	// 机器定时心跳既是远控信标特征(安全)，更是全天候状态打点画像特征(隐私)
+	return AxisWeights{Security: 0.55, Privacy: 0.85}
+}
+
 func (d *beaconHeartbeatDetector) Evaluate(f *FlowRecord) (float64, string) {
 	if f.ConnCount < 6 {
 		return 0, ""
@@ -447,6 +452,13 @@ func (d *domainEntropyDetector) Evaluate(f *FlowRecord) (float64, string) {
 type telemetryFingerprintDetector struct{}
 
 func (d *telemetryFingerprintDetector) Name() string { return "telemetry_fingerprint" }
+
+func (d *telemetryFingerprintDetector) ProjectAxes(f *FlowRecord) AxisWeights {
+	if f != nil && f.PCDNKind != "" {
+		return AxisWeights{Security: 1.0}
+	}
+	return AxisWeights{Privacy: 1.0}
+}
 
 func (d *telemetryFingerprintDetector) Evaluate(f *FlowRecord) (float64, string) {
 	if f == nil {

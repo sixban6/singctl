@@ -39,8 +39,12 @@ func TestServerRegistry_AdaptersAndCapabilities(t *testing.T) {
 		}
 		_, isCfg := c.(component.Configurable)
 		_, isUp := c.(component.Upgradable)
+		_, isVer := c.(component.Versioned)
 		if isCfg != tc.wantCfg || isUp != tc.wantUp {
 			t.Fatalf("Resolve(%q) capabilities cfg=%v (want %v) up=%v (want %v)", tc.query, isCfg, tc.wantCfg, isUp, tc.wantUp)
+		}
+		if !isVer {
+			t.Fatalf("Resolve(%q) expected component.Versioned capability", tc.query)
 		}
 	}
 }

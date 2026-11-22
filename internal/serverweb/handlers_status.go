@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"singctl/internal/component"
 	"singctl/internal/config"
 	"singctl/internal/deploy"
 	"singctl/internal/subhub"
@@ -328,20 +329,34 @@ func (s *Server) getCachedServiceVersions() (caddyVer, singboxVer, subhubVer, wa
 			}
 		}
 
-		var cV, sV, subV, wV string
-		var wg sync.WaitGroup
-		wg.Add(4)
-		go func() { defer wg.Done(); cV = fetchWithTimeout(deploy.GetInstalledCaddyVersion) }()
-		go func() { defer wg.Done(); sV = fetchWithTimeout(deploy.GetInstalledSingBoxVersion) }()
-		go func() { defer wg.Done(); subV = fetchWithTimeout(deploy.GetInstalledSubhubVersion) }()
-		go func() { defer wg.Done(); wV = fetchWithTimeout(deploy.GetInstalledWarpVersion) }()
-		wg.Wait()
+		type verEntry struct {
+			id  string
+			ver string
+		}
+		var targets []component.Component
+		for _, comp := range deploy.ServerRegistry().All() {
+			if _, ok := comp.(component.Versioned); ok {
+				targets = append(targets, comp)
+			}
+		}
 
-		res := map[string]string{
-			"caddy":   cmp.Or(cV, fallback["caddy"]),
-			"singbox": cmp.Or(sV, fallback["singbox"]),
-			"subhub":  cmp.Or(subV, fallback["subhub"]),
-			"warp":    cmp.Or(wV, fallback["warp"]),
+		resCh := make(chan verEntry, len(targets))
+		var wg sync.WaitGroup
+		for _, comp := range targets {
+			verComp := comp.(component.Versioned)
+			id := comp.ID()
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				resCh <- verEntry{id: id, ver: fetchWithTimeout(verComp.InstalledVersion)}
+			}()
+		}
+		wg.Wait()
+		close(resCh)
+
+		res := make(map[string]string, len(targets))
+		for entry := range resCh {
+			res[entry.id] = cmp.Or(entry.ver, fallback[entry.id])
 		}
 		s.versionCacheMu.Lock()
 		s.cachedVersions = maps.Clone(res)
