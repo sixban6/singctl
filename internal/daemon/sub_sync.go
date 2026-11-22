@@ -11,6 +11,7 @@ import (
 	"singctl/internal/constant"
 	"singctl/internal/doctor"
 	"singctl/internal/logger"
+	"singctl/internal/notify"
 	"singctl/internal/singbox"
 )
 
@@ -80,6 +81,8 @@ func (d *Daemon) syncSubscriptionsIfChanged() {
 	if err != nil {
 		logger.Warn("[SubSync] Pre-validation (sing-box check) failed, aborting sync: %v (%s)", err, string(out))
 		recordSubSyncStatus(time.Now(), cand.oldCount, "新配置预检未通过(已拦截)")
+		d.subSyncFailed.Store(true)
+		d.recordSubOrNodeFailEvent("sub_sync", notify.SeverityWarn, false, "订阅同步预检失败", "拉取的新配置未通过 sing-box check 语法校验，已拦截并保留原配置。")
 		return
 	}
 
@@ -100,6 +103,8 @@ func (d *Daemon) buildSubSyncCandidate(cfg *config.Config, cfgPath string, curre
 		maskedErr := singbox.MaskSensitiveText(err.Error())
 		logger.Warn("[SubSync] Upstream subscription poll failed (keeping active config): %s", maskedErr)
 		recordSubSyncStatus(now, oldCount, "拉取失败(保留原配置)")
+		d.subSyncFailed.Store(true)
+		d.recordSubOrNodeFailEvent("sub_sync", notify.SeverityWarn, false, "订阅自动更新失败", fmt.Sprintf("拉取上游订阅失败（已保留原配置）: %s", maskedErr))
 		return subSyncCandidate{}, false
 	}
 
@@ -107,6 +112,8 @@ func (d *Daemon) buildSubSyncCandidate(cfg *config.Config, cfgPath string, curre
 	if err != nil || subNodeCount == 0 {
 		logger.Warn("[SubSync] Upstream subscription returned 0 valid proxy outbounds, ignoring")
 		recordSubSyncStatus(now, oldCount, "返回空节点(已忽略)")
+		d.subSyncFailed.Store(true)
+		d.recordSubOrNodeFailEvent("sub_sync", notify.SeverityWarn, false, "订阅返回空节点", "上游订阅返回 0 个有效代理节点，已忽略并保留原配置。")
 		return subSyncCandidate{}, false
 	}
 
@@ -196,8 +203,14 @@ func (d *Daemon) executeAtomicSubSyncSwap(cfg *config.Config, cfgPath string, cu
 
 	now := time.Now()
 	if startErr != nil || !healthy {
+		d.subSyncFailed.Store(true)
+		d.recordSubOrNodeFailEvent("sub_sync", notify.SeverityCritical, false, "订阅热切换健康校验失败已回滚", "新订阅配置重载后健康校验未通过，守护进程已自动回滚至上一份有效配置。")
 		rollbackFailedSubSync(sb, bakPath, cfgPath, now, cand.oldCount)
 		return
+	}
+
+	if d.subSyncFailed.Swap(false) {
+		d.recordSubOrNodeFailEvent("sub_sync", notify.SeverityInfo, true, "订阅自动同步已恢复正常", fmt.Sprintf("已成功同步 %d 个代理节点。", cand.newCount))
 	}
 
 	_ = singbox.SaveBaseSnapshot(cfgPath, cand.pureBaseJSON)

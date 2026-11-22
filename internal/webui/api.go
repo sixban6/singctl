@@ -19,6 +19,7 @@ import (
 	"singctl/internal/constant"
 	"singctl/internal/daemon"
 	"singctl/internal/firewall"
+	"singctl/internal/safecommit"
 	"singctl/internal/singbox"
 	"singctl/internal/tailscale"
 	"sort"
@@ -41,11 +42,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		fw   firewall.QuickStatus
 		gw   map[string]any
 		cfg  map[string]any
+		sc   safecommit.StatusReport
 	)
 
 	var wg sync.WaitGroup
-	wg.Add(8)
-	go func() { defer wg.Done(); host = hostInfo() }()
+	wg.Add(9)
+	go func() { defer wg.Done(); host = s.hostInfo() }()
 	go func() { defer wg.Done(); sb = singboxStatus() }()
 	go func() { defer wg.Done(); dm = s.daemonStatusSummary() }()
 	go func() { defer wg.Done(); agh = s.dnsStatusSummary(r.Context()) }()
@@ -53,6 +55,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	go func() { defer wg.Done(); fw = firewallStatus() }()
 	go func() { defer wg.Done(); gw = s.gatewayStatusSummary() }()
 	go func() { defer wg.Done(); cfg = s.configSummary(s.opts.ConfigPath) }()
+	go func() { defer wg.Done(); sc = s.safeCommitManager().Status() }()
 	wg.Wait()
 
 	status := map[string]any{
@@ -68,6 +71,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"firewall":       fw,
 		"gateway":        gw,
 		"config":         cfg,
+		"safeCommit":     sc,
 	}
 	writeJSON(w, http.StatusOK, status)
 }
@@ -104,18 +108,26 @@ func (s *Server) daemonStatusSummary() map[string]any {
 	}
 }
 
-func hostInfo() map[string]any {
+func (s *Server) collectHostTelemetry() sysinfo.HostTelemetry {
+	if s.opts.TelemetryDeps != nil {
+		return sysinfo.CollectHostTelemetryWithDeps(s.cpuSampler, *s.opts.TelemetryDeps)
+	}
+	return sysinfo.CollectHostTelemetry(s.cpuSampler)
+}
+
+func (s *Server) hostInfo() map[string]any {
 	hostname, _ := os.Hostname()
 	lanIP := ""
 	if ni, err := netx.Get(); err == nil && ni.LANIPv4 != "" {
 		lanIP = ni.LANIPv4
 	}
 	return map[string]any{
-		"hostname": hostname,
-		"os":       runtime.GOOS,
-		"arch":     runtime.GOARCH,
-		"openwrt":  isOpenWrtSystem(),
-		"lanIP":    lanIP,
+		"hostname":  hostname,
+		"os":        runtime.GOOS,
+		"arch":      runtime.GOARCH,
+		"openwrt":   isOpenWrtSystem(),
+		"lanIP":     lanIP,
+		"telemetry": s.collectHostTelemetry(),
 	}
 }
 

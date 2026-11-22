@@ -154,19 +154,30 @@ func (s *Server) handleDNSConfigPreviewGet(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) handleDNSEngineSwitchPost(w http.ResponseWriter, r *http.Request) {
-	var body localdns.SwitchRequest
+	var body struct {
+		localdns.SwitchRequest
+		SafeCommit       bool `json:"safeCommit,omitempty"`
+		SafeCommitTTLSec int  `json:"safeCommitTtlSec,omitempty"`
+	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "请求格式错误: "+err.Error())
 		return
 	}
 	body.NonInteractive = true
 
+	if body.SafeCommit {
+		if _, err := s.armSafeCommit(r.Context(), body.SafeCommitTTLSec, "DNS 引擎切换"); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
 
 	cfg := s.loadMutableConfig()
 	reg := s.newDNSRegistry(cfg)
-	res, err := reg.SwitchEngine(r.Context(), body)
+	res, err := reg.SwitchEngine(r.Context(), body.SwitchRequest)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return

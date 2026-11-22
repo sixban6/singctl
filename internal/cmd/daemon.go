@@ -100,6 +100,7 @@ func BuildUnifiedDaemon(cfg *config.Config, configPath, ver string, deps DaemonS
 				AuditCollector:          d.AuditCollector(),
 				SmartDNSStatsRing:       d.SmartDNSStatsRing(),
 				SmartDNSTailer:          d.SmartDNSTailer(),
+				NotifyDispatcher:        d.Notifier(),
 				LowMemoryMode:           &lowMem,
 				EmbeddedInDaemon:        true,
 				Listen:                  listen,

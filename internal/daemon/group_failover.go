@@ -16,6 +16,7 @@ import (
 	"singctl/internal/config"
 	"singctl/internal/doctor"
 	"singctl/internal/logger"
+	"singctl/internal/notify"
 	"singctl/internal/singbox"
 	"singctl/internal/singbox/clashapi"
 )
@@ -93,6 +94,7 @@ type GroupFailoverState struct {
 	EnableWANGate         bool
 	CheckWANFn            func(ctx context.Context) bool
 	NowFn                 func() time.Time
+	OnNotify              func(ev notify.Event)
 }
 
 // NewGroupFailoverState creates a new failover state tracker.
@@ -563,6 +565,16 @@ func (s *GroupFailoverState) tryFailbackToOrigin(
 	s.mu.Unlock()
 	logger.Success("[GroupFailover] 分流组 [%s] 原主选线路 [%s] 已稳定恢复 (delay=%dms)，自动切回: %s -> %s",
 		groupName, p.origin, delay, cur, p.origin)
+	if s.OnNotify != nil {
+		s.OnNotify(notify.Event{
+			Type:     notify.EventSubOrNodeFail,
+			Severity: notify.SeverityInfo,
+			DedupKey: "failover:" + groupName,
+			Title:    fmt.Sprintf("策略组 [%s] 原主选线路已恢复", groupName),
+			Body:     fmt.Sprintf("已从备选 [%s] 自动切回原线路 [%s] (延迟 %dms)", cur, p.origin, delay),
+			Resolved: true,
+		})
+	}
 	LogWatchdogEvent(WatchdogEvent{
 		Time:   now,
 		Action: "GROUP_FAILBACK",
@@ -627,9 +639,29 @@ func (s *GroupFailoverState) failoverToBestBackup(
 ) {
 	bestCand, bestDelay, found := s.selectBestHealthyCandidate(ctx, base, secret, proxies, groupName, grp, cur, wanGate)
 	if !found {
+		if s.OnNotify != nil {
+			s.OnNotify(notify.Event{
+				Type:     notify.EventSubOrNodeFail,
+				Severity: notify.SeverityCritical,
+				DedupKey: "failover:" + groupName,
+				Title:    fmt.Sprintf("策略组 [%s] 故障切换失败", groupName),
+				Body:     fmt.Sprintf("当前线路 [%s] 不可达且所有备选节点均探测失败，请检查机场订阅或节点健康状态。", cur),
+				Resolved: false,
+			})
+		}
 		return
 	}
 	if err := s.clashClient().SwitchSelectorAt(ctx, base, secret, groupName, bestCand); err != nil {
+		if s.OnNotify != nil {
+			s.OnNotify(notify.Event{
+				Type:     notify.EventSubOrNodeFail,
+				Severity: notify.SeverityCritical,
+				DedupKey: "failover:" + groupName,
+				Title:    fmt.Sprintf("策略组 [%s] 自动切换指令失败", groupName),
+				Body:     fmt.Sprintf("尝试将 [%s] 切换至 [%s] 失败: %v", cur, bestCand, err),
+				Resolved: false,
+			})
+		}
 		return
 	}
 
@@ -651,6 +683,16 @@ func (s *GroupFailoverState) failoverToBestBackup(
 	}
 	logger.Warn("[GroupFailover] 分流组 [%s] 当前线路 [%s] 不可达，已自动择优切换至 [%s] (delay=%dms, 原主选 [%s])",
 		groupName, cur, bestCand, bestDelay, origRecorded)
+	if s.OnNotify != nil {
+		s.OnNotify(notify.Event{
+			Type:     notify.EventSubOrNodeFail,
+			Severity: notify.SeverityWarn,
+			DedupKey: "failover:" + groupName,
+			Title:    fmt.Sprintf("策略组 [%s] 已自动切备", groupName),
+			Body:     fmt.Sprintf("原线路 [%s] 不可达，已自动切换至 [%s] (延迟 %dms)", cur, bestCand, bestDelay),
+			Resolved: false,
+		})
+	}
 	LogWatchdogEvent(WatchdogEvent{
 		Time:   switchAt,
 		Action: "GROUP_FAILOVER",

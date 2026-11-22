@@ -21,13 +21,16 @@ import (
 	"singctl/internal/config"
 	"singctl/internal/constant"
 	"singctl/internal/daemon"
+	"singctl/internal/doctor"
 	"singctl/internal/gateway"
 	"singctl/internal/lifecycle"
 	"singctl/internal/localdns"
 	"singctl/internal/logger"
 	"singctl/internal/netdiag"
 	"singctl/internal/netdiag/dohprobe"
+	"singctl/internal/notify"
 	"singctl/internal/platform/servicemgr"
+	"singctl/internal/safecommit"
 	"singctl/internal/singbox/clashapi"
 	"singctl/internal/smartdns"
 	"singctl/internal/tailscale"
@@ -83,6 +86,18 @@ type Options struct {
 	IdleCheckInterval       time.Duration                                                                     // 可选：冷态闲置巡检间隔（默认 30 秒）
 	NowFunc                 func() time.Time                                                                  // 可选：测试注入可控时钟（默认 time.Now）
 	ScavengeFunc            func()                                                                            // 可选：测试注入物理内存归还动作（默认 GC+FreeOSMemory）
+	CPUSampler              *sysinfo.CPUSampler                                                               // 可选：自定义宿主机 CPU 差值采样器
+	TelemetryDeps           *sysinfo.TelemetryDeps                                                            // 可选：离线单元测试注入宿主机遥测采集依赖
+	SafeCommitStateDir      string                                                                            // 可选：自定义 Safe Commit 状态与快照目录
+	SafeCommitProcRoot      string                                                                            // 可选：自定义 /proc 路径供 tailscaled OOM 探测/保护
+	SafeCommitSpawnWatcher  func(token string) (int, error)                                                   // 可选：测试注入 Safe Commit 看门狗拉起回调
+	SafeCommitKillWatcher   func(pid int) error                                                               // 可选：测试注入 Safe Commit 看门狗停止回调
+	SafeCommitRollbackOps   *safecommit.RollbackOps                                                           // 可选：测试注入 Safe Commit 回滚动作回调
+	SafeCommitBaselineForTest func() (sbRunning bool, fwActive bool)                                          // 可选：离线单元测试注入回滚基线状态
+	NotifyDispatcher        *notify.Dispatcher                                                                // 可选：与单进程合体守护进程共享的通知调度器
+	NotifyHTTPClient        *http.Client                                                                      // 可选：测试注入默认通知调度器 HTTP 客户端
+	DoctorEnvForTest        func(cfg *config.Config) *doctor.Env                                              // 可选：离线单元测试注入深度体检运行环境
+	DoctorRunner            *doctor.Runner                                                                    // 可选：自定义深度体检调度器
 }
 
 // Server 客户端 Web 管理服务。
@@ -108,6 +123,11 @@ type Server struct {
 	dohProber         *dohprobe.Prober
 	smartDNSStatsRing *localdns.StatsRing
 	smartDNSTailer    *smartdns.AuditLogTailer
+	cpuSampler        *sysinfo.CPUSampler
+	notifier          *notify.Dispatcher
+	ownsNotifier      bool
+	safeCommitMu      sync.Mutex
+	safeCommitMgr     *safecommit.Manager
 
 	// /api/sb/traffic 按需后台采样器（无请求 15s 自动停止）
 	trafficMu                  sync.Mutex
@@ -157,6 +177,12 @@ func New(opts Options) *Server {
 		sdTailer = smartdns.NewAuditLogTailer(cmp.Or(strings.TrimSpace(opts.SmartDNSAuditLogPath), constant.SmartDNSAuditLogPath))
 	}
 
+	cpuSampler := opts.CPUSampler
+	if cpuSampler == nil {
+		cpuSampler = sysinfo.NewCPUSampler()
+	}
+	cpuSampler.Prime()
+
 	s := &Server{
 		opts:              opts,
 		Mux:               http.NewServeMux(),
@@ -167,7 +193,20 @@ func New(opts Options) *Server {
 		clash:             clashCli,
 		smartDNSStatsRing: sdRing,
 		smartDNSTailer:    sdTailer,
+		cpuSampler:        cpuSampler,
 		shutdownCh:        make(chan struct{}),
+	}
+	if opts.NotifyDispatcher != nil {
+		s.notifier = opts.NotifyDispatcher
+	} else {
+		s.notifier = notify.NewDispatcher(
+			notify.OptionsFromConfig(s.readConfigOrEmpty().Notify),
+			notify.DispatcherDeps{
+				HTTPClient: opts.NotifyHTTPClient,
+				NowFunc:    opts.NowFunc,
+			},
+		)
+		s.ownsNotifier = true
 	}
 	s.lastReqUnixNano.Store(s.now().UnixNano())
 	s.activeEpoch.Store(1)
@@ -221,6 +260,7 @@ func (s *Server) registerRoutes() {
 	s.Mux.HandleFunc("PUT /api/groups", s.guard(s.handleGroupsPut))
 	s.Mux.HandleFunc("GET /api/gateway", s.guard(s.handleGatewayGet))
 	s.Mux.HandleFunc("PUT /api/gateway", s.guard(s.handleGatewayPut))
+	s.Mux.HandleFunc("POST /api/gateway", s.guard(s.handleGatewayPut))
 	s.Mux.HandleFunc("POST /api/dns/leak-test", s.guard(s.handleDNSLeakTestPost))
 	s.Mux.HandleFunc("POST /api/dns/browser-doh", s.guard(s.handleBrowserDoHCheckPost))
 
@@ -245,6 +285,7 @@ func (s *Server) registerRoutes() {
 	s.Mux.HandleFunc("POST /api/dns/credentials/reset", s.guard(s.handleDNSCredentialsResetPost))
 	s.Mux.HandleFunc("GET /api/dns/config-preview", s.guard(s.handleDNSConfigPreviewGet))
 	s.Mux.HandleFunc("POST /api/dns/engine", s.guard(s.handleDNSEngineSwitchPost))
+	s.Mux.HandleFunc("POST /api/dns/switch-engine", s.guard(s.handleDNSEngineSwitchPost))
 	s.Mux.HandleFunc("POST /api/dns/protection", s.guard(s.handleDNSProtectionPost))
 	s.Mux.HandleFunc("POST /api/dns/cache/clear", s.guard(s.handleDNSCacheClearPost))
 	s.Mux.HandleFunc("POST /api/dns/probe", s.guard(s.handleDNSProbePost))
@@ -295,6 +336,24 @@ func (s *Server) registerRoutes() {
 	s.Mux.HandleFunc("POST /api/sb/proxies/delay", s.guard(s.handleSbProxyDelayPost))
 	s.Mux.HandleFunc("PUT /api/sb/mode", s.guard(s.handleSbModePut))
 	s.Mux.HandleFunc("GET /api/sb/traffic", s.guard(s.handleSbTrafficGet))
+
+	// Safe Commit 安全回滚保险丝与 OOM 免疫保护 API
+	s.Mux.HandleFunc("GET /api/safe-commit/status", s.guard(s.handleSafeCommitStatusGet))
+	s.Mux.HandleFunc("POST /api/safe-commit/arm", s.guard(s.handleSafeCommitArmPost))
+	s.Mux.HandleFunc("POST /api/safe-commit/confirm", s.guard(s.handleSafeCommitConfirmPost))
+	s.Mux.HandleFunc("POST /api/safe-commit/rollback", s.guard(s.handleSafeCommitRollbackPost))
+	s.Mux.HandleFunc("POST /api/safe-commit/oom-protect", s.guard(s.handleSafeCommitOOMProtectPost))
+	s.Mux.HandleFunc("PUT /api/safe-commit/config", s.guard(s.handleSafeCommitConfigPut))
+
+	// 多渠道主动通知推送与连通性测试 API
+	s.Mux.HandleFunc("GET /api/notify/config", s.guard(s.handleNotifyConfigGet))
+	s.Mux.HandleFunc("PUT /api/notify/config", s.guard(s.handleNotifyConfigPut))
+	s.Mux.HandleFunc("POST /api/notify/test", s.guard(s.handleNotifyTestPost))
+
+	// 一键全链路深度体检与快捷修复 API
+	s.Mux.HandleFunc("GET /api/doctor/run", s.guard(s.handleDoctorRun))
+	s.Mux.HandleFunc("POST /api/doctor/run", s.guard(s.handleDoctorRun))
+	s.Mux.HandleFunc("POST /api/doctor/fix", s.guard(s.handleDoctorFixPost))
 
 	// 流式动作执行 API
 	s.Mux.HandleFunc("POST /api/action", s.guard(s.handleAction))
@@ -399,6 +458,21 @@ func (s *Server) buildLifecycle(bgCtx context.Context, cancelBg context.CancelFu
 			ServiceName: "webui-dns-telemetry",
 			OnStart: func(context.Context) error {
 				go s.runDNSTelemetryLoop(bgCtx)
+				return nil
+			},
+		},
+		lifecycle.FuncService{
+			ServiceName: "webui-notifier",
+			OnStart: func(context.Context) error {
+				if s.notifier != nil && s.ownsNotifier {
+					s.notifier.Start(bgCtx)
+				}
+				return nil
+			},
+			OnClose: func() error {
+				if s.notifier != nil && s.ownsNotifier {
+					s.notifier.Close()
+				}
 				return nil
 			},
 		},

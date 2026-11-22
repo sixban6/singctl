@@ -1,8 +1,12 @@
 package cmd
 
 import (
+	"cmp"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"os"
 	"runtime"
 	"singctl/internal/common/redact"
@@ -12,9 +16,14 @@ import (
 	"singctl/internal/doctor"
 	"singctl/internal/localdns"
 	"singctl/internal/logger"
+	"singctl/internal/safecommit"
+	"singctl/internal/singbox"
 	"singctl/internal/subhub"
 	"singctl/internal/updater"
 	"singctl/internal/webui"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -32,20 +41,209 @@ func NewInfoCommand(version string) *cobra.Command {
 	}
 }
 
+// DoctorCmdDeps 封装 `singctl doctor` 命令的可注入依赖（零值回退生产默认实现）。
+type DoctorCmdDeps struct {
+	ProcRoot          string
+	SingBoxConfigPath string
+	SmartDNSConfPath  string
+	AdGuardConfPath   string
+	Runner            *doctor.Runner
+	BuildEnv          func(cfg *config.Config, resolvedPath string) *doctor.Env
+	RunServerDoctor   func(cfg *config.Config) *doctor.DoctorReport
+	IsServerEnv       func(cfg *config.Config) bool
+}
+
+var allowedCLIDoctorFixes = map[string]bool{
+	"protect-tailscale-oom": true,
+	"sync-dns-local":        true,
+	"sync-smartdns-ipv6":    true,
+}
+
+func buildCLIDoctorEnv(cfg *config.Config, resolvedPath string, deps DoctorCmdDeps) *doctor.Env {
+	var env *doctor.Env
+	if deps.BuildEnv != nil {
+		env = deps.BuildEnv(cfg, resolvedPath)
+	}
+	if env == nil {
+		env = &doctor.Env{
+			Config:            cfg,
+			ConfigPath:        resolvedPath,
+			SingBoxConfigPath: cmp.Or(strings.TrimSpace(deps.SingBoxConfigPath), constant.SingBoxConfigFile),
+			SmartDNSConfPath:  cmp.Or(strings.TrimSpace(deps.SmartDNSConfPath), constant.SmartDNSConfigFile),
+			AdGuardConfPath:   cmp.Or(strings.TrimSpace(deps.AdGuardConfPath), constant.AdGuardConfigFile),
+			ProcRoot:          strings.TrimSpace(deps.ProcRoot),
+		}
+	}
+	if env.Config == nil {
+		env.Config = cfg
+	}
+	procRoot := cmp.Or(strings.TrimSpace(env.ProcRoot), strings.TrimSpace(deps.ProcRoot))
+	sbPath := cmp.Or(strings.TrimSpace(env.SingBoxConfigPath), strings.TrimSpace(deps.SingBoxConfigPath), constant.SingBoxConfigFile)
+	workPath := ""
+	if sbPath == constant.SingBoxConfigFile {
+		workPath = constant.SingBoxWorkConfigFile
+	}
+
+	defaults := map[string]func(ctx context.Context) (string, error){
+		"protect-tailscale-oom": func(context.Context) (string, error) {
+			st, err := safecommit.ProtectTailscaledOOM(procRoot)
+			if err != nil {
+				return "", err
+			}
+			return cmp.Or(st.Message, fmt.Sprintf("已为 tailscaled (PID %d) 开启 OOM 免疫保护 (oom_score_adj=%d)", st.PID, st.ScoreAdj)), nil
+		},
+		"sync-dns-local": func(ctx context.Context) (string, error) {
+			dnsPort := 5353
+			dnsEnabled := true
+			if cfg != nil {
+				dnsPort = cfg.DNS.GetDNSPort()
+				dnsEnabled = cfg.DNS.IsEnabled()
+			}
+			useExternal := false
+			if dnsEnabled {
+				addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(dnsPort))
+				d := &net.Dialer{Timeout: 800 * time.Millisecond}
+				if conn, err := d.DialContext(ctx, "tcp", addr); err == nil {
+					_ = conn.Close()
+					useExternal = true
+				}
+			}
+			changed, err := singbox.SyncLiveSingBoxDNSLocal(ctx, sbPath, workPath, useExternal, dnsPort)
+			if err != nil {
+				return "", err
+			}
+			if useExternal {
+				return fmt.Sprintf("已同步 sing-box dns_local 至本地防劫持 DNS 127.0.0.1:%d (changed=%v)", dnsPort, changed), nil
+			}
+			return fmt.Sprintf("已同步 sing-box dns_local 至加密 DoH 兜底 (changed=%v)", changed), nil
+		},
+		"sync-smartdns-ipv6": func(ctx context.Context) (string, error) {
+			reg := localdns.NewRegistry(cfg, localdns.EngineDeps{ConfigPath: resolvedPath})
+			sdEng, ok := reg.Get(constant.DNSEngineSmartDNS)
+			if !ok || sdEng == nil || !sdEng.IsInstalled() {
+				return "", errors.New("未检测到已安装的 SmartDNS 引擎")
+			}
+			if err := sdEng.SyncCommonConfig(ctx); err != nil {
+				return "", err
+			}
+			return "已按 gateway.ipv6_mode 同步 SmartDNS force-AAAA-SOA 策略", nil
+		},
+	}
+	if env.QuickFixHandlers == nil {
+		env.QuickFixHandlers = defaults
+	} else {
+		for k, fn := range defaults {
+			if _, exists := env.QuickFixHandlers[k]; !exists {
+				env.QuickFixHandlers[k] = fn
+			}
+		}
+	}
+	return env
+}
+
 // NewDoctorCmd creates the doctor command
 func NewDoctorCmd(configPath string) *cobra.Command {
-	return &cobra.Command{
+	return NewDoctorCmdWithDeps(configPath, DoctorCmdDeps{})
+}
+
+// NewDoctorCmdWithDeps 创建带显式依赖注入的 `singctl doctor` 命令。
+func NewDoctorCmdWithDeps(configPath string, deps DoctorCmdDeps) *cobra.Command {
+	var asJSON bool
+	var mode string
+	var fixAction string
+
+	cmd := &cobra.Command{
 		Use:     "doctor",
 		Aliases: []string{"doc", "check"},
 		Short:   "体检  : 全链路健康体检与故障自检",
-		Long:    "自动化检测系统基础环境、TCP BBR 加速、端口监听、四核服务状态、TLS 证书有效性、Reality 伪装连通性及海外全球边缘多点出口画像与服务连通性",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, _, _ := loadCmdConfig(cmd, configPath)
-			report := doctor.RunDoctor(cfg)
-			doctor.PrintDoctorReport(report)
+		Long:    "客户端网关运行 8 项全链路深度体检与一键修复；服务端 VPS 兼容原有四核/TLS/Reality 体检报告。",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			normMode := strings.ToLower(strings.TrimSpace(cmp.Or(mode, "auto")))
+			if normMode != "auto" && normMode != "client" && normMode != "server" {
+				return fmt.Errorf("invalid --mode %q (expected auto|client|server)", mode)
+			}
+
+			cfg, resolvedPath, _ := loadCmdConfig(cmd, configPath)
+			runner := deps.Runner
+			if runner == nil {
+				runner = doctor.NewDefaultRunner()
+			}
+			env := buildCLIDoctorEnv(cfg, resolvedPath, deps)
+
+			if act := strings.TrimSpace(fixAction); act != "" {
+				if !allowedCLIDoctorFixes[act] {
+					return fmt.Errorf("unsupported --fix action %q (allowed: protect-tailscale-oom, sync-dns-local, sync-smartdns-ipv6)", act)
+				}
+				msg, err := runner.Fix(cmd.Context(), env, act)
+				if err != nil {
+					return err
+				}
+				if asJSON {
+					raw, err := json.MarshalIndent(map[string]any{
+						"ok":      true,
+						"action":  act,
+						"message": msg,
+					}, "", "  ")
+					if err != nil {
+						return err
+					}
+					_, _ = fmt.Fprintln(cmd.OutOrStdout(), string(raw))
+					return nil
+				}
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "✅ 快捷修复成功 [%s]: %s\n", act, msg)
+				return nil
+			}
+
+			isServer := false
+			switch normMode {
+			case "server":
+				isServer = true
+			case "client":
+				isServer = false
+			default:
+				if deps.IsServerEnv != nil {
+					isServer = deps.IsServerEnv(cfg)
+				} else {
+					isServer = doctor.IsServerEnvironment(cfg)
+				}
+			}
+
+			if isServer {
+				runSrv := deps.RunServerDoctor
+				if runSrv == nil {
+					runSrv = doctor.RunServerDoctor
+				}
+				report := runSrv(cfg)
+				if asJSON {
+					raw, err := json.MarshalIndent(report, "", "  ")
+					if err != nil {
+						return err
+					}
+					_, _ = fmt.Fprintln(cmd.OutOrStdout(), string(raw))
+					return nil
+				}
+				doctor.PrintDoctorReport(report)
+				return nil
+			}
+
+			report := runner.Run(cmd.Context(), env)
+			if asJSON {
+				raw, err := json.MarshalIndent(report, "", "  ")
+				if err != nil {
+					return err
+				}
+				_, _ = fmt.Fprintln(cmd.OutOrStdout(), string(raw))
+				return nil
+			}
+			_, _ = fmt.Fprint(cmd.OutOrStdout(), doctor.FormatText(report))
 			return nil
 		},
 	}
+
+	cmd.Flags().BoolVar(&asJSON, "json", false, "以 JSON 格式输出体检报告")
+	cmd.Flags().StringVar(&mode, "mode", "auto", "体检模式: auto | client | server")
+	cmd.Flags().StringVar(&fixAction, "fix", "", "执行深度体检安全快捷修复动作 (protect-tailscale-oom | sync-dns-local | sync-smartdns-ipv6)")
+	return cmd
 }
 
 func NewUpdateCmd(configPath string, version string) *cobra.Command {

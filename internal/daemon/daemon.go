@@ -15,11 +15,14 @@ import (
 
 	"singctl/internal/audit"
 	"singctl/internal/common/netx"
+	"singctl/internal/common/sysinfo"
 	"singctl/internal/config"
 	"singctl/internal/constant"
 	"singctl/internal/lifecycle"
 	"singctl/internal/localdns"
 	"singctl/internal/logger"
+	"singctl/internal/notify"
+	"singctl/internal/safecommit"
 	"singctl/internal/smartdns"
 	"singctl/internal/tailscale"
 )
@@ -86,6 +89,11 @@ type DaemonOptions struct {
 	LowMemoryMode       *bool
 	P2PController       *tailscale.P2PAssistController
 	DNSDeps             *localdns.EngineDeps
+	NotifyDispatcher    *notify.Dispatcher
+	NotifyDeps          notify.DispatcherDeps
+	TelemetryDeps       *sysinfo.TelemetryDeps
+	OOMProcRoot         string
+	ProtectOOMFunc      func(procRoot string) (safecommit.OOMShieldStatus, error)
 }
 
 // Daemon 守护进程。
@@ -105,6 +113,7 @@ type Daemon struct {
 	ruleSetMu           sync.Mutex
 	lastRuleSetFailedAt time.Time
 	subSyncRunning      atomic.Bool
+	subSyncFailed       atomic.Bool
 	subSyncMu           sync.Mutex
 	lastSubSyncCheckAt  time.Time
 	subSyncCheckTimeout time.Duration
@@ -120,21 +129,32 @@ type Daemon struct {
 	p2pSnapMu           sync.Mutex
 	p2pLastSnapSummary  string
 
-	logPathOverride   string
-	webLogOverride    string
-	webEmbeddedFile   string
-	webEmbeddedMu     sync.Mutex
-	webEmbeddedListen string
-	embeddedService   func(ctx context.Context, cfgStore *config.Store) error
-	lowMemory         bool
-	stateStore        *StateStore
+	logPathOverride     string
+	webLogOverride      string
+	webEmbeddedFile     string
+	webEmbeddedMu       sync.Mutex
+	webEmbeddedListen   string
+	embeddedService     func(ctx context.Context, cfgStore *config.Store) error
+	lowMemory           bool
+	stateStore          *StateStore
 	skipSignalSetup     bool
 	pidWriter           func() error
 	pidRemover          func() error
-	dnsDeps         *localdns.EngineDeps
-	dnsSmartStats   *localdns.StatsRing
-	smartDNSTailer  *smartdns.AuditLogTailer
-	dnsTickRunning  atomic.Bool
+	dnsDeps             *localdns.EngineDeps
+	dnsSmartStats       *localdns.StatsRing
+	smartDNSTailer      *smartdns.AuditLogTailer
+	dnsTickRunning      atomic.Bool
+	notifier            *notify.Dispatcher
+	ownsNotifier        bool
+	cpuSampler          *sysinfo.CPUSampler
+	telemetryDeps       *sysinfo.TelemetryDeps
+	resourceGuard       *resourceGuardState
+	auditGuard          *auditNotifyGuard
+	watchdogUnhealthy   atomic.Bool
+	oomProcRoot         string
+	protectOOMFn        func(procRoot string) (safecommit.OOMShieldStatus, error)
+	oomGuardMu          sync.Mutex
+	lastOOMProtectedPID int
 }
 
 // NewDaemonWithMeta 创建带配置文件路径（支持热重载）与版本号标识的守护进程。
@@ -225,7 +245,16 @@ func NewDaemonWithOptions(cfg *config.Config, opts DaemonOptions) *Daemon {
 		}
 	}
 
-	return &Daemon{
+	notifier := opts.NotifyDispatcher
+	ownsNotifier := false
+	if notifier == nil {
+		notifier = notify.NewDispatcher(notify.OptionsFromConfig(cfg.Notify), opts.NotifyDeps)
+		ownsNotifier = true
+	}
+	cpuSampler := sysinfo.NewCPUSampler()
+	cpuSampler.Prime()
+
+	d := &Daemon{
 		cfgStore:            cfgStore,
 		configPath:          opts.ConfigPath,
 		version:             ver,
@@ -252,7 +281,17 @@ func NewDaemonWithOptions(cfg *config.Config, opts DaemonOptions) *Daemon {
 		dnsDeps:             opts.DNSDeps,
 		dnsSmartStats:       sdStats,
 		smartDNSTailer:      sdTailer,
+		notifier:            notifier,
+		ownsNotifier:        ownsNotifier,
+		cpuSampler:          cpuSampler,
+		telemetryDeps:       opts.TelemetryDeps,
+		resourceGuard:       &resourceGuardState{},
+		auditGuard:          newAuditNotifyGuard(),
+		oomProcRoot:         strings.TrimSpace(opts.OOMProcRoot),
+		protectOOMFn:        opts.ProtectOOMFunc,
 	}
+	failover.OnNotify = d.emitNotify
+	return d
 }
 
 // SmartDNSStatsRing 返回守护进程持有的 SmartDNS 24h 审计统计环（供单进程合体 WebUI 共享）。
@@ -383,6 +422,7 @@ func (d *Daemon) reloadConfigIfChanged(force bool) (bool, *config.Config) {
 	if d.p2pCtrl != nil {
 		d.p2pCtrl.ResetNFTUnavailableBackoff()
 	}
+	d.syncNotifierConfig(freshCfg)
 	return true, freshCfg
 }
 
@@ -462,6 +502,21 @@ func (d *Daemon) BuildForegroundLifecycle() *lifecycle.Group {
 			OnClose: func() error {
 				if d.cancel != nil {
 					d.cancel()
+				}
+				return nil
+			},
+		},
+		lifecycle.FuncService{
+			ServiceName: "daemon-notifier",
+			OnStart: func(context.Context) error {
+				if d.notifier != nil && d.ownsNotifier {
+					d.notifier.Start(d.ctx)
+				}
+				return nil
+			},
+			OnClose: func() error {
+				if d.notifier != nil && d.ownsNotifier {
+					d.notifier.Close()
 				}
 				return nil
 			},
@@ -694,6 +749,7 @@ func (d *Daemon) monitorLoop() error {
 			d.maybeReconcileTailscaleP2PAsync(true)
 			d.maybeReconcileAuditThrottlesAsync(true)
 		case <-initHealthTimer.C:
+			d.GuardTailscaleOOMOnce()
 			res := NewMonitor(d.currentConfig()).CheckHealth()
 			d.recordHealthResult(res)
 			d.maybeReconcileTailscaleP2PAsync(true)
