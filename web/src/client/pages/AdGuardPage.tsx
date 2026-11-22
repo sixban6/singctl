@@ -29,7 +29,7 @@ import {
 import { AdGuardRulesAndRewritesSection } from './adguard/AdGuardRulesAndRewritesSection';
 import { AdGuardUninstalledView } from './adguard/AdGuardUninstalledView';
 import { AdGuardUpstreamsCard } from './adguard/AdGuardUpstreamsCard';
-import { DNSEngineSwitcherCard } from './adguard/DNSEngineSwitcherCard';
+import { DNSEngineDropdown } from './adguard/DNSEngineDropdown';
 import { DNSStatsCard } from './adguard/DNSStatsCard';
 import { useAdGuardController } from './adguard/useAdGuardController';
 
@@ -98,30 +98,27 @@ export const AdGuardPage: React.FC<AdGuardPageProps> = ({
 
   const headerBadge = useMemo(() => {
     if (!snap) return <Badge tone="neutral">加载中</Badge>;
-    if (activeEngine === 'singbox') {
-      if (!snap.dnsHealthy) return <Badge tone="warn">sing-box 内核未运行</Badge>;
-      if (!snap.protectionEnabled) {
+    if (!snap.supported) return <Badge tone="warn">当前平台不支持本地引擎</Badge>;
+    if (!snap.installed) {
+      if (snap.lowMemoryBlocked) {
+        return <Badge tone="warn">低内存保护 · 内置 DoH 兜底</Badge>;
+      }
+      if (snap.fallbackDoHActive !== false) {
         return (
-          <Badge tone="warn" dot>
-            防劫持在线 · 暂停去广告中
+          <Badge tone="accent" dot>
+            内置 DoH 兜底 · 未安装 {engineShort}
           </Badge>
         );
       }
+      return <Badge tone="neutral">未安装 {engineShort}</Badge>;
+    }
+    if (!snap.dnsHealthy) {
       return (
-        <Badge tone="ok" dot pulse>
-          防劫持接管中 · sing-box 加强版
+        <Badge tone="danger">
+          {snap.fallbackDoHActive ? `${engineShort} 未运行 · DoH 兜底` : `${engineShort} 未运行`}
         </Badge>
       );
     }
-    if (!snap.supported) return <Badge tone="warn">当前平台不支持外部引擎</Badge>;
-    if (!snap.installed) {
-      return snap.lowMemoryBlocked ? (
-        <Badge tone="warn">低内存保护 · 内置 DoH</Badge>
-      ) : (
-        <Badge tone="neutral">未安装</Badge>
-      );
-    }
-    if (!snap.dnsHealthy) return <Badge tone="danger">{engineShort} 未运行</Badge>;
     if (!snap.singboxLinked) {
       return (
         <Badge tone="warn" dot>
@@ -141,20 +138,16 @@ export const AdGuardPage: React.FC<AdGuardPageProps> = ({
         防劫持接管中 · {engineShort} ({snap.dnsAddr})
       </Badge>
     );
-  }, [snap, activeEngine, engineShort]);
+  }, [snap, engineShort]);
 
   const headerDesc = useMemo(() => {
     if (!snap) return '正在读取防劫持 DNS 引擎与解析遥测…';
     const parts: string[] = [engineLabel];
     if (snap.version) parts.push(snap.version);
-    if (activeEngine === 'singbox') {
-      parts.push(snap.dnsAddr || '内置纯 IP 加密 DoH 接管');
-    } else {
-      parts.push(`监听 ${snap.dnsAddr || '127.0.0.1:5353'}`);
-    }
+    parts.push(`监听 ${snap.dnsAddr || '127.0.0.1:5353'}`);
     if (snap.isOpenWrt) parts.push('OpenWrt 闪存保护已开启');
     return parts.join(' · ');
-  }, [snap, activeEngine, engineLabel]);
+  }, [snap, engineLabel]);
 
   if (loading && !snap) {
     return (
@@ -164,31 +157,22 @@ export const AdGuardPage: React.FC<AdGuardPageProps> = ({
     );
   }
 
-  // sing-box 加强版零开销开箱即用；仅在极少数旧快照无 engines 且外部引擎未安装时回退引导页
-  if (snap && !snap.installed && activeEngine !== 'singbox' && !(snap.engines && snap.engines.length > 0)) {
+  if (snap && !snap.installed) {
     return (
       <AdGuardUninstalledView
-        supported={snap.supported}
+        snap={snap}
         busy={busy}
+        mutating={mutating}
+        switchingEngine={switchingEngine}
         headerBadge={headerBadge}
-        lowMemoryBlocked={snap.lowMemoryBlocked}
-        lowMemoryWarning={snap.lowMemoryWarning}
-        onInstall={() => onAction('dns-install')}
-        onForceInstall={() =>
-          onAction(
-            'dns-install',
-            { forceLowMemory: true },
-            '当前设备可用内存较低，强行运行外部 DNS 引擎可能导致路由器 OOM 死机断网。确定要忽略保护强制安装吗？',
-          )
-        }
+        onSwitchEngine={handleSwitchEngine}
+        onAction={onAction}
       />
     );
   }
 
   const showQuickControls = Boolean(
-    snap &&
-      (snap.dnsHealthy || activeEngine === 'singbox') &&
-      (capabilities.hasPauseProtection || capabilities.hasBlockAAAA),
+    snap && snap.dnsHealthy && (capabilities.hasPauseProtection || capabilities.hasBlockAAAA),
   );
 
   return (
@@ -199,11 +183,19 @@ export const AdGuardPage: React.FC<AdGuardPageProps> = ({
         badge={headerBadge}
         actions={
           <>
+            <DNSEngineDropdown
+              snap={snap}
+              busy={busy}
+              mutating={mutating}
+              switchingEngine={switchingEngine}
+              onSwitchEngine={handleSwitchEngine}
+              onAction={onAction}
+            />
             <Button
               size="sm"
               variant="secondary"
               loading={probing}
-              disabled={!snap || (activeEngine !== 'singbox' && !snap.dnsHealthy)}
+              disabled={!snap || !snap.dnsHealthy}
               onClick={() => void runProbe(false)}
               icon={<Zap className="w-3.5 h-3.5" />}
             >
@@ -275,7 +267,7 @@ export const AdGuardPage: React.FC<AdGuardPageProps> = ({
         </div>
       )}
 
-      {snap && activeEngine !== 'singbox' && (!snap.installed || !snap.dnsHealthy || !snap.singboxLinked) && (
+      {snap && (!snap.dnsHealthy || !snap.singboxLinked) && (
         <div
           className="console-card rounded-2xl p-4 flex flex-wrap items-center justify-between gap-3 border"
           style={{
@@ -290,16 +282,12 @@ export const AdGuardPage: React.FC<AdGuardPageProps> = ({
             />
             <div className="text-xs sm:text-sm">
               <div className="font-semibold text-primary">
-                {!snap.installed
-                  ? `${engineLabel} 尚未安装（网关正在使用 sing-box 加强版内置纯 IP 加密 DoH 兜底）`
-                  : !snap.dnsHealthy
-                    ? `${engineLabel} 当前处于停止状态（网关正在使用 sing-box 加强版内置纯 IP 加密 DoH 兜底）`
-                    : `${engineLabel} 已运行，但当前 sing-box 尚未将 dns_local 切换至本地接管`}
+                {!snap.dnsHealthy
+                  ? `${engineLabel} 当前处于停止状态（底层 sing-box 正在使用纯 IP 加密 DoH 应急兜底）`
+                  : `${engineLabel} 已运行，但当前 sing-box 尚未将 dns_local 切换至本地接管`}
               </div>
               <div className="text-secondary mt-0.5">
-                {!snap.installed
-                  ? '点击右侧按钮即可在终端抽屉中实时完成安装、验活与零断网切换。'
-                  : '点击右侧按钮即可在确认本地加密解析就绪后，平滑热重载 sing-box 完成零断网接管。'}
+                点击右侧按钮即可在确认本地加密解析就绪后，平滑热重载 sing-box 完成零断网接管。
               </div>
             </div>
           </div>
@@ -308,59 +296,12 @@ export const AdGuardPage: React.FC<AdGuardPageProps> = ({
             variant="primary"
             disabled={busy}
             icon={<Power className="w-3.5 h-3.5" />}
-            onClick={() =>
-              !snap.installed
-                ? onAction('dns-switch', { engine: activeEngine })
-                : onAction('dns-start')
-            }
+            onClick={() => onAction('dns-start')}
           >
-            {!snap.installed ? `安装并接管 ${engineShort}` : '启动并接管 DNS'}
+            启动并接管 DNS
           </Button>
         </div>
       )}
-
-      {snap && activeEngine === 'singbox' && !snap.dnsHealthy && (
-        <div
-          className="console-card rounded-2xl p-4 flex flex-wrap items-center justify-between gap-3 border"
-          style={{
-            borderColor: 'var(--status-warn)',
-            backgroundColor: 'var(--status-warn-soft)',
-          }}
-        >
-          <div className="flex items-start gap-2.5 min-w-0">
-            <AlertTriangle
-              className="w-5 h-5 shrink-0 mt-0.5"
-              style={{ color: 'var(--status-warn)' }}
-            />
-            <div className="text-xs sm:text-sm">
-              <div className="font-semibold text-primary">
-                sing-box 内核当前未运行，启动内核后内置防劫持 DNS 将立即接管
-              </div>
-              <div className="text-secondary mt-0.5">
-                你仍可提前调整上游服务器、白名单与内网域名重写，启动内核时将自动编译生效。
-              </div>
-            </div>
-          </div>
-          <Button
-            size="sm"
-            variant="primary"
-            disabled={busy}
-            icon={<Power className="w-3.5 h-3.5" />}
-            onClick={() => onAction('sb-start')}
-          >
-            启动 sing-box
-          </Button>
-        </div>
-      )}
-
-      <DNSEngineSwitcherCard
-        snap={snap}
-        busy={busy}
-        mutating={mutating}
-        switchingEngine={switchingEngine}
-        onSwitchEngine={handleSwitchEngine}
-        onAction={onAction}
-      />
 
       {capabilities.hasQueryStats && (
         <DNSStatsCard

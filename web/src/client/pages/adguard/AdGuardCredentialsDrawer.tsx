@@ -30,53 +30,10 @@ export const AdGuardLifecycleSection: React.FC<{
   const engineLabel = getEngineDisplayName(activeEngine, snap?.activeEngineLabel);
   const dnsHealthy = Boolean(snap?.dnsHealthy);
 
-  if (activeEngine === 'singbox') {
-    return (
-      <SectionCard
-        title="引擎运维与内核联动"
-        subtitle="当前由 sing-box 加强版内置接管防劫持 DNS，零额外守护进程与闪存占用；重启内核将同步热加载全部加密上游与规则"
-      >
-        <div className="flex flex-wrap items-center gap-2.5">
-          {dnsHealthy ? (
-            <Button
-              size="sm"
-              variant="secondary"
-              disabled={busy}
-              icon={<RotateCw className="w-3.5 h-3.5" />}
-              onClick={() => onAction('dns-restart')}
-            >
-              重载内置加密 DNS
-            </Button>
-          ) : (
-            <Button
-              size="sm"
-              variant="primary"
-              disabled={busy}
-              icon={<Power className="w-3.5 h-3.5" />}
-              onClick={() => onAction('sb-start')}
-            >
-              启动 sing-box 内核
-            </Button>
-          )}
-
-          <Button
-            size="sm"
-            variant="secondary"
-            disabled={busy}
-            icon={<RefreshCw className="w-3.5 h-3.5" />}
-            onClick={() => onAction('sb-restart')}
-          >
-            重启 sing-box 内核
-          </Button>
-        </div>
-      </SectionCard>
-    );
-  }
-
   return (
     <SectionCard
       title={`服务生命周期与安全切换 · ${engineLabel}`}
-      subtitle={`停用或卸载 ${engineLabel} 时会自动先将 sing-box dns_local 平滑切回 sing-box 加强版加密 DoH，确保全屋网关零断网`}
+      subtitle={`停用或卸载 ${engineLabel} 时会自动先将 sing-box dns_local 平滑回退至内置纯 IP 加密 DoH 兜底，确保全屋网关零断网`}
     >
       <div className="flex flex-wrap items-center gap-2.5">
         {dnsHealthy ? (
@@ -155,7 +112,7 @@ export const AdGuardLifecycleSection: React.FC<{
               onAction(
                 'dns-uninstall',
                 { engine: activeEngine, purge: false },
-                `确认卸载 ${engineLabel}？（将自动先切回 sing-box 加强版内置加密 DNS 保证不断网，并保留自定义配置文件以备重装恢复）`,
+                `确认卸载 ${engineLabel}？（将自动先把 sing-box 切回内置纯 IP 加密 DoH 兜底保证不断网，并保留自定义配置文件以备重装恢复）`,
               )
             }
           >

@@ -151,9 +151,15 @@ export const WatchdogTopCards: React.FC<WatchdogTopCardsProps> = ({
             },
             {
               title: '⑤ 本地防劫持 DNS 保活',
-              desc: agh?.supported ? '联动巡检本地加密 DNS 引擎与上游活性，异常自动热切自愈' : '当前非 Linux 网关，自动跳过',
+              desc: agh?.supported
+                ? agh.installed
+                  ? '联动巡检本地加密 DNS 引擎与上游活性，异常自动自愈'
+                  : '尚未安装外部 DNS 引擎，当前由底层内置 DoH 兜底防劫持'
+                : '当前非 Linux 网关，自动跳过',
               badge: !agh?.supported ? (
                 <Badge>仅 Linux</Badge>
+              ) : !agh.installed ? (
+                <Badge tone="accent">内置 DoH 兜底</Badge>
               ) : !agh.enabled ? (
                 <Badge>已禁用</Badge>
               ) : agh.healthy ? (

@@ -133,10 +133,11 @@ export const DashPage: React.FC<DashPageProps> = ({ status, busy, onAction, onNa
 
   const { singbox: sb, daemon: dm, tailscale: ts, firewall: fw, host, config } = status;
   const dns = getStatusDNS(status);
-  const dnsEngine = dns?.activeEngine || (dns?.installed ? 'adguard' : 'singbox');
+  const dnsInstalled = Boolean(dns?.installed);
+  const dnsEngine = dns?.activeEngine || dns?.recommendedEngine;
   const dnsEngineLabel = getEngineDisplayName(dnsEngine, dns?.activeEngineLabel);
-  const dnsIsSingBox = dnsEngine === 'singbox';
-  const dnsHealthy = dnsIsSingBox ? Boolean(dns?.dnsHealthy ?? sb.running) : Boolean(dns?.dnsHealthy);
+  const dnsFallbackDoH = !dnsInstalled && Boolean(dns?.fallbackDoHActive ?? sb.running);
+  const dnsHealthy = dnsInstalled ? Boolean(dns?.dnsHealthy) : dnsFallbackDoH;
   const tsBadgeInfo = getTailscaleBadge(ts);
   const subs = config?.subs || [];
   const primaryExitText = !sb.running
@@ -254,68 +255,71 @@ export const DashPage: React.FC<DashPageProps> = ({ status, busy, onAction, onNa
           </div>
         </div>
 
-        {/* Anti-Hijack DNS (3-Engine) */}
+        {/* Anti-Hijack DNS (Dual-Engine + Built-in DoH Fallback) */}
         <div className="console-card rounded-2xl p-4 flex flex-col justify-between gap-4">
           <div className="flex items-start justify-between gap-2">
             <div
               className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0"
               style={{
-                backgroundColor: dnsHealthy ? 'var(--status-ok-soft)' : 'var(--bg-surface-2)',
-                color: dnsHealthy ? 'var(--status-ok)' : 'var(--text-secondary)',
+                backgroundColor: dnsHealthy
+                  ? dnsInstalled
+                    ? 'var(--status-ok-soft)'
+                    : 'var(--accent-soft)'
+                  : 'var(--bg-surface-2)',
+                color: dnsHealthy
+                  ? dnsInstalled
+                    ? 'var(--status-ok)'
+                    : 'var(--accent)'
+                  : 'var(--text-secondary)',
               }}
             >
               <ShieldCheck className="w-4.5 h-4.5" />
             </div>
             <Badge
               tone={
-                dnsIsSingBox
-                  ? dnsHealthy
-                    ? 'ok'
-                    : 'warn'
-                  : !dns?.installed
-                    ? 'neutral'
-                    : !dns.dnsHealthy
-                      ? 'danger'
-                      : dns.singboxLinked
-                        ? 'ok'
-                        : 'warn'
+                !dnsInstalled
+                  ? dnsFallbackDoH
+                    ? 'accent'
+                    : 'neutral'
+                  : !dns?.dnsHealthy
+                    ? 'danger'
+                    : dns.singboxLinked
+                      ? 'ok'
+                      : 'warn'
               }
               dot={dnsHealthy}
-              pulse={dnsIsSingBox ? dnsHealthy : Boolean(dns?.dnsHealthy && dns?.singboxLinked)}
+              pulse={Boolean(dnsInstalled && dns?.dnsHealthy && dns?.singboxLinked)}
             >
-              {dnsIsSingBox
-                ? dnsHealthy
-                  ? '防劫持接管'
-                  : '待内核启动'
-                : !dns?.installed
-                  ? '未安装'
-                  : !dns.dnsHealthy
-                    ? '已停止'
-                    : dns.singboxLinked
-                      ? '防劫持接管'
-                      : '待接管'}
+              {!dnsInstalled
+                ? dnsFallbackDoH
+                  ? '内置 DoH 兜底'
+                  : '未安装'
+                : !dns?.dnsHealthy
+                  ? '已停止'
+                  : dns.singboxLinked
+                    ? '防劫持接管'
+                    : '待接管'}
             </Badge>
           </div>
           <div>
             <div className="text-sm font-semibold text-primary">防劫持 DNS</div>
-            <div className="text-xs text-secondary mt-1 tnum truncate" title={dns?.lowMemoryWarning || dnsEngineLabel}>
-              {dnsIsSingBox
-                ? `${dnsEngineLabel} · 内置加密 DoH`
-                : dns?.installed
-                  ? `${dnsEngineLabel} · ${dns.dnsAddr || '127.0.0.1:5353'}`
-                  : `${dnsEngineLabel} · 支持三引擎热切换`}
+            <div
+              className="text-xs text-secondary mt-1 tnum truncate"
+              title={dns?.lowMemoryWarning || dnsEngineLabel}
+            >
+              {dnsInstalled
+                ? `${dnsEngineLabel} · ${dns?.dnsAddr || '127.0.0.1:5353'}`
+                : dnsFallbackDoH
+                  ? `内置 DoH 兜底 · 可安装 ${dnsEngineLabel}`
+                  : '未安装外部引擎 · 可选 SmartDNS / AdGuard'}
             </div>
           </div>
           <div className="flex items-center gap-2 flex-wrap pt-1 border-t border-subtle">
-            {dnsIsSingBox ? (
-              <Button size="xs" variant="secondary" onClick={() => onNavigate('dns')}>
-                切换引擎
-              </Button>
-            ) : !dns?.installed ? (
+            {!dnsInstalled ? (
               <Button size="xs" variant="primary" onClick={() => onNavigate('dns')}>
-                配置引擎
+                安装引擎
               </Button>
-            ) : dns.dnsHealthy && dns.singboxLinked ? (
+            ) : dns?.dnsHealthy && dns?.singboxLinked ? (
               <Button size="xs" disabled={busy} onClick={() => onAction('dns-restart')}>
                 重启
               </Button>
