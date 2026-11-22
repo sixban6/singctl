@@ -26,6 +26,7 @@ type QuickStatus struct {
 	AutostartEnabled bool   `json:"autostartEnabled"`
 	Drifted          bool   `json:"drifted"`
 	Mode             string `json:"mode"`
+	Backend          string `json:"backend,omitempty"`
 	NFTAvailable     bool   `json:"nftAvailable"`
 	IsOpenWrt        bool   `json:"isOpenWrt"`
 }
@@ -169,7 +170,7 @@ var protectedPublicDNSIPs = []string{
 	"2400:3200::1", "2400:3200:baba::1", "2001:4860:4860::8888", "2606:4700:4700::1111",
 }
 
-// InspectQuickStatus 同时核验开机自启持久化文件与内核 `table inet security` 存活态（识别规则漂移/假开启）。
+// InspectQuickStatus 同时核验开机自启持久化文件与内核安全表/链存活态（自动兼容 nftables 与 iptables+ipset，识别规则漂移）。
 func InspectQuickStatus() QuickStatus {
 	st := QuickStatus{
 		Mode:      "standard",
@@ -178,14 +179,16 @@ func InspectQuickStatus() QuickStatus {
 	if runtime.GOOS != "linux" {
 		return st
 	}
+	backend := DetectBackend()
+	st.Backend = backend
 	st.Supported = true
-	_, lookErr := exec.LookPath("nft")
-	st.NFTAvailable = lookErr == nil
+	st.NFTAvailable = backend == BackendNFTables
 	st.AutostartEnabled = fileExists(constant.SingBoxNftablesFile) ||
+		fileExists(DefaultIPTablesScriptPath) ||
 		fileExists(constant.FirewallSystemdService) ||
 		fileExists(constant.FirewallInitdScript)
 
-	if st.NFTAvailable {
+	if backend != BackendNone {
 		if snap, err := readLiveSecurityTableTerse(); err == nil && snap != nil && snap.Active {
 			st.KernelActive = true
 			if snap.Mode != "" {
@@ -196,6 +199,31 @@ func InspectQuickStatus() QuickStatus {
 	st.Enabled = st.KernelActive || st.AutostartEnabled
 	st.Drifted = (st.AutostartEnabled && !st.KernelActive) || (st.KernelActive && !st.AutostartEnabled)
 	return st
+}
+
+// IsSecurityTableActive 检测当前宿主机安全防火墙表/链（nftables 或 iptables+ipset）是否处于活跃状态。
+func IsSecurityTableActive() bool {
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	switch DetectBackend() {
+	case BackendNFTables:
+		snap, err := readLiveSecurityTableTerse()
+		return err == nil && snap != nil && snap.Active
+	case BackendIPTables:
+		return defaultIPTablesBackend().IsSecurityTableActive()
+	default:
+		return false
+	}
+}
+
+// InspectSecurityStats 返回当前活跃内核安全防火墙的实时拦截战果与集合容量统计（兼容 nftables 与 iptables+ipset）。
+func InspectSecurityStats() (SecurityStats, error) {
+	snap, err := readLiveSecurityTable()
+	if err != nil || snap == nil {
+		return SecurityStats{}, err
+	}
+	return snap.Stats, nil
 }
 
 const defaultNFTReadTimeout = 3 * time.Second
@@ -209,6 +237,9 @@ func runCmdWithTimeout(timeout time.Duration, bin string, args ...string) ([]byt
 func readSecurityTableWithArgs(args ...string) (*KernelSnapshot, error) {
 	if runtime.GOOS != "linux" {
 		return nil, fmt.Errorf("not linux")
+	}
+	if DetectBackend() == BackendIPTables {
+		return defaultIPTablesBackend().InspectSnapshot()
 	}
 	nftBin, err := exec.LookPath("nft")
 	if err != nil {
@@ -229,9 +260,12 @@ func readLiveSecurityTableTerse() (*KernelSnapshot, error) {
 	return readSecurityTableWithArgs("-t", "-j", "list", "table", "inet", "security")
 }
 
-func readLiveSecurityText() string {
+func readLiveSecurityText(snap *KernelSnapshot) string {
 	if runtime.GOOS != "linux" {
 		return ""
+	}
+	if DetectBackend() == BackendIPTables {
+		return defaultIPTablesBackend().CompactRuleText(snap)
 	}
 	nftBin, err := exec.LookPath("nft")
 	if err != nil {
@@ -241,12 +275,15 @@ func readLiveSecurityText() string {
 	if err != nil {
 		return ""
 	}
-	return string(out)
+	return CollapseLargeSetsInNFTText(string(out), snap)
 }
 
 func listCoexistingTables() []string {
 	if runtime.GOOS != "linux" {
 		return nil
+	}
+	if DetectBackend() == BackendIPTables {
+		return []string{"iptables filter (" + IPTablesSecurityChain + ")"}
 	}
 	nftBin, err := exec.LookPath("nft")
 	if err != nil {

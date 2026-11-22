@@ -18,15 +18,40 @@ import (
 	"time"
 )
 
-// FW4Manager 负责将 SingCtl P2P 防线规则通过 OpenWrt fw4 drop-in + 原子直写 nftables 兜底生效，
+// FW4Manager 负责将 SingCtl P2P 防线规则通过 OpenWrt fw4 drop-in + 原子直写 nftables（或在无 nft 时自动切换 iptables+ipset 后端）生效，
 // 并提供 JIT 白名单元素的毫秒级开关与计数查询。
 type FW4Manager struct {
-	BaseDir string
-	Runner  CmdRunner
+	BaseDir          string
+	FirewallUserPath string
+	Runner           CmdRunner
+	LookPath         func(file string) (string, error)
 
 	mu            sync.Mutex
 	lastDigest    string
 	lastApplyMode string
+	iptMgr        *IPTablesP2PManager
+}
+
+func (m *FW4Manager) shouldUseIPTablesLocked(lookPath func(string) (string, error)) bool {
+	if m.lastApplyMode == ApplyModeIPTablesIPSet {
+		return true
+	}
+	lp := lookPath
+	if lp == nil {
+		lp = m.LookPath
+	}
+	if lp == nil {
+		if m.Runner != nil {
+			// 测试仅注入 Runner 时默认维持 nftables 契约，避免受宿主机 PATH 干扰。
+			return false
+		}
+		lp = exec.LookPath
+	}
+	if _, err := lp("nft"); err == nil {
+		return false
+	}
+	_, iptErr := lp("iptables")
+	return iptErr == nil
 }
 
 func (m *FW4Manager) baseDir() string {
@@ -79,10 +104,32 @@ func restoreFiles(snaps map[string]fileSnapshot) {
 	}
 }
 
-// Apply 将渲染后的防线规则安全落盘并通过 fw4 reload（健康时）或原子 nftables 直写生效。
+// Apply 将渲染后的防线规则安全落盘并通过 fw4 reload / 原子 nftables 直写生效；
+// 当宿主机无 nft 且存在 iptables 时自动切换为 iptables+ipset 独立后端。
 func (m *FW4Manager) Apply(ctx context.Context, d FW4DropIns) (string, error) {
+	return m.applyWithLookPath(ctx, d, nil)
+}
+
+func (m *FW4Manager) applyWithLookPath(ctx context.Context, d FW4DropIns, lookPath func(string) (string, error)) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	if m.shouldUseIPTablesLocked(lookPath) {
+		rs := d.IPTables
+		if rs.ListenPort == 0 {
+			rs.ListenPort = d.ListenPort
+		}
+		if rs.JITWindowSec == 0 {
+			rs.JITWindowSec = d.JITWindowSec
+		}
+		mode, err := m.iptablesBackend(lookPath).Apply(ctx, rs)
+		if err != nil {
+			return "", err
+		}
+		m.lastApplyMode = mode
+		m.lastDigest = rs.Digest()
+		return mode, nil
+	}
 
 	if out, err := m.run(ctx, d.RenderDryRunCheckScript(), "nft", "-c", "-f", "-"); err != nil {
 		return "", fmt.Errorf("nft syntax self-check failed: %w (%s)", err, strings.TrimSpace(string(out)))
@@ -246,10 +293,21 @@ func (m *FW4Manager) applyNFTDirect(ctx context.Context, d FW4DropIns) error {
 	return nil
 }
 
-// Remove 彻底清理全部 drop-in 文件并撤销运行时防火墙规则（幂等安全）。
+// Remove 彻底清理全部 drop-in 文件并撤销运行时防火墙规则（幂等安全，自动适配 nftables 与 iptables+ipset）。
 func (m *FW4Manager) Remove(ctx context.Context) error {
+	return m.removeWithLookPath(ctx, nil)
+}
+
+func (m *FW4Manager) removeWithLookPath(ctx context.Context, lookPath func(string) (string, error)) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	if m.shouldUseIPTablesLocked(lookPath) {
+		err := m.iptablesBackend(lookPath).Remove(ctx)
+		m.lastDigest = ""
+		m.lastApplyMode = ""
+		return err
+	}
 
 	paths := m.dropInPaths()
 	snaps := snapshotFiles(paths)
@@ -316,6 +374,17 @@ func (m *FW4Manager) Remove(ctx context.Context) error {
 
 // OpenPinhole 仅在打洞窗口秒数内向内核动态集合插入候选公网 IPv4/IPv6，超时由内核自动驱逐。
 func (m *FW4Manager) OpenPinhole(ctx context.Context, v4 []netip.Addr, v6 []netip.Addr, windowSec int) error {
+	m.mu.Lock()
+	useIPT := m.shouldUseIPTablesLocked(nil)
+	var ipt *IPTablesP2PManager
+	if useIPT {
+		ipt = m.iptablesBackend(nil)
+	}
+	m.mu.Unlock()
+	if useIPT {
+		return ipt.AddPinhole(ctx, v4, v6, windowSec)
+	}
+
 	win := min(max(3, windowSec), 10)
 	for _, ip := range v4 {
 		elem := fmt.Sprintf("{ %s timeout %ds }", ip.String(), win)
@@ -334,6 +403,17 @@ func (m *FW4Manager) OpenPinhole(ctx context.Context, v4 []netip.Addr, v6 []neti
 
 // ClosePinhole 在直连切换完成或打洞结束时立即吊销瞬时集合元素，若已被内核超时回收则静默忽略。
 func (m *FW4Manager) ClosePinhole(ctx context.Context, v4 []netip.Addr, v6 []netip.Addr) error {
+	m.mu.Lock()
+	useIPT := m.shouldUseIPTablesLocked(nil)
+	var ipt *IPTablesP2PManager
+	if useIPT {
+		ipt = m.iptablesBackend(nil)
+	}
+	m.mu.Unlock()
+	if useIPT {
+		return ipt.RemovePinhole(ctx, v4, v6)
+	}
+
 	deleteOne := func(setName string, ip netip.Addr) error {
 		elem := fmt.Sprintf("{ %s }", ip.String())
 		out, err := m.run(ctx, "", "nft", "delete", "element", "inet", "fw4", setName, elem)
@@ -361,6 +441,17 @@ func (m *FW4Manager) ClosePinhole(ctx context.Context, v4 []netip.Addr, v6 []net
 
 // CountOpenPinholes 实时读取内核 TS_JIT_ALLOW4 / TS_JIT_ALLOW6 集合中的活跃条目数量。
 func (m *FW4Manager) CountOpenPinholes(ctx context.Context) (int, []string) {
+	m.mu.Lock()
+	useIPT := m.shouldUseIPTablesLocked(nil)
+	var ipt *IPTablesP2PManager
+	if useIPT {
+		ipt = m.iptablesBackend(nil)
+	}
+	m.mu.Unlock()
+	if useIPT {
+		return ipt.ListActivePinholes(ctx)
+	}
+
 	var ips []string
 	for _, setName := range []string{setTSJITAllow4, setTSJITAllow6} {
 		out, err := m.run(ctx, "", "nft", "-j", "list", "set", "inet", "fw4", setName)
@@ -408,12 +499,19 @@ func parseNFTSetJSONElems(raw []byte) []string {
 	return out
 }
 
-// IsFW4Available 检测当前宿主机是否处于存在 inet fw4 防火墙表的 OpenWrt 环境。
+// IsFW4Available 检测当前宿主机是否具备 Tailscale P2P 防线所需的防火墙后端（OpenWrt fw4/nftables 或 iptables+ipset）。
 func IsFW4Available() bool {
-	if _, err := exec.LookPath("fw4"); err != nil {
-		return false
+	if _, err := exec.LookPath("fw4"); err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if exec.CommandContext(ctx, "nft", "list", "table", "inet", "fw4").Run() == nil {
+			return true
+		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	return exec.CommandContext(ctx, "nft", "list", "table", "inet", "fw4").Run() == nil
+	if _, err := exec.LookPath("iptables"); err == nil {
+		if _, setErr := exec.LookPath("ipset"); setErr == nil {
+			return true
+		}
+	}
+	return false
 }
