@@ -29,14 +29,16 @@ const (
 
 // UjailOptions 配置 Layer 3 OpenWrt ujail 沙盒注入与可回滚选项。
 type UjailOptions struct {
-	InitScriptPath string
-	BackupPath     string
-	CapsFilePath   string
-	UjailBin       string
-	SocketPath     string
-	ServiceRunner  func(ctx context.Context, script string, action string) error
-	ProbeFunc      func(ctx context.Context, sockPath string) error
-	ReadyTimeout   time.Duration
+	InitScriptPath    string
+	BackupPath        string
+	CapsFilePath      string
+	UjailBin          string
+	SocketPath        string
+	LookPath          func(file string) (string, error)
+	CapabilitiesProbe func(ctx context.Context, ujailBin string) bool
+	ServiceRunner     func(ctx context.Context, script string, action string) error
+	ProbeFunc         func(ctx context.Context, sockPath string) error
+	ReadyTimeout      time.Duration
 }
 
 func (o UjailOptions) initPath() string {
@@ -49,10 +51,6 @@ func (o UjailOptions) backupPath() string {
 
 func (o UjailOptions) capsPath() string {
 	return cmp.Or(strings.TrimSpace(o.CapsFilePath), DefaultUjailCapsPath)
-}
-
-func (o UjailOptions) ujailBin() string {
-	return cmp.Or(strings.TrimSpace(o.UjailBin), DefaultUjailBin)
 }
 
 func (o UjailOptions) socketPath() string {
@@ -147,9 +145,64 @@ func probeLocalAPIStatus(ctx context.Context, sockPath string) error {
 	return nil
 }
 
+// ResolveUjailBin 按显式路径 -> /sbin/ujail -> /usr/sbin/ujail -> PATH 顺序探测 ujail 可执行文件路径。
+func ResolveUjailBin(explicit string, lookPath func(string) (string, error)) (string, error) {
+	if p := strings.TrimSpace(explicit); p != "" {
+		if _, err := os.Stat(p); err != nil {
+			return "", fmt.Errorf("ujail binary not found at %s: %w", p, err)
+		}
+		return p, nil
+	}
+	for _, cand := range []string{DefaultUjailBin, "/usr/sbin/ujail"} {
+		if _, err := os.Stat(cand); err == nil {
+			return cand, nil
+		}
+	}
+	lp := lookPath
+	if lp == nil {
+		lp = exec.LookPath
+	}
+	if p, err := lp("ujail"); err == nil && strings.TrimSpace(p) != "" {
+		if _, statErr := os.Stat(p); statErr == nil {
+			return p, nil
+		}
+	}
+	return "", fmt.Errorf("ujail binary not found in /sbin/ujail, /usr/sbin/ujail or PATH")
+}
+
+// ParseUjailHelpSupportsCaps 根据 `ujail -h` 帮助输出判断是否支持 `-C <capabilities>` 选项（兼容 OpenWrt 21.02 老版 procd-ujail）。
+func ParseUjailHelpSupportsCaps(helpText string) bool {
+	trimmed := strings.TrimSpace(helpText)
+	if trimmed == "" {
+		// 非标准空输出（例如测试桩脚本）默认保留完整能力，交由启动探活与自动回滚兜底。
+		return true
+	}
+	lower := strings.ToLower(trimmed)
+	if !strings.Contains(lower, "usage") && !strings.Contains(lower, "ujail") {
+		return true
+	}
+	for line := range strings.SplitSeq(trimmed, "\n") {
+		lt := strings.TrimSpace(line)
+		if strings.HasPrefix(lt, "-C ") || strings.HasPrefix(lt, "-C\t") || strings.Contains(lt, " -C ") || strings.Contains(lt, "\t-C ") {
+			return true
+		}
+	}
+	return false
+}
+
+func (o UjailOptions) probeCapsSupport(ctx context.Context, ujailBin string) bool {
+	if o.CapabilitiesProbe != nil {
+		return o.CapabilitiesProbe(ctx, ujailBin)
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	out, _ := exec.CommandContext(probeCtx, ujailBin, "-h").CombinedOutput()
+	return ParseUjailHelpSupportsCaps(string(out))
+}
+
 // IsUjailAvailable 检测当前系统是否具备 OpenWrt ujail 沙盒可执行程序与 tailscale init 脚本。
 func IsUjailAvailable() bool {
-	if _, err := os.Stat(DefaultUjailBin); err != nil {
+	if _, err := ResolveUjailBin("", exec.LookPath); err != nil {
 		return false
 	}
 	_, err := os.Stat(constant.TailscaleInitdScript)
@@ -182,14 +235,20 @@ func ApplyUjailSandbox(ctx context.Context, enable bool, opts UjailOptions) (boo
 	}
 
 	if enable {
-		if _, err := os.Stat(opts.ujailBin()); err != nil {
-			return false, fmt.Errorf("ujail binary not found at %s: %w", opts.ujailBin(), err)
+		resolvedBin, err := ResolveUjailBin(opts.UjailBin, opts.LookPath)
+		if err != nil {
+			return false, err
 		}
-		if err := os.MkdirAll(filepath.Dir(capsPath), 0755); err != nil {
-			return false, fmt.Errorf("create capabilities dir: %w", err)
-		}
-		if err := os.WriteFile(capsPath, BuildTailscaleCapabilitiesJSON(), 0644); err != nil {
-			return false, fmt.Errorf("write capabilities file: %w", err)
+		supportsCaps := opts.probeCapsSupport(ctx, resolvedBin)
+		if supportsCaps {
+			if err := os.MkdirAll(filepath.Dir(capsPath), 0755); err != nil {
+				return false, fmt.Errorf("create capabilities dir: %w", err)
+			}
+			if err := os.WriteFile(capsPath, BuildTailscaleCapabilitiesJSON(), 0644); err != nil {
+				return false, fmt.Errorf("write capabilities file: %w", err)
+			}
+		} else {
+			_ = os.Remove(capsPath)
 		}
 		if hasV2 {
 			return false, nil
@@ -209,7 +268,7 @@ func ApplyUjailSandbox(ctx context.Context, enable bool, opts UjailOptions) (boo
 			}
 		}
 
-		injected, err := injectUjailIntoInitScript(baseScript, capsPath)
+		injected, err := injectUjailIntoInitScript(baseScript, capsPath, supportsCaps)
 		if err != nil {
 			return false, err
 		}
@@ -249,25 +308,32 @@ func ApplyUjailSandbox(ctx context.Context, enable bool, opts UjailOptions) (boo
 	return true, nil
 }
 
-func injectUjailIntoInitScript(script, capsPath string) (string, error) {
+func injectUjailIntoInitScript(script, capsPath string, supportsCaps bool) (string, error) {
 	anchor := "procd_close_instance"
 	idx := strings.LastIndex(script, anchor)
 	if idx < 0 {
 		return "", fmt.Errorf("unexpected tailscale init script layout: missing %s", anchor)
 	}
 
-	jailBlock := strings.Join([]string{
+	lines := []string{
 		"    mkdir -p /etc/tailscale /var/run/tailscale /var/lib/tailscale",
 		"    " + ujailMarkerV2,
 		"    procd_add_jail tailscale log procfs sysfs ronly",
-		fmt.Sprintf("    [ -f %q ] && procd_set_param capabilities %q", capsPath, capsPath),
-		"    procd_set_param no_new_privs 1",
+	}
+	if supportsCaps {
+		lines = append(lines,
+			fmt.Sprintf("    [ -f %q ] && procd_set_param capabilities %q", capsPath, capsPath),
+			"    procd_set_param no_new_privs 1",
+		)
+	}
+	lines = append(lines,
 		"    procd_add_jail_mount /usr/sbin/tailscaled /usr/sbin/tailscale /etc/ssl /etc/hosts /etc/resolv.conf",
-		"    for _singctl_ro in /etc/ssl/certs /etc/ssl/cert.pem /etc/protocols /etc/services /etc/TZ /tmp/resolv.conf.d /usr/sbin/nft /usr/sbin/iptables /usr/sbin/ip6tables /sbin/ip /usr/libexec/ip-full /bin/busybox; do",
+		"    for _singctl_ro in /etc/ssl/certs /etc/ssl/cert.pem /etc/protocols /etc/services /etc/TZ /tmp/resolv.conf.d /usr/sbin/nft /usr/sbin/iptables /usr/sbin/ip6tables /usr/sbin/ipset /sbin/ip /usr/libexec/ip-full /bin/busybox; do",
 		"        [ -e \"$_singctl_ro\" ] && procd_add_jail_mount \"$_singctl_ro\"",
 		"    done",
 		"    procd_add_jail_mount_rw /etc/tailscale /var/run/tailscale /var/lib/tailscale /dev/net/tun",
-	}, "\n") + "\n"
+	)
+	jailBlock := strings.Join(lines, "\n") + "\n"
 
 	lineStart := strings.LastIndex(script[:idx], "\n")
 	if lineStart < 0 {

@@ -51,11 +51,16 @@ func TestP2PAssistController_MissingNFTBackoffAndReset(t *testing.T) {
 			Now:      clk.Now,
 			Sleep:    clk.Sleep,
 			LookPath: func(file string) (string, error) {
-				lookPathCalls.Add(1)
+				if file == "nft" {
+					lookPathCalls.Add(1)
+				}
 				if !hasNFT.Load() {
 					return "", &exec.Error{Name: file, Err: exec.ErrNotFound}
 				}
-				return "/usr/sbin/nft", nil
+				if file == "nft" {
+					return "/usr/sbin/nft", nil
+				}
+				return "", &exec.Error{Name: file, Err: exec.ErrNotFound}
 			},
 		}
 		cfg := config.TailscaleP2PAssistConfig{Enabled: true}

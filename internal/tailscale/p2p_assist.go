@@ -119,22 +119,28 @@ func (c *P2PAssistController) effectiveNFTUnavailableBackoff() time.Duration {
 	return DefaultNFTUnavailableBackoff
 }
 
-func (c *P2PAssistController) probeNFTBinary() error {
-	if c.LookPath != nil {
-		_, err := c.LookPath("nft")
+func (c *P2PAssistController) probeFirewallBackend() error {
+	look := c.LookPath
+	if look == nil {
+		// 当测试显式注入了自定义 FW4.Runner 时跳过宿主机 PATH 检查，避免非 Linux 测试机误判。
+		if c.FW4 != nil && c.FW4.Runner != nil {
+			return nil
+		}
+		look = exec.LookPath
+	}
+	if _, err := look("nft"); err == nil {
+		return nil
+	} else {
+		if _, iptErr := look("iptables"); iptErr == nil {
+			return nil
+		}
 		return err
 	}
-	// 当测试显式注入了自定义 FW4.Runner 时跳过宿主机 PATH 检查，避免非 Linux 测试机误判。
-	if c.FW4 != nil && c.FW4.Runner != nil {
-		return nil
-	}
-	_, err := exec.LookPath("nft")
-	return err
 }
 
 func (c *P2PAssistController) recordNFTUnavailable(now time.Time, cause error) (msg string, firstReport bool) {
 	backoff := c.effectiveNFTUnavailableBackoff()
-	msg = fmt.Sprintf("当前宿主机未检测到 nftables (nft) 命令（可能为纯 iptables 固件），已跳过 fw4 P2P 防线并静默退避 %v: %v", backoff, cause)
+	msg = fmt.Sprintf("当前宿主机未检测到 nftables (nft) 或 iptables 命令，已跳过 Tailscale P2P 防线并静默退避 %v: %v", backoff, cause)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	firstReport = !c.nftUnavailableReported
@@ -267,7 +273,7 @@ func (c *P2PAssistController) Reconcile(ctx context.Context, cfg config.Tailscal
 	fw4 := c.fw4Manager()
 
 	if !cfg.Enabled {
-		err := fw4.Remove(ctx)
+		err := fw4.removeWithLookPath(ctx, c.LookPath)
 		c.mu.Lock()
 		for _, st := range c.peers {
 			st.pinholeOpen = false
@@ -300,7 +306,7 @@ func (c *P2PAssistController) Reconcile(ctx context.Context, cfg config.Tailscal
 	}
 	c.mu.Unlock()
 
-	if lookErr := c.probeNFTBinary(); lookErr != nil {
+	if lookErr := c.probeFirewallBackend(); lookErr != nil {
 		msg, firstReport := c.recordNFTUnavailable(now, lookErr)
 		snap := P2PRuntimeSnapshot{
 			Enabled:    true,
@@ -365,7 +371,7 @@ func (c *P2PAssistController) Reconcile(ctx context.Context, cfg config.Tailscal
 		}, err
 	}
 
-	applyMode, applyErr := fw4.Apply(ctx, dropIns)
+	applyMode, applyErr := fw4.applyWithLookPath(ctx, dropIns, c.LookPath)
 	if applyErr != nil && errors.Is(applyErr, exec.ErrNotFound) {
 		msg, firstReport := c.recordNFTUnavailable(now, applyErr)
 		snap := P2PRuntimeSnapshot{
