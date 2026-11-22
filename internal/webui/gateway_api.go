@@ -10,8 +10,10 @@ import (
 	"strings"
 
 	"singctl/internal/config"
+	"singctl/internal/constant"
 	"singctl/internal/daemon"
 	"singctl/internal/gateway"
+	"singctl/internal/logger"
 	"singctl/internal/singbox"
 )
 
@@ -198,6 +200,16 @@ func (s *Server) handleGatewayPut(w http.ResponseWriter, r *http.Request) {
 			}
 			if daemon.IsSingBoxRunning() {
 				appliedLive = true
+			}
+		}
+	}
+
+	// 同步 SmartDNS 的 force-AAAA-SOA 策略（唯一真相源为 gateway.ipv6_mode：off -> 屏蔽 AAAA，cn_only/full -> 放行）
+	if ipv6Changed || body.IPv6Mode != nil {
+		if active := s.newDNSRegistry(cfg).ActiveEngine(); active != nil &&
+			active.ID() == constant.DNSEngineSmartDNS && active.IsInstalled() {
+			if syncErr := active.SyncCommonConfig(r.Context()); syncErr != nil {
+				logger.Warn("[Gateway] 同步 SmartDNS AAAA 策略失败: %v", syncErr)
 			}
 		}
 	}

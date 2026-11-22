@@ -1,4 +1,4 @@
-// 文件职责：验证审计黑名单对三引擎（adguard / smartdns / singbox）本地 DNS 层的解耦同步行为。
+// 文件职责：验证审计黑名单对双引擎（adguard / smartdns）本地 DNS 层的解耦同步及未安装兜底行为。
 package audit_test
 
 import (
@@ -13,18 +13,25 @@ import (
 	"singctl/internal/platform/servicemgr"
 )
 
-func TestSyncDNSBlockRulesForEngine_ThreeEngines(t *testing.T) {
+func TestSyncDNSBlockRulesForEngine_DualEngines(t *testing.T) {
 	ctx := t.Context()
 
-	t.Run("singbox_engine_is_native_noop", func(t *testing.T) {
-		cfg := &config.Config{
-			DNS: config.ClientDNSConfig{Engine: constant.DNSEngineSingBox},
-		}
-		applied, mode, err := audit.SyncDNSBlockRulesForEngine(ctx, cfg, audit.DNSBlockSyncOptions{}, []config.BlockRule{
-			{Target: "tracker.example.com"},
-		})
-		if err != nil || !applied || mode != "singbox_native" {
-			t.Fatalf("got applied=%v mode=%q err=%v; want true, singbox_native, nil", applied, mode, err)
+	t.Run("uninstalled_auto_or_legacy_singbox_returns_not_installed", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		for _, eng := range []string{constant.DNSEngineAuto, "singbox"} {
+			cfg := &config.Config{
+				DNS: config.ClientDNSConfig{Engine: eng},
+			}
+			applied, mode, err := audit.SyncDNSBlockRulesForEngine(ctx, cfg, audit.DNSBlockSyncOptions{
+				AdGuardBinPath:    filepath.Join(tmpDir, "missing-agh"),
+				AdGuardConfigPath: filepath.Join(tmpDir, "missing-agh.yaml"),
+				SmartDNSBinPath:   filepath.Join(tmpDir, "missing-sd"),
+			}, []config.BlockRule{
+				{Target: "tracker.example.com"},
+			})
+			if err != nil || applied || mode != "not_installed" {
+				t.Fatalf("engine=%q: got applied=%v mode=%q err=%v; want false, not_installed, nil", eng, applied, mode, err)
+			}
 		}
 	})
 

@@ -157,7 +157,7 @@ var defaultSaveCleanupRules = []ASTSubtreeCleanupRule{
 		RemoveTopLevel: true,
 	},
 	{
-		// 当 dns 可选三引擎/规则/开关字段被清空或恢复默认时，从 dstDoc 移除陈旧键以防合并残留
+		// 当 dns 可选双引擎/规则/开关字段被清空或恢复默认时，从 dstDoc 移除陈旧键以防合并残留
 		Name:      "dns_stale_children",
 		When:      func(cfg *Config, _, _ bool) bool { return cfg != nil },
 		TargetDoc: "dst",

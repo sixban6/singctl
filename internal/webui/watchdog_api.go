@@ -173,8 +173,9 @@ func (s *Server) buildWatchdogReport(cfg *config.Config) map[string]any {
 		"enabled":           cfg != nil && cfg.DNS.IsEnabled(),
 		"installed":         false,
 		"healthy":           false,
-		"activeEngine":      constant.DNSEngineSingBox,
-		"activeEngineLabel": "sing-box 加强版",
+		"activeEngine":      constant.DNSEngineSmartDNS,
+		"activeEngineLabel": "SmartDNS",
+		"fallbackDoHActive": true,
 	}
 	if cfg != nil {
 		reg := s.newDNSRegistry(cfg)
@@ -184,6 +185,7 @@ func (s *Server) buildWatchdogReport(cfg *config.Config) map[string]any {
 			aghInfo["activeEngineLabel"] = active.Meta().Name
 			aghInfo["installed"] = st.Installed
 			aghInfo["healthy"] = st.DNSHealthy
+			aghInfo["fallbackDoHActive"] = !st.Installed || !st.Running || !cfg.DNS.IsEnabled()
 		}
 	}
 

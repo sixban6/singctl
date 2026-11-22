@@ -98,7 +98,6 @@ func BuildUnifiedDaemon(cfg *config.Config, configPath, ver string, deps DaemonS
 				ConfigPath:              configPath,
 				ConfigStore:             cfgStore,
 				AuditCollector:          d.AuditCollector(),
-				SingBoxStatsRing:        d.SingBoxStatsRing(),
 				SmartDNSStatsRing:       d.SmartDNSStatsRing(),
 				SmartDNSTailer:          d.SmartDNSTailer(),
 				LowMemoryMode:           &lowMem,

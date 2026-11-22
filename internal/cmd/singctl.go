@@ -214,7 +214,7 @@ func showSystemInfo(configPath, version string) error {
 		logger.Info("日志文件路径    : %s (未生成)", logPath)
 	}
 
-	// 3.5 客户端本地防劫持 DNS 三引擎信息
+	// 3.5 客户端本地防劫持 DNS 双引擎信息
 	if runtime.GOOS == "linux" && cfg != nil {
 		reg := localdns.NewRegistry(cfg, localdns.EngineDeps{ConfigPath: configPath})
 		active := reg.ActiveEngine()
@@ -229,7 +229,7 @@ func showSystemInfo(configPath, version string) error {
 			} else if st.Installed {
 				logger.Warn("运行状态        : 未运行 (%s) ✗", st.DNSAddr)
 			} else {
-				logger.Warn("运行状态        : 未安装 ✗")
+				logger.Warn("运行状态        : 未安装 ✗ (sing-box 纯 IP 加密 DoH 兜底防劫持中)")
 			}
 			if active.ID() == constant.DNSEngineAdGuard {
 				logger.Info("Web 管理面板    : %s", st.WebURL)

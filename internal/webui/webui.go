@@ -56,9 +56,7 @@ type Options struct {
 	DNSProbeUpstreamForTest            func(ctx context.Context, upstreams []string, domain string, timeout time.Duration) []adguard.UpstreamProbeItem    // 仅供离线单元测试注入上游探测结果
 	LocalDNSProbeDNSForTest            func(addr string, timeout time.Duration) error                                                                     // 仅供离线单元测试注入本地 DNS 端口探活
 	LocalDNSProbeResForTest            func(addr, domain string, timeout time.Duration) ([]string, time.Duration, error)                                  // 仅供离线单元测试注入域名实测解析
-	LocalDNSSyncSingBoxEnhancedForTest func(ctx context.Context, sbCfgPath, workPath string, dnsCfg config.ClientDNSConfig, subDomains []string, now time.Time) (bool, error)
 	LocalDNSSyncSingBoxDNSLocalForTest func(ctx context.Context, sbCfgPath, workPath string, useExternal bool, dnsPort int) (bool, error)
-	SingBoxStatsRing                   *localdns.StatsRing                                                                                                // 可选：与单进程合体守护进程共享 sing-box DNS 遥测统计环
 	SmartDNSStatsRing                  *localdns.StatsRing                                                                                                // 可选：与单进程合体守护进程共享 SmartDNS 审计统计环
 	SmartDNSTailer                     *smartdns.AuditLogTailer                                                                                           // 可选：与单进程合体守护进程共享 SmartDNS 审计日志追踪器
 	ExecutablePath          string                                                                            // 可选：测试/定制 singctl 可执行文件路径
@@ -108,10 +106,8 @@ type Server struct {
 
 	clash             *clashapi.Client
 	dohProber         *dohprobe.Prober
-	dnsStatsRing      *localdns.StatsRing
 	smartDNSStatsRing *localdns.StatsRing
 	smartDNSTailer    *smartdns.AuditLogTailer
-	dnsTelemetry      *localdns.DomainTelemetryTracker
 
 	// /api/sb/traffic 按需后台采样器（无请求 15s 自动停止）
 	trafficMu                  sync.Mutex
@@ -152,10 +148,6 @@ func New(opts Options) *Server {
 	}
 
 	lowMemRing := opts.LowMemoryMode != nil && *opts.LowMemoryMode
-	sbRing := opts.SingBoxStatsRing
-	if sbRing == nil {
-		sbRing = localdns.NewStatsRing(lowMemRing)
-	}
 	sdRing := opts.SmartDNSStatsRing
 	if sdRing == nil {
 		sdRing = localdns.NewStatsRing(lowMemRing)
@@ -163,10 +155,6 @@ func New(opts Options) *Server {
 	sdTailer := opts.SmartDNSTailer
 	if sdTailer == nil {
 		sdTailer = smartdns.NewAuditLogTailer(cmp.Or(strings.TrimSpace(opts.SmartDNSAuditLogPath), constant.SmartDNSAuditLogPath))
-	}
-	telemetryCap := 1024
-	if lowMemRing {
-		telemetryCap = 256
 	}
 
 	s := &Server{
@@ -177,10 +165,8 @@ func New(opts Options) *Server {
 		auditCollector:    audCollector,
 		loginLimiter:      newLoginRateLimiter(),
 		clash:             clashCli,
-		dnsStatsRing:      sbRing,
 		smartDNSStatsRing: sdRing,
 		smartDNSTailer:    sdTailer,
-		dnsTelemetry:      localdns.NewDomainTelemetryTracker(sbRing, telemetryCap),
 		shutdownCh:        make(chan struct{}),
 	}
 	s.lastReqUnixNano.Store(s.now().UnixNano())
@@ -253,7 +239,7 @@ func (s *Server) registerRoutes() {
 	s.Mux.HandleFunc("PUT /api/watchdog/config", s.guard(s.handleWatchdogConfigPut))
 	s.Mux.HandleFunc("POST /api/watchdog/patrol", s.guard(s.handleWatchdogPatrolPost))
 
-	// 统一三引擎防劫持 DNS 管控中心 API (/api/dns/* 主契约 + /api/adguard/* 向后兼容别名)
+	// 统一双引擎防劫持 DNS 管控中心 API (/api/dns/* 主契约 + /api/adguard/* 向后兼容别名)
 	s.Mux.HandleFunc("GET /api/dns/overview", s.guard(s.handleDNSOverviewGet))
 	s.Mux.HandleFunc("GET /api/dns/credentials", s.guard(s.handleDNSCredentialsGet))
 	s.Mux.HandleFunc("POST /api/dns/credentials/reset", s.guard(s.handleDNSCredentialsResetPost))
@@ -266,10 +252,10 @@ func (s *Server) registerRoutes() {
 	s.Mux.HandleFunc("POST /api/dns/whitelist", s.guard(s.handleDNSWhitelistPost))
 	s.Mux.HandleFunc("POST /api/dns/rewrites", s.guard(s.handleDNSRewritesPost))
 	s.Mux.HandleFunc("POST /api/dns/filters", s.guard(s.handleDNSFiltersPost))
-	s.Mux.HandleFunc("POST /api/dns/block-aaaa", s.guard(s.handleDNSBlockAAAAPost))
 
 	// 向后兼容原有 AdGuard Home API 路由别名
 	s.Mux.HandleFunc("GET /api/adguard", s.guard(s.handleDNSOverviewGet))
+	s.Mux.HandleFunc("GET /api/adguard/overview", s.guard(s.handleDNSOverviewGet))
 	s.Mux.HandleFunc("GET /api/adguard/credentials", s.guard(s.handleDNSCredentialsGet))
 	s.Mux.HandleFunc("POST /api/adguard/credentials/reset", s.guard(s.handleDNSCredentialsResetPost))
 	s.Mux.HandleFunc("POST /api/adguard/protection", s.guard(s.handleDNSProtectionPost))

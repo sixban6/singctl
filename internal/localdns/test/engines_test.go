@@ -1,20 +1,17 @@
-// 文件职责：验证三引擎注册表与 singbox / smartdns / adguard 三个具体引擎的完整管控接口、统计与防注入校验。
+// 文件职责：验证双引擎注册表（SmartDNS / AdGuard Home）、未安装纯 DoH 兜底契约及各引擎完整管控接口与防注入校验。
 package localdns_test
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 	"time"
 
-	"singctl/internal/adguard"
 	"singctl/internal/common/sysinfo"
 	"singctl/internal/config"
 	"singctl/internal/constant"
@@ -31,6 +28,8 @@ func sampleSingBoxConfigJSON() string {
       {"tag": "dns_local", "type": "https", "server": "223.5.5.5", "server_port": 443, "path": "/dns-query"},
       {"tag": "dns_proxy", "type": "https", "server": "1.1.1.1", "server_port": 443, "path": "/dns-query"}
     ],
+    "disable_cache": true,
+    "optimistic": false,
     "rules": [
       {"rule_set": ["geosite-ad1", "geosite-ad2"], "action": "reject"},
       {"rule_set": "block-builtin-pcdn", "action": "reject"}
@@ -46,201 +45,122 @@ func sampleSingBoxConfigJSON() string {
       {"rule_set": ["geosite-ad1", "geosite-ad2"], "action": "reject"},
       {"rule_set": "block-builtin-pcdn", "action": "reject"}
     ]
+  },
+  "experimental": {
+    "cache_file": {
+      "enabled": true,
+      "store_dns": false,
+      "store_fakeip": false
+    }
   }
 }`
 }
 
-func TestSingBoxEngine_FullControlsAndTelemetry(t *testing.T) {
+func TestRegistry_DualEngineUninstalledFallbackDoHContract(t *testing.T) {
 	ctx := t.Context()
 	tmpDir := t.TempDir()
-	cfgPath := filepath.Join(tmpDir, "singctl.yaml")
+	const mib = 1024 * 1024
+
 	sbCfgPath := filepath.Join(tmpDir, "config.json")
 	if err := os.WriteFile(sbCfgPath, []byte(sampleSingBoxConfigJSON()), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := singbox.SaveBaseSnapshot(sbCfgPath, sampleSingBoxConfigJSON()); err != nil {
-		t.Fatal(err)
-	}
 
-	now := time.Date(2026, 11, 22, 18, 0, 0, 0, time.UTC)
-	cfg := &config.Config{
-		Subs: []config.Subscription{{Name: "S1", URL: "https://sub.example.com/profile"}},
-		DNS: config.ClientDNSConfig{
-			Engine:       constant.DNSEngineSingBox,
-			UpstreamMode: config.DNSUpstreamModeFastestIP,
-			Upstreams:    []string{"https://223.5.5.5/dns-query", "https://1.12.12.12/dns-query"},
-		},
-	}
-	if err := config.Save(cfgPath, cfg); err != nil {
-		t.Fatal(err)
-	}
+	t.Run("n60pro_uninstalled_selects_smartdns_and_reports_fallback_doh_active", func(t *testing.T) {
+		cfg := &config.Config{DNS: config.ClientDNSConfig{Engine: "singbox"}} // legacy value must normalize to auto
+		reg := localdns.NewRegistry(cfg, localdns.EngineDeps{
+			SingBoxConfigPath: sbCfgPath,
+			AdGuardBinPath:    filepath.Join(tmpDir, "missing-agh"),
+			AdGuardConfigPath: filepath.Join(tmpDir, "missing-agh.yaml"),
+			SmartDNSBinPath:   filepath.Join(tmpDir, "missing-smartdns"),
+			ReadMemInfo: func() (sysinfo.MemInfo, error) {
+				return sysinfo.MemInfo{TotalBytes: 491040 * 1024, AvailableBytes: 210260 * 1024}, nil
+			},
+			ReadDiskSpace: func(string) (sysinfo.DiskSpace, error) {
+				return sysinfo.DiskSpace{AvailBytes: 50 * mib}, nil
+			},
+		})
 
-	ring := localdns.NewStatsRing(true)
-	ring.Record(now, "video.example.com", false, 0)
-	ring.Record(now, "ad.example.com", true, 0)
+		if _, ok := reg.Get("singbox"); ok {
+			t.Fatal("removed singbox engine must NOT be registered")
+		}
+		if len(reg.All()) != 2 {
+			t.Fatalf("expected exactly 2 registered engines, got %d", len(reg.All()))
+		}
 
-	syncCalls := 0
-	cacheCleared := false
-
-	deps := localdns.EngineDeps{
-		ConfigPath:        cfgPath,
-		SingBoxConfigPath: sbCfgPath,
-		AdGuardBinPath:    filepath.Join(tmpDir, "missing-agh"),
-		SmartDNSBinPath:   filepath.Join(tmpDir, "missing-smartdns"),
-		SingBoxStats:      ring,
-		NowFunc:           func() time.Time { return now },
-		SingBoxRunningFunc: func() bool {
-			return true
-		},
-		SingBoxVersionFunc: func() string { return "1.14.4" },
-		ReadMemInfo: func() (sysinfo.MemInfo, error) {
-			return sysinfo.MemInfo{TotalBytes: 256 * 1024 * 1024, AvailableBytes: 120 * 1024 * 1024}, nil
-		},
-		ReadDiskSpace: func(string) (sysinfo.DiskSpace, error) {
-			return sysinfo.DiskSpace{AvailBytes: 40 * 1024 * 1024}, nil
-		},
-		ProbeUpstreamListFunc: func(_ context.Context, upstreams []string, _ string, _ time.Duration) []adguard.UpstreamProbeItem {
-			out := make([]adguard.UpstreamProbeItem, len(upstreams))
-			for i, u := range upstreams {
-				lat := int64(35)
-				if strings.Contains(u, "1.12.12.12") {
-					lat = 9
-				}
-				out[i] = adguard.UpstreamProbeItem{
-					Address:   u,
-					Name:      u,
-					Protocol:  "DoH",
-					Healthy:   true,
-					LatencyMs: lat,
-					Resolved:  "192.0.2.1",
-				}
+		ov := reg.Overview(ctx)
+		if ov.ConfiguredEngine != constant.DNSEngineAuto {
+			t.Fatalf("ConfiguredEngine = %q, want auto", ov.ConfiguredEngine)
+		}
+		if ov.ActiveEngine != constant.DNSEngineSmartDNS || ov.ActiveEngineLabel != "SmartDNS" {
+			t.Fatalf("ActiveEngine = %q (%q), want smartdns (SmartDNS)", ov.ActiveEngine, ov.ActiveEngineLabel)
+		}
+		if ov.RecommendedEngine != constant.DNSEngineSmartDNS {
+			t.Fatalf("RecommendedEngine = %q, want smartdns", ov.RecommendedEngine)
+		}
+		if ov.Installed {
+			t.Fatal("expected Installed=false when neither external engine is installed")
+		}
+		if !ov.FallbackDoHActive {
+			t.Fatal("expected FallbackDoHActive=true when external engine is uninstalled")
+		}
+		if ov.StatsSource != "smartdns_audit" {
+			t.Fatalf("StatsSource = %q, want smartdns_audit", ov.StatsSource)
+		}
+		if len(ov.Engines) != 2 {
+			t.Fatalf("expected 2 engine options, got %d: %+v", len(ov.Engines), ov.Engines)
+		}
+		for _, opt := range ov.Engines {
+			if opt.ID == "singbox" {
+				t.Fatalf("Engines must never contain singbox: %+v", ov.Engines)
 			}
-			return out
-		},
-		SyncSingBoxEnhancedFunc: func(_ context.Context, p, _ string, dnsCfg config.ClientDNSConfig, subDomains []string, ts time.Time) (bool, error) {
-			syncCalls++
-			raw, err := os.ReadFile(p)
-			if err != nil {
-				return false, err
-			}
-			updated, changed, err := singbox.ApplyEnhancedSingBoxDNSJSON(string(raw), dnsCfg, subDomains, ts)
-			if err != nil {
-				return false, err
-			}
-			if changed {
-				if err := os.WriteFile(p, []byte(updated), 0600); err != nil {
-					return false, err
-				}
-			}
-			return changed, nil
-		},
-		ClearSingBoxCacheFunc: func(context.Context, string, string) error {
-			cacheCleared = true
-			return nil
-		},
-	}
+		}
 
-	reg := localdns.NewRegistry(cfg, deps)
-	eng := reg.ActiveEngine()
-	if eng == nil || eng.ID() != constant.DNSEngineSingBox {
-		t.Fatalf("expected active singbox engine, got %v", eng)
-	}
+		st := reg.StatusSummary(ctx)
+		if fb, _ := st["fallbackDoHActive"].(bool); !fb {
+			t.Fatalf("StatusSummary expected fallbackDoHActive=true, got %+v", st)
+		}
+		if ae, _ := st["activeEngine"].(string); ae != constant.DNSEngineSmartDNS {
+			t.Fatalf("StatusSummary activeEngine=%q, want smartdns", ae)
+		}
+	})
 
-	// 1. Overview & capabilities contract
-	ov := reg.Overview(ctx)
-	if ov.ActiveEngine != constant.DNSEngineSingBox || !ov.Installed || !ov.Capabilities.HasQueryStats || !ov.Capabilities.HasBlockAAAA || ov.Capabilities.HasCustomFilterURL || ov.Capabilities.CanUninstall {
-		t.Fatalf("unexpected singbox overview/capabilities: active=%q installed=%v caps=%+v", ov.ActiveEngine, ov.Installed, ov.Capabilities)
-	}
-	if ov.StatsSource != "singbox_telemetry" || ov.Stats.NumDNSQueries != 2 || ov.Stats.NumBlockedFiltering != 1 {
-		t.Fatalf("unexpected singbox telemetry stats: source=%q stats=%+v", ov.StatsSource, ov.Stats)
-	}
-	if len(ov.Engines) != 3 {
-		t.Fatalf("expected 3 engine options, got %d", len(ov.Engines))
-	}
-
-	// 2. SetUpstreams in fastest_ip mode places fastest upstream (1.12.12.12) first!
-	upRes, err := eng.SetUpstreams(ctx, []string{"https://223.5.5.5/dns-query", "https://1.12.12.12/dns-query"}, config.DNSUpstreamModeFastestIP, false)
-	if err != nil {
-		t.Fatalf("SetUpstreams failed: %v", err)
-	}
-	if len(upRes.Upstreams) != 2 || upRes.Upstreams[0].Address != "https://1.12.12.12/dns-query" {
-		t.Fatalf("expected fastest upstream promoted to index 0, got %+v", upRes.Upstreams)
-	}
-	// Malicious / loopback upstream rejected
-	if _, err := eng.SetUpstreams(ctx, []string{"https://127.0.0.1/dns-query"}, "", false); err == nil {
-		t.Fatal("expected loopback upstream to be rejected")
-	}
-
-	// 3. Pause protection 30 min -> config persisted & synced
-	if err := eng.SetProtection(ctx, false, 30); err != nil {
-		t.Fatalf("SetProtection pause failed: %v", err)
-	}
-	if !cfg.DNS.IsAdblockPaused(now) {
-		t.Fatalf("expected adblock paused, AdblockDisabledUntil=%d", cfg.DNS.AdblockDisabledUntil)
-	}
-	// Resume protection
-	if err := eng.SetProtection(ctx, true, 0); err != nil {
-		t.Fatalf("SetProtection resume failed: %v", err)
-	}
-	if cfg.DNS.IsAdblockPaused(now) {
-		t.Fatal("expected adblock resumed")
-	}
-
-	// 4. Filter toggle built-in tag succeeds; custom external URL rejected
-	if err := eng.SetFilterState(ctx, "ruleset:geosite-ad2", "", false); err != nil {
-		t.Fatalf("disable geosite-ad2 failed: %v", err)
-	}
-	if !slices.Contains(cfg.DNS.DisabledAdRuleSets, "geosite-ad2") {
-		t.Fatalf("expected geosite-ad2 in DisabledAdRuleSets, got %v", cfg.DNS.DisabledAdRuleSets)
-	}
-	if err := eng.SetFilterState(ctx, "https://example.com/custom.txt", "Custom", true); err == nil {
-		t.Fatal("expected custom filter URL to be rejected by singbox engine")
-	}
-
-	// 5. Whitelist, Rewrite, BlockAAAA & .singctl-base sync
-	if err := eng.SetWhitelist(ctx, "good.example.com", true); err != nil {
-		t.Fatalf("SetWhitelist failed: %v", err)
-	}
-	if err := eng.AddRewrite(ctx, "nas.example.com", "192.0.2.50"); err != nil {
-		t.Fatalf("AddRewrite failed: %v", err)
-	}
-	if err := eng.AddRewrite(ctx, "bad\ndomain.example.com", "192.0.2.50"); err == nil {
-		t.Fatal("expected injection domain rewrite rejected")
-	}
-	if err := eng.SetBlockAAAA(ctx, true); err != nil {
-		t.Fatalf("SetBlockAAAA failed: %v", err)
-	}
-	baseAfter, err := singbox.LoadBaseSnapshot(sbCfgPath)
-	if err != nil || !strings.Contains(baseAfter, "192.0.2.50") {
-		t.Fatalf("expected .singctl-base synced with rewrite, err=%v", err)
-	}
-
-	// 6. Probe, ClearCache & ConfigPreview
-	rep := eng.ProbeUpstreams(ctx, "qq.com")
-	if !rep.Healthy || rep.FastestUpstream != "https://1.12.12.12/dns-query" {
-		t.Fatalf("unexpected probe report: %+v", rep)
-	}
-	if err := eng.ClearCache(ctx); err != nil || !cacheCleared {
-		t.Fatalf("ClearCache failed: err=%v cleared=%v", err, cacheCleared)
-	}
-	prev, err := eng.ConfigPreview(ctx)
-	if err != nil || prev.Engine != constant.DNSEngineSingBox || !strings.Contains(prev.Content, "dns_local") {
-		t.Fatalf("unexpected ConfigPreview: err=%v prev=%+v", err, prev)
-	}
-	if syncCalls == 0 {
-		t.Fatal("expected live singbox enhanced sync calls")
-	}
+	t.Run("high_spec_uninstalled_selects_adguard_with_fallback_doh", func(t *testing.T) {
+		cfg := &config.Config{DNS: config.ClientDNSConfig{Engine: constant.DNSEngineAuto}}
+		reg := localdns.NewRegistry(cfg, localdns.EngineDeps{
+			SingBoxConfigPath: sbCfgPath,
+			AdGuardBinPath:    filepath.Join(tmpDir, "missing-agh"),
+			AdGuardConfigPath: filepath.Join(tmpDir, "missing-agh.yaml"),
+			SmartDNSBinPath:   filepath.Join(tmpDir, "missing-smartdns"),
+			ReadMemInfo: func() (sysinfo.MemInfo, error) {
+				return sysinfo.MemInfo{TotalBytes: 2048 * mib, AvailableBytes: 1500 * mib}, nil
+			},
+			ReadDiskSpace: func(string) (sysinfo.DiskSpace, error) {
+				return sysinfo.DiskSpace{AvailBytes: 512 * mib}, nil
+			},
+		})
+		ov := reg.Overview(ctx)
+		if ov.ActiveEngine != constant.DNSEngineAdGuard || ov.ActiveEngineLabel != "AdGuard Home" || ov.Installed || !ov.FallbackDoHActive || ov.StatsSource != "adguard_api" || len(ov.Engines) != 2 {
+			t.Fatalf("unexpected high-spec uninstalled overview: active=%q label=%q installed=%v fallback=%v source=%q engines=%d",
+				ov.ActiveEngine, ov.ActiveEngineLabel, ov.Installed, ov.FallbackDoHActive, ov.StatsSource, len(ov.Engines))
+		}
+	})
 }
 
 func TestSmartDNSEngine_ControlsAuditStatsAndPreview(t *testing.T) {
 	ctx := t.Context()
 	tmpDir := t.TempDir()
 	cfgPath := filepath.Join(tmpDir, "singctl.yaml")
+	sbPath := filepath.Join(tmpDir, "config.json")
 	binPath := filepath.Join(tmpDir, "smartdns")
 	confPath := filepath.Join(tmpDir, "smartdns.conf")
 	rulesDir := filepath.Join(tmpDir, "smartdns-rules.d")
 	auditLog := filepath.Join(tmpDir, "smartdns-audit.log")
 
+	sbLinked, _, _ := singbox.PatchDNSLocalJSON(sampleSingBoxConfigJSON(), true, 5353)
+	if err := os.WriteFile(sbPath, []byte(sbLinked), 0600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(binPath, []byte("#!/bin/sh\necho 'smartdns 1.2025.46'\n"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -288,6 +208,7 @@ func TestSmartDNSEngine_ControlsAuditStatsAndPreview(t *testing.T) {
 
 	deps := localdns.EngineDeps{
 		ConfigPath:           cfgPath,
+		SingBoxConfigPath:    sbPath,
 		AdGuardBinPath:       filepath.Join(tmpDir, "missing-agh"),
 		SmartDNSBinPath:      binPath,
 		SmartDNSConfigFile:   confPath,
@@ -310,27 +231,30 @@ func TestSmartDNSEngine_ControlsAuditStatsAndPreview(t *testing.T) {
 		t.Fatalf("expected active smartdns engine, got %v", eng)
 	}
 
-	// Overview ingests SmartDNS audit log into 24h StatsRing
+	// Overview ingests SmartDNS audit log into 24h StatsRing and shows FallbackDoHActive=false when running+linked
 	ov := reg.Overview(ctx)
-	if ov.ActiveEngine != constant.DNSEngineSmartDNS || ov.StatsSource != "smartdns_audit" {
-		t.Fatalf("unexpected smartdns overview: active=%q source=%q", ov.ActiveEngine, ov.StatsSource)
+	if ov.ActiveEngine != constant.DNSEngineSmartDNS || ov.StatsSource != "smartdns_audit" || len(ov.Engines) != 2 {
+		t.Fatalf("unexpected smartdns overview: active=%q source=%q engines=%d", ov.ActiveEngine, ov.StatsSource, len(ov.Engines))
+	}
+	if ov.FallbackDoHActive {
+		t.Fatal("expected FallbackDoHActive=false when SmartDNS is installed, running, enabled and linked")
 	}
 	if ov.Stats.NumDNSQueries != 2 || ov.Stats.NumBlockedFiltering != 1 {
 		t.Fatalf("expected 2 queries / 1 blocked from audit log, got %+v", ov.Stats)
 	}
-	if !ov.Capabilities.HasCustomFilterURL || !ov.Capabilities.HasBlockAAAA || ov.Capabilities.HasNativeWebPanel {
-		t.Fatalf("unexpected smartdns capabilities: %+v", ov.Capabilities)
+	if !ov.Capabilities.HasCustomFilterURL || ov.Capabilities.HasBlockAAAA || ov.Capabilities.HasNativeWebPanel {
+		t.Fatalf("unexpected smartdns capabilities (hasBlockAAAA must be false): %+v", ov.Capabilities)
+	}
+	if !ov.BlockAAAA {
+		t.Fatal("expected SmartDNS Overview BlockAAAA=true when gateway.ipv6_mode defaults to off")
 	}
 
-	// Controls: Whitelist, Rewrite, BlockAAAA, Custom Filter, Audit Sync, ConfigPreview
+	// Controls: Whitelist, Rewrite, Custom Filter, Audit Sync, ConfigPreview
 	if err := eng.SetWhitelist(ctx, "allow.example.com", true); err != nil {
 		t.Fatalf("SetWhitelist failed: %v", err)
 	}
 	if err := eng.AddRewrite(ctx, "nas.example.com", "192.0.2.88"); err != nil {
 		t.Fatalf("AddRewrite failed: %v", err)
-	}
-	if err := eng.SetBlockAAAA(ctx, true); err != nil {
-		t.Fatalf("SetBlockAAAA failed: %v", err)
 	}
 	if err := eng.SetFilterState(ctx, filterSrv.URL+"/adblock.txt", "Test Filter", true); err != nil {
 		t.Fatalf("SetFilterState failed: %v", err)
@@ -342,13 +266,38 @@ func TestSmartDNSEngine_ControlsAuditStatsAndPreview(t *testing.T) {
 
 	prev, err := eng.ConfigPreview(ctx)
 	if err != nil || !strings.Contains(prev.Content, "force-AAAA-SOA yes") || !strings.Contains(prev.Content, "evil.example.com") {
-		t.Fatalf("unexpected smartdns ConfigPreview: err=%v content=%s", err, prev.Content)
+		t.Fatalf("expected force-AAAA-SOA yes when ipv6_mode=off: err=%v content=%s", err, prev.Content)
+	}
+
+	// Single source of truth: gateway.ipv6_mode=cn_only or full MUST disable force-AAAA-SOA even if legacy dns.block_aaaa=true
+	for _, v6Mode := range []string{config.GatewayIPv6CNOnly, config.GatewayIPv6Full} {
+		cfg.Gateway.IPv6Mode = v6Mode
+		cfg.DNS.BlockAAAA = true // legacy field must be ignored in favor of gateway.ipv6_mode
+		if err := eng.SyncCommonConfig(ctx); err != nil {
+			t.Fatalf("SyncCommonConfig(ipv6_mode=%s) failed: %v", v6Mode, err)
+		}
+		ovV6 := reg.Overview(ctx)
+		if ovV6.BlockAAAA {
+			t.Fatalf("ipv6_mode=%s: expected BlockAAAA=false, got true", v6Mode)
+		}
+		prevV6, err := eng.ConfigPreview(ctx)
+		if err != nil || strings.Contains(prevV6.Content, "force-AAAA-SOA yes") {
+			t.Fatalf("ipv6_mode=%s: expected force-AAAA-SOA yes absent, err=%v content=%s", v6Mode, err, prevV6.Content)
+		}
+	}
+	// Switching back to off re-enables force-AAAA-SOA yes
+	cfg.Gateway.IPv6Mode = config.GatewayIPv6Off
+	cfg.DNS.BlockAAAA = false
+	if err := eng.SyncCommonConfig(ctx); err != nil {
+		t.Fatalf("SyncCommonConfig(ipv6_mode=off) failed: %v", err)
+	}
+	if prevOff, err := eng.ConfigPreview(ctx); err != nil || !strings.Contains(prevOff.Content, "force-AAAA-SOA yes") {
+		t.Fatalf("ipv6_mode=off: expected force-AAAA-SOA yes present, err=%v content=%s", err, prevOff.Content)
 	}
 
 	// Verify UTC-skewed musl audit timestamp (e.g. OpenWrt static binary logging UTC while host is UTC-5) is normalized cleanly.
 	fixedNow := time.Date(2026, 11, 23, 13, 0, 5, 0, time.FixedZone("EST", -5*3600))
 	utcLogPath := filepath.Join(tmpDir, "smartdns-audit-utc.log")
-	// UTC equivalent of 13:00:05 EST is 18:00:05 UTC; if parsed naively in EST it would appear 5 hours in the future.
 	utcLine := "[2026-11-23 18:00:03,100] 127.0.0.1 query skew.example.com, type 1, time 10ms, speed: 5.0ms, group default, result 192.0.2.55\n"
 	if err := os.WriteFile(utcLogPath, []byte(utcLine), 0600); err != nil {
 		t.Fatal(err)
@@ -431,8 +380,8 @@ func TestAdGuardEngine_OverviewCredentialsAndRedactedPreview(t *testing.T) {
 	}
 
 	ov := reg.Overview(ctx)
-	if ov.StatsSource != "adguard_api" || ov.Stats.NumDNSQueries != 500 || !ov.Capabilities.HasNativeWebPanel || ov.Capabilities.HasBlockAAAA {
-		t.Fatalf("unexpected adguard overview: source=%q stats=%+v caps=%+v", ov.StatsSource, ov.Stats, ov.Capabilities)
+	if ov.StatsSource != "adguard_api" || ov.Stats.NumDNSQueries != 500 || !ov.Capabilities.HasNativeWebPanel || ov.Capabilities.HasBlockAAAA || len(ov.Engines) != 2 {
+		t.Fatalf("unexpected adguard overview: source=%q stats=%+v caps=%+v engines=%d", ov.StatsSource, ov.Stats, ov.Capabilities, len(ov.Engines))
 	}
 
 	credMgr, ok := eng.(localdns.CredentialManager)
@@ -450,9 +399,5 @@ func TestAdGuardEngine_OverviewCredentialsAndRedactedPreview(t *testing.T) {
 	}
 	if strings.Contains(prev.Content, "secretbcryptvalue") {
 		t.Fatalf("ConfigPreview leaked password hash:\n%s", prev.Content)
-	}
-
-	if err := eng.SetBlockAAAA(ctx, true); err == nil {
-		t.Fatal("expected AdGuardEngine.SetBlockAAAA to return unsupported error")
 	}
 }

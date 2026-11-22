@@ -1,4 +1,4 @@
-// 文件职责：验证 24 小时有界滑动环形统计器的窗口滚动、低内存容量硬上限、延迟聚合、连接去重与高并发竞态安全。
+// 文件职责：验证 24 小时有界滑动环形统计器的窗口滚动、低内存容量硬上限、延迟聚合与高并发竞态安全。
 package localdns_test
 
 import (
@@ -24,8 +24,9 @@ func TestStatsRing_SlidingWindowAndAggregation(t *testing.T) {
 	ring.Record(base.Add(90*time.Second), "api.example.com", false, 20)
 	ring.Record(base.Add(2*time.Minute), "ads.example.com", true, 0)
 	ring.Record(base.Add(3*time.Minute), "ads.example.com", true, 0)
-	// Empty domain should be ignored cleanly
+	// Empty domain and bare IP should be ignored cleanly
 	ring.Record(base, "   ", false, 5)
+	ring.Record(base, "192.0.2.10", false, 5)
 
 	snap := ring.Snapshot(base.Add(5*time.Minute), 99)
 	if snap.NumDNSQueries != 6 {
@@ -58,8 +59,7 @@ func TestStatsRing_SlidingWindowAndAggregation(t *testing.T) {
 	// Fallback latency used when zero latency samples exist
 	ring.Reset()
 	ring.Record(base, "only-no-lat.example.com", false, 0)
-	ring.SetFallbackLatencyMs(14.56)
-	snapFallback := ring.Snapshot(base, ring.FallbackLatencyMs())
+	snapFallback := ring.Snapshot(base, 14.56)
 	if snapFallback.AvgProcessingMs != 14.6 {
 		t.Fatalf("fallback AvgProcessingMs = %v, want 14.6", snapFallback.AvgProcessingMs)
 	}
@@ -85,38 +85,9 @@ func TestStatsRing_LowMemoryCapPreventsUnboundedGrowth(t *testing.T) {
 	}
 }
 
-func TestDomainTelemetryTracker_DeduplicatesAndTracksBlocked(t *testing.T) {
-	now := time.Date(2026, 11, 22, 16, 0, 0, 0, time.UTC)
-	ring := localdns.NewStatsRing(true)
-	tracker := localdns.NewDomainTelemetryTracker(ring, 128)
-
-	batch1 := []localdns.DomainEvent{
-		{ID: "c1", Domain: "video.example.com", Blocked: false},
-		{ID: "c2", Domain: "ad.example.com", Blocked: true},
-		{ID: "c3", Domain: "192.0.2.10", Blocked: false}, // bare IP ignored
-	}
-	if n := tracker.IngestEvents(now, batch1); n != 2 {
-		t.Fatalf("batch1 ingested = %d, want 2", n)
-	}
-	// Repeating active connection IDs must not double-count
-	batch2 := []localdns.DomainEvent{
-		{ID: "c1", Domain: "video.example.com", Blocked: false},
-		{ID: "c4", Domain: "news.example.com", Blocked: false},
-	}
-	if n := tracker.IngestEvents(now.Add(10*time.Second), batch2); n != 1 {
-		t.Fatalf("batch2 ingested = %d, want 1", n)
-	}
-
-	snap := ring.Snapshot(now.Add(20*time.Second), 18.0)
-	if snap.NumDNSQueries != 3 || snap.NumBlockedFiltering != 1 {
-		t.Fatalf("unexpected telemetry totals: queries=%d blocked=%d", snap.NumDNSQueries, snap.NumBlockedFiltering)
-	}
-}
-
 func TestStatsRing_ConcurrentRaceSafety(t *testing.T) {
 	now := time.Now()
 	ring := localdns.NewStatsRingWithCap(64)
-	tracker := localdns.NewDomainTelemetryTracker(ring, 64)
 
 	var wg sync.WaitGroup
 	for g := range 8 {
@@ -124,9 +95,6 @@ func TestStatsRing_ConcurrentRaceSafety(t *testing.T) {
 			for i := range 200 {
 				ts := now.Add(time.Duration(i%3) * time.Hour)
 				ring.Record(ts, fmt.Sprintf("host-%d-%d.example.com", g, i%80), i%5 == 0, float64(i%40))
-				tracker.IngestEvents(ts, []localdns.DomainEvent{
-					{ID: fmt.Sprintf("id-%d-%d", g, i), Domain: fmt.Sprintf("t%d.example.com", i%20), Blocked: i%3 == 0},
-				})
 				if i%25 == 0 {
 					_ = ring.Snapshot(ts, 12.0)
 				}

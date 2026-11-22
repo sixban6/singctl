@@ -1,4 +1,4 @@
-// 文件职责：验证看门狗三引擎本地 DNS 统一守护（外部容灾/恢复、singbox 主上游热切、暂停到期自动恢复与 SmartDNS 审计日志采集）。
+// 文件职责：验证看门狗双引擎本地 DNS 守护（彻底消除 sing-box 主上游探测告警、SmartDNS 容灾降级/恢复且关闭乐观缓存、暂停到期自动恢复与审计日志采集）。
 package daemon_test
 
 import (
@@ -17,6 +17,7 @@ import (
 	"singctl/internal/localdns"
 	"singctl/internal/platform/servicemgr"
 	"singctl/internal/singbox"
+	"singctl/internal/singbox/sboption"
 	"singctl/internal/smartdns"
 )
 
@@ -26,6 +27,8 @@ func baseSBJSONForDaemon() string {
     "servers": [
       {"tag": "dns_local", "type": "https", "server": "223.5.5.5", "server_port": 443, "path": "/dns-query"}
     ],
+    "disable_cache": true,
+    "optimistic": false,
     "rules": [
       {"rule_set": ["geosite-ad1"], "action": "reject"}
     ]
@@ -37,90 +40,69 @@ func baseSBJSONForDaemon() string {
     "rules": [
       {"rule_set": ["geosite-ad1"], "action": "reject"}
     ]
+  },
+  "experimental": {
+    "cache_file": {
+      "enabled": true,
+      "store_dns": false
+    }
   }
 }`
 }
 
-func TestDaemon_GuardLocalDNS_SingBoxFailoverAndPauseExpiry(t *testing.T) {
+func TestDaemon_GuardLocalDNS_NeverProbesSingBoxUpstream(t *testing.T) {
 	ctx := t.Context()
 	tmpDir := t.TempDir()
-	cfgPath := filepath.Join(tmpDir, "singctl.yaml")
 	sbPath := filepath.Join(tmpDir, "config.json")
 	if err := os.WriteFile(sbPath, []byte(baseSBJSONForDaemon()), 0600); err != nil {
 		t.Fatal(err)
 	}
 
 	now := time.Date(2026, 11, 22, 20, 0, 0, 0, time.UTC)
-	cfg := &config.Config{
-		DNS: config.ClientDNSConfig{
-			Engine:               constant.DNSEngineSingBox,
-			Upstreams:            []string{"https://223.5.5.5/dns-query", "https://1.12.12.12/dns-query"},
-			AdblockDisabledUntil: now.Add(-1 * time.Minute).Unix(), // already expired!
-		},
-	}
-	if err := config.Save(cfgPath, cfg); err != nil {
-		t.Fatal(err)
-	}
-
-	var syncCount atomic.Int32
-	deps := localdns.EngineDeps{
-		ConfigPath:        cfgPath,
-		SingBoxConfigPath: sbPath,
-		AdGuardBinPath:    filepath.Join(tmpDir, "missing-agh"),
-		SmartDNSBinPath:   filepath.Join(tmpDir, "missing-sd"),
-		NowFunc:           func() time.Time { return now },
-		ProbeUpstreamListFunc: func(_ context.Context, upstreams []string, _ string, _ time.Duration) []adguard.UpstreamProbeItem {
-			out := make([]adguard.UpstreamProbeItem, len(upstreams))
-			for i, u := range upstreams {
-				if u == "https://223.5.5.5/dns-query" {
-					out[i] = adguard.UpstreamProbeItem{Address: u, Healthy: false, Error: "timeout"}
-				} else {
-					out[i] = adguard.UpstreamProbeItem{Address: u, Healthy: true, LatencyMs: 11, Resolved: "192.0.2.1"}
-				}
+	for _, engineVal := range []string{constant.DNSEngineAuto, "singbox"} {
+		t.Run("engine_"+engineVal, func(t *testing.T) {
+			cfgPath := filepath.Join(tmpDir, "singctl-"+engineVal+".yaml")
+			cfg := &config.Config{
+				DNS: config.ClientDNSConfig{
+					Engine:    engineVal,
+					Upstreams: []string{"https://223.5.5.5/dns-query", "https://1.12.12.12/dns-query"},
+				},
 			}
-			return out
-		},
-		SyncSingBoxEnhancedFunc: func(_ context.Context, p, _ string, dnsCfg config.ClientDNSConfig, subs []string, ts time.Time) (bool, error) {
-			syncCount.Add(1)
-			raw, _ := os.ReadFile(p)
-			out, changed, err := singbox.ApplyEnhancedSingBoxDNSJSON(string(raw), dnsCfg, subs, ts)
-			if err == nil && changed {
-				_ = os.WriteFile(p, []byte(out), 0600)
+			if err := config.Save(cfgPath, cfg); err != nil {
+				t.Fatal(err)
 			}
-			return changed, err
-		},
-	}
 
-	d := daemon.NewDaemonWithOptions(cfg, daemon.DaemonOptions{
-		ConfigPath:      cfgPath,
-		SkipSignalSetup: true,
-		DNSDeps:         &deps,
-		Paths: daemon.Paths{
-			PidFile:         filepath.Join(tmpDir, "dm.pid"),
-			LogFile:         filepath.Join(tmpDir, "dm.log"),
-			StateFile:       filepath.Join(tmpDir, "dm.state"),
-			WebEmbeddedFile: filepath.Join(tmpDir, "web.emb"),
-		},
-	})
+			var probeCalled atomic.Int32
+			deps := localdns.EngineDeps{
+				ConfigPath:        cfgPath,
+				SingBoxConfigPath: sbPath,
+				AdGuardBinPath:    filepath.Join(tmpDir, "missing-agh"),
+				SmartDNSBinPath:   filepath.Join(tmpDir, "missing-sd"),
+				NowFunc:           func() time.Time { return now },
+				ProbeUpstreamListFunc: func(_ context.Context, _ []string, _ string, _ time.Duration) []adguard.UpstreamProbeItem {
+					probeCalled.Add(1)
+					return nil
+				},
+			}
 
-	// Round 1: expiry resumes adblock immediately; primary failure count = 1 (not yet failed over)
-	d.GuardLocalDNSOnce(ctx)
-	loaded1, _ := config.Load(cfgPath)
-	if loaded1.DNS.AdblockDisabledUntil != 0 {
-		t.Fatalf("expected expired AdblockDisabledUntil cleared to 0, got %d", loaded1.DNS.AdblockDisabledUntil)
-	}
-	if loaded1.DNS.Upstreams[0] != "https://223.5.5.5/dns-query" {
-		t.Fatalf("expected primary NOT switched on single failure, got %v", loaded1.DNS.Upstreams)
-	}
+			d := daemon.NewDaemonWithOptions(cfg, daemon.DaemonOptions{
+				ConfigPath:      cfgPath,
+				SkipSignalSetup: true,
+				DNSDeps:         &deps,
+				Paths: daemon.Paths{
+					PidFile:         filepath.Join(tmpDir, "dm-"+engineVal+".pid"),
+					LogFile:         filepath.Join(tmpDir, "dm-"+engineVal+".log"),
+					StateFile:       filepath.Join(tmpDir, "dm-"+engineVal+".state"),
+					WebEmbeddedFile: filepath.Join(tmpDir, "web-"+engineVal+".emb"),
+				},
+			})
 
-	// Round 2: consecutive failure #2 -> auto hot-switch primary to healthy fastest backup (1.12.12.12)!
-	d.GuardLocalDNSOnce(ctx)
-	loaded2, _ := config.Load(cfgPath)
-	if loaded2.DNS.Upstreams[0] != "https://1.12.12.12/dns-query" {
-		t.Fatalf("expected primary promoted to fastest healthy backup after 2 consecutive failures, got %v", loaded2.DNS.Upstreams)
-	}
-	if syncCount.Load() < 2 {
-		t.Fatalf("expected live sing-box enhanced sync calls >= 2, got %d", syncCount.Load())
+			d.GuardLocalDNSOnce(ctx)
+			d.GuardLocalDNSOnce(ctx)
+			if probeCalled.Load() != 0 {
+				t.Fatalf("watchdog must NEVER probe sing-box primary upstream, got %d calls", probeCalled.Load())
+			}
+		})
 	}
 }
 
@@ -136,7 +118,7 @@ func (f *failRestartMockSvc) Restart(ctx context.Context, name string) error {
 	return f.MockManager.Restart(ctx, name)
 }
 
-func TestDaemon_GuardLocalDNS_SmartDNSFailoverFailbackAndAuditTail(t *testing.T) {
+func TestDaemon_GuardLocalDNS_SmartDNSFailoverFailbackPauseExpiryAndAuditTail(t *testing.T) {
 	ctx := t.Context()
 	tmpDir := t.TempDir()
 	cfgPath := filepath.Join(tmpDir, "singctl.yaml")
@@ -155,8 +137,9 @@ func TestDaemon_GuardLocalDNS_SmartDNSFailoverFailbackAndAuditTail(t *testing.T)
 
 	cfg := &config.Config{
 		DNS: config.ClientDNSConfig{
-			Engine:  constant.DNSEngineSmartDNS,
-			DNSPort: 5353,
+			Engine:               constant.DNSEngineSmartDNS,
+			DNSPort:              5353,
+			AdblockDisabledUntil: now.Add(-1 * time.Minute).Unix(), // expired temporary pause
 		},
 	}
 	_ = config.Save(cfgPath, cfg)
@@ -192,14 +175,7 @@ func TestDaemon_GuardLocalDNS_SmartDNSFailoverFailbackAndAuditTail(t *testing.T)
 		SmartDNSAuditLogPath: auditLog,
 		ServiceMgr:           mockSvc,
 		SmartDNSManager:      sdMgr,
-		SyncSingBoxEnhancedFunc: func(_ context.Context, p, _ string, dnsCfg config.ClientDNSConfig, subs []string, ts time.Time) (bool, error) {
-			raw, _ := os.ReadFile(p)
-			out, changed, err := singbox.ApplyEnhancedSingBoxDNSJSON(string(raw), dnsCfg, subs, ts)
-			if err == nil && changed {
-				_ = os.WriteFile(p, []byte(out), 0600)
-			}
-			return changed, err
-		},
+		NowFunc:              func() time.Time { return now },
 		SyncSingBoxDNSLocalFunc: func(_ context.Context, p, _ string, useExternal bool, port int) (bool, error) {
 			raw, _ := os.ReadFile(p)
 			out, changed, err := singbox.PatchDNSLocalJSON(string(raw), useExternal, port)
@@ -222,10 +198,22 @@ func TestDaemon_GuardLocalDNS_SmartDNSFailoverFailbackAndAuditTail(t *testing.T)
 		},
 	})
 
-	// 1. SmartDNS down -> emergency fallback sing-box to encrypted DoH + audit log drained
+	// 1. SmartDNS down -> emergency fallback sing-box to pure-IP DoH (optimistic=false!) + pause expiry auto-resumed + audit log drained
 	d.GuardLocalDNSOnce(ctx)
 	if linked, _ := singbox.InspectSingBoxDNSLocal(sbPath); linked {
 		t.Fatal("expected sing-box dns_local emergency fallback to encrypted DoH when SmartDNS unhealthy")
+	}
+	rawSB, _ := os.ReadFile(sbPath)
+	docSB, _ := sboption.ParseDocument(rawSB)
+	if docSB.DNS.DisableCache == nil || !*docSB.DNS.DisableCache ||
+		docSB.DNS.Optimistic == nil || *docSB.DNS.Optimistic ||
+		docSB.Experimental.CacheFile.StoreDNS == nil || *docSB.Experimental.CacheFile.StoreDNS {
+		t.Fatalf("emergency DoH fallback must keep disable_cache=true, optimistic=false, store_dns=false; got dc=%v opt=%v store=%v",
+			docSB.DNS.DisableCache, docSB.DNS.Optimistic, docSB.Experimental.CacheFile.StoreDNS)
+	}
+	loadedCfg, _ := config.Load(cfgPath)
+	if loadedCfg.DNS.AdblockDisabledUntil != 0 {
+		t.Fatalf("expected expired SmartDNS AdblockDisabledUntil cleared to 0, got %d", loadedCfg.DNS.AdblockDisabledUntil)
 	}
 	if snap := d.SmartDNSStatsRing().Snapshot(now.Add(time.Minute), 0); snap.NumDNSQueries != 1 {
 		t.Fatalf("expected SmartDNS audit log drained into StatsRing, got queries=%d", snap.NumDNSQueries)
