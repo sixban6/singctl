@@ -261,23 +261,7 @@ func BuildSecurityNFT(sshConnection string, activeSSHPorts []int) string {
 
 // BuildSecurityNFTWithOptions 根据结构化防火墙选项生成防自锁、支持双模式的 nftables `inet security` 规则脚本。
 func BuildSecurityNFTWithOptions(opts BuildOptions) string {
-	isMinimal := strings.EqualFold(strings.TrimSpace(opts.Mode), "minimal")
-	timeoutDays := clampDefaultInt(opts.BanTimeoutDays, 7, 1, 30)
-	pingLimit := clampDefaultInt(opts.PingLimitPerSec, 10, 1, 100)
-
-	whitelistV4, whitelistV6 := collectNormalizedWhitelists(opts)
-	foreverV4 := collectForeverBlocklistV4(opts.ExtraForeverBan)
-	protectedPorts := collectProtectedPorts(opts)
-
-	return renderSecurityNFT(nftSecurityTemplateData{
-		ForeverV4:       foreverV4,
-		BanTimeoutDays:  timeoutDays,
-		WhitelistV4:     whitelistV4,
-		WhitelistV6:     whitelistV6,
-		ProtectedPorts:  protectedPorts,
-		PingLimitPerSec: pingLimit,
-		EnableHoneypot:  !isMinimal && len(protectedPorts) > 0,
-	})
+	return renderSecurityNFT(prepareSecurityTemplateData(opts))
 }
 
 func clampDefaultInt(val, def, lo, hi int) int {
@@ -385,10 +369,28 @@ func Enable() error {
 	return EnableWithOptions(OptionsFromConfig(cfg, ""), true)
 }
 
-// EnableWithOptions 使用指定选项写盘、校验并热加载 `nftables inet security` 表；当 preserveDynamic=true 时迁移保留现有动态黑牢。
+// EnableWithOptions 使用指定选项写盘、校验并热加载防火墙安全规则（自动适配 nftables 与 iptables+ipset 后端）；
+// 当 preserveDynamic=true 时迁移保留现有动态黑牢。
 func EnableWithOptions(opts BuildOptions, preserveDynamic bool) error {
-	if err := ensureLinuxRootNFT(); err != nil {
-		return err
+	if runtime.GOOS != "linux" {
+		return fmt.Errorf("firewall commands are only supported on Linux")
+	}
+	if os.Geteuid() != 0 {
+		return fmt.Errorf("this command requires root privileges (run with sudo)")
+	}
+	switch DetectBackend() {
+	case BackendIPTables:
+		if err := os.MkdirAll(constant.SingBoxConfigDir, 0755); err != nil {
+			return fmt.Errorf("failed to create config directory %s: %v", constant.SingBoxConfigDir, err)
+		}
+		logger.Info("Loading iptables+ipset security firewall rules...")
+		if err := defaultIPTablesBackend().EnableWithOptions(opts, preserveDynamic); err != nil {
+			return err
+		}
+		logger.Success("Security block rules applied successfully (iptables+ipset)")
+		return nil
+	case BackendNone:
+		return fmt.Errorf("neither nft nor iptables+ipset found, please install nftables or iptables+ipset")
 	}
 	if err := os.MkdirAll(constant.SingBoxConfigDir, 0755); err != nil {
 		return fmt.Errorf("failed to create config directory %s: %v", constant.SingBoxConfigDir, err)
@@ -423,19 +425,6 @@ func EnableWithOptions(opts BuildOptions, preserveDynamic bool) error {
 	}
 	persistAutostartService()
 	logger.Success("Security block rules applied successfully")
-	return nil
-}
-
-func ensureLinuxRootNFT() error {
-	if runtime.GOOS != "linux" {
-		return fmt.Errorf("firewall commands are only supported on Linux")
-	}
-	if os.Geteuid() != 0 {
-		return fmt.Errorf("this command requires root privileges (run with sudo)")
-	}
-	if _, err := exec.LookPath("nft"); err != nil {
-		return fmt.Errorf("nft command not found, please install nftables")
-	}
 	return nil
 }
 
@@ -497,13 +486,16 @@ func restoreDynamicBanSet(setName string, items []BanItem) error {
 	return nil
 }
 
-// Disable removes security rules and auto-start persistence.
+// Disable removes security rules and auto-start persistence for both nftables and iptables+ipset backends.
 func Disable() error {
 	if runtime.GOOS != "linux" {
 		return fmt.Errorf("firewall commands are only supported on Linux")
 	}
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("this command requires root privileges (run with sudo)")
+	}
+	if DetectBackend() == BackendIPTables || fileExists(DefaultIPTablesScriptPath) {
+		_ = defaultIPTablesBackend().Disable()
 	}
 	if servicemgr.IsOpenWrt() {
 		teardownOpenWrtInit()

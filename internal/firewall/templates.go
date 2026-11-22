@@ -201,6 +201,19 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 `))
 
+var firewallIPTablesSystemdUnitTemplate = template.Must(template.New("firewall_iptables_systemd_unit").Parse(`[Unit]
+Description=Singctl Security IPTables+IPSet Rules
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart={{.ScriptPath}}
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+`))
+
 var firewallOpenWrtInitTemplate = template.Must(template.New("firewall_openwrt_init").Parse(`#!/bin/sh /etc/rc.common
 
 START=99
@@ -245,6 +258,15 @@ func BuildMinimalBlocklistNFT() string {
 // "Unable to initialize Netlink socket: Protocol not supported" 退出导致丢表的问题。
 func BuildFirewallSystemdUnit(scriptPath string) string {
 	return renderTemplateString(firewallSystemdUnitTemplate, struct {
+		ScriptPath string
+	}{
+		ScriptPath: scriptPath,
+	})
+}
+
+// BuildIPTablesFirewallSystemdUnit 生成用于纯 iptables+ipset Linux 宿主机的 systemd 开机恢复单元。
+func BuildIPTablesFirewallSystemdUnit(scriptPath string) string {
+	return renderTemplateString(firewallIPTablesSystemdUnitTemplate, struct {
 		ScriptPath string
 	}{
 		ScriptPath: scriptPath,

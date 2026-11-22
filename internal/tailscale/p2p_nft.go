@@ -231,6 +231,9 @@ type FW4DropIns struct {
 
 	ListenPort   int
 	JITWindowSec int
+
+	// IPTables 保存同步渲染的等价 iptables/ip6tables 规则集，供纯 iptables 固件零转换直接下发。
+	IPTables IPTablesP2PRuleSet
 }
 
 // Digest 返回用于幂等对比的内容摘要。
@@ -381,6 +384,11 @@ func RenderFW4DropIns(cfg config.TailscaleP2PAssistConfig, peers []ResolvedPeerA
 	tb.WriteByte('\n')
 	writeChainBlock(&tb, chainForwardACL, forwardACLRules)
 
+	iptRules, err := RenderIPTablesP2P(cfg, peers, defaultLANCIDR, now)
+	if err != nil {
+		return FW4DropIns{}, err
+	}
+
 	out := FW4DropIns{
 		TablePre:        tb.String(),
 		JITGuardRules:   jitGuard,
@@ -388,6 +396,7 @@ func RenderFW4DropIns(cfg config.TailscaleP2PAssistConfig, peers []ResolvedPeerA
 		ForwardACLRules: forwardACLRules,
 		ListenPort:      port,
 		JITWindowSec:    winSec,
+		IPTables:        iptRules,
 	}
 	out.InputWANPre = "# Managed by SingCtl Tailscale P2P Defense — DO NOT EDIT MANUALLY\n" + out.inputWANRule() + "\n"
 	out.InputTailscalePre = "# Managed by SingCtl Tailscale P2P Defense — DO NOT EDIT MANUALLY\n" + out.inputTailscaleRule() + "\n"
