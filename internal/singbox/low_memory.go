@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"singctl/internal/common/sysinfo"
@@ -23,6 +24,8 @@ const (
 	LowMemoryStandardRAMBytes uint64 = sysinfo.LowMemoryThresholdBytes
 	// LowMemoryBasicLogMaxBytes 低内存模式下 /tmp/sing-box-basic.log 最大保留字节数（256 KiB）。
 	LowMemoryBasicLogMaxBytes int64 = 256 * 1024
+	// TmpCacheFilePath 定义 OpenWrt/低内存/小闪存设备零闪存磨损的 sing-box 状态缓存路径（落盘于 tmpfs 内存盘）。
+	TmpCacheFilePath = "/tmp/sing-box-cache.db"
 
 	prunedHeavyAdRuleSetTag = "geosite-ad2"
 )
@@ -59,6 +62,70 @@ func (g *ConfigGenerator) EffectiveLowMemory() bool {
 		}
 	}
 	return g.config.EffectiveLowMemory(readHostTotalRAMBytes()) || sysinfo.IsLowMemoryHost()
+}
+
+// ShouldUseTmpCacheFile 判断当前配置生成器目标环境是否应将 experimental.cache_file.path 迁入 /tmp 内存盘以消除闪存磨损。
+func (g *ConfigGenerator) ShouldUseTmpCacheFile() bool {
+	if g == nil {
+		return false
+	}
+	if g.EffectiveLowMemory() {
+		return true
+	}
+	isOpenWrt := sysinfo.IsOpenWrt
+	if g.isOpenWrtProbe != nil {
+		isOpenWrt = g.isOpenWrtProbe
+	}
+	if isOpenWrt() {
+		return true
+	}
+	isLowFlash := sysinfo.IsLowFlashHost
+	if g.isLowFlashProbe != nil {
+		isLowFlash = g.isLowFlashProbe
+	}
+	return isLowFlash()
+}
+
+// relocateTmpCacheFileInDoc 在强类型配置树上将启用中的客户端 cache_file.path 重写为 /tmp/sing-box-cache.db（已位于 /tmp/ 下的路径保持不变）。
+func relocateTmpCacheFileInDoc(doc *sboption.Document) bool {
+	if doc == nil || doc.Experimental == nil || doc.Experimental.CacheFile == nil {
+		return false
+	}
+	cf := doc.Experimental.CacheFile
+	if cf.Enabled != nil && !*cf.Enabled {
+		return false
+	}
+	curPath := strings.TrimSpace(cf.Path)
+	if strings.HasPrefix(curPath, "/tmp/") {
+		return false
+	}
+	cf.Path = TmpCacheFilePath
+	return true
+}
+
+// CleanupLegacyFlashCacheDB 当生效配置已将 cache_file.path 迁入 /tmp/ 时，自动清理配置文件同目录下残留的旧闪存 cache.db（如 /etc/sing-box/cache.db）。
+func CleanupLegacyFlashCacheDB(configPath, configJSON string) bool {
+	cleanCfg := strings.TrimSpace(configPath)
+	if cleanCfg == "" || strings.TrimSpace(configJSON) == "" {
+		return false
+	}
+	doc, err := sboption.ParseDocument([]byte(configJSON))
+	if err != nil || doc.Experimental == nil || doc.Experimental.CacheFile == nil {
+		return false
+	}
+	curPath := strings.TrimSpace(doc.Experimental.CacheFile.Path)
+	if !strings.HasPrefix(curPath, "/tmp/") {
+		return false
+	}
+	legacyPath := filepath.Join(filepath.Dir(cleanCfg), "cache.db")
+	if filepath.Clean(legacyPath) == filepath.Clean(curPath) {
+		return false
+	}
+	info, err := os.Stat(legacyPath)
+	if err != nil || info.IsDir() {
+		return false
+	}
+	return os.Remove(legacyPath) == nil
 }
 
 // PruneLowMemoryRuleSetsJSON 从给定 sing-box 配置 JSON 中无损剥离巨型广告规则集 geosite-ad2 及其引用（保留 geosite-ad1 等）。

@@ -17,6 +17,10 @@ const (
 	UltraLowMemoryThresholdBytes = 288 * 1024 * 1024
 	// LowMemoryAvailableThresholdBytes 定义无线驱动等内核预留后的低可用物理内存阈值（256 MiB，如 MT7986 512M 路由实剩 ~205MiB）。
 	LowMemoryAvailableThresholdBytes = 256 * 1024 * 1024
+	// LowFlashTotalThresholdBytes 定义小闪存路由器总容量阈值（160 MiB，覆盖 128 MB NAND 实际 ~83-100 MB /overlay 设备）。
+	LowFlashTotalThresholdBytes uint64 = 160 * 1024 * 1024
+	// LowFlashAvailThresholdBytes 定义小闪存路由器可用空间阈值（64 MiB）。
+	LowFlashAvailThresholdBytes uint64 = 64 * 1024 * 1024
 )
 
 // DiskSpace 汇总挂载点的总容量、空闲、非特权可用容量与使用率。
@@ -64,6 +68,49 @@ func IsLowMemoryHost() bool {
 		return false
 	}
 	return IsLowMemoryMemInfo(mi)
+}
+
+// IsLowFlashSpace 判断给定磁盘空间快照是否满足小闪存设备阈值（总容量 <= 160 MiB 或可用空间 <= 64 MiB；0 表示未知）。
+func IsLowFlashSpace(ds DiskSpace) bool {
+	if ds.TotalBytes > 0 && ds.TotalBytes <= LowFlashTotalThresholdBytes {
+		return true
+	}
+	return ds.AvailBytes > 0 && ds.AvailBytes <= LowFlashAvailThresholdBytes
+}
+
+// IsLowFlashHostWithDeps 使用可注入的发行版与磁盘探测依赖判断是否为小闪存宿主机：
+//   - OpenWrt 宿主机：优先检测 /overlay（不可读或零值时回退 /），按 IsLowFlashSpace 综合总容量与可用空间判定；
+//   - 非 OpenWrt Linux 宿主机：仅当 / 根分区总容量 <= 160 MiB 时判定为嵌入式小闪存，避免普通 20GB VPS 剩余空间紧张时误判。
+func IsLowFlashHostWithDeps(isOpenWrt func() bool, statfs func(string) (DiskSpace, error)) bool {
+	if isOpenWrt == nil {
+		isOpenWrt = IsOpenWrt
+	}
+	if statfs == nil {
+		statfs = Statfs
+	}
+	if isOpenWrt() {
+		ds, err := statfs("/overlay")
+		if err != nil || (ds.TotalBytes == 0 && ds.AvailBytes == 0) {
+			ds, err = statfs("/")
+			if err != nil {
+				return false
+			}
+		}
+		return IsLowFlashSpace(ds)
+	}
+	ds, err := statfs("/")
+	if err != nil {
+		return false
+	}
+	return ds.TotalBytes > 0 && ds.TotalBytes <= LowFlashTotalThresholdBytes
+}
+
+// IsLowFlashHost 判断当前 Linux 宿主机是否属于小闪存嵌入式/软路由设备（非 Linux 平台恒返回 false）。
+func IsLowFlashHost() bool {
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	return IsLowFlashHostWithDeps(IsOpenWrt, Statfs)
 }
 
 // TotalRAMBytes 返回当前 Linux 宿主机的总物理内存字节数（非 Linux 或不可读时返回 0）。

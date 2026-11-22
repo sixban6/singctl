@@ -44,11 +44,7 @@ func (u *Updater) shouldUseZeroTmpStreaming(asset *releasepkg.Asset) bool {
 		return false
 	}
 
-	if u.deps.ReadTotalRAMBytes != nil {
-		if sysinfo.IsLowMemoryRAM(u.deps.ReadTotalRAMBytes()) {
-			return true
-		}
-	} else if sysinfo.IsLowMemoryHost() {
+	if u.isLowMemoryHost() || u.isLowFlashHost() {
 		return true
 	}
 

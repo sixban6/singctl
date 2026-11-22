@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"singctl/internal/common/sysinfo"
 	"singctl/internal/constant"
 	log "singctl/internal/logger"
 	rssnapshot "singctl/internal/singbox/ruleset_snapshot"
@@ -142,8 +143,10 @@ func LocalizeRuleSets(jsonStr string, opts LocalizeOptions) (string, RuleSetStat
 	manifest := loadManifest(opts.CacheDir)
 	snap := rssnapshot.Load()
 
-	// 1. 收集 remote 任务，并自检已是 type: local 但磁盘文件缺失/损坏的规则集条目
+	// 1. 收集 remote 任务、记录全部活跃规则集 tag，并自检已是 type: local 但磁盘文件缺失/损坏的规则集条目
 	var tasks []ruleSetTask
+	activeTags := make(map[string]struct{}, len(arr))
+	cleanCacheDir := filepath.Clean(opts.CacheDir)
 	repairedLocalOnDisk := false
 	for i, raw := range arr {
 		entry, ok := raw.(map[string]any)
@@ -156,6 +159,7 @@ func LocalizeRuleSets(jsonStr string, opts LocalizeOptions) (string, RuleSetStat
 		if tag == "" {
 			continue
 		}
+		activeTags[tag] = struct{}{}
 		format, _ := entry["format"].(string)
 		if format == "" {
 			format = "binary"
@@ -165,6 +169,10 @@ func LocalizeRuleSets(jsonStr string, opts LocalizeOptions) (string, RuleSetStat
 			path, _ := entry["path"].(string)
 			if path == "" {
 				path = cacheFilePath(opts.CacheDir, tag, format)
+			} else if filepath.Clean(filepath.Dir(path)) == cleanCacheDir {
+				if base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)); base != "" {
+					activeTags[base] = struct{}{}
+				}
 			}
 			if cachedFileValid(path, format) {
 				continue
@@ -208,6 +216,7 @@ func LocalizeRuleSets(jsonStr string, opts LocalizeOptions) (string, RuleSetStat
 		tasks = append(tasks, ruleSetTask{idx: i, tag: tag, url: url, format: format, entry: entry})
 	}
 	if len(tasks) == 0 {
+		pruneOrphanRuleSetsLogged(opts, activeTags)
 		if repairedLocalOnDisk || sanitizedHC {
 			out, err := json.Marshal(cfg)
 			if err == nil {
@@ -280,6 +289,7 @@ func LocalizeRuleSets(jsonStr string, opts LocalizeOptions) (string, RuleSetStat
 		if err := saveManifest(opts.CacheDir, manifest); err != nil && !opts.Silent {
 			log.Warn("ruleset manifest save failed: %v", err)
 		}
+		pruneOrphanRuleSetsLogged(opts, activeTags)
 		out, err := json.Marshal(cfg)
 		if err != nil {
 			return jsonStr, stats, fmt.Errorf("ruleset localize: re-marshal failed: %w", err)
@@ -335,12 +345,99 @@ func LocalizeRuleSets(jsonStr string, opts LocalizeOptions) (string, RuleSetStat
 	if err := saveManifest(opts.CacheDir, manifest); err != nil && !opts.Silent {
 		log.Warn("ruleset manifest save failed: %v", err)
 	}
+	pruneOrphanRuleSetsLogged(opts, activeTags)
 
 	out, err := json.Marshal(cfg)
 	if err != nil {
 		return jsonStr, stats, fmt.Errorf("ruleset localize: re-marshal failed: %w", err)
 	}
 	return string(out), stats, nil
+}
+
+func pruneOrphanRuleSetsLogged(opts LocalizeOptions, activeTags map[string]struct{}) {
+	if len(activeTags) == 0 {
+		return
+	}
+	removed, freed := PruneOrphanRuleSetFiles(opts.CacheDir, activeTags)
+	if removed > 0 && !opts.Silent {
+		log.Info("🧹 已自动回收 %d 个孤立规则集缓存文件（释放 %s）", removed, sysinfo.FormatBytes(freed))
+	}
+}
+
+// PruneOrphanRuleSetFiles 安全清理规则集缓存目录中不再被当前配置引用的孤立 .srs / .json 文件，
+// 并同步清理 manifest.json 中对应的失效条目。
+// 防误删红线：仅删除扩展名为 .srs 或 .json 且非 manifest.json 的普通文件；当 activeTags 为空时严禁清空目录。
+func PruneOrphanRuleSetFiles(cacheDir string, activeTags map[string]struct{}) (removed int, freedBytes int64) {
+	cleanDir := strings.TrimSpace(cacheDir)
+	if cleanDir == "" || len(activeTags) == 0 {
+		return 0, 0
+	}
+
+	activeBases := make(map[string]struct{}, len(activeTags)*2)
+	for rawTag := range activeTags {
+		tag := strings.TrimSpace(rawTag)
+		if tag == "" {
+			continue
+		}
+		activeBases[tag] = struct{}{}
+		activeBases[sanitizeTag(tag)] = struct{}{}
+	}
+	if len(activeBases) == 0 {
+		return 0, 0
+	}
+
+	entries, err := os.ReadDir(cleanDir)
+	if err != nil {
+		return 0, 0
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() || !entry.Type().IsRegular() {
+			continue
+		}
+		name := entry.Name()
+		if strings.EqualFold(name, manifestFileName) {
+			continue
+		}
+		ext := filepath.Ext(name)
+		lowerExt := strings.ToLower(ext)
+		if lowerExt != ".srs" && lowerExt != ".json" {
+			continue
+		}
+		base := strings.TrimSuffix(name, ext)
+		if _, keep := activeBases[base]; keep {
+			continue
+		}
+		info, _ := entry.Info()
+		if err := os.Remove(filepath.Join(cleanDir, name)); err == nil {
+			removed++
+			if info != nil {
+				freedBytes += info.Size()
+			}
+		}
+	}
+
+	manifest := loadManifest(cleanDir)
+	if len(manifest) > 0 {
+		manifestChanged := false
+		for tag := range manifest {
+			_, keepRaw := activeBases[tag]
+			_, keepSanitized := activeBases[sanitizeTag(tag)]
+			if !keepRaw && !keepSanitized {
+				delete(manifest, tag)
+				manifestChanged = true
+			}
+		}
+		if manifestChanged {
+			if len(manifest) == 0 {
+				_ = os.Remove(manifestPath(cleanDir))
+			} else {
+				_ = saveManifest(cleanDir, manifest)
+			}
+		}
+	}
+
+	return removed, freedBytes
 }
 
 // LocalizeConfigFile 就地本地化现有配置文件（仅当其中含 remote 规则集时改写）。

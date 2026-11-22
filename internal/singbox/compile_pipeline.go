@@ -193,6 +193,22 @@ var defaultConfigCompileStages = []CompileStage{
 		},
 	},
 	{
+		Name: "relocate_tmp_cache_file",
+		AppliesTo: func(g *ConfigGenerator, doc *CompileDoc) bool {
+			return doc.platform == "linux" && !doc.isIOS && g != nil && g.ShouldUseTmpCacheFile()
+		},
+		Apply: func(_ *ConfigGenerator, doc *CompileDoc) error {
+			d, err := doc.EnsureDoc()
+			if err != nil {
+				return err
+			}
+			if relocateTmpCacheFileInDoc(d) {
+				doc.dirty = true
+			}
+			return nil
+		},
+	},
+	{
 		Name: "inject_local_dns",
 		AppliesTo: func(_ *ConfigGenerator, doc *CompileDoc) bool {
 			return doc.platform == "linux"
