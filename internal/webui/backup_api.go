@@ -1,15 +1,9 @@
+// 文件职责：提供客户端网关配置加密灾备包导出与原子恢复（含失败自动回滚）接口。
 package webui
 
 import (
 	"cmp"
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/pbkdf2"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,31 +12,23 @@ import (
 	"strings"
 	"time"
 
+	"singctl/internal/common/cryptobak"
+	"singctl/internal/common/fsx"
 	"singctl/internal/config"
 	"singctl/internal/daemon"
 	"singctl/internal/logger"
 	"singctl/internal/singbox"
-	"singctl/internal/util/file"
 
 	"gopkg.in/yaml.v3"
 )
 
 const (
 	clientBackupFormatVersion = "SINGCTL-CLIENT-BAK-V1"
-	clientBackupPBKDF2Iter    = 210000
 	maxClientBackupUploadSize = 4 * 1024 * 1024 // 4 MiB
 )
 
-// ClientBackupEnvelope 为客户端网关加密灾备快照外层信封（无任何明文隐私）。
-type ClientBackupEnvelope struct {
-	Format     string `json:"format"`
-	CreatedAt  string `json:"createdAt"`
-	KDF        string `json:"kdf"`
-	Iterations int    `json:"iterations"`
-	Salt       string `json:"salt"`
-	Nonce      string `json:"nonce"`
-	Ciphertext string `json:"ciphertext"`
-}
+// ClientBackupEnvelope 为客户端网关加密灾备快照外层信封（复用 common/cryptobak.Envelope）。
+type ClientBackupEnvelope = cryptobak.Envelope
 
 // ClientBackupPayload 保存网关可迁出的完整核心配置状态。
 type ClientBackupPayload struct {
@@ -56,102 +42,12 @@ type ClientBackupPayload struct {
 
 // EncryptClientBackupBundle 使用 PBKDF2-HMAC-SHA256 + AES-256-GCM 加密网关备份载荷。
 func EncryptClientBackupBundle(passphrase string, payload ClientBackupPayload) ([]byte, error) {
-	if len(passphrase) < 8 {
-		return nil, errors.New("加密口令长度至少需要 8 位字符")
-	}
-	plain, err := json.Marshal(payload)
-	if err != nil {
-		return nil, fmt.Errorf("序列化备份数据失败: %w", err)
-	}
-
-	salt := make([]byte, 16)
-	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
-		return nil, err
-	}
-	key, err := pbkdf2.Key(sha256.New, passphrase, salt, clientBackupPBKDF2Iter, 32)
-	if err != nil {
-		return nil, err
-	}
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return nil, err
-	}
-	ciphertext := gcm.Seal(nil, nonce, plain, []byte(clientBackupFormatVersion))
-
-	env := ClientBackupEnvelope{
-		Format:     clientBackupFormatVersion,
-		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
-		KDF:        "PBKDF2-HMAC-SHA256",
-		Iterations: clientBackupPBKDF2Iter,
-		Salt:       base64.StdEncoding.EncodeToString(salt),
-		Nonce:      base64.StdEncoding.EncodeToString(nonce),
-		Ciphertext: base64.StdEncoding.EncodeToString(ciphertext),
-	}
-	return json.MarshalIndent(env, "", "  ")
+	return cryptobak.Encrypt(clientBackupFormatVersion, passphrase, payload)
 }
 
-// DecryptClientBackupBundle 在内存中校验并解密网关灾备快照（口令错误或篡改将触发 GCM 认证失败）。
+// DecryptClientBackupBundle 在内存中校验并解密网关灾备快照。
 func DecryptClientBackupBundle(passphrase string, rawEnvelope []byte) (*ClientBackupPayload, error) {
-	if len(passphrase) < 8 {
-		return nil, errors.New("解密口令长度至少需要 8 位字符")
-	}
-	var env ClientBackupEnvelope
-	if err := json.Unmarshal(rawEnvelope, &env); err != nil {
-		return nil, errors.New("无效的加密快照文件格式")
-	}
-	if env.Format != clientBackupFormatVersion {
-		return nil, fmt.Errorf("不支持的网关备份文件版本: %s", env.Format)
-	}
-	iters := env.Iterations
-	if iters < 10000 || iters > 2000000 {
-		return nil, errors.New("备份文件 KDF 参数超出安全范围")
-	}
-	salt, err := base64.StdEncoding.DecodeString(env.Salt)
-	if err != nil || len(salt) < 8 {
-		return nil, errors.New("备份文件 Salt 损坏")
-	}
-	nonce, err := base64.StdEncoding.DecodeString(env.Nonce)
-	if err != nil {
-		return nil, errors.New("备份文件 Nonce 损坏")
-	}
-	ciphertext, err := base64.StdEncoding.DecodeString(env.Ciphertext)
-	if err != nil {
-		return nil, errors.New("备份文件密文损坏")
-	}
-
-	key, err := pbkdf2.Key(sha256.New, passphrase, salt, iters, 32)
-	if err != nil {
-		return nil, err
-	}
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	if len(nonce) != gcm.NonceSize() {
-		return nil, errors.New("备份文件 Nonce 长度非法")
-	}
-	plain, err := gcm.Open(nil, nonce, ciphertext, []byte(clientBackupFormatVersion))
-	if err != nil {
-		return nil, errors.New("解密失败：口令不正确或快照文件已被篡改")
-	}
-
-	var payload ClientBackupPayload
-	if err := json.Unmarshal(plain, &payload); err != nil {
-		return nil, errors.New("备份内层结构损坏")
-	}
-	return &payload, nil
+	return cryptobak.Decrypt[ClientBackupPayload](clientBackupFormatVersion, passphrase, rawEnvelope)
 }
 
 func (s *Server) handleClientBackupExport(w http.ResponseWriter, r *http.Request) {
@@ -295,7 +191,7 @@ func (s *Server) handleClientBackupRestore(w http.ResponseWriter, r *http.Reques
 			writeJSONError(w, http.StatusInternalServerError, "备份现有 singctl.yaml 失败: "+err.Error())
 			return
 		}
-		if err := file.WriteAtomic0600(cfgPath, []byte(payload.SingctlYAML)); err != nil {
+		if err := fsx.WriteAtomic0600(cfgPath, []byte(payload.SingctlYAML)); err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "写入 singctl.yaml 失败: "+err.Error())
 			return
 		}
@@ -332,7 +228,7 @@ func (s *Server) handleClientBackupRestore(w http.ResponseWriter, r *http.Reques
 			writeJSONError(w, http.StatusInternalServerError, "备份现有 AdGuardHome.yaml 失败: "+err.Error())
 			return
 		}
-		if err := file.WriteAtomic0600(aghPath, []byte(payload.AdGuardYAML)); err != nil {
+		if err := fsx.WriteAtomic0600(aghPath, []byte(payload.AdGuardYAML)); err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "写入 AdGuardHome.yaml 失败: "+err.Error())
 			return
 		}

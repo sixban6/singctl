@@ -14,7 +14,6 @@ import (
 	"singctl/internal/config"
 	"singctl/internal/logger"
 	"singctl/internal/platform/servicemgr"
-	"singctl/internal/util/github"
 )
 
 type caddyServerComponent struct{}
@@ -79,9 +78,9 @@ func (*caddyServerComponent) ReloadAfterSave(ctx context.Context, path string, _
 }
 
 func (c *caddyServerComponent) CheckUpdate(cfg *config.Config) (*component.CheckUpdateInfo, error) {
-	fetcher := github.NewReleaseFetcher(getMirrorURL(cfg), ReleaseClient)
+	fetcher := newDeployReleaseClient(cfg)
 	curr := GetInstalledCaddyVersion()
-	tag, err := fetcher.FetchLatestTag("caddyserver/caddy")
+	tag, err := fetcher.FetchLatestTag(context.Background(), "caddyserver/caddy")
 	latest := cleanVersion(tag)
 	if err != nil || latest == "" {
 		latest = curr

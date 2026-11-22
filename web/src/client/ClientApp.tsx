@@ -20,7 +20,7 @@ import {
 import { clientApi } from './api';
 import { ADGUARD_OVERVIEW_CACHE_KEY, AUDIT_DEFAULT_CACHE_KEY, GATEWAY_CACHE_KEY } from './cacheKeys';
 import { ClientStatusResponse } from './types';
-import { TaskConsoleDrawer } from './TaskConsoleDrawer';
+import { TaskConsoleDrawer } from './shell/TaskConsoleDrawer';
 import { DashPage } from './pages/DashPage';
 import {
   CLIENT_TABS,

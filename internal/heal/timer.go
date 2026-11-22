@@ -1,3 +1,4 @@
+// 文件职责：提供自愈定时任务 OnCalendar 注入防护校验与 systemd timer 单元生成安装。
 package heal
 
 import (

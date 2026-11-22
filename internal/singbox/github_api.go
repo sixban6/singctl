@@ -1,10 +1,12 @@
+// 文件职责：动态查询 SagerNet/sing-box 最新桌面端图形客户端（macOS SFM / Windows ZIP）资产下载地址。
 package singbox
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
-	"singctl/internal/util/github"
+	"singctl/internal/common/release"
 )
 
 // fetchLatestGUIAsset dynamically fetches the latest GUI client URL based on the OS.
@@ -23,8 +25,7 @@ func fetchLatestGUIAsset(goos string) (string, error) {
 		return "", fmt.Errorf("unsupported OS for GUI: %s", goos)
 	}
 
-	fetcher := github.NewReleaseFetcher("", nil)
-	return fetcher.FindAssetURL("SagerNet/sing-box", func(name string) bool {
+	return release.NewClient("").FindAssetURL(context.Background(), "SagerNet/sing-box", func(name string) bool {
 		return strings.HasPrefix(name, prefix) && strings.HasSuffix(name, targetExt)
 	})
 }

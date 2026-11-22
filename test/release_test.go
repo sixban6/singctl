@@ -13,8 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"singctl/internal/util/github"
-	"singctl/internal/util/release"
+	"singctl/internal/common/release"
 	"strings"
 	"testing"
 )
@@ -22,20 +21,20 @@ import (
 func TestFetchLatestTag(t *testing.T) {
 	tests := []struct {
 		name       string
-		response   github.Release
+		response   release.Info
 		statusCode int
 		want       string
 		wantErr    bool
 	}{
 		{
 			name:       "标准 v 前缀",
-			response:   github.Release{TagName: "v1.12.0"},
+			response:   release.Info{TagName: "v1.12.0"},
 			statusCode: http.StatusOK,
 			want:       "1.12.0",
 		},
 		{
 			name:       "无 v 前缀",
-			response:   github.Release{TagName: "1.13.0"},
+			response:   release.Info{TagName: "1.13.0"},
 			statusCode: http.StatusOK,
 			want:       "1.13.0",
 		},
@@ -49,7 +48,6 @@ func TestFetchLatestTag(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				// 验证请求路径包含 /releases/latest
 				if !strings.HasSuffix(r.URL.Path, "/releases/latest") {
 					t.Errorf("expected path ending with /releases/latest, got %s", r.URL.Path)
 				}
@@ -60,10 +58,10 @@ func TestFetchLatestTag(t *testing.T) {
 			}))
 			defer server.Close()
 
-			// 使用测试服务器的 URL 作为 mirror，绕过真实 GitHub API
-			fetcher := github.NewReleaseFetcher("", server.Client())
-			// 通过 FetchLatestTagFromURL 直接传 URL（测试辅助）
-			got, err := fetcher.FetchLatestTagFromURL(server.URL + "/repos/test/repo/releases/latest")
+			client := release.NewClient("")
+			client.APIBase = server.URL
+			client.HTTP = server.Client()
+			got, err := client.FetchLatestTag(t.Context(), "test/repo")
 
 			if (err != nil) != tt.wantErr {
 				t.Errorf("error = %v, wantErr %v", err, tt.wantErr)
@@ -77,16 +75,16 @@ func TestFetchLatestTag(t *testing.T) {
 }
 
 func TestFindAssetURL(t *testing.T) {
-	releases := []github.Release{
+	releases := []release.Info{
 		{
 			TagName: "v1.13.0-rc.1",
-			Assets: []github.Asset{
+			Assets: []release.Asset{
 				{Name: "sing-box-1.13.0-rc.1-linux-amd64.tar.gz", BrowserDownloadURL: "https://example.com/linux.tar.gz"},
 			},
 		},
 		{
 			TagName: "v1.13.0-rc.1",
-			Assets: []github.Asset{
+			Assets: []release.Asset{
 				{Name: "SFM-1.13.0-rc.1-Apple.pkg", BrowserDownloadURL: "https://example.com/sfm.pkg"},
 				{Name: "sing-box-1.13.0-rc.1-windows-amd64.zip", BrowserDownloadURL: "https://example.com/win.zip"},
 			},
@@ -98,11 +96,14 @@ func TestFindAssetURL(t *testing.T) {
 	}))
 	defer server.Close()
 
-	fetcher := github.NewReleaseFetcher("", server.Client())
+	client := release.NewClient("")
+	client.APIBase = server.URL
+	client.HTTP = server.Client()
 
 	t.Run("找到 macOS GUI", func(t *testing.T) {
-		url, err := fetcher.FindAssetURLFromURL(
-			server.URL+"/repos/test/repo/releases",
+		url, err := client.FindAssetURL(
+			t.Context(),
+			"test/repo",
 			func(name string) bool {
 				return strings.HasPrefix(name, "SFM-") && strings.HasSuffix(name, "-Apple.pkg")
 			},
@@ -116,8 +117,9 @@ func TestFindAssetURL(t *testing.T) {
 	})
 
 	t.Run("找到 Windows 资产", func(t *testing.T) {
-		url, err := fetcher.FindAssetURLFromURL(
-			server.URL+"/repos/test/repo/releases",
+		url, err := client.FindAssetURL(
+			t.Context(),
+			"test/repo",
 			func(name string) bool {
 				return strings.HasPrefix(name, "sing-box-") && strings.HasSuffix(name, "-windows-amd64.zip")
 			},
@@ -131,8 +133,9 @@ func TestFindAssetURL(t *testing.T) {
 	})
 
 	t.Run("未找到匹配资产", func(t *testing.T) {
-		_, err := fetcher.FindAssetURLFromURL(
-			server.URL+"/repos/test/repo/releases",
+		_, err := client.FindAssetURL(
+			t.Context(),
+			"test/repo",
 			func(name string) bool { return strings.Contains(name, "nonexistent") },
 		)
 		if err == nil {

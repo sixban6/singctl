@@ -1,11 +1,12 @@
+// 文件职责：提供多节点舰队列表、探活、增删改、批量操作与自动化 Bootstrap 纳管薄 HTTP 接口。
 package serverweb
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
 
+	"singctl/internal/common/httpx"
 	"singctl/internal/fleet"
 )
 
@@ -51,7 +52,6 @@ func (s *Server) handleFleetList(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "读取节点舰队列表失败: "+err.Error())
 		return
 	}
-
 	writeJSON(w, http.StatusOK, map[string]any{
 		"nodes":   nodes,
 		"summary": buildFleetSummary(nodes),
@@ -59,10 +59,13 @@ func (s *Server) handleFleetList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleFleetProbe(w http.ResponseWriter, r *http.Request) {
-	var body struct {
+	type reqBody struct {
 		IDs []string `json:"ids"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
+	body, ok := decodeBodyJSON[reqBody](w, r, httpx.DefaultMaxBodyBytes, true, "")
+	if !ok {
+		return
+	}
 
 	results, err := s.fleet.ProbeNodes(r.Context(), body.IDs)
 	if err != nil {
@@ -78,12 +81,12 @@ func (s *Server) handleFleetProbe(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleFleetUpsertNode(w http.ResponseWriter, r *http.Request) {
-	var body struct {
+	type reqBody struct {
 		fleet.UpsertInput
 		AutoSync bool `json:"autoSync"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "无效的 JSON 请求: "+err.Error())
+	body, ok := decodeBodyJSON[reqBody](w, r, httpx.DefaultMaxBodyBytes, false, "")
+	if !ok {
 		return
 	}
 
@@ -99,7 +102,7 @@ func (s *Server) handleFleetUpsertNode(w http.ResponseWriter, r *http.Request) {
 	if body.AutoSync {
 		res := s.fleet.SyncNode(r.Context(), node.ID)
 		syncResult = &res
-		if updated, ok, _ := s.fleet.Store.Get(node.ID); ok {
+		if updated, exists, _ := s.fleet.Store.Get(node.ID); exists {
 			node = updated
 		}
 	}
@@ -121,14 +124,12 @@ func (s *Server) handleFleetUpsertNode(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleFleetDefaults(w http.ResponseWriter, r *http.Request) {
-	defaults := s.fleet.GetBootstrapDefaults(r.Context())
-	writeJSON(w, http.StatusOK, defaults)
+	writeJSON(w, http.StatusOK, s.fleet.GetBootstrapDefaults(r.Context()))
 }
 
 func (s *Server) handleFleetPreviewBootstrap(w http.ResponseWriter, r *http.Request) {
-	var body fleet.BootstrapInput
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "无效的 JSON 请求: "+err.Error())
+	body, ok := decodeBodyJSON[fleet.BootstrapInput](w, r, httpx.DefaultMaxBodyBytes, false, "")
+	if !ok {
 		return
 	}
 	plan, err := s.fleet.PreviewBootstrapNode(r.Context(), body)
@@ -143,11 +144,14 @@ func (s *Server) handleFleetDeleteNode(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSpace(r.URL.Query().Get("id"))
 	keepDNS := r.URL.Query().Get("keepDns") == "true" || r.URL.Query().Get("keep_dns") == "true"
 	if id == "" {
-		var body struct {
+		type reqBody struct {
 			ID      string `json:"id"`
 			KeepDNS bool   `json:"keepDns"`
 		}
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		body, ok := decodeBodyJSON[reqBody](w, r, httpx.DefaultMaxBodyBytes, true, "")
+		if !ok {
+			return
+		}
 		id = strings.TrimSpace(body.ID)
 		if body.KeepDNS {
 			keepDNS = true
@@ -174,12 +178,12 @@ func (s *Server) handleFleetDeleteNode(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleFleetAction(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Action string   `json:"action"` // "sync" | "doctor" | "reset" | "update"
+	type reqBody struct {
+		Action string   `json:"action"`
 		IDs    []string `json:"ids"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "无效的 JSON 请求")
+	body, ok := decodeBodyJSON[reqBody](w, r, httpx.DefaultMaxBodyBytes, false, "无效的 JSON 请求")
+	if !ok {
 		return
 	}
 	action := strings.ToLower(strings.TrimSpace(body.Action))
@@ -210,9 +214,8 @@ func (s *Server) handleFleetAction(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleFleetBootstrap(w http.ResponseWriter, r *http.Request) {
-	var body fleet.BootstrapInput
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "无效的 JSON 请求: "+err.Error())
+	body, ok := decodeBodyJSON[fleet.BootstrapInput](w, r, httpx.DefaultMaxBodyBytes, false, "")
+	if !ok {
 		return
 	}
 	res, err := s.fleet.BootstrapNode(r.Context(), body)

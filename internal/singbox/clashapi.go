@@ -1,3 +1,4 @@
+// 文件职责：解析客户端 sing-box 配置中的 Clash API 监听端点与访问密钥。
 package singbox
 
 import (
@@ -7,8 +8,8 @@ import (
 	"slices"
 	"strings"
 
+	"singctl/internal/common/netx"
 	"singctl/internal/constant"
-	"singctl/internal/util/netinfo"
 )
 
 // clashAPIConfig 用于从生成的 sing-box 配置中提取 clash_api 信息
@@ -60,7 +61,7 @@ func ClashAPIEndpointsForConfig(sbConfigPath string) []string {
 	add("127.0.0.1:9090")
 
 	// 3. LAN IP(兼容旧版绑定 LAN IP 的配置)
-	if ni, err := netinfo.Get(); err == nil && ni.LANIPv4 != "" {
+	if ni, err := netx.Get(); err == nil && ni.LANIPv4 != "" {
 		add(ni.LANIPv4 + ":9090")
 	}
 

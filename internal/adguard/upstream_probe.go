@@ -124,7 +124,7 @@ func ProbeSingleUpstream(ctx context.Context, upstream, domain string, timeout t
 		Protocol: meta.Protocol,
 	}
 
-	queryWire, txid, err := buildDNSQueryPacket(domain)
+	queryWire, txid, err := BuildDNSQueryPacket(domain)
 	if err != nil {
 		item.Error = err.Error()
 		return item
@@ -157,7 +157,7 @@ func ProbeSingleUpstream(ctx context.Context, upstream, domain string, timeout t
 		return item
 	}
 
-	resolvedIP, parseRespErr := parseDNSFirstARecord(respWire, txid)
+	resolvedIP, parseRespErr := ParseDNSFirstARecord(respWire, txid)
 	if parseRespErr != nil {
 		item.Error = parseRespErr.Error()
 		return item
@@ -250,7 +250,8 @@ func queryDoTWireformat(ctx context.Context, u *url.URL, query []byte, timeout t
 	return resp, nil
 }
 
-func buildDNSQueryPacket(domain string) ([]byte, [2]byte, error) {
+// BuildDNSQueryPacket 构造标准 RFC 1035 IPv4 A 记录查询报文并返回随机事务 ID。
+func BuildDNSQueryPacket(domain string) ([]byte, [2]byte, error) {
 	var txid [2]byte
 	_, _ = rand.Read(txid[:])
 
@@ -280,7 +281,8 @@ func buildDNSQueryPacket(domain string) ([]byte, [2]byte, error) {
 	return buf.Bytes(), txid, nil
 }
 
-func parseDNSFirstARecord(msg []byte, expectedTxID [2]byte) (string, error) {
+// ParseDNSFirstARecord 解析 DNS 响应报文中的首条 IPv4 A 记录（兼容 CNAME 与压缩指针）。
+func ParseDNSFirstARecord(msg []byte, expectedTxID [2]byte) (string, error) {
 	if len(msg) < 12 {
 		return "", errors.New("DNS 响应报文过短")
 	}

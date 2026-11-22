@@ -1,3 +1,4 @@
+// 文件职责：提供客户端 WebUI 多链路 DNS 泄漏实测与综合判定接口。
 package webui
 
 import (

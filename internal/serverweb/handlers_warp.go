@@ -1,164 +1,81 @@
+// 文件职责：提供服务端 WARP 路由配置、单项目标秒切、活跃流查询与单机/全集群广播薄 HTTP 控制层（领域逻辑委托 deploy 与 fleet）。
 package serverweb
 
 import (
 	"cmp"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"os"
-	"os/exec"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
+	"singctl/internal/common/httpx"
 	"singctl/internal/config"
 	"singctl/internal/constant"
 	"singctl/internal/deploy"
+	"singctl/internal/fleet"
 	"singctl/internal/telemetry"
 )
 
-// WarpDaemonStatus 描述本地 Cloudflare WARP (wireproxy) 运行与隧道状态
-type WarpDaemonStatus struct {
-	Installed        bool   `json:"installed"`
-	Running          bool   `json:"running"`
-	TunnelHealthy    bool   `json:"tunnelHealthy"`
-	SocksPort        int    `json:"socksPort"`
-	WarpIP           string `json:"warpIp,omitempty"`
-	WarpLoc          string `json:"warpLoc,omitempty"`
-	Error            string `json:"error,omitempty"`
-	DegradedFallback bool   `json:"degradedFallback,omitempty"`
-	AutoHealStatus   string `json:"autoHealStatus,omitempty"`
-	LastHealedAt     string `json:"lastHealedAt,omitempty"`
+type warpRuntime struct {
+	actionMu sync.Mutex
+	prober   *deploy.WarpProber
+	watchdog *deploy.WarpWatchdog
+	cluster  *fleet.WarpClusterCoordinator
 }
 
-// WarpRoutingStatusResponse 返回服务端 WARP 分流中心总览数据（支持单机与全集群多节点透视）
-type WarpRoutingStatusResponse struct {
-	SelectedNode  string                   `json:"selectedNode,omitempty"`
-	Nodes         []WarpNodeSummary        `json:"nodes,omitempty"`
-	Daemon        WarpDaemonStatus         `json:"daemon"`
-	Routing       config.WarpRoutingConfig `json:"routing"`
-	Presets       []deploy.WarpPresetState `json:"presets"`
-	DCConnCount   int                      `json:"dcConnCount"`
-	WarpConnCount int                      `json:"warpConnCount"`
+func newWarpRuntime(s *Server) *warpRuntime {
+	rt := &warpRuntime{
+		prober:  deploy.NewWarpProber(),
+		cluster: fleet.NewWarpClusterCoordinator(s.fleet),
+	}
+	rt.watchdog = deploy.NewWarpWatchdog(deploy.WarpWatchdogRuntime{
+		ActionMu:          &rt.actionMu,
+		SingBoxConfigPath: s.opts.SingBoxConfigPath,
+		LoadConfig:        s.loadConfigBounded,
+		LiveDepsForConfig: s.liveWarpDepsForConfig,
+		EvictAllWarpConns: s.evictAllWarpConnections,
+		EvictMismatchedConns: func(ctx context.Context, cfg *config.Config) {
+			if s.telemetry == nil || cfg == nil {
+				return
+			}
+			protected := deploy.CollectServerProtectedDomains(cfg)
+			_, _ = s.telemetry.EvictMismatchedConnections(ctx, func(host, dstIP, ruleTag, currentOutbound string) bool {
+				return deploy.ExpectedTargetOutbound(cfg.Server.WarpRouting, host, dstIP, ruleTag, protected...) != currentOutbound
+			})
+		},
+		OnAudit: func(action string) {
+			if s.audit != nil {
+				s.audit.Record("127.0.0.1", action)
+			}
+		},
+		OnExitIPUpdated: func(ip, loc string) {
+			rt.prober.SetCachedExit(ip, loc, time.Now())
+		},
+		OnWireproxyNormalized: func() {
+			rt.prober.ClearCache()
+		},
+	})
+	return rt
 }
 
-func (s *Server) applyWatchdogFieldsToDaemonStatus(status *WarpDaemonStatus) {
-	if status == nil {
-		return
-	}
-	s.warpWatchdogMu.Lock()
-	degraded := s.warpDegraded
-	healMsg := s.warpAutoHealStatus
-	healedAt := s.warpLastHealedAt
-	s.warpWatchdogMu.Unlock()
-
-	if !status.DegradedFallback {
-		status.DegradedFallback = degraded
-	}
-	if status.AutoHealStatus == "" {
-		status.AutoHealStatus = healMsg
-	}
-	if status.LastHealedAt == "" {
-		status.LastHealedAt = healedAt
-	}
+// ProbeWarpDaemon 探测本机 WARP 守护进程与隧道状态，并叠加看门狗熔断/自愈标记。
+func (s *Server) ProbeWarpDaemon(forceRefresh bool) WarpDaemonStatus {
+	st := s.warp.prober.Probe(forceRefresh)
+	s.warp.watchdog.DecorateDaemonStatus(&st)
+	return st
 }
 
-func (s *Server) probeWarpDaemon(forceRefresh bool) WarpDaemonStatus {
-	if s.warpDaemonProbe != nil {
-		st := s.warpDaemonProbe(forceRefresh)
-		s.applyWatchdogFieldsToDaemonStatus(&st)
-		return st
-	}
-
-	_, errBin := exec.LookPath("wireproxy")
-	_, _, hasConf := deploy.ResolveWireproxyConfigPaths()
-	installed := errBin == nil || hasConf || deploy.IsWindtfWireproxyBinary(deploy.DefaultWireproxyBin)
-
-	running := checkServiceRunning("wireproxy")
-	portCheck := s.warpPortChecker
-	if portCheck == nil {
-		portCheck = deploy.CheckWarpSocksPort
-	}
-	portOpen := portCheck()
-	if portOpen {
-		running = true
-		installed = true
-	}
-
-	status := WarpDaemonStatus{
-		Installed:     installed,
-		Running:       running,
-		TunnelHealthy: portOpen,
-		SocksPort:     40000,
-	}
-
-	if !portOpen {
-		if !installed {
-			status.Error = "尚未安装内置纯 Go wireproxy (WARP) 服务"
-		} else if !running {
-			status.Error = "wireproxy 服务未运行，127.0.0.1:40000 未监听"
-		} else {
-			status.Error = "wireproxy 已启动但 127.0.0.1:40000 尚未就绪"
-		}
-		s.applyWatchdogFieldsToDaemonStatus(&status)
-		return status
-	}
-
-	const warpExitCacheTTL = 5 * time.Minute
-	s.warpCacheMu.Lock()
-	cachedIP := s.warpCachedIP
-	cachedLoc := s.warpCachedLoc
-	cacheFresh := !forceRefresh && cachedIP != "" && time.Since(s.warpCachedAt) < warpExitCacheTTL
-	s.warpCacheMu.Unlock()
-
-	if cacheFresh {
-		status.WarpIP = cachedIP
-		status.WarpLoc = cachedLoc
-		s.applyWatchdogFieldsToDaemonStatus(&status)
-		return status
-	}
-
-	refreshWarpExit := func() (string, string, bool) {
-		exitFetch := s.warpExitFetcher
-		if exitFetch == nil {
-			exitFetch = deploy.FetchWarpExitInfo
-		}
-		ip, loc, _, ok := exitFetch(2500 * time.Millisecond)
-		if ok && ip != "" {
-			s.warpCacheMu.Lock()
-			s.warpCachedIP = ip
-			s.warpCachedLoc = loc
-			s.warpCachedAt = time.Now()
-			s.warpCacheMu.Unlock()
-		}
-		return ip, loc, ok && ip != ""
-	}
-
-	// SWR: 已有历史出口 IP 且非强制刷新时，0ms 秒回缓存并单飞后台更新，消除 2.5s 外网阻塞
-	if !forceRefresh && cachedIP != "" {
-		status.WarpIP = cachedIP
-		status.WarpLoc = cachedLoc
-		tryRunSingleFlight(&s.warpExitRefreshing, 4*time.Second, func(context.Context) {
-			refreshWarpExit()
-		})
-		s.applyWatchdogFieldsToDaemonStatus(&status)
-		return status
-	}
-
-	if ip, loc, ok := refreshWarpExit(); ok {
-		status.WarpIP = ip
-		status.WarpLoc = loc
-	} else if cachedIP != "" {
-		status.WarpIP = cachedIP
-		status.WarpLoc = cachedLoc
-	}
-	s.applyWatchdogFieldsToDaemonStatus(&status)
-	return status
+// RunWarpWatchdogTick 执行单次 WARP 健康巡检与三阶段自愈（供测试确定性驱动）。
+func (s *Server) RunWarpWatchdogTick(ctx context.Context) {
+	s.warp.watchdog.RunTick(ctx)
 }
 
-func (s *Server) buildWarpRoutingStatus(r *http.Request, cfg *config.Config, forceRefresh bool) WarpRoutingStatusResponse {
+func (s *Server) buildWarpRoutingStatus(ctx context.Context, cfg *config.Config, forceRefresh bool) WarpRoutingStatusResponse {
 	var wr config.WarpRoutingConfig
 	if cfg != nil {
 		if normalized, err := config.NormalizeWarpRouting(cfg.Server.WarpRouting); err == nil {
@@ -178,13 +95,13 @@ func (s *Server) buildWarpRoutingStatus(r *http.Request, cfg *config.Config, for
 
 	var dcCount, warpCount int
 	if s.telemetry != nil {
-		snap := s.telemetry.Collect(r.Context())
+		snap := s.telemetry.Collect(ctx)
 		dcCount = snap.Outbounds.DirectConnections
 		warpCount = snap.Outbounds.WarpConnections
 	}
 
 	return WarpRoutingStatusResponse{
-		Daemon:        s.probeWarpDaemon(forceRefresh),
+		Daemon:        s.ProbeWarpDaemon(forceRefresh),
 		Routing:       wr,
 		Presets:       deploy.BuildPresetStateList(wr),
 		DCConnCount:   dcCount,
@@ -192,11 +109,16 @@ func (s *Server) buildWarpRoutingStatus(r *http.Request, cfg *config.Config, for
 	}
 }
 
+func (s *Server) buildClusterWarpStatus(ctx context.Context, cfg *config.Config, selectedNode string, forceRefresh bool) (WarpRoutingStatusResponse, error) {
+	localResp := s.buildWarpRoutingStatus(ctx, cfg, forceRefresh && (selectedNode == "" || selectedNode == "local"))
+	return s.warp.cluster.BuildClusterStatus(ctx, localResp, selectedNode, forceRefresh)
+}
+
 func (s *Server) handleGetWarpRouting(w http.ResponseWriter, r *http.Request) {
 	forceRefresh := r.URL.Query().Get("refresh") == "1" || r.URL.Query().Get("refresh") == "true"
 	selectedNode := cmp.Or(strings.TrimSpace(r.URL.Query().Get("node")), "local")
 	cfg := s.readConfigOrNil()
-	resp, err := s.buildClusterWarpStatus(r, cfg, selectedNode, forceRefresh)
+	resp, err := s.buildClusterWarpStatus(r.Context(), cfg, selectedNode, forceRefresh)
 	if err != nil {
 		writeJSONError(w, http.StatusBadGateway, err.Error())
 		return
@@ -206,8 +128,8 @@ func (s *Server) handleGetWarpRouting(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) liveWarpDepsForConfig(cfg *config.Config) *deploy.LiveWarpApplyDeps {
 	var deps deploy.LiveWarpApplyDeps
-	if s.warpDeps != nil {
-		deps = *s.warpDeps
+	if injected := s.snapshotDeps().WarpApplyDeps; injected != nil {
+		deps = *injected
 	}
 	protected := slices.Clone(deps.ProtectedDomains)
 	for _, dom := range deploy.CollectServerProtectedDomains(cfg) {
@@ -229,14 +151,14 @@ func (s *Server) evictAllWarpConnections(ctx context.Context) int {
 	return n
 }
 
-func (s *Server) applyWarpRoutingConfig(r *http.Request, targetWR config.WarpRoutingConfig) (WarpRoutingStatusResponse, int, int, error) {
+func (s *Server) applyWarpRoutingConfig(ctx context.Context, targetWR config.WarpRoutingConfig) (WarpRoutingStatusResponse, int, int, error) {
 	normalized, err := config.NormalizeWarpRouting(targetWR)
 	if err != nil {
 		return WarpRoutingStatusResponse{}, http.StatusBadRequest, 0, err
 	}
 
-	s.warpMu.Lock()
-	defer s.warpMu.Unlock()
+	s.warp.actionMu.Lock()
+	defer s.warp.actionMu.Unlock()
 
 	cfg, loadErr := s.loadMutableConfig()
 	if loadErr != nil || cfg == nil {
@@ -244,8 +166,7 @@ func (s *Server) applyWarpRoutingConfig(r *http.Request, targetWR config.WarpRou
 	}
 
 	sbCfgPath := cmp.Or(strings.TrimSpace(s.opts.SingBoxConfigPath), constant.SingBoxConfigFile)
-	liveDeps := s.liveWarpDepsForConfig(cfg)
-	if _, applyErr := deploy.ApplyLiveWarpRouting(sbCfgPath, normalized, liveDeps); applyErr != nil {
+	if _, applyErr := deploy.ApplyLiveWarpRouting(sbCfgPath, normalized, s.liveWarpDepsForConfig(cfg)); applyErr != nil {
 		if errors.Is(applyErr, deploy.ErrWarpTunnelUnavailable) {
 			return WarpRoutingStatusResponse{}, http.StatusConflict, 0, applyErr
 		}
@@ -259,73 +180,80 @@ func (s *Server) applyWarpRoutingConfig(r *http.Request, targetWR config.WarpRou
 		return WarpRoutingStatusResponse{}, http.StatusInternalServerError, 0, fmt.Errorf("持久化 singctl.yaml 失败: %w", saveErr)
 	}
 
-	s.warpWatchdogMu.Lock()
-	s.warpDegraded = false
-	s.warpFailStreak = 0
-	s.warpBootSynced = true
-	s.warpWatchdogMu.Unlock()
+	s.warp.watchdog.ResetOnManualApply()
 
 	evicted := 0
 	if s.telemetry != nil {
 		protected := deploy.CollectServerProtectedDomains(cfg)
-		n, _ := s.telemetry.EvictMismatchedConnections(r.Context(), func(host, dstIP, ruleTag, currentOutbound string) bool {
-			expected := deploy.ExpectedTargetOutbound(normalized, host, dstIP, ruleTag, protected...)
-			return expected != currentOutbound
+		n, _ := s.telemetry.EvictMismatchedConnections(ctx, func(host, dstIP, ruleTag, currentOutbound string) bool {
+			return deploy.ExpectedTargetOutbound(normalized, host, dstIP, ruleTag, protected...) != currentOutbound
 		})
 		evicted = n
 	}
+	return s.buildWarpRoutingStatus(ctx, cfg, false), http.StatusOK, evicted, nil
+}
 
-	return s.buildWarpRoutingStatus(r, cfg, false), http.StatusOK, evicted, nil
+func writeWarpRoutingMutationResponse(w http.ResponseWriter, msg string, evicted int, statusResp WarpRoutingStatusResponse, extra map[string]any) {
+	out := map[string]any{
+		"message":            msg,
+		"evictedConnections": evicted,
+		"selectedNode":       statusResp.SelectedNode,
+		"nodes":              statusResp.Nodes,
+		"daemon":             statusResp.Daemon,
+		"routing":            statusResp.Routing,
+		"presets":            statusResp.Presets,
+		"dcConnCount":        statusResp.DCConnCount,
+		"warpConnCount":      statusResp.WarpConnCount,
+	}
+	for k, v := range extra {
+		out[k] = v
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleUpdateWarpRouting(w http.ResponseWriter, r *http.Request) {
-	var body struct {
+	type reqBody struct {
 		config.WarpRoutingConfig
 		Node        string `json:"node"`
 		ViewNode    string `json:"viewNode"`
 		SyncCluster bool   `json:"syncCluster"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "无效的 JSON 请求格式")
+	body, ok := decodeBodyJSON[reqBody](w, r, httpx.DefaultMaxBodyBytes, false, "无效的 JSON 请求格式")
+	if !ok {
 		return
 	}
 
 	targetNode := cmp.Or(strings.TrimSpace(body.Node), "local")
 	viewNode := cmp.Or(strings.TrimSpace(body.ViewNode), targetNode)
 
-	// 1. 全集群广播模式（选中了 all 或显式开启了 syncCluster）
 	if targetNode == "all" || body.SyncCluster {
 		normalized, err := config.NormalizeWarpRouting(body.WarpRoutingConfig)
 		if err != nil {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		statusResp, httpCode, evicted, results, msg, applyErr := s.broadcastWarpRoutingCluster(r, normalized, viewNode)
+		evicted, results, msg, conflict, applyErr := s.warp.cluster.BroadcastRouting(r.Context(), normalized, func(ctx context.Context) (int, error) {
+			_, _, ev, lErr := s.applyWarpRoutingConfig(ctx, normalized)
+			return ev, lErr
+		})
 		if applyErr != nil {
-			writeJSONError(w, httpCode, applyErr.Error())
+			code := http.StatusInternalServerError
+			if conflict {
+				code = http.StatusConflict
+			}
+			writeJSONError(w, code, applyErr.Error())
 			return
 		}
+		statusResp, _ := s.buildClusterWarpStatus(r.Context(), s.readConfigOrNil(), viewNode, false)
 		s.recordAudit(r, fmt.Sprintf("全集群同步更新 WARP 智能分流策略 [模式:%s, 节点数:%d, 踢流:%d]",
 			normalized.Mode, len(results), evicted))
-		writeJSON(w, http.StatusOK, map[string]any{
-			"message":            msg,
-			"evictedConnections": evicted,
-			"results":            results,
-			"selectedNode":       statusResp.SelectedNode,
-			"nodes":              statusResp.Nodes,
-			"daemon":             statusResp.Daemon,
-			"routing":            statusResp.Routing,
-			"presets":            statusResp.Presets,
-			"dcConnCount":        statusResp.DCConnCount,
-			"warpConnCount":      statusResp.WarpConnCount,
-		})
+		writeWarpRoutingMutationResponse(w, msg, evicted, statusResp, map[string]any{"results": results})
 		return
 	}
 
-	// 2. 指定远端单台子节点独立更新
 	if targetNode != "local" {
-		fn, ok := s.findEnabledFleetNode(targetNode)
-		if !ok {
+		fn, found := s.warp.cluster.FindEnabledNode(targetNode)
+		if !found {
 			writeJSONError(w, http.StatusNotFound, "未找到集群子节点: "+targetNode)
 			return
 		}
@@ -334,41 +262,28 @@ func (s *Server) handleUpdateWarpRouting(w http.ResponseWriter, r *http.Request)
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		res, applyErr := s.applyWarpRoutingRemoteNode(r.Context(), fn, normalized)
+		res, applyErr := s.warp.cluster.ApplyRemoteNode(r.Context(), fn, normalized)
 		if applyErr != nil {
 			code := http.StatusInternalServerError
-			if isTunnelUnavailableErr(applyErr) {
+			if fleet.IsTunnelUnavailableErr(applyErr) {
 				code = http.StatusConflict
 			}
 			writeJSONError(w, code, fmt.Sprintf("[%s] %v", cmp.Or(fn.Name, fn.ID), applyErr))
 			return
 		}
-		cfg := s.readConfigOrNil()
-		statusResp, _ := s.buildClusterWarpStatus(r, cfg, viewNode, false)
+		statusResp, _ := s.buildClusterWarpStatus(r.Context(), s.readConfigOrNil(), viewNode, false)
 		s.recordAudit(r, fmt.Sprintf("更新子节点 [%s] WARP 分流策略 [模式:%s, 踢流:%d]",
 			cmp.Or(fn.Name, fn.ID), res.Status.Routing.Mode, res.EvictedConnections))
-		writeJSON(w, http.StatusOK, map[string]any{
-			"message":            fmt.Sprintf("[%s] %s", cmp.Or(fn.Name, fn.ID), res.Message),
-			"evictedConnections": res.EvictedConnections,
-			"selectedNode":       statusResp.SelectedNode,
-			"nodes":              statusResp.Nodes,
-			"daemon":             statusResp.Daemon,
-			"routing":            statusResp.Routing,
-			"presets":            statusResp.Presets,
-			"dcConnCount":        statusResp.DCConnCount,
-			"warpConnCount":      statusResp.WarpConnCount,
-		})
+		writeWarpRoutingMutationResponse(w, fmt.Sprintf("[%s] %s", cmp.Or(fn.Name, fn.ID), res.Message), res.EvictedConnections, statusResp, nil)
 		return
 	}
 
-	// 3. 本机主控更新（默认行为）
-	statusResp, httpCode, evicted, err := s.applyWarpRoutingConfig(r, body.WarpRoutingConfig)
+	statusResp, httpCode, evicted, err := s.applyWarpRoutingConfig(r.Context(), body.WarpRoutingConfig)
 	if err != nil {
 		writeJSONError(w, httpCode, err.Error())
 		return
 	}
-	cfg := s.readConfigOrNil()
-	if clusterResp, cErr := s.buildClusterWarpStatus(r, cfg, "local", false); cErr == nil {
+	if clusterResp, cErr := s.buildClusterWarpStatus(r.Context(), s.readConfigOrNil(), "local", false); cErr == nil {
 		statusResp = clusterResp
 	}
 
@@ -389,29 +304,22 @@ func (s *Server) handleUpdateWarpRouting(w http.ResponseWriter, r *http.Request)
 	if evicted > 0 {
 		msg = fmt.Sprintf("已热更新分流路由并平滑切换 %d 条存量连接", evicted)
 	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"message":            msg,
-		"evictedConnections": evicted,
-		"selectedNode":       statusResp.SelectedNode,
-		"nodes":              statusResp.Nodes,
-		"daemon":             statusResp.Daemon,
-		"routing":            statusResp.Routing,
-		"presets":            statusResp.Presets,
-		"dcConnCount":        statusResp.DCConnCount,
-		"warpConnCount":      statusResp.WarpConnCount,
-	})
+	writeWarpRoutingMutationResponse(w, msg, evicted, statusResp, nil)
 }
 
 func (s *Server) handleQuickSwitchWarp(w http.ResponseWriter, r *http.Request) {
-	var body struct {
+	type reqBody struct {
 		Target      string `json:"target"`
-		Outbound    string `json:"outbound"` // "WARP" | "DC" | "Direct"
+		Outbound    string `json:"outbound"`
 		Node        string `json:"node"`
 		ViewNode    string `json:"viewNode"`
 		SyncCluster bool   `json:"syncCluster"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.Target) == "" {
+	body, ok := decodeBodyJSON[reqBody](w, r, httpx.DefaultMaxBodyBytes, false, "请提供要切换的目标域名或 IP/CIDR")
+	if !ok {
+		return
+	}
+	if strings.TrimSpace(body.Target) == "" {
 		writeJSONError(w, http.StatusBadRequest, "请提供要切换的目标域名或 IP/CIDR")
 		return
 	}
@@ -420,42 +328,71 @@ func (s *Server) handleQuickSwitchWarp(w http.ResponseWriter, r *http.Request) {
 	viewNode := cmp.Or(strings.TrimSpace(body.ViewNode), targetNode)
 
 	if targetNode == "all" || body.SyncCluster {
-		s.handleClusterQuickSwitch(w, r, body.Target, body.Outbound, viewNode)
+		cleanTarget, targetOut, matchedPreset, totalEvicted, items, summaryMsg, conflict, badReqErr := s.warp.cluster.BroadcastQuickSwitch(
+			r.Context(),
+			body.Target,
+			body.Outbound,
+			func(ctx context.Context) (int, bool, string, error) {
+				cfg, lErr := s.loadConfigSnapshot()
+				if lErr != nil || cfg == nil {
+					return 0, false, "", errors.New("加载配置失败")
+				}
+				nextWR, _, _, _, qErr := deploy.ComputeQuickSwitchRouting(cfg.Server.WarpRouting, body.Target, body.Outbound)
+				if qErr != nil {
+					if errors.Is(qErr, deploy.ErrWarpQuickSwitchInBypass) {
+						return 0, true, "当前处于紧急旁路，已跳过", nil
+					}
+					return 0, false, "", qErr
+				}
+				_, _, evicted, aErr := s.applyWarpRoutingConfig(ctx, nextWR)
+				return evicted, false, "", aErr
+			},
+		)
+		if badReqErr != nil {
+			writeJSONError(w, http.StatusBadRequest, badReqErr.Error())
+			return
+		}
+		if conflict {
+			firstMsg := "无可用节点"
+			if len(items) > 0 {
+				firstMsg = items[0].Message
+			}
+			writeJSONError(w, http.StatusConflict, "集群内暂无可执行快切的就绪节点："+firstMsg)
+			return
+		}
+		statusResp, _ := s.buildClusterWarpStatus(r.Context(), s.readConfigOrNil(), viewNode, false)
+		s.recordAudit(r, fmt.Sprintf("全集群秒切目标 [%s] -> %s (节点数:%d, 踢断旧流:%d)", cleanTarget, targetOut, len(items), totalEvicted))
+		writeWarpRoutingMutationResponse(w, summaryMsg, totalEvicted, statusResp, map[string]any{
+			"target":        cleanTarget,
+			"outbound":      targetOut,
+			"matchedPreset": matchedPreset,
+			"results":       items,
+		})
 		return
 	}
 
 	if targetNode != "local" {
-		fn, ok := s.findEnabledFleetNode(targetNode)
-		if !ok {
+		fn, found := s.warp.cluster.FindEnabledNode(targetNode)
+		if !found {
 			writeJSONError(w, http.StatusNotFound, "未找到集群子节点: "+targetNode)
 			return
 		}
-		res, err := s.quickSwitchRemoteNode(r.Context(), fn, body.Target, body.Outbound)
+		res, err := s.warp.cluster.QuickSwitchRemoteNode(r.Context(), fn, body.Target, body.Outbound)
 		if err != nil {
 			code := http.StatusInternalServerError
-			if strings.Contains(err.Error(), "紧急全直出旁路") || isTunnelUnavailableErr(err) {
+			if strings.Contains(err.Error(), "紧急全直出旁路") || fleet.IsTunnelUnavailableErr(err) {
 				code = http.StatusConflict
 			}
 			writeJSONError(w, code, fmt.Sprintf("[%s] %v", cmp.Or(fn.Name, fn.ID), err))
 			return
 		}
-		cfg := s.readConfigOrNil()
-		statusResp, _ := s.buildClusterWarpStatus(r, cfg, viewNode, false)
+		statusResp, _ := s.buildClusterWarpStatus(r.Context(), s.readConfigOrNil(), viewNode, false)
 		s.recordAudit(r, fmt.Sprintf("子节点 [%s] 一键秒切目标 [%s] -> %s (踢断旧流:%d)",
 			cmp.Or(fn.Name, fn.ID), res.Target, res.Outbound, res.EvictedConnections))
-		writeJSON(w, http.StatusOK, map[string]any{
-			"message":            fmt.Sprintf("[%s] %s", cmp.Or(fn.Name, fn.ID), res.Message),
-			"target":             res.Target,
-			"outbound":           res.Outbound,
-			"matchedPreset":      res.MatchedPreset,
-			"evictedConnections": res.EvictedConnections,
-			"selectedNode":       statusResp.SelectedNode,
-			"nodes":              statusResp.Nodes,
-			"daemon":             statusResp.Daemon,
-			"routing":            statusResp.Routing,
-			"presets":            statusResp.Presets,
-			"dcConnCount":        statusResp.DCConnCount,
-			"warpConnCount":      statusResp.WarpConnCount,
+		writeWarpRoutingMutationResponse(w, fmt.Sprintf("[%s] %s", cmp.Or(fn.Name, fn.ID), res.Message), res.EvictedConnections, statusResp, map[string]any{
+			"target":        res.Target,
+			"outbound":      res.Outbound,
+			"matchedPreset": res.MatchedPreset,
 		})
 		return
 	}
@@ -465,9 +402,9 @@ func (s *Server) handleQuickSwitchWarp(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "加载配置文件失败")
 		return
 	}
-	nextWR, cleanTarget, targetOut, matchedPresetName, qErr := computeQuickSwitchRouting(cfg.Server.WarpRouting, body.Target, body.Outbound)
+	nextWR, cleanTarget, targetOut, matchedPresetName, qErr := deploy.ComputeQuickSwitchRouting(cfg.Server.WarpRouting, body.Target, body.Outbound)
 	if qErr != nil {
-		if errors.Is(qErr, ErrWarpQuickSwitchInBypass) {
+		if errors.Is(qErr, deploy.ErrWarpQuickSwitchInBypass) {
 			writeJSONError(w, http.StatusConflict, qErr.Error())
 		} else {
 			writeJSONError(w, http.StatusBadRequest, qErr.Error())
@@ -475,12 +412,12 @@ func (s *Server) handleQuickSwitchWarp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	statusResp, httpCode, evicted, applyErr := s.applyWarpRoutingConfig(r, nextWR)
+	statusResp, httpCode, evicted, applyErr := s.applyWarpRoutingConfig(r.Context(), nextWR)
 	if applyErr != nil {
 		writeJSONError(w, httpCode, applyErr.Error())
 		return
 	}
-	if clusterResp, cErr := s.buildClusterWarpStatus(r, s.readConfigOrNil(), "local", false); cErr == nil {
+	if clusterResp, cErr := s.buildClusterWarpStatus(r.Context(), s.readConfigOrNil(), "local", false); cErr == nil {
 		statusResp.SelectedNode = clusterResp.SelectedNode
 		statusResp.Nodes = clusterResp.Nodes
 	}
@@ -498,20 +435,10 @@ func (s *Server) handleQuickSwitchWarp(w http.ResponseWriter, r *http.Request) {
 	if evicted > 0 {
 		msg += fmt.Sprintf("，并立即切换 %d 条活跃连接", evicted)
 	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"message":            msg,
-		"target":             cleanTarget,
-		"outbound":           targetOut,
-		"matchedPreset":      matchedPresetName,
-		"evictedConnections": evicted,
-		"selectedNode":       statusResp.SelectedNode,
-		"nodes":              statusResp.Nodes,
-		"daemon":             statusResp.Daemon,
-		"routing":            statusResp.Routing,
-		"presets":            statusResp.Presets,
-		"dcConnCount":        statusResp.DCConnCount,
-		"warpConnCount":      statusResp.WarpConnCount,
+	writeWarpRoutingMutationResponse(w, msg, evicted, statusResp, map[string]any{
+		"target":        cleanTarget,
+		"outbound":      targetOut,
+		"matchedPreset": matchedPresetName,
 	})
 }
 
@@ -530,7 +457,12 @@ func (s *Server) handleGetWarpConnections(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if targetNode != "local" {
-		s.handleRemoteWarpConnections(w, r, targetNode, q, outbound)
+		fn, found := s.warp.cluster.FindEnabledNode(targetNode)
+		if !found {
+			writeJSONError(w, http.StatusNotFound, "未找到集群子节点: "+targetNode)
+			return
+		}
+		writeJSON(w, http.StatusOK, s.warp.cluster.FetchRemoteConnections(r.Context(), fn, q, outbound))
 		return
 	}
 
@@ -562,38 +494,142 @@ func (s *Server) handleGetWarpConnections(w http.ResponseWriter, r *http.Request
 	})
 }
 
-func (s *Server) handleWarpAction(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Action string `json:"action"` // "rekey" | "ensure" | "enable_telemetry"
-		Node   string `json:"node"`   // "local" | "<id>" | "all"
+func (s *Server) runLocalWarpActionForCluster(ctx context.Context, action string) error {
+	switch action {
+	case "rekey":
+		s.warp.actionMu.Lock()
+		defer s.warp.actionMu.Unlock()
+		prevIP := strings.TrimSpace(s.warp.prober.CachedExitIP())
+		rotateFn := s.snapshotDeps().WarpRotateIdentity
+		if rotateFn == nil {
+			rotateFn = deploy.RotateWarpIdentityFrom
+		}
+		newIP, newLoc, err := rotateFn(prevIP)
+		if err != nil {
+			return err
+		}
+		s.warp.prober.SetCachedExit(newIP, newLoc, time.Now())
+		_ = s.warp.watchdog.RestoreSavedRoutingIfDegraded(s.readConfigOrNil())
+		_ = s.evictAllWarpConnections(ctx)
+		s.invalidateStatusCaches()
+		return nil
+
+	case "ensure":
+		s.warp.actionMu.Lock()
+		defer s.warp.actionMu.Unlock()
+		if err := deploy.DeployWarpWithConfig(s.readConfigOrNil()); err != nil {
+			return err
+		}
+		_ = s.warp.watchdog.RestoreSavedRoutingIfDegraded(s.readConfigOrNil())
+		_ = s.evictAllWarpConnections(ctx)
+		s.invalidateStatusCaches()
+		return nil
+
+	case "enable_telemetry":
+		changed, _, _, err := telemetry.EnsureConfigTelemetry(s.opts.SingBoxConfigPath)
+		if err != nil {
+			return err
+		}
+		if changed {
+			if runErr := s.serviceMgr().Restart(ctx, "sing-box"); runErr != nil {
+				return runErr
+			}
+			time.Sleep(350 * time.Millisecond)
+		}
+		return nil
+
+	default:
+		return fmt.Errorf("不支持的操作: %s", action)
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "无效的 JSON 请求")
+}
+
+func (s *Server) handleWarpAction(w http.ResponseWriter, r *http.Request) {
+	type reqBody struct {
+		Action string `json:"action"`
+		Node   string `json:"node"`
+	}
+	body, ok := decodeBodyJSON[reqBody](w, r, httpx.DefaultMaxBodyBytes, false, "无效的 JSON 请求")
+	if !ok {
 		return
 	}
 
 	action := strings.ToLower(strings.TrimSpace(body.Action))
 	targetNode := cmp.Or(strings.TrimSpace(body.Node), "local")
-	if targetNode != "local" || action == "enable_telemetry" {
-		s.handleClusterOrRemoteWarpAction(w, r, action, targetNode)
+
+	if targetNode == "all" {
+		switch action {
+		case "rekey", "ensure", "enable_telemetry":
+		default:
+			writeJSONError(w, http.StatusBadRequest, "不支持的操作: "+action)
+			return
+		}
+		items, summaryMsg, auditMsg, err := s.warp.cluster.BroadcastAction(r.Context(), action, func(ctx context.Context) error {
+			return s.runLocalWarpActionForCluster(ctx, action)
+		})
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		s.recordAudit(r, auditMsg)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"message": summaryMsg,
+			"results": items,
+			"daemon":  s.ProbeWarpDaemon(false),
+		})
 		return
 	}
 
-	s.warpMu.Lock()
-	defer s.warpMu.Unlock()
+	if targetNode != "local" {
+		switch action {
+		case "rekey", "ensure", "enable_telemetry":
+		default:
+			writeJSONError(w, http.StatusBadRequest, "不支持的操作: "+action)
+			return
+		}
+		fn, found := s.warp.cluster.FindEnabledNode(targetNode)
+		if !found {
+			writeJSONError(w, http.StatusNotFound, "未找到集群子节点: "+targetNode)
+			return
+		}
+		res, err := s.warp.cluster.RunRemoteAction(r.Context(), fn, action)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("[%s] %v", cmp.Or(fn.Name, fn.ID), err))
+			return
+		}
+		if rawMsg, _ := res["message"].(string); rawMsg != "" {
+			res["message"] = fmt.Sprintf("[%s] %s", cmp.Or(fn.Name, fn.ID), rawMsg)
+		}
+		s.recordAudit(r, fmt.Sprintf("子节点 [%s] 执行 WARP 控制指令 [%s]", cmp.Or(fn.Name, fn.ID), action))
+		writeJSON(w, http.StatusOK, res)
+		return
+	}
+
+	if action == "enable_telemetry" {
+		if err := s.runLocalWarpActionForCluster(r.Context(), action); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "启用实时流量遥测失败: "+err.Error())
+			return
+		}
+		s.recordAudit(r, "在 WARP 分流中心一键开启本机实时流量遥测")
+		writeJSON(w, http.StatusOK, map[string]any{
+			"message": "本机实时流量遥测已无损开启",
+			"daemon":  s.ProbeWarpDaemon(false),
+		})
+		return
+	}
+
+	s.warp.actionMu.Lock()
+	defer s.warp.actionMu.Unlock()
 
 	switch action {
 	case "rekey":
-		s.warpCacheMu.Lock()
-		prevIP := strings.TrimSpace(s.warpCachedIP)
-		s.warpCacheMu.Unlock()
+		prevIP := strings.TrimSpace(s.warp.prober.CachedExitIP())
 		if prevIP == "" {
-			if ip, _, _, ok := deploy.FetchWarpExitInfo(1200 * time.Millisecond); ok && ip != "" {
+			if ip, _, _, fetched := deploy.FetchWarpExitInfo(1200 * time.Millisecond); fetched && ip != "" {
 				prevIP = strings.TrimSpace(ip)
 			}
 		}
 
-		rotateFn := s.warpRotateIdentity
+		rotateFn := s.snapshotDeps().WarpRotateIdentity
 		if rotateFn == nil {
 			rotateFn = deploy.RotateWarpIdentityFrom
 		}
@@ -602,20 +638,11 @@ func (s *Server) handleWarpAction(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		s.warpCacheMu.Lock()
-		s.warpCachedIP = newIP
-		s.warpCachedLoc = newLoc
-		s.warpCachedAt = time.Now()
-		s.warpCacheMu.Unlock()
+		s.warp.prober.SetCachedExit(newIP, newLoc, time.Now())
 
-		restoredFromDegraded := s.restoreSavedWarpRoutingIfDegraded()
+		restoredFromDegraded := s.warp.watchdog.RestoreSavedRoutingIfDegraded(s.readConfigOrNil())
 		if !restoredFromDegraded {
-			s.warpWatchdogMu.Lock()
-			if !s.warpDegraded {
-				s.warpAutoHealStatus = ""
-				s.warpLastHealedAt = ""
-			}
-			s.warpWatchdogMu.Unlock()
+			s.warp.watchdog.ClearHealBadgeIfHealthy()
 		}
 		evicted := s.evictAllWarpConnections(r.Context())
 		s.invalidateStatusCaches()
@@ -641,19 +668,18 @@ func (s *Server) handleWarpAction(w http.ResponseWriter, r *http.Request) {
 			"warpIp":             newIP,
 			"warpLoc":            newLoc,
 			"evictedConnections": evicted,
-			"daemon":             s.probeWarpDaemon(false),
+			"daemon":             s.ProbeWarpDaemon(false),
 		})
 
 	case "ensure":
-		cfg := s.readConfigOrNil()
-		if err := deploy.DeployWarpWithConfig(cfg); err != nil {
+		if err := deploy.DeployWarpWithConfig(s.readConfigOrNil()); err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "一键部署/修复 WARP 失败: "+err.Error())
 			return
 		}
-		restoredFromDegraded := s.restoreSavedWarpRoutingIfDegraded()
+		restoredFromDegraded := s.warp.watchdog.RestoreSavedRoutingIfDegraded(s.readConfigOrNil())
 		evicted := s.evictAllWarpConnections(r.Context())
 		s.invalidateStatusCaches()
-		daemon := s.probeWarpDaemon(true)
+		daemon := s.ProbeWarpDaemon(true)
 		s.recordAudit(r, fmt.Sprintf("一键部署并修复内置纯 Go WARP 隧道 (踢断旧流:%d)", evicted))
 		msg := "WARP (纯 Go wireproxy) 本地隧道已就绪，现可自由切换任意分流规则"
 		if restoredFromDegraded {
@@ -668,40 +694,4 @@ func (s *Server) handleWarpAction(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeJSONError(w, http.StatusBadRequest, "不支持的操作: "+action)
 	}
-}
-
-func (s *Server) restoreSavedWarpRoutingIfDegraded() bool {
-	s.warpWatchdogMu.Lock()
-	degraded := s.warpDegraded
-	s.warpFailStreak = 0
-	s.warpWatchdogMu.Unlock()
-	if !degraded {
-		return false
-	}
-
-	cfg, err := s.loadConfigSnapshot()
-	if err != nil || cfg == nil {
-		return false
-	}
-	sbCfgPath := cmp.Or(strings.TrimSpace(s.opts.SingBoxConfigPath), constant.SingBoxConfigFile)
-	if _, applyErr := deploy.ApplyLiveWarpRouting(sbCfgPath, cfg.Server.WarpRouting, s.liveWarpDepsForConfig(cfg)); applyErr != nil && !errors.Is(applyErr, os.ErrNotExist) {
-		return false
-	}
-
-	s.warpWatchdogMu.Lock()
-	s.warpDegraded = false
-	s.warpAutoHealStatus = "已手动恢复 WARP 隧道并切回原有分流策略"
-	s.warpLastHealedAt = time.Now().Format("2006-01-02 15:04:05")
-	s.warpWatchdogMu.Unlock()
-	return true
-}
-
-func removeStringFold(items []string, target string) []string {
-	out := make([]string, 0, len(items))
-	for _, item := range items {
-		if !strings.EqualFold(strings.TrimSpace(item), strings.TrimSpace(target)) {
-			out = append(out, item)
-		}
-	}
-	return out
 }

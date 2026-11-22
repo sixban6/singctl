@@ -19,10 +19,10 @@ import (
 )
 
 const (
-	dnsTypeA     uint16 = 1
-	dnsTypeTXT   uint16 = 16
-	dnsTypeAAAA  uint16 = 28
-	dnsTypeHTTPS uint16 = 65
+	DNSTypeA     uint16 = 1
+	DNSTypeTXT   uint16 = 16
+	DNSTypeAAAA  uint16 = 28
+	DNSTypeHTTPS uint16 = 65
 )
 
 var fakeIPv4Prefix = netip.MustParsePrefix("198.18.0.0/15")
@@ -371,7 +371,7 @@ func newMemoizedISPLookup(fn func(context.Context, string) (*ISPInfo, error)) fu
 	}
 }
 
-func sameIPv6Prefix48(a, b string) bool {
+func SameIPv6Prefix48(a, b string) bool {
 	addrA, errA := netip.ParseAddr(strings.TrimSpace(a))
 	addrB, errB := netip.ParseAddr(strings.TrimSpace(b))
 	if errA != nil || errB != nil {
@@ -439,7 +439,7 @@ var countryNameToISO2 = map[string]string{
 	"israel":                    "IL",
 }
 
-func parseEDNSGeo(geo string) (country, countryCode, isp string) {
+func ParseEDNSGeo(geo string) (country, countryCode, isp string) {
 	trimmed := strings.TrimSpace(geo)
 	if trimmed == "" {
 		return "", "", ""
@@ -565,8 +565,8 @@ func ProbeGatewayEDNSOnce(ctx context.Context) (*DNSResolverProfile, error) {
 	if err != nil {
 		return nil, err
 	}
-	c, cc, isp := parseEDNSGeo(res.DNSGeo)
-	_, ecsCC, _ := parseEDNSGeo(res.EDNSGeo)
+	c, cc, isp := ParseEDNSGeo(res.DNSGeo)
+	_, ecsCC, _ := ParseEDNSGeo(res.EDNSGeo)
 	return &DNSResolverProfile{
 		IP:             res.DNSIP,
 		Country:        c,

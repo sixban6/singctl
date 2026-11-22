@@ -1,3 +1,4 @@
+// 文件职责：定义三层安全自愈状态报告、策略配置与执行历史原子持久化模型。
 package heal
 
 import (
@@ -8,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"singctl/internal/util/file"
+	"singctl/internal/common/fsx"
 )
 
 // PostureLevel summarizes the overall 3-layer security state of a node.
@@ -186,7 +187,7 @@ func writeStateUnlocked(statePath string, st PersistedHealState) error {
 	if err != nil {
 		return err
 	}
-	return file.WriteAtomic0600(statePath, data)
+	return fsx.WriteAtomic0600(statePath, data)
 }
 
 // SavePolicy updates the persisted HealPolicy with 0600 permissions.

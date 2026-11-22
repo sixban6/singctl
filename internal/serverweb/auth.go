@@ -1,3 +1,4 @@
+// 文件职责：负责服务端 Web 会话认证、网关令牌校验、防爆破登录、请求体上限门禁（guard）与账号凭据管理。
 package serverweb
 
 import (
@@ -5,7 +6,6 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -14,9 +14,9 @@ import (
 	"strings"
 	"time"
 
+	"singctl/internal/common/httpx"
+	"singctl/internal/common/netx"
 	"singctl/internal/config"
-	"singctl/internal/util/httpgzip"
-	"singctl/internal/util/netinfo"
 )
 
 func resolveBanFilePath(opts Options) string {
@@ -26,7 +26,7 @@ func resolveBanFilePath(opts Options) string {
 	return ResolveBanFilePath(opts.ConfigPath)
 }
 
-// ResolveBanFilePath 返回指定配置文件对应的防爆破封禁持久化文件路径
+// ResolveBanFilePath 返回指定配置文件对应的防爆破封禁持久化文件路径。
 func ResolveBanFilePath(configPath string) string {
 	if configPath != "" {
 		return filepath.Join(filepath.Dir(configPath), ".serverweb_bans.json")
@@ -37,7 +37,7 @@ func ResolveBanFilePath(configPath string) string {
 	return ""
 }
 
-// ResolveCLITokenPath 返回本机 root CLI 管理令牌文件路径 (0600)
+// ResolveCLITokenPath 返回本机 root CLI 管理令牌文件路径 (0600)。
 func ResolveCLITokenPath(configPath string) string {
 	if configPath != "" {
 		return filepath.Join(filepath.Dir(configPath), ".serverweb_cli.token")
@@ -108,10 +108,7 @@ func resolveGeoFilePath(opts Options) string {
 func (s *Server) GetUsername() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if s.opts.Username != "" {
-		return s.opts.Username
-	}
-	return "singctl"
+	return cmp.Or(s.opts.Username, "singctl")
 }
 
 func (s *Server) GetPassword() string {
@@ -126,7 +123,7 @@ func (s *Server) pendingAck() bool {
 	return s.passwordPendingAck
 }
 
-// GatewayToken 返回当前 Caddy -> ServerWeb 内部网关校验令牌
+// GatewayToken 返回当前 Caddy -> ServerWeb 内部网关校验令牌。
 func (s *Server) GatewayToken() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -249,11 +246,9 @@ func (s *Server) authorized(r *http.Request) bool {
 	if s.GetPassword() == "" {
 		return false
 	}
-
 	if cookie, err := r.Cookie(sessionCookieName); err == nil && s.useSession(cookie.Value) {
 		return true
 	}
-
 	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
 		token := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
 		if s.useSession(token) {
@@ -264,7 +259,6 @@ func (s *Server) authorized(r *http.Request) bool {
 			return true
 		}
 	}
-
 	user, pass, ok := r.BasicAuth()
 	if ok && subtle.ConstantTimeCompare([]byte(user), []byte(s.GetUsername())) == 1 {
 		if config.VerifyPassword(s.GetPassword(), pass) {
@@ -292,12 +286,15 @@ func (s *Server) guard(next http.HandlerFunc) http.HandlerFunc {
 				writeJSONError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
 				return
 			}
+			if r.Body != nil {
+				r.Body = http.MaxBytesReader(w, r.Body, httpx.DefaultMaxBodyBytes)
+			}
 		}
 		if strings.HasSuffix(r.URL.Path, "/stream") || r.Header.Get("Upgrade") != "" || strings.Contains(strings.ToLower(r.Header.Get("Accept")), "text/event-stream") {
 			next(w, r)
 			return
 		}
-		httpgzip.Serve(w, r, next)
+		httpx.ServeGzip(w, r, next)
 	}
 }
 
@@ -319,7 +316,6 @@ func (s *Server) getClientIPAndSeedGeo(r *http.Request) string {
 				}
 				return ip
 			}
-			// 未携带合法 Caddy 网关凭证的直连回环请求：忽略伪造的 X-Real-IP / X-Geo-Country，并纳入独立限流桶
 			return "loopback-direct"
 		}
 	}
@@ -354,10 +350,7 @@ func (s *Server) handleSessionURL(w http.ResponseWriter, r *http.Request) {
 	subDomain := ""
 	adminPath := ""
 	if cfg != nil {
-		subDomain = cfg.Server.GetSubstoreDomain()
-		if subDomain == "" {
-			subDomain = cfg.Server.GetNodeDomain()
-		}
+		subDomain = cmp.Or(cfg.Server.GetSubstoreDomain(), cfg.Server.GetNodeDomain())
 		adminPath = cfg.Server.GetWebAdminPath()
 	}
 
@@ -366,7 +359,7 @@ func (s *Server) handleSessionURL(w http.ResponseWriter, r *http.Request) {
 		targetURL = fmt.Sprintf("https://%s%s/", subDomain, adminPath)
 	} else {
 		lanIP := "127.0.0.1"
-		if ni, err := netinfo.Get(); err == nil && ni.LANIPv4 != "" {
+		if ni, err := netx.Get(); err == nil && ni.LANIPv4 != "" {
 			lanIP = ni.LANIPv4
 		}
 		_, port, err := net.SplitHostPort(s.opts.Listen)
@@ -376,9 +369,7 @@ func (s *Server) handleSessionURL(w http.ResponseWriter, r *http.Request) {
 		targetURL = fmt.Sprintf("http://%s:%s/", lanIP, port)
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{
-		"url": targetURL,
-	})
+	writeJSON(w, http.StatusOK, map[string]string{"url": targetURL})
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -391,12 +382,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var body struct {
+	type loginBody struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 4096)
-	_ = json.NewDecoder(r.Body).Decode(&body)
+	body, _ := httpx.DecodeJSON[loginBody](w, r, 4096, true)
 
 	user := s.GetUsername()
 	pass := s.GetPassword()
@@ -444,18 +434,18 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUnban(w http.ResponseWriter, r *http.Request) {
-	var body struct {
+	type reqBody struct {
 		IP       string `json:"ip"`
 		Target   string `json:"target"`
 		Node     string `json:"node"`
 		ViewNode string `json:"viewNode"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
-
-	targetIP := strings.TrimSpace(cmp.Or(body.IP, body.Target))
-	if targetIP == "" {
-		targetIP = "all"
+	body, ok := decodeBodyJSON[reqBody](w, r, httpx.DefaultMaxBodyBytes, true, "")
+	if !ok {
+		return
 	}
+
+	targetIP := cmp.Or(strings.TrimSpace(cmp.Or(body.IP, body.Target)), "all")
 	nodeScope := cmp.Or(strings.TrimSpace(body.Node), "all")
 	viewScope := cmp.Or(strings.TrimSpace(body.ViewNode), nodeScope)
 
@@ -529,8 +519,6 @@ func (s *Server) handleListAuditLogs(w http.ResponseWriter, r *http.Request) {
 	var rawLogs []AuditEntry
 	if s.audit != nil {
 		rawLogs = s.audit.List()
-	} else {
-		rawLogs = []AuditEntry{}
 	}
 	logs := make([]map[string]any, 0, len(rawLogs))
 	for _, entry := range rawLogs {
@@ -550,19 +538,17 @@ func (s *Server) handleListAuditLogs(w http.ResponseWriter, r *http.Request) {
 		}
 		logs = append(logs, item)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"logs": logs,
-	})
+	writeJSON(w, http.StatusOK, map[string]any{"logs": logs})
 }
 
 func (s *Server) handleUpdateCredentials(w http.ResponseWriter, r *http.Request) {
-	var body struct {
+	type reqBody struct {
 		CurrentPassword string `json:"currentPassword"`
 		NewUsername     string `json:"newUsername"`
 		NewPassword     string `json:"newPassword"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "无效的 JSON 数据")
+	body, ok := decodeBodyJSON[reqBody](w, r, httpx.DefaultMaxBodyBytes, false, "无效的 JSON 数据")
+	if !ok {
 		return
 	}
 
@@ -578,10 +564,7 @@ func (s *Server) handleUpdateCredentials(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	newUsername := strings.TrimSpace(body.NewUsername)
-	if newUsername == "" {
-		newUsername = s.GetUsername()
-	}
+	newUsername := cmp.Or(strings.TrimSpace(body.NewUsername), s.GetUsername())
 	if strings.EqualFold(newUsername, "admin") {
 		writeJSONError(w, http.StatusBadRequest, "管理账号禁止使用通用的 admin，请设置个性化用户名")
 		return
@@ -624,6 +607,9 @@ func (s *Server) handleUpdateCredentials(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleAckCredentials(w http.ResponseWriter, r *http.Request) {
+	if _, ok := decodeBodyJSON[map[string]any](w, r, httpx.DefaultMaxBodyBytes, true, ""); !ok {
+		return
+	}
 	cfg, err := s.loadMutableConfig()
 	if err != nil || cfg == nil {
 		writeJSONError(w, http.StatusInternalServerError, "加载配置文件失败")

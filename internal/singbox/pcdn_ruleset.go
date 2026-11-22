@@ -1,3 +1,4 @@
+// 文件职责：维护客户端内置防 PCDN 域名后缀清单、精确后缀匹配、规则集编译缓存与默认开关生效逻辑。
 package singbox
 
 import (
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"singctl/internal/config"
+	"singctl/internal/singbox/sboption"
 )
 
 const (
@@ -142,16 +144,15 @@ func BuiltinPCDNRuleSetJSON() []byte {
 	return b
 }
 
-// BuiltinPCDNInlineRuleSet 返回可跨平台（含 iOS SFI）免外部下载的 sing-box inline 规则集对象。
-func BuiltinPCDNInlineRuleSet() map[string]any {
-	return map[string]any{
-		"tag":  BuiltinPCDNRuleSetTag,
-		"type": "inline",
-		"rules": []map[string]any{
-			{
-				"domain_suffix": slices.Clone(BuiltinPCDNDomainSuffixes),
-			},
-		},
+// BuiltinPCDNInlineRuleSet 返回可跨平台（含 iOS SFI）免外部下载的 sing-box inline 规则集声明。
+func BuiltinPCDNInlineRuleSet() sboption.RuleSet {
+	rawRules, _ := json.Marshal([]map[string]any{
+		{"domain_suffix": slices.Clone(BuiltinPCDNDomainSuffixes)},
+	})
+	return sboption.RuleSet{
+		Tag:   BuiltinPCDNRuleSetTag,
+		Type:  "inline",
+		Rules: rawRules,
 	}
 }
 

@@ -195,7 +195,7 @@ func Install(cfg *config.Config, configPath string, opts InstallOptions) (*Insta
 	}
 
 	// 6. 安装并配置 wstunnel (Native SSH over WSS)，保留已配置的端口/路径
-	sshPort := resolveWebTerminalSSHPort(cfg, DetectSSHPort)
+	sshPort := ResolveWebTerminalSSHPort(cfg, DetectSSHPort)
 	sshTunnelPort := DefaultSSHTunnelPort
 	if cfg != nil && cfg.Server.WebTerminal.SSHTunnelPort > 0 {
 		sshTunnelPort = cfg.Server.WebTerminal.SSHTunnelPort
@@ -346,7 +346,7 @@ func Status(cfg *config.Config) (*StatusResult, error) {
 		if cfg.Server.WebTerminal.SSHTunnelPort > 0 {
 			res.SSHTunnelPort = cfg.Server.WebTerminal.SSHTunnelPort
 		}
-		res.SSHPort = resolveWebTerminalSSHPort(cfg, DetectSSHPort)
+		res.SSHPort = ResolveWebTerminalSSHPort(cfg, DetectSSHPort)
 		domain := cfg.Server.GetNodeDomain()
 		if domain == "" {
 			domain = cfg.Server.GetSubstoreDomain()
@@ -384,10 +384,11 @@ func ExportCert() (string, error) {
 
 // DetectSSHPort resolves the effective SSH listening port, preferring hardened drop-in configs over default port 22.
 func DetectSSHPort() int {
-	return detectSSHPortFrom(os.Getenv("SSH_CONNECTION"), "/etc/ssh/sshd_config.d/*.conf", "/etc/ssh/sshd_config")
+	return DetectSSHPortFrom(os.Getenv("SSH_CONNECTION"), "/etc/ssh/sshd_config.d/*.conf", "/etc/ssh/sshd_config")
 }
 
-func resolveWebTerminalSSHPort(cfg *config.Config, detector func() int) int {
+// ResolveWebTerminalSSHPort resolves the SSH port for WebTerminal, preferring explicit config over host detection.
+func ResolveWebTerminalSSHPort(cfg *config.Config, detector func() int) int {
 	if cfg != nil && cfg.Server.WebTerminal.SSHPort > 0 {
 		return cfg.Server.WebTerminal.SSHPort
 	}
@@ -399,7 +400,8 @@ func resolveWebTerminalSSHPort(cfg *config.Config, detector func() int) int {
 	return 22
 }
 
-func detectSSHPortFrom(envConn, configDGlob, mainConfigPath string) int {
+// DetectSSHPortFrom inspects drop-in sshd configs, SSH_CONNECTION, and main sshd_config to resolve the active SSH port.
+func DetectSSHPortFrom(envConn, configDGlob, mainConfigPath string) int {
 	fallbackPort := 0
 
 	// 1. 优先扫描 /etc/ssh/sshd_config.d/*.conf (如 00-singctl-hardening.conf 中的非 22 端口)

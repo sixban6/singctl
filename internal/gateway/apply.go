@@ -1,3 +1,4 @@
+// 文件职责：负责旁路由模式（Side Router）内核转发、默认路由自愈、DNS 上游防环收敛与防火墙规则的原子挂载和可逆卸载。
 package gateway
 
 import (
@@ -19,7 +20,7 @@ import (
 const (
 	defaultStateDir       = "/tmp/singctl-side-state"
 	defaultFW4IncludeRoot = "/usr/share/nftables.d"
-	fw4IncludeFileName    = "singctl-side.nft"
+	FW4IncludeFileName    = "singctl-side.nft"
 	ruleCommentTag        = "singctl-side"
 	legacySideChainFwd    = "SINGCTL_SIDE_FWD"
 	legacySideChainNat    = "SINGCTL_SIDE_NAT"
@@ -404,7 +405,7 @@ func (c *Controller) applyFW4PassThrough(ctx context.Context, lanIface string) {
 				logger.Warn("创建 fw4 include 目录 %s 失败: %v", dir, mkErr)
 				continue
 			}
-			path := filepath.Join(dir, fw4IncludeFileName)
+			path := filepath.Join(dir, FW4IncludeFileName)
 			if wErr := os.WriteFile(path, []byte(inc.content), 0600); wErr != nil {
 				logger.Warn("写入 fw4 持久化规则 %s 失败: %v", path, wErr)
 			}
@@ -455,7 +456,7 @@ func (c *Controller) applyLegacyIptablesSideRules(ctx context.Context, plan Reso
 func (c *Controller) cleanupFirewallOnly(ctx context.Context) {
 	root := c.fw4IncludeRoot()
 	for _, chain := range []string{"input", "forward"} {
-		_ = os.Remove(filepath.Join(root, "chain-pre", chain, fw4IncludeFileName))
+		_ = os.Remove(filepath.Join(root, "chain-pre", chain, FW4IncludeFileName))
 	}
 
 	if c.hasCommand("nft") {

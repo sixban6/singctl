@@ -1,21 +1,23 @@
+// 文件职责：负责客户端本地 DNS（AdGuard Home vs 内置加密 DoH）热切换、状态巡检与 RFC 6303 私网 PTR NXDOMAIN 防环注入。
 package singbox
 
 import (
 	"cmp"
 	"context"
-	"encoding/json"
 	"os"
 	"slices"
 	"strings"
 
 	"singctl/internal/constant"
 	log "singctl/internal/logger"
+	"singctl/internal/singbox/sboption"
 )
 
 const (
 	defaultFallbackDoHServer = "223.5.5.5"
 	defaultFallbackDoHPath   = "/dns-query"
-	dnsSDBrowseKeyword       = "_dns-sd._udp."
+	// DNSSDBrowseKeyword 是 Bonjour / mDNS 服务发现反查特征串，用于在 sing-box 侧就地返回 NXDOMAIN 防回环。
+	DNSSDBrowseKeyword = "_dns-sd._udp."
 )
 
 // privateReverseDNSSuffixes 覆盖 RFC 6303 标准私网/链路本地反查域，配合 _dns-sd._udp. 在 sing-box 侧就地返回 NXDOMAIN，
@@ -50,6 +52,9 @@ var privateReverseDNSSuffixes = []string{
 	"b.e.f.ip6.arpa",
 }
 
+// PrivateReverseDNSSuffixes 返回 RFC 6303 私网与链路本地反查域名后缀副本。
+func PrivateReverseDNSSuffixes() []string { return slices.Clone(privateReverseDNSSuffixes) }
+
 // PatchDNSLocalJSON 在现有 sing-box 配置 JSON 上无损切换 dns_local 解析器：
 //   - useAdGuard=true : 指向本地 AdGuard Home (udp://127.0.0.1:<dnsPort>) 并关闭 sing-box 重复缓存；
 //   - useAdGuard=false: 恢复为纯 IP 加密 DoH (https://223.5.5.5/dns-query，已获 TProxy output 链豁免)，
@@ -62,29 +67,18 @@ func PatchDNSLocalJSON(rawJSON string, useAdGuard bool, dnsPort int) (string, bo
 		dnsPort = 5353
 	}
 
-	var root map[string]any
-	if err := json.Unmarshal([]byte(rawJSON), &root); err != nil {
+	doc, err := sboption.ParseDocument([]byte(rawJSON))
+	if err != nil {
 		return "", false, err
 	}
-	dnsMap, ok := root["dns"].(map[string]any)
-	if !ok {
-		return rawJSON, false, nil
-	}
-	servers, ok := dnsMap["servers"].([]any)
-	if !ok {
+	if doc.DNS == nil || len(doc.DNS.Servers) == 0 {
 		return rawJSON, false, nil
 	}
 
 	targetIdx := -1
-	var existingSrv map[string]any
-	for i, item := range servers {
-		srvMap, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
-		if tag, _ := srvMap["tag"].(string); tag == "dns_local" {
+	for i := range doc.DNS.Servers {
+		if doc.DNS.Servers[i].Tag == "dns_local" {
 			targetIdx = i
-			existingSrv = srvMap
 			break
 		}
 	}
@@ -92,60 +86,59 @@ func PatchDNSLocalJSON(rawJSON string, useAdGuard bool, dnsPort int) (string, bo
 		return rawJSON, false, nil
 	}
 
-	var desiredSrv map[string]any
+	var desiredSrv sboption.DNSServer
 	if useAdGuard {
-		desiredSrv = map[string]any{
-			"tag":         "dns_local",
-			"type":        "udp",
-			"server":      "127.0.0.1",
-			"server_port": dnsPort,
+		desiredSrv = sboption.DNSServer{
+			Tag:        "dns_local",
+			Type:       "udp",
+			Server:     "127.0.0.1",
+			ServerPort: dnsPort,
 		}
 	} else {
-		desiredSrv = map[string]any{
-			"tag":         "dns_local",
-			"type":        "https",
-			"server":      defaultFallbackDoHServer,
-			"server_port": 443,
-			"path":        defaultFallbackDoHPath,
+		desiredSrv = sboption.DNSServer{
+			Tag:        "dns_local",
+			Type:       "https",
+			Server:     defaultFallbackDoHServer,
+			ServerPort: 443,
+			Path:       defaultFallbackDoHPath,
 		}
 	}
 
-	alreadyMatch := dnsServerEqual(existingSrv, desiredSrv)
+	existingSrv := doc.DNS.Servers[targetIdx]
+	alreadyMatch := dnsServerStructEqual(existingSrv, desiredSrv)
+
 	wantDisableCache := useAdGuard
 	wantOptimistic := !useAdGuard
+	curDisableCache := doc.DNS.DisableCache != nil && *doc.DNS.DisableCache
+	curOptimistic := doc.DNS.Optimistic != nil && *doc.DNS.Optimistic
+	cacheMatch := doc.DNS.DisableCache != nil && doc.DNS.Optimistic != nil &&
+		curDisableCache == wantDisableCache && curOptimistic == wantOptimistic
 
-	curDisableCache, _ := dnsMap["disable_cache"].(bool)
-	curOptimistic, _ := dnsMap["optimistic"].(bool)
-	cacheMatch := curDisableCache == wantDisableCache && curOptimistic == wantOptimistic
-	ptrChanged := ensurePrivatePTRBlockRules(dnsMap)
-
+	ptrChanged := ensurePrivatePTRBlockRulesInDoc(doc)
 	if alreadyMatch && cacheMatch && !ptrChanged {
 		return rawJSON, false, nil
 	}
 
 	if !alreadyMatch || !cacheMatch {
-		servers[targetIdx] = desiredSrv
-		dnsMap["servers"] = servers
-		dnsMap["disable_cache"] = wantDisableCache
-		dnsMap["optimistic"] = wantOptimistic
+		doc.DNS.Servers[targetIdx] = desiredSrv
+		doc.DNS.DisableCache = new(wantDisableCache)
+		doc.DNS.Optimistic = new(wantOptimistic)
 
-		if expMap, ok := root["experimental"].(map[string]any); ok {
-			if cfMap, ok := expMap["cache_file"].(map[string]any); ok {
-				if useAdGuard {
-					cfMap["store_dns"] = false
-					cfMap["store_fakeip"] = false
-				} else {
-					cfMap["store_dns"] = true
-				}
+		if doc.Experimental != nil && doc.Experimental.CacheFile != nil {
+			if useAdGuard {
+				doc.Experimental.CacheFile.StoreDNS = new(false)
+				doc.Experimental.CacheFile.StoreFakeIP = new(false)
+			} else {
+				doc.Experimental.CacheFile.StoreDNS = new(true)
 			}
 		}
 	}
 
-	formatted, err := PrettyJSONFromValue(root)
+	formatted, err := doc.MarshalPretty()
 	if err != nil {
 		return "", false, err
 	}
-	return formatted, true, nil
+	return formatted + "\n", true, nil
 }
 
 // InjectPrivatePTRBlockRules 在非 iOS 客户端 sing-box 配置中幂等前置 RFC 6303 私网反查与 DNS-SD 浏览域的本地 NXDOMAIN 规则。
@@ -153,45 +146,28 @@ func InjectPrivatePTRBlockRules(rawJSON string) (string, error) {
 	if strings.TrimSpace(rawJSON) == "" {
 		return rawJSON, nil
 	}
-	var root map[string]any
-	if err := json.Unmarshal([]byte(rawJSON), &root); err != nil {
-		return "", err
-	}
-	dnsMap, ok := root["dns"].(map[string]any)
-	if !ok {
-		return rawJSON, nil
-	}
-	if !ensurePrivatePTRBlockRules(dnsMap) {
-		return rawJSON, nil
-	}
-	out, err := json.Marshal(root)
+	doc, err := sboption.ParseDocument([]byte(rawJSON))
 	if err != nil {
 		return "", err
 	}
-	return string(out), nil
+	if !ensurePrivatePTRBlockRulesInDoc(doc) {
+		return rawJSON, nil
+	}
+	return doc.MarshalCompact()
 }
 
-func ensurePrivatePTRBlockRules(dnsMap map[string]any) bool {
-	if dnsMap == nil {
+func ensurePrivatePTRBlockRulesInDoc(doc *sboption.Document) bool {
+	if doc == nil || doc.DNS == nil {
 		return false
 	}
-	existing, _ := dnsMap["rules"].([]any)
 	hasSuffixRule := false
 	hasKeywordRule := false
-	for _, item := range existing {
-		m, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
-		act, _ := m["action"].(string)
-		rcode, _ := m["rcode"].(string)
-		if act != "predefined" || !strings.EqualFold(rcode, "NXDOMAIN") {
-			continue
-		}
-		if matchesStringSliceField(m["domain_suffix"], privateReverseDNSSuffixes) {
+	for _, r := range doc.DNS.Rules {
+		isSfx, isKw := sboption.IsManagedPrivatePTRDNSRule(r, privateReverseDNSSuffixes, DNSSDBrowseKeyword)
+		if isSfx {
 			hasSuffixRule = true
 		}
-		if matchesStringSliceField(m["domain_keyword"], []string{dnsSDBrowseKeyword}) {
+		if isKw {
 			hasKeywordRule = true
 		}
 	}
@@ -199,67 +175,37 @@ func ensurePrivatePTRBlockRules(dnsMap map[string]any) bool {
 		return false
 	}
 
-	prepend := make([]any, 0, 2)
+	prepend := make([]sboption.DNSRule, 0, 2)
 	if !hasSuffixRule {
-		prepend = append(prepend, map[string]any{
-			"action":        "predefined",
-			"domain_suffix": slices.Clone(privateReverseDNSSuffixes),
-			"rcode":         "NXDOMAIN",
+		prepend = append(prepend, sboption.DNSRule{
+			Action:       "predefined",
+			DomainSuffix: sboption.ListOf(privateReverseDNSSuffixes...),
+			Rcode:        "NXDOMAIN",
 		})
 	}
 	if !hasKeywordRule {
-		prepend = append(prepend, map[string]any{
-			"action":         "predefined",
-			"domain_keyword": []string{dnsSDBrowseKeyword},
-			"rcode":          "NXDOMAIN",
+		prepend = append(prepend, sboption.DNSRule{
+			Action:        "predefined",
+			DomainKeyword: sboption.ListOf(DNSSDBrowseKeyword),
+			Rcode:         "NXDOMAIN",
 		})
 	}
-	merged := make([]any, 0, len(prepend)+len(existing))
+	merged := make([]sboption.DNSRule, 0, len(prepend)+len(doc.DNS.Rules))
 	merged = append(merged, prepend...)
-	merged = append(merged, existing...)
-	dnsMap["rules"] = merged
+	merged = append(merged, doc.DNS.Rules...)
+	doc.DNS.Rules = merged
 	return true
 }
 
-func matchesStringSliceField(raw any, want []string) bool {
-	items, ok := raw.([]any)
-	if !ok {
-		if strItems, okStr := raw.([]string); okStr {
-			return slices.Equal(strItems, want)
-		}
-		return false
-	}
-	if len(items) != len(want) {
-		return false
-	}
-	for i, item := range items {
-		s, ok := item.(string)
-		if !ok || s != want[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func dnsServerEqual(a, b map[string]any) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	ab, err1 := json.Marshal(a)
-	bb, err2 := json.Marshal(b)
-	if err1 != nil || err2 != nil {
-		return false
-	}
-	return string(ab) == string(bb)
-}
-
-// PrettyJSONFromValue 将任意对象序列化为 2 空格缩进的 JSON。
-func PrettyJSONFromValue(v any) (string, error) {
-	out, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
-		return "", err
-	}
-	return string(out) + "\n", nil
+func dnsServerStructEqual(a, b sboption.DNSServer) bool {
+	return len(a.Extra) == 0 && len(b.Extra) == 0 &&
+		a.Tag == b.Tag &&
+		a.Type == b.Type &&
+		a.Server == b.Server &&
+		a.ServerPort == b.ServerPort &&
+		a.Path == b.Path &&
+		a.Address == b.Address &&
+		a.Detour == b.Detour
 }
 
 // InspectSingBoxDNSLocal 检查磁盘上的 sing-box config.json 当前是否已将 dns_local 指向本地 127.0.0.1:<port>。
@@ -272,20 +218,11 @@ func InspectSingBoxDNSLocal(sbConfigPath string) (linked bool, port int) {
 	if err != nil {
 		return false, 0
 	}
-	var parsed struct {
-		DNS struct {
-			Servers []struct {
-				Tag        string `json:"tag"`
-				Type       string `json:"type"`
-				Server     string `json:"server"`
-				ServerPort int    `json:"server_port"`
-			} `json:"servers"`
-		} `json:"dns"`
-	}
-	if err := json.Unmarshal(raw, &parsed); err != nil {
+	doc, err := sboption.ParseDocument(raw)
+	if err != nil || doc.DNS == nil {
 		return false, 0
 	}
-	for _, s := range parsed.DNS.Servers {
+	for _, s := range doc.DNS.Servers {
 		if s.Tag == "dns_local" {
 			if strings.TrimSpace(s.Server) == "127.0.0.1" {
 				p := s.ServerPort
@@ -301,7 +238,7 @@ func InspectSingBoxDNSLocal(sbConfigPath string) (linked bool, port int) {
 }
 
 // SyncLiveSingBoxDNSLocal 遵循规则 02 两阶段原子切换准则，离线修改现有 sing-box 配置中的 dns_local，
-// 通过 `sing-box check` 语法校验后原子覆盖并发送 SIGHUP 无感热重载（不中断存量连接，不依赖外部网络拉订阅）。
+// 通过 `sing-box check` 语法校验后原子覆盖并发送 SIGHUP 无感热重载。
 func SyncLiveSingBoxDNSLocal(ctx context.Context, sbConfigPath, sbWorkConfigPath string, useAdGuard bool, dnsPort int) (bool, error) {
 	cfgPath := cmp.Or(strings.TrimSpace(sbConfigPath), constant.SingBoxConfigFile)
 	workPath := cmp.Or(strings.TrimSpace(sbWorkConfigPath), constant.SingBoxWorkConfigFile)

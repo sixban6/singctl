@@ -1,3 +1,4 @@
+// 文件职责：提供客户端自定义分组 (groups.yaml) 读取、实时预览编译与原子热重载回滚接口。
 package webui
 
 import (
@@ -7,10 +8,10 @@ import (
 	"strings"
 
 	"singctl/configs"
+	"singctl/internal/common/fsx"
 	"singctl/internal/config"
 	"singctl/internal/daemon"
 	"singctl/internal/singbox"
-	"singctl/internal/util/file"
 )
 
 // GroupTemplateSnippet 提供给前端一键插入的常用 YAML 模板片段。
@@ -107,7 +108,8 @@ groups:
 	},
 }
 
-type groupsGetResponse struct {
+// GroupsGetResponse 返回自定义分组文件内容、宏说明与编译预览。
+type GroupsGetResponse struct {
 	Path          string                       `json:"path"`
 	Exists        bool                         `json:"exists"`
 	Content       string                       `json:"content"`
@@ -118,11 +120,13 @@ type groupsGetResponse struct {
 	ParseError    string                       `json:"parseError,omitempty"`
 }
 
-type groupsPreviewRequest struct {
+// GroupsPreviewRequest 描述自定义分组在线预览请求体。
+type GroupsPreviewRequest struct {
 	Content string `json:"content"`
 }
 
-type groupsPutRequest struct {
+// GroupsPutRequest 描述自定义分组保存或恢复默认请求体。
+type GroupsPutRequest struct {
 	Content string `json:"content"`
 	Reset   bool   `json:"reset,omitempty"`
 }
@@ -146,7 +150,7 @@ func (s *Server) handleGroupsGet(w http.ResponseWriter, _ *http.Request) {
 	rawSB := string(rawSBBytes)
 	hasLiveSB := sbErr == nil && strings.TrimSpace(rawSB) != ""
 
-	resp := groupsGetResponse{
+	resp := GroupsGetResponse{
 		Path:          gPath,
 		Exists:        exists,
 		Content:       content,
@@ -174,7 +178,7 @@ func (s *Server) handleGroupsGet(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleGroupsPreviewPost(w http.ResponseWriter, r *http.Request) {
-	var body groupsPreviewRequest
+	var body GroupsPreviewRequest
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "请求格式错误: "+err.Error())
 		return
@@ -225,7 +229,7 @@ func (s *Server) handleGroupsPreviewPost(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleGroupsPut(w http.ResponseWriter, r *http.Request) {
-	var body groupsPutRequest
+	var body GroupsPutRequest
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "请求格式错误: "+err.Error())
 		return
@@ -273,7 +277,7 @@ func (s *Server) handleGroupsPut(w http.ResponseWriter, r *http.Request) {
 	// 先更新或清理 groups.yaml，若后续 sing-box check 热重载失败则回滚磁盘文件
 	restoreGroupsFile := func() {
 		if prevDiskErr == nil {
-			_ = file.WriteAtomic0600(gPath, prevDiskBytes)
+			_ = fsx.WriteAtomic0600(gPath, prevDiskBytes)
 		} else {
 			_ = os.Remove(gPath)
 		}

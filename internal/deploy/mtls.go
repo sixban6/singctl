@@ -11,7 +11,7 @@ import (
 
 	"singctl/internal/config"
 	"singctl/internal/constant"
-	"singctl/internal/util/file"
+	"singctl/internal/common/fsx"
 )
 
 const LegacyCaddyMtlsCACert = "/etc/caddy/mtls/ca.crt"
@@ -365,5 +365,5 @@ func applyCaddyReadableFile(path string) error {
 }
 
 func writeFileAtomicWithMode(path string, data []byte, perm os.FileMode) error {
-	return file.WriteAtomic(path, data, perm)
+	return fsx.WriteAtomic(path, data, perm)
 }

@@ -1,36 +1,53 @@
+// 文件职责：提供三层自动化安全自愈中心的状态 SWR 缓存查询、策略配置与本机/舰队自愈执行薄 HTTP 接口。
 package serverweb
 
 import (
 	"cmp"
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
+	"singctl/internal/common/httpx"
 	"singctl/internal/fleet"
 	"singctl/internal/heal"
 )
 
 const healStatusCacheTTL = 3 * time.Minute
 
-func (s *Server) storeHealStatusCache(rep *heal.StatusReport) {
-	if rep == nil {
+type healCacheState struct {
+	cacheMu    sync.Mutex
+	scanMu     sync.Mutex
+	cached     *heal.StatusReport
+	cachedAt   time.Time
+	refreshing atomic.Bool
+}
+
+func (h *healCacheState) set(rep *heal.StatusReport, at time.Time) {
+	if h == nil || rep == nil {
 		return
 	}
 	cp := *rep
-	s.healCacheMu.Lock()
-	s.cachedHealReport = &cp
-	s.cachedHealAt = time.Now()
-	s.healCacheMu.Unlock()
+	h.cacheMu.Lock()
+	h.cached = &cp
+	h.cachedAt = at
+	h.cacheMu.Unlock()
+}
+
+func (s *Server) storeHealStatusCache(rep *heal.StatusReport) {
+	if s.caches != nil && s.caches.heal != nil {
+		s.caches.heal.set(rep, time.Now())
+	}
 }
 
 func (s *Server) runHealScanSync(ctx context.Context) heal.StatusReport {
-	s.healScanMu.Lock()
-	defer s.healScanMu.Unlock()
+	s.caches.heal.scanMu.Lock()
+	defer s.caches.heal.scanMu.Unlock()
 
-	scanFn := s.healScannerOverride
+	scanFn := s.snapshotDeps().HealScanner
 	if scanFn == nil {
 		scanFn = heal.Scan
 	}
@@ -41,38 +58,37 @@ func (s *Server) runHealScanSync(ctx context.Context) heal.StatusReport {
 
 func (s *Server) scanAndCacheHealStatus(ctx context.Context, force bool) heal.StatusReport {
 	if !force {
-		s.healCacheMu.Lock()
-		if s.cachedHealReport != nil {
-			rep := *s.cachedHealReport
-			fresh := time.Since(s.cachedHealAt) < healStatusCacheTTL
-			s.healCacheMu.Unlock()
+		s.caches.heal.cacheMu.Lock()
+		if s.caches.heal.cached != nil {
+			rep := *s.caches.heal.cached
+			fresh := time.Since(s.caches.heal.cachedAt) < healStatusCacheTTL
+			s.caches.heal.cacheMu.Unlock()
 			if !fresh {
-				tryRunSingleFlight(&s.healRefreshing, 45*time.Second, func(bgCtx context.Context) {
+				tryRunSingleFlight(&s.caches.heal.refreshing, 45*time.Second, func(bgCtx context.Context) {
 					s.runHealScanSync(bgCtx)
 				})
 			}
 			return rep
 		}
-		s.healCacheMu.Unlock()
+		s.caches.heal.cacheMu.Unlock()
 	}
 	return s.runHealScanSync(ctx)
 }
 
 func (s *Server) handleHealStatus(w http.ResponseWriter, r *http.Request) {
 	force := r.URL.Query().Get("refresh") == "1" || r.URL.Query().Get("refresh") == "true"
-	rep := s.scanAndCacheHealStatus(r.Context(), force)
-	writeJSON(w, http.StatusOK, rep)
+	writeJSON(w, http.StatusOK, s.scanAndCacheHealStatus(r.Context(), force))
 }
 
 func (s *Server) handleHealPolicy(w http.ResponseWriter, r *http.Request) {
-	var body struct {
+	type reqBody struct {
 		AutoHealEnabled bool   `json:"autoHealEnabled"`
 		Schedule        string `json:"schedule"`
 		AutoReboot      bool   `json:"autoReboot"`
 		ApplyToFleet    bool   `json:"applyToFleet"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "无效的 JSON 请求: "+err.Error())
+	body, ok := decodeBodyJSON[reqBody](w, r, httpx.DefaultMaxBodyBytes, false, "")
+	if !ok {
 		return
 	}
 
@@ -115,18 +131,18 @@ func (s *Server) handleHealPolicy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHealRun(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Scope        string   `json:"scope"` // "local" | "fleet"
+	type reqBody struct {
+		Scope        string   `json:"scope"`
 		CheckOnly    bool     `json:"checkOnly"`
 		AllowReboot  bool     `json:"allowReboot"`
 		EnableTimers bool     `json:"enableTimers"`
 		TargetIDs    []string `json:"targetIds"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
-	scope := strings.ToLower(strings.TrimSpace(body.Scope))
-	if scope == "" {
-		scope = "local"
+	body, ok := decodeBodyJSON[reqBody](w, r, httpx.DefaultMaxBodyBytes, true, "")
+	if !ok {
+		return
 	}
+	scope := cmp.Or(strings.ToLower(strings.TrimSpace(body.Scope)), "local")
 
 	execCtx := r.Context()
 	var cancel context.CancelFunc
@@ -147,7 +163,6 @@ func (s *Server) handleHealRun(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Run local Master self-healing (never auto-rebooting Master mid-WebUI session unless explicitly local)
 		localRes, _ := heal.Run(execCtx, heal.RunOptions{
 			ConfigPath:        s.opts.ConfigPath,
 			CurrentSingctlVer: s.opts.Version,

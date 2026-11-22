@@ -23,7 +23,7 @@ import (
 	"syscall"
 	"time"
 
-	"singctl/internal/util/file"
+	"singctl/internal/common/fsx"
 )
 
 type remoteFetchJob struct {
@@ -44,24 +44,6 @@ func normalizeProxyMode(mode string) string {
 	}
 }
 
-func subFetchOptions(sub map[string]any) (uaStrategy string, proxyMode string) {
-	ua, _ := sub["userAgent"].(string)
-	ua = strings.TrimSpace(ua)
-	if ua == "" {
-		if legacyUA, _ := sub["ua"].(string); strings.TrimSpace(legacyUA) != "" {
-			// Ignore legacy browser User-Agents that trigger anti-bot HTTP 418/403 blocks
-			if !strings.Contains(strings.ToLower(legacyUA), "mozilla/") {
-				ua = strings.TrimSpace(legacyUA)
-			}
-		}
-	}
-	if ua == "" {
-		ua = "auto"
-	}
-	pm, _ := sub["proxyMode"].(string)
-	return ua, normalizeProxyMode(pm)
-}
-
 // WarmupUncachedSources fetches any enabled remote subscription sources that lack a valid cached payload,
 // skipping URLs attempted within the last 60 seconds so dashboard loads never stall repeatedly on dead links.
 func (s *Store) WarmupUncachedSources(ctx context.Context) {
@@ -70,17 +52,13 @@ func (s *Store) WarmupUncachedSources(ctx context.Context) {
 	var jobs []remoteFetchJob
 	if err == nil {
 		s.reloadRemoteCacheLocked()
-		rawSubs, _ := doc["subs"].([]any)
 		now := time.Now()
-		for _, entry := range rawSubs {
-			sub, ok := entry.(map[string]any)
-			if !ok || !subEnabled(sub) {
+		for _, sub := range doc.Subs {
+			if !sub.isEnabled() {
 				continue
 			}
-			srcType, _ := sub["source"].(string)
-			rawURL, _ := sub["url"].(string)
-			rawURL = strings.TrimSpace(rawURL)
-			if rawURL == "" || (srcType != "" && srcType != "remote") {
+			rawURL := strings.TrimSpace(sub.URL)
+			if rawURL == "" || (sub.Source != "" && sub.Source != "remote") {
 				continue
 			}
 			if cached, ok := s.remoteCache[rawURL]; ok && cached.Body != "" {
@@ -92,9 +70,8 @@ func (s *Store) WarmupUncachedSources(ctx context.Context) {
 			if lastTry, ok := s.lastAttempt[rawURL]; ok && now.Sub(lastTry) < 60*time.Second {
 				continue
 			}
-			ua, pm := subFetchOptions(sub)
-			n, _ := sub["name"].(string)
-			jobs = append(jobs, remoteFetchJob{name: n, url: rawURL, uaStrategy: ua, proxyMode: pm})
+			ua, pm := sub.fetchOptions()
+			jobs = append(jobs, remoteFetchJob{name: sub.Name, url: rawURL, uaStrategy: ua, proxyMode: pm})
 		}
 	}
 	s.mu.Unlock()
@@ -133,28 +110,20 @@ func (s *Store) RefreshSources(ctx context.Context, targetName string) ([]Source
 		return nil, err
 	}
 
-	rawSubs, _ := doc["subs"].([]any)
 	var jobs []remoteFetchJob
-	for _, entry := range rawSubs {
-		sub, ok := entry.(map[string]any)
-		if !ok {
+	for _, sub := range doc.Subs {
+		if targetName != "" && sub.Name != targetName {
 			continue
 		}
-		n, _ := sub["name"].(string)
-		if targetName != "" && n != targetName {
+		if targetName == "" && !sub.isEnabled() {
 			continue
 		}
-		if targetName == "" && !subEnabled(sub) {
+		rawURL := strings.TrimSpace(sub.URL)
+		if rawURL == "" || (sub.Source != "" && sub.Source != "remote") {
 			continue
 		}
-		srcType, _ := sub["source"].(string)
-		rawURL, _ := sub["url"].(string)
-		rawURL = strings.TrimSpace(rawURL)
-		if rawURL == "" || (srcType != "" && srcType != "remote") {
-			continue
-		}
-		ua, pm := subFetchOptions(sub)
-		jobs = append(jobs, remoteFetchJob{name: n, url: rawURL, uaStrategy: ua, proxyMode: pm})
+		ua, pm := sub.fetchOptions()
+		jobs = append(jobs, remoteFetchJob{name: sub.Name, url: rawURL, uaStrategy: ua, proxyMode: pm})
 	}
 
 	if targetName != "" && len(jobs) == 0 {
@@ -207,15 +176,17 @@ func (s *Store) existingSubFetchOptions(name string) (string, string) {
 	if err != nil {
 		return "auto", "auto"
 	}
-	rawSubs, _ := doc["subs"].([]any)
-	for _, entry := range rawSubs {
-		if m, ok := entry.(map[string]any); ok {
-			if n, _ := m["name"].(string); n == name {
-				return subFetchOptions(m)
-			}
+	for _, sub := range doc.Subs {
+		if sub.Name == name {
+			return sub.fetchOptions()
 		}
 	}
 	return "auto", "auto"
+}
+
+// ValidateRemoteURL validates a remote subscription URL against SSRF / private IP / loopback rules.
+func (s *Store) ValidateRemoteURL(rawURL string) error {
+	return s.validateRemoteURL(rawURL)
 }
 
 func (s *Store) validateRemoteURL(rawURL string) error {
@@ -347,6 +318,11 @@ func buildUACandidates(strategy, lastWinningUA string) []string {
 	default:
 		return []string{raw}
 	}
+}
+
+// ShortUALabel formats a User-Agent string into a concise UTF-8-safe client label.
+func ShortUALabel(ua string) string {
+	return shortUALabel(ua)
 }
 
 func shortUALabel(ua string) string {
@@ -564,7 +540,7 @@ func (s *Store) saveRemoteCacheLocked() {
 	if err != nil {
 		return
 	}
-	if err := file.WriteAtomic0600(p, b); err == nil {
+	if err := fsx.WriteAtomic0600(p, b); err == nil {
 		if st, stErr := os.Stat(p); stErr == nil {
 			s.remoteCacheMtime = st.ModTime()
 		}

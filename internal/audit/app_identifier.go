@@ -1,3 +1,4 @@
+// 文件职责：基于本地 sing-box 规则集 (.srs) 反编译缓存与内置特征识别目标流所属应用/厂商。
 package audit
 
 import (
@@ -295,10 +296,10 @@ func computeRuleSetDirFingerprint(dir string) string {
 	return "v2:" + strconv.Itoa(count) + ":" + filepath.Base(dir) + ":" + time.Unix(maxMod, 0).UTC().Format("20060102150405")
 }
 
-// srsStringList 兼容 sing-box rule-set decompile 输出的单字符串或字符串数组字段。
-type srsStringList []string
+// SRSStringList 兼容 sing-box rule-set decompile 输出的单字符串或字符串数组字段。
+type SRSStringList []string
 
-func (s *srsStringList) UnmarshalJSON(data []byte) error {
+func (s *SRSStringList) UnmarshalJSON(data []byte) error {
 	trimmed := bytes.TrimSpace(data)
 	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
 		*s = nil
@@ -310,7 +311,7 @@ func (s *srsStringList) UnmarshalJSON(data []byte) error {
 			return err
 		}
 		if single != "" {
-			*s = srsStringList{single}
+			*s = SRSStringList{single}
 		} else {
 			*s = nil
 		}
@@ -320,17 +321,21 @@ func (s *srsStringList) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(trimmed, &list); err != nil {
 		return err
 	}
-	*s = srsStringList(list)
+	*s = SRSStringList(list)
 	return nil
 }
 
-type decompiledSRS struct {
-	Rules []struct {
-		Domain        srsStringList `json:"domain"`
-		DomainSuffix  srsStringList `json:"domain_suffix"`
-		DomainKeyword srsStringList `json:"domain_keyword"`
-		IPCIDR        srsStringList `json:"ip_cidr"`
-	} `json:"rules"`
+// DecompiledSRSRule 表示反编译后的单条 sing-box 规则集匹配项。
+type DecompiledSRSRule struct {
+	Domain        SRSStringList `json:"domain"`
+	DomainSuffix  SRSStringList `json:"domain_suffix"`
+	DomainKeyword SRSStringList `json:"domain_keyword"`
+	IPCIDR        SRSStringList `json:"ip_cidr"`
+}
+
+// DecompiledSRS 表示反编译或 JSON 源码形态的 sing-box 规则集结构。
+type DecompiledSRS struct {
+	Rules []DecompiledSRSRule `json:"rules"`
 }
 
 func buildAppIndexInBackground(ruleSetDir, fp, cacheFile string) {
@@ -377,7 +382,7 @@ func buildAppIndexInBackground(ruleSetDir, fp, cacheFile string) {
 			continue
 		}
 
-		var parsed decompiledSRS
+		var parsed DecompiledSRS
 		if err := json.Unmarshal(out, &parsed); err != nil {
 			continue
 		}

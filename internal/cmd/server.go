@@ -9,7 +9,6 @@ import (
 	"singctl/internal/deploy"
 	"singctl/internal/doctor"
 	"singctl/internal/logger"
-	"singctl/internal/serverweb"
 	"singctl/internal/terminal"
 
 	"github.com/spf13/cobra"
@@ -75,7 +74,7 @@ func newInstallServerCmd(configPath, version string) *cobra.Command {
 					return err
 				}
 
-				if err := serverweb.InstallService(resolvedPath); err != nil {
+				if err := installServerUIService(resolvedPath); err != nil {
 					logger.Warn("安装服务端管理面板服务警告: %v", err)
 				}
 				showUnifiedInstallSummary(cfg, sbs, sbt)
@@ -107,7 +106,7 @@ func newUninstallServerCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				logger.Info("Uninstalling all server components...")
-				_ = serverweb.UninstallService()
+				_ = uninstallServerUIService()
 
 				if err := deploy.UninstallCaddy(); err != nil {
 					logger.Warn("Failed to uninstall Caddy: %v", err)

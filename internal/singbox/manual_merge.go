@@ -9,8 +9,8 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"singctl/internal/common/fsx"
 	"singctl/internal/logger"
-	"singctl/internal/util/file"
 	"slices"
 	"strings"
 )
@@ -47,7 +47,7 @@ func SaveBaseSnapshot(sbConfigPath, content string) error {
 	if p == "" || strings.TrimSpace(content) == "" {
 		return nil
 	}
-	return file.WriteAtomic0600(p, []byte(content))
+	return fsx.WriteAtomic0600(p, []byte(content))
 }
 
 // EnsureInitialBaseSnapshot 在用户通过 WebUI 编辑器首次保存手动修改前调用：
@@ -114,8 +114,8 @@ func MergeManualConfig(baseJSON, currentJSON, freshJSON string) (string, int, er
 
 	// 始终复用当前运行态的 Clash API / Service Secret，避免每次生成随机密钥导致无意义重载或面板断连
 	preserveRuntimeSecrets(curRoot, freshRoot)
-	sanitizeLegacyTransportProtocolRules(curRoot)
-	sanitizeLegacyTransportProtocolRules(freshRoot)
+	sanitizeLegacyTransportProtocolMap(curRoot)
+	sanitizeLegacyTransportProtocolMap(freshRoot)
 
 	// 若升级后首次运行尚无历史 Base 快照，仅安全保留确定性的用户增量（如自定义新增 tag 的 inbound / ntp / endpoints）
 	if strings.TrimSpace(baseJSON) == "" {
@@ -139,7 +139,7 @@ func MergeManualConfig(baseJSON, currentJSON, freshJSON string) (string, int, er
 		return freshJSON, 0, nil
 	}
 	preserveRuntimeSecrets(curRoot, baseRoot)
-	sanitizeLegacyTransportProtocolRules(baseRoot)
+	sanitizeLegacyTransportProtocolMap(baseRoot)
 
 	changes := 0
 
@@ -599,164 +599,6 @@ func mergeGroupOutbound3Way(bMap, cMap, fMap map[string]any, validTags map[strin
 		if len(nextMembers) > 0 && (removedAny || addedAny) {
 			fMap["outbounds"] = stringSliceToAny(nextMembers)
 			changes++
-		}
-	}
-	return changes
-}
-
-func mergeRoute3Way(bRoute, cRoute, fRoute map[string]any, validOutbounds map[string]bool) int {
-	changes := 0
-
-	// 1. route.rule_set
-	var bRS, cRS, fRS []any
-	if bRoute != nil {
-		bRS, _ = bRoute["rule_set"].([]any)
-	}
-	cRS, _ = cRoute["rule_set"].([]any)
-	fRS, _ = fRoute["rule_set"].([]any)
-	if !canonicalEqual(bRS, cRS) {
-		mergedRS, cnt := mergeTaggedSlice3Way(bRS, cRS, fRS, "tag")
-		if cnt > 0 {
-			fRoute["rule_set"] = mergedRS
-			changes += cnt
-		}
-	}
-	validRuleSets := extractTaggedSet(fRoute["rule_set"])
-
-	// 2. route 标量与子属性
-	for _, k := range collectMapKeys(bRoute, cRoute) {
-		if k == "rules" || k == "rule_set" {
-			continue
-		}
-		var bVal any
-		var bOk bool
-		if bRoute != nil {
-			bVal, bOk = bRoute[k]
-		}
-		cVal, cOk := cRoute[k]
-		if canonicalEqual(bVal, cVal) && bOk == cOk {
-			continue
-		}
-		if !cOk && bOk {
-			if fVal, fOk := fRoute[k]; fOk && canonicalEqual(fVal, bVal) {
-				delete(fRoute, k)
-				changes++
-			}
-			continue
-		}
-		if k == "final" {
-			if outTag, ok := cVal.(string); ok && outTag != "" && !validOutbounds[outTag] {
-				continue
-			}
-		}
-		if fVal, fOk := fRoute[k]; !fOk || canonicalEqual(fVal, bVal) {
-			fRoute[k] = deepCopyAny(cVal)
-			changes++
-		}
-	}
-
-	// 3. route.rules
-	var bRules []any
-	if bRoute != nil {
-		bRules, _ = bRoute["rules"].([]any)
-	}
-	cRules, _ := cRoute["rules"].([]any)
-	fRules, _ := fRoute["rules"].([]any)
-	if !canonicalEqual(bRules, cRules) {
-		mergedRules, cnt := mergeOrderedRules3Way(bRules, cRules, fRules, func(rule map[string]any) bool {
-			if outTag := strField(rule, "outbound"); outTag != "" && !validOutbounds[outTag] {
-				return false
-			}
-			return hasValidRuleSetRefs(rule, validRuleSets)
-		})
-		if cnt > 0 {
-			fRoute["rules"] = mergedRules
-			changes += cnt
-		}
-	}
-	return changes
-}
-
-func mergeDNS3Way(bDNS, cDNS, fDNS map[string]any, validOutbounds, validRuleSets map[string]bool) int {
-	changes := 0
-
-	// 1. dns.servers
-	var bSrvs, cSrvs, fSrvs []any
-	if bDNS != nil {
-		bSrvs, _ = bDNS["servers"].([]any)
-	}
-	cSrvs, _ = cDNS["servers"].([]any)
-	fSrvs, _ = fDNS["servers"].([]any)
-	if !canonicalEqual(bSrvs, cSrvs) {
-		mergedSrvs, cnt := mergeTaggedSlice3Way(bSrvs, cSrvs, fSrvs, "tag")
-		if cnt > 0 {
-			// 过滤引用了失效 detour 的自定义 DNS server
-			cleanedSrvs := make([]any, 0, len(mergedSrvs))
-			for _, item := range mergedSrvs {
-				if m, ok := item.(map[string]any); ok {
-					if det := strField(m, "detour"); det != "" && !validOutbounds[det] {
-						continue
-					}
-				}
-				cleanedSrvs = append(cleanedSrvs, item)
-			}
-			if len(cleanedSrvs) > 0 {
-				fDNS["servers"] = cleanedSrvs
-				changes += cnt
-			}
-		}
-	}
-	validServers := extractTaggedSet(fDNS["servers"])
-
-	// 2. dns 标量属性
-	for _, k := range collectMapKeys(bDNS, cDNS) {
-		if k == "servers" || k == "rules" {
-			continue
-		}
-		var bVal any
-		var bOk bool
-		if bDNS != nil {
-			bVal, bOk = bDNS[k]
-		}
-		cVal, cOk := cDNS[k]
-		if canonicalEqual(bVal, cVal) && bOk == cOk {
-			continue
-		}
-		if !cOk && bOk {
-			if fVal, fOk := fDNS[k]; fOk && canonicalEqual(fVal, bVal) {
-				delete(fDNS, k)
-				changes++
-			}
-			continue
-		}
-		if k == "final" {
-			if srvTag, ok := cVal.(string); ok && srvTag != "" && !validServers[srvTag] {
-				continue
-			}
-		}
-		if fVal, fOk := fDNS[k]; !fOk || canonicalEqual(fVal, bVal) {
-			fDNS[k] = deepCopyAny(cVal)
-			changes++
-		}
-	}
-
-	// 3. dns.rules
-	var bRules []any
-	if bDNS != nil {
-		bRules, _ = bDNS["rules"].([]any)
-	}
-	cRules, _ := cDNS["rules"].([]any)
-	fRules, _ := fDNS["rules"].([]any)
-	if !canonicalEqual(bRules, cRules) {
-		mergedRules, cnt := mergeOrderedRules3Way(bRules, cRules, fRules, func(rule map[string]any) bool {
-			if srvTag := strField(rule, "server"); srvTag != "" && !validServers[srvTag] {
-				return false
-			}
-			return hasValidRuleSetRefs(rule, validRuleSets)
-		})
-		if cnt > 0 {
-			fDNS["rules"] = mergedRules
-			changes += cnt
 		}
 	}
 	return changes

@@ -148,7 +148,7 @@ func hasValidRuleSetRefs(rule map[string]any, validRuleSets map[string]bool) boo
 		return true
 	}
 	if rawRS, has := rule["rule_set"]; has {
-		for _, tag := range extractStringOrSliceAny(rawRS) {
+		for _, tag := range sliceStrings(rawRS) {
 			if !validRuleSets[tag] {
 				return false
 			}
@@ -222,6 +222,11 @@ func strField(m map[string]any, key string) string {
 
 func sliceStrings(raw any) []string {
 	switch v := raw.(type) {
+	case string:
+		if s := strings.TrimSpace(v); s != "" {
+			return []string{s}
+		}
+		return nil
 	case []string:
 		return slices.Clone(v)
 	case []any:
@@ -234,6 +239,37 @@ func sliceStrings(raw any) []string {
 		return out
 	default:
 		return nil
+	}
+}
+
+func sanitizeLegacyTransportProtocolMap(root map[string]any) {
+	routeMap, ok := root["route"].(map[string]any)
+	if !ok || routeMap == nil {
+		return
+	}
+	if rules, ok := routeMap["rules"].([]any); ok {
+		sanitizeRuleSliceProtocolMap(rules)
+	}
+}
+
+func sanitizeRuleSliceProtocolMap(rules []any) {
+	for _, item := range rules {
+		rm, ok := item.(map[string]any)
+		if !ok || rm == nil {
+			continue
+		}
+		if sub, ok := rm["rules"].([]any); ok {
+			sanitizeRuleSliceProtocolMap(sub)
+		}
+		if pStr, ok := rm["protocol"].(string); ok {
+			lower := strings.ToLower(strings.TrimSpace(pStr))
+			if lower == "udp" || lower == "tcp" {
+				delete(rm, "protocol")
+				if _, hasNet := rm["network"]; !hasNet {
+					rm["network"] = lower
+				}
+			}
+		}
 	}
 }
 
@@ -333,4 +369,155 @@ func mustMarshalJSON(v any) string {
 		return "{}"
 	}
 	return string(b)
+}
+
+func mergeRoute3Way(bRoute, cRoute, fRoute map[string]any, validOutbounds map[string]bool) int {
+	changes := 0
+
+	var bRS, cRS, fRS []any
+	if bRoute != nil {
+		bRS, _ = bRoute["rule_set"].([]any)
+	}
+	cRS, _ = cRoute["rule_set"].([]any)
+	fRS, _ = fRoute["rule_set"].([]any)
+	if !canonicalEqual(bRS, cRS) {
+		mergedRS, cnt := mergeTaggedSlice3Way(bRS, cRS, fRS, "tag")
+		if cnt > 0 {
+			fRoute["rule_set"] = mergedRS
+			changes += cnt
+		}
+	}
+	validRuleSets := extractTaggedSet(fRoute["rule_set"])
+
+	for _, k := range collectMapKeys(bRoute, cRoute) {
+		if k == "rules" || k == "rule_set" {
+			continue
+		}
+		var bVal any
+		var bOk bool
+		if bRoute != nil {
+			bVal, bOk = bRoute[k]
+		}
+		cVal, cOk := cRoute[k]
+		if canonicalEqual(bVal, cVal) && bOk == cOk {
+			continue
+		}
+		if !cOk && bOk {
+			if fVal, fOk := fRoute[k]; fOk && canonicalEqual(fVal, bVal) {
+				delete(fRoute, k)
+				changes++
+			}
+			continue
+		}
+		if k == "final" {
+			if outTag, ok := cVal.(string); ok && outTag != "" && !validOutbounds[outTag] {
+				continue
+			}
+		}
+		if fVal, fOk := fRoute[k]; !fOk || canonicalEqual(fVal, bVal) {
+			fRoute[k] = deepCopyAny(cVal)
+			changes++
+		}
+	}
+
+	var bRules []any
+	if bRoute != nil {
+		bRules, _ = bRoute["rules"].([]any)
+	}
+	cRules, _ := cRoute["rules"].([]any)
+	fRules, _ := fRoute["rules"].([]any)
+	if !canonicalEqual(bRules, cRules) {
+		mergedRules, cnt := mergeOrderedRules3Way(bRules, cRules, fRules, func(rule map[string]any) bool {
+			if outTag := strField(rule, "outbound"); outTag != "" && !validOutbounds[outTag] {
+				return false
+			}
+			return hasValidRuleSetRefs(rule, validRuleSets)
+		})
+		if cnt > 0 {
+			fRoute["rules"] = mergedRules
+			changes += cnt
+		}
+	}
+	return changes
+}
+
+func mergeDNS3Way(bDNS, cDNS, fDNS map[string]any, validOutbounds, validRuleSets map[string]bool) int {
+	changes := 0
+
+	var bSrvs, cSrvs, fSrvs []any
+	if bDNS != nil {
+		bSrvs, _ = bDNS["servers"].([]any)
+	}
+	cSrvs, _ = cDNS["servers"].([]any)
+	fSrvs, _ = fDNS["servers"].([]any)
+	if !canonicalEqual(bSrvs, cSrvs) {
+		mergedSrvs, cnt := mergeTaggedSlice3Way(bSrvs, cSrvs, fSrvs, "tag")
+		if cnt > 0 {
+			cleanedSrvs := make([]any, 0, len(mergedSrvs))
+			for _, item := range mergedSrvs {
+				if m, ok := item.(map[string]any); ok {
+					if det := strField(m, "detour"); det != "" && !validOutbounds[det] {
+						continue
+					}
+				}
+				cleanedSrvs = append(cleanedSrvs, item)
+			}
+			if len(cleanedSrvs) > 0 {
+				fDNS["servers"] = cleanedSrvs
+				changes += cnt
+			}
+		}
+	}
+	validServers := extractTaggedSet(fDNS["servers"])
+
+	for _, k := range collectMapKeys(bDNS, cDNS) {
+		if k == "servers" || k == "rules" {
+			continue
+		}
+		var bVal any
+		var bOk bool
+		if bDNS != nil {
+			bVal, bOk = bDNS[k]
+		}
+		cVal, cOk := cDNS[k]
+		if canonicalEqual(bVal, cVal) && bOk == cOk {
+			continue
+		}
+		if !cOk && bOk {
+			if fVal, fOk := fDNS[k]; fOk && canonicalEqual(fVal, bVal) {
+				delete(fDNS, k)
+				changes++
+			}
+			continue
+		}
+		if k == "final" {
+			if srvTag, ok := cVal.(string); ok && srvTag != "" && !validServers[srvTag] {
+				continue
+			}
+		}
+		if fVal, fOk := fDNS[k]; !fOk || canonicalEqual(fVal, bVal) {
+			fDNS[k] = deepCopyAny(cVal)
+			changes++
+		}
+	}
+
+	var bRules []any
+	if bDNS != nil {
+		bRules, _ = bDNS["rules"].([]any)
+	}
+	cRules, _ := cDNS["rules"].([]any)
+	fRules, _ := fDNS["rules"].([]any)
+	if !canonicalEqual(bRules, cRules) {
+		mergedRules, cnt := mergeOrderedRules3Way(bRules, cRules, fRules, func(rule map[string]any) bool {
+			if srvTag := strField(rule, "server"); srvTag != "" && !validServers[srvTag] {
+				return false
+			}
+			return hasValidRuleSetRefs(rule, validRuleSets)
+		})
+		if cnt > 0 {
+			fDNS["rules"] = mergedRules
+			changes += cnt
+		}
+	}
+	return changes
 }

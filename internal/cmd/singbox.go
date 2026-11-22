@@ -1,6 +1,8 @@
+// 文件职责：提供客户端 sing-box 生命周期、配置生成、规则集本地缓存及 macOS 剪贴板复制子命令。
 package cmd
 
 import (
+	"cmp"
 	"fmt"
 	"os"
 	"os/exec"
@@ -8,13 +10,13 @@ import (
 	"runtime"
 	"singctl/configs"
 	"singctl/internal/adguard"
+	"singctl/internal/common/netx"
 	"singctl/internal/config"
 	"singctl/internal/constant"
 	"singctl/internal/daemon"
 	"singctl/internal/logger"
 	"singctl/internal/singbox"
 	ruleset_snapshot "singctl/internal/singbox/ruleset_snapshot"
-	"singctl/internal/util/netinfo"
 	"sort"
 	"strings"
 	"time"
@@ -25,12 +27,22 @@ import (
 var (
 	CommandRunner = exec.Command
 	RuntimeGOOS   = runtime.GOOS
-	// defaultSingBoxConfigPath 默认 sing-box 配置路径，测试可注入。
+	// DefaultSingBoxConfigPath 默认 sing-box 配置路径，保留供外部集成测试兼容覆盖。
 	DefaultSingBoxConfigPath = constant.SingBoxConfigFile
 )
 
-func CopyGeneratedConfigToClipboard(targetPath string) (bool, error) {
-	if RuntimeGOOS != "darwin" || targetPath != DefaultSingBoxConfigPath {
+// ClipboardDeps 描述将生成的 sing-box 配置复制到系统剪贴板所需的显式依赖。
+type ClipboardDeps struct {
+	GOOS                     string
+	DefaultSingBoxConfigPath string
+	CommandRunner            func(name string, arg ...string) *exec.Cmd
+}
+
+// CopyConfigToClipboard 在 macOS 默认目标路径下通过显式依赖将配置文件写入系统剪贴板（零全局可变状态）。
+func CopyConfigToClipboard(targetPath string, deps ClipboardDeps) (bool, error) {
+	goos := cmp.Or(strings.TrimSpace(deps.GOOS), runtime.GOOS)
+	defaultPath := cmp.Or(deps.DefaultSingBoxConfigPath, constant.SingBoxConfigFile)
+	if goos != "darwin" || targetPath != defaultPath {
 		return false, nil
 	}
 
@@ -40,13 +52,25 @@ func CopyGeneratedConfigToClipboard(targetPath string) (bool, error) {
 	}
 	defer configFile.Close()
 
-	cmd := CommandRunner("pbcopy")
+	runner := deps.CommandRunner
+	if runner == nil {
+		runner = exec.Command
+	}
+	cmd := runner("pbcopy")
 	cmd.Stdin = configFile
 	if err := cmd.Run(); err != nil {
 		return false, fmt.Errorf("run pbcopy failed: %w", err)
 	}
-
 	return true, nil
+}
+
+// CopyGeneratedConfigToClipboard 按当前运行平台与默认配置路径将生成结果复制到剪贴板。
+func CopyGeneratedConfigToClipboard(targetPath string) (bool, error) {
+	return CopyConfigToClipboard(targetPath, ClipboardDeps{
+		GOOS:                     RuntimeGOOS,
+		DefaultSingBoxConfigPath: DefaultSingBoxConfigPath,
+		CommandRunner:            CommandRunner,
+	})
 }
 
 func runStartSingbox(cfg *config.Config, configPath string) error {
@@ -423,7 +447,7 @@ func newInstallCmd(defaultConfigPath string) *cobra.Command {
 // AutoMeasureAndSaveHy2Bandwidth 在客户端首次安装时自动测定网络上下行带宽并回写到 singctl.yaml 的 hy2.up / hy2.down。
 func AutoMeasureAndSaveHy2Bandwidth(configPath string) {
 	logger.Info("正在测定当前网络上下行带宽，以便自动配置 Hysteria2 最佳速率...")
-	up, down, err := netinfo.MeasureHy2Bandwidth()
+	up, down, err := netx.MeasureHy2Bandwidth()
 	if err != nil {
 		logger.Warn("⚠️ 自动带宽测定未完成（保留默认带宽配置）: %v", err)
 		return

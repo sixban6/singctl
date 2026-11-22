@@ -1,3 +1,4 @@
+// 文件职责：提供 tailscaled Unix Socket LocalAPI 连接池客户端、NetMap 解析与公网候选端点安全过滤。
 package tailscale
 
 import (
@@ -100,6 +101,11 @@ func DefaultLocalAPIClient() LocalAPIClient {
 
 func (c *UnixLocalAPIClient) socketPath() string {
 	return cmp.Or(strings.TrimSpace(c.SocketPath), DefaultTailscaledSocket)
+}
+
+// HTTPClient 返回复用的 Unix Socket HTTP 客户端实例。
+func (c *UnixLocalAPIClient) HTTPClient() *http.Client {
+	return c.client()
 }
 
 func (c *UnixLocalAPIClient) client() *http.Client {

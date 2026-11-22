@@ -1,13 +1,17 @@
+// 文件职责：提供看门狗结构化事件落盘、关键事件行统一判定及守护/内核日志安全截断。
 package daemon
 
 import (
 	"bytes"
+	"cmp"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"singctl/internal/common/fsx"
 )
 
 // MaxDaemonLogBytes 守护日志文件大小上限（512 KB），防止 OpenWrt /tmp (tmpfs) 长期运行膨胀占满内存。
@@ -24,9 +28,33 @@ type WatchdogEvent struct {
 	RestartResult string // 重启或切换结果 ("success" / 错误信息 / 切换摘要)
 }
 
+// IsKeyWatchdogLogLine 判断日志行是否属于值得在事件视图中展示的看门狗/容灾/同步/告警关键事件。
+func IsKeyWatchdogLogLine(line string) bool {
+	return strings.Contains(line, "[WATCHDOG]") ||
+		strings.Contains(line, "[GroupFailover]") ||
+		strings.Contains(line, "[SubSync]") ||
+		strings.Contains(line, "[RuleSet]") ||
+		strings.Contains(line, "[Watchdog]") ||
+		strings.Contains(line, "Daemon ") ||
+		strings.Contains(line, "[WARN]") ||
+		strings.Contains(line, "[ERROR]")
+}
+
+// IsLegacyDaemonSpamLine 判断日志行是否为旧版本遗留的高频无意义订阅噪音行。
+func IsLegacyDaemonSpamLine(line string) bool {
+	return strings.Contains(line, "[INFO] Platform for singgen:") ||
+		strings.Contains(line, "Platform for singgen:") ||
+		strings.Contains(line, "已将 sing-box dns_local 指向本地 AdGuard Home")
+}
+
 // LogWatchdogEvent 记录看门狗事件到守护日志并同步写入结构化状态快照。
 func LogWatchdogEvent(event WatchdogEvent) {
-	logPath := GetDaemonLogPath()
+	logWatchdogEventToStore(defaultStateStore, event)
+}
+
+func logWatchdogEventToStore(store *StateStore, event WatchdogEvent) {
+	p := store.effectivePaths()
+	logPath := p.LogFile
 	ts := event.Time
 	if ts.IsZero() {
 		ts = time.Now()
@@ -49,13 +77,9 @@ func LogWatchdogEvent(event WatchdogEvent) {
 
 	summary := strings.TrimSpace(event.RestartResult)
 	if summary == "" || summary == "-" {
-		if d := strings.TrimSpace(event.CheckResult.Details); d != "" {
-			summary = d
-		} else {
-			summary = strings.TrimSpace(event.CheckResult.FailedReason)
-		}
+		summary = cmp.Or(strings.TrimSpace(event.CheckResult.Details), strings.TrimSpace(event.CheckResult.FailedReason))
 	}
-	AppendRuntimeEvent(WatchdogEventRecord{
+	store.AppendEvent(WatchdogEventRecord{
 		Time:    ts.Format("2006-01-02 15:04:05"),
 		Action:  event.Action,
 		Healthy: event.CheckResult.Healthy,
@@ -63,13 +87,7 @@ func LogWatchdogEvent(event WatchdogEvent) {
 	})
 }
 
-func isLegacyDaemonSpamLine(line string) bool {
-	return strings.Contains(line, "[INFO] Platform for singgen:") ||
-		strings.Contains(line, "已将 sing-box dns_local 指向本地 AdGuard Home")
-}
-
 // CleanAndTrimDaemonLog 清理历史重复噪音行，并在日志文件超过 maxBytes 时截断保留最新后半部分。
-// 返回 true 表示文件内容已被重写（调用方若持有打开的追加句柄应重新打开）。
 func CleanAndTrimDaemonLog(logPath string, maxBytes int64) (bool, error) {
 	if maxBytes <= 0 {
 		maxBytes = MaxDaemonLogBytes
@@ -97,10 +115,7 @@ func CleanAndTrimDaemonLog(logPath string, maxBytes int64) (bool, error) {
 
 	var kept []string
 	for line := range strings.SplitSeq(string(data), "\n") {
-		if line == "" {
-			continue
-		}
-		if isLegacyDaemonSpamLine(line) {
+		if line == "" || IsLegacyDaemonSpamLine(line) {
 			continue
 		}
 		kept = append(kept, line)
@@ -119,13 +134,7 @@ func CleanAndTrimDaemonLog(logPath string, maxBytes int64) (bool, error) {
 		cleaned = tail
 	}
 
-	tmp := logPath + ".trim.tmp"
-	if err := os.WriteFile(tmp, []byte(cleaned), 0600); err != nil {
-		return false, err
-	}
-	_ = os.Chmod(tmp, 0600)
-	if err := os.Rename(tmp, logPath); err != nil {
-		_ = os.Remove(tmp)
+	if err := fsx.WriteAtomic0600(logPath, []byte(cleaned)); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -161,7 +170,7 @@ func TrimLogInPlace(logPath string, maxBytes int64) (bool, error) {
 	if _, err := f.Seek(offset, io.SeekStart); err != nil {
 		return false, err
 	}
-	tail, err := io.ReadAll(io.LimitReader(f, keepTarget))
+	tail, err := io.ReadAll(io.LimitReader(f, keepTarget+4096))
 	if err != nil {
 		return false, err
 	}
@@ -170,14 +179,14 @@ func TrimLogInPlace(logPath string, maxBytes int64) (bool, error) {
 			tail = tail[nl+1:]
 		}
 	}
-
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return false, err
 	}
-	if _, err := f.Write(tail); err != nil {
+	written, err := f.Write(tail)
+	if err != nil {
 		return false, err
 	}
-	if err := f.Truncate(int64(len(tail))); err != nil {
+	if err := f.Truncate(int64(written)); err != nil {
 		return false, err
 	}
 	_ = f.Chmod(0600)

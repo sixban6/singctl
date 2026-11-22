@@ -22,7 +22,7 @@ import (
 	"singctl/internal/config"
 	"singctl/internal/constant"
 	"singctl/internal/singbox"
-	"singctl/internal/util/netinfo"
+	"singctl/internal/common/netx"
 )
 
 // ProtectedBootstrapIPs 禁止被误拉黑的核心公共 DNS 与本机回环地址（防软路由自锁断网）。
@@ -99,6 +99,12 @@ func (e *Enforcer) SetPathsForTest(sbConfigPath, aghConfigPath string, clashEndp
 // SetWorkConfigPathForTest 供单元测试注入临时沙盒运行时配置路径（例如模拟 /tmp/sing-box-work/config.json）。
 func (e *Enforcer) SetWorkConfigPathForTest(sbWorkConfigPath string) {
 	e.sbWorkConfigPath = sbWorkConfigPath
+}
+
+// SetDeps 注入可选的 HTTP 客户端与 sing-box 二进制路径定位器（供离线测试隔离宿主机与外网）。
+func (e *Enforcer) SetDeps(httpClient *http.Client, resolveSingBoxBin func() string) {
+	e.httpClient = httpClient
+	e.resolveSingBoxBin = resolveSingBoxBin
 }
 
 // SetStoragePaths 按需覆写 Enforcer 使用的 sing-box / AdGuard 配置路径（保留 Clash API 端点与鉴权密钥不变）。
@@ -215,7 +221,7 @@ func validateTargetSafety(cfg *config.Config, rawTarget string, strictMask bool)
 				return "", false, fmt.Errorf("安全拦截: 目标 (%s) 包含核心基础 DNS 服务器 (%s)，禁止拉黑以防解析瘫痪", parsedPrefix, bIP)
 			}
 		}
-		if lanIP := netinfo.GetPrimaryLANIPv4(); lanIP != "" {
+		if lanIP := netx.GetPrimaryLANIPv4(); lanIP != "" {
 			if lanAddr, parseErr := netip.ParseAddr(lanIP); parseErr == nil && parsedPrefix.Contains(lanAddr.Unmap()) {
 				return "", false, fmt.Errorf("安全拦截: 目标 (%s) 包含本机局域网网关 IP (%s)，已拒绝", parsedPrefix, lanIP)
 			}
@@ -496,19 +502,19 @@ func blockedRuleSetSummaryPath(tag string) string {
 // ImportAndBlockRuleSet 从远程 URL (.srs 二进制或 .json 源码) 或本地预设规则集导入并整包封禁。
 // 在黑名单列表中仅生成 1 条 "ruleset:<tag>" 聚合记录，绝不展开刷屏。
 func (e *Enforcer) ImportAndBlockRuleSet(ctx context.Context, rawInput, customTag, rawSourceIP, reason string) (*BlockActionResult, error) {
-	spec, err := parseRuleSetImportSpec(rawInput, customTag, rawSourceIP)
+	spec, err := ParseRuleSetImportSpec(rawInput, customTag, rawSourceIP)
 	if err != nil {
 		return nil, err
 	}
-	if spec.tag == singbox.BuiltinPCDNRuleSetTag && spec.normSource == "" {
+	if spec.Tag == singbox.BuiltinPCDNRuleSetTag && spec.NormSource == "" {
 		return e.SetPCDNBlock(ctx, true)
 	}
 
 	ruleSetDir := e.ruleSetDir()
 	_ = os.MkdirAll(ruleSetDir, 0755)
-	dstSRSPath := filepath.Join(ruleSetDir, spec.tag+".srs")
+	dstSRSPath := filepath.Join(ruleSetDir, spec.Tag+".srs")
 
-	rawData, err := e.fetchRuleSetPayload(ctx, spec, dstSRSPath)
+	rawData, err := e.FetchRuleSetPayload(ctx, spec, dstSRSPath)
 	if err != nil {
 		return nil, err
 	}
@@ -516,7 +522,7 @@ func (e *Enforcer) ImportAndBlockRuleSet(ctx context.Context, rawInput, customTa
 	if err != nil {
 		return nil, err
 	}
-	ruleCount, samples, err := validateDecompiledRuleSetSafety(e.cfg, spec.tag, &parsed)
+	ruleCount, samples, err := ValidateDecompiledRuleSetSafety(e.cfg, spec.Tag, &parsed)
 	if err != nil {
 		return nil, err
 	}
@@ -524,16 +530,16 @@ func (e *Enforcer) ImportAndBlockRuleSet(ctx context.Context, rawInput, customTa
 		return nil, err
 	}
 
-	displayTarget := "ruleset:" + spec.tag
+	displayTarget := "ruleset:" + spec.Tag
 	preview := strings.Join(samples, ", ")
 	if ruleCount > len(samples) && preview != "" {
 		preview += fmt.Sprintf(" 等共 %d 条", ruleCount)
 	}
 	if strings.TrimSpace(reason) == "" || reason == "WebUI 手动拉黑" {
-		if appLabel, ok := ruleSetAppDisplayNames[spec.tag]; ok {
+		if appLabel, ok := ruleSetAppDisplayNames[spec.Tag]; ok {
 			reason = "规则集整包封禁: " + appLabel
 		} else {
-			reason = "规则集整包封禁 (" + spec.tag + ")"
+			reason = "规则集整包封禁 (" + spec.Tag + ")"
 		}
 	}
 
@@ -543,11 +549,11 @@ func (e *Enforcer) ImportAndBlockRuleSet(ctx context.Context, rawInput, customTa
 	for i := range e.cfg.CustomRules.Block {
 		t, _ := singbox.NormalizeBlockTarget(e.cfg.CustomRules.Block[i].Target)
 		s := singbox.NormalizeSourceIPCIDR(e.cfg.CustomRules.Block[i].SourceIP)
-		if t == displayTarget && s == spec.normSource {
+		if t == displayTarget && s == spec.NormSource {
 			e.cfg.CustomRules.Block[i].Target = displayTarget
-			e.cfg.CustomRules.Block[i].SourceIP = spec.displaySource
+			e.cfg.CustomRules.Block[i].SourceIP = spec.DisplaySource
 			e.cfg.CustomRules.Block[i].Reason = reason
-			e.cfg.CustomRules.Block[i].RuleSetURL = spec.sourceURL
+			e.cfg.CustomRules.Block[i].RuleSetURL = spec.SourceURL
 			e.cfg.CustomRules.Block[i].RuleCount = ruleCount
 			e.cfg.CustomRules.Block[i].Preview = preview
 			found = true
@@ -557,9 +563,9 @@ func (e *Enforcer) ImportAndBlockRuleSet(ctx context.Context, rawInput, customTa
 	if !found {
 		e.cfg.CustomRules.Block = append(e.cfg.CustomRules.Block, config.BlockRule{
 			Target:     displayTarget,
-			SourceIP:   spec.displaySource,
+			SourceIP:   spec.DisplaySource,
 			Reason:     reason,
-			RuleSetURL: spec.sourceURL,
+			RuleSetURL: spec.SourceURL,
 			RuleCount:  ruleCount,
 			Preview:    preview,
 			CreatedAt:  time.Now().Format(time.RFC3339),
@@ -568,7 +574,7 @@ func (e *Enforcer) ImportAndBlockRuleSet(ctx context.Context, rawInput, customTa
 
 	res := &BlockActionResult{
 		Target:   displayTarget,
-		SourceIP: spec.displaySource,
+		SourceIP: spec.DisplaySource,
 	}
 
 	if e.configPath != "" {
@@ -584,9 +590,9 @@ func (e *Enforcer) ImportAndBlockRuleSet(ctx context.Context, rawInput, customTa
 		res.SingBoxSynced = true
 	}
 
-	res.KilledConnections = e.killMatchingRuleSetConnections(ctx, &parsed, spec.displaySource)
+	res.KilledConnections = e.killMatchingRuleSetConnections(ctx, &parsed, spec.DisplaySource)
 	res.Message = fmt.Sprintf("已导入并封禁规则集 %s (含 %d 条规则, Sing-Box 原生阻断=%v, 斩断活跃连接=%d 条)",
-		spec.tag, ruleCount, res.SingBoxSynced, res.KilledConnections)
+		spec.Tag, ruleCount, res.SingBoxSynced, res.KilledConnections)
 	return res, nil
 }
 

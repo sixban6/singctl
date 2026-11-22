@@ -21,20 +21,22 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// subscriptionPayloadDecoder 描述单种订阅格式的匹配规则与解码器实现。
-type subscriptionPayloadDecoder struct {
+// SubscriptionPayloadDecoder 描述单种订阅格式的匹配规则与解码器实现。
+type SubscriptionPayloadDecoder struct {
 	Name   string
 	Match  func(text string) bool
 	Decode func(ctx context.Context, text string) ([]model.Node, []string)
 }
 
+type subscriptionPayloadDecoder = SubscriptionPayloadDecoder
+
 // ParseRawSubscriptionPayload parses raw URI lists, Base64 URI blobs, Clash YAML, or Sing-box JSON into nodes and canonical URIs.
 func ParseRawSubscriptionPayload(ctx context.Context, raw []byte) ([]model.Node, []string) {
-	return decodeRawSubscriptionWithChain(ctx, raw)
+	return DecodeRawSubscriptionWithChain(ctx, raw)
 }
 
-// decodeRawSubscriptionWithChain 执行标准化预处理（尺寸护栏 + Base64 解包）后，按优先级顺序尝试可扩展解码器链。
-func decodeRawSubscriptionWithChain(ctx context.Context, raw []byte, extraDecoders ...subscriptionPayloadDecoder) ([]model.Node, []string) {
+// DecodeRawSubscriptionWithChain 执行标准化预处理（尺寸护栏 + Base64 解包）后，按优先级顺序尝试可扩展解码器链。
+func DecodeRawSubscriptionWithChain(ctx context.Context, raw []byte, extraDecoders ...SubscriptionPayloadDecoder) ([]model.Node, []string) {
 	if len(raw) == 0 || len(raw) > maxRemoteSubBytes {
 		return nil, nil
 	}
@@ -173,6 +175,11 @@ func decodeRawBase64Bytes(s string) ([]byte, bool) {
 	return nil, false
 }
 
+// DecodeBase64Flexible attempts flexible Base64 decoding when s looks like an encoded subscription payload.
+func DecodeBase64Flexible(s string) (string, bool) {
+	return decodeBase64Flexible(s)
+}
+
 func decodeBase64Flexible(s string) (string, bool) {
 	trimmed := strings.TrimSpace(s)
 	if trimmed == "" || strings.Contains(trimmed, "://") || strings.Contains(trimmed, "proxies:") || strings.HasPrefix(trimmed, "{") {
@@ -185,6 +192,11 @@ func decodeBase64Flexible(s string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// NormalizeShareURI normalizes legacy ss:// links and non-ASCII fragments into RFC 3986 ASCII URIs.
+func NormalizeShareURI(rawLine string) string {
+	return normalizeShareURI(rawLine)
 }
 
 // normalizeShareURI ensures legacy ss:// links, URL-safe SIP002 ss:// userinfo, and raw non-ASCII
@@ -403,6 +415,11 @@ func parseClashYAMLProxies(yamlText string) []model.Node {
 		nodes = append(nodes, n)
 	}
 	return nodes
+}
+
+// AsString safely converts string/numeric dynamic fields into trimmed string form.
+func AsString(v any) string {
+	return asString(v)
 }
 
 func asString(v any) string {

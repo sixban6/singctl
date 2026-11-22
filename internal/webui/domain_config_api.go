@@ -1,8 +1,8 @@
+// 文件职责：提供 Tailscale 局部配置、Sing-Box 订阅列表与系统 GitHub 镜像地址的局部更新接口。
 package webui
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/netip"
@@ -10,47 +10,7 @@ import (
 	"strings"
 
 	"singctl/internal/config"
-	"singctl/internal/daemon"
 )
-
-type apiStatusError struct {
-	status int
-	msg    string
-}
-
-func (e *apiStatusError) Error() string { return e.msg }
-
-func (s *Server) savePartialConfig(syncAdGuard bool, mutate func(cfg *config.Config) error) error {
-	s.cfgMu.Lock()
-	defer s.cfgMu.Unlock()
-
-	cfgPath := configPathFor(s)
-	cfg := s.loadMutableConfig()
-	if err := mutate(cfg); err != nil {
-		return err
-	}
-	if err := backupConfig(cfgPath); err != nil {
-		return &apiStatusError{status: http.StatusInternalServerError, msg: "备份配置失败: " + err.Error()}
-	}
-	if err := s.saveConfig(cfg); err != nil {
-		return &apiStatusError{status: http.StatusInternalServerError, msg: "保存配置失败: " + err.Error()}
-	}
-	if syncAdGuard {
-		s.invalidateIOSCache()
-		s.syncAdGuardSubWhitelistAsync(cfg)
-	}
-	_ = daemon.NotifyReload()
-	return nil
-}
-
-func writePartialSaveError(w http.ResponseWriter, err error) {
-	var apiErr *apiStatusError
-	if errors.As(err, &apiErr) {
-		writeJSONError(w, apiErr.status, apiErr.msg)
-		return
-	}
-	writeJSONError(w, http.StatusBadRequest, err.Error())
-}
 
 // maskTailscaleAuthKey 生成安全遮蔽的 Tailscale Auth Key 提示，避免前端 GET 接口回传完整明文凭据。
 func maskTailscaleAuthKey(key string) string {
@@ -163,7 +123,7 @@ func (s *Server) handleSbSubsPut(w http.ResponseWriter, r *http.Request) {
 		cfg.Hy2.Down = max(0, body.Hy2.Down)
 		if len(cfg.Subs) > 0 {
 			if valErr := cfg.ValidateSubs(); valErr != nil {
-				return &apiStatusError{status: http.StatusBadRequest, msg: valErr.Error()}
+				return &apiStatusError{status: http.StatusBadRequest, msg: sanitizeSubErrorText(valErr)}
 			}
 		}
 		return nil

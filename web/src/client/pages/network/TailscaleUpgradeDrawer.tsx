@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 import { Badge, Button, SlideDrawer, formatBytes } from '../../../ui';
 import { clientApi } from '../../api';
-import { redactInlineSensitive } from '../../lib/privacyMask';
+import { redactInlineSensitive } from '../../../lib/privacyMask';
 import { TailscaleUpgradePreflight } from '../../types';
 
 export interface TailscaleUpgradeDrawerProps {

@@ -1,3 +1,4 @@
+// 文件职责：采集本地回环 Clash API 遥测快照、远端目标聚合脱敏、存量长连接精准踢断及配置文件热注入。
 package telemetry
 
 import (
@@ -19,8 +20,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"singctl/internal/common/fsx"
+	"singctl/internal/common/sysinfo"
 	"singctl/internal/config"
 	"singctl/internal/constant"
+	"singctl/internal/singbox/clashapi"
 )
 
 const (
@@ -97,7 +101,6 @@ type Snapshot struct {
 	Outbounds         OutboundBreakdown `json:"outbounds"`
 	TopDomains        []DomainStat      `json:"topDomains"`
 	History           []RatePoint       `json:"history"`
-	Sniffing          any               `json:"sniffing,omitempty"`
 	ActiveClientIPs   []string          `json:"-"`
 	Message           string            `json:"message,omitempty"`
 }
@@ -121,8 +124,7 @@ func EnsureSecret(configDir string) (string, error) {
 		return "", err
 	}
 	if err := os.MkdirAll(configDir, 0755); err == nil {
-		_ = os.WriteFile(secretPath, []byte(sec+"\n"), 0600)
-		_ = os.Chmod(secretPath, 0600)
+		_ = fsx.WriteAtomic0600(secretPath, []byte(sec+"\n"))
 	}
 	return sec, nil
 }
@@ -207,6 +209,14 @@ func (c *Collector) resolveConfigSnapshot() (string, string, bool) {
 	return ResolveConfig(cfgPath)
 }
 
+// ConfigDiskReads 返回自创建以来实际读取并解析磁盘配置文件的次数。
+func (c *Collector) ConfigDiskReads() int64 {
+	if c == nil {
+		return 0
+	}
+	return c.cfgDiskReads.Load()
+}
+
 // EnsureConfigTelemetry non-destructively injects loopback clash_api telemetry into an existing sing-box config.json.
 func EnsureConfigTelemetry(singboxConfigPath string) (changed bool, addr string, secret string, err error) {
 	singboxConfigPath = cmp.Or(strings.TrimSpace(singboxConfigPath), constant.SingBoxConfigFile)
@@ -256,12 +266,7 @@ func EnsureConfigTelemetry(singboxConfigPath string) (changed bool, addr string,
 	if st, statErr := os.Stat(singboxConfigPath); statErr == nil {
 		mode = st.Mode().Perm()
 	}
-	tmp := singboxConfigPath + ".tmp"
-	if err := os.WriteFile(tmp, out, mode); err != nil {
-		return false, "", "", err
-	}
-	if err := os.Rename(tmp, singboxConfigPath); err != nil {
-		_ = os.Remove(tmp)
+	if err := fsx.WriteAtomic(singboxConfigPath, out, mode); err != nil {
 		return false, "", "", err
 	}
 	return true, DefaultControllerAddr, sec, nil
@@ -289,21 +294,14 @@ type configStatKey struct {
 	modNano int64
 }
 
-var sharedTelemetryHTTPClient = &http.Client{
-	Timeout: 1500 * time.Millisecond,
-	Transport: &http.Transport{
-		Proxy:               nil,
-		MaxIdleConns:        8,
-		MaxIdleConnsPerHost: 4,
-		IdleConnTimeout:     90 * time.Second,
-		DisableCompression:  true,
-	},
-}
-
 // Collector samples sing-box Clash API endpoints on loopback and maintains short-term rate history.
 type Collector struct {
 	ConfigPath string
 	HTTPClient *http.Client
+
+	clashMu     sync.Mutex
+	clashClient *clashapi.Client
+	clashBound  *http.Client
 
 	mu          sync.Mutex
 	lastSample  time.Time
@@ -327,32 +325,38 @@ type Collector struct {
 func NewCollector(singboxConfigPath string) *Collector {
 	return &Collector{
 		ConfigPath: singboxConfigPath,
-		HTTPClient: sharedTelemetryHTTPClient,
+		clashClient: clashapi.NewClient(clashapi.Options{
+			ConfigPath:     singboxConfigPath,
+			RequestTimeout: 1500 * time.Millisecond,
+		}),
 	}
 }
 
-type clashConnectionsResp struct {
-	DownloadTotal int64             `json:"downloadTotal"`
-	UploadTotal   int64             `json:"uploadTotal"`
-	Memory        int64             `json:"memory"`
-	Connections   []clashConnection `json:"connections"`
-}
-
-type clashConnection struct {
-	ID       string   `json:"id"`
-	Upload   int64    `json:"upload"`
-	Download int64    `json:"download"`
-	Start    string   `json:"start"`
-	Chains   []string `json:"chains"`
-	Rule     string   `json:"rule"`
-	Metadata struct {
-		Network         string `json:"network"`
-		Type            string `json:"type"`
-		SourceIP        string `json:"sourceIP"`
-		Host            string `json:"host"`
-		DestinationIP   string `json:"destinationIP"`
-		DestinationPort string `json:"destinationPort"`
-	} `json:"metadata"`
+func (c *Collector) clash() *clashapi.Client {
+	if c == nil {
+		return clashapi.NewClient(clashapi.Options{RequestTimeout: 1500 * time.Millisecond})
+	}
+	c.clashMu.Lock()
+	defer c.clashMu.Unlock()
+	if c.HTTPClient != nil {
+		if c.clashClient == nil || c.clashBound != c.HTTPClient {
+			c.clashClient = clashapi.NewClient(clashapi.Options{
+				ConfigPath:     c.ConfigPath,
+				RequestTimeout: 1500 * time.Millisecond,
+				HTTPClient:     c.HTTPClient,
+			})
+			c.clashBound = c.HTTPClient
+		}
+		return c.clashClient
+	}
+	if c.clashClient == nil || c.clashBound != nil {
+		c.clashClient = clashapi.NewClient(clashapi.Options{
+			ConfigPath:     c.ConfigPath,
+			RequestTimeout: 1500 * time.Millisecond,
+		})
+		c.clashBound = nil
+	}
+	return c.clashClient
 }
 
 // Collect queries the local sing-box controller and returns an enriched Snapshot.
@@ -368,7 +372,7 @@ func (c *Collector) Collect(ctx context.Context) Snapshot {
 	snap.Enabled = enabled
 	snap.ControllerAddr = addr
 	if !enabled {
-		snap.Message = "当前 sing-box 配置尚未开启本地流量遥测 (127.0.0.1:9099)"
+		snap.Message = "当前 sing-box 配置尚未开启本地流量遥测 (" + DefaultControllerAddr + ")"
 		return snap
 	}
 	if !isLoopbackAddr(addr) {
@@ -388,58 +392,61 @@ func (c *Collector) Collect(ctx context.Context) Snapshot {
 	snap.MemoryBytes = payload.Memory
 	snap.ActiveConnections = len(payload.Connections)
 
+	snap.UpBps, snap.DownBps, snap.History = c.recordRateSample(now, payload.UploadTotal, payload.DownloadTotal)
+	c.populateSnapshotBreakdowns(&snap, payload.Connections)
+	return snap
+}
+
+func (c *Collector) recordRateSample(now time.Time, uploadTotal, downloadTotal int64) (int64, int64, []RatePoint) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	var upBps, dnBps int64
 	if !c.lastSample.IsZero() {
 		dt := now.Sub(c.lastSample).Seconds()
 		if dt >= 0.25 {
-			dUp := payload.UploadTotal - c.lastUpTotal
-			dDn := payload.DownloadTotal - c.lastDnTotal
+			dUp := uploadTotal - c.lastUpTotal
+			dDn := downloadTotal - c.lastDnTotal
 			if dUp >= 0 && dDn >= 0 {
 				upBps = int64(float64(dUp) / dt)
 				dnBps = int64(float64(dDn) / dt)
 			}
 			c.lastSample = now
-			c.lastUpTotal = payload.UploadTotal
-			c.lastDnTotal = payload.DownloadTotal
+			c.lastUpTotal = uploadTotal
+			c.lastDnTotal = downloadTotal
 			c.lastUpBps = upBps
 			c.lastDnBps = dnBps
 
-			pt := RatePoint{
+			c.history = append(c.history, RatePoint{
 				Time:    now.Format("15:04:05"),
 				UpBps:   upBps,
 				DownBps: dnBps,
-			}
-			c.history = append(c.history, pt)
+			})
 			if len(c.history) > maxHistoryPoints {
 				c.history = c.history[len(c.history)-maxHistoryPoints:]
 			}
 		} else {
-			// Guard against burst calls < 250ms apart: reuse previous instantaneous rate
 			upBps = c.lastUpBps
 			dnBps = c.lastDnBps
 		}
 	} else {
 		c.lastSample = now
-		c.lastUpTotal = payload.UploadTotal
-		c.lastDnTotal = payload.DownloadTotal
+		c.lastUpTotal = uploadTotal
+		c.lastDnTotal = downloadTotal
 		c.history = append(c.history, RatePoint{
 			Time:    now.Format("15:04:05"),
 			UpBps:   0,
 			DownBps: 0,
 		})
 	}
-	historyCopy := slices.Clone(c.history)
-	c.mu.Unlock()
+	return upBps, dnBps, slices.Clone(c.history)
+}
 
-	snap.UpBps = upBps
-	snap.DownBps = dnBps
-	snap.History = historyCopy
-
-	domainMap := make(map[string]*DomainStat, min(len(payload.Connections), 64))
+func (c *Collector) populateSnapshotBreakdowns(snap *Snapshot, conns []clashapi.Connection) {
+	domainMap := make(map[string]*DomainStat, min(len(conns), 64))
 	clientIPSet := make(map[string]struct{}, 8)
-	for i := range payload.Connections {
-		conn := &payload.Connections[i]
+	for i := range conns {
+		conn := &conns[i]
 		if srcIP := strings.TrimSpace(conn.Metadata.SourceIP); srcIP != "" {
 			clientIPSet[srcIP] = struct{}{}
 		}
@@ -492,10 +499,7 @@ func (c *Collector) Collect(ctx context.Context) Snapshot {
 	}
 	slices.SortFunc(domains, func(a, b DomainStat) int {
 		if a.Bytes != b.Bytes {
-			if a.Bytes > b.Bytes {
-				return -1
-			}
-			return 1
+			return cmp.Compare(b.Bytes, a.Bytes)
 		}
 		return cmp.Compare(b.Connections, a.Connections)
 	})
@@ -509,44 +513,29 @@ func (c *Collector) Collect(ctx context.Context) Snapshot {
 			snap.ActiveClientIPs = append(snap.ActiveClientIPs, ip)
 		}
 	}
-	return snap
 }
 
-func (c *Collector) httpClient() *http.Client {
-	if c != nil && c.HTTPClient != nil {
-		return c.HTTPClient
+func (c *Collector) fetchConnections(ctx context.Context, addr, secret string) (clashapi.ConnectionsSnapshot, error) {
+	snap, err := c.clash().ConnectionsAt(ctx, "http://"+addr, secret)
+	if err == nil {
+		return snap, nil
 	}
-	return sharedTelemetryHTTPClient
-}
-
-func (c *Collector) fetchConnections(ctx context.Context, addr, secret string) (clashConnectionsResp, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://%s/connections", addr), nil)
-	if err != nil {
-		return clashConnectionsResp{}, err
+	var se *clashapi.StatusError
+	if errors.As(err, &se) {
+		return clashapi.ConnectionsSnapshot{}, fmt.Errorf("sing-box 遥测接口返回 HTTP %d", se.StatusCode)
 	}
-	if secret != "" {
-		req.Header.Set("Authorization", "Bearer "+secret)
+	var de *clashapi.DecodeError
+	if errors.As(err, &de) {
+		return clashapi.ConnectionsSnapshot{}, errors.New("解析遥测数据失败")
 	}
-	resp, err := c.httpClient().Do(req)
-	if err != nil {
-		return clashConnectionsResp{}, errors.New("无法连接 sing-box 遥测接口，请确认 sing-box 正在运行")
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return clashConnectionsResp{}, fmt.Errorf("sing-box 遥测接口返回 HTTP %d", resp.StatusCode)
-	}
-	var payload clashConnectionsResp
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return clashConnectionsResp{}, errors.New("解析遥测数据失败")
-	}
-	return payload, nil
+	return clashapi.ConnectionsSnapshot{}, errors.New("无法连接 sing-box 遥测接口，请确认 sing-box 正在运行")
 }
 
 // GetActiveDestinations 查询本地 127.0.0.1:9099 遥测接口并返回按远端目标聚合的活跃连接列表（零客户端隐私 IP 暴露）。
 func (c *Collector) GetActiveDestinations(ctx context.Context, query, outboundFilter string) ([]ActiveDestinationGroup, error) {
 	addr, secret, enabled := c.resolveConfigSnapshot()
 	if !enabled {
-		return []ActiveDestinationGroup{}, errors.New("当前 sing-box 配置尚未开启本地流量遥测 (127.0.0.1:9099)")
+		return []ActiveDestinationGroup{}, errors.New("当前 sing-box 配置尚未开启本地流量遥测 (" + DefaultControllerAddr + ")")
 	}
 	if !isLoopbackAddr(addr) {
 		return []ActiveDestinationGroup{}, errors.New("遥测地址非本地回环，已拒绝连接以保护安全")
@@ -632,8 +621,7 @@ func (c *Collector) GetActiveDestinations(ctx context.Context, query, outboundFi
 	return items, nil
 }
 
-// EvictMismatchedConnections 遍历当前活跃连接，对满足 matchFn 的存量长连接逐条调用 DELETE /connections/{id} 踢断，
-// 使 Hysteria2 / HTTP2 / QUIC 多路复用流在热重载后毫秒级切换至最新出站。
+// EvictMismatchedConnections 遍历当前活跃连接，对满足 matchFn 的存量长连接逐条调用 DELETE /connections/{id} 踢断。
 func (c *Collector) EvictMismatchedConnections(ctx context.Context, matchFn func(host, dstIP, rule, currentOutbound string) bool) (int, error) {
 	if matchFn == nil {
 		return 0, nil
@@ -648,7 +636,8 @@ func (c *Collector) EvictMismatchedConnections(ctx context.Context, matchFn func
 	}
 
 	evicted := 0
-	client := c.httpClient()
+	baseURL := "http://" + addr
+	clashCli := c.clash()
 	for _, conn := range payload.Connections {
 		if conn.ID == "" {
 			continue
@@ -661,18 +650,8 @@ func (c *Collector) EvictMismatchedConnections(ctx context.Context, matchFn func
 		}
 
 		delCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		req, reqErr := http.NewRequestWithContext(delCtx, http.MethodDelete, fmt.Sprintf("http://%s/connections/%s", addr, conn.ID), nil)
-		if reqErr == nil {
-			if secret != "" {
-				req.Header.Set("Authorization", "Bearer "+secret)
-			}
-			resp, doErr := client.Do(req)
-			if doErr == nil {
-				_ = resp.Body.Close()
-				if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-					evicted++
-				}
-			}
+		if err := clashCli.CloseConnectionAt(delCtx, baseURL, secret, conn.ID); err == nil {
+			evicted++
 		}
 		cancel()
 	}
@@ -704,39 +683,12 @@ func classifyOutbound(chains []string) string {
 	return "Direct"
 }
 
-// FormatRate formats bytes/sec into human-readable Mbps or Kbps/B/s.
+// FormatRate formats bytes/sec into human-readable Mbps or Kbps/B/s (delegated to common/sysinfo).
 func FormatRate(bps int64) string {
-	bits := float64(bps) * 8
-	switch {
-	case bits >= 1_000_000_000:
-		return fmt.Sprintf("%.2f Gbps", bits/1_000_000_000)
-	case bits >= 1_000_000:
-		return fmt.Sprintf("%.2f Mbps", bits/1_000_000)
-	case bits >= 1_000:
-		return fmt.Sprintf("%.1f Kbps", bits/1_000)
-	default:
-		return fmt.Sprintf("%d bps", int64(bits))
-	}
+	return sysinfo.FormatRate(bps)
 }
 
-// FormatBytes formats cumulative byte counts into human-readable units.
+// FormatBytes formats cumulative byte counts into human-readable units (delegated to common/sysinfo).
 func FormatBytes(b int64) string {
-	const (
-		KB = 1024
-		MB = 1024 * KB
-		GB = 1024 * MB
-		TB = 1024 * GB
-	)
-	switch {
-	case b >= TB:
-		return fmt.Sprintf("%.2f TB", float64(b)/float64(TB))
-	case b >= GB:
-		return fmt.Sprintf("%.2f GB", float64(b)/float64(GB))
-	case b >= MB:
-		return fmt.Sprintf("%.1f MB", float64(b)/float64(MB))
-	case b >= KB:
-		return fmt.Sprintf("%.1f KB", float64(b)/float64(KB))
-	default:
-		return fmt.Sprintf("%d B", b)
-	}
+	return sysinfo.FormatBytes(b)
 }

@@ -1,21 +1,19 @@
+// 文件职责：提供客户端 WebUI 对 Tailscale P2P 零常驻暴露防线的状态查询、配置热下发与瞬时打洞接口。
 package webui
 
 import (
 	"cmp"
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
-	"net/netip"
-	"os"
 	"runtime"
 	"strings"
 	"time"
 
+	"singctl/internal/common/netx"
 	"singctl/internal/config"
 	"singctl/internal/daemon"
 	"singctl/internal/tailscale"
-	"singctl/internal/util/netinfo"
 )
 
 // TailscaleP2PTestHooks 仅供离线单元测试注入可控的 Tailscale / fw4 / ujail 依赖。
@@ -26,33 +24,6 @@ type TailscaleP2PTestHooks struct {
 	UjailApply     func(ctx context.Context, enable bool) (bool, error)
 	Now            func() time.Time
 	DefaultLANCIDR string
-}
-
-type tailscaleP2PPeerView struct {
-	ID                        string   `json:"id"`
-	Name                      string   `json:"name"`
-	ShortName                 string   `json:"shortName"`
-	DNSName                   string   `json:"dnsName,omitempty"`
-	HostName                  string   `json:"hostName,omitempty"`
-	TailscaleIPs              []string `json:"tailscaleIPs,omitempty"`
-	PrimaryRoutes             []string `json:"primaryRoutes,omitempty"`
-	Online                    bool     `json:"online"`
-	Active                    bool     `json:"active"`
-	Direct                    bool     `json:"direct"`
-	CurAddr                   string   `json:"curAddr,omitempty"`
-	Relay                     string   `json:"relay,omitempty"`
-	CandidatePublicCount      int      `json:"candidatePublicCount"`
-	Configured                bool     `json:"configured"`
-	JITEnabled                bool     `json:"jitEnabled"`
-	AccessMode                string   `json:"accessMode"`
-	EffectiveAccessMode       string   `json:"effectiveAccessMode"`
-	BidirectionalUntil        string   `json:"bidirectionalUntil,omitempty"`
-	BidirectionalRemainingSec int      `json:"bidirectionalRemainingSec"`
-	AllowedLANTargets         []string `json:"allowedLanTargets,omitempty"`
-	PinholeActive             bool     `json:"pinholeActive"`
-	CooldownRemainingSec      int      `json:"cooldownRemainingSec"`
-	LastUpgradeAt             string   `json:"lastUpgradeAt,omitempty"`
-	LastResult                string   `json:"lastResult,omitempty"`
 }
 
 func (s *Server) tailscaleP2PNow() time.Time {
@@ -66,7 +37,7 @@ func (s *Server) defaultLANCIDR() string {
 	if s.opts.TailscaleP2PForTest != nil && strings.TrimSpace(s.opts.TailscaleP2PForTest.DefaultLANCIDR) != "" {
 		return strings.TrimSpace(s.opts.TailscaleP2PForTest.DefaultLANCIDR)
 	}
-	if sub, err := netinfo.GetLANSubnet(); err == nil {
+	if sub, err := netx.GetLANSubnet(); err == nil {
 		return sub
 	}
 	return ""
@@ -101,174 +72,20 @@ func (s *Server) ujailAvailable() bool {
 }
 
 func (s *Server) buildTailscaleP2PReport(ctx context.Context, cfg *config.Config) map[string]any {
-	if cfg == nil {
-		cfg = &config.Config{}
-	}
-	now := s.tailscaleP2PNow()
-	p2pCfg := cfg.Tailscale.P2PAssist
-	ctrl := s.tailscaleP2PController()
-
-	api := ctrl.LocalAPI
-	if api == nil {
-		api = tailscale.DefaultLocalAPIClient()
-	}
-	statusSnap, statusErr := api.Status(ctx)
-	var netmapSnap *tailscale.NetMapSnapshot
-	if statusErr == nil && statusSnap != nil {
-		netmapSnap, _ = api.NetMap(ctx)
-	}
-
-	var selfIPs []netip.Addr
-	if statusSnap != nil {
-		var ifaceAddrs []netip.Addr
-		if ctrl.HostSelfIPs != nil {
-			ifaceAddrs = ctrl.HostSelfIPs()
-		} else {
-			ifaceAddrs = tailscale.HostInterfaceAddrs()
-		}
-		selfIPs = tailscale.ExtractSelfIPs(statusSnap, netmapSnap, ifaceAddrs)
-	}
-
-	fw4Mgr := ctrl.FW4
-	if fw4Mgr == nil {
-		fw4Mgr = &tailscale.FW4Manager{}
-	}
-	openCount, openIPs := fw4Mgr.CountOpenPinholes(ctx)
-
 	dmSnap := daemon.LoadRuntimeSnapshot()
-	ctrlStates := ctrl.PeerStates()
-	mergedStates := make(map[string]tailscale.P2PPeerRuntimeState)
-	if dmSnap.TailscaleP2P != nil {
-		for k, v := range dmSnap.TailscaleP2P.PeerStates {
-			mergedStates[k] = v
-		}
-	}
-	for k, v := range ctrlStates {
-		mergedStates[k] = v
-	}
-
-	runtimeSummary := tailscale.P2PRuntimeSnapshot{
-		Enabled:        p2pCfg.Enabled,
-		OpenPinholes:   openCount,
-		OpenPinholeIPs: openIPs,
-		PeerStates:     mergedStates,
-	}
-	if dmSnap.TailscaleP2P != nil {
-		runtimeSummary.ApplyMode = dmSnap.TailscaleP2P.ApplyMode
-		runtimeSummary.UpdatedAt = dmSnap.TailscaleP2P.UpdatedAt
-		runtimeSummary.LastError = dmSnap.TailscaleP2P.LastError
-	}
-
-	var livePeers []tailscale.PeerStatus
-	selfID := ""
-	tsRunning := false
-	if statusSnap != nil {
-		livePeers = statusSnap.Peers
-		selfID = statusSnap.Self.ID
-		tsRunning = strings.EqualFold(statusSnap.BackendState, "Running")
-	}
-
-	// Match configured rules to discovered live peers (one-to-one).
-	ruleByPeerID := make(map[string]config.TailscaleP2PPeerConfig)
-	matchedRuleIdx := make(map[int]bool)
-	for i, rule := range p2pCfg.Peers {
-		if m, ok := tailscale.MatchConfiguredPeer(rule, livePeers, selfID); ok && m != nil {
-			ruleByPeerID[m.ID] = rule
-			matchedRuleIdx[i] = true
-		}
-	}
-
-	var views []tailscaleP2PPeerView
-	for _, lp := range livePeers {
-		var eps []string
-		eps = append(eps, lp.Addrs...)
-		if netmapSnap != nil {
-			eps = append(eps, netmapSnap.PeerEndpoints[lp.ID]...)
-		}
-		v4, v6 := tailscale.FilterPublicCandidateIPs(eps, selfIPs)
-
-		v := tailscaleP2PPeerView{
-			ID:                   lp.ID,
-			Name:                 cmp.Or(lp.ShortName, lp.HostName, lp.ID),
-			ShortName:            lp.ShortName,
-			DNSName:              lp.DNSName,
-			HostName:             lp.HostName,
-			TailscaleIPs:         lp.TailscaleIPs,
-			PrimaryRoutes:        lp.PrimaryRoutes,
-			Online:               lp.Online,
-			Active:               lp.Active,
-			Direct:               lp.CurAddr != "",
-			CurAddr:              lp.CurAddr,
-			Relay:                lp.Relay,
-			CandidatePublicCount: len(v4) + len(v6),
-			AccessMode:           config.TailscaleAccessOutboundOnly,
-			EffectiveAccessMode:  config.TailscaleAccessOutboundOnly,
-		}
-		if rule, ok := ruleByPeerID[lp.ID]; ok {
-			v.Configured = true
-			v.JITEnabled = rule.JITEnabled
-			v.AccessMode = cmp.Or(strings.TrimSpace(rule.AccessMode), config.TailscaleAccessOutboundOnly)
-			v.EffectiveAccessMode = rule.EffectiveAccessMode(now)
-			v.BidirectionalUntil = strings.TrimSpace(rule.BidirectionalUntil)
-			v.BidirectionalRemainingSec = int(rule.RemainingBidirectional(now).Seconds())
-			v.AllowedLANTargets = rule.AllowedLANTargets
-		}
-		if st, ok := mergedStates[lp.ID]; ok {
-			v.PinholeActive = st.PinholeOpen
-			v.CooldownRemainingSec = st.CooldownRemainingSec
-			v.LastUpgradeAt = st.LastUpgradeAt
-			v.LastResult = st.LastResult
-		}
-		views = append(views, v)
-	}
-
-	// Preserve configured-but-currently-absent peers in the management view.
-	for i, rule := range p2pCfg.Peers {
-		if matchedRuleIdx[i] {
-			continue
-		}
-		var ips []string
-		if strings.TrimSpace(rule.TailscaleIP) != "" {
-			ips = []string{strings.TrimSpace(rule.TailscaleIP)}
-		}
-		key := cmp.Or(strings.TrimSpace(rule.ID), strings.TrimSpace(rule.TailscaleIP), strings.ToLower(strings.TrimSpace(rule.Name)))
-		v := tailscaleP2PPeerView{
-			ID:                        strings.TrimSpace(rule.ID),
-			Name:                      cmp.Or(strings.TrimSpace(rule.Name), strings.TrimSpace(rule.ID), strings.TrimSpace(rule.TailscaleIP)),
-			ShortName:                 strings.TrimSpace(rule.Name),
-			TailscaleIPs:              ips,
-			Online:                    false,
-			Configured:                true,
-			JITEnabled:                rule.JITEnabled,
-			AccessMode:                cmp.Or(strings.TrimSpace(rule.AccessMode), config.TailscaleAccessOutboundOnly),
-			EffectiveAccessMode:       rule.EffectiveAccessMode(now),
-			BidirectionalUntil:        strings.TrimSpace(rule.BidirectionalUntil),
-			BidirectionalRemainingSec: int(rule.RemainingBidirectional(now).Seconds()),
-			AllowedLANTargets:         rule.AllowedLANTargets,
-		}
-		if st, ok := mergedStates[key]; ok {
-			v.PinholeActive = st.PinholeOpen
-			v.CooldownRemainingSec = st.CooldownRemainingSec
-			v.LastUpgradeAt = st.LastUpgradeAt
-			v.LastResult = st.LastResult
-		}
-		views = append(views, v)
-	}
-
-	return map[string]any{
-		"supported":        runtime.GOOS == "linux" || s.opts.TailscaleP2PForTest != nil,
-		"isOpenWrt":        isOpenWrtSystem() || s.fw4Available(),
-		"fw4Available":     s.fw4Available(),
-		"ujailAvailable":   s.ujailAvailable(),
-		"daemonRunning":    daemon.IsDaemonRunning(),
-		"tailscaleRunning": tsRunning,
-		"defaultLanCidr":   s.defaultLANCIDR(),
-		"openPinholes":     openCount,
-		"openPinholeIPs":   openIPs,
-		"config":           p2pCfg,
-		"runtime":          runtimeSummary,
-		"peers":            views,
-	}
+	fw4OK := s.fw4Available()
+	return tailscale.BuildP2PReport(ctx, tailscale.P2PReportOptions{
+		Config:         cfg,
+		Controller:     s.tailscaleP2PController(),
+		DaemonRuntime:  dmSnap.TailscaleP2P,
+		DaemonRunning:  daemon.IsDaemonRunning(),
+		Supported:      runtime.GOOS == "linux" || s.opts.TailscaleP2PForTest != nil,
+		IsOpenWrt:      isOpenWrtSystem() || fw4OK,
+		FW4Available:   fw4OK,
+		UjailAvailable: s.ujailAvailable(),
+		DefaultLANCIDR: s.defaultLANCIDR(),
+		Now:            s.tailscaleP2PNow(),
+	})
 }
 
 func (s *Server) handleTailscaleP2PGet(w http.ResponseWriter, r *http.Request) {
@@ -285,69 +102,62 @@ func (s *Server) handleTailscaleP2PPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	normalized, err := normalizeAndValidateP2PAssistConfig(req)
+	normalized, err := tailscale.NormalizeAndValidateP2PAssistConfig(req)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	s.cfgMu.Lock()
-	defer s.cfgMu.Unlock()
+	var (
+		prevP2P     config.TailscaleP2PAssistConfig
+		appliedLive bool
+		applyMode   string
+	)
+	cfg, txErr := s.updateConfigTx(configTxOptions{
+		LiveApply: func(cfg *config.Config) error {
+			shouldApplyLive := (runtime.GOOS == "linux" && s.fw4Available()) || s.opts.TailscaleP2PForTest != nil
+			if !shouldApplyLive {
+				return nil
+			}
+			ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+			defer cancel()
 
-	cfgPath := configPathFor(s)
-	origBytes, origReadErr := os.ReadFile(cfgPath)
-	cfg := s.loadMutableConfig()
-	prevP2P := cfg.Tailscale.P2PAssist
-	cfg.Tailscale.P2PAssist = normalized
+			snap, applyErr := s.tailscaleP2PController().Reconcile(ctx, normalized)
+			if applyErr != nil {
+				return &apiStatusError{
+					status: http.StatusInternalServerError,
+					msg:    "应用防火墙防线规则失败（已自动回滚配置）: " + applyErr.Error(),
+				}
+			}
+			appliedLive = true
+			applyMode = snap.ApplyMode
 
-	if err := backupConfig(cfgPath); err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "备份配置失败: "+err.Error())
+			if prevP2P.SandboxUjail != normalized.SandboxUjail || (normalized.SandboxUjail && s.opts.TailscaleP2PForTest == nil) {
+				var ujailErr error
+				if s.opts.TailscaleP2PForTest != nil && s.opts.TailscaleP2PForTest.UjailApply != nil {
+					_, ujailErr = s.opts.TailscaleP2PForTest.UjailApply(ctx, normalized.SandboxUjail)
+				} else if runtime.GOOS == "linux" && s.opts.TailscaleP2PForTest == nil {
+					_, ujailErr = tailscale.ApplyUjailSandbox(ctx, normalized.SandboxUjail, tailscale.UjailOptions{})
+				}
+				if ujailErr != nil {
+					_, _ = s.tailscaleP2PController().Reconcile(ctx, prevP2P)
+					return &apiStatusError{
+						status: http.StatusInternalServerError,
+						msg:    "切换 ujail 沙盒失败（已自动回滚）: " + ujailErr.Error(),
+					}
+				}
+			}
+			return nil
+		},
+	}, func(cfg *config.Config) error {
+		prevP2P = cfg.Tailscale.P2PAssist
+		cfg.Tailscale.P2PAssist = normalized
+		return nil
+	})
+	if txErr != nil {
+		writePartialSaveError(w, txErr)
 		return
 	}
-	if err := s.saveConfig(cfg); err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "保存配置失败: "+err.Error())
-		return
-	}
-
-	rollbackConfig := func() {
-		if origReadErr == nil {
-			_ = os.WriteFile(cfgPath, origBytes, 0600)
-			s.invalidateConfigStore()
-		}
-	}
-
-	appliedLive := false
-	var applyMode string
-	shouldApplyLive := (runtime.GOOS == "linux" && s.fw4Available()) || s.opts.TailscaleP2PForTest != nil
-	if shouldApplyLive {
-		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
-		defer cancel()
-		snap, applyErr := s.tailscaleP2PController().Reconcile(ctx, normalized)
-		if applyErr != nil {
-			rollbackConfig()
-			writeJSONError(w, http.StatusInternalServerError, "应用防火墙防线规则失败（已自动回滚配置）: "+applyErr.Error())
-			return
-		}
-		appliedLive = true
-		applyMode = snap.ApplyMode
-
-		if prevP2P.SandboxUjail != normalized.SandboxUjail || (normalized.SandboxUjail && s.opts.TailscaleP2PForTest == nil) {
-			var ujailErr error
-			if s.opts.TailscaleP2PForTest != nil && s.opts.TailscaleP2PForTest.UjailApply != nil {
-				_, ujailErr = s.opts.TailscaleP2PForTest.UjailApply(ctx, normalized.SandboxUjail)
-			} else if runtime.GOOS == "linux" && s.opts.TailscaleP2PForTest == nil {
-				_, ujailErr = tailscale.ApplyUjailSandbox(ctx, normalized.SandboxUjail, tailscale.UjailOptions{})
-			}
-			if ujailErr != nil {
-				rollbackConfig()
-				_, _ = s.tailscaleP2PController().Reconcile(ctx, prevP2P)
-				writeJSONError(w, http.StatusInternalServerError, "切换 ujail 沙盒失败（已自动回滚）: "+ujailErr.Error())
-				return
-			}
-		}
-	}
-
-	_ = daemon.NotifyReload()
 
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
@@ -410,78 +220,4 @@ func (s *Server) handleTailscaleP2PPokePost(w http.ResponseWriter, r *http.Reque
 		"message":        res.Message,
 		"report":         report,
 	})
-}
-
-func normalizeAndValidateP2PAssistConfig(raw config.TailscaleP2PAssistConfig) (config.TailscaleP2PAssistConfig, error) {
-	pf := true
-	out := config.TailscaleP2PAssistConfig{
-		Enabled:       true,
-		JITWindowSec:  min(max(3, cmp.Or(raw.JITWindowSec, 5)), 10),
-		CooldownSec:   min(max(30, cmp.Or(raw.CooldownSec, 300)), 3600),
-		SandboxUjail:  raw.SandboxUjail,
-		ListenPort:    raw.EffectiveListenPort(),
-		PayloadFilter: &pf,
-	}
-
-	seen := make(map[string]struct{}, len(raw.Peers))
-	for _, p := range raw.Peers {
-		id := strings.TrimSpace(p.ID)
-		name := strings.TrimSpace(p.Name)
-		tsIP := strings.TrimSpace(p.TailscaleIP)
-		if id == "" && name == "" && tsIP == "" {
-			continue
-		}
-		if tsIP != "" {
-			if addr, err := netip.ParseAddr(tsIP); err != nil {
-				return out, fmt.Errorf("节点 %q 的 tailscale_ip %q 格式无效: %w", cmp.Or(name, id), tsIP, err)
-			} else {
-				tsIP = addr.Unmap().String()
-			}
-		}
-
-		normMode, ok := config.NormalizeTailscaleAccessMode(p.AccessMode)
-		if !ok {
-			return out, fmt.Errorf("节点 %q 的访问模式 %q 无效（仅支持 outbound_only / bidirectional_timed / bidirectional）", cmp.Or(name, id), p.AccessMode)
-		}
-
-		until := strings.TrimSpace(p.BidirectionalUntil)
-		if normMode == config.TailscaleAccessBidirectionalTimed {
-			if until == "" {
-				return out, fmt.Errorf("节点 %q 启用限时双向互访时必须设置失效时间 bidirectional_until (RFC3339)", cmp.Or(name, id))
-			}
-			parsed, err := time.Parse(time.RFC3339, until)
-			if err != nil {
-				return out, fmt.Errorf("节点 %q 的 bidirectional_until %q 须为 RFC3339 时间格式", cmp.Or(name, id), until)
-			}
-			until = parsed.UTC().Format(time.RFC3339)
-		} else {
-			until = ""
-		}
-
-		var targets []string
-		for _, rawTarget := range p.AllowedLANTargets {
-			parsedTarget, err := tailscale.ParseAllowedLANTarget(rawTarget)
-			if err != nil {
-				return out, fmt.Errorf("节点 %q 的 allowed_lan_targets 无效: %w", cmp.Or(name, id), err)
-			}
-			targets = append(targets, parsedTarget.Raw)
-		}
-
-		dedupKey := cmp.Or(id, tsIP, strings.ToLower(name))
-		if _, dup := seen[dedupKey]; dup {
-			continue
-		}
-		seen[dedupKey] = struct{}{}
-
-		out.Peers = append(out.Peers, config.TailscaleP2PPeerConfig{
-			ID:                 id,
-			Name:               cmp.Or(name, id, tsIP),
-			TailscaleIP:        tsIP,
-			JITEnabled:         p.JITEnabled,
-			AccessMode:         normMode,
-			BidirectionalUntil: until,
-			AllowedLANTargets:  targets,
-		})
-	}
-	return out, nil
 }

@@ -14,7 +14,7 @@ import { Badge, Button, ConfirmDialog, PageHeader, SectionCard, useToast } from 
 import { useCachedQuery } from '../../../hooks';
 import { clientApi } from '../../api';
 import { TAILSCALE_CFG_CACHE_KEY } from '../../cacheKeys';
-import { maskFullIP } from '../../lib/privacyMask';
+import { maskFullIP } from '../../../lib/privacyMask';
 import { ClientStatusResponse, TailscaleConfigResponse } from '../../types';
 import { TailscaleP2PSection } from './TailscaleP2PSection';
 import { TailscaleUpgradeDrawer } from './TailscaleUpgradeDrawer';

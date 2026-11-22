@@ -1,3 +1,4 @@
+// 文件职责：同步审计拦截域名至 AdGuard Home 受管 user_rules 分区并触发热重载。
 package adguard
 
 import (

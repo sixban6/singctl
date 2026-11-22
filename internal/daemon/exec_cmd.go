@@ -1,78 +1,56 @@
+// 文件职责：封装守护进程有界命令调用与订阅同步候选配置离线预校验，底层执行委托 common/execx。
 package daemon
 
 import (
 	"cmp"
 	"context"
-	"errors"
 	"os"
-	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"singctl/internal/common/execx"
 	"singctl/internal/constant"
 )
 
 const (
-	defaultDaemonCmdTimeout  = 3 * time.Second
+	defaultDaemonCmdTimeout  = execx.DefaultProbeTimeout
 	defaultDaemonRunTimeout  = 30 * time.Second
 	defaultSubSyncCheckLimit = 15 * time.Second
 )
 
-func newBoundedCmd(ctx context.Context, timeout time.Duration, name string, args ...string) (*exec.Cmd, context.CancelFunc, error) {
-	if strings.TrimSpace(name) == "" {
-		return nil, func() {}, errors.New("empty command name")
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if timeout <= 0 {
-		timeout = defaultDaemonCmdTimeout
-	}
-	runCtx, cancel := context.WithTimeout(ctx, timeout)
-	cmd := exec.CommandContext(runCtx, name, args...)
-	cmd.WaitDelay = min(timeout/2+100*time.Millisecond, time.Second)
-	return cmd, cancel, nil
+// OutputCmdTimeout 在超时预算内执行外部命令并返回标准输出。
+func OutputCmdTimeout(ctx context.Context, timeout time.Duration, name string, args ...string) ([]byte, error) {
+	return execx.Output(ctx, timeout, name, args...)
 }
 
-// outputCmdTimeout runs a synchronous subprocess with bounded timeout and returns its stdout.
-func outputCmdTimeout(ctx context.Context, timeout time.Duration, name string, args ...string) ([]byte, error) {
-	cmd, cancel, err := newBoundedCmd(ctx, timeout, name, args...)
+// CombinedOutputCmdTimeout 在超时预算内执行外部命令并返回合并标准输出与标准错误。
+func CombinedOutputCmdTimeout(ctx context.Context, timeout time.Duration, name string, args ...string) ([]byte, error) {
+	return execx.CombinedOutput(ctx, timeout, name, args...)
+}
+
+// RunCmdTimeoutIO 在超时预算内以显式标准流运行外部命令。
+func RunCmdTimeoutIO(ctx context.Context, timeout time.Duration, stdin, stdout, stderr *os.File, name string, args ...string) error {
+	return execx.RunIO(ctx, timeout, nil, stdin, stdout, stderr, name, args...)
+}
+
+// PreValidateSubSyncConfig 将候选配置写入临时 0600 文件并执行 `sing-box check`，失败时自动清理临时文件。
+func (d *Daemon) PreValidateSubSyncConfig(cfgPath, candidateJSON string) (string, []byte, error) {
+	tmpFile, err := os.CreateTemp(filepath.Dir(cfgPath), "."+filepath.Base(cfgPath)+".subsync-*")
 	if err != nil {
-		return nil, err
-	}
-	defer cancel()
-	return cmd.Output()
-}
-
-// combinedOutputCmdTimeout runs a synchronous subprocess with bounded timeout and returns merged output.
-func combinedOutputCmdTimeout(ctx context.Context, timeout time.Duration, name string, args ...string) ([]byte, error) {
-	cmd, cancel, err := newBoundedCmd(ctx, timeout, name, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer cancel()
-	return cmd.CombinedOutput()
-}
-
-// runCmdTimeoutIO runs a synchronous subprocess with bounded timeout and explicit stdio handles.
-func runCmdTimeoutIO(ctx context.Context, timeout time.Duration, stdin, stdout, stderr *os.File, name string, args ...string) error {
-	cmd, cancel, err := newBoundedCmd(ctx, timeout, name, args...)
-	if err != nil {
-		return err
-	}
-	defer cancel()
-	cmd.Stdin = stdin
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	return cmd.Run()
-}
-
-func (d *Daemon) preValidateSubSyncConfig(cfgPath, candidateJSON string) (string, []byte, error) {
-	tmpPath := cfgPath + ".subsync.tmp"
-	if err := os.WriteFile(tmpPath, []byte(candidateJSON), 0600); err != nil {
 		return "", nil, err
 	}
-	_ = os.Chmod(tmpPath, 0600)
+	tmpPath := tmpFile.Name()
+	_ = tmpFile.Chmod(0600)
+	if _, err := tmpFile.WriteString(candidateJSON); err != nil {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+		return "", nil, err
+	}
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return "", nil, err
+	}
 
 	sbBin := constant.SingBoxInstallDir
 	checkTimeout := defaultSubSyncCheckLimit
@@ -84,7 +62,7 @@ func (d *Daemon) preValidateSubSyncConfig(cfgPath, candidateJSON string) (string
 		}
 		baseCtx = d.ctx
 	}
-	out, err := combinedOutputCmdTimeout(baseCtx, checkTimeout, sbBin, "check", "-c", tmpPath)
+	out, err := CombinedOutputCmdTimeout(baseCtx, checkTimeout, sbBin, "check", "-c", tmpPath)
 	if err != nil {
 		_ = os.Remove(tmpPath)
 		return "", out, err

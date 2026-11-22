@@ -1,3 +1,4 @@
+// 文件职责：承载 `singctl sr warp-ctl` 隐藏子命令，委托 internal/deploy 执行本机非交互 WARP JSON RPC 控制。
 package cmd
 
 import (
@@ -6,7 +7,7 @@ import (
 	"io"
 	"os"
 
-	"singctl/internal/serverweb"
+	"singctl/internal/deploy"
 
 	"github.com/spf13/cobra"
 )
@@ -50,7 +51,7 @@ func newServerWarpCtlCmd(configPath string) *cobra.Command {
 				payload = raw
 			}
 
-			out, err := serverweb.ExecuteLocalWarpCLI(cmd.Context(), sub, payload, serverweb.LocalWarpCLIOptions{
+			out, err := deploy.ExecuteLocalWarpCLI(cmd.Context(), sub, payload, deploy.LocalWarpCLIOptions{
 				ConfigPath: resolvedPath,
 			})
 			if err != nil {

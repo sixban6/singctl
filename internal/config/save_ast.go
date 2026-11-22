@@ -19,8 +19,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// astSubtreeCleanupRule 声明单条 YAML AST 清理规则，用于在 Save 合并前清除已在 Go 结构体中清空或失效的旧节点。
-type astSubtreeCleanupRule struct {
+// ASTSubtreeCleanupRule 声明单条 YAML AST 清理规则，用于在 Save 合并前清除已在 Go 结构体中清空或失效的旧节点。
+type ASTSubtreeCleanupRule struct {
 	Name                string
 	When                func(cfg *Config, isServerDoc, isClientDoc bool) bool
 	TargetDoc           string // "dst" | "src" | "both"
@@ -37,7 +37,7 @@ func dropChildKey(targetKey string) func(cfg *Config, childKey string) bool {
 }
 
 // defaultSaveCleanupRules 集中维护各子配置块在 AST 合并前需要清理的陈旧键规则表。
-var defaultSaveCleanupRules = []astSubtreeCleanupRule{
+var defaultSaveCleanupRules = []ASTSubtreeCleanupRule{
 	{
 		Name:      "custom_rules_empty_block",
 		When:      func(cfg *Config, _, _ bool) bool { return cfg != nil && len(cfg.CustomRules.Block) == 0 },
@@ -133,8 +133,10 @@ var defaultSaveCleanupRules = []astSubtreeCleanupRule{
 	},
 	{
 		// 当 server.warp_routing 被修改、清空列表或恢复默认时，清理 dstDoc 与 srcDoc 中旧的 warp_routing 子节点以防止合并残留
-		Name:      "server_warp_routing_src",
-		When:      func(cfg *Config, _, isClientDoc bool) bool { return cfg != nil && !isClientDoc && cfg.Server.WarpRouting.IsEmpty() },
+		Name: "server_warp_routing_src",
+		When: func(cfg *Config, _, isClientDoc bool) bool {
+			return cfg != nil && !isClientDoc && cfg.Server.WarpRouting.IsEmpty()
+		},
 		TargetDoc: "src",
 		ParentKey: "server",
 		DropChild: dropChildKey("warp_routing"),
@@ -156,8 +158,8 @@ var defaultSaveCleanupRules = []astSubtreeCleanupRule{
 	},
 }
 
-// saveConfigBytesAST 是纯内存 YAML AST 注释保留合并引擎；extraRules 会先于内置规则执行，便于调用方或单测扩展局部清理策略。
-func saveConfigBytesAST(existingData []byte, cfg *Config, extraRules ...astSubtreeCleanupRule) ([]byte, error) {
+// SaveConfigBytesAST 是纯内存 YAML AST 注释保留合并引擎；extraRules 会先于内置规则执行，便于调用方或单测扩展局部清理策略。
+func SaveConfigBytesAST(existingData []byte, cfg *Config, extraRules ...ASTSubtreeCleanupRule) ([]byte, error) {
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("marshal config: %w", err)
@@ -178,7 +180,7 @@ func saveConfigBytesAST(existingData []byte, cfg *Config, extraRules ...astSubtr
 		var oldRoot, newRoot yaml.Node
 		if errOld := yaml.Unmarshal(existingData, &oldRoot); errOld == nil {
 			if errNew := yaml.Unmarshal(data, &newRoot); errNew == nil {
-				rules := make([]astSubtreeCleanupRule, 0, len(extraRules)+len(defaultSaveCleanupRules))
+				rules := make([]ASTSubtreeCleanupRule, 0, len(extraRules)+len(defaultSaveCleanupRules))
 				rules = append(rules, extraRules...)
 				rules = append(rules, defaultSaveCleanupRules...)
 				filterRoleNodesBeforeMergeWithRules(&oldRoot, &newRoot, cfg, rules)
@@ -200,7 +202,7 @@ func saveConfigBytesAST(existingData []byte, cfg *Config, extraRules ...astSubtr
 // When path does not exist, Save initializes from the role-specific template (ServerConfigYAML or ClientConfigYAML).
 func Save(path string, cfg *Config) error {
 	existingData, _ := os.ReadFile(path)
-	data, err := saveConfigBytesAST(existingData, cfg)
+	data, err := SaveConfigBytesAST(existingData, cfg)
 	if err != nil {
 		return err
 	}
@@ -222,7 +224,7 @@ func Save(path string, cfg *Config) error {
 	return nil
 }
 
-func filterRoleNodesBeforeMergeWithRules(dstRoot, srcRoot *yaml.Node, cfg *Config, rules []astSubtreeCleanupRule) {
+func filterRoleNodesBeforeMergeWithRules(dstRoot, srcRoot *yaml.Node, cfg *Config, rules []ASTSubtreeCleanupRule) {
 	if len(dstRoot.Content) == 0 || len(srcRoot.Content) == 0 {
 		return
 	}
@@ -299,7 +301,7 @@ func filterRoleNodesBeforeMergeWithRules(dstRoot, srcRoot *yaml.Node, cfg *Confi
 	}
 }
 
-func applyASTCleanupRules(dstDoc, srcDoc *yaml.Node, cfg *Config, isServerDoc, isClientDoc bool, rules []astSubtreeCleanupRule) {
+func applyASTCleanupRules(dstDoc, srcDoc *yaml.Node, cfg *Config, isServerDoc, isClientDoc bool, rules []ASTSubtreeCleanupRule) {
 	for _, rule := range rules {
 		_ = rule.Name
 		if rule.When != nil && !rule.When(cfg, isServerDoc, isClientDoc) {

@@ -1,3 +1,4 @@
+// 文件职责：无副作用扫描节点核心二进制、操作系统安全补丁、残留动态库与内核重启需求三层态势。
 package heal
 
 import (
@@ -13,10 +14,11 @@ import (
 	"sync"
 	"time"
 
+	"singctl/internal/common/release"
+	"singctl/internal/common/sysinfo"
 	"singctl/internal/config"
 	"singctl/internal/constant"
 	"singctl/internal/deploy"
-	"singctl/internal/util/github"
 )
 
 // CriticalSecurityPkgPrefixes lists security-sensitive packages always flagged even on custom mirrors.
@@ -101,7 +103,10 @@ func scanCoreLayer(_ context.Context, cfg *config.Config, currentSingctlVer stri
 	if cfg != nil {
 		mirror = cfg.GitHub.MirrorURL
 	}
-	fetcher := github.NewReleaseFetcher(mirror, deploy.ReleaseClient)
+	relClient := release.NewClient(mirror)
+	if deploy.ReleaseClient != nil {
+		relClient.HTTP = deploy.ReleaseClient
+	}
 
 	curSingctl := strings.TrimPrefix(strings.TrimSpace(currentSingctlVer), "v")
 	if diskVer := queryDiskSingctlVersion(); diskVer != "" {
@@ -145,7 +150,7 @@ func scanCoreLayer(_ context.Context, cfg *config.Config, currentSingctlVer stri
 			defer wg.Done()
 			if spec.name == "singctl" {
 				latest := curSingctl
-				if tag, err := fetcher.FetchLatestTag(constant.GitHubRepo); err == nil && strings.TrimSpace(tag) != "" {
+				if tag, err := relClient.FetchLatestTag(context.Background(), constant.GitHubRepo); err == nil && strings.TrimSpace(tag) != "" {
 					latest = strings.TrimPrefix(strings.TrimSpace(tag), "v")
 				}
 				installed := curSingctl != ""
@@ -525,13 +530,7 @@ func detectDistroPrettyName() string {
 }
 
 func isOpenWrtSystem() bool {
-	if _, err := os.Stat("/etc/openwrt_release"); err == nil {
-		return true
-	}
-	if raw, err := os.ReadFile("/etc/os-release"); err == nil {
-		return strings.Contains(strings.ToLower(string(raw)), "openwrt")
-	}
-	return false
+	return sysinfo.IsOpenWrt()
 }
 
 func hasBinary(name string) bool {

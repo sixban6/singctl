@@ -26,6 +26,11 @@ type QuicKeys struct {
 	hp  []byte
 }
 
+// KeyLen 返回当前 QUIC AEAD 对称密钥字节长度。
+func (k QuicKeys) KeyLen() int {
+	return len(k.key)
+}
+
 func DeriveQUICInitialKeys(dcid []byte, isClient bool) (QuicKeys, error) {
 	initialSecret := hkdfExtract(sha256.New, dcid, quicV1InitialSalt)
 	label := "server in"
@@ -118,7 +123,7 @@ func AppendQUICVarint(b []byte, v uint64) []byte {
 	}
 }
 
-func readQUICVarint(b []byte) (uint64, int) {
+func ReadQUICVarint(b []byte) (uint64, int) {
 	if len(b) == 0 {
 		return 0, 0
 	}
@@ -221,14 +226,14 @@ func UnpackQUICLongHeaderPacket(datagram []byte, initKeys QuicKeys, hsKeys *Quic
 	idx += scidLen
 
 	if pktType == 0x00 {
-		tokLen, n := readQUICVarint(datagram[idx:])
+		tokLen, n := ReadQUICVarint(datagram[idx:])
 		if n == 0 || idx+n+int(tokLen) >= len(datagram) {
 			return 0, nil, nil, nil, len(datagram), fmt.Errorf("invalid token")
 		}
 		idx += n + int(tokLen)
 	}
 
-	remLen, n := readQUICVarint(datagram[idx:])
+	remLen, n := ReadQUICVarint(datagram[idx:])
 	if n == 0 {
 		return 0, nil, nil, nil, len(datagram), fmt.Errorf("invalid length")
 	}
@@ -306,7 +311,7 @@ func ExtractQUICFrames(plain []byte) ([]CryptoChunk, string, error) {
 	var chunks []CryptoChunk
 	idx := 0
 	for idx < len(plain) {
-		frameType, n := readQUICVarint(plain[idx:])
+		frameType, n := ReadQUICVarint(plain[idx:])
 		if n == 0 {
 			break
 		}
@@ -315,30 +320,30 @@ func ExtractQUICFrames(plain []byte) ([]CryptoChunk, string, error) {
 		case 0x00, 0x01: // PADDING or PING
 			continue
 		case 0x02, 0x03: // ACK
-			_, n1 := readQUICVarint(plain[idx:])
+			_, n1 := ReadQUICVarint(plain[idx:])
 			idx += n1
-			_, n2 := readQUICVarint(plain[idx:])
+			_, n2 := ReadQUICVarint(plain[idx:])
 			idx += n2
-			rngCount, n3 := readQUICVarint(plain[idx:])
+			rngCount, n3 := ReadQUICVarint(plain[idx:])
 			idx += n3
-			_, n4 := readQUICVarint(plain[idx:])
+			_, n4 := ReadQUICVarint(plain[idx:])
 			idx += n4
 			for range rngCount {
-				_, ng := readQUICVarint(plain[idx:])
+				_, ng := ReadQUICVarint(plain[idx:])
 				idx += ng
-				_, na := readQUICVarint(plain[idx:])
+				_, na := ReadQUICVarint(plain[idx:])
 				idx += na
 			}
 			if frameType == 0x03 {
 				for range 3 {
-					_, ne := readQUICVarint(plain[idx:])
+					_, ne := ReadQUICVarint(plain[idx:])
 					idx += ne
 				}
 			}
 		case 0x06: // CRYPTO
-			offset, n1 := readQUICVarint(plain[idx:])
+			offset, n1 := ReadQUICVarint(plain[idx:])
 			idx += n1
-			length, n2 := readQUICVarint(plain[idx:])
+			length, n2 := ReadQUICVarint(plain[idx:])
 			idx += n2
 			if n1 == 0 || n2 == 0 || idx+int(length) > len(plain) {
 				return chunks, "", fmt.Errorf("invalid CRYPTO frame")
@@ -349,13 +354,13 @@ func ExtractQUICFrames(plain []byte) ([]CryptoChunk, string, error) {
 			})
 			idx += int(length)
 		case 0x1c, 0x1d: // CONNECTION_CLOSE
-			errCode, n1 := readQUICVarint(plain[idx:])
+			errCode, n1 := ReadQUICVarint(plain[idx:])
 			idx += n1
 			if frameType == 0x1c {
-				_, nf := readQUICVarint(plain[idx:])
+				_, nf := ReadQUICVarint(plain[idx:])
 				idx += nf
 			}
-			rLen, n2 := readQUICVarint(plain[idx:])
+			rLen, n2 := ReadQUICVarint(plain[idx:])
 			idx += n2
 			reason := ""
 			if idx+int(rLen) <= len(plain) {
@@ -369,17 +374,20 @@ func ExtractQUICFrames(plain []byte) ([]CryptoChunk, string, error) {
 	return chunks, "", nil
 }
 
-type cryptoReassembler struct {
+// CryptoReassembler 按偏移量安全重组可能乱序到达的 QUIC CRYPTO 字节流。
+type CryptoReassembler struct {
 	buf      []byte
 	received []bool
 	readOff  int
 }
 
-func newCryptoReassembler() *cryptoReassembler {
-	return &cryptoReassembler{}
+// NewCryptoReassembler 创建空的 QUIC CRYPTO 流重组器。
+func NewCryptoReassembler() *CryptoReassembler {
+	return &CryptoReassembler{}
 }
 
-func (r *cryptoReassembler) push(offset uint64, data []byte) {
+// Push 将单段 CRYPTO 数据帧按偏移量写入重组缓冲区（超过 256KiB 上限自动丢弃防内存耗尽）。
+func (r *CryptoReassembler) Push(offset uint64, data []byte) {
 	end := int(offset) + len(data)
 	if end > 262144 {
 		return
@@ -398,7 +406,8 @@ func (r *cryptoReassembler) push(offset uint64, data []byte) {
 	}
 }
 
-func (r *cryptoReassembler) popContiguous() []byte {
+// PopContiguous 弹出从当前读游标起始的新增连续字节段。
+func (r *CryptoReassembler) PopContiguous() []byte {
 	start := r.readOff
 	for r.readOff < len(r.received) && r.received[r.readOff] {
 		r.readOff++
@@ -409,12 +418,13 @@ func (r *cryptoReassembler) popContiguous() []byte {
 	return r.buf[start:r.readOff]
 }
 
-func (r *cryptoReassembler) allSeen() []byte {
+// AllSeen 返回从流起点至今已连续重组完成的全部字节切片。
+func (r *CryptoReassembler) AllSeen() []byte {
 	return r.buf[:r.readOff]
 }
 
-// parseTLS13CertificateMsgFromStream 直接从重组后的 TLS 1.3 Handshake 流中提取 Certificate 消息 (MsgType == 11)。
-func parseTLS13CertificateMsgFromStream(stream []byte) ([]*x509.Certificate, bool) {
+// ParseTLS13CertificateMsgFromStream 直接从重组后的 TLS 1.3 Handshake 流中提取 Certificate 消息 (MsgType == 11)。
+func ParseTLS13CertificateMsgFromStream(stream []byte) ([]*x509.Certificate, bool) {
 	idx := 0
 	for idx+4 <= len(stream) {
 		msgType := stream[idx]

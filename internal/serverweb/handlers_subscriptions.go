@@ -1,15 +1,17 @@
+// 文件职责：提供 SubHub 聚合订阅管理、预览、密钥轮换与访问日志审计薄 HTTP 接口（风险评估委托 internal/subhub）。
 package serverweb
 
 import (
+	"cmp"
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
+	"singctl/internal/common/httpx"
 	"singctl/internal/deploy"
 	"singctl/internal/logger"
 	"singctl/internal/subhub"
@@ -42,11 +44,7 @@ func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 		ssKey, _ = s.subStore.EnsureKey()
 	}
 
-	subDomain := cfg.Server.GetSubstoreDomain()
-	if subDomain == "" {
-		subDomain = cfg.Server.GetNodeDomain()
-	}
-
+	subDomain := cmp.Or(cfg.Server.GetSubstoreDomain(), cfg.Server.GetNodeDomain())
 	rawSubURL := fmt.Sprintf("https://%s/download/collection/all", subDomain)
 	if ssKey != "" {
 		rawSubURL = fmt.Sprintf("https://%s/%s/download/collection/all", subDomain, ssKey)
@@ -57,7 +55,7 @@ func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 		s.subStore.WarmupUncachedSources(warmupCtx)
 		cancelWarmup()
 	} else {
-		tryRunSingleFlight(&s.subWarmupRunning, 15*time.Second, func(bgCtx context.Context) {
+		tryRunSingleFlight(&s.caches.subWarmup, 15*time.Second, func(bgCtx context.Context) {
 			s.subStore.WarmupUncachedSources(bgCtx)
 		})
 	}
@@ -75,7 +73,7 @@ func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 		"loon":         "loon://import?url=" + url.QueryEscape(rawSubURL+"?target=Loon"),
 	}
 
-	res := map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"engine":           "native-go",
 		"substoreKey":      ssKey,
 		"substoreAdminUrl": adminURL,
@@ -94,14 +92,12 @@ func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 				"port": vlessPort,
 			},
 		},
-	}
-	writeJSON(w, http.StatusOK, res)
+	})
 }
 
 func (s *Server) handleUpsertSubscriptionSource(w http.ResponseWriter, r *http.Request) {
-	var in subhub.SourceUpsertInput
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "无效的 JSON 请求: "+err.Error())
+	in, ok := decodeBodyJSON[subhub.SourceUpsertInput](w, r, httpx.DefaultMaxBodyBytes, false, "")
+	if !ok {
 		return
 	}
 	item, err := s.subStore.UpsertSource(r.Context(), in)
@@ -119,10 +115,13 @@ func (s *Server) handleUpsertSubscriptionSource(w http.ResponseWriter, r *http.R
 func (s *Server) handleDeleteSubscriptionSource(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimSpace(r.URL.Query().Get("name"))
 	if name == "" {
-		var body struct {
+		type reqBody struct {
 			Name string `json:"name"`
 		}
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		body, ok := decodeBodyJSON[reqBody](w, r, httpx.DefaultMaxBodyBytes, true, "")
+		if !ok {
+			return
+		}
 		name = strings.TrimSpace(body.Name)
 	}
 	if err := s.subStore.DeleteSource(name); err != nil {
@@ -138,10 +137,13 @@ func (s *Server) handleDeleteSubscriptionSource(w http.ResponseWriter, r *http.R
 func (s *Server) handleRefreshSubscriptionSources(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimSpace(r.URL.Query().Get("name"))
 	if name == "" && r.Body != nil {
-		var body struct {
+		type reqBody struct {
 			Name string `json:"name"`
 		}
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		body, ok := decodeBodyJSON[reqBody](w, r, httpx.DefaultMaxBodyBytes, true, "")
+		if !ok {
+			return
+		}
 		name = strings.TrimSpace(body.Name)
 	}
 
@@ -183,7 +185,7 @@ func (s *Server) handleRotateSubscriptionKey(w http.ResponseWriter, r *http.Requ
 		writeJSONError(w, http.StatusInternalServerError, "轮换订阅密钥失败: "+err.Error())
 		return
 	}
-	s.invalidateConfigCache()
+	s.InvalidateConfigCache()
 
 	cfg := s.readConfigOrNil()
 	if cfg != nil {
@@ -194,10 +196,7 @@ func (s *Server) handleRotateSubscriptionKey(w http.ResponseWriter, r *http.Requ
 
 	subDomain := ""
 	if cfg != nil {
-		subDomain = cfg.Server.GetSubstoreDomain()
-		if subDomain == "" {
-			subDomain = cfg.Server.GetNodeDomain()
-		}
+		subDomain = cmp.Or(cfg.Server.GetSubstoreDomain(), cfg.Server.GetNodeDomain())
 	}
 	newSubURL := ""
 	if subDomain != "" {
@@ -213,10 +212,7 @@ func (s *Server) handleRotateSubscriptionKey(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *Server) handlePreviewSubscription(w http.ResponseWriter, r *http.Request) {
-	qTarget := strings.TrimSpace(r.URL.Query().Get("target"))
-	if qTarget == "" {
-		qTarget = "ClashMeta"
-	}
+	qTarget := cmp.Or(strings.TrimSpace(r.URL.Query().Get("target")), "ClashMeta")
 	target := subhub.DetectTarget(qTarget, r.URL.Query().Get("raw"), "")
 
 	bundle, err := s.subStore.ResolveCollection(r.Context(), "all")
@@ -233,10 +229,7 @@ func (s *Server) handlePreviewSubscription(w http.ResponseWriter, r *http.Reques
 		renderOpts.MirrorURL = cfg.GitHub.MirrorURL
 		renderOpts.UpMbps = cfg.Hy2.Up
 		renderOpts.DownMbps = cfg.Hy2.Down
-		subDomain := cfg.Server.GetSubstoreDomain()
-		if subDomain == "" {
-			subDomain = cfg.Server.GetNodeDomain()
-		}
+		subDomain := cmp.Or(cfg.Server.GetSubstoreDomain(), cfg.Server.GetNodeDomain())
 		if key, kErr := s.subStore.GetKey(); kErr == nil && key != "" && subDomain != "" {
 			renderOpts.RequestURL = fmt.Sprintf("https://%s/%s/download/collection/all?target=%s", subDomain, key, qTarget)
 		}
@@ -284,120 +277,20 @@ func (s *Server) handleListSubscriptionAccessLogs(w http.ResponseWriter, r *http
 		}
 		enriched[i] = item
 	}
-	bannedSet := make(map[string]bool)
+
+	bannedIPs := make([]string, 0)
 	if s.limiter != nil {
 		for ip := range s.limiter.ListBans() {
-			bannedSet[ip] = true
+			bannedIPs = append(bannedIPs, ip)
 		}
 	}
-	bannedIPs := make([]string, 0, len(bannedSet))
-	for ip := range bannedSet {
-		bannedIPs = append(bannedIPs, ip)
-	}
 
-	riskSummary := evaluateSubscriptionAccessRisk(enriched)
+	riskSummary := subhub.EvaluateAccessRisk(enriched)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"logs":        enriched,
 		"riskSummary": riskSummary,
 		"bannedIps":   bannedIPs,
 	})
-}
-
-// SubscriptionRiskSummary 订阅拉取防盗刷态势摘要
-type SubscriptionRiskSummary struct {
-	Level              string   `json:"level"` // "safe" | "warn" | "high"
-	UniqueIPs24h       int      `json:"uniqueIps24h"`
-	UniqueCountries24h int      `json:"uniqueCountries24h"`
-	DeniedHits24h      int      `json:"deniedHits24h"`
-	SuspiciousUAHits   int      `json:"suspiciousUaHits24h"`
-	Reasons            []string `json:"reasons"`
-}
-
-func isSuspiciousSubUA(ua string) bool {
-	lower := strings.ToLower(strings.TrimSpace(ua))
-	if lower == "" {
-		return true
-	}
-	for _, kw := range []string{"python-requests", "python-urllib", "curl/", "wget/", "go-http-client", "axios/", "node-fetch", "headless", "spider", "censys", "shodan", "scrapy"} {
-		if strings.Contains(lower, kw) {
-			return true
-		}
-	}
-	return false
-}
-
-func evaluateSubscriptionAccessRisk(logs []subhub.AccessLogEntry) SubscriptionRiskSummary {
-	cutoff := time.Now().Add(-24 * time.Hour)
-	ipSet := make(map[string]struct{})
-	countrySet := make(map[string]struct{})
-	deniedHits := 0
-	suspiciousUA := 0
-
-	for _, entry := range logs {
-		ts, err := time.Parse(time.RFC3339, entry.Timestamp)
-		if err == nil && ts.Before(cutoff) {
-			continue
-		}
-		if entry.Status == "denied" {
-			deniedHits++
-			continue
-		}
-		if entry.IP != "" {
-			ipSet[entry.IP] = struct{}{}
-		}
-		if cc := strings.ToUpper(strings.TrimSpace(entry.CountryCode)); cc != "" && cc != "XX" && cc != "LOCAL" {
-			countrySet[cc] = struct{}{}
-		}
-		if isSuspiciousSubUA(entry.UserAgent) {
-			suspiciousUA++
-		}
-	}
-
-	uniqueIPs := len(ipSet)
-	uniqueCountries := len(countrySet)
-	var reasons []string
-	level := "safe"
-
-	if uniqueIPs >= 10 {
-		level = "high"
-		reasons = append(reasons, fmt.Sprintf("24 小时内共有 %d 个不同公网 IP 成功拉取订阅，远超个人多设备常规范围", uniqueIPs))
-	} else if uniqueIPs >= 6 {
-		level = "warn"
-		reasons = append(reasons, fmt.Sprintf("24 小时内共有 %d 个不同公网 IP 拉取订阅，建议核对是否均为本人设备", uniqueIPs))
-	}
-
-	if uniqueCountries >= 4 {
-		level = "high"
-		reasons = append(reasons, fmt.Sprintf("24 小时内跨 %d 个国家/地区拉取订阅，存在订阅链接外泄或被第三方测速台抓取风险", uniqueCountries))
-	} else if uniqueCountries >= 3 && level == "safe" {
-		level = "warn"
-		reasons = append(reasons, fmt.Sprintf("24 小时内跨 %d 个国家/地区拉取订阅（若设备挂代理更新订阅属正常现象）", uniqueCountries))
-	}
-
-	if suspiciousUA >= 2 && uniqueIPs >= 4 {
-		level = "high"
-		reasons = append(reasons, fmt.Sprintf("检测到 %d 次脚本/爬虫特征 User-Agent 批量拉取订阅", suspiciousUA))
-	} else if suspiciousUA >= 1 && level == "safe" {
-		level = "warn"
-		reasons = append(reasons, fmt.Sprintf("检测到 %d 次非标准客户端（脚本/空 UA）拉取订阅", suspiciousUA))
-	}
-
-	if deniedHits >= 3 && level == "safe" {
-		level = "warn"
-		reasons = append(reasons, fmt.Sprintf("24 小时内拦截了 %d 次错误订阅密钥试探", deniedHits))
-	}
-
-	if reasons == nil {
-		reasons = []string{}
-	}
-	return SubscriptionRiskSummary{
-		Level:              level,
-		UniqueIPs24h:       uniqueIPs,
-		UniqueCountries24h: uniqueCountries,
-		DeniedHits24h:      deniedHits,
-		SuspiciousUAHits:   suspiciousUA,
-		Reasons:            reasons,
-	}
 }
 
 func (s *Server) handleClearSubscriptionAccessLogs(w http.ResponseWriter, r *http.Request) {

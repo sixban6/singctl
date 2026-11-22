@@ -211,7 +211,7 @@ func TestInstallScriptConsistency(t *testing.T) {
 func TestWindowsScriptFiles(t *testing.T) {
 	t.Run("Windows script files validation", func(t *testing.T) {
 		// 检查 Windows 启动脚本
-		startScriptPath := filepath.Join("..", "internal", "scripts", "start_singbox_windows.bat")
+		startScriptPath := filepath.Join("..", "internal", "singbox", "scripts", "start_singbox_windows.bat")
 		if _, err := os.Stat(startScriptPath); err == nil {
 			content, err := os.ReadFile(startScriptPath)
 			if err != nil {
@@ -237,7 +237,7 @@ func TestWindowsScriptFiles(t *testing.T) {
 		}
 
 		// 检查 Windows 停止脚本
-		stopScriptPath := filepath.Join("..", "internal", "scripts", "stop_singbox_windows.bat")
+		stopScriptPath := filepath.Join("..", "internal", "singbox", "scripts", "stop_singbox_windows.bat")
 		if _, err := os.Stat(stopScriptPath); err == nil {
 			content, err := os.ReadFile(stopScriptPath)
 			if err != nil {

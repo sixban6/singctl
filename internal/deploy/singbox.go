@@ -1,14 +1,10 @@
+// 文件职责：负责服务端 sing-box 实例安装、ACME 证书发现自愈、配置模板渲染与服务生命周期编排。
 package deploy
 
 import (
 	"bytes"
-	"cmp"
 	"context"
-	"crypto/ecdh"
-	"crypto/rand"
 	"crypto/x509"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -17,7 +13,6 @@ import (
 	"path/filepath"
 	"strings"
 	"text/template"
-
 	"time"
 
 	"singctl/internal/config"
@@ -52,24 +47,7 @@ func NewSingBoxServer(cfg *config.Config) (*SingBoxServer, error) {
 	return sbs, nil
 }
 
-// InspectExistingShareLinks 以纯本地只读方式读取已部署的 sing-box 凭据并组装分享链接（零外网探测、零证书轮询等待、零随机伪造密钥）。
-func InspectExistingShareLinks(cfg *config.Config, configFile string) (hy2Link, vlessLink string, hy2Port, vlessPort int) {
-	if cfg == nil {
-		return "", "", 443, 443
-	}
-	sbs := &SingBoxServer{
-		cfg:        cfg,
-		ConfigFile: configFile,
-	}
-	tagPrefix := cmp.Or(cfg.Server.FastNodeTag(), "node")
-	sbs.hy2Tag = fmt.Sprintf("sec_%s_hy2", tagPrefix)
-	sbs.vrTag = fmt.Sprintf("sec_%s_vr", tagPrefix)
-	_ = sbs.LoadExistingCredentials()
-	return sbs.ShareLinkHy2, sbs.ShareLinkVless, sbs.Hy2Port(), sbs.VlessPort()
-}
-
 func (sbs *SingBoxServer) init() error {
-	// Try loading existing deployed credentials first to prevent redundant regeneration
 	_ = sbs.LoadExistingCredentials()
 
 	sbs.initCaddyCertPath()
@@ -93,40 +71,12 @@ func (sbs *SingBoxServer) initTag() {
 	sbs.vrTag = fmt.Sprintf("sec_%s_vr", tagPrefix)
 }
 
-func (sbs *SingBoxServer) updateShareLinks() {
-	nodeDomain := sbs.cfg.Server.GetNodeDomain()
-	hy2Port := sbs.Hy2Port()
-	vlessPort := sbs.VlessPort()
-	sbs.ShareLinkHy2 = fmt.Sprintf("hysteria2://%s@%s:%d/?sni=%s&alpn=h3&insecure=0#%s", sbs.hyUUID, nodeDomain, hy2Port, nodeDomain, sbs.hy2Tag)
-	sbs.ShareLinkVless = fmt.Sprintf("vless://%s@%s:%d?type=tcp&encryption=none&security=reality&pbk=%s&fp=chrome&sni=%s&sid=%s&flow=xtls-rprx-vision#%s", sbs.hyUUID, nodeDomain, vlessPort, sbs.publicKey, sbs.cfg.Server.Sni, sbs.shortID, sbs.vrTag)
-}
+func (sbs *SingBoxServer) HyUUID() string    { return sbs.hyUUID }
+func (sbs *SingBoxServer) PublicKey() string { return sbs.publicKey }
+func (sbs *SingBoxServer) ShortID() string   { return sbs.shortID }
+func (sbs *SingBoxServer) Hy2Tag() string    { return sbs.hy2Tag }
+func (sbs *SingBoxServer) VrTag() string     { return sbs.vrTag }
 
-// HyUUID returns the Hysteria2 password / VLESS UUID.
-func (sbs *SingBoxServer) HyUUID() string {
-	return sbs.hyUUID
-}
-
-// PublicKey returns the VLESS Reality public key.
-func (sbs *SingBoxServer) PublicKey() string {
-	return sbs.publicKey
-}
-
-// ShortID returns the VLESS Reality short ID.
-func (sbs *SingBoxServer) ShortID() string {
-	return sbs.shortID
-}
-
-// Hy2Tag returns the Hysteria 2 tag.
-func (sbs *SingBoxServer) Hy2Tag() string {
-	return sbs.hy2Tag
-}
-
-// VrTag returns the VLESS Reality tag.
-func (sbs *SingBoxServer) VrTag() string {
-	return sbs.vrTag
-}
-
-// Hy2Port returns the external Hysteria 2 UDP port (defaults to 443; configurable via server.hy2_port).
 func (sbs *SingBoxServer) Hy2Port() int {
 	if sbs != nil && sbs.cfg != nil {
 		return sbs.cfg.Server.GetHy2Port()
@@ -134,7 +84,6 @@ func (sbs *SingBoxServer) Hy2Port() int {
 	return 443
 }
 
-// VlessPort returns the external VLESS Reality TCP port (defaults to 443; configurable via server.vless_port).
 func (sbs *SingBoxServer) VlessPort() int {
 	if sbs != nil && sbs.cfg != nil {
 		return sbs.cfg.Server.GetVlessPort()
@@ -157,8 +106,7 @@ func IsValidPublicACMECert(crtPath string) bool {
 	if err != nil {
 		return false
 	}
-	now := time.Now()
-	if now.After(cert.NotAfter) {
+	if time.Now().After(cert.NotAfter) {
 		return false
 	}
 	issuerCN := strings.ToLower(cert.Issuer.CommonName)
@@ -166,10 +114,7 @@ func IsValidPublicACMECert(crtPath string) bool {
 	if strings.Contains(issuerCN, "caddy local") || strings.Contains(issuerOrg, "caddy local") {
 		return false
 	}
-	if cert.Issuer.String() == cert.Subject.String() {
-		return false
-	}
-	return true
+	return cert.Issuer.String() != cert.Subject.String()
 }
 
 // LookupValidCaddyCert locates a valid, non-self-signed ACME certificate and key for domain under Caddy's storage.
@@ -198,11 +143,9 @@ func lookupCaddyCert(domain string) (string, string) {
 			continue
 		}
 		dirNameLower := strings.ToLower(d.Name())
-		// Never select Caddy's internal self-signed local CA directory for public Hysteria2 nodes
 		if dirNameLower == "local" || dirNameLower == "pki" {
 			continue
 		}
-		// 1. Direct domain cert match
 		crtPath := filepath.Join(basePath, d.Name(), domain, domain+".crt")
 		keyPath := filepath.Join(basePath, d.Name(), domain, domain+".key")
 		if _, err := os.Stat(crtPath); err == nil {
@@ -211,7 +154,6 @@ func lookupCaddyCert(domain string) (string, string) {
 			}
 		}
 
-		// 2. Wildcard cert fallback (e.g. wildcard_.example.com)
 		for _, wName := range wildcardNames {
 			wCrt := filepath.Join(basePath, d.Name(), wName, wName+".crt")
 			wKey := filepath.Join(basePath, d.Name(), wName, wName+".key")
@@ -234,7 +176,6 @@ func findCaddyCertForDomain(domain string) (string, string) {
 		return fallbackCrt, fallbackKey
 	}
 
-	// 1. Immediate check: if certs already exist, return instantly without logging wait
 	if crt, key := lookupCaddyCert(domain); crt != "" {
 		return crt, key
 	}
@@ -247,7 +188,6 @@ func findCaddyCertForDomain(domain string) (string, string) {
 			return crt, key
 		}
 	}
-
 	return fallbackCrt, fallbackKey
 }
 
@@ -299,8 +239,7 @@ func SyncHysteria2CertIfNeeded(cfg *config.Config) (bool, string, error) {
 			continue
 		}
 
-		needsCertFix := curCrt != validCrt || !IsValidPublicACMECert(curCrt)
-		if needsCertFix {
+		if curCrt != validCrt || !IsValidPublicACMECert(curCrt) {
 			tlsObj["certificate_path"] = validCrt
 			tlsObj["key_path"] = validKey
 			changed = true
@@ -349,110 +288,22 @@ func SyncHysteria2CertIfNeeded(cfg *config.Config) (bool, string, error) {
 	return true, healMsg, nil
 }
 
-// initCaddyCertPath finds or waits for the actual cert path Caddy generated (Let's Encrypt or ZeroSSL)
 func (sbs *SingBoxServer) initCaddyCertPath() {
 	nodeDomain := sbs.cfg.Server.GetNodeDomain()
 	sbs.crtPath, sbs.keyPath = findCaddyCertForDomain(nodeDomain)
 }
 
-// RefreshCaddyCertPath re-resolves the Caddy TLS certificate path after Caddy deployment/renewal
-// without clearing already loaded credentials.
 func (sbs *SingBoxServer) RefreshCaddyCertPath() {
 	sbs.initCaddyCertPath()
 }
 
-// SetConfig updates the underlying config reference on an already-initialized SingBoxServer instance.
 func (sbs *SingBoxServer) SetConfig(cfg *config.Config) {
 	if cfg != nil {
 		sbs.cfg = cfg
 		sbs.updateShareLinks()
 	}
 }
-func (sbs *SingBoxServer) initVRParams() error {
-	// If credentials were already loaded (e.g. via LoadExistingCredentials), skip generation.
-	if sbs.hyUUID != "" {
-		if sbs.publicKey == "" && sbs.privateKey != "" {
-			pub, err := deriveRealityPublicKey(sbs.privateKey)
-			if err != nil {
-				return fmt.Errorf("failed to derive reality public key from existing private key: %w", err)
-			}
-			sbs.publicKey = pub
-		}
-		return nil
-	}
 
-	// 2. Generate a new UUID
-	logger.Info("Generating new UUID for Hysteria2 and VLESS...")
-	uuid, err := generateUUIDv4()
-	if err != nil {
-		return fmt.Errorf("failed to generate uuid: %w", err)
-	}
-	sbs.hyUUID = uuid
-
-	// Generate Reality Keypair
-	logger.Info("Generating VLESS Reality Keypair...")
-	privateKey, publicKey, err := generateRealityKeypair()
-	if err != nil {
-		return fmt.Errorf("failed to generate reality keypair locally: %w", err)
-	}
-	sbs.privateKey = privateKey
-	sbs.publicKey = publicKey
-
-	logger.Info("Generating VLESS Reality Short ID...")
-	shortID, err := generateHexRandom(8)
-	if err != nil {
-		return fmt.Errorf("failed to generate short id: %w", err)
-	}
-	sbs.shortID = shortID
-	return nil
-}
-
-func generateUUIDv4() (string, error) {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	// RFC 4122 version 4 UUID
-	b[6] = (b[6] & 0x0f) | 0x40
-	b[8] = (b[8] & 0x3f) | 0x80
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
-}
-
-func generateRealityKeypair() (privateKey string, publicKey string, err error) {
-	curve := ecdh.X25519()
-	priv, err := curve.GenerateKey(rand.Reader)
-	if err != nil {
-		return "", "", err
-	}
-	privateKey = base64.RawURLEncoding.EncodeToString(priv.Bytes())
-	publicKey = base64.RawURLEncoding.EncodeToString(priv.PublicKey().Bytes())
-	return privateKey, publicKey, nil
-}
-
-func deriveRealityPublicKey(privateKey string) (string, error) {
-	privBytes, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(privateKey))
-	if err != nil {
-		return "", err
-	}
-	curve := ecdh.X25519()
-	priv, err := curve.NewPrivateKey(privBytes)
-	if err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(priv.PublicKey().Bytes()), nil
-}
-
-func generateHexRandom(byteLen int) (string, error) {
-	b := make([]byte, byteLen)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b), nil
-}
-
-// DeploySingbox handles sing-box installation, config rendering, and outputs URL
-
-// 定义标准的服务文件内容 (请根据你的实际二进制路径和配置文件路径调整 ExecStart)
 const singboxServiceContentTemplate = `[Unit]
 Description=sing-box service
 Documentation=https://sing-box.sagernet.org
@@ -471,7 +322,6 @@ LimitNOFILE=infinity
 WantedBy=multi-user.target
 `
 
-// 检查并创建 service 文件的辅助方法
 func (sbs *SingBoxServer) ensureSystemdService() error {
 	servicePath := constant.SingBoxSystemdService
 	expectedContent := fmt.Sprintf(singboxServiceContentTemplate, constant.SingBoxInstallDir, constant.SingBoxConfigFile)
@@ -497,33 +347,23 @@ func (sbs *SingBoxServer) ensureSystemdService() error {
 		}
 		logger.Success("sing-box.service is ready at %s", servicePath)
 	}
-
 	return nil
 }
 
-// 修复后的主部署逻辑
 func (sbs *SingBoxServer) DeploySingbox() error {
 	logger.Info("Starting Sing-box Server deployment...")
-
-	// 1. Install or update Sing-box core
 	logger.Info("Installing/Updating sing-box core...")
 	sb := singbox.New(sbs.cfg)
 	if err := sb.Install(); err != nil {
 		return fmt.Errorf("failed to install sing-box: %w", err)
 	}
-
-	// 2. Render and save config.json
 	logger.Info("Rendering and saving sing-box config.json...")
 	if err := sbs.renderSingboxConfig(); err != nil {
 		return fmt.Errorf("failed to render config: %w", err)
 	}
-
-	// 3. 检查并创建 systemd 服务 (新增的拦截逻辑)
 	if err := sbs.ensureSystemdService(); err != nil {
 		return err
 	}
-
-	// 4. Enable and restart sing-box service (使用 restart 确保加载新配置)
 	logger.Info("Restarting sing-box service...")
 	ctx := context.Background()
 	if err := serviceMgr().Enable(ctx, "sing-box"); err != nil {
@@ -537,7 +377,6 @@ func (sbs *SingBoxServer) DeploySingbox() error {
 	return nil
 }
 
-// RegenerateCredentials forces generation of fresh credentials and updates share links.
 func (sbs *SingBoxServer) RegenerateCredentials() error {
 	sbs.hyUUID = ""
 	sbs.privateKey = ""
@@ -550,11 +389,8 @@ func (sbs *SingBoxServer) RegenerateCredentials() error {
 	return nil
 }
 
-// ResetCredentials regenerates credentials, renders configuration, and restarts sing-box.
 func (sbs *SingBoxServer) ResetCredentials() error {
 	logger.Info("Resetting sing-box server credentials...")
-
-	// 1. Check if sing-box is installed; install if missing
 	if _, err := os.Stat(constant.SingBoxInstallDir); os.IsNotExist(err) {
 		logger.Info("sing-box binary not found, installing...")
 		sb := singbox.New(sbs.cfg)
@@ -562,24 +398,16 @@ func (sbs *SingBoxServer) ResetCredentials() error {
 			return fmt.Errorf("failed to install sing-box: %w", err)
 		}
 	}
-
-	// 2. Regenerate credentials and share links
 	if err := sbs.RegenerateCredentials(); err != nil {
 		return fmt.Errorf("failed to regenerate credentials: %w", err)
 	}
-
-	// 3. Render and save config.json
 	logger.Info("Rendering and saving new sing-box config.json...")
 	if err := sbs.renderSingboxConfig(); err != nil {
 		return fmt.Errorf("failed to render config: %w", err)
 	}
-
-	// 4. Ensure systemd service exists and is up to date
 	if err := sbs.ensureSystemdService(); err != nil {
 		return err
 	}
-
-	// 5. Restart sing-box service
 	logger.Info("Restarting sing-box service...")
 	ctx := context.Background()
 	if err := serviceMgr().Enable(ctx, "sing-box"); err != nil {
@@ -588,7 +416,6 @@ func (sbs *SingBoxServer) ResetCredentials() error {
 	if err := serviceMgr().Restart(ctx, "sing-box"); err != nil {
 		return fmt.Errorf("failed to restart sing-box service: %w", err)
 	}
-
 	sbs.ShowLoginInfo()
 	return nil
 }
@@ -598,20 +425,14 @@ func (sbs *SingBoxServer) ShowLoginInfo() {
 	fmt.Println("\n┌────────────────────────────────────────────────────────────┐")
 	fmt.Println("│               🚀 服务端节点分享与客户端导入                │")
 	fmt.Println("└────────────────────────────────────────────────────────────┘")
-
-	// 1. Hysteria 2
 	fmt.Printf("\n【1】Hysteria 2 节点 (端口: %d / QUIC UDP)\n", sbs.Hy2Port())
 	fmt.Printf("• 分享链接: %s\n", sbs.ShareLinkHy2)
-
-	// 2. VLESS Reality
 	fmt.Printf("\n【2】VLESS Reality 节点 (端口: %d / TCP Reality)\n", sbs.VlessPort())
 	fmt.Printf("• 分享链接: %s\n", sbs.ShareLinkVless)
 	fmt.Println("────────────────────────────────────────────────────────────")
 	fmt.Println()
 }
 
-// PreviewServerConfig renders the sing-box server config template and returns it as a string.
-// It is exported for use in tests.
 func (sbs *SingBoxServer) PreviewServerConfig() (string, error) {
 	tmplData, err := TemplateFiles.ReadFile("templates/server_config.json")
 	if err != nil {
@@ -645,8 +466,6 @@ func (sbs *SingBoxServer) PreviewServerConfig() (string, error) {
 	handshakeServer := sni
 	handshakePort := 443
 	if sbDomain != "" && strings.EqualFold(strings.TrimSpace(sni), strings.TrimSpace(sbDomain)) {
-		// Reality 自偷模式 (当 SNI 与节点自身域名一致，如 NAT 443 域名分流场景)：
-		// 指向本地 Caddy 9443 真实 ACME 证书端点，避免连接自身 :443 形成 Layer4 转发死循环。
 		handshakeServer = "127.0.0.1"
 		handshakePort = 9443
 	}
@@ -669,12 +488,11 @@ func (sbs *SingBoxServer) PreviewServerConfig() (string, error) {
 	}
 	rendered := buf.String()
 	if handshakePort != 443 {
-		rendered = strings.Replace(
-			rendered,
-			fmt.Sprintf("\"server\": %q,\n            \"server_port\": 443", handshakeServer),
-			fmt.Sprintf("\"server\": %q,\n            \"server_port\": %d", handshakeServer, handshakePort),
-			1,
-		)
+		patched, patchErr := setRealityHandshakePort(rendered, handshakePort)
+		if patchErr != nil {
+			return "", fmt.Errorf("failed to apply reality handshake port: %w", patchErr)
+		}
+		rendered = patched
 	}
 	if sbs.cfg != nil {
 		if compiled, applyErr := ApplyWarpRoutingWithProtectedDomains([]byte(rendered), sbs.cfg.Server.WarpRouting, CollectServerProtectedDomains(sbs.cfg)); applyErr == nil {
@@ -689,96 +507,25 @@ func (sbs *SingBoxServer) renderSingboxConfig() error {
 	if err != nil {
 		return fmt.Errorf("failed to render config: %w", err)
 	}
-
 	if err := os.MkdirAll(constant.SingBoxConfigDir, 0755); err != nil {
 		return err
 	}
-
 	if err := os.WriteFile(constant.SingBoxConfigFile, []byte(content), 0600); err != nil {
 		return err
 	}
 	return ensureFilePermissions(constant.SingBoxConfigFile, 0600)
 }
 
-func (sbs *SingBoxServer) getConfigFile() string {
-	if sbs.ConfigFile != "" {
-		return sbs.ConfigFile
-	}
-	return constant.SingBoxConfigFile
-}
-
-// LoadExistingCredentials reads the deployed sing-box config and populates
-// sbs with the existing uuid, private_key and short_id, and updates share links
-// so that SNI updates or node syncs accurately reflect deployed credentials.
-func (sbs *SingBoxServer) LoadExistingCredentials() error {
-	configFile := sbs.getConfigFile()
-	data, err := os.ReadFile(configFile)
-	if err != nil {
-		return fmt.Errorf("read existing config: %w", err)
-	}
-
-	var raw struct {
-		Inbounds []struct {
-			Type  string `json:"type"`
-			Users []struct {
-				UUID string `json:"uuid"`
-			} `json:"users"`
-			TLS struct {
-				ServerName string `json:"server_name"`
-				Reality    struct {
-					PrivateKey string   `json:"private_key"`
-					ShortID    []string `json:"short_id"`
-				} `json:"reality"`
-			} `json:"tls"`
-		} `json:"inbounds"`
-	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return fmt.Errorf("parse existing config: %w", err)
-	}
-
-	for _, inbound := range raw.Inbounds {
-		if len(inbound.Users) > 0 && inbound.Users[0].UUID != "" {
-			sbs.hyUUID = inbound.Users[0].UUID
-			if inbound.TLS.ServerName != "" && sbs.cfg != nil && sbs.cfg.Server.Sni == "" {
-				sbs.cfg.Server.Sni = inbound.TLS.ServerName
-			}
-			sbs.privateKey = inbound.TLS.Reality.PrivateKey
-			if sbs.privateKey != "" {
-				pub, err := deriveRealityPublicKey(sbs.privateKey)
-				if err != nil {
-					return fmt.Errorf("derive public key from existing private key: %w", err)
-				}
-				sbs.publicKey = pub
-			}
-			if len(inbound.TLS.Reality.ShortID) > 0 {
-				sbs.shortID = inbound.TLS.Reality.ShortID[0]
-			}
-			sbs.updateShareLinks()
-			logger.Info("Loaded existing credentials from %s", configFile)
-			return nil
-		}
-	}
-	return fmt.Errorf("no credentials found in existing sing-box config")
-}
-
-// UninstallServer uninstalls sing-box from the server
 func UninstallSingbox() error {
 	logger.Info("Uninstalling sing-box server...")
-
-	// Stop and disable service and remove unit file
 	_ = serviceMgr().RemoveUnit(context.Background(), servicemgrUnitSpec("sing-box", constant.SingBoxSystemdService))
-
-	// Remove executable
 	exe := constant.SingBoxInstallDir
 	if err := os.Remove(exe); err != nil && !os.IsNotExist(err) {
 		logger.Warn("Failed to remove sing-box executable: %v", err)
 	}
-
-	// Remove configs
 	if err := os.RemoveAll(constant.SingBoxConfigDir); err != nil {
 		logger.Warn("Failed to remove sing-box config directory: %v", err)
 	}
-
 	logger.Success("Sing-box uninstallation completed.")
 	return nil
 }

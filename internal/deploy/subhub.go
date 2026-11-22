@@ -3,7 +3,6 @@ package deploy
 import (
 	"encoding/json"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -141,133 +140,39 @@ func UninstallSubstore() error {
 	return nil
 }
 
-// UpdateSubstoreConfig updates sub-store.json with Hysteria 2 and VLESS+Reality subscriptions.
+// UpdateSubstoreConfig delegates sub-store.json persistence to subhub.Store's strongly-typed API.
 func (sb *Substore) UpdateSubstoreConfig(sbs *SingBoxServer) error {
 	filePath := sb.getSubstorePath()
 	if filePath == "" {
 		return fmt.Errorf("sub-store file path is empty")
 	}
-
-	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
-		return fmt.Errorf("failed to create directory for sub-store config: %w", err)
+	if sbs == nil {
+		return fmt.Errorf("sing-box server instance is nil")
 	}
 
-	// 1. Backup existing config if it exists
-	if _, err := os.Stat(filePath); err == nil {
-		backupPath := filePath + ".bak"
-		input, err := os.ReadFile(filePath)
-		if err == nil {
-			if err := os.WriteFile(backupPath, input, 0600); err == nil {
-				logger.Info("Backed up config to %s", backupPath)
-			} else {
-				logger.Warn("Warning: Failed to create backup: %v", err)
-			}
-		}
+	nodeDomain := ""
+	if sbs.cfg != nil {
+		nodeDomain = sbs.cfg.Server.GetNodeDomain()
 	}
 
-	// 2. Load existing config or create default structure
-	var doc map[string]any
-	data, err := os.ReadFile(filePath)
-	if err == nil && len(data) > 0 {
-		if err := json.Unmarshal(data, &doc); err != nil {
-			logger.Warn("Error decoding JSON from %s, starting with empty config.", filePath)
-			doc = make(map[string]any)
-		}
-	} else {
-		logger.Info("File %s not found, initializing new config.", filePath)
-		doc = make(map[string]any)
-	}
-
-	// 3. Ensure arrays exist
-	var subs []any
-	if existingSubs, ok := doc["subs"].([]any); ok {
-		subs = existingSubs
-	}
-
-	var collections []any
-	if existingCols, ok := doc["collections"].([]any); ok {
-		collections = existingCols
-	}
-
-	// 4. Add subscriptions
-	var addedSubs []string
-
-	hyURI := sbs.ShareLinkHy2
-	subs = addOrUpdateSub(subs, "auto_generated_hy2", "Hysteria2 Auto", hyURI, "Auto-generated Hysteria 2 Subscription", sbs, "hysteria2")
-	addedSubs = append(addedSubs, "auto_generated_hy2")
-
-	subs = addOrUpdateSub(subs, "auto_generated_vless", "VLESS Reality Auto", sbs.ShareLinkVless, "Auto-generated VLESS+Reality Subscription", sbs, "vless")
-	addedSubs = append(addedSubs, "auto_generated_vless")
-
-	// Clean up deprecated protocols (TUIC, AnyTLS) and deduplicate subscriptions by name
-	var cleanedSubs []any
-	seenSubNames := make(map[string]bool)
-	for _, s := range subs {
-		if subObj, ok := s.(map[string]any); ok {
-			name, _ := subObj["name"].(string)
-			if name == "auto_generated_tuic" || name == "auto_generated_anytls" {
-				logger.Info("Removing deprecated subscription: %s", name)
-				continue
-			}
-			if name != "" {
-				if seenSubNames[name] {
-					logger.Info("Removing duplicate subscription: %s", name)
-					continue
-				}
-				seenSubNames[name] = true
-			}
-		}
-		cleanedSubs = append(cleanedSubs, s)
-	}
-	subs = cleanedSubs
-
-	doc["subs"] = subs
-
-	// 5. Update collections
-	collections = AddToCollection(collections, addedSubs)
-	existingSubNames := make(map[string]bool)
-	for _, s := range subs {
-		if subObj, ok := s.(map[string]any); ok {
-			if name, ok := subObj["name"].(string); ok && name != "" {
-				existingSubNames[name] = true
-			}
-		}
-	}
-	for _, v := range collections {
-		if col, ok := v.(map[string]any); ok {
-			if existingSubs, ok := col["subscriptions"].([]any); ok {
-				var cleaned []any
-				for _, subName := range existingSubs {
-					if name, ok := subName.(string); ok && existingSubNames[name] {
-						cleaned = append(cleaned, name)
-					}
-				}
-				col["subscriptions"] = cleaned
-			}
-		}
-	}
-	doc["collections"] = collections
-
-	// 6. Write back to file
-	outData, err := json.MarshalIndent(doc, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal config: %w", err)
-	}
-
-	if err := os.WriteFile(filePath, outData, 0600); err != nil {
-		return fmt.Errorf("failed to write config: %w", err)
+	st := subhub.NewStore(filepath.Dir(filePath), filePath)
+	if err := st.SyncAutoServerNodes(subhub.SyncServerNodesInput{
+		NodeDomain: nodeDomain,
+		Hy2URI:     sbs.ShareLinkHy2,
+		Hy2Tag:     sbs.hy2Tag,
+		VlessURI:   sbs.ShareLinkVless,
+		VrTag:      sbs.vrTag,
+	}); err != nil {
+		return err
 	}
 
 	logger.Info("Successfully updated %s", filePath)
 
-	// SubHub automatically reloads sub-store.json on mtime change, and RestartSubstore
-	// ensures service restarts cleanly if explicitly requested.
 	if !sb.SkipRestart {
 		if err := sb.RestartSubstore(); err != nil {
 			logger.Warn("Failed to restart singctl-sub service (non-fatal): %v", err)
 		}
 	}
-
 	return nil
 }
 
@@ -276,209 +181,82 @@ func (sb *Substore) RestartSubstore() error {
 	return subhub.RestartService()
 }
 
-// Helper to add or update a subscription in the sub-store array
-func addOrUpdateSub(subs []any, targetName, displayName, contentURI, remark string, sbs *SingBoxServer, protocol string) []any {
-	newSub := map[string]any{
-		"name":                  targetName,
-		"displayName":           displayName,
-		"form":                  "",
-		"remark":                remark,
-		"mergeSources":          "",
-		"ignoreFailedRemoteSub": false,
-		"passThroughUA":         false,
-		"icon":                  "",
-		"isIconColor":           true,
-		"source":                "local",
-		"url":                   "",
-		"content":               contentURI,
-		"ua":                    "",
-		"tag":                   []any{},
-		"subscriptionTags":      []any{},
-		"display-name":          displayName,
-	}
-
-	found := false
-	for i, v := range subs {
-		if sub, ok := v.(map[string]any); ok {
-			if name, ok := sub["name"].(string); ok && name == targetName {
-				existingContent, _ := sub["content"].(string)
-				sub["content"] = MergeNodeContent(existingContent, contentURI, sbs, protocol)
-				sub["displayName"] = displayName
-				sub["display-name"] = displayName
-				subs[i] = sub
-				found = true
-				logger.Info("Updated existing subscription: %s", targetName)
-				break
-			}
+// MergeNodeContent merges a new node URI into the existing multi-line subscription content,
+// delegating to subhub.MergeServerNodeContent for single-source-of-truth behavior.
+func MergeNodeContent(existingContent, newURI string, sbs *SingBoxServer, expectedScheme string) string {
+	var domain, targetTag string
+	if sbs != nil {
+		if sbs.cfg != nil {
+			domain = sbs.cfg.Server.GetNodeDomain()
+		}
+		switch expectedScheme {
+		case "hysteria2":
+			targetTag = sbs.hy2Tag
+		case "vless":
+			targetTag = sbs.vrTag
 		}
 	}
-
-	if !found {
-		subs = append(subs, newSub)
-		logger.Info("Added new subscription: %s", targetName)
-	}
-
-	return subs
+	return subhub.MergeServerNodeContent(existingContent, newURI, domain, targetTag, expectedScheme)
 }
 
-// mergeNodeContent merges a new node URI into the existing multi-line subscription content.
-// It replaces any node belonging to the current VPS while preserving nodes from other VPSs.
-// Duplicate lines are strictly filtered out to prevent identical nodes.
-func MergeNodeContent(existingContent, newURI string, sbs *SingBoxServer, expectedScheme string) string {
-	newURI = strings.TrimSpace(newURI)
-	if newURI == "" {
-		return existingContent
+// AddToCollection preserves backward compatibility for external callers/tests by delegating
+// legacy collection normalization to subhub.ReconcileAllCollection.
+func AddToCollection(collections []any, subNames []string) []any {
+	raw, err := json.Marshal(collections)
+	if err != nil {
+		return collections
+	}
+	var typed []struct {
+		Name          string   `json:"name"`
+		DisplayName   string   `json:"displayName"`
+		Subscriptions []string `json:"subscriptions"`
+	}
+	if err := json.Unmarshal(raw, &typed); err != nil {
+		return collections
 	}
 
-	rawLines := strings.Split(strings.ReplaceAll(existingContent, "\r\n", "\n"), "\n")
-	var resultLines []string
-	replaced := false
-
-	for _, rawLine := range rawLines {
-		line := strings.TrimSpace(rawLine)
-		if line == "" {
+	var out []any
+	foundAll := false
+	for _, col := range typed {
+		if col.Name == "Auto" {
 			continue
 		}
-
-		if line == newURI || isNodeForCurrentServer(line, sbs, expectedScheme) {
-			if !replaced {
-				resultLines = append(resultLines, newURI)
-				replaced = true
-			}
-		} else {
-			resultLines = append(resultLines, line)
-		}
-	}
-
-	if !replaced {
-		resultLines = append(resultLines, newURI)
-	}
-
-	var finalLines []string
-	seen := make(map[string]bool)
-	for _, l := range resultLines {
-		if !seen[l] {
-			seen[l] = true
-			finalLines = append(finalLines, l)
-		}
-	}
-
-	return strings.Join(finalLines, "\n")
-}
-
-// isNodeForCurrentServer checks whether a given node URI corresponds to the current VPS.
-func isNodeForCurrentServer(nodeURI string, sbs *SingBoxServer, expectedScheme string) bool {
-	nodeURI = strings.TrimSpace(nodeURI)
-	if nodeURI == "" || sbs == nil || sbs.cfg == nil {
-		return false
-	}
-	currentDomain := strings.ToLower(strings.TrimSpace(sbs.cfg.Server.GetNodeDomain()))
-	if currentDomain == "" {
-		return false
-	}
-
-	targetTag := ""
-	switch expectedScheme {
-	case "hysteria2":
-		targetTag = sbs.hy2Tag
-	case "vless":
-		targetTag = sbs.vrTag
-	}
-
-	u, err := url.Parse(nodeURI)
-	if err == nil {
-		if u.Scheme != "" && !strings.EqualFold(u.Scheme, expectedScheme) {
-			return false
-		}
-
-		uHost := strings.ToLower(u.Hostname())
-		if uHost != "" {
-			if uHost == currentDomain {
-				return true
-			}
-			sni := strings.ToLower(u.Query().Get("sni"))
-			if sni == currentDomain && targetTag != "" && u.Fragment == targetTag {
-				return true
-			}
-		}
-
-		if targetTag != "" && u.Fragment == targetTag {
-			return true
-		}
-	}
-
-	lower := strings.ToLower(nodeURI)
-	if expectedScheme != "" && !strings.HasPrefix(lower, expectedScheme+"://") {
-		return false
-	}
-	if strings.Contains(lower, "@"+currentDomain+":") ||
-		strings.Contains(lower, "@"+currentDomain+"/") ||
-		strings.Contains(lower, "@"+currentDomain+"?") {
-		return true
-	}
-	if targetTag != "" && (strings.HasSuffix(nodeURI, "#"+targetTag) || strings.Contains(nodeURI, "#"+targetTag+"?")) {
-		return true
-	}
-
-	return false
-}
-
-// addToCollection adds subscription names to the "all" collection and cleans up legacy "Auto" collection.
-func AddToCollection(collections []any, subNames []string) []any {
-	targetCollection := "all"
-	collectionFound := false
-
-	var cleanedCols []any
-	for _, v := range collections {
-		if col, ok := v.(map[string]any); ok {
-			name, _ := col["name"].(string)
-			if name == "Auto" {
-				logger.Info("Removing legacy duplicate collection: Auto")
-				continue
-			}
-			if name == targetCollection {
-				var subs []any
-				if existingSubs, ok := col["subscriptions"].([]any); ok {
-					subs = existingSubs
-				}
-				for _, subName := range subNames {
-					if !containsStr(subs, subName) {
-						subs = append(subs, subName)
-						logger.Info("Added %s to collection %s", subName, targetCollection)
+		subs := col.Subscriptions
+		if col.Name == subhub.DefaultCollectionName {
+			foundAll = true
+			for _, sn := range subNames {
+				has := false
+				for _, cur := range subs {
+					if cur == sn {
+						has = true
+						break
 					}
 				}
-				col["subscriptions"] = subs
-				collectionFound = true
+				if !has {
+					subs = append(subs, sn)
+				}
 			}
-			cleanedCols = append(cleanedCols, col)
-		} else {
-			cleanedCols = append(cleanedCols, v)
 		}
+		anySubs := make([]any, len(subs))
+		for i, s := range subs {
+			anySubs[i] = s
+		}
+		out = append(out, map[string]any{
+			"name":          col.Name,
+			"displayName":   col.DisplayName,
+			"subscriptions": anySubs,
+		})
 	}
-	collections = cleanedCols
-
-	if !collectionFound {
-		logger.Info("Creating new collection: %s", targetCollection)
-		subs := make([]any, 0, len(subNames))
-		for _, s := range subNames {
-			subs = append(subs, s)
+	if !foundAll {
+		anySubs := make([]any, len(subNames))
+		for i, s := range subNames {
+			anySubs[i] = s
 		}
-		newCol := map[string]any{
-			"name":          targetCollection,
-			"displayName":   targetCollection,
-			"subscriptions": subs,
-		}
-		collections = append(collections, newCol)
+		out = append(out, map[string]any{
+			"name":          subhub.DefaultCollectionName,
+			"displayName":   subhub.DefaultCollectionName,
+			"subscriptions": anySubs,
+		})
 	}
-
-	return collections
-}
-
-func containsStr(list []any, target string) bool {
-	for _, v := range list {
-		if s, ok := v.(string); ok && s == target {
-			return true
-		}
-	}
-	return false
+	return out
 }

@@ -8,7 +8,7 @@ import (
 	"os/exec"
 	"runtime"
 	"singctl/internal/config"
-	"singctl/internal/util/netinfo"
+	"singctl/internal/common/netx"
 	"slices"
 	"strings"
 )
@@ -68,7 +68,7 @@ func ValidateBanTarget(rawTarget, scope, callerIP string, cfg *config.Config) (n
 			return "", isV6, fmt.Errorf("安全拦截: 禁止封禁公共 DNS 基础设施地址 (%s)", bIP)
 		}
 	}
-	if lanIP := netinfo.GetPrimaryLANIPv4(); lanIP != "" {
+	if lanIP := netx.GetPrimaryLANIPv4(); lanIP != "" {
 		if addr, err := netip.ParseAddr(lanIP); err == nil && prefix.Contains(addr.Unmap()) {
 			return "", isV6, fmt.Errorf("安全拦截: 禁止封禁网关自身地址 (%s)", lanIP)
 		}

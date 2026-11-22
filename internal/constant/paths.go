@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+
+	"singctl/internal/common/sysinfo"
 )
 
 var (
@@ -125,10 +127,7 @@ func init() {
 
 	// Dynamic linux check for SingBoxInstallDir & AdGuardInstallPath
 	if runtime.GOOS == "linux" {
-		if _, err := os.Stat("/etc/openwrt_release"); err == nil {
-			SingBoxInstallDir = "/usr/bin/sing-box"
-			AdGuardInstallPath = "/usr/bin/AdGuardHome"
-		} else if _, err := os.Stat("/etc/openwrt_version"); err == nil {
+		if sysinfo.IsOpenWrt() {
 			SingBoxInstallDir = "/usr/bin/sing-box"
 			AdGuardInstallPath = "/usr/bin/AdGuardHome"
 		} else {

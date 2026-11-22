@@ -18,7 +18,7 @@ import (
 	"sync"
 	"time"
 
-	"singctl/internal/util/netinfo"
+	"singctl/internal/common/sysinfo"
 
 	"gopkg.in/yaml.v3"
 )
@@ -221,7 +221,7 @@ func (m *Manager) Overview(ctx context.Context, singboxLinked bool) *OverviewSna
 		DNSHealthy:          st.DNSHealthy,
 		WebHealthy:          st.WebHealthy,
 		SingBoxLinked:       singboxLinked,
-		IsOpenWrt:           netinfo.IsOpenWrt(),
+		IsOpenWrt:           sysinfo.IsOpenWrt(),
 		Version:             st.Version,
 		DNSAddr:             st.DNSAddr,
 		WebAddr:             st.WebAddr,

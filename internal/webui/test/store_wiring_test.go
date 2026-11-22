@@ -1,0 +1,59 @@
+// 文件职责：验证客户端 WebUI webui.Server 的 config.Store 不可变快照复用与写透一致性。
+package webui_test
+
+import (
+	"os"
+	"path/filepath"
+	"singctl/internal/webui"
+	"testing"
+)
+
+func TestWebUIServer_ConfigStoreSnapshotAndWriteThrough(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "singctl.yaml")
+	if err := os.WriteFile(cfgPath, []byte(`
+subs:
+  - name: "sub-one"
+    url: "https://sub.example.com/1"
+hy2:
+  up: 21
+  down: 200
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := webui.New(webui.Options{
+		ConfigPath:              cfgPath,
+		SkipAdGuardProbeForTest: true,
+	})
+	if srv.ConfigStore() == nil {
+		t.Fatal("expected webui webui.Server cfgStore to be initialized")
+	}
+
+	snap1, err := srv.LoadConfigSnapshot()
+	if err != nil {
+		t.Fatalf("loadConfigSnapshot failed: %v", err)
+	}
+	if snap1.Hy2.Up != 21 {
+		t.Fatalf("expected initial Hy2.Up=21, got %d", snap1.Hy2.Up)
+	}
+	rev1 := srv.ConfigStore().Revision()
+
+	// Unchanged disk file returns exact cached snapshot pointer without bumping revision.
+	snap2 := srv.ReadConfigOrEmpty()
+	if snap2 != snap1 || srv.ConfigStore().Revision() != rev1 {
+		t.Fatalf("expected immutable snapshot reuse when file unchanged")
+	}
+
+	// saveConfig atomically saves and publishes updated snapshot immediately.
+	next := snap2.Clone()
+	next.Hy2.Up = 66
+	if err := srv.SaveConfig(next); err != nil {
+		t.Fatalf("saveConfig failed: %v", err)
+	}
+	if srv.ConfigStore().Revision() <= rev1 {
+		t.Fatalf("expected revision bump after saveConfig, got %d <= %d", srv.ConfigStore().Revision(), rev1)
+	}
+	if got := srv.ReadConfigOrEmpty().Hy2.Up; got != 66 {
+		t.Fatalf("expected immediate read-through Hy2.Up=66, got %d", got)
+	}
+}

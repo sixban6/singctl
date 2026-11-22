@@ -23,7 +23,7 @@ func probeDNSEgressResolver(ctx context.Context, primaryDNS string) (resolverIP,
 	cands := candidateGatewayDNSServers(primaryDNS)
 	var lastErr error
 	for _, srv := range cands {
-		if ans, qErr := queryDNSUDP(ctx, srv, "o-o.myaddr.l.google.com", dnsTypeTXT); qErr == nil {
+		if ans, qErr := queryDNSUDP(ctx, srv, "o-o.myaddr.l.google.com", DNSTypeTXT); qErr == nil {
 			ip, ecs := parseResolverTXT(ans.TXTs)
 			if ip != "" {
 				return ip, ecs, srv, nil
@@ -31,7 +31,7 @@ func probeDNSEgressResolver(ctx context.Context, primaryDNS string) (resolverIP,
 		} else {
 			lastErr = qErr
 		}
-		if ans2, qErr2 := queryDNSUDP(ctx, srv, "whoami.ds.akahelp.net", dnsTypeTXT); qErr2 == nil {
+		if ans2, qErr2 := queryDNSUDP(ctx, srv, "whoami.ds.akahelp.net", DNSTypeTXT); qErr2 == nil {
 			ip, ecs := parseResolverTXT(ans2.TXTs)
 			if ip != "" {
 				return ip, ecs, srv, nil
@@ -249,21 +249,21 @@ func parseDNSAnswerPacket(msg []byte, expectedTxID [2]byte) (dnsAnswerSet, error
 		}
 		rdata := msg[rdataStart : rdataStart+rdLen]
 		switch rrType {
-		case dnsTypeA:
+		case DNSTypeA:
 			if rdLen == 4 {
 				ip := netip.AddrFrom4([4]byte(rdata)).String()
 				if !slices.Contains(out.As, ip) {
 					out.As = append(out.As, ip)
 				}
 			}
-		case dnsTypeAAAA:
+		case DNSTypeAAAA:
 			if rdLen == 16 {
 				ip := netip.AddrFrom16([16]byte(rdata)).Unmap().String()
 				if !slices.Contains(out.AAAAs, ip) {
 					out.AAAAs = append(out.AAAAs, ip)
 				}
 			}
-		case dnsTypeTXT:
+		case DNSTypeTXT:
 			var txtBuilder strings.Builder
 			pos := 0
 			for pos < len(rdata) {
@@ -278,7 +278,7 @@ func parseDNSAnswerPacket(msg []byte, expectedTxID [2]byte) (dnsAnswerSet, error
 			if txtVal := strings.TrimSpace(txtBuilder.String()); txtVal != "" {
 				out.TXTs = append(out.TXTs, txtVal)
 			}
-		case dnsTypeHTTPS:
+		case DNSTypeHTTPS:
 			out.HTTPSCount++
 		}
 		offset = rdataStart + rdLen

@@ -14,8 +14,8 @@ import (
 	"sync"
 	"time"
 
-	"singctl/internal/util/httpgzip"
-	"singctl/internal/util/netinfo"
+	"singctl/internal/common/httpx"
+	"singctl/internal/common/netx"
 )
 
 // SessionToken 根据访问口令派生无状态持久化 Token (HMAC-SHA256)
@@ -86,7 +86,7 @@ func (s *Server) guard(next http.HandlerFunc) http.HandlerFunc {
 			next(w, r)
 			return
 		}
-		httpgzip.Serve(w, r, next)
+		httpx.ServeGzip(w, r, next)
 	}
 }
 
@@ -264,7 +264,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, _ *http.Request) {
 // handleSessionURL 返回手机添加到主屏幕专用的免密访问 URL (含局域网 IP 与持久 Token)
 func (s *Server) handleSessionURL(w http.ResponseWriter, _ *http.Request) {
 	lanIP := "127.0.0.1"
-	if ni, err := netinfo.Get(); err == nil && ni.LANIPv4 != "" {
+	if ni, err := netx.Get(); err == nil && ni.LANIPv4 != "" {
 		lanIP = ni.LANIPv4
 	}
 	_, port, err := net.SplitHostPort(s.opts.Listen)

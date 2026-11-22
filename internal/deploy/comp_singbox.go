@@ -15,7 +15,6 @@ import (
 	"singctl/internal/constant"
 	"singctl/internal/logger"
 	"singctl/internal/platform/servicemgr"
-	"singctl/internal/util/github"
 )
 
 type singboxServerComponent struct{}
@@ -76,9 +75,9 @@ func (s *singboxServerComponent) ReloadAfterSave(ctx context.Context, _ string, 
 }
 
 func (s *singboxServerComponent) CheckUpdate(cfg *config.Config) (*component.CheckUpdateInfo, error) {
-	fetcher := github.NewReleaseFetcher(getMirrorURL(cfg), ReleaseClient)
+	fetcher := newDeployReleaseClient(cfg)
 	curr := GetInstalledSingBoxVersion()
-	tag, err := fetcher.FetchLatestTag("SagerNet/sing-box")
+	tag, err := fetcher.FetchLatestTag(context.Background(), "SagerNet/sing-box")
 	latest := cleanVersion(tag)
 	if err != nil || latest == "" {
 		latest = curr

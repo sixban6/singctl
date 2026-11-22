@@ -1,25 +1,22 @@
+// 文件职责：提供主控配置、舰队清单/密钥与 mTLS 证书保险库的加密灾备快照导出与 0600 原子恢复接口（底层加解密委托 common/cryptobak，路径净化委托 fleet）。
 package serverweb
 
 import (
 	"cmp"
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/pbkdf2"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"singctl/internal/common/cryptobak"
+	"singctl/internal/common/fsx"
+	"singctl/internal/common/httpx"
 	"singctl/internal/config"
 	"singctl/internal/deploy"
+	"singctl/internal/fleet"
 	"singctl/internal/logger"
 
 	"gopkg.in/yaml.v3"
@@ -27,22 +24,14 @@ import (
 
 const (
 	backupFormatVersion = "SINGCTL-BAK-V1"
-	backupPBKDF2Iter    = 210000
-	maxBackupUploadSize = 4 * 1024 * 1024 // 4 MiB
+	maxBackupUploadSize = httpx.DefaultMaxBodyBytes
 )
 
-// EncryptedBackupEnvelope 加密灾备快照外层信封（无任何明文隐私）
-type EncryptedBackupEnvelope struct {
-	Format     string `json:"format"`
-	CreatedAt  string `json:"createdAt"`
-	KDF        string `json:"kdf"`
-	Iterations int    `json:"iterations"`
-	Salt       string `json:"salt"`
-	Nonce      string `json:"nonce"`
-	Ciphertext string `json:"ciphertext"`
-}
+// EncryptedBackupEnvelope 加密灾备快照外层信封（复用 common/cryptobak.Envelope）。
+type EncryptedBackupEnvelope = cryptobak.Envelope
 
-type backupPayload struct {
+// BackupPayload 描述服务端全量灾备快照明文载荷结构。
+type BackupPayload struct {
 	Version       string            `json:"version"`
 	ExportedAt    string            `json:"exportedAt"`
 	SingctlYAML   string            `json:"singctlYaml,omitempty"`
@@ -55,108 +44,19 @@ type backupPayload struct {
 	MtlsFiles     map[string][]byte `json:"mtlsFiles,omitzero"`
 }
 
-// EncryptBackupBundle 使用 PBKDF2-HMAC-SHA256 + AES-256-GCM 在内存中加密备份载荷
-func EncryptBackupBundle(passphrase string, payload backupPayload) ([]byte, error) {
-	if len(passphrase) < 8 {
-		return nil, errors.New("加密口令长度至少需要 8 位字符")
-	}
-	plain, err := json.Marshal(payload)
-	if err != nil {
-		return nil, fmt.Errorf("序列化备份数据失败: %w", err)
-	}
-
-	salt := make([]byte, 16)
-	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
-		return nil, err
-	}
-	key, err := pbkdf2.Key(sha256.New, passphrase, salt, backupPBKDF2Iter, 32)
-	if err != nil {
-		return nil, err
-	}
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return nil, err
-	}
-	ciphertext := gcm.Seal(nil, nonce, plain, []byte(backupFormatVersion))
-
-	env := EncryptedBackupEnvelope{
-		Format:     backupFormatVersion,
-		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
-		KDF:        "PBKDF2-HMAC-SHA256",
-		Iterations: backupPBKDF2Iter,
-		Salt:       base64.StdEncoding.EncodeToString(salt),
-		Nonce:      base64.StdEncoding.EncodeToString(nonce),
-		Ciphertext: base64.StdEncoding.EncodeToString(ciphertext),
-	}
-	return json.MarshalIndent(env, "", "  ")
+// EncryptBackupBundle 使用 PBKDF2-HMAC-SHA256 + AES-256-GCM 在内存中加密备份载荷。
+func EncryptBackupBundle(passphrase string, payload BackupPayload) ([]byte, error) {
+	return cryptobak.Encrypt(backupFormatVersion, passphrase, payload)
 }
 
-// DecryptBackupBundle 在内存中校验并解密灾备快照（口令错误或篡改将立即被 GCM 认证拦截）
-func DecryptBackupBundle(passphrase string, rawEnvelope []byte) (*backupPayload, error) {
-	if len(passphrase) < 8 {
-		return nil, errors.New("解密口令长度至少需要 8 位字符")
-	}
-	var env EncryptedBackupEnvelope
-	if err := json.Unmarshal(rawEnvelope, &env); err != nil {
-		return nil, errors.New("无效的加密快照文件格式")
-	}
-	if env.Format != backupFormatVersion {
-		return nil, fmt.Errorf("不支持的备份文件版本: %s", env.Format)
-	}
-	iters := env.Iterations
-	if iters < 10000 || iters > 2000000 {
-		return nil, errors.New("备份文件 KDF 参数超出安全范围")
-	}
-	salt, err := base64.StdEncoding.DecodeString(env.Salt)
-	if err != nil || len(salt) < 8 {
-		return nil, errors.New("备份文件 Salt 损坏")
-	}
-	nonce, err := base64.StdEncoding.DecodeString(env.Nonce)
-	if err != nil {
-		return nil, errors.New("备份文件 Nonce 损坏")
-	}
-	ciphertext, err := base64.StdEncoding.DecodeString(env.Ciphertext)
-	if err != nil {
-		return nil, errors.New("备份文件密文损坏")
-	}
-
-	key, err := pbkdf2.Key(sha256.New, passphrase, salt, iters, 32)
-	if err != nil {
-		return nil, err
-	}
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	if len(nonce) != gcm.NonceSize() {
-		return nil, errors.New("备份文件 Nonce 长度非法")
-	}
-	plain, err := gcm.Open(nil, nonce, ciphertext, []byte(backupFormatVersion))
-	if err != nil {
-		return nil, errors.New("解密失败：口令不正确或快照文件已被篡改")
-	}
-
-	var payload backupPayload
-	if err := json.Unmarshal(plain, &payload); err != nil {
-		return nil, errors.New("备份内层结构损坏")
-	}
-	return &payload, nil
+// DecryptBackupBundle 在内存中校验并解密灾备快照（口令错误或篡改将立即被 GCM 认证拦截）。
+func DecryptBackupBundle(passphrase string, rawEnvelope []byte) (*BackupPayload, error) {
+	return cryptobak.Decrypt[BackupPayload](backupFormatVersion, passphrase, rawEnvelope)
 }
 
-func (s *Server) buildBackupPayload() backupPayload {
-	p := backupPayload{
+// BuildBackupPayload 收集主控配置、舰队清单与密钥、SubHub 聚合源及 mTLS 保险库构建待加密快照。
+func (s *Server) BuildBackupPayload() BackupPayload {
+	p := BackupPayload{
 		Version:    cmp.Or(s.opts.Version, "1.0"),
 		ExportedAt: time.Now().Format(time.RFC3339),
 		FleetKeys:  make(map[string][]byte),
@@ -213,16 +113,15 @@ func (s *Server) buildBackupPayload() backupPayload {
 	if mtlsBundle := deploy.LoadMtlsBundleFromVault(); len(mtlsBundle) > 0 {
 		p.MtlsFiles = mtlsBundle
 	}
-
 	return p
 }
 
 func (s *Server) handleBackupExport(w http.ResponseWriter, r *http.Request) {
-	var body struct {
+	type reqBody struct {
 		Passphrase string `json:"passphrase"`
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&body); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "无效的请求格式")
+	body, ok := decodeBodyJSON[reqBody](w, r, 4096, false, "无效的请求格式")
+	if !ok {
 		return
 	}
 	passphrase := strings.TrimSpace(body.Passphrase)
@@ -231,7 +130,7 @@ func (s *Server) handleBackupExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	payload := s.buildBackupPayload()
+	payload := s.BuildBackupPayload()
 	if payload.SingctlYAML == "" && payload.FleetYAML == "" && payload.SubStoreJSON == "" {
 		writeJSONError(w, http.StatusNotFound, "当前无可导出的主控配置或舰队数据")
 		return
@@ -257,12 +156,12 @@ func (s *Server) handleBackupExport(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
-	var body struct {
+	type reqBody struct {
 		Passphrase string `json:"passphrase"`
 		Data       string `json:"data"`
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, maxBackupUploadSize)).Decode(&body); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "无效的请求或备份文件超过 4MB 上限")
+	body, ok := decodeBodyJSON[reqBody](w, r, maxBackupUploadSize, false, "无效的请求或备份文件超过 4MB 上限")
+	if !ok {
 		return
 	}
 	passphrase := strings.TrimSpace(body.Passphrase)
@@ -278,7 +177,6 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 写入前严格校验 YAML / JSON 合法性，防止损坏数据落盘
 	if payload.SingctlYAML != "" {
 		var checkMap map[string]any
 		if err := yaml.Unmarshal([]byte(payload.SingctlYAML), &checkMap); err != nil {
@@ -303,7 +201,6 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 
 	var restoredItems []string
 
-	// 0. 若快照包含 Web 终端 mTLS 证书，优先恢复至持久化 0700/0600 主库，确保后续 SyncCaddyfile 可立即投射 ca.crt
 	if len(payload.MtlsFiles) > 0 {
 		if mErr := deploy.SaveMtlsBundleToVault(payload.MtlsFiles); mErr != nil {
 			writeJSONError(w, http.StatusInternalServerError, "恢复 Web 终端 mTLS 证书失败: "+mErr.Error())
@@ -313,12 +210,11 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 		restoredItems = append(restoredItems, "Web终端mTLS证书")
 	}
 
-	// 1. 恢复 singctl.yaml 与主控 SSH 密钥 (强制 0700 目录 + 0600 文件)
 	if payload.SingctlYAML != "" && s.opts.ConfigPath != "" {
 		if old, rErr := os.ReadFile(s.opts.ConfigPath); rErr == nil {
 			_ = WriteConfigBackup(s.opts.ConfigPath, old)
 		}
-		if err := writeSecretFile0600(s.opts.ConfigPath, []byte(payload.SingctlYAML)); err != nil {
+		if err := fsx.WriteAtomic0600(s.opts.ConfigPath, []byte(payload.SingctlYAML)); err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "恢复 singctl.yaml 失败: "+err.Error())
 			return
 		}
@@ -326,12 +222,12 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 
 		cfgDir := filepath.Dir(s.opts.ConfigPath)
 		if len(payload.MasterSSHPriv) > 0 {
-			_ = writeSecretFile0600(filepath.Join(cfgDir, "master_ed25519"), payload.MasterSSHPriv)
+			_ = fsx.WriteAtomic0600(filepath.Join(cfgDir, "master_ed25519"), payload.MasterSSHPriv)
 		}
 		if len(payload.MasterSSHPub) > 0 {
-			_ = writeSecretFile0600(filepath.Join(cfgDir, "master_ed25519.pub"), payload.MasterSSHPub)
+			_ = fsx.WriteAtomic0600(filepath.Join(cfgDir, "master_ed25519.pub"), payload.MasterSSHPub)
 		}
-		s.invalidateConfigCache()
+		s.InvalidateConfigCache()
 		if cfg, lErr := s.loadMutableConfig(); lErr == nil && cfg != nil {
 			if deploy.UpgradeLegacyMtlsConfig(cfg) {
 				_ = s.saveConfig(cfg)
@@ -352,25 +248,24 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 2. 恢复舰队 SSH 密钥与 fleet.yaml (强制文件名净化防目录穿越 + 0600)
 	if s.fleet != nil && s.fleet.Store != nil {
 		if len(payload.FleetKeys) > 0 && s.fleet.Store.KeysDir != "" {
 			_ = os.MkdirAll(s.fleet.Store.KeysDir, 0700)
 			_ = os.Chmod(s.fleet.Store.KeysDir, 0700)
 			for rawName, kBytes := range payload.FleetKeys {
-				safeName, err := sanitizeFleetKeyFilename(rawName)
+				safeName, err := fleet.SanitizeKeyFilename(rawName)
 				if err != nil {
 					continue
 				}
-				_ = writeSecretFile0600(filepath.Join(s.fleet.Store.KeysDir, safeName), kBytes)
+				_ = fsx.WriteAtomic0600(filepath.Join(s.fleet.Store.KeysDir, safeName), kBytes)
 			}
 		}
 		if payload.FleetYAML != "" && s.fleet.Store.FilePath != "" {
-			rewrittenFleet := rewriteRestoredFleetKeyPaths(payload.FleetYAML, s.fleet.Store.KeysDir, payload.FleetKeys)
+			rewrittenFleet := fleet.RewriteRestoredKeyPaths(payload.FleetYAML, s.fleet.Store.KeysDir, payload.FleetKeys)
 			if old, rErr := os.ReadFile(s.fleet.Store.FilePath); rErr == nil {
 				_ = WriteConfigBackup(s.fleet.Store.FilePath, old)
 			}
-			if err := writeSecretFile0600(s.fleet.Store.FilePath, []byte(rewrittenFleet)); err != nil {
+			if err := fsx.WriteAtomic0600(s.fleet.Store.FilePath, []byte(rewrittenFleet)); err != nil {
 				writeJSONError(w, http.StatusInternalServerError, "恢复 fleet.yaml 失败: "+err.Error())
 				return
 			}
@@ -378,106 +273,29 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 3. 恢复 SubHub 聚合订阅源与访问密钥
 	if s.subStore != nil {
 		if payload.SubStoreJSON != "" && s.subStore.FilePath != "" {
 			if old, rErr := os.ReadFile(s.subStore.FilePath); rErr == nil {
 				_ = WriteConfigBackup(s.subStore.FilePath, old)
 			}
-			if err := writeSecretFile0600(s.subStore.FilePath, []byte(payload.SubStoreJSON)); err != nil {
+			if err := fsx.WriteAtomic0600(s.subStore.FilePath, []byte(payload.SubStoreJSON)); err != nil {
 				writeJSONError(w, http.StatusInternalServerError, "恢复 SubHub 订阅配置失败: "+err.Error())
 				return
 			}
 			restoredItems = append(restoredItems, "聚合订阅池")
 		}
 		if strings.TrimSpace(payload.SubStoreKey) != "" && s.subStore.DataDir != "" {
-			_ = writeSecretFile0600(filepath.Join(s.subStore.DataDir, "key"), []byte(strings.TrimSpace(payload.SubStoreKey)+"\n"))
+			_ = fsx.WriteAtomic0600(filepath.Join(s.subStore.DataDir, "key"), []byte(strings.TrimSpace(payload.SubStoreKey)+"\n"))
 			if cfg := s.readConfigOrNil(); cfg != nil {
 				_ = deploy.SyncCaddyfile(cfg)
 			}
 		}
 	}
 
-	summary := strings.Join(restoredItems, "、")
-	if summary == "" {
-		summary = "无变更项"
-	}
+	summary := cmp.Or(strings.Join(restoredItems, "、"), "无变更项")
 	s.recordAudit(r, fmt.Sprintf("从加密灾备快照成功恢复 [%s]", summary))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"message":       fmt.Sprintf("加密灾备快照已成功恢复：%s", summary),
 		"restoredItems": restoredItems,
 	})
-}
-
-func sanitizeFleetKeyFilename(raw string) (string, error) {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" || trimmed == "." || trimmed == ".." || strings.Contains(trimmed, "..") || strings.ContainsAny(trimmed, `/\`) {
-		return "", errors.New("invalid fleet key filename")
-	}
-	base := filepath.Base(trimmed)
-	if base != trimmed || base == "" || base == "." || base == ".." {
-		return "", errors.New("invalid fleet key filename")
-	}
-	return base, nil
-}
-
-func writeSecretFile0600(path string, data []byte) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return err
-	}
-	tmp := fmt.Sprintf("%s.%d.tmp", path, time.Now().UnixNano())
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
-		return err
-	}
-	_ = os.Chmod(tmp, 0600)
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		if wErr := os.WriteFile(path, data, 0600); wErr != nil {
-			return wErr
-		}
-	}
-	return os.Chmod(path, 0600)
-}
-
-// rewriteRestoredFleetKeyPaths 若新机配置目录不同，将受管 fleet_keys 路径自动对齐到当前 KeysDir
-func rewriteRestoredFleetKeyPaths(rawFleetYAML, targetKeysDir string, bundledKeys map[string][]byte) string {
-	if targetKeysDir == "" || len(bundledKeys) == 0 {
-		return rawFleetYAML
-	}
-	var doc map[string]any
-	if err := yaml.Unmarshal([]byte(rawFleetYAML), &doc); err != nil {
-		return rawFleetYAML
-	}
-	nodesRaw, ok := doc["nodes"].([]any)
-	if !ok {
-		return rawFleetYAML
-	}
-	changed := false
-	for _, item := range nodesRaw {
-		nodeMap, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
-		kp, _ := nodeMap["key_path"].(string)
-		if kp == "" {
-			continue
-		}
-		base := filepath.Base(kp)
-		if _, exists := bundledKeys[base]; exists {
-			newPath := filepath.Join(targetKeysDir, base)
-			if newPath != kp {
-				nodeMap["key_path"] = newPath
-				changed = true
-			}
-		}
-	}
-	if !changed {
-		return rawFleetYAML
-	}
-	out, err := yaml.Marshal(doc)
-	if err != nil {
-		return rawFleetYAML
-	}
-	return string(out)
 }

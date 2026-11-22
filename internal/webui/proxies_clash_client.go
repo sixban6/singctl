@@ -1,63 +1,11 @@
-// 文件职责：维护本地 Clash 控制面（/proxies /configs /connections）复用的 HTTP 连接池、端点密钥缓存与请求封装。
+// 文件职责：定义客户端 WebUI 策略组拓扑与实时流量 DTO，并桥接实例级 clashapi.Client 端点解析与缓存。
 package webui
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
-	"net/http"
-	"os"
-	"singctl/internal/singbox"
-	"strings"
-	"time"
+
+	"singctl/internal/singbox/clashapi"
 )
-
-const (
-	defaultClashDelayURL     = "https://www.gstatic.com/generate_204"
-	defaultClashDelayTimeout = 3500
-	maxClashDelayConcurrency = 6
-)
-
-var (
-	errClashUnreachable = errors.New("sing-box 控制接口当前不可达，请确认核心已启动")
-
-	// 共享本地回环 HTTP 连接池：
-	// 127.0.0.1 控制面接口（Clash API /traffic /connections /proxies）高频每秒调用，
-	// 复用 Keep-Alive TCP 连接并关闭无意义的回环 gzip，避免每次轮询重复三次握手与 TIME_WAIT 堆积。
-	sharedClashTransport = &http.Transport{
-		Proxy:               nil,
-		MaxIdleConns:        16,
-		MaxIdleConnsPerHost: 8,
-		IdleConnTimeout:     90 * time.Second,
-		DisableCompression:  true,
-	}
-	sharedClashHTTPClient   = &http.Client{Transport: sharedClashTransport, Timeout: 3 * time.Second}
-	sharedClashStreamClient = &http.Client{Transport: sharedClashTransport}
-)
-
-type sbProxyHistoryEntry struct {
-	Time  string `json:"time,omitempty"`
-	Delay int    `json:"delay"`
-}
-
-type sbProxyRawItem struct {
-	Type    string                `json:"type"`
-	Now     string                `json:"now,omitempty"`
-	All     []string              `json:"all,omitempty"`
-	History []sbProxyHistoryEntry `json:"history,omitempty"`
-	UDP     bool                  `json:"udp,omitempty"`
-}
-
-type sbClashProxiesResp struct {
-	Proxies map[string]sbProxyRawItem `json:"proxies"`
-}
-
-type sbClashConfigsResp struct {
-	Mode string `json:"mode"`
-}
 
 // SbProxyNodeMeta 描述单个出站节点的实时元信息与最新测速结果。
 type SbProxyNodeMeta struct {
@@ -113,7 +61,8 @@ type sbModeRequest struct {
 	Mode string `json:"mode"`
 }
 
-type sbTrafficResponse struct {
+// SbTrafficResponse 描述 /api/sb/traffic 实时上下行速率、累计流量、活跃连接数与内存占用响应。
+type SbTrafficResponse struct {
 	Running       bool   `json:"running"`
 	Up            int64  `json:"up"`
 	Down          int64  `json:"down"`
@@ -124,98 +73,17 @@ type sbTrafficResponse struct {
 	Error         string `json:"error,omitempty"`
 }
 
-func sbConfigFingerprint(path string) string {
-	info, err := os.Stat(path)
-	if err != nil {
-		return "missing"
+func (s *Server) clashClient() *clashapi.Client {
+	if s != nil && s.clash != nil {
+		return s.clash
 	}
-	return fmt.Sprintf("%d:%d", info.Size(), info.ModTime().UnixNano())
+	return clashapi.NewClient(clashapi.Options{ConfigPath: s.sbConfigPath()})
 }
 
 func (s *Server) invalidateClashCache() {
-	s.clashMu.Lock()
-	s.clashEndpoint = ""
-	s.clashSecret = ""
-	s.clashCachedAt = time.Time{}
-	s.clashMu.Unlock()
+	s.clashClient().InvalidateCache()
 }
 
 func (s *Server) clashEndpointAndSecret(ctx context.Context) (string, string, error) {
-	sbPath := s.sbConfigPath()
-	fp := sbConfigFingerprint(sbPath)
-
-	s.clashMu.Lock()
-	if s.clashEndpoint != "" && s.clashFingerprint == fp && time.Since(s.clashCachedAt) < 30*time.Second {
-		ep, sec := s.clashEndpoint, s.clashSecret
-		s.clashMu.Unlock()
-		return ep, sec, nil
-	}
-	s.clashMu.Unlock()
-
-	endpoints := singbox.ClashAPIEndpointsForConfig(sbPath)
-	secret := singbox.ClashAPISecretForConfig(sbPath)
-
-	for _, base := range endpoints {
-		base = strings.TrimRight(strings.TrimSpace(base), "/")
-		if base == "" {
-			continue
-		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/version", nil)
-		if err != nil {
-			continue
-		}
-		if secret != "" {
-			req.Header.Set("Authorization", "Bearer "+secret)
-		}
-		resp, err := sharedClashHTTPClient.Do(req)
-		if err != nil {
-			continue
-		}
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		_ = resp.Body.Close()
-		if resp.StatusCode == http.StatusOK {
-			s.clashMu.Lock()
-			s.clashFingerprint = fp
-			s.clashEndpoint = base
-			s.clashSecret = secret
-			s.clashCachedAt = time.Now()
-			s.clashMu.Unlock()
-			return base, secret, nil
-		}
-	}
-
-	s.invalidateClashCache()
-	return "", "", errClashUnreachable
-}
-
-func doClashRequest(ctx context.Context, client *http.Client, method, fullURL, secret string, payload any) (int, []byte, error) {
-	var bodyReader io.Reader
-	if payload != nil {
-		raw, err := json.Marshal(payload)
-		if err != nil {
-			return 0, nil, err
-		}
-		bodyReader = bytes.NewReader(raw)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, fullURL, bodyReader)
-	if err != nil {
-		return 0, nil, err
-	}
-	if payload != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	if secret != "" {
-		req.Header.Set("Authorization", "Bearer "+secret)
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return 0, nil, err
-	}
-	defer resp.Body.Close()
-
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-	if err != nil {
-		return resp.StatusCode, nil, err
-	}
-	return resp.StatusCode, data, nil
+	return s.clashClient().ResolveEndpoint(ctx)
 }

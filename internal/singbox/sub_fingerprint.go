@@ -1,3 +1,4 @@
+// 文件职责：计算 sing-box 具体代理出站节点的确定性 SHA-256 指纹与订阅 HTTP ETag/Last-Modified 探测。
 package singbox
 
 import (

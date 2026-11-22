@@ -1,19 +1,13 @@
+// 文件职责：提供 Tailscale 零失联升级前体检与异步切换状态查询接口。
 package webui
 
 import (
 	"context"
 	"net/http"
-	"net/netip"
-	"strings"
 	"time"
 
 	"singctl/internal/config"
 	"singctl/internal/tailscale"
-)
-
-var (
-	tsCGNATPrefix = netip.MustParsePrefix("100.64.0.0/10")
-	tsULA6Prefix  = netip.MustParsePrefix("fd7a:115c:a1e0::/48")
 )
 
 // TailscaleUpgradeTestHooks 仅供离线单元测试注入 Tailscale 升级体检与状态依赖。
@@ -22,44 +16,6 @@ type TailscaleUpgradeTestHooks struct {
 	ReadState func() (*tailscale.UpgradeState, error)
 	StatusFn  func(configPath string) map[string]any
 	Paths     tailscale.UpgradePaths
-}
-
-func isTailscaleAddr(rawIP string) bool {
-	s := strings.TrimSpace(rawIP)
-	s = strings.TrimPrefix(s, "[")
-	s = strings.TrimSuffix(s, "]")
-	if i := strings.LastIndexByte(s, '%'); i > 0 {
-		s = s[:i]
-	}
-	addr, err := netip.ParseAddr(s)
-	if err != nil {
-		return false
-	}
-	addr = addr.Unmap()
-	return tsCGNATPrefix.Contains(addr) || tsULA6Prefix.Contains(addr)
-}
-
-func isTailscaleRequest(r *http.Request) bool {
-	if r == nil {
-		return false
-	}
-	remote := remoteClientIP(r)
-	if isTailscaleAddr(remote) {
-		return true
-	}
-	// 仅当直连来源是本机回环（如反代场景）时才参考 X-Forwarded-For / X-Real-IP，防伪造。
-	if addr, err := netip.ParseAddr(strings.TrimSpace(remote)); err == nil && addr.Unmap().IsLoopback() {
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			first, _, _ := strings.Cut(xff, ",")
-			if isTailscaleAddr(first) {
-				return true
-			}
-		}
-		if xri := r.Header.Get("X-Real-IP"); xri != "" && isTailscaleAddr(xri) {
-			return true
-		}
-	}
-	return false
 }
 
 func (s *Server) upgradePaths() tailscale.UpgradePaths {
@@ -107,7 +63,7 @@ func (s *Server) handleTailscaleUpgradePreflightGet(w http.ResponseWriter, r *ht
 		return
 	}
 
-	pre.ViaTailscale = isTailscaleRequest(r)
+	pre.ViaTailscale = tailscale.IsTailscaleRequest(r)
 	if pre.ActiveSwap == nil {
 		if st, readErr := s.readTailscaleUpgradeState(); readErr == nil && st != nil {
 			pre.ActiveSwap = st

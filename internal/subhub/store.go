@@ -1,8 +1,8 @@
 // 文件职责：负责 SubHub 本地/远程订阅源目录（sub-store.json）的 mtime 内存缓存读取、CRUD 变更、集合聚合解析与订阅路径密钥（key）管理。
 //
 // 架构设计原则：
-//   - 高内聚拆 file：网络自适应抓取与 SSRF 校验下沉至 remote_fetcher.go，多格式节点解析与链路归一化下沉至 payload_decoder.go，
-//     本文件聚焦持久化仓储状态、并发锁保护与集合合并去重。
+//   - 高内聚拆文件：强类型文档模型与节点合并下沉至 store_doc.go，网络自适应抓取与 SSRF 校验下沉至 remote_fetcher.go，
+//     多格式节点解析与链路归一化下沉至 payload_decoder.go，本文件聚焦持久化仓储状态、并发锁保护与集合合并去重。
 package subhub
 
 import (
@@ -29,7 +29,8 @@ import (
 
 const (
 	DefaultCollectionName = "all"
-	maxRemoteSubBytes     = 8 * 1024 * 1024 // 8 MiB
+	MaxRemoteSubBytes     = 8 * 1024 * 1024 // 8 MiB
+	maxRemoteSubBytes     = MaxRemoteSubBytes
 
 	UAV2rayNG      = "v2rayNG/1.8.19"
 	UAShadowrocket = "Shadowrocket/2078 CFNetwork/1496.0.7 Darwin/23.5.0"
@@ -72,6 +73,15 @@ type SourceUpsertInput struct {
 	AllowAutoManaged bool   `json:"-"`
 }
 
+// SyncServerNodesInput describes the auto-generated local server nodes to synchronize into sub-store.json.
+type SyncServerNodesInput struct {
+	NodeDomain string
+	Hy2URI     string
+	Hy2Tag     string
+	VlessURI   string
+	VrTag      string
+}
+
 // ResolvedBundle contains deduplicated proxy URIs and parsed nodes ready for target rendering.
 type ResolvedBundle struct {
 	Name  string
@@ -100,7 +110,7 @@ type Store struct {
 	mu               sync.RWMutex
 	cachedMtime      time.Time
 	cachedSize       int64
-	cachedDoc        map[string]any
+	cachedDoc        *subStoreDoc
 	remoteCacheMtime time.Time
 	remoteCache      map[string]remoteCacheEntry
 	lastAttempt      map[string]time.Time
@@ -182,20 +192,17 @@ func isAutoManagedName(name string) bool {
 	return name == "auto_generated_hy2" || name == "auto_generated_vless"
 }
 
-func (s *Store) readDocLocked() (map[string]any, error) {
+func (s *Store) readDocLocked() (*subStoreDoc, error) {
 	st, err := os.Stat(s.FilePath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return map[string]any{
-				"subs":        []any{},
-				"collections": []any{},
-			}, nil
+			return newEmptySubStoreDoc(), nil
 		}
 		return nil, err
 	}
 
 	if s.cachedDoc != nil && st.ModTime().Equal(s.cachedMtime) && st.Size() == s.cachedSize {
-		return cloneDoc(s.cachedDoc), nil
+		return s.cachedDoc.Clone(), nil
 	}
 
 	raw, err := os.ReadFile(s.FilePath)
@@ -203,40 +210,24 @@ func (s *Store) readDocLocked() (map[string]any, error) {
 		return nil, err
 	}
 	if len(strings.TrimSpace(string(raw))) == 0 {
-		doc := map[string]any{"subs": []any{}, "collections": []any{}}
+		doc := newEmptySubStoreDoc()
 		s.cachedDoc = doc
 		s.cachedMtime = st.ModTime()
 		s.cachedSize = st.Size()
-		return cloneDoc(doc), nil
+		return doc.Clone(), nil
 	}
 
-	var doc map[string]any
+	var doc subStoreDoc
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", s.FilePath, err)
 	}
-	if doc == nil {
-		doc = make(map[string]any)
-	}
-	s.cachedDoc = doc
+	s.cachedDoc = &doc
 	s.cachedMtime = st.ModTime()
 	s.cachedSize = st.Size()
-	return cloneDoc(doc), nil
+	return doc.Clone(), nil
 }
 
-func cloneDoc(doc map[string]any) map[string]any {
-	b, err := json.Marshal(doc)
-	if err != nil {
-		return maps.Clone(doc)
-	}
-	var out map[string]any
-	_ = json.Unmarshal(b, &out)
-	if out == nil {
-		out = make(map[string]any)
-	}
-	return out
-}
-
-func (s *Store) writeDocLocked(doc map[string]any) error {
+func (s *Store) writeDocLocked(doc *subStoreDoc) error {
 	if err := os.MkdirAll(filepath.Dir(s.FilePath), 0700); err != nil {
 		return fmt.Errorf("create dir for %s: %w", s.FilePath, err)
 	}
@@ -252,64 +243,111 @@ func (s *Store) writeDocLocked(doc map[string]any) error {
 	if err := os.WriteFile(tmp, out, mode); err != nil {
 		return fmt.Errorf("write %s: %w", tmp, err)
 	}
+	_ = os.Chmod(tmp, mode)
 	if err := os.Rename(tmp, s.FilePath); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("rename %s: %w", s.FilePath, err)
 	}
 	if st, err := os.Stat(s.FilePath); err == nil {
-		s.cachedDoc = cloneDoc(doc)
+		s.cachedDoc = doc.Clone()
 		s.cachedMtime = st.ModTime()
 		s.cachedSize = st.Size()
 	}
 	return nil
 }
 
-func subEnabled(sub map[string]any) bool {
-	v, exists := sub["enabled"]
-	if !exists {
-		return true
+// SyncAutoServerNodes synchronizes auto_generated_hy2 and auto_generated_vless into sub-store.json
+// using strongly-typed document persistence (preserving nodes from other VPSs, cleaning deprecated entries,
+// and eliminating cross-package map[string]any dual-writes).
+func (s *Store) SyncAutoServerNodes(in SyncServerNodesInput) error {
+	if strings.TrimSpace(s.FilePath) == "" {
+		return errors.New("sub-store file path is empty")
 	}
-	b, ok := v.(bool)
-	if !ok {
-		return true
+	if err := os.MkdirAll(filepath.Dir(s.FilePath), 0700); err != nil {
+		return fmt.Errorf("create sub-store directory: %w", err)
 	}
-	return b
-}
 
-func mapToSourceItem(sub map[string]any, cache remoteCacheEntry) SourceItem {
-	name, _ := sub["name"].(string)
-	displayName, _ := sub["displayName"].(string)
-	if displayName == "" {
-		displayName, _ = sub["display-name"].(string)
-	}
-	displayName = cmp.Or(displayName, name)
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	srcType, _ := sub["source"].(string)
-	rawURL, _ := sub["url"].(string)
-	content, _ := sub["content"].(string)
-	remark, _ := sub["remark"].(string)
-
-	if srcType == "" {
-		if strings.TrimSpace(rawURL) != "" {
-			srcType = "remote"
-		} else {
-			srcType = "local"
+	if existingBytes, err := os.ReadFile(s.FilePath); err == nil && len(existingBytes) > 0 {
+		bakPath := s.FilePath + ".bak"
+		if bErr := os.WriteFile(bakPath, existingBytes, 0600); bErr == nil {
+			_ = os.Chmod(bakPath, 0600)
 		}
 	}
 
+	doc, err := s.readDocLocked()
+	if err != nil {
+		// Recover cleanly from corrupted legacy files during server deploy
+		doc = newEmptySubStoreDoc()
+	}
+
+	upsertAutoSub := func(targetName, displayName, uri, remark, tag, scheme string) {
+		idx := slices.IndexFunc(doc.Subs, func(r subRecord) bool { return r.Name == targetName })
+		if idx >= 0 {
+			doc.Subs[idx].Content = MergeServerNodeContent(doc.Subs[idx].Content, uri, in.NodeDomain, tag, scheme)
+			doc.Subs[idx].DisplayName = displayName
+			doc.Subs[idx].Source = cmp.Or(doc.Subs[idx].Source, "local")
+			return
+		}
+		doc.Subs = append(doc.Subs, subRecord{
+			Name:        targetName,
+			DisplayName: displayName,
+			Source:      "local",
+			Content:     strings.TrimSpace(uri),
+			Remark:      remark,
+		})
+	}
+
+	upsertAutoSub("auto_generated_hy2", "Hysteria2 Auto", in.Hy2URI, "Auto-generated Hysteria 2 Subscription", in.Hy2Tag, "hysteria2")
+	upsertAutoSub("auto_generated_vless", "VLESS Reality Auto", in.VlessURI, "Auto-generated VLESS+Reality Subscription", in.VrTag, "vless")
+
+	cleanedSubs := make([]subRecord, 0, len(doc.Subs))
+	seenSubNames := make(map[string]bool, len(doc.Subs))
+	for _, sub := range doc.Subs {
+		if sub.Name == "auto_generated_tuic" || sub.Name == "auto_generated_anytls" {
+			continue
+		}
+		if sub.Name != "" {
+			if seenSubNames[sub.Name] {
+				continue
+			}
+			seenSubNames[sub.Name] = true
+		}
+		cleanedSubs = append(cleanedSubs, sub)
+	}
+	doc.Subs = cleanedSubs
+
+	doc.Collections = ReconcileAllCollection(doc.Collections, []string{"auto_generated_hy2", "auto_generated_vless"})
+	for i := range doc.Collections {
+		kept := make([]string, 0, len(doc.Collections[i].Subscriptions))
+		for _, sn := range doc.Collections[i].Subscriptions {
+			if seenSubNames[sn] && !slices.Contains(kept, sn) {
+				kept = append(kept, sn)
+			}
+		}
+		doc.Collections[i].Subscriptions = kept
+	}
+
+	return s.writeDocLocked(doc)
+}
+
+func recordToSourceItem(sub subRecord, cache remoteCacheEntry) SourceItem {
+	srcType := sub.effectiveSourceType()
 	item := SourceItem{
-		Name:        name,
-		DisplayName: displayName,
+		Name:        sub.Name,
+		DisplayName: cmp.Or(sub.DisplayName, sub.Name),
 		Source:      srcType,
-		URL:         rawURL,
-		Content:     content,
-		Remark:      remark,
-		Enabled:     subEnabled(sub),
-		AutoManaged: isAutoManagedName(name),
+		URL:         sub.URL,
+		Content:     sub.Content,
+		Remark:      sub.Remark,
+		Enabled:     sub.isEnabled(),
+		AutoManaged: isAutoManagedName(sub.Name),
 	}
 
 	if srcType == "remote" {
-		uaStrategy, proxyMode := subFetchOptions(sub)
+		uaStrategy, proxyMode := sub.fetchOptions()
 		item.UserAgent = uaStrategy
 		item.ProxyMode = proxyMode
 		item.EffectiveUA = cache.EffectiveUA
@@ -322,8 +360,8 @@ func mapToSourceItem(sub map[string]any, cache remoteCacheEntry) SourceItem {
 			nodes, uris := ParseRawSubscriptionPayload(context.Background(), []byte(cache.Body))
 			item.NodeCount = max(len(nodes), len(uris))
 		}
-	} else if strings.TrimSpace(content) != "" {
-		nodes, uris := ParseRawSubscriptionPayload(context.Background(), []byte(content))
+	} else if strings.TrimSpace(sub.Content) != "" {
+		nodes, uris := ParseRawSubscriptionPayload(context.Background(), []byte(sub.Content))
 		item.NodeCount = max(len(nodes), len(uris))
 	}
 
@@ -344,15 +382,9 @@ func (s *Store) ListSources() ([]SourceItem, error) {
 		return nil, err
 	}
 
-	rawSubs, _ := doc["subs"].([]any)
-	items := make([]SourceItem, 0, len(rawSubs))
-	for _, entry := range rawSubs {
-		sub, ok := entry.(map[string]any)
-		if !ok {
-			continue
-		}
-		u, _ := sub["url"].(string)
-		items = append(items, mapToSourceItem(sub, cacheSnapshot[strings.TrimSpace(u)]))
+	items := make([]SourceItem, 0, len(doc.Subs))
+	for _, sub := range doc.Subs {
+		items = append(items, recordToSourceItem(sub, cacheSnapshot[strings.TrimSpace(sub.URL)]))
 	}
 	return items, nil
 }
@@ -371,10 +403,8 @@ func (s *Store) UpsertSource(ctx context.Context, in SourceUpsertInput) (*Source
 	if name == "" {
 		return nil, errors.New("订阅名称不能为空")
 	}
-	if isAutoManagedName(name) && !in.AllowAutoManaged {
-		if strings.TrimSpace(in.Source) == "remote" {
-			return nil, errors.New("系统自动同步节点源不支持改为远程 URL 类型")
-		}
+	if isAutoManagedName(name) && !in.AllowAutoManaged && strings.TrimSpace(in.Source) == "remote" {
+		return nil, errors.New("系统自动同步节点源不支持改为远程 URL 类型")
 	}
 
 	srcType := strings.ToLower(strings.TrimSpace(in.Source))
@@ -434,65 +464,50 @@ func (s *Store) UpsertSource(ctx context.Context, in SourceUpsertInput) (*Source
 		return nil, err
 	}
 
-	rawSubs, _ := doc["subs"].([]any)
-	var updatedSub map[string]any
-	idx := slices.IndexFunc(rawSubs, func(entry any) bool {
-		m, ok := entry.(map[string]any)
-		if !ok {
-			return false
-		}
-		n, _ := m["name"].(string)
-		return n == name
-	})
-
+	var updatedSub subRecord
+	idx := slices.IndexFunc(doc.Subs, func(r subRecord) bool { return r.Name == name })
 	if idx >= 0 {
-		existing := rawSubs[idx].(map[string]any)
+		existing := doc.Subs[idx]
 		if displayName != "" {
-			existing["displayName"] = displayName
-			existing["display-name"] = displayName
+			existing.DisplayName = displayName
 		}
-		existing["source"] = srcType
+		existing.Source = srcType
 		if srcType == "remote" {
-			existing["url"] = rawURL
-			existing["content"] = ""
-			existing["userAgent"] = uaStrategy
-			existing["proxyMode"] = proxyMode
+			existing.URL = rawURL
+			existing.Content = ""
+			existing.UserAgent = uaStrategy
+			existing.ProxyMode = proxyMode
 			if strings.EqualFold(uaStrategy, "auto") {
-				delete(existing, "ua")
+				existing.LegacyUA = ""
 			}
 		} else {
-			existing["url"] = ""
+			existing.URL = ""
 			if content != "" || !isAutoManagedName(name) {
-				existing["content"] = content
+				existing.Content = content
 			}
 		}
 		if in.Remark != "" || !isAutoManagedName(name) {
-			existing["remark"] = strings.TrimSpace(in.Remark)
+			existing.Remark = strings.TrimSpace(in.Remark)
 		}
-		existing["enabled"] = enabled
-		rawSubs[idx] = existing
+		existing.Enabled = new(enabled)
+		doc.Subs[idx] = existing
 		updatedSub = existing
 	} else {
-		if displayName == "" {
-			displayName = name
-		}
-		updatedSub = map[string]any{
-			"name":         name,
-			"displayName":  displayName,
-			"display-name": displayName,
-			"source":       srcType,
-			"url":          rawURL,
-			"content":      content,
-			"remark":       strings.TrimSpace(in.Remark),
-			"enabled":      enabled,
+		updatedSub = subRecord{
+			Name:        name,
+			DisplayName: cmp.Or(displayName, name),
+			Source:      srcType,
+			URL:         rawURL,
+			Content:     content,
+			Remark:      strings.TrimSpace(in.Remark),
+			Enabled:     new(enabled),
 		}
 		if srcType == "remote" {
-			updatedSub["userAgent"] = uaStrategy
-			updatedSub["proxyMode"] = proxyMode
+			updatedSub.UserAgent = uaStrategy
+			updatedSub.ProxyMode = proxyMode
 		}
-		rawSubs = append(rawSubs, updatedSub)
+		doc.Subs = append(doc.Subs, updatedSub)
 	}
-	doc["subs"] = rawSubs
 	ensureInAllCollection(doc, name)
 
 	if err := s.writeDocLocked(doc); err != nil {
@@ -503,7 +518,7 @@ func (s *Store) UpsertSource(ctx context.Context, in SourceUpsertInput) (*Source
 	if rawURL != "" {
 		cacheEntry = s.remoteCache[rawURL]
 	}
-	item := mapToSourceItem(updatedSub, cacheEntry)
+	item := recordToSourceItem(updatedSub, cacheEntry)
 	return &item, nil
 }
 
@@ -525,78 +540,34 @@ func (s *Store) DeleteSource(name string) error {
 		return err
 	}
 
-	rawSubs, _ := doc["subs"].([]any)
-	filtered := make([]any, 0, len(rawSubs))
-	removed := false
-	for _, entry := range rawSubs {
-		m, ok := entry.(map[string]any)
-		if !ok {
-			filtered = append(filtered, entry)
-			continue
-		}
-		if n, _ := m["name"].(string); n == name {
-			removed = true
-			continue
-		}
-		filtered = append(filtered, m)
-	}
-	if !removed {
+	beforeLen := len(doc.Subs)
+	doc.Subs = slices.DeleteFunc(doc.Subs, func(r subRecord) bool { return r.Name == name })
+	if len(doc.Subs) == beforeLen {
 		return fmt.Errorf("未找到名为 %q 的订阅源", name)
 	}
-	doc["subs"] = filtered
 
-	if rawCols, ok := doc["collections"].([]any); ok {
-		for _, c := range rawCols {
-			col, ok := c.(map[string]any)
-			if !ok {
-				continue
-			}
-			if subList, ok := col["subscriptions"].([]any); ok {
-				cleaned := make([]any, 0, len(subList))
-				for _, sn := range subList {
-					if sStr, ok := sn.(string); ok && sStr == name {
-						continue
-					}
-					cleaned = append(cleaned, sn)
-				}
-				col["subscriptions"] = cleaned
-			}
-		}
-		doc["collections"] = rawCols
+	for i := range doc.Collections {
+		doc.Collections[i].Subscriptions = slices.DeleteFunc(doc.Collections[i].Subscriptions, func(sn string) bool {
+			return sn == name
+		})
 	}
-
 	return s.writeDocLocked(doc)
 }
 
-func ensureInAllCollection(doc map[string]any, subName string) {
-	rawCols, _ := doc["collections"].([]any)
-	foundAll := false
-	for _, c := range rawCols {
-		col, ok := c.(map[string]any)
-		if !ok {
-			continue
-		}
-		if n, _ := col["name"].(string); n == DefaultCollectionName {
-			foundAll = true
-			subList, _ := col["subscriptions"].([]any)
-			exists := slices.ContainsFunc(subList, func(v any) bool {
-				s, ok := v.(string)
-				return ok && s == subName
-			})
-			if !exists {
-				subList = append(subList, subName)
-				col["subscriptions"] = subList
+func ensureInAllCollection(doc *subStoreDoc, subName string) {
+	for i := range doc.Collections {
+		if doc.Collections[i].Name == DefaultCollectionName {
+			if !slices.Contains(doc.Collections[i].Subscriptions, subName) {
+				doc.Collections[i].Subscriptions = append(doc.Collections[i].Subscriptions, subName)
 			}
+			return
 		}
 	}
-	if !foundAll {
-		rawCols = append(rawCols, map[string]any{
-			"name":          DefaultCollectionName,
-			"displayName":   DefaultCollectionName,
-			"subscriptions": []any{subName},
-		})
-	}
-	doc["collections"] = rawCols
+	doc.Collections = append(doc.Collections, collectionRecord{
+		Name:          DefaultCollectionName,
+		DisplayName:   DefaultCollectionName,
+		Subscriptions: []string{subName},
+	})
 }
 
 // ResolveCollection aggregates and parses all enabled subscriptions in the named collection.
@@ -610,42 +581,23 @@ func (s *Store) ResolveCollection(ctx context.Context, collectionName string) (*
 		return nil, err
 	}
 
-	rawSubs, _ := doc["subs"].([]any)
-	subByName := make(map[string]map[string]any, len(rawSubs))
-	var orderedNames []string
-	for _, entry := range rawSubs {
-		m, ok := entry.(map[string]any)
-		if !ok {
-			continue
-		}
-		if n, _ := m["name"].(string); n != "" {
-			subByName[n] = m
-			orderedNames = append(orderedNames, n)
+	subByName := make(map[string]subRecord, len(doc.Subs))
+	orderedNames := make([]string, 0, len(doc.Subs))
+	for _, sub := range doc.Subs {
+		if sub.Name != "" {
+			subByName[sub.Name] = sub
+			orderedNames = append(orderedNames, sub.Name)
 		}
 	}
 
 	var targetSubNames []string
-	rawCols, _ := doc["collections"].([]any)
 	foundCol := false
-	for _, entry := range rawCols {
-		col, ok := entry.(map[string]any)
-		if !ok {
-			continue
-		}
-		n, _ := col["name"].(string)
-		if strings.EqualFold(n, collectionName) {
+	for _, col := range doc.Collections {
+		if strings.EqualFold(col.Name, collectionName) {
 			foundCol = true
-			if list, ok := col["subscriptions"].([]any); ok {
-				for _, v := range list {
-					if sn, ok := v.(string); ok && sn != "" {
-						targetSubNames = append(targetSubNames, sn)
-					}
-				}
-			} else if list, ok := col["subs"].([]any); ok {
-				for _, v := range list {
-					if sn, ok := v.(string); ok && sn != "" {
-						targetSubNames = append(targetSubNames, sn)
-					}
+			for _, sn := range col.Subscriptions {
+				if sn != "" {
+					targetSubNames = append(targetSubNames, sn)
 				}
 			}
 			break
@@ -672,13 +624,10 @@ func (s *Store) ResolveSubscription(ctx context.Context, subName string) (*Resol
 		return nil, err
 	}
 
-	rawSubs, _ := doc["subs"].([]any)
-	subByName := make(map[string]map[string]any, len(rawSubs))
-	for _, entry := range rawSubs {
-		if m, ok := entry.(map[string]any); ok {
-			if n, _ := m["name"].(string); n != "" {
-				subByName[n] = m
-			}
+	subByName := make(map[string]subRecord, len(doc.Subs))
+	for _, sub := range doc.Subs {
+		if sub.Name != "" {
+			subByName[sub.Name] = sub
 		}
 	}
 	if _, ok := subByName[subName]; !ok {
@@ -687,7 +636,7 @@ func (s *Store) ResolveSubscription(ctx context.Context, subName string) (*Resol
 	return s.resolveSubList(ctx, subName, []string{subName}, subByName)
 }
 
-func (s *Store) resolveSubList(ctx context.Context, bundleName string, names []string, subByName map[string]map[string]any) (*ResolvedBundle, error) {
+func (s *Store) resolveSubList(ctx context.Context, bundleName string, names []string, subByName map[string]subRecord) (*ResolvedBundle, error) {
 	var allURIs []string
 	var allNodes []model.Node
 	seenURIs := make(map[string]bool)
@@ -696,24 +645,20 @@ func (s *Store) resolveSubList(ctx context.Context, bundleName string, names []s
 
 	for _, name := range names {
 		sub, ok := subByName[name]
-		if !ok || !subEnabled(sub) {
+		if !ok || !sub.isEnabled() {
 			continue
 		}
 
-		srcType, _ := sub["source"].(string)
-		rawURL, _ := sub["url"].(string)
-		content, _ := sub["content"].(string)
-
 		var payload string
-		if srcType == "remote" || (srcType == "" && strings.TrimSpace(rawURL) != "") {
-			uaStrategy, proxyMode := subFetchOptions(sub)
-			body, err := s.fetchRemoteAdaptive(ctx, strings.TrimSpace(rawURL), uaStrategy, proxyMode, false)
+		if sub.effectiveSourceType() == "remote" {
+			uaStrategy, proxyMode := sub.fetchOptions()
+			body, err := s.fetchRemoteAdaptive(ctx, strings.TrimSpace(sub.URL), uaStrategy, proxyMode, false)
 			if err != nil {
 				continue
 			}
 			payload = body
 		} else {
-			payload = content
+			payload = sub.Content
 		}
 
 		if strings.TrimSpace(payload) == "" {

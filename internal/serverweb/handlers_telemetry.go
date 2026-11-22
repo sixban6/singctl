@@ -1,3 +1,4 @@
+// 文件职责：提供实时流量遥测快照、SSE 帧级合并推送与无损开启遥测接口，在控制面边界组合嗅探摘要字段。
 package serverweb
 
 import (
@@ -5,10 +6,24 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
+	"singctl/internal/sniff"
 	"singctl/internal/telemetry"
 )
+
+// EnrichedTelemetrySnapshot 在控制面边界组合底层遥测快照与嗅探态势摘要，保持前端 JSON 100% 兼容且解除 telemetry 对 sniff 的耦合。
+type EnrichedTelemetrySnapshot struct {
+	telemetry.Snapshot
+	Sniffing *sniff.Summary `json:"sniffing,omitempty"`
+}
+
+type sseFrameCache struct {
+	mu          sync.Mutex
+	cachedAt    time.Time
+	cachedFrame []byte
+}
 
 func (s *Server) markRequestClientTrusted(r *http.Request) {
 	if s.sniff == nil {
@@ -20,13 +35,15 @@ func (s *Server) markRequestClientTrusted(r *http.Request) {
 	}
 }
 
-func (s *Server) collectEnrichedTelemetry(r *http.Request) telemetry.Snapshot {
+func (s *Server) collectEnrichedTelemetry(r *http.Request) EnrichedTelemetrySnapshot {
 	snap := s.telemetry.Collect(r.Context())
+	out := EnrichedTelemetrySnapshot{Snapshot: snap}
 	if s.sniff != nil {
 		s.markRequestClientTrusted(r)
-		snap.Sniffing = s.sniff.Snapshot(r.Context(), snap.ActiveClientIPs...)
+		summary := s.sniff.Snapshot(r.Context(), snap.ActiveClientIPs...)
+		out.Sniffing = &summary
 	}
-	return snap
+	return out
 }
 
 func (s *Server) handleTelemetrySnapshot(w http.ResponseWriter, r *http.Request) {
@@ -37,20 +54,18 @@ func (s *Server) handleTelemetrySnapshot(w http.ResponseWriter, r *http.Request)
 func (s *Server) getOrBuildTelemetrySSEFrame(r *http.Request) ([]byte, error) {
 	s.markRequestClientTrusted(r)
 
-	// SSE 帧级广播合并（900ms 窗口）：多管理员标签页并发开启实时看板时，
-	// 仅执行 1 次遥测采样 + 嗅探聚合 + JSON 序列化，其余订阅端直接复用帧字节流。
-	s.sseMu.Lock()
-	defer s.sseMu.Unlock()
-	if len(s.sseCachedFrame) > 0 && time.Since(s.sseCachedAt) < 900*time.Millisecond {
-		return s.sseCachedFrame, nil
+	s.caches.sse.mu.Lock()
+	defer s.caches.sse.mu.Unlock()
+	if len(s.caches.sse.cachedFrame) > 0 && time.Since(s.caches.sse.cachedAt) < 900*time.Millisecond {
+		return s.caches.sse.cachedFrame, nil
 	}
 	snap := s.collectEnrichedTelemetry(r)
 	raw, err := json.Marshal(snap)
 	if err != nil {
 		return nil, err
 	}
-	s.sseCachedFrame = raw
-	s.sseCachedAt = time.Now()
+	s.caches.sse.cachedFrame = raw
+	s.caches.sse.cachedAt = time.Now()
 	return raw, nil
 }
 

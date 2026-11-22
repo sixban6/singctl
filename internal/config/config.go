@@ -301,7 +301,7 @@ func MigrateConfig(configPath string, templateData []byte) error {
 		return fmt.Errorf("failed to read old config: %w", err)
 	}
 
-	newData, err := migrateConfigBytes(oldData, templateData)
+	newData, err := MigrateConfigBytes(oldData, templateData)
 	if err != nil {
 		return err
 	}

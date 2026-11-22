@@ -26,7 +26,7 @@ import {
   readPrivacyMaskPref,
   redactInlineSensitive,
   writePrivacyMaskPref,
-} from '../lib/privacyMask';
+} from '../../lib/privacyMask';
 import { BrowserDoHCheckResponse, DNSLeakReport, EgressEndpoint } from '../types';
 import { analyzePanoramicSuite } from './dns-leak/analyzePanoramicSuite';
 import { BrowserDoHCheckBanner } from './dns-leak/BrowserDoHCheckBanner';

@@ -1,7 +1,7 @@
 package test
 
 import (
-	"singctl/internal/util/table"
+	"singctl/internal/common/table"
 	"strings"
 	"testing"
 )

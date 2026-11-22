@@ -1,3 +1,4 @@
+// 文件职责：负责 AdGuard Home 发布包选择、下载校验、初始化配置编排、凭据重置与状态诊断。
 package adguard
 
 import (
@@ -17,14 +18,25 @@ import (
 	"sync"
 	"time"
 
+	"singctl/internal/common/fsx"
+	"singctl/internal/common/netx"
+	releasepkg "singctl/internal/common/release"
+	"singctl/internal/common/sysinfo"
 	"singctl/internal/config"
 	"singctl/internal/constant"
 	"singctl/internal/logger"
-	"singctl/internal/platform/servicemgr"
-	"singctl/internal/util/file"
-	"singctl/internal/util/netinfo"
-	releasepkg "singctl/internal/util/release"
 )
+
+func availableDiskMB(targetPath string) (uint64, error) {
+	ds, err := sysinfo.Statfs(targetPath)
+	if err != nil {
+		if errors.Is(err, errors.ErrUnsupported) {
+			return 10240, nil
+		}
+		return 0, err
+	}
+	return ds.AvailBytes / (1024 * 1024), nil
+}
 
 const (
 	adGuardRepo             = "AdguardTeam/AdGuardHome"
@@ -35,45 +47,6 @@ const (
 var (
 	validUsernameRe = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,32}$`)
 
-	binVerCacheMu  sync.Mutex
-	binVerCacheKey string
-	binVerCached   string
-)
-
-// CachedBinaryVersion 按二进制文件指纹 (path|mtime|size) 缓存 AdGuardHome --version，
-// 二进制升级后 mtime/size 变化同一毫秒自动失效重读，避免高频接口每次 fork 35MB 子进程。
-func CachedBinaryVersion(binPath string) string {
-	info, err := os.Stat(binPath)
-	if err != nil || info.IsDir() {
-		return ""
-	}
-	key := fmt.Sprintf("%s|%d|%d", binPath, info.ModTime().UnixNano(), info.Size())
-
-	binVerCacheMu.Lock()
-	if binVerCacheKey == key && binVerCached != "" {
-		ver := binVerCached
-		binVerCacheMu.Unlock()
-		return ver
-	}
-	binVerCacheMu.Unlock()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
-	out, err := exec.CommandContext(ctx, binPath, "--version").Output()
-	cancel()
-	if err != nil {
-		return ""
-	}
-	ver := strings.TrimSpace(string(out))
-	if ver != "" {
-		binVerCacheMu.Lock()
-		binVerCacheKey = key
-		binVerCached = ver
-		binVerCacheMu.Unlock()
-	}
-	return ver
-}
-
-var (
 	installedCheckMu       sync.RWMutex
 	installedCheckOverride func() bool
 )
@@ -211,14 +184,11 @@ func SelectAssetName(goos, goarch string) (string, error) {
 // PromptAdminUsername 提示用户输入管理员用户名；直接回车或无法读取终端时返回默认 "root"。
 func PromptAdminUsername(r io.Reader) string {
 	var reader *bufio.Reader
-	var ttyFile *os.File
-
 	if r != nil {
 		reader = bufio.NewReader(r)
 	} else if f, err := os.Open("/dev/tty"); err == nil {
-		ttyFile = f
-		defer ttyFile.Close()
-		reader = bufio.NewReader(ttyFile)
+		defer f.Close()
+		reader = bufio.NewReader(f)
 	} else {
 		return "root"
 	}
@@ -251,7 +221,6 @@ func (m *Manager) Install(opts InstallOptions) (*StatusInfo, error) {
 		return nil, err
 	}
 
-	// 1. 确定管理员用户名（首次安装且未预设密码时允许交互输入，回车默认 root）与自动生成强随机密码
 	chosenUser := strings.TrimSpace(opts.Username)
 	firstInit := strings.TrimSpace(m.cfg.DNS.Password) == ""
 	if chosenUser == "" && firstInit && !opts.NonInteractive {
@@ -261,11 +230,9 @@ func (m *Manager) Install(opts InstallOptions) (*StatusInfo, error) {
 	m.cfg.DNS.SetEnabled(true)
 	credChanged := m.cfg.DNS.EnsureCredentials(chosenUser)
 
-	// 2. 获取本机局域网私网 IP（严禁 0.0.0.0），并检测 Web 面板端口可用性
-	lanIP := sanitizeWebBindIP(netinfo.GetPrimaryLANIPv4())
+	lanIP := sanitizeWebBindIP(netx.GetPrimaryLANIPv4())
 	dnsAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(m.cfg.DNS.GetDNSPort()))
-	aghAlreadyRunning := ProbeDNS(dnsAddr, 600*time.Millisecond) == nil
-	if !aghAlreadyRunning {
+	if ProbeDNS(dnsAddr, 600*time.Millisecond) != nil {
 		availPort := SelectAvailableWebPort(lanIP, m.cfg.DNS.GetWebPort())
 		if availPort != m.cfg.DNS.GetWebPort() {
 			logger.Warn("端口 %d 已被其它服务占用，AdGuard Home Web 面板自动切换至端口 %d", m.cfg.DNS.GetWebPort(), availPort)
@@ -280,7 +247,6 @@ func (m *Manager) Install(opts InstallOptions) (*StatusInfo, error) {
 		}
 	}
 
-	// 3. 下载或复用二进制（下载动作在任何重启之前完成，保证软路由网关不断网）
 	if !alreadyHasBinary || opts.ForceDownload {
 		if err := m.downloadAndInstallBinary(context.Background()); err != nil {
 			return nil, err
@@ -289,22 +255,15 @@ func (m *Manager) Install(opts InstallOptions) (*StatusInfo, error) {
 		logger.Info("检测到已安装 AdGuard Home (%s)，跳过重复下载", m.binPath)
 	}
 
-	// 4. 生成或同步 AdGuardHome.yaml（直接写入完整配置 + bcrypt 密码，彻底跳过 0.0.0.0:3000 首次引导向导）
 	if err := m.ensureConfigFile(lanIP, firstInit || chosenUser != ""); err != nil {
 		return nil, err
 	}
-
-	// 5. 使用官方二进制预检配置文件合法性
 	if err := m.validateConfigWithBinary(); err != nil {
 		return nil, err
 	}
-
-	// 6. 注册系统开机自启服务并启动
 	if err := m.installAndStartService(); err != nil {
 		return nil, err
 	}
-
-	// 7. 等待本地 DNS 端口就绪并收敛配置文件权限为 0600
 	if err := m.waitDNSReady(10 * time.Second); err != nil {
 		return nil, err
 	}
@@ -358,7 +317,7 @@ func (m *Manager) downloadAndInstallBinary(ctx context.Context) error {
 
 	logger.Info("正在获取 AdGuard Home 最新稳定版发布信息 (%s)...", assetName)
 	client := releasepkg.NewClient(m.cfg.GitHub.MirrorURL)
-	client.DirectFirst = netinfo.CheckGoogleConnectivity()
+	client.DirectFirst = netx.CheckGoogleConnectivity()
 
 	info, err := client.FetchLatest(ctx, adGuardRepo)
 	if err != nil {
@@ -390,17 +349,15 @@ func (m *Manager) downloadAndInstallBinary(ctx context.Context) error {
 		return fmt.Errorf("解压 AdGuard Home 失败: %w", err)
 	}
 
-	newExe, err := file.FindExecutable(extractDir, "AdGuardHome")
+	newExe, err := fsx.FindExecutable(extractDir, "AdGuardHome")
 	if err != nil {
 		return fmt.Errorf("解压包中未找到 AdGuardHome 可执行文件: %w", err)
 	}
 
-	// 若正在运行则先优雅停止，避免旧二进制占用导致替换失败
 	if isProcessRunning() {
 		_ = m.Stop()
 	}
-
-	if err := file.InstallOrReplace(newExe, m.binPath); err != nil {
+	if err := fsx.InstallOrReplace(newExe, m.binPath); err != nil {
 		return fmt.Errorf("安装二进制到 %s 失败: %w", m.binPath, err)
 	}
 	logger.Success("AdGuard Home 核心已安装至 %s", m.binPath)
@@ -413,9 +370,6 @@ func (m *Manager) ensureConfigFile(lanIP string, updateAuth bool) error {
 		return fmt.Errorf("加密管理员密码失败: %w", err)
 	}
 
-	// 无论主/旁路由模式，始终禁用私网 PTR 反查（AdGuard 位于 127.0.0.1:5353 后端，开启会导致 DNS-SD 查询经 dnsmasq ↔ sing-box 无限放大环路）。
-	disablePrivatePTROpt := new(true)
-
 	if _, statErr := os.Stat(m.aghConfigFile); statErr == nil {
 		logger.Info("检测到已有配置文件 %s，执行无损同步（保留既有自定义规则与过滤器）...", m.aghConfigFile)
 		_, syncErr := SyncExistingConfig(m.aghConfigFile, SyncOptions{
@@ -425,7 +379,7 @@ func (m *Manager) ensureConfigFile(lanIP string, updateAuth bool) error {
 			Username:          m.cfg.DNS.GetUsername(),
 			PasswordHash:      passHash,
 			UpdateAuth:        updateAuth,
-			DisablePrivatePTR: disablePrivatePTROpt,
+			DisablePrivatePTR: new(true),
 		})
 		if syncErr == nil {
 			return nil
@@ -447,7 +401,7 @@ func (m *Manager) ensureConfigFile(lanIP string, updateAuth bool) error {
 		DNSPort:           m.cfg.DNS.GetDNSPort(),
 		Username:          m.cfg.DNS.GetUsername(),
 		PasswordHash:      passHash,
-		IsOpenWrt:         netinfo.IsOpenWrt(),
+		IsOpenWrt:         sysinfo.IsOpenWrt(),
 		DisablePrivatePTR: true,
 		SubURLs:           subURLs,
 	})
@@ -476,147 +430,6 @@ func (m *Manager) validateConfigWithBinary() error {
 	return nil
 }
 
-func (m *Manager) installAndStartService() error {
-	if err := os.MkdirAll(m.aghWorkDir, 0700); err != nil {
-		return err
-	}
-
-	if hasOpenWrtProcd() && m.initdScript != "" {
-		sanitizeOpenWrtDnsmasqTTL()
-		mgr := servicemgr.NewProcd(nil, filepath.Dir(m.initdScript))
-		spec := servicemgr.UnitSpec{
-			Name:      "AdGuardHome",
-			ProcdPath: m.initdScript,
-			ProcdBody: BuildOpenWrtInitScript(m.binPath, m.aghConfigFile, m.aghWorkDir),
-		}
-		if err := mgr.InstallUnit(context.Background(), spec); err != nil {
-			if startErr := mgr.Start(context.Background(), "AdGuardHome"); startErr != nil {
-				logger.Warn("procd 启动 AdGuardHome 返回异常 (%v / %v)，尝试直接守护拉起", err, startErr)
-			}
-		}
-		time.Sleep(300 * time.Millisecond)
-		if !isProcessRunning() {
-			return startBackgroundDirect(m.binPath, m.aghConfigFile, m.aghWorkDir)
-		}
-		return nil
-	}
-
-	if hasSystemd() && m.systemdUnit != "" {
-		mgr := servicemgr.NewSystemdWithDir(nil, filepath.Dir(m.systemdUnit))
-		spec := servicemgr.UnitSpec{
-			Name:        "AdGuardHome",
-			SystemdPath: m.systemdUnit,
-			SystemdBody: BuildSystemdUnit(m.binPath, m.aghConfigFile, m.aghWorkDir),
-		}
-		if err := mgr.InstallUnit(context.Background(), spec); err != nil {
-			return fmt.Errorf("启动 systemd AdGuardHome 服务失败: %w", err)
-		}
-		return nil
-	}
-
-	// 无 systemd/procd 环境（如容器或开发机）直接后台守护启动
-	_ = m.Stop()
-	return startBackgroundDirect(m.binPath, m.aghConfigFile, m.aghWorkDir)
-}
-
-// sanitizeOpenWrtDnsmasqTTL 清理 OpenWrt/ImmortalWrt 固件自带 dnsmasq 中可能存在的强制 min_cache_ttl / mini_ttl，
-// 防止 1 秒 TTL 的动态节点域名被 dnsmasq 强行篡改缓存 3600 秒。
-func sanitizeOpenWrtDnsmasqTTL() {
-	if _, err := exec.LookPath("uci"); err != nil {
-		return
-	}
-	changed := false
-	for _, key := range []string{"min_cache_ttl", "mini_ttl", "minttl", "use_stale_cache"} {
-		target := "dhcp.@dnsmasq[0]." + key
-		if out, err := exec.Command("uci", "-q", "get", target).Output(); err == nil && len(strings.TrimSpace(string(out))) > 0 {
-			if exec.Command("uci", "-q", "delete", target).Run() == nil {
-				changed = true
-			}
-		}
-	}
-	if changed {
-		_ = exec.Command("uci", "commit", "dhcp").Run()
-		_ = exec.Command("/etc/init.d/dnsmasq", "reload").Run()
-	}
-}
-
-func (m *Manager) waitDNSReady(maxWait time.Duration) error {
-	dnsAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(m.cfg.DNS.GetDNSPort()))
-	deadline := time.Now().Add(maxWait)
-	var lastErr error
-	for time.Now().Before(deadline) {
-		if err := ProbeDNS(dnsAddr, 800*time.Millisecond); err == nil {
-			return nil
-		} else {
-			lastErr = err
-		}
-		time.Sleep(400 * time.Millisecond)
-	}
-	return fmt.Errorf("等待 AdGuard Home DNS 端口 (%s) 就绪超时: %v", dnsAddr, lastErr)
-}
-
-// Start 启动已安装的 AdGuard Home（若局域网 IP 发生变化会自动同步 Web 监听地址）。
-func (m *Manager) Start() error {
-	if !m.isBinaryPresent() {
-		return fmt.Errorf("AdGuard Home 尚未安装 (%s)，请先运行: singctl dns install", m.binPath)
-	}
-	if _, err := os.Stat(m.aghConfigFile); os.IsNotExist(err) {
-		m.cfg.DNS.EnsureCredentials("")
-		if m.configPath != "" {
-			_ = config.Save(m.configPath, m.cfg)
-		}
-		if err := m.ensureConfigFile(sanitizeWebBindIP(netinfo.GetPrimaryLANIPv4()), true); err != nil {
-			return err
-		}
-	} else {
-		// 自动修正局域网 IP 漂移（例如 DHCP 更换网段 IP），并强制关闭私网 PTR 防回环及过滤 localhost 探活噪声
-		lanIP := sanitizeWebBindIP(netinfo.GetPrimaryLANIPv4())
-		_, _ = SyncExistingConfig(m.aghConfigFile, SyncOptions{
-			LANIP:             lanIP,
-			WebPort:           m.cfg.DNS.GetWebPort(),
-			DNSPort:           m.cfg.DNS.GetDNSPort(),
-			DisablePrivatePTR: new(true),
-		})
-	}
-
-	if err := m.installAndStartService(); err != nil {
-		return err
-	}
-	if err := m.waitDNSReady(10 * time.Second); err != nil {
-		return err
-	}
-	_ = os.Chmod(m.aghConfigFile, 0600)
-	return nil
-}
-
-// Stop 停止正在运行的 AdGuard Home 服务。
-func (m *Manager) Stop() error {
-	ctx := context.Background()
-	if hasOpenWrtProcd() && m.initdScript != "" {
-		_ = servicemgr.NewProcd(nil, filepath.Dir(m.initdScript)).Stop(ctx, "AdGuardHome")
-	}
-	if hasSystemd() {
-		_ = servicemgr.NewSystemd(nil).Stop(ctx, "AdGuardHome")
-	}
-	if isProcessRunning() {
-		_ = exec.Command("pkill", "-f", "AdGuardHome").Run()
-		_ = exec.Command("killall", "AdGuardHome").Run()
-		for range 10 {
-			if !isProcessRunning() {
-				break
-			}
-			time.Sleep(200 * time.Millisecond)
-		}
-	}
-	return nil
-}
-
-// Restart 重启 AdGuard Home。
-func (m *Manager) Restart() error {
-	_ = m.Stop()
-	return m.Start()
-}
-
 // SyncGatewayMode 在主路由/旁路由模式切换时同步 AdGuardHome.yaml 基础运行参数（始终禁用私网 PTR 防回环），
 // 若配置发生变更且 AdGuard Home 当前正在运行，则自动平滑重启使其立即生效。
 func (m *Manager) SyncGatewayMode(lanIP string) error {
@@ -624,7 +437,7 @@ func (m *Manager) SyncGatewayMode(lanIP string) error {
 		return nil
 	}
 	if strings.TrimSpace(lanIP) == "" {
-		lanIP = netinfo.GetPrimaryLANIPv4()
+		lanIP = netx.GetPrimaryLANIPv4()
 	}
 	changed, err := SyncExistingConfig(m.aghConfigFile, SyncOptions{
 		LANIP:             sanitizeWebBindIP(lanIP),
@@ -660,7 +473,7 @@ func (m *Manager) ResetCredentials(newUsername string) (string, string, error) {
 	}
 
 	if _, err := os.Stat(m.aghConfigFile); err == nil {
-		lanIP := sanitizeWebBindIP(netinfo.GetPrimaryLANIPv4())
+		lanIP := sanitizeWebBindIP(netx.GetPrimaryLANIPv4())
 		if err := m.ensureConfigFile(lanIP, true); err != nil {
 			return "", "", err
 		}
@@ -674,44 +487,13 @@ func (m *Manager) ResetCredentials(newUsername string) (string, string, error) {
 	return m.cfg.DNS.GetUsername(), m.cfg.DNS.GetPassword(), nil
 }
 
-// Uninstall 停止并卸载 AdGuard Home 服务与二进制（可选保留或清理配置目录）。
-func (m *Manager) Uninstall(purgeConfig bool) error {
-	_ = m.Stop()
-
-	ctx := context.Background()
-	if hasOpenWrtProcd() && m.initdScript != "" {
-		_ = servicemgr.NewProcd(nil, filepath.Dir(m.initdScript)).RemoveUnit(ctx, servicemgr.UnitSpec{
-			Name:      "AdGuardHome",
-			ProcdPath: m.initdScript,
-		})
-	}
-	if hasSystemd() && m.systemdUnit != "" {
-		_ = servicemgr.NewSystemdWithDir(nil, filepath.Dir(m.systemdUnit)).RemoveUnit(ctx, servicemgr.UnitSpec{
-			Name:        "AdGuardHome",
-			SystemdPath: m.systemdUnit,
-		})
-	}
-	if m.binPath != "" {
-		_ = os.Remove(m.binPath)
-	}
-	if purgeConfig && m.aghConfigDir != "" {
-		_ = os.RemoveAll(m.aghConfigDir)
-	}
-
-	m.cfg.DNS.SetEnabled(false)
-	if m.configPath != "" {
-		_ = config.Save(m.configPath, m.cfg)
-	}
-	return nil
-}
-
 // EnsureHealthy 供看门狗守护进程调用：自动自愈旧版私网 PTR 回环配置，并在 DNS 端口连续两次失联时自动拉起恢复。
 func (m *Manager) EnsureHealthy() error {
 	if !m.cfg.DNS.IsEnabled() || !m.isBinaryPresent() {
 		return nil
 	}
 	if NeedsHardeningSync(m.aghConfigFile) {
-		lanIP := sanitizeWebBindIP(netinfo.GetPrimaryLANIPv4())
+		lanIP := sanitizeWebBindIP(netx.GetPrimaryLANIPv4())
 		if changed, err := SyncExistingConfig(m.aghConfigFile, SyncOptions{
 			LANIP:             lanIP,
 			WebPort:           m.cfg.DNS.GetWebPort(),
@@ -735,7 +517,7 @@ func (m *Manager) Status() *StatusInfo {
 	dnsAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(m.cfg.DNS.GetDNSPort()))
 	webAddr := ReadCurrentHTTPAddress(m.aghConfigFile)
 	if webAddr == "" {
-		lanIP := sanitizeWebBindIP(netinfo.GetPrimaryLANIPv4())
+		lanIP := sanitizeWebBindIP(netx.GetPrimaryLANIPv4())
 		webAddr = net.JoinHostPort(lanIP, strconv.Itoa(m.cfg.DNS.GetWebPort()))
 	}
 

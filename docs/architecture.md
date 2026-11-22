@@ -1,73 +1,89 @@
 # SingCtl 架构设计与扩展规范
 
-> 本文档面向人类维护者与 AI 编程助手，明确 SingCtl 核心分层边界、五大可复用基础抽象与编译期 AST 防腐烂守卫规范。
+> 本文档面向人类维护者与 AI 编程助手，明确 SingCtl 对标 `SagerNet/sing-box` 的四层无环依赖拓扑、核心可复用抽象、前后端对称目录规范与编译期 AST 防腐烂守卫。
 
-## 1. 分层依赖拓扑（严格无环 DAG）
+## 1. 四层正交依赖拓扑（严格无环 DAG）
 
+```text
+  Layer 4: 控制面与常驻调度薄外壳（仅做鉴权、入参校验、领域调用与响应编排）
+    [ cmd/singctl (~31行极薄入口) | internal/cmd | internal/webui | internal/serverweb | internal/daemon ]
+                                           │
+                                           ▼
+  Layer 3: 高内聚领域引擎层（严禁反向依赖 cmd / webui / serverweb / daemon）
+    [ singbox (+ sboption / clashapi / scripts / ruleset_snapshot)
+      deploy | subhub | sniff | fleet | netdiag (+ ipgeo / dohprobe) | gateway
+      adguard | firewall | tailscale | audit | heal | doctor | telemetry | terminal | gfw | ssh | updater ]
+                                           │
+                                           ▼
+  Layer 2: 基础契约与纯配置层（严禁反向依赖任何领域层与控制面层）
+    [ constant | component | lifecycle | platform/servicemgr | config | logger ]
+                                           │
+                                           ▼
+  Layer 1: 零业务耦合正交微基建层（纯标准库/基础库叶子，零上层内部依赖）
+    [ internal/common/{execx,proc,fsx,sysinfo,release,netx,httpx,swrcache,cryptobak,redact,memlimit,table} ]
 ```
-  [ cmd / webui / serverweb / daemon ]         <-- 控制面与调度入口层（组合 Registry / Lifecycle / Store）
-                   │
-                   ▼
-  [ deploy / singbox / fleet / audit / subhub / adguard / firewall / tailscale / netdiag / heal / doctor / gfw / terminal / telemetry ]
-                   │                           <-- 领域引擎与业务适配实现层
-                   ▼
-  [ config / component / lifecycle / platform/servicemgr / constant / util / logger ]
-                                               <-- 基础契约层（严禁反向依赖上层业务包）
-```
 
-> 所有基础设施契约均采用**显式依赖注入**（结构体字段、`New*` 构造函数或 `Option` 函数；测试未注入时默认回退生产实现），**禁止**使用隐式 `context.Value` 服务定位器传递核心依赖。
+> **显式依赖注入铁律**：所有可替换 I/O 与策略协作者统一采用构造函数参数、`Options` / `Deps` 结构体字段或 `Option` 函数显式注入（未注入 `nil` 时自动回退生产默认实现），**严禁**使用隐式 `context.Value` 服务定位器或篡改包级可变全局单例。
 
 ---
 
-## 2. 核心抽象与标准扩展路径
+## 2. 核心基础抽象与领域引擎规范
 
-### 2.1 极薄宿主服务契约层（[`internal/platform/servicemgr`](../internal/platform/servicemgr)）
+### 2.1 纯标准库微基建（[`internal/common/*`](../internal/common)）
 
-- **契约接口**：`Manager`（`Backend`, `InstallUnit`, `RemoveUnit`, `Start`, `Stop`, `Restart`, `Reload`, `IsActive`, `Logs`, `Run`）、systemd 批量诊断扩展（`ShowUnitsBatch`, `ShowProperties`, `IsEnabled`, `EnableNow`, `DisableNow`, `ParseSystemdShowBatch`）及 `HostInfo` / `IsOpenWrt()` / `ValidateUnitName()`。
-- **内置实现**：`SystemdManager`（systemd VPS）、`ProcdManager`（OpenWrt BusyBox `procd` + 命名白名单防注入）、`NoopManager` 与 `MockManager`。
-- **扩展约束**：**严禁**在 `internal/platform/servicemgr/` 以外的任何业务包或 Web handler 中直接拼装裸 `exec.Command("systemctl", ...)`。
+- **`execx` & `proc`**：统一有界超时与 `WaitDelay` 子进程执行器、分离进程组属性、硬链接 PID 锁，以及基于 `syscall.Fstat` 校验 `S_IFIFO` 的安全就绪管道握手 `NotifyReadyPipe`（杜绝误关非 FIFO 文件描述符）。
+- **`fsx` & `sysinfo`**：随机临时文件 `WriteAtomic0600`、带离线预检与失败自动回滚的事务化落盘 `CommitVerified`、`AsyncSnapshotWriter`，以及 `IsOpenWrt` / `Statfs` / `MemInfo` / 本地 POSIX 时区校准。
+- **`release` & `netx`**：唯一信任锚直连 GitHub Release API + 镜像加速下载 + SHA256 强制校验 + 防 Zip-Slip 流式提取 `ExtractBinaryStream`；纯网卡/ECS 子网/DNS 解析与可注入公网 IP / GeoTag 探针。
+- **`httpx`、`swrcache`、`cryptobak`、`redact`**：零反射泛型 HTTP Handler 与强制默认 `MaxBytesReader` 安全 JSON 解码、sync.Pool Gzip、泛型有界单飞缓存 `Bounded[T]`、PBKDF2+AES-256-GCM 灾备加密信封及零依赖订阅 URL 脱敏。
 
-### 2.2 声明式注册表与正交算子（`component` / `audit` / `doctor`）
+### 2.2 极薄宿主契约、声明式注册表与三阶段生命周期
 
-- **服务组件注册表（[`internal/component`](../internal/component)）**：
-  - 核心契约 `Component` + 正交能力接口 `Configurable`、`Upgradable`、`Versioned`、`ServerLifecycle`；
-  - 服务端挂载点 [`internal/deploy/comp_registry.go`](../internal/deploy/comp_registry.go) 默认注册 `sing-box`、`caddy`、`singctl-sub`、`warp`。
-- **声明式健康体检注册表（[`internal/doctor`](../internal/doctor)）**：
-  - `Registry` 按 `ScopeServer` / `ScopeClient` 有序调度 `Check` 算子（[`checks_server.go`](../internal/doctor/checks_server.go)、[`checks_client.go`](../internal/doctor/checks_client.go)）；
-  - 所有宿主文件、端口与 TLS 探针通过 `Deps` 结构体显式注入，支持纯离线确定性表驱动单测。
-- **扩展约束**：新增受管服务、审计算子或诊断项时，按「独立文件 + 向注册表注册一行」横向扩展，**禁止**在多处拷贝粘连 `switch` / `if-else`。
+- **宿主服务唯一出口（[`internal/platform/servicemgr`](../internal/platform/servicemgr)）**：统一封装 `SystemdManager`（systemd VPS）与 `ProcdManager`（OpenWrt BusyBox `procd`），全仓严禁绕过 `servicemgr` 直接拼装裸 `"systemctl"` 命令。
+- **声明式组件与算子注册表（`component` / `audit` / `doctor` / `subhub` / `heal`）**：新增受管服务、非线性审计算子、体检项、代理协议编解码器或自愈步骤时，遵循「新增独立文件 + 向声明式切片/注册表挂载一行」横向扩展。
+- **确定性三阶段生命周期（[`internal/lifecycle`](../internal/lifecycle)）**：`StageInit`（纯资源准备，零后台协程）→ `StageStart`（拉起监听与受控循环）→ `StagePostStart`（非阻塞首轮预热），停机或初始化失败时按注册**严格逆序**有界回收。
 
-### 2.3 三阶段确定性生命周期编排（[`internal/lifecycle`](../internal/lifecycle)）
+### 2.3 纯配置快照分离与 `sboption` 保真强类型流水线
 
-- **启动阶段**：`StageInit`（加载配置/打开日志文件/校验参数）→ `StageStart`（拉起监听与受控巡检循环）→ `StagePostStart`（非阻塞首轮预热与状态同步）。
-- **回滚与回收**：任一阶段失败或 `ctx` 取消时，自动按**注册严格逆序**调用已触达组件的 `Close()`，受 `WithCloseTimeout`（默认 `5s`）有界保护且幂等。
-- **全量覆盖**：[`internal/serverweb/serverweb.go`](../internal/serverweb/serverweb.go)、[`internal/webui/webui.go`](../internal/webui/webui.go)、[`internal/subhub/server.go`](../internal/subhub/server.go)（`ServeContext` / `buildLifecycle`）与 [`internal/daemon/daemon.go`](../internal/daemon/daemon.go)（`buildForegroundLifecycle`）。
-
-### 2.4 纯配置模型与不可变运行态快照（[`internal/config/store.go`](../internal/config/store.go)）
-
-- **职责分离**：
-  - `Config`（含 [`Clone()`](../internal/config/clone.go)）专注 YAML 序列化、AST 无损注释保存与校验；
-  - `config.Store` 维护 `atomic.Pointer[Config]` 无锁只读快照、`mtime+size` 指纹按需重载、坏 YAML 自动保留上一已知有效快照，以及互斥串行 `Update`（`0600` 原子写入）。
-- **使用铁律**：`webui`、`serverweb`、`subhub`、`daemon` 等长驻模块热路径读配置必须经由 `config.Store` 只读快照；局部修改并落盘时必须遵循 `Clone()` → 校验 → `0600` 原子保存 → 刷新/失效快照，**禁止**原地修改共享快照或在 HTTP handler 中裸调 `config.Load` / `config.Save`。
-
-### 2.5 前后端领域化目录边界（`internal/` & `web/src/`）
-
-- **Go 后端**：按子领域职责拆分为 `< 800` 行内聚文件，每个新文件首行标注 `// 文件职责：...`。
-- **React/TS 前端（[`web/src/`](../web/src)）**：
-  - 服务端面板（`web/src/server/`）：按 `types/` 与 `components/{overview,services,security,warp,fleet,subscriptions}/` 领域子目录内聚组织；
-  - 客户端面板（`web/src/client/`）：按 `types/`、`shell/`、`pages/{adguard,audit,firewall,groups,network,singbox,watchdog}/` 与 `components/{dns-leak,traffic-flow}/` 领域子目录内聚组织。
+- **不可变运行态快照（[`internal/config/store.go`](../internal/config/store.go)）**：`config.Config` 仅承载纯数据 Schema、零反射 `Clone()` 与 AST 注释保留保存；`webui`、`serverweb`、`subhub`、`daemon` 热路径读取统一经由 `config.Store`（`atomic.Pointer[Config]`），局部更新遵循 `Clone()` → 校验 → `0600` 原子落盘 → 写透发布。
+- **保真强类型 `sing-box` 配置模型（[`internal/singbox/sboption`](../internal/singbox/sboption)）**：
+  - 泛型双态切片 `Listable[T]` 自动无损兼容单值与数组；
+  - 各层配置段内置 `Extra map[string]json.RawMessage` 无损信封，确保未知顶层键与新协议扩展字段 100% 零字节丢失；
+  - 编译流水线共享单一内存 `*sboption.Document`（1 次解析 → 10 个类型化 Stage → 1 次格式化输出），路由与 DNS 插入统一由 `rule_anchors.go` 显式谓词定位。
+- **统一 Clash API 与下沉领域引擎**：
+  - 全仓 Clash 控制面查询（`webui`、`daemon`、`telemetry`、`audit`、`dohprobe`）统一复用实例级连接池客户端 [`internal/singbox/clashapi`](../internal/singbox/clashapi)；
+  - 活跃嗅探追踪与封禁引擎独立归位于 [`internal/sniff`](../internal/sniff)（通过消费侧回调解耦 `fleet`），服务端遥测 `sniffing` 字段在 `serverweb` HTTP 序列化边界组合；
+  - 双通道地理缓存归位于 [`internal/netdiag/ipgeo`](../internal/netdiag/ipgeo)，浏览器 DoH 旁路两阶段检测归位于 [`internal/netdiag/dohprobe`](../internal/netdiag/dohprobe)。
 
 ---
 
-## 3. 永久 AST 架构防腐烂门禁
+## 3. 代码组织与双端对称目录规范
 
-每次提交或运行 `go test -short ./test/...` 时，[`test/architecture_guard_test.go`](../test/architecture_guard_test.go) 会自动校验以下六条硬红线：
+### 3.1 Go 包内测试子目录隔离规范（`internal/<pkg>/test/`）
 
-1. **禁止跨包重复硬编码契约字面量**：`constant.GitHubRepo` 与服务回环默认端口仅允许在单一权威文件出现；
-2. **宿主 `systemctl` 零越界**：全仓仅允许 `internal/platform/servicemgr/` 调用 `"systemctl"`，零上层业务白名单负债；
-3. **热路径服务强制走 `config.Store`**：禁止在 `subhub`、`webui`、`serverweb` 的业务 handler 中新增裸 `config.Load` / `config.Save`；
-4. **Go 生产单文件复杂度上限**：除静态内嵌 HTML 伪装模板外，所有 `cmd/`、`internal/` 生产 `.go` 文件不得超过 **1,000 行**；
-5. **前端源码单文件复杂度上限**：所有 `web/src/**/*.{ts,tsx}` 文件不得超过 **1,000 行**；
-6. **基础契约层零反向依赖**：`constant` / `component` / `lifecycle` / `platform/servicemgr` 严禁逆向导入任何领域层或控制面层包。
+- `internal/**` 下所有包的单元测试文件统一收纳于各自模块的 **`test/` 子目录**（即 `internal/<pkg>/test/*_test.go`），保持业务源码目录 100% 纯净无测试混排；
+- 包内测试统一声明为黑盒测试包 **`package <pkg>_test`**，通过公开导出契约、`Options` 或 `Deps` 结构体显式注入替身驱动验证（严禁包级可变 `*Override` 全局变量），与 `go test -race ./internal/...` 及 `deadcode -test ./...` 原生无缝兼容；
+- 每个新增或拆分的 `.go` 文件首行标注 `// 文件职责：...`，常规业务源码单文件保持紧凑高内聚（`< 750` 行，硬红线 `<= 1,000` 行）。
 
-> 本地验证标准示例值（如配置单测与文档）必须使用 RFC 5737 保留网段（`192.0.2.x`、`198.51.100.x`、`203.0.113.x`）与 `example.com`。
+### 3.2 前端 `web/src/` 双端 1:1 镜像对称规范（`<= 700` 行）
+
+- **共享底座（[`web/src/lib/`](../web/src/lib)）**：`http.ts` 提供统一 `createHttpClient`（`requestJSON` / `requestText` / `requestNDJSON` / 401 会话拦截）与无泄漏 `composeAbortSignals(externalSignal, timeoutMs)`；`privacyMask.ts` 提供通用前端脱敏工具。
+- **Client 与 Server 对称四元组（`api/ + shell/ + pages/ + types/`）**：
+  - `web/src/client/`：`api/{session,system,singbox,dns,audit,network,actionStream,index}.ts`、`shell/`、`pages/`（顶层严格仅留 8 个一级路由 `*Page.tsx`，二级面板归入 `{adguard,audit,firewall,groups,network,singbox,watchdog}/`）、`components/{dns-leak,traffic-flow}/`、`types/`；
+  - `web/src/server/`：`api/{http,overview,services,subscriptions,warp,fleet,security,index}.ts`、`shell/{Header,Navigation,LoginModal}.tsx`、`pages/`（9 个一级 `*Tab.tsx` 及 `{overview,services,warp,subscriptions,fleet,security}/` 子目录）、`types/navigation.ts`。
+
+---
+
+## 4. 永久 AST 架构防腐烂门禁
+
+每次执行 `go test -short ./test/...` 时，[`test/architecture_guard_test.go`](../test/architecture_guard_test.go) 自动强制校验以下八条硬红线：
+
+1. **`TestArchGuard_NoDuplicateSharedLiterals`**：`constant.GitHubRepo` 与本机回环默认监听端点仅允许在单一权威定义点出现；
+2. **`TestArchGuard_SystemctlIsolatedToPlatformAllowlist`**：全仓仅允许 `internal/platform/servicemgr/` 调用 `"systemctl"`；
+3. **`TestArchGuard_HotPathServersUseConfigStore`**：禁止 `subhub`、`webui`、`serverweb` 业务 handler 绕过 `config.Store` 裸调 `config.Load` / `config.Save`（零临时 CLI 白名单负债）；
+4. **`TestArchGuard_MaxProductionFileLines`**：除静态内嵌 HTML 伪装站模板外，所有 `cmd/`、`internal/` 生产 `.go` 文件不得超过 **1,000 行**；
+5. **`TestArchGuard_MaxFrontendFileLines`**：所有 `web/src/**/*.{ts,tsx}` 源码单文件不得超过 **700 行**；
+6. **`TestArchGuard_CommonPackagesPureLeaf`**：`internal/common/*` 严禁导入任何非 `common` 的内部包；
+7. **`TestArchGuard_InternalTestsInSubdir`**：`internal/**` 下所有 `*_test.go` 必须位于各自 `test/` 子目录且采用 `package <pkg>_test`；
+8. **`TestArchGuard_LayeredDAGAcyclic`**：强制四层单向依赖无环（禁止 `common`/契约层上向依赖、禁止领域层反向导入 `cmd`/`webui`/`serverweb`/`daemon`、禁止 `sniff` 导入 `fleet`、禁止 `cmd` 除 `ui.go` 外导入 `serverweb`）。
+
+> 文档、配置模板与单元测试中的示例地址与凭据必须严格使用 RFC 5737 保留网段（`192.0.2.x`、`198.51.100.x`、`203.0.113.x`）与 `example.com`。

@@ -201,8 +201,8 @@ func (s *ServerConfig) GetNodeTag() string {
 		}
 	}
 
-	if discoveredLocationTag != "" {
-		return discoveredLocationTag
+	if tag := cachedLocationTag(); tag != "" {
+		return tag
 	}
 
 	var ip string
@@ -237,8 +237,8 @@ func (s *ServerConfig) FastNodeTag() string {
 			return tag
 		}
 	}
-	if discoveredLocationTag != "" {
-		return discoveredLocationTag
+	if tag := cachedLocationTag(); tag != "" {
+		return tag
 	}
 	if s != nil {
 		if nodeDomain := s.GetNodeDomain(); nodeDomain != "" {

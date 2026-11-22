@@ -1,26 +1,31 @@
+// 文件职责：组装服务端 Web 管理面板薄控制面、66 条 HTTP 路由注册、确定性三阶段生命周期与领域协作者显式注入。
 package serverweb
 
 import (
+	"cmp"
 	"context"
 	"embed"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"net"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
+	"singctl/internal/common/execx"
+	"singctl/internal/common/httpx"
 	"singctl/internal/config"
 	"singctl/internal/deploy"
 	"singctl/internal/fleet"
 	"singctl/internal/heal"
 	"singctl/internal/lifecycle"
 	"singctl/internal/logger"
+	"singctl/internal/sniff"
 	"singctl/internal/subhub"
 	"singctl/internal/telemetry"
 )
@@ -30,15 +35,15 @@ var staticFS embed.FS
 
 const sessionCookieName = "singctl_server_session"
 
-// Options 服务端 Web 界面配置
+// Options 服务端 Web 界面配置。
 type Options struct {
 	ConfigPath        string
 	ConfigStore       *config.Store // (可选) 外部注入的配置快照仓库；为空时自动按 ConfigPath 创建
 	SingBoxConfigPath string        // (可选) sing-box 配置文件路径，默认 /etc/sing-box/config.json
-	SubStoreDir       string // (可选) SubHub 数据存储目录，默认 /etc/sub-store
-	FleetFilePath     string // (可选) 节点舰队存储文件路径，默认 <ConfigDir>/fleet.yaml
-	BanFilePath       string // (可选) 防爆破封禁列表存储文件 (默认: <ConfigDir>/.serverweb_bans.json)
-	AuditFilePath     string // (可选) 管理操作审计日志存储文件 (默认: <ConfigDir>/.serverweb_audit.json)
+	SubStoreDir       string        // (可选) SubHub 数据存储目录，默认 /etc/sub-store
+	FleetFilePath     string        // (可选) 节点舰队存储文件路径，默认 <ConfigDir>/fleet.yaml
+	BanFilePath       string        // (可选) 防爆破封禁列表存储文件 (默认: <ConfigDir>/.serverweb_bans.json)
+	AuditFilePath     string        // (可选) 管理操作审计日志存储文件 (默认: <ConfigDir>/.serverweb_audit.json)
 	Listen            string
 	Username          string
 	Password          string
@@ -46,86 +51,23 @@ type Options struct {
 	OnReady           func(listenAddr string)
 }
 
-// Server 服务端 Web 实例
-type Server struct {
-	opts                  Options
-	Mux                   *http.ServeMux
-	subStore              *subhub.Store
-	telemetry             *telemetry.Collector
-	fleet                 *fleet.Manager
-	mu                    sync.RWMutex
-	Sessions              map[string]SessionRecord
-	SessionsMu            sync.Mutex
-	limiter               *IPLimiter
-	audit                 *AuditManager
-	geo                   *IPGeoResolver
-	sniff                 *SniffTracker
-	passwordPendingAck    bool
-	gatewayToken          string
-	cliToken              string
-	warpMu                sync.Mutex
-	warpDeps              *deploy.LiveWarpApplyDeps
-	warpDaemonProbe       func(forceRefresh bool) WarpDaemonStatus
-	warpPortChecker       func() bool
-	warpExitFetcher       func(timeout time.Duration) (ip, loc, traceRaw string, ok bool)
-	warpRotateIdentity    func(previousIP string) (string, string, error)
-	warpCacheMu           sync.Mutex
-	warpCachedIP          string
-	warpCachedLoc         string
-	warpCachedAt          time.Time
-	warpExitRefreshing    atomic.Bool
-	warpWatchdogMu        sync.Mutex
-	warpLegacyChecked     bool
-	warpBootSynced        bool
-	warpFailStreak        int
-	warpDegraded          bool
-	warpAutoHealStatus    string
-	warpLastHealedAt      string
-	warpWatchdogDeps      *WarpWatchdogDeps
-	warpClusterMu         sync.Mutex
-	warpNodeCache         map[string]warpNodeCacheEntry
-	warpClusterRefreshing atomic.Bool
-	configCacheMu         sync.RWMutex
-	cfgStore              *config.Store
-	cachedConfigAt        time.Time
-	cachedSubAdminURL     string
-	configRefreshRunning  atomic.Bool
-	versionCacheMu        sync.Mutex
-	cachedVersions        map[string]string
-	cachedVersionsAt      time.Time
-	versionProbeRunning   atomic.Bool
-	serviceProbeMu        sync.Mutex
-	cachedServiceProbes   map[string]serviceProbeSnapshot
-	cachedServiceProbesAt time.Time
-	serviceProbeRunning   atomic.Bool
-	certProbeMu           sync.Mutex
-	cachedCerts           []CertHealth
-	cachedCertsAt         time.Time
-	certProbeRunning      atomic.Bool
-	diskMetricsMu         sync.Mutex
-	cachedDiskUsed        string
-	cachedDiskTotal       string
-	cachedDiskPercent     string
-	cachedDiskOK          bool
-	cachedDiskAt          time.Time
-	diskProbeRunning      atomic.Bool
-	statusProberOverride  func() map[string]serviceProbeSnapshot
-	configLoaderOverride  func(string) (*config.Config, error)
-	healCacheMu           sync.Mutex
-	healScanMu            sync.Mutex
-	cachedHealReport      *heal.StatusReport
-	cachedHealAt          time.Time
-	healRefreshing        atomic.Bool
-	healScannerOverride   func(ctx context.Context, configPath, currentVer string) heal.StatusReport
-	subWarmupRunning      atomic.Bool
-	cmdRunner             serviceCmdRunner
-	serviceConfigPaths    map[string]string
-	singBoxBinOverride    string
-	sseMu                 sync.Mutex
-	sseCachedAt           time.Time
-	sseCachedFrame        []byte
+// Deps 定义控制面测试可替换协作者依赖（未设置字段自动回退生产默认实现）。
+type Deps struct {
+	CmdRunner          execx.Runner
+	ServiceConfigPaths map[string]string
+	SingBoxBin         string
+	ConfigLoader       func(string) (*config.Config, error)
+	StatusProber       func() map[string]ServiceProbeSnapshot
+	HealScanner        func(ctx context.Context, configPath, currentVer string) heal.StatusReport
+	WarpApplyDeps      *deploy.LiveWarpApplyDeps
+	WarpDaemonProbe    func(forceRefresh bool) WarpDaemonStatus
+	WarpPortChecker    func() bool
+	WarpExitFetcher    func(timeout time.Duration) (ip, loc, traceRaw string, ok bool)
+	WarpRotateIdentity func(previousIP string) (string, string, error)
+	WarpWatchdogDeps   *WarpWatchdogDeps
 }
 
+// SessionRecord 记录管理员会话创建时间与最后活跃时间。
 type SessionRecord struct {
 	Created time.Time
 	Last    time.Time
@@ -137,7 +79,30 @@ const (
 	MaxActiveSessions  = 50
 )
 
-// New 创建服务端 Web 实例
+// Server 服务端 Web 薄控制面实例（状态与锁按子职责内聚下沉至各领域协作者）。
+type Server struct {
+	opts               Options
+	Mux                *http.ServeMux
+	cfgStore           *config.Store
+	subStore           *subhub.Store
+	telemetry          *telemetry.Collector
+	fleet              *fleet.Manager
+	limiter            *IPLimiter
+	audit              *AuditManager
+	geo                *IPGeoResolver
+	sniff              *SniffTracker
+	warp               *warpRuntime
+	caches             *statusCaches
+	deps               Deps
+	cliToken           string
+	mu                 sync.RWMutex
+	passwordPendingAck bool
+	gatewayToken       string
+	SessionsMu         sync.Mutex
+	Sessions           map[string]SessionRecord
+}
+
+// New 创建服务端 Web 实例并完成领域协作者装配与路由注册。
 func New(opts Options) *Server {
 	pendingAck := false
 	gatewayToken := ""
@@ -170,7 +135,7 @@ func New(opts Options) *Server {
 
 	banFile := resolveBanFilePath(opts)
 	if banFile != "" {
-		cleanupStaleServerWebTmpFiles(filepath.Dir(banFile))
+		CleanupStaleServerWebTmpFiles(filepath.Dir(banFile))
 	}
 	auditFile := resolveAuditFilePath(opts)
 	cliToken := ensureCLIToken(ResolveCLITokenPath(opts.ConfigPath))
@@ -188,46 +153,194 @@ func New(opts Options) *Server {
 
 	limiter := NewIPLimiter(3, 10*time.Minute, 15*time.Minute, banFile)
 	geo := NewIPGeoResolver(resolveGeoFilePath(opts))
-	sniffFile := resolveSniffFilePath(opts)
-	sniffTracker := NewSniffTracker(geo, limiter, sniffFile)
-	sniffTracker.SetFleetManager(fleetMgr)
+	sniffTracker := NewSniffTracker(geo, limiter, resolveSniffFilePath(opts))
+	wireSniffRemoteProvider(sniffTracker, fleetMgr)
+
 	cfgStore := opts.ConfigStore
 	if cfgStore == nil {
 		cfgStore = config.NewStore(opts.ConfigPath, config.WithInitialConfig(initialCfg))
 	} else if initialCfg != nil && cfgStore.Revision() == 0 {
 		cfgStore.Set(initialCfg)
 	}
+
 	s := &Server{
 		opts:               opts,
 		Mux:                http.NewServeMux(),
+		cfgStore:           cfgStore,
 		subStore:           subStore,
 		telemetry:          telemetry.NewCollector(opts.SingBoxConfigPath),
 		fleet:              fleetMgr,
-		Sessions:           make(map[string]SessionRecord),
 		limiter:            limiter,
 		audit:              NewAuditManager(auditFile),
 		geo:                geo,
 		sniff:              sniffTracker,
+		cliToken:           cliToken,
 		passwordPendingAck: pendingAck,
 		gatewayToken:       gatewayToken,
-		cliToken:           cliToken,
-		cfgStore:           cfgStore,
+		Sessions:           make(map[string]SessionRecord),
 	}
+	s.caches = newStatusCaches(s)
+	s.warp = newWarpRuntime(s)
 	if initialCfg != nil {
 		s.updateConfigCache(initialCfg)
 	}
 
-	// 静态单页面：放行静态资源，敏感 API 均受 guard 保护；
-	// /assets/* 含构建期内容哈希，设置一年 immutable 强制浏览器长缓存；
-	// 首页 / 与 index.html 设置 no-store，保证版本升级后立刻加载新版前端。
-	staticContent, err := fs.Sub(staticFS, "static")
-	if err == nil {
+	if staticContent, err := fs.Sub(staticFS, "static"); err == nil {
 		fileServer := http.FileServer(http.FS(staticContent))
 		s.Mux.Handle("/", wrapStaticCacheHeaders(fileServer))
 	}
 
 	s.registerRoutes()
 	return s
+}
+
+func wireSniffRemoteProvider(tracker *SniffTracker, fleetMgr *fleet.Manager) {
+	if tracker == nil || fleetMgr == nil {
+		return
+	}
+	tracker.SetRemoteProvider(&sniff.RemoteProvider{
+		TelemetryAddr: telemetry.DefaultControllerAddr,
+		Revision: func() uint64 {
+			if fleetMgr.Store == nil {
+				return 0
+			}
+			return fleetMgr.Store.Revision()
+		},
+		ListTargets: func() ([]sniff.RemoteTarget, error) {
+			if fleetMgr.Store == nil {
+				return nil, nil
+			}
+			nodes, err := fleetMgr.Store.List()
+			if err != nil {
+				return nil, err
+			}
+			out := make([]sniff.RemoteTarget, 0, len(nodes))
+			for _, n := range nodes {
+				out = append(out, sniff.RemoteTarget{
+					ID:      n.ID,
+					Name:    cmp.Or(n.Name, n.ID),
+					Host:    cmp.Or(n.Host, n.Domain),
+					Enabled: n.Enabled,
+					Online:  n.Online,
+				})
+			}
+			return out, nil
+		},
+		Exec: func(ctx context.Context, target sniff.RemoteTarget, script string) (string, int, error) {
+			if fleetMgr.Store == nil {
+				return "", 0, errors.New("fleet store unavailable")
+			}
+			node, ok, err := fleetMgr.Store.Get(target.ID)
+			if err != nil || !ok {
+				return "", 0, fmt.Errorf("fleet node %q not found", target.ID)
+			}
+			runner := fleetMgr.Runner
+			if runner == nil {
+				runner = fleet.DefaultSSHRunner
+			}
+			return runner(ctx, node, script)
+		},
+	})
+}
+
+// SetDeps 按非零字段增量注入测试协作者（并发安全）。
+func (s *Server) SetDeps(d Deps) {
+	s.mu.Lock()
+	if d.CmdRunner != nil {
+		s.deps.CmdRunner = d.CmdRunner
+	}
+	if d.ServiceConfigPaths != nil {
+		s.deps.ServiceConfigPaths = maps.Clone(d.ServiceConfigPaths)
+	}
+	if d.SingBoxBin != "" {
+		s.deps.SingBoxBin = d.SingBoxBin
+	}
+	if d.ConfigLoader != nil {
+		s.deps.ConfigLoader = d.ConfigLoader
+	}
+	if d.StatusProber != nil {
+		s.deps.StatusProber = d.StatusProber
+	}
+	if d.HealScanner != nil {
+		s.deps.HealScanner = d.HealScanner
+	}
+	if d.WarpApplyDeps != nil {
+		s.deps.WarpApplyDeps = d.WarpApplyDeps
+	}
+	if d.WarpRotateIdentity != nil {
+		s.deps.WarpRotateIdentity = d.WarpRotateIdentity
+	}
+	s.mu.Unlock()
+
+	if s.warp != nil {
+		if d.WarpDaemonProbe != nil {
+			s.warp.prober.DaemonProbe = d.WarpDaemonProbe
+		}
+		if d.WarpPortChecker != nil {
+			s.warp.prober.PortChecker = d.WarpPortChecker
+		}
+		if d.WarpExitFetcher != nil {
+			s.warp.prober.ExitFetcher = d.WarpExitFetcher
+		}
+		if d.WarpWatchdogDeps != nil {
+			s.warp.watchdog.SetDeps(d.WarpWatchdogDeps)
+		}
+	}
+}
+
+func (s *Server) snapshotDeps() Deps {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.deps
+}
+
+// FleetManager 暴露底层舰队编排管理器。
+func (s *Server) FleetManager() *fleet.Manager { return s.fleet }
+
+// SubStore 暴露底层 SubHub 存储实例。
+func (s *Server) SubStore() *subhub.Store { return s.subStore }
+
+// SniffTracker 暴露底层嗅探雷达追踪器。
+func (s *Server) SniffTracker() *SniffTracker { return s.sniff }
+
+// GeoResolver 暴露底层实例级 GeoIP 解析器。
+func (s *Server) GeoResolver() *IPGeoResolver { return s.geo }
+
+// Limiter 暴露底层登录防爆破限流器。
+func (s *Server) Limiter() *IPLimiter { return s.limiter }
+
+// AuditManager 暴露底层操作审计日志管理器。
+func (s *Server) AuditManager() *AuditManager { return s.audit }
+
+// CLIToken 返回本机回环 CLI 管理令牌。
+func (s *Server) CLIToken() string { return s.cliToken }
+
+// SeedStatusCaches 预置组件版本与证书健康快照缓存（供测试隔离外部子进程调用）。
+func (s *Server) SeedStatusCaches(versions map[string]string, certs []CertHealth) {
+	if s.caches == nil {
+		return
+	}
+	if versions != nil {
+		s.caches.versions.Set(maps.Clone(versions))
+	}
+	if certs != nil {
+		s.caches.certs.Set(slices.Clone(certs))
+	}
+}
+
+// SeedHealCache 预置安全自愈状态缓存与采集时间。
+func (s *Server) SeedHealCache(rep *heal.StatusReport, fetchedAt time.Time) {
+	if s.caches == nil || s.caches.heal == nil || rep == nil {
+		return
+	}
+	s.caches.heal.set(rep, fetchedAt)
+}
+
+// SeedWarpExitCache 预置本地 WARP 出口 IP 与地区缓存。
+func (s *Server) SeedWarpExitCache(ip, loc string, at time.Time) {
+	if s.warp != nil && s.warp.prober != nil {
+		s.warp.prober.SetCachedExit(ip, loc, at)
+	}
 }
 
 func wrapStaticCacheHeaders(next http.Handler) http.Handler {
@@ -312,7 +425,7 @@ func (s *Server) registerRoutes() {
 	s.Mux.HandleFunc("GET /api/server/camouflage/defaults", s.guard(s.handleCamouflageDefaults))
 	s.Mux.HandleFunc("POST /api/server/camouflage/probe", s.guard(s.handleCamouflageProbe))
 
-	// 三层自动化安全漏洞自愈中心 (3-Layer Security Self-Healing)
+	// 三层自动化安全漏洞自愈中心
 	s.Mux.HandleFunc("GET /api/server/heal/status", s.guard(s.handleHealStatus))
 	s.Mux.HandleFunc("POST /api/server/heal/run", s.guard(s.handleHealRun))
 	s.Mux.HandleFunc("PUT /api/server/heal/policy", s.guard(s.handleHealPolicy))
@@ -322,23 +435,12 @@ func (s *Server) registerRoutes() {
 	s.Mux.HandleFunc("POST /api/server/logout", s.handleLogout)
 }
 
-// FleetManager exposes the underlying fleet manager (useful for testing/injection).
-func (s *Server) FleetManager() *fleet.Manager {
-	return s.fleet
-}
-
-// SubStore exposes the underlying SubHub store.
-func (s *Server) SubStore() *subhub.Store {
-	return s.subStore
-}
-
 // ListenAndServe 启动 HTTP 服务（阻塞直至服务退出）。
 func (s *Server) ListenAndServe() error {
 	return s.ServeContext(context.Background())
 }
 
 // buildLifecycle 构建服务端后台协程与持久化落盘的确定性三阶段生命周期编排组。
-// 注册顺序决定关闭逆序：先停后台巡检，最后统一刷盘，避免后台协程向已关闭管理器继续写入。
 func (s *Server) buildLifecycle(patrolCtx context.Context, cancelPatrol context.CancelFunc) *lifecycle.Group {
 	g := lifecycle.NewGroup()
 	g.Add(
@@ -376,14 +478,14 @@ func (s *Server) buildLifecycle(patrolCtx context.Context, cancelPatrol context.
 		lifecycle.FuncService{
 			ServiceName: "warp-watchdog",
 			OnStart: func(context.Context) error {
-				s.StartWarpWatchdog(patrolCtx, DefaultWarpWatchdogInterval)
+				s.warp.watchdog.Start(patrolCtx, deploy.DefaultWarpWatchdogInterval)
 				return nil
 			},
 		},
 		lifecycle.FuncService{
 			ServiceName: "heal-boot-scan",
 			OnPostStart: func(context.Context) error {
-				tryRunSingleFlight(&s.healRefreshing, 45*time.Second, func(bgCtx context.Context) {
+				tryRunSingleFlight(&s.caches.heal.refreshing, 45*time.Second, func(bgCtx context.Context) {
 					s.runHealScanSync(bgCtx)
 				})
 				return nil
@@ -450,25 +552,17 @@ func (s *Server) ServeContext(ctx context.Context) error {
 }
 
 func (s *Server) invalidateStatusCaches() {
-	s.serviceProbeMu.Lock()
-	s.cachedServiceProbes = nil
-	s.cachedServiceProbesAt = time.Time{}
-	s.serviceProbeMu.Unlock()
-
-	s.versionCacheMu.Lock()
-	s.cachedVersions = nil
-	s.cachedVersionsAt = time.Time{}
-	s.versionCacheMu.Unlock()
-
-	s.certProbeMu.Lock()
-	s.cachedCerts = nil
-	s.cachedCertsAt = time.Time{}
-	s.certProbeMu.Unlock()
+	if s.caches == nil {
+		return
+	}
+	s.caches.serviceProbes.Invalidate()
+	s.caches.versions.Invalidate()
+	s.caches.certs.Invalidate()
 }
 
 func (s *Server) loadConfigSnapshot() (*config.Config, error) {
-	if s.configLoaderOverride != nil {
-		return s.configLoaderOverride(s.opts.ConfigPath)
+	if loader := s.snapshotDeps().ConfigLoader; loader != nil {
+		return loader(s.opts.ConfigPath)
 	}
 	if s.cfgStore != nil {
 		return s.cfgStore.LoadLatest()
@@ -512,31 +606,49 @@ func (s *Server) updateConfigCache(cfg *config.Config) {
 	if s.cfgStore != nil && s.cfgStore.Get() != cfg {
 		s.cfgStore.Set(cfg)
 	}
-	subURL := s.resolveSubstoreAdminURLFast(cfg)
-	s.configCacheMu.Lock()
-	s.cachedSubAdminURL = subURL
-	s.cachedConfigAt = time.Now()
-	s.configCacheMu.Unlock()
+	if s.caches != nil && s.caches.config != nil {
+		s.caches.config.Set(cachedConfigBundle{
+			cfg:         cfg,
+			subAdminURL: s.resolveSubstoreAdminURLFast(cfg),
+		})
+	}
 }
 
-func (s *Server) invalidateConfigCache() {
-	s.configCacheMu.Lock()
-	s.cachedConfigAt = time.Time{}
-	s.configCacheMu.Unlock()
+// InvalidateConfigCache 主动失效配置 SWR 缓存与底层 config.Store 指纹。
+func (s *Server) InvalidateConfigCache() {
+	if s.caches != nil && s.caches.config != nil {
+		s.caches.config.Invalidate()
+	}
 	if s.cfgStore != nil {
 		s.cfgStore.Invalidate()
 	}
 }
 
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+func applySecurityResponseHeaders(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-Frame-Options", "DENY")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	applySecurityResponseHeaders(w)
+	httpx.WriteJSON(w, status, v)
 }
 
 func writeJSONError(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, map[string]any{"error": msg})
+	applySecurityResponseHeaders(w)
+	httpx.WriteError(w, httpx.NewStatusError(status, msg, nil))
+}
+
+func decodeBodyJSON[T any](w http.ResponseWriter, r *http.Request, maxBytes int64, allowEmpty bool, badReqMsg string) (T, bool) {
+	out, err := httpx.DecodeJSON[T](w, r, maxBytes, allowEmpty)
+	if err == nil {
+		return out, true
+	}
+	if se, ok := errors.AsType[*httpx.StatusError](err); ok && se.Code == http.StatusRequestEntityTooLarge {
+		writeJSONError(w, http.StatusRequestEntityTooLarge, se.Error())
+		return out, false
+	}
+	writeJSONError(w, http.StatusBadRequest, cmp.Or(badReqMsg, err.Error()))
+	return out, false
 }

@@ -2,7 +2,7 @@ import React from 'react';
 import { Globe, Monitor, Radar, Router, Wifi } from 'lucide-react';
 import { Badge } from '../../../ui';
 import { countryFlag } from '../../lib/leakProbes';
-import { maskFullIP, redactInlineSensitive } from '../../lib/privacyMask';
+import { maskFullIP, redactInlineSensitive } from '../../../lib/privacyMask';
 import { DNSLeakReport } from '../../types';
 import { PanoramicAnalysis } from './analyzePanoramicSuite';
 import { formatGeoLine, MergedDNSRow, PanoramicSuiteState } from './browserDoHFlow';

@@ -4,79 +4,143 @@ package audit
 import (
 	"cmp"
 	"context"
-	"encoding/json"
 	"fmt"
 	"math"
 	"net"
-	"net/http"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
+
+	"singctl/internal/singbox/clashapi"
 )
 
-// clashConnectionsResponse 对应 sing-box Clash API GET /connections 响应结构。
-type clashConnectionsResponse struct {
-	DownloadTotal int64             `json:"downloadTotal"`
-	UploadTotal   int64             `json:"uploadTotal"`
-	Connections   []clashConnection `json:"connections"`
-}
-
-type clashConnection struct {
-	ID          string   `json:"id"`
-	Upload      int64    `json:"upload"`
-	Download    int64    `json:"download"`
-	Start       string   `json:"start"`
-	Chains      []string `json:"chains"`
-	Rule        string   `json:"rule"`
-	RulePayload string   `json:"rulePayload"`
-	Metadata    struct {
-		Network         string `json:"network"`
-		Type            string `json:"type"`
-		SourceIP        string `json:"sourceIP"`
-		DestinationIP   string `json:"destinationIP"`
-		SourcePort      string `json:"sourcePort"`
-		DestinationPort string `json:"destinationPort"`
-		Host            string `json:"host"`
-		SniffHost       string `json:"sniffHost,omitempty"`
-	} `json:"metadata"`
-}
+// clashConnectionsResponse 与 clashConnection 直接复用统一 clashapi 数据模型。
+type clashConnectionsResponse = clashapi.ConnectionsSnapshot
+type clashConnection = clashapi.Connection
 
 func (c *Collector) fetchConnectionsLocked(ctx context.Context) (*clashConnectionsResponse, string, error) {
+	cli := c.clashClient
+	if cli == nil {
+		cli = clashapi.NewClient(clashapi.Options{RequestTimeout: 2500 * time.Millisecond})
+	}
 	var lastErr error
 	for _, ep := range c.endpoints {
-		u := strings.TrimRight(ep, "/") + "/connections"
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+		parsed, err := fetchEndpointConnections(ctx, cli, ep, c.secret)
 		if err != nil {
 			lastErr = err
 			continue
 		}
-		if c.secret != "" {
-			req.Header.Set("Authorization", "Bearer "+c.secret)
-		}
-		resp, err := c.httpClient.Do(req)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		if resp.StatusCode != http.StatusOK {
-			resp.Body.Close()
-			lastErr = fmt.Errorf("clash api %s returned %d", ep, resp.StatusCode)
-			continue
-		}
-		var parsed clashConnectionsResponse
-		decErr := json.NewDecoder(resp.Body).Decode(&parsed)
-		resp.Body.Close()
-		if decErr != nil {
-			lastErr = decErr
-			continue
-		}
-		return &parsed, ep, nil
+		return parsed, ep, nil
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("no clash api endpoints available")
 	}
 	return nil, "", lastErr
+}
+
+func fetchEndpointConnections(ctx context.Context, client *clashapi.Client, endpoint, secret string) (*clashConnectionsResponse, error) {
+	snap, err := client.ConnectionsAt(ctx, endpoint, secret)
+	if err != nil {
+		return nil, err
+	}
+	return &snap, nil
+}
+
+func computeConnByteDelta(cursors map[string]connByteCursor, conn clashConnection, nowUnix int64) (deltaUp, deltaDown int64, isNew bool) {
+	prev, seen := cursors[conn.ID]
+	cursors[conn.ID] = connByteCursor{
+		Upload:   conn.Upload,
+		Download: conn.Download,
+		SeenUnix: nowUnix,
+	}
+	if !seen {
+		return conn.Upload, conn.Download, true
+	}
+	deltaUp = conn.Upload
+	if conn.Upload >= prev.Upload {
+		deltaUp = conn.Upload - prev.Upload
+	}
+	deltaDown = conn.Download
+	if conn.Download >= prev.Download {
+		deltaDown = conn.Download - prev.Download
+	}
+	return deltaUp, deltaDown, false
+}
+
+func dedupReverseChains(raw []string) []string {
+	chains := make([]string, 0, len(raw))
+	for i := len(raw) - 1; i >= 0; i-- {
+		hop := strings.TrimSpace(raw[i])
+		if hop != "" && !slices.Contains(chains, hop) {
+			chains = append(chains, hop)
+		}
+	}
+	return chains
+}
+
+func updateFlowEntryMetadata(
+	entry *persistedFlowEntry,
+	conn clashConnection,
+	rawHost, destIP string,
+	destPort int,
+	devDir map[string]lanDeviceInfo,
+	srcIP string,
+) bool {
+	mutated := false
+	if entry.RawHost == "" && rawHost != "" {
+		entry.RawHost = rawHost
+		mutated = true
+	}
+	if destPort > 0 && entry.DestPort != destPort {
+		entry.DestPort = destPort
+		mutated = true
+	}
+	if destIP != "" && entry.DestIP != destIP {
+		entry.DestIP = destIP
+		mutated = true
+	}
+	if len(conn.Chains) > 0 {
+		if entry.Outbound != conn.Chains[0] {
+			entry.Outbound = conn.Chains[0]
+			mutated = true
+		}
+		if chains := dedupReverseChains(conn.Chains); len(chains) > 0 && !slices.Equal(entry.Chains, chains) {
+			entry.Chains = chains
+			mutated = true
+		}
+	}
+	if conn.Rule != "" {
+		newRule := conn.Rule
+		if conn.RulePayload != "" {
+			newRule = conn.Rule + "(" + conn.RulePayload + ")"
+		}
+		if entry.Rule != newRule {
+			entry.Rule = newRule
+			mutated = true
+		}
+	}
+	if devInfo, ok := devDir[srcIP]; ok && (entry.DeviceName != devInfo.Name || entry.DeviceMAC != devInfo.MAC) {
+		entry.DeviceName = devInfo.Name
+		entry.DeviceMAC = devInfo.MAC
+		mutated = true
+	}
+	return mutated
+}
+
+func recordNewConnArrival(entry *persistedFlowEntry, connStart string, nowUnix int64, isNight bool, deltaUp int64) {
+	entry.ConnCount++
+	if isNight && deltaUp > 0 {
+		entry.NightHits++
+	}
+	connStartUnix := nowUnix
+	if parsedStart, err := time.Parse(time.RFC3339Nano, connStart); err == nil {
+		connStartUnix = parsedStart.Unix()
+	}
+	entry.ArrivalsUnix = append(entry.ArrivalsUnix, connStartUnix)
+	if len(entry.ArrivalsUnix) > maxArrivalSamples {
+		entry.ArrivalsUnix = entry.ArrivalsUnix[len(entry.ArrivalsUnix)-maxArrivalSamples:]
+	}
 }
 
 func (c *Collector) ingestConnectionsLocked(
@@ -94,134 +158,69 @@ func (c *Collector) ingestConnectionsLocked(
 	mutated := false
 
 	for _, conn := range conns {
-		rawSrc := cmp.Or(strings.TrimSpace(conn.Metadata.SourceIP), "127.0.0.1")
-		srcIP := normalizeSourceDeviceIP(rawSrc, selfIPs, devDir)
-		network := strings.ToLower(cmp.Or(strings.TrimSpace(conn.Metadata.Network), "tcp"))
-		destPort, _ := strconv.Atoi(strings.TrimSpace(conn.Metadata.DestinationPort))
-		rawHost, destIP, target, isDirectIP := resolveConnTarget(conn)
-		if target == "" {
-			continue
-		}
-		if len(conn.Chains) > 0 && strings.EqualFold(conn.Chains[0], "block") {
-			continue
-		}
-		if engine != nil && engine.IsBlocked(srcIP, target) {
-			continue
-		}
-
-		// 计算该连接自上次采样以来的增量字节（支持长连接持续累加且不丢历史）
-		var deltaUp, deltaDown int64
-		isNewConn := false
-		if prev, seen := state.ConnCursors[conn.ID]; seen {
-			if conn.Upload >= prev.Upload {
-				deltaUp = conn.Upload - prev.Upload
-			} else {
-				deltaUp = conn.Upload
-			}
-			if conn.Download >= prev.Download {
-				deltaDown = conn.Download - prev.Download
-			} else {
-				deltaDown = conn.Download
-			}
-		} else {
-			isNewConn = true
-			deltaUp = conn.Upload
-			deltaDown = conn.Download
-		}
-		state.ConnCursors[conn.ID] = connByteCursor{
-			Upload:   conn.Upload,
-			Download: conn.Download,
-			SeenUnix: nowUnix,
-		}
-
-		key := srcIP + "|" + target + "|" + network
-		activeByKey[key] = append(activeByKey[key], conn.ID)
-
-		entry, exists := state.Flows[key]
-		if !exists {
-			entry = &persistedFlowEntry{
-				Key:           key,
-				DeviceIP:      srcIP,
-				Target:        target,
-				RawHost:       rawHost,
-				DestIP:        destIP,
-				DestPort:      destPort,
-				IsDirectIP:    isDirectIP,
-				Network:       network,
-				FirstSeenUnix: nowUnix,
-			}
-			state.Flows[key] = entry
+		if ingestSingleConnection(state, conn, devDir, selfIPs, activeByKey, engine, nowUnix, isNight) {
 			mutated = true
 		}
+	}
+	return mutated
+}
 
-		if isNewConn || deltaUp > 0 || deltaDown > 0 {
-			mutated = true
-		}
+func ingestSingleConnection(
+	state *persistedAuditState,
+	conn clashConnection,
+	devDir map[string]lanDeviceInfo,
+	selfIPs map[string]bool,
+	activeByKey map[string][]string,
+	engine *NonlinearEngine,
+	nowUnix int64,
+	isNight bool,
+) bool {
+	rawSrc := cmp.Or(strings.TrimSpace(conn.Metadata.SourceIP), "127.0.0.1")
+	srcIP := normalizeSourceDeviceIP(rawSrc, selfIPs, devDir)
+	rawHost, destIP, target, isDirectIP := resolveConnTarget(conn)
+	if target == "" {
+		return false
+	}
+	if len(conn.Chains) > 0 && strings.EqualFold(conn.Chains[0], "block") {
+		return false
+	}
+	if engine != nil && engine.IsBlocked(srcIP, target) {
+		return false
+	}
 
-		entry.LastSeenUnix = nowUnix
-		entry.UploadBytes += deltaUp
-		entry.DownloadBytes += deltaDown
-		if entry.RawHost == "" && rawHost != "" {
-			entry.RawHost = rawHost
-			mutated = true
-		}
-		if destPort > 0 && entry.DestPort != destPort {
-			entry.DestPort = destPort
-			mutated = true
-		}
-		if destIP != "" && entry.DestIP != destIP {
-			entry.DestIP = destIP
-			mutated = true
-		}
-		if len(conn.Chains) > 0 {
-			if entry.Outbound != conn.Chains[0] {
-				entry.Outbound = conn.Chains[0]
-				mutated = true
-			}
-			chains := make([]string, 0, len(conn.Chains))
-			for i := len(conn.Chains) - 1; i >= 0; i-- {
-				hop := strings.TrimSpace(conn.Chains[i])
-				if hop != "" && !slices.Contains(chains, hop) {
-					chains = append(chains, hop)
-				}
-			}
-			if len(chains) > 0 && !slices.Equal(entry.Chains, chains) {
-				entry.Chains = chains
-				mutated = true
-			}
-		}
-		if conn.Rule != "" {
-			newRule := conn.Rule
-			if conn.RulePayload != "" {
-				newRule = conn.Rule + "(" + conn.RulePayload + ")"
-			}
-			if entry.Rule != newRule {
-				entry.Rule = newRule
-				mutated = true
-			}
-		}
-		if devInfo, ok := devDir[srcIP]; ok {
-			if entry.DeviceName != devInfo.Name || entry.DeviceMAC != devInfo.MAC {
-				entry.DeviceName = devInfo.Name
-				entry.DeviceMAC = devInfo.MAC
-				mutated = true
-			}
-		}
+	network := strings.ToLower(cmp.Or(strings.TrimSpace(conn.Metadata.Network), "tcp"))
+	destPort, _ := strconv.Atoi(strings.TrimSpace(conn.Metadata.DestinationPort))
+	deltaUp, deltaDown, isNewConn := computeConnByteDelta(state.ConnCursors, conn, nowUnix)
 
-		if isNewConn {
-			entry.ConnCount++
-			if isNight && deltaUp > 0 {
-				entry.NightHits++
-			}
-			connStartUnix := nowUnix
-			if parsedStart, err := time.Parse(time.RFC3339Nano, conn.Start); err == nil {
-				connStartUnix = parsedStart.Unix()
-			}
-			entry.ArrivalsUnix = append(entry.ArrivalsUnix, connStartUnix)
-			if len(entry.ArrivalsUnix) > maxArrivalSamples {
-				entry.ArrivalsUnix = entry.ArrivalsUnix[len(entry.ArrivalsUnix)-maxArrivalSamples:]
-			}
+	key := srcIP + "|" + target + "|" + network
+	activeByKey[key] = append(activeByKey[key], conn.ID)
+
+	mutated := isNewConn || deltaUp > 0 || deltaDown > 0
+	entry, exists := state.Flows[key]
+	if !exists {
+		entry = &persistedFlowEntry{
+			Key:           key,
+			DeviceIP:      srcIP,
+			Target:        target,
+			RawHost:       rawHost,
+			DestIP:        destIP,
+			DestPort:      destPort,
+			IsDirectIP:    isDirectIP,
+			Network:       network,
+			FirstSeenUnix: nowUnix,
 		}
+		state.Flows[key] = entry
+		mutated = true
+	}
+
+	entry.LastSeenUnix = nowUnix
+	entry.UploadBytes += deltaUp
+	entry.DownloadBytes += deltaDown
+	if updateFlowEntryMetadata(entry, conn, rawHost, destIP, destPort, devDir, srcIP) {
+		mutated = true
+	}
+	if isNewConn {
+		recordNewConnArrival(entry, conn.Start, nowUnix, isNight, deltaUp)
 	}
 	return mutated
 }
@@ -237,7 +236,7 @@ func computeIntervalCV(arrivals []int64) float64 {
 	intervals := make([]float64, 0, len(sorted)-1)
 	for i := 1; i < len(sorted); i++ {
 		diff := float64(sorted[i] - sorted[i-1])
-		if diff >= 0.5 { // 忽略同一毫秒并发建连簇，聚焦周期性间隔
+		if diff >= 0.5 {
 			intervals = append(intervals, diff)
 		}
 	}
@@ -260,16 +259,16 @@ func computeIntervalCV(arrivals []int64) float64 {
 		sqDiffSum += d * d
 	}
 	stdDev := math.Sqrt(sqDiffSum / float64(len(intervals)))
-	cv := stdDev / mean
-	return math.Round(cv*1000) / 1000
+	return math.Round((stdDev/mean)*1000) / 1000
 }
+
 func enforcementActiveRank(s EnforcementState) int {
 	switch s {
 	case EnforcementBlocked:
 		return 1
 	case EnforcementWhitelisted:
 		return 0
-	default: // EnforcementObserved 或未填充态优先排在待处置前列
+	default:
 		return 2
 	}
 }
@@ -297,105 +296,93 @@ func compareRiskHierarchy(a, b FlowRecord) int {
 	return cmp.Compare(b.UploadBytes, a.UploadBytes)
 }
 
+func applySortDirection(c int, asc bool) int {
+	if asc {
+		return -c
+	}
+	return c
+}
+
+func compareFlowsBySortKey(a, b FlowRecord, key string, asc bool) int {
+	switch key {
+	case "upload":
+		if c := applySortDirection(cmp.Compare(b.UploadBytes, a.UploadBytes), asc); c != 0 {
+			return c
+		}
+		if r := cmp.Compare(b.RiskScore, a.RiskScore); r != 0 {
+			return r
+		}
+		return cmp.Compare(b.DownloadBytes, a.DownloadBytes)
+	case "download":
+		if c := applySortDirection(cmp.Compare(b.DownloadBytes, a.DownloadBytes), asc); c != 0 {
+			return c
+		}
+		if r := cmp.Compare(b.RiskScore, a.RiskScore); r != 0 {
+			return r
+		}
+		return cmp.Compare(b.UploadBytes, a.UploadBytes)
+	case "ratio":
+		if c := applySortDirection(cmp.Compare(b.UploadRatio, a.UploadRatio), asc); c != 0 {
+			return c
+		}
+		if u := cmp.Compare(b.UploadBytes, a.UploadBytes); u != 0 {
+			return u
+		}
+		return cmp.Compare(b.RiskScore, a.RiskScore)
+	case "risk":
+		return applySortDirection(compareRiskHierarchy(a, b), asc)
+	default:
+		if act := cmp.Compare(flowActiveBucket(b), flowActiveBucket(a)); act != 0 {
+			return applySortDirection(act, asc)
+		}
+		return applySortDirection(compareRiskHierarchy(a, b), asc)
+	}
+}
+
 // SortFlows 对审计流记录按指定字段（默认 "active": 活跃优先+风险评分，或 "risk" | "upload" | "download" | "ratio"）执行稳定排序。
 func SortFlows(flows []FlowRecord, sortBy string, asc bool) {
 	key := strings.ToLower(strings.TrimSpace(sortBy))
 	slices.SortFunc(flows, func(a, b FlowRecord) int {
-		var c int
-		switch key {
-		case "upload":
-			c = cmp.Compare(b.UploadBytes, a.UploadBytes)
-			if asc {
-				c = -c
-			}
-			if c != 0 {
-				return c
-			}
-			if r := cmp.Compare(b.RiskScore, a.RiskScore); r != 0 {
-				return r
-			}
-			return cmp.Compare(b.DownloadBytes, a.DownloadBytes)
-		case "download":
-			c = cmp.Compare(b.DownloadBytes, a.DownloadBytes)
-			if asc {
-				c = -c
-			}
-			if c != 0 {
-				return c
-			}
-			if r := cmp.Compare(b.RiskScore, a.RiskScore); r != 0 {
-				return r
-			}
-			return cmp.Compare(b.UploadBytes, a.UploadBytes)
-		case "ratio":
-			c = cmp.Compare(b.UploadRatio, a.UploadRatio)
-			if asc {
-				c = -c
-			}
-			if c != 0 {
-				return c
-			}
-			if u := cmp.Compare(b.UploadBytes, a.UploadBytes); u != 0 {
-				return u
-			}
-			return cmp.Compare(b.RiskScore, a.RiskScore)
-		case "risk":
-			c = compareRiskHierarchy(a, b)
-			if asc {
-				c = -c
-			}
-			return c
-		default: // "" 或 "active"：活跃置顶 -> 组内按风险评分层级降序
-			if act := cmp.Compare(flowActiveBucket(b), flowActiveBucket(a)); act != 0 {
-				c = act
-			} else {
-				c = compareRiskHierarchy(a, b)
-			}
-			if asc {
-				c = -c
-			}
-			return c
-		}
+		return compareFlowsBySortKey(a, b, key, asc)
 	})
+}
+
+func isValidDNSLabel(label string) bool {
+	if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+		return false
+	}
+	for i := range len(label) {
+		ch := label[i]
+		isAlphaNum := (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')
+		if !isAlphaNum && ch != '-' && ch != '_' {
+			return false
+		}
+	}
+	return true
 }
 
 // isValidAuditDomain 校验嗅探出的字符串是否为合法 FQDN 域名（拒绝类似 "Mijia Cloud" 的 TLS 证书 Subject CN 非域名文本）。
 func isValidAuditDomain(s string) bool {
 	s = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(s)), ".")
-	if s == "" || len(s) > 253 || net.ParseIP(s) != nil {
-		return false
-	}
-	if !strings.Contains(s, ".") {
+	if s == "" || len(s) > 253 || !strings.Contains(s, ".") || net.ParseIP(s) != nil {
 		return false
 	}
 	lastLabel := ""
 	for label := range strings.SplitSeq(s, ".") {
-		if len(label) == 0 || len(label) > 63 {
+		if !isValidDNSLabel(label) {
 			return false
-		}
-		if label[0] == '-' || label[len(label)-1] == '-' {
-			return false
-		}
-		for i := range len(label) {
-			ch := label[i]
-			isAlphaNum := (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')
-			if !isAlphaNum && ch != '-' && ch != '_' {
-				return false
-			}
 		}
 		lastLabel = label
 	}
 	if len(lastLabel) < 2 || strings.Contains(lastLabel, "_") {
 		return false
 	}
-	allDigits := true
 	for i := range len(lastLabel) {
 		if lastLabel[i] < '0' || lastLabel[i] > '9' {
-			allDigits = false
-			break
+			return true
 		}
 	}
-	return !allDigits
+	return false
 }
 
 // resolveConnTarget 从 Clash API 单条连接元数据提取规范化目标域名/IP（供采集与连接断开共享）。
@@ -407,11 +394,10 @@ func resolveConnTarget(conn clashConnection) (rawHost, destIP, target string, is
 		target = strings.TrimSuffix(h, ".")
 	}
 	if target == "" || net.ParseIP(target) != nil {
-		isDirectIP = true
-		target = cmp.Or(destIP, target)
-	} else if !isValidAuditDomain(target) {
-		isDirectIP = true
-		target = destIP
+		return rawHost, destIP, cmp.Or(destIP, target), true
 	}
-	return rawHost, destIP, target, isDirectIP
+	if !isValidAuditDomain(target) {
+		return rawHost, destIP, destIP, true
+	}
+	return rawHost, destIP, target, false
 }

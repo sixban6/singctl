@@ -1,3 +1,4 @@
+// 文件职责：实现每小时重启次数滑动窗口限流器与指数退避策略，并与 StateStore 无缝同步持久化。
 package daemon
 
 import (
@@ -8,31 +9,31 @@ import (
 )
 
 const (
-	// DefaultMaxRestarts 默认每小时最大自动重启次数
 	DefaultMaxRestarts = 3
 	defaultTimeWindow  = time.Hour
 )
 
-// RestartLimiter 重启频率限制器
+// RestartLimiter 重启频率限制器。
 type RestartLimiter struct {
-	maxRestarts   int           // 最大重启次数
-	timeWindow    time.Duration // 时间窗口
-	restartTimes  []time.Time   // 重启时间记录
-	totalRestarts int64         // 累计重启总数(跨窗口, 随状态文件持久化)
-	mu            sync.Mutex    // 并发保护
+	maxRestarts   int
+	timeWindow    time.Duration
+	restartTimes  []time.Time
+	totalRestarts int64
+	store         *StateStore
+	mu            sync.Mutex
 }
 
-// NewRestartLimiter 创建重启限制器（内存态，不读取持久化状态）。
-// 守护进程自身使用；需要展示历史计数时用 NewRestartLimiterFromState。
+// NewRestartLimiter 创建默认重启限制器（内存态，落盘时合并至默认 StateStore）。
 func NewRestartLimiter() *RestartLimiter {
 	return &RestartLimiter{
 		maxRestarts:  DefaultMaxRestarts,
 		timeWindow:   defaultTimeWindow,
 		restartTimes: make([]time.Time, 0),
+		store:        defaultStateStore,
 	}
 }
 
-// NewRestartLimiterWithMax 创建指定上限的重启限制器
+// NewRestartLimiterWithMax 创建指定上限的重启限制器。
 func NewRestartLimiterWithMax(max int) *RestartLimiter {
 	rl := NewRestartLimiter()
 	if max > 0 {
@@ -41,16 +42,22 @@ func NewRestartLimiterWithMax(max int) *RestartLimiter {
 	return rl
 }
 
-// NewRestartLimiterFromState 读取持久化的重启记录构建限制器。
-// 用于 dm status / WebUI 等外部观察者：真实计数只存在于看门狗进程内存中，
-// 这里从状态文件恢复（看门狗每次 RecordRestart 都会落盘）。
-// 兼容旧格式(纯时间戳数组, 无累计总数——总数从 0 重新累计)。
+// NewRestartLimiterFromState 读取默认状态文件中的持久化重启记录构建限制器。
 func NewRestartLimiterFromState(max int) *RestartLimiter {
+	return NewRestartLimiterFromStore(max, defaultStateStore)
+}
+
+// NewRestartLimiterFromStore 从指定 StateStore 恢复持久化的重启记录构建限制器。
+func NewRestartLimiterFromStore(max int, store *StateStore) *RestartLimiter {
+	if store == nil {
+		store = defaultStateStore
+	}
 	rl := NewRestartLimiterWithMax(max)
-	if data, err := os.ReadFile(GetStateFilePath()); err == nil {
+	rl.store = store
+	p := store.effectivePaths()
+	if data, err := os.ReadFile(p.StateFile); err == nil {
 		var legacy []int64
 		if json.Unmarshal(data, &legacy) == nil {
-			// 旧格式: 纯时间戳数组
 			rl.loadTimes(legacy)
 			return rl
 		}
@@ -66,7 +73,6 @@ func NewRestartLimiterFromState(max int) *RestartLimiter {
 	return rl
 }
 
-// loadTimes 载入窗口内的时间戳(丢弃过期记录)
 func (rl *RestartLimiter) loadTimes(ts []int64) {
 	cutoff := time.Now().Add(-rl.timeWindow)
 	for _, v := range ts {
@@ -76,20 +82,23 @@ func (rl *RestartLimiter) loadTimes(ts []int64) {
 	}
 }
 
-// persist 将重启记录合并写入状态文件（调用方需持有 rl.mu 锁），保留状态文件中的其他运行态字段。
 func (rl *RestartLimiter) persist() {
 	ts := make([]int64, 0, len(rl.restartTimes))
 	for _, t := range rl.restartTimes {
 		ts = append(ts, t.Unix())
 	}
 	total := rl.totalRestarts
-	UpdateRuntimeState(func(snap *DaemonRuntimeSnapshot) {
+	store := rl.store
+	if store == nil {
+		store = defaultStateStore
+	}
+	store.Update(func(snap *DaemonRuntimeSnapshot) {
 		snap.Total = total
 		snap.Times = ts
 	})
 }
 
-// SetMaxRestarts 动态更新每小时最大重启次数上限（用于配置热重载）。
+// SetMaxRestarts 动态更新每小时最大重启次数上限。
 func (rl *RestartLimiter) SetMaxRestarts(max int) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
@@ -100,28 +109,23 @@ func (rl *RestartLimiter) SetMaxRestarts(max int) {
 	}
 }
 
-// CanRestart 检查是否可以重启
+// CanRestart 检查当前滑动窗口内是否允许继续自动重启。
 func (rl *RestartLimiter) CanRestart() bool {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
-	now := time.Now()
-	cutoff := now.Add(-rl.timeWindow) // 1小时前的时间
-
-	// 清理过期的重启记录
-	validRestarts := make([]time.Time, 0)
+	cutoff := time.Now().Add(-rl.timeWindow)
+	validRestarts := make([]time.Time, 0, len(rl.restartTimes))
 	for _, t := range rl.restartTimes {
 		if t.After(cutoff) {
 			validRestarts = append(validRestarts, t)
 		}
 	}
 	rl.restartTimes = validRestarts
-
-	// 检查是否超出限制
 	return len(rl.restartTimes) < rl.maxRestarts
 }
 
-// RecordRestart 记录重启时间（累计总数+1 并持久化）
+// RecordRestart 记录一次重启并持久化到关联的 StateStore。
 func (rl *RestartLimiter) RecordRestart() {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
@@ -131,48 +135,45 @@ func (rl *RestartLimiter) RecordRestart() {
 	rl.persist()
 }
 
-// GetTotalRestarts 获取累计重启总数(跨时间窗口, 从状态文件恢复)
+// GetTotalRestarts 获取累计重启总数。
 func (rl *RestartLimiter) GetTotalRestarts() int64 {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 	return rl.totalRestarts
 }
 
-// GetRestartCount 获取当前时间窗口内的重启次数
+// GetRestartCount 获取当前时间窗口内的重启次数。
 func (rl *RestartLimiter) GetRestartCount() int {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
-	now := time.Now()
-	cutoff := now.Add(-rl.timeWindow)
-
+	cutoff := time.Now().Add(-rl.timeWindow)
 	count := 0
 	for _, t := range rl.restartTimes {
 		if t.After(cutoff) {
 			count++
 		}
 	}
-
 	return count
 }
 
-// GetMaxRestarts 获取最大重启次数
+// GetMaxRestarts 获取每小时最大重启次数。
 func (rl *RestartLimiter) GetMaxRestarts() int {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
 	return rl.maxRestarts
 }
 
-// GetRestartDelay 获取重启延迟（渐进式退避）
+// GetRestartDelay 获取重启渐进式退避延迟。
 func (rl *RestartLimiter) GetRestartDelay() time.Duration {
-	restartCount := rl.GetRestartCount()
-
-	switch restartCount {
+	switch rl.GetRestartCount() {
 	case 0:
-		return 0 // 第1次立即重启
+		return 0
 	case 1:
-		return 30 * time.Second // 第2次等待30秒
+		return 30 * time.Second
 	case 2:
-		return 2 * time.Minute // 第3次等待2分钟
+		return 2 * time.Minute
 	default:
-		return 5 * time.Minute // 其他情况等待5分钟
+		return 5 * time.Minute
 	}
 }

@@ -8,12 +8,12 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"singctl/internal/common/release"
 	"singctl/internal/config"
 	"singctl/internal/constant"
 	"singctl/internal/deploy"
 	"singctl/internal/deploy/masksite"
-	"singctl/internal/scripts"
-	"singctl/internal/util/github"
+	"singctl/internal/singbox/scripts"
 	"strings"
 	"testing"
 )
@@ -134,7 +134,7 @@ func (m *mockRewriteTransport) RoundTrip(req *http.Request) (*http.Response, err
 func TestCheckComponentVersion_MockServer(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		rel := github.Release{TagName: "v2.11.7"}
+		rel := release.Info{TagName: "v2.11.7"}
 		_ = json.NewEncoder(w).Encode(rel)
 	}))
 	defer server.Close()

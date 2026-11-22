@@ -1,7 +1,9 @@
+// 文件职责：管理守护进程文件路径配置、PID 原子文件锁、进程身份校验与跨平台启停控制。
 package daemon
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -10,43 +12,55 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
+	"singctl/internal/common/fsx"
+	"singctl/internal/common/proc"
 	"singctl/internal/updater"
-	"singctl/internal/util/file"
-	"singctl/internal/util/os"
 )
 
 const (
-	// PID文件路径（跨平台）
-	PidFileName = "singctl-daemon.pid"
-	// 日志文件名
-	logFileName = "singctl-daemon.log"
-	// 重启计数状态文件名（/tmp 在 OpenWrt 上是 tmpfs，重启自动清零）
+	PidFileName   = "singctl-daemon.pid"
+	logFileName   = "singctl-daemon.log"
 	StateFileName = "singctl-daemon.state"
 )
 
-// errDaemonAlreadyRunning 已有守护进程运行
+// ErrDaemonAlreadyRunning 表示已有守护进程实例在运行。
 var ErrDaemonAlreadyRunning = errors.New("daemon already running")
 
-// 路径覆盖钩子（仅测试使用）
+// Paths 显式注入守护进程的 PID、状态与日志文件路径。
+type Paths struct {
+	PidFile   string
+	StateFile string
+	LogFile   string
+}
+
+// 兼容顶层集成测试 test/daemon_test.go 的回退钩子；包内生产与测试优先通过 Paths 显式注入。
 var (
 	PidFilePathOverride   string
 	StateFilePathOverride string
 	DaemonLogPathOverride string
-	// expectedProcNameFn 返回守护进程期望的进程名（默认取当前可执行文件名）
-	ExpectedProcNameFn = defaultProcName
+	ExpectedProcNameFn    = defaultProcName
 )
+
+// DefaultPaths 返回当前平台默认的守护进程运行路径配置。
+func DefaultPaths() Paths {
+	return Paths{
+		PidFile:   GetPidFilePath(),
+		StateFile: GetStateFilePath(),
+		LogFile:   GetDaemonLogPath(),
+	}
+}
 
 func defaultProcName() string {
 	if p, err := os.Executable(); err == nil {
-		return sanitizeProcName(p)
+		return SanitizeProcName(p)
 	}
 	return "singctl"
 }
 
-func sanitizeProcName(exePath string) string {
+// SanitizeProcName 剥离自更新残留后缀（如 " (deleted)" / ".backup" / ".exe"）提取纯净进程名。
+func SanitizeProcName(exePath string) string {
 	p := strings.TrimSpace(exePath)
 	for {
 		trimmed := strings.TrimSuffix(p, " (deleted)")
@@ -98,12 +112,14 @@ func extractPositionalSubcommands(args []string) []string {
 	return out
 }
 
-func isDaemonStartCmdline(args []string) bool {
+// IsDaemonStartCmdline 判断命令行参数是否为 `singctl dm/daemon start`。
+func IsDaemonStartCmdline(args []string) bool {
 	subs := extractPositionalSubcommands(args)
 	return len(subs) >= 2 && (subs[0] == "dm" || subs[0] == "daemon") && subs[1] == "start"
 }
 
-func isConflictingSingctlSubcommand(args []string) bool {
+// IsConflictingSingctlSubcommand 判断命令行是否为同二进制的非守护子命令（如 web / sr / fleet）。
+func IsConflictingSingctlSubcommand(args []string) bool {
 	subs := extractPositionalSubcommands(args)
 	if len(subs) == 0 {
 		return false
@@ -116,105 +132,79 @@ func isConflictingSingctlSubcommand(args []string) bool {
 	}
 }
 
-// getPidFilePath 获取PID文件路径
+func defaultTempDir() string {
+	if runtime.GOOS == "windows" {
+		return os.Getenv("TEMP")
+	}
+	return "/tmp"
+}
+
+// GetPidFilePath 获取 PID 文件路径。
 func GetPidFilePath() string {
-	if PidFilePathOverride != "" {
-		return PidFilePathOverride
-	}
-	if runtime.GOOS == "windows" {
-		return filepath.Join(os.Getenv("TEMP"), PidFileName)
-	}
-	return filepath.Join("/tmp", PidFileName)
+	return cmp.Or(PidFilePathOverride, filepath.Join(defaultTempDir(), PidFileName))
 }
 
-// getStateFilePath 获取重启计数状态文件路径
+// GetStateFilePath 获取重启与运行态快照文件路径。
 func GetStateFilePath() string {
-	if StateFilePathOverride != "" {
-		return StateFilePathOverride
-	}
-	if runtime.GOOS == "windows" {
-		return filepath.Join(os.Getenv("TEMP"), StateFileName)
-	}
-	return filepath.Join("/tmp", StateFileName)
+	return cmp.Or(StateFilePathOverride, filepath.Join(defaultTempDir(), StateFileName))
 }
 
-// GetDaemonLogPath 获取守护进程日志文件路径
+// GetDaemonLogPath 获取守护进程日志文件路径。
 func GetDaemonLogPath() string {
-	if DaemonLogPathOverride != "" {
-		return DaemonLogPathOverride
-	}
-	if runtime.GOOS == "windows" {
-		return filepath.Join(os.Getenv("TEMP"), logFileName)
-	}
-	return filepath.Join("/tmp", logFileName)
+	return cmp.Or(DaemonLogPathOverride, filepath.Join(defaultTempDir(), logFileName))
 }
 
-// acquirePidLock 以硬链接原子创建 PID 文件作为互斥锁，写入当前进程 PID。
-//
-// 用途：防止并发 `dm start` 分裂出多个守护进程。
-// 实现：先写临时文件再 os.Link 到目标 —— link 在目标已存在时原子失败，
-// 避免 O_EXCL“先建空文件后写内容”窗口期内被并发者误判为残留锁清除。
-// 若目标已存在：
-//   - PID 存活且进程名匹配 → 返回 errDaemonAlreadyRunning
-//   - PID 已死或进程名不符（PID 回绕复用）→ 视为残留锁，清除后重试一次
+// AcquirePidLock 以硬链接原子创建 PID 文件作为互斥锁，写入当前进程 PID。
 func AcquirePidLock() error {
 	pid := strconv.Itoa(os.Getpid())
-	target := GetPidFilePath()
-	f, err := os.CreateTemp(filepath.Dir(target), filepath.Base(target)+".new-*")
-	if err != nil {
-		return fmt.Errorf("failed to create pid tmp file: %w", err)
-	}
-	tmp := f.Name()
-	if _, err := f.WriteString(pid); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmp)
-		return fmt.Errorf("failed to write pid tmp file: %w", err)
-	}
-	_ = f.Close()
-	defer os.Remove(tmp)
-
-	for attempt := 0; attempt < 2; attempt++ {
-		err := os.Link(tmp, target)
-		if err == nil {
-			return nil // 赢得锁
-		}
-		if !os.IsExist(err) {
-			return fmt.Errorf("failed to claim pid lock: %w", err)
-		}
-
-		// 目标已存在：判断是否为活锁
+	err := proc.AcquireLinkLock(GetPidFilePath(), []byte(pid), func() bool {
 		oldPid, rerr := ReadDaemonPid()
-		if rerr == nil && DaemonProcessMatches(oldPid) {
-			return ErrDaemonAlreadyRunning
-		}
-		// 残留锁（进程已死或 PID 被无关进程复用），清除后重试
-		_ = os.Remove(target)
+		return rerr == nil && DaemonProcessMatches(oldPid)
+	})
+	if errors.Is(err, proc.ErrLockHeld) {
+		return ErrDaemonAlreadyRunning
 	}
-	return ErrDaemonAlreadyRunning
+	return err
 }
 
-// WritePidFile 以原子方式写入PID文件（强制 0600 权限，先写临时文件再 rename，避免读到半截内容）
+// WritePidFile 以原子方式写入默认 PID 文件（强制 0600 权限）。
 func WritePidFile() error {
-	pidFile := GetPidFilePath()
-	pid := strconv.Itoa(os.Getpid())
-	return file.WriteAtomic0600(pidFile, []byte(pid))
+	return WritePidFileAt(GetPidFilePath())
 }
 
-// RemovePidFile 删除PID文件
+// WritePidFileAt 以原子方式将当前进程 PID 写入指定路径（强制 0600 权限）。
+func WritePidFileAt(pidFile string) error {
+	pid := strconv.Itoa(os.Getpid())
+	return fsx.WriteAtomic0600(pidFile, []byte(pid))
+}
+
+// RemovePidFile 删除默认 PID 文件。
 func RemovePidFile() error {
-	pidFile := GetPidFilePath()
+	return RemovePidFileAt(GetPidFilePath())
+}
+
+// RemovePidFileAt 删除指定路径的 PID 文件。
+func RemovePidFileAt(pidFile string) error {
 	if _, err := os.Stat(pidFile); os.IsNotExist(err) {
-		return nil // 文件不存在，无需删除
+		return nil
 	}
 	return os.Remove(pidFile)
 }
 
-// ReadDaemonPid 读取守护进程PID；在 Linux 生产环境下若 PID 文件意外丢失，兜底扫描 /proc 定位孤儿 dm start 进程。
+// ReadDaemonPid 读取默认守护进程 PID；Linux 生产环境下缺失时兜底扫描 /proc。
 func ReadDaemonPid() (int, error) {
-	pidFile := GetPidFilePath()
+	return readDaemonPidInternal(GetPidFilePath(), PidFilePathOverride == "")
+}
+
+// ReadDaemonPidAt 从指定 PID 文件路径读取进程号（不触发宿主 /proc 扫描）。
+func ReadDaemonPidAt(pidFile string) (int, error) {
+	return readDaemonPidInternal(pidFile, false)
+}
+
+func readDaemonPidInternal(pidFile string, allowProcFallback bool) (int, error) {
 	data, err := os.ReadFile(pidFile)
 	if err != nil {
-		if PidFilePathOverride == "" && runtime.GOOS == "linux" {
+		if allowProcFallback && runtime.GOOS == "linux" {
 			if orphanPid := findOrphanDaemonPid(); orphanPid > 0 {
 				return orphanPid, nil
 			}
@@ -226,7 +216,6 @@ func ReadDaemonPid() (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("invalid pid in file: %w", err)
 	}
-
 	return pid, nil
 }
 
@@ -249,14 +238,14 @@ func findOrphanDaemonPid() int {
 			continue
 		}
 		args := strings.Split(strings.TrimRight(string(rawCmd), "\x00"), "\x00")
-		if isDaemonStartCmdline(args) && DaemonProcessMatches(pid) {
+		if IsDaemonStartCmdline(args) && DaemonProcessMatches(pid) {
 			return pid
 		}
 	}
 	return 0
 }
 
-// IsDaemonRunning 检查守护进程是否运行（PID 存活 + 进程名匹配，防 PID 回绕误判）
+// IsDaemonRunning 检查守护进程是否运行（PID 存活 + 进程名匹配）。
 func IsDaemonRunning() bool {
 	pid, err := ReadDaemonPid()
 	if err != nil {
@@ -265,15 +254,13 @@ func IsDaemonRunning() bool {
 	return DaemonProcessMatches(pid)
 }
 
-// daemonProcessMatches 判断 PID 对应的进程是否为存活的 singctl 守护进程
+// DaemonProcessMatches 判断 PID 对应的进程是否为存活的 singctl 守护进程。
 func DaemonProcessMatches(pid int) bool {
 	if !ProcessExists(pid) {
 		return false
 	}
-
 	expected := ExpectedProcNameFn()
 
-	// Linux: /proc/<pid>/comm（最快且无副作用，内核限制最多 15 字符）+ /proc/<pid>/cmdline 排除 web/sr 等同二进制非 dm 子命令
 	if runtime.GOOS != "windows" {
 		if b, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid)); err == nil {
 			comm := strings.TrimSpace(string(b))
@@ -283,7 +270,7 @@ func DaemonProcessMatches(pid int) bool {
 			}
 			if rawCmd, cErr := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid)); cErr == nil && len(rawCmd) > 0 {
 				args := strings.Split(strings.TrimRight(string(rawCmd), "\x00"), "\x00")
-				if isConflictingSingctlSubcommand(args) {
+				if IsConflictingSingctlSubcommand(args) {
 					return false
 				}
 			}
@@ -291,130 +278,47 @@ func DaemonProcessMatches(pid int) bool {
 		}
 	}
 
-	// macOS / 其他 Unix: ps 查询
 	if runtime.GOOS != "windows" {
-		out, err := outputCmdTimeout(context.Background(), defaultDaemonCmdTimeout, "ps", "-p", strconv.Itoa(pid), "-o", "comm=")
+		out, err := OutputCmdTimeout(context.Background(), defaultDaemonCmdTimeout, "ps", "-p", strconv.Itoa(pid), "-o", "comm=")
 		if err != nil {
-			// ps 不可用时保守地认为匹配，避免完全失去检测能力
 			return true
 		}
 		name := filepath.Base(strings.TrimSpace(string(out)))
 		if !(name == expected || strings.HasPrefix(name, expected)) {
 			return false
 		}
-		if cmdOut, cErr := outputCmdTimeout(context.Background(), defaultDaemonCmdTimeout, "ps", "-p", strconv.Itoa(pid), "-o", "command="); cErr == nil {
-			if isConflictingSingctlSubcommand(strings.Fields(string(cmdOut))) {
+		if cmdOut, cErr := OutputCmdTimeout(context.Background(), defaultDaemonCmdTimeout, "ps", "-p", strconv.Itoa(pid), "-o", "command="); cErr == nil {
+			if IsConflictingSingctlSubcommand(strings.Fields(string(cmdOut))) {
 				return false
 			}
 		}
 		return true
 	}
 
-	// Windows: 无法低成本校验进程名，仅依赖 Signal(0)
 	return true
 }
 
-// ProcessExists 检查进程是否存在（跨平台）。
-// 儵尸进程视为不存在：进程已死只是尚未被父进程收尸，对存活判定而言就是已退出。
+// ProcessExists 检查进程是否存在（跨平台，自动过滤僵尸态进程）。
 func ProcessExists(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-
-	if isZombie(pid) {
-		return false
-	}
-
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-
-	// 发送信号0检查进程是否存在
-	if runtime.GOOS == "windows" {
-		// Windows下，FindProcess总是成功，需要用Signal检查
-		err = process.Signal(os.Signal(syscall.Signal(0)))
-		return err == nil
-	} else {
-		// Unix系统
-		err = process.Signal(syscall.Signal(0))
-		return err == nil
-	}
+	return proc.IsAlive(pid)
 }
 
-// isZombie 检测进程是否为僵尸（仅 Linux；僵尸=已退出但未被父进程收尸）
-func isZombie(pid int) bool {
-	if runtime.GOOS != "linux" {
-		return false
-	}
-	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
-	if err != nil {
-		return false
-	}
-	// 格式: pid (comm) state ...；comm 可能含空格/括号，取最后一个 ')' 之后的状态字符
-	if i := bytes.LastIndexByte(b, ')'); i >= 0 && i+2 < len(b) {
-		return b[i+2] == 'Z'
-	}
-	return false
-}
-
-// StopDaemon 停止守护进程。
-//
-// 发送 SIGTERM 后轮询等待进程真正退出（上限 5s），超时则 SIGKILL 兜底。
-// 等待退出是必要的：若只发信号就返回，而看门狗恰好在 doRestart 的
-// stop→start 间隙，sing-box 会被重新拉起，出现"停不掉"的假象。
+// StopDaemon 优雅停止守护进程并清理 PID 文件。
 func StopDaemon() error {
 	pid, err := ReadDaemonPid()
 	if err != nil {
-		return nil // 守护进程不存在
+		return nil
 	}
-
 	if !DaemonProcessMatches(pid) {
-		// PID 已死或被无关进程复用 → 残留文件，清理即可
-		RemovePidFile()
+		_ = RemovePidFile()
 		return nil
 	}
-
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return fmt.Errorf("failed to find daemon process: %w", err)
-	}
-
-	send := func(sig os.Signal) {
-		if runtime.GOOS == "windows" {
-			_ = process.Kill()
-		} else {
-			_ = process.Signal(sig)
-		}
-	}
-	send(syscall.SIGTERM)
-
-	// 等待优雅退出（看门狗 ctx 取消 → 日志收尾 → 退出）
-	if waitProcessExit(pid, 5*time.Second) {
-		RemovePidFile()
-		return nil
-	}
-
-	// 超时强杀
-	send(syscall.SIGKILL)
-	waitProcessExit(pid, 3*time.Second)
-	RemovePidFile()
+	_ = proc.TerminateGracefully(pid, 5*time.Second, 3*time.Second)
+	_ = RemovePidFile()
 	return nil
 }
 
-// waitProcessExit 轮询等待进程退出
-func waitProcessExit(pid int, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if !ProcessExists(pid) {
-			return true
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	return !ProcessExists(pid)
-}
-
-// IsDaemonBinaryStale 检测运行中的看门狗进程是否指向已被覆盖删除的旧版二进制（如 Linux "/usr/bin/singctl (deleted)"）。
+// IsDaemonBinaryStale 检测运行中的看门狗进程是否指向已被覆盖删除的旧版二进制。
 func IsDaemonBinaryStale() bool {
 	if runtime.GOOS != "linux" {
 		return false
@@ -430,7 +334,7 @@ func IsDaemonBinaryStale() bool {
 	return strings.HasSuffix(link, " (deleted)") || strings.HasSuffix(link, ".backup")
 }
 
-// NotifyReload 向运行中的看门狗进程发送 SIGHUP，通知其立即热重载磁盘最新 singctl.yaml 配置。
+// NotifyReload 向运行中的看门狗进程发送 SIGHUP，通知其立即热重载磁盘最新配置。
 func NotifyReload() bool {
 	pid, err := ReadDaemonPid()
 	if err != nil || !DaemonProcessMatches(pid) {
@@ -439,7 +343,7 @@ func NotifyReload() bool {
 	return notifyPidReload(pid)
 }
 
-// RestartDaemon 平滑重启看门狗守护进程（不影响运行中的 sing-box 透明代理，全程零断网）。
+// RestartDaemon 平滑重启看门狗守护进程（不影响运行中的 sing-box 透明代理）。
 func RestartDaemon(configPath string) error {
 	if IsDaemonRunning() {
 		if err := StopDaemon(); err != nil {
@@ -460,24 +364,17 @@ func RestartDaemon(configPath string) error {
 		devNull = nFile
 		defer nFile.Close()
 	}
-	return runCmdTimeoutIO(context.Background(), defaultDaemonRunTimeout, devNull, os.Stdout, os.Stderr, exe, args...)
+	return RunCmdTimeoutIO(context.Background(), defaultDaemonRunTimeout, devNull, os.Stdout, os.Stderr, exe, args...)
 }
 
-// IsSingBoxRunning 检查sing-box进程是否运行
+// IsSingBoxRunning 检查 sing-box 进程是否运行。
 func IsSingBoxRunning() bool {
-	return isSingBoxProcessRunning()
-}
-
-// isSingBoxProcessRunning 检查sing-box进程（跨平台实现）
-func isSingBoxProcessRunning() bool {
 	if runtime.GOOS == "windows" {
-		output, err := outputCmdTimeout(context.Background(), defaultDaemonCmdTimeout, "tasklist", "/FI", "IMAGENAME eq sing-box.exe", "/NH")
+		output, err := OutputCmdTimeout(context.Background(), defaultDaemonCmdTimeout, "tasklist", "/FI", "IMAGENAME eq sing-box.exe", "/NH")
 		if err != nil {
 			return false
 		}
 		return bytes.Contains(output, []byte("sing-box.exe"))
 	}
-	// busybox pgrep -x 存在匹配怪癖(实测 ImmortalWrt busybox 1.36.1 无法命中 tailscaled),
-	// 用两级匹配策略保证兼容
-	return osutil.PgrepMatch("sing-box")
+	return proc.PgrepMatch("sing-box")
 }

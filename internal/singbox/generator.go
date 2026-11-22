@@ -18,9 +18,9 @@ import (
 	"runtime"
 	"strings"
 
+	"singctl/internal/common/netx"
 	"singctl/internal/config"
 	log "singctl/internal/logger"
-	"singctl/internal/util/netinfo"
 
 	"github.com/sixban6/singgen/pkg/singgen"
 )
@@ -29,7 +29,7 @@ import (
 type ConfigGenerator struct {
 	config        *config.Config
 	webui         string
-	netInfo       *netinfo.NetInfoResult
+	netInfo       *netx.NetInfoResult
 	defaultTplVer string
 	cacheDir      string
 	silent        bool
@@ -61,7 +61,7 @@ func NewConfigGenerator(cfg *config.Config) *ConfigGenerator {
 		defaultTplVer: "v1.14",
 		cacheDir:      singgen.DefaultCacheDir(),
 	}
-	netResult, err := netinfo.Get()
+	netResult, err := netx.Get()
 	if err != nil {
 		log.Error("error getting netResult: %v", err)
 	}
@@ -82,6 +82,16 @@ func (g *ConfigGenerator) SetCacheDir(dir string) {
 // SetSilent 开启静默生成模式（供看门狗后台定时订阅指纹比对调用，避免无变化巡检刷屏守护日志）。
 func (g *ConfigGenerator) SetSilent(silent bool) {
 	g.silent = silent
+}
+
+// NewOfflineConfigGenerator 创建不主动探测宿主机网卡/公网环境的离线配置生成器（供纯内存编译流水线与单测使用）。
+func NewOfflineConfigGenerator(cfg *config.Config) *ConfigGenerator {
+	return &ConfigGenerator{
+		config:        cfg,
+		defaultTplVer: "v1.14",
+		webui:         "127.0.0.1:9090",
+		silent:        true,
+	}
 }
 
 var sensitiveURLRe = regexp.MustCompile(`https?://[^\s"'<>)\]]+`)
@@ -111,7 +121,7 @@ func (g *ConfigGenerator) webuiForPlatform(platform string) string {
 }
 
 func (c *ConfigGenerator) getSubnetFromIP(ip string) string {
-	return netinfo.ResolveClientSubnet(context.Background(), ip)
+	return netx.ResolveClientSubnet(context.Background(), ip)
 }
 
 func (g *ConfigGenerator) resolveLocalDNSServer(isIOS bool) string {
@@ -124,7 +134,7 @@ func (g *ConfigGenerator) resolveLocalDNSServer(isIOS bool) string {
 		if isSideRouter {
 			// 旁路由模式下兜底 dns_local 严禁指向主路由等局域网私网 IP，彻底杜绝主旁 DNS 互指死循环
 			for _, cand := range g.netInfo.DNSServers {
-				if !netinfo.IsPrivateIP(cand) {
+				if !netx.IsPrivateIP(cand) {
 					dnsServer = cand
 					break
 				}
@@ -172,5 +182,5 @@ func (g *ConfigGenerator) GenerateForPlatform(platform string) (string, error) {
 	}
 
 	// 交由 compile_pipeline.go 中的可扩展多阶段流水线统一完成加工、加固与格式化输出
-	return g.runCompilePipeline(raw, resolved)
+	return g.RunCompilePipeline(raw, resolved)
 }

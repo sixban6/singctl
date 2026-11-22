@@ -4,9 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	releasepkg "singctl/internal/common/release"
 	"singctl/internal/updater"
-	"singctl/internal/util/github"
-	releasepkg "singctl/internal/util/release"
 	"strings"
 	"testing"
 )
@@ -49,12 +48,14 @@ func TestVersionPrefixNormalization(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				json.NewEncoder(w).Encode(github.Release{TagName: tt.remoteTag})
+				json.NewEncoder(w).Encode(releasepkg.Info{TagName: tt.remoteTag})
 			}))
 			defer server.Close()
 
-			fetcher := github.NewReleaseFetcher("", server.Client())
-			latestVersion, err := fetcher.FetchLatestTagFromURL(server.URL + "/repos/test/repo/releases/latest")
+			client := releasepkg.NewClient("")
+			client.APIBase = server.URL
+			client.HTTP = server.Client()
+			latestVersion, err := client.FetchLatestTag(t.Context(), "test/repo")
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}

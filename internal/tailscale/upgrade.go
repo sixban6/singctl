@@ -13,10 +13,13 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"singctl/internal/common/fsx"
+	"singctl/internal/common/netx"
+	"singctl/internal/common/proc"
+	releasepkg "singctl/internal/common/release"
+	"singctl/internal/common/sysinfo"
 	"singctl/internal/constant"
 	"singctl/internal/logger"
-	"singctl/internal/util/netinfo"
-	releasepkg "singctl/internal/util/release"
 	"strconv"
 	"strings"
 	"time"
@@ -39,8 +42,10 @@ const (
 	defaultUpgradeLockFile  = "/tmp/singctl-ts-upgrade.lock"
 	defaultUpgradeSystemd   = "tailscaled.service"
 
-	stagedTailscaledName = ".tailscaled.new"
-	stagedTailscaleName  = ".tailscale.new"
+	StagedTailscaledName = ".tailscaled.new"
+	StagedTailscaleName  = ".tailscale.new"
+	stagedTailscaledName = StagedTailscaledName
+	stagedTailscaleName  = StagedTailscaleName
 
 	upgradeFlashSafetyMarginBytes int64 = 4 << 20   // 4 MiB safety margin alongside staged files
 	maxBinaryExtractBytes         int64 = 256 << 20 // 256 MiB defensive cap per entry
@@ -167,6 +172,14 @@ type UpgradePreflight struct {
 	client        *releasepkg.Client
 }
 
+// SelectedAsset 返回预检阶段匹配到的目标发布资产元数据。
+func (p *UpgradePreflight) SelectedAsset() *releasepkg.Asset {
+	if p == nil {
+		return nil
+	}
+	return p.selectedAsset
+}
+
 // ReadUpgradeState reads the persisted swapper state (if present) and attaches tail of LogFile.
 func ReadUpgradeState(paths UpgradePaths) (*UpgradeState, error) {
 	paths = paths.withDefaults()
@@ -184,7 +197,7 @@ func ReadUpgradeState(paths UpgradePaths) (*UpgradeState, error) {
 	if st.Phase == "" {
 		st.Phase = UpgradePhaseIdle
 	}
-	if (st.Phase == UpgradePhaseSwapping || st.Phase == UpgradePhaseVerifying) && st.SwapperPID > 0 && !isPIDAlive(st.SwapperPID) {
+	if (st.Phase == UpgradePhaseSwapping || st.Phase == UpgradePhaseVerifying) && st.SwapperPID > 0 && !proc.IsAlive(st.SwapperPID) {
 		st.Phase = UpgradePhaseFailed
 		if st.Error == "" {
 			st.Error = "后台切换进程已意外退出"
@@ -212,17 +225,8 @@ func WriteUpgradeState(paths UpgradePaths, st *UpgradeState) error {
 	if err != nil {
 		return fmt.Errorf("marshal upgrade state: %w", err)
 	}
-	tmpPath := paths.StateFile + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0600); err != nil {
-		return fmt.Errorf("write temp upgrade state: %w", err)
-	}
-	if err := os.Chmod(tmpPath, 0600); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("chmod upgrade state: %w", err)
-	}
-	if err := os.Rename(tmpPath, paths.StateFile); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("rename upgrade state: %w", err)
+	if err := fsx.WriteAtomic0600(paths.StateFile, data); err != nil {
+		return fmt.Errorf("write upgrade state: %w", err)
 	}
 	return nil
 }
@@ -248,6 +252,11 @@ func readLogTail(path string, maxBytes int64) string {
 		return ""
 	}
 	return strings.TrimSpace(string(b))
+}
+
+// SelectTailscaleAssetForArch 按严格边界匹配目标架构的 Tailscale 归档包名。
+func SelectTailscaleAssetForArch(assetName, arch string) bool {
+	return selectTailscaleAssetForArch(assetName, arch)
 }
 
 func selectTailscaleAssetForArch(assetName, arch string) bool {
@@ -285,7 +294,7 @@ func (t *Tailscale) newReleaseClient(override *releasepkg.Client) *releasepkg.Cl
 	if override != nil {
 		return override
 	}
-	directOK := netinfo.CheckGoogleConnectivity()
+	directOK := netx.CheckGoogleConnectivity()
 	mirror := ""
 	if !directOK {
 		mirror = t.DownloadURL
@@ -327,13 +336,19 @@ func (t *Tailscale) PreflightUpgrade(ctx context.Context, opts UpgradeOptions) (
 
 	statfsFn := opts.StatfsFn
 	if statfsFn == nil {
-		statfsFn = statfsFreeBytes
+		statfsFn = func(p string) (uint64, error) {
+			ds, err := sysinfo.Statfs(p)
+			return ds.AvailBytes, err
+		}
 	}
 	flashFree, flashErr := statfsFn(paths.InstallDir)
 
 	memInfoFn := opts.MemInfoFn
 	if memInfoFn == nil {
-		memInfoFn = readSystemMemInfo
+		memInfoFn = func() (uint64, uint64) {
+			mi, _ := sysinfo.ReadMemInfo()
+			return mi.AvailableBytes, mi.SwapFreeBytes
+		}
 	}
 	memAvail, swapFree := memInfoFn()
 
@@ -550,7 +565,7 @@ func readActiveLockPID(lockPath string) int {
 	if err != nil || pid <= 0 {
 		return 0
 	}
-	if !isPIDAlive(pid) {
+	if !proc.IsAlive(pid) {
 		return 0
 	}
 	return pid

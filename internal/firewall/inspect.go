@@ -1,4 +1,4 @@
-// 文件职责：定义防火墙态势数据结构，并负责读取与解析内核 `nftables inet security` 表 JSON 快照。
+// 文件职责：定义防火墙态势数据结构，并负责读取与纯函数化解析内核 `nftables inet security` 表 JSON 快照。
 package firewall
 
 import (
@@ -9,12 +9,13 @@ import (
 	"net/netip"
 	"os/exec"
 	"runtime"
-	"singctl/internal/constant"
-	"singctl/internal/platform/servicemgr"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"singctl/internal/constant"
+	"singctl/internal/platform/servicemgr"
 )
 
 // QuickStatus 描述防火墙在内核与开机自启层的轻量真实状态。
@@ -279,158 +280,160 @@ func ParseSecurityTableJSON(raw []byte) (*KernelSnapshot, error) {
 		PingLimitPerSec: 10,
 	}
 
-	builtinForeverSet := make(map[string]struct{}, len(defaultForeverBlocklistV4))
-	for _, c := range defaultForeverBlocklistV4 {
-		builtinForeverSet[c] = struct{}{}
-	}
-	if _, ok := builtinForeverSet["167.94.145.0/24"]; ok {
-		builtinForeverSet["167.94.145.0-167.94.146.255"] = struct{}{}
-	}
-
 	hasProtectedPortsSet := false
 	for _, entry := range doc.NFTables {
-		if rawTable, ok := entry["table"]; ok {
-			var tbl struct {
-				Name string `json:"name"`
-			}
-			if json.Unmarshal(rawTable, &tbl) == nil && tbl.Name == "security" {
-				snap.Active = true
-			}
+		if rawTable, ok := entry["table"]; ok && isSecurityTableEntry(rawTable) {
+			snap.Active = true
 		}
-
-		if rawSet, ok := entry["set"]; ok {
-			var s struct {
-				Name    string            `json:"name"`
-				Timeout int64             `json:"timeout"`
-				Elem    []json.RawMessage `json:"elem"`
-			}
-			if err := json.Unmarshal(rawSet, &s); err != nil {
-				continue
-			}
-			switch s.Name {
-			case "blocklist_ip4_forever":
-				for _, re := range s.Elem {
-					val, _ := parseNFTAddrElem(re)
-					if val != "" {
-						snap.ForeverV4 = append(snap.ForeverV4, val)
-					}
-				}
-			case "blocklist_ip4":
-				if s.Timeout > 0 {
-					snap.BanTimeoutDays = max(1, int(s.Timeout/86400))
-				}
-				for _, re := range s.Elem {
-					val, exp := parseNFTAddrElem(re)
-					if val != "" {
-						snap.DynamicV4 = append(snap.DynamicV4, BanItem{
-							Target:     val,
-							Scope:      "dynamic_v4",
-							ExpiresSec: exp,
-						})
-					}
-				}
-			case "blocklist_ip6":
-				if s.Timeout > 0 {
-					snap.BanTimeoutDays = max(1, int(s.Timeout/86400))
-				}
-				for _, re := range s.Elem {
-					val, exp := parseNFTAddrElem(re)
-					if val != "" {
-						snap.DynamicV6 = append(snap.DynamicV6, BanItem{
-							Target:     val,
-							Scope:      "dynamic_v6",
-							ExpiresSec: exp,
-						})
-					}
-				}
-			case "whitelist_ip":
-				for _, re := range s.Elem {
-					val, _ := parseNFTAddrElem(re)
-					if val != "" {
-						snap.WhitelistV4 = append(snap.WhitelistV4, val)
-					}
-				}
-			case "whitelist_ip6":
-				for _, re := range s.Elem {
-					val, _ := parseNFTAddrElem(re)
-					if val != "" {
-						snap.WhitelistV6 = append(snap.WhitelistV6, val)
-					}
-				}
-			case "protected_ports":
-				hasProtectedPortsSet = true
-				for _, re := range s.Elem {
-					snap.ProtectedPorts = append(snap.ProtectedPorts, parseNFTPortElem(re)...)
-				}
-			}
+		if rawSet, ok := entry["set"]; ok && applyNFTSetEntry(snap, rawSet) {
+			hasProtectedPortsSet = true
 		}
-
 		if rawRule, ok := entry["rule"]; ok {
-			var r struct {
-				Chain string            `json:"chain"`
-				Expr  []json.RawMessage `json:"expr"`
-			}
-			if json.Unmarshal(rawRule, &r) != nil || r.Chain != "input" {
-				continue
-			}
-			var prefix string
-			var ctr CounterStat
-			var hasDrop bool
-			var icmpRate int
-			for _, ex := range r.Expr {
-				var m map[string]json.RawMessage
-				if json.Unmarshal(ex, &m) != nil {
-					continue
-				}
-				if rawLog, ok := m["log"]; ok {
-					var l struct {
-						Prefix string `json:"prefix"`
-					}
-					if json.Unmarshal(rawLog, &l) == nil {
-						prefix = l.Prefix
-					}
-				}
-				if rawCtr, ok := m["counter"]; ok {
-					_ = json.Unmarshal(rawCtr, &ctr)
-				}
-				if _, ok := m["drop"]; ok {
-					hasDrop = true
-				}
-				if rawLim, ok := m["limit"]; ok {
-					var lim struct {
-						Rate int    `json:"rate"`
-						Per  string `json:"per"`
-					}
-					if json.Unmarshal(rawLim, &lim) == nil && lim.Per == "second" && lim.Rate > 0 {
-						icmpRate = lim.Rate
-					}
-				}
-			}
-			if icmpRate > 0 && prefix == "" && !hasDrop {
-				snap.PingLimitPerSec = icmpRate
-			}
-			if !hasDrop {
-				continue
-			}
-			switch {
-			case strings.Contains(prefix, "Ban Forever IPv4"):
-				snap.Stats.ForeverBlocked = addCounterStat(snap.Stats.ForeverBlocked, ctr)
-			case strings.Contains(prefix, "Blocked IPv4 (listed)"):
-				snap.Stats.DynamicV4Blocked = addCounterStat(snap.Stats.DynamicV4Blocked, ctr)
-			case strings.Contains(prefix, "Blocked IPv6 (listed)"):
-				snap.Stats.DynamicV6Blocked = addCounterStat(snap.Stats.DynamicV6Blocked, ctr)
-			case strings.Contains(prefix, "Blocked IPv4 TCP"):
-				snap.Stats.HoneypotTCPV4 = addCounterStat(snap.Stats.HoneypotTCPV4, ctr)
-			case strings.Contains(prefix, "Blocked IPv4 UDP"):
-				snap.Stats.HoneypotUDPv4 = addCounterStat(snap.Stats.HoneypotUDPv4, ctr)
-			case strings.Contains(prefix, "Blocked IPv6 TCP"):
-				snap.Stats.HoneypotTCPV6 = addCounterStat(snap.Stats.HoneypotTCPV6, ctr)
-			case strings.Contains(prefix, "Blocked IPv6 UDP"):
-				snap.Stats.HoneypotUDPv6 = addCounterStat(snap.Stats.HoneypotUDPv6, ctr)
-			}
+			applyNFTRuleEntry(snap, rawRule)
 		}
 	}
 
+	finalizeKernelSnapshot(snap, hasProtectedPortsSet)
+	return snap, nil
+}
+
+func isSecurityTableEntry(raw json.RawMessage) bool {
+	var tbl struct {
+		Name string `json:"name"`
+	}
+	return json.Unmarshal(raw, &tbl) == nil && tbl.Name == "security"
+}
+
+func applyNFTSetEntry(snap *KernelSnapshot, raw json.RawMessage) bool {
+	var s struct {
+		Name    string            `json:"name"`
+		Timeout int64             `json:"timeout"`
+		Elem    []json.RawMessage `json:"elem"`
+	}
+	if json.Unmarshal(raw, &s) != nil {
+		return false
+	}
+	switch s.Name {
+	case "blocklist_ip4_forever":
+		snap.ForeverV4 = append(snap.ForeverV4, collectNFTAddrList(s.Elem)...)
+	case "blocklist_ip4":
+		if s.Timeout > 0 {
+			snap.BanTimeoutDays = max(1, int(s.Timeout/86400))
+		}
+		snap.DynamicV4 = append(snap.DynamicV4, collectNFTDynamicBans(s.Elem, "dynamic_v4")...)
+	case "blocklist_ip6":
+		if s.Timeout > 0 {
+			snap.BanTimeoutDays = max(1, int(s.Timeout/86400))
+		}
+		snap.DynamicV6 = append(snap.DynamicV6, collectNFTDynamicBans(s.Elem, "dynamic_v6")...)
+	case "whitelist_ip":
+		snap.WhitelistV4 = append(snap.WhitelistV4, collectNFTAddrList(s.Elem)...)
+	case "whitelist_ip6":
+		snap.WhitelistV6 = append(snap.WhitelistV6, collectNFTAddrList(s.Elem)...)
+	case "protected_ports":
+		for _, re := range s.Elem {
+			snap.ProtectedPorts = append(snap.ProtectedPorts, parseNFTPortElem(re)...)
+		}
+		return true
+	}
+	return false
+}
+
+func collectNFTAddrList(elems []json.RawMessage) []string {
+	var out []string
+	for _, re := range elems {
+		if val, _ := parseNFTAddrElem(re); val != "" {
+			out = append(out, val)
+		}
+	}
+	return out
+}
+
+func collectNFTDynamicBans(elems []json.RawMessage, scope string) []BanItem {
+	var out []BanItem
+	for _, re := range elems {
+		if val, exp := parseNFTAddrElem(re); val != "" {
+			out = append(out, BanItem{Target: val, Scope: scope, ExpiresSec: exp})
+		}
+	}
+	return out
+}
+
+func applyNFTRuleEntry(snap *KernelSnapshot, raw json.RawMessage) {
+	var r struct {
+		Chain string            `json:"chain"`
+		Expr  []json.RawMessage `json:"expr"`
+	}
+	if json.Unmarshal(raw, &r) != nil || r.Chain != "input" {
+		return
+	}
+	prefix, ctr, hasDrop, icmpRate := extractNFTRuleMetrics(r.Expr)
+	if icmpRate > 0 && prefix == "" && !hasDrop {
+		snap.PingLimitPerSec = icmpRate
+	}
+	if hasDrop {
+		accumulateDropCounter(&snap.Stats, prefix, ctr)
+	}
+}
+
+func extractNFTRuleMetrics(exprs []json.RawMessage) (string, CounterStat, bool, int) {
+	var prefix string
+	var ctr CounterStat
+	var hasDrop bool
+	var icmpRate int
+
+	for _, ex := range exprs {
+		var m map[string]json.RawMessage
+		if json.Unmarshal(ex, &m) != nil {
+			continue
+		}
+		if rawLog, ok := m["log"]; ok {
+			var l struct {
+				Prefix string `json:"prefix"`
+			}
+			if json.Unmarshal(rawLog, &l) == nil {
+				prefix = l.Prefix
+			}
+		}
+		if rawCtr, ok := m["counter"]; ok {
+			_ = json.Unmarshal(rawCtr, &ctr)
+		}
+		if _, ok := m["drop"]; ok {
+			hasDrop = true
+		}
+		if rawLim, ok := m["limit"]; ok {
+			var lim struct {
+				Rate int    `json:"rate"`
+				Per  string `json:"per"`
+			}
+			if json.Unmarshal(rawLim, &lim) == nil && lim.Per == "second" && lim.Rate > 0 {
+				icmpRate = lim.Rate
+			}
+		}
+	}
+	return prefix, ctr, hasDrop, icmpRate
+}
+
+func accumulateDropCounter(stats *SecurityStats, prefix string, ctr CounterStat) {
+	switch {
+	case strings.Contains(prefix, "Ban Forever IPv4"):
+		stats.ForeverBlocked = addCounterStat(stats.ForeverBlocked, ctr)
+	case strings.Contains(prefix, "Blocked IPv4 (listed)"):
+		stats.DynamicV4Blocked = addCounterStat(stats.DynamicV4Blocked, ctr)
+	case strings.Contains(prefix, "Blocked IPv6 (listed)"):
+		stats.DynamicV6Blocked = addCounterStat(stats.DynamicV6Blocked, ctr)
+	case strings.Contains(prefix, "Blocked IPv4 TCP"):
+		stats.HoneypotTCPV4 = addCounterStat(stats.HoneypotTCPV4, ctr)
+	case strings.Contains(prefix, "Blocked IPv4 UDP"):
+		stats.HoneypotUDPv4 = addCounterStat(stats.HoneypotUDPv4, ctr)
+	case strings.Contains(prefix, "Blocked IPv6 TCP"):
+		stats.HoneypotTCPV6 = addCounterStat(stats.HoneypotTCPV6, ctr)
+	case strings.Contains(prefix, "Blocked IPv6 UDP"):
+		stats.HoneypotUDPv6 = addCounterStat(stats.HoneypotUDPv6, ctr)
+	}
+}
+
+func finalizeKernelSnapshot(snap *KernelSnapshot, hasProtectedPortsSet bool) {
 	if hasProtectedPortsSet || snap.Stats.HoneypotTCPV4.Packets > 0 || len(snap.ProtectedPorts) > 0 {
 		snap.Mode = "standard"
 	}
@@ -452,7 +455,6 @@ func ParseSecurityTableJSON(raw []byte) (*KernelSnapshot, error) {
 		snap.Stats.TotalBlockedPackets += s.Packets
 		snap.Stats.TotalBlockedBytes += s.Bytes
 	}
-	return snap, nil
 }
 
 func addCounterStat(a, b CounterStat) CounterStat {

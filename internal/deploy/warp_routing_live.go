@@ -16,7 +16,7 @@ import (
 
 	"singctl/internal/config"
 	"singctl/internal/constant"
-	"singctl/internal/util/file"
+	"singctl/internal/common/fsx"
 )
 
 // LiveWarpApplyDeps 为 ApplyLiveWarpRouting 提供可测试的外部系统调用依赖注入
@@ -138,7 +138,7 @@ func pruneWarpConfigBackups(cfgPath string, keep int) {
 }
 
 func writeFileAtomic0600(path string, data []byte) error {
-	return file.WriteAtomic0600(path, data)
+	return fsx.WriteAtomic0600(path, data)
 }
 
 func defaultValidateSingBoxConfig(tmpPath string) error {

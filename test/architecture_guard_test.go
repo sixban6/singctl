@@ -15,7 +15,7 @@ import (
 
 const (
 	maxProductionGoFileLines = 1000
-	maxFrontendFileLines     = 1000
+	maxFrontendFileLines     = 700
 )
 
 func repoRootDir(t *testing.T) string {
@@ -37,7 +37,7 @@ func collectProductionGoFiles(t *testing.T, root string) []string {
 				return walkErr
 			}
 			if d.IsDir() {
-				if strings.HasPrefix(d.Name(), ".") {
+				if d.Name() == "test" || strings.HasPrefix(d.Name(), ".") {
 					return filepath.SkipDir
 				}
 				return nil
@@ -279,13 +279,12 @@ func TestArchGuard_HotPathServersUseConfigStore(t *testing.T) {
 		"internal/webui/",
 		"internal/serverweb/",
 	}
-	// 仅放行各服务自身的 Store 桥接层与独立 CLI 辅助入口。
+	// 仅放行各服务自身的 Store 桥接层。
 	allowlist := map[string]bool{
-		"internal/webui/webui.go":              true,
-		"internal/webui/api.go":                true,
-		"internal/serverweb/serverweb.go":      true,
-		"internal/serverweb/background.go":     true,
-		"internal/serverweb/warp_local_cli.go": true,
+		"internal/webui/webui.go":          true,
+		"internal/webui/api.go":            true,
+		"internal/serverweb/serverweb.go":  true,
+		"internal/serverweb/background.go": true,
 	}
 
 	var violations []string
@@ -324,7 +323,7 @@ func TestArchGuard_MaxProductionFileLines(t *testing.T) {
 	}
 }
 
-// TestArchGuard_MaxFrontendFileLines 强制前端 TypeScript/React 源码单文件不超过 1,000 行。
+// TestArchGuard_MaxFrontendFileLines 强制前端 TypeScript/React 源码单文件不超过 700 行。
 func TestArchGuard_MaxFrontendFileLines(t *testing.T) {
 	root := repoRootDir(t)
 	var violations []string
@@ -342,34 +341,134 @@ func TestArchGuard_MaxFrontendFileLines(t *testing.T) {
 	}
 }
 
-// TestArchGuard_CoreContractPackagesAcyclic 防止基础契约层反向依赖上层业务实现产生循环依赖。
-func TestArchGuard_CoreContractPackagesAcyclic(t *testing.T) {
+// TestArchGuard_CommonPackagesPureLeaf 强制 internal/common/* 纯微基建叶子包零上层业务/配置/日志反向依赖。
+func TestArchGuard_CommonPackagesPureLeaf(t *testing.T) {
+	root := repoRootDir(t)
+	var violations []string
+	fset := token.NewFileSet()
+	for _, relPath := range collectProductionGoFiles(t, root) {
+		if !strings.HasPrefix(relPath, "internal/common/") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, filepath.Join(root, filepath.FromSlash(relPath)), nil, parser.ImportsOnly)
+		if err != nil {
+			t.Fatalf("parse %s: %v", relPath, err)
+		}
+		for _, imp := range file.Imports {
+			pkgPath, err := strconv.Unquote(imp.Path.Value)
+			if err != nil {
+				continue
+			}
+			if strings.HasPrefix(pkgPath, "singctl/") && !strings.HasPrefix(pkgPath, "singctl/internal/common/") {
+				violations = append(violations, fmt.Sprintf("%s imports non-common internal package %q", relPath, pkgPath))
+			}
+		}
+	}
+	if len(violations) > 0 {
+		t.Fatalf("internal/common pure-leaf dependency violations detected:\n%s", strings.Join(violations, "\n"))
+	}
+}
+
+// TestArchGuard_InternalTestsInSubdir 强制 internal/** 下所有单元测试文件收敛在各自模块的 test/ 子目录中且使用黑盒 package <pkg>_test，保持业务源码目录 100% 纯净。
+func TestArchGuard_InternalTestsInSubdir(t *testing.T) {
+	root := repoRootDir(t)
+	base := filepath.Join(root, "internal")
+	fset := token.NewFileSet()
+	var violations []string
+
+	if err := filepath.WalkDir(base, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			if strings.HasPrefix(d.Name(), ".") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(d.Name(), "_test.go") {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		relSlash := filepath.ToSlash(rel)
+		if filepath.Base(filepath.Dir(path)) != "test" {
+			violations = append(violations, fmt.Sprintf("%s must reside inside a module test/ subdirectory (internal/<pkg>/test/*_test.go)", relSlash))
+			return nil
+		}
+		file, err := parser.ParseFile(fset, path, nil, parser.PackageClauseOnly)
+		if err != nil {
+			return fmt.Errorf("parse %s: %w", relSlash, err)
+		}
+		if !strings.HasSuffix(file.Name.Name, "_test") {
+			violations = append(violations, fmt.Sprintf("%s uses package %q (must use external test package \"<pkg>_test\")", relSlash, file.Name.Name))
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("walk internal tests: %v", err)
+	}
+	if len(violations) > 0 {
+		t.Fatalf("internal test subdirectory violations detected:\n%s", strings.Join(violations, "\n"))
+	}
+}
+
+// TestArchGuard_LayeredDAGAcyclic 强制全仓四层无环依赖拓扑（Common -> Contract -> Domain -> Control Plane）与横向防环约束。
+func TestArchGuard_LayeredDAGAcyclic(t *testing.T) {
 	root := repoRootDir(t)
 	contractPrefixes := []string{
 		"internal/constant/",
 		"internal/component/",
 		"internal/lifecycle/",
 		"internal/platform/servicemgr/",
+		"internal/config/",
+		"internal/logger/",
 	}
-	forbiddenImports := map[string]bool{
+	domainPrefixes := []string{
+		"internal/adguard/",
+		"internal/audit/",
+		"internal/deploy/",
+		"internal/doctor/",
+		"internal/firewall/",
+		"internal/fleet/",
+		"internal/gateway/",
+		"internal/gfw/",
+		"internal/heal/",
+		"internal/netdiag/",
+		"internal/singbox/",
+		"internal/sniff/",
+		"internal/ssh/",
+		"internal/subhub/",
+		"internal/tailscale/",
+		"internal/telemetry/",
+		"internal/terminal/",
+		"internal/updater/",
+	}
+	controlPlaneImports := map[string]bool{
 		"singctl/internal/cmd":       true,
 		"singctl/internal/webui":     true,
 		"singctl/internal/serverweb": true,
 		"singctl/internal/daemon":    true,
-		"singctl/internal/deploy":    true,
-		"singctl/internal/singbox":   true,
-		"singctl/internal/fleet":     true,
-		"singctl/internal/audit":     true,
-		"singctl/internal/subhub":    true,
-		"singctl/internal/adguard":   true,
-		"singctl/internal/firewall":  true,
-		"singctl/internal/tailscale": true,
-		"singctl/internal/netdiag":   true,
-		"singctl/internal/heal":      true,
-		"singctl/internal/doctor":    true,
-		"singctl/internal/gfw":       true,
-		"singctl/internal/terminal":  true,
-		"singctl/internal/telemetry": true,
+	}
+	allowedContractInternalPrefixes := []string{
+		"singctl/configs",
+		"singctl/internal/common/",
+		"singctl/internal/constant",
+		"singctl/internal/component",
+		"singctl/internal/lifecycle",
+		"singctl/internal/platform/servicemgr",
+		"singctl/internal/config",
+		"singctl/internal/logger",
+	}
+
+	hasAnyPrefix := func(s string, prefixes []string) bool {
+		for _, p := range prefixes {
+			if strings.HasPrefix(s, p) {
+				return true
+			}
+		}
+		return false
 	}
 
 	var violations []string
@@ -379,10 +478,44 @@ func TestArchGuard_CoreContractPackagesAcyclic(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parse %s: %v", relPath, err)
 		}
-		violations = append(violations, findLayerCycleViolations(relPath, file, contractPrefixes, forbiddenImports)...)
+		for _, imp := range file.Imports {
+			pkgPath, err := strconv.Unquote(imp.Path.Value)
+			if err != nil || !strings.HasPrefix(pkgPath, "singctl/") {
+				continue
+			}
+
+			// Layer 1: internal/common/* 仅允许依赖标准库/外部库或其它 internal/common/* 子包
+			if strings.HasPrefix(relPath, "internal/common/") && !strings.HasPrefix(pkgPath, "singctl/internal/common/") {
+				violations = append(violations, fmt.Sprintf("%s (Layer 1 common) imports upper-layer package %q", relPath, pkgPath))
+				continue
+			}
+
+			// Layer 2: 基础契约与配置层严禁逆向依赖任何领域层（Layer 3）或控制面层（Layer 4）
+			if hasAnyPrefix(relPath, contractPrefixes) && !hasAnyPrefix(pkgPath, allowedContractInternalPrefixes) {
+				violations = append(violations, fmt.Sprintf("%s (Layer 2 contract/config) imports upper-layer package %q", relPath, pkgPath))
+				continue
+			}
+
+			// Layer 3: 领域引擎层严禁逆向依赖控制面与常驻调度外壳（cmd/webui/serverweb/daemon）
+			if hasAnyPrefix(relPath, domainPrefixes) && controlPlaneImports[pkgPath] {
+				violations = append(violations, fmt.Sprintf("%s (Layer 3 domain) imports control-plane package %q", relPath, pkgPath))
+				continue
+			}
+
+			// 横向防环：internal/sniff 严禁导入 internal/fleet（避免 sniff -> fleet -> heal -> deploy -> telemetry 潜在环路）
+			if strings.HasPrefix(relPath, "internal/sniff/") && (pkgPath == "singctl/internal/fleet" || strings.HasPrefix(pkgPath, "singctl/internal/fleet/")) {
+				violations = append(violations, fmt.Sprintf("%s must not import %q (inject remote exec callback instead)", relPath, pkgPath))
+				continue
+			}
+
+			// 控制面隔离：internal/cmd 除启动桥接文件 ui.go 外严禁直接导入重量级 serverweb
+			if strings.HasPrefix(relPath, "internal/cmd/") && relPath != "internal/cmd/ui.go" && pkgPath == "singctl/internal/serverweb" {
+				violations = append(violations, fmt.Sprintf("%s imports \"singctl/internal/serverweb\" outside internal/cmd/ui.go", relPath))
+			}
+		}
 	}
 	if len(violations) > 0 {
-		t.Fatalf("architecture layer dependency violations detected:\n%s", strings.Join(violations, "\n"))
+		t.Fatalf("layered DAG architecture violations detected:\n%s", strings.Join(violations, "\n"))
 	}
 }
 

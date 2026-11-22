@@ -6,21 +6,19 @@
 package singbox
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
-	"maps"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
 
+	"singctl/internal/common/netx"
 	"singctl/internal/config"
 	log "singctl/internal/logger"
-	"singctl/internal/util/netinfo"
+	"singctl/internal/singbox/sboption"
 
 	"github.com/sixban6/singgen/pkg/model"
 	"github.com/sixban6/singgen/pkg/singgen"
@@ -100,7 +98,7 @@ func (g *ConfigGenerator) getTailScaleParmas() (string, string) {
 		s := g.config.Tailscale.Subnets
 		err := errors.New("")
 		if s == "" {
-			s, err = netinfo.GetLANSubnet()
+			s, err = netx.GetLANSubnet()
 		}
 		if err == nil {
 			subnet = s
@@ -440,71 +438,50 @@ func (p *ruleFilteringParser) ParseWithHint(ctx context.Context, data []byte, fo
 	return kept, nil
 }
 
-// deduplicateOutboundsInRoot 直接对已解析的 JSON 树原地执行出站节点去重（供 compileDoc 单树流水线复用）。
-func deduplicateOutboundsInRoot(cfg map[string]any) (bool, error) {
-	if cfg == nil {
-		return false, nil
-	}
-	rawOutbounds, ok := cfg["outbounds"]
-	if !ok {
-		return false, nil
-	}
-	outbounds, ok := rawOutbounds.([]any)
-	if !ok {
+// deduplicateOutboundsInDoc 直接在 *sboption.Document 上原地执行出站节点去重（供单树编译流水线复用）。
+func deduplicateOutboundsInDoc(doc *sboption.Document) (bool, error) {
+	if doc == nil || doc.Outbounds == nil {
 		return false, nil
 	}
 
 	// fingerprints: tag → canonical JSON bytes，用于识别实质内容是否完全一致
-	fingerprints := make(map[string]string)
+	fingerprints := make(map[string]string, len(doc.Outbounds))
 	// counter: originalTag → 冲突后缀计数器，用于生成 tag_1, tag_2...
 	counter := make(map[string]int)
 
-	clean := make([]any, 0, len(outbounds))
-	for _, item := range outbounds {
-		node, ok := item.(map[string]any)
-		if !ok {
-			clean = append(clean, item)
-			continue
-		}
-
+	clean := make([]sboption.Outbound, 0, len(doc.Outbounds))
+	for _, node := range doc.Outbounds {
 		// 无 tag 节点直接保留（direct/block/dns 等基础固定出站）
-		tagVal, hasTag := node["tag"]
-		if !hasTag {
-			clean = append(clean, node)
-			continue
-		}
-		tag, ok := tagVal.(string)
-		if !ok || tag == "" {
+		if node.Tag == "" {
 			clean = append(clean, node)
 			continue
 		}
 
-		fp, err := json.Marshal(node)
+		fpStr, err := sboption.CanonicalJSON(node)
 		if err != nil {
 			return false, fmt.Errorf("dedup: marshal node failed: %w", err)
 		}
-		fpStr := string(fp)
 
-		existingFP, seen := fingerprints[tag]
+		existingFP, seen := fingerprints[node.Tag]
 		switch {
 		case !seen:
-			fingerprints[tag] = fpStr
+			fingerprints[node.Tag] = fpStr
 			clean = append(clean, node)
 		case existingFP == fpStr:
-			log.Info("dedup: dropping exact duplicate outbound tag=%q", tag)
+			log.Info("dedup: dropping exact duplicate outbound tag=%q", node.Tag)
 		default:
-			counter[tag]++
-			newTag := fmt.Sprintf("%s_%d", tag, counter[tag])
-			newNode := maps.Clone(node)
-			newNode["tag"] = newTag
-			newFP, _ := json.Marshal(newNode)
-			fingerprints[newTag] = string(newFP)
-			log.Info("dedup: renamed conflicting outbound %q → %q", tag, newTag)
+			counter[node.Tag]++
+			newTag := fmt.Sprintf("%s_%d", node.Tag, counter[node.Tag])
+			newNode := node.Clone()
+			newNode.Tag = newTag
+			newFP, _ := sboption.CanonicalJSON(newNode)
+			fingerprints[newTag] = newFP
+			log.Info("dedup: renamed conflicting outbound %q → %q", node.Tag, newTag)
 			clean = append(clean, newNode)
 		}
 	}
 
-	cfg["outbounds"] = clean
+	doc.Outbounds = clean
 	return true, nil
 }
 
@@ -513,29 +490,25 @@ func deduplicateOutboundsInRoot(cfg map[string]any) (bool, error) {
 //   - Tag 相同但内容不同     → 重命名为 tag_1, tag_2...（冲突保留）
 //   - 无 tag 字段的节点      → 直接保留（不参与去重）
 func DeduplicateOutbounds(jsonStr string) (string, error) {
-	var cfg map[string]any
-	if err := json.Unmarshal([]byte(jsonStr), &cfg); err != nil {
+	doc, err := sboption.ParseDocument([]byte(jsonStr))
+	if err != nil {
 		return "", fmt.Errorf("dedup: invalid JSON: %w", err)
 	}
-	changed, err := deduplicateOutboundsInRoot(cfg)
+	changed, err := deduplicateOutboundsInDoc(doc)
 	if err != nil {
 		return "", err
 	}
 	if !changed {
 		return jsonStr, nil
 	}
-	result, err := json.Marshal(cfg)
+	out, err := doc.MarshalCompact()
 	if err != nil {
 		return "", fmt.Errorf("dedup: re-marshal config failed: %w", err)
 	}
-	return string(result), nil
+	return out, nil
 }
 
 // PrettyJSON 将紧凑 JSON 字符串格式化为缩进可读格式。
 func PrettyJSON(jsonStr string) (string, error) {
-	var buf bytes.Buffer
-	if err := json.Indent(&buf, []byte(jsonStr), "", "  "); err != nil {
-		return "", fmt.Errorf("pretty: invalid JSON: %w", err)
-	}
-	return buf.String(), nil
+	return sboption.PrettyBytes([]byte(jsonStr))
 }

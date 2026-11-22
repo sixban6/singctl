@@ -1,3 +1,4 @@
+// 文件职责：负责服务端 Caddy 网关部署、Caddyfile 模板渲染、原子语法校验与回滚以及动态伪装站生成。
 package deploy
 
 import (
@@ -350,8 +351,12 @@ func caddyfilePath() string {
 	return filepath.Join(caddyConfigDir(), "Caddyfile")
 }
 
-// prepareRuntimeCaddyConfig resolves/heals the mTLS trust_pool CA before disk write and degrades
+// PrepareRuntimeCaddyConfig resolves/heals the mTLS trust_pool CA before disk write and degrades
 // cleanly if the CA file is absent on disk, keeping PreviewCaddyfile itself 100% pure.
+func PrepareRuntimeCaddyConfig(cfg *config.Config) *config.Config {
+	return prepareRuntimeCaddyConfig(cfg)
+}
+
 func prepareRuntimeCaddyConfig(cfg *config.Config) *config.Config {
 	if cfg == nil || !cfg.Server.WebTerminal.Enabled {
 		return cfg

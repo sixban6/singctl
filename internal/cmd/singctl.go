@@ -5,15 +5,14 @@ import (
 	"os"
 	"runtime"
 	"singctl/internal/adguard"
+	"singctl/internal/common/redact"
 	"singctl/internal/config"
 	"singctl/internal/constant"
 	"singctl/internal/daemon"
 	"singctl/internal/doctor"
 	"singctl/internal/logger"
-	"singctl/internal/serverweb"
 	"singctl/internal/subhub"
 	"singctl/internal/updater"
-	"singctl/internal/util/file"
 	"singctl/internal/webui"
 
 	"github.com/spf13/cobra"
@@ -69,8 +68,8 @@ func NewUpdateCmd(configPath string, version string) *cobra.Command {
 				if subhub.IsRunning() {
 					_ = subhub.RestartService()
 				}
-				if serverweb.IsRunning(resolvedPath) {
-					_ = serverweb.RestartService()
+				if isServerUIServiceRunning(resolvedPath) {
+					_ = restartServerUIService()
 				}
 				if daemon.IsDaemonRunning() {
 					logger.Info("Restarting watchdog daemon to apply new version...")
@@ -255,7 +254,7 @@ func showSystemInfo(configPath, version string) error {
 				}
 
 				// 脱敏处理URL
-				maskedURL := file.MaskSubscriptionURL(sub.URL)
+				maskedURL := redact.MaskURL(sub.URL)
 				logger.Info("  └─ %-12s: %s", name, maskedURL)
 
 				if sub.SkipTlsVerify {

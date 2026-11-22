@@ -1,3 +1,4 @@
+// 文件职责：以声明式 healStep 流水线编排核心组件金丝雀升级、证书/WARP 修复、系统安全补丁与残留动态库热重载。
 package heal
 
 import (
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"singctl/internal/config"
+	"singctl/internal/constant"
 	"singctl/internal/deploy"
 	"singctl/internal/platform/servicemgr"
 )
@@ -23,17 +25,166 @@ func healServiceMgr() servicemgr.Manager {
 
 var healRunMu = make(chan struct{}, 1)
 
+// Deps 定义自愈流水线各阶段的可注入协作者（未设置字段自动回退至生产默认实现）。
+type Deps struct {
+	Scan              func(ctx context.Context, cfgPath, currentVer string) StatusReport
+	LoadConfig        func(path string) (*config.Config, error)
+	CoreHealer        *CoreHealer
+	SyncHysteria2Cert func(cfg *config.Config) (bool, string, error)
+	SyncWarpConfig    func() (bool, string, error)
+	ServiceMgr        servicemgr.Manager
+	HasBinary         func(name string) bool
+	IsOpenWrt         func() bool
+	GOOS              string
+	RunCmd            func(ctx context.Context, env []string, name string, args ...string) ([]byte, error)
+	ScanStaleServices func() []string
+	VerifySSHD        func() bool
+	RestartWebDaemon  func(async bool)
+	TriggerReboot     func()
+}
+
+type execDeps struct {
+	scan              func(ctx context.Context, cfgPath, currentVer string) StatusReport
+	loadConfig        func(path string) (*config.Config, error)
+	coreHealer        *CoreHealer
+	syncHysteria2Cert func(cfg *config.Config) (bool, string, error)
+	syncWarpConfig    func() (bool, string, error)
+	svcMgr            servicemgr.Manager
+	hasBinary         func(name string) bool
+	isOpenWrt         func() bool
+	goos              string
+	runCmd            func(ctx context.Context, env []string, name string, args ...string) ([]byte, error)
+	scanStaleServices func() []string
+	verifySSHD        func() bool
+	restartWebDaemon  func(async bool)
+	triggerReboot     func()
+}
+
+func resolveExecDeps(deps Deps) execDeps {
+	out := execDeps{
+		scan:              Scan,
+		loadConfig:        config.Load,
+		syncHysteria2Cert: deploy.SyncHysteria2CertIfNeeded,
+		syncWarpConfig:    deploy.SyncWarpConfigIfNeeded,
+		svcMgr:            deps.ServiceMgr,
+		hasBinary:         hasBinary,
+		isOpenWrt:         isOpenWrtSystem,
+		goos:              cmp.Or(strings.TrimSpace(deps.GOOS), runtime.GOOS),
+		runCmd:            defaultRunCmd,
+		scanStaleServices: ScanStaleSharedLibraryServices,
+		verifySSHD:        verifySSHDConfig,
+		restartWebDaemon:  restartWebDaemonSafely,
+		triggerReboot:     triggerDelayedReboot,
+	}
+	if out.svcMgr == nil {
+		out.svcMgr = healServiceMgr()
+	}
+	if deps.Scan != nil {
+		out.scan = deps.Scan
+	}
+	if deps.LoadConfig != nil {
+		out.loadConfig = deps.LoadConfig
+	}
+	if deps.SyncHysteria2Cert != nil {
+		out.syncHysteria2Cert = deps.SyncHysteria2Cert
+	}
+	if deps.SyncWarpConfig != nil {
+		out.syncWarpConfig = deps.SyncWarpConfig
+	}
+	if deps.HasBinary != nil {
+		out.hasBinary = deps.HasBinary
+	}
+	if deps.IsOpenWrt != nil {
+		out.isOpenWrt = deps.IsOpenWrt
+	}
+	if deps.RunCmd != nil {
+		out.runCmd = deps.RunCmd
+	}
+	if deps.ScanStaleServices != nil {
+		out.scanStaleServices = deps.ScanStaleServices
+	}
+	if deps.VerifySSHD != nil {
+		out.verifySSHD = deps.VerifySSHD
+	}
+	if deps.RestartWebDaemon != nil {
+		out.restartWebDaemon = deps.RestartWebDaemon
+	}
+	if deps.TriggerReboot != nil {
+		out.triggerReboot = deps.TriggerReboot
+	}
+	out.coreHealer = deps.CoreHealer
+	if out.coreHealer == nil {
+		out.coreHealer = NewCoreHealer(CoreHealerDeps{
+			ServiceMgr:   out.svcMgr,
+			RestartWebFn: out.restartWebDaemon,
+		})
+	}
+	return out
+}
+
+func defaultRunCmd(ctx context.Context, env []string, name string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
+	return cmd.CombinedOutput()
+}
+
+type healRunState struct {
+	opts                RunOptions
+	deps                execDeps
+	cfgPath             string
+	cfg                 *config.Config
+	initial             StatusReport
+	effectiveSingctlVer string
+	actions             []LayerActionDetail
+	allOK               bool
+	updatedCount        int
+	rollbackCount       int
+}
+
+func (st *healRunState) recordAction(act LayerActionDetail) {
+	st.actions = append(st.actions, act)
+	if !act.Success {
+		st.allOK = false
+	}
+	if act.Updated {
+		st.updatedCount++
+	}
+	if act.RolledBack {
+		st.rollbackCount++
+	}
+}
+
+type healStep struct {
+	name    string
+	applies func(st *healRunState) bool
+	run     func(ctx context.Context, st *healRunState)
+}
+
+var defaultHealPipeline = []healStep{
+	{name: "core_canary_upgrades", run: stepHealCoreComponents},
+	{name: "hysteria2_cert_sync", run: stepSyncHysteria2Cert},
+	{name: "warp_tunnel_sync", run: stepSyncWarpTunnel},
+	{
+		name:    "os_security_and_stale_libs",
+		applies: func(st *healRunState) bool { return st.deps.goos == "linux" },
+		run:     stepHealOSLayer,
+	},
+}
+
 // Run performs a full 3-layer security scan and (unless opts.CheckOnly) executes availability-safe self-healing.
 func Run(ctx context.Context, opts RunOptions) (RunResult, error) {
-	cfgPath := strings.TrimSpace(opts.ConfigPath)
-	if cfgPath == "" {
-		if _, err := os.Stat("/etc/singctl/singctl.yaml"); err == nil {
-			cfgPath = "/etc/singctl/singctl.yaml"
-		}
-	}
+	return RunWithDeps(ctx, opts, Deps{})
+}
+
+// RunWithDeps 使用显式注入依赖执行三层安全自愈流水线（供离线测试与生产 Run 共享）。
+func RunWithDeps(ctx context.Context, opts RunOptions, deps Deps) (RunResult, error) {
+	resolved := resolveExecDeps(deps)
+	cfgPath := resolveHealConfigPath(opts.ConfigPath)
 
 	if opts.CheckOnly {
-		report := Scan(ctx, cfgPath, opts.CurrentSingctlVer)
+		report := resolved.scan(ctx, cfgPath, opts.CurrentSingctlVer)
 		return RunResult{
 			Execution: HealHistoryItem{
 				Timestamp:      report.CheckedAt,
@@ -46,7 +197,6 @@ func Run(ctx context.Context, opts RunOptions) (RunResult, error) {
 		}, nil
 	}
 
-	// Prevent concurrent heal runs on the same machine
 	select {
 	case healRunMu <- struct{}{}:
 		defer func() { <-healRunMu }()
@@ -55,154 +205,38 @@ func Run(ctx context.Context, opts RunOptions) (RunResult, error) {
 	}
 
 	start := time.Now()
-	trigger := cmp.Or(strings.TrimSpace(opts.Trigger), "manual")
-
 	var cfg *config.Config
 	if cfgPath != "" {
-		cfg, _ = config.Load(cfgPath)
+		cfg, _ = resolved.loadConfig(cfgPath)
 	}
 
-	initial := Scan(ctx, cfgPath, opts.CurrentSingctlVer)
-	var actions []LayerActionDetail
-	allOK := true
-	updatedCount := 0
-	rollbackCount := 0
+	st := &healRunState{
+		opts:                opts,
+		deps:                resolved,
+		cfgPath:             cfgPath,
+		cfg:                 cfg,
+		initial:             resolved.scan(ctx, cfgPath, opts.CurrentSingctlVer),
+		effectiveSingctlVer: opts.CurrentSingctlVer,
+		allOK:               true,
+	}
 
-	// ── Layer 1: Core Binary Canary Upgrade + Live Health Probe + Auto Rollback ──
-	effectiveSingctlVer := opts.CurrentSingctlVer
-	for _, comp := range initial.Core.Components {
-		if !comp.Installed || !comp.HasUpdate {
+	for _, step := range defaultHealPipeline {
+		if step.applies != nil && !step.applies(st) {
 			continue
 		}
-		act := healCoreComponent(ctx, cfg, cfgPath, comp, opts.AsyncWebRestart)
-		actions = append(actions, act)
-		if !act.Success {
-			allOK = false
-		}
-		if act.Updated {
-			updatedCount++
-			if comp.Name == "singctl" && comp.LatestVersion != "" {
-				effectiveSingctlVer = comp.LatestVersion
-			}
-		}
-		if act.RolledBack {
-			rollbackCount++
-		}
+		step.run(ctx, st)
 	}
 
-	// Automatically heal Hysteria2 certificate_path / masquerade if Caddy renewed or switched from local CA
-	if certHealed, certMsg, certErr := deploy.SyncHysteria2CertIfNeeded(cfg); certErr != nil {
-		allOK = false
-		actions = append(actions, LayerActionDetail{
-			Layer:   "core",
-			Target:  "hysteria2-cert",
-			Success: false,
-			Message: "Hysteria2 证书同步异常: " + certErr.Error(),
-		})
-	} else if certHealed {
-		updatedCount++
-		actions = append(actions, LayerActionDetail{
-			Layer:   "core",
-			Target:  "hysteria2-cert",
-			Success: true,
-			Updated: true,
-			Message: certMsg,
-		})
-	}
-
-	// Automatically heal WARP (wireproxy) IPv4 resolution strategy & WireGuard tunnel connectivity
-	if warpHealed, warpMsg, warpErr := deploy.SyncWarpConfigIfNeeded(); warpErr != nil {
-		allOK = false
-		actions = append(actions, LayerActionDetail{
-			Layer:   "core",
-			Target:  "warp-tunnel",
-			Success: false,
-			Message: "WARP 隧道自愈异常: " + warpErr.Error(),
-		})
-	} else if warpHealed {
-		updatedCount++
-		actions = append(actions, LayerActionDetail{
-			Layer:   "core",
-			Target:  "warp-tunnel",
-			Success: true,
-			Updated: true,
-			Message: warpMsg,
-		})
-	}
-
-	// ── Layer 2: OS Security Patches (Preserving sshd_config) + Stale .so Reload ──
-	if runtime.GOOS == "linux" {
-		osActs := healOSLayer(ctx, opts.AsyncWebRestart)
-		for _, a := range osActs {
-			actions = append(actions, a)
-			if !a.Success {
-				allOK = false
-			}
-			if a.Updated {
-				updatedCount++
-			}
-		}
-	}
-
-	// ── Post-Heal Verification Scan ──
-	finalReport := Scan(ctx, cfgPath, effectiveSingctlVer)
-	if opts.AsyncWebRestart && len(finalReport.OS.StaleServices) > 0 {
-		// AsyncWebRestart defers restarting singctl-ui by 2s so HTTP response returns first;
-		// remove singctl-ui from the immediate post-scan StaleServices so the persisted report reflects the scheduled restart.
-		finalReport.OS.StaleServices = slices.DeleteFunc(finalReport.OS.StaleServices, func(s string) bool {
-			return s == "singctl-ui"
-		})
-		finalReport.OS.Healthy = finalReport.OS.SecurityCount == 0 && len(finalReport.OS.StaleServices) == 0
-		finalReport.Posture, finalReport.PostureLabel = evaluatePosture(finalReport.Core, finalReport.OS, finalReport.Kernel)
-	}
-
-	// ── Layer 3: Kernel Reboot Handling ──
-	willReboot := false
-	if finalReport.Kernel.RebootRequired {
-		if opts.AllowReboot && runtime.GOOS == "linux" && !isOpenWrtSystem() {
-			willReboot = true
-			actions = append(actions, LayerActionDetail{
-				Layer:   "kernel",
-				Target:  "kernel-reboot",
-				Success: true,
-				Updated: true,
-				Message: "将在 3 秒后平滑重启以加载新安全内核 (" + cmp.Or(finalReport.Kernel.InstalledKernel, "reboot-required") + ")",
-			})
-			updatedCount++
-		} else {
-			actions = append(actions, LayerActionDetail{
-				Layer:   "kernel",
-				Target:  "kernel-pending",
-				Success: true,
-				Updated: false,
-				Message: cmp.Or(finalReport.Kernel.RebootReason, "存在待重启生效的内核补丁（已保留当前会话不断联，可在维护窗口执行滚动重启）"),
-			})
-		}
-	}
-
-	var summary string
-	switch {
-	case rollbackCount > 0:
-		summary = fmt.Sprintf("自愈完成：更新 %d 项，触发 %d 项异常自动回滚保护（服务未中断）", updatedCount, rollbackCount)
-	case updatedCount > 0 && !allOK:
-		summary = fmt.Sprintf("已修复 %d 项安全更新，但部分组件更新遇到异常，请查看明细", updatedCount)
-	case updatedCount > 0 && willReboot:
-		summary = fmt.Sprintf("成功修复 %d 项安全更新，节点即将平滑重启加载新内核", updatedCount)
-	case updatedCount > 0:
-		summary = fmt.Sprintf("成功静默修复 %d 项安全更新，核心代理全程零中断", updatedCount)
-	case !allOK:
-		summary = "部分安全检查或更新步骤遇到异常，请查看明细"
-	default:
-		summary = "全栈已是最新安全基线，无需变更"
-	}
+	finalReport := runPostHealVerification(ctx, st)
+	willReboot := evaluateKernelRebootAction(st, finalReport.Kernel)
 
 	hist := HealHistoryItem{
 		Timestamp:      time.Now().Format(time.RFC3339),
-		Trigger:        trigger,
-		Success:        allOK,
+		Trigger:        cmp.Or(strings.TrimSpace(opts.Trigger), "manual"),
+		Success:        st.allOK,
 		DurationMs:     time.Since(start).Milliseconds(),
-		Summary:        summary,
-		Actions:        actions,
+		Summary:        formatHealSummary(st, willReboot),
+		Actions:        st.actions,
 		RebootRequired: finalReport.Kernel.RebootRequired && !willReboot,
 	}
 
@@ -211,166 +245,293 @@ func Run(ctx context.Context, opts RunOptions) (RunResult, error) {
 	if len(finalReport.History) > 30 {
 		finalReport.History = finalReport.History[:30]
 	}
-
 	if willReboot {
-		triggerDelayedReboot()
+		resolved.triggerReboot()
 	}
 
-	return RunResult{
-		Execution: hist,
-		Status:    finalReport,
-	}, nil
+	return RunResult{Execution: hist, Status: finalReport}, nil
 }
 
-func healCoreComponent(ctx context.Context, cfg *config.Config, cfgPath string, comp ComponentCheck, asyncWebRestart bool) LayerActionDetail {
-	return defaultCoreHealer().healComponent(ctx, cfg, cfgPath, comp, asyncWebRestart)
+func resolveHealConfigPath(raw string) string {
+	cfgPath := strings.TrimSpace(raw)
+	if cfgPath != "" {
+		return cfgPath
+	}
+	const defaultSingCtlConfigPath = "/etc/singctl/singctl.yaml"
+	if _, err := os.Stat(defaultSingCtlConfigPath); err == nil {
+		return defaultSingCtlConfigPath
+	}
+	return ""
 }
 
-func healOSLayer(ctx context.Context, asyncWebRestart bool) []LayerActionDetail {
-	var actions []LayerActionDetail
+func stepHealCoreComponents(ctx context.Context, st *healRunState) {
+	for _, comp := range st.initial.Core.Components {
+		if !comp.Installed || !comp.HasUpdate {
+			continue
+		}
+		act := st.deps.coreHealer.HealComponent(ctx, st.cfg, st.cfgPath, comp, st.opts.AsyncWebRestart)
+		st.recordAction(act)
+		if act.Updated && comp.Name == "singctl" && comp.LatestVersion != "" {
+			st.effectiveSingctlVer = comp.LatestVersion
+		}
+	}
+}
 
-	if isOpenWrtSystem() {
-		actions = append(actions, LayerActionDetail{
+func stepSyncHysteria2Cert(_ context.Context, st *healRunState) {
+	healed, msg, err := st.deps.syncHysteria2Cert(st.cfg)
+	if err != nil {
+		st.recordAction(LayerActionDetail{
+			Layer:   "core",
+			Target:  "hysteria2-cert",
+			Success: false,
+			Message: "Hysteria2 证书同步异常: " + err.Error(),
+		})
+		return
+	}
+	if healed {
+		st.recordAction(LayerActionDetail{
+			Layer:   "core",
+			Target:  "hysteria2-cert",
+			Success: true,
+			Updated: true,
+			Message: msg,
+		})
+	}
+}
+
+func stepSyncWarpTunnel(_ context.Context, st *healRunState) {
+	healed, msg, err := st.deps.syncWarpConfig()
+	if err != nil {
+		st.recordAction(LayerActionDetail{
+			Layer:   "core",
+			Target:  "warp-tunnel",
+			Success: false,
+			Message: "WARP 隧道自愈异常: " + err.Error(),
+		})
+		return
+	}
+	if healed {
+		st.recordAction(LayerActionDetail{
+			Layer:   "core",
+			Target:  "warp-tunnel",
+			Success: true,
+			Updated: true,
+			Message: msg,
+		})
+	}
+}
+
+func stepHealOSLayer(ctx context.Context, st *healRunState) {
+	if st.deps.isOpenWrt() {
+		st.recordAction(LayerActionDetail{
 			Layer:   "os",
 			Target:  "openwrt-guard",
 			Success: true,
 			Updated: false,
 			Message: "OpenWrt 闪存防变砖保护生效：跳过全量 opkg upgrade，仅维护核心二进制",
 		})
-		return actions
+		return
 	}
 
 	switch {
-	case hasBinary("apt-get"):
-		uCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
-		updCmd := exec.CommandContext(uCtx, "apt-get", "update", "-qq")
-		updCmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
-		_ = updCmd.Run()
-		cancel()
-
-		sCtx, sCancel := context.WithTimeout(ctx, 20*time.Second)
-		simCmd := exec.CommandContext(sCtx, "apt-get", "-s", "-o", "Debug::NoLocking=true", "upgrade")
-		simCmd.Env = append(os.Environ(), "LC_ALL=C")
-		simOut, simErr := simCmd.CombinedOutput()
-		sCancel()
-
-		if simErr == nil {
-			secPkgs := ParseAptSimulateSecurityUpdates(string(simOut))
-			if len(secPkgs) > 0 {
-				iCtx, iCancel := context.WithTimeout(ctx, 4*time.Minute)
-				args := []string{
-					"install", "--only-upgrade", "-y",
-					"-o", "Dpkg::Options::=--force-confdef",
-					"-o", "Dpkg::Options::=--force-confold",
-					"--",
-				}
-				args = append(args, secPkgs...)
-				instCmd := exec.CommandContext(iCtx, "apt-get", args...)
-				instCmd.Env = append(os.Environ(),
-					"DEBIAN_FRONTEND=noninteractive",
-					"NEEDRESTART_MODE=l",
-					"APT_LISTCHANGES_FRONTEND=none",
-				)
-				out, iErr := instCmd.CombinedOutput()
-				iCancel()
-
-				if iErr != nil {
-					actions = append(actions, LayerActionDetail{
-						Layer:   "os",
-						Target:  "apt-security",
-						Success: false,
-						Message: fmt.Sprintf("APT 安全补丁安装异常: %v (%s)", iErr, truncateText(string(out), 160)),
-					})
-				} else {
-					verifySSHDConfig()
-					preview := strings.Join(secPkgs[:min(5, len(secPkgs))], ", ")
-					if len(secPkgs) > 5 {
-						preview += fmt.Sprintf(" 等 %d 个包", len(secPkgs))
-					}
-					actions = append(actions, LayerActionDetail{
-						Layer:   "os",
-						Target:  "apt-security",
-						Success: true,
-						Updated: true,
-						Message: fmt.Sprintf("已无感安装 %d 个系统安全补丁 (%s)，保留全部自定义配置", len(secPkgs), preview),
-					})
-				}
-			}
+	case st.deps.hasBinary("apt-get"):
+		if act, ok := healAptSecurity(ctx, st.deps); ok {
+			st.recordAction(act)
 		}
-
-	case hasBinary("dnf"):
-		cCtx, cCancel := context.WithTimeout(ctx, 20*time.Second)
-		chkOut, _ := exec.CommandContext(cCtx, "dnf", "check-update", "--security", "-q").CombinedOutput()
-		cCancel()
-		secPkgs := ParseDnfSecurityCheckUpdate(string(chkOut))
-		if len(secPkgs) > 0 {
-			uCtx, uCancel := context.WithTimeout(ctx, 4*time.Minute)
-			out, uErr := exec.CommandContext(uCtx, "dnf", "update", "--security", "-y").CombinedOutput()
-			uCancel()
-			if uErr != nil {
-				actions = append(actions, LayerActionDetail{
-					Layer:   "os",
-					Target:  "dnf-security",
-					Success: false,
-					Message: fmt.Sprintf("DNF 安全更新异常: %v (%s)", uErr, truncateText(string(out), 160)),
-				})
-			} else {
-				verifySSHDConfig()
-				actions = append(actions, LayerActionDetail{
-					Layer:   "os",
-					Target:  "dnf-security",
-					Success: true,
-					Updated: true,
-					Message: fmt.Sprintf("已安装 %d 个 RHEL/DNF 安全更新", len(secPkgs)),
-				})
-			}
+	case st.deps.hasBinary("dnf"):
+		if act, ok := healDnfSecurity(ctx, st.deps); ok {
+			st.recordAction(act)
 		}
 	}
 
-	// Reload any daemons still holding unlinked/vulnerable shared libraries (.so) in RAM
-	stale := ScanStaleSharedLibraryServices()
-	if len(stale) > 0 {
-		var reloaded []string
-		for _, svc := range stale {
-			switch svc {
-			case "sshd":
-				if verifySSHDConfig() {
-					mgr := healServiceMgr()
-					if mgr.Reload(ctx, "sshd") != nil {
-						_ = mgr.Reload(ctx, "ssh")
-					}
-					reloaded = append(reloaded, "sshd")
-				}
-			case "caddy":
-				_ = healServiceMgr().ReloadOrRestart(ctx, "caddy")
-				reloaded = append(reloaded, "caddy")
-			case "singctl-ui":
-				restartWebDaemonSafely(asyncWebRestart)
-				reloaded = append(reloaded, "singctl-ui")
-			default:
-				if healServiceMgr().Restart(ctx, svc) == nil {
-					reloaded = append(reloaded, svc)
-				}
-			}
-		}
-		if len(reloaded) > 0 {
-			actions = append(actions, LayerActionDetail{
-				Layer:   "os",
-				Target:  "stale-libs",
-				Success: true,
-				Updated: true,
-				Message: "检测到内存残留旧版动态库 (.so)，已平滑热重载服务: " + strings.Join(reloaded, ", "),
-			})
-		}
+	if act, ok := reloadStaleLibServices(ctx, st.deps, st.opts.AsyncWebRestart); ok {
+		st.recordAction(act)
+	}
+}
+
+func healAptSecurity(ctx context.Context, deps execDeps) (LayerActionDetail, bool) {
+	uCtx, uCancel := context.WithTimeout(ctx, 90*time.Second)
+	_, _ = deps.runCmd(uCtx, []string{"DEBIAN_FRONTEND=noninteractive"}, "apt-get", "update", "-qq")
+	uCancel()
+
+	sCtx, sCancel := context.WithTimeout(ctx, 20*time.Second)
+	simOut, simErr := deps.runCmd(sCtx, []string{"LC_ALL=C"}, "apt-get", "-s", "-o", "Debug::NoLocking=true", "upgrade")
+	sCancel()
+	if simErr != nil {
+		return LayerActionDetail{}, false
 	}
 
-	return actions
+	secPkgs := ParseAptSimulateSecurityUpdates(string(simOut))
+	if len(secPkgs) == 0 {
+		return LayerActionDetail{}, false
+	}
+
+	iCtx, iCancel := context.WithTimeout(ctx, 4*time.Minute)
+	args := append([]string{
+		"install", "--only-upgrade", "-y",
+		"-o", "Dpkg::Options::=--force-confdef",
+		"-o", "Dpkg::Options::=--force-confold",
+		"--",
+	}, secPkgs...)
+	out, iErr := deps.runCmd(iCtx, []string{
+		"DEBIAN_FRONTEND=noninteractive",
+		"NEEDRESTART_MODE=l",
+		"APT_LISTCHANGES_FRONTEND=none",
+	}, "apt-get", args...)
+	iCancel()
+
+	if iErr != nil {
+		return LayerActionDetail{
+			Layer:   "os",
+			Target:  "apt-security",
+			Success: false,
+			Message: fmt.Sprintf("APT 安全补丁安装异常: %v (%s)", iErr, truncateText(string(out), 160)),
+		}, true
+	}
+
+	deps.verifySSHD()
+	preview := strings.Join(secPkgs[:min(5, len(secPkgs))], ", ")
+	if len(secPkgs) > 5 {
+		preview += fmt.Sprintf(" 等 %d 个包", len(secPkgs))
+	}
+	return LayerActionDetail{
+		Layer:   "os",
+		Target:  "apt-security",
+		Success: true,
+		Updated: true,
+		Message: fmt.Sprintf("已无感安装 %d 个系统安全补丁 (%s)，保留全部自定义配置", len(secPkgs), preview),
+	}, true
+}
+
+func healDnfSecurity(ctx context.Context, deps execDeps) (LayerActionDetail, bool) {
+	cCtx, cCancel := context.WithTimeout(ctx, 20*time.Second)
+	chkOut, _ := deps.runCmd(cCtx, nil, "dnf", "check-update", "--security", "-q")
+	cCancel()
+
+	secPkgs := ParseDnfSecurityCheckUpdate(string(chkOut))
+	if len(secPkgs) == 0 {
+		return LayerActionDetail{}, false
+	}
+
+	uCtx, uCancel := context.WithTimeout(ctx, 4*time.Minute)
+	out, uErr := deps.runCmd(uCtx, nil, "dnf", "update", "--security", "-y")
+	uCancel()
+	if uErr != nil {
+		return LayerActionDetail{
+			Layer:   "os",
+			Target:  "dnf-security",
+			Success: false,
+			Message: fmt.Sprintf("DNF 安全更新异常: %v (%s)", uErr, truncateText(string(out), 160)),
+		}, true
+	}
+
+	deps.verifySSHD()
+	return LayerActionDetail{
+		Layer:   "os",
+		Target:  "dnf-security",
+		Success: true,
+		Updated: true,
+		Message: fmt.Sprintf("已安装 %d 个 RHEL/DNF 安全更新", len(secPkgs)),
+	}, true
+}
+
+func reloadStaleLibServices(ctx context.Context, deps execDeps, asyncWebRestart bool) (LayerActionDetail, bool) {
+	stale := deps.scanStaleServices()
+	if len(stale) == 0 {
+		return LayerActionDetail{}, false
+	}
+
+	var reloaded []string
+	for _, svc := range stale {
+		switch svc {
+		case "sshd":
+			if deps.verifySSHD() {
+				if deps.svcMgr.Reload(ctx, "sshd") != nil {
+					_ = deps.svcMgr.Reload(ctx, "ssh")
+				}
+				reloaded = append(reloaded, "sshd")
+			}
+		case "caddy":
+			_ = deps.svcMgr.ReloadOrRestart(ctx, "caddy")
+			reloaded = append(reloaded, "caddy")
+		case "singctl-ui":
+			deps.restartWebDaemon(asyncWebRestart)
+			reloaded = append(reloaded, "singctl-ui")
+		default:
+			if deps.svcMgr.Restart(ctx, svc) == nil {
+				reloaded = append(reloaded, svc)
+			}
+		}
+	}
+	if len(reloaded) == 0 {
+		return LayerActionDetail{}, false
+	}
+	return LayerActionDetail{
+		Layer:   "os",
+		Target:  "stale-libs",
+		Success: true,
+		Updated: true,
+		Message: "检测到内存残留旧版动态库 (.so)，已平滑热重载服务: " + strings.Join(reloaded, ", "),
+	}, true
+}
+
+func runPostHealVerification(ctx context.Context, st *healRunState) StatusReport {
+	finalReport := st.deps.scan(ctx, st.cfgPath, st.effectiveSingctlVer)
+	if st.opts.AsyncWebRestart && len(finalReport.OS.StaleServices) > 0 {
+		finalReport.OS.StaleServices = slices.DeleteFunc(finalReport.OS.StaleServices, func(s string) bool {
+			return s == "singctl-ui"
+		})
+		finalReport.OS.Healthy = finalReport.OS.SecurityCount == 0 && len(finalReport.OS.StaleServices) == 0
+		finalReport.Posture, finalReport.PostureLabel = evaluatePosture(finalReport.Core, finalReport.OS, finalReport.Kernel)
+	}
+	return finalReport
+}
+
+func evaluateKernelRebootAction(st *healRunState, kernel KernelLayerStatus) bool {
+	if !kernel.RebootRequired {
+		return false
+	}
+	if st.opts.AllowReboot && st.deps.goos == "linux" && !st.deps.isOpenWrt() {
+		st.recordAction(LayerActionDetail{
+			Layer:   "kernel",
+			Target:  "kernel-reboot",
+			Success: true,
+			Updated: true,
+			Message: "将在 3 秒后平滑重启以加载新安全内核 (" + cmp.Or(kernel.InstalledKernel, "reboot-required") + ")",
+		})
+		return true
+	}
+	st.recordAction(LayerActionDetail{
+		Layer:   "kernel",
+		Target:  "kernel-pending",
+		Success: true,
+		Updated: false,
+		Message: cmp.Or(kernel.RebootReason, "存在待重启生效的内核补丁（已保留当前会话不断联，可在维护窗口执行滚动重启）"),
+	})
+	return false
+}
+
+func formatHealSummary(st *healRunState, willReboot bool) string {
+	switch {
+	case st.rollbackCount > 0:
+		return fmt.Sprintf("自愈完成：更新 %d 项，触发 %d 项异常自动回滚保护（服务未中断）", st.updatedCount, st.rollbackCount)
+	case st.updatedCount > 0 && !st.allOK:
+		return fmt.Sprintf("已修复 %d 项安全更新，但部分组件更新遇到异常，请查看明细", st.updatedCount)
+	case st.updatedCount > 0 && willReboot:
+		return fmt.Sprintf("成功修复 %d 项安全更新，节点即将平滑重启加载新内核", st.updatedCount)
+	case st.updatedCount > 0:
+		return fmt.Sprintf("成功静默修复 %d 项安全更新，核心代理全程零中断", st.updatedCount)
+	case !st.allOK:
+		return "部分安全检查或更新步骤遇到异常，请查看明细"
+	default:
+		return "全栈已是最新安全基线，无需变更"
+	}
 }
 
 func verifySingBoxHealth(ctx context.Context, binPath string, expectActive bool) error {
 	if binPath != "" {
-		if _, err := os.Stat("/etc/sing-box/config.json"); err == nil {
-			if out, cErr := exec.Command(binPath, "check", "-c", "/etc/sing-box/config.json").CombinedOutput(); cErr != nil {
+		if _, err := os.Stat(constant.SingBoxConfigFile); err == nil {
+			if out, cErr := exec.Command(binPath, "check", "-c", constant.SingBoxConfigFile).CombinedOutput(); cErr != nil {
 				return fmt.Errorf("config check failed: %s", truncateText(string(out), 120))
 			}
 		}
@@ -383,8 +544,9 @@ func verifySingBoxHealth(ctx context.Context, binPath string, expectActive bool)
 
 func verifyCaddyHealth(ctx context.Context, binPath string, expectActive bool) error {
 	if binPath != "" {
-		if _, err := os.Stat("/etc/caddy/Caddyfile"); err == nil {
-			if out, cErr := exec.Command(binPath, "validate", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile").CombinedOutput(); cErr != nil {
+		const caddyFile = "/etc/caddy/Caddyfile"
+		if _, err := os.Stat(caddyFile); err == nil {
+			if out, cErr := exec.Command(binPath, "validate", "--config", caddyFile, "--adapter", "caddyfile").CombinedOutput(); cErr != nil {
 				return fmt.Errorf("Caddyfile validate failed: %s", truncateText(string(out), 120))
 			}
 		}
@@ -435,7 +597,6 @@ func restartWebDaemonSafely(async bool) {
 		return
 	}
 
-	// Migrate legacy PID-based daemon to singctl-ui.service if encountered once during upgrade
 	if _, err := os.Stat("/tmp/singctl-serverweb.pid"); err == nil {
 		binPath := locateBinary([]string{"/usr/local/bin/singctl", "/usr/bin/singctl"}, "singctl")
 		if binPath == "" {

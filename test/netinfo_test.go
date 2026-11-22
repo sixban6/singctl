@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"singctl/internal/util/netinfo"
+	netinfo "singctl/internal/common/netx"
 	"strings"
 	"testing"
 	"time"

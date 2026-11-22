@@ -1,19 +1,17 @@
-// 文件职责：执行候选节点并发 HTTPS 204 测速、本地 WAN 连通性防误切校验及 Clash 选择器状态查询与切换。
+// 文件职责：通过统一 clashapi 客户端执行候选节点并发 HTTPS 204 测速、本地 WAN 连通性校验及选择器状态汇总。
 package daemon
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"fmt"
 	"net/http"
-	"net/url"
-	"singctl/internal/config"
 	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"singctl/internal/config"
+	"singctl/internal/singbox/clashapi"
 )
 
 type scoredCandidate struct {
@@ -26,9 +24,9 @@ type scoredCandidate struct {
 func (s *GroupFailoverState) selectBestHealthyCandidate(
 	ctx context.Context,
 	base, secret string,
-	proxies map[string]clashProxyItem,
+	proxies map[string]clashapi.ProxyItem,
 	groupName string,
-	grp clashProxyItem,
+	grp clashapi.ProxyItem,
 	cur string,
 	wanGate func(context.Context) bool,
 ) (string, int, bool) {
@@ -40,7 +38,6 @@ func (s *GroupFailoverState) selectBestHealthyCandidate(
 		if cand == "" || cand == cur || isDirectOutboundTag(cand) || IsInfoPlaceholderNode(cand) {
 			continue
 		}
-		// 对顶层策略组（如 Proxy / AI），优先选 #Auto / #VPS 等聚合组或直属有效节点，#Nodes 仅作兜底
 		if !strings.EqualFold(groupName, "#Nodes") && strings.EqualFold(cand, "#Nodes") {
 			fallbackNodesPool = append(fallbackNodesPool, cand)
 			continue
@@ -60,7 +57,7 @@ func (s *GroupFailoverState) selectBestHealthyCandidate(
 func (s *GroupFailoverState) probeCandidatePoolBest(
 	ctx context.Context,
 	base, secret string,
-	proxies map[string]clashProxyItem,
+	proxies map[string]clashapi.ProxyItem,
 	pool []string,
 	wanGate func(context.Context) bool,
 ) (string, int, bool) {
@@ -71,7 +68,6 @@ func (s *GroupFailoverState) probeCandidatePoolBest(
 		pool = pool[:maxCandidateProbeBatch]
 	}
 
-	// 先在串行安全上下文中确保候选子 Selector（如 #VPS）内部处在健康节点（并纳入状态机追踪）
 	for _, cand := range pool {
 		if ctx.Err() != nil {
 			return "", 0, false
@@ -114,7 +110,6 @@ func (s *GroupFailoverState) probeCandidatePoolBest(
 				return
 			}
 			score := delay
-			// 聚合策略组 (#Auto / #VPS) 享有 80ms 亲和优先权，延迟相近时优先保持聚合组结构
 			if it.agg {
 				score = max(1, delay-80)
 			}
@@ -145,9 +140,9 @@ func (s *GroupFailoverState) probeCandidatePoolBest(
 func (s *GroupFailoverState) ensureSubSelectorHealthyTracked(
 	ctx context.Context,
 	base, secret string,
-	proxies map[string]clashProxyItem,
+	proxies map[string]clashapi.ProxyItem,
 	subName string,
-	subGrp clashProxyItem,
+	subGrp clashapi.ProxyItem,
 	wanGate func(context.Context) bool,
 ) {
 	cur := strings.TrimSpace(subGrp.Now)
@@ -159,7 +154,7 @@ func (s *GroupFailoverState) ensureSubSelectorHealthyTracked(
 		retries := min(1, max(0, s.ConfirmRetries))
 		delay := s.ConfirmRetryDelay
 		s.mu.Unlock()
-		for r := 0; r < retries; r++ {
+		for range retries {
 			if delay > 0 {
 				select {
 				case <-time.After(delay):
@@ -222,8 +217,8 @@ func (s *GroupFailoverState) ensureSubSelectorHealthyTracked(
 		return results[i].order < results[j].order
 	})
 	best := results[0]
-	if err := switchClashSelector(ctx, base, secret, subName, best.name); err == nil {
-		proxies[subName] = clashProxyItem{Type: subGrp.Type, Now: best.name, All: subGrp.All}
+	if err := s.clashClient().SwitchSelectorAt(ctx, base, secret, subName, best.name); err == nil {
+		proxies[subName] = clashapi.ProxyItem{Type: subGrp.Type, Now: best.name, All: subGrp.All}
 		switchAt := s.now()
 		s.mu.Lock()
 		if slices.Contains(s.WatchedGroups, subName) {
@@ -239,8 +234,6 @@ func (s *GroupFailoverState) ensureSubSelectorHealthyTracked(
 	}
 }
 
-// probeOutboundAlive 并发竞速探测多个目标 URL，任一 URL 返回有效延迟即立即判定线路存活，
-// 既将多 URL 探测耗时减半，又彻底消除单一探测目标偶发限流/抽风引发的误判。
 func (s *GroupFailoverState) probeOutboundAlive(ctx context.Context, base, secret, target string) (int, bool) {
 	if ctx.Err() != nil {
 		return 0, false
@@ -261,7 +254,7 @@ func (s *GroupFailoverState) probeOutboundAlive(ctx context.Context, base, secre
 	probeCtx, cancel := context.WithTimeout(ctx, timeout+700*time.Millisecond)
 	defer cancel()
 
-	client := &http.Client{Timeout: timeout + 600*time.Millisecond}
+	cli := s.clashClient()
 	type probeRes struct {
 		delay int
 		ok    bool
@@ -270,32 +263,9 @@ func (s *GroupFailoverState) probeOutboundAlive(ctx context.Context, base, secre
 
 	for _, testURL := range urls {
 		go func(u string) {
-			reqURL := fmt.Sprintf("%s/proxies/%s/delay?url=%s&timeout=%d",
-				strings.TrimRight(base, "/"),
-				url.PathEscape(target),
-				url.QueryEscape(u),
-				timeoutMs,
-			)
-			req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, reqURL, nil)
-			if err != nil {
-				resCh <- probeRes{}
-				return
-			}
-			if secret != "" {
-				req.Header.Set("Authorization", "Bearer "+secret)
-			}
-			resp, err := client.Do(req)
-			if err != nil {
-				resCh <- probeRes{}
-				return
-			}
-			var data struct {
-				Delay int `json:"delay"`
-			}
-			decErr := json.NewDecoder(resp.Body).Decode(&data)
-			_ = resp.Body.Close()
-			if resp.StatusCode == http.StatusOK && decErr == nil && data.Delay > 0 {
-				resCh <- probeRes{delay: data.Delay, ok: true}
+			d, err := cli.ProbeDelayAt(probeCtx, base, secret, target, u, timeoutMs)
+			if err == nil && d > 0 {
+				resCh <- probeRes{delay: d, ok: true}
 				return
 			}
 			resCh <- probeRes{}
@@ -316,13 +286,11 @@ func (s *GroupFailoverState) probeOutboundAlive(ctx context.Context, base, secre
 	return 0, false
 }
 
-// CheckLocalWANConnectivity 检查本机国内直连宽带是否在线（多目标并发竞速，2.5s 超时）：
-// 优先通过 sing-box direct 直连出站（自带 fwmark 豁免 TProxy 回环）检测，同时并发直连国内权威端点兜底；
-// 只要任一通道收到有效 HTTP 响应即判定自家宽带正常；仅当全部超时失败时才判定本机宽带断网。
+// CheckLocalWANConnectivity 检查本机国内直连宽带是否在线（多目标并发竞速，2.5s 超时）。
 func CheckLocalWANConnectivity(
 	ctx context.Context,
 	base, secret string,
-	proxies map[string]clashProxyItem,
+	proxies map[string]clashapi.ProxyItem,
 ) bool {
 	wanCtx, cancel := context.WithTimeout(ctx, 2600*time.Millisecond)
 	defer cancel()
@@ -335,7 +303,7 @@ func CheckLocalWANConnectivity(
 		}
 	}
 
-	client := &http.Client{
+	directHTTP := &http.Client{
 		Timeout: 2400 * time.Millisecond,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
@@ -351,30 +319,8 @@ func CheckLocalWANConnectivity(
 	if directTag != "" && base != "" {
 		for _, u := range domesticWANProbeURLs[:2] {
 			go func(testURL string) {
-				reqURL := fmt.Sprintf("%s/proxies/%s/delay?url=%s&timeout=2200",
-					strings.TrimRight(base, "/"),
-					url.PathEscape(directTag),
-					url.QueryEscape(testURL),
-				)
-				req, err := http.NewRequestWithContext(wanCtx, http.MethodGet, reqURL, nil)
-				if err != nil {
-					okCh <- false
-					return
-				}
-				if secret != "" {
-					req.Header.Set("Authorization", "Bearer "+secret)
-				}
-				resp, err := client.Do(req)
-				if err != nil {
-					okCh <- false
-					return
-				}
-				var data struct {
-					Delay int `json:"delay"`
-				}
-				decErr := json.NewDecoder(resp.Body).Decode(&data)
-				_ = resp.Body.Close()
-				okCh <- (resp.StatusCode == http.StatusOK && decErr == nil && data.Delay > 0)
+				d, err := defaultClashClient.ProbeDelayAt(wanCtx, base, secret, directTag, testURL, 2200)
+				okCh <- (err == nil && d > 0)
 			}(u)
 		}
 	}
@@ -386,7 +332,7 @@ func CheckLocalWANConnectivity(
 				okCh <- false
 				return
 			}
-			resp, err := client.Do(req)
+			resp, err := directHTTP.Do(req)
 			if err != nil {
 				okCh <- false
 				return
@@ -418,7 +364,7 @@ func InspectClashSelectors(
 	watched []string,
 	active []FailoverActiveItem,
 ) ([]SelectorGroupSummary, error) {
-	_, doc, err := fetchClashProxiesDoc(ctx, endpoints, secret)
+	_, proxies, err := defaultClashClient.ResolveProxiesAcross(ctx, endpoints, secret)
 	if err != nil {
 		return nil, err
 	}
@@ -434,7 +380,7 @@ func InspectClashSelectors(
 	}
 
 	var list []SelectorGroupSummary
-	for name, item := range doc.Proxies {
+	for name, item := range proxies {
 		if !strings.EqualFold(item.Type, "Selector") {
 			continue
 		}
@@ -469,65 +415,4 @@ func InspectClashSelectors(
 		}
 	})
 	return list, nil
-}
-
-func fetchClashProxiesDoc(ctx context.Context, endpoints []string, secret string) (string, clashProxiesDocument, error) {
-	client := &http.Client{Timeout: 2500 * time.Millisecond}
-	var lastErr error
-	for _, base := range endpoints {
-		base = strings.TrimRight(strings.TrimSpace(base), "/")
-		if base == "" {
-			continue
-		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/proxies", nil)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		if secret != "" {
-			req.Header.Set("Authorization", "Bearer "+secret)
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		var doc clashProxiesDocument
-		decErr := json.NewDecoder(resp.Body).Decode(&doc)
-		_ = resp.Body.Close()
-		if resp.StatusCode == http.StatusOK && decErr == nil && len(doc.Proxies) > 0 {
-			return base, doc, nil
-		}
-		lastErr = fmt.Errorf("status %d", resp.StatusCode)
-	}
-	if lastErr == nil {
-		lastErr = fmt.Errorf("no clash api endpoints reachable")
-	}
-	return "", clashProxiesDocument{}, lastErr
-}
-
-func switchClashSelector(ctx context.Context, base, secret, group, target string) error {
-	client := &http.Client{Timeout: 2500 * time.Millisecond}
-	body, err := json.Marshal(map[string]string{"name": target})
-	if err != nil {
-		return err
-	}
-	putURL := fmt.Sprintf("%s/proxies/%s", strings.TrimRight(base, "/"), url.PathEscape(group))
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, putURL, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if secret != "" {
-		req.Header.Set("Authorization", "Bearer "+secret)
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("unexpected status %d switching %s -> %s", resp.StatusCode, group, target)
-	}
-	return nil
 }

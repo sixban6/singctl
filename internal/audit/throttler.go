@@ -1,3 +1,4 @@
+// 文件职责：管理客户端审计“限速不拉黑”策略的防自锁校验、配置持久化与隔离 nftables 表下发。
 package audit
 
 import (
@@ -15,7 +16,7 @@ import (
 
 	"singctl/internal/config"
 	"singctl/internal/singbox"
-	"singctl/internal/util/netinfo"
+	"singctl/internal/common/netx"
 )
 
 const (
@@ -159,11 +160,33 @@ func matchThrottleRateKBps(cfg *config.Config, target string, port int) int {
 	return bestWildcardRate
 }
 
+// ThrottlerDeps 定义上行限速执行器的可替换外部依赖（nil 字段自动回退生产默认实现）。
+type ThrottlerDeps struct {
+	LookupIPs func(ctx context.Context, host string) ([]netip.Addr, error)
+	RunNFT    func(ctx context.Context, script string) error
+	DeleteNFT func(ctx context.Context) error
+}
+
 // Throttler 负责将 audit.throttles 编译并幂等下发到 Linux nftables 隔离限速表。
 type Throttler struct {
 	lookupIPs func(ctx context.Context, host string) ([]netip.Addr, error)
 	runNFT    func(ctx context.Context, script string) error
 	deleteNFT func(ctx context.Context) error
+}
+
+// NewThrottlerWithDeps 基于给定依赖创建限速执行器（未注入字段自动回退默认实现）。
+func NewThrottlerWithDeps(deps ThrottlerDeps) *Throttler {
+	def := NewThrottler()
+	if deps.LookupIPs != nil {
+		def.lookupIPs = deps.LookupIPs
+	}
+	if deps.RunNFT != nil {
+		def.runNFT = deps.RunNFT
+	}
+	if deps.DeleteNFT != nil {
+		def.deleteNFT = deps.DeleteNFT
+	}
+	return def
 }
 
 // NewThrottler 创建默认限速执行器（使用系统 DNS 解析与 nftables -f -）。
@@ -416,7 +439,7 @@ func collectProtectedPublicIPs(cfg *config.Config) []netip.Addr {
 	for _, bIP := range ProtectedBootstrapIPs {
 		appendIP(bIP)
 	}
-	if lanIP := netinfo.GetPrimaryLANIPv4(); lanIP != "" {
+	if lanIP := netx.GetPrimaryLANIPv4(); lanIP != "" {
 		appendIP(lanIP)
 	}
 	if cfg != nil {
