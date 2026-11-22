@@ -204,14 +204,114 @@ get_latest_version() {
     echo_success "最新版本: $LATEST_VERSION"
 }
 
-# 构建下载URL（直连 GitHub 优先，不可达时自动回退多镜像；全平台内置离线规则集快照）
-build_download_url() {
-    PACKAGE_FILENAME="singctl-${OS}-${ARCH}.tar.gz"
+# 探测安装目标挂载点可用空间（KiB，兼容 BusyBox df 与 POSIX df -Pk）
+probe_install_avail_kb() {
+    if [ -n "${SINGCTL_MOCK_DISK_AVAIL_KB:-}" ]; then
+        echo "$SINGCTL_MOCK_DISK_AVAIL_KB"
+        return 0
+    fi
+    local check_dir="${INSTALL_DIR:-/usr/bin}"
+    while [ ! -d "$check_dir" ] && [ "$check_dir" != "/" ] && [ "$check_dir" != "." ] && [ -n "$check_dir" ]; do
+        check_dir=$(dirname "$check_dir")
+    done
+    [ -d "$check_dir" ] || check_dir="/"
+    local avail=""
+    avail=$(df -Pk "$check_dir" 2>/dev/null | awk 'NR==2 {print $4}')
+    if [ -z "$avail" ]; then
+        avail=$(df -k "$check_dir" 2>/dev/null | awk 'END {if (NF>=4) print $(NF-2)}')
+    fi
+    echo "$avail"
+}
+
+# 判断是否优先下载 -lite 客户端精简包（OpenWrt 低内存 <=512MB / MemAvailable <=256MB / 闪存 <100MB 或显式 --lite）
+should_use_lite_package() {
+    [ "${OS:-}" = "linux" ] || return 1
+
+    local force_lite="false"
+    local force_full="false"
+    local explicit_server="false"
+    local explicit_client="false"
+    local arg
+
+    for arg in "$@"; do
+        case "$arg" in
+            --lite)
+                force_lite="true"
+                ;;
+            --full|--no-lite)
+                force_full="true"
+                ;;
+            --server|-s|server)
+                explicit_server="true"
+                ;;
+            --client|-c|client)
+                explicit_client="true"
+                ;;
+        esac
+    done
+
+    [ "${SINGCTL_FORCE_LITE:-0}" = "1" ] && force_lite="true"
+    [ "$force_full" = "true" ] && return 1
+    [ "$force_lite" = "true" ] && return 0
+    if [ "$explicit_server" = "true" ] || [ "${PRE_EXISTING_ROLE:-}" = "server" ]; then
+        return 1
+    fi
+
+    local root_prefix="${SINGCTL_ROOT_PREFIX:-}"
+    local is_owrt="false"
+    if [ "${IS_OPENWRT:-false}" = "true" ] || [ -f "${root_prefix}/etc/openwrt_release" ] || [ -f "${root_prefix}/etc/openwrt_version" ]; then
+        is_owrt="true"
+    elif [ -r "${root_prefix}/etc/os-release" ] && grep -iq "openwrt" "${root_prefix}/etc/os-release" 2>/dev/null; then
+        is_owrt="true"
+    fi
+
+    if [ "$is_owrt" != "true" ] && [ "$explicit_client" != "true" ]; then
+        return 1
+    fi
+
+    local meminfo_path="${SINGCTL_MEMINFO_PATH:-${root_prefix}/proc/meminfo}"
+    if [ -r "$meminfo_path" ]; then
+        local mem_total_kb mem_avail_kb
+        mem_total_kb=$(awk '/^MemTotal:/ {print $2; exit}' "$meminfo_path" 2>/dev/null || true)
+        mem_avail_kb=$(awk '/^MemAvailable:/ {print $2; exit}' "$meminfo_path" 2>/dev/null || true)
+        # MemTotal <= 512 MiB (524288 KiB) 或驱动预留后 MemAvailable <= 256 MiB (262144 KiB)
+        if [ -n "$mem_total_kb" ] && [ "$mem_total_kb" -gt 0 ] 2>/dev/null && [ "$mem_total_kb" -le 524288 ] 2>/dev/null; then
+            return 0
+        fi
+        if [ -n "$mem_avail_kb" ] && [ "$mem_avail_kb" -gt 0 ] 2>/dev/null && [ "$mem_avail_kb" -le 262144 ] 2>/dev/null; then
+            return 0
+        fi
+    fi
+
+    local avail_kb
+    avail_kb=$(probe_install_avail_kb)
+    # 目标分区可用空间 < 100 MiB (102400 KiB)
+    if [ -n "$avail_kb" ] && [ "$avail_kb" -ge 0 ] 2>/dev/null && [ "$avail_kb" -lt 102400 ] 2>/dev/null; then
+        return 0
+    fi
+
+    return 1
+}
+
+set_package_urls() {
+    PACKAGE_FILENAME="$1"
     DIRECT_URL="https://github.com/$GITHUB_REPO/releases/download/$LATEST_VERSION/$PACKAGE_FILENAME"
     MIRROR_URL_1="https://ghfast.top/$DIRECT_URL"
     MIRROR_URL_2="https://gh-proxy.com/$DIRECT_URL"
-
     echo_info "目标安装包: $PACKAGE_FILENAME"
+}
+
+# 构建下载URL（OpenWrt 低内存/小闪存自动优先选择 -lite 精简包，不存在时回退标准包）
+build_download_url() {
+    local std_pkg="singctl-${OS}-${ARCH}.tar.gz"
+    FALLBACK_PACKAGE_FILENAME=""
+    if should_use_lite_package "$@"; then
+        FALLBACK_PACKAGE_FILENAME="$std_pkg"
+        echo_info "检测到低内存/小闪存路由器环境或 --lite 参数，优先选择轻量精简包"
+        set_package_urls "singctl-${OS}-${ARCH}-lite.tar.gz"
+    else
+        set_package_urls "$std_pkg"
+    fi
 }
 
 # 计算文件 sha256（兼容 GNU sha256sum / macOS shasum）
@@ -232,6 +332,26 @@ compute_sha256() {
 # 安全：sha256 校验和必须从 GitHub 直连获取（不走镜像），校验失败一律中止
 # ------------------------------------------------------------
 
+download_archive_from_sources() {
+    local out_file="$1"
+    echo_info "尝试从 GitHub 官方源直连下载: $DIRECT_URL"
+    if curl -fL --connect-timeout 8 --retry 1 -o "$out_file" "$DIRECT_URL"; then
+        echo_success "GitHub 官方源直连下载完成"
+        return 0
+    fi
+    echo_warning "GitHub 直连超时或受阻，自动切换镜像 1 加速下载: $MIRROR_URL_1"
+    if curl -fL --connect-timeout 10 --retry 2 -o "$out_file" "$MIRROR_URL_1"; then
+        echo_success "镜像 1 (ghfast.top) 加速下载完成"
+        return 0
+    fi
+    echo_warning "镜像 1 下载未成功，自动切换镜像 2 加速下载: $MIRROR_URL_2"
+    if curl -fL --connect-timeout 10 --retry 2 -o "$out_file" "$MIRROR_URL_2"; then
+        echo_success "镜像 2 (gh-proxy.com) 加速下载完成"
+        return 0
+    fi
+    return 1
+}
+
 download_and_extract() {
     echo_info "开始下载安装包..."
 
@@ -239,28 +359,31 @@ download_and_extract() {
     mkdir -p "$TEMP_DIR"
     tar_file="$TEMP_DIR/singctl.tar.gz"
 
-    # 2. 下载（优先直连 GitHub 保障海外 VPS 满速稳定，失败则依次回退多镜像加速）
-    echo_info "尝试从 GitHub 官方源直连下载: $DIRECT_URL"
-    if curl -fL --connect-timeout 8 --retry 1 -o "$tar_file" "$DIRECT_URL"; then
-        echo_success "GitHub 官方源直连下载完成"
-    elif echo_warning "GitHub 直连超时或受阻，自动切换镜像 1 加速下载: $MIRROR_URL_1" && curl -fL --connect-timeout 10 --retry 2 -o "$tar_file" "$MIRROR_URL_1"; then
-        echo_success "镜像 1 (ghfast.top) 加速下载完成"
-    else
-        echo_warning "镜像 1 下载未成功，自动切换镜像 2 加速下载: $MIRROR_URL_2"
-        if ! curl -fL --connect-timeout 10 --retry 2 -o "$tar_file" "$MIRROR_URL_2"; then
+    # 2. 下载（优先直连 GitHub 保障海外 VPS 满速稳定，失败回退多镜像；若 -lite 包不存在则平滑回退标准包）
+    if ! download_archive_from_sources "$tar_file"; then
+        if [ -n "${FALLBACK_PACKAGE_FILENAME:-}" ] && [ "$PACKAGE_FILENAME" != "$FALLBACK_PACKAGE_FILENAME" ]; then
+            echo_warning "轻量精简包 ($PACKAGE_FILENAME) 暂不可用，平滑回退下载标准安装包: $FALLBACK_PACKAGE_FILENAME"
+            rm -f "$tar_file"
+            local fallback_pkg="$FALLBACK_PACKAGE_FILENAME"
+            FALLBACK_PACKAGE_FILENAME=""
+            set_package_urls "$fallback_pkg"
+            if ! download_archive_from_sources "$tar_file"; then
+                error_exit "下载失败，所有下载源均不可达，请检查主机网络连接"
+            fi
+        else
             error_exit "下载失败，所有下载源均不可达，请检查主机网络连接"
         fi
-        echo_success "镜像 2 (gh-proxy.com) 加速下载完成"
     fi
 
     # 3. sha256 校验（优先从 GitHub 直连获取校验和，不可达时回退镜像并严格比对 SHA256）
     verify_checksum
 
-    # 4. 解压
+    # 4. 解压并立即释放压缩包占用的 /tmp 内存盘空间
     echo_info "解压安装包..."
     if ! tar -xzf "$tar_file" -C "$TEMP_DIR"; then
         error_exit "解压失败"
     fi
+    rm -f "$tar_file"
     echo_success "解压完成"
 
     # 5. 修复可执行权限（POSIX 写法）
@@ -1463,7 +1586,7 @@ main() {
     detect_system
     PRE_EXISTING_ROLE=$(detect_existing_installed_role)
     get_latest_version
-    build_download_url
+    build_download_url "$@"
     download_and_extract
     install_files
     purge_existing_singbox

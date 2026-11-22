@@ -6,6 +6,8 @@ export interface ClientAdGuardStatusSummary {
   dnsHealthy: boolean;
   webHealthy: boolean;
   singboxLinked: boolean;
+  lowMemoryBlocked?: boolean;
+  lowMemoryWarning?: string;
   version: string;
   dnsAddr: string;
   webUrl: string;
@@ -76,6 +78,8 @@ export interface AdGuardOverviewSnapshot {
   webHealthy: boolean;
   singboxLinked: boolean;
   isOpenWrt: boolean;
+  lowMemoryBlocked?: boolean;
+  lowMemoryWarning?: string;
   version: string;
   dnsAddr: string;
   webAddr: string;

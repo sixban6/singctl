@@ -79,6 +79,9 @@ type DaemonOptions struct {
 	PidRemover          func() error
 	SubSyncCheckTimeout time.Duration
 	SubSyncBinOverride  string
+	EmbeddedService     func(ctx context.Context, cfgStore *config.Store) error
+	WebEmbeddedListen   string
+	LowMemoryMode       *bool
 }
 
 // Daemon 守护进程。
@@ -113,10 +116,17 @@ type Daemon struct {
 	p2pSnapMu           sync.Mutex
 	p2pLastSnapSummary  string
 
-	logPathOverride string
-	skipSignalSetup bool
-	pidWriter       func() error
-	pidRemover      func() error
+	logPathOverride   string
+	webLogOverride    string
+	webEmbeddedFile   string
+	webEmbeddedMu     sync.Mutex
+	webEmbeddedListen string
+	embeddedService   func(ctx context.Context, cfgStore *config.Store) error
+	lowMemory         bool
+	stateStore        *StateStore
+	skipSignalSetup   bool
+	pidWriter         func() error
+	pidRemover        func() error
 }
 
 // NewDaemonWithMeta 创建带配置文件路径（支持热重载）与版本号标识的守护进程。
@@ -134,12 +144,24 @@ func NewDaemonWithOptions(cfg *config.Config, opts DaemonOptions) *Daemon {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 
+	var stateStore *StateStore
+	if strings.TrimSpace(opts.Paths.StateFile) != "" || strings.TrimSpace(opts.Paths.LogFile) != "" || strings.TrimSpace(opts.Paths.PidFile) != "" {
+		stateStore = NewStateStore(opts.Paths)
+	} else {
+		stateStore = defaultStateStore
+	}
+
+	lowMem := IsLowMemoryDevice() || opts.EmbeddedService != nil
+	if opts.LowMemoryMode != nil {
+		lowMem = *opts.LowMemoryMode
+	}
+
 	limiter := NewRestartLimiterFromState(cfg.Watchdog.MaxRestarts)
 	failover := NewGroupFailoverState()
 	failover.SingBoxConfigPath = constant.SingBoxConfigFile
 	failover.EnableWANGate = true
 	failover.ApplyConfig(cfg.EffectiveFailoverConfig())
-	failover.RestoreSnapshot(LoadRuntimeSnapshot().ActiveFailovers)
+	failover.RestoreSnapshot(stateStore.Load().ActiveFailovers)
 
 	cfgStore := config.NewStore(
 		opts.ConfigPath,
@@ -169,7 +191,7 @@ func NewDaemonWithOptions(cfg *config.Config, opts DaemonOptions) *Daemon {
 			if !eventGate.ShouldAppendRuntimeEvent(action, summary, time.Now()) {
 				return
 			}
-			AppendRuntimeEvent(WatchdogEventRecord{
+			stateStore.AppendEvent(WatchdogEventRecord{
 				Action:  action,
 				Healthy: healthy,
 				Summary: summary,
@@ -189,9 +211,15 @@ func NewDaemonWithOptions(cfg *config.Config, opts DaemonOptions) *Daemon {
 		subSyncCheckTimeout: opts.SubSyncCheckTimeout,
 		subSyncBinOverride:  opts.SubSyncBinOverride,
 		failover:            failover,
-		auditCollector:      audit.NewCollector(cfg),
+		auditCollector:      audit.NewCollectorWithOptions(cfg, audit.CollectorOptions{LowMemory: &lowMem}),
 		p2pCtrl:             p2pCtrl,
 		logPathOverride:     strings.TrimSpace(opts.Paths.LogFile),
+		webLogOverride:      strings.TrimSpace(opts.Paths.WebLogFile),
+		webEmbeddedFile:     strings.TrimSpace(opts.Paths.WebEmbeddedFile),
+		webEmbeddedListen:   strings.TrimSpace(opts.WebEmbeddedListen),
+		embeddedService:     opts.EmbeddedService,
+		lowMemory:           lowMem,
+		stateStore:          stateStore,
 		skipSignalSetup:     opts.SkipSignalSetup,
 		pidWriter:           opts.PidWriter,
 		pidRemover:          opts.PidRemover,
@@ -206,6 +234,86 @@ func (d *Daemon) HasOpenLogFile() bool {
 	d.logMu.Lock()
 	defer d.logMu.Unlock()
 	return d.logFile != nil
+}
+
+// ConfigStore 返回守护进程持有的只读不可变配置快照仓库。
+func (d *Daemon) ConfigStore() *config.Store {
+	if d == nil {
+		return nil
+	}
+	return d.cfgStore
+}
+
+// AuditCollector 返回守护进程持有的设备行为审计采集器实例。
+func (d *Daemon) AuditCollector() *audit.Collector {
+	if d == nil {
+		return nil
+	}
+	return d.auditCollector
+}
+
+func (d *Daemon) effectiveStateStore() *StateStore {
+	if d != nil && d.stateStore != nil {
+		return d.stateStore
+	}
+	return defaultStateStore
+}
+
+func (d *Daemon) effectiveWebEmbeddedPath() string {
+	if d == nil {
+		return GetWebEmbeddedPath()
+	}
+	return cmp.Or(d.webEmbeddedFile, GetWebEmbeddedPath())
+}
+
+// RecordWebEmbeddedListen 记录并广播内嵌 WebUI 实际绑定的监听地址到状态快照与标记文件。
+func (d *Daemon) RecordWebEmbeddedListen(listen string) {
+	if d == nil {
+		return
+	}
+	clean := strings.TrimSpace(listen)
+	if clean == "" {
+		return
+	}
+	d.webEmbeddedMu.Lock()
+	d.webEmbeddedListen = clean
+	embPath := d.effectiveWebEmbeddedPath()
+	cfgPath := d.configPath
+	d.webEmbeddedMu.Unlock()
+
+	_ = WriteWebEmbeddedStateAt(embPath, WebEmbeddedState{
+		Pid:        os.Getpid(),
+		Listen:     clean,
+		ConfigPath: cfgPath,
+		StartedAt:  time.Now().Format(time.DateTime),
+	})
+	d.effectiveStateStore().Update(func(snap *DaemonRuntimeSnapshot) {
+		snap.WebEmbedded = true
+		snap.WebEmbeddedListen = clean
+	})
+}
+
+func (d *Daemon) clearWebEmbeddedState() {
+	if d == nil {
+		return
+	}
+	d.webEmbeddedMu.Lock()
+	embPath := d.effectiveWebEmbeddedPath()
+	d.webEmbeddedMu.Unlock()
+
+	_ = RemoveWebEmbeddedFileAt(embPath)
+	d.effectiveStateStore().Update(func(snap *DaemonRuntimeSnapshot) {
+		snap.WebEmbedded = false
+		snap.WebEmbeddedListen = ""
+	})
+}
+
+// RotateLogsNow 立即执行一次守护日志与关联日志截断维护（供巡检与单测驱动）。
+func (d *Daemon) RotateLogsNow() {
+	if d == nil {
+		return
+	}
+	d.maybeRotateLogFile()
 }
 
 func (d *Daemon) currentConfig() *config.Config {
@@ -296,7 +404,7 @@ func (d *Daemon) BuildForegroundLifecycle() *lifecycle.Group {
 				cfg := d.currentConfig()
 				startedAt := time.Now().Format(time.DateTime)
 				ver := d.version
-				UpdateRuntimeState(func(snap *DaemonRuntimeSnapshot) {
+				d.effectiveStateStore().Update(func(snap *DaemonRuntimeSnapshot) {
 					snap.DaemonVersion = ver
 					snap.StartedAt = startedAt
 				})
@@ -310,6 +418,60 @@ func (d *Daemon) BuildForegroundLifecycle() *lifecycle.Group {
 				return nil
 			},
 		},
+	)
+
+	if d.embeddedService != nil {
+		var (
+			embCancel    context.CancelFunc
+			embStopAfter func() bool
+			embDone      chan struct{}
+		)
+		g.Add(lifecycle.FuncService{
+			ServiceName: "embedded-webui",
+			OnStart: func(startCtx context.Context) error {
+				svcCtx, cancel := context.WithCancel(d.ctx)
+				embCancel = cancel
+				if startCtx != nil {
+					embStopAfter = context.AfterFunc(startCtx, cancel)
+				}
+				embDone = make(chan struct{})
+				d.webEmbeddedMu.Lock()
+				initListen := d.webEmbeddedListen
+				d.webEmbeddedMu.Unlock()
+				if initListen != "" {
+					d.RecordWebEmbeddedListen(initListen)
+				}
+				svcFn := d.embeddedService
+				store := d.cfgStore
+				go func() {
+					defer close(embDone)
+					if err := svcFn(svcCtx, store); err != nil && svcCtx.Err() == nil {
+						logger.Warn("[Daemon] Embedded service exited with error: %v", err)
+						d.clearWebEmbeddedState()
+					}
+				}()
+				return nil
+			},
+			OnClose: func() error {
+				if embStopAfter != nil {
+					embStopAfter()
+				}
+				if embCancel != nil {
+					embCancel()
+				}
+				if embDone != nil {
+					select {
+					case <-embDone:
+					case <-time.After(4 * time.Second):
+					}
+				}
+				d.clearWebEmbeddedState()
+				return nil
+			},
+		})
+	}
+
+	g.Add(
 		lifecycle.FuncService{
 			ServiceName: "pcdn-default-sync",
 			OnPostStart: func(ctx context.Context) error {

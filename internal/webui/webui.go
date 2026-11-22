@@ -16,6 +16,7 @@ import (
 
 	"singctl/internal/audit"
 	"singctl/internal/common/httpx"
+	"singctl/internal/common/sysinfo"
 	"singctl/internal/config"
 	"singctl/internal/constant"
 	"singctl/internal/daemon"
@@ -41,6 +42,7 @@ type Options struct {
 	SingBoxWorkConfigPath   string                                                                            // 可选：测试/定制沙盒副本 config.json 路径
 	AdGuardBinPath          string                                                                            // 可选：测试/定制 AdGuardHome 二进制路径
 	AdGuardConfigPath       string                                                                            // 可选：测试/定制 AdGuardHome.yaml 路径
+	AdGuardMemInfoForTest   func() sysinfo.MemInfo                                                            // 仅供离线单元测试注入宿主机内存信息（低内存防 OOM 护栏）
 	ExecutablePath          string                                                                            // 可选：测试/定制 singctl 可执行文件路径
 	SingBoxLookPath         func(file string) (string, error)                                                 // 可选：测试/定制 sing-box 二进制查找函数
 	IOSGenerator            func(cfg *config.Config) (string, error)                                          // 可选：测试/定制 iOS 配置生成函数
@@ -56,6 +58,12 @@ type Options struct {
 	Password                string                                                                            // 可选的访问口令(空=不启用鉴权,建议仅在可信内网使用)
 	Version                 string                                                                            // singctl 版本号
 	OnReady                 func(listenAddr string)                                                           // Listen 成功后的回调(后台子进程用于就绪握手)
+	ConfigStore             *config.Store                                                                     // 可选：与单进程合体守护进程共享同一个 config.Store
+	LowMemoryMode           *bool                                                                             // 可选：显式指定低内存模式（控制 256 KiB 日志截断）
+	IdleThreshold           time.Duration                                                                     // 可选：冷态闲置触发物理内存归还阈值（默认 3 分钟）
+	IdleCheckInterval       time.Duration                                                                     // 可选：冷态闲置巡检间隔（默认 30 秒）
+	NowFunc                 func() time.Time                                                                  // 可选：测试注入可控时钟（默认 time.Now）
+	ScavengeFunc            func()                                                                            // 可选：测试注入物理内存归还动作（默认 GC+FreeOSMemory）
 }
 
 // Server 客户端 Web 管理服务。
@@ -90,6 +98,10 @@ type Server struct {
 
 	tsP2PMu   sync.Mutex
 	tsP2PCtrl *tailscale.P2PAssistController
+
+	lastReqUnixNano atomic.Int64
+	activeEpoch     atomic.Uint64
+	scavengedEpoch  atomic.Uint64
 }
 
 // New 创建客户端 Web 服务并完成全部路由与领域组件装配。
@@ -105,16 +117,22 @@ func New(opts Options) *Server {
 	if audLimiter == nil {
 		audLimiter = NewAuditRateLimiter()
 	}
+	cfgStore := opts.ConfigStore
+	if cfgStore == nil {
+		cfgStore = config.NewStore(opts.ConfigPath)
+	}
 
 	s := &Server{
 		opts:           opts,
 		Mux:            http.NewServeMux(),
-		cfgStore:       config.NewStore(opts.ConfigPath),
+		cfgStore:       cfgStore,
 		auditLimiter:   audLimiter,
 		auditCollector: audCollector,
 		loginLimiter:   newLoginRateLimiter(),
 		clash:          clashCli,
 	}
+	s.lastReqUnixNano.Store(s.now().UnixNano())
+	s.activeEpoch.Store(1)
 	s.dohProber = newBrowserDoHProber(opts.BrowserDoHForTest, clashCli)
 
 	staticContent, _ := fs.Sub(staticFS, "static")
@@ -318,6 +336,13 @@ func (s *Server) buildLifecycle(bgCtx context.Context, cancelBg context.CancelFu
 			},
 		},
 		lifecycle.FuncService{
+			ServiceName: "webui-idle-scavenger",
+			OnStart: func(context.Context) error {
+				go s.runIdleScavengerLoop(bgCtx)
+				return nil
+			},
+		},
+		lifecycle.FuncService{
 			ServiceName: "webui-pcdn-boot-sync",
 			OnPostStart: func(context.Context) error {
 				go s.ensureDefaultPCDNBlockWithContext(bgCtx)
@@ -368,7 +393,7 @@ func (s *Server) ServeContext(ctx context.Context) error {
 	s.printBanner(ln)
 
 	srv := &http.Server{
-		Handler:           s.Mux,
+		Handler:           s.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}

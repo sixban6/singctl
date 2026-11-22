@@ -165,37 +165,6 @@ var auditStateBufPool = sync.Pool{
 	},
 }
 
-func trimExcessFlows(st *persistedAuditState, activeByKey map[string][]string) {
-	if len(st.Flows) <= maxPersistedFlows {
-		return
-	}
-	entries := make([]*persistedFlowEntry, 0, len(st.Flows))
-	for _, e := range st.Flows {
-		entries = append(entries, e)
-	}
-	slices.SortFunc(entries, func(a, b *persistedFlowEntry) int {
-		aAct, bAct := 0, 0
-		if len(activeByKey[a.Key]) > 0 {
-			aAct = 1
-		}
-		if len(activeByKey[b.Key]) > 0 {
-			bAct = 1
-		}
-		if c := cmp.Compare(bAct, aAct); c != 0 {
-			return c
-		}
-		if c := cmp.Compare(b.UploadBytes, a.UploadBytes); c != 0 {
-			return c
-		}
-		return cmp.Compare(b.LastSeenUnix, a.LastSeenUnix)
-	})
-	trimmed := make(map[string]*persistedFlowEntry, maxPersistedFlows)
-	for _, e := range entries[:maxPersistedFlows] {
-		trimmed[e.Key] = e
-	}
-	st.Flows = trimmed
-}
-
 func writeStateFileAtomically(statePath string, payload []byte) {
 	tmpFile, err := os.CreateTemp(filepath.Dir(statePath), ".singctl-audit-state-*.tmp")
 	if err != nil {
@@ -222,13 +191,8 @@ func (c *Collector) saveStateLocked(st *persistedAuditState, activeByKey map[str
 	st.SchemaVersion = currentAuditStateSchema
 	st.UpdatedUnix = nowUnix
 
-	if len(st.ConnCursors) > maxTrackedConnDeltas {
-		maps.DeleteFunc(st.ConnCursors, func(_ string, cur connByteCursor) bool {
-			return nowUnix-cur.SeenUnix > 7200
-		})
-	}
 	purgeExpiredFlows(st.Flows, nowUnix)
-	trimExcessFlows(st, activeByKey)
+	c.enforceBoundsLocked(st, activeByKey, c.cachedMergedLANDevs, c.cachedSelfIPs, c.resolveEngineLocked(), nowUnix)
 
 	buf := auditStateBufPool.Get().(*bytes.Buffer)
 	buf.Reset()

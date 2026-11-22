@@ -54,6 +54,23 @@
   - 活跃嗅探追踪与封禁引擎独立归位于 [`internal/sniff`](../internal/sniff)（通过消费侧回调解耦 `fleet`），服务端遥测 `sniffing` 字段在 `serverweb` HTTP 序列化边界组合；
   - 双通道地理缓存归位于 [`internal/netdiag/ipgeo`](../internal/netdiag/ipgeo)，浏览器 DoH 旁路两阶段检测归位于 [`internal/netdiag/dohprobe`](../internal/netdiag/dohprobe)。
 
+### 2.4 `<=512MB RAM / <=256MB 可用内存` 自适应低内存与单进程合体引擎
+
+针对 224MB/256MB 小内存路由器及无线驱动预留大量内存的 512MB 硬路由（如 MT7986 `MemTotal ~480MiB`、`MemAvailable ~205MiB`、`/overlay ~50MB`），SingCtl 默认零配置自动激活五重资源治理：
+
+1. **统一内存阶梯与 tmpfs 日志封顶（`common/sysinfo` + `common/memlimit` + `common/fsx`）**：
+   - `sysinfo.IsLowMemoryHost()` 在 `MemTotal <= 512 MiB` 或 `MemAvailable <= 256 MiB` 时自动判定低内存宿主；`memlimit` 按 `<=288MiB`（`18/22MiB, GOGC=50`）与 `<=512MiB`（`24/28MiB, GOGC=50`）收紧常驻 Go 软内存上限；
+   - `fsx.CapFileTail` / `OpenCappedAppendFile` 与原地保 inode 截断将 `/tmp/singctl-{daemon,web}.log` 及 `/tmp/sing-box-basic.log` 严格封顶在 `256 KiB`，防止长期运行撑爆路由器 tmpfs；
+   - `updater` 在低内存或低 `/tmp` 空间时自动走 `ExtractBinaryStream` 零 `/tmp` 归档落盘流式 SHA256 直写升级。
+2. **`sing-box` 低内存规则裁剪与自适应 `GOMEMLIMIT`（`config.LowMemory` + `singbox` + `servicemgr`）**：
+   - `low_memory: "auto" | "on" | "off"` 默认 `auto` 自动在编译流水线 `prune_low_memory_rulesets` 阶段剥离巨无霸 `geosite-ad2`（节省 ~25–30 MB 堆内存）并清除悬空引用，完整保留高频轻量 `geosite-ad1` 与内置防 PCDN 集；
+   - `servicemgr.UnitSpec.Env` 与启动脚本向 `sing-box`（含 OpenWrt `ujail -e`）注入 `GOMEMLIMIT=40MiB/44MiB` 与 `GOGC=50`；`adguard.Install` 与 WebUI 在超低可用内存下主动拦截防 OOM 并引导使用内置零额外内存 `sing-box 纯 IP DoH + geosite-ad1`。
+3. **零环单进程合体运行时与冷态回收（`cmd` → `{daemon, webui}` + `audit`）**：
+   - 通过 `DaemonOptions.EmbeddedService` 依赖反转钩子，在 `cmd/daemon.go` 自动将共享同一 `*config.Store` 与 `*audit.Collector` 的 `webui.Server` 内嵌进 `singctl dm` 单进程运行（立省一整套独立 Go Runtime ~16–18 MB），`singctl web status/start/restart` 无缝幂等兼容；
+   - WebUI `IdleScavenger` 在连续 `3 分钟` 无请求后单次执行 `GC + FreeOSMemory` 归还物理内存且持续静默零重复唤醒；`audit.Collector` 收紧至 `256` 条风险感知有界流环（高危/可疑 PCDN 流永不误淘汰）并放宽邻居表刷新周期。
+4. **`-tags lite` 小闪存精简发版矩阵**：
+   - 通过 `snapshot_lite.go` 与 `embed_lite.go` 剔除内嵌规则集快照与服务端 WebUI 静态资源，官方 GitHub Release 同步产出 `singctl-linux-{amd64,arm64}-lite.tar.gz`，`install.sh` 与 `updater` 自动识别匹配。
+
 ---
 
 ## 3. 代码组织与双端对称目录规范

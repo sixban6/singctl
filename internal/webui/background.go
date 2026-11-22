@@ -21,6 +21,7 @@ import (
 	"singctl/internal/common/execx"
 	"singctl/internal/common/fsx"
 	"singctl/internal/common/proc"
+	"singctl/internal/daemon"
 	"singctl/internal/logger"
 	"singctl/internal/platform/servicemgr"
 	"singctl/internal/updater"
@@ -34,11 +35,13 @@ import (
 //   - 停止时按 PID + 命令行特征校验后 SIGTERM → 等待 → SIGKILL 兜底
 
 const (
-	envWebBackground = "SINGCTL_WEB_BACKGROUND"
-	envWebReadyFd    = "SINGCTL_WEB_READY_FD"
-	webReadyFd       = 3
-	WebStateName     = "singctl-web.pid"
-	webLogName       = "singctl-web.log"
+	envWebBackground     = "SINGCTL_WEB_BACKGROUND"
+	envWebReadyFd        = "SINGCTL_WEB_READY_FD"
+	webReadyFd           = 3
+	WebStateName         = "singctl-web.pid"
+	webLogName           = "singctl-web.log"
+	MaxWebLogBytes       = 512 * 1024
+	MaxLowMemWebLogBytes = 256 * 1024
 )
 
 // WebState 后台运行状态文件内容（含运行配置路径与可选口令以保障热重启/CLI 自更新不丢鉴权，强制 0600 权限）
@@ -47,6 +50,92 @@ type WebState struct {
 	Listen     string `json:"listen"`
 	ConfigPath string `json:"config_path,omitempty"`
 	Password   string `json:"password,omitempty"`
+	Embedded   bool   `json:"embedded,omitempty"`
+}
+
+// BackgroundDeps 显式注入后台状态探测与守护进程重启协作者（未注入字段自动回退生产实现）。
+type BackgroundDeps struct {
+	EmbeddedStatus func() (WebState, bool)
+	RestartDaemon  func(configPath string) error
+}
+
+func effectiveBackgroundDeps(deps BackgroundDeps) BackgroundDeps {
+	if deps.EmbeddedStatus == nil {
+		deps.EmbeddedStatus = EmbeddedWebStatus
+	}
+	if deps.RestartDaemon == nil {
+		deps.RestartDaemon = daemon.RestartDaemon
+	}
+	return deps
+}
+
+// EmbeddedWebStatus 查询当前是否由单进程合体模式的守护进程内嵌承载 WebUI。
+func EmbeddedWebStatus() (WebState, bool) {
+	if WebStatePathOverride != "" && daemon.WebEmbeddedPathOverride == "" {
+		return WebState{}, false
+	}
+	emb, ok := daemon.ReadWebEmbeddedState()
+	if !ok {
+		return WebState{}, false
+	}
+	return WebState{
+		Pid:        emb.Pid,
+		Listen:     emb.Listen,
+		ConfigPath: emb.ConfigPath,
+		Embedded:   true,
+	}, true
+}
+
+// WebStatusWithDeps 使用显式依赖查询 WebUI 独立后台或守护内嵌运行状态。
+func WebStatusWithDeps(deps BackgroundDeps) (WebState, bool) {
+	if st, err := ReadWebState(); err == nil && WebProcMatches(st.Pid) {
+		return st, true
+	}
+	eff := effectiveBackgroundDeps(deps)
+	if emb, ok := eff.EmbeddedStatus(); ok {
+		emb.Embedded = true
+		return emb, true
+	}
+	return WebState{}, false
+}
+
+// IsWebRunningOrManagedWithDeps 使用显式依赖判断 WebUI 是否正在运行（含内嵌守护、独立后台、procd、systemd）。
+func IsWebRunningOrManagedWithDeps(deps BackgroundDeps) bool {
+	if _, running := WebStatusWithDeps(deps); running {
+		return true
+	}
+	return isProcdManagedWeb() || isSystemdManagedWeb()
+}
+
+// StartBackgroundWithDeps 使用显式依赖启动后台 WebUI（当已内嵌于守护进程时幂等返回成功）。
+func StartBackgroundWithDeps(opts Options, deps BackgroundDeps) error {
+	eff := effectiveBackgroundDeps(deps)
+	if emb, ok := eff.EmbeddedStatus(); ok {
+		logger.Success("WebUI 运行中 (内嵌于守护进程 pid=%d, 低内存单进程合体模式)", emb.Pid)
+		for _, u := range FormatListenURLs(emb.Listen) {
+			logger.Info("  ➜  http://%s", u)
+		}
+		return nil
+	}
+	return startStandaloneBackground(opts)
+}
+
+// RestartWebWithDeps 使用显式依赖平滑重启 WebUI（内嵌模式下联动平滑重启守护进程）。
+func RestartWebWithDeps(configPath string, deps BackgroundDeps) error {
+	eff := effectiveBackgroundDeps(deps)
+	if emb, ok := eff.EmbeddedStatus(); ok {
+		targetCfg := cmp.Or(strings.TrimSpace(configPath), strings.TrimSpace(emb.ConfigPath))
+		return eff.RestartDaemon(targetCfg)
+	}
+	return restartStandaloneOrManagedWeb(configPath)
+}
+
+// TrimWebLog 原地截断超限的 WebUI 日志文件并保持 0600 权限与原 inode。
+func TrimWebLog(logPath string, maxBytes int64) (bool, error) {
+	if maxBytes <= 0 {
+		maxBytes = MaxWebLogBytes
+	}
+	return daemon.TrimLogInPlace(logPath, maxBytes)
 }
 
 var (
@@ -226,6 +315,10 @@ func InstallChildSignalCleanup() {
 
 // StartBackground 后台启动 WebUI(父进程路径)。
 func StartBackground(opts Options) error {
+	return StartBackgroundWithDeps(opts, BackgroundDeps{})
+}
+
+func startStandaloneBackground(opts Options) error {
 	opts.Listen = NormalizeLegacyWildcardListen(opts.Listen)
 	if err := AcquireWebLock(WebState{
 		Pid:        os.Getpid(),
@@ -255,8 +348,13 @@ func StartBackground(opts Options) error {
 	cmd.Env = BuildCleanSubprocessEnv(extraEnv...)
 	proc.SetDetachedAttr(cmd)
 
-	// 日志落盘（0600 权限）;stdin/stdout/stderr 重定向
-	logFile, err := os.OpenFile(WebLogPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	maxLogBytes := int64(MaxWebLogBytes)
+	if (opts.LowMemoryMode != nil && *opts.LowMemoryMode) || (opts.LowMemoryMode == nil && daemon.IsLowMemoryDevice()) {
+		maxLogBytes = MaxLowMemWebLogBytes
+	}
+
+	// 日志落盘（0600 权限 + 启动前 CapFileTail 定长截断保护）;stdin/stdout/stderr 重定向
+	logFile, err := fsx.OpenCappedAppendFile(WebLogPath(), maxLogBytes, 0600)
 	if err != nil {
 		_ = os.Remove(WebStatePath())
 		return fmt.Errorf("failed to open webui log: %w", err)
@@ -364,13 +462,9 @@ func StopWeb() (bool, error) {
 	return true, nil
 }
 
-// WebStatus 查询后台运行状态
+// WebStatus 查询后台运行状态（兼容独立后台进程与守护进程内嵌合体模式）。
 func WebStatus() (WebState, bool) {
-	st, err := ReadWebState()
-	if err != nil {
-		return WebState{}, false
-	}
-	return st, WebProcMatches(st.Pid)
+	return WebStatusWithDeps(BackgroundDeps{})
 }
 
 // isProcdManagedWeb 判断是否由 OpenWrt procd (/etc/init.d/singctl-web) 托管运行
@@ -396,12 +490,9 @@ func isSystemdManagedWeb() bool {
 	return servicemgr.NewSystemd(nil).IsActive(context.Background(), "singctl-web")
 }
 
-// IsWebRunningOrManaged 判断客户端 WebUI 是否正在运行（含 web start 守护、OpenWrt procd 或 systemd 托管）
+// IsWebRunningOrManaged 判断客户端 WebUI 是否正在运行（含内嵌合体守护、web start 守护、OpenWrt procd 或 systemd 托管）
 func IsWebRunningOrManaged() bool {
-	if _, running := WebStatus(); running {
-		return true
-	}
-	return isProcdManagedWeb() || isSystemdManagedWeb()
+	return IsWebRunningOrManagedWithDeps(BackgroundDeps{})
 }
 
 // resolveOnDiskExecutable 定位磁盘上最新的 singctl 可执行文件路径（剥离 Linux /proc/self/exe 的 " (deleted)" 或 ".backup" 后缀）
@@ -426,6 +517,10 @@ func buildRestartArgs(st WebState, configPath string, preferredListen string) []
 
 // RestartWeb 停止当前运行的客户端 WebUI 并使用磁盘上的最新二进制重新拉起（供 CLI `singctl update self` 或 `singctl web restart` 调用）
 func RestartWeb(configPath string) error {
+	return RestartWebWithDeps(configPath, BackgroundDeps{})
+}
+
+func restartStandaloneOrManagedWeb(configPath string) error {
 	if isProcdManagedWeb() {
 		return runWebCmdTimeout(defaultWebRestartTimeout, BuildCleanSubprocessEnv(), os.Stdout, os.Stderr, "/etc/init.d/singctl-web", "restart")
 	}
@@ -433,8 +528,8 @@ func RestartWeb(configPath string) error {
 		return servicemgr.NewSystemd(nil).Restart(context.Background(), "singctl-web")
 	}
 
-	st, running := WebStatus()
-	if !running {
+	st, err := ReadWebState()
+	if err != nil || !WebProcMatches(st.Pid) {
 		return nil
 	}
 	exe, err := resolveOnDiskExecutable()
@@ -507,6 +602,14 @@ func ScheduleDetachedRestart(configPath string, listen string, password string) 
 	var cmd *exec.Cmd
 	// Intentional bare exec.Command: detached async restart helper must survive parent HTTP process shutdown.
 	switch {
+	case st.Embedded:
+		exe, err := resolveOnDiskExecutable()
+		if err != nil || exe == "" {
+			return
+		}
+		posixUnifiedScript := `exe="$1"; cfg="$2"; sleep 1; if [ -n "$cfg" ]; then exec "$exe" --config "$cfg" dm restart; else exec "$exe" dm restart; fi`
+		cmd = exec.Command("/bin/sh", "-c", posixUnifiedScript, "--", exe, effectiveCfg)
+		cmd.Env = buildRestartEnv(effectivePassword)
 	case isProcdManagedWeb():
 		cmd = exec.Command("/bin/sh", "-c", "sleep 1; exec /etc/init.d/singctl-web restart")
 		cmd.Env = BuildCleanSubprocessEnv()

@@ -95,6 +95,8 @@ type OverviewSnapshot struct {
 	WebHealthy                   bool                 `json:"webHealthy"`
 	SingBoxLinked                bool                 `json:"singboxLinked"`
 	IsOpenWrt                    bool                 `json:"isOpenWrt"`
+	LowMemoryBlocked             bool                 `json:"lowMemoryBlocked,omitempty"`
+	LowMemoryWarning             string               `json:"lowMemoryWarning,omitempty"`
 	Version                      string               `json:"version"`
 	DNSAddr                      string               `json:"dnsAddr"`
 	WebAddr                      string               `json:"webAddr"`
@@ -212,6 +214,7 @@ func (m *Manager) controlRequest(ctx context.Context, method, apiPath string, re
 func (m *Manager) Overview(ctx context.Context, singboxLinked bool) *OverviewSnapshot {
 	st := m.Status()
 	autoSubs := m.extractConfiguredSubHosts()
+	lowMemWarn := m.LowMemoryGuardWarning()
 
 	snap := &OverviewSnapshot{
 		Supported:           IsSupportedPlatform(),
@@ -222,6 +225,8 @@ func (m *Manager) Overview(ctx context.Context, singboxLinked bool) *OverviewSna
 		WebHealthy:          st.WebHealthy,
 		SingBoxLinked:       singboxLinked,
 		IsOpenWrt:           sysinfo.IsOpenWrt(),
+		LowMemoryBlocked:    lowMemWarn != "",
+		LowMemoryWarning:    lowMemWarn,
 		Version:             st.Version,
 		DNSAddr:             st.DNSAddr,
 		WebAddr:             st.WebAddr,

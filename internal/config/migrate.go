@@ -121,11 +121,13 @@ func (mc *MigrationContext) selectRoleTemplate() {
 	}
 	oldHasServer := hasYAMLKey(mc.oldDocNode, "server")
 	oldHasClient := hasYAMLKey(mc.oldDocNode, "subs") || hasYAMLKey(mc.oldDocNode, "dns") || hasYAMLKey(mc.oldDocNode, "gateway") ||
-		hasYAMLKey(mc.oldDocNode, "tailscale") || hasYAMLKey(mc.oldDocNode, "watchdog") || hasYAMLKey(mc.oldDocNode, "hy2")
+		hasYAMLKey(mc.oldDocNode, "tailscale") || hasYAMLKey(mc.oldDocNode, "watchdog") || hasYAMLKey(mc.oldDocNode, "hy2") ||
+		hasYAMLKey(mc.oldDocNode, "low_memory")
 	hasRealSub := mc.oldCfg.HasRealSubs()
 	hasRealServer := mc.oldCfg.HasActiveServerConfig()
 	hasCustomClientFields := strings.TrimSpace(mc.oldCfg.Tailscale.AuthKey) != "" ||
 		!mc.oldCfg.Gateway.IsEmpty() ||
+		strings.TrimSpace(string(mc.oldCfg.LowMemory)) != "" ||
 		strings.TrimSpace(mc.oldCfg.DNS.Password) != "" ||
 		(mc.oldCfg.DNS.Enabled != nil && !*mc.oldCfg.DNS.Enabled)
 
@@ -418,5 +420,8 @@ func migrateClientTopLevelStage(mc *MigrationContext) {
 	}
 	if hasYAMLKey(mc.oldDocNode, "gateway") && !mc.oldCfg.Gateway.IsEmpty() {
 		mc.replaceNode("gateway", mc.oldCfg.Gateway)
+	}
+	if hasYAMLKey(mc.oldDocNode, "low_memory") && strings.TrimSpace(string(mc.oldCfg.LowMemory)) != "" {
+		mc.replaceNode("low_memory", mc.oldCfg.LowMemory)
 	}
 }

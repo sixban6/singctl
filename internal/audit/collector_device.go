@@ -65,6 +65,13 @@ func ParseIPv6Neighbors(raw string) map[string]string {
 // resolveLANDevicesLocked 从 OpenWrt / Linux DHCP 租约、odhcpd 主机表、ARP/IPv6 邻居表与 /etc/hosts 解析内网 IP 对应的设备主机名与 MAC。
 // 对磁盘租约与 hosts 文件采用 mtime+size 指纹校验：未变更时 0 磁盘读取，变更瞬间立即失效重读。
 func (c *Collector) resolveLANDevicesLocked() map[string]lanDeviceInfo {
+	now := c.currentTimeLocked()
+	if c.deviceRefreshInterval > 0 && c.cachedMergedLANDevs != nil && !c.lanDevsFetchedAt.IsZero() {
+		if elapsed := now.Sub(c.lanDevsFetchedAt); elapsed >= 0 && elapsed < c.deviceRefreshInterval {
+			return c.cachedMergedLANDevs
+		}
+	}
+
 	var fpBuilder strings.Builder
 	fpBuilder.WriteString(auditFileFingerprint(c.hostsFile))
 	fpBuilder.WriteByte(';')
@@ -153,10 +160,11 @@ func (c *Collector) resolveLANDevicesLocked() map[string]lanDeviceInfo {
 		}
 	}
 
-	// 4. 缓存刷新 IPv6 邻居表 (15 秒 TTL)，将同一物理设备的 IPv6 地址按 MAC 归并至其 IPv4 主机名
-	now := time.Now()
+	// 4. 缓存刷新 IPv6 邻居表（常规 15s TTL，低内存模式放宽至 3m TTL），将同一物理设备的 IPv6 地址按 MAC 归并至其 IPv4 主机名
+	ipv6TTL := cmp.Or(c.ipv6RefreshInterval, 15*time.Second)
 	if c.ipv6NeighCmdFunc != nil || (!c.customEndpoints && runtime.GOOS == "linux") {
-		if c.ipv6NeighCache == nil || now.Sub(c.ipv6NeighFetchedAt) > 15*time.Second {
+		needRefresh := c.ipv6NeighCache == nil || c.ipv6NeighFetchedAt.IsZero() || now.Sub(c.ipv6NeighFetchedAt) < 0 || now.Sub(c.ipv6NeighFetchedAt) >= ipv6TTL
+		if needRefresh {
 			var out []byte
 			var err error
 			if c.ipv6NeighCmdFunc != nil {
@@ -200,6 +208,8 @@ func (c *Collector) resolveLANDevicesLocked() map[string]lanDeviceInfo {
 		}
 	}
 
+	c.cachedMergedLANDevs = base
+	c.lanDevsFetchedAt = now
 	return base
 }
 

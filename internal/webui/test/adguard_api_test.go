@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"singctl/internal/adguard"
+	"singctl/internal/common/sysinfo"
 	"singctl/internal/config"
 )
 
@@ -345,5 +346,135 @@ func TestAuditAIModels_AutoFetchAndFallback(t *testing.T) {
 	srv.Mux.ServeHTTP(badRec, badReq)
 	if badRec.Code != http.StatusOK || strings.Contains(badRec.Body.String(), `"ok":true`) {
 		t.Fatalf("expected graceful fallback ok:false, got code=%d body=%s", badRec.Code, badRec.Body.String())
+	}
+}
+
+func TestAdGuardWebUI_LowMemoryGuardPassThrough(t *testing.T) {
+	const mib = 1024 * 1024
+	cases := []struct {
+		name        string
+		mem         sysinfo.MemInfo
+		wantBlocked bool
+		wantSubstr  string
+	}{
+		{
+			name:        "ultra_low_224mb_router_blocked",
+			mem:         sysinfo.MemInfo{TotalBytes: 224 * mib, AvailableBytes: 120 * mib},
+			wantBlocked: true,
+			wantSubstr:  "sing-box 纯 IP DoH + geosite-ad1",
+		},
+		{
+			name:        "n60pro_480mb_total_205mb_avail_blocked",
+			mem:         sysinfo.MemInfo{TotalBytes: 491040 * 1024, AvailableBytes: 210260 * 1024},
+			wantBlocked: true,
+			wantSubstr:  "可用内存不足",
+		},
+		{
+			name:        "ample_2gb_ram_allowed",
+			mem:         sysinfo.MemInfo{TotalBytes: 2048 * mib, AvailableBytes: 1500 * mib},
+			wantBlocked: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			cfgPath := filepath.Join(tmpDir, "singctl.yaml")
+			if err := config.Save(cfgPath, &config.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			fakeExe := filepath.Join(tmpDir, "fake-singctl.sh")
+			argsOut := filepath.Join(tmpDir, "invoked-args.txt")
+			script := "#!/bin/sh\necho \"$@\" > " + argsOut + "\nexit 0\n"
+			if err := os.WriteFile(fakeExe, []byte(script), 0755); err != nil {
+				t.Fatal(err)
+			}
+
+			srv := webui.New(webui.Options{
+				ConfigPath:              cfgPath,
+				AdGuardBinPath:          filepath.Join(tmpDir, "missing-AdGuardHome"),
+				AdGuardConfigPath:       filepath.Join(tmpDir, "missing-AdGuardHome.yaml"),
+				SingBoxConfigPath:       filepath.Join(tmpDir, "missing-singbox.json"),
+				ExecutablePath:          fakeExe,
+				SkipAdGuardProbeForTest: true,
+				AdGuardMemInfoForTest: func() sysinfo.MemInfo {
+					return tc.mem
+				},
+			})
+
+			// 1. GET /api/adguard exposes lowMemoryBlocked & lowMemoryWarning
+			ovReq := httptest.NewRequest(http.MethodGet, "/api/adguard", nil)
+			ovRec := httptest.NewRecorder()
+			srv.Mux.ServeHTTP(ovRec, ovReq)
+			if ovRec.Code != http.StatusOK {
+				t.Fatalf("GET /api/adguard status=%d body=%s", ovRec.Code, ovRec.Body.String())
+			}
+			var ov map[string]any
+			if err := json.Unmarshal(ovRec.Body.Bytes(), &ov); err != nil {
+				t.Fatal(err)
+			}
+			gotBlocked, _ := ov["lowMemoryBlocked"].(bool)
+			gotWarn, _ := ov["lowMemoryWarning"].(string)
+			if gotBlocked != tc.wantBlocked {
+				t.Fatalf("GET /api/adguard lowMemoryBlocked=%v, want %v (body=%s)", gotBlocked, tc.wantBlocked, ovRec.Body.String())
+			}
+			if tc.wantBlocked && !strings.Contains(gotWarn, tc.wantSubstr) {
+				t.Fatalf("GET /api/adguard lowMemoryWarning=%q missing %q", gotWarn, tc.wantSubstr)
+			}
+
+			// 2. GET /api/status exposes adguard.lowMemoryBlocked & lowMemoryWarning
+			stReq := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+			stRec := httptest.NewRecorder()
+			srv.Mux.ServeHTTP(stRec, stReq)
+			var stPayload struct {
+				AdGuard map[string]any `json:"adguard"`
+			}
+			if err := json.Unmarshal(stRec.Body.Bytes(), &stPayload); err != nil {
+				t.Fatal(err)
+			}
+			if b, _ := stPayload.AdGuard["lowMemoryBlocked"].(bool); b != tc.wantBlocked {
+				t.Fatalf("GET /api/status adguard.lowMemoryBlocked=%v, want %v", b, tc.wantBlocked)
+			}
+
+			// 3. POST /api/action {"name":"dns-install"} intercepts low-memory without spawning subprocess unless forceLowMemory=true
+			actBody, _ := json.Marshal(map[string]any{"name": "dns-install"})
+			actReq := httptest.NewRequest(http.MethodPost, "/api/action", bytes.NewReader(actBody))
+			actReq.Header.Set("Content-Type", "application/json")
+			actRec := httptest.NewRecorder()
+			srv.Mux.ServeHTTP(actRec, actReq)
+			if actRec.Code != http.StatusOK {
+				t.Fatalf("POST /api/action status=%d body=%s", actRec.Code, actRec.Body.String())
+			}
+			ndjson := actRec.Body.String()
+			if tc.wantBlocked {
+				if !strings.Contains(ndjson, tc.wantSubstr) || !strings.Contains(ndjson, `"code":1`) {
+					t.Fatalf("expected NDJSON low-memory guard failure containing %q, got:\n%s", tc.wantSubstr, ndjson)
+				}
+				if _, err := os.Stat(argsOut); !os.IsNotExist(err) {
+					t.Fatal("expected fake executable NOT to be spawned when low-memory guard blocks install")
+				}
+
+				// Explicit forceLowMemory:true passes --force-low-memory through to CLI
+				forceBody, _ := json.Marshal(map[string]any{
+					"name":   "dns-install",
+					"params": map[string]any{"forceLowMemory": true},
+				})
+				forceReq := httptest.NewRequest(http.MethodPost, "/api/action", bytes.NewReader(forceBody))
+				forceReq.Header.Set("Content-Type", "application/json")
+				forceRec := httptest.NewRecorder()
+				srv.Mux.ServeHTTP(forceRec, forceReq)
+				invokedBytes, err := os.ReadFile(argsOut)
+				if err != nil {
+					t.Fatalf("expected fake executable spawned when forceLowMemory=true: %v", err)
+				}
+				if !strings.Contains(string(invokedBytes), "--force-low-memory") {
+					t.Fatalf("expected --force-low-memory passed to CLI, got %q", string(invokedBytes))
+				}
+			} else {
+				if !strings.Contains(ndjson, `"code":0`) {
+					t.Fatalf("expected normal RAM dns-install to succeed, got:\n%s", ndjson)
+				}
+			}
+		})
 	}
 }

@@ -20,6 +20,8 @@ hy2:
   up: 20                                         # Hysteria2 上行带宽 (Mbps)
   down: 200                                      # Hysteria2 下行带宽 (Mbps)
 
+# low_memory: "auto"                             # (可选) 低内存路由器自适应模式: "auto" (默认: MemTotal<=512MiB 或 MemAvailable<=256MiB 自动启用) | "on" | "off"
+
 dns:                                             # (可选) 客户端本地防劫持 DNS (AdGuard Home) 配置
   enabled: true                                  # 是否启用本地 AdGuard Home 接管 dns_local
   dns_port: 5353                                 # 本地 DNS 监听端口 (仅绑定 127.0.0.1)

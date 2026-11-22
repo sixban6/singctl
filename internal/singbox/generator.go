@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync/atomic"
 
 	"singctl/internal/common/netx"
 	"singctl/internal/config"
@@ -27,12 +28,13 @@ import (
 
 // ConfigGenerator 持有配置模板版本、本机网络环境及订阅缓存控制参数。
 type ConfigGenerator struct {
-	config        *config.Config
-	webui         string
-	netInfo       *netx.NetInfoResult
-	defaultTplVer string
-	cacheDir      string
-	silent        bool
+	config           *config.Config
+	webui            string
+	netInfo          *netx.NetInfoResult
+	defaultTplVer    string
+	cacheDir         string
+	silent           bool
+	totalRAMOverride atomic.Pointer[uint64]
 }
 
 // 支持的目标平台常量。
@@ -86,12 +88,15 @@ func (g *ConfigGenerator) SetSilent(silent bool) {
 
 // NewOfflineConfigGenerator 创建不主动探测宿主机网卡/公网环境的离线配置生成器（供纯内存编译流水线与单测使用）。
 func NewOfflineConfigGenerator(cfg *config.Config) *ConfigGenerator {
-	return &ConfigGenerator{
+	cg := &ConfigGenerator{
 		config:        cfg,
 		defaultTplVer: "v1.14",
 		webui:         "127.0.0.1:9090",
 		silent:        true,
 	}
+	zero := uint64(0)
+	cg.totalRAMOverride.Store(&zero)
+	return cg
 }
 
 var sensitiveURLRe = regexp.MustCompile(`https?://[^\s"'<>)\]]+`)

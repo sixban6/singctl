@@ -56,8 +56,8 @@ var Actions = map[string]ActionDef{
 	"fw-disable": {Title: "禁用防火墙加固", Build: fixed("fw", "disable")},
 
 	// 本地防劫持 DNS (AdGuard Home)
-	"dns-install":   {Title: "安装并启用防劫持 DNS (AdGuard Home)", Build: fixed("dns", "install", "--non-interactive")},
-	"dns-update":    {Title: "更新 AdGuard Home 核心版本", Build: fixed("dns", "install", "--non-interactive", "--force")},
+	"dns-install":   {Title: "安装并启用防劫持 DNS (AdGuard Home)", Build: DnsInstallArgs},
+	"dns-update":    {Title: "更新 AdGuard Home 核心版本", Build: DnsUpdateArgs},
 	"dns-start":     {Title: "启用防劫持 DNS 并接管 sing-box", Build: fixed("dns", "start")},
 	"dns-stop":      {Title: "安全停用防劫持 DNS (自动回退内置加密 DNS)", Build: fixed("dns", "stop")},
 	"dns-restart":   {Title: "重启 AdGuard Home 服务", Build: fixed("dns", "restart")},
@@ -110,6 +110,27 @@ func TsUpdateArgs(p map[string]any) []string {
 	args := []string{"ts", "update", "--no-wait"}
 	if paramBool(p, "force") {
 		args = append(args, "--force")
+	}
+	return args
+}
+
+// DnsInstallArgs 将 Web 参数映射为 dns install 命令行参数（支持 force / forceLowMemory）。
+func DnsInstallArgs(p map[string]any) []string {
+	args := []string{"dns", "install", "--non-interactive"}
+	if paramBool(p, "force") {
+		args = append(args, "--force")
+	}
+	if paramBool(p, "forceLowMemory") {
+		args = append(args, "--force-low-memory")
+	}
+	return args
+}
+
+// DnsUpdateArgs 将 Web 参数映射为 dns install --force 命令行参数（支持 forceLowMemory）。
+func DnsUpdateArgs(p map[string]any) []string {
+	args := []string{"dns", "install", "--non-interactive", "--force"}
+	if paramBool(p, "forceLowMemory") {
+		args = append(args, "--force-low-memory")
 	}
 	return args
 }
@@ -180,26 +201,40 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	args := append([]string{"--config", s.opts.ConfigPath}, def.Build(body.Params)...)
-
-	ctx, cancel := context.WithTimeout(context.Background(), actionTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, exe, args...)
-	cmd.Env = BuildCleanSubprocessEnv("TERM=dumb", "SINGCTL_FROM_WEBUI=1")
-
 	w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
 
 	stream := NewNDJSONWriter(w)
-	cmd.Stdout = stream
-	cmd.Stderr = stream
-
+	builtArgs := def.Build(body.Params)
 	stream.write(map[string]any{
 		"t":     "start",
 		"title": def.Title,
-		"cmd":   "singctl " + strings.Join(def.Build(body.Params), " "),
+		"cmd":   "singctl " + strings.Join(builtArgs, " "),
 	})
+
+	// AdGuard Home 超低内存防 OOM 前置护栏：未显式传入 forceLowMemory 时零子进程开销直接透传中文保护提示
+	if (body.Name == "dns-install" || body.Name == "dns-update") && !paramBool(body.Params, "forceLowMemory") {
+		if warn := s.newAdGuardManager(s.readConfigOrEmpty()).LowMemoryGuardWarning(); warn != "" {
+			stream.emitLine("[ERROR] 🛡️ " + warn)
+			stream.write(map[string]any{
+				"t":                "exit",
+				"code":             1,
+				"restarting":       false,
+				"lowMemoryBlocked": true,
+				"lowMemoryWarning": warn,
+			})
+			return
+		}
+	}
+
+	args := append([]string{"--config", s.opts.ConfigPath}, builtArgs...)
+	ctx, cancel := context.WithTimeout(context.Background(), actionTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, exe, args...)
+	cmd.Env = BuildCleanSubprocessEnv("TERM=dumb", "SINGCTL_FROM_WEBUI=1")
+	cmd.Stdout = stream
+	cmd.Stderr = stream
 
 	waitErr := cmd.Run()
 

@@ -115,6 +115,9 @@ func (m *MockManager) InstallUnit(_ context.Context, spec UnitSpec) error {
 	if err := ValidateUnitName(spec.Name); err != nil {
 		return err
 	}
+	if err := ValidateEnvMap(spec.Env); err != nil {
+		return err
+	}
 	m.record("install-unit", spec.Name)
 	m.setActive(spec.Name, true)
 	return nil

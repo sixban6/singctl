@@ -1,19 +1,25 @@
 import React from 'react';
-import { Download, ShieldCheck } from 'lucide-react';
+import { AlertTriangle, Download, ShieldCheck } from 'lucide-react';
 import { Button, PageHeader, SectionCard } from '../../../ui';
 
 export interface AdGuardUninstalledViewProps {
   supported: boolean;
   busy: boolean;
   headerBadge: React.ReactNode;
+  lowMemoryBlocked?: boolean;
+  lowMemoryWarning?: string;
   onInstall: () => void;
+  onForceInstall?: () => void;
 }
 
 export const AdGuardUninstalledView: React.FC<AdGuardUninstalledViewProps> = ({
   supported,
   busy,
   headerBadge,
+  lowMemoryBlocked,
+  lowMemoryWarning,
   onInstall,
+  onForceInstall,
 }) => (
   <div className="space-y-5">
     <PageHeader
@@ -21,6 +27,41 @@ export const AdGuardUninstalledView: React.FC<AdGuardUninstalledViewProps> = ({
       description="本地 127.0.0.1:5353 回环托管 + 纯 IP 加密 DoH 上游，彻底根除宽带运营商明文 DNS 抢答劫持"
       badge={headerBadge}
     />
+
+    {lowMemoryBlocked && lowMemoryWarning && (
+      <div
+        className="console-card rounded-2xl p-4 flex flex-col gap-3 border animate-sc-in"
+        style={{
+          borderColor: 'var(--status-warn)',
+          backgroundColor: 'var(--status-warn-soft)',
+        }}
+      >
+        <div className="flex items-start gap-2.5 min-w-0">
+          <AlertTriangle
+            className="w-5 h-5 shrink-0 mt-0.5"
+            style={{ color: 'var(--status-warn)' }}
+          />
+          <div className="text-xs sm:text-sm space-y-1">
+            <div className="font-semibold text-primary">
+              小内存路由器防 OOM 保护已启用（推荐零额外内存内置加密 DNS）
+            </div>
+            <div className="text-secondary leading-relaxed">{lowMemoryWarning}</div>
+          </div>
+        </div>
+        {onForceInstall && (
+          <div className="flex justify-end">
+            <Button
+              size="xs"
+              variant="ghost"
+              disabled={busy || !supported}
+              onClick={onForceInstall}
+            >
+              已知晓 OOM 风险，仍强制安装
+            </Button>
+          </div>
+        )}
+      </div>
+    )}
 
     <SectionCard
       title="为什么建议在网关客户端启用本地 AdGuard Home？"
@@ -62,11 +103,11 @@ export const AdGuardUninstalledView: React.FC<AdGuardUninstalledViewProps> = ({
         <div className="flex flex-wrap items-center gap-3 pt-2 border-t border-subtle">
           <Button
             variant="primary"
-            disabled={busy || !supported}
+            disabled={busy || !supported || Boolean(lowMemoryBlocked)}
             icon={<Download className="w-4 h-4" />}
             onClick={onInstall}
           >
-            一键安装并无感接管 DNS
+            {lowMemoryBlocked ? '已启用内置 DoH + geosite-ad1 保护' : '一键安装并无感接管 DNS'}
           </Button>
           {!supported && (
             <span className="text-xs text-muted">

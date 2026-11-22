@@ -28,27 +28,32 @@ const (
 // ErrDaemonAlreadyRunning 表示已有守护进程实例在运行。
 var ErrDaemonAlreadyRunning = errors.New("daemon already running")
 
-// Paths 显式注入守护进程的 PID、状态与日志文件路径。
+// Paths 显式注入守护进程的 PID、状态、日志与内嵌 WebUI 标记文件路径。
 type Paths struct {
-	PidFile   string
-	StateFile string
-	LogFile   string
+	PidFile         string
+	StateFile       string
+	LogFile         string
+	WebEmbeddedFile string
+	WebLogFile      string
 }
 
 // 兼容顶层集成测试 test/daemon_test.go 的回退钩子；包内生产与测试优先通过 Paths 显式注入。
 var (
-	PidFilePathOverride   string
-	StateFilePathOverride string
-	DaemonLogPathOverride string
-	ExpectedProcNameFn    = defaultProcName
+	PidFilePathOverride     string
+	StateFilePathOverride   string
+	DaemonLogPathOverride   string
+	WebEmbeddedPathOverride string
+	ExpectedProcNameFn      = defaultProcName
 )
 
 // DefaultPaths 返回当前平台默认的守护进程运行路径配置。
 func DefaultPaths() Paths {
 	return Paths{
-		PidFile:   GetPidFilePath(),
-		StateFile: GetStateFilePath(),
-		LogFile:   GetDaemonLogPath(),
+		PidFile:         GetPidFilePath(),
+		StateFile:       GetStateFilePath(),
+		LogFile:         GetDaemonLogPath(),
+		WebEmbeddedFile: GetWebEmbeddedPath(),
+		WebLogFile:      filepath.Join(defaultTempDir(), "singctl-web.log"),
 	}
 }
 
@@ -303,18 +308,21 @@ func ProcessExists(pid int) bool {
 	return proc.IsAlive(pid)
 }
 
-// StopDaemon 优雅停止守护进程并清理 PID 文件。
+// StopDaemon 优雅停止守护进程并清理 PID 与内嵌状态文件。
 func StopDaemon() error {
 	pid, err := ReadDaemonPid()
 	if err != nil {
+		_ = RemoveWebEmbeddedFileAt(GetWebEmbeddedPath())
 		return nil
 	}
 	if !DaemonProcessMatches(pid) {
 		_ = RemovePidFile()
+		_ = RemoveWebEmbeddedFileAt(GetWebEmbeddedPath())
 		return nil
 	}
 	_ = proc.TerminateGracefully(pid, 5*time.Second, 3*time.Second)
 	_ = RemovePidFile()
+	_ = RemoveWebEmbeddedFileAt(GetWebEmbeddedPath())
 	return nil
 }
 

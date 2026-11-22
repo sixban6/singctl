@@ -17,6 +17,9 @@ import (
 // MaxDaemonLogBytes 守护日志文件大小上限（512 KB），防止 OpenWrt /tmp (tmpfs) 长期运行膨胀占满内存。
 const MaxDaemonLogBytes = 512 * 1024
 
+// MaxLowMemDaemonLogBytes 低内存单进程合体模式下守护进程与 WebUI 日志大小上限（256 KiB）。
+const MaxLowMemDaemonLogBytes = 256 * 1024
+
 // MaxSingBoxLogBytes sing-box 运行标准输出日志上限（16 MB），防止 info 日志长期写入将 OpenWrt /tmp (tmpfs) 撑爆导致 DNS/DHCP 异常。
 const MaxSingBoxLogBytes = 16 * 1024 * 1024
 
@@ -112,6 +115,13 @@ func CleanAndTrimDaemonLog(logPath string, maxBytes int64) (bool, error) {
 		_ = os.Chmod(logPath, 0600)
 		return false, nil
 	}
+	if !hasSpam {
+		_ = os.Chmod(logPath, 0600)
+		if err := fsx.CapFileTail(logPath, maxBytes); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
 
 	var kept []string
 	for line := range strings.SplitSeq(string(data), "\n") {
@@ -156,6 +166,7 @@ func TrimLogInPlace(logPath string, maxBytes int64) (bool, error) {
 		return false, err
 	}
 	if info.Size() <= maxBytes {
+		_ = os.Chmod(logPath, 0600)
 		return false, nil
 	}
 

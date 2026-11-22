@@ -1,17 +1,29 @@
+// 文件职责：提供客户端 WebUI (`singctl web` / `singctl w`) 前后台启停、状态查询及单进程合体模式无缝兼容子命令。
 package cmd
 
 import (
 	"fmt"
 	"os"
 
+	"singctl/internal/daemon"
 	"singctl/internal/logger"
 	"singctl/internal/webui"
 
 	"github.com/spf13/cobra"
 )
 
+// WebCmdDeps 显式注入 Web 子命令的后台状态与重启依赖（供离线单测驱动合体模式分支）。
+type WebCmdDeps struct {
+	Background webui.BackgroundDeps
+}
+
 // NewWebCmd 创建 Web 管理界面命令
 func NewWebCmd(version string) *cobra.Command {
+	return NewWebCmdWithDeps(version, WebCmdDeps{})
+}
+
+// NewWebCmdWithDeps 使用显式依赖创建 Web 管理界面命令。
+func NewWebCmdWithDeps(version string, deps WebCmdDeps) *cobra.Command {
 	var listen string
 	var password string
 
@@ -61,12 +73,12 @@ OpenWrt 开机自启请参考 docs/webui.md 的 procd 配置。`,
 				Password:   resolveWebPassword(password),
 				Version:    version,
 			}
-		}),
-		newWebStopCmd(),
+		}, deps.Background),
+		newWebStopCmd(deps.Background),
 		newWebRestartCmd(func() string {
 			return root.Flag("config").Value.String()
-		}),
-		newWebStatusCmd(),
+		}, deps.Background),
+		newWebStatusCmd(deps.Background),
 	)
 
 	return root
@@ -95,7 +107,7 @@ func cutEnv(kv string) (string, string, bool) {
 	return "", "", false
 }
 
-func newWebStartCmd(opts func() webui.Options) *cobra.Command {
+func newWebStartCmd(opts func() webui.Options, bgDeps webui.BackgroundDeps) *cobra.Command {
 	return &cobra.Command{
 		Use:   "start",
 		Short: "后台启动 WebUI / Start WebUI in background",
@@ -109,28 +121,38 @@ func newWebStartCmd(opts func() webui.Options) *cobra.Command {
 				}
 				return webui.New(o).ListenAndServe()
 			}
-			// 父进程路径:fork 后台子进程并等待就绪
-			return webui.StartBackground(opts())
+			// 父进程路径:若已内嵌于守护进程则幂等返回成功，否则 fork 后台子进程并等待就绪
+			if bgDeps.EmbeddedStatus == nil && bgDeps.RestartDaemon == nil {
+				return webui.StartBackground(opts())
+			}
+			return webui.StartBackgroundWithDeps(opts(), bgDeps)
 		},
 	}
 }
 
-func newWebRestartCmd(configPath func() string) *cobra.Command {
+func newWebRestartCmd(configPath func() string, bgDeps webui.BackgroundDeps) *cobra.Command {
 	return &cobra.Command{
 		Use:     "restart",
 		Aliases: []string{"r"},
 		Short:   "平滑重启后台 WebUI / Restart background WebUI",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if !webui.IsWebRunningOrManaged() {
+			if !webui.IsWebRunningOrManagedWithDeps(bgDeps) {
 				logger.Warn("WebUI 未在运行，请使用: singctl web start")
 				return nil
 			}
-			return webui.RestartWeb(configPath())
+			st, _ := webui.WebStatusWithDeps(bgDeps)
+			if err := webui.RestartWebWithDeps(configPath(), bgDeps); err != nil {
+				return err
+			}
+			if st.Embedded {
+				logger.Success("已联动平滑重启合体守护进程与内嵌 WebUI")
+			}
+			return nil
 		},
 	}
 }
 
-func newWebStopCmd() *cobra.Command {
+func newWebStopCmd(bgDeps webui.BackgroundDeps) *cobra.Command {
 	return &cobra.Command{
 		Use:     "stop",
 		Aliases: []string{"s"},
@@ -142,23 +164,35 @@ func newWebStopCmd() *cobra.Command {
 			}
 			if stopped {
 				logger.Success("WebUI 已停止")
-			} else {
-				logger.Warn("WebUI 未在运行")
+				return nil
 			}
+			if st, ok := webui.WebStatusWithDeps(bgDeps); ok && st.Embedded {
+				logger.Warn("WebUI 运行中 (内嵌于守护进程 pid=%d, 低内存单进程合体模式)；如需一并停止请执行: singctl dm stop", st.Pid)
+				return nil
+			}
+			logger.Warn("WebUI 未在运行")
 			return nil
 		},
 	}
 }
 
-func newWebStatusCmd() *cobra.Command {
+func newWebStatusCmd(bgDeps webui.BackgroundDeps) *cobra.Command {
 	return &cobra.Command{
 		Use:     "status",
 		Aliases: []string{"st"},
 		Short:   "查看后台 WebUI 状态 / Show background WebUI status",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			st, running := webui.WebStatus()
+			st, running := webui.WebStatusWithDeps(bgDeps)
 			if !running {
 				logger.Info("WebUI 未在后台运行 (启动: singctl web start)")
+				return nil
+			}
+			if st.Embedded {
+				logger.Success("WebUI 运行中 (内嵌于守护进程 pid=%d, 低内存单进程合体模式)", st.Pid)
+				for _, u := range webui.ListenURLs(st.Listen) {
+					logger.Info("  ➜  http://%s", u)
+				}
+				logger.Info("日志: %s   状态: %s", daemon.GetDaemonLogPath(), daemon.GetWebEmbeddedPath())
 				return nil
 			}
 			logger.Success("WebUI 后台运行中 (pid=%d)", st.Pid)

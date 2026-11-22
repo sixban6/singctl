@@ -52,6 +52,7 @@ func newDNSInstallCmd(defaultConfigPath string) *cobra.Command {
 	var username string
 	var nonInteractive bool
 	var forceDownload bool
+	var forceLowMemory bool
 
 	cmd := &cobra.Command{
 		Use:   "install",
@@ -67,6 +68,7 @@ func newDNSInstallCmd(defaultConfigPath string) *cobra.Command {
 				Username:       username,
 				NonInteractive: nonInteractive,
 				ForceDownload:  forceDownload,
+				ForceLowMemory: forceLowMemory,
 			})
 			if err != nil {
 				return err
@@ -84,6 +86,7 @@ func newDNSInstallCmd(defaultConfigPath string) *cobra.Command {
 	cmd.Flags().StringVarP(&username, "username", "u", "", "管理员账号 (留空交互式询问，直接回车默认 root)")
 	cmd.Flags().BoolVar(&nonInteractive, "non-interactive", false, "非交互模式，直接使用配置账号或默认 root")
 	cmd.Flags().BoolVarP(&forceDownload, "force", "f", false, "强制重新下载最新 AdGuard Home 二进制")
+	cmd.Flags().BoolVar(&forceLowMemory, "force-low-memory", false, "忽略 <=288MB 总内存或 <=256MB 可用内存的防 OOM 保护护栏强制安装")
 	return cmd
 }
 

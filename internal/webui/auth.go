@@ -59,6 +59,7 @@ func (s *Server) setAuthCookie(w http.ResponseWriter, r *http.Request) {
 // guard 包装器:统一鉴权、反爬虫头注入、JSON 错误输出、方法校验
 func (s *Server) guard(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		s.RecordRequestActivity()
 		w.Header().Set("X-Robots-Tag", "noindex, nofollow, noarchive, nosnippet")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Cache-Control", "no-store")
@@ -95,6 +96,7 @@ func (s *Server) guard(next http.HandlerFunc) http.HandlerFunc {
 //  2. 未授权访问首页时返回 401 + 自包含口令登录页（不发 WWW-Authenticate），兼容 Safari/PWA/移动端。
 func (s *Server) authOnly(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.RecordRequestActivity()
 		w.Header().Set("X-Robots-Tag", "noindex, nofollow, noarchive, nosnippet")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		if !s.authorized(r) {
@@ -178,6 +180,7 @@ func (s *Server) guardIOSDownload(next http.HandlerFunc) http.HandlerFunc {
 
 // handleAuthCheck 公开鉴权在线探测接口（供前端自更新热重启重连探测及会话校验使用，未登录不泄漏敏感信息）
 func (s *Server) handleAuthCheck(w http.ResponseWriter, r *http.Request) {
+	s.RecordRequestActivity()
 	w.Header().Set("X-Robots-Tag", "noindex, nofollow, noarchive, nosnippet")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Cache-Control", "no-store")

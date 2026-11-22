@@ -100,17 +100,21 @@ func (sb *SingBox) Start() error {
 			defer os.Remove(scriptPath)
 
 			// Execute script with appropriate command
+			totalRAM := readHostTotalRAMBytes()
+			_ = EnforceLowMemoryBasicLogCap(sb.config, totalRAM, constant.SingBoxBasicLogFile)
 			if runtime.GOOS == "windows" {
 				cmd = exec.Command("cmd", "/C", scriptPath)
 			} else {
 				cmd = exec.Command("sh", scriptPath)
 			}
+			cmd.Env = BuildSingBoxCommandEnv(os.Environ(), sb.config, totalRAM)
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
 
 			if err := cmd.Run(); err != nil {
 				return fmt.Errorf("start sing-box failed: %w", err)
 			}
+			_ = EnforceLowMemoryBasicLogCap(sb.config, totalRAM, constant.SingBoxBasicLogFile)
 			return nil
 		},
 	)

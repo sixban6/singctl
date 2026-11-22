@@ -184,21 +184,28 @@ func (s *Server) buildWatchdogReport(cfg *config.Config) map[string]any {
 		}
 	}
 
+	maxLogBytes := int64(daemon.MaxDaemonLogBytes)
+	if daemon.IsLowMemoryDevice() || snap.WebEmbedded {
+		maxLogBytes = daemon.MaxLowMemDaemonLogBytes
+	}
+
 	return map[string]any{
 		"daemon": map[string]any{
-			"running":         running,
-			"pid":             pid,
-			"daemonVersion":   snap.DaemonVersion,
-			"singctlVersion":  s.opts.Version,
-			"staleBinary":     stale,
-			"versionMismatch": versionMismatch,
-			"startedAt":       snap.StartedAt,
-			"restarts":        limiter.GetRestartCount(),
-			"maxRestarts":     limiter.GetMaxRestarts(),
-			"totalRestarts":   limiter.GetTotalRestarts(),
-			"logPath":         logPath,
-			"logSizeBytes":    logSize,
-			"logMaxBytes":     daemon.MaxDaemonLogBytes,
+			"running":           running,
+			"pid":               pid,
+			"daemonVersion":     snap.DaemonVersion,
+			"singctlVersion":    s.opts.Version,
+			"staleBinary":       stale,
+			"versionMismatch":   versionMismatch,
+			"startedAt":         snap.StartedAt,
+			"restarts":          limiter.GetRestartCount(),
+			"maxRestarts":       limiter.GetMaxRestarts(),
+			"totalRestarts":     limiter.GetTotalRestarts(),
+			"logPath":           logPath,
+			"logSizeBytes":      logSize,
+			"logMaxBytes":       maxLogBytes,
+			"webEmbedded":       snap.WebEmbedded,
+			"webEmbeddedListen": snap.WebEmbeddedListen,
 		},
 		"config":         dto,
 		"runtime":        snap,

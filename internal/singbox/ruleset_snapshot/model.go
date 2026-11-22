@@ -25,8 +25,6 @@ type Snapshot struct {
 	manifest snapshotManifest
 }
 
-var loaded *Snapshot
-
 // Count 快照中的规则集数量。
 func (s *Snapshot) Count() int { return len(s.manifest.Entries) }
 
