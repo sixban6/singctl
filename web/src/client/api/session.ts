@@ -64,9 +64,15 @@ export function notifyUnauthorized() {
 }
 
 function defaultTimeoutForPath(path: string): number {
+  if (path.startsWith('/api/dns/engine')) {
+    return 45000;
+  }
   if (
     path.startsWith('/api/health') ||
     path.startsWith('/api/sb/proxies/delay') ||
+    path.startsWith('/api/dns/probe') ||
+    path.startsWith('/api/dns/filters') ||
+    path.startsWith('/api/dns/upstreams') ||
     path.startsWith('/api/adguard/probe') ||
     path.startsWith('/api/adguard/filters') ||
     path.startsWith('/api/audit/ai-') ||

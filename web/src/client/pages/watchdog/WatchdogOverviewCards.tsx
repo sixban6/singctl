@@ -150,8 +150,8 @@ export const WatchdogTopCards: React.FC<WatchdogTopCardsProps> = ({
               ),
             },
             {
-              title: '⑤ 本地 AdGuard DNS 保活',
-              desc: agh?.supported ? '联动巡检 53 端口解析器，异常自动重启' : '当前非 Linux 网关，自动跳过',
+              title: '⑤ 本地防劫持 DNS 保活',
+              desc: agh?.supported ? '联动巡检本地加密 DNS 引擎与上游活性，异常自动热切自愈' : '当前非 Linux 网关，自动跳过',
               badge: !agh?.supported ? (
                 <Badge>仅 Linux</Badge>
               ) : !agh.enabled ? (
