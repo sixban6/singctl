@@ -1,29 +1,35 @@
+// 文件职责：提供客户端三引擎防劫持 DNS (`singctl dns` / `singctl agh`) 的安装、零断网切换、启停、状态与卸载子命令。
 package cmd
 
 import (
 	"context"
 	"fmt"
 	"runtime"
+	"strings"
+	"time"
+
 	"singctl/internal/adguard"
 	"singctl/internal/config"
+	"singctl/internal/constant"
+	"singctl/internal/localdns"
 	"singctl/internal/logger"
 	"singctl/internal/singbox"
-	"time"
 
 	"github.com/spf13/cobra"
 )
 
-// NewDNSCmd 创建客户端本地防劫持 DNS (AdGuard Home) 管理命令组。
+// NewDNSCmd 创建客户端本地防劫持 DNS 三引擎管理命令组（sing-box 加强版 / SmartDNS / AdGuard Home）。
 func NewDNSCmd(defaultConfigPath string) *cobra.Command {
 	dnsCmd := &cobra.Command{
 		Use:     "dns",
 		Aliases: []string{"agh"},
-		Short:   "DNS   : 管理客户端本地防劫持 AdGuard Home 服务 / Manage local AdGuard Home anti-hijack DNS",
-		Long:    "一键安装、免向导初始化配置并托管本地 AdGuard Home (127.0.0.1:5353 + 局域网管理面板)，自动原子切换 sing-box dns_local，彻底解决客户端明文 DNS 劫持问题。",
+		Short:   "DNS   : 管理客户端三引擎防劫持 DNS (sing-box / SmartDNS / AdGuard Home) / Manage local anti-hijack DNS",
+		Long:    "统一管理客户端三引擎防劫持本地 DNS（sing-box 加强版 / SmartDNS 极速版 / AdGuard Home 可视版），支持按宿主机内存与闪存自动选型及两阶段零断网原子切换。",
 	}
 
 	dnsCmd.AddCommand(
 		newDNSInstallCmd(defaultConfigPath),
+		newDNSSwitchCmd(defaultConfigPath),
 		newDNSStartCmd(defaultConfigPath),
 		newDNSStopCmd(defaultConfigPath),
 		newDNSRestartCmd(defaultConfigPath),
@@ -35,7 +41,13 @@ func NewDNSCmd(defaultConfigPath string) *cobra.Command {
 	return dnsCmd
 }
 
-func syncSingBoxLocalDNSLink(ctx context.Context, cfg *config.Config, useAdGuard bool) {
+func newLocalDNSRegistry(cfg *config.Config, cfgPath string) *localdns.Registry {
+	return localdns.NewRegistry(cfg, localdns.EngineDeps{
+		ConfigPath: cfgPath,
+	})
+}
+
+func syncSingBoxLocalDNSLink(ctx context.Context, cfg *config.Config, useExternal bool) {
 	if runtime.GOOS != "linux" {
 		return
 	}
@@ -43,12 +55,33 @@ func syncSingBoxLocalDNSLink(ctx context.Context, cfg *config.Config, useAdGuard
 	if cfg != nil {
 		dnsPort = cfg.DNS.GetDNSPort()
 	}
-	if _, err := singbox.SyncLiveSingBoxDNSLocal(ctx, "", "", useAdGuard, dnsPort); err != nil {
+	if !useExternal && cfg != nil {
+		if _, err := singbox.SyncLiveSingBoxEnhancedDNS(ctx, "", "", cfg.DNS, singbox.ExtractSubscriptionDomains(cfg), time.Now()); err == nil {
+			return
+		}
+	}
+	if _, err := singbox.SyncLiveSingBoxDNSLocal(ctx, "", "", useExternal, dnsPort); err != nil {
 		logger.Warn("同步更新 sing-box dns_local 失败: %v", err)
 	}
 }
 
+func resolveTargetDNSEngine(reg *localdns.Registry, flagEngine string, preferRecommended bool) (string, error) {
+	norm := strings.ToLower(strings.TrimSpace(flagEngine))
+	if norm == "" || norm == constant.DNSEngineAuto {
+		sel := reg.ResolveSelection()
+		if preferRecommended {
+			return sel.RecommendedEngine, nil
+		}
+		return sel.ActiveEngine, nil
+	}
+	if !config.IsValidDNSEngine(norm) {
+		return "", fmt.Errorf("不支持的 DNS 引擎 %q（可选: auto / singbox / smartdns / adguard）", flagEngine)
+	}
+	return norm, nil
+}
+
 func newDNSInstallCmd(defaultConfigPath string) *cobra.Command {
+	var engineFlag string
 	var username string
 	var nonInteractive bool
 	var forceDownload bool
@@ -56,44 +89,113 @@ func newDNSInstallCmd(defaultConfigPath string) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "install",
-		Short: "安装并无感启用 AdGuard Home 防劫持接管 / Install and enable AdGuard Home",
+		Short: "按硬件自动选型或指定引擎安装并启用防劫持 DNS / Install and enable anti-hijack DNS",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, resolvedPath, err := loadCmdConfig(cmd, defaultConfigPath)
 			if err != nil {
 				return err
 			}
-			mgr := adguard.NewManager(cfg, resolvedPath)
-			st, err := mgr.Install(adguard.InstallOptions{
-				ConfigPath:     resolvedPath,
-				Username:       username,
-				NonInteractive: nonInteractive,
-				ForceDownload:  forceDownload,
+			reg := newLocalDNSRegistry(cfg, resolvedPath)
+			target, err := resolveTargetDNSEngine(reg, engineFlag, true)
+			if err != nil {
+				return err
+			}
+
+			// 交互指定 AdGuard 用户名或强制重装已安装二进制时先执行目标引擎 Install
+			if target == constant.DNSEngineAdGuard && (forceDownload || username != "" || !nonInteractive) {
+				if eng, ok := reg.Get(target); ok {
+					if err := eng.Install(cmd.Context(), localdns.InstallOptions{
+						Username:       username,
+						NonInteractive: nonInteractive,
+						ForceDownload:  forceDownload,
+						ForceLowMemory: forceLowMemory,
+					}); err != nil {
+						return err
+					}
+				}
+			} else if target == constant.DNSEngineSmartDNS && forceDownload {
+				if eng, ok := reg.Get(target); ok {
+					if err := eng.Install(cmd.Context(), localdns.InstallOptions{
+						NonInteractive: true,
+						ForceDownload:  true,
+						ForceLowMemory: forceLowMemory,
+						SkipWaitReady:  true,
+					}); err != nil {
+						return err
+					}
+				}
+			}
+
+			pref := target
+			if strings.TrimSpace(engineFlag) == "" || strings.EqualFold(strings.TrimSpace(engineFlag), constant.DNSEngineAuto) {
+				pref = target
+			}
+			res, err := reg.SwitchEngine(cmd.Context(), localdns.SwitchRequest{
+				TargetEngine:   pref,
 				ForceLowMemory: forceLowMemory,
+				NonInteractive: nonInteractive,
 			})
 			if err != nil {
 				return err
 			}
-			if st != nil && st.DNSHealthy {
-				if ips, elapsed, pErr := adguard.ProbeUpstreamResolution(st.DNSAddr, "qq.com", 4*time.Second); pErr == nil && len(ips) > 0 {
-					logger.Success("加密 DoH 上游实测通过: qq.com -> %s (%dms)", ips[0], elapsed.Milliseconds())
-				}
-				syncSingBoxLocalDNSLink(cmd.Context(), cfg, true)
+			logger.Success("🛡️ 已完成防劫持 DNS 引擎安装与零断网接管: %s", res.ActiveEngine)
+			if len(res.MigratedItems) > 0 {
+				logger.Info("   • 已同步策略 : %s", strings.Join(res.MigratedItems, "、"))
 			}
 			return nil
 		},
 	}
 
-	cmd.Flags().StringVarP(&username, "username", "u", "", "管理员账号 (留空交互式询问，直接回车默认 root)")
+	cmd.Flags().StringVar(&engineFlag, "engine", constant.DNSEngineAuto, "目标 DNS 引擎: auto / singbox / smartdns / adguard")
+	cmd.Flags().StringVarP(&username, "username", "u", "", "AdGuard Home 管理员账号 (留空交互式询问，直接回车默认 root)")
 	cmd.Flags().BoolVar(&nonInteractive, "non-interactive", false, "非交互模式，直接使用配置账号或默认 root")
-	cmd.Flags().BoolVarP(&forceDownload, "force", "f", false, "强制重新下载最新 AdGuard Home 二进制")
-	cmd.Flags().BoolVar(&forceLowMemory, "force-low-memory", false, "忽略 <=288MB 总内存或 <=256MB 可用内存的防 OOM 保护护栏强制安装")
+	cmd.Flags().BoolVarP(&forceDownload, "force", "f", false, "强制重新下载最新引擎二进制")
+	cmd.Flags().BoolVar(&forceLowMemory, "force-low-memory", false, "忽略低内存防 OOM 保护护栏强制安装（不可绕过闪存不足护栏）")
+	return cmd
+}
+
+func newDNSSwitchCmd(defaultConfigPath string) *cobra.Command {
+	var engineFlag string
+	var forceLowMemory bool
+
+	cmd := &cobra.Command{
+		Use:   "switch",
+		Short: "零断网两阶段原子切换本地防劫持 DNS 引擎 / Zero-disconnect atomic DNS engine switch",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, resolvedPath, err := loadCmdConfig(cmd, defaultConfigPath)
+			if err != nil {
+				return err
+			}
+			reg := newLocalDNSRegistry(cfg, resolvedPath)
+			res, err := reg.SwitchEngine(cmd.Context(), localdns.SwitchRequest{
+				TargetEngine:   engineFlag,
+				ForceLowMemory: forceLowMemory,
+				NonInteractive: true,
+			})
+			if err != nil {
+				return err
+			}
+			logger.Success("🛡️ 已零断网切换防劫持 DNS 引擎: configured=%s -> active=%s", res.ConfiguredEngine, res.ActiveEngine)
+			if len(res.MigratedItems) > 0 {
+				logger.Info("   • 已自动迁移 : %s", strings.Join(res.MigratedItems, "、"))
+			}
+			for _, w := range res.Warnings {
+				logger.Warn("   • 提示 : %s", w)
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&engineFlag, "engine", constant.DNSEngineAuto, "目标 DNS 引擎: auto / singbox / smartdns / adguard")
+	cmd.Flags().BoolVar(&forceLowMemory, "force-low-memory", false, "忽略低内存防 OOM 护栏强制切换（不可绕过闪存不足护栏）")
 	return cmd
 }
 
 func newDNSStartCmd(defaultConfigPath string) *cobra.Command {
-	return &cobra.Command{
+	var engineFlag string
+	cmd := &cobra.Command{
 		Use:   "start",
-		Short: "启动本地 AdGuard Home 并自动接管 sing-box dns_local / Start AdGuard Home",
+		Short: "启动本地防劫持 DNS 引擎并接管 sing-box dns_local / Start local DNS engine",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, resolvedPath, err := loadCmdConfig(cmd, defaultConfigPath)
 			if err != nil {
@@ -105,96 +207,126 @@ func newDNSStartCmd(defaultConfigPath string) *cobra.Command {
 					_ = config.Save(resolvedPath, cfg)
 				}
 			}
-			mgr := adguard.NewManager(cfg, resolvedPath)
-			if err := mgr.Start(); err != nil {
+			reg := newLocalDNSRegistry(cfg, resolvedPath)
+			target, err := resolveTargetDNSEngine(reg, engineFlag, false)
+			if err != nil {
 				return err
 			}
-			syncSingBoxLocalDNSLink(cmd.Context(), cfg, true)
-			mgr.PrintAccessSummary(mgr.Status())
+			eng, ok := reg.Get(target)
+			if !ok {
+				return fmt.Errorf("未找到 DNS 引擎: %s", target)
+			}
+			if err := eng.Start(cmd.Context()); err != nil {
+				return err
+			}
+			syncSingBoxLocalDNSLink(cmd.Context(), cfg, target != constant.DNSEngineSingBox)
+			if target == constant.DNSEngineAdGuard {
+				mgr := adguard.NewManager(cfg, resolvedPath)
+				mgr.PrintAccessSummary(mgr.Status())
+			} else {
+				logger.Success("🛡️ %s 已启动并完成 sing-box 联动", eng.Meta().Name)
+			}
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&engineFlag, "engine", "", "指定要启动的 DNS 引擎: auto / singbox / smartdns / adguard")
+	return cmd
 }
 
 func newDNSStopCmd(defaultConfigPath string) *cobra.Command {
-	return &cobra.Command{
+	var engineFlag string
+	cmd := &cobra.Command{
 		Use:   "stop",
-		Short: "零断网切回内置加密 DNS 并停止本地 AdGuard Home / Safely fallback DNS and stop AdGuard Home",
+		Short: "零断网切回 sing-box 加密 DNS 并停止外部本地 DNS / Safely fallback and stop external DNS",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			resolvedPath := resolveCmdConfigPath(cmd, defaultConfigPath)
 			cfg := loadCmdConfigOrDefault(cmd, defaultConfigPath)
+			reg := newLocalDNSRegistry(cfg, resolvedPath)
+			target, err := resolveTargetDNSEngine(reg, engineFlag, false)
+			if err != nil {
+				return err
+			}
 			cfg.DNS.SetEnabled(false)
 			if resolvedPath != "" {
 				_ = config.Save(resolvedPath, cfg)
 			}
-			// 零断网准则：必须先将 sing-box dns_local 切回内置纯 IP 加密 DoH，再停止 AdGuard Home 进程
+			// 零断网准则：必须先将 sing-box dns_local 切回内置纯 IP 加密 DoH，再停止外部 DNS 进程
 			syncSingBoxLocalDNSLink(cmd.Context(), cfg, false)
 
-			mgr := adguard.NewManager(cfg, resolvedPath)
-			if err := mgr.Stop(); err != nil {
-				return err
+			if eng, ok := reg.Get(target); ok && target != constant.DNSEngineSingBox {
+				if err := eng.Stop(cmd.Context()); err != nil {
+					return err
+				}
+				logger.Success("已安全回退 sing-box 至内置加密 DNS 并停止 %s（全程零断网）", eng.Meta().Name)
+				return nil
 			}
-			logger.Success("已安全回退 sing-box 至内置加密 DNS 并停止 AdGuard Home（全程零断网）")
+			logger.Success("当前已使用 sing-box 加强版内置加密 DNS")
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&engineFlag, "engine", "", "指定要停用的 DNS 引擎: auto / singbox / smartdns / adguard")
+	return cmd
 }
 
 func newDNSRestartCmd(defaultConfigPath string) *cobra.Command {
-	return &cobra.Command{
+	var engineFlag string
+	cmd := &cobra.Command{
 		Use:     "restart",
 		Aliases: []string{"r"},
-		Short:   "重启本地 AdGuard Home 服务 / Restart local AdGuard Home service",
+		Short:   "重启本地防劫持 DNS 服务 / Restart local DNS engine",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, resolvedPath, err := loadCmdConfig(cmd, defaultConfigPath)
 			if err != nil {
 				return err
 			}
-			mgr := adguard.NewManager(cfg, resolvedPath)
-			if err := mgr.Restart(); err != nil {
+			reg := newLocalDNSRegistry(cfg, resolvedPath)
+			target, err := resolveTargetDNSEngine(reg, engineFlag, false)
+			if err != nil {
+				return err
+			}
+			eng, ok := reg.Get(target)
+			if !ok {
+				return fmt.Errorf("未找到 DNS 引擎: %s", target)
+			}
+			if err := eng.Restart(cmd.Context()); err != nil {
 				return err
 			}
 			if cfg.DNS.IsEnabled() {
-				syncSingBoxLocalDNSLink(cmd.Context(), cfg, true)
+				syncSingBoxLocalDNSLink(cmd.Context(), cfg, target != constant.DNSEngineSingBox)
 			}
-			mgr.PrintAccessSummary(mgr.Status())
+			logger.Success("已重启 %s", eng.Meta().Name)
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&engineFlag, "engine", "", "指定要重启的 DNS 引擎: auto / singbox / smartdns / adguard")
+	return cmd
 }
 
 func newDNSStatusCmd(defaultConfigPath string) *cobra.Command {
 	return &cobra.Command{
 		Use:     "status",
 		Aliases: []string{"s"},
-		Short:   "查看本地 AdGuard Home 状态与面板凭据 / Show AdGuard Home status and credentials",
+		Short:   "查看三引擎防劫持 DNS 状态、硬件推荐与面板凭据 / Show local DNS status",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg := loadCmdConfigOrDefault(cmd, defaultConfigPath)
-			mgr := adguard.NewManager(cfg, resolveCmdConfigPath(cmd, defaultConfigPath))
-			st := mgr.Status()
+			resolvedPath := resolveCmdConfigPath(cmd, defaultConfigPath)
+			reg := newLocalDNSRegistry(cfg, resolvedPath)
+			ov := reg.Overview(cmd.Context())
 			linked, linkedPort := singbox.InspectSingBoxDNSLocal("")
 
 			logger.Info("═══════════════════════════════════════════════════════════")
-			logger.Success("           🛡️  AdGuard Home 状态面板")
+			logger.Success("           🛡️  三引擎防劫持 DNS 状态面板")
 			logger.Info("═══════════════════════════════════════════════════════════")
-			if !st.Installed {
-				logger.Warn("安装状态        : 未安装 (%s)", st.BinaryPath)
-				logger.Info("安装命令        : singctl dns install")
-				return nil
+			logger.Info("配置偏好        : %s", ov.ConfiguredEngine)
+			logger.Success("当前活跃引擎    : %s (%s)", ov.ActiveEngineLabel, ov.ActiveEngine)
+			logger.Info("硬件推荐引擎    : %s — %s", ov.RecommendedEngine, ov.RecommendedReason)
+			if ov.Version != "" {
+				logger.Info("核心版本        : %s", ov.Version)
 			}
-			logger.Success("安装路径        : %s ✓", st.BinaryPath)
-			if st.Version != "" {
-				logger.Info("核心版本        : %s", st.Version)
-			}
-			logger.Info("配置文件        : %s", st.ConfigFile)
-
-			if st.DNSHealthy {
-				logger.Success("DNS 引擎状态    : 运行正常 (%s) ✓", st.DNSAddr)
-				if ips, elapsed, err := adguard.ProbeUpstreamResolution(st.DNSAddr, "qq.com", 3*time.Second); err == nil && len(ips) > 0 {
-					logger.Success("加密上游实测    : qq.com -> %s (耗时 %dms) ✓", ips[0], elapsed.Milliseconds())
-				}
-			} else if st.Running {
-				logger.Warn("DNS 引擎状态    : 进程运行中但 %s 未响应 ✗", st.DNSAddr)
+			if ov.DNSHealthy {
+				logger.Success("DNS 引擎状态    : 运行正常 (%s) ✓", ov.DNSAddr)
+			} else if ov.Running {
+				logger.Warn("DNS 引擎状态    : 进程运行中但 %s 未响应 ✗", ov.DNSAddr)
 			} else {
 				logger.Warn("DNS 引擎状态    : 未运行 ✗")
 			}
@@ -202,19 +334,39 @@ func newDNSStatusCmd(defaultConfigPath string) *cobra.Command {
 			if linked {
 				logger.Success("sing-box 联动   : 已接管 dns_local (127.0.0.1:%d) ✓", linkedPort)
 			} else {
-				logger.Info("sing-box 联动   : 未接管 (当前使用内置加密 DNS)")
+				logger.Info("sing-box 联动   : sing-box 加强版内置纯 IP 加密 DoH 生效中 ✓")
 			}
 
-			if st.WebHealthy {
-				logger.Success("Web 管理面板    : %s (仅限局域网访问) ✓", st.WebURL)
-			} else {
-				logger.Warn("Web 管理面板    : %s (未监听) ✗", st.WebURL)
+			logger.Info("───────────────────────────────────────────────────────────")
+			for _, opt := range ov.Engines {
+				mark := "  "
+				if opt.Active {
+					mark = "▶ "
+				}
+				state := "未安装"
+				if opt.Installed {
+					state = "已安装"
+				}
+				if opt.Recommended {
+					state += " · 硬件推荐"
+				}
+				if !opt.Eligible && opt.BlockedReason != "" {
+					state += " · 受限(" + opt.BlockedReason + ")"
+				}
+				logger.Info("%s%-14s [%s | %s / %s]", mark, opt.Name, state, opt.DiskHint, opt.RAMHint)
 			}
-			logger.Info("管理员账号      : %s", st.Username)
-			if st.Password != "" {
-				logger.Info("管理员密码      : %s", st.Password)
-			} else {
-				logger.Info("管理员密码      : (可通过 singctl dns reset-password 重置)")
+
+			if ov.ActiveEngine == constant.DNSEngineAdGuard {
+				logger.Info("───────────────────────────────────────────────────────────")
+				if ov.WebHealthy {
+					logger.Success("Web 管理面板    : %s (仅限局域网访问) ✓", ov.WebURL)
+				} else {
+					logger.Warn("Web 管理面板    : %s (未监听) ✗", ov.WebURL)
+				}
+				logger.Info("管理员账号      : %s", ov.Username)
+				if cfg.DNS.GetPassword() != "" {
+					logger.Info("管理员密码      : %s", cfg.DNS.GetPassword())
+				}
 			}
 			logger.Info("═══════════════════════════════════════════════════════════")
 			return nil
@@ -250,27 +402,47 @@ func newDNSResetPasswordCmd(defaultConfigPath string) *cobra.Command {
 }
 
 func newDNSUninstallCmd(defaultConfigPath string) *cobra.Command {
+	var engineFlag string
 	var purge bool
 	cmd := &cobra.Command{
 		Use:   "uninstall",
-		Short: "零断网切回内置加密 DNS 并卸载 AdGuard Home / Safely fallback DNS and uninstall AdGuard Home",
+		Short: "零断网切回 sing-box 加密 DNS 并卸载外部本地 DNS / Safely fallback and uninstall external DNS",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, resolvedPath, err := loadCmdConfig(cmd, defaultConfigPath)
 			if err != nil {
 				cfg = loadCmdConfigOrDefault(cmd, defaultConfigPath)
 				resolvedPath = resolveCmdConfigPath(cmd, defaultConfigPath)
 			}
-			// 卸载前先将运行中的 sing-box 平滑切回内置纯 IP 加密 DoH，防止卸载瞬间断网
-			syncSingBoxLocalDNSLink(cmd.Context(), cfg, false)
-
-			mgr := adguard.NewManager(cfg, resolvedPath)
-			if err := mgr.Uninstall(purge); err != nil {
+			reg := newLocalDNSRegistry(cfg, resolvedPath)
+			target, err := resolveTargetDNSEngine(reg, engineFlag, false)
+			if err != nil {
 				return err
 			}
-			logger.Success("已安全回退 sing-box 解析并完成 AdGuard Home 卸载（全程零断网）")
+			if target == constant.DNSEngineSingBox {
+				return fmt.Errorf("sing-box 加强版为内置零开销核心 DNS 引擎，无需也不可卸载")
+			}
+
+			// 卸载前先将运行中的 sing-box 平滑切回 sing-box 加强版纯 IP 加密 DoH，防止卸载瞬间断网
+			syncSingBoxLocalDNSLink(cmd.Context(), cfg, false)
+
+			eng, ok := reg.Get(target)
+			if !ok {
+				return fmt.Errorf("未找到 DNS 引擎: %s", target)
+			}
+			if err := eng.Uninstall(cmd.Context(), purge); err != nil {
+				return err
+			}
+			if cfg.DNS.GetEngine() == target {
+				cfg.DNS.SetEngine(constant.DNSEngineAuto)
+				if resolvedPath != "" {
+					_ = config.Save(resolvedPath, cfg)
+				}
+			}
+			logger.Success("已安全回退 sing-box 加密解析并完成 %s 卸载（全程零断网）", eng.Meta().Name)
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&purge, "purge", false, "同时清理 /etc/AdGuardHome 配置与数据目录")
+	cmd.Flags().StringVar(&engineFlag, "engine", "", "指定要卸载的外部 DNS 引擎: smartdns / adguard")
+	cmd.Flags().BoolVar(&purge, "purge", false, "同时清理配置与数据目录")
 	return cmd
 }

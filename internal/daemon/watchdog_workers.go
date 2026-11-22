@@ -8,7 +8,6 @@ import (
 	"maps"
 	"os/exec"
 	"runtime"
-	"singctl/internal/adguard"
 	"singctl/internal/audit"
 	"singctl/internal/constant"
 	"singctl/internal/logger"
@@ -214,26 +213,13 @@ func (d *Daemon) maybeRefreshRuleSetsAsync() {
 	}()
 }
 
-// runWatchdogCheck 健康检查：先确保本地 AdGuard Home 在线，再探测 sing-box 健康，不健康则二次确认后重启。
+// runWatchdogCheck 健康检查：先统一通过 localdns 守护当前活跃本地 DNS 引擎，再探测 sing-box 健康，不健康则二次确认后重启。
 func (d *Daemon) runWatchdogCheck() {
 	if d.reloading.Load() {
 		return
 	}
+	d.GuardLocalDNSOnce(d.ctx)
 	cfg := d.currentConfig()
-	if runtime.GOOS == "linux" && cfg != nil && cfg.DNS.IsEnabled() && adguard.IsInstalled() {
-		dnsPort := cfg.DNS.GetDNSPort()
-		linked, _ := singbox.InspectSingBoxDNSLocal("")
-		if err := adguard.NewManager(cfg, d.configPath).EnsureHealthy(); err != nil {
-			logger.Warn("[Watchdog] AdGuard Home 自愈启动失败: %v", err)
-			if linked {
-				logger.Warn("[Watchdog] 触发 DNS 应急降级：将 sing-box dns_local 临时切回内置纯 IP 加密 DoH，保障全屋不断网")
-				_, _ = singbox.SyncLiveSingBoxDNSLocal(d.ctx, "", "", false, dnsPort)
-			}
-		} else if !linked {
-			logger.Info("[Watchdog] AdGuard Home 已恢复在线，自动将 sing-box dns_local 切回本地防劫持引擎 (127.0.0.1:%d)", dnsPort)
-			_, _ = singbox.SyncLiveSingBoxDNSLocal(d.ctx, "", "", true, dnsPort)
-		}
-	}
 
 	mon := NewMonitor(cfg)
 	result1 := mon.CheckHealth()

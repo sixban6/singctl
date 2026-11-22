@@ -2,6 +2,7 @@
 package audit
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"net"
@@ -12,6 +13,8 @@ import (
 	"singctl/internal/adguard"
 	"singctl/internal/config"
 	"singctl/internal/constant"
+	"singctl/internal/localdns"
+	"singctl/internal/platform/servicemgr"
 	"singctl/internal/singbox"
 )
 
@@ -98,16 +101,83 @@ func hasActiveBuiltinPCDNRuleSet(rawBytes []byte) bool {
 	return true
 }
 
-func (e *Enforcer) syncDNSLayer(ctx context.Context, blocks []config.BlockRule) (bool, string, error) {
-	if e.aghConfigPath != "" && e.aghConfigPath != constant.AdGuardConfigFile {
-		if _, err := os.Stat(e.aghConfigPath); err == nil {
-			_, syncErr := adguard.SyncUserBlockRulesYAML(e.aghConfigPath, blocks)
+// DNSBlockSyncOptions 描述审计黑名单同步至三引擎本地 DNS 时可显式注入的路径与服务管理依赖。
+type DNSBlockSyncOptions struct {
+	ConfigPath         string
+	AdGuardBinPath     string
+	AdGuardConfigPath  string
+	SmartDNSBinPath    string
+	SmartDNSConfigFile string
+	SmartDNSRulesDir   string
+	ServiceMgr         servicemgr.Manager
+}
+
+// SyncDNSBlockRulesForEngine 按当前活跃本地 DNS 引擎（singbox / smartdns / adguard）路由同步审计封禁列表。
+func SyncDNSBlockRulesForEngine(
+	ctx context.Context,
+	cfg *config.Config,
+	opts DNSBlockSyncOptions,
+	blocks []config.BlockRule,
+) (bool, string, error) {
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
+
+	configured := cfg.DNS.GetEngine()
+	// 兼容既有基于临时 AdGuardHome.yaml 路径的单测场景：未显式指定 singbox/smartdns 且注入了自定义 aghConfigPath 时沿用直写 YAML
+	if configured != constant.DNSEngineSingBox && configured != constant.DNSEngineSmartDNS &&
+		opts.AdGuardConfigPath != "" && opts.AdGuardConfigPath != constant.AdGuardConfigFile {
+		if _, err := os.Stat(opts.AdGuardConfigPath); err == nil {
+			_, syncErr := adguard.SyncUserBlockRulesYAML(opts.AdGuardConfigPath, blocks)
 			return syncErr == nil, "yaml_file", syncErr
 		}
-		return false, "not_installed", nil
+		if configured == constant.DNSEngineAdGuard {
+			return false, "not_installed", nil
+		}
 	}
-	mgr := adguard.NewManager(e.cfg, e.configPath)
-	return mgr.SyncBlockRules(ctx, blocks)
+
+	reg := localdns.NewRegistry(cfg, localdns.EngineDeps{
+		ConfigPath:         opts.ConfigPath,
+		AdGuardBinPath:     opts.AdGuardBinPath,
+		AdGuardConfigPath:  opts.AdGuardConfigPath,
+		SmartDNSBinPath:    opts.SmartDNSBinPath,
+		SmartDNSConfigFile: opts.SmartDNSConfigFile,
+		SmartDNSRulesDir:   opts.SmartDNSRulesDir,
+		ServiceMgr:         opts.ServiceMgr,
+	})
+
+	switch configured {
+	case constant.DNSEngineSingBox:
+		return true, "singbox_native", nil
+	case constant.DNSEngineSmartDNS:
+		eng, ok := reg.Get(constant.DNSEngineSmartDNS)
+		if !ok {
+			return false, "not_installed", nil
+		}
+		return eng.SyncBlockRules(ctx, blocks)
+	case constant.DNSEngineAdGuard:
+		if opts.AdGuardConfigPath != "" && opts.AdGuardConfigPath != constant.AdGuardConfigFile {
+			if _, err := os.Stat(opts.AdGuardConfigPath); err == nil {
+				_, syncErr := adguard.SyncUserBlockRulesYAML(opts.AdGuardConfigPath, blocks)
+				return syncErr == nil, "yaml_file", syncErr
+			}
+			return false, "not_installed", nil
+		}
+		return adguard.NewManager(cfg, opts.ConfigPath).SyncBlockRules(ctx, blocks)
+	default:
+		active := reg.ActiveEngine()
+		if active == nil {
+			return true, "singbox_native", nil
+		}
+		return active.SyncBlockRules(ctx, blocks)
+	}
+}
+
+func (e *Enforcer) syncDNSLayer(ctx context.Context, blocks []config.BlockRule) (bool, string, error) {
+	return SyncDNSBlockRulesForEngine(ctx, e.cfg, DNSBlockSyncOptions{
+		ConfigPath:        e.configPath,
+		AdGuardConfigPath: cmp.Or(e.aghConfigPath, constant.AdGuardConfigFile),
+	}, blocks)
 }
 
 // syncSingBoxLayer 遵循规则 02（两阶段原子切换 + 预校验 + 自动回滚）：

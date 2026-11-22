@@ -48,7 +48,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	go func() { defer wg.Done(); host = hostInfo() }()
 	go func() { defer wg.Done(); sb = singboxStatus() }()
 	go func() { defer wg.Done(); dm = s.daemonStatusSummary() }()
-	go func() { defer wg.Done(); agh = s.adguardStatusSummary() }()
+	go func() { defer wg.Done(); agh = s.dnsStatusSummary(r.Context()) }()
 	go func() { defer wg.Done(); ts = s.tailscaleStatus(s.opts.ConfigPath) }()
 	go func() { defer wg.Done(); fw = firewallStatus() }()
 	go func() { defer wg.Done(); gw = s.gatewayStatusSummary() }()
@@ -62,6 +62,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"host":           host,
 		"singbox":        sb,
 		"daemon":         dm,
+		"dns":            agh,
 		"adguard":        agh,
 		"tailscale":      ts,
 		"firewall":       fw,

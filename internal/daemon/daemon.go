@@ -18,7 +18,9 @@ import (
 	"singctl/internal/config"
 	"singctl/internal/constant"
 	"singctl/internal/lifecycle"
+	"singctl/internal/localdns"
 	"singctl/internal/logger"
+	"singctl/internal/smartdns"
 	"singctl/internal/tailscale"
 )
 
@@ -83,6 +85,7 @@ type DaemonOptions struct {
 	WebEmbeddedListen   string
 	LowMemoryMode       *bool
 	P2PController       *tailscale.P2PAssistController
+	DNSDeps             *localdns.EngineDeps
 }
 
 // Daemon 守护进程。
@@ -125,9 +128,16 @@ type Daemon struct {
 	embeddedService   func(ctx context.Context, cfgStore *config.Store) error
 	lowMemory         bool
 	stateStore        *StateStore
-	skipSignalSetup   bool
-	pidWriter         func() error
-	pidRemover        func() error
+	skipSignalSetup     bool
+	pidWriter           func() error
+	pidRemover          func() error
+	dnsDeps             *localdns.EngineDeps
+	dnsSingBoxStats     *localdns.StatsRing
+	dnsSmartStats       *localdns.StatsRing
+	smartDNSTailer      *smartdns.AuditLogTailer
+	dnsPrimaryFailMu    sync.Mutex
+	dnsPrimaryFailCount int
+	dnsTickRunning      atomic.Bool
 }
 
 // NewDaemonWithMeta 创建带配置文件路径（支持热重载）与版本号标识的守护进程。
@@ -203,6 +213,25 @@ func NewDaemonWithOptions(cfg *config.Config, opts DaemonOptions) *Daemon {
 		}
 	}
 
+	auditLogPath := constant.SmartDNSAuditLogPath
+	if opts.DNSDeps != nil && strings.TrimSpace(opts.DNSDeps.SmartDNSAuditLogPath) != "" {
+		auditLogPath = strings.TrimSpace(opts.DNSDeps.SmartDNSAuditLogPath)
+	}
+	sbStats := localdns.NewStatsRing(lowMem)
+	sdStats := localdns.NewStatsRing(lowMem)
+	sdTailer := smartdns.NewAuditLogTailer(auditLogPath)
+	if opts.DNSDeps != nil {
+		if opts.DNSDeps.SingBoxStats != nil {
+			sbStats = opts.DNSDeps.SingBoxStats
+		}
+		if opts.DNSDeps.SmartDNSStats != nil {
+			sdStats = opts.DNSDeps.SmartDNSStats
+		}
+		if opts.DNSDeps.SmartDNSTailer != nil {
+			sdTailer = opts.DNSDeps.SmartDNSTailer
+		}
+	}
+
 	return &Daemon{
 		cfgStore:            cfgStore,
 		configPath:          opts.ConfigPath,
@@ -227,7 +256,35 @@ func NewDaemonWithOptions(cfg *config.Config, opts DaemonOptions) *Daemon {
 		skipSignalSetup:     opts.SkipSignalSetup,
 		pidWriter:           opts.PidWriter,
 		pidRemover:          opts.PidRemover,
+		dnsDeps:             opts.DNSDeps,
+		dnsSingBoxStats:     sbStats,
+		dnsSmartStats:       sdStats,
+		smartDNSTailer:      sdTailer,
 	}
+}
+
+// SingBoxStatsRing 返回守护进程持有的 sing-box 24h DNS 遥测统计环（供单进程合体 WebUI 共享）。
+func (d *Daemon) SingBoxStatsRing() *localdns.StatsRing {
+	if d == nil {
+		return nil
+	}
+	return d.dnsSingBoxStats
+}
+
+// SmartDNSStatsRing 返回守护进程持有的 SmartDNS 24h 审计统计环（供单进程合体 WebUI 共享）。
+func (d *Daemon) SmartDNSStatsRing() *localdns.StatsRing {
+	if d == nil {
+		return nil
+	}
+	return d.dnsSmartStats
+}
+
+// SmartDNSTailer 返回守护进程持有的 SmartDNS 审计日志增量追踪器（供单进程合体 WebUI 共享）。
+func (d *Daemon) SmartDNSTailer() *smartdns.AuditLogTailer {
+	if d == nil {
+		return nil
+	}
+	return d.smartDNSTailer
 }
 
 // HasOpenLogFile 返回当前守护实例是否持有已打开的日志文件句柄。
@@ -662,6 +719,7 @@ func (d *Daemon) monitorLoop() error {
 			optTickers.sync(d.currentConfig(), d.p2pLastActive.Load())
 		case <-auditSampleTicker.C:
 			d.maybeSampleDeviceAuditAsync()
+			d.maybeTickLocalDNSAuditAndExpiryAsync()
 		case <-throttleReconcileTicker.C:
 			d.maybeReconcileAuditThrottlesAsync(false)
 		case <-initFailoverTimer.C:
