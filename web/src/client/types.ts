@@ -4,4 +4,5 @@ export * from './types/network';
 export * from './types/adguard';
 export * from './types/watchdog';
 export * from './types/audit';
+export * from './types/p0';
 export * from './types/system';

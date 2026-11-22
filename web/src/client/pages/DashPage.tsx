@@ -8,32 +8,33 @@ import {
   Flame,
   QrCode,
   SlidersHorizontal,
-  Copy,
   CheckCircle2,
   XCircle,
   Zap,
   Globe,
-  ExternalLink,
+  Stethoscope,
 } from 'lucide-react';
 import {
   Badge,
   Button,
   PageHeader,
-  QRCodeBox,
   SectionCard,
-  SlideDrawer,
   useToast,
 } from '../../ui';
 import { clientApi } from '../api';
 import { ClientHealthResponse, ClientStatusResponse, SbProxiesSnapshot } from '../types';
 import { TrafficFlowCard } from '../components/TrafficFlowCard';
 import { getEngineDisplayName, getStatusDNS } from './adguard/adguardHelpers';
+import { DashIOSImportDrawer } from './dash/DashIOSImportDrawer';
+import { DoctorDrawer } from './dash/DoctorDrawer';
+import { HostMetricsStrip } from './dash/HostMetricsStrip';
 
 export interface DashPageProps {
   status: ClientStatusResponse | null;
   busy: boolean;
   onAction: (name: string, params?: Record<string, unknown>, confirmMsg?: string) => void;
   onNavigate: (tab: string, sub?: string) => void;
+  onRefreshStatus?: () => void;
 }
 
 function getTailscaleBadge(ts: ClientStatusResponse['tailscale']): {
@@ -50,14 +51,20 @@ function getTailscaleBadge(ts: ClientStatusResponse['tailscale']): {
   return { text: ts.state || '运行中', tone: 'ok', pulse: true };
 }
 
-export const DashPage: React.FC<DashPageProps> = ({ status, busy, onAction, onNavigate }) => {
+export const DashPage: React.FC<DashPageProps> = ({
+  status,
+  busy,
+  onAction,
+  onNavigate,
+  onRefreshStatus,
+}) => {
   const { success, error } = useToast();
   const [health, setHealth] = useState<ClientHealthResponse | null>(null);
   const [checkingHealth, setCheckingHealth] = useState(false);
+  const [doctorOpen, setDoctorOpen] = useState(false);
   const [iosOpen, setIosOpen] = useState(false);
   const [iosUrl, setIosUrl] = useState('');
   const [iosImportUrl, setIosImportUrl] = useState('');
-  const [iosQrMode, setIosQrMode] = useState<'import' | 'raw'>('import');
   const [iosLoading, setIosLoading] = useState(false);
   const [proxySnap, setProxySnap] = useState<SbProxiesSnapshot | null>(null);
 
@@ -163,6 +170,14 @@ export const DashPage: React.FC<DashPageProps> = ({ status, busy, onAction, onNa
             <Button
               variant="secondary"
               size="sm"
+              onClick={() => setDoctorOpen(true)}
+              icon={<Stethoscope className="w-3.5 h-3.5 text-emerald-400" />}
+            >
+              一键深度体检
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
               loading={checkingHealth}
               onClick={runHealthCheck}
               icon={<Activity className="w-3.5 h-3.5" />}
@@ -180,6 +195,9 @@ export const DashPage: React.FC<DashPageProps> = ({ status, busy, onAction, onNa
           </>
         }
       />
+
+      {/* Host Live Telemetry Strip */}
+      <HostMetricsStrip telemetry={host.telemetry} />
 
       {/* Health Check Result Banner */}
       {health && (
@@ -583,75 +601,21 @@ export const DashPage: React.FC<DashPageProps> = ({ status, busy, onAction, onNa
       </div>
 
       {/* Mobile Sing-Box Import Drawer */}
-      <SlideDrawer
+      <DashIOSImportDrawer
         open={iosOpen}
+        loading={iosLoading}
+        iosUrl={iosUrl}
+        iosImportUrl={iosImportUrl}
         onClose={() => setIosOpen(false)}
-        title="移动端 · Sing-Box 扫描导入"
-        subtitle="同一局域网下使用手机相机或 iOS / Android Sing-Box 客户端扫描即可同步完整分流配置"
-      >
-        <div className="flex flex-col items-center text-center space-y-4 py-2">
-          {iosLoading ? (
-            <div className="w-44 h-44 rounded-2xl bg-surface2 animate-pulse" />
-          ) : iosUrl ? (
-            <>
-              <div className="inline-flex items-center p-1 rounded-xl bg-surface2 border border-subtle text-xs">
-                <button
-                  type="button"
-                  onClick={() => setIosQrMode('import')}
-                  className={`px-3 py-1 rounded-lg font-medium transition-colors cursor-pointer ${
-                    iosQrMode === 'import'
-                      ? 'bg-[var(--accent)] text-white shadow-sm'
-                      : 'text-secondary hover:text-primary'
-                  }`}
-                >
-                  客户端一键扫描导入
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setIosQrMode('raw')}
-                  className={`px-3 py-1 rounded-lg font-medium transition-colors cursor-pointer ${
-                    iosQrMode === 'raw'
-                      ? 'bg-[var(--accent)] text-white shadow-sm'
-                      : 'text-secondary hover:text-primary'
-                  }`}
-                >
-                  纯配置链接
-                </button>
-              </div>
-              <QRCodeBox value={iosQrMode === 'import' ? iosImportUrl : iosUrl} size={184} />
-              <div className="w-full p-3 rounded-xl bg-surface2 border border-subtle font-mono text-xs text-primary break-all select-all">
-                {iosUrl}
-              </div>
-              <div className="flex flex-wrap items-center justify-center gap-2">
-                <a
-                  href={iosImportUrl}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-emerald-500 hover:bg-emerald-400 text-slate-950 shadow-sm transition-colors"
-                >
-                  <ExternalLink className="w-3.5 h-3.5" />
-                  一键打开 Sing-Box 导入
-                </a>
-                <Button
-                  variant="primary"
-                  onClick={() => copyText(iosUrl, '已复制移动端配置同步地址')}
-                  icon={<Copy className="w-3.5 h-3.5" />}
-                >
-                  复制配置链接
-                </Button>
-                <Button
-                  variant="secondary"
-                  onClick={() => {
-                    window.open(iosUrl, '_blank', 'noopener');
-                  }}
-                >
-                  直接下载 JSON
-                </Button>
-              </div>
-            </>
-          ) : (
-            <p className="text-xs text-muted">未能生成链接，请确认已配置订阅且处于局域网中。</p>
-          )}
-        </div>
-      </SlideDrawer>
+        onCopy={(text, msg) => void copyText(text, msg)}
+      />
+
+      {/* Full-chain Deep Doctor Drawer */}
+      <DoctorDrawer
+        open={doctorOpen}
+        onClose={() => setDoctorOpen(false)}
+        onFixed={onRefreshStatus}
+      />
     </div>
   );
 };
