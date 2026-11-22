@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -136,5 +137,23 @@ func CleanEnv(stripKeys []string, extra ...string) []string {
 			out = append(out, kv)
 		}
 	}
+	return out
+}
+
+// WithXtablesWait 为 iptables/ip6tables 命令参数自动前置 `-w 5` 等待内核 xtables 锁，
+// 防止多模块并发下发规则时触发 `exit status 4 (Another app is currently holding the xtables lock)`。
+func WithXtablesWait(name string, args []string) []string {
+	base := filepath.Base(strings.TrimSpace(name))
+	if base != "iptables" && base != "ip6tables" {
+		return args
+	}
+	for _, a := range args {
+		if a == "-w" || a == "--wait" || strings.HasPrefix(a, "--wait=") {
+			return args
+		}
+	}
+	out := make([]string, 0, len(args)+2)
+	out = append(out, "-w", "5")
+	out = append(out, args...)
 	return out
 }

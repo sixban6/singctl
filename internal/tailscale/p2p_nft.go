@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"singctl/internal/common/execx"
 	"singctl/internal/config"
 )
 
@@ -43,7 +44,7 @@ var (
 type CmdRunner func(ctx context.Context, stdin string, name string, args ...string) ([]byte, error)
 
 func defaultCmdRunner(ctx context.Context, stdin string, name string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, name, args...)
+	cmd := exec.CommandContext(ctx, name, execx.WithXtablesWait(name, args)...)
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin)
 	}

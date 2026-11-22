@@ -179,6 +179,7 @@ type EngineDeps struct {
 	ProbeDNSFunc            func(addr string, timeout time.Duration) error
 	ProbeResolutionFunc     func(addr, domain string, timeout time.Duration) ([]string, time.Duration, error)
 	CheckPortAvailableFunc  func(port int) bool
+	PortReleasePollInterval time.Duration
 	SyncSingBoxDNSLocalFunc func(ctx context.Context, sbCfgPath, workPath string, useExternal bool, dnsPort int) (bool, error)
 	NowFunc                 func() time.Time
 
