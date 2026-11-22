@@ -344,6 +344,31 @@ func TestSmartDNSEngine_ControlsAuditStatsAndPreview(t *testing.T) {
 	if err != nil || !strings.Contains(prev.Content, "force-AAAA-SOA yes") || !strings.Contains(prev.Content, "evil.example.com") {
 		t.Fatalf("unexpected smartdns ConfigPreview: err=%v content=%s", err, prev.Content)
 	}
+
+	// Verify UTC-skewed musl audit timestamp (e.g. OpenWrt static binary logging UTC while host is UTC-5) is normalized cleanly.
+	fixedNow := time.Date(2026, 11, 23, 13, 0, 5, 0, time.FixedZone("EST", -5*3600))
+	utcLogPath := filepath.Join(tmpDir, "smartdns-audit-utc.log")
+	// UTC equivalent of 13:00:05 EST is 18:00:05 UTC; if parsed naively in EST it would appear 5 hours in the future.
+	utcLine := "[2026-11-23 18:00:03,100] 127.0.0.1 query skew.example.com, type 1, time 10ms, speed: 5.0ms, group default, result 192.0.2.55\n"
+	if err := os.WriteFile(utcLogPath, []byte(utcLine), 0600); err != nil {
+		t.Fatal(err)
+	}
+	skewReg := localdns.NewRegistry(cfg, localdns.EngineDeps{
+		ConfigPath:           cfgPath,
+		AdGuardBinPath:       filepath.Join(tmpDir, "missing-agh"),
+		SmartDNSBinPath:      binPath,
+		SmartDNSConfigFile:   confPath,
+		SmartDNSRulesDir:     rulesDir,
+		SmartDNSAuditLogPath: utcLogPath,
+		ServiceMgr:           mockSvc,
+		SmartDNSManager:      sdMgr,
+		SkipProbeForTest:     true,
+		NowFunc:              func() time.Time { return fixedNow },
+	})
+	skewOv := skewReg.Overview(ctx)
+	if skewOv.Stats.NumDNSQueries != 1 {
+		t.Fatalf("expected UTC-skewed musl audit entry normalized into current 24h window, got stats=%+v", skewOv.Stats)
+	}
 }
 
 func TestAdGuardEngine_OverviewCredentialsAndRedactedPreview(t *testing.T) {

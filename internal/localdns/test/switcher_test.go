@@ -355,3 +355,165 @@ func TestSwitchEngine_HardwareGuardsAndRollbackOnProbeFailure(t *testing.T) {
 		}
 	})
 }
+
+func TestSwitchEngine_AutoFallbackWhenPort5353OccupiedByMDNS(t *testing.T) {
+	ctx := t.Context()
+	const mib = 1024 * 1024
+
+	t.Run("auto_shifts_to_5354_when_5353_in_use", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		cfgPath := filepath.Join(tmpDir, "singctl.yaml")
+		sbCfgPath := filepath.Join(tmpDir, "config.json")
+		smartBin := filepath.Join(tmpDir, "smartdns")
+		smartConf := filepath.Join(tmpDir, "smartdns.conf")
+		smartRules := filepath.Join(tmpDir, "smartdns-rules.d")
+
+		if err := os.WriteFile(sbCfgPath, []byte(sampleSingBoxConfigJSON()), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(smartBin, []byte("#!/bin/sh\necho 'smartdns Release48.5'\n"), 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		cfg := &config.Config{
+			DNS: config.ClientDNSConfig{
+				Engine:  constant.DNSEngineSingBox,
+				DNSPort: 5353,
+			},
+		}
+		if err := config.Save(cfgPath, cfg); err != nil {
+			t.Fatal(err)
+		}
+
+		mockSvc := servicemgr.NewMock()
+		sdMgr := smartdns.NewManager(smartdns.ManagerOptions{
+			BinaryPath:   smartBin,
+			ConfigFile:   smartConf,
+			RulesDir:     smartRules,
+			AuditLogPath: filepath.Join(tmpDir, "audit.log"),
+			LogFilePath:  filepath.Join(tmpDir, "smartdns.log"),
+			PIDFilePath:  filepath.Join(tmpDir, "smartdns.pid"),
+			ServiceName:  constant.SmartDNSServiceName,
+			GOOS:         "linux",
+			GOARCH:       "arm64",
+			ServiceMgr:   mockSvc,
+			ProbeDNSFunc: func(string, time.Duration) error { return nil },
+		})
+
+		var probedAddr string
+		reg := localdns.NewRegistry(cfg, localdns.EngineDeps{
+			ConfigPath:         cfgPath,
+			SingBoxConfigPath:  sbCfgPath,
+			AdGuardBinPath:     filepath.Join(tmpDir, "missing-agh"),
+			SmartDNSBinPath:    smartBin,
+			SmartDNSConfigFile: smartConf,
+			SmartDNSRulesDir:   smartRules,
+			ServiceMgr:         mockSvc,
+			SmartDNSManager:    sdMgr,
+			ReadMemInfo: func() (sysinfo.MemInfo, error) {
+				return sysinfo.MemInfo{TotalBytes: 480 * mib, AvailableBytes: 205 * mib}, nil
+			},
+			ReadDiskSpace: func(string) (sysinfo.DiskSpace, error) {
+				return sysinfo.DiskSpace{AvailBytes: 20 * mib}, nil
+			},
+			CheckPortAvailableFunc: func(port int) bool {
+				return port != 5353 // simulate avahi-daemon mDNS occupying UDP 5353
+			},
+			ProbeDNSFunc: func(addr string, _ time.Duration) error {
+				probedAddr = addr
+				return nil
+			},
+			ProbeResolutionFunc: func(addr, _ string, _ time.Duration) ([]string, time.Duration, error) {
+				probedAddr = addr
+				return []string{"192.0.2.1"}, 5 * time.Millisecond, nil
+			},
+			SyncSingBoxEnhancedFunc: func(context.Context, string, string, config.ClientDNSConfig, []string, time.Time) (bool, error) {
+				return true, nil
+			},
+			SyncSingBoxDNSLocalFunc: func(_ context.Context, p, _ string, useExternal bool, port int) (bool, error) {
+				raw, _ := os.ReadFile(p)
+				out, changed, err := singbox.PatchDNSLocalJSON(string(raw), useExternal, port)
+				if err == nil && changed {
+					_ = os.WriteFile(p, []byte(out), 0600)
+				}
+				return changed, err
+			},
+		})
+
+		res, err := reg.SwitchEngine(ctx, localdns.SwitchRequest{TargetEngine: constant.DNSEngineSmartDNS})
+		if err != nil {
+			t.Fatalf("SwitchEngine failed when 5353 occupied: %v", err)
+		}
+		if probedAddr != "127.0.0.1:5354" {
+			t.Fatalf("expected SmartDNS probed on fallback port 127.0.0.1:5354, got %q", probedAddr)
+		}
+		confBytes, err := os.ReadFile(smartConf)
+		if err != nil || !strings.Contains(string(confBytes), "bind 127.0.0.1:5354") {
+			t.Fatalf("expected smartdns.conf bound to 127.0.0.1:5354, err=%v content=%s", err, string(confBytes))
+		}
+		linked, linkedPort := singbox.InspectSingBoxDNSLocal(sbCfgPath)
+		if !linked || linkedPort != 5354 {
+			t.Fatalf("expected sing-box dns_local linked to 5354, got linked=%v port=%d", linked, linkedPort)
+		}
+		loaded, err := config.Load(cfgPath)
+		if err != nil || loaded.DNS.GetDNSPort() != 5354 {
+			t.Fatalf("expected persisted dns_port=5354, err=%v got=%d", err, loaded.DNS.GetDNSPort())
+		}
+		if len(res.Warnings) == 0 || !strings.Contains(strings.Join(res.Warnings, ";"), "5354") {
+			t.Fatalf("expected warning mentioning auto port fallback 5354, got %v", res.Warnings)
+		}
+	})
+
+	t.Run("rollback_restores_original_dns_port_on_probe_failure", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		cfgPath := filepath.Join(tmpDir, "singctl.yaml")
+		sbCfgPath := filepath.Join(tmpDir, "config.json")
+		smartBin := filepath.Join(tmpDir, "smartdns")
+		smartConf := filepath.Join(tmpDir, "smartdns.conf")
+		smartRules := filepath.Join(tmpDir, "smartdns-rules.d")
+
+		_ = os.WriteFile(sbCfgPath, []byte(sampleSingBoxConfigJSON()), 0600)
+		_ = os.WriteFile(smartBin, []byte("#!/bin/sh\necho 'smartdns Release48.5'\n"), 0755)
+		cfg := &config.Config{DNS: config.ClientDNSConfig{Engine: constant.DNSEngineSingBox, DNSPort: 5353}}
+		_ = config.Save(cfgPath, cfg)
+
+		mockSvc := servicemgr.NewMock()
+		sdMgr := smartdns.NewManager(smartdns.ManagerOptions{
+			BinaryPath:   smartBin,
+			ConfigFile:   smartConf,
+			RulesDir:     smartRules,
+			ServiceName:  constant.SmartDNSServiceName,
+			GOOS:         "linux",
+			GOARCH:       "arm64",
+			ServiceMgr:   mockSvc,
+			ProbeDNSFunc: func(string, time.Duration) error { return nil },
+		})
+
+		reg := localdns.NewRegistry(cfg, localdns.EngineDeps{
+			ConfigPath:             cfgPath,
+			SingBoxConfigPath:      sbCfgPath,
+			AdGuardBinPath:         filepath.Join(tmpDir, "missing-agh"),
+			SmartDNSBinPath:        smartBin,
+			SmartDNSConfigFile:     smartConf,
+			SmartDNSRulesDir:       smartRules,
+			ServiceMgr:             mockSvc,
+			SmartDNSManager:        sdMgr,
+			CheckPortAvailableFunc: func(port int) bool { return port != 5353 },
+			ProbeDNSFunc:           func(string, time.Duration) error { return nil },
+			ProbeResolutionFunc: func(string, string, time.Duration) ([]string, time.Duration, error) {
+				return nil, 0, errors.New("probe failed")
+			},
+			SyncSingBoxEnhancedFunc: func(context.Context, string, string, config.ClientDNSConfig, []string, time.Time) (bool, error) {
+				return true, nil
+			},
+		})
+
+		if _, err := reg.SwitchEngine(ctx, localdns.SwitchRequest{TargetEngine: constant.DNSEngineSmartDNS}); err == nil {
+			t.Fatal("expected SwitchEngine failure")
+		}
+		loaded, _ := config.Load(cfgPath)
+		if loaded.DNS.GetDNSPort() != 5353 {
+			t.Fatalf("expected rollback to restore original dns_port=5353, got %d", loaded.DNS.GetDNSPort())
+		}
+	})
+}

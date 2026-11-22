@@ -66,8 +66,11 @@ PIDFILE="%s"
 
 start_service() {
     [ -f "$CONF" ] && chmod 600 "$CONF" 2>/dev/null || true
+    TZ_VAL=""
+    [ -s /etc/TZ ] && TZ_VAL="$(head -n 1 /etc/TZ 2>/dev/null | tr -d '\r\n')"
     procd_open_instance "singctl-smartdns"
     procd_set_param command "$PROG" -f -c "$CONF" -p "$PIDFILE"
+    [ -n "$TZ_VAL" ] && procd_set_param env "TZ=$TZ_VAL"
     procd_set_param respawn 3600 5 5
     procd_set_param limits nofile="65536 65536"
     procd_set_param stdout 1
