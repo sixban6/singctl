@@ -119,7 +119,6 @@ export function resolveDNSCapabilities(snap: DNSOverviewSnapshot | null): DNSCap
       hasFilterLists: true,
       hasCustomFilterURL: true,
       hasPauseProtection: true,
-      hasBlockAAAA: true,
       canClearCache: true,
       canUninstall: true,
     };
@@ -131,7 +130,6 @@ export function resolveDNSCapabilities(snap: DNSOverviewSnapshot | null): DNSCap
     hasFilterLists: true,
     hasCustomFilterURL: true,
     hasPauseProtection: true,
-    hasBlockAAAA: false,
     canClearCache: true,
     canUninstall: true,
   };

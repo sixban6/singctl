@@ -201,7 +201,7 @@ export const AdGuardUninstalledView: React.FC<AdGuardUninstalledViewProps> = ({
               },
               {
                 title: '控制台一体化管理',
-                desc: '直接在当前页面一键临时暂停去广告、屏蔽 AAAA、放行误拦域名、配置内网 NAS 域名映射。',
+                desc: '直接在当前页面一键临时暂停去广告、实测加密上游、放行误拦域名、配置内网 NAS 域名映射。',
               },
               {
                 title: '软路由闪存保护 + 永不断网兜底',
