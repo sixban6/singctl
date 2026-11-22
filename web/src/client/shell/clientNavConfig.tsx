@@ -14,6 +14,7 @@ import {
   Zap,
 } from 'lucide-react';
 import { Button, CommandItem, NavGroupConfig, StatusDot } from '../../ui';
+import { getEngineDisplayName, getStatusDNS } from '../pages/adguard/adguardHelpers';
 import { ClientStatusResponse } from '../types';
 
 export const CLIENT_TABS = ['dash', 'sb', 'dns', 'audit', 'dm', 'net', 'logs', 'sys'] as const;
@@ -35,8 +36,10 @@ export function buildClientNavGroups(status?: ClientStatusResponse | null): NavG
       <StatusDot tone="danger" />
     ) : undefined;
   const dmBadge = status?.daemon?.staleBinary ? <StatusDot tone="warn" /> : undefined;
+  const dns = getStatusDNS(status);
+  const dnsEngineLabel = getEngineDisplayName(dns?.activeEngine, dns?.activeEngineLabel);
   const dnsBadge =
-    status?.adguard?.installed && status.adguard.enabled && !status.adguard.dnsHealthy ? (
+    dns && dns.activeEngine !== 'singbox' && dns.installed && dns.enabled && !dns.dnsHealthy ? (
       <StatusDot tone="danger" />
     ) : undefined;
 
@@ -63,7 +66,9 @@ export function buildClientNavGroups(status?: ClientStatusResponse | null): NavG
           key: 'dns',
           label: '防劫持 DNS',
           shortLabel: 'DNS',
-          desc: '本地 AdGuard Home 加密 DoH 防抢答、防误伤暂停与内网域名重写',
+          desc: dns?.activeEngine
+            ? `当前引擎：${dnsEngineLabel} · 三引擎防劫持、防误伤暂停与内网重写`
+            : '三引擎防劫持加密 DoH、防误伤暂停与内网域名重写',
           icon: ShieldCheck,
           badge: dnsBadge,
         },
@@ -152,11 +157,11 @@ export function buildClientExtraCommands(
     },
     {
       id: 'act-dns-restart',
-      label: '重启本地 AdGuard Home 防劫持 DNS',
+      label: '重启当前防劫持 DNS 引擎',
       hint: 'dns',
       group: '快捷操作',
       icon: <ShieldCheck className="w-3.5 h-3.5" />,
-      keywords: 'adguard dns doh restart',
+      keywords: 'dns singbox smartdns adguard doh restart',
       onSelect: () => requestAction('dns-restart'),
     },
     {

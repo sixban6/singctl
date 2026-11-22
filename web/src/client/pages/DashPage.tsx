@@ -27,6 +27,7 @@ import {
 import { clientApi } from '../api';
 import { ClientHealthResponse, ClientStatusResponse, SbProxiesSnapshot } from '../types';
 import { TrafficFlowCard } from '../components/TrafficFlowCard';
+import { getEngineDisplayName, getStatusDNS } from './adguard/adguardHelpers';
 
 export interface DashPageProps {
   status: ClientStatusResponse | null;
@@ -130,7 +131,12 @@ export const DashPage: React.FC<DashPageProps> = ({ status, busy, onAction, onNa
     );
   }
 
-  const { singbox: sb, daemon: dm, adguard: agh, tailscale: ts, firewall: fw, host, config } = status;
+  const { singbox: sb, daemon: dm, tailscale: ts, firewall: fw, host, config } = status;
+  const dns = getStatusDNS(status);
+  const dnsEngine = dns?.activeEngine || (dns?.installed ? 'adguard' : 'singbox');
+  const dnsEngineLabel = getEngineDisplayName(dnsEngine, dns?.activeEngineLabel);
+  const dnsIsSingBox = dnsEngine === 'singbox';
+  const dnsHealthy = dnsIsSingBox ? Boolean(dns?.dnsHealthy ?? sb.running) : Boolean(dns?.dnsHealthy);
   const tsBadgeInfo = getTailscaleBadge(ts);
   const subs = config?.subs || [];
   const primaryExitText = !sb.running
@@ -248,61 +254,68 @@ export const DashPage: React.FC<DashPageProps> = ({ status, busy, onAction, onNa
           </div>
         </div>
 
-        {/* AdGuard Home Anti-Hijack DNS */}
+        {/* Anti-Hijack DNS (3-Engine) */}
         <div className="console-card rounded-2xl p-4 flex flex-col justify-between gap-4">
           <div className="flex items-start justify-between gap-2">
             <div
               className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0"
               style={{
-                backgroundColor: agh?.dnsHealthy ? 'var(--status-ok-soft)' : 'var(--bg-surface-2)',
-                color: agh?.dnsHealthy ? 'var(--status-ok)' : 'var(--text-secondary)',
+                backgroundColor: dnsHealthy ? 'var(--status-ok-soft)' : 'var(--bg-surface-2)',
+                color: dnsHealthy ? 'var(--status-ok)' : 'var(--text-secondary)',
               }}
             >
               <ShieldCheck className="w-4.5 h-4.5" />
             </div>
             <Badge
               tone={
-                !agh?.installed
-                  ? 'neutral'
-                  : !agh.dnsHealthy
-                    ? 'danger'
-                    : agh.singboxLinked
-                      ? 'ok'
-                      : 'warn'
+                dnsIsSingBox
+                  ? dnsHealthy
+                    ? 'ok'
+                    : 'warn'
+                  : !dns?.installed
+                    ? 'neutral'
+                    : !dns.dnsHealthy
+                      ? 'danger'
+                      : dns.singboxLinked
+                        ? 'ok'
+                        : 'warn'
               }
-              dot={Boolean(agh?.dnsHealthy)}
-              pulse={Boolean(agh?.dnsHealthy && agh?.singboxLinked)}
+              dot={dnsHealthy}
+              pulse={dnsIsSingBox ? dnsHealthy : Boolean(dns?.dnsHealthy && dns?.singboxLinked)}
             >
-              {!agh?.installed
-                ? '未安装'
-                : !agh.dnsHealthy
-                  ? '已停止'
-                  : agh.singboxLinked
-                    ? '防劫持接管'
-                    : '待接管'}
+              {dnsIsSingBox
+                ? dnsHealthy
+                  ? '防劫持接管'
+                  : '待内核启动'
+                : !dns?.installed
+                  ? '未安装'
+                  : !dns.dnsHealthy
+                    ? '已停止'
+                    : dns.singboxLinked
+                      ? '防劫持接管'
+                      : '待接管'}
             </Badge>
           </div>
           <div>
             <div className="text-sm font-semibold text-primary">防劫持 DNS</div>
-            <div className="text-xs text-secondary mt-1 tnum truncate" title={agh?.lowMemoryWarning}>
-              {agh?.installed
-                ? `${agh.dnsAddr || '127.0.0.1:5353'} · ${agh.singboxLinked ? '已联动内核' : '内置 DoH 兜底'}`
-                : agh?.lowMemoryBlocked
-                  ? '小内存保护 · 内置纯 IP DoH + ad1'
-                  : '本地 AdGuard Home 加密 DoH'}
+            <div className="text-xs text-secondary mt-1 tnum truncate" title={dns?.lowMemoryWarning || dnsEngineLabel}>
+              {dnsIsSingBox
+                ? `${dnsEngineLabel} · 内置加密 DoH`
+                : dns?.installed
+                  ? `${dnsEngineLabel} · ${dns.dnsAddr || '127.0.0.1:5353'}`
+                  : `${dnsEngineLabel} · 支持三引擎热切换`}
             </div>
           </div>
           <div className="flex items-center gap-2 flex-wrap pt-1 border-t border-subtle">
-            {!agh?.installed ? (
-              <Button
-                size="xs"
-                variant="primary"
-                disabled={busy || agh?.supported === false || Boolean(agh?.lowMemoryBlocked)}
-                onClick={() => onAction('dns-install')}
-              >
-                {agh?.lowMemoryBlocked ? '内置保护' : '安装'}
+            {dnsIsSingBox ? (
+              <Button size="xs" variant="secondary" onClick={() => onNavigate('dns')}>
+                切换引擎
               </Button>
-            ) : agh.dnsHealthy && agh.singboxLinked ? (
+            ) : !dns?.installed ? (
+              <Button size="xs" variant="primary" onClick={() => onNavigate('dns')}>
+                配置引擎
+              </Button>
+            ) : dns.dnsHealthy && dns.singboxLinked ? (
               <Button size="xs" disabled={busy} onClick={() => onAction('dns-restart')}>
                 重启
               </Button>

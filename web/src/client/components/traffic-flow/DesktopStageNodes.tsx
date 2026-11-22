@@ -86,7 +86,7 @@ export const DesktopStageNodes: React.FC<DesktopStageNodesProps> = ({ vm, onNavi
         className="cursor-pointer"
         onClick={() => onNavigate('dns')}
       >
-        <title>管理 AdGuard Home 防劫持 DNS 与广告过滤</title>
+        <title>管理三引擎防劫持 DNS 与广告过滤</title>
         <rect
           width="108"
           height="96"

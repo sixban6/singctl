@@ -12,34 +12,44 @@ import { clientApi } from '../../api';
 import { ADGUARD_OVERVIEW_CACHE_KEY, ADGUARD_PROBE_CACHE_KEY } from '../../cacheKeys';
 import {
   AdGuardCredentialsResponse,
-  AdGuardOverviewSnapshot,
-  AdGuardProbeResult,
-  AdGuardUpstreamMode,
   ClientStatusResponse,
+  DNSConfigPreviewResponse,
+  DNSEnginePreference,
+  DNSOverviewSnapshot,
+  DNSUpstreamMode,
+  UpstreamProbeReport,
 } from '../../types';
+import {
+  getEngineDisplayName,
+  getStatusDNS,
+  resolveActiveEngine,
+  resolveDNSCapabilities,
+} from './adguardHelpers';
 
 export function useAdGuardController(
   active: boolean,
   status: ClientStatusResponse | null,
   onRefreshStatus: () => void,
 ) {
-  const { success, error } = useToast();
-  const [snap, setSnap] = useState<AdGuardOverviewSnapshot | null>(
-    () => peekCachedQuery<AdGuardOverviewSnapshot>(ADGUARD_OVERVIEW_CACHE_KEY) ?? null,
+  const { success, error, warn } = useToast();
+  const [snap, setSnap] = useState<DNSOverviewSnapshot | null>(
+    () => peekCachedQuery<DNSOverviewSnapshot>(ADGUARD_OVERVIEW_CACHE_KEY) ?? null,
   );
   const [loading, setLoading] = useState<boolean>(
-    () => !peekCachedQuery<AdGuardOverviewSnapshot>(ADGUARD_OVERVIEW_CACHE_KEY),
+    () => !peekCachedQuery<DNSOverviewSnapshot>(ADGUARD_OVERVIEW_CACHE_KEY),
   );
   const [mutating, setMutating] = useState(false);
+  const [switchingEngine, setSwitchingEngine] = useState<DNSEnginePreference | null>(null);
+  const [togglingBlockAAAA, setTogglingBlockAAAA] = useState(false);
 
-  const [probe, setProbe] = useState<AdGuardProbeResult | null>(
-    () => peekCachedQuery<AdGuardProbeResult>(ADGUARD_PROBE_CACHE_KEY) ?? null,
+  const [probe, setProbe] = useState<UpstreamProbeReport | null>(
+    () => peekCachedQuery<UpstreamProbeReport>(ADGUARD_PROBE_CACHE_KEY) ?? null,
   );
   const [probing, setProbing] = useState(false);
 
   const pauseDeadlineRef = useRef<number>(0);
   const [pauseRemainSec, setPauseRemainSec] = useState<number>(() => {
-    const cached = peekCachedQuery<AdGuardOverviewSnapshot>(ADGUARD_OVERVIEW_CACHE_KEY);
+    const cached = peekCachedQuery<DNSOverviewSnapshot>(ADGUARD_OVERVIEW_CACHE_KEY);
     if (
       cached &&
       !cached.protectionEnabled &&
@@ -56,6 +66,25 @@ export function useAdGuardController(
   const [credData, setCredData] = useState<AdGuardCredentialsResponse | null>(null);
   const [credLoading, setCredLoading] = useState(false);
   const [resettingPwd, setResettingPwd] = useState(false);
+  const [configPreview, setConfigPreview] = useState<DNSConfigPreviewResponse | null>(null);
+  const [configPreviewLoading, setConfigPreviewLoading] = useState(false);
+  const [configPreviewError, setConfigPreviewError] = useState<string | null>(null);
+
+  const applySnapshot = useCallback((res: DNSOverviewSnapshot) => {
+    writeCachedQuery(ADGUARD_OVERVIEW_CACHE_KEY, res);
+    setSnap(res);
+    if (
+      !res.protectionEnabled &&
+      res.protectionDisabledDurationMs &&
+      res.protectionDisabledDurationMs > 0
+    ) {
+      pauseDeadlineRef.current = Date.now() + res.protectionDisabledDurationMs;
+      setPauseRemainSec(Math.ceil(res.protectionDisabledDurationMs / 1000));
+    } else {
+      pauseDeadlineRef.current = 0;
+      setPauseRemainSec(0);
+    }
+  }, []);
 
   const loadOverview = useCallback(
     async (silent = false) => {
@@ -64,31 +93,32 @@ export function useAdGuardController(
       }
       try {
         const res = silent
-          ? await clientApi.getAdGuardOverview()
-          : (await prefetchCachedQuery(ADGUARD_OVERVIEW_CACHE_KEY, () => clientApi.getAdGuardOverview())) ??
-            (await clientApi.getAdGuardOverview());
-        writeCachedQuery(ADGUARD_OVERVIEW_CACHE_KEY, res);
-        setSnap(res);
-        if (!res.protectionEnabled && res.protectionDisabledDurationMs && res.protectionDisabledDurationMs > 0) {
-          pauseDeadlineRef.current = Date.now() + res.protectionDisabledDurationMs;
-          setPauseRemainSec(Math.ceil(res.protectionDisabledDurationMs / 1000));
-        } else {
-          pauseDeadlineRef.current = 0;
-          setPauseRemainSec(0);
-        }
+          ? await clientApi.getDNSOverview()
+          : (await prefetchCachedQuery(ADGUARD_OVERVIEW_CACHE_KEY, () =>
+              clientApi.getDNSOverview(),
+            )) ?? (await clientApi.getDNSOverview());
+        applySnapshot(res);
       } catch (e) {
         if (!silent) error((e as Error).message || '加载防劫持 DNS 状态失败');
       } finally {
         setLoading(false);
       }
     },
-    [error],
+    [applySnapshot, error],
   );
 
+  const statusDns = getStatusDNS(status);
   useEffect(() => {
     void loadOverview(Boolean(snap));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status?.adguard?.installed, status?.adguard?.running, status?.adguard?.singboxLinked]);
+  }, [
+    statusDns?.activeEngine,
+    statusDns?.configuredEngine,
+    statusDns?.installed,
+    statusDns?.running,
+    statusDns?.dnsHealthy,
+    statusDns?.singboxLinked,
+  ]);
 
   const prevActiveRef = useRef<boolean>(active);
   useEffect(() => {
@@ -107,6 +137,7 @@ export function useAdGuardController(
     const onInvalidate = (ev: Event) => {
       const scope = (ev as CustomEvent<ClientInvalidateScope>).detail;
       if (!scope || scope === 'all' || scope === 'adguard') {
+        setConfigPreview(null);
         void loadOverview(true);
       }
     };
@@ -114,11 +145,12 @@ export function useAdGuardController(
     return () => window.removeEventListener(CLIENT_INVALIDATE_EVENT, onInvalidate);
   }, [loadOverview]);
 
+  const engineActiveOrReady = Boolean(snap?.installed || snap?.activeEngine === 'singbox');
   useVisibilityInterval(
     () => {
       void loadOverview(true);
     },
-    active && snap?.installed ? 15000 : null,
+    active && engineActiveOrReady ? 15000 : null,
   );
 
   useEffect(() => {
@@ -141,13 +173,13 @@ export function useAdGuardController(
     async (silent = false) => {
       setProbing(true);
       try {
-        const res = await clientApi.probeAdGuardUpstream();
+        const res = await clientApi.probeDNSUpstream();
         writeCachedQuery(ADGUARD_PROBE_CACHE_KEY, res);
         setProbe(res);
         if (!silent) {
           if (res.healthy && res.fastestUpstream) {
             success(
-              `实测完成：当前最快为 ${res.fastestName || res.fastestUpstream} (${res.fastestLatencyMs}ms) · 本地端到端 ${res.latencyMs}ms`,
+              `实测完成：当前最快为 ${res.fastestName || res.fastestUpstream} (${res.fastestLatencyMs}ms)${res.latencyMs ? ` · 端到端 ${res.latencyMs}ms` : ''}`,
             );
           } else if (res.healthy) {
             success(`加密上游解析正常：${res.domain} → ${res.resolved} (${res.latencyMs}ms)`);
@@ -164,20 +196,69 @@ export function useAdGuardController(
     [success, error],
   );
 
+  const prevEngineRef = useRef<string | undefined>(snap?.activeEngine);
   useEffect(() => {
-    if (active && snap?.installed && snap.dnsHealthy && !probe && !probing) {
+    if (!active || !snap) return;
+    const curEngine = resolveActiveEngine(snap);
+    const engineChanged = Boolean(prevEngineRef.current && prevEngineRef.current !== curEngine);
+    prevEngineRef.current = curEngine;
+    if (engineChanged) {
+      setConfigPreview(null);
+      if ((snap.dnsHealthy || curEngine === 'singbox') && !probing) {
+        void runProbe(true);
+      }
+      return;
+    }
+    if ((snap.installed || curEngine === 'singbox') && snap.dnsHealthy && !probe && !probing) {
       void runProbe(true);
     }
-  }, [active, snap?.installed, snap?.dnsHealthy, probe, probing, runProbe]);
+  }, [active, snap, probe, probing, runProbe]);
+
+  const handleSwitchEngine = async (
+    engine: DNSEnginePreference,
+    forceLowMemory = false,
+  ): Promise<boolean> => {
+    setSwitchingEngine(engine);
+    try {
+      const res = await clientApi.switchDNSEngine({ engine, forceLowMemory });
+      if (res.overview) {
+        applySnapshot(res.overview);
+      }
+      const targetName = getEngineDisplayName(res.activeEngine || engine);
+      const migrated = res.migratedItems?.length
+        ? `（已迁移：${res.migratedItems.join('、')}）`
+        : '';
+      if (engine === 'auto') {
+        success(`已恢复自动选型，当前活跃引擎：${targetName}${migrated}`);
+      } else {
+        success(`已零断网切换至 ${targetName}${migrated}`);
+      }
+      if (res.warnings && res.warnings.length > 0) {
+        warn(res.warnings.join('；'), 6500);
+      }
+      setConfigPreview(null);
+      onRefreshStatus();
+      if (!res.overview) {
+        await loadOverview(true);
+      }
+      void runProbe(true);
+      return true;
+    } catch (e) {
+      error((e as Error).message || '切换 DNS 引擎失败');
+      return false;
+    } finally {
+      setSwitchingEngine(null);
+    }
+  };
 
   const handleProtection = async (enabled: boolean, durationMinutes = 0) => {
     setMutating(true);
     try {
-      await clientApi.setAdGuardProtection(enabled, durationMinutes);
+      await clientApi.setDNSProtection(enabled, durationMinutes);
       if (enabled) {
         success('已恢复去广告与隐私追踪过滤保护');
       } else if (durationMinutes > 0) {
-        success(`已临时暂停广告过滤 ${durationMinutes} 分钟（防劫持 DoH 解析保持运行，不断网）`);
+        success(`已临时暂停广告过滤 ${durationMinutes} 分钟（防劫持加密解析保持运行，不断网）`);
       } else {
         success('已暂停广告过滤规则');
       }
@@ -189,10 +270,28 @@ export function useAdGuardController(
     }
   };
 
+  const handleToggleBlockAAAA = async (enabled: boolean): Promise<boolean> => {
+    setTogglingBlockAAAA(true);
+    try {
+      await clientApi.setDNSBlockAAAA(enabled);
+      if (snap) {
+        applySnapshot({ ...snap, blockAAAA: enabled });
+      }
+      success(enabled ? '已开启 AAAA (IPv6) 解析屏蔽并热生效' : '已关闭 AAAA (IPv6) 解析屏蔽并热生效');
+      await loadOverview(true);
+      return true;
+    } catch (e) {
+      error((e as Error).message || '切换 AAAA 屏蔽开关失败');
+      return false;
+    } finally {
+      setTogglingBlockAAAA(false);
+    }
+  };
+
   const handleClearCache = async () => {
     setMutating(true);
     try {
-      await clientApi.clearAdGuardCache();
+      await clientApi.clearDNSCache();
       success('已清空本地 DNS 缓存');
       void runProbe(true);
     } catch (e) {
@@ -207,7 +306,7 @@ export function useAdGuardController(
     if (!d) return false;
     setMutating(true);
     try {
-      await clientApi.setAdGuardWhitelist(action, d);
+      await clientApi.setDNSWhitelist(action, d);
       success(action === 'add' ? `已放行域名 ${d}` : `已移出白名单 ${d}`);
       await loadOverview(true);
       return true;
@@ -228,7 +327,7 @@ export function useAdGuardController(
     }
     setMutating(true);
     try {
-      await clientApi.manageAdGuardRewrite('add', domain, answer);
+      await clientApi.manageDNSRewrite('add', domain, answer);
       success(`已添加域名映射：${domain} → ${answer}`);
       await loadOverview(true);
       return true;
@@ -243,7 +342,7 @@ export function useAdGuardController(
   const handleDeleteRewrite = async (domain: string, answer: string) => {
     setMutating(true);
     try {
-      await clientApi.manageAdGuardRewrite('delete', domain, answer);
+      await clientApi.manageDNSRewrite('delete', domain, answer);
       success(`已移除映射 ${domain}`);
       await loadOverview(true);
     } catch (err) {
@@ -256,7 +355,7 @@ export function useAdGuardController(
   const handleFilterToggle = async (url: string, name: string, enabled: boolean) => {
     setMutating(true);
     try {
-      await clientApi.manageAdGuardFilter({ action: 'toggle', url, name, enabled });
+      await clientApi.manageDNSFilter({ action: 'toggle', url, name, enabled });
       success(enabled ? `已启用规则库：${name}` : `已停用规则库：${name}`);
       await loadOverview(true);
     } catch (err) {
@@ -274,7 +373,7 @@ export function useAdGuardController(
     }
     setMutating(true);
     try {
-      await clientApi.manageAdGuardFilter({
+      await clientApi.manageDNSFilter({
         action: 'add',
         url,
         name: nameRaw.trim(),
@@ -294,7 +393,7 @@ export function useAdGuardController(
   const handleRemoveCustomFilter = async (url: string, name: string) => {
     setMutating(true);
     try {
-      await clientApi.manageAdGuardFilter({ action: 'remove', url });
+      await clientApi.manageDNSFilter({ action: 'remove', url });
       success(`已移除规则库：${name}`);
       await loadOverview(true);
     } catch (err) {
@@ -307,7 +406,7 @@ export function useAdGuardController(
   const handleRefreshFilters = async () => {
     setMutating(true);
     try {
-      await clientApi.manageAdGuardFilter({ action: 'refresh' });
+      await clientApi.manageDNSFilter({ action: 'refresh' });
       success('已在线同步更新全部规则库');
       await loadOverview(true);
     } catch (err) {
@@ -317,23 +416,48 @@ export function useAdGuardController(
     }
   };
 
+  const loadConfigPreview = useCallback(async () => {
+    setConfigPreviewLoading(true);
+    setConfigPreviewError(null);
+    try {
+      const res = await clientApi.fetchDNSConfigPreview();
+      setConfigPreview(res);
+    } catch (err) {
+      setConfigPreviewError((err as Error).message || '读取生效配置失败');
+    } finally {
+      setConfigPreviewLoading(false);
+    }
+  }, []);
+
   const openCredentialsDrawer = async () => {
     setCredOpen(true);
-    setCredLoading(true);
-    try {
-      const res = await clientApi.getAdGuardCredentials();
-      setCredData(res);
-    } catch (err) {
-      error((err as Error).message || '读取凭据失败');
-    } finally {
-      setCredLoading(false);
+    const caps = resolveDNSCapabilities(snap);
+    const tasks: Promise<void>[] = [];
+
+    if (caps.hasNativeWebPanel) {
+      setCredLoading(true);
+      tasks.push(
+        clientApi
+          .getDNSCredentials()
+          .then((res) => setCredData(res))
+          .catch((err) => {
+            error((err as Error).message || '读取凭据失败');
+          })
+          .finally(() => setCredLoading(false)),
+      );
     }
+
+    if (caps.hasConfigPreview) {
+      tasks.push(loadConfigPreview());
+    }
+
+    await Promise.all(tasks);
   };
 
   const handleResetPassword = async (): Promise<boolean> => {
     setResettingPwd(true);
     try {
-      const res = await clientApi.resetAdGuardCredentials();
+      const res = await clientApi.resetDNSCredentials();
       setCredData(res);
       success('已生成新的 16 位随机管理密码并热同步生效');
       onRefreshStatus();
@@ -348,18 +472,18 @@ export function useAdGuardController(
 
   const handleUpdateUpstreams = async (
     nextList: string[],
-    nextMode?: AdGuardUpstreamMode,
+    nextMode?: DNSUpstreamMode,
     resetDefault = false,
   ): Promise<boolean> => {
     setSavingUpstreams(true);
     try {
-      const res = await clientApi.saveAdGuardUpstreams({
+      const res = await clientApi.saveDNSUpstreams({
         upstreams: resetDefault ? undefined : nextList,
-        upstreamMode: nextMode || snap?.upstreamMode || 'parallel',
+        upstreamMode: resetDefault ? undefined : nextMode || snap?.upstreamMode,
         resetDefault,
       });
       if (snap) {
-        setSnap({
+        applySnapshot({
           ...snap,
           upstreams: res.upstreams,
           upstreamMode: res.upstreamMode,
@@ -367,7 +491,7 @@ export function useAdGuardController(
         });
       }
       if (resetDefault) {
-        success('已恢复默认推荐的阿里 / 腾讯纯 IP 加密上游并热生效');
+        success('已恢复默认推荐的纯 IP 加密上游并热生效');
       } else if (res.notes && res.notes.length > 0) {
         success(`上游已热生效（${res.notes.join('；')}）`);
       } else {
@@ -386,7 +510,7 @@ export function useAdGuardController(
 
   const handleToggleUpstreamPreset = (presetAddr: string) => {
     if (!snap) return;
-    const current = snap.upstreams.map((u) => u.address);
+    const current = (snap.upstreams || []).map((u) => u.address);
     const exists = current.some((a) => a.toLowerCase() === presetAddr.toLowerCase());
     if (exists) {
       if (current.length <= 1) {
@@ -403,7 +527,7 @@ export function useAdGuardController(
 
   const handleRemoveUpstream = (addr: string) => {
     if (!snap) return;
-    const current = snap.upstreams.map((u) => u.address);
+    const current = (snap.upstreams || []).map((u) => u.address);
     if (current.length <= 1) {
       error('至少需保留 1 条加密上游 DNS 服务器');
       return;
@@ -415,6 +539,8 @@ export function useAdGuardController(
     snap,
     loading,
     mutating,
+    switchingEngine,
+    togglingBlockAAAA,
     probe,
     probing,
     pauseRemainSec,
@@ -424,8 +550,14 @@ export function useAdGuardController(
     credData,
     credLoading,
     resettingPwd,
+    configPreview,
+    configPreviewLoading,
+    configPreviewError,
+    loadConfigPreview,
     runProbe,
+    handleSwitchEngine,
     handleProtection,
+    handleToggleBlockAAAA,
     handleClearCache,
     handleWhitelist,
     handleAddRewrite,
