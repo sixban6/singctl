@@ -34,6 +34,7 @@ func TestBuildServiceUnits(t *testing.T) {
 		`procd_open_instance "singctl-smartdns"`,
 		`procd_set_param command "$PROG" -f -c "$CONF" -p "$PIDFILE"`,
 		"procd_set_param respawn",
+		`procd_set_param env "TZ=$TZ_VAL"`,
 	} {
 		if !strings.Contains(procd, kw) {
 			t.Errorf("procd script missing %q:\n%s", kw, procd)

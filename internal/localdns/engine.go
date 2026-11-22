@@ -178,6 +178,7 @@ type EngineDeps struct {
 	ProbeUpstreamListFunc   func(ctx context.Context, upstreams []string, domain string, timeout time.Duration) []adguard.UpstreamProbeItem
 	ProbeDNSFunc            func(addr string, timeout time.Duration) error
 	ProbeResolutionFunc     func(addr, domain string, timeout time.Duration) ([]string, time.Duration, error)
+	CheckPortAvailableFunc  func(port int) bool
 	SyncSingBoxEnhancedFunc func(ctx context.Context, sbCfgPath, workPath string, dnsCfg config.ClientDNSConfig, subDomains []string, now time.Time) (bool, error)
 	SyncSingBoxDNSLocalFunc func(ctx context.Context, sbCfgPath, workPath string, useExternal bool, dnsPort int) (bool, error)
 	ClearSingBoxCacheFunc   func(ctx context.Context, sbCfgPath, workPath string) error

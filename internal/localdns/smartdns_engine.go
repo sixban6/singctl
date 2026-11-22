@@ -247,6 +247,22 @@ func (e *SmartDNSEngine) IsInstalled() bool {
 	return err == nil && !info.IsDir()
 }
 
+func normalizeAuditEntryTime(ts, now time.Time) time.Time {
+	if ts.IsZero() {
+		return now
+	}
+	if diff := now.Sub(ts); diff >= -30*time.Minute && diff <= 30*time.Minute {
+		return ts
+	}
+	// OpenWrt 静态 musl 版 SmartDNS 若未继承 TZ 会以 UTC 墙钟写审计日志；
+	// 若按 UTC 解释恰好落在当前时间 30 分钟窗口内，则自动还原为准确时间戳。
+	asUTC := time.Date(ts.Year(), ts.Month(), ts.Day(), ts.Hour(), ts.Minute(), ts.Second(), ts.Nanosecond(), time.UTC)
+	if diff := now.Sub(asUTC); diff >= -30*time.Minute && diff <= 30*time.Minute {
+		return asUTC
+	}
+	return ts
+}
+
 // DrainAuditLog 增量消费 SmartDNS tmpfs 审计日志并写入共享 24h 环形统计器。
 func (e *SmartDNSEngine) DrainAuditLog() int {
 	if e == nil || e.tailer == nil || e.stats == nil {
@@ -256,12 +272,13 @@ func (e *SmartDNSEngine) DrainAuditLog() int {
 	if err != nil || len(entries) == 0 {
 		return 0
 	}
+	now := e.now()
 	recorded := 0
 	for _, entry := range entries {
 		if entry.Domain == "localhost" {
 			continue
 		}
-		e.stats.Record(entry.Timestamp, entry.Domain, entry.Blocked, entry.LatencyMs)
+		e.stats.Record(normalizeAuditEntryTime(entry.Timestamp, now), entry.Domain, entry.Blocked, entry.LatencyMs)
 		recorded++
 	}
 	return recorded

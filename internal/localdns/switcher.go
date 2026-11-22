@@ -40,6 +40,60 @@ func isExternalEngine(id string) bool {
 	return id == constant.DNSEngineSmartDNS || id == constant.DNSEngineAdGuard
 }
 
+var externalDNSFallbackPorts = []int{5354, 5355, 5335, 15353, 15354}
+
+func isLoopbackDNSPortFree(port int) bool {
+	if port <= 0 || port > 65535 || port == 53 {
+		return false
+	}
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	pc, err := net.ListenPacket("udp", addr)
+	if err != nil {
+		return false
+	}
+	_ = pc.Close()
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return false
+	}
+	_ = ln.Close()
+	return true
+}
+
+func (r *Registry) ensureAvailableExternalDNSPort(
+	ctx context.Context,
+	origActive string,
+	desiredEngine string,
+	targetEng Engine,
+	currentPort int,
+) (int, string, error) {
+	// 目标引擎已在当前端口健康运行时保留原端口，不做无谓迁移
+	if origActive == desiredEngine && targetEng.Status(ctx).DNSHealthy {
+		return currentPort, "", nil
+	}
+	checkFree := r.deps.CheckPortAvailableFunc
+	if checkFree == nil {
+		// 使用注入 Mock ServiceMgr 的隔离单测环境不探测宿主机真实端口
+		if r.deps.ServiceMgr != nil {
+			return currentPort, "", nil
+		}
+		checkFree = isLoopbackDNSPortFree
+	}
+	if checkFree(currentPort) {
+		return currentPort, "", nil
+	}
+	for _, cand := range externalDNSFallbackPorts {
+		if cand == currentPort {
+			continue
+		}
+		if checkFree(cand) {
+			warn := fmt.Sprintf("检测到本地端口 127.0.0.1:%d 已被其他服务（如 avahi-daemon mDNS）占用，已自动顺延至空闲回环端口 127.0.0.1:%d", currentPort, cand)
+			return cand, warn, nil
+		}
+	}
+	return currentPort, "", fmt.Errorf("本地回环 DNS 端口 127.0.0.1:%d 及全部备选端口均被占用，请在 singctl.yaml 中手动指定空闲 dns.dns_port", currentPort)
+}
+
 func (r *Registry) saveConfig() error {
 	if r.deps.SaveConfig != nil {
 		return r.deps.SaveConfig(r.cfg)
@@ -186,6 +240,7 @@ func (r *Registry) SwitchEngine(ctx context.Context, req SwitchRequest) (*Switch
 	migratedItems := r.describeMigratedItems(harvested)
 
 	dnsPort := r.cfg.DNS.GetDNSPort()
+	origDNSPort := r.cfg.DNS.DNSPort
 	var warnings []string
 	stoppedOrigExternal := false
 	startedTargetExternal := false
@@ -197,6 +252,7 @@ func (r *Registry) SwitchEngine(ctx context.Context, req SwitchRequest) (*Switch
 		}
 		r.cfg.DNS.SetEngine(origConfigured)
 		r.cfg.DNS.SetEnabled(origEnabled)
+		r.cfg.DNS.DNSPort = origDNSPort
 		_ = r.saveConfig()
 
 		if stoppedOrigExternal && isExternalEngine(origActive) {
@@ -230,8 +286,20 @@ func (r *Registry) SwitchEngine(ctx context.Context, req SwitchRequest) (*Switch
 		}
 	}
 
-	// 5. 若目标为外部引擎：按需安装 -> 同步公共配置 -> 启动 -> 实测 127.0.0.1:<dnsPort> 解析 qq.com -> 原子切换 sing-box
+	// 5. 若目标为外部引擎：检测回环端口冲突（如 avahi-daemon 占用 5353 mDNS）自动顺延 -> 按需安装 -> 同步公共配置 -> 启动 -> 实测解析 -> 原子切换 sing-box
 	if isExternalEngine(desiredEngine) {
+		chosenPort, portWarn, portErr := r.ensureAvailableExternalDNSPort(ctx, origActive, desiredEngine, targetEng, dnsPort)
+		if portErr != nil {
+			return rollback(portErr)
+		}
+		if chosenPort != dnsPort {
+			dnsPort = chosenPort
+			r.cfg.DNS.DNSPort = chosenPort
+			if portWarn != "" {
+				logger.Warn("[LocalDNS] %s", portWarn)
+				warnings = append(warnings, portWarn)
+			}
+		}
 		if !targetEng.IsInstalled() && !req.SkipInstall {
 			logger.Info("[LocalDNS] 正在安装目标防劫持 DNS 引擎: %s（当前由 sing-box 加密 DoH 兜底不断网）...", desiredEngine)
 			if err := targetEng.Install(ctx, InstallOptions{
