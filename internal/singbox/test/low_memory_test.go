@@ -284,13 +284,27 @@ func TestComputeSingBoxMemoryEnv_And_UnitSpec_And_LogCap(t *testing.T) {
 	})
 
 	t.Run("embedded_linux_start_scripts_inject_gomemlimit_ujail_env_and_256k_cap", func(t *testing.T) {
-		openwrtScript := scripts.GetStartScriptForTarget("linux", false)
-		if !strings.Contains(openwrtScript, "GOMEMLIMIT") ||
-			!strings.Contains(openwrtScript, "40MiB") ||
-			!strings.Contains(openwrtScript, "44MiB") ||
-			!strings.Contains(openwrtScript, "-e GOMEMLIMIT") ||
-			!strings.Contains(openwrtScript, "262144") {
-			t.Fatalf("OpenWrt start_singbox.sh missing adaptive GOMEMLIMIT / ujail -e / 256KiB log cap")
+		for _, backend := range []scripts.OpenWrtFirewallBackend{
+			scripts.BackendNFTables,
+			scripts.BackendIPTables,
+		} {
+			openwrtScript := scripts.GetOpenWrtStartScript(backend)
+			if !strings.Contains(openwrtScript, "GOMEMLIMIT") ||
+				!strings.Contains(openwrtScript, "40MiB") ||
+				!strings.Contains(openwrtScript, "44MiB") ||
+				!strings.Contains(openwrtScript, "-e GOMEMLIMIT") ||
+				!strings.Contains(openwrtScript, "262144") ||
+				!strings.Contains(openwrtScript, "ensure_openwrt_ujail") {
+				t.Fatalf("OpenWrt start script (%s) missing adaptive GOMEMLIMIT / ujail -e / 256KiB log cap / auto-ujail", backend)
+			}
+		}
+		openwrtTargetScript := scripts.GetStartScriptForTarget("linux", false)
+		if !strings.Contains(openwrtTargetScript, "GOMEMLIMIT") ||
+			!strings.Contains(openwrtTargetScript, "40MiB") ||
+			!strings.Contains(openwrtTargetScript, "44MiB") ||
+			!strings.Contains(openwrtTargetScript, "-e GOMEMLIMIT") ||
+			!strings.Contains(openwrtTargetScript, "262144") {
+			t.Fatalf("OpenWrt target start script missing adaptive GOMEMLIMIT / ujail -e / 256KiB log cap")
 		}
 		debianScript := scripts.GetStartScriptForTarget("linux", true)
 		if !strings.Contains(debianScript, "GOMEMLIMIT") ||
