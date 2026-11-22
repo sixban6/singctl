@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"singctl/internal/adguard"
-	"singctl/internal/config"
 	"singctl/internal/daemon"
 	"singctl/internal/gateway"
 	"singctl/internal/netdiag"
@@ -37,10 +36,7 @@ func (s *Server) handleDNSLeakTestPost(w http.ResponseWriter, r *http.Request) {
 		gatewayRounds = 16
 	}
 
-	cfg, err := config.Load(configPathFor(s))
-	if err != nil || cfg == nil {
-		cfg = &config.Config{}
-	}
+	cfg := s.readConfigOrEmpty()
 
 	topo := s.probeGatewayTopology()
 	ipv6Mode := cfg.Gateway.EffectiveIPv6Mode()

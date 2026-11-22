@@ -173,10 +173,7 @@ func (s *Server) handleAuditBlock(w http.ResponseWriter, r *http.Request) {
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
 
-	cfg, err := config.Load(s.opts.ConfigPath)
-	if err != nil || cfg == nil {
-		cfg = &config.Config{}
-	}
+	cfg := s.loadMutableConfig()
 
 	enforcer := s.newAuditEnforcer(cfg)
 	res, err := enforcer.Block(r.Context(), req.Target, req.SourceIP, req.Reason)
@@ -184,6 +181,7 @@ func (s *Server) handleAuditBlock(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	s.invalidateConfigStore()
 	s.invalidateIOSCache()
 	_ = daemon.NotifyReload()
 	writeJSON(w, http.StatusOK, res)
@@ -209,11 +207,12 @@ func (s *Server) handleAuditUnblock(w http.ResponseWriter, r *http.Request) {
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
 
-	cfg, err := config.Load(s.opts.ConfigPath)
-	if err != nil || cfg == nil {
+	snap, err := s.loadConfigSnapshot()
+	if err != nil || snap == nil {
 		writeJSONError(w, http.StatusBadRequest, "加载配置文件失败")
 		return
 	}
+	cfg := snap.Clone()
 
 	enforcer := s.newAuditEnforcer(cfg)
 	res, err := enforcer.Unblock(r.Context(), req.Target, req.SourceIP)
@@ -221,6 +220,7 @@ func (s *Server) handleAuditUnblock(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	s.invalidateConfigStore()
 	s.invalidateIOSCache()
 	_ = daemon.NotifyReload()
 	writeJSON(w, http.StatusOK, res)
@@ -246,10 +246,7 @@ func (s *Server) handleAuditPCDNBlock(w http.ResponseWriter, r *http.Request) {
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
 
-	cfg, err := config.Load(s.opts.ConfigPath)
-	if err != nil || cfg == nil {
-		cfg = &config.Config{}
-	}
+	cfg := s.loadMutableConfig()
 
 	enforcer := s.newAuditEnforcer(cfg)
 	res, err := enforcer.SetPCDNBlock(r.Context(), req.Enabled)
@@ -257,6 +254,7 @@ func (s *Server) handleAuditPCDNBlock(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	s.invalidateConfigStore()
 	s.invalidateIOSCache()
 	_ = daemon.NotifyReload()
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -295,10 +293,7 @@ func (s *Server) handleAuditWhitelist(w http.ResponseWriter, r *http.Request) {
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
 
-	cfg, err := config.Load(s.opts.ConfigPath)
-	if err != nil || cfg == nil {
-		cfg = &config.Config{}
-	}
+	cfg := s.loadMutableConfig()
 
 	enforcer := audit.NewEnforcer(cfg, s.opts.ConfigPath)
 	action := strings.ToLower(cmp.Or(strings.TrimSpace(req.Action), "add"))
@@ -309,6 +304,7 @@ func (s *Server) handleAuditWhitelist(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		s.invalidateConfigStore()
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":        true,
 			"target":    normalized,
@@ -321,6 +317,7 @@ func (s *Server) handleAuditWhitelist(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		s.invalidateConfigStore()
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":        true,
 			"target":    normalized,
@@ -376,10 +373,7 @@ func (s *Server) handleAuditAIConfigPost(w http.ResponseWriter, r *http.Request)
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
 
-	cfg, err := config.Load(s.opts.ConfigPath)
-	if err != nil || cfg == nil {
-		cfg = &config.Config{}
-	}
+	cfg := s.loadMutableConfig()
 
 	cfg.Audit.AI.Endpoint = strings.TrimSpace(req.BaseURL)
 	cfg.Audit.AI.APIKey = strings.TrimSpace(req.APIKey)
@@ -556,10 +550,7 @@ func (s *Server) handleAuditThrottle(w http.ResponseWriter, r *http.Request) {
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
 
-	cfg, err := config.Load(s.opts.ConfigPath)
-	if err != nil || cfg == nil {
-		cfg = &config.Config{}
-	}
+	cfg := s.loadMutableConfig()
 
 	normTarget, _, err := audit.NormalizeThrottleTarget(cfg, req.Target, req.Port)
 	if err != nil {

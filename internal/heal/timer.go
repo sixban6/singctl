@@ -6,12 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"regexp"
 	"runtime"
 	"strings"
 	"time"
 
+	"singctl/internal/platform/servicemgr"
 	"singctl/internal/updater"
 )
 
@@ -65,25 +65,13 @@ func GetTimerStatus(fallbackSchedule string) TimerStatus {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	if out, err := exec.CommandContext(ctx, "systemctl", "is-enabled", "singctl-heal.timer").Output(); err == nil {
-		s := strings.TrimSpace(string(out))
-		st.Enabled = s == "enabled" || s == "static"
-	}
-	if out, err := exec.CommandContext(ctx, "systemctl", "is-active", "singctl-heal.timer").Output(); err == nil {
-		st.Active = strings.TrimSpace(string(out)) == "active"
-	}
+	mgr := servicemgr.NewSystemd(nil)
+	st.Enabled = mgr.IsEnabled(ctx, "singctl-heal.timer")
+	st.Active = mgr.IsActive(ctx, "singctl-heal.timer")
 
-	if out, err := exec.CommandContext(ctx, "systemctl", "show", "singctl-heal.timer",
-		"--property=NextElapseUSecRealtime,LastTriggerUSec").Output(); err == nil {
-		for line := range strings.SplitSeq(string(out), "\n") {
-			line = strings.TrimSpace(line)
-			if after, ok := strings.CutPrefix(line, "NextElapseUSecRealtime="); ok && after != "" && after != "n/a" {
-				st.NextRun = after
-			}
-			if after, ok := strings.CutPrefix(line, "LastTriggerUSec="); ok && after != "" && after != "n/a" {
-				st.LastRun = after
-			}
-		}
+	if props, err := mgr.ShowProperties(ctx, 2*time.Second, "singctl-heal.timer", "NextElapseUSecRealtime", "LastTriggerUSec"); err == nil {
+		st.NextRun = props["NextElapseUSecRealtime"]
+		st.LastRun = props["LastTriggerUSec"]
 	}
 	return st
 }
@@ -160,19 +148,23 @@ WantedBy=timers.target
 		return fmt.Errorf("写入 %s 失败: %w", healTimerPath, err)
 	}
 
-	if out, err := exec.Command("systemctl", "daemon-reload").CombinedOutput(); err != nil {
-		return fmt.Errorf("systemctl daemon-reload 失败: %v (%s)", err, strings.TrimSpace(string(out)))
+	mgr := servicemgr.NewSystemd(nil)
+	ctx := context.Background()
+	if err := mgr.DaemonReload(ctx); err != nil {
+		return fmt.Errorf("systemctl daemon-reload 失败: %w", err)
 	}
-	if out, err := exec.Command("systemctl", "enable", "--now", "singctl-heal.timer").CombinedOutput(); err != nil {
-		return fmt.Errorf("启用 singctl-heal.timer 失败: %v (%s)", err, strings.TrimSpace(string(out)))
+	if err := mgr.EnableNow(ctx, "singctl-heal.timer"); err != nil {
+		return fmt.Errorf("启用 singctl-heal.timer 失败: %w", err)
 	}
 	return nil
 }
 
 func disableAndRemoveTimer() error {
-	_ = exec.Command("systemctl", "disable", "--now", "singctl-heal.timer").Run()
+	mgr := servicemgr.NewSystemd(nil)
+	ctx := context.Background()
+	_ = mgr.DisableNow(ctx, "singctl-heal.timer")
 	_ = os.Remove(healTimerPath)
 	_ = os.Remove(healServicePath)
-	_ = exec.Command("systemctl", "daemon-reload").Run()
+	_ = mgr.DaemonReload(ctx)
 	return nil
 }

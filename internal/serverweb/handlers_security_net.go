@@ -37,7 +37,7 @@ func (s *Server) handleWarpDiagnose(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRegeneratePath(w http.ResponseWriter, r *http.Request) {
-	cfg, err := config.Load(s.opts.ConfigPath)
+	cfg, err := s.loadMutableConfig()
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "加载配置失败")
 		return
@@ -45,11 +45,10 @@ func (s *Server) handleRegeneratePath(w http.ResponseWriter, r *http.Request) {
 
 	newPath := config.GenerateRandomAdminPath()
 	cfg.Server.WebAdmin.Path = newPath
-	if err := config.Save(s.opts.ConfigPath, cfg); err != nil {
+	if err := s.saveConfig(cfg); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "保存新随机路径失败: "+err.Error())
 		return
 	}
-	s.updateConfigCache(cfg)
 	s.mu.Lock()
 	s.gatewayToken = config.DeriveGatewayToken(newPath)
 	s.mu.Unlock()
@@ -95,18 +94,17 @@ func (s *Server) handleUpdateSNI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg, err := config.Load(s.opts.ConfigPath)
+	cfg, err := s.loadMutableConfig()
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "加载配置失败")
 		return
 	}
 
 	cfg.Server.Sni = strings.TrimSpace(body.SNI)
-	if err := config.Save(s.opts.ConfigPath, cfg); err != nil {
+	if err := s.saveConfig(cfg); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "保存配置失败: "+err.Error())
 		return
 	}
-	s.updateConfigCache(cfg)
 
 	if err := deploy.DeployCaddy(cfg); err != nil {
 		logger.Warn("更新 Caddy SNI 警告: %v", err)
@@ -150,18 +148,17 @@ func (s *Server) handleUpdateCFToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg, err := config.Load(s.opts.ConfigPath)
+	cfg, err := s.loadMutableConfig()
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "加载配置失败")
 		return
 	}
 
 	cfg.Server.CFDNSKey = strings.TrimSpace(body.Token)
-	if err := config.Save(s.opts.ConfigPath, cfg); err != nil {
+	if err := s.saveConfig(cfg); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "保存配置失败: "+err.Error())
 		return
 	}
-	s.updateConfigCache(cfg)
 
 	if err := deploy.RotateCloudflareToken(cfg); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "轮换 Token 失败: "+err.Error())
@@ -173,7 +170,7 @@ func (s *Server) handleUpdateCFToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDoctor(w http.ResponseWriter, r *http.Request) {
-	cfg, _ := config.Load(s.opts.ConfigPath)
+	cfg := s.readConfigOrNil()
 	report := doctor.RunServerDoctor(cfg)
 	writeJSON(w, http.StatusOK, report)
 }

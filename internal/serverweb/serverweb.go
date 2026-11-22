@@ -33,7 +33,8 @@ const sessionCookieName = "singctl_server_session"
 // Options 服务端 Web 界面配置
 type Options struct {
 	ConfigPath        string
-	SingBoxConfigPath string // (可选) sing-box 配置文件路径，默认 /etc/sing-box/config.json
+	ConfigStore       *config.Store // (可选) 外部注入的配置快照仓库；为空时自动按 ConfigPath 创建
+	SingBoxConfigPath string        // (可选) sing-box 配置文件路径，默认 /etc/sing-box/config.json
 	SubStoreDir       string // (可选) SubHub 数据存储目录，默认 /etc/sub-store
 	FleetFilePath     string // (可选) 节点舰队存储文件路径，默认 <ConfigDir>/fleet.yaml
 	BanFilePath       string // (可选) 防爆破封禁列表存储文件 (默认: <ConfigDir>/.serverweb_bans.json)
@@ -190,6 +191,12 @@ func New(opts Options) *Server {
 	sniffFile := resolveSniffFilePath(opts)
 	sniffTracker := NewSniffTracker(geo, limiter, sniffFile)
 	sniffTracker.SetFleetManager(fleetMgr)
+	cfgStore := opts.ConfigStore
+	if cfgStore == nil {
+		cfgStore = config.NewStore(opts.ConfigPath, config.WithInitialConfig(initialCfg))
+	} else if initialCfg != nil && cfgStore.Revision() == 0 {
+		cfgStore.Set(initialCfg)
+	}
 	s := &Server{
 		opts:               opts,
 		Mux:                http.NewServeMux(),
@@ -204,7 +211,7 @@ func New(opts Options) *Server {
 		passwordPendingAck: pendingAck,
 		gatewayToken:       gatewayToken,
 		cliToken:           cliToken,
-		cfgStore:           config.NewStore(opts.ConfigPath, config.WithInitialConfig(initialCfg)),
+		cfgStore:           cfgStore,
 	}
 	if initialCfg != nil {
 		s.updateConfigCache(initialCfg)
@@ -457,6 +464,45 @@ func (s *Server) invalidateStatusCaches() {
 	s.cachedCerts = nil
 	s.cachedCertsAt = time.Time{}
 	s.certProbeMu.Unlock()
+}
+
+func (s *Server) loadConfigSnapshot() (*config.Config, error) {
+	if s.configLoaderOverride != nil {
+		return s.configLoaderOverride(s.opts.ConfigPath)
+	}
+	if s.cfgStore != nil {
+		return s.cfgStore.LoadLatest()
+	}
+	return config.Load(s.opts.ConfigPath)
+}
+
+func (s *Server) readConfigOrNil() *config.Config {
+	if cfg, err := s.loadConfigSnapshot(); err == nil && cfg != nil {
+		return cfg
+	}
+	if s.cfgStore != nil && s.cfgStore.Revision() > 0 {
+		return s.cfgStore.Get()
+	}
+	return nil
+}
+
+func (s *Server) loadMutableConfig() (*config.Config, error) {
+	snap, err := s.loadConfigSnapshot()
+	if err != nil || snap == nil {
+		if err == nil {
+			err = fmt.Errorf("empty config")
+		}
+		return nil, err
+	}
+	return snap.Clone(), nil
+}
+
+func (s *Server) saveConfig(cfg *config.Config) error {
+	if err := config.Save(s.opts.ConfigPath, cfg); err != nil {
+		return err
+	}
+	s.updateConfigCache(cfg)
+	return nil
 }
 
 func (s *Server) updateConfigCache(cfg *config.Config) {

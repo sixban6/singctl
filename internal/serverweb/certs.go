@@ -252,7 +252,7 @@ func probeLocalLoopbackCert(domain string) *x509.Certificate {
 }
 
 func (s *Server) handleInspectCerts(w http.ResponseWriter, r *http.Request) {
-	cfg, _ := config.Load(s.opts.ConfigPath)
+	cfg := s.readConfigOrNil()
 	force := r.URL.Query().Get("refresh") == "1" || r.URL.Query().Get("refresh") == "true"
 	certs := InspectServerCerts(cfg, force)
 	writeJSON(w, http.StatusOK, map[string]any{

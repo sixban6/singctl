@@ -114,11 +114,30 @@ func defaultLegacyWarpPurgeEnv(env *LegacyWarpPurgeEnv) LegacyWarpPurgeEnv {
 	e.PrimaryBin = cmp.Or(strings.TrimSpace(e.PrimaryBin), DefaultWireproxyBin)
 	e.PrimaryConf = cmp.Or(strings.TrimSpace(e.PrimaryConf), DefaultWireproxyConf)
 	if e.RunSystemctl == nil {
-		e.RunSystemctl = func(args ...string) error {
-			return runCmd("systemctl", args...)
-		}
+		e.RunSystemctl = defaultLegacyWarpSystemctl
 	}
 	return e
+}
+
+func defaultLegacyWarpSystemctl(args ...string) error {
+	if len(args) == 0 {
+		return nil
+	}
+	ctx := context.Background()
+	mgr := serviceMgr()
+	switch args[0] {
+	case "daemon-reload":
+		return mgr.DaemonReload(ctx)
+	case "stop":
+		if len(args) >= 2 {
+			return mgr.Stop(ctx, args[1])
+		}
+	case "disable":
+		if len(args) >= 2 {
+			return mgr.Disable(ctx, args[1])
+		}
+	}
+	return nil
 }
 
 func isLegacyWireproxyUnitContent(content string) bool {

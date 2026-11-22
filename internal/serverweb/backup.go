@@ -331,9 +331,12 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 		if len(payload.MasterSSHPub) > 0 {
 			_ = writeSecretFile0600(filepath.Join(cfgDir, "master_ed25519.pub"), payload.MasterSSHPub)
 		}
-		if cfg, lErr := config.Load(s.opts.ConfigPath); lErr == nil && cfg != nil {
+		s.invalidateConfigCache()
+		if cfg, lErr := s.loadMutableConfig(); lErr == nil && cfg != nil {
 			if deploy.UpgradeLegacyMtlsConfig(cfg) {
-				_ = config.Save(s.opts.ConfigPath, cfg)
+				_ = s.saveConfig(cfg)
+			} else {
+				s.updateConfigCache(cfg)
 			}
 			s.mu.Lock()
 			s.opts.Username = cmp.Or(cfg.Server.GetWebAdminUsername(), s.opts.Username)
@@ -342,7 +345,6 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 			}
 			s.gatewayToken = config.DeriveGatewayToken(cfg.Server.GetWebAdminPath())
 			s.mu.Unlock()
-			s.updateConfigCache(cfg)
 			s.invalidateStatusCaches()
 			if cErr := deploy.SyncCaddyfile(cfg); cErr != nil {
 				logger.Warn("灾备恢复后同步 Caddyfile 提示: %v", cErr)
@@ -390,7 +392,7 @@ func (s *Server) handleBackupRestore(w http.ResponseWriter, r *http.Request) {
 		}
 		if strings.TrimSpace(payload.SubStoreKey) != "" && s.subStore.DataDir != "" {
 			_ = writeSecretFile0600(filepath.Join(s.subStore.DataDir, "key"), []byte(strings.TrimSpace(payload.SubStoreKey)+"\n"))
-			if cfg, lErr := config.Load(s.opts.ConfigPath); lErr == nil && cfg != nil {
+			if cfg := s.readConfigOrNil(); cfg != nil {
 				_ = deploy.SyncCaddyfile(cfg)
 			}
 		}

@@ -1,6 +1,7 @@
 package deploy
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -219,8 +220,8 @@ func DetachCaddyFromApt() {
 
 	// 5. 确保独立 systemd 单元生效并自启（不重启在线 caddy 进程）
 	_ = ensureStandaloneCaddySystemdUnit()
-	_ = exec.Command("systemctl", "daemon-reload").Run()
-	_ = exec.Command("systemctl", "enable", "caddy").Run()
+	_ = serviceMgr().DaemonReload(context.Background())
+	_ = serviceMgr().Enable(context.Background(), "caddy")
 
 	// 6. 移除 Cloudsmith 第三方源、密钥及缓存列表，刷新 APT 索引消除账面残留
 	removedRepo := false

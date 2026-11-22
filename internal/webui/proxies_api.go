@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"singctl/internal/config"
 	"singctl/internal/daemon"
 	"singctl/internal/singbox"
 	"slices"
@@ -130,10 +129,7 @@ func (s *Server) buildSbProxiesSnapshot(ctx context.Context, base, secret string
 
 func (s *Server) buildRoutingGroupUsageMap() map[string][]string {
 	out := make(map[string][]string)
-	cfg, err := config.Load(configPathFor(s))
-	if err != nil || cfg == nil {
-		cfg = &config.Config{}
-	}
+	cfg := s.readConfigOrEmpty()
 	rawSB, _ := os.ReadFile(s.sbConfigPath())
 	report := singbox.BuildClientRoutingReport(cfg, string(rawSB))
 	for _, item := range report.Items {

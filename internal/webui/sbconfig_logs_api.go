@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"singctl/internal/config"
 	"singctl/internal/constant"
 	"singctl/internal/daemon"
 	"singctl/internal/singbox"
@@ -87,7 +86,7 @@ func (s *Server) handleSbConfigGet(w http.ResponseWriter, r *http.Request) {
 		content = string(data)
 	}
 	preserveManual := true
-	if cfg, cfgErr := config.Load(configPathFor(s)); cfgErr == nil && cfg != nil {
+	if cfg, cfgErr := s.loadConfigSnapshot(); cfgErr == nil && cfg != nil {
 		preserveManual = cfg.Watchdog.ShouldPreserveManualConfig()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -164,11 +163,7 @@ func (s *Server) handleSbConfigPreservePut(w http.ResponseWriter, r *http.Reques
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
 
-	cfgPath := configPathFor(s)
-	cfg, err := config.Load(cfgPath)
-	if err != nil || cfg == nil {
-		cfg = &config.Config{}
-	}
+	cfg := s.loadMutableConfig()
 	cfg.Watchdog.SetPreserveManualConfig(body.Preserve)
 	if err := s.saveConfig(cfg); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "保存配置失败: "+err.Error())
@@ -242,7 +237,7 @@ func (s *Server) handleSbConfigRestore(w http.ResponseWriter, r *http.Request) {
 // ───────────────────────── 规则集缓存 ─────────────────────────
 
 func (s *Server) handleCache(w http.ResponseWriter, r *http.Request) {
-	cfg, err := config.Load(configPathFor(s))
+	cfg, err := s.loadConfigSnapshot()
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "加载配置失败: "+err.Error())
 		return

@@ -41,7 +41,7 @@ func (s *Server) gatewayStatusSummary() map[string]any {
 	mode := gateway.ModeMain
 	mainRouterIP := ""
 	ipv6Mode := config.GatewayIPv6Off
-	if cfg, err := config.Load(configPathFor(s)); err == nil && cfg != nil {
+	if cfg, err := s.loadConfigSnapshot(); err == nil && cfg != nil {
 		mode = cfg.Gateway.EffectiveMode()
 		mainRouterIP = strings.TrimSpace(cfg.Gateway.MainRouterIP)
 		ipv6Mode = cfg.Gateway.EffectiveIPv6Mode()
@@ -58,10 +58,7 @@ func (s *Server) handleGatewayGet(w http.ResponseWriter, r *http.Request) {
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
 
-	cfg, err := config.Load(configPathFor(s))
-	if err != nil || cfg == nil {
-		cfg = &config.Config{}
-	}
+	cfg := s.readConfigOrEmpty()
 	topo := s.probeGatewayTopology()
 	ipv6Status := s.probeGatewayIPv6Status(r.Context(), cfg.Gateway, topo)
 
@@ -88,10 +85,7 @@ func (s *Server) handleGatewayPut(w http.ResponseWriter, r *http.Request) {
 
 	cfgPath := configPathFor(s)
 	origCfgBytes, origReadErr := os.ReadFile(cfgPath)
-	cfg, err := config.Load(cfgPath)
-	if err != nil || cfg == nil {
-		cfg = &config.Config{}
-	}
+	cfg := s.loadMutableConfig()
 	prevIPv6Mode := cfg.Gateway.EffectiveIPv6Mode()
 
 	topo := s.probeGatewayTopology()
@@ -177,6 +171,7 @@ func (s *Server) handleGatewayPut(w http.ResponseWriter, r *http.Request) {
 		if v6Res, v6Err := gateway.NewController().SyncIPv6Host(r.Context(), nextGw); v6Err != nil {
 			if origReadErr == nil {
 				_ = os.WriteFile(cfgPath, origCfgBytes, 0600)
+				s.invalidateConfigStore()
 			}
 			writeJSONError(w, http.StatusInternalServerError, "自动配置宿主 IPv6 失败（已回滚）: "+v6Err.Error())
 			return

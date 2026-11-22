@@ -416,7 +416,7 @@ func (s *Server) broadcastWarpRoutingCluster(r *http.Request, normalized config.
 		return WarpRoutingStatusResponse{}, http.StatusConflict, 0, items, "", fmt.Errorf("集群内暂无可应用 WARP 策略的就绪节点：%s", items[0].Message)
 	}
 
-	cfg, _ := config.Load(s.opts.ConfigPath)
+	cfg := s.readConfigOrNil()
 	effectiveView := cmp.Or(strings.TrimSpace(viewNode), "all")
 	statusResp, err := s.buildClusterWarpStatus(r, cfg, effectiveView, false)
 	if err != nil {
@@ -442,7 +442,7 @@ func (s *Server) handleClusterQuickSwitch(w http.ResponseWriter, r *http.Request
 
 	// 1. 本机快速切换（基于本机自身当前配置独立计算）
 	wg.Go(func() {
-		cfg, err := config.Load(s.opts.ConfigPath)
+		cfg, err := s.loadConfigSnapshot()
 		if err != nil || cfg == nil {
 			items[0] = WarpClusterOpItem{ID: "local", Name: "主控本机", Success: false, Message: "读取配置失败"}
 			return
@@ -505,7 +505,7 @@ func (s *Server) handleClusterQuickSwitch(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	cfg, _ := config.Load(s.opts.ConfigPath)
+	cfg := s.readConfigOrNil()
 	effectiveView := cmp.Or(strings.TrimSpace(viewNode), "all")
 	statusResp, err := s.buildClusterWarpStatus(r, cfg, effectiveView, false)
 	if err != nil {
@@ -635,6 +635,7 @@ func (s *Server) handleClusterOrRemoteWarpAction(w http.ResponseWriter, r *http.
 					s.warpCachedAt = time.Now()
 					s.warpCacheMu.Unlock()
 				}
+				s.invalidateConfigCache()
 				items[0] = WarpClusterOpItem{ID: "local", Name: "主控本机", Success: true, Message: "执行成功"}
 			} else {
 				items[0] = WarpClusterOpItem{ID: "local", Name: "主控本机", Success: false, Message: err.Error()}
@@ -677,7 +678,7 @@ func (s *Server) handleClusterOrRemoteWarpAction(w http.ResponseWriter, r *http.
 			label = "全集群开启实时遥测"
 		}
 		s.recordAudit(r, fmt.Sprintf("%s (%d/%d 成功)", label, okCount, len(items)))
-		cfg, _ := config.Load(s.opts.ConfigPath)
+		cfg := s.readConfigOrNil()
 		clusterStatus, _ := s.buildClusterWarpStatus(r, cfg, "all", false)
 		writeJSON(w, http.StatusOK, map[string]any{
 			"message": fmt.Sprintf("%s完成：%d/%d 台节点执行成功", label, okCount, len(items)),

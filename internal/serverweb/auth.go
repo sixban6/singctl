@@ -593,7 +593,7 @@ func (s *Server) handleUpdateCredentials(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	cfg, err := config.Load(s.opts.ConfigPath)
+	cfg, err := s.loadMutableConfig()
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "加载配置文件失败: "+err.Error())
 		return
@@ -602,11 +602,10 @@ func (s *Server) handleUpdateCredentials(w http.ResponseWriter, r *http.Request)
 	cfg.Server.WebAdmin.Username = newUsername
 	cfg.Server.WebAdmin.Password = hashedPassword
 	cfg.Server.WebAdmin.PasswordPendingAck = false
-	if err := config.Save(s.opts.ConfigPath, cfg); err != nil {
+	if err := s.saveConfig(cfg); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "保存配置文件失败: "+err.Error())
 		return
 	}
-	s.updateConfigCache(cfg)
 
 	s.mu.Lock()
 	s.opts.Username = newUsername
@@ -625,7 +624,7 @@ func (s *Server) handleUpdateCredentials(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleAckCredentials(w http.ResponseWriter, r *http.Request) {
-	cfg, err := config.Load(s.opts.ConfigPath)
+	cfg, err := s.loadMutableConfig()
 	if err != nil || cfg == nil {
 		writeJSONError(w, http.StatusInternalServerError, "加载配置文件失败")
 		return
@@ -638,11 +637,10 @@ func (s *Server) handleAckCredentials(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	cfg.Server.WebAdmin.PasswordPendingAck = false
-	if err := config.Save(s.opts.ConfigPath, cfg); err != nil {
+	if err := s.saveConfig(cfg); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "保存配置文件失败: "+err.Error())
 		return
 	}
-	s.updateConfigCache(cfg)
 	s.mu.Lock()
 	if hashedPass != "" {
 		s.opts.Password = hashedPass

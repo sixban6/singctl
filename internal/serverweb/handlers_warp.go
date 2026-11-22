@@ -195,7 +195,7 @@ func (s *Server) buildWarpRoutingStatus(r *http.Request, cfg *config.Config, for
 func (s *Server) handleGetWarpRouting(w http.ResponseWriter, r *http.Request) {
 	forceRefresh := r.URL.Query().Get("refresh") == "1" || r.URL.Query().Get("refresh") == "true"
 	selectedNode := cmp.Or(strings.TrimSpace(r.URL.Query().Get("node")), "local")
-	cfg, _ := config.Load(s.opts.ConfigPath)
+	cfg := s.readConfigOrNil()
 	resp, err := s.buildClusterWarpStatus(r, cfg, selectedNode, forceRefresh)
 	if err != nil {
 		writeJSONError(w, http.StatusBadGateway, err.Error())
@@ -238,7 +238,7 @@ func (s *Server) applyWarpRoutingConfig(r *http.Request, targetWR config.WarpRou
 	s.warpMu.Lock()
 	defer s.warpMu.Unlock()
 
-	cfg, loadErr := config.Load(s.opts.ConfigPath)
+	cfg, loadErr := s.loadMutableConfig()
 	if loadErr != nil || cfg == nil {
 		return WarpRoutingStatusResponse{}, http.StatusInternalServerError, 0, fmt.Errorf("加载配置文件失败: %w", loadErr)
 	}
@@ -255,10 +255,9 @@ func (s *Server) applyWarpRoutingConfig(r *http.Request, targetWR config.WarpRou
 	}
 
 	cfg.Server.WarpRouting = normalized
-	if saveErr := config.Save(s.opts.ConfigPath, cfg); saveErr != nil {
+	if saveErr := s.saveConfig(cfg); saveErr != nil {
 		return WarpRoutingStatusResponse{}, http.StatusInternalServerError, 0, fmt.Errorf("持久化 singctl.yaml 失败: %w", saveErr)
 	}
-	s.updateConfigCache(cfg)
 
 	s.warpWatchdogMu.Lock()
 	s.warpDegraded = false
@@ -344,7 +343,7 @@ func (s *Server) handleUpdateWarpRouting(w http.ResponseWriter, r *http.Request)
 			writeJSONError(w, code, fmt.Sprintf("[%s] %v", cmp.Or(fn.Name, fn.ID), applyErr))
 			return
 		}
-		cfg, _ := config.Load(s.opts.ConfigPath)
+		cfg := s.readConfigOrNil()
 		statusResp, _ := s.buildClusterWarpStatus(r, cfg, viewNode, false)
 		s.recordAudit(r, fmt.Sprintf("更新子节点 [%s] WARP 分流策略 [模式:%s, 踢流:%d]",
 			cmp.Or(fn.Name, fn.ID), res.Status.Routing.Mode, res.EvictedConnections))
@@ -368,7 +367,7 @@ func (s *Server) handleUpdateWarpRouting(w http.ResponseWriter, r *http.Request)
 		writeJSONError(w, httpCode, err.Error())
 		return
 	}
-	cfg, _ := config.Load(s.opts.ConfigPath)
+	cfg := s.readConfigOrNil()
 	if clusterResp, cErr := s.buildClusterWarpStatus(r, cfg, "local", false); cErr == nil {
 		statusResp = clusterResp
 	}
@@ -440,7 +439,7 @@ func (s *Server) handleQuickSwitchWarp(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, code, fmt.Sprintf("[%s] %v", cmp.Or(fn.Name, fn.ID), err))
 			return
 		}
-		cfg, _ := config.Load(s.opts.ConfigPath)
+		cfg := s.readConfigOrNil()
 		statusResp, _ := s.buildClusterWarpStatus(r, cfg, viewNode, false)
 		s.recordAudit(r, fmt.Sprintf("子节点 [%s] 一键秒切目标 [%s] -> %s (踢断旧流:%d)",
 			cmp.Or(fn.Name, fn.ID), res.Target, res.Outbound, res.EvictedConnections))
@@ -461,7 +460,7 @@ func (s *Server) handleQuickSwitchWarp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg, err := config.Load(s.opts.ConfigPath)
+	cfg, err := s.loadConfigSnapshot()
 	if err != nil || cfg == nil {
 		writeJSONError(w, http.StatusInternalServerError, "加载配置文件失败")
 		return
@@ -481,7 +480,7 @@ func (s *Server) handleQuickSwitchWarp(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, httpCode, applyErr.Error())
 		return
 	}
-	if clusterResp, cErr := s.buildClusterWarpStatus(r, cfg, "local", false); cErr == nil {
+	if clusterResp, cErr := s.buildClusterWarpStatus(r, s.readConfigOrNil(), "local", false); cErr == nil {
 		statusResp.SelectedNode = clusterResp.SelectedNode
 		statusResp.Nodes = clusterResp.Nodes
 	}
@@ -646,7 +645,7 @@ func (s *Server) handleWarpAction(w http.ResponseWriter, r *http.Request) {
 		})
 
 	case "ensure":
-		cfg, _ := config.Load(s.opts.ConfigPath)
+		cfg := s.readConfigOrNil()
 		if err := deploy.DeployWarpWithConfig(cfg); err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "一键部署/修复 WARP 失败: "+err.Error())
 			return
@@ -680,7 +679,7 @@ func (s *Server) restoreSavedWarpRoutingIfDegraded() bool {
 		return false
 	}
 
-	cfg, err := config.Load(s.opts.ConfigPath)
+	cfg, err := s.loadConfigSnapshot()
 	if err != nil || cfg == nil {
 		return false
 	}

@@ -10,16 +10,23 @@ import (
 	"strings"
 	"time"
 
-	"singctl/internal/config"
 	"singctl/internal/deploy"
 	"singctl/internal/logger"
 	"singctl/internal/subhub"
 )
 
 func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
-	cfg, err := config.Load(s.opts.ConfigPath)
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "加载配置失败: "+err.Error())
+	cfg, err := s.loadConfigSnapshot()
+	if err != nil && s.cfgStore != nil && s.cfgStore.Revision() > 0 {
+		cfg = s.cfgStore.Get()
+		err = nil
+	}
+	if err != nil || cfg == nil {
+		errMsg := "empty config"
+		if err != nil {
+			errMsg = err.Error()
+		}
+		writeJSONError(w, http.StatusInternalServerError, "加载配置失败: "+errMsg)
 		return
 	}
 
@@ -178,7 +185,7 @@ func (s *Server) handleRotateSubscriptionKey(w http.ResponseWriter, r *http.Requ
 	}
 	s.invalidateConfigCache()
 
-	cfg, _ := config.Load(s.opts.ConfigPath)
+	cfg := s.readConfigOrNil()
 	if cfg != nil {
 		if err := deploy.SyncCaddyfile(cfg); err != nil {
 			logger.Warn("轮换订阅密钥后同步 Caddyfile 警告: %v", err)
@@ -222,7 +229,7 @@ func (s *Server) handlePreviewSubscription(w http.ResponseWriter, r *http.Reques
 		Target:   target,
 		Platform: r.URL.Query().Get("platform"),
 	}
-	if cfg, err := config.Load(s.opts.ConfigPath); err == nil && cfg != nil {
+	if cfg := s.readConfigOrNil(); cfg != nil {
 		renderOpts.MirrorURL = cfg.GitHub.MirrorURL
 		renderOpts.UpMbps = cfg.Hy2.Up
 		renderOpts.DownMbps = cfg.Hy2.Down

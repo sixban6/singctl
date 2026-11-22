@@ -1,14 +1,12 @@
+// 文件职责：提供服务端 GoTTY + Tmux + wstunnel + mTLS Web 终端的安装、卸载、运行状态检查、证书导出与 SSH 端口识别主入口。
 package terminal
 
 import (
-	"archive/tar"
-	"compress/gzip"
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,11 +14,11 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"time"
 
 	"singctl/internal/config"
 	"singctl/internal/deploy"
 	"singctl/internal/logger"
+	"singctl/internal/platform/servicemgr"
 )
 
 const (
@@ -267,7 +265,7 @@ func Install(cfg *config.Config, configPath string, opts InstallOptions) (*Insta
 	}
 
 	fullURL := fmt.Sprintf("https://%s%s/", domain, termPath)
-	res := &InstallResult{
+	return &InstallResult{
 		URL:           fullURL,
 		Domain:        domain,
 		Path:          termPath,
@@ -281,9 +279,7 @@ func Install(cfg *config.Config, configPath string, opts InstallOptions) (*Insta
 		ClientCrtPath: crtPath,
 		ClientKeyPath: keyPath,
 		NodeTag:       nodeTag,
-	}
-
-	return res, nil
+	}, nil
 }
 
 // Uninstall stops GoTTY, removes service and cleans up certificates
@@ -293,13 +289,10 @@ func Uninstall(cfg *config.Config, configPath string) error {
 	}
 
 	logger.Info("正在停止并禁用 GoTTY 与 wstunnel 服务...")
-	_ = exec.Command("systemctl", "stop", "gotty").Run()
-	_ = exec.Command("systemctl", "disable", "gotty").Run()
-	_ = os.Remove(GottyServicePath)
-	_ = exec.Command("systemctl", "stop", "wstunnel").Run()
-	_ = exec.Command("systemctl", "disable", "wstunnel").Run()
-	_ = os.Remove(WstunnelServicePath)
-	_ = exec.Command("systemctl", "daemon-reload").Run()
+	mgr := servicemgr.NewSystemd(nil)
+	ctx := context.Background()
+	_ = mgr.RemoveUnit(ctx, servicemgr.UnitSpec{Name: "gotty", SystemdPath: GottyServicePath})
+	_ = mgr.RemoveUnit(ctx, servicemgr.UnitSpec{Name: "wstunnel", SystemdPath: WstunnelServicePath})
 
 	logger.Info("正在清理 mTLS 证书目录...")
 	if err := deploy.RemoveMtlsAll(); err != nil {
@@ -367,14 +360,10 @@ func Status(cfg *config.Config) (*StatusResult, error) {
 	}
 
 	if runtime.GOOS == "linux" {
-		out, err := exec.Command("systemctl", "is-active", "gotty").Output()
-		if err == nil && strings.TrimSpace(string(out)) == "active" {
-			res.ServiceActive = true
-		}
-		outWs, errWs := exec.Command("systemctl", "is-active", "wstunnel").Output()
-		if errWs == nil && strings.TrimSpace(string(outWs)) == "active" {
-			res.WstunnelActive = true
-		}
+		mgr := servicemgr.NewSystemd(nil)
+		ctx := context.Background()
+		res.ServiceActive = mgr.IsActive(ctx, "gotty")
+		res.WstunnelActive = mgr.IsActive(ctx, "wstunnel")
 	}
 
 	return res, nil
@@ -386,377 +375,13 @@ func ExportCert() (string, error) {
 	if !ok {
 		return "", fmt.Errorf("客户端证书文件 %s 不存在，请先执行 singctl term install", p12Path)
 	}
-	bytes, err := os.ReadFile(p12Path)
+	raw, err := os.ReadFile(p12Path)
 	if err != nil {
 		return "", fmt.Errorf("读取证书失败: %w", err)
 	}
-	return base64.StdEncoding.EncodeToString(bytes), nil
+	return base64.StdEncoding.EncodeToString(raw), nil
 }
 
-func resolveMtlsArtifact(name, legacyPath string) (string, bool) {
-	vaultPath := deploy.VaultMtlsFilePath(name)
-	if info, err := os.Stat(vaultPath); err == nil && !info.IsDir() && info.Size() > 0 {
-		return vaultPath, true
-	}
-	if legacyPath != "" {
-		if info, err := os.Stat(legacyPath); err == nil && !info.IsDir() && info.Size() > 0 {
-			return legacyPath, true
-		}
-	}
-	return vaultPath, false
-}
-
-func installDependencies() error {
-	logger.Info("正在检查并安装系统依赖 (tmux, openssl, tar, wget)...")
-
-	// 1. 如果基础依赖都已经安装，直接放行
-	if isCommandAvailable("tmux") && isCommandAvailable("openssl") && isCommandAvailable("tar") && isCommandAvailable("wget") {
-		logger.Success("基础依赖环境已完备。")
-		return nil
-	}
-
-	// 2. 根据系统包管理器安装基础依赖
-	if isCommandAvailable("apt-get") {
-		_ = exec.Command("apt-get", "update", "-y").Run()
-		cmdInstall := exec.Command("apt-get", "install", "-y", "tmux", "openssl", "tar", "wget")
-		cmdInstall.Stdout = os.Stdout
-		cmdInstall.Stderr = os.Stderr
-		if err := cmdInstall.Run(); err != nil {
-			return fmt.Errorf("apt-get 安装依赖失败: %w", err)
-		}
-		// 可选安装 openssl-provider-legacy (部分系统无此独立包，忽略错误)
-		_ = exec.Command("apt-get", "install", "-y", "openssl-provider-legacy").Run()
-	} else if isCommandAvailable("dnf") {
-		cmd := exec.Command("dnf", "install", "-y", "tmux", "openssl", "tar", "wget")
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("dnf 安装依赖失败: %w", err)
-		}
-	} else if isCommandAvailable("yum") {
-		cmd := exec.Command("yum", "install", "-y", "tmux", "openssl", "tar", "wget")
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("yum 安装依赖失败: %w", err)
-		}
-	} else if isCommandAvailable("apk") {
-		cmd := exec.Command("apk", "add", "--no-cache", "tmux", "openssl", "tar", "wget")
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("apk 安装依赖失败: %w", err)
-		}
-	} else {
-		return fmt.Errorf("未识别的 Linux 包管理器 (请先手动安装 tmux, openssl, tar, wget)")
-	}
-
-	// 3. 再次校验关键依赖
-	if isCommandAvailable("tmux") && isCommandAvailable("openssl") && isCommandAvailable("tar") && isCommandAvailable("wget") {
-		logger.Success("基础依赖环境已安装完成。")
-		return nil
-	}
-
-	return fmt.Errorf("基础依赖未完全就绪，请手动安装 tmux 与 openssl")
-}
-
-func isCommandAvailable(name string) bool {
-	_, err := exec.LookPath(name)
-	return err == nil
-}
-
-func installGoTTY(cfg *config.Config, arch string) error {
-	if fi, err := os.Stat(GottyBinaryPath); err == nil && fi.Size() > 0 {
-		logger.Success("GoTTY 二进制已就绪 (%s)", GottyBinaryPath)
-		return nil
-	}
-
-	logger.Info("正在下载 GoTTY %s (%s)...", GottyVersion, arch)
-	fileName := fmt.Sprintf("gotty_%s_linux_%s.tar.gz", GottyVersion, arch)
-	url := fmt.Sprintf("https://github.com/sorenisanerd/gotty/releases/download/%s/%s", GottyVersion, fileName)
-	if cfg != nil && cfg.GitHub.MirrorURL != "" {
-		url = strings.TrimSuffix(cfg.GitHub.MirrorURL, "/") + "/" + url
-	}
-
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Get(url)
-	if err != nil {
-		return fmt.Errorf("下载 GoTTY 失败: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("下载 GoTTY 返回状态码 %d", resp.StatusCode)
-	}
-
-	gzReader, err := gzip.NewReader(resp.Body)
-	if err != nil {
-		return fmt.Errorf("解压 gzip 失败: %w", err)
-	}
-	defer gzReader.Close()
-
-	tarReader := tar.NewReader(gzReader)
-	for {
-		header, err := tarReader.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return fmt.Errorf("读取 tar 失败: %w", err)
-		}
-
-		if header.Name == "gotty" || filepath.Base(header.Name) == "gotty" {
-			tmpBinary := GottyBinaryPath + ".tmp"
-			outFile, err := os.OpenFile(tmpBinary, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
-			if err != nil {
-				return fmt.Errorf("写入临时 gotty 二进制失败: %w", err)
-			}
-			_, copyErr := io.Copy(outFile, tarReader)
-			outFile.Close()
-			if copyErr != nil {
-				_ = os.Remove(tmpBinary)
-				return fmt.Errorf("保存 gotty 失败: %w", copyErr)
-			}
-			_ = os.Chmod(tmpBinary, 0755)
-			if err := os.Rename(tmpBinary, GottyBinaryPath); err != nil {
-				_ = os.Remove(GottyBinaryPath)
-				if err := os.Rename(tmpBinary, GottyBinaryPath); err != nil {
-					return fmt.Errorf("安装 gotty 二进制失败: %w", err)
-				}
-			}
-			logger.Success("GoTTY 二进制已成功安装至 %s", GottyBinaryPath)
-			return nil
-		}
-	}
-
-	return fmt.Errorf("在下载包中未找到 gotty 可执行文件")
-}
-
-func generateMTLSCertificates(password string, force bool) error {
-	if err := deploy.MigrateLegacyCaddyMtlsToVault(); err != nil {
-		return err
-	}
-
-	vaultP12 := deploy.VaultMtlsFilePath("client.p12")
-	vaultCA := deploy.VaultMtlsFilePath("ca.crt")
-	if !force {
-		p12Info, pErr := os.Stat(vaultP12)
-		caInfo, cErr := os.Stat(vaultCA)
-		if pErr == nil && p12Info.Size() > 0 && cErr == nil && caInfo.Size() > 0 {
-			if _, _, err := deploy.EnsureCaddyMtlsTrustPool(""); err != nil {
-				return err
-			}
-			logger.Success("检测到已有 mTLS 证书，复用现有证书 (如需重建可加 --force)")
-			return nil
-		}
-	}
-
-	logger.Info("正在生成 10 年期 mTLS 双向认证证书 (兼容 macOS 与现代浏览器)...")
-
-	// 临时工作目录
-	tmpDir, err := os.MkdirTemp("", "singctl-mtls-*")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(tmpDir)
-
-	caKey := filepath.Join(tmpDir, "ca.key")
-	caCrt := filepath.Join(tmpDir, "ca.crt")
-	clientKey := filepath.Join(tmpDir, "client.key")
-	clientCsr := filepath.Join(tmpDir, "client.csr")
-	clientExt := filepath.Join(tmpDir, "client.ext")
-	clientCrt := filepath.Join(tmpDir, "client.crt")
-	clientP12 := filepath.Join(tmpDir, "client.p12")
-
-	// 1. 生成自签名根证书 CA
-	if err := runCmd("openssl", "genrsa", "-out", caKey, "4096"); err != nil {
-		return fmt.Errorf("生成 CA 私钥失败: %w", err)
-	}
-	if err := runCmd("openssl", "req", "-x509", "-new", "-nodes", "-key", caKey,
-		"-sha256", "-days", "3650", "-subj", "/O=PersonalOps/CN=OpsRootCA", "-out", caCrt); err != nil {
-		return fmt.Errorf("生成 CA 证书失败: %w", err)
-	}
-
-	// 2. 生成客户端私钥与 CSR
-	if err := runCmd("openssl", "genrsa", "-out", clientKey, "2048"); err != nil {
-		return fmt.Errorf("生成客户端私钥失败: %w", err)
-	}
-	if err := runCmd("openssl", "req", "-new", "-key", clientKey,
-		"-subj", "/O=PersonalOps/CN=AdminClient", "-out", clientCsr); err != nil {
-		return fmt.Errorf("生成客户端 CSR 失败: %w", err)
-	}
-
-	// 3. 写入 client.ext 扩展属性 (clientAuth)
-	extContent := `basicConstraints = CA:FALSE
-nsCertType = client
-nsComment = "OpenSSL Generated Client Certificate"
-subjectKeyIdentifier = hash
-authorityKeyIdentifier = keyid,issuer
-keyUsage = critical, nonRepudiation, digitalSignature, keyEncipherment
-extendedKeyUsage = clientAuth
-`
-	if err := os.WriteFile(clientExt, []byte(extContent), 0644); err != nil {
-		return fmt.Errorf("写入 client.ext 失败: %w", err)
-	}
-
-	// 4. 用 CA 签发客户端证书
-	if err := runCmd("openssl", "x509", "-req", "-in", clientCsr, "-CA", caCrt,
-		"-CAkey", caKey, "-CAcreateserial", "-out", clientCrt, "-days", "3650",
-		"-sha256", "-extfile", clientExt); err != nil {
-		return fmt.Errorf("签发客户端证书失败: %w", err)
-	}
-
-	// 5. 打包为客户端用的 .p12 文件 (多重兼容策略：确保 macOS Keychain、Windows 与现代浏览器无缝导入)
-	var exportErr error
-	// 策略 1: 显式指定 macOS 原生支持的 3DES/SHA1 算法 (兼容性最强，防止 RC2 或现代 AES 在 macOS 钥匙串报错)
-	p12AlgoArgs := []string{
-		"pkcs12", "-export",
-		"-keypbe", "PBE-SHA1-3DES",
-		"-certpbe", "PBE-SHA1-3DES",
-		"-macalg", "sha1",
-		"-out", clientP12,
-		"-inkey", clientKey,
-		"-in", clientCrt,
-		"-certfile", caCrt,
-		"-passout", fmt.Sprintf("pass:%s", password),
-	}
-	exportErr = runCmd("openssl", p12AlgoArgs...)
-
-	// 策略 2: 标准 OpenSSL 3.x -legacy 模式
-	if exportErr != nil {
-		p12Args := []string{
-			"pkcs12", "-export", "-legacy",
-			"-out", clientP12,
-			"-inkey", clientKey,
-			"-in", clientCrt,
-			"-certfile", caCrt,
-			"-passout", fmt.Sprintf("pass:%s", password),
-		}
-		exportErr = runCmd("openssl", p12Args...)
-	}
-
-	// 策略 3: 显式加载 default 与 legacy provider
-	if exportErr != nil {
-		p12ProviderArgs := []string{
-			"pkcs12", "-export",
-			"-provider", "default", "-provider", "legacy",
-			"-out", clientP12,
-			"-inkey", clientKey,
-			"-in", clientCrt,
-			"-certfile", caCrt,
-			"-passout", fmt.Sprintf("pass:%s", password),
-		}
-		exportErr = runCmd("openssl", p12ProviderArgs...)
-	}
-
-	// 策略 4: 如果为 OpenSSL 1.1 或以上参数皆不支持，尝试原生模式
-	if exportErr != nil {
-		p12FallbackArgs := []string{
-			"pkcs12", "-export",
-			"-out", clientP12,
-			"-inkey", clientKey,
-			"-in", clientCrt,
-			"-certfile", caCrt,
-			"-passout", fmt.Sprintf("pass:%s", password),
-		}
-		if err2 := runCmd("openssl", p12FallbackArgs...); err2 != nil {
-			return fmt.Errorf("打包 PKCS#12 客户端证书失败: %w", exportErr)
-		}
-	}
-
-	// 6. 将全套凭据存入持久化 0700/0600 主库，并只读投射公钥 ca.crt 给 Caddy
-	bundle := make(map[string][]byte, 4)
-	for _, spec := range []struct {
-		name string
-		src  string
-		req  bool
-	}{
-		{"ca.crt", caCrt, true},
-		{"client.p12", clientP12, true},
-		{"client.crt", clientCrt, false},
-		{"client.key", clientKey, false},
-	} {
-		data, rErr := os.ReadFile(spec.src)
-		if rErr != nil {
-			if spec.req {
-				return fmt.Errorf("读取生成的 %s 失败: %w", spec.name, rErr)
-			}
-			continue
-		}
-		bundle[spec.name] = data
-	}
-
-	if err := deploy.SaveMtlsBundleToVault(bundle); err != nil {
-		return fmt.Errorf("保存 mTLS 证书至主库失败: %w", err)
-	}
-	if _, _, err := deploy.EnsureCaddyMtlsTrustPool(""); err != nil {
-		return fmt.Errorf("投射 Caddy ca.crt 失败: %w", err)
-	}
-
-	logger.Success("mTLS 证书生成成功：主库 %s 与 Caddy 只读 ca.crt 已就绪。", deploy.MtlsVaultDir())
-	return nil
-}
-
-func createGottySystemdService(port int, termPath, tmuxPath string) error {
-	serviceContent := fmt.Sprintf(`[Unit]
-Description=GoTTY Web Terminal
-After=network.target
-
-[Service]
-Type=simple
-User=root
-Environment="LANG=en_US.UTF-8"
-Environment="TERM=xterm-256color"
-WorkingDirectory=/root
-ExecStart=%s -a 127.0.0.1 -p %d -w --ws-origin ".*" --path %s %s new -A -s web
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-`, GottyBinaryPath, port, termPath, tmuxPath)
-
-	if err := os.WriteFile(GottyServicePath, []byte(serviceContent), 0644); err != nil {
-		return fmt.Errorf("写入 gotty.service 失败: %w", err)
-	}
-
-	_ = runCmd("systemctl", "daemon-reload")
-	if err := runCmd("systemctl", "enable", "--now", "gotty"); err != nil {
-		return fmt.Errorf("启动 gotty.service 失败: %w", err)
-	}
-	_ = runCmd("systemctl", "restart", "gotty")
-
-	logger.Success("GoTTY Systemd 守护进程已启动 (监听 127.0.0.1:%d, 挂载 tmux 会话: web)", port)
-	return nil
-}
-
-func runCmd(name string, arg ...string) error {
-	cmd := exec.Command(name, arg...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("command execution failed (%s %v): %v, output: %s", name, arg, err, string(out))
-	}
-	return nil
-}
-
-func CopyFile(src, dst string, perm os.FileMode) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-
-	_, err = io.Copy(out, in)
-	return err
-}
-
-// DetectSSHPort tries to detect the SSH daemon port on the server
 // DetectSSHPort resolves the effective SSH listening port, preferring hardened drop-in configs over default port 22.
 func DetectSSHPort() int {
 	return detectSSHPortFrom(os.Getenv("SSH_CONNECTION"), "/etc/ssh/sshd_config.d/*.conf", "/etc/ssh/sshd_config")
@@ -842,102 +467,4 @@ func scanSSHDConfigPorts(path string) []int {
 		}
 	}
 	return ports
-}
-
-func installWstunnel(cfg *config.Config, arch string) error {
-	if fi, err := os.Stat(WstunnelBinaryPath); err == nil && fi.Size() > 0 {
-		logger.Success("wstunnel 二进制已就绪 (%s)", WstunnelBinaryPath)
-		return nil
-	}
-
-	logger.Info("正在下载 wstunnel %s (%s)...", WstunnelVersion, arch)
-	versionNum := strings.TrimPrefix(WstunnelVersion, "v")
-	fileName := fmt.Sprintf("wstunnel_%s_linux_%s.tar.gz", versionNum, arch)
-	url := fmt.Sprintf("https://github.com/erebe/wstunnel/releases/download/%s/%s", WstunnelVersion, fileName)
-	if cfg != nil && cfg.GitHub.MirrorURL != "" {
-		url = strings.TrimSuffix(cfg.GitHub.MirrorURL, "/") + "/" + url
-	}
-
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Get(url)
-	if err != nil {
-		return fmt.Errorf("下载 wstunnel 失败: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("下载 wstunnel 返回状态码 %d", resp.StatusCode)
-	}
-
-	gzReader, err := gzip.NewReader(resp.Body)
-	if err != nil {
-		return fmt.Errorf("解压 gzip 失败: %w", err)
-	}
-	defer gzReader.Close()
-
-	tarReader := tar.NewReader(gzReader)
-	for {
-		header, err := tarReader.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return fmt.Errorf("读取 tar 失败: %w", err)
-		}
-
-		if header.Name == "wstunnel" || filepath.Base(header.Name) == "wstunnel" {
-			tmpBinary := WstunnelBinaryPath + ".tmp"
-			outFile, err := os.OpenFile(tmpBinary, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
-			if err != nil {
-				return fmt.Errorf("写入临时 wstunnel 失败: %w", err)
-			}
-			_, copyErr := io.Copy(outFile, tarReader)
-			outFile.Close()
-			if copyErr != nil {
-				_ = os.Remove(tmpBinary)
-				return fmt.Errorf("保存 wstunnel 失败: %w", copyErr)
-			}
-			_ = os.Chmod(tmpBinary, 0755)
-			if err := os.Rename(tmpBinary, WstunnelBinaryPath); err != nil {
-				_ = os.Remove(WstunnelBinaryPath)
-				if err := os.Rename(tmpBinary, WstunnelBinaryPath); err != nil {
-					return fmt.Errorf("更新 wstunnel 二进制失败: %w", err)
-				}
-			}
-			logger.Success("wstunnel 二进制已成功安装至 %s", WstunnelBinaryPath)
-			return nil
-		}
-	}
-
-	return fmt.Errorf("在下载包中未找到 wstunnel 可执行文件")
-}
-
-func createWstunnelSystemdService(sshTunnelPort int, sshPort int) error {
-	serviceContent := fmt.Sprintf(`[Unit]
-Description=wstunnel SSH WebSocket Bridge
-After=network.target
-
-[Service]
-Type=simple
-User=root
-ExecStart=%s server --restrict-to 127.0.0.1:%d ws://127.0.0.1:%d
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-`, WstunnelBinaryPath, sshPort, sshTunnelPort)
-
-	if err := os.WriteFile(WstunnelServicePath, []byte(serviceContent), 0644); err != nil {
-		return fmt.Errorf("写入 wstunnel.service 失败: %w", err)
-	}
-
-	_ = runCmd("systemctl", "daemon-reload")
-	if err := runCmd("systemctl", "enable", "--now", "wstunnel"); err != nil {
-		return fmt.Errorf("启动 wstunnel.service 失败: %w", err)
-	}
-	_ = runCmd("systemctl", "restart", "wstunnel")
-
-	logger.Success("wstunnel 守护进程已启动 (监听 127.0.0.1:%d, 转发至本地 SSH 127.0.0.1:%d)", sshTunnelPort, sshPort)
-	return nil
 }

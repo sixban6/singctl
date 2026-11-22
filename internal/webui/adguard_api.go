@@ -38,10 +38,7 @@ func (s *Server) cachedAdGuardVersion(binPath string) string {
 
 // adguardStatusSummary 返回轻量级 AdGuard Home 顶栏与总览卡片状态快照（控制在毫秒级，不阻塞 /api/status）。
 func (s *Server) adguardStatusSummary() map[string]any {
-	cfg, err := config.Load(s.opts.ConfigPath)
-	if err != nil || cfg == nil {
-		cfg = &config.Config{}
-	}
+	cfg := s.readConfigOrEmpty()
 	binPath := s.adguardBinPath()
 	aghCfgPath := s.adguardConfigFilePath()
 
@@ -111,10 +108,7 @@ func (s *Server) syncAdGuardSubWhitelistAsync(cfg *config.Config) {
 
 // handleAdGuardOverviewGet 返回 AdGuard Home 完整工作台快照。
 func (s *Server) handleAdGuardOverviewGet(w http.ResponseWriter, r *http.Request) {
-	cfg, err := config.Load(s.opts.ConfigPath)
-	if err != nil || cfg == nil {
-		cfg = &config.Config{}
-	}
+	cfg := s.readConfigOrEmpty()
 	sbCfgPath := cmp.Or(strings.TrimSpace(s.opts.SingBoxConfigPath), constant.SingBoxConfigFile)
 	linked, _ := singbox.InspectSingBoxDNSLocal(sbCfgPath)
 
@@ -125,10 +119,7 @@ func (s *Server) handleAdGuardOverviewGet(w http.ResponseWriter, r *http.Request
 
 // handleAdGuardCredentialsGet 仅在用户主动点开「原生面板与凭据」抽屉时返回登录凭据。
 func (s *Server) handleAdGuardCredentialsGet(w http.ResponseWriter, r *http.Request) {
-	cfg, err := config.Load(s.opts.ConfigPath)
-	if err != nil || cfg == nil {
-		cfg = &config.Config{}
-	}
+	cfg := s.readConfigOrEmpty()
 	st := s.newAdGuardManager(cfg).Status()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"webUrl":   st.WebURL,
@@ -147,10 +138,7 @@ func (s *Server) handleAdGuardCredentialsResetPost(w http.ResponseWriter, r *htt
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
 
-	cfg, err := config.Load(s.opts.ConfigPath)
-	if err != nil || cfg == nil {
-		cfg = &config.Config{}
-	}
+	cfg := s.readConfigOrEmpty()
 	mgr := s.newAdGuardManager(cfg)
 	user, pass, err := mgr.ResetCredentials(body.Username)
 	if err != nil {
@@ -175,10 +163,7 @@ func (s *Server) handleAdGuardProtectionPost(w http.ResponseWriter, r *http.Requ
 		writeJSONError(w, http.StatusBadRequest, "请求格式错误: "+err.Error())
 		return
 	}
-	cfg, err := config.Load(s.opts.ConfigPath)
-	if err != nil || cfg == nil {
-		cfg = &config.Config{}
-	}
+	cfg := s.readConfigOrEmpty()
 	if err := s.newAdGuardManager(cfg).SetProtection(r.Context(), body.Enabled, body.DurationMinutes); err != nil {
 		writeJSONError(w, http.StatusBadGateway, err.Error())
 		return
@@ -188,10 +173,7 @@ func (s *Server) handleAdGuardProtectionPost(w http.ResponseWriter, r *http.Requ
 
 // handleAdGuardCacheClearPost 清空 AdGuard Home 本地 DNS 缓存。
 func (s *Server) handleAdGuardCacheClearPost(w http.ResponseWriter, r *http.Request) {
-	cfg, err := config.Load(s.opts.ConfigPath)
-	if err != nil || cfg == nil {
-		cfg = &config.Config{}
-	}
+	cfg := s.readConfigOrEmpty()
 	if err := s.newAdGuardManager(cfg).ClearCache(r.Context()); err != nil {
 		writeJSONError(w, http.StatusBadGateway, err.Error())
 		return
@@ -201,10 +183,7 @@ func (s *Server) handleAdGuardCacheClearPost(w http.ResponseWriter, r *http.Requ
 
 // handleAdGuardProbePost 并发实测本地防劫持引擎端到端延迟及每条已配置加密上游的独立响应耗时，标出当前最快上游。
 func (s *Server) handleAdGuardProbePost(w http.ResponseWriter, r *http.Request) {
-	cfg, err := config.Load(s.opts.ConfigPath)
-	if err != nil || cfg == nil {
-		cfg = &config.Config{}
-	}
+	cfg := s.readConfigOrEmpty()
 	report := s.newAdGuardManager(cfg).ProbeAllUpstreams(r.Context(), "qq.com")
 	writeJSON(w, http.StatusOK, report)
 }
@@ -228,10 +207,7 @@ func (s *Server) handleAdGuardUpstreamsPost(w http.ResponseWriter, r *http.Reque
 		targetMode = "parallel"
 	}
 
-	cfg, err := config.Load(s.opts.ConfigPath)
-	if err != nil || cfg == nil {
-		cfg = &config.Config{}
-	}
+	cfg := s.readConfigOrEmpty()
 	mgr := s.newAdGuardManager(cfg)
 	infos, mode, notes, setErr := mgr.SetDNSUpstreams(r.Context(), targetUpstreams, targetMode, s.opts.SkipAdGuardProbeForTest)
 	if setErr != nil {
@@ -258,10 +234,7 @@ func (s *Server) handleAdGuardWhitelistPost(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	allow := strings.ToLower(strings.TrimSpace(body.Action)) != "remove"
-	cfg, err := config.Load(s.opts.ConfigPath)
-	if err != nil || cfg == nil {
-		cfg = &config.Config{}
-	}
+	cfg := s.readConfigOrEmpty()
 	if err := s.newAdGuardManager(cfg).SetDomainWhitelist(r.Context(), body.Domain, allow); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
@@ -280,10 +253,7 @@ func (s *Server) handleAdGuardRewritesPost(w http.ResponseWriter, r *http.Reques
 		writeJSONError(w, http.StatusBadRequest, "请求格式错误: "+err.Error())
 		return
 	}
-	cfg, err := config.Load(s.opts.ConfigPath)
-	if err != nil || cfg == nil {
-		cfg = &config.Config{}
-	}
+	cfg := s.readConfigOrEmpty()
 	mgr := s.newAdGuardManager(cfg)
 	switch strings.ToLower(strings.TrimSpace(body.Action)) {
 	case "delete", "remove":
@@ -312,10 +282,7 @@ func (s *Server) handleAdGuardFiltersPost(w http.ResponseWriter, r *http.Request
 		writeJSONError(w, http.StatusBadRequest, "请求格式错误: "+err.Error())
 		return
 	}
-	cfg, err := config.Load(s.opts.ConfigPath)
-	if err != nil || cfg == nil {
-		cfg = &config.Config{}
-	}
+	cfg := s.readConfigOrEmpty()
 	mgr := s.newAdGuardManager(cfg)
 	switch strings.ToLower(strings.TrimSpace(body.Action)) {
 	case "refresh":

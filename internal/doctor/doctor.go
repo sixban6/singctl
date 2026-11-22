@@ -1,8 +1,11 @@
+// 文件职责：定义全链路健康体检模型、声明式检查项注册表（Registry）、可注入宿主/网络探针契约（Deps）与报告输出。
 package doctor
 
 import (
+	"cmp"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -10,17 +13,25 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"singctl/internal/config"
-	"singctl/internal/constant"
 	"singctl/internal/deploy"
 	"singctl/internal/logger"
 	"singctl/internal/platform/servicemgr"
 	"singctl/internal/subhub"
 )
 
-// DoctorItem 单个体检检查项
+// Scope 标识体检项适用的运行模式。
+type Scope string
+
+const (
+	ScopeServer Scope = "server"
+	ScopeClient Scope = "client"
+)
+
+// DoctorItem 单个体检检查项。
 type DoctorItem struct {
 	Name     string `json:"name"`
 	Category string `json:"category"` // "system" | "network" | "services" | "security"
@@ -29,7 +40,7 @@ type DoctorItem struct {
 	Detail   string `json:"detail,omitempty"`
 }
 
-// DoctorReport 整体体检报告
+// DoctorReport 整体体检报告。
 type DoctorReport struct {
 	Score     int          `json:"score"`
 	CheckedAt string       `json:"checkedAt"`
@@ -37,12 +48,157 @@ type DoctorReport struct {
 	Summary   string       `json:"summary"`
 }
 
-// IsServerEnvironment 判断当前主机/配置是否处于服务端部署模式
-func IsServerEnvironment(cfg *config.Config) bool {
-	if _, err := os.Stat("/etc/caddy/Caddyfile"); err == nil {
-		return true
+// TLSPeerInfo 描述服务端网关 TLS 握手对端证书摘要。
+type TLSPeerInfo struct {
+	NotAfter   time.Time
+	TLSVersion string
+}
+
+// Deps 封装体检检查项所需的全部宿主文件、进程与网络探针依赖；零值字段自动回退生产默认实现。
+type Deps struct {
+	GOOS                 string
+	GOARCH               string
+	NumCPU               int
+	Now                  func() time.Time
+	ReadFile             func(path string) ([]byte, error)
+	FileExists           func(path string) bool
+	FileNonEmpty         func(path string) bool
+	DialTCP              func(addr string, timeout time.Duration) error
+	HTTPGetStatus        func(url string, timeout time.Duration) (statusCode int, latency time.Duration, err error)
+	ProbeServerTLS       func(domain string, port int) (TLSPeerInfo, error)
+	ProbeRealitySNI      func(sni string) (latency time.Duration, tlsVer string, err error)
+	LookupValidCaddyCert func(domain string) (crtPath, keyPath string)
+	IsServiceActive      func(serviceName string) bool
+	CheckMediaUnlock     func() *MediaUnlockReport
+}
+
+// DefaultDeps 返回生产环境默认探针依赖集合。
+func DefaultDeps() Deps {
+	return Deps{}.withDefaults()
+}
+
+func (d Deps) withDefaults() Deps {
+	d.GOOS = cmp.Or(d.GOOS, runtime.GOOS)
+	d.GOARCH = cmp.Or(d.GOARCH, runtime.GOARCH)
+	if d.NumCPU <= 0 {
+		d.NumCPU = runtime.NumCPU()
 	}
-	if _, err := os.Stat("/etc/sub-store"); err == nil {
+	if d.Now == nil {
+		d.Now = time.Now
+	}
+	if d.ReadFile == nil {
+		d.ReadFile = os.ReadFile
+	}
+	if d.FileExists == nil {
+		d.FileExists = func(path string) bool {
+			_, err := os.Stat(path)
+			return err == nil
+		}
+	}
+	if d.FileNonEmpty == nil {
+		d.FileNonEmpty = fileNonEmpty
+	}
+	if d.DialTCP == nil {
+		d.DialTCP = defaultDialTCP
+	}
+	if d.HTTPGetStatus == nil {
+		d.HTTPGetStatus = defaultHTTPGetStatus
+	}
+	if d.ProbeServerTLS == nil {
+		d.ProbeServerTLS = defaultProbeServerTLS
+	}
+	if d.ProbeRealitySNI == nil {
+		d.ProbeRealitySNI = defaultProbeRealitySNI
+	}
+	if d.LookupValidCaddyCert == nil {
+		d.LookupValidCaddyCert = deploy.LookupValidCaddyCert
+	}
+	if d.IsServiceActive == nil {
+		d.IsServiceActive = defaultIsServiceActive
+	}
+	if d.CheckMediaUnlock == nil {
+		d.CheckMediaUnlock = CheckMediaUnlock
+	}
+	return d
+}
+
+// Check 描述一个声明式健康体检算子。
+type Check struct {
+	ID    string
+	Scope Scope
+	Run   func(ctx context.Context, cfg *config.Config, deps Deps) []DoctorItem
+}
+
+// Registry 维护有序、并发安全的声明式体检算子集合。
+type Registry struct {
+	mu     sync.RWMutex
+	checks []Check
+}
+
+// NewRegistry 创建空的声明式体检注册表。
+func NewRegistry() *Registry {
+	return &Registry{}
+}
+
+// Register 按传入顺序追加一个或多个体检检查项。
+func (r *Registry) Register(checks ...Check) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.checks = append(r.checks, checks...)
+}
+
+// RunScope 执行指定 Scope 的全部体检项并汇总评分报告。
+func (r *Registry) RunScope(ctx context.Context, scope Scope, cfg *config.Config, deps Deps, healthyMsg string) *DoctorReport {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	deps = deps.withDefaults()
+
+	r.mu.RLock()
+	snapshot := make([]Check, 0, len(r.checks))
+	for _, c := range r.checks {
+		if c.Scope == scope && c.Run != nil {
+			snapshot = append(snapshot, c)
+		}
+	}
+	r.mu.RUnlock()
+
+	report := &DoctorReport{
+		Score:     100,
+		CheckedAt: deps.Now().Format("2006-01-02 15:04:05"),
+		Items:     make([]DoctorItem, 0, len(snapshot)),
+	}
+	for _, c := range snapshot {
+		if err := ctx.Err(); err != nil {
+			break
+		}
+		report.Items = append(report.Items, c.Run(ctx, cfg, deps)...)
+	}
+	finalizeReport(report, healthyMsg)
+	return report
+}
+
+var defaultRegistry = sync.OnceValue(func() *Registry {
+	reg := NewRegistry()
+	reg.Register(defaultServerChecks()...)
+	reg.Register(defaultClientChecks()...)
+	return reg
+})
+
+// DefaultRegistry 返回包含内置服务端与客户端全部检查项的只读全局注册表。
+func DefaultRegistry() *Registry {
+	return defaultRegistry()
+}
+
+// IsServerEnvironment 判断当前主机/配置是否处于服务端部署模式。
+func IsServerEnvironment(cfg *config.Config) bool {
+	return IsServerEnvironmentWithDeps(cfg, DefaultDeps())
+}
+
+// IsServerEnvironmentWithDeps 基于可注入宿主文件探针判断是否为服务端部署模式。
+func IsServerEnvironmentWithDeps(cfg *config.Config, deps Deps) bool {
+	deps = deps.withDefaults()
+	if deps.FileExists("/etc/caddy/Caddyfile") || deps.FileExists("/etc/sub-store") {
 		return true
 	}
 	if cfg != nil {
@@ -57,7 +213,7 @@ func IsServerEnvironment(cfg *config.Config) bool {
 	return false
 }
 
-// RunDoctor 根据当前环境自动识别服务端或客户端模式并执行体检
+// RunDoctor 根据当前环境自动识别服务端或客户端模式并执行体检。
 func RunDoctor(cfg *config.Config) *DoctorReport {
 	if IsServerEnvironment(cfg) {
 		return RunServerDoctor(cfg)
@@ -65,311 +221,71 @@ func RunDoctor(cfg *config.Config) *DoctorReport {
 	return RunClientDoctor(cfg)
 }
 
-// RunServerDoctor 执行服务端全链路体检
+// RunServerDoctor 执行服务端全链路体检。
 func RunServerDoctor(cfg *config.Config) *DoctorReport {
-	report := &DoctorReport{
-		Score:     100,
-		CheckedAt: time.Now().Format("2006-01-02 15:04:05"),
-		Items:     make([]DoctorItem, 0),
-	}
-
-	// 1. 系统基础环境
-	checkSystem(report)
-
-	// 2. 内核网络与 BBR
-	checkBBR(report)
-
-	// 3. 核心端口监听与占用
-	checkPorts(cfg, report)
-
-	// 4. 四大核心服务进程状态
-	checkServices(report)
-
-	// 5. TLS 证书有效性与剩余天数 (若是服务端)
-	checkTLSCert(cfg, report)
-
-	// 6. Reality SNI 伪装站握手连通性
-	checkRealitySNI(cfg, report)
-
-	// 7. Sub-Store 订阅中心状态
-	checkSubstore(report)
-
-	// 8. WARP 状态与出口流媒体解锁
-	checkWARPAndUnlock(report)
-
-	// 9. Web 终端 mTLS 证书与守护进程一致性体检
-	checkWebTerminal(cfg, report)
-
-	finalizeReport(report, "🎉 系统运行状态极佳！所有核心组件、TLS 证书与高可用链路均处于健康状态。")
-	return report
+	return RunServerDoctorWithDeps(context.Background(), cfg, DefaultDeps())
 }
 
-// RunClientDoctor 执行客户端透明代理/桌面网关模式体检
+// RunServerDoctorWithDeps 使用显式注入的依赖执行服务端全链路体检。
+func RunServerDoctorWithDeps(ctx context.Context, cfg *config.Config, deps Deps) *DoctorReport {
+	const healthyMsg = "🎉 系统运行状态极佳！所有核心组件、TLS 证书与高可用链路均处于健康状态。"
+	return DefaultRegistry().RunScope(ctx, ScopeServer, cfg, deps, healthyMsg)
+}
+
+// RunClientDoctor 执行客户端透明代理/桌面网关模式体检。
 func RunClientDoctor(cfg *config.Config) *DoctorReport {
-	report := &DoctorReport{
-		Score:     100,
-		CheckedAt: time.Now().Format("2006-01-02 15:04:05"),
-		Items:     make([]DoctorItem, 0),
-	}
+	return RunClientDoctorWithDeps(context.Background(), cfg, DefaultDeps())
+}
 
-	// 1. 系统基础环境
-	checkSystem(report)
-
-	// 2. Linux 内核下顺带检查 BBR
-	if runtime.GOOS == "linux" {
-		checkBBR(report)
-	}
-
-	// 3. 客户端订阅配置检查
-	hasValidSub := false
-	if cfg != nil {
-		for _, sub := range cfg.Subs {
-			if strings.TrimSpace(sub.URL) != "" {
-				hasValidSub = true
-				break
-			}
-		}
-	}
-	if hasValidSub {
-		report.Items = append(report.Items, DoctorItem{
-			Name:     "客户端订阅配置",
-			Category: "system",
-			Status:   "ok",
-			Summary:  fmt.Sprintf("已配置 %d 个订阅源", len(cfg.Subs)),
-		})
-	} else {
-		report.Items = append(report.Items, DoctorItem{
-			Name:     "客户端订阅配置",
-			Category: "system",
-			Status:   "warn",
-			Summary:  "尚未配置有效订阅链接 (subs.url)",
-			Detail:   "若作为客户端使用，请编辑 singctl.yaml 填入订阅地址；若为服务端请运行 'singctl sr doctor'",
-		})
-	}
-
-	// 4. 客户端 sing-box 配置与进程状态
-	if _, err := os.Stat(constant.SingBoxConfigFile); err == nil {
-		if isServiceActive("sing-box") {
-			report.Items = append(report.Items, DoctorItem{
-				Name:     "sing-box 客户端核心",
-				Category: "services",
-				Status:   "ok",
-				Summary:  "配置文件就绪且 sing-box 正在运行",
-			})
-		} else {
-			report.Items = append(report.Items, DoctorItem{
-				Name:     "sing-box 客户端核心",
-				Category: "services",
-				Status:   "warn",
-				Summary:  "配置文件已生成，但 sing-box 当前未运行",
-				Detail:   "可执行 'singctl sb start' 启动客户端代理",
-			})
-		}
-	} else {
-		report.Items = append(report.Items, DoctorItem{
-			Name:     "sing-box 客户端核心",
-			Category: "services",
-			Status:   "warn",
-			Summary:  "未检测到客户端配置 (" + constant.SingBoxConfigFile + ")",
-			Detail:   "可执行 'singctl sb install && singctl sb start' 初始化客户端",
-		})
-	}
-
-	// 5. 本地控制面端口探测 (Clash API 9090 / Web 面板 8090)
-	var activeLocalPorts []int
-	for _, p := range []int{9090, 8090} {
-		if conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", p), 300*time.Millisecond); err == nil {
-			_ = conn.Close()
-			activeLocalPorts = append(activeLocalPorts, p)
-		}
-	}
-	if len(activeLocalPorts) > 0 {
-		report.Items = append(report.Items, DoctorItem{
-			Name:     "本地控制面板监听",
-			Category: "network",
-			Status:   "ok",
-			Summary:  fmt.Sprintf("已检测到本地控制端口 (%s) 在线", joinInts(activeLocalPorts)),
-		})
-	}
-
-	// 6. 基础外网连通性探测
-	client := &http.Client{Timeout: 3 * time.Second}
-	start := time.Now()
-	if resp, err := client.Get("https://cp.cloudflare.com/generate_204"); err == nil {
-		_ = resp.Body.Close()
-		report.Items = append(report.Items, DoctorItem{
-			Name:     "外网 HTTPS 连通性",
-			Category: "network",
-			Status:   "ok",
-			Summary:  fmt.Sprintf("Cloudflare 连通探测正常 (延迟: %d ms)", time.Since(start).Milliseconds()),
-		})
-	} else {
-		report.Items = append(report.Items, DoctorItem{
-			Name:     "外网 HTTPS 连通性",
-			Category: "network",
-			Status:   "warn",
-			Summary:  "无法直连 cp.cloudflare.com",
-			Detail:   err.Error(),
-		})
-	}
-
-	finalizeReport(report, "🎉 客户端运行环境健康，代理与网络组件状态良好。")
-	return report
+// RunClientDoctorWithDeps 使用显式注入的依赖执行客户端模式体检。
+func RunClientDoctorWithDeps(ctx context.Context, cfg *config.Config, deps Deps) *DoctorReport {
+	const healthyMsg = "🎉 客户端运行环境健康，代理与网络组件状态良好。"
+	return DefaultRegistry().RunScope(ctx, ScopeClient, cfg, deps, healthyMsg)
 }
 
 func finalizeReport(report *DoctorReport, healthyMsg string) {
 	var fails, warns int
 	for _, item := range report.Items {
-		if item.Status == "fail" {
+		switch item.Status {
+		case "fail":
 			fails++
-		} else if item.Status == "warn" {
+		case "warn":
 			warns++
 		}
 	}
 	report.Score = max(0, 100-(fails*20)-(warns*5))
 
-	if fails == 0 && warns == 0 {
+	switch {
+	case fails == 0 && warns == 0:
 		report.Summary = healthyMsg
-	} else if fails == 0 {
+	case fails == 0:
 		report.Summary = fmt.Sprintf("⚠️ 系统整体可用，但发现 %d 项次要警告，建议排查优化。", warns)
-	} else {
+	default:
 		report.Summary = fmt.Sprintf("❌ 检测到 %d 项严重异常与 %d 项警告，部分代理或网关链路可能受阻，请根据下方详情排查！", fails, warns)
 	}
 }
 
-func checkSystem(r *DoctorReport) {
-	osName := runtime.GOOS
-	if data, err := os.ReadFile("/etc/os-release"); err == nil {
-		for _, line := range strings.Split(string(data), "\n") {
-			if strings.HasPrefix(line, "PRETTY_NAME=") {
-				osName = strings.Trim(strings.TrimPrefix(line, "PRETTY_NAME="), `"`)
-				break
-			}
-		}
+func defaultDialTCP(addr string, timeout time.Duration) error {
+	conn, err := net.DialTimeout("tcp", addr, timeout)
+	if err != nil {
+		return err
 	}
-
-	r.Items = append(r.Items, DoctorItem{
-		Name:     "基础运行环境",
-		Category: "system",
-		Status:   "ok",
-		Summary:  fmt.Sprintf("%s (%s), CPU: %d 核", osName, runtime.GOARCH, runtime.NumCPU()),
-	})
+	_ = conn.Close()
+	return nil
 }
 
-func checkBBR(r *DoctorReport) {
-	data, err := os.ReadFile("/proc/sys/net/ipv4/tcp_congestion_control")
-	if err != nil && os.IsNotExist(err) {
-		r.Items = append(r.Items, DoctorItem{
-			Name:     "TCP 拥塞控制算法",
-			Category: "network",
-			Status:   "ok",
-			Summary:  "容器共享宿主机内核网络栈 (TCP 拥塞控制由宿主机托管)",
-		})
-		return
+func defaultHTTPGetStatus(url string, timeout time.Duration) (int, time.Duration, error) {
+	client := &http.Client{Timeout: timeout}
+	start := time.Now()
+	resp, err := client.Get(url)
+	if err != nil {
+		return 0, 0, err
 	}
-	bbrEnabled := err == nil && strings.Contains(strings.TrimSpace(string(data)), "bbr")
-
-	if bbrEnabled {
-		r.Items = append(r.Items, DoctorItem{
-			Name:     "TCP 拥塞控制算法",
-			Category: "network",
-			Status:   "ok",
-			Summary:  "Google BBR 加速 [已激活启用]",
-		})
-	} else {
-		r.Items = append(r.Items, DoctorItem{
-			Name:     "TCP 拥塞控制算法",
-			Category: "network",
-			Status:   "warn",
-			Summary:  "BBR 未启用 (当前为标准 Reno/Cubic)",
-			Detail:   "建议通过控制台或 'sysctl' 启用 BBR 以大幅提升弱网与长距离链路吞吐量",
-		})
-	}
+	defer resp.Body.Close()
+	return resp.StatusCode, time.Since(start), nil
 }
 
-func checkPorts(cfg *config.Config, r *DoctorReport) {
-	ports := []int{80, 443}
-	if cfg != nil && cfg.Server.GetVlessPort() != 443 {
-		ports = append(ports, cfg.Server.GetVlessPort())
-	}
-	if cfg != nil && cfg.Server.GetWebAdminPort() > 0 {
-		ports = append(ports, cfg.Server.GetWebAdminPort())
-	}
-
-	var closed []int
-	for _, p := range ports {
-		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", p), 500*time.Millisecond)
-		if err != nil {
-			closed = append(closed, p)
-		} else {
-			_ = conn.Close()
-		}
-	}
-
-	if len(closed) == 0 {
-		r.Items = append(r.Items, DoctorItem{
-			Name:     "网关与管理端口监听",
-			Category: "network",
-			Status:   "ok",
-			Summary:  fmt.Sprintf("核心端口 (%s) 均正常监听运行", joinInts(ports)),
-		})
-	} else {
-		r.Items = append(r.Items, DoctorItem{
-			Name:     "网关与管理端口监听",
-			Category: "network",
-			Status:   "warn",
-			Summary:  fmt.Sprintf("端口 %v 未检测到本地监听", closed),
-			Detail:   "若 Caddy 或服务端尚未启动，此状态属正常现象",
-		})
-	}
-}
-
-func checkServices(r *DoctorReport) {
-	services := []struct {
-		id       string
-		name     string
-		fixGuide string
-	}{
-		{"caddy", "Caddy 网关", "systemctl restart caddy"},
-		{"sing-box", "sing-box 核心", "systemctl restart sing-box"},
-		{"singctl-sub", "SubHub 订阅引擎", "systemctl restart singctl-sub"},
-		{"wireproxy", "WARP (wireproxy)", "systemctl restart wireproxy"},
-	}
-
-	for _, s := range services {
-		active := isServiceActive(s.id)
-		if active {
-			r.Items = append(r.Items, DoctorItem{
-				Name:     s.name,
-				Category: "services",
-				Status:   "ok",
-				Summary:  "服务处于活跃运行状态 (active)",
-			})
-		} else {
-			r.Items = append(r.Items, DoctorItem{
-				Name:     s.name,
-				Category: "services",
-				Status:   "warn",
-				Summary:  "服务未运行或未启动 (inactive)",
-				Detail:   fmt.Sprintf("可尝试在控制台或终端运行: %s", s.fixGuide),
-			})
-		}
-	}
-}
-
-func checkTLSCert(cfg *config.Config, r *DoctorReport) {
-	if cfg == nil {
-		return
-	}
-	domain := cfg.Server.GetNodeDomain()
-	if domain == "" {
-		domain = cfg.Server.SubstoreDomain
-	}
-	if domain == "" {
-		return
-	}
-
-	vlessPort := cfg.Server.GetVlessPort()
+func defaultProbeServerTLS(domain string, vlessPort int) (TLSPeerInfo, error) {
 	targetAddr := fmt.Sprintf("%s:%d", domain, vlessPort)
 	tlsCfg := &tls.Config{
 		ServerName:         domain,
@@ -377,213 +293,37 @@ func checkTLSCert(cfg *config.Config, r *DoctorReport) {
 	}
 	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 3 * time.Second}, "tcp", targetAddr, tlsCfg)
 	if err != nil {
-		// NAT 共享 IP 小鸡内部往往不支持 Hairpin NAT (容器内直连自身公网 IP 端口超时)，回退通过本地回环验证同一网关与真实 ACME 证书链
+		// NAT 共享 IP 小鸡内部往往不支持 Hairpin NAT，回退通过本地回环验证同一网关与真实 ACME 证书链
 		conn, err = tls.DialWithDialer(&net.Dialer{Timeout: 2 * time.Second}, "tcp", fmt.Sprintf("127.0.0.1:%d", vlessPort), tlsCfg)
 	}
 	if err != nil {
-		r.Items = append(r.Items, DoctorItem{
-			Name:     "HTTPS 证书与网关",
-			Category: "security",
-			Status:   "warn",
-			Summary:  fmt.Sprintf("无法建立与 %s 的 TLS 握手", targetAddr),
-			Detail:   err.Error(),
-		})
-		return
+		return TLSPeerInfo{}, err
 	}
 	defer conn.Close()
 
-	certs := conn.ConnectionState().PeerCertificates
-	if len(certs) == 0 {
-		return
+	state := conn.ConnectionState()
+	if len(state.PeerCertificates) == 0 {
+		return TLSPeerInfo{}, errors.New("no peer certificates presented")
 	}
-
-	cert := certs[0]
-	daysRemaining := int(time.Until(cert.NotAfter).Hours() / 24)
-	if daysRemaining > 15 {
-		r.Items = append(r.Items, DoctorItem{
-			Name:     "HTTPS 证书状态",
-			Category: "security",
-			Status:   "ok",
-			Summary:  fmt.Sprintf("Let's Encrypt / ZeroSSL 证书正常 (剩余有效期 %d 天)", daysRemaining),
-		})
-	} else if daysRemaining > 0 {
-		r.Items = append(r.Items, DoctorItem{
-			Name:     "HTTPS 证书状态",
-			Category: "security",
-			Status:   "warn",
-			Summary:  fmt.Sprintf("证书即将到期 (剩余 %d 天)", daysRemaining),
-			Detail:   "Caddy 会在到期前自动续签，请保持 80/443 端口畅通",
-		})
-	} else {
-		r.Items = append(r.Items, DoctorItem{
-			Name:     "HTTPS 证书状态",
-			Category: "security",
-			Status:   "fail",
-			Summary:  "证书已过期！",
-			Detail:   "请检查 Caddy 证书续期日志",
-		})
-	}
-
-	// 校验 sing-box Hysteria2 配置证书文件是否真实存在且为非自签有效 ACME 证书
-	if rawCfg, err := os.ReadFile(constant.SingBoxConfigFile); err == nil {
-		s := string(rawCfg)
-		if strings.Contains(s, `"hysteria2"`) {
-			if strings.Contains(s, "/certificates/local/") {
-				r.Items = append(r.Items, DoctorItem{
-					Name:     "Hysteria2 QUIC 证书",
-					Category: "security",
-					Status:   "fail",
-					Summary:  "Hysteria2 证书误指向 Caddy local 内部自签证书",
-					Detail:   "客户端将拒绝自签证书握手，请执行安全自愈或重新同步证书路径",
-				})
-			} else if validCrt, _ := deploy.LookupValidCaddyCert(domain); validCrt != "" && !strings.Contains(s, validCrt) {
-				r.Items = append(r.Items, DoctorItem{
-					Name:     "Hysteria2 QUIC 证书",
-					Category: "security",
-					Status:   "warn",
-					Summary:  "Hysteria2 证书路径与最新 ACME 证书不一致",
-					Detail:   "可执行安全自愈自动同步至最新 ACME 证书并重载 sing-box",
-				})
-			} else {
-				r.Items = append(r.Items, DoctorItem{
-					Name:     "Hysteria2 QUIC 证书",
-					Category: "security",
-					Status:   "ok",
-					Summary:  "UDP 443 (QUIC/H3) 证书链与 TCP 443 保持一致且有效",
-				})
-			}
-		}
-	}
+	return TLSPeerInfo{
+		NotAfter:   state.PeerCertificates[0].NotAfter,
+		TLSVersion: tlsVersionToString(state.Version),
+	}, nil
 }
 
-func checkRealitySNI(cfg *config.Config, r *DoctorReport) {
-	sni := "swdist.apple.com"
-	if cfg != nil && cfg.Server.Sni != "" {
-		sni = cfg.Server.Sni
-	}
-
+func defaultProbeRealitySNI(sni string) (time.Duration, string, error) {
 	start := time.Now()
 	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 3 * time.Second}, "tcp", sni+":443", &tls.Config{
 		ServerName: sni,
 	})
-	latency := time.Since(start).Milliseconds()
-
 	if err != nil {
-		r.Items = append(r.Items, DoctorItem{
-			Name:     "Reality 伪装目标探测",
-			Category: "security",
-			Status:   "warn",
-			Summary:  fmt.Sprintf("无法握手伪装域名 %s: %v", sni, err),
-			Detail:   "建议更换为响应更快的 Apple/Microsoft 官方域名以保障抗封锁效果",
-		})
-		return
+		return 0, "", err
 	}
 	defer conn.Close()
-
-	r.Items = append(r.Items, DoctorItem{
-		Name:     "Reality 伪装目标探测",
-		Category: "security",
-		Status:   "ok",
-		Summary:  fmt.Sprintf("目标 SNI [%s] 握手正常 (延迟: %d ms, TLS %s)", sni, latency, tlsVersionToString(conn.ConnectionState().Version)),
-	})
+	return time.Since(start), tlsVersionToString(conn.ConnectionState().Version), nil
 }
 
-func checkSubstore(r *DoctorReport) {
-	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get("http://" + subhub.DefaultListenAddr + "/healthz")
-	if err != nil || resp.StatusCode != http.StatusOK {
-		if resp != nil {
-			_ = resp.Body.Close()
-		}
-		resp, err = client.Get("http://" + subhub.DefaultListenAddr + "/")
-	}
-	if err == nil && resp.StatusCode == http.StatusOK {
-		defer resp.Body.Close()
-		r.Items = append(r.Items, DoctorItem{
-			Name:     "SubHub 订阅聚合",
-			Category: "services",
-			Status:   "ok",
-			Summary:  "本地 3001 端口原生引擎响应正常 (HTTP 200)",
-		})
-	} else {
-		if resp != nil {
-			_ = resp.Body.Close()
-		}
-		r.Items = append(r.Items, DoctorItem{
-			Name:     "SubHub 订阅聚合",
-			Category: "services",
-			Status:   "warn",
-			Summary:  "本地 3001 端口未响应",
-			Detail:   "可执行 'singctl sr sub restart' 或 'systemctl status singctl-sub' 检查状态",
-		})
-	}
-}
-
-func checkWARPAndUnlock(r *DoctorReport) {
-	unlock := CheckMediaUnlock()
-
-	// 1. VPS 原生出口
-	directSummary := formatProfileSummary(&unlock.Direct)
-	r.Items = append(r.Items, DoctorItem{
-		Name:     "VPS 原生出口画像",
-		Category: "network",
-		Status:   "ok",
-		Summary:  directSummary,
-		Detail:   fmt.Sprintf("出口公网 IP: %s (%s)", unlock.Direct.ExitIP, unlock.Direct.ExitLoc),
-	})
-
-	// 2. WARP 分流出口
-	if unlock.WARP.Available {
-		warpSummary := formatProfileSummary(&unlock.WARP)
-		r.Items = append(r.Items, DoctorItem{
-			Name:     "WARP 分流出口画像",
-			Category: "network",
-			Status:   "ok",
-			Summary:  warpSummary,
-			Detail:   fmt.Sprintf("出口公网 IP: %s (%s)", unlock.WARP.ExitIP, unlock.WARP.ExitLoc),
-		})
-	} else {
-		r.Items = append(r.Items, DoctorItem{
-			Name:     "WARP 分流出口画像",
-			Category: "network",
-			Status:   "warn",
-			Summary:  "WARP 服务未运行或 40000 端口未就绪",
-			Detail:   "若需要海外流媒体/AI 解锁增强，可运行 'singctl sr install warp'",
-		})
-	}
-}
-
-func formatProfileSummary(p *ExitProfile) string {
-	list := []string{}
-	if p.OpenAI.Status == "unlocked" {
-		loc := p.OpenAI.Region
-		if loc == "" {
-			loc = "OK"
-		}
-		list = append(list, fmt.Sprintf("OpenAI [%s]", loc))
-	} else {
-		list = append(list, "OpenAI [受阻]")
-	}
-
-	if p.Netflix.Status == "unlocked" {
-		list = append(list, "Netflix [完整解锁]")
-	} else if p.Netflix.Status == "partially_unlocked" {
-		list = append(list, "Netflix [仅自制剧]")
-	} else {
-		list = append(list, "Netflix [未解锁]")
-	}
-
-	if p.YouTube.Status == "unlocked" {
-		list = append(list, "YouTube [原生]")
-	}
-	if p.Google.Status == "unlocked" {
-		list = append(list, "Google [无验证码]")
-	}
-
-	return strings.Join(list, " | ")
-}
-
-func isServiceActive(serviceName string) bool {
+func defaultIsServiceActive(serviceName string) bool {
 	ctx := context.Background()
 	mgr := servicemgr.Detect(nil)
 
@@ -592,18 +332,14 @@ func isServiceActive(serviceName string) bool {
 		if mgr.IsActive(ctx, "singctl-sub") {
 			return true
 		}
-		conn, err := net.DialTimeout("tcp", subhub.DefaultListenAddr, 300*time.Millisecond)
-		if err == nil {
-			_ = conn.Close()
+		if defaultDialTCP(subhub.DefaultListenAddr, 300*time.Millisecond) == nil {
 			return true
 		}
 	}
 
 	// 针对 WARP: 检查 wireproxy 或 warp-svc 或 40000 端口
 	if serviceName == "wireproxy" {
-		conn, err := net.DialTimeout("tcp", "127.0.0.1:40000", 300*time.Millisecond)
-		if err == nil {
-			_ = conn.Close()
+		if defaultDialTCP("127.0.0.1:40000", 300*time.Millisecond) == nil {
 			return true
 		}
 		if mgr.IsActive(ctx, "warp-svc") {
@@ -616,8 +352,8 @@ func isServiceActive(serviceName string) bool {
 		return true
 	}
 	// 回退检查进程名称
-	out2, err2 := exec.Command("pgrep", "-f", serviceName).Output()
-	return err2 == nil && len(strings.TrimSpace(string(out2))) > 0
+	out, err := exec.Command("pgrep", "-f", serviceName).Output()
+	return err == nil && len(strings.TrimSpace(string(out))) > 0
 }
 
 func tlsVersionToString(v uint16) string {
@@ -632,14 +368,22 @@ func tlsVersionToString(v uint16) string {
 }
 
 func joinInts(ints []int) string {
-	var s []string
+	s := make([]string, 0, len(ints))
 	for _, i := range ints {
 		s = append(s, fmt.Sprintf("%d", i))
 	}
 	return strings.Join(s, ", ")
 }
 
-// PrintDoctorReport 终端美化输出
+func fileNonEmpty(path string) bool {
+	if strings.TrimSpace(path) == "" {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir() && info.Size() > 0
+}
+
+// PrintDoctorReport 终端美化输出。
 func PrintDoctorReport(r *DoctorReport) {
 	logger.Info("═══════════════════════════════════════════════════════════")
 	logger.Success("                 🩺 SINGCTL 全链路健康体检报告")
@@ -681,69 +425,4 @@ func PrintDoctorReport(r *DoctorReport) {
 		logger.Error("结论: %s", r.Summary)
 	}
 	logger.Info("═══════════════════════════════════════════════════════════\n")
-}
-
-func checkWebTerminal(cfg *config.Config, r *DoctorReport) {
-	if cfg == nil || !cfg.Server.WebTerminal.Enabled {
-		return
-	}
-
-	rawCA := strings.TrimSpace(cfg.Server.WebTerminal.MtlsCA)
-	caPath := deploy.NormalizeMtlsCAPath(rawCA)
-	caOK := fileNonEmpty(caPath)
-	legacyCfg := rawCA != "" && deploy.IsLegacyCaddyMtlsCAPath(rawCA)
-
-	switch {
-	case caOK && !legacyCfg:
-		r.Items = append(r.Items, DoctorItem{
-			Category: "security",
-			Name:     "Web 终端 mTLS 证书",
-			Status:   "ok",
-			Summary:  fmt.Sprintf("CA 信任池正常 (%s)", caPath),
-		})
-	case caOK && legacyCfg:
-		r.Items = append(r.Items, DoctorItem{
-			Category: "security",
-			Name:     "Web 终端 mTLS 证书",
-			Status:   "warn",
-			Summary:  fmt.Sprintf("CA 证书已在 %s 就绪，但配置仍指向旧路径 %s", caPath, rawCA),
-			Detail:   "运行 'singctl sr sync' 可自动收敛配置并清理废弃的 /etc/caddy/mtls 目录",
-		})
-	default:
-		r.Items = append(r.Items, DoctorItem{
-			Category: "security",
-			Name:     "Web 终端 mTLS 证书",
-			Status:   "fail",
-			Summary:  fmt.Sprintf("Web 终端已启用，但 mTLS CA 证书缺失 (%s)", caPath),
-			Detail:   "请运行 'singctl sr term install' 重新生成 mTLS 证书并恢复 Caddy 网关",
-		})
-	}
-
-	gottyActive := isServiceActive("gotty")
-	wstunnelActive := isServiceActive("wstunnel")
-	switch {
-	case gottyActive && wstunnelActive:
-		r.Items = append(r.Items, DoctorItem{
-			Category: "services",
-			Name:     "Web 终端后台服务 (gotty/wstunnel)",
-			Status:   "ok",
-			Summary:  "gotty 与 wstunnel 均运行中",
-		})
-	default:
-		r.Items = append(r.Items, DoctorItem{
-			Category: "services",
-			Name:     "Web 终端后台服务 (gotty/wstunnel)",
-			Status:   "warn",
-			Summary:  fmt.Sprintf("gotty=%v, wstunnel=%v", gottyActive, wstunnelActive),
-			Detail:   "运行 'singctl sr term status' 或 'singctl sr term install' 检查/启动 Web 终端服务",
-		})
-	}
-}
-
-func fileNonEmpty(path string) bool {
-	if strings.TrimSpace(path) == "" {
-		return false
-	}
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir() && info.Size() > 0
 }
