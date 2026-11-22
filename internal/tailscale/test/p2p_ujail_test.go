@@ -339,3 +339,91 @@ func TestApplyUjailSandbox_StaleSocketTriggersRollback(t *testing.T) {
 		t.Fatalf("expected init script rolled back to exact original:\n%s", string(restored))
 	}
 }
+
+func TestResolveUjailBin_AndOpenWrt2102NoCapsFallback(t *testing.T) {
+	ctx := t.Context()
+	dir := t.TempDir()
+
+	// 1. ResolveUjailBin falls back to LookPath when explicit is empty and default paths are absent.
+	customBin := filepath.Join(dir, "ujail-from-path")
+	if err := os.WriteFile(customBin, []byte("#!/bin/sh\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := tailscale.ResolveUjailBin("", func(file string) (string, error) {
+		if file == "ujail" {
+			return customBin, nil
+		}
+		return "", exec.ErrNotFound
+	})
+	if err != nil || resolved == "" {
+		t.Fatalf("expected ResolveUjailBin to resolve ujail, got path=%q err=%v", resolved, err)
+	}
+
+	// 2. ParseUjailHelpSupportsCaps accurately distinguishes OpenWrt 21.02 vs 22.03+ ujail -h.
+	openwrt2102Help := "Usage: ujail <options> -- <binary> <params ...>\n  -n <name> the name of the jail\n  -r <file> readonly files that should be staged\n  -w <file> writeable files that should be staged\n"
+	openwrt2305Help := openwrt2102Help + "  -C <file> capabilities drop file\n  -c        set PR_SET_NO_NEW_PRIVS\n"
+	if tailscale.ParseUjailHelpSupportsCaps(openwrt2102Help) {
+		t.Fatal("expected OpenWrt 21.02 ujail help without -C to report supportsCaps=false")
+	}
+	if !tailscale.ParseUjailHelpSupportsCaps(openwrt2305Help) {
+		t.Fatal("expected OpenWrt 23.05 ujail help with -C to report supportsCaps=true")
+	}
+
+	// 3. ApplyUjailSandbox on OpenWrt 21.02 (without -C caps support) omits capabilities/no_new_privs and mounts ipset cleanly.
+	initPath := filepath.Join(dir, "tailscale")
+	backupPath := filepath.Join(dir, "tailscale.bak")
+	capsPath := filepath.Join(dir, "capabilities", "tailscale.json")
+	if err := os.WriteFile(initPath, []byte(sampleStockTailscaleInit), 0755); err != nil {
+		t.Fatal(err)
+	}
+	sockDir, err := os.MkdirTemp("/tmp", "ts-ujail2102-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(sockDir) })
+	sockPath := filepath.Join(sockDir, "ts.sock")
+
+	stopOld := startMockLocalAPIServer(t, sockPath, "Running")
+	opts := tailscale.UjailOptions{
+		InitScriptPath:    initPath,
+		BackupPath:        backupPath,
+		CapsFilePath:      capsPath,
+		UjailBin:          customBin,
+		SocketPath:        sockPath,
+		ReadyTimeout:      3 * time.Second,
+		CapabilitiesProbe: func(context.Context, string) bool { return false },
+		ServiceRunner: func(_ context.Context, _ string, action string) error {
+			switch action {
+			case "stop":
+				stopOld()
+			case "start":
+				startMockLocalAPIServer(t, sockPath, "Running")
+			}
+			return nil
+		},
+	}
+
+	changed, err := tailscale.ApplyUjailSandbox(ctx, true, opts)
+	if err != nil || !changed {
+		t.Fatalf("ApplyUjailSandbox(21.02 no-caps) failed: changed=%v err=%v", changed, err)
+	}
+	gotBytes, _ := os.ReadFile(initPath)
+	got := string(gotBytes)
+	if strings.Contains(got, "procd_set_param capabilities") || strings.Contains(got, "procd_set_param no_new_privs") {
+		t.Fatalf("OpenWrt 21.02 no-caps fallback must omit capabilities/no_new_privs:\n%s", got)
+	}
+	for _, want := range []string{
+		tailscale.DefaultUjailMarkerV2,
+		"procd_add_jail tailscale log procfs sysfs ronly",
+		"/usr/sbin/ipset",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected %q in 21.02 fallback script:\n%s", want, got)
+		}
+	}
+	if shBin, err := exec.LookPath("sh"); err == nil {
+		if out, err := exec.CommandContext(ctx, shBin, "-n", initPath).CombinedOutput(); err != nil {
+			t.Fatalf("21.02 fallback init script failed sh -n: %v (%s)", err, string(out))
+		}
+	}
+}

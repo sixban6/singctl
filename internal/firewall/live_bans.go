@@ -138,7 +138,7 @@ func IsBuiltinWhitelist(norm string) bool {
 	return slices.Contains(defaultWhitelistV4, strings.TrimSpace(norm))
 }
 
-// AddBanLive 在不重载整表的前提下将 IP/CIDR 实时注入内核黑名单集合。
+// AddBanLive 在不重载整表的前提下将 IP/CIDR 实时注入内核黑名单集合（自动适配 nftables 与 iptables+ipset）。
 func AddBanLive(target, scope string, timeoutDays int, callerIP string, cfg *config.Config) (string, bool, error) {
 	norm, isV6, err := ValidateBanTarget(target, scope, callerIP, cfg)
 	if err != nil {
@@ -146,6 +146,9 @@ func AddBanLive(target, scope string, timeoutDays int, callerIP string, cfg *con
 	}
 	if runtime.GOOS != "linux" {
 		return norm, isV6, nil
+	}
+	if DetectBackend() == BackendIPTables {
+		return defaultIPTablesBackend().AddLiveBan(target, scope, timeoutDays, callerIP, cfg)
 	}
 	snap, snapErr := readLiveSecurityTable()
 	if snapErr != nil || snap == nil || !snap.Active {
@@ -176,7 +179,7 @@ func AddBanLive(target, scope string, timeoutDays int, callerIP string, cfg *con
 	return norm, isV6, nil
 }
 
-// RemoveBanLive 在不重置计数器与其余封禁记录的情况下，从指定内核黑名单集合实时解封单条 IP/CIDR。
+// RemoveBanLive 在不重置计数器与其余封禁记录的情况下，从指定内核黑名单集合实时解封单条 IP/CIDR（自动适配 nftables 与 iptables+ipset）。
 func RemoveBanLive(target, scope string) error {
 	trimmed := strings.TrimSpace(target)
 	if trimmed == "" {
@@ -184,6 +187,9 @@ func RemoveBanLive(target, scope string) error {
 	}
 	if runtime.GOOS != "linux" {
 		return nil
+	}
+	if DetectBackend() == BackendIPTables {
+		return defaultIPTablesBackend().RemoveLiveBan(target, scope)
 	}
 	snap, err := readLiveSecurityTable()
 	if err != nil || snap == nil || !snap.Active {
@@ -223,10 +229,13 @@ func RemoveBanLive(target, scope string) error {
 	return nil
 }
 
-// ClearDynamicBansLive 清空当前 7 天动态扫描黑名单（保留永久威胁段与规则计数器）。
+// ClearDynamicBansLive 清空当前 7 天动态扫描黑名单（保留永久威胁段与规则计数器，自动适配 nftables 与 iptables+ipset）。
 func ClearDynamicBansLive(family string) error {
 	if runtime.GOOS != "linux" {
 		return nil
+	}
+	if DetectBackend() == BackendIPTables {
+		return defaultIPTablesBackend().FlushDynamicBans(family)
 	}
 	snap, err := readLiveSecurityTable()
 	if err != nil || snap == nil || !snap.Active {
@@ -244,10 +253,13 @@ func ClearDynamicBansLive(family string) error {
 	return execNFTBatch(sb.String())
 }
 
-// SyncWhitelistElementLive 在当前已运行表上实时增删白名单成员；若遇到旧表缺少 whitelist_ip6 则返回 needReload=true 提示调用方热重载。
+// SyncWhitelistElementLive 在当前已运行表/链上实时增删白名单成员；若遇到旧表缺少 whitelist_ip6 则返回 needReload=true 提示调用方热重载。
 func SyncWhitelistElementLive(norm string, isV6 bool, add bool) (needReload bool, err error) {
 	if runtime.GOOS != "linux" {
 		return false, nil
+	}
+	if DetectBackend() == BackendIPTables {
+		return defaultIPTablesBackend().SyncWhitelistElementLive(norm, isV6, add)
 	}
 	snap, err := readLiveSecurityTable()
 	if err != nil || snap == nil || !snap.Active {

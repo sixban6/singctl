@@ -101,8 +101,8 @@ func BuildOverview(_ context.Context, cfg *config.Config, callerIP string, q Ove
 				resp.Whitelist.LiveExtra = append(resp.Whitelist.LiveExtra, liveW)
 			}
 
-			if rawText := readLiveSecurityText(); rawText != "" {
-				resp.CompactRuleText = CollapseLargeSetsInNFTText(rawText, snap)
+			if rawText := readLiveSecurityText(snap); rawText != "" {
+				resp.CompactRuleText = rawText
 			}
 		}
 	}
