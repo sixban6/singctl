@@ -472,14 +472,17 @@ func adaptSingBoxJSONForTarget(
 	lowMemory bool,
 ) (adapted string, didFallbackDoH bool, didPruneAd2 bool, err error) {
 	adapted = alignLocalRuleSetPathsJSON(rawJSON, ruleSetDir, writtenRS)
-	if noAdGuard && isDNSLocalPointingToLocalAdGuard(adapted) {
+	if noAdGuard {
+		wasLocalExternal := isDNSLocalPointingToLocalAdGuard(adapted)
 		patched, changed, pErr := singbox.PatchDNSLocalJSON(adapted, false, 0)
 		if pErr != nil {
 			return "", false, false, fmt.Errorf("跨机自适配回退内置 DoH 失败: %w", pErr)
 		}
 		if changed {
 			adapted = patched
-			didFallbackDoH = true
+			if wasLocalExternal {
+				didFallbackDoH = true
+			}
 		}
 	}
 	if lowMemory {

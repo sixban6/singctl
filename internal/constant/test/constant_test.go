@@ -35,7 +35,6 @@ func TestDNSEngineAndSmartDNSConstants(t *testing.T) {
 		want string
 	}{
 		{"DNSEngineAuto", constant.DNSEngineAuto, "auto"},
-		{"DNSEngineSingBox", constant.DNSEngineSingBox, "singbox"},
 		{"DNSEngineAdGuard", constant.DNSEngineAdGuard, "adguard"},
 		{"DNSEngineSmartDNS", constant.DNSEngineSmartDNS, "smartdns"},
 		{"SmartDNSInstallPath", constant.SmartDNSInstallPath, "/usr/bin/smartdns"},

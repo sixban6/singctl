@@ -241,8 +241,6 @@ func resolveExternalLocalDNSEngine(g *ConfigGenerator, cfg *config.Config, platf
 	}
 
 	switch cfg.DNS.GetEngine() {
-	case constant.DNSEngineSingBox:
-		return "", false
 	case constant.DNSEngineAdGuard:
 		if probe(constant.DNSEngineAdGuard) {
 			return constant.DNSEngineAdGuard, true
@@ -275,31 +273,9 @@ func injectLocalDNSInDoc(g *ConfigGenerator, doc *sboption.Document, platform st
 
 	if engine, useExternal := resolveExternalLocalDNSEngine(g, cfg, platform); useExternal {
 		dnsPort := cfg.DNS.GetDNSPort()
-		updated := false
-		for i := range doc.DNS.Servers {
-			if doc.DNS.Servers[i].Tag == "dns_local" {
-				doc.DNS.Servers[i] = sboption.DNSServer{
-					Tag:        "dns_local",
-					Type:       "udp",
-					Server:     "127.0.0.1",
-					ServerPort: dnsPort,
-				}
-				updated = true
-				break
-			}
-		}
-		if !updated {
+		if !patchDNSLocalInDoc(doc, true, dnsPort) {
 			return false
 		}
-
-		doc.DNS.DisableCache = new(true)
-		doc.DNS.Optimistic = new(false)
-
-		if doc.Experimental != nil && doc.Experimental.CacheFile != nil {
-			doc.Experimental.CacheFile.StoreDNS = new(false)
-			doc.Experimental.CacheFile.StoreFakeIP = new(false)
-		}
-
 		if g == nil || !g.silent {
 			if engine == constant.DNSEngineSmartDNS {
 				log.Info("已将 sing-box dns_local 指向本地 SmartDNS (127.0.0.1:%d)，并交由 SmartDNS 统一管理 DNS 缓存与测速", dnsPort)
@@ -310,24 +286,17 @@ func injectLocalDNSInDoc(g *ConfigGenerator, doc *sboption.Document, platform st
 		return true
 	}
 
-	var dnsCfg config.ClientDNSConfig
-	if cfg != nil {
-		dnsCfg = cfg.DNS
-	}
-	changed, err := ApplyEnhancedSingBoxDNSInDoc(doc, dnsCfg, ExtractSubscriptionDomains(cfg), time.Now())
-	if err != nil {
-		log.Warn("应用 sing-box 加强版加密 DNS 失败: %v", err)
-		return false
-	}
+	// 无外部本地 DNS 引擎就绪时：应急升级为纯 IP 加密 DoH 防劫持，同时强制 disable_cache=true / optimistic=false / store_dns=false。
+	changed := patchDNSLocalInDoc(doc, false, 0)
 	if changed && (g == nil || !g.silent) {
-		log.Info("已启用 sing-box 加强版防劫持加密 DNS（纯 IP DoH/DoT + 缓存乐观解析）")
+		log.Info("未检测到就绪的本地 DNS 引擎（AdGuard Home / SmartDNS），已启用应急纯 IP 加密 DoH (https://%s/dns-query) 防劫持兜底", defaultFallbackDoHServer)
 	}
 	return changed
 }
 
-// InjectLocalDNS 在 Linux/OpenWrt 客户端网关平台按三引擎策略配置本地 DNS：
+// InjectLocalDNS 在 Linux/OpenWrt 客户端网关平台按双引擎策略配置本地 DNS：
 // 外部本地引擎（AdGuard Home / SmartDNS）启用且就绪时指向 127.0.0.1:<dns_port>；
-// 否则自动启用 sing-box 加强版纯 IP 加密 DoH/DoT，彻底杜绝明文 UDP 53 回退。
+// 否则自动升级为纯 IP 加密 DoH 应急兜底，并始终强制 disable_cache=true、optimistic=false、store_dns=false。
 func (g *ConfigGenerator) InjectLocalDNS(rawJSON, platform string) (string, error) {
 	if g == nil || platform != "linux" {
 		return rawJSON, nil

@@ -15,8 +15,10 @@ import (
 
 	"singctl/internal/adguard"
 	"singctl/internal/config"
+	"singctl/internal/constant"
 	"singctl/internal/gateway"
 	"singctl/internal/netdiag"
+	"singctl/internal/platform/servicemgr"
 )
 
 func TestGatewayAPI_GetPutAndSelfLoopReject(t *testing.T) {
@@ -244,5 +246,82 @@ func TestGatewayIPv6ModeAndDNSLeakTestAPI(t *testing.T) {
 	srv.Mux.ServeHTTP(deepRec, deepReq)
 	if deepRec.Code != http.StatusOK || capturedRounds != 16 {
 		t.Fatalf("expected POST /api/dns/leak-test deep status=200 rounds=16, got status=%d rounds=%d", deepRec.Code, capturedRounds)
+	}
+}
+
+func TestGatewayIPv6Mode_AutoSyncsSmartDNSBlockAAAA(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "singctl.yaml")
+	smartBin := filepath.Join(dir, "smartdns")
+	smartConf := filepath.Join(dir, "smartdns.conf")
+	smartRules := filepath.Join(dir, "smartdns-rules.d")
+
+	if err := os.WriteFile(smartBin, []byte("#!/bin/sh\necho 'smartdns 1.2025.46'\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	initCfg := &config.Config{
+		Gateway: config.GatewayConfig{Mode: gateway.ModeMain, IPv6Mode: config.GatewayIPv6Off},
+		DNS:     config.ClientDNSConfig{Engine: constant.DNSEngineSmartDNS, DNSPort: 5353},
+	}
+	if err := config.Save(cfgPath, initCfg); err != nil {
+		t.Fatal(err)
+	}
+
+	mockSvc := servicemgr.NewMock()
+	_ = mockSvc.Start(t.Context(), constant.SmartDNSServiceName)
+
+	srv := webui.New(webui.Options{
+		ConfigPath:              cfgPath,
+		AdGuardBinPath:          filepath.Join(dir, "missing-agh"),
+		AdGuardConfigPath:       filepath.Join(dir, "missing-agh.yaml"),
+		SmartDNSBinPath:         smartBin,
+		SmartDNSConfigPath:      smartConf,
+		SmartDNSRulesDir:        smartRules,
+		LocalDNSServiceMgr:      mockSvc,
+		SkipAdGuardProbeForTest: true,
+		GatewayProberForTest: func() gateway.TopologyInfo {
+			return gateway.TopologyInfo{LANIP: "192.0.2.2", LANCIDR: "192.0.2.0/24", LANIface: "eth0", SuggestedMainRouterIP: "192.0.2.1"}
+		},
+	})
+
+	putGateway := func(body string) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPut, "/api/gateway", bytes.NewBufferString(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		srv.Mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("PUT /api/gateway %s failed: status=%d body=%s", body, rec.Code, rec.Body.String())
+		}
+	}
+
+	// 1. cn_only -> SmartDNS must NOT block AAAA (force-AAAA-SOA yes absent)
+	putGateway(`{"mode":"main","ipv6Mode":"cn_only"}`)
+	confCNOnly, err := os.ReadFile(smartConf)
+	if err != nil {
+		t.Fatalf("expected smartdns.conf rendered on ipv6Mode=cn_only: %v", err)
+	}
+	if strings.Contains(string(confCNOnly), "force-AAAA-SOA yes") {
+		t.Fatalf("ipv6Mode=cn_only must NOT enable force-AAAA-SOA yes:\n%s", string(confCNOnly))
+	}
+
+	// 2. full -> SmartDNS must NOT block AAAA
+	putGateway(`{"mode":"main","ipv6Mode":"full"}`)
+	confFull, err := os.ReadFile(smartConf)
+	if err != nil {
+		t.Fatalf("read smartdns.conf on full: %v", err)
+	}
+	if strings.Contains(string(confFull), "force-AAAA-SOA yes") {
+		t.Fatalf("ipv6Mode=full must NOT enable force-AAAA-SOA yes:\n%s", string(confFull))
+	}
+
+	// 3. off -> SmartDNS MUST automatically enable force-AAAA-SOA yes
+	putGateway(`{"mode":"main","ipv6Mode":"off"}`)
+	confOff, err := os.ReadFile(smartConf)
+	if err != nil {
+		t.Fatalf("read smartdns.conf on off: %v", err)
+	}
+	if !strings.Contains(string(confOff), "force-AAAA-SOA yes") {
+		t.Fatalf("ipv6Mode=off must automatically enable force-AAAA-SOA yes:\n%s", string(confOff))
 	}
 }

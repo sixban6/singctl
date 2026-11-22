@@ -1,4 +1,4 @@
-// 文件职责：实现三引擎防劫持 DNS 的硬件准入评估、自动选型推荐与运行态活跃引擎解析。
+// 文件职责：实现双引擎防劫持 DNS（SmartDNS / AdGuard Home）的硬件准入评估、自动选型推荐与运行态活跃引擎解析。
 package localdns
 
 import (
@@ -36,7 +36,7 @@ type EngineEligibility struct {
 	BlockedReason string
 }
 
-// SelectionResult 汇总自动选型结果：硬件推荐引擎、当前可直接运行的活跃引擎与三引擎准入详情。
+// SelectionResult 汇总自动选型结果：硬件推荐引擎、当前活跃引擎（smartdns / adguard）与双引擎准入详情。
 type SelectionResult struct {
 	RecommendedEngine string
 	RecommendedReason string
@@ -136,18 +136,15 @@ func evaluateSmartDNSEligibility(hw HardwareProfile, isInstalled bool) EngineEli
 	return elig
 }
 
-// EvaluateEligibility 评估三个 DNS 引擎在当前硬件与安装状态下的准入性。
+// EvaluateEligibility 评估双引擎（SmartDNS / AdGuard Home）在当前硬件与安装状态下的准入性。
 func EvaluateEligibility(hw HardwareProfile, installed map[string]bool) map[string]EngineEligibility {
 	return map[string]EngineEligibility{
-		constant.DNSEngineSingBox: {
-			Eligible: true,
-		},
 		constant.DNSEngineSmartDNS: evaluateSmartDNSEligibility(hw, installed[constant.DNSEngineSmartDNS]),
 		constant.DNSEngineAdGuard:  evaluateAdGuardEligibility(hw, installed[constant.DNSEngineAdGuard]),
 	}
 }
 
-// RecommendEngine 按存量保护与硬件分级阈值输出 auto 策略推荐结果。
+// RecommendEngine 按存量保护与硬件分级阈值输出 auto 策略推荐结果（仅在 adguard 与 smartdns 之间推荐）。
 func RecommendEngine(hw HardwareProfile, installed map[string]bool) SelectionResult {
 	elig := EvaluateEligibility(hw, installed)
 	res := SelectionResult{
@@ -168,49 +165,37 @@ func RecommendEngine(hw HardwareProfile, installed map[string]bool) SelectionRes
 		return res
 	}
 
-	// 2. 全新设备未装外部引擎：运行态立即落 singbox 加强版开箱即用，同时给出精准硬件推荐。
-	res.ActiveEngine = constant.DNSEngineSingBox
+	// 2. 全新设备未装外部引擎：按内存与闪存门槛推荐 AdGuard Home 或 SmartDNS；
+	// 若两家均受硬件门槛限制，仍推荐最轻量的 SmartDNS（eligible=false）并由 sing-box 纯 DoH 静默兜底防劫持。
 	if elig[constant.DNSEngineAdGuard].Eligible {
 		res.RecommendedEngine = constant.DNSEngineAdGuard
+		res.ActiveEngine = constant.DNSEngineAdGuard
 		res.RecommendedReason = "设备内存与闪存充裕，推荐安装 AdGuard Home 获得独立 Web 面板、完整查询日志与丰富过滤规则库"
 		return res
 	}
 	if elig[constant.DNSEngineSmartDNS].Eligible {
 		res.RecommendedEngine = constant.DNSEngineSmartDNS
+		res.ActiveEngine = constant.DNSEngineSmartDNS
 		res.RecommendedReason = "检测到中小内存或紧张闪存设备，推荐安装 SmartDNS 极速版（~3 MB 闪存 / ~10 MB 内存），支持多上游毫秒级竞速与内存盘审计"
 		return res
 	}
 
-	res.RecommendedEngine = constant.DNSEngineSingBox
-	res.RecommendedReason = "检测到超低内存或极小闪存硬件环境，推荐零额外开销的 sing-box 加强版纯 IP 加密 DoH/DoT 引擎"
+	res.RecommendedEngine = constant.DNSEngineSmartDNS
+	res.ActiveEngine = constant.DNSEngineSmartDNS
+	res.RecommendedReason = "检测到超低内存或极小闪存硬件环境，默认推荐最轻量的 SmartDNS（当前硬件受限，底层 sing-box 已启用纯 IP 加密 DoH 应急兜底防劫持）"
 	return res
 }
 
-// ResolveActiveEngine 结合用户配置偏好、启用开关、硬件画像与已安装状态解析最终活跃引擎。
-func ResolveActiveEngine(configured string, dnsEnabled bool, hw HardwareProfile, installed map[string]bool) SelectionResult {
+// ResolveActiveEngine 结合用户配置偏好、启用开关、硬件画像与已安装状态解析最终活跃引擎（smartdns / adguard）。
+func ResolveActiveEngine(configured string, _ bool, hw HardwareProfile, installed map[string]bool) SelectionResult {
 	res := RecommendEngine(hw, installed)
-	if !dnsEnabled {
-		res.ActiveEngine = constant.DNSEngineSingBox
-		return res
-	}
-
 	switch strings.ToLower(strings.TrimSpace(configured)) {
-	case constant.DNSEngineSingBox:
-		res.ActiveEngine = constant.DNSEngineSingBox
 	case constant.DNSEngineSmartDNS:
-		if installed[constant.DNSEngineSmartDNS] {
-			res.ActiveEngine = constant.DNSEngineSmartDNS
-		} else {
-			res.ActiveEngine = constant.DNSEngineSingBox
-		}
+		res.ActiveEngine = constant.DNSEngineSmartDNS
 	case constant.DNSEngineAdGuard:
-		if installed[constant.DNSEngineAdGuard] {
-			res.ActiveEngine = constant.DNSEngineAdGuard
-		} else {
-			res.ActiveEngine = constant.DNSEngineSingBox
-		}
+		res.ActiveEngine = constant.DNSEngineAdGuard
 	default:
-		// "auto" / 空 / 非法值：沿用 RecommendEngine 解析结果
+		// "auto" / 空 / 历史 "singbox" / 未知值：沿用 RecommendEngine 解析结果
 	}
 	return res
 }

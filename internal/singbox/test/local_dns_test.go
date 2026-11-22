@@ -1,4 +1,4 @@
-// 文件职责：覆盖本地 AdGuard DNS 与加密 DoH 兜底热切换及 RFC 6303 私网 PTR NXDOMAIN 防环注入测试。
+// 文件职责：覆盖本地外部 DNS（AdGuard Home / SmartDNS）与应急纯 IP DoH 兜底热切换、彻底关闭乐观缓存（optimistic: false）及 RFC 6303 私网 PTR NXDOMAIN 防环注入测试。
 package singbox_test
 
 import (
@@ -7,13 +7,14 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"singctl/internal/singbox"
 	"singctl/internal/singbox/sboption"
 )
 
-func TestPatchDNSLocalJSON_RoundTripAndSingBoxCheck(t *testing.T) {
+func TestPatchDNSLocalJSON_RoundTripNoOptimisticAndSingBoxCheck(t *testing.T) {
 	base := `{
   "dns": {
     "servers": [
@@ -36,7 +37,24 @@ func TestPatchDNSLocalJSON_RoundTripAndSingBoxCheck(t *testing.T) {
 		t.Fatalf("PatchDNSLocalJSON(useAdGuard=true) failed: %v", err)
 	}
 	if !changed {
-		t.Fatal("expected changed=true when switching to AdGuard Home")
+		t.Fatal("expected changed=true when switching to external local DNS")
+	}
+
+	docAGH, err := sboption.ParseDocument([]byte(toAGH))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if docAGH.DNS.DisableCache == nil || !*docAGH.DNS.DisableCache {
+		t.Fatalf("external DNS: expected disable_cache=true, got %v", docAGH.DNS.DisableCache)
+	}
+	if docAGH.DNS.Optimistic == nil || *docAGH.DNS.Optimistic {
+		t.Fatalf("external DNS: expected optimistic=false, got %v", docAGH.DNS.Optimistic)
+	}
+	if docAGH.Experimental.CacheFile.StoreDNS == nil || *docAGH.Experimental.CacheFile.StoreDNS {
+		t.Fatalf("external DNS: expected store_dns=false, got %v", docAGH.Experimental.CacheFile.StoreDNS)
+	}
+	if docAGH.Experimental.CacheFile.StoreFakeIP == nil || *docAGH.Experimental.CacheFile.StoreFakeIP {
+		t.Fatalf("external DNS: expected store_fakeip=false, got %v", docAGH.Experimental.CacheFile.StoreFakeIP)
 	}
 
 	tmpDir := t.TempDir()
@@ -54,9 +72,10 @@ func TestPatchDNSLocalJSON_RoundTripAndSingBoxCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	if changedAgain {
-		t.Fatal("expected changed=false on idempotent call")
+		t.Fatal("expected changed=false on idempotent external call")
 	}
 
+	// Fallback pure-IP DoH MUST also force disable_cache=true, optimistic=false, store_dns=false!
 	toFallback, changedFB, err := singbox.PatchDNSLocalJSON(toAGH, false, 5353)
 	if err != nil {
 		t.Fatalf("PatchDNSLocalJSON(useAdGuard=false) failed: %v", err)
@@ -64,6 +83,26 @@ func TestPatchDNSLocalJSON_RoundTripAndSingBoxCheck(t *testing.T) {
 	if !changedFB {
 		t.Fatal("expected changed=true when switching back to encrypted DoH fallback")
 	}
+	docFB, err := sboption.ParseDocument([]byte(toFallback))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if docFB.DNS.DisableCache == nil || !*docFB.DNS.DisableCache {
+		t.Fatalf("DoH fallback: expected disable_cache=true, got %v", docFB.DNS.DisableCache)
+	}
+	if docFB.DNS.Optimistic == nil || *docFB.DNS.Optimistic {
+		t.Fatalf("DoH fallback: expected optimistic=false, got %v", docFB.DNS.Optimistic)
+	}
+	if docFB.Experimental.CacheFile.StoreDNS == nil || *docFB.Experimental.CacheFile.StoreDNS {
+		t.Fatalf("DoH fallback: expected store_dns=false, got %v", docFB.Experimental.CacheFile.StoreDNS)
+	}
+
+	// Idempotent second fallback call
+	_, changedFBAgain, err := singbox.PatchDNSLocalJSON(toFallback, false, 5353)
+	if err != nil || changedFBAgain {
+		t.Fatalf("expected changed=false on idempotent fallback call, got changed=%v err=%v", changedFBAgain, err)
+	}
+
 	if err := os.WriteFile(cfgPath, []byte(toFallback), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -71,6 +110,48 @@ func TestPatchDNSLocalJSON_RoundTripAndSingBoxCheck(t *testing.T) {
 	if linkedFB {
 		t.Fatal("expected linked=false after fallback to pure-IP DoH")
 	}
+
+	// Legacy DoH JSON that still has optimistic=true / store_dns=true / disable_cache=false MUST be corrected!
+	legacyOptimistic := `{
+  "dns": {
+    "servers": [
+      {"tag": "dns_local", "type": "https", "server": "223.5.5.5", "server_port": 443, "path": "/dns-query"}
+    ],
+    "disable_cache": false,
+    "optimistic": true
+  },
+  "experimental": {
+    "cache_file": {
+      "enabled": true,
+      "store_dns": true
+    }
+  }
+}`
+	healed, healedChanged, err := singbox.PatchDNSLocalJSON(legacyOptimistic, false, 5353)
+	if err != nil || !healedChanged {
+		t.Fatalf("expected legacy optimistic=true DoH config to be patched, changed=%v err=%v", healedChanged, err)
+	}
+	docHealed, err := sboption.ParseDocument([]byte(healed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if docHealed.DNS.DisableCache == nil || !*docHealed.DNS.DisableCache ||
+		docHealed.DNS.Optimistic == nil || *docHealed.DNS.Optimistic ||
+		docHealed.Experimental.CacheFile.StoreDNS == nil || *docHealed.Experimental.CacheFile.StoreDNS {
+		t.Fatalf("legacy optimistic config not properly disabled: disable_cache=%v optimistic=%v store_dns=%v",
+			docHealed.DNS.DisableCache, docHealed.DNS.Optimistic, docHealed.Experimental.CacheFile.StoreDNS)
+	}
+
+	// Concurrent race-safety check
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() {
+			if _, _, pErr := singbox.PatchDNSLocalJSON(base, false, 5353); pErr != nil {
+				t.Errorf("concurrent PatchDNSLocalJSON failed: %v", pErr)
+			}
+		})
+	}
+	wg.Wait()
 
 	if sbBin, err := exec.LookPath("sing-box"); err == nil && sbBin != "" {
 		for name, content := range map[string]string{"adguard": toAGH, "fallback_doh": toFallback} {

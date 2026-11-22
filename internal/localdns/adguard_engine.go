@@ -4,7 +4,6 @@ package localdns
 import (
 	"cmp"
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"slices"
@@ -276,10 +275,6 @@ func (e *AdGuardEngine) RemoveFilter(ctx context.Context, filterURL string) erro
 
 func (e *AdGuardEngine) RefreshFilters(ctx context.Context) error {
 	return e.mgr.RefreshFilters(ctx)
-}
-
-func (e *AdGuardEngine) SetBlockAAAA(context.Context, bool) error {
-	return errors.New("AdGuard Home 暂不支持快捷 AAAA 屏蔽开关，请在原生管理面板 DNS 设置中调整")
 }
 
 func (e *AdGuardEngine) SyncBlockRules(ctx context.Context, blocks []config.BlockRule) (bool, string, error) {
