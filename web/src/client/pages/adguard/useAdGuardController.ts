@@ -40,7 +40,6 @@ export function useAdGuardController(
   );
   const [mutating, setMutating] = useState(false);
   const [switchingEngine, setSwitchingEngine] = useState<DNSEnginePreference | null>(null);
-  const [togglingBlockAAAA, setTogglingBlockAAAA] = useState(false);
 
   const [probe, setProbe] = useState<UpstreamProbeReport | null>(
     () => peekCachedQuery<UpstreamProbeReport>(ADGUARD_PROBE_CACHE_KEY) ?? null,
@@ -269,24 +268,6 @@ export function useAdGuardController(
       error((e as Error).message || '切换过滤状态失败');
     } finally {
       setMutating(false);
-    }
-  };
-
-  const handleToggleBlockAAAA = async (enabled: boolean): Promise<boolean> => {
-    setTogglingBlockAAAA(true);
-    try {
-      await clientApi.setDNSBlockAAAA(enabled);
-      if (snap) {
-        applySnapshot({ ...snap, blockAAAA: enabled });
-      }
-      success(enabled ? '已开启 AAAA (IPv6) 解析屏蔽并热生效' : '已关闭 AAAA (IPv6) 解析屏蔽并热生效');
-      await loadOverview(true);
-      return true;
-    } catch (e) {
-      error((e as Error).message || '切换 AAAA 屏蔽开关失败');
-      return false;
-    } finally {
-      setTogglingBlockAAAA(false);
     }
   };
 
@@ -542,7 +523,6 @@ export function useAdGuardController(
     loading,
     mutating,
     switchingEngine,
-    togglingBlockAAAA,
     probe,
     probing,
     pauseRemainSec,
@@ -559,7 +539,6 @@ export function useAdGuardController(
     runProbe,
     handleSwitchEngine,
     handleProtection,
-    handleToggleBlockAAAA,
     handleClearCache,
     handleWhitelist,
     handleAddRewrite,

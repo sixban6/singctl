@@ -53,7 +53,6 @@ export const AdGuardPage: React.FC<AdGuardPageProps> = ({
     loading,
     mutating,
     switchingEngine,
-    togglingBlockAAAA,
     probe,
     probing,
     pauseRemainSec,
@@ -70,7 +69,6 @@ export const AdGuardPage: React.FC<AdGuardPageProps> = ({
     runProbe,
     handleSwitchEngine,
     handleProtection,
-    handleToggleBlockAAAA,
     handleClearCache,
     handleWhitelist,
     handleAddRewrite,
@@ -171,9 +169,7 @@ export const AdGuardPage: React.FC<AdGuardPageProps> = ({
     );
   }
 
-  const showQuickControls = Boolean(
-    snap && snap.dnsHealthy && (capabilities.hasPauseProtection || capabilities.hasBlockAAAA),
-  );
+  const showQuickControls = Boolean(snap && snap.dnsHealthy && capabilities.hasPauseProtection);
 
   return (
     <div className="space-y-5">
@@ -316,103 +312,63 @@ export const AdGuardPage: React.FC<AdGuardPageProps> = ({
 
       {showQuickControls && snap && (
         <SectionCard
-          title="防误伤与解析快捷控制"
+          title="防误伤快捷控制"
           icon={<ShieldCheck className="w-4 h-4" />}
           subtitle="遇到小程序、电商活动或视频激励加载异常时可一键临时放行广告拦截（不断网），到点自动恢复"
         >
-          <div className="space-y-3.5">
-            {capabilities.hasPauseProtection && (
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div className="flex flex-wrap items-center gap-2">
-                  {snap.protectionEnabled ? (
-                    <>
-                      <Button
-                        size="sm"
-                        variant="secondary"
-                        disabled={mutating || !canMutate}
-                        icon={<PauseCircle className="w-3.5 h-3.5" />}
-                        onClick={() => void handleProtection(false, 5)}
-                      >
-                        暂停过滤 5 分钟
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="secondary"
-                        disabled={mutating || !canMutate}
-                        onClick={() => void handleProtection(false, 30)}
-                      >
-                        暂停 30 分钟
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="secondary"
-                        disabled={mutating || !canMutate}
-                        onClick={() => void handleProtection(false, 60)}
-                      >
-                        暂停 1 小时
-                      </Button>
-                    </>
-                  ) : (
-                    <Button
-                      size="sm"
-                      variant="primary"
-                      disabled={mutating || !canMutate}
-                      icon={<PlayCircle className="w-3.5 h-3.5" />}
-                      onClick={() => void handleProtection(true, 0)}
-                    >
-                      立即恢复去广告保护
-                    </Button>
-                  )}
-                </div>
-
-                <div className="flex flex-wrap items-center gap-2 text-xs text-secondary">
-                  {(snap.autoWhitelistedSubs?.length || 0) > 0 && (
-                    <Badge tone="ok">
-                      已自动保护 {snap.autoWhitelistedSubs.length} 个订阅域名
-                    </Badge>
-                  )}
-                  {(snap.auditManagedCount || 0) > 0 && (
-                    <Badge tone="accent">行为审计联动阻断 {snap.auditManagedCount} 条</Badge>
-                  )}
-                </div>
-              </div>
-            )}
-
-            {capabilities.hasBlockAAAA && (
-              <div className="pt-3 border-t border-subtle flex flex-wrap items-center justify-between gap-3">
-                <div className="min-w-0 space-y-0.5">
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs sm:text-sm font-semibold text-primary">
-                      屏蔽 AAAA (IPv6) 解析
-                    </span>
-                    <Badge tone={snap.blockAAAA ? 'ok' : 'neutral'}>
-                      {snap.blockAAAA ? '已屏蔽 IPv6 解析' : '允许 IPv6 解析'}
-                    </Badge>
-                  </div>
-                  <div className="text-[11px] sm:text-xs text-secondary">
-                    无公网 IPv6 或 IPv6 链路质量差时建议开启，直接返回空 AAAA 消除双栈连接等待超时。
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={Boolean(snap.blockAAAA)}
-                  disabled={togglingBlockAAAA || mutating || !canMutate}
-                  onClick={() => void handleToggleBlockAAAA(!snap.blockAAAA)}
-                  className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full border transition-colors cursor-pointer disabled:opacity-50 ${
-                    snap.blockAAAA
-                      ? 'bg-emerald-500 border-emerald-400'
-                      : 'bg-surface2 border-strong'
-                  }`}
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-2">
+              {snap.protectionEnabled ? (
+                <>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={mutating || !canMutate}
+                    icon={<PauseCircle className="w-3.5 h-3.5" />}
+                    onClick={() => void handleProtection(false, 5)}
+                  >
+                    暂停过滤 5 分钟
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={mutating || !canMutate}
+                    onClick={() => void handleProtection(false, 30)}
+                  >
+                    暂停 30 分钟
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={mutating || !canMutate}
+                    onClick={() => void handleProtection(false, 60)}
+                  >
+                    暂停 1 小时
+                  </Button>
+                </>
+              ) : (
+                <Button
+                  size="sm"
+                  variant="primary"
+                  disabled={mutating || !canMutate}
+                  icon={<PlayCircle className="w-3.5 h-3.5" />}
+                  onClick={() => void handleProtection(true, 0)}
                 >
-                  <span
-                    className={`inline-block h-4 w-4 rounded-full bg-white shadow transition-transform ${
-                      snap.blockAAAA ? 'translate-x-5' : 'translate-x-1'
-                    }`}
-                  />
-                </button>
-              </div>
-            )}
+                  立即恢复去广告保护
+                </Button>
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 text-xs text-secondary">
+              {(snap.autoWhitelistedSubs?.length || 0) > 0 && (
+                <Badge tone="ok">
+                  已自动保护 {snap.autoWhitelistedSubs.length} 个订阅域名
+                </Badge>
+              )}
+              {(snap.auditManagedCount || 0) > 0 && (
+                <Badge tone="accent">行为审计联动阻断 {snap.auditManagedCount} 条</Badge>
+              )}
+            </div>
           </div>
         </SectionCard>
       )}

@@ -8,7 +8,6 @@ export interface DNSCapabilities {
   hasFilterLists: boolean;
   hasCustomFilterURL: boolean;
   hasPauseProtection: boolean;
-  hasBlockAAAA: boolean;
   canClearCache: boolean;
   canUninstall: boolean;
 }
@@ -164,7 +163,6 @@ export interface DNSOverviewSnapshot {
   recommendedEngine: DNSEngineID;
   recommendedReason: string;
   fallbackDoHActive?: boolean;
-  blockAAAA: boolean;
   statsSource: 'adguard_api' | 'smartdns_audit';
   statsSourceLabel: string;
   capabilities: DNSCapabilities;
