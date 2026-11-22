@@ -151,6 +151,7 @@ DNS optimization, and complete service lifecycle management.`,
 	)
 	addGrouped("system",
 		NewDoctorCmd(cfgPath),
+		NewSafeCommitCmd(cfgPath),
 		NewInfoCommand(info.Version),
 		NewUpdateCmd(cfgPath, info.Version),
 		NewVersionCmd(info.Version, info.BuildTime, info.GitCommit),

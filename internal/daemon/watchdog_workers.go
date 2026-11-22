@@ -46,7 +46,9 @@ func (d *Daemon) maybeSampleDeviceAuditAsync() {
 		ctx, cancel := context.WithTimeout(d.ctx, 3*time.Second)
 		defer cancel()
 		collector.UpdateConfig(cfg)
-		_ = collector.SampleActiveConnections(ctx)
+		if collector.SampleActiveConnections(ctx) {
+			d.maybeObserveAuditAlerts(ctx, cfg, collector)
+		}
 	}()
 }
 
@@ -213,11 +215,13 @@ func (d *Daemon) maybeRefreshRuleSetsAsync() {
 	}()
 }
 
-// runWatchdogCheck 健康检查：先统一通过 localdns 守护当前活跃本地 DNS 引擎，再探测 sing-box 健康，不健康则二次确认后重启。
+// runWatchdogCheck 健康检查：先维护 tailscaled OOM 免疫与宿主机资源预警，再守护本地 DNS 与 sing-box，不健康则二次确认后重启。
 func (d *Daemon) runWatchdogCheck() {
 	if d.reloading.Load() {
 		return
 	}
+	d.GuardTailscaleOOMOnce()
+	d.CheckHostResourcesOnce()
 	d.GuardLocalDNSOnce(d.ctx)
 	cfg := d.currentConfig()
 
@@ -225,6 +229,9 @@ func (d *Daemon) runWatchdogCheck() {
 	result1 := mon.CheckHealth()
 	d.recordHealthResult(result1)
 	if result1.Healthy {
+		if d.watchdogUnhealthy.Swap(false) {
+			d.RecordWatchdogHealEvent(true, "recovered", result1.Details)
+		}
 		d.maybeRefreshRuleSetsAsync()
 		d.maybeSyncSubscriptionsAsync()
 		return
@@ -270,6 +277,8 @@ func (d *Daemon) runWatchdogCheck() {
 		RestartResult: "-",
 	})
 
+	d.watchdogUnhealthy.Store(true)
+	d.RecordWatchdogHealEvent(false, result2.FailedReason, result2.Details)
 	d.doRestart(result2, result2.FailedReason)
 }
 
@@ -366,6 +375,10 @@ func (d *Daemon) doRestart(checkResult HealthCheckResult, reason string) {
 	logger.Success("[Watchdog] sing-box restarted successfully (reason: %s)", reason)
 	resAfter := NewMonitor(cfg).CheckHealth()
 	d.recordHealthResult(resAfter)
+	if resAfter.Healthy {
+		d.watchdogUnhealthy.Store(false)
+		d.RecordWatchdogHealEvent(true, reason, fmt.Sprintf("sing-box 已自动重启恢复健康 (原因: %s)", reason))
+	}
 	LogWatchdogEvent(WatchdogEvent{
 		Time:   now,
 		Action: "RESTART",

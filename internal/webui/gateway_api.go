@@ -18,10 +18,12 @@ import (
 )
 
 type gatewayPutRequest struct {
-	Mode         string  `json:"mode"`
-	MainRouterIP string  `json:"mainRouterIP"`
-	LANIface     string  `json:"lanIface,omitempty"`
-	IPv6Mode     *string `json:"ipv6Mode,omitempty"`
+	Mode             string  `json:"mode"`
+	MainRouterIP     string  `json:"mainRouterIP"`
+	LANIface         string  `json:"lanIface,omitempty"`
+	IPv6Mode         *string `json:"ipv6Mode,omitempty"`
+	SafeCommit       bool    `json:"safeCommit,omitempty"`
+	SafeCommitTTLSec int     `json:"safeCommitTtlSec,omitempty"`
 }
 
 func (s *Server) probeGatewayTopology() gateway.TopologyInfo {
@@ -123,6 +125,13 @@ func (s *Server) handleGatewayPut(w http.ResponseWriter, r *http.Request) {
 	if _, err := gateway.ResolveAndValidate(nextGw, topo); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
+	}
+
+	if body.SafeCommit {
+		if _, err := s.armSafeCommit(r.Context(), body.SafeCommitTTLSec, "网关拓扑/IPv6 变更"); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 
 	if nextGw.EffectiveMode() == gateway.ModeMain {

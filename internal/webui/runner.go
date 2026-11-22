@@ -202,6 +202,17 @@ func paramBool(p map[string]any, key string) bool {
 	return false
 }
 
+func paramInt(p map[string]any, key string) int {
+	switch v := p[key].(type) {
+	case float64:
+		return int(v)
+	case int:
+		return v
+	default:
+		return 0
+	}
+}
+
 func (s *Server) resolveExecutable() (string, error) {
 	if exe := strings.TrimSpace(s.opts.ExecutablePath); exe != "" {
 		return exe, nil
@@ -218,8 +229,10 @@ func (s *Server) resolveExecutable() (string, error) {
 //	{"t":"exit","code":0}
 func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Name   string         `json:"name"`
-		Params map[string]any `json:"params"`
+		Name             string         `json:"name"`
+		Params           map[string]any `json:"params"`
+		SafeCommit       bool           `json:"safeCommit,omitempty"`
+		SafeCommitTTLSec int            `json:"safeCommitTtlSec,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "请求格式错误: "+err.Error())
@@ -238,6 +251,18 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer s.actionBusy.Store(false)
+
+	useSafeCommit := body.SafeCommit || paramBool(body.Params, "safeCommit")
+	if useSafeCommit {
+		ttlSec := body.SafeCommitTTLSec
+		if ttlSec <= 0 {
+			ttlSec = paramInt(body.Params, "safeCommitTtlSec")
+		}
+		if _, err := s.armSafeCommit(r.Context(), ttlSec, "高危动作: "+def.Title); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 
 	exe, err := s.resolveExecutable()
 	if err != nil {

@@ -205,19 +205,45 @@ func runStopSingbox(cfg *config.Config) error {
 	return sb.Stop()
 }
 
-func newStartCmd(defaultConfigPath string) *cobra.Command {
+// StartSingboxDeps 封装 `singctl sb start` 与 `--safe-commit` 集成的可注入依赖（零值回退生产默认）。
+type StartSingboxDeps struct {
+	SafeCommit SafeCommitCmdDeps
+	StartFunc  func(cfg *config.Config, configPath string) error
+}
+
+func newStartCmdWithDeps(defaultConfigPath string, deps StartSingboxDeps) *cobra.Command {
+	var safeCommitSec int
 	// 1. sb start
 	cmd := &cobra.Command{
 		Use:   "start",
 		Short: "生成配置并启动 sing-box / Generate config and start sing-box",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if safeCommitSec < 0 || (safeCommitSec > 0 && (safeCommitSec < constant.SafeCommitMinTTLSec || safeCommitSec > constant.SafeCommitMaxTTLSec)) {
+				return fmt.Errorf("--safe-commit 必须为 0（关闭）或在 %d..%d 秒之间，当前值: %d",
+					constant.SafeCommitMinTTLSec, constant.SafeCommitMaxTTLSec, safeCommitSec)
+			}
 			cfg, resolvedPath, err := loadCmdConfig(cmd, defaultConfigPath)
 			if err != nil {
 				return err
 			}
-			return runStartSingbox(cfg, resolvedPath)
+			if safeCommitSec > 0 {
+				st, armErr := armSafeCommitCLI(cmd.Context(), resolvedPath, safeCommitSec, "singctl sb start", deps.SafeCommit)
+				if armErr != nil {
+					return fmt.Errorf("failed to arm safe-commit fuse: %w", armErr)
+				}
+				msg := fmt.Sprintf("🛡️ 已开启 Safe Commit 安全回滚保险丝 (%ds)，启动后请执行确认：\n  singctl safe-commit confirm --token %s",
+					st.TTLSec, st.Token)
+				logger.Warn("%s", msg)
+				_, _ = fmt.Fprintln(cmd.OutOrStdout(), msg)
+			}
+			startFn := deps.StartFunc
+			if startFn == nil {
+				startFn = runStartSingbox
+			}
+			return startFn(cfg, resolvedPath)
 		},
 	}
+	cmd.Flags().IntVar(&safeCommitSec, "safe-commit", 0, "启动前开启安全回滚倒计时秒数（0=关闭，范围 60..600）")
 	return cmd
 }
 
@@ -588,6 +614,11 @@ func newCacheClearCmd(defaultConfigPath string) *cobra.Command {
 }
 
 func NewSingboxCommand(configPath string) *cobra.Command {
+	return NewSingboxCommandWithDeps(configPath, StartSingboxDeps{})
+}
+
+// NewSingboxCommandWithDeps 创建支持显式依赖注入的 `singctl sb` 命令树。
+func NewSingboxCommandWithDeps(configPath string, deps StartSingboxDeps) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "singbox",
 		Aliases: []string{"sb"}, // 添加快捷命令 singctl sb
@@ -595,7 +626,7 @@ func NewSingboxCommand(configPath string) *cobra.Command {
 	}
 
 	cmd.AddCommand(
-		newStartCmd(configPath),
+		newStartCmdWithDeps(configPath, deps),
 		newStopCmd(configPath),
 		newRestartCmd(configPath),
 		newGenCmd(configPath),
