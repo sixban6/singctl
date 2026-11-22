@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"singctl/internal/common/sysinfo"
@@ -23,11 +24,12 @@ import (
 )
 
 const (
-	DefaultBinaryPath   = "/usr/bin/smartdns"
-	DefaultConfigDir    = "/etc/singctl"
-	DefaultConfigFile   = "/etc/singctl/smartdns.conf"
-	DefaultRulesDir     = "/etc/singctl/smartdns-rules.d"
-	DefaultAuditLogPath = "/tmp/singctl-smartdns-audit.log"
+	DefaultBinaryPath     = "/usr/bin/smartdns"
+	DefaultConfigDir      = "/etc/singctl"
+	DefaultConfigFile     = "/etc/singctl/smartdns.conf"
+	DefaultRulesDir       = "/etc/singctl/smartdns-rules.d"
+	DefaultFilterCacheDir = "/tmp/singctl-smartdns-filters"
+	DefaultAuditLogPath   = "/tmp/singctl-smartdns-audit.log"
 	DefaultLogFilePath  = "/tmp/singctl-smartdns.log"
 	DefaultPIDFilePath  = "/tmp/singctl-smartdns.pid"
 	DefaultServiceName  = "singctl-smartdns"
@@ -94,6 +96,7 @@ type ManagerOptions struct {
 	ConfigDir      string
 	ConfigFile     string
 	RulesDir       string
+	FilterCacheDir string
 	AuditLogPath   string
 	LogFilePath    string
 	PIDFilePath    string
@@ -109,6 +112,8 @@ type ManagerOptions struct {
 	ServiceMgr     servicemgr.Manager
 	ReadMemInfo    func() (sysinfo.MemInfo, error)
 	ReadDiskSpace  func(path string) (sysinfo.DiskSpace, error)
+	IsOpenWrt      func() bool
+	IsLowFlashHost func() bool
 	HTTPClient     *http.Client
 	DownloadFunc   func(ctx context.Context, assetName, tmpDestPath string) error
 	ExecVerifyFunc func(ctx context.Context, binPath string) (string, error)
@@ -122,6 +127,7 @@ type Manager struct {
 	configDir      string
 	configFile     string
 	rulesDir       string
+	filterCacheDir string
 	auditLogPath   string
 	logFilePath    string
 	pidFilePath    string
@@ -136,10 +142,17 @@ type Manager struct {
 	serviceMgr     servicemgr.Manager
 	readMemInfo    func() (sysinfo.MemInfo, error)
 	readDiskSpace  func(path string) (sysinfo.DiskSpace, error)
+	isOpenWrtFn    func() bool
+	isLowFlashFn   func() bool
 	httpClient     *http.Client
 	downloadFunc   func(ctx context.Context, assetName, tmpDestPath string) error
 	execVerifyFunc func(ctx context.Context, binPath string) (string, error)
 	probeDNSFunc   func(addr string, timeout time.Duration) error
+
+	bgCtx          context.Context
+	bgCancel       context.CancelFunc
+	bgSyncInFlight atomic.Bool
+	bgWG           sync.WaitGroup
 }
 
 // NewManager 创建 SmartDNS 生命周期管理器（零值字段自动回退生产默认实现）。
@@ -163,12 +176,14 @@ func NewManager(opts ManagerOptions) *Manager {
 			rulesDir = DefaultRulesDir
 		}
 	}
+	bgCtx, bgCancel := context.WithCancel(context.Background())
 
 	return &Manager{
 		binPath:        binPath,
 		configDir:      configDir,
 		configFile:     configFile,
 		rulesDir:       rulesDir,
+		filterCacheDir: strings.TrimSpace(opts.FilterCacheDir),
 		auditLogPath:   cmp.Or(strings.TrimSpace(opts.AuditLogPath), DefaultAuditLogPath),
 		logFilePath:    cmp.Or(strings.TrimSpace(opts.LogFilePath), DefaultLogFilePath),
 		pidFilePath:    cmp.Or(strings.TrimSpace(opts.PIDFilePath), DefaultPIDFilePath),
@@ -182,10 +197,14 @@ func NewManager(opts ManagerOptions) *Manager {
 		serviceMgr:     opts.ServiceMgr,
 		readMemInfo:    opts.ReadMemInfo,
 		readDiskSpace:  opts.ReadDiskSpace,
+		isOpenWrtFn:    opts.IsOpenWrt,
+		isLowFlashFn:   opts.IsLowFlashHost,
 		httpClient:     opts.HTTPClient,
 		downloadFunc:   opts.DownloadFunc,
 		execVerifyFunc: opts.ExecVerifyFunc,
 		probeDNSFunc:   opts.ProbeDNSFunc,
+		bgCtx:          bgCtx,
+		bgCancel:       bgCancel,
 	}
 }
 
@@ -372,7 +391,12 @@ func (m *Manager) Install(ctx context.Context, opts InstallOptions) (*StatusInfo
 
 	mergedCfg := mergeConfigInput(m.snapshotConfig(), opts.Config)
 	// 先校验配置语法与输入合法性，确保存在注入或非法端口时在下载前即快速失败。
-	if _, err := BuildConfig(mergedCfg, m.rulesDir, m.auditLogPath, m.logFilePath); err != nil {
+	if _, err := BuildConfigWithOptions(mergedCfg, BuildConfigOptions{
+		RulesDir:       m.rulesDir,
+		FilterCacheDir: m.effectiveFilterCacheDir(mergedCfg),
+		AuditLogPath:   m.auditLogPath,
+		LogFilePath:    m.logFilePath,
+	}); err != nil {
 		return nil, err
 	}
 
@@ -418,8 +442,13 @@ func (m *Manager) ApplyConfig(ctx context.Context, input ConfigInput) error {
 }
 
 func (m *Manager) writeConfigAndRules(ctx context.Context, input ConfigInput) error {
-	confText, err := BuildConfig(input, m.rulesDir, m.auditLogPath, m.logFilePath)
-	if err != nil {
+	filterDir := m.effectiveFilterCacheDir(input)
+	if _, err := BuildConfigWithOptions(input, BuildConfigOptions{
+		RulesDir:       m.rulesDir,
+		FilterCacheDir: filterDir,
+		AuditLogPath:   m.auditLogPath,
+		LogFilePath:    m.logFilePath,
+	}); err != nil {
 		return err
 	}
 	if err := WriteManagedRules(m.rulesDir, RuleSetInput{
@@ -429,12 +458,30 @@ func (m *Manager) writeConfigAndRules(ctx context.Context, input ConfigInput) er
 	}); err != nil {
 		return err
 	}
-	if len(input.EnabledFilters) > 0 || input.ProtectionPaused {
-		if _, err := syncAdblockFiltersWithClient(ctx, m.httpClient, m.rulesDir, input.EnabledFilters, input.ProtectionPaused); err != nil {
-			return err
+	if err := m.ensureManagedBasePlaceholders(filterDir); err != nil {
+		return err
+	}
+	usingSeparateTmpCache := filepath.Clean(filterDir) != filepath.Clean(m.rulesDir)
+	if usingSeparateTmpCache {
+		if removed, freed := CleanupLegacyFlashFilters(m.rulesDir); removed > 0 {
+			logger.Info("🧹 已清理 SmartDNS 历史闪存去广告缓存 %d 个文件（释放 %s）", removed, sysinfo.FormatBytes(freed))
 		}
 	}
-	if err := EnsureRulePlaceholders(m.rulesDir); err != nil {
+	if len(input.EnabledFilters) > 0 || input.ProtectionPaused {
+		if _, err := syncAdblockFiltersWithClient(ctx, m.httpClient, filterDir, input.EnabledFilters, input.ProtectionPaused); err != nil {
+			return err
+		}
+	} else if usingSeparateTmpCache {
+		_ = os.Remove(filepath.Join(filterDir, "adblock.conf"))
+	}
+	confText, err := BuildConfigWithOptions(input, BuildConfigOptions{
+		RulesDir:               m.rulesDir,
+		FilterCacheDir:         filterDir,
+		AuditLogPath:           m.auditLogPath,
+		LogFilePath:            m.logFilePath,
+		RequireExistingFilters: true,
+	})
+	if err != nil {
 		return err
 	}
 	return WriteConfig(m.configFile, confText)
@@ -445,6 +492,11 @@ func (m *Manager) Uninstall(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if m.bgCancel != nil {
+		m.bgCancel()
+	}
+	m.bgWG.Wait()
+
 	mgr := m.activeServiceMgr()
 	_ = mgr.Stop(ctx, m.serviceName)
 	rmUnitErr := mgr.RemoveUnit(ctx, m.unitSpec())
@@ -464,20 +516,30 @@ func (m *Manager) Uninstall(ctx context.Context) error {
 	if strings.TrimSpace(m.rulesDir) != "" && m.rulesDir != "/" && m.rulesDir != m.configDir {
 		_ = os.RemoveAll(m.rulesDir)
 	}
+	if strings.TrimSpace(m.filterCacheDir) != "" && m.filterCacheDir != "/" && m.filterCacheDir != m.configDir {
+		_ = os.RemoveAll(m.filterCacheDir)
+	} else if m.rulesDir == DefaultRulesDir {
+		_ = os.RemoveAll(DefaultFilterCacheDir)
+	}
 	return rmUnitErr
 }
 
-// EnsureHealthy 供看门狗巡检调用：本地 DNS 端口探活连续失败时自动重启恢复。
+// EnsureHealthy 供看门狗巡检调用：本地 DNS 端口探活连续失败时自动重启恢复，并自愈重启后缺失的内存盘去广告规则。
 func (m *Manager) EnsureHealthy() error {
 	if !m.isBinaryPresent() {
 		return nil
 	}
 	dnsAddr := m.dnsAddr()
 	if err := m.probeDNSWithRetry(dnsAddr, 1500*time.Millisecond, 2, 300*time.Millisecond); err == nil {
+		m.triggerBackgroundFilterSync(m.snapshotConfig())
 		return nil
 	}
 	logger.Warn("[Watchdog] SmartDNS (%s) 未响应，正在自动重启恢复...", dnsAddr)
-	return m.Restart()
+	if err := m.Restart(); err != nil {
+		return err
+	}
+	m.triggerBackgroundFilterSync(m.snapshotConfig())
+	return nil
 }
 
 // Status 采集 SmartDNS 安装、版本、健康与硬件护栏状态快照。
@@ -532,7 +594,13 @@ func (m *Manager) EffectiveConfigPreview() (string, error) {
 			b.WriteByte('\n')
 		}
 	} else if os.IsNotExist(err) {
-		preview, buildErr := BuildConfig(m.snapshotConfig(), m.rulesDir, m.auditLogPath, m.logFilePath)
+		cfgSnap := m.snapshotConfig()
+		preview, buildErr := BuildConfigWithOptions(cfgSnap, BuildConfigOptions{
+			RulesDir:       m.rulesDir,
+			FilterCacheDir: m.effectiveFilterCacheDir(cfgSnap),
+			AuditLogPath:   m.auditLogPath,
+			LogFilePath:    m.logFilePath,
+		})
 		if buildErr != nil {
 			return "", buildErr
 		}
@@ -547,7 +615,12 @@ func (m *Manager) EffectiveConfigPreview() (string, error) {
 	appendRuleFileSummary(&b, m.rulesDir, "whitelist.conf", 100)
 	appendRuleFileSummary(&b, m.rulesDir, "rewrites.conf", 100)
 	appendRuleFileSummary(&b, m.rulesDir, "audit_block.conf", 100)
-	appendRuleFileSummary(&b, m.rulesDir, "adblock.conf", 10)
+	filterDir := m.effectiveFilterCacheDir(m.snapshotConfig())
+	if _, err := os.Stat(filepath.Join(filterDir, "adblock.conf")); err == nil {
+		appendRuleFileSummary(&b, filterDir, "adblock.conf", 10)
+	} else {
+		appendRuleFileSummary(&b, m.rulesDir, "adblock.conf", 10)
+	}
 
 	return b.String(), nil
 }

@@ -66,6 +66,12 @@ PIDFILE="%s"
 
 start_service() {
     [ -f "$CONF" ] && chmod 600 "$CONF" 2>/dev/null || true
+    mkdir -p %s 2>/dev/null || true
+    if [ -f "$CONF" ]; then
+        for _cf in $(awk '/^conf-file[[:space:]]+\/tmp\/singctl-smartdns-filters\// {print $2}' "$CONF" 2>/dev/null); do
+            [ -f "$_cf" ] || { : > "$_cf" && chmod 600 "$_cf" 2>/dev/null || true; }
+        done
+    fi
     TZ_VAL=""
     [ -s /etc/TZ ] && TZ_VAL="$(head -n 1 /etc/TZ 2>/dev/null | tr -d '\r\n')"
     procd_open_instance "singctl-smartdns"
@@ -82,7 +88,7 @@ reload_service() {
     stop
     start
 }
-`, bin, conf, pid)
+`, bin, conf, pid, DefaultFilterCacheDir)
 }
 
 func (m *Manager) activeServiceMgr() servicemgr.Manager {
@@ -135,25 +141,48 @@ func (m *Manager) isServiceActive() bool {
 	return false
 }
 
-// Start 启动 SmartDNS 托管服务（若配置文件缺失则先按当前输入安全落盘）。
+// Start 启动 SmartDNS 托管服务：
+// 若配置文件缺失或重启后 /tmp 滤镜缓存已清空，先以基础规则无阻塞拉起服务确保零断网，再后台异步补拉缺失滤镜并重载。
 func (m *Manager) Start() error {
 	if !m.isBinaryPresent() {
 		return fmt.Errorf("SmartDNS 尚未安装 (%s)，请先执行安装", m.binPath)
 	}
 	ctx := context.Background()
-	if _, err := os.Stat(m.configFile); os.IsNotExist(err) {
-		if err := m.writeConfigAndRules(ctx, m.snapshotConfig()); err != nil {
+	cfg := m.snapshotConfig()
+	filterDir := m.effectiveFilterCacheDir(cfg)
+	needsFilters := !cfg.ProtectionPaused && len(cfg.EnabledFilters) > 0
+	hasActiveFilters := len(ListActiveFilterFiles(filterDir)) > 0
+
+	_, statErr := os.Stat(m.configFile)
+	if os.IsNotExist(statErr) || (needsFilters && !hasActiveFilters) || m.configReferencesMissingFilterFile() {
+		if os.IsNotExist(statErr) {
+			if err := WriteManagedRules(m.rulesDir, RuleSetInput{
+				Whitelist:           cfg.Whitelist,
+				Rewrites:            cfg.Rewrites,
+				AuditBlockedDomains: cfg.AuditBlockedDomains,
+			}); err != nil {
+				return err
+			}
+		}
+		if err := m.writeBootSafeConfigWithoutNetwork(cfg); err != nil {
 			return err
 		}
 	}
 	mgr := m.activeServiceMgr()
 	if err := mgr.Start(ctx, m.serviceName); err != nil {
 		if os.IsNotExist(err) {
-			return m.installAndStartService(ctx)
+			if installErr := m.installAndStartService(ctx); installErr != nil {
+				return installErr
+			}
+		} else {
+			return fmt.Errorf("启动服务 %s 失败: %w", m.serviceName, err)
 		}
-		return fmt.Errorf("启动服务 %s 失败: %w", m.serviceName, err)
+	} else {
+		_ = mgr.Enable(ctx, m.serviceName)
 	}
-	_ = mgr.Enable(ctx, m.serviceName)
+	if needsFilters && !hasActiveFilters {
+		m.triggerBackgroundFilterSync(cfg)
+	}
 	return nil
 }
 

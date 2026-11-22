@@ -34,6 +34,8 @@ type Deps struct {
 	GOARCH            string
 	IsLite            *bool
 	ReadTotalRAMBytes func() uint64
+	IsLowFlashHost    func() bool
+	IsServerHost      func(configPath string) bool
 	StatTmpSpace      func(path string) (sysinfo.DiskSpace, error)
 	ResolveExePath    func() (string, error)
 	TempDir           string
@@ -92,6 +94,66 @@ func (u *Updater) targetPlatform() (goos, goarch string, isLite bool) {
 	return goos, goarch, isLite
 }
 
+func (u *Updater) isLowMemoryHost() bool {
+	if u.deps.ReadTotalRAMBytes != nil {
+		return sysinfo.IsLowMemoryRAM(u.deps.ReadTotalRAMBytes())
+	}
+	return sysinfo.IsLowMemoryHost()
+}
+
+func (u *Updater) isLowFlashHost() bool {
+	if u.deps.IsLowFlashHost != nil {
+		return u.deps.IsLowFlashHost()
+	}
+	return sysinfo.IsLowFlashHost()
+}
+
+func (u *Updater) isServerHost(configPath string) bool {
+	if u.deps.IsServerHost != nil {
+		return u.deps.IsServerHost(configPath)
+	}
+	if p := strings.TrimSpace(configPath); p != "" {
+		if cfg, err := config.Load(p); err == nil && cfg.HasActiveServerConfig() {
+			return true
+		}
+	}
+	// 仅在未注入测试可执行路径替身的真实 Linux 宿主机上检测服务端 systemd 单元，避免单测污染。
+	if u.deps.ResolveExePath == nil && runtime.GOOS == "linux" {
+		for _, unitPath := range []string{constant.SubHubSystemdService, "/etc/systemd/system/singctl-ui.service"} {
+			if unitPath != "" {
+				if _, err := os.Stat(unitPath); err == nil {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func (u *Updater) resolveLiteTarget(goos, configPath string, isLiteBuild bool) (bool, string) {
+	if isLiteBuild {
+		return true, ""
+	}
+	if goos != "linux" {
+		return false, ""
+	}
+	if u.isServerHost(configPath) {
+		return false, ""
+	}
+	lowFlash := u.isLowFlashHost()
+	lowMem := u.isLowMemoryHost()
+	switch {
+	case lowFlash && lowMem:
+		return true, "检测到小闪存且低内存宿主机，自动优先匹配 -lite 精简包以防撑爆 /overlay"
+	case lowFlash:
+		return true, "检测到小闪存宿主机（<=160MiB 总容量或 <=64MiB 可用空间），自动优先匹配 -lite 精简包以防撑爆 /overlay"
+	case lowMem:
+		return true, "检测到低内存宿主机，自动优先匹配 -lite 精简包以降低闪存与内存占用"
+	default:
+		return false, ""
+	}
+}
+
 func (u *Updater) resolveCurrentExe() (string, error) {
 	if u.deps.ResolveExePath != nil {
 		return u.deps.ResolveExePath()
@@ -124,11 +186,15 @@ func (u *Updater) UpdateSelf(configPath string, currentVersion string) error {
 		logVersionTransition(normalizedVersion, latestVersion)
 	}
 
-	// 2. 选择当前平台的压缩包资产（严格区分完整版与 lite 轻量版）
-	goos, goarch, isLite := u.targetPlatform()
-	asset := SelectSingCtlAsset(info.Assets, goos, goarch, isLite)
+	// 2. 选择当前平台的压缩包资产（严格区分完整版与 lite 轻量版；小闪存/低内存非服务端宿主自动启用 -lite 保护）
+	goos, goarch, isLiteBuild := u.targetPlatform()
+	wantLite, liteReason := u.resolveLiteTarget(goos, configPath, isLiteBuild)
+	if liteReason != "" {
+		logger.Info("📦 %s", liteReason)
+	}
+	asset := SelectSingCtlAsset(info.Assets, goos, goarch, wantLite)
 	if asset == nil {
-		return fmt.Errorf("no suitable asset found for OS: %s, Arch: %s (lite=%v)", goos, goarch, isLite)
+		return fmt.Errorf("no suitable asset found for OS: %s, Arch: %s (lite=%v)", goos, goarch, wantLite)
 	}
 
 	// 3. 低内存路由器或 /tmp 可用空间不足时：走零 /tmp 流式 SHA256 校验直写升级路径

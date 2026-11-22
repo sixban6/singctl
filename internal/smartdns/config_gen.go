@@ -160,8 +160,27 @@ func validateSafePath(label, p string) (string, error) {
 	return trimmed, nil
 }
 
+// BuildConfigOptions 控制 smartdns.conf 渲染时的持久化规则目录、内存盘去广告缓存目录与磁盘存在性守卫。
+type BuildConfigOptions struct {
+	RulesDir               string
+	FilterCacheDir         string // 为空时回退 RulesDir
+	AuditLogPath           string
+	LogFilePath            string
+	RequireExistingFilters bool // 为 true 时仅为磁盘实际存在且包含有效规则的第三方过滤文件写入 conf-file
+}
+
 // BuildConfig 生成零污染隔离监听 127.0.0.1 与零闪存磨损参数的 smartdns.conf 文本。
 func BuildConfig(input ConfigInput, rulesDir, auditLogPath, logFilePath string) (string, error) {
+	return BuildConfigWithOptions(input, BuildConfigOptions{
+		RulesDir:     rulesDir,
+		AuditLogPath: auditLogPath,
+		LogFilePath:  logFilePath,
+	})
+}
+
+// BuildConfigWithOptions 支持分离用户持久化规则目录（RulesDir）与内存盘去广告缓存目录（FilterCacheDir），
+// 并在 RequireExistingFilters=true 时仅挂载磁盘实际存在且非空的第三方滤镜，确保路由器重启 /tmp 清空后零报错启动。
+func BuildConfigWithOptions(input ConfigInput, opts BuildConfigOptions) (string, error) {
 	dnsPort := input.DNSPort
 	if dnsPort == 0 {
 		dnsPort = DefaultDNSPort
@@ -173,15 +192,22 @@ func BuildConfig(input ConfigInput, rulesDir, auditLogPath, logFilePath string) 
 		return "", fmt.Errorf("SmartDNS DNS 监听端口不合法: %d", dnsPort)
 	}
 
-	cleanRulesDir, err := validateSafePath("rulesDir", cmp.Or(rulesDir, DefaultRulesDir))
+	cleanRulesDir, err := validateSafePath("rulesDir", cmp.Or(opts.RulesDir, DefaultRulesDir))
 	if err != nil {
 		return "", err
 	}
-	cleanAuditLog, err := validateSafePath("auditLogPath", cmp.Or(auditLogPath, DefaultAuditLogPath))
+	cleanFilterDir := cleanRulesDir
+	if strings.TrimSpace(opts.FilterCacheDir) != "" {
+		cleanFilterDir, err = validateSafePath("filterCacheDir", opts.FilterCacheDir)
+		if err != nil {
+			return "", err
+		}
+	}
+	cleanAuditLog, err := validateSafePath("auditLogPath", cmp.Or(opts.AuditLogPath, DefaultAuditLogPath))
 	if err != nil {
 		return "", err
 	}
-	cleanLogFile, err := validateSafePath("logFilePath", cmp.Or(logFilePath, DefaultLogFilePath))
+	cleanLogFile, err := validateSafePath("logFilePath", cmp.Or(opts.LogFilePath, DefaultLogFilePath))
 	if err != nil {
 		return "", err
 	}
@@ -271,7 +297,13 @@ func BuildConfig(input ConfigInput, rulesDir, auditLogPath, logFilePath string) 
 
 	b.WriteString("\n# Managed rule files\n")
 	if !input.ProtectionPaused && len(input.EnabledFilters) > 0 {
-		fmt.Fprintf(&b, "conf-file %s\n", filepath.Join(cleanRulesDir, "adblock.conf"))
+		if opts.RequireExistingFilters {
+			for _, filterPath := range ListActiveFilterFiles(cleanFilterDir) {
+				fmt.Fprintf(&b, "conf-file %s\n", filterPath)
+			}
+		} else {
+			fmt.Fprintf(&b, "conf-file %s\n", filepath.Join(cleanFilterDir, "adblock.conf"))
+		}
 	}
 	fmt.Fprintf(&b, "conf-file %s\n", filepath.Join(cleanRulesDir, "audit_block.conf"))
 	fmt.Fprintf(&b, "conf-file %s\n", filepath.Join(cleanRulesDir, "rewrites.conf"))

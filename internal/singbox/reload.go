@@ -73,7 +73,7 @@ func CheckSingBoxConfigContent(ctx context.Context, content string) error {
 	return CheckSingBoxConfigFile(ctx, tmpName)
 }
 
-// RewriteSandboxWorkConfig 将 ujail 沙盒工作目录引用 (/etc/sing-box/{cache.db,ui,dashboard})
+// RewriteSandboxWorkConfig 将 ujail 沙盒工作目录引用 (/etc/sing-box/{cache.db,ui,dashboard} 与 /tmp/sing-box-cache.db)
 // 重写为 sandbox 工作目录对应路径，与 start_singbox.sh 沙盒引导逻辑保持一致。
 func RewriteSandboxWorkConfig(rawJSON, srcDir, workDir string) string {
 	srcDir = filepath.ToSlash(strings.TrimRight(srcDir, "/\\"))
@@ -93,6 +93,9 @@ func RewriteSandboxWorkConfig(rawJSON, srcDir, workDir string) string {
 		if srcDir != "/etc/sing-box" {
 			addPair(srcDir, name)
 		}
+	}
+	if workDir != "" && workDir+"/cache.db" != TmpCacheFilePath {
+		pairs = append(pairs, `"`+TmpCacheFilePath+`"`, `"`+workDir+`/cache.db"`)
 	}
 	if len(pairs) == 0 {
 		return rawJSON
@@ -180,6 +183,7 @@ func ApplyLiveSingBoxConfig(ctx context.Context, sbConfigPath, sbWorkConfigPath,
 	if err := SyncSandboxWorkConfig(ctx, sbConfigPath, sbWorkConfigPath, updatedJSON, tmpSuffix); err != nil {
 		return err
 	}
+	CleanupLegacyFlashCacheDB(sbConfigPath, updatedJSON)
 	ReloadSingBoxProcess()
 	return nil
 }

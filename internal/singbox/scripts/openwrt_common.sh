@@ -534,7 +534,8 @@ start_singbox() {
     # 创建沙盒专用配置，修改状态缓存路径到可写 tmpfs 目录并清理历史外置 UI 残留
     rm -rf /tmp/sing-box-work/ui /tmp/sing-box-work/dashboard 2>/dev/null || true
     if [ -f "$CONFIG_FILE" ]; then
-        sed 's|"/etc/sing-box/cache.db"|"/tmp/sing-box-work/cache.db"|g' \
+        sed -e 's|"/etc/sing-box/cache.db"|"/tmp/sing-box-work/cache.db"|g' \
+            -e 's|"/tmp/sing-box-cache.db"|"/tmp/sing-box-work/cache.db"|g' \
             "$CONFIG_FILE" > /tmp/sing-box-work/config.json
         chmod 0600 /tmp/sing-box-work/config.json 2>/dev/null || true
     else
