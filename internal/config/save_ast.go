@@ -156,6 +156,14 @@ var defaultSaveCleanupRules = []ASTSubtreeCleanupRule{
 		ParentKey:      "traffic_routing",
 		RemoveTopLevel: true,
 	},
+	{
+		// 当 low_memory 清空恢复默认自动档时，从 dstDoc 移除陈旧的顶层 low_memory 键
+		Name:           "low_memory_clear",
+		When:           func(cfg *Config, _, _ bool) bool { return cfg != nil && strings.TrimSpace(string(cfg.LowMemory)) == "" },
+		TargetDoc:      "dst",
+		ParentKey:      "low_memory",
+		RemoveTopLevel: true,
+	},
 }
 
 // SaveConfigBytesAST 是纯内存 YAML AST 注释保留合并引擎；extraRules 会先于内置规则执行，便于调用方或单测扩展局部清理策略。
@@ -268,6 +276,9 @@ func filterRoleNodesBeforeMergeWithRules(dstRoot, srcRoot *yaml.Node, cfg *Confi
 			continue
 		}
 		if key == "gateway" && (cfg == nil || cfg.Gateway.IsEmpty()) {
+			continue
+		}
+		if key == "low_memory" && (cfg == nil || strings.TrimSpace(string(cfg.LowMemory)) == "") {
 			continue
 		}
 		if isServerDoc {

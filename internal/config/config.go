@@ -88,6 +88,7 @@ func (c *Config) HasActiveServerConfig() bool {
 
 type Config struct {
 	sourcePath     string               `yaml:"-" json:"-"`
+	LowMemory      LowMemoryMode        `yaml:"low_memory,omitempty" json:"low_memory,omitempty"`
 	Subs           []Subscription       `yaml:"subs"`
 	GitHub         GitHubConfig         `yaml:"github"`
 	Hy2            Hy2Config            `yaml:"hy2"`
@@ -139,6 +140,7 @@ func cleanStringSlice(items []string) []string {
 }
 
 var knownYAMLKeys = []string{
+	"low_memory",
 	"subs", "name", "url", "skip_tls_verify", "remove-emoji",
 	"include", "exclude", "rename", "match", "replace",
 	"github", "mirror_url", "hy2", "up", "down",

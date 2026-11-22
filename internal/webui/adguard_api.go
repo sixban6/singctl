@@ -22,6 +22,9 @@ import (
 func (s *Server) newAdGuardManager(cfg *config.Config) *adguard.Manager {
 	mgr := adguard.NewManager(cfg, s.opts.ConfigPath)
 	mgr.SetPathsForTest(s.opts.AdGuardBinPath, s.opts.AdGuardConfigPath)
+	if s.opts.AdGuardMemInfoForTest != nil {
+		mgr.SetReadMemInfoForTest(s.opts.AdGuardMemInfoForTest)
+	}
 	return mgr
 }
 
@@ -71,18 +74,21 @@ func (s *Server) adguardStatusSummary() map[string]any {
 	}
 	sbCfgPath := cmp.Or(strings.TrimSpace(s.opts.SingBoxConfigPath), constant.SingBoxConfigFile)
 	singboxLinked, _ := singbox.InspectSingBoxDNSLocal(sbCfgPath)
+	lowMemWarn := s.newAdGuardManager(cfg).LowMemoryGuardWarning()
 
 	return map[string]any{
-		"supported":     adguard.IsSupportedPlatform(),
-		"installed":     installed,
-		"enabled":       cfg.DNS.IsEnabled(),
-		"running":       dnsHealthy || webHealthy,
-		"dnsHealthy":    dnsHealthy,
-		"webHealthy":    webHealthy,
-		"singboxLinked": singboxLinked,
-		"version":       version,
-		"dnsAddr":       dnsAddr,
-		"webUrl":        "http://" + webAddr,
+		"supported":        adguard.IsSupportedPlatform(),
+		"installed":        installed,
+		"enabled":          cfg.DNS.IsEnabled(),
+		"running":          dnsHealthy || webHealthy,
+		"dnsHealthy":       dnsHealthy,
+		"webHealthy":       webHealthy,
+		"singboxLinked":    singboxLinked,
+		"lowMemoryBlocked": lowMemWarn != "",
+		"lowMemoryWarning": lowMemWarn,
+		"version":          version,
+		"dnsAddr":          dnsAddr,
+		"webUrl":           "http://" + webAddr,
 	}
 }
 

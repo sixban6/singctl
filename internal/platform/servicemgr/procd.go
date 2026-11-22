@@ -106,13 +106,17 @@ func (m *ProcdManager) InstallUnit(ctx context.Context, spec UnitSpec) error {
 	if err := ValidateUnitName(spec.Name); err != nil {
 		return err
 	}
+	renderedBody, err := RenderProcdBody(spec)
+	if err != nil {
+		return err
+	}
 	script := cmp.Or(strings.TrimSpace(spec.ProcdPath), m.scriptPath(spec.Name))
 	if dir := filepath.Dir(script); dir != "" {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return fmt.Errorf("create init dir %s: %w", dir, err)
 		}
 	}
-	if err := os.WriteFile(script, []byte(spec.ProcdBody), 0755); err != nil {
+	if err := os.WriteFile(script, []byte(renderedBody), 0755); err != nil {
 		return fmt.Errorf("write %s: %w", script, err)
 	}
 	_ = m.runner.Run(ctx, defaultActionTimeout, script, "enable")

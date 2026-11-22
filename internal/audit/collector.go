@@ -42,31 +42,23 @@ type Collector struct {
 	cachedEngineFp     string
 	cachedSelfIPs      map[string]bool
 	selfIPsFetchedAt   time.Time
-	cachedLeaseFp      string
-	cachedLeaseDevs    map[string]lanDeviceInfo
-	ipv6NeighCache     map[string]string
-	ipv6NeighFetchedAt time.Time
+	cachedLeaseFp          string
+	cachedLeaseDevs        map[string]lanDeviceInfo
+	cachedMergedLANDevs    map[string]lanDeviceInfo
+	lanDevsFetchedAt       time.Time
+	ipv6NeighCache         map[string]string
+	ipv6NeighFetchedAt     time.Time
+	lowMemory              bool
+	maxTrackedFlows        int
+	maxConnCursors         int
+	deviceRefreshInterval  time.Duration
+	ipv6RefreshInterval    time.Duration
+	selfIPsRefreshInterval time.Duration
 }
 
-// NewCollector 创建默认客户端审计采集器（自动兼容 OpenWrt /etc/TZ 与 /etc/config/system 本地时区）。
+// NewCollector 创建默认客户端审计采集器（自动兼容 OpenWrt /etc/TZ 与 /etc/config/system 本地时区及低内存自适应预算）。
 func NewCollector(cfg *config.Config) *Collector {
-	c := &Collector{
-		cfg:             cfg,
-		statePath:       defaultStatePath(),
-		endpoints:       singbox.ClashAPIEndpoints(),
-		secret:          singbox.ClashAPISecret(),
-		clashClient:     clashapi.NewClient(clashapi.Options{RequestTimeout: 2500 * time.Millisecond}),
-		leaseFiles:      []string{"/tmp/dhcp.leases", "/var/lib/misc/dnsmasq.leases", "/tmp/dnsmasq.leases"},
-		arpFile:         "/proc/net/arp",
-		hostsFile:       "/etc/hosts",
-		odhcpdHostsFile: "/tmp/hosts/odhcpd",
-		tzFile:          "/etc/TZ",
-		uciSystemFile:   "/etc/config/system",
-	}
-	c.nowFunc = func() time.Time {
-		return time.Now().In(c.resolveLocalLocation())
-	}
-	return c
+	return NewCollectorWithOptions(cfg, CollectorOptions{})
 }
 
 // SetTimezoneFilesForTest 供单元测试注入模拟的 OpenWrt /etc/TZ 与 /etc/config/system 路径。
@@ -102,6 +94,8 @@ func (c *Collector) SetLeaseFilesForTest(leaseFiles []string, arpFile, hostsFile
 	c.odhcpdHostsFile = ""
 	c.cachedLeaseDevs = nil
 	c.cachedLeaseFp = ""
+	c.cachedMergedLANDevs = nil
+	c.lanDevsFetchedAt = time.Time{}
 }
 
 // SetNowFuncForTest 供单元测试注入确定性时钟（例如模拟凌晨 03:00 行为）。
@@ -119,6 +113,9 @@ func (c *Collector) SetIPv6NeighCmdForTest(fn func() ([]byte, error)) {
 	defer c.mu.Unlock()
 	c.ipv6NeighCmdFunc = fn
 	c.ipv6NeighCache = nil
+	c.ipv6NeighFetchedAt = time.Time{}
+	c.cachedMergedLANDevs = nil
+	c.lanDevsFetchedAt = time.Time{}
 }
 
 // CollectOptions 控制审计报告生成的过滤与 AI 增强选项。
@@ -222,7 +219,8 @@ func (c *Collector) sampleActiveLocked(ctx context.Context, now time.Time) (
 
 	ingestedMutated := c.ingestConnectionsLocked(state, connsResp.Connections, devDirectory, selfIPs, activeByKey, engine, now)
 	blockTrimmed := purgeBlockedFlows(state, selfIPs, devDirectory, engine)
-	if ingestedMutated || blockTrimmed {
+	boundsTrimmed := c.enforceBoundsLocked(state, activeByKey, devDirectory, selfIPs, engine, now.Unix())
+	if ingestedMutated || blockTrimmed || boundsTrimmed {
 		c.stateDirty = true
 	}
 	if c.shouldSaveSampledStateLocked(state, now) {
@@ -275,8 +273,9 @@ func (c *Collector) resolveEngineLocked() *NonlinearEngine {
 }
 
 func (c *Collector) resolveSelfIPsLocked() map[string]bool {
-	now := time.Now()
-	if c.cachedSelfIPs != nil && now.Sub(c.selfIPsFetchedAt) < 30*time.Second {
+	now := c.currentTimeLocked()
+	ttl := cmp.Or(c.selfIPsRefreshInterval, 30*time.Second)
+	if c.cachedSelfIPs != nil && !c.selfIPsFetchedAt.IsZero() && now.Sub(c.selfIPsFetchedAt) >= 0 && now.Sub(c.selfIPsFetchedAt) < ttl {
 		return c.cachedSelfIPs
 	}
 	c.cachedSelfIPs = collectLocalInterfaceIPs()

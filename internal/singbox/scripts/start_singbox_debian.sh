@@ -454,12 +454,44 @@ setup_route() {
     echo_succ "路由规则配置完成"
 }
 
+# 根据宿主机 /proc/meminfo 自适应计算 Go 软内存上限 (GOMEMLIMIT / GOGC)
+setup_singbox_mem_env() {
+    local mem_total_kb=0
+    if [ -r /proc/meminfo ]; then
+        mem_total_kb=$(awk '/^MemTotal:/ {print $2; exit}' /proc/meminfo 2>/dev/null || echo 0)
+    fi
+    case "$mem_total_kb" in
+        ''|*[!0-9]*) mem_total_kb=0 ;;
+    esac
+    if [ "${SINGCTL_LOW_MEMORY:-}" != "0" ] && [ -z "${GOMEMLIMIT:-}" ] && [ "$mem_total_kb" -gt 0 ]; then
+        if [ "$mem_total_kb" -le 294912 ]; then
+            GOMEMLIMIT="40MiB"
+            [ -z "${GOGC:-}" ] && GOGC="50"
+        elif [ "$mem_total_kb" -le 524288 ]; then
+            GOMEMLIMIT="44MiB"
+            [ -z "${GOGC:-}" ] && GOGC="50"
+        fi
+    fi
+    [ -n "${GOMEMLIMIT:-}" ] && export GOMEMLIMIT
+    [ -n "${GOGC:-}" ] && export GOGC
+}
+
 # 启动 sing-box (支持沙盒)
 start_singbox() {
+    setup_singbox_mem_env
     echo_succ "启动 sing-box 服务 (TProxy模式)..."
     local singbox_bin
     singbox_bin=$(command -v sing-box)
     mkdir -p /var/log
+    local systemd_env_lines=""
+    if [ -n "${GOMEMLIMIT:-}" ]; then
+        systemd_env_lines="${systemd_env_lines}Environment=\"GOMEMLIMIT=${GOMEMLIMIT}\"
+"
+    fi
+    if [ -n "${GOGC:-}" ]; then
+        systemd_env_lines="${systemd_env_lines}Environment=\"GOGC=${GOGC}\"
+"
+    fi
 
     # 1) 若宿主机 PID 1 为 systemd，优先采用带文件系统隔离与网络能力的 systemd 服务托管
     if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
@@ -471,7 +503,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=$singbox_bin run -c $CONFIG_FILE
+${systemd_env_lines}ExecStart=$singbox_bin run -c $CONFIG_FILE
 Restart=no
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE

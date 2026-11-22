@@ -45,13 +45,18 @@ func WriteStopScript(path string) error {
 
 // GetStartScript 返回当前操作系统对应的启动脚本内容。
 func GetStartScript() string {
-	switch runtime.GOOS {
+	return GetStartScriptForTarget(runtime.GOOS, isDebian())
+}
+
+// GetStartScriptForTarget 按指定操作系统与是否为 Debian 系发行版返回对应启动脚本内容。
+func GetStartScriptForTarget(goos string, debian bool) string {
+	switch goos {
 	case "darwin":
 		return startScriptDarwin
 	case "windows":
 		return startScriptWindows
 	case "linux":
-		if isDebian() {
+		if debian {
 			return startScriptDebian
 		}
 		return startScriptLinux

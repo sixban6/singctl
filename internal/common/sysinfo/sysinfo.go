@@ -1,4 +1,4 @@
-// 文件职责：提供宿主机发行版识别（OpenWrt/Debian）、/proc/meminfo 内存解析以及字节与速率人性化格式化函数。
+// 文件职责：提供宿主机发行版识别（OpenWrt/Debian）、/proc/meminfo 内存解析、低内存判定及字节速率格式化函数。
 package sysinfo
 
 import (
@@ -8,6 +8,15 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+)
+
+const (
+	// LowMemoryThresholdBytes 定义低内存设备总物理内存自动激活阈值（512 MiB，覆盖 256MB/512MB 软硬路由）。
+	LowMemoryThresholdBytes = 512 * 1024 * 1024
+	// UltraLowMemoryThresholdBytes 定义超小内存设备总物理内存阈值（288 MiB，覆盖 224MB/256MB 极限内存路由）。
+	UltraLowMemoryThresholdBytes = 288 * 1024 * 1024
+	// LowMemoryAvailableThresholdBytes 定义无线驱动等内核预留后的低可用物理内存阈值（256 MiB，如 MT7986 512M 路由实剩 ~205MiB）。
+	LowMemoryAvailableThresholdBytes = 256 * 1024 * 1024
 )
 
 // DiskSpace 汇总挂载点的总容量、空闲、非特权可用容量与使用率。
@@ -28,6 +37,42 @@ type MemInfo struct {
 	CachedBytes    uint64
 	SwapTotalBytes uint64
 	SwapFreeBytes  uint64
+}
+
+// IsLowMemoryRAM 判断给定总物理内存字节数是否属于低内存设备（0 表示未知，返回 false）。
+func IsLowMemoryRAM(totalBytes uint64) bool {
+	return totalBytes > 0 && totalBytes <= LowMemoryThresholdBytes
+}
+
+// IsUltraLowMemoryRAM 判断给定总物理内存字节数是否属于 <= 288 MiB 超小内存设备（0 表示未知，返回 false）。
+func IsUltraLowMemoryRAM(totalBytes uint64) bool {
+	return totalBytes > 0 && totalBytes <= UltraLowMemoryThresholdBytes
+}
+
+// IsLowMemoryMemInfo 综合总内存（<= 512 MiB）与可用内存（<= 256 MiB）判定是否为低内存运行环境。
+func IsLowMemoryMemInfo(mi MemInfo) bool {
+	if IsLowMemoryRAM(mi.TotalBytes) {
+		return true
+	}
+	return mi.AvailableBytes > 0 && mi.AvailableBytes <= LowMemoryAvailableThresholdBytes
+}
+
+// IsLowMemoryHost 读取当前宿主机 /proc/meminfo 判断是否处于低内存设备环境。
+func IsLowMemoryHost() bool {
+	mi, err := ReadMemInfo()
+	if err != nil {
+		return false
+	}
+	return IsLowMemoryMemInfo(mi)
+}
+
+// TotalRAMBytes 返回当前 Linux 宿主机的总物理内存字节数（非 Linux 或不可读时返回 0）。
+func TotalRAMBytes() uint64 {
+	mi, err := ReadMemInfo()
+	if err != nil {
+		return 0
+	}
+	return mi.TotalBytes
 }
 
 // IsOpenWrt 判断当前 Linux 宿主机是否运行 OpenWrt / ImmortalWrt 固件。

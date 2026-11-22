@@ -284,10 +284,12 @@ export const DashPage: React.FC<DashPageProps> = ({ status, busy, onAction, onNa
           </div>
           <div>
             <div className="text-sm font-semibold text-primary">防劫持 DNS</div>
-            <div className="text-xs text-secondary mt-1 tnum truncate">
+            <div className="text-xs text-secondary mt-1 tnum truncate" title={agh?.lowMemoryWarning}>
               {agh?.installed
                 ? `${agh.dnsAddr || '127.0.0.1:5353'} · ${agh.singboxLinked ? '已联动内核' : '内置 DoH 兜底'}`
-                : '本地 AdGuard Home 加密 DoH'}
+                : agh?.lowMemoryBlocked
+                  ? '小内存保护 · 内置纯 IP DoH + ad1'
+                  : '本地 AdGuard Home 加密 DoH'}
             </div>
           </div>
           <div className="flex items-center gap-2 flex-wrap pt-1 border-t border-subtle">
@@ -295,10 +297,10 @@ export const DashPage: React.FC<DashPageProps> = ({ status, busy, onAction, onNa
               <Button
                 size="xs"
                 variant="primary"
-                disabled={busy || agh?.supported === false}
+                disabled={busy || agh?.supported === false || Boolean(agh?.lowMemoryBlocked)}
                 onClick={() => onAction('dns-install')}
               >
-                安装
+                {agh?.lowMemoryBlocked ? '内置保护' : '安装'}
               </Button>
             ) : agh.dnsHealthy && agh.singboxLinked ? (
               <Button size="xs" disabled={busy} onClick={() => onAction('dns-restart')}>

@@ -1,11 +1,13 @@
-// 文件职责：验证 sysinfo 发行版识别（OpenWrt/Debian）、磁盘 Statfs、/proc/meminfo 解析、POSIX 时区初始化与字节格式化。
+// 文件职责：验证 sysinfo 发行版识别、磁盘 Statfs、/proc/meminfo 解析、低内存阈值判定（含 MemAvailable 校准）与字节格式化。
 package sysinfo_test
 
 import (
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -80,6 +82,86 @@ SwapFree:         512000 kB
 		t.Fatalf("AvailableBytes explicit = %d, want %d", miWithAvail.AvailableBytes, 600*1024)
 	}
 	_, _ = sysinfo.ReadMemInfo()
+}
+
+func TestLowMemoryThresholds_MemInfoCalibration_And_TotalRAMBytes(t *testing.T) {
+	const mib = 1024 * 1024
+	if sysinfo.LowMemoryThresholdBytes != 512*mib {
+		t.Fatalf("LowMemoryThresholdBytes = %d, want %d", sysinfo.LowMemoryThresholdBytes, 512*mib)
+	}
+	if sysinfo.UltraLowMemoryThresholdBytes != 288*mib {
+		t.Fatalf("UltraLowMemoryThresholdBytes = %d, want %d", sysinfo.UltraLowMemoryThresholdBytes, 288*mib)
+	}
+	if sysinfo.LowMemoryAvailableThresholdBytes != 256*mib {
+		t.Fatalf("LowMemoryAvailableThresholdBytes = %d, want %d", sysinfo.LowMemoryAvailableThresholdBytes, 256*mib)
+	}
+
+	cases := []struct {
+		name      string
+		totalRAM  uint64
+		wantLow   bool
+		wantUltra bool
+	}{
+		{"zero_unknown_ram_not_low", 0, false, false},
+		{"one_byte_ram", 1, true, true},
+		{"224MiB_router_ram", 224 * mib, true, true},
+		{"256MiB_router_ram", 256 * mib, true, true},
+		{"exact_288MiB_ultra_boundary", 288 * mib, true, true},
+		{"288MiB_plus_one_byte", 288*mib + 1, true, false},
+		{"n60pro_479MiB_total_ram", 491040 * 1024, true, false},
+		{"exact_512MiB_low_boundary", 512 * mib, true, false},
+		{"512MiB_plus_one_byte", 512*mib + 1, false, false},
+		{"1024MiB_vps_ram", 1024 * mib, false, false},
+		{"max_uint64_ram", math.MaxUint64, false, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sysinfo.IsLowMemoryRAM(tc.totalRAM); got != tc.wantLow {
+				t.Fatalf("IsLowMemoryRAM(%d) = %v, want %v", tc.totalRAM, got, tc.wantLow)
+			}
+			if got := sysinfo.IsUltraLowMemoryRAM(tc.totalRAM); got != tc.wantUltra {
+				t.Fatalf("IsUltraLowMemoryRAM(%d) = %v, want %v", tc.totalRAM, got, tc.wantUltra)
+			}
+		})
+	}
+
+	// Real-world n60pro router profile: MemTotal=491040 kB (~479.5 MiB), MemAvailable=210260 kB (~205.3 MiB)
+	n60proMem := sysinfo.ParseMemInfo("MemTotal:         491040 kB\nMemFree:           68400 kB\nMemAvailable:     210260 kB\n")
+	if !sysinfo.IsLowMemoryMemInfo(n60proMem) {
+		t.Fatalf("expected IsLowMemoryMemInfo=true for n60pro profile %+v", n60proMem)
+	}
+
+	// Larger MemTotal (768 MiB) but driver-reserved/constrained MemAvailable <= 256 MiB -> still low-memory!
+	availConstrained := sysinfo.MemInfo{TotalBytes: 768 * mib, AvailableBytes: 256 * mib}
+	if !sysinfo.IsLowMemoryMemInfo(availConstrained) {
+		t.Fatal("expected IsLowMemoryMemInfo=true when AvailableBytes <= 256 MiB")
+	}
+
+	// MemTotal > 512 MiB and AvailableBytes == 0 (unknown) -> false
+	if sysinfo.IsLowMemoryMemInfo(sysinfo.MemInfo{TotalBytes: 1024 * mib, AvailableBytes: 0}) {
+		t.Fatal("expected IsLowMemoryMemInfo=false when TotalBytes=1GiB and AvailableBytes=0")
+	}
+
+	// Empty MemInfo -> false
+	if sysinfo.IsLowMemoryMemInfo(sysinfo.MemInfo{}) {
+		t.Fatal("expected IsLowMemoryMemInfo=false for zero MemInfo")
+	}
+
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() {
+			got := sysinfo.TotalRAMBytes()
+			_ = sysinfo.IsLowMemoryHost()
+			if runtime.GOOS != "linux" && got != 0 {
+				t.Errorf("expected TotalRAMBytes()=0 on non-linux %s, got %d", runtime.GOOS, got)
+			}
+			if runtime.GOOS == "linux" && got == 0 {
+				t.Errorf("expected positive TotalRAMBytes() on linux")
+			}
+		})
+	}
+	wg.Wait()
 }
 
 func TestTimezone_POSIXAndOpenWrtFiles(t *testing.T) {

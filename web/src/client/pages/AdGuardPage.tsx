@@ -70,7 +70,13 @@ export const AdGuardPage: React.FC<AdGuardPageProps> = ({
   const headerBadge = useMemo(() => {
     if (!snap) return <Badge tone="neutral">加载中</Badge>;
     if (!snap.supported) return <Badge tone="warn">当前平台不支持</Badge>;
-    if (!snap.installed) return <Badge tone="neutral">未安装</Badge>;
+    if (!snap.installed) {
+      return snap.lowMemoryBlocked ? (
+        <Badge tone="warn">低内存保护 · 内置 DoH</Badge>
+      ) : (
+        <Badge tone="neutral">未安装</Badge>
+      );
+    }
     if (!snap.dnsHealthy) return <Badge tone="danger">未运行</Badge>;
     if (!snap.singboxLinked) {
       return (
@@ -107,7 +113,16 @@ export const AdGuardPage: React.FC<AdGuardPageProps> = ({
         supported={snap.supported}
         busy={busy}
         headerBadge={headerBadge}
+        lowMemoryBlocked={snap.lowMemoryBlocked}
+        lowMemoryWarning={snap.lowMemoryWarning}
         onInstall={() => onAction('dns-install')}
+        onForceInstall={() =>
+          onAction(
+            'dns-install',
+            { forceLowMemory: true },
+            '当前设备可用内存较低，强行运行 AdGuard Home 可能导致路由器 OOM 死机断网。确定要忽略保护强制安装吗？',
+          )
+        }
       />
     );
   }

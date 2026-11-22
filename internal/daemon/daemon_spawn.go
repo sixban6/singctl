@@ -96,6 +96,24 @@ func waitReady(r *os.File, timeout time.Duration) error {
 func notifyParentReady(ok bool) {
 	proc.NotifyReadyPipeResult(readyFd, ok)
 }
+func (d *Daemon) effectiveMaxDaemonLogBytes() int64 {
+	if d != nil && d.lowMemory {
+		return MaxLowMemDaemonLogBytes
+	}
+	return MaxDaemonLogBytes
+}
+
+func (d *Daemon) effectiveWebLogPath() string {
+	if d != nil && d.webLogOverride != "" {
+		return d.webLogOverride
+	}
+	if d != nil && d.logPathOverride != "" {
+		// 测试隔离了守护日志目录但未显式提供 WebLogFile 时，不触碰宿主机 /tmp/singctl-web.log
+		return ""
+	}
+	return filepath.Join(defaultTempDir(), "singctl-web.log")
+}
+
 func (d *Daemon) setupLogFile() error {
 	logPath := cmp.Or(d.logPathOverride, GetDaemonLogPath())
 	logDir := filepath.Dir(logPath)
@@ -103,7 +121,13 @@ func (d *Daemon) setupLogFile() error {
 		return fmt.Errorf("failed to create log directory: %w", err)
 	}
 
-	_, _ = CleanAndTrimDaemonLog(logPath, MaxDaemonLogBytes)
+	maxLogBytes := d.effectiveMaxDaemonLogBytes()
+	_, _ = CleanAndTrimDaemonLog(logPath, maxLogBytes)
+	if d.lowMemory {
+		if webLog := d.effectiveWebLogPath(); webLog != "" {
+			_, _ = TrimLogInPlace(webLog, MaxLowMemDaemonLogBytes)
+		}
+	}
 
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
@@ -128,8 +152,13 @@ func (d *Daemon) maybeRotateLogFile() {
 			_, _ = TrimLogInPlace(sbLog, MaxSingBoxLogBytes)
 		}
 	}
+	if d.lowMemory {
+		if webLog := d.effectiveWebLogPath(); webLog != "" {
+			_, _ = TrimLogInPlace(webLog, MaxLowMemDaemonLogBytes)
+		}
+	}
 	logPath := cmp.Or(d.logPathOverride, GetDaemonLogPath())
-	trimmed, err := CleanAndTrimDaemonLog(logPath, MaxDaemonLogBytes)
+	trimmed, err := CleanAndTrimDaemonLog(logPath, d.effectiveMaxDaemonLogBytes())
 	if err != nil || !trimmed {
 		return
 	}

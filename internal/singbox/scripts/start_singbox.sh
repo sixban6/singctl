@@ -461,7 +461,61 @@ wait_tproxy_ready() {
     return 1
 }
 
+# 根据宿主机 /proc/meminfo 自适应注入 Go 软内存上限 (GOMEMLIMIT / GOGC) 与低内存日志限流标记
+setup_singbox_mem_env() {
+    local mem_total_kb=0
+    if [ -r /proc/meminfo ]; then
+        mem_total_kb=$(awk '/^MemTotal:/ {print $2; exit}' /proc/meminfo 2>/dev/null || echo 0)
+    fi
+    case "$mem_total_kb" in
+        ''|*[!0-9]*) mem_total_kb=0 ;;
+    esac
+    if [ "${SINGCTL_LOW_MEMORY:-}" != "0" ]; then
+        if [ -z "${GOMEMLIMIT:-}" ] && [ "$mem_total_kb" -gt 0 ]; then
+            if [ "$mem_total_kb" -le 294912 ]; then
+                GOMEMLIMIT="40MiB"
+                [ -z "${GOGC:-}" ] && GOGC="50"
+            elif [ "$mem_total_kb" -le 524288 ]; then
+                GOMEMLIMIT="44MiB"
+                [ -z "${GOGC:-}" ] && GOGC="50"
+            fi
+        fi
+        if [ -z "${SINGCTL_LOW_MEMORY:-}" ]; then
+            if [ "$mem_total_kb" -gt 0 ] && [ "$mem_total_kb" -le 524288 ]; then
+                SINGCTL_LOW_MEMORY=1
+            else
+                SINGCTL_LOW_MEMORY=0
+            fi
+        fi
+    fi
+    [ -n "${GOMEMLIMIT:-}" ] && export GOMEMLIMIT
+    [ -n "${GOGC:-}" ] && export GOGC
+}
+
+# 低内存模式下将 tmpfs 沙盒日志原地截断限制在 256 KiB (262144 字节) 以内，防止吃光内存盘
+cap_singbox_log_256k() {
+    local log_file="$1"
+    [ "${SINGCTL_LOW_MEMORY:-0}" = "1" ] || return 0
+    [ -f "$log_file" ] || return 0
+    local sz
+    sz=$(wc -c < "$log_file" 2>/dev/null || echo 0)
+    case "$sz" in
+        ''|*[!0-9]*) sz=0 ;;
+    esac
+    if [ "$sz" -gt 262144 ]; then
+        local cap_tmp="${log_file}.cap.$$"
+        tail -c 262144 "$log_file" > "$cap_tmp" 2>/dev/null && cat "$cap_tmp" > "$log_file" 2>/dev/null
+        rm -f "$cap_tmp" 2>/dev/null || true
+    fi
+    chmod 0600 "$log_file" 2>/dev/null || true
+}
+
 start_singbox() {
+    setup_singbox_mem_env
+    if [ -n "${GOMEMLIMIT:-}" ]; then
+        echo_succ "已启用低内存自适应护栏: GOMEMLIMIT=${GOMEMLIMIT} GOGC=${GOGC:-100}"
+    fi
+
     # 检查ujail是否可用
     if ! command -v ujail >/dev/null 2>&1; then
         sing-box run -c "/etc/sing-box/config.json" >/dev/null 2>&1 &
@@ -531,8 +585,22 @@ start_singbox() {
     
     # 尝试最简单的沙盒模式 - 添加必要的证书和配置访问
     echo_succ "尝试基础沙盒模式(证书+配置访问)..."
-    : > /tmp/sing-box-basic.log && chmod 0600 /tmp/sing-box-basic.log
+    if [ "${SINGCTL_LOW_MEMORY:-0}" = "1" ] && [ -f /tmp/sing-box-basic.log ]; then
+        cap_singbox_log_256k /tmp/sing-box-basic.log
+    else
+        : > /tmp/sing-box-basic.log && chmod 0600 /tmp/sing-box-basic.log
+    fi
+    UJAIL_HAS_ENV=0
+    if [ -n "${GOMEMLIMIT:-}" ] || [ -n "${GOGC:-}" ]; then
+        if ujail -n test-env -w /tmp -e PATH -- /bin/echo "ok" >/dev/null 2>&1; then
+            UJAIL_HAS_ENV=1
+        fi
+    fi
     set -- -n sing-box -w /tmp
+    if [ "$UJAIL_HAS_ENV" = "1" ]; then
+        [ -n "${GOMEMLIMIT:-}" ] && set -- "$@" -e GOMEMLIMIT
+        [ -n "${GOGC:-}" ] && set -- "$@" -e GOGC
+    fi
     for ro_path in /etc/ssl /etc/sing-box /usr/share/ca-certificates /etc/hosts /etc/resolv.conf /proc; do
         if [ -e "$ro_path" ]; then
             set -- "$@" -r "$ro_path"
@@ -542,6 +610,7 @@ start_singbox() {
     UJAIL_PID=$!
     
     if ps | grep -v grep | grep "ujail.*sing-box" > /dev/null && wait_tproxy_ready; then
+       cap_singbox_log_256k /tmp/sing-box-basic.log
        echo_succ "sing-box 启动成功 运行模式--TProxy(基础沙盒)"
        echo_succ "沙盒特性: 进程隔离 + 临时目录访问"
        return
@@ -554,12 +623,17 @@ start_singbox() {
     
     : > /tmp/sing-box-simple.log && chmod 0600 /tmp/sing-box-simple.log
     set -- -n sing-box -p -w /tmp -r /etc/sing-box
+    if [ "$UJAIL_HAS_ENV" = "1" ]; then
+        [ -n "${GOMEMLIMIT:-}" ] && set -- "$@" -e GOMEMLIMIT
+        [ -n "${GOGC:-}" ] && set -- "$@" -e GOGC
+    fi
     [ -e /etc/ssl ] && set -- "$@" -r /etc/ssl
     [ -e /etc/resolv.conf ] && set -- "$@" -r /etc/resolv.conf
     ujail "$@" -- "$SINGBOX_EXEC" run -c /tmp/sing-box-work/config.json >>/tmp/sing-box-simple.log 2>&1 &
     UJAIL_PID=$!
     
     if ps | grep -v grep | grep "ujail.*sing-box" > /dev/null && wait_tproxy_ready; then
+       cap_singbox_log_256k /tmp/sing-box-simple.log
        echo_succ "sing-box 启动成功 运行模式--TProxy(最简沙盒)"
        echo_succ "沙盒特性: 基础进程隔离"
        return

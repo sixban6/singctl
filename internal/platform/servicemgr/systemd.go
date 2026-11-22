@@ -112,13 +112,17 @@ func (m *SystemdManager) InstallUnit(ctx context.Context, spec UnitSpec) error {
 	if err := ValidateUnitName(spec.Name); err != nil {
 		return err
 	}
+	renderedBody, err := RenderSystemdBody(spec)
+	if err != nil {
+		return err
+	}
 	unitPath := cmp.Or(strings.TrimSpace(spec.SystemdPath), m.unitFilePath(spec.Name))
 	if dir := filepath.Dir(unitPath); dir != "" {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return fmt.Errorf("create unit dir %s: %w", dir, err)
 		}
 	}
-	if err := os.WriteFile(unitPath, []byte(spec.SystemdBody), 0644); err != nil {
+	if err := os.WriteFile(unitPath, []byte(renderedBody), 0644); err != nil {
 		return fmt.Errorf("write %s: %w", unitPath, err)
 	}
 	if err := m.DaemonReload(ctx); err != nil {

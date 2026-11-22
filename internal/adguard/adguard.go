@@ -39,9 +39,11 @@ func availableDiskMB(targetPath string) (uint64, error) {
 }
 
 const (
-	adGuardRepo             = "AdguardTeam/AdGuardHome"
-	minFreshInstallDiskMB   = 80
-	minUpgradeInstallDiskMB = 45
+	adGuardRepo                = "AdguardTeam/AdGuardHome"
+	minFreshInstallDiskMB      = 80
+	minUpgradeInstallDiskMB    = 45
+	ultraLowTotalRAMGuardBytes = sysinfo.UltraLowMemoryThresholdBytes     // 288 MiB 物理总内存红线
+	lowAvailableRAMGuardBytes  = sysinfo.LowMemoryAvailableThresholdBytes // 256 MiB 可用内存红线（如 512MB MT7986 路由实余 ~205MB）
 )
 
 var (
@@ -107,6 +109,7 @@ type InstallOptions struct {
 	Username       string // 显式指定用户名；为空时交互式询问（回车默认 root）
 	NonInteractive bool   // 非交互模式：不等待终端输入，直接使用已有用户名或默认 root
 	ForceDownload  bool   // 强制重新下载二进制
+	ForceLowMemory bool   // 强制忽略超低内存防呆护栏继续安装
 	Input          io.Reader
 }
 
@@ -120,6 +123,8 @@ type Manager struct {
 	aghWorkDir    string
 	systemdUnit   string
 	initdScript   string
+	readMemTotal  func() uint64
+	readMemInfo   func() sysinfo.MemInfo
 }
 
 // NewManager 创建默认路径的 AdGuard Home 管理器。
@@ -149,6 +154,16 @@ func (m *Manager) SetPathsForTest(binPath, aghConfigFile string) {
 		m.aghConfigDir = filepath.Dir(aghConfigFile)
 		m.aghWorkDir = m.aghConfigDir
 	}
+}
+
+// SetReadMemTotalForTest 仅供单元测试注入宿主机总物理内存字节数探测函数。
+func (m *Manager) SetReadMemTotalForTest(fn func() uint64) {
+	m.readMemTotal = fn
+}
+
+// SetReadMemInfoForTest 仅供单元测试注入宿主机完整内存信息（MemTotal + MemAvailable）探测函数。
+func (m *Manager) SetReadMemInfoForTest(fn func() sysinfo.MemInfo) {
+	m.readMemInfo = fn
 }
 
 // SelectAssetName 根据目标 OS 与 CPU 架构返回官方 Release 压缩包文件名。
@@ -216,6 +231,10 @@ func (m *Manager) Install(opts InstallOptions) (*StatusInfo, error) {
 		return nil, fmt.Errorf("singctl dns 仅支持 Linux / OpenWrt 客户端环境 (当前: %s)", runtime.GOOS)
 	}
 
+	if err := m.checkLowMemoryGuard(opts.ForceLowMemory); err != nil {
+		return nil, err
+	}
+
 	alreadyHasBinary := m.isBinaryPresent()
 	if err := m.checkDiskSpace(alreadyHasBinary); err != nil {
 		return nil, err
@@ -273,6 +292,50 @@ func (m *Manager) Install(opts InstallOptions) (*StatusInfo, error) {
 	st := m.Status()
 	m.PrintAccessSummary(st)
 	return st, nil
+}
+
+func (m *Manager) currentMemInfo() sysinfo.MemInfo {
+	if m.readMemInfo != nil {
+		return m.readMemInfo()
+	}
+	if m.readMemTotal != nil {
+		return sysinfo.MemInfo{TotalBytes: m.readMemTotal()}
+	}
+	info, err := sysinfo.ReadMemInfo()
+	if err != nil {
+		return sysinfo.MemInfo{}
+	}
+	return info
+}
+
+// LowMemoryGuardWarning 返回当前宿主环境是否命中 AdGuard Home 低内存防 OOM 拦截提示（未命中返回空字符串）。
+func (m *Manager) LowMemoryGuardWarning() string {
+	if err := m.checkLowMemoryGuard(false); err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
+func (m *Manager) checkLowMemoryGuard(forceLowMemory bool) error {
+	if forceLowMemory {
+		return nil
+	}
+	mem := m.currentMemInfo()
+	const mib = 1024 * 1024
+	if sysinfo.IsUltraLowMemoryRAM(mem.TotalBytes) {
+		return fmt.Errorf(
+			"检测到超低内存设备（物理总内存约 %d MB <= 288 MB），已拦截安装 AdGuard Home 以避免引发 OOM 死机；224M/256M 小内存路由器建议直接使用内置零额外内存的 sing-box 纯 IP DoH + geosite-ad1 去广告方案",
+			mem.TotalBytes/mib,
+		)
+	}
+	if mem.AvailableBytes > 0 && mem.AvailableBytes <= lowAvailableRAMGuardBytes {
+		return fmt.Errorf(
+			"检测到设备当前可用内存不足（总内存约 %d MB，可用内存约 %d MB <= 256 MB），已拦截安装 AdGuard Home 以避免引发 OOM 死机；224M/256M 小内存路由器建议直接使用内置零额外内存的 sing-box 纯 IP DoH + geosite-ad1 去广告方案",
+			mem.TotalBytes/mib,
+			mem.AvailableBytes/mib,
+		)
+	}
+	return nil
 }
 
 func (m *Manager) isBinaryPresent() bool {

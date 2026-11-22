@@ -4,7 +4,6 @@ package serverweb
 import (
 	"cmp"
 	"context"
-	"embed"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -29,9 +28,6 @@ import (
 	"singctl/internal/subhub"
 	"singctl/internal/telemetry"
 )
-
-//go:embed static
-var staticFS embed.FS
 
 const sessionCookieName = "singctl_server_session"
 
@@ -185,13 +181,34 @@ func New(opts Options) *Server {
 		s.updateConfigCache(initialCfg)
 	}
 
-	if staticContent, err := fs.Sub(staticFS, "static"); err == nil {
-		fileServer := http.FileServer(http.FS(staticContent))
-		s.Mux.Handle("/", wrapStaticCacheHeaders(fileServer))
-	}
+	s.mountStaticRoutes()
 
 	s.registerRoutes()
 	return s
+}
+
+func (s *Server) mountStaticRoutes() {
+	if staticContent, err := fs.Sub(staticFS, "static"); err == nil {
+		if _, statErr := fs.Stat(staticContent, "index.html"); statErr == nil {
+			fileServer := http.FileServer(http.FS(staticContent))
+			s.Mux.Handle("/", wrapStaticCacheHeaders(fileServer))
+			return
+		}
+	}
+	s.Mux.Handle("/", wrapStaticCacheHeaders(http.HandlerFunc(serveLiteStaticPlaceholder)))
+}
+
+func serveLiteStaticPlaceholder(w http.ResponseWriter, r *http.Request) {
+	switch r.URL.Path {
+	case "/", "/index.html":
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte("<!doctype html><html><head><meta charset=\"utf-8\"><title>SingCtl Lite</title><script src=\"/assets/lite-notice.js\"></script></head><body>SingCtl -lite 客户端精简构建未内嵌服务端 Web 管理静态资源，服务端请安装标准完整版。</body></html>"))
+	case "/assets/lite-notice.js":
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		_, _ = w.Write([]byte("// singctl lite build: server web static bundle omitted\n"))
+	default:
+		http.NotFound(w, r)
+	}
 }
 
 func wireSniffRemoteProvider(tracker *SniffTracker, fleetMgr *fleet.Manager) {

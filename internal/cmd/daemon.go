@@ -2,6 +2,7 @@
 package cmd
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"io"
@@ -11,12 +12,101 @@ import (
 	"syscall"
 	"time"
 
+	"singctl/internal/common/sysinfo"
 	"singctl/internal/config"
 	"singctl/internal/daemon"
 	"singctl/internal/logger"
+	"singctl/internal/webui"
 
 	"github.com/spf13/cobra"
 )
+
+// DaemonStartDeps 显式注入守护进程启动时的宿主内存探测、环境变量与路径覆盖（零全局状态篡改）。
+type DaemonStartDeps struct {
+	ReadMemInfo     func() (sysinfo.MemInfo, error)
+	UnifiedEnvValue *string
+	WebListen       string
+	WebPassword     string
+	Paths           daemon.Paths
+	SkipSignalSetup bool
+	OnWebReady      func(listenAddr string)
+}
+
+// BuildUnifiedDaemon 装配守护进程实例；当命中低内存设备或 SINGCTL_UNIFIED_DAEMON=1 时自动内嵌共享 config.Store 的 WebUI。
+func BuildUnifiedDaemon(cfg *config.Config, configPath, ver string, deps DaemonStartDeps) (*daemon.Daemon, bool) {
+	readMem := deps.ReadMemInfo
+	if readMem == nil {
+		readMem = sysinfo.ReadMemInfo
+	}
+	mi, _ := readMem()
+
+	envVal := os.Getenv(daemon.EnvUnifiedDaemon)
+	if deps.UnifiedEnvValue != nil {
+		envVal = *deps.UnifiedEnvValue
+	}
+
+	if !daemon.ShouldEnableUnifiedDaemon(mi, envVal) {
+		if deps.Paths == (daemon.Paths{}) && !deps.SkipSignalSetup {
+			return daemon.NewDaemonWithMeta(cfg, configPath, ver), false
+		}
+		d := daemon.NewDaemonWithOptions(cfg, daemon.DaemonOptions{
+			ConfigPath:      configPath,
+			Version:         ver,
+			Paths:           deps.Paths,
+			SkipSignalSetup: deps.SkipSignalSetup,
+		})
+		return d, false
+	}
+
+	listen := cmp.Or(strings.TrimSpace(deps.WebListen), strings.TrimSpace(os.Getenv("SINGCTL_WEB_LISTEN")))
+	password := cmp.Or(deps.WebPassword, resolveWebPassword(""))
+	isolatedTest := strings.TrimSpace(deps.Paths.WebEmbeddedFile) != ""
+	if !isolatedTest {
+		if prevSt, err := webui.ReadWebState(); err == nil {
+			if listen == "" {
+				listen = strings.TrimSpace(prevSt.Listen)
+			}
+			if password == "" {
+				password = prevSt.Password
+			}
+		}
+	}
+	listen = webui.NormalizeLegacyWildcardListen(cmp.Or(listen, ":8090"))
+	lowMem := true
+
+	var d *daemon.Daemon
+	d = daemon.NewDaemonWithOptions(cfg, daemon.DaemonOptions{
+		ConfigPath:        configPath,
+		Version:           ver,
+		Paths:             deps.Paths,
+		SkipSignalSetup:   deps.SkipSignalSetup,
+		WebEmbeddedListen: listen,
+		LowMemoryMode:     &lowMem,
+		EmbeddedService: func(ctx context.Context, cfgStore *config.Store) error {
+			if !isolatedTest {
+				_, _ = webui.StopWeb()
+			}
+			srv := webui.New(webui.Options{
+				ConfigPath:              configPath,
+				ConfigStore:             cfgStore,
+				AuditCollector:          d.AuditCollector(),
+				LowMemoryMode:           &lowMem,
+				Listen:                  listen,
+				Password:                password,
+				Version:                 ver,
+				SkipAdGuardProbeForTest: deps.SkipSignalSetup,
+				OnReady: func(actualAddr string) {
+					d.RecordWebEmbeddedListen(actualAddr)
+					if deps.OnWebReady != nil {
+						deps.OnWebReady(actualAddr)
+					}
+				},
+			})
+			return srv.ServeContext(ctx)
+		},
+	})
+	return d, true
+}
 
 // NewDaemonCommand creates the daemon command with subcommands
 func NewDaemonCommand(version ...string) *cobra.Command {
@@ -56,7 +146,10 @@ func newDaemonStartCommand(ver string) *cobra.Command {
 				return fmt.Errorf("failed to load config: %w", err)
 			}
 
-			d := daemon.NewDaemonWithMeta(cfg, configPath, ver)
+			d, unified := BuildUnifiedDaemon(cfg, configPath, ver, DaemonStartDeps{})
+			if unified && os.Getenv("SINGCTL_DAEMONIZED") != "1" {
+				logger.Info("检测到低内存设备，已启用单进程合体模式 (守护进程内嵌 WebUI)")
+			}
 			return d.Start()
 		},
 	}
@@ -134,6 +227,12 @@ func newDaemonStatusCommand() *cobra.Command {
 				logger.Info("├─ SingBox: Running ✓")
 			} else {
 				logger.Info("├─ SingBox: Stopped ✗")
+			}
+
+			if emb, ok := daemon.ReadWebEmbeddedState(); ok {
+				logger.Info("├─ WebUI: Embedded ✓ (%s, 低内存单进程合体模式)", emb.Listen)
+			} else if status.DaemonRunning && snap.WebEmbedded {
+				logger.Info("├─ WebUI: Embedded ✓ (%s, 低内存单进程合体模式)", cmp.Or(snap.WebEmbeddedListen, ":8090"))
 			}
 
 			foCfg := cfg.Watchdog.Failover

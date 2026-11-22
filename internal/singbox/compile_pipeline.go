@@ -192,6 +192,22 @@ var defaultConfigCompileStages = []CompileStage{
 		},
 	},
 	{
+		Name: "prune_low_memory_rulesets",
+		AppliesTo: func(g *ConfigGenerator, doc *CompileDoc) bool {
+			return !doc.isIOS && g != nil && g.EffectiveLowMemory()
+		},
+		Apply: func(_ *ConfigGenerator, doc *CompileDoc) error {
+			d, err := doc.EnsureDoc()
+			if err != nil {
+				return err
+			}
+			if pruneLowMemoryRuleSetsInDoc(d) {
+				doc.dirty = true
+			}
+			return nil
+		},
+	},
+	{
 		Name: "normalize_client_log_level",
 		Apply: func(_ *ConfigGenerator, doc *CompileDoc) error {
 			d, err := doc.EnsureDoc()

@@ -1,4 +1,6 @@
-// 文件职责：负责加载内嵌规则集快照清单，并提供流式解压、SHA-256 校验与原子落盘能力。
+//go:build !lite
+
+// 文件职责：在标准完整构建（!lite）下内嵌规则集快照资产，并提供流式解压、SHA-256 校验与原子落盘能力。
 package ruleset_snapshot
 
 import (
@@ -21,6 +23,16 @@ var assetsFS embed.FS
 // IsLite 标识当前二进制是否为不含内嵌规则集快照的轻量构建。
 const IsLite = false
 
+var loadOnce = sync.OnceValue(func() *Snapshot {
+	s := &Snapshot{}
+	if data, err := assetsFS.ReadFile("assets/manifest.json"); err == nil {
+		if err := json.Unmarshal(data, &s.manifest); err != nil {
+			s.manifest = snapshotManifest{}
+		}
+	}
+	return s
+})
+
 // 32KB 流式拷贝缓冲区对象池：避免释放几十个大体积内置规则集时反复分配临时切片或整块 readAll 堆膨胀。
 var extractCopyBufPool = sync.Pool{
 	New: func() any {
@@ -29,19 +41,9 @@ var extractCopyBufPool = sync.Pool{
 	},
 }
 
-// Load 解析内置快照清单（进程内缓存，重复调用开销可忽略）。
+// Load 解析内置快照清单（并发安全进程内单例，重复调用开销可忽略）。
 func Load() *Snapshot {
-	if loaded != nil {
-		return loaded
-	}
-	s := &Snapshot{}
-	if data, err := assetsFS.ReadFile("assets/manifest.json"); err == nil {
-		if err := json.Unmarshal(data, &s.manifest); err != nil {
-			s.manifest = snapshotManifest{}
-		}
-	}
-	loaded = s
-	return s
+	return loadOnce()
 }
 
 // Extract 解出指定 tag 的规则集内容（gunzip + sha256 完整性校验）。
@@ -76,8 +78,6 @@ func (s *Snapshot) Extract(tag string) ([]byte, error) {
 }
 
 // ExtractToFile 将指定 tag 的规则集流式解压校验并原子落盘，避免整块规则集驻留堆内存。
-// 性能优化原理：直接打开 embed.FS 只读流并经 gzip.Reader + io.TeeReader 边写入临时文件边计算 SHA256，
-// 配合 sync.Pool 复用 32KB 拷贝缓冲区，将 `sb gen` 恢复 40+ 个内置规则集时的瞬时峰值内存压低到几十 KB。
 func (s *Snapshot) ExtractToFile(tag, destPath string, perm os.FileMode) error {
 	e, ok := s.manifest.Entries[tag]
 	if !ok {

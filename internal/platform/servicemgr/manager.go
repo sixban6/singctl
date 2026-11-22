@@ -54,6 +54,7 @@ type UnitSpec struct {
 	SystemdBody string
 	ProcdPath   string
 	ProcdBody   string
+	Env         map[string]string
 }
 
 // Manager 定义极薄跨平台宿主服务启停与单元托管接口。

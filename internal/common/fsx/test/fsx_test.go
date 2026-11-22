@@ -1,10 +1,11 @@
-// 文件职责：验证 fsx 随机临时文件 0600 原子写入、CommitVerified 预检与失败自动回滚事务、SafeReplace 及异步快照合并器。
+// 文件职责：验证 fsx 随机临时文件 0600 原子写入、CommitVerified 事务回滚、SafeReplace、异步快照及定长日志截断保护。
 package fsx_test
 
 import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -190,4 +191,132 @@ func TestSafeReplace_CopyDir_FindExecutable_And_AsyncSnapshotWriter(t *testing.T
 		done <- struct{}{}
 	})
 	<-done
+}
+
+func TestCapFileTail_And_OpenCappedAppendFile(t *testing.T) {
+	dir := t.TempDir()
+
+	// 1. Edge cases: empty path, missing file, directory target, non-positive maxBytes
+	if err := fsx.CapFileTail("", 1024); err == nil {
+		t.Fatal("expected error on empty path")
+	}
+	if _, err := fsx.OpenCappedAppendFile("   ", 1024, 0600); err == nil {
+		t.Fatal("expected error on empty path in OpenCappedAppendFile")
+	}
+	missingLog := filepath.Join(dir, "nonexistent.log")
+	if err := fsx.CapFileTail(missingLog, 256*1024); err != nil {
+		t.Fatalf("missing log file should be a clean no-op, got %v", err)
+	}
+	if err := fsx.CapFileTail(dir, 1024); err == nil {
+		t.Fatal("expected error when CapFileTail targets a directory")
+	}
+
+	// 2. Under-limit and exact-limit files remain untouched; non-positive maxBytes is no-op
+	logPath := filepath.Join(dir, "logs", "daemon.log")
+	f, err := fsx.OpenCappedAppendFile(logPath, 256, 0)
+	if err != nil {
+		t.Fatalf("OpenCappedAppendFile new file failed: %v", err)
+	}
+	if _, err := f.WriteString("boot-line-1\n"); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+
+	st, err := os.Stat(logPath)
+	if err != nil || st.Mode().Perm() != 0600 {
+		t.Fatalf("expected default 0600 permission on capped log, got %v (%v)", st, err)
+	}
+	if err := fsx.CapFileTail(logPath, 0); err != nil {
+		t.Fatalf("maxBytes=0 should be no-op, got %v", err)
+	}
+	if err := fsx.CapFileTail(logPath, -1); err != nil {
+		t.Fatalf("maxBytes=-1 should be no-op, got %v", err)
+	}
+	if err := fsx.CapFileTail(logPath, 256); err != nil {
+		t.Fatalf("under-limit CapFileTail failed: %v", err)
+	}
+	if got, _ := os.ReadFile(logPath); string(got) != "boot-line-1\n" {
+		t.Fatalf("under-limit file should remain intact, got %q", string(got))
+	}
+
+	// 3. Oversized file (> 256 KiB) is atomically truncated to latest half (~128 KiB), preserving tail & permissions
+	const maxLogBytes = 256 * 1024
+	var buf bytes.Buffer
+	for i := range 10000 {
+		fmt.Fprintf(&buf, "line-%05d-payload-padding-for-tmpfs-protection\n", i)
+	}
+	fullPayload := buf.Bytes()
+	if len(fullPayload) <= maxLogBytes {
+		t.Fatalf("test setup payload too small: %d", len(fullPayload))
+	}
+	if err := os.WriteFile(logPath, fullPayload, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := fsx.CapFileTail(logPath, maxLogBytes); err != nil {
+		t.Fatalf("CapFileTail oversized failed: %v", err)
+	}
+	capped, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int64(len(capped)) != maxLogBytes/2 {
+		t.Fatalf("expected capped size = %d (half of maxBytes), got %d", maxLogBytes/2, len(capped))
+	}
+	if !bytes.HasSuffix(fullPayload, capped) {
+		t.Fatal("capped content must match exact latest tail of original log")
+	}
+	if !strings.Contains(string(capped), "line-09999-payload") {
+		t.Fatal("latest log line missing after truncation")
+	}
+
+	// Idempotency: calling CapFileTail again immediately is a no-op
+	if err := fsx.CapFileTail(logPath, maxLogBytes); err != nil {
+		t.Fatal(err)
+	}
+	cappedAgain, _ := os.ReadFile(logPath)
+	if !bytes.Equal(capped, cappedAgain) {
+		t.Fatal("second CapFileTail call was not idempotent")
+	}
+
+	// 4. OpenCappedAppendFile truncates oversized file first, then appends new entries cleanly
+	if err := os.WriteFile(logPath, fullPayload, 0640); err != nil {
+		t.Fatal(err)
+	}
+	appFile, err := fsx.OpenCappedAppendFile(logPath, maxLogBytes, 0640)
+	if err != nil {
+		t.Fatalf("OpenCappedAppendFile oversized failed: %v", err)
+	}
+	const marker = "TAIL_APPEND_AFTER_CAP\n"
+	if _, err := appFile.WriteString(marker); err != nil {
+		t.Fatal(err)
+	}
+	_ = appFile.Close()
+
+	afterAppend, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int64(len(afterAppend)) != maxLogBytes/2+int64(len(marker)) {
+		t.Fatalf("unexpected size after OpenCappedAppendFile write: %d", len(afterAppend))
+	}
+	if !strings.HasSuffix(string(afterAppend), marker) {
+		t.Fatal("appended marker missing at end of file")
+	}
+
+	// 5. Concurrent CapFileTail calls must not corrupt file or leave temp files
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() {
+			_ = fsx.CapFileTail(logPath, 4096)
+		})
+	}
+	wg.Wait()
+	entries, err := os.ReadDir(filepath.Dir(logPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected no leaked temp files in log dir, got %d entries", len(entries))
+	}
 }

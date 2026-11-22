@@ -1,8 +1,11 @@
+// 文件职责：负责 SingCtl 自升级版本检测、平台/Lite 资产筛选，并按宿主内存与 /tmp 空间自动分派归档升级或零 /tmp 流式直写升级。
 package updater
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +14,7 @@ import (
 
 	"singctl/internal/common/fsx"
 	releasepkg "singctl/internal/common/release"
+	"singctl/internal/common/sysinfo"
 	"singctl/internal/config"
 	"singctl/internal/constant"
 	"singctl/internal/logger"
@@ -20,36 +24,95 @@ import (
 // SkipChecksumEnv 允许用户在无法直连 GitHub 时显式跳过校验（自担风险）。
 const SkipChecksumEnv = "SINGCTL_SKIP_CHECKSUM"
 
+// Deps 定义 Updater 可注入的外部 HTTP 与宿主机环境探测依赖（未设置字段自动回退生产默认实现）。
+type Deps struct {
+	APIBase           string
+	DLBase            string
+	HTTPClient        *http.Client
+	Repo              string
+	GOOS              string
+	GOARCH            string
+	IsLite            *bool
+	ReadTotalRAMBytes func() uint64
+	StatTmpSpace      func(path string) (sysinfo.DiskSpace, error)
+	ResolveExePath    func() (string, error)
+	TempDir           string
+}
+
+// Updater 封装 SingCtl 供应链安全的版本拉取、SHA256 校验与平滑二进制替换。
 type Updater struct {
 	mirrorURL string
 	repoURL   string
+	deps      Deps
 }
 
+// New 创建使用生产默认宿主依赖的 Updater。
 func New(mirrorURL, repoURL string) *Updater {
+	return NewWithDeps(mirrorURL, repoURL, Deps{})
+}
+
+// NewWithDeps 创建带显式依赖注入的 Updater（供离线确定性单测与特殊宿主定制）。
+func NewWithDeps(mirrorURL, repoURL string, deps Deps) *Updater {
 	if repoURL == "" {
 		repoURL = constant.GitHubRepoURL
 	}
 	return &Updater{
 		mirrorURL: mirrorURL,
 		repoURL:   repoURL,
+		deps:      deps,
 	}
 }
 
+func (u *Updater) buildReleaseClient() *releasepkg.Client {
+	client := releasepkg.NewClient(u.mirrorURL)
+	if u.deps.APIBase != "" {
+		client.APIBase = u.deps.APIBase
+	}
+	if u.deps.DLBase != "" {
+		client.DLBase = u.deps.DLBase
+	}
+	if u.deps.HTTPClient != nil {
+		client.HTTP = u.deps.HTTPClient
+	}
+	client.SkipSHA256 = os.Getenv(SkipChecksumEnv) == "1"
+	return client
+}
+
+func (u *Updater) targetRepo() string {
+	return cmp.Or(strings.TrimSpace(u.deps.Repo), constant.GitHubRepo)
+}
+
+func (u *Updater) targetPlatform() (goos, goarch string, isLite bool) {
+	goos = cmp.Or(u.deps.GOOS, runtime.GOOS)
+	goarch = cmp.Or(u.deps.GOARCH, runtime.GOARCH)
+	isLite = ruleset_snapshot.IsLite
+	if u.deps.IsLite != nil {
+		isLite = *u.deps.IsLite
+	}
+	return goos, goarch, isLite
+}
+
+func (u *Updater) resolveCurrentExe() (string, error) {
+	if u.deps.ResolveExePath != nil {
+		return u.deps.ResolveExePath()
+	}
+	return ResolveExecutablePath()
+}
+
+// UpdateSelf 检查最新官方 Release 并在校验 SHA256 后安全替换当前 singctl 二进制。
 func (u *Updater) UpdateSelf(configPath string, currentVersion string) error {
 	logger.Info("Checking for singctl updates...")
 
 	ctx := context.Background()
+	client := u.buildReleaseClient()
+	repo := u.targetRepo()
 
-	// 1. 直连 GitHub API 获取发布元数据（tag + 资产列表 + 官方 digest，
-	//    绝不经镜像，防止镜像篡改"最新版本"指向旧版或恶意资产）。
-	client := releasepkg.NewClient(u.mirrorURL)
-	client.SkipSHA256 = os.Getenv(SkipChecksumEnv) == "1"
-	info, err := client.FetchLatest(ctx, constant.GitHubRepo)
+	// 1. 直连 GitHub API 获取发布元数据（绝不经镜像，防止镜像篡改最新版本指向旧版或恶意资产）。
+	info, err := client.FetchLatest(ctx, repo)
 	if err != nil {
 		return fmt.Errorf("无法直连 GitHub API 获取版本信息（为保证供应链安全，元数据不走镜像）: %w", err)
 	}
 
-	// 版本检测：对比当前版本与远端最新版本
 	normalizedVersion := strings.TrimPrefix(currentVersion, "v")
 	latestVersion := strings.TrimPrefix(info.TagName, "v")
 	if normalizedVersion != "" && normalizedVersion != "dev" {
@@ -58,31 +121,49 @@ func (u *Updater) UpdateSelf(configPath string, currentVersion string) error {
 			logger.Success("✅ singctl 已是最新版本 (当前: %s)", normalizedVersion)
 			return nil
 		}
-
-		// 检查是否为跨大版本升级 (例如 1.14.x -> 1.15.0)
-		curParts := strings.Split(normalizedVersion, ".")
-		latestParts := strings.Split(latestVersion, ".")
-		if len(curParts) >= 2 && len(latestParts) >= 2 {
-			curMajorMinor := curParts[0] + "." + curParts[1]
-			latestMajorMinor := latestParts[0] + "." + latestParts[1]
-			if curMajorMinor != latestMajorMinor {
-				logger.Warn("🚀 检测到全新的 sing-box 大版本内核升级: %s -> %s (适配 sing-box %s.x)", normalizedVersion, latestVersion, latestMajorMinor)
-			} else {
-				logger.Info("⬆️ singctl 同轨升级: %s -> %s", normalizedVersion, latestVersion)
-			}
-		} else {
-			logger.Info("⬆️ singctl 更新: %s -> %s", normalizedVersion, latestVersion)
-		}
+		logVersionTransition(normalizedVersion, latestVersion)
 	}
 
 	// 2. 选择当前平台的压缩包资产（严格区分完整版与 lite 轻量版）
-	asset := SelectSingCtlAsset(info.Assets, runtime.GOOS, runtime.GOARCH, ruleset_snapshot.IsLite)
+	goos, goarch, isLite := u.targetPlatform()
+	asset := SelectSingCtlAsset(info.Assets, goos, goarch, isLite)
 	if asset == nil {
-		return fmt.Errorf("no suitable asset found for OS: %s, Arch: %s (lite=%v)", runtime.GOOS, runtime.GOARCH, ruleset_snapshot.IsLite)
+		return fmt.Errorf("no suitable asset found for OS: %s, Arch: %s (lite=%v)", goos, goarch, isLite)
 	}
 
-	// 3. 下载压缩包（可走镜像加速），并强制校验 sha256
-	tempDir, err := os.MkdirTemp("", "singctl-update-*")
+	// 3. 低内存路由器或 /tmp 可用空间不足时：走零 /tmp 流式 SHA256 校验直写升级路径
+	if u.shouldUseZeroTmpStreaming(asset) {
+		return u.updateSelfZeroTmpStream(ctx, client, repo, info, asset, goos, configPath)
+	}
+
+	return u.updateSelfArchive(ctx, client, repo, info, asset, configPath)
+}
+
+func logVersionTransition(normalizedVersion, latestVersion string) {
+	curParts := strings.Split(normalizedVersion, ".")
+	latestParts := strings.Split(latestVersion, ".")
+	if len(curParts) >= 2 && len(latestParts) >= 2 {
+		curMajorMinor := curParts[0] + "." + curParts[1]
+		latestMajorMinor := latestParts[0] + "." + latestParts[1]
+		if curMajorMinor != latestMajorMinor {
+			logger.Warn("🚀 检测到全新的 sing-box 大版本内核升级: %s -> %s (适配 sing-box %s.x)", normalizedVersion, latestVersion, latestMajorMinor)
+			return
+		}
+		logger.Info("⬆️ singctl 同轨升级: %s -> %s", normalizedVersion, latestVersion)
+		return
+	}
+	logger.Info("⬆️ singctl 更新: %s -> %s", normalizedVersion, latestVersion)
+}
+
+func (u *Updater) updateSelfArchive(
+	ctx context.Context,
+	client *releasepkg.Client,
+	repo string,
+	info *releasepkg.Info,
+	asset *releasepkg.Asset,
+	configPath string,
+) error {
+	tempDir, err := os.MkdirTemp(u.deps.TempDir, "singctl-update-*")
 	if err != nil {
 		return fmt.Errorf("create temp dir: %w", err)
 	}
@@ -95,11 +176,10 @@ func (u *Updater) UpdateSelf(configPath string, currentVersion string) error {
 
 	if res.SHA256Verified {
 		logger.Success("✅ sha256 校验通过，与 GitHub 官方 digest 一致 (%s)", asset.Name)
-	} else if err := u.verifyChecksumsFile(ctx, client, info, asset, res.Path, res.ViaMirror); err != nil {
+	} else if err := u.verifyChecksumsFile(ctx, client, repo, info, asset, res.Path, res.ViaMirror); err != nil {
 		return err
 	}
 
-	// 4. 解压并定位新的可执行文件
 	extractDir := filepath.Join(tempDir, "extracted")
 	if err := releasepkg.Extract(res.Path, extractDir); err != nil {
 		return fmt.Errorf("extract archive failed: %w", err)
@@ -109,44 +189,9 @@ func (u *Updater) UpdateSelf(configPath string, currentVersion string) error {
 		return fmt.Errorf("new executable not found in downloaded package: %w", err)
 	}
 
-	// 5. 同步 configs 目录
-	var configsSrc string
-	filepath.Walk(extractDir, func(path string, info os.FileInfo, err error) error {
-		if err == nil && info.IsDir() && info.Name() == "configs" {
-			configsSrc = path
-			return filepath.SkipDir
-		}
-		return nil
-	})
+	u.syncExtractedConfigs(extractDir, newExe, configPath)
 
-	if configsSrc != "" && configPath != "" {
-		configDir := filepath.Dir(configPath)
-		logger.Info("Syncing default configurations to %s...", configDir)
-		if err := fsx.CopyDir(configsSrc, configDir); err != nil {
-			logger.Warn("Failed to sync configs directory: %v", err)
-		}
-
-		logger.Info("Migrating main configuration file...")
-		// 迁移主配置文件：优先调用新下载的 singctl 二进制执行迁移，确保新版本字段与合并逻辑生效
-		templatePath := filepath.Join(configsSrc, "singctl.yaml")
-		migrateCmd := exec.Command(newExe, "internal-migrate", "--config", configPath, "--template", templatePath)
-		if out, err := migrateCmd.CombinedOutput(); err != nil {
-			logger.Warn("New binary migrate command returned %v (%s), falling back to in-process migration", err, strings.TrimSpace(string(out)))
-			templateData, rErr := os.ReadFile(templatePath)
-			if rErr != nil {
-				logger.Warn("Failed to read downloaded template config %s: %v", templatePath, rErr)
-			} else {
-				if mErr := config.MigrateConfig(configPath, templateData); mErr != nil {
-					logger.Warn("Failed to migrate config %s: %v", configPath, mErr)
-				}
-			}
-		} else {
-			logger.Success("Main configuration migrated successfully using new version.")
-		}
-	}
-
-	// 6. 执行安全替换
-	currentExe, err := ResolveExecutablePath()
+	currentExe, err := u.resolveCurrentExe()
 	if err != nil {
 		return fmt.Errorf("get current executable: %w", err)
 	}
@@ -159,9 +204,47 @@ func (u *Updater) UpdateSelf(configPath string, currentVersion string) error {
 	return nil
 }
 
-// ResolveExecutablePath returns the canonical on-disk executable path for singctl,
-// stripping Linux `/proc/self/exe` artifacts such as ` (deleted)` or `.backup` left over
-// when a long-running daemon (e.g. `singctl sr web`) was already replaced on disk.
+func (u *Updater) syncExtractedConfigs(extractDir, newExe, configPath string) {
+	if configPath == "" {
+		return
+	}
+	var configsSrc string
+	_ = filepath.Walk(extractDir, func(path string, info os.FileInfo, err error) error {
+		if err == nil && info.IsDir() && info.Name() == "configs" {
+			configsSrc = path
+			return filepath.SkipDir
+		}
+		return nil
+	})
+	if configsSrc == "" {
+		return
+	}
+
+	configDir := filepath.Dir(configPath)
+	logger.Info("Syncing default configurations to %s...", configDir)
+	if err := fsx.CopyDir(configsSrc, configDir); err != nil {
+		logger.Warn("Failed to sync configs directory: %v", err)
+	}
+
+	logger.Info("Migrating main configuration file...")
+	templatePath := filepath.Join(configsSrc, "singctl.yaml")
+	migrateCmd := exec.Command(newExe, "internal-migrate", "--config", configPath, "--template", templatePath)
+	if out, err := migrateCmd.CombinedOutput(); err != nil {
+		logger.Warn("New binary migrate command returned %v (%s), falling back to in-process migration", err, strings.TrimSpace(string(out)))
+		templateData, rErr := os.ReadFile(templatePath)
+		if rErr != nil {
+			logger.Warn("Failed to read downloaded template config %s: %v", templatePath, rErr)
+			return
+		}
+		if mErr := config.MigrateConfig(configPath, templateData); mErr != nil {
+			logger.Warn("Failed to migrate config %s: %v", configPath, mErr)
+		}
+	} else {
+		logger.Success("Main configuration migrated successfully using new version.")
+	}
+}
+
+// ResolveExecutablePath 返回清洗 Linux /proc/self/exe (deleted) 与 .backup 后缀后的真实可执行文件路径。
 func ResolveExecutablePath() (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
@@ -183,7 +266,7 @@ func ResolveExecutablePath() (string, error) {
 	return cleaned, nil
 }
 
-// SanitizeExecutablePath strips ` (deleted)` and trailing `.backup` suffixes from an executable path.
+// SanitizeExecutablePath 剥离可执行路径末尾的 ` (deleted)` 与 `.backup` 残留后缀。
 func SanitizeExecutablePath(exe string) string {
 	p := strings.TrimSpace(exe)
 	for {
@@ -197,15 +280,13 @@ func SanitizeExecutablePath(exe string) string {
 	return p
 }
 
-// verifyChecksumsFile 是 digest 不可用时的回退路径：
-// 用发布附带的 checksums.txt（从 GitHub 直连获取，不走镜像）校验 sha256。
-func (u *Updater) verifyChecksumsFile(ctx context.Context, client *releasepkg.Client, info *releasepkg.Info, asset *releasepkg.Asset, archivePath string, viaMirror bool) error {
-	if os.Getenv(SkipChecksumEnv) == "1" {
+func (u *Updater) verifyChecksumsFile(ctx context.Context, client *releasepkg.Client, repo string, info *releasepkg.Info, asset *releasepkg.Asset, archivePath string, viaMirror bool) error {
+	if client.SkipSHA256 {
 		logger.Warn("⚠️  %s=1 已设置，跳过 sha256 校验。镜像或网络被劫持时可能安装恶意程序，请自行承担风险！", SkipChecksumEnv)
 		return nil
 	}
 
-	sums, err := client.FetchChecksums(ctx, constant.GitHubRepo, info.TagName, nil, info)
+	sums, err := client.FetchChecksums(ctx, repo, info.TagName, nil, info)
 	if err != nil {
 		return fmt.Errorf("无法直连 GitHub 获取 checksums.txt（校验必需，不走镜像）。请检查网络后重试；确要跳过请设置 %s=1: %w", SkipChecksumEnv, err)
 	}
@@ -224,7 +305,6 @@ func (u *Updater) verifyChecksumsFile(ctx context.Context, client *releasepkg.Cl
 }
 
 // SelectSingCtlAsset 根据目标系统、架构及构建变体（完整版 vs lite 轻量版）选择最合适的资产。
-// 标准版绝不误选 -lite 包；lite 版优先匹配 -lite 包，仅在无 -lite 资产时回退标准包。
 func SelectSingCtlAsset(assets []releasepkg.Asset, goos, goarch string, isLite bool) *releasepkg.Asset {
 	var standardMatch *releasepkg.Asset
 	var liteMatch *releasepkg.Asset
@@ -263,22 +343,9 @@ func matchesOSAndArch(assetName, goos, goarch string) bool {
 	goos = strings.ToLower(goos)
 	goarch = strings.ToLower(goarch)
 
-	// 排除校验文件
-	if strings.Contains(name, "checksums") {
+	if strings.Contains(name, "checksums") || !strings.Contains(name, "singctl") || !strings.Contains(name, goos) {
 		return false
 	}
-
-	// 必须包含 singctl
-	if !strings.Contains(name, "singctl") {
-		return false
-	}
-
-	// 必须包含正确的操作系统
-	if !strings.Contains(name, goos) {
-		return false
-	}
-
-	// 必须包含正确的架构
 	if goarch == "amd64" {
 		if !strings.Contains(name, "amd64") && !strings.Contains(name, "x86_64") {
 			return false
@@ -286,11 +353,5 @@ func matchesOSAndArch(assetName, goos, goarch string) bool {
 	} else if !strings.Contains(name, goarch) {
 		return false
 	}
-
-	// 必须是压缩包格式
-	if !strings.HasSuffix(name, ".tar.gz") && !strings.HasSuffix(name, ".zip") {
-		return false
-	}
-
-	return true
+	return strings.HasSuffix(name, ".tar.gz") || strings.HasSuffix(name, ".zip")
 }

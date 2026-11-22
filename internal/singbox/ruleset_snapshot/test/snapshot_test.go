@@ -1,10 +1,11 @@
-// 文件职责：验证内嵌规则集快照的加载、流式解压校验、原子落盘权限及未知标签错误处理。
+// 文件职责：验证规则集快照在标准完整构建（!lite）与轻量构建（lite）下的清单契约、流式解压校验及回退行为。
 package ruleset_snapshot_test
 
 import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"singctl/internal/singbox/ruleset_snapshot"
@@ -26,10 +27,50 @@ func pickLargestSnapshotTag(t testing.TB, snap *ruleset_snapshot.Snapshot) strin
 	return bestTag
 }
 
-func TestSnapshot_ExtractAndExtractToFile(t *testing.T) {
+func TestSnapshot_LoadConcurrencyAndBuildVariantContract(t *testing.T) {
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() {
+			snap := ruleset_snapshot.Load()
+			if snap == nil {
+				t.Errorf("Load() returned nil")
+			}
+		})
+	}
+	wg.Wait()
+
 	snap := ruleset_snapshot.Load()
+	if ruleset_snapshot.IsLite {
+		if snap.Count() != 0 {
+			t.Fatalf("expected 0 embedded rulesets in lite build, got %d", snap.Count())
+		}
+		if snap.GeneratedAt() != "" {
+			t.Fatalf("expected empty GeneratedAt in lite build, got %q", snap.GeneratedAt())
+		}
+		if len(snap.Tags()) != 0 {
+			t.Fatalf("expected empty Tags() in lite build, got %v", snap.Tags())
+		}
+		if _, _, _, ok := snap.Lookup("geoip-cn", "https://example.com/geoip-cn.srs"); ok {
+			t.Fatal("expected Lookup=false in lite build")
+		}
+		if sz, ok := snap.EntrySize("geoip-cn"); ok || sz != 0 {
+			t.Fatalf("expected EntrySize=(0,false) in lite build, got (%d,%v)", sz, ok)
+		}
+		if _, err := snap.Extract("geoip-cn"); err == nil {
+			t.Fatal("expected Extract to return error in lite build")
+		}
+		missingDest := filepath.Join(t.TempDir(), "lite-missing.srs")
+		if err := snap.ExtractToFile("geoip-cn", missingDest, 0644); err == nil {
+			t.Fatal("expected ExtractToFile to return error in lite build")
+		}
+		if _, err := os.Stat(missingDest); !os.IsNotExist(err) {
+			t.Fatalf("expected no file created on lite ExtractToFile failure, got %v", err)
+		}
+		return
+	}
+
 	if snap.Count() == 0 {
-		t.Fatal("expected non-zero snapshot entries")
+		t.Fatal("expected non-zero snapshot entries in full (!lite) build")
 	}
 	tag := pickLargestSnapshotTag(t, snap)
 	if matched, url, format, ok := snap.Lookup(tag, ""); !ok || matched != tag || url == "" || format == "" {
@@ -73,6 +114,9 @@ func TestSnapshot_ExtractAndExtractToFile(t *testing.T) {
 }
 
 func BenchmarkSnapshot_Extract(b *testing.B) {
+	if ruleset_snapshot.IsLite {
+		b.Skip("skipping embedded ruleset benchmark in lite build")
+	}
 	snap := ruleset_snapshot.Load()
 	tag := pickLargestSnapshotTag(b, snap)
 	b.ReportAllocs()
@@ -85,6 +129,9 @@ func BenchmarkSnapshot_Extract(b *testing.B) {
 }
 
 func BenchmarkSnapshot_ExtractToFile(b *testing.B) {
+	if ruleset_snapshot.IsLite {
+		b.Skip("skipping embedded ruleset benchmark in lite build")
+	}
 	snap := ruleset_snapshot.Load()
 	tag := pickLargestSnapshotTag(b, snap)
 	destPath := filepath.Join(b.TempDir(), "bench.srs")
