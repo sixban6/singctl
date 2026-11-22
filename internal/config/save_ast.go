@@ -195,6 +195,22 @@ var defaultSaveCleanupRules = []ASTSubtreeCleanupRule{
 		ParentKey:      "low_memory",
 		RemoveTopLevel: true,
 	},
+	{
+		// 当 notify 被修改、禁用某渠道或恢复默认空值时，清理 dstDoc 旧的 notify 子树，由 srcDoc 最新值完整覆盖（为空时彻底移除）
+		Name:           "notify_replace_subtree",
+		When:           func(cfg *Config, _, _ bool) bool { return cfg != nil },
+		TargetDoc:      "dst",
+		ParentKey:      "notify",
+		RemoveTopLevel: true,
+	},
+	{
+		// 当 safe_commit 被修改或恢复默认空值时，清理 dstDoc 旧的 safe_commit 子树，由 srcDoc 最新值完整覆盖（为空时彻底移除）
+		Name:           "safe_commit_replace_subtree",
+		When:           func(cfg *Config, _, _ bool) bool { return cfg != nil },
+		TargetDoc:      "dst",
+		ParentKey:      "safe_commit",
+		RemoveTopLevel: true,
+	},
 }
 
 // SaveConfigBytesAST 是纯内存 YAML AST 注释保留合并引擎；extraRules 会先于内置规则执行，便于调用方或单测扩展局部清理策略。
@@ -312,9 +328,18 @@ func filterRoleNodesBeforeMergeWithRules(dstRoot, srcRoot *yaml.Node, cfg *Confi
 		if key == "low_memory" && (cfg == nil || strings.TrimSpace(string(cfg.LowMemory)) == "") {
 			continue
 		}
+		if key == "notify" && (cfg == nil || cfg.Notify.IsEmpty()) {
+			continue
+		}
+		if key == "safe_commit" && (cfg == nil || cfg.SafeCommit.IsEmpty()) {
+			continue
+		}
 		if isServerDoc {
-			// 纯服务端配置：只保留原文件已有的顶层键、server 以及非空的 custom_rules
-			if !hasKey(dstDoc, key) && key != "server" && !(key == "custom_rules" && cfg != nil && !cfg.CustomRules.IsEmpty()) {
+			// 纯服务端配置：只保留原文件已有的顶层键、server 以及非空的 custom_rules / notify / safe_commit
+			allowActive := (key == "custom_rules" && cfg != nil && !cfg.CustomRules.IsEmpty()) ||
+				(key == "notify" && cfg != nil && !cfg.Notify.IsEmpty()) ||
+				(key == "safe_commit" && cfg != nil && !cfg.SafeCommit.IsEmpty())
+			if !hasKey(dstDoc, key) && key != "server" && !allowActive {
 				continue
 			}
 		}

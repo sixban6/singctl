@@ -51,6 +51,38 @@ func TestDNSEngineAndSmartDNSConstants(t *testing.T) {
 	}
 }
 
+func TestSafeCommitConstants(t *testing.T) {
+	strCases := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{"SafeCommitDir", constant.SafeCommitDir, "/tmp/singctl-safecommit"},
+		{"SafeCommitStateFile", constant.SafeCommitStateFile, "/tmp/singctl-safecommit/state.json"},
+		{"SafeCommitLastRollbackFile", constant.SafeCommitLastRollbackFile, "/tmp/singctl-safecommit/last_rollback.json"},
+		{"SafeCommitWatchLogFile", constant.SafeCommitWatchLogFile, "/tmp/singctl-safecommit/watch.log"},
+	}
+	for _, tc := range strCases {
+		if tc.got != tc.want {
+			t.Errorf("%s = %q, want %q", tc.name, tc.got, tc.want)
+		}
+	}
+
+	if constant.SafeCommitDefaultTTLSec != 180 {
+		t.Errorf("SafeCommitDefaultTTLSec = %d, want 180", constant.SafeCommitDefaultTTLSec)
+	}
+	if constant.SafeCommitMinTTLSec != 60 {
+		t.Errorf("SafeCommitMinTTLSec = %d, want 60", constant.SafeCommitMinTTLSec)
+	}
+	if constant.SafeCommitMaxTTLSec != 600 {
+		t.Errorf("SafeCommitMaxTTLSec = %d, want 600", constant.SafeCommitMaxTTLSec)
+	}
+	if !(constant.SafeCommitMinTTLSec < constant.SafeCommitDefaultTTLSec && constant.SafeCommitDefaultTTLSec < constant.SafeCommitMaxTTLSec) {
+		t.Errorf("invalid SafeCommit TTL ordering: min=%d default=%d max=%d",
+			constant.SafeCommitMinTTLSec, constant.SafeCommitDefaultTTLSec, constant.SafeCommitMaxTTLSec)
+	}
+}
+
 func TestNoDuplicateSharedContractLiterals(t *testing.T) {
 	repoRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
 	if err != nil {

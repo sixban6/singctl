@@ -101,6 +101,8 @@ type Config struct {
 	Audit          AuditConfig          `yaml:"audit,omitempty" json:"audit,omitzero"`
 	CustomRules    CustomRulesConfig    `yaml:"custom_rules,omitempty"`
 	TrafficRouting TrafficRoutingConfig `yaml:"traffic_routing,omitempty" json:"traffic_routing,omitzero"`
+	Notify         NotifyConfig         `yaml:"notify,omitempty" json:"notify,omitzero"`
+	SafeCommit     SafeCommitConfig     `yaml:"safe_commit,omitempty" json:"safe_commit,omitzero"`
 }
 
 func parseIntAny(v any) (int, error) {
@@ -181,6 +183,13 @@ var knownYAMLKeys = []string{
 	"audit", "whitelist", "pcdn_block", "throttles", "rate_kbps", "comment", "ai", "endpoint", "api_key", "model",
 	"firewall", "ban_timeout_days", "ping_limit_per_sec", "extra_forever_ban", "protected_ports",
 	"traffic_routing", "outbound",
+	"notify", "cooldown_minutes", "daily_limit", "quiet_hours", "events",
+	"watchdog_heal", "safe_commit_rollback", "resource_guard", "audit_high_risk", "new_device", "sub_or_node_fail", "server_quota_or_ban",
+	"channels", "telegram", "bot_token", "chat_id", "api_base_url",
+	"bark", "server_url", "device_key", "group",
+	"feishu", "webhook_url", "secret",
+	"wecom", "webhook", "header_name", "header_value",
+	"safe_commit", "default_ttl_sec", "protect_tailscale_oom",
 }
 
 var colonSpaceFixRegex = regexp.MustCompile(
