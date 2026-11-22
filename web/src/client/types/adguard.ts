@@ -1,4 +1,33 @@
-export interface ClientAdGuardStatusSummary {
+export type DNSEngineID = 'singbox' | 'smartdns' | 'adguard';
+export type DNSEnginePreference = 'auto' | DNSEngineID;
+
+export interface DNSCapabilities {
+  hasNativeWebPanel: boolean;
+  hasConfigPreview: boolean;
+  hasQueryStats: boolean;
+  hasFilterLists: boolean;
+  hasCustomFilterURL: boolean;
+  hasPauseProtection: boolean;
+  hasBlockAAAA: boolean;
+  canClearCache: boolean;
+  canUninstall: boolean;
+}
+
+export interface DNSEngineOption {
+  id: DNSEngineID;
+  name: string;
+  tagline: string;
+  installed: boolean;
+  active: boolean;
+  recommended: boolean;
+  eligible: boolean;
+  blockedReason?: string;
+  diskHint: string;
+  ramHint: string;
+  version?: string;
+}
+
+export interface ClientDNSStatusSummary {
   supported: boolean;
   installed: boolean;
   enabled: boolean;
@@ -11,12 +40,19 @@ export interface ClientAdGuardStatusSummary {
   version: string;
   dnsAddr: string;
   webUrl: string;
+  configuredEngine?: DNSEnginePreference;
+  activeEngine?: DNSEngineID;
+  activeEngineLabel?: string;
+  recommendedEngine?: DNSEngineID;
 }
+
+export type ClientAdGuardStatusSummary = ClientDNSStatusSummary;
 
 export interface AdGuardDomainStat {
   domain: string;
   count: number;
 }
+export type DNSDomainStat = AdGuardDomainStat;
 
 export interface AdGuardFilterItem {
   id: number;
@@ -26,6 +62,7 @@ export interface AdGuardFilterItem {
   rulesCount: number;
   lastUpdated?: string;
 }
+export type DNSFilterItem = AdGuardFilterItem;
 
 export interface AdGuardPresetStatus {
   id: string;
@@ -37,13 +74,21 @@ export interface AdGuardPresetStatus {
   enabled: boolean;
   rulesCount: number;
 }
+export type DNSPresetStatus = AdGuardPresetStatus;
 
 export interface AdGuardRewriteEntry {
   domain: string;
   answer: string;
 }
+export type DNSRewriteEntry = AdGuardRewriteEntry;
 
-export type AdGuardUpstreamMode = 'parallel' | 'fastest_addr' | 'load_balance' | string;
+export type DNSUpstreamMode =
+  | 'fastest_ip'
+  | 'parallel'
+  | 'fastest_addr'
+  | 'load_balance'
+  | string;
+export type AdGuardUpstreamMode = DNSUpstreamMode;
 
 export interface AdGuardUpstreamPreset {
   address: string;
@@ -51,12 +96,14 @@ export interface AdGuardUpstreamPreset {
   protocol: string;
   recommended: boolean;
 }
+export type DNSUpstreamPreset = AdGuardUpstreamPreset;
 
 export interface AdGuardUpstreamServerInfo {
   address: string;
   name: string;
   protocol: string;
 }
+export type DNSUpstreamServerInfo = AdGuardUpstreamServerInfo;
 
 export interface AdGuardUpstreamProbeItem {
   address: string;
@@ -68,8 +115,9 @@ export interface AdGuardUpstreamProbeItem {
   fastest?: boolean;
   error?: string;
 }
+export type DNSUpstreamProbeItem = AdGuardUpstreamProbeItem;
 
-export interface AdGuardOverviewSnapshot {
+export interface DNSOverviewSnapshot {
   supported: boolean;
   installed: boolean;
   enabled: boolean;
@@ -90,7 +138,7 @@ export interface AdGuardOverviewSnapshot {
   protectionDisabledDurationMs?: number;
   protectionDisabledUntil?: string;
   upstreamLatencyMs?: number;
-  upstreamMode: AdGuardUpstreamMode;
+  upstreamMode: DNSUpstreamMode;
   upstreamModeLabel: string;
   upstreams: AdGuardUpstreamServerInfo[];
   upstreamPresets: AdGuardUpstreamPreset[];
@@ -109,15 +157,27 @@ export interface AdGuardOverviewSnapshot {
   autoWhitelistedSubs: string[];
   auditManagedCount: number;
   rewrites: AdGuardRewriteEntry[];
+  configuredEngine: DNSEnginePreference;
+  activeEngine: DNSEngineID;
+  activeEngineLabel: string;
+  recommendedEngine: DNSEngineID;
+  recommendedReason: string;
+  blockAAAA: boolean;
+  statsSource: 'adguard_api' | 'smartdns_audit' | 'singbox_telemetry' | string;
+  statsSourceLabel: string;
+  capabilities: DNSCapabilities;
+  engines: DNSEngineOption[];
 }
 
-export interface AdGuardProbeResult {
+export type AdGuardOverviewSnapshot = DNSOverviewSnapshot;
+
+export interface UpstreamProbeReport {
   healthy: boolean;
   dnsAddr: string;
   domain?: string;
   resolved?: string;
   latencyMs?: number;
-  upstreamMode?: AdGuardUpstreamMode;
+  upstreamMode?: DNSUpstreamMode;
   upstreamModeLabel?: string;
   fastestUpstream?: string;
   fastestName?: string;
@@ -125,9 +185,34 @@ export interface AdGuardProbeResult {
   upstreams?: AdGuardUpstreamProbeItem[];
   error?: string;
 }
+export type AdGuardProbeResult = UpstreamProbeReport;
 
 export interface AdGuardCredentialsResponse {
   webUrl: string;
   username: string;
   password: string;
+}
+export type DNSCredentialsResponse = AdGuardCredentialsResponse;
+
+export interface DNSConfigPreviewResponse {
+  engine: string;
+  title: string;
+  path: string;
+  content: string;
+  runtimeSummary: string;
+}
+
+export interface DNSSwitchEngineRequest {
+  engine: DNSEnginePreference;
+  forceLowMemory?: boolean;
+}
+
+export interface DNSSwitchEngineResponse {
+  ok: boolean;
+  configuredEngine: string;
+  activeEngine: string;
+  switched: boolean;
+  migratedItems?: string[];
+  warnings?: string[];
+  overview?: DNSOverviewSnapshot;
 }

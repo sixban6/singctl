@@ -1,14 +1,92 @@
 import {
   AdGuardCredentialsResponse,
-  AdGuardOverviewSnapshot,
-  AdGuardProbeResult,
-  AdGuardUpstreamMode,
   AdGuardUpstreamServerInfo,
   BrowserDoHCheckRequest,
   BrowserDoHCheckResponse,
+  DNSConfigPreviewResponse,
   DNSLeakReport,
+  DNSOverviewSnapshot,
+  DNSSwitchEngineRequest,
+  DNSSwitchEngineResponse,
+  DNSUpstreamMode,
+  UpstreamProbeReport,
 } from '../types';
 import { request } from './session';
+
+const getDNSOverview = () => request<DNSOverviewSnapshot>('/api/dns/overview');
+
+const getDNSCredentials = () => request<AdGuardCredentialsResponse>('/api/dns/credentials');
+
+const resetDNSCredentials = (username = '') =>
+  request<AdGuardCredentialsResponse>('/api/dns/credentials/reset', {
+    method: 'POST',
+    body: JSON.stringify({ username }),
+  });
+
+const fetchDNSConfigPreview = () => request<DNSConfigPreviewResponse>('/api/dns/config-preview');
+
+const switchDNSEngine = (payload: DNSSwitchEngineRequest) =>
+  request<DNSSwitchEngineResponse>('/api/dns/engine', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+
+const setDNSProtection = (enabled: boolean, durationMinutes = 0) =>
+  request<{ ok: boolean }>('/api/dns/protection', {
+    method: 'POST',
+    body: JSON.stringify({ enabled, durationMinutes }),
+  });
+
+const clearDNSCache = () =>
+  request<{ ok: boolean }>('/api/dns/cache/clear', { method: 'POST', body: '{}' });
+
+const probeDNSUpstream = () =>
+  request<UpstreamProbeReport>('/api/dns/probe', { method: 'POST', body: '{}' });
+
+const saveDNSUpstreams = (payload: {
+  upstreams?: string[];
+  upstreamMode?: DNSUpstreamMode;
+  resetDefault?: boolean;
+}) =>
+  request<{
+    ok: boolean;
+    upstreams: AdGuardUpstreamServerInfo[];
+    upstreamMode: DNSUpstreamMode;
+    upstreamModeLabel: string;
+    notes?: string[];
+  }>('/api/dns/upstreams', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+
+const setDNSWhitelist = (action: 'add' | 'remove', domain: string) =>
+  request<{ ok: boolean }>('/api/dns/whitelist', {
+    method: 'POST',
+    body: JSON.stringify({ action, domain }),
+  });
+
+const manageDNSRewrite = (action: 'add' | 'delete', domain: string, answer: string) =>
+  request<{ ok: boolean }>('/api/dns/rewrites', {
+    method: 'POST',
+    body: JSON.stringify({ action, domain, answer }),
+  });
+
+const manageDNSFilter = (payload: {
+  action: 'toggle' | 'add' | 'remove' | 'refresh';
+  url?: string;
+  name?: string;
+  enabled?: boolean;
+}) =>
+  request<{ ok: boolean }>('/api/dns/filters', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+
+const setDNSBlockAAAA = (enabled: boolean) =>
+  request<{ ok: boolean; blockAAAA?: boolean }>('/api/dns/block-aaaa', {
+    method: 'POST',
+    body: JSON.stringify({ enabled }),
+  });
 
 export const dnsApi = {
   runDNSLeakTest: (mode: 'standard' | 'deep' = 'standard') =>
@@ -23,64 +101,30 @@ export const dnsApi = {
       body: JSON.stringify(payload),
     }),
 
-  getAdGuardOverview: () => request<AdGuardOverviewSnapshot>('/api/adguard'),
+  // 统一三引擎 /api/dns/* 契约方法
+  getDNSOverview,
+  getDNSCredentials,
+  resetDNSCredentials,
+  fetchDNSConfigPreview,
+  switchDNSEngine,
+  setDNSProtection,
+  clearDNSCache,
+  probeDNSUpstream,
+  saveDNSUpstreams,
+  setDNSWhitelist,
+  manageDNSRewrite,
+  manageDNSFilter,
+  setDNSBlockAAAA,
 
-  getAdGuardCredentials: () => request<AdGuardCredentialsResponse>('/api/adguard/credentials'),
-
-  resetAdGuardCredentials: (username = '') =>
-    request<AdGuardCredentialsResponse>('/api/adguard/credentials/reset', {
-      method: 'POST',
-      body: JSON.stringify({ username }),
-    }),
-
-  setAdGuardProtection: (enabled: boolean, durationMinutes = 0) =>
-    request<{ ok: boolean }>('/api/adguard/protection', {
-      method: 'POST',
-      body: JSON.stringify({ enabled, durationMinutes }),
-    }),
-
-  clearAdGuardCache: () =>
-    request<{ ok: boolean }>('/api/adguard/cache/clear', { method: 'POST', body: '{}' }),
-
-  probeAdGuardUpstream: () =>
-    request<AdGuardProbeResult>('/api/adguard/probe', { method: 'POST', body: '{}' }),
-
-  saveAdGuardUpstreams: (payload: {
-    upstreams?: string[];
-    upstreamMode?: AdGuardUpstreamMode;
-    resetDefault?: boolean;
-  }) =>
-    request<{
-      ok: boolean;
-      upstreams: AdGuardUpstreamServerInfo[];
-      upstreamMode: AdGuardUpstreamMode;
-      upstreamModeLabel: string;
-      notes?: string[];
-    }>('/api/adguard/upstreams', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    }),
-
-  setAdGuardWhitelist: (action: 'add' | 'remove', domain: string) =>
-    request<{ ok: boolean }>('/api/adguard/whitelist', {
-      method: 'POST',
-      body: JSON.stringify({ action, domain }),
-    }),
-
-  manageAdGuardRewrite: (action: 'add' | 'delete', domain: string, answer: string) =>
-    request<{ ok: boolean }>('/api/adguard/rewrites', {
-      method: 'POST',
-      body: JSON.stringify({ action, domain, answer }),
-    }),
-
-  manageAdGuardFilter: (payload: {
-    action: 'toggle' | 'add' | 'remove' | 'refresh';
-    url?: string;
-    name?: string;
-    enabled?: boolean;
-  }) =>
-    request<{ ok: boolean }>('/api/adguard/filters', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    }),
+  // 向后兼容既有调用方的方法别名（全部指向 /api/dns/*）
+  getAdGuardOverview: getDNSOverview,
+  getAdGuardCredentials: getDNSCredentials,
+  resetAdGuardCredentials: resetDNSCredentials,
+  setAdGuardProtection: setDNSProtection,
+  clearAdGuardCache: clearDNSCache,
+  probeAdGuardUpstream: probeDNSUpstream,
+  saveAdGuardUpstreams: saveDNSUpstreams,
+  setAdGuardWhitelist: setDNSWhitelist,
+  manageAdGuardRewrite: manageDNSRewrite,
+  manageAdGuardFilter: manageDNSFilter,
 };
