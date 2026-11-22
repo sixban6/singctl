@@ -388,7 +388,16 @@ func TestHandleClientBackup_RuleSetArchiveSecurityRejection(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			srv := webui.New(webui.Options{
+			// 在隔离临时目录注入确定性 stub sing-box（兼容无 sing-box 的 CI 环境），命中非法协议时强制 check 返回非零以触发全事务回滚
+		fakeBinDir := t.TempDir()
+		fakeSBPath := filepath.Join(fakeBinDir, "sing-box")
+		fakeSBScript := "#!/bin/sh\nif [ \"$1\" = \"check\" ]; then\n  for arg in \"$@\"; do\n    if [ -f \"$arg\" ] && grep -q 'nonexistent_proto_trigger_check_fail' \"$arg\"; then\n      echo 'invalid outbound type: nonexistent_proto_trigger_check_fail' >&2\n      exit 1\n    fi\n  done\nfi\nexit 0\n"
+		if err := os.WriteFile(fakeSBPath, []byte(fakeSBScript), 0755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+		srv := webui.New(webui.Options{
 				ConfigPath:              cfgPath,
 				SingBoxConfigPath:       sbPath,
 				SkipAdGuardProbeForTest: true,
@@ -681,6 +690,15 @@ func TestHandleClientBackup_V2LiveReconcileAndFullAtomicRollback(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
+
+		// 在隔离临时目录注入确定性 stub sing-box（兼容无 sing-box 的 CI 环境），命中非法协议时强制 check 返回非零以触发全事务回滚
+		fakeBinDir := t.TempDir()
+		fakeSBPath := filepath.Join(fakeBinDir, "sing-box")
+		fakeSBScript := "#!/bin/sh\nif [ \"$1\" = \"check\" ]; then\n  for arg in \"$@\"; do\n    if [ -f \"$arg\" ] && grep -q 'nonexistent_proto_trigger_check_fail' \"$arg\"; then\n      echo 'invalid outbound type: nonexistent_proto_trigger_check_fail' >&2\n      exit 1\n    fi\n  done\nfi\nexit 0\n"
+		if err := os.WriteFile(fakeSBPath, []byte(fakeSBScript), 0755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 		srv := webui.New(webui.Options{
 			ConfigPath:              cfgPath,
