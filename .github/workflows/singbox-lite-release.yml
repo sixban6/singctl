@@ -1,0 +1,368 @@
+name: Sync & Build Minimal Sing-Box Lite
+
+on:
+  schedule:
+    # 每 12 小时自动巡检一次上游 SagerNet/sing-box 稳定版，无新版本时秒级跳过不浪费算力
+    - cron: '30 */12 * * *'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '指定 sing-box 版本号（如 1.14.4，留空则自动检测官方最新稳定版）'
+        required: false
+        default: ''
+        type: string
+      force_rebuild:
+        description: '即使本仓库已是该最新版本也强制重新编译发布'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: singbox-lite-release
+  cancel-in-progress: false
+
+jobs:
+  sync-singbox-lite:
+    name: Sync Official Sing-Box Lite Client Builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check Upstream Sing-Box Version (Zero-Waste Gate)
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_VERSION: ${{ inputs.version }}
+          FORCE_REBUILD: ${{ inputs.force_rebuild }}
+        run: |
+          set -euo pipefail
+
+          RAW_VER="${INPUT_VERSION#v}"
+          RAW_VER="${RAW_VER//[[:space:]]/}"
+          if [ -n "${RAW_VER}" ]; then
+            VERSION="${RAW_VER}"
+          else
+            TAG_NAME=$(gh api repos/SagerNet/sing-box/releases/latest --jq '.tag_name' 2>/dev/null || \
+              curl -fsSL --retry 3 --connect-timeout 10 -H "Accept: application/vnd.github+json" "https://api.github.com/repos/SagerNet/sing-box/releases/latest" | jq -r '.tag_name')
+            VERSION="${TAG_NAME#v}"
+          fi
+
+          if ! [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "::error::Invalid upstream sing-box version resolved: '${VERSION}'"
+            exit 1
+          fi
+
+          echo "检查上游源码 Tag v${VERSION} 是否存在..."
+          if ! git ls-remote --exit-code --tags https://github.com/SagerNet/sing-box.git "refs/tags/v${VERSION}" >/dev/null; then
+            echo "::error::Upstream Git tag v${VERSION} not found on SagerNet/sing-box"
+            exit 1
+          fi
+
+          # 查询本仓库固定通道 Prerelease（singbox-lite-latest）现有资产，对比版本与双架构产物是否齐全
+          EXISTING_ASSETS=$(gh release view singbox-lite-latest -R "${GITHUB_REPOSITORY}" --json assets -q '.assets[].name' 2>/dev/null || true)
+
+          HAS_AMD64=false
+          HAS_ARM64=false
+          HAS_SUMS=false
+          while IFS= read -r asset; do
+            case "${asset}" in
+              "sing-box-${VERSION}-linux-amd64-lite.tar.gz") HAS_AMD64=true ;;
+              "sing-box-${VERSION}-linux-arm64-lite.tar.gz") HAS_ARM64=true ;;
+              "checksums.txt") HAS_SUMS=true ;;
+            esac
+          done <<< "${EXISTING_ASSETS}"
+
+          if [ "${FORCE_REBUILD}" != "true" ] && [ "${HAS_AMD64}" = "true" ] && [ "${HAS_ARM64}" = "true" ] && [ "${HAS_SUMS}" = "true" ]; then
+            echo "✅ singbox-lite-latest 已包含官方最新稳定版 v${VERSION} 的双架构裁剪产物与 checksums.txt，跳过编译（零资源浪费）。"
+            {
+              echo "should_build=false"
+              echo "version=${VERSION}"
+            } >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          echo "🚀 检测到需要编译发布 sing-box-lite v${VERSION}（force_rebuild=${FORCE_REBUILD}）"
+          {
+            echo "should_build=true"
+            echo "version=${VERSION}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Clone Official Sing-Box Source
+        if: steps.gate.outputs.should_build == 'true'
+        env:
+          SB_VERSION: ${{ steps.gate.outputs.version }}
+        run: |
+          set -euo pipefail
+          rm -rf singbox-src dist
+          git clone --depth 1 --branch "v${SB_VERSION}" https://github.com/SagerNet/sing-box.git singbox-src
+
+      - name: Setup Go Matching Sing-Box go.mod
+        if: steps.gate.outputs.should_build == 'true'
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: singbox-src/go.mod
+          cache: false
+
+      - name: Build Trimmed Lite AMD64 & ARM64 Packages
+        if: steps.gate.outputs.should_build == 'true'
+        env:
+          SB_VERSION: ${{ steps.gate.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          ABS_DIST="$(pwd)/dist"
+
+          cd singbox-src
+
+          if ! grep -q 'Version' constant/version.go 2>/dev/null; then
+            echo "::error::constant/version.go missing expected Version symbol in SagerNet/sing-box v${SB_VERSION}"
+            exit 1
+          fi
+
+          # 复用上游 release/LDFLAGS 与非特性编译器兼容标签（如 badlinkname,tfogo_checklinkname0），同时严格保持不加 UPX 壳以保留内核 RssFile 代码页共享
+          SHARED_LDFLAGS=""
+          if [ -f release/LDFLAGS ]; then
+            SHARED_LDFLAGS="$(tr '\r\n' ' ' < release/LDFLAGS)"
+          fi
+          COMPAT_TAGS=""
+          if [ -f release/DEFAULT_BUILD_TAGS_OTHERS ]; then
+            COMPAT_TAGS="$(tr ',\r\n' '\n' < release/DEFAULT_BUILD_TAGS_OTHERS | grep -Ev '^(with_|$)' | paste -sd, - || true)"
+          fi
+          LITE_TAGS="with_quic,with_utls,with_clash_api${COMPAT_TAGS:+,${COMPAT_TAGS}}"
+          echo "Sing-Box Lite build tags: ${LITE_TAGS}"
+          echo "Sing-Box shared ldflags : ${SHARED_LDFLAGS}"
+
+          for ARCH in amd64 arm64; do
+            PKG_DIR="sing-box-${SB_VERSION}-linux-${ARCH}-lite"
+            PKG_PATH="${ABS_DIST}/${PKG_DIR}"
+            mkdir -p "${PKG_PATH}"
+
+            echo "==> 编译 linux/${ARCH} 无 UPX 裁剪版 sing-box-lite (v${SB_VERSION})..."
+            CGO_ENABLED=0 GOOS=linux GOARCH="${ARCH}" go build \
+              -tags="${LITE_TAGS}" \
+              -trimpath \
+              -ldflags="${SHARED_LDFLAGS} -s -w -X github.com/sagernet/sing-box/constant.Version=${SB_VERSION} -buildid=" \
+              -o "${PKG_PATH}/sing-box" \
+              ./cmd/sing-box
+            chmod 0755 "${PKG_PATH}/sing-box"
+
+            ELF_BYTES=$(stat -c%s "${PKG_PATH}/sing-box")
+            ELF_MIB=$(awk "BEGIN { printf \"%.2f\", ${ELF_BYTES}/1048576 }")
+            echo "  [体积统计] linux/${ARCH} 解压 ELF 体积: ${ELF_MIB} MiB (${ELF_BYTES} bytes)"
+
+            if [ "${ARCH}" = "amd64" ]; then
+              echo "==> Runner 真机冒烟门禁验证 (linux/amd64)..."
+              VER_OUT=$("${PKG_PATH}/sing-box" version)
+              echo "${VER_OUT}"
+              FIRST_LINE=$(printf '%s\n' "${VER_OUT}" | head -n 1)
+              if [[ "${FIRST_LINE}" != *"${SB_VERSION}"* ]]; then
+                echo "::error::Smoke version mismatch! expected '${SB_VERSION}', got '${FIRST_LINE}'"
+                exit 1
+              fi
+
+              REALITY_PUB=$("${PKG_PATH}/sing-box" generate reality-keypair | awk '/PublicKey:/ {print $2}')
+              if [ -z "${REALITY_PUB}" ]; then
+                echo "::error::Failed to generate ephemeral Reality public key during smoke test"
+                exit 1
+              fi
+
+              cat > /tmp/smoke-config.json <<EOF
+          {
+            "log": {
+              "level": "warn"
+            },
+            "dns": {
+              "servers": [
+                {
+                  "tag": "dns_local",
+                  "type": "https",
+                  "server": "223.5.5.5",
+                  "server_port": 443,
+                  "path": "/dns-query"
+                }
+              ],
+              "final": "dns_local"
+            },
+            "inbounds": [
+              {
+                "type": "tproxy",
+                "tag": "tproxy-in",
+                "listen": "::",
+                "listen_port": 7893
+              },
+              {
+                "type": "mixed",
+                "tag": "mixed-in",
+                "listen": "127.0.0.1",
+                "listen_port": 7890
+              }
+            ],
+            "outbounds": [
+              {
+                "type": "vless",
+                "tag": "vless-reality-out",
+                "server": "198.51.100.10",
+                "server_port": 443,
+                "uuid": "11111111-1111-1111-1111-111111111111",
+                "flow": "xtls-rprx-vision",
+                "tls": {
+                  "enabled": true,
+                  "server_name": "node.example.com",
+                  "utls": {
+                    "enabled": true,
+                    "fingerprint": "chrome"
+                  },
+                  "reality": {
+                    "enabled": true,
+                    "public_key": "${REALITY_PUB}",
+                    "short_id": "0123456789abcdef"
+                  }
+                }
+              },
+              {
+                "type": "hysteria2",
+                "tag": "hy2-out",
+                "server": "198.51.100.11",
+                "server_port": 8443,
+                "up_mbps": 50,
+                "down_mbps": 200,
+                "password": "smoke-test-hy2-password",
+                "tls": {
+                  "enabled": true,
+                  "server_name": "node.example.com"
+                }
+              },
+              {
+                "type": "trojan",
+                "tag": "trojan-out",
+                "server": "198.51.100.12",
+                "server_port": 443,
+                "password": "smoke-test-trojan-password",
+                "tls": {
+                  "enabled": true,
+                  "server_name": "node.example.com",
+                  "utls": {
+                    "enabled": true,
+                    "fingerprint": "chrome"
+                  }
+                }
+              },
+              {
+                "type": "shadowsocks",
+                "tag": "ss-out",
+                "server": "198.51.100.13",
+                "server_port": 8388,
+                "method": "2022-blake3-aes-128-gcm",
+                "password": "AAAAAAAAAAAAAAAAAAAAAA=="
+              },
+              {
+                "type": "selector",
+                "tag": "Proxy",
+                "outbounds": [
+                  "vless-reality-out",
+                  "hy2-out",
+                  "trojan-out",
+                  "ss-out"
+                ]
+              },
+              {
+                "type": "direct",
+                "tag": "direct-out"
+              }
+            ],
+            "route": {
+              "default_domain_resolver": "dns_local",
+              "rules": [
+                {
+                  "action": "sniff"
+                }
+              ],
+              "final": "Proxy"
+            },
+            "experimental": {
+              "clash_api": {
+                "external_controller": "127.0.0.1:9090"
+              }
+            }
+          }
+          EOF
+
+              "${PKG_PATH}/sing-box" check -c /tmp/smoke-config.json
+              rm -f /tmp/smoke-config.json
+              echo "  ✅ sing-box check 全协议（DoH + TProxy/Mixed + VLESS-Reality-uTLS + Hysteria2 + Trojan + Shadowsocks + ClashAPI）冒烟校验通过！"
+            fi
+
+            GZIP=-9 tar -C "${ABS_DIST}" -czf "${ABS_DIST}/${PKG_DIR}.tar.gz" "${PKG_DIR}"
+            echo "${ELF_MIB} MiB (${ELF_BYTES} bytes)" > "${ABS_DIST}/${PKG_DIR}.elfsize"
+            rm -rf "${PKG_PATH}"
+          done
+
+          cd "${ABS_DIST}"
+          sha256sum "sing-box-${SB_VERSION}-linux-amd64-lite.tar.gz" "sing-box-${SB_VERSION}-linux-arm64-lite.tar.gz" > checksums.txt
+          echo "==> 产物压缩包与 SHA256 清单:"
+          ls -lh *.tar.gz checksums.txt
+          cat checksums.txt
+
+      - name: Publish Atomic Rolling Release (singbox-lite-latest)
+        if: steps.gate.outputs.should_build == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SB_VERSION: ${{ steps.gate.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          AMD64_ELF=$(cat "dist/sing-box-${SB_VERSION}-linux-amd64-lite.elfsize" 2>/dev/null || echo "N/A")
+          ARM64_ELF=$(cat "dist/sing-box-${SB_VERSION}-linux-arm64-lite.elfsize" 2>/dev/null || echo "N/A")
+
+          cat > /tmp/singbox-lite-notes.md <<EOF
+          ## Sing-Box 客户端网关精简裁剪包 v${SB_VERSION} (sing-box-lite)
+
+          - **上游版本**: [SagerNet/sing-box v${SB_VERSION}](https://github.com/SagerNet/sing-box/releases/tag/v${SB_VERSION})
+          - **覆盖架构**: \`linux/amd64\`（解压 ELF: \`${AMD64_ELF}\`）、\`linux/arm64\`（解压 ELF: \`${ARM64_ELF}\`）
+          - **构建工艺**: 官方同版源码保留客户端全核心能力标签 \`with_quic,with_utls,with_clash_api\`（完整支持 DoH/QUIC、TProxy/Mixed/Redirect、VLESS Reality + uTLS、Hysteria2/TUIC、Trojan、Shadowsocks、Clash API），剔除 \`tailscale\` / \`gvisor\` / \`acme\` / \`wireguard\` / \`ccm\` / \`ocm\` 等服务端与内嵌隧道巨型依赖；仅 \`-trimpath -s -w\` 剥离符号表，**未加 UPX 壳**以保留 Linux 内核 \`RssFile\` 代码页按需映射，完美装入 \`<= 40MB\` 小闪存硬路由 \`/overlay\`！
+          - **发布通道**: 独立固定 \`prerelease\` 通道（\`--latest=false\`），绝不影响 \`singctl\` 主程序 \`/releases/latest\`
+
+          ### SHA256 Checksums
+          \`\`\`
+          $(cat dist/checksums.txt)
+          \`\`\`
+          EOF
+
+          PKG_AMD64="dist/sing-box-${SB_VERSION}-linux-amd64-lite.tar.gz"
+          PKG_ARM64="dist/sing-box-${SB_VERSION}-linux-arm64-lite.tar.gz"
+          PKG_SUMS="dist/checksums.txt"
+
+          if gh release view singbox-lite-latest -R "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "==> 更新现有 singbox-lite-latest Release（先上传新包再清理旧资产，零 404 窗口）..."
+            gh release upload singbox-lite-latest \
+              "${PKG_AMD64}" "${PKG_ARM64}" "${PKG_SUMS}" \
+              --clobber -R "${GITHUB_REPOSITORY}"
+
+            gh release edit singbox-lite-latest \
+              --prerelease \
+              --latest=false \
+              --title "Sing-Box 网关精简包 (v${SB_VERSION})" \
+              --notes-file /tmp/singbox-lite-notes.md \
+              -R "${GITHUB_REPOSITORY}"
+
+            OLD_ASSETS=$(gh release view singbox-lite-latest -R "${GITHUB_REPOSITORY}" --json assets -q '.assets[].name' | grep -E '^sing-box-.*-lite\.tar\.gz$' || true)
+            for old_asset in ${OLD_ASSETS}; do
+              if [ "${old_asset}" != "sing-box-${SB_VERSION}-linux-amd64-lite.tar.gz" ] && [ "${old_asset}" != "sing-box-${SB_VERSION}-linux-arm64-lite.tar.gz" ]; then
+                echo "  - 清理旧版资产: ${old_asset}"
+                gh release delete-asset singbox-lite-latest "${old_asset}" -R "${GITHUB_REPOSITORY}" --yes || true
+              fi
+            done
+          else
+            echo "==> 首次创建 singbox-lite-latest Prerelease（latest=false）..."
+            gh release create singbox-lite-latest \
+              --target "${GITHUB_SHA}" \
+              --prerelease \
+              --latest=false \
+              --title "Sing-Box 网关精简包 (v${SB_VERSION})" \
+              --notes-file /tmp/singbox-lite-notes.md \
+              "${PKG_AMD64}" "${PKG_ARM64}" "${PKG_SUMS}" \
+              -R "${GITHUB_REPOSITORY}"
+          fi
+          rm -f /tmp/singbox-lite-notes.md

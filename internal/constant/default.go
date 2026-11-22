@@ -6,6 +6,9 @@ const (
 	GitHubRepo    = "sixban6/singctl"
 	GitHubRepoURL = "https://github.com/" + GitHubRepo
 
+	// SingBoxLiteReleaseTag 为本仓库独立托管的裁剪版 sing-box 滚动 Prerelease 标签（--latest=false）。
+	SingBoxLiteReleaseTag = "singbox-lite-latest"
+
 	AppName          = "SFM"
 	ExitNode         = "exit-node"
 	MainRouter       = "router"

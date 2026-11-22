@@ -68,8 +68,9 @@
 3. **零环单进程合体运行时与冷态回收（`cmd` → `{daemon, webui}` + `audit`）**：
    - 通过 `DaemonOptions.EmbeddedService` 依赖反转钩子，在 `cmd/daemon.go` 自动将共享同一 `*config.Store` 与 `*audit.Collector` 的 `webui.Server` 内嵌进 `singctl dm` 单进程运行（立省一整套独立 Go Runtime ~16–18 MB），`singctl web status/start/restart` 无缝幂等兼容；
    - WebUI `IdleScavenger` 在连续 `3 分钟` 无请求后单次执行 `GC + FreeOSMemory` 归还物理内存且持续静默零重复唤醒；`audit.Collector` 收紧至 `256` 条风险感知有界流环（高危/可疑 PCDN 流永不误淘汰）并放宽邻居表刷新周期。
-4. **`-tags lite` 小闪存精简发版矩阵**：
-   - 通过 `snapshot_lite.go` 与 `embed_lite.go` 剔除内嵌规则集快照与服务端 WebUI 静态资源，官方 GitHub Release 同步产出 `singctl-linux-{amd64,arm64}-lite.tar.gz`，`install.sh` 与 `updater` 自动识别匹配。
+4. **`-tags lite` 小闪存精简发版矩阵与 `singbox-lite-latest` 滚动通道**：
+   - 通过 `snapshot_lite.go` 与 `embed_lite.go` 剔除内嵌规则集快照与服务端 WebUI 静态资源，官方 GitHub Release 同步产出 `singctl-linux-{amd64,arm64}-lite.tar.gz`，`install.sh` 与 `updater` 自动识别匹配；
+   - 独立滚动 Prerelease 通道 `singbox-lite-latest`（`singbox-lite-release.yml`）基于官方同版源码以 `with_quic,with_utls,with_clash_api` 裁剪产出无 UPX 精简版 `sing-box`，低内存或小闪存（`< 120 MiB`）网关执行 `sb install/update` 时零配置自动流式 SHA256 验签直写安装（0 MB `/tmp` 归档落盘，未就绪时平滑回退 `SagerNet/sing-box`）。
 
 ---
 
