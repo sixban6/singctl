@@ -20,9 +20,7 @@ export interface DNSStatsCardProps {
 function getDefaultStatsSourceLabel(snap: DNSOverviewSnapshot | null): string {
   if (snap?.statsSourceLabel) return snap.statsSourceLabel;
   const engine = resolveActiveEngine(snap);
-  if (engine === 'adguard') return 'AdGuard Home 逐包 DNS 统计';
-  if (engine === 'smartdns') return 'SmartDNS 内存盘逐包审计';
-  return 'sing-box 连接与拦截实时遥测';
+  return engine === 'adguard' ? 'AdGuard Home 逐包 DNS 统计' : 'SmartDNS 内存盘逐包审计';
 }
 
 function getStatsSourceBadge(statsSource?: string, engine?: string): string {
@@ -31,12 +29,8 @@ function getStatsSourceBadge(statsSource?: string, engine?: string): string {
       return 'AdGuard API';
     case 'smartdns_audit':
       return '内存盘审计';
-    case 'singbox_telemetry':
-      return '内核遥测';
     default:
-      if (engine === 'adguard') return 'AdGuard API';
-      if (engine === 'smartdns') return '内存盘审计';
-      return '内核遥测';
+      return engine === 'adguard' ? 'AdGuard API' : '内存盘审计';
   }
 }
 
@@ -74,18 +68,12 @@ export const DNSStatsCard: React.FC<DNSStatsCardProps> = ({
     <div className="space-y-4">
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3.5">
         <div className="console-card rounded-2xl p-4 space-y-1">
-          <div className="text-xs text-secondary">
-            {activeEngine === 'singbox' ? '24h 域名访问总量' : '24h DNS 查询总量'}
-          </div>
+          <div className="text-xs text-secondary">24h DNS 查询总量</div>
           <div className="text-xl sm:text-2xl font-bold text-primary font-mono tnum">
             {formatNumber(stats?.numDnsQueries || 0)}
           </div>
           <div className="text-[11px] text-muted truncate" title={sourceLabel}>
-            {activeEngine === 'singbox'
-              ? 'sing-box 加强版内置接管中'
-              : snap?.singboxLinked
-                ? 'sing-box dns_local 实时接管中'
-                : '等待内核接管'}
+            {snap?.singboxLinked ? 'sing-box dns_local 实时接管中' : '等待内核接管'}
           </div>
         </div>
 
@@ -110,11 +98,7 @@ export const DNSStatsCard: React.FC<DNSStatsCardProps> = ({
           <div className="text-xl sm:text-2xl font-bold text-primary font-mono tnum">
             {stats?.avgProcessingMs ?? 0} <span className="text-xs font-normal">ms</span>
           </div>
-          <div className="text-[11px] text-muted">
-            {activeEngine === 'singbox'
-              ? '加密 DoH 实测与乐观缓存参考'
-              : '含本地缓存与并发竞速加速'}
-          </div>
+          <div className="text-[11px] text-muted">含本地缓存与并发竞速加速</div>
         </div>
 
         <div className="console-card rounded-2xl p-4 space-y-1">
@@ -156,7 +140,7 @@ export const DNSStatsCard: React.FC<DNSStatsCardProps> = ({
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-1.5 text-xs font-semibold text-primary">
                 <TrendingUp className="w-3.5 h-3.5 text-sky-400" />
-                <span>{activeEngine === 'singbox' ? 'Top 访问域名排行' : 'Top 查询域名排行'}</span>
+                <span>Top 查询域名排行</span>
               </div>
               <span className="text-[11px] text-muted tnum">
                 {topQueried.length > 0 ? `前 ${topQueried.length} 项` : '实时采集'}

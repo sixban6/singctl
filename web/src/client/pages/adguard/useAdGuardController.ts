@@ -40,7 +40,6 @@ export function useAdGuardController(
   );
   const [mutating, setMutating] = useState(false);
   const [switchingEngine, setSwitchingEngine] = useState<DNSEnginePreference | null>(null);
-  const [togglingBlockAAAA, setTogglingBlockAAAA] = useState(false);
 
   const [probe, setProbe] = useState<UpstreamProbeReport | null>(
     () => peekCachedQuery<UpstreamProbeReport>(ADGUARD_PROBE_CACHE_KEY) ?? null,
@@ -145,7 +144,7 @@ export function useAdGuardController(
     return () => window.removeEventListener(CLIENT_INVALIDATE_EVENT, onInvalidate);
   }, [loadOverview]);
 
-  const engineActiveOrReady = Boolean(snap?.installed || snap?.activeEngine === 'singbox');
+  const engineActiveOrReady = Boolean(snap?.installed);
   useVisibilityInterval(
     () => {
       void loadOverview(true);
@@ -204,12 +203,12 @@ export function useAdGuardController(
     prevEngineRef.current = curEngine;
     if (engineChanged) {
       setConfigPreview(null);
-      if ((snap.dnsHealthy || curEngine === 'singbox') && !probing) {
+      if (snap.installed && snap.dnsHealthy && !probing) {
         void runProbe(true);
       }
       return;
     }
-    if ((snap.installed || curEngine === 'singbox') && snap.dnsHealthy && !probe && !probing) {
+    if (snap.installed && snap.dnsHealthy && !probe && !probing) {
       void runProbe(true);
     }
   }, [active, snap, probe, probing, runProbe]);
@@ -224,7 +223,9 @@ export function useAdGuardController(
       if (res.overview) {
         applySnapshot(res.overview);
       }
-      const targetName = getEngineDisplayName(res.activeEngine || engine);
+      const targetName = getEngineDisplayName(
+        res.activeEngine || (engine === 'auto' ? snap?.recommendedEngine : engine),
+      );
       const migrated = res.migratedItems?.length
         ? `（已迁移：${res.migratedItems.join('、')}）`
         : '';
@@ -267,24 +268,6 @@ export function useAdGuardController(
       error((e as Error).message || '切换过滤状态失败');
     } finally {
       setMutating(false);
-    }
-  };
-
-  const handleToggleBlockAAAA = async (enabled: boolean): Promise<boolean> => {
-    setTogglingBlockAAAA(true);
-    try {
-      await clientApi.setDNSBlockAAAA(enabled);
-      if (snap) {
-        applySnapshot({ ...snap, blockAAAA: enabled });
-      }
-      success(enabled ? '已开启 AAAA (IPv6) 解析屏蔽并热生效' : '已关闭 AAAA (IPv6) 解析屏蔽并热生效');
-      await loadOverview(true);
-      return true;
-    } catch (e) {
-      error((e as Error).message || '切换 AAAA 屏蔽开关失败');
-      return false;
-    } finally {
-      setTogglingBlockAAAA(false);
     }
   };
 
@@ -540,7 +523,6 @@ export function useAdGuardController(
     loading,
     mutating,
     switchingEngine,
-    togglingBlockAAAA,
     probe,
     probing,
     pauseRemainSec,
@@ -557,7 +539,6 @@ export function useAdGuardController(
     runProbe,
     handleSwitchEngine,
     handleProtection,
-    handleToggleBlockAAAA,
     handleClearCache,
     handleWhitelist,
     handleAddRewrite,
