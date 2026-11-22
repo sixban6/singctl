@@ -26,14 +26,26 @@ type SingBox struct {
 	config          *config.Config
 	configPath      string
 	configGenerator *ConfigGenerator
+	deps            InstallDeps
 }
 
 func New(cfg *config.Config) *SingBox {
+	return NewWithDeps(cfg, InstallDeps{})
+}
 
+// NewWithDeps 创建支持显式注入平台、磁盘探测与发布客户端替身的 SingBox 实例（未设置字段自动回退生产默认实现）。
+func NewWithDeps(cfg *config.Config, deps InstallDeps) *SingBox {
+	var cg *ConfigGenerator
+	if deps.HTTPClient != nil || deps.APIBase != "" {
+		cg = NewOfflineConfigGenerator(cfg)
+	} else {
+		cg = NewConfigGenerator(cfg)
+	}
 	return &SingBox{
 		config:          cfg,
 		configPath:      constant.SingBoxConfigFile,
-		configGenerator: NewConfigGenerator(cfg),
+		configGenerator: cg,
+		deps:            deps,
 	}
 }
 
@@ -253,10 +265,11 @@ func (sb *SingBox) localizeRuleSets(configContent string) string {
 
 // Install 安装 sing-box
 func (sb *SingBox) Install() error {
-	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+	goos := sb.effectiveGOOS()
+	if goos == "darwin" || goos == "windows" {
 		return sb.InstallGUI()
 	}
-	return sb.installOrUpdate(constant.SingBoxInstallDir)
+	return sb.installOrUpdate(sb.effectiveTargetPath())
 }
 
 // InstallGUI 安装 GUI 客户端
@@ -392,22 +405,21 @@ func (sb *SingBox) StartGUI() error {
 }
 
 // installOrUpdate 安装或更新 sing-box (CLI)
-// 发布元数据从 GitHub API 直连获取（信任锚，不走镜像）；压缩包可走镜像加速，
-// 但会用官方元数据校验文件大小并在镜像下载时提示风险（上游不发布 checksums，无法加密校验）。
+// 小内存/小闪存/lite 客户端优先从本仓库 singbox-lite-latest 滚动通道流式验签直写安装；
+// 发布元数据永远从 GitHub API 直连获取（信任锚，不走镜像），压缩包支持镜像加速与 SHA256 强校验。
 func (sb *SingBox) installOrUpdate(targetPath string) error {
 	ctx := context.Background()
+	client := sb.buildReleaseClient()
 
-	// 创建临时目录
-	tempDir, err := os.MkdirTemp("", "singbox-install-*")
-	if err != nil {
-		return fmt.Errorf("create temp dir: %w", err)
+	if sb.shouldUseSingBoxLite(targetPath) {
+		fallback, err := sb.tryInstallSingBoxLite(ctx, client, targetPath)
+		if !fallback {
+			return err
+		}
 	}
-	defer os.RemoveAll(tempDir)
 
-	// 1. 直连获取发布元数据（资产名、大小、下载地址；信任锚，不走镜像）
-	client := releasepkg.NewClient(sb.config.GitHub.MirrorURL)
-	client.DirectFirst = netx.CheckGoogleConnectivity()
-	info, err := client.FetchLatest(ctx, "SagerNet/sing-box")
+	// 1. 直连获取上游发布元数据（资产名、大小、下载地址；信任锚，不走镜像）
+	info, err := client.FetchLatest(ctx, UpstreamSingBoxRepo)
 	if err != nil {
 		return fmt.Errorf("无法直连 GitHub API 获取 sing-box 发布信息（为保证供应链安全，元数据不走镜像）: %w", err)
 	}
@@ -421,8 +433,20 @@ func (sb *SingBox) installOrUpdate(targetPath string) error {
 		}
 	}
 	if asset == nil {
-		return fmt.Errorf("no suitable asset found for OS: %s, Arch: %s", runtime.GOOS, runtime.GOARCH)
+		return fmt.Errorf("no suitable asset found for OS: %s, Arch: %s", sb.effectiveGOOS(), sb.effectiveGOARCH())
 	}
+
+	// 低内存/小闪存设备即使回退到上游包也采用零 /tmp 流式直写解压
+	if sb.shouldStreamDirectToTarget(targetPath, asset, false) {
+		return sb.streamInstallSingBoxTarGz(ctx, client, UpstreamSingBoxRepo, info, asset, targetPath, false)
+	}
+
+	// 创建临时目录（常规大容量主机）
+	tempDir, err := os.MkdirTemp(sb.deps.TempDir, "singbox-install-*")
+	if err != nil {
+		return fmt.Errorf("create temp dir: %w", err)
+	}
+	defer os.RemoveAll(tempDir)
 
 	// 3. 下载并解压（官方 digest 随元数据直连返回，下载内容做 sha256 强校验）
 	res, err := client.Download(ctx, *asset, tempDir)
@@ -455,8 +479,7 @@ func (sb *SingBox) installOrUpdate(targetPath string) error {
 	return nil
 }
 
-// selectSingBoxAsset 选择合适的sing-box资产
-// selectSingBoxAsset 选择合适的sing-box资产
+// selectSingBoxAsset 选择合适的上游 SagerNet/sing-box 资产
 func (sb *SingBox) selectSingBoxAsset(assetName string) bool {
 	name := strings.ToLower(assetName)
 
@@ -477,18 +500,19 @@ func (sb *SingBox) selectSingBoxAsset(assetName string) bool {
 	}
 
 	// 2. 匹配操作系统
-	if runtime.GOOS == "darwin" && !strings.Contains(name, "darwin") {
+	goos := sb.effectiveGOOS()
+	if goos == "darwin" && !strings.Contains(name, "darwin") {
 		return false
 	}
-	if runtime.GOOS == "windows" && !strings.Contains(name, "windows") {
+	if goos == "windows" && !strings.Contains(name, "windows") {
 		return false
 	}
-	if runtime.GOOS == "linux" && !strings.Contains(name, "linux") {
+	if goos == "linux" && !strings.Contains(name, "linux") {
 		return false
 	}
 
 	// 3. 匹配 CPU 架构
-	arch := runtime.GOARCH
+	arch := sb.effectiveGOARCH()
 	if arch == "amd64" {
 		// x86_64 和 amd64 是同义词
 		if !strings.Contains(name, "amd64") && !strings.Contains(name, "x86_64") {
@@ -527,24 +551,46 @@ func ParseSingBoxVersionOutput(raw string) (string, error) {
 
 // getCurrentVersion 获取当前已安装 sing-box 的版本号。
 func (sb *SingBox) getCurrentVersion() (string, error) {
-	out, err := exec.Command(constant.SingBoxInstallDir, "version").Output()
+	if sb.deps.CurrentVersionFn != nil {
+		return sb.deps.CurrentVersionFn()
+	}
+	out, err := exec.Command(sb.effectiveTargetPath(), "version").Output()
 	if err != nil {
 		return "", fmt.Errorf("failed to run sing-box version: %w", err)
 	}
 	return ParseSingBoxVersionOutput(string(out))
 }
 
-// fetchLatestVersion 从 GitHub API 获取 sing-box 最新稳定 Release 的版本号。
-func (sb *SingBox) fetchLatestVersion() (string, error) {
-	return releasepkg.NewClient(sb.config.GitHub.MirrorURL).FetchLatestTag(context.Background(), "SagerNet/sing-box")
+// fetchLatestVersion 从 GitHub API 获取目标通道（singbox-lite-latest 或上游 SagerNet/sing-box）的最新版本号。
+func (sb *SingBox) fetchLatestVersion(targetPath string) (string, error) {
+	ctx := context.Background()
+	client := sb.buildReleaseClient()
+	if sb.shouldUseSingBoxLite(targetPath) {
+		repo := sb.liteRepo()
+		info, err := client.FetchTag(ctx, repo, constant.SingBoxLiteReleaseTag)
+		if err == nil {
+			if asset := SelectSingBoxLiteAsset(info.Assets, sb.effectiveGOARCH()); asset != nil {
+				if ver, vErr := ParseSingBoxLiteAssetVersion(asset.Name); vErr == nil {
+					return ver, nil
+				}
+			}
+			logger.Warn("⚠️ sing-box-lite 通道 (%s) 暂无 linux/%s 资产，回退查询上游 %s 最新版本", constant.SingBoxLiteReleaseTag, sb.effectiveGOARCH(), UpstreamSingBoxRepo)
+		} else if releasepkg.IsNotFound(err) {
+			logger.Warn("⚠️ sing-box-lite 精简通道 (%s@%s) 尚未就绪 (404)，回退查询上游 %s 最新版本", repo, constant.SingBoxLiteReleaseTag, UpstreamSingBoxRepo)
+		} else {
+			return "", err
+		}
+	}
+	return client.FetchLatestTag(ctx, UpstreamSingBoxRepo)
 }
 
-// Update 更新 sing-box（更新前对比版本，避免无意义的重复下载）。
+// Update 更新 sing-box（更新前精准对齐目标通道版本比对，避免无意义的重复下载）。
 func (sb *SingBox) Update() error {
 	logger.Info("Checking for sing-box updates...")
+	targetPath := sb.effectiveTargetPath()
 
-	// 1. 获取远端最新版本
-	latestVersion, err := sb.fetchLatestVersion()
+	// 1. 获取远端目标通道最新版本
+	latestVersion, err := sb.fetchLatestVersion(targetPath)
 	if err != nil {
 		logger.Warn("⚠️ 无法获取最新版本 (%v)，将继续尝试更新", err)
 		latestVersion = "unknown"
@@ -556,7 +602,7 @@ func (sb *SingBox) Update() error {
 	currentVersion, currentErr := sb.getCurrentVersion()
 	if currentErr != nil {
 		logger.Warn("无法获取当前版本 (%v)，继续执行更新...", currentErr)
-	} else if latestVersion != "unknown" && currentVersion == latestVersion {
+	} else if latestVersion != "unknown" && strings.TrimPrefix(currentVersion, "v") == strings.TrimPrefix(latestVersion, "v") {
 		logger.Success("✅ sing-box 已是最新版本 (当前: %s)", currentVersion)
 		return nil
 	} else if latestVersion != "unknown" {
@@ -566,5 +612,5 @@ func (sb *SingBox) Update() error {
 	}
 
 	// 3. 执行实际更新
-	return sb.installOrUpdate(constant.SingBoxInstallDir)
+	return sb.installOrUpdate(targetPath)
 }

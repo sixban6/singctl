@@ -162,3 +162,80 @@ func TestExtractBinaryStream_SecurityBoundsAndZipSlip(t *testing.T) {
 		t.Fatalf("DownloadAndExtractBinary failed: %v", err)
 	}
 }
+
+func TestFetchTag_TrustAnchorNotFoundAndInputValidation(t *testing.T) {
+	mirrorHitAPI := false
+	apiHits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		apiHits++
+		if strings.HasPrefix(r.URL.Path, "/mirror/") {
+			mirrorHitAPI = true
+			http.Error(w, "mirror must NEVER receive FetchTag metadata calls", http.StatusForbidden)
+			return
+		}
+		switch r.URL.Path {
+		case "/repos/example/demo/releases/tags/singbox-lite-latest":
+			_ = json.NewEncoder(w).Encode(release.Info{
+				TagName: "singbox-lite-latest",
+				Assets: []release.Asset{
+					{Name: "sing-box-1.14.4-linux-arm64-lite.tar.gz", Size: 1024},
+					{Name: "checksums.txt", Size: 128},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c := release.NewClient(srv.URL + "/mirror")
+	c.APIBase = srv.URL
+	c.DLBase = srv.URL
+	c.HTTP = srv.Client()
+	c.DirectFirst = false
+
+	// 1. Happy path: fetches fixed prerelease tag directly without touching mirror
+	info, err := c.FetchTag(t.Context(), "example/demo", "singbox-lite-latest")
+	if err != nil {
+		t.Fatalf("FetchTag valid prerelease tag failed: %v", err)
+	}
+	if mirrorHitAPI {
+		t.Fatal("security violation: FetchTag went through mirror")
+	}
+	if info.TagName != "singbox-lite-latest" || len(info.Assets) != 2 {
+		t.Fatalf("unexpected FetchTag Info: %+v", info)
+	}
+
+	// 2. HTTP 404 maps cleanly to release.IsNotFound
+	_, err = c.FetchTag(t.Context(), "example/demo", "non-existent-tag")
+	if err == nil || !release.IsNotFound(err) {
+		t.Fatalf("FetchTag 404 err = %v, want release.IsNotFound=true", err)
+	}
+
+	// 3. Invalid / empty / path-traversal / query-injection inputs rejected BEFORE any network call
+	hitsBeforeBad := apiHits
+	badInputs := []struct {
+		name string
+		repo string
+		tag  string
+	}{
+		{name: "empty_repo", repo: "", tag: "singbox-lite-latest"},
+		{name: "empty_tag", repo: "example/demo", tag: "   "},
+		{name: "repo_missing_slash", repo: "exampleOnly", tag: "v1.0.0"},
+		{name: "repo_traversal", repo: "example/../evil", tag: "v1.0.0"},
+		{name: "tag_path_traversal", repo: "example/demo", tag: "../../latest"},
+		{name: "tag_slash_injection", repo: "example/demo", tag: "foo/bar"},
+		{name: "tag_query_injection", repo: "example/demo", tag: "v1.0.0?per_page=100"},
+		{name: "tag_fragment_injection", repo: "example/demo", tag: "v1.0.0#frag"},
+	}
+	for _, tc := range badInputs {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := c.FetchTag(t.Context(), tc.repo, tc.tag); err == nil {
+				t.Fatalf("expected error for repo=%q tag=%q, got nil", tc.repo, tc.tag)
+			}
+		})
+	}
+	if apiHits != hitsBeforeBad {
+		t.Fatalf("malformed FetchTag inputs triggered %d HTTP requests, want 0", apiHits-hitsBeforeBad)
+	}
+}

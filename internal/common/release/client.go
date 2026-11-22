@@ -101,13 +101,38 @@ func IsNotFound(err error) bool {
 	return false
 }
 
-// FetchLatest 直连获取最新稳定版 Release 元数据（绝不经镜像）。
-func (c *Client) FetchLatest(ctx context.Context, repo string) (*Info, error) {
+// validateRepoSlug 校验 GitHub owner/repo 坐标格式，拦截空值、路径穿越与查询串注入。
+func validateRepoSlug(repo string) (string, error) {
 	repo = strings.TrimSpace(repo)
 	if repo == "" {
-		return nil, errors.New("repo must not be empty")
+		return "", errors.New("repo must not be empty")
 	}
-	url := fmt.Sprintf("%s/repos/%s/releases/latest", c.apiBase(), repo)
+	if strings.Contains(repo, "..") || strings.ContainsAny(repo, "\\?# \t\r\n") {
+		return "", fmt.Errorf("invalid repo slug: %q", repo)
+	}
+	owner, name, ok := strings.Cut(repo, "/")
+	if !ok || owner == "" || name == "" || strings.Contains(name, "/") {
+		return "", fmt.Errorf("repo must be in owner/name format: %q", repo)
+	}
+	return repo, nil
+}
+
+// validateTagSlug 校验 GitHub Release Tag 名称，拦截路径穿越、分隔符与查询串注入。
+func validateTagSlug(tag string) (string, error) {
+	tag = strings.TrimSpace(tag)
+	if tag == "" || tag == "." || strings.Contains(tag, "..") || strings.ContainsAny(tag, "/\\?# \t\r\n") {
+		return "", fmt.Errorf("invalid release tag: %q", tag)
+	}
+	return tag, nil
+}
+
+// FetchLatest 直连获取最新稳定版 Release 元数据（绝不经镜像）。
+func (c *Client) FetchLatest(ctx context.Context, repo string) (*Info, error) {
+	cleanRepo, err := validateRepoSlug(repo)
+	if err != nil {
+		return nil, err
+	}
+	url := fmt.Sprintf("%s/repos/%s/releases/latest", c.apiBase(), cleanRepo)
 	return c.fetchInfo(ctx, url)
 }
 
@@ -122,12 +147,15 @@ func (c *Client) FetchLatestTag(ctx context.Context, repo string) (string, error
 
 // FetchTag 直连获取指定 Tag（含 prerelease）的 Release 元数据（绝不经镜像）。
 func (c *Client) FetchTag(ctx context.Context, repo, tag string) (*Info, error) {
-	repo = strings.TrimSpace(repo)
-	tag = strings.TrimSpace(tag)
-	if repo == "" || tag == "" {
-		return nil, fmt.Errorf("repo and tag must not be empty")
+	cleanRepo, err := validateRepoSlug(repo)
+	if err != nil {
+		return nil, err
 	}
-	url := fmt.Sprintf("%s/repos/%s/releases/tags/%s", c.apiBase(), repo, tag)
+	cleanTag, err := validateTagSlug(tag)
+	if err != nil {
+		return nil, err
+	}
+	url := fmt.Sprintf("%s/repos/%s/releases/tags/%s", c.apiBase(), cleanRepo, cleanTag)
 	return c.fetchInfo(ctx, url)
 }
 

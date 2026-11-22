@@ -90,6 +90,7 @@ func TestCollector_IdleSampleSkipsWrite_ActiveSamplePersistsImmediately(t *testi
 	c2 := audit.NewCollector(cfg)
 	c2.SetLeaseFilesForTest(nil, filepath.Join(tmpDir, "missing-arp"), filepath.Join(tmpDir, "missing-hosts"))
 	c2.SetEndpointsForTest([]string{srv.URL}, "", statePath)
+	c2.SetNowFuncForTest(func() time.Time { return fixedNow })
 	rep2 := c2.Collect(t.Context(), audit.CollectOptions{Limit: -1})
 	if len(rep2.Flows) != 1 || rep2.Flows[0].DownloadBytes != 1048576 {
 		t.Fatalf("expected persisted flow download=1048576, got %+v", rep2.Flows)
