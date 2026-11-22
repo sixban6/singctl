@@ -121,8 +121,10 @@ func TestDaemon_ReconcileTailscaleP2P_MissingNFTLogsOnceAndSilentBackoff(t *test
 	p2pCtrl := &tailscale.P2PAssistController{
 		Now: nowFn,
 		LookPath: func(file string) (string, error) {
-			lookPathCalls.Add(1)
-			if !nftAvailable.Load() {
+			if file == "nft" {
+				lookPathCalls.Add(1)
+			}
+			if !nftAvailable.Load() || file != "nft" {
 				return "", &exec.Error{Name: file, Err: exec.ErrNotFound}
 			}
 			return "/usr/sbin/nft", nil
@@ -196,12 +198,12 @@ func TestDaemon_ReconcileTailscaleP2P_MissingNFTLogsOnceAndSilentBackoff(t *test
 		t.Fatalf("expected concurrent ticks within backoff to stay at 1 LookPath call, got %d", got)
 	}
 
-	// After 31 minutes, controller re-probes once; if nft is now installed, error clears.
+	// After 31 minutes, controller re-probes and selects nft backend on apply; error clears.
 	nftAvailable.Store(true)
 	advanceClock(31 * time.Minute)
 	d.ReconcileTailscaleP2POnce(t.Context(), false)
-	if got := lookPathCalls.Load(); got != 2 {
-		t.Fatalf("expected re-probe after 30m backoff, got %d LookPath calls", got)
+	if got := lookPathCalls.Load(); got < 2 {
+		t.Fatalf("expected re-probe after 30m backoff, got %d nft LookPath calls", got)
 	}
 	snapAfter := daemon.NewStateStore(paths).Load()
 	if snapAfter.TailscaleP2P == nil || snapAfter.TailscaleP2P.LastError != "" {

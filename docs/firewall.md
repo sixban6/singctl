@@ -4,7 +4,7 @@
 
 > **平台限制**：仅适用于 **Linux / OpenWrt**，需要 root 权限。
 
-一键部署独立的 `nftables inet security` 安全护盾，屏蔽高危扫描端口并动态关押恶意探测源，同时内置多级防锁死机制与开机自启；卸载或禁用时整表清理，不影响 OpenWrt `fw4`、`sing-box` 透明代理或其它既有表。
+一键部署独立的安全护盾（优先 `nftables` `table inet security`，在 OpenWrt 21.02 / `fw3` 等无 `nft` 固件上自动切换 1:1 等价的 **`iptables` + `ip6tables` + `ipset`** `SINGCTL_SECURITY` 独立隔离链），屏蔽高危扫描端口并动态关押恶意探测源，同时内置多级防锁死机制与开机自启；卸载或禁用时整表/隔离链干净清理，不影响 OpenWrt `fw4`/`fw3`、`sing-box` 透明代理或其它既有表。
 
 ---
 
