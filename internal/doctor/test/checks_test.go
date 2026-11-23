@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -383,6 +385,68 @@ func TestChecker_HWOffloadConflict(t *testing.T) {
 		if !strings.Contains(res.Detail, "mtkhnat") || !strings.Contains(res.Detail, "flow_offloading") || res.Advice == "" {
 			t.Fatalf("expected mtkhnat, flow_offloading & disable advice, got %+v", res)
 		}
+		if res.FixAction != "disable-flow-offload" || res.FixLabel == "" {
+			t.Fatalf("expected FixAction=disable-flow-offload when UCI offload active, got %+v", res)
+		}
+	})
+
+	t.Run("uci_only_offload_omits_mtkhnat_advice_and_sets_fix_action", func(t *testing.T) {
+		procRoot := t.TempDir()
+		makeProcWithCmdline(t, procRoot, "501", "sing-box", "/usr/bin/sing-box\x00run\x00", "0\n")
+		_ = os.WriteFile(filepath.Join(procRoot, "modules"), []byte("nf_tables 16384 1 - Live 0x0\n"), 0644)
+
+		env := &doctor.Env{
+			ProcRoot:  procRoot,
+			IsOpenWrt: func() bool { return true },
+			LookPath:  func(file string) (string, error) { return "/sbin/" + file, nil },
+			RunCmd: func(_ context.Context, name string, args ...string) ([]byte, error) {
+				if name == "uci" && len(args) == 3 && strings.Contains(args[2], "flow_offloading") {
+					return []byte("1\n"), nil
+				}
+				return nil, errors.New("not found")
+			},
+		}
+		res := runSingleCheck(t, "hw_offload_conflict", env)
+		if res.Status != doctor.StatusWarn {
+			t.Fatalf("expected warn on UCI offload, got %+v", res)
+		}
+		if res.FixAction != "disable-flow-offload" || res.FixLabel != "一键关闭 UCI 流量卸载" {
+			t.Fatalf("expected disable-flow-offload fix metadata, got %+v", res)
+		}
+		if strings.Contains(res.Advice, "mtkhnat") {
+			t.Fatalf("x86 UCI-only offload advice must NOT mention mtkhnat: %q", res.Advice)
+		}
+		if !strings.Contains(res.Advice, "uci set firewall.@defaults[0].flow_offloading='0'") {
+			t.Fatalf("UCI-only advice missing uci command: %q", res.Advice)
+		}
+	})
+
+	t.Run("mtkhnat_only_omits_uci_advice_and_has_no_uci_fix", func(t *testing.T) {
+		procRoot := t.TempDir()
+		makeProcWithCmdline(t, procRoot, "502", "sing-box", "/usr/bin/sing-box\x00run\x00", "0\n")
+		_ = os.WriteFile(filepath.Join(procRoot, "modules"), []byte("mtkhnat 81920 1 - Live 0x0\n"), 0644)
+
+		env := &doctor.Env{
+			ProcRoot:  procRoot,
+			IsOpenWrt: func() bool { return true },
+			LookPath:  func(file string) (string, error) { return "/sbin/" + file, nil },
+			RunCmd: func(_ context.Context, name string, args ...string) ([]byte, error) {
+				if name == "uci" {
+					return []byte("0\n"), nil
+				}
+				return nil, errors.New("not found")
+			},
+		}
+		res := runSingleCheck(t, "hw_offload_conflict", env)
+		if res.Status != doctor.StatusWarn {
+			t.Fatalf("expected warn on mtkhnat module, got %+v", res)
+		}
+		if res.FixAction != "" {
+			t.Fatalf("mtkhnat-only conflict should not attach UCI fix action, got %+v", res)
+		}
+		if !strings.Contains(res.Advice, "mtkhnat") || strings.Contains(res.Advice, "uci set") {
+			t.Fatalf("mtkhnat-only advice should mention mtkhnat and omit uci set: %q", res.Advice)
+		}
 	})
 
 	t.Run("singbox_stopped_with_offload_passes", func(t *testing.T) {
@@ -734,9 +798,88 @@ func TestChecker_DNSAntiHijack(t *testing.T) {
 			t.Fatalf("expected warn with sync-smartdns-ipv6, got %+v", res)
 		}
 	})
+
+	t.Run("auto_engine_with_adguardhome_running_skips_stale_smartdns_conf", func(t *testing.T) {
+		procRoot := t.TempDir()
+		makeProcWithCmdline(t, procRoot, "777", "AdGuardHome", "/usr/bin/AdGuardHome\x00-c\x00/etc/AdGuardHome/AdGuardHome.yaml\x00", "0\n")
+
+		cfg := &config.Config{
+			Gateway: config.GatewayConfig{IPv6Mode: config.GatewayIPv6CNOnly},
+			DNS:     config.ClientDNSConfig{Engine: "auto", DNSPort: 5353},
+		}
+		env := &doctor.Env{
+			Config:            cfg,
+			ProcRoot:          procRoot,
+			SingBoxConfigPath: "/etc/sing-box/config.json",
+			SmartDNSConfPath:  "/etc/singctl/smartdns.conf",
+			DialTCP:           func(context.Context, string) error { return nil },
+			ReadFile: func(p string) ([]byte, error) {
+				switch p {
+				case "/etc/sing-box/config.json":
+					return []byte(`{"dns":{"servers":[{"tag":"dns_local","type":"udp","server":"127.0.0.1","server_port":5353}]}}`), nil
+				case "/etc/singctl/smartdns.conf":
+					// Historical leftover smartdns.conf with conflicting force-AAAA-SOA yes
+					return []byte("bind 127.0.0.1:5353\nforce-AAAA-SOA yes\n"), nil
+				default:
+					return nil, os.ErrNotExist
+				}
+			},
+		}
+		res := runSingleCheck(t, "dns_anti_hijack", env)
+		if res.Status != doctor.StatusPass {
+			t.Fatalf("expected pass when AdGuardHome is active under auto engine despite stale smartdns.conf, got %+v", res)
+		}
+		if !strings.Contains(res.Detail, "AdGuardHome") {
+			t.Fatalf("expected detail to note active engine AdGuardHome, got %+v", res)
+		}
+	})
 }
 
 func TestChecker_DualStackConnectivity(t *testing.T) {
+	t.Run("ipv6_probe_url_constants_target_geosite_cn_and_gstatic", func(t *testing.T) {
+		if doctor.ProbeURLDomesticIPv6 != "https://ipv6.baidu.com" {
+			t.Fatalf("ProbeURLDomesticIPv6 = %q, want %q", doctor.ProbeURLDomesticIPv6, "https://ipv6.baidu.com")
+		}
+		if doctor.ProbeURLOverseasIPv6 != "https://www.gstatic.com/generate_204" {
+			t.Fatalf("ProbeURLOverseasIPv6 = %q, want %q", doctor.ProbeURLOverseasIPv6, "https://www.gstatic.com/generate_204")
+		}
+	})
+
+	t.Run("http_probe_ipv6_override_is_used_for_v6_probes_only", func(t *testing.T) {
+		var v4Calls, v6Calls atomic.Int32
+		env := &doctor.Env{
+			Config: &config.Config{Gateway: config.GatewayConfig{IPv6Mode: config.GatewayIPv6Full}},
+			HTTPProbe: func(_ context.Context, _ string) (int, int64, error) {
+				v4Calls.Add(1)
+				return 200, 12, nil
+			},
+			HTTPProbeIPv6: func(_ context.Context, _ string) (int, int64, error) {
+				v6Calls.Add(1)
+				return 204, 25, nil
+			},
+		}
+		res := runSingleCheck(t, "dual_stack_connectivity", env)
+		if res.Status != doctor.StatusPass || v4Calls.Load() != 2 || v6Calls.Load() != 2 {
+			t.Fatalf("expected 2 v4 calls and 2 v6 calls with pass, got res=%+v v4=%d v6=%d", res, v4Calls.Load(), v6Calls.Load())
+		}
+	})
+
+	t.Run("default_http_probe_ipv6_enforces_tcp6_and_rejects_ipv4_only_listener", func(t *testing.T) {
+		ln, err := net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen tcp4: %v", err)
+		}
+		srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		srv.Listener = ln
+		srv.Start()
+		defer srv.Close()
+
+		if code, _, probeErr := doctor.DefaultHTTPProbeIPv6(t.Context(), srv.URL); probeErr == nil {
+			t.Fatalf("expected DefaultHTTPProbeIPv6 to fail on IPv4-only listener %s, but succeeded with HTTP %d", srv.URL, code)
+		}
+	})
 	t.Run("ipv6_off_probes_domestic_and_overseas_only", func(t *testing.T) {
 		var ipv6Called atomic.Int32
 		env := &doctor.Env{

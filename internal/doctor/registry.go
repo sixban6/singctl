@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"singctl/internal/platform/servicemgr"
 	"singctl/internal/safecommit"
 )
 
@@ -163,9 +164,52 @@ func (r *Runner) Fix(ctx context.Context, env *Env, action string) (string, erro
 			return "", err
 		}
 		return cmp.Or(st.Message, fmt.Sprintf("已为 tailscaled (PID %d) 写入 oom_score_adj=%d", st.PID, st.ScoreAdj)), nil
+	case "disable-flow-offload":
+		return disableFlowOffloadFix(ctx, resolved)
 	default:
 		return "", fmt.Errorf("unsupported quick-fix action: %q", act)
 	}
+}
+
+func disableFlowOffloadFix(ctx context.Context, env *Env) (string, error) {
+	if !env.lookPathOK("uci") {
+		return "", errors.New("未找到 uci 命令，仅支持 OpenWrt / ImmortalWrt 宿主机关闭 UCI 流量卸载")
+	}
+	uciSteps := [][]string{
+		{"set", "firewall.@defaults[0].flow_offloading=0"},
+		{"set", "firewall.@defaults[0].flow_offloading_hw=0"},
+		{"commit", "firewall"},
+	}
+	for _, args := range uciSteps {
+		if out, err := env.RunCmd(ctx, "uci", args...); err != nil {
+			detail := strings.TrimSpace(string(out))
+			if detail != "" {
+				return "", fmt.Errorf("uci %s 失败: %w (%s)", strings.Join(args, " "), err, detail)
+			}
+			return "", fmt.Errorf("uci %s 失败: %w", strings.Join(args, " "), err)
+		}
+	}
+
+	// 优先使用 fw4 reload 温和重载 inet fw4 表，绝不触碰 inet sing-box 透明代理表以保障零断网。
+	if env.lookPathOK("fw4") {
+		if out, err := env.RunCmd(ctx, "fw4", "reload"); err != nil {
+			detail := strings.TrimSpace(string(out))
+			if detail != "" {
+				return "", fmt.Errorf("fw4 reload 失败: %w (%s)", err, detail)
+			}
+			return "", fmt.Errorf("fw4 reload 失败: %w", err)
+		}
+		return "已关闭 OpenWrt UCI 软/硬件流量卸载并通过 fw4 reload 平滑生效（sing-box 透明代理表零中断）", nil
+	}
+
+	mgr := env.ServiceManager
+	if mgr == nil {
+		mgr = servicemgr.Detect(nil)
+	}
+	if err := mgr.Reload(ctx, "firewall"); err != nil {
+		return "", fmt.Errorf("重载 firewall 服务失败: %w", err)
+	}
+	return "已关闭 OpenWrt UCI 软/硬件流量卸载并重载 firewall 服务生效", nil
 }
 
 func runSingleChecker(parentCtx context.Context, chk Checker, env *Env, timeout time.Duration) CheckResult {

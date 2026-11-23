@@ -18,6 +18,7 @@ import (
 	"singctl/internal/common/sysinfo"
 	"singctl/internal/config"
 	"singctl/internal/constant"
+	"singctl/internal/platform/servicemgr"
 )
 
 const (
@@ -81,11 +82,13 @@ type Env struct {
 	RunCmd            func(ctx context.Context, name string, args ...string) ([]byte, error)
 	LookPath          func(file string) (string, error)
 	HTTPProbe         func(ctx context.Context, url string) (statusCode int, latencyMs int64, err error)
+	HTTPProbeIPv6     func(ctx context.Context, url string) (statusCode int, latencyMs int64, err error)
 	DialTCP           func(ctx context.Context, addr string) error
 	ReadFile          func(path string) ([]byte, error)
 	Statfs            func(path string) (sysinfo.DiskSpace, error)
 	ReadMemInfo       func() (sysinfo.MemInfo, error)
 	IsOpenWrt         func() bool
+	ServiceManager    servicemgr.Manager
 	QuickFixHandlers  map[string]func(ctx context.Context) (string, error)
 }
 
@@ -113,6 +116,13 @@ func (e *Env) withDefaults() *Env {
 	}
 	if out.HTTPProbe == nil {
 		out.HTTPProbe = defaultHTTPProbe
+	}
+	if out.HTTPProbeIPv6 == nil {
+		if e != nil && e.HTTPProbe != nil {
+			out.HTTPProbeIPv6 = e.HTTPProbe
+		} else {
+			out.HTTPProbeIPv6 = DefaultHTTPProbeIPv6
+		}
 	}
 	if out.DialTCP == nil {
 		out.DialTCP = ProbeLocalDNS
@@ -221,6 +231,41 @@ func defaultHTTPProbe(ctx context.Context, targetURL string) (int, int64, error)
 	}
 	req.Header.Set("User-Agent", "singctl-doctor/1.0")
 	client := &http.Client{Timeout: 4 * time.Second}
+	start := time.Now()
+	resp, err := client.Do(req)
+	latencyMs := max(1, time.Since(start).Milliseconds())
+	if err != nil {
+		return 0, latencyMs, err
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	_ = resp.Body.Close()
+	return resp.StatusCode, latencyMs, nil
+}
+
+// DefaultHTTPProbeIPv6 使用显式强制 tcp6 拨号的独立传输层执行 IPv6 连通性探测，避免双栈域名回落 IPv4 造成假通过。
+func DefaultHTTPProbeIPv6(ctx context.Context, targetURL string) (int, int64, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+	if err != nil {
+		return 0, 0, err
+	}
+	req.Header.Set("User-Agent", "singctl-doctor/1.0")
+
+	tr := &http.Transport{
+		DialContext: func(dCtx context.Context, _, addr string) (net.Conn, error) {
+			return (&net.Dialer{Timeout: 3 * time.Second}).DialContext(dCtx, "tcp6", addr)
+		},
+		TLSHandshakeTimeout: 3 * time.Second,
+		DisableKeepAlives:   true,
+	}
+	defer tr.CloseIdleConnections()
+
+	client := &http.Client{
+		Transport: tr,
+		Timeout:   4 * time.Second,
+	}
 	start := time.Now()
 	resp, err := client.Do(req)
 	latencyMs := max(1, time.Since(start).Milliseconds())

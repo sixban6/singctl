@@ -3,6 +3,7 @@ package doctor_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"singctl/internal/doctor"
+	"singctl/internal/platform/servicemgr"
 )
 
 type stubChecker struct {
@@ -238,6 +240,82 @@ func TestRunner_FixDispatchAndBuiltinOOMShield(t *testing.T) {
 	if _, err := runner.Fix(t.Context(), &doctor.Env{}, "unknown-action"); err == nil {
 		t.Fatal("expected error for unknown quick-fix action")
 	}
+}
+
+func TestRunner_FixDisableFlowOffload(t *testing.T) {
+	runner := doctor.NewDefaultRunner()
+
+	t.Run("success_with_uci_and_fw4_reload", func(t *testing.T) {
+		var cmds []string
+		env := &doctor.Env{
+			LookPath: func(file string) (string, error) {
+				if file == "uci" || file == "fw4" {
+					return "/sbin/" + file, nil
+				}
+				return "", errors.New("not found")
+			},
+			RunCmd: func(_ context.Context, name string, args ...string) ([]byte, error) {
+				cmds = append(cmds, name+" "+strings.Join(args, " "))
+				return []byte("ok\n"), nil
+			},
+		}
+		msg, err := runner.Fix(t.Context(), env, "disable-flow-offload")
+		if err != nil {
+			t.Fatalf("disable-flow-offload failed: %v", err)
+		}
+		if !strings.Contains(msg, "流量卸载") {
+			t.Fatalf("unexpected success message: %q", msg)
+		}
+		want := []string{
+			"uci set firewall.@defaults[0].flow_offloading=0",
+			"uci set firewall.@defaults[0].flow_offloading_hw=0",
+			"uci commit firewall",
+			"fw4 reload",
+		}
+		if len(cmds) != len(want) {
+			t.Fatalf("commands = %v, want %v", cmds, want)
+		}
+		for i := range want {
+			if cmds[i] != want[i] {
+				t.Fatalf("cmd[%d] = %q, want %q", i, cmds[i], want[i])
+			}
+		}
+	})
+
+	t.Run("fallback_to_servicemgr_reload_when_fw4_absent", func(t *testing.T) {
+		mockMgr := servicemgr.NewMock()
+		env := &doctor.Env{
+			LookPath: func(file string) (string, error) {
+				if file == "uci" {
+					return "/sbin/uci", nil
+				}
+				return "", errors.New("not found")
+			},
+			RunCmd: func(_ context.Context, _ string, _ ...string) ([]byte, error) {
+				return []byte("ok\n"), nil
+			},
+			ServiceManager: mockMgr,
+		}
+		msg, err := runner.Fix(t.Context(), env, "disable-flow-offload")
+		if err != nil {
+			t.Fatalf("disable-flow-offload fallback failed: %v", err)
+		}
+		if !strings.Contains(msg, "firewall") {
+			t.Fatalf("unexpected fallback message: %q", msg)
+		}
+		if got := mockMgr.Calls(); len(got) != 1 || got[0] != "reload firewall" {
+			t.Fatalf("expected servicemgr reload firewall call, got %v", got)
+		}
+	})
+
+	t.Run("missing_uci_returns_error", func(t *testing.T) {
+		env := &doctor.Env{
+			LookPath: func(string) (string, error) { return "", errors.New("not found") },
+		}
+		if _, err := runner.Fix(t.Context(), env, "disable-flow-offload"); err == nil {
+			t.Fatal("expected error when uci is missing")
+		}
+	})
 }
 
 func TestFormatText_RendersStatusesDetailsAndFixHints(t *testing.T) {

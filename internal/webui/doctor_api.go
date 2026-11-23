@@ -24,6 +24,7 @@ var allowedDoctorFixActions = map[string]bool{
 	"protect-tailscale-oom": true,
 	"sync-dns-local":        true,
 	"sync-smartdns-ipv6":    true,
+	"disable-flow-offload":  true,
 }
 
 func (s *Server) doctorRunner() *doctor.Runner {

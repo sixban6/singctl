@@ -17,10 +17,10 @@ const (
 	ProbeURLDomestic = "https://www.baidu.com"
 	// ProbeURLOverseas 为海外代理连通性探针 URL。
 	ProbeURLOverseas = "https://www.gstatic.com/generate_204"
-	// ProbeURLDomesticIPv6 为国内 IPv6 连通性探针 URL。
-	ProbeURLDomesticIPv6 = "https://6.ipw.cn"
-	// ProbeURLOverseasIPv6 为海外 IPv6 连通性探针 URL。
-	ProbeURLOverseasIPv6 = "https://ipv6.geojs.io/v1/ip/geo.json"
+	// ProbeURLDomesticIPv6 为国内 IPv6 连通性探针 URL（命中 geosite-cn，兼容 cn_only 模式的 AAAA 放行策略）。
+	ProbeURLDomesticIPv6 = "https://ipv6.baidu.com"
+	// ProbeURLOverseasIPv6 为海外 IPv6 连通性探针 URL（配合强制 tcp6 拨号验证纯 IPv6 代理出站）。
+	ProbeURLOverseasIPv6 = "https://www.gstatic.com/generate_204"
 )
 
 type firewallBackendChecker struct{}
@@ -306,12 +306,15 @@ func (hwOffloadConflictChecker) Run(ctx context.Context, env *Env) CheckResult {
 
 	sbRunning, _ := inspectSingBoxProcess(ctx, env)
 	var conflicts []string
+	var hasUCIOffload, hasMtkHnat, hasXtFlowOffload bool
 
 	if env.IsOpenWrt() && env.lookPathOK("uci") {
 		if out, err := env.RunCmd(ctx, "uci", "-q", "get", "firewall.@defaults[0].flow_offloading"); err == nil && strings.TrimSpace(string(out)) == "1" {
+			hasUCIOffload = true
 			conflicts = append(conflicts, "uci flow_offloading=1 (软件流量卸载)")
 		}
 		if out, err := env.RunCmd(ctx, "uci", "-q", "get", "firewall.@defaults[0].flow_offloading_hw"); err == nil && strings.TrimSpace(string(out)) == "1" {
+			hasUCIOffload = true
 			conflicts = append(conflicts, "uci flow_offloading_hw=1 (硬件流量卸载)")
 		}
 	}
@@ -328,8 +331,10 @@ func (hwOffloadConflictChecker) Run(ctx context.Context, env *Env) CheckResult {
 			}
 			switch fields[0] {
 			case "mtkhnat":
+				hasMtkHnat = true
 				conflicts = append(conflicts, "内核模块 mtkhnat 已加载")
 			case "xt_FLOWOFFLOAD":
+				hasXtFlowOffload = true
 				conflicts = append(conflicts, "内核模块 xt_FLOWOFFLOAD 已加载")
 			}
 		}
@@ -344,7 +349,19 @@ func (hwOffloadConflictChecker) Run(ctx context.Context, env *Env) CheckResult {
 	if sbRunning {
 		res.Status = StatusWarn
 		res.Summary = "检测到软/硬件流量卸载与运行中的 sing-box TProxy 存在绕行冲突"
-		res.Advice = "请在 OpenWrt 防火墙中关闭软件/硬件流量卸载（uci set firewall.@defaults[0].flow_offloading='0' && uci set firewall.@defaults[0].flow_offloading_hw='0' && uci commit firewall）并重载防火墙，同时禁用 mtkhnat 硬件加速"
+		var advices []string
+		if hasUCIOffload {
+			advices = append(advices, "请在 OpenWrt 防火墙中关闭软件/硬件流量卸载（uci set firewall.@defaults[0].flow_offloading='0' && uci set firewall.@defaults[0].flow_offloading_hw='0' && uci commit firewall）并重载防火墙")
+			res.FixAction = "disable-flow-offload"
+			res.FixLabel = "一键关闭 UCI 流量卸载"
+		}
+		if hasMtkHnat {
+			advices = append(advices, "请在路由固件加速设置中禁用 MediaTek mtkhnat 硬件加速模块")
+		}
+		if hasXtFlowOffload && !hasUCIOffload {
+			advices = append(advices, "请检查并关闭启用 xt_FLOWOFFLOAD 的防火墙或加速插件（如 TurboACC）")
+		}
+		res.Advice = strings.Join(advices, "；")
 		return res
 	}
 
@@ -386,13 +403,13 @@ func (dualStackConnectivityChecker) Run(ctx context.Context, env *Env) CheckResu
 	})
 	if needDomV6 {
 		wg.Go(func() {
-			c, ms, err := env.HTTPProbe(ctx, ProbeURLDomesticIPv6)
+			c, ms, err := env.HTTPProbeIPv6(ctx, ProbeURLDomesticIPv6)
 			domV6 = probeOutcome{code: c, latencyMs: ms, err: err}
 		})
 	}
 	if needOvsV6 {
 		wg.Go(func() {
-			c, ms, err := env.HTTPProbe(ctx, ProbeURLOverseasIPv6)
+			c, ms, err := env.HTTPProbeIPv6(ctx, ProbeURLOverseasIPv6)
 			ovsV6 = probeOutcome{code: c, latencyMs: ms, err: err}
 		})
 	}
