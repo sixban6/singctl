@@ -1,3 +1,5 @@
+//go:build !lite
+
 // 文件职责：定义全链路健康体检模型、声明式检查项注册表（Registry）、可注入宿主/网络探针契约（Deps）与报告输出。
 package doctor
 

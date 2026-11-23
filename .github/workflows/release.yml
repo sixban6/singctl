@@ -62,7 +62,7 @@ jobs:
             exit 1
           fi
           go test -race ./internal/...
-          go test -race -tags lite ./internal/singbox/ruleset_snapshot/... ./internal/serverweb/...
+          go test -race -tags lite ./internal/singbox/ruleset_snapshot/... ./internal/serverweb/... ./internal/cmd/... ./internal/webui/... ./internal/doctor/... ./internal/common/netx/...
           go test -short ./test/...
 
       - name: Upload Built Server WebUI Static Assets
@@ -179,7 +179,7 @@ jobs:
 
           CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "${LDFLAGS}" -o dist/linux-arm64/singctl ./cmd/singctl
 
-          # Linux / OpenWrt Lite (<=512MB RAM / small-flash routers: strips embedded rulesets & server WebUI static bundle)
+          # Linux / OpenWrt Lite (<=512MB RAM / 128MB small-flash client routers: pure-client build stripping server/fleet/SSH/speedtest deps, embedded rulesets & server WebUI; embeds precompressed .gz client WebUI)
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags lite -trimpath -ldflags "${LDFLAGS}" -o dist/linux-amd64-lite/singctl ./cmd/singctl
           CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -tags lite -trimpath -ldflags "${LDFLAGS}" -o dist/linux-arm64-lite/singctl ./cmd/singctl
 

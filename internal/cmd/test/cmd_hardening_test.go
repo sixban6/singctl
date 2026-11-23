@@ -1,3 +1,5 @@
+//go:build !lite
+
 // 文件职责：验证全量 CLI 命令树无标志位冲突、内部配置迁移命令与舰队位置参数解析。
 package cmd_test
 

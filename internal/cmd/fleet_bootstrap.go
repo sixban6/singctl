@@ -1,3 +1,5 @@
+//go:build !lite
+
 // 文件职责：提供舰队新裸机零配置开荒 (`singctl fleet new`) 子命令、交互向导与位置参数解析。
 package cmd
 

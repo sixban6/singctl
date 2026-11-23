@@ -10,7 +10,6 @@ import (
 	"singctl/internal/audit"
 	"singctl/internal/config"
 	"singctl/internal/logger"
-	"singctl/internal/telemetry"
 
 	"github.com/spf13/cobra"
 )
@@ -211,8 +210,8 @@ func renderAuditReport(rep *audit.Report, showAI bool) {
 			fmt.Printf("   %-24s %-8s %10s %10s %6.1fx %6d %15s\n",
 				truncateText(devLabel, 24),
 				cmp.Or(d.DeviceRole, "unknown"),
-				telemetry.FormatBytes(d.UploadBytes),
-				telemetry.FormatBytes(d.DownloadBytes),
+				formatAuditBytes(d.UploadBytes),
+				formatAuditBytes(d.DownloadBytes),
 				d.UploadRatio,
 				d.SuspiciousCount+d.HighRiskCount,
 				scoreCol,
@@ -250,8 +249,8 @@ func renderAuditReport(rep *audit.Report, showAI bool) {
 				truncateText(f.DeviceIP, 15),
 				truncateText(target, 26),
 				strings.ToUpper(f.Network),
-				telemetry.FormatBytes(f.UploadBytes),
-				telemetry.FormatBytes(f.DownloadBytes),
+				formatAuditBytes(f.UploadBytes),
+				formatAuditBytes(f.DownloadBytes),
 				f.UploadRatio,
 				truncateText(reasonStr, 42),
 			)
@@ -293,4 +292,25 @@ func truncateText(s string, maxLen int) string {
 		return string(runes[:maxLen])
 	}
 	return string(runes[:maxLen-3]) + "..."
+}
+
+func formatAuditBytes(b int64) string {
+	if b < 0 {
+		b = 0
+	}
+	const (
+		kb = 1024
+		mb = 1024 * kb
+		gb = 1024 * mb
+	)
+	switch {
+	case b >= gb:
+		return fmt.Sprintf("%.2f GB", float64(b)/float64(gb))
+	case b >= mb:
+		return fmt.Sprintf("%.2f MB", float64(b)/float64(mb))
+	case b >= kb:
+		return fmt.Sprintf("%.1f KB", float64(b)/float64(kb))
+	default:
+		return fmt.Sprintf("%d B", b)
+	}
 }
