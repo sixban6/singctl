@@ -425,7 +425,7 @@ export const SystemPage: React.FC<SystemPageProps> = ({
             className="p-4 rounded-xl bg-surface2 border border-subtle space-y-3"
           >
             <div className="space-y-1">
-              <div className="text-sm font-medium text-primary">导出 V2 加密备份包</div>
+              <div className="text-sm font-medium text-primary">导出加密备份包</div>
               <p className="text-xs text-secondary leading-relaxed">
                 自动打包 <code className="font-mono">singctl.yaml</code>、<code className="font-mono">groups.yaml</code>、
                 <code className="font-mono">AdGuardHome.yaml</code>、<code className="font-mono">config.json</code> 及三路合并基线。
@@ -470,7 +470,7 @@ export const SystemPage: React.FC<SystemPageProps> = ({
             className="p-4 rounded-xl bg-surface2 border border-subtle space-y-3"
           >
             <div className="space-y-1">
-              <div className="text-sm font-medium text-primary">从 V2 快照一键还原</div>
+              <div className="text-sm font-medium text-primary">从加密快照一键还原</div>
               <p className="text-xs text-secondary leading-relaxed">
                 落盘前全量校验 YAML/JSON/规则集归档（上限 16 MB）与 <code className="font-mono">sing-box check</code>，支持跨硬件自适配与失败全事务原子回滚。
               </p>

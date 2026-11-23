@@ -163,7 +163,7 @@ func (r *Runner) Fix(ctx context.Context, env *Env, action string) (string, erro
 		if err != nil {
 			return "", err
 		}
-		return cmp.Or(st.Message, fmt.Sprintf("已为 tailscaled (PID %d) 写入 oom_score_adj=%d", st.PID, st.ScoreAdj)), nil
+		return cmp.Or(st.Message, "已为 tailscaled 开启 OOM 免疫保护"), nil
 	case "disable-flow-offload":
 		return disableFlowOffloadFix(ctx, resolved)
 	default:

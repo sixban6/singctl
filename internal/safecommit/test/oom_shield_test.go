@@ -123,6 +123,9 @@ func TestInspectTailscaledOOM_Table(t *testing.T) {
 			if got.Message == "" {
 				t.Fatalf("expected non-empty descriptive Message, got %+v", got)
 			}
+			if strings.Contains(got.Message, "-1000") || strings.Contains(got.Message, "oom_score_adj") {
+				t.Fatalf("expected concise user-facing OOM Message without -1000/oom_score_adj details, got %q", got.Message)
+			}
 		})
 	}
 }

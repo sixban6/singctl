@@ -17,31 +17,45 @@ import (
 	"singctl/internal/singbox/clashapi"
 )
 
+type connRateCursor struct {
+	Upload   int64
+	Download int64
+	SampleAt time.Time
+}
+
+type flowLiveRate struct {
+	upBps   float64
+	downBps float64
+}
+
 // Collector 负责从 sing-box Clash API 采集连接、关联局域网 DHCP/ARP 设备名并执行多维非线性分析。
 type Collector struct {
-	mu                 sync.Mutex
-	cfg                *config.Config
-	statePath          string
-	endpoints          []string
-	secret             string
-	customEndpoints    bool
-	clashClient        *clashapi.Client
-	leaseFiles         []string
-	arpFile            string
-	hostsFile          string
-	odhcpdHostsFile    string
-	tzFile             string
-	uciSystemFile      string
-	nowFunc            func() time.Time
-	ipv6NeighCmdFunc   func() ([]byte, error)
-	cachedState        *persistedAuditState
-	cachedStateFp      string
-	stateDirty         bool
-	lastSavedUnix      int64
-	cachedEngine       *NonlinearEngine
-	cachedEngineFp     string
-	cachedSelfIPs      map[string]bool
-	selfIPsFetchedAt   time.Time
+	mu                     sync.Mutex
+	cfg                    *config.Config
+	statePath              string
+	endpoints              []string
+	secret                 string
+	customEndpoints        bool
+	clashClient            *clashapi.Client
+	leaseFiles             []string
+	arpFile                string
+	hostsFile              string
+	odhcpdHostsFile        string
+	tzFile                 string
+	uciSystemFile          string
+	nowFunc                func() time.Time
+	ipv6NeighCmdFunc       func() ([]byte, error)
+	cachedState            *persistedAuditState
+	cachedStateFp          string
+	stateDirty             bool
+	lastSavedUnix          int64
+	lastPollAt             time.Time
+	connRateCursors        map[string]connRateCursor
+	flowLiveRates          map[string]flowLiveRate
+	cachedEngine           *NonlinearEngine
+	cachedEngineFp         string
+	cachedSelfIPs          map[string]bool
+	selfIPsFetchedAt       time.Time
 	cachedLeaseFp          string
 	cachedLeaseDevs        map[string]lanDeviceInfo
 	cachedMergedLANDevs    map[string]lanDeviceInfo
@@ -80,6 +94,9 @@ func (c *Collector) SetEndpointsForTest(endpoints []string, secret, statePath st
 		c.statePath = statePath
 		c.cachedState = nil
 		c.cachedStateFp = ""
+		c.lastPollAt = time.Time{}
+		c.connRateCursors = nil
+		c.flowLiveRates = nil
 		ResetAICacheForTest(statePath + ".ai-cache.json")
 	}
 }
@@ -321,6 +338,7 @@ func buildRawFlowRecords(
 	cfg *config.Config,
 	state *persistedAuditState,
 	activeByKey map[string][]string,
+	liveRates map[string]flowLiveRate,
 	devDirectory map[string]lanDeviceInfo,
 	selfIPs map[string]bool,
 	engine *NonlinearEngine,
@@ -335,34 +353,43 @@ func buildRawFlowRecords(
 		}
 		devName, devMAC := resolveFlowDeviceIdentity(normDevIP, entry, devDirectory)
 		activeIDs := activeByKey[entry.Key]
+		var curUpBps, curDownBps float64
+		if len(activeIDs) > 0 && liveRates != nil {
+			if lr, ok := liveRates[entry.Key]; ok {
+				curUpBps = math.Round(lr.upBps*10) / 10
+				curDownBps = math.Round(lr.downBps*10) / 10
+			}
+		}
 		rawFlows = append(rawFlows, FlowRecord{
-			Key:               entry.Key,
-			DeviceIP:          normDevIP,
-			DeviceName:        devName,
-			DeviceMAC:         devMAC,
-			DeviceRole:        InferDeviceRole(devName),
-			Target:            entry.Target,
-			AppName:           IdentifyApp(entry.Target, entry.DestIP, entry.Rule, entry.RawHost),
-			RawHost:           entry.RawHost,
-			DestIP:            entry.DestIP,
-			DestPort:          entry.DestPort,
-			IsDirectIP:        entry.IsDirectIP,
-			Network:           entry.Network,
-			Outbound:          entry.Outbound,
-			Chains:            slices.Clone(entry.Chains),
-			Rule:              entry.Rule,
-			UploadBytes:       entry.UploadBytes,
-			DownloadBytes:     entry.DownloadBytes,
-			ThrottledRateKBps: matchThrottleRateKBps(cfg, entry.Target, entry.DestPort),
-			ConnCount:         entry.ConnCount,
-			ActiveConns:       len(activeIDs),
-			ActiveConnIDs:     activeIDs,
-			FirstSeen:         time.Unix(entry.FirstSeenUnix, 0).In(displayLoc).Format("15:04:05"),
-			LastSeen:          time.Unix(entry.LastSeenUnix, 0).In(displayLoc).Format("15:04:05"),
-			ActiveSpanSec:     max(int64(60), entry.LastSeenUnix-entry.FirstSeenUnix),
-			NightHits:         entry.NightHits,
-			IntervalCV:        computeIntervalCV(entry.ArrivalsUnix),
-			AIReview:          LookupCachedAIReview(entry.Target),
+			Key:                entry.Key,
+			DeviceIP:           normDevIP,
+			DeviceName:         devName,
+			DeviceMAC:          devMAC,
+			DeviceRole:         InferDeviceRole(devName),
+			Target:             entry.Target,
+			AppName:            IdentifyApp(entry.Target, entry.DestIP, entry.Rule, entry.RawHost),
+			RawHost:            entry.RawHost,
+			DestIP:             entry.DestIP,
+			DestPort:           entry.DestPort,
+			IsDirectIP:         entry.IsDirectIP,
+			Network:            entry.Network,
+			Outbound:           entry.Outbound,
+			Chains:             slices.Clone(entry.Chains),
+			Rule:               entry.Rule,
+			UploadBytes:        entry.UploadBytes,
+			DownloadBytes:      entry.DownloadBytes,
+			CurrentUploadBps:   curUpBps,
+			CurrentDownloadBps: curDownBps,
+			ThrottledRateKBps:  matchThrottleRateKBps(cfg, entry.Target, entry.DestPort),
+			ConnCount:          entry.ConnCount,
+			ActiveConns:        len(activeIDs),
+			ActiveConnIDs:      activeIDs,
+			FirstSeen:          time.Unix(entry.FirstSeenUnix, 0).In(displayLoc).Format("15:04:05"),
+			LastSeen:           time.Unix(entry.LastSeenUnix, 0).In(displayLoc).Format("15:04:05"),
+			ActiveSpanSec:      max(int64(60), entry.LastSeenUnix-entry.FirstSeenUnix),
+			NightHits:          entry.NightHits,
+			IntervalCV:         computeIntervalCV(entry.ArrivalsUnix),
+			AIReview:           LookupCachedAIReview(entry.Target),
 		})
 	}
 	return rawFlows
@@ -533,7 +560,7 @@ func (c *Collector) collectLocked(ctx context.Context, opts CollectOptions) *Rep
 		rep.ControllerAddr = usedAddr
 	}
 
-	rawFlows := buildRawFlowRecords(c.cfg, state, activeByKey, devDirectory, selfIPs, engine, now)
+	rawFlows := buildRawFlowRecords(c.cfg, state, activeByKey, c.flowLiveRates, devDirectory, selfIPs, engine, now)
 	allFlows, deviceAgg := evaluateAndFilterFlows(engine, rawFlows, opts, rep)
 	rep.TotalFlows = len(state.Flows)
 	rep.Devices = buildSortedDeviceSummaries(deviceAgg)

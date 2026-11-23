@@ -36,7 +36,7 @@ func InspectTailscaledOOM(procRoot string) OOMShieldStatus {
 	if trimmed == "" && runtime.GOOS != "linux" {
 		return OOMShieldStatus{
 			Found:   false,
-			Message: "非 Linux 平台不支持 /proc OOM 免疫探测",
+			Message: "当前系统平台不支持 OOM 免疫探测",
 		}
 	}
 	root := cmp.Or(trimmed, "/proc")
@@ -45,7 +45,7 @@ func InspectTailscaledOOM(procRoot string) OOMShieldStatus {
 	if err != nil {
 		return OOMShieldStatus{
 			Found:   false,
-			Message: fmt.Sprintf("无法读取进程目录 %s: %v", root, err),
+			Message: "无法读取系统进程信息",
 		}
 	}
 
@@ -78,7 +78,7 @@ func InspectTailscaledOOM(procRoot string) OOMShieldStatus {
 				Found:     true,
 				PID:       pid,
 				Protected: false,
-				Message:   fmt.Sprintf("已检测到 tailscaled (PID %d)，但无法读取 oom_score_adj: %v", pid, adjErr),
+				Message:   "已检测到 tailscaled，暂无法读取其内存保护状态",
 			}
 		}
 		score, parseErr := strconv.Atoi(strings.TrimSpace(string(rawAdj)))
@@ -87,14 +87,14 @@ func InspectTailscaledOOM(procRoot string) OOMShieldStatus {
 				Found:     true,
 				PID:       pid,
 				Protected: false,
-				Message:   fmt.Sprintf("已检测到 tailscaled (PID %d)，但 oom_score_adj 内容异常: %v", pid, parseErr),
+				Message:   "已检测到 tailscaled，内存保护状态异常",
 			}
 		}
 
 		protected := score <= oomImmuneScoreAdj
-		msg := fmt.Sprintf("tailscaled (PID %d) 未开启 OOM 免疫保护 (当前 oom_score_adj=%d，建议设为 -1000)", pid, score)
+		msg := "tailscaled 尚未开启内存防误杀保护"
 		if protected {
-			msg = fmt.Sprintf("tailscaled (PID %d) 已受 OOM 免疫保护 (oom_score_adj=%d)", pid, score)
+			msg = "tailscaled 已开启内存防误杀保护"
 		}
 		return OOMShieldStatus{
 			Found:     true,

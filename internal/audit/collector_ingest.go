@@ -143,6 +143,61 @@ func recordNewConnArrival(entry *persistedFlowEntry, connStart string, nowUnix i
 	}
 }
 
+const (
+	liveRateMinSampleSec = 0.5
+	liveRateMaxSampleSec = 120.0
+	maxValidConnStartAge = 30 * 24 * 3600
+)
+
+func parseConnStartTime(raw string) (time.Time, bool) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return time.Time{}, false
+	}
+	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+		return t, true
+	}
+	return time.Time{}, false
+}
+
+func computeConnLiveRate(
+	prev connRateCursor,
+	hadPrev bool,
+	lastPollAt time.Time,
+	conn clashConnection,
+	now time.Time,
+) (upBps, downBps float64) {
+	if hadPrev {
+		dt := now.Sub(prev.SampleAt).Seconds()
+		if dt < liveRateMinSampleSec || dt > liveRateMaxSampleSec {
+			return 0, 0
+		}
+		if conn.Upload > prev.Upload {
+			upBps = float64(conn.Upload-prev.Upload) / dt
+		}
+		if conn.Download > prev.Download {
+			downBps = float64(conn.Download-prev.Download) / dt
+		}
+		return upBps, downBps
+	}
+
+	if lastPollAt.IsZero() {
+		return 0, 0
+	}
+	connStart, ok := parseConnStartTime(conn.Start)
+	if !ok || !connStart.After(lastPollAt) || connStart.After(now) {
+		return 0, 0
+	}
+	dt := max(1.0, now.Sub(connStart).Seconds())
+	if conn.Upload > 0 {
+		upBps = float64(conn.Upload) / dt
+	}
+	if conn.Download > 0 {
+		downBps = float64(conn.Download) / dt
+	}
+	return upBps, downBps
+}
+
 func (c *Collector) ingestConnectionsLocked(
 	state *persistedAuditState,
 	conns []clashConnection,
@@ -157,10 +212,53 @@ func (c *Collector) ingestConnectionsLocked(
 	isNight := hour >= 1 && hour <= 5
 	mutated := false
 
+	pollDeltaSec := now.Sub(c.lastPollAt).Seconds()
+	debounceRapidPoll := !c.lastPollAt.IsZero() && pollDeltaSec >= 0 && pollDeltaSec < liveRateMinSampleSec
+
+	var nextCursors map[string]connRateCursor
+	var nextRates map[string]flowLiveRate
+	if !debounceRapidPoll {
+		nextCursors = make(map[string]connRateCursor, len(conns))
+		nextRates = make(map[string]flowLiveRate, len(conns))
+	}
+
 	for _, conn := range conns {
-		if ingestSingleConnection(state, conn, devDir, selfIPs, activeByKey, engine, nowUnix, isNight) {
+		flowKey, changed := ingestSingleConnection(state, conn, devDir, selfIPs, activeByKey, engine, nowUnix, isNight)
+		if changed {
 			mutated = true
 		}
+		if flowKey == "" || debounceRapidPoll {
+			continue
+		}
+		prev, hadPrev := c.connRateCursors[conn.ID]
+		upBps, downBps := computeConnLiveRate(prev, hadPrev, c.lastPollAt, conn, now)
+		if upBps > 0 || downBps > 0 {
+			cur := nextRates[flowKey]
+			cur.upBps += upBps
+			cur.downBps += downBps
+			nextRates[flowKey] = cur
+		}
+		nextCursors[conn.ID] = connRateCursor{
+			Upload:   conn.Upload,
+			Download: conn.Download,
+			SampleAt: now,
+		}
+	}
+
+	if debounceRapidPoll {
+		if len(c.flowLiveRates) > 0 {
+			retained := make(map[string]flowLiveRate, len(activeByKey))
+			for key := range activeByKey {
+				if r, ok := c.flowLiveRates[key]; ok {
+					retained[key] = r
+				}
+			}
+			c.flowLiveRates = retained
+		}
+	} else {
+		c.connRateCursors = nextCursors
+		c.flowLiveRates = nextRates
+		c.lastPollAt = now
 	}
 	return mutated
 }
@@ -174,18 +272,18 @@ func ingestSingleConnection(
 	engine *NonlinearEngine,
 	nowUnix int64,
 	isNight bool,
-) bool {
+) (string, bool) {
 	rawSrc := cmp.Or(strings.TrimSpace(conn.Metadata.SourceIP), "127.0.0.1")
 	srcIP := normalizeSourceDeviceIP(rawSrc, selfIPs, devDir)
 	rawHost, destIP, target, isDirectIP := resolveConnTarget(conn)
 	if target == "" {
-		return false
+		return "", false
 	}
 	if len(conn.Chains) > 0 && strings.EqualFold(conn.Chains[0], "block") {
-		return false
+		return "", false
 	}
 	if engine != nil && engine.IsBlocked(srcIP, target) {
-		return false
+		return "", false
 	}
 
 	network := strings.ToLower(cmp.Or(strings.TrimSpace(conn.Metadata.Network), "tcp"))
@@ -194,6 +292,14 @@ func ingestSingleConnection(
 
 	key := srcIP + "|" + target + "|" + network
 	activeByKey[key] = append(activeByKey[key], conn.ID)
+
+	firstSeenCandidate := nowUnix
+	if connStart, ok := parseConnStartTime(conn.Start); ok {
+		startUnix := connStart.Unix()
+		if startUnix > 0 && startUnix < nowUnix && nowUnix-startUnix <= maxValidConnStartAge {
+			firstSeenCandidate = startUnix
+		}
+	}
 
 	mutated := isNewConn || deltaUp > 0 || deltaDown > 0
 	entry, exists := state.Flows[key]
@@ -207,9 +313,12 @@ func ingestSingleConnection(
 			DestPort:      destPort,
 			IsDirectIP:    isDirectIP,
 			Network:       network,
-			FirstSeenUnix: nowUnix,
+			FirstSeenUnix: firstSeenCandidate,
 		}
 		state.Flows[key] = entry
+		mutated = true
+	} else if firstSeenCandidate < entry.FirstSeenUnix {
+		entry.FirstSeenUnix = firstSeenCandidate
 		mutated = true
 	}
 
@@ -222,7 +331,7 @@ func ingestSingleConnection(
 	if isNewConn {
 		recordNewConnArrival(entry, conn.Start, nowUnix, isNight, deltaUp)
 	}
-	return mutated
+	return key, mutated
 }
 
 // computeIntervalCV 计算建连时间序列的间隔变异系数 CV = sigma / mu。

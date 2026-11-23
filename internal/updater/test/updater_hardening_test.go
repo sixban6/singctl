@@ -313,4 +313,120 @@ func TestUpdateSelf_LowMemoryZeroTmpStreaming_DigestAndChecksumsAndRollback(t *t
 			t.Fatalf("expected temporary extracted file to be deleted on checksum failure, got %v", entries)
 		}
 	})
+
+	t.Run("streaming_update_migrates_config_preserving_notify_for_client_and_server", func(t *testing.T) {
+		for _, tc := range []struct {
+			name        string
+			initialYAML string
+			wantContain []string
+			wantAbsent  []string
+		}{
+			{
+				name: "client_preserves_telegram_notify",
+				initialYAML: `subs:
+  - name: main
+    url: https://sub.example.com/client?token=test
+notify:
+  enabled: true
+  channels:
+    telegram:
+      enabled: true
+      bot_token: "123456:stream_test_token"
+      chat_id: "-100999"
+`,
+				wantContain: []string{"123456:stream_test_token", "-100999"},
+				wantAbsent:  []string{"\nserver:\n"},
+			},
+			{
+				name: "server_preserves_server_and_telegram_notify",
+				initialYAML: `server:
+  node_domain: "node.example.com"
+  cf_dns_key: "cf-test-token"
+notify:
+  enabled: true
+  channels:
+    telegram:
+      enabled: true
+      bot_token: "654321:server_stream_token"
+      chat_id: "888888"
+`,
+				wantContain: []string{"node.example.com", "654321:server_stream_token", "888888"},
+				wantAbsent:  []string{"\nsubs:\n"},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				workDir := t.TempDir()
+				installDir := filepath.Join(workDir, "bin")
+				_ = os.MkdirAll(installDir, 0755)
+				exePath := filepath.Join(installDir, "singctl")
+				_ = os.WriteFile(exePath, []byte("old-binary"), 0755)
+
+				cfgPath := filepath.Join(workDir, "singctl.yaml")
+				if err := os.WriteFile(cfgPath, []byte(tc.initialYAML), 0600); err != nil {
+					t.Fatal(err)
+				}
+
+				// Mock new binary that exits non-zero on internal-migrate so in-process fallback is also exercised cleanly.
+				fallbackBin := "#!/bin/sh\nexit 1\n"
+				pkgBytes, pkgSHA := buildTestSingCtlTarGz(t, map[string]string{
+					"singctl-linux-arm64-lite/singctl": fallbackBin,
+				})
+
+				var srvURL string
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch r.URL.Path {
+					case "/repos/test/singctl/releases/latest":
+						_ = json.NewEncoder(w).Encode(release.Info{
+							TagName: "v1.14.201",
+							Assets: []release.Asset{
+								{
+									Name:               "singctl-linux-arm64-lite.tar.gz",
+									BrowserDownloadURL: srvURL + "/dl/singctl-linux-arm64-lite.tar.gz",
+									Size:               int64(len(pkgBytes)),
+									Digest:             "sha256:" + pkgSHA,
+								},
+							},
+						})
+					case "/dl/singctl-linux-arm64-lite.tar.gz":
+						_, _ = w.Write(pkgBytes)
+					default:
+						http.NotFound(w, r)
+					}
+				}))
+				defer srv.Close()
+				srvURL = srv.URL
+
+				u := updater.NewWithDeps("", srv.URL, updater.Deps{
+					APIBase:           srv.URL,
+					DLBase:            srv.URL,
+					HTTPClient:        srv.Client(),
+					Repo:              "test/singctl",
+					GOOS:              "linux",
+					GOARCH:            "arm64",
+					IsLite:            &isLite,
+					ReadTotalRAMBytes: func() uint64 { return 256 * mib },
+					ResolveExePath:    func() (string, error) { return exePath, nil },
+				})
+
+				if err := u.UpdateSelf(cfgPath, "v1.14.100"); err != nil {
+					t.Fatalf("UpdateSelf streaming with config failed: %v", err)
+				}
+				afterBytes, err := os.ReadFile(cfgPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				after := string(afterBytes)
+				for _, want := range tc.wantContain {
+					if !strings.Contains(after, want) {
+						t.Fatalf("expected migrated config to contain %q, got:\n%s", want, after)
+					}
+				}
+				for _, forbid := range tc.wantAbsent {
+					if strings.Contains(after, forbid) {
+						t.Fatalf("expected migrated config NOT to contain %q, got:\n%s", forbid, after)
+					}
+				}
+			})
+		}
+	})
 }

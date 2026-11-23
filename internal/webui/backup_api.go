@@ -136,7 +136,7 @@ func (s *Server) handleClientBackupExport(w http.ResponseWriter, r *http.Request
 	filename := fmt.Sprintf("singctl-client-backup-%s.enc.json", time.Now().Format("20060102-150405"))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":       true,
-		"message":  "网关 V2 加密备份快照已生成，请妥善保管文件与解密口令",
+		"message":  "网关加密备份快照已生成，请妥善保管文件与解密口令",
 		"filename": filename,
 		"data":     string(encryptedBytes),
 		"summary": map[string]any{

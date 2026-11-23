@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -197,8 +198,14 @@ func (u *Updater) updateSelfZeroTmpStream(
 
 		if configPath != "" {
 			if _, stErr := os.Stat(configPath); stErr == nil {
-				if mErr := config.MigrateConfig(configPath, configs.ClientConfigYAML); mErr != nil {
-					logger.Warn("In-process config migration warning for %s: %v", configPath, mErr)
+				migrateCmd := exec.CommandContext(ctx, currentExe, "internal-migrate", "--config", configPath)
+				if out, mErr := migrateCmd.CombinedOutput(); mErr != nil {
+					logger.Warn("New binary streaming migrate returned %v (%s), falling back to in-process migration", mErr, strings.TrimSpace(string(out)))
+					if fbErr := config.MigrateConfig(configPath, configs.DefaultConfigYAML); fbErr != nil {
+						logger.Warn("In-process config migration warning for %s: %v", configPath, fbErr)
+					}
+				} else {
+					logger.Success("Main configuration migrated successfully using new version.")
 				}
 			}
 		}
