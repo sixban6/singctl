@@ -4,6 +4,7 @@ package doctor
 import (
 	"cmp"
 	"context"
+	"crypto/rand"
 	"fmt"
 	"io"
 	"maps"
@@ -114,7 +115,7 @@ func (e *Env) withDefaults() *Env {
 		out.HTTPProbe = defaultHTTPProbe
 	}
 	if out.DialTCP == nil {
-		out.DialTCP = defaultDialTCPCtx
+		out.DialTCP = ProbeLocalDNS
 	}
 	if out.ReadFile == nil {
 		out.ReadFile = os.ReadFile
@@ -153,16 +154,60 @@ func defaultRunCmd(ctx context.Context, name string, args ...string) ([]byte, er
 	return exec.CommandContext(ctx, name, args...).CombinedOutput()
 }
 
-func defaultDialTCPCtx(ctx context.Context, addr string) error {
+// ProbeLocalDNS 探测本地防劫持 DNS 端口（优先 TCP 兼容 AdGuard Home，失败时回退标准 RFC 1035 UDP DNS 探活以兼容纯 UDP 的 SmartDNS）。
+func ProbeLocalDNS(ctx context.Context, addr string) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	d := &net.Dialer{Timeout: 800 * time.Millisecond}
-	conn, err := d.DialContext(ctx, "tcp", addr)
+	const probeTimeout = 800 * time.Millisecond
+	d := &net.Dialer{Timeout: probeTimeout}
+	if conn, err := d.DialContext(ctx, "tcp", addr); err == nil {
+		_ = conn.Close()
+		return nil
+	}
+
+	udpConn, err := d.DialContext(ctx, "udp", addr)
 	if err != nil {
 		return err
 	}
-	_ = conn.Close()
+	defer udpConn.Close()
+
+	deadline := time.Now().Add(probeTimeout)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
+	_ = udpConn.SetDeadline(deadline)
+
+	var txid [2]byte
+	_, _ = rand.Read(txid[:])
+	query := []byte{
+		txid[0], txid[1],
+		0x01, 0x00, // Standard query, RD=1
+		0x00, 0x01, // QDCOUNT=1
+		0x00, 0x00, // ANCOUNT=0
+		0x00, 0x00, // NSCOUNT=0
+		0x00, 0x00, // ARCOUNT=0
+		0x09, 'l', 'o', 'c', 'a', 'l', 'h', 'o', 's', 't', 0x00,
+		0x00, 0x01, // QTYPE=A
+		0x00, 0x01, // QCLASS=IN
+	}
+	if _, err := udpConn.Write(query); err != nil {
+		return err
+	}
+	resp := make([]byte, 512)
+	n, err := udpConn.Read(resp)
+	if err != nil {
+		return err
+	}
+	if n < 12 {
+		return fmt.Errorf("short DNS response (%d bytes)", n)
+	}
+	if resp[0] != txid[0] || resp[1] != txid[1] {
+		return fmt.Errorf("mismatched DNS transaction ID")
+	}
+	if resp[2]&0x80 == 0 {
+		return fmt.Errorf("response missing QR flag")
+	}
 	return nil
 }
 

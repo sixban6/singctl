@@ -313,14 +313,28 @@ func scanProcesses(procRoot string) ([]procEntry, bool) {
 	return out, true
 }
 
+func isUjailSingBoxProcess(p procEntry) bool {
+	if !strings.Contains(p.cmdline, "sing-box") {
+		return false
+	}
+	if p.comm == "ujail" {
+		return true
+	}
+	// OpenWrt `ujail -n sing-box` invokes prctl(PR_SET_NAME, "sing-box"),
+	// renaming /proc/<pid>/comm from "ujail" to "sing-box" while argv[0] remains ujail or /sbin/ujail.
+	fields := strings.Fields(p.cmdline)
+	return len(fields) > 0 && filepath.Base(fields[0]) == "ujail"
+}
+
 func inspectSingBoxProcess(ctx context.Context, env *Env) (running bool, inUjail bool) {
 	if procs, ok := scanProcesses(env.ProcRoot); ok {
 		for _, p := range procs {
+			if isUjailSingBoxProcess(p) {
+				inUjail = true
+				continue
+			}
 			if p.comm == "sing-box" {
 				running = true
-			}
-			if p.comm == "ujail" && strings.Contains(p.cmdline, "sing-box") {
-				inUjail = true
 			}
 		}
 		return running, inUjail

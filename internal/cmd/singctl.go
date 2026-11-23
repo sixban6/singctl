@@ -22,7 +22,6 @@ import (
 	"singctl/internal/webui"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -101,11 +100,7 @@ func buildCLIDoctorEnv(cfg *config.Config, resolvedPath string, deps DoctorCmdDe
 			useExternal := false
 			if dnsEnabled {
 				addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(dnsPort))
-				d := &net.Dialer{Timeout: 800 * time.Millisecond}
-				if conn, err := d.DialContext(ctx, "tcp", addr); err == nil {
-					_ = conn.Close()
-					useExternal = true
-				}
+				useExternal = doctor.ProbeLocalDNS(ctx, addr) == nil
 			}
 			changed, err := singbox.SyncLiveSingBoxDNSLocal(ctx, sbPath, workPath, useExternal, dnsPort)
 			if err != nil {

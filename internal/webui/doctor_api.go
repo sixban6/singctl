@@ -65,11 +65,7 @@ func (s *Server) quickFixSyncDNSLocal(ctx context.Context, cfg *config.Config) (
 		if s.opts.LocalDNSProbeDNSForTest != nil {
 			useExternal = s.opts.LocalDNSProbeDNSForTest(localAddr, 800*time.Millisecond) == nil
 		} else {
-			d := &net.Dialer{Timeout: 800 * time.Millisecond}
-			if conn, err := d.DialContext(ctx, "tcp", localAddr); err == nil {
-				_ = conn.Close()
-				useExternal = true
-			}
+			useExternal = doctor.ProbeLocalDNS(ctx, localAddr) == nil
 		}
 	}
 
