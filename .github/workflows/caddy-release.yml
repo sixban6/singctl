@@ -1,0 +1,236 @@
+name: Sync & Build Custom Caddy
+
+on:
+  schedule:
+    # 每 12 小时自动巡检一次上游 Caddy 及 Cloudflare DNS / Layer4 插件，无更新时秒级跳过不浪费算力
+    - cron: '15 */12 * * *'
+  workflow_dispatch:
+    inputs:
+      caddy_version:
+        description: '指定 Caddy 版本号（如 2.10.0，留空则自动检测官方最新正式版）'
+        required: false
+        default: ''
+        type: string
+      force_rebuild:
+        description: '即使上游版本与插件均无更新也强制重新编译发布'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: caddy-release
+  cancel-in-progress: false
+
+jobs:
+  sync-caddy:
+    name: Sync Custom Caddy (Cloudflare DNS + Layer4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check Upstream Caddy & Plugin Versions (Zero-Waste Gate)
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_VERSION: ${{ inputs.caddy_version }}
+          FORCE_REBUILD: ${{ inputs.force_rebuild }}
+        run: |
+          set -euo pipefail
+
+          RAW_VER="${INPUT_VERSION#v}"
+          RAW_VER="${RAW_VER//[[:space:]]/}"
+          if [ -n "${RAW_VER}" ]; then
+            CADDY_VER="${RAW_VER}"
+          else
+            TAG_NAME=$(gh api repos/caddyserver/caddy/releases/latest --jq '.tag_name' 2>/dev/null || \
+              curl -fsSL --retry 3 --connect-timeout 10 -H "Accept: application/vnd.github+json" "https://api.github.com/repos/caddyserver/caddy/releases/latest" | jq -r '.tag_name')
+            CADDY_VER="${TAG_NAME#v}"
+          fi
+
+          if ! [[ "${CADDY_VER}" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "::error::Invalid upstream Caddy version resolved: '${CADDY_VER}'"
+            exit 1
+          fi
+
+          echo "检查上游 Caddy Tag v${CADDY_VER} 与插件最新提交..."
+          if ! git ls-remote --exit-code --tags https://github.com/caddyserver/caddy.git "refs/tags/v${CADDY_VER}" >/dev/null; then
+            echo "::error::Upstream Git tag v${CADDY_VER} not found on caddyserver/caddy"
+            exit 1
+          fi
+
+          CF_FULL_SHA=$(git ls-remote https://github.com/caddy-dns/cloudflare.git HEAD | awk 'NR==1 {print $1}')
+          L4_FULL_SHA=$(git ls-remote https://github.com/mholt/caddy-l4.git HEAD | awk 'NR==1 {print $1}')
+          CF_SHA="${CF_FULL_SHA:0:12}"
+          L4_SHA="${L4_FULL_SHA:0:12}"
+          if [ -z "${CF_SHA}" ] || [ -z "${L4_SHA}" ]; then
+            echo "::error::Failed to resolve upstream plugin commits (cloudflare='${CF_SHA}', layer4='${L4_SHA}')"
+            exit 1
+          fi
+
+          FINGERPRINT="caddy=v${CADDY_VER}|cloudflare=${CF_SHA}|layer4=${L4_SHA}"
+          echo "Resolved upstream fingerprint: ${FINGERPRINT}"
+
+          # 查询本仓库固定通道 Prerelease（caddy-latest）现有指纹与双架构资产
+          EXISTING_BODY=$(gh release view caddy-latest -R "${GITHUB_REPOSITORY}" --json body -q '.body' 2>/dev/null || true)
+          EXISTING_ASSETS=$(gh release view caddy-latest -R "${GITHUB_REPOSITORY}" --json assets -q '.assets[].name' 2>/dev/null || true)
+
+          HAS_AMD64=false
+          HAS_ARM64=false
+          HAS_SUMS=false
+          while IFS= read -r asset; do
+            case "${asset}" in
+              "caddy-custom-linux-amd64.tar.gz") HAS_AMD64=true ;;
+              "caddy-custom-linux-arm64.tar.gz") HAS_ARM64=true ;;
+              "checksums.txt") HAS_SUMS=true ;;
+            esac
+          done <<< "${EXISTING_ASSETS}"
+
+          HAS_FP=false
+          if printf '%s\n' "${EXISTING_BODY}" | grep -Fq "<!-- upstream-fingerprint: ${FINGERPRINT} -->"; then
+            HAS_FP=true
+          fi
+
+          if [ "${FORCE_REBUILD}" != "true" ] && [ "${HAS_FP}" = "true" ] && [ "${HAS_AMD64}" = "true" ] && [ "${HAS_ARM64}" = "true" ] && [ "${HAS_SUMS}" = "true" ]; then
+            echo "✅ caddy-latest 已包含最新上游指纹 (${FINGERPRINT}) 的双架构产物与 checksums.txt，跳过编译（零资源浪费）。"
+            {
+              echo "should_build=false"
+              echo "caddy_version=${CADDY_VER}"
+              echo "cf_sha=${CF_SHA}"
+              echo "cf_full_sha=${CF_FULL_SHA}"
+              echo "l4_sha=${L4_SHA}"
+              echo "l4_full_sha=${L4_FULL_SHA}"
+              echo "fingerprint=${FINGERPRINT}"
+            } >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          echo "🚀 检测到需要编译发布 Custom Caddy v${CADDY_VER}（${FINGERPRINT}, force_rebuild=${FORCE_REBUILD}）"
+          {
+            echo "should_build=true"
+            echo "caddy_version=${CADDY_VER}"
+            echo "cf_sha=${CF_SHA}"
+            echo "cf_full_sha=${CF_FULL_SHA}"
+            echo "l4_sha=${L4_SHA}"
+            echo "l4_full_sha=${L4_FULL_SHA}"
+            echo "fingerprint=${FINGERPRINT}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Setup Go
+        if: steps.gate.outputs.should_build == 'true'
+        uses: actions/setup-go@v7
+        with:
+          go-version: 'stable'
+          cache: false
+
+      - name: Build & Smoke Test Custom Caddy (AMD64 & ARM64)
+        if: steps.gate.outputs.should_build == 'true'
+        env:
+          CADDY_VER: ${{ steps.gate.outputs.caddy_version }}
+          CF_SHA: ${{ steps.gate.outputs.cf_sha }}
+          CF_FULL_SHA: ${{ steps.gate.outputs.cf_full_sha }}
+          L4_SHA: ${{ steps.gate.outputs.l4_sha }}
+          L4_FULL_SHA: ${{ steps.gate.outputs.l4_full_sha }}
+        run: |
+          set -euo pipefail
+          go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+          rm -rf dist
+          mkdir -p dist/caddy-build
+
+          for ARCH in amd64 arm64; do
+            echo "==> 编译 linux/${ARCH} Custom Caddy v${CADDY_VER} (cloudflare@${CF_SHA} + layer4@${L4_SHA})..."
+            rm -f dist/caddy-build/caddy
+            CGO_ENABLED=0 GOOS=linux GOARCH="${ARCH}" xcaddy build "v${CADDY_VER}" \
+              --with "github.com/caddy-dns/cloudflare@${CF_FULL_SHA}" \
+              --with "github.com/mholt/caddy-l4@${L4_FULL_SHA}" \
+              --output dist/caddy-build/caddy
+            chmod 0755 dist/caddy-build/caddy
+
+            if [ "${ARCH}" = "amd64" ]; then
+              echo "==> Runner 真机冒烟验证 amd64 版本与插件模块..."
+              VER_OUT=$(./dist/caddy-build/caddy version)
+              echo "  caddy version -> ${VER_OUT}"
+              if [[ "${VER_OUT}" != *"v${CADDY_VER}"* ]]; then
+                echo "::error::Smoke version mismatch! expected 'v${CADDY_VER}', got '${VER_OUT}'"
+                exit 1
+              fi
+              MODS=$(./dist/caddy-build/caddy list-modules)
+              if ! printf '%s\n' "${MODS}" | grep -q "dns.providers.cloudflare"; then
+                echo "::error::Missing dns.providers.cloudflare module in compiled Caddy binary"
+                exit 1
+              fi
+              if ! printf '%s\n' "${MODS}" | grep -q "layer4"; then
+                echo "::error::Missing layer4 module in compiled Caddy binary"
+                exit 1
+              fi
+              echo "  ✅ dns.providers.cloudflare 与 layer4 模块冒烟校验通过！"
+            fi
+
+            GZIP=-9 tar -czf "dist/caddy-custom-linux-${ARCH}.tar.gz" -C dist/caddy-build caddy
+            rm -f dist/caddy-build/caddy
+          done
+
+          rm -rf dist/caddy-build
+          cd dist
+          sha256sum caddy-custom-linux-amd64.tar.gz caddy-custom-linux-arm64.tar.gz > checksums.txt
+          ls -lh
+          cat checksums.txt
+
+      - name: Publish Atomic Rolling Release (caddy-latest)
+        if: steps.gate.outputs.should_build == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CADDY_VER: ${{ steps.gate.outputs.caddy_version }}
+          CF_SHA: ${{ steps.gate.outputs.cf_sha }}
+          L4_SHA: ${{ steps.gate.outputs.l4_sha }}
+          FINGERPRINT: ${{ steps.gate.outputs.fingerprint }}
+        run: |
+          set -euo pipefail
+
+          cat > /tmp/caddy-notes.md <<EOF
+          ## Custom Caddy 网关预编译包 v${CADDY_VER} (Cloudflare DNS + Layer4)
+
+          - **Caddy 版本**: [caddyserver/caddy v${CADDY_VER}](https://github.com/caddyserver/caddy/releases/tag/v${CADDY_VER})
+          - **集成插件**:
+            - \`github.com/caddy-dns/cloudflare\` (\`${CF_SHA}\`)
+            - \`github.com/mholt/caddy-l4\` (\`${L4_SHA}\`)
+          - **覆盖架构**: \`linux/amd64\`、\`linux/arm64\`（纯静态 \`CGO_ENABLED=0\`）
+          - **发布通道**: 独立固定 \`prerelease\` 通道（\`--latest=false\`），每次覆盖仅保留最新版，绝不影响 \`singctl\` 主程序 \`/releases/latest\`
+
+          ### SHA256 Checksums
+          \`\`\`
+          $(cat dist/checksums.txt)
+          \`\`\`
+
+          <!-- upstream-fingerprint: ${FINGERPRINT} -->
+          EOF
+
+          PKG_AMD64="dist/caddy-custom-linux-amd64.tar.gz"
+          PKG_ARM64="dist/caddy-custom-linux-arm64.tar.gz"
+          PKG_SUMS="dist/checksums.txt"
+
+          if gh release view caddy-latest -R "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "==> 覆盖更新现有 caddy-latest Release（仅保留最新版）..."
+            gh release upload caddy-latest \
+              "${PKG_AMD64}" "${PKG_ARM64}" "${PKG_SUMS}" \
+              --clobber -R "${GITHUB_REPOSITORY}"
+
+            gh release edit caddy-latest \
+              --prerelease \
+              --latest=false \
+              --title "Custom Caddy 预编译包 (v${CADDY_VER})" \
+              --notes-file /tmp/caddy-notes.md \
+              -R "${GITHUB_REPOSITORY}"
+          else
+            echo "==> 首次创建 caddy-latest Prerelease（latest=false）..."
+            gh release create caddy-latest \
+              --target "${GITHUB_SHA}" \
+              --prerelease \
+              --latest=false \
+              --title "Custom Caddy 预编译包 (v${CADDY_VER})" \
+              --notes-file /tmp/caddy-notes.md \
+              "${PKG_AMD64}" "${PKG_ARM64}" "${PKG_SUMS}" \
+              -R "${GITHUB_REPOSITORY}"
+          fi
+          rm -f /tmp/caddy-notes.md

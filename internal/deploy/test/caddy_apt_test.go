@@ -4,9 +4,12 @@ package deploy_test
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
+	"singctl/internal/config"
+	"singctl/internal/constant"
 	"singctl/internal/deploy"
 )
 
@@ -70,5 +73,78 @@ func TestNeutralizeCaddyDpkgMetadata(t *testing.T) {
 		if st.Mode().Perm()&0111 == 0 {
 			t.Fatalf("expected %s to remain executable, mode=%v", p, st.Mode())
 		}
+	}
+}
+
+func TestCaddyCustomDownloadURLs_AndInstallScriptChannel(t *testing.T) {
+	directRolling := constant.GitHubRepoURL + "/releases/download/" + constant.CaddyReleaseTag + "/caddy-custom-linux-amd64.tar.gz"
+	directLegacy := constant.GitHubRepoURL + "/releases/latest/download/caddy-custom-linux-amd64.tar.gz"
+
+	cases := []struct {
+		name string
+		cfg  *config.Config
+		arch string
+		want []string
+	}{
+		{
+			name: "no_mirror_amd64",
+			cfg:  nil,
+			arch: "amd64",
+			want: []string{directRolling, directLegacy},
+		},
+		{
+			name: "with_mirror_trailing_slash_amd64",
+			cfg:  &config.Config{GitHub: config.GitHubConfig{MirrorURL: "https://mirror.example.com/"}},
+			arch: "amd64",
+			want: []string{
+				"https://mirror.example.com/" + directRolling,
+				directRolling,
+				"https://mirror.example.com/" + directLegacy,
+				directLegacy,
+			},
+		},
+		{
+			name: "arm64_without_mirror",
+			cfg:  &config.Config{},
+			arch: "arm64",
+			want: []string{
+				constant.GitHubRepoURL + "/releases/download/" + constant.CaddyReleaseTag + "/caddy-custom-linux-arm64.tar.gz",
+				constant.GitHubRepoURL + "/releases/latest/download/caddy-custom-linux-arm64.tar.gz",
+			},
+		},
+		{
+			name: "unsupported_arch_returns_nil",
+			cfg:  &config.Config{},
+			arch: "mipsle",
+			want: nil,
+		},
+		{
+			name: "empty_arch_returns_nil",
+			cfg:  nil,
+			arch: "",
+			want: nil,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := deploy.CaddyCustomDownloadURLs(tc.cfg, tc.arch)
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("CaddyCustomDownloadURLs(%q) = %v, want %v", tc.arch, got, tc.want)
+			}
+		})
+	}
+
+	scriptBytes, err := os.ReadFile(filepath.Join("..", "scripts", "install_caddy.sh"))
+	if err != nil {
+		t.Fatalf("read install_caddy.sh: %v", err)
+	}
+	script := string(scriptBytes)
+	wantChannel := "/releases/download/" + constant.CaddyReleaseTag + "/${CADDY_TAR}"
+	if !strings.Contains(script, wantChannel) {
+		t.Fatalf("expected install_caddy.sh to download from rolling tag %q", wantChannel)
+	}
+	if strings.Contains(script, "/releases/latest/download/${CADDY_TAR}") {
+		t.Fatalf("install_caddy.sh should no longer point directly to singctl /releases/latest for caddy")
 	}
 }

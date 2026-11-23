@@ -74,24 +74,29 @@ esac
 PREBUILT_SUCCESS=false
 if [ -n "${CADDY_ARCH}" ]; then
     CADDY_TAR="caddy-custom-linux-${CADDY_ARCH}.tar.gz"
-    DOWNLOAD_URL="https://github.com/sixban6/singctl/releases/latest/download/${CADDY_TAR}"
+    DIRECT_URL="https://github.com/sixban6/singctl/releases/download/caddy-latest/${CADDY_TAR}"
+    DOWNLOAD_URLS="${DIRECT_URL}"
     if [ -n "${MIRROR_URL}" ]; then
-        DOWNLOAD_URL="${MIRROR_URL%/}/${DOWNLOAD_URL}"
+        DOWNLOAD_URLS="${MIRROR_URL%/}/${DIRECT_URL} ${DIRECT_URL}"
     fi
 
-    echo "Attempting to download prebuilt Caddy binary (${CADDY_ARCH}) from ${DOWNLOAD_URL}..."
     TMP_DIR="$(mktemp -d)"
-    if curl -fsSL --connect-timeout 15 -o "${TMP_DIR}/${CADDY_TAR}" "${DOWNLOAD_URL}" 2>/dev/null; then
-        if tar -xzf "${TMP_DIR}/${CADDY_TAR}" -C "${TMP_DIR}" caddy 2>/dev/null || tar -xzf "${TMP_DIR}/${CADDY_TAR}" -C "${TMP_DIR}" 2>/dev/null; then
-            if [ -f "${TMP_DIR}/caddy" ]; then
-                setup_caddy_runtime
-                systemctl stop caddy 2>/dev/null || true
-                install -m 0755 "${TMP_DIR}/caddy" /usr/bin/caddy
-                echo "Prebuilt Caddy with Cloudflare & layer4 installed successfully (standalone, no APT repo)."
-                PREBUILT_SUCCESS=true
+    for DOWNLOAD_URL in ${DOWNLOAD_URLS}; do
+        echo "Attempting to download prebuilt Caddy binary (${CADDY_ARCH}) from ${DOWNLOAD_URL}..."
+        rm -f "${TMP_DIR}/${CADDY_TAR}" "${TMP_DIR}/caddy"
+        if curl -fsSL --connect-timeout 15 -o "${TMP_DIR}/${CADDY_TAR}" "${DOWNLOAD_URL}" 2>/dev/null; then
+            if tar -xzf "${TMP_DIR}/${CADDY_TAR}" -C "${TMP_DIR}" caddy 2>/dev/null || tar -xzf "${TMP_DIR}/${CADDY_TAR}" -C "${TMP_DIR}" 2>/dev/null; then
+                if [ -f "${TMP_DIR}/caddy" ]; then
+                    setup_caddy_runtime
+                    systemctl stop caddy 2>/dev/null || true
+                    install -m 0755 "${TMP_DIR}/caddy" /usr/bin/caddy
+                    echo "Prebuilt Caddy with Cloudflare & layer4 installed successfully (standalone, no APT repo)."
+                    PREBUILT_SUCCESS=true
+                    break
+                fi
             fi
         fi
-    fi
+    done
     rm -rf "${TMP_DIR}"
 fi
 

@@ -222,6 +222,32 @@ func UpgradeSingbox(cfg *config.Config) (*UpgradeResult, error) {
 	}, nil
 }
 
+// CaddyCustomDownloadURLs 返回定制版 Caddy 压缩包的有序候选下载地址（优先独立滚动通道 caddy-latest，其次兼容回退 latest）。
+func CaddyCustomDownloadURLs(cfg *config.Config, arch string) []string {
+	normArch := strings.ToLower(strings.TrimSpace(arch))
+	if normArch != "amd64" && normArch != "arm64" {
+		return nil
+	}
+	caddyTar := fmt.Sprintf("caddy-custom-linux-%s.tar.gz", normArch)
+	directURLs := []string{
+		fmt.Sprintf("%s/releases/download/%s/%s", constant.GitHubRepoURL, constant.CaddyReleaseTag, caddyTar),
+		fmt.Sprintf("%s/releases/latest/download/%s", constant.GitHubRepoURL, caddyTar),
+	}
+
+	mirror := ""
+	if cfg != nil {
+		mirror = strings.TrimRight(strings.TrimSpace(cfg.GitHub.MirrorURL), "/")
+	}
+	urls := make([]string, 0, len(directURLs)*2)
+	for _, u := range directURLs {
+		if mirror != "" {
+			urls = append(urls, mirror+"/"+u)
+		}
+		urls = append(urls, u)
+	}
+	return urls
+}
+
 // UpgradeCaddy atomically replaces Caddy (with Cloudflare DNS & layer4) and restarts the service.
 func UpgradeCaddy(cfg *config.Config) (*UpgradeResult, error) {
 	oldVer := GetInstalledCaddyVersion()
@@ -244,9 +270,9 @@ func UpgradeCaddy(cfg *config.Config) (*UpgradeResult, error) {
 
 	arch := runtime.GOARCH
 	caddyTar := fmt.Sprintf("caddy-custom-linux-%s.tar.gz", arch)
-	downloadURL := fmt.Sprintf("%s/releases/latest/download/%s", constant.GitHubRepoURL, caddyTar)
-	if cfg != nil && cfg.GitHub.MirrorURL != "" {
-		downloadURL = fmt.Sprintf("%s/%s", strings.TrimRight(cfg.GitHub.MirrorURL, "/"), downloadURL)
+	candidateURLs := CaddyCustomDownloadURLs(cfg, arch)
+	if len(candidateURLs) == 0 {
+		return nil, fmt.Errorf("unsupported CPU architecture for custom Caddy build: %s", arch)
 	}
 
 	tmpDir, err := os.MkdirTemp("", "caddy-upgrade-*")
@@ -256,8 +282,14 @@ func UpgradeCaddy(cfg *config.Config) (*UpgradeResult, error) {
 	defer os.RemoveAll(tmpDir)
 
 	archivePath := filepath.Join(tmpDir, caddyTar)
-	if err := downloadToFile(downloadURL, archivePath); err != nil {
-		return nil, err
+	var downloadErr error
+	for _, u := range candidateURLs {
+		if downloadErr = downloadToFile(u, archivePath); downloadErr == nil {
+			break
+		}
+	}
+	if downloadErr != nil {
+		return nil, downloadErr
 	}
 
 	extractedCaddy := filepath.Join(tmpDir, "caddy")
