@@ -1,3 +1,5 @@
+//go:build !lite
+
 // 文件职责：验证 CLI 舰队子命令拆解树、离线子节点生命周期管理与显式依赖注入剪贴板复制。
 package cmd_test
 

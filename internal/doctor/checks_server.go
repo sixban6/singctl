@@ -1,3 +1,5 @@
+//go:build !lite
+
 // 文件职责：实现服务端模式下的声明式体检算子集合（系统环境、BBR、监听端口、四核心服务、TLS/QUIC 证书、Reality SNI、SubHub、WARP 与 Web 终端 mTLS）。
 package doctor
 

@@ -1,3 +1,5 @@
+//go:build !lite
+
 // 文件职责：提供 CLI 多节点舰队根命令 (`singctl fleet`) 装配及子节点列表、纳管与下线子命令。
 package cmd
 

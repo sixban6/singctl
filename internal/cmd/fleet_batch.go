@@ -1,3 +1,5 @@
+//go:build !lite
+
 // 文件职责：提供舰队并发批量指令 (`sync` / `probe` / `doctor` / `reset` / `update`) 与全舰队安全自愈 (`heal`) 子命令。
 package cmd
 

@@ -1,12 +1,11 @@
-// 文件职责：提供终端对齐美化输出的深度体检报告格式化器 FormatText。
+// 文件职责：提供终端对齐美化输出的深度体检报告格式化器 FormatText（零外部宽度表依赖）。
 package doctor
 
 import (
 	"cmp"
 	"fmt"
 	"strings"
-
-	"github.com/mattn/go-runewidth"
+	"unicode"
 )
 
 // FormatText 将深度体检 Report 渲染为终端对齐可读文本。
@@ -26,7 +25,7 @@ func FormatText(r Report) string {
 
 	titleColWidth := 24
 	for _, c := range r.Checks {
-		if w := runewidth.StringWidth(cmp.Or(c.Title, c.ID)); w > titleColWidth {
+		if w := displayWidth(cmp.Or(c.Title, c.ID)); w > titleColWidth {
 			titleColWidth = min(w, 34)
 		}
 	}
@@ -78,9 +77,41 @@ func statusBadge(s Status) string {
 }
 
 func padRightWidth(s string, width int) string {
-	w := runewidth.StringWidth(s)
+	w := displayWidth(s)
 	if w >= width {
 		return s
 	}
 	return s + strings.Repeat(" ", width-w)
+}
+
+// displayWidth 按等宽终端习惯估算 Unicode 字符显示列宽（零外部宽度查找表，避免引入大体积 BSS LUT）。
+func displayWidth(s string) int {
+	w := 0
+	for _, r := range s {
+		switch {
+		case r < 0x20 || (r >= 0x7f && r < 0xa0):
+			continue
+		case unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Me, r) || unicode.Is(unicode.Cf, r):
+			continue
+		case isWideRune(r):
+			w += 2
+		default:
+			w++
+		}
+	}
+	return w
+}
+
+func isWideRune(r rune) bool {
+	return (r >= 0x1100 && r <= 0x115F) ||
+		r == 0x2329 || r == 0x232A ||
+		(r >= 0x2E80 && r <= 0xA4CF && r != 0x303F) ||
+		(r >= 0xAC00 && r <= 0xD7A3) ||
+		(r >= 0xF900 && r <= 0xFAFF) ||
+		(r >= 0xFE10 && r <= 0xFE19) ||
+		(r >= 0xFE30 && r <= 0xFE6F) ||
+		(r >= 0xFF00 && r <= 0xFF60) ||
+		(r >= 0xFFE0 && r <= 0xFFE6) ||
+		(r >= 0x1F300 && r <= 0x1FAFF) ||
+		(r >= 0x20000 && r <= 0x3FFFD)
 }

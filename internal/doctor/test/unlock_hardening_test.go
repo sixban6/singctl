@@ -1,3 +1,5 @@
+//go:build !lite
+
 // 文件职责：验证流媒体与 AI 解锁探测（RunExitDiagnostics）、画像摘要格式化、环境识别与报告评分汇总。
 package doctor_test
 

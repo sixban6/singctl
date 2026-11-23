@@ -122,8 +122,8 @@ DNS optimization, and complete service lifecycle management.`,
 		},
 	})
 
+	registerEditionGroups(rootCmd)
 	rootCmd.AddGroup(
-		&cobra.Group{ID: "server", Title: "【服务端核心运维 (Server Fleet)】"},
 		&cobra.Group{ID: "client", Title: "【客户端透明代理 (Client Gateway)】"},
 		&cobra.Group{ID: "system", Title: "【系统与运维工具 (System & Diagnostics)】"},
 	)
@@ -135,12 +135,6 @@ DNS optimization, and complete service lifecycle management.`,
 		}
 	}
 
-	addGrouped("server",
-		NewServerCmd(cfgPath, info.Version),
-		NewFleetCmd(cfgPath),
-		NewReinstallServerCmd(cfgPath),
-		NewCfTokenCmd(cfgPath),
-	)
 	addGrouped("client",
 		NewSingboxCommand(cfgPath),
 		NewDNSCmd(cfgPath),
@@ -156,11 +150,9 @@ DNS optimization, and complete service lifecycle management.`,
 		NewUpdateCmd(cfgPath, info.Version),
 		NewVersionCmd(info.Version, info.BuildTime, info.GitCommit),
 		NewDaemonCommand(info.Version),
-		NewTerminalCmd(cfgPath),
-		NewSSHCmd(),
 		NewFirewallCmd(),
-		NewUtilCmd(),
 	)
+	mountEditionCommands(rootCmd, cfgPath, info, addGrouped)
 	rootCmd.AddCommand(NewInternalMigrateCmd())
 	return rootCmd
 }
