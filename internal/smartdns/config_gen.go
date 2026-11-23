@@ -114,6 +114,23 @@ func FormatUpstreamDirective(raw string) (string, error) {
 		if domErr != nil || !strings.Contains(cleanDomain, ".") {
 			return "", fmt.Errorf("上游主机 %q 不合法", host)
 		}
+		for _, suffix := range []string{".local", ".localhost", ".lan", ".home.arpa", ".internal", ".arpa"} {
+			if strings.HasSuffix(cleanDomain, suffix) {
+				return "", fmt.Errorf("禁止将局域网或本地域名 (%s) 设为加密上游", cleanDomain)
+			}
+		}
+		labels := strings.Split(cleanDomain, ".")
+		tld := labels[len(labels)-1]
+		allDigits := true
+		for i := range len(tld) {
+			if tld[i] < '0' || tld[i] > '9' {
+				allDigits = false
+				break
+			}
+		}
+		if allDigits {
+			return "", fmt.Errorf("上游主机 %q 不是有效的公网 IP 或域名", host)
+		}
 		hostLiteral = cleanDomain
 	}
 
@@ -219,13 +236,18 @@ func BuildConfigWithOptions(input ConfigInput, opts BuildConfigOptions) (string,
 
 	seen := make(map[string]struct{}, len(rawUpstreams))
 	directives := make([]string, 0, len(rawUpstreams))
+	hasDomainUpstream := false
 	for _, raw := range rawUpstreams {
-		if strings.TrimSpace(raw) == "" {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
 			continue
 		}
-		dir, err := FormatUpstreamDirective(raw)
+		dir, err := FormatUpstreamDirective(trimmed)
 		if err != nil {
 			return "", err
+		}
+		if u, uErr := url.Parse(trimmed); uErr == nil && net.ParseIP(strings.TrimSpace(u.Hostname())) == nil {
+			hasDomainUpstream = true
 		}
 		key := strings.ToLower(dir)
 		if _, dup := seen[key]; dup {
@@ -258,6 +280,12 @@ func BuildConfigWithOptions(input ConfigInput, opts BuildConfigOptions) (string,
 	var b strings.Builder
 	b.WriteString("# SmartDNS configuration managed by singctl (isolated loopback mode)\n")
 	fmt.Fprintf(&b, "bind 127.0.0.1:%d\n\n", dnsPort)
+
+	if hasDomainUpstream {
+		b.WriteString("# Encrypted pure-IP bootstrap DNS for domain-based upstreams\n")
+		b.WriteString("server-https https://223.5.5.5/dns-query -bootstrap-dns\n")
+		b.WriteString("server-tls 1.12.12.12:853 -bootstrap-dns\n\n")
+	}
 
 	b.WriteString("# Encrypted upstreams\n")
 	for _, dir := range directives {

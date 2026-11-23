@@ -2,15 +2,19 @@
 package adguard_test
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"singctl/internal/adguard"
 	"singctl/internal/config"
@@ -78,8 +82,77 @@ func TestNormalizeAndValidateUpstream(t *testing.T) {
 			expectErr: true,
 		},
 		{
-			name:      "reject arbitrary domain name",
-			input:     "https://dns.example.com/dns-query",
+			name:     "valid domain DoT (OneDNS)",
+			input:    "tls://dot.onedns.net",
+			wantNorm: "tls://dot.onedns.net",
+			wantIP:   "",
+		},
+		{
+			name:     "valid domain DoT uppercase trailing dot and explicit port",
+			input:    "tls://DOT.OneDNS.NET.:853",
+			wantNorm: "tls://dot.onedns.net:853",
+			wantIP:   "",
+		},
+		{
+			name:     "valid domain DoH auto path",
+			input:    "https://doh.onedns.net",
+			wantNorm: "https://doh.onedns.net/dns-query",
+			wantIP:   "",
+		},
+		{
+			name:     "valid domain DoH with query",
+			input:    "https://dns.example.com/dns-query?profile=clean",
+			wantNorm: "https://dns.example.com/dns-query?profile=clean",
+			wantIP:   "",
+		},
+		{
+			name:      "reject single-label localhost domain",
+			input:     "tls://localhost",
+			expectErr: true,
+		},
+		{
+			name:      "reject local LAN suffix domain",
+			input:     "tls://router.lan",
+			expectErr: true,
+		},
+		{
+			name:      "reject mDNS .local domain",
+			input:     "https://nas.local/dns-query",
+			expectErr: true,
+		},
+		{
+			name:      "reject home.arpa domain",
+			input:     "tls://dns.home.arpa",
+			expectErr: true,
+		},
+		{
+			name:      "reject numeric TLD invalid IP",
+			input:     "tls://999.999.999.999",
+			expectErr: true,
+		},
+		{
+			name:      "reject newline injection in domain upstream",
+			input:     "tls://dot.onedns.net\nfoo",
+			expectErr: true,
+		},
+		{
+			name:      "reject shell metachar in domain upstream",
+			input:     "tls://dot.onedns.net;id",
+			expectErr: true,
+		},
+		{
+			name:      "reject userinfo in domain upstream",
+			input:     "https://user:pass@dot.onedns.net/dns-query",
+			expectErr: true,
+		},
+		{
+			name:      "reject fragment in domain upstream",
+			input:     "https://dot.onedns.net/dns-query#frag",
+			expectErr: true,
+		},
+		{
+			name:      "reject unsupported http scheme",
+			input:     "http://dot.onedns.net/dns-query",
 			expectErr: true,
 		},
 	}
@@ -217,5 +290,129 @@ func TestSetDNSUpstreams_HotAPIAndYAMLPersistence(t *testing.T) {
 	savedBytes, _ := os.ReadFile(aghYAML)
 	if !strings.Contains(string(savedBytes), "tls://1.12.12.12") || !strings.Contains(string(savedBytes), "fastest_addr") {
 		t.Fatalf("YAML not updated: %s", string(savedBytes))
+	}
+}
+
+func TestDescribeUpstream_DomainProviders(t *testing.T) {
+	cases := []struct {
+		addr         string
+		wantProto    string
+		wantContains string
+	}{
+		{"tls://dot.onedns.net", "DoT", "OneDNS"},
+		{"https://doh-pure.onedns.net/dns-query", "DoH", "OneDNS"},
+		{"https://doh.360.cn/dns-query", "DoH", "360"},
+		{"tls://dns.quad9.net", "DoT", "Quad9"},
+		{"https://cloudflare-dns.com/dns-query", "DoH", "Cloudflare"},
+		{"tls://dns.google", "DoT", "Google"},
+	}
+	for _, tc := range cases {
+		info := adguard.DescribeUpstream(tc.addr)
+		if info.Protocol != tc.wantProto || !strings.Contains(info.Name, tc.wantContains) {
+			t.Errorf("DescribeUpstream(%q) = %+v, want proto=%q name containing %q", tc.addr, info, tc.wantProto, tc.wantContains)
+		}
+	}
+}
+
+func TestSetDNSUpstreams_DomainSupportFallbackBypassAndSingleProbe(t *testing.T) {
+	currentUpstreams := []string{"https://223.5.5.5/dns-query"}
+	var gotPayload map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/control/dns_config":
+			_ = json.NewDecoder(r.Body).Decode(&gotPayload)
+			w.WriteHeader(http.StatusOK)
+		case "/control/dns_info":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"upstream_dns":  currentUpstreams,
+				"upstream_mode": "parallel",
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	u, _ := url.Parse(srv.URL)
+	tmpDir := t.TempDir()
+	fakeBin := filepath.Join(tmpDir, "AdGuardHome")
+	if err := os.WriteFile(fakeBin, []byte("#!/bin/sh\necho v0.107.80\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	aghYAML := filepath.Join(tmpDir, "AdGuardHome.yaml")
+	initialYAML := "http:\n  address: " + u.Host + "\ndns:\n  port: 5353\n  upstream_dns:\n    - https://223.5.5.5/dns-query\n  upstream_mode: parallel\n"
+	if err := os.WriteFile(aghYAML, []byte(initialYAML), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{}
+	cfg.DNS.Username = "root"
+	cfg.DNS.Password = "secret123"
+	mgr := adguard.NewManager(cfg, "")
+	mgr.SetPathsForTest(fakeBin, aghYAML)
+
+	var bypassedIPs []string
+	probeHealthyMap := map[string]bool{
+		"https://223.5.5.5/dns-query": true,
+		"tls://dot.onedns.net":        false,
+	}
+	mgr.SetUpstreamHooksForTest(
+		func(_ context.Context, upstreams []string, _ string, _ time.Duration) []adguard.UpstreamProbeItem {
+			out := make([]adguard.UpstreamProbeItem, 0, len(upstreams))
+			for _, addr := range upstreams {
+				ok := probeHealthyMap[strings.ToLower(addr)]
+				item := adguard.UpstreamProbeItem{Address: addr, Healthy: ok}
+				if !ok {
+					item.Error = "连接被远端重置（目标端口可能不可达或被拦截）"
+				}
+				out = append(out, item)
+			}
+			return out
+		},
+		func(_ context.Context, host string) ([]net.IP, error) {
+			if host == "dot.onedns.net" {
+				// Include a private IP and loopback to verify they are strictly filtered out of bypass rules.
+				return []net.IP{net.ParseIP("198.51.100.44"), net.ParseIP("127.0.0.1"), net.ParseIP("192.168.1.9")}, nil
+			}
+			return nil, nil
+		},
+		func(ips []string) {
+			bypassedIPs = slices.Clone(ips)
+		},
+	)
+
+	// 1. Domain-only list MUST be rejected to prevent cold-boot DNS deadlock.
+	if _, _, _, err := mgr.SetDNSUpstreams(t.Context(), []string{"tls://dot.onedns.net"}, "parallel", false); err == nil {
+		t.Fatal("expected domain-only upstream list to be rejected without pure-IP fallback")
+	}
+
+	// 2. Newly added unreachable domain MUST be rejected even when existing pure-IP upstream is healthy.
+	_, _, _, err := mgr.SetDNSUpstreams(t.Context(), []string{"https://223.5.5.5/dns-query", "tls://dot.onedns.net"}, "parallel", false)
+	if err == nil || !strings.Contains(err.Error(), "tls://dot.onedns.net") {
+		t.Fatalf("expected newly added failing upstream error mentioning tls://dot.onedns.net, got: %v", err)
+	}
+
+	// 3. When newly added domain probes healthy, save succeeds, bypasses resolved public IPv4 only, and persists to YAML.
+	probeHealthyMap["tls://dot.onedns.net"] = true
+	infos, mode, _, err := mgr.SetDNSUpstreams(t.Context(), []string{"https://223.5.5.5/dns-query", "tls://dot.onedns.net"}, "parallel", false)
+	if err != nil {
+		t.Fatalf("expected healthy hybrid upstreams to succeed, got: %v", err)
+	}
+	if mode != "parallel" || len(infos) != 2 || infos[1].Address != "tls://dot.onedns.net" {
+		t.Fatalf("unexpected infos: mode=%q infos=%+v", mode, infos)
+	}
+	if !slices.Contains(bypassedIPs, "198.51.100.44") || slices.Contains(bypassedIPs, "127.0.0.1") || slices.Contains(bypassedIPs, "192.168.1.9") {
+		t.Fatalf("unexpected bypassedIPs (must include public IPv4 198.51.100.44 and exclude loopback/private): %v", bypassedIPs)
+	}
+	savedBytes, _ := os.ReadFile(aghYAML)
+	if !strings.Contains(string(savedBytes), "tls://dot.onedns.net") {
+		t.Fatalf("AdGuardHome.yaml missing tls://dot.onedns.net:\n%s", string(savedBytes))
+	}
+
+	// 4. Switching scheduling mode when an *existing* upstream has a transient failure must still succeed if another upstream is healthy.
+	currentUpstreams = []string{"https://223.5.5.5/dns-query", "tls://dot.onedns.net"}
+	probeHealthyMap["tls://dot.onedns.net"] = false
+	if _, mode, _, err := mgr.SetDNSUpstreams(t.Context(), currentUpstreams, "fastest_addr", false); err != nil || mode != "fastest_addr" {
+		t.Fatalf("switching mode with existing flaky upstream should succeed while pure-IP upstream is healthy: mode=%q err=%v", mode, err)
 	}
 }

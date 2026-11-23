@@ -3,6 +3,7 @@ package localdns
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"time"
 
@@ -176,6 +177,8 @@ type EngineDeps struct {
 	SkipProbeForTest      bool
 
 	ProbeUpstreamListFunc   func(ctx context.Context, upstreams []string, domain string, timeout time.Duration) []adguard.UpstreamProbeItem
+	LookupIPFunc            func(ctx context.Context, host string) ([]net.IP, error)
+	BypassFirewallFunc      func(ips []string)
 	ProbeDNSFunc            func(addr string, timeout time.Duration) error
 	ProbeResolutionFunc     func(addr, domain string, timeout time.Duration) ([]string, time.Duration, error)
 	CheckPortAvailableFunc  func(port int) bool

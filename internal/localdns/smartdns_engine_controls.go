@@ -209,26 +209,61 @@ func (e *SmartDNSEngine) SetUpstreams(ctx context.Context, rawUpstreams []string
 	if len(cleaned) > 12 {
 		return nil, errors.New("上游 DNS 服务器数量请勿超过 12 条")
 	}
+	if err := adguard.ValidatePureIPFallbackInvariant(cleaned); err != nil {
+		return nil, err
+	}
+
+	prevSet := make(map[string]struct{})
+	prevList := e.cfg.DNS.Upstreams
+	if len(prevList) == 0 {
+		prevList = smartdns.DefaultUpstreams()
+	}
+	for _, prev := range prevList {
+		prevSet[strings.ToLower(strings.TrimSpace(prev))] = struct{}{}
+	}
+
+	if !e.deps.SkipProbeForTest || e.deps.LookupIPFunc != nil || e.deps.BypassFirewallFunc != nil {
+		bypassIPs := adguard.ResolveUpstreamBypassIPs(ctx, cleaned, e.deps.LookupIPFunc)
+		if e.deps.BypassFirewallFunc != nil {
+			e.deps.BypassFirewallFunc(bypassIPs)
+		} else {
+			adguard.EnsureRuntimeFirewallBypass(bypassIPs)
+		}
+	}
 
 	if !e.deps.SkipProbeForTest {
-		probeList := e.deps.ProbeUpstreamListFunc
-		if probeList == nil {
-			probeList = adguard.ProbeUpstreamList
-		}
-		items := probeList(ctx, cleaned, "qq.com", 2800*time.Millisecond)
-		anyHealthy := false
-		var firstErr string
-		for _, it := range items {
-			if it.Healthy {
-				anyHealthy = true
-				break
-			}
-			if firstErr == "" && it.Error != "" {
-				firstErr = fmt.Sprintf("%s (%s)", it.Address, it.Error)
+		probeTargets := make([]string, 0, len(cleaned))
+		for _, addr := range cleaned {
+			lower := strings.ToLower(addr)
+			if strings.HasPrefix(lower, "https://") || strings.HasPrefix(lower, "tls://") {
+				probeTargets = append(probeTargets, addr)
+			} else if _, existed := prevSet[lower]; !existed {
+				notes = append(notes, fmt.Sprintf("%s 已交由 SmartDNS 接管（跳过直连探测）", addr))
 			}
 		}
-		if !anyHealthy {
-			return nil, fmt.Errorf("所选加密上游均无法完成解析验证，已拦截保存以防断网：%s", cmp.Or(firstErr, "连接超时"))
+
+		if len(probeTargets) > 0 {
+			probeList := e.deps.ProbeUpstreamListFunc
+			if probeList == nil {
+				probeList = adguard.ProbeUpstreamList
+			}
+			items := probeList(ctx, probeTargets, "qq.com", 2800*time.Millisecond)
+			anyHealthy := false
+			var firstErr string
+			for _, it := range items {
+				key := strings.ToLower(strings.TrimSpace(it.Address))
+				if _, existed := prevSet[key]; !existed && len(prevSet) > 0 && !it.Healthy {
+					return nil, fmt.Errorf("新增上游 %s 探测失败，已拦截添加：%s", it.Address, cmp.Or(it.Error, "连接超时"))
+				}
+				if it.Healthy {
+					anyHealthy = true
+				} else if firstErr == "" && it.Error != "" {
+					firstErr = fmt.Sprintf("%s (%s)", it.Address, it.Error)
+				}
+			}
+			if !anyHealthy {
+				return nil, fmt.Errorf("所选加密上游均无法完成解析验证，已拦截保存以防断网：%s", cmp.Or(firstErr, "连接超时"))
+			}
 		}
 	}
 

@@ -2,16 +2,20 @@
 package localdns_test
 
 import (
+	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"singctl/internal/adguard"
 	"singctl/internal/common/sysinfo"
 	"singctl/internal/config"
 	"singctl/internal/constant"
@@ -399,5 +403,124 @@ func TestAdGuardEngine_OverviewCredentialsAndRedactedPreview(t *testing.T) {
 	}
 	if strings.Contains(prev.Content, "secretbcryptvalue") {
 		t.Fatalf("ConfigPreview leaked password hash:\n%s", prev.Content)
+	}
+}
+
+func TestSmartDNSEngine_SetUpstreams_DomainFallbackBypassAndNewItemProbe(t *testing.T) {
+	ctx := t.Context()
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "singctl.yaml")
+	binPath := filepath.Join(tmpDir, "smartdns")
+	confPath := filepath.Join(tmpDir, "smartdns.conf")
+	rulesDir := filepath.Join(tmpDir, "smartdns-rules.d")
+	auditLog := filepath.Join(tmpDir, "smartdns-audit.log")
+
+	if err := os.WriteFile(binPath, []byte("#!/bin/sh\necho 'smartdns 1.2025.46'\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	mockSvc := servicemgr.NewMock()
+	_ = mockSvc.Start(ctx, constant.SmartDNSServiceName)
+
+	cfg := &config.Config{
+		DNS: config.ClientDNSConfig{
+			Engine:    constant.DNSEngineSmartDNS,
+			DNSPort:   5353,
+			Upstreams: []string{"https://223.5.5.5/dns-query"},
+		},
+	}
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	sdMgr := smartdns.NewManager(smartdns.ManagerOptions{
+		BinaryPath:   binPath,
+		ConfigFile:   confPath,
+		RulesDir:     rulesDir,
+		AuditLogPath: auditLog,
+		LogFilePath:  filepath.Join(tmpDir, "smartdns.log"),
+		PIDFilePath:  filepath.Join(tmpDir, "smartdns.pid"),
+		ServiceName:  constant.SmartDNSServiceName,
+		GOOS:         "linux",
+		GOARCH:       "amd64",
+		ServiceMgr:   mockSvc,
+		ProbeDNSFunc: func(string, time.Duration) error { return nil },
+	})
+
+	probeHealthy := map[string]bool{
+		"https://223.5.5.5/dns-query": true,
+		"tls://dot.onedns.net":        false,
+	}
+	var bypassedIPs []string
+	reg := localdns.NewRegistry(cfg, localdns.EngineDeps{
+		ConfigPath:           cfgPath,
+		AdGuardBinPath:       filepath.Join(tmpDir, "missing-agh"),
+		SmartDNSBinPath:      binPath,
+		SmartDNSConfigFile:   confPath,
+		SmartDNSRulesDir:     rulesDir,
+		SmartDNSAuditLogPath: auditLog,
+		ServiceMgr:           mockSvc,
+		SmartDNSManager:      sdMgr,
+		ProbeUpstreamListFunc: func(_ context.Context, upstreams []string, _ string, _ time.Duration) []adguard.UpstreamProbeItem {
+			out := make([]adguard.UpstreamProbeItem, 0, len(upstreams))
+			for _, addr := range upstreams {
+				ok := probeHealthy[strings.ToLower(addr)]
+				item := adguard.UpstreamProbeItem{Address: addr, Healthy: ok}
+				if !ok {
+					item.Error = "连接超时"
+				}
+				out = append(out, item)
+			}
+			return out
+		},
+		LookupIPFunc: func(_ context.Context, host string) ([]net.IP, error) {
+			if host == "dot.onedns.net" {
+				return []net.IP{net.ParseIP("198.51.100.55"), net.ParseIP("10.0.0.1")}, nil
+			}
+			return nil, nil
+		},
+		BypassFirewallFunc: func(ips []string) {
+			bypassedIPs = slices.Clone(ips)
+		},
+	})
+	eng := reg.ActiveEngine()
+
+	// 1. Domain-only list must be rejected (requires >= 1 pure-IP fallback).
+	if _, err := eng.SetUpstreams(ctx, []string{"tls://dot.onedns.net"}, "fastest_ip", false); err == nil {
+		t.Fatal("expected SmartDNS to reject domain-only upstream list")
+	}
+
+	// 2. Newly added unreachable domain must be rejected even though existing pure-IP upstream is healthy.
+	if _, err := eng.SetUpstreams(ctx, []string{"https://223.5.5.5/dns-query", "tls://dot.onedns.net"}, "fastest_ip", false); err == nil || !strings.Contains(err.Error(), "tls://dot.onedns.net") {
+		t.Fatalf("expected SmartDNS to reject unreachable newly added domain upstream, got: %v", err)
+	}
+
+	// 3. Healthy hybrid pure-IP + domain succeeds, bypasses public IPv4 only, and renders bootstrap DNS in smartdns.conf.
+	probeHealthy["tls://dot.onedns.net"] = true
+	res, err := eng.SetUpstreams(ctx, []string{"https://223.5.5.5/dns-query", "tls://dot.onedns.net"}, "fastest_ip", false)
+	if err != nil {
+		t.Fatalf("expected healthy hybrid upstreams to succeed: %v", err)
+	}
+	if len(res.Upstreams) != 2 || res.Upstreams[1].Address != "tls://dot.onedns.net" {
+		t.Fatalf("unexpected result upstreams: %+v", res.Upstreams)
+	}
+	if !slices.Contains(bypassedIPs, "198.51.100.55") || slices.Contains(bypassedIPs, "10.0.0.1") {
+		t.Fatalf("unexpected bypassedIPs: %v", bypassedIPs)
+	}
+	rawConf, err := os.ReadFile(confPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	confStr := string(rawConf)
+	if !strings.Contains(confStr, "server-tls dot.onedns.net:853") || !strings.Contains(confStr, "-bootstrap-dns") {
+		t.Fatalf("smartdns.conf missing domain directive or -bootstrap-dns:\n%s", confStr)
+	}
+
+	// 4. Adding quic:// alongside pure-IP upstream must not be falsely blocked by stdlib DoH/DoT prober.
+	resQ, err := eng.SetUpstreams(ctx, []string{"https://223.5.5.5/dns-query", "tls://dot.onedns.net", "quic://dns.example.com"}, "fastest_ip", false)
+	if err != nil {
+		t.Fatalf("expected quic:// upstream alongside pure IP to succeed: %v", err)
+	}
+	if len(resQ.Upstreams) != 3 {
+		t.Fatalf("expected 3 upstreams including quic, got %+v", resQ.Upstreams)
 	}
 }

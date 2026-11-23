@@ -153,7 +153,7 @@ func ProbeSingleUpstream(ctx context.Context, upstream, domain string, timeout t
 	elapsed := time.Since(start)
 
 	if err != nil {
-		item.Error = simplifyProbeError(err)
+		item.Error = simplifyProbeError(err, net.ParseIP(u.Hostname()) != nil)
 		return item
 	}
 
@@ -362,7 +362,7 @@ func skipDNSName(msg []byte, offset int) (int, error) {
 	return 0, errors.New("DNS 域名层级过深")
 }
 
-func simplifyProbeError(err error) string {
+func simplifyProbeError(err error, isIP bool) string {
 	if err == nil {
 		return ""
 	}
@@ -371,7 +371,14 @@ func simplifyProbeError(err error) string {
 	case strings.Contains(s, "context deadline exceeded") || strings.Contains(s, "i/o timeout"):
 		return "连接超时"
 	case strings.Contains(s, "x509:"):
-		return "TLS 证书不含该纯 IP 签名"
+		if isIP {
+			return "TLS 证书不含该纯 IP 签名"
+		}
+		return "TLS 证书校验失败"
+	case strings.Contains(s, "connection reset by peer"):
+		return "连接被远端重置（目标端口可能不可达或被拦截）"
+	case strings.Contains(s, "no such host"):
+		return "域名解析失败（请检查域名拼写或网络连通性）"
 	case strings.Contains(s, "connection refused"):
 		return "目标端口拒绝连接"
 	default:
@@ -379,7 +386,61 @@ func simplifyProbeError(err error) string {
 	}
 }
 
-func ensureRuntimeFirewallBypass(ips []string) {
+// ResolveUpstreamBypassIPs 提取上游列表中的公网 IPv4，并为域名型上游有界解析其当前公网 IPv4，
+// 供透明代理运行时防火墙豁免 443/853 直连（自动过滤私网、回环与保留地址）。
+func ResolveUpstreamBypassIPs(ctx context.Context, upstreams []string, lookupIP func(ctx context.Context, host string) ([]net.IP, error)) []string {
+	if lookupIP == nil {
+		lookupIP = func(c context.Context, host string) ([]net.IP, error) {
+			return net.DefaultResolver.LookupIP(c, "ip4", host)
+		}
+	}
+	var out []string
+	addPublicV4 := func(ip net.IP) {
+		if ip == nil {
+			return
+		}
+		v4 := ip.To4()
+		if v4 == nil {
+			return
+		}
+		if v4.IsLoopback() || v4.IsPrivate() || v4.IsUnspecified() || v4.IsLinkLocalUnicast() || v4.IsLinkLocalMulticast() || v4.IsMulticast() {
+			return
+		}
+		s := v4.String()
+		if !slices.Contains(out, s) {
+			out = append(out, s)
+		}
+	}
+
+	resolveCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
+	for _, raw := range upstreams {
+		u, err := url.Parse(strings.TrimSpace(raw))
+		if err != nil || u.Host == "" {
+			continue
+		}
+		host := strings.TrimSpace(u.Hostname())
+		if host == "" {
+			continue
+		}
+		if ip := net.ParseIP(host); ip != nil {
+			addPublicV4(ip)
+			continue
+		}
+		resolved, err := lookupIP(resolveCtx, host)
+		if err != nil {
+			continue
+		}
+		for _, ip := range resolved {
+			addPublicV4(ip)
+		}
+	}
+	return out
+}
+
+// EnsureRuntimeFirewallBypass 将自定义加密上游的公网 IPv4 动态注入 nftables/iptables 直连放行规则（443/853）。
+func EnsureRuntimeFirewallBypass(ips []string) {
 	if runtime.GOOS != "linux" {
 		return
 	}
