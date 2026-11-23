@@ -4,6 +4,8 @@ package doctor_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -433,6 +435,60 @@ func TestChecker_SandboxAndConfig(t *testing.T) {
 		}
 	})
 
+	t.Run("openwrt_ujail_prctl_renamed_comm_singbox_passes", func(t *testing.T) {
+		procRoot := t.TempDir()
+		// Real OpenWrt `ujail -n sing-box` sets /proc/<pid>/comm to "sing-box" via prctl(PR_SET_NAME).
+		makeProcWithCmdline(t, procRoot, "12214", "sing-box", "ujail\x00-n\x00sing-box\x00-w\x00/tmp\x00-r\x00/etc/sing-box\x00--\x00/usr/bin/sing-box\x00run\x00", "0\n")
+		makeProcWithCmdline(t, procRoot, "12216", "sing-box", "/usr/bin/sing-box\x00run\x00-c\x00/tmp/sing-box-work/config.json\x00", "0\n")
+
+		env := &doctor.Env{
+			ProcRoot:          procRoot,
+			SingBoxConfigPath: "/etc/sing-box/config.json",
+			IsOpenWrt:         func() bool { return true },
+			ReadFile: func(p string) ([]byte, error) {
+				if p == "/etc/sing-box/config.json" {
+					return []byte(`{"dns":{"disable_cache":true,"optimistic":false,"servers":[]}}`), nil
+				}
+				return nil, os.ErrNotExist
+			},
+			LookPath: func(file string) (string, error) {
+				if file == "sing-box" {
+					return "/usr/bin/sing-box", nil
+				}
+				return "", errors.New("not found")
+			},
+			RunCmd: func(_ context.Context, name string, args ...string) ([]byte, error) {
+				if name == "sing-box" && len(args) >= 1 && args[0] == "check" {
+					return []byte("OK\n"), nil
+				}
+				return nil, errors.New("unexpected")
+			},
+		}
+		res := runSingleCheck(t, "sandbox_and_config", env)
+		if res.Status != doctor.StatusPass || !strings.Contains(res.Detail, "ujail 最小权限沙盒") {
+			t.Fatalf("expected pass with ujail sandbox detected even when ujail comm is renamed to sing-box, got %+v", res)
+		}
+	})
+
+	t.Run("openwrt_ujail_wrapper_only_without_child_reports_not_running", func(t *testing.T) {
+		procRoot := t.TempDir()
+		makeProcWithCmdline(t, procRoot, "12214", "sing-box", "/sbin/ujail\x00-n\x00sing-box\x00-w\x00/tmp\x00", "0\n")
+
+		env := &doctor.Env{
+			ProcRoot:          procRoot,
+			SingBoxConfigPath: "/etc/sing-box/config.json",
+			IsOpenWrt:         func() bool { return true },
+			ReadFile: func(p string) ([]byte, error) {
+				return []byte(`{"dns":{"disable_cache":true,"optimistic":false,"servers":[]}}`), nil
+			},
+			LookPath: func(string) (string, error) { return "", errors.New("not found") },
+		}
+		res := runSingleCheck(t, "sandbox_and_config", env)
+		if !strings.Contains(res.Detail, "sing-box 当前未运行") {
+			t.Fatalf("expected wrapper-only ujail without child sing-box to report not running, got %+v", res)
+		}
+	})
+
 	t.Run("optimistic_true_or_no_ujail_warns", func(t *testing.T) {
 		procRoot := t.TempDir()
 		makeProcWithCmdline(t, procRoot, "602", "sing-box", "/usr/bin/sing-box\x00run\x00", "0\n")
@@ -498,6 +554,60 @@ func TestChecker_DNSAntiHijack(t *testing.T) {
 		res := runSingleCheck(t, "dns_anti_hijack", env)
 		if res.Status != doctor.StatusPass {
 			t.Fatalf("expected pass, got %+v", res)
+		}
+	})
+
+	t.Run("default_probe_detects_udp_only_smartdns_listener", func(t *testing.T) {
+		pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen udp: %v", err)
+		}
+		defer pc.Close()
+
+		udpAddr := pc.LocalAddr().(*net.UDPAddr)
+		go func() {
+			buf := make([]byte, 512)
+			for {
+				n, raddr, rerr := pc.ReadFrom(buf)
+				if rerr != nil {
+					return
+				}
+				if n < 12 {
+					continue
+				}
+				resp := make([]byte, 12)
+				resp[0], resp[1] = buf[0], buf[1]
+				resp[2] = 0x81 // QR=1, RD=1
+				resp[3] = 0x80 // RA=1, NOERROR
+				_, _ = pc.WriteTo(resp, raddr)
+			}
+		}()
+
+		cfg := &config.Config{
+			Gateway: config.GatewayConfig{IPv6Mode: config.GatewayIPv6CNOnly},
+			DNS:     config.ClientDNSConfig{Engine: "smartdns", DNSPort: udpAddr.Port},
+		}
+		sbJSON := fmt.Sprintf(`{"dns":{"servers":[{"tag":"dns_local","type":"udp","server":"127.0.0.1","server_port":%d}]}}`, udpAddr.Port)
+		sdConf := fmt.Sprintf("bind 127.0.0.1:%d\n", udpAddr.Port)
+		env := &doctor.Env{
+			Config:            cfg,
+			SingBoxConfigPath: "/etc/sing-box/config.json",
+			SmartDNSConfPath:  "/etc/singctl/smartdns.conf",
+			// DialTCP intentionally nil to exercise default production local DNS probe (TCP + UDP fallback).
+			ReadFile: func(p string) ([]byte, error) {
+				switch p {
+				case "/etc/sing-box/config.json":
+					return []byte(sbJSON), nil
+				case "/etc/singctl/smartdns.conf":
+					return []byte(sdConf), nil
+				default:
+					return nil, os.ErrNotExist
+				}
+			},
+		}
+		res := runSingleCheck(t, "dns_anti_hijack", env)
+		if res.Status != doctor.StatusPass {
+			t.Fatalf("expected UDP-only SmartDNS to pass default doctor probe, got %+v", res)
 		}
 	})
 
