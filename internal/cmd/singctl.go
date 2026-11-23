@@ -18,7 +18,6 @@ import (
 	"singctl/internal/logger"
 	"singctl/internal/safecommit"
 	"singctl/internal/singbox"
-	"singctl/internal/subhub"
 	"singctl/internal/updater"
 	"singctl/internal/webui"
 	"strconv"
@@ -203,7 +202,7 @@ func NewDoctorCmdWithDeps(configPath string, deps DoctorCmdDeps) *cobra.Command 
 			default:
 				if deps.IsServerEnv != nil {
 					isServer = deps.IsServerEnv(cfg)
-				} else {
+				} else if !isLiteEdition() {
 					isServer = doctor.IsServerEnvironment(cfg)
 				}
 			}
@@ -264,12 +263,7 @@ func NewUpdateCmd(configPath string, version string) *cobra.Command {
 				if err := up.UpdateSelf(resolvedPath, version); err != nil {
 					return err
 				}
-				if subhub.IsRunning() {
-					_ = subhub.RestartService()
-				}
-				if isServerUIServiceRunning(resolvedPath) {
-					_ = restartServerUIService()
-				}
+				restartServerServicesAfterSelfUpdate(resolvedPath)
 				if daemon.IsDaemonRunning() {
 					logger.Info("Restarting watchdog daemon to apply new version...")
 					if rErr := daemon.RestartDaemon(resolvedPath); rErr != nil {

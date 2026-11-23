@@ -1,3 +1,5 @@
+//go:build !lite
+
 // 文件职责：验证服务端体检对 Web 终端 mTLS 证书保险库缺失、旧路径警告与升级收敛状态的判定。
 package doctor_test
 

@@ -1,3 +1,5 @@
+//go:build !lite
+
 // 文件职责：测试声明式体检注册表（Registry）与可注入探针依赖（Deps）的服务端/客户端全链路离线体检、评分计算与并发安全。
 package doctor_test
 

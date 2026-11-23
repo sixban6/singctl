@@ -213,8 +213,7 @@ func New(opts Options) *Server {
 	s.dohProber = newBrowserDoHProber(opts.BrowserDoHForTest, clashCli)
 
 	staticContent, _ := fs.Sub(staticFS, "static")
-	fileServer := http.FileServer(http.FS(staticContent))
-	s.Mux.Handle("/", s.authOnly(fileServer))
+	s.Mux.Handle("/", s.authOnly(NewStaticHandler(staticContent)))
 
 	s.registerRoutes()
 	return s
