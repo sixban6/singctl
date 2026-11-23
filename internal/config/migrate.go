@@ -446,8 +446,23 @@ func migrateClientTopLevelStage(mc *MigrationContext) {
 	if hasYAMLKey(mc.oldDocNode, "traffic_routing") && !mc.oldCfg.TrafficRouting.IsEmpty() {
 		mc.replaceNode("traffic_routing", mc.oldCfg.TrafficRouting)
 	}
-	if hasYAMLKey(mc.oldDocNode, "gateway") && !mc.oldCfg.Gateway.IsEmpty() {
-		mc.replaceNode("gateway", mc.oldCfg.Gateway)
+	if oldGW := getYAMLSubMap(mc.oldDocNode, "gateway"); oldGW != nil && !mc.oldCfg.Gateway.IsEmpty() {
+		if getYAMLSubMap(mc.docNode, "gateway") != nil {
+			if hasYAMLKey(oldGW, "mode") && mc.oldCfg.Gateway.Mode != "" {
+				mc.SetOrAddField("gateway", "mode", mc.oldCfg.Gateway.Mode)
+			}
+			if hasYAMLKey(oldGW, "main_router_ip") && mc.oldCfg.Gateway.MainRouterIP != "" {
+				mc.SetOrAddField("gateway", "main_router_ip", mc.oldCfg.Gateway.MainRouterIP)
+			}
+			if hasYAMLKey(oldGW, "lan_iface") && mc.oldCfg.Gateway.LANIface != "" {
+				mc.SetOrAddField("gateway", "lan_iface", mc.oldCfg.Gateway.LANIface)
+			}
+			if hasYAMLKey(oldGW, "ipv6_mode") && mc.oldCfg.Gateway.IPv6Mode != "" {
+				mc.SetOrAddField("gateway", "ipv6_mode", mc.oldCfg.Gateway.IPv6Mode)
+			}
+		} else {
+			mc.replaceNode("gateway", mc.oldCfg.Gateway)
+		}
 	}
 	if hasYAMLKey(mc.oldDocNode, "low_memory") && strings.TrimSpace(string(mc.oldCfg.LowMemory)) != "" {
 		mc.replaceNode("low_memory", mc.oldCfg.LowMemory)
