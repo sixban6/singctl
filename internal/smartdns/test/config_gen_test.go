@@ -61,6 +61,9 @@ func TestFormatUpstreamDirective_ValidAndInjectionPayloads(t *testing.T) {
 		{"quic://198.51.100.4", "server-quic 198.51.100.4:853"},
 		{"h3://203.0.113.5/dns-query", "server-https https://203.0.113.5/dns-query"},
 		{"tls://[2001:db8::1]:853", "server-tls [2001:db8::1]:853"},
+		{"tls://dot.onedns.net", "server-tls dot.onedns.net:853"},
+		{"https://doh.onedns.net", "server-https https://doh.onedns.net/dns-query"},
+		{"quic://dns.example.com", "server-quic dns.example.com:853"},
 	}
 	for _, tc := range validCases {
 		got, err := smartdns.FormatUpstreamDirective(tc.raw)
@@ -93,6 +96,11 @@ func TestFormatUpstreamDirective_ValidAndInjectionPayloads(t *testing.T) {
 		"https://192.0.2.1/dns-query\x00extra",
 		"tls://192.0.2.1:99999",
 		"https://",
+		"tls://localhost",
+		"tls://router.lan",
+		"https://nas.local/dns-query",
+		"tls://dns.home.arpa",
+		"tls://999.999.999.999",
 	}
 	for _, bad := range invalidPayloads {
 		if got, err := smartdns.FormatUpstreamDirective(bad); err == nil {
@@ -150,6 +158,30 @@ func TestBuildConfig_StrategiesLowMemoryAndSecurity(t *testing.T) {
 		}
 		if strings.Contains(cfg, "adblock.conf") {
 			t.Errorf("adblock.conf should not be included when EnabledFilters is empty")
+		}
+		if strings.Contains(cfg, "-bootstrap-dns") {
+			t.Errorf("-bootstrap-dns should not be emitted when all upstreams are pure IPs")
+		}
+	})
+
+	t.Run("domain_upstream_adds_encrypted_bootstrap_dns", func(t *testing.T) {
+		cfg, err := smartdns.BuildConfig(smartdns.ConfigInput{
+			Upstreams: []string{
+				"https://223.5.5.5/dns-query",
+				"tls://dot.onedns.net",
+			},
+		}, rulesDir, auditLog, logFile)
+		if err != nil {
+			t.Fatalf("BuildConfig failed: %v", err)
+		}
+		for _, kw := range []string{
+			"server-https https://223.5.5.5/dns-query -bootstrap-dns",
+			"server-tls 1.12.12.12:853 -bootstrap-dns",
+			"server-tls dot.onedns.net:853",
+		} {
+			if !strings.Contains(cfg, kw) {
+				t.Errorf("config missing %q\n--- config ---\n%s", kw, cfg)
+			}
 		}
 	})
 

@@ -75,7 +75,7 @@ export const AdGuardUpstreamsCard: React.FC<AdGuardUpstreamsCardProps> = ({
     <SectionCard
       title="加密上游 DNS 服务器与竞速策略"
       icon={<Server className="w-4 h-4" />}
-      subtitle="仅使用纯 IP 加密 DoH / DoT / DoQ 直连上游，彻底规避运营商 53 端口劫持与透明代理冷启动回环"
+      subtitle="支持纯 IP 与域名型加密 DoH / DoT / DoQ 上游（至少保留 1 条纯 IP 兜底），规避 53 端口劫持与透明代理冷启动回环"
       actions={
         <div className="flex flex-wrap items-center gap-2">
           <Button
@@ -263,7 +263,7 @@ export const AdGuardUpstreamsCard: React.FC<AdGuardUpstreamsCardProps> = ({
               type="text"
               value={upstreamInput}
               onChange={(e) => setUpstreamInput(e.target.value)}
-              placeholder="手动添加加密上游，如 https://223.5.5.5/dns-query 或 tls://1.12.12.12"
+              placeholder="手动添加加密上游，如 https://223.5.5.5/dns-query 或 tls://dot.onedns.net"
               className="flex-1 min-w-0 h-9 px-3 rounded-xl bg-surface2 border border-subtle text-xs sm:text-sm text-primary font-mono focus:outline-none focus:border-strong"
             />
             <Button

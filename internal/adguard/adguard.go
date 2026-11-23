@@ -122,9 +122,12 @@ type Manager struct {
 	aghConfigFile string
 	aghWorkDir    string
 	systemdUnit   string
-	initdScript   string
-	readMemTotal  func() uint64
-	readMemInfo   func() sysinfo.MemInfo
+	initdScript         string
+	readMemTotal        func() uint64
+	readMemInfo         func() sysinfo.MemInfo
+	probeUpstreamListFn func(ctx context.Context, upstreams []string, domain string, timeout time.Duration) []UpstreamProbeItem
+	lookupIPFn          func(ctx context.Context, host string) ([]net.IP, error)
+	bypassFirewallFn    func(ips []string)
 }
 
 // NewManager 创建默认路径的 AdGuard Home 管理器。
@@ -164,6 +167,17 @@ func (m *Manager) SetReadMemTotalForTest(fn func() uint64) {
 // SetReadMemInfoForTest 仅供单元测试注入宿主机完整内存信息（MemTotal + MemAvailable）探测函数。
 func (m *Manager) SetReadMemInfoForTest(fn func() sysinfo.MemInfo) {
 	m.readMemInfo = fn
+}
+
+// SetUpstreamHooksForTest 仅供单元测试显式注入上游探测、域名解析与防火墙放行钩子（零全局状态）。
+func (m *Manager) SetUpstreamHooksForTest(
+	probeFn func(ctx context.Context, upstreams []string, domain string, timeout time.Duration) []UpstreamProbeItem,
+	lookupFn func(ctx context.Context, host string) ([]net.IP, error),
+	bypassFn func(ips []string),
+) {
+	m.probeUpstreamListFn = probeFn
+	m.lookupIPFn = lookupFn
+	m.bypassFirewallFn = bypassFn
 }
 
 // SelectAssetName 根据目标 OS 与 CPU 架构返回官方 Release 压缩包文件名。
