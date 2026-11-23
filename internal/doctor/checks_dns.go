@@ -104,8 +104,13 @@ func (dnsAntiHijackChecker) Run(ctx context.Context, env *Env) CheckResult {
 	}
 
 	// 2. 核验 gateway.ipv6_mode 与 /etc/singctl/smartdns.conf force-AAAA-SOA 一致性。
+	// 若 dnsEngine=="auto" 且进程探测确认当前活跃本地 DNS 为 AdGuardHome（SmartDNS 未运行），
+	// 则跳过历史残留的 smartdns.conf 校验以避免误报。
 	if dnsEngine == "smartdns" || dnsEngine == "auto" {
-		if rawSD, err := env.ReadFile(env.SmartDNSConfPath); err == nil {
+		adguardRunning, smartdnsRunning := detectActiveLocalDNSProcesses(env.ProcRoot)
+		if dnsEngine == "auto" && adguardRunning && !smartdnsRunning {
+			details = append(details, "当前活跃引擎: AdGuardHome")
+		} else if rawSD, err := env.ReadFile(env.SmartDNSConfPath); err == nil {
 			forceAAAA := parseSmartDNSForceAAAASOA(string(rawSD))
 			wantBlockAAAA := ipv6Mode == config.GatewayIPv6Off
 			if wantBlockAAAA != forceAAAA {
@@ -246,6 +251,24 @@ func isLoopbackHost(host string) bool {
 	}
 	ip := net.ParseIP(h)
 	return ip != nil && ip.IsLoopback()
+}
+
+func detectActiveLocalDNSProcesses(procRoot string) (adguardRunning, smartdnsRunning bool) {
+	procs, ok := scanProcesses(procRoot)
+	if !ok {
+		return false, false
+	}
+	for _, p := range procs {
+		commLower := strings.ToLower(p.comm)
+		cmdLower := strings.ToLower(p.cmdline)
+		if commLower == "adguardhome" || strings.Contains(cmdLower, "adguardhome") {
+			adguardRunning = true
+		}
+		if commLower == "smartdns" {
+			smartdnsRunning = true
+		}
+	}
+	return adguardRunning, smartdnsRunning
 }
 
 func parseSmartDNSForceAAAASOA(raw string) bool {

@@ -55,6 +55,7 @@ var allowedCLIDoctorFixes = map[string]bool{
 	"protect-tailscale-oom": true,
 	"sync-dns-local":        true,
 	"sync-smartdns-ipv6":    true,
+	"disable-flow-offload":  true,
 }
 
 func buildCLIDoctorEnv(cfg *config.Config, resolvedPath string, deps DoctorCmdDeps) *doctor.Env {
@@ -166,7 +167,7 @@ func NewDoctorCmdWithDeps(configPath string, deps DoctorCmdDeps) *cobra.Command 
 
 			if act := strings.TrimSpace(fixAction); act != "" {
 				if !allowedCLIDoctorFixes[act] {
-					return fmt.Errorf("unsupported --fix action %q (allowed: protect-tailscale-oom, sync-dns-local, sync-smartdns-ipv6)", act)
+					return fmt.Errorf("unsupported --fix action %q (allowed: protect-tailscale-oom, sync-dns-local, sync-smartdns-ipv6, disable-flow-offload)", act)
 				}
 				msg, err := runner.Fix(cmd.Context(), env, act)
 				if err != nil {
@@ -236,7 +237,7 @@ func NewDoctorCmdWithDeps(configPath string, deps DoctorCmdDeps) *cobra.Command 
 
 	cmd.Flags().BoolVar(&asJSON, "json", false, "以 JSON 格式输出体检报告")
 	cmd.Flags().StringVar(&mode, "mode", "auto", "体检模式: auto | client | server")
-	cmd.Flags().StringVar(&fixAction, "fix", "", "执行深度体检安全快捷修复动作 (protect-tailscale-oom | sync-dns-local | sync-smartdns-ipv6)")
+	cmd.Flags().StringVar(&fixAction, "fix", "", "执行深度体检安全快捷修复动作 (protect-tailscale-oom | sync-dns-local | sync-smartdns-ipv6 | disable-flow-offload)")
 	return cmd
 }
 
