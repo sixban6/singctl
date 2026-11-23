@@ -21,6 +21,7 @@ import (
 
 	"singctl/internal/common/netx"
 	"singctl/internal/config"
+	"singctl/internal/constant"
 	log "singctl/internal/logger"
 
 	"github.com/sixban6/singgen/pkg/singgen"
@@ -34,6 +35,7 @@ type ConfigGenerator struct {
 	defaultTplVer    string
 	cacheDir         string
 	silent           bool
+	offline          bool
 	totalRAMOverride atomic.Pointer[uint64]
 	localDNSProbe    func(engine string, dnsPort int) bool
 	isOpenWrtProbe   func() bool
@@ -63,7 +65,7 @@ func ResolvePlatform(p string) (string, error) {
 func NewConfigGenerator(cfg *config.Config) *ConfigGenerator {
 	cg := &ConfigGenerator{
 		config:        cfg,
-		defaultTplVer: "v1.14",
+		defaultTplVer: constant.SingBoxTargetTemplateVersion,
 		cacheDir:      singgen.DefaultCacheDir(),
 	}
 	netResult, err := netx.Get()
@@ -110,9 +112,10 @@ func (g *ConfigGenerator) SetHostFlashProbes(isOpenWrt, isLowFlash func() bool) 
 func NewOfflineConfigGenerator(cfg *config.Config) *ConfigGenerator {
 	cg := &ConfigGenerator{
 		config:          cfg,
-		defaultTplVer:   "v1.14",
+		defaultTplVer:   constant.SingBoxTargetTemplateVersion,
 		webui:           "127.0.0.1:9090",
 		silent:          true,
+		offline:         true,
 		isOpenWrtProbe:  func() bool { return false },
 		isLowFlashProbe: func() bool { return false },
 	}
@@ -148,6 +151,9 @@ func (g *ConfigGenerator) webuiForPlatform(platform string) string {
 }
 
 func (c *ConfigGenerator) getSubnetFromIP(ip string) string {
+	if c != nil && c.offline {
+		return netx.DefaultClientSubnet
+	}
 	return netx.ResolveClientSubnet(context.Background(), ip)
 }
 

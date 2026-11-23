@@ -12,12 +12,13 @@ import (
 	"strconv"
 	"strings"
 
+	"singctl/internal/constant"
 	"singctl/internal/singbox/sboption"
 )
 
 // AdaptIOSConfig 对生成给 iOS SFI / 移动端客户端的默认 (v1.14+) 配置进行沙盒兼容、镜像剥离与内存裁剪。
 func AdaptIOSConfig(rawJSON, mirrorURL string) (string, error) {
-	return AdaptIOSConfigForVersion(rawJSON, mirrorURL, "v1.14")
+	return AdaptIOSConfigForVersion(rawJSON, mirrorURL, constant.SingBoxTargetTemplateVersion)
 }
 
 // AdaptIOSConfigForVersion 按指定的 sing-box 目标版本（如 "v1.14" 或向下兼容的 "v1.12"/"v1.13"）

@@ -11,6 +11,7 @@ import (
 	"fmt"
 
 	"singctl/internal/config"
+	"singctl/internal/constant"
 	"singctl/internal/singbox/sboption"
 )
 
@@ -271,7 +272,7 @@ var defaultConfigCompileStages = []CompileStage{
 			if g != nil && g.config != nil {
 				mirrorURL = g.config.GitHub.MirrorURL
 			}
-			adaptIOSConfigInDoc(d, mirrorURL, "v1.14")
+			adaptIOSConfigInDoc(d, mirrorURL, constant.SingBoxTargetTemplateVersion)
 			doc.dirty = true
 			return nil
 		},
