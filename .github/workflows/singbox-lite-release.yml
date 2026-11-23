@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: '指定 sing-box 版本号（如 1.14.4，留空则自动检测官方最新稳定版）'
+        description: '指定 sing-box 版本号（如 1.14.4，留空则自动锁定 .upstream-version 轨道最新稳定补丁版）'
         required: false
         default: ''
         type: string
@@ -30,7 +30,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Check Upstream Sing-Box Version (Zero-Waste Gate)
+      - name: Checkout SingCtl Repository
+        uses: actions/checkout@v7
+
+      - name: Check Upstream Sing-Box Version (Same-Track Safe Gate)
         id: gate
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -39,14 +42,29 @@ jobs:
         run: |
           set -euo pipefail
 
+          TARGET_MAJOR=$(tr -d '[:space:]' < .upstream-version 2>/dev/null || echo "")
+          if ! [[ "${TARGET_MAJOR}" =~ ^[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid .upstream-version content: '${TARGET_MAJOR}' (expected X.Y)"
+            exit 1
+          fi
+
           RAW_VER="${INPUT_VERSION#v}"
           RAW_VER="${RAW_VER//[[:space:]]/}"
           if [ -n "${RAW_VER}" ]; then
             VERSION="${RAW_VER}"
+            echo "📌 使用手动指定的上游版本: v${VERSION}（当前仓库适配轨道: v${TARGET_MAJOR}.x）"
           else
-            TAG_NAME=$(gh api repos/SagerNet/sing-box/releases/latest --jq '.tag_name' 2>/dev/null || \
-              curl -fsSL --retry 3 --connect-timeout 10 -H "Accept: application/vnd.github+json" "https://api.github.com/repos/SagerNet/sing-box/releases/latest" | jq -r '.tag_name')
+            ESC_MAJOR="${TARGET_MAJOR//./\\.}"
+            RELEASES_JSON=$(gh api 'repos/SagerNet/sing-box/releases?per_page=100' 2>/dev/null || \
+              curl -fsSL --retry 3 --connect-timeout 10 -H "Accept: application/vnd.github+json" "https://api.github.com/repos/SagerNet/sing-box/releases?per_page=100")
+            TAG_NAME=$(printf '%s' "${RELEASES_JSON}" | jq -r --arg re "^v${ESC_MAJOR}\\.[0-9]+$" \
+              '.[] | select(.draft == false and .prerelease == false) | .tag_name | select(test($re))' | sort -V | tail -n 1)
+            if [ -z "${TAG_NAME}" ]; then
+              echo "::error::No stable SagerNet/sing-box release found matching .upstream-version track v${TARGET_MAJOR}.x"
+              exit 1
+            fi
             VERSION="${TAG_NAME#v}"
+            echo "📌 已锁定 .upstream-version 适配轨道 v${TARGET_MAJOR}.x，解析最新稳定补丁版: v${VERSION}"
           fi
 
           if ! [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
@@ -291,6 +309,8 @@ jobs:
 
               "${PKG_PATH}/sing-box" check -c /tmp/smoke-config.json
               rm -f /tmp/smoke-config.json
+              cp "${PKG_PATH}/sing-box" /tmp/singbox-lite-amd64
+              chmod 0755 /tmp/singbox-lite-amd64
               echo "  ✅ sing-box check 全协议（DoH + TProxy/Mixed + VLESS-Reality-uTLS + Hysteria2 + Trojan + Shadowsocks + ClashAPI）冒烟校验通过！"
             fi
 
@@ -304,6 +324,24 @@ jobs:
           echo "==> 产物压缩包与 SHA256 清单:"
           ls -lh *.tar.gz checksums.txt
           cat checksums.txt
+
+      - name: Setup Go Matching SingCtl go.mod
+        if: steps.gate.outputs.should_build == 'true'
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Verify Real SingCtl Linux Client Matrix (sing-box check)
+        if: steps.gate.outputs.should_build == 'true'
+        run: |
+          set -euo pipefail
+          trap 'rm -f /tmp/singbox-lite-amd64' EXIT
+          echo "==> 使用刚编译的 sing-box-lite (linux/amd64) 校验 singctl 全部 5 套 Linux 网关真实配置矩阵..."
+          SINGBOX_CHECK_BIN=/tmp/singbox-lite-amd64 \
+          SINGBOX_CHECK_SCOPE=client_linux \
+          go test -v -count=1 ./test -run TestSingBoxRealConfigMatrixCompat
+          echo "✅ singctl 全部 Linux 网关真实配置矩阵已通过 sing-box-lite 实机 check 门禁！"
 
       - name: Publish Atomic Rolling Release (singbox-lite-latest)
         if: steps.gate.outputs.should_build == 'true'

@@ -6,6 +6,12 @@ const (
 	GitHubRepo    = "sixban6/singctl"
 	GitHubRepoURL = "https://github.com/" + GitHubRepo
 
+	// SingBoxTargetMajor 定义本仓库当前适配验证通过的 sing-box 主次版本号（与仓库根目录 .upstream-version 严格同步）。
+	SingBoxTargetMajor = "1.14"
+
+	// SingBoxTargetTemplateVersion 为配置编译流水线与 iOS 适配默认使用的目标版本标签（如 "v1.14"）。
+	SingBoxTargetTemplateVersion = "v" + SingBoxTargetMajor
+
 	// SingBoxLiteReleaseTag 为本仓库独立托管的裁剪版 sing-box 滚动 Prerelease 标签（--latest=false）。
 	SingBoxLiteReleaseTag = "singbox-lite-latest"
 

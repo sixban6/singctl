@@ -1,0 +1,404 @@
+name: Auto-Adapt Upstream Sing-Box Major Release
+
+on:
+  schedule:
+    # 每 12 小时自动巡检上游 SagerNet/sing-box 是否有新的主次大版本稳定版发布（无新大版本时秒级跳过）
+    - cron: '45 */12 * * *'
+  workflow_dispatch:
+    inputs:
+      target_version:
+        description: '指定要探测适配的 sing-box 稳定版本号（如 1.15.0 或 1.14.4；留空则自动检查官方最新稳定版）'
+        required: false
+        default: ''
+        type: string
+      dry_run:
+        description: '仅执行全矩阵真实配置校验与报告输出，不推送分支、不创建 PR 或 Issue'
+        required: false
+        default: false
+        type: boolean
+      strict_deprecation:
+        description: '是否将 sing-box check 输出的 deprecated 弃用警告视为阻断项（默认开启）'
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: singbox-upstream-adapt
+  cancel-in-progress: false
+
+jobs:
+  adapt-singbox-major:
+    name: Detect & Adapt Upstream Sing-Box Major Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout SingCtl Repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Check Upstream Sing-Box Major Release (Zero-Waste Gate)
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_VERSION: ${{ inputs.target_version }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+
+          CURRENT_MAJOR=$(tr -d '[:space:]' < .upstream-version 2>/dev/null || echo "")
+          if ! [[ "${CURRENT_MAJOR}" =~ ^[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid .upstream-version content: '${CURRENT_MAJOR}' (expected X.Y)"
+            exit 1
+          fi
+          HEAD_SHA=$(git rev-parse --short HEAD)
+
+          RAW_VER="${INPUT_VERSION#v}"
+          RAW_VER="${RAW_VER//[[:space:]]/}"
+          if [ -n "${RAW_VER}" ]; then
+            UPSTREAM_VER="${RAW_VER}"
+          else
+            RELEASES_JSON=$(gh api 'repos/SagerNet/sing-box/releases?per_page=100' 2>/dev/null || \
+              curl -fsSL --retry 3 --connect-timeout 10 -H "Accept: application/vnd.github+json" "https://api.github.com/repos/SagerNet/sing-box/releases?per_page=100")
+            TAG_NAME=$(printf '%s' "${RELEASES_JSON}" | jq -r \
+              '.[] | select(.draft == false and .prerelease == false) | .tag_name | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))' | sort -V | tail -n 1)
+            if [ -z "${TAG_NAME}" ]; then
+              echo "::error::Unable to resolve latest stable SagerNet/sing-box release"
+              exit 1
+            fi
+            UPSTREAM_VER="${TAG_NAME#v}"
+          fi
+
+          if ! [[ "${UPSTREAM_VER}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid sing-box version resolved: '${UPSTREAM_VER}' (expected X.Y.Z)"
+            exit 1
+          fi
+
+          UPSTREAM_MAJOR="${UPSTREAM_VER%.*}"
+          CUR_MAJ="${CURRENT_MAJOR%%.*}"
+          CUR_MIN="${CURRENT_MAJOR##*.}"
+          UP_MAJ="${UPSTREAM_MAJOR%%.*}"
+          UP_MIN="${UPSTREAM_MAJOR##*.}"
+
+          IS_NEWER_MAJOR=false
+          if (( 10#${UP_MAJ} > 10#${CUR_MAJ} )) || { (( 10#${UP_MAJ} == 10#${CUR_MAJ} )) && (( 10#${UP_MIN} > 10#${CUR_MIN} )); }; then
+            IS_NEWER_MAJOR=true
+          fi
+
+          echo "当前已适配轨道: v${CURRENT_MAJOR}.x | 上游稳定版: v${UPSTREAM_VER} (轨道 v${UPSTREAM_MAJOR}.x) | 是否新大版本: ${IS_NEWER_MAJOR}"
+
+          if [ -z "${RAW_VER}" ] && [ "${DRY_RUN}" != "true" ]; then
+            if [ "${IS_NEWER_MAJOR}" != "true" ]; then
+              echo "✅ 当前已是上游最新主次大版本轨道 v${CURRENT_MAJOR}.x，无需跨版本适配（秒级跳过）。"
+              {
+                echo "should_run=false"
+                echo "current_major=${CURRENT_MAJOR}"
+                echo "upstream_version=${UPSTREAM_VER}"
+                echo "upstream_major=${UPSTREAM_MAJOR}"
+                echo "is_newer_major=${IS_NEWER_MAJOR}"
+                echo "head_sha=${HEAD_SHA}"
+              } >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+
+            BRANCH="adapt/singbox-v${UPSTREAM_MAJOR}"
+            PR_BODY=$(gh pr list -R "${GITHUB_REPOSITORY}" --head "${BRANCH}" --state open --json body -q '.[0].body // ""' 2>/dev/null || true)
+            if printf '%s' "${PR_BODY}" | grep -qF "<!-- singbox-adapt-ver: v${UPSTREAM_VER} -->"; then
+              echo "✅ 已存在针对 v${UPSTREAM_VER} 的待合并适配 PR (${BRANCH})，跳过重复验证。"
+              {
+                echo "should_run=false"
+                echo "current_major=${CURRENT_MAJOR}"
+                echo "upstream_version=${UPSTREAM_VER}"
+                echo "upstream_major=${UPSTREAM_MAJOR}"
+                echo "is_newer_major=${IS_NEWER_MAJOR}"
+                echo "head_sha=${HEAD_SHA}"
+              } >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+
+            ISSUE_BODY=$(gh issue list -R "${GITHUB_REPOSITORY}" --state open --search "\"[Upstream] sing-box v${UPSTREAM_MAJOR}\" in:title" --json title,body -q \
+              ".[] | select(.title | startswith(\"[Upstream] sing-box v${UPSTREAM_MAJOR}\")) | .body" 2>/dev/null | head -n 200 || true)
+            if printf '%s' "${ISSUE_BODY}" | grep -qF "<!-- singbox-adapt-ver: v${UPSTREAM_VER} -->" && \
+               printf '%s' "${ISSUE_BODY}" | grep -qF "<!-- singbox-adapt-sha: ${HEAD_SHA} -->"; then
+              echo "✅ 当前 main (${HEAD_SHA}) 针对 v${UPSTREAM_VER} 的阻断报告 Issue 已是最新，等待修复提交后再自动复测。"
+              {
+                echo "should_run=false"
+                echo "current_major=${CURRENT_MAJOR}"
+                echo "upstream_version=${UPSTREAM_VER}"
+                echo "upstream_major=${UPSTREAM_MAJOR}"
+                echo "is_newer_major=${IS_NEWER_MAJOR}"
+                echo "head_sha=${HEAD_SHA}"
+              } >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+          fi
+
+          echo "🚀 启动 sing-box v${UPSTREAM_VER} 全场景真实配置兼容矩阵验证（dry_run=${DRY_RUN}）"
+          {
+            echo "should_run=true"
+            echo "current_major=${CURRENT_MAJOR}"
+            echo "upstream_version=${UPSTREAM_VER}"
+            echo "upstream_major=${UPSTREAM_MAJOR}"
+            echo "is_newer_major=${IS_NEWER_MAJOR}"
+            echo "head_sha=${HEAD_SHA}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Download Official Sing-Box Linux AMD64 Binary
+        if: steps.gate.outputs.should_run == 'true'
+        env:
+          UPSTREAM_VER: ${{ steps.gate.outputs.upstream_version }}
+        run: |
+          set -euo pipefail
+          URL="https://github.com/SagerNet/sing-box/releases/download/v${UPSTREAM_VER}/sing-box-${UPSTREAM_VER}-linux-amd64.tar.gz"
+          echo "==> 下载官方发布包: ${URL}"
+          rm -rf /tmp/upstream-sb-extract /tmp/upstream-sing-box /tmp/upstream-sb.tar.gz
+          mkdir -p /tmp/upstream-sb-extract
+          curl -fsSL --retry 3 --connect-timeout 15 -o /tmp/upstream-sb.tar.gz "${URL}"
+          tar -xzf /tmp/upstream-sb.tar.gz -C /tmp/upstream-sb-extract
+          SB_BIN=$(find /tmp/upstream-sb-extract -type f -name sing-box | head -n 1)
+          if [ -z "${SB_BIN}" ] || [ ! -f "${SB_BIN}" ]; then
+            echo "::error::Failed to locate sing-box binary inside official tarball for v${UPSTREAM_VER}"
+            exit 1
+          fi
+          cp "${SB_BIN}" /tmp/upstream-sing-box
+          chmod 0755 /tmp/upstream-sing-box
+          rm -rf /tmp/upstream-sb-extract /tmp/upstream-sb.tar.gz
+          /tmp/upstream-sing-box version
+
+      - name: Setup Go Matching SingCtl go.mod
+        if: steps.gate.outputs.should_run == 'true'
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Run Full 8-Scenario Real-Config Compatibility Matrix
+        id: compat
+        if: steps.gate.outputs.should_run == 'true'
+        env:
+          UPSTREAM_VER: ${{ steps.gate.outputs.upstream_version }}
+          UPSTREAM_MAJOR: ${{ steps.gate.outputs.upstream_major }}
+          CURRENT_MAJOR: ${{ steps.gate.outputs.current_major }}
+          STRICT_DEPRECATION: ${{ inputs.strict_deprecation }}
+        run: |
+          set -euo pipefail
+          STRICT_VAL=1
+          if [ "${STRICT_DEPRECATION}" = "false" ]; then
+            STRICT_VAL=0
+          fi
+
+          rm -f /tmp/compat-report.json /tmp/compat-test.log /tmp/compat-report.md
+          set +e
+          SINGBOX_CHECK_BIN=/tmp/upstream-sing-box \
+          SINGBOX_CHECK_SCOPE=all \
+          SINGBOX_CHECK_STRICT_DEPRECATION="${STRICT_VAL}" \
+          SINGBOX_COMPAT_REPORT_PATH=/tmp/compat-report.json \
+          go test -v -count=1 ./test -run TestSingBoxRealConfigMatrixCompat 2>&1 | tee /tmp/compat-test.log
+          TEST_EXIT=${PIPESTATUS[0]}
+          set -e
+
+          if [ ! -s /tmp/compat-report.json ]; then
+            echo "::error::Compatibility report JSON was not generated (test exit=${TEST_EXIT})"
+            exit 1
+          fi
+
+          ALL_PASSED=$(jq -r '.allPassed' /tmp/compat-report.json)
+          HAS_DEP=$(jq -r '.hasDeprecated' /tmp/compat-report.json)
+          SB_VER_LINE=$(jq -r '.singboxVersion // "unknown"' /tmp/compat-report.json)
+          TOTAL_COUNT=$(jq -r '.scenarios | length' /tmp/compat-report.json)
+          PASS_COUNT=$(jq -r '[.scenarios[] | select(.passed == true)] | length' /tmp/compat-report.json)
+
+          COMPAT_OK=false
+          if [ "${TEST_EXIT}" -eq 0 ] && [ "${ALL_PASSED}" = "true" ]; then
+            COMPAT_OK=true
+          fi
+
+          {
+            echo "### Sing-Box 上游大版本兼容矩阵报告"
+            echo ""
+            echo "- **测试二进制**: \`${SB_VER_LINE}\`（上游标签 \`v${UPSTREAM_VER}\`）"
+            echo "- **当前仓库轨道**: \`v${CURRENT_MAJOR}.x\` → **探测轨道**: \`v${UPSTREAM_MAJOR}.x\`"
+            echo "- **严格弃用门禁**: \`${STRICT_VAL}\` | **通过场景**: \`${PASS_COUNT}/${TOTAL_COUNT}\` | **存在弃用警告**: \`${HAS_DEP}\`"
+            echo "- **上游参考**: [Release Notes v${UPSTREAM_VER}](https://github.com/SagerNet/sing-box/releases/tag/v${UPSTREAM_VER}) · [Official Migration Guide](https://sing-box.sagernet.org/migration/)"
+            echo ""
+            echo "| 场景 | 分类 | 结果 | 弃用告警 |"
+            echo "| :--- | :---: | :---: | :---: |"
+            jq -r '.scenarios[] | "| `\(.name)` | `\(.scope)` | \(if .passed then "✅ PASS" else "❌ FAIL" end) | \(if .deprecated then "⚠️ \((.warnings // []) | length)" else "0" end) |"' /tmp/compat-report.json
+            echo ""
+          } > /tmp/compat-report.md
+
+          FAILED_DETAILS=$(jq -r '.scenarios[] | select(.passed != true or .deprecated == true) | "#### 场景: `\(.name)`\n\n```\n\(.error // ((.warnings // []) | join("\n")))\n```\n"' /tmp/compat-report.json)
+          if [ -n "${FAILED_DETAILS}" ]; then
+            {
+              echo "<details>"
+              echo "<summary>点击展开错误与弃用告警原始详情</summary>"
+              echo ""
+              printf '%s\n' "${FAILED_DETAILS}"
+              echo "</details>"
+              echo ""
+            } >> /tmp/compat-report.md
+          fi
+
+          cat /tmp/compat-report.md >> "${GITHUB_STEP_SUMMARY}"
+          {
+            echo "compat_ok=${COMPAT_OK}"
+            echo "has_deprecated=${HAS_DEP}"
+            echo "pass_count=${PASS_COUNT}"
+            echo "total_count=${TOTAL_COUNT}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Auto-Bump Track & Open/Update Adaptation PR (Compatible Path)
+        if: steps.gate.outputs.should_run == 'true' && steps.compat.outputs.compat_ok == 'true' && steps.gate.outputs.is_newer_major == 'true' && inputs.dry_run != true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM_VER: ${{ steps.gate.outputs.upstream_version }}
+          UPSTREAM_MAJOR: ${{ steps.gate.outputs.upstream_major }}
+          CURRENT_MAJOR: ${{ steps.gate.outputs.current_major }}
+          STRICT_DEPRECATION: ${{ inputs.strict_deprecation }}
+        run: |
+          set -euo pipefail
+          BRANCH="adapt/singbox-v${UPSTREAM_MAJOR}"
+          STRICT_VAL=1
+          if [ "${STRICT_DEPRECATION}" = "false" ]; then
+            STRICT_VAL=0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "${BRANCH}"
+
+          printf '%s\n' "${UPSTREAM_MAJOR}" > .upstream-version
+          sed -i -E "s|^([[:space:]]*SingBoxTargetMajor[[:space:]]*=[[:space:]]*)\"[^\"]+\"|\\1\"${UPSTREAM_MAJOR}\"|" internal/constant/default.go
+
+          if ! grep -q "SingBoxTargetMajor = \"${UPSTREAM_MAJOR}\"" internal/constant/default.go; then
+            echo "::error::Failed to update SingBoxTargetMajor in internal/constant/default.go"
+            exit 1
+          fi
+
+          echo "==> 执行升级轨道后的完整 Go 静态检查、竞态单测与实机配置矩阵回归..."
+          go vet ./...
+          go vet -tags lite ./...
+          go test -race ./internal/constant/... ./internal/singbox/... ./internal/deploy/...
+          SINGBOX_CHECK_BIN=/tmp/upstream-sing-box \
+          SINGBOX_CHECK_SCOPE=all \
+          SINGBOX_CHECK_STRICT_DEPRECATION="${STRICT_VAL}" \
+          go test -short ./test/...
+
+          git add .upstream-version internal/constant/default.go
+          {
+            echo "feat(singbox): 自动适配上游 sing-box v${UPSTREAM_MAJOR}.x 稳定版 (v${UPSTREAM_VER})"
+            echo ""
+            echo "变更类型：功能新增"
+            echo ""
+            echo "改动原因：上游 SagerNet/sing-box 已发布新大版本稳定版 v${UPSTREAM_VER}，经自动兼容矩阵全量校验无配置破坏与弃用告警，自动推进目标大版本轨道至 v${UPSTREAM_MAJOR}.x。"
+            echo ""
+            echo "核心改动要点："
+            echo "- 更新 .upstream-version 与 internal/constant/default.go 中的 SingBoxTargetMajor 至 ${UPSTREAM_MAJOR}"
+            echo "- 通过全部 8 套客户端（Linux 主/旁/IPv6/低内存 + iOS SFI）与服务端（Hy2/VLESS-Reality/WARP 分流）真实配置 sing-box check 门禁"
+            echo "- 合并后将自动解锁 singbox-lite-release.yml 切换至 v${UPSTREAM_MAJOR}.x 补丁轨道"
+          } > /tmp/adapt-commit-msg.txt
+          git commit -F /tmp/adapt-commit-msg.txt
+          rm -f /tmp/adapt-commit-msg.txt
+
+          git push --force origin "${BRANCH}"
+
+          {
+            echo "<!-- singbox-adapt-ver: v${UPSTREAM_VER} -->"
+            echo "本 PR 由 \`Auto-Adapt Upstream Sing-Box Major Release\` 自动生成。"
+            echo ""
+            echo "上游已发布 **SagerNet/sing-box v${UPSTREAM_VER}**，本仓库全部真实客户端（Linux 网关 5 套 + iOS SFI）及服务端（Hy2 + VLESS-Reality + WARP 分流/全局 2 套）配置均已通过新版 \`sing-box check\` 零报错、零弃用校验，且 \`go vet\` / \`go vet -tags lite\` / \`go test -race\` / \`go test -short ./test/...\` 全部通过。"
+            echo ""
+            echo "### 合并后效果"
+            echo "- 主线默认目标版本轨道将从 \`v${CURRENT_MAJOR}.x\` 推进至 \`v${UPSTREAM_MAJOR}.x\`"
+            echo "- \`Sync & Build Minimal Sing-Box Lite\` 将自动切换跟踪 \`v${UPSTREAM_MAJOR}.x\` 稳定补丁版（不会提前跨轨破坏存量网关）"
+            echo "- 主线推送后自动触发新版本发版流水线"
+            echo ""
+            cat /tmp/compat-report.md
+          } > /tmp/pr-body.md
+
+          EXISTING_PR=$(gh pr list -R "${GITHUB_REPOSITORY}" --head "${BRANCH}" --state open --json number -q '.[0].number // ""')
+          PR_TITLE="feat(singbox): 自动适配 sing-box v${UPSTREAM_MAJOR}.x 稳定版 (v${UPSTREAM_VER})"
+          PR_URL=""
+          if [ -n "${EXISTING_PR}" ]; then
+            gh pr edit "${EXISTING_PR}" -R "${GITHUB_REPOSITORY}" --title "${PR_TITLE}" --body-file /tmp/pr-body.md
+            PR_URL="https://github.com/${GITHUB_REPOSITORY}/pull/${EXISTING_PR}"
+            echo "✅ 已更新现有适配 PR: ${PR_URL}"
+          else
+            if PR_URL=$(gh pr create -R "${GITHUB_REPOSITORY}" --base main --head "${BRANCH}" --title "${PR_TITLE}" --body-file /tmp/pr-body.md 2>/tmp/pr-create.err); then
+              echo "✅ 已自动创建适配 PR: ${PR_URL}"
+            else
+              echo "::warning::gh pr create 失败（可能是仓库未勾选 Allow GitHub Actions to create pull requests），已保留适配分支 ${BRANCH} 并转为 Issue 提醒："
+              cat /tmp/pr-create.err || true
+              {
+                echo "<!-- singbox-adapt-ver: v${UPSTREAM_VER} -->"
+                echo "已自动完成 **sing-box v${UPSTREAM_VER}** 兼容性验证并将适配提交推送至分支 \`${BRANCH}\`，但仓库暂未开启 GitHub Actions 自动创建 PR 权限。"
+                echo ""
+                echo "👉 **一键发起合并 PR**: https://github.com/${GITHUB_REPOSITORY}/compare/main...${BRANCH}?expand=1"
+                echo ""
+                cat /tmp/compat-report.md
+              } > /tmp/pr-fallback-issue.md
+              gh issue create -R "${GITHUB_REPOSITORY}" \
+                --title "[Upstream] sing-box v${UPSTREAM_MAJOR} (v${UPSTREAM_VER}) 自动适配分支已就绪" \
+                --body-file /tmp/pr-fallback-issue.md || true
+            fi
+          fi
+
+          # 若此前存在同大版本的兼容阻断 Issue，现已兼容通过并出 PR，自动附链关闭
+          if [ -n "${PR_URL}" ]; then
+            BLOCKER_ISSUES=$(gh issue list -R "${GITHUB_REPOSITORY}" --state open --search "\"[Upstream] sing-box v${UPSTREAM_MAJOR}\" in:title" --json number,title -q \
+              ".[] | select(.title | startswith(\"[Upstream] sing-box v${UPSTREAM_MAJOR}\")) | .number" 2>/dev/null || true)
+            for num in ${BLOCKER_ISSUES}; do
+              gh issue close "${num}" -R "${GITHUB_REPOSITORY}" --comment "✅ 上游 sing-box v${UPSTREAM_VER} 兼容适配已完成并通过全矩阵校验，请审阅自动生成的 PR：${PR_URL}" || true
+            done
+          fi
+
+      - name: Create or Update Compatibility Blocker Issue (Incompatible Path)
+        if: steps.gate.outputs.should_run == 'true' && steps.compat.outputs.compat_ok != 'true' && inputs.dry_run != true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM_VER: ${{ steps.gate.outputs.upstream_version }}
+          UPSTREAM_MAJOR: ${{ steps.gate.outputs.upstream_major }}
+          CURRENT_MAJOR: ${{ steps.gate.outputs.current_major }}
+          HEAD_SHA: ${{ steps.gate.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          ISSUE_TITLE="[Upstream] sing-box v${UPSTREAM_MAJOR} (v${UPSTREAM_VER}) 配置兼容阻断报告"
+          {
+            echo "<!-- singbox-adapt-ver: v${UPSTREAM_VER} -->"
+            echo "<!-- singbox-adapt-sha: ${HEAD_SHA} -->"
+            echo "⚠️ 检测到上游 **SagerNet/sing-box v${UPSTREAM_VER}** 存在配置破坏性变更或弃用告警，自动化流水线已**安全拦截本次升级**："
+            echo ""
+            echo "- \`.upstream-version\` 保持锁定在 \`${CURRENT_MAJOR}\`，线上网关与 \`singbox-lite-latest\` 通道不受影响"
+            echo "- 修复配置模板或编译流水线并合入 \`main\` 后，下一次定时巡检（或手动触发工作流）将自动复测并生成适配 PR"
+            echo ""
+            cat /tmp/compat-report.md
+          } > /tmp/issue-body.md
+
+          EXISTING_ISSUE=$(gh issue list -R "${GITHUB_REPOSITORY}" --state open --search "\"[Upstream] sing-box v${UPSTREAM_MAJOR}\" in:title" --json number,title -q \
+            ".[] | select(.title | startswith(\"[Upstream] sing-box v${UPSTREAM_MAJOR}\")) | .number" | head -n 1 || true)
+
+          if [ -n "${EXISTING_ISSUE}" ]; then
+            gh issue edit "${EXISTING_ISSUE}" -R "${GITHUB_REPOSITORY}" --title "${ISSUE_TITLE}" --body-file /tmp/issue-body.md
+            echo "📝 已更新现有兼容阻断 Issue #${EXISTING_ISSUE}"
+          else
+            gh issue create -R "${GITHUB_REPOSITORY}" --title "${ISSUE_TITLE}" --body-file /tmp/issue-body.md
+            echo "📝 已创建兼容阻断 Issue"
+          fi
+
+      - name: Finalize Dry-Run Verification Status
+        if: steps.gate.outputs.should_run == 'true' && inputs.dry_run == true
+        env:
+          COMPAT_OK: ${{ steps.compat.outputs.compat_ok }}
+          UPSTREAM_VER: ${{ steps.gate.outputs.upstream_version }}
+        run: |
+          set -euo pipefail
+          if [ "${COMPAT_OK}" != "true" ]; then
+            echo "::error::Dry-run compatibility matrix failed for sing-box v${UPSTREAM_VER}. See job summary for details."
+            exit 1
+          fi
+          echo "✅ Dry-run 全矩阵校验通过（sing-box v${UPSTREAM_VER}），未修改任何分支/PR/Issue。"
