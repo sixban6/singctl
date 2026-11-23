@@ -9,6 +9,9 @@ const (
 	// SingBoxLiteReleaseTag 为本仓库独立托管的裁剪版 sing-box 滚动 Prerelease 标签（--latest=false）。
 	SingBoxLiteReleaseTag = "singbox-lite-latest"
 
+	// CaddyReleaseTag 为本仓库独立托管的定制版 Caddy (Cloudflare DNS + Layer4) 滚动 Prerelease 标签（--latest=false）。
+	CaddyReleaseTag = "caddy-latest"
+
 	AppName          = "SFM"
 	ExitNode         = "exit-node"
 	MainRouter       = "router"
