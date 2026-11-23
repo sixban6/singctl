@@ -261,12 +261,12 @@ func TestAdGuardWebUIAPI_EndToEnd(t *testing.T) {
 		t.Fatalf("cache clear failed: code=%d cleared=%v", rec.Code, cacheCleared)
 	}
 
-	// 6. Update encrypted DNS upstreams: pure-IP + domain succeeds, domain-only & loopback rejected
+	// 6. Update encrypted DNS upstreams: pure-IP + domain (including dot.pub/dns.alidns.com) preserved verbatim; domain-only & loopback rejected
 	rec = doJSON(http.MethodPost, "/api/adguard/upstreams", map[string]any{
-		"upstreams":    []string{"https://dns.alidns.com/dns-query", "tls://1.12.12.12", "tls://dot.onedns.net"},
+		"upstreams":    []string{"https://dns.alidns.com/dns-query", "tls://1.12.12.12", "tls://dot.pub", "tls://dot.onedns.net"},
 		"upstreamMode": "parallel",
 	})
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "https://223.5.5.5/dns-query") || !strings.Contains(rec.Body.String(), "tls://dot.onedns.net") || !strings.Contains(rec.Body.String(), "OneDNS") {
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "https://dns.alidns.com/dns-query") || !strings.Contains(rec.Body.String(), "tls://dot.pub") || !strings.Contains(rec.Body.String(), "tls://dot.onedns.net") || !strings.Contains(rec.Body.String(), "OneDNS") {
 		t.Fatalf("POST /api/adguard/upstreams hybrid domain failed: code=%d body=%s", rec.Code, rec.Body.String())
 	}
 	rec = doJSON(http.MethodPost, "/api/adguard/upstreams", map[string]any{

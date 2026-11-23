@@ -191,9 +191,24 @@ export function getUpstreamModeOptions(engine: DNSEngineID): UpstreamModeOption[
     {
       key: 'load_balance',
       label: '负载均衡',
-      shortDesc: '在多条纯 IP 加密上游间均衡分担解析负载',
+      shortDesc: '在多条加密上游间均衡分担解析负载',
     },
   ];
+}
+
+const IPV4_LITERAL_RE = /^(?:\d{1,3}\.){3}\d{1,3}$/;
+const IPV6_BRACKET_RE = /^\[[0-9a-fA-F:]+\]$/;
+
+export function isPureIPUpstreamAddress(addr: string): boolean {
+  const trimmed = addr.trim();
+  if (!trimmed) return false;
+  try {
+    const parsed = new URL(trimmed);
+    const host = parsed.hostname;
+    return IPV4_LITERAL_RE.test(host) || IPV6_BRACKET_RE.test(host) || host.includes(':');
+  } catch {
+    return false;
+  }
 }
 
 export function normalizeUpstreamMode(engine: DNSEngineID, mode?: DNSUpstreamMode): DNSUpstreamMode {

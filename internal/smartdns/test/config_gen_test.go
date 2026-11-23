@@ -107,6 +107,10 @@ func TestFormatUpstreamDirective_ValidAndInjectionPayloads(t *testing.T) {
 			t.Errorf("FormatUpstreamDirective(%q) expected error, got %q", bad, got)
 		}
 	}
+
+	if _, err := smartdns.FormatUpstreamDirective("dot.pub"); err == nil || !strings.Contains(err.Error(), "tls://dot.pub") || !strings.Contains(err.Error(), "https://dot.pub/dns-query") {
+		t.Fatalf("expected missing-scheme guidance with tls://dot.pub and https://dot.pub/dns-query, got: %v", err)
+	}
 }
 
 func TestBuildConfig_StrategiesLowMemoryAndSecurity(t *testing.T) {

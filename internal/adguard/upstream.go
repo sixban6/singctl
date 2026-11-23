@@ -182,6 +182,8 @@ func DescribeUpstream(addr string) UpstreamServerInfo {
 	switch {
 	case strings.HasPrefix(lower, "https://"):
 		proto = "DoH"
+	case strings.HasPrefix(lower, "h3://"):
+		proto = "DoH3"
 	case strings.HasPrefix(lower, "tls://"):
 		proto = "DoT"
 	case strings.HasPrefix(lower, "quic://"):
@@ -217,13 +219,6 @@ func DescribeUpstream(addr string) UpstreamServerInfo {
 		Name:     fmt.Sprintf("%s · %s", provider, proto),
 		Protocol: proto,
 	}
-}
-
-var knownDomainToPureIP = map[string]string{
-	"dns.alidns.com": "223.5.5.5",
-	"alidns.com":     "223.5.5.5",
-	"doh.pub":        "1.12.12.12",
-	"dot.pub":        "1.12.12.12",
 }
 
 var disallowedLocalDomainSuffixes = []string{
@@ -310,8 +305,33 @@ func ValidatePureIPFallbackInvariant(upstreams []string) error {
 	return errors.New("为防止软路由冷启动 DNS 引导死锁，使用域名上游时列表中至少须保留 1 条纯 IP 加密上游（如 https://223.5.5.5/dns-query）")
 }
 
-// NormalizeAndValidateUpstream 校验并归一化单条加密上游 DNS 地址（支持纯 IP 与合法公网 FQDN 域名）。
-// 若主机为纯 IP（或已知国内公共 DNS 自动映射为纯 IP），返回非空 ipLiteral；若为域名上游，返回 ipLiteral=""。
+// SameUpstreamSet 判断两组加密上游列表（忽略大小写与首尾空白）是否包含完全相同的地址集合。
+func SameUpstreamSet(a, b []string) bool {
+	setA := make(map[string]struct{}, len(a))
+	for _, item := range a {
+		if k := strings.ToLower(strings.TrimSpace(item)); k != "" {
+			setA[k] = struct{}{}
+		}
+	}
+	setB := make(map[string]struct{}, len(b))
+	for _, item := range b {
+		if k := strings.ToLower(strings.TrimSpace(item)); k != "" {
+			setB[k] = struct{}{}
+		}
+	}
+	if len(setA) != len(setB) {
+		return false
+	}
+	for k := range setA {
+		if _, ok := setB[k]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// NormalizeAndValidateUpstream 校验并归一化单条加密上游 DNS 地址（支持纯 IP 与合法公网 FQDN 域名，原样保留域名不强转 IP）。
+// 若主机为纯 IP，返回非空 ipLiteral；若为域名上游，返回 ipLiteral=""。
 func NormalizeAndValidateUpstream(raw string) (normalized string, ipLiteral string, convertedNote string, err error) {
 	if containsControlOrWhitespace(strings.TrimSpace(raw)) {
 		return "", "", "", fmt.Errorf("上游地址 %q 包含非法空白或控制字符", raw)
@@ -326,6 +346,9 @@ func NormalizeAndValidateUpstream(raw string) (normalized string, ipLiteral stri
 	if !strings.Contains(s, "://") {
 		if ip := net.ParseIP(strings.Split(s, ":")[0]); ip != nil {
 			return "", "", "", fmt.Errorf("不支持明文 DNS (%s)，请改用加密格式如 https://%s/dns-query 或 tls://%s", s, ip.String(), ip.String())
+		}
+		if cleanDom, domErr := ValidateUpstreamDomain(s); domErr == nil {
+			return "", "", "", fmt.Errorf("上游地址 %q 缺少加密协议前缀，请改用如 tls://%s 或 https://%s/dns-query", s, cleanDom, cleanDom)
 		}
 		return "", "", "", fmt.Errorf("上游地址 %q 缺少加密协议前缀（请使用 https:// 或 tls://）", s)
 	}
@@ -353,12 +376,6 @@ func NormalizeAndValidateUpstream(raw string) (normalized string, ipLiteral stri
 		if pNum == 53 {
 			return "", "", "", errors.New("禁止使用 53 明文端口作为上游，避免透明代理网关回环死锁")
 		}
-	}
-
-	trimmedHost := strings.TrimSuffix(host, ".")
-	if mappedIP, ok := knownDomainToPureIP[trimmedHost]; ok {
-		convertedNote = fmt.Sprintf("%s 已自动转换为防死锁纯 IP (%s)", trimmedHost, mappedIP)
-		host = mappedIP
 	}
 
 	var hostWithPort string
@@ -464,6 +481,7 @@ func (m *Manager) SetDNSUpstreams(ctx context.Context, rawUpstreams []string, ra
 	seen := make(map[string]struct{}, len(rawUpstreams))
 	cleaned := make([]string, 0, len(rawUpstreams))
 	ips := make([]string, 0, len(rawUpstreams))
+	var duplicates []string
 	var notes []string
 
 	for _, item := range rawUpstreams {
@@ -476,6 +494,7 @@ func (m *Manager) SetDNSUpstreams(ctx context.Context, rawUpstreams []string, ra
 		}
 		key := strings.ToLower(norm)
 		if _, dup := seen[key]; dup {
+			duplicates = append(duplicates, norm)
 			continue
 		}
 		seen[key] = struct{}{}
@@ -499,11 +518,19 @@ func (m *Manager) SetDNSUpstreams(ctx context.Context, rawUpstreams []string, ra
 	}
 
 	prevSet := make(map[string]struct{})
+	var prevList []string
+	prevMode := ""
 	if !skipProbe {
-		existing, _ := m.GetConfiguredUpstreams(ctx)
-		for _, prev := range existing {
+		prevList, prevMode = m.GetConfiguredUpstreams(ctx)
+		for _, prev := range prevList {
 			prevSet[strings.ToLower(strings.TrimSpace(prev))] = struct{}{}
 		}
+		if len(duplicates) > 0 && mode == prevMode && SameUpstreamSet(cleaned, prevList) {
+			return nil, mode, nil, fmt.Errorf("上游 %s 已在当前列表中，无需重复添加", strings.Join(duplicates, "、"))
+		}
+	}
+	if len(duplicates) > 0 {
+		notes = append(notes, fmt.Sprintf("已自动跳过重复上游（%s）", strings.Join(duplicates, "、")))
 	}
 
 	bypassIPs := ips

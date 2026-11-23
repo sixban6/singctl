@@ -48,18 +48,22 @@ func TestNormalizeAndValidateUpstream(t *testing.T) {
 			wantIP:   "223.6.6.6",
 		},
 		{
-			name:     "auto convert alidns domain to pure IP",
+			name:     "preserve alidns domain verbatim without IP rewrite",
 			input:    "https://dns.alidns.com/dns-query",
-			wantNorm: "https://223.5.5.5/dns-query",
-			wantIP:   "223.5.5.5",
-			wantConv: true,
+			wantNorm: "https://dns.alidns.com/dns-query",
+			wantIP:   "",
 		},
 		{
-			name:     "auto convert doh.pub domain to pure IP",
+			name:     "preserve doh.pub domain verbatim without IP rewrite",
 			input:    "https://doh.pub/dns-query",
-			wantNorm: "https://1.12.12.12/dns-query",
-			wantIP:   "1.12.12.12",
-			wantConv: true,
+			wantNorm: "https://doh.pub/dns-query",
+			wantIP:   "",
+		},
+		{
+			name:     "preserve dot.pub domain verbatim without IP rewrite",
+			input:    "tls://dot.pub",
+			wantNorm: "tls://dot.pub",
+			wantIP:   "",
 		},
 		{
 			name:      "reject plain IP",
@@ -178,7 +182,16 @@ func TestNormalizeAndValidateUpstream(t *testing.T) {
 			if tc.wantConv && note == "" {
 				t.Fatalf("expected conversion note for %q", tc.input)
 			}
+			if !tc.wantConv && note != "" {
+				t.Fatalf("unexpected conversion note %q for %q", note, tc.input)
+			}
 		})
+	}
+
+	// Missing scheme on bare domain should provide explicit tls:// and https:// examples for that domain.
+	_, _, _, err := adguard.NormalizeAndValidateUpstream("dot.pub")
+	if err == nil || !strings.Contains(err.Error(), "tls://dot.pub") || !strings.Contains(err.Error(), "https://dot.pub/dns-query") {
+		t.Fatalf("expected missing-scheme guidance with tls://dot.pub and https://dot.pub/dns-query, got: %v", err)
 	}
 }
 
@@ -258,7 +271,7 @@ func TestSetDNSUpstreams_HotAPIAndYAMLPersistence(t *testing.T) {
 	mgr := adguard.NewManager(cfg, "")
 	mgr.SetPathsForTest(fakeBin, aghYAML)
 
-	infos, mode, notes, err := mgr.SetDNSUpstreams(
+	infos, mode, _, err := mgr.SetDNSUpstreams(
 		t.Context(),
 		[]string{"https://dns.alidns.com/dns-query", "tls://1.12.12.12"},
 		"fastest_addr",
@@ -270,11 +283,8 @@ func TestSetDNSUpstreams_HotAPIAndYAMLPersistence(t *testing.T) {
 	if mode != "fastest_addr" {
 		t.Fatalf("mode=%q, want fastest_addr", mode)
 	}
-	if len(infos) != 2 || infos[0].Address != "https://223.5.5.5/dns-query" {
+	if len(infos) != 2 || infos[0].Address != "https://dns.alidns.com/dns-query" || infos[1].Address != "tls://1.12.12.12" {
 		t.Fatalf("unexpected infos: %+v", infos)
-	}
-	if len(notes) == 0 {
-		t.Fatalf("expected domain-to-IP conversion note")
 	}
 	if gotPayload == nil || gotPayload["upstream_mode"] != "fastest_addr" {
 		t.Fatalf("hot API payload not sent properly: %+v", gotPayload)
@@ -299,12 +309,16 @@ func TestDescribeUpstream_DomainProviders(t *testing.T) {
 		wantProto    string
 		wantContains string
 	}{
+		{"tls://dot.pub", "DoT", "腾讯云 DNSPod"},
+		{"https://dns.alidns.com/dns-query", "DoH", "阿里云公共 DNS"},
 		{"tls://dot.onedns.net", "DoT", "OneDNS"},
 		{"https://doh-pure.onedns.net/dns-query", "DoH", "OneDNS"},
 		{"https://doh.360.cn/dns-query", "DoH", "360"},
 		{"tls://dns.quad9.net", "DoT", "Quad9"},
 		{"https://cloudflare-dns.com/dns-query", "DoH", "Cloudflare"},
 		{"tls://dns.google", "DoT", "Google"},
+		{"quic://dns.example.com", "DoQ", "自定义加密上游"},
+		{"h3://dns.example.com/dns-query", "DoH3", "自定义加密上游"},
 	}
 	for _, tc := range cases {
 		info := adguard.DescribeUpstream(tc.addr)
@@ -409,8 +423,13 @@ func TestSetDNSUpstreams_DomainSupportFallbackBypassAndSingleProbe(t *testing.T)
 		t.Fatalf("AdGuardHome.yaml missing tls://dot.onedns.net:\n%s", string(savedBytes))
 	}
 
-	// 4. Switching scheduling mode when an *existing* upstream has a transient failure must still succeed if another upstream is healthy.
+	// 4. Duplicate addition with no effective change must return an explicit duplicate error instead of silent success.
 	currentUpstreams = []string{"https://223.5.5.5/dns-query", "tls://dot.onedns.net"}
+	if _, _, _, err := mgr.SetDNSUpstreams(t.Context(), []string{"https://223.5.5.5/dns-query", "tls://dot.onedns.net", "tls://DOT.ONEDNS.NET"}, "parallel", false); err == nil || !strings.Contains(err.Error(), "已在当前列表中") || !strings.Contains(err.Error(), "tls://dot.onedns.net") {
+		t.Fatalf("expected explicit duplicate error for tls://dot.onedns.net, got: %v", err)
+	}
+
+	// 5. Switching scheduling mode when an *existing* upstream has a transient failure must still succeed if another upstream is healthy.
 	probeHealthyMap["tls://dot.onedns.net"] = false
 	if _, mode, _, err := mgr.SetDNSUpstreams(t.Context(), currentUpstreams, "fastest_addr", false); err != nil || mode != "fastest_addr" {
 		t.Fatalf("switching mode with existing flaky upstream should succeed while pure-IP upstream is healthy: mode=%q err=%v", mode, err)

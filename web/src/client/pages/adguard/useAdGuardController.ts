@@ -22,6 +22,7 @@ import {
 import {
   getEngineDisplayName,
   getStatusDNS,
+  isPureIPUpstreamAddress,
   resolveActiveEngine,
   resolveDNSCapabilities,
 } from './adguardHelpers';
@@ -500,9 +501,14 @@ export function useAdGuardController(
         error('至少需保留 1 条加密上游 DNS 服务器');
         return;
       }
-      void handleUpdateUpstreams(
-        current.filter((a) => a.toLowerCase() !== presetAddr.toLowerCase()),
-      );
+      const next = current.filter((a) => a.toLowerCase() !== presetAddr.toLowerCase());
+      const nextHasDomain = next.some((a) => !isPureIPUpstreamAddress(a));
+      const nextHasPureIP = next.some((a) => isPureIPUpstreamAddress(a));
+      if (nextHasDomain && !nextHasPureIP) {
+        error('存在域名上游时需保留至少 1 条纯 IP 兜底防冷启动死锁');
+        return;
+      }
+      void handleUpdateUpstreams(next);
     } else {
       void handleUpdateUpstreams([...current, presetAddr]);
     }

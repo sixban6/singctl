@@ -62,6 +62,12 @@ func FormatUpstreamDirective(raw string) (string, error) {
 		return "", fmt.Errorf("上游地址 %q 包含非法空白或注入字符", s)
 	}
 	if !strings.Contains(s, "://") {
+		if ip := net.ParseIP(strings.Split(s, ":")[0]); ip != nil {
+			return "", fmt.Errorf("不支持明文 DNS (%s)，请改用加密格式如 https://%s/dns-query 或 tls://%s", s, ip.String(), ip.String())
+		}
+		if cleanDom, domErr := ValidateDomain(s); domErr == nil && strings.Contains(cleanDom, ".") {
+			return "", fmt.Errorf("上游地址 %q 缺少加密协议前缀，请改用如 tls://%s 或 https://%s/dns-query", s, cleanDom, cleanDom)
+		}
 		return "", fmt.Errorf("上游地址 %q 缺少加密协议前缀（仅支持 https://、tls://、quic://、h3://）", s)
 	}
 
