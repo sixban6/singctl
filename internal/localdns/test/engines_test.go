@@ -515,7 +515,23 @@ func TestSmartDNSEngine_SetUpstreams_DomainFallbackBypassAndNewItemProbe(t *test
 		t.Fatalf("smartdns.conf missing domain directive or -bootstrap-dns:\n%s", confStr)
 	}
 
-	// 4. Adding quic:// alongside pure-IP upstream must not be falsely blocked by stdlib DoH/DoT prober.
+	// 4. Adding tls://dot.pub alongside tls://1.12.12.12 preserves both verbatim (no silent rewrite/disappearance).
+	probeHealthy["tls://1.12.12.12"] = true
+	probeHealthy["tls://dot.pub"] = true
+	resDotPub, err := eng.SetUpstreams(ctx, []string{"https://223.5.5.5/dns-query", "tls://1.12.12.12", "tls://dot.pub"}, "fastest_ip", false)
+	if err != nil {
+		t.Fatalf("expected tls://dot.pub alongside tls://1.12.12.12 to succeed: %v", err)
+	}
+	if len(resDotPub.Upstreams) != 3 || resDotPub.Upstreams[1].Address != "tls://1.12.12.12" || resDotPub.Upstreams[2].Address != "tls://dot.pub" {
+		t.Fatalf("expected both tls://1.12.12.12 and tls://dot.pub preserved, got: %+v", resDotPub.Upstreams)
+	}
+
+	// 5. Re-adding an already-existing upstream with unchanged mode returns explicit duplicate error.
+	if _, err := eng.SetUpstreams(ctx, []string{"https://223.5.5.5/dns-query", "tls://1.12.12.12", "tls://dot.pub", "tls://DOT.PUB"}, "fastest_ip", false); err == nil || !strings.Contains(err.Error(), "已在当前列表中") || !strings.Contains(err.Error(), "tls://dot.pub") {
+		t.Fatalf("expected explicit duplicate error on SmartDNS, got: %v", err)
+	}
+
+	// 6. Adding quic:// alongside pure-IP upstream must not be falsely blocked by stdlib DoH/DoT prober.
 	resQ, err := eng.SetUpstreams(ctx, []string{"https://223.5.5.5/dns-query", "tls://dot.onedns.net", "quic://dns.example.com"}, "fastest_ip", false)
 	if err != nil {
 		t.Fatalf("expected quic:// upstream alongside pure IP to succeed: %v", err)

@@ -178,6 +178,7 @@ func (e *SmartDNSEngine) SetUpstreams(ctx context.Context, rawUpstreams []string
 
 	seen := make(map[string]struct{}, len(rawUpstreams))
 	cleaned := make([]string, 0, len(rawUpstreams))
+	var duplicates []string
 	var notes []string
 	for _, raw := range rawUpstreams {
 		s := strings.TrimSpace(raw)
@@ -198,6 +199,7 @@ func (e *SmartDNSEngine) SetUpstreams(ctx context.Context, rawUpstreams []string
 		}
 		key := strings.ToLower(s)
 		if _, dup := seen[key]; dup {
+			duplicates = append(duplicates, s)
 			continue
 		}
 		seen[key] = struct{}{}
@@ -218,8 +220,15 @@ func (e *SmartDNSEngine) SetUpstreams(ctx context.Context, rawUpstreams []string
 	if len(prevList) == 0 {
 		prevList = smartdns.DefaultUpstreams()
 	}
+	prevMode := smartdns.NormalizeUpstreamMode(e.cfg.DNS.UpstreamMode)
 	for _, prev := range prevList {
 		prevSet[strings.ToLower(strings.TrimSpace(prev))] = struct{}{}
+	}
+	if !e.deps.SkipProbeForTest && !resetDefault && len(duplicates) > 0 && mode == prevMode && adguard.SameUpstreamSet(cleaned, prevList) {
+		return nil, fmt.Errorf("上游 %s 已在当前列表中，无需重复添加", strings.Join(duplicates, "、"))
+	}
+	if len(duplicates) > 0 {
+		notes = append(notes, fmt.Sprintf("已自动跳过重复上游（%s）", strings.Join(duplicates, "、")))
 	}
 
 	if !e.deps.SkipProbeForTest || e.deps.LookupIPFunc != nil || e.deps.BypassFirewallFunc != nil {

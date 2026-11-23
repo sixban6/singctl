@@ -10,6 +10,7 @@ import {
 import {
   getUpstreamModeBadgeText,
   getUpstreamModeOptions,
+  isPureIPUpstreamAddress,
   normalizeUpstreamMode,
   resolveActiveEngine,
 } from './adguardHelpers';
@@ -58,6 +59,19 @@ export const AdGuardUpstreamsCard: React.FC<AdGuardUpstreamsCardProps> = ({
 
   const activeUpstreamSet = useMemo(() => {
     return new Set((snap?.upstreams || []).map((u) => u.address.toLowerCase()));
+  }, [snap?.upstreams]);
+
+  const { pureIPCount, hasDomainUpstream } = useMemo(() => {
+    let pureCount = 0;
+    let hasDomain = false;
+    for (const u of snap?.upstreams || []) {
+      if (isPureIPUpstreamAddress(u.address)) {
+        pureCount += 1;
+      } else {
+        hasDomain = true;
+      }
+    }
+    return { pureIPCount: pureCount, hasDomainUpstream: hasDomain };
   }, [snap?.upstreams]);
 
   const handleAddCustomUpstream = async (e: React.FormEvent) => {
@@ -162,18 +176,28 @@ export const AdGuardUpstreamsCard: React.FC<AdGuardUpstreamsCardProps> = ({
         <div className="divide-y divide-[var(--border-subtle)] rounded-xl border border-subtle bg-surface1 overflow-hidden">
           {(snap?.upstreams || []).map((up) => {
             const pItem = probeItemMap.get(up.address.toLowerCase());
-            const canRemove = (snap?.upstreams?.length || 0) > 1;
+            const isPureIP = isPureIPUpstreamAddress(up.address);
+            const isLastPureIPFallback = hasDomainUpstream && pureIPCount <= 1 && isPureIP;
+            const canRemove = (snap?.upstreams?.length || 0) > 1 && !isLastPureIPFallback;
+            const isManagedUnprobed =
+              Boolean(pItem && !pItem.healthy) &&
+              (up.protocol === 'DoQ' ||
+                up.protocol === 'DoH3' ||
+                Boolean(pItem?.error?.includes('暂不支持直接探测')));
             return (
               <div
                 key={up.address}
                 className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 px-3.5 py-2.5 hover:bg-surface2/40 transition-colors"
               >
                 <div className="min-w-0 flex flex-wrap items-center gap-2">
-                  <Badge tone={up.protocol === 'DoH' ? 'accent' : 'neutral'}>{up.protocol}</Badge>
+                  <Badge tone={up.protocol === 'DoH' || up.protocol === 'DoH3' ? 'accent' : 'neutral'}>
+                    {up.protocol}
+                  </Badge>
                   <span className="font-mono text-xs sm:text-sm font-semibold text-primary break-all">
                     {up.address}
                   </span>
                   <span className="text-xs text-secondary">{up.name}</span>
+                  {isLastPureIPFallback && <Badge tone="ok">兜底纯 IP</Badge>}
                 </div>
 
                 <div className="flex items-center justify-between sm:justify-end gap-2 shrink-0">
@@ -203,6 +227,8 @@ export const AdGuardUpstreamsCard: React.FC<AdGuardUpstreamsCardProps> = ({
                           {pItem.fastest && <span className="font-sans text-[11px]">最快</span>}
                         </span>
                       </div>
+                    ) : isManagedUnprobed ? (
+                      <Badge tone="neutral">SmartDNS 托管</Badge>
                     ) : (
                       <Badge tone="danger">{pItem.error || '不可达'}</Badge>
                     )
@@ -214,7 +240,13 @@ export const AdGuardUpstreamsCard: React.FC<AdGuardUpstreamsCardProps> = ({
                     size="xs"
                     variant="ghost"
                     disabled={savingUpstreams || !canMutate || !canRemove}
-                    title={canRemove ? '移除该上游' : '至少需保留 1 条加密上游'}
+                    title={
+                      isLastPureIPFallback
+                        ? '存在域名上游时需保留至少 1 条纯 IP 兜底防冷启动死锁'
+                        : canRemove
+                          ? '移除该上游'
+                          : '至少需保留 1 条加密上游'
+                    }
                     onClick={() => onRemoveUpstream(up.address)}
                     icon={<Trash2 className="w-3.5 h-3.5" />}
                   />
