@@ -133,7 +133,7 @@ export const SafeCommitCard: React.FC<SafeCommitCardProps> = ({
       const res = await clientApi.protectTailscaleOOM();
       setData((prev) => (prev ? { ...prev, tailscaleOom: res.tailscaleOom } : prev));
       if (res.ok) {
-        success(`已为 tailscaled (PID ${res.tailscaleOom.pid ?? '-'}) 应用 OOM 免疫 (-1000)`);
+        success('已为 tailscaled 开启 OOM 免疫保护');
       } else {
         error(res.error || res.tailscaleOom?.message || '未发现运行中的 tailscaled 进程');
       }
@@ -323,27 +323,17 @@ export const SafeCommitCard: React.FC<SafeCommitCardProps> = ({
                   tone={oom?.protected ? 'ok' : oom?.found ? 'warn' : 'neutral'}
                   dot={Boolean(oom?.found)}
                 >
-                  {oom?.protected ? '已免疫 (-1000)' : oom?.found ? '未免疫' : '未运行'}
+                  {oom?.protected ? '已保护' : oom?.found ? '未保护' : '未运行'}
                 </Badge>
               </div>
 
-              <div className="space-y-1 text-xs">
-                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-secondary tnum">
-                  <span>进程：{oom?.found ? `PID ${oom.pid ?? '-'}` : '未发现 tailscaled'}</span>
-                  {oom?.found && (
-                    <span>
-                      oom_score_adj:{' '}
-                      <strong className={oom.scoreAdj <= -1000 ? 'text-emerald-400' : 'text-amber-300'}>
-                        {oom.scoreAdj}
-                      </strong>
-                    </span>
-                  )}
-                </div>
-                <p className="text-[11px] text-muted leading-relaxed">
-                  {oom?.message ||
-                    '将 tailscaled 的 oom_score_adj 锁定为 -1000，避免小内存路由器触发 OOM Killer 导致远程失联。'}
-                </p>
-              </div>
+              <p className="text-xs text-secondary leading-relaxed">
+                {oom?.protected
+                  ? 'tailscaled 已开启内存防误杀保护，低内存时不会被系统终止。'
+                  : oom?.found
+                    ? 'tailscaled 当前未开启内存防误杀保护，低内存时可能被系统终止导致远程失联。'
+                    : '当前未检测到运行中的 tailscaled 进程。'}
+              </p>
 
               <div>
                 <Button

@@ -172,8 +172,8 @@ export const AuditFlowsSection: React.FC<AuditFlowsSectionProps> = ({
       render: (f) => (
         <div className="text-right font-mono tnum text-xs whitespace-nowrap">
           <div className="text-primary font-semibold">↑ {fmtBytes(f.uploadBytes)}</div>
-          {(f.avgUploadBps || 0) > 0 && (f.activeSpanSec || 0) >= 300 && (
-            <div className="text-[10.5px] text-muted">均速 {fmtBps(f.avgUploadBps)}</div>
+          {(f.activeConns || 0) > 0 && (f.currentUploadBps || 0) > 0 && (
+            <div className="text-[10.5px] text-emerald-400">实时 {fmtBps(f.currentUploadBps)}</div>
           )}
         </div>
       ),
@@ -186,6 +186,9 @@ export const AuditFlowsSection: React.FC<AuditFlowsSectionProps> = ({
       render: (f) => (
         <div className="text-right font-mono tnum text-xs whitespace-nowrap">
           <div className="text-secondary font-medium">↓ {fmtBytes(f.downloadBytes)}</div>
+          {(f.activeConns || 0) > 0 && (f.currentDownloadBps || 0) > 0 && (
+            <div className="text-[10.5px] text-sky-400">实时 {fmtBps(f.currentDownloadBps)}</div>
+          )}
         </div>
       ),
     },

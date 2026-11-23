@@ -261,6 +261,7 @@ func TestHandleClientBackup_V2ExportRuleSetsAndBaseSnapshot(t *testing.T) {
 	}
 	var expResp struct {
 		OK       bool   `json:"ok"`
+		Message  string `json:"message"`
 		Filename string `json:"filename"`
 		Data     string `json:"data"`
 		Summary  struct {
@@ -274,6 +275,9 @@ func TestHandleClientBackup_V2ExportRuleSetsAndBaseSnapshot(t *testing.T) {
 	}
 	if err := json.Unmarshal(recExp.Body.Bytes(), &expResp); err != nil {
 		t.Fatal(err)
+	}
+	if strings.Contains(strings.ToUpper(expResp.Message), "V2") {
+		t.Fatalf("export user-facing message should not contain V2 hint, got %q", expResp.Message)
 	}
 	if !expResp.OK || !expResp.Summary.HasSingctlCfg || !expResp.Summary.HasGroups ||
 		!expResp.Summary.HasAdGuard || !expResp.Summary.HasSingBox || !expResp.Summary.HasSingBoxBase ||

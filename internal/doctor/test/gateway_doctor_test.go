@@ -228,8 +228,8 @@ func TestRunner_FixDispatchAndBuiltinOOMShield(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(pidDir, "oom_score_adj"), []byte("0\n"), 0644)
 
 	msg, err = runner.Fix(t.Context(), &doctor.Env{ProcRoot: procRoot}, "protect-tailscale-oom")
-	if err != nil || !strings.Contains(msg, "-1000") {
-		t.Fatalf("builtin protect-tailscale-oom failed: msg=%q err=%v", msg, err)
+	if err != nil || msg == "" || strings.Contains(msg, "-1000") || strings.Contains(msg, "oom_score_adj") {
+		t.Fatalf("builtin protect-tailscale-oom failed or leaked low-level OOM details: msg=%q err=%v", msg, err)
 	}
 	rawAdj, _ := os.ReadFile(filepath.Join(pidDir, "oom_score_adj"))
 	if strings.TrimSpace(string(rawAdj)) != "-1000" {

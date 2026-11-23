@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"runtime"
+	"singctl/configs"
 	"singctl/internal/common/redact"
 	"singctl/internal/config"
 	"singctl/internal/constant"
@@ -89,7 +90,7 @@ func buildCLIDoctorEnv(cfg *config.Config, resolvedPath string, deps DoctorCmdDe
 			if err != nil {
 				return "", err
 			}
-			return cmp.Or(st.Message, fmt.Sprintf("已为 tailscaled (PID %d) 开启 OOM 免疫保护 (oom_score_adj=%d)", st.PID, st.ScoreAdj)), nil
+			return cmp.Or(st.Message, "已为 tailscaled 开启 OOM 免疫保护"), nil
 		},
 		"sync-dns-local": func(ctx context.Context) (string, error) {
 			dnsPort := 5353
@@ -290,12 +291,20 @@ func NewInternalMigrateCmd() *cobra.Command {
 		Use:    "internal-migrate",
 		Hidden: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if configPath == "" || templatePath == "" {
-				return fmt.Errorf("both --config and --template are required")
+			if configPath == "" {
+				return fmt.Errorf("--config is required")
 			}
-			tplData, err := os.ReadFile(templatePath)
-			if err != nil {
-				return fmt.Errorf("failed to read template file %s: %w", templatePath, err)
+			var (
+				tplData []byte
+				err     error
+			)
+			if strings.TrimSpace(templatePath) != "" {
+				tplData, err = os.ReadFile(templatePath)
+				if err != nil {
+					return fmt.Errorf("failed to read template file %s: %w", templatePath, err)
+				}
+			} else {
+				tplData = configs.DefaultConfigYAML
 			}
 			if err := config.MigrateConfig(configPath, tplData); err != nil {
 				return fmt.Errorf("migration failed: %w", err)

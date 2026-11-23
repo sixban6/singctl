@@ -132,18 +132,27 @@ export const AuditFlowDetailDrawer: React.FC<AuditFlowDetailDrawerProps> = ({
             <div className="mt-1 font-mono tnum text-sm font-bold text-primary">
               {fmtBytes(detailFlow.uploadBytes)}
             </div>
-            {(detailFlow.avgUploadBps || 0) > 0 && (
-              <div className="text-[10.5px] font-mono text-muted mt-0.5 truncate">
-                均速 {fmtBps(detailFlow.avgUploadBps)} · 观测 {fmtDurationSpan(detailFlow.activeSpanSec)}
-              </div>
-            )}
+            <div className="text-[10.5px] font-mono text-muted mt-0.5 truncate">
+              {(detailFlow.activeConns || 0) > 0 && (detailFlow.currentUploadBps || 0) > 0 ? (
+                <span className="text-emerald-400">实时 {fmtBps(detailFlow.currentUploadBps)}</span>
+              ) : (detailFlow.activeConns || 0) > 0 ? (
+                <span>当前无实时上传</span>
+              ) : (
+                <span>观测 {fmtDurationSpan(detailFlow.activeSpanSec)}</span>
+              )}
+            </div>
           </div>
           <div className="rounded-xl border border-subtle bg-surface2/60 p-3">
             <div className="text-[11px] text-muted">累计下载 ↓</div>
             <div className="mt-1 font-mono tnum text-sm font-bold text-primary">
               {fmtBytes(detailFlow.downloadBytes)}
             </div>
-            <div className="text-[10.5px] font-mono text-muted mt-0.5">
+            <div className="text-[10.5px] font-mono text-muted mt-0.5 truncate">
+              {(detailFlow.activeConns || 0) > 0 && (detailFlow.currentDownloadBps || 0) > 0 ? (
+                <>
+                  <span className="text-sky-400">实时 {fmtBps(detailFlow.currentDownloadBps)}</span> ·{' '}
+                </>
+              ) : null}
               上/下比 {Number(detailFlow.uploadRatio || 0).toFixed(2)}x
             </div>
           </div>

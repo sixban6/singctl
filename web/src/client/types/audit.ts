@@ -67,6 +67,8 @@ export interface AuditFlowRecord {
   downloadBytes: number;
   uploadRatio: number;
   avgUploadBps?: number;
+  currentUploadBps?: number;
+  currentDownloadBps?: number;
   throttledRateKbps?: number;
   connCount?: number;
   activeConns?: number;

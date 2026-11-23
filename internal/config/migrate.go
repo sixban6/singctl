@@ -33,6 +33,7 @@ var defaultMigrationStages = []ConfigMigrationStage{
 	{Name: "server", Apply: migrateServerStage},
 	{Name: "watchdog", Apply: migrateWatchdogStage},
 	{Name: "client_top_level", Apply: migrateClientTopLevelStage},
+	{Name: "shared_top_level", Apply: migrateSharedTopLevelStage},
 }
 
 // MigrateConfigBytes merges oldData into templateData using YAML AST while preserving
@@ -184,7 +185,7 @@ func (mc *MigrationContext) replaceNode(key string, val any) {
 }
 
 func inferScalarTag(val string) string {
-	if _, err := strconv.Atoi(val); err == nil {
+	if _, err := strconv.ParseInt(val, 10, 64); err == nil {
 		return "!!int"
 	}
 	if val == "true" || val == "false" {
@@ -283,6 +284,9 @@ func migrateDNSStage(mc *MigrationContext) {
 	if hasYAMLKey(oldDNS, "enabled") && mc.oldCfg.DNS.Enabled != nil {
 		mc.SetOrAddField("dns", "enabled", strconv.FormatBool(*mc.oldCfg.DNS.Enabled))
 	}
+	if hasYAMLKey(oldDNS, "engine") && mc.oldCfg.DNS.Engine != "" {
+		mc.SetOrAddField("dns", "engine", mc.oldCfg.DNS.Engine)
+	}
 	if hasYAMLKey(oldDNS, "dns_port") && mc.oldCfg.DNS.DNSPort > 0 {
 		mc.SetOrAddField("dns", "dns_port", strconv.Itoa(mc.oldCfg.DNS.DNSPort))
 	}
@@ -294,6 +298,30 @@ func migrateDNSStage(mc *MigrationContext) {
 	}
 	if hasYAMLKey(oldDNS, "password") && mc.oldCfg.DNS.Password != "" {
 		mc.SetOrAddField("dns", "password", mc.oldCfg.DNS.Password)
+	}
+	if hasYAMLKey(oldDNS, "upstreams") && len(mc.oldCfg.DNS.Upstreams) > 0 {
+		mc.setOrAddMapping("dns", "upstreams", mc.oldCfg.DNS.Upstreams)
+	}
+	if hasYAMLKey(oldDNS, "upstream_mode") && mc.oldCfg.DNS.UpstreamMode != "" {
+		mc.SetOrAddField("dns", "upstream_mode", mc.oldCfg.DNS.UpstreamMode)
+	}
+	if hasYAMLKey(oldDNS, "whitelist") && len(mc.oldCfg.DNS.Whitelist) > 0 {
+		mc.setOrAddMapping("dns", "whitelist", mc.oldCfg.DNS.Whitelist)
+	}
+	if hasYAMLKey(oldDNS, "rewrites") && len(mc.oldCfg.DNS.Rewrites) > 0 {
+		mc.setOrAddMapping("dns", "rewrites", mc.oldCfg.DNS.Rewrites)
+	}
+	if hasYAMLKey(oldDNS, "block_aaaa") && mc.oldCfg.DNS.BlockAAAA {
+		mc.SetOrAddField("dns", "block_aaaa", "true")
+	}
+	if hasYAMLKey(oldDNS, "adblock_disabled_until") && mc.oldCfg.DNS.AdblockDisabledUntil != 0 {
+		mc.SetOrAddField("dns", "adblock_disabled_until", strconv.FormatInt(mc.oldCfg.DNS.AdblockDisabledUntil, 10))
+	}
+	if hasYAMLKey(oldDNS, "disabled_ad_rule_sets") && len(mc.oldCfg.DNS.DisabledAdRuleSets) > 0 {
+		mc.setOrAddMapping("dns", "disabled_ad_rule_sets", mc.oldCfg.DNS.DisabledAdRuleSets)
+	}
+	if hasYAMLKey(oldDNS, "smartdns_filters") && len(mc.oldCfg.DNS.SmartDNSFilters) > 0 {
+		mc.setOrAddMapping("dns", "smartdns_filters", mc.oldCfg.DNS.SmartDNSFilters)
 	}
 }
 
@@ -423,5 +451,17 @@ func migrateClientTopLevelStage(mc *MigrationContext) {
 	}
 	if hasYAMLKey(mc.oldDocNode, "low_memory") && strings.TrimSpace(string(mc.oldCfg.LowMemory)) != "" {
 		mc.replaceNode("low_memory", mc.oldCfg.LowMemory)
+	}
+}
+
+func migrateSharedTopLevelStage(mc *MigrationContext) {
+	if hasYAMLKey(mc.oldDocNode, "firewall") && !mc.oldCfg.Firewall.IsEmpty() {
+		mc.replaceNode("firewall", mc.oldCfg.Firewall)
+	}
+	if hasYAMLKey(mc.oldDocNode, "notify") && !mc.oldCfg.Notify.IsEmpty() {
+		mc.replaceNode("notify", mc.oldCfg.Notify)
+	}
+	if hasYAMLKey(mc.oldDocNode, "safe_commit") && !mc.oldCfg.SafeCommit.IsEmpty() {
+		mc.replaceNode("safe_commit", mc.oldCfg.SafeCommit)
 	}
 }

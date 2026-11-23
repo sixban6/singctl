@@ -4,6 +4,8 @@ package config_test
 import (
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -181,5 +183,238 @@ gateway:
 			}()
 		}
 		wg.Wait()
+	})
+}
+
+func TestMigrateConfigBytes_PreservesNotifySafeCommitFirewallAndFullDNS(t *testing.T) {
+	t.Run("client_preserves_telegram_notify_safe_commit_firewall_and_dual_dns", func(t *testing.T) {
+		oldYAML := `subs:
+  - name: "main"
+    url: "https://sub.example.com/client?token=test-sub-token"
+dns:
+  enabled: true
+  engine: "smartdns"
+  dns_port: 5353
+  web_port: 3000
+  username: "admin"
+  password: "dns-test-password"
+  upstreams:
+    - "https://223.5.5.5/dns-query"
+    - "tls://1.1.1.1"
+  upstream_mode: "parallel"
+  whitelist:
+    - "trusted.example.com"
+  rewrites:
+    - domain: "nas.example.com"
+      answer: "192.168.1.20"
+  block_aaaa: true
+  adblock_disabled_until: -1
+  disabled_ad_rule_sets:
+    - "geosite-ad2"
+  smartdns_filters:
+    - "https://example.com/ad.conf"
+firewall:
+  ban_timeout_days: 7
+  ping_limit_per_sec: 12
+  whitelist:
+    - "198.51.100.1"
+  extra_forever_ban:
+    - "203.0.113.99"
+  protected_ports:
+    - 443
+    - 8443
+notify:
+  enabled: true
+  cooldown_minutes: 30
+  daily_limit: 80
+  quiet_hours: "23:00-07:30"
+  events:
+    watchdog_heal: true
+    safe_commit_rollback: true
+    resource_guard: false
+    audit_high_risk: true
+    new_device: false
+    sub_or_node_fail: true
+    server_quota_or_ban: false
+  channels:
+    telegram:
+      enabled: true
+      bot_token: "123456:test_telegram_bot_token"
+      chat_id: "-1001234567890"
+      api_base_url: "https://tg-proxy.example.com"
+    bark:
+      enabled: true
+      server_url: "https://bark.example.com"
+      device_key: "test_bark_device_key"
+      group: "RouterAlert"
+    feishu:
+      enabled: false
+      webhook_url: "https://open.feishu.cn/open-apis/bot/v2/hook/test_hook"
+      secret: "test_feishu_secret"
+    wecom:
+      enabled: false
+      webhook_url: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=test_wecom_key"
+    webhook:
+      enabled: true
+      url: "https://hooks.example.com/notify"
+      header_name: "Authorization"
+      header_value: "Bearer test_webhook_token"
+safe_commit:
+  default_ttl_sec: 240
+  protect_tailscale_oom: false
+`
+		out, err := config.MigrateConfigBytes([]byte(oldYAML), configs.DefaultConfigYAML)
+		if err != nil {
+			t.Fatalf("MigrateConfigBytes failed: %v", err)
+		}
+		var got config.Config
+		if err := yaml.Unmarshal(out, &got); err != nil {
+			t.Fatalf("unmarshal migrated yaml failed: %v", err)
+		}
+
+		// Notify + Telegram must survive migration intact
+		if !got.Notify.Enabled || got.Notify.CooldownMinutes != 30 || got.Notify.DailyLimit != 80 || got.Notify.QuietHours != "23:00-07:30" {
+			t.Fatalf("notify global settings lost: %+v", got.Notify)
+		}
+		tg := got.Notify.Channels.Telegram
+		if !tg.Enabled || tg.BotToken != "123456:test_telegram_bot_token" || tg.ChatID != "-1001234567890" || tg.APIBaseURL != "https://tg-proxy.example.com" {
+			t.Fatalf("telegram notify config lost after migration: %+v", tg)
+		}
+		if !got.Notify.Channels.Bark.Enabled || got.Notify.Channels.Bark.DeviceKey != "test_bark_device_key" {
+			t.Fatalf("bark notify config lost: %+v", got.Notify.Channels.Bark)
+		}
+		if got.Notify.Channels.Webhook.HeaderValue != "Bearer test_webhook_token" {
+			t.Fatalf("webhook notify config lost: %+v", got.Notify.Channels.Webhook)
+		}
+		if got.Notify.Events.ResourceGuard || got.Notify.Events.NewDevice || !got.Notify.Events.WatchdogHeal {
+			t.Fatalf("notify explicit events lost: %+v", got.Notify.Events)
+		}
+
+		// SafeCommit must survive
+		if got.SafeCommit.EffectiveTTLSec() != 240 || got.SafeCommit.IsProtectTailscaleOOM() {
+			t.Fatalf("safe_commit lost: %+v", got.SafeCommit)
+		}
+
+		// Firewall must survive
+		if got.Firewall.BanTimeoutDays != 7 || got.Firewall.PingLimitPerSec != 12 || !slices.Equal(got.Firewall.ProtectedPorts, []int{443, 8443}) {
+			t.Fatalf("firewall lost: %+v", got.Firewall)
+		}
+
+		// Full DNS dual-engine fields must survive
+		if got.DNS.Engine != "smartdns" || got.DNS.UpstreamMode != "parallel" || !got.DNS.BlockAAAA || got.DNS.AdblockDisabledUntil != -1 {
+			t.Fatalf("dns dual-engine fields lost: %+v", got.DNS)
+		}
+		if !slices.Equal(got.DNS.Upstreams, []string{"https://223.5.5.5/dns-query", "tls://1.1.1.1"}) ||
+			!slices.Equal(got.DNS.Whitelist, []string{"trusted.example.com"}) ||
+			len(got.DNS.Rewrites) != 1 || got.DNS.Rewrites[0].Domain != "nas.example.com" ||
+			!slices.Equal(got.DNS.SmartDNSFilters, []string{"https://example.com/ad.conf"}) {
+			t.Fatalf("dns list/rewrite fields lost: %+v", got.DNS)
+		}
+
+		// Repeated migration converges identically (idempotent)
+		out2, err := config.MigrateConfigBytes(out, configs.DefaultConfigYAML)
+		if err != nil {
+			t.Fatalf("second MigrateConfigBytes failed: %v", err)
+		}
+		if string(out) != string(out2) {
+			t.Fatalf("migration not idempotent with notify/safe_commit/firewall/dns:\npass1:\n%s\npass2:\n%s", string(out), string(out2))
+		}
+	})
+
+	t.Run("server_also_preserves_notify_safe_commit_and_firewall", func(t *testing.T) {
+		oldServer := `server:
+  node_domain: "node.example.com"
+  cf_dns_key: "cf-test-token"
+firewall:
+  ban_timeout_days: 14
+notify:
+  enabled: true
+  channels:
+    telegram:
+      enabled: true
+      bot_token: "999999:server_test_token"
+      chat_id: "100200300"
+safe_commit:
+  default_ttl_sec: 300
+`
+		out, err := config.MigrateConfigBytes([]byte(oldServer), configs.DefaultConfigYAML)
+		if err != nil {
+			t.Fatalf("MigrateConfigBytes server failed: %v", err)
+		}
+		var got config.Config
+		if err := yaml.Unmarshal(out, &got); err != nil {
+			t.Fatalf("unmarshal server migrated yaml failed: %v", err)
+		}
+		if !got.Notify.Enabled || got.Notify.Channels.Telegram.BotToken != "999999:server_test_token" {
+			t.Fatalf("server notify lost: %+v", got.Notify)
+		}
+		if got.Firewall.BanTimeoutDays != 14 || got.SafeCommit.EffectiveTTLSec() != 300 {
+			t.Fatalf("server firewall/safe_commit lost: fw=%+v sc=%+v", got.Firewall, got.SafeCommit)
+		}
+	})
+
+	t.Run("all_config_top_level_yaml_keys_survive_migration_guard", func(t *testing.T) {
+		// Reflection guard: every top-level YAML key on config.Config must be present in a populated migration output.
+		fullYAML := `low_memory: "on"
+subs:
+  - name: "main"
+    url: "https://sub.example.com/client"
+github:
+  mirror_url: "https://mirror.example.com"
+hy2:
+  up: 50
+  down: 300
+dns:
+  enabled: true
+  engine: "smartdns"
+gateway:
+  mode: "side"
+  main_router_ip: "192.168.1.1"
+tailscale:
+  auth_key: "test-ts-key"
+watchdog:
+  interval: 90
+firewall:
+  ban_timeout_days: 5
+audit:
+  whitelist:
+    - "safe.example.com"
+custom_rules:
+  block:
+    - target: "ads.example.com"
+traffic_routing:
+  presets:
+    openai:
+      enabled: true
+      outbound: "#VPS"
+notify:
+  enabled: true
+  channels:
+    telegram:
+      enabled: true
+      bot_token: "111:guard_token"
+      chat_id: "222"
+safe_commit:
+  default_ttl_sec: 120
+`
+		out, err := config.MigrateConfigBytes([]byte(fullYAML), configs.ClientConfigYAML)
+		if err != nil {
+			t.Fatalf("MigrateConfigBytes full client failed: %v", err)
+		}
+		var doc map[string]any
+		if err := yaml.Unmarshal(out, &doc); err != nil {
+			t.Fatalf("unmarshal doc failed: %v", err)
+		}
+		cfgType := reflect.TypeFor[config.Config]()
+		for i := range cfgType.NumField() {
+			field := cfgType.Field(i)
+			tag := strings.Split(field.Tag.Get("yaml"), ",")[0]
+			if tag == "" || tag == "-" || tag == "server" {
+				continue
+			}
+			if _, ok := doc[tag]; !ok {
+				t.Errorf("top-level Config field %s (yaml:%q) was dropped by MigrateConfigBytes!", field.Name, tag)
+			}
+		}
 	})
 }

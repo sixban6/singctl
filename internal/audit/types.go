@@ -135,11 +135,13 @@ type FlowRecord struct {
 	Outbound          string                 `json:"outbound"`
 	Chains            []string               `json:"chains,omitempty"` // 完整策略组链路（入口 -> 出口，如 Proxy -> #VPS -> node）
 	Rule              string                 `json:"rule,omitempty"`
-	UploadBytes       int64                  `json:"uploadBytes"`
-	DownloadBytes     int64                  `json:"downloadBytes"`
-	UploadRatio       float64                `json:"uploadRatio"`
-	AvgUploadBps      float64                `json:"avgUploadBps,omitempty"`
-	ThrottledRateKBps int                    `json:"throttledRateKbps,omitempty"`
+	UploadBytes        int64                  `json:"uploadBytes"`
+	DownloadBytes      int64                  `json:"downloadBytes"`
+	UploadRatio        float64                `json:"uploadRatio"`
+	AvgUploadBps       float64                `json:"avgUploadBps,omitempty"`
+	CurrentUploadBps   float64                `json:"currentUploadBps,omitempty"`
+	CurrentDownloadBps float64                `json:"currentDownloadBps,omitempty"`
+	ThrottledRateKBps  int                    `json:"throttledRateKbps,omitempty"`
 	ConnCount         int                    `json:"connCount"`
 	ActiveConns       int                    `json:"activeConns"`
 	ActiveConnIDs     []string               `json:"activeConnIds,omitempty"`

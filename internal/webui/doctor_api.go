@@ -41,7 +41,7 @@ func (s *Server) buildDoctorQuickFixHandlers(cfg *config.Config, procRoot string
 			if err != nil {
 				return "", err
 			}
-			return cmp.Or(st.Message, fmt.Sprintf("已为 tailscaled (PID %d) 开启 OOM 免疫保护 (oom_score_adj=%d)", st.PID, st.ScoreAdj)), nil
+			return cmp.Or(st.Message, "已为 tailscaled 开启 OOM 免疫保护"), nil
 		},
 		"sync-dns-local": func(ctx context.Context) (string, error) {
 			return s.quickFixSyncDNSLocal(ctx, cfg)

@@ -157,15 +157,15 @@ func (remoteLifelineChecker) Run(_ context.Context, env *Env) CheckResult {
 
 	if st.Protected {
 		res.Status = StatusPass
-		res.Summary = fmt.Sprintf("tailscaled (PID %d) 已开启 OOM 免疫保护 (oom_score_adj=%d)", st.PID, st.ScoreAdj)
+		res.Summary = "tailscaled 已开启 OOM 免疫保护"
 		res.Detail = st.Message
 		return res
 	}
 
 	res.Status = StatusWarn
-	res.Summary = fmt.Sprintf("tailscaled (PID %d) 未受 OOM 免疫保护 (oom_score_adj=%d)", st.PID, st.ScoreAdj)
-	res.Detail = "小内存设备出现突发抖动时，内核 OOM Killer 可能杀掉 tailscaled 导致远程彻底失联"
-	res.Advice = "建议立即将 tailscaled 的 oom_score_adj 锁定为 -1000"
+	res.Summary = "tailscaled 未开启 OOM 免疫保护"
+	res.Detail = "低内存设备出现内存波动时，系统可能终止 tailscaled 导致远程失联"
+	res.Advice = "建议一键开启 tailscaled OOM 免疫保护"
 	res.FixAction = "protect-tailscale-oom"
 	res.FixLabel = "一键加 OOM 免疫"
 	return res
