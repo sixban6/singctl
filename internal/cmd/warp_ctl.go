@@ -1,3 +1,5 @@
+//go:build !lite
+
 // 文件职责：承载 `singctl sr warp-ctl` 隐藏子命令，委托 internal/deploy 执行本机非交互 WARP JSON RPC 控制。
 package cmd
 

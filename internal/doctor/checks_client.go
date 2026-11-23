@@ -1,3 +1,5 @@
+//go:build !lite
+
 // 文件职责：实现客户端网关/透明代理模式下的声明式体检算子集合（系统环境、Linux BBR、订阅源、sing-box 客户端核心、本地控制面与外网 HTTPS 连通性）。
 package doctor
 
