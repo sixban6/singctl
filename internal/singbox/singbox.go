@@ -218,7 +218,8 @@ func (sb *SingBox) GenerateConfig() error {
 	// 规则集本地化：预下载 remote 规则集并改写为本地引用，
 	// 使 sing-box 启动不依赖 GitHub；下载失败自动回退/保留 remote
 	pureBaseJSON := sb.localizeRuleSets(configContent)
-	preserveManual := sb.config == nil || sb.config.Watchdog.ShouldPreserveManualConfig()
+	preserveManual := (sb.config == nil || !sb.config.IsDirectAuditMode()) &&
+		(sb.config == nil || sb.config.Watchdog.ShouldPreserveManualConfig())
 	configContent, preservedChanges := PrepareRegeneratedConfig(context.Background(), sb.configPath, pureBaseJSON, preserveManual)
 
 	// 备份原配置文件（如果存在）

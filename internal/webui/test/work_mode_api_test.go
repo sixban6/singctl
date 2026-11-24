@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -91,4 +92,46 @@ func TestGatewayWorkModeAPI_ZeroSubsBasicAuditAndProxyGuard(t *testing.T) {
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"effectiveWorkMode":"basic"`) {
 		t.Fatalf("switching back to basic failed: code=%d body=%s", rec.Code, rec.Body.String())
 	}
+
+	// 6. Switching from basic -> audit WITH ipv6Mode="off" (exact frontend payload) MUST succeed
+	// even when a stale/broken sing-box config.json exists on disk (e.g. unsupported tailscale DNS server).
+	t.Run("switch_to_audit_with_ipv6_param_ignores_stale_singbox_config", func(t *testing.T) {
+		dir2 := t.TempDir()
+		cfg2 := filepath.Join(dir2, "singctl.yaml")
+		sb2 := filepath.Join(dir2, "config.json")
+		if err := config.Save(cfg2, &config.Config{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(sb2, []byte(`{invalid-json-stale-config`), 0600); err != nil {
+			t.Fatal(err)
+		}
+		var called []string
+		srv2 := webui.New(webui.Options{
+			ConfigPath:        cfg2,
+			SingBoxConfigPath: sb2,
+			GatewayProberForTest: func() gateway.TopologyInfo {
+				return gateway.TopologyInfo{LANIP: "192.168.1.1", LANIface: "br-lan"}
+			},
+			WorkModeApplyForTest: func(_ context.Context, _ *config.Config, targetMode string) (bool, string, error) {
+				called = append(called, targetMode)
+				return true, "switched to " + targetMode, nil
+			},
+		})
+		var buf bytes.Buffer
+		_ = json.NewEncoder(&buf).Encode(map[string]any{
+			"mode":     "main",
+			"workMode": "audit",
+			"ipv6Mode": "off",
+		})
+		req := httptest.NewRequest(http.MethodPut, "/api/gateway", &buf)
+		req.Header.Set("Content-Type", "application/json")
+		rec2 := httptest.NewRecorder()
+		srv2.Mux.ServeHTTP(rec2, req)
+		if rec2.Code != http.StatusOK {
+			t.Fatalf("expected 200 switching basic->audit with stale config.json, got code=%d body=%s", rec2.Code, rec2.Body.String())
+		}
+		if len(called) != 1 || called[0] != config.WorkModeAudit {
+			t.Fatalf("expected WorkModeApplyForTest called with audit, got %v", called)
+		}
+	})
 }

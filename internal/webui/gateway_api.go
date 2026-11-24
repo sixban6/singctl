@@ -228,23 +228,31 @@ func (s *Server) handleGatewayPut(w http.ResponseWriter, r *http.Request) {
 		ipv6Status = s.probeGatewayIPv6Status(r.Context(), nextGw, topo)
 	}
 
-	// 同步热更新 /etc/sing-box/config.json 中的 IPv6 DNS 策略（存在即生效）
+	// 同步热更新 /etc/sing-box/config.json 中的 IPv6 DNS 策略（存在即生效）。
+	// 若本次请求正在切换工作模式（将停用或全新重编译 config.json），或在真实宿主机基础模式且 sing-box 未运行时，
+	// 跳过对磁盘旧 config.json 的校验与改写，避免历史废弃配置阻断模式切换。
+	newEffectiveWorkMode := cfg.EffectiveWorkMode()
+	willApplyWorkMode := workModeRequested && (newEffectiveWorkMode != prevWorkMode || s.opts.WorkModeApplyForTest != nil)
+	skipLegacySBIPv6Patch := willApplyWorkMode ||
+		(isRealHost && newEffectiveWorkMode == config.WorkModeBasic && !daemon.IsSingBoxRunning())
 	sbPath := s.sbConfigPath()
-	if rawSBBytes, sbErr := os.ReadFile(sbPath); sbErr == nil && strings.TrimSpace(string(rawSBBytes)) != "" {
-		if ipv6Changed || nextGw.EffectiveIPv6Mode() != config.GatewayIPv6Off || body.IPv6Mode != nil {
-			updatedJSON, convErr := singbox.ApplyIPv6ModeToConfigJSON(string(rawSBBytes), nextGw.EffectiveIPv6Mode())
-			if convErr != nil {
-				s.rollbackSavedConfigFile(cfgPath, origCfgBytes, origReadErr)
-				writeJSONError(w, http.StatusInternalServerError, "编译 sing-box IPv6 规则失败: "+convErr.Error())
-				return
-			}
-			if liveErr := singbox.ApplyLiveSingBoxConfig(r.Context(), sbPath, s.sbWorkConfigPath(), updatedJSON, "ipv6"); liveErr != nil {
-				s.rollbackSavedConfigFile(cfgPath, origCfgBytes, origReadErr)
-				writeJSONError(w, http.StatusBadRequest, "sing-box 配置校验或热重载失败: "+liveErr.Error())
-				return
-			}
-			if daemon.IsSingBoxRunning() {
-				appliedLive = true
+	if !skipLegacySBIPv6Patch {
+		if rawSBBytes, sbErr := os.ReadFile(sbPath); sbErr == nil && strings.TrimSpace(string(rawSBBytes)) != "" {
+			if ipv6Changed || nextGw.EffectiveIPv6Mode() != config.GatewayIPv6Off || body.IPv6Mode != nil {
+				updatedJSON, convErr := singbox.ApplyIPv6ModeToConfigJSON(string(rawSBBytes), nextGw.EffectiveIPv6Mode())
+				if convErr != nil {
+					s.rollbackSavedConfigFile(cfgPath, origCfgBytes, origReadErr)
+					writeJSONError(w, http.StatusInternalServerError, "编译 sing-box IPv6 规则失败: "+convErr.Error())
+					return
+				}
+				if liveErr := singbox.ApplyLiveSingBoxConfig(r.Context(), sbPath, s.sbWorkConfigPath(), updatedJSON, "ipv6"); liveErr != nil {
+					s.rollbackSavedConfigFile(cfgPath, origCfgBytes, origReadErr)
+					writeJSONError(w, http.StatusBadRequest, "sing-box 配置校验或热重载失败: "+liveErr.Error())
+					return
+				}
+				if daemon.IsSingBoxRunning() {
+					appliedLive = true
+				}
 			}
 		}
 	}
@@ -260,10 +268,9 @@ func (s *Server) handleGatewayPut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 若请求切换了工作模式（基础模式 / 审计模式 / 代理模式），执行热切换
-	newEffectiveWorkMode := cfg.EffectiveWorkMode()
 	workModeMsg := ""
-	if workModeRequested && (newEffectiveWorkMode != prevWorkMode || s.opts.WorkModeApplyForTest != nil) {
-		liveOK, wmMsg, wmErr := s.applyWorkModeLive(r.Context(), cfg, newEffectiveWorkMode)
+	if willApplyWorkMode {
+		liveOK, wmMsg, wmErr := s.applyWorkModeLive(r.Context(), cfg, prevWorkMode, newEffectiveWorkMode)
 		if wmErr != nil {
 			s.rollbackSavedConfigFile(cfgPath, origCfgBytes, origReadErr)
 			writeJSONError(w, http.StatusInternalServerError, "切换工作模式失败（已回滚）: "+wmErr.Error())
@@ -321,7 +328,7 @@ func (s *Server) handleGatewayPut(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) applyWorkModeLive(ctx context.Context, cfg *config.Config, targetMode string) (bool, string, error) {
+func (s *Server) applyWorkModeLive(ctx context.Context, cfg *config.Config, prevMode, targetMode string) (bool, string, error) {
 	if s.opts.WorkModeApplyForTest != nil {
 		return s.opts.WorkModeApplyForTest(ctx, cfg, targetMode)
 	}
@@ -330,6 +337,12 @@ func (s *Server) applyWorkModeLive(ctx context.Context, cfg *config.Config, targ
 	}
 
 	dnsPort := cfg.DNS.GetDNSPort()
+	restoreBasicBridgeIfNeeded := func() {
+		if prevMode == config.WorkModeBasic && cfg.DNS.IsEnabled() {
+			_, _ = localdns.SyncOpenWrtDnsmasqBridge(ctx, true, dnsPort, localdns.DnsmasqBridgeDeps{})
+		}
+	}
+
 	switch targetMode {
 	case config.WorkModeBasic:
 		if daemon.IsSingBoxRunning() {
@@ -346,7 +359,6 @@ func (s *Server) applyWorkModeLive(ctx context.Context, cfg *config.Config, targ
 		return true, "已切换为「基础模式」（已停止代理内核，防劫持 DNS 与隔离网零损耗生效）", nil
 
 	case config.WorkModeAudit:
-		_, _ = localdns.SyncOpenWrtDnsmasqBridge(ctx, false, dnsPort, localdns.DnsmasqBridgeDeps{})
 		sb := singbox.New(cfg)
 		if err := sb.GenerateConfig(); err != nil {
 			return false, "", fmt.Errorf("生成免订阅审计配置失败: %w", err)
@@ -354,13 +366,14 @@ func (s *Server) applyWorkModeLive(ctx context.Context, cfg *config.Config, targ
 		if daemon.IsSingBoxRunning() {
 			_ = sb.Stop()
 		}
+		_, _ = localdns.SyncOpenWrtDnsmasqBridge(ctx, false, dnsPort, localdns.DnsmasqBridgeDeps{})
 		if err := sb.Start(); err != nil {
+			restoreBasicBridgeIfNeeded()
 			return false, "", fmt.Errorf("启动免订阅审计内核失败: %w", err)
 		}
 		return true, "已切换为「审计模式」（无需订阅，实时行为审计、PCDN 拦截与防劫持 DNS 已激活）", nil
 
 	case config.WorkModeProxy:
-		_, _ = localdns.SyncOpenWrtDnsmasqBridge(ctx, false, dnsPort, localdns.DnsmasqBridgeDeps{})
 		sb := singbox.New(cfg)
 		if err := sb.GenerateConfig(); err != nil {
 			return false, "", fmt.Errorf("生成代理配置失败: %w", err)
@@ -368,7 +381,9 @@ func (s *Server) applyWorkModeLive(ctx context.Context, cfg *config.Config, targ
 		if daemon.IsSingBoxRunning() {
 			_ = sb.Stop()
 		}
+		_, _ = localdns.SyncOpenWrtDnsmasqBridge(ctx, false, dnsPort, localdns.DnsmasqBridgeDeps{})
 		if err := sb.Start(); err != nil {
+			restoreBasicBridgeIfNeeded()
 			return false, "", fmt.Errorf("启动代理内核失败: %w", err)
 		}
 		return true, "已切换为「代理模式」（透明代理智能分流与完整审计已生效）", nil
