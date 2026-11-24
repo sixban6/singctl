@@ -39,6 +39,13 @@ export const GatewayIPv6Section: React.FC<GatewayIPv6SectionProps> = ({
 }) => {
   const { success, error } = useToast();
   const [copiedSubCmd, setCopiedSubCmd] = useState(false);
+  const wanPublicIPv6 = Boolean(v6Status?.wanHasGua || v6Status?.pdPrefix);
+  const lanInheritedIPv6 = Boolean(v6Status?.lanGua || (v6Status?.lanPrefixes && v6Status.lanPrefixes.length > 0));
+  const publicIPv6Available =
+    mode === 'side'
+      ? Boolean(v6Status?.hasPublicIpv6 || wanPublicIPv6 || lanInheritedIPv6)
+      : wanPublicIPv6;
+  const showInheritedSideLabel = mode === 'side' && !wanPublicIPv6 && lanInheritedIPv6;
 
   const handleCopySubRouterCmd = async () => {
     try {
@@ -82,12 +89,14 @@ export const GatewayIPv6Section: React.FC<GatewayIPv6SectionProps> = ({
         {v6Status && (
           <div className="rounded-xl border border-subtle bg-surface2/60 px-3.5 py-2.5 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs">
             <div className="flex items-center gap-1.5">
-              <span className="text-muted">WAN IPv6:</span>
-              <Badge tone={v6Status.wanHasGua ? 'ok' : 'warn'}>
-                {v6Status.wanHasGua
+              <span className="text-muted">{mode === 'side' ? 'IPv6 接入:' : 'WAN IPv6:'}</span>
+              <Badge tone={publicIPv6Available ? 'ok' : 'warn'}>
+                {publicIPv6Available
                   ? v6Status.pdPrefix
                     ? `已获公网 + PD ${maskFullIP(v6Status.pdPrefix, privacyMask)}`
-                    : '已获公网地址'
+                    : showInheritedSideLabel
+                      ? '已获公网 IPv6 (继承上级路由)'
+                      : '已获公网地址'
                   : '未检测到公网 IPv6'}
               </Badge>
             </div>
@@ -263,7 +272,7 @@ export const GatewayIPv6Section: React.FC<GatewayIPv6SectionProps> = ({
         <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-subtle">
           <span className="text-[11px] text-muted">
             {mode === 'side'
-              ? '当前选择旁路由模式：为避免主路由 RA 绕过旁路由造成泄漏，IPv6 自动保持关闭。'
+              ? '当前选择旁路由模式：本机可通过 LAN 口继承上级路由 IPv6；IPv6 透明代理自动保持关闭，避免主路由 RA 绕过造成泄漏。'
               : '保存后自动同步 OpenWrt RA/DHCPv6、dnsmasq 与 sing-box 规则并零断网热重载（切回关闭会自动按备份还原）。'}
           </span>
           <Button

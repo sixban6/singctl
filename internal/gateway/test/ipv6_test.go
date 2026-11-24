@@ -207,3 +207,69 @@ func TestProbeIPv6Status_RADNSAnnounceAndBackupBackfill(t *testing.T) {
 		t.Fatalf("expected legacy backup preserved and dnsforwardmax backfilled, got:\n%s", content)
 	}
 }
+
+func TestProbeIPv6Status_SideRouterTreatsLANGUAAsIPv6Availability(t *testing.T) {
+	tests := []struct {
+		name          string
+		side          bool
+		kernelProbe   func() (bool, bool)
+		probe         func(string) (bool, string, []string)
+		wantAvailable bool
+		wantWarning   string
+	}{
+		{
+			name:          "side router inherits IPv6 on LAN",
+			side:          true,
+			probe:         func(string) (bool, string, []string) { return false, "2001:db8:10::2", []string{"2001:db8:10::/64"} },
+			wantAvailable: true,
+			wantWarning:   "已通过 LAN 口",
+		},
+		{
+			name:          "side router without LAN GUA",
+			side:          true,
+			probe:         func(string) (bool, string, []string) { return false, "", nil },
+			wantAvailable: false,
+			wantWarning:   "LAN 口未检测到公网 IPv6",
+		},
+		{
+			name:          "side router with kernel IPv6 disabled reports kernel warning first",
+			side:          true,
+			kernelProbe:   func() (bool, bool) { return false, false },
+			probe:         func(string) (bool, string, []string) { return false, "", nil },
+			wantAvailable: false,
+			wantWarning:   "系统内核已禁用 IPv6",
+		},
+		{
+			name:          "main router still requires WAN IPv6",
+			probe:         func(string) (bool, string, []string) { return false, "2001:db8:10::2", []string{"2001:db8:10::/64"} },
+			wantAvailable: false,
+			wantWarning:   "WAN 口暂未检测到公网 IPv6",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := &gateway.Controller{
+				IsOpenWrt: func() bool { return false },
+				Exec: func(name string, args ...string) ([]byte, error) {
+					if strings.TrimSpace(name+" "+strings.Join(args, " ")) == "ip -6 route show default" {
+						return []byte("default via fe80::1 dev eth0 proto static\n"), nil
+					}
+					return nil, os.ErrNotExist
+				},
+				IPv6IfaceProbe:  tt.probe,
+				IPv6KernelProbe: tt.kernelProbe,
+			}
+			mode := "main"
+			if tt.side {
+				mode = "side"
+			}
+			st := ctrl.ProbeIPv6Status(t.Context(), config.GatewayConfig{Mode: mode, MainRouterIP: "192.168.1.1"}, gateway.TopologyInfo{LANIface: "eth0"})
+			if st.HasPublicIPv6 != tt.wantAvailable {
+				t.Fatalf("expected HasPublicIPv6=%v, got %v (lanGua=%q prefixes=%v)", tt.wantAvailable, st.HasPublicIPv6, st.LANGUA, st.LANPrefixes)
+			}
+			if !slices.ContainsFunc(st.Warnings, func(w string) bool { return strings.Contains(w, tt.wantWarning) }) {
+				t.Fatalf("expected warning containing %q, got %v", tt.wantWarning, st.Warnings)
+			}
+		})
+	}
+}

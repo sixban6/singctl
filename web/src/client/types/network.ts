@@ -9,6 +9,7 @@ export interface IPv6StatusInfo {
   kernelEnabled: boolean;
   forwardingEnabled: boolean;
   wanHasGua: boolean;
+  hasPublicIpv6?: boolean;
   wanHasDefaultV6: boolean;
   pdPrefix?: string;
   lanGua?: string;
