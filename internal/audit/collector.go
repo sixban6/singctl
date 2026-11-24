@@ -52,6 +52,7 @@ type Collector struct {
 	lastPollAt             time.Time
 	connRateCursors        map[string]connRateCursor
 	flowLiveRates          map[string]flowLiveRate
+	flowActiveDetails      map[string][]ActiveConnDetail
 	cachedEngine           *NonlinearEngine
 	cachedEngineFp         string
 	cachedSelfIPs          map[string]bool
@@ -97,6 +98,7 @@ func (c *Collector) SetEndpointsForTest(endpoints []string, secret, statePath st
 		c.lastPollAt = time.Time{}
 		c.connRateCursors = nil
 		c.flowLiveRates = nil
+		c.flowActiveDetails = nil
 		ResetAICacheForTest(statePath + ".ai-cache.json")
 	}
 }
@@ -339,6 +341,7 @@ func buildRawFlowRecords(
 	state *persistedAuditState,
 	activeByKey map[string][]string,
 	liveRates map[string]flowLiveRate,
+	activeDetails map[string][]ActiveConnDetail,
 	devDirectory map[string]lanDeviceInfo,
 	selfIPs map[string]bool,
 	engine *NonlinearEngine,
@@ -359,6 +362,10 @@ func buildRawFlowRecords(
 				curUpBps = math.Round(lr.upBps*10) / 10
 				curDownBps = math.Round(lr.downBps*10) / 10
 			}
+		}
+		var subDetails []ActiveConnDetail
+		if len(activeIDs) > 0 && activeDetails != nil {
+			subDetails = slices.Clone(activeDetails[entry.Key])
 		}
 		rawFlows = append(rawFlows, FlowRecord{
 			Key:                entry.Key,
@@ -384,8 +391,10 @@ func buildRawFlowRecords(
 			ConnCount:          entry.ConnCount,
 			ActiveConns:        len(activeIDs),
 			ActiveConnIDs:      activeIDs,
+			ActiveConnDetails:  subDetails,
 			FirstSeen:          time.Unix(entry.FirstSeenUnix, 0).In(displayLoc).Format("15:04:05"),
 			LastSeen:           time.Unix(entry.LastSeenUnix, 0).In(displayLoc).Format("15:04:05"),
+			LastSeenUnix:       entry.LastSeenUnix,
 			ActiveSpanSec:      max(int64(60), entry.LastSeenUnix-entry.FirstSeenUnix),
 			NightHits:          entry.NightHits,
 			IntervalCV:         computeIntervalCV(entry.ArrivalsUnix),
@@ -560,7 +569,7 @@ func (c *Collector) collectLocked(ctx context.Context, opts CollectOptions) *Rep
 		rep.ControllerAddr = usedAddr
 	}
 
-	rawFlows := buildRawFlowRecords(c.cfg, state, activeByKey, c.flowLiveRates, devDirectory, selfIPs, engine, now)
+	rawFlows := buildRawFlowRecords(c.cfg, state, activeByKey, c.flowLiveRates, c.flowActiveDetails, devDirectory, selfIPs, engine, now)
 	allFlows, deviceAgg := evaluateAndFilterFlows(engine, rawFlows, opts, rep)
 	rep.TotalFlows = len(state.Flows)
 	rep.Devices = buildSortedDeviceSummaries(deviceAgg)

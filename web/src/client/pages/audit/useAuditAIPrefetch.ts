@@ -24,6 +24,7 @@ export interface UseAuditAICacheResult {
   pendingTargets: Set<string>;
   aiStatusText: string;
   reviewSingleFlow: (f: AuditFlowRecord, force?: boolean) => Promise<void>;
+  reviewBatchFlows: (flows: AuditFlowRecord[], force?: boolean) => Promise<void>;
 }
 
 export function useAuditAICache(): UseAuditAICacheResult {
@@ -112,6 +113,57 @@ export function useAuditAICache(): UseAuditAICacheResult {
     [setCachedReview, success, error],
   );
 
+  const reviewBatchFlows = useCallback(
+    async (flows: AuditFlowRecord[], force = false) => {
+      const seen = new Set<string>();
+      const unique: AuditFlowRecord[] = [];
+      for (const f of flows) {
+        const tk = getFlowTargetKey(f);
+        if (seen.has(tk)) continue;
+        seen.add(tk);
+        unique.push(f);
+        if (unique.length >= 25) break;
+      }
+      if (!unique.length) return;
+      const tks = unique.map(getFlowTargetKey);
+      setPendingTargets((prev) => {
+        const next = new Set(prev);
+        tks.forEach((tk) => next.add(tk));
+        return next;
+      });
+      try {
+        const res = await clientApi.reviewAuditBatch(unique, force);
+        let updated = 0;
+        unique.forEach((f) => {
+          const fk = getFlowCacheKey(f);
+          const tk = getFlowTargetKey(f);
+          const rev = res.results?.[fk] || res.results?.[f.target] || res.results?.[tk];
+          if (rev) {
+            setCachedReview(f, f.target, rev, true);
+            updated++;
+          }
+        });
+        if (updated > 0) {
+          flushCachedReviews();
+          success(
+            res.usedRemote
+              ? `已完成 ${updated} 个目标的 AI 深度研判`
+              : `已使用内置知识库研判 ${updated} 个目标`,
+          );
+        }
+      } catch (e) {
+        error((e as Error).message || '批量 AI 研判失败');
+      } finally {
+        setPendingTargets((prev) => {
+          const next = new Set(prev);
+          tks.forEach((tk) => next.delete(tk));
+          return next;
+        });
+      }
+    },
+    [setCachedReview, flushCachedReviews, success, error],
+  );
+
   return {
     aiEnabled,
     handleToggleAI,
@@ -121,6 +173,7 @@ export function useAuditAICache(): UseAuditAICacheResult {
     pendingTargets,
     aiStatusText,
     reviewSingleFlow,
+    reviewBatchFlows,
   };
 }
 

@@ -144,10 +144,41 @@ func recordNewConnArrival(entry *persistedFlowEntry, connStart string, nowUnix i
 }
 
 const (
-	liveRateMinSampleSec = 0.5
-	liveRateMaxSampleSec = 120.0
-	maxValidConnStartAge = 30 * 24 * 3600
+	liveRateMinSampleSec    = 0.5
+	liveRateMaxSampleSec    = 120.0
+	maxValidConnStartAge    = 30 * 24 * 3600
+	maxActiveDetailsPerFlow = 8
 )
+
+func buildActiveConnDetail(conn clashConnection, upBps, downBps float64, now time.Time) ActiveConnDetail {
+	rule := strings.TrimSpace(conn.Rule)
+	if rule != "" && strings.TrimSpace(conn.RulePayload) != "" {
+		rule = rule + "(" + strings.TrimSpace(conn.RulePayload) + ")"
+	}
+	var durSec int64
+	var startLabel string
+	if st, ok := parseConnStartTime(conn.Start); ok {
+		startLabel = st.In(now.Location()).Format("15:04:05")
+		if d := int64(now.Sub(st).Seconds()); d > 0 {
+			durSec = d
+		}
+	}
+	return ActiveConnDetail{
+		ID:          conn.ID,
+		SourcePort:  strings.TrimSpace(conn.Metadata.SourcePort),
+		DestIP:      strings.TrimSpace(conn.Metadata.DestinationIP),
+		DestPort:    strings.TrimSpace(conn.Metadata.DestinationPort),
+		InboundType: strings.TrimSpace(conn.Metadata.Type),
+		Rule:        rule,
+		Chains:      dedupReverseChains(conn.Chains),
+		Upload:      conn.Upload,
+		Download:    conn.Download,
+		UploadBps:   math.Round(upBps*10) / 10,
+		DownloadBps: math.Round(downBps*10) / 10,
+		Start:       startLabel,
+		DurationSec: durSec,
+	}
+}
 
 func parseConnStartTime(raw string) (time.Time, bool) {
 	s := strings.TrimSpace(raw)
@@ -217,6 +248,7 @@ func (c *Collector) ingestConnectionsLocked(
 
 	var nextCursors map[string]connRateCursor
 	var nextRates map[string]flowLiveRate
+	nextDetails := make(map[string][]ActiveConnDetail, len(conns))
 	if !debounceRapidPoll {
 		nextCursors = make(map[string]connRateCursor, len(conns))
 		nextRates = make(map[string]flowLiveRate, len(conns))
@@ -227,23 +259,42 @@ func (c *Collector) ingestConnectionsLocked(
 		if changed {
 			mutated = true
 		}
-		if flowKey == "" || debounceRapidPoll {
+		if flowKey == "" {
 			continue
 		}
-		prev, hadPrev := c.connRateCursors[conn.ID]
-		upBps, downBps := computeConnLiveRate(prev, hadPrev, c.lastPollAt, conn, now)
-		if upBps > 0 || downBps > 0 {
-			cur := nextRates[flowKey]
-			cur.upBps += upBps
-			cur.downBps += downBps
-			nextRates[flowKey] = cur
+		var upBps, downBps float64
+		if !debounceRapidPoll {
+			prev, hadPrev := c.connRateCursors[conn.ID]
+			upBps, downBps = computeConnLiveRate(prev, hadPrev, c.lastPollAt, conn, now)
+			if upBps > 0 || downBps > 0 {
+				cur := nextRates[flowKey]
+				cur.upBps += upBps
+				cur.downBps += downBps
+				nextRates[flowKey] = cur
+			}
+			nextCursors[conn.ID] = connRateCursor{
+				Upload:   conn.Upload,
+				Download: conn.Download,
+				SampleAt: now,
+			}
 		}
-		nextCursors[conn.ID] = connRateCursor{
-			Upload:   conn.Upload,
-			Download: conn.Download,
-			SampleAt: now,
+		nextDetails[flowKey] = append(nextDetails[flowKey], buildActiveConnDetail(conn, upBps, downBps, now))
+	}
+
+	for key, list := range nextDetails {
+		if len(list) > 1 {
+			slices.SortFunc(list, func(a, b ActiveConnDetail) int {
+				if c := cmp.Compare(b.UploadBps+b.DownloadBps, a.UploadBps+a.DownloadBps); c != 0 {
+					return c
+				}
+				return cmp.Compare(b.Upload+b.Download, a.Upload+a.Download)
+			})
+		}
+		if len(list) > maxActiveDetailsPerFlow {
+			nextDetails[key] = list[:maxActiveDetailsPerFlow]
 		}
 	}
+	c.flowActiveDetails = nextDetails
 
 	if debounceRapidPoll {
 		if len(c.flowLiveRates) > 0 {
@@ -414,6 +465,30 @@ func applySortDirection(c int, asc bool) int {
 
 func compareFlowsBySortKey(a, b FlowRecord, key string, asc bool) int {
 	switch key {
+	case "latest":
+		if c := applySortDirection(cmp.Compare(b.LastSeenUnix, a.LastSeenUnix), asc); c != 0 {
+			return c
+		}
+		if ac := cmp.Compare(b.ActiveConns, a.ActiveConns); ac != 0 {
+			return ac
+		}
+		return cmp.Compare(b.RiskScore, a.RiskScore)
+	case "live_up":
+		if c := applySortDirection(cmp.Compare(b.CurrentUploadBps, a.CurrentUploadBps), asc); c != 0 {
+			return c
+		}
+		if u := applySortDirection(cmp.Compare(b.UploadBytes, a.UploadBytes), asc); u != 0 {
+			return u
+		}
+		return cmp.Compare(b.RiskScore, a.RiskScore)
+	case "live_down":
+		if c := applySortDirection(cmp.Compare(b.CurrentDownloadBps, a.CurrentDownloadBps), asc); c != 0 {
+			return c
+		}
+		if d := applySortDirection(cmp.Compare(b.DownloadBytes, a.DownloadBytes), asc); d != 0 {
+			return d
+		}
+		return cmp.Compare(b.RiskScore, a.RiskScore)
 	case "upload":
 		if c := applySortDirection(cmp.Compare(b.UploadBytes, a.UploadBytes), asc); c != 0 {
 			return c

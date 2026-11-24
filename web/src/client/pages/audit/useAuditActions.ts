@@ -2,9 +2,14 @@ import React, { useState } from 'react';
 import { emitClientInvalidate } from '../../../hooks';
 import { useToast } from '../../../ui';
 import { clientApi } from '../../api';
-import { AuditBlockRule, AuditFlowRecord, AuditReport } from '../../types';
 import {
-  AuditSortKey,
+  AuditBlockBatchItem,
+  AuditBlockRule,
+  AuditFlowRecord,
+  AuditReport,
+} from '../../types';
+import { AuditSelectedDevice, AuditSortKey } from './auditFlowModel';
+import {
   getFlowCacheKey,
   isProtectedBootstrapTarget,
   SubnetBlockConfirmState,
@@ -12,7 +17,8 @@ import {
 
 export interface UseAuditActionsParams {
   report: AuditReport | null;
-  deviceFilter: string;
+  searchQuery: string;
+  selectedDevice: AuditSelectedDevice | null;
   onlySuspect: boolean;
   sortBy: AuditSortKey;
   sortDir: 'asc' | 'desc';
@@ -23,9 +29,36 @@ export interface UseAuditActionsParams {
   loadAudit: (silent?: boolean) => Promise<void>;
 }
 
+async function copyTextWithFallback(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // fallback below
+  }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    ta.style.top = '-9999px';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
 export function useAuditActions({
   report,
-  deviceFilter,
+  searchQuery,
+  selectedDevice,
   onlySuspect,
   sortBy,
   sortDir,
@@ -38,6 +71,7 @@ export function useAuditActions({
   const { success, error, toast } = useToast();
 
   const [blockBusy, setBlockBusy] = useState(false);
+  const [batchBusy, setBatchBusy] = useState(false);
   const [pcdnToggleBusy, setPcdnToggleBusy] = useState(false);
   const [throttleBusy, setThrottleBusy] = useState(false);
   const [busyFlowKeys, setBusyFlowKeys] = useState<Set<string>>(() => new Set());
@@ -45,6 +79,17 @@ export function useAuditActions({
   const [closeAllConfirmOpen, setCloseAllConfirmOpen] = useState(false);
   const [subnetBlockConfirm, setSubnetBlockConfirm] = useState<SubnetBlockConfirmState | null>(null);
   const [subnetBlocking, setSubnetBlocking] = useState(false);
+
+  const handleCopyText = async (text: string, label?: string) => {
+    const val = String(text || '').trim();
+    if (!val) return;
+    const ok = await copyTextWithFallback(val);
+    if (ok) {
+      success(`已复制${label ? ` ${label}: ` : ': '}${val}`, 2400);
+    } else {
+      error('浏览器阻止了剪贴板访问，请手动复制');
+    }
+  };
 
   const handleBlockFlow = async (f: AuditFlowRecord, deviceOnly = false) => {
     if (isProtectedBootstrapTarget(f.target)) {
@@ -61,7 +106,24 @@ export function useAuditActions({
       const res = await clientApi.blockAuditTarget(f.target, scopedSource, reason);
       success(
         res.message ||
-          (scopedSource ? `已仅针对 ${scopedSource} 阻断 ${f.target}` : `已全局拉黑 ${f.target}`),
+          (scopedSource ? `已仅针对 ${scopedSource} 阻断 ${f.target}` : `已全屋拉黑 ${f.target}`),
+        6000,
+        {
+          label: '撤销',
+          onClick: async () => {
+            actionInFlightRef.current++;
+            try {
+              await clientApi.unblockAuditTarget(f.target, scopedSource);
+              success(`已撤销拉黑 ${f.target}`, 3000);
+              emitClientInvalidate('adguard');
+              await loadAudit(false);
+            } catch (ue) {
+              error((ue as Error).message || '撤销拉黑失败');
+            } finally {
+              actionInFlightRef.current = Math.max(0, actionInFlightRef.current - 1);
+            }
+          },
+        },
       );
       if (detailFlowKey === fk) {
         setDetailFlowKey(null);
@@ -77,6 +139,96 @@ export function useAuditActions({
         next.delete(fk);
         return next;
       });
+    }
+  };
+
+  const handleBlockBatch = async (
+    flows: AuditFlowRecord[],
+    deviceOnly: boolean,
+  ): Promise<boolean> => {
+    const items: AuditBlockBatchItem[] = [];
+    const seen = new Set<string>();
+    let protectedSkipped = 0;
+
+    for (const f of flows) {
+      if (!f?.target) continue;
+      if (isProtectedBootstrapTarget(f.target)) {
+        protectedSkipped++;
+        continue;
+      }
+      const src = deviceOnly && f.deviceIp && f.deviceIp !== '127.0.0.1' ? f.deviceIp : '';
+      const key = `${f.target.toLowerCase()}|${src}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      items.push({
+        target: f.target,
+        sourceIp: src,
+        reason: (f.reasons && f.reasons[0]) || 'WebUI 安全审计批量拉黑',
+      });
+    }
+
+    if (items.length === 0) {
+      toast(
+        protectedSkipped > 0
+          ? '所选目标均受防断网基础设施保护，无法拉黑'
+          : '没有可拉黑的有效目标',
+        'info',
+      );
+      return false;
+    }
+
+    setBatchBusy(true);
+    actionInFlightRef.current++;
+    try {
+      const res = await clientApi.blockAuditBatch(items);
+      const summary =
+        res.message ||
+        `已批量生效 ${res.added} 条规则${res.killedConnections > 0 ? `，断开 ${res.killedConnections} 条活跃连接` : ''}`;
+      success(summary, 5000);
+      emitClientInvalidate('adguard');
+      await loadAudit(false);
+      return true;
+    } catch (e) {
+      error((e as Error).message || '批量拉黑失败');
+      return false;
+    } finally {
+      setBatchBusy(false);
+      actionInFlightRef.current = Math.max(0, actionInFlightRef.current - 1);
+    }
+  };
+
+  const handleWhitelistBatch = async (flows: AuditFlowRecord[]): Promise<boolean> => {
+    const targets = Array.from(
+      new Set(
+        flows
+          .map((f) => String(f.target || '').trim().toLowerCase())
+          .filter((t) => Boolean(t)),
+      ),
+    );
+    if (!targets.length) return false;
+    setBatchBusy(true);
+    actionInFlightRef.current++;
+    let okCount = 0;
+    try {
+      for (const target of targets) {
+        try {
+          await clientApi.whitelistAuditTarget('add', target);
+          okCount++;
+        } catch {
+          // continue others
+        }
+      }
+      if (okCount > 0) {
+        success(`已批量放行 ${okCount} 个目标`, 4500);
+        emitClientInvalidate('adguard');
+        await loadAudit(false);
+        return true;
+      }
+      error('批量放行失败');
+      return false;
+    } finally {
+      setBatchBusy(false);
+      actionInFlightRef.current = Math.max(0, actionInFlightRef.current - 1);
     }
   };
 
@@ -157,7 +309,26 @@ export function useAuditActions({
     actionInFlightRef.current++;
     try {
       const res = await clientApi.whitelistAuditTarget(action, target);
-      success(res.message || (action === 'add' ? '已加入白名单' : '已移出白名单'));
+      if (action === 'add') {
+        success(res.message || `已放行 ${target}`, 6000, {
+          label: '撤销',
+          onClick: async () => {
+            actionInFlightRef.current++;
+            try {
+              await clientApi.whitelistAuditTarget('remove', target);
+              success(`已从白名单移出 ${target}`, 3000);
+              emitClientInvalidate('adguard');
+              await loadAudit(false);
+            } catch (ue) {
+              error((ue as Error).message || '撤销放行失败');
+            } finally {
+              actionInFlightRef.current = Math.max(0, actionInFlightRef.current - 1);
+            }
+          },
+        });
+      } else {
+        success(res.message || `已移出白名单: ${target}`);
+      }
       emitClientInvalidate('adguard');
       await loadAudit(false);
       return true;
@@ -237,6 +408,48 @@ export function useAuditActions({
     }
   };
 
+  const handleCloseSingleSubConn = async (connId: string, label?: string) => {
+    if (!connId) return;
+    actionInFlightRef.current++;
+    try {
+      const res = await clientApi.closeAuditConnections({ connIds: [connId] });
+      success(res.message || `已断开子连接${label ? ` (${label})` : ''}`, 3000);
+      await loadAudit(false);
+    } catch (e) {
+      error((e as Error).message || '断开子连接失败');
+    } finally {
+      actionInFlightRef.current = Math.max(0, actionInFlightRef.current - 1);
+    }
+  };
+
+  const handleCloseFilteredConnections = async (flows: AuditFlowRecord[]) => {
+    const connIds = Array.from(
+      new Set(
+        flows.flatMap((f) => [
+          ...(f.activeConnIds || []),
+          ...(f.activeConnDetails || []).map((c) => c.id),
+        ]).filter(Boolean),
+      ),
+    );
+    if (connIds.length === 0) {
+      toast('当前命中记录中没有可断开的活跃连接', 'info');
+      return;
+    }
+    setClosingAll(true);
+    actionInFlightRef.current++;
+    try {
+      const res = await clientApi.closeAuditConnections({ connIds });
+      setCloseAllConfirmOpen(false);
+      success(res.message || `已断开当前命中的 ${res.closed || connIds.length} 条活跃连接`);
+      await loadAudit(false);
+    } catch (e) {
+      error((e as Error).message || '断开当前命中连接失败');
+    } finally {
+      setClosingAll(false);
+      actionInFlightRef.current = Math.max(0, actionInFlightRef.current - 1);
+    }
+  };
+
   const handleCloseAllConnections = async () => {
     setClosingAll(true);
     actionInFlightRef.current++;
@@ -256,16 +469,17 @@ export function useAuditActions({
   const handleExportCSV = async () => {
     try {
       const qs = new URLSearchParams();
-      const q = deviceFilter.trim();
+      const dev = selectedDevice?.ip || searchQuery.trim();
       const isKnownDevice = Boolean(
-        q &&
-          (report?.devices || []).some(
-            (d) =>
-              d.deviceIp.toLowerCase() === q.toLowerCase() ||
-              (d.deviceName || '').toLowerCase() === q.toLowerCase(),
-          ),
+        selectedDevice?.ip ||
+          (dev &&
+            (report?.devices || []).some(
+              (d) =>
+                d.deviceIp.toLowerCase() === dev.toLowerCase() ||
+                (d.deviceName || '').toLowerCase() === dev.toLowerCase(),
+            )),
       );
-      if (isKnownDevice) qs.set('device', q);
+      if (isKnownDevice) qs.set('device', dev);
       if (onlySuspect) qs.set('suspicious', '1');
       if (sortBy) qs.set('sort', sortBy);
       if (sortDir) qs.set('dir', sortDir);
@@ -288,6 +502,7 @@ export function useAuditActions({
 
   return {
     blockBusy,
+    batchBusy,
     pcdnToggleBusy,
     throttleBusy,
     busyFlowKeys,
@@ -297,7 +512,10 @@ export function useAuditActions({
     subnetBlockConfirm,
     setSubnetBlockConfirm,
     subnetBlocking,
+    handleCopyText,
     handleBlockFlow,
+    handleBlockBatch,
+    handleWhitelistBatch,
     handleManualBlock,
     handleConfirmSubnetBlock,
     handleUnblock,
@@ -305,6 +523,8 @@ export function useAuditActions({
     handleTogglePCDNBlock,
     handleSetThrottle,
     handleCloseFlowConnections,
+    handleCloseSingleSubConn,
+    handleCloseFilteredConnections,
     handleCloseAllConnections,
     handleExportCSV,
   };

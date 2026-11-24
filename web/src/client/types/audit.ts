@@ -44,6 +44,42 @@ export interface AuditPCDNSwarmSummary {
   suspicious: boolean;
 }
 
+export interface AuditActiveConnDetail {
+  id: string;
+  sourcePort?: string;
+  destIp?: string;
+  destPort?: string;
+  inboundType?: string;
+  rule?: string;
+  chains?: string[];
+  upload: number;
+  download: number;
+  uploadBps?: number;
+  downloadBps?: number;
+  start?: string;
+  durationSec?: number;
+}
+
+export interface AuditBlockBatchItem {
+  target: string;
+  sourceIp?: string;
+  reason?: string;
+}
+
+export interface AuditBlockBatchResult {
+  ok: boolean;
+  added: number;
+  skipped: number;
+  failed: number;
+  configSaved?: boolean;
+  singboxSynced?: boolean;
+  dnsBlocked?: boolean;
+  killedConnections: number;
+  applied?: AuditBlockBatchItem[];
+  errors?: string[];
+  message: string;
+}
+
 export interface AuditFlowRecord {
   key?: string;
   id?: string;
@@ -73,8 +109,10 @@ export interface AuditFlowRecord {
   connCount?: number;
   activeConns?: number;
   activeConnIds?: string[];
+  activeConnDetails?: AuditActiveConnDetail[];
   firstSeen?: string;
   lastSeen?: string;
+  lastSeenUnix?: number;
   activeSpanSec?: number;
   nightHits?: number;
   intervalCv?: number;

@@ -1,10 +1,19 @@
-import { AuditAIReview, AuditFlowRecord, AuditReport } from '../../types';
+import { AuditAIReview, AuditFlowRecord } from '../../types';
 
 export const AUDIT_AI_STORAGE_KEY = 'sc_audit_ai_cache_v2';
 export const AUDIT_AI_ENABLE_KEY = 'sc_audit_ai_enable';
 export const FLOW_RENDER_STEP = 80;
 
-export type AuditSortKey = 'active' | 'risk' | 'upload' | 'download' | 'ratio';
+export type {
+  AuditFlowTelemetry,
+  AuditPresetCounts,
+  AuditPresetFilter,
+  AuditRefreshCadence,
+  AuditSelectedDevice,
+  AuditSortKey,
+  AuditTargetGroup,
+  AuditViewMode,
+} from './auditFlowModel';
 
 export interface SubnetBlockConfirmState {
   cidr: string;
@@ -322,105 +331,4 @@ export function persistAICache(map: Map<string, AuditAIReview>): void {
   } catch {
     // ignore
   }
-}
-
-export function filterAndSortAuditFlows(
-  report: AuditReport | null,
-  opts: {
-    deviceFilter: string;
-    networkFilter: '' | 'tcp' | 'udp';
-    onlyActive: boolean;
-    axisFilter: '' | 'security' | 'privacy';
-    sortBy: AuditSortKey;
-    sortDir: 'asc' | 'desc';
-    getCachedReview: (f: AuditFlowRecord) => AuditAIReview | null;
-  },
-): AuditFlowRecord[] {
-  const raw = report?.flows || [];
-  const whitelist = report?.whitelist || [];
-  const q = opts.deviceFilter.trim().toLowerCase();
-  const matchedDevMACs = new Set<string>();
-  if (q) {
-    for (const d of report?.devices || []) {
-      if (d.deviceMac && d.deviceIp.toLowerCase() === q) {
-        matchedDevMACs.add(d.deviceMac.toLowerCase());
-      }
-    }
-  }
-  const damped = raw
-    .filter((f) => {
-      if (!f || f.state === 'blocked') return false;
-      if (opts.onlyActive && (f.activeConns || 0) <= 0) return false;
-      if (opts.networkFilter && (f.network || '').toLowerCase() !== opts.networkFilter) return false;
-      if (q) {
-        const macLower = (f.deviceMac || '').toLowerCase();
-        const hit =
-          (f.target || '').toLowerCase().includes(q) ||
-          (f.destIp || '').toLowerCase().includes(q) ||
-          (f.subnetCluster?.cidr || '').toLowerCase().includes(q) ||
-          (f.destPort ? String(f.destPort).includes(q) : false) ||
-          (f.deviceIp || '').toLowerCase().includes(q) ||
-          (f.deviceName || '').toLowerCase().includes(q) ||
-          macLower.includes(q) ||
-          (macLower !== '' && matchedDevMACs.has(macLower)) ||
-          (f.outbound || '').toLowerCase().includes(q) ||
-          (f.chains || []).some((c) => c.toLowerCase().includes(q)) ||
-          (f.rule || '').toLowerCase().includes(q) ||
-          (f.appName || '').toLowerCase().includes(q) ||
-          (f.network || '').toLowerCase().includes(q);
-        if (!hit) return false;
-      }
-      if (opts.axisFilter === 'security') {
-        return (f.securityScore || 0) >= 15 || f.dominantAxis === 'security' || f.dominantAxis === 'both';
-      }
-      if (opts.axisFilter === 'privacy') {
-        return (f.privacyScore || 0) >= 15 || f.dominantAxis === 'privacy' || f.dominantAxis === 'both';
-      }
-      return true;
-    })
-    .map((f) => {
-      const rev = opts.getCachedReview(f);
-      const withDamp = applyLiveAIDampingToFlow(f, rev);
-      if (withDamp.state !== 'blocked' && isUserWhitelistedTarget(withDamp.target, whitelist)) {
-        return { ...withDamp, state: 'whitelisted' };
-      }
-      return withDamp;
-    });
-
-  const compareRiskHierarchy = (a: AuditFlowRecord, b: AuditFlowRecord): number => {
-    let c = stateRank(b.state) - stateRank(a.state);
-    if (c === 0) c = threatRank(b.threat) - threatRank(a.threat);
-    if (c === 0) c = (b.riskScore || 0) - (a.riskScore || 0);
-    if (c === 0) c = (b.activeConns || 0) - (a.activeConns || 0);
-    if (c === 0) c = (b.uploadBytes || 0) - (a.uploadBytes || 0);
-    return c;
-  };
-
-  const sign = opts.sortDir === 'asc' ? -1 : 1;
-  damped.sort((a, b) => {
-    if (opts.sortBy === 'upload') {
-      const c = ((b.uploadBytes || 0) - (a.uploadBytes || 0)) * sign;
-      if (c !== 0) return c;
-      return (b.riskScore || 0) - (a.riskScore || 0);
-    }
-    if (opts.sortBy === 'download') {
-      const c = ((b.downloadBytes || 0) - (a.downloadBytes || 0)) * sign;
-      if (c !== 0) return c;
-      return (b.riskScore || 0) - (a.riskScore || 0);
-    }
-    if (opts.sortBy === 'ratio') {
-      const c = ((b.uploadRatio || 0) - (a.uploadRatio || 0)) * sign;
-      if (c !== 0) return c;
-      return (b.uploadBytes || 0) - (a.uploadBytes || 0);
-    }
-    if (opts.sortBy === 'risk') {
-      return compareRiskHierarchy(a, b) * sign;
-    }
-    const aAct = (a.activeConns || 0) > 0 ? 1 : 0;
-    const bAct = (b.activeConns || 0) > 0 ? 1 : 0;
-    let c = bAct - aAct;
-    if (c === 0) c = compareRiskHierarchy(a, b);
-    return c * sign;
-  });
-  return damped;
 }
