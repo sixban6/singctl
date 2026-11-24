@@ -30,7 +30,7 @@ export const AuditBulkBar: React.FC<AuditBulkBarProps> = ({
   if (selectedCount === 0) return null;
 
   return (
-    <div className="sticky bottom-3 z-30 mx-3 sm:mx-4 mb-3 rounded-2xl border border-accent/45 bg-slate-900/95 backdrop-blur-xl shadow-2xl px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2.5 animate-sc-in">
+    <div className="fixed bottom-mobile-nav inset-x-3 md:sticky md:inset-x-auto md:bottom-3 md:mx-4 md:mb-3 z-30 rounded-2xl border border-accent/45 bg-slate-900/95 backdrop-blur-xl shadow-2xl px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2.5 animate-sc-in">
       <div className="flex items-center gap-2.5 text-xs">
         <span className="inline-flex items-center gap-1.5 font-semibold text-primary">
           <CheckSquare className="w-4 h-4 text-accent" />
