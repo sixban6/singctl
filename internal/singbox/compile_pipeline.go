@@ -165,6 +165,26 @@ var defaultConfigCompileStages = []CompileStage{
 		},
 	},
 	{
+		Name: "inject_dns_bypass_guard",
+		AppliesTo: func(_ *ConfigGenerator, doc *CompileDoc) bool {
+			return !doc.isIOS
+		},
+		Apply: func(g *ConfigGenerator, doc *CompileDoc) error {
+			d, err := doc.EnsureDoc()
+			if err != nil {
+				return err
+			}
+			var cfg *config.Config
+			if g != nil {
+				cfg = g.config
+			}
+			if ApplyDNSBypassGuardToDoc(d, cfg) {
+				doc.dirty = true
+			}
+			return nil
+		},
+	},
+	{
 		Name: "inject_private_ptr_block",
 		AppliesTo: func(_ *ConfigGenerator, doc *CompileDoc) bool {
 			return !doc.isIOS

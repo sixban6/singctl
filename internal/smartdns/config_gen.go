@@ -81,9 +81,9 @@ func FormatUpstreamDirective(raw string) (string, error) {
 
 	scheme := strings.ToLower(u.Scheme)
 	switch scheme {
-	case "https", "tls", "quic", "h3":
+	case "https", "tls", "quic", "h3", "udp":
 	default:
-		return "", fmt.Errorf("不支持的 DNS 上游协议 %q（仅支持 https://、tls://、quic://、h3://）", scheme)
+		return "", fmt.Errorf("不支持的 DNS 上游协议 %q（仅支持 https://、tls://、quic://、h3://，或级联上级网关 udp://<私网IP>:53）", scheme)
 	}
 
 	host := strings.TrimSpace(u.Hostname())
@@ -92,6 +92,26 @@ func FormatUpstreamDirective(raw string) (string, error) {
 	}
 
 	port := u.Port()
+	if scheme == "udp" {
+		if (u.Path != "" && u.Path != "/") || u.RawQuery != "" {
+			return "", fmt.Errorf("上级网关 UDP 上游 %q 不允许包含路径或查询参数", s)
+		}
+		ip := net.ParseIP(host)
+		if ip == nil || ip.To4() == nil {
+			return "", fmt.Errorf("上级网关 UDP 上游 %q 仅允许使用私网 IPv4 地址", s)
+		}
+		v4 := ip.To4()
+		if v4.IsLoopback() || v4.IsUnspecified() || v4.IsLinkLocalUnicast() || v4.IsLinkLocalMulticast() || v4.IsMulticast() {
+			return "", fmt.Errorf("禁止将本机回环或保留地址 (%s) 设为上游", v4.String())
+		}
+		if !v4.IsPrivate() {
+			return "", fmt.Errorf("公网地址 (%s) 禁止使用明文 UDP，请改用 https:// 或 tls:// 加密上游", v4.String())
+		}
+		if port != "" && port != "53" {
+			return "", fmt.Errorf("上级网关 UDP 上游端口仅支持 53（当前: %s）", port)
+		}
+		return "server " + v4.String() + ":53 -set-mark 0x1", nil
+	}
 	if port != "" {
 		pNum, pErr := strconv.Atoi(port)
 		if pErr != nil || pNum <= 0 || pNum > 65535 {

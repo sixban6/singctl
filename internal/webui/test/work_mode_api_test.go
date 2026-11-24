@@ -48,11 +48,11 @@ func TestGatewayWorkModeAPI_ZeroSubsBasicAuditAndProxyGuard(t *testing.T) {
 		return rec
 	}
 
-	// 1. Default without subs: configured=auto, effective=basic, hasSubs=false
+	// 1. Default without subs: configured=auto, effective=audit, hasSubs=false
 	rec := doJSON(http.MethodGet, "/api/gateway", nil)
 	if rec.Code != http.StatusOK ||
 		!strings.Contains(rec.Body.String(), `"workMode":"auto"`) ||
-		!strings.Contains(rec.Body.String(), `"effectiveWorkMode":"basic"`) ||
+		!strings.Contains(rec.Body.String(), `"effectiveWorkMode":"audit"`) ||
 		!strings.Contains(rec.Body.String(), `"hasSubs":false`) {
 		t.Fatalf("unexpected default GET /api/gateway: code=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -66,7 +66,7 @@ func TestGatewayWorkModeAPI_ZeroSubsBasicAuditAndProxyGuard(t *testing.T) {
 		t.Fatalf("expected 400 when switching to proxy without subs, got code=%d body=%s", rec.Code, rec.Body.String())
 	}
 
-	// 3. Switching to audit without subs succeeds and triggers WorkModeApplyForTest
+	// 3. Explicit audit without subs succeeds and triggers WorkModeApplyForTest
 	rec = doJSON(http.MethodPut, "/api/gateway", map[string]any{
 		"mode":     "main",
 		"workMode": "audit",
@@ -84,13 +84,13 @@ func TestGatewayWorkModeAPI_ZeroSubsBasicAuditAndProxyGuard(t *testing.T) {
 		t.Fatalf("expected effectiveWorkMode=audit in /api/status, got code=%d body=%s", rec.Code, rec.Body.String())
 	}
 
-	// 5. Switching back to basic without subs succeeds
+	// 5. Legacy "basic" request smoothly normalizes to "audit" for backward compatibility
 	rec = doJSON(http.MethodPut, "/api/gateway", map[string]any{
 		"mode":     "main",
 		"workMode": "basic",
 	})
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"effectiveWorkMode":"basic"`) {
-		t.Fatalf("switching back to basic failed: code=%d body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"effectiveWorkMode":"audit"`) {
+		t.Fatalf("legacy basic workMode should normalize to audit, got code=%d body=%s", rec.Code, rec.Body.String())
 	}
 
 	// 6. Switching from basic -> audit WITH ipv6Mode="off" (exact frontend payload) MUST succeed

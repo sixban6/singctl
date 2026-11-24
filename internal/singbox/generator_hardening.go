@@ -273,7 +273,7 @@ func injectLocalDNSInDoc(g *ConfigGenerator, doc *sboption.Document, platform st
 
 	if engine, useExternal := resolveExternalLocalDNSEngine(g, cfg, platform); useExternal {
 		dnsPort := cfg.DNS.GetDNSPort()
-		if !patchDNSLocalInDoc(doc, true, dnsPort) {
+		if !patchDNSLocalInDoc(doc, true, dnsPort, "") {
 			return false
 		}
 		if g == nil || !g.silent {
@@ -286,10 +286,21 @@ func injectLocalDNSInDoc(g *ConfigGenerator, doc *sboption.Document, platform st
 		return true
 	}
 
-	// 无外部本地 DNS 引擎就绪时：应急升级为纯 IP 加密 DoH 防劫持，同时强制 disable_cache=true / optimistic=false / store_dns=false。
-	changed := patchDNSLocalInDoc(doc, false, 0)
+	// 无外部本地 DNS 引擎就绪时：若处于二级级联网关模式则兜底上级私网网关 (sing-box default_mark:1 零环路)，
+	// 否则应急升级为纯 IP 加密 DoH 防劫持，并强制 disable_cache=true / optimistic=false / store_dns=false。
+	fallbackGW := ""
+	if cfg != nil {
+		if gw, ok := ExtractCascadedGatewayUpstream(cfg.DNS.Upstreams); ok {
+			fallbackGW = gw
+		}
+	}
+	changed := patchDNSLocalInDoc(doc, false, 0, fallbackGW)
 	if changed && (g == nil || !g.silent) {
-		log.Info("未检测到就绪的本地 DNS 引擎（AdGuard Home / SmartDNS），已启用应急纯 IP 加密 DoH (https://%s/dns-query) 防劫持兜底", defaultFallbackDoHServer)
+		if fallbackGW != "" {
+			log.Info("未检测到就绪的本地 DNS 引擎，已启用上级主路由网关 (%s:53) 应急零断网兜底", fallbackGW)
+		} else {
+			log.Info("未检测到就绪的本地 DNS 引擎（AdGuard Home / SmartDNS），已启用应急纯 IP 加密 DoH (https://%s/dns-query) 防劫持兜底", defaultFallbackDoHServer)
+		}
 	}
 	return changed
 }

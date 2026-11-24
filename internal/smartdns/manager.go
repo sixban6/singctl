@@ -473,7 +473,7 @@ func (m *Manager) writeConfigAndRules(ctx context.Context, input ConfigInput) er
 		}
 	}
 	if len(input.EnabledFilters) > 0 || input.ProtectionPaused {
-		if _, err := syncAdblockFiltersWithClient(ctx, m.httpClient, filterDir, input.EnabledFilters, input.ProtectionPaused); err != nil {
+		if _, err := syncAdblockFiltersWithClient(ctx, m.httpClient, filterDir, input.EnabledFilters, input.ProtectionPaused, input.MirrorURL); err != nil {
 			return err
 		}
 	} else if usingSeparateTmpCache {

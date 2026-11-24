@@ -141,8 +141,9 @@ func TestGatewayWorkMode_NormalizeEffectiveSaveAndMigrate(t *testing.T) {
 	}{
 		{"", config.WorkModeAuto, true},
 		{"auto", config.WorkModeAuto, true},
-		{"basic", config.WorkModeBasic, true},
-		{"dns_only", config.WorkModeBasic, true},
+		{"basic", config.WorkModeAudit, true},
+		{"dns_only", config.WorkModeAudit, true},
+		{"lite", config.WorkModeAudit, true},
 		{"audit", config.WorkModeAudit, true},
 		{"direct_audit", config.WorkModeAudit, true},
 		{"proxy", config.WorkModeProxy, true},
@@ -156,8 +157,13 @@ func TestGatewayWorkMode_NormalizeEffectiveSaveAndMigrate(t *testing.T) {
 	}
 
 	noSubAuto := &config.Config{}
-	if noSubAuto.EffectiveWorkMode() != config.WorkModeBasic || !noSubAuto.IsBasicMode() || noSubAuto.NeedsSingBox() {
-		t.Fatalf("empty subs auto should resolve to basic (NeedsSingBox=false), got %q", noSubAuto.EffectiveWorkMode())
+	if noSubAuto.EffectiveWorkMode() != config.WorkModeAudit || !noSubAuto.IsDirectAuditMode() || !noSubAuto.NeedsSingBox() {
+		t.Fatalf("empty subs auto should resolve to audit (NeedsSingBox=true), got %q", noSubAuto.EffectiveWorkMode())
+	}
+
+	legacyBasic := &config.Config{Gateway: config.GatewayConfig{WorkMode: "basic"}}
+	if legacyBasic.EffectiveWorkMode() != config.WorkModeAudit || !legacyBasic.IsDirectAuditMode() || !legacyBasic.NeedsSingBox() {
+		t.Fatalf("legacy basic work_mode should map smoothly to audit, got %q", legacyBasic.EffectiveWorkMode())
 	}
 
 	noSubAudit := &config.Config{Gateway: config.GatewayConfig{WorkMode: config.WorkModeAudit}}

@@ -34,7 +34,6 @@ export interface ClientDNSStatusSummary {
   dnsHealthy: boolean;
   webHealthy: boolean;
   singboxLinked: boolean;
-  dnsmasqLinked?: boolean;
   workMode?: string;
   lowMemoryBlocked?: boolean;
   lowMemoryWarning?: string;
@@ -127,8 +126,8 @@ export interface DNSOverviewSnapshot {
   dnsHealthy: boolean;
   webHealthy: boolean;
   singboxLinked: boolean;
-  dnsmasqLinked?: boolean;
   workMode?: string;
+  upstreamGatewayIp?: string;
   isOpenWrt: boolean;
   lowMemoryBlocked?: boolean;
   lowMemoryWarning?: string;
@@ -219,4 +218,42 @@ export interface DNSSwitchEngineResponse {
   migratedItems?: string[];
   warnings?: string[];
   overview?: DNSOverviewSnapshot;
+}
+
+export interface DNSBypassLayerMeta {
+  id: 'dot_doq' | 'public_doh' | 'sdk_httpdns' | 'app_httpdns' | string;
+  level: string;
+  name: string;
+  desc: string;
+  ports: number[];
+  risk: 'low' | 'medium' | 'high' | string;
+  defaultEnabled: boolean;
+  enabled: boolean;
+  ipCount: number;
+  domainCount: number;
+}
+
+export interface DNSBypassAppGroupMeta {
+  id: string;
+  name: string;
+  desc: string;
+  risk: 'medium' | 'high' | string;
+  defaultEnabled: boolean;
+  enabled: boolean;
+  domains: string[];
+}
+
+export interface DNSBypassGuardSnapshot {
+  enabled: boolean;
+  layers: DNSBypassLayerMeta[];
+  appGroups: DNSBypassAppGroupMeta[];
+  exemptSourceIps: string[];
+  activeRuleCount: number;
+}
+
+export interface DNSBypassGuardUpdateRequest {
+  enabled: boolean;
+  layers: Record<string, boolean>;
+  appGroups: Record<string, boolean>;
+  exemptSourceIps: string[];
 }

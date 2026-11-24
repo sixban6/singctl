@@ -103,7 +103,7 @@ export const GatewayModePage: React.FC<GatewayModePageProps> = ({
   const configuredWorkMode = data?.workMode ?? gwSummary?.workMode;
   const hasSubs = data?.hasSubs ?? gwSummary?.hasSubs ?? Boolean((status?.config?.subs?.length || 0) > 0);
   const effectiveWorkMode: EffectiveGatewayWorkMode =
-    data?.effectiveWorkMode ?? gwSummary?.effectiveWorkMode ?? (hasSubs ? 'proxy' : 'basic');
+    data?.effectiveWorkMode ?? gwSummary?.effectiveWorkMode ?? (hasSubs ? 'proxy' : 'audit');
   const effectiveDisplayIPv6Mode: GatewayIPv6Mode | null =
     mode === 'side' ? 'off' : ipv6Mode ?? (data?.ipv6Mode as GatewayIPv6Mode | undefined) ?? gwSummary?.ipv6Mode ?? null;
 
@@ -187,7 +187,7 @@ export const GatewayModePage: React.FC<GatewayModePageProps> = ({
     <div className="space-y-5">
       <PageHeader
         title="网关模式"
-        description="按需选择基础模式、审计模式或代理模式，同时支持主/旁路由与 IPv6 双栈配置"
+        description="按需选择审计模式（免订阅）或代理模式（需订阅），同时支持主/旁路由与 IPv6 双栈配置"
         badge={
           <Badge
             tone={!activeGatewayMode ? 'neutral' : activeGatewayMode === 'side' ? 'accent' : 'ok'}

@@ -299,6 +299,8 @@ func (s *Server) registerRoutes() {
 	s.Mux.HandleFunc("POST /api/dns/whitelist", s.guard(s.handleDNSWhitelistPost))
 	s.Mux.HandleFunc("POST /api/dns/rewrites", s.guard(s.handleDNSRewritesPost))
 	s.Mux.HandleFunc("POST /api/dns/filters", s.guard(s.handleDNSFiltersPost))
+	s.Mux.HandleFunc("GET /api/dns/bypass-guard", s.guard(s.handleDNSBypassGuardGet))
+	s.Mux.HandleFunc("POST /api/dns/bypass-guard", s.guard(s.handleDNSBypassGuardPost))
 
 	// 向后兼容原有 AdGuard Home API 路由别名
 	s.Mux.HandleFunc("GET /api/adguard", s.guard(s.handleDNSOverviewGet))

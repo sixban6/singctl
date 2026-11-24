@@ -1393,15 +1393,34 @@ func TestGenerator_SingleSubscription_Failure(t *testing.T) {
 }
 
 func TestGenerator_ZeroSubscriptions(t *testing.T) {
-	cfg := &config.Config{
-		Subs: []config.Subscription{},
+	// 1. Explicit proxy mode with empty subs must fail
+	proxyCfg := &config.Config{
+		Gateway: config.GatewayConfig{WorkMode: config.WorkModeProxy},
+		Subs:    []config.Subscription{},
+	}
+	proxyGen := singbox.NewConfigGenerator(proxyCfg)
+	proxyGen.SetCacheDir(t.TempDir())
+	if _, err := proxyGen.GenerateForPlatform("linux"); err == nil {
+		t.Fatal("expected error when subs is empty in explicit proxy mode, got nil")
 	}
 
-	generator := singbox.NewConfigGenerator(cfg)
-	generator.SetCacheDir(t.TempDir())
-	_, err := generator.GenerateForPlatform("linux")
-	if err == nil {
-		t.Fatal("expected error when subs is empty, got nil")
+	// 2. Default zero-sub auto mode resolves to zero-sub audit mode on Linux and succeeds with L1~L4 bypass guard
+	auditCfg := &config.Config{
+		Subs: []config.Subscription{},
+	}
+	auditGen := singbox.NewConfigGenerator(auditCfg)
+	auditGen.SetCacheDir(t.TempDir())
+	out, err := auditGen.GenerateForPlatform("linux")
+	if err != nil {
+		t.Fatalf("expected zero-sub auto mode to generate direct audit config on linux, got err: %v", err)
+	}
+	if !strings.Contains(out, `"hijack-dns"`) || !strings.Contains(out, `"httpdns.bilivideo.com"`) {
+		t.Fatalf("expected hijack-dns and layered bypass guard in zero-sub audit config:\n%s", out)
+	}
+
+	// 3. iOS platform still requires subscriptions even in auto mode
+	if _, err := auditGen.GenerateForPlatform("ios"); err == nil {
+		t.Fatal("expected error when subs is empty for iOS export, got nil")
 	}
 }
 

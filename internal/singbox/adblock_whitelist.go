@@ -78,11 +78,24 @@ func EffectiveAdBlockWhitelist(cfg *config.Config) []string {
 		seen[dom] = struct{}{}
 	}
 
+	wechatBlocked := make(map[string]struct{})
+	if IsWeChatHTTPDNSRejectActive(cfg) {
+		for _, wd := range WeChatProprietaryHTTPDNSDomains() {
+			if dom, ok := NormalizeWhitelistDomain(wd); ok {
+				wechatBlocked[dom] = struct{}{}
+			}
+		}
+	}
+
 	for _, safeDom := range constant.DefaultAdBlockSafeDomains {
 		if dom, ok := NormalizeWhitelistDomain(safeDom); ok {
-			if _, blocked := explicitlyBlocked[dom]; !blocked {
-				seen[dom] = struct{}{}
+			if _, blocked := explicitlyBlocked[dom]; blocked {
+				continue
 			}
+			if _, wxRejected := wechatBlocked[dom]; wxRejected {
+				continue
+			}
+			seen[dom] = struct{}{}
 		}
 	}
 	if cfg != nil {

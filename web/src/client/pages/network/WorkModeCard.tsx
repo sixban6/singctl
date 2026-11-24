@@ -1,18 +1,15 @@
 import React, { useEffect, useState } from 'react';
-import { ArrowRight, Globe, Layers, Radar, Save, Shield } from 'lucide-react';
+import { ArrowRight, Globe, Layers, Radar, Save } from 'lucide-react';
 import { Badge, Button, SectionCard } from '../../../ui';
 import { EffectiveGatewayWorkMode, GatewayWorkMode } from '../../types';
 
 export function getWorkModeLabel(mode?: string): string {
   switch (mode) {
-    case 'basic':
-      return '基础模式';
-    case 'audit':
-      return '审计模式';
     case 'proxy':
       return '代理模式';
+    case 'audit':
     default:
-      return '基础模式';
+      return '审计模式';
   }
 }
 
@@ -39,26 +36,18 @@ interface WorkModeOption {
 
 const WORK_MODE_OPTIONS: WorkModeOption[] = [
   {
-    key: 'basic',
-    title: '基础模式',
-    tag: '免订阅 · 零损耗',
-    desc: '只开防劫持 DNS、防火墙和子网隔离，不跑代理内核，宽带满速零占用。',
-    hint: '切换后将自动把路由器 DNS 接入本地防劫持引擎，不运行 sing-box。',
-    icon: <Shield className="w-4 h-4" />,
-  },
-  {
     key: 'audit',
     title: '审计模式',
-    tag: '免订阅 · 强防护',
-    desc: '无需订阅，直连看全屋设备流量、自动防 PCDN、一键拉黑并强接管 DNS。',
-    hint: '切换后将免订阅启动轻量直连内核，完整开启设备行为审计与防劫持。',
+    tag: '免订阅 · 强劫持',
+    desc: '无需订阅，纯直连透明劫持全屋 DNS、四层防 DoH/HTTPDNS 绕过、实时设备审计与防 PCDN。',
+    hint: '切换后将免订阅启动轻量直连内核，完整开启设备行为审计、去广告与防绕过 DNS 劫持。',
     icon: <Radar className="w-4 h-4" />,
   },
   {
     key: 'proxy',
     title: '代理模式',
     tag: '需订阅 · 全功能',
-    desc: '透明代理智能分流 + 设备行为审计 + 防劫持 DNS，需先添加订阅链接。',
+    desc: '透明代理智能分流 + 完整设备行为审计 + 四层防绕过 DNS 劫持，需先添加订阅链接。',
     hint: '切换后将使用已配置的订阅链接生成完整分流配置并启动透明代理。',
     requiresSubs: true,
     icon: <Globe className="w-4 h-4" />,
@@ -75,7 +64,7 @@ export const WorkModeCard: React.FC<WorkModeCardProps> = ({
   onSaveWorkMode,
   onGoSubs,
 }) => {
-  const currentEffective: EffectiveGatewayWorkMode = effectiveWorkMode || (hasSubs ? 'proxy' : 'basic');
+  const currentEffective: EffectiveGatewayWorkMode = effectiveWorkMode || (hasSubs ? 'proxy' : 'audit');
   const [selected, setSelected] = useState<EffectiveGatewayWorkMode>(currentEffective);
   const [dirty, setDirty] = useState(false);
 
@@ -108,7 +97,7 @@ export const WorkModeCard: React.FC<WorkModeCardProps> = ({
       }
     >
       <div className="space-y-4">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           {WORK_MODE_OPTIONS.map((opt) => {
             const isSelected = selected === opt.key;
             const isCurrent = currentEffective === opt.key;

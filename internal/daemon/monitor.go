@@ -47,12 +47,6 @@ func (m *Monitor) CheckHealth() HealthCheckResult {
 		CheckTime: time.Now(),
 	}
 
-	if m != nil && m.config != nil && m.config.IsBasicMode() {
-		result.DNSOK = true
-		result.Details = "基础模式运行中（防劫持 DNS / 网关服务正常，未运行 sing-box）"
-		return result
-	}
-
 	if !IsSingBoxRunning() {
 		result.Healthy = false
 		result.FailedReason = "sing-box process not running"

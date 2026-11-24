@@ -26,7 +26,7 @@ var cnExtraDirectRuleSets = []string{
 	"geosite-ctm_cn",
 }
 
-// cnPublicDoHIPCIDRs 与 cnPublicDoHDomains 用于拦截局域网终端绕过网关 :53 直接请求国内公共 DoH/DoT 导致的 DNS 泄漏。
+// cnPublicDoHIPCIDRs 与 cnPublicDoHDomains 保留历史旧版防绕过规则指纹，供 dns_bypass_guard.go 升级清理用。
 var cnPublicDoHIPCIDRs = []string{
 	"223.5.5.5/32",
 	"223.6.6.6/32",
@@ -54,12 +54,6 @@ var cnPublicDoHDomains = []string{
 	"doh.360.cn",
 	"dns.360.cn",
 }
-
-// CNPublicDoHIPCIDRs 返回防绕过拦截的国内公共 DoH/DoT IP 网段副本。
-func CNPublicDoHIPCIDRs() []string { return slices.Clone(cnPublicDoHIPCIDRs) }
-
-// CNPublicDoHDomains 返回防绕过拦截的国内公共 DoH/DoT 域名副本。
-func CNPublicDoHDomains() []string { return slices.Clone(cnPublicDoHDomains) }
 
 // ApplyIPv6ModeToConfigJSON 将客户端 gateway.ipv6_mode ("off" | "cn_only" | "full")
 // 幂等地编译写入 sing-box JSON 配置的 dns.strategy、dns.rules 与 route.rules。
@@ -175,8 +169,7 @@ func applyIPv6ModeToRouteRulesInDoc(route *sboption.RouteOptions, mode string) {
 
 	cleaned := make([]sboption.RouteRule, 0, len(route.Rules))
 	for _, r := range route.Rules {
-		if sboption.IsManagedDNSBypassRejectRouteRule(r, cnPublicDoHIPCIDRs, cnPublicDoHDomains) ||
-			sboption.IsManagedSTUNRejectRouteRule(r) ||
+		if sboption.IsManagedSTUNRejectRouteRule(r) ||
 			sboption.IsManagedIPv6RejectRouteRule(r) {
 			continue
 		}
@@ -187,25 +180,6 @@ func applyIPv6ModeToRouteRulesInDoc(route *sboption.RouteOptions, mode string) {
 		route.Rules = cleaned
 		return
 	}
-
-	dnsBypassRejectRules := []sboption.RouteRule{
-		{
-			Action: "reject",
-			Port:   sboption.ScalarOf[uint16](853),
-		},
-		{
-			Action: "reject",
-			IPCIDR: sboption.ListOf(cnPublicDoHIPCIDRs...),
-			Port:   sboption.ListOf[uint16](443, 853),
-		},
-		{
-			Action: "reject",
-			Domain: sboption.ListOf(cnPublicDoHDomains...),
-			Port:   sboption.ListOf[uint16](443, 853),
-		},
-	}
-	insertAt := sboption.DNSBypassRejectInsertIndex(cleaned)
-	withDNSReject := slices.Insert(slices.Clone(cleaned), insertAt, dnsBypassRejectRules...)
 
 	stunRejectRules := []sboption.RouteRule{
 		{
@@ -223,8 +197,8 @@ func applyIPv6ModeToRouteRulesInDoc(route *sboption.RouteOptions, mode string) {
 			PortRange: sboption.ListOf("19302:19309"),
 		},
 	}
-	stunInsertAt := sboption.STUNRejectInsertIndex(withDNSReject, isDirectOrLocalOutbound)
-	withLeaksBlocked := slices.Insert(withDNSReject, stunInsertAt, stunRejectRules...)
+	stunInsertAt := sboption.STUNRejectInsertIndex(cleaned, isDirectOrLocalOutbound)
+	withLeaksBlocked := slices.Insert(slices.Clone(cleaned), stunInsertAt, stunRejectRules...)
 
 	if mode == config.GatewayIPv6Full {
 		route.Rules = withLeaksBlocked

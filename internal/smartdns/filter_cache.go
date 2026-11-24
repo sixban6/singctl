@@ -232,7 +232,7 @@ func (m *Manager) triggerBackgroundFilterSync(input ConfigInput) {
 		ctx, cancel := context.WithTimeout(parentCtx, backgroundFilterSyncTimeout)
 		defer cancel()
 
-		count, err := syncAdblockFiltersWithClient(ctx, m.httpClient, filterDir, cfgSnapshot.EnabledFilters, cfgSnapshot.ProtectionPaused)
+		count, err := syncAdblockFiltersWithClient(ctx, m.httpClient, filterDir, cfgSnapshot.EnabledFilters, cfgSnapshot.ProtectionPaused, cfgSnapshot.MirrorURL)
 		if err != nil {
 			logger.Warn("SmartDNS 后台补拉去广告规则失败（不影响基础 DNS 解析）: %v", err)
 			return

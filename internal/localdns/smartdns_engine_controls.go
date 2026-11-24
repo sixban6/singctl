@@ -193,6 +193,11 @@ func (e *SmartDNSEngine) SetUpstreams(ctx context.Context, rawUpstreams []string
 					notes = append(notes, note)
 				}
 			}
+		} else if strings.HasPrefix(lower, "udp://") {
+			hostPart := strings.TrimPrefix(lower, "udp://")
+			if ip := net.ParseIP(strings.TrimSpace(hostPart)); ip != nil && ip.To4() != nil {
+				s = "udp://" + ip.To4().String() + ":53"
+			}
 		}
 		if _, err := smartdns.FormatUpstreamDirective(s); err != nil {
 			return nil, err
@@ -244,7 +249,7 @@ func (e *SmartDNSEngine) SetUpstreams(ctx context.Context, rawUpstreams []string
 		probeTargets := make([]string, 0, len(cleaned))
 		for _, addr := range cleaned {
 			lower := strings.ToLower(addr)
-			if strings.HasPrefix(lower, "https://") || strings.HasPrefix(lower, "tls://") {
+			if strings.HasPrefix(lower, "https://") || strings.HasPrefix(lower, "tls://") || strings.HasPrefix(lower, "udp://") {
 				probeTargets = append(probeTargets, addr)
 			} else if _, existed := prevSet[lower]; !existed {
 				notes = append(notes, fmt.Sprintf("%s 已交由 SmartDNS 接管（跳过直连探测）", addr))
@@ -360,12 +365,12 @@ func (e *SmartDNSEngine) DeleteRewrite(ctx context.Context, domain, answer strin
 }
 
 func (e *SmartDNSEngine) SetFilterState(ctx context.Context, filterURL, _ string, enabled bool) error {
-	cleanURL, err := smartdns.ValidateFilterURL(filterURL)
+	cleanURL, err := smartdns.ValidateFilterURL(smartdns.MigrateLegacyFilterURL(filterURL))
 	if err != nil {
 		return err
 	}
 	updated := slices.DeleteFunc(slices.Clone(e.cfg.DNS.SmartDNSFilters), func(u string) bool {
-		return strings.TrimSpace(u) == cleanURL
+		return smartdns.MigrateLegacyFilterURL(u) == cleanURL
 	})
 	if enabled {
 		updated = append(updated, cleanURL)

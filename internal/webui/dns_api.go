@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"runtime"
 	"slices"
 	"strings"
 	"time"
@@ -28,6 +29,12 @@ func (s *Server) newDNSRegistry(cfg *config.Config) *localdns.Registry {
 		readMem = func() (sysinfo.MemInfo, error) {
 			return fn(), nil
 		}
+	}
+
+	upstreamGW := ""
+	if runtime.GOOS == "linux" || s.opts.GatewayProberForTest != nil {
+		topo := s.probeGatewayTopology()
+		upstreamGW = strings.TrimSpace(topo.CurrentGatewayIP)
 	}
 
 	deps := localdns.EngineDeps{
@@ -52,6 +59,7 @@ func (s *Server) newDNSRegistry(cfg *config.Config) *localdns.Registry {
 		NowFunc:                 s.now,
 		SmartDNSStats:           s.smartDNSStatsRing,
 		SmartDNSTailer:          s.smartDNSTailer,
+		UpstreamGatewayIP:       upstreamGW,
 	}
 	return localdns.NewRegistry(cfg, deps)
 }
@@ -305,6 +313,9 @@ func (s *Server) handleDNSWhitelistPost(w http.ResponseWriter, r *http.Request) 
 			newManaged := singbox.EffectiveAdBlockWhitelist(cfg)
 			if sbErr := s.syncSingBoxAdBlockWhitelist(r.Context(), oldManaged, newManaged); sbErr != nil {
 				logger.Warn("[DNS] 热同步 sing-box 去广告白名单失败: %v", sbErr)
+			}
+			if bgErr := s.syncSingBoxDNSBypassGuard(r.Context(), cfg); bgErr != nil {
+				logger.Warn("[DNS] 热同步 sing-box 防绕过白名单豁免失败: %v", bgErr)
 			}
 			return nil
 		},

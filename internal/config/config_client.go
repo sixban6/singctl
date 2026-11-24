@@ -18,20 +18,18 @@ const (
 	GatewayIPv6CNOnly = "cn_only"
 	GatewayIPv6Full   = "full"
 
-	WorkModeAuto  = "auto"  // 自动：有订阅=代理模式，无订阅=基础模式
-	WorkModeBasic = "basic" // 基础模式（免订阅：防劫持 DNS / 隔离网 / 防火墙，零转发损耗）
-	WorkModeAudit = "audit" // 审计模式（免订阅：设备行为审计 + PCDN 拦截 + 强防劫持 DNS）
-	WorkModeProxy = "proxy" // 代理模式（需订阅：透明代理分流 + 完整审计 + 防劫持 DNS）
+	WorkModeAuto  = "auto"  // 自动：有订阅=代理模式，无订阅=审计模式
+	WorkModeAudit = "audit" // 审计模式（免订阅：设备行为审计 + PCDN 拦截 + 强劫持防绕过 DNS）
+	WorkModeProxy = "proxy" // 代理模式（需订阅：透明代理分流 + 完整审计 + 强劫持防绕过 DNS）
 )
 
-// NormalizeWorkMode 校验并归一化客户端运行工作模式（auto / basic / audit / proxy）。
+// NormalizeWorkMode 校验并归一化客户端运行工作模式（auto / audit / proxy）；
+// 历史配置中的 basic / dns_only / lite 自动平滑兼容归一化为 audit。
 func NormalizeWorkMode(raw string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "", WorkModeAuto:
 		return WorkModeAuto, true
-	case WorkModeBasic, "dns_only", "dns-only", "lite":
-		return WorkModeBasic, true
-	case WorkModeAudit, "direct_audit", "direct-audit", "direct":
+	case WorkModeAudit, "basic", "dns_only", "dns-only", "lite", "direct_audit", "direct-audit", "direct":
 		return WorkModeAudit, true
 	case WorkModeProxy, "full":
 		return WorkModeProxy, true
@@ -110,15 +108,13 @@ func (c *Config) ConfiguredWorkMode() string {
 	return c.Gateway.ConfiguredWorkMode()
 }
 
-// EffectiveWorkMode 解析当前实际生效的工作模式（basic / audit / proxy）：
-// auto 下有订阅自动进入 proxy，无订阅自动进入 basic（零订阅零转发损耗基础模式）。
+// EffectiveWorkMode 解析当前实际生效的工作模式（audit / proxy）：
+// auto 下有订阅自动进入 proxy，无订阅自动进入 audit（免订阅纯直连强劫持审计模式）。
 func (c *Config) EffectiveWorkMode() string {
 	if c == nil {
-		return WorkModeBasic
+		return WorkModeAudit
 	}
 	switch c.Gateway.ConfiguredWorkMode() {
-	case WorkModeBasic:
-		return WorkModeBasic
 	case WorkModeAudit:
 		return WorkModeAudit
 	case WorkModeProxy:
@@ -127,13 +123,8 @@ func (c *Config) EffectiveWorkMode() string {
 		if c.HasRealSubs() {
 			return WorkModeProxy
 		}
-		return WorkModeBasic
+		return WorkModeAudit
 	}
-}
-
-// IsBasicMode 判断当前是否处于「基础模式」（免订阅、不启动 sing-box，仅运行防劫持 DNS / 隔离网 / 防火墙）。
-func (c *Config) IsBasicMode() bool {
-	return c.EffectiveWorkMode() == WorkModeBasic
 }
 
 // IsDirectAuditMode 判断当前是否处于「审计模式」（免订阅、纯直连零节点 sing-box 透明嗅探与 PCDN/黑名单拦截）。
@@ -141,7 +132,7 @@ func (c *Config) IsDirectAuditMode() bool {
 	return c.EffectiveWorkMode() == WorkModeAudit
 }
 
-// NeedsSingBox 判断当前工作模式是否需要运行 sing-box 内核（审计模式或已配置订阅的代理模式）。
+// NeedsSingBox 判断当前工作模式是否需要运行 sing-box 内核（审计模式恒为 true；代理模式需配置有效订阅）。
 func (c *Config) NeedsSingBox() bool {
 	switch c.EffectiveWorkMode() {
 	case WorkModeAudit:
@@ -149,7 +140,7 @@ func (c *Config) NeedsSingBox() bool {
 	case WorkModeProxy:
 		return c != nil && c.HasRealSubs()
 	default:
-		return false
+		return true
 	}
 }
 

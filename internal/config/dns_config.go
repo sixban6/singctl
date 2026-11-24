@@ -45,8 +45,9 @@ type ClientDNSConfig struct {
 	Rewrites             []DNSRewriteRule `yaml:"rewrites,omitempty"`               // 内网自定义解析重写列表
 	BlockAAAA            bool             `yaml:"block_aaaa,omitempty"`             // 历史兼容保留字段（实际 AAAA 策略由 gateway.ipv6_mode 单一数据源派生）
 	AdblockDisabledUntil int64            `yaml:"adblock_disabled_until,omitempty"` // 临时暂停去广告截止时间戳（Unix 秒，0 未暂停，<0 手动持续暂停）
-	DisabledAdRuleSets   []string         `yaml:"disabled_ad_rule_sets,omitempty"`  // 历史兼容保留字段
-	SmartDNSFilters      []string         `yaml:"smartdns_filters,omitempty"`       // SmartDNS 启用的轻量去广告规则集 URL 列表
+	DisabledAdRuleSets   []string             `yaml:"disabled_ad_rule_sets,omitempty"`  // 历史兼容保留字段
+	SmartDNSFilters      []string             `yaml:"smartdns_filters,omitempty"`       // SmartDNS 启用的轻量去广告规则集 URL 列表
+	BypassGuard          DNSBypassGuardConfig `yaml:"bypass_guard,omitempty"`           // 分层防 DNS 绕过拦截策略（L1~L4 + 横向源 IP 豁免）
 }
 
 func (c *ClientDNSConfig) IsEnabled() bool {
@@ -187,9 +188,10 @@ func (c *ClientDNSConfig) UnmarshalYAML(node *yaml.Node) error {
 		Whitelist            []string         `yaml:"whitelist"`
 		Rewrites             []DNSRewriteRule `yaml:"rewrites"`
 		BlockAAAA            bool             `yaml:"block_aaaa"`
-		AdblockDisabledUntil any              `yaml:"adblock_disabled_until"`
-		DisabledAdRuleSets   []string         `yaml:"disabled_ad_rule_sets"`
-		SmartDNSFilters      []string         `yaml:"smartdns_filters"`
+		AdblockDisabledUntil any                  `yaml:"adblock_disabled_until"`
+		DisabledAdRuleSets   []string             `yaml:"disabled_ad_rule_sets"`
+		SmartDNSFilters      []string             `yaml:"smartdns_filters"`
+		BypassGuard          DNSBypassGuardConfig `yaml:"bypass_guard"`
 	}
 	if err := node.Decode(&raw); err != nil {
 		return err
@@ -217,6 +219,18 @@ func (c *ClientDNSConfig) UnmarshalYAML(node *yaml.Node) error {
 	c.BlockAAAA = raw.BlockAAAA
 	c.DisabledAdRuleSets = cleanStringSlice(raw.DisabledAdRuleSets)
 	c.SmartDNSFilters = cleanStringSlice(raw.SmartDNSFilters)
+	c.BypassGuard = raw.BypassGuard.Clone()
+	if len(c.BypassGuard.AppGroups) > 0 {
+		normGroups := make(map[string]bool, len(c.BypassGuard.AppGroups))
+		for k, v := range c.BypassGuard.AppGroups {
+			nk := strings.ToLower(strings.TrimSpace(k))
+			if nk != "" {
+				normGroups[nk] = v
+			}
+		}
+		c.BypassGuard.AppGroups = normGroups
+	}
+	c.BypassGuard.ExemptSourceIPs = cleanStringSlice(c.BypassGuard.ExemptSourceIPs)
 	if raw.DNSPort != nil {
 		if v, err := parseIntAny(raw.DNSPort); err == nil {
 			c.DNSPort = v

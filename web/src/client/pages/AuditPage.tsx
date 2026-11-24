@@ -4,12 +4,10 @@ import {
   Ban,
   Bot,
   Download,
-  Radar,
   RefreshCw,
   ShieldCheck,
 } from 'lucide-react';
-import { Badge, Button, ConfirmDialog, PageHeader, useToast } from '../../ui';
-import { clientApi } from '../api';
+import { Badge, Button, ConfirmDialog, PageHeader } from '../../ui';
 import { ClientStatusResponse } from '../types';
 import { AuditAIConfigDrawer } from './audit/AuditAIConfigDrawer';
 import { AuditBlacklistDrawer } from './audit/AuditBlacklistDrawer';
@@ -31,10 +29,7 @@ export interface AuditPageProps {
 export const AuditPage: React.FC<AuditPageProps> = ({
   active = true,
   status,
-  onRefreshStatus,
 }) => {
-  const { success, error } = useToast();
-  const [enablingAudit, setEnablingAudit] = useState(false);
   const [blockDrawerOpen, setBlockDrawerOpen] = useState(false);
   const [aiCfgOpen, setAiCfgOpen] = useState(false);
   const [pcdnBannerDismissed, setPcdnBannerDismissed] = useState(false);
@@ -105,27 +100,6 @@ export const AuditPage: React.FC<AuditPageProps> = ({
   const whitelistCount = ctrl.report?.whitelistCount ?? whitelist.length;
   const pcdnOn = ctrl.report?.pcdnBlockEnabled ?? true;
   const isAuditOnlyMode = status?.gateway?.effectiveWorkMode === 'audit';
-  const showBasicModeAuditPrompt =
-    status?.gateway?.effectiveWorkMode === 'basic' && !status?.singbox?.running;
-
-  const handleEnableAuditMode = async () => {
-    setEnablingAudit(true);
-    try {
-      const res = await clientApi.saveGateway({
-        mode: status?.gateway?.mode === 'side' ? 'side' : 'main',
-        workMode: 'audit',
-        mainRouterIP: status?.gateway?.mode === 'side' ? status?.gateway?.mainRouterIP || '' : '',
-        ipv6Mode: status?.gateway?.ipv6Mode || 'off',
-      });
-      success(res.message || '已切换为审计模式（免订阅）');
-      onRefreshStatus?.();
-      void ctrl.loadAudit(false);
-    } catch (e: unknown) {
-      error(e instanceof Error ? e.message : '开启审计模式失败');
-    } finally {
-      setEnablingAudit(false);
-    }
-  };
 
   return (
     <div className="space-y-5">
@@ -207,32 +181,6 @@ export const AuditPage: React.FC<AuditPageProps> = ({
           </div>
         }
       />
-
-      {showBasicModeAuditPrompt && (
-        <div
-          className="console-card rounded-2xl p-4 flex flex-wrap items-center justify-between gap-3 border animate-sc-in"
-          style={{ borderColor: 'var(--accent)', backgroundColor: 'var(--accent-soft)' }}
-        >
-          <div className="flex items-start gap-2.5 min-w-0">
-            <Radar className="w-5 h-5 shrink-0 mt-0.5 text-cyan-400" />
-            <div className="text-xs sm:text-sm">
-              <div className="font-semibold text-primary">当前网关处于「基础模式」，设备行为审计未开启</div>
-              <div className="text-secondary mt-0.5">
-                无需订阅链接，一键将网关切到「审计模式」即可实时查看全屋设备流量、自动防 PCDN 并一键拉黑。
-              </div>
-            </div>
-          </div>
-          <Button
-            size="sm"
-            variant="primary"
-            loading={enablingAudit}
-            icon={<Radar className="w-3.5 h-3.5" />}
-            onClick={() => void handleEnableAuditMode()}
-          >
-            开启审计模式（免订阅）
-          </Button>
-        </div>
-      )}
 
       <AuditDevicesAndBanners
         report={ctrl.report}

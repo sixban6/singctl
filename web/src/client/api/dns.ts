@@ -3,6 +3,8 @@ import {
   AdGuardUpstreamServerInfo,
   BrowserDoHCheckRequest,
   BrowserDoHCheckResponse,
+  DNSBypassGuardSnapshot,
+  DNSBypassGuardUpdateRequest,
   DNSConfigPreviewResponse,
   DNSLeakReport,
   DNSOverviewSnapshot,
@@ -82,6 +84,14 @@ const manageDNSFilter = (payload: {
     body: JSON.stringify(payload),
   });
 
+const getDNSBypassGuard = () => request<DNSBypassGuardSnapshot>('/api/dns/bypass-guard');
+
+const saveDNSBypassGuard = (payload: DNSBypassGuardUpdateRequest) =>
+  request<{ ok: boolean; bypassGuard: DNSBypassGuardSnapshot }>('/api/dns/bypass-guard', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+
 export const dnsApi = {
   runDNSLeakTest: (mode: 'standard' | 'deep' = 'standard') =>
     request<DNSLeakReport>('/api/dns/leak-test', {
@@ -108,6 +118,8 @@ export const dnsApi = {
   setDNSWhitelist,
   manageDNSRewrite,
   manageDNSFilter,
+  getDNSBypassGuard,
+  saveDNSBypassGuard,
 
   // 向后兼容既有调用方的方法别名（全部指向 /api/dns/*）
   getAdGuardOverview: getDNSOverview,

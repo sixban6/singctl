@@ -328,7 +328,7 @@ func (e *SmartDNSEngine) buildFiltersAndPresets() ([]adguard.FilterItem, []adgua
 	curated := smartdns.CuratedFilterPresets()
 	enabledSet := make(map[string]bool, len(e.cfg.DNS.SmartDNSFilters))
 	for _, u := range e.cfg.DNS.SmartDNSFilters {
-		enabledSet[strings.TrimSpace(u)] = true
+		enabledSet[smartdns.MigrateLegacyFilterURL(u)] = true
 	}
 
 	presets := make([]adguard.PresetStatus, 0, len(curated))
@@ -361,7 +361,7 @@ func (e *SmartDNSEngine) buildFiltersAndPresets() ([]adguard.FilterItem, []adgua
 		}
 	}
 	for _, rawURL := range e.cfg.DNS.SmartDNSFilters {
-		u := strings.TrimSpace(rawURL)
+		u := smartdns.MigrateLegacyFilterURL(rawURL)
 		if u == "" || curatedURLs[u] {
 			continue
 		}
@@ -420,6 +420,20 @@ func (e *SmartDNSEngine) Overview(_ context.Context, singboxLinked bool) *Overvi
 		isOpenWrt = sysinfo.IsOpenWrt()
 	}
 
+	upPresets := adguard.CuratedUpstreamPresets()
+	if gwIP := strings.TrimSpace(e.deps.UpstreamGatewayIP); gwIP != "" {
+		if ip := net.ParseIP(gwIP); ip != nil && ip.To4() != nil && ip.To4().IsPrivate() && !ip.IsLoopback() {
+			upPresets = append([]adguard.UpstreamPreset{
+				{
+					Address:     "udp://" + ip.To4().String() + ":53",
+					Name:        fmt.Sprintf("上级主路由网关 (%s) · 级联协同", ip.To4().String()),
+					Protocol:    "Gateway",
+					Recommended: false,
+				},
+			}, upPresets...)
+		}
+	}
+
 	return &OverviewSnapshot{
 		OverviewSnapshot: adguard.OverviewSnapshot{
 			Supported:                    st.Supported,
@@ -438,7 +452,7 @@ func (e *SmartDNSEngine) Overview(_ context.Context, singboxLinked bool) *Overvi
 			UpstreamMode:                 mode,
 			UpstreamModeLabel:            smartDNSUpstreamModeLabel(mode),
 			Upstreams:                    upInfos,
-			UpstreamPresets:              adguard.CuratedUpstreamPresets(),
+			UpstreamPresets:              upPresets,
 			Stats:                        e.stats.Snapshot(now, 0),
 			Filters:                      filters,
 			TotalRulesCount:              len(filters),

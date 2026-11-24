@@ -101,6 +101,7 @@ func (c *Config) Clone() *Config {
 	out.DNS.Rewrites = slices.Clone(c.DNS.Rewrites)
 	out.DNS.DisabledAdRuleSets = slices.Clone(c.DNS.DisabledAdRuleSets)
 	out.DNS.SmartDNSFilters = slices.Clone(c.DNS.SmartDNSFilters)
+	out.DNS.BypassGuard = c.DNS.BypassGuard.Clone()
 
 	out.Tailscale.P2PAssist.PayloadFilter = cloneBoolPtr(c.Tailscale.P2PAssist.PayloadFilter)
 	if c.Tailscale.P2PAssist.Peers != nil {

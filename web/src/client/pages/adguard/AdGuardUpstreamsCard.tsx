@@ -190,7 +190,15 @@ export const AdGuardUpstreamsCard: React.FC<AdGuardUpstreamsCardProps> = ({
                 className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 px-3.5 py-2.5 hover:bg-surface2/40 transition-colors"
               >
                 <div className="min-w-0 flex flex-wrap items-center gap-2">
-                  <Badge tone={up.protocol === 'DoH' || up.protocol === 'DoH3' ? 'accent' : 'neutral'}>
+                  <Badge
+                    tone={
+                      up.protocol === 'Gateway'
+                        ? 'ok'
+                        : up.protocol === 'DoH' || up.protocol === 'DoH3'
+                          ? 'accent'
+                          : 'neutral'
+                    }
+                  >
                     {up.protocol}
                   </Badge>
                   <span className="font-mono text-xs sm:text-sm font-semibold text-primary break-all">

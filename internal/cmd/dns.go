@@ -51,10 +51,16 @@ func syncSingBoxLocalDNSLink(ctx context.Context, cfg *config.Config, useExterna
 		return
 	}
 	dnsPort := 5353
+	fallbackGW := ""
 	if cfg != nil {
 		dnsPort = cfg.DNS.GetDNSPort()
+		if !useExternal {
+			if gw, ok := singbox.ExtractCascadedGatewayUpstream(cfg.DNS.Upstreams); ok {
+				fallbackGW = gw
+			}
+		}
 	}
-	if _, err := singbox.SyncLiveSingBoxDNSLocal(ctx, "", "", useExternal, dnsPort); err != nil {
+	if _, err := singbox.SyncLiveSingBoxDNSLocalWithFallback(ctx, "", "", useExternal, dnsPort, fallbackGW); err != nil {
 		logger.Warn("同步更新 sing-box dns_local 失败: %v", err)
 	}
 }

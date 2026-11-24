@@ -6,13 +6,11 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	"singctl/internal/adguard"
-	"singctl/internal/common/proc"
 	"singctl/internal/config"
 	"singctl/internal/constant"
 	"singctl/internal/logger"
@@ -140,19 +138,6 @@ func (r *Registry) saveConfig() error {
 	return config.Save(r.deps.ConfigPath, r.cfg)
 }
 
-func (r *Registry) shouldSyncSingBox() bool {
-	if !r.cfg.IsBasicMode() {
-		return true
-	}
-	if r.deps.IsSingBoxRunningFunc != nil {
-		return r.deps.IsSingBoxRunningFunc()
-	}
-	if r.deps.SyncSingBoxDNSLocalFunc != nil {
-		return true
-	}
-	return proc.PgrepMatch("sing-box")
-}
-
 func (r *Registry) syncSingBoxDNSLocal(ctx context.Context, useExternal bool, dnsPort int) error {
 	sbPath := r.sbConfigPath()
 	workPath := r.sbWorkConfigPath()
@@ -160,7 +145,13 @@ func (r *Registry) syncSingBoxDNSLocal(ctx context.Context, useExternal bool, dn
 		_, err := r.deps.SyncSingBoxDNSLocalFunc(ctx, sbPath, workPath, useExternal, dnsPort)
 		return err
 	}
-	_, err := singbox.SyncLiveSingBoxDNSLocal(ctx, sbPath, workPath, useExternal, dnsPort)
+	fallbackGW := ""
+	if !useExternal && r.cfg != nil {
+		if gw, ok := singbox.ExtractCascadedGatewayUpstream(r.cfg.DNS.Upstreams); ok {
+			fallbackGW = gw
+		}
+	}
+	_, err := singbox.SyncLiveSingBoxDNSLocalWithFallback(ctx, sbPath, workPath, useExternal, dnsPort, fallbackGW)
 	return err
 }
 
@@ -293,7 +284,6 @@ func (r *Registry) SwitchEngine(ctx context.Context, req SwitchRequest) (*Switch
 	var warnings []string
 	stoppedOrigExternal := false
 	startedTargetExternal := false
-	syncSB := r.shouldSyncSingBox()
 
 	rollback := func(cause error) (*SwitchResult, error) {
 		logger.Warn("[LocalDNS] 切换至 %s 失败 (%v)，正在执行零断网自动回滚...", desiredEngine, cause)
@@ -310,27 +300,20 @@ func (r *Registry) SwitchEngine(ctx context.Context, req SwitchRequest) (*Switch
 			if origEng, hasOrig := r.Get(origActive); hasOrig {
 				if startErr := origEng.Start(ctx); startErr == nil {
 					if verifyErr := r.verifyExternalDNSReady(ctx, origActive, restorePort); verifyErr == nil {
-						if syncSB {
-							_ = r.syncSingBoxDNSLocal(ctx, true, restorePort)
-						} else if r.cfg.IsBasicMode() {
-							_, _ = SyncOpenWrtDnsmasqBridge(ctx, true, restorePort, r.dnsmasqBridgeDeps())
-						}
+						_ = r.syncSingBoxDNSLocal(ctx, true, restorePort)
 						return nil, fmt.Errorf("切换至 %s 失败（已自动回滚恢复至 %s）: %w", desiredEngine, origActive, cause)
 					}
 				}
 			}
 		}
-		if syncSB {
-			_ = r.syncSingBoxDNSLocal(ctx, false, restorePort)
-			return nil, fmt.Errorf("切换至 %s 失败（已维持 sing-box 纯 IP 加密 DoH 零断网兜底）: %w", desiredEngine, cause)
-		}
-		return nil, fmt.Errorf("切换至 %s 失败（已保持原有路由器 DNS 不变）: %w", desiredEngine, cause)
+		_ = r.syncSingBoxDNSLocal(ctx, false, restorePort)
+		return nil, fmt.Errorf("切换至 %s 失败（已维持 sing-box 安全兜底不断网）: %w", desiredEngine, cause)
 	}
 
-	// 3. 零断网安全桥：仅在需联动 sing-box 时先将其 dns_local 原子热切至纯 IP 加密 DoH
-	if syncSB && (origActive != desiredEngine || !targetWasHealthy) {
+	// 3. 零断网安全桥：先将 sing-box dns_local 原子热切至安全应急上游
+	if origActive != desiredEngine || !targetWasHealthy {
 		if err := r.syncSingBoxDNSLocal(ctx, false, dnsPort); err != nil {
-			warnings = append(warnings, fmt.Sprintf("切换 sing-box 纯 IP 加密 DoH 安全桥告警: %v", err))
+			warnings = append(warnings, fmt.Sprintf("切换 sing-box 安全桥告警: %v", err))
 		}
 	}
 
@@ -358,11 +341,7 @@ func (r *Registry) SwitchEngine(ctx context.Context, req SwitchRequest) (*Switch
 		}
 	}
 	if !targetEng.IsInstalled() && !req.SkipInstall {
-		if syncSB {
-			logger.Info("[LocalDNS] 正在安装目标防劫持 DNS 引擎: %s（当前由 sing-box 纯 IP 加密 DoH 兜底不断网）...", desiredEngine)
-		} else {
-			logger.Info("[LocalDNS] 正在安装目标防劫持 DNS 引擎: %s（基础模式，验活后将自动接管路由器 dnsmasq）...", desiredEngine)
-		}
+		logger.Info("[LocalDNS] 正在安装目标防劫持 DNS 引擎: %s（当前由 sing-box 安全兜底不断网）...", desiredEngine)
 		if err := targetEng.Install(ctx, InstallOptions{
 			NonInteractive: true,
 			ForceLowMemory: req.ForceLowMemory,
@@ -382,22 +361,9 @@ func (r *Registry) SwitchEngine(ctx context.Context, req SwitchRequest) (*Switch
 	if err := r.verifyExternalDNSReady(ctx, desiredEngine, dnsPort); err != nil {
 		return rollback(err)
 	}
-	if r.cfg.IsBasicMode() {
-		if _, brErr := SyncOpenWrtDnsmasqBridge(ctx, true, dnsPort, r.dnsmasqBridgeDeps()); brErr != nil {
-			warnings = append(warnings, fmt.Sprintf("接管 OpenWrt dnsmasq 指向 %s 告警: %v", desiredEngine, brErr))
-		}
-		if syncSB {
-			if _, statErr := os.Stat(r.sbConfigPath()); statErr == nil {
-				if err := r.syncSingBoxDNSLocal(ctx, true, dnsPort); err != nil {
-					warnings = append(warnings, fmt.Sprintf("同步本地 sing-box dns_local 告警: %v", err))
-				}
-			}
-		}
-	} else {
-		_, _ = SyncOpenWrtDnsmasqBridge(ctx, false, dnsPort, r.dnsmasqBridgeDeps())
-		if err := r.syncSingBoxDNSLocal(ctx, true, dnsPort); err != nil {
-			return rollback(fmt.Errorf("切换 sing-box dns_local 指向 %s 失败: %w", desiredEngine, err))
-		}
+	_, _ = RestoreLegacyOpenWrtDnsmasqBridge(ctx, dnsPort, r.dnsmasqBridgeDeps())
+	if err := r.syncSingBoxDNSLocal(ctx, true, dnsPort); err != nil {
+		return rollback(fmt.Errorf("切换 sing-box dns_local 指向 %s 失败: %w", desiredEngine, err))
 	}
 
 	// 6. 原子持久化 cfg.DNS.Engine 至 singctl.yaml (0600)

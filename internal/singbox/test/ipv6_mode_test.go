@@ -112,26 +112,11 @@ func TestApplyIPv6ModeToConfigJSON_TransitionsAndIdempotency(t *testing.T) {
 	}
 
 	routeRules := doc.Route.Rules
-	privateIdx, dotIdx, dohIPIdx, dohDomIdx := -1, -1, -1, -1
 	geoipCNIdx, stunProtoIdx, stunPortsIdx, stunRangeIdx, udpCatchAllIdx := -1, -1, -1, -1, -1
 	foundVPSTwin, foundGeoNotCNTwin, foundDCRejectTwin := false, false, false
 	for i, r := range routeRules {
 		if slices.Equal(r.IPCIDR.Slice(), []string{"::/0"}) && (!r.DomainSuffix.IsEmpty() || !r.RuleSet.IsEmpty() || r.ClashMode != "") {
 			t.Fatalf("unsafe flat OR rule combines ip_cidr=[::/0] with other matchers: %+v", r)
-		}
-		if r.IPIsPrivate != nil && *r.IPIsPrivate {
-			privateIdx = i
-		}
-		if r.Action == "reject" && slices.Equal(r.Port.Slice(), []uint16{853}) {
-			dotIdx = i
-		}
-		if r.Action == "reject" && slices.Equal(r.Port.Slice(), []uint16{443, 853}) {
-			if !r.IPCIDR.IsEmpty() {
-				dohIPIdx = i
-			}
-			if !r.Domain.IsEmpty() {
-				dohDomIdx = i
-			}
 		}
 		if slices.Contains(r.RuleSet.Slice(), "geoip-cn") && r.Outbound == "#DC" {
 			geoipCNIdx = i
@@ -166,9 +151,6 @@ func TestApplyIPv6ModeToConfigJSON_TransitionsAndIdempotency(t *testing.T) {
 				}
 			}
 		}
-	}
-	if privateIdx < 0 || dotIdx != privateIdx+1 || dohIPIdx != privateIdx+2 || dohDomIdx != privateIdx+3 {
-		t.Fatalf("expected DoT/CN-DoH reject rules right after ip_is_private (%d): dot=%d ip=%d dom=%d", privateIdx, dotIdx, dohIPIdx, dohDomIdx)
 	}
 	if geoipCNIdx < 0 || udpCatchAllIdx < 0 || stunProtoIdx <= geoipCNIdx || stunPortsIdx != stunProtoIdx+1 || stunRangeIdx != stunProtoIdx+2 || stunRangeIdx >= udpCatchAllIdx {
 		t.Fatalf("expected 3 STUN reject rules after geoip-cn (%d) and before udp 1024:65535 (%d): proto=%d ports=%d range=%d", geoipCNIdx, udpCatchAllIdx, stunProtoIdx, stunPortsIdx, stunRangeIdx)
@@ -269,23 +251,17 @@ func TestApplyIPv6ModeToConfigJSON_TransitionsAndIdempotency(t *testing.T) {
 	if !hasExtraCNInFull {
 		t.Fatal("expected extra CN direct rulesets preserved in full mode")
 	}
-	dohCIDRs := singbox.CNPublicDoHIPCIDRs()
-	dohDomains := singbox.CNPublicDoHDomains()
-	fullBypassRejectCount := 0
 	fullSTUNRejectCount := 0
 	for _, r := range fullDoc.Route.Rules {
 		if sboption.IsManagedIPv6RejectRouteRule(r) {
 			t.Fatalf("expected zero ::/0 reject rules in full mode, found %+v", r)
 		}
-		if sboption.IsManagedDNSBypassRejectRouteRule(r, dohCIDRs, dohDomains) {
-			fullBypassRejectCount++
-		}
 		if sboption.IsManagedSTUNRejectRouteRule(r) {
 			fullSTUNRejectCount++
 		}
 	}
-	if fullBypassRejectCount != 3 || fullSTUNRejectCount != 3 {
-		t.Fatalf("expected 3 DoT/CN-DoH + 3 STUN reject rules preserved in full mode, got bypass=%d stun=%d", fullBypassRejectCount, fullSTUNRejectCount)
+	if fullSTUNRejectCount != 3 {
+		t.Fatalf("expected 3 STUN reject rules preserved in full mode, got stun=%d", fullSTUNRejectCount)
 	}
 
 	offJSON, err := singbox.ApplyIPv6ModeToConfigJSON(fullJSON, "off")

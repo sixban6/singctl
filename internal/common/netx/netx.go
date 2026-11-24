@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -170,6 +171,38 @@ func getDefaultInterfaceSubnet() (string, error) {
 		}
 	}
 	return "", fmt.Errorf("no subnet found for interface %s", netdev)
+}
+
+// BuildGitHubDownloadCandidates 为规则集或远程资源构造按优先级排列的下载候选列表：
+// 若目标位于 GitHub 域名且配置了有效的加速镜像前缀（如 https://gh-proxy.com），优先尝试镜像地址并保留直连回退；
+// 若已带镜像前缀或非 GitHub 域名，则原样返回单一候选。
+func BuildGitHubDownloadCandidates(rawURL, mirrorURL string) []string {
+	target := strings.TrimSpace(rawURL)
+	if target == "" {
+		return nil
+	}
+	u, err := url.Parse(target)
+	if err != nil || u.Host == "" {
+		return []string{target}
+	}
+	host := strings.ToLower(u.Hostname())
+	isGitHub := host == "github.com" ||
+		host == "raw.githubusercontent.com" ||
+		host == "gist.githubusercontent.com" ||
+		host == "objects.githubusercontent.com"
+	if !isGitHub {
+		return []string{target}
+	}
+
+	mirror := strings.TrimRight(strings.TrimSpace(mirrorURL), "/")
+	if mirror == "" || strings.EqualFold(mirror, "https://github.com") {
+		return []string{target}
+	}
+	prefix := mirror + "/"
+	if strings.HasPrefix(strings.ToLower(target), strings.ToLower(prefix)) {
+		return []string{target}
+	}
+	return []string{prefix + target, target}
 }
 
 // GetReachableURL 当 Google 直连不可达且配置了镜像前缀时拼接加速 URL。

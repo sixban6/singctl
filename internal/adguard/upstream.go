@@ -188,12 +188,21 @@ func DescribeUpstream(addr string) UpstreamServerInfo {
 		proto = "DoT"
 	case strings.HasPrefix(lower, "quic://"):
 		proto = "DoQ"
+	case strings.HasPrefix(lower, "udp://"):
+		proto = "Gateway"
 	}
 
 	u, err := url.Parse(clean)
 	host := ""
 	if err == nil {
 		host = u.Hostname()
+	}
+	if proto == "Gateway" {
+		return UpstreamServerInfo{
+			Address:  clean,
+			Name:     "上级主路由网关 DNS",
+			Protocol: "Gateway",
+		}
 	}
 	provider := "自定义加密上游"
 	hostLower := strings.ToLower(strings.TrimSuffix(host, "."))

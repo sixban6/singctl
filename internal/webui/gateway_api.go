@@ -48,7 +48,7 @@ func (s *Server) probeGatewayIPv6Status(ctx context.Context, gwCfg config.Gatewa
 func (s *Server) gatewayStatusSummary() map[string]any {
 	mode := gateway.ModeMain
 	workMode := config.WorkModeAuto
-	effectiveWorkMode := config.WorkModeBasic
+	effectiveWorkMode := config.WorkModeAudit
 	hasSubs := false
 	mainRouterIP := ""
 	ipv6Mode := config.GatewayIPv6Off
@@ -120,11 +120,11 @@ func (s *Server) handleGatewayPut(w http.ResponseWriter, r *http.Request) {
 	if body.WorkMode != nil {
 		normWM, ok := config.NormalizeWorkMode(*body.WorkMode)
 		if !ok {
-			writeJSONError(w, http.StatusBadRequest, "无效的工作模式参数（仅支持 auto / basic / audit / proxy）")
+			writeJSONError(w, http.StatusBadRequest, "无效的工作模式参数（仅支持 auto / audit / proxy）")
 			return
 		}
 		if normWM == config.WorkModeProxy && !cfg.HasRealSubs() {
-			writeJSONError(w, http.StatusBadRequest, "切换到「代理模式」需要先添加至少一条订阅链接；无需订阅请选择「基础模式」或「审计模式」")
+			writeJSONError(w, http.StatusBadRequest, "切换到「代理模式」需要先添加至少一条订阅链接；无需订阅请选择「审计模式」")
 			return
 		}
 		desiredWorkMode = normWM
@@ -229,12 +229,11 @@ func (s *Server) handleGatewayPut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 同步热更新 /etc/sing-box/config.json 中的 IPv6 DNS 策略（存在即生效）。
-	// 若本次请求正在切换工作模式（将停用或全新重编译 config.json），或在真实宿主机基础模式且 sing-box 未运行时，
+	// 若本次请求正在切换工作模式（将全新重编译 config.json），
 	// 跳过对磁盘旧 config.json 的校验与改写，避免历史废弃配置阻断模式切换。
 	newEffectiveWorkMode := cfg.EffectiveWorkMode()
 	willApplyWorkMode := workModeRequested && (newEffectiveWorkMode != prevWorkMode || s.opts.WorkModeApplyForTest != nil)
-	skipLegacySBIPv6Patch := willApplyWorkMode ||
-		(isRealHost && newEffectiveWorkMode == config.WorkModeBasic && !daemon.IsSingBoxRunning())
+	skipLegacySBIPv6Patch := willApplyWorkMode
 	sbPath := s.sbConfigPath()
 	if !skipLegacySBIPv6Patch {
 		if rawSBBytes, sbErr := os.ReadFile(sbPath); sbErr == nil && strings.TrimSpace(string(rawSBBytes)) != "" {
@@ -328,7 +327,7 @@ func (s *Server) handleGatewayPut(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) applyWorkModeLive(ctx context.Context, cfg *config.Config, prevMode, targetMode string) (bool, string, error) {
+func (s *Server) applyWorkModeLive(ctx context.Context, cfg *config.Config, _, targetMode string) (bool, string, error) {
 	if s.opts.WorkModeApplyForTest != nil {
 		return s.opts.WorkModeApplyForTest(ctx, cfg, targetMode)
 	}
@@ -337,27 +336,8 @@ func (s *Server) applyWorkModeLive(ctx context.Context, cfg *config.Config, prev
 	}
 
 	dnsPort := cfg.DNS.GetDNSPort()
-	restoreBasicBridgeIfNeeded := func() {
-		if prevMode == config.WorkModeBasic && cfg.DNS.IsEnabled() {
-			_, _ = localdns.SyncOpenWrtDnsmasqBridge(ctx, true, dnsPort, localdns.DnsmasqBridgeDeps{})
-		}
-	}
 
 	switch targetMode {
-	case config.WorkModeBasic:
-		if daemon.IsSingBoxRunning() {
-			if err := singbox.New(cfg).Stop(); err != nil {
-				return false, "", fmt.Errorf("停止 sing-box 失败: %w", err)
-			}
-		}
-		if active := s.newDNSRegistry(cfg).ActiveEngine(); active != nil && active.IsInstalled() && cfg.DNS.IsEnabled() {
-			_ = active.EnsureHealthy(ctx)
-			if _, err := localdns.SyncOpenWrtDnsmasqBridge(ctx, true, dnsPort, localdns.DnsmasqBridgeDeps{}); err != nil {
-				logger.Warn("[WorkMode] 接管 dnsmasq 桥接告警: %v", err)
-			}
-		}
-		return true, "已切换为「基础模式」（已停止代理内核，防劫持 DNS 与隔离网零损耗生效）", nil
-
 	case config.WorkModeAudit:
 		sb := singbox.New(cfg)
 		if err := sb.GenerateConfig(); err != nil {
@@ -366,12 +346,11 @@ func (s *Server) applyWorkModeLive(ctx context.Context, cfg *config.Config, prev
 		if daemon.IsSingBoxRunning() {
 			_ = sb.Stop()
 		}
-		_, _ = localdns.SyncOpenWrtDnsmasqBridge(ctx, false, dnsPort, localdns.DnsmasqBridgeDeps{})
+		_, _ = localdns.RestoreLegacyOpenWrtDnsmasqBridge(ctx, dnsPort, localdns.DnsmasqBridgeDeps{})
 		if err := sb.Start(); err != nil {
-			restoreBasicBridgeIfNeeded()
 			return false, "", fmt.Errorf("启动免订阅审计内核失败: %w", err)
 		}
-		return true, "已切换为「审计模式」（无需订阅，实时行为审计、PCDN 拦截与防劫持 DNS 已激活）", nil
+		return true, "已切换为「审计模式」（无需订阅，实时行为审计、PCDN 拦截与强劫持防绕过 DNS 已激活）", nil
 
 	case config.WorkModeProxy:
 		sb := singbox.New(cfg)
@@ -381,12 +360,11 @@ func (s *Server) applyWorkModeLive(ctx context.Context, cfg *config.Config, prev
 		if daemon.IsSingBoxRunning() {
 			_ = sb.Stop()
 		}
-		_, _ = localdns.SyncOpenWrtDnsmasqBridge(ctx, false, dnsPort, localdns.DnsmasqBridgeDeps{})
+		_, _ = localdns.RestoreLegacyOpenWrtDnsmasqBridge(ctx, dnsPort, localdns.DnsmasqBridgeDeps{})
 		if err := sb.Start(); err != nil {
-			restoreBasicBridgeIfNeeded()
 			return false, "", fmt.Errorf("启动代理内核失败: %w", err)
 		}
-		return true, "已切换为「代理模式」（透明代理智能分流与完整审计已生效）", nil
+		return true, "已切换为「代理模式」（透明代理智能分流、完整审计与强劫持防绕过 DNS 已生效）", nil
 
 	default:
 		return false, "已保存工作模式", nil

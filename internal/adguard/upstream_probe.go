@@ -147,6 +147,8 @@ func ProbeSingleUpstream(ctx context.Context, upstream, domain string, timeout t
 		respWire, err = queryDoHWireformat(probeCtx, strings.TrimSpace(upstream), queryWire, timeout)
 	case "tls":
 		respWire, err = queryDoTWireformat(probeCtx, u, queryWire, timeout)
+	case "udp":
+		respWire, err = queryUDPWireformat(probeCtx, u, queryWire, timeout)
 	default:
 		err = fmt.Errorf("暂不支持直接探测协议 %s", u.Scheme)
 	}
@@ -248,6 +250,37 @@ func queryDoTWireformat(ctx context.Context, u *url.URL, query []byte, timeout t
 		return nil, err
 	}
 	return resp, nil
+}
+
+func queryUDPWireformat(ctx context.Context, u *url.URL, query []byte, timeout time.Duration) ([]byte, error) {
+	host := u.Hostname()
+	port := cmp.Or(u.Port(), "53")
+	addr := net.JoinHostPort(host, port)
+
+	dialer := &net.Dialer{
+		Timeout: timeout,
+		Control: controlSocketWithBypassMark,
+	}
+	conn, err := dialer.DialContext(ctx, "udp", addr)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	if dl, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(dl)
+	} else {
+		_ = conn.SetDeadline(time.Now().Add(timeout))
+	}
+	if _, err := conn.Write(query); err != nil {
+		return nil, err
+	}
+	buf := make([]byte, 4096)
+	n, err := conn.Read(buf)
+	if err != nil {
+		return nil, err
+	}
+	return buf[:n], nil
 }
 
 // BuildDNSQueryPacket 构造标准 RFC 1035 IPv4 A 记录查询报文并返回随机事务 ID。

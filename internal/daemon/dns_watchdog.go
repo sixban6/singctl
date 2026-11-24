@@ -68,14 +68,20 @@ func (d *Daemon) dnsSBWorkConfigPath() string {
 	return ""
 }
 
-func (d *Daemon) syncLiveSingBoxDNSLocal(ctx context.Context, useExternal bool, dnsPort int) {
+func (d *Daemon) syncLiveSingBoxDNSLocal(ctx context.Context, cfg *config.Config, useExternal bool, dnsPort int) {
 	sbPath := d.dnsSBConfigPath()
 	workPath := d.dnsSBWorkConfigPath()
 	if d.dnsDeps != nil && d.dnsDeps.SyncSingBoxDNSLocalFunc != nil {
 		_, _ = d.dnsDeps.SyncSingBoxDNSLocalFunc(ctx, sbPath, workPath, useExternal, dnsPort)
 		return
 	}
-	_, _ = singbox.SyncLiveSingBoxDNSLocal(ctx, sbPath, workPath, useExternal, dnsPort)
+	fallbackGW := ""
+	if !useExternal && cfg != nil {
+		if gw, ok := singbox.ExtractCascadedGatewayUpstream(cfg.DNS.Upstreams); ok {
+			fallbackGW = gw
+		}
+	}
+	_, _ = singbox.SyncLiveSingBoxDNSLocalWithFallback(ctx, sbPath, workPath, useExternal, dnsPort, fallbackGW)
 }
 
 // GuardLocalDNSOnce 执行单轮双引擎本地 DNS 巡检与自愈编排（供看门狗主循环与单元测试直接驱动）。
@@ -144,15 +150,15 @@ func (d *Daemon) guardExternalDNSEngine(ctx context.Context, cfg *config.Config,
 	if err := eng.EnsureHealthy(ctx); err != nil {
 		logger.Warn("[Watchdog] %s 自愈恢复失败: %v", eng.Meta().Name, err)
 		if linked {
-			logger.Warn("[Watchdog] 触发 DNS 应急降级：将 sing-box dns_local 临时切回纯 IP 加密 DoH (optimistic: false)，保障全屋不断网")
-			d.syncLiveSingBoxDNSLocal(ctx, false, dnsPort)
+			logger.Warn("[Watchdog] 触发 DNS 应急降级：将 sing-box dns_local 临时切回安全应急上游 (optimistic: false)，保障全屋不断网")
+			d.syncLiveSingBoxDNSLocal(ctx, cfg, false, dnsPort)
 		}
 		return
 	}
 
 	if !linked {
 		logger.Info("[Watchdog] %s 已恢复在线，自动将 sing-box dns_local 切回本地防劫持引擎 (127.0.0.1:%d)", eng.Meta().Name, dnsPort)
-		d.syncLiveSingBoxDNSLocal(ctx, true, dnsPort)
+		d.syncLiveSingBoxDNSLocal(ctx, cfg, true, dnsPort)
 	}
 }
 

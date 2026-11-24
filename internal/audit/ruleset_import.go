@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"singctl/internal/common/netx"
 	"singctl/internal/config"
 	"singctl/internal/singbox"
 	"singctl/internal/singbox/clashapi"
@@ -112,13 +113,11 @@ func (e *Enforcer) FetchRuleSetPayload(ctx context.Context, spec RuleSetImportSp
 	}
 
 	if spec.SourceURL != "" {
-		var candidates []string
-		if strings.Contains(spec.SourceURL, "github.com/") || strings.Contains(spec.SourceURL, "raw.githubusercontent.com/") {
-			if !strings.HasPrefix(spec.SourceURL, "https://ghfast.top/") {
-				candidates = append(candidates, "https://ghfast.top/"+spec.SourceURL)
-			}
+		mirrorURL := ""
+		if e != nil && e.cfg != nil {
+			mirrorURL = e.cfg.GitHub.MirrorURL
 		}
-		candidates = append(candidates, spec.SourceURL)
+		candidates := netx.BuildGitHubDownloadCandidates(spec.SourceURL, mirrorURL)
 
 		client := e.activeHTTPClient()
 		var lastErr error

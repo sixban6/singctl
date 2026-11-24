@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Cpu, FileCode, Layers, Link2, SlidersHorizontal } from 'lucide-react';
-import { Badge, Button, ConfirmDialog, PageHeader, SegmentedTabs, useToast } from '../../ui';
+import { Badge, ConfirmDialog, PageHeader, SegmentedTabs, useToast } from '../../ui';
 import { clientApi } from '../api';
 import { useVisibilityInterval } from '../../hooks';
 import {
@@ -369,15 +369,6 @@ export const SingBoxPage: React.FC<SingBoxPageProps> = ({
           />
         }
       />
-
-      {status?.gateway?.effectiveWorkMode === 'basic' && !sbRunning && (
-        <div className="console-card rounded-2xl px-4 py-3 border border-subtle flex flex-wrap items-center justify-between gap-2 text-xs text-secondary">
-          <span>当前网关处于「基础模式」，sing-box 内核默认不启动；如需启用审计或代理，请在网关模式中切换。</span>
-          <Button size="xs" variant="secondary" onClick={() => onNavigate('net', 'gw')}>
-            前往网关模式
-          </Button>
-        </div>
-      )}
 
       <SingBoxControlBar
         sb={sb}

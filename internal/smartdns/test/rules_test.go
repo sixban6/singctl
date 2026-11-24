@@ -88,7 +88,7 @@ func TestValidateFilterURLAndCuratedPresets(t *testing.T) {
 	}
 	wantIDs := map[string]string{
 		"anti-ad-smartdns":      "https://anti-ad.net/anti-ad-for-smartdns.conf",
-		"hagezi-light-smartdns": "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/domains/light.txt",
+		"hagezi-light-smartdns": "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/light.txt",
 	}
 	for _, p := range presets {
 		if expectedURL, ok := wantIDs[p.ID]; ok {
@@ -303,5 +303,34 @@ conf-file /etc/passwd
 	rawPaused, _ := os.ReadFile(filepath.Join(rulesDir, "adblock.conf"))
 	if strings.Contains(string(rawPaused), "address /") {
 		t.Fatalf("paused adblock.conf should not contain active block rules:\n%s", string(rawPaused))
+	}
+}
+
+func TestSyncAdblockFiltersWithMirror_AcceleratesGitHubURLs(t *testing.T) {
+	var hitPaths []string
+	mirrorSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hitPaths = append(hitPaths, r.URL.Path)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("||tracker.example.com^\n||ads.example.com^\n"))
+	}))
+	defer mirrorSrv.Close()
+
+	rulesDir := filepath.Join(t.TempDir(), "filters")
+	count, err := smartdns.SyncAdblockFiltersWithMirror(
+		t.Context(),
+		mirrorSrv.Client(),
+		rulesDir,
+		[]string{"https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/light.txt"},
+		false,
+		mirrorSrv.URL,
+	)
+	if err != nil {
+		t.Fatalf("SyncAdblockFiltersWithMirror failed: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("expected 2 normalized rules, got %d", count)
+	}
+	if len(hitPaths) != 1 || !strings.Contains(hitPaths[0], "/https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/light.txt") {
+		t.Fatalf("expected GitHub filter downloaded through configured mirror, hits=%v", hitPaths)
 	}
 }

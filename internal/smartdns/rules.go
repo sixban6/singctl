@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"singctl/internal/common/fsx"
+	"singctl/internal/common/netx"
 )
 
 // MaxFilterFileBytes 限制单个远程去广告规则文件下载上限（4 MiB），防止撑爆软路由闪存。
@@ -133,7 +134,7 @@ func CuratedFilterPresets() []FilterPreset {
 			ID:          "hagezi-light-smartdns",
 			Name:        "HaGeZi Light 轻量安全精选",
 			Desc:        "低内存软路由友好，下载后自动规范化转写为 SmartDNS 屏蔽规则（单文件上限 4 MiB）",
-			URL:         "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/domains/light.txt",
+			URL:         "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/light.txt",
 			Recommended: false,
 		},
 	}
@@ -349,10 +350,23 @@ func NormalizeAdblockLine(line string) (string, bool) {
 
 // SyncAdblockFilters 拉取、校验并规范化远程轻量去广告规则集写入 adblock.conf（单源硬上限 4 MiB）。
 func SyncAdblockFilters(ctx context.Context, rulesDir string, urls []string, paused bool) (int, error) {
-	return syncAdblockFiltersWithClient(ctx, nil, rulesDir, urls, paused)
+	return SyncAdblockFiltersWithMirror(ctx, nil, rulesDir, urls, paused, "")
 }
 
-func syncAdblockFiltersWithClient(ctx context.Context, client *http.Client, rulesDir string, urls []string, paused bool) (int, error) {
+// SyncAdblockFiltersWithMirror 拉取、校验并规范化远程去广告规则集，GitHub 地址优先走配置的加速镜像并自动直连回退。
+func SyncAdblockFiltersWithMirror(ctx context.Context, client *http.Client, rulesDir string, urls []string, paused bool, mirrorURL string) (int, error) {
+	return syncAdblockFiltersWithClient(ctx, client, rulesDir, urls, paused, mirrorURL)
+}
+
+// MigrateLegacyFilterURL 将已失效的历史内置过滤列表 URL 平滑映射至有效新地址。
+func MigrateLegacyFilterURL(u string) string {
+	if strings.EqualFold(strings.TrimSpace(u), "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/domains/light.txt") {
+		return "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/light.txt"
+	}
+	return strings.TrimSpace(u)
+}
+
+func syncAdblockFiltersWithClient(ctx context.Context, client *http.Client, rulesDir string, urls []string, paused bool, mirrorURL string) (int, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -379,6 +393,7 @@ func syncAdblockFiltersWithClient(ctx context.Context, client *http.Client, rule
 		if err != nil {
 			return 0, err
 		}
+		u = MigrateLegacyFilterURL(u)
 		if _, dup := seenURL[u]; dup {
 			continue
 		}
@@ -402,25 +417,40 @@ func syncAdblockFiltersWithClient(ctx context.Context, client *http.Client, rule
 	rules := make([]string, 0, 1024)
 
 	for _, filterURL := range cleanURLs {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, filterURL, nil)
-		if err != nil {
-			return 0, fmt.Errorf("构造规则请求失败 (%s): %w", filterURL, err)
-		}
-		resp, err := httpClient.Do(req)
-		if err != nil {
-			return 0, fmt.Errorf("下载去广告规则失败 (%s): %w", filterURL, err)
-		}
-		body, readErr := io.ReadAll(io.LimitReader(resp.Body, MaxFilterFileBytes+1))
-		_ = resp.Body.Close()
+		candidates := netx.BuildGitHubDownloadCandidates(filterURL, mirrorURL)
+		var body []byte
+		var fetchErr error
+		for _, cand := range candidates {
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, cand, nil)
+			if err != nil {
+				fetchErr = fmt.Errorf("构造规则请求失败 (%s): %w", cand, err)
+				continue
+			}
+			resp, err := httpClient.Do(req)
+			if err != nil {
+				fetchErr = fmt.Errorf("下载去广告规则失败 (%s): %w", cand, err)
+				continue
+			}
+			rawBody, readErr := io.ReadAll(io.LimitReader(resp.Body, MaxFilterFileBytes+1))
+			_ = resp.Body.Close()
 
-		if resp.StatusCode != http.StatusOK {
-			return 0, fmt.Errorf("下载去广告规则失败 (%s): HTTP %d", filterURL, resp.StatusCode)
+			if resp.StatusCode != http.StatusOK {
+				fetchErr = fmt.Errorf("下载去广告规则失败 (%s): HTTP %d", cand, resp.StatusCode)
+				continue
+			}
+			if readErr != nil {
+				fetchErr = fmt.Errorf("读取去广告规则失败 (%s): %w", cand, readErr)
+				continue
+			}
+			if len(rawBody) > MaxFilterFileBytes {
+				return 0, fmt.Errorf("去广告规则文件超过 %d MiB 安全上限 (%s)，已拒绝写入以保护闪存", MaxFilterFileBytes/(1024*1024), filterURL)
+			}
+			body = rawBody
+			fetchErr = nil
+			break
 		}
-		if readErr != nil {
-			return 0, fmt.Errorf("读取去广告规则失败 (%s): %w", filterURL, readErr)
-		}
-		if len(body) > MaxFilterFileBytes {
-			return 0, fmt.Errorf("去广告规则文件超过 %d MiB 安全上限 (%s)，已拒绝写入以保护闪存", MaxFilterFileBytes/(1024*1024), filterURL)
+		if fetchErr != nil {
+			return 0, fetchErr
 		}
 
 		for line := range strings.SplitSeq(string(body), "\n") {

@@ -105,8 +105,8 @@ type OverviewSnapshot struct {
 	ActiveEngineLabel string         `json:"activeEngineLabel"`
 	RecommendedEngine string         `json:"recommendedEngine"`
 	RecommendedReason string         `json:"recommendedReason"`
-	DnsmasqLinked     bool           `json:"dnsmasqLinked"`
 	WorkMode          string         `json:"workMode"`
+	UpstreamGatewayIP string         `json:"upstreamGatewayIp,omitempty"`
 	FallbackDoHActive bool           `json:"fallbackDoHActive"`
 	BlockAAAA         bool           `json:"blockAAAA"`
 	StatsSource       string         `json:"statsSource"`
@@ -195,4 +195,5 @@ type EngineDeps struct {
 	AdGuardManager    *adguard.Manager
 	SmartDNSExtraOpt  *smartdns.ManagerOptions
 	DnsmasqBridgeDeps *DnsmasqBridgeDeps
+	UpstreamGatewayIP string
 }

@@ -1,6 +1,6 @@
 export type GatewayRoleMode = 'main' | 'side';
-export type GatewayWorkMode = 'auto' | 'basic' | 'audit' | 'proxy';
-export type EffectiveGatewayWorkMode = 'basic' | 'audit' | 'proxy';
+export type GatewayWorkMode = 'auto' | 'audit' | 'proxy';
+export type EffectiveGatewayWorkMode = 'audit' | 'proxy';
 export type GatewayIPv6Mode = 'off' | 'cn_only' | 'full';
 
 export interface IPv6StatusInfo {

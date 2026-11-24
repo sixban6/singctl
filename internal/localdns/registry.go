@@ -173,8 +173,6 @@ func (r *Registry) Overview(ctx context.Context) *OverviewSnapshot {
 	}
 
 	linked, _ := singbox.InspectSingBoxDNSLocal(r.sbConfigPath())
-	dnsmasqLinked := InspectOpenWrtDnsmasqBridge(ctx, r.cfg.DNS.GetDNSPort(), r.dnsmasqBridgeDeps())
-	effectiveLinked := linked || dnsmasqLinked
 	snap := active.Overview(ctx, linked)
 	if snap == nil {
 		snap = &OverviewSnapshot{}
@@ -191,9 +189,9 @@ func (r *Registry) Overview(ctx context.Context) *OverviewSnapshot {
 	snap.ActiveEngineLabel = active.Meta().Name
 	snap.RecommendedEngine = sel.RecommendedEngine
 	snap.RecommendedReason = sel.RecommendedReason
-	snap.DnsmasqLinked = dnsmasqLinked
 	snap.WorkMode = r.cfg.EffectiveWorkMode()
-	snap.FallbackDoHActive = !snap.Installed || !snap.Running || !r.cfg.DNS.IsEnabled() || !effectiveLinked
+	snap.UpstreamGatewayIP = strings.TrimSpace(r.deps.UpstreamGatewayIP)
+	snap.FallbackDoHActive = !snap.Installed || !snap.Running || !r.cfg.DNS.IsEnabled() || !linked
 	snap.Capabilities = active.Capabilities()
 	snap.Engines = r.buildEngineOptions(ctx, sel, active.ID(), snap.Version)
 	return snap
@@ -208,9 +206,7 @@ func (r *Registry) StatusSummary(ctx context.Context) map[string]any {
 	}
 	st := active.Status(ctx)
 	linked, _ := singbox.InspectSingBoxDNSLocal(r.sbConfigPath())
-	dnsmasqLinked := InspectOpenWrtDnsmasqBridge(ctx, r.cfg.DNS.GetDNSPort(), r.dnsmasqBridgeDeps())
-	effectiveLinked := linked || dnsmasqLinked
-	fallbackDoH := !st.Installed || !st.Running || !r.cfg.DNS.IsEnabled() || !effectiveLinked
+	fallbackDoH := !st.Installed || !st.Running || !r.cfg.DNS.IsEnabled() || !linked
 	aghWarn := r.aghEng.LowMemoryGuardWarning()
 
 	return map[string]any{
@@ -221,7 +217,6 @@ func (r *Registry) StatusSummary(ctx context.Context) map[string]any {
 		"dnsHealthy":        st.DNSHealthy,
 		"webHealthy":        st.WebHealthy,
 		"singboxLinked":     linked,
-		"dnsmasqLinked":     dnsmasqLinked,
 		"workMode":          r.cfg.EffectiveWorkMode(),
 		"fallbackDoHActive": fallbackDoH,
 		"lowMemoryBlocked":  aghWarn != "",

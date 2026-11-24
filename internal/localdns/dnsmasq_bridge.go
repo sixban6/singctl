@@ -1,28 +1,25 @@
-// 文件职责：实现「基础模式」（零 sing-box）下 OpenWrt dnsmasq 接管至本地 SmartDNS/AdGuard 的 0600 备份、原子切换与无痕还原。
+// 文件职责：提供历史基础模式遗留 OpenWrt dnsmasq 桥接快照（/etc/singctl/dnsmasq-bridge-backup.json）的无痕幂等还原清理。
 package localdns
 
 import (
 	"cmp"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
 	"time"
 
-	"singctl/internal/common/fsx"
 	"singctl/internal/common/sysinfo"
 	"singctl/internal/platform/servicemgr"
 )
 
 const defaultDnsmasqBridgeBackupPath = "/etc/singctl/dnsmasq-bridge-backup.json"
 
-// DnsmasqBridgeDeps 封装 OpenWrt dnsmasq 桥接操作的可替换宿主机 I/O 依赖（零值回退生产默认）。
+// DnsmasqBridgeDeps 封装 OpenWrt dnsmasq 历史桥接还原操作的可替换宿主机 I/O 依赖（零值回退生产默认）。
 type DnsmasqBridgeDeps struct {
 	IsOpenWrt     func() bool
 	RunUCI        func(ctx context.Context, args ...string) (string, error)
@@ -84,11 +81,7 @@ func targetBridgeServer(dnsPort int) string {
 	return "127.0.0.1#" + strconv.Itoa(dnsPort)
 }
 
-// InspectOpenWrtDnsmasqBridge 检测 OpenWrt dnsmasq 当前是否已接管指向本地防劫持 DNS (127.0.0.1#<port>)。
-func InspectOpenWrtDnsmasqBridge(ctx context.Context, dnsPort int, deps DnsmasqBridgeDeps) bool {
-	if !deps.isOpenWrt() {
-		return false
-	}
+func isLegacyBridged(ctx context.Context, dnsPort int, deps DnsmasqBridgeDeps) bool {
 	noResolv, _ := deps.runUCI(ctx, "-q", "get", "dhcp.@dnsmasq[0].noresolv")
 	if strings.TrimSpace(noResolv) != "1" {
 		return false
@@ -103,60 +96,16 @@ func InspectOpenWrtDnsmasqBridge(ctx context.Context, dnsPort int, deps DnsmasqB
 	return false
 }
 
-// SyncOpenWrtDnsmasqBridge 在「基础模式」下将 OpenWrt dnsmasq 安全桥接至 127.0.0.1#<dnsPort>，
-// 或在切入 sing-box 审计/代理模式时从 0600 快照无痕恢复原上游配置（幂等）。
-func SyncOpenWrtDnsmasqBridge(ctx context.Context, enable bool, dnsPort int, deps DnsmasqBridgeDeps) (bool, error) {
+// RestoreLegacyOpenWrtDnsmasqBridge 幂等清理早期版本基础模式遗留的 OpenWrt dnsmasq 桥接配置与 0600 备份快照；
+// 无遗留快照且未处于桥接状态时直接返回 (false, nil)。
+func RestoreLegacyOpenWrtDnsmasqBridge(ctx context.Context, dnsPort int, deps DnsmasqBridgeDeps) (bool, error) {
 	if !deps.isOpenWrt() {
 		return false, nil
 	}
-	wantServer := targetBridgeServer(dnsPort)
 	backupFile := deps.backupPath()
-
-	if enable {
-		if InspectOpenWrtDnsmasqBridge(ctx, dnsPort, deps) {
-			return false, nil
-		}
-		// 首次接管前备份原有 dnsmasq 上游配置至 0600 文件
-		if _, err := os.Stat(backupFile); errors.Is(err, os.ErrNotExist) {
-			origNoResolv, _ := deps.runUCI(ctx, "-q", "get", "dhcp.@dnsmasq[0].noresolv")
-			origServersRaw, _ := deps.runUCI(ctx, "-q", "get", "dhcp.@dnsmasq[0].server")
-			var origServers []string
-			for s := range strings.FieldsSeq(origServersRaw) {
-				clean := strings.Trim(s, "'\"")
-				if clean != "" && !strings.HasPrefix(clean, "127.0.0.1#") {
-					origServers = append(origServers, clean)
-				}
-			}
-			snap := dnsmasqBridgeBackup{
-				NoResolv: strings.TrimSpace(origNoResolv),
-				Servers:  origServers,
-			}
-			if raw, mErr := json.MarshalIndent(snap, "", "  "); mErr == nil {
-				_ = os.MkdirAll(filepath.Dir(backupFile), 0700)
-				_ = fsx.WriteAtomic0600(backupFile, append(raw, '\n'))
-			}
-		}
-
-		if _, err := deps.runUCI(ctx, "set", "dhcp.@dnsmasq[0].noresolv=1"); err != nil {
-			return false, fmt.Errorf("uci set dnsmasq noresolv: %w", err)
-		}
-		_, _ = deps.runUCI(ctx, "delete", "dhcp.@dnsmasq[0].server")
-		if _, err := deps.runUCI(ctx, "add_list", "dhcp.@dnsmasq[0].server="+wantServer); err != nil {
-			return false, fmt.Errorf("uci add_list dnsmasq server: %w", err)
-		}
-		if _, err := deps.runUCI(ctx, "commit", "dhcp"); err != nil {
-			return false, fmt.Errorf("uci commit dhcp: %w", err)
-		}
-		if err := deps.reloadDnsmasq(ctx); err != nil {
-			return true, fmt.Errorf("reload dnsmasq: %w", err)
-		}
-		return true, nil
-	}
-
-	// Disable / restore
 	rawBackup, readErr := os.ReadFile(backupFile)
 	hasBackup := readErr == nil && len(rawBackup) > 0
-	isBridged := InspectOpenWrtDnsmasqBridge(ctx, dnsPort, deps)
+	isBridged := isLegacyBridged(ctx, dnsPort, deps)
 	if !hasBackup && !isBridged {
 		return false, nil
 	}
