@@ -360,8 +360,19 @@ func (s *Server) SeedWarpExitCache(ip, loc string, at time.Time) {
 	}
 }
 
+// serverWebCSP 服务端管理面板严格纯同源 CSP，彻底阻断任何未授权外部脚本与外泄连接。
+const serverWebCSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+
+func applyServerWebBaseSecurityHeaders(w http.ResponseWriter) {
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("Content-Security-Policy", serverWebCSP)
+}
+
 func wrapStaticCacheHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		applyServerWebBaseSecurityHeaders(w)
 		if strings.HasPrefix(r.URL.Path, "/assets/") {
 			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		} else if r.URL.Path == "/" || r.URL.Path == "/index.html" {
@@ -643,8 +654,7 @@ func (s *Server) InvalidateConfigCache() {
 
 func applySecurityResponseHeaders(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("X-Frame-Options", "DENY")
+	applyServerWebBaseSecurityHeaders(w)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

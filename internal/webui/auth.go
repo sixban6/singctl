@@ -56,12 +56,24 @@ func (s *Server) setAuthCookie(w http.ResponseWriter, r *http.Request) {
 	s.issueAuthCookie(w)
 }
 
-// guard 包装器:统一鉴权、反爬虫头注入、JSON 错误输出、方法校验
+// clientWebCSP 严格限制浏览器脚本、框架与出站连接，仅放行同源接口及 DNS/IP 测漏探针域名。
+const clientWebCSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://ipv4.geojs.io https://ipv6.geojs.io https://myip.ipip.net https://*.edns.ip-api.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+
+func applyClientSecurityHeaders(w http.ResponseWriter, csp string) {
+	w.Header().Set("X-Robots-Tag", "noindex, nofollow, noarchive, nosnippet")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	if csp != "" {
+		w.Header().Set("Content-Security-Policy", csp)
+	}
+}
+
+// guard 包装器:统一鉴权、反爬虫与严格 CSP 安全头注入、JSON 错误输出、方法校验
 func (s *Server) guard(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		s.RecordRequestActivity()
-		w.Header().Set("X-Robots-Tag", "noindex, nofollow, noarchive, nosnippet")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
+		applyClientSecurityHeaders(w, clientWebCSP)
 		w.Header().Set("Cache-Control", "no-store")
 		if !s.authorized(r) {
 			// 前端 XHR 请求携带 X-Requested-With 时不返回 WWW-Authenticate，避免浏览器乱弹原生 Basic Auth 框
@@ -97,11 +109,10 @@ func (s *Server) guard(next http.HandlerFunc) http.HandlerFunc {
 func (s *Server) authOnly(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.RecordRequestActivity()
-		w.Header().Set("X-Robots-Tag", "noindex, nofollow, noarchive, nosnippet")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
 		if !s.authorized(r) {
 			w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
 			if (r.Method == http.MethodGet || r.Method == http.MethodHead) && (r.URL.Path == "/" || r.URL.Path == "/index.html") {
+				applyClientSecurityHeaders(w, embeddedLoginCSP)
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
 				w.WriteHeader(http.StatusUnauthorized)
 				if r.Method != http.MethodHead {
@@ -109,9 +120,11 @@ func (s *Server) authOnly(next http.Handler) http.Handler {
 				}
 				return
 			}
+			applyClientSecurityHeaders(w, clientWebCSP)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
+		applyClientSecurityHeaders(w, clientWebCSP)
 		s.setAuthCookie(w, r)
 		if strings.HasPrefix(r.URL.Path, "/assets/") {
 			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
@@ -181,8 +194,7 @@ func (s *Server) guardIOSDownload(next http.HandlerFunc) http.HandlerFunc {
 // handleAuthCheck 公开鉴权在线探测接口（供前端自更新热重启重连探测及会话校验使用，未登录不泄漏敏感信息）
 func (s *Server) handleAuthCheck(w http.ResponseWriter, r *http.Request) {
 	s.RecordRequestActivity()
-	w.Header().Set("X-Robots-Tag", "noindex, nofollow, noarchive, nosnippet")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
+	applyClientSecurityHeaders(w, clientWebCSP)
 	w.Header().Set("Cache-Control", "no-store")
 
 	authed := s.authorized(r)
@@ -202,8 +214,7 @@ func (s *Server) handleAuthCheck(w http.ResponseWriter, r *http.Request) {
 
 // handleAuthLogin 内嵌口令登录接口：恒定时间校验口令、同 IP 限流防爆破，成功后下发 30 天 HttpOnly Cookie 及会话 Token
 func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("X-Robots-Tag", "noindex, nofollow, noarchive, nosnippet")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
+	applyClientSecurityHeaders(w, clientWebCSP)
 	w.Header().Set("Cache-Control", "no-store")
 
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)

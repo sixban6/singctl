@@ -229,7 +229,6 @@ export const AuditFlowMobileCards: React.FC<AuditFlowMobileCardsProps> = ({
             {/* Action bar */}
             <div className="pt-0.5 flex items-center justify-between gap-2">
               <div className="flex items-center gap-1 flex-wrap">
-                {f.isDirectIp && <Badge tone="warn">裸 IP</Badge>}
                 {f.pcdnKind === 'upload' && <Badge tone="danger">PCDN 偷跑</Badge>}
                 {f.pcdnKind === 'swarm' && <Badge tone="danger">PCDN 蜂群</Badge>}
                 {(f.throttledRateKbps || 0) > 0 && (

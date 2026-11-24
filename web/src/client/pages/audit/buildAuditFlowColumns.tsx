@@ -110,13 +110,9 @@ export function buildAuditFlowColumns({
                   <Copy className="w-3 h-3" />
                 </button>
                 {f.appName && <Badge tone="accent">{f.appName}</Badge>}
-                {f.isDirectIp && <Badge tone="warn">裸IP</Badge>}
                 {f.pcdnKind === 'upload' && <Badge tone="danger">PCDN 偷跑</Badge>}
                 {f.pcdnKind === 'swarm' && <Badge tone="danger">PCDN 蜂群</Badge>}
                 {f.pcdnKind === 'download' && <Badge tone="warn">PCDN 拉流</Badge>}
-                {f.subnetCluster?.suspicious && (
-                  <Badge tone="warn">同段×{f.subnetCluster.uniqueIps}</Badge>
-                )}
                 {(f.throttledRateKbps || 0) > 0 && (
                   <Badge tone="accent">限速 {f.throttledRateKbps}K</Badge>
                 )}

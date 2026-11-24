@@ -35,7 +35,7 @@ jobs:
       - name: Typecheck & Build Server WebUI
         working-directory: web
         run: |
-          npm ci
+          npm ci --ignore-scripts
           npx tsc --noEmit
           npm run build
 

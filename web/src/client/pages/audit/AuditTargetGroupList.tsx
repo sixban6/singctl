@@ -105,7 +105,6 @@ export const AuditTargetGroupList: React.FC<AuditTargetGroupListProps> = ({
                       </span>
                     </Badge>
                     {g.appName && <Badge tone="accent">{g.appName}</Badge>}
-                    {g.isDirectIp && <Badge tone="warn">裸 IP</Badge>}
                     {g.pcdnKind === 'upload' && <Badge tone="danger">PCDN 偷跑</Badge>}
                     {g.pcdnKind === 'swarm' && <Badge tone="danger">PCDN 蜂群</Badge>}
                     <Badge tone={riskTone}>
