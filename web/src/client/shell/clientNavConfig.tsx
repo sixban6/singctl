@@ -31,8 +31,9 @@ export interface TsSwapBannerState {
 
 export function buildClientNavGroups(status?: ClientStatusResponse | null): NavGroupConfig<ClientTab>[] {
   // 遵循「常态零绿点、仅异常微标提醒」规范：健康运行时选项卡视觉完全统一对称
+  const isBasicMode = status?.gateway?.effectiveWorkMode === 'basic';
   const sbBadge =
-    status && status.singbox.installed && !status.singbox.running ? (
+    status && !isBasicMode && status.singbox.installed && !status.singbox.running ? (
       <StatusDot tone="danger" />
     ) : undefined;
   const dmBadge = status?.daemon?.staleBinary ? <StatusDot tone="warn" /> : undefined;
@@ -176,29 +177,52 @@ export function buildClientExtraCommands(
   ];
 }
 
-export const ClientStatusPill: React.FC<{ status: ClientStatusResponse }> = ({ status }) => (
-  <div className="hidden md:flex items-center gap-2 text-xs font-mono text-slate-400">
-    <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-800">
-      <StatusDot tone={status.singbox.running ? 'ok' : 'danger'} pulse={status.singbox.running} />
-      <span className="text-slate-400">核心</span>
-      <span className={status.singbox.running ? 'text-emerald-400 font-semibold' : 'text-rose-400 font-semibold'}>
-        {status.singbox.running ? '运行中' : '已停止'}
-      </span>
-    </div>
-    <div className="hidden lg:flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-800">
-      <span className="text-slate-400">看门狗</span>
-      <span className={status.daemon.running ? 'text-emerald-400 font-semibold' : 'text-slate-300 font-semibold'}>
-        {status.daemon.running ? '守护中' : '未运行'}
-      </span>
-    </div>
-    {status.host.lanIP && (
-      <div className="hidden xl:flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-800">
+export const ClientStatusPill: React.FC<{
+  status: ClientStatusResponse;
+  onOpenGatewayMode?: () => void;
+}> = ({ status, onOpenGatewayMode }) => {
+  const workMode = status.gateway?.effectiveWorkMode;
+  const isBasic = workMode === 'basic';
+  const isAudit = workMode === 'audit';
+  const pillHealthy = isBasic || status.singbox.running;
+  const modeText = isBasic
+    ? '基础模式'
+    : status.singbox.running
+      ? isAudit
+        ? '审计模式'
+        : '代理模式'
+      : isAudit
+        ? '审计已停'
+        : '内核已停';
+  return (
+    <div className="hidden md:flex items-center gap-2 text-xs font-mono text-slate-400">
+      <button
+        type="button"
+        onClick={onOpenGatewayMode}
+        title="点击前往「网关模式」切换基础 / 审计 / 代理模式"
+        className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800/90 border border-slate-800 hover:border-slate-700 transition-colors cursor-pointer"
+      >
+        <StatusDot tone={pillHealthy ? 'ok' : 'danger'} pulse={!isBasic && status.singbox.running} />
         <span className="text-slate-400">网关</span>
-        <span className="text-slate-200 font-semibold">{status.host.lanIP}</span>
+        <span className={pillHealthy ? 'text-emerald-400 font-semibold' : 'text-rose-400 font-semibold'}>
+          {modeText}
+        </span>
+      </button>
+      <div className="hidden lg:flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-800">
+        <span className="text-slate-400">看门狗</span>
+        <span className={status.daemon.running ? 'text-emerald-400 font-semibold' : 'text-slate-300 font-semibold'}>
+          {status.daemon.running ? '守护中' : '未运行'}
+        </span>
       </div>
-    )}
-  </div>
-);
+      {status.host.lanIP && (
+        <div className="hidden xl:flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-800">
+          <span className="text-slate-400">地址</span>
+          <span className="text-slate-200 font-semibold">{status.host.lanIP}</span>
+        </div>
+      )}
+    </div>
+  );
+};
 
 export interface ClientTopbarBannersProps {
   status?: ClientStatusResponse | null;

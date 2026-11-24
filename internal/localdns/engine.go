@@ -105,6 +105,8 @@ type OverviewSnapshot struct {
 	ActiveEngineLabel string         `json:"activeEngineLabel"`
 	RecommendedEngine string         `json:"recommendedEngine"`
 	RecommendedReason string         `json:"recommendedReason"`
+	DnsmasqLinked     bool           `json:"dnsmasqLinked"`
+	WorkMode          string         `json:"workMode"`
 	FallbackDoHActive bool           `json:"fallbackDoHActive"`
 	BlockAAAA         bool           `json:"blockAAAA"`
 	StatsSource       string         `json:"statsSource"`
@@ -184,11 +186,13 @@ type EngineDeps struct {
 	CheckPortAvailableFunc  func(port int) bool
 	PortReleasePollInterval time.Duration
 	SyncSingBoxDNSLocalFunc func(ctx context.Context, sbCfgPath, workPath string, useExternal bool, dnsPort int) (bool, error)
+	IsSingBoxRunningFunc    func() bool
 	NowFunc                 func() time.Time
 
-	SmartDNSStats    *StatsRing
-	SmartDNSTailer   *smartdns.AuditLogTailer
-	SmartDNSManager  *smartdns.Manager
-	AdGuardManager   *adguard.Manager
-	SmartDNSExtraOpt *smartdns.ManagerOptions
+	SmartDNSStats     *StatsRing
+	SmartDNSTailer    *smartdns.AuditLogTailer
+	SmartDNSManager   *smartdns.Manager
+	AdGuardManager    *adguard.Manager
+	SmartDNSExtraOpt  *smartdns.ManagerOptions
+	DnsmasqBridgeDeps *DnsmasqBridgeDeps
 }

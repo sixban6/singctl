@@ -15,11 +15,18 @@ fw_cleanup_pre() {
 fw_apply() {
     echo_succ "创建 nftables 防火墙规则文件..."
     collect_bypass_dns_ips
+    collect_vlan_proxy_bypass_cidrs
     collect_lan_ipv6_prefixes
 
-    local bypass_dns_nft4 bypass_dns_nft6
+    local bypass_dns_nft4 bypass_dns_nft6 bypass_vlan_rule
     bypass_dns_nft4=$(echo "$BYPASS_DNS_V4_IPS" | awk '{$1=$1; gsub(/ /, ", "); print}')
     bypass_dns_nft6=$(echo "$BYPASS_DNS_V6_IPS" | awk '{$1=$1; gsub(/ /, ", "); print}')
+    bypass_vlan_rule=""
+    if [ -n "$BYPASS_VLAN_V4_CIDRS" ]; then
+        local bypass_vlan_nft4
+        bypass_vlan_nft4=$(echo "$BYPASS_VLAN_V4_CIDRS" | awk '{$1=$1; gsub(/ /, ", "); print}')
+        bypass_vlan_rule="            ip saddr { $bypass_vlan_nft4 } fib daddr type != local accept comment \"singctl-vlan-bypass\""
+    fi
 
     local local_ipv6_elems="::1/128, fc00::/7, fe80::/10, ff00::/8"
     local pfx
@@ -62,6 +69,9 @@ fw_apply() {
 
             # 优先承接本机 output 链 (mark 0x2 -> table 101) 回环进来的流量（含发往上级光猫/私网网关 192.168.x.1:53 的 DNS），避免命中表 100 throw 逃逸
             iifname "lo" meta mark $PROXY_LOCAL_FWMARK meta l4proto { tcp, udp } tproxy to :$TPROXY_PORT meta mark set $PROXY_LOCAL_FWMARK accept
+
+            # 放行配置为「纯直连绕过代理」的隔离 VLAN 子网（目标为路由器本机服务时已在上方 fib daddr type local 放行）
+${bypass_vlan_rule}
 
             # 先豁免回环与 Tailscale MagicDNS，防止内网域名解析受影响
             ip daddr { 127.0.0.0/8, 100.64.0.0/10 } accept

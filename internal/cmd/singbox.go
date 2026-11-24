@@ -86,10 +86,12 @@ func runStartSingbox(cfg *config.Config, configPath string) error {
 
 	sb := singbox.New(cfg)
 	if err := sb.ValidateConfig(); err != nil {
-		// 现有配置无效或不存在，需要重新生成 → 此时才校验 subs
+		// 现有配置无效或不存在，需要重新生成 → 仅在代理模式校验 subs，审计模式支持零订阅纯直连生成
 		logger.Info("Current config is invalid or missing, generating new config...")
-		if err := cfg.ValidateSubs(); err != nil {
-			return fmt.Errorf("subscription config invalid: %w", err)
+		if !cfg.IsDirectAuditMode() {
+			if err := cfg.ValidateSubs(); err != nil {
+				return fmt.Errorf("subscription config invalid: %w", err)
+			}
 		}
 		if err := sb.GenerateConfig(); err != nil {
 			return err
@@ -296,16 +298,18 @@ func newGenCmd(defaultConfigPath string) *cobra.Command {
 				return err
 			}
 
-			// gen 命令必须依赖 subs，提前校验防止 index-out-of-range panic
-			if err := effectiveCfg.ValidateSubs(); err != nil {
-				return fmt.Errorf("subscription config invalid: %w", err)
-			}
-
 			target, err := singbox.ResolvePlatform(platform)
 			if err != nil {
 				return err
 			}
 			isIOS := target == singbox.PlatformIOS
+
+			// 仅代理模式或 iOS 目标强制校验订阅；零订阅「审计模式」允许直接生成纯直连审计配置
+			if isIOS || !effectiveCfg.IsDirectAuditMode() {
+				if err := effectiveCfg.ValidateSubs(); err != nil {
+					return fmt.Errorf("subscription config invalid: %w", err)
+				}
+			}
 
 			generator := singbox.NewConfigGenerator(effectiveCfg)
 			generator.SetLocalDNSProbe(localdns.NewRegistry(effectiveCfg, localdns.EngineDeps{}).MakeSingBoxProbe())

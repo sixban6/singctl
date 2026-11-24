@@ -69,6 +69,7 @@ export interface SingBoxControlBarProps {
   traffic: SbTrafficSnapshot | null;
   currentMode: SbProxyMode;
   switchingMode: boolean;
+  hideRoutingModeSwitch?: boolean;
   onAction: (name: string, params?: Record<string, unknown>, confirmMsg?: string) => void;
   onNavigate: (tab: string, sub?: string) => void;
   onModeSwitch: (nextMode: SbProxyMode) => void;
@@ -81,6 +82,7 @@ export const SingBoxControlBar: React.FC<SingBoxControlBarProps> = ({
   traffic,
   currentMode,
   switchingMode,
+  hideRoutingModeSwitch = false,
   onAction,
   onNavigate,
   onModeSwitch,
@@ -263,87 +265,89 @@ export const SingBoxControlBar: React.FC<SingBoxControlBarProps> = ({
             )}
           </div>
 
-          <div className="shrink-0">
-            <button
-              ref={modeTriggerRef}
-              type="button"
-              disabled={switchingMode}
-              aria-haspopup="listbox"
-              aria-expanded={modeMenuOpen}
-              title={currentModeMeta.hint}
-              onClick={toggleModeMenu}
-              className={`inline-flex items-center gap-1.5 h-8 px-2.5 sm:px-3 rounded-xl text-xs font-medium border transition-all cursor-pointer disabled:opacity-60 ${
-                isNonDefaultMode
-                  ? 'bg-amber-500/15 text-amber-300 border-amber-500/35 hover:bg-amber-500/25'
-                  : 'bg-surface2 text-primary border-subtle hover:border-strong'
-              }`}
-            >
-              {isNonDefaultMode ? (
-                <Zap className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-              ) : (
-                <SlidersHorizontal className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-              )}
-              <span>{currentModeMeta.activePillLabel}</span>
-              <ChevronDown
-                className={`w-3.5 h-3.5 opacity-75 transition-transform ${modeMenuOpen ? 'rotate-180' : ''}`}
-              />
-            </button>
+          {!hideRoutingModeSwitch && (
+            <div className="shrink-0">
+              <button
+                ref={modeTriggerRef}
+                type="button"
+                disabled={switchingMode}
+                aria-haspopup="listbox"
+                aria-expanded={modeMenuOpen}
+                title={currentModeMeta.hint}
+                onClick={toggleModeMenu}
+                className={`inline-flex items-center gap-1.5 h-8 px-2.5 sm:px-3 rounded-xl text-xs font-medium border transition-all cursor-pointer disabled:opacity-60 ${
+                  isNonDefaultMode
+                    ? 'bg-amber-500/15 text-amber-300 border-amber-500/35 hover:bg-amber-500/25'
+                    : 'bg-surface2 text-primary border-subtle hover:border-strong'
+                }`}
+              >
+                {isNonDefaultMode ? (
+                  <Zap className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                ) : (
+                  <SlidersHorizontal className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                )}
+                <span>{currentModeMeta.activePillLabel}</span>
+                <ChevronDown
+                  className={`w-3.5 h-3.5 opacity-75 transition-transform ${modeMenuOpen ? 'rotate-180' : ''}`}
+                />
+              </button>
 
-            {modeMenuOpen &&
-              modeMenuPos &&
-              typeof document !== 'undefined' &&
-              createPortal(
-                <div
-                  ref={modeDropdownRef}
-                  role="listbox"
-                  aria-label="切换代理运行模式"
-                  style={{
-                    top: `${modeMenuPos.top}px`,
-                    left: `${modeMenuPos.left}px`,
-                    width: `${modeMenuPos.width}px`,
-                  }}
-                  className="fixed z-[100] rounded-xl bg-slate-900/95 backdrop-blur-xl border border-slate-700/90 shadow-2xl shadow-black/60 p-1 space-y-0.5"
-                >
-                  {MODE_OPTIONS.map((opt) => {
-                    const active = currentMode === opt.key;
-                    return (
-                      <button
-                        key={opt.key}
-                        type="button"
-                        role="option"
-                        aria-selected={active}
-                        disabled={switchingMode}
-                        title={opt.hint}
-                        onClick={() => {
-                          setModeMenuOpen(false);
-                          onModeSwitch(opt.key);
-                        }}
-                        className={`w-full text-left px-2.5 py-2 sm:py-1.5 rounded-lg transition-colors cursor-pointer flex items-center justify-between gap-1.5 ${
-                          active
-                            ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/25'
-                            : 'text-slate-200 hover:bg-slate-800/85 border border-transparent'
-                        }`}
-                      >
-                        <div className="flex items-center gap-1.5 min-w-0">
-                          <span className="text-xs font-medium truncate">{opt.label}</span>
-                          <span
-                            className={`text-[10px] leading-none px-1 py-0.5 rounded shrink-0 ${
-                              opt.recommended
-                                ? 'bg-emerald-500/15 text-emerald-400'
-                                : 'bg-slate-800 text-slate-400'
-                            }`}
-                          >
-                            {opt.tag}
-                          </span>
-                        </div>
-                        {active && <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />}
-                      </button>
-                    );
-                  })}
-                </div>,
-                document.body,
-              )}
-          </div>
+              {modeMenuOpen &&
+                modeMenuPos &&
+                typeof document !== 'undefined' &&
+                createPortal(
+                  <div
+                    ref={modeDropdownRef}
+                    role="listbox"
+                    aria-label="切换分流策略"
+                    style={{
+                      top: `${modeMenuPos.top}px`,
+                      left: `${modeMenuPos.left}px`,
+                      width: `${modeMenuPos.width}px`,
+                    }}
+                    className="fixed z-[100] rounded-xl bg-slate-900/95 backdrop-blur-xl border border-slate-700/90 shadow-2xl shadow-black/60 p-1 space-y-0.5"
+                  >
+                    {MODE_OPTIONS.map((opt) => {
+                      const active = currentMode === opt.key;
+                      return (
+                        <button
+                          key={opt.key}
+                          type="button"
+                          role="option"
+                          aria-selected={active}
+                          disabled={switchingMode}
+                          title={opt.hint}
+                          onClick={() => {
+                            setModeMenuOpen(false);
+                            onModeSwitch(opt.key);
+                          }}
+                          className={`w-full text-left px-2.5 py-2 sm:py-1.5 rounded-lg transition-colors cursor-pointer flex items-center justify-between gap-1.5 ${
+                            active
+                              ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/25'
+                              : 'text-slate-200 hover:bg-slate-800/85 border border-transparent'
+                          }`}
+                        >
+                          <div className="flex items-center gap-1.5 min-w-0">
+                            <span className="text-xs font-medium truncate">{opt.label}</span>
+                            <span
+                              className={`text-[10px] leading-none px-1 py-0.5 rounded shrink-0 ${
+                                opt.recommended
+                                  ? 'bg-emerald-500/15 text-emerald-400'
+                                  : 'bg-slate-800 text-slate-400'
+                              }`}
+                            >
+                              {opt.tag}
+                            </span>
+                          </div>
+                          {active && <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />}
+                        </button>
+                      );
+                    })}
+                  </div>,
+                  document.body,
+                )}
+            </div>
+          )}
         </div>
       )}
     </div>

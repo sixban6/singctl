@@ -21,6 +21,7 @@ import (
 	"singctl/internal/notify"
 	"singctl/internal/safecommit"
 	"singctl/internal/singbox"
+	"singctl/internal/vlan"
 )
 
 type safeCommitConfigDTO struct {
@@ -124,7 +125,8 @@ func (s *Server) buildSafeCommitRollbackOps() safecommit.RollbackOps {
 			}
 			return eng.Restart(ctx)
 		},
-		OnRolledBack: s.onSafeCommitRolledBack,
+		ReloadOpenWrtNetwork: vlan.ReloadOpenWrtNetwork,
+		OnRolledBack:         s.onSafeCommitRolledBack,
 	}
 }
 
@@ -176,6 +178,10 @@ func absSnapshotPath(p string) string {
 }
 
 func (s *Server) armSafeCommit(ctx context.Context, ttlSec int, reason string) (*safecommit.State, error) {
+	return s.armSafeCommitWithExtraSnapshots(ctx, ttlSec, reason, nil)
+}
+
+func (s *Server) armSafeCommitWithExtraSnapshots(ctx context.Context, ttlSec int, reason string, extraSnapshots map[string]string) (*safecommit.State, error) {
 	cfg := s.readConfigOrEmpty()
 	effectiveTTL := ttlSec
 	if effectiveTTL <= 0 {
@@ -185,7 +191,7 @@ func (s *Server) armSafeCommit(ctx context.Context, ttlSec int, reason string) (
 		return nil, fmt.Errorf("%w: got %d", safecommit.ErrInvalidTTL, ttlSec)
 	}
 
-	snapshots := make(map[string]string, 4)
+	snapshots := make(map[string]string, 4+len(extraSnapshots))
 	addSnap := func(name, path string) {
 		if abs := absSnapshotPath(path); abs != "" {
 			snapshots[name] = abs
@@ -195,6 +201,9 @@ func (s *Server) armSafeCommit(ctx context.Context, ttlSec int, reason string) (
 	addSnap("sing-box.json", s.sbConfigPath())
 	addSnap("smartdns.conf", s.smartDNSConfigFilePath())
 	addSnap("adguard.yaml", s.adguardConfigFilePath())
+	for name, path := range extraSnapshots {
+		addSnap(name, path)
+	}
 
 	sbRunning, fwActive := false, false
 	if s.opts.SafeCommitBaselineForTest != nil {

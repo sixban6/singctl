@@ -197,12 +197,28 @@ func (g *ConfigGenerator) GenerateForPlatform(platform string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if g == nil || g.config == nil || len(g.config.Subs) == 0 {
-		return "", errors.New("配置中未找到任何订阅源 (subs 列表为空)")
+	if g == nil || g.config == nil {
+		return "", errors.New("配置未初始化")
 	}
 
 	ctx := context.Background()
 	dnsServer := g.resolveLocalDNSServer(resolved == PlatformIOS)
+
+	// 零订阅「审计模式」：无需订阅链接即可生成纯直连透明嗅探与拦截配置（仅限本机非 iOS 平台）。
+	if g.config.IsDirectAuditMode() && resolved != PlatformIOS {
+		raw, err := generateDirectAuditBase(dnsServer)
+		if err != nil {
+			return "", err
+		}
+		return g.RunCompilePipeline(raw, resolved)
+	}
+
+	if len(g.config.Subs) == 0 {
+		if resolved == PlatformIOS {
+			return "", errors.New("iOS 客户端配置需要至少配置一条订阅链接")
+		}
+		return "", errors.New("配置中未找到任何订阅源 (subs 列表为空)；若无需代理仅需审计与防劫持 DNS，请切换至「审计模式」或「基础模式」")
+	}
 
 	var raw string
 	if len(g.config.Subs) == 1 {

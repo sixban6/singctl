@@ -231,7 +231,9 @@ func (s *GroupFailoverState) now() time.Time {
 func (d *Daemon) maybePatrolGroupFailoverAsync() {
 	cfg := d.currentConfig()
 	if cfg != nil {
-		if doctor.IsServerEnvironment(cfg) && len(cfg.Subs) == 0 {
+		if (doctor.IsServerEnvironment(cfg) && len(cfg.Subs) == 0) ||
+			cfg.EffectiveWorkMode() != config.WorkModeProxy ||
+			!cfg.HasRealSubs() {
 			return
 		}
 		if !cfg.Watchdog.Failover.IsEnabled() {

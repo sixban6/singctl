@@ -296,7 +296,11 @@ const ClientShell: React.FC = () => {
         onSelectTab={(next) => navigate(next)}
         onHoverTab={handleHoverTab}
         mobilePrimaryKeys={MOBILE_PRIMARY_TABS}
-        statusPill={status ? <ClientStatusPill status={status} /> : null}
+        statusPill={
+          status ? (
+            <ClientStatusPill status={status} onOpenGatewayMode={() => navigate('net', 'gw')} />
+          ) : null
+        }
         topbarActions={topbarActions}
         banner={banner}
         extraCommandItems={extraCommands}
@@ -339,7 +343,11 @@ const ClientShell: React.FC = () => {
         {(tab === 'audit' || visitedTabs.has('audit')) && (
           <div className={tab === 'audit' ? 'block' : 'hidden'} aria-hidden={tab !== 'audit'}>
             <React.Suspense fallback={<CardSkeleton rows={4} />}>
-              <AuditPage active={tab === 'audit'} />
+              <AuditPage
+                active={tab === 'audit'}
+                status={status ?? null}
+                onRefreshStatus={() => void refreshStatus(true)}
+              />
             </React.Suspense>
           </div>
         )}

@@ -132,3 +132,54 @@ gateway:
 		t.Fatalf("expected migrated LANIface=br-lan, got %q", migrated.Gateway.LANIface)
 	}
 }
+
+func TestGatewayWorkMode_NormalizeEffectiveSaveAndMigrate(t *testing.T) {
+	normCases := []struct {
+		raw  string
+		want string
+		ok   bool
+	}{
+		{"", config.WorkModeAuto, true},
+		{"auto", config.WorkModeAuto, true},
+		{"basic", config.WorkModeBasic, true},
+		{"dns_only", config.WorkModeBasic, true},
+		{"audit", config.WorkModeAudit, true},
+		{"direct_audit", config.WorkModeAudit, true},
+		{"proxy", config.WorkModeProxy, true},
+		{"invalid_mode", "", false},
+	}
+	for _, tc := range normCases {
+		got, ok := config.NormalizeWorkMode(tc.raw)
+		if ok != tc.ok || got != tc.want {
+			t.Fatalf("NormalizeWorkMode(%q) = (%q, %v), want (%q, %v)", tc.raw, got, ok, tc.want, tc.ok)
+		}
+	}
+
+	noSubAuto := &config.Config{}
+	if noSubAuto.EffectiveWorkMode() != config.WorkModeBasic || !noSubAuto.IsBasicMode() || noSubAuto.NeedsSingBox() {
+		t.Fatalf("empty subs auto should resolve to basic (NeedsSingBox=false), got %q", noSubAuto.EffectiveWorkMode())
+	}
+
+	noSubAudit := &config.Config{Gateway: config.GatewayConfig{WorkMode: config.WorkModeAudit}}
+	if noSubAudit.EffectiveWorkMode() != config.WorkModeAudit || !noSubAudit.IsDirectAuditMode() || !noSubAudit.NeedsSingBox() {
+		t.Fatalf("empty subs audit should resolve to audit (NeedsSingBox=true), got %q", noSubAudit.EffectiveWorkMode())
+	}
+
+	withSubAuto := &config.Config{Subs: []config.Subscription{{Name: "s1", URL: "https://example.com/s1"}}}
+	if withSubAuto.EffectiveWorkMode() != config.WorkModeProxy || !withSubAuto.NeedsSingBox() {
+		t.Fatalf("with subs auto should resolve to proxy, got %q", withSubAuto.EffectiveWorkMode())
+	}
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "singctl.yaml")
+	if err := config.Save(cfgPath, noSubAudit); err != nil {
+		t.Fatalf("Save zero-sub audit config failed: %v", err)
+	}
+	reloaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load zero-sub audit config failed: %v", err)
+	}
+	if reloaded.Gateway.WorkMode != config.WorkModeAudit || !reloaded.IsDirectAuditMode() {
+		t.Fatalf("reloaded work_mode mismatch: %+v", reloaded.Gateway)
+	}
+}

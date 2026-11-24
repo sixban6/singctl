@@ -34,6 +34,7 @@ import (
 	"singctl/internal/singbox/clashapi"
 	"singctl/internal/smartdns"
 	"singctl/internal/tailscale"
+	"singctl/internal/vlan"
 )
 
 // SessionCookieName 持久化 Cookie 键名，用于 Safari/PWA 独立沙盒免密免登。
@@ -69,6 +70,7 @@ type Options struct {
 	AuditLimiter            *AuditRateLimiter                                                                 // 可选：显式注入审计限流器
 	SkipAdGuardProbeForTest bool                                                                              // 仅供离线单元测试跳过公网上游实测
 	GatewayProberForTest    func() gateway.TopologyInfo                                                       // 仅供单元测试注入网络拓扑探测结果
+	WorkModeApplyForTest    func(ctx context.Context, cfg *config.Config, targetMode string) (bool, string, error) // 仅供单元测试注入工作模式热应用替身
 	DNSLeakRunnerForTest    func(ctx context.Context, opts netdiag.DNSLeakTestOptions) *netdiag.DNSLeakReport // 仅供单元测试注入离线 DNS 泄漏实测结果
 	BrowserDoHForTest       *BrowserDoHTestHooks                                                              // 仅供单元测试注入浏览器 DoH 旁路检测依赖
 	TailscaleP2PForTest     *TailscaleP2PTestHooks                                                            // 仅供单元测试注入 Tailscale P2P 防线依赖
@@ -98,6 +100,7 @@ type Options struct {
 	NotifyHTTPClient        *http.Client                                                                      // 可选：测试注入默认通知调度器 HTTP 客户端
 	DoctorEnvForTest        func(cfg *config.Config) *doctor.Env                                              // 可选：离线单元测试注入深度体检运行环境
 	DoctorRunner            *doctor.Runner                                                                    // 可选：自定义深度体检调度器
+	VLANServiceForTest      *vlan.Service                                                                     // 仅供离线单元测试注入 OpenWrt VLAN 领域服务
 }
 
 // Server 客户端 Web 管理服务。
@@ -353,6 +356,13 @@ func (s *Server) registerRoutes() {
 	s.Mux.HandleFunc("GET /api/doctor/run", s.guard(s.handleDoctorRun))
 	s.Mux.HandleFunc("POST /api/doctor/run", s.guard(s.handleDoctorRun))
 	s.Mux.HandleFunc("POST /api/doctor/fix", s.guard(s.handleDoctorFixPost))
+
+	// OpenWrt 本机原生 VLAN 子网隔离与透明代理联动 API
+	s.Mux.HandleFunc("GET /api/vlan/overview", s.guard(s.handleVLANOverviewGet))
+	s.Mux.HandleFunc("POST /api/vlan/preview", s.guard(s.handleVLANPreviewPost))
+	s.Mux.HandleFunc("POST /api/vlan/apply", s.guard(s.handleVLANApplyPost))
+	s.Mux.HandleFunc("POST /api/vlan/delete/preview", s.guard(s.handleVLANDeletePreviewPost))
+	s.Mux.HandleFunc("DELETE /api/vlan/segment/{id}", s.guard(s.handleVLANDelete))
 
 	// 流式动作执行 API
 	s.Mux.HandleFunc("POST /api/action", s.guard(s.handleAction))

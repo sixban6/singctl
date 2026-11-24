@@ -444,6 +444,7 @@ func TestArchGuard_LayeredDAGAcyclic(t *testing.T) {
 		"internal/telemetry/",
 		"internal/terminal/",
 		"internal/updater/",
+		"internal/vlan/",
 	}
 	controlPlaneImports := map[string]bool{
 		"singctl/internal/cmd":       true,

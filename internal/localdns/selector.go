@@ -9,15 +9,16 @@ import (
 
 	"singctl/internal/common/sysinfo"
 	"singctl/internal/constant"
+	"singctl/internal/smartdns"
 )
 
 const (
 	AdGuardMinTotalRAMBytes  uint64 = 512 * 1024 * 1024
 	AdGuardMinAvailRAMBytes  uint64 = 256 * 1024 * 1024
 	AdGuardMinDiskMB         uint64 = 80
-	SmartDNSMinTotalRAMBytes uint64 = 288 * 1024 * 1024
-	SmartDNSMinAvailRAMBytes uint64 = 128 * 1024 * 1024
-	SmartDNSMinDiskMB        uint64 = 10
+	SmartDNSMinTotalRAMBytes uint64 = smartdns.MinTotalRAMBytes
+	SmartDNSMinAvailRAMBytes uint64 = smartdns.MinAvailRAMBytes
+	SmartDNSMinDiskMB        uint64 = smartdns.MinInstallDiskMB
 )
 
 // HardwareProfile 描述目标宿主机的物理内存与闪存可用空间画像。
@@ -118,14 +119,14 @@ func evaluateSmartDNSEligibility(hw HardwareProfile, isInstalled bool) EngineEli
 
 	memKnown := hw.TotalRAMBytes > 0 || hw.AvailRAMBytes > 0
 	if memKnown {
-		totalLow := hw.TotalRAMBytes > 0 && hw.TotalRAMBytes <= SmartDNSMinTotalRAMBytes
+		totalLow := hw.TotalRAMBytes > 0 && hw.TotalRAMBytes < SmartDNSMinTotalRAMBytes
 		availLow := hw.AvailRAMBytes > 0 && hw.AvailRAMBytes < SmartDNSMinAvailRAMBytes
 		if totalLow || availLow {
 			elig.Eligible = false
 			elig.MemoryBlocked = true
 			reasons = append(reasons, fmt.Sprintf(
-				"内存未达 SmartDNS 推荐门槛（总内存 %d MB / 可用 %d MB；建议总内存 > 288 MB 且可用 >= 128 MB）",
-				hw.TotalRAMBytes/mib, hw.AvailRAMBytes/mib,
+				"内存未达 SmartDNS 最低安全门槛（总内存 %d MB / 可用 %d MB；至少需总内存 >= %d MB 且可用 >= %d MB）",
+				hw.TotalRAMBytes/mib, hw.AvailRAMBytes/mib, SmartDNSMinTotalRAMBytes/mib, SmartDNSMinAvailRAMBytes/mib,
 			))
 		}
 	}

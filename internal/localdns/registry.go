@@ -157,6 +157,13 @@ func (r *Registry) buildEngineOptions(ctx context.Context, sel SelectionResult, 
 	return opts
 }
 
+func (r *Registry) dnsmasqBridgeDeps() DnsmasqBridgeDeps {
+	if r != nil && r.deps.DnsmasqBridgeDeps != nil {
+		return *r.deps.DnsmasqBridgeDeps
+	}
+	return DnsmasqBridgeDeps{}
+}
+
 // Overview 聚合当前活跃引擎完整工作台快照与双引擎下拉选项状态。
 func (r *Registry) Overview(ctx context.Context) *OverviewSnapshot {
 	sel := r.ResolveSelection()
@@ -166,6 +173,8 @@ func (r *Registry) Overview(ctx context.Context) *OverviewSnapshot {
 	}
 
 	linked, _ := singbox.InspectSingBoxDNSLocal(r.sbConfigPath())
+	dnsmasqLinked := InspectOpenWrtDnsmasqBridge(ctx, r.cfg.DNS.GetDNSPort(), r.dnsmasqBridgeDeps())
+	effectiveLinked := linked || dnsmasqLinked
 	snap := active.Overview(ctx, linked)
 	if snap == nil {
 		snap = &OverviewSnapshot{}
@@ -182,7 +191,9 @@ func (r *Registry) Overview(ctx context.Context) *OverviewSnapshot {
 	snap.ActiveEngineLabel = active.Meta().Name
 	snap.RecommendedEngine = sel.RecommendedEngine
 	snap.RecommendedReason = sel.RecommendedReason
-	snap.FallbackDoHActive = !snap.Installed || !snap.Running || !r.cfg.DNS.IsEnabled() || !linked
+	snap.DnsmasqLinked = dnsmasqLinked
+	snap.WorkMode = r.cfg.EffectiveWorkMode()
+	snap.FallbackDoHActive = !snap.Installed || !snap.Running || !r.cfg.DNS.IsEnabled() || !effectiveLinked
 	snap.Capabilities = active.Capabilities()
 	snap.Engines = r.buildEngineOptions(ctx, sel, active.ID(), snap.Version)
 	return snap
@@ -197,7 +208,9 @@ func (r *Registry) StatusSummary(ctx context.Context) map[string]any {
 	}
 	st := active.Status(ctx)
 	linked, _ := singbox.InspectSingBoxDNSLocal(r.sbConfigPath())
-	fallbackDoH := !st.Installed || !st.Running || !r.cfg.DNS.IsEnabled() || !linked
+	dnsmasqLinked := InspectOpenWrtDnsmasqBridge(ctx, r.cfg.DNS.GetDNSPort(), r.dnsmasqBridgeDeps())
+	effectiveLinked := linked || dnsmasqLinked
+	fallbackDoH := !st.Installed || !st.Running || !r.cfg.DNS.IsEnabled() || !effectiveLinked
 	aghWarn := r.aghEng.LowMemoryGuardWarning()
 
 	return map[string]any{
@@ -208,6 +221,8 @@ func (r *Registry) StatusSummary(ctx context.Context) map[string]any {
 		"dnsHealthy":        st.DNSHealthy,
 		"webHealthy":        st.WebHealthy,
 		"singboxLinked":     linked,
+		"dnsmasqLinked":     dnsmasqLinked,
+		"workMode":          r.cfg.EffectiveWorkMode(),
 		"fallbackDoHActive": fallbackDoH,
 		"lowMemoryBlocked":  aghWarn != "",
 		"lowMemoryWarning":  aghWarn,

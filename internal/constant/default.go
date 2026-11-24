@@ -46,4 +46,7 @@ const (
 	SafeCommitDefaultTTLSec    = 180
 	SafeCommitMinTTLSec        = 60
 	SafeCommitMaxTTLSec        = 600
+
+	// VLANProxyBypassFile 为透明代理按 VLAN 子网直连绕行清单的权威落盘路径（0600，每行一条 IPv4 CIDR）。
+	VLANProxyBypassFile = "/etc/singctl/vlan-proxy-bypass.list"
 )

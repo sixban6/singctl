@@ -17,7 +17,7 @@ import (
 
 func (d *Daemon) maybeSyncSubscriptionsAsync() {
 	cfg := d.currentConfig()
-	if cfg == nil || cfg.Watchdog.SubSyncInterval < 0 || len(cfg.Subs) == 0 {
+	if cfg == nil || cfg.Watchdog.SubSyncInterval < 0 || !cfg.HasRealSubs() || cfg.EffectiveWorkMode() != config.WorkModeProxy {
 		return
 	}
 	if doctor.IsServerEnvironment(cfg) {
@@ -62,7 +62,7 @@ type subSyncCandidate struct {
 
 func (d *Daemon) syncSubscriptionsIfChanged() {
 	cfg := d.currentConfig()
-	if cfg == nil || cfg.Watchdog.SubSyncInterval < 0 || len(cfg.Subs) == 0 {
+	if cfg == nil || cfg.Watchdog.SubSyncInterval < 0 || !cfg.HasRealSubs() || cfg.EffectiveWorkMode() != config.WorkModeProxy {
 		return
 	}
 

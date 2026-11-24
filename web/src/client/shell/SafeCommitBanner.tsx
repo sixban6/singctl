@@ -199,7 +199,7 @@ export const SafeCommitBanner: React.FC<SafeCommitBannerProps> = ({
       <ConfirmDialog
         open={rollbackDialogOpen}
         title="确认立即回滚网关配置"
-        description="系统将立即把 singctl.yaml、sing-box 与 DNS 配置恢复到激活保险丝前的快照，并按原基线重载相关服务。确认执行？"
+        description="系统将立即把 singctl.yaml、OpenWrt 网络/VLAN、sing-box 与 DNS 配置恢复到激活保险丝前的快照，并按原基线重载相关服务。确认执行？"
         confirmText="立即回滚"
         danger
         loading={rollingBack}

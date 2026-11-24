@@ -7,6 +7,7 @@ import {
   Flame,
   GitFork,
   Monitor,
+  Network,
   RefreshCw,
   Share2,
   ShieldAlert,
@@ -29,15 +30,17 @@ import { BrowserDoHCheckResponse, ClientStatusResponse } from '../types';
 import { FirewallPanel } from './firewall/FirewallPanel';
 import { GatewayModePage, GatewayModePageProps } from './network/GatewayModePage';
 import { TailscalePage, TailscalePageProps } from './network/TailscalePage';
+import { VlanManagerSection } from './network/vlan/VlanManagerSection';
 
 export { GatewayModePage, TailscalePage };
 export type { GatewayModePageProps, TailscalePageProps };
 
-export type NetSubTab = 'gw' | 'ts' | 'fw';
+export type NetSubTab = 'gw' | 'ts' | 'fw' | 'vlan';
 
 function normalizeNetSubTab(raw?: string): NetSubTab {
   if (raw === 'fw') return 'fw';
   if (raw === 'ts') return 'ts';
+  if (raw === 'vlan') return 'vlan';
   if (raw === 'gw') return 'gw';
   return 'gw';
 }
@@ -48,7 +51,7 @@ export interface NetworkHubPageProps {
   initialSub?: string;
   onSubChange?: (sub: NetSubTab) => void;
   onAction: (name: string, params?: Record<string, unknown>, confirmMsg?: string) => void;
-  onNavigate?: (tab: string) => void;
+  onNavigate?: (tab: string, sub?: string) => void;
   onRefreshStatus?: () => void;
 }
 
@@ -58,6 +61,7 @@ export const NetworkHubPage: React.FC<NetworkHubPageProps> = ({
   initialSub,
   onSubChange,
   onAction,
+  onNavigate,
   onRefreshStatus,
 }) => {
   const { success, toast } = useToast();
@@ -168,6 +172,11 @@ export const NetworkHubPage: React.FC<NetworkHubPageProps> = ({
               label: 'nftables 防火墙加固',
               icon: <Flame className="w-3.5 h-3.5" />,
             },
+            {
+              key: 'vlan',
+              label: '子网隔离 (VLAN)',
+              icon: <Network className="w-3.5 h-3.5" />,
+            },
           ]}
         />
 
@@ -254,7 +263,13 @@ export const NetworkHubPage: React.FC<NetworkHubPageProps> = ({
       )}
 
       {sub === 'gw' && (
-        <GatewayModePage status={status} busy={busy} privacyMask={privacyMask} onSaved={onRefreshStatus} />
+        <GatewayModePage
+          status={status}
+          busy={busy}
+          privacyMask={privacyMask}
+          onNavigate={onNavigate}
+          onSaved={onRefreshStatus}
+        />
       )}
       {sub === 'ts' && (
         <TailscalePage
@@ -268,6 +283,13 @@ export const NetworkHubPage: React.FC<NetworkHubPageProps> = ({
       {sub === 'fw' && (
         <FirewallPanel
           status={status}
+          busy={busy}
+          privacyMask={privacyMask}
+          onRefreshStatus={onRefreshStatus}
+        />
+      )}
+      {sub === 'vlan' && (
+        <VlanManagerSection
           busy={busy}
           privacyMask={privacyMask}
           onRefreshStatus={onRefreshStatus}

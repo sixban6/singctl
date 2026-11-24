@@ -143,17 +143,28 @@ export const DashPage: React.FC<DashPageProps> = ({
   const dnsInstalled = Boolean(dns?.installed);
   const dnsEngine = dns?.activeEngine || dns?.recommendedEngine;
   const dnsEngineLabel = getEngineDisplayName(dnsEngine, dns?.activeEngineLabel);
-  const dnsFallbackDoH = !dnsInstalled && Boolean(dns?.fallbackDoHActive ?? sb.running);
+  const subs = config?.subs || [];
+  const effectiveWorkMode = status.gateway?.effectiveWorkMode || (subs.length > 0 ? 'proxy' : 'basic');
+  const isBasicMode = effectiveWorkMode === 'basic';
+  const isAuditMode = effectiveWorkMode === 'audit';
+  const dnsFallbackDoH = !dnsInstalled && !isBasicMode && Boolean(dns?.fallbackDoHActive ?? sb.running);
+  const dnsLinked = Boolean(dns?.singboxLinked || dns?.dnsmasqLinked);
   const dnsHealthy = dnsInstalled ? Boolean(dns?.dnsHealthy) : dnsFallbackDoH;
   const tsBadgeInfo = getTailscaleBadge(ts);
-  const subs = config?.subs || [];
-  const primaryExitText = !sb.running
-    ? 'sing-box 启动后可用'
-    : proxySnap?.primaryNode
-      ? `${proxySnap.primaryGroup || 'Proxy'} → ${proxySnap.primaryNode}${proxySnap.primaryDelay && proxySnap.primaryDelay > 0 ? ` (${proxySnap.primaryDelay}ms)` : ''}`
-      : proxySnap?.error
-        ? '节点状态暂不可用'
-        : '读取中…';
+  const workModeLabel = isBasicMode ? '基础模式' : isAuditMode ? '审计模式' : '代理模式';
+  const primaryExitText = isBasicMode
+    ? '宽带直连（基础模式）'
+    : isAuditMode
+      ? sb.running
+        ? '直连审计中（免订阅）'
+        : '审计内核未启动'
+      : !sb.running
+        ? 'sing-box 启动后可用'
+        : proxySnap?.primaryNode
+          ? `${proxySnap.primaryGroup || 'Proxy'} → ${proxySnap.primaryNode}${proxySnap.primaryDelay && proxySnap.primaryDelay > 0 ? ` (${proxySnap.primaryDelay}ms)` : ''}`
+          : proxySnap?.error
+            ? '节点状态暂不可用'
+            : '读取中…';
 
   return (
     <div className="space-y-5">
@@ -161,9 +172,28 @@ export const DashPage: React.FC<DashPageProps> = ({
         title="系统总览"
         description={`${host.hostname || 'singctl'} · ${host.os}/${host.arch}${host.openwrt ? ' (OpenWrt)' : ''} · ${host.lanIP || '127.0.0.1'}`}
         badge={
-          <Badge tone={sb.running ? 'ok' : 'danger'} dot pulse={sb.running}>
-            {sb.running ? '代理运行中' : '代理已停止'}
-          </Badge>
+          <button
+            type="button"
+            onClick={() => onNavigate('net', 'gw')}
+            title="点击前往「网关模式」切换基础 / 审计 / 代理模式"
+            className="cursor-pointer transition-opacity hover:opacity-85"
+          >
+            {isBasicMode ? (
+              <Badge tone="ok" dot>
+                网关：基础模式 · 零损耗
+              </Badge>
+            ) : (
+              <Badge tone={sb.running ? 'ok' : isAuditMode ? 'warn' : 'danger'} dot pulse={sb.running}>
+                {isAuditMode
+                  ? sb.running
+                    ? '网关：审计模式'
+                    : '审计内核已停止'
+                  : sb.running
+                    ? '网关：代理模式'
+                    : '代理内核已停止'}
+              </Badge>
+            )}
+          </button>
         }
         actions={
           <>
@@ -237,14 +267,16 @@ export const DashPage: React.FC<DashPageProps> = ({
             >
               <Box className="w-4.5 h-4.5" />
             </div>
-            <Badge tone={sb.running ? 'ok' : sb.installed ? 'neutral' : 'warn'} dot pulse={sb.running}>
-              {sb.running ? '运行中' : sb.installed ? '已停止' : '未安装'}
+            <Badge tone={sb.running ? 'ok' : isBasicMode ? 'neutral' : sb.installed ? 'neutral' : 'warn'} dot pulse={sb.running}>
+              {sb.running ? (isAuditMode ? '审计运行中' : '运行中') : isBasicMode ? '未启用' : sb.installed ? '已停止' : '未安装'}
             </Badge>
           </div>
           <div>
             <div className="text-sm font-semibold text-primary">sing-box 内核</div>
             <div className="text-xs text-secondary mt-1 tnum">
-              {sb.version ? `v${sb.version}` : '版本未知'} · {sb.configExists ? '配置就绪' : '未生成配置'}
+              {isBasicMode && !sb.running
+                ? '当前网关为基础模式，未运行内核'
+                : `${sb.version ? `v${sb.version}` : '版本未知'} · ${sb.configExists ? '配置就绪' : '未生成配置'}`}
             </div>
           </div>
           <div className="flex items-center gap-2 flex-wrap pt-1 border-t border-subtle">
@@ -262,11 +294,11 @@ export const DashPage: React.FC<DashPageProps> = ({
                   停止
                 </Button>
               </>
-            ) : (
+            ) : !isBasicMode ? (
               <Button size="xs" variant="primary" disabled={busy} onClick={() => onAction('sb-start')}>
                 启动
               </Button>
-            )}
+            ) : null}
             <Button size="xs" variant="ghost" onClick={() => onNavigate('sb')}>
               管理
             </Button>
@@ -301,12 +333,12 @@ export const DashPage: React.FC<DashPageProps> = ({
                     : 'neutral'
                   : !dns?.dnsHealthy
                     ? 'danger'
-                    : dns.singboxLinked
+                    : dnsLinked
                       ? 'ok'
                       : 'warn'
               }
               dot={dnsHealthy}
-              pulse={Boolean(dnsInstalled && dns?.dnsHealthy && dns?.singboxLinked)}
+              pulse={Boolean(dnsInstalled && dns?.dnsHealthy && dnsLinked)}
             >
               {!dnsInstalled
                 ? dnsFallbackDoH
@@ -314,8 +346,10 @@ export const DashPage: React.FC<DashPageProps> = ({
                   : '未安装'
                 : !dns?.dnsHealthy
                   ? '已停止'
-                  : dns.singboxLinked
-                    ? '防劫持接管'
+                  : dnsLinked
+                    ? dns?.dnsmasqLinked && !dns?.singboxLinked
+                      ? '基础模式接管'
+                      : '防劫持接管'
                     : '待接管'}
             </Badge>
           </div>
@@ -337,7 +371,7 @@ export const DashPage: React.FC<DashPageProps> = ({
               <Button size="xs" variant="primary" onClick={() => onNavigate('dns')}>
                 安装引擎
               </Button>
-            ) : dns?.dnsHealthy && dns?.singboxLinked ? (
+            ) : dns?.dnsHealthy && dnsLinked ? (
               <Button size="xs" disabled={busy} onClick={() => onAction('dns-restart')}>
                 重启
               </Button>
@@ -535,20 +569,26 @@ export const DashPage: React.FC<DashPageProps> = ({
           title="主机与网关环境"
           icon={<Globe className="w-4 h-4" />}
           actions={
-            sb.running ? (
-              <Button
-                size="xs"
-                onClick={() => onNavigate('sb', 'nodes')}
-                icon={<SlidersHorizontal className="w-3 h-3" />}
-              >
-                选择节点
+            <div className="flex items-center gap-1.5">
+              <Button size="xs" variant="secondary" onClick={() => onNavigate('net', 'gw')}>
+                切换网关模式
               </Button>
-            ) : undefined
+              {sb.running && !isAuditMode && (
+                <Button
+                  size="xs"
+                  onClick={() => onNavigate('sb', 'nodes')}
+                  icon={<SlidersHorizontal className="w-3 h-3" />}
+                >
+                  选择节点
+                </Button>
+              )}
+            </div>
           }
         >
           <div className="divide-y divide-[var(--border-subtle)] text-xs sm:text-sm">
             {[
               ['主机名称', host.hostname || '-'],
+              ['网关模式', workModeLabel],
               ['运行架构', `${host.os} / ${host.arch}${host.openwrt ? ' · OpenWrt' : ''}`],
               ['局域网 IP', host.lanIP || '-'],
               ['SingCtl 版本', `v${String(status.singctlVersion || 'dev').replace(/^v/, '')}`],

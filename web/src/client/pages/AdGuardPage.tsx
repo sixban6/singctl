@@ -25,6 +25,7 @@ import {
   getEngineShortName,
   resolveActiveEngine,
   resolveDNSCapabilities,
+  resolveEngineOptions,
 } from './adguard/adguardHelpers';
 import { AdGuardRulesAndRewritesSection } from './adguard/AdGuardRulesAndRewritesSection';
 import { AdGuardUninstalledView } from './adguard/AdGuardUninstalledView';
@@ -87,6 +88,13 @@ export const AdGuardPage: React.FC<AdGuardPageProps> = ({
   const activeEngine = resolveActiveEngine(snap);
   const engineLabel = getEngineDisplayName(activeEngine, snap?.activeEngineLabel);
   const engineShort = getEngineShortName(activeEngine);
+  const selectedEngineOpt = useMemo(
+    () => resolveEngineOptions(snap).find((opt) => opt.id === activeEngine),
+    [snap, activeEngine],
+  );
+  const isBasicNoSingBox =
+    (snap?.workMode === 'basic' || status?.gateway?.effectiveWorkMode === 'basic') &&
+    !status?.singbox?.running;
   const capabilities = useMemo(() => resolveDNSCapabilities(snap), [snap]);
   const canMutate = useMemo(() => canMutateEngine(snap), [snap]);
   const canClearCache = useMemo(
@@ -98,8 +106,15 @@ export const AdGuardPage: React.FC<AdGuardPageProps> = ({
     if (!snap) return <Badge tone="neutral">加载中</Badge>;
     if (!snap.supported) return <Badge tone="warn">当前平台不支持本地引擎</Badge>;
     if (!snap.installed) {
-      if (snap.lowMemoryBlocked) {
-        return <Badge tone="warn">低内存保护 · 内置 DoH 兜底</Badge>;
+      if (selectedEngineOpt && !selectedEngineOpt.eligible) {
+        return (
+          <Badge tone="warn">
+            {isBasicNoSingBox ? `硬件受限 · 未安装 ${engineShort}` : '低内存保护 · 内置 DoH 兜底'}
+          </Badge>
+        );
+      }
+      if (isBasicNoSingBox) {
+        return <Badge tone="neutral">基础模式 · 未安装 {engineShort}</Badge>;
       }
       if (snap.fallbackDoHActive !== false) {
         return (
@@ -113,14 +128,17 @@ export const AdGuardPage: React.FC<AdGuardPageProps> = ({
     if (!snap.dnsHealthy) {
       return (
         <Badge tone="danger">
-          {snap.fallbackDoHActive ? `${engineShort} 未运行 · DoH 兜底` : `${engineShort} 未运行`}
+          {!isBasicNoSingBox && snap.fallbackDoHActive
+            ? `${engineShort} 未运行 · DoH 兜底`
+            : `${engineShort} 未运行`}
         </Badge>
       );
     }
-    if (!snap.singboxLinked) {
+    const dnsLinked = Boolean(snap.singboxLinked || snap.dnsmasqLinked);
+    if (!dnsLinked) {
       return (
         <Badge tone="warn" dot>
-          {engineShort} 运行中 · 待接管 sing-box
+          {engineShort} 运行中 · 待接管
         </Badge>
       );
     }
@@ -131,12 +149,19 @@ export const AdGuardPage: React.FC<AdGuardPageProps> = ({
         </Badge>
       );
     }
+    if (snap.dnsmasqLinked && !snap.singboxLinked) {
+      return (
+        <Badge tone="ok" dot pulse>
+          基础模式接管中 · {engineShort} ({snap.dnsAddr})
+        </Badge>
+      );
+    }
     return (
       <Badge tone="ok" dot pulse>
         防劫持接管中 · {engineShort} ({snap.dnsAddr})
       </Badge>
     );
-  }, [snap, engineShort]);
+  }, [snap, engineShort, selectedEngineOpt, isBasicNoSingBox]);
 
   const headerDesc = useMemo(() => {
     if (!snap) return '正在读取防劫持 DNS 引擎与解析遥测…';
@@ -159,6 +184,7 @@ export const AdGuardPage: React.FC<AdGuardPageProps> = ({
     return (
       <AdGuardUninstalledView
         snap={snap}
+        isBasicNoSingBox={isBasicNoSingBox}
         busy={busy}
         mutating={mutating}
         switchingEngine={switchingEngine}
@@ -263,7 +289,7 @@ export const AdGuardPage: React.FC<AdGuardPageProps> = ({
         </div>
       )}
 
-      {snap && (!snap.dnsHealthy || !snap.singboxLinked) && (
+      {snap && (!snap.dnsHealthy || (!snap.singboxLinked && !snap.dnsmasqLinked)) && (
         <div
           className="console-card rounded-2xl p-4 flex flex-wrap items-center justify-between gap-3 border"
           style={{
@@ -279,11 +305,15 @@ export const AdGuardPage: React.FC<AdGuardPageProps> = ({
             <div className="text-xs sm:text-sm">
               <div className="font-semibold text-primary">
                 {!snap.dnsHealthy
-                  ? `${engineLabel} 当前处于停止状态（底层 sing-box 正在使用纯 IP 加密 DoH 应急兜底）`
-                  : `${engineLabel} 已运行，但当前 sing-box 尚未将 dns_local 切换至本地接管`}
+                  ? `${engineLabel} 当前处于停止状态`
+                  : snap.workMode === 'basic'
+                    ? `${engineLabel} 已运行，尚未将路由器 dnsmasq 上游指向本地防劫持引擎`
+                    : `${engineLabel} 已运行，但当前 sing-box 尚未将 dns_local 切换至本地接管`}
               </div>
               <div className="text-secondary mt-0.5">
-                点击右侧按钮即可在确认本地加密解析就绪后，平滑热重载 sing-box 完成零断网接管。
+                {snap.workMode === 'basic'
+                  ? '点击右侧按钮即可在基础模式下把路由器 dnsmasq 接入本地加密解析（免订阅零断网）。'
+                  : '点击右侧按钮即可在确认本地加密解析就绪后，平滑热重载 sing-box 完成零断网接管。'}
               </div>
             </div>
           </div>

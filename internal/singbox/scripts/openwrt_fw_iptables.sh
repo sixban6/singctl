@@ -104,6 +104,13 @@ fw_apply_ipv4() {
         error_exit "应用 IPv4 TProxy UDP 规则失败（请确认已安装 kmod-ipt-tproxy）"
     }
 
+    # 2.5 放行配置为「纯直连绕过代理」的隔离 VLAN 子网（目标为本机已在第 1 步 RETURN）
+    local vlan_cidr
+    for vlan_cidr in $BYPASS_VLAN_V4_CIDRS; do
+        iptables -t mangle -A SING_BOX -s "$vlan_cidr" -m comment --comment singctl-vlan-bypass -j RETURN 2>/dev/null || \
+            iptables -t mangle -A SING_BOX -s "$vlan_cidr" -j RETURN
+    done
+
     # 3. 放行回环与 Tailscale MagicDNS / CGNAT（注意不放行 -i tailscale+，保留 ExitNode 透明代理能力）
     iptables -t mangle -A SING_BOX -d 127.0.0.0/8 -j RETURN
     iptables -t mangle -A SING_BOX -d 100.64.0.0/10 -j RETURN
@@ -266,6 +273,7 @@ fw_apply_ipv6() {
 
 fw_apply() {
     collect_bypass_dns_ips
+    collect_vlan_proxy_bypass_cidrs
     collect_lan_ipv6_prefixes
     fw_cleanup_pre
     fw_apply_ipv4

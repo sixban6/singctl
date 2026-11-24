@@ -95,6 +95,7 @@ type RollbackOps struct {
 	DisableFirewall      func(ctx context.Context) error
 	ReloadFirewall       func(ctx context.Context) error
 	ReloadDNS            func(ctx context.Context, engine string) error
+	ReloadOpenWrtNetwork func(ctx context.Context) error
 	OnRolledBack         func(rec RollbackRecord)
 }
 
@@ -330,6 +331,7 @@ func (m *Manager) Rollback(ctx context.Context, trigger string) (*RollbackRecord
 	var actions []string
 	var errs []error
 	allRestored := true
+	restoredUCI := false
 
 	for _, name := range slices.Sorted(maps.Keys(st.Snapshots)) {
 		origPath := st.Snapshots[name]
@@ -356,6 +358,9 @@ func (m *Manager) Rollback(ctx context.Context, trigger string) (*RollbackRecord
 			errs = append(errs, fmt.Errorf("restore %s -> %s: %w", name, origPath, wErr))
 			continue
 		}
+		if strings.HasPrefix(name, "uci_") || strings.HasPrefix(origPath, "/etc/config/") {
+			restoredUCI = true
+		}
 		actions = append(actions, fmt.Sprintf("restore:%s->%s", name, origPath))
 	}
 
@@ -364,6 +369,13 @@ func (m *Manager) Rollback(ctx context.Context, trigger string) (*RollbackRecord
 	}
 	if st.WatcherPID > 0 && st.WatcherPID != os.Getpid() {
 		_ = m.killWatcher(st.WatcherPID)
+	}
+
+	if restoredUCI && m.ops.ReloadOpenWrtNetwork != nil {
+		if err := m.ops.ReloadOpenWrtNetwork(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("reload openwrt network: %w", err))
+		}
+		actions = append(actions, "openwrt_network:reload")
 	}
 
 	// 严格按回滚恢复序执行全部回调；单项出错绝不阻断其余关键服务恢复。

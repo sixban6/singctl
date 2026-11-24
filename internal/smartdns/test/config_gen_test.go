@@ -214,6 +214,26 @@ func TestBuildConfig_StrategiesLowMemoryAndSecurity(t *testing.T) {
 		}
 	})
 
+	t.Run("ultra_low_memory_256m_profile_trims_cache_and_prefetch", func(t *testing.T) {
+		cfg, err := smartdns.BuildConfig(smartdns.ConfigInput{
+			IsLowMemory:      true,
+			IsUltraLowMemory: true,
+		}, rulesDir, auditLog, logFile)
+		if err != nil {
+			t.Fatalf("BuildConfig failed: %v", err)
+		}
+		for _, kw := range []string{
+			"cache-size 1024",
+			"prefetch-domain no",
+			"log-size 32k",
+			"audit-size 64k",
+		} {
+			if !strings.Contains(cfg, kw) {
+				t.Errorf("ultra-low-memory config missing %q\n%s", kw, cfg)
+			}
+		}
+	})
+
 	t.Run("load_balance_and_protection_paused_omits_adblock", func(t *testing.T) {
 		cfg, err := smartdns.BuildConfig(smartdns.ConfigInput{
 			UpstreamMode:     "load_balance",

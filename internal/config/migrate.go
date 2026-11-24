@@ -451,6 +451,9 @@ func migrateClientTopLevelStage(mc *MigrationContext) {
 			if hasYAMLKey(oldGW, "mode") && mc.oldCfg.Gateway.Mode != "" {
 				mc.SetOrAddField("gateway", "mode", mc.oldCfg.Gateway.Mode)
 			}
+			if hasYAMLKey(oldGW, "work_mode") && mc.oldCfg.Gateway.WorkMode != "" {
+				mc.SetOrAddField("gateway", "work_mode", mc.oldCfg.Gateway.WorkMode)
+			}
 			if hasYAMLKey(oldGW, "main_router_ip") && mc.oldCfg.Gateway.MainRouterIP != "" {
 				mc.SetOrAddField("gateway", "main_router_ip", mc.oldCfg.Gateway.MainRouterIP)
 			}

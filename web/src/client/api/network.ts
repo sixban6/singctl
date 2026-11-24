@@ -5,6 +5,7 @@ import {
   FirewallOverviewResponse,
   GatewayIPv6Mode,
   GatewayRoleMode,
+  GatewayWorkMode,
   TailscaleConfigResponse,
   TailscaleP2PAssistConfig,
   TailscaleP2PPokeResult,
@@ -20,6 +21,7 @@ export const networkApi = {
 
   saveGateway: (payload: {
     mode: GatewayRoleMode;
+    workMode?: GatewayWorkMode;
     mainRouterIP?: string;
     lanIface?: string;
     ipv6Mode?: GatewayIPv6Mode;

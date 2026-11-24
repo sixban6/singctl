@@ -17,7 +17,28 @@ const (
 	GatewayIPv6Off    = "off"
 	GatewayIPv6CNOnly = "cn_only"
 	GatewayIPv6Full   = "full"
+
+	WorkModeAuto  = "auto"  // 自动：有订阅=代理模式，无订阅=基础模式
+	WorkModeBasic = "basic" // 基础模式（免订阅：防劫持 DNS / 隔离网 / 防火墙，零转发损耗）
+	WorkModeAudit = "audit" // 审计模式（免订阅：设备行为审计 + PCDN 拦截 + 强防劫持 DNS）
+	WorkModeProxy = "proxy" // 代理模式（需订阅：透明代理分流 + 完整审计 + 防劫持 DNS）
 )
+
+// NormalizeWorkMode 校验并归一化客户端运行工作模式（auto / basic / audit / proxy）。
+func NormalizeWorkMode(raw string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", WorkModeAuto:
+		return WorkModeAuto, true
+	case WorkModeBasic, "dns_only", "dns-only", "lite":
+		return WorkModeBasic, true
+	case WorkModeAudit, "direct_audit", "direct-audit", "direct":
+		return WorkModeAudit, true
+	case WorkModeProxy, "full":
+		return WorkModeProxy, true
+	default:
+		return "", false
+	}
+}
 
 // NormalizeGatewayIPv6Mode 校验并归一化客户端 IPv6 双栈分流策略（off / cn_only / full）。
 // 空字符串视为默认值 off 并返回合法；其余未识别值返回 false。
@@ -34,9 +55,10 @@ func NormalizeGatewayIPv6Mode(raw string) (string, bool) {
 	}
 }
 
-// GatewayConfig 定义客户端网关部署拓扑模式（默认主路由 main，可选单臂旁路由 side）与 IPv6 双栈分流策略。
+// GatewayConfig 定义客户端网关部署拓扑模式（默认主路由 main，可选单臂旁路由 side）、工作模式（basic/audit/proxy）与 IPv6 双栈分流策略。
 type GatewayConfig struct {
 	Mode         string `yaml:"mode,omitempty" json:"mode,omitempty"`
+	WorkMode     string `yaml:"work_mode,omitempty" json:"workMode,omitempty"`
 	MainRouterIP string `yaml:"main_router_ip,omitempty" json:"main_router_ip,omitempty"`
 	LANIface     string `yaml:"lan_iface,omitempty" json:"lan_iface,omitempty"`
 	IPv6Mode     string `yaml:"ipv6_mode,omitempty" json:"ipv6_mode,omitempty"`
@@ -48,6 +70,14 @@ func (g GatewayConfig) EffectiveMode() string {
 		return "side"
 	}
 	return "main"
+}
+
+// ConfiguredWorkMode 返回归一化后的用户显式配置工作模式（auto / basic / audit / proxy）。
+func (g GatewayConfig) ConfiguredWorkMode() string {
+	if norm, ok := NormalizeWorkMode(g.WorkMode); ok {
+		return norm
+	}
+	return WorkModeAuto
 }
 
 // EffectiveIPv6Mode 返回归一化后的 IPv6 分流模式（off / cn_only / full），默认 "off"。
@@ -66,9 +96,61 @@ func (g GatewayConfig) IsSideRouter() bool {
 // IsEmpty 判断是否未显式设置任何网关配置字段。
 func (g GatewayConfig) IsEmpty() bool {
 	return strings.TrimSpace(g.Mode) == "" &&
+		strings.TrimSpace(g.WorkMode) == "" &&
 		strings.TrimSpace(g.MainRouterIP) == "" &&
 		strings.TrimSpace(g.LANIface) == "" &&
 		strings.TrimSpace(g.IPv6Mode) == ""
+}
+
+// ConfiguredWorkMode 返回当前配置显式选择的工作模式（auto / basic / audit / proxy）。
+func (c *Config) ConfiguredWorkMode() string {
+	if c == nil {
+		return WorkModeAuto
+	}
+	return c.Gateway.ConfiguredWorkMode()
+}
+
+// EffectiveWorkMode 解析当前实际生效的工作模式（basic / audit / proxy）：
+// auto 下有订阅自动进入 proxy，无订阅自动进入 basic（零订阅零转发损耗基础模式）。
+func (c *Config) EffectiveWorkMode() string {
+	if c == nil {
+		return WorkModeBasic
+	}
+	switch c.Gateway.ConfiguredWorkMode() {
+	case WorkModeBasic:
+		return WorkModeBasic
+	case WorkModeAudit:
+		return WorkModeAudit
+	case WorkModeProxy:
+		return WorkModeProxy
+	default:
+		if c.HasRealSubs() {
+			return WorkModeProxy
+		}
+		return WorkModeBasic
+	}
+}
+
+// IsBasicMode 判断当前是否处于「基础模式」（免订阅、不启动 sing-box，仅运行防劫持 DNS / 隔离网 / 防火墙）。
+func (c *Config) IsBasicMode() bool {
+	return c.EffectiveWorkMode() == WorkModeBasic
+}
+
+// IsDirectAuditMode 判断当前是否处于「审计模式」（免订阅、纯直连零节点 sing-box 透明嗅探与 PCDN/黑名单拦截）。
+func (c *Config) IsDirectAuditMode() bool {
+	return c.EffectiveWorkMode() == WorkModeAudit
+}
+
+// NeedsSingBox 判断当前工作模式是否需要运行 sing-box 内核（审计模式或已配置订阅的代理模式）。
+func (c *Config) NeedsSingBox() bool {
+	switch c.EffectiveWorkMode() {
+	case WorkModeAudit:
+		return true
+	case WorkModeProxy:
+		return c != nil && c.HasRealSubs()
+	default:
+		return false
+	}
 }
 
 // AuditThrottleRule 定义单目标"限速不拉黑"防护策略（通过 nftables limit 对特定域名/IP 上行速率封顶而不掐断连接）。

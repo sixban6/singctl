@@ -13,6 +13,7 @@ import {
 } from './session';
 import { singboxApi } from './singbox';
 import { systemApi } from './system';
+import { vlanApi } from './vlan';
 
 export {
   ApiError,
@@ -27,6 +28,7 @@ export {
   auditApi,
   networkApi,
   p0Api,
+  vlanApi,
   actionStreamApi,
 };
 
@@ -37,5 +39,6 @@ export const clientApi = {
   ...auditApi,
   ...networkApi,
   ...p0Api,
+  ...vlanApi,
   ...actionStreamApi,
 };
