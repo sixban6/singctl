@@ -241,6 +241,7 @@ export interface DNSBypassAppGroupMeta {
   defaultEnabled: boolean;
   enabled: boolean;
   domains: string[];
+  ips?: string[];
 }
 
 export interface DNSBypassGuardSnapshot {

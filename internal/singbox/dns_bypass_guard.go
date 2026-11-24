@@ -10,7 +10,7 @@ import (
 	"singctl/internal/singbox/sboption"
 )
 
-// DNSBypassAppGroupMeta 描述 L4 层单个大厂 App 自建 HTTPDNS 分组的元数据与受管域名清单。
+// DNSBypassAppGroupMeta 描述 L4 层单个大厂 App 自建 HTTPDNS 分组的元数据与受管域名/专用 VIP IP 清单。
 type DNSBypassAppGroupMeta struct {
 	ID             string   `json:"id"`
 	Name           string   `json:"name"`
@@ -19,6 +19,7 @@ type DNSBypassAppGroupMeta struct {
 	DefaultEnabled bool     `json:"defaultEnabled"`
 	Enabled        bool     `json:"enabled"`
 	Domains        []string `json:"domains"`
+	IPs            []string `json:"ips,omitempty"`
 }
 
 // DNSBypassLayerMeta 描述 L1~L4 单个防绕过拦截层的展示元数据与生效状态。
@@ -114,6 +115,7 @@ var sdkHTTPDNSIPCIDRs = []string{
 	"119.29.29.29/32", // 腾讯云 DNSPod HTTPDNS (80/443)
 	"119.28.28.28/32", // 腾讯云 DNSPod HTTPDNS 备 (80/443)
 	"180.76.76.76/32", // 百度云 HTTPDNS (80/443)
+	"180.76.76.112/32", // 百度云 HTTPDNS 专用调度 VIP (httpsdns.baidu.com)
 	"180.184.1.1/32",  // 火山引擎 HTTPDNS (80/443)
 	"180.184.2.2/32",  // 火山引擎 HTTPDNS 备 (80/443)
 }
@@ -122,8 +124,12 @@ var sdkHTTPDNSIPCIDRs = []string{
 var sdkHTTPDNSDomains = []string{
 	"httpdns.alicdn.com",
 	"httpdns-api.aliyuncs.com",
+	"httpdns.aliyuncs.com",
+	"httpdns-sc.aliyuncs.com",
+	"resolvers-cn.httpdns.aliyuncs.com",
 	"httpdns.qcloud.com",
 	"httpdns.baidubce.com",
+	"httpsdns.baidu.com",
 	"httpdns.volcengineapi.com",
 	"dig.bdurl.net",
 	"httpdns.platform.dbankcloud.com",
@@ -167,10 +173,24 @@ var appHTTPDNSGroupCatalog = []DNSBypassAppGroupMeta{
 	{
 		ID:             "meituan",
 		Name:           "美团 / 点评",
-		Desc:           "拦截美团自建 HTTPDNS",
+		Desc:           "拦截美团/点评自建 HTTPDNS 域名及专用 VIP 直连 IP（不触碰共享业务 API VIP）",
 		Risk:           "medium",
 		DefaultEnabled: true,
-		Domains:        []string{"httpdns.meituan.com"},
+		Domains: []string{
+			"httpdns.meituan.com",
+			"httpdnsvip.meituan.com",
+			"httpdnsmultiapi.meituan.com",
+			"httpdnsmultiapivip.meituan.com",
+		},
+		// 仅收录已实测验证仅响应 /fetch HTTPDNS 接口、对业务 API Host 返回 404 的专用 VIP IP，
+		// 严禁收录 inf-wan.vip.meituan.com 共享业务入口 IP 以免误伤点餐/支付。
+		IPs: []string{
+			"103.37.155.60/32",
+			"103.37.152.97/32",
+			"103.37.152.224/32",
+			"203.76.217.49/32",
+			"2405:1480:2000:3::5/128",
+		},
 	},
 	{
 		ID:             "ctrip",
@@ -199,7 +219,7 @@ var appHTTPDNSGroupCatalog = []DNSBypassAppGroupMeta{
 		Desc:           "拦截微信内置 HTTPDNS；高误伤风险：可能导致搜一搜表情加载慢或裂图，默认关闭",
 		Risk:           "high",
 		DefaultEnabled: false,
-		Domains:        []string{"dns.weixin.qq.com.cn", "aedns.weixin.qq.com"},
+		Domains:        []string{"dns.weixin.qq.com", "dns.weixin.qq.com.cn", "aedns.weixin.qq.com"},
 	},
 }
 
@@ -210,12 +230,17 @@ var (
 )
 
 func buildBypassCIDRSet() map[string]struct{} {
-	set := make(map[string]struct{}, len(publicDoHIPCIDRs)+len(sdkHTTPDNSIPCIDRs))
+	set := make(map[string]struct{}, len(publicDoHIPCIDRs)+len(sdkHTTPDNSIPCIDRs)+8)
 	for _, s := range publicDoHIPCIDRs {
 		set[s] = struct{}{}
 	}
 	for _, s := range sdkHTTPDNSIPCIDRs {
 		set[s] = struct{}{}
+	}
+	for _, g := range appHTTPDNSGroupCatalog {
+		for _, ip := range g.IPs {
+			set[ip] = struct{}{}
+		}
 	}
 	return set
 }
@@ -386,14 +411,23 @@ func buildDNSBypassRouteRules(cfg *config.Config) []sboption.RouteRule {
 		}
 	}
 
-	// L4: 大厂 App 自建 HTTPDNS (80 / 443，按家族细粒度拼装)
+	// L4: 大厂 App 自建 HTTPDNS (80 / 443，按家族细粒度拼装域名 + 专用 VIP 直连 IP)
 	if bg.LayerAppHTTPDNS() {
 		var appDomains []string
+		var appIPs []string
 		for _, grp := range appHTTPDNSGroupCatalog {
 			if !bg.IsAppGroupEnabled(grp.ID) {
 				continue
 			}
 			appDomains = append(appDomains, grp.Domains...)
+			appIPs = append(appIPs, grp.IPs...)
+		}
+		if len(appIPs) > 0 {
+			rules = append(rules, wrapWithExemptSourceIPs(sboption.RouteRule{
+				Action: "reject",
+				IPCIDR: sboption.ListOf(appIPs...),
+				Port:   sboption.ListOf[uint16](80, 443),
+			}, exempt))
 		}
 		if doms := filterNonWhitelistedDomains(appDomains, wl); len(doms) > 0 {
 			rules = append(rules, wrapWithExemptSourceIPs(sboption.RouteRule{
@@ -544,12 +578,15 @@ func InspectDNSBypassGuardStatus(cfg *config.Config) DNSBypassGuardSnapshot {
 	}
 	groups := make([]DNSBypassAppGroupMeta, 0, len(appHTTPDNSGroupCatalog))
 	enabledAppDomainCount := 0
+	enabledAppIPCount := 0
 	for _, g := range appHTTPDNSGroupCatalog {
 		item := g
 		item.Domains = slices.Clone(g.Domains)
+		item.IPs = slices.Clone(g.IPs)
 		item.Enabled = bg.IsAppGroupEnabled(g.ID)
 		if item.Enabled {
 			enabledAppDomainCount += len(item.Domains)
+			enabledAppIPCount += len(item.IPs)
 		}
 		groups = append(groups, item)
 	}
@@ -598,6 +635,7 @@ func InspectDNSBypassGuardStatus(cfg *config.Config) DNSBypassGuardSnapshot {
 			Risk:           "medium",
 			DefaultEnabled: true,
 			Enabled:        bg.LayerAppHTTPDNS(),
+			IPCount:        enabledAppIPCount,
 			DomainCount:    enabledAppDomainCount,
 		},
 	}

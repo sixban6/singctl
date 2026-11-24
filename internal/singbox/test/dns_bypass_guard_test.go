@@ -55,7 +55,7 @@ func TestDNSBypassGuard_DefaultFourLayersAndIPv4Decoupling(t *testing.T) {
 		t.Fatalf("parse output failed: %v", err)
 	}
 
-	var hasL1DoT, hasL2DoHIP, hasL2DoHDom, hasL3SDKIP, hasL3SDKDom, hasL4AppDom, keptUserRule bool
+	var hasL1DoT, hasL2DoHIP, hasL2DoHDom, hasL3SDKIP, hasL3SDKDom, hasL4AppDom, hasL4AppIP, keptUserRule bool
 	for _, r := range doc.Route.Rules {
 		if r.Action == "reject" && slices.Equal(r.Port.Slice(), []uint16{853}) && slices.Equal(r.SourceIPCIDR.Slice(), []string{"192.0.2.99/32"}) {
 			keptUserRule = true
@@ -76,24 +76,44 @@ func TestDNSBypassGuard_DefaultFourLayersAndIPv4Decoupling(t *testing.T) {
 			}
 		}
 		if slices.Equal(ports, []uint16{80, 443}) {
-			if slices.Contains(r.IPCIDR.Slice(), "203.107.1.0/24") && slices.Contains(r.IPCIDR.Slice(), "119.29.29.29/32") {
+			if slices.Contains(r.IPCIDR.Slice(), "203.107.1.0/24") && slices.Contains(r.IPCIDR.Slice(), "119.29.29.29/32") && slices.Contains(r.IPCIDR.Slice(), "180.76.76.112/32") {
 				hasL3SDKIP = true
 			}
-			if slices.Contains(r.Domain.Slice(), "httpdns.alicdn.com") && slices.Contains(r.Domain.Slice(), "dig.bdurl.net") {
+			if slices.Contains(r.Domain.Slice(), "httpdns.alicdn.com") &&
+				slices.Contains(r.Domain.Slice(), "resolvers-cn.httpdns.aliyuncs.com") &&
+				slices.Contains(r.Domain.Slice(), "httpsdns.baidu.com") &&
+				slices.Contains(r.Domain.Slice(), "dig.bdurl.net") {
 				hasL3SDKDom = true
 			}
-			if slices.Contains(r.Domain.Slice(), "httpdns.bilivideo.com") && slices.Contains(r.Domain.Slice(), "dns.jd.com") {
+			if slices.Contains(r.IPCIDR.Slice(), "103.37.155.60/32") &&
+				slices.Contains(r.IPCIDR.Slice(), "103.37.152.97/32") &&
+				slices.Contains(r.IPCIDR.Slice(), "103.37.152.224/32") &&
+				slices.Contains(r.IPCIDR.Slice(), "203.76.217.49/32") &&
+				slices.Contains(r.IPCIDR.Slice(), "2405:1480:2000:3::5/128") {
+				hasL4AppIP = true
+				if slices.Contains(r.IPCIDR.Slice(), "101.236.69.43/32") || slices.Contains(r.IPCIDR.Slice(), "103.37.152.92/32") {
+					t.Fatalf("shared Meituan business API VIPs must NOT be IP-blocked: %v", r.IPCIDR.Slice())
+				}
+			}
+			if slices.Contains(r.Domain.Slice(), "httpdns.bilivideo.com") &&
+				slices.Contains(r.Domain.Slice(), "dns.jd.com") &&
+				slices.Contains(r.Domain.Slice(), "httpdns.meituan.com") &&
+				slices.Contains(r.Domain.Slice(), "httpdnsvip.meituan.com") &&
+				slices.Contains(r.Domain.Slice(), "httpdnsmultiapi.meituan.com") &&
+				slices.Contains(r.Domain.Slice(), "httpdnsmultiapivip.meituan.com") {
 				hasL4AppDom = true
-				if slices.Contains(r.Domain.Slice(), "dns.weixin.qq.com.cn") || slices.Contains(r.Domain.Slice(), "aedns.weixin.qq.com") {
+				if slices.Contains(r.Domain.Slice(), "dns.weixin.qq.com") ||
+					slices.Contains(r.Domain.Slice(), "dns.weixin.qq.com.cn") ||
+					slices.Contains(r.Domain.Slice(), "aedns.weixin.qq.com") {
 					t.Fatalf("high-risk wechat HTTPDNS must NOT be blocked by default: %v", r.Domain.Slice())
 				}
 			}
 		}
 	}
 
-	if !hasL1DoT || !hasL2DoHIP || !hasL2DoHDom || !hasL3SDKIP || !hasL3SDKDom || !hasL4AppDom {
-		t.Fatalf("missing default bypass guard layers: L1=%v L2IP=%v L2Dom=%v L3IP=%v L3Dom=%v L4=%v",
-			hasL1DoT, hasL2DoHIP, hasL2DoHDom, hasL3SDKIP, hasL3SDKDom, hasL4AppDom)
+	if !hasL1DoT || !hasL2DoHIP || !hasL2DoHDom || !hasL3SDKIP || !hasL3SDKDom || !hasL4AppDom || !hasL4AppIP {
+		t.Fatalf("missing default bypass guard layers: L1=%v L2IP=%v L2Dom=%v L3IP=%v L3Dom=%v L4Dom=%v L4IP=%v",
+			hasL1DoT, hasL2DoHIP, hasL2DoHDom, hasL3SDKIP, hasL3SDKDom, hasL4AppDom, hasL4AppIP)
 	}
 	if !keptUserRule {
 		t.Fatal("user-scoped port 853 rule must be preserved untouched")
@@ -125,6 +145,7 @@ func TestDNSBypassGuard_GranularLayersWeChatWhitelistAndExemptSourceIPs(t *testi
 				},
 				AppGroups: map[string]bool{
 					"bilibili": false, // disable bilibili
+					"meituan":  false, // disable meituan (must drop both domains & dedicated VIP IPs)
 					"wechat":   true,  // explicitly opt in to wechat
 				},
 				ExemptSourceIPs: []string{"192.0.2.151"},
@@ -156,10 +177,15 @@ func TestDNSBypassGuard_GranularLayersWeChatWhitelistAndExemptSourceIPs(t *testi
 			if slices.Contains(head.Domain.Slice(), "httpdns.bilivideo.com") {
 				t.Fatal("disabled bilibili group must not be injected")
 			}
+			if slices.Contains(head.Domain.Slice(), "httpdnsmultiapivip.meituan.com") || slices.Contains(head.IPCIDR.Slice(), "103.37.152.97/32") {
+				t.Fatal("disabled meituan group must not inject domains or VIP IPs")
+			}
 			if slices.Contains(head.Domain.Slice(), "httpdns.n.netease.com") {
 				t.Fatal("explicitly whitelisted domain httpdns.n.netease.com must be subtracted from reject rule")
 			}
-			if slices.Contains(head.Domain.Slice(), "dns.weixin.qq.com.cn") && slices.Contains(head.Domain.Slice(), "aedns.weixin.qq.com") {
+			if slices.Contains(head.Domain.Slice(), "dns.weixin.qq.com") &&
+				slices.Contains(head.Domain.Slice(), "dns.weixin.qq.com.cn") &&
+				slices.Contains(head.Domain.Slice(), "aedns.weixin.qq.com") {
 				foundExemptWrappedWeChat = true
 			}
 		}
@@ -173,7 +199,7 @@ func TestDNSBypassGuard_GranularLayersWeChatWhitelistAndExemptSourceIPs(t *testi
 
 	// Verify WeChat mutual exclusion with DefaultAdBlockSafeDomains
 	wl := singbox.EffectiveAdBlockWhitelist(cfg)
-	if slices.Contains(wl, "dns.weixin.qq.com.cn") || slices.Contains(wl, "aedns.weixin.qq.com") {
+	if slices.Contains(wl, "dns.weixin.qq.com") || slices.Contains(wl, "dns.weixin.qq.com.cn") || slices.Contains(wl, "aedns.weixin.qq.com") {
 		t.Fatalf("when wechat bypass reject is explicitly enabled, EffectiveAdBlockWhitelist must exclude wechat HTTPDNS domains: %v", wl)
 	}
 	if !slices.Contains(wl, "wxaintpcos.wxqcloud.qq.com.cn") {

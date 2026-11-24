@@ -91,7 +91,7 @@ func TestWebUI_DNSBypassGuardAPI_GetPostValidateAndHotSync(t *testing.T) {
 		t.Fatalf("GET /api/dns/bypass-guard code=%d body=%s", rec.Code, rec.Body.String())
 	}
 	bodyStr := rec.Body.String()
-	for _, want := range []string{`"dot_doq"`, `"public_doh"`, `"sdk_httpdns"`, `"app_httpdns"`, `"bilibili"`, `"wechat"`} {
+	for _, want := range []string{`"dot_doq"`, `"public_doh"`, `"sdk_httpdns"`, `"app_httpdns"`, `"bilibili"`, `"wechat"`, `"httpdnsmultiapivip.meituan.com"`, `"103.37.152.97/32"`} {
 		if !strings.Contains(bodyStr, want) {
 			t.Fatalf("GET /api/dns/bypass-guard missing %s in %s", want, bodyStr)
 		}

@@ -208,11 +208,12 @@ export const DNSBypassGuardCard: React.FC<DNSBypassGuardCardProps> = ({ active =
                     {snap.appGroups.map((grp) => {
                       const on = Boolean(appGroups[grp.id]);
                       const isHigh = grp.risk === 'high';
+                      const targets = [...grp.domains, ...(grp.ips || [])];
                       return (
                         <button
                           key={grp.id}
                           type="button"
-                          title={`${grp.desc} (${grp.domains.join(', ')})`}
+                          title={`${grp.desc} (${targets.join(', ')})`}
                           onClick={() => handleToggleGroup(grp.id)}
                           className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs border transition-colors cursor-pointer ${
                             on
@@ -224,7 +225,7 @@ export const DNSBypassGuardCard: React.FC<DNSBypassGuardCardProps> = ({ active =
                         >
                           {isHigh && <ShieldAlert className="w-3.5 h-3.5" />}
                           <span>{grp.name}</span>
-                          <span className="text-[10px] opacity-70 font-mono">{grp.domains.length}</span>
+                          <span className="text-[10px] opacity-70 font-mono">{targets.length}</span>
                         </button>
                       );
                     })}
@@ -233,7 +234,7 @@ export const DNSBypassGuardCard: React.FC<DNSBypassGuardCardProps> = ({ active =
                     <div className="flex items-start gap-2 rounded-lg border border-rose-500/35 bg-rose-500/10 px-3 py-2 text-[11px] text-rose-200">
                       <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5 text-rose-400" />
                       <span>
-                        已勾选高风险「微信专有调度」：保存后将拦截 dns.weixin.qq.com.cn / aedns.weixin.qq.com，若出现微信搜一搜表情加载慢或裂图，取消勾选保存即可秒级恢复。
+                        已勾选高风险「微信专有调度」：保存后将拦截 dns.weixin.qq.com / dns.weixin.qq.com.cn / aedns.weixin.qq.com，若出现微信搜一搜表情加载慢或裂图，取消勾选保存即可秒级恢复。
                       </span>
                     </div>
                   )}

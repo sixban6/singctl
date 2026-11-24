@@ -58,6 +58,7 @@ var DefaultAdBlockSafeDomains = []string{
 	"dl.weshineapp.com",             // 闪萌表情包下载源
 	"pass1.soogif.com",              // SOOGIF 动图表情源
 	"pass2.soogif.com",              // SOOGIF 动图表情源
-	"dns.weixin.qq.com.cn",          // 微信内置 HTTPDNS 调度
+	"dns.weixin.qq.com",             // 微信内置 HTTPDNS 调度
+	"dns.weixin.qq.com.cn",          // 微信内置 HTTPDNS 调度 (.cn)
 	"aedns.weixin.qq.com",           // 微信边缘 DNS 调度
 }
