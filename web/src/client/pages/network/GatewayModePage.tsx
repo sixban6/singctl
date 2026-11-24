@@ -9,15 +9,18 @@ import { maskFullIP } from '../../../lib/privacyMask';
 import {
   ClientGatewayConfigResponse,
   ClientStatusResponse,
+  EffectiveGatewayWorkMode,
   GatewayIPv6Mode,
   GatewayRoleMode,
 } from '../../types';
 import { GatewayIPv6Section } from './GatewayIPv6Section';
+import { getWorkModeLabel, WorkModeCard } from './WorkModeCard';
 
 export interface GatewayModePageProps {
   status?: ClientStatusResponse | null;
   busy: boolean;
   privacyMask?: boolean;
+  onNavigate?: (tab: string, sub?: string) => void;
   onSaved?: () => void;
 }
 
@@ -25,6 +28,7 @@ export const GatewayModePage: React.FC<GatewayModePageProps> = ({
   status,
   busy,
   privacyMask = false,
+  onNavigate,
   onSaved,
 }) => {
   const { success, error } = useToast();
@@ -37,6 +41,7 @@ export const GatewayModePage: React.FC<GatewayModePageProps> = ({
   } = useCachedQuery<ClientGatewayConfigResponse>(GATEWAY_CACHE_KEY, () => clientApi.getGateway());
 
   const [saving, setSaving] = useState(false);
+  const [workModeSaving, setWorkModeSaving] = useState(false);
   const [ipv6Saving, setIpv6Saving] = useState(false);
 
   const gwSummary = status?.gateway;
@@ -95,6 +100,10 @@ export const GatewayModePage: React.FC<GatewayModePageProps> = ({
   const trimmedIP = mainRouterIP.trim();
   const isSelfLoop = Boolean(mode === 'side' && topo?.lanIP && trimmedIP === topo.lanIP);
   const activeGatewayMode = data?.mode ?? gwSummary?.mode ?? mode;
+  const configuredWorkMode = data?.workMode ?? gwSummary?.workMode;
+  const hasSubs = data?.hasSubs ?? gwSummary?.hasSubs ?? Boolean((status?.config?.subs?.length || 0) > 0);
+  const effectiveWorkMode: EffectiveGatewayWorkMode =
+    data?.effectiveWorkMode ?? gwSummary?.effectiveWorkMode ?? (hasSubs ? 'proxy' : 'basic');
   const effectiveDisplayIPv6Mode: GatewayIPv6Mode | null =
     mode === 'side' ? 'off' : ipv6Mode ?? (data?.ipv6Mode as GatewayIPv6Mode | undefined) ?? gwSummary?.ipv6Mode ?? null;
 
@@ -149,14 +158,36 @@ export const GatewayModePage: React.FC<GatewayModePageProps> = ({
     }
   };
 
+  const handleSaveWorkMode = async (nextWorkMode: EffectiveGatewayWorkMode) => {
+    if (privacyMask) return;
+    const roleMode: GatewayRoleMode = mode || (activeGatewayMode === 'side' ? 'side' : 'main');
+    const effectiveV6: GatewayIPv6Mode = roleMode === 'side' ? 'off' : ipv6Mode || 'off';
+    setWorkModeSaving(true);
+    try {
+      const res = await clientApi.saveGateway({
+        mode: roleMode,
+        workMode: nextWorkMode,
+        mainRouterIP: roleMode === 'side' ? trimmedIP : '',
+        ipv6Mode: effectiveV6,
+      });
+      setGatewayData(res);
+      success(res.message || `已切换为${getWorkModeLabel(nextWorkMode)}`);
+      onSaved?.();
+    } catch (e: unknown) {
+      error(e instanceof Error ? e.message : '切换运行模式失败');
+    } finally {
+      setWorkModeSaving(false);
+    }
+  };
+
   const sideLanDisplay = privacyMask ? '••••••••' : topo?.lanIP || '<旁路由IP>';
   const mainGwDisplay = privacyMask ? '••••••••' : trimmedIP || topo?.suggestedMainRouterIP || '<主路由IP>';
 
   return (
     <div className="space-y-5">
       <PageHeader
-        title="网关部署模式"
-        description="默认主路由模式；单网口挂在主路由下做旁路由时可在此一键切换"
+        title="网关模式"
+        description="按需选择基础模式、审计模式或代理模式，同时支持主/旁路由与 IPv6 双栈配置"
         badge={
           <Badge
             tone={!activeGatewayMode ? 'neutral' : activeGatewayMode === 'side' ? 'accent' : 'ok'}
@@ -164,9 +195,7 @@ export const GatewayModePage: React.FC<GatewayModePageProps> = ({
           >
             {!activeGatewayMode
               ? '读取中…'
-              : activeGatewayMode === 'side'
-                ? '当前：旁路由模式 (Side)'
-                : '当前：主路由模式 (Main)'}
+              : `${activeGatewayMode === 'side' ? '旁路由' : '主路由'} · ${getWorkModeLabel(effectiveWorkMode)}`}
           </Badge>
         }
         actions={
@@ -179,6 +208,17 @@ export const GatewayModePage: React.FC<GatewayModePageProps> = ({
             重新探测拓扑
           </Button>
         }
+      />
+
+      <WorkModeCard
+        configuredWorkMode={configuredWorkMode}
+        effectiveWorkMode={effectiveWorkMode}
+        hasSubs={hasSubs}
+        saving={workModeSaving}
+        busy={busy}
+        privacyMask={privacyMask}
+        onSaveWorkMode={(next) => void handleSaveWorkMode(next)}
+        onGoSubs={onNavigate ? () => onNavigate('sb', 'subs') : undefined}
       />
 
       <SectionCard

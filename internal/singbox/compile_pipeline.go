@@ -76,6 +76,9 @@ func (d *CompileDoc) MarshalCount() int { return d.marshalCount }
 var defaultConfigCompileStages = []CompileStage{
 	{
 		Name: "deduplicate_outbounds",
+		AppliesTo: func(g *ConfigGenerator, _ *CompileDoc) bool {
+			return g == nil || g.config == nil || !g.config.IsDirectAuditMode()
+		},
 		Apply: func(_ *ConfigGenerator, doc *CompileDoc) error {
 			d, err := doc.EnsureDoc()
 			if err != nil {
@@ -94,7 +97,7 @@ var defaultConfigCompileStages = []CompileStage{
 	{
 		Name: "inject_groups",
 		AppliesTo: func(g *ConfigGenerator, _ *CompileDoc) bool {
-			return g != nil
+			return g != nil && (g.config == nil || !g.config.IsDirectAuditMode())
 		},
 		Apply: func(g *ConfigGenerator, doc *CompileDoc) error {
 			d, err := doc.EnsureDoc()
@@ -131,7 +134,7 @@ var defaultConfigCompileStages = []CompileStage{
 	{
 		Name: "inject_traffic_routing",
 		AppliesTo: func(g *ConfigGenerator, _ *CompileDoc) bool {
-			return g != nil && g.config != nil
+			return g != nil && g.config != nil && !g.config.IsDirectAuditMode()
 		},
 		Apply: func(g *ConfigGenerator, doc *CompileDoc) error {
 			d, err := doc.EnsureDoc()

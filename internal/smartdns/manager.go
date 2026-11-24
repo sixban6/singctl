@@ -36,11 +36,12 @@ const (
 	DefaultDNSPort      = 5353
 	SmartDNSRepo        = "pymumu/smartdns"
 
-	// 硬件护栏阈值（匹配 OpenWrt UBIFS 与小内存路由器边界）
-	MinInstallDiskMB = 10
-	MinUpgradeDiskMB = 6
-	MinTotalRAMBytes = 289 * 1024 * 1024 // > 288 MiB
-	MinAvailRAMBytes = 96 * 1024 * 1024  // >= 96 MiB
+	// 硬件护栏阈值（匹配 OpenWrt UBIFS 与小内存路由器边界；SmartDNS 实测常驻 RSS ~6.3 MB）
+	MinInstallDiskMB      = 10
+	MinUpgradeDiskMB      = 6
+	MinTotalRAMBytes      = 112 * 1024 * 1024 // >= 112 MiB（放行 256MB 标称路由器如 AX3000T，仅保护 64M/128M 极低内存路由）
+	MinAvailRAMBytes      = 32 * 1024 * 1024  // >= 32 MiB（相对 ~6.3 MiB 实测 RSS 保留 >5 倍安全余量）
+	UltraLowTotalRAMBytes = 288 * 1024 * 1024 // <= 288 MiB（256MB 级路由器自动启用超轻量运行配置）
 )
 
 // RewriteEntry 描述一条局域网自定义域名解析重写或屏蔽规则。
@@ -62,6 +63,7 @@ type ConfigInput struct {
 	ProtectionPaused    bool           `json:"protectionPaused,omitzero"`
 	MirrorURL           string         `json:"mirrorUrl,omitzero"`
 	IsLowMemory         bool           `json:"isLowMemory,omitzero"`
+	IsUltraLowMemory    bool           `json:"isUltraLowMemory,omitzero"`
 }
 
 // Options 为 ConfigInput 的兼容别名。
@@ -253,6 +255,9 @@ func mergeConfigInput(base, override ConfigInput) ConfigInput {
 	if !out.IsLowMemory && base.IsLowMemory {
 		out.IsLowMemory = base.IsLowMemory
 	}
+	if !out.IsUltraLowMemory && base.IsUltraLowMemory {
+		out.IsUltraLowMemory = base.IsUltraLowMemory
+	}
 	return out
 }
 
@@ -308,13 +313,13 @@ func (m *Manager) checkLowMemoryGuard(forceLowMemory bool) error {
 	const mib = 1024 * 1024
 	if mem.TotalBytes > 0 && mem.TotalBytes < MinTotalRAMBytes {
 		return fmt.Errorf(
-			"检测到低内存设备（物理总内存约 %d MB <= 288 MB），已拦截安装 SmartDNS；256M/224M 小内存路由建议直接使用零额外内存的 singbox 引擎（或通过 ForceLowMemory 强制覆盖）",
+			"检测到极低内存设备（物理总内存约 %d MB < 112 MB），已拦截安装 SmartDNS 防 OOM（如确认内存充裕可通过 ForceLowMemory 强制覆盖）",
 			mem.TotalBytes/mib,
 		)
 	}
 	if mem.AvailableBytes > 0 && mem.AvailableBytes < MinAvailRAMBytes {
 		return fmt.Errorf(
-			"检测到设备当前可用内存不足（总内存约 %d MB，可用内存约 %d MB < 96 MB），已拦截安装 SmartDNS；建议使用零额外内存的 singbox 引擎（或通过 ForceLowMemory 强制覆盖）",
+			"检测到设备当前可用内存不足（总内存约 %d MB，可用内存约 %d MB < 32 MB），已拦截安装 SmartDNS 防 OOM（如确认可运行可通过 ForceLowMemory 强制覆盖）",
 			mem.TotalBytes/mib,
 			mem.AvailableBytes/mib,
 		)

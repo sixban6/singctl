@@ -224,6 +224,15 @@ func (d *Daemon) runWatchdogCheck() {
 	d.CheckHostResourcesOnce()
 	d.GuardLocalDNSOnce(d.ctx)
 	cfg := d.currentConfig()
+	if cfg != nil && cfg.IsBasicMode() {
+		d.recordHealthResult(HealthCheckResult{
+			Healthy:   true,
+			DNSOK:     true,
+			CheckTime: time.Now(),
+			Details:   "基础模式运行中（防劫持 DNS / 网关守护）",
+		})
+		return
+	}
 
 	mon := NewMonitor(cfg)
 	result1 := mon.CheckHealth()

@@ -376,6 +376,53 @@ func TestManager_RollbackRestoresFilesAndInvokesServiceOps(t *testing.T) {
 		}
 	})
 
+	t.Run("uci_network_snapshot_triggers_reload_openwrt_network", func(t *testing.T) {
+		workDir := t.TempDir()
+		stateDir := filepath.Join(workDir, "state")
+		netCfg := filepath.Join(workDir, "uci-network")
+		orig := "config interface 'lan'\n\toption ipaddr '192.168.29.1'\n"
+		if err := os.WriteFile(netCfg, []byte(orig), 0600); err != nil {
+			t.Fatal(err)
+		}
+
+		var reloadedUCI bool
+		mgr := safecommit.NewManager(safecommit.ManagerOptions{
+			StateDir:     stateDir,
+			ProcRoot:     t.TempDir(),
+			SpawnWatcher: func(string) (int, error) { return 6109, nil },
+			KillWatcher:  func(int) error { return nil },
+			RollbackOps: safecommit.RollbackOps{
+				ReloadOpenWrtNetwork: func(context.Context) error {
+					reloadedUCI = true
+					return nil
+				},
+			},
+		})
+
+		if _, err := mgr.Arm(t.Context(), safecommit.ArmRequest{
+			TTLSec: 120,
+			Reason: "vlan segment update",
+			SnapshotFiles: map[string]string{
+				"uci_network": netCfg,
+			},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		_ = os.WriteFile(netCfg, []byte("broken"), 0600)
+
+		rec, err := mgr.Rollback(t.Context(), "timeout")
+		if err != nil || rec == nil || !rec.Success {
+			t.Fatalf("UCI rollback failed: rec=%+v err=%v", rec, err)
+		}
+		if !reloadedUCI {
+			t.Fatal("expected ReloadOpenWrtNetwork callback invoked when uci_* snapshot restored")
+		}
+		got, _ := os.ReadFile(netCfg)
+		if string(got) != orig {
+			t.Fatalf("uci network file not restored: %q", string(got))
+		}
+	})
+
 	t.Run("stopped_singbox_inactive_firewall_and_partial_error_continues", func(t *testing.T) {
 		stateDir := filepath.Join(t.TempDir(), "state")
 		var calls []string

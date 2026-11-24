@@ -505,6 +505,36 @@ printf 'V4=%s\nV6=%s\n' "$BYPASS_DNS_V4_IPS" "$BYPASS_DNS_V6_IPS"
 			t.Fatalf("unexpected default bypass sets:\n%s", text)
 		}
 	})
+
+	t.Run("collect_vlan_proxy_bypass_cidrs_filters_invalid_and_dedups", func(t *testing.T) {
+		bypassFile := filepath.Join(dir, "vlan-proxy-bypass.list")
+		raw := strings.Join([]string{
+			"# comment",
+			"192.168.20.0/24",
+			"192.168.20.0/24",
+			"10.10.20.0/24",
+			"192.168.30.0/24;rm -rf /",
+			"not-a-cidr",
+			"127.0.0.0/8",
+		}, "\n") + "\n"
+		if err := os.WriteFile(bypassFile, []byte(raw), 0600); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.CommandContext(t.Context(), "/bin/sh", "-c", `
+. "$1"
+collect_vlan_proxy_bypass_cidrs
+printf 'CIDRS=%s\n' "$BYPASS_VLAN_V4_CIDRS"
+`, "_", libPath)
+		cmd.Env = append(os.Environ(), "VLAN_PROXY_BYPASS_FILE="+bypassFile)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("collect_vlan_proxy_bypass_cidrs failed: %v\n%s", err, string(out))
+		}
+		text := strings.TrimSpace(string(out))
+		if text != "CIDRS=192.168.20.0/24 10.10.20.0/24" {
+			t.Fatalf("unexpected BYPASS_VLAN_V4_CIDRS: %q", text)
+		}
+	})
 }
 
 func TestOpenWrtCommon_EnsureUjailAndLogCap_RuntimeSh(t *testing.T) {

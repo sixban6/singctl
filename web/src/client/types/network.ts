@@ -1,4 +1,6 @@
 export type GatewayRoleMode = 'main' | 'side';
+export type GatewayWorkMode = 'auto' | 'basic' | 'audit' | 'proxy';
+export type EffectiveGatewayWorkMode = 'basic' | 'audit' | 'proxy';
 export type GatewayIPv6Mode = 'off' | 'cn_only' | 'full';
 
 export interface IPv6StatusInfo {
@@ -33,6 +35,9 @@ export interface ClientGatewayTopology {
 export interface ClientGatewayStatusSummary {
   supported: boolean;
   mode: GatewayRoleMode;
+  workMode?: GatewayWorkMode;
+  effectiveWorkMode?: EffectiveGatewayWorkMode;
+  hasSubs?: boolean;
   mainRouterIP: string;
   ipv6Mode?: GatewayIPv6Mode;
 }
@@ -40,6 +45,9 @@ export interface ClientGatewayStatusSummary {
 export interface ClientGatewayConfigResponse {
   supported: boolean;
   mode: GatewayRoleMode;
+  workMode?: GatewayWorkMode;
+  effectiveWorkMode?: EffectiveGatewayWorkMode;
+  hasSubs?: boolean;
   mainRouterIP: string;
   lanIface?: string;
   ipv6Mode?: GatewayIPv6Mode;

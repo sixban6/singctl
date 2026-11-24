@@ -279,7 +279,15 @@ func BuildConfigWithOptions(input ConfigInput, opts BuildConfigOptions) (string,
 	}
 
 	cacheSize := 8192
-	if input.IsLowMemory {
+	prefetchDomain := "yes"
+	logSize := "64k"
+	auditSize := "128k"
+	if input.IsUltraLowMemory {
+		cacheSize = 1024
+		prefetchDomain = "no"
+		logSize = "32k"
+		auditSize = "64k"
+	} else if input.IsLowMemory {
 		cacheSize = 2048
 	}
 
@@ -308,17 +316,17 @@ func BuildConfigWithOptions(input ConfigInput, opts BuildConfigOptions) (string,
 	fmt.Fprintf(&b, "cache-size %d\n", cacheSize)
 	b.WriteString("cache-persist no\n")
 	b.WriteString("serve-expired yes\n")
-	b.WriteString("prefetch-domain yes\n")
+	fmt.Fprintf(&b, "prefetch-domain %s\n", prefetchDomain)
 	b.WriteString("log-level warn\n")
 	fmt.Fprintf(&b, "log-file %s\n", cleanLogFile)
-	b.WriteString("log-size 64k\n")
+	fmt.Fprintf(&b, "log-size %s\n", logSize)
 	b.WriteString("log-num 1\n\n")
 
 	b.WriteString("# Lightweight tmpfs audit log for 24h stats\n")
 	b.WriteString("audit-enable yes\n")
 	b.WriteString("audit-SOA yes\n")
 	fmt.Fprintf(&b, "audit-file %s\n", cleanAuditLog)
-	b.WriteString("audit-size 128k\n")
+	fmt.Fprintf(&b, "audit-size %s\n", auditSize)
 	b.WriteString("audit-num 1\n")
 
 	b.WriteString("\n# Local health-probe loopback resolution (zero upstream traffic)\n")

@@ -4,6 +4,7 @@ package webui
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"runtime"
@@ -13,12 +14,14 @@ import (
 	"singctl/internal/constant"
 	"singctl/internal/daemon"
 	"singctl/internal/gateway"
+	"singctl/internal/localdns"
 	"singctl/internal/logger"
 	"singctl/internal/singbox"
 )
 
 type gatewayPutRequest struct {
 	Mode             string  `json:"mode"`
+	WorkMode         *string `json:"workMode,omitempty"`
 	MainRouterIP     string  `json:"mainRouterIP"`
 	LANIface         string  `json:"lanIface,omitempty"`
 	IPv6Mode         *string `json:"ipv6Mode,omitempty"`
@@ -44,18 +47,27 @@ func (s *Server) probeGatewayIPv6Status(ctx context.Context, gwCfg config.Gatewa
 
 func (s *Server) gatewayStatusSummary() map[string]any {
 	mode := gateway.ModeMain
+	workMode := config.WorkModeAuto
+	effectiveWorkMode := config.WorkModeBasic
+	hasSubs := false
 	mainRouterIP := ""
 	ipv6Mode := config.GatewayIPv6Off
 	if cfg, err := s.loadConfigSnapshot(); err == nil && cfg != nil {
 		mode = cfg.Gateway.EffectiveMode()
+		workMode = cfg.ConfiguredWorkMode()
+		effectiveWorkMode = cfg.EffectiveWorkMode()
+		hasSubs = cfg.HasRealSubs()
 		mainRouterIP = strings.TrimSpace(cfg.Gateway.MainRouterIP)
 		ipv6Mode = cfg.Gateway.EffectiveIPv6Mode()
 	}
 	return map[string]any{
-		"supported":    runtime.GOOS == "linux",
-		"mode":         mode,
-		"mainRouterIP": mainRouterIP,
-		"ipv6Mode":     ipv6Mode,
+		"supported":         runtime.GOOS == "linux",
+		"mode":              mode,
+		"workMode":          workMode,
+		"effectiveWorkMode": effectiveWorkMode,
+		"hasSubs":           hasSubs,
+		"mainRouterIP":      mainRouterIP,
+		"ipv6Mode":          ipv6Mode,
 	}
 }
 
@@ -68,13 +80,16 @@ func (s *Server) handleGatewayGet(w http.ResponseWriter, r *http.Request) {
 	ipv6Status := s.probeGatewayIPv6Status(r.Context(), cfg.Gateway, topo)
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"supported":    runtime.GOOS == "linux" || s.opts.GatewayProberForTest != nil,
-		"mode":         cfg.Gateway.EffectiveMode(),
-		"mainRouterIP": strings.TrimSpace(cfg.Gateway.MainRouterIP),
-		"lanIface":     strings.TrimSpace(cfg.Gateway.LANIface),
-		"ipv6Mode":     cfg.Gateway.EffectiveIPv6Mode(),
-		"ipv6Status":   ipv6Status,
-		"topology":     topo,
+		"supported":         runtime.GOOS == "linux" || s.opts.GatewayProberForTest != nil,
+		"mode":              cfg.Gateway.EffectiveMode(),
+		"workMode":          cfg.ConfiguredWorkMode(),
+		"effectiveWorkMode": cfg.EffectiveWorkMode(),
+		"hasSubs":           cfg.HasRealSubs(),
+		"mainRouterIP":      strings.TrimSpace(cfg.Gateway.MainRouterIP),
+		"lanIface":          strings.TrimSpace(cfg.Gateway.LANIface),
+		"ipv6Mode":          cfg.Gateway.EffectiveIPv6Mode(),
+		"ipv6Status":        ipv6Status,
+		"topology":          topo,
 	})
 }
 
@@ -92,11 +107,28 @@ func (s *Server) handleGatewayPut(w http.ResponseWriter, r *http.Request) {
 	origCfgBytes, origReadErr := os.ReadFile(cfgPath)
 	cfg := s.loadMutableConfig()
 	prevIPv6Mode := cfg.Gateway.EffectiveIPv6Mode()
+	prevWorkMode := cfg.EffectiveWorkMode()
 
 	topo := s.probeGatewayTopology()
 	rawMode := strings.ToLower(strings.TrimSpace(body.Mode))
 	if rawMode == "" {
-		rawMode = gateway.ModeMain
+		rawMode = cfg.Gateway.EffectiveMode()
+	}
+
+	desiredWorkMode := cfg.ConfiguredWorkMode()
+	workModeRequested := false
+	if body.WorkMode != nil {
+		normWM, ok := config.NormalizeWorkMode(*body.WorkMode)
+		if !ok {
+			writeJSONError(w, http.StatusBadRequest, "无效的工作模式参数（仅支持 auto / basic / audit / proxy）")
+			return
+		}
+		if normWM == config.WorkModeProxy && !cfg.HasRealSubs() {
+			writeJSONError(w, http.StatusBadRequest, "切换到「代理模式」需要先添加至少一条订阅链接；无需订阅请选择「基础模式」或「审计模式」")
+			return
+		}
+		desiredWorkMode = normWM
+		workModeRequested = true
 	}
 
 	desiredIPv6 := prevIPv6Mode
@@ -118,6 +150,7 @@ func (s *Server) handleGatewayPut(w http.ResponseWriter, r *http.Request) {
 
 	nextGw := config.GatewayConfig{
 		Mode:         rawMode,
+		WorkMode:     desiredWorkMode,
 		MainRouterIP: strings.TrimSpace(body.MainRouterIP),
 		LANIface:     strings.TrimSpace(body.LANIface),
 		IPv6Mode:     desiredIPv6,
@@ -128,7 +161,7 @@ func (s *Server) handleGatewayPut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if body.SafeCommit {
-		if _, err := s.armSafeCommit(r.Context(), body.SafeCommitTTLSec, "网关拓扑/IPv6 变更"); err != nil {
+		if _, err := s.armSafeCommit(r.Context(), body.SafeCommitTTLSec, "网关模式/工作模式变更"); err != nil {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -141,6 +174,9 @@ func (s *Server) handleGatewayPut(w http.ResponseWriter, r *http.Request) {
 	}
 	if nextGw.EffectiveIPv6Mode() == config.GatewayIPv6Off {
 		nextGw.IPv6Mode = config.GatewayIPv6Off
+	}
+	if nextGw.ConfiguredWorkMode() == config.WorkModeAuto {
+		nextGw.WorkMode = ""
 	}
 	cfg.Gateway = nextGw
 
@@ -223,8 +259,27 @@ func (s *Server) handleGatewayPut(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 若请求切换了工作模式（基础模式 / 审计模式 / 代理模式），执行热切换
+	newEffectiveWorkMode := cfg.EffectiveWorkMode()
+	workModeMsg := ""
+	if workModeRequested && (newEffectiveWorkMode != prevWorkMode || s.opts.WorkModeApplyForTest != nil) {
+		liveOK, wmMsg, wmErr := s.applyWorkModeLive(r.Context(), cfg, newEffectiveWorkMode)
+		if wmErr != nil {
+			s.rollbackSavedConfigFile(cfgPath, origCfgBytes, origReadErr)
+			writeJSONError(w, http.StatusInternalServerError, "切换工作模式失败（已回滚）: "+wmErr.Error())
+			return
+		}
+		if liveOK {
+			appliedLive = true
+		}
+		workModeMsg = wmMsg
+		_ = daemon.NotifyReload()
+	}
+
 	msg := "已保存网关设置"
-	if body.IPv6Mode != nil || ipv6Changed {
+	if workModeMsg != "" {
+		msg = workModeMsg
+	} else if body.IPv6Mode != nil || ipv6Changed {
 		switch nextGw.EffectiveIPv6Mode() {
 		case config.GatewayIPv6CNOnly:
 			msg = "已启用 IPv6 智能双栈分流（国内原生 IPv6 + 海外纯 IPv4 零泄漏）并自动完成宿主配置"
@@ -250,15 +305,75 @@ func (s *Server) handleGatewayPut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":           true,
-		"appliedLive":  appliedLive,
-		"message":      msg,
-		"mode":         nextGw.EffectiveMode(),
-		"mainRouterIP": nextGw.MainRouterIP,
-		"lanIface":     nextGw.LANIface,
-		"ipv6Mode":     nextGw.EffectiveIPv6Mode(),
-		"ipv6Status":   ipv6Status,
-		"ipv6Actions":  ipv6Actions,
-		"topology":     topo,
+		"ok":                true,
+		"appliedLive":       appliedLive,
+		"message":           msg,
+		"mode":              nextGw.EffectiveMode(),
+		"workMode":          cfg.ConfiguredWorkMode(),
+		"effectiveWorkMode": newEffectiveWorkMode,
+		"hasSubs":           cfg.HasRealSubs(),
+		"mainRouterIP":      nextGw.MainRouterIP,
+		"lanIface":          nextGw.LANIface,
+		"ipv6Mode":          nextGw.EffectiveIPv6Mode(),
+		"ipv6Status":        ipv6Status,
+		"ipv6Actions":       ipv6Actions,
+		"topology":          topo,
 	})
+}
+
+func (s *Server) applyWorkModeLive(ctx context.Context, cfg *config.Config, targetMode string) (bool, string, error) {
+	if s.opts.WorkModeApplyForTest != nil {
+		return s.opts.WorkModeApplyForTest(ctx, cfg, targetMode)
+	}
+	if runtime.GOOS != "linux" {
+		return false, "已保存工作模式（非 Linux 宿主机仅更新配置）", nil
+	}
+
+	dnsPort := cfg.DNS.GetDNSPort()
+	switch targetMode {
+	case config.WorkModeBasic:
+		if daemon.IsSingBoxRunning() {
+			if err := singbox.New(cfg).Stop(); err != nil {
+				return false, "", fmt.Errorf("停止 sing-box 失败: %w", err)
+			}
+		}
+		if active := s.newDNSRegistry(cfg).ActiveEngine(); active != nil && active.IsInstalled() && cfg.DNS.IsEnabled() {
+			_ = active.EnsureHealthy(ctx)
+			if _, err := localdns.SyncOpenWrtDnsmasqBridge(ctx, true, dnsPort, localdns.DnsmasqBridgeDeps{}); err != nil {
+				logger.Warn("[WorkMode] 接管 dnsmasq 桥接告警: %v", err)
+			}
+		}
+		return true, "已切换为「基础模式」（已停止代理内核，防劫持 DNS 与隔离网零损耗生效）", nil
+
+	case config.WorkModeAudit:
+		_, _ = localdns.SyncOpenWrtDnsmasqBridge(ctx, false, dnsPort, localdns.DnsmasqBridgeDeps{})
+		sb := singbox.New(cfg)
+		if err := sb.GenerateConfig(); err != nil {
+			return false, "", fmt.Errorf("生成免订阅审计配置失败: %w", err)
+		}
+		if daemon.IsSingBoxRunning() {
+			_ = sb.Stop()
+		}
+		if err := sb.Start(); err != nil {
+			return false, "", fmt.Errorf("启动免订阅审计内核失败: %w", err)
+		}
+		return true, "已切换为「审计模式」（无需订阅，实时行为审计、PCDN 拦截与防劫持 DNS 已激活）", nil
+
+	case config.WorkModeProxy:
+		_, _ = localdns.SyncOpenWrtDnsmasqBridge(ctx, false, dnsPort, localdns.DnsmasqBridgeDeps{})
+		sb := singbox.New(cfg)
+		if err := sb.GenerateConfig(); err != nil {
+			return false, "", fmt.Errorf("生成代理配置失败: %w", err)
+		}
+		if daemon.IsSingBoxRunning() {
+			_ = sb.Stop()
+		}
+		if err := sb.Start(); err != nil {
+			return false, "", fmt.Errorf("启动代理内核失败: %w", err)
+		}
+		return true, "已切换为「代理模式」（透明代理智能分流与完整审计已生效）", nil
+
+	default:
+		return false, "已保存工作模式", nil
+	}
 }

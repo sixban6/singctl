@@ -218,6 +218,7 @@ func (e *SmartDNSEngine) buildConfigInput() smartdns.ConfigInput {
 		ProtectionPaused:    e.cfg.DNS.IsAdblockPaused(now),
 		MirrorURL:           e.cfg.GitHub.MirrorURL,
 		IsLowMemory:         e.cfg.EffectiveLowMemory(totalRAM),
+		IsUltraLowMemory:    totalRAM > 0 && totalRAM <= smartdns.UltraLowTotalRAMBytes,
 	}
 }
 

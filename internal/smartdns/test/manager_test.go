@@ -21,12 +21,12 @@ import (
 func TestManager_HardwareGuardBoundaries(t *testing.T) {
 	const mib uint64 = 1024 * 1024
 
-	t.Run("ram_guard_blocks_256m_and_288m_allows_n60pro_and_force_bypass", func(t *testing.T) {
+	t.Run("ram_guard_blocks_111m_and_31m_allows_ax3000t_n60pro_and_force_bypass", func(t *testing.T) {
 		blockedCases := []sysinfo.MemInfo{
-			{TotalBytes: 224 * mib, AvailableBytes: 120 * mib},
-			{TotalBytes: 256 * mib, AvailableBytes: 128 * mib},
-			{TotalBytes: 288 * mib, AvailableBytes: 160 * mib},
-			{TotalBytes: 512 * mib, AvailableBytes: 95 * mib},
+			{TotalBytes: 96 * mib, AvailableBytes: 48 * mib},
+			{TotalBytes: 111 * mib, AvailableBytes: 64 * mib},
+			{TotalBytes: 224 * mib, AvailableBytes: 31 * mib},
+			{TotalBytes: 512 * mib, AvailableBytes: 31 * mib},
 		}
 		for i, mem := range blockedCases {
 			root := t.TempDir()
@@ -48,8 +48,11 @@ func TestManager_HardwareGuardBoundaries(t *testing.T) {
 			if lowMemWarn == "" || diskWarn != "" {
 				t.Errorf("case[%d] mem=%+v: got (lowMem=%q, disk=%q), want non-empty lowMem and empty disk", i, mem, lowMemWarn, diskWarn)
 			}
-			if !strings.Contains(lowMemWarn, "singbox") {
-				t.Errorf("case[%d]: lowMemWarn %q should suggest singbox engine", i, lowMemWarn)
+			if !strings.Contains(lowMemWarn, "ForceLowMemory") {
+				t.Errorf("case[%d]: lowMemWarn %q should mention ForceLowMemory override", i, lowMemWarn)
+			}
+			if strings.Contains(lowMemWarn, "singbox 引擎") {
+				t.Errorf("case[%d]: lowMemWarn %q must not contain obsolete singbox engine wording", i, lowMemWarn)
 			}
 			if _, err := mgr.Install(t.Context(), smartdns.InstallOptions{}); err == nil {
 				t.Errorf("case[%d]: expected Install blocked by RAM guard", i)
@@ -60,39 +63,62 @@ func TestManager_HardwareGuardBoundaries(t *testing.T) {
 			}
 		}
 
-		// n60pro profile (~479.5 MiB total, ~205 MiB avail, 19.8 MB flash) MUST pass!
-		root := t.TempDir()
-		binPath := filepath.Join(root, "smartdns")
-		mgr := smartdns.NewManager(smartdns.ManagerOptions{
-			BinaryPath:   binPath,
-			ConfigDir:    filepath.Join(root, "etc"),
-			AuditLogPath: filepath.Join(root, "audit.log"),
-			LogFilePath:  filepath.Join(root, "smartdns.log"),
-			PIDFilePath:  filepath.Join(root, "smartdns.pid"),
-			GOOS:         "linux",
-			GOARCH:       "arm64",
-			ServiceMgr:   servicemgr.NewMock(),
-			ReadMemInfo: func() (sysinfo.MemInfo, error) {
-				return sysinfo.MemInfo{TotalBytes: 479 * mib, AvailableBytes: 205 * mib}, nil
+		// ax3000t (224 MiB total, 72 MiB avail, 25 MB flash) AND n60pro (479 MiB total, 205 MiB avail, 19.8 MB flash) MUST pass!
+		allowedProfiles := []struct {
+			name string
+			mem  sysinfo.MemInfo
+			disk uint64
+		}{
+			{
+				name: "ax3000t_256m",
+				mem:  sysinfo.MemInfo{TotalBytes: 224 * mib, AvailableBytes: 72 * mib},
+				disk: 25 * mib,
 			},
-			ReadDiskSpace: func(string) (sysinfo.DiskSpace, error) {
-				return sysinfo.DiskSpace{AvailBytes: 19*mib + 800*1024}, nil
+			{
+				name: "n60pro_512m",
+				mem:  sysinfo.MemInfo{TotalBytes: 479 * mib, AvailableBytes: 205 * mib},
+				disk: 19*mib + 800*1024,
 			},
-			DownloadFunc: func(_ context.Context, _, tmpDest string) error {
-				return os.WriteFile(tmpDest, []byte("#!/bin/sh\necho 'smartdns Release48.5'\n"), 0755)
+			{
+				name: "exact_pass_112m_32m_10m",
+				mem:  sysinfo.MemInfo{TotalBytes: 112 * mib, AvailableBytes: 32 * mib},
+				disk: 10 * mib,
 			},
-			ProbeDNSFunc: func(string, time.Duration) error { return nil },
-		})
-
-		lowMemWarn, diskWarn := mgr.HardwareGuardWarning()
-		if lowMemWarn != "" || diskWarn != "" {
-			t.Fatalf("n60pro should be eligible, got lowMem=%q disk=%q", lowMemWarn, diskWarn)
 		}
-		if _, err := mgr.Install(t.Context(), smartdns.InstallOptions{}); err != nil {
-			t.Fatalf("n60pro Install should succeed, got: %v", err)
+		for _, prof := range allowedProfiles {
+			root := t.TempDir()
+			binPath := filepath.Join(root, "smartdns")
+			mgr := smartdns.NewManager(smartdns.ManagerOptions{
+				BinaryPath:   binPath,
+				ConfigDir:    filepath.Join(root, "etc"),
+				AuditLogPath: filepath.Join(root, "audit.log"),
+				LogFilePath:  filepath.Join(root, "smartdns.log"),
+				PIDFilePath:  filepath.Join(root, "smartdns.pid"),
+				GOOS:         "linux",
+				GOARCH:       "arm64",
+				ServiceMgr:   servicemgr.NewMock(),
+				ReadMemInfo: func() (sysinfo.MemInfo, error) {
+					return prof.mem, nil
+				},
+				ReadDiskSpace: func(string) (sysinfo.DiskSpace, error) {
+					return sysinfo.DiskSpace{AvailBytes: prof.disk}, nil
+				},
+				DownloadFunc: func(_ context.Context, _, tmpDest string) error {
+					return os.WriteFile(tmpDest, []byte("#!/bin/sh\necho 'smartdns Release48.5'\n"), 0755)
+				},
+				ProbeDNSFunc: func(string, time.Duration) error { return nil },
+			})
+
+			lowMemWarn, diskWarn := mgr.HardwareGuardWarning()
+			if lowMemWarn != "" || diskWarn != "" {
+				t.Fatalf("%s should be eligible, got lowMem=%q disk=%q", prof.name, lowMemWarn, diskWarn)
+			}
+			if _, err := mgr.Install(t.Context(), smartdns.InstallOptions{}); err != nil {
+				t.Fatalf("%s Install should succeed, got: %v", prof.name, err)
+			}
 		}
 
-		// ForceLowMemory allows 256M device to install
+		// ForceLowMemory allows 110M / 24M device to install
 		root2 := t.TempDir()
 		mgrForce := smartdns.NewManager(smartdns.ManagerOptions{
 			BinaryPath:   filepath.Join(root2, "smartdns"),
@@ -104,7 +130,7 @@ func TestManager_HardwareGuardBoundaries(t *testing.T) {
 			GOARCH:       "arm64",
 			ServiceMgr:   servicemgr.NewMock(),
 			ReadMemInfo: func() (sysinfo.MemInfo, error) {
-				return sysinfo.MemInfo{TotalBytes: 256 * mib, AvailableBytes: 80 * mib}, nil
+				return sysinfo.MemInfo{TotalBytes: 110 * mib, AvailableBytes: 24 * mib}, nil
 			},
 			ReadDiskSpace: func(string) (sysinfo.DiskSpace, error) {
 				return sysinfo.DiskSpace{AvailBytes: 12 * mib}, nil

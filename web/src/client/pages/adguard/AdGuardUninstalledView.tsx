@@ -21,6 +21,7 @@ import { DNSEngineDropdown } from './DNSEngineDropdown';
 
 export interface AdGuardUninstalledViewProps {
   snap: DNSOverviewSnapshot;
+  isBasicNoSingBox?: boolean;
   busy: boolean;
   mutating: boolean;
   switchingEngine: DNSEnginePreference | null;
@@ -31,6 +32,7 @@ export interface AdGuardUninstalledViewProps {
 
 export const AdGuardUninstalledView: React.FC<AdGuardUninstalledViewProps> = ({
   snap,
+  isBasicNoSingBox = false,
   busy,
   mutating,
   switchingEngine,
@@ -50,8 +52,8 @@ export const AdGuardUninstalledView: React.FC<AdGuardUninstalledViewProps> = ({
   const hardBlocked = Boolean(
     !snap.supported || (selectedOpt && !selectedOpt.eligible && !memOnlyBlocked),
   );
-  const blockedReason = selectedOpt?.blockedReason || snap.lowMemoryWarning;
-  const fallbackDoHActive = snap.fallbackDoHActive !== false;
+  const blockedReason = selectedOpt && !selectedOpt.eligible ? selectedOpt.blockedReason : undefined;
+  const fallbackDoHActive = !isBasicNoSingBox && snap.fallbackDoHActive !== false;
 
   const triggerForceInstall = () => {
     onAction(
@@ -79,27 +81,47 @@ export const AdGuardUninstalledView: React.FC<AdGuardUninstalledViewProps> = ({
         }
       />
 
-      {fallbackDoHActive && (
+      {isBasicNoSingBox ? (
         <div
           className="console-card rounded-2xl p-4 flex items-start gap-3 border animate-sc-in"
           style={{
-            borderColor: 'color-mix(in srgb, var(--status-ok) 35%, transparent)',
-            backgroundColor: 'var(--status-ok-soft)',
+            borderColor: 'var(--accent)',
+            backgroundColor: 'var(--accent-soft)',
           }}
         >
-          <CheckCircle2
-            className="w-5 h-5 shrink-0 mt-0.5"
-            style={{ color: 'var(--status-ok)' }}
-          />
+          <ShieldCheck className="w-5 h-5 shrink-0 mt-0.5 text-cyan-400" />
           <div className="text-xs sm:text-sm space-y-0.5 min-w-0">
             <div className="font-semibold text-primary">
-              底层 sing-box 正在使用纯 IP 加密 DoH 应急防劫持兜底，安装期间全屋零断网
+              当前处于「基础模式」，安装 {engineLabel} 后将自动接管路由器 DNS
             </div>
             <div className="text-secondary leading-relaxed">
-              当前尚未安装本地独立防劫持 DNS 引擎，网关已自动通过内置加密 DoH 阻断运营商明文 DNS 抢答；完成下方引擎安装并验活后，将两阶段原子平滑接管。
+              基础模式免订阅、不启动 sing-box；点击下方一键安装并验活后，将自动把路由器 dnsmasq 上游接入本地加密 DoH/DoT 防劫持解析。
             </div>
           </div>
         </div>
+      ) : (
+        fallbackDoHActive && (
+          <div
+            className="console-card rounded-2xl p-4 flex items-start gap-3 border animate-sc-in"
+            style={{
+              borderColor: 'color-mix(in srgb, var(--status-ok) 35%, transparent)',
+              backgroundColor: 'var(--status-ok-soft)',
+            }}
+          >
+            <CheckCircle2
+              className="w-5 h-5 shrink-0 mt-0.5"
+              style={{ color: 'var(--status-ok)' }}
+            />
+            <div className="text-xs sm:text-sm space-y-0.5 min-w-0">
+              <div className="font-semibold text-primary">
+                底层 sing-box 正在使用纯 IP 加密 DoH 应急防劫持兜底，安装期间全屋零断网
+              </div>
+              <div className="text-secondary leading-relaxed">
+                当前尚未安装本地独立防劫持 DNS 引擎，网关已自动通过内置加密 DoH 阻断运营商明文 DNS 抢答；完成下方引擎安装并验活后，将两阶段原子平滑接管。
+              </div>
+            </div>
+          </div>
+        )
       )}
 
       <SectionCard

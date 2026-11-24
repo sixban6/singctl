@@ -12,6 +12,7 @@ RETRY_DELAY=3  # 重试间隔时间（秒）
 CONFIG_FILE="${CONFIG_FILE:-/etc/sing-box/config.json}"
 ADGUARD_CONFIG_FILE="${ADGUARD_CONFIG_FILE:-/etc/AdGuardHome/AdGuardHome.yaml}"
 SMARTDNS_CONFIG_FILE="${SMARTDNS_CONFIG_FILE:-/etc/singctl/smartdns.conf}"
+VLAN_PROXY_BYPASS_FILE="${VLAN_PROXY_BYPASS_FILE:-/etc/singctl/vlan-proxy-bypass.list}"
 CYAN='\033[0;36m'
 YLW='\033[0;33m'
 RED='\033[0;31m'
@@ -242,6 +243,37 @@ collect_bypass_dns_ips() {
             append_bypass_dns_v6 "$extra_v6"
         done
     fi
+}
+
+# 读取 VLAN 透明代理纯直连绕行 CIDR 清单，校验合法 IPv4 CIDR（拒绝回环与注入载荷）并去重产出 BYPASS_VLAN_V4_CIDRS
+collect_vlan_proxy_bypass_cidrs() {
+    BYPASS_VLAN_V4_CIDRS=""
+    [ -f "$VLAN_PROXY_BYPASS_FILE" ] || return 0
+    local cidr
+    for cidr in $(awk '
+        {
+            gsub(/\r/, "")
+            sub(/^[[:space:]]+/, "")
+            sub(/[[:space:]]+$/, "")
+        }
+        /^$/ || /^#/ { next }
+        /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\/[0-9]+$/ {
+            split($0, parts, "/")
+            mask = parts[2] + 0
+            n = split(parts[1], o, ".")
+            if (n == 4 && mask >= 8 && mask <= 32 &&
+                o[1]+0 > 0 && o[1]+0 != 127 && o[1]+0 <= 255 &&
+                o[2]+0 <= 255 && o[3]+0 <= 255 && o[4]+0 <= 255) {
+                if (!seen[$0]++) print $0
+            }
+        }
+    ' "$VLAN_PROXY_BYPASS_FILE" 2>/dev/null || true); do
+        if [ -z "$BYPASS_VLAN_V4_CIDRS" ]; then
+            BYPASS_VLAN_V4_CIDRS="$cidr"
+        else
+            BYPASS_VLAN_V4_CIDRS="$BYPASS_VLAN_V4_CIDRS $cidr"
+        fi
+    done
 }
 
 # 动态采集 br-lan / eth0 的全局 IPv6 前缀，产出 LAN_IPV6_PFXS

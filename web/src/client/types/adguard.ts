@@ -34,6 +34,8 @@ export interface ClientDNSStatusSummary {
   dnsHealthy: boolean;
   webHealthy: boolean;
   singboxLinked: boolean;
+  dnsmasqLinked?: boolean;
+  workMode?: string;
   lowMemoryBlocked?: boolean;
   lowMemoryWarning?: string;
   version: string;
@@ -125,6 +127,8 @@ export interface DNSOverviewSnapshot {
   dnsHealthy: boolean;
   webHealthy: boolean;
   singboxLinked: boolean;
+  dnsmasqLinked?: boolean;
+  workMode?: string;
   isOpenWrt: boolean;
   lowMemoryBlocked?: boolean;
   lowMemoryWarning?: string;
