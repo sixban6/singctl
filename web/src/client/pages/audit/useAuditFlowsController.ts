@@ -36,6 +36,10 @@ export interface UseAuditFlowsControllerParams {
   flushCachedReviews: () => void;
 }
 
+const MOBILE_RENDER_STEP = 30;
+const getRenderStep = () =>
+  typeof window !== 'undefined' && window.innerWidth < 768 ? MOBILE_RENDER_STEP : FLOW_RENDER_STEP;
+
 export function useAuditFlowsController({
   active,
   drawerBlockingRefresh,
@@ -58,7 +62,7 @@ export function useAuditFlowsController({
   const [refreshMs, setRefreshMs] = useState<AuditRefreshCadence>(2000);
   const [sortBy, setSortBy] = useState<AuditSortKey>('active');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
-  const [visibleLimit, setVisibleLimit] = useState(FLOW_RENDER_STEP);
+  const [visibleLimit, setVisibleLimit] = useState<number>(getRenderStep);
 
   // Interaction & selection states
   const [hoverPaused, setHoverPaused] = useState(false);
@@ -256,7 +260,7 @@ export function useAuditFlowsController({
   }, []);
 
   useEffect(() => {
-    setVisibleLimit(FLOW_RENDER_STEP);
+    setVisibleLimit(getRenderStep());
     setSelectedKeys(new Set());
     if (flowScrollRef.current) {
       flowScrollRef.current.scrollTop = 0;
@@ -282,20 +286,37 @@ export function useAuditFlowsController({
   useEffect(() => {
     const el = flowScrollRef.current;
     if (!el || visibleLimit >= processedFlows.length) return;
-    if (el.scrollHeight - el.scrollTop - el.clientHeight < 200) {
-      setVisibleLimit((prev) => Math.min(processedFlows.length, prev + FLOW_RENDER_STEP));
+    if (el.clientHeight > 0 && el.scrollHeight - el.scrollTop - el.clientHeight < 200) {
+      setVisibleLimit((prev) => Math.min(processedFlows.length, prev + getRenderStep()));
     }
   }, [visibleLimit, processedFlows.length]);
 
+  useEffect(() => {
+    if (!active) return;
+    const onWindowScroll = () => {
+      // 手机端整页滚动期间暂缓后台静默刷新，防止惯性下滑中途重排急刹
+      pointerDownUntilRef.current = Math.max(pointerDownUntilRef.current, Date.now() + 1500);
+      if (window.innerWidth >= 768 || viewMode !== 'list') return;
+      if (visibleLimit >= processedFlows.length) return;
+      const doc = document.documentElement;
+      const distBottom = doc.scrollHeight - window.scrollY - window.innerHeight;
+      if (distBottom < 520) {
+        setVisibleLimit((prev) => Math.min(processedFlows.length, prev + MOBILE_RENDER_STEP));
+      }
+    };
+    window.addEventListener('scroll', onWindowScroll, { passive: true });
+    return () => window.removeEventListener('scroll', onWindowScroll);
+  }, [active, viewMode, visibleLimit, processedFlows.length]);
+
   const handleFlowTableScroll = useCallback(
     (e: React.UIEvent<HTMLDivElement>) => {
-      pointerDownUntilRef.current = Math.max(pointerDownUntilRef.current, Date.now() + 500);
+      pointerDownUntilRef.current = Math.max(pointerDownUntilRef.current, Date.now() + 1000);
       const el = e.currentTarget;
       if (
         visibleLimit < processedFlows.length &&
         el.scrollHeight - el.scrollTop - el.clientHeight < 280
       ) {
-        setVisibleLimit((prev) => Math.min(processedFlows.length, prev + FLOW_RENDER_STEP));
+        setVisibleLimit((prev) => Math.min(processedFlows.length, prev + getRenderStep()));
       }
     },
     [visibleLimit, processedFlows.length],

@@ -63,7 +63,7 @@ export const AuditFlowMobileCards: React.FC<AuditFlowMobileCardsProps> = ({
   }
 
   return (
-    <div className="divide-y divide-[var(--border-subtle)] max-h-[70vh] overflow-y-auto overscroll-contain">
+    <div className="divide-y divide-[var(--border-subtle)]">
       {flows.map((f) => {
         const fk = getFlowCacheKey(f);
         const tk = getFlowTargetKey(f);
@@ -88,8 +88,9 @@ export const AuditFlowMobileCards: React.FC<AuditFlowMobileCardsProps> = ({
         return (
           <div
             key={fk}
+            data-audit-flow-row="1"
             onClick={() => onSelectFlowDetail(fk)}
-            className={`p-3.5 space-y-2.5 transition-colors cursor-pointer ${
+            className={`audit-mobile-card p-3.5 space-y-2.5 transition-colors cursor-pointer ${
               dual ? 'bg-rose-500/[0.06]' : checked ? 'bg-accent/[0.06]' : ''
             }`}
           >

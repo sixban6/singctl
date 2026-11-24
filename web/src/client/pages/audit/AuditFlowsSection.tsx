@@ -249,6 +249,7 @@ export const AuditFlowsSection: React.FC<AuditFlowsSectionProps> = ({
           ) : undefined
         }
         noPadding
+        className="audit-flows-card"
       >
         <AuditToolbarAndPresets
           onlyActive={onlyActive}
@@ -288,8 +289,14 @@ export const AuditFlowsSection: React.FC<AuditFlowsSectionProps> = ({
 
         <div
           ref={tableContainerRef}
-          onMouseEnter={() => onHoverTableChange(true)}
-          onMouseLeave={() => onHoverTableChange(false)}
+          onPointerEnter={(e) => {
+            if (e.pointerType === 'mouse') onHoverTableChange(true);
+          }}
+          onPointerLeave={(e) => {
+            if (e.pointerType === 'mouse') onHoverTableChange(false);
+          }}
+          onTouchStart={onMarkPointerInteraction}
+          onTouchMove={onMarkPointerInteraction}
           className={`transition-opacity duration-150 ${filterTransitioning ? 'opacity-70' : 'opacity-100'}`}
         >
           {viewMode === 'grouped' ? (

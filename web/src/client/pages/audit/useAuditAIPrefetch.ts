@@ -223,11 +223,17 @@ export function useAuditViewportPrefetch(opts: {
     }
 
     const vh = window.innerHeight || document.documentElement.clientHeight || 800;
-    const containerEl = flowScrollRef.current;
-    const bounds = containerEl ? containerEl.getBoundingClientRect() : null;
+    const isDesktopScrollBox = Boolean(
+      flowScrollRef.current && flowScrollRef.current.clientHeight > 0,
+    );
+    const containerEl = isDesktopScrollBox ? flowScrollRef.current : tableContainerRef.current;
+    const bounds = isDesktopScrollBox && containerEl ? containerEl.getBoundingClientRect() : null;
     const viewTop = bounds ? Math.max(0, bounds.top) : 0;
     const viewBottom = bounds ? Math.min(vh, bounds.bottom) : vh;
-    const rows = (containerEl || tableContainerRef.current)?.querySelectorAll('tbody tr') || [];
+    const rows =
+      containerEl?.querySelectorAll(
+        isDesktopScrollBox ? 'tbody tr' : '[data-audit-flow-row="1"]',
+      ) || [];
     let firstVis = -1;
     let lastVis = -1;
     rows.forEach((tr, idx) => {
@@ -340,7 +346,7 @@ export function useAuditViewportPrefetch(opts: {
     let timer: number | null = null;
     const onScroll = () => {
       if (timer) window.clearTimeout(timer);
-      timer = window.setTimeout(() => void scheduleAIPrefetch(), 180);
+      timer = window.setTimeout(() => void scheduleAIPrefetch(), 320);
     };
     const scrollEl = flowScrollRef.current;
     window.addEventListener('scroll', onScroll, { passive: true });

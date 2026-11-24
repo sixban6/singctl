@@ -56,7 +56,7 @@ export const AuditTargetGroupList: React.FC<AuditTargetGroupListProps> = ({
   }
 
   return (
-    <div className="divide-y divide-[var(--border-subtle)] max-h-[68vh] min-h-[360px] overflow-y-auto overscroll-contain">
+    <div className="divide-y divide-[var(--border-subtle)] md:max-h-[68vh] md:min-h-[360px] md:overflow-y-auto md:overscroll-contain">
       {groups.map((g) => {
         const isOpen = expanded.has(g.targetKey);
         const rev = getCachedReview(g.sampleFlow);

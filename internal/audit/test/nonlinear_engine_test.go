@@ -123,3 +123,59 @@ func TestNonlinearEngine_AxisProjector_OCPAndBuiltinAxes(t *testing.T) {
 		eng.EvaluateFlow(nil)
 	})
 }
+
+func TestNonlinearEngine_WeChatCoreShortLinksTrusted_TelemetryStillFlagged(t *testing.T) {
+	eng := audit.NewNonlinearEngine(&config.Config{})
+
+	for _, coreDomain := range []string{
+		"sgminorshort.wechat.com",
+		"sgshort.wechat.com",
+		"sglong.wechat.com",
+		"c2c.cdn.wechat.com",
+		"szminorshort.weixin.qq.com",
+		"wyw-pics.wxqcloud.qq.com.cn",
+		"emoji.qpic.cn",
+	} {
+		if !eng.IsTrusted(coreDomain) {
+			t.Errorf("expected WeChat core domain %q to be in trusted baseline", coreDomain)
+		}
+		flow := &audit.FlowRecord{
+			Target:        coreDomain,
+			DestPort:      80,
+			Network:       "tcp",
+			UploadBytes:   512 * 1024,
+			DownloadBytes: 64 * 1024,
+			UploadRatio:   8.0,
+			ConnCount:     150,
+			NightHits:     12,
+		}
+		eng.EvaluateFlow(flow)
+		if flow.Threat == audit.ThreatHighRisk || flow.Threat == audit.ThreatSuspicious {
+			t.Errorf("WeChat core domain %q must not be flagged suspicious/high_risk, got threat=%s score=%d reasons=%v",
+				coreDomain, flow.Threat, flow.RiskScore, flow.Reasons)
+		}
+	}
+
+	for _, telemetryDomain := range []string{
+		"wetelemetry.weixin.qq.com",
+		"report.trade.weixin.qq.com",
+		"report-online.sh.wxgateway.com",
+	} {
+		if eng.IsTrusted(telemetryDomain) {
+			t.Errorf("WeChat telemetry domain %q must NOT be in trusted baseline", telemetryDomain)
+		}
+		flow := &audit.FlowRecord{
+			Target:        telemetryDomain,
+			DestPort:      443,
+			Network:       "tcp",
+			UploadBytes:   64 * 1024,
+			DownloadBytes: 8 * 1024,
+			UploadRatio:   8.0,
+			ConnCount:     30,
+		}
+		eng.EvaluateFlow(flow)
+		if flow.PrivacyScore == 0 {
+			t.Errorf("expected WeChat telemetry domain %q to retain non-zero PrivacyScore", telemetryDomain)
+		}
+	}
+}
