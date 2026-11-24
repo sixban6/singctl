@@ -26,7 +26,7 @@ import {
   redactInlineSensitive,
   writePrivacyMaskPref,
 } from '../../lib/privacyMask';
-import { BrowserDoHCheckResponse, ClientStatusResponse } from '../types';
+import { BrowserDoHCheckResponse, ClientStatusResponse, SafeCommitStatusReport } from '../types';
 import { FirewallPanel } from './firewall/FirewallPanel';
 import { GatewayModePage, GatewayModePageProps } from './network/GatewayModePage';
 import { TailscalePage, TailscalePageProps } from './network/TailscalePage';
@@ -53,6 +53,7 @@ export interface NetworkHubPageProps {
   onAction: (name: string, params?: Record<string, unknown>, confirmMsg?: string) => void;
   onNavigate?: (tab: string, sub?: string) => void;
   onRefreshStatus?: () => void;
+  onSafeCommitUpdated?: (sc: SafeCommitStatusReport) => void;
 }
 
 export const NetworkHubPage: React.FC<NetworkHubPageProps> = ({
@@ -63,6 +64,7 @@ export const NetworkHubPage: React.FC<NetworkHubPageProps> = ({
   onAction,
   onNavigate,
   onRefreshStatus,
+  onSafeCommitUpdated,
 }) => {
   const { success, toast } = useToast();
   const [sub, setSub] = useState<NetSubTab>(() => normalizeNetSubTab(initialSub));
@@ -292,7 +294,9 @@ export const NetworkHubPage: React.FC<NetworkHubPageProps> = ({
         <VlanManagerSection
           busy={busy}
           privacyMask={privacyMask}
+          safeCommit={status?.safeCommit}
           onRefreshStatus={onRefreshStatus}
+          onSafeCommitUpdated={onSafeCommitUpdated}
         />
       )}
     </div>

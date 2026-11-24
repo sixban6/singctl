@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Cable,
   Check,
@@ -25,6 +25,7 @@ import { clientApi } from '../../../api';
 import { VLAN_OVERVIEW_CACHE_KEY } from '../../../cacheKeys';
 import { copyPlainText } from '../../../lib/leakProbes';
 import {
+  SafeCommitStatusReport,
   VlanApplyResponse,
   VlanOverview,
   VlanPresetTemplate,
@@ -34,6 +35,7 @@ import {
 } from '../../../types';
 import { PortSwitchBar } from './PortSwitchBar';
 import { VlanSegmentDrawer } from './VlanSegmentDrawer';
+import { AppliedWifiCredential, VlanWifiCredentialBanner } from './VlanWirelessCard';
 import {
   buildDraftFromPreset,
   buildDraftFromSegment,
@@ -68,13 +70,17 @@ function presetIcon(id: string) {
 export interface VlanManagerSectionProps {
   busy?: boolean;
   privacyMask?: boolean;
+  safeCommit?: SafeCommitStatusReport | null;
   onRefreshStatus?: () => void;
+  onSafeCommitUpdated?: (sc: SafeCommitStatusReport) => void;
 }
 
 export const VlanManagerSection: React.FC<VlanManagerSectionProps> = ({
   busy = false,
   privacyMask = false,
+  safeCommit,
   onRefreshStatus,
+  onSafeCommitUpdated,
 }) => {
   const { success, error, toast } = useToast();
   const {
@@ -90,6 +96,26 @@ export const VlanManagerSection: React.FC<VlanManagerSectionProps> = ({
   const [drawerIsEdit, setDrawerIsEdit] = useState(false);
   const [drawerIsCallerMgmt, setDrawerIsCallerMgmt] = useState(false);
   const [drawerDraft, setDrawerDraft] = useState<VlanSaveSegmentRequest | null>(null);
+  const [appliedWifiCred, setAppliedWifiCred] = useState<AppliedWifiCredential | null>(null);
+  const lastRollbackAtRef = useRef<number | undefined>(safeCommit?.lastRollback?.rolledBackAt);
+
+  // 防回滚误导：一旦监听到 Safe Commit 发生手动或超时回滚，立即销毁新 Wi-Fi 凭据速记卡
+  useEffect(() => {
+    const nextRolledBackAt = safeCommit?.lastRollback?.rolledBackAt;
+    if (nextRolledBackAt && nextRolledBackAt !== lastRollbackAtRef.current) {
+      setAppliedWifiCred(null);
+    }
+    lastRollbackAtRef.current = nextRolledBackAt;
+  }, [safeCommit?.lastRollback?.rolledBackAt]);
+
+  // 临时内存态速记卡 10 分钟后自动销毁
+  useEffect(() => {
+    if (!appliedWifiCred) return;
+    const timer = window.setTimeout(() => {
+      setAppliedWifiCred(null);
+    }, 10 * 60 * 1000);
+    return () => window.clearTimeout(timer);
+  }, [appliedWifiCred]);
 
   const [deleteTarget, setDeleteTarget] = useState<VlanSegment | null>(null);
   const [deletePreview, setDeletePreview] = useState<VlanPreviewResult | null>(null);
@@ -154,6 +180,9 @@ export const VlanManagerSection: React.FC<VlanManagerSectionProps> = ({
     try {
       const res = await clientApi.deleteVlanSegment(deleteTarget.id);
       setDeleteTarget(null);
+      if (res.safeCommit) {
+        onSafeCommitUpdated?.(res.safeCommit);
+      }
       if (res.overview) {
         setOverview(res.overview);
       } else {
@@ -168,8 +197,14 @@ export const VlanManagerSection: React.FC<VlanManagerSectionProps> = ({
     }
   };
 
-  const handleApplied = (res: VlanApplyResponse) => {
+  const handleApplied = (res: VlanApplyResponse, newCredential?: AppliedWifiCredential | null) => {
     setDrawerOpen(false);
+    if (res.safeCommit) {
+      onSafeCommitUpdated?.(res.safeCommit);
+    }
+    if (newCredential) {
+      setAppliedWifiCred(newCredential);
+    }
     if (res.overview) {
       setOverview(res.overview);
     } else {
@@ -250,6 +285,12 @@ export const VlanManagerSection: React.FC<VlanManagerSectionProps> = ({
 
   return (
     <div className="space-y-5">
+      <VlanWifiCredentialBanner
+        credential={appliedWifiCred}
+        privacyMask={privacyMask}
+        onDismiss={() => setAppliedWifiCred(null)}
+      />
+
       {/* Header summary & mode toggle */}
       <SectionCard
         title="家庭网络分区与隔离"
@@ -567,6 +608,7 @@ export const VlanManagerSection: React.FC<VlanManagerSectionProps> = ({
         initialDraft={drawerDraft}
         onClose={() => setDrawerOpen(false)}
         onApplied={handleApplied}
+        onSafeCommitUpdated={onSafeCommitUpdated}
       />
 
       {/* Delete confirmation dialog */}

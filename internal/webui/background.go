@@ -51,12 +51,20 @@ type WebState struct {
 	ConfigPath string `json:"config_path,omitempty"`
 	Password   string `json:"password,omitempty"`
 	Embedded   bool   `json:"embedded,omitempty"`
+	ManagedBy  string `json:"managed_by,omitempty"`
 }
 
-// BackgroundDeps 显式注入后台状态探测与守护进程重启协作者（未注入字段自动回退生产实现）。
+// BackgroundDeps 显式注入后台状态探测、系统服务托管与守护进程重启协作者（未注入字段自动回退生产实现）。
 type BackgroundDeps struct {
-	EmbeddedStatus func() (WebState, bool)
-	RestartDaemon  func(configPath string) error
+	EmbeddedStatus      func() (WebState, bool)
+	RestartDaemon       func(configPath string) error
+	ServiceMgr          servicemgr.Manager
+	PasswordFilePath    string
+	ExecutablePath      string
+	HasLegacyStandalone func() (WebState, bool)
+	StopStandalone      func() (bool, error)
+	StartStandalone     func(Options) error
+	WaitManagedReady    func(ctx context.Context, mgr servicemgr.Manager) (WebState, bool)
 }
 
 func effectiveBackgroundDeps(deps BackgroundDeps) BackgroundDeps {
@@ -66,7 +74,27 @@ func effectiveBackgroundDeps(deps BackgroundDeps) BackgroundDeps {
 	if deps.RestartDaemon == nil {
 		deps.RestartDaemon = daemon.RestartDaemon
 	}
+	if deps.HasLegacyStandalone == nil {
+		deps.HasLegacyStandalone = defaultHasLegacyStandalone
+	}
+	if deps.StopStandalone == nil {
+		deps.StopStandalone = stopStandaloneProcess
+	}
+	if deps.StartStandalone == nil {
+		deps.StartStandalone = startStandaloneBackground
+	}
+	if deps.WaitManagedReady == nil {
+		deps.WaitManagedReady = defaultWaitManagedReady
+	}
 	return deps
+}
+
+func defaultHasLegacyStandalone() (WebState, bool) {
+	st, err := ReadWebState()
+	if err != nil || !WebProcMatches(st.Pid) {
+		return WebState{}, false
+	}
+	return st, true
 }
 
 // EmbeddedWebStatus 查询当前是否由单进程合体模式的守护进程内嵌承载 WebUI。
@@ -86,15 +114,25 @@ func EmbeddedWebStatus() (WebState, bool) {
 	}, true
 }
 
-// WebStatusWithDeps 使用显式依赖查询 WebUI 独立后台或守护内嵌运行状态。
+// WebStatusWithDeps 使用显式依赖查询 WebUI 独立后台、系统托管或守护内嵌运行状态。
 func WebStatusWithDeps(deps BackgroundDeps) (WebState, bool) {
+	eff := effectiveBackgroundDeps(deps)
+	mgr := resolveServiceMgrForControl(eff)
 	if st, err := ReadWebState(); err == nil && WebProcMatches(st.Pid) {
+		if st.ManagedBy == "" && mgr != nil && mgr.IsActive(context.Background(), WebServiceName) {
+			st.ManagedBy = string(mgr.Kind())
+		}
 		return st, true
 	}
-	eff := effectiveBackgroundDeps(deps)
 	if emb, ok := eff.EmbeddedStatus(); ok {
 		emb.Embedded = true
 		return emb, true
+	}
+	if mgr != nil && mgr.IsActive(context.Background(), WebServiceName) {
+		return WebState{
+			Listen:    ":8090",
+			ManagedBy: string(mgr.Kind()),
+		}, true
 	}
 	return WebState{}, false
 }
@@ -107,7 +145,7 @@ func IsWebRunningOrManagedWithDeps(deps BackgroundDeps) bool {
 	return isProcdManagedWeb() || isSystemdManagedWeb()
 }
 
-// StartBackgroundWithDeps 使用显式依赖启动后台 WebUI（当已内嵌于守护进程时幂等返回成功）。
+// StartBackgroundWithDeps 使用显式依赖启动后台 WebUI（内嵌模式幂等返回；Linux root 自动托管为 procd/systemd 服务）。
 func StartBackgroundWithDeps(opts Options, deps BackgroundDeps) error {
 	eff := effectiveBackgroundDeps(deps)
 	if emb, ok := eff.EmbeddedStatus(); ok {
@@ -117,17 +155,20 @@ func StartBackgroundWithDeps(opts Options, deps BackgroundDeps) error {
 		}
 		return nil
 	}
-	return startStandaloneBackground(opts)
+	if mgr, ok := shouldUseSystemService(opts, eff); ok {
+		return startManagedService(opts, mgr, eff)
+	}
+	return eff.StartStandalone(opts)
 }
 
-// RestartWebWithDeps 使用显式依赖平滑重启 WebUI（内嵌模式下联动平滑重启守护进程）。
+// RestartWebWithDeps 使用显式依赖平滑重启 WebUI（内嵌模式下联动平滑重启守护进程；旧裸进程在支持平台自动迁移为原生系统服务）。
 func RestartWebWithDeps(configPath string, deps BackgroundDeps) error {
 	eff := effectiveBackgroundDeps(deps)
 	if emb, ok := eff.EmbeddedStatus(); ok {
 		targetCfg := cmp.Or(strings.TrimSpace(configPath), strings.TrimSpace(emb.ConfigPath))
 		return eff.RestartDaemon(targetCfg)
 	}
-	return restartStandaloneOrManagedWeb(configPath)
+	return restartStandaloneOrManagedWebWithDeps(configPath, eff)
 }
 
 // TrimWebLog 原地截断超限的 WebUI 日志文件并保持 0600 权限与原 inode。
@@ -467,8 +508,7 @@ func FormatListenURLs(listen string) []string {
 
 // ───────────────────────── 停止 / 状态 ─────────────────────────
 
-// StopWeb 停止后台 WebUI。返回是否真的执行了停止( false = 本来就没在运行)。
-func StopWeb() (bool, error) {
+func stopStandaloneProcess() (bool, error) {
 	st, err := ReadWebState()
 	if err != nil {
 		return false, nil
@@ -480,6 +520,34 @@ func StopWeb() (bool, error) {
 	_ = proc.TerminateGracefully(st.Pid, 5*time.Second, 3*time.Second)
 	_ = os.Remove(WebStatePath())
 	return true, nil
+}
+
+// StopWebWithDeps 停止受管系统服务与/或独立后台 WebUI（先停系统服务防止 procd/systemd 自动复活）。
+func StopWebWithDeps(deps BackgroundDeps) (bool, error) {
+	eff := effectiveBackgroundDeps(deps)
+	managedStopped := false
+	mgr := resolveServiceMgrForControl(eff)
+	if mgr != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), defaultWebServiceTimeout)
+		defer cancel()
+		st, stErr := ReadWebState()
+		if mgr.IsActive(ctx, WebServiceName) || (stErr == nil && st.ManagedBy != "") {
+			if err := mgr.Stop(ctx, WebServiceName); err != nil {
+				return false, err
+			}
+			managedStopped = true
+		}
+	}
+	standaloneStopped, err := eff.StopStandalone()
+	if err != nil {
+		return managedStopped, err
+	}
+	return managedStopped || standaloneStopped, nil
+}
+
+// StopWeb 停止后台 WebUI。返回是否真的执行了停止( false = 本来就没在运行)。
+func StopWeb() (bool, error) {
+	return StopWebWithDeps(BackgroundDeps{})
 }
 
 // WebStatus 查询后台运行状态（兼容独立后台进程与守护进程内嵌合体模式）。
@@ -496,6 +564,9 @@ func isProcdManagedWeb() bool {
 	if err != nil || fi.IsDir() {
 		return false
 	}
+	if servicemgr.NewProcd(nil, "").IsActive(context.Background(), WebServiceName) {
+		return true
+	}
 	return runWebCmdTimeout(defaultWebProbeTimeout, nil, nil, nil, "/etc/init.d/singctl-web", "running") == nil
 }
 
@@ -507,7 +578,7 @@ func isSystemdManagedWeb() bool {
 	if _, err := exec.LookPath("systemctl"); err != nil {
 		return false
 	}
-	return servicemgr.NewSystemd(nil).IsActive(context.Background(), "singctl-web")
+	return servicemgr.NewSystemd(nil).IsActive(context.Background(), WebServiceName)
 }
 
 // IsWebRunningOrManaged 判断客户端 WebUI 是否正在运行（含内嵌合体守护、web start 守护、OpenWrt procd 或 systemd 托管）
@@ -540,24 +611,35 @@ func RestartWeb(configPath string) error {
 	return RestartWebWithDeps(configPath, BackgroundDeps{})
 }
 
-func restartStandaloneOrManagedWeb(configPath string) error {
-	if isProcdManagedWeb() {
-		return runWebCmdTimeout(defaultWebRestartTimeout, BuildCleanSubprocessEnv(), os.Stdout, os.Stderr, "/etc/init.d/singctl-web", "restart")
-	}
-	if isSystemdManagedWeb() {
-		return servicemgr.NewSystemd(nil).Restart(context.Background(), "singctl-web")
+func restartStandaloneOrManagedWebWithDeps(configPath string, eff BackgroundDeps) error {
+	if mgr := resolveServiceMgrForControl(eff); mgr != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), defaultWebServiceTimeout)
+		defer cancel()
+		if mgr.IsActive(ctx, WebServiceName) {
+			return mgr.Restart(ctx, WebServiceName)
+		}
 	}
 
-	st, err := ReadWebState()
-	if err != nil || !WebProcMatches(st.Pid) {
+	st, hasLegacy := eff.HasLegacyStandalone()
+	if !hasLegacy {
 		return nil
 	}
+
+	// 支持平台且为 root 时，将历史裸 fork 进程无缝迁移为原生 procd/systemd 托管服务
+	if mgr, ok := shouldUseSystemService(Options{}, eff); ok {
+		return startManagedService(Options{
+			ConfigPath: cmp.Or(strings.TrimSpace(configPath), strings.TrimSpace(st.ConfigPath)),
+			Listen:     cmp.Or(strings.TrimSpace(st.Listen), ":8090"),
+			Password:   st.Password,
+		}, mgr, eff)
+	}
+
 	exe, err := resolveOnDiskExecutable()
 	if err != nil {
 		return err
 	}
 	args := buildRestartArgs(st, configPath, st.Listen)
-	if _, err := StopWeb(); err != nil {
+	if _, err := eff.StopStandalone(); err != nil {
 		return err
 	}
 	return runWebCmdTimeout(defaultWebRestartTimeout, buildRestartEnv(st.Password), os.Stdout, os.Stderr, exe, args...)

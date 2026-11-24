@@ -182,14 +182,20 @@ type PreviewResult struct {
 	UpstreamRouteHint string   `json:"upstreamRouteHint,omitempty"`
 }
 
+// ReloadOptions 描述 OpenWrt 网络服务重载策略（仅当无线配置实际发生变更时才执行 wifi reload 与 DMA 碎片整理）。
+type ReloadOptions struct {
+	WirelessChanged bool `json:"wirelessChanged"`
+}
+
 // ApplyResult 描述 VLAN 变更应用后的执行结果与 Safe Commit 令牌信息。
 type ApplyResult struct {
-	OK                bool     `json:"ok"`
-	SegmentID         string   `json:"segmentId"`
-	PlainSummary      []string `json:"plainSummary,omitempty"`
-	UCICommands       []string `json:"uciCommands,omitempty"`
-	Warnings          []string `json:"warnings,omitempty"`
-	UpstreamRouteHint string   `json:"upstreamRouteHint,omitempty"`
-	SafeCommitToken   string   `json:"safeCommitToken,omitempty"`
-	SafeCommitTTLSec  int      `json:"safeCommitTtlSec,omitempty"`
+	OK                bool          `json:"ok"`
+	SegmentID         string        `json:"segmentId"`
+	PlainSummary      []string      `json:"plainSummary,omitempty"`
+	UCICommands       []string      `json:"uciCommands,omitempty"`
+	Warnings          []string      `json:"warnings,omitempty"`
+	UpstreamRouteHint string        `json:"upstreamRouteHint,omitempty"`
+	SafeCommitToken   string        `json:"safeCommitToken,omitempty"`
+	SafeCommitTTLSec  int           `json:"safeCommitTtlSec,omitempty"`
+	ReloadOpts        ReloadOptions `json:"-"`
 }

@@ -683,3 +683,203 @@ func TestSaveAndDelete_ValidationAntiLockoutAndApply(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestSwconfigDedup_DirtyWirelessSkipReload_AndDMAHeadroom(t *testing.T) {
+	axNetWithDups := `network.loopback=interface
+network.loopback.device='lo'
+network.loopback.proto='static'
+network.loopback.ipaddr='127.0.0.1'
+network.lan=interface
+network.lan.device='br-lan'
+network.lan.proto='static'
+network.lan.ipaddr='192.168.50.1'
+network.lan.netmask='255.255.255.0'
+network.wan=interface
+network.wan.device='eth0.2'
+network.wan.proto='dhcp'
+network.@switch[0]=switch
+network.@switch[0].name='switch0'
+network.@switch[0].enable_vlan='1'
+network.@switch_vlan[0]=switch_vlan
+network.@switch_vlan[0].device='switch0'
+network.@switch_vlan[0].vlan='1'
+network.@switch_vlan[0].vid='1'
+network.@switch_vlan[0].ports='0 1 2 6t'
+network.@switch_vlan[1]=switch_vlan
+network.@switch_vlan[1].device='switch0'
+network.@switch_vlan[1].vlan='3'
+network.@switch_vlan[1].vid='3'
+network.@switch_vlan[1].ports='3 6t'
+network.@device[3]=device
+network.@device[3].name='iot-br'
+network.@device[3].type='bridge'
+network.@device[3].ports='eth0.3'
+network.singctl_br_iot=device
+network.singctl_br_iot.name='iot-br'
+network.singctl_br_iot.type='bridge'
+network.singctl_br_iot.ports='eth0.3'
+network.iot=interface
+network.iot.proto='static'
+network.iot.device='iot-br'
+network.iot.type='bridge'
+network.iot.ipaddr='192.168.34.1'
+network.iot.netmask='255.255.255.0'
+`
+	axWireless := `wireless.MT7981_1_1=wifi-device
+wireless.MT7981_1_1.type='mtwifi'
+wireless.MT7981_1_1.band='2g'
+wireless.iot_2g=wifi-iface
+wireless.iot_2g.device='MT7981_1_1'
+wireless.iot_2g.mode='ap'
+wireless.iot_2g.network='iot'
+wireless.iot_2g.ssid='IoT-2G'
+wireless.iot_2g.encryption='psk2'
+wireless.iot_2g.disabled='0'
+wireless.iot_2g.isolate='1'
+wireless.iot_2g.key='ExistingSecret123'
+`
+	axFirewall := `firewall.@zone[2]=zone
+firewall.@zone[2].name='iot'
+firewall.@zone[2].network='iot'
+firewall.@forwarding[1]=forwarding
+firewall.@forwarding[1].src='iot'
+firewall.@forwarding[1].dest='wan'
+firewall.singctl_fwd_wan_iot=forwarding
+firewall.singctl_fwd_wan_iot.src='iot'
+firewall.singctl_fwd_wan_iot.dest='wan'
+firewall.@forwarding[2]=forwarding
+firewall.@forwarding[2].src='lan'
+firewall.@forwarding[2].dest='iot'
+firewall.singctl_fwd_main_iot=forwarding
+firewall.singctl_fwd_main_iot.src='lan'
+firewall.singctl_fwd_main_iot.dest='iot'
+`
+
+	var reloadOptsLog []vlan.ReloadOptions
+	var dmaHeadroomCalls int
+	makeSvc := func() *vlan.Service {
+		return vlan.NewService(vlan.Env{
+			IsOpenWrt: func() bool { return true },
+			RunUCI: func(_ context.Context, args ...string) (string, error) {
+				if len(args) == 2 && args[0] == "show" {
+					switch args[1] {
+					case "network":
+						return axNetWithDups, nil
+					case "wireless":
+						return axWireless, nil
+					case "firewall":
+						return axFirewall, nil
+					}
+				}
+				return "", nil
+			},
+			BatchUCI: func(_ context.Context, _ []string) error { return nil },
+			ReloadNetworkWithOpts: func(_ context.Context, opts vlan.ReloadOptions) error {
+				reloadOptsLog = append(reloadOptsLog, opts)
+				return nil
+			},
+			PrepareDMAHeadroom: func() {
+				dmaHeadroomCalls++
+			},
+			SyncProxyBypass: func(_ context.Context, _ []string) error { return nil },
+			ReadFile:        func(string) ([]byte, error) { return nil, os.ErrNotExist },
+			ListNetDevs:     func() ([]string, error) { return []string{"lo", "eth0", "eth0.1", "eth0.2", "eth0.3", "br-lan", "iot-br"}, nil },
+			ReadIPv4Addrs: func() (map[string]string, error) {
+				return map[string]string{"eth0.2": "192.168.3.181/24", "br-lan": "192.168.50.1/24", "iot-br": "192.168.34.1/24"}, nil
+			},
+			ProxyBypassFile: filepath.Join(t.TempDir(), "bypass.list"),
+		})
+	}
+
+	svc := makeSvc()
+
+	// 1. Edit IoT without changing any Wi-Fi parameter -> dedup bridge/forwarding, zero wireless.* cmds, WirelessChanged=false
+	reqNoWifiChange := vlan.SaveSegmentRequest{
+		ID:        "iot",
+		VLANID:    3,
+		IPAddr:    "192.168.34.1",
+		Netmask:   "255.255.255.0",
+		ProxyMode: vlan.ProxyModeDirect,
+		Ports:     map[string]string{"lan4": vlan.PortModeAccess},
+		Wireless: &vlan.WirelessSpec{
+			Enabled:    true,
+			Section:    "iot_2g",
+			Radio:      "MT7981_1_1",
+			SSID:       "IoT-2G",
+			Encryption: "psk2",
+			Isolate:    true,
+			Password:   "", // unchanged
+		},
+		Policy: vlan.SecurityPolicy{
+			AllowWAN:         true,
+			AllowFromMainLAN: true,
+			BlockRouterMgmt:  true,
+			BlockUpstreamLAN: true,
+			AllowMDNS:        true,
+		},
+	}
+
+	commitRes, err := svc.CommitSave(t.Context(), "192.168.50.10", reqNoWifiChange)
+	if err != nil {
+		t.Fatalf("CommitSave failed: %v", err)
+	}
+	joined := strings.Join(commitRes.UCICommands, "\n")
+	if strings.Contains(joined, "wireless.") {
+		t.Fatalf("expected ZERO wireless.* UCI commands when wireless fields unchanged:\n%s", joined)
+	}
+	if commitRes.ReloadOpts.WirelessChanged {
+		t.Fatalf("expected ReloadOpts.WirelessChanged=false when wireless unchanged")
+	}
+	if !slices.Contains(commitRes.UCICommands, "delete network.singctl_br_iot") {
+		t.Fatalf("expected duplicate network.singctl_br_iot cleaned up:\n%s", joined)
+	}
+	if !slices.Contains(commitRes.UCICommands, "delete network.iot.type") {
+		t.Fatalf("expected legacy network.iot.type cleaned up:\n%s", joined)
+	}
+	if strings.Contains(joined, "set network.@device[3]=device") || strings.Contains(joined, "set network.singctl_br_iot=device") {
+		t.Fatalf("must reuse @device[3] without creating duplicate bridge section:\n%s", joined)
+	}
+	if !slices.Contains(commitRes.UCICommands, "set network.@device[3].name='iot-br'") {
+		t.Fatalf("expected reused @device[3] updated in place:\n%s", joined)
+	}
+	if !slices.Contains(commitRes.UCICommands, "delete firewall.singctl_fwd_wan_iot") ||
+		!slices.Contains(commitRes.UCICommands, "delete firewall.singctl_fwd_main_iot") {
+		t.Fatalf("expected duplicate singctl_fwd_* sections cleaned up when reusing @forwarding:\n%s", joined)
+	}
+	if pkgs := vlan.DirtyUCIPackages(commitRes.UCICommands); slices.Contains(pkgs, "wireless") {
+		t.Fatalf("DirtyUCIPackages must not include wireless when unchanged: %v", pkgs)
+	}
+
+	if err := svc.ReloadWithOptions(t.Context(), commitRes.ReloadOpts); err != nil {
+		t.Fatalf("ReloadWithOptions failed: %v", err)
+	}
+	if len(reloadOptsLog) != 1 || reloadOptsLog[0].WirelessChanged {
+		t.Fatalf("expected ReloadWithOptions called with WirelessChanged=false, got %+v", reloadOptsLog)
+	}
+	if dmaHeadroomCalls != 0 {
+		t.Fatalf("expected PrepareDMAHeadroom NOT called when WirelessChanged=false, got %d", dmaHeadroomCalls)
+	}
+
+	// 2. Edit IoT WITH password change -> emits wireless.* cmds, WirelessChanged=true, triggers DMA headroom prep
+	reqWifiChanged := reqNoWifiChange
+	wifiCopy := *reqNoWifiChange.Wireless
+	wifiCopy.Password = "NewStrong-2026"
+	reqWifiChanged.Wireless = &wifiCopy
+
+	commitRes2, err := svc.CommitSave(t.Context(), "192.168.50.10", reqWifiChanged)
+	if err != nil {
+		t.Fatalf("CommitSave (wifi changed) failed: %v", err)
+	}
+	if !commitRes2.ReloadOpts.WirelessChanged {
+		t.Fatalf("expected ReloadOpts.WirelessChanged=true when Wi-Fi password changed")
+	}
+	if !slices.Contains(vlan.DirtyUCIPackages(commitRes2.UCICommands), "wireless") {
+		t.Fatalf("expected wireless in DirtyUCIPackages when Wi-Fi changed")
+	}
+	if err := svc.ReloadWithOptions(t.Context(), commitRes2.ReloadOpts); err != nil {
+		t.Fatalf("ReloadWithOptions (wifi changed) failed: %v", err)
+	}
+	if len(reloadOptsLog) != 2 || !reloadOptsLog[1].WirelessChanged {
+		t.Fatalf("expected second ReloadWithOptions with WirelessChanged=true, got %+v", reloadOptsLog)
+	}
+}

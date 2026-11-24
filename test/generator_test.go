@@ -954,12 +954,17 @@ func TestGenerator_GameUDPAndDNSIsolation(t *testing.T) {
 			} `json:"outbounds"`
 			Route struct {
 				Rules []struct {
+					Type      string   `json:"type"`
+					Mode      string   `json:"mode"`
 					Action    string   `json:"action"`
 					Network   string   `json:"network"`
 					Outbound  string   `json:"outbound"`
 					Port      any      `json:"port"`
 					PortRange []string `json:"port_range"`
 					RuleSet   any      `json:"rule_set"`
+					Rules     []struct {
+						RuleSet any `json:"rule_set"`
+					} `json:"rules"`
 				} `json:"rules"`
 			} `json:"route"`
 		}
@@ -1047,10 +1052,23 @@ func TestGenerator_GameUDPAndDNSIsolation(t *testing.T) {
 			if rs, ok := r.RuleSet.(string); ok && rs == "geosite-hok" && r.Outbound == "#Auto" {
 				hokIdx = i
 			}
-			if rsArr, ok := r.RuleSet.([]any); ok && r.Action == "reject" {
-				for _, item := range rsArr {
-					if item == "geosite-ad1" {
-						adIdx = i
+			if r.Action == "reject" {
+				if rsArr, ok := r.RuleSet.([]any); ok {
+					for _, item := range rsArr {
+						if item == "geosite-ad1" {
+							adIdx = i
+						}
+					}
+				}
+				if r.Type == "logical" && r.Mode == "and" {
+					for _, sub := range r.Rules {
+						if rsArr, ok := sub.RuleSet.([]any); ok {
+							for _, item := range rsArr {
+								if item == "geosite-ad1" {
+									adIdx = i
+								}
+							}
+						}
 					}
 				}
 			}
@@ -1151,12 +1169,17 @@ func TestGenerator_InjectCustomRules_OutboundsRouteAndDNS(t *testing.T) {
 		} `json:"outbounds"`
 		Route struct {
 			Rules []struct {
+				Type      string   `json:"type"`
+				Mode      string   `json:"mode"`
 				Action    string   `json:"action"`
 				Network   string   `json:"network"`
 				Outbound  string   `json:"outbound"`
 				Port      any      `json:"port"`
 				PortRange []string `json:"port_range"`
 				RuleSet   any      `json:"rule_set"`
+				Rules     []struct {
+					RuleSet any `json:"rule_set"`
+				} `json:"rules"`
 			} `json:"rules"`
 		} `json:"route"`
 	}
@@ -1207,10 +1230,23 @@ func TestGenerator_InjectCustomRules_OutboundsRouteAndDNS(t *testing.T) {
 		if r.Network == "udp" && r.Outbound == "#Auto" && slices.Equal(r.PortRange, wantUDPRanges) {
 			hokUDPIdx = i
 		}
-		if rsArr, ok := r.RuleSet.([]any); ok && r.Action == "reject" {
-			for _, item := range rsArr {
-				if item == "geosite-ad1" {
-					adIdx = i
+		if r.Action == "reject" {
+			if rsArr, ok := r.RuleSet.([]any); ok {
+				for _, item := range rsArr {
+					if item == "geosite-ad1" {
+						adIdx = i
+					}
+				}
+			}
+			if r.Type == "logical" && r.Mode == "and" {
+				for _, sub := range r.Rules {
+					if rsArr, ok := sub.RuleSet.([]any); ok {
+						for _, item := range rsArr {
+							if item == "geosite-ad1" {
+								adIdx = i
+							}
+						}
+					}
 				}
 			}
 		}
@@ -1876,6 +1912,21 @@ func TestTrafficRouting_CompilerPrecedenceIdempotencyAndRoundTrip(t *testing.T) 
 				}
 				if item == "geosite-apple" && ob == "Proxy" && appleIdx == -1 {
 					appleIdx = i
+				}
+			}
+		}
+		if act == "reject" && r["type"] == "logical" && r["mode"] == "and" {
+			if subs, ok := r["rules"].([]any); ok {
+				for _, subAny := range subs {
+					if sub, ok := subAny.(map[string]any); ok {
+						if rs, ok := sub["rule_set"].([]any); ok {
+							for _, item := range rs {
+								if item == "geosite-ad1" {
+									adIdx = i
+								}
+							}
+						}
+					}
 				}
 			}
 		}

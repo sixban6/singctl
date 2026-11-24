@@ -197,6 +197,26 @@ var defaultConfigCompileStages = []CompileStage{
 		},
 	},
 	{
+		Name: "inject_adblock_whitelist",
+		AppliesTo: func(_ *ConfigGenerator, doc *CompileDoc) bool {
+			return !doc.isIOS
+		},
+		Apply: func(g *ConfigGenerator, doc *CompileDoc) error {
+			d, err := doc.EnsureDoc()
+			if err != nil {
+				return err
+			}
+			var cfg *config.Config
+			if g != nil {
+				cfg = g.config
+			}
+			if ApplyAdBlockWhitelistToDoc(d, nil, EffectiveAdBlockWhitelist(cfg)) {
+				doc.dirty = true
+			}
+			return nil
+		},
+	},
+	{
 		Name: "relocate_tmp_cache_file",
 		AppliesTo: func(g *ConfigGenerator, doc *CompileDoc) bool {
 			return doc.platform == "linux" && !doc.isIOS && g != nil && g.ShouldUseTmpCacheFile()

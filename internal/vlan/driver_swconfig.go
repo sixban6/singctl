@@ -269,13 +269,28 @@ func (d *SwconfigDriver) BuildNetworkCommands(state *parsedState, req SaveSegmen
 	}
 
 	// Independent bridge br-v<vid> wrapping eth0.<vid> (exact ax3000t pattern).
+	// 优先复用现网已存在的同名 bridge device（包括匿名 @device[N]），并自动清理历史重复的 singctl_br_<id>。
 	bridgeName := fmt.Sprintf("br-v%d", vid)
 	if existing != nil && existing.Device != "" && !strings.Contains(existing.Device, ".") {
 		bridgeName = existing.Device
 	}
-	devRef := "singctl_br_" + req.ID
+	managedDevRef := "singctl_br_" + req.ID
+	devRef := managedDevRef
+	hasDupManaged := false
+	for _, devSec := range state.NetUCI.ByType("device") {
+		if devSec.Opt("type") == "bridge" && devSec.Opt("name") == bridgeName {
+			if devSec.Name == managedDevRef {
+				hasDupManaged = true
+				continue
+			}
+			devRef = devSec.Name
+			break
+		}
+	}
+	if !strings.HasPrefix(devRef, "@") {
+		cmds = append(cmds, fmt.Sprintf("set network.%s=device", devRef))
+	}
 	cmds = append(cmds,
-		fmt.Sprintf("set network.%s=device", devRef),
 		fmt.Sprintf("set network.%s.type='bridge'", devRef),
 		fmt.Sprintf("set network.%s.name=%s", devRef, quoteUCI(bridgeName)),
 		fmt.Sprintf("delete network.%s.ports", devRef),
@@ -283,6 +298,9 @@ func (d *SwconfigDriver) BuildNetworkCommands(state *parsedState, req SaveSegmen
 	)
 	if req.IPv6Mode == IPv6Off || req.IPv6Mode == "" {
 		cmds = append(cmds, fmt.Sprintf("set network.%s.ipv6='0'", devRef))
+	}
+	if devRef != managedDevRef && (hasDupManaged || state.NetUCI.ByName(managedDevRef) != nil) {
+		cmds = append(cmds, fmt.Sprintf("delete network.%s", managedDevRef))
 	}
 
 	netmask := cmp.Or(strings.TrimSpace(req.Netmask), "255.255.255.0")
@@ -294,6 +312,9 @@ func (d *SwconfigDriver) BuildNetworkCommands(state *parsedState, req SaveSegmen
 		fmt.Sprintf("set network.%s.netmask=%s", req.ID, quoteUCI(netmask)),
 		fmt.Sprintf("set network.%s.delegate='0'", req.ID),
 	)
+	if curIface := state.NetUCI.ByName(req.ID); curIface != nil && curIface.Opt("type") != "" {
+		cmds = append(cmds, fmt.Sprintf("delete network.%s.type", req.ID))
+	}
 	return cmds, bridgeName, nil
 }
 

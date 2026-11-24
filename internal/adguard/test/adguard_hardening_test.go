@@ -423,6 +423,48 @@ func TestConfigGen_Blocklist_And_ControlAPI_EndToEnd(t *testing.T) {
 	}
 }
 
+func TestSyncSubscriptionWhitelist_IncludesDefaultSafeDomainsRespectingBlocks(t *testing.T) {
+	tmp := t.TempDir()
+	binPath := filepath.Join(tmp, "AdGuardHome")
+	cfgFile := filepath.Join(tmp, "AdGuardHome.yaml")
+	_ = os.WriteFile(binPath, []byte("#!/bin/sh\n"), 0755)
+	_ = os.WriteFile(cfgFile, []byte("schema_version: 29\nhttp:\n  address: 127.0.0.1:1\nuser_rules:\n  - \"@@||existing.example.com^$important\"\n"), 0600)
+
+	cfg := &config.Config{
+		DNS: config.ClientDNSConfig{
+			Whitelist: []string{"user-allow.example.com"},
+		},
+		CustomRules: config.CustomRulesConfig{
+			Block: []config.BlockRule{{Target: "dl.weshineapp.com"}},
+		},
+	}
+	mgr := adguard.NewManager(cfg, "")
+	mgr.SetPathsForTest(binPath, cfgFile)
+
+	if err := mgr.SyncSubscriptionWhitelist(t.Context(), []string{"https://sub.example.com/feed"}); err != nil {
+		t.Fatalf("SyncSubscriptionWhitelist failed: %v", err)
+	}
+	raw, err := os.ReadFile(cfgFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	txt := string(raw)
+	for _, want := range []string{
+		"@@||existing.example.com^$important",
+		"@@||sub.example.com^$important",
+		"@@||user-allow.example.com^$important",
+		"@@||wxaintpcos.wxqcloud.qq.com.cn^$important",
+		"@@||dns.weixin.qq.com.cn^$important",
+	} {
+		if !strings.Contains(txt, want) {
+			t.Fatalf("AdGuardHome.yaml user_rules missing %q:\n%s", want, txt)
+		}
+	}
+	if strings.Contains(txt, "dl.weshineapp.com") {
+		t.Fatalf("explicitly blocked domain dl.weshineapp.com must not be whitelisted:\n%s", txt)
+	}
+}
+
 func TestBuildInitialConfig_DisablesPrivatePTRAndSuppressesLocalhostNoise(t *testing.T) {
 	hash, err := config.HashPassword("TestPass123456")
 	if err != nil {

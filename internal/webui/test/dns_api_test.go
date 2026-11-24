@@ -324,3 +324,129 @@ func TestWebUI_BackupV2_SmartDNSAndFallbackDoHNoOptimistic(t *testing.T) {
 			noneDoc.DNS.Optimistic, noneDoc.DNS.DisableCache)
 	}
 }
+
+func TestWebUI_DNSAndAuditWhitelist_PersistsConfigAndHotSyncsSingBox(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "singctl.yaml")
+	sbPath := filepath.Join(tmpDir, "config.json")
+	smartBin := filepath.Join(tmpDir, "smartdns")
+	smartConf := filepath.Join(tmpDir, "smartdns.conf")
+	smartRules := filepath.Join(tmpDir, "smartdns-rules.d")
+
+	_ = os.WriteFile(smartBin, []byte("#!/bin/sh\necho 'smartdns 1.2025.46'\n"), 0755)
+	sbRaw := `{
+  "outbounds": [{"type": "direct", "tag": "direct"}],
+  "dns": {
+    "servers": [{"tag": "dns_local", "type": "udp", "server": "127.0.0.1", "server_port": 5353}],
+    "rules": [
+      {
+        "type": "logical",
+        "mode": "and",
+        "rules": [
+          {"rule_set": ["geosite-ad1", "geosite-ad2"]},
+          {"invert": true, "domain_suffix": ["sub-keep.example.com"]}
+        ],
+        "action": "reject"
+      }
+    ]
+  },
+  "route": {
+    "rule_set": [
+      {"tag": "geosite-ad1", "type": "inline", "rules": [{"domain_suffix": ["ad1.invalid"]}]},
+      {"tag": "geosite-ad2", "type": "inline", "rules": [{"domain_suffix": ["ad2.invalid"]}]}
+    ],
+    "rules": [
+      {"action": "sniff"},
+      {"rule_set": ["geosite-ad1", "geosite-ad2"], "action": "reject"}
+    ]
+  }
+}`
+	if err := os.WriteFile(sbPath, []byte(sbRaw), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.Save(cfgPath, &config.Config{
+		DNS: config.ClientDNSConfig{Engine: constant.DNSEngineSmartDNS},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeBinDir := filepath.Join(tmpDir, "fake-bin")
+	_ = os.MkdirAll(fakeBinDir, 0755)
+	_ = os.WriteFile(filepath.Join(fakeBinDir, "sing-box"), []byte("#!/bin/sh\nexit 0\n"), 0755)
+	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	srv := webui.New(webui.Options{
+		ConfigPath:              cfgPath,
+		SingBoxConfigPath:       sbPath,
+		AdGuardBinPath:          filepath.Join(tmpDir, "missing-agh"),
+		AdGuardConfigPath:       filepath.Join(tmpDir, "missing-agh.yaml"),
+		SmartDNSBinPath:         smartBin,
+		SmartDNSConfigPath:      smartConf,
+		SmartDNSRulesDir:        smartRules,
+		SmartDNSAuditLogPath:    filepath.Join(tmpDir, "smartdns-audit.log"),
+		LocalDNSServiceMgr:      servicemgr.NewMock(),
+		SkipAdGuardProbeForTest: true,
+		LocalDNSProbeDNSForTest: func(string, time.Duration) error { return nil },
+	})
+
+	postJSON := func(path string, payload any) *httptest.ResponseRecorder {
+		t.Helper()
+		b, _ := json.Marshal(payload)
+		req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(b))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Requested-With", "SingCtlWebUI")
+		rec := httptest.NewRecorder()
+		srv.Mux.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// 1. Add via POST /api/dns/whitelist -> persists to singctl.yaml + SmartDNS whitelist.conf + sing-box config.json (both DNS & Route)
+	rec := postJSON("/api/dns/whitelist", map[string]any{"domain": "sticker.example.com", "action": "add"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/dns/whitelist add failed: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	reloadedCfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(reloadedCfg.DNS.Whitelist, ","), "sticker.example.com") {
+		t.Fatalf("expected sticker.example.com persisted in singctl.yaml dns.whitelist, got %v", reloadedCfg.DNS.Whitelist)
+	}
+	wlFile, err := os.ReadFile(filepath.Join(smartRules, "whitelist.conf"))
+	if err != nil || !strings.Contains(string(wlFile), "sticker.example.com") || !strings.Contains(string(wlFile), "wxaintpcos.wxqcloud.qq.com.cn") {
+		t.Fatalf("expected sticker.example.com and default safe domains in SmartDNS whitelist.conf, err=%v content=%s", err, string(wlFile))
+	}
+	sbAfterAdd, err := os.ReadFile(sbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sbTxt := string(sbAfterAdd)
+	for _, want := range []string{"sub-keep.example.com", "sticker.example.com", "wxaintpcos.wxqcloud.qq.com.cn"} {
+		if !strings.Contains(sbTxt, want) {
+			t.Fatalf("expected %q in hot-synced sing-box config.json:\n%s", want, sbTxt)
+		}
+	}
+
+	// 2. Remove via POST /api/dns/whitelist -> cleanly removed from singctl.yaml & sing-box while preserving sub-keep.example.com
+	rec = postJSON("/api/dns/whitelist", map[string]any{"domain": "sticker.example.com", "action": "remove"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/dns/whitelist remove failed: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	sbAfterRm, _ := os.ReadFile(sbPath)
+	if strings.Contains(string(sbAfterRm), "sticker.example.com") {
+		t.Fatalf("expected sticker.example.com removed from sing-box config.json:\n%s", string(sbAfterRm))
+	}
+	if !strings.Contains(string(sbAfterRm), "sub-keep.example.com") {
+		t.Fatalf("expected unmanaged sub-keep.example.com preserved:\n%s", string(sbAfterRm))
+	}
+
+	// 3. POST /api/audit/whitelist with domain also hot-syncs DNS engine + sing-box
+	rec = postJSON("/api/audit/whitelist", map[string]any{"target": "audit-allow.example.com", "action": "add"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/audit/whitelist add failed: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	sbAfterAudit, _ := os.ReadFile(sbPath)
+	if !strings.Contains(string(sbAfterAudit), "audit-allow.example.com") {
+		t.Fatalf("expected audit-allow.example.com synced into sing-box config.json:\n%s", string(sbAfterAudit))
+	}
+}

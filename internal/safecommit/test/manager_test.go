@@ -714,3 +714,64 @@ func TestManager_DefaultOptionsInstantiation(t *testing.T) {
 		t.Fatal("expected error for empty watch token")
 	}
 }
+
+func TestManager_ReArmWhileActivePreservesOriginalBaseline(t *testing.T) {
+	workDir := t.TempDir()
+	stateDir := filepath.Join(workDir, "state")
+	cfgPath := filepath.Join(workDir, "network.cfg")
+	if err := os.WriteFile(cfgPath, []byte("known-good-v1"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	curTime := time.Date(2026, 11, 24, 10, 0, 0, 0, time.UTC)
+	pid := 8100
+	mgr := safecommit.NewManager(safecommit.ManagerOptions{
+		StateDir:     stateDir,
+		ProcRoot:     t.TempDir(),
+		NowFunc:      func() time.Time { return curTime },
+		SpawnWatcher: func(string) (int, error) { pid++; return pid, nil },
+		KillWatcher:  func(int) error { return nil },
+	})
+
+	// Arm #1 captures original known-good-v1
+	if _, err := mgr.Arm(t.Context(), safecommit.ArmRequest{
+		TTLSec:        180,
+		Reason:        "edit 1",
+		SnapshotFiles: map[string]string{"uci_network": cfgPath},
+	}); err != nil {
+		t.Fatalf("Arm #1 failed: %v", err)
+	}
+
+	// Simulate unconfirmed mutation #1 on disk
+	if err := os.WriteFile(cfgPath, []byte("unconfirmed-v2"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Arm #2 while Arm #1 is still active (now < DeadlineUnix) MUST inherit known-good-v1, NOT overwrite with unconfirmed-v2
+	curTime = curTime.Add(30 * time.Second)
+	if _, err := mgr.Arm(t.Context(), safecommit.ArmRequest{
+		TTLSec:        180,
+		Reason:        "edit 2",
+		SnapshotFiles: map[string]string{"uci_network": cfgPath},
+	}); err != nil {
+		t.Fatalf("Arm #2 failed: %v", err)
+	}
+
+	// Simulate unconfirmed mutation #2 on disk
+	if err := os.WriteFile(cfgPath, []byte("unconfirmed-v3"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Rollback MUST restore original known-good-v1
+	rec, err := mgr.Rollback(t.Context(), "timeout")
+	if err != nil || rec == nil {
+		t.Fatalf("Rollback failed: rec=%+v err=%v", rec, err)
+	}
+	got, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "known-good-v1" {
+		t.Fatalf("expected original known-good-v1 restored after consecutive unconfirmed edits, got %q", string(got))
+	}
+}

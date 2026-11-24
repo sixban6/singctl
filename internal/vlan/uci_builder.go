@@ -57,8 +57,13 @@ func buildWirelessCommands(wUCI *UCIConfig, radios []RadioInfo, req SaveSegmentR
 		secName = existing.Wireless.Section
 	}
 
+	var cur *UCISection
+	if wUCI != nil {
+		cur = wUCI.ByName(secName)
+	}
+
 	if !req.Wireless.Enabled {
-		if wUCI != nil && wUCI.ByName(secName) != nil {
+		if cur != nil && cur.Opt("disabled") != "1" {
 			return []string{fmt.Sprintf("set wireless.%s.disabled='1'", secName)}
 		}
 		return nil
@@ -68,20 +73,40 @@ func buildWirelessCommands(wUCI *UCIConfig, radios []RadioInfo, req SaveSegmentR
 	if radio == "" && len(radios) > 0 {
 		radio = radios[0].Name
 	}
-	cmds := []string{
-		fmt.Sprintf("set wireless.%s=wifi-iface", secName),
+	wantIsolate := "0"
+	if req.Wireless.Isolate {
+		wantIsolate = "1"
+	}
+
+	// 无线属性脏检测：未改任何无线字段且未传新密码时返回空切片，避免触发无意义的 uci commit wireless 与高危 wifi reload。
+	if cur != nil && req.Wireless.Password == "" {
+		curMode := cmp.Or(cur.Opt("mode"), "ap")
+		curDisabled := cmp.Or(cur.Opt("disabled"), "0")
+		curIsolate := cmp.Or(cur.Opt("isolate"), "0")
+		if cur.Opt("device") == radio &&
+			curMode == "ap" &&
+			cur.Opt("network") == req.ID &&
+			cur.Opt("ssid") == req.Wireless.SSID &&
+			cur.Opt("encryption") == req.Wireless.Encryption &&
+			curDisabled == "0" &&
+			curIsolate == wantIsolate {
+			return nil
+		}
+	}
+
+	var cmds []string
+	if !strings.HasPrefix(secName, "@") {
+		cmds = append(cmds, fmt.Sprintf("set wireless.%s=wifi-iface", secName))
+	}
+	cmds = append(cmds,
 		fmt.Sprintf("set wireless.%s.device=%s", secName, quoteUCI(radio)),
 		fmt.Sprintf("set wireless.%s.mode='ap'", secName),
 		fmt.Sprintf("set wireless.%s.network=%s", secName, quoteUCI(req.ID)),
 		fmt.Sprintf("set wireless.%s.ssid=%s", secName, quoteUCI(req.Wireless.SSID)),
 		fmt.Sprintf("set wireless.%s.encryption=%s", secName, quoteUCI(req.Wireless.Encryption)),
 		fmt.Sprintf("set wireless.%s.disabled='0'", secName),
-	}
-	if req.Wireless.Isolate {
-		cmds = append(cmds, fmt.Sprintf("set wireless.%s.isolate='1'", secName))
-	} else {
-		cmds = append(cmds, fmt.Sprintf("set wireless.%s.isolate='0'", secName))
-	}
+		fmt.Sprintf("set wireless.%s.isolate=%s", secName, quoteUCI(wantIsolate)),
+	)
 	if req.Wireless.Password != "" {
 		cmds = append(cmds, fmt.Sprintf("set wireless.%s.key=%s", secName, quoteUCI(req.Wireless.Password)))
 	}
@@ -137,29 +162,13 @@ func buildFirewallCommands(fwUCI *UCIConfig, wanSubnet string, req SaveSegmentRe
 		fmt.Sprintf("set firewall.%s.masq='1'", zoneRef),
 	)
 
-	// Allow outbound to WAN.
+	// Allow outbound to WAN（优先复用现网已有匹配 forwarding 节并清理历史重复的 singctl_fwd_wan_<id>）.
 	fwdWanRef := "singctl_fwd_wan_" + req.ID
-	if req.Policy.AllowWAN {
-		cmds = append(cmds,
-			fmt.Sprintf("set firewall.%s=forwarding", fwdWanRef),
-			fmt.Sprintf("set firewall.%s.src=%s", fwdWanRef, quoteUCI(zoneName)),
-			fmt.Sprintf("set firewall.%s.dest='wan'", fwdWanRef),
-		)
-	} else {
-		cmds = append(cmds, fmt.Sprintf("delete firewall.%s", fwdWanRef))
-	}
+	cmds = append(cmds, buildForwardingRuleCommands(fwUCI, fwdWanRef, zoneName, "wan", req.Policy.AllowWAN)...)
 
-	// Allow one-way management/control from main LAN.
+	// Allow one-way management/control from main LAN（优先复用现网已有匹配 forwarding 节并清理重复节）.
 	fwdMainRef := "singctl_fwd_main_" + req.ID
-	if req.Policy.AllowFromMainLAN {
-		cmds = append(cmds,
-			fmt.Sprintf("set firewall.%s=forwarding", fwdMainRef),
-			fmt.Sprintf("set firewall.%s.src='lan'", fwdMainRef),
-			fmt.Sprintf("set firewall.%s.dest=%s", fwdMainRef, quoteUCI(zoneName)),
-		)
-	} else {
-		cmds = append(cmds, fmt.Sprintf("delete firewall.%s", fwdMainRef))
-	}
+	cmds = append(cmds, buildForwardingRuleCommands(fwUCI, fwdMainRef, "lan", zoneName, req.Policy.AllowFromMainLAN)...)
 
 	// Custom one-way forwarding to other VLANs.
 	for _, dst := range req.Policy.AllowForwardTo {
@@ -239,6 +248,52 @@ func buildFirewallCommands(fwUCI *UCIConfig, wanSubnet string, req SaveSegmentRe
 		cmds = append(cmds, fmt.Sprintf("delete firewall.%s", mdnsRef))
 	}
 
+	return cmds
+}
+
+func buildForwardingRuleCommands(fwUCI *UCIConfig, managedRef, src, dest string, allow bool) []string {
+	var existingOther []string
+	hasManaged := false
+	if fwUCI != nil {
+		for _, f := range fwUCI.ByType("forwarding") {
+			if f.Opt("src") == src && f.Opt("dest") == dest {
+				if f.Name == managedRef {
+					hasManaged = true
+				} else {
+					existingOther = append(existingOther, f.Name)
+				}
+			}
+		}
+		if !hasManaged && fwUCI.ByName(managedRef) != nil {
+			hasManaged = true
+		}
+	}
+
+	var cmds []string
+	if allow {
+		if len(existingOther) > 0 {
+			// 复用现网已有匹配 forwarding（如匿名 @forwarding[N]），并自动清理冗余的 singctl_fwd_* 重复节
+			if hasManaged {
+				cmds = append(cmds, fmt.Sprintf("delete firewall.%s", managedRef))
+			}
+			return cmds
+		}
+		return []string{
+			fmt.Sprintf("set firewall.%s=forwarding", managedRef),
+			fmt.Sprintf("set firewall.%s.src=%s", managedRef, quoteUCI(src)),
+			fmt.Sprintf("set firewall.%s.dest=%s", managedRef, quoteUCI(dest)),
+		}
+	}
+
+	if hasManaged {
+		cmds = append(cmds, fmt.Sprintf("delete firewall.%s", managedRef))
+	}
+	for _, ref := range existingOther {
+		cmds = append(cmds, fmt.Sprintf("delete firewall.%s", ref))
+	}
+	if len(cmds) == 0 {
+		cmds = append(cmds, fmt.Sprintf("delete firewall.%s", managedRef))
+	}
 	return cmds
 }
 

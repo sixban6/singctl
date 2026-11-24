@@ -19,7 +19,7 @@ import {
 } from '../hooks';
 import { clientApi } from './api';
 import { ADGUARD_OVERVIEW_CACHE_KEY, AUDIT_DEFAULT_CACHE_KEY, GATEWAY_CACHE_KEY } from './cacheKeys';
-import { ClientStatusResponse } from './types';
+import { ClientStatusResponse, SafeCommitStatusReport } from './types';
 import { TaskConsoleDrawer } from './shell/TaskConsoleDrawer';
 import { DashPage } from './pages/DashPage';
 import {
@@ -83,13 +83,29 @@ const ClientShell: React.FC = () => {
     return () => window.removeEventListener('hashchange', normalizeLegacyHash);
   }, [navigate]);
 
+  const [safeCommitFastPoll, setSafeCommitFastPoll] = useState(false);
+
   const {
     data: status,
     refreshing,
+    setData: setStatus,
     refetch: refreshStatus,
   } = useCachedQuery<ClientStatusResponse>('client:status', () => clientApi.getStatus(), {
-    pollMs: 12000,
+    pollMs: safeCommitFastPoll ? 3000 : 12000,
   });
+
+  useEffect(() => {
+    setSafeCommitFastPoll(Boolean(status?.safeCommit?.active));
+  }, [status?.safeCommit?.active]);
+
+  const handleInjectSafeCommit = useCallback(
+    (sc: SafeCommitStatusReport) => {
+      setSafeCommitFastPoll(Boolean(sc.active));
+      setStatus((prev) => (prev ? { ...prev, safeCommit: sc } : prev));
+      void refreshStatus(true);
+    },
+    [setStatus, refreshStatus],
+  );
 
   // 已访问的高频重页面保活记录（仅对已点开过的 dns/audit 保持 DOM 挂载，切页 0ms 瞬开）
   const [visitedTabs, setVisitedTabs] = useState<Set<ClientTab>>(() => new Set([tab]));
@@ -259,24 +275,25 @@ const ClientShell: React.FC = () => {
     </div>
   );
 
+  const stickyBanner = (
+    <SafeCommitBanner
+      safeCommit={status?.safeCommit}
+      onRefreshStatus={() => void refreshStatus(true)}
+    />
+  );
+
   const banner = (
-    <>
-      <SafeCommitBanner
-        safeCommit={status?.safeCommit}
-        onRefreshStatus={() => void refreshStatus(true)}
-      />
-      <ClientTopbarBanners
-        status={status}
-        busy={busy}
-        tsSwapBanner={tsSwapBanner}
-        restartingBanner={restartingBanner}
-        restartTimedOut={restartTimedOut}
-        onRepollTailscale={() => void pollTailscaleUpgrade(false)}
-        onDismissTsBanner={() => setTsSwapBanner(null)}
-        onReloadPage={reloadWithCacheBust}
-        onRestartDaemon={() => requestAction('dm-restart')}
-      />
-    </>
+    <ClientTopbarBanners
+      status={status}
+      busy={busy}
+      tsSwapBanner={tsSwapBanner}
+      restartingBanner={restartingBanner}
+      restartTimedOut={restartTimedOut}
+      onRepollTailscale={() => void pollTailscaleUpgrade(false)}
+      onDismissTsBanner={() => setTsSwapBanner(null)}
+      onReloadPage={reloadWithCacheBust}
+      onRestartDaemon={() => requestAction('dm-restart')}
+    />
   );
 
   return (
@@ -302,6 +319,7 @@ const ClientShell: React.FC = () => {
           ) : null
         }
         topbarActions={topbarActions}
+        stickyBanner={stickyBanner}
         banner={banner}
         extraCommandItems={extraCommands}
       >
@@ -371,6 +389,7 @@ const ClientShell: React.FC = () => {
               onAction={requestAction}
               onNavigate={navigateSafe}
               onRefreshStatus={() => void refreshStatus(true)}
+              onSafeCommitUpdated={handleInjectSafeCommit}
             />
           </React.Suspense>
         )}

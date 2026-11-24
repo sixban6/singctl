@@ -15,6 +15,8 @@ import (
 	"singctl/internal/audit"
 	"singctl/internal/config"
 	"singctl/internal/daemon"
+	"singctl/internal/logger"
+	"singctl/internal/singbox"
 )
 
 // AuditRateLimiter 针对审计与拉黑接口提供轻量滑动窗口防爬虫/防高频扫描限流。
@@ -338,9 +340,27 @@ func (s *Server) handleAuditWhitelist(w http.ResponseWriter, r *http.Request) {
 	defer s.cfgMu.Unlock()
 
 	cfg := s.loadMutableConfig()
+	oldManaged := singbox.EffectiveAdBlockWhitelist(cfg)
 
 	enforcer := audit.NewEnforcer(cfg, s.opts.ConfigPath)
 	action := strings.ToLower(cmp.Or(strings.TrimSpace(req.Action), "add"))
+	syncDomainWhitelist := func(target string, allow bool) {
+		dom, ok := singbox.NormalizeWhitelistDomain(target)
+		if !ok {
+			return
+		}
+		if eng := s.newDNSRegistry(cfg).ActiveEngine(); eng != nil && eng.IsInstalled() {
+			if err := eng.SetWhitelist(r.Context(), dom, allow); err != nil {
+				logger.Warn("[Audit] 同步审计白名单至本地 DNS 引擎失败 (%s): %v", dom, err)
+			}
+		}
+		newManaged := singbox.EffectiveAdBlockWhitelist(cfg)
+		if err := s.syncSingBoxAdBlockWhitelist(r.Context(), oldManaged, newManaged); err != nil {
+			logger.Warn("[Audit] 热同步审计白名单至 sing-box 失败 (%s): %v", dom, err)
+		}
+		_ = daemon.NotifyReload()
+	}
+
 	switch action {
 	case "add":
 		normalized, err := enforcer.WhitelistAdd(req.Target)
@@ -349,6 +369,7 @@ func (s *Server) handleAuditWhitelist(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.invalidateConfigStore()
+		syncDomainWhitelist(normalized, true)
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":        true,
 			"target":    normalized,
@@ -362,6 +383,7 @@ func (s *Server) handleAuditWhitelist(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.invalidateConfigStore()
+		syncDomainWhitelist(normalized, false)
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":        true,
 			"target":    normalized,

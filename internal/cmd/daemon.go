@@ -70,7 +70,7 @@ func BuildUnifiedDaemon(cfg *config.Config, configPath, ver string, deps DaemonS
 	}
 
 	listen := cmp.Or(strings.TrimSpace(deps.WebListen), strings.TrimSpace(os.Getenv("SINGCTL_WEB_LISTEN")))
-	password := cmp.Or(deps.WebPassword, resolveWebPassword(""))
+	password := cmp.Or(deps.WebPassword, webui.ResolveWebPassword("", configPath))
 	isolatedTest := strings.TrimSpace(deps.Paths.WebEmbeddedFile) != ""
 	if !isolatedTest {
 		if prevSt, err := webui.ReadWebState(); err == nil {

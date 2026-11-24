@@ -187,3 +187,45 @@ export function isPrivateIPv4(ip?: string): boolean {
     /^172\.(1[6-9]|2\d|3[0-1])\./.test(ip)
   );
 }
+
+const WIFI_UPPER = 'ABCDEFGHJKLMNPQRSTUVWXYZ'; // 24 chars (no I, O)
+const WIFI_LOWER = 'abcdefghijkmnopqrstuvwxyz'; // 25 chars (no l)
+const WIFI_DIGIT = '23456789'; // 8 chars (no 0, 1)
+const WIFI_ALL = WIFI_UPPER + WIFI_LOWER + WIFI_DIGIT; // 57 unambiguous chars
+
+function unbiasedRandomIndex(max: number): number {
+  const cryptoApi = typeof window !== 'undefined' ? window.crypto : undefined;
+  if (!cryptoApi?.getRandomValues) {
+    return Math.floor(Math.random() * max);
+  }
+  const limit = Math.floor(256 / max) * max;
+  const buf = new Uint8Array(1);
+  for (;;) {
+    cryptoApi.getRandomValues(buf);
+    if (buf[0] < limit) {
+      return buf[0] % max;
+    }
+  }
+}
+
+/**
+ * 使用密码学 CSPRNG + 拒绝采样生成无偏高强度易读 Wi-Fi 密码（xxxx-xxxx-xxxx，14 字符 ~66-bit 熵），
+ * 剔除 0/O/o/1/l/I 及特殊符号，保证至少含 1 大写 + 1 小写 + 1 数字，兼容 WPA2/WPA3 与全系智能家居。
+ */
+export function generateReadableWifiPassword(): string {
+  const chars: string[] = [
+    WIFI_UPPER[unbiasedRandomIndex(WIFI_UPPER.length)],
+    WIFI_LOWER[unbiasedRandomIndex(WIFI_LOWER.length)],
+    WIFI_DIGIT[unbiasedRandomIndex(WIFI_DIGIT.length)],
+  ];
+  while (chars.length < 12) {
+    chars.push(WIFI_ALL[unbiasedRandomIndex(WIFI_ALL.length)]);
+  }
+  for (let i = chars.length - 1; i > 0; i--) {
+    const j = unbiasedRandomIndex(i + 1);
+    const tmp = chars[i];
+    chars[i] = chars[j];
+    chars[j] = tmp;
+  }
+  return `${chars.slice(0, 4).join('')}-${chars.slice(4, 8).join('')}-${chars.slice(8, 12).join('')}`;
+}

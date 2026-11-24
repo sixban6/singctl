@@ -30,6 +30,7 @@ export interface AppShellProps<T extends string = string> {
   mobilePrimaryKeys?: readonly T[];
   statusPill?: React.ReactNode;
   topbarActions?: React.ReactNode;
+  stickyBanner?: React.ReactNode;
   banner?: React.ReactNode;
   footerText?: string;
   theme?: ThemeMode;
@@ -51,6 +52,7 @@ export function AppShell<T extends string = string>({
   mobilePrimaryKeys,
   statusPill,
   topbarActions,
+  stickyBanner,
   banner,
   footerText = 'SingCtl Client Gateway · 极简零外部依赖 · 单二进制内嵌静态控制台',
   extraCommandItems = [],
@@ -182,6 +184,7 @@ export function AppShell<T extends string = string>({
             )}
           </div>
         </div>
+        {stickyBanner}
       </header>
 
       {/* Main Container matching Server Console max-w-[1440px] */}

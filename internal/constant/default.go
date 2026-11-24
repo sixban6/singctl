@@ -50,3 +50,14 @@ const (
 	// VLANProxyBypassFile 为透明代理按 VLAN 子网直连绕行清单的权威落盘路径（0600，每行一条 IPv4 CIDR）。
 	VLANProxyBypassFile = "/etc/singctl/vlan-proxy-bypass.list"
 )
+
+// DefaultAdBlockSafeDomains 定义内置极小去广告防误杀安全域名基线（微信搜一搜表情原图 CDN、闪萌、SOOGIF、微信 HTTPDNS）。
+// 单一权威归属：供 sing-box 编译与热同步、AdGuard Home 与 SmartDNS 共同复用；用户显式拉黑项由上层自动剔除。
+var DefaultAdBlockSafeDomains = []string{
+	"wxaintpcos.wxqcloud.qq.com.cn", // 微信搜一搜/AI 表情原图 COS CDN
+	"dl.weshineapp.com",             // 闪萌表情包下载源
+	"pass1.soogif.com",              // SOOGIF 动图表情源
+	"pass2.soogif.com",              // SOOGIF 动图表情源
+	"dns.weixin.qq.com.cn",          // 微信内置 HTTPDNS 调度
+	"aedns.weixin.qq.com",           // 微信边缘 DNS 调度
+}

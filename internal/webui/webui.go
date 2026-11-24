@@ -77,6 +77,8 @@ type Options struct {
 	TailscaleUpgradeForTest *TailscaleUpgradeTestHooks                                                        // 仅供单元测试注入 Tailscale 零失联升级体检与状态
 	Listen                  string                                                                            // 监听地址,如 ":8090"
 	Password                string                                                                            // 可选的访问口令(空=不启用鉴权,建议仅在可信内网使用)
+	NoService               bool                                                                              // 禁用自动安装 procd/systemd 原生系统服务，强制走独立后台模式
+	ClearPassword           bool                                                                              // 显式清空已持久化的 0600 web.password 口令文件
 	Version                 string                                                                            // singctl 版本号
 	OnReady                 func(listenAddr string)                                                           // Listen 成功后的回调(后台子进程用于就绪握手)
 	ConfigStore             *config.Store                                                                     // 可选：与单进程合体守护进程共享同一个 config.Store
@@ -98,9 +100,10 @@ type Options struct {
 	SafeCommitBaselineForTest func() (sbRunning bool, fwActive bool)                                          // 可选：离线单元测试注入回滚基线状态
 	NotifyDispatcher        *notify.Dispatcher                                                                // 可选：与单进程合体守护进程共享的通知调度器
 	NotifyHTTPClient        *http.Client                                                                      // 可选：测试注入默认通知调度器 HTTP 客户端
-	DoctorEnvForTest        func(cfg *config.Config) *doctor.Env                                              // 可选：离线单元测试注入深度体检运行环境
-	DoctorRunner            *doctor.Runner                                                                    // 可选：自定义深度体检调度器
-	VLANServiceForTest      *vlan.Service                                                                     // 仅供离线单元测试注入 OpenWrt VLAN 领域服务
+	DoctorEnvForTest            func(cfg *config.Config) *doctor.Env                                              // 可选：离线单元测试注入深度体检运行环境
+	DoctorRunner                *doctor.Runner                                                                    // 可选：自定义深度体检调度器
+	VLANServiceForTest          *vlan.Service                                                                     // 仅供离线单元测试注入 OpenWrt VLAN 领域服务
+	VLANAsyncReloadDelayForTest *time.Duration                                                                    // 仅供离线单元测试覆盖 VLAN 异步延迟重载时长（0=同步）
 }
 
 // Server 客户端 Web 管理服务。
@@ -131,6 +134,7 @@ type Server struct {
 	ownsNotifier      bool
 	safeCommitMu      sync.Mutex
 	safeCommitMgr     *safecommit.Manager
+	vlanApplyMu       sync.Mutex
 
 	// /api/sb/traffic 按需后台采样器（无请求 15s 自动停止）
 	trafficMu                  sync.Mutex

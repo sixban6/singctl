@@ -291,6 +291,29 @@ func (s *Service) runUCI(ctx context.Context, args ...string) (string, error) {
 	return string(out), err
 }
 
+// DirtyUCIPackages 从一批 UCI 命令中提取实际涉及的配置文件包名（固定返回顺序：network/dhcp/wireless/firewall）。
+func DirtyUCIPackages(commands []string) []string {
+	seen := make(map[string]bool, 4)
+	for _, line := range commands {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) < 2 {
+			continue
+		}
+		target := fields[1]
+		if pkg, _, ok := strings.Cut(target, "."); ok {
+			seen[pkg] = true
+		}
+	}
+	ordered := []string{"network", "dhcp", "wireless", "firewall"}
+	out := make([]string, 0, len(seen))
+	for _, pkg := range ordered {
+		if seen[pkg] {
+			out = append(out, pkg)
+		}
+	}
+	return out
+}
+
 func (s *Service) batchUCI(ctx context.Context, commands []string) error {
 	if len(commands) == 0 {
 		return nil
@@ -306,7 +329,7 @@ func (s *Service) batchUCI(ctx context.Context, commands []string) error {
 	if err != nil {
 		return fmt.Errorf("uci batch failed: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
-	for _, pkg := range []string{"network", "dhcp", "wireless", "firewall"} {
+	for _, pkg := range DirtyUCIPackages(commands) {
 		if cOut, cErr := exec.CommandContext(cctx, "uci", "commit", pkg).CombinedOutput(); cErr != nil {
 			// Skip committing packages that do not exist (e.g. wireless on x86 softrouter).
 			if pkg == "wireless" && strings.Contains(strings.ToLower(string(cOut)), "entry not found") {
@@ -318,8 +341,8 @@ func (s *Service) batchUCI(ctx context.Context, commands []string) error {
 	return nil
 }
 
-// ReloadOpenWrtNetwork 在 OpenWrt 上通过统一 servicemgr 热重载网络、防火墙、dnsmasq 与无线配置（供应用变更与 Safe Commit 自动回滚复用）。
-func ReloadOpenWrtNetwork(ctx context.Context) error {
+// ReloadOpenWrtNetworkWithOptions 在 OpenWrt 上按需重载网络、防火墙、dnsmasq，并仅当无线变更时执行 DMA 护盾与单次 wifi reload。
+func ReloadOpenWrtNetworkWithOptions(ctx context.Context, opts ReloadOptions, prepareDMA func()) error {
 	if runtime.GOOS != "linux" {
 		return nil
 	}
@@ -346,17 +369,36 @@ func ReloadOpenWrtNetwork(ctx context.Context) error {
 			}
 		}
 	}
-	if wifiPath, err := exec.LookPath("wifi"); err == nil {
-		_ = exec.CommandContext(cctx, wifiPath, "reload").Run()
+	if opts.WirelessChanged {
+		if prepareDMA != nil {
+			prepareDMA()
+		} else {
+			prepareWirelessDMAHeadroomOS()
+		}
+		if wifiPath, err := exec.LookPath("wifi"); err == nil {
+			_ = exec.CommandContext(cctx, wifiPath, "reload").Run()
+		}
 	}
 	return errors.Join(errs...)
 }
 
-func (s *Service) reloadNetwork(ctx context.Context) error {
+// ReloadOpenWrtNetwork 在 OpenWrt 上通过统一 servicemgr 热重载网络、防火墙、dnsmasq 与无线配置（供 Safe Commit 自动回滚复用，含 DMA 护盾）。
+func ReloadOpenWrtNetwork(ctx context.Context) error {
+	return ReloadOpenWrtNetworkWithOptions(ctx, ReloadOptions{WirelessChanged: true}, nil)
+}
+
+// ReloadWithOptions 按 ReloadOptions 执行网络及可选的无线重载（未改动无线时跳过 wifi reload 与 DMA 整理）。
+func (s *Service) ReloadWithOptions(ctx context.Context, opts ReloadOptions) error {
+	if s.env.ReloadNetworkWithOpts != nil {
+		if opts.WirelessChanged && s.env.PrepareDMAHeadroom != nil {
+			s.env.PrepareDMAHeadroom()
+		}
+		return s.env.ReloadNetworkWithOpts(ctx, opts)
+	}
 	if s.env.ReloadNetwork != nil {
 		return s.env.ReloadNetwork(ctx)
 	}
-	return ReloadOpenWrtNetwork(ctx)
+	return ReloadOpenWrtNetworkWithOptions(ctx, opts, s.env.PrepareDMAHeadroom)
 }
 
 func (s *Service) readFile(path string) ([]byte, error) {

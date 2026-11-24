@@ -6,21 +6,19 @@ import {
   ChevronDown,
   ChevronRight,
   Copy,
-  Eye,
-  EyeOff,
   Globe,
   RefreshCw,
   Shield,
   ShieldCheck,
   Sliders,
   Terminal,
-  Wifi,
   Zap,
 } from 'lucide-react';
 import { Badge, Button, SlideDrawer, useToast } from '../../../../ui';
 import { clientApi } from '../../../api';
 import { copyPlainText } from '../../../lib/leakProbes';
 import {
+  SafeCommitStatusReport,
   VlanApplyResponse,
   VlanOverview,
   VlanPortMode,
@@ -28,6 +26,7 @@ import {
   VlanSaveSegmentRequest,
 } from '../../../types';
 import { PortSwitchBar } from './PortSwitchBar';
+import { AppliedWifiCredential, VlanWirelessCard } from './VlanWirelessCard';
 import { maskVlanText } from './vlanHelpers';
 
 export interface VlanSegmentDrawerProps {
@@ -39,7 +38,8 @@ export interface VlanSegmentDrawerProps {
   overview: VlanOverview;
   initialDraft: VlanSaveSegmentRequest | null;
   onClose: () => void;
-  onApplied: (res: VlanApplyResponse) => void;
+  onApplied: (res: VlanApplyResponse, newCredential?: AppliedWifiCredential | null) => void;
+  onSafeCommitUpdated?: (sc: SafeCommitStatusReport) => void;
 }
 
 interface ToggleRowProps {
@@ -74,15 +74,16 @@ export const VlanSegmentDrawer: React.FC<VlanSegmentDrawerProps> = ({
   initialDraft,
   onClose,
   onApplied,
+  onSafeCommitUpdated,
 }) => {
-  const { success, error } = useToast();
+  const { success, error, toast } = useToast();
   const [draft, setDraft] = useState<VlanSaveSegmentRequest | null>(initialDraft);
-  const [showPass, setShowPass] = useState(false);
   const [advOpen, setAdvOpen] = useState(proMode);
   const [trustedText, setTrustedText] = useState('');
   const [preview, setPreview] = useState<VlanPreviewResult | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [applying, setApplying] = useState(false);
+  const [reconnectingHint, setReconnectingHint] = useState(false);
   const [copiedRoute, setCopiedRoute] = useState(false);
 
   useEffect(() => {
@@ -91,7 +92,7 @@ export const VlanSegmentDrawer: React.FC<VlanSegmentDrawerProps> = ({
     setTrustedText((initialDraft.policy.trustedSourceIps ?? []).join(', '));
     setAdvOpen(proMode);
     setPreview(null);
-    setShowPass(false);
+    setReconnectingHint(false);
   }, [open, initialDraft, proMode]);
 
   const buildPayload = useCallback(
@@ -168,17 +169,73 @@ export const VlanSegmentDrawer: React.FC<VlanSegmentDrawerProps> = ({
   const handleApply = async () => {
     if (!draft) return;
     setApplying(true);
+    setReconnectingHint(false);
+
+    const newCred: AppliedWifiCredential | null =
+      draft.wireless?.enabled && draft.wireless.ssid && draft.wireless.password
+        ? {
+            segmentName: draft.displayName || draft.id,
+            ssid: draft.wireless.ssid,
+            password: draft.wireless.password,
+            createdAt: Date.now(),
+          }
+        : null;
+
     try {
       const res = await clientApi.applyVlanSave(buildPayload(draft, trustedText));
+      if (res.safeCommit) {
+        onSafeCommitUpdated?.(res.safeCommit);
+      }
       success(
         `已应用「${draft.displayName || draft.id}」，防失联保险丝已启动 (${res.safeCommitTtlSec || 180}s 内可确认保留)`,
         6000,
       );
-      onApplied(res);
+      onApplied(res, newCred);
     } catch (e: unknown) {
-      error(e instanceof Error ? e.message : '应用 VLAN 配置失败');
+      const msg = e instanceof Error ? e.message : '';
+      const isTransientDrop =
+        !msg ||
+        /network|failed to fetch|load failed|aborted|timeout|超时|连接|网络/i.test(msg);
+
+      if (!isTransientDrop) {
+        error(msg || '应用 VLAN 配置失败');
+        return;
+      }
+
+      // 网络重载瞬间若发生 Wi-Fi 闪断，自动每 2s 探测 /api/safe-commit/status（持续 30s）并恢复展示倒计时条
+      setReconnectingHint(true);
+      toast('配置已提交，网络正在重载重连，正在同步防失联倒计时…', 'info', 6000);
+      for (let attempt = 0; attempt < 15; attempt++) {
+        await new Promise((resolve) => window.setTimeout(resolve, 2000));
+        try {
+          const sc = await clientApi.getSafeCommitStatus();
+          onSafeCommitUpdated?.(sc);
+          let latestOv: VlanOverview | undefined;
+          try {
+            latestOv = await clientApi.getVlanOverview();
+          } catch {
+            // ignore optional overview refresh failure
+          }
+          success('已重新连上路由器并同步防失联安全回滚倒计时', 5000);
+          onApplied(
+            {
+              ok: true,
+              segmentId: draft.id,
+              safeCommit: sc,
+              safeCommitTtlSec: sc.state?.ttlSec,
+              overview: latestOv,
+            },
+            newCred,
+          );
+          return;
+        } catch {
+          // continue retrying until router network/Wi-Fi finishes reconnecting
+        }
+      }
+      error('配置已提交但暂未重新连上路由器；若确认失联，网关将在倒计时归零后自动回滚恢复。');
     } finally {
       setApplying(false);
+      setReconnectingHint(false);
     }
   };
 
@@ -272,109 +329,21 @@ export const VlanSegmentDrawer: React.FC<VlanSegmentDrawerProps> = ({
         <h4 className="text-xs font-semibold text-white">2. 哪些设备连入这个网络？</h4>
 
         {/* Wireless section */}
-        <div className="rounded-xl border border-slate-800/80 bg-slate-950/50 p-3.5 space-y-3">
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <Wifi className="w-4 h-4 text-sky-400" />
-              <div>
-                <div className="text-xs font-medium text-white">开启专属 Wi-Fi</div>
-                <div className="text-[11px] text-slate-400">
-                  {hasRadios ? '为该隔离网独立广播一个无线名称' : '当前设备未检测到无线网卡，仅支持有线网口分配'}
-                </div>
-              </div>
-            </div>
-            <input
-              type="checkbox"
-              disabled={!hasRadios}
-              checked={Boolean(wifi.enabled) && hasRadios}
-              onChange={(e) =>
-                setDraft({
-                  ...draft,
-                  wireless: { ...wifi, enabled: e.target.checked, radio: wifi.radio || overview.radios[0]?.name },
-                })
-              }
-              className="h-4 w-4 rounded border-slate-600 accent-emerald-500 cursor-pointer disabled:opacity-40"
-            />
+        <VlanWirelessCard
+          hasRadios={hasRadios}
+          isEdit={isEdit}
+          proMode={proMode}
+          radios={overview.radios}
+          wifi={wifi}
+          onChange={(nextWifi) => setDraft({ ...draft, wireless: nextWifi })}
+        />
+
+        {reconnectingHint && (
+          <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200 flex items-center gap-2">
+            <RefreshCw className="w-3.5 h-3.5 animate-spin text-amber-400 shrink-0" />
+            <span>配置已提交，网络正在重载重连，正在自动同步防失联倒计时…</span>
           </div>
-
-          {hasRadios && wifi.enabled && (
-            <div className="pt-2 border-t border-slate-800/70 space-y-3">
-              <div className="grid sm:grid-cols-2 gap-3">
-                <label className="space-y-1">
-                  <span className="text-[11px] text-slate-400">Wi-Fi 名称 (SSID)</span>
-                  <input
-                    type="text"
-                    value={wifi.ssid || ''}
-                    onChange={(e) => setDraft({ ...draft, wireless: { ...wifi, ssid: e.target.value } })}
-                    placeholder="例如：Home-IoT"
-                    className="w-full rounded-xl border border-slate-700/90 bg-slate-900/90 px-3 py-2 text-xs text-white focus:border-emerald-500/70 focus:outline-none"
-                  />
-                </label>
-
-                <label className="space-y-1">
-                  <span className="text-[11px] text-slate-400">
-                    连接密码{wifi.passwordConfigured ? '（留空保持原密码不变）' : '（至少 8 位）'}
-                  </span>
-                  <div className="relative">
-                    <input
-                      type={showPass ? 'text' : 'password'}
-                      value={wifi.password || ''}
-                      onChange={(e) => setDraft({ ...draft, wireless: { ...wifi, password: e.target.value } })}
-                      placeholder={wifi.passwordConfigured ? '已设置密码，留空不修改' : '请输入 8~63 位 Wi-Fi 密码'}
-                      className="w-full rounded-xl border border-slate-700/90 bg-slate-900/90 pl-3 pr-9 py-2 text-xs text-white focus:border-emerald-500/70 focus:outline-none"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowPass((v) => !v)}
-                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
-                      aria-label="显示或隐藏密码"
-                    >
-                      {showPass ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                    </button>
-                  </div>
-                </label>
-              </div>
-
-              <div className="grid sm:grid-cols-2 gap-3">
-                <label className="space-y-1">
-                  <span className="text-[11px] text-slate-400">无线频段</span>
-                  <select
-                    value={wifi.radio || overview.radios[0]?.name || ''}
-                    onChange={(e) => setDraft({ ...draft, wireless: { ...wifi, radio: e.target.value } })}
-                    className="w-full rounded-xl border border-slate-700/90 bg-slate-900/90 px-3 py-2 text-xs text-white focus:border-emerald-500/70 focus:outline-none"
-                  >
-                    {overview.radios.map((r) => (
-                      <option key={r.name} value={r.name}>
-                        {r.bandLabel}
-                        {r.band === '2g' ? '（推荐老设备/智能家居）' : '（高速低延迟）'}
-                        {proMode ? ` · ${r.name}` : ''}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-
-                <label className="space-y-1">
-                  <span className="text-[11px] text-slate-400">加密兼容模式</span>
-                  <select
-                    value={wifi.encryption || 'psk2'}
-                    onChange={(e) => setDraft({ ...draft, wireless: { ...wifi, encryption: e.target.value } })}
-                    className="w-full rounded-xl border border-slate-700/90 bg-slate-900/90 px-3 py-2 text-xs text-white focus:border-emerald-500/70 focus:outline-none"
-                  >
-                    <option value="psk2">老设备高兼容模式 (WPA2 · 适合智能家居)</option>
-                    <option value="sae-mixed">高速安全模式 (WPA2/WPA3 混合)</option>
-                  </select>
-                </label>
-              </div>
-
-              <ToggleRow
-                label="同网段无线设备互不可见（防横向传染）"
-                desc="开启后，连上同一个 Wi-Fi 的扫地机/访客手机彼此无法互相扫描或通信"
-                checked={Boolean(wifi.isolate)}
-                onChange={(checked) => setDraft({ ...draft, wireless: { ...wifi, isolate: checked } })}
-              />
-            </div>
-          )}
-        </div>
+        )}
 
         {/* Physical port assignment */}
         <PortSwitchBar

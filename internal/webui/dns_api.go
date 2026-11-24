@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -15,6 +17,8 @@ import (
 	"singctl/internal/constant"
 	"singctl/internal/daemon"
 	"singctl/internal/localdns"
+	"singctl/internal/logger"
+	"singctl/internal/singbox"
 )
 
 func (s *Server) newDNSRegistry(cfg *config.Config) *localdns.Registry {
@@ -258,6 +262,22 @@ func (s *Server) handleDNSUpstreamsPost(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+func (s *Server) syncSingBoxAdBlockWhitelist(ctx context.Context, oldManaged, newManaged []string) error {
+	sbPath := cmp.Or(strings.TrimSpace(s.opts.SingBoxConfigPath), constant.SingBoxConfigFile)
+	rawBytes, err := os.ReadFile(sbPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	updated, changed, err := singbox.SyncAdBlockWhitelistInConfigJSON(string(rawBytes), oldManaged, newManaged)
+	if err != nil || !changed {
+		return err
+	}
+	return singbox.ApplyLiveSingBoxConfig(ctx, sbPath, s.opts.SingBoxWorkConfigPath, updated, "whitelist")
+}
+
 func (s *Server) handleDNSWhitelistPost(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Domain string `json:"domain"`
@@ -267,18 +287,49 @@ func (s *Server) handleDNSWhitelistPost(w http.ResponseWriter, r *http.Request) 
 		writeJSONError(w, http.StatusBadRequest, "请求格式错误: "+err.Error())
 		return
 	}
-	allow := strings.ToLower(strings.TrimSpace(body.Action)) != "remove"
-
-	s.cfgMu.Lock()
-	defer s.cfgMu.Unlock()
-
-	cfg := s.loadMutableConfig()
-	eng := s.newDNSRegistry(cfg).ActiveEngine()
-	if err := eng.SetWhitelist(r.Context(), body.Domain, allow); err != nil {
-		writeJSONError(w, http.StatusBadRequest, err.Error())
+	dom, ok := singbox.NormalizeWhitelistDomain(body.Domain)
+	if !ok {
+		writeJSONError(w, http.StatusBadRequest, "请输入合法的域名（如 example.com）")
 		return
 	}
-	_ = daemon.NotifyReload()
+	allow := strings.ToLower(strings.TrimSpace(body.Action)) != "remove"
+
+	var oldManaged []string
+	_, err := s.updateConfigTx(configTxOptions{
+		InvalidateIOS: true,
+		LiveApply: func(cfg *config.Config) error {
+			eng := s.newDNSRegistry(cfg).ActiveEngine()
+			if err := eng.SetWhitelist(r.Context(), dom, allow); err != nil {
+				return &apiStatusError{status: http.StatusBadRequest, msg: err.Error()}
+			}
+			newManaged := singbox.EffectiveAdBlockWhitelist(cfg)
+			if sbErr := s.syncSingBoxAdBlockWhitelist(r.Context(), oldManaged, newManaged); sbErr != nil {
+				logger.Warn("[DNS] 热同步 sing-box 去广告白名单失败: %v", sbErr)
+			}
+			return nil
+		},
+	}, func(cfg *config.Config) error {
+		oldManaged = singbox.EffectiveAdBlockWhitelist(cfg)
+		updated := make([]string, 0, len(cfg.DNS.Whitelist)+1)
+		for _, item := range cfg.DNS.Whitelist {
+			if norm, valid := singbox.NormalizeWhitelistDomain(item); valid && norm == dom {
+				continue
+			}
+			if strings.EqualFold(strings.TrimSpace(item), dom) {
+				continue
+			}
+			updated = append(updated, item)
+		}
+		if allow && !slices.Contains(updated, dom) {
+			updated = append(updated, dom)
+		}
+		cfg.DNS.Whitelist = updated
+		return nil
+	})
+	if err != nil {
+		writePartialSaveError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 

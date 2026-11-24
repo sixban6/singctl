@@ -33,6 +33,7 @@ type ConfigParams struct {
 	IsOpenWrt         bool     // OpenWrt 下默认关闭查询日志落盘以保护闪存
 	DisablePrivatePTR bool     // 已弃用（始终禁用私网 PTR 以防止与 dnsmasq 形成死循环）；保留字段以兼容既有调用方
 	SubURLs           []string // 订阅链接列表（自动将其域名加入放行白名单，防止误拦截）
+	WhitelistDomains  []string // 可选：额外需预置放行的安全域名（内置防误杀基线 + 用户 DNS 白名单）
 }
 
 // SyncOptions 定义对已存在的 AdGuardHome.yaml 进行非破坏性同步的选项。
@@ -63,10 +64,21 @@ func sanitizeWebBindIP(ipStr string) string {
 	return "127.0.0.1"
 }
 
-// extractSubWhitelistRules 提取订阅 URL 中的域名并生成 AdGuard 强放行规则。
-func extractSubWhitelistRules(subURLs []string) []string {
+// extractSubWhitelistRules 提取订阅 URL 与附加域名列表并生成去重后的 AdGuard 强放行规则。
+func extractSubWhitelistRules(subURLs []string, extraDomains ...string) []string {
 	seen := make(map[string]struct{})
 	var rules []string
+	addHost := func(host string) {
+		h := strings.Trim(strings.ToLower(strings.TrimSpace(host)), ".")
+		if h == "" || net.ParseIP(h) != nil || h == "localhost" {
+			return
+		}
+		if _, ok := seen[h]; ok {
+			return
+		}
+		seen[h] = struct{}{}
+		rules = append(rules, fmt.Sprintf("@@||%s^$important", h))
+	}
 	for _, raw := range subURLs {
 		trimmed := strings.TrimSpace(raw)
 		if trimmed == "" {
@@ -76,15 +88,14 @@ func extractSubWhitelistRules(subURLs []string) []string {
 		if err != nil || u.Host == "" {
 			continue
 		}
-		host := strings.ToLower(strings.TrimSpace(u.Hostname()))
-		if host == "" || net.ParseIP(host) != nil || host == "localhost" {
+		addHost(u.Hostname())
+	}
+	for _, raw := range extraDomains {
+		d := normalizeAdGuardTarget(raw)
+		if d == "" || !validRewriteDomainRe.MatchString(d) {
 			continue
 		}
-		if _, ok := seen[host]; ok {
-			continue
-		}
-		seen[host] = struct{}{}
-		rules = append(rules, fmt.Sprintf("@@||%s^$important", host))
+		addHost(d)
 	}
 	return rules
 }
@@ -120,7 +131,7 @@ func BuildInitialConfigYAML(p ConfigParams) ([]byte, error) {
 	queryLogMap := ensureYAMLSubMap(doc, "querylog")
 	setYAMLScalar(queryLogMap, "interval", queryLogInterval, "!!str")
 	setYAMLScalar(queryLogMap, "file_enabled", strconv.FormatBool(!p.IsOpenWrt), "!!bool")
-	setYAMLStringSlice(doc, "user_rules", extractSubWhitelistRules(p.SubURLs))
+	setYAMLStringSlice(doc, "user_rules", extractSubWhitelistRules(p.SubURLs, p.WhitelistDomains...))
 
 	out, err := yaml.Marshal(&root)
 	if err != nil {

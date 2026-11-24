@@ -12,17 +12,19 @@ import (
 
 // Env 封装 VLAN 服务所需的全部可替换宿主机 I/O 依赖（nil 自动回退生产默认实现，严禁包级全局变量）。
 type Env struct {
-	IsOpenWrt       func() bool
-	RunUCI          func(ctx context.Context, args ...string) (string, error)
-	BatchUCI        func(ctx context.Context, commands []string) error
-	ReloadNetwork   func(ctx context.Context) error
-	SyncProxyBypass func(ctx context.Context, cidrs []string) error
-	ReadFile        func(path string) ([]byte, error)
-	ListNetDevs     func() ([]string, error)
-	ReadIPv4Addrs   func() (map[string]string, error)
-	ProxyBypassFile string
-	BoardJSONPath   string
-	DHCPLeasesPath  string
+	IsOpenWrt             func() bool
+	RunUCI                func(ctx context.Context, args ...string) (string, error)
+	BatchUCI              func(ctx context.Context, commands []string) error
+	ReloadNetwork         func(ctx context.Context) error
+	ReloadNetworkWithOpts func(ctx context.Context, opts ReloadOptions) error
+	PrepareDMAHeadroom    func()
+	SyncProxyBypass       func(ctx context.Context, cidrs []string) error
+	ReadFile              func(path string) ([]byte, error)
+	ListNetDevs           func() ([]string, error)
+	ReadIPv4Addrs         func() (map[string]string, error)
+	ProxyBypassFile       string
+	BoardJSONPath         string
+	DHCPLeasesPath        string
 }
 
 // Service 提供 OpenWrt VLAN 分段的硬件探测、只读总览、Dry-Run 预览、原子应用与安全删除编排。
@@ -232,8 +234,8 @@ func (s *Service) PreviewSave(ctx context.Context, callerIP string, rawReq SaveS
 	}, nil
 }
 
-// ApplySave 校验并原子提交 VLAN 变更至 OpenWrt UCI、同步透明代理绕行清单并热重载网络服务。
-func (s *Service) ApplySave(ctx context.Context, callerIP string, rawReq SaveSegmentRequest) (*ApplyResult, error) {
+// CommitSave 执行第一阶段：校验、原子写入 UCI 变更与透明代理绕行清单（不阻塞等待网络/无线重载）。
+func (s *Service) CommitSave(ctx context.Context, callerIP string, rawReq SaveSegmentRequest) (*ApplyResult, error) {
 	prev, err := s.PreviewSave(ctx, callerIP, rawReq)
 	if err != nil {
 		return nil, err
@@ -248,9 +250,6 @@ func (s *Service) ApplySave(ctx context.Context, callerIP string, rawReq SaveSeg
 	if err := s.syncProxyBypass(ctx, prev.ProxyBypassCIDRs); err != nil {
 		return nil, fmt.Errorf("同步透明代理绕行规则失败: %w", err)
 	}
-	if err := s.reloadNetwork(ctx); err != nil {
-		return nil, fmt.Errorf("重载 OpenWrt 网络服务失败: %w", err)
-	}
 
 	req := normalizeSaveRequest(rawReq)
 	return &ApplyResult{
@@ -260,7 +259,22 @@ func (s *Service) ApplySave(ctx context.Context, callerIP string, rawReq SaveSeg
 		UCICommands:       prev.UCICommands,
 		Warnings:          prev.Warnings,
 		UpstreamRouteHint: prev.UpstreamRouteHint,
+		ReloadOpts: ReloadOptions{
+			WirelessChanged: slices.Contains(DirtyUCIPackages(prev.UCICommands), "wireless"),
+		},
 	}, nil
+}
+
+// ApplySave 校验并原子提交 VLAN 变更至 OpenWrt UCI、同步透明代理绕行清单并热重载网络服务。
+func (s *Service) ApplySave(ctx context.Context, callerIP string, rawReq SaveSegmentRequest) (*ApplyResult, error) {
+	res, err := s.CommitSave(ctx, callerIP, rawReq)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.ReloadWithOptions(ctx, res.ReloadOpts); err != nil {
+		return nil, fmt.Errorf("重载 OpenWrt 网络服务失败: %w", err)
+	}
+	return res, nil
 }
 
 // PreviewDelete 校验删除指定 VLAN 分段的安全性并返回变更摘要与底层清理指令。
@@ -309,8 +323,8 @@ func (s *Service) PreviewDelete(ctx context.Context, callerIP, segID string) (*P
 	}, nil
 }
 
-// ApplyDelete 执行受保护的 VLAN 分段卸载、同步绕行清单并热重载网络服务。
-func (s *Service) ApplyDelete(ctx context.Context, callerIP, segID string) (*ApplyResult, error) {
+// CommitDelete 执行第一阶段：校验删除安全性、原子写入 UCI 清理指令并同步代理绕行清单（不阻塞等待网络重载）。
+func (s *Service) CommitDelete(ctx context.Context, callerIP, segID string) (*ApplyResult, error) {
 	prev, err := s.PreviewDelete(ctx, callerIP, segID)
 	if err != nil {
 		return nil, err
@@ -324,15 +338,27 @@ func (s *Service) ApplyDelete(ctx context.Context, callerIP, segID string) (*App
 	if err := s.syncProxyBypass(ctx, prev.ProxyBypassCIDRs); err != nil {
 		return nil, fmt.Errorf("同步透明代理绕行规则失败: %w", err)
 	}
-	if err := s.reloadNetwork(ctx); err != nil {
-		return nil, fmt.Errorf("重载 OpenWrt 网络服务失败: %w", err)
-	}
 	return &ApplyResult{
 		OK:           true,
 		SegmentID:    strings.ToLower(strings.TrimSpace(segID)),
 		PlainSummary: prev.PlainSummary,
 		UCICommands:  prev.UCICommands,
+		ReloadOpts: ReloadOptions{
+			WirelessChanged: slices.Contains(DirtyUCIPackages(prev.UCICommands), "wireless"),
+		},
 	}, nil
+}
+
+// ApplyDelete 执行受保护的 VLAN 分段卸载、同步绕行清单并热重载网络服务。
+func (s *Service) ApplyDelete(ctx context.Context, callerIP, segID string) (*ApplyResult, error) {
+	res, err := s.CommitDelete(ctx, callerIP, segID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.ReloadWithOptions(ctx, res.ReloadOpts); err != nil {
+		return nil, fmt.Errorf("重载 OpenWrt 网络服务失败: %w", err)
+	}
+	return res, nil
 }
 
 func (s *Service) syncProxyBypass(ctx context.Context, cidrs []string) error {

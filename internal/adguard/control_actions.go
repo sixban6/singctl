@@ -11,6 +11,8 @@ import (
 	"slices"
 	"strings"
 
+	"singctl/internal/constant"
+
 	"gopkg.in/yaml.v3"
 )
 
@@ -91,14 +93,43 @@ func updateWhitelistInRules(existing []string, domain, targetRule string, allow 
 	return out
 }
 
-// SyncSubscriptionWhitelist 确保 singctl.yaml 中最新的机场/自建订阅域名全部位于 AdGuard 白名单中，防止规则误杀订阅拉取。
+func (m *Manager) effectiveSafeWhitelistDomains() []string {
+	blocked := make(map[string]struct{})
+	if m.cfg != nil {
+		for _, b := range m.cfg.CustomRules.Block {
+			if strings.TrimSpace(b.SourceIP) != "" {
+				continue
+			}
+			if dom := normalizeAdGuardTarget(b.Target); dom != "" {
+				blocked[dom] = struct{}{}
+			}
+		}
+	}
+	out := make([]string, 0, len(constant.DefaultAdBlockSafeDomains)+8)
+	for _, d := range constant.DefaultAdBlockSafeDomains {
+		norm := normalizeAdGuardTarget(d)
+		if norm == "" {
+			continue
+		}
+		if _, isBlocked := blocked[norm]; isBlocked {
+			continue
+		}
+		out = append(out, norm)
+	}
+	if m.cfg != nil {
+		out = append(out, m.cfg.DNS.Whitelist...)
+	}
+	return out
+}
+
+// SyncSubscriptionWhitelist 确保 singctl.yaml 中最新的订阅域名、内置防 Anti-AD 误杀基线（剔除显式拉黑项）与用户白名单全部位于 AdGuard 高优放行列表。
 func (m *Manager) SyncSubscriptionWhitelist(ctx context.Context, subURLs []string) error {
 	if !m.isBinaryPresent() {
 		if _, err := os.Stat(m.aghConfigFile); os.IsNotExist(err) {
 			return nil
 		}
 	}
-	subRules := extractSubWhitelistRules(subURLs)
+	subRules := extractSubWhitelistRules(subURLs, m.effectiveSafeWhitelistDomains()...)
 	if len(subRules) == 0 {
 		return nil
 	}

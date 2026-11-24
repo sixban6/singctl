@@ -180,6 +180,8 @@ func (m *Manager) Arm(ctx context.Context, req ArmRequest) (*State, error) {
 	}
 
 	prevState, _ := m.readStateFile()
+	nowUnix := m.now().Unix()
+	inheritPrevBaseline := prevState != nil && prevState.Token != "" && nowUnix < prevState.DeadlineUnix
 
 	token, err := generateRandomToken()
 	if err != nil {
@@ -190,23 +192,35 @@ func (m *Manager) Arm(ctx context.Context, req ArmRequest) (*State, error) {
 	snapshots := make(map[string]string, len(sortedNames))
 	for _, name := range sortedNames {
 		srcPath := filepath.Clean(strings.TrimSpace(req.SnapshotFiles[name]))
-		info, statErr := os.Stat(srcPath)
-		if errors.Is(statErr, os.ErrNotExist) {
-			continue
+		var raw []byte
+		inherited := false
+		if inheritPrevBaseline && prevState.Snapshots[name] == srcPath {
+			prevSnapFile := filepath.Join(m.stateDir, snapshotsDirName, prevState.Token, name)
+			if prevRaw, rErr := os.ReadFile(prevSnapFile); rErr == nil {
+				raw = prevRaw
+				inherited = true
+			}
 		}
-		if statErr != nil {
-			_ = os.RemoveAll(snapDir)
-			return nil, fmt.Errorf("stat snapshot source %s: %w", srcPath, statErr)
-		}
-		if info.IsDir() {
-			_ = os.RemoveAll(snapDir)
-			return nil, fmt.Errorf("snapshot source %s is a directory", srcPath)
-		}
+		if !inherited {
+			info, statErr := os.Stat(srcPath)
+			if errors.Is(statErr, os.ErrNotExist) {
+				continue
+			}
+			if statErr != nil {
+				_ = os.RemoveAll(snapDir)
+				return nil, fmt.Errorf("stat snapshot source %s: %w", srcPath, statErr)
+			}
+			if info.IsDir() {
+				_ = os.RemoveAll(snapDir)
+				return nil, fmt.Errorf("snapshot source %s is a directory", srcPath)
+			}
 
-		raw, readErr := os.ReadFile(srcPath)
-		if readErr != nil {
-			_ = os.RemoveAll(snapDir)
-			return nil, fmt.Errorf("read snapshot source %s: %w", srcPath, readErr)
+			var readErr error
+			raw, readErr = os.ReadFile(srcPath)
+			if readErr != nil {
+				_ = os.RemoveAll(snapDir)
+				return nil, fmt.Errorf("read snapshot source %s: %w", srcPath, readErr)
+			}
 		}
 		if mkErr := os.MkdirAll(snapDir, 0700); mkErr != nil {
 			_ = os.RemoveAll(snapDir)
@@ -221,7 +235,6 @@ func (m *Manager) Arm(ctx context.Context, req ArmRequest) (*State, error) {
 		snapshots[name] = srcPath
 	}
 
-	nowUnix := m.now().Unix()
 	st := State{
 		Token:             token,
 		Reason:            strings.TrimSpace(req.Reason),

@@ -175,10 +175,10 @@ func (e *SmartDNSEngine) buildConfigInput() smartdns.ConfigInput {
 		ups = smartdns.DefaultUpstreams()
 	}
 
-	subs := singbox.ExtractSubscriptionDomains(e.cfg)
-	wl := make([]string, 0, len(e.cfg.DNS.Whitelist)+len(subs))
-	seenWL := make(map[string]struct{}, len(e.cfg.DNS.Whitelist)+len(subs))
-	for _, raw := range append(slices.Clone(e.cfg.DNS.Whitelist), subs...) {
+	effectiveWL := singbox.EffectiveAdBlockWhitelist(e.cfg)
+	wl := make([]string, 0, len(effectiveWL))
+	seenWL := make(map[string]struct{}, len(effectiveWL))
+	for _, raw := range effectiveWL {
 		if dom, err := smartdns.ValidateDomain(strings.TrimPrefix(strings.TrimSpace(raw), "*.")); err == nil {
 			if _, dup := seenWL[dom]; !dup {
 				seenWL[dom] = struct{}{}

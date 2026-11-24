@@ -481,6 +481,7 @@ func (m *Manager) ensureConfigFile(lanIP string, updateAuth bool) error {
 		IsOpenWrt:         sysinfo.IsOpenWrt(),
 		DisablePrivatePTR: true,
 		SubURLs:           subURLs,
+		WhitelistDomains:  m.effectiveSafeWhitelistDomains(),
 	})
 	if err != nil {
 		return err

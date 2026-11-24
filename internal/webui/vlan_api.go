@@ -3,16 +3,51 @@ package webui
 
 import (
 	"cmp"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"singctl/internal/constant"
+	"singctl/internal/logger"
 	"singctl/internal/safecommit"
 	"singctl/internal/vlan"
 )
+
+const defaultVLANAsyncReloadDelay = 600 * time.Millisecond
+
+func (s *Server) vlanAsyncReloadDelay() (time.Duration, bool) {
+	if s.opts.VLANAsyncReloadDelayForTest != nil {
+		d := *s.opts.VLANAsyncReloadDelayForTest
+		return d, d > 0
+	}
+	if s.opts.VLANServiceForTest != nil {
+		return 0, false
+	}
+	return defaultVLANAsyncReloadDelay, true
+}
+
+func (s *Server) scheduleVLANAsyncReload(reqCtx context.Context, svc *vlan.Service, delay time.Duration, opts vlan.ReloadOptions) {
+	bgCtx, cancel := context.WithTimeout(context.WithoutCancel(reqCtx), 35*time.Second)
+	go func() {
+		defer cancel()
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-bgCtx.Done():
+			return
+		case <-timer.C:
+		}
+		s.vlanApplyMu.Lock()
+		defer s.vlanApplyMu.Unlock()
+		if err := svc.ReloadWithOptions(bgCtx, opts); err != nil {
+			logger.Warn("[VLAN] 延迟异步重载 OpenWrt 网络服务失败: %v", err)
+		}
+	}()
+}
 
 func (s *Server) vlanService() *vlan.Service {
 	if s.opts.VLANServiceForTest != nil {
@@ -80,9 +115,11 @@ func (s *Server) handleVLANApplyPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.vlanApplyMu.Lock()
 	reason := "VLAN 子网变更: " + cmp.Or(strings.TrimSpace(req.DisplayName), strings.TrimSpace(req.ID))
 	scState, scErr := s.armSafeCommitWithExtraSnapshots(r.Context(), req.TTLSec, reason, vlanSnapshotFiles())
 	if scErr != nil {
+		s.vlanApplyMu.Unlock()
 		if errors.Is(scErr, safecommit.ErrInvalidTTL) {
 			writeJSONError(w, http.StatusBadRequest, scErr.Error())
 			return
@@ -91,15 +128,26 @@ func (s *Server) handleVLANApplyPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, err := svc.ApplySave(r.Context(), caller, req)
+	res, err := svc.CommitSave(r.Context(), caller, req)
 	if err != nil {
+		s.vlanApplyMu.Unlock()
 		writeJSONError(w, http.StatusInternalServerError, "应用 VLAN 配置失败: "+err.Error())
 		return
 	}
+	delay, async := s.vlanAsyncReloadDelay()
+	if !async {
+		if rErr := svc.ReloadWithOptions(r.Context(), res.ReloadOpts); rErr != nil {
+			s.vlanApplyMu.Unlock()
+			writeJSONError(w, http.StatusInternalServerError, "重载 OpenWrt 网络服务失败: "+rErr.Error())
+			return
+		}
+	}
+	ov, _ := svc.Overview(r.Context(), caller)
+	s.vlanApplyMu.Unlock()
+
 	res.SafeCommitToken = scState.Token
 	res.SafeCommitTTLSec = scState.TTLSec
 
-	ov, _ := svc.Overview(r.Context(), caller)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":                res.OK,
 		"segmentId":         res.SegmentID,
@@ -112,6 +160,12 @@ func (s *Server) handleVLANApplyPost(w http.ResponseWriter, r *http.Request) {
 		"safeCommit":        s.safeCommitStatusPayload(s.readConfigOrEmpty()),
 		"overview":          ov,
 	})
+	if async {
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		s.scheduleVLANAsyncReload(r.Context(), svc, delay, res.ReloadOpts)
+	}
 }
 
 func (s *Server) handleVLANDeletePreviewPost(w http.ResponseWriter, r *http.Request) {
@@ -145,21 +199,34 @@ func (s *Server) handleVLANDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.vlanApplyMu.Lock()
 	scState, scErr := s.armSafeCommitWithExtraSnapshots(r.Context(), 0, "删除 VLAN 子网: "+segID, vlanSnapshotFiles())
 	if scErr != nil {
+		s.vlanApplyMu.Unlock()
 		writeJSONError(w, http.StatusInternalServerError, "武装防失联安全回滚保险丝失败，已中止删除: "+scErr.Error())
 		return
 	}
 
-	res, err := svc.ApplyDelete(r.Context(), caller, segID)
+	res, err := svc.CommitDelete(r.Context(), caller, segID)
 	if err != nil {
+		s.vlanApplyMu.Unlock()
 		writeJSONError(w, http.StatusInternalServerError, "删除 VLAN 子网失败: "+err.Error())
 		return
 	}
+	delay, async := s.vlanAsyncReloadDelay()
+	if !async {
+		if rErr := svc.ReloadWithOptions(r.Context(), res.ReloadOpts); rErr != nil {
+			s.vlanApplyMu.Unlock()
+			writeJSONError(w, http.StatusInternalServerError, "重载 OpenWrt 网络服务失败: "+rErr.Error())
+			return
+		}
+	}
+	ov, _ := svc.Overview(r.Context(), caller)
+	s.vlanApplyMu.Unlock()
+
 	res.SafeCommitToken = scState.Token
 	res.SafeCommitTTLSec = scState.TTLSec
 
-	ov, _ := svc.Overview(r.Context(), caller)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":               res.OK,
 		"segmentId":        res.SegmentID,
@@ -170,4 +237,10 @@ func (s *Server) handleVLANDelete(w http.ResponseWriter, r *http.Request) {
 		"safeCommit":       s.safeCommitStatusPayload(s.readConfigOrEmpty()),
 		"overview":         ov,
 	})
+	if async {
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		s.scheduleVLANAsyncReload(r.Context(), svc, delay, res.ReloadOpts)
+	}
 }

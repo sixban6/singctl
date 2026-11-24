@@ -2,8 +2,10 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
-	"os"
+	"os/signal"
+	"syscall"
 
 	"singctl/internal/daemon"
 	"singctl/internal/logger"
@@ -26,6 +28,9 @@ func NewWebCmd(version string) *cobra.Command {
 func NewWebCmdWithDeps(version string, deps WebCmdDeps) *cobra.Command {
 	var listen string
 	var password string
+	var managed bool
+	var noService bool
+	var clearPassword bool
 
 	root := &cobra.Command{
 		Use:     "web",
@@ -34,26 +39,36 @@ func NewWebCmdWithDeps(version string, deps WebCmdDeps) *cobra.Command {
 		Long: `启动 SingCtl Web 管理界面,在浏览器中管理 sing-box、守护进程、Tailscale、防火墙和配置。
 
   singctl web                          # 前台运行(Ctrl+C 停止,适合调试)
-  singctl web start                    # 后台启动(推荐)
+  singctl web start                    # 后台启动(Linux/OpenWrt 自动注册开机自启与崩溃拉起守护)
   singctl web stop                     # 停止后台 WebUI (简写 singctl w s)
   singctl web status                   # 查看后台运行状态
   singctl web -l 192.168.1.1:8090      # 指定监听地址
   singctl web --password secret        # 启用 Basic Auth(admin/secret)
 
-也可通过环境变量 SINGCTL_WEB_PASSWORD 设置口令。
-OpenWrt 开机自启请参考 docs/webui.md 的 procd 配置。`,
+也可通过环境变量 SINGCTL_WEB_PASSWORD 设置口令。`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) > 0 {
 				return fmt.Errorf("未知子命令: %q (可用: start, stop, status)", args[0])
 			}
 
 			configPath := cmd.Flag("config").Value.String()
-			server := webui.New(webui.Options{
+			opts := webui.Options{
 				ConfigPath: configPath,
 				Listen:     listen,
-				Password:   resolveWebPassword(password),
+				Password:   webui.ResolveWebPassword(password, configPath),
 				Version:    version,
-			})
+			}
+			if managed {
+				cleanup, managedBy := webui.SetupManagedRuntime(opts)
+				defer cleanup()
+				opts.OnReady = func(actualListen string) {
+					webui.WriteManagedReadyState(opts, actualListen, managedBy)
+				}
+				sigCtx, stopSig := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+				defer stopSig()
+				return webui.New(opts).ServeContext(sigCtx)
+			}
+			server := webui.New(opts)
 			logger.Info("前台运行中,按 Ctrl+C 停止;后台模式请使用: singctl web start")
 			return server.ListenAndServe()
 		},
@@ -64,16 +79,29 @@ OpenWrt 开机自启请参考 docs/webui.md 的 procd 配置。`,
 		"监听地址 / Listen address (e.g. :8090 or 127.0.0.1:8090)")
 	root.PersistentFlags().StringVarP(&password, "password", "p", "",
 		"访问口令(用户名固定 admin,留空则不鉴权) / Web UI password (username: admin)")
+	root.Flags().BoolVar(&managed, "managed", false, "由 procd/systemd 系统服务托管运行（内部标志）")
+	_ = root.Flags().MarkHidden("managed")
+
+	startCmd := newWebStartCmd(func() webui.Options {
+		cfgPath := root.Flag("config").Value.String()
+		resolvedPw := webui.ResolveWebPassword(password, cfgPath)
+		if clearPassword {
+			resolvedPw = ""
+		}
+		return webui.Options{
+			ConfigPath:    cfgPath,
+			Listen:        listen,
+			Password:      resolvedPw,
+			NoService:     noService,
+			ClearPassword: clearPassword,
+			Version:       version,
+		}
+	}, deps.Background)
+	startCmd.Flags().BoolVar(&noService, "no-service", false, "禁用 procd/systemd 自动托管，仅以独立后台进程启动")
+	startCmd.Flags().BoolVar(&clearPassword, "clear-password", false, "清空已保存的 0600 访问口令文件")
 
 	root.AddCommand(
-		newWebStartCmd(func() webui.Options {
-			return webui.Options{
-				ConfigPath: root.Flag("config").Value.String(),
-				Listen:     listen,
-				Password:   resolveWebPassword(password),
-				Version:    version,
-			}
-		}, deps.Background),
+		startCmd,
 		newWebStopCmd(deps.Background),
 		newWebRestartCmd(func() string {
 			return root.Flag("config").Value.String()
@@ -82,29 +110,6 @@ OpenWrt 开机自启请参考 docs/webui.md 的 procd 配置。`,
 	)
 
 	return root
-}
-
-func resolveWebPassword(password string) string {
-	if password != "" {
-		return password
-	}
-	// 逆序扫描环境变量（兼容旧版 <= v1.14.126 ScheduleDetachedRestart 使用 append 追加同名 SINGCTL_WEB_PASSWORD 的场景，取最新非空值）
-	env := os.Environ()
-	for i := len(env) - 1; i >= 0; i-- {
-		if k, v, ok := cutEnv(env[i]); ok && k == "SINGCTL_WEB_PASSWORD" && v != "" {
-			return v
-		}
-	}
-	return os.Getenv("SINGCTL_WEB_PASSWORD")
-}
-
-func cutEnv(kv string) (string, string, bool) {
-	for i := 0; i < len(kv); i++ {
-		if kv[i] == '=' {
-			return kv[:i], kv[i+1:], true
-		}
-	}
-	return "", "", false
 }
 
 func newWebStartCmd(opts func() webui.Options, bgDeps webui.BackgroundDeps) *cobra.Command {
@@ -121,8 +126,8 @@ func newWebStartCmd(opts func() webui.Options, bgDeps webui.BackgroundDeps) *cob
 				}
 				return webui.New(o).ListenAndServe()
 			}
-			// 父进程路径:若已内嵌于守护进程则幂等返回成功，否则 fork 后台子进程并等待就绪
-			if bgDeps.EmbeddedStatus == nil && bgDeps.RestartDaemon == nil {
+			// 父进程路径:若已内嵌于守护进程则幂等返回成功，否则自动走系统服务托管或独立后台模式
+			if bgDeps.EmbeddedStatus == nil && bgDeps.RestartDaemon == nil && bgDeps.ServiceMgr == nil {
 				return webui.StartBackground(opts())
 			}
 			return webui.StartBackgroundWithDeps(opts(), bgDeps)
@@ -158,7 +163,7 @@ func newWebStopCmd(bgDeps webui.BackgroundDeps) *cobra.Command {
 		Aliases: []string{"s"},
 		Short:   "停止后台 WebUI / Stop background WebUI",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			stopped, err := webui.StopWeb()
+			stopped, err := webui.StopWebWithDeps(bgDeps)
 			if err != nil {
 				return err
 			}
@@ -195,7 +200,15 @@ func newWebStatusCmd(bgDeps webui.BackgroundDeps) *cobra.Command {
 				logger.Info("日志: %s   状态: %s", daemon.GetDaemonLogPath(), daemon.GetWebEmbeddedPath())
 				return nil
 			}
-			logger.Success("WebUI 后台运行中 (pid=%d)", st.Pid)
+			if st.ManagedBy != "" {
+				if st.Pid > 0 {
+					logger.Success("WebUI 后台运行中 (%s 系统服务托管, pid=%d)", st.ManagedBy, st.Pid)
+				} else {
+					logger.Success("WebUI 后台运行中 (%s 系统服务托管)", st.ManagedBy)
+				}
+			} else {
+				logger.Success("WebUI 后台运行中 (pid=%d)", st.Pid)
+			}
 			for _, u := range webui.ListenURLs(st.Listen) {
 				logger.Info("  ➜  http://%s", u)
 			}
