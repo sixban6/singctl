@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { AlertTriangle, Laptop, Network, Search, ShieldCheck, X } from 'lucide-react';
+import { AlertTriangle, Laptop, Network, ShieldCheck, X } from 'lucide-react';
 import {
   Badge,
   Button,
@@ -9,25 +9,14 @@ import {
   formatBytes as fmtBytes,
 } from '../../../ui';
 import { AuditDeviceSummary, AuditReport } from '../../types';
+import { AuditSelectedDevice } from './auditFlowModel';
 import { formatDeviceRoleLabel } from './auditHelpers';
 
 export interface AuditDevicesAndBannersProps {
   report: AuditReport | null;
   loading: boolean;
-  deviceFilter: string;
-  onDeviceFilterChange: (v: string) => void;
-  networkFilter: '' | 'tcp' | 'udp';
-  onNetworkFilterChange: (v: '' | 'tcp' | 'udp') => void;
-  axisFilter: '' | 'security' | 'privacy';
-  onAxisFilterChange: (v: '' | 'security' | 'privacy') => void;
-  onlyActive: boolean;
-  onOnlyActiveChange: (v: boolean) => void;
-  onlySuspect: boolean;
-  onOnlySuspectChange: (v: boolean) => void;
-  autoRefresh: boolean;
-  onAutoRefreshChange: (v: boolean) => void;
-  aiEnabled: boolean;
-  onToggleAI: (v: boolean) => void;
+  selectedDevice: AuditSelectedDevice | null;
+  onSelectDevice: (device: AuditSelectedDevice | null) => void;
   pcdnToggleBusy: boolean;
   pcdnBannerDismissed: boolean;
   onDismissPcdnBanner: () => void;
@@ -37,20 +26,8 @@ export interface AuditDevicesAndBannersProps {
 export const AuditDevicesAndBanners: React.FC<AuditDevicesAndBannersProps> = ({
   report,
   loading,
-  deviceFilter,
-  onDeviceFilterChange,
-  networkFilter,
-  onNetworkFilterChange,
-  axisFilter,
-  onAxisFilterChange,
-  onlyActive,
-  onOnlyActiveChange,
-  onlySuspect,
-  onOnlySuspectChange,
-  autoRefresh,
-  onAutoRefreshChange,
-  aiEnabled,
-  onToggleAI,
+  selectedDevice,
+  onSelectDevice,
   pcdnToggleBusy,
   pcdnBannerDismissed,
   onDismissPcdnBanner,
@@ -118,7 +95,7 @@ export const AuditDevicesAndBanners: React.FC<AuditDevicesAndBannersProps> = ({
     },
     {
       key: 'susp',
-      header: '可疑连接',
+      header: '待关注',
       align: 'right',
       render: (d) => (
         <span className="font-mono tnum text-xs font-semibold">
@@ -153,12 +130,22 @@ export const AuditDevicesAndBanners: React.FC<AuditDevicesAndBannersProps> = ({
       header: '操作',
       align: 'right',
       render: (d) => {
-        const active = deviceFilter.trim() === d.deviceIp;
+        const active = selectedDevice?.ip.toLowerCase() === d.deviceIp.toLowerCase();
         return (
           <Button
             size="xs"
             variant={active ? 'primary' : 'secondary'}
-            onClick={() => onDeviceFilterChange(active ? '' : d.deviceIp)}
+            onClick={() =>
+              onSelectDevice(
+                active
+                  ? null
+                  : {
+                      ip: d.deviceIp,
+                      label: d.deviceName || d.deviceIp,
+                      mac: d.deviceMac,
+                    },
+              )
+            }
           >
             {active ? '取消筛选' : '只看此设备'}
           </Button>
@@ -169,91 +156,6 @@ export const AuditDevicesAndBanners: React.FC<AuditDevicesAndBannersProps> = ({
 
   return (
     <>
-      <SectionCard>
-        <div className="flex flex-wrap items-center gap-2.5">
-          <div className="relative flex-1 min-w-[180px] max-w-xs">
-            <Search className="w-3.5 h-3.5 text-muted absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-            <input
-              type="text"
-              value={deviceFilter}
-              onChange={(e) => onDeviceFilterChange(e.target.value)}
-              placeholder="搜索域名、IP、设备、节点或规则…"
-              className="sc-input w-full pl-8 pr-7 py-1.5 text-xs"
-            />
-            {deviceFilter && (
-              <button
-                type="button"
-                onClick={() => onDeviceFilterChange('')}
-                className="absolute right-2 top-1/2 -translate-y-1/2 text-muted hover:text-primary cursor-pointer"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            )}
-          </div>
-
-          <select
-            aria-label="按传输协议筛选"
-            value={networkFilter}
-            onChange={(e) => onNetworkFilterChange(e.target.value as '' | 'tcp' | 'udp')}
-            className="sc-input px-2.5 py-1.5 text-xs"
-          >
-            <option value="">全部协议</option>
-            <option value="tcp">仅 TCP</option>
-            <option value="udp">仅 UDP / QUIC</option>
-          </select>
-
-          <select
-            value={axisFilter}
-            onChange={(e) => onAxisFilterChange(e.target.value as '' | 'security' | 'privacy')}
-            className="sc-input px-2.5 py-1.5 text-xs"
-          >
-            <option value="">全部类型 (安全 + 隐私)</option>
-            <option value="security">仅看安全异常</option>
-            <option value="privacy">仅看隐私追踪</option>
-          </select>
-
-          <label className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border border-subtle bg-surface2 text-xs text-secondary cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={onlyActive}
-              onChange={(e) => onOnlyActiveChange(e.target.checked)}
-              className="accent-emerald-500"
-            />
-            仅看当前活跃
-          </label>
-
-          <label className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border border-subtle bg-surface2 text-xs text-secondary cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={onlySuspect}
-              onChange={(e) => onOnlySuspectChange(e.target.checked)}
-              className="accent-emerald-500"
-            />
-            仅看关注/高危
-          </label>
-
-          <label className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border border-subtle bg-surface2 text-xs text-secondary cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={autoRefresh}
-              onChange={(e) => onAutoRefreshChange(e.target.checked)}
-              className="accent-emerald-500"
-            />
-            自动刷新 (5s)
-          </label>
-
-          <label className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border border-subtle bg-surface2 text-xs text-secondary cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={aiEnabled}
-              onChange={(e) => onToggleAI(e.target.checked)}
-              className="accent-emerald-500"
-            />
-            AI 深度研判
-          </label>
-        </div>
-      </SectionCard>
-
       {report &&
         report.pcdnBlockEnabled === false &&
         (report.pcdnDetectedFlows || 0) > 0 &&
@@ -309,7 +211,7 @@ export const AuditDevicesAndBanners: React.FC<AuditDevicesAndBannersProps> = ({
 
       <SectionCard
         title="局域网设备活跃排行"
-        subtitle={`共 ${report?.devices?.length || 0} 台活跃设备，默认展示前 12 台`}
+        subtitle={`共 ${report?.devices?.length || 0} 台活跃设备，默认展示前 12 台 · 点击「只看此设备」联动下方明细`}
         icon={<Laptop className="w-4 h-4" />}
         collapsible
         defaultOpen

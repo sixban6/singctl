@@ -190,6 +190,47 @@ func (s *Server) handleAuditBlock(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
+type auditBlockBatchRequest struct {
+	Items []audit.BlockBatchItem `json:"items"`
+}
+
+// handleAuditBlockBatch 执行原子批量拉黑（单次持久化 + 单次 sing-box/DNS 热重载 + 存量连接批量斩断）。
+func (s *Server) handleAuditBlockBatch(w http.ResponseWriter, r *http.Request) {
+	if !s.auditLimiter.Allow(r, "write", 60) {
+		writeJSONError(w, http.StatusTooManyRequests, "操作过于频繁，请稍后再试")
+		return
+	}
+
+	var req auditBlockBatchRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "无效的 JSON 请求体")
+		return
+	}
+	if len(req.Items) == 0 {
+		writeJSONError(w, http.StatusBadRequest, "items 不能为空")
+		return
+	}
+	if len(req.Items) > 100 {
+		writeJSONError(w, http.StatusBadRequest, "单次批量拉黑最多支持 100 条目标")
+		return
+	}
+
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
+
+	cfg := s.loadMutableConfig()
+	enforcer := s.newAuditEnforcer(cfg)
+	res, err := enforcer.BlockBatch(r.Context(), req.Items)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.invalidateConfigStore()
+	s.invalidateIOSCache()
+	_ = daemon.NotifyReload()
+	writeJSON(w, http.StatusOK, res)
+}
+
 // handleAuditUnblock 从 Sing-Box 与 AdGuard Home DNS 黑名单中一键解封目标。
 func (s *Server) handleAuditUnblock(w http.ResponseWriter, r *http.Request) {
 	if !s.auditLimiter.Allow(r, "write", 120) {

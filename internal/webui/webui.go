@@ -316,6 +316,7 @@ func (s *Server) registerRoutes() {
 	s.Mux.HandleFunc("POST /api/audit/ai-models", s.guard(s.handleAuditAIModelsPost))
 	s.Mux.HandleFunc("POST /api/audit/ai-review", s.guard(s.handleAuditAIReviewPost))
 	s.Mux.HandleFunc("POST /api/audit/block", s.guard(s.handleAuditBlock))
+	s.Mux.HandleFunc("POST /api/audit/block-batch", s.guard(s.handleAuditBlockBatch))
 	s.Mux.HandleFunc("POST /api/audit/unblock", s.guard(s.handleAuditUnblock))
 	s.Mux.HandleFunc("POST /api/audit/pcdn-block", s.guard(s.handleAuditPCDNBlock))
 	s.Mux.HandleFunc("POST /api/audit/throttle", s.guard(s.handleAuditThrottle))

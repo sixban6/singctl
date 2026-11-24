@@ -2,6 +2,8 @@ import {
   AuditAIConfig,
   AuditAIModelsResponse,
   AuditAIReview,
+  AuditBlockBatchItem,
+  AuditBlockBatchResult,
   AuditFlowRecord,
   AuditReport,
 } from '../types';
@@ -38,6 +40,12 @@ export const auditApi = {
     request<{ message?: string }>('/api/audit/block', {
       method: 'POST',
       body: JSON.stringify({ target, sourceIp, reason }),
+    }),
+
+  blockAuditBatch: (items: AuditBlockBatchItem[]) =>
+    request<AuditBlockBatchResult>('/api/audit/block-batch', {
+      method: 'POST',
+      body: JSON.stringify({ items }),
     }),
 
   unblockAuditTarget: (target: string, sourceIp: string) =>

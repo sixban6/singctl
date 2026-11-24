@@ -1,1 +1,0 @@
-import{P as e}from"./api-RdAhaU1_.js";var t={name:`arrow-right`,size:24,node:[[`path`,{d:`M5 12h14`,key:`1ays0h`}],[`path`,{d:`m12 5 7 7-7 7`,key:`xquz4c`}]]};t.node;var n=e(t),r={name:`chevron-up`,size:24,node:[[`path`,{d:`m18 15-6-6-6 6`,key:`153udz`}]]};r.node;var i=e(r);export{n,i as t};

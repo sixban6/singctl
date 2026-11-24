@@ -115,6 +115,23 @@ type PCDNSwarmSummary struct {
 	Suspicious    bool    `json:"suspicious"`
 }
 
+// ActiveConnDetail 记录单条活跃子连接的实时快照（支持抽屉内下钻单条 TCP/UDP 排障与精准断开）。
+type ActiveConnDetail struct {
+	ID          string   `json:"id"`
+	SourcePort  string   `json:"sourcePort,omitempty"`
+	DestIP      string   `json:"destIp,omitempty"`
+	DestPort    string   `json:"destPort,omitempty"`
+	InboundType string   `json:"inboundType,omitempty"`
+	Rule        string   `json:"rule,omitempty"`
+	Chains      []string `json:"chains,omitempty"`
+	Upload      int64    `json:"upload"`
+	Download    int64    `json:"download"`
+	UploadBps   float64  `json:"uploadBps,omitempty"`
+	DownloadBps float64  `json:"downloadBps,omitempty"`
+	Start       string   `json:"start,omitempty"`
+	DurationSec int64    `json:"durationSec,omitempty"`
+}
+
 // FlowRecord 表示按 (内网设备 IP, 目标域名/IP, 传输协议) 聚合后的连接行为画像。
 type FlowRecord struct {
 	Key               string                 `json:"key"`
@@ -142,11 +159,13 @@ type FlowRecord struct {
 	CurrentUploadBps   float64                `json:"currentUploadBps,omitempty"`
 	CurrentDownloadBps float64                `json:"currentDownloadBps,omitempty"`
 	ThrottledRateKBps  int                    `json:"throttledRateKbps,omitempty"`
-	ConnCount         int                    `json:"connCount"`
-	ActiveConns       int                    `json:"activeConns"`
-	ActiveConnIDs     []string               `json:"activeConnIds,omitempty"`
-	FirstSeen         string                 `json:"firstSeen"`
-	LastSeen          string                 `json:"lastSeen"`
+	ConnCount          int                    `json:"connCount"`
+	ActiveConns        int                    `json:"activeConns"`
+	ActiveConnIDs      []string               `json:"activeConnIds,omitempty"`
+	ActiveConnDetails  []ActiveConnDetail     `json:"activeConnDetails,omitempty"`
+	FirstSeen          string                 `json:"firstSeen"`
+	LastSeen           string                 `json:"lastSeen"`
+	LastSeenUnix       int64                  `json:"lastSeenUnix,omitempty"`
 	ActiveSpanSec     int64                  `json:"activeSpanSec,omitempty"` // 首次到末次观测跨度秒数（用于按小时归一化连接频率）
 	NightHits         int                    `json:"nightHits"`               // 凌晨 01:00-05:59 本地时间活跃采样次数
 	IntervalCV        float64                `json:"intervalCv"`              // 建连时间间隔变异系数 (越小越像机器定时心跳)
