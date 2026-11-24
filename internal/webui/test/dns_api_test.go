@@ -450,3 +450,78 @@ func TestWebUI_DNSAndAuditWhitelist_PersistsConfigAndHotSyncsSingBox(t *testing.
 		t.Fatalf("expected audit-allow.example.com synced into sing-box config.json:\n%s", string(sbAfterAudit))
 	}
 }
+
+func TestWebUI_DNSWhitelist_DefaultSandboxWorkConfigHotSynced(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "singctl.yaml")
+	sbPath := filepath.Join(tmpDir, "etc-sing-box", "config.json")
+	workPath := filepath.Join(tmpDir, "tmp-sing-box-work", "config.json")
+	smartBin := filepath.Join(tmpDir, "smartdns")
+	smartConf := filepath.Join(tmpDir, "smartdns.conf")
+	smartRules := filepath.Join(tmpDir, "smartdns-rules.d")
+
+	_ = os.MkdirAll(filepath.Dir(sbPath), 0700)
+	_ = os.MkdirAll(filepath.Dir(workPath), 0700)
+	_ = os.WriteFile(smartBin, []byte("#!/bin/sh\necho 'smartdns 1.2025.46'\n"), 0755)
+
+	sbRaw := `{
+  "outbounds": [{"type": "direct", "tag": "direct"}],
+  "dns": {
+    "servers": [{"tag": "dns_local", "type": "udp", "server": "127.0.0.1", "server_port": 5353}],
+    "rules": [{"rule_set": ["geosite-ad1", "geosite-ad2"], "action": "reject"}]
+  },
+  "route": {
+    "rule_set": [
+      {"tag": "geosite-ad1", "type": "inline", "rules": [{"domain_suffix": ["ad1.invalid"]}]},
+      {"tag": "geosite-ad2", "type": "inline", "rules": [{"domain_suffix": ["ad2.invalid"]}]}
+    ],
+    "rules": [{"action": "sniff"}, {"rule_set": ["geosite-ad1", "geosite-ad2"], "action": "reject"}]
+  }
+}`
+	_ = os.WriteFile(sbPath, []byte(sbRaw), 0600)
+	_ = os.WriteFile(workPath, []byte(sbRaw), 0600)
+	if err := config.Save(cfgPath, &config.Config{DNS: config.ClientDNSConfig{Engine: constant.DNSEngineSmartDNS}}); err != nil {
+		t.Fatal(err)
+	}
+
+	prevSB := constant.SingBoxConfigFile
+	prevWork := constant.SingBoxWorkConfigFile
+	constant.SingBoxConfigFile = sbPath
+	constant.SingBoxWorkConfigFile = workPath
+	t.Cleanup(func() {
+		constant.SingBoxConfigFile = prevSB
+		constant.SingBoxWorkConfigFile = prevWork
+	})
+
+	// Leave SingBoxConfigPath and SingBoxWorkConfigPath empty to exercise production ujail default path!
+	srv := webui.New(webui.Options{
+		ConfigPath:              cfgPath,
+		AdGuardBinPath:          filepath.Join(tmpDir, "missing-agh"),
+		AdGuardConfigPath:       filepath.Join(tmpDir, "missing-agh.yaml"),
+		SmartDNSBinPath:         smartBin,
+		SmartDNSConfigPath:      smartConf,
+		SmartDNSRulesDir:        smartRules,
+		SmartDNSAuditLogPath:    filepath.Join(tmpDir, "smartdns-audit.log"),
+		LocalDNSServiceMgr:      servicemgr.NewMock(),
+		SkipAdGuardProbeForTest: true,
+		LocalDNSProbeDNSForTest: func(string, time.Duration) error { return nil },
+	})
+
+	b, _ := json.Marshal(map[string]any{"domain": "work-sync.example.com", "action": "add"})
+	req := httptest.NewRequest(http.MethodPost, "/api/dns/whitelist", bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Requested-With", "SingCtlWebUI")
+	rec := httptest.NewRecorder()
+	srv.Mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/dns/whitelist failed: code=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	workAfter, err := os.ReadFile(workPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(workAfter), "work-sync.example.com") || !strings.Contains(string(workAfter), "wxaintpcos.wxqcloud.qq.com.cn") {
+		t.Fatalf("expected ujail sandbox work config synced with whitelist, got:\n%s", string(workAfter))
+	}
+}

@@ -33,8 +33,8 @@ func (s *Server) newDNSRegistry(cfg *config.Config) *localdns.Registry {
 	deps := localdns.EngineDeps{
 		ConfigPath:              s.opts.ConfigPath,
 		SaveConfig:              s.saveConfig,
-		SingBoxConfigPath:       cmp.Or(strings.TrimSpace(s.opts.SingBoxConfigPath), constant.SingBoxConfigFile),
-		SingBoxWorkConfigPath:   s.opts.SingBoxWorkConfigPath,
+		SingBoxConfigPath:       s.sbConfigPath(),
+		SingBoxWorkConfigPath:   s.sbWorkConfigPath(),
 		AdGuardBinPath:          s.opts.AdGuardBinPath,
 		AdGuardConfigPath:       s.opts.AdGuardConfigPath,
 		SmartDNSBinPath:         s.opts.SmartDNSBinPath,
@@ -263,7 +263,7 @@ func (s *Server) handleDNSUpstreamsPost(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) syncSingBoxAdBlockWhitelist(ctx context.Context, oldManaged, newManaged []string) error {
-	sbPath := cmp.Or(strings.TrimSpace(s.opts.SingBoxConfigPath), constant.SingBoxConfigFile)
+	sbPath := s.sbConfigPath()
 	rawBytes, err := os.ReadFile(sbPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -275,7 +275,7 @@ func (s *Server) syncSingBoxAdBlockWhitelist(ctx context.Context, oldManaged, ne
 	if err != nil || !changed {
 		return err
 	}
-	return singbox.ApplyLiveSingBoxConfig(ctx, sbPath, s.opts.SingBoxWorkConfigPath, updated, "whitelist")
+	return singbox.ApplyLiveSingBoxConfig(ctx, sbPath, s.sbWorkConfigPath(), updated, "whitelist")
 }
 
 func (s *Server) handleDNSWhitelistPost(w http.ResponseWriter, r *http.Request) {
