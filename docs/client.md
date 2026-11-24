@@ -73,6 +73,7 @@ gateway:                                      # (可选) 客户端网关拓扑�
   - **`off`（纯 IPv4，默认）**：全链路保持 `ipv4_only`，OpenWrt 保持 `dnsmasq filter_aaaa=1`。
   - **`cn_only`（智能双栈 · 推荐）**：自动探测内核与 OpenWrt WAN PD 前缀，配置 LAN RA/DHCPv6 分配公网 IPv6 前缀同时显式关闭 IPv6 RDNSS（`ra_dns=0`、`dns_service=0`）使终端统一经受控 IPv4 `:53` 解析、将 `dnsmasq` `dnsforwardmax` 提升至 `1024` 并设 `filter_aaaa=0`（修改前以 `0600` 权限备份原 UCI，切回 `off` 时自动还原，绝不中断 PPPoE WAN）；国内直连规则集对齐至 `dns_local` 放行原生 IPv6，海外规则注入 `query_type: ["AAAA", "HTTPS"]` → `predefined NOERROR` 本地 `0ms` 静音，同时注入 DoT `:853` / 国内公共 DoH (`443/853`) / 海外 WebRTC STUN（`protocol: stun` 及常用 STUN UDP 端口）拦截，并在代理出站规则前注入逻辑与 `type: "logical", mode: "and"`（目标 ∧ `::/0`）快速拒接规则防挂死。旁路由模式下强制保持关闭防绕过。
   - **`full`（全量双栈）**：保留 DoT `:853`、国内公共 DoH 与海外 STUN 防绕过拦截，国内外域名均保留双栈解析；仅推荐在全节点均确认支持 IPv6 出站时开启。
+- **旁路由 IPv6 接入探测**：单臂旁路由没有独立 WAN 口，公网 IPv6 由上级主路由经 RA/DHCPv6 下发到 LAN 口。状态面板会以 LAN 口 GUA/前缀判定“IPv6 接入：已获公网 IPv6 (继承上级路由)”，不再误报“未检测到公网 IPv6”；旁路由模式下 IPv6 透明代理仍自动保持关闭，避免主路由 RA 绕过造成泄漏。
 - **开启 IPv6 后的手机端防 5G 蜂窝兜底泄漏指引**：
   - 在 `cn_only` 模式下（海外域名 `AAAA`/`HTTPS` 静音），手机同时开着 Wi-Fi 与 5G 蜂窝时，部分系统的网络助理会将纯 IPv6 探针（如 `ipv6.ipleak.net`）自动切走 5G 基站发出运营商 IPv6 DNS 查询，绕过家用网关：
   - **iPhone (iOS)**：打开 `设置 → 无线局域网 (WLAN)` 关闭 **「连接助理」**（部分 iOS 版本在 `设置 → 蜂窝网络 → 展开全部应用 → 拉至最底端` 关闭 **「无线局域网助理」**）。

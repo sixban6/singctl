@@ -40,6 +40,7 @@ type IPv6StatusInfo struct {
 	KernelEnabled     bool     `json:"kernelEnabled"`
 	ForwardingEnabled bool     `json:"forwardingEnabled"`
 	WANHasGUA         bool     `json:"wanHasGua"`
+	HasPublicIPv6     bool     `json:"hasPublicIpv6"`
 	WANHasDefaultV6   bool     `json:"wanHasDefaultV6"`
 	PDPrefix          string   `json:"pdPrefix,omitempty"`
 	LANGUA            string   `json:"lanGua,omitempty"`
@@ -201,19 +202,30 @@ func (c *Controller) ProbeIPv6Status(ctx context.Context, gwCfg config.GatewayCo
 		return info
 	}
 
-	if c.Exec == nil {
+	if c.IPv6KernelProbe != nil {
+		info.KernelEnabled, info.ForwardingEnabled = c.IPv6KernelProbe()
+	} else if c.Exec == nil {
 		if raw, err := os.ReadFile("/proc/sys/net/ipv6/conf/all/disable_ipv6"); err == nil {
 			info.KernelEnabled = strings.TrimSpace(string(raw)) == "0"
 		}
 		if raw, err := os.ReadFile("/proc/sys/net/ipv6/conf/all/forwarding"); err == nil {
 			info.ForwardingEnabled = strings.TrimSpace(string(raw)) == "1"
 		}
-		wanGUA, lanGUA, lanPfxs := probeInterfaceIPv6Summary(topo.LANIface)
+	} else {
+		info.KernelEnabled = true
+	}
+
+	// 旁路由只有单臂 LAN 口，公网 IPv6 由上级主路由经 RA/DHCPv6 下发到该口；
+	// 因此不能只把非 LAN 网卡上的 GUA 当作可用 IPv6，否则单臂旁路由会被误判为“无 IPv6”。
+	if c.Exec == nil || c.IPv6IfaceProbe != nil {
+		ifaceProbe := probeInterfaceIPv6Summary
+		if c.IPv6IfaceProbe != nil {
+			ifaceProbe = c.IPv6IfaceProbe
+		}
+		wanGUA, lanGUA, lanPfxs := ifaceProbe(topo.LANIface)
 		info.WANHasGUA = wanGUA
 		info.LANGUA = lanGUA
 		info.LANPrefixes = lanPfxs
-	} else {
-		info.KernelEnabled = true
 	}
 
 	if c.Exec != nil || func() bool { _, err := exec.LookPath("ip"); return err == nil }() {
@@ -242,13 +254,22 @@ func (c *Controller) ProbeIPv6Status(ctx context.Context, gwCfg config.GatewayCo
 		info.RADNSAnnounce = (raDNS != "0" || dnsSvc != "0") && (info.LANRAMode == "server" || info.LANDHCPv6Mode == "server")
 	}
 
+	info.HasPublicIPv6 = info.WANHasGUA || info.PDPrefix != ""
+	if gwCfg.IsSideRouter() && !info.HasPublicIPv6 {
+		info.HasPublicIPv6 = info.LANGUA != "" || len(info.LANPrefixes) > 0
+	}
+
 	mode := gwCfg.EffectiveIPv6Mode()
 	switch {
-	case gwCfg.IsSideRouter():
-		info.Warnings = append(info.Warnings, "旁路由模式下主路由会继续广播 IPv6 网关并可能绕过旁路由，因此禁止自动启用 IPv6 透明代理")
 	case !info.KernelEnabled:
 		info.Warnings = append(info.Warnings, "系统内核已禁用 IPv6 (net.ipv6.conf.all.disable_ipv6=1)")
-	case !info.WANHasGUA && info.PDPrefix == "":
+	case gwCfg.IsSideRouter():
+		if info.HasPublicIPv6 {
+			info.Warnings = append(info.Warnings, "旁路由已通过 LAN 口从上级路由获取公网 IPv6；主路由若继续广播 IPv6 RA 可能绕过旁路由，因此 IPv6 透明代理保持关闭")
+		} else {
+			info.Warnings = append(info.Warnings, "旁路由 LAN 口未检测到公网 IPv6 地址或前缀；请确认上级主路由已开启 IPv6 并向旁路由下发 RA/DHCPv6")
+		}
+	case !info.HasPublicIPv6:
 		info.Warnings = append(info.Warnings, "WAN 口暂未检测到公网 IPv6 地址或 PD 前缀，请检查光猫拨号/ISP IPv6 下发")
 	case mode != config.GatewayIPv6Off && len(info.LANPrefixes) == 0 && info.AutoConfigurable:
 		info.Warnings = append(info.Warnings, "WAN 已获取 IPv6，但 LAN 口尚无公网 IPv6 前缀（保存后将自动配置 OpenWrt RA/DHCPv6 下发）")

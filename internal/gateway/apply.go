@@ -47,6 +47,8 @@ type Controller struct {
 	Prober          func() TopologyInfo
 	IsOpenWrt       func() bool
 	Exec            func(name string, args ...string) ([]byte, error)
+	IPv6IfaceProbe  func(lanIface string) (wanHasGUA bool, lanGUA string, lanPrefixes []string)
+	IPv6KernelProbe func() (enabled bool, forwarding bool)
 }
 
 // NewController 创建默认旁路由控制器。
