@@ -1,5 +1,96 @@
-// 文件职责：承载客户端 WebUI 未登录访问时的自包含免外链认证页 HTML 模板。
+// 文件职责：承载客户端 WebUI 未登录访问时的自包含免外链认证页 HTML 模板与确定性 CSP 脚本哈希。
 package webui
+
+import (
+	"crypto/sha256"
+	"encoding/base64"
+)
+
+const embeddedLoginScript = `
+    (function () {
+      var form = document.getElementById('loginForm');
+      var pwd = document.getElementById('pwdInput');
+      var btn = document.getElementById('submitBtn');
+      var errBox = document.getElementById('errBox');
+      var toggleBtn = document.getElementById('toggleBtn');
+
+      toggleBtn.addEventListener('click', function () {
+        var show = pwd.type === 'password';
+        pwd.type = show ? 'text' : 'password';
+        toggleBtn.textContent = show ? '隐藏' : '显示';
+        pwd.focus();
+      });
+
+      function showErr(msg) {
+        errBox.textContent = msg;
+        errBox.style.display = 'block';
+      }
+
+      form.addEventListener('submit', function (e) {
+        e.preventDefault();
+        var val = pwd.value || '';
+        if (!val) {
+          showErr('请输入访问口令');
+          return;
+        }
+        errBox.style.display = 'none';
+        btn.disabled = true;
+        btn.textContent = '正在验证...';
+
+        var ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+        var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, 10000) : null;
+
+        fetch('/api/auth/login', {
+          method: 'POST',
+          credentials: 'same-origin',
+          cache: 'no-store',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Requested-With': 'SingCtlWebUI'
+          },
+          body: JSON.stringify({ password: val }),
+          signal: ctrl ? ctrl.signal : undefined
+        })
+          .then(function (resp) {
+            return resp.json().catch(function () { return {}; }).then(function (data) {
+              if (!resp.ok) {
+                throw new Error(data.error || ('验证失败 (HTTP ' + resp.status + ')'));
+              }
+              return data;
+            });
+          })
+          .then(function (data) {
+            try {
+              if (data && data.token) {
+                localStorage.setItem('sc_token', data.token);
+              }
+            } catch (_) {}
+            var sep = window.location.pathname.indexOf('?') >= 0 ? '&' : '?';
+            window.location.replace(window.location.pathname + sep + '_t=' + Date.now() + (window.location.hash || ''));
+          })
+          .catch(function (err) {
+            if (err && err.name === 'AbortError') {
+              showErr('登录请求超时，请检查网关连接后重试');
+            } else {
+              showErr((err && err.message) || '验证失败，请重试');
+            }
+            btn.disabled = false;
+            btn.textContent = '登录控制台';
+          })
+          .finally(function () {
+            if (timer) clearTimeout(timer);
+          });
+      });
+    })();
+  `
+
+var embeddedLoginCSP = buildEmbeddedLoginCSP()
+
+func buildEmbeddedLoginCSP() string {
+	sum := sha256.Sum256([]byte(embeddedLoginScript))
+	hash := base64.StdEncoding.EncodeToString(sum[:])
+	return "default-src 'self'; script-src 'sha256-" + hash + "'; style-src 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+}
 
 const embeddedLoginHTML = `<!doctype html>
 <html lang="zh-CN">
@@ -175,82 +266,6 @@ const embeddedLoginHTML = `<!doctype html>
     <button type="submit" class="btn" id="submitBtn">登录控制台</button>
     <div class="hint">验证成功后自动保持 30 天免密登录态</div>
   </form>
-  <script>
-    (function () {
-      var form = document.getElementById('loginForm');
-      var pwd = document.getElementById('pwdInput');
-      var btn = document.getElementById('submitBtn');
-      var errBox = document.getElementById('errBox');
-      var toggleBtn = document.getElementById('toggleBtn');
-
-      toggleBtn.addEventListener('click', function () {
-        var show = pwd.type === 'password';
-        pwd.type = show ? 'text' : 'password';
-        toggleBtn.textContent = show ? '隐藏' : '显示';
-        pwd.focus();
-      });
-
-      function showErr(msg) {
-        errBox.textContent = msg;
-        errBox.style.display = 'block';
-      }
-
-      form.addEventListener('submit', function (e) {
-        e.preventDefault();
-        var val = pwd.value || '';
-        if (!val) {
-          showErr('请输入访问口令');
-          return;
-        }
-        errBox.style.display = 'none';
-        btn.disabled = true;
-        btn.textContent = '正在验证...';
-
-        var ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
-        var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, 10000) : null;
-
-        fetch('/api/auth/login', {
-          method: 'POST',
-          credentials: 'same-origin',
-          cache: 'no-store',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Requested-With': 'SingCtlWebUI'
-          },
-          body: JSON.stringify({ password: val }),
-          signal: ctrl ? ctrl.signal : undefined
-        })
-          .then(function (resp) {
-            return resp.json().catch(function () { return {}; }).then(function (data) {
-              if (!resp.ok) {
-                throw new Error(data.error || ('验证失败 (HTTP ' + resp.status + ')'));
-              }
-              return data;
-            });
-          })
-          .then(function (data) {
-            try {
-              if (data && data.token) {
-                localStorage.setItem('sc_token', data.token);
-              }
-            } catch (_) {}
-            var sep = window.location.pathname.indexOf('?') >= 0 ? '&' : '?';
-            window.location.replace(window.location.pathname + sep + '_t=' + Date.now() + (window.location.hash || ''));
-          })
-          .catch(function (err) {
-            if (err && err.name === 'AbortError') {
-              showErr('登录请求超时，请检查网关连接后重试');
-            } else {
-              showErr((err && err.message) || '验证失败，请重试');
-            }
-            btn.disabled = false;
-            btn.textContent = '登录控制台';
-          })
-          .finally(function () {
-            if (timer) clearTimeout(timer);
-          });
-      });
-    })();
-  </script>
+  <script>` + embeddedLoginScript + `</script>
 </body>
 </html>`
