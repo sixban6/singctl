@@ -29,6 +29,16 @@ type gatewayPutRequest struct {
 	SafeCommitTTLSec int     `json:"safeCommitTtlSec,omitempty"`
 }
 
+func (s *Server) isSingBoxRunning() bool {
+	if s.opts.SingBoxRunningForTest != nil {
+		return s.opts.SingBoxRunningForTest()
+	}
+	if s.opts.GatewayProberForTest != nil {
+		return false
+	}
+	return daemon.IsSingBoxRunning()
+}
+
 func (s *Server) probeGatewayTopology() gateway.TopologyInfo {
 	if s.opts.GatewayProberForTest != nil {
 		return s.opts.GatewayProberForTest()
@@ -229,10 +239,10 @@ func (s *Server) handleGatewayPut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 同步热更新 /etc/sing-box/config.json 中的 IPv6 DNS 策略（存在即生效）。
-	// 若本次请求正在切换工作模式（将全新重编译 config.json），
+	// 若本次请求正在切换工作模式（或旧配置升级后内核未运行需拉起审计/代理内核），
 	// 跳过对磁盘旧 config.json 的校验与改写，避免历史废弃配置阻断模式切换。
 	newEffectiveWorkMode := cfg.EffectiveWorkMode()
-	willApplyWorkMode := workModeRequested && (newEffectiveWorkMode != prevWorkMode || s.opts.WorkModeApplyForTest != nil)
+	willApplyWorkMode := workModeRequested && (newEffectiveWorkMode != prevWorkMode || !s.isSingBoxRunning())
 	skipLegacySBIPv6Patch := willApplyWorkMode
 	sbPath := s.sbConfigPath()
 	if !skipLegacySBIPv6Patch {

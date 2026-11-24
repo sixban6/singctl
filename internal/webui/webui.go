@@ -70,6 +70,7 @@ type Options struct {
 	AuditLimiter            *AuditRateLimiter                                                                 // 可选：显式注入审计限流器
 	SkipAdGuardProbeForTest bool                                                                              // 仅供离线单元测试跳过公网上游实测
 	GatewayProberForTest    func() gateway.TopologyInfo                                                       // 仅供单元测试注入网络拓扑探测结果
+	SingBoxRunningForTest   func() bool                                                                       // 仅供单元测试注入 sing-box 运行状态探测
 	WorkModeApplyForTest    func(ctx context.Context, cfg *config.Config, targetMode string) (bool, string, error) // 仅供单元测试注入工作模式热应用替身
 	DNSLeakRunnerForTest    func(ctx context.Context, opts netdiag.DNSLeakTestOptions) *netdiag.DNSLeakReport // 仅供单元测试注入离线 DNS 泄漏实测结果
 	BrowserDoHForTest       *BrowserDoHTestHooks                                                              // 仅供单元测试注入浏览器 DoH 旁路检测依赖

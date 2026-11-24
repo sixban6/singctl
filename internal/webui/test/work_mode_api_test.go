@@ -134,4 +134,55 @@ func TestGatewayWorkModeAPI_ZeroSubsBasicAuditAndProxyGuard(t *testing.T) {
 			t.Fatalf("expected WorkModeApplyForTest called with audit, got %v", called)
 		}
 	})
+
+	// 7. Re-applying same effective workMode:
+	//    - when sing-box is STOPPED (e.g. upgraded from legacy basic mode), MUST invoke WorkModeApplyForTest to start audit kernel
+	//    - when sing-box is ALREADY RUNNING, MUST skip redundant restart
+	t.Run("same_workmode_applies_only_when_singbox_stopped", func(t *testing.T) {
+		for _, tc := range []struct {
+			name        string
+			sbRunning   bool
+			wantApplied int
+		}{
+			{name: "stopped_starts_audit_kernel", sbRunning: false, wantApplied: 1},
+			{name: "running_skips_redundant_restart", sbRunning: true, wantApplied: 0},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				d := t.TempDir()
+				cPath := filepath.Join(d, "singctl.yaml")
+				if err := config.Save(cPath, &config.Config{
+					Gateway: config.GatewayConfig{WorkMode: config.WorkModeAudit},
+				}); err != nil {
+					t.Fatal(err)
+				}
+				var called []string
+				s := webui.New(webui.Options{
+					ConfigPath: cPath,
+					GatewayProberForTest: func() gateway.TopologyInfo {
+						return gateway.TopologyInfo{LANIP: "192.168.1.1", LANIface: "br-lan"}
+					},
+					SingBoxRunningForTest: func() bool { return tc.sbRunning },
+					WorkModeApplyForTest: func(_ context.Context, _ *config.Config, targetMode string) (bool, string, error) {
+						called = append(called, targetMode)
+						return true, "applied " + targetMode, nil
+					},
+				})
+				var buf bytes.Buffer
+				_ = json.NewEncoder(&buf).Encode(map[string]any{
+					"mode":     "main",
+					"workMode": "audit",
+				})
+				req := httptest.NewRequest(http.MethodPut, "/api/gateway", &buf)
+				req.Header.Set("Content-Type", "application/json")
+				rec := httptest.NewRecorder()
+				s.Mux.ServeHTTP(rec, req)
+				if rec.Code != http.StatusOK {
+					t.Fatalf("expected 200, got code=%d body=%s", rec.Code, rec.Body.String())
+				}
+				if len(called) != tc.wantApplied {
+					t.Fatalf("sbRunning=%v: applied count=%d (%v), want %d", tc.sbRunning, len(called), called, tc.wantApplied)
+				}
+			})
+		}
+	})
 }

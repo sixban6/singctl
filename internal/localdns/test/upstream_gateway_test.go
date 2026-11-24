@@ -96,7 +96,7 @@ func TestUpstreamGateway_SmartDNSPresetSetUpstreamsAndSingBoxFallback(t *testing
 		t.Fatalf("expected gateway preset in Overview.UpstreamPresets, got %+v", ov.UpstreamPresets)
 	}
 
-	// SetUpstreams accepts udp://192.168.1.1:53 and writes -set-mark 0x1 to smartdns.conf
+	// SetUpstreams accepts udp://192.168.1.1:53 and writes decimal -set-mark 524288 (0x80000) to smartdns.conf
 	res, err := reg.ActiveEngine().SetUpstreams(t.Context(), []string{"udp://192.168.1.1:53"}, "fastest_ip", false)
 	if err != nil {
 		t.Fatalf("SmartDNSEngine.SetUpstreams(udp://192.168.1.1:53) failed: %v", err)
@@ -108,8 +108,11 @@ func TestUpstreamGateway_SmartDNSPresetSetUpstreamsAndSingBoxFallback(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(confBytes), "server 192.168.1.1:53 -set-mark 0x1") {
-		t.Fatalf("expected -set-mark 0x1 in smartdns.conf:\n%s", string(confBytes))
+	if !strings.Contains(string(confBytes), "server 192.168.1.1:53 -set-mark 524288") {
+		t.Fatalf("expected decimal -set-mark 524288 in smartdns.conf:\n%s", string(confBytes))
+	}
+	if strings.Contains(string(confBytes), "-set-mark 0x") {
+		t.Fatalf("smartdns.conf must not render hex -set-mark:\n%s", string(confBytes))
 	}
 
 	// sing-box fallback dns_local uses udp://192.168.1.1:53 when configured with cascaded gateway upstream

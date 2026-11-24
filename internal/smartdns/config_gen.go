@@ -15,6 +15,11 @@ import (
 	"singctl/internal/common/fsx"
 )
 
+// UpstreamBypassMarkDecimal 是上级网关明文 UDP 上游使用的十进制 fwmark（524288 = 0x80000）。
+// SmartDNS 底层 C 解析器对 -set-mark 按十进制解析（十六进制 0x* 会被解析为 0 导致触发 TProxy OUTPUT 53 环路）；
+// 同时 0x80000 在所有防火墙脚本（OpenWrt iptables/nftables、Debian）的 OUTPUT 链直接放行，且不落入 TProxy 策略路由表 100。
+const UpstreamBypassMarkDecimal = "524288"
+
 // DefaultUpstreams 返回网关默认推荐的纯 IP 加密 DoH/DoT 上游列表（与 TProxy 放行清单一致）。
 func DefaultUpstreams() []string {
 	return []string{
@@ -110,7 +115,7 @@ func FormatUpstreamDirective(raw string) (string, error) {
 		if port != "" && port != "53" {
 			return "", fmt.Errorf("上级网关 UDP 上游端口仅支持 53（当前: %s）", port)
 		}
-		return "server " + v4.String() + ":53 -set-mark 0x1", nil
+		return "server " + v4.String() + ":53 -set-mark " + UpstreamBypassMarkDecimal, nil
 	}
 	if port != "" {
 		pNum, pErr := strconv.Atoi(port)
