@@ -27,8 +27,8 @@ func TestSmartDNS_UltraLowMemoryDefaultsAndSpeedCheck(t *testing.T) {
 	if !strings.Contains(conf, "speed-check-mode none") || !strings.Contains(conf, "response-mode fastest-response") {
 		t.Fatalf("ultra-low-memory default mode must use speed-check-mode none + fastest-response:\n%s", conf)
 	}
-	if strings.Count(conf, "server-https ")+strings.Count(conf, "server-tls ") != 2 {
-		t.Fatalf("ultra-low-memory default upstreams must have exactly 2 entries:\n%s", conf)
+	if strings.Count(conf, "server-https ") != 1 || strings.Count(conf, "server-quic ") != 1 {
+		t.Fatalf("ultra-low-memory default upstreams must have 1 DoH + 1 DoQ entry:\n%s", conf)
 	}
 
 	// Explicit fastest_ip on ultra-low-memory trims 3-way probe to lightweight tcp:443

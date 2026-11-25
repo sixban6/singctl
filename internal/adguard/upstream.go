@@ -70,20 +70,32 @@ var builtinBypassIPv4Set = map[string]struct{}{
 
 var validIPv4LiteralRe = regexp.MustCompile(`^(?:\d{1,3}\.){3}\d{1,3}$`)
 
-// DefaultUpstreams 返回网关默认推荐的纯 IP 加密 DoH/DoT 上游列表。
+// DefaultUpstreams 返回网关默认推荐的纯 IP DoQ (QUIC) + DoH 黄金组合加密上游列表。
 func DefaultUpstreams() []string {
 	return []string{
+		"quic://223.5.5.5:853",
+		"quic://223.6.6.6:853",
 		"https://223.5.5.5/dns-query",
 		"https://223.6.6.6/dns-query",
 		"https://1.12.12.12/dns-query",
-		"tls://223.5.5.5",
-		"tls://1.12.12.12",
 	}
 }
 
 // CuratedUpstreamPresets 返回国内宽带实测具备合法 IP SAN 证书的纯 IP 加密 DNS 预设列表。
 func CuratedUpstreamPresets() []UpstreamPreset {
 	return []UpstreamPreset{
+		{
+			Address:     "quic://223.5.5.5:853",
+			Name:        "阿里云公共 DNS · 主 DoQ",
+			Protocol:    "DoQ",
+			Recommended: true,
+		},
+		{
+			Address:     "quic://223.6.6.6:853",
+			Name:        "阿里云公共 DNS · 备 DoQ",
+			Protocol:    "DoQ",
+			Recommended: true,
+		},
 		{
 			Address:     "https://223.5.5.5/dns-query",
 			Name:        "阿里云公共 DNS · 主 DoH",
@@ -112,7 +124,7 @@ func CuratedUpstreamPresets() []UpstreamPreset {
 			Address:     "tls://223.5.5.5",
 			Name:        "阿里云公共 DNS · 主 DoT",
 			Protocol:    "DoT",
-			Recommended: true,
+			Recommended: false,
 		},
 		{
 			Address:     "tls://223.6.6.6",
@@ -124,24 +136,12 @@ func CuratedUpstreamPresets() []UpstreamPreset {
 			Address:     "tls://1.12.12.12",
 			Name:        "腾讯云 DNSPod · 主 DoT",
 			Protocol:    "DoT",
-			Recommended: true,
+			Recommended: false,
 		},
 		{
 			Address:     "tls://120.53.53.53",
 			Name:        "腾讯云 DNSPod · 备 DoT",
 			Protocol:    "DoT",
-			Recommended: false,
-		},
-		{
-			Address:     "quic://223.5.5.5:853",
-			Name:        "阿里云公共 DNS · 主 DoQ",
-			Protocol:    "DoQ",
-			Recommended: false,
-		},
-		{
-			Address:     "quic://223.6.6.6:853",
-			Name:        "阿里云公共 DNS · 备 DoQ",
-			Protocol:    "DoQ",
 			Recommended: false,
 		},
 	}

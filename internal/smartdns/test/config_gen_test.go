@@ -13,10 +13,10 @@ import (
 func TestDefaultUpstreamsAndNormalizeMode(t *testing.T) {
 	defaults := smartdns.DefaultUpstreams()
 	want := []string{
+		"quic://223.5.5.5:853",
+		"quic://223.6.6.6:853",
 		"https://223.5.5.5/dns-query",
 		"https://1.12.12.12/dns-query",
-		"tls://223.6.6.6:853",
-		"tls://120.53.53.53:853",
 	}
 	if len(defaults) != len(want) {
 		t.Fatalf("DefaultUpstreams len = %d, want %d: %v", len(defaults), len(want), defaults)
@@ -125,10 +125,10 @@ func TestBuildConfig_StrategiesLowMemoryAndSecurity(t *testing.T) {
 		}
 		mustContain := []string{
 			"bind 127.0.0.1:5353",
+			"server-quic 223.5.5.5:853",
+			"server-quic 223.6.6.6:853",
 			"server-https https://223.5.5.5/dns-query",
 			"server-https https://1.12.12.12/dns-query",
-			"server-tls 223.6.6.6:853",
-			"server-tls 120.53.53.53:853",
 			"speed-check-mode ping,tcp:80,tcp:443",
 			"response-mode fastest-ip",
 			"cache-size 8192",

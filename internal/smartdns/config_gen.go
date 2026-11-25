@@ -20,23 +20,23 @@ import (
 // 同时 0x80000 在所有防火墙脚本（OpenWrt iptables/nftables、Debian）的 OUTPUT 链直接放行，且不落入 TProxy 策略路由表 100。
 const UpstreamBypassMarkDecimal = "524288"
 
-// DefaultUpstreams 返回网关默认推荐的纯 IP 加密 DoH/DoT 上游列表（与 TProxy 放行清单一致）。
+// DefaultUpstreams 返回网关默认推荐的纯 IP DoQ (QUIC) + DoH 黄金组合加密上游列表（与 TProxy 放行清单一致）。
 func DefaultUpstreams() []string {
 	return []string{
+		"quic://223.5.5.5:853",
+		"quic://223.6.6.6:853",
 		"https://223.5.5.5/dns-query",
 		"https://1.12.12.12/dns-query",
-		"tls://223.6.6.6:853",
-		"tls://120.53.53.53:853",
 	}
 }
 
 // DefaultUpstreamsForMemory 按宿主机是否处于超小内存档（<=288MiB）返回默认加密上游列表：
-// 超小内存设备默认仅维护 2 条互补纯 IP 加密上游（阿里 DoH + 腾讯 DoT），显著降低 OpenSSL 会话内存与并发连接数。
+// 超小内存设备默认仅维护 2 条互补纯 IP 加密上游（阿里 DoQ + 阿里 DoH），兼顾 QUIC 零队头阻塞提速与 443 稳健兜底。
 func DefaultUpstreamsForMemory(ultraLowMemory bool) []string {
 	if ultraLowMemory {
 		return []string{
+			"quic://223.6.6.6:853",
 			"https://223.5.5.5/dns-query",
-			"tls://1.12.12.12:853",
 		}
 	}
 	return DefaultUpstreams()

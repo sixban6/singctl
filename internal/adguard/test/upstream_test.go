@@ -218,7 +218,19 @@ func TestNormalizeAndValidateUpstream(t *testing.T) {
 		t.Fatalf("expected missing-scheme guidance with tls://dot.pub and https://dot.pub/dns-query, got: %v", err)
 	}
 
-	// Curated presets must include primary and backup Alibaba Cloud DoQ presets.
+	// DefaultUpstreams must use DoQ (QUIC) + DoH golden combination without DoT.
+	wantDef := []string{
+		"quic://223.5.5.5:853",
+		"quic://223.6.6.6:853",
+		"https://223.5.5.5/dns-query",
+		"https://223.6.6.6/dns-query",
+		"https://1.12.12.12/dns-query",
+	}
+	if gotDef := adguard.DefaultUpstreams(); !slices.Equal(gotDef, wantDef) {
+		t.Fatalf("adguard.DefaultUpstreams = %v, want %v", gotDef, wantDef)
+	}
+
+	// Curated presets must recommend primary & backup Alibaba Cloud DoQ presets and keep DoT optional (Recommended=false).
 	presets := adguard.CuratedUpstreamPresets()
 	wantDoQ := map[string]bool{
 		"quic://223.5.5.5:853": false,
@@ -226,7 +238,13 @@ func TestNormalizeAndValidateUpstream(t *testing.T) {
 	}
 	for _, p := range presets {
 		if _, ok := wantDoQ[p.Address]; ok && p.Protocol == "DoQ" {
+			if !p.Recommended {
+				t.Fatalf("expected DoQ preset %q Recommended=true", p.Address)
+			}
 			wantDoQ[p.Address] = true
+		}
+		if p.Protocol == "DoT" && p.Recommended {
+			t.Fatalf("expected DoT preset %q Recommended=false when superseded by DoQ", p.Address)
 		}
 	}
 	for addr, found := range wantDoQ {
