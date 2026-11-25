@@ -275,7 +275,7 @@ func ReadDNSBypassRules(path string) []VLANDNSBypassRule {
 	return norm
 }
 
-// SyncRuntimeDNSBypass 持久化自定义 DNS 免劫持清单，并在 Linux 运行时同步 nftables/iptables PREROUTING 53 端口放行规则。
+// SyncRuntimeDNSBypass 持久化自定义 DNS 免劫持清单，同步 OpenWrt fw4/fw3 持久化脚本并在 Linux 运行时挂载 PREROUTING/mangle 53 端口放行规则。
 func SyncRuntimeDNSBypass(ctx context.Context, bypassFile string, rules []VLANDNSBypassRule) error {
 	norm, err := NormalizeDNSBypassRules(rules)
 	if err != nil {
@@ -284,93 +284,9 @@ func SyncRuntimeDNSBypass(ctx context.Context, bypassFile string, rules []VLANDN
 	if err := WriteDNSBypassRules(bypassFile, norm); err != nil {
 		return err
 	}
-	if runtime.GOOS != "linux" {
+	if runtime.GOOS != "linux" || os.Geteuid() != 0 {
 		return nil
 	}
-	applyRuntimeDNSBypass(ctx, norm)
-	return nil
-}
-
-func applyRuntimeDNSBypass(ctx context.Context, rules []VLANDNSBypassRule) {
-	if runtime.GOOS != "linux" || os.Geteuid() != 0 {
-		return
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	if nftPath, err := exec.LookPath("nft"); err == nil && exec.CommandContext(cctx, nftPath, "list", "tables").Run() == nil {
-		for _, target := range [][3]string{
-			{"inet", "dnsmasq", "prerouting"},
-			{"inet", "sing-box", "prerouting"},
-		} {
-			out, listErr := exec.CommandContext(cctx, nftPath, "-a", "list", "chain", target[0], target[1], target[2]).Output()
-			if listErr != nil {
-				continue
-			}
-			for line := range strings.SplitSeq(string(out), "\n") {
-				if !strings.Contains(line, vlanDNSComment) {
-					continue
-				}
-				_, after, ok := strings.Cut(line, "# handle ")
-				if !ok {
-					continue
-				}
-				if h := strings.Fields(after); len(h) > 0 {
-					_ = exec.CommandContext(cctx, nftPath, "delete", "rule", target[0], target[1], target[2], "handle", h[0]).Run()
-				}
-			}
-			for _, r := range rules {
-				for _, dnsIP := range r.DNSIPs {
-					_ = exec.CommandContext(cctx, nftPath, "insert", "rule", target[0], target[1], target[2],
-						"ip", "saddr", r.CIDR, "ip", "daddr", dnsIP,
-						"meta", "l4proto", "{", "tcp,", "udp", "}", "th", "dport", "53",
-						"accept", "comment", vlanDNSComment).Run()
-				}
-			}
-		}
-		return
-	}
-
-	if iptPath, err := exec.LookPath("iptables"); err == nil {
-		cleanIPTablesDNSChain(cctx, iptPath, "nat", "PREROUTING")
-		for _, r := range rules {
-			for _, dnsIP := range r.DNSIPs {
-				for _, proto := range []string{"udp", "tcp"} {
-					_ = exec.CommandContext(cctx, iptPath, "-t", "nat", "-I", "PREROUTING", "1",
-						"-s", r.CIDR, "-d", dnsIP, "-p", proto, "--dport", "53",
-						"-m", "comment", "--comment", vlanDNSComment, "-j", "ACCEPT").Run()
-				}
-			}
-		}
-		if exec.CommandContext(cctx, iptPath, "-t", "mangle", "-L", "SING_BOX", "-n").Run() == nil {
-			cleanIPTablesDNSChain(cctx, iptPath, "mangle", "SING_BOX")
-			for _, r := range rules {
-				for _, dnsIP := range r.DNSIPs {
-					for _, proto := range []string{"udp", "tcp"} {
-						_ = exec.CommandContext(cctx, iptPath, "-t", "mangle", "-I", "SING_BOX", "1",
-							"-s", r.CIDR, "-d", dnsIP, "-p", proto, "--dport", "53",
-							"-m", "comment", "--comment", vlanDNSComment, "-j", "RETURN").Run()
-					}
-				}
-			}
-		}
-	}
-}
-
-func cleanIPTablesDNSChain(ctx context.Context, iptPath, table, chain string) {
-	out, err := exec.CommandContext(ctx, iptPath, "-t", table, "-S", chain).Output()
-	if err != nil {
-		return
-	}
-	prefix := "-A " + chain + " "
-	for line := range strings.SplitSeq(string(out), "\n") {
-		if !strings.Contains(line, vlanDNSComment) || !strings.HasPrefix(line, prefix) {
-			continue
-		}
-		delArgs := append([]string{"-t", table, "-D", chain}, strings.Fields(strings.TrimPrefix(line, prefix))...)
-		_ = exec.CommandContext(ctx, iptPath, delArgs...).Run()
-	}
+	syncDefaultDNSBypassIncludes(norm, defaultSideRouteRunner)
+	return ApplyRuntimeDNSBypass(ctx, norm, nil)
 }

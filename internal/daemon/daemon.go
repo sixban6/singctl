@@ -7,7 +7,6 @@ import (
 	"errors"
 	"os"
 	"os/signal"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,7 +25,6 @@ import (
 	"singctl/internal/safecommit"
 	"singctl/internal/smartdns"
 	"singctl/internal/tailscale"
-	"singctl/internal/vlan"
 )
 
 const (
@@ -635,13 +633,7 @@ func (d *Daemon) BuildForegroundLifecycle() *lifecycle.Group {
 					defer cancel()
 					ReconcileLowMemHostDefault(tuneCtx, d.embeddedService != nil)
 					EnsureAutoStartFromConfig(tuneCtx, d.currentConfig(), d.configPath)
-					if runtime.GOOS == "linux" {
-						if curCfg := d.currentConfig(); curCfg == nil || !curCfg.Gateway.IsSideRouter() {
-							if sideSpec := vlan.ReadSideRouteSpec(constant.VLANSideRoutesFile); sideSpec.SideRouterIP != "" && len(sideSpec.CIDRs) > 0 {
-								_ = vlan.ApplyRuntimeSideRoutes(tuneCtx, sideSpec, nil)
-							}
-						}
-					}
+					reconcileMainRouterVLANState(tuneCtx, d.currentConfig())
 				}()
 				return nil
 			},

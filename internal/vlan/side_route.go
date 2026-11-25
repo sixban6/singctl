@@ -375,8 +375,10 @@ func ApplyRuntimeSideRoutes(ctx context.Context, spec VLANSideRouteSpec, run Com
 	if norm.SideRouterIP == "" || len(norm.CIDRs) == 0 {
 		if isDefaultRunner {
 			syncDefaultSideNoMasqIncludes(nil, run)
+			syncDefaultSideDNSIncludes(norm.SideRouterIP, nil, run)
 		}
 		syncSideRouteLANNoMasq(ctx, nil, run)
+		applyRuntimeSideDNSBypassLocked(ctx, norm.SideRouterIP, nil, run)
 		return nil
 	}
 
@@ -397,8 +399,10 @@ func ApplyRuntimeSideRoutes(ctx context.Context, spec VLANSideRouteSpec, run Com
 	}
 	if isDefaultRunner {
 		syncDefaultSideNoMasqIncludes(norm.CIDRs, run)
+		syncDefaultSideDNSIncludes(norm.SideRouterIP, norm.CIDRs, run)
 	}
 	syncSideRouteLANNoMasq(ctx, norm.CIDRs, run)
+	applyRuntimeSideDNSBypassLocked(ctx, norm.SideRouterIP, norm.CIDRs, run)
 	return nil
 }
 
@@ -421,8 +425,10 @@ func SuspendRuntimeSideRoutes(ctx context.Context, run CommandRunner) error {
 	deleteManagedSideRouteRules(ctx, run)
 	if isDefaultRunner {
 		syncDefaultSideNoMasqIncludes(nil, run)
+		syncDefaultSideDNSIncludes("", nil, run)
 	}
 	syncSideRouteLANNoMasq(ctx, nil, run)
+	applyRuntimeSideDNSBypassLocked(ctx, "", nil, run)
 	return nil
 }
 

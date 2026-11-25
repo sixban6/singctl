@@ -387,10 +387,20 @@ func (s *Server) handleGatewayPut(w http.ResponseWriter, r *http.Request) {
 		msg = "已保存为主路由模式 (main)"
 	}
 
-	if isRealHost && nextGw.EffectiveMode() == gateway.ModeMain && nextGw.SideRouterIP != "" && nextGw.SideRouterIP != prevSideIP {
-		if sideSpec := vlan.ReadSideRouteSpec(constant.VLANSideRoutesFile); len(sideSpec.CIDRs) > 0 {
-			sideSpec.SideRouterIP = nextGw.SideRouterIP
-			_ = vlan.SyncRuntimeSideRoutes(r.Context(), constant.VLANSideRoutesFile, sideSpec)
+	if isRealHost {
+		if nextGw.EffectiveMode() == gateway.ModeMain && nextGw.SideRouterIP != "" {
+			if dnsRules := vlan.ReadDNSBypassRules(constant.VLANDNSBypassFile); len(dnsRules) > 0 {
+				_ = vlan.SyncRuntimeDNSBypass(r.Context(), constant.VLANDNSBypassFile, dnsRules)
+			}
+			sideSpec := vlan.ReadSideRouteSpec(constant.VLANSideRoutesFile)
+			if newEffectiveWorkMode == config.WorkModeDelegated || len(sideSpec.CIDRs) > 0 || nextGw.SideRouterIP != prevSideIP {
+				sideSpec.SideRouterIP = nextGw.SideRouterIP
+				_ = vlan.SyncRuntimeSideRoutes(r.Context(), constant.VLANSideRoutesFile, sideSpec)
+			}
+		} else if nextGw.IsSideRouter() || nextGw.SideRouterIP == "" {
+			if prevSpec := vlan.ReadSideRouteSpec(constant.VLANSideRoutesFile); prevSpec.SideRouterIP != "" || len(prevSpec.CIDRs) > 0 {
+				_ = vlan.SyncRuntimeSideRoutes(r.Context(), constant.VLANSideRoutesFile, vlan.VLANSideRouteSpec{})
+			}
 		}
 	}
 

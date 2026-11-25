@@ -412,12 +412,16 @@ func ReloadOpenWrtNetworkWithOptions(ctx context.Context, opts ReloadOptions, pr
 		applyRuntimeProxyBypass(cctx, cidrs)
 	}
 	if dnsRules := ReadDNSBypassRules(constant.VLANDNSBypassFile); len(dnsRules) > 0 {
-		applyRuntimeDNSBypass(cctx, dnsRules)
+		_ = SyncRuntimeDNSBypass(cctx, constant.VLANDNSBypassFile, dnsRules)
 	}
-	if sideSpec := ReadSideRouteSpec(constant.VLANSideRoutesFile); sideSpec.SideRouterIP != "" && len(sideSpec.CIDRs) > 0 {
-		_ = ApplySideRoutesWithRetry(cctx, sideSpec, 6, 500*time.Millisecond, func(c context.Context, s VLANSideRouteSpec) error {
-			return ApplyRuntimeSideRoutes(c, s, nil)
-		})
+	if sideSpec := ReadSideRouteSpec(constant.VLANSideRoutesFile); sideSpec.SideRouterIP != "" {
+		if len(sideSpec.CIDRs) > 0 {
+			_ = ApplySideRoutesWithRetry(cctx, sideSpec, 6, 500*time.Millisecond, func(c context.Context, s VLANSideRouteSpec) error {
+				return ApplyRuntimeSideRoutes(c, s, nil)
+			})
+		} else {
+			_ = ApplyRuntimeSideRoutes(cctx, sideSpec, nil)
+		}
 	}
 	return errors.Join(errs...)
 }

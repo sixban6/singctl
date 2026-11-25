@@ -4,6 +4,7 @@ package daemon
 import (
 	"cmp"
 	"context"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -159,4 +160,23 @@ func (g *SideRouterFailoverGuard) EvaluateOnce(ctx context.Context, cfg *config.
 	msg := "旁路由 (" + sideIP + ") 连续失联，已自动摘除策略路由并切回主路由直连逃生"
 	logger.Warn("[SideRouterGuard] %s", msg)
 	g.emitEvent("SIDE_ROUTER_FAILOVER", false, msg)
+}
+
+func reconcileMainRouterVLANState(ctx context.Context, cfg *config.Config) {
+	if runtime.GOOS != "linux" || (cfg != nil && cfg.Gateway.IsSideRouter()) {
+		return
+	}
+	if proxyCIDRs := vlan.ReadProxyBypassList(constant.VLANProxyBypassFile); len(proxyCIDRs) > 0 {
+		_ = vlan.SyncRuntimeProxyBypass(ctx, constant.VLANProxyBypassFile, proxyCIDRs)
+	}
+	if dnsRules := vlan.ReadDNSBypassRules(constant.VLANDNSBypassFile); len(dnsRules) > 0 {
+		_ = vlan.SyncRuntimeDNSBypass(ctx, constant.VLANDNSBypassFile, dnsRules)
+	}
+	sideSpec := vlan.ReadSideRouteSpec(constant.VLANSideRoutesFile)
+	if sideSpec.SideRouterIP == "" && cfg != nil && cfg.ConfiguredWorkMode() == config.WorkModeDelegated {
+		sideSpec.SideRouterIP = strings.TrimSpace(cfg.Gateway.SideRouterIP)
+	}
+	if sideSpec.SideRouterIP != "" {
+		_ = vlan.ApplyRuntimeSideRoutes(ctx, sideSpec, nil)
+	}
 }

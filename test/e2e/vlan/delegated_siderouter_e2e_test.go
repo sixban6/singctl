@@ -224,6 +224,8 @@ config dnsmasq
 	option local '/lan/'
 	option domain 'lan'
 	option expandhosts '1'
+	option dns_redirect '1'
+	list address '/app.example.com/198.18.0.99'
 	option leasefile '/tmp/dhcp.leases'
 
 config dhcp 'lan'
@@ -596,15 +598,19 @@ nft list chain inet fw4 input
 	})
 
 	includeCheck := mustDockerExec(t, ctx, mainC, `
-ls -la /usr/share/nftables.d/chain-pre/srcnat_lan/singctl-side-nomasq.nft /usr/share/nftables.d/chain-pre/forward/singctl-vlan-br-l2.nft
+ls -la /usr/share/nftables.d/chain-pre/srcnat_lan/singctl-side-nomasq.nft /usr/share/nftables.d/chain-pre/forward/singctl-vlan-br-l2.nft /usr/share/nftables.d/chain-pre/dstnat/singctl-side-dns.nft /usr/share/nftables.d/chain-pre/dstnat/singctl-vlan-dns.nft
 fw4 restart >/tmp/fw4-restart.log 2>&1 || { cat /tmp/fw4-restart.log; exit 1; }
 nft list chain inet fw4 srcnat_lan
 nft list chain inet fw4 forward
+nft list chain inet fw4 dstnat
+nft list chain inet dnsmasq prerouting
 grep 'dhcp-range=' /var/etc/dnsmasq.conf.*
 `)
 	if !strings.Contains(includeCheck, "singctl-side-nomasq.nft") ||
 		!strings.Contains(includeCheck, "singctl-vlan-br-l2.nft") ||
-		strings.Count(includeCheck, "-rw-------") < 2 {
+		!strings.Contains(includeCheck, "singctl-side-dns.nft") ||
+		!strings.Contains(includeCheck, "singctl-vlan-dns.nft") ||
+		strings.Count(includeCheck, "-rw-------") < 4 {
 		t.Fatalf("expected 0600 perms on fw4 nft includes:\n%s", includeCheck)
 	}
 	nomasqIdx := strings.Index(includeCheck, `comment "singctl-side-nomasq"`)
@@ -615,11 +621,14 @@ grep 'dhcp-range=' /var/etc/dnsmasq.conf.*
 	if !strings.Contains(includeCheck, `comment "singctl-vlan-br-l2"`) {
 		t.Fatalf("expected singctl-vlan-br-l2 in fw4 forward after fw4 restart:\n%s", includeCheck)
 	}
+	if !strings.Contains(includeCheck, `comment "singctl-side-dns"`) || !strings.Contains(includeCheck, `comment "singctl-vlan-dns"`) {
+		t.Fatalf("expected singctl-side-dns and singctl-vlan-dns in fw4/dnsmasq after fw4 restart:\n%s", includeCheck)
+	}
 	if !strings.Contains(includeCheck, "dhcp-range=") || !strings.Contains(includeCheck, "192.168.89.") {
 		t.Fatalf("expected 192.168.89.x dhcp-range in dnsmasq config after restart:\n%s", includeCheck)
 	}
 
-	// === 断言 3：vlan-cli (192.168.89.137) 隔离性 + 跨网段 DNS + ICMP + HTTP 转发 ===
+	// === 断言 3：vlan-cli (192.168.89.137) 隔离性 + 跨网段/硬编码公网 DNS 免劫持 + ICMP + HTTP 转发 ===
 	mustNetNSSh(t, ctx, mainC, vlanSock, `
 ip link set lo up
 ip link set vlan0 up
@@ -633,8 +642,16 @@ ip route replace default via 192.168.89.1
 		t.Fatalf("expected vlan-cli blocked from mgmt host 192.168.55.50:8088, got HTTP %d", code)
 	}
 	dnsIPs, err := probeNetNSDNS(ctx, mainC, vlanSock, "192.168.55.88:53", "app.example.com")
-	if err != nil || !strings.Contains(dnsIPs, "203.0.113.20") {
-		t.Fatalf("cross-subnet DNS @192.168.55.88 failed: ips=%q err=%v", dnsIPs, err)
+	if err != nil || !strings.Contains(dnsIPs, "203.0.113.20") || strings.Contains(dnsIPs, "198.18.0.99") {
+		t.Fatalf("cross-subnet DNS @192.168.55.88 failed or hijacked: ips=%q err=%v", dnsIPs, err)
+	}
+	pubDNSIPs, pubDNSErr := probeNetNSDNS(ctx, mainC, vlanSock, "223.5.5.5:53", "app.example.com")
+	if pubDNSErr != nil || !strings.Contains(pubDNSIPs, "203.0.113.20") || strings.Contains(pubDNSIPs, "198.18.0.99") {
+		t.Fatalf("vlan-cli hardcoded public DNS @223.5.5.5 hijacked by main-rtr dns_redirect: ips=%q err=%v", pubDNSIPs, pubDNSErr)
+	}
+	sideDNSOut := mustDockerExec(t, ctx, sideC, "/usr/bin/vlan-probe dns-query 223.5.5.5:53 app.example.com")
+	if !strings.Contains(sideDNSOut, "203.0.113.20") || strings.Contains(sideDNSOut, "198.18.0.99") {
+		t.Fatalf("side-rtr upstream DNS @223.5.5.5 hijacked by main-rtr dns_redirect: out=%q", sideDNSOut)
 	}
 	mustNetNSSh(t, ctx, mainC, vlanSock, "ping -c 2 -W 2 203.0.113.20 >/dev/null")
 
@@ -853,6 +870,7 @@ EOF
 cat > /etc/config/dhcp <<'EOF'
 config dnsmasq
 	option domainneeded '1'
+	option dns_redirect '1'
 	option leasefile '/tmp/dhcp.leases'
 
 config dhcp 'lan'
@@ -899,6 +917,7 @@ sleep 1
 /sbin/netifd </dev/null >/tmp/netifd.log 2>&1 &
 sleep 2
 fw3 restart >/tmp/fw3-init.log 2>&1 || { cat /tmp/fw3-init.log; exit 1; }
+/etc/init.d/dnsmasq start >/tmp/dnsmasq-init.log 2>&1 || { cat /tmp/dnsmasq-init.log; exit 1; }
 /usr/bin/singctl -c /etc/singctl/singctl.yaml web start -l 127.0.0.1:8090 </dev/null >/tmp/singctl-web.log 2>&1 || { cat /tmp/singctl-web.log; exit 1; }
 `)
 
@@ -937,19 +956,48 @@ fw3 restart >/tmp/fw3-init.log 2>&1 || { cat /tmp/fw3-init.log; exit 1; }
 		return e == nil
 	})
 	fw3Out := mustDockerExec(t, ctx, cname, `
-ls -la /etc/singctl/vlan-side-nomasq.fw3.sh /etc/singctl/vlan-br-l2.fw3.sh
+ls -la /etc/singctl/vlan-side-nomasq.fw3.sh /etc/singctl/vlan-br-l2.fw3.sh /etc/singctl/vlan-side-dns.fw3.sh /etc/singctl/vlan-dns-bypass.fw3.sh
 uci get firewall.singctl_vlan_nomasq.path
 uci get firewall.singctl_vlan_br_l2.path
+uci get firewall.singctl_vlan_side_dns.path
+uci get firewall.singctl_vlan_dns.path
 fw3 restart >/tmp/fw3-restart.log 2>&1 || { cat /tmp/fw3-restart.log; exit 1; }
+/etc/init.d/dnsmasq restart >/tmp/dnsmasq-restart.log 2>&1 || { cat /tmp/dnsmasq-restart.log; exit 1; }
 iptables -w 2 -t nat -S postrouting_lan_rule
+echo "=== PREROUTING ==="
+iptables -w 2 -t nat -S PREROUTING
+echo "=== FORWARD ==="
 iptables -w 2 -S FORWARD
 `)
-	if strings.Count(fw3Out, "-rw-------") < 2 ||
+	if strings.Count(fw3Out, "-rw-------") < 4 ||
 		!strings.Contains(fw3Out, "/etc/singctl/vlan-side-nomasq.fw3.sh") ||
 		!strings.Contains(fw3Out, "/etc/singctl/vlan-br-l2.fw3.sh") ||
+		!strings.Contains(fw3Out, "/etc/singctl/vlan-side-dns.fw3.sh") ||
+		!strings.Contains(fw3Out, "/etc/singctl/vlan-dns-bypass.fw3.sh") ||
 		!strings.Contains(fw3Out, "-A postrouting_lan_rule -s 192.168.89.0/24 -m comment --comment singctl-side-nomasq -j ACCEPT") ||
 		!strings.Contains(fw3Out, "-A FORWARD -i br-lan -o br-lan -m comment --comment singctl-vlan-br-l2 -j ACCEPT") {
-		t.Fatalf("expected OpenWrt 21.02 fw3 restart to preserve singctl-side-nomasq and singctl-vlan-br-l2 rules, got:\n%s", fw3Out)
+		t.Fatalf("expected OpenWrt 21.02 fw3 restart to preserve singctl-side-nomasq, singctl-vlan-br-l2, and DNS bypass includes, got:\n%s", fw3Out)
+	}
+	_, preSection, hasPre := strings.Cut(fw3Out, "=== PREROUTING ===")
+	if !hasPre {
+		t.Fatalf("missing PREROUTING section in output:\n%s", fw3Out)
+	}
+	preSection, _, _ = strings.Cut(preSection, "=== FORWARD ===")
+	dnsmasqRuleIdx := strings.Index(preSection, "DNSMASQ")
+	if dnsmasqRuleIdx < 0 {
+		t.Fatalf("expected DNSMASQ REDIRECT rule in PREROUTING, got:\n%s", preSection)
+	}
+	for _, wantPre := range []string{
+		"-A PREROUTING -s 192.168.89.0/24 -p udp -m udp --dport 53 -m comment --comment singctl-side-dns -j ACCEPT",
+		"-A PREROUTING -s 192.168.89.0/24 -p tcp -m tcp --dport 53 -m comment --comment singctl-side-dns -j ACCEPT",
+		"-A PREROUTING -s 192.168.55.88/32 -p udp -m udp --dport 53 -m comment --comment singctl-side-dns -j ACCEPT",
+		"-A PREROUTING -d 192.168.55.88/32 -p udp -m udp --dport 53 -m comment --comment singctl-side-dns -j ACCEPT",
+		"-A PREROUTING -s 192.168.89.0/24 -d 192.168.55.88/32 -p udp -m udp --dport 53 -m comment --comment singctl-vlan-dns -j ACCEPT",
+	} {
+		idx := strings.Index(preSection, wantPre)
+		if idx < 0 || idx > dnsmasqRuleIdx {
+			t.Fatalf("expected rule %q BEFORE DNSMASQ REDIRECT in PREROUTING:\n%s", wantPre, preSection)
+		}
 	}
 
 	code, body, err = probeHTTP(ctx, cname, "DELETE", "http://127.0.0.1:8090/api/vlan/segment/baidu_lan", "-", "")
@@ -959,14 +1007,42 @@ iptables -w 2 -S FORWARD
 	cleanOut := mustDockerExec(t, ctx, cname, `
 fw3 restart >/tmp/fw3-clean-restart.log 2>&1 || true
 iptables -w 2 -t nat -S postrouting_lan_rule
+echo "=== PREROUTING ==="
+iptables -w 2 -t nat -S PREROUTING
+echo "=== FORWARD ==="
 iptables -w 2 -S FORWARD
 test ! -e /etc/singctl/vlan-side-nomasq.fw3.sh && echo "FW3_SCRIPT_REMOVED"
+test ! -e /etc/singctl/vlan-dns-bypass.fw3.sh && echo "FW3_DNS_SCRIPT_REMOVED"
+test -f /etc/singctl/vlan-side-dns.fw3.sh && echo "FW3_SIDE_DNS_KEPT"
 uci -q get firewall.singctl_vlan_nomasq || echo "FW3_UCI_REMOVED"
+uci -q get firewall.singctl_vlan_dns || echo "FW3_DNS_UCI_REMOVED"
 `)
 	if strings.Contains(cleanOut, "singctl-side-nomasq") ||
+		strings.Contains(cleanOut, "singctl-vlan-dns") ||
+		strings.Contains(cleanOut, "192.168.89.0/24") ||
 		!strings.Contains(cleanOut, "FW3_SCRIPT_REMOVED") ||
+		!strings.Contains(cleanOut, "FW3_DNS_SCRIPT_REMOVED") ||
+		!strings.Contains(cleanOut, "FW3_SIDE_DNS_KEPT") ||
 		!strings.Contains(cleanOut, "FW3_UCI_REMOVED") ||
+		!strings.Contains(cleanOut, "FW3_DNS_UCI_REMOVED") ||
+		!strings.Contains(cleanOut, "192.168.55.88/32") ||
 		!strings.Contains(cleanOut, "-A FORWARD -i br-lan -o br-lan -m comment --comment singctl-vlan-br-l2 -j ACCEPT") {
-		t.Fatalf("expected OpenWrt 21.02 segment delete to clean fw3 nomasq include while preserving singctl-vlan-br-l2 on br-lan.1, got:\n%s", cleanOut)
+		t.Fatalf("expected OpenWrt 21.02 segment delete to clean fw3 nomasq/vlan-dns while keeping sideRouterIP DNS bypass & br-l2, got:\n%s", cleanOut)
+	}
+
+	gwClearCode, gwClearBody, gwClearErr := probeHTTP(ctx, cname, "POST", "http://127.0.0.1:8090/api/gateway", "-", `{"mode":"main","sideRouterIP":""}`)
+	if gwClearErr != nil || gwClearCode != 200 {
+		t.Fatalf("OpenWrt 21.02 POST /api/gateway clear sideRouterIP failed: code=%d body=%s err=%v", gwClearCode, gwClearBody, gwClearErr)
+	}
+	gwClearOut := mustDockerExec(t, ctx, cname, `
+fw3 restart >/tmp/fw3-gw-clear.log 2>&1 || true
+iptables -w 2 -t nat -S PREROUTING
+test ! -e /etc/singctl/vlan-side-dns.fw3.sh && echo "FW3_SIDE_DNS_REMOVED"
+uci -q get firewall.singctl_vlan_side_dns || echo "FW3_SIDE_DNS_UCI_REMOVED"
+`)
+	if strings.Contains(gwClearOut, "singctl-side-dns") ||
+		!strings.Contains(gwClearOut, "FW3_SIDE_DNS_REMOVED") ||
+		!strings.Contains(gwClearOut, "FW3_SIDE_DNS_UCI_REMOVED") {
+		t.Fatalf("expected clearing sideRouterIP to remove vlan-side-dns.fw3.sh and UCI section, got:\n%s", gwClearOut)
 	}
 }

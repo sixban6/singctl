@@ -21,7 +21,6 @@ import (
 	"singctl/internal/logger"
 	"singctl/internal/platform/servicemgr"
 	"singctl/internal/updater"
-	"singctl/internal/vlan"
 )
 
 const (
@@ -497,11 +496,7 @@ func RunBootInit(ctx context.Context, cfg *config.Config, deps BootInitDeps) err
 		isWebRunning = deps.IsStandaloneWebRunning
 	}
 
-	if runtime.GOOS == "linux" && (cfg == nil || !cfg.Gateway.IsSideRouter()) {
-		if sideSpec := vlan.ReadSideRouteSpec(constant.VLANSideRoutesFile); sideSpec.SideRouterIP != "" && len(sideSpec.CIDRs) > 0 {
-			_ = vlan.ApplyRuntimeSideRoutes(ctx, sideSpec, nil)
-		}
-	}
+	reconcileMainRouterVLANState(ctx, cfg)
 
 	needSingBox := cfg == nil || cfg.NeedsSingBox()
 	if !needSingBox || !sbCfgExists {
