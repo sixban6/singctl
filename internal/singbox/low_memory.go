@@ -225,11 +225,18 @@ func dnsRulesContainTag(rules []sboption.DNSRule, target string) bool {
 	return false
 }
 
-// ComputeSingBoxMemoryEnvForMode 根据宿主机总物理内存与工作模式计算自适应 Go 软内存上限与 GC 步频：
-//   - 0 < totalRAMBytes <= 288 MiB：审计模式 GOMEMLIMIT="20MiB", GOGC="25"；代理/通用模式 GOMEMLIMIT="28MiB", GOGC="30"
-//   - 288 MiB < totalRAMBytes <= 512 MiB：GOMEMLIMIT="44MiB", GOGC="50"
-//   - > 512 MiB 或 0：返回空字符串（不限制大内存设备）
+// ComputeSingBoxMemoryEnvForMode 根据宿主机总物理内存与工作模式计算全内存段自适应 Go 软内存上限与 GC 步频：
+//   - 0：未知内存返回空字符串（不盲猜）
+//   - <= 288 MiB：审计模式 GOMEMLIMIT="20MiB", GOGC="25"；代理模式 GOMEMLIMIT="28MiB", GOGC="30"
+//   - 289~512 MiB：GOMEMLIMIT="44MiB", GOGC="50"
+//   - 513 MiB~1 GiB：GOMEMLIMIT="160MiB"（保持 Go 默认 GOGC=100，零性能损耗防泄漏软顶）
+//   - 1~2 GiB：GOMEMLIMIT="256MiB"（保持 Go 默认 GOGC=100）
+//   - > 2 GiB：GOMEMLIMIT="512MiB"（保持 Go 默认 GOGC=100）
 func ComputeSingBoxMemoryEnvForMode(totalRAMBytes uint64, workMode string) (gomemlimit string, gogc string) {
+	const mib uint64 = 1024 * 1024
+	if totalRAMBytes == 0 {
+		return "", ""
+	}
 	switch {
 	case sysinfo.IsUltraLowMemoryRAM(totalRAMBytes):
 		if strings.EqualFold(strings.TrimSpace(workMode), config.WorkModeAudit) {
@@ -238,8 +245,12 @@ func ComputeSingBoxMemoryEnvForMode(totalRAMBytes uint64, workMode string) (gome
 		return "28MiB", "30"
 	case sysinfo.IsLowMemoryRAM(totalRAMBytes):
 		return "44MiB", "50"
+	case totalRAMBytes <= 1024*mib:
+		return "160MiB", ""
+	case totalRAMBytes <= 2048*mib:
+		return "256MiB", ""
 	default:
-		return "", ""
+		return "512MiB", ""
 	}
 }
 
@@ -254,10 +265,13 @@ func SingBoxMemoryEnvMap(totalRAMBytes uint64) map[string]string {
 	if limit == "" {
 		return nil
 	}
-	return map[string]string{
+	out := map[string]string{
 		"GOMEMLIMIT": limit,
-		"GOGC":       gogc,
 	}
+	if gogc != "" {
+		out["GOGC"] = gogc
+	}
+	return out
 }
 
 // BuildSingBoxClientUnitSpec 构建注入了自适应 GOMEMLIMIT/GOGC 的客户端 sing-box 跨平台服务单元规格。
@@ -304,22 +318,32 @@ start_service() {
 	}
 }
 
-// BuildSingBoxCommandEnv 构建执行客户端启动脚本时的进程环境变量切片，自动注入自适应 GOMEMLIMIT/GOGC 与低内存标识。
+// BuildSingBoxCommandEnv 构建执行客户端启动脚本时的进程环境变量切片，自动注入全内存段自适应 GOMEMLIMIT/GOGC 与低内存标识。
 func BuildSingBoxCommandEnv(baseEnv []string, cfg *config.Config, totalRAMBytes uint64) []string {
 	lowMem := cfg.EffectiveLowMemory(totalRAMBytes)
+	explicitOff := false
+	if cfg != nil {
+		if norm, valid := config.NormalizeLowMemoryMode(string(cfg.LowMemory)); valid && norm == config.LowMemoryOff {
+			explicitOff = true
+		}
+	}
 	overrides := make(map[string]string, 3)
 	if lowMem {
 		overrides["SINGCTL_LOW_MEMORY"] = "1"
+	} else {
+		overrides["SINGCTL_LOW_MEMORY"] = "0"
+	}
+	if !explicitOff {
 		workMode := ""
 		if cfg != nil {
 			workMode = cfg.EffectiveWorkMode()
 		}
 		if limit, gogc := ComputeSingBoxMemoryEnvForMode(totalRAMBytes, workMode); limit != "" {
 			overrides["GOMEMLIMIT"] = limit
-			overrides["GOGC"] = gogc
+			if gogc != "" {
+				overrides["GOGC"] = gogc
+			}
 		}
-	} else {
-		overrides["SINGCTL_LOW_MEMORY"] = "0"
 	}
 
 	out := make([]string, 0, len(baseEnv)+len(overrides))
@@ -330,10 +354,8 @@ func BuildSingBoxCommandEnv(baseEnv []string, cfg *config.Config, totalRAMBytes 
 				continue
 			}
 			// 若显式关闭低内存模式，剥离外部继承的 GOMEMLIMIT 防止误限流
-			if !lowMem && (key == "GOMEMLIMIT" || key == "GOGC") && cfg != nil {
-				if norm, valid := config.NormalizeLowMemoryMode(string(cfg.LowMemory)); valid && norm == config.LowMemoryOff {
-					continue
-				}
+			if explicitOff && (key == "GOMEMLIMIT" || key == "GOGC") {
+				continue
 			}
 		}
 		out = append(out, kv)

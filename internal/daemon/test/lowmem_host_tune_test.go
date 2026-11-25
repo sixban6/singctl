@@ -167,11 +167,63 @@ func TestLowMemHostTune_UniversalReconcileAndSafetyGuards(t *testing.T) {
 		t.Fatalf("expected DisabledStandaloneWeb=true when WebEmbedded && S95singctl-web present")
 	}
 
-	// Verify > 512 MiB host is completely untouched (zero-op)
-	bigDeps := deps
-	bigDeps.TotalRAMBytes = 1024 * mib
-	bigRes := daemon.ReconcileLowMemHost(t.Context(), bigDeps)
-	if bigRes.AppliedAny() {
-		t.Fatalf("expected zero-op on 1GiB host, got %+v", bigRes)
+	// Verify > 512 MiB host (e.g. 2GiB x86_64): cleans /tmp stale binaries + injects Tailscale/AdGuard GOMEMLIMIT
+	// WITHOUT touching sysctl / zram / log_size / standalone web!
+	bigRoot := t.TempDir()
+	bigTmp := filepath.Join(bigRoot, "tmp")
+	bigInit := filepath.Join(bigRoot, "init.d")
+	bigProcSys := filepath.Join(bigRoot, "proc", "sys", "net", "netfilter")
+	for _, d := range []string{bigTmp, bigInit, bigProcSys} {
+		_ = os.MkdirAll(d, 0755)
+	}
+	_ = os.WriteFile(filepath.Join(bigTmp, "singctl.v182.bak"), bigBin, 0600)
+	_ = os.WriteFile(filepath.Join(bigProcSys, "nf_conntrack_max"), []byte("65536\n"), 0644)
+	bigTS := filepath.Join(bigInit, "tailscale")
+	bigAGH := filepath.Join(bigInit, "AdGuardHome")
+	_ = os.WriteFile(bigTS, []byte("#!/bin/sh /etc/rc.common\nUSE_PROCD=1\nstart_service() {\n    procd_open_instance\n    procd_set_param command /usr/sbin/tailscaled\n    procd_close_instance\n}\n"), 0755)
+	_ = os.WriteFile(bigAGH, []byte("#!/bin/sh /etc/rc.common\nUSE_PROCD=1\nstart_service() {\n    procd_open_instance \"AdGuardHome\"\n    procd_set_param command /usr/bin/AdGuardHome\n    procd_close_instance\n}\n"), 0755)
+
+	bigMgr := servicemgr.NewMock()
+	_ = bigMgr.Start(t.Context(), "AdGuardHome") // AdGuardHome active; tailscale intentionally inactive (stopped)
+
+	bigRes := daemon.ReconcileLowMemHost(t.Context(), daemon.LowMemHostTuneDeps{
+		TotalRAMBytes:        2048 * mib,
+		IsOpenWrt:            true,
+		WebEmbedded:          false,
+		TmpDir:               bigTmp,
+		ProcSysRoot:          filepath.Join(bigRoot, "proc", "sys"),
+		TailscaleInitdPath:   bigTS,
+		AdGuardInitdPath:     bigAGH,
+		ServiceMgr:           bigMgr,
+		RestartTailscaleNow:  true,
+		RestartAdGuardNow:    true,
+	})
+	if bigRes.RemovedTmpBackups != 1 || !bigRes.TailscaleEnvUpdated || !bigRes.AdGuardEnvUpdated {
+		t.Fatalf("2GiB host expected tmp cleanup + tailscale/adguard GOMEMLIMIT, got %+v", bigRes)
+	}
+	if len(bigRes.SysctlUpdatedKeys) != 0 || bigRes.ZramAlgoUpdated != "" || bigRes.LogSizeCapped || bigRes.DisabledStandaloneWeb {
+		t.Fatalf("2GiB host must NOT touch low-mem sysctl/zram/logd/web, got %+v", bigRes)
+	}
+	tsOut, _ := os.ReadFile(bigTS)
+	aghOut, _ := os.ReadFile(bigAGH)
+	if !strings.Contains(string(tsOut), "GOMEMLIMIT=64MiB") || !strings.Contains(string(aghOut), "GOMEMLIMIT=256MiB") {
+		t.Fatalf("2GiB host expected 64MiB/256MiB env, got ts=%q agh=%q", string(tsOut), string(aghOut))
+	}
+	// Safety redline: active AdGuardHome MUST restart to pick up GOMEMLIMIT, inactive tailscale MUST NOT be started/restarted!
+	bigCalls := strings.Join(bigMgr.Calls(), ",")
+	if !strings.Contains(bigCalls, "restart AdGuardHome") {
+		t.Fatalf("expected active AdGuardHome to be restarted, calls=%v", bigMgr.Calls())
+	}
+	if strings.Contains(bigCalls, "restart tailscale") {
+		t.Fatalf("inactive tailscale must NOT be restarted/started, calls=%v", bigMgr.Calls())
+	}
+
+	// Unknown RAM (0) must remain strictly zero-op
+	zeroRes := daemon.ReconcileLowMemHost(t.Context(), daemon.LowMemHostTuneDeps{
+		TotalRAMBytes: 0,
+		TmpDir:        bigTmp,
+	})
+	if zeroRes.AppliedAny() {
+		t.Fatalf("expected zero-op on unknown RAM=0, got %+v", zeroRes)
 	}
 }

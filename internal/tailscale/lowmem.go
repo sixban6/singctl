@@ -12,11 +12,18 @@ import (
 	"singctl/internal/platform/servicemgr"
 )
 
-// ComputeMemoryEnv 根据宿主机总物理内存计算 Tailscale 守护进程的自适应 Go 内存护栏环境变量：
+// ComputeMemoryEnv 根据宿主机总物理内存计算 Tailscale 守护进程的全内存段自适应 Go 内存护栏环境变量：
+//   - 0：未知内存返回 nil（不盲猜）
 //   - <= 288 MiB（超小内存路由）：GOMEMLIMIT=14MiB, GOGC=25, TS_NO_LOGS_NO_SUPPORT=true
 //   - 289~512 MiB（小内存路由）：GOMEMLIMIT=22MiB, GOGC=40, TS_NO_LOGS_NO_SUPPORT=true
-//   - > 512 MiB 或未知（0）：返回 nil（不施加限制）
+//   - 513 MiB~1 GiB：GOMEMLIMIT=48MiB（保持 Go 默认 GOGC=100）
+//   - 1~2 GiB：GOMEMLIMIT=64MiB（保持 Go 默认 GOGC=100）
+//   - > 2 GiB：GOMEMLIMIT=128MiB（保持 Go 默认 GOGC=100）
 func ComputeMemoryEnv(totalRAMBytes uint64) map[string]string {
+	const mib uint64 = 1024 * 1024
+	if totalRAMBytes == 0 {
+		return nil
+	}
 	switch {
 	case sysinfo.IsUltraLowMemoryRAM(totalRAMBytes):
 		return map[string]string{
@@ -30,8 +37,12 @@ func ComputeMemoryEnv(totalRAMBytes uint64) map[string]string {
 			"GOGC":                  "40",
 			"TS_NO_LOGS_NO_SUPPORT": "true",
 		}
+	case totalRAMBytes <= 1024*mib:
+		return map[string]string{"GOMEMLIMIT": "48MiB"}
+	case totalRAMBytes <= 2048*mib:
+		return map[string]string{"GOMEMLIMIT": "64MiB"}
 	default:
-		return nil
+		return map[string]string{"GOMEMLIMIT": "128MiB"}
 	}
 }
 
@@ -175,8 +186,7 @@ func stripManagedProcdMemEnvLines(body string) string {
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "procd_set_param env ") &&
-			strings.Contains(trimmed, "GOMEMLIMIT=") &&
-			strings.Contains(trimmed, "TS_NO_LOGS_NO_SUPPORT=") {
+			strings.Contains(trimmed, "GOMEMLIMIT=") {
 			continue
 		}
 		out = append(out, line)

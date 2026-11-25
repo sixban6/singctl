@@ -16,6 +16,7 @@ import (
 
 	"singctl/internal/common/netx"
 	"singctl/internal/common/proc"
+	"singctl/internal/common/sysinfo"
 	"singctl/internal/config"
 	"singctl/internal/logger"
 	"singctl/internal/platform/servicemgr"
@@ -122,6 +123,8 @@ func (m *Manager) installAndStartService() error {
 		return err
 	}
 
+	memEnv := ComputeMemoryEnv(sysinfo.TotalRAMBytes())
+
 	if hasOpenWrtProcd() && m.initdScript != "" {
 		sanitizeOpenWrtDnsmasqTTL()
 		mgr := servicemgr.NewProcd(nil, filepath.Dir(m.initdScript))
@@ -129,6 +132,7 @@ func (m *Manager) installAndStartService() error {
 			Name:      "AdGuardHome",
 			ProcdPath: m.initdScript,
 			ProcdBody: BuildOpenWrtInitScript(m.binPath, m.aghConfigFile, m.aghWorkDir),
+			Env:       memEnv,
 		}
 		if err := mgr.InstallUnit(context.Background(), spec); err != nil {
 			if startErr := mgr.Start(context.Background(), "AdGuardHome"); startErr != nil {
@@ -148,6 +152,7 @@ func (m *Manager) installAndStartService() error {
 			Name:        "AdGuardHome",
 			SystemdPath: m.systemdUnit,
 			SystemdBody: BuildSystemdUnit(m.binPath, m.aghConfigFile, m.aghWorkDir),
+			Env:         memEnv,
 		}
 		if err := mgr.InstallUnit(context.Background(), spec); err != nil {
 			return fmt.Errorf("启动 systemd AdGuardHome 服务失败: %w", err)
@@ -475,6 +480,13 @@ func startBackgroundDirect(binPath, configFile, workDir string) error {
 	}
 
 	cmd := exec.Command(binPath, "-s", "run", "-c", configFile, "-w", workDir, "--no-check-update")
+	if memEnv := ComputeMemoryEnv(sysinfo.TotalRAMBytes()); len(memEnv) > 0 {
+		env := os.Environ()
+		for k, v := range memEnv {
+			env = append(env, k+"="+v)
+		}
+		cmd.Env = env
+	}
 	cmd.Dir = workDir
 	cmd.Stdin = devNull
 	cmd.Stdout = logFile

@@ -13,28 +13,34 @@ import (
 func TestTailscale_LowMemServiceEnvAndDuplicateRcCleanup(t *testing.T) {
 	const mib = 1024 * 1024
 
-	// 1. Tiered memory env table
+	// 1. Full-range tiered memory env table
 	if env := tailscale.ComputeMemoryEnv(224 * mib); env["GOMEMLIMIT"] != "14MiB" || env["GOGC"] != "25" || env["TS_NO_LOGS_NO_SUPPORT"] != "true" {
 		t.Fatalf("unexpected 224MiB tailscale env: %v", env)
 	}
 	if env := tailscale.ComputeMemoryEnv(479 * mib); env["GOMEMLIMIT"] != "22MiB" || env["GOGC"] != "40" || env["TS_NO_LOGS_NO_SUPPORT"] != "true" {
 		t.Fatalf("unexpected 479MiB tailscale env: %v", env)
 	}
-	if env := tailscale.ComputeMemoryEnv(1024 * mib); len(env) != 0 {
-		t.Fatalf("expected no memory env limit on 1GiB host, got %v", env)
+	if env := tailscale.ComputeMemoryEnv(1024 * mib); env["GOMEMLIMIT"] != "48MiB" || env["GOGC"] != "" {
+		t.Fatalf("unexpected 1GiB tailscale env: %v", env)
+	}
+	if env := tailscale.ComputeMemoryEnv(2048 * mib); env["GOMEMLIMIT"] != "64MiB" || env["GOGC"] != "" {
+		t.Fatalf("unexpected 2GiB tailscale env: %v", env)
+	}
+	if env := tailscale.ComputeMemoryEnv(4096 * mib); env["GOMEMLIMIT"] != "128MiB" || env["GOGC"] != "" {
+		t.Fatalf("unexpected 4GiB tailscale env: %v", env)
 	}
 	if env := tailscale.ComputeMemoryEnv(0); len(env) != 0 {
 		t.Fatalf("expected no memory env limit on unknown RAM, got %v", env)
 	}
 
-	// 2. RenderInitScriptWithMem injects procd_set_param env on ultra-low RAM and omits on large RAM
+	// 2. RenderInitScriptWithMem injects full-range procd_set_param env (ultra-low includes GOGC, 2GiB keeps default GOGC)
 	ultraScript := tailscale.RenderInitScriptWithMem(true, 224*mib)
 	if !strings.Contains(ultraScript, "procd_set_param env GOGC=25 GOMEMLIMIT=14MiB TS_NO_LOGS_NO_SUPPORT=true") {
 		t.Fatalf("expected ultra-low procd env in rendered init script:\n%s", ultraScript)
 	}
 	bigScript := tailscale.RenderInitScriptWithMem(true, 2048*mib)
-	if strings.Contains(bigScript, "GOMEMLIMIT=") {
-		t.Fatalf("large RAM init script must not set GOMEMLIMIT:\n%s", bigScript)
+	if !strings.Contains(bigScript, "procd_set_param env GOMEMLIMIT=64MiB") || strings.Contains(bigScript, "GOGC=") {
+		t.Fatalf("2GiB RAM init script must set GOMEMLIMIT=64MiB without overriding GOGC:\n%s", bigScript)
 	}
 
 	// 3. EnsureLowMemServiceEnv idempotently patches existing OpenWrt procd script + cleans duplicate S80tailscale

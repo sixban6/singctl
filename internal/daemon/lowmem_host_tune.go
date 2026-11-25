@@ -1,4 +1,4 @@
-// 文件职责：提供面向所有小内存路由器（<=512MiB）的通用代码级宿主机内存自愈调优（/tmp 旧二进制备份清扫、内核 sysctl 稳态调优、zram 最优压缩算法、OpenWrt logd/冗余 web 清理与 tailscale 护栏对账）。
+// 文件职责：提供面向全内存段 Linux/OpenWrt 路由器的通用代码级宿主机内存护栏与自愈调优（全段 /tmp 旧二进制备份清扫、Tailscale/AdGuardHome 自适应 GOMEMLIMIT 服务对账，以及 <=512MiB 内核 sysctl、zram 最优算法与 logd/冗余 web 清理）。
 package daemon
 
 import (
@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"singctl/internal/adguard"
 	"singctl/internal/common/fsx"
 	"singctl/internal/common/sysinfo"
 	"singctl/internal/constant"
@@ -25,7 +26,7 @@ const (
 	defaultLowMemSysctl          = "/etc/sysctl.d/99-singctl-lowmem.conf"
 )
 
-// LowMemHostTuneDeps 显式注入小内存宿主机调优器的全部路径与外部执行器依赖（支持完全离线测试）。
+// LowMemHostTuneDeps 显式注入宿主机内存护栏调优器的全部路径与外部执行器依赖（支持完全离线测试）。
 type LowMemHostTuneDeps struct {
 	TotalRAMBytes       uint64
 	IsOpenWrt           bool
@@ -36,13 +37,16 @@ type LowMemHostTuneDeps struct {
 	ZramCompAlgoPath    string
 	TailscaleInitdPath  string
 	TailscaleSystemd    string
+	AdGuardInitdPath    string
+	AdGuardSystemd      string
 	OpenWrtRcdDir       string
 	ServiceMgr          servicemgr.Manager
 	RestartTailscaleNow bool
+	RestartAdGuardNow   bool
 	RunUCI              func(ctx context.Context, args ...string) (string, error)
 }
 
-// LowMemHostTuneResult 汇总本次小内存宿主机自适应调优的执行成效。
+// LowMemHostTuneResult 汇总本次宿主机内存护栏自适应调优的执行成效。
 type LowMemHostTuneResult struct {
 	RemovedTmpBackups     int
 	FreedTmpBytes         int64
@@ -51,6 +55,7 @@ type LowMemHostTuneResult struct {
 	LogSizeCapped         bool
 	DisabledStandaloneWeb bool
 	TailscaleEnvUpdated   bool
+	AdGuardEnvUpdated     bool
 }
 
 // AppliedAny 判断本次调优是否执行了任意实际宿主机优化动作。
@@ -60,7 +65,8 @@ func (r LowMemHostTuneResult) AppliedAny() bool {
 		r.ZramAlgoUpdated != "" ||
 		r.LogSizeCapped ||
 		r.DisabledStandaloneWeb ||
-		r.TailscaleEnvUpdated
+		r.TailscaleEnvUpdated ||
+		r.AdGuardEnvUpdated
 }
 
 // SelectBestZramCompAlgo 解析 `/sys/block/zram0/comp_algorithm` 内容，按 zstd > lz4 > lzo-rle 优先级挑选更优压缩算法；
@@ -216,11 +222,13 @@ func hasStandaloneWebRcSymlink(rcdDir string) bool {
 	return len(matches) > 0
 }
 
-// ReconcileLowMemHost 对小内存路由器（<=512MiB）执行幂等、零断网、代码级通用的宿主机内存优化；
-// 对 >512MiB 宿主机静默零开销跳过。
+// ReconcileLowMemHost 对全内存段路由器执行幂等、零断网、代码级通用的宿主机内存护栏优化：
+//   - 全内存段（TotalRAMBytes > 0）：清扫 /tmp 残留大备份 + 为既有 Tailscale/AdGuardHome 补齐自适应 GOMEMLIMIT；
+//   - 小内存段（<= 512 MiB）：额外执行内核 sysctl 稳态护栏、zram 压缩算法升级、logd 环形缓冲收敛与冗余 web 自启清理；
+//   - 未知内存（TotalRAMBytes == 0）：静默零开销跳过。
 func ReconcileLowMemHost(ctx context.Context, deps LowMemHostTuneDeps) LowMemHostTuneResult {
 	var res LowMemHostTuneResult
-	if !sysinfo.IsLowMemoryRAM(deps.TotalRAMBytes) {
+	if deps.TotalRAMBytes == 0 {
 		return res
 	}
 	if ctx == nil {
@@ -232,65 +240,66 @@ func ReconcileLowMemHost(ctx context.Context, deps LowMemHostTuneDeps) LowMemHos
 		runUCI = defaultRunUCI
 	}
 
-	// 1. 清扫 /tmp 内存盘残留的 >=1MiB 旧版 singctl 二进制备份
+	// 1. 全内存段：清扫 /tmp 内存盘残留的 >=1MiB 旧版 singctl 二进制备份
 	res.RemovedTmpBackups, res.FreedTmpBytes = sweepStaleTmpBinaryBackups(deps.TmpDir)
 
-	// 2. 应用并持久化自适应内核 sysctl 稳态护栏
-	res.SysctlUpdatedKeys = applyLowMemSysctls(deps.ProcSysRoot, deps.SysctlConfPath, deps.TotalRAMBytes)
+	// 2~3. 仅小内存宿主机（<= 512 MiB）：内核 sysctl 稳态护栏 + OpenWrt zram/logd/冗余 web 收敛
+	if sysinfo.IsLowMemoryRAM(deps.TotalRAMBytes) {
+		res.SysctlUpdatedKeys = applyLowMemSysctls(deps.ProcSysRoot, deps.SysctlConfPath, deps.TotalRAMBytes)
 
-	// 3. OpenWrt 专属轻量优化（zram 压缩算法升级 + logd 环形缓冲收敛 + 合体模式停用冗余独立 web 自启）
-	if deps.IsOpenWrt {
-		uciCommitted := false
-		if strings.TrimSpace(deps.ZramCompAlgoPath) != "" {
-			if raw, err := os.ReadFile(deps.ZramCompAlgoPath); err == nil {
-				if best := SelectBestZramCompAlgo(string(raw)); best != "" {
-					curUCI, _ := runUCI(ctx, "get", "system.@system[0].zram_comp_algo")
-					if strings.TrimSpace(curUCI) != best {
-						if _, setErr := runUCI(ctx, "set", "system.@system[0].zram_comp_algo="+best); setErr == nil {
-							res.ZramAlgoUpdated = best
+		if deps.IsOpenWrt {
+			uciCommitted := false
+			if strings.TrimSpace(deps.ZramCompAlgoPath) != "" {
+				if raw, err := os.ReadFile(deps.ZramCompAlgoPath); err == nil {
+					if best := SelectBestZramCompAlgo(string(raw)); best != "" {
+						curUCI, _ := runUCI(ctx, "get", "system.@system[0].zram_comp_algo")
+						if strings.TrimSpace(curUCI) != best {
+							if _, setErr := runUCI(ctx, "set", "system.@system[0].zram_comp_algo="+best); setErr == nil {
+								res.ZramAlgoUpdated = best
+								uciCommitted = true
+							}
+						}
+					}
+				}
+			}
+
+			if sysinfo.IsUltraLowMemoryRAM(deps.TotalRAMBytes) {
+				if curLogSz, err := runUCI(ctx, "get", "system.@system[0].log_size"); err == nil {
+					if n, pErr := strconv.Atoi(strings.TrimSpace(curLogSz)); pErr == nil && n > 64 {
+						if _, setErr := runUCI(ctx, "set", "system.@system[0].log_size=64"); setErr == nil {
+							res.LogSizeCapped = true
 							uciCommitted = true
 						}
 					}
 				}
 			}
-		}
 
-		if sysinfo.IsUltraLowMemoryRAM(deps.TotalRAMBytes) {
-			if curLogSz, err := runUCI(ctx, "get", "system.@system[0].log_size"); err == nil {
-				if n, pErr := strconv.Atoi(strings.TrimSpace(curLogSz)); pErr == nil && n > 64 {
-					if _, setErr := runUCI(ctx, "set", "system.@system[0].log_size=64"); setErr == nil {
-						res.LogSizeCapped = true
-						uciCommitted = true
+			if uciCommitted {
+				_, _ = runUCI(ctx, "commit", "system")
+				if res.LogSizeCapped && deps.ServiceMgr != nil {
+					_ = deps.ServiceMgr.Reload(ctx, "log")
+				}
+			}
+
+			if deps.WebEmbedded && hasStandaloneWebRcSymlink(deps.OpenWrtRcdDir) {
+				if deps.ServiceMgr != nil {
+					if err := deps.ServiceMgr.Disable(ctx, "singctl-web"); err == nil {
+						res.DisabledStandaloneWeb = true
 					}
 				}
-			}
-		}
-
-		if uciCommitted {
-			_, _ = runUCI(ctx, "commit", "system")
-			if res.LogSizeCapped && deps.ServiceMgr != nil {
-				_ = deps.ServiceMgr.Reload(ctx, "log")
-			}
-		}
-
-		if deps.WebEmbedded && hasStandaloneWebRcSymlink(deps.OpenWrtRcdDir) {
-			if deps.ServiceMgr != nil {
-				if err := deps.ServiceMgr.Disable(ctx, "singctl-web"); err == nil {
-					res.DisabledStandaloneWeb = true
-				}
-			}
-			// 同步确保测试/受限环境下孤立 S*singctl-web 软链被清理
-			if matches, _ := filepath.Glob(filepath.Join(deps.OpenWrtRcdDir, "S*singctl-web")); len(matches) > 0 {
-				for _, m := range matches {
-					if os.Remove(m) == nil {
-						res.DisabledStandaloneWeb = true
+				// 同步确保测试/受限环境下孤立 S*singctl-web 软链被清理
+				if matches, _ := filepath.Glob(filepath.Join(deps.OpenWrtRcdDir, "S*singctl-web")); len(matches) > 0 {
+					for _, m := range matches {
+						if os.Remove(m) == nil {
+							res.DisabledStandaloneWeb = true
+						}
 					}
 				}
 			}
 		}
 	}
 
-	// 4. Tailscale 服务小内存 GOMEMLIMIT/GOGC 护栏与重复启动软链清理
+	// 4. 全内存段：Tailscale 服务自适应 GOMEMLIMIT 护栏与重复启动软链清理（仅在服务处于运行态时热重启生效）
 	if changed, svcType, err := tailscale.EnsureLowMemServiceEnv(
 		deps.TailscaleInitdPath,
 		deps.TailscaleSystemd,
@@ -304,20 +313,39 @@ func ReconcileLowMemHost(ctx context.Context, deps LowMemHostTuneDeps) LowMemHos
 				unitName = "tailscaled"
 				_ = deps.ServiceMgr.DaemonReload(ctx)
 			}
-			_ = deps.ServiceMgr.Restart(ctx, unitName)
+			if deps.ServiceMgr.IsActive(ctx, unitName) {
+				_ = deps.ServiceMgr.Restart(ctx, unitName)
+			}
+		}
+	}
+
+	// 5. 全内存段：AdGuard Home 服务自适应 GOMEMLIMIT 护栏（仅在服务处于运行态时热重启，严禁误拉起已停用的 DNS 引擎）
+	if changed, svcType, err := adguard.EnsureMemoryLimitServiceEnv(
+		deps.AdGuardInitdPath,
+		deps.AdGuardSystemd,
+		deps.TotalRAMBytes,
+	); err == nil && changed {
+		res.AdGuardEnvUpdated = true
+		if deps.RestartAdGuardNow && deps.ServiceMgr != nil {
+			if svcType == "systemd" {
+				_ = deps.ServiceMgr.DaemonReload(ctx)
+			}
+			if deps.ServiceMgr.IsActive(ctx, "AdGuardHome") {
+				_ = deps.ServiceMgr.Restart(ctx, "AdGuardHome")
+			}
 		}
 	}
 
 	return res
 }
 
-// ReconcileLowMemHostDefault 在真实 Linux 小内存路由器启动守护进程后执行自动零断网自愈调优。
+// ReconcileLowMemHostDefault 在真实 Linux 路由器启动守护进程后执行全内存段自适应内存护栏与自愈调优。
 func ReconcileLowMemHostDefault(ctx context.Context, webEmbedded bool) LowMemHostTuneResult {
 	if runtime.GOOS != "linux" {
 		return LowMemHostTuneResult{}
 	}
 	totalRAM := sysinfo.TotalRAMBytes()
-	if !sysinfo.IsLowMemoryRAM(totalRAM) {
+	if totalRAM == 0 {
 		return LowMemHostTuneResult{}
 	}
 	res := ReconcileLowMemHost(ctx, LowMemHostTuneDeps{
@@ -330,15 +358,18 @@ func ReconcileLowMemHostDefault(ctx context.Context, webEmbedded bool) LowMemHos
 		ZramCompAlgoPath:    "/sys/block/zram0/comp_algorithm",
 		TailscaleInitdPath:  constant.TailscaleInitdScript,
 		TailscaleSystemd:    constant.TailscaleSystemdService,
+		AdGuardInitdPath:    constant.AdGuardInitdScript,
+		AdGuardSystemd:      constant.AdGuardSystemdService,
 		OpenWrtRcdDir:       "/etc/rc.d",
 		ServiceMgr:          servicemgr.Detect(nil),
 		RestartTailscaleNow: true,
+		RestartAdGuardNow:   true,
 	})
 	if res.AppliedAny() {
-		logger.Info("[LowMem-Tune] 小内存宿主机自愈调优已生效: tmpCleanup=%d(%.1fMiB) sysctl=%v zram=%s log64=%v disableWeb=%v tailscaleEnv=%v",
+		logger.Info("[LowMem-Tune] 宿主机内存护栏调优已生效: tmpCleanup=%d(%.1fMiB) sysctl=%v zram=%s log64=%v disableWeb=%v tailscaleEnv=%v adguardEnv=%v",
 			res.RemovedTmpBackups, float64(res.FreedTmpBytes)/(1024*1024),
 			res.SysctlUpdatedKeys, res.ZramAlgoUpdated, res.LogSizeCapped,
-			res.DisabledStandaloneWeb, res.TailscaleEnvUpdated)
+			res.DisabledStandaloneWeb, res.TailscaleEnvUpdated, res.AdGuardEnvUpdated)
 	}
 	return res
 }

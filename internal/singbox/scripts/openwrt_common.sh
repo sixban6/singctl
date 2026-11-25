@@ -409,6 +409,12 @@ setup_singbox_mem_env() {
             elif [ "$mem_total_kb" -le 524288 ]; then
                 GOMEMLIMIT="44MiB"
                 [ -z "${GOGC:-}" ] && GOGC="50"
+            elif [ "$mem_total_kb" -le 1048576 ]; then
+                GOMEMLIMIT="160MiB"
+            elif [ "$mem_total_kb" -le 2097152 ]; then
+                GOMEMLIMIT="256MiB"
+            else
+                GOMEMLIMIT="512MiB"
             fi
         fi
         if [ -z "${SINGCTL_LOW_MEMORY:-}" ]; then
