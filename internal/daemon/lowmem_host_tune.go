@@ -144,7 +144,8 @@ func desiredLowMemSysctls(totalRAMBytes uint64) []sysctlBound {
 		return []sysctlBound{
 			{key: "net.netfilter.nf_conntrack_max", relPath: "net/netfilter/nf_conntrack_max", target: 16384, isMax: true},
 			{key: "vm.vfs_cache_pressure", relPath: "vm/vfs_cache_pressure", target: 150, isMax: false},
-			{key: "vm.min_free_kbytes", relPath: "vm/min_free_kbytes", target: 8192, isMax: false},
+			// 224~256MiB 单 DMA32 域设备严禁抬高 min_free_kbytes（8192 会把 low 水位线拉至 ~19MiB 导致 MemAvailable 倒挂），上限保持 OpenWrt 默认 4096
+			{key: "vm.min_free_kbytes", relPath: "vm/min_free_kbytes", target: 4096, isMax: true},
 		}
 	}
 	if sysinfo.IsLowMemoryRAM(totalRAMBytes) {

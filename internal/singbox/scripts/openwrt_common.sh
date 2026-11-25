@@ -615,7 +615,7 @@ start_singbox() {
     if [ -n "${GOMEMLIMIT:-}" ] || [ -n "${GOGC:-}" ]; then
         if ujail -n test-env -w /tmp -e PATH -- /bin/echo "ok" >/dev/null 2>&1; then
             UJAIL_HAS_ENV=1
-        elif [ -x /usr/bin/env ] && ujail -n test-envwrap -w /tmp -r /usr/bin/env -- /usr/bin/env "GOMEMLIMIT=${GOMEMLIMIT:-}" /bin/echo "ok" >/dev/null 2>&1; then
+        elif [ -x /usr/bin/env ] && ujail -n test-envwrap -w /tmp -r /usr/bin/env -r /bin/echo -- /usr/bin/env "GOMEMLIMIT=${GOMEMLIMIT:-}" /bin/echo "ok" >/dev/null 2>&1; then
             UJAIL_USE_ENV_WRAPPER=1
         fi
     fi
@@ -641,7 +641,7 @@ start_singbox() {
         [ -n "${GOMEMLIMIT:-}" ] && set -- "$@" -e GOMEMLIMIT
         [ -n "${GOGC:-}" ] && set -- "$@" -e GOGC
     elif [ "$UJAIL_USE_ENV_WRAPPER" = "1" ]; then
-        set -- "$@" -r /usr/bin/env
+        set -- "$@" -r /usr/bin/env -r "$SINGBOX_EXEC"
     fi
     if [ "$UJAIL_PROC_MODE" = "flag" ]; then
         set -- "$@" -p
@@ -688,7 +688,7 @@ start_singbox() {
         [ -n "${GOMEMLIMIT:-}" ] && set -- "$@" -e GOMEMLIMIT
         [ -n "${GOGC:-}" ] && set -- "$@" -e GOGC
     elif [ "$UJAIL_USE_ENV_WRAPPER" = "1" ]; then
-        set -- "$@" -r /usr/bin/env
+        set -- "$@" -r /usr/bin/env -r "$SINGBOX_EXEC"
     fi
     [ -e /etc/sing-box ] && set -- "$@" -r /etc/sing-box
     [ -e /etc/ssl ] && set -- "$@" -r /etc/ssl

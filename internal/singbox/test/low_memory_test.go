@@ -314,10 +314,11 @@ func TestComputeSingBoxMemoryEnv_And_UnitSpec_And_LogCap(t *testing.T) {
 				!strings.Contains(openwrtScript, "44MiB") ||
 				!strings.Contains(openwrtScript, "-e GOMEMLIMIT") ||
 				!strings.Contains(openwrtScript, "UJAIL_USE_ENV_WRAPPER") ||
-				!strings.Contains(openwrtScript, "/usr/bin/env") ||
+				!strings.Contains(openwrtScript, `-r "$SINGBOX_EXEC"`) ||
+				!strings.Contains(openwrtScript, "-r /usr/bin/env -r /bin/echo") ||
 				!strings.Contains(openwrtScript, "262144") ||
 				!strings.Contains(openwrtScript, "ensure_openwrt_ujail") {
-				t.Fatalf("OpenWrt start script (%s) missing adaptive GOMEMLIMIT / ujail env wrapper / 256KiB log cap / auto-ujail", backend)
+				t.Fatalf("OpenWrt start script (%s) missing adaptive GOMEMLIMIT / ujail env wrapper staging (-r SINGBOX_EXEC) / 256KiB log cap / auto-ujail", backend)
 			}
 		}
 		openwrtTargetScript := scripts.GetStartScriptForTarget("linux", false)

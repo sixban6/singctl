@@ -75,10 +75,10 @@ func TestLowMemHostTune_UniversalReconcileAndSafetyGuards(t *testing.T) {
 		}
 	}
 
-	// Seed proc/sys values typical of 224MiB OpenWrt defaults
+	// Seed proc/sys values typical of 224MiB OpenWrt defaults (plus over-high min_free_kbytes=8192 that causes low-watermark MemAvailable inversion)
 	_ = os.WriteFile(filepath.Join(procSysDir, "net", "netfilter", "nf_conntrack_max"), []byte("65536\n"), 0644)
 	_ = os.WriteFile(filepath.Join(procSysDir, "vm", "vfs_cache_pressure"), []byte("100\n"), 0644)
-	_ = os.WriteFile(filepath.Join(procSysDir, "vm", "min_free_kbytes"), []byte("4096\n"), 0644)
+	_ = os.WriteFile(filepath.Join(procSysDir, "vm", "min_free_kbytes"), []byte("8192\n"), 0644)
 	_ = os.WriteFile(zramAlgoPath, []byte("[lzo] lzo-rle\n"), 0644)
 
 	// Seed OpenWrt tailscale init script + duplicate S80tailscale + redundant S95singctl-web
@@ -137,11 +137,11 @@ func TestLowMemHostTune_UniversalReconcileAndSafetyGuards(t *testing.T) {
 		}
 	}
 
-	// Verify sysctl live + persistent file
+	// Verify sysctl live + persistent file (min_free_kbytes capped <= 4096 to avoid DMA32 low-watermark MemAvailable inversion)
 	for rel, want := range map[string]string{
 		"net/netfilter/nf_conntrack_max": "16384",
 		"vm/vfs_cache_pressure":          "150",
-		"vm/min_free_kbytes":             "8192",
+		"vm/min_free_kbytes":             "4096",
 	} {
 		raw, err := os.ReadFile(filepath.Join(procSysDir, rel))
 		if err != nil || strings.TrimSpace(string(raw)) != want {
