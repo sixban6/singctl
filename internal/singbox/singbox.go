@@ -111,6 +111,11 @@ func (sb *SingBox) Start() error {
 			}
 			defer os.Remove(scriptPath)
 
+			// Pre-clean old TProxy dataplane in Go before starting sing-box so stop/ujail/probe runs with direct network
+			if runtime.GOOS == "linux" && os.Geteuid() == 0 {
+				_ = sb.cleanupNativeDataplane(context.Background())
+			}
+
 			// Execute script with appropriate command
 			totalRAM := readHostTotalRAMBytes()
 			_ = EnforceLowMemoryBasicLogCap(sb.config, totalRAM, constant.SingBoxBasicLogFile)
@@ -119,12 +124,21 @@ func (sb *SingBox) Start() error {
 			} else {
 				cmd = exec.Command("sh", scriptPath)
 			}
-			cmd.Env = BuildSingBoxCommandEnv(os.Environ(), sb.config, totalRAM)
+			cmdEnv := BuildSingBoxCommandEnv(os.Environ(), sb.config, totalRAM)
+			if runtime.GOOS == "linux" && os.Geteuid() == 0 {
+				cmdEnv = append(cmdEnv, "SINGCTL_GO_DATAPLANE=1")
+			}
+			cmd.Env = cmdEnv
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
 
 			if err := cmd.Run(); err != nil {
 				return fmt.Errorf("start sing-box failed: %w", err)
+			}
+			if runtime.GOOS == "linux" && os.Geteuid() == 0 {
+				if dpErr := sb.applyNativeDataplane(context.Background()); dpErr != nil {
+					return fmt.Errorf("apply go native dataplane failed: %w", dpErr)
+				}
 			}
 			_ = EnforceLowMemoryBasicLogCap(sb.config, totalRAM, constant.SingBoxBasicLogFile)
 			return nil
@@ -164,6 +178,9 @@ func (sb *SingBox) Stop() error {
 	} else {
 		cmd = exec.Command("sh", scriptPath)
 	}
+	if runtime.GOOS == "linux" && os.Geteuid() == 0 {
+		cmd.Env = append(os.Environ(), "SINGCTL_GO_DATAPLANE=1")
+	}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
@@ -172,6 +189,9 @@ func (sb *SingBox) Stop() error {
 	}
 
 	if runtime.GOOS == "linux" {
+		if os.Geteuid() == 0 {
+			_ = sb.cleanupNativeDataplane(context.Background())
+		}
 		_ = gateway.NewController().Teardown(context.Background())
 	}
 

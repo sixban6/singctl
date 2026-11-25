@@ -69,6 +69,8 @@ func TestBuildSecurityNFTWithOptions_ModesClampingAndSelfLockProtection(t *testi
 	nft := firewall.BuildSecurityNFTWithOptions(opts)
 	for _, mustContain := range []string{
 		"#!/usr/sbin/nft -f",
+		"add table inet security",
+		"flush table inet security",
 		"table inet security",
 		"timeout 14d",
 		"limit rate 25/second counter accept",
@@ -124,7 +126,7 @@ func TestBuildSecurityNFTWithOptions_ModesClampingAndSelfLockProtection(t *testi
 	}
 
 	minBoot := firewall.BuildMinimalBlocklistNFT()
-	if !strings.Contains(minBoot, "table inet security") || strings.Contains(minBoot, "protected_ports") {
+	if !strings.Contains(minBoot, "add table inet security") || !strings.Contains(minBoot, "flush table inet security") || !strings.Contains(minBoot, "table inet security") || strings.Contains(minBoot, "protected_ports") {
 		t.Fatalf("unexpected BuildMinimalBlocklistNFT:\n%s", minBoot)
 	}
 	unit := firewall.BuildFirewallSystemdUnit("/etc/sing-box/sec_block.nft")

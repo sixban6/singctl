@@ -5,12 +5,16 @@ trap 'error_exit "脚本被中断"' INT TERM
 
 main() {
     require_root
-    check_command "ip"
-    fw_check_deps
+    if [ "${SINGCTL_GO_DATAPLANE:-0}" != "1" ]; then
+        check_command "ip"
+        fw_check_deps
+    fi
 
     stop_singbox_proc
-    fw_stop_cleanup
-    cleanup_route
+    if [ "${SINGCTL_GO_DATAPLANE:-0}" != "1" ]; then
+        fw_stop_cleanup
+        cleanup_route
+    fi
 
     # 清理持久化缓存与沙盒工作区
     rm -f /etc/sing-box/cache.db /tmp/sing-box-cache.db 2>/dev/null && echo_succ "已清理缓存文件" || true

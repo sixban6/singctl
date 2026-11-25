@@ -422,6 +422,8 @@ func TestArchGuard_LayeredDAGAcyclic(t *testing.T) {
 		"internal/component/",
 		"internal/lifecycle/",
 		"internal/platform/servicemgr/",
+		"internal/platform/rtnl/",
+		"internal/platform/fwtx/",
 		"internal/config/",
 		"internal/logger/",
 	}
@@ -459,6 +461,8 @@ func TestArchGuard_LayeredDAGAcyclic(t *testing.T) {
 		"singctl/internal/component",
 		"singctl/internal/lifecycle",
 		"singctl/internal/platform/servicemgr",
+		"singctl/internal/platform/rtnl",
+		"singctl/internal/platform/fwtx",
 		"singctl/internal/config",
 		"singctl/internal/logger",
 	}

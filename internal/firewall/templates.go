@@ -34,6 +34,8 @@ var nftTemplateFuncs = template.FuncMap{
 
 var securityNFTTemplate = template.Must(template.New("security_nft").Funcs(nftTemplateFuncs).Parse(`#!/usr/sbin/nft -f
 
+add table inet security
+flush table inet security
 table inet security {
 
     set blocklist_ip4_forever {
@@ -139,7 +141,9 @@ table inet security {
 }
 `))
 
-var minimalBlocklistNFTTemplate = template.Must(template.New("minimal_blocklist_nft").Funcs(nftTemplateFuncs).Parse(`table inet security {
+var minimalBlocklistNFTTemplate = template.Must(template.New("minimal_blocklist_nft").Funcs(nftTemplateFuncs).Parse(`add table inet security
+flush table inet security
+table inet security {
     set blocklist_ip4_forever {
         type ipv4_addr
         flags interval

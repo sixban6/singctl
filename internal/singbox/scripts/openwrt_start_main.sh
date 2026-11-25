@@ -7,13 +7,17 @@ init_env() {
     stop_singbox_proc
 
     # 清理残留防火墙规则与策略路由，确保后续网络探测与 procd-ujail 自动安装直通外网
-    fw_cleanup_pre
-    cleanup_route
+    if [ "${SINGCTL_GO_DATAPLANE:-0}" != "1" ]; then
+        fw_cleanup_pre
+        cleanup_route
+    fi
 
     # 检查必要依赖
     check_command "sing-box"
-    fw_check_deps
-    check_command "ip"
+    if [ "${SINGCTL_GO_DATAPLANE:-0}" != "1" ]; then
+        fw_check_deps
+        check_command "ip"
+    fi
     check_command "ping"
 
     # 检查网络和端口
@@ -35,8 +39,10 @@ init_env() {
 main() {
     init_env
     ensure_openwrt_ujail || true
-    fw_apply
-    setup_route
+    if [ "${SINGCTL_GO_DATAPLANE:-0}" != "1" ]; then
+        fw_apply
+        setup_route
+    fi
     start_singbox
     sync_dnsmasq_ipv4_only
 }

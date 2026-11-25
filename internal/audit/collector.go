@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"singctl/internal/config"
+	"singctl/internal/platform/rtnl"
 	"singctl/internal/singbox"
 	"singctl/internal/singbox/clashapi"
 )
@@ -45,6 +46,7 @@ type Collector struct {
 	uciSystemFile          string
 	nowFunc                func() time.Time
 	ipv6NeighCmdFunc       func() ([]byte, error)
+	rtnlClient             rtnl.Client
 	cachedState            *persistedAuditState
 	cachedStateFp          string
 	stateDirty             bool

@@ -18,6 +18,7 @@ import (
 
 	"singctl/internal/config"
 	"singctl/internal/logger"
+	"singctl/internal/platform/rtnl"
 )
 
 const (
@@ -217,18 +218,35 @@ func (c *Controller) ProbeIPv6Status(ctx context.Context, gwCfg config.GatewayCo
 
 	// 旁路由只有单臂 LAN 口，公网 IPv6 由上级主路由经 RA/DHCPv6 下发到该口；
 	// 因此不能只把非 LAN 网卡上的 GUA 当作可用 IPv6，否则单臂旁路由会被误判为“无 IPv6”。
-	if c.Exec == nil || c.IPv6IfaceProbe != nil {
-		ifaceProbe := probeInterfaceIPv6Summary
-		if c.IPv6IfaceProbe != nil {
-			ifaceProbe = c.IPv6IfaceProbe
+	if c.IPv6IfaceProbe != nil {
+		wanGUA, lanGUA, lanPfxs := c.IPv6IfaceProbe(topo.LANIface)
+		info.WANHasGUA = wanGUA
+		info.LANGUA = lanGUA
+		info.LANPrefixes = lanPfxs
+	} else if rc := c.rtnlClient(); rc != nil {
+		if addrs, err := rc.ListAddresses(); err == nil && len(addrs) > 0 {
+			wanGUA, lanGUA, lanPfxs := summarizeIPv6FromRTNL(addrs, topo.LANIface)
+			info.WANHasGUA = wanGUA
+			info.LANGUA = lanGUA
+			info.LANPrefixes = lanPfxs
+		} else if c.Exec == nil {
+			wanGUA, lanGUA, lanPfxs := probeInterfaceIPv6Summary(topo.LANIface)
+			info.WANHasGUA = wanGUA
+			info.LANGUA = lanGUA
+			info.LANPrefixes = lanPfxs
 		}
-		wanGUA, lanGUA, lanPfxs := ifaceProbe(topo.LANIface)
+	} else if c.Exec == nil {
+		wanGUA, lanGUA, lanPfxs := probeInterfaceIPv6Summary(topo.LANIface)
 		info.WANHasGUA = wanGUA
 		info.LANGUA = lanGUA
 		info.LANPrefixes = lanPfxs
 	}
 
-	if c.Exec != nil || func() bool { _, err := exec.LookPath("ip"); return err == nil }() {
+	if rc := c.rtnlClient(); rc != nil {
+		if _, ok, err := rc.GetDefaultRoute(6); err == nil {
+			info.WANHasDefaultV6 = ok
+		}
+	} else if c.Exec != nil || func() bool { _, err := exec.LookPath("ip"); return err == nil }() {
 		if out, err := c.runCmd(ctx, "ip", "-6", "route", "show", "default"); err == nil && strings.TrimSpace(string(out)) != "" {
 			info.WANHasDefaultV6 = true
 		}
@@ -479,7 +497,53 @@ func (c *Controller) SyncIPv6Host(ctx context.Context, gwCfg config.GatewayConfi
 	return res, nil
 }
 
+func summarizeIPv6FromRTNL(addrs []rtnl.InterfaceAddr, lanIface string) (wanHasGUA bool, lanGUA string, lanPrefixes []string) {
+	if lanIface == "" {
+		lanIface = "br-lan"
+	}
+	for _, p := range rtnl.ExtractLANIPv6Prefixes(addrs, lanIface) {
+		lanPrefixes = append(lanPrefixes, p.String())
+	}
+	for _, a := range addrs {
+		if !a.IsUp || a.IsLoop {
+			continue
+		}
+		name := strings.ToLower(a.IfName)
+		if strings.HasPrefix(name, "tailscale") || strings.HasPrefix(name, "wg") || strings.HasPrefix(name, "tun") {
+			continue
+		}
+		addr := a.Prefix.Addr().Unmap()
+		if !isPublicGlobalIPv6(addr) {
+			continue
+		}
+		if strings.EqualFold(a.IfName, lanIface) {
+			if lanGUA == "" {
+				lanGUA = addr.String()
+			}
+		} else {
+			wanHasGUA = true
+		}
+	}
+	return wanHasGUA, lanGUA, lanPrefixes
+}
+
 func (c *Controller) ensureIPv6ProxyTableThrowRoutes(ctx context.Context, lanPrefixes []string) {
+	if rc := c.rtnlClient(); rc != nil {
+		has100, err := rc.HasRouteTableLocal(6, 100)
+		if err == nil {
+			if !has100 {
+				return
+			}
+			v6Prefixes := rtnl.DefaultThrowV6Prefixes()
+			for _, raw := range lanPrefixes {
+				if pfx, pErr := netip.ParsePrefix(strings.TrimSpace(raw)); pErr == nil {
+					v6Prefixes = append(v6Prefixes, pfx.Masked())
+				}
+			}
+			_ = rc.EnsureThrowRoutes(6, 100, v6Prefixes)
+			return
+		}
+	}
 	if !c.hasCommand("ip") {
 		return
 	}

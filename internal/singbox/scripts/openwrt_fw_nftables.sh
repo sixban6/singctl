@@ -34,13 +34,11 @@ fw_apply() {
         local_ipv6_elems="$local_ipv6_elems, $pfx"
     done
 
-    nft flush table inet sing-box 2>/dev/null || true
-    nft delete table inet sing-box 2>/dev/null || true
-    nft add table inet sing-box 2>/dev/null || true
     cat > /etc/sing-box/singbox.nft << EOF
-    #!/usr/sbin/nft -f
-    # 添加规则
-    table inet sing-box {
+#!/usr/sbin/nft -f
+add table inet sing-box
+flush table inet sing-box
+table inet sing-box {
 
         set LOCAL_IPV4_SET {
             type ipv4_addr

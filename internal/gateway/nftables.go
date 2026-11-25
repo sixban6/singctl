@@ -20,6 +20,8 @@ func BuildSideRouterNFT(plan ResolvedPlan) string {
 	}
 
 	return fmt.Sprintf(`#!/usr/sbin/nft -f
+add table inet singctl-side
+flush table inet singctl-side
 table inet singctl-side {
 %s    chain forward {
         type filter hook forward priority filter - 5; policy accept;

@@ -112,6 +112,8 @@ func TestBuildSideRouterNFTAndSysctls(t *testing.T) {
 		InterceptLocalDNS: true,
 	})
 	for _, want := range []string{
+		"add table inet singctl-side",
+		"flush table inet singctl-side",
 		"table inet singctl-side",
 		"th dport 53 tproxy to :7895 meta mark set 0x1 accept",
 		"tcp flags syn tcp option maxseg size set rt mtu",

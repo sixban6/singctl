@@ -253,13 +253,12 @@ setup_nftables() {
         LOCAL_IPV6_ELEMS="$LOCAL_IPV6_ELEMS, $pfx"
     done
     
-    # 清理现有规则
-    nft delete table inet sing-box 2>/dev/null || true
-    
-    # 创建规则文件
+    # 单流原子创建规则文件（0ms 切换空窗）
     cat > /etc/sing-box/singbox.nft << EOF
 #!/usr/sbin/nft -f
 # Debian sing-box nftables 配置
+add table inet sing-box
+flush table inet sing-box
 table inet sing-box {
     set LOCAL_IPV4_SET {
         type ipv4_addr
@@ -571,8 +570,10 @@ main() {
     echo_info "开始配置 Debian sing-box TProxy 模式..."
     
     init_env
-    setup_firewall
-    setup_route
+    if [ "${SINGCTL_GO_DATAPLANE:-0}" != "1" ]; then
+        setup_firewall
+        setup_route
+    fi
     start_singbox
     
     echo_succ "Debian sing-box TProxy 配置完成！"

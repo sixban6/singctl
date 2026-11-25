@@ -196,6 +196,9 @@ if [ "$1" = "list" ] && [ "$2" = "table" ] && [ "$3" = "inet" ] && [ "$4" = "sec
   [ -f %q ] && exit 0 || exit 1
 fi
 if [ "$1" = "-f" ]; then
+  if [ "$2" = "-" ]; then
+    cat >> %q
+  fi
   touch %q
   exit 0
 fi
@@ -203,7 +206,7 @@ if [ "$1" = "add" ] && [ "$2" = "element" ]; then
   [ -f %q ] && exit 0 || exit 1
 fi
 exit 0
-`, logFile, stateFile, stateFile, stateFile)
+`, logFile, stateFile, logFile, stateFile, stateFile)
 	if err := os.WriteFile(fakeNFT, []byte(script), 0755); err != nil {
 		t.Fatal(err)
 	}

@@ -20,6 +20,7 @@ import (
 	"singctl/internal/config"
 	"singctl/internal/constant"
 	"singctl/internal/logger"
+	"singctl/internal/platform/fwtx"
 	"singctl/internal/platform/servicemgr"
 )
 
@@ -404,19 +405,18 @@ func EnableWithOptions(opts BuildOptions, preserveDynamic bool) error {
 
 	dynamicV4, dynamicV6 := snapshotLiveDynamicBans(preserveDynamic)
 	scriptPath := constant.SingBoxNftablesFile
-	if err := fsx.WriteAtomic0600(scriptPath, []byte(BuildSecurityNFTWithOptions(opts))); err != nil {
+	atomicScript, err := fwtx.WrapAtomicNFTTable("inet", "security", BuildSecurityNFTWithOptions(opts))
+	if err != nil {
+		return fmt.Errorf("failed to build atomic firewall ruleset: %v", err)
+	}
+	if err := fsx.WriteAtomic0600(scriptPath, []byte(atomicScript)); err != nil {
 		return fmt.Errorf("failed to write %s: %v", scriptPath, err)
 	}
 
 	preloadNFTablesModule()
-	if out, err := exec.Command("nft", "-c", "-f", scriptPath).CombinedOutput(); err != nil {
-		return fmt.Errorf("nftables syntax check failed: %v\nOutput: %s", err, string(out))
-	}
-	_ = exec.Command("nft", "delete", "table", "inet", "security").Run()
-
-	logger.Info("Loading nftables rules from %s...", scriptPath)
-	if out, err := exec.Command("nft", "-f", scriptPath).CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to load nftables rules: %v\nOutput: %s", err, string(out))
+	logger.Info("Loading atomic nftables rules from %s...", scriptPath)
+	if err := fwtx.ApplyAtomicNFT(context.Background(), nil, atomicScript, true); err != nil {
+		return fmt.Errorf("failed to apply atomic nftables rules: %v", err)
 	}
 	if preserveDynamic && (len(dynamicV4) > 0 || len(dynamicV6) > 0) {
 		if restoreErr := restoreDynamicBans(dynamicV4, dynamicV6); restoreErr != nil {
@@ -502,7 +502,7 @@ func Disable() error {
 	} else {
 		teardownSystemdService()
 	}
-	_ = exec.Command("nft", "delete", "table", "inet", "security").Run()
+	_ = fwtx.DeleteNFTTableIdempotent(context.Background(), nil, "inet", "security")
 	_ = os.Remove(constant.SingBoxNftablesFile)
 	logger.Success("Security block rules disabled and removed")
 	return nil

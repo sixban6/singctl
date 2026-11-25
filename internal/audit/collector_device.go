@@ -16,6 +16,7 @@ import (
 
 	"singctl/internal/common/sysinfo"
 	"singctl/internal/config"
+	"singctl/internal/platform/rtnl"
 )
 
 // FormatFriendlyDeviceName 优先将 cfg.HomeDomain 中用户配置的设备昵称与 .home 域名叠加到审计设备展示名上（MAC 优先、IP 兜底）。
@@ -180,21 +181,36 @@ func (c *Collector) resolveLANDevicesLocked() map[string]lanDeviceInfo {
 		}
 	}
 
-	// 4. 缓存刷新 IPv6 邻居表（常规 15s TTL，低内存模式放宽至 3m TTL），将同一物理设备的 IPv6 地址按 MAC 归并至其 IPv4 主机名
+	// 4. 缓存刷新 IPv6 邻居表（常规 15s TTL，低内存模式放宽至 3m TTL），优先直读纯 Go AF_NETLINK（零子进程），将同一物理设备的 IPv6 地址按 MAC 归并至其 IPv4 主机名
 	ipv6TTL := cmp.Or(c.ipv6RefreshInterval, 15*time.Second)
-	if c.ipv6NeighCmdFunc != nil || (!c.customEndpoints && runtime.GOOS == "linux") {
+	if c.ipv6NeighCmdFunc != nil || c.rtnlClient != nil || (!c.customEndpoints && runtime.GOOS == "linux") {
 		needRefresh := c.ipv6NeighCache == nil || c.ipv6NeighFetchedAt.IsZero() || now.Sub(c.ipv6NeighFetchedAt) < 0 || now.Sub(c.ipv6NeighFetchedAt) >= ipv6TTL
 		if needRefresh {
-			var out []byte
-			var err error
 			if c.ipv6NeighCmdFunc != nil {
-				out, err = c.ipv6NeighCmdFunc()
-			} else if ipBin, lpErr := exec.LookPath("ip"); lpErr == nil {
-				out, err = exec.Command(ipBin, "-6", "neigh", "show").Output()
-			}
-			if err == nil {
-				c.ipv6NeighCache = ParseIPv6Neighbors(string(out))
-				c.ipv6NeighFetchedAt = now
+				if out, err := c.ipv6NeighCmdFunc(); err == nil {
+					c.ipv6NeighCache = ParseIPv6Neighbors(string(out))
+					c.ipv6NeighFetchedAt = now
+				}
+			} else {
+				nlClient := c.rtnlClient
+				if nlClient == nil {
+					nlClient = rtnl.Default()
+				}
+				if entries, err := nlClient.ListNeighbors(6); err == nil {
+					next := make(map[string]string, len(entries))
+					for _, e := range entries {
+						if e.IP.Is6() && e.MAC != "" {
+							next[e.IP.String()] = strings.ToLower(e.MAC)
+						}
+					}
+					c.ipv6NeighCache = next
+					c.ipv6NeighFetchedAt = now
+				} else if ipBin, lpErr := exec.LookPath("ip"); lpErr == nil {
+					if out, cmdErr := exec.Command(ipBin, "-6", "neigh", "show").Output(); cmdErr == nil {
+						c.ipv6NeighCache = ParseIPv6Neighbors(string(out))
+						c.ipv6NeighFetchedAt = now
+					}
+				}
 			}
 		}
 	}

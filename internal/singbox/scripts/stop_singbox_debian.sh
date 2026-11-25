@@ -244,8 +244,10 @@ main() {
     fi
     
     # 清理系统配置
-    cleanup_firewall
-    cleanup_routes
+    if [ "${SINGCTL_GO_DATAPLANE:-0}" != "1" ]; then
+        cleanup_firewall
+        cleanup_routes
+    fi
     cleanup_configs
     
     # 验证清理结果

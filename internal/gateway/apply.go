@@ -15,6 +15,7 @@ import (
 
 	"singctl/internal/config"
 	"singctl/internal/logger"
+	"singctl/internal/platform/rtnl"
 )
 
 const (
@@ -47,6 +48,7 @@ type Controller struct {
 	Prober          func() TopologyInfo
 	IsOpenWrt       func() bool
 	Exec            func(name string, args ...string) ([]byte, error)
+	RTNL            rtnl.Client
 	IPv6IfaceProbe  func(lanIface string) (wanHasGUA bool, lanGUA string, lanPrefixes []string)
 	IPv6KernelProbe func() (enabled bool, forwarding bool)
 }
@@ -80,6 +82,16 @@ func (c *Controller) runCmd(ctx context.Context, name string, args ...string) ([
 		return c.Exec(name, args...)
 	}
 	return exec.CommandContext(ctx, name, args...).CombinedOutput()
+}
+
+func (c *Controller) rtnlClient() rtnl.Client {
+	if c.RTNL != nil {
+		return c.RTNL
+	}
+	if c.Exec == nil && runtime.GOOS == "linux" {
+		return rtnl.Default()
+	}
+	return nil
 }
 
 func (c *Controller) hasCommand(name string) bool {
@@ -121,11 +133,21 @@ func (c *Controller) Apply(ctx context.Context, cfg config.GatewayConfig) error 
 		return fmt.Errorf("创建旁路由状态目录失败: %w", err)
 	}
 
-	// 1. 默认路由对齐与防 DHCP 网关污染自愈
+	// 1. 默认路由对齐与防 DHCP 网关污染自愈（优先纯 Go AF_NETLINK，异常时降级 ip 命令）
 	if plan.LANIface != "" {
-		if _, rErr := c.runCmd(ctx, "ip", "-4", "route", "replace", "default", "via", plan.MainRouterIP, "dev", plan.LANIface); rErr != nil {
-			if out, fbErr := c.runCmd(ctx, "ip", "-4", "route", "replace", "default", "via", plan.MainRouterIP); fbErr != nil {
-				return fmt.Errorf("设置旁路由上级默认网关 %s 失败: %w (%s)", plan.MainRouterIP, fbErr, strings.TrimSpace(string(out)))
+		gwReplaced := false
+		if rc := c.rtnlClient(); rc != nil {
+			if gwAddr, pErr := netip.ParseAddr(plan.MainRouterIP); pErr == nil {
+				if rc.ReplaceDefaultRoute(4, gwAddr, plan.LANIface) == nil || rc.ReplaceDefaultRoute(4, gwAddr, "") == nil {
+					gwReplaced = true
+				}
+			}
+		}
+		if !gwReplaced {
+			if _, rErr := c.runCmd(ctx, "ip", "-4", "route", "replace", "default", "via", plan.MainRouterIP, "dev", plan.LANIface); rErr != nil {
+				if out, fbErr := c.runCmd(ctx, "ip", "-4", "route", "replace", "default", "via", plan.MainRouterIP); fbErr != nil {
+					return fmt.Errorf("设置旁路由上级默认网关 %s 失败: %w (%s)", plan.MainRouterIP, fbErr, strings.TrimSpace(string(out)))
+				}
 			}
 		}
 	}
@@ -136,9 +158,10 @@ func (c *Controller) Apply(ctx context.Context, cfg config.GatewayConfig) error 
 	}
 	c.ensureSideRouterResolvUpstream(ctx, plan.LANIP)
 
-	// 3. 清理旧表后挂载独立隔离的旁路由规则表 + 宿主跨表放行项
-	c.cleanupFirewallOnly(ctx)
-	if c.hasCommand("nft") {
+	// 3. 清理残留 fw4/legacy 挂载后通过单事务原子替换独立隔离表 singctl-side（0ms 空窗），再挂载宿主跨表放行项
+	hasNFT := c.hasCommand("nft")
+	c.cleanupFirewallOnly(ctx, !hasNFT)
+	if hasNFT {
 		nftPath := filepath.Join(c.stateDir(), "singctl-side.nft")
 		nftContent := BuildSideRouterNFT(plan)
 		if err := os.WriteFile(nftPath, []byte(nftContent), 0600); err != nil {
@@ -175,7 +198,7 @@ func (c *Controller) Teardown(ctx context.Context) error {
 	if runtime.GOOS != "linux" && c.Exec == nil {
 		return nil
 	}
-	c.cleanupFirewallOnly(ctx)
+	c.cleanupFirewallOnly(ctx, true)
 	c.restoreSideRouterResolvUpstream(ctx)
 	c.restoreSysctls(ctx)
 	_ = os.RemoveAll(c.stateDir())
@@ -425,6 +448,31 @@ func (c *Controller) applyFW4PassThrough(ctx context.Context, lanIface string) {
 }
 
 func (c *Controller) ensureProxyTableThrowRoutes(ctx context.Context, lanCIDR string) {
+	if rc := c.rtnlClient(); rc != nil {
+		has100, err := rc.HasRouteTableLocal(4, 100)
+		if err == nil {
+			if !has100 {
+				return
+			}
+			prefixes := rtnl.DefaultThrowV4Prefixes()
+			if trimmed := strings.TrimSpace(lanCIDR); trimmed != "" {
+				if pfx, pErr := netip.ParsePrefix(trimmed); pErr == nil {
+					prefixes = append(prefixes, pfx.Masked())
+				}
+			}
+			_ = rc.EnsureThrowRoutes(4, 100, prefixes)
+			if has101, err101 := rc.HasRouteTableLocal(4, 101); err101 == nil && !has101 {
+				_ = rc.ReconcileTProxyRoutes(rtnl.TProxyRouteSpec{
+					ForwardFwMark:   0x1,
+					ForwardTable:    100,
+					LocalFwMark:     0x2,
+					LocalTable:      101,
+					ThrowV4Prefixes: prefixes,
+				})
+			}
+			return
+		}
+	}
 	out, err := c.runCmd(ctx, "ip", "-4", "route", "show", "table", proxyRouteTable)
 	if err != nil || !strings.Contains(string(out), "local ") {
 		return
@@ -455,14 +503,16 @@ func (c *Controller) applyLegacyIptablesSideRules(ctx context.Context, plan Reso
 	return nil
 }
 
-func (c *Controller) cleanupFirewallOnly(ctx context.Context) {
+func (c *Controller) cleanupFirewallOnly(ctx context.Context, deleteSideNFT bool) {
 	root := c.fw4IncludeRoot()
 	for _, chain := range []string{"input", "forward"} {
 		_ = os.Remove(filepath.Join(root, "chain-pre", chain, FW4IncludeFileName))
 	}
 
 	if c.hasCommand("nft") {
-		_, _ = c.runCmd(ctx, "nft", "delete", "table", "inet", "singctl-side")
+		if deleteSideNFT {
+			_, _ = c.runCmd(ctx, "nft", "delete", "table", "inet", "singctl-side")
+		}
 		// 清理 fw4 中带 singctl-side 注释的规则句柄
 		for _, chain := range []string{"input", "forward"} {
 			out, err := c.runCmd(ctx, "nft", "-a", "list", "chain", "inet", "fw4", chain)

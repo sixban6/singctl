@@ -16,7 +16,7 @@
                                            │
                                            ▼
   Layer 2: 基础契约与纯配置层（严禁反向依赖任何领域层与控制面层）
-    [ constant | component | lifecycle | platform/servicemgr | config | logger ]
+    [ constant | component | lifecycle | platform/{servicemgr,rtnl,fwtx} | config | logger ]
                                            │
                                            ▼
   Layer 1: 零业务耦合正交微基建层（纯标准库/基础库叶子，零上层内部依赖）
@@ -39,6 +39,7 @@
 ### 2.2 极薄宿主契约、声明式注册表与三阶段生命周期
 
 - **宿主服务唯一出口（[`internal/platform/servicemgr`](../internal/platform/servicemgr)）**：统一封装 `SystemdManager`（systemd VPS）与 `ProcdManager`（OpenWrt BusyBox `procd`），全仓严禁绕过 `servicemgr` 直接拼装裸 `"systemctl"` 命令。
+- **零新依赖内核路由与单事务防火墙底座（[`internal/platform/rtnl`](../internal/platform/rtnl) + [`internal/platform/fwtx`](../internal/platform/fwtx)）**：`rtnl` 直接通过 `golang.org/x/sys/unix` 封装 `AF_NETLINK / NETLINK_ROUTE`（Rule/Route/Addr/Neigh 强类型零子进程读写与表 `100/101` 幂等对账）；`fwtx` 统一收口 `AtomicNFT`（同流 `add table + flush table` 无空窗单批事务）与 `iptables-restore --noflush` 隔离链批量提交。
 - **双内核防火墙策略隔离（OCP：`nftables` + `iptables/ip6tables/ipset`）**：OpenWrt TProxy 启停脚本拆分为共享主干（`openwrt_common.sh`，含 `ensure_openwrt_ujail` 自动按 `/overlay` 引导 `procd-ujail`）与严格隔离的 `openwrt_fw_{nftables,iptables}.sh`（独立 `SING_BOX`/`SING_BOX_OUTPUT` 隔离链，零宿主链清空）；Tailscale P2P 防线（`p2p_nft.go` / `p2p_iptables.go`）、行为审计限速（`throttler_nft.go` / `throttler_iptables.go`，含双栈分离 DNS 与 30 分钟公网 IP 韧性缓存）及主机安全防火墙加固（`firewall.go` / `firewall_iptables*.go`）均按自动探测无缝支持 `nftables` 与纯 `iptables+ipset` 固件。
 - **声明式组件与算子注册表（`component` / `localdns` / `audit` / `doctor` / `subhub` / `heal`）**：新增受管服务、双引擎防劫持 DNS（`smartdns` / `adguard`，`force-AAAA-SOA` 单一真相源绑定 `gateway.ipv6_mode`）、非线性审计算子、体检项、代理协议编解码器或自愈步骤时，遵循「新增独立文件 + 向声明式切片/注册表挂载一行」横向扩展。
 - **确定性三阶段生命周期（[`internal/lifecycle`](../internal/lifecycle)）**：`StageInit`（纯资源准备，零后台协程）→ `StageStart`（拉起监听与受控循环）→ `StagePostStart`（非阻塞首轮预热），停机或初始化失败时按注册**严格逆序**有界回收。

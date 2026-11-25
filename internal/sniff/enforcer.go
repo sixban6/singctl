@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"strings"
@@ -16,7 +17,76 @@ import (
 	"singctl/internal/constant"
 	"singctl/internal/firewall"
 	"singctl/internal/logger"
+	"singctl/internal/platform/fwtx"
 )
+
+// NFTBlockAction 描述单批次 nftables 封禁操作类型。
+type NFTBlockAction string
+
+const (
+	NFTActionBlockIP     NFTBlockAction = "block_ip"
+	NFTActionBlockCIDR   NFTBlockAction = "block_cidr"
+	NFTActionUnblock     NFTBlockAction = "unblock_ip"
+	NFTActionUnblockCIDR NFTBlockAction = "unblock_cidr"
+	NFTActionFlushAll    NFTBlockAction = "flush_all"
+)
+
+// NFTBlockOp 描述单条待合并提交给 `nft -f -` 的动态封禁/解封指令。
+type NFTBlockOp struct {
+	Action  NFTBlockAction
+	Target  string
+	IsIPv4  bool
+	Timeout time.Duration
+}
+
+// BuildNFTBlockBatchScript 将一组封禁/解封/清表操作校验并编译为单流 `nft -f -` 批处理脚本文本。
+func BuildNFTBlockBatchScript(ops []NFTBlockOp) (string, error) {
+	if len(ops) == 0 {
+		return "", fmt.Errorf("empty nft block batch")
+	}
+	var b strings.Builder
+	for _, op := range ops {
+		switch op.Action {
+		case NFTActionFlushAll:
+			b.WriteString("flush set inet security blocklist_ip4\n")
+			b.WriteString("flush set inet security blocklist_ip6\n")
+			b.WriteString("flush set inet security blocklist_ip4_forever\n")
+		case NFTActionBlockIP, NFTActionUnblock:
+			addr, err := netip.ParseAddr(strings.TrimSpace(op.Target))
+			if err != nil {
+				return "", fmt.Errorf("invalid IP target %q: %w", op.Target, err)
+			}
+			addr = addr.Unmap()
+			setName := "blocklist_ip6"
+			if addr.Is4() {
+				setName = "blocklist_ip4"
+			}
+			if op.Action == NFTActionUnblock {
+				fmt.Fprintf(&b, "delete element inet security %s { %s }\n", setName, addr.String())
+			} else {
+				secs := max(int64(60), int64(op.Timeout.Seconds()))
+				fmt.Fprintf(&b, "add element inet security %s { %s timeout %ds }\n", setName, addr.String(), secs)
+			}
+		case NFTActionBlockCIDR, NFTActionUnblockCIDR:
+			pfx, err := netip.ParsePrefix(strings.TrimSpace(op.Target))
+			if err != nil {
+				return "", fmt.Errorf("invalid CIDR target %q: %w", op.Target, err)
+			}
+			pfx = netip.PrefixFrom(pfx.Addr().Unmap(), pfx.Bits()).Masked()
+			if !pfx.Addr().Is4() {
+				continue
+			}
+			if op.Action == NFTActionUnblockCIDR {
+				fmt.Fprintf(&b, "delete element inet security blocklist_ip4_forever { %s }\n", pfx.String())
+			} else {
+				fmt.Fprintf(&b, "add element inet security blocklist_ip4_forever { %s }\n", pfx.String())
+			}
+		default:
+			return "", fmt.Errorf("unsupported nft block action %q", op.Action)
+		}
+	}
+	return b.String(), nil
+}
 
 // BlockTargetSpec 描述通过安全校验并规范化后的单 IP 或 CIDR 封禁目标。
 type BlockTargetSpec struct {
@@ -302,7 +372,7 @@ func ensureLocalSecurityNFTTable(ctx context.Context) error {
 	return nil
 }
 
-// ApplyNFTBlockIP 在本机 nftables `inet security` 表中封禁单个 IP（缺失表时复用 internal/firewall 最小安全表自举）。
+// ApplyNFTBlockIP 在本机 nftables `inet security` 表中单流封禁单个 IP（缺失表时复用 internal/firewall 最小安全表自举）。
 func ApplyNFTBlockIP(ipStr string, isIPv4 bool) error {
 	if _, err := exec.LookPath("nft"); err != nil {
 		return nil
@@ -312,16 +382,16 @@ func ApplyNFTBlockIP(ipStr string, isIPv4 bool) error {
 	if err := ensureLocalSecurityNFTTable(ctx); err != nil {
 		return err
 	}
-	setName := "blocklist_ip6"
-	if isIPv4 {
-		setName = "blocklist_ip4"
+	script, err := BuildNFTBlockBatchScript([]NFTBlockOp{{
+		Action:  NFTActionBlockIP,
+		Target:  ipStr,
+		IsIPv4:  isIPv4,
+		Timeout: 7 * 24 * time.Hour,
+	}})
+	if err != nil {
+		return err
 	}
-	_ = exec.CommandContext(ctx, "nft", "delete", "element", "inet", "security", setName, fmt.Sprintf("{ %s }", ipStr)).Run()
-	elem := fmt.Sprintf("{ %s timeout 7d }", ipStr)
-	if out, err := exec.CommandContext(ctx, "nft", "add", "element", "inet", "security", setName, elem).CombinedOutput(); err != nil {
-		return fmt.Errorf("nft add element %s: %w (%s)", setName, err, strings.TrimSpace(string(out)))
-	}
-	return nil
+	return fwtx.ApplyAtomicNFT(ctx, nil, script, false)
 }
 
 func applyNFTBlockCIDR(cidr string, isIPv4 bool) error {
@@ -336,14 +406,15 @@ func applyNFTBlockCIDR(cidr string, isIPv4 bool) error {
 	if err := ensureLocalSecurityNFTTable(ctx); err != nil {
 		return err
 	}
-	elem := fmt.Sprintf("{ %s }", cidr)
-	if out, err := exec.CommandContext(ctx, "nft", "add", "element", "inet", "security", "blocklist_ip4_forever", elem).CombinedOutput(); err != nil {
-		if exec.CommandContext(ctx, "nft", "get", "element", "inet", "security", "blocklist_ip4_forever", elem).Run() == nil {
-			return nil
-		}
-		return fmt.Errorf("nft add element blocklist_ip4_forever: %w (%s)", err, strings.TrimSpace(string(out)))
+	script, err := BuildNFTBlockBatchScript([]NFTBlockOp{{
+		Action: NFTActionBlockCIDR,
+		Target: cidr,
+		IsIPv4: true,
+	}})
+	if err != nil {
+		return err
 	}
-	return nil
+	return fwtx.ApplyAtomicNFT(ctx, nil, script, false)
 }
 
 // UnblockTargetForNode 在指定主机 ("local" | "<node_id>" | "all") 全链路解除单个 IP、/24 网段或全部 ("all") 封禁。
@@ -522,11 +593,13 @@ func applyNFTUnblockIP(ipStr string, isIPv4 bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if _, err := exec.LookPath("nft"); err == nil {
-		setName := "blocklist_ip6"
-		if isIPv4 {
-			setName = "blocklist_ip4"
+		if script, bErr := BuildNFTBlockBatchScript([]NFTBlockOp{{
+			Action: NFTActionUnblock,
+			Target: ipStr,
+			IsIPv4: isIPv4,
+		}}); bErr == nil {
+			_ = fwtx.ApplyAtomicNFT(ctx, nil, script, false)
 		}
-		_ = exec.CommandContext(ctx, "nft", "delete", "element", "inet", "security", setName, fmt.Sprintf("{ %s }", ipStr)).Run()
 	}
 	if _, err := exec.LookPath("fail2ban-client"); err == nil {
 		_ = exec.CommandContext(ctx, "fail2ban-client", "unban", ipStr).Run()
@@ -542,7 +615,13 @@ func applyNFTUnblockCIDR(cidr string, isIPv4 bool) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_ = exec.CommandContext(ctx, "nft", "delete", "element", "inet", "security", "blocklist_ip4_forever", fmt.Sprintf("{ %s }", cidr)).Run()
+	if script, err := BuildNFTBlockBatchScript([]NFTBlockOp{{
+		Action: NFTActionUnblockCIDR,
+		Target: cidr,
+		IsIPv4: true,
+	}}); err == nil {
+		_ = fwtx.ApplyAtomicNFT(ctx, nil, script, false)
+	}
 }
 
 func applyNFTFlushAll() {
@@ -551,7 +630,7 @@ func applyNFTFlushAll() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_ = exec.CommandContext(ctx, "nft", "flush", "set", "inet", "security", "blocklist_ip4").Run()
-	_ = exec.CommandContext(ctx, "nft", "flush", "set", "inet", "security", "blocklist_ip6").Run()
-	_ = exec.CommandContext(ctx, "nft", "flush", "set", "inet", "security", "blocklist_ip4_forever").Run()
+	if script, err := BuildNFTBlockBatchScript([]NFTBlockOp{{Action: NFTActionFlushAll}}); err == nil {
+		_ = fwtx.ApplyAtomicNFT(ctx, nil, script, false)
+	}
 }

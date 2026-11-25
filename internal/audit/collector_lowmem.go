@@ -9,6 +9,7 @@ import (
 
 	"singctl/internal/common/sysinfo"
 	"singctl/internal/config"
+	"singctl/internal/platform/rtnl"
 	"singctl/internal/singbox"
 	"singctl/internal/singbox/clashapi"
 )
@@ -46,6 +47,7 @@ type CollectorOptions struct {
 	MaxTrackedFlows          int
 	DeviceRefreshMinInterval time.Duration
 	IPv6NeighRefreshInterval time.Duration
+	RTNLClient               rtnl.Client
 }
 
 // IsLowMemoryAuditMemInfo 判断内存快照是否应启用审计采集器低内存有界保护（委托 sysinfo.IsLowMemoryMemInfo）。
@@ -87,6 +89,7 @@ func NewCollectorWithOptions(cfg *config.Config, opts CollectorOptions) *Collect
 		odhcpdHostsFile: "/tmp/hosts/odhcpd",
 		tzFile:          "/etc/TZ",
 		uciSystemFile:   "/etc/config/system",
+		rtnlClient:      opts.RTNLClient,
 	}
 	c.nowFunc = func() time.Time {
 		return time.Now().In(c.resolveLocalLocation())

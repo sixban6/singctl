@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+
+	"singctl/internal/platform/rtnl"
 )
 
 // ParseProcNetRouteDefault 解析 Linux /proc/net/route 内容，提取默认路由出口网卡与网关 IPv4。
@@ -188,6 +190,15 @@ func ParseProcNetUDPHasLANPort53(lanIP, procUDP, procUDP6 string) bool {
 }
 
 func probeRouteFallback() (iface, gw string) {
+	if runtime.GOOS == "linux" {
+		if def, ok, err := rtnl.Default().GetDefaultRoute(4); err == nil && ok {
+			gwStr := ""
+			if def.Gateway.IsValid() {
+				gwStr = def.Gateway.String()
+			}
+			return def.IfName, gwStr
+		}
+	}
 	if runtime.GOOS == "darwin" {
 		out, err := exec.Command("route", "-n", "get", "default").Output()
 		if err != nil {
