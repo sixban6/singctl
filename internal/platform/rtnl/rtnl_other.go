@@ -27,6 +27,14 @@ func (s *stubClient) ReplaceDefaultRoute(int, netip.Addr, string) error {
 	return ErrUnsupportedPlatform
 }
 
+func (s *stubClient) ReplaceUnicastRoute(UnicastRouteSpec) error {
+	return ErrUnsupportedPlatform
+}
+
+func (s *stubClient) DeleteUnicastRoute(UnicastRouteSpec) error {
+	return ErrUnsupportedPlatform
+}
+
 func (s *stubClient) HasRouteTableLocal(int, int) (bool, error) {
 	return false, ErrUnsupportedPlatform
 }

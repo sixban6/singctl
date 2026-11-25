@@ -79,6 +79,21 @@ func TestController_UsesRTNLForSideRoutesAndIPv6ZeroIPSubprocess(t *testing.T) {
 		t.Fatalf("expected LANCIDR throw route reconciled via RTNL, got %v", mockRTNL.EnsuredThrows())
 	}
 
+	replacedRoutes := mockRTNL.ReplacedUnicastRoutes()
+	for _, wantDst := range []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"} {
+		wantPrefix := netip.MustParsePrefix(wantDst)
+		found := false
+		for _, r := range replacedRoutes {
+			if r.Dst == wantPrefix && r.Gateway == netip.MustParseAddr("192.0.2.1") && r.IfName == "br-lan" && r.Priority == 200 {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected RFC1918 return route %s via 192.0.2.1 dev br-lan metric 200 in MockClient, got %+v", wantDst, replacedRoutes)
+		}
+	}
+
 	// ProbeIPv6Status must also extract default IPv6 route and LAN /64 prefix via RTNL!
 	v6Status := ctrl.ProbeIPv6Status(t.Context(), config.GatewayConfig{Mode: "main", IPv6Mode: "cn_only"}, gateway.TopologyInfo{
 		LANIP:    "192.0.2.2",
@@ -87,5 +102,19 @@ func TestController_UsesRTNLForSideRoutesAndIPv6ZeroIPSubprocess(t *testing.T) {
 	})
 	if !v6Status.WANHasDefaultV6 || len(v6Status.LANPrefixes) == 0 || v6Status.LANPrefixes[0] != "2001:db8:cafe:1::/64" {
 		t.Fatalf("expected ProbeIPv6Status to read default route & LAN prefix via RTNL, got %+v", v6Status)
+	}
+
+	// Teardown cleans return routes via RTNL without spawning `ip`.
+	if err := ctrl.Teardown(t.Context()); err != nil {
+		t.Fatalf("Teardown failed: %v", err)
+	}
+	for _, cmd := range cmds {
+		if strings.HasPrefix(cmd, "ip ") {
+			t.Fatalf("expected zero `ip` subprocess invocations across Apply+Teardown when RTNL is injected, got %q", cmd)
+		}
+	}
+	deletedRoutes := mockRTNL.DeletedUnicastRoutes()
+	if len(deletedRoutes) != 3 {
+		t.Fatalf("expected 3 deleted unicast return routes on Teardown, got %+v", deletedRoutes)
 	}
 }

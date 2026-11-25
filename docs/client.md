@@ -65,10 +65,10 @@ gateway:                                      # (可选) 客户端网关拓扑�
 ### 主路由模式与旁路由模式（Side Router / Delegated Mode）说明
 
 - **`mode: "main"`（主路由模式，默认）**：适用于设备直接拨号或接光猫充当全屋主网关的场景，保持标准原生 TProxy 规则运行。
-  - **旁路由协同托管（`work_mode: "delegated"` + `gateway.side_router_ip`）**：当主路由负责 PPPoE 拨号、交换端口、Wi-Fi 与 VLAN 子网隔离，而全部代理分流/去广告/审计交由旁路由处理时，可在 WebUI「网关模式」切为 **旁路由托管** —— 自动停用主路由本机 `sing-box` 与全局透明劫持、释放路由器内存并恢复硬件转发；并在「子网隔离 (VLAN)」支持按指定 Wi-Fi/子网一键启用 **「交由旁路由分流 (`side_router`)」**（自动配置表 188 策略路由与 DHCP Option 6 DNS，同时保留内网隔离与旁路由离线 30 秒自动切回主路由直连的防断网救生艇）。
+  - **旁路由协同托管（`work_mode: "delegated"` + `gateway.side_router_ip`）**：当主路由负责 PPPoE 拨号、交换端口、Wi-Fi 与 VLAN 子网隔离，而全部代理分流/去广告/审计交由旁路由处理时，可在 WebUI「网关模式」切为 **旁路由托管** —— 自动停用主路由本机 `sing-box` 与全局透明劫持、释放路由器内存并恢复硬件转发；并在「子网隔离 (VLAN)」支持按指定 Wi-Fi/子网一键启用 **「交由旁路由分流 (`side_router`)」**（自动配置表 188 策略路由与 DHCP Option 6 DNS，精准免除旁路由托管子网的 LAN SNAT 伪装实现真实终端 IP 透传，同时保留内网隔离与旁路由离线 30 秒自动切回主路由直连的防断网救生艇）。
 - **`mode: "side"`（旁路由 / 单臂网关模式）**：适用于 N1、小主机、OpenWrt 盒子或 PVE LXC 单网口挂在主路由 LAN 口下的场景：
   - **安装阶段引导**：运行 `install.sh` 自动识别为客户端模式后，脚本还会根据网口数量与网关关系自动推荐主路由或旁路由拓扑，用户**只需按回车**即可完成确认（亦可输入 `2` / `side` 或 `1` / `main` 手动切换；旁路由模式下自动探测上级主路由 IP，并自动拦截填成旁路由本机 IP 的自环错误）。
-  - **内核与防火墙自动收口**：`singctl sb start` 启动时自动对齐上级默认路由、开启 `ip_forward=1` 并关闭单臂 `rp_filter` / `send_redirects` / `bridge-nf-call-iptables`，同时挂载独立可逆的 `table inet singctl-side`（含本机 `:53` 透明 DNS 接管、TCP MSS 自动钳制防止 PPPoE `1492` MTU 下 HTTPS 卡死、单臂 `masquerade` 消除主路由状态防火墙 `ct state invalid` 非对称丢包，并在 `sing-box` 内部完整保留终端真实局域网 IP 供行为审计使用）。`singctl sb stop` 时自动卸载并还原系统参数。
+  - **内核、跨子网真实 IP 透传与防火墙自动收口**：`singctl sb start` 启动时自动对齐上级默认路由、开启 `ip_forward=1` 并关闭单臂 `rp_filter` / `send_redirects` / `bridge-nf-call-iptables`，通过零子进程 Netlink 自动挂载 RFC1918 回程静态路由（`metric 200`经 `main_router_ip` 回传跨 VLAN 终端回包）、在 OpenWrt 自动放开 `dnsmasq localservice=0` 响应跨网段 `:53` DNS 查询，同时挂载独立可逆的 `table inet singctl-side`（含本机 `:53` 透明 DNS 接管、TCP MSS 自动钳制防止 PPPoE `1492` MTU 下 HTTPS 卡死、全私网+CGNAT 源单臂 `masquerade` 消除多子网真实 IP 透传时主路由 `ct state invalid` 非对称丢包）；行为审计自动携带绕行标记向上级主路由 `192.168.1.1:53` 发起带 TTL 缓存的反向 PTR 查询，跨网段终端（如子网设备连往 `192.168.1.2` 旁路由）也能自动显示真实设备主机名并独立生效单设备「允许外网 / 仅限直连」。`singctl sb stop` 时自动卸载并按 `0600` 快照还原系统参数。
   - **终端 / 主路由 DHCP 接入要求**：将内网终端（或主路由 DHCP 下发）的 **默认网关** 与 **DNS 服务器** 同时设为旁路由 IP（如 `192.168.1.2`），为旁路由固定静态 IP，并在主路由关闭 LAN 侧 IPv6 RA/DHCPv6 通告以防终端经主路由 IPv6 直出绕过旁路由。
 
 ### IPv6 智能双栈分流与全景防泄漏体检（WebUI）

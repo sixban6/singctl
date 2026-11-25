@@ -16,6 +16,7 @@ import (
 	"singctl/internal/config"
 	"singctl/internal/logger"
 	"singctl/internal/platform/rtnl"
+	"singctl/internal/platform/servicemgr"
 )
 
 const (
@@ -49,6 +50,7 @@ type Controller struct {
 	IsOpenWrt       func() bool
 	Exec            func(name string, args ...string) ([]byte, error)
 	RTNL            rtnl.Client
+	ServiceMgr      servicemgr.Manager
 	IPv6IfaceProbe  func(lanIface string) (wanHasGUA bool, lanGUA string, lanPrefixes []string)
 	IPv6KernelProbe func() (enabled bool, forwarding bool)
 }
@@ -152,10 +154,11 @@ func (c *Controller) Apply(ctx context.Context, cfg config.GatewayConfig) error 
 		}
 	}
 
-	// 2. 快照并应用可逆 sysctl 内核转发参数，同时确保旁路由本机 DNS 上游文件非空且无自环污染
+	// 2. 快照并应用可逆 sysctl 内核转发参数，对齐跨子网 RFC1918 回程路由与 dnsmasq 跨网段响应，同时确保旁路由本机 DNS 上游文件非空且无自环污染
 	if err := c.applySysctls(ctx, plan.LANIface); err != nil {
 		logger.Warn("旁路由部分 sysctl 参数设置受限(容器只读项已跳过): %v", err)
 	}
+	c.applySideRouterCrossSubnet(ctx, plan)
 	c.ensureSideRouterResolvUpstream(ctx, plan.LANIP)
 
 	// 3. 清理残留 fw4/legacy 挂载后通过单事务原子替换独立隔离表 singctl-side（0ms 空窗），再挂载宿主跨表放行项
@@ -193,12 +196,13 @@ func (c *Controller) Apply(ctx context.Context, cfg config.GatewayConfig) error 
 	return nil
 }
 
-// Teardown 卸载旁路由专属防火墙表、撤回跨表放行规则并按快照还原 sysctl 参数与上游 DNS 文件。
+// Teardown 卸载旁路由专属防火墙表、撤回跨表放行规则并按快照还原 sysctl 参数、回程路由、dnsmasq 选项与上游 DNS 文件。
 func (c *Controller) Teardown(ctx context.Context) error {
 	if runtime.GOOS != "linux" && c.Exec == nil {
 		return nil
 	}
 	c.cleanupFirewallOnly(ctx, true)
+	c.restoreSideRouterCrossSubnet(ctx)
 	c.restoreSideRouterResolvUpstream(ctx)
 	c.restoreSysctls(ctx)
 	_ = os.RemoveAll(c.stateDir())
@@ -498,7 +502,13 @@ func (c *Controller) applyLegacyIptablesSideRules(ctx context.Context, plan Reso
 
 	_, _ = c.runCmd(ctx, "iptables", "-t", "nat", "-N", legacySideChainNat)
 	_, _ = c.runCmd(ctx, "iptables", "-t", "nat", "-F", legacySideChainNat)
-	_, _ = c.runCmd(ctx, "iptables", "-t", "nat", "-A", legacySideChainNat, "-o", plan.LANIface, "-s", plan.LANCIDR, "!", "-d", plan.LANCIDR, "-j", "MASQUERADE")
+	cidrs := sidePrivateCIDRs(plan.LANCIDR)
+	for _, cidr := range cidrs {
+		_, _ = c.runCmd(ctx, "iptables", "-t", "nat", "-A", legacySideChainNat, "-d", cidr, "-j", "RETURN")
+	}
+	for _, cidr := range cidrs {
+		_, _ = c.runCmd(ctx, "iptables", "-t", "nat", "-A", legacySideChainNat, "-o", plan.LANIface, "-s", cidr, "-j", "MASQUERADE")
+	}
 	_, _ = c.runCmd(ctx, "iptables", "-t", "nat", "-I", "POSTROUTING", "1", "-j", legacySideChainNat)
 	return nil
 }

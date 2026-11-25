@@ -10,8 +10,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"singctl/internal/common/fsx"
@@ -24,6 +26,8 @@ const (
 	// SideRoutePrefBase 与 SideRoutePrefMax 定义受管 ip rule 优先级区间（绝不干扰系统 local/main 及 Tailscale rule 5270）。
 	SideRoutePrefBase = 18810
 	SideRoutePrefMax  = 18890
+
+	sideRouteNoMasqComment = "singctl-side-nomasq"
 )
 
 var sideRouteThrowCIDRs = []string{
@@ -140,9 +144,14 @@ func ReadSideRouteSpec(path string) VLANSideRouteSpec {
 	return norm
 }
 
+var sideRouteRuntimeMu sync.Mutex
+
 func defaultSideRouteRunner(ctx context.Context, name string, args ...string) ([]byte, error) {
 	if runtime.GOOS != "linux" {
 		return nil, nil
+	}
+	if name == "iptables" && !slices.Contains(args, "-w") {
+		args = append([]string{"-w", "2"}, args...)
 	}
 	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -175,6 +184,46 @@ func deleteManagedSideRouteRules(ctx context.Context, run CommandRunner) {
 	}
 }
 
+func syncSideRouteLANNoMasq(ctx context.Context, cidrs []string, run CommandRunner) {
+	if out, err := run(ctx, "nft", "-a", "list", "chain", "inet", "fw4", "srcnat_lan"); err == nil && strings.Contains(string(out), "chain srcnat_lan") {
+		for line := range strings.SplitSeq(string(out), "\n") {
+			if !strings.Contains(line, sideRouteNoMasqComment) {
+				continue
+			}
+			_, after, ok := strings.Cut(line, "# handle ")
+			if !ok {
+				continue
+			}
+			if h := strings.Fields(after); len(h) > 0 {
+				_, _ = run(ctx, "nft", "delete", "rule", "inet", "fw4", "srcnat_lan", "handle", h[0])
+			}
+		}
+		for _, cidr := range cidrs {
+			_, _ = run(ctx, "nft", "insert", "rule", "inet", "fw4", "srcnat_lan",
+				"ip", "saddr", cidr, "accept", "comment", sideRouteNoMasqComment)
+		}
+	}
+
+	if out, err := run(ctx, "iptables", "-t", "nat", "-S", "postrouting_lan_rule"); err == nil && strings.Contains(string(out), "postrouting_lan_rule") {
+		for line := range strings.SplitSeq(string(out), "\n") {
+			trimmed := strings.TrimSpace(line)
+			if !strings.HasPrefix(trimmed, "-A postrouting_lan_rule ") || !strings.Contains(trimmed, sideRouteNoMasqComment) {
+				continue
+			}
+			fields := strings.Fields(strings.TrimPrefix(trimmed, "-A postrouting_lan_rule "))
+			for i := range fields {
+				fields[i] = strings.Trim(fields[i], `"`)
+			}
+			delArgs := append([]string{"-t", "nat", "-D", "postrouting_lan_rule"}, fields...)
+			_, _ = run(ctx, "iptables", delArgs...)
+		}
+		for _, cidr := range cidrs {
+			_, _ = run(ctx, "iptables", "-t", "nat", "-I", "postrouting_lan_rule", "1",
+				"-s", cidr, "-m", "comment", "--comment", sideRouteNoMasqComment, "-j", "ACCEPT")
+		}
+	}
+}
+
 // ApplyRuntimeSideRoutes 原子对齐内核策略路由表 188 与源子网 ip rule 优先级队列。
 func ApplyRuntimeSideRoutes(ctx context.Context, spec VLANSideRouteSpec, run CommandRunner) error {
 	if ctx == nil {
@@ -191,9 +240,13 @@ func ApplyRuntimeSideRoutes(ctx context.Context, spec VLANSideRouteSpec, run Com
 		run = defaultSideRouteRunner
 	}
 
+	sideRouteRuntimeMu.Lock()
+	defer sideRouteRuntimeMu.Unlock()
+
 	deleteManagedSideRouteRules(ctx, run)
 	_, _ = run(ctx, "ip", "-4", "route", "flush", "table", strconv.Itoa(SideRouteTableID))
 	if norm.SideRouterIP == "" || len(norm.CIDRs) == 0 {
+		syncSideRouteLANNoMasq(ctx, nil, run)
 		return nil
 	}
 
@@ -212,6 +265,7 @@ func ApplyRuntimeSideRoutes(ctx context.Context, spec VLANSideRouteSpec, run Com
 			return fmt.Errorf("add ip rule from %s table %s failed: %w (%s)", cidr, tableStr, err, strings.TrimSpace(string(out)))
 		}
 	}
+	syncSideRouteLANNoMasq(ctx, norm.CIDRs, run)
 	return nil
 }
 
@@ -226,7 +280,12 @@ func SuspendRuntimeSideRoutes(ctx context.Context, run CommandRunner) error {
 		}
 		run = defaultSideRouteRunner
 	}
+
+	sideRouteRuntimeMu.Lock()
+	defer sideRouteRuntimeMu.Unlock()
+
 	deleteManagedSideRouteRules(ctx, run)
+	syncSideRouteLANNoMasq(ctx, nil, run)
 	return nil
 }
 

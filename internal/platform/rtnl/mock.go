@@ -23,6 +23,8 @@ type MockClient struct {
 	reconciledSpecs       []TProxyRouteSpec
 	cleanedTables         [][]int
 	replacedDefaultRoutes []DefaultRoute
+	replacedUnicastRoutes []UnicastRouteSpec
+	deletedUnicastRoutes  []UnicastRouteSpec
 	ensuredThrows         []netip.Prefix
 }
 
@@ -67,6 +69,40 @@ func (m *MockClient) ReplaceDefaultRoute(family int, gw netip.Addr, ifName strin
 	m.DefaultRoutes[family] = r
 	m.replacedDefaultRoutes = append(m.replacedDefaultRoutes, r)
 	return nil
+}
+
+func (m *MockClient) ReplaceUnicastRoute(spec UnicastRouteSpec) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.ReplaceErr != nil {
+		return m.ReplaceErr
+	}
+	m.replacedUnicastRoutes = append(m.replacedUnicastRoutes, spec)
+	return nil
+}
+
+func (m *MockClient) DeleteUnicastRoute(spec UnicastRouteSpec) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.CleanupErr != nil {
+		return m.CleanupErr
+	}
+	m.deletedUnicastRoutes = append(m.deletedUnicastRoutes, spec)
+	return nil
+}
+
+// ReplacedUnicastRoutes 返回记录的 ReplaceUnicastRoute 调用规格副本。
+func (m *MockClient) ReplacedUnicastRoutes() []UnicastRouteSpec {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Clone(m.replacedUnicastRoutes)
+}
+
+// DeletedUnicastRoutes 返回记录的 DeleteUnicastRoute 调用规格副本。
+func (m *MockClient) DeletedUnicastRoutes() []UnicastRouteSpec {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Clone(m.deletedUnicastRoutes)
 }
 
 func (m *MockClient) HasRouteTableLocal(family int, table int) (bool, error) {

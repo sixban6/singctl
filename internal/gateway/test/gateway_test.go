@@ -117,7 +117,7 @@ func TestBuildSideRouterNFTAndSysctls(t *testing.T) {
 		"table inet singctl-side",
 		"th dport 53 tproxy to :7895 meta mark set 0x1 accept",
 		"tcp flags syn tcp option maxseg size set rt mtu",
-		`oifname "eth0" ip saddr 192.168.100.0/24 ip daddr != 192.168.100.0/24 masquerade`,
+		`oifname "eth0" ip saddr { 10.0.0.0/8, 100.64.0.0/10, 172.16.0.0/12, 192.168.0.0/16 } ip daddr != { 10.0.0.0/8, 100.64.0.0/10, 172.16.0.0/12, 192.168.0.0/16 } masquerade`,
 	} {
 		if !strings.Contains(nftIntercept, want) {
 			t.Fatalf("generated nft (InterceptLocalDNS=true) missing %q:\n%s", want, nftIntercept)
@@ -136,8 +136,8 @@ func TestBuildSideRouterNFTAndSysctls(t *testing.T) {
 	if strings.Contains(nftOpenWrt, "dport 53") || strings.Contains(nftOpenWrt, "chain prerouting") {
 		t.Fatalf("OpenWrt with local :53 listener must NOT hijack :53 in prerouting (avoids EADDRINUSE), got:\n%s", nftOpenWrt)
 	}
-	if !strings.Contains(nftOpenWrt, `oifname "br-lan" ip saddr 192.168.100.0/24 ip daddr != 192.168.100.0/24 masquerade`) {
-		t.Fatalf("OpenWrt nft missing masquerade rule:\n%s", nftOpenWrt)
+	if !strings.Contains(nftOpenWrt, `oifname "br-lan" ip saddr { 10.0.0.0/8, 100.64.0.0/10, 172.16.0.0/12, 192.168.0.0/16 } ip daddr != { 10.0.0.0/8, 100.64.0.0/10, 172.16.0.0/12, 192.168.0.0/16 } masquerade`) {
+		t.Fatalf("OpenWrt nft missing full-private masquerade rule:\n%s", nftOpenWrt)
 	}
 
 	sysctls := gateway.BuildSideRouterSysctls("br-lan", true)

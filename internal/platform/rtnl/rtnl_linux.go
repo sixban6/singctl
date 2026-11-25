@@ -268,6 +268,84 @@ func (c *linuxClient) ReplaceDefaultRoute(family int, gw netip.Addr, ifName stri
 	return execNetlinkAck(unix.RTM_NEWROUTE, unix.NLM_F_CREATE|unix.NLM_F_REPLACE, body)
 }
 
+func buildUnicastRouteBody(spec UnicastRouteSpec, forDelete bool) ([]byte, error) {
+	if !spec.Dst.IsValid() {
+		return nil, fmt.Errorf("invalid destination prefix %v", spec.Dst)
+	}
+	if !spec.Gateway.IsValid() {
+		return nil, fmt.Errorf("invalid gateway address %v", spec.Gateway)
+	}
+	dst := spec.Dst.Masked()
+	dstAddr := dst.Addr().Unmap()
+	gwAddr := spec.Gateway.Unmap()
+	if dstAddr.Is4() != gwAddr.Is4() {
+		return nil, fmt.Errorf("address family mismatch between dst %s and gateway %s", dst, gwAddr)
+	}
+
+	af := uint8(unix.AF_INET)
+	if dstAddr.Is6() {
+		af = unix.AF_INET6
+	}
+	tbl := cmp.Or(spec.Table, int(unix.RT_TABLE_MAIN))
+
+	body := make([]byte, unix.SizeofRtMsg)
+	body[0] = af
+	body[1] = uint8(dst.Bits())
+	if tbl > 0 && tbl < 256 {
+		body[4] = uint8(tbl)
+	} else {
+		body[4] = unix.RT_TABLE_UNSPEC
+	}
+	if forDelete {
+		body[5] = unix.RTPROT_UNSPEC
+		body[6] = unix.RT_SCOPE_NOWHERE
+		body[7] = unix.RTN_UNSPEC
+	} else {
+		body[5] = unix.RTPROT_BOOT
+		body[6] = unix.RT_SCOPE_UNIVERSE
+		body[7] = unix.RTN_UNICAST
+	}
+
+	if dst.Bits() > 0 {
+		body = appendNLAttr(body, unix.RTA_DST, dstAddr.AsSlice())
+	}
+	body = appendNLAttr(body, unix.RTA_GATEWAY, gwAddr.AsSlice())
+	if spec.IfName != "" {
+		ifi, err := net.InterfaceByName(spec.IfName)
+		if err != nil {
+			return nil, fmt.Errorf("lookup interface %s: %w", spec.IfName, err)
+		}
+		body = appendNLAttr(body, unix.RTA_OIF, u32AttrBytes(uint32(ifi.Index)))
+	}
+	if spec.Priority > 0 {
+		body = appendNLAttr(body, unix.RTA_PRIORITY, u32AttrBytes(spec.Priority))
+	}
+	if tbl >= 256 {
+		body = appendNLAttr(body, unix.RTA_TABLE, u32AttrBytes(uint32(tbl)))
+	}
+	return body, nil
+}
+
+func (c *linuxClient) ReplaceUnicastRoute(spec UnicastRouteSpec) error {
+	body, err := buildUnicastRouteBody(spec, false)
+	if err != nil {
+		return err
+	}
+	return execNetlinkAck(unix.RTM_NEWROUTE, unix.NLM_F_CREATE|unix.NLM_F_REPLACE, body)
+}
+
+func (c *linuxClient) DeleteUnicastRoute(spec UnicastRouteSpec) error {
+	body, err := buildUnicastRouteBody(spec, true)
+	if err != nil {
+		return err
+	}
+	err = execNetlinkAck(unix.RTM_DELROUTE, 0, body)
+	if errors.Is(err, unix.ESRCH) || errors.Is(err, unix.ENOENT) {
+		return nil
+	}
+	return err
+}
+
 func (c *linuxClient) HasRouteTableLocal(family int, table int) (bool, error) {
 	body := make([]byte, unix.SizeofRtMsg)
 	body[0] = toUnixAF(family)

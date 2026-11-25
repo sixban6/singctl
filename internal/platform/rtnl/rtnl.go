@@ -128,12 +128,23 @@ type TProxyRouteSpec struct {
 	ThrowV6Prefixes []netip.Prefix
 }
 
+// UnicastRouteSpec 描述通过 AF_NETLINK 新增/替换或删除的单播静态路由规格。
+type UnicastRouteSpec struct {
+	Dst      netip.Prefix
+	Gateway  netip.Addr
+	IfName   string
+	Priority uint32 // metric（如 200）
+	Table    int    // 0 表示默认 RT_TABLE_MAIN (254)
+}
+
 // Client 定义零子进程的内核路由、地址与邻居表操作契约。
 type Client interface {
 	ListAddresses() ([]InterfaceAddr, error)
 	ListNeighbors(family int) ([]NeighborEntry, error)
 	GetDefaultRoute(family int) (DefaultRoute, bool, error)
 	ReplaceDefaultRoute(family int, gw netip.Addr, ifName string) error
+	ReplaceUnicastRoute(spec UnicastRouteSpec) error
+	DeleteUnicastRoute(spec UnicastRouteSpec) error
 	HasRouteTableLocal(family int, table int) (bool, error)
 	EnsureThrowRoutes(family int, table int, prefixes []netip.Prefix) error
 	ReconcileTProxyRoutes(spec TProxyRouteSpec) error

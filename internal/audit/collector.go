@@ -46,6 +46,7 @@ type Collector struct {
 	uciSystemFile          string
 	nowFunc                func() time.Time
 	ipv6NeighCmdFunc       func() ([]byte, error)
+	ptrLookupFunc          func(ctx context.Context, ip string) (string, error)
 	rtnlClient             rtnl.Client
 	cachedState            *persistedAuditState
 	cachedStateFp          string
@@ -65,6 +66,7 @@ type Collector struct {
 	lanDevsFetchedAt       time.Time
 	ipv6NeighCache         map[string]string
 	ipv6NeighFetchedAt     time.Time
+	ptrCache               map[string]ptrCacheEntry
 	lowMemory              bool
 	maxTrackedFlows        int
 	maxConnCursors         int
@@ -135,6 +137,16 @@ func (c *Collector) SetIPv6NeighCmdForTest(fn func() ([]byte, error)) {
 	c.ipv6NeighCmdFunc = fn
 	c.ipv6NeighCache = nil
 	c.ipv6NeighFetchedAt = time.Time{}
+	c.cachedMergedLANDevs = nil
+	c.lanDevsFetchedAt = time.Time{}
+}
+
+// SetPTRLookupFuncForTest 供单元测试注入确定性的主路由反向 PTR 解析函数，零宿主网络副作用。
+func (c *Collector) SetPTRLookupFuncForTest(fn func(ctx context.Context, ip string) (string, error)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ptrLookupFunc = fn
+	c.ptrCache = nil
 	c.cachedMergedLANDevs = nil
 	c.lanDevsFetchedAt = time.Time{}
 }
@@ -229,6 +241,15 @@ func (c *Collector) sampleActiveLocked(ctx context.Context, now time.Time) (
 
 	connsResp, addr, err := c.fetchConnectionsLocked(ctx)
 	if err != nil || connsResp == nil {
+		if len(state.Flows) > 0 {
+			candIPs := make([]string, 0, len(state.Flows))
+			for _, e := range state.Flows {
+				if e != nil && e.DeviceIP != "" {
+					candIPs = append(candIPs, e.DeviceIP)
+				}
+			}
+			c.enrichSideRouterPTRDevicesLocked(ctx, devDirectory, selfIPs, candIPs)
+		}
 		if purgeBlockedFlows(state, selfIPs, devDirectory, engine) {
 			c.stateDirty = true
 			if c.statePath != "" {
@@ -237,6 +258,19 @@ func (c *Collector) sampleActiveLocked(ctx context.Context, now time.Time) (
 		}
 		return state, activeByKey, devDirectory, selfIPs, engine, "", false
 	}
+
+	candIPs := make([]string, 0, len(connsResp.Connections)+len(state.Flows))
+	for _, conn := range connsResp.Connections {
+		if src := strings.TrimSpace(conn.Metadata.SourceIP); src != "" {
+			candIPs = append(candIPs, src)
+		}
+	}
+	for _, e := range state.Flows {
+		if e != nil && e.DeviceIP != "" {
+			candIPs = append(candIPs, e.DeviceIP)
+		}
+	}
+	c.enrichSideRouterPTRDevicesLocked(ctx, devDirectory, selfIPs, candIPs)
 
 	ingestedMutated := c.ingestConnectionsLocked(state, connsResp.Connections, devDirectory, selfIPs, activeByKey, engine, now)
 	blockTrimmed := purgeBlockedFlows(state, selfIPs, devDirectory, engine)

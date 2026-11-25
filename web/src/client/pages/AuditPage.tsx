@@ -164,6 +164,8 @@ export const AuditPage: React.FC<AuditPageProps> = ({
   const whitelistCount = ctrl.report?.whitelistCount ?? whitelist.length;
   const pcdnOn = ctrl.report?.pcdnBlockEnabled ?? true;
   const isAuditOnlyMode = status?.gateway?.effectiveWorkMode === 'audit';
+  const isDelegatedMode = status?.gateway?.effectiveWorkMode === 'delegated';
+  const sideRouterIP = status?.gateway?.sideRouterIP?.trim() || '';
 
   return (
     <div className="space-y-5">
@@ -253,6 +255,8 @@ export const AuditPage: React.FC<AuditPageProps> = ({
         onSelectDevice={handleSelectDeviceFromRanking}
         onRenameDevice={(d) => void handleOpenRenameDevice(d)}
         isAuditOnlyMode={isAuditOnlyMode}
+        isDelegatedMode={isDelegatedMode}
+        sideRouterIP={sideRouterIP}
         busyDeviceIps={actions.busyDeviceIps}
         onToggleDeviceOverseas={(d, next) => void actions.handleToggleDeviceOverseas(d, next)}
         pcdnToggleBusy={actions.pcdnToggleBusy}

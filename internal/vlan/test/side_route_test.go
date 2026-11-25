@@ -8,7 +8,9 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"singctl/internal/vlan"
 )
@@ -274,4 +276,206 @@ func TestVLAN_ApplyAndSuspendRuntimeSideRoutes(t *testing.T) {
 		})
 	}
 	wg.Wait()
+}
+
+func TestVLAN_SideRouteLANNoMasqRules(t *testing.T) {
+	tests := []struct {
+		name           string
+		nftListOutput  string
+		nftListErr     bool
+		iptListOutput  string
+		iptListErr     bool
+		spec           vlan.VLANSideRouteSpec
+		wantApplyCmds  []string
+		wantSuspCmds   []string
+		forbidApplySub []string
+	}{
+		{
+			name:          "fw3 iptables postrouting_lan_rule",
+			nftListErr:    true,
+			iptListOutput: "-N postrouting_lan_rule\n-A postrouting_lan_rule -s 192.168.99.0/24 -m comment --comment \"singctl-side-nomasq\" -j ACCEPT\n-A postrouting_lan_rule -s 192.168.10.0/24 -j ACCEPT\n",
+			spec: vlan.VLANSideRouteSpec{
+				SideRouterIP: "192.168.55.88",
+				CIDRs:        []string{"192.168.89.0/24", "192.168.34.0/24"},
+			},
+			wantApplyCmds: []string{
+				"iptables -t nat -D postrouting_lan_rule -s 192.168.99.0/24 -m comment --comment singctl-side-nomasq -j ACCEPT",
+				"iptables -t nat -I postrouting_lan_rule 1 -s 192.168.34.0/24 -m comment --comment singctl-side-nomasq -j ACCEPT",
+				"iptables -t nat -I postrouting_lan_rule 1 -s 192.168.89.0/24 -m comment --comment singctl-side-nomasq -j ACCEPT",
+			},
+			forbidApplySub: []string{
+				"-D postrouting_lan_rule -s 192.168.10.0/24",
+			},
+			wantSuspCmds: []string{
+				"iptables -t nat -D postrouting_lan_rule -s 192.168.99.0/24 -m comment --comment singctl-side-nomasq -j ACCEPT",
+			},
+		},
+		{
+			name: "fw4 nftables srcnat_lan",
+			nftListOutput: "table inet fw4 {\n\tchain srcnat_lan {\n\t\tip saddr 192.168.99.0/24 accept comment \"singctl-side-nomasq\" # handle 42\n\t\tip saddr 192.168.10.0/24 masquerade # handle 99\n\t}\n}\n",
+			iptListErr: true,
+			spec: vlan.VLANSideRouteSpec{
+				SideRouterIP: "192.168.55.88",
+				CIDRs:        []string{"192.168.89.0/24"},
+			},
+			wantApplyCmds: []string{
+				"nft delete rule inet fw4 srcnat_lan handle 42",
+				"nft insert rule inet fw4 srcnat_lan ip saddr 192.168.89.0/24 accept comment singctl-side-nomasq",
+			},
+			forbidApplySub: []string{
+				"handle 99",
+			},
+			wantSuspCmds: []string{
+				"nft delete rule inet fw4 srcnat_lan handle 42",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var cmds []string
+			var mu sync.Mutex
+			runner := func(_ context.Context, name string, args ...string) ([]byte, error) {
+				line := name + " " + strings.Join(args, " ")
+				mu.Lock()
+				cmds = append(cmds, line)
+				mu.Unlock()
+				switch line {
+				case "ip -4 rule show":
+					return []byte("18810:\tfrom 192.168.89.0/24 lookup 188\n"), nil
+				case "nft -a list chain inet fw4 srcnat_lan":
+					if tc.nftListErr {
+						return nil, context.DeadlineExceeded
+					}
+					return []byte(tc.nftListOutput), nil
+				case "iptables -t nat -S postrouting_lan_rule":
+					if tc.iptListErr {
+						return nil, context.DeadlineExceeded
+					}
+					return []byte(tc.iptListOutput), nil
+				default:
+					return nil, nil
+				}
+			}
+
+			if err := vlan.ApplyRuntimeSideRoutes(t.Context(), tc.spec, runner); err != nil {
+				t.Fatalf("ApplyRuntimeSideRoutes failed: %v", err)
+			}
+			applyJoined := strings.Join(cmds, "\n")
+			for _, want := range tc.wantApplyCmds {
+				if !strings.Contains(applyJoined, want) {
+					t.Fatalf("missing apply no-masq cmd %q in:\n%s", want, applyJoined)
+				}
+			}
+			for _, forbid := range tc.forbidApplySub {
+				if strings.Contains(applyJoined, forbid) {
+					t.Fatalf("unexpected cmd matching %q in:\n%s", forbid, applyJoined)
+				}
+			}
+
+			// Suspend cleans no-masq rules too.
+			mu.Lock()
+			cmds = nil
+			mu.Unlock()
+			if err := vlan.SuspendRuntimeSideRoutes(t.Context(), runner); err != nil {
+				t.Fatalf("SuspendRuntimeSideRoutes failed: %v", err)
+			}
+			suspJoined := strings.Join(cmds, "\n")
+			for _, want := range tc.wantSuspCmds {
+				if !strings.Contains(suspJoined, want) {
+					t.Fatalf("missing suspend cleanup cmd %q in:\n%s", want, suspJoined)
+				}
+			}
+
+			// Empty CIDRs on Apply cleans no-masq rules too.
+			mu.Lock()
+			cmds = nil
+			mu.Unlock()
+			if err := vlan.ApplyRuntimeSideRoutes(t.Context(), vlan.VLANSideRouteSpec{SideRouterIP: "192.168.55.88"}, runner); err != nil {
+				t.Fatalf("ApplyRuntimeSideRoutes(empty) failed: %v", err)
+			}
+			emptyJoined := strings.Join(cmds, "\n")
+			for _, want := range tc.wantSuspCmds {
+				if !strings.Contains(emptyJoined, want) {
+					t.Fatalf("missing empty cleanup cmd %q in:\n%s", want, emptyJoined)
+				}
+			}
+		})
+	}
+
+	t.Run("concurrent_idempotency_serialized", func(t *testing.T) {
+		var mu sync.Mutex
+		var chainRules []string
+		var inFlight atomic.Int32
+		var overlapDetected atomic.Bool
+
+		statefulRunner := func(_ context.Context, name string, args ...string) ([]byte, error) {
+			if cur := inFlight.Add(1); cur > 1 {
+				overlapDetected.Store(true)
+			}
+			defer inFlight.Add(-1)
+
+			// Yield briefly so unserialized callers deterministically overlap.
+			time.Sleep(2 * time.Millisecond)
+
+			line := name + " " + strings.Join(args, " ")
+			switch {
+			case line == "ip -4 rule show":
+				return []byte("18810:\tfrom 192.168.89.0/24 lookup 188\n"), nil
+			case line == "nft -a list chain inet fw4 srcnat_lan":
+				return nil, context.DeadlineExceeded
+			case line == "iptables -t nat -S postrouting_lan_rule":
+				mu.Lock()
+				defer mu.Unlock()
+				lines := append([]string{"-N postrouting_lan_rule"}, chainRules...)
+				return []byte(strings.Join(lines, "\n") + "\n"), nil
+			case strings.HasPrefix(line, "iptables -t nat -D postrouting_lan_rule "):
+				rule := "-A postrouting_lan_rule " + strings.TrimPrefix(line, "iptables -t nat -D postrouting_lan_rule ")
+				mu.Lock()
+				if idx := slices.Index(chainRules, rule); idx >= 0 {
+					chainRules = append(chainRules[:idx], chainRules[idx+1:]...)
+				}
+				mu.Unlock()
+			case strings.HasPrefix(line, "iptables -t nat -I postrouting_lan_rule 1 "):
+				rule := "-A postrouting_lan_rule " + strings.TrimPrefix(line, "iptables -t nat -I postrouting_lan_rule 1 ")
+				mu.Lock()
+				chainRules = append([]string{rule}, chainRules...)
+				mu.Unlock()
+			}
+			return nil, nil
+		}
+
+		spec := vlan.VLANSideRouteSpec{
+			SideRouterIP: "192.168.55.88",
+			CIDRs:        []string{"192.168.89.0/24"},
+		}
+		var wg sync.WaitGroup
+		for i := range 4 {
+			wg.Go(func() {
+				if i%2 == 0 {
+					if err := vlan.ApplyRuntimeSideRoutes(t.Context(), spec, statefulRunner); err != nil {
+						t.Errorf("concurrent ApplyRuntimeSideRoutes failed: %v", err)
+					}
+				} else {
+					if err := vlan.SuspendRuntimeSideRoutes(t.Context(), statefulRunner); err != nil {
+						t.Errorf("concurrent SuspendRuntimeSideRoutes failed: %v", err)
+					}
+				}
+			})
+		}
+		wg.Wait()
+
+		if overlapDetected.Load() {
+			t.Fatal("expected ApplyRuntimeSideRoutes / SuspendRuntimeSideRoutes to serialize via runtime mutex")
+		}
+		if err := vlan.ApplyRuntimeSideRoutes(t.Context(), spec, statefulRunner); err != nil {
+			t.Fatalf("final ApplyRuntimeSideRoutes failed: %v", err)
+		}
+		mu.Lock()
+		gotLen := len(chainRules)
+		mu.Unlock()
+		if gotLen != 1 {
+			t.Fatalf("expected exactly 1 no-masq rule after concurrent apply/suspend, got %d: %v", gotLen, chainRules)
+		}
+	})
 }

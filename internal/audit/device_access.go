@@ -106,6 +106,16 @@ func (e *Enforcer) SetDeviceOverseasAccess(ctx context.Context, rawDeviceIP stri
 
 	res.KilledConnections = e.killConnectionsMatching(ctx, normIP, func(_, _ string) bool { return true })
 
+	if e.cfg != nil && e.cfg.IsDelegatedMode() {
+		sideIP := strings.TrimSpace(e.cfg.Gateway.SideRouterIP)
+		if sideIP != "" {
+			res.Message = fmt.Sprintf("已更新主路由本地配置 %s；当前处于旁路由托管模式，单设备外网分流请前往旁路由 (%s:8090) 的「行为与审计」页面设置", normIP, sideIP)
+		} else {
+			res.Message = fmt.Sprintf("已更新主路由本地配置 %s；当前处于旁路由托管模式，单设备外网分流请前往旁路由「行为与审计」页面设置", normIP)
+		}
+		return res, nil
+	}
+
 	if allowOverseas {
 		res.Message = fmt.Sprintf("已允许 %s 访问外网（恢复 sing-box 分流, 断开存量连接=%d 条）", normIP, res.KilledConnections)
 	} else {

@@ -1,5 +1,15 @@
 import React, { useMemo } from 'react';
-import { AlertTriangle, Globe, Home, Laptop, Network, Pencil, ShieldCheck, X } from 'lucide-react';
+import {
+  AlertTriangle,
+  ExternalLink,
+  Globe,
+  Home,
+  Laptop,
+  Network,
+  Pencil,
+  ShieldCheck,
+  X,
+} from 'lucide-react';
 import {
   Badge,
   Button,
@@ -19,6 +29,8 @@ export interface AuditDevicesAndBannersProps {
   onSelectDevice: (device: AuditSelectedDevice | null) => void;
   onRenameDevice?: (device: AuditDeviceSummary) => void;
   isAuditOnlyMode?: boolean;
+  isDelegatedMode?: boolean;
+  sideRouterIP?: string;
   busyDeviceIps?: Set<string>;
   onToggleDeviceOverseas?: (device: AuditDeviceSummary, allowOverseas: boolean) => void;
   pcdnToggleBusy: boolean;
@@ -34,6 +46,8 @@ export const AuditDevicesAndBanners: React.FC<AuditDevicesAndBannersProps> = ({
   onSelectDevice,
   onRenameDevice,
   isAuditOnlyMode = false,
+  isDelegatedMode = false,
+  sideRouterIP = '',
   busyDeviceIps,
   onToggleDeviceOverseas,
   pcdnToggleBusy,
@@ -155,6 +169,25 @@ export const AuditDevicesAndBanners: React.FC<AuditDevicesAndBannersProps> = ({
         if (!d.deviceIp || d.deviceIp === '127.0.0.1' || d.deviceIp === '::1') {
           return <Badge tone="neutral">本机网关</Badge>;
         }
+        if (isDelegatedMode) {
+          const cleanSideIP = sideRouterIP.trim();
+          if (cleanSideIP) {
+            return (
+              <a
+                href={`http://${cleanSideIP}:8090/#/audit`}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={(e) => e.stopPropagation()}
+                title={`当前主路由处于旁路由托管模式，请前往旁路由 ${cleanSideIP}:8090 统一设置单设备外网/直连分流`}
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/35 text-cyan-200 font-medium whitespace-nowrap transition-colors"
+              >
+                <span>去旁路由设置</span>
+                <ExternalLink className="w-3 h-3" />
+              </a>
+            );
+          }
+          return <Badge tone="neutral">已由旁路由接管</Badge>;
+        }
         const allowed = d.allowOverseas !== false;
         const devBusy = Boolean(busyDeviceIps?.has(d.deviceIp));
         const disabled = devBusy || !onToggleDeviceOverseas;
@@ -258,6 +291,29 @@ export const AuditDevicesAndBanners: React.FC<AuditDevicesAndBannersProps> = ({
 
   return (
     <>
+      {isDelegatedMode && (
+        <div className="rounded-2xl border border-cyan-500/35 bg-cyan-500/10 p-4 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-start gap-3 text-xs leading-relaxed text-secondary">
+            <Network className="w-5 h-5 text-cyan-400 shrink-0 mt-0.5" />
+            <div>
+              <strong className="text-primary">当前主路由处于「旁路由托管」模式（已启用三层真实终端 IP 透传）：</strong>
+              本机已停用 sing-box，跨子网设备的真实 IP 与设备名已透传至旁路由。全屋流量统计、风险封禁及单设备「允许外网 / 仅限直连」均由旁路由统一接管，本页仅保留历史本地快照。
+            </div>
+          </div>
+          {sideRouterIP.trim() && (
+            <a
+              href={`http://${sideRouterIP.trim()}:8090/#/audit`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/40 text-xs text-cyan-200 font-semibold shrink-0 transition-colors"
+            >
+              <span>前往旁路由行为与审计 ({sideRouterIP.trim()}:8090)</span>
+              <ExternalLink className="w-3.5 h-3.5" />
+            </a>
+          )}
+        </div>
+      )}
+
       {report &&
         report.pcdnBlockEnabled === false &&
         (report.pcdnDetectedFlows || 0) > 0 &&

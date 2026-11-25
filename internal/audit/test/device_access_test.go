@@ -155,4 +155,28 @@ func TestDeviceOverseasAccess_EnforcerAndCollector(t *testing.T) {
 			t.Fatalf("unexpected AllowOverseas map: %+v", byIP)
 		}
 	})
+
+	t.Run("delegated_mode_includes_side_router_guidance_message", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		cfgPath := filepath.Join(tmpDir, "singctl.yaml")
+		cfg := &config.Config{
+			Gateway: config.GatewayConfig{
+				Mode:         "main",
+				WorkMode:     config.WorkModeDelegated,
+				SideRouterIP: "192.168.55.88",
+			},
+		}
+		if err := config.Save(cfgPath, cfg); err != nil {
+			t.Fatal(err)
+		}
+		enforcer := audit.NewEnforcer(cfg, cfgPath)
+		enforcer.SetPathsForTest("", "", nil, "")
+		res, err := enforcer.SetDeviceOverseasAccess(ctx, "192.168.89.137", false)
+		if err != nil {
+			t.Fatalf("SetDeviceOverseasAccess failed in delegated mode: %v", err)
+		}
+		if !strings.Contains(res.Message, "旁路由") || !strings.Contains(res.Message, "192.168.55.88") {
+			t.Fatalf("expected delegated guidance in message, got %q", res.Message)
+		}
+	})
 }
