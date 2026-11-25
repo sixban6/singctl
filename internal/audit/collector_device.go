@@ -15,7 +15,27 @@ import (
 	"time"
 
 	"singctl/internal/common/sysinfo"
+	"singctl/internal/config"
 )
+
+// FormatFriendlyDeviceName 优先将 cfg.HomeDomain 中用户配置的设备昵称与 .home 域名叠加到审计设备展示名上（MAC 优先、IP 兜底）。
+func FormatFriendlyDeviceName(cfg *config.Config, ipStr, macStr, fallback string) string {
+	if cfg == nil {
+		return fallback
+	}
+	display, fqdn, ok := cfg.HomeDomain.LookupFriendlyName(ipStr, macStr)
+	if !ok || fqdn == "" {
+		return fallback
+	}
+	aliasPrefix := fqdn
+	if dot := strings.IndexByte(fqdn, '.'); dot > 0 {
+		aliasPrefix = fqdn[:dot]
+	}
+	if display == "" || strings.EqualFold(display, aliasPrefix) || strings.EqualFold(display, fqdn) {
+		return fqdn
+	}
+	return display + " (" + fqdn + ")"
+}
 
 type lanDeviceInfo struct {
 	Name string

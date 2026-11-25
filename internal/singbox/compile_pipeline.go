@@ -269,6 +269,23 @@ var defaultConfigCompileStages = []CompileStage{
 		},
 	},
 	{
+		Name: "inject_home_domain_dns",
+		AppliesTo: func(g *ConfigGenerator, doc *CompileDoc) bool {
+			return doc.platform == "linux" && !doc.isIOS && g != nil && g.config != nil &&
+				g.config.HomeDomain.IsEnabled() && len(g.config.HomeDomain.Devices) > 0
+		},
+		Apply: func(g *ConfigGenerator, doc *CompileDoc) error {
+			d, err := doc.EnsureDoc()
+			if err != nil {
+				return fmt.Errorf("failed to parse config JSON for home domain DNS injection: %w", err)
+			}
+			if ensureHomeDomainRulesInDoc(d, g.config.HomeDomain.EffectiveSuffix(), "") {
+				doc.dirty = true
+			}
+			return nil
+		},
+	},
+	{
 		Name: "normalize_client_log_level",
 		Apply: func(_ *ConfigGenerator, doc *CompileDoc) error {
 			d, err := doc.EnsureDoc()

@@ -387,6 +387,11 @@ traffic_routing:
     openai:
       enabled: true
       outbound: "#VPS"
+home_domain:
+  suffix: "home"
+  devices:
+    - alias: "nas"
+      ip: "192.0.2.10"
 notify:
   enabled: true
   channels:

@@ -48,6 +48,12 @@ export const AdGuardRulesAndRewritesSection: React.FC<AdGuardRulesAndRewritesSec
     return (snap?.filters || []).filter((f) => !presetUrlSet.has(f.url));
   }, [snap?.filters, presetUrlSet]);
 
+  const managedRewriteSet = useMemo(() => {
+    return new Set(
+      (snap?.managedRewriteDomains || []).map((d) => d.trim().toLowerCase().replace(/^\.+|\.+$/g, '')),
+    );
+  }, [snap?.managedRewriteDomains]);
+
   const submitWhitelist = async (e: React.FormEvent) => {
     e.preventDefault();
     const ok = await onWhitelist('add', wlInput);
@@ -193,25 +199,40 @@ export const AdGuardRulesAndRewritesSection: React.FC<AdGuardRulesAndRewritesSec
               </div>
             ) : (
               <div className="divide-y divide-[var(--border-subtle)] text-xs sm:text-sm max-h-72 overflow-y-auto pr-1">
-                {snap.rewrites.map((rw, idx) => (
-                  <div
-                    key={`${rw.domain}-${rw.answer}-${idx}`}
-                    className="flex items-center justify-between gap-3 py-2"
-                  >
-                    <div className="min-w-0 flex-1 flex items-center gap-2 font-mono">
-                      <span className="text-primary font-medium truncate">{rw.domain}</span>
-                      <span className="text-muted">→</span>
-                      <span className="text-secondary truncate">{rw.answer}</span>
+                {snap.rewrites.map((rw, idx) => {
+                  const isManaged = managedRewriteSet.has(
+                    rw.domain.trim().toLowerCase().replace(/^\.+|\.+$/g, ''),
+                  );
+                  return (
+                    <div
+                      key={`${rw.domain}-${rw.answer}-${idx}`}
+                      className="flex items-center justify-between gap-3 py-2"
+                    >
+                      <div className="min-w-0 flex-1 flex items-center gap-2 font-mono">
+                        <span className="text-primary font-medium truncate">{rw.domain}</span>
+                        {isManaged && (
+                          <Badge tone="accent" className="shrink-0 font-sans">
+                            设备托管
+                          </Badge>
+                        )}
+                        <span className="text-muted">→</span>
+                        <span className="text-secondary truncate">{rw.answer}</span>
+                      </div>
+                      <Button
+                        size="xs"
+                        variant="ghost"
+                        disabled={mutating || !canMutate || isManaged}
+                        title={
+                          isManaged
+                            ? '由「网络中心 → 本地域名」自动托管，请前往该页面编辑或删除'
+                            : '删除此重写记录'
+                        }
+                        onClick={() => onDeleteRewrite(rw.domain, rw.answer)}
+                        icon={<Trash2 className="w-3.5 h-3.5" />}
+                      />
                     </div>
-                    <Button
-                      size="xs"
-                      variant="ghost"
-                      disabled={mutating || !canMutate}
-                      onClick={() => onDeleteRewrite(rw.domain, rw.answer)}
-                      icon={<Trash2 className="w-3.5 h-3.5" />}
-                    />
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>

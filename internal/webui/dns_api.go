@@ -91,7 +91,18 @@ func (s *Server) dnsStatusSummary(ctx context.Context) map[string]any {
 func (s *Server) handleDNSOverviewGet(w http.ResponseWriter, r *http.Request) {
 	cfg := s.readConfigOrEmpty()
 	reg := s.newDNSRegistry(cfg)
-	writeJSON(w, http.StatusOK, reg.Overview(r.Context()))
+	ov := reg.Overview(r.Context())
+	if ov != nil {
+		if managed := cfg.HomeDomain.ManagedDomainMap(); len(managed) > 0 {
+			domains := make([]string, 0, len(managed))
+			for d := range managed {
+				domains = append(domains, d)
+			}
+			slices.Sort(domains)
+			ov.ManagedRewriteDomains = domains
+		}
+	}
+	writeJSON(w, http.StatusOK, ov)
 }
 
 func (s *Server) handleDNSCredentialsGet(w http.ResponseWriter, r *http.Request) {
@@ -362,6 +373,13 @@ func (s *Server) handleDNSRewritesPost(w http.ResponseWriter, r *http.Request) {
 	eng := s.newDNSRegistry(cfg).ActiveEngine()
 	switch strings.ToLower(strings.TrimSpace(body.Action)) {
 	case "delete", "remove":
+		normDom := strings.ToLower(strings.Trim(strings.TrimSpace(body.Domain), "."))
+		if managed := cfg.HomeDomain.ManagedDomainMap(); managed != nil {
+			if _, isManaged := managed[normDom]; isManaged {
+				writeJSONError(w, http.StatusBadRequest, "该记录由「本地域名」设备名册自动托管，请前往「网络中心 → 本地域名」中编辑或删除")
+				return
+			}
+		}
 		if err := eng.DeleteRewrite(r.Context(), body.Domain, body.Answer); err != nil {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return

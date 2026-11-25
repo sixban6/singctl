@@ -7,8 +7,10 @@ import {
   RefreshCw,
   ShieldCheck,
 } from 'lucide-react';
-import { Badge, Button, ConfirmDialog, PageHeader } from '../../ui';
-import { ClientStatusResponse } from '../types';
+import { Badge, Button, ConfirmDialog, PageHeader, useToast } from '../../ui';
+import { clientApi } from '../api';
+import { AuditDeviceSummary, ClientStatusResponse, HomeDomainDeviceUpsertPayload } from '../types';
+import { DeviceEditDrawer, DeviceEditInitial } from './network/homedomain/DeviceEditDrawer';
 import { AuditAIConfigDrawer } from './audit/AuditAIConfigDrawer';
 import { AuditBlacklistDrawer } from './audit/AuditBlacklistDrawer';
 import { AuditDevicesAndBanners } from './audit/AuditDevicesAndBanners';
@@ -30,9 +32,14 @@ export const AuditPage: React.FC<AuditPageProps> = ({
   active = true,
   status,
 }) => {
+  const { success, error } = useToast();
   const [blockDrawerOpen, setBlockDrawerOpen] = useState(false);
   const [aiCfgOpen, setAiCfgOpen] = useState(false);
   const [pcdnBannerDismissed, setPcdnBannerDismissed] = useState(false);
+  const [renameDrawerOpen, setRenameDrawerOpen] = useState(false);
+  const [renameInit, setRenameInit] = useState<DeviceEditInitial | null>(null);
+  const [renameSuffix, setRenameSuffix] = useState('home');
+  const [renameSaving, setRenameSaving] = useState(false);
 
   const {
     aiEnabled,
@@ -47,7 +54,7 @@ export const AuditPage: React.FC<AuditPageProps> = ({
 
   const ctrl = useAuditFlowsController({
     active,
-    drawerBlockingRefresh: blockDrawerOpen || aiCfgOpen,
+    drawerBlockingRefresh: blockDrawerOpen || aiCfgOpen || renameDrawerOpen,
     setCachedReview,
     getCachedReview,
     flushCachedReviews,
@@ -92,6 +99,63 @@ export const AuditPage: React.FC<AuditPageProps> = ({
     ctrl.setSelectedDevice(dev);
     if (dev) {
       ctrl.sectionAnchorRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  };
+
+  const handleOpenRenameDevice = async (dev: AuditDeviceSummary) => {
+    let suffix = renameSuffix;
+    let existingAlias: string | undefined;
+    let existingDisplay = dev.deviceName && dev.deviceName !== dev.deviceIp ? dev.deviceName : '';
+    let existingWildcard = false;
+    let existingServices = undefined;
+    try {
+      const hd = await clientApi.getHomeDomain();
+      suffix = hd.suffix || 'home';
+      setRenameSuffix(suffix);
+      const macNorm = (dev.deviceMac || '').trim().toLowerCase();
+      const matched = hd.devices.find(
+        (x) =>
+          (macNorm && (x.mac || '').trim().toLowerCase() === macNorm) || x.ip === dev.deviceIp,
+      );
+      if (matched) {
+        existingAlias = matched.alias;
+        existingDisplay = matched.displayName || existingDisplay;
+        existingWildcard = Boolean(matched.wildcard);
+        existingServices = matched.services;
+      }
+    } catch {
+      // ignore prefill lookup failure; fallback to basic LAN prefill
+    }
+    const cleanSuggested = (existingAlias || dev.deviceName || '')
+      .toLowerCase()
+      .replace(/\.[^.]+$/, '')
+      .replace(/[^a-z0-9-]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+    setRenameInit({
+      originalAlias: existingAlias,
+      alias: existingAlias || cleanSuggested,
+      displayName: existingDisplay.replace(/\s*\([^)]+\)\s*$/, ''),
+      ip: dev.deviceIp,
+      mac: dev.deviceMac || '',
+      source: 'lan',
+      wildcard: existingWildcard,
+      services: existingServices,
+    });
+    setRenameDrawerOpen(true);
+  };
+
+  const handleSubmitRenameDevice = async (payload: HomeDomainDeviceUpsertPayload): Promise<boolean> => {
+    setRenameSaving(true);
+    try {
+      const res = await clientApi.upsertHomeDomainDevice(payload);
+      success(`已绑定 ${payload.alias}.${res.suffix}，审计页设备名将立即更新`);
+      void ctrl.loadAudit(false);
+      return true;
+    } catch (err) {
+      error((err as Error)?.message || '保存设备昵称失败');
+      return false;
+    } finally {
+      setRenameSaving(false);
     }
   };
 
@@ -187,6 +251,7 @@ export const AuditPage: React.FC<AuditPageProps> = ({
         loading={ctrl.loading}
         selectedDevice={ctrl.selectedDevice}
         onSelectDevice={handleSelectDeviceFromRanking}
+        onRenameDevice={(d) => void handleOpenRenameDevice(d)}
         pcdnToggleBusy={actions.pcdnToggleBusy}
         pcdnBannerDismissed={pcdnBannerDismissed}
         onDismissPcdnBanner={() => setPcdnBannerDismissed(true)}
@@ -296,6 +361,15 @@ export const AuditPage: React.FC<AuditPageProps> = ({
       />
 
       <AuditAIConfigDrawer open={aiCfgOpen} onClose={() => setAiCfgOpen(false)} />
+
+      <DeviceEditDrawer
+        open={renameDrawerOpen}
+        suffix={renameSuffix}
+        saving={renameSaving}
+        initial={renameInit}
+        onClose={() => setRenameDrawerOpen(false)}
+        onSubmit={handleSubmitRenameDevice}
+      />
 
       <AuditFlowDetailDrawer
         detailFlow={ctrl.detailFlow}

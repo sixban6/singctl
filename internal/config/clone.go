@@ -142,6 +142,7 @@ func (c *Config) Clone() *Config {
 	out.CustomRules.DNS = cloneAnyMapSlice(c.CustomRules.DNS)
 
 	out.TrafficRouting = c.TrafficRouting.Clone()
+	out.HomeDomain = c.HomeDomain.Clone()
 	out.Notify = c.Notify.Clone()
 	out.SafeCommit = c.SafeCommit.Clone()
 

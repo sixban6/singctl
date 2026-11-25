@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { AlertTriangle, Laptop, Network, ShieldCheck, X } from 'lucide-react';
+import { AlertTriangle, Laptop, Network, Pencil, ShieldCheck, X } from 'lucide-react';
 import {
   Badge,
   Button,
@@ -17,6 +17,7 @@ export interface AuditDevicesAndBannersProps {
   loading: boolean;
   selectedDevice: AuditSelectedDevice | null;
   onSelectDevice: (device: AuditSelectedDevice | null) => void;
+  onRenameDevice?: (device: AuditDeviceSummary) => void;
   pcdnToggleBusy: boolean;
   pcdnBannerDismissed: boolean;
   onDismissPcdnBanner: () => void;
@@ -28,6 +29,7 @@ export const AuditDevicesAndBanners: React.FC<AuditDevicesAndBannersProps> = ({
   loading,
   selectedDevice,
   onSelectDevice,
+  onRenameDevice,
   pcdnToggleBusy,
   pcdnBannerDismissed,
   onDismissPcdnBanner,
@@ -51,12 +53,27 @@ export const AuditDevicesAndBanners: React.FC<AuditDevicesAndBannersProps> = ({
       key: 'device',
       header: '局域网设备',
       render: (d) => (
-        <div>
-          <div className="font-semibold text-xs text-primary">{d.deviceName || d.deviceIp}</div>
-          <div className="font-mono text-[11px] text-muted">
-            {d.deviceIp}
-            {d.deviceMac ? ` · ${d.deviceMac}` : ''}
+        <div className="flex items-start justify-between gap-2 group">
+          <div className="min-w-0">
+            <div className="font-semibold text-xs text-primary truncate">{d.deviceName || d.deviceIp}</div>
+            <div className="font-mono text-[11px] text-muted">
+              {d.deviceIp}
+              {d.deviceMac ? ` · ${d.deviceMac}` : ''}
+            </div>
           </div>
+          {onRenameDevice && d.deviceIp && d.deviceIp !== '127.0.0.1' && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onRenameDevice(d);
+              }}
+              title="设昵称并绑定 .home 本地域名"
+              className="p-1 rounded-md text-muted hover:text-sky-300 hover:bg-sky-500/15 transition-colors shrink-0 cursor-pointer"
+            >
+              <Pencil className="w-3 h-3" />
+            </button>
+          )}
         </div>
       ),
     },

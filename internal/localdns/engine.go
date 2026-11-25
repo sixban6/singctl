@@ -111,8 +111,9 @@ type OverviewSnapshot struct {
 	BlockAAAA         bool           `json:"blockAAAA"`
 	StatsSource       string         `json:"statsSource"`
 	StatsSourceLabel  string         `json:"statsSourceLabel"`
-	Capabilities      Capabilities   `json:"capabilities"`
-	Engines           []EngineOption `json:"engines"`
+	Capabilities          Capabilities   `json:"capabilities"`
+	Engines               []EngineOption `json:"engines"`
+	ManagedRewriteDomains []string       `json:"managedRewriteDomains,omitempty"`
 }
 
 // Engine 定义双引擎防劫持本地 DNS（smartdns / adguard）的统一领域契约。

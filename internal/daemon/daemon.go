@@ -126,8 +126,10 @@ type Daemon struct {
 	p2pCtrl             *tailscale.P2PAssistController
 	p2pReconciling      atomic.Bool
 	p2pLastActive       atomic.Bool
-	p2pSnapMu           sync.Mutex
-	p2pLastSnapSummary  string
+	p2pSnapMu             sync.Mutex
+	p2pLastSnapSummary    string
+	homeDomainWorker      *HomeDomainWorker
+	homeDomainReconciling atomic.Bool
 
 	logPathOverride     string
 	webLogOverride      string
@@ -621,6 +623,47 @@ func (d *Daemon) BuildForegroundLifecycle() *lifecycle.Group {
 				return nil
 			},
 		},
+		lifecycle.FuncService{
+			ServiceName: "home-domain-dns",
+			OnStart: func(startCtx context.Context) error {
+				if d.skipSignalSetup {
+					return nil
+				}
+				worker := d.ensureHomeDomainWorker()
+				go func() {
+					// 首次延迟 1 秒启动，待 Tailscale/dnsmasq 稳定后立即拉起 Split-DNS 应答器并每 60 秒巡检 DHCP 变更与网卡重绑
+					select {
+					case <-d.ctx.Done():
+						return
+					case <-time.After(1 * time.Second):
+					}
+					rCtx, cancel := context.WithTimeout(d.ctx, 12*time.Second)
+					_ = worker.Reconcile(rCtx, d.currentConfig())
+					cancel()
+
+					ticker := time.NewTicker(60 * time.Second)
+					defer ticker.Stop()
+					for {
+						select {
+						case <-d.ctx.Done():
+							return
+						case <-ticker.C:
+							tCtx, tCancel := context.WithTimeout(d.ctx, 12*time.Second)
+							worker.ReconcileDHCP(tCtx)
+							_ = worker.Reconcile(tCtx, d.currentConfig())
+							tCancel()
+						}
+					}
+				}()
+				return nil
+			},
+			OnClose: func() error {
+				if d.homeDomainWorker != nil {
+					return d.homeDomainWorker.Close()
+				}
+				return nil
+			},
+		},
 	)
 	return g
 }
@@ -769,6 +812,7 @@ func (d *Daemon) monitorLoop() error {
 			d.maybePatrolGroupFailoverAsync()
 			d.maybeReconcileTailscaleP2PAsync(true)
 			d.maybeReconcileAuditThrottlesAsync(true)
+			d.reconcileHomeDomainAsync()
 		case <-initHealthTimer.C:
 			d.GuardTailscaleOOMOnce()
 			res := NewMonitor(d.currentConfig()).CheckHealth()

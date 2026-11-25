@@ -1,0 +1,1 @@
+import{F as e}from"./api-C7qYNco8.js";var t={name:`chevron-up`,size:24,node:[[`path`,{d:`m18 15-6-6-6 6`,key:`153udz`}]]};t.node;var n=e(t),r={name:`power`,size:24,node:[[`path`,{d:`M12 2v10`,key:`mnfbl`}],[`path`,{d:`M18.4 6.6a9 9 0 1 1-12.77.04`,key:`obofu9`}]]};r.node;var i=e(r);export{n,i as t};

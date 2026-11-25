@@ -6,6 +6,7 @@ import {
   EyeOff,
   Flame,
   GitFork,
+  Globe,
   Monitor,
   Network,
   RefreshCw,
@@ -29,17 +30,19 @@ import {
 import { BrowserDoHCheckResponse, ClientStatusResponse, SafeCommitStatusReport } from '../types';
 import { FirewallPanel } from './firewall/FirewallPanel';
 import { GatewayModePage, GatewayModePageProps } from './network/GatewayModePage';
+import { HomeDomainSection } from './network/homedomain/HomeDomainSection';
 import { TailscalePage, TailscalePageProps } from './network/TailscalePage';
 import { VlanManagerSection } from './network/vlan/VlanManagerSection';
 
 export { GatewayModePage, TailscalePage };
 export type { GatewayModePageProps, TailscalePageProps };
 
-export type NetSubTab = 'gw' | 'ts' | 'fw' | 'vlan';
+export type NetSubTab = 'gw' | 'ts' | 'home' | 'fw' | 'vlan';
 
 function normalizeNetSubTab(raw?: string): NetSubTab {
   if (raw === 'fw') return 'fw';
   if (raw === 'ts') return 'ts';
+  if (raw === 'home') return 'home';
   if (raw === 'vlan') return 'vlan';
   if (raw === 'gw') return 'gw';
   return 'gw';
@@ -170,6 +173,11 @@ export const NetworkHubPage: React.FC<NetworkHubPageProps> = ({
               icon: <Share2 className="w-3.5 h-3.5" />,
             },
             {
+              key: 'home',
+              label: '本地域名 (.home)',
+              icon: <Globe className="w-3.5 h-3.5" />,
+            },
+            {
               key: 'fw',
               label: 'nftables 防火墙加固',
               icon: <Flame className="w-3.5 h-3.5" />,
@@ -279,6 +287,13 @@ export const NetworkHubPage: React.FC<NetworkHubPageProps> = ({
           busy={busy}
           privacyMask={privacyMask}
           onAction={onAction}
+          onRefreshStatus={onRefreshStatus}
+        />
+      )}
+      {sub === 'home' && (
+        <HomeDomainSection
+          busy={busy}
+          privacyMask={privacyMask}
           onRefreshStatus={onRefreshStatus}
         />
       )}

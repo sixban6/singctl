@@ -101,6 +101,7 @@ type Config struct {
 	Audit          AuditConfig          `yaml:"audit,omitempty" json:"audit,omitzero"`
 	CustomRules    CustomRulesConfig    `yaml:"custom_rules,omitempty"`
 	TrafficRouting TrafficRoutingConfig `yaml:"traffic_routing,omitempty" json:"traffic_routing,omitzero"`
+	HomeDomain     HomeDomainConfig     `yaml:"home_domain,omitempty" json:"home_domain,omitzero"`
 	Notify         NotifyConfig         `yaml:"notify,omitempty" json:"notify,omitzero"`
 	SafeCommit     SafeCommitConfig     `yaml:"safe_commit,omitempty" json:"safe_commit,omitzero"`
 }
@@ -185,6 +186,7 @@ var knownYAMLKeys = []string{
 	"audit", "whitelist", "pcdn_block", "throttles", "rate_kbps", "comment", "ai", "endpoint", "api_key", "model",
 	"firewall", "ban_timeout_days", "ping_limit_per_sec", "extra_forever_ban", "protected_ports",
 	"traffic_routing", "outbound",
+	"home_domain", "suffix", "tailscale_dns", "follow_dhcp", "devices", "alias", "display_name", "ip", "mac", "source", "wildcard", "services", "label", "scheme", "note",
 	"notify", "cooldown_minutes", "daily_limit", "quiet_hours", "events",
 	"watchdog_heal", "safe_commit_rollback", "resource_guard", "audit_high_risk", "new_device", "sub_or_node_fail", "server_quota_or_ban",
 	"channels", "telegram", "bot_token", "chat_id", "api_base_url",

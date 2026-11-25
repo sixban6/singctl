@@ -2,12 +2,16 @@
 package singbox
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -141,26 +145,66 @@ func SyncSandboxWorkConfig(ctx context.Context, sbConfigPath, sbWorkConfigPath, 
 	return ValidateAndReplaceSingBoxConfig(ctx, workPath, workJSON, tmpSuffix)
 }
 
-// ReloadSingBoxProcess 向运行中的 sing-box 进程发送 SIGHUP 无损热重载配置。
+// FindSingBoxRunPIDs 扫描 /proc/<pid>/cmdline，仅精确匹配真正的 `sing-box run` 守护进程 PID：
+// 严格排除 OpenWrt `ujail` 父进程（其 comm 为 sing-box 且参数末尾含 sing-box run）、`/usr/bin/env` 包装器以及临时 `sing-box check` 校验进程，
+// 防止 SIGHUP 误杀 ujail 沙盒导致整个网关断网。
+func FindSingBoxRunPIDs(procRoot string) []int {
+	root := cmp.Or(strings.TrimSpace(procRoot), "/proc")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+	var pids []int
+	for _, ent := range entries {
+		if !ent.IsDir() {
+			continue
+		}
+		pid, pErr := strconv.Atoi(ent.Name())
+		if pErr != nil || pid <= 0 {
+			continue
+		}
+		raw, rErr := os.ReadFile(filepath.Join(root, ent.Name(), "cmdline"))
+		if rErr != nil || len(raw) == 0 {
+			continue
+		}
+		parts := bytes.Split(bytes.TrimRight(raw, "\x00"), []byte{0})
+		if len(parts) < 2 {
+			continue
+		}
+		argv0 := string(parts[0])
+		argv1 := string(parts[1])
+		if filepath.Base(argv0) == "sing-box" && argv1 == "run" {
+			pids = append(pids, pid)
+		}
+	}
+	slices.Sort(pids)
+	return pids
+}
+
+// ReloadSingBoxProcess 向运行中的真正 sing-box run 进程发送 SIGHUP 无损热重载配置（Linux/OpenWrt 严格排除 ujail 父进程）。
 func ReloadSingBoxProcess() {
 	// 避免单测污染宿主机运行态或跨包并发误杀 `sing-box check` 子进程
 	if testing.Testing() {
 		return
 	}
+	if runtime.GOOS == "linux" {
+		// Linux/OpenWrt 严禁使用 `killall -HUP sing-box` 或 `pkill -HUP -f "sing-box run"`：
+		// OpenWrt ujail (-n sing-box) 的 comm 就是 "sing-box" 且 cmdline 含 "sing-box run"，误发 SIGHUP 会直接杀死 ujail 导致断网！
+		for _, pid := range FindSingBoxRunPIDs("/proc") {
+			_ = sendSIGHUPToPID(pid)
+		}
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-
 	if _, err := exec.LookPath("pkill"); err == nil {
-		// 优先精确匹配 `sing-box run` 守护进程，防止误向并发执行的 `sing-box check` 临时进程发送 SIGHUP
 		if exec.CommandContext(ctx, "pkill", "-HUP", "-f", "sing-box run").Run() == nil {
 			return
 		}
 		if exec.CommandContext(ctx, "pkill", "-HUP", "-x", "sing-box").Run() == nil {
 			return
 		}
-	}
-	if _, err := exec.LookPath("killall"); err == nil {
-		_ = exec.CommandContext(ctx, "killall", "-HUP", "sing-box").Run()
 	}
 }
 

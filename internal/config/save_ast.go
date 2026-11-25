@@ -57,6 +57,14 @@ var defaultSaveCleanupRules = []ASTSubtreeCleanupRule{
 		RemoveTopLevel: true,
 	},
 	{
+		// 当 home_domain 设备名册或后缀被编辑/清空时，先移除 dstDoc 旧节点由最新结构体完整替换，保留其余配置注释
+		Name:           "home_domain_replace_subtree",
+		When:           func(cfg *Config, _, _ bool) bool { return cfg != nil },
+		TargetDoc:      "dst",
+		ParentKey:      "home_domain",
+		RemoveTopLevel: true,
+	},
+	{
 		// 当 audit 子字段被修改或清空时，移除 dstDoc 中旧的子节点以保证置空字段或清空最后一条白名单真实生效
 		Name:      "audit_stale_children",
 		When:      func(cfg *Config, _, _ bool) bool { return cfg != nil },

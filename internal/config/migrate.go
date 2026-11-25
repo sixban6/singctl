@@ -446,6 +446,9 @@ func migrateClientTopLevelStage(mc *MigrationContext) {
 	if hasYAMLKey(mc.oldDocNode, "traffic_routing") && !mc.oldCfg.TrafficRouting.IsEmpty() {
 		mc.replaceNode("traffic_routing", mc.oldCfg.TrafficRouting)
 	}
+	if hasYAMLKey(mc.oldDocNode, "home_domain") && !mc.oldCfg.HomeDomain.IsEmpty() {
+		mc.replaceNode("home_domain", mc.oldCfg.HomeDomain)
+	}
 	if oldGW := getYAMLSubMap(mc.oldDocNode, "gateway"); oldGW != nil && !mc.oldCfg.Gateway.IsEmpty() {
 		if getYAMLSubMap(mc.docNode, "gateway") != nil {
 			if hasYAMLKey(oldGW, "mode") && mc.oldCfg.Gateway.Mode != "" {

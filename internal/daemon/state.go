@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"singctl/internal/common/fsx"
+	"singctl/internal/homedomain"
 	"singctl/internal/tailscale"
 )
 
@@ -52,6 +53,7 @@ type DaemonRuntimeSnapshot struct {
 	LastFailoverAt    string                        `json:"lastFailoverAt,omitempty"`
 	ActiveFailovers   []FailoverActiveItem          `json:"activeFailovers,omitempty"`
 	TailscaleP2P      *tailscale.P2PRuntimeSnapshot `json:"tailscaleP2P,omitempty"`
+	HomeDomainDNS     *homedomain.ResponderStatus   `json:"homeDomainDns,omitempty"`
 	WebEmbedded       bool                          `json:"webEmbedded,omitempty"`
 	WebEmbeddedListen string                        `json:"webEmbeddedListen,omitempty"`
 	RecentEvents      []WatchdogEventRecord         `json:"recentEvents,omitempty"`

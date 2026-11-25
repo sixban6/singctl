@@ -355,6 +355,7 @@ func buildRawFlowRecords(
 			continue
 		}
 		devName, devMAC := resolveFlowDeviceIdentity(normDevIP, entry, devDirectory)
+		devName = FormatFriendlyDeviceName(cfg, normDevIP, devMAC, devName)
 		activeIDs := activeByKey[entry.Key]
 		var curUpBps, curDownBps float64
 		if len(activeIDs) > 0 && liveRates != nil {

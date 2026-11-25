@@ -76,6 +76,7 @@ type Options struct {
 	BrowserDoHForTest       *BrowserDoHTestHooks                                                              // 仅供单元测试注入浏览器 DoH 旁路检测依赖
 	TailscaleP2PForTest     *TailscaleP2PTestHooks                                                            // 仅供单元测试注入 Tailscale P2P 防线依赖
 	TailscaleUpgradeForTest *TailscaleUpgradeTestHooks                                                        // 仅供单元测试注入 Tailscale 零失联升级体检与状态
+	HomeDomainForTest       *HomeDomainTestHooks                                                              // 仅供单元测试注入本地域名发现与探活替身
 	Listen                  string                                                                            // 监听地址,如 ":8090"
 	Password                string                                                                            // 可选的访问口令(空=不启用鉴权,建议仅在可信内网使用)
 	NoService               bool                                                                              // 禁用自动安装 procd/systemd 原生系统服务，强制走独立后台模式
@@ -280,6 +281,13 @@ func (s *Server) registerRoutes() {
 	s.Mux.HandleFunc("PUT /api/system/mirror", s.guard(s.handleSystemMirrorPut))
 	s.Mux.HandleFunc("GET /api/tailscale/upgrade/preflight", s.guard(s.handleTailscaleUpgradePreflightGet))
 	s.Mux.HandleFunc("GET /api/tailscale/upgrade/status", s.guard(s.handleTailscaleUpgradeStatusGet))
+
+	// 设备昵称与跨 Tailscale 本地域名 (.home) 管理 API
+	s.Mux.HandleFunc("GET /api/home-domain", s.guard(s.handleHomeDomainGet))
+	s.Mux.HandleFunc("PUT /api/home-domain/settings", s.guard(s.handleHomeDomainSettingsPut))
+	s.Mux.HandleFunc("POST /api/home-domain/devices", s.guard(s.handleHomeDomainDeviceUpsertPost))
+	s.Mux.HandleFunc("DELETE /api/home-domain/devices/{alias}", s.guard(s.handleHomeDomainDeviceDelete))
+	s.Mux.HandleFunc("POST /api/home-domain/verify", s.guard(s.handleHomeDomainVerifyPost))
 
 	// 看门狗守护与策略组容灾控制 API
 	s.Mux.HandleFunc("GET /api/watchdog", s.guard(s.handleWatchdogGet))

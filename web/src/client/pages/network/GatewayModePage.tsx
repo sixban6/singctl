@@ -222,7 +222,7 @@ export const GatewayModePage: React.FC<GatewayModePageProps> = ({
       />
 
       <SectionCard
-        title="选择客户端网关角色"
+        title="选择路由器角色"
         icon={<GitFork className="w-4 h-4" />}
         subtitle="主路由模式不加载任何旁路由附加规则；旁路由模式自动挂载独立可逆的内核转发与单臂防丢包规则"
       >

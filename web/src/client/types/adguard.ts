@@ -160,6 +160,7 @@ export interface DNSOverviewSnapshot {
   autoWhitelistedSubs: string[];
   auditManagedCount: number;
   rewrites: AdGuardRewriteEntry[];
+  managedRewriteDomains?: string[];
   configuredEngine: DNSEnginePreference;
   activeEngine: DNSEngineID;
   activeEngineLabel: string;
