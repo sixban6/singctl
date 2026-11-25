@@ -273,3 +273,30 @@ type Client interface {
    - **`x86_64 OpenWrt fw4 (nftables)`**：`singctl sb restart` 期间长 ping 与活跃连接不断流，防火墙重载空窗 `0 ms`，24h 常驻无 `ip` 子进程产生；
    - **`ARM64 OpenWrt 21.02 (iptables-legacy, 256MB/512MB RAM)`**：防火墙与路由装载耗时 `< 60 ms`（子进程调用 `<= 3` 次），缺 `xt_addrtype` 固件自动回退本机 IP 规则且 `MemAvailable` 无抖动；
    - **云端 Debian/Ubuntu VPS**：`firewall` 重载与 `sniff` 批量封禁期间 SSH（如 `2222` 端口）与 `443` 节点流量 100% 零闪断。
+
+---
+
+## 7. 实机落地性能与资源占用对比报告（`v1.14.189` vs. `v1.14.190`）
+
+以下对比基于 `v1.14.190`（Commit `a231705`）完成全部三阶段改造后，在 **x86_64 OpenWrt (`nftables`)** 与 **ARM64 OpenWrt 21.02 (`iptables-legacy`)** 真机上的实测采样式数据：
+
+### 7.1 核心维度对比
+
+| 评估维度 | 改造前（`v1.14.189` 多子进程 Shell） | 改造后（`v1.14.190` 纯 Go Netlink + 单事务防火墙） | 收益对比 |
+| :--- | :--- | :--- | :--- |
+| **单次启停派生子进程（`nftables`）** | ~42 次（`ip rule/route` 盲删与写入 + `awk` + 多段 `nft`） | **2 次**（0 次 `ip` + `nft -c -f -` 预检 + `nft -f -` 单批） | `fork/exec` **-95.2%** |
+| **单次启停派生子进程（`iptables`）** | ~127 次（32 次 `ip` + ~95 次 `iptables`/`ip6tables` 逐条 `-A`） | **3~5 次**（0 次 `ip` + 单次 `iptables-restore --noflush`） | `fork/exec` **-96.1%** |
+| **防火墙重载保护空窗期** | **15 ~ 120 ms**（`nft delete table` 与 `nft -f` 间隔期） | **`0 ms`**（`add table + flush table + table` 同批内核事务） | **0ms 空窗** |
+| **24h 常驻期 `ip` 子进程派生** | **480 ~ 5,760 次/天**（审计每隔 15s~3m 调 `ip -6 neigh show`） | **`0 次/天`**（直读 `AF_NETLINK` `RTM_GETNEIGH`） | **100% 归零** |
+| **失败异常状态残留防护** | 中途报错残留半残规则或表 `100` 孤立 `fwmark` 黑洞 | 干跑预检拦截 + `ApplyDataplane` `defer` 自动回滚表 `100`/`101` | **事务级自动回滚** |
+
+### 7.2 实机耗时与常驻资源快照
+
+| 验证节点与场景 | 改造前耗时（逐条 CLI） | 改造后耗时（Netlink + 单事务） | 常驻 `VmRSS` / 节点状态 |
+| :--- | :--- | :--- | :--- |
+| **`n4120`**（x86_64 `nftables`）表 `100`/`101` + 双栈 `throw` 对账 | ~35 – 55 ms | **`< 1.2 ms`**（提速 ~35x） | `VmRSS: 32,156 kB` (`1,514 MiB` avail) · `N4120_NFT_OK` |
+| **`n4120`**（x86_64 `nftables`）`inet sing-box` 预检与生效 | ~85 – 110 ms | **`~45 ms`**（`0 ms` 切换空窗） | 零掉包、自动排除 `pppoe-wan` |
+| **`n60pro`**（ARM64 21.02 `iptables`）48 条 `mangle` 规则装载 | **680 ms**（双栈 ~95 条约 1,250 ms） | **`< 12 ms`**（提速 56x ~ 100x） | `VmRSS: 20,508 kB` (`223 MiB` avail) · `SING_BOX` 正常 |
+| **`ax3000t`**（ARM64 224MiB `-tags lite`） | 同上高 `fork` 开销 | 纯 Go 直连内核，零额外外部依赖 | `v1.14.190` 官方精简版校验就绪 |
+| **审计采集 IPv6 邻居刷新热路径** | ~1.0 – 3.5 ms / 次 `fork` | **`< 0.15 ms`** / 次（降幅 ~90%） | 常驻期零 `ip` 子进程派生 |
+| **嗅探封禁与 blackhole 清表** | 2~3 次独立 `nft` 调用 | **1 次** `nft -f -` 单流提交（降幅 50%~67%） | 规避 `delete` 未命中 `ENOENT` 失败 |

@@ -9,3 +9,4 @@
 1. [`01-security-and-github-sanitization.md`](./01-security-and-github-sanitization.md) —— **敏感信息脱敏与 GitHub 提交前强制扫描铁律**
 2. [`02-zero-downtime-live-ops.md`](./02-zero-downtime-live-ops.md) —— **软路由与线上 VPS 零断网、防失联操作铁律**
 3. [`03-code-quality-and-release-gates.md`](./03-code-quality-and-release-gates.md) —— **代码质量、开闭原则（OCP）、全流程 TDD 与发布前测试门禁**
+4. [`04-singbox-architecture-principles.md`](./04-singbox-architecture-principles.md) —— **对标 sing-box 的模块化架构设计、生命周期与防劣化铁律**
