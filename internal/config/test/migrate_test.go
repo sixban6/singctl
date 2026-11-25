@@ -423,3 +423,105 @@ safe_commit:
 		}
 	})
 }
+
+func TestWatchdogAutoStartConfig(t *testing.T) {
+	t.Run("default_enabled_and_clone_isolation", func(t *testing.T) {
+		var zeroCfg config.Config
+		if zeroCfg.Watchdog.AutoStart != nil {
+			t.Fatalf("expected zero AutoStart to be nil, got %v", *zeroCfg.Watchdog.AutoStart)
+		}
+		if !zeroCfg.Watchdog.IsAutoStartEnabled() {
+			t.Fatalf("expected zero Watchdog.IsAutoStartEnabled() == true by default")
+		}
+
+		zeroCfg.Watchdog.SetAutoStart(false)
+		if zeroCfg.Watchdog.AutoStart == nil || zeroCfg.Watchdog.IsAutoStartEnabled() {
+			t.Fatalf("expected SetAutoStart(false) to disable AutoStart")
+		}
+
+		cloned := zeroCfg.Clone()
+		cloned.Watchdog.SetAutoStart(true)
+		if zeroCfg.Watchdog.IsAutoStartEnabled() {
+			t.Fatalf("expected Clone() to isolate Watchdog.AutoStart pointer from original")
+		}
+		if !cloned.Watchdog.IsAutoStartEnabled() {
+			t.Fatalf("expected cloned AutoStart to be true")
+		}
+	})
+
+	t.Run("load_and_migrate_preserves_explicit_false_and_true", func(t *testing.T) {
+		for _, want := range []bool{false, true} {
+			raw := "subs:\n  - name: \"main\"\n    url: \"https://sub.example.com/1\"\nwatchdog:\n  interval: 180\n  auto_start: false\n"
+			if want {
+				raw = "subs:\n  - name: \"main\"\n    url: \"https://sub.example.com/1\"\nwatchdog:\n  interval: 180\n  auto_start: true\n"
+			}
+			migrated, err := config.MigrateConfigBytes([]byte(raw), configs.ClientConfigYAML)
+			if err != nil {
+				t.Fatalf("MigrateConfigBytes(want=%v) failed: %v", want, err)
+			}
+			var got config.Config
+			if err := yaml.Unmarshal(migrated, &got); err != nil {
+				t.Fatalf("unmarshal failed: %v", err)
+			}
+			if got.Watchdog.AutoStart == nil || got.Watchdog.IsAutoStartEnabled() != want {
+				t.Fatalf("migrated Watchdog.AutoStart mismatch: got ptr=%v val=%v, want %v",
+					got.Watchdog.AutoStart, got.Watchdog.IsAutoStartEnabled(), want)
+			}
+		}
+	})
+
+	t.Run("ast_save_round_trip_toggle_with_0600_mode", func(t *testing.T) {
+		cfgPath := filepath.Join(t.TempDir(), "singctl.yaml")
+		if err := os.WriteFile(cfgPath, configs.ClientConfigYAML, 0600); err != nil {
+			t.Fatal(err)
+		}
+
+		cfg, err := config.Load(cfgPath)
+		if err != nil {
+			t.Fatalf("initial Load failed: %v", err)
+		}
+		if !cfg.Watchdog.IsAutoStartEnabled() {
+			t.Fatalf("expected initial template config to default IsAutoStartEnabled() == true")
+		}
+
+		cfg.Watchdog.SetAutoStart(false)
+		if err := config.Save(cfgPath, cfg); err != nil {
+			t.Fatalf("Save(false) failed: %v", err)
+		}
+		fi, err := os.Stat(cfgPath)
+		if err != nil || fi.Mode().Perm() != 0600 {
+			t.Fatalf("expected 0600 permissions, got %v (err=%v)", fi.Mode().Perm(), err)
+		}
+		reloaded, err := config.Load(cfgPath)
+		if err != nil {
+			t.Fatalf("Load after Save(false) failed: %v", err)
+		}
+		if reloaded.Watchdog.AutoStart == nil || reloaded.Watchdog.IsAutoStartEnabled() {
+			t.Fatalf("expected reloaded AutoStart == false, got ptr=%v", reloaded.Watchdog.AutoStart)
+		}
+
+		reloaded.Watchdog.SetAutoStart(true)
+		if err := config.Save(cfgPath, reloaded); err != nil {
+			t.Fatalf("Save(true) failed: %v", err)
+		}
+		reloaded2, err := config.Load(cfgPath)
+		if err != nil {
+			t.Fatalf("Load after Save(true) failed: %v", err)
+		}
+		if reloaded2.Watchdog.AutoStart == nil || !reloaded2.Watchdog.IsAutoStartEnabled() {
+			t.Fatalf("expected reloaded2 AutoStart == true, got ptr=%v", reloaded2.Watchdog.AutoStart)
+		}
+
+		reloaded2.Watchdog.AutoStart = nil
+		if err := config.Save(cfgPath, reloaded2); err != nil {
+			t.Fatalf("Save(nil) failed: %v", err)
+		}
+		reloaded3, err := config.Load(cfgPath)
+		if err != nil {
+			t.Fatalf("Load after Save(nil) failed: %v", err)
+		}
+		if reloaded3.Watchdog.AutoStart != nil || !reloaded3.Watchdog.IsAutoStartEnabled() {
+			t.Fatalf("expected reloaded3 AutoStart nil & default true, got ptr=%v", reloaded3.Watchdog.AutoStart)
+		}
+	})
+}

@@ -43,10 +43,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		gw   map[string]any
 		cfg  map[string]any
 		sc   safecommit.StatusReport
+		as   daemon.AutoStartStatus
 	)
 
 	var wg sync.WaitGroup
-	wg.Add(9)
+	wg.Add(10)
 	go func() { defer wg.Done(); host = s.hostInfo() }()
 	go func() { defer wg.Done(); sb = singboxStatus() }()
 	go func() { defer wg.Done(); dm = s.daemonStatusSummary() }()
@@ -56,6 +57,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	go func() { defer wg.Done(); gw = s.gatewayStatusSummary() }()
 	go func() { defer wg.Done(); cfg = s.configSummary(s.opts.ConfigPath) }()
 	go func() { defer wg.Done(); sc = s.safeCommitManager().Status() }()
+	go func() { defer wg.Done(); as = s.autoStartStatusSummary(r.Context()) }()
 	wg.Wait()
 
 	status := map[string]any{
@@ -72,6 +74,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"gateway":        gw,
 		"config":         cfg,
 		"safeCommit":     sc,
+		"autoStart":      as,
 	}
 	writeJSON(w, http.StatusOK, status)
 }

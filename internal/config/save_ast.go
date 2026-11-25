@@ -125,6 +125,14 @@ var defaultSaveCleanupRules = []ASTSubtreeCleanupRule{
 		DropChild: dropChildKey("failover"),
 	},
 	{
+		// 当 watchdog.auto_start 恢复默认 nil 时，移除 dstDoc 旧的 auto_start 键使默认开启行为生效
+		Name:      "watchdog_auto_start_nil",
+		When:      func(cfg *Config, _, _ bool) bool { return cfg != nil && cfg.Watchdog.AutoStart == nil },
+		TargetDoc: "dst",
+		ParentKey: "watchdog",
+		DropChild: dropChildKey("auto_start"),
+	},
+	{
 		// 当 tailscale.p2p_assist 被修改或清空时，清理 dstDoc 与 srcDoc 中旧的 p2p_assist 子节点以保证置空字段和删除 peer 真实生效
 		Name:      "tailscale_p2p_assist_src",
 		When:      func(cfg *Config, _, _ bool) bool { return cfg != nil && cfg.Tailscale.P2PAssist.IsZero() },

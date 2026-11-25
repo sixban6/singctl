@@ -129,6 +129,9 @@ func (m *SystemdManager) InstallUnit(ctx context.Context, spec UnitSpec) error {
 		return err
 	}
 	_ = m.Enable(ctx, spec.Name)
+	if spec.BootOnly {
+		return nil
+	}
 	return m.Restart(ctx, spec.Name)
 }
 

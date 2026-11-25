@@ -55,6 +55,7 @@ type UnitSpec struct {
 	ProcdPath   string
 	ProcdBody   string
 	Env         map[string]string
+	BootOnly    bool // true 时 InstallUnit 仅写入单元并 enable，不立即触发 restart
 }
 
 // Manager 定义极薄跨平台宿主服务启停与单元托管接口。
@@ -69,6 +70,7 @@ type Manager interface {
 	Disable(ctx context.Context, name string) error
 	DaemonReload(ctx context.Context) error
 	IsActive(ctx context.Context, name string) bool
+	IsEnabled(ctx context.Context, name string) bool
 	InstallUnit(ctx context.Context, spec UnitSpec) error
 	RemoveUnit(ctx context.Context, spec UnitSpec) error
 }
@@ -166,7 +168,8 @@ func (n *NoopManager) Disable(_ context.Context, name string) error {
 	return n.unsupportedErr("disable", name)
 }
 func (n *NoopManager) DaemonReload(context.Context) error    { return nil }
-func (n *NoopManager) IsActive(context.Context, string) bool { return false }
+func (n *NoopManager) IsActive(context.Context, string) bool  { return false }
+func (n *NoopManager) IsEnabled(context.Context, string) bool { return false }
 func (n *NoopManager) InstallUnit(_ context.Context, s UnitSpec) error {
 	return n.unsupportedErr("install-unit", s.Name)
 }

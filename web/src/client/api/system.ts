@@ -1,5 +1,7 @@
 import {
   CacheResponse,
+  ClientAutoStartSaveResponse,
+  ClientAutoStartStatus,
   ClientBackupExportResponse,
   ClientBackupRestoreResponse,
   ClientConfigDTO,
@@ -61,6 +63,14 @@ export const systemApi = {
     request<{ ok: boolean; mirrorUrl: string }>('/api/system/mirror', {
       method: 'PUT',
       body: JSON.stringify({ mirrorUrl }),
+    }),
+
+  getAutoStart: () => request<ClientAutoStartStatus>('/api/system/autostart'),
+
+  setAutoStart: (enabled: boolean) =>
+    request<ClientAutoStartSaveResponse>('/api/system/autostart', {
+      method: 'PUT',
+      body: JSON.stringify({ enabled }),
     }),
 
   getCache: () => request<CacheResponse>('/api/cache'),

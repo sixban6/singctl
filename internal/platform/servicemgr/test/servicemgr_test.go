@@ -308,3 +308,95 @@ func TestNoopAndMockManagers_RaceSafety(t *testing.T) {
 		t.Fatalf("expected recorded calls on MockManager")
 	}
 }
+
+func TestManagerIsEnabled(t *testing.T) {
+	ctx := t.Context()
+
+	t.Run("procd_rc_d_detection_and_cleanup", func(t *testing.T) {
+		root := t.TempDir()
+		initDir := filepath.Join(root, "init.d")
+		rcdDir := filepath.Join(root, "rc.d")
+		if err := os.MkdirAll(initDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(rcdDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		runner := newFakeCmdRunner()
+		mgr := servicemgr.NewProcd(runner, initDir)
+
+		if mgr.IsEnabled(ctx, "singctl-autostart") {
+			t.Fatalf("expected IsEnabled false when init script is missing")
+		}
+		if mgr.IsEnabled(ctx, "bad;id") {
+			t.Fatalf("expected IsEnabled false for invalid unit name")
+		}
+
+		initPath := filepath.Join(initDir, "singctl-autostart")
+		if err := os.WriteFile(initPath, []byte("#!/bin/sh /etc/rc.common\nSTART=99\n"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if mgr.IsEnabled(ctx, "singctl-autostart") {
+			t.Fatalf("expected IsEnabled false when rc.d S-link is missing")
+		}
+
+		rcdLink := filepath.Join(rcdDir, "S99singctl-autostart")
+		if err := os.Symlink(initPath, rcdLink); err != nil {
+			t.Fatal(err)
+		}
+		if !mgr.IsEnabled(ctx, "singctl-autostart") {
+			t.Fatalf("expected IsEnabled true when init script and rc.d S99 symlink exist")
+		}
+
+		if err := mgr.RemoveUnit(ctx, servicemgr.UnitSpec{Name: "singctl-autostart", ProcdPath: initPath}); err != nil {
+			t.Fatalf("RemoveUnit failed: %v", err)
+		}
+		if mgr.IsEnabled(ctx, "singctl-autostart") {
+			t.Fatalf("expected IsEnabled false after RemoveUnit")
+		}
+		if _, err := os.Stat(rcdLink); !os.IsNotExist(err) {
+			t.Fatalf("expected rc.d S99 symlink removed after RemoveUnit, got err=%v", err)
+		}
+	})
+
+	t.Run("mock_and_noop", func(t *testing.T) {
+		noop := servicemgr.NewNoop()
+		if noop.IsEnabled(ctx, "singctl-autostart") {
+			t.Fatalf("expected NoopManager.IsEnabled false")
+		}
+
+		mock := servicemgr.NewMock()
+		if mock.IsEnabled(ctx, "singctl-autostart") {
+			t.Fatalf("expected initial MockManager.IsEnabled false")
+		}
+		if err := mock.Enable(ctx, "singctl-autostart"); err != nil {
+			t.Fatal(err)
+		}
+		if !mock.IsEnabled(ctx, "singctl-autostart") {
+			t.Fatalf("expected MockManager.IsEnabled true after Enable")
+		}
+		if err := mock.Disable(ctx, "singctl-autostart"); err != nil {
+			t.Fatal(err)
+		}
+		if mock.IsEnabled(ctx, "singctl-autostart") {
+			t.Fatalf("expected MockManager.IsEnabled false after Disable")
+		}
+		if err := mock.InstallUnit(ctx, servicemgr.UnitSpec{Name: "singctl-autostart"}); err != nil {
+			t.Fatal(err)
+		}
+		if !mock.IsEnabled(ctx, "singctl-autostart") {
+			t.Fatalf("expected MockManager.IsEnabled true after InstallUnit")
+		}
+		if err := mock.RemoveUnit(ctx, servicemgr.UnitSpec{Name: "singctl-autostart"}); err != nil {
+			t.Fatal(err)
+		}
+		if mock.IsEnabled(ctx, "singctl-autostart") {
+			t.Fatalf("expected MockManager.IsEnabled false after RemoveUnit")
+		}
+		mock.SetEnabled("singctl-autostart", true)
+		if !mock.IsEnabled(ctx, "singctl-autostart") {
+			t.Fatalf("expected MockManager.IsEnabled true after SetEnabled(true)")
+		}
+	})
+}

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strings"
 	"syscall"
@@ -17,6 +18,7 @@ import (
 	"singctl/internal/config"
 	"singctl/internal/daemon"
 	"singctl/internal/logger"
+	"singctl/internal/updater"
 	"singctl/internal/webui"
 
 	"github.com/spf13/cobra"
@@ -238,6 +240,7 @@ func NewDaemonCommand(version ...string) *cobra.Command {
 		newDaemonRestartCommand(),
 		newDaemonStatusCommand(),
 		newDaemonLogsCommand(),
+		newDaemonBootInitCommand(),
 	)
 
 	return cmd
@@ -486,4 +489,79 @@ func followFile(ctx context.Context, path string, offset int64) error {
 		}
 		f.Close()
 	}
+}
+
+func newDaemonBootInitCommand() *cobra.Command {
+	var worker bool
+	cmd := &cobra.Command{
+		Use:    "boot-init",
+		Short:  "开机自启动与掉电恢复（内部命令） / Boot autostart recovery (internal)",
+		Hidden: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			configPath := cmd.Flag("config").Value.String()
+			cfg, err := config.Load(configPath)
+			if err != nil {
+				return fmt.Errorf("failed to load config: %w", err)
+			}
+			exePath, _ := updater.ResolveExecutablePath()
+			deps := daemon.BootInitDeps{
+				ConfigPath:             configPath,
+				ExecutablePath:         exePath,
+				IsStandaloneWebRunning: webui.IsStandaloneWebRunning,
+				IsLowMemory: func() bool {
+					switch strings.ToLower(strings.TrimSpace(string(cfg.LowMemory))) {
+					case "on", "true", "yes", "1":
+						return true
+					case "off", "false", "no", "0":
+						return false
+					default:
+						return daemon.IsLowMemoryDevice()
+					}
+				},
+				StartSingBox: func(ctx context.Context) error {
+					return runBootSubcommand(ctx, exePath, configPath, "sb", "start")
+				},
+				StartDaemon: func(ctx context.Context) error {
+					return runBootSubcommand(ctx, exePath, configPath, "dm", "start")
+				},
+				StartWeb: func(ctx context.Context) error {
+					return runBootSubcommand(ctx, exePath, configPath, "web", "start")
+				},
+			}
+			if !worker {
+				if daemon.IsBootInitSatisfied(cfg, deps) {
+					return nil
+				}
+				return daemon.SpawnDetachedBootInitWorker(exePath, configPath, daemon.DefaultBootInitLog)
+			}
+			logger.Info("[AutoStart] 执行路由器开机自启恢复流程 (config=%s)...", configPath)
+			if err := daemon.RunBootInit(cmd.Context(), cfg, deps); err != nil {
+				logger.Warn("[AutoStart] 开机恢复未完全成功: %v", err)
+				return err
+			}
+			logger.Success("[AutoStart] 路由器开机自启恢复完成")
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&worker, "worker", false, "内部异步恢复执行器标志")
+	return cmd
+}
+
+func runBootSubcommand(ctx context.Context, exePath, cfgPath string, subArgs ...string) error {
+	resolvedExe := strings.TrimSpace(exePath)
+	if resolvedExe == "" {
+		resolvedExe = os.Args[0]
+	}
+	args := make([]string, 0, len(subArgs)+2)
+	if cleanCfg := strings.TrimSpace(cfgPath); cleanCfg != "" {
+		args = append(args, "--config", cleanCfg)
+	}
+	args = append(args, subArgs...)
+	runCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	c := exec.CommandContext(runCtx, resolvedExe, args...)
+	c.Env = os.Environ()
+	c.Stdout = os.Stdout
+	c.Stderr = os.Stderr
+	return c.Run()
 }

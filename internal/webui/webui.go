@@ -106,6 +106,8 @@ type Options struct {
 	DoctorRunner                *doctor.Runner                                                                    // 可选：自定义深度体检调度器
 	VLANServiceForTest          *vlan.Service                                                                     // 仅供离线单元测试注入 OpenWrt VLAN 领域服务
 	VLANAsyncReloadDelayForTest *time.Duration                                                                    // 仅供离线单元测试覆盖 VLAN 异步延迟重载时长（0=同步）
+	AutoStartServiceMgr         servicemgr.Manager                                                                // 可选：测试注入开机自启服务管理器替身
+	AutoStartProcdDir           string                                                                            // 可选：测试注入开机自启 procd 目录
 }
 
 // Server 客户端 Web 管理服务。
@@ -279,6 +281,8 @@ func (s *Server) registerRoutes() {
 	s.Mux.HandleFunc("PUT /api/tailscale/p2p", s.guard(s.handleTailscaleP2PPut))
 	s.Mux.HandleFunc("POST /api/tailscale/p2p/poke", s.guard(s.handleTailscaleP2PPokePost))
 	s.Mux.HandleFunc("PUT /api/system/mirror", s.guard(s.handleSystemMirrorPut))
+	s.Mux.HandleFunc("GET /api/system/autostart", s.guard(s.handleAutoStartGet))
+	s.Mux.HandleFunc("PUT /api/system/autostart", s.guard(s.handleAutoStartPut))
 	s.Mux.HandleFunc("GET /api/tailscale/upgrade/preflight", s.guard(s.handleTailscaleUpgradePreflightGet))
 	s.Mux.HandleFunc("GET /api/tailscale/upgrade/status", s.guard(s.handleTailscaleUpgradeStatusGet))
 

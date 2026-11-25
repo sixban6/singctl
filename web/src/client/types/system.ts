@@ -64,6 +64,7 @@ export interface ClientStatusResponse {
   firewall: ClientFirewallStatus;
   gateway?: ClientGatewayStatusSummary;
   safeCommit?: SafeCommitStatusReport;
+  autoStart?: ClientAutoStartStatus;
   config: {
     path: string;
     exists: boolean;
@@ -154,4 +155,24 @@ export interface ActionStreamEvent {
   code?: number;
   restarting?: boolean;
   tailscaleSwapping?: boolean;
+}
+
+export interface ClientAutoStartStatus {
+  supported: boolean;
+  enabled: boolean;
+  configEnabled: boolean;
+  serviceInstalled: boolean;
+  serviceEnabled: boolean;
+  serviceName: string;
+  initSystem: 'procd' | 'systemd' | 'unsupported' | string;
+  unitPath: string;
+  mode: 'unified_low_memory' | 'standard' | string;
+  lowMemory: boolean;
+  summary: string;
+}
+
+export interface ClientAutoStartSaveResponse {
+  ok: boolean;
+  message: string;
+  status: ClientAutoStartStatus;
 }

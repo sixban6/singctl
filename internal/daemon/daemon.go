@@ -619,6 +619,7 @@ func (d *Daemon) BuildForegroundLifecycle() *lifecycle.Group {
 					tuneCtx, cancel := context.WithTimeout(d.ctx, 15*time.Second)
 					defer cancel()
 					ReconcileLowMemHostDefault(tuneCtx, d.embeddedService != nil)
+					EnsureAutoStartFromConfig(tuneCtx, d.currentConfig(), d.configPath)
 				}()
 				return nil
 			},

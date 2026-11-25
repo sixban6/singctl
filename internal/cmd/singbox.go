@@ -125,6 +125,7 @@ func runStartSingbox(cfg *config.Config, configPath string) error {
 			logger.Success("Watchdog daemon started")
 		}
 	}
+	daemon.EnsureAutoStartFromConfig(context.Background(), cfg, configPath)
 	return nil
 }
 

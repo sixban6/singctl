@@ -116,6 +116,7 @@ func (c *Config) Clone() *Config {
 	out.Server.WarpRouting = cloneWarpRoutingConfig(c.Server.WarpRouting)
 
 	out.Watchdog.PreserveManualConfig = cloneBoolPtr(c.Watchdog.PreserveManualConfig)
+	out.Watchdog.AutoStart = cloneBoolPtr(c.Watchdog.AutoStart)
 	out.Watchdog.Failover.Enabled = cloneBoolPtr(c.Watchdog.Failover.Enabled)
 	out.Watchdog.Failover.Groups = slices.Clone(c.Watchdog.Failover.Groups)
 	out.Watchdog.Failover.ProbeURLs = slices.Clone(c.Watchdog.Failover.ProbeURLs)

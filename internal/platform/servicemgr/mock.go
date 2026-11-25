@@ -7,15 +7,17 @@ import (
 
 // MockManager 为并发安全的纯内存服务管理器替身，供上层单测验证启停与单元安装序列。
 type MockManager struct {
-	mu     sync.Mutex
-	active map[string]bool
-	calls  []string
+	mu      sync.Mutex
+	active  map[string]bool
+	enabled map[string]bool
+	calls   []string
 }
 
 // NewMock 创建纯内存 Mock 服务管理器。
 func NewMock() *MockManager {
 	return &MockManager{
-		active: make(map[string]bool),
+		active:  make(map[string]bool),
+		enabled: make(map[string]bool),
 	}
 }
 
@@ -29,6 +31,16 @@ func (m *MockManager) setActive(name string, v bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.active[name] = v
+}
+
+// SetEnabled 显式设置 Mock 服务的开机自启状态（供上层单测构造初始场景）。
+func (m *MockManager) SetEnabled(name string, v bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.enabled == nil {
+		m.enabled = make(map[string]bool)
+	}
+	m.enabled[name] = v
 }
 
 // Calls 返回当前已记录的所有操作序列快照。
@@ -86,6 +98,7 @@ func (m *MockManager) Enable(_ context.Context, name string) error {
 		return err
 	}
 	m.record("enable", name)
+	m.SetEnabled(name, true)
 	return nil
 }
 
@@ -94,6 +107,7 @@ func (m *MockManager) Disable(_ context.Context, name string) error {
 		return err
 	}
 	m.record("disable", name)
+	m.SetEnabled(name, false)
 	return nil
 }
 
@@ -111,6 +125,15 @@ func (m *MockManager) IsActive(_ context.Context, name string) bool {
 	return m.active[name]
 }
 
+func (m *MockManager) IsEnabled(_ context.Context, name string) bool {
+	if ValidateUnitName(name) != nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.enabled[name]
+}
+
 func (m *MockManager) InstallUnit(_ context.Context, spec UnitSpec) error {
 	if err := ValidateUnitName(spec.Name); err != nil {
 		return err
@@ -120,6 +143,7 @@ func (m *MockManager) InstallUnit(_ context.Context, spec UnitSpec) error {
 	}
 	m.record("install-unit", spec.Name)
 	m.setActive(spec.Name, true)
+	m.SetEnabled(spec.Name, true)
 	return nil
 }
 
@@ -129,5 +153,6 @@ func (m *MockManager) RemoveUnit(_ context.Context, spec UnitSpec) error {
 	}
 	m.record("remove-unit", spec.Name)
 	m.setActive(spec.Name, false)
+	m.SetEnabled(spec.Name, false)
 	return nil
 }

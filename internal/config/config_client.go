@@ -599,6 +599,7 @@ type WatchdogConfig struct {
 	MaxRestarts          int                    `yaml:"max_restarts"`                     // 每小时最大自动重启次数, 默认 3
 	SubSyncInterval      int                    `yaml:"sub_sync_interval,omitempty"`      // 订阅节点指纹自动热同步间隔(秒), 默认 600; 设为 -1 关闭
 	PreserveManualConfig *bool                  `yaml:"preserve_manual_config,omitempty"` // 刷新订阅或更新版本时是否自动保留 config.json 手动修改(默认 true)
+	AutoStart            *bool                  `yaml:"auto_start,omitempty"`             // 是否启用路由器开机自启动与掉电恢复（nil 默认 true）
 	Failover             WatchdogFailoverConfig `yaml:"failover,omitempty"`               // 策略组自动故障切换配置(默认开启)
 }
 
@@ -618,6 +619,23 @@ func (w *WatchdogConfig) SetPreserveManualConfig(preserve bool) {
 	w.PreserveManualConfig = &v
 }
 
+// IsAutoStartEnabled 返回是否启用开机自启动与掉电恢复（未配置时默认开启）。
+func (w WatchdogConfig) IsAutoStartEnabled() bool {
+	if w.AutoStart == nil {
+		return true
+	}
+	return *w.AutoStart
+}
+
+// SetAutoStart 显式设置开机自启动开关值。
+func (w *WatchdogConfig) SetAutoStart(enabled bool) {
+	if w == nil {
+		return
+	}
+	v := enabled
+	w.AutoStart = &v
+}
+
 func (w *WatchdogConfig) UnmarshalYAML(node *yaml.Node) error {
 	var a struct {
 		Interval             any                    `yaml:"interval"`
@@ -625,6 +643,7 @@ func (w *WatchdogConfig) UnmarshalYAML(node *yaml.Node) error {
 		MaxRestarts          any                    `yaml:"max_restarts"`
 		SubSyncInterval      any                    `yaml:"sub_sync_interval"`
 		PreserveManualConfig *bool                  `yaml:"preserve_manual_config"`
+		AutoStart            *bool                  `yaml:"auto_start"`
 		Failover             WatchdogFailoverConfig `yaml:"failover"`
 	}
 	if err := node.Decode(&a); err != nil {
@@ -651,6 +670,7 @@ func (w *WatchdogConfig) UnmarshalYAML(node *yaml.Node) error {
 		}
 	}
 	w.PreserveManualConfig = a.PreserveManualConfig
+	w.AutoStart = a.AutoStart
 	w.Failover = a.Failover
 	return nil
 }

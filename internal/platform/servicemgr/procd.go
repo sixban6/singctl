@@ -102,6 +102,23 @@ func (m *ProcdManager) IsActive(ctx context.Context, name string) bool {
 	return strings.Contains(strings.ToLower(string(out)), "running")
 }
 
+func (m *ProcdManager) rcdDir() string {
+	return filepath.Join(filepath.Dir(m.initDir), "rc.d")
+}
+
+func (m *ProcdManager) IsEnabled(_ context.Context, name string) bool {
+	if ValidateUnitName(name) != nil {
+		return false
+	}
+	script := m.scriptPath(name)
+	if _, err := os.Stat(script); err != nil {
+		return false
+	}
+	base := strings.TrimSuffix(name, ".service")
+	matches, err := filepath.Glob(filepath.Join(m.rcdDir(), "S[0-9][0-9]"+base))
+	return err == nil && len(matches) > 0
+}
+
 func (m *ProcdManager) InstallUnit(ctx context.Context, spec UnitSpec) error {
 	if err := ValidateUnitName(spec.Name); err != nil {
 		return err
@@ -120,6 +137,9 @@ func (m *ProcdManager) InstallUnit(ctx context.Context, spec UnitSpec) error {
 		return fmt.Errorf("write %s: %w", script, err)
 	}
 	_ = m.runner.Run(ctx, defaultActionTimeout, script, "enable")
+	if spec.BootOnly {
+		return nil
+	}
 	out, err := m.runner.CombinedOutput(ctx, defaultActionTimeout, script, "restart")
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
@@ -139,6 +159,12 @@ func (m *ProcdManager) RemoveUnit(ctx context.Context, spec UnitSpec) error {
 	if _, err := os.Stat(script); err == nil {
 		_ = m.runner.Run(ctx, defaultActionTimeout, script, "stop")
 		_ = m.runner.Run(ctx, defaultActionTimeout, script, "disable")
+	}
+	base := strings.TrimSuffix(spec.Name, ".service")
+	if links, err := filepath.Glob(filepath.Join(m.rcdDir(), "[SK][0-9][0-9]"+base)); err == nil {
+		for _, link := range links {
+			_ = os.Remove(link)
+		}
 	}
 	if err := os.Remove(script); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove %s: %w", script, err)

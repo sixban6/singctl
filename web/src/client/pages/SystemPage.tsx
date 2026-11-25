@@ -27,6 +27,7 @@ import {
 import { clientApi } from '../api';
 import { ClientStatusResponse } from '../types';
 import { DoctorDrawer } from './dash/DoctorDrawer';
+import { AutoStartCard } from './system/AutoStartCard';
 import { NotifyConfigCard } from './system/NotifyConfigCard';
 import { SafeCommitCard } from './system/SafeCommitCard';
 
@@ -356,6 +357,13 @@ export const SystemPage: React.FC<SystemPageProps> = ({
           </SectionCard>
         </div>
       </div>
+
+      {/* 开机自启动与掉电恢复开关 */}
+      <AutoStartCard
+        liveAutoStart={status?.autoStart}
+        busy={busy}
+        onRefreshStatus={onRefreshStatus ?? onRestored}
+      />
 
       {/* 远端安全回滚保险丝与 tailscaled OOM 免疫 */}
       <SafeCommitCard
