@@ -165,3 +165,152 @@ printf "FINAL_PKG=%%s\n" "$PACKAGE_FILENAME"
 		t.Fatalf("expected tar.gz archive to be removed from TEMP_DIR immediately after extraction")
 	}
 }
+
+func TestInstallScript_SlowDirectCircuitBreakerAndMirrorAffinity(t *testing.T) {
+	installSh := resolveRepoInstallSh(t)
+	dir := t.TempDir()
+
+	stdTarBytes, stdSHA := buildTestSingCtlTarGz(t, map[string]string{
+		"singctl-linux-arm64/singctl": "#!/bin/sh\necho ok\n",
+	})
+	stdServePath := filepath.Join(dir, "std.tar.gz")
+	checksumsServePath := filepath.Join(dir, "checksums.txt")
+	if err := os.WriteFile(stdServePath, stdTarBytes, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(checksumsServePath, []byte(fmt.Sprintf("%s  singctl-linux-arm64.tar.gz\n", stdSHA)), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := filepath.Join(dir, "mock-bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	tracePath := filepath.Join(dir, "curl-trace.log")
+
+	mockCurl := fmt.Sprintf(`#!/bin/sh
+echo "CALL $*" >> %q
+out=""
+url=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -o) shift; out="$1" ;;
+        http*://*) url="$1" ;;
+    esac
+    shift
+done
+case "$url" in
+    https://ghfast.top/https://api.github.com/*)
+        printf '{"tag_name": "v1.14.195"}\n'
+        exit 0
+        ;;
+    https://ghfast.top/https://github.com/*/singctl-linux-arm64.tar.gz)
+        cp %q "$out"
+        exit 0
+        ;;
+    https://ghfast.top/https://github.com/*/checksums.txt)
+        cp %q "$out"
+        exit 0
+        ;;
+    https://api.github.com/*|https://github.com/*)
+        exit 28
+        ;;
+esac
+exit 22
+`, tracePath, stdServePath, checksumsServePath)
+	if err := os.WriteFile(filepath.Join(binDir, "curl"), []byte(mockCurl), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("mirror_affinity_from_get_latest_version_skips_direct_download_and_checksums", func(t *testing.T) {
+		_ = os.WriteFile(tracePath, nil, 0644)
+		tmpInstall := filepath.Join(dir, "tmp-a")
+		harness := filepath.Join(dir, "case_a.sh")
+		script := fmt.Sprintf(`#!/bin/sh
+set -e
+export PATH=%q:"$PATH"
+export SINGCTL_INSTALL_LIB_ONLY=1
+. %q
+OS="linux"
+ARCH="arm64"
+IS_OPENWRT="false"
+TEMP_DIR=%q
+get_latest_version
+printf "AFTER_VERSION_PREFER_MIRROR=%%s\n" "${PREFER_MIRROR:-}"
+build_download_url --full
+download_and_extract
+printf "FINAL_PREFER_MIRROR=%%s\n" "${PREFER_MIRROR:-}"
+`, binDir, installSh, tmpInstall)
+		_ = os.WriteFile(harness, []byte(script), 0755)
+		out, err := exec.CommandContext(t.Context(), "sh", harness).CombinedOutput()
+		if err != nil {
+			t.Fatalf("case_a harness failed: %v\nOutput:\n%s", err, string(out))
+		}
+		if !strings.Contains(string(out), "AFTER_VERSION_PREFER_MIRROR=true") {
+			t.Fatalf("expected PREFER_MIRROR=true after get_latest_version fell back to ghfast.top, got:\n%s", string(out))
+		}
+		traceBytes, _ := os.ReadFile(tracePath)
+		trace := string(traceBytes)
+		if strings.Contains(trace, "CALL ") && strings.Contains(trace, " https://github.com/sixban6/singctl/releases/download/") {
+			for line := range strings.SplitSeq(trace, "\n") {
+				if strings.Contains(line, "https://github.com/sixban6/singctl/releases/download/") &&
+					!strings.Contains(line, "https://ghfast.top/") &&
+					!strings.Contains(line, "https://gh-proxy.com/") {
+					t.Fatalf("expected mirror affinity to skip direct download/checksums URL, trace line:\n%s", line)
+				}
+			}
+		}
+		if !strings.Contains(trace, "https://ghfast.top/https://github.com/sixban6/singctl/releases/download/v1.14.195/singctl-linux-arm64.tar.gz") ||
+			!strings.Contains(trace, "https://ghfast.top/https://github.com/sixban6/singctl/releases/download/v1.14.195/checksums.txt") {
+			t.Fatalf("expected ghfast.top mirror calls in trace, got:\n%s", trace)
+		}
+	})
+
+	t.Run("direct_download_enforces_speed_limit_circuit_breaker_and_sets_mirror_affinity", func(t *testing.T) {
+		_ = os.WriteFile(tracePath, nil, 0644)
+		tmpInstall := filepath.Join(dir, "tmp-b")
+		harness := filepath.Join(dir, "case_b.sh")
+		script := fmt.Sprintf(`#!/bin/sh
+set -e
+export PATH=%q:"$PATH"
+export SINGCTL_INSTALL_LIB_ONLY=1
+. %q
+OS="linux"
+ARCH="arm64"
+IS_OPENWRT="false"
+LATEST_VERSION="v1.14.195"
+PREFER_MIRROR="false"
+TEMP_DIR=%q
+build_download_url --full
+download_and_extract
+printf "PREFER_MIRROR=%%s\n" "${PREFER_MIRROR:-}"
+`, binDir, installSh, tmpInstall)
+		_ = os.WriteFile(harness, []byte(script), 0755)
+		out, err := exec.CommandContext(t.Context(), "sh", harness).CombinedOutput()
+		if err != nil {
+			t.Fatalf("case_b harness failed: %v\nOutput:\n%s", err, string(out))
+		}
+		if !strings.Contains(string(out), "PREFER_MIRROR=true") {
+			t.Fatalf("expected PREFER_MIRROR=true after direct download fallback, got:\n%s", string(out))
+		}
+		traceBytes, _ := os.ReadFile(tracePath)
+		trace := string(traceBytes)
+		foundCircuitBreaker := false
+		for line := range strings.SplitSeq(trace, "\n") {
+			if strings.Contains(line, "https://github.com/sixban6/singctl/releases/download/v1.14.195/singctl-linux-arm64.tar.gz") &&
+				!strings.Contains(line, "ghfast.top") &&
+				strings.Contains(line, "--speed-limit 102400") &&
+				strings.Contains(line, "--speed-time 5") {
+				foundCircuitBreaker = true
+			}
+			if strings.Contains(line, "https://github.com/sixban6/singctl/releases/download/v1.14.195/checksums.txt") &&
+				!strings.Contains(line, "ghfast.top") &&
+				!strings.Contains(line, "gh-proxy.com") {
+				t.Fatalf("expected verify_checksum to reuse mirror affinity without retrying direct checksums.txt:\n%s", trace)
+			}
+		}
+		if !foundCircuitBreaker {
+			t.Fatalf("expected direct curl invocation to carry --speed-limit 102400 --speed-time 5, got trace:\n%s", trace)
+		}
+	})
+}

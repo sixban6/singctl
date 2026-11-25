@@ -32,6 +32,8 @@ IS_FIRST_INSTALL="false"
 if [ ! -f "$INSTALL_DIR/singctl" ] && [ ! -f "$CONFIG_FILE" ]; then
     IS_FIRST_INSTALL="true"
 fi
+# 镜像亲和状态：任一联网步骤直连受阻并回退至镜像后自动记忆，避免后续步骤重复撞墙等待
+PREFER_MIRROR="${SINGCTL_PREFER_MIRROR:-false}"
 
 # 获取当前时间
 timestamp() {
@@ -163,7 +165,7 @@ detect_system() {
     echo_info "调试 - uname -m: $(uname -m)"
 }
 
-# 获取最新版本（优先 GitHub API -> releases/latest 302 重定向防限流 -> 国内镜像兜底）
+# 获取最新版本（优先 GitHub API -> releases/latest 302 重定向防限流 -> 国内镜像兜底并记忆镜像亲和）
 get_latest_version() {
     echo_info "获取最新版本信息..."
     
@@ -171,29 +173,37 @@ get_latest_version() {
     local latest_page="https://github.com/$GITHUB_REPO/releases/latest"
     local version=""
     
-    # 1) 尝试 GitHub 官方 API（带超时保护）
-    version=$(curl -fsSL --connect-timeout 8 --max-time 15 "$api_url" 2>/dev/null | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' | head -1 || true)
-    
-    # 2) 若 API 被限流 (403/429) 或失败，利用 GitHub Web 302 重定向 URL 提取 tag（零 API 配额消耗）
-    if [ -z "$version" ]; then
-        local effective_url
-        effective_url=$(curl -fsSLI -o /dev/null -w '%{url_effective}' --connect-timeout 8 --max-time 15 "$latest_page" 2>/dev/null || true)
-        case "$effective_url" in
-            */releases/tag/*)
-                version=$(echo "$effective_url" | sed -E 's|.*/releases/tag/([^/?#]+).*|\1|')
-                ;;
-        esac
+    if [ "$PREFER_MIRROR" != "true" ]; then
+        # 1) 尝试 GitHub 官方 API（带短超时保护）
+        version=$(curl -fsSL --connect-timeout 4 --max-time 8 "$api_url" 2>/dev/null | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' | head -1 || true)
+        
+        # 2) 若 API 被限流 (403/429) 或失败，利用 GitHub Web 302 重定向 URL 提取 tag（零 API 配额消耗）
+        if [ -z "$version" ]; then
+            local effective_url
+            effective_url=$(curl -fsSLI -o /dev/null -w '%{url_effective}' --connect-timeout 4 --max-time 8 "$latest_page" 2>/dev/null || true)
+            case "$effective_url" in
+                */releases/tag/*)
+                    version=$(echo "$effective_url" | sed -E 's|.*/releases/tag/([^/?#]+).*|\1|')
+                    ;;
+            esac
+        fi
     fi
 
-    # 3) 国内无代理环境兜底：通过多镜像获取版本元数据
+    # 3) 国内无代理环境：通过多镜像获取版本元数据并标记后续全程镜像优先
     if [ -z "$version" ]; then
         for mirror_prefix in "https://ghfast.top" "https://gh-proxy.com"; do
-            version=$(curl -fsSL --connect-timeout 8 --max-time 15 "$mirror_prefix/$api_url" 2>/dev/null | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' | head -1 || true)
+            version=$(curl -fsSL --connect-timeout 6 --max-time 12 "$mirror_prefix/$api_url" 2>/dev/null | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' | head -1 || true)
             if [ -n "$version" ]; then
+                PREFER_MIRROR="true"
                 echo_info "已通过镜像 ($mirror_prefix) 获取最新版本信息"
                 break
             fi
         done
+    fi
+
+    # 4) 若预设镜像优先但镜像均失败，兜底直连 GitHub
+    if [ -z "$version" ] && [ "$PREFER_MIRROR" = "true" ]; then
+        version=$(curl -fsSL --connect-timeout 6 --max-time 12 "$api_url" 2>/dev/null | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' | head -1 || true)
     fi
     
     if [ -z "$version" ]; then
@@ -334,20 +344,33 @@ compute_sha256() {
 
 download_archive_from_sources() {
     local out_file="$1"
-    echo_info "尝试从 GitHub 官方源直连下载: $DIRECT_URL"
-    if curl -fL --connect-timeout 8 --retry 1 -o "$out_file" "$DIRECT_URL"; then
-        echo_success "GitHub 官方源直连下载完成"
-        return 0
+    local started_with_mirror="${PREFER_MIRROR:-false}"
+    if [ "$started_with_mirror" != "true" ]; then
+        echo_info "尝试从 GitHub 官方源直连下载: $DIRECT_URL"
+        if curl -fL --connect-timeout 5 --speed-limit 102400 --speed-time 5 -o "$out_file" "$DIRECT_URL"; then
+            echo_success "GitHub 官方源直连下载完成"
+            return 0
+        fi
+        PREFER_MIRROR="true"
+        echo_warning "GitHub 直连低速(<100KB/s)或超时，自动熔断切换镜像 1 加速下载: $MIRROR_URL_1"
+    else
+        echo_info "已启用镜像加速优先策略，直接从镜像 1 下载: $MIRROR_URL_1"
     fi
-    echo_warning "GitHub 直连超时或受阻，自动切换镜像 1 加速下载: $MIRROR_URL_1"
-    if curl -fL --connect-timeout 10 --retry 2 -o "$out_file" "$MIRROR_URL_1"; then
+    if curl -fL --connect-timeout 8 --speed-limit 51200 --speed-time 10 --retry 2 -o "$out_file" "$MIRROR_URL_1"; then
         echo_success "镜像 1 (ghfast.top) 加速下载完成"
         return 0
     fi
     echo_warning "镜像 1 下载未成功，自动切换镜像 2 加速下载: $MIRROR_URL_2"
-    if curl -fL --connect-timeout 10 --retry 2 -o "$out_file" "$MIRROR_URL_2"; then
+    if curl -fL --connect-timeout 8 --speed-limit 51200 --speed-time 10 --retry 2 -o "$out_file" "$MIRROR_URL_2"; then
         echo_success "镜像 2 (gh-proxy.com) 加速下载完成"
         return 0
+    fi
+    if [ "$started_with_mirror" = "true" ]; then
+        echo_warning "加速镜像暂不可用，回退尝试 GitHub 官方源直连: $DIRECT_URL"
+        if curl -fL --connect-timeout 8 --speed-limit 51200 --speed-time 10 -o "$out_file" "$DIRECT_URL"; then
+            echo_success "GitHub 官方源直连下载完成"
+            return 0
+        fi
     fi
     return 1
 }
@@ -421,11 +444,20 @@ verify_checksum() {
     fi
 
     echo_info "获取官方 SHA256 校验和文件 (checksums.txt)..."
-    if ! curl -fsSL --connect-timeout 8 --retry 1 --max-time 30 -o "$TEMP_DIR/checksums.txt" "$checksums_url"; then
-        echo_warning "GitHub 直连获取 checksums.txt 超时，尝试通过加速镜像获取..."
-        if ! curl -fsSL --connect-timeout 8 --retry 1 --max-time 30 -o "$TEMP_DIR/checksums.txt" "https://ghfast.top/$checksums_url" && \
-           ! curl -fsSL --connect-timeout 8 --retry 1 --max-time 30 -o "$TEMP_DIR/checksums.txt" "https://gh-proxy.com/$checksums_url"; then
+    if [ "$PREFER_MIRROR" = "true" ]; then
+        if ! curl -fsSL --connect-timeout 5 --max-time 15 -o "$TEMP_DIR/checksums.txt" "https://ghfast.top/$checksums_url" && \
+           ! curl -fsSL --connect-timeout 5 --max-time 15 -o "$TEMP_DIR/checksums.txt" "https://gh-proxy.com/$checksums_url" && \
+           ! curl -fsSL --connect-timeout 5 --max-time 15 -o "$TEMP_DIR/checksums.txt" "$checksums_url"; then
             error_exit "无法获取 checksums.txt，已中止安装。请检查网络后重试；确要跳过请设置 SINGCTL_SKIP_CHECKSUM=1"
+        fi
+    else
+        if ! curl -fsSL --connect-timeout 5 --max-time 10 -o "$TEMP_DIR/checksums.txt" "$checksums_url"; then
+            PREFER_MIRROR="true"
+            echo_warning "GitHub 直连获取 checksums.txt 超时，尝试通过加速镜像获取..."
+            if ! curl -fsSL --connect-timeout 5 --max-time 15 -o "$TEMP_DIR/checksums.txt" "https://ghfast.top/$checksums_url" && \
+               ! curl -fsSL --connect-timeout 5 --max-time 15 -o "$TEMP_DIR/checksums.txt" "https://gh-proxy.com/$checksums_url"; then
+                error_exit "无法获取 checksums.txt，已中止安装。请检查网络后重试；确要跳过请设置 SINGCTL_SKIP_CHECKSUM=1"
+            fi
         fi
     fi
 
