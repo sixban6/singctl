@@ -104,14 +104,25 @@ func buildCLIDoctorEnv(cfg *config.Config, resolvedPath string, deps DoctorCmdDe
 				addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(dnsPort))
 				useExternal = doctor.ProbeLocalDNS(ctx, addr) == nil
 			}
-			changed, err := singbox.SyncLiveSingBoxDNSLocal(ctx, sbPath, workPath, useExternal, dnsPort)
+			var (
+				changed    bool
+				err        error
+				fallbackIP string
+			)
+			if useExternal {
+				changed, err = singbox.SyncLiveSingBoxDNSLocal(ctx, sbPath, workPath, true, dnsPort)
+			} else {
+				fallbackIP = singbox.ProbeSafeWANFallbackDNS(nil, nil)
+				changed, err = singbox.SyncLiveSingBoxDNSLocalWithFallback(ctx, sbPath, workPath, false, dnsPort, fallbackIP)
+			}
 			if err != nil {
 				return "", err
 			}
 			if useExternal {
 				return fmt.Sprintf("已同步 sing-box dns_local 至本地防劫持 DNS 127.0.0.1:%d (changed=%v)", dnsPort, changed), nil
 			}
-			return fmt.Sprintf("已同步 sing-box dns_local 至加密 DoH 兜底 (changed=%v)", changed), nil
+			return fmt.Sprintf("已同步 sing-box dns_local 至运营商/基础公网 DNS 兜底 (%s) (changed=%v)",
+				cmp.Or(singbox.InspectSingBoxDNSLocalTarget(sbPath), "udp://"+fallbackIP+":53"), changed), nil
 		},
 		"sync-smartdns-ipv6": func(ctx context.Context) (string, error) {
 			reg := localdns.NewRegistry(cfg, localdns.EngineDeps{ConfigPath: resolvedPath})

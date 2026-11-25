@@ -37,9 +37,11 @@ type ConfigGenerator struct {
 	silent           bool
 	offline          bool
 	totalRAMOverride atomic.Pointer[uint64]
-	localDNSProbe    func(engine string, dnsPort int) bool
-	isOpenWrtProbe   func() bool
-	isLowFlashProbe  func() bool
+	localDNSProbe       func(engine string, dnsPort int) bool
+	isOpenWrtProbe      func() bool
+	isLowFlashProbe     func() bool
+	fallbackResolvPaths []string
+	fallbackLocalIPs    []string
 }
 
 // 支持的目标平台常量。
@@ -97,6 +99,15 @@ func (g *ConfigGenerator) SetLocalDNSProbe(fn func(engine string, dnsPort int) b
 		return
 	}
 	g.localDNSProbe = fn
+}
+
+// SetFallbackDNSResolvForTest 显式注入停用/未安装外部本地 DNS 时探测宿主机 WAN DNS 的 resolv 路径与本机 IP 集合（供离线测试用）。
+func (g *ConfigGenerator) SetFallbackDNSResolvForTest(resolvPaths []string, localIPs []string) {
+	if g == nil {
+		return
+	}
+	g.fallbackResolvPaths = resolvPaths
+	g.fallbackLocalIPs = localIPs
 }
 
 // SetHostFlashProbes 显式注入 OpenWrt 与小闪存宿主机探测钩子（供离线编译与确定性单元测试使用）。

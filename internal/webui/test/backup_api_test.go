@@ -525,14 +525,36 @@ func TestHandleClientBackup_V2RestoreCrossHardwareAdaptation(t *testing.T) {
 				t.Fatalf("expected geosite-ad1 preserved in %s", filepath.Base(checkPath))
 			}
 			if strings.Contains(txt, `"127.0.0.1"`) {
-				// 仅检查 dns_local 已回退到 223.5.5.5，不影响 mixed-in 监听地址
+				// 仅检查 dns_local 已回退到安全公网 UDP 53 DNS，不影响 mixed-in 监听地址
 				linked, _ := singbox.InspectSingBoxDNSLocal(checkPath)
 				if linked {
-					t.Fatalf("expected dns_local in %s fallen back from 127.0.0.1 to DoH", filepath.Base(checkPath))
+					t.Fatalf("expected dns_local in %s fallen back from 127.0.0.1 to public UDP DNS", filepath.Base(checkPath))
 				}
 			}
-			if !strings.Contains(txt, "223.5.5.5") {
-				t.Fatalf("expected fallback DoH 223.5.5.5 in %s", filepath.Base(checkPath))
+			var sbDoc struct {
+				DNS struct {
+					Servers []struct {
+						Tag        string `json:"tag"`
+						Type       string `json:"type"`
+						Server     string `json:"server"`
+						ServerPort int    `json:"server_port"`
+					} `json:"servers"`
+				} `json:"dns"`
+			}
+			if jErr := json.Unmarshal(raw, &sbDoc); jErr != nil {
+				t.Fatal(jErr)
+			}
+			var foundLocal bool
+			for _, srv := range sbDoc.DNS.Servers {
+				if srv.Tag == "dns_local" {
+					foundLocal = true
+					if srv.Type != "udp" || srv.ServerPort != 53 || srv.Server == "" || srv.Server == "127.0.0.1" {
+						t.Fatalf("expected safe public UDP 53 dns_local in %s, got %+v", filepath.Base(checkPath), srv)
+					}
+				}
+			}
+			if !foundLocal {
+				t.Fatalf("expected dns_local server present in %s", filepath.Base(checkPath))
 			}
 		}
 	})

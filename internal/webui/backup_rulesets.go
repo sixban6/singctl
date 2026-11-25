@@ -476,7 +476,7 @@ func adaptSingBoxJSONForTarget(
 		wasLocalExternal := isDNSLocalPointingToLocalAdGuard(adapted)
 		patched, changed, pErr := singbox.PatchDNSLocalJSON(adapted, false, 0)
 		if pErr != nil {
-			return "", false, false, fmt.Errorf("跨机自适配回退内置 DoH 失败: %w", pErr)
+			return "", false, false, fmt.Errorf("跨机自适配回退运营商/基础公网 DNS 失败: %w", pErr)
 		}
 		if changed {
 			adapted = patched

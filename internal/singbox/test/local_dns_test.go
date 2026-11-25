@@ -76,26 +76,30 @@ func TestPatchDNSLocalJSON_RoundTripNoOptimisticAndSingBoxCheck(t *testing.T) {
 		t.Fatal("expected changed=false on idempotent external call")
 	}
 
-	// Fallback pure-IP DoH MUST also force disable_cache=true, optimistic=false, store_dns=false!
+	// Fallback MUST use safe public WAN/ISP UDP 53 DNS (not 223.5.5.5 DoH) and keep disable_cache=true, optimistic=false, store_dns=false!
 	toFallback, changedFB, err := singbox.PatchDNSLocalJSON(toAGH, false, 5353)
 	if err != nil {
 		t.Fatalf("PatchDNSLocalJSON(useAdGuard=false) failed: %v", err)
 	}
 	if !changedFB {
-		t.Fatal("expected changed=true when switching back to encrypted DoH fallback")
+		t.Fatal("expected changed=true when switching back to safe WAN UDP fallback")
 	}
 	docFB, err := sboption.ParseDocument([]byte(toFallback))
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(docFB.DNS.Servers) < 2 || docFB.DNS.Servers[1].Type != "udp" || docFB.DNS.Servers[1].ServerPort != 53 ||
+		!singbox.IsPublicISPUnicastIPv4(net.ParseIP(docFB.DNS.Servers[1].Server), nil) {
+		t.Fatalf("expected fallback dns_local to be safe public unicast UDP 53, got %+v", docFB.DNS.Servers)
+	}
 	if docFB.DNS.DisableCache == nil || !*docFB.DNS.DisableCache {
-		t.Fatalf("DoH fallback: expected disable_cache=true, got %v", docFB.DNS.DisableCache)
+		t.Fatalf("fallback: expected disable_cache=true, got %v", docFB.DNS.DisableCache)
 	}
 	if docFB.DNS.Optimistic == nil || *docFB.DNS.Optimistic {
-		t.Fatalf("DoH fallback: expected optimistic=false, got %v", docFB.DNS.Optimistic)
+		t.Fatalf("fallback: expected optimistic=false, got %v", docFB.DNS.Optimistic)
 	}
 	if docFB.Experimental.CacheFile.StoreDNS == nil || *docFB.Experimental.CacheFile.StoreDNS {
-		t.Fatalf("DoH fallback: expected store_dns=false, got %v", docFB.Experimental.CacheFile.StoreDNS)
+		t.Fatalf("fallback: expected store_dns=false, got %v", docFB.Experimental.CacheFile.StoreDNS)
 	}
 
 	// Idempotent second fallback call
@@ -109,7 +113,22 @@ func TestPatchDNSLocalJSON_RoundTripNoOptimisticAndSingBoxCheck(t *testing.T) {
 	}
 	linkedFB, _ := singbox.InspectSingBoxDNSLocal(cfgPath)
 	if linkedFB {
-		t.Fatal("expected linked=false after fallback to pure-IP DoH")
+		t.Fatal("expected linked=false after fallback to public UDP DNS")
+	}
+
+	// Private gateway IP MUST be rejected by PatchDNSLocalJSONWithFallback to prevent side-router DNS loops!
+	privRejected, privChanged, err := singbox.PatchDNSLocalJSONWithFallback(toAGH, false, 5353, "192.168.1.1")
+	if err != nil || !privChanged {
+		t.Fatalf("PatchDNSLocalJSONWithFallback with private IP failed: changed=%v err=%v", privChanged, err)
+	}
+	docPrivRejected, err := sboption.ParseDocument([]byte(privRejected))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if docPrivRejected.DNS.Servers[1].Server == "192.168.1.1" ||
+		docPrivRejected.DNS.Servers[1].Type != "udp" ||
+		!singbox.IsPublicISPUnicastIPv4(net.ParseIP(docPrivRejected.DNS.Servers[1].Server), nil) {
+		t.Fatalf("private gateway IP must be rejected in favor of public ISP UDP DNS, got %+v", docPrivRejected.DNS.Servers[1])
 	}
 
 	// Legacy DoH JSON that still has optimistic=true / store_dns=true / disable_cache=false MUST be corrected!

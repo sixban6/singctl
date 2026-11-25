@@ -286,28 +286,25 @@ func injectLocalDNSInDoc(g *ConfigGenerator, doc *sboption.Document, platform st
 		return true
 	}
 
-	// 无外部本地 DNS 引擎就绪时：若处于二级级联网关模式则兜底上级私网网关 (sing-box default_mark:1 零环路)，
-	// 否则应急升级为纯 IP 加密 DoH 防劫持，并强制 disable_cache=true / optimistic=false / store_dns=false。
-	fallbackGW := ""
-	if cfg != nil {
-		if gw, ok := ExtractCascadedGatewayUpstream(cfg.DNS.Upstreams); ok {
-			fallbackGW = gw
-		}
+	// 无外部本地 DNS 引擎就绪时，与停用外部引擎逻辑完全统一：
+	// 探测宿主机运营商/WAN 公网 DNS（严格过滤私网/回环/CGNAT/FakeIP 防旁路由死循环，未发现则回退 114.114.114.114:53），
+	// 并始终强制 disable_cache=true / optimistic=false / store_dns=false。
+	var resolvPaths, localIPs []string
+	if g != nil {
+		resolvPaths = g.fallbackResolvPaths
+		localIPs = g.fallbackLocalIPs
 	}
-	changed := patchDNSLocalInDoc(doc, false, 0, fallbackGW)
+	fallbackIP := ProbeSafeWANFallbackDNS(resolvPaths, localIPs)
+	changed := patchDNSLocalInDoc(doc, false, 0, fallbackIP)
 	if changed && (g == nil || !g.silent) {
-		if fallbackGW != "" {
-			log.Info("未检测到就绪的本地 DNS 引擎，已启用上级主路由网关 (%s:53) 应急零断网兜底", fallbackGW)
-		} else {
-			log.Info("未检测到就绪的本地 DNS 引擎（AdGuard Home / SmartDNS），已启用应急纯 IP 加密 DoH (https://%s/dns-query) 防劫持兜底", defaultFallbackDoHServer)
-		}
+		log.Info("未检测到就绪的本地 DNS 引擎（AdGuard Home / SmartDNS），已启用宿主机运营商/基础公网 DNS (udp://%s:53) 应急零断网兜底", fallbackIP)
 	}
 	return changed
 }
 
 // InjectLocalDNS 在 Linux/OpenWrt 客户端网关平台按双引擎策略配置本地 DNS：
 // 外部本地引擎（AdGuard Home / SmartDNS）启用且就绪时指向 127.0.0.1:<dns_port>；
-// 否则自动升级为纯 IP 加密 DoH 应急兜底，并始终强制 disable_cache=true、optimistic=false、store_dns=false。
+// 否则自动回退为安全公网运营商 DNS / 114.114.114.114:53，并始终强制 disable_cache=true、optimistic=false、store_dns=false。
 func (g *ConfigGenerator) InjectLocalDNS(rawJSON, platform string) (string, error) {
 	if g == nil || platform != "linux" {
 		return rawJSON, nil

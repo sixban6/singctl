@@ -68,20 +68,18 @@ func (d *Daemon) dnsSBWorkConfigPath() string {
 	return ""
 }
 
-func (d *Daemon) syncLiveSingBoxDNSLocal(ctx context.Context, cfg *config.Config, useExternal bool, dnsPort int) {
+func (d *Daemon) syncLiveSingBoxDNSLocal(ctx context.Context, _ *config.Config, useExternal bool, dnsPort int) {
 	sbPath := d.dnsSBConfigPath()
 	workPath := d.dnsSBWorkConfigPath()
 	if d.dnsDeps != nil && d.dnsDeps.SyncSingBoxDNSLocalFunc != nil {
 		_, _ = d.dnsDeps.SyncSingBoxDNSLocalFunc(ctx, sbPath, workPath, useExternal, dnsPort)
 		return
 	}
-	fallbackGW := ""
-	if !useExternal && cfg != nil {
-		if gw, ok := singbox.ExtractCascadedGatewayUpstream(cfg.DNS.Upstreams); ok {
-			fallbackGW = gw
-		}
+	fallbackIP := ""
+	if !useExternal {
+		fallbackIP = singbox.ProbeSafeWANFallbackDNS(nil, nil)
 	}
-	_, _ = singbox.SyncLiveSingBoxDNSLocalWithFallback(ctx, sbPath, workPath, useExternal, dnsPort, fallbackGW)
+	_, _ = singbox.SyncLiveSingBoxDNSLocalWithFallback(ctx, sbPath, workPath, useExternal, dnsPort, fallbackIP)
 }
 
 // GuardLocalDNSOnce 执行单轮双引擎本地 DNS 巡检与自愈编排（供看门狗主循环与单元测试直接驱动）。
@@ -114,7 +112,7 @@ func (d *Daemon) GuardLocalDNSOnce(ctx context.Context) {
 		return
 	}
 
-	// 3. 守护当前活跃外部引擎（AdGuard Home 或 SmartDNS），失活时临时降级至 sing-box 纯 IP DoH，恢复后自动回切
+	// 3. 守护当前活跃外部引擎（AdGuard Home 或 SmartDNS），失活时临时降级至安全公网运营商 DNS，恢复后自动回切
 	switch active.ID() {
 	case constant.DNSEngineAdGuard, constant.DNSEngineSmartDNS:
 		d.guardExternalDNSEngine(ctx, cfg, active)

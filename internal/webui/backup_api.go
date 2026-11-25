@@ -437,7 +437,7 @@ func (s *Server) handleClientBackupRestore(w http.ResponseWriter, r *http.Reques
 			}
 			didPruneAd2InConfig = didPruneAd2
 			if didFallbackDoH {
-				adaptations = append(adaptations, "目标机未安装可用的外部本地 DNS 引擎（AdGuard Home / SmartDNS），已自动将 dns_local 安全回退为 sing-box 内置纯 IP 加密 DoH (223.5.5.5，已关闭乐观缓存)")
+				adaptations = append(adaptations, "目标机未安装可用的外部本地 DNS 引擎（AdGuard Home / SmartDNS），已自动将 dns_local 安全回退为宿主机运营商/基础公网 DNS 兜底（已关闭乐观缓存）")
 			}
 			if didPruneAd2 {
 				if skippedHeavyRS {

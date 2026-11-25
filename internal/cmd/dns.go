@@ -23,7 +23,7 @@ func NewDNSCmd(defaultConfigPath string) *cobra.Command {
 		Use:     "dns",
 		Aliases: []string{"agh"},
 		Short:   "DNS   : 管理客户端双引擎防劫持 DNS (SmartDNS / AdGuard Home) / Manage local anti-hijack DNS",
-		Long:    "统一管理客户端双引擎防劫持本地 DNS（SmartDNS 极速版 / AdGuard Home 可视版），支持按宿主机内存与闪存自动选型、两阶段零断网原子切换及 sing-box 纯 IP 加密 DoH 静默兜底。",
+		Long:    "统一管理客户端双引擎防劫持本地 DNS（SmartDNS 极速版 / AdGuard Home 可视版），支持按宿主机内存与闪存自动选型、两阶段零断网原子切换及安全公网运营商 DNS 静默兜底。",
 	}
 
 	dnsCmd.AddCommand(
@@ -51,19 +51,14 @@ func syncSingBoxLocalDNSLink(ctx context.Context, cfg *config.Config, useExterna
 		return
 	}
 	dnsPort := 5353
-	fallbackGW := ""
 	if cfg != nil {
 		dnsPort = cfg.DNS.GetDNSPort()
-		if !useExternal {
-			if gw, ok := singbox.ExtractCascadedGatewayUpstream(cfg.DNS.Upstreams); ok {
-				fallbackGW = gw
-			}
-		}
 	}
-	if !useExternal && fallbackGW == "" {
-		fallbackGW = singbox.ProbeSafeWANFallbackDNS(nil, nil)
+	fallbackIP := ""
+	if !useExternal {
+		fallbackIP = singbox.ProbeSafeWANFallbackDNS(nil, nil)
 	}
-	if _, err := singbox.SyncLiveSingBoxDNSLocalWithFallback(ctx, "", "", useExternal, dnsPort, fallbackGW); err != nil {
+	if _, err := singbox.SyncLiveSingBoxDNSLocalWithFallback(ctx, "", "", useExternal, dnsPort, fallbackIP); err != nil {
 		logger.Warn("同步更新 sing-box dns_local 失败: %v", err)
 	}
 }
@@ -236,7 +231,7 @@ func newDNSStopCmd(defaultConfigPath string) *cobra.Command {
 	var engineFlag string
 	cmd := &cobra.Command{
 		Use:   "stop",
-		Short: "零断网切回 sing-box 纯 IP 加密 DoH 并停止外部本地 DNS / Safely fallback and stop external DNS",
+		Short: "零断网切回安全公网运营商 DNS 并停止外部本地 DNS / Safely fallback and stop external DNS",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			resolvedPath := resolveCmdConfigPath(cmd, defaultConfigPath)
 			cfg := loadCmdConfigOrDefault(cmd, defaultConfigPath)
@@ -249,17 +244,17 @@ func newDNSStopCmd(defaultConfigPath string) *cobra.Command {
 			if resolvedPath != "" {
 				_ = config.Save(resolvedPath, cfg)
 			}
-			// 零断网准则：必须先将 sing-box dns_local 切回内置纯 IP 加密 DoH，再停止外部 DNS 进程
+			// 零断网准则：必须先将 sing-box dns_local 切回安全公网运营商 DNS / 114.114.114.114，再停止外部 DNS 进程
 			syncSingBoxLocalDNSLink(cmd.Context(), cfg, false)
 
 			if eng, ok := reg.Get(target); ok {
 				if err := eng.Stop(cmd.Context()); err != nil {
 					return err
 				}
-				logger.Success("已安全回退 sing-box dns_local 至原生 DNS 并停止 %s（全程零断网）", eng.Meta().Name)
+				logger.Success("已安全回退 sing-box dns_local 至运营商/基础公网 DNS 并停止 %s（全程零断网）", eng.Meta().Name)
 				return nil
 			}
-			logger.Success("当前已使用 sing-box 内置纯 IP 加密 DoH 兜底")
+			logger.Success("当前已使用运营商/基础公网 DNS 兜底 (%s)", singbox.InspectSingBoxDNSLocalTarget(""))
 			return nil
 		},
 	}
@@ -334,8 +329,10 @@ func newDNSStatusCmd(defaultConfigPath string) *cobra.Command {
 
 			if linked {
 				logger.Success("sing-box 联动   : 已接管 dns_local (127.0.0.1:%d) ✓", linkedPort)
+			} else if target := singbox.InspectSingBoxDNSLocalTarget(""); target != "" {
+				logger.Info("sing-box 联动   : 未接管，当前运营商/基础公网 DNS 兜底中 (%s) ✓", target)
 			} else {
-				logger.Info("sing-box 联动   : sing-box 内置纯 IP 加密 DoH 兜底防劫持中 ✓")
+				logger.Info("sing-box 联动   : 运营商/基础公网 DNS 兜底中 ✓")
 			}
 
 			logger.Info("───────────────────────────────────────────────────────────")

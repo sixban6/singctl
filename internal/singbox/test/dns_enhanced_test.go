@@ -138,8 +138,18 @@ func TestInjectLocalDNS_DualEngineAndNoOptimisticFallbackDoH(t *testing.T) {
 		return nil
 	}
 
-	t.Run("linux_without_external_engine_uses_pure_ip_doh_with_optimistic_false", func(t *testing.T) {
+	t.Run("linux_without_external_engine_uses_safe_wan_udp_with_optimistic_false", func(t *testing.T) {
 		adguard.SetInstalledCheckForTest(func() bool { return false })
+		tmpResolvDir := t.TempDir()
+		ispResolv := filepath.Join(tmpResolvDir, "resolv.auto")
+		if err := os.WriteFile(ispResolv, []byte("nameserver 192.168.1.1\nnameserver 203.0.113.53\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		lanOnlyResolv := filepath.Join(tmpResolvDir, "resolv.lan")
+		if err := os.WriteFile(lanOnlyResolv, []byte("nameserver 127.0.0.1\nnameserver 192.168.1.1\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+
 		cfg := &config.Config{
 			DNS: config.ClientDNSConfig{
 				Engine: constant.DNSEngineAuto,
@@ -147,6 +157,7 @@ func TestInjectLocalDNS_DualEngineAndNoOptimisticFallbackDoH(t *testing.T) {
 		}
 		gen := singbox.NewOfflineConfigGenerator(cfg)
 		gen.SetLocalDNSProbe(func(_ string, _ int) bool { return false })
+		gen.SetFallbackDNSResolvForTest([]string{ispResolv}, []string{})
 
 		out, err := gen.RunCompilePipeline(dualEngineDNSBaseJSON, "linux")
 		if err != nil {
@@ -157,22 +168,40 @@ func TestInjectLocalDNS_DualEngineAndNoOptimisticFallbackDoH(t *testing.T) {
 			t.Fatal(err)
 		}
 		localSrv := findLocal(t, doc)
-		if localSrv.Type != "https" || localSrv.Server != "223.5.5.5" || localSrv.ServerPort != 443 || localSrv.Path != "/dns-query" {
-			t.Fatalf("expected pure-IP encrypted DoH fallback, got %+v", localSrv)
+		if localSrv.Type != "udp" || localSrv.Server != "203.0.113.53" || localSrv.ServerPort != 53 {
+			t.Fatalf("expected safe WAN ISP UDP 53 fallback (203.0.113.53), got %+v", localSrv)
 		}
 		if doc.DNS.DisableCache == nil || !*doc.DNS.DisableCache {
-			t.Fatalf("expected disable_cache=true in DoH fallback, got %v", doc.DNS.DisableCache)
+			t.Fatalf("expected disable_cache=true in WAN UDP fallback, got %v", doc.DNS.DisableCache)
 		}
 		if doc.DNS.Optimistic == nil || *doc.DNS.Optimistic {
-			t.Fatalf("expected optimistic=false in DoH fallback, got %v", doc.DNS.Optimistic)
+			t.Fatalf("expected optimistic=false in WAN UDP fallback, got %v", doc.DNS.Optimistic)
 		}
 		if doc.Experimental.CacheFile.StoreDNS == nil || *doc.Experimental.CacheFile.StoreDNS {
-			t.Fatalf("expected store_dns=false in DoH fallback, got %v", doc.Experimental.CacheFile.StoreDNS)
+			t.Fatalf("expected store_dns=false in WAN UDP fallback, got %v", doc.Experimental.CacheFile.StoreDNS)
 		}
-		runSingBoxCheckIfAvailable(t, "fallback_doh_no_optimistic", out)
+		runSingBoxCheckIfAvailable(t, "fallback_wan_udp_no_optimistic", out)
+
+		// When resolv files only contain private/loopback DNS, skip private IPs and fall back to 114.114.114.114:53
+		genLAN := singbox.NewOfflineConfigGenerator(cfg)
+		genLAN.SetLocalDNSProbe(func(_ string, _ int) bool { return false })
+		genLAN.SetFallbackDNSResolvForTest([]string{lanOnlyResolv}, []string{})
+
+		outLAN, err := genLAN.RunCompilePipeline(dualEngineDNSBaseJSON, "linux")
+		if err != nil {
+			t.Fatalf("RunCompilePipeline(lan-only) failed: %v", err)
+		}
+		docLAN, err := sboption.ParseDocument([]byte(outLAN))
+		if err != nil {
+			t.Fatal(err)
+		}
+		localLAN := findLocal(t, docLAN)
+		if localLAN.Type != "udp" || localLAN.Server != singbox.DefaultFallbackPlainUDPDNS || localLAN.ServerPort != 53 {
+			t.Fatalf("expected lan-only resolv to skip private IPs and use %s:53, got %+v", singbox.DefaultFallbackPlainUDPDNS, localLAN)
+		}
 	})
 
-	t.Run("linux_explicit_smartdns_ready_routes_to_loopback_and_unready_falls_back_to_doh_no_optimistic", func(t *testing.T) {
+	t.Run("linux_explicit_smartdns_ready_routes_to_loopback_and_unready_falls_back_to_wan_udp_no_optimistic", func(t *testing.T) {
 		adguard.SetInstalledCheckForTest(func() bool { return false })
 		cfg := &config.Config{
 			DNS: config.ClientDNSConfig{
@@ -200,17 +229,22 @@ func TestInjectLocalDNS_DualEngineAndNoOptimisticFallbackDoH(t *testing.T) {
 			t.Fatalf("expected disable_cache=true optimistic=false store_dns=false store_fakeip=false for external smartdns")
 		}
 
-		// When SmartDNS is NOT ready, must fall back to pure-IP encrypted DoH with optimistic=false!
+		// When SmartDNS is NOT ready, must fall back to safe public WAN UDP DNS with optimistic=false!
+		lanResolv := filepath.Join(t.TempDir(), "resolv.auto")
+		if err := os.WriteFile(lanResolv, []byte("nameserver 192.168.1.1\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
 		genDown := singbox.NewOfflineConfigGenerator(cfg)
 		genDown.SetLocalDNSProbe(func(_ string, _ int) bool { return false })
+		genDown.SetFallbackDNSResolvForTest([]string{lanResolv}, []string{})
 		outDown, err := genDown.InjectLocalDNS(dualEngineDNSBaseJSON, "linux")
 		if err != nil {
 			t.Fatalf("InjectLocalDNS(smartdns down) failed: %v", err)
 		}
 		docDown, _ := sboption.ParseDocument([]byte(outDown))
 		srvDown := findLocal(t, docDown)
-		if srvDown.Type != "https" || srvDown.Server != "223.5.5.5" || srvDown.ServerPort != 443 {
-			t.Fatalf("expected fallback to encrypted DoH when smartdns unready, got %+v", srvDown)
+		if srvDown.Type != "udp" || srvDown.Server != singbox.DefaultFallbackPlainUDPDNS || srvDown.ServerPort != 53 {
+			t.Fatalf("expected fallback to public UDP 53 (%s) when smartdns unready, got %+v", singbox.DefaultFallbackPlainUDPDNS, srvDown)
 		}
 		if docDown.DNS.DisableCache == nil || !*docDown.DNS.DisableCache ||
 			docDown.DNS.Optimistic == nil || *docDown.DNS.Optimistic ||

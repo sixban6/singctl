@@ -115,13 +115,13 @@ func TestUpstreamGateway_SmartDNSPresetSetUpstreamsAndSingBoxFallback(t *testing
 		t.Fatalf("smartdns.conf must not render hex -set-mark:\n%s", string(confBytes))
 	}
 
-	// sing-box fallback dns_local uses udp://192.168.1.1:53 when configured with cascaded gateway upstream
+	// sing-box fallback dns_local MUST reject private IP 192.168.1.1 (side-router ping-pong loop risk) and fall back to safe public unicast UDP 53!
 	sbBase := `{"dns":{"servers":[{"tag":"dns_local","type":"udp","server":"127.0.0.1","server_port":5354}],"final":"dns_local"},"route":{"rules":[]}}`
 	patched, changed, err := singbox.PatchDNSLocalJSONWithFallback(sbBase, false, 5354, "192.168.1.1")
 	if err != nil || !changed {
 		t.Fatalf("PatchDNSLocalJSONWithFallback failed: changed=%v err=%v", changed, err)
 	}
-	if !strings.Contains(patched, `"server": "192.168.1.1"`) || !strings.Contains(patched, `"type": "udp"`) || strings.Contains(patched, "223.5.5.5") {
-		t.Fatalf("expected cascaded fallback dns_local to use udp://192.168.1.1:53, got:\n%s", patched)
+	if strings.Contains(patched, `"server": "192.168.1.1"`) || !strings.Contains(patched, `"type": "udp"`) || !strings.Contains(patched, `"server_port": 53`) || strings.Contains(patched, "223.5.5.5") {
+		t.Fatalf("expected private gateway IP rejected and dns_local fallen back to safe public UDP 53, got:\n%s", patched)
 	}
 }

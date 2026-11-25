@@ -145,13 +145,11 @@ func (r *Registry) syncSingBoxDNSLocal(ctx context.Context, useExternal bool, dn
 		_, err := r.deps.SyncSingBoxDNSLocalFunc(ctx, sbPath, workPath, useExternal, dnsPort)
 		return err
 	}
-	fallbackGW := ""
-	if !useExternal && r.cfg != nil {
-		if gw, ok := singbox.ExtractCascadedGatewayUpstream(r.cfg.DNS.Upstreams); ok {
-			fallbackGW = gw
-		}
+	fallbackIP := ""
+	if !useExternal {
+		fallbackIP = singbox.ProbeSafeWANFallbackDNS(nil, nil)
 	}
-	_, err := singbox.SyncLiveSingBoxDNSLocalWithFallback(ctx, sbPath, workPath, useExternal, dnsPort, fallbackGW)
+	_, err := singbox.SyncLiveSingBoxDNSLocalWithFallback(ctx, sbPath, workPath, useExternal, dnsPort, fallbackIP)
 	return err
 }
 

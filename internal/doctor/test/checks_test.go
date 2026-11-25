@@ -702,21 +702,66 @@ func TestChecker_DNSAntiHijack(t *testing.T) {
 		}
 	})
 
-	t.Run("plaintext_udp_53_dns_local_fails_with_fix", func(t *testing.T) {
-		env := &doctor.Env{
-			Config:            &config.Config{},
+	t.Run("unsafe_private_or_loop_udp53_fails_while_public_wan_udp53_passes_when_disabled", func(t *testing.T) {
+		for _, unsafeJSON := range []string{
+			`{"dns":{"servers":[{"tag":"dns_local","type":"udp","server":"192.168.1.1","server_port":53}]}}`,
+			`{"dns":{"servers":[{"tag":"dns_local","type":"udp","server":"127.0.0.1","server_port":53}]}}`,
+			`{"dns":{"servers":[{"tag":"dns_local","type":"local"}]}}`,
+		} {
+			env := &doctor.Env{
+				Config:            &config.Config{},
+				SingBoxConfigPath: "/etc/sing-box/config.json",
+				DialTCP:           func(context.Context, string) error { return errors.New("refused") },
+				ReadFile: func(p string) ([]byte, error) {
+					if p == "/etc/sing-box/config.json" {
+						return []byte(unsafeJSON), nil
+					}
+					return nil, os.ErrNotExist
+				},
+			}
+			res := runSingleCheck(t, "dns_anti_hijack", env)
+			if res.Status != doctor.StatusFail || res.FixAction != "sync-dns-local" {
+				t.Fatalf("expected fail with FixAction=sync-dns-local for unsafe %s, got %+v", unsafeJSON, res)
+			}
+		}
+
+		// Public ISP / fallback UDP 53 passes when external local DNS is disabled/stopped
+		for _, safeJSON := range []string{
+			`{"dns":{"servers":[{"tag":"dns_local","type":"udp","server":"114.114.114.114","server_port":53}]}}`,
+			`{"dns":{"servers":[{"tag":"dns_local","type":"udp","server":"192.0.2.53","server_port":53}]}}`,
+		} {
+			env := &doctor.Env{
+				Config:            &config.Config{},
+				SingBoxConfigPath: "/etc/sing-box/config.json",
+				DialTCP:           func(context.Context, string) error { return errors.New("not listening") },
+				ReadFile: func(p string) ([]byte, error) {
+					if p == "/etc/sing-box/config.json" {
+						return []byte(safeJSON), nil
+					}
+					return nil, os.ErrNotExist
+				},
+			}
+			res := runSingleCheck(t, "dns_anti_hijack", env)
+			if res.Status != doctor.StatusPass {
+				t.Fatalf("expected pass for safe public UDP 53 fallback %s, got %+v", safeJSON, res)
+			}
+		}
+
+		// When external local DNS IS listening, public UDP 53 fallback warns to take over local engine
+		envTakeover := &doctor.Env{
+			Config:            &config.Config{DNS: config.ClientDNSConfig{DNSPort: 5353}},
 			SingBoxConfigPath: "/etc/sing-box/config.json",
-			DialTCP:           func(context.Context, string) error { return errors.New("refused") },
+			DialTCP:           func(context.Context, string) error { return nil },
 			ReadFile: func(p string) ([]byte, error) {
 				if p == "/etc/sing-box/config.json" {
-					return []byte(`{"dns":{"servers":[{"tag":"dns_local","type":"udp","server":"192.0.2.53","server_port":53}]}}`), nil
+					return []byte(`{"dns":{"servers":[{"tag":"dns_local","type":"udp","server":"114.114.114.114","server_port":53}]}}`), nil
 				}
 				return nil, os.ErrNotExist
 			},
 		}
-		res := runSingleCheck(t, "dns_anti_hijack", env)
-		if res.Status != doctor.StatusFail || res.FixAction != "sync-dns-local" {
-			t.Fatalf("expected fail with FixAction=sync-dns-local for plaintext UDP 53, got %+v", res)
+		resTakeover := runSingleCheck(t, "dns_anti_hijack", envTakeover)
+		if resTakeover.Status != doctor.StatusWarn || resTakeover.FixAction != "sync-dns-local" {
+			t.Fatalf("expected warn with FixAction=sync-dns-local when local engine ready under fallback UDP 53, got %+v", resTakeover)
 		}
 	})
 
@@ -738,7 +783,7 @@ func TestChecker_DNSAntiHijack(t *testing.T) {
 		}
 	})
 
-	t.Run("loopback_dns_local_with_dead_port_fails_and_legacy_udp53_fails", func(t *testing.T) {
+	t.Run("loopback_dns_local_with_dead_port_fails_and_legacy_private_udp53_fails", func(t *testing.T) {
 		envDead := &doctor.Env{
 			Config:            &config.Config{DNS: config.ClientDNSConfig{DNSPort: 5353}},
 			SingBoxConfigPath: "/etc/sing-box/config.json",
@@ -761,14 +806,14 @@ func TestChecker_DNSAntiHijack(t *testing.T) {
 			DialTCP:           func(context.Context, string) error { return errors.New("refused") },
 			ReadFile: func(p string) ([]byte, error) {
 				if p == "/etc/sing-box/config.json" {
-					return []byte(`{"dns":{"servers":[{"tag":"dns_local","address":"udp://192.0.2.53:53"}]}}`), nil
+					return []byte(`{"dns":{"servers":[{"tag":"dns_local","address":"udp://192.168.1.1:53"}]}}`), nil
 				}
 				return nil, os.ErrNotExist
 			},
 		}
 		resLegacy := runSingleCheck(t, "dns_anti_hijack", envLegacy)
 		if resLegacy.Status != doctor.StatusFail || resLegacy.FixAction != "sync-dns-local" {
-			t.Fatalf("expected fail for legacy udp://...:53, got %+v", resLegacy)
+			t.Fatalf("expected fail for legacy private udp://192.168.1.1:53, got %+v", resLegacy)
 		}
 	})
 

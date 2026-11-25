@@ -34,7 +34,7 @@ export const AdGuardLifecycleSection: React.FC<{
   return (
     <SectionCard
       title={`服务生命周期与安全切换 · ${engineLabel}`}
-      subtitle={`停用或卸载 ${engineLabel} 时会自动先将 sing-box dns_local 平滑回退至内置纯 IP 加密 DoH 兜底，确保全屋网关零断网`}
+      subtitle={`停用或卸载 ${engineLabel} 时会自动先将 sing-box dns_local 平滑回退至运营商/基础公网 DNS 兜底，确保全屋网关零断网`}
     >
       <div className="flex flex-wrap items-center gap-2.5">
         {dnsHealthy ? (
@@ -56,7 +56,7 @@ export const AdGuardLifecycleSection: React.FC<{
                 onAction(
                   'dns-stop',
                   {},
-                  `确认停用本地 ${engineLabel} 接管？系统将自动先把 sing-box 切回内置纯 IP 加密 DoH，不会中断当前网络。`,
+                  `确认停用本地 ${engineLabel} 接管？系统将自动先把 sing-box 切回运营商/基础公网 DNS 兜底，不会中断当前网络。`,
                 )
               }
             >
@@ -84,7 +84,7 @@ export const AdGuardLifecycleSection: React.FC<{
             onAction(
               'dns-install',
               { engine: activeEngine },
-              `确认重新安装 / 刷新 ${engineLabel}？期间将保持加密 DoH 兜底不断网，既有配置自动保留。`,
+              `确认重新安装 / 刷新 ${engineLabel}？期间将保持安全公网 DNS 兜底不断网，既有配置自动保留。`,
             )
           }
         >
@@ -113,7 +113,7 @@ export const AdGuardLifecycleSection: React.FC<{
               onAction(
                 'dns-uninstall',
                 { engine: activeEngine, purge: false },
-                `确认卸载 ${engineLabel}？（将自动先把 sing-box 切回内置纯 IP 加密 DoH 兜底保证不断网，并保留自定义配置文件以备重装恢复）`,
+                `确认卸载 ${engineLabel}？（将自动先把 sing-box 切回运营商/基础公网 DNS 兜底保证不断网，并保留自定义配置文件以备重装恢复）`,
               )
             }
           >

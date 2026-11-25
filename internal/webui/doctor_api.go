@@ -87,9 +87,9 @@ func (s *Server) quickFixSyncDNSLocal(ctx context.Context, cfg *config.Config) (
 		return fmt.Sprintf("sing-box dns_local 已指向本地防劫持 DNS (127.0.0.1:%d)，配置合规无需变更", dnsPort), nil
 	}
 	if changed {
-		return "本地防劫持 DNS 未监听，已将 sing-box dns_local 切换为加密 DoH 兜底并关闭内置缓存", nil
+		return "本地防劫持 DNS 未监听，已将 sing-box dns_local 切换为运营商/基础公网 DNS 兜底并关闭内置缓存", nil
 	}
-	return "sing-box dns_local 已处于加密 DoH 兜底合规状态", nil
+	return "sing-box dns_local 已处于安全公网 DNS 兜底合规状态", nil
 }
 
 func (s *Server) quickFixSyncSmartDNSIPv6(ctx context.Context, cfg *config.Config) (string, error) {

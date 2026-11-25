@@ -1,23 +1,22 @@
-// 文件职责：负责客户端本地 DNS（AdGuard Home vs 内置加密 DoH）热切换、状态巡检与 RFC 6303 私网 PTR NXDOMAIN 防环注入。
+// 文件职责：负责客户端本地 DNS（AdGuard Home/SmartDNS vs 安全公网运营商 UDP 兜底）热切换、状态巡检与 RFC 6303 私网 PTR NXDOMAIN 防环注入。
 package singbox
 
 import (
 	"cmp"
 	"context"
+	"fmt"
 	"net"
-	"net/url"
 	"os"
 	"slices"
 	"strings"
 
+	"singctl/internal/common/netx"
 	"singctl/internal/constant"
 	log "singctl/internal/logger"
 	"singctl/internal/singbox/sboption"
 )
 
 const (
-	defaultFallbackDoHServer   = "223.5.5.5"
-	defaultFallbackDoHPath     = "/dns-query"
 	DefaultFallbackPlainUDPDNS = "114.114.114.114"
 	// DNSSDBrowseKeyword 是 Bonjour / mDNS 服务发现反查特征串，用于在 sing-box 侧就地返回 NXDOMAIN 防回环。
 	DNSSDBrowseKeyword = "_dns-sd._udp."
@@ -29,34 +28,9 @@ var defaultResolvPaths = []string{
 	"/etc/resolv.conf",
 }
 
-// IsPublicISPUnicastIPv4 判断 IPv4 地址是否为合法可路由的公网单播 DNS 地址（严格过滤回环、局域网私网 RFC1918、CGNAT/Tailscale 100.64/10、FakeIP 198.18/15、链路本地、组播/广播及本机接口 IP 防自环）。
+// IsPublicISPUnicastIPv4 委托给 netx.IsPublicISPUnicastIPv4，校验合法公网单播 IPv4 DNS 地址（排除私网/回环/CGNAT/FakeIP/本机 IP）。
 func IsPublicISPUnicastIPv4(ip net.IP, localIPSet map[string]struct{}) bool {
-	if ip == nil {
-		return false
-	}
-	v4 := ip.To4()
-	if v4 == nil {
-		return false
-	}
-	if v4.IsLoopback() || v4.IsPrivate() || v4.IsUnspecified() || v4.IsMulticast() ||
-		v4.IsLinkLocalUnicast() || v4.IsLinkLocalMulticast() {
-		return false
-	}
-	if v4[0] == 0 || v4[0] >= 240 {
-		return false
-	}
-	if v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127 {
-		return false
-	}
-	if v4[0] == 198 && (v4[1] == 18 || v4[1] == 19) {
-		return false
-	}
-	if len(localIPSet) > 0 {
-		if _, isSelf := localIPSet[v4.String()]; isSelf {
-			return false
-		}
-	}
-	return true
+	return netx.IsPublicISPUnicastIPv4(ip, localIPSet)
 }
 
 // ProbeSafeWANFallbackDNS 按优先级扫描宿主机 WAN 口/运营商 resolv 文件中的公网 DNS IPv4（严格过滤全部局域网/回环/CGNAT/FakeIP/本机 IP 防止停用防劫持 DNS 后陷入 53 自环）；
@@ -142,43 +116,17 @@ var privateReverseDNSSuffixes = []string{
 // PrivateReverseDNSSuffixes 返回 RFC 6303 私网与链路本地反查域名后缀副本。
 func PrivateReverseDNSSuffixes() []string { return slices.Clone(privateReverseDNSSuffixes) }
 
-// ExtractCascadedGatewayUpstream 检测上游池是否采用纯上级私网网关协同模式（udp://<private-ipv4>:53 且无公网 DoH/DoT）。
-func ExtractCascadedGatewayUpstream(upstreams []string) (string, bool) {
-	var gwIP string
-	for _, raw := range upstreams {
-		s := strings.TrimSpace(raw)
-		if s == "" {
-			continue
-		}
-		u, err := url.Parse(s)
-		if err != nil || u.Host == "" {
-			continue
-		}
-		if strings.EqualFold(u.Scheme, "udp") {
-			ip := net.ParseIP(strings.TrimSpace(u.Hostname()))
-			if ip != nil && ip.To4() != nil && ip.To4().IsPrivate() && !ip.IsLoopback() {
-				if gwIP == "" {
-					gwIP = ip.To4().String()
-				}
-				continue
-			}
-		}
-		// 存在任何加密公网 DoH/DoT 上游时，不视为纯级联网关模式
-		return "", false
-	}
-	return gwIP, gwIP != ""
-}
-
 // PatchDNSLocalJSON 在现有 sing-box 配置 JSON 上无损切换 dns_local 解析器：
 //   - useAdGuard=true : 指向本地外部防劫持 DNS (udp://127.0.0.1:<dnsPort>) 并强制关闭 sing-box 缓存与乐观解析；
-//   - useAdGuard=false: 切为应急纯 IP 加密 DoH (https://223.5.5.5/dns-query，已获 TProxy output 链豁免)，
-//     同样强制 disable_cache=true、optimistic=false、store_dns=false，杜绝双层缓存与陈旧乐观记录。
+//   - useAdGuard=false: 统一切回安全公网运营商 DNS / 114.114.114.114 (udp://<ip>:53)，
+//     同样强制 disable_cache=true、optimistic=false、store_dns=false，杜绝双层缓存、私网乒乓环路与陈旧乐观记录。
 func PatchDNSLocalJSON(rawJSON string, useAdGuard bool, dnsPort int) (string, bool, error) {
 	return PatchDNSLocalJSONWithFallback(rawJSON, useAdGuard, dnsPort, "")
 }
 
-// PatchDNSLocalJSONWithFallback 在 PatchDNSLocalJSON 基础上支持二级级联路由指定私网应急上游网关 IP（sing-box 自带 default_mark:1 零环路）。
-func PatchDNSLocalJSONWithFallback(rawJSON string, useAdGuard bool, dnsPort int, fallbackGatewayIP string) (string, bool, error) {
+// PatchDNSLocalJSONWithFallback 在 PatchDNSLocalJSON 基础上支持显式传入备选公网单播 DNS IPv4；
+// 若传入为空、私网或回环地址，则自动忽略并回退至 ProbeSafeWANFallbackDNS，杜绝旁路由死循环。
+func PatchDNSLocalJSONWithFallback(rawJSON string, useAdGuard bool, dnsPort int, fallbackPublicIP string) (string, bool, error) {
 	if strings.TrimSpace(rawJSON) == "" {
 		return rawJSON, false, nil
 	}
@@ -190,7 +138,7 @@ func PatchDNSLocalJSONWithFallback(rawJSON string, useAdGuard bool, dnsPort int,
 	if err != nil {
 		return "", false, err
 	}
-	if !patchDNSLocalInDoc(doc, useAdGuard, dnsPort, fallbackGatewayIP) {
+	if !patchDNSLocalInDoc(doc, useAdGuard, dnsPort, fallbackPublicIP) {
 		return rawJSON, false, nil
 	}
 
@@ -201,7 +149,15 @@ func PatchDNSLocalJSONWithFallback(rawJSON string, useAdGuard bool, dnsPort int,
 	return formatted + "\n", true, nil
 }
 
-func patchDNSLocalInDoc(doc *sboption.Document, useExternal bool, dnsPort int, fallbackGatewayIP string) bool {
+func resolveSafeFallbackPublicIP(fallbackPublicIP string) string {
+	trimmed := strings.TrimSpace(fallbackPublicIP)
+	if ip := net.ParseIP(trimmed); IsPublicISPUnicastIPv4(ip, nil) {
+		return ip.To4().String()
+	}
+	return ProbeSafeWANFallbackDNS(nil, nil)
+}
+
+func patchDNSLocalInDoc(doc *sboption.Document, useExternal bool, dnsPort int, fallbackPublicIP string) bool {
 	if doc == nil || doc.DNS == nil || len(doc.DNS.Servers) == 0 {
 		return false
 	}
@@ -225,20 +181,13 @@ func patchDNSLocalInDoc(doc *sboption.Document, useExternal bool, dnsPort int, f
 			Server:     "127.0.0.1",
 			ServerPort: dnsPort,
 		}
-	} else if gwIP := strings.TrimSpace(fallbackGatewayIP); gwIP != "" {
+	} else {
+		fbIP := resolveSafeFallbackPublicIP(fallbackPublicIP)
 		desiredSrv = sboption.DNSServer{
 			Tag:        "dns_local",
 			Type:       "udp",
-			Server:     gwIP,
+			Server:     fbIP,
 			ServerPort: 53,
-		}
-	} else {
-		desiredSrv = sboption.DNSServer{
-			Tag:        "dns_local",
-			Type:       "https",
-			Server:     defaultFallbackDoHServer,
-			ServerPort: 443,
-			Path:       defaultFallbackDoHPath,
 		}
 	}
 
@@ -375,14 +324,52 @@ func InspectSingBoxDNSLocal(sbConfigPath string) (linked bool, port int) {
 	return false, 0
 }
 
+// InspectSingBoxDNSLocalTarget 返回磁盘上 sing-box dns_local 的可读目标地址（如 "udp://127.0.0.1:5353"、"udp://114.114.114.114:53"）。
+func InspectSingBoxDNSLocalTarget(sbConfigPath string) string {
+	path := cmp.Or(strings.TrimSpace(sbConfigPath), constant.SingBoxConfigFile)
+	if path == "" {
+		return ""
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	doc, err := sboption.ParseDocument(raw)
+	if err != nil || doc.DNS == nil {
+		return ""
+	}
+	for _, s := range doc.DNS.Servers {
+		if s.Tag != "dns_local" {
+			continue
+		}
+		typ := strings.ToLower(strings.TrimSpace(s.Type))
+		host := strings.TrimSpace(s.Server)
+		if typ != "" {
+			if typ == "udp" {
+				p := s.ServerPort
+				if p <= 0 {
+					p = 53
+				}
+				return fmt.Sprintf("udp://%s:%d", host, p)
+			}
+			if s.ServerPort > 0 {
+				return fmt.Sprintf("%s://%s:%d%s", typ, host, s.ServerPort, s.Path)
+			}
+			return fmt.Sprintf("%s://%s%s", typ, host, s.Path)
+		}
+		return strings.TrimSpace(s.Address)
+	}
+	return ""
+}
+
 // SyncLiveSingBoxDNSLocal 遵循规则 02 两阶段原子切换准则，离线修改现有 sing-box 配置中的 dns_local，
 // 通过 `sing-box check` 语法校验后原子覆盖并发送 SIGHUP 无感热重载。
 func SyncLiveSingBoxDNSLocal(ctx context.Context, sbConfigPath, sbWorkConfigPath string, useAdGuard bool, dnsPort int) (bool, error) {
 	return SyncLiveSingBoxDNSLocalWithFallback(ctx, sbConfigPath, sbWorkConfigPath, useAdGuard, dnsPort, "")
 }
 
-// SyncLiveSingBoxDNSLocalWithFallback 在 SyncLiveSingBoxDNSLocal 基础上支持级联路由回退至上级私网网关 IP:53。
-func SyncLiveSingBoxDNSLocalWithFallback(ctx context.Context, sbConfigPath, sbWorkConfigPath string, useAdGuard bool, dnsPort int, fallbackGatewayIP string) (bool, error) {
+// SyncLiveSingBoxDNSLocalWithFallback 在 SyncLiveSingBoxDNSLocal 基础上支持显式传入备选公网单播 DNS IPv4（无效/私网地址自动回退 ProbeSafeWANFallbackDNS）。
+func SyncLiveSingBoxDNSLocalWithFallback(ctx context.Context, sbConfigPath, sbWorkConfigPath string, useAdGuard bool, dnsPort int, fallbackPublicIP string) (bool, error) {
 	cfgPath := cmp.Or(strings.TrimSpace(sbConfigPath), constant.SingBoxConfigFile)
 	workPath := cmp.Or(strings.TrimSpace(sbWorkConfigPath), constant.SingBoxWorkConfigFile)
 	if cfgPath == "" {
@@ -396,7 +383,11 @@ func SyncLiveSingBoxDNSLocalWithFallback(ctx context.Context, sbConfigPath, sbWo
 		return false, err
 	}
 
-	updatedJSON, changed, err := PatchDNSLocalJSONWithFallback(string(rawBytes), useAdGuard, dnsPort, fallbackGatewayIP)
+	resolvedFB := ""
+	if !useAdGuard {
+		resolvedFB = resolveSafeFallbackPublicIP(fallbackPublicIP)
+	}
+	updatedJSON, changed, err := PatchDNSLocalJSONWithFallback(string(rawBytes), useAdGuard, dnsPort, resolvedFB)
 	if err != nil {
 		return false, err
 	}
@@ -409,10 +400,8 @@ func SyncLiveSingBoxDNSLocalWithFallback(ctx context.Context, sbConfigPath, sbWo
 	}
 	if useAdGuard {
 		log.Success("已平滑热重载 sing-box：dns_local -> 本地防劫持 DNS (127.0.0.1:%d)", dnsPort)
-	} else if gw := strings.TrimSpace(fallbackGatewayIP); gw != "" {
-		log.Success("已平滑热重载 sing-box：dns_local -> 原生明文 DNS (udp://%s:53)", gw)
 	} else {
-		log.Success("已平滑热重载 sing-box：dns_local -> 应急纯 IP 加密 DoH (https://%s/dns-query)", defaultFallbackDoHServer)
+		log.Success("已平滑热重载 sing-box：dns_local -> 运营商/基础公网 DNS (udp://%s:53)", resolvedFB)
 	}
 	return true, nil
 }

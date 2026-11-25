@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"singctl/internal/common/netx"
 	"singctl/internal/config"
 )
 
@@ -18,12 +19,13 @@ type dnsAntiHijackChecker struct{}
 func (dnsAntiHijackChecker) ID() string { return "dns_anti_hijack" }
 
 type dnsLocalInspection struct {
-	found          bool
-	isPlainUDP53   bool
-	isLoopback     bool
-	loopbackPort   int
-	isEncryptedDoX bool
-	desc           string
+	found             bool
+	isUnsafeUDP53     bool
+	isSafePublicUDP53 bool
+	isLoopback        bool
+	loopbackPort      int
+	isEncryptedDoX    bool
+	desc              string
 }
 
 func (dnsAntiHijackChecker) Run(ctx context.Context, env *Env) CheckResult {
@@ -76,24 +78,24 @@ func (dnsAntiHijackChecker) Run(ctx context.Context, env *Env) CheckResult {
 		} else {
 			details = append(details, "dns_local: "+insp.desc)
 			switch {
-			case insp.isPlainUDP53:
+			case insp.isUnsafeUDP53:
 				status = worstStatus(status, StatusFail)
-				advices = append(advices, "检测到 dns_local 使用明文 UDP 53，易被运营商劫持或造成透明代理回环死锁，请切换加密 DoH 或本地防劫持引擎")
+				advices = append(advices, "检测到 dns_local 使用本地/私网明文 DNS，存在自环死锁与劫持风险，请切换本地防劫持引擎或安全公网兜底")
 				fixAction = "sync-dns-local"
 				fixLabel = "一键修复 dns_local 防劫持配置"
 			case insp.isLoopback && !localListening:
 				status = worstStatus(status, StatusFail)
 				advices = append(advices, fmt.Sprintf("dns_local 指向 %s 但该本地 DNS 端口未监听，将导致国内域名解析中断", localAddr))
 				fixAction = "sync-dns-local"
-				fixLabel = "一键切换加密 DoH 兜底"
+				fixLabel = "一键切换安全公网 DNS 兜底"
 			case insp.isLoopback && insp.loopbackPort != dnsPort:
 				status = worstStatus(status, StatusWarn)
 				advices = append(advices, fmt.Sprintf("dns_local 端口 (%d) 与配置的 dns_port (%d) 不一致", insp.loopbackPort, dnsPort))
 				fixAction = "sync-dns-local"
 				fixLabel = "一键同步 dns_local 端口"
-			case insp.isEncryptedDoX && localListening:
+			case (insp.isEncryptedDoX || insp.isSafePublicUDP53) && localListening:
 				status = worstStatus(status, StatusWarn)
-				advices = append(advices, "本地防劫持 DNS 已在线，但 sing-box 仍处于应急 DoH 兜底状态，建议同步接管")
+				advices = append(advices, "本地防劫持 DNS 已在线，但 sing-box 仍处于应急兜底状态，建议同步接管")
 				fixAction = "sync-dns-local"
 				fixLabel = "一键接管本地防劫持 DNS"
 			}
@@ -149,6 +151,40 @@ func (dnsAntiHijackChecker) Run(ctx context.Context, env *Env) CheckResult {
 	return res
 }
 
+func classifyUDPTarget(host string, port int, descPrefix string) dnsLocalInspection {
+	if port <= 0 {
+		port = 53
+	}
+	desc := cmpDesc(descPrefix, fmt.Sprintf("udp://%s:%d", host, port))
+	if isLoopbackHost(host) && port != 53 {
+		return dnsLocalInspection{
+			found:        true,
+			isLoopback:   true,
+			loopbackPort: port,
+			desc:         desc,
+		}
+	}
+	if port == 53 && netx.IsPublicISPUnicastIPv4(net.ParseIP(strings.TrimSpace(host)), nil) {
+		return dnsLocalInspection{
+			found:             true,
+			isSafePublicUDP53: true,
+			desc:              desc + " (安全公网 DNS 兜底)",
+		}
+	}
+	return dnsLocalInspection{
+		found:         true,
+		isUnsafeUDP53: true,
+		desc:          desc + " (私网/回环自环风险)",
+	}
+}
+
+func cmpDesc(prefix, fallback string) string {
+	if strings.TrimSpace(prefix) != "" {
+		return prefix
+	}
+	return fallback
+}
+
 func inspectSingBoxDNSLocal(rawJSON []byte) dnsLocalInspection {
 	var doc struct {
 		DNS *struct {
@@ -183,35 +219,19 @@ func inspectSingBoxDNSLocal(rawJSON []byte) dnsLocalInspection {
 					desc:           fmt.Sprintf("%s://%s", typ, host),
 				}
 			case "udp":
-				if port == 0 {
-					port = 53
-				}
-				isLoop := isLoopbackHost(host)
-				if isLoop && port != 53 {
-					return dnsLocalInspection{
-						found:        true,
-						isLoopback:   true,
-						loopbackPort: port,
-						desc:         fmt.Sprintf("udp://%s:%d", host, port),
-					}
-				}
-				return dnsLocalInspection{
-					found:        true,
-					isPlainUDP53: true,
-					desc:         fmt.Sprintf("udp://%s:%d (明文)", host, port),
-				}
+				return classifyUDPTarget(host, port, "")
 			case "local":
 				return dnsLocalInspection{
-					found:        true,
-					isPlainUDP53: true,
-					desc:         "local (明文系统 DNS)",
+					found:         true,
+					isUnsafeUDP53: true,
+					desc:          "local (明文系统 DNS)",
 				}
 			default:
 				return dnsLocalInspection{found: true, desc: fmt.Sprintf("%s://%s", typ, host)}
 			}
 		}
 
-		// 兼容旧版 address 字符串格式（如 https://223.5.5.5/dns-query 或 udp://192.0.2.53:53）。
+		// 兼容旧版 address 字符串格式（如 https://223.5.5.5/dns-query 或 udp://114.114.114.114:53）。
 		addr := strings.TrimSpace(srv.Address)
 		lowerAddr := strings.ToLower(addr)
 		switch {
@@ -221,7 +241,7 @@ func inspectSingBoxDNSLocal(rawJSON []byte) dnsLocalInspection {
 			strings.HasPrefix(lowerAddr, "h3://"):
 			return dnsLocalInspection{found: true, isEncryptedDoX: true, desc: addr}
 		case lowerAddr == "local" || lowerAddr == "rcode://success":
-			return dnsLocalInspection{found: true, isPlainUDP53: lowerAddr == "local", desc: addr}
+			return dnsLocalInspection{found: true, isUnsafeUDP53: lowerAddr == "local", desc: addr}
 		case strings.HasPrefix(lowerAddr, "udp://"):
 			u, err := url.Parse(addr)
 			if err == nil {
@@ -231,14 +251,17 @@ func inspectSingBoxDNSLocal(rawJSON []byte) dnsLocalInspection {
 						p = v
 					}
 				}
-				if isLoopbackHost(u.Hostname()) && p != 53 {
-					return dnsLocalInspection{found: true, isLoopback: true, loopbackPort: p, desc: addr}
-				}
+				return classifyUDPTarget(u.Hostname(), p, addr)
 			}
-			return dnsLocalInspection{found: true, isPlainUDP53: true, desc: addr + " (明文)"}
+			return dnsLocalInspection{found: true, isUnsafeUDP53: true, desc: addr + " (私网/回环自环风险)"}
 		default:
 			// 纯 IP 或 host:port 无协议前缀在 sing-box 中等价于明文 UDP 53。
-			return dnsLocalInspection{found: true, isPlainUDP53: true, desc: addr + " (明文)"}
+			h, pStr, splitErr := net.SplitHostPort(addr)
+			if splitErr != nil {
+				return classifyUDPTarget(addr, 53, addr)
+			}
+			p, _ := strconv.Atoi(pStr)
+			return classifyUDPTarget(h, p, addr)
 		}
 	}
 	return dnsLocalInspection{}
