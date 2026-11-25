@@ -157,33 +157,73 @@ export const AuditDevicesAndBanners: React.FC<AuditDevicesAndBannersProps> = ({
         }
         const allowed = d.allowOverseas !== false;
         const devBusy = Boolean(busyDeviceIps?.has(d.deviceIp));
-        const disabled = isAuditOnlyMode || devBusy || !onToggleDeviceOverseas;
+        const disabled = devBusy || !onToggleDeviceOverseas;
+        if (devBusy) {
+          return <Badge tone="neutral">切换中…</Badge>;
+        }
+        const auditModeHint = isAuditOnlyMode
+          ? '（当前无海外订阅，配置会提前写入，开启分流后立即按此生效）'
+          : '';
         return (
-          <button
-            type="button"
-            disabled={disabled}
-            onClick={(e) => {
-              e.stopPropagation();
-              onToggleDeviceOverseas?.(d, !allowed);
-            }}
-            title={
-              isAuditOnlyMode
-                ? '当前处于无订阅纯直连审计模式，全网设备均走直连'
-                : allowed
-                  ? '当前允许访问外网（走 sing-box 分流规则），点击切换为全部走 Direct 直出'
-                  : '已禁止走海外代理，全部流量强制从 Direct 直出（仍保留去广告/防 PCDN/流量审计），点击恢复外网分流'
-            }
-            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium border whitespace-nowrap transition-colors ${
-              disabled ? 'opacity-55 cursor-not-allowed' : 'cursor-pointer'
-            } ${
-              allowed
-                ? 'bg-emerald-500/12 text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/20'
-                : 'bg-amber-500/12 text-amber-300 border-amber-500/35 hover:bg-amber-500/20'
-            }`}
+          <div
+            role="group"
+            aria-label="设备外网访问权限"
+            onClick={(e) => e.stopPropagation()}
+            className="inline-flex items-center p-0.5 rounded-lg bg-surface2/80 border border-subtle whitespace-nowrap"
           >
-            {allowed ? <Globe className="w-3 h-3" /> : <Home className="w-3 h-3" />}
-            <span>{devBusy ? '切换中…' : allowed ? '允许外网' : '仅限直连'}</span>
-          </button>
+            <button
+              type="button"
+              disabled={disabled}
+              aria-pressed={allowed}
+              onClick={(e) => {
+                e.stopPropagation();
+                if (!allowed && !disabled) {
+                  onToggleDeviceOverseas?.(d, true);
+                }
+              }}
+              title={
+                allowed
+                  ? `当前已选：允许外网（走 sing-box 智能分流）${auditModeHint}`
+                  : `点击切换为「允许外网」（恢复 sing-box 智能分流）${auditModeHint}`
+              }
+              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] border transition-colors ${
+                disabled ? 'opacity-55 cursor-not-allowed' : allowed ? 'cursor-default' : 'cursor-pointer'
+              } ${
+                allowed
+                  ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40 font-semibold shadow-sm'
+                  : 'text-muted hover:text-primary border-transparent'
+              }`}
+            >
+              <Globe className="w-3 h-3" />
+              <span>允许外网</span>
+            </button>
+            <button
+              type="button"
+              disabled={disabled}
+              aria-pressed={!allowed}
+              onClick={(e) => {
+                e.stopPropagation();
+                if (allowed && !disabled) {
+                  onToggleDeviceOverseas?.(d, false);
+                }
+              }}
+              title={
+                !allowed
+                  ? `当前已选：仅限直连（全部流量走 Direct，仍保留去广告/防 PCDN/审计）${auditModeHint}`
+                  : `点击切换为「仅限直连」（禁止访问海外代理节点）${auditModeHint}`
+              }
+              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] border transition-colors ${
+                disabled ? 'opacity-55 cursor-not-allowed' : !allowed ? 'cursor-default' : 'cursor-pointer'
+              } ${
+                !allowed
+                  ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 font-semibold shadow-sm'
+                  : 'text-muted hover:text-primary border-transparent'
+              }`}
+            >
+              <Home className="w-3 h-3" />
+              <span>仅限直连</span>
+            </button>
+          </div>
         );
       },
     },
