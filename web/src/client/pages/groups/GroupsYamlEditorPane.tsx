@@ -1,6 +1,7 @@
 import React, { useCallback, useMemo, useRef } from 'react';
 import { AlertTriangle, Download, Plus, Sparkles, Upload } from 'lucide-react';
 import { Button, useToast } from '../../../ui';
+import { copyToClipboard } from '../../../lib/clipboard';
 import { GroupMacroInfo, GroupTemplateSnippet } from '../../types';
 import { appendGroupSnippetToYAML, parseYAMLErrorLine } from './groupsYamlHelpers';
 
@@ -70,8 +71,9 @@ export const GroupsYamlEditorPane: React.FC<GroupsYamlEditorPaneProps> = ({
   const handleInsertMacro = (macroId: string) => {
     const el = textareaRef.current;
     if (!el) {
-      void navigator.clipboard?.writeText(`"${macroId}"`);
-      toast(`已复制语义宏 "${macroId}"`, 'info');
+      void copyToClipboard(`"${macroId}"`)
+        .then(() => toast(`已复制语义宏 "${macroId}"`, 'info'))
+        .catch(() => error('复制失败，请手动复制'));
       return;
     }
     const start = el.selectionStart ?? yamlText.length;

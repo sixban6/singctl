@@ -39,8 +39,8 @@ var defaultMigrationStages = []ConfigMigrationStage{
 // MigrateConfigBytes merges oldData into templateData using YAML AST while preserving
 // template structure, comments, intentional zero values, and extra OCP stages.
 func MigrateConfigBytes(oldData, templateData []byte, extraStages ...ConfigMigrationStage) ([]byte, error) {
-	// Pre-process the old YAML to fix common syntax errors such as missing spaces after colons.
-	cleanOldData := colonSpaceFixRegex.ReplaceAll(oldData, []byte("$1: $2"))
+	// Pre-process the old YAML to heal mixed gateway indentation and fix missing spaces after colons.
+	cleanOldData := preprocessConfigYAML(oldData)
 
 	var oldCfg Config
 	if err := yaml.Unmarshal(cleanOldData, &oldCfg); err != nil {

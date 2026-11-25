@@ -22,6 +22,7 @@ import {
   useToast,
 } from '../../ui';
 import { clientApi } from '../api';
+import { copyToClipboard } from '../../lib/clipboard';
 import { ClientHealthResponse, ClientStatusResponse, SbProxiesSnapshot } from '../types';
 import { TrafficFlowCard } from '../components/TrafficFlowCard';
 import { getEngineDisplayName, getStatusDNS } from './adguard/adguardHelpers';
@@ -123,7 +124,7 @@ export const DashPage: React.FC<DashPageProps> = ({
 
   const copyText = async (text: string, msg: string) => {
     try {
-      await navigator.clipboard.writeText(text);
+      await copyToClipboard(text);
       success(msg);
     } catch {
       error('复制失败，请手动复制');

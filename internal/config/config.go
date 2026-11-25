@@ -200,16 +200,117 @@ var colonSpaceFixRegex = regexp.MustCompile(
 	fmt.Sprintf("(?m)^([ \\t-]*(?:%s)):([^\\s].*)", strings.Join(knownYAMLKeys, "|")),
 )
 
+var gatewayChildKeys = []string{
+	"mode",
+	"work_mode",
+	"main_router_ip",
+	"lan_iface",
+	"ipv6_mode",
+}
+
+func isGatewayHeaderLine(trimmedLine string) bool {
+	if !strings.HasPrefix(trimmedLine, "gateway:") {
+		return false
+	}
+	after := strings.TrimSpace(strings.TrimPrefix(trimmedLine, "gateway:"))
+	return after == "" || strings.HasPrefix(after, "#")
+}
+
+func leadingIndentAndBody(lineNoCR string) (string, string) {
+	trimmed := strings.TrimLeft(lineNoCR, " \t")
+	return lineNoCR[:len(lineNoCR)-len(trimmed)], trimmed
+}
+
+func isGatewayChildKeyLine(body string) bool {
+	for _, key := range gatewayChildKeys {
+		if strings.HasPrefix(body, key+":") {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizeGatewayYAMLIndent 统一顶层 gateway 块内直接子键与注释行的缩进宽度，
+// 自动修复旧版 install.sh 与 yaml.v3 混用 2/4 空格缩进导致的 YAML 解析失败。
+func normalizeGatewayYAMLIndent(data []byte) []byte {
+	src := string(data)
+	if !strings.Contains(src, "gateway:") {
+		return data
+	}
+
+	lines := strings.Split(src, "\n")
+	changed := false
+
+	for i := 0; i < len(lines); i++ {
+		headerNoCR := strings.TrimSuffix(lines[i], "\r")
+		if len(headerNoCR) == 0 || headerNoCR[0] == ' ' || headerNoCR[0] == '\t' || !isGatewayHeaderLine(headerNoCR) {
+			continue
+		}
+
+		targetIndent := ""
+		blockEnd := i + 1
+		for ; blockEnd < len(lines); blockEnd++ {
+			lineNoCR := strings.TrimSuffix(lines[blockEnd], "\r")
+			if strings.TrimSpace(lineNoCR) == "" {
+				continue
+			}
+			// 遇到非缩进的顶层非注释行，说明 gateway 块结束
+			if lineNoCR[0] != ' ' && lineNoCR[0] != '\t' && lineNoCR[0] != '#' {
+				break
+			}
+			// 仅参考有缩进的直接子键确定基准缩进宽度
+			indent, body := leadingIndentAndBody(lineNoCR)
+			if targetIndent == "" && indent != "" && isGatewayChildKeyLine(body) {
+				targetIndent = indent
+			}
+		}
+
+		if targetIndent == "" {
+			i = blockEnd - 1
+			continue
+		}
+
+		for j := i + 1; j < blockEnd; j++ {
+			hasCR := strings.HasSuffix(lines[j], "\r")
+			lineNoCR := strings.TrimSuffix(lines[j], "\r")
+			indent, body := leadingIndentAndBody(lineNoCR)
+			if indent == "" || body == "" {
+				continue
+			}
+			if (isGatewayChildKeyLine(body) || strings.HasPrefix(body, "#")) && indent != targetIndent {
+				rebuilt := targetIndent + body
+				if hasCR {
+					rebuilt += "\r"
+				}
+				lines[j] = rebuilt
+				changed = true
+			}
+		}
+
+		i = blockEnd - 1
+	}
+
+	if !changed {
+		return data
+	}
+	return []byte(strings.Join(lines, "\n"))
+}
+
+// preprocessConfigYAML 在反序列化前执行 gateway 块缩进自愈与冒号后缺失空格补全。
+func preprocessConfigYAML(data []byte) []byte {
+	normalized := normalizeGatewayYAMLIndent(data)
+	return colonSpaceFixRegex.ReplaceAll(normalized, []byte("$1: $2"))
+}
+
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config file: %w", err)
 	}
 
-	// Pre-process the YAML to fix common syntax errors such as missing spaces after colons.
-	// For example: `url:"https://test.com"` -> `url: "https://test.com"`
+	// Pre-process the YAML to heal mixed gateway indentation and fix missing spaces after colons.
 	// We only match known keys to avoid accidentally modifying strings containing colons.
-	data = colonSpaceFixRegex.ReplaceAll(data, []byte("$1: $2"))
+	data = preprocessConfigYAML(data)
 
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {

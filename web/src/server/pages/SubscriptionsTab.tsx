@@ -11,6 +11,7 @@ import { api } from '../api';
 import { SUBS_AUDIT_CACHE_KEY, SUBS_CACHE_KEY } from '../prefetch';
 import { peekCachedQuery, writeCachedQuery } from '../../hooks';
 import { useToast } from '../../ui';
+import { copyToClipboard } from '../../lib/clipboard';
 import { CachedSubAudit } from './subscriptions/helpers';
 import { ClientImportsAndDirectLinks, UnifiedSubscriptionCard } from './subscriptions/SubscriptionLinksSection';
 import { SourcesPoolCard } from './subscriptions/SourcesPoolCard';
@@ -122,10 +123,15 @@ export const SubscriptionsTab: React.FC<{ active?: boolean }> = ({ active = true
   };
 
   const copyText = (text: string, key: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedKey(key);
-    success('已复制到剪贴板');
-    setTimeout(() => setCopiedKey(null), 2000);
+    void copyToClipboard(text)
+      .then(() => {
+        setCopiedKey(key);
+        success('已复制到剪贴板');
+        setTimeout(() => setCopiedKey(null), 2000);
+      })
+      .catch(() => {
+        error('复制失败，请手动复制');
+      });
   };
 
   const openAddSourceModal = () => {

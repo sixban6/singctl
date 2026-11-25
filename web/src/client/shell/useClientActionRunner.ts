@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from 'react';
 import { emitClientInvalidate } from '../../hooks';
+import { copyToClipboard } from '../../lib/clipboard';
 import { useToast } from '../../ui';
 import { clientApi } from '../api';
 import { ClientStatusResponse } from '../types';
@@ -214,7 +215,7 @@ export function useClientActionRunner(refreshStatus: (silent?: boolean) => Promi
 
   const handleCopyConsole = useCallback(async () => {
     try {
-      await navigator.clipboard.writeText(consoleLines.join('\n'));
+      await copyToClipboard(consoleLines.join('\n'));
       success('终端日志已复制到剪贴板');
     } catch {
       error('复制失败');

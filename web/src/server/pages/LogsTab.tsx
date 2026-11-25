@@ -2,6 +2,7 @@ import React, { useEffect, useState, useRef } from 'react';
 import { api } from '../api';
 import { useVisibilityInterval } from '../../hooks';
 import { useToast } from '../../ui';
+import { copyToClipboard } from '../../lib/clipboard';
 import { Terminal, RefreshCw, Trash2, Download, Pause, Play, Check } from 'lucide-react';
 
 interface LogsTabProps {
@@ -39,10 +40,15 @@ export const LogsTab: React.FC<LogsTabProps> = ({ initialService = 'singbox' }) 
   }, autoRefresh ? 3000 : null);
 
   const handleCopyLogs = () => {
-    navigator.clipboard.writeText(logs);
-    setCopied(true);
-    success('日志内容已复制');
-    setTimeout(() => setCopied(false), 2000);
+    void copyToClipboard(logs)
+      .then(() => {
+        setCopied(true);
+        success('日志内容已复制');
+        setTimeout(() => setCopied(false), 2000);
+      })
+      .catch(() => {
+        error('复制失败，请手动选中复制');
+      });
   };
 
   const handleDownloadLogs = () => {

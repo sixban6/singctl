@@ -8,6 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
+	"singctl/internal/config"
 )
 
 func resolveRepoInstallSh(t *testing.T) string {
@@ -311,6 +314,132 @@ printf "PREFER_MIRROR=%%s\n" "${PREFER_MIRROR:-}"
 		}
 		if !foundCircuitBreaker {
 			t.Fatalf("expected direct curl invocation to carry --speed-limit 102400 --speed-time 5, got trace:\n%s", trace)
+		}
+	})
+}
+
+func TestInstallScript_WriteGatewayConfigPreserves4SpaceAndHealsMixedIndentation(t *testing.T) {
+	installSh := resolveRepoInstallSh(t)
+
+	runWriteGateway := func(t *testing.T, initialYAML, mode, mainIP string) []byte {
+		t.Helper()
+		dir := t.TempDir()
+		cfgPath := filepath.Join(dir, "singctl.yaml")
+		if err := os.WriteFile(cfgPath, []byte(initialYAML), 0644); err != nil {
+			t.Fatal(err)
+		}
+		harness := filepath.Join(dir, "write_gw.sh")
+		script := fmt.Sprintf(`#!/bin/sh
+set -e
+export SINGCTL_INSTALL_LIB_ONLY=1
+. %q
+CONFIG_FILE=%q
+write_gateway_config %q %q
+`, installSh, cfgPath, mode, mainIP)
+		if err := os.WriteFile(harness, []byte(script), 0755); err != nil {
+			t.Fatal(err)
+		}
+		out, err := exec.CommandContext(t.Context(), "sh", harness).CombinedOutput()
+		if err != nil {
+			t.Fatalf("write_gateway_config failed: %v\nOutput:\n%s", err, string(out))
+		}
+		st, err := os.Stat(cfgPath)
+		if err != nil {
+			t.Fatalf("stat cfgPath: %v", err)
+		}
+		if perm := st.Mode().Perm(); perm != 0600 {
+			t.Fatalf("expected CONFIG_FILE permission 0600, got %04o", perm)
+		}
+		got, err := os.ReadFile(cfgPath)
+		if err != nil {
+			t.Fatalf("read cfgPath: %v", err)
+		}
+		if _, err := config.Load(cfgPath); err != nil {
+			t.Fatalf("config.Load after write_gateway_config failed: %v\nYAML:\n%s", err, string(got))
+		}
+		return got
+	}
+
+	t.Run("preserves_4space_indent_after_internal_migrate", func(t *testing.T) {
+		migrated4Space := strings.Join([]string{
+			"subs:",
+			"    - name: main",
+			"      url: https://sub.example.com/client",
+			"gateway: # (可选) 客户端网关部署模式配置",
+			"    mode: \"main\"",
+			"    main_router_ip: \"\"",
+			"    # lan_iface: \"\"",
+			"    ipv6_mode: \"off\"",
+			"watchdog:",
+			"    interval: 180",
+		}, "\n") + "\n"
+
+		outBytes := runWriteGateway(t, migrated4Space, "side", "192.168.1.1")
+		outStr := string(outBytes)
+
+		var rawParsed config.Config
+		if err := yaml.Unmarshal(outBytes, &rawParsed); err != nil {
+			t.Fatalf("raw yaml.Unmarshal failed (mixed indent left by install.sh):\n%s\nerr: %v", outStr, err)
+		}
+		if rawParsed.Gateway.Mode != "side" || rawParsed.Gateway.MainRouterIP != "192.168.1.1" || rawParsed.Gateway.IPv6Mode != "off" {
+			t.Fatalf("parsed Gateway mismatch: %+v\nYAML:\n%s", rawParsed.Gateway, outStr)
+		}
+		if !strings.Contains(outStr, "\n    mode: \"side\"\n") || !strings.Contains(outStr, "\n    main_router_ip: \"192.168.1.1\"\n") {
+			t.Fatalf("expected 4-space indent preserved for gateway keys, got:\n%s", outStr)
+		}
+	})
+
+	t.Run("heals_already_mixed_2_and_4_space_gateway_block", func(t *testing.T) {
+		corruptedMixed := strings.Join([]string{
+			"subs:",
+			"    - name: main",
+			"      url: https://sub.example.com/client",
+			"gateway: # (可选) 客户端网关部署模式配置",
+			"  mode: \"side\"",
+			"  main_router_ip: \"192.168.1.2\"",
+			"    # lan_iface: \"\"",
+			"    ipv6_mode: \"off\"",
+			"watchdog:",
+			"    interval: 180",
+		}, "\n") + "\n"
+
+		outBytes := runWriteGateway(t, corruptedMixed, "side", "192.168.1.1")
+		outStr := string(outBytes)
+
+		var rawParsed config.Config
+		if err := yaml.Unmarshal(outBytes, &rawParsed); err != nil {
+			t.Fatalf("expected write_gateway_config to heal mixed indentation for raw yaml.Unmarshal, got err: %v\nYAML:\n%s", err, outStr)
+		}
+		if rawParsed.Gateway.Mode != "side" || rawParsed.Gateway.MainRouterIP != "192.168.1.1" || rawParsed.Gateway.IPv6Mode != "off" {
+			t.Fatalf("parsed Gateway mismatch: %+v", rawParsed.Gateway)
+		}
+	})
+
+	t.Run("preserves_2space_indent_even_with_nested_4space_failover_enabled", func(t *testing.T) {
+		twoSpace := strings.Join([]string{
+			"subs:",
+			"  - name: \"main\"",
+			"    url: \"https://sub.example.com/client\"",
+			"gateway:",
+			"  mode: \"main\"",
+			"  main_router_ip: \"\"",
+			"  # lan_iface: \"\"",
+			"  ipv6_mode: \"off\"",
+			"watchdog:",
+			"  interval: 180",
+			"  failover:",
+			"    enabled: true",
+		}, "\n") + "\n"
+
+		outBytes := runWriteGateway(t, twoSpace, "side", "192.168.1.1")
+		outStr := string(outBytes)
+
+		var rawParsed config.Config
+		if err := yaml.Unmarshal(outBytes, &rawParsed); err != nil {
+			t.Fatalf("raw yaml.Unmarshal failed on 2-space file: %v\nYAML:\n%s", err, outStr)
+		}
+		if !strings.Contains(outStr, "\n  mode: \"side\"\n") || !strings.Contains(outStr, "\n  main_router_ip: \"192.168.1.1\"\n") {
+			t.Fatalf("expected 2-space indent preserved when level-1 keys use 2 spaces, got:\n%s", outStr)
 		}
 	})
 }

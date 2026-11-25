@@ -599,3 +599,78 @@ func TestAuditDirectDevicesConfig(t *testing.T) {
 		}
 	})
 }
+
+func TestLoadAndMigrate_HealsMixedGatewayIndentation(t *testing.T) {
+	t.Run("heals_2space_mode_with_4space_ipv6_mode_on_load_and_migrate", func(t *testing.T) {
+		brokenYAML := strings.Join([]string{
+			"subs:",
+			"    - name: main",
+			"      url: https://sub.example.com/client",
+			"dns:",
+			"    enabled: true",
+			"gateway: # (可选) 客户端网关部署模式配置",
+			"  mode: \"side\"",
+			"  main_router_ip: \"192.168.1.1\"",
+			"    # lan_iface: \"\"",
+			"    ipv6_mode: \"off\"",
+			"watchdog:",
+			"    interval: 180",
+		}, "\n") + "\n"
+
+		cfgPath := filepath.Join(t.TempDir(), "singctl.yaml")
+		if err := os.WriteFile(cfgPath, []byte(brokenYAML), 0600); err != nil {
+			t.Fatal(err)
+		}
+
+		cfg, err := config.Load(cfgPath)
+		if err != nil {
+			t.Fatalf("expected config.Load to heal mixed gateway indentation, got error: %v", err)
+		}
+		if cfg.Gateway.Mode != "side" || cfg.Gateway.MainRouterIP != "192.168.1.1" || cfg.Gateway.IPv6Mode != "off" {
+			t.Fatalf("unexpected healed Gateway config: %+v", cfg.Gateway)
+		}
+		if cfg.Watchdog.Interval != 180 {
+			t.Fatalf("expected watchdog.interval=180 untouched, got %d", cfg.Watchdog.Interval)
+		}
+
+		migrated, err := config.MigrateConfigBytes([]byte(brokenYAML), configs.ClientConfigYAML)
+		if err != nil {
+			t.Fatalf("expected MigrateConfigBytes to heal mixed gateway indentation, got error: %v", err)
+		}
+		var got config.Config
+		if err := yaml.Unmarshal(migrated, &got); err != nil {
+			t.Fatalf("unmarshal migrated healed YAML failed: %v", err)
+		}
+		if got.Gateway.Mode != "side" || got.Gateway.MainRouterIP != "192.168.1.1" || got.Gateway.IPv6Mode != "off" {
+			t.Fatalf("migrated Gateway mismatch: %+v", got.Gateway)
+		}
+	})
+
+	t.Run("heals_4space_mode_with_2space_tail_and_crlf", func(t *testing.T) {
+		brokenYAML := strings.Join([]string{
+			"subs:",
+			"  - name: \"main\"",
+			"    url: \"https://sub.example.com/client\"",
+			"gateway:",
+			"    mode: \"side\"",
+			"    work_mode: \"proxy\"",
+			"  main_router_ip: \"192.168.1.1\"",
+			"  lan_iface: \"eth0\"",
+			"  ipv6_mode: \"off\"",
+			"watchdog:",
+			"  interval: 180",
+		}, "\r\n") + "\r\n"
+
+		cfgPath := filepath.Join(t.TempDir(), "singctl.yaml")
+		if err := os.WriteFile(cfgPath, []byte(brokenYAML), 0600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := config.Load(cfgPath)
+		if err != nil {
+			t.Fatalf("expected config.Load to heal 4/2 mixed indentation with CRLF, got error: %v", err)
+		}
+		if cfg.Gateway.Mode != "side" || cfg.Gateway.WorkMode != "proxy" || cfg.Gateway.MainRouterIP != "192.168.1.1" || cfg.Gateway.LANIface != "eth0" || cfg.Gateway.IPv6Mode != "off" {
+			t.Fatalf("unexpected Gateway config: %+v", cfg.Gateway)
+		}
+	})
+}

@@ -659,47 +659,78 @@ probe_gateway_reachable() {
     return 0
 }
 
-# 原子更新 singctl.yaml 中的 gateway 配置段（严格保持 0600 权限）
+# 原子更新 singctl.yaml 中的 gateway 配置段（自动适配 2/4 空格缩进并自愈混排，严格保持 0600 权限）
 write_gateway_config() {
     local gw_mode="$1"
     local main_gw_ip="$2"
     [ -f "$CONFIG_FILE" ] || return 0
 
+    local gw_indent
+    gw_indent=$(awk '
+        BEGIN { sec = ""; found4 = 0 }
+        /^[^[:space:]#]/ {
+            sec = $0
+            sub(/:.*/, "", sec)
+            next
+        }
+        sec == "gateway" && /^    (# *)?(mode|work_mode|main_router_ip|lan_iface|ipv6_mode):/ { found4 = 1 }
+        sec == "dns" && /^    (# *)?enabled:/ { found4 = 1 }
+        sec == "hy2" && /^    (# *)?up:/ { found4 = 1 }
+        sec == "github" && /^    (# *)?mirror_url:/ { found4 = 1 }
+        sec == "watchdog" && /^    (# *)?interval:/ { found4 = 1 }
+        END { print (found4 ? "    " : "  ") }
+    ' "$CONFIG_FILE")
+
     local tmp_cfg="${CONFIG_FILE}.gw.tmp"
     if grep -Eq '^gateway:[[:space:]]*(#.*)?$' "$CONFIG_FILE"; then
-        awk -v m="$gw_mode" -v ip="$main_gw_ip" '
+        awk -v m="$gw_mode" -v ip="$main_gw_ip" -v indent="$gw_indent" '
             BEGIN { in_gw = 0; wrote_m = 0; wrote_ip = 0 }
             /^gateway:[[:space:]]*(#.*)?$/ {
                 in_gw = 1
+                sub(/\r$/, "")
                 print
                 next
             }
             in_gw && /^[^[:space:]#]/ {
-                if (!wrote_m) { printf "  mode: \"%s\"\n", m; wrote_m = 1 }
-                if (!wrote_ip) { printf "  main_router_ip: \"%s\"\n", ip; wrote_ip = 1 }
+                if (!wrote_m) { printf "%smode: \"%s\"\n", indent, m; wrote_m = 1 }
+                if (!wrote_ip) { printf "%smain_router_ip: \"%s\"\n", indent, ip; wrote_ip = 1 }
                 in_gw = 0
             }
-            in_gw && /^[[:space:]]+mode:/ {
-                printf "  mode: \"%s\"\n", m
-                wrote_m = 1
-                next
-            }
-            in_gw && /^[[:space:]]+main_router_ip:/ {
-                printf "  main_router_ip: \"%s\"\n", ip
-                wrote_ip = 1
+            in_gw {
+                sub(/\r$/, "")
+                if ($0 ~ /^[[:space:]]*$/) {
+                    print ""
+                    next
+                }
+                if ($0 ~ /^[[:space:]]+mode:/) {
+                    printf "%smode: \"%s\"\n", indent, m
+                    wrote_m = 1
+                    next
+                }
+                if ($0 ~ /^[[:space:]]+main_router_ip:/) {
+                    printf "%smain_router_ip: \"%s\"\n", indent, ip
+                    wrote_ip = 1
+                    next
+                }
+                if ($0 ~ /^[[:space:]]+(#|(work_mode|lan_iface|ipv6_mode):)/) {
+                    sub(/^[[:space:]]+/, "")
+                    printf "%s%s\n", indent, $0
+                    next
+                }
+                print
                 next
             }
             { print }
             END {
                 if (in_gw) {
-                    if (!wrote_m) printf "  mode: \"%s\"\n", m
-                    if (!wrote_ip) printf "  main_router_ip: \"%s\"\n", ip
+                    if (!wrote_m) printf "%smode: \"%s\"\n", indent, m
+                    if (!wrote_ip) printf "%smain_router_ip: \"%s\"\n", indent, ip
                 }
             }
         ' "$CONFIG_FILE" > "$tmp_cfg"
     else
         cat "$CONFIG_FILE" > "$tmp_cfg"
-        printf "\ngateway:\n  mode: \"%s\"\n  main_router_ip: \"%s\"\n" "$gw_mode" "$main_gw_ip" >> "$tmp_cfg"
+        printf "\ngateway:\n%smode: \"%s\"\n%smain_router_ip: \"%s\"\n" "$gw_indent" "$gw_mode" "$gw_indent" "$main_gw_ip" >> "$tmp_cfg"
     fi
     chmod 600 "$tmp_cfg"
     mv -f "$tmp_cfg" "$CONFIG_FILE"

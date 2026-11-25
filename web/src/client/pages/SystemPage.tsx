@@ -25,6 +25,7 @@ import {
   useToast,
 } from '../../ui';
 import { clientApi } from '../api';
+import { copyToClipboard } from '../../lib/clipboard';
 import { ClientStatusResponse } from '../types';
 import { DoctorDrawer } from './dash/DoctorDrawer';
 import { AutoStartCard } from './system/AutoStartCard';
@@ -168,7 +169,7 @@ export const SystemPage: React.FC<SystemPageProps> = ({
   const copyPwaUrl = async () => {
     if (!pwaUrl) return;
     try {
-      await navigator.clipboard.writeText(pwaUrl);
+      await copyToClipboard(pwaUrl);
       success('已复制免密访问链接！用 iPhone Safari 打开「添加到主屏幕」即可免输密码');
     } catch {
       error('复制失败，请手动选中复制');

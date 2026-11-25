@@ -12,6 +12,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { Badge, Button, SectionCard, SlideDrawer, useToast } from '../../../ui';
+import { copyToClipboard } from '../../../lib/clipboard';
 import {
   AdGuardCredentialsResponse,
   DNSCapabilities,
@@ -162,7 +163,7 @@ export const AdGuardCredentialsDrawer: React.FC<AdGuardCredentialsDrawerProps> =
   const copyText = async (text: string, msg: string) => {
     if (!text) return;
     try {
-      await navigator.clipboard.writeText(text);
+      await copyToClipboard(text);
       success(msg);
     } catch {
       error('复制失败，请手动复制');

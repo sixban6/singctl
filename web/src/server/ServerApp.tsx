@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { SERVER_TAB_KEYS, ServerStatusResponse, TabKey } from './types';
 import { ApiError, api, setOnUnauthorized } from './api';
 import { clearCachedQuery, useHashRoute, useVisibilityInterval } from '../hooks';
+import { copyToClipboard } from '../lib/clipboard';
 import { ToastProvider, CardSkeleton, lazyWithReload, useToast } from '../ui';
 import { Header } from './shell/Header';
 import { Navigation } from './shell/Navigation';
@@ -188,7 +189,7 @@ const DashboardContent: React.FC = () => {
 
   const copyPassword = async (password: string) => {
     try {
-      await navigator.clipboard.writeText(password);
+      await copyToClipboard(password);
       success('密码已复制');
     } catch {
       error('复制失败，请手动选择密码');

@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { ServerStatusResponse } from '../../types';
 import { api } from '../../api';
 import { useToast } from '../../../ui';
+import { copyToClipboard } from '../../../lib/clipboard';
 import { Check, Copy, Dices, Eye, EyeOff, KeyRound, Lock, Shield, X } from 'lucide-react';
 import { generateRandomStrongPassword } from './helpers';
 
@@ -32,7 +33,7 @@ export const AccessAndCredentialsCards: React.FC<{
     setShowNewPassword(true);
 
     try {
-      await navigator.clipboard.writeText(generated);
+      await copyToClipboard(generated);
       success('已生成 16 位随机强密码并自动复制到剪贴板，请输入当前密码后保存');
     } catch {
       success('已生成 16 位随机强密码并填入输入框，请复制保存');
@@ -42,7 +43,7 @@ export const AccessAndCredentialsCards: React.FC<{
   const handleCopyNewPassword = async () => {
     if (!newPassword) return;
     try {
-      await navigator.clipboard.writeText(newPassword);
+      await copyToClipboard(newPassword);
       success('新管理密码已复制到剪贴板');
     } catch {
       error('复制失败，请手动选中复制');
