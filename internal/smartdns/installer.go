@@ -76,7 +76,7 @@ func CachedBinaryVersion(binPath string) string {
 	}
 	binVerCacheMu.RUnlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	out, err := exec.CommandContext(ctx, binPath, "-v").CombinedOutput()
 	cancel()
 	if err != nil {

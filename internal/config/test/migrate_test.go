@@ -525,3 +525,77 @@ func TestWatchdogAutoStartConfig(t *testing.T) {
 		}
 	})
 }
+
+func TestAuditDirectDevicesConfig(t *testing.T) {
+	t.Run("default_overseas_allowed_toggle_and_clone_isolation", func(t *testing.T) {
+		var cfg config.Config
+		if cfg.Audit.IsDeviceDirect("192.168.1.50") || !cfg.Audit.IsDeviceOverseasAllowed("192.168.1.50") {
+			t.Fatalf("expected default device overseas allowed == true")
+		}
+
+		if changed := cfg.Audit.SetDeviceOverseasAllowed("192.168.1.50", false); !changed {
+			t.Fatalf("expected SetDeviceOverseasAllowed(false) to mutate slice")
+		}
+		if !cfg.Audit.IsDeviceDirect("192.168.1.50") || cfg.Audit.IsDeviceOverseasAllowed("192.168.1.50") {
+			t.Fatalf("expected 192.168.1.50 marked direct")
+		}
+		if cfg.Audit.SetDeviceOverseasAllowed("192.168.1.50/32", false) {
+			t.Fatalf("expected duplicate SetDeviceOverseasAllowed(false) to be idempotent false")
+		}
+		if cfg.Audit.IsEmpty() {
+			t.Fatalf("expected Audit.IsEmpty() == false when DirectDevices is non-empty")
+		}
+
+		cloned := cfg.Clone()
+		cloned.Audit.SetDeviceOverseasAllowed("192.168.1.50", true)
+		if cfg.Audit.IsDeviceOverseasAllowed("192.168.1.50") {
+			t.Fatalf("expected Clone() to isolate Audit.DirectDevices slice")
+		}
+
+		if changed := cfg.Audit.SetDeviceOverseasAllowed("192.168.1.50", true); !changed {
+			t.Fatalf("expected SetDeviceOverseasAllowed(true) to remove device")
+		}
+		if len(cfg.Audit.DirectDevices) != 0 || !cfg.Audit.IsDeviceOverseasAllowed("192.168.1.50") {
+			t.Fatalf("expected DirectDevices cleared, got %v", cfg.Audit.DirectDevices)
+		}
+	})
+
+	t.Run("migrate_and_ast_save_removes_stale_direct_devices", func(t *testing.T) {
+		raw := "subs:\n  - name: \"main\"\n    url: \"https://sub.example.com/1\"\naudit:\n  pcdn_block: true\n  direct_devices:\n    - \"192.168.1.50\"\n"
+		migrated, err := config.MigrateConfigBytes([]byte(raw), configs.ClientConfigYAML)
+		if err != nil {
+			t.Fatalf("MigrateConfigBytes failed: %v", err)
+		}
+		var got config.Config
+		if err := yaml.Unmarshal(migrated, &got); err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(got.Audit.DirectDevices, []string{"192.168.1.50"}) {
+			t.Fatalf("expected direct_devices preserved across migration, got %v", got.Audit.DirectDevices)
+		}
+
+		cfgPath := filepath.Join(t.TempDir(), "singctl.yaml")
+		if err := os.WriteFile(cfgPath, migrated, 0600); err != nil {
+			t.Fatal(err)
+		}
+		loaded, err := config.Load(cfgPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		loaded.Audit.SetDeviceOverseasAllowed("192.168.1.50", true)
+		if err := config.Save(cfgPath, loaded); err != nil {
+			t.Fatalf("Save failed: %v", err)
+		}
+		fi, err := os.Stat(cfgPath)
+		if err != nil || fi.Mode().Perm() != 0600 {
+			t.Fatalf("expected 0600 mode, got %v (err=%v)", fi.Mode().Perm(), err)
+		}
+		reloaded, err := config.Load(cfgPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(reloaded.Audit.DirectDevices) != 0 {
+			t.Fatalf("expected cleared direct_devices not to resurface after AST Save, got %v", reloaded.Audit.DirectDevices)
+		}
+	})
+}

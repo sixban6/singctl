@@ -322,6 +322,7 @@ func newBaseAuditReport(cfg *config.Config, now time.Time) *Report {
 	rep.Throttles = slices.Clone(cfg.Audit.Throttles)
 	rep.Whitelist = slices.Clone(cfg.Audit.Whitelist)
 	rep.WhitelistCount = len(rep.Whitelist)
+	rep.DirectDevices = slices.Clone(cfg.Audit.DirectDevices)
 	rep.PCDNBlockEnabled = cfg.Audit.IsPCDNBlockEnabled()
 	return rep
 }
@@ -502,11 +503,12 @@ func evaluateAndFilterFlows(
 	return filtered, deviceAgg
 }
 
-func buildSortedDeviceSummaries(deviceAgg map[string]*DeviceSummary) []DeviceSummary {
+func buildSortedDeviceSummaries(deviceAgg map[string]*DeviceSummary, cfg *config.Config) []DeviceSummary {
 	devices := make([]DeviceSummary, 0, len(deviceAgg))
 	for _, ds := range deviceAgg {
 		denom := float64(ds.DownloadBytes) + 65536.0
 		ds.UploadRatio = math.Round((float64(ds.UploadBytes)/denom)*100) / 100
+		ds.AllowOverseas = cfg == nil || cfg.Audit.IsDeviceOverseasAllowed(ds.DeviceIP)
 		devices = append(devices, *ds)
 	}
 	slices.SortFunc(devices, func(a, b DeviceSummary) int {
@@ -575,7 +577,7 @@ func (c *Collector) collectLocked(ctx context.Context, opts CollectOptions) *Rep
 	rawFlows := buildRawFlowRecords(c.cfg, state, activeByKey, c.flowLiveRates, c.flowActiveDetails, devDirectory, selfIPs, engine, now)
 	allFlows, deviceAgg := evaluateAndFilterFlows(engine, rawFlows, opts, rep)
 	rep.TotalFlows = len(state.Flows)
-	rep.Devices = buildSortedDeviceSummaries(deviceAgg)
+	rep.Devices = buildSortedDeviceSummaries(deviceAgg, c.cfg)
 
 	SortFlows(allFlows, opts.SortBy, opts.SortAsc)
 	allFlows = truncateFlowsToLimit(allFlows, opts.Limit)

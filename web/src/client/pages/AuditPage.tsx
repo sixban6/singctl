@@ -252,6 +252,9 @@ export const AuditPage: React.FC<AuditPageProps> = ({
         selectedDevice={ctrl.selectedDevice}
         onSelectDevice={handleSelectDeviceFromRanking}
         onRenameDevice={(d) => void handleOpenRenameDevice(d)}
+        isAuditOnlyMode={isAuditOnlyMode}
+        busyDeviceIps={actions.busyDeviceIps}
+        onToggleDeviceOverseas={(d, next) => void actions.handleToggleDeviceOverseas(d, next)}
         pcdnToggleBusy={actions.pcdnToggleBusy}
         pcdnBannerDismissed={pcdnBannerDismissed}
         onDismissPcdnBanner={() => setPcdnBannerDismissed(true)}

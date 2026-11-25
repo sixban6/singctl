@@ -183,7 +183,7 @@ var knownYAMLKeys = []string{
 	"bypass_guard", "layers", "dot_doq", "public_doh", "sdk_httpdns", "app_httpdns", "app_groups", "exempt_source_ips",
 	"bilibili", "bytedance", "jd", "netease", "meituan", "ctrip", "oem", "wechat",
 	"gateway", "work_mode", "main_router_ip", "lan_iface", "ipv6_mode",
-	"audit", "whitelist", "pcdn_block", "throttles", "rate_kbps", "comment", "ai", "endpoint", "api_key", "model",
+	"audit", "whitelist", "pcdn_block", "direct_devices", "throttles", "rate_kbps", "comment", "ai", "endpoint", "api_key", "model",
 	"firewall", "ban_timeout_days", "ping_limit_per_sec", "extra_forever_ban", "protected_ports",
 	"traffic_routing", "outbound",
 	"home_domain", "suffix", "tailscale_dns", "follow_dhcp", "devices", "alias", "display_name", "ip", "mac", "source", "wildcard", "services", "label", "scheme", "note",

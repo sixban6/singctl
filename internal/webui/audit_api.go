@@ -679,3 +679,45 @@ func (s *Server) handleAuditThrottle(w http.ResponseWriter, r *http.Request) {
 		"message":     msg,
 	})
 }
+
+type auditDeviceAccessRequest struct {
+	DeviceIP      string `json:"deviceIp"`
+	AllowOverseas *bool  `json:"allowOverseas"`
+}
+
+// handleAuditDeviceAccess 切换单个局域网设备的外网分流权限（true=正常分流, false=强制全部走 Direct + dns_local）。
+func (s *Server) handleAuditDeviceAccess(w http.ResponseWriter, r *http.Request) {
+	if !s.auditLimiter.Allow(r, "write", 120) {
+		writeJSONError(w, http.StatusTooManyRequests, "操作过于频繁，请稍后再试")
+		return
+	}
+
+	var req auditDeviceAccessRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil || req.AllowOverseas == nil {
+		writeJSONError(w, http.StatusBadRequest, "请求参数无效：缺少 deviceIp 或 allowOverseas 布尔开关")
+		return
+	}
+
+	s.cfgMu.Lock()
+	defer s.cfgMu.Unlock()
+
+	cfg := s.loadMutableConfig()
+	enforcer := s.newAuditEnforcer(cfg)
+	res, err := enforcer.SetDeviceOverseasAccess(r.Context(), req.DeviceIP, *req.AllowOverseas)
+	if err != nil {
+		if res != nil && res.ConfigSaved && s.cfgStore != nil {
+			s.cfgStore.Set(cfg)
+		} else {
+			s.invalidateConfigStore()
+		}
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if s.cfgStore != nil {
+		s.cfgStore.Set(cfg)
+	}
+	s.invalidateIOSCache()
+	_ = daemon.NotifyReload()
+	writeJSON(w, http.StatusOK, res)
+}

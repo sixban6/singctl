@@ -132,6 +132,18 @@ func CuratedUpstreamPresets() []UpstreamPreset {
 			Protocol:    "DoT",
 			Recommended: false,
 		},
+		{
+			Address:     "quic://223.5.5.5:853",
+			Name:        "阿里云公共 DNS · 主 DoQ",
+			Protocol:    "DoQ",
+			Recommended: false,
+		},
+		{
+			Address:     "quic://223.6.6.6:853",
+			Name:        "阿里云公共 DNS · 备 DoQ",
+			Protocol:    "DoQ",
+			Recommended: false,
+		},
 	}
 }
 
@@ -371,8 +383,10 @@ func NormalizeAndValidateUpstream(raw string) (normalized string, ipLiteral stri
 	}
 
 	scheme := strings.ToLower(u.Scheme)
-	if scheme != "https" && scheme != "tls" {
-		return "", "", "", fmt.Errorf("仅支持 https:// (DoH) 或 tls:// (DoT) 加密上游（当前: %s://）", scheme)
+	switch scheme {
+	case "https", "tls", "quic", "h3":
+	default:
+		return "", "", "", fmt.Errorf("仅支持 https:// (DoH)、tls:// (DoT)、quic:// (DoQ) 或 h3:// (DoH3) 加密上游（当前: %s://）", scheme)
 	}
 
 	host := strings.ToLower(strings.TrimSpace(u.Hostname()))
@@ -385,6 +399,9 @@ func NormalizeAndValidateUpstream(raw string) (normalized string, ipLiteral stri
 		if pNum == 53 {
 			return "", "", "", errors.New("禁止使用 53 明文端口作为上游，避免透明代理网关回环死锁")
 		}
+	}
+	if scheme == "quic" && port == "" {
+		port = "853"
 	}
 
 	var hostWithPort string
@@ -414,16 +431,19 @@ func NormalizeAndValidateUpstream(raw string) (normalized string, ipLiteral stri
 		}
 	}
 
-	if scheme == "https" {
+	switch scheme {
+	case "https", "h3":
 		path := u.EscapedPath()
 		if path == "" || path == "/" {
 			path = "/dns-query"
 		}
-		normalized = "https://" + hostWithPort + path
+		normalized = scheme + "://" + hostWithPort + path
 		if u.RawQuery != "" {
 			normalized += "?" + u.RawQuery
 		}
-	} else {
+	case "quic":
+		normalized = "quic://" + hostWithPort
+	default:
 		normalized = "tls://" + hostWithPort
 	}
 
@@ -553,26 +573,37 @@ func (m *Manager) SetDNSUpstreams(ctx context.Context, rawUpstreams []string, ra
 	}
 
 	if !skipProbe {
-		probeFn := m.probeUpstreamListFn
-		if probeFn == nil {
-			probeFn = ProbeUpstreamList
-		}
-		items := probeFn(ctx, cleaned, "qq.com", 2800*time.Millisecond)
-		anyHealthy := false
-		var firstErr string
-		for _, it := range items {
-			key := strings.ToLower(strings.TrimSpace(it.Address))
-			if _, existed := prevSet[key]; !existed && len(prevSet) > 0 && !it.Healthy {
-				return nil, mode, nil, fmt.Errorf("新增上游 %s 探测失败，已拦截添加：%s", it.Address, cmp.Or(it.Error, "连接超时"))
-			}
-			if it.Healthy {
-				anyHealthy = true
-			} else if firstErr == "" && it.Error != "" {
-				firstErr = fmt.Sprintf("%s (%s)", it.Address, it.Error)
+		probeTargets := make([]string, 0, len(cleaned))
+		for _, addr := range cleaned {
+			lower := strings.ToLower(addr)
+			if strings.HasPrefix(lower, "https://") || strings.HasPrefix(lower, "tls://") {
+				probeTargets = append(probeTargets, addr)
+			} else if _, existed := prevSet[lower]; !existed {
+				notes = append(notes, fmt.Sprintf("%s 已交由引擎接管（跳过直连探测）", addr))
 			}
 		}
-		if !anyHealthy {
-			return nil, mode, nil, fmt.Errorf("所选上游均无法完成加密解析验证，已拦截保存以防断网：%s", cmp.Or(firstErr, "连接超时"))
+		if len(probeTargets) > 0 {
+			probeFn := m.probeUpstreamListFn
+			if probeFn == nil {
+				probeFn = ProbeUpstreamList
+			}
+			items := probeFn(ctx, probeTargets, "qq.com", 2800*time.Millisecond)
+			anyHealthy := false
+			var firstErr string
+			for _, it := range items {
+				key := strings.ToLower(strings.TrimSpace(it.Address))
+				if _, existed := prevSet[key]; !existed && len(prevSet) > 0 && !it.Healthy {
+					return nil, mode, nil, fmt.Errorf("新增上游 %s 探测失败，已拦截添加：%s", it.Address, cmp.Or(it.Error, "连接超时"))
+				}
+				if it.Healthy {
+					anyHealthy = true
+				} else if firstErr == "" && it.Error != "" {
+					firstErr = fmt.Sprintf("%s (%s)", it.Address, it.Error)
+				}
+			}
+			if !anyHealthy {
+				return nil, mode, nil, fmt.Errorf("所选上游均无法完成加密解析验证，已拦截保存以防断网：%s", cmp.Or(firstErr, "连接超时"))
+			}
 		}
 	}
 

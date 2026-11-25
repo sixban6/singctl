@@ -198,6 +198,7 @@ type DeviceSummary struct {
 	MaxSecurityScore int     `json:"maxSecurityScore"`
 	MaxPrivacyScore  int     `json:"maxPrivacyScore"`
 	MaxRiskScore     int     `json:"maxRiskScore"`
+	AllowOverseas    bool    `json:"allowOverseas"`
 }
 
 // Report 汇总完整的设备审计分析报告与当前黑名单状态。
@@ -220,6 +221,7 @@ type Report struct {
 	BlockRules        []config.BlockRule         `json:"blockRules"`
 	Throttles         []config.AuditThrottleRule `json:"throttles,omitempty"`
 	Whitelist         []string                   `json:"whitelist,omitempty"`
+	DirectDevices     []string                   `json:"directDevices,omitempty"`
 }
 
 // BlockActionResult 记录执行“一键双层拉黑”或“解封”后的各层执行反馈。
@@ -232,6 +234,18 @@ type BlockActionResult struct {
 	DNSMode           string `json:"dnsMode,omitempty"`
 	KilledConnections int    `json:"killedConnections"`
 	Message           string `json:"message"`
+}
+
+// DeviceAccessResult 记录单台局域网设备「允许外网分流 / 仅限 Direct 直出」切换结果。
+type DeviceAccessResult struct {
+	OK                bool     `json:"ok"`
+	DeviceIP          string   `json:"deviceIp"`
+	AllowOverseas     bool     `json:"allowOverseas"`
+	DirectDevices     []string `json:"directDevices"`
+	ConfigSaved       bool     `json:"configSaved"`
+	SingBoxSynced     bool     `json:"singboxSynced"`
+	KilledConnections int      `json:"killedConnections"`
+	Message           string   `json:"message"`
 }
 
 // WriteCSV 将审计明细流导出为纯正 UTF-8（不带 BOM）的 CSV 格式。

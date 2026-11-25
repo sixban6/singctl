@@ -4,6 +4,7 @@ import {
   AuditAIReview,
   AuditBlockBatchItem,
   AuditBlockBatchResult,
+  AuditDeviceAccessResult,
   AuditFlowRecord,
   AuditReport,
 } from '../types';
@@ -97,5 +98,11 @@ export const auditApi = {
     request<{ ok: boolean; closed: number; all: boolean; message: string }>('/api/audit/close-connections', {
       method: 'POST',
       body: JSON.stringify(payload),
+    }),
+
+  setAuditDeviceAccess: (deviceIp: string, allowOverseas: boolean) =>
+    request<AuditDeviceAccessResult>('/api/audit/device-access', {
+      method: 'POST',
+      body: JSON.stringify({ deviceIp, allowOverseas }),
     }),
 };

@@ -17,6 +17,7 @@ import (
 	"singctl/internal/config"
 	"singctl/internal/constant"
 	"singctl/internal/daemon"
+	"singctl/internal/gateway"
 	"singctl/internal/localdns"
 	"singctl/internal/logger"
 	"singctl/internal/singbox"
@@ -32,7 +33,7 @@ func (s *Server) newDNSRegistry(cfg *config.Config) *localdns.Registry {
 	}
 
 	upstreamGW := ""
-	if runtime.GOOS == "linux" || s.opts.GatewayProberForTest != nil {
+	if (cfg == nil || cfg.Gateway.EffectiveMode() != gateway.ModeSide) && (runtime.GOOS == "linux" || s.opts.GatewayProberForTest != nil) {
 		topo := s.probeGatewayTopology()
 		upstreamGW = strings.TrimSpace(topo.CurrentGatewayIP)
 	}

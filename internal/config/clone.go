@@ -127,6 +127,7 @@ func (c *Config) Clone() *Config {
 
 	out.Audit.Whitelist = slices.Clone(c.Audit.Whitelist)
 	out.Audit.PCDNBlock = cloneBoolPtr(c.Audit.PCDNBlock)
+	out.Audit.DirectDevices = slices.Clone(c.Audit.DirectDevices)
 	out.Audit.Throttles = slices.Clone(c.Audit.Throttles)
 
 	out.CustomRules.Block = slices.Clone(c.CustomRules.Block)

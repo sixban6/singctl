@@ -186,7 +186,7 @@ func (e *SmartDNSEngine) SetUpstreams(ctx context.Context, rawUpstreams []string
 			continue
 		}
 		lower := strings.ToLower(s)
-		if strings.HasPrefix(lower, "https://") || strings.HasPrefix(lower, "tls://") {
+		if strings.HasPrefix(lower, "https://") || strings.HasPrefix(lower, "tls://") || strings.HasPrefix(lower, "quic://") || strings.HasPrefix(lower, "h3://") {
 			if norm, _, note, err := adguard.NormalizeAndValidateUpstream(s); err == nil {
 				s = norm
 				if note != "" {

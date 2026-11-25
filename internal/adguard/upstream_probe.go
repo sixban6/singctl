@@ -145,7 +145,14 @@ func ProbeSingleUpstream(ctx context.Context, upstream, domain string, timeout t
 	switch strings.ToLower(u.Scheme) {
 	case "https":
 		respWire, err = queryDoHWireformat(probeCtx, strings.TrimSpace(upstream), queryWire, timeout)
-	case "tls":
+	case "h3":
+		uCopy := *u
+		uCopy.Scheme = "https"
+		if uCopy.Path == "" || uCopy.Path == "/" {
+			uCopy.Path = "/dns-query"
+		}
+		respWire, err = queryDoHWireformat(probeCtx, uCopy.String(), queryWire, timeout)
+	case "tls", "quic":
 		respWire, err = queryDoTWireformat(probeCtx, u, queryWire, timeout)
 	case "udp":
 		respWire, err = queryUDPWireformat(probeCtx, u, queryWire, timeout)
@@ -510,7 +517,7 @@ func EnsureRuntimeFirewallBypass(ips []string) {
 					continue
 				}
 				_ = exec.CommandContext(ctx, nftPath, "insert", "rule", "inet", "sing-box", "output",
-					"ip", "daddr", v4, "tcp", "dport", "{", "443,", "853", "}", "accept").Run()
+					"ip", "daddr", v4, "meta", "l4proto", "{", "tcp,", "udp", "}", "th", "dport", "{", "443,", "853", "}", "accept").Run()
 			}
 			return
 		}
@@ -525,9 +532,11 @@ func EnsureRuntimeFirewallBypass(ips []string) {
 		}
 		if targetChain != "" {
 			for _, v4 := range customIPv4s {
-				for _, port := range []string{"443", "853"} {
-					if exec.CommandContext(ctx, iptPath, "-t", "mangle", "-C", targetChain, "-d", v4, "-p", "tcp", "--dport", port, "-j", "RETURN").Run() != nil {
-						_ = exec.CommandContext(ctx, iptPath, "-t", "mangle", "-I", targetChain, "1", "-d", v4, "-p", "tcp", "--dport", port, "-j", "RETURN").Run()
+				for _, proto := range []string{"tcp", "udp"} {
+					for _, port := range []string{"443", "853"} {
+						if exec.CommandContext(ctx, iptPath, "-t", "mangle", "-C", targetChain, "-d", v4, "-p", proto, "--dport", port, "-j", "RETURN").Run() != nil {
+							_ = exec.CommandContext(ctx, iptPath, "-t", "mangle", "-I", targetChain, "1", "-d", v4, "-p", proto, "--dport", port, "-j", "RETURN").Run()
+						}
 					}
 				}
 			}

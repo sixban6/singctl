@@ -6,6 +6,7 @@
 package config
 
 import (
+	"net/netip"
 	"slices"
 	"strings"
 	"time"
@@ -155,10 +156,92 @@ type AuditThrottleRule struct {
 
 // AuditConfig 定义客户端设备行为审计与可选 AI 深度研判配置。
 type AuditConfig struct {
-	Whitelist []string            `yaml:"whitelist,omitempty" json:"whitelist,omitempty"`   // 额外信任的域名后缀或 IP/CIDR 白名单
-	PCDNBlock *bool               `yaml:"pcdn_block,omitempty" json:"pcdn_block,omitempty"` // nil 或 true 默认开启内置防 PCDN 规则集拦截；显式 false 关闭
-	Throttles []AuditThrottleRule `yaml:"throttles,omitempty" json:"throttles,omitempty"`   // 按目标上行限速防爆列表（不断网限速）
-	AI        AuditAIConfig       `yaml:"ai,omitempty" json:"ai,omitempty"`                 // 可选 L2 AI 语义研判配置 (OpenAI 兼容接口)
+	Whitelist     []string            `yaml:"whitelist,omitempty" json:"whitelist,omitempty"`           // 额外信任的域名后缀或 IP/CIDR 白名单
+	PCDNBlock     *bool               `yaml:"pcdn_block,omitempty" json:"pcdn_block,omitempty"`         // nil 或 true 默认开启内置防 PCDN 规则集拦截；显式 false 关闭
+	DirectDevices []string            `yaml:"direct_devices,omitempty" json:"direct_devices,omitempty"` // 禁止走海外代理的局域网设备 IP 列表（强制全部走 Direct 出站 + dns_local）
+	Throttles     []AuditThrottleRule `yaml:"throttles,omitempty" json:"throttles,omitempty"`           // 按目标上行限速防爆列表（不断网限速）
+	AI            AuditAIConfig       `yaml:"ai,omitempty" json:"ai,omitempty"`                         // 可选 L2 AI 语义研判配置 (OpenAI 兼容接口)
+}
+
+func normalizeAuditDirectDeviceIP(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	if p, err := netip.ParsePrefix(s); err == nil && p.IsSingleIP() {
+		return p.Addr().Unmap().String()
+	}
+	if addr, err := netip.ParseAddr(s); err == nil {
+		return addr.Unmap().String()
+	}
+	return ""
+}
+
+// IsDeviceDirect 判断指定设备 IP 是否已被限制禁止走海外代理（全量 Direct 直出）。
+func (a AuditConfig) IsDeviceDirect(rawIP string) bool {
+	target := normalizeAuditDirectDeviceIP(rawIP)
+	if target == "" {
+		return false
+	}
+	for _, item := range a.DirectDevices {
+		if normalizeAuditDirectDeviceIP(item) == target {
+			return true
+		}
+	}
+	return false
+}
+
+// IsDeviceOverseasAllowed 判断指定设备是否允许访问海外外网（走 sing-box 代理分流规则）。
+func (a AuditConfig) IsDeviceOverseasAllowed(rawIP string) bool {
+	return !a.IsDeviceDirect(rawIP)
+}
+
+// SetDeviceOverseasAllowed 设置单设备是否允许走海外分流（false=加入 direct_devices 强制直连，true=移除并恢复分流）。
+func (a *AuditConfig) SetDeviceOverseasAllowed(rawIP string, allowOverseas bool) bool {
+	if a == nil {
+		return false
+	}
+	target := normalizeAuditDirectDeviceIP(rawIP)
+	if target == "" {
+		return false
+	}
+
+	cleaned := make([]string, 0, len(a.DirectDevices))
+	seen := make(map[string]struct{}, len(a.DirectDevices))
+	existed := false
+	for _, item := range a.DirectDevices {
+		norm := normalizeAuditDirectDeviceIP(item)
+		if norm == "" {
+			continue
+		}
+		if norm == target {
+			existed = true
+			if allowOverseas {
+				continue
+			}
+		}
+		if _, dup := seen[norm]; dup {
+			continue
+		}
+		seen[norm] = struct{}{}
+		cleaned = append(cleaned, norm)
+	}
+
+	if allowOverseas {
+		if len(cleaned) == 0 {
+			a.DirectDevices = nil
+		} else {
+			a.DirectDevices = cleaned
+		}
+		return existed
+	}
+
+	if existed {
+		a.DirectDevices = cleaned
+		return false
+	}
+	a.DirectDevices = append(cleaned, target)
+	return true
 }
 
 // IsPCDNBlockEnabled 返回是否开启内置防 PCDN 规则集拦截（默认开启）。
@@ -179,6 +262,7 @@ func (a *AuditConfig) SetPCDNBlock(enabled bool) {
 func (a AuditConfig) IsEmpty() bool {
 	return len(a.Whitelist) == 0 &&
 		a.PCDNBlock == nil &&
+		len(a.DirectDevices) == 0 &&
 		len(a.Throttles) == 0 &&
 		!a.AI.Enabled &&
 		strings.TrimSpace(a.AI.Endpoint) == "" &&

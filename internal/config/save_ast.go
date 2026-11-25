@@ -80,6 +80,8 @@ var defaultSaveCleanupRules = []ASTSubtreeCleanupRule{
 				return len(cfg.Audit.Throttles) == 0
 			case "pcdn_block":
 				return cfg.Audit.PCDNBlock == nil
+			case "direct_devices":
+				return len(cfg.Audit.DirectDevices) == 0
 			default:
 				return false
 			}

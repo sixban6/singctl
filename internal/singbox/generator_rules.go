@@ -27,6 +27,7 @@ func hasAnyCustomRules(cfg *config.Config) bool {
 	}
 	blocks := EffectiveBlockRules(cfg)
 	return len(blocks) > 0 ||
+		len(cfg.Audit.DirectDevices) > 0 ||
 		len(cfg.CustomRules.Outbounds) > 0 ||
 		len(cfg.CustomRules.DNS) > 0 ||
 		len(cfg.CustomRules.Route) > 0
@@ -118,6 +119,7 @@ func applyCustomRulesToDoc(cfg *config.Config, doc *sboption.Document, platform 
 		idx := sboption.BlockRouteInsertIndex(doc.Route.Rules)
 		doc.Route.Rules = slices.Insert(doc.Route.Rules, idx, blockRoute...)
 	}
+	ApplyDirectDevicesToDoc(doc, cfg.Audit.DirectDevices, platform)
 	return nil
 }
 

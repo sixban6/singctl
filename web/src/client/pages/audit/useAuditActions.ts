@@ -5,6 +5,7 @@ import { clientApi } from '../../api';
 import {
   AuditBlockBatchItem,
   AuditBlockRule,
+  AuditDeviceSummary,
   AuditFlowRecord,
   AuditReport,
 } from '../../types';
@@ -75,6 +76,7 @@ export function useAuditActions({
   const [pcdnToggleBusy, setPcdnToggleBusy] = useState(false);
   const [throttleBusy, setThrottleBusy] = useState(false);
   const [busyFlowKeys, setBusyFlowKeys] = useState<Set<string>>(() => new Set());
+  const [busyDeviceIps, setBusyDeviceIps] = useState<Set<string>>(() => new Set());
   const [closingAll, setClosingAll] = useState(false);
   const [closeAllConfirmOpen, setCloseAllConfirmOpen] = useState(false);
   const [subnetBlockConfirm, setSubnetBlockConfirm] = useState<SubnetBlockConfirmState | null>(null);
@@ -422,6 +424,52 @@ export function useAuditActions({
     }
   };
 
+  const handleToggleDeviceOverseas = async (
+    device: AuditDeviceSummary,
+    nextAllowOverseas: boolean,
+  ) => {
+    const ip = String(device?.deviceIp || '').trim();
+    if (!ip) return;
+    const label = device.deviceName && device.deviceName !== ip ? `${device.deviceName} (${ip})` : ip;
+    actionInFlightRef.current++;
+    setBusyDeviceIps((prev) => new Set(prev).add(ip));
+    try {
+      const res = await clientApi.setAuditDeviceAccess(ip, nextAllowOverseas);
+      success(
+        res.message ||
+          (nextAllowOverseas
+            ? `已允许 ${label} 访问外网（走 sing-box 分流）`
+            : `已关闭 ${label} 外网代理（全部流量走 Direct）`),
+        5500,
+        {
+          label: '撤销',
+          onClick: async () => {
+            actionInFlightRef.current++;
+            try {
+              await clientApi.setAuditDeviceAccess(ip, !nextAllowOverseas);
+              success(`已恢复 ${label} 的原出站策略`, 3000);
+              await loadAudit(false);
+            } catch (ue) {
+              error((ue as Error).message || '撤销设备外网策略失败');
+            } finally {
+              actionInFlightRef.current = Math.max(0, actionInFlightRef.current - 1);
+            }
+          },
+        },
+      );
+      await loadAudit(false);
+    } catch (e) {
+      error((e as Error).message || '切换设备外网策略失败');
+    } finally {
+      actionInFlightRef.current = Math.max(0, actionInFlightRef.current - 1);
+      setBusyDeviceIps((prev) => {
+        const next = new Set(prev);
+        next.delete(ip);
+        return next;
+      });
+    }
+  };
+
   const handleCloseFilteredConnections = async (flows: AuditFlowRecord[]) => {
     const connIds = Array.from(
       new Set(
@@ -506,6 +554,7 @@ export function useAuditActions({
     pcdnToggleBusy,
     throttleBusy,
     busyFlowKeys,
+    busyDeviceIps,
     closingAll,
     closeAllConfirmOpen,
     setCloseAllConfirmOpen,
@@ -526,6 +575,7 @@ export function useAuditActions({
     handleCloseSingleSubConn,
     handleCloseFilteredConnections,
     handleCloseAllConnections,
+    handleToggleDeviceOverseas,
     handleExportCSV,
   };
 }

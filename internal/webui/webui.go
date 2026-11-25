@@ -341,6 +341,7 @@ func (s *Server) registerRoutes() {
 	s.Mux.HandleFunc("POST /api/audit/throttle", s.guard(s.handleAuditThrottle))
 	s.Mux.HandleFunc("POST /api/audit/whitelist", s.guard(s.handleAuditWhitelist))
 	s.Mux.HandleFunc("POST /api/audit/close-connections", s.guard(s.handleAuditCloseConnections))
+	s.Mux.HandleFunc("POST /api/audit/device-access", s.guard(s.handleAuditDeviceAccess))
 
 	// 防火墙加固可视化与规则治理 API
 	s.Mux.HandleFunc("GET /api/firewall/overview", s.guard(s.handleFirewallOverviewGet))

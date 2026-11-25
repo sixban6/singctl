@@ -93,6 +93,7 @@ watchdog:                                      # (可选) 看门狗守护进程�
 
 # audit:                                        # (可选) 客户端局域网设备流量审计与防 PCDN 配置
 #   pcdn_block: true                            # 默认开启内置防 PCDN 规则集拦截 (设为 false 可关闭)
+#   direct_devices: ["192.168.1.50"]            # (可选) 禁止走海外代理的局域网设备 IP 列表 (全部流量强制走 Direct 直连)
 #   whitelist:                                  # 信任放行域名后缀或 IP/CIDR 白名单
 #     - "sync.example.com"
 #   throttles:                                  # 单目标上行限速防爆列表 (不断网封顶)

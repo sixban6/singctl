@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { AlertTriangle, Laptop, Network, Pencil, ShieldCheck, X } from 'lucide-react';
+import { AlertTriangle, Globe, Home, Laptop, Network, Pencil, ShieldCheck, X } from 'lucide-react';
 import {
   Badge,
   Button,
@@ -18,6 +18,9 @@ export interface AuditDevicesAndBannersProps {
   selectedDevice: AuditSelectedDevice | null;
   onSelectDevice: (device: AuditSelectedDevice | null) => void;
   onRenameDevice?: (device: AuditDeviceSummary) => void;
+  isAuditOnlyMode?: boolean;
+  busyDeviceIps?: Set<string>;
+  onToggleDeviceOverseas?: (device: AuditDeviceSummary, allowOverseas: boolean) => void;
   pcdnToggleBusy: boolean;
   pcdnBannerDismissed: boolean;
   onDismissPcdnBanner: () => void;
@@ -30,6 +33,9 @@ export const AuditDevicesAndBanners: React.FC<AuditDevicesAndBannersProps> = ({
   selectedDevice,
   onSelectDevice,
   onRenameDevice,
+  isAuditOnlyMode = false,
+  busyDeviceIps,
+  onToggleDeviceOverseas,
   pcdnToggleBusy,
   pcdnBannerDismissed,
   onDismissPcdnBanner,
@@ -139,6 +145,45 @@ export const AuditDevicesAndBanners: React.FC<AuditDevicesAndBannersProps> = ({
               安:{d.maxSecurityScore || 0} · 隐:{d.maxPrivacyScore || 0}
             </div>
           </div>
+        );
+      },
+    },
+    {
+      key: 'overseas',
+      header: '外网权限',
+      render: (d) => {
+        if (!d.deviceIp || d.deviceIp === '127.0.0.1' || d.deviceIp === '::1') {
+          return <Badge tone="neutral">本机网关</Badge>;
+        }
+        const allowed = d.allowOverseas !== false;
+        const devBusy = Boolean(busyDeviceIps?.has(d.deviceIp));
+        const disabled = isAuditOnlyMode || devBusy || !onToggleDeviceOverseas;
+        return (
+          <button
+            type="button"
+            disabled={disabled}
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleDeviceOverseas?.(d, !allowed);
+            }}
+            title={
+              isAuditOnlyMode
+                ? '当前处于无订阅纯直连审计模式，全网设备均走直连'
+                : allowed
+                  ? '当前允许访问外网（走 sing-box 分流规则），点击切换为全部走 Direct 直出'
+                  : '已禁止走海外代理，全部流量强制从 Direct 直出（仍保留去广告/防 PCDN/流量审计），点击恢复外网分流'
+            }
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium border whitespace-nowrap transition-colors ${
+              disabled ? 'opacity-55 cursor-not-allowed' : 'cursor-pointer'
+            } ${
+              allowed
+                ? 'bg-emerald-500/12 text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/20'
+                : 'bg-amber-500/12 text-amber-300 border-amber-500/35 hover:bg-amber-500/20'
+            }`}
+          >
+            {allowed ? <Globe className="w-3 h-3" /> : <Home className="w-3 h-3" />}
+            <span>{devBusy ? '切换中…' : allowed ? '允许外网' : '仅限直连'}</span>
+          </button>
         );
       },
     },

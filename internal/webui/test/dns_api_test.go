@@ -17,6 +17,7 @@ import (
 	"singctl/internal/common/sysinfo"
 	"singctl/internal/config"
 	"singctl/internal/constant"
+	"singctl/internal/gateway"
 	"singctl/internal/localdns"
 	"singctl/internal/platform/servicemgr"
 	"singctl/internal/singbox"
@@ -523,5 +524,94 @@ func TestWebUI_DNSWhitelist_DefaultSandboxWorkConfigHotSynced(t *testing.T) {
 	}
 	if !strings.Contains(string(workAfter), "work-sync.example.com") || !strings.Contains(string(workAfter), "wxaintpcos.wxqcloud.qq.com.cn") {
 		t.Fatalf("expected ujail sandbox work config synced with whitelist, got:\n%s", string(workAfter))
+	}
+}
+
+func TestWebUI_GatewayMode_UpstreamGatewayPresetGuard(t *testing.T) {
+	cases := []struct {
+		name       string
+		mode       string
+		mainIP     string
+		currentGW  string
+		wantPreset bool
+	}{
+		{
+			name:       "main_mode_shows_upstream_gateway_preset",
+			mode:       gateway.ModeMain,
+			currentGW:  "192.168.1.1",
+			wantPreset: true,
+		},
+		{
+			name:       "side_mode_hides_upstream_gateway_preset_to_prevent_loop",
+			mode:       gateway.ModeSide,
+			mainIP:     "192.168.1.1",
+			currentGW:  "192.168.1.1",
+			wantPreset: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			cfgPath := filepath.Join(tmpDir, "singctl.yaml")
+			smartBin := filepath.Join(tmpDir, "smartdns")
+			_ = os.WriteFile(smartBin, []byte("#!/bin/sh\necho 'smartdns 1.2025.46'\n"), 0755)
+
+			cfg := &config.Config{
+				DNS: config.ClientDNSConfig{
+					Engine: constant.DNSEngineSmartDNS,
+				},
+				Gateway: config.GatewayConfig{
+					Mode:         tc.mode,
+					MainRouterIP: tc.mainIP,
+				},
+			}
+			if err := config.Save(cfgPath, cfg); err != nil {
+				t.Fatal(err)
+			}
+
+			gw := tc.currentGW
+			srv := webui.New(webui.Options{
+				ConfigPath:              cfgPath,
+				AdGuardBinPath:          filepath.Join(tmpDir, "missing-agh"),
+				AdGuardConfigPath:       filepath.Join(tmpDir, "missing-agh.yaml"),
+				SmartDNSBinPath:         smartBin,
+				SmartDNSConfigPath:      filepath.Join(tmpDir, "smartdns.conf"),
+				SmartDNSRulesDir:        filepath.Join(tmpDir, "smartdns-rules.d"),
+				SmartDNSAuditLogPath:    filepath.Join(tmpDir, "smartdns-audit.log"),
+				LocalDNSServiceMgr:      servicemgr.NewMock(),
+				SkipAdGuardProbeForTest: true,
+				GatewayProberForTest: func() gateway.TopologyInfo {
+					return gateway.TopologyInfo{
+						CurrentGatewayIP:      gw,
+						SuggestedMainRouterIP: gw,
+					}
+				},
+			})
+
+			req := httptest.NewRequest(http.MethodGet, "/api/dns/overview", nil)
+			rec := httptest.NewRecorder()
+			srv.Mux.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("GET /api/dns/overview failed: code=%d body=%s", rec.Code, rec.Body.String())
+			}
+
+			var ov struct {
+				UpstreamPresets []adguard.UpstreamPreset `json:"upstreamPresets"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &ov); err != nil {
+				t.Fatalf("decode overview: %v", err)
+			}
+			found := false
+			for _, p := range ov.UpstreamPresets {
+				if p.Address == "udp://192.168.1.1:53" && p.Protocol == "Gateway" {
+					found = true
+					break
+				}
+			}
+			if found != tc.wantPreset {
+				t.Fatalf("Gateway preset presence=%v, want %v; presets=%+v", found, tc.wantPreset, ov.UpstreamPresets)
+			}
+		})
 	}
 }

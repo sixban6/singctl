@@ -48,6 +48,30 @@ func TestNormalizeAndValidateUpstream(t *testing.T) {
 			wantIP:   "223.6.6.6",
 		},
 		{
+			name:     "standard pure IP DoQ auto port 853",
+			input:    "quic://223.5.5.5",
+			wantNorm: "quic://223.5.5.5:853",
+			wantIP:   "223.5.5.5",
+		},
+		{
+			name:     "standard pure IP DoQ explicit port 853",
+			input:    "quic://223.6.6.6:853",
+			wantNorm: "quic://223.6.6.6:853",
+			wantIP:   "223.6.6.6",
+		},
+		{
+			name:     "domain DoQ auto port 853",
+			input:    "quic://dns.alidns.com",
+			wantNorm: "quic://dns.alidns.com:853",
+			wantIP:   "",
+		},
+		{
+			name:     "pure IP DoH3 auto /dns-query",
+			input:    "h3://223.5.5.5",
+			wantNorm: "h3://223.5.5.5/dns-query",
+			wantIP:   "223.5.5.5",
+		},
+		{
 			name:     "preserve alidns domain verbatim without IP rewrite",
 			input:    "https://dns.alidns.com/dns-query",
 			wantNorm: "https://dns.alidns.com/dns-query",
@@ -192,6 +216,23 @@ func TestNormalizeAndValidateUpstream(t *testing.T) {
 	_, _, _, err := adguard.NormalizeAndValidateUpstream("dot.pub")
 	if err == nil || !strings.Contains(err.Error(), "tls://dot.pub") || !strings.Contains(err.Error(), "https://dot.pub/dns-query") {
 		t.Fatalf("expected missing-scheme guidance with tls://dot.pub and https://dot.pub/dns-query, got: %v", err)
+	}
+
+	// Curated presets must include primary and backup Alibaba Cloud DoQ presets.
+	presets := adguard.CuratedUpstreamPresets()
+	wantDoQ := map[string]bool{
+		"quic://223.5.5.5:853": false,
+		"quic://223.6.6.6:853": false,
+	}
+	for _, p := range presets {
+		if _, ok := wantDoQ[p.Address]; ok && p.Protocol == "DoQ" {
+			wantDoQ[p.Address] = true
+		}
+	}
+	for addr, found := range wantDoQ {
+		if !found {
+			t.Fatalf("CuratedUpstreamPresets missing DoQ preset %q", addr)
+		}
 	}
 }
 
@@ -433,5 +474,120 @@ func TestSetDNSUpstreams_DomainSupportFallbackBypassAndSingleProbe(t *testing.T)
 	probeHealthyMap["tls://dot.onedns.net"] = false
 	if _, mode, _, err := mgr.SetDNSUpstreams(t.Context(), currentUpstreams, "fastest_addr", false); err != nil || mode != "fastest_addr" {
 		t.Fatalf("switching mode with existing flaky upstream should succeed while pure-IP upstream is healthy: mode=%q err=%v", mode, err)
+	}
+}
+
+func TestSetDNSUpstreams_QUICAndH3SkipDirectProbeAndSave(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/control/dns_config":
+			w.WriteHeader(http.StatusOK)
+		case "/control/dns_info":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"upstream_dns":  []string{"https://223.5.5.5/dns-query"},
+				"upstream_mode": "parallel",
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	u, _ := url.Parse(srv.URL)
+	tmpDir := t.TempDir()
+	fakeBin := filepath.Join(tmpDir, "AdGuardHome")
+	_ = os.WriteFile(fakeBin, []byte("#!/bin/sh\necho v0.107.80\n"), 0755)
+	aghYAML := filepath.Join(tmpDir, "AdGuardHome.yaml")
+	_ = os.WriteFile(aghYAML, []byte("http:\n  address: "+u.Host+"\ndns:\n  port: 5353\n  upstream_dns:\n    - https://223.5.5.5/dns-query\n  upstream_mode: parallel\n"), 0600)
+
+	cfg := &config.Config{}
+	cfg.DNS.Username = "root"
+	cfg.DNS.Password = "secret123"
+	mgr := adguard.NewManager(cfg, "")
+	mgr.SetPathsForTest(fakeBin, aghYAML)
+
+	probeCalls := 0
+	var bypassedIPs []string
+	mgr.SetUpstreamHooksForTest(
+		func(_ context.Context, upstreams []string, _ string, _ time.Duration) []adguard.UpstreamProbeItem {
+			probeCalls++
+			out := make([]adguard.UpstreamProbeItem, 0, len(upstreams))
+			for _, addr := range upstreams {
+				if strings.HasPrefix(addr, "quic://") || strings.HasPrefix(addr, "h3://") {
+					t.Errorf("quic/h3 upstream %q should skip direct probe", addr)
+				}
+				out = append(out, adguard.UpstreamProbeItem{Address: addr, Healthy: true})
+			}
+			return out
+		},
+		nil,
+		func(ips []string) { bypassedIPs = slices.Clone(ips) },
+	)
+
+	infos, _, notes, err := mgr.SetDNSUpstreams(t.Context(), []string{"quic://223.5.5.5", "h3://223.6.6.6"}, "parallel", false)
+	if err != nil {
+		t.Fatalf("SetDNSUpstreams with QUIC/H3 failed: %v", err)
+	}
+	if probeCalls != 0 {
+		t.Fatalf("expected probeFn skipped when all upstreams are quic/h3, got %d calls", probeCalls)
+	}
+	if len(infos) != 2 || infos[0].Address != "quic://223.5.5.5:853" || infos[1].Address != "h3://223.6.6.6/dns-query" {
+		t.Fatalf("unexpected infos: %+v", infos)
+	}
+	if !slices.Contains(bypassedIPs, "223.5.5.5") || !slices.Contains(bypassedIPs, "223.6.6.6") {
+		t.Fatalf("expected QUIC/H3 public IPs bypassed in firewall, got %v", bypassedIPs)
+	}
+	if len(notes) == 0 {
+		t.Fatalf("expected skip-probe note for quic/h3")
+	}
+}
+
+func TestProbeSingleUpstream_QUICAndH3(t *testing.T) {
+	// Bind an ephemeral TCP listener and close it immediately to guarantee an unused loopback port.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unusedAddr := ln.Addr().String()
+	_ = ln.Close()
+
+	// Start a real local TLS server (self-signed cert) to verify h3:// actually performs HTTPS/TLS handshake
+	// instead of bailing out with "暂不支持直接探测协议".
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer tlsSrv.Close()
+	tlsU, _ := url.Parse(tlsSrv.URL)
+
+	cases := []struct {
+		name     string
+		upstream string
+		wantErr  string
+	}{
+		{
+			name:     "quic_attempts_real_probe",
+			upstream: "quic://" + unusedAddr,
+			wantErr:  "目标端口拒绝连接",
+		},
+		{
+			name:     "h3_attempts_real_doh_probe",
+			upstream: "h3://" + tlsU.Host,
+			wantErr:  "TLS 证书",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := adguard.ProbeSingleUpstream(t.Context(), tc.upstream, "qq.com", time.Second)
+			if res.Healthy {
+				t.Fatalf("expected non-healthy against %s, got healthy: %+v", tc.upstream, res)
+			}
+			if strings.Contains(res.Error, "暂不支持直接探测协议") {
+				t.Fatalf("expected %s to attempt real probe, still got unsupported error: %q", tc.upstream, res.Error)
+			}
+			if !strings.Contains(res.Error, tc.wantErr) {
+				t.Fatalf("expected error containing %q for %s, got %q", tc.wantErr, tc.upstream, res.Error)
+			}
+		})
 	}
 }

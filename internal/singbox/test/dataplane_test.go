@@ -101,8 +101,8 @@ func TestRenderSingBoxNFTBatch_SingleTransactionParityAndGuards(t *testing.T) {
 		`iifname "lo" meta mark 0x2 meta l4proto { tcp, udp } tproxy to :7895 meta mark set 0x2 accept`,
 		`ip saddr { 192.168.20.0/24 } fib daddr type != local accept comment "singctl-vlan-bypass"`,
 		`meta l4proto { tcp, udp } th dport 53 tproxy to :7895 meta mark set 0x1 accept comment "DNS透明代理"`,
-		`ip daddr { 223.5.5.5, 198.51.100.53 } tcp dport { 443, 853 } accept`,
-		`ip6 daddr { 2001:db8::53 } tcp dport { 443, 853 } accept`,
+		`ip daddr { 223.5.5.5, 198.51.100.53 } meta l4proto { tcp, udp } th dport { 443, 853 } accept`,
+		`ip6 daddr { 2001:db8::53 } meta l4proto { tcp, udp } th dport { 443, 853 } accept`,
 		`meta mark 0x80000 accept`,
 	} {
 		if !strings.Contains(script, want) {
@@ -171,6 +171,10 @@ func TestRenderSingBoxIPTablesRestore_CapsFallbackAndParity(t *testing.T) {
 		"-A SING_BOX -s 192.168.30.0/24",
 		"-A SING_BOX -p udp --dport 53 -j TPROXY --on-port 7895 --tproxy-mark 1",
 		"-A SING_BOX_OUTPUT -m mark --mark 0x80000 -j RETURN",
+		"-A SING_BOX_OUTPUT -d 223.5.5.5 -p tcp --dport 443 -j RETURN",
+		"-A SING_BOX_OUTPUT -d 223.5.5.5 -p udp --dport 443 -j RETURN",
+		"-A SING_BOX_OUTPUT -d 223.5.5.5 -p tcp --dport 853 -j RETURN",
+		"-A SING_BOX_OUTPUT -d 223.5.5.5 -p udp --dport 853 -j RETURN",
 		"COMMIT",
 	} {
 		if !strings.Contains(v4Degraded, want) {
@@ -194,6 +198,9 @@ func TestRenderSingBoxIPTablesRestore_CapsFallbackAndParity(t *testing.T) {
 		"-A SING_BOX -d 2001:db8:abcd::/64 -j RETURN",
 		"-A SING_BOX_OUTPUT -p icmpv6 -j RETURN",
 		"-A SING_BOX_OUTPUT -d 2400:3200::1 -p tcp --dport 443 -j RETURN",
+		"-A SING_BOX_OUTPUT -d 2400:3200::1 -p udp --dport 443 -j RETURN",
+		"-A SING_BOX_OUTPUT -d 2400:3200::1 -p tcp --dport 853 -j RETURN",
+		"-A SING_BOX_OUTPUT -d 2400:3200::1 -p udp --dport 853 -j RETURN",
 		"COMMIT",
 	} {
 		if !strings.Contains(v6Full, wantV6) {

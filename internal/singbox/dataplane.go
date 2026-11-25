@@ -229,14 +229,14 @@ func RenderSingBoxNFTBatch(in DataplaneInput) (string, error) {
 		for _, a := range norm.BypassDNSV4 {
 			strs = append(strs, a.Unmap().String())
 		}
-		fmt.Fprintf(&bypassDNSLines, "        ip daddr { %s } tcp dport { 443, 853 } accept comment \"Bypass local encrypted DNS upstreams\"\n", strings.Join(strs, ", "))
+		fmt.Fprintf(&bypassDNSLines, "        ip daddr { %s } meta l4proto { tcp, udp } th dport { 443, 853 } accept comment \"Bypass local encrypted DNS upstreams\"\n", strings.Join(strs, ", "))
 	}
 	if len(norm.BypassDNSV6) > 0 {
 		strs := make([]string, 0, len(norm.BypassDNSV6))
 		for _, a := range norm.BypassDNSV6 {
 			strs = append(strs, a.Unmap().String())
 		}
-		fmt.Fprintf(&bypassDNSLines, "        ip6 daddr { %s } tcp dport { 443, 853 } accept comment \"Bypass local IPv6 encrypted DNS upstreams\"\n", strings.Join(strs, ", "))
+		fmt.Fprintf(&bypassDNSLines, "        ip6 daddr { %s } meta l4proto { tcp, udp } th dport { 443, 853 } accept comment \"Bypass local IPv6 encrypted DNS upstreams\"\n", strings.Join(strs, ", "))
 	}
 
 	body := fmt.Sprintf(`#!/usr/sbin/nft -f
@@ -371,8 +371,10 @@ func RenderSingBoxIPTablesRestore(in DataplaneInput, caps IPTablesCaps) (v4Batch
 	v4.WriteString("-A SING_BOX_OUTPUT -o tailscale+ -j RETURN\n")
 	for _, dnsIP := range norm.BypassDNSV4 {
 		s := dnsIP.Unmap().String()
-		fmt.Fprintf(&v4, "-A SING_BOX_OUTPUT -d %s -p tcp --dport 443 -j RETURN\n", s)
-		fmt.Fprintf(&v4, "-A SING_BOX_OUTPUT -d %s -p tcp --dport 853 -j RETURN\n", s)
+		for _, proto := range []string{"tcp", "udp"} {
+			fmt.Fprintf(&v4, "-A SING_BOX_OUTPUT -d %s -p %s --dport 443 -j RETURN\n", s, proto)
+			fmt.Fprintf(&v4, "-A SING_BOX_OUTPUT -d %s -p %s --dport 853 -j RETURN\n", s, proto)
+		}
 	}
 	v4.WriteString("-A SING_BOX_OUTPUT -d 127.0.0.0/8 -j RETURN\n")
 	v4.WriteString("-A SING_BOX_OUTPUT -d 100.64.0.0/10 -j RETURN\n")
@@ -420,8 +422,10 @@ func RenderSingBoxIPTablesRestore(in DataplaneInput, caps IPTablesCaps) (v4Batch
 	v6.WriteString("-A SING_BOX_OUTPUT -p icmpv6 -j RETURN\n")
 	for _, dnsV6 := range norm.BypassDNSV6 {
 		s := dnsV6.Unmap().String()
-		fmt.Fprintf(&v6, "-A SING_BOX_OUTPUT -d %s -p tcp --dport 443 -j RETURN\n", s)
-		fmt.Fprintf(&v6, "-A SING_BOX_OUTPUT -d %s -p tcp --dport 853 -j RETURN\n", s)
+		for _, proto := range []string{"tcp", "udp"} {
+			fmt.Fprintf(&v6, "-A SING_BOX_OUTPUT -d %s -p %s --dport 443 -j RETURN\n", s, proto)
+			fmt.Fprintf(&v6, "-A SING_BOX_OUTPUT -d %s -p %s --dport 853 -j RETURN\n", s, proto)
+		}
 	}
 	v6.WriteString("-A SING_BOX_OUTPUT -d ::1/128 -j RETURN\n")
 	v6.WriteString("-A SING_BOX_OUTPUT -d fd7a:115c:a1e0::/48 -j RETURN\n")

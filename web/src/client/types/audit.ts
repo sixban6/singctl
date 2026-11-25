@@ -21,6 +21,7 @@ export interface AuditDeviceSummary {
   maxRiskScore: number;
   maxSecurityScore: number;
   maxPrivacyScore: number;
+  allowOverseas?: boolean;
 }
 
 export interface AuditDirectIPSubnetCluster {
@@ -160,7 +161,19 @@ export interface AuditReport {
   devices: AuditDeviceSummary[];
   flows: AuditFlowRecord[];
   blockRules: AuditBlockRule[];
+  directDevices?: string[];
   message?: string;
+}
+
+export interface AuditDeviceAccessResult {
+  ok: boolean;
+  deviceIp: string;
+  allowOverseas: boolean;
+  directDevices: string[];
+  configSaved?: boolean;
+  singboxSynced?: boolean;
+  killedConnections: number;
+  message: string;
 }
 
 export interface AuditAIConfig {
