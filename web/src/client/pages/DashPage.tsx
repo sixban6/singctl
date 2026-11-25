@@ -27,6 +27,7 @@ import { ClientHealthResponse, ClientStatusResponse, SbProxiesSnapshot } from '.
 import { TrafficFlowCard } from '../components/TrafficFlowCard';
 import { getEngineDisplayName, getStatusDNS } from './adguard/adguardHelpers';
 import { DashIOSImportDrawer } from './dash/DashIOSImportDrawer';
+import { DelegatedTopologyCard } from './dash/DelegatedTopologyCard';
 import { DoctorDrawer } from './dash/DoctorDrawer';
 import { HostMetricsStrip } from './dash/HostMetricsStrip';
 
@@ -146,23 +147,28 @@ export const DashPage: React.FC<DashPageProps> = ({
   const dnsEngineLabel = getEngineDisplayName(dnsEngine, dns?.activeEngineLabel);
   const subs = config?.subs || [];
   const effectiveWorkMode = status.gateway?.effectiveWorkMode || (subs.length > 0 ? 'proxy' : 'audit');
+  const isDelegatedMode = effectiveWorkMode === 'delegated';
   const isAuditMode = effectiveWorkMode === 'audit';
   const dnsFallbackDoH = !dnsInstalled && Boolean(dns?.fallbackDoHActive ?? sb.running);
   const dnsLinked = Boolean(dns?.singboxLinked);
   const dnsHealthy = dnsInstalled ? Boolean(dns?.dnsHealthy) : dnsFallbackDoH;
   const tsBadgeInfo = getTailscaleBadge(ts);
-  const workModeLabel = isAuditMode ? '审计模式' : '代理模式';
-  const primaryExitText = isAuditMode
-    ? sb.running
-      ? '直连审计中（免订阅）'
-      : '审计内核未启动'
-    : !sb.running
-      ? 'sing-box 启动后可用'
-      : proxySnap?.primaryNode
-        ? `${proxySnap.primaryGroup || 'Proxy'} → ${proxySnap.primaryNode}${proxySnap.primaryDelay && proxySnap.primaryDelay > 0 ? ` (${proxySnap.primaryDelay}ms)` : ''}`
-        : proxySnap?.error
-          ? '节点状态暂不可用'
-          : '读取中…';
+  const workModeLabel = isDelegatedMode ? '旁路由托管' : isAuditMode ? '审计模式' : '代理模式';
+  const primaryExitText = isDelegatedMode
+    ? status.gateway?.sideRouterIP
+      ? `旁路由托管 → ${status.gateway.sideRouterIP}`
+      : '旁路由托管（待绑定 IP）'
+    : isAuditMode
+      ? sb.running
+        ? '直连审计中（免订阅）'
+        : '审计内核未启动'
+      : !sb.running
+        ? 'sing-box 启动后可用'
+        : proxySnap?.primaryNode
+          ? `${proxySnap.primaryGroup || 'Proxy'} → ${proxySnap.primaryNode}${proxySnap.primaryDelay && proxySnap.primaryDelay > 0 ? ` (${proxySnap.primaryDelay}ms)` : ''}`
+          : proxySnap?.error
+            ? '节点状态暂不可用'
+            : '读取中…';
 
   return (
     <div className="space-y-5">
@@ -173,17 +179,23 @@ export const DashPage: React.FC<DashPageProps> = ({
           <button
             type="button"
             onClick={() => onNavigate('net', 'gw')}
-            title="点击前往「网关模式」切换审计模式 / 代理模式"
+            title="点击前往「网关模式」切换工作模式"
             className="cursor-pointer transition-opacity hover:opacity-85"
           >
-            <Badge tone={sb.running ? 'ok' : isAuditMode ? 'warn' : 'danger'} dot pulse={sb.running}>
-              {isAuditMode
-                ? sb.running
-                  ? '网关：审计模式'
-                  : '审计内核已停止'
-                : sb.running
-                  ? '网关：代理模式'
-                  : '代理内核已停止'}
+            <Badge
+              tone={isDelegatedMode || sb.running ? 'ok' : isAuditMode ? 'warn' : 'danger'}
+              dot
+              pulse={sb.running}
+            >
+              {isDelegatedMode
+                ? '网关：旁路由托管'
+                : isAuditMode
+                  ? sb.running
+                    ? '网关：审计模式'
+                    : '审计内核已停止'
+                  : sb.running
+                    ? '网关：代理模式'
+                    : '代理内核已停止'}
             </Badge>
           </button>
         }
@@ -220,6 +232,9 @@ export const DashPage: React.FC<DashPageProps> = ({
 
       {/* Host Live Telemetry Strip */}
       <HostMetricsStrip telemetry={host.telemetry} />
+
+      {/* Main + Side Router Delegated Co-orchestration Overview */}
+      <DelegatedTopologyCard status={status} onNavigate={onNavigate} />
 
       {/* Health Check Result Banner */}
       {health && (
@@ -259,8 +274,8 @@ export const DashPage: React.FC<DashPageProps> = ({
             >
               <Box className="w-4.5 h-4.5" />
             </div>
-            <Badge tone={sb.running ? 'ok' : sb.installed ? 'neutral' : 'warn'} dot pulse={sb.running}>
-              {sb.running ? (isAuditMode ? '审计运行中' : '运行中') : sb.installed ? '已停止' : '未安装'}
+            <Badge tone={sb.running ? 'ok' : isDelegatedMode ? 'neutral' : sb.installed ? 'neutral' : 'warn'} dot={sb.running} pulse={sb.running}>
+              {sb.running ? (isAuditMode ? '审计运行中' : '运行中') : isDelegatedMode ? '托管省电中' : sb.installed ? '已停止' : '未安装'}
             </Badge>
           </div>
           <div>
@@ -543,13 +558,15 @@ export const DashPage: React.FC<DashPageProps> = ({
         </div>
       </div>
 
-      {/* Traffic Flow Visual SVG Topology */}
-      <TrafficFlowCard
-        status={status}
-        proxySnap={proxySnap}
-        health={health}
-        onNavigate={onNavigate}
-      />
+      {/* Traffic Flow Visual SVG Topology (hidden in delegated mode where DelegatedTopologyCard takes over) */}
+      {!isDelegatedMode && (
+        <TrafficFlowCard
+          status={status}
+          proxySnap={proxySnap}
+          health={health}
+          onNavigate={onNavigate}
+        />
+      )}
 
       {/* Host & Subscriptions Two-Column Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">

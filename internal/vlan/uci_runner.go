@@ -385,6 +385,9 @@ func ReloadOpenWrtNetworkWithOptions(ctx context.Context, opts ReloadOptions, pr
 	if dnsRules := ReadDNSBypassRules(constant.VLANDNSBypassFile); len(dnsRules) > 0 {
 		applyRuntimeDNSBypass(cctx, dnsRules)
 	}
+	if sideSpec := ReadSideRouteSpec(constant.VLANSideRoutesFile); sideSpec.SideRouterIP != "" && len(sideSpec.CIDRs) > 0 {
+		_ = ApplyRuntimeSideRoutes(cctx, sideSpec, nil)
+	}
 	return errors.Join(errs...)
 }
 

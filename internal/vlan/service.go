@@ -28,11 +28,14 @@ type Env struct {
 	PrepareDMAHeadroom    func()
 	SyncProxyBypass       func(ctx context.Context, cidrs []string) error
 	SyncDNSBypass         func(ctx context.Context, rules []VLANDNSBypassRule) error
+	SyncSideRoutes        func(ctx context.Context, spec VLANSideRouteSpec) error
 	ReadFile              func(path string) ([]byte, error)
 	ListNetDevs           func() ([]string, error)
 	ReadIPv4Addrs         func() (map[string]string, error)
+	SideRouterIP          string
 	ProxyBypassFile       string
 	DNSBypassFile         string
+	SideRoutesFile        string
 	BoardJSONPath         string
 	DHCPLeasesPath        string
 }
@@ -109,6 +112,12 @@ func (s *Service) inspectState(ctx context.Context, callerIP string) (*Overview,
 	for _, c := range ReadProxyBypassList(s.proxyBypassFile()) {
 		bypassSet[c] = true
 	}
+	sideSpec := ReadSideRouteSpec(s.sideRoutesFile())
+	sideRouteSet := make(map[string]bool, len(sideSpec.CIDRs))
+	for _, c := range sideSpec.CIDRs {
+		sideRouteSet[c] = true
+	}
+	resolvedSideIP := cmp.Or(strings.TrimSpace(s.env.SideRouterIP), sideSpec.SideRouterIP)
 	cleanCallerIP := extractHostIP(callerIP)
 	callerAddr, callerAddrErr := netip.ParseAddr(cleanCallerIP)
 	boardModel := ""
@@ -118,7 +127,7 @@ func (s *Service) inspectState(ctx context.Context, callerIP string) (*Overview,
 
 	drv := s.registry.Detect(state.NetUCI, board, netDevs)
 	if drv == nil {
-		roSegments := buildSegments(state, map[string]map[string]string{}, map[string]int{}, ssids, bypassSet, callerAddr, callerAddrErr == nil)
+		roSegments := buildSegments(state, map[string]map[string]string{}, map[string]int{}, ssids, bypassSet, sideRouteSet, callerAddr, callerAddrErr == nil)
 		lanSec := state.NetUCI.ByName("lan")
 		lanDev := ""
 		if lanSec != nil {
@@ -159,7 +168,7 @@ func (s *Service) inspectState(ctx context.Context, callerIP string) (*Overview,
 	state.Driver = drv
 
 	ports, segPorts, segVLANs := drv.ParseTopology(state, s.readPortLink)
-	segments := buildSegments(state, segPorts, segVLANs, ssids, bypassSet, callerAddr, callerAddrErr == nil)
+	segments := buildSegments(state, segPorts, segVLANs, ssids, bypassSet, sideRouteSet, callerAddr, callerAddrErr == nil)
 
 	leasesRaw, _ := s.readFile(s.dhcpLeasesPath())
 	leaseCounts := countDHCPLeasesByCIDR(leasesRaw, segments)
@@ -227,6 +236,7 @@ func (s *Service) inspectState(ctx context.Context, callerIP string) (*Overview,
 		CallerIP:        cleanCallerIP,
 		CallerSegmentID: callerSegID,
 		CallerPort:      callerPort,
+		SideRouterIP:    resolvedSideIP,
 		Ports:           ports,
 		Radios:          radios,
 		ExistingSSIDs:   ssids,
@@ -271,21 +281,14 @@ func (s *Service) PreviewSave(ctx context.Context, callerIP string, rawReq SaveS
 	if validDNS, _ := normalizeAndValidateDHCPDNS(req.DHCPDNS); len(validDNS) > 0 {
 		req.DHCPDNS = validDNS
 	}
+	ensureSideRouterEffectiveDNS(ov, &req)
 
-	cmds, plain, bypassCIDRs, dnsBypassRules, routeHint, err := s.compileSavePlan(ov, state, req, existing)
+	prev, err := s.compileSavePlan(ov, state, req, existing)
 	if err != nil {
 		return &PreviewResult{Valid: false, Errors: []string{err.Error()}, Warnings: warns}, nil
 	}
-
-	return &PreviewResult{
-		Valid:             true,
-		Warnings:          warns,
-		PlainSummary:      plain,
-		UCICommands:       cmds,
-		ProxyBypassCIDRs:  bypassCIDRs,
-		DNSBypassRules:    dnsBypassRules,
-		UpstreamRouteHint: routeHint,
-	}, nil
+	prev.Warnings = warns
+	return prev, nil
 }
 
 // CommitSave 执行第一阶段：校验、原子写入 UCI 变更与透明代理/自定义 DNS 免劫持规则（不阻塞等待网络/无线重载）。
@@ -306,6 +309,9 @@ func (s *Service) CommitSave(ctx context.Context, callerIP string, rawReq SaveSe
 	}
 	if err := s.syncDNSBypass(ctx, prev.DNSBypassRules); err != nil {
 		return nil, fmt.Errorf("同步自定义 DNS 免劫持规则失败: %w", err)
+	}
+	if err := s.syncSideRoutes(ctx, prev.SideRouteSpec); err != nil {
+		return nil, fmt.Errorf("同步旁路由策略路由规则失败: %w", err)
 	}
 
 	req := normalizeSaveRequest(rawReq)
@@ -357,14 +363,11 @@ func (s *Service) PreviewDelete(ctx context.Context, callerIP, segID string) (*P
 	cmds = append(cmds, buildDeleteWirelessCommands(state.WirelessUCI, existing.ID)...)
 	cmds = append(cmds, buildDeleteFirewallCommands(state.Firewall, existing.ID)...)
 
-	var nextBypass []string
+	nextBypass, nextSide := collectSegmentProxyAndSideCIDRs(ov.Segments, existing.ID, SaveSegmentRequest{}, "")
 	var nextDNSBypass []VLANDNSBypassRule
 	for _, seg := range ov.Segments {
 		if seg.ID == existing.ID || seg.CIDR == "" {
 			continue
-		}
-		if seg.ProxyMode == ProxyModeDirect {
-			nextBypass = append(nextBypass, seg.CIDR)
 		}
 		if customDNS := effectiveCustomDNS(seg.DHCPDNS, seg.IPAddr); len(customDNS) > 0 {
 			nextDNSBypass = append(nextDNSBypass, VLANDNSBypassRule{
@@ -378,8 +381,8 @@ func (s *Service) PreviewDelete(ctx context.Context, callerIP, segID string) (*P
 		fmt.Sprintf("移除子网分段「%s」(%s)", cmp.Or(existing.DisplayName, existing.ID), existing.CIDR),
 		"自动清理关联 DHCP 池、防火墙区域与隔离规则，并安全解绑关联的无线网络",
 	}
-	if existing.ProxyMode == ProxyModeDirect {
-		plain = append(plain, "同步移除该网段的透明代理纯直连绕行规则")
+	if existing.ProxyMode == ProxyModeDirect || existing.ProxyMode == ProxyModeSideRouter {
+		plain = append(plain, "同步移除该网段的透明代理绕行与策略路由规则")
 	}
 
 	return &PreviewResult{
@@ -388,6 +391,7 @@ func (s *Service) PreviewDelete(ctx context.Context, callerIP, segID string) (*P
 		UCICommands:      cmds,
 		ProxyBypassCIDRs: nextBypass,
 		DNSBypassRules:   nextDNSBypass,
+		SideRouteSpec:    VLANSideRouteSpec{SideRouterIP: ov.SideRouterIP, CIDRs: nextSide},
 	}, nil
 }
 
@@ -408,6 +412,9 @@ func (s *Service) CommitDelete(ctx context.Context, callerIP, segID string) (*Ap
 	}
 	if err := s.syncDNSBypass(ctx, prev.DNSBypassRules); err != nil {
 		return nil, fmt.Errorf("同步自定义 DNS 免劫持规则失败: %w", err)
+	}
+	if err := s.syncSideRoutes(ctx, prev.SideRouteSpec); err != nil {
+		return nil, fmt.Errorf("同步旁路由策略路由规则失败: %w", err)
 	}
 	return &ApplyResult{
 		OK:           true,
@@ -446,14 +453,14 @@ func (s *Service) syncDNSBypass(ctx context.Context, rules []VLANDNSBypassRule) 
 	return SyncRuntimeDNSBypass(ctx, s.dnsBypassFile(), rules)
 }
 
-func (s *Service) compileSavePlan(ov *Overview, state *parsedState, req SaveSegmentRequest, existing *Segment) ([]string, []string, []string, []VLANDNSBypassRule, string, error) {
+func (s *Service) compileSavePlan(ov *Overview, state *parsedState, req SaveSegmentRequest, existing *Segment) (*PreviewResult, error) {
 	cidr, err := computeNetworkCIDR(req.IPAddr, req.Netmask)
 	if err != nil {
-		return nil, nil, nil, nil, "", err
+		return nil, err
 	}
 	netCmds, l3Dev, err := state.Driver.BuildNetworkCommands(state, req, existing)
 	if err != nil {
-		return nil, nil, nil, nil, "", err
+		return nil, err
 	}
 
 	var cmds []string
@@ -462,15 +469,12 @@ func (s *Service) compileSavePlan(ov *Overview, state *parsedState, req SaveSegm
 	cmds = append(cmds, buildWirelessCommands(state.WirelessUCI, ov.Radios, req, existing)...)
 	cmds = append(cmds, buildFirewallCommands(ov, state.Firewall, ov.WANSubnet, req)...)
 
-	// Compute resulting proxy bypass CIDR list and custom DNS bypass rules across all segments.
-	var bypassCIDRs []string
+	// Compute resulting proxy bypass CIDR list, side-router PBR CIDRs, and custom DNS bypass rules across all segments.
+	bypassCIDRs, sideCIDRs := collectSegmentProxyAndSideCIDRs(ov.Segments, req.ID, req, cidr.String())
 	var dnsBypassRules []VLANDNSBypassRule
 	for _, seg := range ov.Segments {
 		if seg.ID == req.ID || seg.CIDR == "" {
 			continue
-		}
-		if seg.ProxyMode == ProxyModeDirect {
-			bypassCIDRs = append(bypassCIDRs, seg.CIDR)
 		}
 		if customDNS := effectiveCustomDNS(seg.DHCPDNS, seg.IPAddr); len(customDNS) > 0 {
 			dnsBypassRules = append(dnsBypassRules, VLANDNSBypassRule{
@@ -479,10 +483,6 @@ func (s *Service) compileSavePlan(ov *Overview, state *parsedState, req SaveSegm
 			})
 		}
 	}
-	if req.ProxyMode == ProxyModeDirect {
-		bypassCIDRs = append(bypassCIDRs, cidr.String())
-	}
-	bypassCIDRs, _ = NormalizeBypassCIDRs(bypassCIDRs)
 	customDNS := effectiveCustomDNS(req.DHCPDNS, req.IPAddr)
 	if len(customDNS) > 0 {
 		dnsBypassRules = append(dnsBypassRules, VLANDNSBypassRule{
@@ -528,10 +528,13 @@ func (s *Service) compileSavePlan(ov *Overview, state *parsedState, req SaveSegm
 	if len(trunkPorts) > 0 {
 		plain = append(plain, fmt.Sprintf("物理网口 %s 开启多网一线透传（下联专业 AP / 交换机）", strings.Join(trunkPorts, " / ")))
 	}
-	if req.ProxyMode == ProxyModeDirect {
+	switch req.ProxyMode {
+	case ProxyModeSideRouter:
+		plain = append(plain, fmt.Sprintf("上网方式：交由旁路由 (%s) 透明分流与 DNS 解析（内网设备保持隔离，旁路由离线自动回退主路由直连）", ov.SideRouterIP))
+	case ProxyModeDirect:
 		plain = append(plain, "上网方式：纯直连绕过透明代理（不消耗代理流量，不误伤国内智能家居）")
-	} else {
-		plain = append(plain, "上网方式：跟随网关全局透明代理分流")
+	default:
+		plain = append(plain, "上网方式：跟随主路由工作模式转发")
 	}
 	var secNotes []string
 	if req.Policy.BlockRouterMgmt {
@@ -551,5 +554,13 @@ func (s *Service) compileSavePlan(ov *Overview, state *parsedState, req SaveSegm
 	if ov.WANIP != "" {
 		routeHint = fmt.Sprintf("ip route replace %s via %s", cidr.String(), ov.WANIP)
 	}
-	return cmds, plain, bypassCIDRs, dnsBypassRules, routeHint, nil
+	return &PreviewResult{
+		Valid:             true,
+		PlainSummary:      plain,
+		UCICommands:       cmds,
+		ProxyBypassCIDRs:  bypassCIDRs,
+		DNSBypassRules:    dnsBypassRules,
+		SideRouteSpec:     VLANSideRouteSpec{SideRouterIP: ov.SideRouterIP, CIDRs: sideCIDRs},
+		UpstreamRouteHint: routeHint,
+	}, nil
 }

@@ -53,7 +53,13 @@ func (s *Server) vlanService() *vlan.Service {
 	if s.opts.VLANServiceForTest != nil {
 		return s.opts.VLANServiceForTest
 	}
-	return vlan.NewService(vlan.Env{})
+	sideIP := ""
+	if cfg, err := s.loadConfigSnapshot(); err == nil && cfg != nil && !cfg.Gateway.IsSideRouter() {
+		sideIP = strings.TrimSpace(cfg.Gateway.SideRouterIP)
+	}
+	return vlan.NewService(vlan.Env{
+		SideRouterIP: sideIP,
+	})
 }
 
 func vlanSnapshotFiles() map[string]string {
@@ -64,6 +70,7 @@ func vlanSnapshotFiles() map[string]string {
 		"uci_firewall":      "/etc/config/firewall",
 		"vlan_proxy_bypass": constant.VLANProxyBypassFile,
 		"vlan_dns_bypass":   constant.VLANDNSBypassFile,
+		"vlan_side_routes":  constant.VLANSideRoutesFile,
 	}
 }
 

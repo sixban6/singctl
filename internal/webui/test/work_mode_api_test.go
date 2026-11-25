@@ -186,3 +186,94 @@ func TestGatewayWorkModeAPI_ZeroSubsBasicAuditAndProxyGuard(t *testing.T) {
 		}
 	})
 }
+
+func TestGatewayPutDelegatedModeAndSideRouter(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "singctl.yaml")
+	if err := config.Save(cfgPath, &config.Config{
+		Gateway: config.GatewayConfig{Mode: "main", WorkMode: config.WorkModeAudit},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var appliedModes []string
+	sbRunning := true
+	srv := webui.New(webui.Options{
+		ConfigPath: cfgPath,
+		GatewayProberForTest: func() gateway.TopologyInfo {
+			return gateway.TopologyInfo{LANIP: "192.168.55.1", LANIface: "br-lan"}
+		},
+		SingBoxRunningForTest: func() bool { return sbRunning },
+		WorkModeApplyForTest: func(_ context.Context, cfg *config.Config, targetMode string) (bool, string, error) {
+			appliedModes = append(appliedModes, targetMode)
+			if targetMode == config.WorkModeDelegated {
+				sbRunning = false
+			}
+			return true, "mock applied " + targetMode, nil
+		},
+	})
+
+	doJSON := func(method, path string, body any) *httptest.ResponseRecorder {
+		var buf bytes.Buffer
+		if body != nil {
+			_ = json.NewEncoder(&buf).Encode(body)
+		}
+		req := httptest.NewRequest(method, path, &buf)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		srv.Mux.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// 1. Side router role rejects workMode="delegated".
+	recSide := doJSON(http.MethodPut, "/api/gateway", map[string]any{
+		"mode":         "side",
+		"mainRouterIP": "192.168.55.1",
+		"workMode":     "delegated",
+	})
+	if recSide.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 when side router selects delegated mode, got code=%d body=%s", recSide.Code, recSide.Body.String())
+	}
+
+	// 2. Reject invalid / self-looped sideRouterIP.
+	for _, badIP := range []string{"127.0.0.1", "192.168.55.1", "8.8.8.8", "192.168.55.88;id"} {
+		recBad := doJSON(http.MethodPut, "/api/gateway", map[string]any{
+			"mode":         "main",
+			"workMode":     "delegated",
+			"sideRouterIP": badIP,
+		})
+		if recBad.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 for invalid sideRouterIP %q, got code=%d body=%s", badIP, recBad.Code, recBad.Body.String())
+		}
+	}
+
+	// 3. Valid switch to delegated mode with sideRouterIP saves 0600, applies live stop, and exposes via GET /api/gateway & /api/status.
+	failoverFalse := false
+	recOK := doJSON(http.MethodPut, "/api/gateway", map[string]any{
+		"mode":               "main",
+		"workMode":           "delegated",
+		"sideRouterIP":       "192.168.55.88",
+		"sideRouterFailover": failoverFalse,
+	})
+	if recOK.Code != http.StatusOK {
+		t.Fatalf("expected 200 switching to delegated mode, got code=%d body=%s", recOK.Code, recOK.Body.String())
+	}
+	if len(appliedModes) != 1 || appliedModes[0] != config.WorkModeDelegated {
+		t.Fatalf("expected WorkModeApplyForTest called with delegated, got %v", appliedModes)
+	}
+	if !strings.Contains(recOK.Body.String(), `"effectiveWorkMode":"delegated"`) ||
+		!strings.Contains(recOK.Body.String(), `"sideRouterIP":"192.168.55.88"`) ||
+		!strings.Contains(recOK.Body.String(), `"sideRouterFailover":false`) {
+		t.Fatalf("unexpected delegated response body: %s", recOK.Body.String())
+	}
+
+	recGet := doJSON(http.MethodGet, "/api/gateway", nil)
+	if recGet.Code != http.StatusOK || !strings.Contains(recGet.Body.String(), `"sideRouterStatus"`) || !strings.Contains(recGet.Body.String(), `"sideRouterIP":"192.168.55.88"`) {
+		t.Fatalf("expected sideRouterStatus & sideRouterIP in GET /api/gateway: %s", recGet.Body.String())
+	}
+
+	recStatus := doJSON(http.MethodGet, "/api/status", nil)
+	if recStatus.Code != http.StatusOK || !strings.Contains(recStatus.Body.String(), `"effectiveWorkMode":"delegated"`) || !strings.Contains(recStatus.Body.String(), `"sideRouterIP":"192.168.55.88"`) {
+		t.Fatalf("expected delegated status in GET /api/status: %s", recStatus.Body.String())
+	}
+}

@@ -463,6 +463,12 @@ func migrateClientTopLevelStage(mc *MigrationContext) {
 			if hasYAMLKey(oldGW, "main_router_ip") && mc.oldCfg.Gateway.MainRouterIP != "" {
 				mc.SetOrAddField("gateway", "main_router_ip", mc.oldCfg.Gateway.MainRouterIP)
 			}
+			if hasYAMLKey(oldGW, "side_router_ip") && mc.oldCfg.Gateway.SideRouterIP != "" {
+				mc.SetOrAddField("gateway", "side_router_ip", mc.oldCfg.Gateway.SideRouterIP)
+			}
+			if hasYAMLKey(oldGW, "side_router_failover") && mc.oldCfg.Gateway.SideRouterFailover != nil {
+				mc.SetOrAddField("gateway", "side_router_failover", strconv.FormatBool(*mc.oldCfg.Gateway.SideRouterFailover))
+			}
 			if hasYAMLKey(oldGW, "lan_iface") && mc.oldCfg.Gateway.LANIface != "" {
 				mc.SetOrAddField("gateway", "lan_iface", mc.oldCfg.Gateway.LANIface)
 			}

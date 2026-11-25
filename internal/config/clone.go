@@ -86,6 +86,7 @@ func (c *Config) Clone() *Config {
 	}
 
 	out := *c
+	out.Gateway.SideRouterFailover = cloneBoolPtr(c.Gateway.SideRouterFailover)
 
 	if c.Subs != nil {
 		out.Subs = make([]Subscription, len(c.Subs))

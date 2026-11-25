@@ -660,7 +660,7 @@ func (e *Enforcer) SetPCDNBlock(ctx context.Context, enabled bool) (*BlockAction
 
 // EnsureDefaultPCDNBlock 在守护进程或 WebUI 启动后幂等检查并将默认开启的防 PCDN 规则集同步到现有 sing-box 配置。
 func (e *Enforcer) EnsureDefaultPCDNBlock(ctx context.Context) (bool, error) {
-	if e == nil || e.cfg == nil || !e.cfg.Audit.IsPCDNBlockEnabled() || e.sbConfigPath == "" {
+	if e == nil || e.cfg == nil || !e.cfg.NeedsSingBox() || !e.cfg.Audit.IsPCDNBlockEnabled() || e.sbConfigPath == "" {
 		return false, nil
 	}
 	rawBytes, err := os.ReadFile(e.sbConfigPath)

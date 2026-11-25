@@ -333,3 +333,43 @@ func TestDNSBypassGuard_LegacyRuleCleanupAndConcurrentRace(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestDNSBypassGuard_AutoExemptsSideRouterIP(t *testing.T) {
+	cfg := &config.Config{
+		Gateway: config.GatewayConfig{
+			Mode:         "main",
+			WorkMode:     config.WorkModeAudit,
+			SideRouterIP: "192.168.55.88",
+		},
+	}
+	out, changed, err := singbox.ApplyDNSBypassGuardToConfigJSON(baseBypassTestConfigJSON(), cfg)
+	if err != nil || !changed {
+		t.Fatalf("apply failed: changed=%v err=%v", changed, err)
+	}
+	doc, err := sboption.ParseDocument([]byte(out))
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+	foundExempt := false
+	for _, r := range doc.Route.Rules {
+		if r.Type == "logical" && len(r.Rules) == 2 && slices.Contains(r.Rules[1].SourceIPCIDR.Slice(), "192.168.55.88/32") {
+			foundExempt = true
+			break
+		}
+	}
+	if !foundExempt {
+		t.Fatal("expected main router with side_router_ip to automatically exempt 192.168.55.88/32 in DNSBypassGuard rules")
+	}
+
+	dp := singbox.CollectDataplaneInput(cfg, nil, "", "", "")
+	foundBypass := false
+	for _, pfx := range dp.BypassVLANCIDRs {
+		if pfx.String() == "192.168.55.88/32" {
+			foundBypass = true
+			break
+		}
+	}
+	if !foundBypass {
+		t.Fatalf("expected CollectDataplaneInput to exempt 192.168.55.88/32 from TProxy, got %v", dp.BypassVLANCIDRs)
+	}
+}

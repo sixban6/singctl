@@ -11,8 +11,9 @@ const (
 	PortModeAccess = "access"
 	PortModeTrunk  = "trunk"
 
-	ProxyModeFollow = "follow"
-	ProxyModeDirect = "direct"
+	ProxyModeFollow     = "follow"
+	ProxyModeDirect     = "direct"
+	ProxyModeSideRouter = "side_router"
 
 	IPv6Off    = "off"
 	IPv6Relay  = "relay"
@@ -144,6 +145,7 @@ type Overview struct {
 	CallerIP          string             `json:"callerIp,omitempty"`
 	CallerSegmentID   string             `json:"callerSegmentId,omitempty"`
 	CallerPort        string             `json:"callerPort,omitempty"`
+	SideRouterIP      string             `json:"sideRouterIp,omitempty"`
 	Ports             []PortInfo         `json:"ports"`
 	Radios            []RadioInfo        `json:"radios"`
 	ExistingSSIDs     []WirelessSSIDInfo `json:"existingSsids"`
@@ -182,6 +184,7 @@ type PreviewResult struct {
 	UCICommands       []string            `json:"uciCommands,omitempty"`
 	ProxyBypassCIDRs  []string            `json:"proxyBypassCidrs,omitempty"`
 	DNSBypassRules    []VLANDNSBypassRule `json:"-"`
+	SideRouteSpec     VLANSideRouteSpec   `json:"-"`
 	UpstreamRouteHint string              `json:"upstreamRouteHint,omitempty"`
 }
 

@@ -366,6 +366,7 @@ export const VlanSegmentDrawer: React.FC<VlanSegmentDrawerProps> = ({
       <VlanDnsAndPolicyCard
         resetKey={`${draft.id}:${sessionSeq}`}
         draft={draft}
+        sideRouterIp={overview.sideRouterIp}
         privacyMask={privacyMask}
         onChangeDraft={setDraft}
       />

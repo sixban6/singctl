@@ -17,16 +17,19 @@ import (
 	"singctl/internal/localdns"
 	"singctl/internal/logger"
 	"singctl/internal/singbox"
+	"singctl/internal/vlan"
 )
 
 type gatewayPutRequest struct {
-	Mode             string  `json:"mode"`
-	WorkMode         *string `json:"workMode,omitempty"`
-	MainRouterIP     string  `json:"mainRouterIP"`
-	LANIface         string  `json:"lanIface,omitempty"`
-	IPv6Mode         *string `json:"ipv6Mode,omitempty"`
-	SafeCommit       bool    `json:"safeCommit,omitempty"`
-	SafeCommitTTLSec int     `json:"safeCommitTtlSec,omitempty"`
+	Mode               string  `json:"mode"`
+	WorkMode           *string `json:"workMode,omitempty"`
+	MainRouterIP       string  `json:"mainRouterIP"`
+	SideRouterIP       *string `json:"sideRouterIP,omitempty"`
+	SideRouterFailover *bool   `json:"sideRouterFailover,omitempty"`
+	LANIface           string  `json:"lanIface,omitempty"`
+	IPv6Mode           *string `json:"ipv6Mode,omitempty"`
+	SafeCommit         bool    `json:"safeCommit,omitempty"`
+	SafeCommitTTLSec   int     `json:"safeCommitTtlSec,omitempty"`
 }
 
 func (s *Server) isSingBoxRunning() bool {
@@ -55,12 +58,33 @@ func (s *Server) probeGatewayIPv6Status(ctx context.Context, gwCfg config.Gatewa
 	return gateway.ProbeIPv6Status(ctx, gwCfg, topo)
 }
 
+func (s *Server) probeSideRouterStatus(ctx context.Context, cfg config.GatewayConfig) *gateway.SideRouterStatus {
+	if cfg.EffectiveMode() == gateway.ModeSide {
+		return nil
+	}
+	sideIP := strings.TrimSpace(cfg.SideRouterIP)
+	if sideIP == "" {
+		return nil
+	}
+	if s.opts.GatewayProberForTest != nil {
+		return &gateway.SideRouterStatus{
+			Configured:  true,
+			IP:          sideIP,
+			LANDHCPMode: gateway.LANDHCPModeUnknown,
+		}
+	}
+	st := gateway.ProbeSideRouterStatus(ctx, sideIP, gateway.SideRouterProbeDeps{})
+	return &st
+}
+
 func (s *Server) gatewayStatusSummary() map[string]any {
 	mode := gateway.ModeMain
 	workMode := config.WorkModeAuto
 	effectiveWorkMode := config.WorkModeAudit
 	hasSubs := false
 	mainRouterIP := ""
+	sideRouterIP := ""
+	sideRouterFailover := true
 	ipv6Mode := config.GatewayIPv6Off
 	if cfg, err := s.loadConfigSnapshot(); err == nil && cfg != nil {
 		mode = cfg.Gateway.EffectiveMode()
@@ -68,16 +92,22 @@ func (s *Server) gatewayStatusSummary() map[string]any {
 		effectiveWorkMode = cfg.EffectiveWorkMode()
 		hasSubs = cfg.HasRealSubs()
 		mainRouterIP = strings.TrimSpace(cfg.Gateway.MainRouterIP)
+		if mode == gateway.ModeMain {
+			sideRouterIP = strings.TrimSpace(cfg.Gateway.SideRouterIP)
+			sideRouterFailover = cfg.Gateway.IsSideRouterFailoverEnabled()
+		}
 		ipv6Mode = cfg.Gateway.EffectiveIPv6Mode()
 	}
 	return map[string]any{
-		"supported":         runtime.GOOS == "linux",
-		"mode":              mode,
-		"workMode":          workMode,
-		"effectiveWorkMode": effectiveWorkMode,
-		"hasSubs":           hasSubs,
-		"mainRouterIP":      mainRouterIP,
-		"ipv6Mode":          ipv6Mode,
+		"supported":          runtime.GOOS == "linux",
+		"mode":               mode,
+		"workMode":           workMode,
+		"effectiveWorkMode":  effectiveWorkMode,
+		"hasSubs":            hasSubs,
+		"mainRouterIP":       mainRouterIP,
+		"sideRouterIP":       sideRouterIP,
+		"sideRouterFailover": sideRouterFailover,
+		"ipv6Mode":           ipv6Mode,
 	}
 }
 
@@ -88,18 +118,25 @@ func (s *Server) handleGatewayGet(w http.ResponseWriter, r *http.Request) {
 	cfg := s.readConfigOrEmpty()
 	topo := s.probeGatewayTopology()
 	ipv6Status := s.probeGatewayIPv6Status(r.Context(), cfg.Gateway, topo)
+	sideIP := ""
+	if cfg.Gateway.EffectiveMode() == gateway.ModeMain {
+		sideIP = strings.TrimSpace(cfg.Gateway.SideRouterIP)
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"supported":         runtime.GOOS == "linux" || s.opts.GatewayProberForTest != nil,
-		"mode":              cfg.Gateway.EffectiveMode(),
-		"workMode":          cfg.ConfiguredWorkMode(),
-		"effectiveWorkMode": cfg.EffectiveWorkMode(),
-		"hasSubs":           cfg.HasRealSubs(),
-		"mainRouterIP":      strings.TrimSpace(cfg.Gateway.MainRouterIP),
-		"lanIface":          strings.TrimSpace(cfg.Gateway.LANIface),
-		"ipv6Mode":          cfg.Gateway.EffectiveIPv6Mode(),
-		"ipv6Status":        ipv6Status,
-		"topology":          topo,
+		"supported":          runtime.GOOS == "linux" || s.opts.GatewayProberForTest != nil,
+		"mode":               cfg.Gateway.EffectiveMode(),
+		"workMode":           cfg.ConfiguredWorkMode(),
+		"effectiveWorkMode":  cfg.EffectiveWorkMode(),
+		"hasSubs":            cfg.HasRealSubs(),
+		"mainRouterIP":       strings.TrimSpace(cfg.Gateway.MainRouterIP),
+		"sideRouterIP":       sideIP,
+		"sideRouterFailover": cfg.Gateway.IsSideRouterFailoverEnabled(),
+		"sideRouterStatus":   s.probeSideRouterStatus(r.Context(), cfg.Gateway),
+		"lanIface":           strings.TrimSpace(cfg.Gateway.LANIface),
+		"ipv6Mode":           cfg.Gateway.EffectiveIPv6Mode(),
+		"ipv6Status":         ipv6Status,
+		"topology":           topo,
 	})
 }
 
@@ -130,7 +167,11 @@ func (s *Server) handleGatewayPut(w http.ResponseWriter, r *http.Request) {
 	if body.WorkMode != nil {
 		normWM, ok := config.NormalizeWorkMode(*body.WorkMode)
 		if !ok {
-			writeJSONError(w, http.StatusBadRequest, "无效的工作模式参数（仅支持 auto / audit / proxy）")
+			writeJSONError(w, http.StatusBadRequest, "无效的工作模式参数（仅支持 auto / audit / proxy / delegated）")
+			return
+		}
+		if normWM == config.WorkModeDelegated && rawMode == gateway.ModeSide {
+			writeJSONError(w, http.StatusBadRequest, "旁路由自身不能设为「旁路由托管」模式，请选择代理模式或审计模式")
 			return
 		}
 		if normWM == config.WorkModeProxy && !cfg.HasRealSubs() {
@@ -139,6 +180,20 @@ func (s *Server) handleGatewayPut(w http.ResponseWriter, r *http.Request) {
 		}
 		desiredWorkMode = normWM
 		workModeRequested = true
+	}
+	if rawMode == gateway.ModeSide && desiredWorkMode == config.WorkModeDelegated {
+		writeJSONError(w, http.StatusBadRequest, "旁路由自身不能设为「旁路由托管」模式，请选择代理模式或审计模式")
+		return
+	}
+
+	nextSideIP := strings.TrimSpace(cfg.Gateway.SideRouterIP)
+	if body.SideRouterIP != nil {
+		validSideIP, sideErr := gateway.ValidateSideRouterIP(*body.SideRouterIP, topo.LANIP)
+		if sideErr != nil {
+			writeJSONError(w, http.StatusBadRequest, sideErr.Error())
+			return
+		}
+		nextSideIP = validSideIP
 	}
 
 	desiredIPv6 := prevIPv6Mode
@@ -158,12 +213,18 @@ func (s *Server) handleGatewayPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	prevSideIP := strings.TrimSpace(cfg.Gateway.SideRouterIP)
 	nextGw := config.GatewayConfig{
-		Mode:         rawMode,
-		WorkMode:     desiredWorkMode,
-		MainRouterIP: strings.TrimSpace(body.MainRouterIP),
-		LANIface:     strings.TrimSpace(body.LANIface),
-		IPv6Mode:     desiredIPv6,
+		Mode:               rawMode,
+		WorkMode:           desiredWorkMode,
+		MainRouterIP:       strings.TrimSpace(body.MainRouterIP),
+		SideRouterIP:       nextSideIP,
+		SideRouterFailover: cfg.Gateway.SideRouterFailover,
+		LANIface:           strings.TrimSpace(body.LANIface),
+		IPv6Mode:           desiredIPv6,
+	}
+	if body.SideRouterFailover != nil {
+		nextGw.SetSideRouterFailover(*body.SideRouterFailover)
 	}
 	if _, err := gateway.ResolveAndValidate(nextGw, topo); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
@@ -181,6 +242,9 @@ func (s *Server) handleGatewayPut(w http.ResponseWriter, r *http.Request) {
 		nextGw.Mode = gateway.ModeMain
 		nextGw.MainRouterIP = ""
 		nextGw.LANIface = ""
+	} else {
+		nextGw.SideRouterIP = ""
+		nextGw.SideRouterFailover = nil
 	}
 	if nextGw.EffectiveIPv6Mode() == config.GatewayIPv6Off {
 		nextGw.IPv6Mode = config.GatewayIPv6Off
@@ -242,8 +306,11 @@ func (s *Server) handleGatewayPut(w http.ResponseWriter, r *http.Request) {
 	// 若本次请求正在切换工作模式（或旧配置升级后内核未运行需拉起审计/代理内核），
 	// 跳过对磁盘旧 config.json 的校验与改写，避免历史废弃配置阻断模式切换。
 	newEffectiveWorkMode := cfg.EffectiveWorkMode()
-	willApplyWorkMode := workModeRequested && (newEffectiveWorkMode != prevWorkMode || !s.isSingBoxRunning())
-	skipLegacySBIPv6Patch := willApplyWorkMode
+	needsWorkTransition := newEffectiveWorkMode != prevWorkMode ||
+		(cfg.NeedsSingBox() && !s.isSingBoxRunning()) ||
+		(!cfg.NeedsSingBox() && s.isSingBoxRunning())
+	willApplyWorkMode := workModeRequested && needsWorkTransition
+	skipLegacySBIPv6Patch := willApplyWorkMode || !cfg.NeedsSingBox()
 	sbPath := s.sbConfigPath()
 	if !skipLegacySBIPv6Patch {
 		if rawSBBytes, sbErr := os.ReadFile(sbPath); sbErr == nil && strings.TrimSpace(string(rawSBBytes)) != "" {
@@ -320,20 +387,30 @@ func (s *Server) handleGatewayPut(w http.ResponseWriter, r *http.Request) {
 		msg = "已保存为主路由模式 (main)"
 	}
 
+	if isRealHost && nextGw.EffectiveMode() == gateway.ModeMain && nextGw.SideRouterIP != "" && nextGw.SideRouterIP != prevSideIP {
+		if sideSpec := vlan.ReadSideRouteSpec(constant.VLANSideRoutesFile); len(sideSpec.CIDRs) > 0 {
+			sideSpec.SideRouterIP = nextGw.SideRouterIP
+			_ = vlan.SyncRuntimeSideRoutes(r.Context(), constant.VLANSideRoutesFile, sideSpec)
+		}
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":                true,
-		"appliedLive":       appliedLive,
-		"message":           msg,
-		"mode":              nextGw.EffectiveMode(),
-		"workMode":          cfg.ConfiguredWorkMode(),
-		"effectiveWorkMode": newEffectiveWorkMode,
-		"hasSubs":           cfg.HasRealSubs(),
-		"mainRouterIP":      nextGw.MainRouterIP,
-		"lanIface":          nextGw.LANIface,
-		"ipv6Mode":          nextGw.EffectiveIPv6Mode(),
-		"ipv6Status":        ipv6Status,
-		"ipv6Actions":       ipv6Actions,
-		"topology":          topo,
+		"ok":                 true,
+		"appliedLive":        appliedLive,
+		"message":            msg,
+		"mode":               nextGw.EffectiveMode(),
+		"workMode":           cfg.ConfiguredWorkMode(),
+		"effectiveWorkMode":  newEffectiveWorkMode,
+		"hasSubs":            cfg.HasRealSubs(),
+		"mainRouterIP":       nextGw.MainRouterIP,
+		"sideRouterIP":       nextGw.SideRouterIP,
+		"sideRouterFailover": nextGw.IsSideRouterFailoverEnabled(),
+		"sideRouterStatus":   s.probeSideRouterStatus(r.Context(), nextGw),
+		"lanIface":           nextGw.LANIface,
+		"ipv6Mode":           nextGw.EffectiveIPv6Mode(),
+		"ipv6Status":         ipv6Status,
+		"ipv6Actions":        ipv6Actions,
+		"topology":           topo,
 	})
 }
 
@@ -348,6 +425,15 @@ func (s *Server) applyWorkModeLive(ctx context.Context, cfg *config.Config, _, t
 	dnsPort := cfg.DNS.GetDNSPort()
 
 	switch targetMode {
+	case config.WorkModeDelegated:
+		if daemon.IsSingBoxRunning() {
+			if err := singbox.New(cfg).Stop(); err != nil {
+				return false, "", fmt.Errorf("停止本机 sing-box 内核失败: %w", err)
+			}
+		}
+		gateway.CleanupLocalTProxyTables(ctx, nil)
+		return true, "已切换为「旁路由托管（纯网关直通）」模式：本机 sing-box 与全局透明劫持已停用，分流交由旁路由处理", nil
+
 	case config.WorkModeAudit:
 		sb := singbox.New(cfg)
 		if err := sb.GenerateConfig(); err != nil {

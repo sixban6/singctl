@@ -84,9 +84,12 @@ func normalizeSaveRequest(req SaveSegmentRequest) SaveSegmentRequest {
 	default:
 		req.IPv6Mode = IPv6Off
 	}
-	if strings.EqualFold(strings.TrimSpace(req.ProxyMode), ProxyModeDirect) {
+	switch strings.ToLower(strings.TrimSpace(req.ProxyMode)) {
+	case ProxyModeDirect:
 		req.ProxyMode = ProxyModeDirect
-	} else {
+	case ProxyModeSideRouter:
+		req.ProxyMode = ProxyModeSideRouter
+	default:
 		req.ProxyMode = ProxyModeFollow
 	}
 	if len(req.DHCPDNS) > 0 {
@@ -251,8 +254,21 @@ func validateSaveRequest(ov *Overview, req SaveSegmentRequest, existing *Segment
 		}
 	}
 
-	if req.ProxyMode == ProxyModeDirect && req.IPv6Mode != IPv6Off {
-		warns = append(warns, "已开启「纯直连绕过代理」，建议同时关闭该网段 IPv6 以避免部分设备 IPv6 流量分流不一致")
+	if (req.ProxyMode == ProxyModeDirect || req.ProxyMode == ProxyModeSideRouter) && req.IPv6Mode != IPv6Off {
+		warns = append(warns, "已开启绕过本机代理分流，建议同时关闭该网段 IPv6 以避免部分设备 IPv6 流量分流不一致")
+	}
+	if req.ProxyMode == ProxyModeSideRouter {
+		sideIP := strings.TrimSpace(ov.SideRouterIP)
+		if sideIP == "" {
+			errs = append(errs, "尚未配置旁路由 IP，请先在「网关角色与模式」中填写旁路由地址后再启用旁路由分流")
+		} else if cidrErr == nil {
+			if sideAddr, aErr := netip.ParseAddr(sideIP); aErr == nil && cidr.Contains(sideAddr) {
+				errs = append(errs, fmt.Sprintf("旁路由 IP (%s) 位于当前子网 (%s) 内部，无法将子网策略路由回指自身", sideIP, cidr.String()))
+			}
+		}
+		if !req.Policy.AllowWAN {
+			errs = append(errs, "关闭「允许访问外网」时无法交由旁路由分流，请开启外网访问或改用纯直连模式")
+		}
 	}
 	return errs, warns
 }

@@ -284,6 +284,8 @@ func buildFirewallCommands(ov *Overview, fwUCI *UCIConfig, wanSubnet string, req
 		cmds = append(cmds, fmt.Sprintf("delete firewall.%s", mdnsRef))
 	}
 
+	cmds = append(cmds, buildSideRouterFirewallCommands(fwUCI, zoneName, req.ID, req.ProxyMode == ProxyModeSideRouter && req.Policy.AllowWAN)...)
+
 	return cmds
 }
 
@@ -348,6 +350,8 @@ func buildDeleteFirewallCommands(fwUCI *UCIConfig, segID string) []string {
 		"singctl_allow_trust_" + segID + "_",
 		"singctl_allow_dns_" + segID + "_",
 		"singctl_allow_mdns_" + segID,
+		"singctl_side_iso_" + segID,
+		"singctl_side_fwd_" + segID,
 	}
 	for _, sec := range fwUCI.Sections {
 		matched := false
@@ -427,6 +431,7 @@ func buildSegments(
 	segVLANs map[string]int,
 	ssids []WirelessSSIDInfo,
 	bypassSet map[string]bool,
+	sideRouteSet map[string]bool,
 	callerAddr netip.Addr,
 	callerAddrOK bool,
 ) []Segment {
@@ -474,7 +479,9 @@ func buildSegments(
 		}
 
 		proxyMode := ProxyModeFollow
-		if bypassSet[cidrStr] {
+		if sideRouteSet[cidrStr] {
+			proxyMode = ProxyModeSideRouter
+		} else if bypassSet[cidrStr] {
 			proxyMode = ProxyModeDirect
 		}
 
@@ -660,6 +667,9 @@ func buildRelationBadges(seg Segment) []RelationBadge {
 		return []RelationBadge{{Tone: "ok", Text: "默认管理主网"}}
 	}
 	var out []RelationBadge
+	if seg.ProxyMode == ProxyModeSideRouter {
+		out = append(out, RelationBadge{Tone: "accent", Text: "旁路由分流"})
+	}
 	if seg.Policy.BlockUpstreamLAN {
 		out = append(out, RelationBadge{Tone: "danger", Text: "已隔离主网"})
 	}

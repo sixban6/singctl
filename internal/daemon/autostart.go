@@ -21,6 +21,7 @@ import (
 	"singctl/internal/logger"
 	"singctl/internal/platform/servicemgr"
 	"singctl/internal/updater"
+	"singctl/internal/vlan"
 )
 
 const (
@@ -444,7 +445,8 @@ func IsBootInitSatisfied(cfg *config.Config, deps BootInitDeps) bool {
 		isWebRunning = deps.IsStandaloneWebRunning
 	}
 
-	if sbCfgExists {
+	needSingBox := cfg == nil || cfg.NeedsSingBox()
+	if needSingBox && sbCfgExists {
 		return isSBRunning() && isDMRunning() && (lowMem || isWebRunning())
 	}
 	if lowMem {
@@ -495,7 +497,14 @@ func RunBootInit(ctx context.Context, cfg *config.Config, deps BootInitDeps) err
 		isWebRunning = deps.IsStandaloneWebRunning
 	}
 
-	if !sbCfgExists {
+	if runtime.GOOS == "linux" && (cfg == nil || !cfg.Gateway.IsSideRouter()) {
+		if sideSpec := vlan.ReadSideRouteSpec(constant.VLANSideRoutesFile); sideSpec.SideRouterIP != "" && len(sideSpec.CIDRs) > 0 {
+			_ = vlan.ApplyRuntimeSideRoutes(ctx, sideSpec, nil)
+		}
+	}
+
+	needSingBox := cfg == nil || cfg.NeedsSingBox()
+	if !needSingBox || !sbCfgExists {
 		if lowMem {
 			if !isDMRunning() && deps.StartDaemon != nil {
 				return deps.StartDaemon(ctx)

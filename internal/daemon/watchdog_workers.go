@@ -215,6 +215,25 @@ func (d *Daemon) maybeRefreshRuleSetsAsync() {
 	}()
 }
 
+func (d *Daemon) maybePatrolSideRouterFailoverAsync() {
+	if runtime.GOOS != "linux" || d == nil || d.sideRouterGuard == nil {
+		return
+	}
+	cfg := d.currentConfig()
+	if cfg == nil || cfg.Gateway.IsSideRouter() || strings.TrimSpace(cfg.Gateway.SideRouterIP) == "" {
+		return
+	}
+	if !d.sideGuardRunning.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer d.sideGuardRunning.Store(false)
+		ctx, cancel := context.WithTimeout(d.ctx, 3*time.Second)
+		defer cancel()
+		d.sideRouterGuard.EvaluateOnce(ctx, cfg)
+	}()
+}
+
 // runWatchdogCheck 健康检查：先维护 tailscaled OOM 免疫与宿主机资源预警，再守护本地 DNS 与 sing-box，不健康则二次确认后重启。
 func (d *Daemon) runWatchdogCheck() {
 	if d.reloading.Load() {
@@ -232,8 +251,10 @@ func (d *Daemon) runWatchdogCheck() {
 		if d.watchdogUnhealthy.Swap(false) {
 			d.RecordWatchdogHealEvent(true, "recovered", result1.Details)
 		}
-		d.maybeRefreshRuleSetsAsync()
-		d.maybeSyncSubscriptionsAsync()
+		if cfg == nil || cfg.NeedsSingBox() {
+			d.maybeRefreshRuleSetsAsync()
+			d.maybeSyncSubscriptionsAsync()
+		}
 		return
 	}
 

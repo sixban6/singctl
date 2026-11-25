@@ -2,7 +2,7 @@ import { SafeCommitStatusResponse } from './p0';
 
 export type VlanDriverKind = 'dsa' | 'swconfig' | 'softrouter' | 'unsupported';
 export type VlanPortMode = 'off' | 'access' | 'trunk';
-export type VlanProxyMode = 'follow' | 'direct';
+export type VlanProxyMode = 'follow' | 'direct' | 'side_router';
 export type VlanIPv6Mode = 'off' | 'relay' | 'server';
 export type VlanPresetKind = 'iot' | 'wifi' | 'guest' | 'wired';
 export type VlanRelationTone = 'ok' | 'warn' | 'danger' | 'neutral' | 'accent';
@@ -118,6 +118,7 @@ export interface VlanOverview {
   callerIp?: string;
   callerSegmentId?: string;
   callerPort?: string;
+  sideRouterIp?: string;
   ports: VlanPortInfo[];
   radios: VlanRadioInfo[];
   existingSsids: VlanWirelessSSIDInfo[];

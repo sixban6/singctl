@@ -6,6 +6,7 @@ import {
   Copy,
   Globe,
   Server,
+  Share2,
   Shield,
   Terminal,
   Zap,
@@ -40,6 +41,7 @@ export const ToggleRow: React.FC<ToggleRowProps> = ({ label, desc, checked, onCh
 export interface VlanDnsAndPolicyCardProps {
   resetKey: string;
   draft: VlanSaveSegmentRequest;
+  sideRouterIp?: string;
   privacyMask: boolean;
   onChangeDraft: (next: VlanSaveSegmentRequest) => void;
 }
@@ -47,6 +49,7 @@ export interface VlanDnsAndPolicyCardProps {
 export const VlanDnsAndPolicyCard: React.FC<VlanDnsAndPolicyCardProps> = ({
   resetKey,
   draft,
+  sideRouterIp = '',
   privacyMask,
   onChangeDraft,
 }) => {
@@ -96,23 +99,46 @@ export const VlanDnsAndPolicyCard: React.FC<VlanDnsAndPolicyCardProps> = ({
 
       {/* Proxy mode selector */}
       <div className="space-y-1.5">
-        <div className="text-[11px] text-slate-400">透明代理联动策略</div>
-        <div className="grid sm:grid-cols-2 gap-2.5">
+        <div className="text-[11px] text-slate-400">分流与透明代理联动策略</div>
+        <div className="grid sm:grid-cols-3 gap-2.5">
           <button
             type="button"
             onClick={() => onChangeDraft({ ...draft, proxyMode: 'follow' })}
             className={`rounded-xl border p-3 text-left transition-all cursor-pointer ${
-              draft.proxyMode !== 'direct'
+              draft.proxyMode !== 'direct' && draft.proxyMode !== 'side_router'
                 ? 'border-emerald-500/65 bg-emerald-500/12'
                 : 'border-slate-800 bg-slate-950/60 hover:border-slate-700'
             }`}
           >
             <div className="flex items-center gap-2 text-xs font-semibold text-white">
               <Globe className="w-3.5 h-3.5 text-emerald-400" />
-              跟随网关透明代理
+              跟随本机网关
             </div>
             <p className="text-[11px] text-slate-400 mt-1">
-              按网关规则自动分流国内外流量，适合主力手机与电脑。
+              遵循主路由当前运行模式转发或审计。
+            </p>
+          </button>
+
+          <button
+            type="button"
+            disabled={!sideRouterIp && draft.proxyMode !== 'side_router'}
+            onClick={() => onChangeDraft({ ...draft, proxyMode: 'side_router' })}
+            className={`rounded-xl border p-3 text-left transition-all ${
+              !sideRouterIp && draft.proxyMode !== 'side_router'
+                ? 'border-slate-800/70 bg-slate-950/40 opacity-55 cursor-not-allowed'
+                : draft.proxyMode === 'side_router'
+                  ? 'border-cyan-500/70 bg-cyan-500/15 cursor-pointer'
+                  : 'border-slate-800 bg-slate-950/60 hover:border-slate-700 cursor-pointer'
+            }`}
+          >
+            <div className="flex items-center gap-2 text-xs font-semibold text-white">
+              <Share2 className="w-3.5 h-3.5 text-cyan-400" />
+              交由旁路由分流
+            </div>
+            <p className="text-[11px] text-slate-400 mt-1">
+              {sideRouterIp
+                ? `策略路由直转 ${maskVlanText(sideRouterIp, privacyMask)} 科学分流，并保持主网严格隔离。`
+                : '需先在「网关模式」填写旁路由 IP。'}
             </p>
           </button>
 
@@ -130,7 +156,7 @@ export const VlanDnsAndPolicyCard: React.FC<VlanDnsAndPolicyCardProps> = ({
               纯直连 · 绕过代理
             </div>
             <p className="text-[11px] text-slate-400 mt-1">
-              彻底绕开 sing-box，不消耗节点流量，最适合智能家居与访客。
+              彻底不走代理与旁路由，直出 WAN，适合智能家居与访客。
             </p>
           </button>
         </div>
@@ -156,9 +182,15 @@ export const VlanDnsAndPolicyCard: React.FC<VlanDnsAndPolicyCardProps> = ({
                 : 'border-slate-800 bg-slate-900/60 text-slate-400 hover:border-slate-700 hover:text-slate-200'
             }`}
           >
-            <div className="font-semibold">跟随本子网网关（默认推荐）</div>
+            <div className="font-semibold">
+              {draft.proxyMode === 'side_router' && sideRouterIp
+                ? '自动下发旁路由 DNS（推荐协同）'
+                : '跟随本子网网关（默认推荐）'}
+            </div>
             <div className="text-[11px] opacity-80 mt-0.5">
-              下发 {maskVlanText(draft.ipAddr || '子网网关', privacyMask)}，由本机就近解析
+              {draft.proxyMode === 'side_router' && sideRouterIp
+                ? `保存时自动下发旁路由 ${maskVlanText(sideRouterIp, privacyMask)} 并放行 53 端口`
+                : `下发 ${maskVlanText(draft.ipAddr || '子网网关', privacyMask)}，由本机就近解析`}
             </div>
           </button>
 

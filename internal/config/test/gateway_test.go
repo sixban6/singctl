@@ -147,6 +147,9 @@ func TestGatewayWorkMode_NormalizeEffectiveSaveAndMigrate(t *testing.T) {
 		{"audit", config.WorkModeAudit, true},
 		{"direct_audit", config.WorkModeAudit, true},
 		{"proxy", config.WorkModeProxy, true},
+		{"delegated", config.WorkModeDelegated, true},
+		{"side_delegated", config.WorkModeDelegated, true},
+		{"passthrough", config.WorkModeDelegated, true},
 		{"invalid_mode", "", false},
 	}
 	for _, tc := range normCases {
@@ -187,5 +190,86 @@ func TestGatewayWorkMode_NormalizeEffectiveSaveAndMigrate(t *testing.T) {
 	}
 	if reloaded.Gateway.WorkMode != config.WorkModeAudit || !reloaded.IsDirectAuditMode() {
 		t.Fatalf("reloaded work_mode mismatch: %+v", reloaded.Gateway)
+	}
+}
+
+func TestGatewayDelegatedAndSideRouterConfig(t *testing.T) {
+	mainDelegated := &config.Config{
+		Subs: []config.Subscription{{Name: "s1", URL: "https://example.com/s1"}},
+		Gateway: config.GatewayConfig{
+			Mode:         "main",
+			WorkMode:     "delegated",
+			SideRouterIP: "192.168.55.88",
+		},
+	}
+	if mainDelegated.EffectiveWorkMode() != config.WorkModeDelegated {
+		t.Fatalf("expected EffectiveWorkMode=delegated, got %q", mainDelegated.EffectiveWorkMode())
+	}
+	if !mainDelegated.IsDelegatedMode() {
+		t.Fatal("expected IsDelegatedMode=true on main router")
+	}
+	if mainDelegated.NeedsSingBox() {
+		t.Fatal("expected NeedsSingBox=false in delegated mode even with subs configured")
+	}
+	if !mainDelegated.Gateway.IsSideRouterFailoverEnabled() {
+		t.Fatal("expected IsSideRouterFailoverEnabled=true by default")
+	}
+	if mainDelegated.Gateway.IsEmpty() {
+		t.Fatal("expected Gateway.IsEmpty=false when SideRouterIP/WorkMode is set")
+	}
+
+	// Side router misconfigured as delegated must fall back safely to normal auto resolution (proxy/audit).
+	sideMisconfigured := &config.Config{
+		Subs: []config.Subscription{{Name: "s1", URL: "https://example.com/s1"}},
+		Gateway: config.GatewayConfig{
+			Mode:     "side",
+			WorkMode: config.WorkModeDelegated,
+		},
+	}
+	if sideMisconfigured.EffectiveWorkMode() != config.WorkModeProxy || !sideMisconfigured.NeedsSingBox() || sideMisconfigured.IsDelegatedMode() {
+		t.Fatalf("side router misconfigured with delegated must fall back to proxy, got %q", sideMisconfigured.EffectiveWorkMode())
+	}
+
+	// Explicit false failover pointer must deep-clone independently.
+	f := false
+	mainDelegated.Gateway.SideRouterFailover = &f
+	cloned := mainDelegated.Clone()
+	*cloned.Gateway.SideRouterFailover = true
+	if mainDelegated.Gateway.IsSideRouterFailoverEnabled() {
+		t.Fatal("mutating cloned SideRouterFailover mutated original snapshot")
+	}
+
+	// Verify Save/Load + colonSpaceFix + MigrateConfig preserve side_router_ip & side_router_failover.
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "singctl.yaml")
+	raw := `subs: []
+gateway:
+  mode: "main"
+  work_mode: "delegated"
+  side_router_ip:"192.168.55.88"
+  side_router_failover:false
+`
+	if err := os.WriteFile(cfgPath, []byte(raw), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	loaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load delegated config failed: %v", err)
+	}
+	if loaded.Gateway.SideRouterIP != "192.168.55.88" || loaded.Gateway.IsSideRouterFailoverEnabled() {
+		t.Fatalf("unexpected loaded gateway: %+v", loaded.Gateway)
+	}
+
+	if err := config.MigrateConfig(cfgPath, configs.DefaultConfigYAML); err != nil {
+		t.Fatalf("MigrateConfig failed: %v", err)
+	}
+	migrated, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load migrated failed: %v", err)
+	}
+	if migrated.Gateway.WorkMode != config.WorkModeDelegated ||
+		migrated.Gateway.SideRouterIP != "192.168.55.88" ||
+		migrated.Gateway.IsSideRouterFailoverEnabled() {
+		t.Fatalf("migrated delegated gateway fields lost: %+v", migrated.Gateway)
 	}
 }

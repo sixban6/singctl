@@ -19,12 +19,13 @@ const (
 	GatewayIPv6CNOnly = "cn_only"
 	GatewayIPv6Full   = "full"
 
-	WorkModeAuto  = "auto"  // 自动：有订阅=代理模式，无订阅=审计模式
-	WorkModeAudit = "audit" // 审计模式（免订阅：设备行为审计 + PCDN 拦截 + 强劫持防绕过 DNS）
-	WorkModeProxy = "proxy" // 代理模式（需订阅：透明代理分流 + 完整审计 + 强劫持防绕过 DNS）
+	WorkModeAuto      = "auto"      // 自动：有订阅=代理模式，无订阅=审计模式
+	WorkModeAudit     = "audit"     // 审计模式（免订阅：设备行为审计 + PCDN 拦截 + 强劫持防绕过 DNS）
+	WorkModeProxy     = "proxy"     // 代理模式（需订阅：透明代理分流 + 完整审计 + 强劫持防绕过 DNS）
+	WorkModeDelegated = "delegated" // 旁路由托管（主路由专用：停用本机 sing-box 与全局 TProxy，按子网策略路由交由旁路由分流）
 )
 
-// NormalizeWorkMode 校验并归一化客户端运行工作模式（auto / audit / proxy）；
+// NormalizeWorkMode 校验并归一化客户端运行工作模式（auto / audit / proxy / delegated）；
 // 历史配置中的 basic / dns_only / lite 自动平滑兼容归一化为 audit。
 func NormalizeWorkMode(raw string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
@@ -34,6 +35,8 @@ func NormalizeWorkMode(raw string) (string, bool) {
 		return WorkModeAudit, true
 	case WorkModeProxy, "full":
 		return WorkModeProxy, true
+	case WorkModeDelegated, "side_delegated", "side-delegated", "passthrough":
+		return WorkModeDelegated, true
 	default:
 		return "", false
 	}
@@ -54,13 +57,36 @@ func NormalizeGatewayIPv6Mode(raw string) (string, bool) {
 	}
 }
 
-// GatewayConfig 定义客户端网关部署拓扑模式（默认主路由 main，可选单臂旁路由 side）、工作模式（basic/audit/proxy）与 IPv6 双栈分流策略。
+// GatewayConfig 定义客户端网关部署拓扑模式（默认主路由 main，可选单臂旁路由 side）、工作模式（audit/proxy/delegated）与 IPv6 双栈分流策略。
 type GatewayConfig struct {
-	Mode         string `yaml:"mode,omitempty" json:"mode,omitempty"`
-	WorkMode     string `yaml:"work_mode,omitempty" json:"workMode,omitempty"`
-	MainRouterIP string `yaml:"main_router_ip,omitempty" json:"main_router_ip,omitempty"`
-	LANIface     string `yaml:"lan_iface,omitempty" json:"lan_iface,omitempty"`
-	IPv6Mode     string `yaml:"ipv6_mode,omitempty" json:"ipv6_mode,omitempty"`
+	Mode               string `yaml:"mode,omitempty" json:"mode,omitempty"`
+	WorkMode           string `yaml:"work_mode,omitempty" json:"workMode,omitempty"`
+	MainRouterIP       string `yaml:"main_router_ip,omitempty" json:"main_router_ip,omitempty"`
+	SideRouterIP       string `yaml:"side_router_ip,omitempty" json:"side_router_ip,omitempty"`
+	SideRouterFailover *bool  `yaml:"side_router_failover,omitempty" json:"side_router_failover,omitempty"`
+	LANIface           string `yaml:"lan_iface,omitempty" json:"lan_iface,omitempty"`
+	IPv6Mode           string `yaml:"ipv6_mode,omitempty" json:"ipv6_mode,omitempty"`
+}
+
+// IsSideRouterFailoverEnabled 返回旁路由离线时是否自动摘除策略路由回退主路由直连（默认 true）。
+func (g GatewayConfig) IsSideRouterFailoverEnabled() bool {
+	if g.SideRouterFailover == nil {
+		return true
+	}
+	return *g.SideRouterFailover
+}
+
+// SetSideRouterFailover 显式设置旁路由离线自动回退开关（true 时置 nil 回归默认值）。
+func (g *GatewayConfig) SetSideRouterFailover(enabled bool) {
+	if g == nil {
+		return
+	}
+	if enabled {
+		g.SideRouterFailover = nil
+		return
+	}
+	v := false
+	g.SideRouterFailover = &v
 }
 
 // EffectiveMode 返回归一化后的生效模式：默认始终为 "main"，仅当显式配置为 "side" 时返回 "side"。
@@ -97,11 +123,13 @@ func (g GatewayConfig) IsEmpty() bool {
 	return strings.TrimSpace(g.Mode) == "" &&
 		strings.TrimSpace(g.WorkMode) == "" &&
 		strings.TrimSpace(g.MainRouterIP) == "" &&
+		strings.TrimSpace(g.SideRouterIP) == "" &&
+		g.SideRouterFailover == nil &&
 		strings.TrimSpace(g.LANIface) == "" &&
 		strings.TrimSpace(g.IPv6Mode) == ""
 }
 
-// ConfiguredWorkMode 返回当前配置显式选择的工作模式（auto / basic / audit / proxy）。
+// ConfiguredWorkMode 返回当前配置显式选择的工作模式（auto / basic / audit / proxy / delegated）。
 func (c *Config) ConfiguredWorkMode() string {
 	if c == nil {
 		return WorkModeAuto
@@ -109,8 +137,9 @@ func (c *Config) ConfiguredWorkMode() string {
 	return c.Gateway.ConfiguredWorkMode()
 }
 
-// EffectiveWorkMode 解析当前实际生效的工作模式（audit / proxy）：
-// auto 下有订阅自动进入 proxy，无订阅自动进入 audit（免订阅纯直连强劫持审计模式）。
+// EffectiveWorkMode 解析当前实际生效的工作模式（audit / proxy / delegated）：
+//   - delegated 仅对主路由 (main) 生效，旁路由若误配则安全回退至 auto 判定；
+//   - auto 下有订阅自动进入 proxy，无订阅自动进入 audit（免订阅纯直连强劫持审计模式）。
 func (c *Config) EffectiveWorkMode() string {
 	if c == nil {
 		return WorkModeAudit
@@ -120,6 +149,14 @@ func (c *Config) EffectiveWorkMode() string {
 		return WorkModeAudit
 	case WorkModeProxy:
 		return WorkModeProxy
+	case WorkModeDelegated:
+		if !c.Gateway.IsSideRouter() {
+			return WorkModeDelegated
+		}
+		if c.HasRealSubs() {
+			return WorkModeProxy
+		}
+		return WorkModeAudit
 	default:
 		if c.HasRealSubs() {
 			return WorkModeProxy
@@ -128,18 +165,25 @@ func (c *Config) EffectiveWorkMode() string {
 	}
 }
 
+// IsDelegatedMode 判断当前主路由是否处于「旁路由托管（纯网关直通）」模式。
+func (c *Config) IsDelegatedMode() bool {
+	return c.EffectiveWorkMode() == WorkModeDelegated
+}
+
 // IsDirectAuditMode 判断当前是否处于「审计模式」（免订阅、纯直连零节点 sing-box 透明嗅探与 PCDN/黑名单拦截）。
 func (c *Config) IsDirectAuditMode() bool {
 	return c.EffectiveWorkMode() == WorkModeAudit
 }
 
-// NeedsSingBox 判断当前工作模式是否需要运行 sing-box 内核（审计模式恒为 true；代理模式需配置有效订阅）。
+// NeedsSingBox 判断当前工作模式是否需要运行 sing-box 内核（审计模式恒为 true；代理模式需配置有效订阅；旁路由托管模式为 false）。
 func (c *Config) NeedsSingBox() bool {
 	switch c.EffectiveWorkMode() {
 	case WorkModeAudit:
 		return true
 	case WorkModeProxy:
 		return c != nil && c.HasRealSubs()
+	case WorkModeDelegated:
+		return false
 	default:
 		return true
 	}

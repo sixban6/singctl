@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,6 +26,7 @@ import (
 	"singctl/internal/safecommit"
 	"singctl/internal/smartdns"
 	"singctl/internal/tailscale"
+	"singctl/internal/vlan"
 )
 
 const (
@@ -120,6 +122,8 @@ type Daemon struct {
 	subSyncBinOverride  string
 	failoverRunning     atomic.Bool
 	failover            *GroupFailoverState
+	sideRouterGuard     *SideRouterFailoverGuard
+	sideGuardRunning    atomic.Bool
 	auditCollector      *audit.Collector
 	auditSampling       atomic.Bool
 	throttleReconciling atomic.Bool
@@ -256,6 +260,16 @@ func NewDaemonWithOptions(cfg *config.Config, opts DaemonOptions) *Daemon {
 	cpuSampler := sysinfo.NewCPUSampler()
 	cpuSampler.Prime()
 
+	sideGuard := NewSideRouterFailoverGuard(SideRouterGuardDeps{
+		OnEvent: func(action string, healthy bool, summary string) {
+			stateStore.AppendEvent(WatchdogEventRecord{
+				Action:  action,
+				Healthy: healthy,
+				Summary: summary,
+			})
+		},
+	})
+
 	d := &Daemon{
 		cfgStore:            cfgStore,
 		configPath:          opts.ConfigPath,
@@ -268,6 +282,7 @@ func NewDaemonWithOptions(cfg *config.Config, opts DaemonOptions) *Daemon {
 		subSyncCheckTimeout: opts.SubSyncCheckTimeout,
 		subSyncBinOverride:  opts.SubSyncBinOverride,
 		failover:            failover,
+		sideRouterGuard:     sideGuard,
 		auditCollector:      audit.NewCollectorWithOptions(cfg, audit.CollectorOptions{LowMemory: &lowMem}),
 		p2pCtrl:             p2pCtrl,
 		logPathOverride:     strings.TrimSpace(opts.Paths.LogFile),
@@ -620,6 +635,13 @@ func (d *Daemon) BuildForegroundLifecycle() *lifecycle.Group {
 					defer cancel()
 					ReconcileLowMemHostDefault(tuneCtx, d.embeddedService != nil)
 					EnsureAutoStartFromConfig(tuneCtx, d.currentConfig(), d.configPath)
+					if runtime.GOOS == "linux" {
+						if curCfg := d.currentConfig(); curCfg == nil || !curCfg.Gateway.IsSideRouter() {
+							if sideSpec := vlan.ReadSideRouteSpec(constant.VLANSideRoutesFile); sideSpec.SideRouterIP != "" && len(sideSpec.CIDRs) > 0 {
+								_ = vlan.ApplyRuntimeSideRoutes(tuneCtx, sideSpec, nil)
+							}
+						}
+					}
 				}()
 				return nil
 			},
@@ -826,6 +848,7 @@ func (d *Daemon) monitorLoop() error {
 		case <-auditSampleTicker.C:
 			d.maybeSampleDeviceAuditAsync()
 			d.maybeTickLocalDNSAuditAndExpiryAsync()
+			d.maybePatrolSideRouterFailoverAsync()
 		case <-throttleReconcileTicker.C:
 			d.maybeReconcileAuditThrottlesAsync(false)
 		case <-initFailoverTimer.C:
@@ -835,8 +858,10 @@ func (d *Daemon) monitorLoop() error {
 			applyHotReload(false)
 			d.maybePatrolGroupFailoverAsync()
 		case <-initRefreshTimer.C:
-			if NewMonitor(d.currentConfig()).CheckHealth().Healthy {
-				d.maybeRefreshRuleSetsAsync()
+			if curCfg := d.currentConfig(); curCfg == nil || curCfg.NeedsSingBox() {
+				if NewMonitor(curCfg).CheckHealth().Healthy {
+					d.maybeRefreshRuleSetsAsync()
+				}
 			}
 		case <-watchdogTicker.C:
 			applyHotReload(false)

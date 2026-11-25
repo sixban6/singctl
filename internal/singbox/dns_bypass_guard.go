@@ -368,7 +368,13 @@ func buildDNSBypassRouteRules(cfg *config.Config) []sboption.RouteRule {
 	}
 
 	wl := buildWhitelistDomainSet(cfg)
-	exempt := normalizeExemptCIDRsSafe(bg.ExemptSourceIPs)
+	exemptRaw := slices.Clone(bg.ExemptSourceIPs)
+	if cfg != nil && !cfg.Gateway.IsSideRouter() {
+		if sideIP := strings.TrimSpace(cfg.Gateway.SideRouterIP); sideIP != "" {
+			exemptRaw = append(exemptRaw, sideIP)
+		}
+	}
+	exempt := normalizeExemptCIDRsSafe(exemptRaw)
 	var rules []sboption.RouteRule
 
 	// L1: 全量 DoT / DoQ 专用 853 端口

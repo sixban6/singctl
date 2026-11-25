@@ -14,6 +14,7 @@ import {
   GatewayRoleMode,
 } from '../../types';
 import { GatewayIPv6Section } from './GatewayIPv6Section';
+import { SideRouterDelegationCard } from './SideRouterDelegationCard';
 import { getWorkModeLabel, WorkModeCard } from './WorkModeCard';
 
 export interface GatewayModePageProps {
@@ -180,6 +181,27 @@ export const GatewayModePage: React.FC<GatewayModePageProps> = ({
     }
   };
 
+  const handleSaveSideRouter = async (nextIP: string, nextFailover: boolean, alsoSwitchDelegated = false) => {
+    if (privacyMask) return;
+    setWorkModeSaving(true);
+    try {
+      const res = await clientApi.saveGateway({
+        mode: 'main',
+        ...(alsoSwitchDelegated ? { workMode: 'delegated' as const } : {}),
+        sideRouterIP: nextIP,
+        sideRouterFailover: nextFailover,
+        ipv6Mode: ipv6Mode || 'off',
+      });
+      setGatewayData(res);
+      success(res.message || '已保存旁路由协同设置');
+      onSaved?.();
+    } catch (e: unknown) {
+      error(e instanceof Error ? e.message : '保存旁路由协同设置失败');
+    } finally {
+      setWorkModeSaving(false);
+    }
+  };
+
   const sideLanDisplay = privacyMask ? '••••••••' : topo?.lanIP || '<旁路由IP>';
   const mainGwDisplay = privacyMask ? '••••••••' : trimmedIP || topo?.suggestedMainRouterIP || '<主路由IP>';
 
@@ -211,6 +233,7 @@ export const GatewayModePage: React.FC<GatewayModePageProps> = ({
       />
 
       <WorkModeCard
+        roleMode={mode || (activeGatewayMode === 'side' ? 'side' : 'main')}
         configuredWorkMode={configuredWorkMode}
         effectiveWorkMode={effectiveWorkMode}
         hasSubs={hasSubs}
@@ -220,6 +243,22 @@ export const GatewayModePage: React.FC<GatewayModePageProps> = ({
         onSaveWorkMode={(next) => void handleSaveWorkMode(next)}
         onGoSubs={onNavigate ? () => onNavigate('sb', 'subs') : undefined}
       />
+
+      {(mode === 'main' || (!mode && activeGatewayMode !== 'side')) && (
+        <SideRouterDelegationCard
+          sideRouterIP={data?.sideRouterIP ?? gwSummary?.sideRouterIP ?? ''}
+          sideRouterFailover={data?.sideRouterFailover ?? gwSummary?.sideRouterFailover ?? true}
+          sideRouterStatus={data?.sideRouterStatus}
+          effectiveWorkMode={effectiveWorkMode}
+          saving={workModeSaving}
+          busy={busy}
+          privacyMask={privacyMask}
+          onSaveSideRouter={(nextIP, nextFailover, switchDelegated) =>
+            void handleSaveSideRouter(nextIP, nextFailover, switchDelegated)
+          }
+          onGoVlan={onNavigate ? () => onNavigate('net', 'vlan') : undefined}
+        />
+      )}
 
       <SectionCard
         title="选择路由器角色"

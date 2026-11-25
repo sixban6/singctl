@@ -126,6 +126,16 @@ func CollectDataplaneInput(cfg *config.Config, nlClient rtnl.Client, adguardPath
 	collectEncryptedDNSBypassFromFile(cmp.Or(adguardPath, "/etc/AdGuardHome/AdGuardHome.yaml"), &in)
 	collectEncryptedDNSBypassFromFile(cmp.Or(smartdnsPath, "/etc/singctl/smartdns.conf"), &in)
 	collectVLANBypassFromFile(cmp.Or(vlanBypassPath, "/etc/singctl/vlan-proxy-bypass.list"), &in)
+	if cfg != nil && !cfg.Gateway.IsSideRouter() {
+		if sideIP := strings.TrimSpace(cfg.Gateway.SideRouterIP); sideIP != "" {
+			if addr, err := netip.ParseAddr(sideIP); err == nil && addr.Is4() {
+				sidePfx := netip.PrefixFrom(addr, 32)
+				if !slices.Contains(in.BypassVLANCIDRs, sidePfx) {
+					in.BypassVLANCIDRs = append(in.BypassVLANCIDRs, sidePfx)
+				}
+			}
+		}
+	}
 	return in
 }
 

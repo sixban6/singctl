@@ -54,14 +54,18 @@ dns:                                          # (可选) 客户端本地防劫�
 
 gateway:                                      # (可选) 客户端网关拓扑模式配置
   mode: "main"                                # "main" (默认主路由模式) | "side" (旁路由单臂网关模式)
+  work_mode: "auto"                           # "auto" | "audit" | "proxy" | "delegated" (主路由旁路由托管纯直通模式)
   main_router_ip: ""                          # (旁路由模式必填) 上级主路由/网关 IP，例如 "192.168.1.1"
+  # side_router_ip: ""                        # (主路由协同可选) 绑定旁路由 IP，例如 "192.168.1.2"
+  # side_router_failover: true                # (默认 true) 旁路由离线时自动摘除策略路由切回主路由直连逃生
   # lan_iface: ""                             # (可选) 指定单臂局域网网卡名，留空自动探测
   ipv6_mode: "off"                            # "off" (纯 IPv4) | "cn_only" (推荐：国内原生 IPv6 + 海外 0ms 静音 AAAA 防泄漏) | "full" (全量双栈；旁路由自动保持 off)
 ```
 
-### 主路由模式与旁路由模式（Side Router）说明
+### 主路由模式与旁路由模式（Side Router / Delegated Mode）说明
 
 - **`mode: "main"`（主路由模式，默认）**：适用于设备直接拨号或接光猫充当全屋主网关的场景，保持标准原生 TProxy 规则运行。
+  - **旁路由协同托管（`work_mode: "delegated"` + `gateway.side_router_ip`）**：当主路由负责 PPPoE 拨号、交换端口、Wi-Fi 与 VLAN 子网隔离，而全部代理分流/去广告/审计交由旁路由处理时，可在 WebUI「网关模式」切为 **旁路由托管** —— 自动停用主路由本机 `sing-box` 与全局透明劫持、释放路由器内存并恢复硬件转发；并在「子网隔离 (VLAN)」支持按指定 Wi-Fi/子网一键启用 **「交由旁路由分流 (`side_router`)」**（自动配置表 188 策略路由与 DHCP Option 6 DNS，同时保留内网隔离与旁路由离线 30 秒自动切回主路由直连的防断网救生艇）。
 - **`mode: "side"`（旁路由 / 单臂网关模式）**：适用于 N1、小主机、OpenWrt 盒子或 PVE LXC 单网口挂在主路由 LAN 口下的场景：
   - **安装阶段引导**：运行 `install.sh` 自动识别为客户端模式后，脚本还会根据网口数量与网关关系自动推荐主路由或旁路由拓扑，用户**只需按回车**即可完成确认（亦可输入 `2` / `side` 或 `1` / `main` 手动切换；旁路由模式下自动探测上级主路由 IP，并自动拦截填成旁路由本机 IP 的自环错误）。
   - **内核与防火墙自动收口**：`singctl sb start` 启动时自动对齐上级默认路由、开启 `ip_forward=1` 并关闭单臂 `rp_filter` / `send_redirects` / `bridge-nf-call-iptables`，同时挂载独立可逆的 `table inet singctl-side`（含本机 `:53` 透明 DNS 接管、TCP MSS 自动钳制防止 PPPoE `1492` MTU 下 HTTPS 卡死、单臂 `masquerade` 消除主路由状态防火墙 `ct state invalid` 非对称丢包，并在 `sing-box` 内部完整保留终端真实局域网 IP 供行为审计使用）。`singctl sb stop` 时自动卸载并还原系统参数。

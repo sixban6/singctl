@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useMemo, useEffect } from 'react';
-import { Router, Terminal, RefreshCw, LogOut } from 'lucide-react';
+import { ExternalLink, Router, Terminal, RefreshCw, LogOut } from 'lucide-react';
 import {
   AppShell,
   Button,
@@ -163,7 +163,12 @@ const ClientShell: React.FC = () => {
       if (tab !== 'dns' && !peekCachedQuery(ADGUARD_OVERVIEW_CACHE_KEY)) {
         void prefetchCachedQuery(ADGUARD_OVERVIEW_CACHE_KEY, () => clientApi.getAdGuardOverview());
       }
-      if (tab !== 'audit' && status.singbox?.running && !peekCachedQuery(AUDIT_DEFAULT_CACHE_KEY)) {
+      if (
+        tab !== 'audit' &&
+        status.singbox?.running &&
+        status.gateway?.effectiveWorkMode !== 'delegated' &&
+        !peekCachedQuery(AUDIT_DEFAULT_CACHE_KEY)
+      ) {
         const qs = new URLSearchParams({ sort: 'active', dir: 'desc' });
         void prefetchCachedQuery(AUDIT_DEFAULT_CACHE_KEY, () => clientApi.getAudit(qs));
       }
@@ -241,8 +246,40 @@ const ClientShell: React.FC = () => {
     [navigate],
   );
 
+  const peerPanelLink = useMemo(() => {
+    const gw = status?.gateway;
+    if (!gw) return null;
+    if (gw.mode === 'side' && gw.mainRouterIP) {
+      return {
+        label: '主路由面板',
+        title: `前往主路由控制面板 (${gw.mainRouterIP}:8090)`,
+        href: `http://${gw.mainRouterIP}:8090`,
+      };
+    }
+    if (gw.mode !== 'side' && gw.sideRouterIP) {
+      return {
+        label: '旁路由面板',
+        title: `前往旁路由分流面板 (${gw.sideRouterIP}:8090)`,
+        href: `http://${gw.sideRouterIP}:8090`,
+      };
+    }
+    return null;
+  }, [status?.gateway]);
+
   const topbarActions = (
     <div className="flex items-center gap-1.5">
+      {peerPanelLink && (
+        <a
+          href={peerPanelLink.href}
+          target="_blank"
+          rel="noopener noreferrer"
+          title={peerPanelLink.title}
+          className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-cyan-500/12 hover:bg-cyan-500/22 border border-cyan-500/30 text-cyan-300 text-xs font-medium transition-colors"
+        >
+          <span className="hidden sm:inline">{peerPanelLink.label}</span>
+          <ExternalLink className="w-3.5 h-3.5" />
+        </a>
+      )}
       {(consoleLines.length > 0 || busy) && (
         <Button
           size="sm"

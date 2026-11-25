@@ -1,7 +1,18 @@
 export type GatewayRoleMode = 'main' | 'side';
-export type GatewayWorkMode = 'auto' | 'audit' | 'proxy';
-export type EffectiveGatewayWorkMode = 'audit' | 'proxy';
+export type GatewayWorkMode = 'auto' | 'audit' | 'proxy' | 'delegated';
+export type EffectiveGatewayWorkMode = 'audit' | 'proxy' | 'delegated';
 export type GatewayIPv6Mode = 'off' | 'cn_only' | 'full';
+
+export interface SideRouterStatusInfo {
+  configured: boolean;
+  ip?: string;
+  online: boolean;
+  webuiReady: boolean;
+  dnsReady: boolean;
+  latencyMs?: number;
+  lanDhcpMode?: 'side_dhcp' | 'main_dhcp_option' | 'main_local' | 'unknown' | string;
+  lanDhcpHint?: string;
+}
 
 export interface IPv6StatusInfo {
   supported: boolean;
@@ -40,6 +51,8 @@ export interface ClientGatewayStatusSummary {
   effectiveWorkMode?: EffectiveGatewayWorkMode;
   hasSubs?: boolean;
   mainRouterIP: string;
+  sideRouterIP?: string;
+  sideRouterFailover?: boolean;
   ipv6Mode?: GatewayIPv6Mode;
 }
 
@@ -50,6 +63,9 @@ export interface ClientGatewayConfigResponse {
   effectiveWorkMode?: EffectiveGatewayWorkMode;
   hasSubs?: boolean;
   mainRouterIP: string;
+  sideRouterIP?: string;
+  sideRouterFailover?: boolean;
+  sideRouterStatus?: SideRouterStatusInfo | null;
   lanIface?: string;
   ipv6Mode?: GatewayIPv6Mode;
   ipv6Status?: IPv6StatusInfo;

@@ -351,8 +351,14 @@ export const SingBoxPage: React.FC<SingBoxPageProps> = ({
         title="sing-box"
         description={sb?.configPath || '/etc/sing-box/config.json'}
         badge={
-          <Badge tone={sbRunning ? 'ok' : sb?.installed ? 'neutral' : 'warn'} dot={sbRunning} pulse={sbRunning}>
-            {sbRunning ? `运行中 · v${sb?.version || '-'}` : sb?.installed ? '已停止' : '未安装'}
+          <Badge tone={sbRunning ? 'ok' : status?.gateway?.effectiveWorkMode === 'delegated' ? 'neutral' : sb?.installed ? 'neutral' : 'warn'} dot={sbRunning} pulse={sbRunning}>
+            {sbRunning
+              ? `运行中 · v${sb?.version || '-'}`
+              : status?.gateway?.effectiveWorkMode === 'delegated'
+                ? '托管省电中'
+                : sb?.installed
+                  ? '已停止'
+                  : '未安装'}
           </Badge>
         }
         actions={
@@ -370,6 +376,33 @@ export const SingBoxPage: React.FC<SingBoxPageProps> = ({
         }
       />
 
+      {status?.gateway?.effectiveWorkMode === 'delegated' && (
+        <div className="rounded-xl border border-cyan-500/30 bg-cyan-500/8 px-4 py-3 text-xs text-cyan-200 flex flex-wrap items-center justify-between gap-2">
+          <span>
+            当前主路由处于「旁路由托管（纯网关直通）」模式，本机 sing-box 已省内存停用，全部透明分流由旁路由处理。
+          </span>
+          <div className="flex items-center gap-2">
+            {status.gateway.sideRouterIP && (
+              <a
+                href={`http://${status.gateway.sideRouterIP}:8090`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="px-2.5 py-1 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/40 text-cyan-200 font-medium"
+              >
+                前往旁路由分流面板 ↗
+              </a>
+            )}
+            <button
+              type="button"
+              onClick={() => onNavigate('net', 'gw')}
+              className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 cursor-pointer"
+            >
+              切换网关模式
+            </button>
+          </div>
+        </div>
+      )}
+
       <SingBoxControlBar
         sb={sb}
         sbRunning={sbRunning}
@@ -377,7 +410,10 @@ export const SingBoxPage: React.FC<SingBoxPageProps> = ({
         traffic={traffic}
         currentMode={currentMode}
         switchingMode={switchingMode}
-        hideRoutingModeSwitch={status?.gateway?.effectiveWorkMode === 'audit'}
+        hideRoutingModeSwitch={
+          status?.gateway?.effectiveWorkMode === 'audit' ||
+          status?.gateway?.effectiveWorkMode === 'delegated'
+        }
         onAction={onAction}
         onNavigate={onNavigate}
         onModeSwitch={(nextMode) => void handleModeSwitch(nextMode)}

@@ -30,11 +30,15 @@ export interface TsSwapBannerState {
 }
 
 export function buildClientNavGroups(status?: ClientStatusResponse | null): NavGroupConfig<ClientTab>[] {
-  // 遵循「常态零绿点、仅异常微标提醒」规范：健康运行时选项卡视觉完全统一对称
-  const sbBadge =
-    status && status.singbox.installed && !status.singbox.running ? (
-      <StatusDot tone="danger" />
-    ) : undefined;
+  // 遵循「常态零绿点、仅异常微标提醒」规范：健康运行时选项卡视觉完全统一对称；旁路由托管模式不报红
+  const isDelegated = status?.gateway?.effectiveWorkMode === 'delegated';
+  const sbBadge = isDelegated ? (
+    <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">
+      已托管
+    </span>
+  ) : status && status.singbox.installed && !status.singbox.running ? (
+    <StatusDot tone="danger" />
+  ) : undefined;
   const dmBadge = status?.daemon?.staleBinary ? <StatusDot tone="warn" /> : undefined;
   const dns = getStatusDNS(status);
   const dnsEngineLabel = getEngineDisplayName(dns?.activeEngine, dns?.activeEngineLabel);
@@ -181,21 +185,28 @@ export const ClientStatusPill: React.FC<{
   onOpenGatewayMode?: () => void;
 }> = ({ status, onOpenGatewayMode }) => {
   const workMode = status.gateway?.effectiveWorkMode;
+  const isDelegated = workMode === 'delegated';
   const isAudit = workMode === 'audit';
-  const pillHealthy = status.singbox.running;
-  const modeText = status.singbox.running
-    ? isAudit
-      ? '审计模式'
-      : '代理模式'
-    : isAudit
-      ? '审计已停'
-      : '内核已停';
+  const pillHealthy = isDelegated || status.singbox.running;
+  const modeText = isDelegated
+    ? '主路由 · 旁路由托管'
+    : status.singbox.running
+      ? isAudit
+        ? '审计模式'
+        : '代理模式'
+      : isAudit
+        ? '审计已停'
+        : '内核已停';
   return (
     <div className="hidden md:flex items-center gap-2 text-xs font-mono text-slate-400">
       <button
         type="button"
         onClick={onOpenGatewayMode}
-        title="点击前往「网关模式」切换审计模式 / 代理模式"
+        title={
+          isDelegated && status.gateway?.sideRouterIP
+            ? `已托管至旁路由 ${status.gateway.sideRouterIP}（点击管理网关与旁路由设置）`
+            : '点击前往「网关模式」切换运行模式'
+        }
         className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800/90 border border-slate-800 hover:border-slate-700 transition-colors cursor-pointer"
       >
         <StatusDot tone={pillHealthy ? 'ok' : 'danger'} pulse={status.singbox.running} />

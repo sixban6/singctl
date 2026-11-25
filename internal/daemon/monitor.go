@@ -40,11 +40,21 @@ type HealthCheckResult struct {
 	Details      string    // 详细信息
 }
 
-// CheckHealth 综合健康检测（进程存活 + Clash API 内部 DNS 解析探活）。
+// CheckHealth 综合健康检测（进程存活 + Clash API 内部 DNS 解析探活；旁路由托管模式免运行 sing-box）。
 func (m *Monitor) CheckHealth() HealthCheckResult {
 	result := HealthCheckResult{
 		Healthy:   true,
 		CheckTime: time.Now(),
+	}
+
+	if m != nil && m.config != nil && !m.config.NeedsSingBox() {
+		result.DNSOK = true
+		if m.config.IsDelegatedMode() {
+			result.Details = "旁路由托管模式运行中（本机免运行 sing-box）"
+		} else {
+			result.Details = "当前模式无需运行 sing-box"
+		}
+		return result
 	}
 
 	if !IsSingBoxRunning() {

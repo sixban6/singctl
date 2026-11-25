@@ -1,12 +1,14 @@
 import React, { useEffect, useState } from 'react';
-import { ArrowRight, Globe, Layers, Radar, Save } from 'lucide-react';
+import { ArrowRight, ArrowRightLeft, Globe, Layers, Radar, Save } from 'lucide-react';
 import { Badge, Button, SectionCard } from '../../../ui';
-import { EffectiveGatewayWorkMode, GatewayWorkMode } from '../../types';
+import { EffectiveGatewayWorkMode, GatewayRoleMode, GatewayWorkMode } from '../../types';
 
 export function getWorkModeLabel(mode?: string): string {
   switch (mode) {
     case 'proxy':
       return '代理模式';
+    case 'delegated':
+      return '旁路由托管';
     case 'audit':
     default:
       return '审计模式';
@@ -14,6 +16,7 @@ export function getWorkModeLabel(mode?: string): string {
 }
 
 export interface WorkModeCardProps {
+  roleMode?: GatewayRoleMode;
   configuredWorkMode?: GatewayWorkMode;
   effectiveWorkMode?: EffectiveGatewayWorkMode;
   hasSubs: boolean;
@@ -31,6 +34,7 @@ interface WorkModeOption {
   desc: string;
   hint: string;
   requiresSubs?: boolean;
+  mainOnly?: boolean;
   icon: React.ReactNode;
 }
 
@@ -39,22 +43,32 @@ const WORK_MODE_OPTIONS: WorkModeOption[] = [
     key: 'audit',
     title: '审计模式',
     tag: '免订阅 · 强劫持',
-    desc: '无需订阅，纯直连透明劫持全屋 DNS、四层防 DoH/HTTPDNS 绕过、实时设备审计与防 PCDN。',
-    hint: '切换后将免订阅启动轻量直连内核，完整开启设备行为审计、去广告与防绕过 DNS 劫持。',
+    desc: '无需订阅，本机直连透明劫持全屋 DNS、四层防 DoH 绕过、实时设备审计与防 PCDN。',
+    hint: '切换后将启动本机轻量直连审计内核。',
     icon: <Radar className="w-4 h-4" />,
   },
   {
     key: 'proxy',
     title: '代理模式',
-    tag: '需订阅 · 全功能',
-    desc: '透明代理智能分流 + 完整设备行为审计 + 四层防绕过 DNS 劫持，需先添加订阅链接。',
-    hint: '切换后将使用已配置的订阅链接生成完整分流配置并启动透明代理。',
+    tag: '需订阅 · 本机分流',
+    desc: '本机承担透明代理智能分流 + 完整设备行为审计 + 防绕过 DNS，需添加订阅链接。',
+    hint: '切换后将由本机直接加载订阅配置并运行 sing-box 透明代理。',
     requiresSubs: true,
     icon: <Globe className="w-4 h-4" />,
+  },
+  {
+    key: 'delegated',
+    title: '旁路由托管',
+    tag: '主旁协同 · 全速直通',
+    desc: '停用主路由 sing-box 与全局透明劫持，释放路由器内存并恢复硬件全速转发，全权交由旁路由分流。',
+    hint: '主路由仅负责拨号、交换机与 Wi-Fi/VLAN 子网策略分流，不消耗主路由 CPU/内存做代理。',
+    mainOnly: true,
+    icon: <ArrowRightLeft className="w-4 h-4" />,
   },
 ];
 
 export const WorkModeCard: React.FC<WorkModeCardProps> = ({
+  roleMode = 'main',
   configuredWorkMode,
   effectiveWorkMode,
   hasSubs,
@@ -64,17 +78,18 @@ export const WorkModeCard: React.FC<WorkModeCardProps> = ({
   onSaveWorkMode,
   onGoSubs,
 }) => {
+  const options = WORK_MODE_OPTIONS.filter((opt) => !(roleMode === 'side' && opt.mainOnly));
   const currentEffective: EffectiveGatewayWorkMode = effectiveWorkMode || (hasSubs ? 'proxy' : 'audit');
   const [selected, setSelected] = useState<EffectiveGatewayWorkMode>(currentEffective);
   const [dirty, setDirty] = useState(false);
 
   useEffect(() => {
     if (!dirty) {
-      setSelected(currentEffective);
+      setSelected(roleMode === 'side' && currentEffective === 'delegated' ? (hasSubs ? 'proxy' : 'audit') : currentEffective);
     }
-  }, [currentEffective, dirty]);
+  }, [currentEffective, dirty, roleMode, hasSubs]);
 
-  const activeOpt = WORK_MODE_OPTIONS.find((item) => item.key === selected) || WORK_MODE_OPTIONS[0];
+  const activeOpt = options.find((item) => item.key === selected) || options[0];
   const blockedByNoSubs = Boolean(activeOpt.requiresSubs && !hasSubs);
   const unchanged = selected === currentEffective && configuredWorkMode !== 'auto';
 
@@ -88,7 +103,7 @@ export const WorkModeCard: React.FC<WorkModeCardProps> = ({
     <SectionCard
       title="运行模式"
       icon={<Layers className="w-4 h-4" />}
-      subtitle="不配订阅也能用防劫持 DNS 与设备审计，按需一键切换"
+      subtitle={roleMode === 'main' ? '支持本机审计、本机代理或全权托管给旁路由（纯网关直通）' : '旁路由仅支持代理分流或审计模式'}
       actions={
         <Badge tone={currentEffective === 'proxy' ? 'accent' : 'ok'} dot>
           当前：{getWorkModeLabel(currentEffective)}
@@ -97,8 +112,8 @@ export const WorkModeCard: React.FC<WorkModeCardProps> = ({
       }
     >
       <div className="space-y-4">
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          {WORK_MODE_OPTIONS.map((opt) => {
+        <div className={`grid grid-cols-1 gap-3 ${options.length >= 3 ? 'md:grid-cols-3' : 'md:grid-cols-2'}`}>
+          {options.map((opt) => {
             const isSelected = selected === opt.key;
             const isCurrent = currentEffective === opt.key;
             const disabled = Boolean(opt.requiresSubs && !hasSubs);

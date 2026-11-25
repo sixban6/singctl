@@ -23,6 +23,8 @@ export const networkApi = {
     mode: GatewayRoleMode;
     workMode?: GatewayWorkMode;
     mainRouterIP?: string;
+    sideRouterIP?: string;
+    sideRouterFailover?: boolean;
     lanIface?: string;
     ipv6Mode?: GatewayIPv6Mode;
   }) =>
