@@ -111,12 +111,31 @@ func TestDNSBypassGuard_DefaultFourLayersAndIPv4Decoupling(t *testing.T) {
 		}
 	}
 
-	if !hasL1DoT || !hasL2DoHIP || !hasL2DoHDom || !hasL3SDKIP || !hasL3SDKDom || !hasL4AppDom || !hasL4AppIP {
-		t.Fatalf("missing default bypass guard layers: L1=%v L2IP=%v L2Dom=%v L3IP=%v L3Dom=%v L4Dom=%v L4IP=%v",
-			hasL1DoT, hasL2DoHIP, hasL2DoHDom, hasL3SDKIP, hasL3SDKDom, hasL4AppDom, hasL4AppIP)
+	if !hasL1DoT || !hasL2DoHIP || !hasL2DoHDom || !hasL3SDKIP || !hasL3SDKDom {
+		t.Fatalf("missing default bypass guard layers L1~L3: L1=%v L2IP=%v L2Dom=%v L3IP=%v L3Dom=%v",
+			hasL1DoT, hasL2DoHIP, hasL2DoHDom, hasL3SDKIP, hasL3SDKDom)
+	}
+	if hasL4AppDom || hasL4AppIP {
+		t.Fatalf("L4 app_httpdns must be disabled by default: L4Dom=%v L4IP=%v", hasL4AppDom, hasL4AppIP)
 	}
 	if !keptUserRule {
 		t.Fatal("user-scoped port 853 rule must be preserved untouched")
+	}
+
+	snap := singbox.InspectDNSBypassGuardStatus(cfg)
+	var foundL4Meta bool
+	for _, layer := range snap.Layers {
+		if layer.ID == "app_httpdns" {
+			foundL4Meta = true
+			if layer.DefaultEnabled || layer.Enabled {
+				t.Fatalf("expected app_httpdns metadata DefaultEnabled=false Enabled=false by default, got %+v", layer)
+			}
+		} else if !layer.DefaultEnabled || !layer.Enabled {
+			t.Fatalf("expected %s default enabled, got %+v", layer.ID, layer)
+		}
+	}
+	if !foundL4Meta {
+		t.Fatal("missing app_httpdns layer metadata")
 	}
 
 	// Idempotency
@@ -126,6 +145,54 @@ func TestDNSBypassGuard_DefaultFourLayersAndIPv4Decoupling(t *testing.T) {
 	}
 	if changed2 || out2 != out {
 		t.Fatalf("expected idempotent re-apply (changed=%v)", changed2)
+	}
+
+	// Explicit L4 opt-in enables non-wechat App HTTPDNS domains & dedicated VIP IPs
+	on := true
+	cfgOptInL4 := &config.Config{
+		Gateway: cfg.Gateway,
+		DNS: config.ClientDNSConfig{
+			BypassGuard: config.DNSBypassGuardConfig{
+				Layers: config.DNSBypassGuardLayers{
+					AppHTTPDNS: &on,
+				},
+			},
+		},
+	}
+	outOptIn, changedOptIn, err := singbox.ApplyDNSBypassGuardToConfigJSON(baseBypassTestConfigJSON(), cfgOptInL4)
+	if err != nil || !changedOptIn {
+		t.Fatalf("opt-in L4 apply failed: changed=%v err=%v", changedOptIn, err)
+	}
+	docOptIn, err := sboption.ParseDocument([]byte(outOptIn))
+	if err != nil {
+		t.Fatalf("parse opt-in L4 output failed: %v", err)
+	}
+	var optInHasAppDom, optInHasAppIP bool
+	for _, r := range docOptIn.Route.Rules {
+		if r.Action != "reject" || r.Type != "" || !r.SourceIPCIDR.IsEmpty() {
+			continue
+		}
+		if slices.Equal(r.Port.Slice(), []uint16{80, 443}) {
+			if slices.Contains(r.IPCIDR.Slice(), "103.37.155.60/32") &&
+				slices.Contains(r.IPCIDR.Slice(), "103.37.152.97/32") {
+				optInHasAppIP = true
+				if slices.Contains(r.IPCIDR.Slice(), "101.236.69.43/32") || slices.Contains(r.IPCIDR.Slice(), "103.37.152.92/32") {
+					t.Fatalf("shared Meituan business API VIPs must NOT be IP-blocked: %v", r.IPCIDR.Slice())
+				}
+			}
+			if slices.Contains(r.Domain.Slice(), "httpdns.bilivideo.com") &&
+				slices.Contains(r.Domain.Slice(), "httpdnsmultiapivip.meituan.com") {
+				optInHasAppDom = true
+				if slices.Contains(r.Domain.Slice(), "dns.weixin.qq.com") ||
+					slices.Contains(r.Domain.Slice(), "dns.weixin.qq.com.cn") ||
+					slices.Contains(r.Domain.Slice(), "aedns.weixin.qq.com") {
+					t.Fatalf("high-risk wechat HTTPDNS must NOT be blocked by default even when L4 opted in: %v", r.Domain.Slice())
+				}
+			}
+		}
+	}
+	if !optInHasAppDom || !optInHasAppIP {
+		t.Fatalf("expected L4 opt-in rules injected: L4Dom=%v L4IP=%v", optInHasAppDom, optInHasAppIP)
 	}
 }
 

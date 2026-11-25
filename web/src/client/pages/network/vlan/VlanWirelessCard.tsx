@@ -28,6 +28,8 @@ export interface VlanWirelessCardProps {
   proMode: boolean;
   radios: VlanRadioInfo[];
   wifi: VlanWirelessSpec;
+  originalPassword?: string;
+  loadingSecret?: boolean;
   onChange: (next: VlanWirelessSpec) => void;
 }
 
@@ -37,6 +39,8 @@ export const VlanWirelessCard: React.FC<VlanWirelessCardProps> = ({
   proMode,
   radios,
   wifi,
+  originalPassword = '',
+  loadingSecret = false,
   onChange,
 }) => {
   const { success } = useToast();
@@ -92,7 +96,8 @@ export const VlanWirelessCard: React.FC<VlanWirelessCardProps> = ({
   };
 
   const highlightRandom = !isEdit && !wifi.password;
-  const showReconnectWarn = isEdit && Boolean(wifi.passwordConfigured) && Boolean(wifi.password);
+  const hasPasswordChanged = Boolean(wifi.password) && wifi.password !== originalPassword;
+  const showReconnectWarn = isEdit && Boolean(wifi.passwordConfigured) && hasPasswordChanged;
 
   return (
     <div className="rounded-xl border border-slate-800/80 bg-slate-950/50 p-3.5 space-y-3">
@@ -133,7 +138,14 @@ export const VlanWirelessCard: React.FC<VlanWirelessCardProps> = ({
 
             <div className="space-y-1">
               <span className="block text-[11px] text-slate-400">
-                连接密码{wifi.passwordConfigured ? '（留空保持原密码不变）' : '（至少 8 位）'}
+                连接密码
+                {wifi.passwordConfigured
+                  ? loadingSecret
+                    ? '（正在读取现网密码…）'
+                    : originalPassword
+                      ? '（已回显当前密码，可点右侧眼睛查看或复制，未修改不重连 Wi-Fi）'
+                      : '（留空保持原密码不变）'
+                  : '（至少 8 位）'}
               </span>
               <div className="flex items-center gap-1.5">
                 <div className="relative flex-1 min-w-0">
@@ -141,7 +153,13 @@ export const VlanWirelessCard: React.FC<VlanWirelessCardProps> = ({
                     type={showPass ? 'text' : 'password'}
                     value={wifi.password || ''}
                     onChange={(e) => onChange({ ...wifi, password: e.target.value })}
-                    placeholder={wifi.passwordConfigured ? '已设置密码，留空不修改' : '输入或点右侧随机生成'}
+                    placeholder={
+                      wifi.passwordConfigured
+                        ? loadingSecret
+                          ? '正在读取当前密码…'
+                          : '已设置密码，留空不修改'
+                        : '输入或点右侧随机生成'
+                    }
                     className="w-full rounded-xl border border-slate-700/90 bg-slate-900/90 pl-3 pr-8 py-2 text-xs font-mono text-white focus:border-emerald-500/70 focus:outline-none"
                   />
                   <button
@@ -302,7 +320,7 @@ export const VlanWifiCredentialBanner: React.FC<VlanWifiCredentialBannerProps> =
           <div className="min-w-0 space-y-1">
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-xs sm:text-sm font-semibold text-white">
-                新 Wi-Fi 凭据速记卡 · {credential.segmentName}
+                Wi-Fi 凭据速记卡 · {credential.segmentName}
               </span>
               <Badge tone="ok">仅内存临时展示</Badge>
             </div>

@@ -63,7 +63,7 @@ func (d *SoftRouterDriver) Matches(netUCI *UCIConfig, _ *boardInfo, _ []string) 
 	if len(netUCI.ByType("switch_vlan")) > 0 || len(netUCI.ByType("switch")) > 0 {
 		return false
 	}
-	return len(collectBridgePorts(netUCI, "br-lan")) > 0 || netUCI.ByName("lan") != nil
+	return len(collectBridgePorts(netUCI, "br-lan")) > 0
 }
 
 func (d *SoftRouterDriver) ParseTopology(state *parsedState, readLink func(dev string) (bool, int)) ([]PortInfo, map[string]map[string]string, map[string]int) {
@@ -108,7 +108,7 @@ func parseBridgeVLANTopology(state *parsedState, readLink func(dev string) (bool
 		netDevsSet[dev] = true
 	}
 
-	var ports []PortInfo
+	ports := make([]PortInfo, 0)
 	seenPorts := make(map[string]bool)
 	addPort := func(name, label string, isWAN bool) {
 		name = strings.TrimSpace(name)

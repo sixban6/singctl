@@ -3,11 +3,17 @@ import {
   VlanOverview,
   VlanPreviewResult,
   VlanSaveSegmentRequest,
+  VlanWirelessSecretResponse,
 } from '../types';
 import { request } from './session';
 
 export const vlanApi = {
   getVlanOverview: () => request<VlanOverview>('/api/vlan/overview', { timeoutMs: 12000 }),
+
+  getVlanWifiSecret: (id: string) =>
+    request<VlanWirelessSecretResponse>(`/api/vlan/segment/${encodeURIComponent(id)}/wifi-secret`, {
+      timeoutMs: 8000,
+    }),
 
   previewVlanSave: (payload: VlanSaveSegmentRequest) =>
     request<VlanPreviewResult>('/api/vlan/preview', {

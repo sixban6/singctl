@@ -3,7 +3,7 @@ import { SERVER_TAB_KEYS, ServerStatusResponse, TabKey } from './types';
 import { ApiError, api, setOnUnauthorized } from './api';
 import { clearCachedQuery, useHashRoute, useVisibilityInterval } from '../hooks';
 import { copyToClipboard } from '../lib/clipboard';
-import { ToastProvider, CardSkeleton, lazyWithReload, useToast } from '../ui';
+import { ToastProvider, CardSkeleton, ErrorBoundary, lazyWithReload, useToast } from '../ui';
 import { Header } from './shell/Header';
 import { Navigation } from './shell/Navigation';
 import { OverviewTab } from './pages/OverviewTab';
@@ -308,6 +308,7 @@ const DashboardContent: React.FC = () => {
         />
 
         <div className="pt-2">
+          <ErrorBoundary resetKey={currentTab} onNavigateHome={() => setCurrentTab('overview')}>
           {currentTab === 'overview' && (
             <OverviewTab
               status={status}
@@ -380,6 +381,7 @@ const DashboardContent: React.FC = () => {
               </React.Suspense>
             </div>
           )}
+          </ErrorBoundary>
         </div>
       </main>
 

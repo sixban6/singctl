@@ -380,6 +380,7 @@ func (s *Server) registerRoutes() {
 
 	// OpenWrt 本机原生 VLAN 子网隔离与透明代理联动 API
 	s.Mux.HandleFunc("GET /api/vlan/overview", s.guard(s.handleVLANOverviewGet))
+	s.Mux.HandleFunc("GET /api/vlan/segment/{id}/wifi-secret", s.guard(s.handleVLANWifiSecretGet))
 	s.Mux.HandleFunc("POST /api/vlan/preview", s.guard(s.handleVLANPreviewPost))
 	s.Mux.HandleFunc("POST /api/vlan/apply", s.guard(s.handleVLANApplyPost))
 	s.Mux.HandleFunc("POST /api/vlan/delete/preview", s.guard(s.handleVLANDeletePreviewPost))

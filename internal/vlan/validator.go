@@ -89,6 +89,19 @@ func normalizeSaveRequest(req SaveSegmentRequest) SaveSegmentRequest {
 	} else {
 		req.ProxyMode = ProxyModeFollow
 	}
+	if len(req.DHCPDNS) > 0 {
+		var rawDNS []string
+		for _, entry := range req.DHCPDNS {
+			for _, tok := range strings.FieldsFunc(entry, func(r rune) bool {
+				return r == ',' || r == '，' || r == ' ' || r == '\t'
+			}) {
+				if trimmed := strings.TrimSpace(tok); trimmed != "" {
+					rawDNS = append(rawDNS, trimmed)
+				}
+			}
+		}
+		req.DHCPDNS = rawDNS
+	}
 	if req.Ports != nil {
 		req.Ports = maps.Clone(req.Ports)
 	}
@@ -162,6 +175,9 @@ func validateSaveRequest(ov *Overview, req SaveSegmentRequest, existing *Segment
 	}
 	if !validLeaseTimeRe.MatchString(req.LeaseTime) {
 		errs = append(errs, fmt.Sprintf("DHCP 租期格式无效: %q（如 2h、12h、1d）", req.LeaseTime))
+	}
+	if _, dnsErrs := normalizeAndValidateDHCPDNS(req.DHCPDNS); len(dnsErrs) > 0 {
+		errs = append(errs, dnsErrs...)
 	}
 
 	// Port checks: forbid WAN port, unknown port, or moving caller's active management port.

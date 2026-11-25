@@ -96,6 +96,25 @@ func TestWebUI_DNSBypassGuardAPI_GetPostValidateAndHotSync(t *testing.T) {
 			t.Fatalf("GET /api/dns/bypass-guard missing %s in %s", want, bodyStr)
 		}
 	}
+	var snapResp struct {
+		Layers []struct {
+			ID             string `json:"id"`
+			DefaultEnabled bool   `json:"defaultEnabled"`
+			Enabled        bool   `json:"enabled"`
+		} `json:"layers"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &snapResp); err != nil {
+		t.Fatalf("unmarshal GET /api/dns/bypass-guard failed: %v", err)
+	}
+	for _, layer := range snapResp.Layers {
+		if layer.ID == "app_httpdns" {
+			if layer.DefaultEnabled || layer.Enabled {
+				t.Fatalf("expected L4 app_httpdns default disabled in API response, got %+v", layer)
+			}
+		} else if !layer.DefaultEnabled || !layer.Enabled {
+			t.Fatalf("expected layer %s default enabled, got %+v", layer.ID, layer)
+		}
+	}
 
 	// 2. Invalid exemptSourceIps must return 400
 	badRec := doJSON(http.MethodPost, "/api/dns/bypass-guard", map[string]any{

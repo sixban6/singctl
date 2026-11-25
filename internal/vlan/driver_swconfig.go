@@ -93,7 +93,7 @@ func (d *SwconfigDriver) ParseTopology(state *parsedState, _ func(dev string) (b
 	}
 	slices.Sort(portNums)
 
-	var ports []PortInfo
+	ports := make([]PortInfo, 0)
 	portNumToName := make(map[string]string)
 	if wanPortNum != "" {
 		portNumToName[wanPortNum] = "wan"

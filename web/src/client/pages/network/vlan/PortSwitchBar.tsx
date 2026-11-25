@@ -24,15 +24,18 @@ export const PortSwitchBar: React.FC<PortSwitchBarProps> = ({
   onSelectOverviewSegment,
   onChangePortMode,
 }) => {
+  const safePorts = ports ?? [];
+  const safeSegments = segments ?? [];
+
   const segById = React.useMemo(() => {
     const map = new Map<string, VlanSegment>();
-    for (const seg of segments) {
+    for (const seg of safeSegments) {
       map.set(seg.id, seg);
     }
     return map;
-  }, [segments]);
+  }, [safeSegments]);
 
-  if (ports.length === 0) {
+  if (safePorts.length === 0) {
     return (
       <div className="rounded-xl border border-slate-800 bg-slate-950/50 px-4 py-3 text-xs text-slate-400">
         当前设备未探测到独立物理交换机网口。
@@ -85,7 +88,7 @@ export const PortSwitchBar: React.FC<PortSwitchBarProps> = ({
         </div>
 
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2.5">
-          {ports.map((p) => {
+          {safePorts.map((p) => {
             const ownerSeg = p.untaggedSegmentId ? segById.get(p.untaggedSegmentId) : undefined;
             const ownerTheme = getSegmentTheme(ownerSeg?.id, ownerSeg?.preset);
             const curSel = (selectedPorts[p.name] as VlanPortMode | undefined) || 'off';

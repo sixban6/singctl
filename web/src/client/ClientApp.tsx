@@ -5,6 +5,7 @@ import {
   Button,
   CardSkeleton,
   ConfirmDialog,
+  ErrorBoundary,
   ToastProvider,
   lazyWithReload,
   useToast,
@@ -323,7 +324,8 @@ const ClientShell: React.FC = () => {
         banner={banner}
         extraCommandItems={extraCommands}
       >
-        {tab === 'dash' && (
+        <ErrorBoundary resetKey={`${tab}:${sub || ''}`} onNavigateHome={() => navigate('dash')}>
+          {tab === 'dash' && (
           <DashPage
             status={status ?? null}
             busy={busy}
@@ -412,6 +414,7 @@ const ClientShell: React.FC = () => {
             />
           </React.Suspense>
         )}
+        </ErrorBoundary>
       </AppShell>
 
       <TaskConsoleDrawer

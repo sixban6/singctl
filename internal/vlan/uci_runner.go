@@ -379,6 +379,12 @@ func ReloadOpenWrtNetworkWithOptions(ctx context.Context, opts ReloadOptions, pr
 			_ = exec.CommandContext(cctx, wifiPath, "reload").Run()
 		}
 	}
+	if cidrs := ReadProxyBypassList(constant.VLANProxyBypassFile); len(cidrs) > 0 {
+		applyRuntimeProxyBypass(cctx, cidrs)
+	}
+	if dnsRules := ReadDNSBypassRules(constant.VLANDNSBypassFile); len(dnsRules) > 0 {
+		applyRuntimeDNSBypass(cctx, dnsRules)
+	}
 	return errors.Join(errs...)
 }
 
@@ -474,6 +480,10 @@ func (s *Service) readPortLink(devName string) (linkUp bool, speedMbps int) {
 
 func (s *Service) proxyBypassFile() string {
 	return cmp.Or(strings.TrimSpace(s.env.ProxyBypassFile), constant.VLANProxyBypassFile)
+}
+
+func (s *Service) dnsBypassFile() string {
+	return cmp.Or(strings.TrimSpace(s.env.DNSBypassFile), constant.VLANDNSBypassFile)
 }
 
 func (s *Service) boardJSONPath() string {

@@ -91,6 +91,7 @@ export function buildDraftFromPreset(preset: VlanPresetTemplate): VlanSaveSegmen
     dhcpStart: 100,
     dhcpLimit: 150,
     leaseTime: preset.id === 'guest' ? '2h' : '12h',
+    dhcpDns: [],
     ipv6Mode: preset.defaultIpv6Mode || 'off',
     proxyMode: preset.defaultProxyMode || 'direct',
     ports: {},
@@ -126,7 +127,7 @@ export function buildDraftFromSegment(seg: VlanSegment, overview: VlanOverview):
       }
     }
   }
-  const defaultRadio = overview.radios[0]?.name || '';
+  const defaultRadio = (overview.radios ?? [])[0]?.name || '';
   return {
     id: seg.id,
     displayName: seg.displayName || seg.id,
@@ -137,6 +138,7 @@ export function buildDraftFromSegment(seg: VlanSegment, overview: VlanOverview):
     dhcpStart: seg.dhcpStart || 100,
     dhcpLimit: seg.dhcpLimit || 150,
     leaseTime: seg.leaseTime || '12h',
+    dhcpDns: [...(seg.dhcpDns ?? [])],
     ipv6Mode: seg.ipv6Mode || 'off',
     proxyMode: seg.proxyMode || 'follow',
     ports,
@@ -172,6 +174,13 @@ export function buildDraftFromSegment(seg: VlanSegment, overview: VlanOverview):
     },
     ttlSec: 180,
   };
+}
+
+export function parseDnsInput(raw: string): string[] {
+  return raw
+    .split(/[\s,，;]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
 export function maskVlanText(text: string, privacyMask: boolean): string {

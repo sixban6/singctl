@@ -1,22 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import {
-  AlertTriangle,
-  Check,
-  CheckCircle2,
-  ChevronDown,
-  ChevronRight,
-  Copy,
-  Globe,
-  RefreshCw,
-  Shield,
-  ShieldCheck,
-  Sliders,
-  Terminal,
-  Zap,
-} from 'lucide-react';
+import { ChevronDown, ChevronRight, RefreshCw, ShieldCheck, Sliders } from 'lucide-react';
 import { Badge, Button, SlideDrawer, useToast } from '../../../../ui';
 import { clientApi } from '../../../api';
-import { copyPlainText } from '../../../lib/leakProbes';
 import {
   SafeCommitStatusReport,
   VlanApplyResponse,
@@ -26,6 +11,7 @@ import {
   VlanSaveSegmentRequest,
 } from '../../../types';
 import { PortSwitchBar } from './PortSwitchBar';
+import { ToggleRow, VlanDnsAndPolicyCard, VlanPreviewSummaryCard } from './VlanDnsAndPolicyCard';
 import { AppliedWifiCredential, VlanWirelessCard } from './VlanWirelessCard';
 import { maskVlanText } from './vlanHelpers';
 
@@ -41,28 +27,6 @@ export interface VlanSegmentDrawerProps {
   onApplied: (res: VlanApplyResponse, newCredential?: AppliedWifiCredential | null) => void;
   onSafeCommitUpdated?: (sc: SafeCommitStatusReport) => void;
 }
-
-interface ToggleRowProps {
-  label: string;
-  desc: string;
-  checked: boolean;
-  onChange: (next: boolean) => void;
-}
-
-const ToggleRow: React.FC<ToggleRowProps> = ({ label, desc, checked, onChange }) => (
-  <label className="flex items-start justify-between gap-3 rounded-xl border border-slate-800/80 bg-slate-950/50 px-3.5 py-2.5 cursor-pointer hover:border-slate-700 transition-colors">
-    <div className="min-w-0">
-      <div className="text-xs font-medium text-white">{label}</div>
-      <div className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">{desc}</div>
-    </div>
-    <input
-      type="checkbox"
-      checked={checked}
-      onChange={(e) => onChange(e.target.checked)}
-      className="mt-1 h-4 w-4 rounded border-slate-600 bg-slate-900 accent-emerald-500 shrink-0 cursor-pointer"
-    />
-  </label>
-);
 
 export const VlanSegmentDrawer: React.FC<VlanSegmentDrawerProps> = ({
   open,
@@ -84,16 +48,61 @@ export const VlanSegmentDrawer: React.FC<VlanSegmentDrawerProps> = ({
   const [previewLoading, setPreviewLoading] = useState(false);
   const [applying, setApplying] = useState(false);
   const [reconnectingHint, setReconnectingHint] = useState(false);
-  const [copiedRoute, setCopiedRoute] = useState(false);
+  const [originalPassword, setOriginalPassword] = useState('');
+  const [loadingSecret, setLoadingSecret] = useState(false);
+  const [sessionSeq, setSessionSeq] = useState(0);
 
   useEffect(() => {
-    if (!open || !initialDraft) return;
+    if (!open || !initialDraft) {
+      setOriginalPassword('');
+      setLoadingSecret(false);
+      return;
+    }
     setDraft(initialDraft);
     setTrustedText((initialDraft.policy.trustedSourceIps ?? []).join(', '));
     setAdvOpen(proMode);
     setPreview(null);
     setReconnectingHint(false);
-  }, [open, initialDraft, proMode]);
+    setOriginalPassword('');
+    setSessionSeq((n) => n + 1);
+
+    if (!isEdit || !initialDraft.wireless?.passwordConfigured) {
+      setLoadingSecret(false);
+      return;
+    }
+
+    let cancelled = false;
+    setLoadingSecret(true);
+    void clientApi
+      .getVlanWifiSecret(initialDraft.id)
+      .then((sec) => {
+        if (cancelled) return;
+        const pwd = sec.password || '';
+        setOriginalPassword(pwd);
+        if (!pwd) return;
+        setDraft((prev) => {
+          if (!prev || prev.id !== initialDraft.id) return prev;
+          if (prev.wireless?.password) return prev;
+          return {
+            ...prev,
+            wireless: {
+              ...(prev.wireless ?? { enabled: true, isolate: false }),
+              password: pwd,
+              passwordConfigured: true,
+            },
+          };
+        });
+      })
+      .catch(() => {
+        // 读取失败时保持输入框留空，提交时不改动原 UCI key
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingSecret(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, isEdit, initialDraft, proMode]);
 
   const buildPayload = useCallback(
     (src: VlanSaveSegmentRequest, trustedRaw: string): VlanSaveSegmentRequest => {
@@ -140,9 +149,12 @@ export const VlanSegmentDrawer: React.FC<VlanSegmentDrawerProps> = ({
 
   if (!draft) return null;
 
-  const hasRadios = overview.radios.length > 0;
+  const safeRadios = overview.radios ?? [];
+  const safePorts = overview.ports ?? [];
+  const safeSegments = overview.segments ?? [];
+  const hasRadios = safeRadios.length > 0;
   const wifi = draft.wireless ?? { enabled: false, isolate: false };
-  const otherSegments = overview.segments.filter((s) => s.id !== draft.id && s.id !== 'lan');
+  const otherSegments = safeSegments.filter((s) => s.id !== draft.id && s.id !== 'lan');
 
   const updatePortMode = (portName: string, nextMode: VlanPortMode) => {
     setDraft((prev) => {
@@ -171,8 +183,10 @@ export const VlanSegmentDrawer: React.FC<VlanSegmentDrawerProps> = ({
     setApplying(true);
     setReconnectingHint(false);
 
+    const passwordChanged =
+      Boolean(draft.wireless?.password) && (!isEdit || draft.wireless?.password !== originalPassword);
     const newCred: AppliedWifiCredential | null =
-      draft.wireless?.enabled && draft.wireless.ssid && draft.wireless.password
+      draft.wireless?.enabled && draft.wireless.ssid && draft.wireless.password && passwordChanged
         ? {
             segmentName: draft.displayName || draft.id,
             ssid: draft.wireless.ssid,
@@ -236,17 +250,6 @@ export const VlanSegmentDrawer: React.FC<VlanSegmentDrawerProps> = ({
     } finally {
       setApplying(false);
       setReconnectingHint(false);
-    }
-  };
-
-  const handleCopyRoute = async (cmd: string) => {
-    try {
-      await copyPlainText(cmd);
-      setCopiedRoute(true);
-      success('已复制上级主路由回程路由命令');
-      window.setTimeout(() => setCopiedRoute(false), 2000);
-    } catch {
-      error('复制失败，请手动选中复制');
     }
   };
 
@@ -333,8 +336,10 @@ export const VlanSegmentDrawer: React.FC<VlanSegmentDrawerProps> = ({
           hasRadios={hasRadios}
           isEdit={isEdit}
           proMode={proMode}
-          radios={overview.radios}
+          radios={safeRadios}
           wifi={wifi}
+          originalPassword={originalPassword}
+          loadingSecret={loadingSecret}
           onChange={(nextWifi) => setDraft({ ...draft, wireless: nextWifi })}
         />
 
@@ -347,8 +352,8 @@ export const VlanSegmentDrawer: React.FC<VlanSegmentDrawerProps> = ({
 
         {/* Physical port assignment */}
         <PortSwitchBar
-          ports={overview.ports}
-          segments={overview.segments}
+          ports={safePorts}
+          segments={safeSegments}
           mode="select"
           proMode={proMode}
           selectedPorts={draft.ports}
@@ -357,84 +362,13 @@ export const VlanSegmentDrawer: React.FC<VlanSegmentDrawerProps> = ({
         />
       </div>
 
-      {/* 3. 上网方式（透明代理联动）与安全隔离 */}
-      <div className="rounded-2xl border border-slate-800/90 bg-slate-900/60 p-4 space-y-3.5">
-        <h4 className="text-xs font-semibold text-white">3. 上网方式与安全隔离</h4>
-
-        <div className="space-y-1.5">
-          <div className="text-[11px] text-slate-400">透明代理联动策略</div>
-          <div className="grid sm:grid-cols-2 gap-2.5">
-            <button
-              type="button"
-              onClick={() => setDraft({ ...draft, proxyMode: 'follow' })}
-              className={`rounded-xl border p-3 text-left transition-all cursor-pointer ${
-                draft.proxyMode !== 'direct'
-                  ? 'border-emerald-500/65 bg-emerald-500/12'
-                  : 'border-slate-800 bg-slate-950/60 hover:border-slate-700'
-              }`}
-            >
-              <div className="flex items-center gap-2 text-xs font-semibold text-white">
-                <Globe className="w-3.5 h-3.5 text-emerald-400" />
-                跟随网关透明代理
-              </div>
-              <p className="text-[11px] text-slate-400 mt-1">
-                按网关规则自动分流国内外流量，适合主力手机与电脑。
-              </p>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setDraft({ ...draft, proxyMode: 'direct' })}
-              className={`rounded-xl border p-3 text-left transition-all cursor-pointer ${
-                draft.proxyMode === 'direct'
-                  ? 'border-amber-500/65 bg-amber-500/12'
-                  : 'border-slate-800 bg-slate-950/60 hover:border-slate-700'
-              }`}
-            >
-              <div className="flex items-center gap-2 text-xs font-semibold text-white">
-                <Zap className="w-3.5 h-3.5 text-amber-400" />
-                纯直连 · 绕过代理
-              </div>
-              <p className="text-[11px] text-slate-400 mt-1">
-                彻底绕开 sing-box，不消耗节点流量，最适合智能家居与访客。
-              </p>
-            </button>
-          </div>
-        </div>
-
-        <div className="space-y-2">
-          <ToggleRow
-            label="允许访问外网 (Internet)"
-            desc="关闭后该网段将成为纯离线内网（适合防摄像头偷传云端）"
-            checked={draft.policy.allowWan}
-            onChange={(v) => setDraft({ ...draft, policy: { ...draft.policy, allowWan: v } })}
-          />
-          <ToggleRow
-            label="禁止访问路由器管理后台（推荐隔离网开启）"
-            desc="拦截该网段访问路由器的网页后台、SSH 与 SingCtl 面板，防止设备被入侵后提权"
-            checked={draft.policy.blockRouterMgmt}
-            onChange={(v) => setDraft({ ...draft, policy: { ...draft.policy, blockRouterMgmt: v } })}
-          />
-          <ToggleRow
-            label="禁止访问家里主网设备（电脑 / NAS）"
-            desc="该网段无法主动探测或访问上级主网与个人电脑，仅保留正常上网能力"
-            checked={draft.policy.blockUpstreamLan}
-            onChange={(v) => setDraft({ ...draft, policy: { ...draft.policy, blockUpstreamLan: v } })}
-          />
-          <ToggleRow
-            label="允许主网设备单向控制此网"
-            desc="允许主网手机/电脑主动访问此网段设备（例如从主力网控制扫地机），但反向被禁止"
-            checked={draft.policy.allowFromMainLan}
-            onChange={(v) => setDraft({ ...draft, policy: { ...draft.policy, allowFromMainLan: v } })}
-          />
-          <ToggleRow
-            label="支持跨网设备发现 (AirPlay / 米家 / mDNS)"
-            desc="放行局域网 UDP 5353 组播发现，方便手机自动找到智能设备"
-            checked={draft.policy.allowMdns}
-            onChange={(v) => setDraft({ ...draft, policy: { ...draft.policy, allowMdns: v } })}
-          />
-        </div>
-      </div>
+      {/* 3. 上网方式（透明代理联动）、下发 DNS 与安全隔离 */}
+      <VlanDnsAndPolicyCard
+        resetKey={`${draft.id}:${sessionSeq}`}
+        draft={draft}
+        privacyMask={privacyMask}
+        onChangeDraft={setDraft}
+      />
 
       {/* 4. 高级网络参数（折叠 / 专家模式自动展开） */}
       <div className="rounded-2xl border border-slate-800/90 bg-slate-900/45 overflow-hidden">
@@ -578,89 +512,12 @@ export const VlanSegmentDrawer: React.FC<VlanSegmentDrawerProps> = ({
       </div>
 
       {/* 5. 生效前变更摘要（人话版 + 专家 UCI 预览） */}
-      <div className="rounded-2xl border border-slate-800/90 bg-slate-950/70 p-4 space-y-3">
-        <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2 text-xs font-semibold text-white">
-            <Shield className="w-3.5 h-3.5 text-emerald-400" />
-            生效前变更核对
-          </div>
-          {previewLoading ? (
-            <Badge tone="neutral">实时校验中…</Badge>
-          ) : preview?.valid ? (
-            <Badge tone="ok" dot>
-              校验通过 · 可安全应用
-            </Badge>
-          ) : (
-            <Badge tone="danger" dot>
-              存在冲突待修正
-            </Badge>
-          )}
-        </div>
-
-        {preview?.errors && preview.errors.length > 0 && (
-          <div className="rounded-xl border border-rose-500/40 bg-rose-500/10 p-3 space-y-1 text-xs text-rose-200">
-            {preview.errors.map((errMsg, idx) => (
-              <div key={idx} className="flex items-start gap-2">
-                <AlertTriangle className="w-3.5 h-3.5 text-rose-400 shrink-0 mt-0.5" />
-                <span>{maskVlanText(errMsg, privacyMask)}</span>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {preview?.warnings && preview.warnings.length > 0 && (
-          <div className="rounded-xl border border-amber-500/35 bg-amber-500/10 p-3 space-y-1 text-xs text-amber-200">
-            {preview.warnings.map((wMsg, idx) => (
-              <div key={idx} className="flex items-start gap-2">
-                <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
-                <span>{maskVlanText(wMsg, privacyMask)}</span>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {preview?.plainSummary && preview.plainSummary.length > 0 && (
-          <ul className="space-y-1.5 text-xs text-slate-200">
-            {preview.plainSummary.map((line, idx) => (
-              <li key={idx} className="flex items-start gap-2">
-                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0 mt-0.5" />
-                <span>{maskVlanText(line, privacyMask)}</span>
-              </li>
-            ))}
-          </ul>
-        )}
-
-        {preview?.upstreamRouteHint && (
-          <div className="rounded-xl border border-sky-500/30 bg-sky-500/8 p-3 space-y-1.5">
-            <div className="flex items-center justify-between gap-2 text-[11px] text-sky-200">
-              <span>若上级还有主软路由，需在其上添加回程静态路由：</span>
-              <Button
-                size="xs"
-                variant="secondary"
-                icon={copiedRoute ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
-                onClick={() => void handleCopyRoute(preview.upstreamRouteHint || '')}
-              >
-                {copiedRoute ? '已复制' : '复制命令'}
-              </Button>
-            </div>
-            <code className="block text-[11px] font-mono text-sky-300 break-all">
-              {maskVlanText(preview.upstreamRouteHint, privacyMask)}
-            </code>
-          </div>
-        )}
-
-        {proMode && preview?.uciCommands && preview.uciCommands.length > 0 && (
-          <details className="rounded-xl border border-slate-800 bg-slate-950/90 p-3">
-            <summary className="text-[11px] font-mono text-slate-300 cursor-pointer flex items-center gap-1.5">
-              <Terminal className="w-3.5 h-3.5 text-emerald-400" />
-              查看底层 UCI 批量指令 ({preview.uciCommands.length} 条)
-            </summary>
-            <pre className="mt-2 max-h-48 overflow-auto text-[11px] font-mono text-emerald-300/90 leading-relaxed whitespace-pre-wrap break-all">
-              {maskVlanText(preview.uciCommands.join('\n'), privacyMask)}
-            </pre>
-          </details>
-        )}
-      </div>
+      <VlanPreviewSummaryCard
+        proMode={proMode}
+        privacyMask={privacyMask}
+        preview={preview}
+        previewLoading={previewLoading}
+      />
     </SlideDrawer>
   );
 };

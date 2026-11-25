@@ -103,6 +103,7 @@ type Segment struct {
 	DHCPStart        int               `json:"dhcpStart"`
 	DHCPLimit        int               `json:"dhcpLimit"`
 	LeaseTime        string            `json:"leaseTime"`
+	DHCPDNS          []string          `json:"dhcpDns,omitempty"`
 	IPv6Mode         string            `json:"ipv6Mode"`
 	ProxyMode        string            `json:"proxyMode"`
 	IsPrimaryLAN     bool              `json:"isPrimaryLan"`
@@ -162,6 +163,7 @@ type SaveSegmentRequest struct {
 	DHCPStart       int               `json:"dhcpStart,omitempty"`
 	DHCPLimit       int               `json:"dhcpLimit,omitempty"`
 	LeaseTime       string            `json:"leaseTime,omitempty"`
+	DHCPDNS         []string          `json:"dhcpDns,omitempty"`
 	IPv6Mode        string            `json:"ipv6Mode,omitempty"`
 	ProxyMode       string            `json:"proxyMode,omitempty"`
 	Ports           map[string]string `json:"ports,omitempty"`
@@ -173,13 +175,14 @@ type SaveSegmentRequest struct {
 
 // PreviewResult 描述 Dry-Run 校验、人话变更摘要与底层 UCI 预览指令。
 type PreviewResult struct {
-	Valid             bool     `json:"valid"`
-	Errors            []string `json:"errors,omitempty"`
-	Warnings          []string `json:"warnings,omitempty"`
-	PlainSummary      []string `json:"plainSummary,omitempty"`
-	UCICommands       []string `json:"uciCommands,omitempty"`
-	ProxyBypassCIDRs  []string `json:"proxyBypassCidrs,omitempty"`
-	UpstreamRouteHint string   `json:"upstreamRouteHint,omitempty"`
+	Valid             bool                `json:"valid"`
+	Errors            []string            `json:"errors,omitempty"`
+	Warnings          []string            `json:"warnings,omitempty"`
+	PlainSummary      []string            `json:"plainSummary,omitempty"`
+	UCICommands       []string            `json:"uciCommands,omitempty"`
+	ProxyBypassCIDRs  []string            `json:"proxyBypassCidrs,omitempty"`
+	DNSBypassRules    []VLANDNSBypassRule `json:"-"`
+	UpstreamRouteHint string              `json:"upstreamRouteHint,omitempty"`
 }
 
 // ReloadOptions 描述 OpenWrt 网络服务重载策略（仅当无线配置实际发生变更时才执行 wifi reload 与 DMA 碎片整理）。
@@ -198,4 +201,19 @@ type ApplyResult struct {
 	SafeCommitToken   string        `json:"safeCommitToken,omitempty"`
 	SafeCommitTTLSec  int           `json:"safeCommitTtlSec,omitempty"`
 	ReloadOpts        ReloadOptions `json:"-"`
+}
+
+// WirelessSecret 描述单个 VLAN 分段按需读取的现网 Wi-Fi 凭据摘要（仅按需鉴权端点返回，不进入轮询 Overview）。
+type WirelessSecret struct {
+	SegmentID          string `json:"segmentId"`
+	Section            string `json:"section,omitempty"`
+	SSID               string `json:"ssid,omitempty"`
+	PasswordConfigured bool   `json:"passwordConfigured"`
+	Password           string `json:"password,omitempty"`
+}
+
+// VLANDNSBypassRule 描述单个 VLAN 子网去往自定义 DNS IP 的 53 端口免重定向放行规则。
+type VLANDNSBypassRule struct {
+	CIDR   string   `json:"cidr"`
+	DNSIPs []string `json:"dnsIps"`
 }

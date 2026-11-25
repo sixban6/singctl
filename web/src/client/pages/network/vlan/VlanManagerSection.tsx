@@ -7,6 +7,7 @@ import {
   Globe,
   Home,
   Info,
+  KeyRound,
   Lock,
   Network,
   Plus,
@@ -121,6 +122,7 @@ export const VlanManagerSection: React.FC<VlanManagerSectionProps> = ({
   const [deletePreview, setDeletePreview] = useState<VlanPreviewResult | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [copiedRoutes, setCopiedRoutes] = useState(false);
+  const [revealingSegId, setRevealingSegId] = useState<string | null>(null);
 
   const toggleProMode = () => {
     const next = !proMode;
@@ -213,6 +215,28 @@ export const VlanManagerSection: React.FC<VlanManagerSectionProps> = ({
     onRefreshStatus?.();
   };
 
+  const handleRevealWifiSecret = async (seg: VlanSegment) => {
+    setRevealingSegId(seg.id);
+    try {
+      const res = await clientApi.getVlanWifiSecret(seg.id);
+      if (!res.passwordConfigured || !res.password) {
+        toast(`分段「${seg.displayName || seg.id}」当前未配置 Wi-Fi 密码`, 'info');
+        return;
+      }
+      setAppliedWifiCred({
+        segmentName: seg.displayName || seg.id,
+        ssid: res.ssid || seg.wireless?.ssid || seg.id,
+        password: res.password,
+        createdAt: Date.now(),
+      });
+      success(`已读取「${seg.displayName || seg.id}」的 Wi-Fi 密码`);
+    } catch (e: unknown) {
+      error(e instanceof Error ? e.message : '读取 Wi-Fi 密码失败');
+    } finally {
+      setRevealingSegId(null);
+    }
+  };
+
   const totalOnline = useMemo(
     () => (overview?.segments ?? []).reduce((acc, s) => acc + (s.onlineClients || 0), 0),
     [overview],
@@ -220,7 +244,7 @@ export const VlanManagerSection: React.FC<VlanManagerSectionProps> = ({
 
   const upstreamRouteBatch = useMemo(() => {
     if (!overview?.wanIp || !isPrivateIPv4(overview.wanIp)) return '';
-    const customSegs = overview.segments.filter((s) => s.cidr && s.cidr !== overview.wanSubnet);
+    const customSegs = (overview.segments ?? []).filter((s) => s.cidr && s.cidr !== overview.wanSubnet);
     if (customSegs.length === 0) return '';
     return customSegs.map((s) => `ip route replace ${s.cidr} via ${overview.wanIp}`).join('\n');
   }, [overview]);
@@ -263,17 +287,20 @@ export const VlanManagerSection: React.FC<VlanManagerSectionProps> = ({
   }
 
   if (!overview.supported) {
+    const isSingleNIC = overview.driverLabel === '单网口旁路由';
     return (
       <SectionCard
         title="子网隔离与无线分段 (VLAN)"
-        subtitle="OpenWrt 本机原生网络分段自动化"
+        subtitle={isSingleNIC ? '当前设备拓扑识别结果' : 'OpenWrt 本机原生网络分段自动化'}
         icon={<Network className="w-4 h-4" />}
-        badge={<Badge tone="neutral">当前设备未启用</Badge>}
+        badge={<Badge tone="neutral">{isSingleNIC ? '单网口旁路由' : '当前设备未启用'}</Badge>}
       >
         <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-4 flex items-start gap-3">
           <Info className="w-5 h-5 text-sky-400 shrink-0 mt-0.5" />
           <div className="space-y-1 text-xs text-slate-300">
-            <div className="font-semibold text-white">该功能仅在 OpenWrt / ImmortalWrt 路由器上自动激活</div>
+            <div className="font-semibold text-white">
+              {isSingleNIC ? '单网口旁路由无需在本机划分 VLAN 子网' : '该功能仅在 OpenWrt / ImmortalWrt 路由器上自动激活'}
+            </div>
             <p className="text-slate-400 leading-relaxed">
               {overview.unsupportedReason || '未检测到 OpenWrt UCI 环境，因此已自动隐藏物理交换机分段配置。'}
             </p>
@@ -282,6 +309,11 @@ export const VlanManagerSection: React.FC<VlanManagerSectionProps> = ({
       </SectionCard>
     );
   }
+
+  const safeSegments = overview.segments ?? [];
+  const safePorts = overview.ports ?? [];
+  const safePresets = overview.presets ?? [];
+  const driverCode = (overview.driver || '').toUpperCase() || 'OPENWRT';
 
   return (
     <div className="space-y-5">
@@ -297,12 +329,12 @@ export const VlanManagerSection: React.FC<VlanManagerSectionProps> = ({
         subtitle={
           proMode
             ? `${overview.boardModel || 'OpenWrt 路由器'} · ${overview.driverLabel} · 在线终端 ${totalOnline} 台`
-            : `${overview.boardModel || 'OpenWrt 路由器'} · 当前共有 ${overview.segments.length} 个网络分段，${totalOnline} 台在线设备`
+            : `${overview.boardModel || 'OpenWrt 路由器'} · 当前共有 ${safeSegments.length} 个网络分段，${totalOnline} 台在线设备`
         }
         icon={<Network className="w-4 h-4" />}
         badge={
           <Badge tone="ok" dot>
-            {proMode ? overview.driver.toUpperCase() : '已开启防断联保护'}
+            {proMode ? driverCode : '已开启防断联保护'}
           </Badge>
         }
         actions={
@@ -326,13 +358,13 @@ export const VlanManagerSection: React.FC<VlanManagerSectionProps> = ({
             >
               刷新
             </Button>
-            {overview.presets.length > 0 && (
+            {safePresets.length > 0 && (
               <Button
                 size="sm"
                 variant="primary"
                 disabled={busy}
                 icon={<Plus className="w-3.5 h-3.5" />}
-                onClick={() => openFromPreset(overview.presets[0])}
+                onClick={() => openFromPreset(safePresets[0])}
               >
                 新建隔离网
               </Button>
@@ -362,12 +394,12 @@ export const VlanManagerSection: React.FC<VlanManagerSectionProps> = ({
           )}
 
           <PortSwitchBar
-            ports={overview.ports}
-            segments={overview.segments}
+            ports={safePorts}
+            segments={safeSegments}
             mode="overview"
             proMode={proMode}
             onSelectOverviewSegment={(segId) => {
-              const target = overview.segments.find((s) => s.id === segId);
+              const target = safeSegments.find((s) => s.id === segId);
               if (target) openEditSegment(target);
             }}
           />
@@ -375,14 +407,14 @@ export const VlanManagerSection: React.FC<VlanManagerSectionProps> = ({
       </SectionCard>
 
       {/* Scenario preset quick-add cards */}
-      {overview.presets.length > 0 && (
+      {safePresets.length > 0 && (
         <SectionCard
           title="一键添加隔离网络"
           subtitle="不懂 VLAN 也没关系——直接按用途选择，系统自动分配不冲突的网段与隔离防火墙"
           icon={<Shield className="w-4 h-4" />}
         >
           <div className="grid sm:grid-cols-2 xl:grid-cols-4 gap-3">
-            {overview.presets.map((preset) => {
+            {safePresets.map((preset) => {
               const theme = getSegmentTheme(preset.suggestedId, preset.id);
               return (
                 <button
@@ -426,15 +458,16 @@ export const VlanManagerSection: React.FC<VlanManagerSectionProps> = ({
         </SectionCard>
       )}
 
+      {/* Scenario preset quick-add cards closing */}
       {/* Existing segments grid */}
       <SectionCard
         title="当前网络分段总览"
         subtitle="每个分段拥有独立网段、DHCP 与安全隔离策略，支持单独决定是否经过透明代理"
         icon={<Globe className="w-4 h-4" />}
-        badge={<Badge tone="neutral">{overview.segments.length} 个分段</Badge>}
+        badge={<Badge tone="neutral">{safeSegments.length} 个分段</Badge>}
       >
         <div className="grid md:grid-cols-2 gap-3.5">
-          {overview.segments.map((seg) => {
+          {safeSegments.map((seg) => {
             const theme = getSegmentTheme(seg.id, seg.preset);
             const assignedPorts = Object.entries(seg.ports ?? {});
             return (
@@ -496,6 +529,12 @@ export const VlanManagerSection: React.FC<VlanManagerSectionProps> = ({
                       </Badge>
                     )}
 
+                    {seg.dhcpDns && seg.dhcpDns.length > 0 && (
+                      <Badge tone="accent">
+                        DNS: {maskVlanText(seg.dhcpDns.join(', '), privacyMask)}
+                      </Badge>
+                    )}
+
                     {assignedPorts.map(([pName, pMode]) => (
                       <span
                         key={pName}
@@ -542,6 +581,18 @@ export const VlanManagerSection: React.FC<VlanManagerSectionProps> = ({
                         : '现网识别（支持接管编辑）'}
                   </span>
                   <div className="flex items-center gap-1.5">
+                    {seg.isPrimaryLan && seg.wireless?.passwordConfigured && (
+                      <Button
+                        size="xs"
+                        variant="secondary"
+                        disabled={busy}
+                        loading={revealingSegId === seg.id}
+                        icon={<KeyRound className="w-3 h-3" />}
+                        onClick={() => void handleRevealWifiSecret(seg)}
+                      >
+                        查看 Wi-Fi 密码
+                      </Button>
+                    )}
                     {!seg.isPrimaryLan && (
                       <Button
                         size="xs"

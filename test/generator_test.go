@@ -1404,7 +1404,7 @@ func TestGenerator_ZeroSubscriptions(t *testing.T) {
 		t.Fatal("expected error when subs is empty in explicit proxy mode, got nil")
 	}
 
-	// 2. Default zero-sub auto mode resolves to zero-sub audit mode on Linux and succeeds with L1~L4 bypass guard
+	// 2. Default zero-sub auto mode resolves to zero-sub audit mode on Linux and succeeds with L1~L3 bypass guard (L4 default off)
 	auditCfg := &config.Config{
 		Subs: []config.Subscription{},
 	}
@@ -1414,8 +1414,11 @@ func TestGenerator_ZeroSubscriptions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected zero-sub auto mode to generate direct audit config on linux, got err: %v", err)
 	}
-	if !strings.Contains(out, `"hijack-dns"`) || !strings.Contains(out, `"httpdns.bilivideo.com"`) {
-		t.Fatalf("expected hijack-dns and layered bypass guard in zero-sub audit config:\n%s", out)
+	if !strings.Contains(out, `"hijack-dns"`) || !strings.Contains(out, `"dns.alidns.com"`) || !strings.Contains(out, `"httpdns.alicdn.com"`) {
+		t.Fatalf("expected hijack-dns and L1~L3 bypass guard in zero-sub audit config:\n%s", out)
+	}
+	if strings.Contains(out, `"httpdns.bilivideo.com"`) {
+		t.Fatalf("expected default-disabled L4 domain httpdns.bilivideo.com absent from zero-sub audit config:\n%s", out)
 	}
 
 	// 3. iOS platform still requires subscriptions even in auto mode

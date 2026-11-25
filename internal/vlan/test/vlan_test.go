@@ -3,6 +3,7 @@ package vlan_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -882,4 +883,412 @@ firewall.singctl_fwd_main_iot.dest='iot'
 	if len(reloadOptsLog) != 2 || !reloadOptsLog[1].WirelessChanged {
 		t.Fatalf("expected second ReloadWithOptions with WirelessChanged=true, got %+v", reloadOptsLog)
 	}
+}
+
+func TestOverview_SingleNICSideRouterAndNonNullJSON(t *testing.T) {
+	sampleSingleNICBoardJSON := `{
+  "model": { "id": "sample,single-nic", "name": "Sample Single-NIC Node" },
+  "network": { "lan": { "device": "eth0", "protocol": "static" } }
+}`
+	sampleSingleNICNetworkUCI := `network.loopback=interface
+network.loopback.device='lo'
+network.loopback.proto='static'
+network.loopback.ipaddr='127.0.0.1'
+network.docker=interface
+network.docker.device='docker0'
+network.docker.proto='none'
+network.lan=interface
+network.lan.proto='static'
+network.lan.netmask='255.255.255.0'
+network.lan.device='eth0'
+network.lan.ipaddr='192.168.1.2'
+network.lan.gateway='192.168.1.1'
+network.@device[0]=device
+network.@device[0].type='bridge'
+network.@device[0].name='docker0'
+`
+	env := vlan.Env{
+		IsOpenWrt: func() bool { return true },
+		RunUCI: func(_ context.Context, args ...string) (string, error) {
+			if len(args) == 2 && args[0] == "show" && args[1] == "network" {
+				return sampleSingleNICNetworkUCI, nil
+			}
+			return "", nil
+		},
+		ReadFile: func(p string) ([]byte, error) {
+			if p == "/etc/board.json" {
+				return []byte(sampleSingleNICBoardJSON), nil
+			}
+			return nil, os.ErrNotExist
+		},
+		ListNetDevs: func() ([]string, error) {
+			return []string{"lo", "eth0", "docker0"}, nil
+		},
+		ReadIPv4Addrs: func() (map[string]string, error) {
+			return map[string]string{"eth0": "192.168.1.2/24"}, nil
+		},
+		BoardJSONPath:   "/etc/board.json",
+		ProxyBypassFile: filepath.Join(t.TempDir(), "bypass.list"),
+	}
+
+	ov, err := vlan.NewService(env).Overview(t.Context(), "127.0.0.1")
+	if err != nil {
+		t.Fatalf("Overview failed: %v", err)
+	}
+	if ov.Supported {
+		t.Fatalf("single-NIC side router without br-lan/switch/AP must report Supported=false, got %+v", ov)
+	}
+	if ov.Driver != vlan.DriverUnsupported || ov.DriverLabel != "单网口旁路由" {
+		t.Fatalf("expected Driver=unsupported DriverLabel='单网口旁路由', got driver=%q label=%q", ov.Driver, ov.DriverLabel)
+	}
+	if !strings.Contains(ov.UnsupportedReason, "单网口") || !strings.Contains(ov.UnsupportedReason, "主路由") {
+		t.Fatalf("expected helpful single-NIC side-router guidance in UnsupportedReason, got %q", ov.UnsupportedReason)
+	}
+
+	rawJSON, err := json.Marshal(ov)
+	if err != nil {
+		t.Fatalf("json.Marshal Overview failed: %v", err)
+	}
+	js := string(rawJSON)
+	for _, nullField := range []string{`"ports":null`, `"radios":null`, `"existingSsids":null`, `"segments":null`, `"presets":null`} {
+		if strings.Contains(js, nullField) {
+			t.Fatalf("Overview JSON must never contain %s; got: %s", nullField, js)
+		}
+	}
+}
+
+func TestWirelessSecret_OnDemandReadAndValidation(t *testing.T) {
+	env, _, _, _ := newN60ProEnv(t)
+	svc := vlan.NewService(env)
+
+	ov, err := svc.Overview(t.Context(), "192.168.10.179")
+	if err != nil {
+		t.Fatalf("Overview failed: %v", err)
+	}
+	for _, seg := range ov.Segments {
+		if seg.Wireless != nil && seg.Wireless.Password != "" {
+			t.Fatalf("Overview must remain redacted, leaked password for %s", seg.ID)
+		}
+	}
+
+	sec, err := svc.WirelessSecret(t.Context(), "iot")
+	if err != nil {
+		t.Fatalf("WirelessSecret(iot) failed: %v", err)
+	}
+	if !sec.PasswordConfigured || sec.SSID != "IoT-Example" || sec.Password != "SuperSecretWiFiPass123" {
+		t.Fatalf("unexpected WirelessSecret(iot): %+v", sec)
+	}
+
+	lanSec, err := svc.WirelessSecret(t.Context(), "lan")
+	if err != nil {
+		t.Fatalf("WirelessSecret(lan) failed: %v", err)
+	}
+	if lanSec.PasswordConfigured || lanSec.Password != "" {
+		t.Fatalf("expected lan without wifi binding to have PasswordConfigured=false, got %+v", lanSec)
+	}
+
+	for _, badID := range []string{"", "iot;id", "guest\nrm", "../etc"} {
+		if _, err := svc.WirelessSecret(t.Context(), badID); !errors.Is(err, vlan.ErrInvalidSegmentID) {
+			t.Fatalf("expected ErrInvalidSegmentID for %q, got %v", badID, err)
+		}
+	}
+	if _, err := svc.WirelessSecret(t.Context(), "nonexistent"); !errors.Is(err, vlan.ErrSegmentNotFound) {
+		t.Fatalf("expected ErrSegmentNotFound for missing segment, got %v", err)
+	}
+}
+
+func TestCommitSave_PreFilledSamePasswordSkipsWifiReload(t *testing.T) {
+	axNet := `network.lan=interface
+network.lan.device='br-lan'
+network.lan.proto='static'
+network.lan.ipaddr='192.168.50.1'
+network.lan.netmask='255.255.255.0'
+network.wan=interface
+network.wan.device='eth0.2'
+network.wan.proto='dhcp'
+network.@switch[0]=switch
+network.@switch[0].name='switch0'
+network.@switch[0].enable_vlan='1'
+network.@switch_vlan[0]=switch_vlan
+network.@switch_vlan[0].device='switch0'
+network.@switch_vlan[0].vlan='1'
+network.@switch_vlan[0].vid='1'
+network.@switch_vlan[0].ports='0 1 2 6t'
+network.@switch_vlan[1]=switch_vlan
+network.@switch_vlan[1].device='switch0'
+network.@switch_vlan[1].vlan='3'
+network.@switch_vlan[1].vid='3'
+network.@switch_vlan[1].ports='3 6t'
+network.@device[3]=device
+network.@device[3].name='iot-br'
+network.@device[3].type='bridge'
+network.@device[3].ports='eth0.3'
+network.iot=interface
+network.iot.proto='static'
+network.iot.device='iot-br'
+network.iot.ipaddr='192.168.34.1'
+network.iot.netmask='255.255.255.0'
+`
+	axWireless := `wireless.MT7981_1_1=wifi-device
+wireless.MT7981_1_1.type='mtwifi'
+wireless.MT7981_1_1.band='2g'
+wireless.iot_2g=wifi-iface
+wireless.iot_2g.device='MT7981_1_1'
+wireless.iot_2g.mode='ap'
+wireless.iot_2g.network='iot'
+wireless.iot_2g.ssid='IoT-2G'
+wireless.iot_2g.encryption='psk2'
+wireless.iot_2g.disabled='0'
+wireless.iot_2g.isolate='1'
+wireless.iot_2g.key='ExistingSecret123'
+`
+	svc := vlan.NewService(vlan.Env{
+		IsOpenWrt: func() bool { return true },
+		RunUCI: func(_ context.Context, args ...string) (string, error) {
+			if len(args) == 2 && args[0] == "show" {
+				switch args[1] {
+				case "network":
+					return axNet, nil
+				case "wireless":
+					return axWireless, nil
+				}
+			}
+			return "", nil
+		},
+		BatchUCI:        func(_ context.Context, _ []string) error { return nil },
+		SyncProxyBypass: func(_ context.Context, _ []string) error { return nil },
+		SyncDNSBypass:   func(_ context.Context, _ []vlan.VLANDNSBypassRule) error { return nil },
+		ReadFile:        func(string) ([]byte, error) { return nil, os.ErrNotExist },
+		ListNetDevs:     func() ([]string, error) { return []string{"lo", "eth0", "eth0.1", "eth0.2", "eth0.3", "br-lan", "iot-br"}, nil },
+		ReadIPv4Addrs: func() (map[string]string, error) {
+			return map[string]string{"eth0.2": "192.168.3.181/24", "br-lan": "192.168.50.1/24", "iot-br": "192.168.34.1/24"}, nil
+		},
+		ProxyBypassFile: filepath.Join(t.TempDir(), "bypass.list"),
+		DNSBypassFile:   filepath.Join(t.TempDir(), "dns-bypass.list"),
+	})
+
+	req := vlan.SaveSegmentRequest{
+		ID:        "iot",
+		VLANID:    3,
+		IPAddr:    "192.168.34.1",
+		Netmask:   "255.255.255.0",
+		ProxyMode: vlan.ProxyModeDirect,
+		DHCPDNS:   []string{"223.5.5.5"},
+		Ports:     map[string]string{"lan4": vlan.PortModeAccess},
+		Wireless: &vlan.WirelessSpec{
+			Enabled:    true,
+			Section:    "iot_2g",
+			Radio:      "MT7981_1_1",
+			SSID:       "IoT-2G",
+			Encryption: "psk2",
+			Isolate:    true,
+			Password:   "ExistingSecret123", // exact same pre-filled password from UI reveal
+		},
+		Policy: vlan.SecurityPolicy{AllowWAN: true, BlockRouterMgmt: true},
+	}
+
+	res, err := svc.CommitSave(t.Context(), "192.168.50.10", req)
+	if err != nil {
+		t.Fatalf("CommitSave failed: %v", err)
+	}
+	if res.ReloadOpts.WirelessChanged {
+		t.Fatal("expected WirelessChanged=false when pre-filled password equals existing UCI key")
+	}
+	for _, cmd := range res.UCICommands {
+		if strings.Contains(cmd, "wireless.") {
+			t.Fatalf("expected ZERO wireless.* UCI commands when password unchanged, got %q", cmd)
+		}
+	}
+}
+
+func TestCustomDHCPDNS_FullPipeline(t *testing.T) {
+	t.Run("parse_existing_dhcp_option", func(t *testing.T) {
+		env, _, _, _ := newN60ProEnv(t)
+		origRunUCI := env.RunUCI
+		env.RunUCI = func(ctx context.Context, args ...string) (string, error) {
+			if len(args) == 2 && args[0] == "show" && args[1] == "dhcp" {
+				return sampleN60ProDHCP + `dhcp.iot.dhcp_option='3,192.168.20.1' '6,192.168.29.88,223.5.5.5'
+`, nil
+			}
+			return origRunUCI(ctx, args...)
+		}
+		ov, err := vlan.NewService(env).Overview(t.Context(), "192.168.10.179")
+		if err != nil {
+			t.Fatalf("Overview failed: %v", err)
+		}
+		var iotSeg *vlan.Segment
+		for i := range ov.Segments {
+			if ov.Segments[i].ID == "iot" {
+				iotSeg = &ov.Segments[i]
+				break
+			}
+		}
+		if iotSeg == nil {
+			t.Fatal("iot segment missing")
+		}
+		want := []string{"192.168.29.88", "223.5.5.5"}
+		if !slices.Equal(iotSeg.DHCPDNS, want) {
+			t.Fatalf("iot DHCPDNS=%v, want %v", iotSeg.DHCPDNS, want)
+		}
+	})
+
+	t.Run("validation_rejects_invalid_dns", func(t *testing.T) {
+		env, _, _, _ := newN60ProEnv(t)
+		svc := vlan.NewService(env)
+		badDNSLists := [][]string{
+			{"not-an-ip"},
+			{"127.0.0.1"},
+			{"0.0.0.0"},
+			{"224.0.0.1"},
+			{"255.255.255.255"},
+			{"223.5.5.5;rm"},
+			{"223.5.5.5", "119.29.29.29", "114.114.114.114", "1.1.1.1", "8.8.8.8"},
+		}
+		for _, dnsList := range badDNSLists {
+			prev, err := svc.PreviewSave(t.Context(), "192.168.10.179", vlan.SaveSegmentRequest{
+				ID:      "guest",
+				VLANID:  30,
+				IPAddr:  "192.168.30.1",
+				DHCPDNS: dnsList,
+			})
+			if err != nil {
+				t.Fatalf("PreviewSave err=%v for dnsList=%v", err, dnsList)
+			}
+			if prev.Valid || len(prev.Errors) == 0 {
+				t.Fatalf("expected invalid preview for bad DHCPDNS %v", dnsList)
+			}
+		}
+	})
+
+	t.Run("apply_preserve_other_options_pinholes_and_dns_bypass", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dnsBypassFile := filepath.Join(tmpDir, "vlan-dns-bypass.list")
+		env, _, _, _ := newN60ProEnv(t)
+		origRunUCI := env.RunUCI
+
+		dhcpExtra := `dhcp.guest=dhcp
+dhcp.guest.interface='guest'
+dhcp.guest.start='100'
+dhcp.guest.limit='150'
+dhcp.guest.leasetime='12h'
+dhcp.guest.dhcp_option='3,192.168.30.1' '6,1.2.3.4'
+`
+		clearOption6 := false
+		env.RunUCI = func(ctx context.Context, args ...string) (string, error) {
+			if len(args) == 2 && args[0] == "show" && args[1] == "dhcp" {
+				if clearOption6 {
+					return sampleN60ProDHCP + `dhcp.guest=dhcp
+dhcp.guest.interface='guest'
+dhcp.guest.start='100'
+dhcp.guest.limit='150'
+dhcp.guest.leasetime='12h'
+dhcp.guest.dhcp_option='3,192.168.30.1' '6,192.168.29.88,192.168.1.53,223.5.5.5'
+`, nil
+				}
+				return sampleN60ProDHCP + dhcpExtra, nil
+			}
+			if len(args) == 2 && args[0] == "show" && args[1] == "firewall" {
+				if clearOption6 {
+					return sampleN60ProFirewall + `firewall.singctl_allow_dns_guest_0=rule
+firewall.singctl_allow_dns_guest_0.src='guest'
+`, nil
+				}
+			}
+			return origRunUCI(ctx, args...)
+		}
+
+		var syncedDNS []vlan.VLANDNSBypassRule
+		env.DNSBypassFile = dnsBypassFile
+		env.SyncDNSBypass = func(_ context.Context, rules []vlan.VLANDNSBypassRule) error {
+			syncedDNS = slices.Clone(rules)
+			return nil
+		}
+
+		svc := vlan.NewService(env)
+		req := vlan.SaveSegmentRequest{
+			ID:        "guest",
+			VLANID:    30,
+			IPAddr:    "192.168.30.1",
+			ProxyMode: vlan.ProxyModeDirect,
+			DHCPDNS:   []string{"192.168.29.88", "192.168.1.53", "223.5.5.5"},
+			Ports:     map[string]string{"lan3": vlan.PortModeAccess},
+			Policy: vlan.SecurityPolicy{
+				AllowWAN:         true,
+				BlockRouterMgmt:  true,
+				BlockUpstreamLAN: true,
+			},
+		}
+
+		res, err := svc.CommitSave(t.Context(), "192.168.10.179", req)
+		if err != nil {
+			t.Fatalf("CommitSave failed: %v", err)
+		}
+		joined := strings.Join(res.UCICommands, "\n")
+		for _, want := range []string{
+			"delete dhcp.guest.dhcp_option",
+			"add_list dhcp.guest.dhcp_option='3,192.168.30.1'",
+			"add_list dhcp.guest.dhcp_option='6,192.168.29.88,192.168.1.53,223.5.5.5'",
+			"set dhcp.guest.ra_dns='0'",
+			"set dhcp.guest.dns_service='0'",
+		} {
+			if !strings.Contains(joined, want) {
+				t.Fatalf("missing DHCP command %q in:\n%s", want, joined)
+			}
+		}
+
+		// Verify firewall pinhole rules for LAN IP (192.168.29.88) and WAN-subnet IP (192.168.1.53) appear BEFORE block_up rule.
+		allowLANIdx := strings.Index(joined, "dest_ip='192.168.29.88'")
+		allowWANIdx := strings.Index(joined, "dest_ip='192.168.1.53'")
+		blockUpIdx := strings.Index(joined, "singctl_block_up_guest=")
+		if allowLANIdx < 0 || allowWANIdx < 0 || blockUpIdx < 0 {
+			t.Fatalf("missing custom DNS firewall rules or block_up in:\n%s", joined)
+		}
+		if allowWANIdx > blockUpIdx {
+			t.Fatalf("WAN-subnet DNS pinhole rule MUST appear before singctl_block_up_guest:\n%s", joined)
+		}
+		if !strings.Contains(joined, "dest='lan'") || !strings.Contains(joined, "dest_port='53'") {
+			t.Fatalf("expected dest='lan' and dest_port='53' in firewall pinhole:\n%s", joined)
+		}
+
+		if len(syncedDNS) != 1 || syncedDNS[0].CIDR != "192.168.30.0/24" || !slices.Equal(syncedDNS[0].DNSIPs, req.DHCPDNS) {
+			t.Fatalf("unexpected SyncDNSBypass rules: %+v", syncedDNS)
+		}
+
+		// Verify default OS persistence writes 0600 file when SyncDNSBypass is nil.
+		envDisk := env
+		envDisk.SyncDNSBypass = nil
+		if _, err := vlan.NewService(envDisk).CommitSave(t.Context(), "192.168.10.179", req); err != nil {
+			t.Fatalf("CommitSave(disk fallback) failed: %v", err)
+		}
+		st, err := os.Stat(dnsBypassFile)
+		if err != nil || st.Mode().Perm() != 0600 {
+			t.Fatalf("dns bypass file stat err=%v perm=%o (want 0600)", err, st.Mode().Perm())
+		}
+		rawBypass, _ := os.ReadFile(dnsBypassFile)
+		if !strings.Contains(string(rawBypass), "192.168.30.0/24 192.168.29.88,192.168.1.53,223.5.5.5") {
+			t.Fatalf("unexpected dns bypass file contents:\n%s", string(rawBypass))
+		}
+
+		// Clearing DHCPDNS should remove option 6 (preserving option 3), delete singctl_allow_dns_guest_*, and clear dns-bypass file.
+		clearOption6 = true
+		req.DHCPDNS = nil
+		resClear, err := vlan.NewService(envDisk).CommitSave(t.Context(), "192.168.10.179", req)
+		if err != nil {
+			t.Fatalf("CommitSave(clear dns) failed: %v", err)
+		}
+		joinedClear := strings.Join(resClear.UCICommands, "\n")
+		if strings.Contains(joinedClear, "'6,") {
+			t.Fatalf("expected option 6 removed when DHCPDNS cleared, got:\n%s", joinedClear)
+		}
+		if !strings.Contains(joinedClear, "add_list dhcp.guest.dhcp_option='3,192.168.30.1'") {
+			t.Fatalf("expected non-DNS dhcp_option 3 preserved when clearing DNS, got:\n%s", joinedClear)
+		}
+		if !strings.Contains(joinedClear, "delete firewall.singctl_allow_dns_guest_0") {
+			t.Fatalf("expected stale singctl_allow_dns_guest_0 deleted, got:\n%s", joinedClear)
+		}
+		rawBypassCleared, _ := os.ReadFile(dnsBypassFile)
+		if strings.Contains(string(rawBypassCleared), "192.168.30.0/24") {
+			t.Fatalf("expected dns bypass file cleared, got:\n%s", string(rawBypassCleared))
+		}
+	})
 }

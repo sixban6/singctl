@@ -142,7 +142,7 @@ export const DNSBypassGuardCard: React.FC<DNSBypassGuardCardProps> = ({ active =
                 onChange={handleToggleMaster}
                 className="accent-cyan-400 w-4 h-4 cursor-pointer"
               />
-              <span className="font-medium text-primary">启用 L1~L4 防绕过拦截</span>
+              <span className="font-medium text-primary">启用防 DNS 绕过拦截（默认开启 L1~L3，L4 按需开启）</span>
             </label>
           </div>
 
@@ -174,6 +174,9 @@ export const DNSBypassGuardCard: React.FC<DNSBypassGuardCardProps> = ({ active =
                               {layer.name}
                             </span>
                             <Badge tone={risk.tone}>{risk.label}</Badge>
+                            {!layer.defaultEnabled && (
+                              <Badge tone="neutral">默认关闭 · 按需开启</Badge>
+                            )}
                           </div>
                           <p className="text-[11px] text-secondary leading-relaxed">{layer.desc}</p>
                         </div>

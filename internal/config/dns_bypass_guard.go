@@ -28,7 +28,7 @@ func IsKnownDNSBypassAppGroup(id string) bool {
 	return ok
 }
 
-// DNSBypassGuardLayers 控制 L1~L4 四个正交防绕过拦截层的独立开关（nil 默认启用）。
+// DNSBypassGuardLayers 控制 L1~L4 四个正交防绕过拦截层的独立开关（L1~L3 默认启用，L4 默认关闭按需开启）。
 type DNSBypassGuardLayers struct {
 	DoTDoQ     *bool `yaml:"dot_doq,omitempty" json:"dotDoq,omitempty"`
 	PublicDoH  *bool `yaml:"public_doh,omitempty" json:"publicDoh,omitempty"`
@@ -48,6 +48,10 @@ func boolPtrDefaultTrue(p *bool) bool {
 	return p == nil || *p
 }
 
+func boolPtrDefaultFalse(p *bool) bool {
+	return p != nil && *p
+}
+
 // IsEnabled 返回防绕过分层引擎总开关（未配置时默认开启）。
 func (g DNSBypassGuardConfig) IsEnabled() bool { return boolPtrDefaultTrue(g.Enabled) }
 
@@ -60,8 +64,8 @@ func (g DNSBypassGuardConfig) LayerPublicDoH() bool { return boolPtrDefaultTrue(
 // LayerSDKHTTPDNS 返回 L3（国内云厂商通用 HTTPDNS SDK 80/443 层）是否启用（默认开启）。
 func (g DNSBypassGuardConfig) LayerSDKHTTPDNS() bool { return boolPtrDefaultTrue(g.Layers.SDKHTTPDNS) }
 
-// LayerAppHTTPDNS 返回 L4（主流大厂 App 自建 HTTPDNS 层）总开关是否启用（默认开启）。
-func (g DNSBypassGuardConfig) LayerAppHTTPDNS() bool { return boolPtrDefaultTrue(g.Layers.AppHTTPDNS) }
+// LayerAppHTTPDNS 返回 L4（主流大厂 App 自建 HTTPDNS 层）总开关是否启用（默认关闭，需用户按需开启）。
+func (g DNSBypassGuardConfig) LayerAppHTTPDNS() bool { return boolPtrDefaultFalse(g.Layers.AppHTTPDNS) }
 
 // IsAppGroupEnabled 返回指定 L4 App 家族的最终生效状态（显式配置优先，否则回退默认安全基线）。
 func (g DNSBypassGuardConfig) IsAppGroupEnabled(id string) bool {

@@ -14,8 +14,11 @@ func TestDNSBypassGuardConfig_DefaultsAndValidation(t *testing.T) {
 	if !zero.IsEnabled() {
 		t.Fatal("zero-value DNSBypassGuardConfig must default to enabled")
 	}
-	if !zero.LayerDoTDoQ() || !zero.LayerPublicDoH() || !zero.LayerSDKHTTPDNS() || !zero.LayerAppHTTPDNS() {
-		t.Fatal("all four layers L1~L4 must default to enabled")
+	if !zero.LayerDoTDoQ() || !zero.LayerPublicDoH() || !zero.LayerSDKHTTPDNS() {
+		t.Fatal("layers L1~L3 must default to enabled")
+	}
+	if zero.LayerAppHTTPDNS() {
+		t.Fatal("layer L4 (app_httpdns) must default to disabled unless explicitly enabled")
 	}
 	for _, id := range []string{"bilibili", "bytedance", "jd", "netease", "meituan", "ctrip", "oem"} {
 		if !zero.IsAppGroupEnabled(id) {

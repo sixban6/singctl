@@ -79,6 +79,7 @@ export interface VlanSegment {
   dhcpStart: number;
   dhcpLimit: number;
   leaseTime: string;
+  dhcpDns?: string[];
   ipv6Mode: VlanIPv6Mode | string;
   proxyMode: VlanProxyMode | string;
   isPrimaryLan: boolean;
@@ -135,6 +136,7 @@ export interface VlanSaveSegmentRequest {
   dhcpStart?: number;
   dhcpLimit?: number;
   leaseTime?: string;
+  dhcpDns?: string[];
   ipv6Mode?: VlanIPv6Mode | string;
   proxyMode?: VlanProxyMode | string;
   ports?: Record<string, VlanPortMode | string>;
@@ -165,4 +167,12 @@ export interface VlanApplyResponse {
   safeCommitTtlSec?: number;
   safeCommit?: SafeCommitStatusResponse;
   overview?: VlanOverview;
+}
+
+export interface VlanWirelessSecretResponse {
+  segmentId: string;
+  section?: string;
+  ssid?: string;
+  passwordConfigured: boolean;
+  password?: string;
 }

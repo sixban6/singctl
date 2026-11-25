@@ -11,7 +11,7 @@ import (
 	"strings"
 )
 
-func buildDHCPCommands(req SaveSegmentRequest) []string {
+func buildDHCPCommands(dUCI *UCIConfig, req SaveSegmentRequest) []string {
 	cmds := []string{
 		fmt.Sprintf("set dhcp.%s=dhcp", req.ID),
 		fmt.Sprintf("set dhcp.%s.interface=%s", req.ID, quoteUCI(req.ID)),
@@ -19,6 +19,31 @@ func buildDHCPCommands(req SaveSegmentRequest) []string {
 		fmt.Sprintf("set dhcp.%s.limit=%s", req.ID, quoteUCI(strconv.Itoa(req.DHCPLimit))),
 		fmt.Sprintf("set dhcp.%s.leasetime=%s", req.ID, quoteUCI(req.LeaseTime)),
 	}
+
+	var curSec *UCISection
+	if dUCI != nil {
+		curSec = dUCI.ByName(req.ID)
+		if curSec == nil {
+			for _, cand := range dUCI.ByType("dhcp") {
+				if cand.Opt("interface") == req.ID {
+					curSec = cand
+					break
+				}
+			}
+		}
+	}
+	keptOpts := filterNonDNSDHCPOptions(curSec)
+	customDNS := effectiveCustomDNS(req.DHCPDNS, req.IPAddr)
+	if (curSec != nil && len(curSec.List("dhcp_option")) > 0) || len(keptOpts) > 0 || len(customDNS) > 0 {
+		cmds = append(cmds, fmt.Sprintf("delete dhcp.%s.dhcp_option", req.ID))
+		for _, opt := range keptOpts {
+			cmds = append(cmds, fmt.Sprintf("add_list dhcp.%s.dhcp_option=%s", req.ID, quoteUCI(opt)))
+		}
+		if len(customDNS) > 0 {
+			cmds = append(cmds, fmt.Sprintf("add_list dhcp.%s.dhcp_option=%s", req.ID, quoteUCI("6,"+strings.Join(customDNS, ","))))
+		}
+	}
+
 	switch req.IPv6Mode {
 	case IPv6Relay:
 		cmds = append(cmds,
@@ -42,6 +67,12 @@ func buildDHCPCommands(req SaveSegmentRequest) []string {
 			fmt.Sprintf("delete dhcp.%s.dhcpv6", req.ID),
 			fmt.Sprintf("delete dhcp.%s.ndp", req.ID),
 		)
+		if len(customDNS) > 0 {
+			cmds = append(cmds,
+				fmt.Sprintf("set dhcp.%s.ra_dns='0'", req.ID),
+				fmt.Sprintf("set dhcp.%s.dns_service='0'", req.ID),
+			)
+		}
 	}
 	return cmds
 }
@@ -78,8 +109,8 @@ func buildWirelessCommands(wUCI *UCIConfig, radios []RadioInfo, req SaveSegmentR
 		wantIsolate = "1"
 	}
 
-	// 无线属性脏检测：未改任何无线字段且未传新密码时返回空切片，避免触发无意义的 uci commit wireless 与高危 wifi reload。
-	if cur != nil && req.Wireless.Password == "" {
+	// 无线属性脏检测：未改任何无线字段且未传新密码（留空或等于现网原密码）时返回空切片，避免触发无意义的 uci commit wireless 与高危 wifi reload。
+	if cur != nil && (req.Wireless.Password == "" || req.Wireless.Password == cur.Opt("key")) {
 		curMode := cmp.Or(cur.Opt("mode"), "ap")
 		curDisabled := cmp.Or(cur.Opt("disabled"), "0")
 		curIsolate := cmp.Or(cur.Opt("isolate"), "0")
@@ -134,7 +165,7 @@ func buildDeleteWirelessCommands(wUCI *UCIConfig, segID string) []string {
 	return cmds
 }
 
-func buildFirewallCommands(fwUCI *UCIConfig, wanSubnet string, req SaveSegmentRequest) []string {
+func buildFirewallCommands(ov *Overview, fwUCI *UCIConfig, wanSubnet string, req SaveSegmentRequest) []string {
 	zoneName := req.ID
 	zoneRef := "singctl_zone_" + req.ID
 	if fwUCI != nil {
@@ -198,6 +229,11 @@ func buildFirewallCommands(fwUCI *UCIConfig, wanSubnet string, req SaveSegmentRe
 	} else {
 		cmds = append(cmds, fmt.Sprintf("delete firewall.%s", mgmtRef))
 	}
+
+	// Allow custom DHCP DNS cross-zone 53 pinholes BEFORE BlockUpstreamLAN rules so upstream/main-LAN DNS is not shadowed.
+	dnsCmds, activeDNSRefs := buildCustomDNSFirewallRules(ov, fwUCI, zoneName, req.ID, req.IPAddr, req.DHCPDNS)
+	cmds = append(cmds, collectStaleCustomDNSRuleDeletes(fwUCI, req.ID, activeDNSRefs)...)
+	cmds = append(cmds, dnsCmds...)
 
 	// Block access to upstream main LAN subnet (e.g. 192.168.1.0/24).
 	upRef := "singctl_block_up_" + req.ID
@@ -310,6 +346,7 @@ func buildDeleteFirewallCommands(fwUCI *UCIConfig, segID string) []string {
 		"singctl_block_mgmt_" + segID,
 		"singctl_block_up_" + segID,
 		"singctl_allow_trust_" + segID + "_",
+		"singctl_allow_dns_" + segID + "_",
 		"singctl_allow_mdns_" + segID,
 	}
 	for _, sec := range fwUCI.Sections {
@@ -400,7 +437,7 @@ func buildSegments(
 		}
 	}
 
-	var segments []Segment
+	segments := make([]Segment, 0)
 	for _, sec := range state.NetUCI.ByType("interface") {
 		if sec.Name == "loopback" || sec.Name == "wan" || sec.Name == "wan6" || sec.Name == "Wan6" || sec.Name == "tailscale" {
 			continue
@@ -419,7 +456,7 @@ func buildSegments(
 			}
 		}
 
-		dhcpStart, dhcpLimit, leaseTime, ipv6Mode := parseSegmentDHCP(state.DHCP, sec.Name)
+		dhcpStart, dhcpLimit, leaseTime, dhcpDNS, ipv6Mode := parseSegmentDHCP(state.DHCP, sec.Name)
 		policy := parseSegmentFirewallPolicy(state.Firewall, sec.Name, state.WANSubnet)
 
 		var wifiSpec *WirelessSpec
@@ -453,6 +490,7 @@ func buildSegments(
 			DHCPStart:        dhcpStart,
 			DHCPLimit:        dhcpLimit,
 			LeaseTime:        leaseTime,
+			DHCPDNS:          dhcpDNS,
 			IPv6Mode:         ipv6Mode,
 			ProxyMode:        proxyMode,
 			IsPrimaryLAN:     sec.Name == "lan",
@@ -482,7 +520,7 @@ func buildSegments(
 	return segments
 }
 
-func parseSegmentDHCP(dUCI *UCIConfig, segID string) (start, limit int, lease, ipv6Mode string) {
+func parseSegmentDHCP(dUCI *UCIConfig, segID string) (start, limit int, lease string, dhcpDNS []string, ipv6Mode string) {
 	start, limit, lease, ipv6Mode = 100, 150, "12h", IPv6Off
 	if dUCI == nil {
 		return
@@ -508,6 +546,7 @@ func parseSegmentDHCP(dUCI *UCIConfig, segID string) (start, limit int, lease, i
 	if v := sec.Opt("leasetime"); v != "" {
 		lease = v
 	}
+	dhcpDNS = parseDHCPDNSOptions(sec)
 	switch sec.Opt("ra") {
 	case "relay":
 		ipv6Mode = IPv6Relay

@@ -63,6 +63,7 @@ func vlanSnapshotFiles() map[string]string {
 		"uci_wireless":      "/etc/config/wireless",
 		"uci_firewall":      "/etc/config/firewall",
 		"vlan_proxy_bypass": constant.VLANProxyBypassFile,
+		"vlan_dns_bypass":   constant.VLANDNSBypassFile,
 	}
 }
 
@@ -80,6 +81,24 @@ func (s *Server) handleVLANOverviewGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, ov)
+}
+
+func (s *Server) handleVLANWifiSecretGet(w http.ResponseWriter, r *http.Request) {
+	segID := strings.TrimSpace(r.PathValue("id"))
+	sec, err := s.vlanService().WirelessSecret(r.Context(), segID)
+	if err != nil {
+		switch {
+		case errors.Is(err, vlan.ErrInvalidSegmentID):
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+		case errors.Is(err, vlan.ErrSegmentNotFound):
+			writeJSONError(w, http.StatusNotFound, err.Error())
+		default:
+			writeJSONError(w, http.StatusInternalServerError, "读取 Wi-Fi 密钥失败: "+err.Error())
+		}
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, sec)
 }
 
 func (s *Server) handleVLANPreviewPost(w http.ResponseWriter, r *http.Request) {
