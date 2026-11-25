@@ -2,6 +2,7 @@
 package singbox_test
 
 import (
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -214,5 +215,176 @@ func TestInjectPrivatePTRBlockRules_PrecedesClashAndNoWildcardARPA(t *testing.T)
 	}
 	if again != injected {
 		t.Fatalf("expected identical output on idempotent InjectPrivatePTRBlockRules")
+	}
+}
+
+func TestProbeSafeWANFallbackDNS_StrictAntiLoopMatrix(t *testing.T) {
+	writeTempResolv := func(name, content string) string {
+		t.Helper()
+		p := filepath.Join(t.TempDir(), name)
+		if err := os.WriteFile(p, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	// Verify IsPublicISPUnicastIPv4 rejects every non-public / local / loop-risk address directly.
+	ipCases := []struct {
+		ipStr    string
+		localIPs map[string]struct{}
+		wantOK   bool
+	}{
+		{"127.0.0.1", nil, false},
+		{"127.0.0.53", nil, false},
+		{"192.168.1.1", nil, false},
+		{"192.168.50.1", nil, false},
+		{"10.0.0.1", nil, false},
+		{"172.16.0.1", nil, false},
+		{"172.31.255.1", nil, false},
+		{"100.100.100.100", nil, false},
+		{"100.64.0.1", nil, false},
+		{"198.18.0.1", nil, false},
+		{"198.19.255.254", nil, false},
+		{"169.254.1.1", nil, false},
+		{"224.0.0.1", nil, false},
+		{"0.0.0.0", nil, false},
+		{"0.1.2.3", nil, false},
+		{"240.0.0.1", nil, false},
+		{"255.255.255.255", nil, false},
+		{"::1", nil, false},
+		{"fe80::1", nil, false},
+		{"198.51.100.10", map[string]struct{}{"198.51.100.10": {}}, false},
+		{"203.0.113.53", map[string]struct{}{"198.51.100.10": {}}, true},
+		{"114.114.114.114", nil, true},
+	}
+	for _, tc := range ipCases {
+		ip := net.ParseIP(tc.ipStr)
+		if got := singbox.IsPublicISPUnicastIPv4(ip, tc.localIPs); got != tc.wantOK {
+			t.Errorf("IsPublicISPUnicastIPv4(%s) = %v, want %v", tc.ipStr, got, tc.wantOK)
+		}
+	}
+
+	cases := []struct {
+		name     string
+		files    []string
+		localIPs []string
+		want     string
+	}{
+		{
+			name:     "loopback_only_falls_back_to_114",
+			files:    []string{"nameserver 127.0.0.1\nnameserver 127.0.0.53\n"},
+			localIPs: []string{},
+			want:     singbox.DefaultFallbackPlainUDPDNS,
+		},
+		{
+			name:     "private_lan_rfc1918_all_filtered_falls_back_to_114",
+			files:    []string{"nameserver 192.168.1.1\nnameserver 192.168.50.1\nnameserver 10.0.0.1\nnameserver 172.16.0.1\nnameserver 172.31.255.1\n"},
+			localIPs: []string{},
+			want:     singbox.DefaultFallbackPlainUDPDNS,
+		},
+		{
+			name:     "cgnat_and_tailscale_magicdns_filtered",
+			files:    []string{"nameserver 100.100.100.100\nnameserver 100.64.0.1\n"},
+			localIPs: []string{},
+			want:     singbox.DefaultFallbackPlainUDPDNS,
+		},
+		{
+			name:     "fakeip_range_filtered",
+			files:    []string{"nameserver 198.18.0.1\nnameserver 198.19.255.254\n"},
+			localIPs: []string{},
+			want:     singbox.DefaultFallbackPlainUDPDNS,
+		},
+		{
+			name:     "link_local_multicast_unspecified_broadcast_filtered",
+			files:    []string{"nameserver 169.254.1.1\nnameserver 224.0.0.1\nnameserver 0.0.0.0\nnameserver 255.255.255.255\nnameserver 240.0.0.1\n"},
+			localIPs: []string{},
+			want:     singbox.DefaultFallbackPlainUDPDNS,
+		},
+		{
+			name:     "skips_own_public_wan_ip_picks_next_isp_dns",
+			files:    []string{"nameserver 198.51.100.10\nnameserver 203.0.113.53\n"},
+			localIPs: []string{"198.51.100.10"},
+			want:     "203.0.113.53",
+		},
+		{
+			name: "mixed_lan_file1_falls_through_to_isp_dns_file2",
+			files: []string{
+				"nameserver 127.0.0.1\nnameserver 192.168.50.1\n",
+				"# auto\nnameserver 203.0.113.88 # Telecom DNS\n",
+			},
+			localIPs: []string{},
+			want:     "203.0.113.88",
+		},
+		{
+			name:     "empty_comments_and_ipv6_only_falls_back_to_114",
+			files:    []string{"# comment\n; semicolon\nnameserver ::1\nnameserver fe80::1\n"},
+			localIPs: []string{},
+			want:     singbox.DefaultFallbackPlainUDPDNS,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var paths []string
+			for i, body := range tc.files {
+				paths = append(paths, writeTempResolv(filepath.Base(t.Name())+string(rune('a'+i)), body))
+			}
+			got := singbox.ProbeSafeWANFallbackDNS(paths, tc.localIPs)
+			if got != tc.want {
+				t.Fatalf("ProbeSafeWANFallbackDNS = %q, want %q", got, tc.want)
+			}
+		})
+	}
+
+	// Missing paths also return 114.114.114.114
+	if got := singbox.ProbeSafeWANFallbackDNS([]string{filepath.Join(t.TempDir(), "nonexistent.conf")}, []string{}); got != "114.114.114.114" {
+		t.Fatalf("missing resolv path = %q, want 114.114.114.114", got)
+	}
+
+	// Integration with PatchDNSLocalJSONWithFallback + sing-box check
+	baseSB := `{
+  "dns": {
+    "servers": [
+      {"tag": "dns_local", "type": "udp", "server": "127.0.0.1", "server_port": 5353}
+    ],
+    "final": "dns_local"
+  },
+  "route": {"rules": []}
+}`
+	ispPath := writeTempResolv("resolv.auto", "nameserver 192.168.1.1\nnameserver 203.0.113.88 # ISP\n")
+	lanOnlyPath := writeTempResolv("resolv.lan", "nameserver 127.0.0.1\nnameserver 192.168.50.1\n")
+
+	for _, sc := range []struct {
+		label string
+		path  string
+		want  string
+	}{
+		{"isp_dns", ispPath, "203.0.113.88"},
+		{"lan_fallback_114", lanOnlyPath, "114.114.114.114"},
+	} {
+		targetIP := singbox.ProbeSafeWANFallbackDNS([]string{sc.path}, []string{})
+		if targetIP != sc.want {
+			t.Fatalf("%s targetIP=%q want %q", sc.label, targetIP, sc.want)
+		}
+		patched, changed, err := singbox.PatchDNSLocalJSONWithFallback(baseSB, false, 5353, targetIP)
+		if err != nil || !changed {
+			t.Fatalf("%s PatchDNSLocalJSONWithFallback failed: changed=%v err=%v", sc.label, changed, err)
+		}
+		doc, err := sboption.ParseDocument([]byte(patched))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(doc.DNS.Servers) != 1 || doc.DNS.Servers[0].Type != "udp" || doc.DNS.Servers[0].Server != sc.want || doc.DNS.Servers[0].ServerPort != 53 {
+			t.Fatalf("%s unexpected dns_local: %+v", sc.label, doc.DNS.Servers)
+		}
+		if sbBin, err := exec.LookPath("sing-box"); err == nil && sbBin != "" {
+			cfgFile := filepath.Join(t.TempDir(), sc.label+".json")
+			if err := os.WriteFile(cfgFile, []byte(patched), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if out, cErr := exec.CommandContext(t.Context(), sbBin, "check", "-c", cfgFile).CombinedOutput(); cErr != nil {
+				t.Fatalf("sing-box check failed for %s: %v\n%s", sc.label, cErr, string(out))
+			}
+		}
 	}
 }

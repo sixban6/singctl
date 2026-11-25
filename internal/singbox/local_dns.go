@@ -16,11 +16,96 @@ import (
 )
 
 const (
-	defaultFallbackDoHServer = "223.5.5.5"
-	defaultFallbackDoHPath   = "/dns-query"
+	defaultFallbackDoHServer   = "223.5.5.5"
+	defaultFallbackDoHPath     = "/dns-query"
+	DefaultFallbackPlainUDPDNS = "114.114.114.114"
 	// DNSSDBrowseKeyword 是 Bonjour / mDNS 服务发现反查特征串，用于在 sing-box 侧就地返回 NXDOMAIN 防回环。
 	DNSSDBrowseKeyword = "_dns-sd._udp."
 )
+
+var defaultResolvPaths = []string{
+	"/tmp/resolv.conf.d/resolv.conf.auto",
+	"/tmp/resolv.conf.auto",
+	"/etc/resolv.conf",
+}
+
+// IsPublicISPUnicastIPv4 判断 IPv4 地址是否为合法可路由的公网单播 DNS 地址（严格过滤回环、局域网私网 RFC1918、CGNAT/Tailscale 100.64/10、FakeIP 198.18/15、链路本地、组播/广播及本机接口 IP 防自环）。
+func IsPublicISPUnicastIPv4(ip net.IP, localIPSet map[string]struct{}) bool {
+	if ip == nil {
+		return false
+	}
+	v4 := ip.To4()
+	if v4 == nil {
+		return false
+	}
+	if v4.IsLoopback() || v4.IsPrivate() || v4.IsUnspecified() || v4.IsMulticast() ||
+		v4.IsLinkLocalUnicast() || v4.IsLinkLocalMulticast() {
+		return false
+	}
+	if v4[0] == 0 || v4[0] >= 240 {
+		return false
+	}
+	if v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127 {
+		return false
+	}
+	if v4[0] == 198 && (v4[1] == 18 || v4[1] == 19) {
+		return false
+	}
+	if len(localIPSet) > 0 {
+		if _, isSelf := localIPSet[v4.String()]; isSelf {
+			return false
+		}
+	}
+	return true
+}
+
+// ProbeSafeWANFallbackDNS 按优先级扫描宿主机 WAN 口/运营商 resolv 文件中的公网 DNS IPv4（严格过滤全部局域网/回环/CGNAT/FakeIP/本机 IP 防止停用防劫持 DNS 后陷入 53 自环）；
+// 未探测到任何安全公网 ISP DNS 时回退至 DefaultFallbackPlainUDPDNS ("114.114.114.114")。
+func ProbeSafeWANFallbackDNS(resolvPaths []string, localIPs []string) string {
+	if len(resolvPaths) == 0 {
+		resolvPaths = defaultResolvPaths
+	}
+	localIPSet := make(map[string]struct{})
+	if localIPs != nil {
+		for _, raw := range localIPs {
+			if ip := net.ParseIP(strings.TrimSpace(raw)); ip != nil && ip.To4() != nil {
+				localIPSet[ip.To4().String()] = struct{}{}
+			}
+		}
+	} else if addrs, err := net.InterfaceAddrs(); err == nil {
+		for _, a := range addrs {
+			if ipNet, ok := a.(*net.IPNet); ok && ipNet.IP != nil {
+				if v4 := ipNet.IP.To4(); v4 != nil {
+					localIPSet[v4.String()] = struct{}{}
+				}
+			}
+		}
+	}
+
+	for _, p := range resolvPaths {
+		raw, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		for line := range strings.SplitSeq(string(raw), "\n") {
+			if idx := strings.IndexAny(line, "#;"); idx >= 0 {
+				line = line[:idx]
+			}
+			fields := strings.Fields(strings.TrimSpace(line))
+			if len(fields) < 2 || !strings.EqualFold(fields[0], "nameserver") {
+				continue
+			}
+			cand := strings.TrimSpace(fields[1])
+			if host, _, splitErr := net.SplitHostPort(cand); splitErr == nil {
+				cand = host
+			}
+			if ip := net.ParseIP(cand); IsPublicISPUnicastIPv4(ip, localIPSet) {
+				return ip.To4().String()
+			}
+		}
+	}
+	return DefaultFallbackPlainUDPDNS
+}
 
 // privateReverseDNSSuffixes 覆盖 RFC 6303 标准私网/链路本地反查域，配合 _dns-sd._udp. 在 sing-box 侧就地返回 NXDOMAIN，
 // 既防止与 AdGuard/dnsmasq 形成回环放大，也杜绝内网 IP 段拓扑外泄到公网 DoH 或运营商 DNS。
@@ -325,7 +410,7 @@ func SyncLiveSingBoxDNSLocalWithFallback(ctx context.Context, sbConfigPath, sbWo
 	if useAdGuard {
 		log.Success("已平滑热重载 sing-box：dns_local -> 本地防劫持 DNS (127.0.0.1:%d)", dnsPort)
 	} else if gw := strings.TrimSpace(fallbackGatewayIP); gw != "" {
-		log.Success("已平滑热重载 sing-box：dns_local -> 上级主路由网关 (%s:53)", gw)
+		log.Success("已平滑热重载 sing-box：dns_local -> 原生明文 DNS (udp://%s:53)", gw)
 	} else {
 		log.Success("已平滑热重载 sing-box：dns_local -> 应急纯 IP 加密 DoH (https://%s/dns-query)", defaultFallbackDoHServer)
 	}

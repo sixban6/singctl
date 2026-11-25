@@ -60,6 +60,9 @@ func syncSingBoxLocalDNSLink(ctx context.Context, cfg *config.Config, useExterna
 			}
 		}
 	}
+	if !useExternal && fallbackGW == "" {
+		fallbackGW = singbox.ProbeSafeWANFallbackDNS(nil, nil)
+	}
 	if _, err := singbox.SyncLiveSingBoxDNSLocalWithFallback(ctx, "", "", useExternal, dnsPort, fallbackGW); err != nil {
 		logger.Warn("同步更新 sing-box dns_local 失败: %v", err)
 	}
@@ -253,7 +256,7 @@ func newDNSStopCmd(defaultConfigPath string) *cobra.Command {
 				if err := eng.Stop(cmd.Context()); err != nil {
 					return err
 				}
-				logger.Success("已安全回退 sing-box 至内置纯 IP 加密 DoH 并停止 %s（全程零断网）", eng.Meta().Name)
+				logger.Success("已安全回退 sing-box dns_local 至原生 DNS 并停止 %s（全程零断网）", eng.Meta().Name)
 				return nil
 			}
 			logger.Success("当前已使用 sing-box 内置纯 IP 加密 DoH 兜底")
