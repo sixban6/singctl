@@ -30,6 +30,18 @@ func DefaultUpstreams() []string {
 	}
 }
 
+// DefaultUpstreamsForMemory 按宿主机是否处于超小内存档（<=288MiB）返回默认加密上游列表：
+// 超小内存设备默认仅维护 2 条互补纯 IP 加密上游（阿里 DoH + 腾讯 DoT），显著降低 OpenSSL 会话内存与并发连接数。
+func DefaultUpstreamsForMemory(ultraLowMemory bool) []string {
+	if ultraLowMemory {
+		return []string{
+			"https://223.5.5.5/dns-query",
+			"tls://1.12.12.12:853",
+		}
+	}
+	return DefaultUpstreams()
+}
+
 // NormalizeUpstreamMode 归一化 SmartDNS 上游测速与调度策略（fastest_ip / parallel / load_balance）。
 func NormalizeUpstreamMode(raw string) string {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
@@ -262,7 +274,7 @@ func BuildConfigWithOptions(input ConfigInput, opts BuildConfigOptions) (string,
 
 	rawUpstreams := input.Upstreams
 	if len(rawUpstreams) == 0 {
-		rawUpstreams = DefaultUpstreams()
+		rawUpstreams = DefaultUpstreamsForMemory(input.IsUltraLowMemory)
 	}
 
 	seen := make(map[string]struct{}, len(rawUpstreams))
@@ -291,12 +303,18 @@ func BuildConfigWithOptions(input ConfigInput, opts BuildConfigOptions) (string,
 		return "", errors.New("至少需要配置 1 条合法的加密上游 DNS")
 	}
 
-	mode := NormalizeUpstreamMode(input.UpstreamMode)
+	rawMode := strings.TrimSpace(input.UpstreamMode)
+	if rawMode == "" && input.IsUltraLowMemory {
+		rawMode = "load_balance"
+	}
+	mode := NormalizeUpstreamMode(rawMode)
 	speedCheckMode := "ping,tcp:80,tcp:443"
+	if input.IsUltraLowMemory {
+		speedCheckMode = "tcp:443"
+	}
 	responseMode := "fastest-ip"
 	switch mode {
 	case "parallel":
-		speedCheckMode = "ping,tcp:80,tcp:443"
 		responseMode = "first-ping"
 	case "load_balance":
 		speedCheckMode = "none"

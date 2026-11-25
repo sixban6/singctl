@@ -105,10 +105,7 @@ func ComputeSoftMemoryLimit(role Role, totalRAMBytes uint64) int64 {
 
 	switch {
 	case totalRAMBytes <= sysinfo.UltraLowMemoryThresholdBytes:
-		if role == RoleSubHub {
-			return 18 * mib
-		}
-		return 22 * mib
+		return 14 * mib
 	case totalRAMBytes <= sysinfo.LowMemoryThresholdBytes:
 		if role == RoleSubHub {
 			return 24 * mib
@@ -141,6 +138,8 @@ func ComputeGCPercent(role Role, totalRAMBytes uint64) int {
 		return 100
 	}
 	switch {
+	case totalRAMBytes <= sysinfo.UltraLowMemoryThresholdBytes:
+		return 25
 	case totalRAMBytes <= sysinfo.LowMemoryThresholdBytes:
 		return 50
 	default:

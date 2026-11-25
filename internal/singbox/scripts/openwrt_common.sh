@@ -398,8 +398,14 @@ setup_singbox_mem_env() {
     if [ "${SINGCTL_LOW_MEMORY:-}" != "0" ]; then
         if [ -z "${GOMEMLIMIT:-}" ] && [ "$mem_total_kb" -gt 0 ]; then
             if [ "$mem_total_kb" -le 294912 ]; then
-                GOMEMLIMIT="40MiB"
-                [ -z "${GOGC:-}" ] && GOGC="50"
+                # 超小内存路由（<=288MiB）：免订阅审计模式无代理节点与大规则集，进一步收紧至 20MiB / GOGC=25
+                if [ -f "${CONFIG_FILE:-}" ] && ! grep -qE '"type"[[:space:]]*:[[:space:]]*"(selector|urltest)"' "$CONFIG_FILE" 2>/dev/null; then
+                    GOMEMLIMIT="20MiB"
+                    [ -z "${GOGC:-}" ] && GOGC="25"
+                else
+                    GOMEMLIMIT="28MiB"
+                    [ -z "${GOGC:-}" ] && GOGC="30"
+                fi
             elif [ "$mem_total_kb" -le 524288 ]; then
                 GOMEMLIMIT="44MiB"
                 [ -z "${GOGC:-}" ] && GOGC="50"
@@ -603,11 +609,14 @@ start_singbox() {
         return
     fi
 
-    # 2. 探测 -e 环境变量透传支持（OpenWrt 21.02 老版 ujail 不支持 -e，探测失败时自动省略）
+    # 2. 探测 -e 环境变量透传支持；OpenWrt 21.02 老版 ujail 不支持 -e 时自动回退 /usr/bin/env 包装透传，确保 GOMEMLIMIT/GOGC 永不丢失
     UJAIL_HAS_ENV=0
+    UJAIL_USE_ENV_WRAPPER=0
     if [ -n "${GOMEMLIMIT:-}" ] || [ -n "${GOGC:-}" ]; then
         if ujail -n test-env -w /tmp -e PATH -- /bin/echo "ok" >/dev/null 2>&1; then
             UJAIL_HAS_ENV=1
+        elif [ -x /usr/bin/env ] && ujail -n test-envwrap -w /tmp -r /usr/bin/env -- /usr/bin/env "GOMEMLIMIT=${GOMEMLIMIT:-}" /bin/echo "ok" >/dev/null 2>&1; then
+            UJAIL_USE_ENV_WRAPPER=1
         fi
     fi
 
@@ -631,6 +640,8 @@ start_singbox() {
     if [ "$UJAIL_HAS_ENV" = "1" ]; then
         [ -n "${GOMEMLIMIT:-}" ] && set -- "$@" -e GOMEMLIMIT
         [ -n "${GOGC:-}" ] && set -- "$@" -e GOGC
+    elif [ "$UJAIL_USE_ENV_WRAPPER" = "1" ]; then
+        set -- "$@" -r /usr/bin/env
     fi
     if [ "$UJAIL_PROC_MODE" = "flag" ]; then
         set -- "$@" -p
@@ -644,7 +655,14 @@ start_singbox() {
     if [ "$UJAIL_PROC_MODE" = "ro" ] && [ -e /proc ]; then
         set -- "$@" -r /proc
     fi
-    ujail "$@" -- "$SINGBOX_EXEC" run -c /tmp/sing-box-work/config.json >>/tmp/sing-box-basic.log 2>&1 &
+    set -- "$@" --
+    if [ "$UJAIL_USE_ENV_WRAPPER" = "1" ]; then
+        set -- "$@" /usr/bin/env
+        [ -n "${GOMEMLIMIT:-}" ] && set -- "$@" "GOMEMLIMIT=${GOMEMLIMIT}"
+        [ -n "${GOGC:-}" ] && set -- "$@" "GOGC=${GOGC}"
+    fi
+    set -- "$@" "$SINGBOX_EXEC" run -c /tmp/sing-box-work/config.json
+    ujail "$@" >>/tmp/sing-box-basic.log 2>&1 &
     UJAIL_PID=$!
 
     sleep 1
@@ -669,11 +687,20 @@ start_singbox() {
     if [ "$UJAIL_HAS_ENV" = "1" ]; then
         [ -n "${GOMEMLIMIT:-}" ] && set -- "$@" -e GOMEMLIMIT
         [ -n "${GOGC:-}" ] && set -- "$@" -e GOGC
+    elif [ "$UJAIL_USE_ENV_WRAPPER" = "1" ]; then
+        set -- "$@" -r /usr/bin/env
     fi
     [ -e /etc/sing-box ] && set -- "$@" -r /etc/sing-box
     [ -e /etc/ssl ] && set -- "$@" -r /etc/ssl
     [ -e /etc/resolv.conf ] && set -- "$@" -r /etc/resolv.conf
-    ujail "$@" -- "$SINGBOX_EXEC" run -c /tmp/sing-box-work/config.json >>/tmp/sing-box-simple.log 2>&1 &
+    set -- "$@" --
+    if [ "$UJAIL_USE_ENV_WRAPPER" = "1" ]; then
+        set -- "$@" /usr/bin/env
+        [ -n "${GOMEMLIMIT:-}" ] && set -- "$@" "GOMEMLIMIT=${GOMEMLIMIT}"
+        [ -n "${GOGC:-}" ] && set -- "$@" "GOGC=${GOGC}"
+    fi
+    set -- "$@" "$SINGBOX_EXEC" run -c /tmp/sing-box-work/config.json
+    ujail "$@" >>/tmp/sing-box-simple.log 2>&1 &
     UJAIL_PID=$!
 
     sleep 1

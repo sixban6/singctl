@@ -43,10 +43,10 @@ func TestDetectDaemonRole_And_ComputeMemoryAndGCTiers(t *testing.T) {
 		wantGC     int
 	}{
 		{"unknown_zero_ram_keeps_safe_default", 0, 48, 64, 100},
-		{"ultra_low_128MiB", 128 * mib, 18, 22, 50},
-		{"ultra_low_224MiB_router", 224 * mib, 18, 22, 50},
-		{"ultra_low_256MiB_router", 256 * mib, 18, 22, 50},
-		{"ultra_low_288MiB_boundary", 288 * mib, 18, 22, 50},
+		{"ultra_low_128MiB", 128 * mib, 14, 14, 25},
+		{"ultra_low_224MiB_router", 224 * mib, 14, 14, 25},
+		{"ultra_low_256MiB_router", 256 * mib, 14, 14, 25},
+		{"ultra_low_288MiB_boundary", 288 * mib, 14, 14, 25},
 		{"low_289MiB", 289 * mib, 24, 28, 50},
 		{"low_384MiB_router", 384 * mib, 24, 28, 50},
 		{"low_n60pro_479MiB_router", 491040 * 1024, 24, 28, 50},
@@ -85,7 +85,7 @@ func TestDetectDaemonRole_And_ComputeMemoryAndGCTiers(t *testing.T) {
 func TestApplyRuntimeLimits_RespectsExplicitEnvAndConcurrency(t *testing.T) {
 	const mib = 1024 * 1024
 
-	// 1. 224MB router sets both GOMEMLIMIT=22MiB and GOGC=50 when env vars are unset
+	// 1. 224MB router sets both GOMEMLIMIT=14MiB and GOGC=25 when env vars are unset
 	var setMem int64
 	var setGC int
 	lim, gc := memlimit.ApplyRuntimeLimits(
@@ -95,8 +95,8 @@ func TestApplyRuntimeLimits_RespectsExplicitEnvAndConcurrency(t *testing.T) {
 		func(v int64) int64 { setMem = v; return -1 },
 		func(v int) int { setGC = v; return 100 },
 	)
-	if lim != 22*mib || setMem != 22*mib || gc != 50 || setGC != 50 {
-		t.Fatalf("224MB ApplyRuntimeLimits = (%d, %d), set=(%d, %d), want (22MiB, 50)", lim, gc, setMem, setGC)
+	if lim != 14*mib || setMem != 14*mib || gc != 25 || setGC != 25 {
+		t.Fatalf("224MB ApplyRuntimeLimits = (%d, %d), set=(%d, %d), want (14MiB, 25)", lim, gc, setMem, setGC)
 	}
 
 	// 2. n60pro (~479.5 MiB) sets GOMEMLIMIT=28MiB and GOGC=50
@@ -112,7 +112,7 @@ func TestApplyRuntimeLimits_RespectsExplicitEnvAndConcurrency(t *testing.T) {
 		t.Fatalf("n60pro ApplyRuntimeLimits = (%d, %d), set=(%d, %d), want (28MiB, 50)", lim, gc, setMem, setGC)
 	}
 
-	// 3. Explicit GOMEMLIMIT respected while GOGC is still auto-tuned
+	// 3. Explicit GOMEMLIMIT respected while GOGC is still auto-tuned (25 on 224MB)
 	setMem, setGC = 0, 0
 	lim, gc = memlimit.ApplyRuntimeLimits(
 		[]string{"singctl", "dm", "start"},
@@ -126,8 +126,8 @@ func TestApplyRuntimeLimits_RespectsExplicitEnvAndConcurrency(t *testing.T) {
 		func(v int64) int64 { setMem = v; return -1 },
 		func(v int) int { setGC = v; return 100 },
 	)
-	if lim != 0 || setMem != 0 || gc != 50 || setGC != 50 {
-		t.Fatalf("explicit GOMEMLIMIT should skip setLimit but apply GOGC=50, got lim=%d gc=%d", lim, gc)
+	if lim != 0 || setMem != 0 || gc != 25 || setGC != 25 {
+		t.Fatalf("explicit GOMEMLIMIT should skip setLimit but apply GOGC=25, got lim=%d gc=%d", lim, gc)
 	}
 
 	// 4. Explicit GOGC respected while GOMEMLIMIT is still auto-tuned

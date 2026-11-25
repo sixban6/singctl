@@ -20,14 +20,22 @@ const (
 	LowMemAvailThresholdBytes uint64 = sysinfo.LowMemoryAvailableThresholdBytes
 	// LowMemMaxTrackedFlows 低内存模式下驻留历史流条目硬上限（256 条）。
 	LowMemMaxTrackedFlows = 256
+	// UltraLowMemMaxTrackedFlows 超小内存模式（<= 288 MiB）下驻留历史流条目硬上限（128 条）。
+	UltraLowMemMaxTrackedFlows = 128
 	// DefaultMaxTrackedFlows 常规内存模式下驻留历史流条目上限（1500 条）。
 	DefaultMaxTrackedFlows = maxPersistedFlows
 	// LowMemMaxTrackedConnCursors 低内存模式下活跃连接字节增量游标上限（512 条，防满载 BT 短连接撑爆内存）。
 	LowMemMaxTrackedConnCursors = 512
+	// UltraLowMemMaxTrackedConnCursors 超小内存模式下活跃连接字节增量游标上限（256 条）。
+	UltraLowMemMaxTrackedConnCursors = 256
 	// LowMemDeviceRefreshInterval 低内存模式下 DHCP/ARP/hosts 设备表最小刷新间隔。
 	LowMemDeviceRefreshInterval = 2 * time.Minute
+	// UltraLowMemDeviceRefreshInterval 超小内存模式下设备表最小刷新间隔。
+	UltraLowMemDeviceRefreshInterval = 3 * time.Minute
 	// LowMemIPv6NeighRefreshInterval 低内存模式下 `ip -6 neigh` 邻居表最小刷新间隔。
 	LowMemIPv6NeighRefreshInterval = 3 * time.Minute
+	// UltraLowMemIPv6NeighRefreshInterval 超小内存模式下 IPv6 邻居表最小刷新间隔。
+	UltraLowMemIPv6NeighRefreshInterval = 5 * time.Minute
 )
 
 // CollectorOptions 显式配置审计采集器的低内存预算与邻居表刷新降频参数。
@@ -45,20 +53,24 @@ func IsLowMemoryAuditMemInfo(mi sysinfo.MemInfo) bool {
 	return sysinfo.IsLowMemoryMemInfo(mi)
 }
 
-func resolveLowMemoryOption(opts CollectorOptions) bool {
+func resolveLowMemoryTier(opts CollectorOptions) (lowMem bool, ultraLowMem bool) {
 	if opts.LowMemory != nil {
-		return *opts.LowMemory
+		if !*opts.LowMemory {
+			return false, false
+		}
+		return true, sysinfo.IsUltraLowMemoryRAM(opts.MemTotalBytes)
 	}
 	if opts.MemTotalBytes > 0 || opts.MemAvailableBytes > 0 {
-		return IsLowMemoryAuditMemInfo(sysinfo.MemInfo{
+		mi := sysinfo.MemInfo{
 			TotalBytes:     opts.MemTotalBytes,
 			AvailableBytes: opts.MemAvailableBytes,
-		})
+		}
+		return IsLowMemoryAuditMemInfo(mi), sysinfo.IsUltraLowMemoryRAM(mi.TotalBytes)
 	}
 	if mi, err := sysinfo.ReadMemInfo(); err == nil {
-		return IsLowMemoryAuditMemInfo(mi)
+		return IsLowMemoryAuditMemInfo(mi), sysinfo.IsUltraLowMemoryRAM(mi.TotalBytes)
 	}
-	return false
+	return false, false
 }
 
 // NewCollectorWithOptions 按显式选项或宿主机内存自适应创建审计采集器。
@@ -79,13 +91,20 @@ func NewCollectorWithOptions(cfg *config.Config, opts CollectorOptions) *Collect
 	c.nowFunc = func() time.Time {
 		return time.Now().In(c.resolveLocalLocation())
 	}
-	c.applyCollectorOptionsLocked(opts, resolveLowMemoryOption(opts))
+	lowMem, ultraLowMem := resolveLowMemoryTier(opts)
+	c.applyCollectorOptionsLocked(opts, lowMem, ultraLowMem)
 	return c
 }
 
-func (c *Collector) applyCollectorOptionsLocked(opts CollectorOptions, lowMem bool) {
+func (c *Collector) applyCollectorOptionsLocked(opts CollectorOptions, lowMem, ultraLowMem bool) {
 	c.lowMemory = lowMem
-	if lowMem {
+	if ultraLowMem && lowMem {
+		c.maxTrackedFlows = cmp.Or(opts.MaxTrackedFlows, UltraLowMemMaxTrackedFlows)
+		c.maxConnCursors = UltraLowMemMaxTrackedConnCursors
+		c.deviceRefreshInterval = cmp.Or(opts.DeviceRefreshMinInterval, UltraLowMemDeviceRefreshInterval)
+		c.ipv6RefreshInterval = cmp.Or(opts.IPv6NeighRefreshInterval, UltraLowMemIPv6NeighRefreshInterval)
+		c.selfIPsRefreshInterval = 5 * time.Minute
+	} else if lowMem {
 		c.maxTrackedFlows = cmp.Or(opts.MaxTrackedFlows, LowMemMaxTrackedFlows)
 		c.maxConnCursors = LowMemMaxTrackedConnCursors
 		c.deviceRefreshInterval = cmp.Or(opts.DeviceRefreshMinInterval, LowMemDeviceRefreshInterval)
@@ -104,7 +123,7 @@ func (c *Collector) applyCollectorOptionsLocked(opts CollectorOptions, lowMem bo
 func (c *Collector) SetLowMemoryForTest(enabled bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.applyCollectorOptionsLocked(CollectorOptions{}, enabled)
+	c.applyCollectorOptionsLocked(CollectorOptions{}, enabled, false)
 	c.cachedMergedLANDevs = nil
 	c.lanDevsFetchedAt = time.Time{}
 	c.ipv6NeighFetchedAt = time.Time{}

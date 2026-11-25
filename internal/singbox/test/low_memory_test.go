@@ -179,10 +179,10 @@ func TestComputeSingBoxMemoryEnv_And_UnitSpec_And_LogCap(t *testing.T) {
 			wantGOGC  string
 		}{
 			{0, "", ""},
-			{1, "40MiB", "50"},
-			{128 * mib, "40MiB", "50"},
-			{224 * mib, "40MiB", "50"},
-			{288 * mib, "40MiB", "50"},
+			{1, "28MiB", "30"},
+			{128 * mib, "28MiB", "30"},
+			{224 * mib, "28MiB", "30"},
+			{288 * mib, "28MiB", "30"},
 			{288*mib + 1, "44MiB", "50"},
 			{n60ProKB, "44MiB", "50"},
 			{512 * mib, "44MiB", "50"},
@@ -204,6 +204,14 @@ func TestComputeSingBoxMemoryEnv_And_UnitSpec_And_LogCap(t *testing.T) {
 				t.Fatalf("unexpected SingBoxMemoryEnvMap(%d) = %v", tc.ram, envMap)
 			}
 		}
+
+		// Audit mode on ultra-low-memory (<= 288 MiB) tightens further to 20MiB / GOGC=25
+		if lim, gc := singbox.ComputeSingBoxMemoryEnvForMode(224*mib, config.WorkModeAudit); lim != "20MiB" || gc != "25" {
+			t.Fatalf("ComputeSingBoxMemoryEnvForMode(224MiB, audit) = (%q, %q), want (20MiB, 25)", lim, gc)
+		}
+		if lim, gc := singbox.ComputeSingBoxMemoryEnvForMode(224*mib, config.WorkModeProxy); lim != "28MiB" || gc != "30" {
+			t.Fatalf("ComputeSingBoxMemoryEnvForMode(224MiB, proxy) = (%q, %q), want (28MiB, 30)", lim, gc)
+		}
 	})
 
 	t.Run("unit_spec_and_command_env_integration", func(t *testing.T) {
@@ -217,10 +225,21 @@ func TestComputeSingBoxMemoryEnv_And_UnitSpec_And_LogCap(t *testing.T) {
 			t.Fatalf("unexpected systemd render: err=%v\n%s", err, sysRendered)
 		}
 
-		cmdEnv := singbox.BuildSingBoxCommandEnv([]string{"PATH=/usr/bin"}, &config.Config{}, 224*mib)
-		joined := strings.Join(cmdEnv, "\n")
-		if !strings.Contains(joined, "GOMEMLIMIT=40MiB") || !strings.Contains(joined, "GOGC=50") || !strings.Contains(joined, "SINGCTL_LOW_MEMORY=1") {
-			t.Fatalf("BuildSingBoxCommandEnv(224MiB) missing expected vars:\n%s", joined)
+		// Zero-sub config on 224MiB defaults to audit mode -> 20MiB / GOGC=25
+		cmdEnvAudit := singbox.BuildSingBoxCommandEnv([]string{"PATH=/usr/bin"}, &config.Config{}, 224*mib)
+		joinedAudit := strings.Join(cmdEnvAudit, "\n")
+		if !strings.Contains(joinedAudit, "GOMEMLIMIT=20MiB") || !strings.Contains(joinedAudit, "GOGC=25") || !strings.Contains(joinedAudit, "SINGCTL_LOW_MEMORY=1") {
+			t.Fatalf("BuildSingBoxCommandEnv(224MiB audit) missing expected vars:\n%s", joinedAudit)
+		}
+		// Proxy config with real sub on 224MiB -> 28MiB / GOGC=30
+		proxyCfg := &config.Config{
+			Subs:    []config.Subscription{{Name: "main", URL: "https://example.com/sub"}},
+			Gateway: config.GatewayConfig{WorkMode: config.WorkModeProxy},
+		}
+		cmdEnvProxy := singbox.BuildSingBoxCommandEnv([]string{"PATH=/usr/bin"}, proxyCfg, 224*mib)
+		joinedProxy := strings.Join(cmdEnvProxy, "\n")
+		if !strings.Contains(joinedProxy, "GOMEMLIMIT=28MiB") || !strings.Contains(joinedProxy, "GOGC=30") || !strings.Contains(joinedProxy, "SINGCTL_LOW_MEMORY=1") {
+			t.Fatalf("BuildSingBoxCommandEnv(224MiB proxy) missing expected vars:\n%s", joinedProxy)
 		}
 
 		cmdEnvOff := singbox.BuildSingBoxCommandEnv([]string{"PATH=/usr/bin"}, &config.Config{LowMemory: config.LowMemoryOff}, 224*mib)
@@ -290,25 +309,31 @@ func TestComputeSingBoxMemoryEnv_And_UnitSpec_And_LogCap(t *testing.T) {
 		} {
 			openwrtScript := scripts.GetOpenWrtStartScript(backend)
 			if !strings.Contains(openwrtScript, "GOMEMLIMIT") ||
-				!strings.Contains(openwrtScript, "40MiB") ||
+				!strings.Contains(openwrtScript, "20MiB") ||
+				!strings.Contains(openwrtScript, "28MiB") ||
 				!strings.Contains(openwrtScript, "44MiB") ||
 				!strings.Contains(openwrtScript, "-e GOMEMLIMIT") ||
+				!strings.Contains(openwrtScript, "UJAIL_USE_ENV_WRAPPER") ||
+				!strings.Contains(openwrtScript, "/usr/bin/env") ||
 				!strings.Contains(openwrtScript, "262144") ||
 				!strings.Contains(openwrtScript, "ensure_openwrt_ujail") {
-				t.Fatalf("OpenWrt start script (%s) missing adaptive GOMEMLIMIT / ujail -e / 256KiB log cap / auto-ujail", backend)
+				t.Fatalf("OpenWrt start script (%s) missing adaptive GOMEMLIMIT / ujail env wrapper / 256KiB log cap / auto-ujail", backend)
 			}
 		}
 		openwrtTargetScript := scripts.GetStartScriptForTarget("linux", false)
 		if !strings.Contains(openwrtTargetScript, "GOMEMLIMIT") ||
-			!strings.Contains(openwrtTargetScript, "40MiB") ||
+			!strings.Contains(openwrtTargetScript, "20MiB") ||
+			!strings.Contains(openwrtTargetScript, "28MiB") ||
 			!strings.Contains(openwrtTargetScript, "44MiB") ||
+			!strings.Contains(openwrtTargetScript, "UJAIL_USE_ENV_WRAPPER") ||
 			!strings.Contains(openwrtTargetScript, "-e GOMEMLIMIT") ||
 			!strings.Contains(openwrtTargetScript, "262144") {
-			t.Fatalf("OpenWrt target start script missing adaptive GOMEMLIMIT / ujail -e / 256KiB log cap")
+			t.Fatalf("OpenWrt target start script missing adaptive GOMEMLIMIT / ujail env wrapper / 256KiB log cap")
 		}
 		debianScript := scripts.GetStartScriptForTarget("linux", true)
 		if !strings.Contains(debianScript, "GOMEMLIMIT") ||
-			!strings.Contains(debianScript, "40MiB") ||
+			!strings.Contains(debianScript, "20MiB") ||
+			!strings.Contains(debianScript, "28MiB") ||
 			!strings.Contains(debianScript, "44MiB") {
 			t.Fatalf("Debian start_singbox_debian.sh missing adaptive GOMEMLIMIT")
 		}

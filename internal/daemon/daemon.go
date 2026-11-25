@@ -600,6 +600,27 @@ func (d *Daemon) BuildForegroundLifecycle() *lifecycle.Group {
 				return nil
 			},
 		},
+		lifecycle.FuncService{
+			ServiceName: "lowmem-host-tune",
+			OnPostStart: func(ctx context.Context) error {
+				if d.skipSignalSetup {
+					return nil
+				}
+				go func() {
+					select {
+					case <-d.ctx.Done():
+						return
+					case <-ctx.Done():
+						return
+					case <-time.After(3 * time.Second):
+					}
+					tuneCtx, cancel := context.WithTimeout(d.ctx, 15*time.Second)
+					defer cancel()
+					ReconcileLowMemHostDefault(tuneCtx, d.embeddedService != nil)
+				}()
+				return nil
+			},
+		},
 	)
 	return g
 }

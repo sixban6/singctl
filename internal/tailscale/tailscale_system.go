@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 
+	"singctl/internal/common/sysinfo"
 	"singctl/internal/constant"
 	"singctl/internal/logger"
 )
@@ -168,70 +169,7 @@ func CheckTunModule() bool {
 
 func CreateInitScript(hasTun bool) error {
 	scriptPath := constant.TailscaleInitdScript
-
-	content := `#!/bin/sh /etc/rc.common
-USE_PROCD=1
-START=99
-STOP=10
-
-start_service() {
-`
-	if hasTun {
-		content += `    # 加载 tun 模块以防未开机加载
-    modprobe tun > /dev/null 2>&1
-
-    # 确保 TUN 设备存在
-    if [ ! -c /dev/net/tun ]; then
-        mkdir -p /dev/net
-        mknod /dev/net/tun c 10 200
-        chmod 0666 /dev/net/tun
-    fi
-
-    # 开启转发
-    sysctl -w net.ipv4.ip_forward=1 > /dev/null
-
-    mkdir -p %s
-    mkdir -p /var/run/tailscale
-
-    procd_open_instance
-    procd_set_param command /usr/sbin/tailscaled
-    
-    # 核心差异：移除 userspace-networking，默认使用 tun
-    procd_append_param command --state=%s/tailscaled.state
-    procd_append_param command --socket=/var/run/tailscale/tailscaled.sock
-    procd_append_param command --port=41641
-    
-    procd_set_param respawn
-    procd_set_param stdout 1
-    procd_set_param stderr 1
-    procd_close_instance
-}
-`
-	} else {
-		content += `    # 开启内核转发(虽然是用户态，但为了路由功能最好开启)
-    sysctl -w net.ipv4.ip_forward=1 > /dev/null
-
-    mkdir -p %s
-    mkdir -p /var/run/tailscale
-
-    procd_open_instance
-    procd_set_param command /usr/sbin/tailscaled
-    
-    # 核心差异：用户态网络模式
-    procd_append_param command --tun=userspace-networking
-    procd_append_param command --state=%s/tailscaled.state
-    procd_append_param command --socket=/var/run/tailscale/tailscaled.sock
-    procd_append_param command --port=41641
-    
-    procd_set_param respawn
-    procd_set_param stdout 1
-    procd_set_param stderr 1
-    procd_close_instance
-}
-`
-	}
-
-	finalContent := fmt.Sprintf(content, constant.TailscaleStateDir, constant.TailscaleStateDir)
+	finalContent := RenderInitScriptWithMem(hasTun, sysinfo.TotalRAMBytes())
 	if err := os.WriteFile(scriptPath, []byte(finalContent), 0755); err != nil {
 		return fmt.Errorf("write init script failed: %w", err)
 	}
@@ -240,36 +178,7 @@ start_service() {
 
 func createSystemdScript(hasTun bool) error {
 	scriptPath := constant.TailscaleSystemdService
-
-	content := `[Unit]
-Description=Tailscale node agent
-Documentation=https://tailscale.com/kb/
-Wants=network-pre.target
-After=network-pre.target NetworkManager.service systemd-resolved.service
-
-[Service]
-ExecStartPre=/usr/sbin/tailscaled --cleanup
-`
-	if hasTun {
-		content += `ExecStart=/usr/sbin/tailscaled --state=/var/lib/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock --port=41641
-`
-	} else {
-		content += `ExecStart=/usr/sbin/tailscaled --tun=userspace-networking --state=/var/lib/tailscale/tailscaled.state --socket=/var/run/tailscale/tailscaled.sock --port=41641
-`
-	}
-	content += `ExecStopPost=/usr/sbin/tailscaled --cleanup
-Restart=on-failure
-RuntimeDirectory=tailscale
-RuntimeDirectoryMode=0755
-StateDirectory=tailscale
-StateDirectoryMode=0700
-CacheDirectory=tailscale
-CacheDirectoryMode=0750
-Type=notify
-
-[Install]
-WantedBy=multi-user.target
-`
+	content := RenderSystemdScriptWithMem(hasTun, sysinfo.TotalRAMBytes())
 
 	_ = os.MkdirAll("/var/lib/tailscale", 0700)
 	_ = os.MkdirAll("/var/run/tailscale", 0755)

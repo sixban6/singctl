@@ -225,19 +225,27 @@ func dnsRulesContainTag(rules []sboption.DNSRule, target string) bool {
 	return false
 }
 
-// ComputeSingBoxMemoryEnv 根据宿主机总物理内存计算自适应 Go 软内存上限与 GC 步频：
-//   - 0 < totalRAMBytes <= 288 MiB：GOMEMLIMIT="40MiB", GOGC="50"
+// ComputeSingBoxMemoryEnvForMode 根据宿主机总物理内存与工作模式计算自适应 Go 软内存上限与 GC 步频：
+//   - 0 < totalRAMBytes <= 288 MiB：审计模式 GOMEMLIMIT="20MiB", GOGC="25"；代理/通用模式 GOMEMLIMIT="28MiB", GOGC="30"
 //   - 288 MiB < totalRAMBytes <= 512 MiB：GOMEMLIMIT="44MiB", GOGC="50"
 //   - > 512 MiB 或 0：返回空字符串（不限制大内存设备）
-func ComputeSingBoxMemoryEnv(totalRAMBytes uint64) (gomemlimit string, gogc string) {
+func ComputeSingBoxMemoryEnvForMode(totalRAMBytes uint64, workMode string) (gomemlimit string, gogc string) {
 	switch {
 	case sysinfo.IsUltraLowMemoryRAM(totalRAMBytes):
-		return "40MiB", "50"
+		if strings.EqualFold(strings.TrimSpace(workMode), config.WorkModeAudit) {
+			return "20MiB", "25"
+		}
+		return "28MiB", "30"
 	case sysinfo.IsLowMemoryRAM(totalRAMBytes):
 		return "44MiB", "50"
 	default:
 		return "", ""
 	}
+}
+
+// ComputeSingBoxMemoryEnv 根据宿主机总物理内存计算自适应 Go 软内存上限与 GC 步频（默认代理档向后兼容签名）。
+func ComputeSingBoxMemoryEnv(totalRAMBytes uint64) (gomemlimit string, gogc string) {
+	return ComputeSingBoxMemoryEnvForMode(totalRAMBytes, "")
 }
 
 // SingBoxMemoryEnvMap 将自适应内存上限封装为服务环境变量映射（无需限制时返回 nil）。
@@ -302,7 +310,11 @@ func BuildSingBoxCommandEnv(baseEnv []string, cfg *config.Config, totalRAMBytes 
 	overrides := make(map[string]string, 3)
 	if lowMem {
 		overrides["SINGCTL_LOW_MEMORY"] = "1"
-		if limit, gogc := ComputeSingBoxMemoryEnv(totalRAMBytes); limit != "" {
+		workMode := ""
+		if cfg != nil {
+			workMode = cfg.EffectiveWorkMode()
+		}
+		if limit, gogc := ComputeSingBoxMemoryEnvForMode(totalRAMBytes, workMode); limit != "" {
 			overrides["GOMEMLIMIT"] = limit
 			overrides["GOGC"] = gogc
 		}

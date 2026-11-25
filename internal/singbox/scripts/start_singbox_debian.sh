@@ -465,8 +465,13 @@ setup_singbox_mem_env() {
     esac
     if [ "${SINGCTL_LOW_MEMORY:-}" != "0" ] && [ -z "${GOMEMLIMIT:-}" ] && [ "$mem_total_kb" -gt 0 ]; then
         if [ "$mem_total_kb" -le 294912 ]; then
-            GOMEMLIMIT="40MiB"
-            [ -z "${GOGC:-}" ] && GOGC="50"
+            if [ -f "${CONFIG_FILE:-}" ] && ! grep -qE '"type"[[:space:]]*:[[:space:]]*"(selector|urltest)"' "$CONFIG_FILE" 2>/dev/null; then
+                GOMEMLIMIT="20MiB"
+                [ -z "${GOGC:-}" ] && GOGC="25"
+            else
+                GOMEMLIMIT="28MiB"
+                [ -z "${GOGC:-}" ] && GOGC="30"
+            fi
         elif [ "$mem_total_kb" -le 524288 ]; then
             GOMEMLIMIT="44MiB"
             [ -z "${GOGC:-}" ] && GOGC="50"

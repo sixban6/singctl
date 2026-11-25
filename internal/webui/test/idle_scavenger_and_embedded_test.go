@@ -105,6 +105,18 @@ func TestIdleScavenger_ThreeMinuteColdIdleOneShotAndReArm(t *testing.T) {
 	if !srv.MaybeScavengeIdle() || scavengeCount.Load() != 2 {
 		t.Fatalf("expected second scavenge after re-armed 3m idle, got count=%d", scavengeCount.Load())
 	}
+
+	// Ultra-low-memory (<= 288 MiB) auto idle threshold drops to 60s; >= 289 MiB stays 3m
+	const mib = 1024 * 1024
+	if got := webui.ComputeDefaultIdleScavengeThreshold(224 * mib); got != 60*time.Second {
+		t.Fatalf("ComputeDefaultIdleScavengeThreshold(224MiB) = %s, want 60s", got)
+	}
+	if got := webui.ComputeDefaultIdleScavengeThreshold(479 * mib); got != webui.DefaultIdleScavengeThreshold {
+		t.Fatalf("ComputeDefaultIdleScavengeThreshold(479MiB) = %s, want %s", got, webui.DefaultIdleScavengeThreshold)
+	}
+	if got := webui.ComputeDefaultIdleScavengeThreshold(0); got != webui.DefaultIdleScavengeThreshold {
+		t.Fatalf("ComputeDefaultIdleScavengeThreshold(0) = %s, want %s", got, webui.DefaultIdleScavengeThreshold)
+	}
 }
 
 func TestIdleScavenger_ServeContextIntegrationAndConcurrency(t *testing.T) {

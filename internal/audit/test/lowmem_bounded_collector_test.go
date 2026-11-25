@@ -271,3 +271,26 @@ func TestCollectorLowMemory_DeviceAndIPv6RefreshThrottled(t *testing.T) {
 		t.Fatalf("expected refreshed hostname 'new-hostname' after >=2m, got %+v", rep2.Flows)
 	}
 }
+
+func TestCollectorUltraLowMemory_Tighter128FlowBound(t *testing.T) {
+	const mib = 1024 * 1024
+	cUltra := audit.NewCollectorWithOptions(&config.Config{}, audit.CollectorOptions{
+		MemTotalBytes:     224 * mib,
+		MemAvailableBytes: 80 * mib,
+	})
+	if !cUltra.IsLowMemoryMode() || cUltra.MaxTrackedFlows() != audit.UltraLowMemMaxTrackedFlows {
+		t.Fatalf("224MiB router expected UltraLowMemMaxTrackedFlows (%d), got lowMem=%v max=%d",
+			audit.UltraLowMemMaxTrackedFlows, cUltra.IsLowMemoryMode(), cUltra.MaxTrackedFlows())
+	}
+
+	// Explicit LowMemory=false overrides ultra-low bound
+	off := false
+	cOff := audit.NewCollectorWithOptions(&config.Config{}, audit.CollectorOptions{
+		LowMemory:     &off,
+		MemTotalBytes: 224 * mib,
+	})
+	if cOff.IsLowMemoryMode() || cOff.MaxTrackedFlows() != audit.DefaultMaxTrackedFlows {
+		t.Fatalf("explicit LowMemory=false must keep default flows, got lowMem=%v max=%d",
+			cOff.IsLowMemoryMode(), cOff.MaxTrackedFlows())
+	}
+}

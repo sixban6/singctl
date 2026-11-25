@@ -8,14 +8,26 @@ import (
 	"runtime/debug"
 	"time"
 
+	"singctl/internal/common/sysinfo"
 	"singctl/internal/daemon"
 )
 
 // DefaultIdleScavengeThreshold 默认连续无 HTTP 请求冷态闲置回收阈值（3 分钟）。
 const DefaultIdleScavengeThreshold = 3 * time.Minute
 
+// UltraLowMemIdleScavengeThreshold 超小内存设备（<= 288 MiB）默认冷态闲置回收阈值（60 秒）。
+const UltraLowMemIdleScavengeThreshold = 60 * time.Second
+
 // DefaultIdleScavengeCheckInterval 默认冷态闲置后台轻量巡检间隔（30 秒）。
 const DefaultIdleScavengeCheckInterval = 30 * time.Second
+
+// ComputeDefaultIdleScavengeThreshold 按宿主机总物理内存自适应返回冷态物理内存归还阈值。
+func ComputeDefaultIdleScavengeThreshold(totalRAMBytes uint64) time.Duration {
+	if sysinfo.IsUltraLowMemoryRAM(totalRAMBytes) {
+		return UltraLowMemIdleScavengeThreshold
+	}
+	return DefaultIdleScavengeThreshold
+}
 
 func (s *Server) now() time.Time {
 	if s != nil && s.opts.NowFunc != nil {
@@ -28,7 +40,7 @@ func (s *Server) effectiveIdleThreshold() time.Duration {
 	if s != nil && s.opts.IdleThreshold > 0 {
 		return s.opts.IdleThreshold
 	}
-	return DefaultIdleScavengeThreshold
+	return ComputeDefaultIdleScavengeThreshold(sysinfo.TotalRAMBytes())
 }
 
 func (s *Server) effectiveIdleCheckInterval() time.Duration {
