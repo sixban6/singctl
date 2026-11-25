@@ -27,8 +27,102 @@ const (
 	SideRoutePrefBase = 18810
 	SideRoutePrefMax  = 18890
 
+	// DefaultFW4NftablesDir 为 OpenWrt 22+/24+ firewall4 标准持久化 include 根目录。
+	DefaultFW4NftablesDir = "/usr/share/nftables.d"
+	fw4SideNoMasqRelPath  = "chain-pre/srcnat_lan/singctl-side-nomasq.nft"
+	// DefaultFW3SideNoMasqScript 为 OpenWrt 21 firewall3 (iptables) 子网免伪装持久化 include 脚本路径。
+	DefaultFW3SideNoMasqScript = "/etc/singctl/vlan-side-nomasq.fw3.sh"
+	fw3SideNoMasqUCISec        = "singctl_vlan_nomasq"
+
 	sideRouteNoMasqComment = "singctl-side-nomasq"
 )
+
+// SyncFW3SideNoMasqInclude 持久化 OpenWrt 21 firewall3 子网免伪装脚本并绑定 firewall include，确保 fw3 restart 后持久生效。
+func SyncFW3SideNoMasqInclude(scriptPath string, cidrs []string, run CommandRunner) error {
+	norm, err := NormalizeBypassCIDRs(cidrs)
+	if err != nil {
+		return err
+	}
+	if run == nil {
+		if runtime.GOOS != "linux" {
+			return nil
+		}
+		run = defaultSideRouteRunner
+	}
+	path := cmp.Or(strings.TrimSpace(scriptPath), DefaultFW3SideNoMasqScript)
+	uciSec := "firewall." + fw3SideNoMasqUCISec
+	if len(norm) == 0 {
+		_ = os.Remove(path)
+		if _, gErr := run(context.Background(), "uci", "-q", "get", uciSec); gErr == nil {
+			_, _ = run(context.Background(), "uci", "delete", uciSec)
+			_, _ = run(context.Background(), "uci", "commit", "firewall")
+		}
+		return nil
+	}
+
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("mkdir %s: %w", dir, err)
+	}
+	_ = os.Chmod(dir, 0700)
+
+	var b strings.Builder
+	b.WriteString("# Managed by singctl VLAN side-router L3 real-IP passthrough (OpenWrt fw3 include)\n")
+	b.WriteString("iptables -w 2 -t nat -S postrouting_lan_rule 2>/dev/null | while IFS= read -r line; do\n")
+	b.WriteString("  case \"$line\" in\n")
+	b.WriteString("    \"-A postrouting_lan_rule \"*" + sideRouteNoMasqComment + "*)\n")
+	b.WriteString("      spec=\"${line#-A postrouting_lan_rule }\"\n")
+	b.WriteString("      eval \"set -- $spec\"\n")
+	b.WriteString("      iptables -w 2 -t nat -D postrouting_lan_rule \"$@\" 2>/dev/null || true\n")
+	b.WriteString("      ;;\n")
+	b.WriteString("  esac\n")
+	b.WriteString("done\n")
+	for _, cidr := range norm {
+		b.WriteString(fmt.Sprintf("iptables -w 2 -t nat -I postrouting_lan_rule 1 -s %s -m comment --comment %s -j ACCEPT\n", cidr, sideRouteNoMasqComment))
+	}
+	if err := fsx.WriteAtomic0600(path, []byte(b.String())); err != nil {
+		return err
+	}
+
+	_, _ = run(context.Background(), "uci", "set", uciSec+"=include")
+	_, _ = run(context.Background(), "uci", "set", uciSec+".type=script")
+	_, _ = run(context.Background(), "uci", "set", uciSec+".path="+path)
+	_, _ = run(context.Background(), "uci", "set", uciSec+".reload=1")
+	_, _ = run(context.Background(), "uci", "commit", "firewall")
+	return nil
+}
+
+// SyncFW4SideNoMasqInclude 持久化 OpenWrt 24 firewall4 (srcnat_lan chain-pre) 子网免伪装规则，确保 fw4 restart 后 0ms 间隙持久生效。
+func SyncFW4SideNoMasqInclude(fw4Root string, cidrs []string) error {
+	norm, err := NormalizeBypassCIDRs(cidrs)
+	if err != nil {
+		return err
+	}
+	root := cmp.Or(strings.TrimSpace(fw4Root), DefaultFW4NftablesDir)
+	st, err := os.Stat(root)
+	if err != nil || !st.IsDir() {
+		return nil
+	}
+	target := filepath.Join(root, fw4SideNoMasqRelPath)
+	if len(norm) == 0 {
+		_ = os.Remove(target)
+		return nil
+	}
+	dir := filepath.Dir(target)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("mkdir %s: %w", dir, err)
+	}
+	_ = os.Chmod(dir, 0700)
+
+	var b strings.Builder
+	b.WriteString("# Managed by singctl VLAN side-router L3 real-IP passthrough\n")
+	b.WriteString("ip saddr { ")
+	b.WriteString(strings.Join(norm, ", "))
+	b.WriteString(` } accept comment "`)
+	b.WriteString(sideRouteNoMasqComment)
+	b.WriteString("\"\n")
+	return fsx.WriteAtomic0600(target, []byte(b.String()))
+}
 
 var sideRouteThrowCIDRs = []string{
 	"10.0.0.0/8",
@@ -151,11 +245,22 @@ func defaultSideRouteRunner(ctx context.Context, name string, args ...string) ([
 		return nil, nil
 	}
 	if name == "iptables" && !slices.Contains(args, "-w") {
+		_ = os.MkdirAll("/var/run", 0755)
 		args = append([]string{"-w", "2"}, args...)
 	}
 	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	return exec.CommandContext(cctx, name, args...).CombinedOutput()
+}
+
+func syncDefaultSideNoMasqIncludes(cidrs []string, run CommandRunner) {
+	_ = SyncFW4SideNoMasqInclude(DefaultFW4NftablesDir, cidrs)
+	if st, err := os.Stat(DefaultFW4NftablesDir); err == nil && st.IsDir() {
+		return
+	}
+	if _, fw3Err := os.Stat("/sbin/fw3"); fw3Err == nil {
+		_ = SyncFW3SideNoMasqInclude(DefaultFW3SideNoMasqScript, cidrs, run)
+	}
 }
 
 func deleteManagedSideRouteRules(ctx context.Context, run CommandRunner) {
@@ -184,23 +289,44 @@ func deleteManagedSideRouteRules(ctx context.Context, run CommandRunner) {
 	}
 }
 
+func deleteManagedNFTRulesByComment(ctx context.Context, chain, out, comment string, run CommandRunner) {
+	for line := range strings.SplitSeq(out, "\n") {
+		if !strings.Contains(line, comment) {
+			continue
+		}
+		_, after, ok := strings.Cut(line, "# handle ")
+		if !ok {
+			continue
+		}
+		if h := strings.Fields(after); len(h) > 0 {
+			_, _ = run(ctx, "nft", "delete", "rule", "inet", "fw4", chain, "handle", h[0])
+		}
+	}
+}
+
+func deleteManagedNFTRules(ctx context.Context, chain, out string, run CommandRunner) {
+	deleteManagedNFTRulesByComment(ctx, chain, out, sideRouteNoMasqComment, run)
+}
+
 func syncSideRouteLANNoMasq(ctx context.Context, cidrs []string, run CommandRunner) {
 	if out, err := run(ctx, "nft", "-a", "list", "chain", "inet", "fw4", "srcnat_lan"); err == nil && strings.Contains(string(out), "chain srcnat_lan") {
-		for line := range strings.SplitSeq(string(out), "\n") {
-			if !strings.Contains(line, sideRouteNoMasqComment) {
-				continue
-			}
-			_, after, ok := strings.Cut(line, "# handle ")
-			if !ok {
-				continue
-			}
-			if h := strings.Fields(after); len(h) > 0 {
-				_, _ = run(ctx, "nft", "delete", "rule", "inet", "fw4", "srcnat_lan", "handle", h[0])
-			}
-		}
+		deleteManagedNFTRules(ctx, "srcnat_lan", string(out), run)
 		for _, cidr := range cidrs {
 			_, _ = run(ctx, "nft", "insert", "rule", "inet", "fw4", "srcnat_lan",
 				"ip", "saddr", cidr, "accept", "comment", sideRouteNoMasqComment)
+		}
+	}
+
+	if out, err := run(ctx, "nft", "-a", "list", "chain", "inet", "fw4", "forward"); err == nil && strings.Contains(string(out), "chain forward") {
+		fwdText := string(out)
+		deleteManagedNFTRules(ctx, "forward", fwdText, run)
+		if len(cidrs) > 0 && (strings.Contains(fwdText, "flow add @") || strings.Contains(fwdText, "flow offload @")) {
+			for _, cidr := range cidrs {
+				_, _ = run(ctx, "nft", "insert", "rule", "inet", "fw4", "forward",
+					"ip", "daddr", cidr, "ct", "state", "established,related", "accept", "comment", sideRouteNoMasqComment)
+				_, _ = run(ctx, "nft", "insert", "rule", "inet", "fw4", "forward",
+					"ip", "saddr", cidr, "ct", "state", "established,related", "accept", "comment", sideRouteNoMasqComment)
+			}
 		}
 	}
 
@@ -233,7 +359,8 @@ func ApplyRuntimeSideRoutes(ctx context.Context, spec VLANSideRouteSpec, run Com
 	if err != nil {
 		return err
 	}
-	if run == nil {
+	isDefaultRunner := run == nil
+	if isDefaultRunner {
 		if runtime.GOOS != "linux" {
 			return nil
 		}
@@ -246,6 +373,9 @@ func ApplyRuntimeSideRoutes(ctx context.Context, spec VLANSideRouteSpec, run Com
 	deleteManagedSideRouteRules(ctx, run)
 	_, _ = run(ctx, "ip", "-4", "route", "flush", "table", strconv.Itoa(SideRouteTableID))
 	if norm.SideRouterIP == "" || len(norm.CIDRs) == 0 {
+		if isDefaultRunner {
+			syncDefaultSideNoMasqIncludes(nil, run)
+		}
 		syncSideRouteLANNoMasq(ctx, nil, run)
 		return nil
 	}
@@ -265,6 +395,9 @@ func ApplyRuntimeSideRoutes(ctx context.Context, spec VLANSideRouteSpec, run Com
 			return fmt.Errorf("add ip rule from %s table %s failed: %w (%s)", cidr, tableStr, err, strings.TrimSpace(string(out)))
 		}
 	}
+	if isDefaultRunner {
+		syncDefaultSideNoMasqIncludes(norm.CIDRs, run)
+	}
 	syncSideRouteLANNoMasq(ctx, norm.CIDRs, run)
 	return nil
 }
@@ -274,7 +407,8 @@ func SuspendRuntimeSideRoutes(ctx context.Context, run CommandRunner) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if run == nil {
+	isDefaultRunner := run == nil
+	if isDefaultRunner {
 		if runtime.GOOS != "linux" {
 			return nil
 		}
@@ -285,8 +419,51 @@ func SuspendRuntimeSideRoutes(ctx context.Context, run CommandRunner) error {
 	defer sideRouteRuntimeMu.Unlock()
 
 	deleteManagedSideRouteRules(ctx, run)
+	if isDefaultRunner {
+		syncDefaultSideNoMasqIncludes(nil, run)
+	}
 	syncSideRouteLANNoMasq(ctx, nil, run)
 	return nil
+}
+
+// ApplySideRoutesWithRetry 带退避重试应用旁路由策略路由（应对 netifd 异步迁移 br-lan->br-lan.1 导致的短时网关不可达窗口）。
+func ApplySideRoutesWithRetry(ctx context.Context, spec VLANSideRouteSpec, maxAttempts int, retryDelay time.Duration, applyFn func(context.Context, VLANSideRouteSpec) error) error {
+	if applyFn == nil {
+		return fmt.Errorf("applyFn is required")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if maxAttempts <= 0 {
+		maxAttempts = 1
+	}
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := applyFn(ctx, spec)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if attempt+1 >= maxAttempts {
+			break
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		if retryDelay > 0 {
+			timer := time.NewTimer(retryDelay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
+		}
+	}
+	return lastErr
 }
 
 // SyncRuntimeSideRoutes 持久化 0600 旁路由策略清单并在 Linux 运行时同步生效内核策略路由。

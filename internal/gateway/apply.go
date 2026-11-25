@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 
 	"singctl/internal/config"
@@ -44,10 +45,12 @@ var defaultThrowCIDRs = []string{
 type Controller struct {
 	StateDir        string
 	FW4IncludeRoot  string
+	FW3IncludePath  string
 	ResolvGuardPath string
 	IPv6BackupPath  string
 	Prober          func() TopologyInfo
 	IsOpenWrt       func() bool
+	HasCommand      func(string) bool
 	Exec            func(name string, args ...string) ([]byte, error)
 	RTNL            rtnl.Client
 	ServiceMgr      servicemgr.Manager
@@ -83,6 +86,10 @@ func (c *Controller) runCmd(ctx context.Context, name string, args ...string) ([
 	if c.Exec != nil {
 		return c.Exec(name, args...)
 	}
+	if (name == "iptables" || name == "ip6tables") && !slices.Contains(args, "-w") {
+		_ = os.MkdirAll("/var/run", 0755)
+		args = append([]string{"-w", "2"}, args...)
+	}
 	return exec.CommandContext(ctx, name, args...).CombinedOutput()
 }
 
@@ -97,6 +104,9 @@ func (c *Controller) rtnlClient() rtnl.Client {
 }
 
 func (c *Controller) hasCommand(name string) bool {
+	if c.HasCommand != nil {
+		return c.HasCommand(name)
+	}
 	if c.Exec != nil {
 		return true
 	}
@@ -158,8 +168,8 @@ func (c *Controller) Apply(ctx context.Context, cfg config.GatewayConfig) error 
 	if err := c.applySysctls(ctx, plan.LANIface); err != nil {
 		logger.Warn("旁路由部分 sysctl 参数设置受限(容器只读项已跳过): %v", err)
 	}
-	c.applySideRouterCrossSubnet(ctx, plan)
 	c.ensureSideRouterResolvUpstream(ctx, plan.LANIP)
+	c.applySideRouterCrossSubnet(ctx, plan)
 
 	// 3. 清理残留 fw4/legacy 挂载后通过单事务原子替换独立隔离表 singctl-side（0ms 空窗），再挂载宿主跨表放行项
 	hasNFT := c.hasCommand("nft")
@@ -183,9 +193,13 @@ func (c *Controller) Apply(ctx context.Context, cfg config.GatewayConfig) error 
 		}
 	}
 
-	// 4. 若宿主存在 iptables filter 表（如 Debian 安装了 Docker 将 FORWARD 默认设为 DROP），在链首插入带注释的高优放行
+	// 4. 若宿主存在 iptables filter 表（如 OpenWrt 21 fw3 或安装了 Docker 的 Debian 将 FORWARD/INPUT 默认设为 DROP/REJECT），
+	// 在链首插入带注释的高优放行；OpenWrt 21 fw3 模式下同步写入 0600 firewall include 脚本防重启丢失。
 	if c.hasCommand("iptables") {
 		c.applyIptablesFilterPassThrough(ctx, plan.LANIface)
+		if !hasNFT {
+			c.applyFW3Include(ctx, plan)
+		}
 	}
 
 	// 5. 若 TProxy 策略路由表 100 已在运行（如 WebUI 热切旁路由模式），确保其包含私网/CGNAT throw 逃生路由，
@@ -394,16 +408,18 @@ func (c *Controller) applyIptablesFilterPassThrough(ctx context.Context, lanIfac
 	rules := [][]string{
 		{"-I", "INPUT", "1", "-m", "mark", "--mark", "0x1", "-m", "comment", "--comment", ruleCommentTag, "-j", "ACCEPT"},
 		{"-I", "INPUT", "1", "-m", "mark", "--mark", "0x2", "-m", "comment", "--comment", ruleCommentTag, "-j", "ACCEPT"},
-		{"-I", "FORWARD", "1", "-i", lanIface, "-m", "comment", "--comment", ruleCommentTag, "-j", "ACCEPT"},
-		{"-I", "FORWARD", "1", "-o", lanIface, "-m", "comment", "--comment", ruleCommentTag, "-j", "ACCEPT"},
+	}
+	if strings.TrimSpace(lanIface) != "" {
+		rules = append(rules,
+			[]string{"-I", "INPUT", "1", "-i", lanIface, "-m", "comment", "--comment", ruleCommentTag, "-j", "ACCEPT"},
+			[]string{"-I", "FORWARD", "1", "-i", lanIface, "-m", "comment", "--comment", ruleCommentTag, "-j", "ACCEPT"},
+			[]string{"-I", "FORWARD", "1", "-o", lanIface, "-m", "comment", "--comment", ruleCommentTag, "-j", "ACCEPT"},
+		)
 	}
 	for _, r := range rules {
-		var checkArgs []string
-		if r[1] == "INPUT" {
-			checkArgs = []string{"-C", "INPUT", "-m", "mark", "--mark", r[5], "-m", "comment", "--comment", ruleCommentTag, "-j", "ACCEPT"}
-		} else {
-			checkArgs = []string{"-C", "FORWARD", r[3], r[4], "-m", "comment", "--comment", ruleCommentTag, "-j", "ACCEPT"}
-		}
+		checkArgs := make([]string, 0, len(r))
+		checkArgs = append(checkArgs, "-C", r[1])
+		checkArgs = append(checkArgs, r[3:]...)
 		if _, err := c.runCmd(ctx, "iptables", checkArgs...); err != nil {
 			_, _ = c.runCmd(ctx, "iptables", r...)
 		}
@@ -518,6 +534,7 @@ func (c *Controller) cleanupFirewallOnly(ctx context.Context, deleteSideNFT bool
 	for _, chain := range []string{"input", "forward"} {
 		_ = os.Remove(filepath.Join(root, "chain-pre", chain, FW4IncludeFileName))
 	}
+	c.cleanupFW3Include(ctx)
 
 	if c.hasCommand("nft") {
 		if deleteSideNFT {

@@ -278,11 +278,70 @@ func TestVLAN_ApplyAndSuspendRuntimeSideRoutes(t *testing.T) {
 	wg.Wait()
 }
 
+func TestVLAN_SyncFW4SideNoMasqInclude(t *testing.T) {
+	// 1. Non-existent fw4Root (e.g. OpenWrt 21 fw3 host) is a safe no-op and does not create directories.
+	missingRoot := filepath.Join(t.TempDir(), "missing-nftables.d")
+	if err := vlan.SyncFW4SideNoMasqInclude(missingRoot, []string{"192.168.89.0/24"}); err != nil {
+		t.Fatalf("expected nil when fw4Root does not exist, got %v", err)
+	}
+	if _, err := os.Stat(missingRoot); !os.IsNotExist(err) {
+		t.Fatalf("expected missingRoot not to be created, stat err=%v", err)
+	}
+
+	// 2. Existing fw4Root writes normalized sorted CIDRs with 0600 file / 0700 parent permissions.
+	fw4Root := filepath.Join(t.TempDir(), "nftables.d")
+	if err := os.MkdirAll(fw4Root, 0755); err != nil {
+		t.Fatalf("mkdir fw4Root: %v", err)
+	}
+	targetFile := filepath.Join(fw4Root, "chain-pre", "srcnat_lan", "singctl-side-nomasq.nft")
+	if err := vlan.SyncFW4SideNoMasqInclude(fw4Root, []string{"192.168.89.0/24", "192.168.34.0/24", "192.168.89.0/24"}); err != nil {
+		t.Fatalf("SyncFW4SideNoMasqInclude apply failed: %v", err)
+	}
+	raw, err := os.ReadFile(targetFile)
+	if err != nil {
+		t.Fatalf("read generated nft include failed: %v", err)
+	}
+	wantLine := `ip saddr { 192.168.34.0/24, 192.168.89.0/24 } accept comment "singctl-side-nomasq"`
+	if !strings.Contains(string(raw), wantLine) {
+		t.Fatalf("unexpected nft include content:\n%s\nwant substring: %s", string(raw), wantLine)
+	}
+	fi, err := os.Stat(targetFile)
+	if err != nil || fi.Mode().Perm() != 0600 {
+		t.Fatalf("expected 0600 perm on %s, err=%v mode=%v", targetFile, err, fi.Mode().Perm())
+	}
+	dirInfo, err := os.Stat(filepath.Dir(targetFile))
+	if err != nil || dirInfo.Mode().Perm() != 0700 {
+		t.Fatalf("expected 0700 perm on parent dir, err=%v mode=%v", err, dirInfo.Mode().Perm())
+	}
+
+	// 3. Malformed / injection CIDR errors out and leaves valid file intact.
+	if err := vlan.SyncFW4SideNoMasqInclude(fw4Root, []string{"192.168.89.0/24; rm -rf /"}); err == nil {
+		t.Fatal("expected SyncFW4SideNoMasqInclude to reject injection CIDR")
+	}
+	rawAfterErr, err := os.ReadFile(targetFile)
+	if err != nil || !strings.Contains(string(rawAfterErr), wantLine) {
+		t.Fatalf("expected valid file preserved on validation error, got err=%v content=%s", err, string(rawAfterErr))
+	}
+
+	// 4. Empty/nil CIDRs removes include file idempotently.
+	if err := vlan.SyncFW4SideNoMasqInclude(fw4Root, nil); err != nil {
+		t.Fatalf("SyncFW4SideNoMasqInclude(nil) cleanup failed: %v", err)
+	}
+	if _, err := os.Stat(targetFile); !os.IsNotExist(err) {
+		t.Fatalf("expected include file removed on nil CIDRs, stat err=%v", err)
+	}
+	if err := vlan.SyncFW4SideNoMasqInclude(fw4Root, []string{}); err != nil {
+		t.Fatalf("idempotent empty SyncFW4SideNoMasqInclude failed: %v", err)
+	}
+}
+
 func TestVLAN_SideRouteLANNoMasqRules(t *testing.T) {
 	tests := []struct {
 		name           string
 		nftListOutput  string
 		nftListErr     bool
+		nftFwdOutput   string
+		nftFwdErr      bool
 		iptListOutput  string
 		iptListErr     bool
 		spec           vlan.VLANSideRouteSpec
@@ -293,6 +352,7 @@ func TestVLAN_SideRouteLANNoMasqRules(t *testing.T) {
 		{
 			name:          "fw3 iptables postrouting_lan_rule",
 			nftListErr:    true,
+			nftFwdErr:     true,
 			iptListOutput: "-N postrouting_lan_rule\n-A postrouting_lan_rule -s 192.168.99.0/24 -m comment --comment \"singctl-side-nomasq\" -j ACCEPT\n-A postrouting_lan_rule -s 192.168.10.0/24 -j ACCEPT\n",
 			spec: vlan.VLANSideRouteSpec{
 				SideRouterIP: "192.168.55.88",
@@ -313,6 +373,7 @@ func TestVLAN_SideRouteLANNoMasqRules(t *testing.T) {
 		{
 			name: "fw4 nftables srcnat_lan",
 			nftListOutput: "table inet fw4 {\n\tchain srcnat_lan {\n\t\tip saddr 192.168.99.0/24 accept comment \"singctl-side-nomasq\" # handle 42\n\t\tip saddr 192.168.10.0/24 masquerade # handle 99\n\t}\n}\n",
+			nftFwdErr: true,
 			iptListErr: true,
 			spec: vlan.VLANSideRouteSpec{
 				SideRouterIP: "192.168.55.88",
@@ -327,6 +388,47 @@ func TestVLAN_SideRouteLANNoMasqRules(t *testing.T) {
 			},
 			wantSuspCmds: []string{
 				"nft delete rule inet fw4 srcnat_lan handle 42",
+			},
+		},
+		{
+			name:          "fw4 nftables forward flow offload bypass",
+			nftListOutput: "table inet fw4 {\n\tchain srcnat_lan {\n\t\tip saddr 192.168.10.0/24 masquerade # handle 99\n\t}\n}\n",
+			nftFwdOutput: "table inet fw4 {\n\tchain forward {\n\t\tct state established,related accept comment \"singctl-side-nomasq\" # handle 77\n\t\tmeta l4proto { tcp, udp } flow add @ft # handle 88\n\t\tjump forward_lan\n\t}\n}\n",
+			iptListErr: true,
+			spec: vlan.VLANSideRouteSpec{
+				SideRouterIP: "192.168.55.88",
+				CIDRs:        []string{"192.168.89.0/24"},
+			},
+			wantApplyCmds: []string{
+				"nft delete rule inet fw4 forward handle 77",
+				"nft insert rule inet fw4 forward ip daddr 192.168.89.0/24 ct state established,related accept comment singctl-side-nomasq",
+				"nft insert rule inet fw4 forward ip saddr 192.168.89.0/24 ct state established,related accept comment singctl-side-nomasq",
+			},
+			forbidApplySub: []string{
+				"handle 88",
+			},
+			wantSuspCmds: []string{
+				"nft delete rule inet fw4 forward handle 77",
+			},
+		},
+		{
+			name:          "fw4 nftables forward without flow offload",
+			nftListOutput: "table inet fw4 {\n\tchain srcnat_lan {\n\t\tip saddr 192.168.10.0/24 masquerade # handle 99\n\t}\n}\n",
+			nftFwdOutput: "table inet fw4 {\n\tchain forward {\n\t\tip daddr 192.168.99.0/24 ct state established,related accept comment \"singctl-side-nomasq\" # handle 75\n\t\tct state established,related accept # handle 55\n\t\tjump forward_lan\n\t}\n}\n",
+			iptListErr: true,
+			spec: vlan.VLANSideRouteSpec{
+				SideRouterIP: "192.168.55.88",
+				CIDRs:        []string{"192.168.89.0/24"},
+			},
+			wantApplyCmds: []string{
+				"nft delete rule inet fw4 forward handle 75",
+			},
+			forbidApplySub: []string{
+				"nft insert rule inet fw4 forward",
+				"handle 55",
+			},
+			wantSuspCmds: []string{
+				"nft delete rule inet fw4 forward handle 75",
 			},
 		},
 	}
@@ -348,6 +450,11 @@ func TestVLAN_SideRouteLANNoMasqRules(t *testing.T) {
 						return nil, context.DeadlineExceeded
 					}
 					return []byte(tc.nftListOutput), nil
+				case "nft -a list chain inet fw4 forward":
+					if tc.nftFwdErr {
+						return nil, context.DeadlineExceeded
+					}
+					return []byte(tc.nftFwdOutput), nil
 				case "iptables -t nat -S postrouting_lan_rule":
 					if tc.iptListErr {
 						return nil, context.DeadlineExceeded
@@ -476,6 +583,140 @@ func TestVLAN_SideRouteLANNoMasqRules(t *testing.T) {
 		mu.Unlock()
 		if gotLen != 1 {
 			t.Fatalf("expected exactly 1 no-masq rule after concurrent apply/suspend, got %d: %v", gotLen, chainRules)
+		}
+	})
+}
+
+func TestVLAN_SyncFW3SideNoMasqInclude(t *testing.T) {
+	scriptPath := filepath.Join(t.TempDir(), "etc", "singctl", "vlan-side-nomasq.fw3.sh")
+	var cmds []string
+	uciPresent := false
+	runner := func(_ context.Context, name string, args ...string) ([]byte, error) {
+		line := name + " " + strings.Join(args, " ")
+		cmds = append(cmds, line)
+		if line == "uci -q get firewall.singctl_vlan_nomasq" && !uciPresent {
+			return nil, os.ErrNotExist
+		}
+		if line == "uci set firewall.singctl_vlan_nomasq=include" {
+			uciPresent = true
+		}
+		if line == "uci delete firewall.singctl_vlan_nomasq" {
+			uciPresent = false
+		}
+		return nil, nil
+	}
+
+	// 1. Write 0600 script + register UCI firewall.singctl_vlan_nomasq=include
+	if err := vlan.SyncFW3SideNoMasqInclude(scriptPath, []string{"192.168.89.0/24", "192.168.34.0/24"}, runner); err != nil {
+		t.Fatalf("SyncFW3SideNoMasqInclude apply failed: %v", err)
+	}
+	st, err := os.Stat(scriptPath)
+	if err != nil || st.Mode().Perm() != 0600 {
+		t.Fatalf("expected 0600 perm on %s, err=%v mode=%v", scriptPath, err, st.Mode().Perm())
+	}
+	raw, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatalf("read fw3 no-masq script: %v", err)
+	}
+	text := string(raw)
+	for _, want := range []string{
+		"postrouting_lan_rule",
+		"192.168.34.0/24",
+		"192.168.89.0/24",
+		"singctl-side-nomasq",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("fw3 no-masq script missing %q:\n%s", want, text)
+		}
+	}
+	joined := strings.Join(cmds, "\n")
+	for _, wantCmd := range []string{
+		"uci set firewall.singctl_vlan_nomasq=include",
+		"uci set firewall.singctl_vlan_nomasq.type=script",
+		"uci set firewall.singctl_vlan_nomasq.path=" + scriptPath,
+		"uci set firewall.singctl_vlan_nomasq.reload=1",
+		"uci commit firewall",
+	} {
+		if !strings.Contains(joined, wantCmd) {
+			t.Fatalf("missing expected UCI include command %q in:\n%s", wantCmd, joined)
+		}
+	}
+
+	// 2. Injection CIDR fails without removing valid script
+	if err := vlan.SyncFW3SideNoMasqInclude(scriptPath, []string{"192.168.89.0/24; id"}, runner); err == nil {
+		t.Fatal("expected SyncFW3SideNoMasqInclude to reject injection CIDR")
+	}
+	if _, statErr := os.Stat(scriptPath); statErr != nil {
+		t.Fatalf("expected existing script intact on validation error, got %v", statErr)
+	}
+
+	// 3. Empty/nil CIDRs cleans script and removes UCI section idempotently
+	cmds = nil
+	if err := vlan.SyncFW3SideNoMasqInclude(scriptPath, nil, runner); err != nil {
+		t.Fatalf("SyncFW3SideNoMasqInclude(nil) cleanup failed: %v", err)
+	}
+	if _, statErr := os.Stat(scriptPath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected script removed after cleanup, err=%v", statErr)
+	}
+	cleanJoined := strings.Join(cmds, "\n")
+	if !strings.Contains(cleanJoined, "uci delete firewall.singctl_vlan_nomasq") || !strings.Contains(cleanJoined, "uci commit firewall") {
+		t.Fatalf("expected cleanup to remove UCI firewall.singctl_vlan_nomasq, got:\n%s", cleanJoined)
+	}
+}
+
+func TestVLAN_ApplySideRoutesWithRetry(t *testing.T) {
+	spec := vlan.VLANSideRouteSpec{
+		SideRouterIP: "192.168.55.88",
+		CIDRs:        []string{"192.168.89.0/24"},
+	}
+
+	t.Run("recovers on third attempt", func(t *testing.T) {
+		attempts := 0
+		err := vlan.ApplySideRoutesWithRetry(t.Context(), spec, 5, 5*time.Millisecond, func(_ context.Context, got vlan.VLANSideRouteSpec) error {
+			attempts++
+			if got.SideRouterIP != spec.SideRouterIP || len(got.CIDRs) != 1 {
+				t.Fatalf("unexpected spec passed to applyFn: %+v", got)
+			}
+			if attempts < 3 {
+				return os.ErrInvalid
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("expected retry to recover on attempt 3, got err=%v (attempts=%d)", err, attempts)
+		}
+		if attempts != 3 {
+			t.Fatalf("expected 3 attempts, got %d", attempts)
+		}
+	})
+
+	t.Run("aborts immediately on canceled context", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		attempts := 0
+		err := vlan.ApplySideRoutesWithRetry(ctx, spec, 5, time.Second, func(_ context.Context, _ vlan.VLANSideRouteSpec) error {
+			attempts++
+			cancel()
+			return os.ErrInvalid
+		})
+		if err == nil {
+			t.Fatal("expected canceled error, got nil")
+		}
+		if attempts != 1 {
+			t.Fatalf("expected immediate abort after cancel (1 attempt), got %d", attempts)
+		}
+	})
+
+	t.Run("returns error after exhausting maxAttempts", func(t *testing.T) {
+		attempts := 0
+		err := vlan.ApplySideRoutesWithRetry(t.Context(), spec, 3, time.Millisecond, func(_ context.Context, _ vlan.VLANSideRouteSpec) error {
+			attempts++
+			return os.ErrInvalid
+		})
+		if err == nil {
+			t.Fatal("expected error after exhausting maxAttempts, got nil")
+		}
+		if attempts != 3 {
+			t.Fatalf("expected 3 attempts, got %d", attempts)
 		}
 	})
 }

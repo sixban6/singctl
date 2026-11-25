@@ -509,6 +509,9 @@ func ApplyDataplane(
 		ensureIPTablesJump(ctx, fwRunner, "ip6tables", "PREROUTING", "SING_BOX")
 		ensureIPTablesJump(ctx, fwRunner, "ip6tables", "OUTPUT", "SING_BOX_OUTPUT")
 	}
+	if os.Geteuid() == 0 && isOpenWrtHost() {
+		_ = SyncSingBoxFW3Include(ctx, DefaultSingBoxFW3Script, v4Batch, v6Batch, fwRunner)
+	}
 	return nil
 }
 
@@ -527,6 +530,9 @@ func CleanupDataplane(ctx context.Context, useNFT bool, nlClient rtnl.Client, fw
 	} else {
 		cleanupIPTablesChains(ctx, fwRunner, "iptables")
 		cleanupIPTablesChains(ctx, fwRunner, "ip6tables")
+		if os.Geteuid() == 0 && isOpenWrtHost() {
+			_ = SyncSingBoxFW3Include(ctx, DefaultSingBoxFW3Script, "", "", fwRunner)
+		}
 	}
 	return nlClient.CleanupTProxyRoutes(100, 101)
 }

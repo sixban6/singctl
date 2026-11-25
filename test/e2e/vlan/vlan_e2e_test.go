@@ -261,8 +261,8 @@ table inet sing-box {
 }
 NFTEOF
 
-# 后台启动真实 singctl WebUI
-/usr/bin/singctl web start -c /etc/singctl/singctl.yaml -l :8090 </dev/null >/tmp/singctl-web-e2e.log 2>&1 || { cat /tmp/singctl-web-e2e.log /tmp/singctl-web.log 2>/dev/null; exit 1; }
+# 后台启动真实 singctl WebUI（容器无 procd 时显式使用 --no-service 独立守护）
+/usr/bin/singctl web start --no-service -c /etc/singctl/singctl.yaml -l :8090 </dev/null >/tmp/singctl-web-e2e.log 2>&1 || { cat /tmp/singctl-web-e2e.log /tmp/singctl-web.log 2>/dev/null; exit 1; }
 `)
 
 	// 4. 在独立客户端命名空间中点亮网卡与监听服务

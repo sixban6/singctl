@@ -486,3 +486,102 @@ func TestController_SideModeConvergesPrivateDNSUpstream(t *testing.T) {
 	}
 	_ = debCtrlStub.Teardown(t.Context())
 }
+
+func TestController_OpenWrt21FW3IncludeAndInputPassThrough(t *testing.T) {
+	tmp := t.TempDir()
+	fw3Script := filepath.Join(tmp, "etc", "singctl", "singctl-side.fw3.sh")
+	var executed []string
+	hasInclude := false
+
+	ctrl := &gateway.Controller{
+		StateDir:       filepath.Join(tmp, "state"),
+		FW4IncludeRoot: filepath.Join(tmp, "missing-fw4"),
+		FW3IncludePath: fw3Script,
+		IsOpenWrt:      func() bool { return true },
+		HasCommand: func(name string) bool {
+			return name == "iptables" || name == "uci" || name == "ip"
+		},
+		Prober: func() gateway.TopologyInfo {
+			return gateway.TopologyInfo{
+				LANIP:               "192.168.55.88",
+				LANCIDR:             "192.168.55.0/24",
+				LANIface:            "br-lan",
+				CurrentGatewayIP:    "192.168.55.1",
+				HasLocalDNSListener: true,
+			}
+		},
+		Exec: func(name string, args ...string) ([]byte, error) {
+			cmd := name + " " + strings.Join(args, " ")
+			executed = append(executed, cmd)
+			if name == "iptables" && len(args) > 0 && args[0] == "-C" {
+				return nil, os.ErrNotExist
+			}
+			if cmd == "uci set firewall.singctl_side=include" {
+				hasInclude = true
+			}
+			if cmd == "uci -q get firewall.singctl_side" && !hasInclude {
+				return nil, os.ErrNotExist
+			}
+			return nil, nil
+		},
+	}
+
+	if err := ctrl.Apply(t.Context(), config.GatewayConfig{
+		Mode:         gateway.ModeSide,
+		MainRouterIP: "192.168.55.1",
+	}); err != nil {
+		t.Fatalf("Apply on OpenWrt 21 fw3 failed: %v", err)
+	}
+
+	joined := strings.Join(executed, "\n")
+	for _, want := range []string{
+		"iptables -I INPUT 1 -i br-lan -m comment --comment singctl-side -j ACCEPT",
+		"iptables -I FORWARD 1 -i br-lan -m comment --comment singctl-side -j ACCEPT",
+		"iptables -I FORWARD 1 -o br-lan -m comment --comment singctl-side -j ACCEPT",
+		"uci set firewall.singctl_side=include",
+		"uci set firewall.singctl_side.type=script",
+		"uci set firewall.singctl_side.path=" + fw3Script,
+		"uci set firewall.singctl_side.reload=1",
+		"uci commit firewall",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("missing expected fw3 command %q in:\n%s", want, joined)
+		}
+	}
+
+	st, err := os.Stat(fw3Script)
+	if err != nil || st.Mode().Perm() != 0600 {
+		t.Fatalf("expected 0600 perm on %s, err=%v mode=%v", fw3Script, err, st.Mode().Perm())
+	}
+	contentBytes, err := os.ReadFile(fw3Script)
+	if err != nil {
+		t.Fatalf("read fw3 script: %v", err)
+	}
+	scriptContent := string(contentBytes)
+	for _, want := range []string{
+		"SINGCTL_SIDE_FWD",
+		"SINGCTL_SIDE_NAT",
+		"10.0.0.0/8",
+		"100.64.0.0/10",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+		"MASQUERADE",
+		"-i br-lan -m comment --comment singctl-side -j ACCEPT",
+	} {
+		if !strings.Contains(scriptContent, want) {
+			t.Fatalf("fw3 persistence script missing %q:\n%s", want, scriptContent)
+		}
+	}
+
+	executed = nil
+	if err := ctrl.Teardown(t.Context()); err != nil {
+		t.Fatalf("Teardown failed: %v", err)
+	}
+	if _, err := os.Stat(fw3Script); !os.IsNotExist(err) {
+		t.Fatalf("expected fw3 persistence script removed on Teardown, stat err=%v", err)
+	}
+	teardownJoined := strings.Join(executed, "\n")
+	if !strings.Contains(teardownJoined, "uci delete firewall.singctl_side") || !strings.Contains(teardownJoined, "uci commit firewall") {
+		t.Fatalf("expected Teardown to delete firewall.singctl_side, got:\n%s", teardownJoined)
+	}
+}

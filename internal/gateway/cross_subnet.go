@@ -201,8 +201,8 @@ func (c *Controller) applySideRouterDnsmasqCrossSubnet(ctx context.Context) {
 		return
 	}
 	if mgr := c.serviceMgr(); mgr != nil && mgr.Kind() != servicemgr.InitUnknown {
-		if relErr := mgr.Reload(ctx, "dnsmasq"); relErr != nil {
-			logger.Warn("重载 dnsmasq 服务失败: %v", relErr)
+		if relErr := mgr.Restart(ctx, "dnsmasq"); relErr != nil {
+			logger.Warn("重启 dnsmasq 服务失败: %v", relErr)
 		}
 	}
 }
@@ -222,7 +222,7 @@ func (c *Controller) restoreSideRouterDnsmasqCrossSubnet(ctx context.Context) {
 		}
 		_, _ = c.runCmd(ctx, "uci", "commit", "dhcp")
 		if mgr := c.serviceMgr(); mgr != nil && mgr.Kind() != servicemgr.InitUnknown {
-			_ = mgr.Reload(ctx, "dnsmasq")
+			_ = mgr.Restart(ctx, "dnsmasq")
 		}
 	}
 	_ = os.Remove(snapPath)

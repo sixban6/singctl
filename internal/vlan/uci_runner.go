@@ -341,6 +341,44 @@ func (s *Service) batchUCI(ctx context.Context, commands []string) error {
 	return nil
 }
 
+// ReloadOpenWrtServices 通过统一服务管理器按序执行 OpenWrt network 重载、netifd 就绪等待、firewall 重载与 dnsmasq 完整重启。
+func ReloadOpenWrtServices(ctx context.Context, mgr servicemgr.Manager, netSettleDelay time.Duration) error {
+	if mgr == nil || mgr.Kind() != servicemgr.InitProcd {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var errs []error
+	if err := mgr.Reload(ctx, "network"); err != nil {
+		errs = append(errs, fmt.Errorf("reload network: %w", err))
+	}
+	// Give netifd a brief moment to register new br-lan.<vid> interfaces in ubus before fw4 compiles zones.
+	if netSettleDelay > 0 {
+		timer := time.NewTimer(netSettleDelay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+		case <-timer.C:
+		}
+	}
+	if err := mgr.Reload(ctx, "firewall"); err != nil {
+		errs = append(errs, fmt.Errorf("reload firewall: %w", err))
+	}
+	if err := mgr.Restart(ctx, "dnsmasq"); err != nil {
+		errs = append(errs, fmt.Errorf("restart dnsmasq: %w", err))
+	}
+	return errors.Join(errs...)
+}
+
+func isDSABridgeVLANActive(ctx context.Context) bool {
+	out, err := exec.CommandContext(ctx, "uci", "-q", "get", "network.lan.device").Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(out)) == "br-lan.1"
+}
+
 // ReloadOpenWrtNetworkWithOptions 在 OpenWrt 上按需重载网络、防火墙、dnsmasq，并仅当无线变更时执行 DMA 护盾与单次 wifi reload。
 func ReloadOpenWrtNetworkWithOptions(ctx context.Context, opts ReloadOptions, prepareDMA func()) error {
 	if runtime.GOOS != "linux" {
@@ -354,21 +392,11 @@ func ReloadOpenWrtNetworkWithOptions(ctx context.Context, opts ReloadOptions, pr
 
 	var errs []error
 	mgr := servicemgr.Detect(nil)
-	if mgr.Kind() == servicemgr.InitProcd {
-		if err := mgr.Reload(cctx, "network"); err != nil {
-			errs = append(errs, fmt.Errorf("reload network: %w", err))
-		}
-		// Give netifd a brief moment to register new br-lan.<vid> interfaces in ubus before fw4 compiles zones.
-		select {
-		case <-cctx.Done():
-		case <-time.After(1200 * time.Millisecond):
-		}
-		for _, unit := range []string{"firewall", "dnsmasq"} {
-			if err := mgr.Reload(cctx, unit); err != nil {
-				errs = append(errs, fmt.Errorf("reload %s: %w", unit, err))
-			}
-		}
+	if err := ReloadOpenWrtServices(cctx, mgr, 1200*time.Millisecond); err != nil {
+		errs = append(errs, err)
 	}
+	dsaActive := isDSABridgeVLANActive(cctx)
+	_ = SyncBridgeVLANL2Forward(cctx, dsaActive, "", "", nil)
 	if opts.WirelessChanged {
 		if prepareDMA != nil {
 			prepareDMA()
@@ -386,7 +414,9 @@ func ReloadOpenWrtNetworkWithOptions(ctx context.Context, opts ReloadOptions, pr
 		applyRuntimeDNSBypass(cctx, dnsRules)
 	}
 	if sideSpec := ReadSideRouteSpec(constant.VLANSideRoutesFile); sideSpec.SideRouterIP != "" && len(sideSpec.CIDRs) > 0 {
-		_ = ApplyRuntimeSideRoutes(cctx, sideSpec, nil)
+		_ = ApplySideRoutesWithRetry(cctx, sideSpec, 6, 500*time.Millisecond, func(c context.Context, s VLANSideRouteSpec) error {
+			return ApplyRuntimeSideRoutes(c, s, nil)
+		})
 	}
 	return errors.Join(errs...)
 }

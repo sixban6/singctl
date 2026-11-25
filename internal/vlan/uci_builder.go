@@ -18,6 +18,7 @@ func buildDHCPCommands(dUCI *UCIConfig, req SaveSegmentRequest) []string {
 		fmt.Sprintf("set dhcp.%s.start=%s", req.ID, quoteUCI(strconv.Itoa(req.DHCPStart))),
 		fmt.Sprintf("set dhcp.%s.limit=%s", req.ID, quoteUCI(strconv.Itoa(req.DHCPLimit))),
 		fmt.Sprintf("set dhcp.%s.leasetime=%s", req.ID, quoteUCI(req.LeaseTime)),
+		fmt.Sprintf("set dhcp.%s.dhcpv4='server'", req.ID),
 	}
 
 	var curSec *UCISection

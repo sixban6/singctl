@@ -292,3 +292,86 @@ func TestCollectDataplaneInput_ReadsDNSBypassAndVLANFromFiles(t *testing.T) {
 		t.Fatalf("unexpected VLAN bypass CIDRs: %v", in.BypassVLANCIDRs)
 	}
 }
+
+func TestSyncSingBoxFW3Include(t *testing.T) {
+	scriptPath := filepath.Join(t.TempDir(), "etc", "sing-box", "singbox.fw3.sh")
+	uciPresent := false
+	runner := &mockFWTxRunner{
+		fn: func(_ string, name string, args ...string) ([]byte, error) {
+			line := name + " " + strings.Join(args, " ")
+			if line == "uci -q get firewall.singctl_singbox" && !uciPresent {
+				return nil, os.ErrNotExist
+			}
+			if line == "uci set firewall.singctl_singbox=include" {
+				uciPresent = true
+			}
+			if line == "uci delete firewall.singctl_singbox" {
+				uciPresent = false
+			}
+			return nil, nil
+		},
+	}
+
+	v4Batch := "*mangle\n:SING_BOX - [0:0]\nCOMMIT\n"
+	v6Batch := "*mangle\n:SING_BOX - [0:0]\nCOMMIT\n"
+	if err := singbox.SyncSingBoxFW3Include(t.Context(), scriptPath, v4Batch, v6Batch, runner); err != nil {
+		t.Fatalf("SyncSingBoxFW3Include apply failed: %v", err)
+	}
+
+	st, err := os.Stat(scriptPath)
+	if err != nil || st.Mode().Perm() != 0600 {
+		t.Fatalf("expected 0600 script %s, err=%v mode=%v", scriptPath, err, st.Mode().Perm())
+	}
+	raw, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatalf("read script: %v", err)
+	}
+	scriptText := string(raw)
+	if strings.Contains(scriptText, "exit ") || strings.Contains(scriptText, "\nexit\n") {
+		t.Fatalf("fw3 script MUST NOT contain exit:\n%s", scriptText)
+	}
+	for _, want := range []string{
+		"iptables-restore --noflush",
+		"SING_BOX",
+		"SING_BOX_OUTPUT",
+		"ip6tables-restore --noflush",
+	} {
+		if !strings.Contains(scriptText, want) {
+			t.Fatalf("script missing %q:\n%s", want, scriptText)
+		}
+	}
+
+	var uciLines []string
+	for _, c := range runner.calls {
+		uciLines = append(uciLines, c.Name+" "+strings.Join(c.Args, " "))
+	}
+	joinedUCI := strings.Join(uciLines, "\n")
+	for _, wantUCI := range []string{
+		"uci set firewall.singctl_singbox=include",
+		"uci set firewall.singctl_singbox.type=script",
+		"uci set firewall.singctl_singbox.path=" + scriptPath,
+		"uci set firewall.singctl_singbox.reload=1",
+		"uci commit firewall",
+	} {
+		if !strings.Contains(joinedUCI, wantUCI) {
+			t.Fatalf("missing UCI command %q in:\n%s", wantUCI, joinedUCI)
+		}
+	}
+
+	// Cleanup with empty v4Batch removes script and UCI section idempotently.
+	runner.calls = nil
+	if err := singbox.SyncSingBoxFW3Include(t.Context(), scriptPath, "", "", runner); err != nil {
+		t.Fatalf("SyncSingBoxFW3Include cleanup failed: %v", err)
+	}
+	if _, statErr := os.Stat(scriptPath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected script removed after cleanup, err=%v", statErr)
+	}
+	var cleanLines []string
+	for _, c := range runner.calls {
+		cleanLines = append(cleanLines, c.Name+" "+strings.Join(c.Args, " "))
+	}
+	cleanJoined := strings.Join(cleanLines, "\n")
+	if !strings.Contains(cleanJoined, "uci delete firewall.singctl_singbox") || !strings.Contains(cleanJoined, "uci commit firewall") {
+		t.Fatalf("expected UCI delete + commit firewall on cleanup, got:\n%s", cleanJoined)
+	}
+}

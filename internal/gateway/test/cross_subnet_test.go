@@ -70,8 +70,8 @@ func TestSideRouterCrossSubnetRoutesAndDnsmasq(t *testing.T) {
 			t.Fatalf("expected %q in first Apply commands:\n%s", want, joined)
 		}
 	}
-	if !slices.Contains(mockMgr.Calls(), "reload dnsmasq") {
-		t.Fatalf("expected reload dnsmasq call, got %v", mockMgr.Calls())
+	if !slices.Contains(mockMgr.Calls(), "restart dnsmasq") {
+		t.Fatalf("expected restart dnsmasq call, got %v", mockMgr.Calls())
 	}
 
 	for _, fname := range []string{"return_routes.json", "dnsmasq.orig.json"} {
@@ -95,7 +95,7 @@ func TestSideRouterCrossSubnetRoutesAndDnsmasq(t *testing.T) {
 		t.Fatalf("second Apply should be idempotent when localservice is already 0, got:\n%s", joined2)
 	}
 	if len(mockMgr.Calls()) != 1 {
-		t.Fatalf("expected dnsmasq reload only once across two Applies, got %v", mockMgr.Calls())
+		t.Fatalf("expected dnsmasq restart only once across two Applies, got %v", mockMgr.Calls())
 	}
 
 	// 3. Teardown deletes metric 200 return routes and restores localservice=1.
@@ -118,8 +118,8 @@ func TestSideRouterCrossSubnetRoutesAndDnsmasq(t *testing.T) {
 	if localServiceVal != "1" {
 		t.Fatalf("expected localservice restored to 1, got %q", localServiceVal)
 	}
-	if calls := mockMgr.Calls(); len(calls) != 2 || calls[1] != "reload dnsmasq" {
-		t.Fatalf("expected second reload dnsmasq on Teardown, got %v", calls)
+	if calls := mockMgr.Calls(); len(calls) != 2 || calls[1] != "restart dnsmasq" {
+		t.Fatalf("expected second restart dnsmasq on Teardown, got %v", calls)
 	}
 
 	// 4. Non-OpenWrt host still installs return routes without touching uci/dnsmasq.
