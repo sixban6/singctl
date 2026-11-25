@@ -361,7 +361,7 @@ func ApplyRuntimeSideRoutes(ctx context.Context, spec VLANSideRouteSpec, run Com
 	}
 	isDefaultRunner := run == nil
 	if isDefaultRunner {
-		if runtime.GOOS != "linux" {
+		if runtime.GOOS != "linux" || os.Geteuid() != 0 {
 			return nil
 		}
 		run = defaultSideRouteRunner
@@ -409,7 +409,7 @@ func SuspendRuntimeSideRoutes(ctx context.Context, run CommandRunner) error {
 	}
 	isDefaultRunner := run == nil
 	if isDefaultRunner {
-		if runtime.GOOS != "linux" {
+		if runtime.GOOS != "linux" || os.Geteuid() != 0 {
 			return nil
 		}
 		run = defaultSideRouteRunner
@@ -475,7 +475,7 @@ func SyncRuntimeSideRoutes(ctx context.Context, listPath string, spec VLANSideRo
 	if err := WriteSideRouteSpec(listPath, norm); err != nil {
 		return err
 	}
-	if runtime.GOOS != "linux" {
+	if runtime.GOOS != "linux" || os.Geteuid() != 0 {
 		return nil
 	}
 	return ApplyRuntimeSideRoutes(ctx, norm, nil)
@@ -520,7 +520,13 @@ func buildSideRouterFirewallCommands(fwUCI *UCIConfig, zoneName, segID string, e
 }
 
 func (s *Service) sideRoutesFile() string {
-	return cmp.Or(strings.TrimSpace(s.env.SideRoutesFile), constant.VLANSideRoutesFile)
+	if p := strings.TrimSpace(s.env.SideRoutesFile); p != "" {
+		return p
+	}
+	if bp := strings.TrimSpace(s.env.ProxyBypassFile); bp != "" {
+		return filepath.Join(filepath.Dir(bp), filepath.Base(constant.VLANSideRoutesFile))
+	}
+	return constant.VLANSideRoutesFile
 }
 
 func (s *Service) syncSideRoutes(ctx context.Context, spec VLANSideRouteSpec) error {

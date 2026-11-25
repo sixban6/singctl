@@ -111,7 +111,7 @@ func SyncRuntimeProxyBypass(ctx context.Context, bypassFile string, cidrs []stri
 }
 
 func applyRuntimeProxyBypass(ctx context.Context, norm []string) {
-	if runtime.GOOS != "linux" {
+	if runtime.GOOS != "linux" || os.Geteuid() != 0 {
 		return
 	}
 	if ctx == nil {
@@ -292,7 +292,7 @@ func SyncRuntimeDNSBypass(ctx context.Context, bypassFile string, rules []VLANDN
 }
 
 func applyRuntimeDNSBypass(ctx context.Context, rules []VLANDNSBypassRule) {
-	if runtime.GOOS != "linux" {
+	if runtime.GOOS != "linux" || os.Geteuid() != 0 {
 		return
 	}
 	if ctx == nil {

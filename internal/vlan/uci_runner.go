@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strconv"
@@ -516,7 +517,13 @@ func (s *Service) proxyBypassFile() string {
 }
 
 func (s *Service) dnsBypassFile() string {
-	return cmp.Or(strings.TrimSpace(s.env.DNSBypassFile), constant.VLANDNSBypassFile)
+	if p := strings.TrimSpace(s.env.DNSBypassFile); p != "" {
+		return p
+	}
+	if bp := strings.TrimSpace(s.env.ProxyBypassFile); bp != "" {
+		return filepath.Join(filepath.Dir(bp), filepath.Base(constant.VLANDNSBypassFile))
+	}
+	return constant.VLANDNSBypassFile
 }
 
 func (s *Service) boardJSONPath() string {

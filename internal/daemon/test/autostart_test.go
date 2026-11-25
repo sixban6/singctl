@@ -287,6 +287,8 @@ func TestRunBootInit(t *testing.T) {
 		dmStarts, webStarts := 0, 0
 		if err := daemon.RunBootInit(ctx, &config.Config{}, daemon.BootInitDeps{
 			SingBoxConfigExists: func() bool { return false },
+			IsSingBoxRunning:    func() bool { return false },
+			IsDaemonRunning:     func() bool { return false },
 			IsLowMemory:         func() bool { return true },
 			WaitNetworkReady:    func(context.Context) error { return nil },
 			StartDaemon:         func(context.Context) error { dmStarts++; return nil },
@@ -298,6 +300,8 @@ func TestRunBootInit(t *testing.T) {
 		dmStarts, webStarts = 0, 0
 		if err := daemon.RunBootInit(ctx, &config.Config{}, daemon.BootInitDeps{
 			SingBoxConfigExists: func() bool { return false },
+			IsSingBoxRunning:    func() bool { return false },
+			IsDaemonRunning:     func() bool { return false },
 			IsLowMemory:         func() bool { return false },
 			WaitNetworkReady:    func(context.Context) error { return nil },
 			StartDaemon:         func(context.Context) error { dmStarts++; return nil },
@@ -311,6 +315,8 @@ func TestRunBootInit(t *testing.T) {
 		sbAttempts, dmStarts := 0, 0
 		err := daemon.RunBootInit(ctx, &config.Config{}, daemon.BootInitDeps{
 			SingBoxConfigExists: func() bool { return true },
+			IsSingBoxRunning:    func() bool { return false },
+			IsDaemonRunning:     func() bool { return false },
 			IsLowMemory:         func() bool { return true },
 			WaitNetworkReady:    func(context.Context) error { return nil },
 			RetryAttempts:       2,

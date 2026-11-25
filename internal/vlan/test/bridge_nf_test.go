@@ -308,3 +308,87 @@ func TestVLAN_SyncBridgeVLANL2Forward(t *testing.T) {
 		}
 	})
 }
+
+func TestVLAN_EnvProxyBypassSiblingIsolation(t *testing.T) {
+	tmpDir := t.TempDir()
+	proxyBypassFile := filepath.Join(tmpDir, "vlan-proxy-bypass.list")
+	boardJSON := `{"model":{"id":"xiaomi,ax3000t","name":"AX3000T"},"network":{"lan":{"ports":["lan1","lan2","lan3","lan4"]},"wan":{"device":"eth0"}}}`
+	networkUCI := strings.Join([]string{
+		"network.loopback=interface",
+		"network.loopback.device='lo'",
+		"network.@device[0]=device",
+		"network.@device[0].name='br-lan'",
+		"network.@device[0].type='bridge'",
+		"network.@device[0].ports='lan1' 'lan2' 'lan3' 'lan4'",
+		"network.lan=interface",
+		"network.lan.device='br-lan'",
+		"network.lan.proto='static'",
+		"network.lan.ipaddr='192.168.55.1'",
+		"network.lan.netmask='255.255.255.0'",
+		"network.wan=interface",
+		"network.wan.device='eth0'",
+		"network.wan.proto='dhcp'",
+	}, "\n")
+	firewallUCI := "firewall.@zone[0]=zone\nfirewall.@zone[0].name='lan'\nfirewall.@zone[0].network='lan'\n"
+
+	svc := vlan.NewService(vlan.Env{
+		IsOpenWrt:       func() bool { return true },
+		SideRouterIP:    "192.168.55.88",
+		ProxyBypassFile: proxyBypassFile, // Leave DNSBypassFile and SideRoutesFile unset intentionally.
+		ReadFile: func(path string) ([]byte, error) {
+			if strings.HasSuffix(path, "board.json") {
+				return []byte(boardJSON), nil
+			}
+			return nil, os.ErrNotExist
+		},
+		ListNetDevs: func() ([]string, error) {
+			return []string{"lo", "eth0", "br-lan", "lan1", "lan2", "lan3", "lan4"}, nil
+		},
+		RunUCI: func(_ context.Context, args ...string) (string, error) {
+			if len(args) >= 2 && args[0] == "show" {
+				switch args[1] {
+				case "network":
+					return networkUCI, nil
+				case "firewall":
+					return firewallUCI, nil
+				case "dhcp":
+					return "dhcp.lan=dhcp\ndhcp.lan.interface='lan'\n", nil
+				}
+			}
+			return "", nil
+		},
+		BatchUCI:      func(context.Context, []string) error { return nil },
+		ReloadNetwork: func(context.Context) error { return nil },
+	})
+
+	_, err := svc.CommitSave(t.Context(), "192.168.55.50", vlan.SaveSegmentRequest{
+		ID:        "baidu_lan",
+		VLANID:    8,
+		IPAddr:    "192.168.89.1",
+		Netmask:   "255.255.255.0",
+		DHCPStart: 100,
+		DHCPLimit: 150,
+		LeaseTime: "12h",
+		ProxyMode: vlan.ProxyModeSideRouter,
+		DHCPDNS:   []string{"192.168.55.88", "223.5.5.5"},
+		Ports:     map[string]string{"lan3": vlan.PortModeAccess},
+		Policy: vlan.SecurityPolicy{
+			AllowWAN:        true,
+			BlockRouterMgmt: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CommitSave failed: %v", err)
+	}
+
+	for _, rel := range []string{"vlan-proxy-bypass.list", "vlan-dns-bypass.list", "vlan-side-routes.list"} {
+		p := filepath.Join(tmpDir, rel)
+		st, statErr := os.Stat(p)
+		if statErr != nil {
+			t.Fatalf("expected isolated 0600 sibling file %s inside t.TempDir(), statErr=%v", p, statErr)
+		}
+		if st.Mode().Perm() != 0600 {
+			t.Fatalf("expected 0600 perm on %s, got %v", p, st.Mode().Perm())
+		}
+	}
+}
