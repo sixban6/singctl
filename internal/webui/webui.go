@@ -72,6 +72,9 @@ type Options struct {
 	GatewayProberForTest    func() gateway.TopologyInfo                                                       // 仅供单元测试注入网络拓扑探测结果
 	FlowOffloadProberForTest func(ctx context.Context) gateway.FlowOffloadStatus                              // 仅供单元测试注入流量卸载状态探测替身
 	FlowOffloadApplyForTest  func(ctx context.Context, enable bool) (gateway.FlowOffloadApplyResult, error)   // 仅供单元测试注入流量卸载热开关替身
+	ModemDepsForTest         *gateway.ModemDeps                                                               // 仅供单元测试注入光猫探测与桥接依赖
+	ModemProxyOptionsForTest *gateway.ModemProxyOptions                                                       // 仅供单元测试注入光猫反向代理配置
+	ModemConsolePort         *int                                                                             // 可选：覆盖光猫控制台代理监听端口（nil 默认 8091，0 为系统分配）
 	SingBoxRunningForTest   func() bool                                                                       // 仅供单元测试注入 sing-box 运行状态探测
 	WorkModeApplyForTest    func(ctx context.Context, cfg *config.Config, targetMode string) (bool, string, error) // 仅供单元测试注入工作模式热应用替身
 	DNSLeakRunnerForTest    func(ctx context.Context, opts netdiag.DNSLeakTestOptions) *netdiag.DNSLeakReport // 仅供单元测试注入离线 DNS 泄漏实测结果
@@ -150,8 +153,10 @@ type Server struct {
 	trafficRunning             bool
 	trafficMemUnsupportedUntil time.Time
 
-	tsP2PMu   sync.Mutex
-	tsP2PCtrl *tailscale.P2PAssistController
+	tsP2PMu      sync.Mutex
+	tsP2PCtrl    *tailscale.P2PAssistController
+	modemProxy   *gateway.ModemProxyManager
+	modemVaultMu sync.Mutex
 
 	lastReqUnixNano atomic.Int64
 	activeEpoch     atomic.Uint64
@@ -225,6 +230,15 @@ func New(opts Options) *Server {
 	s.activeEpoch.Store(1)
 	s.dohProber = newBrowserDoHProber(opts.BrowserDoHForTest, clashCli)
 
+	var proxyOpts gateway.ModemProxyOptions
+	if opts.ModemProxyOptionsForTest != nil {
+		proxyOpts = *opts.ModemProxyOptionsForTest
+	}
+	if proxyOpts.Authorizer == nil {
+		proxyOpts.Authorizer = s.authorized
+	}
+	s.modemProxy = gateway.NewModemProxyManager(proxyOpts)
+
 	staticContent, _ := fs.Sub(staticFS, "static")
 	s.Mux.Handle("/", s.authOnly(NewStaticHandler(staticContent)))
 
@@ -274,6 +288,13 @@ func (s *Server) registerRoutes() {
 	s.Mux.HandleFunc("PUT /api/gateway", s.guard(s.handleGatewayPut))
 	s.Mux.HandleFunc("POST /api/gateway", s.guard(s.handleGatewayPut))
 	s.Mux.HandleFunc("PUT /api/gateway/flow-offload", s.guard(s.handleGatewayFlowOffloadPut))
+	s.Mux.HandleFunc("GET /api/modem/status", s.guard(s.handleModemStatusGet))
+	s.Mux.HandleFunc("PUT /api/modem/config", s.guard(s.handleModemConfigPut))
+	s.Mux.HandleFunc("PUT /api/modem/bridge", s.guard(s.handleModemBridgePut))
+	s.Mux.HandleFunc("PUT /api/modem/credentials", s.guard(s.handleModemCredentialsPut))
+	s.Mux.HandleFunc("POST /api/modem/credentials/use", s.guard(s.handleModemCredentialsUsePost))
+	s.Mux.HandleFunc("POST /api/modem/console/open", s.guard(s.handleModemConsoleOpenPost))
+	s.Mux.HandleFunc("POST /api/modem/console/close", s.guard(s.handleModemConsoleClosePost))
 	s.Mux.HandleFunc("POST /api/dns/leak-test", s.guard(s.handleDNSLeakTestPost))
 	s.Mux.HandleFunc("POST /api/dns/browser-doh", s.guard(s.handleBrowserDoHCheckPost))
 
@@ -514,6 +535,15 @@ func (s *Server) buildLifecycle(bgCtx context.Context, cancelBg context.CancelFu
 			ServiceName: "webui-pcdn-boot-sync",
 			OnPostStart: func(context.Context) error {
 				go s.ensureDefaultPCDNBlockWithContext(bgCtx)
+				return nil
+			},
+		},
+		lifecycle.FuncService{
+			ServiceName: "webui-modem-proxy",
+			OnClose: func() error {
+				if s.modemProxy != nil {
+					return s.modemProxy.Close()
+				}
 				return nil
 			},
 		},

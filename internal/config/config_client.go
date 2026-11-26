@@ -64,6 +64,7 @@ type GatewayConfig struct {
 	MainRouterIP       string `yaml:"main_router_ip,omitempty" json:"main_router_ip,omitempty"`
 	SideRouterIP       string `yaml:"side_router_ip,omitempty" json:"side_router_ip,omitempty"`
 	SideRouterFailover *bool  `yaml:"side_router_failover,omitempty" json:"side_router_failover,omitempty"`
+	ModemIP            string `yaml:"modem_ip,omitempty" json:"modemIP,omitempty"`
 	LANIface           string `yaml:"lan_iface,omitempty" json:"lan_iface,omitempty"`
 	IPv6Mode           string `yaml:"ipv6_mode,omitempty" json:"ipv6_mode,omitempty"`
 }
@@ -125,6 +126,7 @@ func (g GatewayConfig) IsEmpty() bool {
 		strings.TrimSpace(g.MainRouterIP) == "" &&
 		strings.TrimSpace(g.SideRouterIP) == "" &&
 		g.SideRouterFailover == nil &&
+		strings.TrimSpace(g.ModemIP) == "" &&
 		strings.TrimSpace(g.LANIface) == "" &&
 		strings.TrimSpace(g.IPv6Mode) == ""
 }

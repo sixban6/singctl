@@ -35,6 +35,7 @@ gateway:                                         # (可选) 客户端网关部�
   main_router_ip: ""                             # (旁路由模式必填) 上级主路由/网关 IP，例如 "192.168.1.1"
   # side_router_ip: ""                           # (主路由旁路由托管模式可选) 局域网旁路由 IP，例如 "192.168.1.2"
   # side_router_failover: true                   # (旁路由托管默认 true) 旁路由连续失联时自动摘除策略路由回退主路由直连
+  # modem_ip: ""                                 # (可选) 指定上游光猫私网 IPv4 地址（留空自动探测）
   # lan_iface: ""                                # (可选) 指定单臂局域网网卡名，留空自动探测
   ipv6_mode: "off"                               # "off" (纯 IPv4) | "cn_only" (推荐：国内原生 IPv6 + 海外 0ms 静音 AAAA 防泄漏) | "full" (全量双栈；旁路由自动保持 off)
 

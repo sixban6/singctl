@@ -10,6 +10,7 @@ import {
   Monitor,
   Network,
   RefreshCw,
+  Router,
   Share2,
   ShieldAlert,
   X,
@@ -30,6 +31,7 @@ import {
 import { BrowserDoHCheckResponse, ClientStatusResponse, SafeCommitStatusReport } from '../types';
 import { FirewallPanel } from './firewall/FirewallPanel';
 import { GatewayModePage, GatewayModePageProps } from './network/GatewayModePage';
+import { ModemPage } from './network/ModemPage';
 import { HomeDomainSection } from './network/homedomain/HomeDomainSection';
 import { TailscalePage, TailscalePageProps } from './network/TailscalePage';
 import { VlanManagerSection } from './network/vlan/VlanManagerSection';
@@ -37,13 +39,14 @@ import { VlanManagerSection } from './network/vlan/VlanManagerSection';
 export { GatewayModePage, TailscalePage };
 export type { GatewayModePageProps, TailscalePageProps };
 
-export type NetSubTab = 'gw' | 'ts' | 'home' | 'fw' | 'vlan';
+export type NetSubTab = 'gw' | 'ts' | 'home' | 'fw' | 'vlan' | 'modem';
 
 function normalizeNetSubTab(raw?: string): NetSubTab {
   if (raw === 'fw') return 'fw';
   if (raw === 'ts') return 'ts';
   if (raw === 'home') return 'home';
   if (raw === 'vlan') return 'vlan';
+  if (raw === 'modem') return 'modem';
   if (raw === 'gw') return 'gw';
   return 'gw';
 }
@@ -187,6 +190,11 @@ export const NetworkHubPage: React.FC<NetworkHubPageProps> = ({
               label: '子网隔离 (VLAN)',
               icon: <Network className="w-3.5 h-3.5" />,
             },
+            {
+              key: 'modem',
+              label: '上游光猫',
+              icon: <Router className="w-3.5 h-3.5" />,
+            },
           ]}
         />
 
@@ -314,6 +322,7 @@ export const NetworkHubPage: React.FC<NetworkHubPageProps> = ({
           onSafeCommitUpdated={onSafeCommitUpdated}
         />
       )}
+      {sub === 'modem' && <ModemPage busy={busy} privacyMask={privacyMask} />}
     </div>
   );
 };

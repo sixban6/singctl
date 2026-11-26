@@ -378,3 +378,70 @@ export interface TailscaleUpgradeStatusResponse {
   state: TailscaleUpgradeState;
   tailscale?: ClientTailscaleStatus;
 }
+
+export interface ModemProxySessionInfo {
+  running: boolean;
+  port: number;
+  ticket: string;
+  target: string;
+  expiresInSec: number;
+  autofillNonce?: string;
+}
+
+export interface ModemProxyStatusInfo {
+  running: boolean;
+  port: number;
+  target?: string;
+  idleSec: number;
+}
+
+export interface ModemHopInfo {
+  hop: number;
+  ip: string;
+  deviceKind: 'modem' | 'router' | 'unknown' | string;
+  vendorHint?: string;
+  online: boolean;
+}
+
+export interface ModemCredentialSlotSummary {
+  saved: boolean;
+  username?: string;
+  updatedAt?: string;
+}
+
+export interface ModemCredentialsSummary {
+  super: ModemCredentialSlotSummary;
+  user: ModemCredentialSlotSummary;
+}
+
+export interface ModemStatusResponse {
+  supported: boolean;
+  isOpenWrt: boolean;
+  gatewayRole: GatewayRoleMode | string;
+  accessMode: 'router_nat' | 'pppoe_bridge' | 'side_via_main' | 'unknown' | string;
+  wanProto?: string;
+  wanIface?: string;
+  wanPhysDevice?: string;
+  wanIp?: string;
+  wanExitType: 'public' | 'cgnat' | 'private' | 'unknown' | string;
+  configuredModemIp?: string;
+  detectedModemIp?: string;
+  effectiveModemIp?: string;
+  candidateIps?: string[];
+  online: boolean;
+  scheme?: string;
+  port?: number;
+  adminPort?: number;
+  latencyMs?: number;
+  deviceKind?: 'modem' | 'router' | 'unknown' | string;
+  vendorHint?: string;
+  natLayers?: number;
+  upstreamHops?: ModemHopInfo[];
+  bridgeHelperCapable: boolean;
+  bridgeHelperEnabled: boolean;
+  bridgeHelperIp?: string;
+  subnetConflict?: string;
+  doubleNatHint?: string;
+  console: ModemProxyStatusInfo;
+  credentials?: ModemCredentialsSummary;
+}

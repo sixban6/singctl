@@ -7,6 +7,10 @@ import {
   GatewayIPv6Mode,
   GatewayRoleMode,
   GatewayWorkMode,
+  ModemCredentialsSummary,
+  ModemProxySessionInfo,
+  ModemProxyStatusInfo,
+  ModemStatusResponse,
   TailscaleConfigResponse,
   TailscaleP2PAssistConfig,
   TailscaleP2PPokeResult,
@@ -45,6 +49,55 @@ export const networkApi = {
       method: 'PUT',
       body: JSON.stringify(payload),
     }),
+
+  getModemStatus: () => request<ModemStatusResponse>('/api/modem/status'),
+
+  saveModemConfig: (payload: { modemIP: string }) =>
+    request<{ ok: boolean; message: string; status: ModemStatusResponse }>('/api/modem/config', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+
+  saveModemBridge: (payload: { enabled: boolean; modemIP?: string }) =>
+    request<{ ok: boolean; message: string; status: ModemStatusResponse }>('/api/modem/bridge', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+
+  openModemConsole: (payload?: { scheme?: string; ip?: string; port?: number }) =>
+    request<{ ok: boolean; session: ModemProxySessionInfo; console: ModemProxyStatusInfo }>(
+      '/api/modem/console/open',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload || {}),
+      },
+    ),
+
+  closeModemConsole: () =>
+    request<{ ok: boolean; running: boolean; console: ModemProxyStatusInfo }>('/api/modem/console/close', {
+      method: 'POST',
+      body: '{}',
+    }),
+
+  saveModemCredentials: (payload: {
+    slot: 'super' | 'user';
+    username?: string;
+    password?: string;
+    clear?: boolean;
+  }) =>
+    request<{ ok: boolean; message: string; credentials: ModemCredentialsSummary }>('/api/modem/credentials', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+
+  useModemCredential: (payload: { slot: 'super' | 'user' }) =>
+    request<{ ok: boolean; slot: 'super' | 'user'; username: string; password: string }>(
+      '/api/modem/credentials/use',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      },
+    ),
 
   getTailscaleConfig: () => request<TailscaleConfigResponse>('/api/tailscale/config'),
 

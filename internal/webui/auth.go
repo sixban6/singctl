@@ -57,7 +57,7 @@ func (s *Server) setAuthCookie(w http.ResponseWriter, r *http.Request) {
 }
 
 // clientWebCSP 严格限制浏览器脚本、框架与出站连接，仅放行同源接口及 DNS/IP 测漏探针域名。
-const clientWebCSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://ipv4.geojs.io https://ipv6.geojs.io https://myip.ipip.net https://*.edns.ip-api.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+const clientWebCSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; frame-src 'self' http: https:; connect-src 'self' https://ipv4.geojs.io https://ipv6.geojs.io https://myip.ipip.net https://*.edns.ip-api.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
 
 func applyClientSecurityHeaders(w http.ResponseWriter, csp string) {
 	w.Header().Set("X-Robots-Tag", "noindex, nofollow, noarchive, nosnippet")

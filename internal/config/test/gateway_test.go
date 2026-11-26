@@ -47,6 +47,7 @@ func TestGatewayConfig_LoadSaveAndColonFix(t *testing.T) {
 gateway:
   mode:"side"
   main_router_ip:"192.168.100.1"
+  modem_ip:"192.168.3.1"
   lan_iface:"eth0"
 `
 	if err := os.WriteFile(cfgPath, []byte(raw), 0600); err != nil {
@@ -65,6 +66,9 @@ gateway:
 	}
 	if cfg.Gateway.MainRouterIP != "192.168.100.1" {
 		t.Fatalf("expected MainRouterIP=192.168.100.1, got %q", cfg.Gateway.MainRouterIP)
+	}
+	if cfg.Gateway.ModemIP != "192.168.3.1" {
+		t.Fatalf("expected ModemIP=192.168.3.1, got %q", cfg.Gateway.ModemIP)
 	}
 	if cfg.Gateway.LANIface != "eth0" {
 		t.Fatalf("expected LANIface=eth0, got %q", cfg.Gateway.LANIface)
@@ -86,7 +90,7 @@ gateway:
 	if err != nil {
 		t.Fatalf("reload failed: %v", err)
 	}
-	if !reloaded.Gateway.IsSideRouter() || reloaded.Gateway.MainRouterIP != "192.168.100.1" || reloaded.Gateway.LANIface != "eth0" {
+	if !reloaded.Gateway.IsSideRouter() || reloaded.Gateway.MainRouterIP != "192.168.100.1" || reloaded.Gateway.ModemIP != "192.168.3.1" || reloaded.Gateway.LANIface != "eth0" {
 		t.Fatalf("reloaded gateway mismatch: %+v", reloaded.Gateway)
 	}
 }

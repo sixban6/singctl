@@ -217,6 +217,7 @@ func (s *Server) handleGatewayPut(w http.ResponseWriter, r *http.Request) {
 		MainRouterIP:       strings.TrimSpace(body.MainRouterIP),
 		SideRouterIP:       nextSideIP,
 		SideRouterFailover: cfg.Gateway.SideRouterFailover,
+		ModemIP:            cfg.Gateway.ModemIP,
 		LANIface:           strings.TrimSpace(body.LANIface),
 		IPv6Mode:           desiredIPv6,
 	}
