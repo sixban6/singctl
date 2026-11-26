@@ -7,9 +7,12 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"runtime"
 	"strings"
 
 	"singctl/internal/config"
+	"singctl/internal/daemon"
+	"singctl/internal/gateway"
 )
 
 // maskTailscaleAuthKey 生成安全遮蔽的 Tailscale Auth Key 提示，避免前端 GET 接口回传完整明文凭据。
@@ -117,10 +120,18 @@ func (s *Server) handleSbSubsPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	prevEffective := config.WorkModeAudit
+	if prevSnap, pErr := s.loadConfigSnapshot(); pErr == nil && prevSnap != nil {
+		prevEffective = prevSnap.EffectiveWorkMode()
+	}
+
 	err := s.savePartialConfig(true, func(cfg *config.Config) error {
 		applySubsToConfig(body.Subs, cfg)
 		cfg.Hy2.Up = max(0, body.Hy2.Up)
 		cfg.Hy2.Down = max(0, body.Hy2.Down)
+		if cfg.Gateway.EffectiveMode() != gateway.ModeMain || strings.TrimSpace(cfg.Gateway.SideRouterIP) == "" {
+			cfg.Gateway.WorkMode = ""
+		}
 		if len(cfg.Subs) > 0 {
 			if valErr := cfg.ValidateSubs(); valErr != nil {
 				return &apiStatusError{status: http.StatusBadRequest, msg: sanitizeSubErrorText(valErr)}
@@ -131,6 +142,14 @@ func (s *Server) handleSbSubsPut(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writePartialSaveError(w, err)
 		return
+	}
+	if nextCfg, nErr := s.loadConfigSnapshot(); nErr == nil && nextCfg != nil {
+		if prevEffective == config.WorkModeProxy && nextCfg.EffectiveWorkMode() == config.WorkModeAudit {
+			if s.opts.WorkModeApplyForTest != nil || (runtime.GOOS == "linux" && daemon.IsSingBoxRunning()) {
+				_, _, _ = s.applyWorkModeLive(r.Context(), nextCfg, prevEffective, config.WorkModeAudit)
+				_ = daemon.NotifyReload()
+			}
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }

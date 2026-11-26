@@ -1,25 +1,27 @@
 import React, { useEffect, useState } from 'react';
 import {
   Activity,
+  CheckCircle2,
   ExternalLink,
   Network,
+  RotateCcw,
   Save,
   Share2,
   ShieldCheck,
+  Unlink,
 } from 'lucide-react';
 import { Badge, Button, SectionCard } from '../../../ui';
 import { maskFullIP } from '../../../lib/privacyMask';
-import { EffectiveGatewayWorkMode, SideRouterStatusInfo } from '../../types';
+import { SideRouterStatusInfo } from '../../types';
 
 export interface SideRouterDelegationCardProps {
   sideRouterIP?: string;
   sideRouterFailover: boolean;
   sideRouterStatus?: SideRouterStatusInfo | null;
-  effectiveWorkMode: EffectiveGatewayWorkMode;
   saving: boolean;
   busy: boolean;
   privacyMask?: boolean;
-  onSaveSideRouter: (nextIP: string, nextFailover: boolean, alsoSwitchDelegated?: boolean) => void;
+  onSaveSideRouter: (nextIP: string, nextFailover: boolean) => Promise<boolean>;
   onGoVlan?: () => void;
 }
 
@@ -27,7 +29,6 @@ export const SideRouterDelegationCard: React.FC<SideRouterDelegationCardProps> =
   sideRouterIP = '',
   sideRouterFailover,
   sideRouterStatus,
-  effectiveWorkMode,
   saving,
   busy,
   privacyMask = false,
@@ -47,13 +48,35 @@ export const SideRouterDelegationCard: React.FC<SideRouterDelegationCardProps> =
 
   const trimmedIP = ipInput.trim();
   const savedTrimmed = sideRouterIP.trim();
+  const ipChanged = trimmedIP !== savedTrimmed;
+  const failoverChanged = failover !== sideRouterFailover;
+  const hasChanges = ipChanged || failoverChanged;
   const canOpenPeer = Boolean(savedTrimmed) && !privacyMask;
+
+  const submitSave = async (nextIP: string, nextFailover: boolean) => {
+    const ok = await onSaveSideRouter(nextIP, nextFailover);
+    if (ok) {
+      setDirty(false);
+    }
+  };
+
+  const resetDraft = () => {
+    setIpInput(sideRouterIP);
+    setFailover(sideRouterFailover);
+    setDirty(false);
+  };
+
+  const saveLabel = !trimmedIP && savedTrimmed
+    ? '解除绑定并恢复本机运行'
+    : ipChanged
+      ? '保存并交由旁路由托管'
+      : '保存容灾设置';
 
   return (
     <SectionCard
       title="旁路由协同托管中心"
       icon={<Share2 className="w-4 h-4" />}
-      subtitle="绑定局域网旁路由（如 N1）后，主路由可完全关闭本地代理并按 Wi-Fi / VLAN 精准把流量转交旁路由分流"
+      subtitle="绑定局域网旁路由（如 N1）后，主路由将自动停用本机代理并按 Wi-Fi / VLAN 精准把流量转交旁路由分流"
       actions={
         <div className="flex items-center gap-2 flex-wrap">
           {sideRouterStatus?.configured ? (
@@ -82,9 +105,20 @@ export const SideRouterDelegationCard: React.FC<SideRouterDelegationCardProps> =
       <div className="space-y-4">
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
           <div className="rounded-xl bg-surface2 border border-subtle p-3.5 space-y-2">
-            <label htmlFor="side-router-ip-input" className="block text-xs font-semibold text-primary">
-              旁路由局域网 IPv4 地址
-            </label>
+            <div className="flex items-center justify-between gap-2">
+              <label htmlFor="side-router-ip-input" className="block text-xs font-semibold text-primary">
+                旁路由局域网 IPv4 地址
+              </label>
+              {hasChanges ? (
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/35">
+                  待保存
+                </span>
+              ) : savedTrimmed ? (
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/35">
+                  ✓ 当前生效
+                </span>
+              ) : null}
+            </div>
             <input
               id="side-router-ip-input"
               type={privacyMask ? 'password' : 'text'}
@@ -94,11 +128,11 @@ export const SideRouterDelegationCard: React.FC<SideRouterDelegationCardProps> =
                 setIpInput(e.target.value);
                 setDirty(true);
               }}
-              placeholder={privacyMask ? '••••••••' : '例如 192.168.55.88（留空表示解绑）'}
+              placeholder={privacyMask ? '••••••••' : '例如 192.168.55.88（留空或点击解绑可恢复本机运行）'}
               className="sc-input w-full h-9 px-3 text-xs sm:text-sm font-mono"
             />
             <p className="text-[11px] text-secondary leading-relaxed">
-              填入后，主路由即使处于审计/代理模式也会自动豁免该 IP；切为「旁路由托管」更可零负担硬件转发。
+              绑定旁路由 IP 后，主路由将自动停用本机 sing-box 释放内存，交由旁路由透明分流；解除绑定后自动恢复主路由本机运行。
             </p>
           </div>
 
@@ -163,33 +197,55 @@ export const SideRouterDelegationCard: React.FC<SideRouterDelegationCardProps> =
             )}
           </div>
           <div className="flex items-center gap-2 flex-wrap">
-            {effectiveWorkMode !== 'delegated' && trimmedIP && (
+            {hasChanges && !saving && (
               <Button
                 size="sm"
-                variant="secondary"
-                loading={saving}
-                disabled={busy || saving || privacyMask}
-                onClick={() => {
-                  setDirty(false);
-                  onSaveSideRouter(trimmedIP, failover, true);
-                }}
+                variant="ghost"
+                disabled={busy || privacyMask}
+                icon={<RotateCcw className="w-3.5 h-3.5" />}
+                onClick={resetDraft}
               >
-                绑定并切为旁路由托管
+                撤销更改
               </Button>
             )}
-            <Button
-              size="sm"
-              variant="primary"
-              loading={saving}
-              disabled={busy || saving || privacyMask || !dirty}
-              icon={<Save className="w-3.5 h-3.5" />}
-              onClick={() => {
-                setDirty(false);
-                onSaveSideRouter(trimmedIP, failover, false);
-              }}
-            >
-              保存旁路由协同设置
-            </Button>
+
+            {hasChanges ? (
+              <Button
+                size="sm"
+                variant="primary"
+                loading={saving}
+                disabled={busy || saving || privacyMask}
+                icon={<Save className="w-3.5 h-3.5" />}
+                onClick={() => void submitSave(trimmedIP, failover)}
+              >
+                {saveLabel}
+              </Button>
+            ) : savedTrimmed ? (
+              <>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  loading={saving}
+                  disabled={busy || saving || privacyMask}
+                  icon={<Unlink className="w-3.5 h-3.5" />}
+                  onClick={() => void submitSave('', failover)}
+                >
+                  解除绑定
+                </Button>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled
+                  icon={<CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />}
+                >
+                  已托管至旁路由 ({maskFullIP(savedTrimmed, privacyMask)})
+                </Button>
+              </>
+            ) : (
+              <Button size="sm" variant="secondary" disabled>
+                填写旁路由 IP 后可绑定托管
+              </Button>
+            )}
           </div>
         </div>
       </div>

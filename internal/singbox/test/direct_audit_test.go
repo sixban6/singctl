@@ -73,12 +73,35 @@ func TestConfigGenerator_DirectAuditMode_ZeroSubs(t *testing.T) {
 		}
 	})
 
-	t.Run("proxy_mode_without_subs_still_rejected", func(t *testing.T) {
+	t.Run("legacy_proxy_mode_without_subs_auto_falls_back_to_audit", func(t *testing.T) {
 		proxyCfg := &config.Config{
 			Gateway: config.GatewayConfig{WorkMode: config.WorkModeProxy},
 		}
-		if _, err := singbox.NewOfflineConfigGenerator(proxyCfg).GenerateForPlatform("linux"); err == nil {
-			t.Fatal("expected proxy mode without subs to fail")
+		g := singbox.NewOfflineConfigGenerator(proxyCfg)
+		g.SetLocalDNSProbe(func(_ string, _ int) bool { return false })
+		rawOut, gErr := g.GenerateForPlatform("linux")
+		if gErr != nil {
+			t.Fatalf("expected legacy work_mode=proxy without subs to auto-fall back to direct-audit, got err: %v", gErr)
+		}
+		var outDoc map[string]any
+		if uErr := json.Unmarshal([]byte(rawOut), &outDoc); uErr != nil {
+			t.Fatalf("invalid generated JSON: %v", uErr)
+		}
+		outs, _ := outDoc["outbounds"].([]any)
+		if len(outs) != 1 {
+			t.Fatalf("expected 1 direct outbound in auto audit fallback, got %d: %v", len(outs), outs)
+		}
+	})
+
+	t.Run("delegated_mode_without_subs_rejected", func(t *testing.T) {
+		delegatedCfg := &config.Config{
+			Gateway: config.GatewayConfig{
+				Mode:         "main",
+				SideRouterIP: "192.168.55.88",
+			},
+		}
+		if _, gErr := singbox.NewOfflineConfigGenerator(delegatedCfg).GenerateForPlatform("linux"); gErr == nil {
+			t.Fatal("expected delegated main router without subs to skip/reject sing-box config generation")
 		}
 	})
 

@@ -181,10 +181,6 @@ func (s *Server) handleGatewayPut(w http.ResponseWriter, r *http.Request) {
 		desiredWorkMode = normWM
 		workModeRequested = true
 	}
-	if rawMode == gateway.ModeSide && desiredWorkMode == config.WorkModeDelegated {
-		writeJSONError(w, http.StatusBadRequest, "旁路由自身不能设为「旁路由托管」模式，请选择代理模式或审计模式")
-		return
-	}
 
 	nextSideIP := strings.TrimSpace(cfg.Gateway.SideRouterIP)
 	if body.SideRouterIP != nil {
@@ -242,15 +238,22 @@ func (s *Server) handleGatewayPut(w http.ResponseWriter, r *http.Request) {
 		nextGw.Mode = gateway.ModeMain
 		nextGw.MainRouterIP = ""
 		nextGw.LANIface = ""
+		switch {
+		case nextGw.SideRouterIP != "":
+			nextGw.WorkMode = config.WorkModeDelegated
+		case workModeRequested && desiredWorkMode == config.WorkModeDelegated:
+			nextGw.WorkMode = config.WorkModeDelegated
+		default:
+			// 非托管模式下统一清空 work_mode，交由订阅是否存在全自动推导 proxy/audit
+			nextGw.WorkMode = ""
+		}
 	} else {
 		nextGw.SideRouterIP = ""
 		nextGw.SideRouterFailover = nil
+		nextGw.WorkMode = ""
 	}
 	if nextGw.EffectiveIPv6Mode() == config.GatewayIPv6Off {
 		nextGw.IPv6Mode = config.GatewayIPv6Off
-	}
-	if nextGw.ConfiguredWorkMode() == config.WorkModeAuto {
-		nextGw.WorkMode = ""
 	}
 	cfg.Gateway = nextGw
 
@@ -309,7 +312,9 @@ func (s *Server) handleGatewayPut(w http.ResponseWriter, r *http.Request) {
 	needsWorkTransition := newEffectiveWorkMode != prevWorkMode ||
 		(cfg.NeedsSingBox() && !s.isSingBoxRunning()) ||
 		(!cfg.NeedsSingBox() && s.isSingBoxRunning())
-	willApplyWorkMode := workModeRequested && needsWorkTransition
+	willApplyWorkMode := (workModeRequested && needsWorkTransition) ||
+		newEffectiveWorkMode != prevWorkMode ||
+		(!cfg.NeedsSingBox() && s.isSingBoxRunning())
 	skipLegacySBIPv6Patch := willApplyWorkMode || !cfg.NeedsSingBox()
 	sbPath := s.sbConfigPath()
 	if !skipLegacySBIPv6Patch {

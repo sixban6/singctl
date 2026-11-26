@@ -1,5 +1,14 @@
 import React, { useState } from 'react';
-import { AlertTriangle, Check, Copy, Network, Save, Smartphone } from 'lucide-react';
+import {
+  AlertTriangle,
+  Check,
+  CheckCircle2,
+  Copy,
+  Network,
+  RotateCcw,
+  Save,
+  Smartphone,
+} from 'lucide-react';
 import { Badge, Button, SectionCard, useToast } from '../../../ui';
 import { copyPlainText } from '../../lib/leakProbes';
 import { maskFullIP, redactInlineSensitive } from '../../../lib/privacyMask';
@@ -18,27 +27,50 @@ export interface GatewayIPv6SectionProps {
   mode: GatewayRoleMode | null;
   v6Status?: IPv6StatusInfo;
   effectiveDisplayIPv6Mode: GatewayIPv6Mode | null;
+  savedIPv6Mode?: GatewayIPv6Mode | null;
   ipv6Saving: boolean;
   busy: boolean;
   isSelfLoop: boolean;
   privacyMask: boolean;
   onSelectIPv6Mode: (next: GatewayIPv6Mode) => void;
+  onResetIPv6?: () => void;
   onSaveIPv6: () => void;
+}
+
+function getIPv6ShortLabel(mode: GatewayIPv6Mode | null | undefined): string {
+  switch (mode) {
+    case 'cn_only':
+      return '智能双栈';
+    case 'full':
+      return '全量双栈';
+    case 'off':
+    default:
+      return '纯 IPv4';
+  }
 }
 
 export const GatewayIPv6Section: React.FC<GatewayIPv6SectionProps> = ({
   mode,
   v6Status,
   effectiveDisplayIPv6Mode,
+  savedIPv6Mode = null,
   ipv6Saving,
   busy,
   isSelfLoop,
   privacyMask,
   onSelectIPv6Mode,
+  onResetIPv6,
   onSaveIPv6,
 }) => {
   const { success, error } = useToast();
   const [copiedSubCmd, setCopiedSubCmd] = useState(false);
+  const effectiveSavedV6: GatewayIPv6Mode | null = mode === 'side' ? 'off' : savedIPv6Mode ?? null;
+  const hasIPv6Changes = Boolean(
+    mode !== 'side' &&
+      effectiveDisplayIPv6Mode &&
+      effectiveSavedV6 &&
+      effectiveDisplayIPv6Mode !== effectiveSavedV6,
+  );
   const wanPublicIPv6 = Boolean(v6Status?.wanHasGua || v6Status?.pdPrefix);
   const lanInheritedIPv6 = Boolean(v6Status?.lanGua || (v6Status?.lanPrefixes && v6Status.lanPrefixes.length > 0));
   const publicIPv6Available =
@@ -176,6 +208,7 @@ export const GatewayIPv6Section: React.FC<GatewayIPv6SectionProps> = ({
             },
           ].map((opt) => {
             const selected = effectiveDisplayIPv6Mode !== null && effectiveDisplayIPv6Mode === opt.key;
+            const isSavedOpt = effectiveSavedV6 !== null && effectiveSavedV6 === opt.key;
             return (
               <button
                 key={opt.key}
@@ -199,7 +232,24 @@ export const GatewayIPv6Section: React.FC<GatewayIPv6SectionProps> = ({
                 }`}
               >
                 <div className="flex items-center justify-between gap-2">
-                  <span className="text-xs sm:text-sm font-semibold text-primary">{opt.title}</span>
+                  <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
+                    <span className="text-xs sm:text-sm font-semibold text-primary">{opt.title}</span>
+                    {isSavedOpt && selected && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/35">
+                        ✓ 当前生效
+                      </span>
+                    )}
+                    {selected && !isSavedOpt && effectiveSavedV6 !== null && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/35">
+                        待保存
+                      </span>
+                    )}
+                    {!selected && isSavedOpt && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400/80 border border-emerald-500/25">
+                        当前生效
+                      </span>
+                    )}
+                  </div>
                   <span className="text-[10px] px-1.5 py-0.5 rounded bg-surface1 text-secondary border border-subtle shrink-0">
                     {opt.tag}
                   </span>
@@ -273,18 +323,47 @@ export const GatewayIPv6Section: React.FC<GatewayIPv6SectionProps> = ({
           <span className="text-[11px] text-muted">
             {mode === 'side'
               ? '当前选择旁路由模式：本机可通过 LAN 口继承上级路由 IPv6；IPv6 透明代理自动保持关闭，避免主路由 RA 绕过造成泄漏。'
-              : '保存后自动同步 OpenWrt RA/DHCPv6、dnsmasq 与 sing-box 规则并零断网热重载（切回关闭会自动按备份还原）。'}
+              : hasIPv6Changes
+                ? '已选择新的 IPv6 策略，点击右侧按钮并按 OpenWrt/sing-box 自动热重载。'
+                : '当前 IPv6 策略已同步至 OpenWrt RA/DHCPv6、dnsmasq 与 sing-box。'}
           </span>
-          <Button
-            variant="primary"
-            loading={ipv6Saving}
-            disabled={busy || !mode || effectiveDisplayIPv6Mode === null || isSelfLoop || privacyMask}
-            title={privacyMask ? '隐私完全遮挡开启期间已锁定修改' : undefined}
-            icon={<Save className="w-3.5 h-3.5" />}
-            onClick={onSaveIPv6}
-          >
-            保存并自动配置 IPv6
-          </Button>
+          <div className="flex items-center gap-2 flex-wrap">
+            {hasIPv6Changes && !ipv6Saving && onResetIPv6 && (
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={busy || privacyMask}
+                icon={<RotateCcw className="w-3.5 h-3.5" />}
+                onClick={onResetIPv6}
+              >
+                撤销更改
+              </Button>
+            )}
+            <Button
+              variant={hasIPv6Changes ? 'primary' : 'secondary'}
+              loading={ipv6Saving}
+              disabled={busy || !mode || effectiveDisplayIPv6Mode === null || isSelfLoop || privacyMask || !hasIPv6Changes}
+              title={privacyMask ? '隐私完全遮挡开启期间已锁定修改' : undefined}
+              icon={
+                hasIPv6Changes ? (
+                  <Save className="w-3.5 h-3.5" />
+                ) : (
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                )
+              }
+              onClick={onSaveIPv6}
+            >
+              {ipv6Saving
+                ? '正在配置 IPv6…'
+                : mode === 'side'
+                  ? '旁路由模式已锁定纯 IPv4'
+                  : effectiveDisplayIPv6Mode === null
+                    ? '读取策略中…'
+                    : hasIPv6Changes
+                      ? `切换并配置为「${getIPv6ShortLabel(effectiveDisplayIPv6Mode)}」`
+                      : `当前已生效：${getIPv6ShortLabel(effectiveDisplayIPv6Mode)}`}
+            </Button>
+          </div>
         </div>
       </div>
     </SectionCard>

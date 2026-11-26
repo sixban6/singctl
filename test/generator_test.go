@@ -1393,15 +1393,30 @@ func TestGenerator_SingleSubscription_Failure(t *testing.T) {
 }
 
 func TestGenerator_ZeroSubscriptions(t *testing.T) {
-	// 1. Explicit proxy mode with empty subs must fail
+	// 1. Legacy explicit proxy work_mode with empty subs auto-resolves to zero-sub audit mode on Linux
 	proxyCfg := &config.Config{
 		Gateway: config.GatewayConfig{WorkMode: config.WorkModeProxy},
 		Subs:    []config.Subscription{},
 	}
 	proxyGen := singbox.NewConfigGenerator(proxyCfg)
 	proxyGen.SetCacheDir(t.TempDir())
-	if _, err := proxyGen.GenerateForPlatform("linux"); err == nil {
-		t.Fatal("expected error when subs is empty in explicit proxy mode, got nil")
+	legacyOut, err := proxyGen.GenerateForPlatform("linux")
+	if err != nil {
+		t.Fatalf("expected legacy work_mode=proxy with empty subs to auto-resolve to audit on linux, got err: %v", err)
+	}
+	if !strings.Contains(legacyOut, `"hijack-dns"`) {
+		t.Fatal("expected hijack-dns in auto-resolved zero-sub config")
+	}
+
+	// 1b. Delegated main router with empty subs must fail
+	delegatedCfg := &config.Config{
+		Gateway: config.GatewayConfig{Mode: "main", SideRouterIP: "192.0.2.88"},
+		Subs:    []config.Subscription{},
+	}
+	delegatedGen := singbox.NewConfigGenerator(delegatedCfg)
+	delegatedGen.SetCacheDir(t.TempDir())
+	if _, err := delegatedGen.GenerateForPlatform("linux"); err == nil {
+		t.Fatal("expected error when subs is empty in delegated mode, got nil")
 	}
 
 	// 2. Default zero-sub auto mode resolves to zero-sub audit mode on Linux and succeeds with L1~L3 bypass guard (L4 default off)

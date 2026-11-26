@@ -179,6 +179,23 @@ func TestGatewayWorkMode_NormalizeEffectiveSaveAndMigrate(t *testing.T) {
 		t.Fatalf("with subs auto should resolve to proxy, got %q", withSubAuto.EffectiveWorkMode())
 	}
 
+	// 历史显式指定的 audit/basic 在用户添加订阅后应自动生效 proxy，不再锁死无节点审计模式
+	legacyAuditWithSub := &config.Config{
+		Subs:    []config.Subscription{{Name: "s1", URL: "https://example.com/s1"}},
+		Gateway: config.GatewayConfig{WorkMode: config.WorkModeAudit},
+	}
+	if legacyAuditWithSub.EffectiveWorkMode() != config.WorkModeProxy || legacyAuditWithSub.IsDirectAuditMode() || !legacyAuditWithSub.NeedsSingBox() {
+		t.Fatalf("legacy work_mode=audit with real subs must auto-resolve to proxy, got %q", legacyAuditWithSub.EffectiveWorkMode())
+	}
+
+	// 历史显式指定的 proxy 在清空全部订阅后应自动回退 audit（免订阅直连审计）
+	legacyProxyNoSub := &config.Config{
+		Gateway: config.GatewayConfig{WorkMode: config.WorkModeProxy},
+	}
+	if legacyProxyNoSub.EffectiveWorkMode() != config.WorkModeAudit || !legacyProxyNoSub.IsDirectAuditMode() || !legacyProxyNoSub.NeedsSingBox() {
+		t.Fatalf("legacy work_mode=proxy without subs must auto-resolve to audit, got %q", legacyProxyNoSub.EffectiveWorkMode())
+	}
+
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "singctl.yaml")
 	if err := config.Save(cfgPath, noSubAudit); err != nil {
@@ -204,6 +221,18 @@ func TestGatewayDelegatedAndSideRouterConfig(t *testing.T) {
 	}
 	if mainDelegated.EffectiveWorkMode() != config.WorkModeDelegated {
 		t.Fatalf("expected EffectiveWorkMode=delegated, got %q", mainDelegated.EffectiveWorkMode())
+	}
+
+	// 主路由仅绑定 side_router_ip（未显式设置 work_mode，即便带有订阅）也应自动推导为 delegated
+	mainSideBoundAuto := &config.Config{
+		Subs: []config.Subscription{{Name: "s1", URL: "https://example.com/s1"}},
+		Gateway: config.GatewayConfig{
+			Mode:         "main",
+			SideRouterIP: "192.168.55.88",
+		},
+	}
+	if mainSideBoundAuto.EffectiveWorkMode() != config.WorkModeDelegated || !mainSideBoundAuto.IsDelegatedMode() || mainSideBoundAuto.NeedsSingBox() {
+		t.Fatalf("main router with side_router_ip and empty work_mode must auto-resolve to delegated with NeedsSingBox=false, got %q", mainSideBoundAuto.EffectiveWorkMode())
 	}
 	if !mainDelegated.IsDelegatedMode() {
 		t.Fatal("expected IsDelegatedMode=true on main router")

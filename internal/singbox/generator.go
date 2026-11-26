@@ -228,7 +228,7 @@ func (g *ConfigGenerator) GenerateForPlatform(platform string) (string, error) {
 		if resolved == PlatformIOS {
 			return "", errors.New("iOS 客户端配置需要至少配置一条订阅链接")
 		}
-		return "", errors.New("配置中未找到任何订阅源 (subs 列表为空)；若无需代理仅需审计与防劫持 DNS，请切换至「审计模式」或「基础模式」")
+		return "", errors.New("配置中未找到任何订阅源 (subs 列表为空)；当前主路由已绑定旁路由托管，本机无需生成 sing-box 配置")
 	}
 
 	var raw string

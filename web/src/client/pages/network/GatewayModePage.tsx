@@ -1,5 +1,12 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { AlertTriangle, CheckCircle2, GitFork, RefreshCw, Save } from 'lucide-react';
+import {
+  AlertTriangle,
+  CheckCircle2,
+  GitFork,
+  RefreshCw,
+  RotateCcw,
+  Save,
+} from 'lucide-react';
 import { Badge, Button, PageHeader, SectionCard, useToast } from '../../../ui';
 import { useCachedQuery } from '../../../hooks';
 import { clientApi } from '../../api';
@@ -9,13 +16,11 @@ import { maskFullIP } from '../../../lib/privacyMask';
 import {
   ClientGatewayConfigResponse,
   ClientStatusResponse,
-  EffectiveGatewayWorkMode,
   GatewayIPv6Mode,
   GatewayRoleMode,
 } from '../../types';
 import { GatewayIPv6Section } from './GatewayIPv6Section';
 import { SideRouterDelegationCard } from './SideRouterDelegationCard';
-import { getWorkModeLabel, WorkModeCard } from './WorkModeCard';
 
 export interface GatewayModePageProps {
   status?: ClientStatusResponse | null;
@@ -42,22 +47,32 @@ export const GatewayModePage: React.FC<GatewayModePageProps> = ({
   } = useCachedQuery<ClientGatewayConfigResponse>(GATEWAY_CACHE_KEY, () => clientApi.getGateway());
 
   const [saving, setSaving] = useState(false);
-  const [workModeSaving, setWorkModeSaving] = useState(false);
+  const [sideSaving, setSideSaving] = useState(false);
   const [ipv6Saving, setIpv6Saving] = useState(false);
 
   const gwSummary = status?.gateway;
 
-  const [mode, setMode] = useState<GatewayRoleMode | null>(() => {
-    if (data?.mode) return data.mode === 'side' ? 'side' : 'main';
-    if (gwSummary?.mode) return gwSummary.mode === 'side' ? 'side' : 'main';
-    return null;
-  });
+  const savedMode: GatewayRoleMode | null = data?.mode
+    ? data.mode === 'side'
+      ? 'side'
+      : 'main'
+    : gwSummary?.mode
+      ? gwSummary.mode === 'side'
+        ? 'side'
+        : 'main'
+      : null;
+  const savedMainRouterIP = (data?.mainRouterIP ?? gwSummary?.mainRouterIP ?? '').trim();
+  const savedSideRouterIP = (data?.sideRouterIP ?? gwSummary?.sideRouterIP ?? '').trim();
+  const savedIPv6Mode: GatewayIPv6Mode | null =
+    (data?.ipv6Mode as GatewayIPv6Mode | undefined) ??
+    (gwSummary?.ipv6Mode as GatewayIPv6Mode | undefined) ??
+    null;
+
+  const [mode, setMode] = useState<GatewayRoleMode | null>(() => savedMode);
   const [mainRouterIP, setMainRouterIP] = useState<string>(
-    () => data?.mainRouterIP || data?.topology?.suggestedMainRouterIP || gwSummary?.mainRouterIP || '',
+    () => savedMainRouterIP || data?.topology?.suggestedMainRouterIP || '',
   );
-  const [ipv6Mode, setIpv6Mode] = useState<GatewayIPv6Mode | null>(
-    () => (data?.ipv6Mode as GatewayIPv6Mode | undefined) || (gwSummary?.ipv6Mode as GatewayIPv6Mode | undefined) || null,
-  );
+  const [ipv6Mode, setIpv6Mode] = useState<GatewayIPv6Mode | null>(() => savedIPv6Mode);
   const [modeDirty, setModeDirty] = useState(false);
   const [mainRouterDirty, setMainRouterDirty] = useState(false);
   const [ipv6Dirty, setIpv6Dirty] = useState(false);
@@ -100,28 +115,45 @@ export const GatewayModePage: React.FC<GatewayModePageProps> = ({
   const v6Status = data?.ipv6Status;
   const trimmedIP = mainRouterIP.trim();
   const isSelfLoop = Boolean(mode === 'side' && topo?.lanIP && trimmedIP === topo.lanIP);
-  const activeGatewayMode = data?.mode ?? gwSummary?.mode ?? mode;
-  const configuredWorkMode = data?.workMode ?? gwSummary?.workMode;
-  const hasSubs = data?.hasSubs ?? gwSummary?.hasSubs ?? Boolean((status?.config?.subs?.length || 0) > 0);
-  const effectiveWorkMode: EffectiveGatewayWorkMode =
-    data?.effectiveWorkMode ?? gwSummary?.effectiveWorkMode ?? (hasSubs ? 'proxy' : 'audit');
   const effectiveDisplayIPv6Mode: GatewayIPv6Mode | null =
-    mode === 'side' ? 'off' : ipv6Mode ?? (data?.ipv6Mode as GatewayIPv6Mode | undefined) ?? gwSummary?.ipv6Mode ?? null;
+    mode === 'side' ? 'off' : ipv6Mode ?? savedIPv6Mode ?? null;
+
+  const roleChanged = Boolean(mode && savedMode && mode !== savedMode);
+  const mainGwChanged = Boolean(mode === 'side' && savedMode === 'side' && trimmedIP !== savedMainRouterIP);
+  const hasRoleChanges = roleChanged || mainGwChanged || Boolean(topo?.selfLooped);
 
   const handleSelectMode = (nextMode: GatewayRoleMode) => {
     setMode(nextMode);
-    setModeDirty(true);
+    setModeDirty(savedMode ? nextMode !== savedMode : true);
     if (nextMode === 'side') {
       setIpv6Mode('off');
-      setIpv6Dirty(true);
+      setIpv6Dirty(savedIPv6Mode !== null && savedIPv6Mode !== 'off');
       if (!trimmedIP && topo?.suggestedMainRouterIP) {
         setMainRouterIP(topo.suggestedMainRouterIP);
       }
+    } else if (!ipv6Dirty) {
+      setIpv6Mode(savedIPv6Mode || 'off');
     }
+  };
+
+  const handleResetRole = () => {
+    if (!savedMode) return;
+    setMode(savedMode);
+    setMainRouterIP(savedMainRouterIP || topo?.suggestedMainRouterIP || '');
+    setIpv6Mode(savedIPv6Mode || 'off');
+    setModeDirty(false);
+    setMainRouterDirty(false);
+    setIpv6Dirty(false);
+  };
+
+  const handleResetIPv6 = () => {
+    setIpv6Mode(savedIPv6Mode || 'off');
+    setIpv6Dirty(false);
   };
 
   const handleSave = async (forIPv6 = false) => {
     if (!mode || privacyMask) return;
+    if (!forIPv6 && !hasRoleChanges) return;
     if (mode === 'side' && !trimmedIP) {
       error('旁路由模式请填写上级主路由(网关) IP');
       return;
@@ -149,7 +181,7 @@ export const GatewayModePage: React.FC<GatewayModePageProps> = ({
       setModeDirty(false);
       setMainRouterDirty(false);
       setIpv6Dirty(false);
-      success(res.message || '网关模式已保存');
+      success(res.message || '网关模式已保存并生效');
       onSaved?.();
     } catch (e: unknown) {
       error(e instanceof Error ? e.message : '保存网关模式失败');
@@ -159,35 +191,12 @@ export const GatewayModePage: React.FC<GatewayModePageProps> = ({
     }
   };
 
-  const handleSaveWorkMode = async (nextWorkMode: EffectiveGatewayWorkMode) => {
-    if (privacyMask) return;
-    const roleMode: GatewayRoleMode = mode || (activeGatewayMode === 'side' ? 'side' : 'main');
-    const effectiveV6: GatewayIPv6Mode = roleMode === 'side' ? 'off' : ipv6Mode || 'off';
-    setWorkModeSaving(true);
-    try {
-      const res = await clientApi.saveGateway({
-        mode: roleMode,
-        workMode: nextWorkMode,
-        mainRouterIP: roleMode === 'side' ? trimmedIP : '',
-        ipv6Mode: effectiveV6,
-      });
-      setGatewayData(res);
-      success(res.message || `已切换为${getWorkModeLabel(nextWorkMode)}`);
-      onSaved?.();
-    } catch (e: unknown) {
-      error(e instanceof Error ? e.message : '切换运行模式失败');
-    } finally {
-      setWorkModeSaving(false);
-    }
-  };
-
-  const handleSaveSideRouter = async (nextIP: string, nextFailover: boolean, alsoSwitchDelegated = false) => {
-    if (privacyMask) return;
-    setWorkModeSaving(true);
+  const handleSaveSideRouter = async (nextIP: string, nextFailover: boolean): Promise<boolean> => {
+    if (privacyMask) return false;
+    setSideSaving(true);
     try {
       const res = await clientApi.saveGateway({
         mode: 'main',
-        ...(alsoSwitchDelegated ? { workMode: 'delegated' as const } : {}),
         sideRouterIP: nextIP,
         sideRouterFailover: nextFailover,
         ipv6Mode: ipv6Mode || 'off',
@@ -195,29 +204,56 @@ export const GatewayModePage: React.FC<GatewayModePageProps> = ({
       setGatewayData(res);
       success(res.message || '已保存旁路由协同设置');
       onSaved?.();
+      return true;
     } catch (e: unknown) {
       error(e instanceof Error ? e.message : '保存旁路由协同设置失败');
+      return false;
     } finally {
-      setWorkModeSaving(false);
+      setSideSaving(false);
     }
   };
 
   const sideLanDisplay = privacyMask ? '••••••••' : topo?.lanIP || '<旁路由IP>';
   const mainGwDisplay = privacyMask ? '••••••••' : trimmedIP || topo?.suggestedMainRouterIP || '<主路由IP>';
 
+  const headerBadgeText = !savedMode
+    ? '读取中…'
+    : savedMode === 'side'
+      ? '旁路由模式 · 已生效'
+      : savedSideRouterIP
+        ? '主路由 · 旁路由托管中'
+        : '主路由模式 · 已生效';
+
+  const roleCardBadgeText = !savedMode
+    ? '读取中…'
+    : savedMode === 'side'
+      ? `当前生效：旁路由模式${savedMainRouterIP ? `（上级网关 ${maskFullIP(savedMainRouterIP, privacyMask)}）` : ''}`
+      : savedSideRouterIP
+        ? `当前生效：主路由（已托管至 ${maskFullIP(savedSideRouterIP, privacyMask)}）`
+        : '当前生效：主路由模式';
+
+  const roleSaveLabel = (() => {
+    if (saving) return '正在应用网关角色…';
+    if (topo?.selfLooped && !roleChanged && !mainGwChanged) return '一键修复默认网关路由';
+    if (roleChanged) {
+      return `切换并应用为「${mode === 'side' ? '旁路由模式' : '主路由模式'}」`;
+    }
+    if (mainGwChanged) return '保存并更新上级网关';
+    if (!savedMode) return '读取中…';
+    return savedMode === 'side' ? '当前已生效：旁路由模式' : '当前已生效：主路由模式';
+  })();
+
   return (
     <div className="space-y-5">
       <PageHeader
         title="网关模式"
-        description="按需选择审计模式（免订阅）或代理模式（需订阅），同时支持主/旁路由与 IPv6 双栈配置"
+        description="选择路由器角色与 IPv6 双栈策略（主路由绑定旁路由自动直通托管；其余按是否配置订阅自动启用透明代理或免订阅守护）"
         badge={
           <Badge
-            tone={!activeGatewayMode ? 'neutral' : activeGatewayMode === 'side' ? 'accent' : 'ok'}
-            dot={Boolean(activeGatewayMode)}
+            tone={!savedMode ? 'neutral' : savedMode === 'side' ? 'accent' : 'ok'}
+            dot={Boolean(savedMode)}
           >
-            {!activeGatewayMode
-              ? '读取中…'
-              : `${activeGatewayMode === 'side' ? '旁路由' : '主路由'} · ${getWorkModeLabel(effectiveWorkMode)}`}
+            {headerBadgeText}
           </Badge>
         }
         actions={
@@ -232,45 +268,25 @@ export const GatewayModePage: React.FC<GatewayModePageProps> = ({
         }
       />
 
-      <WorkModeCard
-        roleMode={mode || (activeGatewayMode === 'side' ? 'side' : 'main')}
-        configuredWorkMode={configuredWorkMode}
-        effectiveWorkMode={effectiveWorkMode}
-        hasSubs={hasSubs}
-        saving={workModeSaving}
-        busy={busy}
-        privacyMask={privacyMask}
-        onSaveWorkMode={(next) => void handleSaveWorkMode(next)}
-        onGoSubs={onNavigate ? () => onNavigate('sb', 'subs') : undefined}
-      />
-
-      {(mode === 'main' || (!mode && activeGatewayMode !== 'side')) && (
-        <SideRouterDelegationCard
-          sideRouterIP={data?.sideRouterIP ?? gwSummary?.sideRouterIP ?? ''}
-          sideRouterFailover={data?.sideRouterFailover ?? gwSummary?.sideRouterFailover ?? true}
-          sideRouterStatus={data?.sideRouterStatus}
-          effectiveWorkMode={effectiveWorkMode}
-          saving={workModeSaving}
-          busy={busy}
-          privacyMask={privacyMask}
-          onSaveSideRouter={(nextIP, nextFailover, switchDelegated) =>
-            void handleSaveSideRouter(nextIP, nextFailover, switchDelegated)
-          }
-          onGoVlan={onNavigate ? () => onNavigate('net', 'vlan') : undefined}
-        />
-      )}
-
       <SectionCard
         title="选择路由器角色"
         icon={<GitFork className="w-4 h-4" />}
         subtitle="主路由模式不加载任何旁路由附加规则；旁路由模式自动挂载独立可逆的内核转发与单臂防丢包规则"
+        actions={
+          <Badge
+            tone={!savedMode ? 'neutral' : savedMode === 'side' ? 'accent' : 'ok'}
+            dot={Boolean(savedMode)}
+          >
+            {roleCardBadgeText}
+          </Badge>
+        }
       >
         <div className="space-y-4">
           {topo?.selfLooped && (
             <div className="rounded-xl border border-amber-500/35 bg-amber-500/10 px-3.5 py-2.5 text-xs text-amber-200 flex items-start gap-2">
               <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
               <span>
-                检测到当前系统默认网关已误指回本机 ({maskFullIP(topo.lanIP, privacyMask)})！请确认下方上级主路由 IP 并保存，系统将自动修复默认路由避免死循环。
+                检测到当前系统默认网关已误指回本机 ({maskFullIP(topo.lanIP, privacyMask)})！请确认下方上级主路由 IP 并点击修复，系统将自动修复默认路由避免死循环。
               </span>
             </div>
           )}
@@ -281,7 +297,7 @@ export const GatewayModePage: React.FC<GatewayModePageProps> = ({
                 key: 'main' as GatewayRoleMode,
                 title: '主路由模式 (Main Router)',
                 tag: '默认推荐',
-                desc: '设备本身直接拨号或连接光猫，作为全屋主网关运行（保持原生 TProxy 规则零变动）。',
+                desc: '设备本身直接拨号或连接光猫，作为全屋主网关运行（绑定旁路由 IP 即自动进入托管直通，否则按订阅自动透明分流或审计守护）。',
               },
               {
                 key: 'side' as GatewayRoleMode,
@@ -290,7 +306,8 @@ export const GatewayModePage: React.FC<GatewayModePageProps> = ({
                 desc: '单网口接入主路由 LAN 口，自动开启转发、MSS 钳制与单臂防非对称丢包，同时保留终端真实 IP 审计。',
               },
             ].map((opt) => {
-              const active = mode !== null && mode === opt.key;
+              const isSelected = mode !== null && mode === opt.key;
+              const isSaved = savedMode !== null && savedMode === opt.key;
               return (
                 <button
                   key={opt.key}
@@ -298,7 +315,7 @@ export const GatewayModePage: React.FC<GatewayModePageProps> = ({
                   disabled={mode === null}
                   onClick={() => handleSelectMode(opt.key)}
                   style={
-                    active
+                    isSelected
                       ? {
                           backgroundColor: 'var(--accent-soft)',
                           borderColor: 'var(--accent)',
@@ -306,12 +323,29 @@ export const GatewayModePage: React.FC<GatewayModePageProps> = ({
                       : undefined
                   }
                   className={`p-4 rounded-xl border text-left transition-all cursor-pointer ${
-                    active ? '' : 'bg-surface2 border-subtle hover:border-strong'
+                    isSelected ? '' : 'bg-surface2 border-subtle hover:border-strong'
                   }`}
                 >
                   <div className="flex items-center justify-between gap-2">
-                    <span className="text-xs sm:text-sm font-semibold text-primary">{opt.title}</span>
-                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-surface1 text-secondary border border-subtle">
+                    <div className="flex items-center gap-2 min-w-0 flex-wrap">
+                      <span className="text-xs sm:text-sm font-semibold text-primary">{opt.title}</span>
+                      {isSaved && isSelected && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/35">
+                          ✓ 当前生效
+                        </span>
+                      )}
+                      {isSelected && !isSaved && savedMode !== null && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/35">
+                          待保存
+                        </span>
+                      )}
+                      {!isSelected && isSaved && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400/80 border border-emerald-500/25">
+                          当前生效
+                        </span>
+                      )}
+                    </div>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-surface1 text-secondary border border-subtle shrink-0">
                       {opt.tag}
                     </span>
                   </div>
@@ -368,25 +402,66 @@ export const GatewayModePage: React.FC<GatewayModePageProps> = ({
           )}
 
           <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-subtle">
-            <div className="text-xs text-secondary font-mono">
-              本机地址: <span className="text-primary">{maskFullIP(topo?.lanIP, privacyMask)}</span> · 网卡:{' '}
-              <span className="text-primary">{topo?.lanIface || '-'}</span> · 系统当前网关:{' '}
-              <span className="text-primary">{maskFullIP(topo?.currentGatewayIP, privacyMask)}</span>
+            <div className="space-y-1">
+              <div className="text-xs text-secondary font-mono">
+                本机地址: <span className="text-primary">{maskFullIP(topo?.lanIP, privacyMask)}</span> · 网卡:{' '}
+                <span className="text-primary">{topo?.lanIface || '-'}</span> · 系统当前网关:{' '}
+                <span className="text-primary">{maskFullIP(topo?.currentGatewayIP, privacyMask)}</span>
+              </div>
+              {(roleChanged || mainGwChanged) && (
+                <div className="text-[11px] text-amber-300">
+                  {roleChanged
+                    ? '有未保存的角色变更，点击右侧按钮生效'
+                    : '上级网关地址已修改，待保存生效'}
+                </div>
+              )}
             </div>
 
-            <Button
-              variant="primary"
-              loading={saving}
-              disabled={busy || !mode || isSelfLoop || privacyMask}
-              title={privacyMask ? '隐私完全遮挡开启期间已锁定修改，避免误改网络配置' : undefined}
-              icon={<Save className="w-3.5 h-3.5" />}
-              onClick={() => void handleSave()}
-            >
-              保存并应用模式
-            </Button>
+            <div className="flex items-center gap-2 flex-wrap">
+              {(roleChanged || mainGwChanged) && !saving && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={busy || privacyMask}
+                  icon={<RotateCcw className="w-3.5 h-3.5" />}
+                  onClick={handleResetRole}
+                >
+                  撤销更改
+                </Button>
+              )}
+              <Button
+                variant={hasRoleChanges ? 'primary' : 'secondary'}
+                loading={saving}
+                disabled={busy || !mode || isSelfLoop || privacyMask || !hasRoleChanges}
+                title={privacyMask ? '隐私完全遮挡开启期间已锁定修改，避免误改网络配置' : undefined}
+                icon={
+                  hasRoleChanges ? (
+                    <Save className="w-3.5 h-3.5" />
+                  ) : (
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                  )
+                }
+                onClick={() => void handleSave()}
+              >
+                {roleSaveLabel}
+              </Button>
+            </div>
           </div>
         </div>
       </SectionCard>
+
+      {(mode === 'main' || (!mode && savedMode !== 'side')) && (
+        <SideRouterDelegationCard
+          sideRouterIP={savedSideRouterIP}
+          sideRouterFailover={data?.sideRouterFailover ?? gwSummary?.sideRouterFailover ?? true}
+          sideRouterStatus={data?.sideRouterStatus}
+          saving={sideSaving}
+          busy={busy}
+          privacyMask={privacyMask}
+          onSaveSideRouter={handleSaveSideRouter}
+          onGoVlan={onNavigate ? () => onNavigate('net', 'vlan') : undefined}
+        />
+      )}
 
       {mode === 'side' && (
         <SectionCard
@@ -417,14 +492,16 @@ export const GatewayModePage: React.FC<GatewayModePageProps> = ({
         mode={mode}
         v6Status={v6Status}
         effectiveDisplayIPv6Mode={effectiveDisplayIPv6Mode}
+        savedIPv6Mode={savedIPv6Mode}
         ipv6Saving={ipv6Saving}
         busy={busy}
         isSelfLoop={isSelfLoop}
         privacyMask={privacyMask}
         onSelectIPv6Mode={(next) => {
           setIpv6Mode(next);
-          setIpv6Dirty(true);
+          setIpv6Dirty(savedIPv6Mode !== null ? next !== savedIPv6Mode : true);
         }}
+        onResetIPv6={handleResetIPv6}
         onSaveIPv6={() => void handleSave(true)}
       />
 

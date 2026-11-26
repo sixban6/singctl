@@ -277,3 +277,119 @@ func TestGatewayPutDelegatedModeAndSideRouter(t *testing.T) {
 		t.Fatalf("expected delegated status in GET /api/status: %s", recStatus.Body.String())
 	}
 }
+
+func TestGatewayAutoDerivation_BindUnbindSideRouterAndSubsTransition(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "singctl.yaml")
+	// 故意预置历史 work_mode: audit，验证自动推导不再被旧配置锁死
+	if err := config.Save(cfgPath, &config.Config{
+		Gateway: config.GatewayConfig{Mode: "main", WorkMode: config.WorkModeAudit},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var appliedModes []string
+	sbRunning := true
+	srv := webui.New(webui.Options{
+		ConfigPath: cfgPath,
+		GatewayProberForTest: func() gateway.TopologyInfo {
+			return gateway.TopologyInfo{LANIP: "192.168.55.1", LANIface: "br-lan"}
+		},
+		SingBoxRunningForTest: func() bool { return sbRunning },
+		WorkModeApplyForTest: func(_ context.Context, _ *config.Config, targetMode string) (bool, string, error) {
+			appliedModes = append(appliedModes, targetMode)
+			sbRunning = targetMode != config.WorkModeDelegated
+			return true, "mock auto " + targetMode, nil
+		},
+	})
+
+	doJSON := func(method, path string, body any) *httptest.ResponseRecorder {
+		var buf bytes.Buffer
+		if body != nil {
+			_ = json.NewEncoder(&buf).Encode(body)
+		}
+		req := httptest.NewRequest(method, path, &buf)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		srv.Mux.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// 1. 主路由仅绑定 sideRouterIP（不传 workMode）-> 自动切入 delegated 并停用本机 sing-box
+	recBind := doJSON(http.MethodPut, "/api/gateway", map[string]any{
+		"mode":               "main",
+		"sideRouterIP":       "192.168.55.88",
+		"sideRouterFailover": true,
+	})
+	if recBind.Code != http.StatusOK || !strings.Contains(recBind.Body.String(), `"effectiveWorkMode":"delegated"`) {
+		t.Fatalf("expected auto delegated on binding sideRouterIP, got code=%d body=%s", recBind.Code, recBind.Body.String())
+	}
+	if len(appliedModes) != 1 || appliedModes[0] != config.WorkModeDelegated || sbRunning {
+		t.Fatalf("expected WorkModeApplyForTest(delegated) and sbRunning=false, applied=%v sbRunning=%v", appliedModes, sbRunning)
+	}
+
+	// 2. 主路由解绑 sideRouterIP（不传 workMode）-> 清除残留 work_mode 并自动恢复 audit
+	recUnbind := doJSON(http.MethodPut, "/api/gateway", map[string]any{
+		"mode":         "main",
+		"sideRouterIP": "",
+	})
+	if recUnbind.Code != http.StatusOK || !strings.Contains(recUnbind.Body.String(), `"effectiveWorkMode":"audit"`) {
+		t.Fatalf("expected auto audit on unbinding sideRouterIP, got code=%d body=%s", recUnbind.Code, recUnbind.Body.String())
+	}
+	if len(appliedModes) != 2 || appliedModes[1] != config.WorkModeAudit || !sbRunning {
+		t.Fatalf("expected WorkModeApplyForTest(audit) and sbRunning=true, applied=%v sbRunning=%v", appliedModes, sbRunning)
+	}
+	loadedAfterUnbind, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loadedAfterUnbind.Gateway.SideRouterIP != "" || loadedAfterUnbind.Gateway.WorkMode != "" {
+		t.Fatalf("expected sideRouterIP and work_mode cleared after unbind, got %+v", loadedAfterUnbind.Gateway)
+	}
+
+	// 3. 重新绑定为旁路由托管后，直接切换角色为 side（不传 workMode）-> 自动清 sideRouterIP 并恢复 audit
+	_ = doJSON(http.MethodPut, "/api/gateway", map[string]any{
+		"mode":         "main",
+		"sideRouterIP": "192.168.55.88",
+	})
+	recSide := doJSON(http.MethodPut, "/api/gateway", map[string]any{
+		"mode":         "side",
+		"mainRouterIP": "192.168.55.254",
+	})
+	if recSide.Code != http.StatusOK || !strings.Contains(recSide.Body.String(), `"effectiveWorkMode":"audit"`) {
+		t.Fatalf("expected switch to side router auto-deriving audit, got code=%d body=%s", recSide.Code, recSide.Body.String())
+	}
+	if last := appliedModes[len(appliedModes)-1]; last != config.WorkModeAudit || !sbRunning {
+		t.Fatalf("expected side router switch to trigger audit kernel, applied=%v sbRunning=%v", appliedModes, sbRunning)
+	}
+
+	// 4. 添加有效订阅后 GET /api/gateway & GET /api/status 自动变为 proxy（不被历史 work_mode 锁死），清空订阅后自动回切 audit
+	recSubAdd := doJSON(http.MethodPut, "/api/sb/subs", map[string]any{
+		"subs": []map[string]any{{"name": "main", "url": "https://example.com/sub"}},
+		"hy2":  map[string]any{"up": 0, "down": 0},
+	})
+	if recSubAdd.Code != http.StatusOK {
+		t.Fatalf("PUT /api/sb/subs add failed: code=%d body=%s", recSubAdd.Code, recSubAdd.Body.String())
+	}
+	if g := doJSON(http.MethodGet, "/api/gateway", nil); !strings.Contains(g.Body.String(), `"effectiveWorkMode":"proxy"`) {
+		t.Fatalf("expected GET /api/gateway effectiveWorkMode=proxy after adding sub: %s", g.Body.String())
+	}
+	if st := doJSON(http.MethodGet, "/api/status", nil); !strings.Contains(st.Body.String(), `"effectiveWorkMode":"proxy"`) {
+		t.Fatalf("expected GET /api/status effectiveWorkMode=proxy after adding sub: %s", st.Body.String())
+	}
+
+	countBeforeClear := len(appliedModes)
+	recSubClear := doJSON(http.MethodPut, "/api/sb/subs", map[string]any{
+		"subs": []any{},
+		"hy2":  map[string]any{"up": 0, "down": 0},
+	})
+	if recSubClear.Code != http.StatusOK {
+		t.Fatalf("PUT /api/sb/subs clear failed: code=%d body=%s", recSubClear.Code, recSubClear.Body.String())
+	}
+	if g := doJSON(http.MethodGet, "/api/gateway", nil); !strings.Contains(g.Body.String(), `"effectiveWorkMode":"audit"`) {
+		t.Fatalf("expected GET /api/gateway effectiveWorkMode=audit after clearing subs: %s", g.Body.String())
+	}
+	if len(appliedModes) != countBeforeClear+1 || appliedModes[len(appliedModes)-1] != config.WorkModeAudit {
+		t.Fatalf("expected clearing all subs to hot-apply audit mode, appliedModes=%v", appliedModes)
+	}
+}

@@ -138,31 +138,20 @@ func (c *Config) ConfiguredWorkMode() string {
 }
 
 // EffectiveWorkMode 解析当前实际生效的工作模式（audit / proxy / delegated）：
-//   - delegated 仅对主路由 (main) 生效，旁路由若误配则安全回退至 auto 判定；
-//   - auto 下有订阅自动进入 proxy，无订阅自动进入 audit（免订阅纯直连强劫持审计模式）。
+//   - 主路由 (main) 只要绑定了 side_router_ip（或显式为 delegated），即自动进入旁路由托管直通模式；
+//   - 其余情况（未托管主路由 / 旁路由）完全按是否配置有效订阅自动推导：有订阅=proxy，无订阅=audit（不再被历史 work_mode 锁死）。
 func (c *Config) EffectiveWorkMode() string {
 	if c == nil {
 		return WorkModeAudit
 	}
-	switch c.Gateway.ConfiguredWorkMode() {
-	case WorkModeAudit:
-		return WorkModeAudit
-	case WorkModeProxy:
-		return WorkModeProxy
-	case WorkModeDelegated:
-		if !c.Gateway.IsSideRouter() {
-			return WorkModeDelegated
-		}
-		if c.HasRealSubs() {
-			return WorkModeProxy
-		}
-		return WorkModeAudit
-	default:
-		if c.HasRealSubs() {
-			return WorkModeProxy
-		}
-		return WorkModeAudit
+	if !c.Gateway.IsSideRouter() &&
+		(strings.TrimSpace(c.Gateway.SideRouterIP) != "" || c.Gateway.ConfiguredWorkMode() == WorkModeDelegated) {
+		return WorkModeDelegated
 	}
+	if c.HasRealSubs() {
+		return WorkModeProxy
+	}
+	return WorkModeAudit
 }
 
 // IsDelegatedMode 判断当前主路由是否处于「旁路由托管（纯网关直通）」模式。

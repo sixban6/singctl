@@ -197,10 +197,10 @@ export const ClientStatusPill: React.FC<{
     ? '主路由 · 旁路由托管'
     : status.singbox.running
       ? isAudit
-        ? '审计模式'
-        : '代理模式'
+        ? '免订阅守护中'
+        : '透明代理中'
       : isAudit
-        ? '审计已停'
+        ? '守护已停'
         : '内核已停';
   return (
     <div className="hidden md:flex items-center gap-2 text-xs font-mono text-slate-400">
@@ -209,8 +209,8 @@ export const ClientStatusPill: React.FC<{
         onClick={onOpenGatewayMode}
         title={
           isDelegated && status.gateway?.sideRouterIP
-            ? `已托管至旁路由 ${status.gateway.sideRouterIP}（点击管理网关与旁路由设置）`
-            : '点击前往「网关模式」切换运行模式'
+            ? `已托管至旁路由 ${status.gateway.sideRouterIP}（点击打开网关与旁路由设置）`
+            : '点击打开网关与旁路由设置'
         }
         className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800/90 border border-slate-800 hover:border-slate-700 transition-colors cursor-pointer"
       >

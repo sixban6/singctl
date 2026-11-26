@@ -379,7 +379,7 @@ export const SingBoxPage: React.FC<SingBoxPageProps> = ({
       {status?.gateway?.effectiveWorkMode === 'delegated' && (
         <div className="rounded-xl border border-cyan-500/30 bg-cyan-500/8 px-4 py-3 text-xs text-cyan-200 flex flex-wrap items-center justify-between gap-2">
           <span>
-            当前主路由处于「旁路由托管（纯网关直通）」模式，本机 sing-box 已省内存停用，全部透明分流由旁路由处理。
+            当前主路由已绑定旁路由托管，本机 sing-box 自动省内存停用，全部透明分流由旁路由处理。
           </span>
           <div className="flex items-center gap-2">
             {status.gateway.sideRouterIP && (
@@ -397,7 +397,7 @@ export const SingBoxPage: React.FC<SingBoxPageProps> = ({
               onClick={() => onNavigate('net', 'gw')}
               className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 cursor-pointer"
             >
-              切换网关模式
+              管理网关与旁路由
             </button>
           </div>
         </div>
