@@ -56,6 +56,34 @@ export interface ClientGatewayStatusSummary {
   ipv6Mode?: GatewayIPv6Mode;
 }
 
+export interface FlowOffloadStatusInfo {
+  supported: boolean;
+  isOpenWrt: boolean;
+  enabled: boolean;
+  uciSoftware: boolean;
+  uciHardware: boolean;
+  turboaccPresent: boolean;
+  turboaccFastpath?: string;
+  hnatSupported: boolean;
+  hnatActive: boolean;
+  sfeActive: boolean;
+  kernelFlowActive: boolean;
+  preservedFeatures?: string[];
+  activeEngines?: string[];
+  hasBackup: boolean;
+}
+
+export interface FlowOffloadApplyResponse {
+  ok: boolean;
+  enabled: boolean;
+  appliedLive: boolean;
+  rebootRequired: boolean;
+  restoredBackup: boolean;
+  actions?: string[];
+  message: string;
+  flowOffloadStatus: FlowOffloadStatusInfo;
+}
+
 export interface ClientGatewayConfigResponse {
   supported: boolean;
   mode: GatewayRoleMode;
@@ -70,6 +98,7 @@ export interface ClientGatewayConfigResponse {
   ipv6Mode?: GatewayIPv6Mode;
   ipv6Status?: IPv6StatusInfo;
   ipv6Actions?: string[];
+  flowOffloadStatus?: FlowOffloadStatusInfo;
   topology: ClientGatewayTopology;
 }
 

@@ -35,7 +35,7 @@ func (s *Server) doctorRunner() *doctor.Runner {
 }
 
 func (s *Server) buildDoctorQuickFixHandlers(cfg *config.Config, procRoot string) map[string]func(ctx context.Context) (string, error) {
-	return map[string]func(ctx context.Context) (string, error){
+	handlers := map[string]func(ctx context.Context) (string, error){
 		"protect-tailscale-oom": func(context.Context) (string, error) {
 			st, err := safecommit.ProtectTailscaledOOM(procRoot)
 			if err != nil {
@@ -50,6 +50,16 @@ func (s *Server) buildDoctorQuickFixHandlers(cfg *config.Config, procRoot string
 			return s.quickFixSyncSmartDNSIPv6(ctx, cfg)
 		},
 	}
+	if s.opts.FlowOffloadApplyForTest != nil || s.opts.DoctorEnvForTest == nil {
+		handlers["disable-flow-offload"] = func(ctx context.Context) (string, error) {
+			res, err := s.applyGatewayFlowOffload(ctx, cfg, false)
+			if err != nil {
+				return "", err
+			}
+			return res.Message, nil
+		}
+	}
+	return handlers
 }
 
 func (s *Server) quickFixSyncDNSLocal(ctx context.Context, cfg *config.Config) (string, error) {

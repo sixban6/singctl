@@ -136,6 +136,7 @@ func (s *Server) handleGatewayGet(w http.ResponseWriter, r *http.Request) {
 		"lanIface":           strings.TrimSpace(cfg.Gateway.LANIface),
 		"ipv6Mode":           cfg.Gateway.EffectiveIPv6Mode(),
 		"ipv6Status":         ipv6Status,
+		"flowOffloadStatus":  s.probeGatewayFlowOffloadStatus(r.Context()),
 		"topology":           topo,
 	})
 }
@@ -425,6 +426,7 @@ func (s *Server) handleGatewayPut(w http.ResponseWriter, r *http.Request) {
 		"ipv6Mode":           nextGw.EffectiveIPv6Mode(),
 		"ipv6Status":         ipv6Status,
 		"ipv6Actions":        ipv6Actions,
+		"flowOffloadStatus":  s.probeGatewayFlowOffloadStatus(r.Context()),
 		"topology":           topo,
 	})
 }

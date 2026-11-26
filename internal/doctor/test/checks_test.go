@@ -462,6 +462,62 @@ func TestChecker_HWOffloadConflict(t *testing.T) {
 			t.Fatalf("expected pass when sing-box is not running, got %+v", res)
 		}
 	})
+
+	t.Run("turboacc_mtkhnat_enabled_warns_with_fix_and_disabled_hook_passes", func(t *testing.T) {
+		procRoot := t.TempDir()
+		makeProcWithCmdline(t, procRoot, "510", "sing-box", "/usr/bin/sing-box\x00run\x00", "0\n")
+		_ = os.WriteFile(filepath.Join(procRoot, "modules"), []byte("mtkhnat 102400 1 mt_wifi, Live 0x0\nxt_FLOWOFFLOAD 16384 0 - Live 0x0\n"), 0644)
+		_ = os.MkdirAll(filepath.Join(procRoot, "etc/config"), 0755)
+		_ = os.WriteFile(filepath.Join(procRoot, "etc/config/turboacc"), []byte("config turboacc 'config'\n\toption fastpath 'mediatek_hnat'\n\toption fastpath_mh_eth_hnat '1'\n"), 0644)
+		hookPath := filepath.Join(procRoot, "sys/kernel/debug/hnat/hook_toggle")
+		_ = os.MkdirAll(filepath.Dir(hookPath), 0755)
+		_ = os.WriteFile(hookPath, []byte("enabled\n"), 0644)
+
+		env := &doctor.Env{
+			ProcRoot:  procRoot,
+			IsOpenWrt: func() bool { return true },
+			LookPath:  func(file string) (string, error) { return "/sbin/" + file, nil },
+			RunCmd: func(_ context.Context, _ string, _ ...string) ([]byte, error) {
+				return nil, errors.New("not set")
+			},
+		}
+		resWarn := runSingleCheck(t, "hw_offload_conflict", env)
+		if resWarn.Status != doctor.StatusWarn || resWarn.FixAction != "disable-flow-offload" {
+			t.Fatalf("expected warn with fixAction=disable-flow-offload when HNAT hook enabled, got %+v", resWarn)
+		}
+
+		// Disabling TurboACC + HNAT hook must pass even though mtkhnat stays in /proc/modules.
+		_ = os.WriteFile(filepath.Join(procRoot, "etc/config/turboacc"), []byte("config turboacc 'config'\n\toption fastpath 'none'\n\toption fastpath_mh_eth_hnat '0'\n"), 0644)
+		_ = os.WriteFile(hookPath, []byte("disabled\n"), 0644)
+		resPass := runSingleCheck(t, "hw_offload_conflict", env)
+		if resPass.Status != doctor.StatusPass {
+			t.Fatalf("expected pass when HNAT hook_toggle=disabled and mtkhnat pinned by wifi, got %+v", resPass)
+		}
+	})
+
+	t.Run("delegated_main_router_with_active_offload_warns", func(t *testing.T) {
+		procRoot := t.TempDir()
+		_ = os.WriteFile(filepath.Join(procRoot, "modules"), []byte("mtkhnat 102400 1 mt_wifi, Live 0x0\n"), 0644)
+		_ = os.MkdirAll(filepath.Join(procRoot, "etc/config"), 0755)
+		_ = os.WriteFile(filepath.Join(procRoot, "etc/config/turboacc"), []byte("config turboacc 'config'\n\toption fastpath 'mediatek_hnat'\n"), 0644)
+		hookPath := filepath.Join(procRoot, "sys/kernel/debug/hnat/hook_toggle")
+		_ = os.MkdirAll(filepath.Dir(hookPath), 0755)
+		_ = os.WriteFile(hookPath, []byte("enabled\n"), 0644)
+
+		env := &doctor.Env{
+			ProcRoot:  procRoot,
+			Config:    &config.Config{Gateway: config.GatewayConfig{Mode: "main", SideRouterIP: "192.0.2.88"}},
+			IsOpenWrt: func() bool { return true },
+			LookPath:  func(file string) (string, error) { return "/sbin/" + file, nil },
+			RunCmd: func(_ context.Context, _ string, _ ...string) ([]byte, error) {
+				return nil, errors.New("not set")
+			},
+		}
+		res := runSingleCheck(t, "hw_offload_conflict", env)
+		if res.Status != doctor.StatusWarn || res.FixAction != "disable-flow-offload" {
+			t.Fatalf("expected warn on delegated main router with active HNAT, got %+v", res)
+		}
+	})
 }
 
 func TestChecker_SandboxAndConfig(t *testing.T) {

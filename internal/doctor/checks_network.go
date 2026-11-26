@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"singctl/internal/config"
+	"singctl/internal/gateway"
 )
 
 const (
@@ -292,6 +293,26 @@ func (policyRoutingChecker) Run(ctx context.Context, env *Env) CheckResult {
 	return res
 }
 
+func doctorFlowOffloadDeps(env *Env) gateway.FlowOffloadDeps {
+	deps := gateway.FlowOffloadDeps{
+		IsOpenWrt:  env.IsOpenWrt,
+		HasCommand: env.lookPathOK,
+		RunCmd:     env.RunCmd,
+		ReadFile:   env.ReadFile,
+		WriteFile:  env.WriteFile,
+		ServiceMgr: env.ServiceManager,
+	}
+	if env.ProcRoot != "" {
+		deps.ProcModulesPath = filepath.Join(env.ProcRoot, "modules")
+		deps.TurboACCConfigPath = filepath.Join(env.ProcRoot, "etc/config/turboacc")
+		deps.HNATHookTogglePath = filepath.Join(env.ProcRoot, "sys/kernel/debug/hnat/hook_toggle")
+		deps.HNATSettingPath = filepath.Join(env.ProcRoot, "sys/kernel/debug/hnat/hnat_setting")
+		deps.FastClassifierPath = filepath.Join(env.ProcRoot, "sys/fast_classifier/skip_to_bridge_ingress")
+		deps.BackupPath = filepath.Join(env.ProcRoot, "etc/singctl/flow-offload-backup.json")
+	}
+	return deps
+}
+
 type hwOffloadConflictChecker struct{}
 
 func (hwOffloadConflictChecker) ID() string { return "hw_offload_conflict" }
@@ -305,61 +326,68 @@ func (hwOffloadConflictChecker) Run(ctx context.Context, env *Env) CheckResult {
 	}
 
 	sbRunning, _ := inspectSingBoxProcess(ctx, env)
-	var conflicts []string
-	var hasUCIOffload, hasMtkHnat, hasXtFlowOffload bool
+	delegatedMainRouter := env.Config != nil &&
+		env.Config.Gateway.EffectiveMode() == gateway.ModeMain &&
+		strings.TrimSpace(env.Config.Gateway.SideRouterIP) != ""
 
-	if env.IsOpenWrt() && env.lookPathOK("uci") {
-		if out, err := env.RunCmd(ctx, "uci", "-q", "get", "firewall.@defaults[0].flow_offloading"); err == nil && strings.TrimSpace(string(out)) == "1" {
-			hasUCIOffload = true
-			conflicts = append(conflicts, "uci flow_offloading=1 (软件流量卸载)")
-		}
-		if out, err := env.RunCmd(ctx, "uci", "-q", "get", "firewall.@defaults[0].flow_offloading_hw"); err == nil && strings.TrimSpace(string(out)) == "1" {
-			hasUCIOffload = true
-			conflicts = append(conflicts, "uci flow_offloading_hw=1 (硬件流量卸载)")
-		}
+	st := gateway.ProbeFlowOffloadStatus(ctx, doctorFlowOffloadDeps(env))
+	var details []string
+	if st.UCISoftware {
+		details = append(details, "uci flow_offloading=1 (软件流量卸载)")
 	}
-
-	modulesPath := "/proc/modules"
-	if env.ProcRoot != "" {
-		modulesPath = filepath.Join(env.ProcRoot, "modules")
+	if st.UCIHardware {
+		details = append(details, "uci flow_offloading_hw=1 (硬件流量卸载)")
 	}
-	if rawMods, err := env.ReadFile(modulesPath); err == nil {
-		for line := range strings.SplitSeq(string(rawMods), "\n") {
-			fields := strings.Fields(line)
-			if len(fields) == 0 {
-				continue
-			}
-			switch fields[0] {
-			case "mtkhnat":
-				hasMtkHnat = true
-				conflicts = append(conflicts, "内核模块 mtkhnat 已加载")
-			case "xt_FLOWOFFLOAD":
-				hasXtFlowOffload = true
-				conflicts = append(conflicts, "内核模块 xt_FLOWOFFLOAD 已加载")
-			}
+	if st.TurboACCPresent && st.TurboACCFastpath != "" && st.TurboACCFastpath != "none" && st.TurboACCFastpath != "0" {
+		details = append(details, "TurboACC fastpath="+st.TurboACCFastpath)
+	}
+	if st.HNATActive {
+		if st.HNATSupported {
+			details = append(details, "MediaTek mtkhnat 硬件加速已开启 (hook_toggle=enabled)")
+		} else {
+			details = append(details, "内核模块 mtkhnat 已加载")
 		}
 	}
+	if st.SFEActive {
+		details = append(details, "SFE 快捷转发模块已加载")
+	}
+	if st.KernelFlowActive {
+		details = append(details, "内核 flow offload 规则正在转发")
+	}
 
-	if len(conflicts) == 0 {
+	if !st.Enabled || len(details) == 0 {
 		res.Summary = "未检测到软硬件流量卸载冲突，TProxy 流量路径纯净"
 		return res
 	}
 
-	res.Detail = strings.Join(conflicts, " | ")
-	if sbRunning {
+	res.Detail = strings.Join(details, " | ")
+	hasUCIOffload := st.UCISoftware || st.UCIHardware
+	canAutoFix := hasUCIOffload || st.TurboACCPresent || st.HNATSupported
+
+	if sbRunning || delegatedMainRouter {
 		res.Status = StatusWarn
-		res.Summary = "检测到软/硬件流量卸载与运行中的 sing-box TProxy 存在绕行冲突"
+		if sbRunning {
+			res.Summary = "检测到软/硬件流量卸载与运行中的 sing-box TProxy 存在绕行冲突"
+		} else {
+			res.Summary = "检测到主路由开启软/硬件流量卸载，与旁路由托管/跨网段分流存在绕行风险"
+		}
 		var advices []string
 		if hasUCIOffload {
 			advices = append(advices, "请在 OpenWrt 防火墙中关闭软件/硬件流量卸载（uci set firewall.@defaults[0].flow_offloading='0' && uci set firewall.@defaults[0].flow_offloading_hw='0' && uci commit firewall）并重载防火墙")
+		}
+		if st.HNATActive {
+			advices = append(advices, "请在路由固件加速设置或网关模式页面中禁用 MediaTek mtkhnat 硬件加速模块")
+		}
+		if (st.SFEActive || st.KernelFlowActive) && !hasUCIOffload && !st.TurboACCPresent {
+			advices = append(advices, "请检查并关闭启用 xt_FLOWOFFLOAD / SFE 的防火墙或加速插件（如 TurboACC）")
+		}
+		if canAutoFix {
 			res.FixAction = "disable-flow-offload"
-			res.FixLabel = "一键关闭 UCI 流量卸载"
-		}
-		if hasMtkHnat {
-			advices = append(advices, "请在路由固件加速设置中禁用 MediaTek mtkhnat 硬件加速模块")
-		}
-		if hasXtFlowOffload && !hasUCIOffload {
-			advices = append(advices, "请检查并关闭启用 xt_FLOWOFFLOAD 的防火墙或加速插件（如 TurboACC）")
+			if st.TurboACCPresent || st.HNATSupported {
+				res.FixLabel = "一键关闭流量卸载"
+			} else {
+				res.FixLabel = "一键关闭 UCI 流量卸载"
+			}
 		}
 		res.Advice = strings.Join(advices, "；")
 		return res

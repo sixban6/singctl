@@ -6,6 +6,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -188,6 +190,35 @@ func disableFlowOffloadFix(ctx context.Context, env *Env) (string, error) {
 			}
 			return "", fmt.Errorf("uci %s 失败: %w", strings.Join(args, " "), err)
 		}
+	}
+
+	turboPath := "/etc/config/turboacc"
+	hookPath := "/sys/kernel/debug/hnat/hook_toggle"
+	if env.ProcRoot != "" {
+		turboPath = filepath.Join(env.ProcRoot, "etc/config/turboacc")
+		hookPath = filepath.Join(env.ProcRoot, "sys/kernel/debug/hnat/hook_toggle")
+	}
+	if _, err := env.ReadFile(turboPath); err == nil {
+		for _, args := range [][]string{
+			{"set", "turboacc.config.fastpath=none"},
+			{"set", "turboacc.config.fastpath_mh_eth_hnat=0"},
+			{"commit", "turboacc"},
+		} {
+			if out, uErr := env.RunCmd(ctx, "uci", args...); uErr != nil {
+				detail := strings.TrimSpace(string(out))
+				if detail != "" {
+					return "", fmt.Errorf("uci %s 失败: %w (%s)", strings.Join(args, " "), uErr, detail)
+				}
+				return "", fmt.Errorf("uci %s 失败: %w", strings.Join(args, " "), uErr)
+			}
+		}
+	}
+	writeFn := env.WriteFile
+	if writeFn == nil {
+		writeFn = func(p string, d []byte) error { return os.WriteFile(p, d, 0644) }
+	}
+	if _, err := env.ReadFile(hookPath); err == nil {
+		_ = writeFn(hookPath, []byte("0\n"))
 	}
 
 	// 优先使用 fw4 reload 温和重载 inet fw4 表，绝不触碰 inet sing-box 透明代理表以保障零断网。

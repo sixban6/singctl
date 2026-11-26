@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -314,6 +315,42 @@ func TestRunner_FixDisableFlowOffload(t *testing.T) {
 		}
 		if _, err := runner.Fix(t.Context(), env, "disable-flow-offload"); err == nil {
 			t.Fatal("expected error when uci is missing")
+		}
+	})
+
+	t.Run("turboacc_hnat_fix_clears_turboacc_and_hook_toggle", func(t *testing.T) {
+		procRoot := t.TempDir()
+		_ = os.MkdirAll(filepath.Join(procRoot, "etc/config"), 0755)
+		_ = os.WriteFile(filepath.Join(procRoot, "etc/config/turboacc"), []byte("config turboacc 'config'\n\toption fastpath 'mediatek_hnat'\n\toption fastpath_mh_eth_hnat '1'\n\toption tcpcca 'bbr'\n"), 0644)
+		hookPath := filepath.Join(procRoot, "sys/kernel/debug/hnat/hook_toggle")
+		_ = os.MkdirAll(filepath.Dir(hookPath), 0755)
+		_ = os.WriteFile(hookPath, []byte("enabled\n"), 0644)
+
+		var cmds []string
+		mockMgr := servicemgr.NewMock()
+		env := &doctor.Env{
+			ProcRoot: procRoot,
+			LookPath: func(file string) (string, error) {
+				if file == "uci" {
+					return "/sbin/uci", nil
+				}
+				return "", errors.New("not found")
+			},
+			RunCmd: func(_ context.Context, name string, args ...string) ([]byte, error) {
+				cmds = append(cmds, name+" "+strings.Join(args, " "))
+				return []byte("ok\n"), nil
+			},
+			ServiceManager: mockMgr,
+		}
+		if _, err := runner.Fix(t.Context(), env, "disable-flow-offload"); err != nil {
+			t.Fatalf("turboacc disable-flow-offload failed: %v", err)
+		}
+		if !slices.Contains(cmds, "uci set turboacc.config.fastpath=none") || !slices.Contains(cmds, "uci commit turboacc") {
+			t.Fatalf("expected turboacc UCI disable & commit commands, got %v", cmds)
+		}
+		rawHook, _ := os.ReadFile(hookPath)
+		if strings.TrimSpace(string(rawHook)) != "0" {
+			t.Fatalf("expected hook_toggle updated to 0, got %q", string(rawHook))
 		}
 	})
 }

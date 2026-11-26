@@ -70,6 +70,8 @@ type Options struct {
 	AuditLimiter            *AuditRateLimiter                                                                 // 可选：显式注入审计限流器
 	SkipAdGuardProbeForTest bool                                                                              // 仅供离线单元测试跳过公网上游实测
 	GatewayProberForTest    func() gateway.TopologyInfo                                                       // 仅供单元测试注入网络拓扑探测结果
+	FlowOffloadProberForTest func(ctx context.Context) gateway.FlowOffloadStatus                              // 仅供单元测试注入流量卸载状态探测替身
+	FlowOffloadApplyForTest  func(ctx context.Context, enable bool) (gateway.FlowOffloadApplyResult, error)   // 仅供单元测试注入流量卸载热开关替身
 	SingBoxRunningForTest   func() bool                                                                       // 仅供单元测试注入 sing-box 运行状态探测
 	WorkModeApplyForTest    func(ctx context.Context, cfg *config.Config, targetMode string) (bool, string, error) // 仅供单元测试注入工作模式热应用替身
 	DNSLeakRunnerForTest    func(ctx context.Context, opts netdiag.DNSLeakTestOptions) *netdiag.DNSLeakReport // 仅供单元测试注入离线 DNS 泄漏实测结果
@@ -271,6 +273,7 @@ func (s *Server) registerRoutes() {
 	s.Mux.HandleFunc("GET /api/gateway", s.guard(s.handleGatewayGet))
 	s.Mux.HandleFunc("PUT /api/gateway", s.guard(s.handleGatewayPut))
 	s.Mux.HandleFunc("POST /api/gateway", s.guard(s.handleGatewayPut))
+	s.Mux.HandleFunc("PUT /api/gateway/flow-offload", s.guard(s.handleGatewayFlowOffloadPut))
 	s.Mux.HandleFunc("POST /api/dns/leak-test", s.guard(s.handleDNSLeakTestPost))
 	s.Mux.HandleFunc("POST /api/dns/browser-doh", s.guard(s.handleBrowserDoHCheckPost))
 

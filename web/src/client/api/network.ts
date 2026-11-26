@@ -3,6 +3,7 @@ import {
   FirewallApplyPayload,
   FirewallLogEvent,
   FirewallOverviewResponse,
+  FlowOffloadApplyResponse,
   GatewayIPv6Mode,
   GatewayRoleMode,
   GatewayWorkMode,
@@ -35,6 +36,12 @@ export const networkApi = {
         message: string;
       }
     >('/api/gateway', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+
+  saveGatewayFlowOffload: (payload: { enabled: boolean }) =>
+    request<FlowOffloadApplyResponse>('/api/gateway/flow-offload', {
       method: 'PUT',
       body: JSON.stringify(payload),
     }),

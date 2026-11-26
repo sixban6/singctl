@@ -85,6 +85,7 @@ type Env struct {
 	HTTPProbeIPv6     func(ctx context.Context, url string) (statusCode int, latencyMs int64, err error)
 	DialTCP           func(ctx context.Context, addr string) error
 	ReadFile          func(path string) ([]byte, error)
+	WriteFile         func(path string, data []byte) error
 	Statfs            func(path string) (sysinfo.DiskSpace, error)
 	ReadMemInfo       func() (sysinfo.MemInfo, error)
 	IsOpenWrt         func() bool

@@ -20,6 +20,7 @@ import {
   GatewayRoleMode,
 } from '../../types';
 import { GatewayIPv6Section } from './GatewayIPv6Section';
+import { GatewayFlowOffloadSection } from './GatewayFlowOffloadSection';
 import { SideRouterDelegationCard } from './SideRouterDelegationCard';
 
 export interface GatewayModePageProps {
@@ -37,7 +38,7 @@ export const GatewayModePage: React.FC<GatewayModePageProps> = ({
   onNavigate,
   onSaved,
 }) => {
-  const { success, error } = useToast();
+  const { toast, success, error } = useToast();
   const {
     data,
     loading,
@@ -49,6 +50,8 @@ export const GatewayModePage: React.FC<GatewayModePageProps> = ({
   const [saving, setSaving] = useState(false);
   const [sideSaving, setSideSaving] = useState(false);
   const [ipv6Saving, setIpv6Saving] = useState(false);
+  const [offloadSaving, setOffloadSaving] = useState(false);
+  const [offloadRebootNotice, setOffloadRebootNotice] = useState<string | null>(null);
 
   const gwSummary = status?.gateway;
 
@@ -212,6 +215,45 @@ export const GatewayModePage: React.FC<GatewayModePageProps> = ({
       setSideSaving(false);
     }
   };
+
+  const handleApplyFlowOffload = async (enable: boolean): Promise<boolean> => {
+    if (privacyMask) return false;
+    setOffloadSaving(true);
+    try {
+      const res = await clientApi.saveGatewayFlowOffload({ enabled: enable });
+      setGatewayData((prev) =>
+        prev
+          ? {
+              ...prev,
+              flowOffloadStatus: res.flowOffloadStatus,
+            }
+          : prev,
+      );
+      if (res.rebootRequired) {
+        setOffloadRebootNotice(res.message);
+        toast(res.message, 'warn');
+      } else {
+        setOffloadRebootNotice(null);
+        success(res.message);
+      }
+      onSaved?.();
+      return true;
+    } catch (e: unknown) {
+      error(e instanceof Error ? e.message : '切换流量卸载状态失败');
+      return false;
+    } finally {
+      setOffloadSaving(false);
+    }
+  };
+
+  const hasOffloadConflictRisk = Boolean(
+    status?.singbox?.running ||
+      savedMode === 'side' ||
+      savedSideRouterIP ||
+      data?.effectiveWorkMode === 'proxy' ||
+      data?.effectiveWorkMode === 'audit' ||
+      data?.effectiveWorkMode === 'delegated',
+  );
 
   const sideLanDisplay = privacyMask ? '••••••••' : topo?.lanIP || '<旁路由IP>';
   const mainGwDisplay = privacyMask ? '••••••••' : trimmedIP || topo?.suggestedMainRouterIP || '<主路由IP>';
@@ -503,6 +545,16 @@ export const GatewayModePage: React.FC<GatewayModePageProps> = ({
         }}
         onResetIPv6={handleResetIPv6}
         onSaveIPv6={() => void handleSave(true)}
+      />
+
+      <GatewayFlowOffloadSection
+        flowStatus={data?.flowOffloadStatus}
+        hasConflictRisk={hasOffloadConflictRisk}
+        saving={offloadSaving}
+        busy={busy}
+        privacyMask={privacyMask}
+        rebootNotice={offloadRebootNotice}
+        onApply={handleApplyFlowOffload}
       />
 
       <DNSLeakTestCard privacyMask={privacyMask} />
