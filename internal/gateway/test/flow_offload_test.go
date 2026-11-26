@@ -417,3 +417,113 @@ func TestFlowOffload_ConcurrentProbeRaceSafe(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestFlowOffload_SFEFastClassifierHotUnloadAndModprobeRestore(t *testing.T) {
+	dir := t.TempDir()
+	backupPath := filepath.Join(dir, "flow-offload-backup.json")
+	turboPath := filepath.Join(dir, "turboacc")
+	procModPath := filepath.Join(dir, "modules")
+	fastClsPath := filepath.Join(dir, "skip_to_bridge_ingress")
+
+	turboOpts := map[string]string{
+		"fastpath":       "fast_classifier",
+		"fastpath_fc_br": "1",
+		"tcpcca":         "bbr",
+	}
+	syncTurbo := func() {
+		var b strings.Builder
+		b.WriteString("config turboacc 'config'\n")
+		for k, v := range turboOpts {
+			b.WriteString("\toption " + k + " '" + v + "'\n")
+		}
+		if err := os.WriteFile(turboPath, []byte(b.String()), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	syncTurbo()
+
+	if err := os.WriteFile(procModPath, []byte("fast_classifier 65536 0 - Live 0x0\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fastClsPath, []byte("1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var cmds []string
+	deps := gateway.FlowOffloadDeps{
+		BackupPath:         backupPath,
+		TurboACCConfigPath: turboPath,
+		ProcModulesPath:    procModPath,
+		HNATHookTogglePath: filepath.Join(dir, "no-hook"),
+		HNATSettingPath:    filepath.Join(dir, "no-setting"),
+		FastClassifierPath: fastClsPath,
+		IsOpenWrt:          func() bool { return true },
+		HasCommand: func(name string) bool {
+			return name == "uci" || name == "fw4" || name == "rmmod" || name == "modprobe"
+		},
+		ReadFile: os.ReadFile,
+		WriteFile: func(path string, data []byte) error {
+			return os.WriteFile(path, data, 0644)
+		},
+		RunCmd: func(_ context.Context, name string, args ...string) ([]byte, error) {
+			line := strings.TrimSpace(name + " " + strings.Join(args, " "))
+			cmds = append(cmds, line)
+			switch {
+			case name == "uci" && len(args) >= 2 && args[0] == "set":
+				kv := strings.SplitN(args[1], "=", 2)
+				if len(kv) == 2 && strings.HasPrefix(kv[0], "turboacc.config.") {
+					turboOpts[strings.TrimPrefix(kv[0], "turboacc.config.")] = kv[1]
+					syncTurbo()
+				}
+				return []byte("ok\n"), nil
+			case name == "rmmod" && len(args) == 1 && args[0] == "fast_classifier":
+				_ = os.WriteFile(procModPath, []byte(""), 0644)
+				return []byte(""), nil
+			case name == "modprobe" && len(args) == 1 && args[0] == "fast_classifier":
+				_ = os.WriteFile(procModPath, []byte("fast_classifier 65536 0 - Live 0x0\n"), 0644)
+				return []byte(""), nil
+			case name == "uci" && len(args) == 3 && args[0] == "-q" && args[1] == "get":
+				return nil, os.ErrNotExist
+			}
+			return []byte("ok\n"), nil
+		},
+	}
+
+	st := gateway.ProbeFlowOffloadStatus(t.Context(), deps)
+	if !st.Enabled || !st.SFEActive || st.HNATSupported || !slices.Contains(st.ActiveEngines, "SFE 快捷转发") {
+		t.Fatalf("unexpected initial SFE probe: %+v", st)
+	}
+
+	// 1. Disable unloads fast_classifier via rmmod and skips reboot.
+	resOff, err := gateway.ApplyFlowOffload(t.Context(), false, deps)
+	if err != nil {
+		t.Fatalf("SFE disable failed: %v", err)
+	}
+	if !resOff.AppliedLive || resOff.RebootRequired || resOff.Status.Enabled || resOff.Status.SFEActive {
+		t.Fatalf("expected live SFE disable without reboot, got %+v", resOff)
+	}
+	if !slices.Contains(cmds, "rmmod fast_classifier") {
+		t.Fatalf("expected rmmod fast_classifier command, got %v", cmds)
+	}
+	if fcRaw, _ := os.ReadFile(fastClsPath); strings.TrimSpace(string(fcRaw)) != "0" {
+		t.Fatalf("expected skip_to_bridge_ingress=0, got %q", string(fcRaw))
+	}
+	if turboOpts["tcpcca"] != "bbr" {
+		t.Fatalf("expected tcpcca=bbr preserved, got %q", turboOpts["tcpcca"])
+	}
+
+	// 2. Enable restores via modprobe and fastpath_fc_br=1.
+	resOn, err := gateway.ApplyFlowOffload(t.Context(), true, deps)
+	if err != nil {
+		t.Fatalf("SFE restore failed: %v", err)
+	}
+	if !resOn.AppliedLive || resOn.RebootRequired || !resOn.RestoredBackup || !resOn.Status.Enabled || !resOn.Status.SFEActive {
+		t.Fatalf("expected live SFE restore without reboot, got %+v", resOn)
+	}
+	if !slices.Contains(cmds, "modprobe fast_classifier") {
+		t.Fatalf("expected modprobe fast_classifier command, got %v", cmds)
+	}
+	if fcRaw, _ := os.ReadFile(fastClsPath); strings.TrimSpace(string(fcRaw)) != "1" {
+		t.Fatalf("expected skip_to_bridge_ingress=1 restored, got %q", string(fcRaw))
+	}
+}

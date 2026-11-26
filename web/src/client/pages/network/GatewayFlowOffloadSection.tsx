@@ -101,7 +101,7 @@ export const GatewayFlowOffloadSection: React.FC<GatewayFlowOffloadSectionProps>
   const hwEngineBadgeText = (() => {
     if (!flowStatus) return '';
     if (flowStatus.hnatActive) return 'MediaTek HNAT 运行中';
-    if (flowStatus.sfeActive) return 'Qualcomm SFE 运行中';
+    if (flowStatus.sfeActive) return 'SFE 快捷转发运行中';
     if (flowStatus.turboaccFastpath && flowStatus.turboaccFastpath !== 'none' && flowStatus.turboaccFastpath !== '0') {
       return `${flowStatus.turboaccFastpath} 配置开启`;
     }
@@ -110,12 +110,26 @@ export const GatewayFlowOffloadSection: React.FC<GatewayFlowOffloadSectionProps>
 
   const hwEngineActive = Boolean(flowStatus?.hnatActive || flowStatus?.sfeActive);
 
+  const cardSubtitle = (() => {
+    if (flowStatus?.hnatSupported || flowStatus?.hnatActive) {
+      return '统一管理 OpenWrt 防火墙软/硬件卸载、TurboACC 与 MediaTek HNAT；支持在线热关闭与 1:1 热恢复，无需重启路由器';
+    }
+    if (
+      flowStatus?.sfeActive ||
+      flowStatus?.turboaccFastpath === 'fast_classifier' ||
+      flowStatus?.turboaccFastpath === 'shortcut_fe_cm'
+    ) {
+      return '统一管理 OpenWrt 防火墙软/硬件卸载、TurboACC 与 SFE 快捷转发；支持在线热关闭与 1:1 热恢复，无需重启路由器';
+    }
+    return '统一管理 OpenWrt 防火墙软/硬件流量卸载与固件网络加速；支持在线热关闭与 1:1 热恢复，无需重启路由器';
+  })();
+
   return (
     <>
       <SectionCard
         title="软硬件流量卸载控制"
         icon={<Zap className="w-4 h-4" />}
-        subtitle="统一管理 OpenWrt 软/硬件卸载、TurboACC 与 MediaTek HNAT；支持在线热关闭与 1:1 热恢复，无需重启路由器"
+        subtitle={cardSubtitle}
         actions={
           <Badge tone={headerBadgeTone} dot={Boolean(flowStatus)}>
             {headerBadgeLabel}

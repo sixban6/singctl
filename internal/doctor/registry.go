@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"singctl/internal/gateway"
 	"singctl/internal/platform/servicemgr"
 	"singctl/internal/safecommit"
 )
@@ -194,9 +195,13 @@ func disableFlowOffloadFix(ctx context.Context, env *Env) (string, error) {
 
 	turboPath := "/etc/config/turboacc"
 	hookPath := "/sys/kernel/debug/hnat/hook_toggle"
+	modulesPath := "/proc/modules"
+	sfeTogglePath := "/sys/fast_classifier/skip_to_bridge_ingress"
 	if env.ProcRoot != "" {
 		turboPath = filepath.Join(env.ProcRoot, "etc/config/turboacc")
 		hookPath = filepath.Join(env.ProcRoot, "sys/kernel/debug/hnat/hook_toggle")
+		modulesPath = filepath.Join(env.ProcRoot, "modules")
+		sfeTogglePath = filepath.Join(env.ProcRoot, "sys/fast_classifier/skip_to_bridge_ingress")
 	}
 	if _, err := env.ReadFile(turboPath); err == nil {
 		for _, args := range [][]string{
@@ -219,6 +224,18 @@ func disableFlowOffloadFix(ctx context.Context, env *Env) (string, error) {
 	}
 	if _, err := env.ReadFile(hookPath); err == nil {
 		_ = writeFn(hookPath, []byte("0\n"))
+	}
+	if rawMods, err := env.ReadFile(modulesPath); err == nil {
+		if sfeMods := gateway.DetectLoadedSFEModules(rawMods); len(sfeMods) > 0 {
+			if _, fcErr := env.ReadFile(sfeTogglePath); fcErr == nil {
+				_ = writeFn(sfeTogglePath, []byte("0\n"))
+			}
+			if env.lookPathOK("rmmod") {
+				for _, mod := range sfeMods {
+					_, _ = env.RunCmd(ctx, "rmmod", mod)
+				}
+			}
+		}
 	}
 
 	// 优先使用 fw4 reload 温和重载 inet fw4 表，绝不触碰 inet sing-box 透明代理表以保障零断网。

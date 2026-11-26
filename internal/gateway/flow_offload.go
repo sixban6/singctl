@@ -83,6 +83,23 @@ type flowOffloadBackup struct {
 	TurboACCHasSection bool                      `json:"turboaccHasSection,omitempty"`
 	TurboACC           map[string]uciBackupValue `json:"turboacc,omitempty"`
 	HadHNAT            bool                      `json:"hadHnat,omitempty"`
+	SFEModule          string                    `json:"sfeModule,omitempty"`
+}
+
+// DetectLoadedSFEModules 从 /proc/modules 原始内容中提取已加载的 SFE 内核模块列表（去重保序）。
+func DetectLoadedSFEModules(rawMods []byte) []string {
+	var mods []string
+	for line := range strings.SplitSeq(string(rawMods), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		switch fields[0] {
+		case "fast_classifier", "shortcut_fe_cm", "shortcut_fe":
+			mods = appendUniqueStr(mods, fields[0])
+		}
+	}
+	return mods
 }
 
 type resolvedFlowOffloadDeps struct {
@@ -354,7 +371,7 @@ func ProbeFlowOffloadStatus(ctx context.Context, deps FlowOffloadDeps) FlowOfflo
 		st.ActiveEngines = appendUniqueStr(st.ActiveEngines, "MediaTek HNAT 硬件加速")
 	}
 	if st.SFEActive {
-		st.ActiveEngines = appendUniqueStr(st.ActiveEngines, "Qualcomm SFE 快捷转发")
+		st.ActiveEngines = appendUniqueStr(st.ActiveEngines, "SFE 快捷转发")
 	}
 	if turboConfiguredActive && !st.HNATActive && !st.SFEActive {
 		st.ActiveEngines = appendUniqueStr(st.ActiveEngines, fmt.Sprintf("TurboACC (%s)", cmp.Or(st.TurboACCFastpath, "已启用")))
@@ -419,6 +436,15 @@ func ApplyFlowOffload(ctx context.Context, enable bool, deps FlowOffloadDeps) (F
 		if _, err := d.readFile(d.fastClassifierPath); err == nil {
 			_ = d.writeFile(d.fastClassifierPath, []byte("0\n"))
 			actions = append(actions, "已关闭 SFE 快速分类器桥接转发")
+		}
+		if before.SFEActive && d.hasCommand("rmmod") {
+			if rawMods, mErr := d.readFile(d.procModulesPath); mErr == nil {
+				for _, mod := range DetectLoadedSFEModules(rawMods) {
+					if _, rErr := d.runCmd(ctx, "rmmod", mod); rErr == nil {
+						actions = append(actions, fmt.Sprintf("已在线卸载 SFE 内核模块 (%s)", mod))
+					}
+				}
+			}
 		}
 	} else {
 		var turboCfg turboACCConfig
@@ -526,6 +552,11 @@ func ensureFlowOffloadBackup(ctx context.Context, d resolvedFlowOffloadDeps, bef
 		SavedAtUnix: time.Now().Unix(),
 		Firewall:    make(map[string]uciBackupValue),
 		HadHNAT:     before.HNATActive || before.TurboACCFastpath == "mediatek_hnat",
+	}
+	if rawMods, mErr := d.readFile(d.procModulesPath); mErr == nil {
+		if mods := DetectLoadedSFEModules(rawMods); len(mods) > 0 {
+			snap.SFEModule = mods[0]
+		}
 	}
 	if d.hasCommand("uci") && d.isOpenWrt() {
 		for _, k := range []string{"firewall.@defaults[0].flow_offloading", "firewall.@defaults[0].flow_offloading_hw"} {
@@ -698,6 +729,30 @@ func restoreFlowOffloadFromBackup(ctx context.Context, d resolvedFlowOffloadDeps
 			}
 			syncHNATKernelSettings(d, turboCfg)
 			actions = append(actions, "已热重新启用 MediaTek HNAT 内核 Hook")
+		}
+	}
+
+	targetSFEMod := ""
+	origFP := strings.ToLower(strings.TrimSpace(snap.TurboACC["fastpath"].Value))
+	switch {
+	case origFP == "fast_classifier" || origFP == "shortcut_fe_cm" || origFP == "shortcut_fe":
+		targetSFEMod = origFP
+	case snap.SFEModule != "":
+		targetSFEMod = snap.SFEModule
+	case strings.TrimSpace(snap.TurboACC["sfe_flow"].Value) == "1":
+		targetSFEMod = "fast_classifier"
+	}
+	if targetSFEMod != "" {
+		if d.hasCommand("modprobe") {
+			if _, mErr := d.runCmd(ctx, "modprobe", targetSFEMod); mErr == nil {
+				actions = append(actions, fmt.Sprintf("已在线加载恢复 SFE 内核模块 (%s)", targetSFEMod))
+			}
+		}
+		if targetSFEMod == "fast_classifier" {
+			if _, fErr := d.readFile(d.fastClassifierPath); fErr == nil {
+				fcBr := cmp.Or(strings.TrimSpace(snap.TurboACC["fastpath_fc_br"].Value), "0")
+				_ = d.writeFile(d.fastClassifierPath, []byte(fcBr+"\n"))
+			}
 		}
 	}
 

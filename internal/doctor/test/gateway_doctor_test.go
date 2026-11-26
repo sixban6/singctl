@@ -353,6 +353,41 @@ func TestRunner_FixDisableFlowOffload(t *testing.T) {
 			t.Fatalf("expected hook_toggle updated to 0, got %q", string(rawHook))
 		}
 	})
+
+	t.Run("sfe_module_fix_unloads_fast_classifier", func(t *testing.T) {
+		procRoot := t.TempDir()
+		_ = os.WriteFile(filepath.Join(procRoot, "modules"), []byte("fast_classifier 65536 0 - Live 0x0\n"), 0644)
+		_ = os.MkdirAll(filepath.Join(procRoot, "etc/config"), 0755)
+		_ = os.WriteFile(filepath.Join(procRoot, "etc/config/turboacc"), []byte("config turboacc 'config'\n\toption fastpath 'fast_classifier'\n"), 0644)
+		fastClsPath := filepath.Join(procRoot, "sys/fast_classifier/skip_to_bridge_ingress")
+		_ = os.MkdirAll(filepath.Dir(fastClsPath), 0755)
+		_ = os.WriteFile(fastClsPath, []byte("1\n"), 0644)
+
+		var cmds []string
+		env := &doctor.Env{
+			ProcRoot: procRoot,
+			LookPath: func(file string) (string, error) {
+				if file == "uci" || file == "rmmod" || file == "fw4" {
+					return "/sbin/" + file, nil
+				}
+				return "", errors.New("not found")
+			},
+			RunCmd: func(_ context.Context, name string, args ...string) ([]byte, error) {
+				cmds = append(cmds, name+" "+strings.Join(args, " "))
+				return []byte("ok\n"), nil
+			},
+		}
+		if _, err := runner.Fix(t.Context(), env, "disable-flow-offload"); err != nil {
+			t.Fatalf("sfe disable-flow-offload failed: %v", err)
+		}
+		if !slices.Contains(cmds, "rmmod fast_classifier") {
+			t.Fatalf("expected rmmod fast_classifier command, got %v", cmds)
+		}
+		rawFC, _ := os.ReadFile(fastClsPath)
+		if strings.TrimSpace(string(rawFC)) != "0" {
+			t.Fatalf("expected skip_to_bridge_ingress updated to 0, got %q", string(rawFC))
+		}
+	})
 }
 
 func TestFormatText_RendersStatusesDetailsAndFixHints(t *testing.T) {
