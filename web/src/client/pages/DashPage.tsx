@@ -153,11 +153,11 @@ export const DashPage: React.FC<DashPageProps> = ({
   const dnsLinked = Boolean(dns?.singboxLinked);
   const dnsHealthy = dnsInstalled ? Boolean(dns?.dnsHealthy) : dnsFallbackDoH;
   const tsBadgeInfo = getTailscaleBadge(ts);
-  const workModeLabel = isDelegatedMode ? '旁路由托管' : isAuditMode ? '审计模式' : '代理模式';
+  const workModeLabel = isDelegatedMode ? '托管路由' : isAuditMode ? '审计模式' : '代理模式';
   const primaryExitText = isDelegatedMode
     ? status.gateway?.sideRouterIP
-      ? `旁路由托管 → ${status.gateway.sideRouterIP}`
-      : '旁路由托管（待绑定 IP）'
+      ? `托管路由 → ${status.gateway.sideRouterIP}`
+      : '托管路由（待绑定 IP）'
     : isAuditMode
       ? sb.running
         ? '直连审计中（免订阅）'

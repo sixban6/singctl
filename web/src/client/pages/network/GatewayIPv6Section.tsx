@@ -322,7 +322,7 @@ export const GatewayIPv6Section: React.FC<GatewayIPv6SectionProps> = ({
         <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-subtle">
           <span className="text-[11px] text-muted">
             {mode === 'side'
-              ? '当前选择旁路由模式：本机可通过 LAN 口继承上级路由 IPv6；IPv6 透明代理自动保持关闭，避免主路由 RA 绕过造成泄漏。'
+              ? '当前选择旁挂路由：本机可通过 LAN 口继承上级路由 IPv6；IPv6 透明代理自动保持关闭，避免主路由 RA 绕过造成泄漏。'
               : hasIPv6Changes
                 ? '已选择新的 IPv6 策略，点击右侧按钮并按 OpenWrt/sing-box 自动热重载。'
                 : '当前 IPv6 策略已同步至 OpenWrt RA/DHCPv6、dnsmasq 与 sing-box。'}
@@ -356,7 +356,7 @@ export const GatewayIPv6Section: React.FC<GatewayIPv6SectionProps> = ({
               {ipv6Saving
                 ? '正在配置 IPv6…'
                 : mode === 'side'
-                  ? '旁路由模式已锁定纯 IPv4'
+                  ? '旁挂路由已锁定纯 IPv4'
                   : effectiveDisplayIPv6Mode === null
                     ? '读取策略中…'
                     : hasIPv6Changes
