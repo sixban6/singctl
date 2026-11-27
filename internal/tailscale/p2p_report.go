@@ -57,14 +57,76 @@ type P2PReportOptions struct {
 
 // NormalizeAndValidateP2PAssistConfig 校验并归一化 Tailscale P2P 防线配置。
 func NormalizeAndValidateP2PAssistConfig(raw config.TailscaleP2PAssistConfig) (config.TailscaleP2PAssistConfig, error) {
+	roleMode := strings.ToLower(strings.TrimSpace(raw.RoleMode))
+	switch roleMode {
+	case "", "client", "router", "exit", "gateway":
+	default:
+		return config.TailscaleP2PAssistConfig{}, fmt.Errorf("运行角色 %q 无效（仅支持 client / router / exit / gateway）", raw.RoleMode)
+	}
+
 	pf := true
+	da := raw.EffectiveDownstreamAssist()
 	out := config.TailscaleP2PAssistConfig{
-		Enabled:       true,
-		JITWindowSec:  min(max(3, cmp.Or(raw.JITWindowSec, 5)), 10),
-		CooldownSec:   min(max(30, cmp.Or(raw.CooldownSec, 300)), 3600),
-		SandboxUjail:  raw.SandboxUjail,
-		ListenPort:    raw.EffectiveListenPort(),
-		PayloadFilter: &pf,
+		Enabled:          true,
+		RoleMode:         roleMode,
+		JITWindowSec:     min(max(3, cmp.Or(raw.JITWindowSec, 5)), 10),
+		CooldownSec:      min(max(30, cmp.Or(raw.CooldownSec, 300)), 3600),
+		SandboxUjail:     raw.SandboxUjail,
+		ListenPort:       raw.EffectiveListenPort(),
+		PayloadFilter:    &pf,
+		DownstreamAssist: &da,
+	}
+
+	ruleSeen := make(map[string]struct{}, len(raw.LocalRules))
+	for _, r := range raw.LocalRules {
+		rawCIDR := strings.TrimSpace(r.CIDR)
+		if rawCIDR == "" {
+			continue
+		}
+		pfx, err := netip.ParsePrefix(rawCIDR)
+		if err != nil {
+			return out, fmt.Errorf("本地网段规则 %q 格式无效: %w", r.CIDR, err)
+		}
+		pfx = netip.PrefixFrom(pfx.Addr().Unmap(), pfx.Bits()).Masked()
+		cidrStr := pfx.String()
+		if _, dup := ruleSeen[cidrStr]; dup {
+			continue
+		}
+		ruleSeen[cidrStr] = struct{}{}
+
+		normScope, ok := config.NormalizeTailscaleSubnetScope(r.Scope)
+		if !ok {
+			return out, fmt.Errorf("网段 %s 的设备限制模式 %q 无效（仅支持 all / allowlist / denylist）", cidrStr, r.Scope)
+		}
+
+		var devs []string
+		devSeen := make(map[string]struct{}, len(r.Devices))
+		for _, rawDev := range r.Devices {
+			dStr := strings.TrimSpace(rawDev)
+			if dStr == "" {
+				continue
+			}
+			addr, err := netip.ParseAddr(dStr)
+			if err != nil {
+				return out, fmt.Errorf("网段 %s 内的设备 IP %q 格式无效: %w", cidrStr, rawDev, err)
+			}
+			addr = addr.Unmap()
+			if !pfx.Contains(addr) {
+				return out, fmt.Errorf("设备 IP %s 不属于网段 %s", addr.String(), cidrStr)
+			}
+			normIP := addr.String()
+			if _, dup := devSeen[normIP]; dup {
+				continue
+			}
+			devSeen[normIP] = struct{}{}
+			devs = append(devs, normIP)
+		}
+
+		out.LocalRules = append(out.LocalRules, config.TailscaleLocalSubnetRule{
+			CIDR:    cidrStr,
+			Scope:   normScope,
+			Devices: devs,
+		})
 	}
 
 	seen := make(map[string]struct{}, len(raw.Peers))

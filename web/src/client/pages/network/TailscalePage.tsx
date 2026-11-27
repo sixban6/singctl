@@ -1,22 +1,31 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  CheckCircle2,
-  ChevronDown,
-  ChevronUp,
+  AlertTriangle,
   Download,
+  Info,
   KeyRound,
-  Play,
-  Power,
+  Lock,
+  RotateCcw,
   Save,
   Share2,
 } from 'lucide-react';
 import { Badge, Button, ConfirmDialog, PageHeader, SectionCard, useToast } from '../../../ui';
 import { useCachedQuery } from '../../../hooks';
 import { clientApi } from '../../api';
-import { TAILSCALE_CFG_CACHE_KEY } from '../../cacheKeys';
+import { TAILSCALE_MESH_CACHE_KEY } from '../../cacheKeys';
 import { maskFullIP } from '../../../lib/privacyMask';
-import { ClientStatusResponse, TailscaleConfigResponse } from '../../types';
-import { TailscaleP2PSection } from './TailscaleP2PSection';
+import {
+  ClientStatusResponse,
+  TailscaleLocalSubnetRuleDTO,
+  TailscaleMeshTopologyResponse,
+  TailscaleP2PPeerConfig,
+  TailscaleP2PPeerView,
+  TailscaleSubnetScope,
+} from '../../types';
+import { LocalSubnetDraft } from './TailscaleLocalScopeCard';
+import { PeerPolicyDraft, TailscaleMeshMap, meshPeerKey } from './TailscaleMeshMap';
+import { TailscaleAdvancedDrawer } from './TailscaleAdvancedDrawer';
+import { TailscaleRoleAuthCard, normalizeTSMode } from './TailscaleRoleAuthCard';
 import { TailscaleUpgradeDrawer } from './TailscaleUpgradeDrawer';
 
 export interface TailscalePageProps {
@@ -27,16 +36,50 @@ export interface TailscalePageProps {
   onRefreshStatus?: () => void;
 }
 
-const TS_MODES = [
-  { value: 'client', title: '默认客户端', desc: '仅作为普通节点加入 Tailscale，不广播路由' },
-  { value: 'router', title: '子网路由器', desc: '广播本机局域网网段，软路由设备推荐此项' },
-  { value: 'exit', title: '出口节点', desc: '将本机设为全网流量出口，供其他设备选为 Exit Node' },
-  { value: 'gateway', title: '全能网关', desc: '同时充当子网路由器 + 出口节点' },
-];
-
-function normalizeTSMode(raw?: string): string {
-  if (raw === 'router' || raw === 'exit' || raw === 'gateway') return raw;
-  return 'client';
+function buildDraftFromMesh(mesh: TailscaleMeshTopologyResponse) {
+  const subnetDrafts: Record<string, LocalSubnetDraft> = {};
+  const custom: string[] = [];
+  for (const n of mesh.localNetworks || []) {
+    subnetDrafts[n.cidr] = {
+      cidr: n.cidr,
+      selected: Boolean(n.selected),
+      scope: (n.scope as TailscaleSubnetScope) || 'all',
+      devices: new Set(n.selectedDevices || []),
+    };
+    if (n.kind === 'custom') custom.push(n.cidr);
+  }
+  const peers: Record<string, PeerPolicyDraft> = {};
+  for (const p of mesh.gatewayPeers || []) {
+    const k = meshPeerKey(p);
+    const isBidir =
+      p.effectiveAccessMode === 'bidirectional' ||
+      p.effectiveAccessMode === 'bidirectional_timed' ||
+      p.accessMode === 'bidirectional';
+    peers[k] = {
+      id: p.id || '',
+      name: p.shortName || p.name || p.hostName || k,
+      tailscaleIP: p.tailscaleIPs?.[0] || '',
+      jitEnabled: p.configured ? Boolean(p.jitEnabled) : true,
+      accessMode: isBidir ? 'bidirectional' : 'outbound_only',
+      allowedLanTargetsText: (p.allowedLanTargets || []).join(', '),
+    };
+  }
+  const p2pCfg = mesh.p2p?.config;
+  const preferredRole = mesh.roleMode || mesh.tailscaleStatus?.mode || '';
+  return {
+    mode: normalizeTSMode(preferredRole || (mesh.tailscaleStatus?.running ? 'client' : 'router')),
+    subnetDrafts,
+    custom,
+    peers,
+    jitWindowSec: p2pCfg?.jit_window_sec && p2pCfg.jit_window_sec > 0 ? p2pCfg.jit_window_sec : 5,
+    cooldownSec: p2pCfg?.cooldown_sec && p2pCfg.cooldown_sec > 0 ? p2pCfg.cooldown_sec : 300,
+    sandboxUjail: mesh.p2p?.ujailAvailable
+      ? !p2pCfg?.enabled
+        ? true
+        : Boolean(p2pCfg?.sandbox_ujail)
+      : false,
+    downstreamAssist: p2pCfg?.downstream_assist === undefined ? true : Boolean(p2pCfg.downstream_assist),
+  };
 }
 
 export const TailscalePage: React.FC<TailscalePageProps> = ({
@@ -46,164 +89,337 @@ export const TailscalePage: React.FC<TailscalePageProps> = ({
   onAction,
   onRefreshStatus,
 }) => {
-  const { success, error } = useToast();
-  const ts = status?.tailscale;
-  const [mode, setMode] = useState<string>(() => (ts?.running ? normalizeTSMode(ts.mode) : 'router'));
-  const [acceptRoutes, setAcceptRoutes] = useState(() => Boolean(ts?.acceptRoutes));
-  const [modeDirty, setModeDirty] = useState(false);
-
+  const { success, error, toast } = useToast();
   const {
-    data: tsCfg,
-    loading: tsCfgLoading,
-    setData: setTsCfgData,
-  } = useCachedQuery<TailscaleConfigResponse>(TAILSCALE_CFG_CACHE_KEY, () => clientApi.getTailscaleConfig());
-  const [tsAuthExpanded, setTsAuthExpanded] = useState(false);
+    data: mesh,
+    loading: meshLoading,
+    setData: setMeshData,
+    refetch: refetchMesh,
+  } = useCachedQuery<TailscaleMeshTopologyResponse>(TAILSCALE_MESH_CACHE_KEY, () =>
+    clientApi.getTailscaleMesh(),
+  );
+
+  const ts = mesh?.tailscaleStatus || status?.tailscale;
+  const tsCfg = mesh?.config;
+  const gatewayRole = mesh?.gatewayRole || status?.gateway?.mode || 'main';
+
+  const dirtyRef = useRef(false);
+  const [hasDraftChanges, setHasDraftChanges] = useState(false);
+  const [savingMesh, setSavingMesh] = useState(false);
+  const [pokingKey, setPokingKey] = useState('');
+
+  const [mode, setMode] = useState<string>(() => normalizeTSMode(mesh?.roleMode || ts?.mode || 'router'));
+  const [subnetDrafts, setSubnetDrafts] = useState<Record<string, LocalSubnetDraft>>({});
+  const [customSubnets, setCustomSubnets] = useState<string[]>([]);
+  const [peerDrafts, setPeerDrafts] = useState<Record<string, PeerPolicyDraft>>({});
+  const [jitWindowSec, setJitWindowSec] = useState(5);
+  const [cooldownSec, setCooldownSec] = useState(300);
+  const [sandboxUjail, setSandboxUjail] = useState(false);
+  const [downstreamAssist, setDownstreamAssist] = useState(true);
+
+  const [authExpanded, setAuthExpanded] = useState<boolean | null>(null);
   const [authKeyInput, setAuthKeyInput] = useState('');
   const [clearAuthKey, setClearAuthKey] = useState(false);
-  const [subnetsInput, setSubnetsInput] = useState(() => tsCfg?.subnets || '');
-  const [subnetsDirty, setSubnetsDirty] = useState(false);
-  const [savingTsCfg, setSavingTsCfg] = useState(false);
-
+  const [savingAuthKey, setSavingAuthKey] = useState(false);
   const [stopConfirmOpen, setStopConfirmOpen] = useState(false);
-  const [reconfigConfirmOpen, setReconfigConfirmOpen] = useState(false);
   const [upgradeDrawerOpen, setUpgradeDrawerOpen] = useState(false);
 
+  const [newWebPassword, setNewWebPassword] = useState('');
+  const [savingWebPassword, setSavingWebPassword] = useState(false);
+
+  const applyMeshHydration = useCallback((m: TailscaleMeshTopologyResponse) => {
+    const d = buildDraftFromMesh(m);
+    setMode(d.mode);
+    setSubnetDrafts(d.subnetDrafts);
+    setCustomSubnets(d.custom);
+    setPeerDrafts(d.peers);
+    setJitWindowSec(d.jitWindowSec);
+    setCooldownSec(d.cooldownSec);
+    setSandboxUjail(d.sandboxUjail);
+    setDownstreamAssist(d.downstreamAssist);
+    dirtyRef.current = false;
+    setHasDraftChanges(false);
+  }, []);
+
   useEffect(() => {
-    if (!tsCfg) return;
-    if (!subnetsDirty) {
-      setSubnetsInput(tsCfg.subnets || '');
-    }
-    if (!tsCfg.authKeySet) {
-      setTsAuthExpanded(true);
-    }
-  }, [tsCfg, subnetsDirty]);
+    if (!mesh || dirtyRef.current) return;
+    applyMeshHydration(mesh);
+  }, [mesh, applyMeshHydration]);
 
-  const savedMode = ts?.running ? normalizeTSMode(ts.mode) : mode;
-  const savedAcceptRoutes = ts?.running ? Boolean(ts.acceptRoutes) : acceptRoutes;
-  const hasModeChanges = Boolean(ts?.running) && (mode !== savedMode || acceptRoutes !== savedAcceptRoutes);
+  const markDirty = () => {
+    dirtyRef.current = true;
+    setHasDraftChanges(true);
+  };
 
-  useEffect(() => {
-    if (!ts?.installed || !ts.running) return;
-    const liveMode = normalizeTSMode(ts.mode);
-    const liveAccept = Boolean(ts.acceptRoutes);
-    if (!modeDirty) {
-      setMode(liveMode);
-      setAcceptRoutes(liveAccept);
-    } else if (!busy && mode === liveMode && acceptRoutes === liveAccept) {
-      setModeDirty(false);
-    }
-  }, [ts?.installed, ts?.running, ts?.mode, ts?.acceptRoutes, modeDirty, busy, mode, acceptRoutes]);
-
-  const handleSaveTsConfig = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (privacyMask) return;
-    setSavingTsCfg(true);
+  const handleRefreshAll = async () => {
+    dirtyRef.current = false;
     try {
-      const saved = await clientApi.saveTailscaleConfig({
-        authKey: authKeyInput.trim(),
-        clearAuthKey,
-        subnets: subnetsInput.trim(),
-      });
-      setTsCfgData(saved);
-      setAuthKeyInput('');
-      setClearAuthKey(false);
-      setSubnetsDirty(false);
-      setSubnetsInput(saved.subnets || '');
-      success('Tailscale 认证密钥与广播子网已保存（0600 权限）');
+      const fresh = await refetchMesh(false);
+      if (fresh) applyMeshHydration(fresh);
       onRefreshStatus?.();
     } catch (err) {
-      error((err as Error)?.message || '保存 Tailscale 配置失败');
-    } finally {
-      setSavingTsCfg(false);
+      error((err as Error)?.message || '刷新组网拓扑失败');
     }
   };
 
-  const activeModeLabel = ts?.running
-    ? TS_MODES.find((m) => m.value === normalizeTSMode(ts.mode))?.title || normalizeTSMode(ts.mode)
-    : '-';
-  const selectedModeLabel = TS_MODES.find((m) => m.value === mode)?.title || mode;
+  const handleSelectRole = (nextRole: string) => {
+    markDirty();
+    setMode(nextRole);
+    if (nextRole === 'router' || nextRole === 'gateway') {
+      setSubnetDrafts((prev) => {
+        const anySelected = Object.values(prev).some((s) => s.selected);
+        if (anySelected) return prev;
+        const firstCIDR = mesh?.localNetworks?.[0]?.cidr || customSubnets[0];
+        if (!firstCIDR) return prev;
+        const cur = prev[firstCIDR] || {
+          cidr: firstCIDR,
+          selected: true,
+          scope: 'all' as TailscaleSubnetScope,
+          devices: new Set<string>(),
+        };
+        return { ...prev, [firstCIDR]: { ...cur, selected: true } };
+      });
+    }
+  };
 
-  const renderAuthSubnetsForm = () => (
-    <form onSubmit={(e) => void handleSaveTsConfig(e)} className="space-y-3 text-xs">
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        <label className="block space-y-1">
-          <span className="text-secondary">Tailscale 授权密钥 (`auth_key`)</span>
-          <input
-            type="password"
-            autoComplete="new-password"
-            disabled={tsCfgLoading || clearAuthKey}
-            value={authKeyInput}
-            onChange={(e) => setAuthKeyInput(e.target.value)}
-            placeholder={
-              tsCfg?.authKeySet
-                ? privacyMask
-                  ? '已配置 (••••••••)，留空保持不变'
-                  : `已配置 (${tsCfg.authKeyHint || '********'})，留空保持不变`
-                : 'tskey-auth-...'
-            }
-            className="w-full h-9 px-3 rounded-xl bg-surface1 border border-subtle text-primary font-mono focus:outline-none focus:border-strong disabled:opacity-60"
-          />
-        </label>
-        <label className="block space-y-1">
-          <span className="text-secondary">广播局域网网段 (`subnets`，留空自动探测)</span>
-          <input
-            type={privacyMask ? 'password' : 'text'}
-            readOnly={privacyMask}
-            disabled={tsCfgLoading}
-            value={subnetsInput}
-            onChange={(e) => {
-              setSubnetsInput(e.target.value);
-              setSubnetsDirty(true);
-            }}
-            placeholder={privacyMask ? '••••••••' : '例如 192.168.1.0/24（多网段用英文逗号分隔）'}
-            className="w-full h-9 px-3 rounded-xl bg-surface1 border border-subtle text-primary font-mono focus:outline-none focus:border-strong"
-          />
-        </label>
-      </div>
-      <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
-        <div>
-          {tsCfg?.authKeySet && (
-            <label className="inline-flex items-center gap-1.5 text-[11px] text-rose-300 cursor-pointer select-none">
-              <input
-                type="checkbox"
-                checked={clearAuthKey}
-                onChange={(e) => {
-                  setClearAuthKey(e.target.checked);
-                  if (e.target.checked) setAuthKeyInput('');
-                }}
-                className="accent-rose-500 w-3.5 h-3.5"
-              />
-              <span>清空已保存的 Auth Key</span>
-            </label>
-          )}
-        </div>
-        <Button
-          type="submit"
-          size="xs"
-          variant="secondary"
-          loading={savingTsCfg}
-          disabled={tsCfgLoading || busy || privacyMask}
-          title={privacyMask ? '隐私完全遮挡开启期间请先关闭遮挡再编辑网段' : undefined}
-          icon={<Save className="w-3.5 h-3.5" />}
-        >
-          保存认证与子网
-        </Button>
-      </div>
-    </form>
+  const handleToggleSubnet = (cidr: string) => {
+    markDirty();
+    setSubnetDrafts((prev) => {
+      const cur = prev[cidr] || { cidr, selected: false, scope: 'all' as TailscaleSubnetScope, devices: new Set<string>() };
+      const nextSelected = !cur.selected;
+      const next = { ...prev, [cidr]: { ...cur, selected: nextSelected } };
+      const countSelected = Object.values(next).filter((s) => s.selected).length;
+      if (nextSelected && (mode === 'client' || mode === 'exit')) {
+        setMode(mode === 'exit' ? 'gateway' : 'router');
+      } else if (!nextSelected && countSelected === 0 && (mode === 'router' || mode === 'gateway')) {
+        setMode(mode === 'gateway' ? 'exit' : 'client');
+      }
+      return next;
+    });
+  };
+
+  const handleAddCustomSubnet = (cidr: string) => {
+    markDirty();
+    setCustomSubnets((prev) => (prev.includes(cidr) ? prev : [...prev, cidr]));
+    setSubnetDrafts((prev) => ({
+      ...prev,
+      [cidr]: { cidr, selected: true, scope: 'all', devices: new Set<string>() },
+    }));
+    if (mode === 'client' || mode === 'exit') {
+      setMode(mode === 'exit' ? 'gateway' : 'router');
+    }
+  };
+
+  const handleRemoveCustomSubnet = (cidr: string) => {
+    markDirty();
+    setCustomSubnets((prev) => prev.filter((c) => c !== cidr));
+    setSubnetDrafts((prev) => {
+      const copy = { ...prev };
+      delete copy[cidr];
+      return copy;
+    });
+  };
+
+  const handleChangeScope = (cidr: string, scope: TailscaleSubnetScope) => {
+    markDirty();
+    setSubnetDrafts((prev) => {
+      const cur = prev[cidr] || { cidr, selected: true, scope: 'all' as TailscaleSubnetScope, devices: new Set<string>() };
+      return { ...prev, [cidr]: { ...cur, scope } };
+    });
+  };
+
+  const handleToggleDevice = (cidr: string, deviceIP: string) => {
+    markDirty();
+    setSubnetDrafts((prev) => {
+      const cur = prev[cidr] || { cidr, selected: true, scope: 'allowlist' as TailscaleSubnetScope, devices: new Set<string>() };
+      const nextSet = new Set(cur.devices);
+      if (nextSet.has(deviceIP)) nextSet.delete(deviceIP);
+      else nextSet.add(deviceIP);
+      return { ...prev, [cidr]: { ...cur, devices: nextSet } };
+    });
+  };
+
+  const handleAddManualDevice = (cidr: string, deviceIP: string) => {
+    markDirty();
+    setSubnetDrafts((prev) => {
+      const cur = prev[cidr] || { cidr, selected: true, scope: 'allowlist' as TailscaleSubnetScope, devices: new Set<string>() };
+      const nextSet = new Set(cur.devices);
+      nextSet.add(deviceIP);
+      return { ...prev, [cidr]: { ...cur, devices: nextSet } };
+    });
+  };
+
+  const handleUpdatePeerPolicy = (k: string, patch: Partial<PeerPolicyDraft>) => {
+    markDirty();
+    setPeerDrafts((prev) => {
+      const cur = prev[k];
+      if (!cur) return prev;
+      return { ...prev, [k]: { ...cur, ...patch } };
+    });
+  };
+
+  const collectSavePayload = () => {
+    const isSubnetRole = mode === 'router' || mode === 'gateway';
+    const orderedSubnets: string[] = [];
+    const localRules: TailscaleLocalSubnetRuleDTO[] = [];
+    if (isSubnetRole) {
+      const seen = new Set<string>();
+      const pushCIDR = (cidr: string) => {
+        if (seen.has(cidr)) return;
+        const d = subnetDrafts[cidr];
+        if (!d?.selected) return;
+        seen.add(cidr);
+        orderedSubnets.push(cidr);
+        localRules.push({
+          cidr,
+          scope: d.scope,
+          devices: Array.from(d.devices),
+        });
+      };
+      for (const n of mesh?.localNetworks || []) pushCIDR(n.cidr);
+      for (const c of customSubnets) pushCIDR(c);
+    }
+
+    const peersPayload: TailscaleP2PPeerConfig[] = Object.values(peerDrafts).map((d) => ({
+      id: d.id || undefined,
+      name: d.name,
+      tailscale_ip: d.tailscaleIP || undefined,
+      jit_enabled: d.jitEnabled,
+      access_mode: d.accessMode,
+      allowed_lan_targets: d.allowedLanTargetsText
+        .split(/[,，\n]+/)
+        .map((s) => s.trim())
+        .filter(Boolean),
+    }));
+
+    return {
+      mode,
+      subnets: orderedSubnets,
+      local_rules: localRules,
+      peers: peersPayload,
+      jit_window_sec: Math.min(10, Math.max(3, Number(jitWindowSec) || 5)),
+      cooldown_sec: Math.min(3600, Math.max(30, Number(cooldownSec) || 300)),
+      sandbox_ujail: Boolean(mesh?.p2p?.ujailAvailable && sandboxUjail),
+      downstream_assist: downstreamAssist,
+    };
+  };
+
+  const handleSaveMesh = async () => {
+    if (privacyMask) return;
+    setSavingMesh(true);
+    try {
+      const res = await clientApi.saveTailscaleMesh(collectSavePayload());
+      if (res.mesh) {
+        setMeshData(res.mesh);
+        applyMeshHydration(res.mesh);
+      }
+      success(res.message || '组网角色、设备范围与防线策略已保存并生效');
+      onRefreshStatus?.();
+    } catch (err) {
+      error((err as Error)?.message || '保存组网配置失败');
+    } finally {
+      setSavingMesh(false);
+    }
+  };
+
+  const handleSaveAuthKey = async (e?: React.FormEvent) => {
+    e?.preventDefault();
+    if (privacyMask) return;
+    setSavingAuthKey(true);
+    try {
+      const payload = collectSavePayload();
+      await clientApi.saveTailscaleConfig({
+        authKey: authKeyInput.trim(),
+        clearAuthKey,
+        subnets: payload.subnets.join(','),
+      });
+      setAuthKeyInput('');
+      setClearAuthKey(false);
+      success('Tailscale 授权密钥已安全保存（0600 权限）');
+      await handleRefreshAll();
+    } catch (err) {
+      error((err as Error)?.message || '保存授权密钥失败');
+    } finally {
+      setSavingAuthKey(false);
+    }
+  };
+
+  const handleStartWithAutoSave = async () => {
+    if (privacyMask) {
+      onAction('ts-start', { mode, acceptRoutes: true });
+      return;
+    }
+    try {
+      const payload = collectSavePayload();
+      if (authKeyInput.trim() || clearAuthKey) {
+        await clientApi.saveTailscaleConfig({
+          authKey: authKeyInput.trim(),
+          clearAuthKey,
+          subnets: payload.subnets.join(','),
+        });
+        setAuthKeyInput('');
+        setClearAuthKey(false);
+      }
+      if (hasDraftChanges || authKeyInput.trim()) {
+        await clientApi.saveTailscaleMesh(payload);
+      }
+    } catch (err) {
+      error((err as Error)?.message || '启动前保存配置失败');
+      return;
+    }
+    onAction('ts-start', { mode, acceptRoutes: true });
+  };
+
+  const handlePokePeer = async (peer: TailscaleP2PPeerView) => {
+    const k = meshPeerKey(peer);
+    setPokingKey(k);
+    try {
+      const res = await clientApi.pokeTailscaleP2P({ id: peer.id, name: peer.name });
+      toast(res.message || '打洞探测完成', res.direct ? 'success' : 'warn');
+      await handleRefreshAll();
+    } catch (err) {
+      error((err as Error)?.message || '瞬时打洞探测失败');
+    } finally {
+      setPokingKey('');
+    }
+  };
+
+  const handleEnableWebPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (newWebPassword.length < 6) {
+      error('WebUI 访问口令至少需要 6 位字符');
+      return;
+    }
+    setSavingWebPassword(true);
+    try {
+      await clientApi.updatePassword({ password: newWebPassword });
+      setNewWebPassword('');
+      success('已开启 WebUI 口令保护（已自动维持 30 天免重登）');
+      await handleRefreshAll();
+    } catch (err) {
+      error((err as Error)?.message || '开启 WebUI 口令失败');
+    } finally {
+      setSavingWebPassword(false);
+    }
+  };
+
+  const isAuthOpen = authExpanded ?? (!tsCfg?.authKeySet || !ts?.running || Boolean(ts?.needsLogin));
+  const hasAnyBidirectionalPeer = useMemo(
+    () => Object.values(peerDrafts).some((d) => d.accessMode === 'bidirectional'),
+    [peerDrafts],
   );
+  const showPasswordGuardBanner = hasAnyBidirectionalPeer && mesh && !mesh.webPasswordConfigured;
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-4">
       <PageHeader
-        title="Tailscale 组网"
+        title="Tailscale 异地组网"
         description={
           !ts
-            ? '正在读取 Tailscale 运行状态…'
+            ? '正在读取 Tailscale 状态…'
             : !ts.installed
               ? '尚未安装 Tailscale 二进制'
-              : ts.version
-                ? `v${ts.version}${ts.subnets ? ` · 子网 ${maskFullIP(ts.subnets, privacyMask)}` : ''}`
-                : '已安装'
+              : `v${ts.version || '-'}${ts.selfIp ? ` · ${maskFullIP(ts.selfIp, privacyMask)}` : ''}`
         }
         badge={
           <Badge
@@ -211,7 +427,7 @@ export const TailscalePage: React.FC<TailscalePageProps> = ({
             dot={Boolean(ts?.running)}
             pulse={ts?.state === 'Running'}
           >
-            {!ts?.installed ? '未安装' : ts.state === 'Running' ? '已连接' : ts.running ? ts.state : '未运行'}
+            {!ts?.installed ? '未安装' : ts.state === 'Running' ? '组网已连接' : ts.running ? ts.state : '未运行'}
           </Badge>
         }
       />
@@ -220,220 +436,210 @@ export const TailscalePage: React.FC<TailscalePageProps> = ({
         <SectionCard
           title="安装并启用 Tailscale 组网"
           icon={<Share2 className="w-4 h-4" />}
-          subtitle="一键拉取架构适配安装包（AMD64/ARM64 均为精简合体无加壳版，含官方 SHA256 强校验），先配好 auth_key 再启动更省心"
+          subtitle="一键拉取架构适配安装包（含官方 SHA256 强校验），先填好授权密钥启动即连"
         >
           <div className="space-y-4">
-            <div className="p-3.5 rounded-xl bg-surface2 border border-subtle space-y-3">
-              <div className="flex items-center gap-2 text-xs font-semibold text-primary">
-                <KeyRound className="w-3.5 h-3.5 text-[var(--accent)]" />
-                认证密钥与广播子网 (`tailscale.auth_key` / `subnets`)
+            <form onSubmit={(e) => void handleSaveAuthKey(e)} className="flex flex-col sm:flex-row sm:items-center gap-2 text-xs">
+              <div className="flex items-center gap-2 flex-1">
+                <KeyRound className="w-4 h-4 text-[var(--accent)] shrink-0" />
+                <input
+                  type="password"
+                  value={authKeyInput}
+                  onChange={(e) => setAuthKeyInput(e.target.value)}
+                  placeholder={tsCfg?.authKeySet ? '已保存 Auth Key（留空不变）' : '可选：粘贴 tskey-auth-...'}
+                  className="flex-1 h-10 sm:h-9 px-3 rounded-xl bg-surface1 border border-subtle text-base sm:text-xs text-primary font-mono"
+                />
               </div>
-              {renderAuthSubnetsForm()}
-            </div>
-            <div className="flex flex-wrap items-center gap-3 pt-1">
-              <Button
-                variant="primary"
-                disabled={busy}
-                onClick={() => onAction('ts-install')}
-                icon={<Download className="w-4 h-4" />}
-              >
-                安装 Tailscale
+              <Button type="submit" size="sm" variant="secondary" loading={savingAuthKey}>
+                保存密钥
               </Button>
-            </div>
+            </form>
+            <Button
+              variant="primary"
+              disabled={busy}
+              onClick={() => onAction('ts-install')}
+              icon={<Download className="w-4 h-4" />}
+            >
+              一键安装 Tailscale
+            </Button>
           </div>
         </SectionCard>
       ) : (
         <>
-          <div className="console-card rounded-2xl px-4 py-3 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
-            <div className="flex flex-wrap items-center gap-2 text-xs">
-              <Badge tone={ts?.running ? 'ok' : 'neutral'} dot={Boolean(ts?.running)}>
-                {ts?.running ? `运行中 (${ts.state || 'Running'})` : '守护进程已停止'}
-              </Badge>
-              {ts?.running && <Badge tone="accent">当前模式: {activeModeLabel}</Badge>}
-              {ts?.running && ts.acceptRoutes && <Badge tone="neutral">已启用接收对端路由</Badge>}
-              <Badge tone={tsCfg?.authKeySet || ts?.authKeySet ? 'ok' : 'warn'}>
-                {tsCfg?.authKeySet || ts?.authKeySet ? 'auth_key 已就绪' : 'auth_key 未配置'}
-              </Badge>
+          <TailscaleRoleAuthCard
+            ts={ts}
+            tsCfg={tsCfg}
+            p2p={mesh?.p2p}
+            lanShieldActive={mesh?.lanShieldActive}
+            mode={mode}
+            busy={busy}
+            meshLoading={meshLoading}
+            privacyMask={privacyMask}
+            isAuthOpen={isAuthOpen}
+            authKeyInput={authKeyInput}
+            clearAuthKey={clearAuthKey}
+            savingAuthKey={savingAuthKey}
+            onSelectRole={handleSelectRole}
+            onToggleAuthOpen={() => setAuthExpanded(!isAuthOpen)}
+            onAuthKeyInputChange={setAuthKeyInput}
+            onClearAuthKeyChange={(checked) => {
+              setClearAuthKey(checked);
+              if (checked) setAuthKeyInput('');
+            }}
+            onSaveAuthKey={(e) => void handleSaveAuthKey(e)}
+            onStartWithAutoSave={() => void handleStartWithAutoSave()}
+            onRefreshAll={() => void handleRefreshAll()}
+            onOpenUpgrade={() => setUpgradeDrawerOpen(true)}
+            onRequestStop={() => setStopConfirmOpen(true)}
+            onFixTun={() => onAction('ts-fix-tun')}
+          />
+
+          {gatewayRole === 'side' && (
+            <div className="p-3.5 rounded-2xl border border-sky-500/30 bg-sky-500/10 text-xs text-sky-100 flex items-start gap-2.5 leading-relaxed">
+              <Info className="w-4 h-4 text-sky-300 shrink-0 mt-0.5" />
+              <div>
+                <div className="font-semibold text-white">旁路由无需重复开启 Tailscale</div>
+                <div className="text-sky-200/90 mt-0.5">
+                  主路由开启即可覆盖全屋局域网；若仍需在本机启动，SingCtl 内核双通护盾（5260/5265）会自动防止局域网访问失联。
+                </div>
+              </div>
             </div>
-            <div className="flex flex-wrap items-center gap-2">
-              {!ts?.running && (
+          )}
+
+          {showPasswordGuardBanner && (
+            <form
+              onSubmit={(e) => void handleEnableWebPassword(e)}
+              className="p-3.5 rounded-2xl border border-amber-500/35 bg-amber-500/10 text-xs text-amber-100 flex flex-col lg:flex-row lg:items-center justify-between gap-3"
+            >
+              <div className="flex items-start gap-2.5">
+                <AlertTriangle className="w-4 h-4 text-amber-300 shrink-0 mt-0.5" />
+                <div>
+                  <div className="font-semibold text-white">安全提醒：建议为 WebUI 启用访问口令</div>
+                  <div className="text-amber-200/90 mt-0.5 leading-relaxed">
+                    已开启「互通（家庭网络）」，设置 6 位以上口令可避免对端设备免密误改路由器配置。
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <input
+                  type="password"
+                  autoComplete="new-password"
+                  value={newWebPassword}
+                  onChange={(e) => setNewWebPassword(e.target.value)}
+                  placeholder="输入 6 位以上口令"
+                  className="flex-1 sm:w-48 h-10 sm:h-8 px-3 rounded-lg bg-surface1 border border-amber-400/40 text-base sm:text-xs text-primary"
+                />
                 <Button
+                  type="submit"
                   size="sm"
                   variant="primary"
-                  disabled={busy}
-                  icon={<Play className="w-3.5 h-3.5" />}
-                  onClick={() => onAction('ts-start', { mode, acceptRoutes })}
+                  loading={savingWebPassword}
+                  icon={<Lock className="w-3.5 h-3.5" />}
                 >
-                  启动 Tailscale
+                  启用口令
+                </Button>
+              </div>
+            </form>
+          )}
+
+          <TailscaleMeshMap
+            mode={mode}
+            localNetworks={mesh?.localNetworks || []}
+            customSubnets={customSubnets}
+            subnetDrafts={subnetDrafts}
+            gatewayPeers={mesh?.gatewayPeers || []}
+            personalDevices={mesh?.personalDevices || []}
+            peerDrafts={peerDrafts}
+            tsStatus={ts}
+            p2pLiveEnabled={Boolean(mesh?.p2p?.config?.enabled)}
+            pokingKey={pokingKey}
+            privacyMask={privacyMask}
+            onToggleSubnet={handleToggleSubnet}
+            onAddCustomSubnet={handleAddCustomSubnet}
+            onRemoveCustomSubnet={handleRemoveCustomSubnet}
+            onChangeScope={handleChangeScope}
+            onToggleDevice={handleToggleDevice}
+            onAddManualDevice={handleAddManualDevice}
+            onUpdatePeerPolicy={handleUpdatePeerPolicy}
+            onPokePeer={(p) => void handlePokePeer(p)}
+          />
+
+          <TailscaleAdvancedDrawer
+            p2pReport={mesh?.p2p}
+            privacyMask={privacyMask}
+            jitWindowSec={jitWindowSec}
+            cooldownSec={cooldownSec}
+            sandboxUjail={sandboxUjail}
+            downstreamAssist={downstreamAssist}
+            onJitWindowChange={(sec) => {
+              markDirty();
+              setJitWindowSec(sec);
+            }}
+            onCooldownChange={(sec) => {
+              markDirty();
+              setCooldownSec(sec);
+            }}
+            onSandboxUjailChange={(enabled) => {
+              markDirty();
+              setSandboxUjail(enabled);
+            }}
+            onDownstreamAssistChange={(enabled) => {
+              markDirty();
+              setDownstreamAssist(enabled);
+            }}
+          />
+
+          {/* 拇指区智能悬浮保存条：有待保存修改时固定在手机底部导航正上方，平时不遮挡滚动视野 */}
+          <div
+            className={`console-card rounded-2xl px-3.5 sm:px-4 py-3 flex flex-wrap items-center justify-between gap-2.5 transition-all ${
+              hasDraftChanges
+                ? 'sticky bottom-[calc(4.5rem+env(safe-area-inset-bottom,0px))] md:bottom-4 z-30 shadow-2xl border-[var(--accent)]/70 backdrop-blur-xl'
+                : ''
+            }`}
+          >
+            <div className="text-xs text-secondary flex flex-wrap items-center gap-2 min-w-0">
+              {hasDraftChanges ? (
+                <Badge tone="warn" dot>
+                  有未生效的组网修改
+                </Badge>
+              ) : (
+                <Badge tone="ok" dot>
+                  配置与实时防线已同步
+                </Badge>
+              )}
+              <span className="hidden sm:inline">
+                保存将同步写入 0600 配置、更新进出双向设备防火墙并无断流生效。
+              </span>
+            </div>
+            <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
+              {hasDraftChanges && mesh && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  disabled={savingMesh}
+                  onClick={() => applyMeshHydration(mesh)}
+                  icon={<RotateCcw className="w-3.5 h-3.5" />}
+                >
+                  撤销
                 </Button>
               )}
               <Button
+                type="button"
                 size="sm"
-                variant="secondary"
-                disabled={busy}
-                icon={<Download className="w-3.5 h-3.5" />}
-                onClick={() => setUpgradeDrawerOpen(true)}
+                variant="primary"
+                loading={savingMesh}
+                disabled={savingMesh || privacyMask}
+                title={privacyMask ? '请先关闭隐私遮挡再保存修改' : undefined}
+                onClick={() => void handleSaveMesh()}
+                icon={<Save className="w-3.5 h-3.5" />}
               >
-                零失联更新
+                {savingMesh ? '正在生效…' : '保存并立即生效'}
               </Button>
-              {ts?.running && (
-                <Button
-                  size="sm"
-                  variant="danger"
-                  disabled={busy}
-                  icon={<Power className="w-3.5 h-3.5" />}
-                  onClick={() => setStopConfirmOpen(true)}
-                >
-                  停止服务
-                </Button>
-              )}
             </div>
           </div>
-
-          <SectionCard
-            title="启动模式与路由策略"
-            icon={<Share2 className="w-4 h-4" />}
-            subtitle={
-              ts?.running
-                ? '切换模式或路由选项后不会立即改动网络，需点击下方「保存并热切换模式」确认生效'
-                : '选择网关在 Tailscale 网络中承担的角色，然后启动服务'
-            }
-          >
-            <div className="space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-                {TS_MODES.map((m) => {
-                  const selected = mode === m.value;
-                  return (
-                    <button
-                      key={m.value}
-                      type="button"
-                      onClick={() => {
-                        setMode(m.value);
-                        setModeDirty(true);
-                      }}
-                      style={
-                        selected
-                          ? {
-                              backgroundColor: 'var(--accent-soft)',
-                              borderColor: 'var(--accent)',
-                            }
-                          : undefined
-                      }
-                      className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer ${
-                        selected ? '' : 'bg-surface2 border-subtle hover:border-strong'
-                      }`}
-                    >
-                      <div className="text-xs sm:text-sm font-semibold text-primary">{m.title}</div>
-                      <div className="text-[11px] text-secondary mt-1 leading-relaxed">{m.desc}</div>
-                    </button>
-                  );
-                })}
-              </div>
-
-              <label className="inline-flex items-center gap-2 text-xs sm:text-sm text-primary cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={acceptRoutes}
-                  onChange={(e) => {
-                    setAcceptRoutes(e.target.checked);
-                    setModeDirty(true);
-                  }}
-                  className="accent-[var(--accent)] w-4 h-4"
-                />
-                <span>接收其他节点广播的路由（`--accept-routes`）</span>
-              </label>
-
-              <div className="rounded-xl border border-subtle bg-surface2/60 overflow-hidden">
-                <button
-                  type="button"
-                  onClick={() => setTsAuthExpanded((v) => !v)}
-                  className="w-full px-3.5 py-2.5 flex items-center justify-between gap-2 text-left hover:bg-surface2 transition-colors cursor-pointer"
-                >
-                  <div className="flex items-center gap-2 text-xs font-medium text-primary">
-                    <KeyRound className="w-3.5 h-3.5 text-[var(--accent)]" />
-                    <span>认证密钥与广播子网 (`auth_key` / `subnets`)</span>
-                    <Badge tone={tsCfg?.authKeySet || ts?.authKeySet ? 'ok' : 'warn'}>
-                      {tsCfg?.authKeySet
-                        ? privacyMask
-                          ? '•••••••• (已遮挡)'
-                          : tsCfg.authKeyHint || '已配置'
-                        : '未配置'}
-                    </Badge>
-                    {tsCfg?.subnets && (
-                      <span className="hidden sm:inline text-[11px] font-mono text-secondary">
-                        · {maskFullIP(tsCfg.subnets, privacyMask)}
-                      </span>
-                    )}
-                  </div>
-                  {tsAuthExpanded ? (
-                    <ChevronUp className="w-4 h-4 text-secondary shrink-0" />
-                  ) : (
-                    <ChevronDown className="w-4 h-4 text-secondary shrink-0" />
-                  )}
-                </button>
-                {tsAuthExpanded && (
-                  <div className="px-3.5 pb-3.5 pt-2 border-t border-subtle">
-                    {renderAuthSubnetsForm()}
-                  </div>
-                )}
-              </div>
-
-              <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-subtle">
-                {!ts?.running ? (
-                  <>
-                    <span className="text-[11px] text-secondary">
-                      将使用「{selectedModeLabel}」模式（{acceptRoutes ? '接收对端路由' : '不接收对端路由'}）启动 Tailscale
-                    </span>
-                    <Button
-                      variant="primary"
-                      disabled={busy}
-                      icon={<Play className="w-3.5 h-3.5" />}
-                      onClick={() => onAction('ts-start', { mode, acceptRoutes })}
-                    >
-                      按所选模式启动
-                    </Button>
-                  </>
-                ) : hasModeChanges ? (
-                  <>
-                    <span className="text-[11px] text-amber-300">
-                      检测到待应用变更：{activeModeLabel} → {selectedModeLabel}（--accept-routes={String(acceptRoutes)}），请确认保存并热切换
-                    </span>
-                    <div className="flex items-center gap-2">
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        disabled={busy}
-                        onClick={() => {
-                          setMode(savedMode);
-                          setAcceptRoutes(savedAcceptRoutes);
-                          setModeDirty(false);
-                        }}
-                      >
-                        撤销变更
-                      </Button>
-                      <Button
-                        variant="primary"
-                        disabled={busy}
-                        icon={<Save className="w-3.5 h-3.5" />}
-                        onClick={() => setReconfigConfirmOpen(true)}
-                      >
-                        保存并热切换模式
-                      </Button>
-                    </div>
-                  </>
-                ) : (
-                  <span className="text-[11px] text-emerald-300/90 flex items-center gap-1.5">
-                    <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
-                    当前正以「{activeModeLabel}」模式运行 · 修改上方选项并点击保存即可在线热生效
-                  </span>
-                )}
-              </div>
-            </div>
-          </SectionCard>
         </>
       )}
-
-      <TailscaleP2PSection privacyMask={privacyMask} />
 
       <ConfirmDialog
         open={stopConfirmOpen}
@@ -445,19 +651,6 @@ export const TailscalePage: React.FC<TailscalePageProps> = ({
           onAction('ts-stop');
         }}
         onCancel={() => setStopConfirmOpen(false)}
-      />
-
-      <ConfirmDialog
-        open={reconfigConfirmOpen}
-        title="确认在线热切换 Tailscale 模式"
-        description={`确认将运行模式切换为「${selectedModeLabel}」（--accept-routes=${String(acceptRoutes)}）？将通过 tailscale up --reset 在线重配参数而无需重启服务（期间隧道可能短暂重建 1~3 秒）。`}
-        confirmText="确认保存并热切换"
-        danger={false}
-        onConfirm={() => {
-          setReconfigConfirmOpen(false);
-          onAction('ts-start', { mode, acceptRoutes, reconfigure: true });
-        }}
-        onCancel={() => setReconfigConfirmOpen(false)}
       />
 
       <TailscaleUpgradeDrawer

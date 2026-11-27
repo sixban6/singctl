@@ -115,6 +115,28 @@ func TestRenderSingBoxNFTBatch_SingleTransactionParityAndGuards(t *testing.T) {
 		t.Fatalf("DNS 53 tproxy must precede LOCAL_IPV4_SET accept:\n%s", script)
 	}
 
+	// Verify downstream Tailscale P2P UDP 41641 (STUN/Disco/WireGuard) bypasses prerouting TProxy
+	// AFTER DNS 53 & LOCAL sets and BEFORE catch-all TProxy, without opening WebRTC STUN 3478 globally.
+	preroutingStart := strings.Index(script, "chain prerouting {")
+	outputStart := strings.Index(script, "chain output {")
+	if preroutingStart < 0 || outputStart <= preroutingStart {
+		t.Fatalf("missing prerouting/output chains:\n%s", script)
+	}
+	preroutingBlock := script[preroutingStart:outputStart]
+	idxSport := strings.Index(preroutingBlock, `udp sport 41641 accept comment "Bypass downstream Tailscale UDP port"`)
+	idxDport := strings.Index(preroutingBlock, `udp dport 41641 accept comment "Bypass downstream Tailscale UDP port"`)
+	idxLocal6 := strings.Index(preroutingBlock, "ip6 daddr @LOCAL_IPV6_SET accept")
+	idxCatchAll := strings.LastIndex(preroutingBlock, "tproxy to :7895 meta mark set 0x1 accept")
+	if idxSport < 0 || idxDport < 0 {
+		t.Fatalf("nft prerouting must bypass downstream Tailscale UDP 41641 sport/dport:\n%s", preroutingBlock)
+	}
+	if !(idxLocal6 < idxSport && idxSport < idxCatchAll && idxLocal6 < idxDport && idxDport < idxCatchAll) {
+		t.Fatalf("nft prerouting UDP 41641 bypass must sit after LOCAL_IPV6_SET and before catch-all TProxy:\n%s", preroutingBlock)
+	}
+	if strings.Contains(preroutingBlock, "3478") {
+		t.Fatalf("nft prerouting must not unconditionally bypass UDP 3478 (preserves WebRTC anti-leak):\n%s", preroutingBlock)
+	}
+
 	// Reject out-of-range port
 	if _, err := singbox.RenderSingBoxNFTBatch(singbox.DataplaneInput{TProxyPort: 0}); err == nil {
 		t.Fatal("expected error for invalid TProxyPort=0")
@@ -170,6 +192,8 @@ func TestRenderSingBoxIPTablesRestore_CapsFallbackAndParity(t *testing.T) {
 		"-A SING_BOX -d 192.168.1.1 -j RETURN",
 		"-A SING_BOX -s 192.168.30.0/24",
 		"-A SING_BOX -p udp --dport 53 -j TPROXY --on-port 7895 --tproxy-mark 1",
+		"-A SING_BOX -p udp --sport 41641 -j RETURN",
+		"-A SING_BOX -p udp --dport 41641 -j RETURN",
 		"-A SING_BOX_OUTPUT -m mark --mark 0x80000 -j RETURN",
 		"-A SING_BOX_OUTPUT -d 223.5.5.5 -p tcp --dport 443 -j RETURN",
 		"-A SING_BOX_OUTPUT -d 223.5.5.5 -p udp --dport 443 -j RETURN",
@@ -196,6 +220,8 @@ func TestRenderSingBoxIPTablesRestore_CapsFallbackAndParity(t *testing.T) {
 	}
 	for _, wantV6 := range []string{
 		"-A SING_BOX -d 2001:db8:abcd::/64 -j RETURN",
+		"-A SING_BOX -p udp --sport 41641 -j RETURN",
+		"-A SING_BOX -p udp --dport 41641 -j RETURN",
 		"-A SING_BOX_OUTPUT -p icmpv6 -j RETURN",
 		"-A SING_BOX_OUTPUT -d 2400:3200::1 -p tcp --dport 443 -j RETURN",
 		"-A SING_BOX_OUTPUT -d 2400:3200::1 -p udp --dport 443 -j RETURN",

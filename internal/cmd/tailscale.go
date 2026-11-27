@@ -142,6 +142,17 @@ func newUpdateTailScaleCmd(defaultConfigPath string) *cobra.Command {
 	return updateCmd
 }
 
+func newFixTunTailScaleCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "fix-tun",
+		Short: "一键修复内核 TUN 模式 / Fix kernel TUN mode for Tailscale",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			_, err := tailscale.RepairTunMode(cmd.Context(), tailscale.TunProbeDeps{})
+			return err
+		},
+	}
+}
+
 func NewTailscaleCmd(configPath string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "tailscale",
@@ -153,5 +164,6 @@ func NewTailscaleCmd(configPath string) *cobra.Command {
 	cmd.AddCommand(newStopTailScaleCmd(configPath))
 	cmd.AddCommand(newInstallTailScaleCmd(configPath))
 	cmd.AddCommand(newUpdateTailScaleCmd(configPath))
+	cmd.AddCommand(newFixTunTailScaleCmd())
 	return cmd
 }

@@ -105,6 +105,15 @@ func (c *Config) Clone() *Config {
 	out.DNS.BypassGuard = c.DNS.BypassGuard.Clone()
 
 	out.Tailscale.P2PAssist.PayloadFilter = cloneBoolPtr(c.Tailscale.P2PAssist.PayloadFilter)
+	out.Tailscale.P2PAssist.DownstreamAssist = cloneBoolPtr(c.Tailscale.P2PAssist.DownstreamAssist)
+	if c.Tailscale.P2PAssist.LocalRules != nil {
+		rules := make([]TailscaleLocalSubnetRule, len(c.Tailscale.P2PAssist.LocalRules))
+		for i, r := range c.Tailscale.P2PAssist.LocalRules {
+			rules[i] = r
+			rules[i].Devices = slices.Clone(r.Devices)
+		}
+		out.Tailscale.P2PAssist.LocalRules = rules
+	}
 	if c.Tailscale.P2PAssist.Peers != nil {
 		peers := make([]TailscaleP2PPeerConfig, len(c.Tailscale.P2PAssist.Peers))
 		for i, peer := range c.Tailscale.P2PAssist.Peers {

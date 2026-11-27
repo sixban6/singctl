@@ -480,3 +480,132 @@ func TestP2PAssistController_AutoFallbackToIPTablesIPSet_NoNFTWarn(t *testing.T)
 		t.Fatalf("expected clean disable on iptables backend, got snap=%+v err=%v", snapOff, err)
 	}
 }
+
+func TestRenderIPTablesP2P_MultiSubnetAndBidirectionalRouterInput(t *testing.T) {
+	now := time.Date(2026, 11, 27, 0, 0, 0, 0, time.UTC)
+	cfg := config.TailscaleP2PAssistConfig{
+		Enabled:       true,
+		JITWindowSec:  5,
+		PayloadFilter: boolPtr(true),
+		ListenPort:    41641,
+	}
+	peers := []tailscale.ResolvedPeerACL{
+		{
+			Config: config.TailscaleP2PPeerConfig{
+				ID:         "nHome1",
+				Name:       "home-main",
+				JITEnabled: true,
+				AccessMode: config.TailscaleAccessBidirectional,
+			},
+			TailscaleIPs:  []string{"100.96.182.83"},
+			PrimaryRoutes: []string{"192.168.55.0/24"},
+		},
+	}
+
+	rs, err := tailscale.RenderIPTablesP2P(cfg, peers, "192.168.31.0/24,192.168.27.0/24", now)
+	if err != nil {
+		t.Fatalf("RenderIPTablesP2P failed: %v", err)
+	}
+	joinLines := func(rules [][]string) string {
+		lines := make([]string, len(rules))
+		for i, r := range rules {
+			lines[i] = strings.Join(r, " ")
+		}
+		return strings.Join(lines, "\n")
+	}
+
+	v4Fwd := joinLines(rs.V4FwdACL)
+	for _, want := range []string{
+		"-s 192.168.55.0/24 -d 192.168.31.0/24 -j ACCEPT",
+		"-s 192.168.55.0/24 -d 192.168.27.0/24 -j ACCEPT",
+	} {
+		if !strings.Contains(v4Fwd, want) {
+			t.Fatalf("V4FwdACL missing %q:\n%s", want, v4Fwd)
+		}
+	}
+
+	v4In := joinLines(rs.V4InACL)
+	for _, want := range []string{
+		"-s 192.168.55.0/24 -d 192.168.31.0/24 -j ACCEPT",
+		"-s 192.168.55.0/24 -d 100.64.0.0/10 -j ACCEPT",
+		"-s 192.168.55.0/24 -j DROP",
+	} {
+		if !strings.Contains(v4In, want) {
+			t.Fatalf("V4InACL missing %q:\n%s", want, v4In)
+		}
+	}
+	if strings.Index(v4In, "-s 192.168.55.0/24 -d 192.168.31.0/24 -j ACCEPT") >= strings.Index(v4In, "-s 192.168.55.0/24 -j DROP") {
+		t.Fatalf("ACCEPT rule must precede DROP rule in V4InACL:\n%s", v4In)
+	}
+}
+
+func TestRenderIPTablesP2P_LocalDeviceScopesAndEgressACL(t *testing.T) {
+	now := time.Date(2026, 11, 27, 1, 0, 0, 0, time.UTC)
+	peers := []tailscale.ResolvedPeerACL{
+		{
+			Config: config.TailscaleP2PPeerConfig{
+				ID:         "nHome1",
+				Name:       "ax3000t",
+				JITEnabled: true,
+				AccessMode: config.TailscaleAccessBidirectional,
+			},
+			TailscaleIPs:  []string{"100.96.182.83"},
+			PrimaryRoutes: []string{"192.168.55.0/24"},
+		},
+	}
+	joinLines := func(rules [][]string) string {
+		lines := make([]string, len(rules))
+		for i, r := range rules {
+			lines[i] = strings.Join(r, " ")
+		}
+		return strings.Join(lines, "\n")
+	}
+
+	// 1. Allowlist mode
+	rsAllow, err := tailscale.RenderIPTablesP2P(config.TailscaleP2PAssistConfig{
+		Enabled:       true,
+		RoleMode:      "router",
+		PayloadFilter: boolPtr(true),
+		LocalRules: []config.TailscaleLocalSubnetRule{
+			{CIDR: "192.168.31.0/24", Scope: config.TailscaleScopeAllowlist, Devices: []string{"192.168.31.88"}},
+		},
+	}, peers, "192.168.31.0/24", now)
+	if err != nil {
+		t.Fatalf("allowlist RenderIPTablesP2P failed: %v", err)
+	}
+	v4OutAllow := joinLines(rsAllow.V4OutACL)
+	if !strings.Contains(v4OutAllow, "-s 192.168.31.88 -j ACCEPT") || strings.Contains(v4OutAllow, "-s 192.168.31.0/24 -j ACCEPT") {
+		t.Fatalf("unexpected V4OutACL for allowlist:\n%s", v4OutAllow)
+	}
+	if !strings.Contains(v4OutAllow, "--ctdir REPLY -j ACCEPT") || !strings.Contains(v4OutAllow, "-j DROP") {
+		t.Fatalf("V4OutACL missing conntrack reply or final drop:\n%s", v4OutAllow)
+	}
+	v4FwdAllow := joinLines(rsAllow.V4FwdACL)
+	if !strings.Contains(v4FwdAllow, "-s 192.168.55.0/24 -d 192.168.31.88 -j ACCEPT") || strings.Contains(v4FwdAllow, "-s 192.168.55.0/24 -d 192.168.31.0/24 -j ACCEPT") {
+		t.Fatalf("expected bidirectional peer forward limited to allowlisted host:\n%s", v4FwdAllow)
+	}
+	if !strings.Contains(v4FwdAllow, "-d 192.168.31.88 -j RETURN") || !strings.Contains(v4FwdAllow, "-d 192.168.31.0/24 -j DROP") {
+		t.Fatalf("expected personal-device allowlist tail in V4FwdACL:\n%s", v4FwdAllow)
+	}
+
+	// 2. Denylist mode
+	rsDeny, err := tailscale.RenderIPTablesP2P(config.TailscaleP2PAssistConfig{
+		Enabled:       true,
+		RoleMode:      "router",
+		PayloadFilter: boolPtr(true),
+		LocalRules: []config.TailscaleLocalSubnetRule{
+			{CIDR: "192.168.31.0/24", Scope: config.TailscaleScopeDenylist, Devices: []string{"192.168.31.151"}},
+		},
+	}, peers, "192.168.31.0/24", now)
+	if err != nil {
+		t.Fatalf("denylist RenderIPTablesP2P failed: %v", err)
+	}
+	v4OutDeny := joinLines(rsDeny.V4OutACL)
+	if strings.Index(v4OutDeny, "-s 192.168.31.151 -j DROP") >= strings.Index(v4OutDeny, "-s 192.168.31.0/24 -j ACCEPT") {
+		t.Fatalf("denylist drop must precede subnet accept in V4OutACL:\n%s", v4OutDeny)
+	}
+	v4FwdDeny := joinLines(rsDeny.V4FwdACL)
+	if !strings.Contains(v4FwdDeny, "-d 192.168.31.151 -j DROP") {
+		t.Fatalf("denylist must block ingress to excluded IP in V4FwdACL:\n%s", v4FwdDeny)
+	}
+}

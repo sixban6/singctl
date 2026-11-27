@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -130,6 +131,7 @@ type Server struct {
 
 	cfgMu          sync.Mutex
 	cfgStore       *config.Store
+	passwordPtr    atomic.Pointer[string]
 	auditLimiter   *AuditRateLimiter
 	auditCollector *audit.Collector
 	loginLimiter   *loginRateLimiter
@@ -214,6 +216,8 @@ func New(opts Options) *Server {
 		cpuSampler:        cpuSampler,
 		shutdownCh:        make(chan struct{}),
 	}
+	initPW := opts.Password
+	s.passwordPtr.Store(&initPW)
 	if opts.NotifyDispatcher != nil {
 		s.notifier = opts.NotifyDispatcher
 	} else {
@@ -250,6 +254,7 @@ func (s *Server) registerRoutes() {
 	// 公开鉴权握手与登录 API
 	s.Mux.HandleFunc("GET /api/auth/check", s.handleAuthCheck)
 	s.Mux.HandleFunc("POST /api/auth/login", s.handleAuthLogin)
+	s.Mux.HandleFunc("PUT /api/auth/password", s.guard(s.handleAuthPasswordPut))
 
 	// 只读与基础配置 API
 	s.Mux.HandleFunc("GET /api/status", s.guard(s.handleStatus))
@@ -298,9 +303,11 @@ func (s *Server) registerRoutes() {
 	s.Mux.HandleFunc("POST /api/dns/leak-test", s.guard(s.handleDNSLeakTestPost))
 	s.Mux.HandleFunc("POST /api/dns/browser-doh", s.guard(s.handleBrowserDoHCheckPost))
 
-	// Tailscale 局部配置、P2P 直连防线与升级 API
+	// Tailscale 局部配置、统一组网视图、P2P 直连防线与升级 API
 	s.Mux.HandleFunc("GET /api/tailscale/config", s.guard(s.handleTailscaleConfigGet))
 	s.Mux.HandleFunc("PUT /api/tailscale/config", s.guard(s.handleTailscaleConfigPut))
+	s.Mux.HandleFunc("GET /api/tailscale/mesh", s.guard(s.handleTailscaleMeshGet))
+	s.Mux.HandleFunc("PUT /api/tailscale/mesh", s.guard(s.handleTailscaleMeshPut))
 	s.Mux.HandleFunc("GET /api/tailscale/p2p", s.guard(s.handleTailscaleP2PGet))
 	s.Mux.HandleFunc("PUT /api/tailscale/p2p", s.guard(s.handleTailscaleP2PPut))
 	s.Mux.HandleFunc("POST /api/tailscale/p2p/poke", s.guard(s.handleTailscaleP2PPokePost))
@@ -539,6 +546,23 @@ func (s *Server) buildLifecycle(bgCtx context.Context, cancelBg context.CancelFu
 			},
 		},
 		lifecycle.FuncService{
+			ServiceName: "webui-tailscale-p2p-boot-sync",
+			OnPostStart: func(context.Context) error {
+				if runtime.GOOS == "linux" && !s.opts.EmbeddedInDaemon && s.opts.TailscaleP2PForTest == nil {
+					go func() {
+						cfg, err := s.loadConfigSnapshot()
+						if err != nil || cfg == nil || !cfg.Tailscale.P2PAssist.Enabled {
+							return
+						}
+						rCtx, cancel := context.WithTimeout(bgCtx, 10*time.Second)
+						defer cancel()
+						_, _ = s.tailscaleP2PController().Reconcile(rCtx, cfg.Tailscale.P2PAssist)
+					}()
+				}
+				return nil
+			},
+		},
+		lifecycle.FuncService{
 			ServiceName: "webui-modem-proxy",
 			OnClose: func() error {
 				if s.modemProxy != nil {
@@ -683,7 +707,7 @@ func (s *Server) printBanner(ln net.Listener) {
 	for _, a := range FormatListenURLs(ln.Addr().String()) {
 		logger.Info("  ➜  http://%s", a)
 	}
-	if s.opts.Password == "" {
+	if s.currentPassword() == "" {
 		logger.Warn("  ⚠  未设置访问口令,请确保仅暴露在可信内网(建议 --password 或 SINGCTL_WEB_PASSWORD)")
 	}
 }

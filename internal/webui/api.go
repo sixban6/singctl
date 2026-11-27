@@ -62,7 +62,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	status := map[string]any{
 		"singctlVersion": s.opts.Version,
-		"authEnabled":    s.opts.Password != "",
+		"authEnabled":    s.currentPassword() != "",
 		"sessionToken":   s.SessionToken(),
 		"host":           host,
 		"singbox":        sb,

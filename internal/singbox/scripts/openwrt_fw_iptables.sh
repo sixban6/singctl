@@ -133,6 +133,10 @@ fw_apply_ipv4() {
     iptables -t mangle -A SING_BOX -d 224.0.0.0/4 -j RETURN
     iptables -t mangle -A SING_BOX -d 255.255.255.255/32 -j RETURN
 
+    # 7.5 放行下游设备（二级路由/手机/电脑/NAS）的 Tailscale UDP 41641 P2P 打洞流量
+    iptables -t mangle -A SING_BOX -p udp --sport 41641 -j RETURN
+    iptables -t mangle -A SING_BOX -p udp --dport 41641 -j RETURN
+
     # 8. 其余 TCP/UDP 全部交由 TProxy 代理
     iptables -t mangle -A SING_BOX -p tcp -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark "$PROXY_FWMARK"
     iptables -t mangle -A SING_BOX -p udp -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark "$PROXY_FWMARK"
@@ -227,6 +231,10 @@ fw_apply_ipv6() {
     for pfx in $LAN_IPV6_PFXS; do
         ip6tables -t mangle -A SING_BOX -d "$pfx" -j RETURN
     done
+
+    # 5.5 放行下游设备的 IPv6 Tailscale UDP 41641 P2P 打洞流量
+    ip6tables -t mangle -A SING_BOX -p udp --sport 41641 -j RETURN
+    ip6tables -t mangle -A SING_BOX -p udp --dport 41641 -j RETURN
 
     # 6. 其余 IPv6 TCP/UDP 全部走 TProxy
     ip6tables -t mangle -A SING_BOX -p tcp -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark "$PROXY_FWMARK"

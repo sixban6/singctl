@@ -113,6 +113,32 @@ exit 1
 		st["version"] != "1.104.8" || st["authKeySet"] != true {
 		t.Fatalf("unexpected InspectHostStatus: %+v", st)
 	}
+
+	// Tailscale >= 1.104 populates Self.PrimaryRoutes / Self.AllowedIPs without Self.AdvertisedRoutes.
+	scriptV104 := `#!/bin/sh
+if [ "$1" = "version" ]; then
+  echo "1.104.7"
+  exit 0
+fi
+if [ "$1" = "status" ] && [ "$2" = "--json" ]; then
+  cat <<'EOF'
+{"BackendState":"Running","Self":{"TailscaleIPs":["100.108.214.2","fd7a:115c:a1e0::1"],"PrimaryRoutes":["192.168.31.0/24"],"AllowedIPs":["100.108.214.2/32","fd7a:115c:a1e0::1/128","192.168.31.0/24","0.0.0.0/0","::/0"],"ExitNodeOption":true}}
+EOF
+  exit 0
+fi
+exit 1
+`
+	if err := os.WriteFile(fakeTS, []byte(scriptV104), 0755); err != nil {
+		t.Fatal(err)
+	}
+	stV104 := tailscale.InspectHostStatus(t.Context(), tailscale.HostStatusOptions{
+		BinPath:           fakeTS,
+		LocalAPI:          localAPI,
+		AuthKeyConfigured: true,
+	})
+	if stV104["mode"] != "gateway" || stV104["liveSubnets"] != "192.168.31.0/24" || stV104["subnets"] != "192.168.31.0/24" || stV104["selfIp"] != "100.108.214.2" {
+		t.Fatalf("expected PrimaryRoutes/AllowedIPs fallback for Tailscale 1.104+, got: %+v", stV104)
+	}
 }
 
 func TestNormalizeAndValidateP2PAssistConfig_And_BuildP2PReport(t *testing.T) {

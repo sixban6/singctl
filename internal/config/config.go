@@ -169,7 +169,7 @@ var knownYAMLKeys = []string{
 	"include", "exclude", "rename", "match", "replace",
 	"github", "mirror_url", "hy2", "up", "down",
 	"tailscale", "auth_key", "use_build", constant.TailscaleSubnets,
-	"p2p_assist", "jit_window_sec", "cooldown_sec", "payload_filter", "sandbox_ujail", "listen_port", "peers", "id", "tailscale_ip", "jit_enabled", "access_mode", "bidirectional_until", "allowed_lan_targets",
+	"p2p_assist", "role_mode", "local_rules", "cidr", "scope", "jit_window_sec", "cooldown_sec", "payload_filter", "downstream_assist", "sandbox_ujail", "listen_port", "peers", "id", "tailscale_ip", "jit_enabled", "access_mode", "bidirectional_until", "allowed_lan_targets",
 	"server", "node_tag", "sb_domain", "node_domain", "hy2_port", "vless_port", "substore_domain", "server_ip",
 	"cf_dns_key", "sni", "cors_allowed_origins",
 	"web_terminal", "mtls_ca", "ssh_tunnel_port", "ssh_tunnel_path", "ssh_port",

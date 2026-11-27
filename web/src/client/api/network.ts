@@ -12,6 +12,9 @@ import {
   ModemProxyStatusInfo,
   ModemStatusResponse,
   TailscaleConfigResponse,
+  TailscaleMeshSaveRequest,
+  TailscaleMeshSaveResponse,
+  TailscaleMeshTopologyResponse,
   TailscaleP2PAssistConfig,
   TailscaleP2PPokeResult,
   TailscaleP2PReport,
@@ -113,6 +116,14 @@ export const networkApi = {
     }),
 
   getTailscaleP2P: () => request<TailscaleP2PReport>('/api/tailscale/p2p'),
+
+  getTailscaleMesh: () => request<TailscaleMeshTopologyResponse>('/api/tailscale/mesh'),
+
+  saveTailscaleMesh: (payload: TailscaleMeshSaveRequest) =>
+    request<TailscaleMeshSaveResponse>('/api/tailscale/mesh', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
 
   saveTailscaleP2P: (payload: TailscaleP2PAssistConfig) =>
     request<TailscaleP2PReport>('/api/tailscale/p2p', {

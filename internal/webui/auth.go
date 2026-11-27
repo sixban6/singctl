@@ -18,13 +18,26 @@ import (
 	"singctl/internal/common/netx"
 )
 
+func (s *Server) currentPassword() string {
+	if p := s.passwordPtr.Load(); p != nil {
+		return *p
+	}
+	return s.opts.Password
+}
+
+func (s *Server) setPasswordRuntime(pw string) {
+	cp := pw
+	s.passwordPtr.Store(&cp)
+}
+
 // SessionToken 根据访问口令派生无状态持久化 Token (HMAC-SHA256)
 func (s *Server) SessionToken() string {
-	if s.opts.Password == "" {
+	pw := s.currentPassword()
+	if pw == "" {
 		return ""
 	}
 	mac := hmac.New(sha256.New, []byte("singctl-webui-session-salt-v1"))
-	mac.Write([]byte(s.opts.Password))
+	mac.Write([]byte(pw))
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
@@ -137,7 +150,8 @@ func (s *Server) authOnly(next http.Handler) http.Handler {
 
 // authorized 校验多通道凭据 (支持 Cookie、Bearer Token、URL 参数、Basic Auth)
 func (s *Server) authorized(r *http.Request) bool {
-	if s.opts.Password == "" {
+	pw := s.currentPassword()
+	if pw == "" {
 		return true
 	}
 	expectedToken := s.SessionToken()
@@ -164,7 +178,7 @@ func (s *Server) authorized(r *http.Request) bool {
 		}
 	}
 	if qPass := r.URL.Query().Get("password"); qPass != "" {
-		if subtle.ConstantTimeCompare([]byte(qPass), []byte(s.opts.Password)) == 1 {
+		if subtle.ConstantTimeCompare([]byte(qPass), []byte(pw)) == 1 {
 			return true
 		}
 	}
@@ -172,7 +186,7 @@ func (s *Server) authorized(r *http.Request) bool {
 	// 4. 标准 HTTP Basic Auth (admin / password)
 	user, pass, ok := r.BasicAuth()
 	if ok && user == "admin" {
-		if subtle.ConstantTimeCompare([]byte(pass), []byte(s.opts.Password)) == 1 {
+		if subtle.ConstantTimeCompare([]byte(pass), []byte(pw)) == 1 {
 			return true
 		}
 	}
@@ -203,7 +217,7 @@ func (s *Server) handleAuthCheck(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := map[string]any{
 		"ok":            true,
-		"authRequired":  s.opts.Password != "",
+		"authRequired":  s.currentPassword() != "",
 		"authenticated": authed,
 	}
 	if authed && s.opts.Version != "" {
@@ -237,7 +251,8 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.opts.Password == "" {
+	curPW := s.currentPassword()
+	if curPW == "" {
 		if s.loginLimiter != nil {
 			s.loginLimiter.reset(clientIP)
 		}
@@ -245,7 +260,7 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if subtle.ConstantTimeCompare([]byte(body.Password), []byte(s.opts.Password)) != 1 {
+	if subtle.ConstantTimeCompare([]byte(body.Password), []byte(curPW)) != 1 {
 		if s.loginLimiter != nil {
 			s.loginLimiter.recordFailure(clientIP)
 		}
@@ -260,6 +275,57 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":    true,
 		"token": s.SessionToken(),
+	})
+}
+
+// handleAuthPasswordPut 支持在不中断当前登录态的前提下设置或更新 0600 落盘的 WebUI 访问口令。
+func (s *Server) handleAuthPasswordPut(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		CurrentPassword string `json:"currentPassword"`
+		Password        string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+
+	curPW := s.currentPassword()
+	if curPW != "" && subtle.ConstantTimeCompare([]byte(body.CurrentPassword), []byte(curPW)) != 1 {
+		writeJSONError(w, http.StatusForbidden, "当前访问口令校验未通过")
+		return
+	}
+
+	if strings.ContainsAny(body.Password, "\r\n\x00") {
+		writeJSONError(w, http.StatusBadRequest, "访问口令包含非法换行或控制字符")
+		return
+	}
+	if body.Password != "" && (len(body.Password) < 6 || len(body.Password) > 128) {
+		writeJSONError(w, http.StatusBadRequest, "访问口令长度须在 6～128 位之间")
+		return
+	}
+
+	pwPath := WebPasswordFilePath(s.opts.ConfigPath)
+	if err := WriteWebPasswordFile(pwPath, body.Password); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "持久化 WebUI 口令文件失败: "+err.Error())
+		return
+	}
+	s.setPasswordRuntime(body.Password)
+	if body.Password != "" {
+		s.issueAuthCookie(w)
+	} else {
+		http.SetCookie(w, &http.Cookie{
+			Name:     SessionCookieName,
+			Value:    "",
+			Path:     "/",
+			MaxAge:   -1,
+			HttpOnly: true,
+			SameSite: http.SameSiteLaxMode,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":           true,
+		"authRequired": body.Password != "",
+		"token":        s.SessionToken(),
 	})
 }
 

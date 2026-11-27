@@ -217,8 +217,58 @@ export interface ClientTailscaleStatus {
   mode: '' | 'router' | 'exit' | 'gateway' | 'client' | string;
   acceptRoutes?: boolean;
   subnets?: string;
+  liveSubnets?: string;
+  selfIp?: string;
+  needsLogin?: boolean;
+  authUrl?: string;
+  tunAvailable?: boolean;
+  userspaceMode?: boolean;
+  tunInterfaceUp?: boolean;
+  canSwitchToKernel?: boolean;
+  tunReason?: string;
   version: string;
   authKeySet: boolean;
+}
+
+export type TailscaleLocalNetworkKind = 'primary_lan' | 'vlan' | 'downstream_subnet' | 'custom' | string;
+export type TailscaleSubnetScope = 'all' | 'allowlist' | 'denylist';
+
+export interface TailscaleLocalDeviceDTO {
+  ip: string;
+  name: string;
+  mac?: string;
+  online: boolean;
+  staticLease: boolean;
+  isDownstream?: boolean;
+}
+
+export interface TailscaleLocalSubnetRuleDTO {
+  cidr: string;
+  scope: TailscaleSubnetScope | string;
+  devices?: string[];
+}
+
+export interface TailscaleLocalNetworkDTO {
+  cidr: string;
+  kind: TailscaleLocalNetworkKind;
+  label: string;
+  interface?: string;
+  viaGateway?: string;
+  ssid?: string;
+  vlanId?: number;
+  onlineClients?: number;
+  selected: boolean;
+  scope?: TailscaleSubnetScope | string;
+  selectedDevices?: string[];
+  devices?: TailscaleLocalDeviceDTO[];
+  approved?: boolean;
+  natHint?: string;
+}
+
+export interface AuthPasswordUpdateResponse {
+  ok: boolean;
+  authRequired: boolean;
+  token: string;
 }
 
 export interface TailscaleConfigResponse {
@@ -248,6 +298,7 @@ export interface TailscaleP2PAssistConfig {
   sandbox_ujail?: boolean;
   listen_port?: number;
   peers?: TailscaleP2PPeerConfig[];
+  downstream_assist?: boolean;
 }
 
 export interface TailscaleP2PPeerView {
@@ -280,6 +331,8 @@ export interface TailscaleP2PPeerView {
 export interface TailscaleP2PRuntimeSnapshot {
   enabled: boolean;
   applyMode?: string;
+  downstreamV4Active?: boolean;
+  downstreamV6Active?: boolean;
   openPinholes: number;
   openPinholeIPs?: string[];
   updatedAt?: string;
@@ -315,6 +368,38 @@ export interface TailscaleP2PPokeResult {
   candidateCount: number;
   message: string;
   report?: TailscaleP2PReport;
+}
+
+export interface TailscaleMeshTopologyResponse {
+  gatewayRole: GatewayRoleMode | string;
+  roleMode?: string;
+  webPasswordConfigured: boolean;
+  lanShieldActive: boolean;
+  tailscaleStatus: ClientTailscaleStatus;
+  config: TailscaleConfigResponse;
+  localNetworks: TailscaleLocalNetworkDTO[];
+  p2p: TailscaleP2PReport;
+  gatewayPeers: TailscaleP2PPeerView[];
+  personalDevices: TailscaleP2PPeerView[];
+}
+
+export interface TailscaleMeshSaveRequest {
+  mode?: 'client' | 'router' | 'exit' | 'gateway' | string;
+  subnets: string[];
+  local_rules?: TailscaleLocalSubnetRuleDTO[];
+  peers: TailscaleP2PPeerConfig[];
+  jit_window_sec?: number;
+  cooldown_sec?: number;
+  sandbox_ujail?: boolean;
+  downstream_assist?: boolean;
+}
+
+export interface TailscaleMeshSaveResponse {
+  ok: boolean;
+  appliedLive: boolean;
+  applyMode?: string;
+  message: string;
+  mesh: TailscaleMeshTopologyResponse;
 }
 
 export type TailscaleUpgradePhase =

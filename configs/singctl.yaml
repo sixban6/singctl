@@ -43,12 +43,19 @@ tailscale:                                      # (可选) Tailscale 部署配�
   auth_key: ""                                  # (可选) Tailscale 授权密钥。默认是: ""
   subnets: ""                                   # (可选) 配置通告的子网，默认为空，程序会自动获取
   use_build: false                              # (可选) 是否使用singbox内置的TailScale。默认：false, 不启用
-  # p2p_assist:                                 # (可选) Tailscale P2P 直连防线（零常驻公网暴露 + 3 态双向管控）
+  # p2p_assist:                                 # (可选) Tailscale P2P 直连防线（零常驻公网暴露 + 网段/单设备双向管控 + 下游边界微窗）
   #   enabled: false
+  #   role_mode: "router"                       # client | router | exit | gateway
   #   jit_window_sec: 5                         # 瞬时打洞白名单窗口（秒，3~10，默认 5）
   #   cooldown_sec: 300                         # 连续失败退避冷却（秒，默认 300；退避期间继续经 DERP 转发）
   #   payload_filter: true                      # Layer 2 内核 DISCO/WireGuard/STUN 魔法头校验
+  #   downstream_assist: true                   # 主路由未跑 Tailscale 时，为下游路由/NAS 提供出站触发式 5s 边界动态微窗（默认 true）
   #   sandbox_ujail: false                      # (可选) Layer 3 OpenWrt ujail 沙盒隔离
+  #   local_rules:                              # (可选) 按网段与单台设备精细管控进出组网权限
+  #     - cidr: "192.168.1.0/24"
+  #       scope: "all"                          # all | allowlist | denylist
+  #       devices:
+  #         - "192.168.1.10"
   #   peers:
   #     - name: "router-remote"
   #       jit_enabled: true

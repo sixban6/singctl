@@ -445,7 +445,32 @@ const (
 	TailscaleAccessOutboundOnly       = "outbound_only"
 	TailscaleAccessBidirectionalTimed = "bidirectional_timed"
 	TailscaleAccessBidirectional      = "bidirectional"
+
+	TailscaleScopeAll       = "all"
+	TailscaleScopeAllowlist = "allowlist"
+	TailscaleScopeDenylist  = "denylist"
 )
+
+// NormalizeTailscaleSubnetScope 校验并归一化本地网段的设备参与模式（all / allowlist / denylist）。
+func NormalizeTailscaleSubnetScope(raw string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", TailscaleScopeAll:
+		return TailscaleScopeAll, true
+	case TailscaleScopeAllowlist:
+		return TailscaleScopeAllowlist, true
+	case TailscaleScopeDenylist:
+		return TailscaleScopeDenylist, true
+	default:
+		return "", false
+	}
+}
+
+// TailscaleLocalSubnetRule 定义单个本机/下级网段内部的具体设备级允许或排除策略。
+type TailscaleLocalSubnetRule struct {
+	CIDR    string   `yaml:"cidr" json:"cidr"`
+	Scope   string   `yaml:"scope,omitempty" json:"scope,omitempty"`
+	Devices []string `yaml:"devices,omitempty" json:"devices,omitempty"`
+}
 
 // NormalizeTailscaleAccessMode 校验并归一化 Tailscale 异地子网双向互访模式。
 // 空字符串视为默认值 outbound_only 并返回合法；其余未识别值返回 false。
@@ -516,22 +541,35 @@ func (p TailscaleP2PPeerConfig) EffectiveAccessMode(now time.Time) string {
 
 // TailscaleP2PAssistConfig 控制 Tailscale WAN 口零常驻暴露的 JIT 瞬时打洞与入向最小权限防护。
 type TailscaleP2PAssistConfig struct {
-	Enabled       bool                     `yaml:"enabled" json:"enabled"`
-	JITWindowSec  int                      `yaml:"jit_window_sec,omitempty" json:"jit_window_sec,omitempty"`
-	CooldownSec   int                      `yaml:"cooldown_sec,omitempty" json:"cooldown_sec,omitempty"`
-	PayloadFilter *bool                    `yaml:"payload_filter,omitempty" json:"payload_filter,omitempty"`
-	SandboxUjail  bool                     `yaml:"sandbox_ujail,omitempty" json:"sandbox_ujail,omitempty"`
-	ListenPort    int                      `yaml:"listen_port,omitempty" json:"listen_port,omitempty"`
-	Peers         []TailscaleP2PPeerConfig `yaml:"peers,omitempty" json:"peers,omitempty"`
+	Enabled          bool                       `yaml:"enabled" json:"enabled"`
+	RoleMode         string                     `yaml:"role_mode,omitempty" json:"role_mode,omitempty"`
+	JITWindowSec     int                        `yaml:"jit_window_sec,omitempty" json:"jit_window_sec,omitempty"`
+	CooldownSec      int                        `yaml:"cooldown_sec,omitempty" json:"cooldown_sec,omitempty"`
+	PayloadFilter    *bool                      `yaml:"payload_filter,omitempty" json:"payload_filter,omitempty"`
+	DownstreamAssist *bool                      `yaml:"downstream_assist,omitempty" json:"downstream_assist,omitempty"`
+	SandboxUjail     bool                       `yaml:"sandbox_ujail,omitempty" json:"sandbox_ujail,omitempty"`
+	ListenPort       int                        `yaml:"listen_port,omitempty" json:"listen_port,omitempty"`
+	LocalRules       []TailscaleLocalSubnetRule `yaml:"local_rules,omitempty" json:"local_rules,omitempty"`
+	Peers            []TailscaleP2PPeerConfig   `yaml:"peers,omitempty" json:"peers,omitempty"`
+}
+
+func (c TailscaleP2PAssistConfig) EffectiveDownstreamAssist() bool {
+	if c.DownstreamAssist == nil {
+		return true
+	}
+	return *c.DownstreamAssist
 }
 
 func (c TailscaleP2PAssistConfig) IsZero() bool {
 	return !c.Enabled &&
+		c.RoleMode == "" &&
 		c.JITWindowSec == 0 &&
 		c.CooldownSec == 0 &&
 		c.PayloadFilter == nil &&
+		c.DownstreamAssist == nil &&
 		!c.SandboxUjail &&
 		c.ListenPort == 0 &&
+		len(c.LocalRules) == 0 &&
 		len(c.Peers) == 0
 }
 

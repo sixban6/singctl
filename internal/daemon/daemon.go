@@ -214,6 +214,15 @@ func NewDaemonWithOptions(cfg *config.Config, opts DaemonOptions) *Daemon {
 		p2pCtrl = &tailscale.P2PAssistController{
 			BaseCtx: ctx,
 			DefaultLANCIDR: func() string {
+				if cfg := cfgStore.Get(); cfg != nil {
+					rm := strings.ToLower(strings.TrimSpace(cfg.Tailscale.P2PAssist.RoleMode))
+					if rm == "client" || rm == "exit" {
+						return ""
+					}
+					if strings.TrimSpace(cfg.Tailscale.Subnets) != "" {
+						return strings.TrimSpace(cfg.Tailscale.Subnets)
+					}
+				}
 				s, err := netx.GetLANSubnet()
 				if err != nil {
 					return ""

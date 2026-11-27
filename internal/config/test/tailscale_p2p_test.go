@@ -230,3 +230,83 @@ tailscale:
 		t.Fatalf("expected raw migrated YAML to contain p2p_assist:\n%s", string(raw))
 	}
 }
+
+func TestTailscaleLocalSubnetRule_ScopeNormalizationAndClone(t *testing.T) {
+	if s, ok := config.NormalizeTailscaleSubnetScope(""); !ok || s != config.TailscaleScopeAll {
+		t.Fatalf("empty scope got (%q, %v), want (%q, true)", s, ok, config.TailscaleScopeAll)
+	}
+	if s, ok := config.NormalizeTailscaleSubnetScope("ALLOWLIST"); !ok || s != config.TailscaleScopeAllowlist {
+		t.Fatalf("allowlist got (%q, %v)", s, ok)
+	}
+	if s, ok := config.NormalizeTailscaleSubnetScope("denylist"); !ok || s != config.TailscaleScopeDenylist {
+		t.Fatalf("denylist got (%q, %v)", s, ok)
+	}
+	if _, ok := config.NormalizeTailscaleSubnetScope("bogus"); ok {
+		t.Fatal("expected invalid scope to return ok=false")
+	}
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "singctl.yaml")
+	raw := `subs:
+  - name: "main"
+    url: "https://example.com/sub"
+tailscale:
+  subnets: "192.168.31.0/24"
+  p2p_assist:
+    enabled: true
+    role_mode:"gateway"
+    local_rules:
+      - cidr:"192.168.31.0/24"
+        scope:"allowlist"
+        devices:
+          - "192.168.31.88"
+`
+	if err := os.WriteFile(cfgPath, []byte(raw), 0600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if loaded.Tailscale.P2PAssist.RoleMode != "gateway" || len(loaded.Tailscale.P2PAssist.LocalRules) != 1 {
+		t.Fatalf("unexpected RoleMode/LocalRules after load: %+v", loaded.Tailscale.P2PAssist)
+	}
+	cloned := loaded.Clone()
+	cloned.Tailscale.P2PAssist.LocalRules[0].Devices[0] = "192.168.31.99"
+	if loaded.Tailscale.P2PAssist.LocalRules[0].Devices[0] != "192.168.31.88" {
+		t.Fatal("Clone did not isolate LocalRules.Devices slice")
+	}
+}
+
+func TestTailscaleP2PAssistConfig_DownstreamAssistDefaultsAndClone(t *testing.T) {
+	var zero config.TailscaleP2PAssistConfig
+	if !zero.EffectiveDownstreamAssist() {
+		t.Fatal("expected nil DownstreamAssist to default to true")
+	}
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "singctl.yaml")
+	raw := `subs:
+  - name: "main"
+    url: "https://example.com/sub"
+tailscale:
+  p2p_assist:
+    enabled: true
+    downstream_assist:false
+`
+	if err := os.WriteFile(cfgPath, []byte(raw), 0600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if loaded.Tailscale.P2PAssist.EffectiveDownstreamAssist() {
+		t.Fatal("expected explicit downstream_assist:false to evaluate false")
+	}
+	cloned := loaded.Clone()
+	*cloned.Tailscale.P2PAssist.DownstreamAssist = true
+	if loaded.Tailscale.P2PAssist.EffectiveDownstreamAssist() {
+		t.Fatal("Clone did not isolate DownstreamAssist pointer")
+	}
+}

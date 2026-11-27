@@ -1,4 +1,5 @@
 import {
+  AuthPasswordUpdateResponse,
   CacheResponse,
   ClientAutoStartSaveResponse,
   ClientAutoStartStatus,
@@ -35,6 +36,19 @@ export const systemApi = {
     });
     if (data?.token) {
       saveClientToken(data.token);
+    }
+    return data;
+  },
+
+  updatePassword: async (payload: { password: string; currentPassword?: string }) => {
+    const data = await request<AuthPasswordUpdateResponse>('/api/auth/password', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    });
+    if (data?.token) {
+      saveClientToken(data.token);
+    } else if (!data?.authRequired) {
+      clearSavedClientToken();
     }
     return data;
   },

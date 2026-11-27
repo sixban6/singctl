@@ -301,6 +301,10 @@ table inet sing-box {
         ip daddr @LOCAL_IPV4_SET accept
         ip6 daddr @LOCAL_IPV6_SET accept
 
+        # 放行下游设备的 Tailscale P2P UDP 41641 打洞流量
+        udp sport 41641 accept comment "Bypass downstream Tailscale UDP port"
+        udp dport 41641 accept comment "Bypass downstream Tailscale UDP port"
+
         # TProxy 流量处理
         meta l4proto { tcp, udp } tproxy to :$TPROXY_PORT meta mark set $PROXY_FWMARK accept
     }
@@ -376,6 +380,8 @@ setup_iptables() {
     iptables -t mangle -A SINGBOX -d 169.254.0.0/16 -j RETURN
     iptables -t mangle -A SINGBOX -d 224.0.0.0/4 -j RETURN
     iptables -t mangle -A SINGBOX -d 255.255.255.255/32 -j RETURN
+    iptables -t mangle -A SINGBOX -p udp --sport 41641 -j RETURN
+    iptables -t mangle -A SINGBOX -p udp --dport 41641 -j RETURN
     
     # 其他流量重定向
     iptables -t mangle -A SINGBOX -p tcp -j TPROXY --tproxy-mark $PROXY_FWMARK --on-port $TPROXY_PORT

@@ -376,3 +376,328 @@ func TestFW4Manager_PinholesAndCountAndRemove(t *testing.T) {
 		t.Fatalf("unexpected direct nft remove script:\n%s", removeScript)
 	}
 }
+
+func TestRenderFW4DropIns_MultiSubnetAndBidirectionalRouterInput(t *testing.T) {
+	now := time.Date(2026, 11, 27, 0, 0, 0, 0, time.UTC)
+	cfg := config.TailscaleP2PAssistConfig{
+		Enabled:       true,
+		JITWindowSec:  5,
+		PayloadFilter: boolPtr(true),
+		ListenPort:    41641,
+	}
+	peers := []tailscale.ResolvedPeerACL{
+		{
+			Config: config.TailscaleP2PPeerConfig{
+				ID:         "nHome1",
+				Name:       "home-main",
+				JITEnabled: true,
+				AccessMode: config.TailscaleAccessBidirectional,
+			},
+			TailscaleIPs:  []string{"100.96.182.83"},
+			PrimaryRoutes: []string{"192.168.55.0/24"},
+		},
+		{
+			Config: config.TailscaleP2PPeerConfig{
+				ID:                "nNarrow",
+				Name:              "guest-gw",
+				JITEnabled:        true,
+				AccessMode:        config.TailscaleAccessBidirectional,
+				AllowedLANTargets: []string{"192.168.31.10:8080"},
+			},
+			TailscaleIPs: []string{"100.96.182.99"},
+		},
+	}
+
+	dropIns, err := tailscale.RenderFW4DropIns(cfg, peers, "192.168.31.0/24, 192.168.27.0/24, 0.0.0.0/0, ::/0", now)
+	if err != nil {
+		t.Fatalf("RenderFW4DropIns failed: %v", err)
+	}
+
+	fwdRules := strings.Join(dropIns.ForwardACLRules, "\n")
+	for _, want := range []string{
+		"ip saddr 100.96.182.83 ip daddr 192.168.31.0/24 counter accept",
+		"ip saddr 100.96.182.83 ip daddr 192.168.27.0/24 counter accept",
+		"ip saddr 192.168.55.0/24 ip daddr 192.168.31.0/24 counter accept",
+		"ip saddr 192.168.55.0/24 ip daddr 192.168.27.0/24 counter accept",
+	} {
+		if !strings.Contains(fwdRules, want) {
+			t.Fatalf("ForwardACLRules missing %q:\n%s", want, fwdRules)
+		}
+	}
+	if strings.Contains(fwdRules, "0.0.0.0/0") || strings.Contains(fwdRules, "::/0") {
+		t.Fatalf("ForwardACLRules must ignore exit node routes:\n%s", fwdRules)
+	}
+
+	inputRules := strings.Join(dropIns.InputACLRules, "\n")
+	for _, want := range []string{
+		"ip saddr 100.96.182.83 ip daddr 192.168.31.0/24 counter accept",
+		"ip saddr 100.96.182.83 ip daddr 192.168.27.0/24 counter accept",
+		"ip saddr 192.168.55.0/24 ip daddr 192.168.31.0/24 counter accept",
+		"ip saddr 100.96.182.83 ip daddr 100.64.0.0/10 counter accept",
+		"ip saddr 192.168.55.0/24 ip daddr 100.64.0.0/10 counter accept",
+		"ip saddr 100.96.182.83 counter drop",
+	} {
+		if !strings.Contains(inputRules, want) {
+			t.Fatalf("InputACLRules missing %q:\n%s", want, inputRules)
+		}
+	}
+	// Accept rules MUST appear before fallback drop for nHome1.
+	accIdx := strings.Index(inputRules, "ip saddr 192.168.55.0/24 ip daddr 192.168.31.0/24 counter accept")
+	dropIdx := strings.Index(inputRules, "ip saddr 192.168.55.0/24 counter drop")
+	if accIdx < 0 || dropIdx < 0 || accIdx >= dropIdx {
+		t.Fatalf("accept rule must precede drop rule (acc=%d, drop=%d):\n%s", accIdx, dropIdx, inputRules)
+	}
+	// Narrow peer must NOT emit broad CGNAT accept.
+	if strings.Contains(inputRules, "ip saddr 100.96.182.99 ip daddr 100.64.0.0/10 counter accept") {
+		t.Fatalf("narrow AllowedLANTargets peer must not allow broad CGNAT router input:\n%s", inputRules)
+	}
+}
+
+func TestRenderFW4DropIns_LocalDeviceScopesAndEgressACL(t *testing.T) {
+	now := time.Date(2026, 11, 27, 1, 0, 0, 0, time.UTC)
+	peers := []tailscale.ResolvedPeerACL{
+		{
+			Config: config.TailscaleP2PPeerConfig{
+				ID:         "nHome1",
+				Name:       "ax3000t",
+				JITEnabled: true,
+				AccessMode: config.TailscaleAccessBidirectional,
+			},
+			TailscaleIPs:  []string{"100.96.182.83"},
+			PrimaryRoutes: []string{"192.168.55.0/24"},
+		},
+	}
+
+	// 1. Scope=all emits subnet egress accept & reply conntrack & drop tail.
+	dropAll, err := tailscale.RenderFW4DropIns(config.TailscaleP2PAssistConfig{
+		Enabled:       true,
+		RoleMode:      "router",
+		PayloadFilter: boolPtr(true),
+		LocalRules: []config.TailscaleLocalSubnetRule{
+			{CIDR: "192.168.31.0/24", Scope: config.TailscaleScopeAll},
+		},
+	}, peers, "192.168.31.0/24", now)
+	if err != nil {
+		t.Fatalf("Scope=all failed: %v", err)
+	}
+	egressAll := strings.Join(dropAll.EgressACLRules, "\n")
+	for _, want := range []string{
+		"ct state { established, related } ct direction reply counter accept",
+		"ip saddr 100.64.0.0/10 counter accept",
+		"ip saddr 192.168.31.0/24 counter accept",
+		"counter drop",
+	} {
+		if !strings.Contains(egressAll, want) {
+			t.Fatalf("Scope=all EgressACLRules missing %q:\n%s", want, egressAll)
+		}
+	}
+	if !strings.Contains(dropAll.ForwardEgressPre, `oifname "tailscale*" jump singctl_ts_egress_acl comment "singctl-ts-acl"`) {
+		t.Fatalf("unexpected ForwardEgressPre:\n%s", dropAll.ForwardEgressPre)
+	}
+
+	// 2. Scope=allowlist restricts BOTH egress and ingress strictly to 192.168.31.88.
+	dropAllow, err := tailscale.RenderFW4DropIns(config.TailscaleP2PAssistConfig{
+		Enabled:       true,
+		RoleMode:      "gateway",
+		PayloadFilter: boolPtr(true),
+		LocalRules: []config.TailscaleLocalSubnetRule{
+			{CIDR: "192.168.31.0/24", Scope: config.TailscaleScopeAllowlist, Devices: []string{"192.168.31.88"}},
+		},
+	}, peers, "192.168.31.0/24", now)
+	if err != nil {
+		t.Fatalf("Scope=allowlist failed: %v", err)
+	}
+	egressAllow := strings.Join(dropAllow.EgressACLRules, "\n")
+	if !strings.Contains(egressAllow, "ip saddr 192.168.31.88 counter accept") {
+		t.Fatalf("expected allowlisted host in EgressACLRules:\n%s", egressAllow)
+	}
+	if strings.Contains(egressAllow, "ip saddr 192.168.31.0/24 counter accept") {
+		t.Fatalf("allowlist must NOT accept entire 192.168.31.0/24 in EgressACLRules:\n%s", egressAllow)
+	}
+	fwdAllow := strings.Join(dropAllow.ForwardACLRules, "\n")
+	guardRule := "ip daddr 192.168.31.0/24 ip daddr != { 192.168.31.88 } counter drop"
+	if !strings.Contains(fwdAllow, guardRule) {
+		t.Fatalf("expected allowlist ingress guard %q in ForwardACLRules:\n%s", guardRule, fwdAllow)
+	}
+	if strings.Index(fwdAllow, guardRule) >= strings.Index(fwdAllow, "ip saddr 192.168.55.0/24") {
+		t.Fatalf("allowlist ingress guard must precede peer accept rules:\n%s", fwdAllow)
+	}
+
+	// 3. Scope=denylist drops 192.168.31.151 before allowing rest of 192.168.31.0/24.
+	dropDeny, err := tailscale.RenderFW4DropIns(config.TailscaleP2PAssistConfig{
+		Enabled:       true,
+		RoleMode:      "router",
+		PayloadFilter: boolPtr(true),
+		LocalRules: []config.TailscaleLocalSubnetRule{
+			{CIDR: "192.168.31.0/24", Scope: config.TailscaleScopeDenylist, Devices: []string{"192.168.31.151"}},
+		},
+	}, peers, "192.168.31.0/24", now)
+	if err != nil {
+		t.Fatalf("Scope=denylist failed: %v", err)
+	}
+	egressDeny := strings.Join(dropDeny.EgressACLRules, "\n")
+	dropIdx := strings.Index(egressDeny, "ip saddr 192.168.31.151 counter drop")
+	accIdx := strings.Index(egressDeny, "ip saddr 192.168.31.0/24 counter accept")
+	if dropIdx < 0 || accIdx < 0 || dropIdx >= accIdx {
+		t.Fatalf("denylist drop must precede subnet accept in EgressACLRules:\n%s", egressDeny)
+	}
+	fwdDeny := strings.Join(dropDeny.ForwardACLRules, "\n")
+	if !strings.Contains(fwdDeny, "ip daddr 192.168.31.151 counter drop") {
+		t.Fatalf("denylist must emit ip daddr drop in ForwardACLRules:\n%s", fwdDeny)
+	}
+}
+
+func TestRenderFW4DropInsWithOptions_DownstreamEdgeJIT_MutualExclusionAndSecurity(t *testing.T) {
+	now := time.Date(2026, 11, 27, 4, 0, 0, 0, time.UTC)
+	baseCfg := config.TailscaleP2PAssistConfig{
+		Enabled:       true,
+		JITWindowSec:  5,
+		PayloadFilter: boolPtr(true),
+		ListenPort:    41641,
+	}
+
+	// 1. Local Tailscale stopped + DownstreamAssist default(true): both IPv4 & IPv6 downstream 5s dynamic micro-window active.
+	dropDown, err := tailscale.RenderFW4DropInsWithOptions(baseCfg, nil, "", now, tailscale.FW4RenderOptions{
+		LocalTailscaleRunning: false,
+	})
+	if err != nil {
+		t.Fatalf("RenderFW4DropInsWithOptions(stopped) failed: %v", err)
+	}
+	if !dropDown.DownstreamV4Active || !dropDown.DownstreamV6Active {
+		t.Fatalf("expected both v4 & v6 downstream active when local tailscale stopped, got v4=%v v6=%v",
+			dropDown.DownstreamV4Active, dropDown.DownstreamV6Active)
+	}
+	for _, want := range []string{
+		"map TS_LAN_PUNCH4",
+		"type ipv4_addr : ipv4_addr",
+		"size 64",
+		"flags dynamic, timeout",
+		"timeout 5s",
+		"set TS_LAN_PUNCH6",
+		"type ipv6_addr . ipv6_addr",
+		"chain singctl_ts_lan_learn4",
+		"udp sport != 41641 return",
+		"udp dport 3478 return",
+		"ip saddr != { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } return",
+		"@th,64,48 0x5453f09f92ac update @TS_LAN_PUNCH4 { ip daddr timeout 5s : ip saddr } return",
+		"chain singctl_ts_lan_dnat4",
+		"fib daddr type != local return",
+		"ip saddr != @TS_LAN_PUNCH4 return",
+		"limit rate over 300/second burst 600 packets return",
+		"udp dport 41641 @th,64,48 0x5453f09f92ac counter dnat ip to ip saddr map @TS_LAN_PUNCH4 : 41641",
+		"chain singctl_ts_lan_learn6",
+		"chain singctl_ts_lan_fwd",
+		"ct status dnat udp dport 41641 ip saddr @TS_LAN_PUNCH4 counter accept",
+	} {
+		if !strings.Contains(dropDown.TablePre, want) {
+			t.Fatalf("TablePre missing %q:\n%s", want, dropDown.TablePre)
+		}
+	}
+	if !strings.Contains(dropDown.ForwardLanLearnPre, "jump singctl_ts_lan_learn4") {
+		t.Fatalf("missing ForwardLanLearnPre jump:\n%s", dropDown.ForwardLanLearnPre)
+	}
+	if !strings.Contains(dropDown.ForwardLanV6LearnPre, "jump singctl_ts_lan_learn6") {
+		t.Fatalf("missing ForwardLanV6LearnPre jump:\n%s", dropDown.ForwardLanV6LearnPre)
+	}
+	if !strings.Contains(dropDown.DstnatPre, "jump singctl_ts_lan_dnat4") {
+		t.Fatalf("missing DstnatPre jump:\n%s", dropDown.DstnatPre)
+	}
+	if !strings.Contains(dropDown.ForwardWANPre, "jump singctl_ts_lan_fwd") {
+		t.Fatalf("missing ForwardWANPre jump:\n%s", dropDown.ForwardWANPre)
+	}
+	if !strings.Contains(dropDown.SrcnatLanPre, "ct status dnat udp dport 41641 ip saddr @TS_LAN_PUNCH4 return") {
+		t.Fatalf("missing SrcnatLanPre bypass rule:\n%s", dropDown.SrcnatLanPre)
+	}
+	dryRun := dropDown.RenderDryRunCheckScript()
+	for _, wantHook := range []string{"chain dstnat", "chain forward_wan", "chain srcnat_lan"} {
+		if !strings.Contains(dryRun, wantHook) {
+			t.Fatalf("dry-run script missing %q:\n%s", wantHook, dryRun)
+		}
+	}
+
+	// 2. Local Tailscale RUNNING: strict IPv4 mutual exclusion (no TS_LAN_PUNCH4 / DstnatPre / SrcnatLanPre), IPv6 remains active.
+	dropHost, err := tailscale.RenderFW4DropInsWithOptions(baseCfg, nil, "192.168.31.0/24", now, tailscale.FW4RenderOptions{
+		LocalTailscaleRunning: true,
+	})
+	if err != nil {
+		t.Fatalf("RenderFW4DropInsWithOptions(running) failed: %v", err)
+	}
+	if dropHost.DownstreamV4Active || !dropHost.DownstreamV6Active {
+		t.Fatalf("expected v4=false v6=true when local tailscale running, got v4=%v v6=%v",
+			dropHost.DownstreamV4Active, dropHost.DownstreamV6Active)
+	}
+	for _, forbidden := range []string{"TS_LAN_PUNCH4", "singctl_ts_lan_dnat4", "singctl_ts_lan_learn4"} {
+		if strings.Contains(dropHost.TablePre, forbidden) {
+			t.Fatalf("host-running mode must not emit %q:\n%s", forbidden, dropHost.TablePre)
+		}
+	}
+	if dropHost.DstnatPre != "" || dropHost.SrcnatLanPre != "" || dropHost.ForwardLanLearnPre != "" {
+		t.Fatalf("host-running mode must leave IPv4 downstream drop-ins empty: dstnat=%q srcnat=%q fwd=%q",
+			dropHost.DstnatPre, dropHost.SrcnatLanPre, dropHost.ForwardLanLearnPre)
+	}
+	if !strings.Contains(dropHost.TablePre, "set TS_LAN_PUNCH6") || !strings.Contains(dropHost.ForwardWANPre, "jump singctl_ts_lan_fwd") {
+		t.Fatalf("host-running mode should keep IPv6 downstream assist active")
+	}
+
+	// 3. DownstreamAssist explicitly false: both v4 & v6 downstream completely omitted.
+	cfgOff := baseCfg
+	cfgOff.DownstreamAssist = boolPtr(false)
+	dropOff, err := tailscale.RenderFW4DropInsWithOptions(cfgOff, nil, "", now, tailscale.FW4RenderOptions{
+		LocalTailscaleRunning: false,
+	})
+	if err != nil {
+		t.Fatalf("RenderFW4DropInsWithOptions(disabled) failed: %v", err)
+	}
+	if dropOff.DownstreamV4Active || dropOff.DownstreamV6Active {
+		t.Fatalf("expected downstream disabled, got v4=%v v6=%v", dropOff.DownstreamV4Active, dropOff.DownstreamV6Active)
+	}
+	if strings.Contains(dropOff.TablePre, "TS_LAN_PUNCH") || dropOff.ForwardWANPre != "" || dropOff.DstnatPre != "" {
+		t.Fatalf("disabled downstream assist must emit zero TS_LAN_PUNCH rules")
+	}
+}
+
+func TestFW4Manager_DownstreamDropInCleanupOnModeSwitch(t *testing.T) {
+	baseDir := t.TempDir()
+	mgr := &tailscale.FW4Manager{
+		BaseDir: baseDir,
+		Runner: func(_ context.Context, _ string, _ string, _ ...string) ([]byte, error) {
+			return nil, nil
+		},
+	}
+	now := time.Date(2026, 11, 27, 4, 0, 0, 0, time.UTC)
+	cfg := config.TailscaleP2PAssistConfig{Enabled: true, JITWindowSec: 5, PayloadFilter: boolPtr(true)}
+
+	// 1. Apply with local Tailscale stopped -> writes dstnat + srcnat_lan + forward_wan + forward/lan-jit drop-ins.
+	dStopped, err := tailscale.RenderFW4DropInsWithOptions(cfg, nil, "", now, tailscale.FW4RenderOptions{LocalTailscaleRunning: false})
+	if err != nil {
+		t.Fatalf("render stopped: %v", err)
+	}
+	if _, err := mgr.Apply(t.Context(), dStopped); err != nil {
+		t.Fatalf("Apply(stopped) failed: %v", err)
+	}
+	dstnatPath := filepath.Join(baseDir, "chain-pre", "dstnat", "singctl-ts-lan-jit.nft")
+	srcnatPath := filepath.Join(baseDir, "chain-pre", "srcnat_lan", "singctl-ts-lan-jit.nft")
+	fwdWANPath := filepath.Join(baseDir, "chain-pre", "forward_wan", "singctl-ts-lan-jit.nft")
+	for _, p := range []string{dstnatPath, srcnatPath, fwdWANPath} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("expected drop-in %s to exist in stopped mode: %v", p, err)
+		}
+	}
+
+	// 2. Switch to local Tailscale running -> stale IPv4 dstnat & srcnat_lan drop-ins MUST be removed, forward_wan kept for IPv6.
+	dRunning, err := tailscale.RenderFW4DropInsWithOptions(cfg, nil, "192.168.31.0/24", now, tailscale.FW4RenderOptions{LocalTailscaleRunning: true})
+	if err != nil {
+		t.Fatalf("render running: %v", err)
+	}
+	if _, err := mgr.Apply(t.Context(), dRunning); err != nil {
+		t.Fatalf("Apply(running) failed: %v", err)
+	}
+	for _, removed := range []string{dstnatPath, srcnatPath} {
+		if _, err := os.Stat(removed); !os.IsNotExist(err) {
+			t.Fatalf("expected stale IPv4 drop-in %s to be removed when local tailscale runs, stat err=%v", removed, err)
+		}
+	}
+	if _, err := os.Stat(fwdWANPath); err != nil {
+		t.Fatalf("expected IPv6 forward_wan drop-in %s to remain: %v", fwdWANPath, err)
+	}
+}

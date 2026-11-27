@@ -33,11 +33,12 @@ const (
 	chainJITGuard   = "singctl_ts_jit_guard"
 	chainInputACL   = "singctl_ts_input_acl"
 	chainForwardACL = "singctl_ts_forward_acl"
+	chainEgressACL  = "singctl_ts_egress_acl"
 )
 
 var (
 	nftHandleRe    = regexp.MustCompile(`#\s*handle\s+(\d+)\s*$`)
-	openBraceSelRe = regexp.MustCompile(`^(set|chain)\s+([A-Za-z0-9_]+)\s*\{`)
+	openBraceSelRe = regexp.MustCompile(`^(set|map|chain)\s+([A-Za-z0-9_]+)\s*\{`)
 )
 
 // CmdRunner 允许注入外部命令执行器，便于单元测试与可控 E2E 校验。
@@ -219,16 +220,30 @@ func (r ResolvedPeerACL) sourceExpressions() []struct {
 	return out
 }
 
-// FW4DropIns 保存为 fw4 生成的 4 份 drop-in 文件与直写 nft 所需的单源规则集。
+// FW4DropIns 保存为 fw4 生成的 drop-in 文件与直写 nft 所需的单源规则集。
 type FW4DropIns struct {
-	TablePre            string
-	InputWANPre         string
-	InputTailscalePre   string
-	ForwardTailscalePre string
+	TablePre             string
+	InputWANPre          string
+	InputTailscalePre    string
+	ForwardTailscalePre  string
+	ForwardEgressPre     string
+	ForwardLanLearnPre   string
+	ForwardLanV6LearnPre string
+	DstnatPre            string
+	ForwardWANPre        string
+	SrcnatLanPre         string
+
+	DownstreamV4Active bool
+	DownstreamV6Active bool
 
 	JITGuardRules   []string
 	InputACLRules   []string
 	ForwardACLRules []string
+	EgressACLRules  []string
+	LanLearn4Rules  []string
+	LanLearn6Rules  []string
+	LanDNAT4Rules   []string
+	LanFwdRules     []string
 
 	ListenPort   int
 	JITWindowSec int
@@ -240,7 +255,10 @@ type FW4DropIns struct {
 // Digest 返回用于幂等对比的内容摘要。
 func (d FW4DropIns) Digest() string {
 	h := sha256.New()
-	for _, s := range []string{d.TablePre, d.InputWANPre, d.InputTailscalePre, d.ForwardTailscalePre} {
+	for _, s := range []string{
+		d.TablePre, d.InputWANPre, d.InputTailscalePre, d.ForwardTailscalePre, d.ForwardEgressPre,
+		d.ForwardLanLearnPre, d.ForwardLanV6LearnPre, d.DstnatPre, d.ForwardWANPre, d.SrcnatLanPre,
+	} {
 		h.Write([]byte(s))
 		h.Write([]byte{0})
 	}
@@ -267,6 +285,31 @@ func (d FW4DropIns) RenderDryRunCheckScript() string {
 	b.WriteString("    chain forward_tailscale {\n")
 	b.WriteString("        " + d.forwardTailscaleRule() + "\n")
 	b.WriteString("    }\n")
+	b.WriteString("    chain forward {\n")
+	b.WriteString("        " + d.forwardEgressRule() + "\n")
+	if d.DownstreamV4Active {
+		b.WriteString("        " + d.forwardLanLearn4Rule() + "\n")
+	}
+	b.WriteString("    }\n")
+	if d.DownstreamV6Active {
+		b.WriteString("    chain forward_lan {\n")
+		b.WriteString("        " + d.forwardLanLearn6Rule() + "\n")
+		b.WriteString("    }\n")
+	}
+	if d.DownstreamV4Active || d.DownstreamV6Active {
+		b.WriteString("    chain forward_wan {\n")
+		b.WriteString("        " + d.forwardWANLanRule() + "\n")
+		b.WriteString("    }\n")
+	}
+	if d.DownstreamV4Active {
+		b.WriteString("    chain dstnat {\n")
+		b.WriteString("        type nat hook prerouting priority dstnat; policy accept;\n")
+		b.WriteString("        " + d.dstnatLanRule() + "\n")
+		b.WriteString("    }\n")
+		b.WriteString("    chain srcnat_lan {\n")
+		b.WriteString("        " + d.srcnatLanBypassRule() + "\n")
+		b.WriteString("    }\n")
+	}
 	b.WriteString("}\n")
 	return b.String()
 }
@@ -283,8 +326,131 @@ func (d FW4DropIns) forwardTailscaleRule() string {
 	return fmt.Sprintf(`jump %s comment "%s"`, chainForwardACL, aclCommentTag)
 }
 
+func (d FW4DropIns) forwardEgressRule() string {
+	return fmt.Sprintf(`oifname "tailscale*" jump %s comment "%s"`, chainEgressACL, aclCommentTag)
+}
+
+type resolvedLocalRule struct {
+	target  LANTarget
+	scope   string
+	devices []string
+}
+
+func resolveEffectiveLocalRules(cfg config.TailscaleP2PAssistConfig, defaultTargets []LANTarget) ([]resolvedLocalRule, bool) {
+	role := strings.ToLower(strings.TrimSpace(cfg.RoleMode))
+	enforced := len(defaultTargets) > 0 || role != ""
+	if role == "client" || role == "exit" {
+		return nil, enforced
+	}
+	ruleByCIDR := make(map[string]config.TailscaleLocalSubnetRule, len(cfg.LocalRules))
+	for _, r := range cfg.LocalRules {
+		if pfx, err := netip.ParsePrefix(strings.TrimSpace(r.CIDR)); err == nil {
+			ruleByCIDR[pfx.Masked().String()] = r
+		}
+	}
+	resolved := make([]resolvedLocalRule, 0, len(defaultTargets))
+	for _, tgt := range defaultTargets {
+		item := resolvedLocalRule{target: tgt, scope: config.TailscaleScopeAll}
+		if r, ok := ruleByCIDR[tgt.AddrExpr]; ok {
+			if normScope, valid := config.NormalizeTailscaleSubnetScope(r.Scope); valid {
+				item.scope = normScope
+			}
+			for _, d := range r.Devices {
+				if addr, err := netip.ParseAddr(strings.TrimSpace(d)); err == nil {
+					item.devices = append(item.devices, addr.Unmap().String())
+				}
+			}
+		}
+		resolved = append(resolved, item)
+	}
+	return resolved, enforced
+}
+
+func renderNFTEgressAndLocalIngress(localRules []resolvedLocalRule, enforceEgressDrop bool) (egress []string, localIngress []string) {
+	egress = []string{
+		"ct state { established, related } ct direction reply counter accept",
+		"ip saddr 100.64.0.0/10 counter accept",
+		"ip6 saddr fd7a:115c:a1e0::/48 counter accept",
+	}
+	for _, lr := range localRules {
+		fam := "ip"
+		if lr.target.IsV6 {
+			fam = "ip6"
+		}
+		switch lr.scope {
+		case config.TailscaleScopeAllowlist:
+			for _, dev := range lr.devices {
+				egress = append(egress, fmt.Sprintf("%s saddr %s counter accept", fam, dev))
+			}
+			if len(lr.devices) == 0 {
+				localIngress = append(localIngress, fmt.Sprintf("%s daddr %s counter drop", fam, lr.target.AddrExpr))
+			} else {
+				localIngress = append(localIngress, fmt.Sprintf("%s daddr %s %s daddr != { %s } counter drop", fam, lr.target.AddrExpr, fam, strings.Join(lr.devices, ", ")))
+			}
+		case config.TailscaleScopeDenylist:
+			for _, dev := range lr.devices {
+				egress = append(egress, fmt.Sprintf("%s saddr %s counter drop", fam, dev))
+				localIngress = append(localIngress, fmt.Sprintf("%s daddr %s counter drop", fam, dev))
+			}
+			egress = append(egress, fmt.Sprintf("%s saddr %s counter accept", fam, lr.target.AddrExpr))
+		default:
+			egress = append(egress, fmt.Sprintf("%s saddr %s counter accept", fam, lr.target.AddrExpr))
+		}
+	}
+	if enforceEgressDrop {
+		egress = append(egress, "counter drop")
+	} else {
+		egress = append(egress, "return")
+	}
+	return egress, localIngress
+}
+
+func parseDefaultLANTargets(rawCSV string) []LANTarget {
+	var targets []LANTarget
+	seen := make(map[string]struct{})
+	for part := range strings.SplitSeq(rawCSV, ",") {
+		p := strings.TrimSpace(part)
+		if p == "" || p == "0.0.0.0/0" || p == "::/0" {
+			continue
+		}
+		parsed, err := ParseAllowedLANTarget(p)
+		if err != nil {
+			continue
+		}
+		key := fmt.Sprintf("%s|%s|%d", parsed.AddrExpr, parsed.Proto, parsed.Port)
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		targets = append(targets, parsed)
+	}
+	return targets
+}
+
+func appendNFTACLAcceptRules(dst []string, srcExpr string, srcIsV6 bool, tgt LANTarget) []string {
+	if srcIsV6 != tgt.IsV6 {
+		return dst
+	}
+	family := "ip"
+	if srcIsV6 {
+		family = "ip6"
+	}
+	switch {
+	case tgt.Port == 0:
+		return append(dst, fmt.Sprintf("%s saddr %s %s daddr %s counter accept", family, srcExpr, family, tgt.AddrExpr))
+	case tgt.Proto == "tcp" || tgt.Proto == "udp":
+		return append(dst, fmt.Sprintf("%s saddr %s %s daddr %s %s dport %d counter accept", family, srcExpr, family, tgt.AddrExpr, tgt.Proto, tgt.Port))
+	default:
+		return append(dst, fmt.Sprintf("%s saddr %s %s daddr %s meta l4proto { tcp, udp } th dport %d counter accept", family, srcExpr, family, tgt.AddrExpr, tgt.Port))
+	}
+}
+
 // RenderFW4DropIns 根据 P2P 防线配置与对端拓扑渲染全部 Layer 1 / Layer 2 / Layer 4 防火墙规则。
 func RenderFW4DropIns(cfg config.TailscaleP2PAssistConfig, peers []ResolvedPeerACL, defaultLANCIDR string, now time.Time) (FW4DropIns, error) {
+	return renderFW4BaseDropIns(cfg, peers, defaultLANCIDR, now)
+}
+
+func renderFW4BaseDropIns(cfg config.TailscaleP2PAssistConfig, peers []ResolvedPeerACL, defaultLANCIDR string, now time.Time) (FW4DropIns, error) {
 	port := cfg.EffectiveListenPort()
 	winSec := cfg.EffectiveJITWindowSec()
 
@@ -308,15 +474,12 @@ func RenderFW4DropIns(cfg config.TailscaleP2PAssistConfig, peers []ResolvedPeerA
 		jitGuard = append(jitGuard, "counter accept")
 	}
 
-	var defaultTargets []LANTarget
-	if trimmedDef := strings.TrimSpace(defaultLANCIDR); trimmedDef != "" {
-		if parsed, err := ParseAllowedLANTarget(trimmedDef); err == nil {
-			defaultTargets = append(defaultTargets, parsed)
-		}
-	}
+	defaultTargets := parseDefaultLANTargets(defaultLANCIDR)
+	resolvedLocal, enforceEgressDrop := resolveEffectiveLocalRules(cfg, defaultTargets)
+	egressACLRules, localIngressGuards := renderNFTEgressAndLocalIngress(resolvedLocal, enforceEgressDrop)
 
 	var inputACLRules []string
-	var forwardACLRules []string
+	forwardACLRules := append([]string(nil), localIngressGuards...)
 
 	for _, peer := range peers {
 		srcs := peer.sourceExpressions()
@@ -324,17 +487,10 @@ func RenderFW4DropIns(cfg config.TailscaleP2PAssistConfig, peers []ResolvedPeerA
 			continue
 		}
 
-		for _, src := range srcs {
-			if src.isV6 {
-				inputACLRules = append(inputACLRules, fmt.Sprintf("ip6 saddr %s counter drop", src.expr))
-			} else {
-				inputACLRules = append(inputACLRules, fmt.Sprintf("ip saddr %s counter drop", src.expr))
-			}
-		}
-
 		effMode := peer.Config.EffectiveAccessMode(now)
-		if effMode == config.TailscaleAccessBidirectional || effMode == config.TailscaleAccessBidirectionalTimed {
-			var parsedTargets []LANTarget
+		isBidir := effMode == config.TailscaleAccessBidirectional || effMode == config.TailscaleAccessBidirectionalTimed
+		var parsedTargets []LANTarget
+		if isBidir {
 			for _, rawTarget := range peer.Config.AllowedLANTargets {
 				t, err := ParseAllowedLANTarget(rawTarget)
 				if err != nil {
@@ -345,23 +501,36 @@ func RenderFW4DropIns(cfg config.TailscaleP2PAssistConfig, peers []ResolvedPeerA
 			if len(parsedTargets) == 0 {
 				parsedTargets = defaultTargets
 			}
+		}
+
+		// 家庭互信模式下先在 INPUT/FORWARD 放行已勾选本机网段与路由器管理平面，其余未勾选网段仍由末尾 drop 兜底拦截。
+		if effMode == config.TailscaleAccessBidirectional {
 			for _, src := range srcs {
 				for _, tgt := range parsedTargets {
-					if src.isV6 != tgt.IsV6 {
-						continue
-					}
-					family := "ip"
+					inputACLRules = appendNFTACLAcceptRules(inputACLRules, src.expr, src.isV6, tgt)
+				}
+				if len(peer.Config.AllowedLANTargets) == 0 {
 					if src.isV6 {
-						family = "ip6"
+						inputACLRules = append(inputACLRules, fmt.Sprintf("ip6 saddr %s ip6 daddr fd7a:115c:a1e0::/48 counter accept", src.expr))
+					} else {
+						inputACLRules = append(inputACLRules, fmt.Sprintf("ip saddr %s ip daddr 100.64.0.0/10 counter accept", src.expr))
 					}
-					switch {
-					case tgt.Port == 0:
-						forwardACLRules = append(forwardACLRules, fmt.Sprintf("%s saddr %s %s daddr %s counter accept", family, src.expr, family, tgt.AddrExpr))
-					case tgt.Proto == "tcp" || tgt.Proto == "udp":
-						forwardACLRules = append(forwardACLRules, fmt.Sprintf("%s saddr %s %s daddr %s %s dport %d counter accept", family, src.expr, family, tgt.AddrExpr, tgt.Proto, tgt.Port))
-					default:
-						forwardACLRules = append(forwardACLRules, fmt.Sprintf("%s saddr %s %s daddr %s meta l4proto { tcp, udp } th dport %d counter accept", family, src.expr, family, tgt.AddrExpr, tgt.Port))
-					}
+				}
+			}
+		}
+
+		for _, src := range srcs {
+			if src.isV6 {
+				inputACLRules = append(inputACLRules, fmt.Sprintf("ip6 saddr %s counter drop", src.expr))
+			} else {
+				inputACLRules = append(inputACLRules, fmt.Sprintf("ip saddr %s counter drop", src.expr))
+			}
+		}
+
+		if isBidir {
+			for _, src := range srcs {
+				for _, tgt := range parsedTargets {
+					forwardACLRules = appendNFTACLAcceptRules(forwardACLRules, src.expr, src.isV6, tgt)
 				}
 			}
 		}
@@ -384,6 +553,8 @@ func RenderFW4DropIns(cfg config.TailscaleP2PAssistConfig, peers []ResolvedPeerA
 	writeChainBlock(&tb, chainInputACL, inputACLRules)
 	tb.WriteByte('\n')
 	writeChainBlock(&tb, chainForwardACL, forwardACLRules)
+	tb.WriteByte('\n')
+	writeChainBlock(&tb, chainEgressACL, egressACLRules)
 
 	iptRules, err := RenderIPTablesP2P(cfg, peers, defaultLANCIDR, now)
 	if err != nil {
@@ -395,6 +566,7 @@ func RenderFW4DropIns(cfg config.TailscaleP2PAssistConfig, peers []ResolvedPeerA
 		JITGuardRules:   jitGuard,
 		InputACLRules:   inputACLRules,
 		ForwardACLRules: forwardACLRules,
+		EgressACLRules:  egressACLRules,
 		ListenPort:      port,
 		JITWindowSec:    winSec,
 		IPTables:        iptRules,
@@ -402,6 +574,7 @@ func RenderFW4DropIns(cfg config.TailscaleP2PAssistConfig, peers []ResolvedPeerA
 	out.InputWANPre = "# Managed by SingCtl Tailscale P2P Defense — DO NOT EDIT MANUALLY\n" + out.inputWANRule() + "\n"
 	out.InputTailscalePre = "# Managed by SingCtl Tailscale P2P Defense — DO NOT EDIT MANUALLY\n" + out.inputTailscaleRule() + "\n"
 	out.ForwardTailscalePre = "# Managed by SingCtl Tailscale P2P Defense — DO NOT EDIT MANUALLY\n" + out.forwardTailscaleRule() + "\n"
+	out.ForwardEgressPre = "# Managed by SingCtl Tailscale P2P Defense — DO NOT EDIT MANUALLY\n" + out.forwardEgressRule() + "\n"
 	return out, nil
 }
 

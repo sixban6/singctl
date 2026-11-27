@@ -152,6 +152,12 @@ func RestoreUDPGRO() error {
 }
 
 func CheckTunModule() bool {
+	if _, err := os.Stat("/dev/net/tun"); err == nil {
+		return true
+	}
+	if _, err := os.Stat("/sys/class/misc/tun"); err == nil {
+		return true
+	}
 	if err := exec.Command("modprobe", "tun").Run(); err == nil {
 		return true
 	}

@@ -284,6 +284,9 @@ table inet sing-box {
         ip daddr @LOCAL_IPV4_SET accept
         ip6 daddr @LOCAL_IPV6_SET accept
 
+        udp sport 41641 accept comment "Bypass downstream Tailscale UDP port"
+        udp dport 41641 accept comment "Bypass downstream Tailscale UDP port"
+
         meta l4proto { tcp, udp } tproxy to :%d meta mark set %s accept
     }
 
@@ -371,6 +374,8 @@ func RenderSingBoxIPTablesRestore(in DataplaneInput, caps IPTablesCaps) (v4Batch
 	for _, cidr := range []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "224.0.0.0/4", "255.255.255.255/32"} {
 		fmt.Fprintf(&v4, "-A SING_BOX -d %s -j RETURN\n", cidr)
 	}
+	v4.WriteString("-A SING_BOX -p udp --sport 41641 -j RETURN\n")
+	v4.WriteString("-A SING_BOX -p udp --dport 41641 -j RETURN\n")
 	fmt.Fprintf(&v4, "-A SING_BOX -p tcp -j TPROXY --on-port %s --tproxy-mark %s\n", portStr, fwdMarkStr)
 	fmt.Fprintf(&v4, "-A SING_BOX -p udp -j TPROXY --on-port %s --tproxy-mark %s\n", portStr, fwdMarkStr)
 
@@ -421,6 +426,8 @@ func RenderSingBoxIPTablesRestore(in DataplaneInput, caps IPTablesCaps) (v4Batch
 	for _, pfx := range norm.LANIPv6Prefixes {
 		fmt.Fprintf(&v6, "-A SING_BOX -d %s -j RETURN\n", pfx.Masked().String())
 	}
+	v6.WriteString("-A SING_BOX -p udp --sport 41641 -j RETURN\n")
+	v6.WriteString("-A SING_BOX -p udp --dport 41641 -j RETURN\n")
 	fmt.Fprintf(&v6, "-A SING_BOX -p tcp -j TPROXY --on-port %s --tproxy-mark %s\n", portStr, fwdMarkStr)
 	fmt.Fprintf(&v6, "-A SING_BOX -p udp -j TPROXY --on-port %s --tproxy-mark %s\n", portStr, fwdMarkStr)
 

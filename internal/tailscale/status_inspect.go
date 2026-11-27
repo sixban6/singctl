@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -28,6 +29,9 @@ type BackendStatus struct {
 	Mode         string
 	AcceptRoutes bool
 	LiveSubnets  string
+	SelfIP       string
+	NeedsLogin   bool
+	AuthURL      string
 }
 
 // HostStatusOptions 控制宿主机 Tailscale 综合状态聚合所需的可选输入。
@@ -149,8 +153,12 @@ func QueryBackendStatus(ctx context.Context, binPath string, localAPI *UnixLocal
 	}
 	var st struct {
 		BackendState string `json:"BackendState"`
+		AuthURL      string `json:"AuthURL"`
 		Self         struct {
+			TailscaleIPs     []string `json:"TailscaleIPs"`
 			AdvertisedRoutes []string `json:"AdvertisedRoutes"`
+			PrimaryRoutes    []string `json:"PrimaryRoutes"`
+			AllowedIPs       []string `json:"AllowedIPs"`
 			ExitNodeOption   bool     `json:"ExitNodeOption"`
 		} `json:"Self"`
 	}
@@ -158,13 +166,51 @@ func QueryBackendStatus(ctx context.Context, binPath string, localAPI *UnixLocal
 		return BackendStatus{}
 	}
 
-	var lanRoutes []string
-	for _, r := range st.Self.AdvertisedRoutes {
-		trimmed := strings.TrimSpace(r)
-		if trimmed == "" || trimmed == "0.0.0.0/0" || trimmed == "::/0" {
-			continue
+	selfIP := ""
+	for _, rawIP := range st.Self.TailscaleIPs {
+		if addr, err := netip.ParseAddr(strings.TrimSpace(rawIP)); err == nil && addr.Unmap().Is4() {
+			selfIP = addr.Unmap().String()
+			break
 		}
+	}
+	if selfIP == "" && len(st.Self.TailscaleIPs) > 0 {
+		selfIP = strings.TrimSpace(st.Self.TailscaleIPs[0])
+	}
+
+	seenRoutes := make(map[string]struct{})
+	var lanRoutes []string
+	appendSubnet := func(raw string) {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" || trimmed == "0.0.0.0/0" || trimmed == "::/0" {
+			return
+		}
+		if pfx, err := netip.ParsePrefix(trimmed); err == nil {
+			addr := pfx.Addr().Unmap()
+			// 过滤 Tailscale 自身虚拟 IP (/32, /128) 及 CGNAT/ULA 本机地址。
+			if (addr.Is4() && pfx.Bits() >= 32) || (addr.Is6() && pfx.Bits() >= 128) {
+				return
+			}
+			if tsCGNATPrefix.Contains(addr) || tsULA6Prefix.Contains(addr) {
+				return
+			}
+			trimmed = netip.PrefixFrom(addr, pfx.Bits()).Masked().String()
+		}
+		if _, dup := seenRoutes[trimmed]; dup {
+			return
+		}
+		seenRoutes[trimmed] = struct{}{}
 		lanRoutes = append(lanRoutes, trimmed)
+	}
+	for _, r := range st.Self.AdvertisedRoutes {
+		appendSubnet(r)
+	}
+	for _, r := range st.Self.PrimaryRoutes {
+		appendSubnet(r)
+	}
+	if len(lanRoutes) == 0 {
+		for _, r := range st.Self.AllowedIPs {
+			appendSubnet(r)
+		}
 	}
 
 	mode := ""
@@ -184,6 +230,9 @@ func QueryBackendStatus(ctx context.Context, binPath string, localAPI *UnixLocal
 		Mode:         mode,
 		AcceptRoutes: QueryAcceptRoutes(qCtx, localAPI, binPath),
 		LiveSubnets:  strings.Join(lanRoutes, ", "),
+		SelfIP:       selfIP,
+		NeedsLogin:   strings.EqualFold(st.BackendState, "NeedsLogin"),
+		AuthURL:      strings.TrimSpace(st.AuthURL),
 	}
 }
 
@@ -225,14 +274,31 @@ func InspectHostStatus(ctx context.Context, opts HostStatusOptions) map[string]a
 	}
 
 	subnets := cmp.Or(strings.TrimSpace(opts.ConfiguredSubnets), bs.LiveSubnets)
-	return map[string]any{
+	out := map[string]any{
 		"installed":    binPath != "",
 		"running":      daemonUp,
 		"state":        bs.State,
 		"mode":         bs.Mode,
 		"acceptRoutes": bs.AcceptRoutes,
 		"subnets":      subnets,
+		"liveSubnets":  bs.LiveSubnets,
+		"selfIp":       bs.SelfIP,
+		"needsLogin":   bs.NeedsLogin,
 		"version":      version,
 		"authKeySet":   opts.AuthKeyConfigured,
 	}
+	if bs.AuthURL != "" {
+		out["authUrl"] = bs.AuthURL
+	}
+	if runtime.GOOS == "linux" && binPath != "" {
+		tunDiag := InspectTunDiagnostics(ctx, daemonUp, TunProbeDeps{})
+		out["tunAvailable"] = tunDiag.TunAvailable
+		out["userspaceMode"] = tunDiag.UserspaceMode
+		out["tunInterfaceUp"] = tunDiag.TunInterfaceUp
+		out["canSwitchToKernel"] = tunDiag.CanSwitchToKernel
+		if tunDiag.Reason != "" {
+			out["tunReason"] = tunDiag.Reason
+		}
+	}
+	return out
 }

@@ -45,13 +45,15 @@ type P2PPeerRuntimeState struct {
 
 // P2PRuntimeSnapshot 描述 Daemon / WebUI 观测到的 Tailscale P2P 防线全局运行态。
 type P2PRuntimeSnapshot struct {
-	Enabled        bool                           `json:"enabled"`
-	ApplyMode      string                         `json:"applyMode,omitempty"`
-	OpenPinholes   int                            `json:"openPinholes"`
-	OpenPinholeIPs []string                       `json:"openPinholeIPs,omitempty"`
-	UpdatedAt      string                         `json:"updatedAt,omitempty"`
-	LastError      string                         `json:"lastError,omitempty"`
-	PeerStates     map[string]P2PPeerRuntimeState `json:"peerStates,omitempty"`
+	Enabled            bool                           `json:"enabled"`
+	ApplyMode          string                         `json:"applyMode,omitempty"`
+	DownstreamV4Active bool                           `json:"downstreamV4Active,omitempty"`
+	DownstreamV6Active bool                           `json:"downstreamV6Active,omitempty"`
+	OpenPinholes       int                            `json:"openPinholes"`
+	OpenPinholeIPs     []string                       `json:"openPinholeIPs,omitempty"`
+	UpdatedAt          string                         `json:"updatedAt,omitempty"`
+	LastError          string                         `json:"lastError,omitempty"`
+	PeerStates         map[string]P2PPeerRuntimeState `json:"peerStates,omitempty"`
 }
 
 // PokeResult 表示 WebUI「测试瞬时打洞」操作的实时反馈结果。
@@ -361,7 +363,10 @@ func (c *P2PAssistController) Reconcile(ctx context.Context, cfg config.Tailscal
 		resolved = append(resolved, acl)
 	}
 
-	dropIns, err := RenderFW4DropIns(cfg, resolved, c.defaultLANCIDR(), now)
+	localTailscaleRunning := statusErr == nil && statusSnap != nil && strings.EqualFold(strings.TrimSpace(statusSnap.BackendState), "Running")
+	dropIns, err := RenderFW4DropInsWithOptions(cfg, resolved, c.defaultLANCIDR(), now, FW4RenderOptions{
+		LocalTailscaleRunning: localTailscaleRunning,
+	})
 	if err != nil {
 		return P2PRuntimeSnapshot{
 			Enabled:    true,
@@ -403,12 +408,14 @@ func (c *P2PAssistController) Reconcile(ctx context.Context, cfg config.Tailscal
 	}
 
 	snap := P2PRuntimeSnapshot{
-		Enabled:        true,
-		ApplyMode:      applyMode,
-		OpenPinholes:   openCount,
-		OpenPinholeIPs: openIPs,
-		UpdatedAt:      now.Format(time.DateTime),
-		PeerStates:     c.PeerStates(),
+		Enabled:            true,
+		ApplyMode:          applyMode,
+		DownstreamV4Active: dropIns.DownstreamV4Active,
+		DownstreamV6Active: dropIns.DownstreamV6Active,
+		OpenPinholes:       openCount,
+		OpenPinholeIPs:     openIPs,
+		UpdatedAt:          now.Format(time.DateTime),
+		PeerStates:         c.PeerStates(),
 	}
 	if applyErr != nil {
 		snap.LastError = applyErr.Error()

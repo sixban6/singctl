@@ -56,6 +56,7 @@ var Actions = map[string]ActionDef{
 	"ts-stop":    {Title: "停止 Tailscale", Build: fixed("ts", "stop")},
 	"ts-install": {Title: "安装 Tailscale", Build: fixed("ts", "install")},
 	"ts-update":  {Title: "零失联更新 Tailscale", Build: TsUpdateArgs},
+	"ts-fix-tun": {Title: "一键修复 Tailscale 内核 TUN 模式", Build: fixed("ts", "fix-tun")},
 
 	// 防火墙
 	"fw-enable":  {Title: "启用防火墙加固", Build: fixed("fw", "enable")},

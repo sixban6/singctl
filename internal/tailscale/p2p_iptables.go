@@ -33,6 +33,8 @@ const (
 	IPTablesChainTSInACL = "SINGCTL_TS_IN_ACL"
 	// IPTablesChainTSFwdACL 是 Tailscale 隧道转发 LAN 隔离链（挂载于 FORWARD 顶部，过滤 -i tailscale+）。
 	IPTablesChainTSFwdACL = "SINGCTL_TS_FWD_ACL"
+	// IPTablesChainTSOutACL 是本机 LAN/设备出站进入 Tailscale 隧道的源网段门禁链（挂载于 FORWARD 顶部，过滤 -o tailscale+）。
+	IPTablesChainTSOutACL = "SINGCTL_TS_OUT_ACL"
 
 	tsFirewallUserBegin = "# BEGIN SINGCTL_TS_P2P"
 	tsFirewallUserEnd   = "# END SINGCTL_TS_P2P"
@@ -52,13 +54,15 @@ type IPTablesP2PRuleSet struct {
 	V6InACL  [][]string
 	V4FwdACL [][]string
 	V6FwdACL [][]string
+	V4OutACL [][]string
+	V6OutACL [][]string
 }
 
 // Digest 返回用于幂等变更比对的 SHA-256 摘要。
 func (r IPTablesP2PRuleSet) Digest() string {
 	h := sha256.New()
 	fmt.Fprintf(h, "%d|%d|%v\n", r.ListenPort, r.JITWindowSec, r.PayloadFilter)
-	for _, group := range [][][]string{r.V4JIT, r.V6JIT, r.V4InACL, r.V6InACL, r.V4FwdACL, r.V6FwdACL} {
+	for _, group := range [][][]string{r.V4JIT, r.V6JIT, r.V4InACL, r.V6InACL, r.V4FwdACL, r.V6FwdACL, r.V4OutACL, r.V6OutACL} {
 		h.Write([]byte("---\n"))
 		for _, args := range group {
 			h.Write([]byte(strings.Join(args, " ")))
@@ -77,34 +81,86 @@ func RenderIPTablesP2P(cfg config.TailscaleP2PAssistConfig, peers []ResolvedPeer
 	v4JIT := buildTSJITRules(setTSJITAllow4, false, payloadFilter)
 	v6JIT := buildTSJITRules(setTSJITAllow6, true, payloadFilter)
 
-	var defaultTargets []LANTarget
-	if trimmedDef := strings.TrimSpace(defaultLANCIDR); trimmedDef != "" {
-		if parsed, err := ParseAllowedLANTarget(trimmedDef); err == nil {
-			defaultTargets = append(defaultTargets, parsed)
-		}
-	}
+	defaultTargets := parseDefaultLANTargets(defaultLANCIDR)
+	resolvedLocal, enforceEgressDrop := resolveEffectiveLocalRules(cfg, defaultTargets)
 
 	v4In := [][]string{{"-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"}}
 	v6In := [][]string{{"-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"}}
 	v4Fwd := [][]string{{"-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"}}
 	v6Fwd := [][]string{{"-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"}}
+	v4Out := [][]string{
+		{"-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "--ctdir", "REPLY", "-j", "ACCEPT"},
+		{"-s", "100.64.0.0/10", "-j", "ACCEPT"},
+	}
+	v6Out := [][]string{
+		{"-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "--ctdir", "REPLY", "-j", "ACCEPT"},
+		{"-s", "fd7a:115c:a1e0::/48", "-j", "ACCEPT"},
+	}
+
+	var defaultFwdTargets []LANTarget
+	for _, lr := range resolvedLocal {
+		switch lr.scope {
+		case config.TailscaleScopeAllowlist:
+			if len(lr.devices) == 0 {
+				if lr.target.IsV6 {
+					v6Fwd = append(v6Fwd, []string{"-d", lr.target.AddrExpr, "-j", "DROP"})
+				} else {
+					v4Fwd = append(v4Fwd, []string{"-d", lr.target.AddrExpr, "-j", "DROP"})
+				}
+			} else {
+				for _, dev := range lr.devices {
+					if lr.target.IsV6 {
+						v6Out = append(v6Out, []string{"-s", dev, "-j", "ACCEPT"})
+					} else {
+						v4Out = append(v4Out, []string{"-s", dev, "-j", "ACCEPT"})
+					}
+					defaultFwdTargets = append(defaultFwdTargets, LANTarget{Raw: dev, AddrExpr: dev, IsV6: lr.target.IsV6})
+				}
+			}
+		case config.TailscaleScopeDenylist:
+			for _, dev := range lr.devices {
+				if lr.target.IsV6 {
+					v6Out = append(v6Out, []string{"-s", dev, "-j", "DROP"})
+					v6Fwd = append(v6Fwd, []string{"-d", dev, "-j", "DROP"})
+				} else {
+					v4Out = append(v4Out, []string{"-s", dev, "-j", "DROP"})
+					v4Fwd = append(v4Fwd, []string{"-d", dev, "-j", "DROP"})
+				}
+			}
+			if lr.target.IsV6 {
+				v6Out = append(v6Out, []string{"-s", lr.target.AddrExpr, "-j", "ACCEPT"})
+			} else {
+				v4Out = append(v4Out, []string{"-s", lr.target.AddrExpr, "-j", "ACCEPT"})
+			}
+			defaultFwdTargets = append(defaultFwdTargets, lr.target)
+		default:
+			if lr.target.IsV6 {
+				v6Out = append(v6Out, []string{"-s", lr.target.AddrExpr, "-j", "ACCEPT"})
+			} else {
+				v4Out = append(v4Out, []string{"-s", lr.target.AddrExpr, "-j", "ACCEPT"})
+			}
+			defaultFwdTargets = append(defaultFwdTargets, lr.target)
+		}
+	}
+	if enforceEgressDrop {
+		v4Out = append(v4Out, []string{"-j", "DROP"})
+		v6Out = append(v6Out, []string{"-j", "DROP"})
+	} else {
+		v4Out = append(v4Out, []string{"-j", "RETURN"})
+		v6Out = append(v6Out, []string{"-j", "RETURN"})
+	}
 
 	for _, peer := range peers {
 		srcs := peer.sourceExpressions()
 		if len(srcs) == 0 {
 			continue
 		}
-		for _, src := range srcs {
-			if src.isV6 {
-				v6In = append(v6In, []string{"-s", src.expr, "-j", "DROP"})
-			} else {
-				v4In = append(v4In, []string{"-s", src.expr, "-j", "DROP"})
-			}
-		}
 
 		effMode := peer.Config.EffectiveAccessMode(now)
-		if effMode == config.TailscaleAccessBidirectional || effMode == config.TailscaleAccessBidirectionalTimed {
-			parsedTargets := make([]LANTarget, 0, len(peer.Config.AllowedLANTargets))
+		isBidir := effMode == config.TailscaleAccessBidirectional || effMode == config.TailscaleAccessBidirectionalTimed
+		var parsedTargets []LANTarget
+		if isBidir {
+			parsedTargets = make([]LANTarget, 0, len(peer.Config.AllowedLANTargets))
 			for _, rawTarget := range peer.Config.AllowedLANTargets {
 				t, err := ParseAllowedLANTarget(rawTarget)
 				if err != nil {
@@ -113,8 +169,46 @@ func RenderIPTablesP2P(cfg config.TailscaleP2PAssistConfig, peers []ResolvedPeer
 				parsedTargets = append(parsedTargets, t)
 			}
 			if len(parsedTargets) == 0 {
-				parsedTargets = defaultTargets
+				parsedTargets = defaultFwdTargets
 			}
+		}
+
+		if effMode == config.TailscaleAccessBidirectional {
+			inTargets := parsedTargets
+			if len(peer.Config.AllowedLANTargets) == 0 {
+				inTargets = defaultTargets
+			}
+			for _, src := range srcs {
+				for _, tgt := range inTargets {
+					if src.isV6 != tgt.IsV6 {
+						continue
+					}
+					rules := buildTSForwardAcceptRules(src.expr, tgt)
+					if src.isV6 {
+						v6In = append(v6In, rules...)
+					} else {
+						v4In = append(v4In, rules...)
+					}
+				}
+				if len(peer.Config.AllowedLANTargets) == 0 {
+					if src.isV6 {
+						v6In = append(v6In, []string{"-s", src.expr, "-d", "fd7a:115c:a1e0::/48", "-j", "ACCEPT"})
+					} else {
+						v4In = append(v4In, []string{"-s", src.expr, "-d", "100.64.0.0/10", "-j", "ACCEPT"})
+					}
+				}
+			}
+		}
+
+		for _, src := range srcs {
+			if src.isV6 {
+				v6In = append(v6In, []string{"-s", src.expr, "-j", "DROP"})
+			} else {
+				v4In = append(v4In, []string{"-s", src.expr, "-j", "DROP"})
+			}
+		}
+
+		if isBidir {
 			for _, src := range srcs {
 				for _, tgt := range parsedTargets {
 					if src.isV6 != tgt.IsV6 {
@@ -139,6 +233,24 @@ func RenderIPTablesP2P(cfg config.TailscaleP2PAssistConfig, peers []ResolvedPeer
 		}
 	}
 
+	// 个人随身设备走链路末端透传，若某本机网段启用了仅指定设备模式，同样在尾部收口拦截非白名单主机。
+	for _, lr := range resolvedLocal {
+		if lr.scope == config.TailscaleScopeAllowlist && len(lr.devices) > 0 {
+			for _, dev := range lr.devices {
+				if lr.target.IsV6 {
+					v6Fwd = append(v6Fwd, []string{"-d", dev, "-j", "RETURN"})
+				} else {
+					v4Fwd = append(v4Fwd, []string{"-d", dev, "-j", "RETURN"})
+				}
+			}
+			if lr.target.IsV6 {
+				v6Fwd = append(v6Fwd, []string{"-d", lr.target.AddrExpr, "-j", "DROP"})
+			} else {
+				v4Fwd = append(v4Fwd, []string{"-d", lr.target.AddrExpr, "-j", "DROP"})
+			}
+		}
+	}
+
 	return IPTablesP2PRuleSet{
 		ListenPort:    port,
 		JITWindowSec:  winSec,
@@ -149,6 +261,8 @@ func RenderIPTablesP2P(cfg config.TailscaleP2PAssistConfig, peers []ResolvedPeer
 		V6InACL:       v6In,
 		V4FwdACL:      v4Fwd,
 		V6FwdACL:      v6Fwd,
+		V4OutACL:      v4Out,
+		V6OutACL:      v6Out,
 	}, nil
 }
 
@@ -206,22 +320,22 @@ func (r IPTablesP2PRuleSet) RenderFirewallUserBlock() string {
 	b.WriteString("if command -v ipset >/dev/null 2>&1 && command -v iptables >/dev/null 2>&1; then\n")
 	fmt.Fprintf(&b, "    ipset create %s hash:ip family inet timeout %d -exist 2>/dev/null || true\n", setTSJITAllow4, defaultIPSetTimeoutSec)
 	fmt.Fprintf(&b, "    ipset create %s hash:ip family inet6 timeout %d -exist 2>/dev/null || true\n", setTSJITAllow6, defaultIPSetTimeoutSec)
-	writeFirewallUserFamily(&b, "iptables", port, r.V4JIT, r.V4InACL, r.V4FwdACL)
+	writeFirewallUserFamily(&b, "iptables", port, r.V4JIT, r.V4InACL, r.V4FwdACL, r.V4OutACL)
 	b.WriteString("    if command -v ip6tables >/dev/null 2>&1; then\n")
-	writeFirewallUserFamily(&b, "ip6tables", port, r.V6JIT, r.V6InACL, r.V6FwdACL)
+	writeFirewallUserFamily(&b, "ip6tables", port, r.V6JIT, r.V6InACL, r.V6FwdACL, r.V6OutACL)
 	b.WriteString("    fi\n")
 	b.WriteString("fi\n")
 	b.WriteString(tsFirewallUserEnd + "\n")
 	return b.String()
 }
 
-func writeFirewallUserFamily(b *strings.Builder, bin string, port int, jit, inACL, fwdACL [][]string) {
+func writeFirewallUserFamily(b *strings.Builder, bin string, port int, jit, inACL, fwdACL, outACL [][]string) {
 	indent := "    "
 	if bin == "ip6tables" {
 		indent = "        "
 	}
 	cmd := bin + " -w 5"
-	for _, ch := range []string{IPTablesChainTSJIT, IPTablesChainTSInACL, IPTablesChainTSFwdACL} {
+	for _, ch := range []string{IPTablesChainTSJIT, IPTablesChainTSInACL, IPTablesChainTSFwdACL, IPTablesChainTSOutACL} {
 		fmt.Fprintf(b, "%s%s -N %s 2>/dev/null || true\n", indent, cmd, ch)
 		fmt.Fprintf(b, "%s%s -F %s\n", indent, cmd, ch)
 	}
@@ -234,12 +348,17 @@ func writeFirewallUserFamily(b *strings.Builder, bin string, port int, jit, inAC
 	for _, args := range fwdACL {
 		fmt.Fprintf(b, "%s%s -A %s %s\n", indent, cmd, IPTablesChainTSFwdACL, strings.Join(args, " "))
 	}
+	for _, args := range outACL {
+		fmt.Fprintf(b, "%s%s -A %s %s\n", indent, cmd, IPTablesChainTSOutACL, strings.Join(args, " "))
+	}
 	fmt.Fprintf(b, "%s%s -C INPUT -p udp --dport %d -m comment --comment %s -j %s 2>/dev/null || %s -I INPUT 1 -p udp --dport %d -m comment --comment %s -j %s\n",
 		indent, cmd, port, jitCommentTag, IPTablesChainTSJIT, cmd, port, jitCommentTag, IPTablesChainTSJIT)
 	fmt.Fprintf(b, "%s%s -C INPUT -i tailscale+ -m comment --comment %s -j %s 2>/dev/null || %s -I INPUT 1 -i tailscale+ -m comment --comment %s -j %s\n",
 		indent, cmd, aclCommentTag, IPTablesChainTSInACL, cmd, aclCommentTag, IPTablesChainTSInACL)
 	fmt.Fprintf(b, "%s%s -C FORWARD -i tailscale+ -m comment --comment %s -j %s 2>/dev/null || %s -I FORWARD 1 -i tailscale+ -m comment --comment %s -j %s\n",
 		indent, cmd, aclCommentTag, IPTablesChainTSFwdACL, cmd, aclCommentTag, IPTablesChainTSFwdACL)
+	fmt.Fprintf(b, "%s%s -C FORWARD -o tailscale+ -m comment --comment %s -j %s 2>/dev/null || %s -I FORWARD 1 -o tailscale+ -m comment --comment %s -j %s\n",
+		indent, cmd, aclCommentTag, IPTablesChainTSOutACL, cmd, aclCommentTag, IPTablesChainTSOutACL)
 }
 
 // IPTablesP2PManager 实现基于 iptables + ip6tables + ipset 的 Tailscale P2P 防线独立后端。
@@ -308,11 +427,11 @@ func (m *IPTablesP2PManager) Apply(ctx context.Context, rs IPTablesP2PRuleSet) (
 	// IPv6 ipset 在禁用 IPv6 的内核上可能失败，容错不阻断 IPv4。
 	_, _ = m.run(ctx, "", "ipset", "create", setTSJITAllow6, "hash:ip", "family", "inet6", "timeout", strconv.Itoa(defaultIPSetTimeoutSec), "-exist")
 
-	if err := m.applyFamilyLocked(ctx, "iptables", rs.ListenPort, rs.V4JIT, rs.V4InACL, rs.V4FwdACL); err != nil {
+	if err := m.applyFamilyLocked(ctx, "iptables", rs.ListenPort, rs.V4JIT, rs.V4InACL, rs.V4FwdACL, rs.V4OutACL); err != nil {
 		return "", err
 	}
 	if m.hasBinary("ip6tables") {
-		_ = m.applyFamilyLocked(ctx, "ip6tables", rs.ListenPort, rs.V6JIT, rs.V6InACL, rs.V6FwdACL)
+		_ = m.applyFamilyLocked(ctx, "ip6tables", rs.ListenPort, rs.V6JIT, rs.V6InACL, rs.V6FwdACL, rs.V6OutACL)
 	}
 
 	if err := m.syncFirewallUserLocked(rs.RenderFirewallUserBlock()); err != nil {
@@ -327,7 +446,7 @@ func (m *IPTablesP2PManager) liveChainExists(ctx context.Context) bool {
 	return err == nil
 }
 
-func (m *IPTablesP2PManager) applyFamilyLocked(ctx context.Context, bin string, listenPort int, jit, inACL, fwdACL [][]string) error {
+func (m *IPTablesP2PManager) applyFamilyLocked(ctx context.Context, bin string, listenPort int, jit, inACL, fwdACL, outACL [][]string) error {
 	chains := []struct {
 		name  string
 		rules [][]string
@@ -335,6 +454,7 @@ func (m *IPTablesP2PManager) applyFamilyLocked(ctx context.Context, bin string, 
 		{name: IPTablesChainTSJIT, rules: jit},
 		{name: IPTablesChainTSInACL, rules: inACL},
 		{name: IPTablesChainTSFwdACL, rules: fwdACL},
+		{name: IPTablesChainTSOutACL, rules: outACL},
 	}
 
 	for _, ch := range chains {
@@ -363,6 +483,7 @@ func (m *IPTablesP2PManager) applyFamilyLocked(ctx context.Context, bin string, 
 	m.detachChainJumps(ctx, bin, "INPUT", IPTablesChainTSJIT)
 	m.detachChainJumps(ctx, bin, "INPUT", IPTablesChainTSInACL)
 	m.detachChainJumps(ctx, bin, "FORWARD", IPTablesChainTSFwdACL)
+	m.detachChainJumps(ctx, bin, "FORWARD", IPTablesChainTSOutACL)
 
 	hooks := []struct {
 		parent string
@@ -371,6 +492,7 @@ func (m *IPTablesP2PManager) applyFamilyLocked(ctx context.Context, bin string, 
 		{parent: "INPUT", spec: []string{"-i", "tailscale+", "-m", "comment", "--comment", aclCommentTag, "-j", IPTablesChainTSInACL}},
 		{parent: "INPUT", spec: []string{"-p", "udp", "--dport", strconv.Itoa(listenPort), "-m", "comment", "--comment", jitCommentTag, "-j", IPTablesChainTSJIT}},
 		{parent: "FORWARD", spec: []string{"-i", "tailscale+", "-m", "comment", "--comment", aclCommentTag, "-j", IPTablesChainTSFwdACL}},
+		{parent: "FORWARD", spec: []string{"-o", "tailscale+", "-m", "comment", "--comment", aclCommentTag, "-j", IPTablesChainTSOutACL}},
 	}
 	for _, h := range hooks {
 		checkArgs := append([]string{"-C", h.parent}, h.spec...)
@@ -440,7 +562,8 @@ func (m *IPTablesP2PManager) Remove(ctx context.Context) error {
 		m.detachChainJumps(ctx, bin, "INPUT", IPTablesChainTSJIT)
 		m.detachChainJumps(ctx, bin, "INPUT", IPTablesChainTSInACL)
 		m.detachChainJumps(ctx, bin, "FORWARD", IPTablesChainTSFwdACL)
-		for _, ch := range []string{IPTablesChainTSJIT, IPTablesChainTSInACL, IPTablesChainTSFwdACL} {
+		m.detachChainJumps(ctx, bin, "FORWARD", IPTablesChainTSOutACL)
+		for _, ch := range []string{IPTablesChainTSJIT, IPTablesChainTSInACL, IPTablesChainTSFwdACL, IPTablesChainTSOutACL} {
 			_, _ = m.run(ctx, "", bin, "-F", ch)
 			_, _ = m.run(ctx, "", bin, "-X", ch)
 		}

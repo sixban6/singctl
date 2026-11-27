@@ -325,8 +325,39 @@ func (t *Tailscale) StartWithOptions(opts StartOptions) error {
 		configureOpenWrtTailscaleFirewall()
 	}
 
+	if runtime.GOOS == "linux" {
+		t.syncLANShieldBestEffort(isOpenWrt, IsMainRouter)
+	}
+
 	logger.Success("Tailscale configured and started")
 	return nil
+}
+
+func (t *Tailscale) syncLANShieldBestEffort(isOpenWrt, advertiseLAN bool) {
+	sCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var localCIDRs []string
+	if t.config != nil && strings.TrimSpace(t.config.Subnets) != "" {
+		localCIDRs = append(localCIDRs, t.config.Subnets)
+	}
+	if sub, err := netx.GetLANSubnet(); err == nil && sub != "" {
+		localCIDRs = append(localCIDRs, sub)
+	}
+	lanIP := ""
+	if ni, err := netx.GetWithTimeout(2 * time.Second); err == nil && ni != nil {
+		lanIP = ni.LANIPv4
+	}
+	if err := SyncLANCoexistenceShield(sCtx, LANShieldOptions{
+		BinPath:            filepath.Join(installDir, "tailscale"),
+		LocalCIDRs:         localCIDRs,
+		LocalLANIP:         lanIP,
+		AdvertiseLocalLAN:  advertiseLAN,
+		IsOpenWrt:          isOpenWrt,
+		EnsureNetfilterOff: isOpenWrt,
+	}); err != nil {
+		logger.Warn("同步 Tailscale 内网防劫持护盾失败（非致命）: %v", err)
+	}
 }
 
 func (t *Tailscale) Stop() error {
@@ -334,6 +365,12 @@ func (t *Tailscale) Stop() error {
 
 	if err := exec.Command(filepath.Join(installDir, "tailscale"), "down").Run(); err != nil {
 		logger.Warn("tailscale down failed: %v", err)
+	}
+
+	if runtime.GOOS == "linux" {
+		rCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		_ = RemoveLANCoexistenceShield(rCtx, nil)
+		cancel()
 	}
 
 	stopCtx := context.Background()

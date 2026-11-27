@@ -85,6 +85,10 @@ ${bypass_vlan_rule}
             ip daddr @LOCAL_IPV4_SET accept
             ip6 daddr @LOCAL_IPV6_SET accept
 
+            # 放行下游设备（二级路由/手机/电脑/NAS）的 Tailscale P2P 与 STUN (sport/dport 41641)，不破坏浏览器 WebRTC 防泄漏
+            udp sport 41641 accept comment "Bypass downstream Tailscale UDP port"
+            udp dport 41641 accept comment "Bypass downstream Tailscale UDP port"
+
             # 3.将其他流量标记并转发到 TProxy
             meta l4proto { tcp, udp } tproxy to :$TPROXY_PORT meta mark set $PROXY_FWMARK accept
         }

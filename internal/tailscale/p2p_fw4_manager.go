@@ -68,10 +68,16 @@ func (m *FW4Manager) run(ctx context.Context, stdin string, name string, args ..
 func (m *FW4Manager) dropInPaths() map[string]string {
 	base := m.baseDir()
 	return map[string]string{
-		"table-pre":         filepath.Join(base, "table-pre", "singctl-ts-jit.nft"),
-		"input-wan":         filepath.Join(base, "chain-pre", "input_wan", "singctl-ts-jit.nft"),
-		"input-tailscale":   filepath.Join(base, "chain-pre", "input_tailscale", "singctl-ts-acl.nft"),
-		"forward-tailscale": filepath.Join(base, "chain-pre", "forward_tailscale", "singctl-ts-acl.nft"),
+		"table-pre":          filepath.Join(base, "table-pre", "singctl-ts-jit.nft"),
+		"input-wan":          filepath.Join(base, "chain-pre", "input_wan", "singctl-ts-jit.nft"),
+		"input-tailscale":    filepath.Join(base, "chain-pre", "input_tailscale", "singctl-ts-acl.nft"),
+		"forward-tailscale":  filepath.Join(base, "chain-pre", "forward_tailscale", "singctl-ts-acl.nft"),
+		"forward-egress":     filepath.Join(base, "chain-pre", "forward", "singctl-ts-egress.nft"),
+		"forward-lan-learn4": filepath.Join(base, "chain-pre", "forward", "singctl-ts-lan-jit.nft"),
+		"forward-lan-learn6": filepath.Join(base, "chain-pre", "forward_lan", "singctl-ts-lan-jit.nft"),
+		"forward-wan-lan":    filepath.Join(base, "chain-pre", "forward_wan", "singctl-ts-lan-jit.nft"),
+		"dstnat-lan":         filepath.Join(base, "chain-pre", "dstnat", "singctl-ts-lan-jit.nft"),
+		"srcnat-lan":         filepath.Join(base, "chain-pre", "srcnat_lan", "singctl-ts-lan-jit.nft"),
 	}
 }
 
@@ -137,16 +143,29 @@ func (m *FW4Manager) applyWithLookPath(ctx context.Context, d FW4DropIns, lookPa
 
 	paths := m.dropInPaths()
 	wantContents := map[string]string{
-		paths["table-pre"]:         d.TablePre,
-		paths["input-wan"]:         d.InputWANPre,
-		paths["input-tailscale"]:   d.InputTailscalePre,
-		paths["forward-tailscale"]: d.ForwardTailscalePre,
+		paths["table-pre"]:          d.TablePre,
+		paths["input-wan"]:          d.InputWANPre,
+		paths["input-tailscale"]:    d.InputTailscalePre,
+		paths["forward-tailscale"]:  d.ForwardTailscalePre,
+		paths["forward-egress"]:     d.ForwardEgressPre,
+		paths["forward-lan-learn4"]: d.ForwardLanLearnPre,
+		paths["forward-lan-learn6"]: d.ForwardLanV6LearnPre,
+		paths["forward-wan-lan"]:    d.ForwardWANPre,
+		paths["dstnat-lan"]:         d.DstnatPre,
+		paths["srcnat-lan"]:         d.SrcnatLanPre,
 	}
 
 	snaps := snapshotFiles(paths)
 	filesMatch := true
 	for p, want := range wantContents {
 		snap, ok := snaps[p]
+		if want == "" {
+			if ok && snap.existed {
+				filesMatch = false
+				break
+			}
+			continue
+		}
 		if !ok || !snap.existed || string(snap.data) != want {
 			filesMatch = false
 			break
@@ -159,6 +178,13 @@ func (m *FW4Manager) applyWithLookPath(ctx context.Context, d FW4DropIns, lookPa
 	}
 
 	for p, content := range wantContents {
+		if content == "" {
+			if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+				restoreFiles(snaps)
+				return "", fmt.Errorf("remove stale drop-in %s: %w", p, err)
+			}
+			continue
+		}
 		if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
 			restoreFiles(snaps)
 			return "", fmt.Errorf("create nftables drop-in dir: %w", err)
@@ -203,6 +229,7 @@ func (m *FW4Manager) liveChainExists(ctx context.Context) bool {
 
 type fw4TableInspection struct {
 	setsPresent   map[string]bool
+	mapsPresent   map[string]bool
 	chainsPresent map[string]bool
 	taggedHandles map[string][]int
 }
@@ -210,6 +237,7 @@ type fw4TableInspection struct {
 func parseFW4Inspection(raw string) fw4TableInspection {
 	res := fw4TableInspection{
 		setsPresent:   make(map[string]bool),
+		mapsPresent:   make(map[string]bool),
 		chainsPresent: make(map[string]bool),
 		taggedHandles: make(map[string][]int),
 	}
@@ -222,6 +250,8 @@ func parseFW4Inspection(raw string) fw4TableInspection {
 			switch currentKind {
 			case "set":
 				res.setsPresent[currentName] = true
+			case "map":
+				res.mapsPresent[currentName] = true
 			case "chain":
 				res.chainsPresent[currentName] = true
 			}
@@ -232,8 +262,8 @@ func parseFW4Inspection(raw string) fw4TableInspection {
 			currentName = ""
 			continue
 		}
-		if currentKind == "chain" && (currentName == "input_wan" || currentName == "input_tailscale" || currentName == "forward_tailscale") {
-			if strings.Contains(trimmed, jitCommentTag) || strings.Contains(trimmed, aclCommentTag) {
+		if currentKind == "chain" && (currentName == "input_wan" || currentName == "input_tailscale" || currentName == "forward_tailscale" || currentName == "forward" || currentName == "forward_lan" || currentName == "forward_wan" || currentName == "dstnat" || currentName == "srcnat_lan") {
+			if strings.Contains(trimmed, jitCommentTag) || strings.Contains(trimmed, aclCommentTag) || strings.Contains(trimmed, lanJITCommentTag) {
 				if hm := nftHandleRe.FindStringSubmatch(trimmed); len(hm) == 2 {
 					if handle, err := strconv.Atoi(hm[1]); err == nil && handle > 0 {
 						res.taggedHandles[currentName] = append(res.taggedHandles[currentName], handle)
@@ -259,6 +289,14 @@ func (m *FW4Manager) applyNFTDirect(ctx context.Context, d FW4DropIns) error {
 	if !insp.setsPresent[setTSJITAllow6] {
 		fmt.Fprintf(&b, "add set inet fw4 %s { type ipv6_addr; flags timeout; timeout %ds; }\n", setTSJITAllow6, d.JITWindowSec)
 	}
+	if d.DownstreamV4Active && !insp.mapsPresent[mapTSLanPunch4] {
+		fmt.Fprintf(&b, "add map inet fw4 %s { type ipv4_addr : ipv4_addr; size %d; flags dynamic, timeout; timeout %ds; }\n",
+			mapTSLanPunch4, downstreamPunchMapSize, d.JITWindowSec)
+	}
+	if d.DownstreamV6Active && !insp.setsPresent[setTSLanPunch6] {
+		fmt.Fprintf(&b, "add set inet fw4 %s { type ipv6_addr . ipv6_addr; size %d; flags dynamic, timeout; timeout %ds; }\n",
+			setTSLanPunch6, downstreamPunchMapSize, d.JITWindowSec)
+	}
 
 	writeChainPatch := func(chain string, rules []string) {
 		fmt.Fprintf(&b, "add chain inet fw4 %s\n", chain)
@@ -270,18 +308,82 @@ func (m *FW4Manager) applyNFTDirect(ctx context.Context, d FW4DropIns) error {
 	writeChainPatch(chainJITGuard, d.JITGuardRules)
 	writeChainPatch(chainInputACL, d.InputACLRules)
 	writeChainPatch(chainForwardACL, d.ForwardACLRules)
+	writeChainPatch(chainEgressACL, d.EgressACLRules)
+	if d.DownstreamV4Active {
+		writeChainPatch(chainLanLearn4, d.LanLearn4Rules)
+		writeChainPatch(chainLanDNAT4, d.LanDNAT4Rules)
+	}
+	if d.DownstreamV6Active {
+		writeChainPatch(chainLanLearn6, d.LanLearn6Rules)
+	}
+	if d.DownstreamV4Active || d.DownstreamV6Active {
+		writeChainPatch(chainLanFwd, d.LanFwdRules)
+	}
 
-	patchJump := func(parent string, ruleExpr string) {
+	clearHandles := func(parent string) {
 		for _, h := range insp.taggedHandles[parent] {
 			fmt.Fprintf(&b, "delete rule inet fw4 %s handle %d\n", parent, h)
 		}
-		if insp.chainsPresent[parent] {
+	}
+	patchJump := func(parent string, ruleExpr string) {
+		clearHandles(parent)
+		if ruleExpr != "" && insp.chainsPresent[parent] {
 			fmt.Fprintf(&b, "insert rule inet fw4 %s %s\n", parent, ruleExpr)
 		}
 	}
 	patchJump("input_wan", d.inputWANRule())
 	patchJump("input_tailscale", d.inputTailscaleRule())
 	patchJump("forward_tailscale", d.forwardTailscaleRule())
+
+	clearHandles("forward")
+	if insp.chainsPresent["forward"] {
+		if d.DownstreamV4Active {
+			fmt.Fprintf(&b, "insert rule inet fw4 forward %s\n", d.forwardLanLearn4Rule())
+		}
+		fmt.Fprintf(&b, "insert rule inet fw4 forward %s\n", d.forwardEgressRule())
+	}
+	if d.DownstreamV6Active {
+		patchJump("forward_lan", d.forwardLanLearn6Rule())
+	} else {
+		clearHandles("forward_lan")
+	}
+	if d.DownstreamV4Active || d.DownstreamV6Active {
+		patchJump("forward_wan", d.forwardWANLanRule())
+	} else {
+		clearHandles("forward_wan")
+	}
+	if d.DownstreamV4Active {
+		patchJump("dstnat", d.dstnatLanRule())
+		patchJump("srcnat_lan", d.srcnatLanBypassRule())
+	} else {
+		clearHandles("dstnat")
+		clearHandles("srcnat_lan")
+	}
+
+	if !d.DownstreamV4Active {
+		for _, ch := range []string{chainLanLearn4, chainLanDNAT4} {
+			if insp.chainsPresent[ch] {
+				fmt.Fprintf(&b, "flush chain inet fw4 %s\n", ch)
+				fmt.Fprintf(&b, "delete chain inet fw4 %s\n", ch)
+			}
+		}
+		if insp.mapsPresent[mapTSLanPunch4] {
+			fmt.Fprintf(&b, "delete map inet fw4 %s\n", mapTSLanPunch4)
+		}
+	}
+	if !d.DownstreamV6Active {
+		if insp.chainsPresent[chainLanLearn6] {
+			fmt.Fprintf(&b, "flush chain inet fw4 %s\n", chainLanLearn6)
+			fmt.Fprintf(&b, "delete chain inet fw4 %s\n", chainLanLearn6)
+		}
+		if insp.setsPresent[setTSLanPunch6] {
+			fmt.Fprintf(&b, "delete set inet fw4 %s\n", setTSLanPunch6)
+		}
+	}
+	if !d.DownstreamV4Active && !d.DownstreamV6Active && insp.chainsPresent[chainLanFwd] {
+		fmt.Fprintf(&b, "flush chain inet fw4 %s\n", chainLanFwd)
+		fmt.Fprintf(&b, "delete chain inet fw4 %s\n", chainLanFwd)
+	}
 
 	script := b.String()
 	if out, err := m.run(ctx, script, "nft", "-c", "-f", "-"); err != nil {
@@ -345,21 +447,24 @@ func (m *FW4Manager) removeWithLookPath(ctx context.Context, lookPath func(strin
 	insp := parseFW4Inspection(string(raw))
 
 	var b strings.Builder
-	for _, parent := range []string{"input_wan", "input_tailscale", "forward_tailscale"} {
+	for _, parent := range []string{"input_wan", "input_tailscale", "forward_tailscale", "forward", "forward_lan", "forward_wan", "dstnat", "srcnat_lan"} {
 		for _, h := range insp.taggedHandles[parent] {
 			fmt.Fprintf(&b, "delete rule inet fw4 %s handle %d\n", parent, h)
 		}
 	}
-	for _, ch := range []string{chainJITGuard, chainInputACL, chainForwardACL} {
+	for _, ch := range []string{chainJITGuard, chainInputACL, chainForwardACL, chainEgressACL, chainLanLearn4, chainLanLearn6, chainLanDNAT4, chainLanFwd} {
 		if insp.chainsPresent[ch] {
 			fmt.Fprintf(&b, "flush chain inet fw4 %s\n", ch)
 			fmt.Fprintf(&b, "delete chain inet fw4 %s\n", ch)
 		}
 	}
-	for _, setName := range []string{setTSJITAllow4, setTSJITAllow6} {
+	for _, setName := range []string{setTSJITAllow4, setTSJITAllow6, setTSLanPunch6} {
 		if insp.setsPresent[setName] {
 			fmt.Fprintf(&b, "delete set inet fw4 %s\n", setName)
 		}
+	}
+	if insp.mapsPresent[mapTSLanPunch4] {
+		fmt.Fprintf(&b, "delete map inet fw4 %s\n", mapTSLanPunch4)
 	}
 
 	if b.Len() > 0 {

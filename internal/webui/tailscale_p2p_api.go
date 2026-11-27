@@ -18,12 +18,17 @@ import (
 
 // TailscaleP2PTestHooks 仅供离线单元测试注入可控的 Tailscale / fw4 / ujail 依赖。
 type TailscaleP2PTestHooks struct {
-	Controller     *tailscale.P2PAssistController
-	FW4Available   bool
-	UjailAvailable bool
-	UjailApply     func(ctx context.Context, enable bool) (bool, error)
-	Now            func() time.Time
-	DefaultLANCIDR string
+	Controller       *tailscale.P2PAssistController
+	FW4Available     bool
+	UjailAvailable   bool
+	UjailApply       func(ctx context.Context, enable bool) (bool, error)
+	Now              func() time.Time
+	DefaultLANCIDR   string
+	RouteOutput      string
+	LeaseText        string
+	NeighText        string
+	MeshSync         func(ctx context.Context, subnetsCSV string, acceptRoutes bool) error
+	MeshSyncWithMode func(ctx context.Context, mode, subnetsCSV string, acceptRoutes, exitNode bool) error
 }
 
 func (s *Server) tailscaleP2PNow() time.Time {
@@ -43,6 +48,22 @@ func (s *Server) defaultLANCIDR() string {
 	return ""
 }
 
+func (s *Server) effectiveProtectedLANCIDRs() string {
+	if cfg, err := s.loadConfigSnapshot(); err == nil && cfg != nil {
+		rm := strings.ToLower(strings.TrimSpace(cfg.Tailscale.P2PAssist.RoleMode))
+		if rm == "client" || rm == "exit" {
+			return ""
+		}
+		if strings.TrimSpace(cfg.Tailscale.Subnets) != "" {
+			return strings.TrimSpace(cfg.Tailscale.Subnets)
+		}
+	}
+	if s.opts.TailscaleP2PForTest != nil && strings.TrimSpace(s.opts.TailscaleP2PForTest.DefaultLANCIDR) != "" {
+		return strings.TrimSpace(s.opts.TailscaleP2PForTest.DefaultLANCIDR)
+	}
+	return s.defaultLANCIDR()
+}
+
 func (s *Server) tailscaleP2PController() *tailscale.P2PAssistController {
 	if s.opts.TailscaleP2PForTest != nil && s.opts.TailscaleP2PForTest.Controller != nil {
 		return s.opts.TailscaleP2PForTest.Controller
@@ -51,7 +72,7 @@ func (s *Server) tailscaleP2PController() *tailscale.P2PAssistController {
 	defer s.tsP2PMu.Unlock()
 	if s.tsP2PCtrl == nil {
 		s.tsP2PCtrl = &tailscale.P2PAssistController{
-			DefaultLANCIDR: s.defaultLANCIDR,
+			DefaultLANCIDR: s.effectiveProtectedLANCIDRs,
 		}
 	}
 	return s.tsP2PCtrl
@@ -83,7 +104,7 @@ func (s *Server) buildTailscaleP2PReport(ctx context.Context, cfg *config.Config
 		IsOpenWrt:      isOpenWrtSystem() || fw4OK,
 		FW4Available:   fw4OK,
 		UjailAvailable: s.ujailAvailable(),
-		DefaultLANCIDR: s.defaultLANCIDR(),
+		DefaultLANCIDR: s.effectiveProtectedLANCIDRs(),
 		Now:            s.tailscaleP2PNow(),
 	})
 }

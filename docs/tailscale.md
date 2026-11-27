@@ -151,7 +151,14 @@ singctl ts update --timeout 30 --no-wait
 - **JIT 瞬时打洞（Layer 1）**：闲置与已直连期间 `TS_JIT_ALLOW4` / `TS_JIT_ALLOW6` 保持空集；仅当已授权节点处于活跃转发且走 DERP 中继时，瞬时放行候选公网 IP `3~10` 秒并触发 DISCO 探活，升级直连后毫秒级撤销集合条目（由 Linux `nf_conntrack` 五元组维持已建立会话）。若连续 2 次失败则自动进入 DERP 冷却退避（默认 300 秒）。
 - **内核载荷魔法头过滤（Layer 2）**：可选开启 DISCO / WireGuard (Type 1–4) / STUN (RFC 5389) 魔法字节与长度校验 + `300/second` 限速。
 - **可选 `ujail` 沙盒（Layer 3）**：在支持 `/sbin/ujail` 的 OpenWrt 设备上可选启用 `sandbox_ujail: true`。
-- **3 态零信任双向控制（Layer 4）**：针对纳管节点支持 `outbound_only`（单向锁死）、`bidirectional_timed`（探亲限时双向，过期自动降级）与 `bidirectional`（长期双向，支持按 CIDR/`IP:port` 收窄至 `allowed_lan_targets`）；未纳入 `peers` 列表的个人终端（笔记本、手机等）不受限。
+- **3 态零信任双向控制与网段/单设备权限（Layer 4）**：
+  - 支持对本机各网段（主 LAN / 多 VLAN / 下级静态路由子网）分别设置 `all`（全部设备）、`allowlist`（仅指定设备）或 `denylist`（排除个别设备），在 `nftables` 与 `iptables` 同步强制进出双向隔离；
+  - 针对远端纳管网关支持 `outbound_only`（单向·公共网络）、`bidirectional_timed`（限时双向）与 `bidirectional`（互通·家庭网络）；未纳入限制的个人随身终端不受限。
+- **下游设备边界动态微窗 (`downstream_assist`，默认开启)**：
+  - 当主路由自身未运行 Tailscale 时，自动在 OpenWrt `fw4` 外网边界启用基于 `nftables` 动态超时映射表（`TS_LAN_PUNCH4` / `TS_LAN_PUNCH6`，复用 `jit_window_sec` 默认 5 秒、上限 `size 64`、出/入双向 Layer 2 魔法头校验）的零暴露穿透协助，平时外网边界 0 字节进内网；本机启动 Tailscale 时 IPv4 自动互斥卸载不抢端口。
+  - 同时透明代理数据面在 `prerouting` / `SING_BOX` 放行下游设备 `UDP 41641` 直出物理宽带（不破坏浏览器 WebRTC `UDP 3478` 防泄漏）。
+- **内核 TUN 驱动检测与一键修复 (`singctl ts fix-tun`)**：
+  - 自动检测系统是否因缺少 `/dev/net/tun`（`kmod-tun`）降级为 `--tun=userspace-networking` 纯用户态模式，并在 WebUI 顶部弹出告警与一键修复入口（支持 `apk` / `opkg` 自动安装并无缝切回内核 TUN 模式；定制固件源缺失时安全中止并输出内核版本指引）。
 
 可在 WebUI **「Tailscale 组网」** 页面可视化配置并测试瞬时打洞，或在 `singctl.yaml` 中配置：
 
@@ -159,10 +166,17 @@ singctl ts update --timeout 30 --no-wait
 tailscale:
   p2p_assist:
     enabled: true
+    role_mode: "router"                       # client | router | exit | gateway
     jit_window_sec: 5
     cooldown_sec: 300
     payload_filter: true
+    downstream_assist: true                   # 默认 true，主路由未跑 Tailscale 时协助下游路由/NAS 零暴露打洞
     sandbox_ujail: false
+    local_rules:
+      - cidr: "192.168.1.0/24"
+        scope: "allowlist"                    # all | allowlist | denylist
+        devices:
+          - "192.168.1.10"
     peers:
       - name: "router-remote"
         jit_enabled: true
