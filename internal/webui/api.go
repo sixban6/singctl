@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
@@ -19,7 +20,6 @@ import (
 	"singctl/internal/constant"
 	"singctl/internal/daemon"
 	"singctl/internal/firewall"
-	"singctl/internal/safecommit"
 	"singctl/internal/singbox"
 	"singctl/internal/tailscale"
 	"sort"
@@ -32,7 +32,7 @@ import (
 
 // ───────────────────────── 状态 ─────────────────────────
 
-func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+func (s *Server) collectStatusSnapshot(ctx context.Context) map[string]any {
 	var (
 		host map[string]any
 		sb   map[string]any
@@ -42,40 +42,55 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		fw   firewall.QuickStatus
 		gw   map[string]any
 		cfg  map[string]any
-		sc   safecommit.StatusReport
 		as   daemon.AutoStartStatus
 	)
 
 	var wg sync.WaitGroup
-	wg.Add(10)
+	wg.Add(9)
 	go func() { defer wg.Done(); host = s.hostInfo() }()
 	go func() { defer wg.Done(); sb = singboxStatus() }()
 	go func() { defer wg.Done(); dm = s.daemonStatusSummary() }()
-	go func() { defer wg.Done(); agh = s.dnsStatusSummary(r.Context()) }()
+	go func() { defer wg.Done(); agh = s.dnsStatusSummary(ctx) }()
 	go func() { defer wg.Done(); ts = s.tailscaleStatus(s.opts.ConfigPath) }()
 	go func() { defer wg.Done(); fw = firewallStatus() }()
 	go func() { defer wg.Done(); gw = s.gatewayStatusSummary() }()
 	go func() { defer wg.Done(); cfg = s.configSummary(s.opts.ConfigPath) }()
-	go func() { defer wg.Done(); sc = s.safeCommitManager().Status() }()
-	go func() { defer wg.Done(); as = s.autoStartStatusSummary(r.Context()) }()
+	go func() { defer wg.Done(); as = s.autoStartStatusSummary(ctx) }()
 	wg.Wait()
 
-	status := map[string]any{
-		"singctlVersion": s.opts.Version,
-		"authEnabled":    s.currentPassword() != "",
-		"sessionToken":   s.SessionToken(),
-		"host":           host,
-		"singbox":        sb,
-		"daemon":         dm,
-		"dns":            agh,
-		"adguard":        agh,
-		"tailscale":      ts,
-		"firewall":       fw,
-		"gateway":        gw,
-		"config":         cfg,
-		"safeCommit":     sc,
-		"autoStart":      as,
+	return map[string]any{
+		"host":      host,
+		"singbox":   sb,
+		"daemon":    dm,
+		"dns":       agh,
+		"adguard":   agh,
+		"tailscale": ts,
+		"firewall":  fw,
+		"gateway":   gw,
+		"config":    cfg,
+		"autoStart": as,
 	}
+}
+
+func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	var base map[string]any
+	if s.statusCache != nil && r.URL.Query().Get("fresh") != "1" {
+		snap, err := s.statusCache.Get(r.Context())
+		if snap != nil {
+			base = snap
+		} else if err != nil {
+			base = s.collectStatusSnapshot(r.Context())
+		}
+	} else {
+		base = s.collectStatusSnapshot(r.Context())
+	}
+
+	status := make(map[string]any, len(base)+4)
+	maps.Copy(status, base)
+	status["singctlVersion"] = s.opts.Version
+	status["authEnabled"] = s.currentPassword() != ""
+	status["sessionToken"] = s.SessionToken()
+	status["safeCommit"] = s.safeCommitManager().Status()
 	writeJSON(w, http.StatusOK, status)
 }
 
@@ -138,19 +153,60 @@ func isOpenWrtSystem() bool {
 	return sysinfo.IsOpenWrt()
 }
 
+type sbVersionCacheEntry struct {
+	mtimeNano int64
+	size      int64
+	version   string
+}
+
+var (
+	sbVersionCacheMu sync.Mutex
+	sbVersionCache   = make(map[string]sbVersionCacheEntry)
+)
+
+func cachedSingBoxVersion(binPath string) string {
+	info, statErr := os.Stat(binPath)
+	if statErr != nil || info.IsDir() {
+		return ""
+	}
+	sbVersionCacheMu.Lock()
+	if ent, ok := sbVersionCache[binPath]; ok && ent.mtimeNano == info.ModTime().UnixNano() && ent.size == info.Size() {
+		sbVersionCacheMu.Unlock()
+		return ent.version
+	}
+	sbVersionCacheMu.Unlock()
+
+	v, err := shortCommand(3*time.Second, binPath, "version")
+	if err != nil {
+		return ""
+	}
+	parsed, err := singbox.ParseSingBoxVersionOutput(v)
+	if err != nil {
+		return ""
+	}
+	sbVersionCacheMu.Lock()
+	sbVersionCache[binPath] = sbVersionCacheEntry{
+		mtimeNano: info.ModTime().UnixNano(),
+		size:      info.Size(),
+		version:   parsed,
+	}
+	sbVersionCacheMu.Unlock()
+	return parsed
+}
+
 func singboxStatus() map[string]any {
-	installed := fileExists(constant.SingBoxInstallDir)
+	binPath := constant.SingBoxInstallDir
+	installed := fileExists(binPath)
 	if !installed {
-		if _, err := exec.LookPath("sing-box"); err == nil {
+		if looked, err := exec.LookPath("sing-box"); err == nil {
 			installed = true
+			binPath = looked
 		}
 	}
 
 	version := ""
-	if v, err := shortCommand(3*time.Second, constant.SingBoxInstallDir, "version"); err == nil {
-		if parsed, err := singbox.ParseSingBoxVersionOutput(v); err == nil {
-			version = parsed
-		}
+	if installed {
+		version = cachedSingBoxVersion(binPath)
 	}
 
 	return map[string]any{

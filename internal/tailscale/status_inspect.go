@@ -14,8 +14,65 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
+
+type tsVersionCacheEntry struct {
+	mtimeNano int64
+	size      int64
+	version   string
+}
+
+var (
+	tsVersionCacheMu sync.Mutex
+	tsVersionCache   = make(map[string]tsVersionCacheEntry)
+)
+
+func cachedTailscaleVersion(ctx context.Context, binPath string) string {
+	if strings.TrimSpace(binPath) == "" {
+		return ""
+	}
+	info, statErr := os.Stat(binPath)
+	if statErr == nil {
+		tsVersionCacheMu.Lock()
+		if ent, ok := tsVersionCache[binPath]; ok && ent.mtimeNano == info.ModTime().UnixNano() && ent.size == info.Size() {
+			tsVersionCacheMu.Unlock()
+			return ent.version
+		}
+		tsVersionCacheMu.Unlock()
+	}
+
+	vCtx, vCancel := context.WithTimeout(ctx, 3*time.Second)
+	defer vCancel()
+	out, err := exec.CommandContext(vCtx, binPath, "version").CombinedOutput()
+	if err != nil {
+		return ""
+	}
+	ver, err := ParseVersionOutput(string(out))
+	if err != nil {
+		return ""
+	}
+	if statErr == nil {
+		tsVersionCacheMu.Lock()
+		tsVersionCache[binPath] = tsVersionCacheEntry{
+			mtimeNano: info.ModTime().UnixNano(),
+			size:      info.Size(),
+			version:   ver,
+		}
+		tsVersionCacheMu.Unlock()
+	}
+	return ver
+}
+
+func defaultTailscaleSocketExists() bool {
+	for _, sock := range []string{"/var/run/tailscale/tailscaled.sock", "/run/tailscale/tailscaled.sock"} {
+		if _, err := os.Stat(sock); err == nil {
+			return true
+		}
+	}
+	return false
+}
 
 var (
 	tsCGNATPrefix = netip.MustParsePrefix("100.64.0.0/10")
@@ -256,18 +313,22 @@ func InspectHostStatus(ctx context.Context, opts HostStatusOptions) map[string]a
 		binPath = FindInstalledTailscaleBin()
 	}
 
-	version := ""
-	if binPath != "" {
-		vCtx, vCancel := context.WithTimeout(ctx, 3*time.Second)
-		if out, err := exec.CommandContext(vCtx, binPath, "version").CombinedOutput(); err == nil {
-			if v, err := ParseVersionOutput(string(out)); err == nil {
-				version = v
-			}
-		}
-		vCancel()
-	}
+	version := cachedTailscaleVersion(ctx, binPath)
 
-	bs := QueryBackendStatus(ctx, binPath, opts.LocalAPI)
+	// 快路径：当显式探针确认 tailscaled 未运行且默认 Unix Socket 不存在时，直接跳过 `tailscale status --json`
+	// 避免 CLI 内部 2 秒 socket 重试空等拖垮 /api/status 首屏与轮询热路径。
+	var bs BackendStatus
+	skipBackendQuery := false
+	if opts.LocalAPI == nil {
+		if opts.DaemonProcProbe != nil && !opts.DaemonProcProbe() {
+			skipBackendQuery = true
+		} else if runtime.GOOS == "linux" && !defaultTailscaleSocketExists() {
+			skipBackendQuery = true
+		}
+	}
+	if !skipBackendQuery {
+		bs = QueryBackendStatus(ctx, binPath, opts.LocalAPI)
+	}
 	daemonUp := bs.Running
 	if !daemonUp && binPath == "" && opts.DaemonProcProbe != nil {
 		daemonUp = opts.DaemonProcProbe()

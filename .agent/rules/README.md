@@ -10,3 +10,4 @@
 2. [`02-zero-downtime-live-ops.md`](./02-zero-downtime-live-ops.md) —— **软路由与线上 VPS 零断网、防失联操作铁律**
 3. [`03-code-quality-and-release-gates.md`](./03-code-quality-and-release-gates.md) —— **代码质量、开闭原则（OCP）、全流程 TDD 与发布前测试门禁**
 4. [`04-singbox-architecture-principles.md`](./04-singbox-architecture-principles.md) —— **对标 sing-box 的模块化架构设计、生命周期与防劣化铁律**
+5. [`05-ui-smoothness-and-hotpath-latency.md`](./05-ui-smoothness-and-hotpath-latency.md) —— **WebUI 页面流畅、首屏秒开与热路径零卡顿铁律**

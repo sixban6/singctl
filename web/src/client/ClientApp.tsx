@@ -65,6 +65,43 @@ const SystemPage = lazyWithReload(
   'client-system',
 );
 
+const STATUS_SESSION_CACHE_KEY = 'sc_client_status_snap_v1';
+
+function readSessionStatusSnapshot(): ClientStatusResponse | undefined {
+  if (typeof window === 'undefined') return undefined;
+  try {
+    const raw = window.sessionStorage.getItem(STATUS_SESSION_CACHE_KEY);
+    if (!raw) return undefined;
+    const parsed = JSON.parse(raw) as ClientStatusResponse;
+    if (parsed && typeof parsed === 'object' && parsed.host) {
+      return parsed;
+    }
+  } catch {
+    // ignore corrupted storage
+  }
+  return undefined;
+}
+
+function writeSessionStatusSnapshot(status: ClientStatusResponse) {
+  if (typeof window === 'undefined') return;
+  try {
+    // 不把 sessionToken 写入 sessionStorage，仅持久化非敏感状态快照供首屏 0ms 回显
+    const { sessionToken: _omit, ...safeSnap } = status;
+    window.sessionStorage.setItem(STATUS_SESSION_CACHE_KEY, JSON.stringify(safeSnap));
+  } catch {
+    // ignore quota errors
+  }
+}
+
+function clearSessionStatusSnapshot() {
+  if (typeof window === 'undefined') return;
+  try {
+    window.sessionStorage.removeItem(STATUS_SESSION_CACHE_KEY);
+  } catch {
+    // ignore
+  }
+}
+
 const ClientShell: React.FC = () => {
   const { error } = useToast();
   const { tab, sub, navigate } = useHashRoute<ClientTab>(CLIENT_TABS, 'dash');
@@ -86,14 +123,27 @@ const ClientShell: React.FC = () => {
 
   const [safeCommitFastPoll, setSafeCommitFastPoll] = useState(false);
 
+  const initialStatusSnap = useMemo(() => readSessionStatusSnapshot(), []);
+
   const {
     data: status,
+    loading: statusLoading,
     refreshing,
+    error: statusError,
     setData: setStatus,
     refetch: refreshStatus,
-  } = useCachedQuery<ClientStatusResponse>('client:status', () => clientApi.getStatus(), {
-    pollMs: safeCommitFastPoll ? 3000 : 12000,
-  });
+  } = useCachedQuery<ClientStatusResponse>(
+    'client:status',
+    async () => {
+      const next = await clientApi.getStatus();
+      writeSessionStatusSnapshot(next);
+      return next;
+    },
+    {
+      initialData: initialStatusSnap,
+      pollMs: safeCommitFastPoll ? 3000 : 12000,
+    },
+  );
 
   useEffect(() => {
     setSafeCommitFastPoll(Boolean(status?.safeCommit?.active));
@@ -204,6 +254,7 @@ const ClientShell: React.FC = () => {
     try {
       await clientApi.logout();
       clearCachedQuery();
+      clearSessionStatusSnapshot();
       reloadWithCacheBust();
     } catch (e) {
       error((e as Error).message || '退出登录失败');
@@ -365,10 +416,12 @@ const ClientShell: React.FC = () => {
           {tab === 'dash' && (
           <DashPage
             status={status ?? null}
+            statusLoading={statusLoading}
+            statusError={statusError}
             busy={busy}
             onAction={requestAction}
             onNavigate={navigateSafe}
-            onRefreshStatus={() => void refreshStatus(true)}
+            onRefreshStatus={() => void refreshStatus(false)}
           />
         )}
         {tab === 'sb' && (

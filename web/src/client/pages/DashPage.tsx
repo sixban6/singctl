@@ -27,12 +27,15 @@ import { ClientHealthResponse, ClientStatusResponse, SbProxiesSnapshot } from '.
 import { TrafficFlowCard } from '../components/TrafficFlowCard';
 import { getEngineDisplayName, getStatusDNS } from './adguard/adguardHelpers';
 import { DashIOSImportDrawer } from './dash/DashIOSImportDrawer';
+import { DashLoadingState } from './dash/DashLoadingState';
 import { DelegatedTopologyCard } from './dash/DelegatedTopologyCard';
 import { DoctorDrawer } from './dash/DoctorDrawer';
 import { HostMetricsStrip } from './dash/HostMetricsStrip';
 
 export interface DashPageProps {
   status: ClientStatusResponse | null;
+  statusLoading?: boolean;
+  statusError?: string | null;
   busy: boolean;
   onAction: (name: string, params?: Record<string, unknown>, confirmMsg?: string) => void;
   onNavigate: (tab: string, sub?: string) => void;
@@ -55,6 +58,8 @@ function getTailscaleBadge(ts: ClientStatusResponse['tailscale']): {
 
 export const DashPage: React.FC<DashPageProps> = ({
   status,
+  statusLoading = false,
+  statusError = null,
   busy,
   onAction,
   onNavigate,
@@ -134,9 +139,11 @@ export const DashPage: React.FC<DashPageProps> = ({
 
   if (!status) {
     return (
-      <div className="space-y-5">
-        <PageHeader title="系统总览" description="正在连接网关状态接口…" />
-      </div>
+      <DashLoadingState
+        loading={statusLoading}
+        error={statusError}
+        onRetry={onRefreshStatus}
+      />
     );
   }
 

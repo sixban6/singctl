@@ -110,9 +110,15 @@ func (s *Server) guard(next http.HandlerFunc) http.HandlerFunc {
 		}
 		if strings.HasSuffix(r.URL.Path, "/stream") || r.Header.Get("Upgrade") != "" || strings.Contains(strings.ToLower(r.Header.Get("Accept")), "text/event-stream") {
 			next(w, r)
+			if r.Method != http.MethodGet && r.Method != http.MethodHead {
+				s.invalidateStatusCache()
+			}
 			return
 		}
 		httpx.ServeGzip(w, r, next)
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			s.invalidateStatusCache()
+		}
 	}
 }
 

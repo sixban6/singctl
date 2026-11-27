@@ -51,6 +51,7 @@ export function saveClientToken(token: string) {
 export function clearSavedClientToken() {
   try {
     localStorage.removeItem(CLIENT_TOKEN_KEY);
+    sessionStorage.removeItem('sc_client_status_snap_v1');
   } catch {
     // ignore
   }

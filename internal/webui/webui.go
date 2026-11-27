@@ -18,6 +18,7 @@ import (
 	"singctl/internal/adguard"
 	"singctl/internal/audit"
 	"singctl/internal/common/httpx"
+	"singctl/internal/common/swrcache"
 	"singctl/internal/common/sysinfo"
 	"singctl/internal/config"
 	"singctl/internal/constant"
@@ -129,6 +130,9 @@ type Server struct {
 	iosCacheKey string
 	iosCacheVal string
 
+	// /api/status 短周期单飞缓存（3s TTL + 写操作自动失效），避免多标签页与高频轮询重复探测卡顿
+	statusCache *swrcache.Bounded[map[string]any]
+
 	cfgMu          sync.Mutex
 	cfgStore       *config.Store
 	passwordPtr    atomic.Pointer[string]
@@ -218,6 +222,9 @@ func New(opts Options) *Server {
 	}
 	initPW := opts.Password
 	s.passwordPtr.Store(&initPW)
+	s.statusCache = swrcache.NewBounded(3*time.Second, 2500*time.Millisecond, func(ctx context.Context) (map[string]any, error) {
+		return s.collectStatusSnapshot(ctx), nil
+	})
 	if opts.NotifyDispatcher != nil {
 		s.notifier = opts.NotifyDispatcher
 	} else {
@@ -490,12 +497,20 @@ func (s *Server) saveConfig(cfg *config.Config) error {
 	if s.cfgStore != nil {
 		s.cfgStore.Set(cfg)
 	}
+	s.invalidateStatusCache()
 	return nil
 }
 
 func (s *Server) invalidateConfigStore() {
 	if s.cfgStore != nil {
 		s.cfgStore.Invalidate()
+	}
+	s.invalidateStatusCache()
+}
+
+func (s *Server) invalidateStatusCache() {
+	if s.statusCache != nil {
+		s.statusCache.Invalidate()
 	}
 }
 

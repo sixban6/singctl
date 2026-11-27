@@ -9,3 +9,5 @@
 @[代码质量与发布测试门禁准则](./.agent/rules/03-code-quality-and-release-gates.md)
 
 @[对标 sing-box 模块化架构与防劣化铁律](./.agent/rules/04-singbox-architecture-principles.md)
+
+@[WebUI 页面流畅、首屏秒开与热路径零卡顿铁律](./.agent/rules/05-ui-smoothness-and-hotpath-latency.md)
