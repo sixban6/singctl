@@ -22,6 +22,8 @@ import (
 	"singctl/internal/notify"
 	"singctl/internal/safecommit"
 	"singctl/internal/singbox"
+	"singctl/internal/vlan"
+	"singctl/internal/wifiopt"
 
 	"github.com/spf13/cobra"
 )
@@ -130,6 +132,8 @@ func buildCLISafeCommitManager(cfgPath string, deps SafeCommitCmdDeps) *safecomm
 				}
 				return eng.Restart(ctx)
 			},
+			ReloadOpenWrtNetwork:  vlan.ReloadOpenWrtNetwork,
+			ReloadOpenWrtWireless: wifiopt.ReloadOpenWrtWireless,
 			OnRolledBack: func(rec safecommit.RollbackRecord) {
 				_ = daemon.NotifyReload()
 				dispatchCLIRollbackNotify(loadCfg(), rec, deps.NotifyHTTPClient)

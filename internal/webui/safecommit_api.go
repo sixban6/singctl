@@ -22,6 +22,7 @@ import (
 	"singctl/internal/safecommit"
 	"singctl/internal/singbox"
 	"singctl/internal/vlan"
+	"singctl/internal/wifiopt"
 )
 
 type safeCommitConfigDTO struct {
@@ -125,8 +126,9 @@ func (s *Server) buildSafeCommitRollbackOps() safecommit.RollbackOps {
 			}
 			return eng.Restart(ctx)
 		},
-		ReloadOpenWrtNetwork: vlan.ReloadOpenWrtNetwork,
-		OnRolledBack:         s.onSafeCommitRolledBack,
+		ReloadOpenWrtNetwork:  vlan.ReloadOpenWrtNetwork,
+		ReloadOpenWrtWireless: wifiopt.ReloadOpenWrtWireless,
+		OnRolledBack:          s.onSafeCommitRolledBack,
 	}
 }
 

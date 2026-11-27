@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"singctl/internal/config"
+	"singctl/internal/constant"
 	"singctl/internal/platform/rtnl"
 	"singctl/internal/singbox"
 	"singctl/internal/singbox/clashapi"
@@ -36,6 +37,7 @@ type Collector struct {
 	statePath              string
 	endpoints              []string
 	secret                 string
+	clashCfgFp             string
 	customEndpoints        bool
 	clashClient            *clashapi.Client
 	leaseFiles             []string
@@ -162,15 +164,25 @@ type CollectOptions struct {
 	SortAsc      bool   // 是否升序排列 (默认 false 即降序)
 }
 
+func (c *Collector) syncClashEndpointsLocked() {
+	if c.customEndpoints {
+		return
+	}
+	fp := auditFileFingerprint(constant.SingBoxConfigFile)
+	if len(c.endpoints) > 0 && c.clashCfgFp == fp {
+		return
+	}
+	c.endpoints = singbox.ClashAPIEndpoints()
+	c.secret = singbox.ClashAPISecret()
+	c.clashCfgFp = fp
+}
+
 // UpdateConfig 在常驻采集器上刷新最新配置与 Clash API 访问凭据。
 func (c *Collector) UpdateConfig(cfg *config.Config) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.cfg = cfg
-	if !c.customEndpoints {
-		c.endpoints = singbox.ClashAPIEndpoints()
-		c.secret = singbox.ClashAPISecret()
-	}
+	c.syncClashEndpointsLocked()
 }
 
 // CollectWithConfig 在常驻单例 Collector 上注入最新配置并采样实时连接与历史增量。
@@ -178,10 +190,7 @@ func (c *Collector) CollectWithConfig(ctx context.Context, cfg *config.Config, o
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.cfg = cfg
-	if !c.customEndpoints {
-		c.endpoints = singbox.ClashAPIEndpoints()
-		c.secret = singbox.ClashAPISecret()
-	}
+	c.syncClashEndpointsLocked()
 	return c.collectLocked(ctx, opts)
 }
 
@@ -189,7 +198,7 @@ func (c *Collector) CollectWithConfig(ctx context.Context, cfg *config.Config, o
 func (c *Collector) SampleActiveConnections(ctx context.Context) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	_, _, _, _, _, _, reachable := c.sampleActiveLocked(ctx, c.nowFunc())
+	_, _, _, _, _, _, reachable := c.sampleActiveLocked(ctx, c.nowFunc(), true)
 	return reachable
 }
 
@@ -213,18 +222,26 @@ func purgeBlockedFlows(
 	return len(state.Flows) != before
 }
 
-func (c *Collector) shouldSaveSampledStateLocked(state *persistedAuditState, now time.Time) bool {
-	if c.stateDirty {
-		return true
-	}
+const auditReadPathSaveDebounceSec = 30
+
+func (c *Collector) shouldSaveSampledStateLocked(state *persistedAuditState, now time.Time, persistImmediately, forceFlush bool) bool {
 	stateMissingOnDisk := c.statePath != "" && (c.cachedStateFp == "" || strings.HasSuffix(c.cachedStateFp, "|missing"))
 	if stateMissingOnDisk && len(state.Flows) > 0 {
 		return true
 	}
+	if forceFlush {
+		return true
+	}
+	if c.stateDirty {
+		if persistImmediately || c.lastSavedUnix == 0 {
+			return true
+		}
+		return now.Unix()-c.lastSavedUnix >= auditReadPathSaveDebounceSec
+	}
 	return c.lastSavedUnix > 0 && now.Unix()-c.lastSavedUnix >= 3600 && len(state.Flows) > 0
 }
 
-func (c *Collector) sampleActiveLocked(ctx context.Context, now time.Time) (
+func (c *Collector) sampleActiveLocked(ctx context.Context, now time.Time, persistImmediately bool) (
 	state *persistedAuditState,
 	activeByKey map[string][]string,
 	devDirectory map[string]lanDeviceInfo,
@@ -278,7 +295,7 @@ func (c *Collector) sampleActiveLocked(ctx context.Context, now time.Time) (
 	if ingestedMutated || blockTrimmed || boundsTrimmed {
 		c.stateDirty = true
 	}
-	if c.shouldSaveSampledStateLocked(state, now) {
+	if c.shouldSaveSampledStateLocked(state, now, persistImmediately, blockTrimmed) {
 		c.saveStateLocked(state, activeByKey, now)
 	}
 	return state, activeByKey, devDirectory, selfIPs, engine, addr, true
@@ -596,7 +613,7 @@ func (c *Collector) collectLocked(ctx context.Context, opts CollectOptions) *Rep
 	now := c.nowFunc()
 	rep := newBaseAuditReport(c.cfg, now)
 
-	state, activeByKey, devDirectory, selfIPs, engine, usedAddr, reachable := c.sampleActiveLocked(ctx, now)
+	state, activeByKey, devDirectory, selfIPs, engine, usedAddr, reachable := c.sampleActiveLocked(ctx, now, false)
 	if !reachable {
 		if len(state.Flows) == 0 {
 			rep.Message = "未检测到运行中的 sing-box 代理实例 (Clash API 不可达)"

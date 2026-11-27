@@ -94,9 +94,10 @@ type RollbackOps struct {
 	StartOrReloadSingBox func(ctx context.Context) error
 	DisableFirewall      func(ctx context.Context) error
 	ReloadFirewall       func(ctx context.Context) error
-	ReloadDNS            func(ctx context.Context, engine string) error
-	ReloadOpenWrtNetwork func(ctx context.Context) error
-	OnRolledBack         func(rec RollbackRecord)
+	ReloadDNS             func(ctx context.Context, engine string) error
+	ReloadOpenWrtNetwork  func(ctx context.Context) error
+	ReloadOpenWrtWireless func(ctx context.Context) error
+	OnRolledBack          func(rec RollbackRecord)
 }
 
 // ManagerOptions 封装 Safe Commit 管理器全部可注入依赖（零值回退生产默认实现）。
@@ -344,7 +345,8 @@ func (m *Manager) Rollback(ctx context.Context, trigger string) (*RollbackRecord
 	var actions []string
 	var errs []error
 	allRestored := true
-	restoredUCI := false
+	restoredNonWirelessUCI := false
+	restoredWirelessUCI := false
 
 	for _, name := range slices.Sorted(maps.Keys(st.Snapshots)) {
 		origPath := st.Snapshots[name]
@@ -371,8 +373,10 @@ func (m *Manager) Rollback(ctx context.Context, trigger string) (*RollbackRecord
 			errs = append(errs, fmt.Errorf("restore %s -> %s: %w", name, origPath, wErr))
 			continue
 		}
-		if strings.HasPrefix(name, "uci_") || strings.HasPrefix(origPath, "/etc/config/") {
-			restoredUCI = true
+		if name == "uci_wireless" || origPath == "/etc/config/wireless" {
+			restoredWirelessUCI = true
+		} else if strings.HasPrefix(name, "uci_") || strings.HasPrefix(origPath, "/etc/config/") {
+			restoredNonWirelessUCI = true
 		}
 		actions = append(actions, fmt.Sprintf("restore:%s->%s", name, origPath))
 	}
@@ -384,7 +388,17 @@ func (m *Manager) Rollback(ctx context.Context, trigger string) (*RollbackRecord
 		_ = m.killWatcher(st.WatcherPID)
 	}
 
-	if restoredUCI && m.ops.ReloadOpenWrtNetwork != nil {
+	if restoredNonWirelessUCI && m.ops.ReloadOpenWrtNetwork != nil {
+		if err := m.ops.ReloadOpenWrtNetwork(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("reload openwrt network: %w", err))
+		}
+		actions = append(actions, "openwrt_network:reload")
+	} else if restoredWirelessUCI && m.ops.ReloadOpenWrtWireless != nil {
+		if err := m.ops.ReloadOpenWrtWireless(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("reload openwrt wireless: %w", err))
+		}
+		actions = append(actions, "openwrt_wireless:reload")
+	} else if restoredWirelessUCI && m.ops.ReloadOpenWrtNetwork != nil {
 		if err := m.ops.ReloadOpenWrtNetwork(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("reload openwrt network: %w", err))
 		}

@@ -59,7 +59,7 @@ export function useAuditFlowsController({
   const [preset, setPreset] = useState<AuditPresetFilter>('all');
   const [hideWhitelisted, setHideWhitelisted] = useState(false);
   const [viewMode, setViewMode] = useState<AuditViewMode>('list');
-  const [refreshMs, setRefreshMs] = useState<AuditRefreshCadence>(2000);
+  const [refreshMs, setRefreshMs] = useState<AuditRefreshCadence>(3000);
   const [sortBy, setSortBy] = useState<AuditSortKey>('active');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [visibleLimit, setVisibleLimit] = useState<number>(getRenderStep);
@@ -82,6 +82,7 @@ export function useAuditFlowsController({
 
   const requestSeqRef = useRef(0);
   const abortCtrlRef = useRef<AbortController | null>(null);
+  const inFlightRef = useRef(false);
   const actionInFlightRef = useRef(0);
   const pointerDownUntilRef = useRef(0);
   const hasLoadedReportRef = useRef<boolean>(Boolean(peekCachedQuery(AUDIT_DEFAULT_CACHE_KEY)));
@@ -92,13 +93,16 @@ export function useAuditFlowsController({
 
   const loadAudit = useCallback(
     async (silent = false) => {
-      if (silent && (actionInFlightRef.current > 0 || Date.now() < pointerDownUntilRef.current)) {
+      if (silent && (inFlightRef.current || actionInFlightRef.current > 0 || Date.now() < pointerDownUntilRef.current)) {
         return;
       }
 
-      abortCtrlRef.current?.abort();
+      if (!silent) {
+        abortCtrlRef.current?.abort();
+      }
       const ctrl = new AbortController();
       abortCtrlRef.current = ctrl;
+      inFlightRef.current = true;
       const seq = ++requestSeqRef.current;
 
       if (!silent) {
@@ -113,6 +117,9 @@ export function useAuditFlowsController({
       const qs = new URLSearchParams();
       qs.set('sort', 'active');
       qs.set('dir', 'desc');
+      if (!silent) {
+        qs.set('fresh', '1');
+      }
 
       try {
         const rep = await clientApi.getAudit(qs, ctrl.signal);
@@ -139,6 +146,7 @@ export function useAuditFlowsController({
         }
       } finally {
         if (seq === requestSeqRef.current) {
+          inFlightRef.current = false;
           setLoading(false);
           setRefreshing(false);
           setFilterTransitioning(false);
@@ -151,6 +159,7 @@ export function useAuditFlowsController({
   useEffect(() => {
     void loadAudit(hasLoadedReportRef.current);
     return () => {
+      inFlightRef.current = false;
       abortCtrlRef.current?.abort();
     };
   }, [loadAudit]);

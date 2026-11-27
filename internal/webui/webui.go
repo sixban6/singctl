@@ -37,6 +37,7 @@ import (
 	"singctl/internal/smartdns"
 	"singctl/internal/tailscale"
 	"singctl/internal/vlan"
+	"singctl/internal/wifiopt"
 )
 
 // SessionCookieName 持久化 Cookie 键名，用于 Safari/PWA 独立沙盒免密免登。
@@ -113,6 +114,7 @@ type Options struct {
 	DoctorRunner                *doctor.Runner                                                                    // 可选：自定义深度体检调度器
 	VLANServiceForTest          *vlan.Service                                                                     // 仅供离线单元测试注入 OpenWrt VLAN 领域服务
 	VLANAsyncReloadDelayForTest *time.Duration                                                                    // 仅供离线单元测试覆盖 VLAN 异步延迟重载时长（0=同步）
+	WifiOptServiceForTest       *wifiopt.Service                                                                  // 仅供离线单元测试注入 OpenWrt Wi-Fi 体检与调优服务
 	AutoStartServiceMgr         servicemgr.Manager                                                                // 可选：测试注入开机自启服务管理器替身
 	AutoStartProcdDir           string                                                                            // 可选：测试注入开机自启 procd 目录
 }
@@ -130,8 +132,10 @@ type Server struct {
 	iosCacheKey string
 	iosCacheVal string
 
-	// /api/status 短周期单飞缓存（3s TTL + 写操作自动失效），避免多标签页与高频轮询重复探测卡顿
+	// /api/status 与 /api/audit 短周期单飞缓存（写操作自动失效），避免多标签页与高频轮询重复探测卡顿
 	statusCache *swrcache.Bounded[map[string]any]
+	auditCache  *swrcache.Bounded[*audit.Report]
+	wifiCache   *swrcache.Bounded[*wifiopt.Overview]
 
 	cfgMu          sync.Mutex
 	cfgStore       *config.Store
@@ -150,6 +154,7 @@ type Server struct {
 	safeCommitMu      sync.Mutex
 	safeCommitMgr     *safecommit.Manager
 	vlanApplyMu       sync.Mutex
+	wifiApplyMu       sync.Mutex
 
 	// /api/sb/traffic 按需后台采样器（无请求 15s 自动停止）
 	trafficMu                  sync.Mutex
@@ -225,6 +230,8 @@ func New(opts Options) *Server {
 	s.statusCache = swrcache.NewBounded(3*time.Second, 2500*time.Millisecond, func(ctx context.Context) (map[string]any, error) {
 		return s.collectStatusSnapshot(ctx), nil
 	})
+	s.auditCache = swrcache.NewBounded(1500*time.Millisecond, 3500*time.Millisecond, s.collectDefaultAuditReport)
+	s.wifiCache = swrcache.NewBounded(3*time.Second, 2500*time.Millisecond, s.wifiOverviewLoader)
 	if opts.NotifyDispatcher != nil {
 		s.notifier = opts.NotifyDispatcher
 	} else {
@@ -426,6 +433,12 @@ func (s *Server) registerRoutes() {
 	s.Mux.HandleFunc("POST /api/vlan/delete/preview", s.guard(s.handleVLANDeletePreviewPost))
 	s.Mux.HandleFunc("DELETE /api/vlan/segment/{id}", s.guard(s.handleVLANDelete))
 
+	// OpenWrt Wi-Fi 体检、按需信道干扰扫描、一键双频安全优化与高并发底盘加速 API
+	s.Mux.HandleFunc("GET /api/wifi/overview", s.guard(s.handleWifiOverviewGet))
+	s.Mux.HandleFunc("POST /api/wifi/scan", s.guard(s.handleWifiScanPost))
+	s.Mux.HandleFunc("POST /api/wifi/apply", s.guard(s.handleWifiApplyPost))
+	s.Mux.HandleFunc("POST /api/wifi/chassis", s.guard(s.handleWifiChassisPost))
+
 	// 流式动作执行 API
 	s.Mux.HandleFunc("POST /api/action", s.guard(s.handleAction))
 }
@@ -511,6 +524,9 @@ func (s *Server) invalidateConfigStore() {
 func (s *Server) invalidateStatusCache() {
 	if s.statusCache != nil {
 		s.statusCache.Invalidate()
+	}
+	if s.auditCache != nil {
+		s.auditCache.Invalidate()
 	}
 }
 

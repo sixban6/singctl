@@ -8,3 +8,4 @@ export * from './types/p0';
 export * from './types/system';
 export * from './types/vlan';
 export * from './types/homedomain';
+export * from './types/wifi';

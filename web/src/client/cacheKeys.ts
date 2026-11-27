@@ -7,3 +7,4 @@ export const TAILSCALE_CFG_CACHE_KEY = 'client:tailscale:config';
 export const TAILSCALE_MESH_CACHE_KEY = 'client:tailscale:mesh';
 export const TAILSCALE_P2P_CACHE_KEY = 'client:tailscale:p2p';
 export const VLAN_OVERVIEW_CACHE_KEY = 'client:vlan:overview';
+export const WIFI_OVERVIEW_CACHE_KEY = 'client:wifi:overview';

@@ -423,6 +423,60 @@ func TestManager_RollbackRestoresFilesAndInvokesServiceOps(t *testing.T) {
 		}
 	})
 
+	t.Run("uci_wireless_only_snapshot_triggers_wireless_reload_without_network_reload", func(t *testing.T) {
+		workDir := t.TempDir()
+		stateDir := filepath.Join(workDir, "state")
+		wifiCfg := filepath.Join(workDir, "uci-wireless")
+		orig := "config wifi-device 'MT7981_1_1'\n\toption channel '1'\n"
+		if err := os.WriteFile(wifiCfg, []byte(orig), 0600); err != nil {
+			t.Fatal(err)
+		}
+
+		var reloadedNet, reloadedWifi bool
+		mgr := safecommit.NewManager(safecommit.ManagerOptions{
+			StateDir:     stateDir,
+			ProcRoot:     t.TempDir(),
+			SpawnWatcher: func(string) (int, error) { return 6110, nil },
+			KillWatcher:  func(int) error { return nil },
+			RollbackOps: safecommit.RollbackOps{
+				ReloadOpenWrtNetwork: func(context.Context) error {
+					reloadedNet = true
+					return nil
+				},
+				ReloadOpenWrtWireless: func(context.Context) error {
+					reloadedWifi = true
+					return nil
+				},
+			},
+		})
+
+		if _, err := mgr.Arm(t.Context(), safecommit.ArmRequest{
+			TTLSec: 120,
+			Reason: "wifi dual-band optimize",
+			SnapshotFiles: map[string]string{
+				"uci_wireless": wifiCfg,
+			},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		_ = os.WriteFile(wifiCfg, []byte("broken-wifi"), 0600)
+
+		rec, err := mgr.Rollback(t.Context(), "timeout")
+		if err != nil || rec == nil || !rec.Success {
+			t.Fatalf("wireless rollback failed: rec=%+v err=%v", rec, err)
+		}
+		if !reloadedWifi {
+			t.Fatal("expected ReloadOpenWrtWireless invoked when only uci_wireless snapshot restored")
+		}
+		if reloadedNet {
+			t.Fatal("ReloadOpenWrtNetwork must NOT be called for wireless-only rollback")
+		}
+		got, _ := os.ReadFile(wifiCfg)
+		if string(got) != orig {
+			t.Fatalf("uci wireless file not restored: %q", string(got))
+		}
+	})
+
 	t.Run("stopped_singbox_inactive_firewall_and_partial_error_continues", func(t *testing.T) {
 		stateDir := filepath.Join(t.TempDir(), "state")
 		var calls []string

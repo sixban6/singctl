@@ -95,19 +95,28 @@ type compiledCIDRRule struct {
 	app string
 }
 
+const (
+	appDirFingerprintTTL = 30 * time.Second
+	appResultCacheMax    = 4096
+)
+
 type appIdentifierCache struct {
 	mu            sync.RWMutex
 	fingerprint   string
+	dirCheckAt    time.Time
+	dirFP         string
 	exactDomains  map[string]string
 	suffixDomains map[string]string
 	keywords      []keywordAppEntry
 	cidrs         []compiledCIDRRule
+	resultCache   map[string]string
 	building      bool
 }
 
 var globalAppCache = &appIdentifierCache{
 	exactDomains:  make(map[string]string),
 	suffixDomains: make(map[string]string),
+	resultCache:   make(map[string]string),
 }
 
 func defaultAppIndexCachePath() string {
@@ -119,9 +128,54 @@ func defaultAppIndexCachePath() string {
 func IdentifyApp(target, destIP, ruleStr string, rawHints ...string) string {
 	target = strings.ToLower(strings.TrimSpace(target))
 	destIP = strings.TrimSpace(destIP)
+	ruleStr = strings.TrimSpace(ruleStr)
 
-	// 1. 尝试从本地已下载的 sing-box rule_sets 索引匹配精确域名或域名后缀 / GeoIP 网段
 	idx := getOrLoadAppIndex()
+
+	cacheKey := buildAppIdentifyCacheKey(target, destIP, ruleStr, rawHints)
+	if cacheKey != "" {
+		globalAppCache.mu.RLock()
+		if cached, ok := globalAppCache.resultCache[cacheKey]; ok {
+			globalAppCache.mu.RUnlock()
+			return cached
+		}
+		globalAppCache.mu.RUnlock()
+	}
+
+	app := identifyAppUncached(idx, target, destIP, ruleStr, rawHints)
+	if cacheKey != "" {
+		globalAppCache.mu.Lock()
+		if globalAppCache.resultCache == nil || len(globalAppCache.resultCache) >= appResultCacheMax {
+			globalAppCache.resultCache = make(map[string]string, 256)
+		}
+		globalAppCache.resultCache[cacheKey] = app
+		globalAppCache.mu.Unlock()
+	}
+	return app
+}
+
+func buildAppIdentifyCacheKey(target, destIP, ruleStr string, rawHints []string) string {
+	if target == "" && destIP == "" && ruleStr == "" && len(rawHints) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.Grow(len(target) + len(destIP) + len(ruleStr) + 8)
+	b.WriteString(target)
+	b.WriteByte('\x00')
+	b.WriteString(destIP)
+	b.WriteByte('\x00')
+	b.WriteString(ruleStr)
+	for _, h := range rawHints {
+		if trimmed := strings.ToLower(strings.TrimSpace(h)); trimmed != "" {
+			b.WriteByte('\x00')
+			b.WriteString(trimmed)
+		}
+	}
+	return b.String()
+}
+
+func identifyAppUncached(idx *appIdentifierCache, target, destIP, ruleStr string, rawHints []string) string {
+	// 1. 尝试从本地已下载的 sing-box rule_sets 索引匹配精确域名或域名后缀 / GeoIP 网段
 	if idx != nil {
 		if app := idx.matchExactOrSuffixOrCIDR(target, destIP); app != "" {
 			return app
@@ -209,19 +263,38 @@ func (c *appIdentifierCache) matchKeywords(target string) string {
 }
 
 func getOrLoadAppIndex() *appIdentifierCache {
+	now := time.Now()
+	globalAppCache.mu.RLock()
+	if !globalAppCache.dirCheckAt.IsZero() && now.Sub(globalAppCache.dirCheckAt) < appDirFingerprintTTL {
+		fp := globalAppCache.dirFP
+		ready := fp != "" && globalAppCache.fingerprint == fp && (len(globalAppCache.suffixDomains) > 0 || len(globalAppCache.cidrs) > 0)
+		globalAppCache.mu.RUnlock()
+		if fp == "" {
+			return nil
+		}
+		if ready {
+			return globalAppCache
+		}
+		return globalAppCache
+	}
+	globalAppCache.mu.RUnlock()
+
 	ruleSetDir := filepath.Join(constant.SingBoxConfigDir, "rule_sets")
 	fp := computeRuleSetDirFingerprint(ruleSetDir)
+
+	globalAppCache.mu.Lock()
+	globalAppCache.dirCheckAt = now
+	globalAppCache.dirFP = fp
+	ready := fp != "" && globalAppCache.fingerprint == fp && (len(globalAppCache.suffixDomains) > 0 || len(globalAppCache.cidrs) > 0)
+	isBuilding := globalAppCache.building
+	globalAppCache.mu.Unlock()
+
 	if fp == "" {
 		return nil
 	}
-
-	globalAppCache.mu.RLock()
-	if globalAppCache.fingerprint == fp && (len(globalAppCache.suffixDomains) > 0 || len(globalAppCache.cidrs) > 0) {
-		globalAppCache.mu.RUnlock()
+	if ready {
 		return globalAppCache
 	}
-	isBuilding := globalAppCache.building
-	globalAppCache.mu.RUnlock()
 
 	// 尝试从 /tmp/singctl-ruleset-app-index.json 快速载入已编译索引
 	cacheFile := defaultAppIndexCachePath()
@@ -449,6 +522,7 @@ func applyPersistedIndex(dst *appIdentifierCache, p *persistedAppIndex) {
 	dst.suffixDomains = p.SuffixDomains
 	dst.keywords = p.Keywords
 	dst.cidrs = compiled
+	dst.resultCache = make(map[string]string, 256)
 	dst.mu.Unlock()
 }
 

@@ -15,6 +15,7 @@ import { singboxApi } from './singbox';
 import { systemApi } from './system';
 import { vlanApi } from './vlan';
 import { homeDomainApi } from './homedomain';
+import { wifiApi } from './wifi';
 
 export {
   ApiError,
@@ -31,6 +32,7 @@ export {
   p0Api,
   vlanApi,
   homeDomainApi,
+  wifiApi,
   actionStreamApi,
 };
 
@@ -43,5 +45,6 @@ export const clientApi = {
   ...p0Api,
   ...vlanApi,
   ...homeDomainApi,
+  ...wifiApi,
   ...actionStreamApi,
 };

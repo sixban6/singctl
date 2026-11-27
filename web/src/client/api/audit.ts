@@ -12,7 +12,7 @@ import { clientHttp, request } from './session';
 
 export const auditApi = {
   getAudit: (qs: URLSearchParams, signal?: AbortSignal) =>
-    request<AuditReport>(`/api/audit?${qs.toString()}`, signal ? { signal } : {}),
+    request<AuditReport>(`/api/audit?${qs.toString()}`, { timeoutMs: 12000, ...(signal ? { signal } : {}) }),
 
   downloadAuditCSV: (qs: URLSearchParams, signal?: AbortSignal): Promise<string> =>
     clientHttp.requestText(`/api/audit?${qs.toString()}`, signal ? { signal } : {}),

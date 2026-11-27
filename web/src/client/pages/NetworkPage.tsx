@@ -13,6 +13,7 @@ import {
   Router,
   Share2,
   ShieldAlert,
+  Wifi,
   X,
 } from 'lucide-react';
 import { Badge, Button, SegmentedTabs, useToast } from '../../ui';
@@ -35,17 +36,19 @@ import { ModemPage } from './network/ModemPage';
 import { HomeDomainSection } from './network/homedomain/HomeDomainSection';
 import { TailscalePage, TailscalePageProps } from './network/TailscalePage';
 import { VlanManagerSection } from './network/vlan/VlanManagerSection';
+import { WifiOptSection } from './network/wifi/WifiOptSection';
 
 export { GatewayModePage, TailscalePage };
 export type { GatewayModePageProps, TailscalePageProps };
 
-export type NetSubTab = 'gw' | 'ts' | 'home' | 'fw' | 'vlan' | 'modem';
+export type NetSubTab = 'gw' | 'ts' | 'home' | 'fw' | 'vlan' | 'wifi' | 'modem';
 
 function normalizeNetSubTab(raw?: string): NetSubTab {
   if (raw === 'fw') return 'fw';
   if (raw === 'ts') return 'ts';
   if (raw === 'home') return 'home';
   if (raw === 'vlan') return 'vlan';
+  if (raw === 'wifi') return 'wifi';
   if (raw === 'modem') return 'modem';
   if (raw === 'gw') return 'gw';
   return 'gw';
@@ -191,6 +194,11 @@ export const NetworkHubPage: React.FC<NetworkHubPageProps> = ({
               icon: <Network className="w-3.5 h-3.5" />,
             },
             {
+              key: 'wifi',
+              label: 'Wi-Fi 调优',
+              icon: <Wifi className="w-3.5 h-3.5" />,
+            },
+            {
               key: 'modem',
               label: '上游光猫',
               icon: <Router className="w-3.5 h-3.5" />,
@@ -318,6 +326,14 @@ export const NetworkHubPage: React.FC<NetworkHubPageProps> = ({
           busy={busy}
           privacyMask={privacyMask}
           safeCommit={status?.safeCommit}
+          onRefreshStatus={onRefreshStatus}
+          onSafeCommitUpdated={onSafeCommitUpdated}
+        />
+      )}
+      {sub === 'wifi' && (
+        <WifiOptSection
+          busy={busy}
+          privacyMask={privacyMask}
           onRefreshStatus={onRefreshStatus}
           onSafeCommitUpdated={onSafeCommitUpdated}
         />

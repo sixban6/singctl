@@ -19,7 +19,7 @@ export type AuditSortKey =
 
 export type AuditPresetFilter = 'all' | 'actionable' | 'uploading' | 'direct_ip' | 'pcdn';
 export type AuditViewMode = 'list' | 'grouped';
-export type AuditRefreshCadence = 2000 | 5000 | 0;
+export type AuditRefreshCadence = 2000 | 3000 | 5000 | 0;
 
 export interface AuditSelectedDevice {
   ip: string;

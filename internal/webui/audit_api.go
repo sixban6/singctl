@@ -3,6 +3,7 @@ package webui
 
 import (
 	"cmp"
+	"context"
 	"encoding/json"
 	"io"
 	"net"
@@ -77,6 +78,31 @@ func (l *AuditRateLimiter) Allow(r *http.Request, scope string, maxPerMin int) b
 	return win.count <= maxPerMin
 }
 
+func (s *Server) collectDefaultAuditReport(ctx context.Context) (*audit.Report, error) {
+	cfg := s.readConfigOrEmpty()
+	opts := audit.CollectOptions{
+		Limit:  -1,
+		SortBy: "active",
+	}
+	if s.auditCollector != nil {
+		return s.auditCollector.CollectWithConfig(ctx, cfg, opts), nil
+	}
+	return audit.NewCollector(cfg).Collect(ctx, opts), nil
+}
+
+func (s *Server) invalidateAuditCache() {
+	if s.auditCache != nil {
+		s.auditCache.Invalidate()
+	}
+}
+
+func isDefaultWebUIAuditQuery(exportFormat string, opts audit.CollectOptions, fresh bool) bool {
+	if fresh || exportFormat != "" || opts.DeviceFilter != "" || opts.OnlySuspect || opts.EnableAI || opts.Limit != -1 || opts.SortAsc {
+		return false
+	}
+	return opts.SortBy == "" || opts.SortBy == "active"
+}
+
 // handleAuditGet 返回局域网设备行为审计报告（支持 ?device=...&suspicious=1&ai=1&format=csv|json）。
 func (s *Server) handleAuditGet(w http.ResponseWriter, r *http.Request) {
 	if !s.auditLimiter.Allow(r, "read", 180) {
@@ -113,10 +139,17 @@ func (s *Server) handleAuditGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var rep *audit.Report
-	if s.auditCollector != nil {
-		rep = s.auditCollector.CollectWithConfig(r.Context(), cfg, opts)
-	} else {
-		rep = audit.NewCollector(cfg).Collect(r.Context(), opts)
+	if s.auditCache != nil && isDefaultWebUIAuditQuery(exportFormat, opts, q.Get("fresh") == "1") {
+		if cached, cErr := s.auditCache.Get(r.Context()); cErr == nil && cached != nil {
+			rep = cached
+		}
+	}
+	if rep == nil {
+		if s.auditCollector != nil {
+			rep = s.auditCollector.CollectWithConfig(r.Context(), cfg, opts)
+		} else {
+			rep = audit.NewCollector(cfg).Collect(r.Context(), opts)
+		}
 	}
 
 	ts := time.Now().Format("20060102-150405")
@@ -542,6 +575,7 @@ func (s *Server) handleAuditAIReviewPost(w http.ResponseWriter, r *http.Request)
 
 	advisor := audit.NewAdvisor(cfg.Audit.AI)
 	results, usedRemote := advisor.ReviewFlowBatch(r.Context(), req.Flows, callerHost, req.Force)
+	s.invalidateAuditCache()
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":         true,
@@ -576,6 +610,7 @@ func (s *Server) handleAuditCloseConnections(w http.ResponseWriter, r *http.Requ
 		writeJSONError(w, http.StatusBadGateway, "断开活跃连接失败: "+err.Error())
 		return
 	}
+	s.invalidateAuditCache()
 
 	msg := "已触发断开所有活跃连接，后续请求将重新选路"
 	if !res.All {

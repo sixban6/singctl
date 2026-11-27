@@ -212,7 +212,7 @@ export const AuditToolbarAndPresets: React.FC<AuditToolbarAndPresetsProps> = ({
             className="inline-flex items-center rounded-xl border border-subtle bg-surface1/80 p-0.5 text-[11px]"
             title="实时自动刷新频率（类似 Clash 连接监控）"
           >
-            {([2000, 5000, 0] as AuditRefreshCadence[]).map((ms) => {
+            {([2000, 3000, 5000, 0] as AuditRefreshCadence[]).map((ms) => {
               const active = refreshMs === ms;
               return (
                 <button
