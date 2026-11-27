@@ -35,10 +35,15 @@ func TestControllerSyncIPv6Host_OpenWrtAutoConfigAndRestore(t *testing.T) {
 	backupPath := filepath.Join(dir, "ipv6-uci-backup.json")
 
 	var cmds []string
+	uciState := map[string]string{
+		"network.lan.delegate":         "0",
+		"dhcp.@dnsmasq[0].filter_aaaa": "1",
+	}
 	ctrl := &gateway.Controller{
-		StateDir:       dir,
-		IPv6BackupPath: backupPath,
-		IsOpenWrt:      func() bool { return true },
+		StateDir:              dir,
+		IPv6BackupPath:        backupPath,
+		IsOpenWrt:             func() bool { return true },
+		HasProprietaryMTKWifi: func() bool { return false },
 		Prober: func() gateway.TopologyInfo {
 			return gateway.TopologyInfo{
 				LANIP:    "192.168.1.1",
@@ -49,28 +54,23 @@ func TestControllerSyncIPv6Host_OpenWrtAutoConfigAndRestore(t *testing.T) {
 		Exec: func(name string, args ...string) ([]byte, error) {
 			cmdLine := strings.TrimSpace(name + " " + strings.Join(args, " "))
 			cmds = append(cmds, cmdLine)
-			switch cmdLine {
-			case "uci -q get network.lan.delegate":
-				return []byte("0\n"), nil
-			case "uci -q get network.lan.ip6assign":
+			if name == "uci" && len(args) >= 3 && args[0] == "-q" && args[1] == "get" {
+				if v, ok := uciState[args[2]]; ok {
+					return []byte(v + "\n"), nil
+				}
 				return []byte(""), os.ErrNotExist
-			case "uci -q get dhcp.lan.ra":
-				return []byte(""), os.ErrNotExist
-			case "uci -q get dhcp.lan.dhcpv6":
-				return []byte(""), os.ErrNotExist
-			case "uci -q get dhcp.lan.ra_slaac":
-				return []byte(""), os.ErrNotExist
-			case "uci -q get dhcp.lan.ra_flags":
-				return []byte(""), os.ErrNotExist
-			case "uci -q get dhcp.lan.ra_dns":
-				return []byte(""), os.ErrNotExist
-			case "uci -q get dhcp.lan.dns_service":
-				return []byte(""), os.ErrNotExist
-			case "uci -q get dhcp.@dnsmasq[0].filter_aaaa":
-				return []byte("1\n"), nil
-			case "uci -q get dhcp.@dnsmasq[0].dnsforwardmax":
-				return []byte(""), os.ErrNotExist
-			case "ifstatus wan_6":
+			}
+			if name == "uci" && len(args) >= 2 && args[0] == "set" {
+				if k, v, ok := strings.Cut(args[1], "="); ok {
+					uciState[k] = v
+				}
+				return nil, nil
+			}
+			if name == "uci" && len(args) >= 3 && args[0] == "-q" && args[1] == "delete" {
+				delete(uciState, args[2])
+				return nil, nil
+			}
+			if cmdLine == "ifstatus wan_6" {
 				return []byte(`{"up":true,"ipv6-prefix":[{"address":"2001:db8:10::","mask":60}]}`), nil
 			}
 			return nil, nil
@@ -271,5 +271,151 @@ func TestProbeIPv6Status_SideRouterTreatsLANGUAAsIPv6Availability(t *testing.T) 
 				t.Fatalf("expected warning containing %q, got %v", tt.wantWarning, st.Warnings)
 			}
 		})
+	}
+}
+
+func TestControllerSyncIPv6Host_SkipsGlobalNetworkReloadOnProprietaryMTKWifi(t *testing.T) {
+	dir := t.TempDir()
+	backupPath := filepath.Join(dir, "ipv6-uci-backup.json")
+
+	var cmds []string
+	uciState := map[string]string{
+		"network.lan.delegate":         "0",
+		"network.lan.ip6assign":        "64",
+		"dhcp.@dnsmasq[0].filter_aaaa": "1",
+	}
+	ctrl := &gateway.Controller{
+		StateDir:              dir,
+		IPv6BackupPath:        backupPath,
+		IsOpenWrt:             func() bool { return true },
+		HasProprietaryMTKWifi: func() bool { return true },
+		Prober: func() gateway.TopologyInfo {
+			return gateway.TopologyInfo{
+				LANIP:    "192.168.29.1",
+				LANCIDR:  "192.168.29.0/24",
+				LANIface: "br-lan",
+			}
+		},
+		Exec: func(name string, args ...string) ([]byte, error) {
+			cmdLine := strings.TrimSpace(name + " " + strings.Join(args, " "))
+			cmds = append(cmds, cmdLine)
+			if name == "uci" && len(args) >= 3 && args[0] == "-q" && args[1] == "get" {
+				if v, ok := uciState[args[2]]; ok {
+					return []byte(v + "\n"), nil
+				}
+				return []byte(""), os.ErrNotExist
+			}
+			if name == "uci" && len(args) >= 2 && args[0] == "set" {
+				if k, v, ok := strings.Cut(args[1], "="); ok {
+					uciState[k] = v
+				}
+				return nil, nil
+			}
+			if name == "uci" && len(args) >= 3 && args[0] == "-q" && args[1] == "delete" {
+				delete(uciState, args[2])
+				return nil, nil
+			}
+			return nil, nil
+		},
+	}
+
+	// 1. Enable cn_only on MediaTek proprietary mt_wifi host: MUST NOT invoke global "ubus call network reload"
+	resEnable, err := ctrl.SyncIPv6Host(t.Context(), config.GatewayConfig{Mode: "main", IPv6Mode: "cn_only"})
+	if err != nil {
+		t.Fatalf("SyncIPv6Host(cn_only) failed: %v", err)
+	}
+	if slices.Contains(cmds, "ubus call network reload") {
+		t.Fatalf("must NOT run global 'ubus call network reload' on proprietary MTK mt_wifi host; cmds=%v", cmds)
+	}
+	if !slices.Contains(cmds, "uci commit network") {
+		t.Fatalf("expected 'uci commit network' when network.lan.delegate changed; cmds=%v", cmds)
+	}
+	if !slices.Contains(cmds, "ubus call network.interface.lan renew") {
+		t.Fatalf("expected lightweight 'ubus call network.interface.lan renew' on MTK host; cmds=%v", cmds)
+	}
+	if !slices.ContainsFunc(resEnable.Actions, func(a string) bool { return strings.Contains(a, "MediaTek") }) {
+		t.Fatalf("expected action note mentioning MediaTek safe reload, got %v", resEnable.Actions)
+	}
+
+	// 2. Disable (off) restores backup on MediaTek host: MUST NOT invoke global "ubus call network reload"
+	cmds = nil
+	resDisable, err := ctrl.SyncIPv6Host(t.Context(), config.GatewayConfig{Mode: "main", IPv6Mode: "off"})
+	if err != nil {
+		t.Fatalf("SyncIPv6Host(off) failed: %v", err)
+	}
+	if !resDisable.RestoredFromBackup {
+		t.Fatal("expected RestoredFromBackup=true")
+	}
+	if slices.Contains(cmds, "ubus call network reload") {
+		t.Fatalf("must NOT run global 'ubus call network reload' during restore on proprietary MTK mt_wifi host; cmds=%v", cmds)
+	}
+	if !slices.Contains(cmds, "uci set network.lan.delegate=0") || !slices.Contains(cmds, "uci commit network") {
+		t.Fatalf("expected network.lan.delegate=0 restored and committed; cmds=%v", cmds)
+	}
+	if !slices.Contains(cmds, "/etc/init.d/odhcpd reload") || !slices.Contains(cmds, "/etc/init.d/dnsmasq reload") {
+		t.Fatalf("expected odhcpd and dnsmasq reload on restore; cmds=%v", cmds)
+	}
+}
+
+func TestControllerSyncIPv6Host_IdempotentNetworkUCISkipsCommitAndReload(t *testing.T) {
+	dir := t.TempDir()
+	backupPath := filepath.Join(dir, "ipv6-uci-backup.json")
+
+	var cmds []string
+	uciState := map[string]string{
+		"network.lan.delegate":         "1",
+		"network.lan.ip6assign":        "64",
+		"dhcp.@dnsmasq[0].filter_aaaa": "0",
+	}
+	ctrl := &gateway.Controller{
+		StateDir:              dir,
+		IPv6BackupPath:        backupPath,
+		IsOpenWrt:             func() bool { return true },
+		HasProprietaryMTKWifi: func() bool { return false },
+		Prober: func() gateway.TopologyInfo {
+			return gateway.TopologyInfo{
+				LANIP:    "192.168.31.1",
+				LANCIDR:  "192.168.31.0/24",
+				LANIface: "br-lan",
+			}
+		},
+		Exec: func(name string, args ...string) ([]byte, error) {
+			cmdLine := strings.TrimSpace(name + " " + strings.Join(args, " "))
+			cmds = append(cmds, cmdLine)
+			if name == "uci" && len(args) >= 3 && args[0] == "-q" && args[1] == "get" {
+				if v, ok := uciState[args[2]]; ok {
+					return []byte(v + "\n"), nil
+				}
+				return []byte(""), os.ErrNotExist
+			}
+			if name == "uci" && len(args) >= 2 && args[0] == "set" {
+				if k, v, ok := strings.Cut(args[1], "="); ok {
+					uciState[k] = v
+				}
+				return nil, nil
+			}
+			if name == "uci" && len(args) >= 3 && args[0] == "-q" && args[1] == "delete" {
+				delete(uciState, args[2])
+				return nil, nil
+			}
+			return nil, nil
+		},
+	}
+
+	// 1. Enable when network.lan.delegate=1 & ip6assign=64 already set -> must NOT commit/reload network
+	if _, err := ctrl.SyncIPv6Host(t.Context(), config.GatewayConfig{Mode: "main", IPv6Mode: "cn_only"}); err != nil {
+		t.Fatalf("SyncIPv6Host(cn_only) failed: %v", err)
+	}
+	if slices.Contains(cmds, "uci commit network") || slices.Contains(cmds, "ubus call network reload") {
+		t.Fatalf("expected no network commit/reload when network.lan UCI already matches target; cmds=%v", cmds)
+	}
+
+	// 2. Restore when backup matches current network.lan UCI values -> must NOT commit/reload network
+	cmds = nil
+	if _, err := ctrl.SyncIPv6Host(t.Context(), config.GatewayConfig{Mode: "main", IPv6Mode: "off"}); err != nil {
+		t.Fatalf("SyncIPv6Host(off) failed: %v", err)
+	}
+	if slices.Contains(cmds, "uci commit network") || slices.Contains(cmds, "ubus call network reload") {
+		t.Fatalf("expected no network commit/reload when restored network.lan UCI already matches current; cmds=%v", cmds)
 	}
 }

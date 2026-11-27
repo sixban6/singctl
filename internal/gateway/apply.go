@@ -54,8 +54,9 @@ type Controller struct {
 	Exec            func(name string, args ...string) ([]byte, error)
 	RTNL            rtnl.Client
 	ServiceMgr      servicemgr.Manager
-	IPv6IfaceProbe  func(lanIface string) (wanHasGUA bool, lanGUA string, lanPrefixes []string)
-	IPv6KernelProbe func() (enabled bool, forwarding bool)
+	IPv6IfaceProbe        func(lanIface string) (wanHasGUA bool, lanGUA string, lanPrefixes []string)
+	IPv6KernelProbe       func() (enabled bool, forwarding bool)
+	HasProprietaryMTKWifi func() bool
 }
 
 // NewController 创建默认旁路由控制器。

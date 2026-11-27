@@ -96,6 +96,25 @@ func (c *Controller) isOpenWrt() bool {
 	return isOpenWrtSystem()
 }
 
+func (c *Controller) hasProprietaryMTKWifi() bool {
+	if c.HasProprietaryMTKWifi != nil {
+		return c.HasProprietaryMTKWifi()
+	}
+	st, err := os.Stat("/etc/wireless/mediatek")
+	return err == nil && st.IsDir()
+}
+
+func (c *Controller) reloadOpenWrtLANNetworkSafe(ctx context.Context, isRestoreOff bool) bool {
+	if c.hasProprietaryMTKWifi() {
+		if !isRestoreOff {
+			_, _ = c.runCmd(ctx, "ubus", "call", "network.interface.lan", "renew")
+		}
+		return true
+	}
+	_, _ = c.runCmd(ctx, "ubus", "call", "network", "reload")
+	return false
+}
+
 // ParseOpenWrtIfstatusPDPrefix 从 OpenWrt `ifstatus wan_6` / `ifstatus wan6` JSON 输出中提取运营商下发的公网 IPv6-PD 前缀。
 func ParseOpenWrtIfstatusPDPrefix(raw []byte) (string, int, bool) {
 	var parsed struct {
@@ -345,15 +364,15 @@ func (c *Controller) saveOpenWrtIPv6Backup(ctx context.Context) error {
 	return os.WriteFile(path, data, 0600)
 }
 
-func (c *Controller) restoreOpenWrtIPv6Backup(ctx context.Context) bool {
+func (c *Controller) restoreOpenWrtIPv6Backup(ctx context.Context) (bool, bool) {
 	path := c.ipv6BackupPath()
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return false
+		return false, false
 	}
 	var snap ipv6UCIBackup
 	if err := json.Unmarshal(raw, &snap); err != nil || len(snap.Keys) == 0 {
-		return false
+		return false, false
 	}
 
 	networkDirty := false
@@ -363,12 +382,20 @@ func (c *Controller) restoreOpenWrtIPv6Backup(ctx context.Context) bool {
 		if !ok {
 			continue
 		}
+		targetVal := strings.TrimSpace(orig.Value)
 		if strings.HasPrefix(key, "network.") {
+			curVal := c.readUCIKey(ctx, key)
+			if (!orig.Set || targetVal == "") && curVal == "" {
+				continue
+			}
+			if orig.Set && targetVal != "" && curVal == targetVal {
+				continue
+			}
 			networkDirty = true
 		} else if strings.HasPrefix(key, "dhcp.") {
 			dhcpDirty = true
 		}
-		if !orig.Set || strings.TrimSpace(orig.Value) == "" {
+		if !orig.Set || targetVal == "" {
 			_, _ = c.runCmd(ctx, "uci", "-q", "delete", key)
 			continue
 		}
@@ -381,9 +408,10 @@ func (c *Controller) restoreOpenWrtIPv6Backup(ctx context.Context) bool {
 		}
 		_, _ = c.runCmd(ctx, "uci", "set", key+"="+orig.Value)
 	}
+	skippedGlobalReload := false
 	if networkDirty {
 		_, _ = c.runCmd(ctx, "uci", "commit", "network")
-		_, _ = c.runCmd(ctx, "ubus", "call", "network", "reload")
+		skippedGlobalReload = c.reloadOpenWrtLANNetworkSafe(ctx, true)
 	}
 	if dhcpDirty {
 		_, _ = c.runCmd(ctx, "uci", "commit", "dhcp")
@@ -392,7 +420,7 @@ func (c *Controller) restoreOpenWrtIPv6Backup(ctx context.Context) bool {
 		_, _ = c.runCmd(ctx, "killall", "-HUP", "dnsmasq")
 	}
 	_ = os.Remove(path)
-	return true
+	return true, skippedGlobalReload
 }
 
 // SyncIPv6Host 根据 gateway.ipv6_mode 自动探测并幂等配置/还原宿主 IPv6 转发、OpenWrt RA/DHCPv6、dnsmasq filter_aaaa 与表 100/nftables 豁免。
@@ -420,9 +448,12 @@ func (c *Controller) SyncIPv6Host(ctx context.Context, gwCfg config.GatewayConfi
 			_, _ = c.runCmd(ctx, "killall", "-HUP", "dnsmasq")
 			res.Actions = append(res.Actions, "已恢复 dnsmasq filter_aaaa=1")
 
-			if c.restoreOpenWrtIPv6Backup(ctx) {
+			if restored, skippedGlobal := c.restoreOpenWrtIPv6Backup(ctx); restored {
 				res.RestoredFromBackup = true
 				res.Actions = append(res.Actions, "已按安全备份还原 OpenWrt LAN IPv6 配置")
+				if skippedGlobal {
+					res.Actions = append(res.Actions, "检测到 MediaTek 闭源无线驱动，已跳过全局 network reload 以防无线与网桥断流")
+				}
 			}
 		}
 		res.Status = c.ProbeIPv6Status(ctx, gwCfg, topo)
@@ -440,10 +471,16 @@ func (c *Controller) SyncIPv6Host(ctx context.Context, gwCfg config.GatewayConfi
 			logger.Warn("备份 OpenWrt 原有 IPv6 UCI 配置失败: %v", err)
 		}
 
+		curDelegate := c.readUCIKey(ctx, "network.lan.delegate")
 		curIP6Assign := c.readUCIKey(ctx, "network.lan.ip6assign")
-		_, _ = c.runCmd(ctx, "uci", "set", "network.lan.delegate=1")
+		networkDirty := false
+		if curDelegate != "1" {
+			_, _ = c.runCmd(ctx, "uci", "set", "network.lan.delegate=1")
+			networkDirty = true
+		}
 		if curIP6Assign == "" || curIP6Assign == "0" {
 			_, _ = c.runCmd(ctx, "uci", "set", "network.lan.ip6assign=64")
+			networkDirty = true
 		}
 		_, _ = c.runCmd(ctx, "uci", "set", "dhcp.lan.ra=server")
 		_, _ = c.runCmd(ctx, "uci", "set", "dhcp.lan.dhcpv6=server")
@@ -455,9 +492,13 @@ func (c *Controller) SyncIPv6Host(ctx context.Context, gwCfg config.GatewayConfi
 		_, _ = c.runCmd(ctx, "uci", "set", "dhcp.lan.dns_service=0")
 		_, _ = c.runCmd(ctx, "uci", "set", "dhcp.@dnsmasq[0].filter_aaaa=0")
 		_, _ = c.runCmd(ctx, "uci", "set", "dhcp.@dnsmasq[0].dnsforwardmax=1024")
-		_, _ = c.runCmd(ctx, "uci", "commit", "network")
 		_, _ = c.runCmd(ctx, "uci", "commit", "dhcp")
-		_, _ = c.runCmd(ctx, "ubus", "call", "network", "reload")
+		if networkDirty {
+			_, _ = c.runCmd(ctx, "uci", "commit", "network")
+			if c.reloadOpenWrtLANNetworkSafe(ctx, false) {
+				res.Actions = append(res.Actions, "检测到 MediaTek 闭源无线驱动，已使用轻量 lan renew 替代全局 network reload 以防无线断流")
+			}
+		}
 
 		// 短轮询等待 netifd 将 PD 前缀分发到 br-lan（仅真实宿主机），随后再重载 odhcpd/dnsmasq 以确保绑定新 LAN GUA 并立即广播 RA
 		if c.Exec == nil {
