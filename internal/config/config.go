@@ -175,7 +175,7 @@ var knownYAMLKeys = []string{
 	"web_terminal", "mtls_ca", "ssh_tunnel_port", "ssh_tunnel_path", "ssh_port",
 	"web_admin", "enabled", "port", "path", "username", "password", "password_pending_ack",
 	"warp_routing", "mode", "presets", "warp_domains", "warp_cidrs", "direct_domains", "direct_cidrs",
-	"watchdog", "interval", "confirm_wait", "max_restarts", "sub_sync_interval", "preserve_manual_config", "auto_start",
+	"watchdog", "interval", "confirm_wait", "max_restarts", "sub_sync_interval", "preserve_manual_config", "auto_start", "auto_update", "singctl", "singbox", "adguard_home", "interval_hours",
 	"failover", "groups", "patrol_interval", "probe_timeout_ms", "confirm_retries", "failback_cooldown", "max_failback_delay_ms", "probe_urls",
 	"custom_rules", "block", "target", "source_ip", "reason", "ruleset_url", "rule_count", "preview", "created_at",
 	"outbounds", "tag", "default", "tolerance", "interrupt_exist_connections",

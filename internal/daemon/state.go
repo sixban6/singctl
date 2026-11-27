@@ -54,9 +54,10 @@ type DaemonRuntimeSnapshot struct {
 	ActiveFailovers   []FailoverActiveItem          `json:"activeFailovers,omitempty"`
 	TailscaleP2P      *tailscale.P2PRuntimeSnapshot `json:"tailscaleP2P,omitempty"`
 	HomeDomainDNS     *homedomain.ResponderStatus   `json:"homeDomainDns,omitempty"`
-	WebEmbedded       bool                          `json:"webEmbedded,omitempty"`
-	WebEmbeddedListen string                        `json:"webEmbeddedListen,omitempty"`
-	RecentEvents      []WatchdogEventRecord         `json:"recentEvents,omitempty"`
+	WebEmbedded       bool                                `json:"webEmbedded,omitempty"`
+	WebEmbeddedListen string                              `json:"webEmbeddedListen,omitempty"`
+	AutoUpdate        map[string]AutoUpdateComponentState `json:"autoUpdate,omitempty"`
+	RecentEvents      []WatchdogEventRecord               `json:"recentEvents,omitempty"`
 }
 
 // StateStore 以显式注入的 Paths 并发安全地读写守护进程运行态快照。

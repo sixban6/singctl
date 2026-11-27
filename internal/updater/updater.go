@@ -161,6 +161,21 @@ func (u *Updater) resolveCurrentExe() (string, error) {
 	return ResolveExecutablePath()
 }
 
+// CheckLatest 直连 GitHub API 比对当前版本与最新官方 Release（不执行下载或替换）。
+func (u *Updater) CheckLatest(ctx context.Context, currentVersion string) (latestVersion string, upToDate bool, err error) {
+	client := u.buildReleaseClient()
+	info, fErr := client.FetchLatest(ctx, u.targetRepo())
+	if fErr != nil {
+		return "", false, fErr
+	}
+	latest := strings.TrimPrefix(strings.TrimSpace(info.TagName), "v")
+	cur := strings.TrimPrefix(strings.TrimSpace(currentVersion), "v")
+	if cur != "" && cur != "dev" && cur == latest {
+		return latest, true, nil
+	}
+	return latest, false, nil
+}
+
 // UpdateSelf 检查最新官方 Release 并在校验 SHA256 后安全替换当前 singctl 二进制。
 func (u *Updater) UpdateSelf(configPath string, currentVersion string) error {
 	logger.Info("Checking for singctl updates...")

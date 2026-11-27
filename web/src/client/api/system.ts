@@ -3,6 +3,9 @@ import {
   CacheResponse,
   ClientAutoStartSaveResponse,
   ClientAutoStartStatus,
+  ClientAutoUpdateSaveRequest,
+  ClientAutoUpdateSaveResponse,
+  ClientAutoUpdateStatus,
   ClientBackupExportResponse,
   ClientBackupRestoreResponse,
   ClientConfigDTO,
@@ -85,6 +88,14 @@ export const systemApi = {
     request<ClientAutoStartSaveResponse>('/api/system/autostart', {
       method: 'PUT',
       body: JSON.stringify({ enabled }),
+    }),
+
+  getAutoUpdate: () => request<ClientAutoUpdateStatus>('/api/system/auto-update'),
+
+  saveAutoUpdate: (payload: ClientAutoUpdateSaveRequest) =>
+    request<ClientAutoUpdateSaveResponse>('/api/system/auto-update', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
     }),
 
   getCache: () => request<CacheResponse>('/api/cache'),

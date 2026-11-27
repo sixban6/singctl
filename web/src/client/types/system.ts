@@ -176,3 +176,44 @@ export interface ClientAutoStartSaveResponse {
   message: string;
   status: ClientAutoStartStatus;
 }
+
+export type AutoUpdateComponentID = 'singctl' | 'singbox' | 'adguard_home' | 'tailscale';
+
+export interface ClientAutoUpdateComponentItem {
+  id: AutoUpdateComponentID;
+  name: string;
+  description: string;
+  enabled: boolean;
+  installed: boolean;
+  currentVersion?: string;
+  latestVersion?: string;
+  lastCheckedAt?: string;
+  lastUpdatedAt?: string;
+  status?: 'idle' | 'up_to_date' | 'updated' | 'skipped' | 'failed' | string;
+  message?: string;
+  lastError?: string;
+}
+
+export interface ClientAutoUpdateStatus {
+  singctl: boolean;
+  singbox: boolean;
+  adguardHome: boolean;
+  tailscale: boolean;
+  intervalHours: number;
+  daemonRunning: boolean;
+  components: ClientAutoUpdateComponentItem[];
+}
+
+export interface ClientAutoUpdateSaveRequest {
+  singctl?: boolean;
+  singbox?: boolean;
+  adguardHome?: boolean;
+  tailscale?: boolean;
+  intervalHours?: number;
+}
+
+export interface ClientAutoUpdateSaveResponse {
+  ok: boolean;
+  message: string;
+  status: ClientAutoUpdateStatus;
+}

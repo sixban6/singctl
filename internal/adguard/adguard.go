@@ -380,6 +380,23 @@ func (m *Manager) checkDiskSpace(alreadyInstalled bool) error {
 	return nil
 }
 
+// CheckLatestVersion 比对本地已安装 AdGuard Home 与官方最新稳定版 Tag（不执行下载）。
+func (m *Manager) CheckLatestVersion(ctx context.Context) (currentVersion, latestVersion string, upToDate bool, err error) {
+	if !m.isBinaryPresent() {
+		return "", "", false, nil
+	}
+	cur := strings.TrimSpace(CachedBinaryVersion(m.binPath))
+	client := releasepkg.NewClient(m.cfg.GitHub.MirrorURL)
+	client.DirectFirst = netx.CheckGoogleConnectivity()
+	info, fErr := client.FetchLatest(ctx, adGuardRepo)
+	if fErr != nil {
+		return cur, "", false, fErr
+	}
+	latest := strings.TrimSpace(info.TagName)
+	same := cur != "" && strings.TrimPrefix(cur, "v") == strings.TrimPrefix(latest, "v")
+	return cur, latest, same, nil
+}
+
 func (m *Manager) downloadAndInstallBinary(ctx context.Context) error {
 	assetName, err := SelectAssetName(runtime.GOOS, runtime.GOARCH)
 	if err != nil {

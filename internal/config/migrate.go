@@ -434,6 +434,9 @@ func migrateWatchdogStage(mc *MigrationContext) {
 	if hasYAMLKey(oldWD, "auto_start") && mc.oldCfg.Watchdog.AutoStart != nil {
 		mc.SetOrAddField("watchdog", "auto_start", strconv.FormatBool(*mc.oldCfg.Watchdog.AutoStart))
 	}
+	if hasYAMLKey(oldWD, "auto_update") && !mc.oldCfg.Watchdog.AutoUpdate.IsEmpty() {
+		mc.setOrAddMapping("watchdog", "auto_update", mc.oldCfg.Watchdog.AutoUpdate)
+	}
 	if hasYAMLKey(oldWD, "failover") && !mc.oldCfg.Watchdog.Failover.IsEmpty() {
 		mc.setOrAddMapping("watchdog", "failover", mc.oldCfg.Watchdog.Failover)
 	}

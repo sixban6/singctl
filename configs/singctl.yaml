@@ -97,6 +97,12 @@ watchdog:                                      # (可选) 看门狗守护进程�
   sub_sync_interval: 600                        # 订阅节点变化自动无感同步间隔(秒), 默认 600 (10分钟; 设为 -1 关闭)
   # preserve_manual_config: true                # 刷新订阅或更新版本时是否自动保留 config.json 手动修改, 默认 true
   # auto_start: true                            # 是否开启路由器开机自启动与掉电恢复, 默认 true (可在 WebUI 系统与维护页一键开关)
+  # auto_update:                                # (可选) 核心组件后台自动更新开关 (默认全部关闭，可在 WebUI 系统与维护页按需开启)
+  #   singctl: false                            # SingCtl 本体自动更新 (自动识别完整版 / -lite，更新后平滑重启 dm 与 WebUI)
+  #   singbox: false                            # sing-box 内核自动更新 (含配置预校验与失败自动回滚)
+  #   adguard_home: false                       # AdGuard Home 自动更新 (无损保留既有规则与配置)
+  #   tailscale: false                          # Tailscale 自动更新 (走零失联预检与自动回滚切换器)
+  #   interval_hours: 24                        # 定时检查周期 (小时, 6~168, 默认 24)
   # failover:                                   # (可选) 策略组自动故障切换配置 (默认开启, 可在 WebUI 看门狗页可视化配置)
   #   enabled: true                             # 是否启用故障切换与恢复回切, 默认 true
   #   groups: ["Proxy", "AI", "#VPS"]           # 默认仅守护活跃核心组 (不含底层闲置单节点池 #Nodes)

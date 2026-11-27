@@ -314,6 +314,8 @@ func (s *Server) registerRoutes() {
 	s.Mux.HandleFunc("PUT /api/system/mirror", s.guard(s.handleSystemMirrorPut))
 	s.Mux.HandleFunc("GET /api/system/autostart", s.guard(s.handleAutoStartGet))
 	s.Mux.HandleFunc("PUT /api/system/autostart", s.guard(s.handleAutoStartPut))
+	s.Mux.HandleFunc("GET /api/system/auto-update", s.guard(s.handleAutoUpdateGet))
+	s.Mux.HandleFunc("PUT /api/system/auto-update", s.guard(s.handleAutoUpdatePut))
 	s.Mux.HandleFunc("GET /api/tailscale/upgrade/preflight", s.guard(s.handleTailscaleUpgradePreflightGet))
 	s.Mux.HandleFunc("GET /api/tailscale/upgrade/status", s.guard(s.handleTailscaleUpgradeStatusGet))
 

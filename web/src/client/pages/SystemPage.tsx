@@ -29,6 +29,7 @@ import { copyToClipboard } from '../../lib/clipboard';
 import { ClientStatusResponse } from '../types';
 import { DoctorDrawer } from './dash/DoctorDrawer';
 import { AutoStartCard } from './system/AutoStartCard';
+import { AutoUpdateCard } from './system/AutoUpdateCard';
 import { NotifyConfigCard } from './system/NotifyConfigCard';
 import { SafeCommitCard } from './system/SafeCommitCard';
 
@@ -365,6 +366,9 @@ export const SystemPage: React.FC<SystemPageProps> = ({
         busy={busy}
         onRefreshStatus={onRefreshStatus ?? onRestored}
       />
+
+      {/* 核心组件定时自动更新开关（默认全部关闭） */}
+      <AutoUpdateCard busy={busy} daemonRunning={status?.daemon?.running} />
 
       {/* 远端安全回滚保险丝与 tailscaled OOM 免疫 */}
       <SafeCommitCard

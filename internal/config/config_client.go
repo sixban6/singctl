@@ -750,14 +750,93 @@ func (f *WatchdogFailoverConfig) UnmarshalYAML(node *yaml.Node) error {
 	return nil
 }
 
+const (
+	DefaultAutoUpdateIntervalHours = 24
+	MinAutoUpdateIntervalHours     = 6
+	MaxAutoUpdateIntervalHours     = 168
+)
+
+// ComponentAutoUpdateConfig 定义客户端核心组件后台自动更新开关（默认全部关闭）。
+type ComponentAutoUpdateConfig struct {
+	SingCtl       bool `yaml:"singctl,omitempty" json:"singctl"`
+	SingBox       bool `yaml:"singbox,omitempty" json:"singbox"`
+	AdGuardHome   bool `yaml:"adguard_home,omitempty" json:"adguardHome"`
+	Tailscale     bool `yaml:"tailscale,omitempty" json:"tailscale"`
+	IntervalHours int  `yaml:"interval_hours,omitempty" json:"intervalHours,omitempty"`
+}
+
+func (a ComponentAutoUpdateConfig) AnyEnabled() bool {
+	return a.SingCtl || a.SingBox || a.AdGuardHome || a.Tailscale
+}
+
+func (a ComponentAutoUpdateConfig) IsEmpty() bool {
+	return !a.AnyEnabled() && a.IntervalHours <= 0
+}
+
+func (a ComponentAutoUpdateConfig) EffectiveIntervalHours() int {
+	if a.IntervalHours <= 0 {
+		return DefaultAutoUpdateIntervalHours
+	}
+	if a.IntervalHours < MinAutoUpdateIntervalHours {
+		return MinAutoUpdateIntervalHours
+	}
+	if a.IntervalHours > MaxAutoUpdateIntervalHours {
+		return MaxAutoUpdateIntervalHours
+	}
+	return a.IntervalHours
+}
+
+func (a ComponentAutoUpdateConfig) EffectiveInterval() time.Duration {
+	return time.Duration(a.EffectiveIntervalHours()) * time.Hour
+}
+
+func (a ComponentAutoUpdateConfig) IsEnabled(componentID string) bool {
+	switch strings.ToLower(strings.TrimSpace(componentID)) {
+	case "singctl":
+		return a.SingCtl
+	case "singbox", "sing-box":
+		return a.SingBox
+	case "adguard_home", "adguard", "adguardhome":
+		return a.AdGuardHome
+	case "tailscale":
+		return a.Tailscale
+	default:
+		return false
+	}
+}
+
+func (a *ComponentAutoUpdateConfig) UnmarshalYAML(node *yaml.Node) error {
+	var raw struct {
+		SingCtl       bool `yaml:"singctl"`
+		SingBox       bool `yaml:"singbox"`
+		AdGuardHome   bool `yaml:"adguard_home"`
+		Tailscale     bool `yaml:"tailscale"`
+		IntervalHours any  `yaml:"interval_hours"`
+	}
+	if err := node.Decode(&raw); err != nil {
+		return err
+	}
+	a.SingCtl = raw.SingCtl
+	a.SingBox = raw.SingBox
+	a.AdGuardHome = raw.AdGuardHome
+	a.Tailscale = raw.Tailscale
+	if raw.IntervalHours != nil {
+		if v, err := parseIntAny(raw.IntervalHours); err == nil {
+			a.IntervalHours = v
+		}
+	}
+	return nil
+}
+
 type WatchdogConfig struct {
-	Interval             int                    `yaml:"interval"`                         // 检查间隔(秒), 默认 180
-	ConfirmWait          int                    `yaml:"confirm_wait"`                     // 二次确认等待(秒), 默认 30
-	MaxRestarts          int                    `yaml:"max_restarts"`                     // 每小时最大自动重启次数, 默认 3
-	SubSyncInterval      int                    `yaml:"sub_sync_interval,omitempty"`      // 订阅节点指纹自动热同步间隔(秒), 默认 600; 设为 -1 关闭
-	PreserveManualConfig *bool                  `yaml:"preserve_manual_config,omitempty"` // 刷新订阅或更新版本时是否自动保留 config.json 手动修改(默认 true)
-	AutoStart            *bool                  `yaml:"auto_start,omitempty"`             // 是否启用路由器开机自启动与掉电恢复（nil 默认 true）
-	Failover             WatchdogFailoverConfig `yaml:"failover,omitempty"`               // 策略组自动故障切换配置(默认开启)
+	Interval             int                       `yaml:"interval"`                         // 检查间隔(秒), 默认 180
+	ConfirmWait          int                       `yaml:"confirm_wait"`                     // 二次确认等待(秒), 默认 30
+	MaxRestarts          int                       `yaml:"max_restarts"`                     // 每小时最大自动重启次数, 默认 3
+	SubSyncInterval      int                       `yaml:"sub_sync_interval,omitempty"`      // 订阅节点指纹自动热同步间隔(秒), 默认 600; 设为 -1 关闭
+	PreserveManualConfig *bool                     `yaml:"preserve_manual_config,omitempty"` // 刷新订阅或更新版本时是否自动保留 config.json 手动修改(默认 true)
+	AutoStart            *bool                     `yaml:"auto_start,omitempty"`             // 是否启用路由器开机自启动与掉电恢复（nil 默认 true）
+	AutoUpdate           ComponentAutoUpdateConfig `yaml:"auto_update,omitempty"`            // 核心组件定时自动更新开关（默认全关）
+	Failover             WatchdogFailoverConfig    `yaml:"failover,omitempty"`               // 策略组自动故障切换配置(默认开启)
 }
 
 func (w WatchdogConfig) ShouldPreserveManualConfig() bool {
@@ -799,9 +878,10 @@ func (w *WatchdogConfig) UnmarshalYAML(node *yaml.Node) error {
 		ConfirmWait          any                    `yaml:"confirm_wait"`
 		MaxRestarts          any                    `yaml:"max_restarts"`
 		SubSyncInterval      any                    `yaml:"sub_sync_interval"`
-		PreserveManualConfig *bool                  `yaml:"preserve_manual_config"`
-		AutoStart            *bool                  `yaml:"auto_start"`
-		Failover             WatchdogFailoverConfig `yaml:"failover"`
+		PreserveManualConfig *bool                     `yaml:"preserve_manual_config"`
+		AutoStart            *bool                     `yaml:"auto_start"`
+		AutoUpdate           ComponentAutoUpdateConfig `yaml:"auto_update"`
+		Failover             WatchdogFailoverConfig    `yaml:"failover"`
 	}
 	if err := node.Decode(&a); err != nil {
 		return err
@@ -828,6 +908,7 @@ func (w *WatchdogConfig) UnmarshalYAML(node *yaml.Node) error {
 	}
 	w.PreserveManualConfig = a.PreserveManualConfig
 	w.AutoStart = a.AutoStart
+	w.AutoUpdate = a.AutoUpdate
 	w.Failover = a.Failover
 	return nil
 }

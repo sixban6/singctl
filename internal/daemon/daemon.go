@@ -94,6 +94,7 @@ type DaemonOptions struct {
 	TelemetryDeps       *sysinfo.TelemetryDeps
 	OOMProcRoot         string
 	ProtectOOMFunc      func(procRoot string) (safecommit.OOMShieldStatus, error)
+	AutoUpdater         *ComponentAutoUpdater
 }
 
 // Daemon 守护进程。
@@ -159,6 +160,7 @@ type Daemon struct {
 	protectOOMFn        func(procRoot string) (safecommit.OOMShieldStatus, error)
 	oomGuardMu          sync.Mutex
 	lastOOMProtectedPID int
+	autoUpdater         *ComponentAutoUpdater
 }
 
 // NewDaemonWithMeta 创建带配置文件路径（支持热重载）与版本号标识的守护进程。
@@ -315,6 +317,13 @@ func NewDaemonWithOptions(cfg *config.Config, opts DaemonOptions) *Daemon {
 		protectOOMFn:        opts.ProtectOOMFunc,
 	}
 	failover.OnNotify = d.emitNotify
+	d.autoUpdater = opts.AutoUpdater
+	if d.autoUpdater == nil {
+		d.autoUpdater = NewComponentAutoUpdater(AutoUpdaterOptions{
+			Targets:    DefaultAutoUpdateTargets(d),
+			StateStore: stateStore,
+		})
+	}
 	return d
 }
 
@@ -738,11 +747,17 @@ func shouldRunThrottleTicker(cfg *config.Config) bool {
 	return cfg != nil && len(cfg.Audit.Throttles) > 0
 }
 
+func shouldRunAutoUpdateTicker(cfg *config.Config) bool {
+	return cfg != nil && cfg.Watchdog.AutoUpdate.AnyEnabled()
+}
+
 type optionalTickerState struct {
-	p2pTicker      *time.Ticker
-	throttleTicker *time.Ticker
-	p2pRunning     bool
-	throtRunning   bool
+	p2pTicker         *time.Ticker
+	throttleTicker    *time.Ticker
+	autoUpdateTicker  *time.Ticker
+	p2pRunning        bool
+	throtRunning      bool
+	autoUpdateRunning bool
 }
 
 func (ts *optionalTickerState) sync(cfg *config.Config, p2pLastActive bool) {
@@ -763,6 +778,15 @@ func (ts *optionalTickerState) sync(cfg *config.Config, p2pLastActive bool) {
 		ts.throttleTicker.Stop()
 		ts.throtRunning = false
 	}
+
+	wantAutoUpdate := shouldRunAutoUpdateTicker(cfg)
+	if wantAutoUpdate && !ts.autoUpdateRunning {
+		ts.autoUpdateTicker.Reset(autoUpdateTickerInterval)
+		ts.autoUpdateRunning = true
+	} else if !wantAutoUpdate && ts.autoUpdateRunning {
+		ts.autoUpdateTicker.Stop()
+		ts.autoUpdateRunning = false
+	}
 }
 
 func (d *Daemon) monitorLoop() error {
@@ -774,15 +798,18 @@ func (d *Daemon) monitorLoop() error {
 	p2pAssistTicker := time.NewTicker(3 * time.Second)
 	auditSampleTicker := time.NewTicker(defaultAuditSampleInterval)
 	throttleReconcileTicker := time.NewTicker(defaultAuditThrottleReconcileInterval)
+	autoUpdateTicker := time.NewTicker(autoUpdateTickerInterval)
 	initHealthTimer := time.NewTimer(2 * time.Second)
 	initFailoverTimer := time.NewTimer(8 * time.Second)
 	initRefreshTimer := time.NewTimer(30 * time.Second)
 
 	optTickers := &optionalTickerState{
-		p2pTicker:      p2pAssistTicker,
-		throttleTicker: throttleReconcileTicker,
-		p2pRunning:     true,
-		throtRunning:   true,
+		p2pTicker:         p2pAssistTicker,
+		throttleTicker:    throttleReconcileTicker,
+		autoUpdateTicker:  autoUpdateTicker,
+		p2pRunning:        true,
+		throtRunning:      true,
+		autoUpdateRunning: true,
 	}
 	optTickers.sync(cfg, d.p2pLastActive.Load())
 
@@ -792,6 +819,7 @@ func (d *Daemon) monitorLoop() error {
 		p2pAssistTicker.Stop()
 		auditSampleTicker.Stop()
 		throttleReconcileTicker.Stop()
+		autoUpdateTicker.Stop()
 		initHealthTimer.Stop()
 		initFailoverTimer.Stop()
 		initRefreshTimer.Stop()
@@ -852,6 +880,8 @@ func (d *Daemon) monitorLoop() error {
 			d.maybePatrolSideRouterFailoverAsync()
 		case <-throttleReconcileTicker.C:
 			d.maybeReconcileAuditThrottlesAsync(false)
+		case <-autoUpdateTicker.C:
+			d.maybeRunAutoUpdateAsync(false)
 		case <-initFailoverTimer.C:
 			applyHotReload(false)
 			d.maybePatrolGroupFailoverAsync()

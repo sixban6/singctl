@@ -5,9 +5,17 @@ package daemon
 
 import (
 	"os"
+	"os/exec"
 	"os/signal"
 	"syscall"
 )
+
+func detachExecCmd(cmd *exec.Cmd) {
+	if cmd == nil {
+		return
+	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+}
 
 func installReloadSignal(onReload func()) {
 	ch := make(chan os.Signal, 1)

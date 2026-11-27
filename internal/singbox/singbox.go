@@ -606,6 +606,21 @@ func (sb *SingBox) fetchLatestVersion(targetPath string) (string, error) {
 	return client.FetchLatestTag(ctx, UpstreamSingBoxRepo)
 }
 
+// CheckUpdate 检查当前已安装 sing-box 与目标发布通道最新版本的差异（不执行下载或替换）。
+func (sb *SingBox) CheckUpdate() (currentVersion, latestVersion string, upToDate bool, err error) {
+	targetPath := sb.effectiveTargetPath()
+	latest, lErr := sb.fetchLatestVersion(targetPath)
+	if lErr != nil {
+		return "", "", false, lErr
+	}
+	cur, cErr := sb.getCurrentVersion()
+	if cErr != nil {
+		return "", latest, false, nil
+	}
+	same := strings.TrimPrefix(strings.TrimSpace(cur), "v") == strings.TrimPrefix(strings.TrimSpace(latest), "v")
+	return cur, latest, same, nil
+}
+
 // Update 更新 sing-box（更新前精准对齐目标通道版本比对，避免无意义的重复下载）。
 func (sb *SingBox) Update() error {
 	logger.Info("Checking for sing-box updates...")
