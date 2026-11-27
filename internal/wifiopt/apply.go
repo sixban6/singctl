@@ -15,21 +15,45 @@ type uciOp struct {
 	Value string
 }
 
-// Apply 执行一键全自动优化、一键双频合一或单频微调（含 0600 备份、批量 UCI、单次 wifi reload 与网桥自检回滚）。
+// PreparedReload 封装已提交 UCI 无线变更后延迟执行 wifi reload 与网桥验收所需的不可变上下文。
+type PreparedReload struct {
+	origWireless    []byte
+	haveOrig        bool
+	expectedBridges map[string][]string
+}
+
+// Apply 执行一键全自动优化、一键双频合一或单频微调（同步模式：含 0600 备份、批量 UCI、单次 wifi reload 与网桥自检回滚）。
 func (s *Service) Apply(ctx context.Context, req ApplyRequest) (*ApplyResult, error) {
+	res, prep, err := s.CommitWithoutReload(ctx, req)
+	if err != nil || prep == nil {
+		return res, err
+	}
+	waitMs, err := s.ExecutePreparedReload(ctx, prep)
+	if err != nil {
+		return nil, err
+	}
+	res.Reloaded = true
+	res.BridgeVerified = true
+	res.BridgeWaitMs = waitMs
+	res.Summary = fmt.Sprintf("已成功应用 %d 项无线优化，全部射频与网桥已就绪。", len(res.Changes))
+	return res, nil
+}
+
+// CommitWithoutReload 仅执行参数校验、0600 快照、批量 uci set 与单次 uci commit，返回待重载上下文供 HTTP 层先返回 200 后异步重载（避免 Wi-Fi 客户端操作误报断网）。
+func (s *Service) CommitWithoutReload(ctx context.Context, req ApplyRequest) (*ApplyResult, *PreparedReload, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	ov, err := s.Overview(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if !ov.Supported {
-		return nil, ErrUnsupported
+		return nil, nil, ErrUnsupported
 	}
 	st, _, _, err := s.probe(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	action := strings.TrimSpace(req.Action)
@@ -45,10 +69,10 @@ func (s *Service) Apply(ctx context.Context, req ApplyRequest) (*ApplyResult, er
 	case "tune_radio":
 		ops, changes, expectedBridges, err = buildTuneRadioOps(ov, st, req)
 	default:
-		return nil, fmt.Errorf("%w: 不支持的操作类型 %q", ErrInvalidRequest, req.Action)
+		return nil, nil, fmt.Errorf("%w: 不支持的操作类型 %q", ErrInvalidRequest, req.Action)
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	if req.DryRun || len(ops) == 0 {
@@ -62,7 +86,7 @@ func (s *Service) Apply(ctx context.Context, req ApplyRequest) (*ApplyResult, er
 			Action:  action,
 			Summary: summary,
 			Changes: changes,
-		}, nil
+		}, nil, nil
 	}
 
 	// 1. 变更前只读快照 /etc/config/wireless（用于网桥校验失败时当场秒级回滚）
@@ -72,38 +96,46 @@ func (s *Service) Apply(ctx context.Context, req ApplyRequest) (*ApplyResult, er
 	for _, op := range ops {
 		if _, err := s.runCmd(ctx, "uci", "set", op.Key+"="+op.Value); err != nil {
 			s.rollbackWirelessFile(ctx, origWireless, backupErr == nil)
-			return nil, fmt.Errorf("写入 UCI 无线参数失败: %w", err)
+			return nil, nil, fmt.Errorf("写入 UCI 无线参数失败: %w", err)
 		}
 	}
 	if _, err := s.runCmd(ctx, "uci", "commit", "wireless"); err != nil {
 		s.rollbackWirelessFile(ctx, origWireless, backupErr == nil)
-		return nil, fmt.Errorf("提交 UCI 无线配置失败: %w", err)
-	}
-
-	// 3. 仅重载无线（严禁触碰有线/WAN/network）
-	if err := s.reloadWifi(ctx); err != nil {
-		s.rollbackWirelessFile(ctx, origWireless, backupErr == nil)
-		return nil, fmt.Errorf("重载无线服务失败并已自动回滚: %w", err)
-	}
-
-	// 4. 轮询校验全部目标无线接口回归网桥（兼容 MT7981/MT7986 DBDC 串行拉起），超时自动回滚
-	start := s.now()
-	verified := s.waitBridgesReady(ctx, expectedBridges)
-	waitMs := s.now().Sub(start).Milliseconds()
-	if !verified {
-		s.rollbackWirelessFile(ctx, origWireless, backupErr == nil)
-		return nil, ErrBridgeVerifyFailed
+		return nil, nil, fmt.Errorf("提交 UCI 无线配置失败: %w", err)
 	}
 
 	return &ApplyResult{
-		OK:             true,
-		Action:         action,
-		Summary:        fmt.Sprintf("已成功应用 %d 项无线优化，全部射频与网桥已就绪。", len(changes)),
-		Changes:        changes,
-		Reloaded:       true,
-		BridgeVerified: true,
-		BridgeWaitMs:   waitMs,
-	}, nil
+			OK:      true,
+			Action:  action,
+			Summary: fmt.Sprintf("已提交 %d 项无线优化配置，即将平滑重载无线（约 8 秒瞬断）。", len(changes)),
+			Changes: changes,
+		}, &PreparedReload{
+			origWireless:    origWireless,
+			haveOrig:        backupErr == nil,
+			expectedBridges: expectedBridges,
+		}, nil
+}
+
+// ExecutePreparedReload 执行单次纯无线重载（绝不触碰有线/WAN/network）与 25 秒网桥就绪验收，失败自动 0600 还原并重拉无线。
+func (s *Service) ExecutePreparedReload(ctx context.Context, prep *PreparedReload) (int64, error) {
+	if prep == nil {
+		return 0, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := s.reloadWifi(ctx); err != nil {
+		s.rollbackWirelessFile(ctx, prep.origWireless, prep.haveOrig)
+		return 0, fmt.Errorf("重载无线服务失败并已自动回滚: %w", err)
+	}
+	start := s.now()
+	verified := s.waitBridgesReady(ctx, prep.expectedBridges)
+	waitMs := s.now().Sub(start).Milliseconds()
+	if !verified {
+		s.rollbackWirelessFile(ctx, prep.origWireless, prep.haveOrig)
+		return waitMs, ErrBridgeVerifyFailed
+	}
+	return waitMs, nil
 }
 
 func (s *Service) rollbackWirelessFile(ctx context.Context, orig []byte, haveOrig bool) {

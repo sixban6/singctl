@@ -288,4 +288,104 @@ func TestWifiAPI_AuthGuardOverviewScanApplyAndChassis(t *testing.T) {
 			t.Fatalf("expected optimal chassis, got %+v", chResp)
 		}
 	})
+
+	t.Run("async_reload_flushes_response_before_reloading_wifi", func(t *testing.T) {
+		tmp := t.TempDir()
+		cfgPath := filepath.Join(tmp, "singctl.yaml")
+		_ = os.WriteFile(cfgPath, []byte("subs: []\n"), 0600)
+		wifiFile := filepath.Join(tmp, "wireless")
+		_ = os.WriteFile(wifiFile, []byte("config wifi-device 'MT7986_1_2'\n\toption channel 'auto'\n"), 0600)
+
+		reloadDone := make(chan struct{}, 1)
+		var reloadedCount int
+		var mu sync.Mutex
+		wifiSvc := wifiopt.NewService(wifiopt.Env{
+			WirelessFile:  wifiFile,
+			PollInterval:  time.Millisecond,
+			VerifyTimeout: 20 * time.Millisecond,
+			CPUCount:      2,
+			Now:           func() time.Time { return time.Unix(1795552000, 0) },
+			Sleep:         func(context.Context, time.Duration) error { return nil },
+			LookPath:      func(name string) (string, error) { return "/usr/sbin/" + name, nil },
+			ReadFile: func(p string) ([]byte, error) {
+				if p == wifiFile {
+					return os.ReadFile(p)
+				}
+				return nil, os.ErrNotExist
+			},
+			WriteFile0600: func(p string, d []byte) error { return os.WriteFile(p, d, 0600) },
+			Glob:          func(string) ([]string, error) { return nil, nil },
+			ReloadWifi: func(context.Context) error {
+				mu.Lock()
+				reloadedCount++
+				mu.Unlock()
+				select {
+				case reloadDone <- struct{}{}:
+				default:
+				}
+				return nil
+			},
+			RunCmd: func(_ context.Context, name string, args ...string) ([]byte, error) {
+				switch name {
+				case "uci":
+					if len(args) >= 2 && args[0] == "show" && args[1] == "wireless" {
+						return []byte("wireless.MT7986_1_2=wifi-device\nwireless.MT7986_1_2.type='mtwifi'\nwireless.MT7986_1_2.phy='rax0'\nwireless.MT7986_1_2.band='5g'\nwireless.MT7986_1_2.channel='auto'\nwireless.MT7986_1_2.htmode='HE160'\nwireless.default_MT7986_1_2=wifi-iface\nwireless.default_MT7986_1_2.device='MT7986_1_2'\nwireless.default_MT7986_1_2.mode='ap'\nwireless.default_MT7986_1_2.ssid='test5g'\nwireless.default_MT7986_1_2.network='wifi'\n"), nil
+					}
+					if len(args) >= 2 && args[0] == "show" && args[1] == "network" {
+						return []byte("network.wifi=interface\nnetwork.wifi.device='br-lan.27'\n"), nil
+					}
+					return nil, nil
+				case "iwinfo":
+					return []byte("rax0      ESSID: \"test5g\"\n          Mode: Master  Channel: 52 (5.260 GHz)\n          Bit Rate: 4803.0 MBit/s\n"), nil
+				case "brctl":
+					return []byte("bridge name\tbridge id\t\tSTP enabled\tinterfaces\nbr-lan\t\t7fff.1\tno\t\trax0\n"), nil
+				}
+				return nil, nil
+			},
+		})
+
+		delay := 15 * time.Millisecond
+		srv := webui.New(webui.Options{
+			ConfigPath:                  cfgPath,
+			WifiOptServiceForTest:       wifiSvc,
+			WifiAsyncReloadDelayForTest: &delay,
+			SafeCommitStateDir:          filepath.Join(tmp, "sc"),
+			SafeCommitProcRoot:          t.TempDir(),
+			SafeCommitSpawnWatcher:      func(string) (int, error) { return 7002, nil },
+			SafeCommitKillWatcher:       func(int) error { return nil },
+			SafeCommitBaselineForTest:   func() (bool, bool) { return true, true },
+		})
+
+		req := httptest.NewRequest(http.MethodPost, "/api/wifi/apply", bytes.NewBufferString(`{"action":"auto_optimize","recommended5gChannel":149}`))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		srv.Mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("async POST /api/wifi/apply status=%d body=%s", rec.Code, rec.Body.String())
+		}
+		var resp struct {
+			OK              bool   `json:"ok"`
+			AsyncReload     bool   `json:"asyncReload"`
+			SafeCommitToken string `json:"safeCommitToken"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode async apply: %v", err)
+		}
+		if !resp.OK || !resp.AsyncReload || resp.SafeCommitToken == "" {
+			t.Fatalf("expected ok + asyncReload=true + safeCommitToken, got %+v", resp)
+		}
+		// Immediately after HTTP response returns, reload must NOT have executed yet (proves response flushed first!).
+		mu.Lock()
+		earlyCount := reloadedCount
+		mu.Unlock()
+		if earlyCount != 0 {
+			t.Fatalf("expected wifi reload deferred after HTTP flush, but already ran %d times", earlyCount)
+		}
+		// Wait for async goroutine to trigger reload.
+		select {
+		case <-reloadDone:
+		case <-time.After(1 * time.Second):
+			t.Fatal("timed out waiting for deferred async wifi reload")
+		}
+	})
 }

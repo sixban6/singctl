@@ -9,10 +9,48 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
+	"singctl/internal/logger"
 	"singctl/internal/safecommit"
 	"singctl/internal/wifiopt"
 )
+
+const defaultWifiAsyncReloadDelay = 600 * time.Millisecond
+
+func (s *Server) wifiAsyncReloadDelay() (time.Duration, bool) {
+	if s.opts.WifiAsyncReloadDelayForTest != nil {
+		d := *s.opts.WifiAsyncReloadDelayForTest
+		return d, d > 0
+	}
+	if s.opts.WifiOptServiceForTest != nil {
+		return 0, false
+	}
+	return defaultWifiAsyncReloadDelay, true
+}
+
+func (s *Server) scheduleWifiAsyncReload(reqCtx context.Context, svc *wifiopt.Service, delay time.Duration, prep *wifiopt.PreparedReload, scToken string) {
+	bgCtx, cancel := context.WithTimeout(context.WithoutCancel(reqCtx), 45*time.Second)
+	go func() {
+		defer cancel()
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-bgCtx.Done():
+			return
+		case <-timer.C:
+		}
+		s.wifiApplyMu.Lock()
+		defer s.wifiApplyMu.Unlock()
+		if _, err := svc.ExecutePreparedReload(bgCtx, prep); err != nil {
+			logger.Warn("[WiFiOpt] 延迟异步重载无线并校验网桥失败（已自动回滚原无线配置）: %v", err)
+			if scToken != "" {
+				_, _ = s.safeCommitManager().Confirm(scToken)
+			}
+		}
+		s.invalidateWifiCache()
+	}()
+}
 
 func (s *Server) wifiOptService() *wifiopt.Service {
 	if s.opts.WifiOptServiceForTest != nil {
@@ -98,13 +136,12 @@ func (s *Server) handleWifiApplyPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.wifiApplyMu.Lock()
-	defer s.wifiApplyMu.Unlock()
-
 	reason := "Wi-Fi 安全调优: " + cmp.Or(strings.TrimSpace(req.Action), "optimize")
 	scState, scErr := s.armSafeCommitWithExtraSnapshots(r.Context(), req.TTLSec, reason, map[string]string{
 		"uci_wireless": "/etc/config/wireless",
 	})
 	if scErr != nil {
+		s.wifiApplyMu.Unlock()
 		if errors.Is(scErr, safecommit.ErrInvalidTTL) {
 			writeJSONError(w, http.StatusBadRequest, scErr.Error())
 			return
@@ -113,17 +150,34 @@ func (s *Server) handleWifiApplyPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, err := svc.Apply(r.Context(), req)
+	res, prep, err := svc.CommitWithoutReload(r.Context(), req)
 	if err != nil {
-		// 后端即时网桥自检失败已完成自动回滚，解除本次无效保险丝防止重复回滚
 		_, _ = s.safeCommitManager().Confirm(scState.Token)
 		s.invalidateWifiCache()
+		s.wifiApplyMu.Unlock()
 		writeWifiApplyError(w, err)
 		return
 	}
 
+	delay, async := s.wifiAsyncReloadDelay()
+	if !async && prep != nil {
+		waitMs, rErr := svc.ExecutePreparedReload(r.Context(), prep)
+		if rErr != nil {
+			_, _ = s.safeCommitManager().Confirm(scState.Token)
+			s.invalidateWifiCache()
+			s.wifiApplyMu.Unlock()
+			writeWifiApplyError(w, rErr)
+			return
+		}
+		res.Reloaded = true
+		res.BridgeVerified = true
+		res.BridgeWaitMs = waitMs
+		res.Summary = "已成功应用无线优化，全部射频与网桥已就绪。"
+	}
+
 	s.invalidateWifiCache()
 	ov, _ := svc.Overview(r.Context())
+	s.wifiApplyMu.Unlock()
 
 	res.SafeCommitToken = scState.Token
 	res.SafeCommitTTLSec = scState.TTLSec
@@ -133,7 +187,8 @@ func (s *Server) handleWifiApplyPost(w http.ResponseWriter, r *http.Request) {
 		"action":           res.Action,
 		"summary":          res.Summary,
 		"changes":          res.Changes,
-		"reloaded":         res.Reloaded,
+		"reloaded":         res.Reloaded || async,
+		"asyncReload":      async && prep != nil,
 		"bridgeVerified":   res.BridgeVerified,
 		"bridgeWaitMs":     res.BridgeWaitMs,
 		"warnings":         res.Warnings,
@@ -142,6 +197,12 @@ func (s *Server) handleWifiApplyPost(w http.ResponseWriter, r *http.Request) {
 		"safeCommit":       s.safeCommitStatusPayload(s.readConfigOrEmpty()),
 		"overview":         ov,
 	})
+	if async && prep != nil {
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		s.scheduleWifiAsyncReload(r.Context(), svc, delay, prep, scState.Token)
+	}
 }
 
 func (s *Server) handleWifiChassisPost(w http.ResponseWriter, r *http.Request) {

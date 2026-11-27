@@ -168,6 +168,7 @@ export interface WifiApplyResponse {
   summary: string;
   changes: WifiOptimizationStep[];
   reloaded?: boolean;
+  asyncReload?: boolean;
   bridgeVerified?: boolean;
   bridgeWaitMs?: number;
   warnings?: string[];

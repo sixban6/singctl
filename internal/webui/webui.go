@@ -115,6 +115,7 @@ type Options struct {
 	VLANServiceForTest          *vlan.Service                                                                     // 仅供离线单元测试注入 OpenWrt VLAN 领域服务
 	VLANAsyncReloadDelayForTest *time.Duration                                                                    // 仅供离线单元测试覆盖 VLAN 异步延迟重载时长（0=同步）
 	WifiOptServiceForTest       *wifiopt.Service                                                                  // 仅供离线单元测试注入 OpenWrt Wi-Fi 体检与调优服务
+	WifiAsyncReloadDelayForTest *time.Duration                                                                    // 仅供离线单元测试覆盖 Wi-Fi 异步延迟重载时长（0=同步）
 	AutoStartServiceMgr         servicemgr.Manager                                                                // 可选：测试注入开机自启服务管理器替身
 	AutoStartProcdDir           string                                                                            // 可选：测试注入开机自启 procd 目录
 }

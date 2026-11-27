@@ -122,9 +122,19 @@ export const WifiOptSection: React.FC<WifiOptSectionProps> = ({
         onSafeCommitUpdated(res.safeCommit);
       }
       onRefreshStatus?.();
-      success(
-        `${res.summary}（已启动 ${res.safeCommitTtlSec || 180} 秒防失联倒计时，确认正常后请点顶部「确认生效」）`,
-      );
+      if (res.asyncReload) {
+        success(
+          `无线配置已提交，正在平滑重载（约 8 秒瞬断）。已启动 ${res.safeCommitTtlSec || 180} 秒防失联倒计时，重连后请点顶部「确认生效」`,
+        );
+        window.setTimeout(() => {
+          void refetch(true);
+          onRefreshStatus?.();
+        }, 12000);
+      } else {
+        success(
+          `${res.summary}（已启动 ${res.safeCommitTtlSec || 180} 秒防失联倒计时，确认正常后请点顶部「确认生效」）`,
+        );
+      }
     } catch (err: unknown) {
       toastError(err instanceof Error ? err.message : '应用无线优化失败（已自动回滚原配置）');
       await refetch(true);
