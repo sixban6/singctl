@@ -39,11 +39,15 @@ type RadioInfo struct {
 	DFSChannel      bool     `json:"dfsChannel"`               // 5G DFS 雷达信道
 	SupportedModes  []string `json:"supportedModes,omitzero"`  // 可选频宽列表
 	RecommendChs    []int    `json:"recommendChannels,omitzero"`
-	InterfaceCount  int      `json:"interfaceCount"`
-	ClientCount     int      `json:"clientCount"`
-	RxPackets       uint64   `json:"rxPackets"`
-	RxErrors        uint64   `json:"rxErrors"`
-	RxErrorRatePct  float64  `json:"rxErrorRatePct"`
+	InterfaceCount    int     `json:"interfaceCount"`
+	ClientCount       int     `json:"clientCount"`
+	RxPackets         uint64  `json:"rxPackets"`
+	RxErrors          uint64  `json:"rxErrors"`
+	RxDropped         uint64  `json:"rxDropped"`
+	TxPackets         uint64  `json:"txPackets"`
+	TxDropped         uint64  `json:"txDropped"`
+	RxErrorRatePct    float64 `json:"rxErrorRatePct"`
+	PacketLossRatePct float64 `json:"packetLossRatePct"`
 }
 
 // SSIDInfo 描述单个无线 AP 接口（wifi-iface）及其运行统计（绝不含明文密钥）。
@@ -63,7 +67,11 @@ type SSIDInfo struct {
 	ClientCount        int     `json:"clientCount"`
 	RxPackets          uint64  `json:"rxPackets"`
 	RxErrors           uint64  `json:"rxErrors"`
+	RxDropped          uint64  `json:"rxDropped"`
+	TxPackets          uint64  `json:"txPackets"`
+	TxDropped          uint64  `json:"txDropped"`
 	RxErrorRatePct     float64 `json:"rxErrorRatePct"`
+	PacketLossRatePct  float64 `json:"packetLossRatePct"`
 	DualBandPaired     bool    `json:"dualBandPaired"`
 	CanUpgradeDualBand bool    `json:"canUpgradeDualBand"`
 }
@@ -165,6 +173,9 @@ type Overview struct {
 	AutoOptimizePlan []OptimizationStep `json:"autoOptimizePlan"`
 	Chassis          ChassisStatus      `json:"chassis"`
 	SampledAt        int64              `json:"sampledAt"`
+	StatsScope       string             `json:"statsScope"`               // boot / post_optimize / retest
+	StatsBaselineAt  int64              `json:"statsBaselineAt,omitzero"` // 最近一次统计基准重置时间（Unix 秒）
+	StatsWindowSec   int64              `json:"statsWindowSec,omitzero"`  // 距离基准重置已累计采样秒数
 }
 
 // RadioPatch 描述单张射频的精细调优入参。

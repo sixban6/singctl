@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type iwinfoBlock struct {
@@ -28,6 +29,10 @@ type iwinfoBlock struct {
 type netDevStat struct {
 	RxPackets uint64
 	RxErrors  uint64
+	RxDropped uint64
+	TxPackets uint64
+	TxErrors  uint64
+	TxDropped uint64
 }
 
 type dhcpLease struct {
@@ -59,12 +64,89 @@ var (
 	reRateLine  = regexp.MustCompile(`(RX|TX):\s*([0-9.]+)\s*MBit/s.*?(?:(\d+)MHz)?`)
 )
 
+// RetestStats 重置网卡实时统计基准并按需采样一个短窗口（默认 3 秒），立即返回重置后的实时丢包率与错包率。
+func (s *Service) RetestStats(ctx context.Context) (*Overview, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.recordStatsBaseline("retest")
+	if err := s.sleep(ctx, s.retestWindow()); err != nil {
+		return nil, err
+	}
+	return s.Overview(ctx)
+}
+
+func (s *Service) recordStatsBaseline(scope string) {
+	raw, err := s.readFile("/proc/net/dev")
+	if err != nil {
+		return
+	}
+	snap := parseProcNetDev(string(raw))
+	now := s.now()
+	s.statsMu.Lock()
+	s.statsBaseline = snap
+	s.statsBaselineAt = now
+	s.statsScope = scope
+	s.statsMu.Unlock()
+}
+
+func (s *Service) applyStatsDelta(raw map[string]netDevStat, now time.Time) (map[string]netDevStat, string, int64, int64) {
+	s.statsMu.Lock()
+	base := s.statsBaseline
+	baseAt := s.statsBaselineAt
+	scope := s.statsScope
+	s.statsMu.Unlock()
+
+	if scope == "" || base == nil {
+		return raw, "boot", 0, 0
+	}
+	delta := make(map[string]netDevStat, len(raw))
+	for iface, cur := range raw {
+		b := base[iface]
+		var d netDevStat
+		// 若 RX/TX 总包数回退（驱动重载或 32 位回绕），说明该方向计数器已整体归零，整组直接采用当前值而非逐项相减
+		if cur.RxPackets < b.RxPackets {
+			d.RxPackets = cur.RxPackets
+			d.RxErrors = cur.RxErrors
+			d.RxDropped = cur.RxDropped
+		} else {
+			d.RxPackets = cur.RxPackets - b.RxPackets
+			d.RxErrors = subCounter(cur.RxErrors, b.RxErrors)
+			d.RxDropped = subCounter(cur.RxDropped, b.RxDropped)
+		}
+		if cur.TxPackets < b.TxPackets {
+			d.TxPackets = cur.TxPackets
+			d.TxErrors = cur.TxErrors
+			d.TxDropped = cur.TxDropped
+		} else {
+			d.TxPackets = cur.TxPackets - b.TxPackets
+			d.TxErrors = subCounter(cur.TxErrors, b.TxErrors)
+			d.TxDropped = subCounter(cur.TxDropped, b.TxDropped)
+		}
+		delta[iface] = d
+	}
+	winSec := int64(now.Sub(baseAt).Seconds())
+	if winSec < 0 {
+		winSec = 0
+	}
+	return delta, scope, baseAt.Unix(), winSec
+}
+
+func subCounter(cur, base uint64) uint64 {
+	if cur >= base {
+		return cur - base
+	}
+	// 内核 32 位计数器回绕或驱动重载归零时安全回退为当前值，避免无符号下溢
+	return cur
+}
+
 // Overview 毫秒级只读采集 Wi-Fi 射频、在线客户端、体检结论、自动优化计划与高并发底盘状态。
 func (s *Service) Overview(ctx context.Context) (*Overview, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	chassis := s.InspectChassis(ctx)
+	now := s.now()
 
 	ov := &Overview{
 		Radios:           []RadioInfo{},
@@ -73,7 +155,8 @@ func (s *Service) Overview(ctx context.Context) (*Overview, error) {
 		Diagnostics:      []DiagnosisItem{},
 		AutoOptimizePlan: []OptimizationStep{},
 		Chassis:          chassis,
-		SampledAt:        s.now().Unix(),
+		SampledAt:        now.Unix(),
+		StatsScope:       "boot",
 	}
 
 	st, supported, hint, err := s.probe(ctx)
@@ -91,6 +174,11 @@ func (s *Service) Overview(ctx context.Context) (*Overview, error) {
 
 	ov.Supported = true
 	ov.Driver = st.Driver
+
+	effStats, statsScope, baseAt, winSec := s.applyStatsDelta(st.DevStats, now)
+	ov.StatsScope = statsScope
+	ov.StatsBaselineAt = baseAt
+	ov.StatsWindowSec = winSec
 
 	// 1. 构建 SSID 与客户端视图
 	ssidByBandName := make(map[string]map[string]bool)
@@ -126,6 +214,10 @@ func (s *Service) Overview(ctx context.Context) (*Overview, error) {
 	radioClients := make(map[string]int)
 	radioRxPkts := make(map[string]uint64)
 	radioRxErrs := make(map[string]uint64)
+	radioRxDrops := make(map[string]uint64)
+	radioTxPkts := make(map[string]uint64)
+	radioTxErrs := make(map[string]uint64)
+	radioTxDrops := make(map[string]uint64)
 	radioIw := make(map[string]iwinfoBlock)
 
 	for _, sec := range apSections {
@@ -142,7 +234,7 @@ func (s *Service) Overview(ctx context.Context) (*Overview, error) {
 		if _, ok := radioIw[devName]; !ok && (iw.Channel > 0 || iw.Hardware != "" || iw.BitRateMbps > 0) {
 			radioIw[devName] = iw
 		}
-		stat := st.DevStats[ifName]
+		stat := effStats[ifName]
 
 		var clients []ClientInfo
 		if ifName != "" && sec.opt("disabled") != "1" && !radioDisabled {
@@ -154,6 +246,10 @@ func (s *Service) Overview(ctx context.Context) (*Overview, error) {
 		radioClients[devName] += len(clients)
 		radioRxPkts[devName] += stat.RxPackets
 		radioRxErrs[devName] += stat.RxErrors
+		radioRxDrops[devName] += stat.RxDropped
+		radioTxPkts[devName] += stat.TxPackets
+		radioTxErrs[devName] += stat.TxErrors
+		radioTxDrops[devName] += stat.TxDropped
 
 		ssidName := sec.opt("ssid")
 		dualPaired := false
@@ -187,7 +283,11 @@ func (s *Service) Overview(ctx context.Context) (*Overview, error) {
 			ClientCount:        len(clients),
 			RxPackets:          stat.RxPackets,
 			RxErrors:           stat.RxErrors,
+			RxDropped:          stat.RxDropped,
+			TxPackets:          stat.TxPackets,
+			TxDropped:          stat.TxDropped,
 			RxErrorRatePct:     calcErrRate(stat.RxPackets, stat.RxErrors),
+			PacketLossRatePct:  calcPacketLossRate(stat.RxPackets, stat.TxPackets, stat.RxDropped, stat.TxDropped, stat.TxErrors),
 			DualBandPaired:     dualPaired,
 			CanUpgradeDualBand: band == "2g" && has5GRadio && !dualPaired && sec.opt("disabled") != "1" && ssidName != "" && sec.opt("isolate") != "1",
 		})
@@ -240,11 +340,15 @@ func (s *Service) Overview(ctx context.Context) (*Overview, error) {
 			DFSChannel:     band == "5g" && curCh > 0 && isDFSChannel(curCh),
 			SupportedModes: modes,
 			RecommendChs:   recChs,
-			InterfaceCount: radioIfaceCount[dev.Name],
-			ClientCount:    radioClients[dev.Name],
-			RxPackets:      radioRxPkts[dev.Name],
-			RxErrors:       radioRxErrs[dev.Name],
-			RxErrorRatePct: calcErrRate(radioRxPkts[dev.Name], radioRxErrs[dev.Name]),
+			InterfaceCount:    radioIfaceCount[dev.Name],
+			ClientCount:       radioClients[dev.Name],
+			RxPackets:         radioRxPkts[dev.Name],
+			RxErrors:          radioRxErrs[dev.Name],
+			RxDropped:         radioRxDrops[dev.Name],
+			TxPackets:         radioTxPkts[dev.Name],
+			TxDropped:         radioTxDrops[dev.Name],
+			RxErrorRatePct:    calcErrRate(radioRxPkts[dev.Name], radioRxErrs[dev.Name]),
+			PacketLossRatePct: calcPacketLossRate(radioRxPkts[dev.Name], radioTxPkts[dev.Name], radioRxDrops[dev.Name], radioTxDrops[dev.Name], radioTxErrs[dev.Name]),
 		})
 	}
 
@@ -418,7 +522,8 @@ func (s *Service) readAssocClients(ctx context.Context, ifName, ssid, band strin
 						cur.BandwidthMHz = bw
 					}
 				}
-				if (cur.TxMbps > 0 && cur.TxMbps < 30) || (cur.RxMbps > 0 && cur.RxMbps < 30) {
+				// 仅在信号偏弱（≤ -76 dBm）且协商速率 < 30 Mbps 时判为弱信号低速；避免把近距离（如 -40 dBm）休眠节能的智能插座/音箱误报为弱信号
+				if cur.SignalDBm <= -76 && ((cur.TxMbps > 0 && cur.TxMbps < 30) || (cur.RxMbps > 0 && cur.RxMbps < 30)) {
 					cur.WeakSignal = true
 				}
 			}
@@ -517,12 +622,23 @@ func parseProcNetDev(raw string) map[string]netDevStat {
 			continue
 		}
 		fields := strings.Fields(rest)
-		if len(fields) < 3 {
+		if len(fields) < 4 {
 			continue
 		}
-		pkts, _ := strconv.ParseUint(fields[1], 10, 64)
-		errs, _ := strconv.ParseUint(fields[2], 10, 64)
-		out[strings.TrimSpace(iface)] = netDevStat{RxPackets: pkts, RxErrors: errs}
+		rxPkts, _ := strconv.ParseUint(fields[1], 10, 64)
+		rxErrs, _ := strconv.ParseUint(fields[2], 10, 64)
+		rxDrop, _ := strconv.ParseUint(fields[3], 10, 64)
+		stat := netDevStat{
+			RxPackets: rxPkts,
+			RxErrors:  rxErrs,
+			RxDropped: rxDrop,
+		}
+		if len(fields) >= 12 {
+			stat.TxPackets, _ = strconv.ParseUint(fields[9], 10, 64)
+			stat.TxErrors, _ = strconv.ParseUint(fields[10], 10, 64)
+			stat.TxDropped, _ = strconv.ParseUint(fields[11], 10, 64)
+		}
+		out[strings.TrimSpace(iface)] = stat
 	}
 	return out
 }
@@ -545,10 +661,20 @@ func parseDHCPLeases(raw string) map[string]dhcpLease {
 }
 
 func calcErrRate(pkts, errs uint64) float64 {
-	if pkts == 0 {
+	total := pkts + errs
+	if total == 0 {
 		return 0
 	}
-	return math.Round(float64(errs)*10000/float64(pkts)) / 100
+	return math.Round(float64(errs)*10000/float64(total)) / 100
+}
+
+func calcPacketLossRate(rxPkts, txPkts, rxDrop, txDrop, txErrs uint64) float64 {
+	lost := rxDrop + txDrop + txErrs
+	total := rxPkts + txPkts + lost
+	if total == 0 {
+		return 0
+	}
+	return math.Round(float64(lost)*10000/float64(total)) / 100
 }
 
 func parseInt(s string) int {

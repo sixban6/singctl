@@ -24,6 +24,7 @@ import (
 const (
 	staleTmpBackupMinBytes int64 = 1024 * 1024 // 仅清扫 >= 1 MiB 的二进制备份，绝不误删配置备份
 	defaultLowMemSysctl          = "/etc/sysctl.d/99-singctl-lowmem.conf"
+	defaultUserSysctl            = "/etc/sysctl.conf"
 )
 
 // LowMemHostTuneDeps 显式注入宿主机内存护栏调优器的全部路径与外部执行器依赖（支持完全离线测试）。
@@ -34,6 +35,7 @@ type LowMemHostTuneDeps struct {
 	TmpDir              string
 	ProcSysRoot         string
 	SysctlConfPath      string
+	UserSysctlConfPath  string
 	ZramCompAlgoPath    string
 	TailscaleInitdPath  string
 	TailscaleSystemd    string
@@ -163,16 +165,46 @@ func desiredLowMemSysctls(totalRAMBytes uint64) []sysctlBound {
 	return nil
 }
 
-func applyLowMemSysctls(procSysRoot, sysctlConfPath string, totalRAMBytes uint64) []string {
+func parseActiveSysctlKeys(path string) map[string]bool {
+	out := make(map[string]bool)
+	if strings.TrimSpace(path) == "" {
+		return out
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return out
+	}
+	for line := range strings.SplitSeq(string(raw), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, ";") {
+			continue
+		}
+		if k, v, ok := strings.Cut(trimmed, "="); ok {
+			key := strings.TrimSpace(k)
+			val := strings.TrimSpace(v)
+			if key != "" && val != "" {
+				out[key] = true
+			}
+		}
+	}
+	return out
+}
+
+func applyLowMemSysctls(procSysRoot, sysctlConfPath, userSysctlConfPath string, totalRAMBytes uint64) []string {
 	bounds := desiredLowMemSysctls(totalRAMBytes)
 	if len(bounds) == 0 || strings.TrimSpace(procSysRoot) == "" {
 		return nil
 	}
+	// 尊重用户在 /etc/sysctl.conf 中显式配置的键（例如 WebUI 高并发底盘调优扩容的 nf_conntrack_max），绝不静默回压覆盖
+	userOverrides := parseActiveSysctlKeys(userSysctlConfPath)
 	var updated []string
 	var persistLines []string
 	persistLines = append(persistLines, "# Managed by singctl adaptive low-memory host tuner")
 
 	for _, b := range bounds {
+		if userOverrides[b.key] {
+			continue
+		}
 		targetStr := strconv.FormatInt(b.target, 10)
 		persistLines = append(persistLines, fmt.Sprintf("%s = %s", b.key, targetStr))
 		p := filepath.Join(procSysRoot, filepath.FromSlash(b.relPath))
@@ -245,7 +277,7 @@ func ReconcileLowMemHost(ctx context.Context, deps LowMemHostTuneDeps) LowMemHos
 
 	// 2~3. 仅小内存宿主机（<= 512 MiB）：内核 sysctl 稳态护栏 + OpenWrt zram/logd/冗余 web 收敛
 	if sysinfo.IsLowMemoryRAM(deps.TotalRAMBytes) {
-		res.SysctlUpdatedKeys = applyLowMemSysctls(deps.ProcSysRoot, deps.SysctlConfPath, deps.TotalRAMBytes)
+		res.SysctlUpdatedKeys = applyLowMemSysctls(deps.ProcSysRoot, deps.SysctlConfPath, deps.UserSysctlConfPath, deps.TotalRAMBytes)
 
 		if deps.IsOpenWrt {
 			uciCommitted := false
@@ -355,6 +387,7 @@ func ReconcileLowMemHostDefault(ctx context.Context, webEmbedded bool) LowMemHos
 		TmpDir:              cmp.Or(defaultTempDir(), "/tmp"),
 		ProcSysRoot:         "/proc/sys",
 		SysctlConfPath:      defaultLowMemSysctl,
+		UserSysctlConfPath:  defaultUserSysctl,
 		ZramCompAlgoPath:    "/sys/block/zram0/comp_algorithm",
 		TailscaleInitdPath:  constant.TailscaleInitdScript,
 		TailscaleSystemd:    constant.TailscaleSystemdService,

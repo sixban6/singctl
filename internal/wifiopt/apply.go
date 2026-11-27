@@ -75,6 +75,9 @@ func (s *Service) CommitWithoutReload(ctx context.Context, req ApplyRequest) (*A
 		return nil, nil, err
 	}
 
+	if changes == nil {
+		changes = []OptimizationStep{}
+	}
 	if req.DryRun || len(ops) == 0 {
 		summary := "当前配置已是推荐状态，无需修改。"
 		if len(changes) > 0 {
@@ -135,6 +138,8 @@ func (s *Service) ExecutePreparedReload(ctx context.Context, prep *PreparedReloa
 		s.rollbackWirelessFile(ctx, prep.origWireless, prep.haveOrig)
 		return waitMs, ErrBridgeVerifyFailed
 	}
+	// 无线优化并网桥就绪后立即重置错包/丢包统计基准，确保页面反映优化后的真实无线质量而非开机历史累计值
+	s.recordStatsBaseline("post_optimize")
 	return waitMs, nil
 }
 

@@ -16,6 +16,7 @@ import { WifiRadioInfo, WifiRadioPatch, WifiSSIDInfo } from '../../../types';
 interface WifiRadioCardsProps {
   radios: WifiRadioInfo[];
   ssids: WifiSSIDInfo[];
+  statsScope?: string;
   busy: boolean;
   recommended2gCh?: number;
   recommended5gCh?: number;
@@ -29,6 +30,7 @@ const CHANNELS_5G = ['auto', '36', '40', '44', '48', '149', '153', '157', '161',
 export const WifiRadioCards: React.FC<WifiRadioCardsProps> = ({
   radios,
   ssids,
+  statsScope,
   busy,
   recommended2gCh,
   recommended5gCh,
@@ -130,13 +132,21 @@ export const WifiRadioCards: React.FC<WifiRadioCardsProps> = ({
                   {r.disabled ? '-' : r.txPowerDbm ? `${r.txPowerDbm} dBm` : `${r.txPowerPct}%`}
                 </div>
               </div>
-              <div className="rounded-xl bg-white/[0.03] border border-white/10 p-2.5">
-                <div className="text-secondary text-[11px]">在线 / 错包率</div>
-                <div className="mt-1 font-mono font-semibold flex items-center gap-1.5">
+              <div
+                className="rounded-xl bg-white/[0.03] border border-white/10 p-2.5"
+                title={`收包 ${r.rxPackets.toLocaleString()} / 发包 ${(r.txPackets ?? 0).toLocaleString()}；真实丢包 ${(r.rxDropped ?? 0) + (r.txDropped ?? 0)}；空口 PHY 错帧 ${r.rxErrors.toLocaleString()} (${r.rxErrorRatePct.toFixed(1)}%)`}
+              >
+                <div className="text-secondary text-[11px]">
+                  在线 / {statsScope && statsScope !== 'boot' ? '实测丢包' : '丢包率'}
+                </div>
+                <div className="mt-1 font-mono font-semibold flex items-center gap-1.5 flex-wrap">
                   <span className="text-primary">{r.clientCount} 台</span>
-                  <span className={r.rxErrorRatePct >= 5 ? 'text-amber-300' : 'text-emerald-300'}>
-                    ({r.rxErrorRatePct.toFixed(1)}%)
+                  <span className={(r.packetLossRatePct ?? 0) >= 1 ? 'text-amber-300' : 'text-emerald-300'}>
+                    {(r.packetLossRatePct ?? 0).toFixed(2)}%
                   </span>
+                </div>
+                <div className="text-[10px] font-mono text-secondary mt-0.5">
+                  空口错帧 {r.rxErrorRatePct.toFixed(1)}%
                 </div>
               </div>
             </div>

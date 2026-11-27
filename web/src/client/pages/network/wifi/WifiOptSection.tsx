@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import {
+  Activity,
   AlertTriangle,
   CheckCircle2,
   Info,
@@ -50,6 +51,7 @@ export const WifiOptSection: React.FC<WifiOptSectionProps> = ({
 
   const [scanResult, setScanResult] = useState<WifiScanResult | null>(null);
   const [scanning, setScanning] = useState(false);
+  const [retesting, setRetesting] = useState(false);
   const [applying, setApplying] = useState(false);
   const [chassisBusy, setChassisBusy] = useState(false);
 
@@ -57,7 +59,7 @@ export const WifiOptSection: React.FC<WifiOptSectionProps> = ({
   const [pendingChanges, setPendingChanges] = useState<WifiOptimizationStep[]>([]);
   const [pendingTitle, setPendingTitle] = useState('');
 
-  const allBusy = busy || applying || scanning || chassisBusy;
+  const allBusy = busy || applying || scanning || retesting || chassisBusy;
 
   const scoreTone = useMemo(() => {
     const lv = overview?.healthLevel;
@@ -88,16 +90,56 @@ export const WifiOptSection: React.FC<WifiOptSectionProps> = ({
     }
   };
 
-  const openApplyPreview = async (title: string, req: WifiApplyRequest) => {
+  const handleRetestStats = async () => {
+    setRetesting(true);
+    try {
+      const fresh = await clientApi.retestWifiStats();
+      setData(fresh);
+      success('已重置计数基准并完成 3 秒实时丢包/错帧采样');
+    } catch (err: unknown) {
+      toastError(err instanceof Error ? err.message : '重测实时丢包率失败');
+    } finally {
+      setRetesting(false);
+    }
+  };
+
+  const openApplyPreview = async (
+    title: string,
+    req: WifiApplyRequest,
+    options?: { autoScanIfNeeded?: boolean },
+  ) => {
     setApplying(true);
     try {
-      const preview = await clientApi.applyWifiOptimize({ ...req, dryRun: true });
+      let effectiveReq = req;
+      const shouldAutoScan =
+        Boolean(options?.autoScanIfNeeded) &&
+        (!scanResult || Date.now() / 1000 - scanResult.scannedAt > 300);
+
+      if (shouldAutoScan) {
+        toast('正在自动扫描周边信道干扰以优选最佳信道，请稍候…', 'info');
+        setScanning(true);
+        try {
+          const freshScan = await clientApi.scanWifiChannels();
+          setScanResult(freshScan);
+          effectiveReq = {
+            ...req,
+            recommended2gChannel: req.recommended2gChannel ?? freshScan.recommended2gChannel,
+            recommended5gChannel: req.recommended5gChannel ?? freshScan.recommended5gChannel,
+          };
+        } catch {
+          // 扫描失败不阻断优化流程，平滑回退默认正交/非 DFS 信道
+        } finally {
+          setScanning(false);
+        }
+      }
+
+      const preview = await clientApi.applyWifiOptimize({ ...effectiveReq, dryRun: true });
       if (!preview.changes || preview.changes.length === 0) {
         toast(preview.summary || '当前配置已是最优状态，无需修改', 'info');
         return;
       }
       setPendingTitle(title);
-      setPendingReq(req);
+      setPendingReq(effectiveReq);
       setPendingChanges(preview.changes);
     } catch (err: unknown) {
       toastError(err instanceof Error ? err.message : '生成无线优化预览失败');
@@ -127,7 +169,10 @@ export const WifiOptSection: React.FC<WifiOptSectionProps> = ({
           `无线配置已提交，正在平滑重载（约 8 秒瞬断）。已启动 ${res.safeCommitTtlSec || 180} 秒防失联倒计时，重连后请点顶部「确认生效」`,
         );
         window.setTimeout(() => {
-          void refetch(true);
+          void clientApi
+            .getWifiOverview(true)
+            .then((fresh) => setData(fresh))
+            .catch(() => void refetch(true));
           onRefreshStatus?.();
         }, 12000);
       } else {
@@ -185,6 +230,20 @@ export const WifiOptSection: React.FC<WifiOptSectionProps> = ({
 
   if (!overview) return null;
 
+  const radios = overview.radios ?? [];
+  const ssids = overview.ssids ?? [];
+  const clients = overview.clients ?? [];
+  const diagnostics = overview.diagnostics ?? [];
+  const autoPlan = overview.autoOptimizePlan ?? [];
+
+  const statsScopeText = (() => {
+    const win = overview.statsWindowSec ?? 0;
+    const winLabel = win >= 60 ? `${Math.floor(win / 60)}分${win % 60}秒` : `${win}秒`;
+    if (overview.statsScope === 'post_optimize') return `优化后实时 (${winLabel})`;
+    if (overview.statsScope === 'retest') return `重测实时 (${winLabel})`;
+    return '自开机累计';
+  })();
+
   return (
     <div className="space-y-4">
       {!overview.supported ? (
@@ -233,6 +292,9 @@ export const WifiOptSection: React.FC<WifiOptSectionProps> = ({
                     <ShieldCheck className="w-3 h-3 mr-1 inline" />
                     双重防断网自动回滚保护
                   </Badge>
+                  <Badge tone={overview.statsScope && overview.statsScope !== 'boot' ? 'accent' : 'neutral'}>
+                    统计：{statsScopeText}
+                  </Badge>
                 </div>
                 <p className="text-xs text-secondary leading-relaxed">{overview.healthSummary}</p>
               </div>
@@ -252,6 +314,16 @@ export const WifiOptSection: React.FC<WifiOptSectionProps> = ({
               <Button
                 size="sm"
                 variant="secondary"
+                loading={retesting}
+                disabled={allBusy}
+                icon={<Activity className="w-3.5 h-3.5" />}
+                onClick={() => void handleRetestStats()}
+              >
+                重测丢包率
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
                 loading={scanning}
                 disabled={allBusy}
                 icon={<Radar className="w-3.5 h-3.5" />}
@@ -263,26 +335,30 @@ export const WifiOptSection: React.FC<WifiOptSectionProps> = ({
                 size="sm"
                 variant="primary"
                 loading={applying}
-                disabled={allBusy || overview.autoOptimizePlan.length === 0}
+                disabled={allBusy || autoPlan.length === 0}
                 icon={<Sparkles className="w-3.5 h-3.5" />}
                 onClick={() =>
-                  void openApplyPreview('一键全自动无线优化', {
-                    action: 'auto_optimize',
-                    recommended2gChannel: scanResult?.recommended2gChannel,
-                    recommended5gChannel: scanResult?.recommended5gChannel,
-                  })
+                  void openApplyPreview(
+                    '一键全自动无线优化',
+                    {
+                      action: 'auto_optimize',
+                      recommended2gChannel: scanResult?.recommended2gChannel,
+                      recommended5gChannel: scanResult?.recommended5gChannel,
+                    },
+                    { autoScanIfNeeded: true },
+                  )
                 }
               >
-                {overview.autoOptimizePlan.length > 0
-                  ? `一键全自动优化 (${overview.autoOptimizePlan.length} 项)`
+                {autoPlan.length > 0
+                  ? `一键全自动优化 (${autoPlan.length} 项)`
                   : '已处于推荐最优'}
               </Button>
             </div>
           </div>
 
-          {overview.diagnostics.length > 0 && (
+          {diagnostics.length > 0 && (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              {overview.diagnostics.map((d) => (
+              {diagnostics.map((d) => (
                 <div
                   key={d.id}
                   className={`rounded-xl border p-3.5 flex items-start gap-2.5 text-xs ${
@@ -314,17 +390,22 @@ export const WifiOptSection: React.FC<WifiOptSectionProps> = ({
           )}
 
           <WifiRadioCards
-            radios={overview.radios}
-            ssids={overview.ssids}
+            radios={radios}
+            ssids={ssids}
+            statsScope={overview.statsScope}
             busy={allBusy}
             recommended2gCh={scanResult?.recommended2gChannel}
             recommended5gCh={scanResult?.recommended5gChannel}
             onDualBandMerge={(section, ssid) =>
-              void openApplyPreview(`将「${ssid}」升级为双频合一`, {
-                action: 'dual_band_merge',
-                sourceSection: section,
-                recommended5gChannel: scanResult?.recommended5gChannel,
-              })
+              void openApplyPreview(
+                `将「${ssid}」升级为双频合一`,
+                {
+                  action: 'dual_band_merge',
+                  sourceSection: section,
+                  recommended5gChannel: scanResult?.recommended5gChannel,
+                },
+                { autoScanIfNeeded: true },
+              )
             }
             onTuneRadio={(patch: WifiRadioPatch) =>
               void openApplyPreview(`微调射频 ${patch.device}`, {
@@ -340,17 +421,17 @@ export const WifiOptSection: React.FC<WifiOptSectionProps> = ({
             busy={allBusy}
             onScan={() => void handleScan()}
             onApplyRecommended={(ch2g, ch5g) => {
-              const radios: WifiRadioPatch[] = [];
-              for (const r of overview.radios) {
+              const targetRadios: WifiRadioPatch[] = [];
+              for (const r of radios) {
                 if (r.band === '2g' && !r.disabled && ch2g) {
-                  radios.push({ device: r.device, channel: String(ch2g), htmode: 'HE20' });
+                  targetRadios.push({ device: r.device, channel: String(ch2g), htmode: 'HE20' });
                 }
                 if (r.band === '5g' && !r.disabled && ch5g) {
-                  radios.push({ device: r.device, channel: String(ch5g), htmode: 'HE80' });
+                  targetRadios.push({ device: r.device, channel: String(ch5g), htmode: 'HE80' });
                 }
               }
-              if (radios.length > 0) {
-                void openApplyPreview('一键切换至扫描推荐最优信道', { action: 'tune_radio', radios });
+              if (targetRadios.length > 0) {
+                void openApplyPreview('一键切换至扫描推荐最优信道', { action: 'tune_radio', radios: targetRadios });
               }
             }}
           />
@@ -358,7 +439,7 @@ export const WifiOptSection: React.FC<WifiOptSectionProps> = ({
       )}
 
       <WifiClientsAndChassis
-        clients={overview.clients}
+        clients={clients}
         chassis={overview.chassis}
         privacyMask={privacyMask}
         busy={allBusy}

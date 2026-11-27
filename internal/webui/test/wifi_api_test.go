@@ -191,6 +191,11 @@ func TestWifiAPI_AuthGuardOverviewScanApplyAndChassis(t *testing.T) {
 		if rec.Code != http.StatusUnauthorized {
 			t.Fatalf("expected 401, got %d", rec.Code)
 		}
+		rec2 := httptest.NewRecorder()
+		srv.Mux.ServeHTTP(rec2, httptest.NewRequest(http.MethodPost, "/api/wifi/retest", bytes.NewBufferString(`{}`)))
+		if rec2.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 on POST /api/wifi/retest, got %d", rec2.Code)
+		}
 	})
 
 	t.Run("overview_scan_dryrun_apply_safecommit_and_chassis", func(t *testing.T) {
@@ -286,6 +291,36 @@ func TestWifiAPI_AuthGuardOverviewScanApplyAndChassis(t *testing.T) {
 		}
 		if !chResp.OK || !chResp.Chassis.Optimal {
 			t.Fatalf("expected optimal chassis, got %+v", chResp)
+		}
+
+		// 7. POST /api/wifi/retest resets stats baseline and returns fresh overview with statsScope="retest"
+		reqRetest := httptest.NewRequest(http.MethodPost, "/api/wifi/retest", bytes.NewBufferString(`{}`))
+		reqRetest.Header.Set("Content-Type", "application/json")
+		rec = httptest.NewRecorder()
+		srv.Mux.ServeHTTP(rec, reqRetest)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("POST /api/wifi/retest status=%d body=%s", rec.Code, rec.Body.String())
+		}
+		var retestOv wifiopt.Overview
+		if err := json.Unmarshal(rec.Body.Bytes(), &retestOv); err != nil {
+			t.Fatalf("decode retest overview: %v", err)
+		}
+		if !retestOv.Supported || retestOv.StatsScope != "retest" {
+			t.Fatalf("expected retest overview with statsScope='retest', got %+v", retestOv)
+		}
+
+		// Subsequent GET /api/wifi/overview must retain the same retest baseline across requests!
+		rec = httptest.NewRecorder()
+		srv.Mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/wifi/overview?fresh=1", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /api/wifi/overview after retest status=%d", rec.Code)
+		}
+		var afterOv wifiopt.Overview
+		if err := json.Unmarshal(rec.Body.Bytes(), &afterOv); err != nil {
+			t.Fatalf("decode overview after retest: %v", err)
+		}
+		if afterOv.StatsScope != "retest" {
+			t.Fatalf("expected persistent statsScope='retest' across requests, got %q", afterOv.StatsScope)
 		}
 	})
 

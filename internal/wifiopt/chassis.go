@@ -88,7 +88,7 @@ func (s *Service) ApplyChassis(ctx context.Context, req ChassisApplyRequest) (*C
 	}
 
 	cur := s.InspectChassis(ctx)
-	var actions []string
+	actions := []string{}
 
 	if req.EnableRPS && cur.CPUCores > 1 && len(cur.RPSInterfaces) > 0 {
 		targetMask := fullCPUMaskHex(cur.CPUCores)
@@ -97,6 +97,13 @@ func (s *Service) ApplyChassis(ctx context.Context, req ChassisApplyRequest) (*C
 			p := fmt.Sprintf("/sys/class/net/%s/queues/rx-0/rps_cpus", item.Interface)
 			if err := s.writeSysfs(p, []byte(targetMask+"\n")); err != nil {
 				return nil, fmt.Errorf("写入 %s 失败: %w", p, err)
+			}
+			// 写后回读校验：若内核驱动静默忽略或钳制 rps_cpus，立刻显式报错，杜绝“前端假成功、刷新后还原”
+			if rb, rbErr := s.readFile(p); rbErr == nil {
+				gotMask := strings.TrimSpace(string(rb))
+				if !masksEqual(gotMask, targetMask) {
+					return nil, fmt.Errorf("内核未接受 %s 的 RPS 掩码（写入 %s，回读仍为 %s）", item.Interface, targetMask, gotMask)
+				}
 			}
 			rcLines = append(rcLines, fmt.Sprintf("[ -w %s ] && echo %s > %s", p, targetMask, p))
 			actions = append(actions, fmt.Sprintf("RPS %s: %s -> %s", item.Interface, item.CurrentMask, targetMask))
@@ -117,9 +124,17 @@ func (s *Service) ApplyChassis(ctx context.Context, req ChassisApplyRequest) (*C
 		if _, err := s.runCmd(ctx, "sysctl", "-w", fmt.Sprintf("net.netfilter.nf_conntrack_max=%d", target)); err != nil {
 			return nil, fmt.Errorf("应用 nf_conntrack_max 失败: %w", err)
 		}
+		// 写后回读校验：确认内核实际生效，避免静默未生效
+		if rb, rbErr := s.readFile("/proc/sys/net/netfilter/nf_conntrack_max"); rbErr == nil {
+			if actual := parseInt(string(rb)); actual > 0 && actual < target {
+				return nil, fmt.Errorf("内核未接受 nf_conntrack_max=%d（当前回读仍为 %d）", target, actual)
+			}
+		}
 		if err := s.persistSysctlKey("net.netfilter.nf_conntrack_max", strconv.Itoa(target)); err != nil {
 			return nil, fmt.Errorf("持久化 sysctl 失败: %w", err)
 		}
+		// 同步清理 /etc/sysctl.d/99-singctl-lowmem.conf 中的旧低内存上限，防止重启或守护进程拉起后回压覆盖
+		_ = s.stripConflictingSysctlKey(s.lowMemSysctlFile(), "net.netfilter.nf_conntrack_max")
 		actions = append(actions, fmt.Sprintf("nf_conntrack_max: %d -> %d", cur.ConntrackMax, target))
 	}
 
@@ -169,11 +184,21 @@ func fullCPUMaskHex(cores int) string {
 	return strconv.FormatUint((uint64(1)<<uint(cores))-1, 16)
 }
 
+func normalizeHexMask(raw string) string {
+	s := strings.ReplaceAll(strings.TrimSpace(raw), ",", "")
+	s = strings.TrimLeft(s, "0")
+	if s == "" {
+		return "0"
+	}
+	return strings.ToLower(s)
+}
+
 func masksEqual(a, b string) bool {
-	ua, errA := strconv.ParseUint(strings.TrimLeft(strings.TrimSpace(a), "0"), 16, 64)
-	ub, errB := strconv.ParseUint(strings.TrimLeft(strings.TrimSpace(b), "0"), 16, 64)
+	na, nb := normalizeHexMask(a), normalizeHexMask(b)
+	ua, errA := strconv.ParseUint(na, 16, 64)
+	ub, errB := strconv.ParseUint(nb, 16, 64)
 	if errA != nil || errB != nil {
-		return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
+		return strings.EqualFold(na, nb)
 	}
 	return ua == ub
 }
@@ -220,7 +245,8 @@ func (s *Service) persistRCLocalRPS(lines []string) error {
 	merged = append(merged, kept[:insertAt]...)
 	merged = append(merged, block...)
 	merged = append(merged, kept[insertAt:]...)
-	return s.writeFile0600(s.rcLocalFile(), []byte(strings.Join(merged, "\n")+"\n"))
+	// /etc/rc.local 必须保持 0755 可执行权限，兼容 OpenWrt 与 systemd rc-local.service
+	return s.writeSystemFile(s.rcLocalFile(), []byte(strings.Join(merged, "\n")+"\n"), 0755)
 }
 
 func (s *Service) persistSysctlKey(key, val string) error {
@@ -241,5 +267,31 @@ func (s *Service) persistSysctlKey(key, val string) error {
 	if !replaced {
 		out = append(out, key+"="+val)
 	}
-	return s.writeFile0600(s.sysctlFile(), []byte(strings.Join(out, "\n")+"\n"))
+	return s.writeSystemFile(s.sysctlFile(), []byte(strings.Join(out, "\n")+"\n"), 0644)
+}
+
+func (s *Service) stripConflictingSysctlKey(path, key string) error {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	origBytes, err := s.readFile(path)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	changed := false
+	for line := range strings.SplitSeq(strings.TrimRight(string(origBytes), "\n"), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "#") && !strings.HasPrefix(trimmed, ";") {
+			if k, _, ok := strings.Cut(trimmed, "="); ok && strings.TrimSpace(k) == key {
+				changed = true
+				continue
+			}
+		}
+		out = append(out, line)
+	}
+	if !changed {
+		return nil
+	}
+	return s.writeSystemFile(path, []byte(strings.Join(out, "\n")+"\n"), 0644)
 }

@@ -26,7 +26,11 @@ export interface WifiRadioInfo {
   clientCount: number;
   rxPackets: number;
   rxErrors: number;
+  rxDropped: number;
+  txPackets: number;
+  txDropped: number;
   rxErrorRatePct: number;
+  packetLossRatePct: number;
 }
 
 export interface WifiSSIDInfo {
@@ -45,7 +49,11 @@ export interface WifiSSIDInfo {
   clientCount: number;
   rxPackets: number;
   rxErrors: number;
+  rxDropped: number;
+  txPackets: number;
+  txDropped: number;
   rxErrorRatePct: number;
+  packetLossRatePct: number;
   dualBandPaired: boolean;
   canUpgradeDualBand: boolean;
 }
@@ -139,6 +147,9 @@ export interface WifiOverview {
   autoOptimizePlan: WifiOptimizationStep[];
   chassis: WifiChassisStatus;
   sampledAt: number;
+  statsScope?: 'boot' | 'post_optimize' | 'retest' | string;
+  statsBaselineAt?: number;
+  statsWindowSec?: number;
 }
 
 export interface WifiRadioPatch {

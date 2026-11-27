@@ -131,8 +131,8 @@ export const WifiChannelChart: React.FC<WifiChannelChartProps> = ({
         </div>
       ) : (
         <div className="space-y-4">
-          {scan.channels2g.length > 0 && <ChannelBars title="2.4 GHz 频段（仅 1 / 6 / 11 正交无重叠）" items={scan.channels2g} />}
-          {scan.channels5g.length > 0 && <ChannelBars title="5 GHz 频段（优先非 DFS 高功率信道）" items={scan.channels5g} />}
+          {(scan.channels2g?.length ?? 0) > 0 && <ChannelBars title="2.4 GHz 频段（仅 1 / 6 / 11 正交无重叠）" items={scan.channels2g} />}
+          {(scan.channels5g?.length ?? 0) > 0 && <ChannelBars title="5 GHz 频段（优先非 DFS 高功率信道）" items={scan.channels5g} />}
           {scan.warnings && scan.warnings.length > 0 && (
             <div className="text-[11px] text-amber-300/90 space-y-0.5">
               {scan.warnings.map((w, i) => (

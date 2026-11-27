@@ -227,3 +227,75 @@ func TestLowMemHostTune_UniversalReconcileAndSafetyGuards(t *testing.T) {
 		t.Fatalf("expected zero-op on unknown RAM=0, got %+v", zeroRes)
 	}
 }
+
+func TestLowMemHostTune_RespectsUserSysctlConntrackOverride(t *testing.T) {
+	const mib = 1024 * 1024
+	root := t.TempDir()
+	procSysDir := filepath.Join(root, "proc", "sys")
+	sysctlDir := filepath.Join(root, "etc", "sysctl.d")
+	userSysctl := filepath.Join(root, "etc", "sysctl.conf")
+	lowMemSysctl := filepath.Join(sysctlDir, "99-singctl-lowmem.conf")
+
+	for _, d := range []string{
+		filepath.Join(procSysDir, "net", "netfilter"),
+		filepath.Join(procSysDir, "vm"),
+		sysctlDir,
+	} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Simulate n60pro (479 MiB <= 512 MiB) where user expanded nf_conntrack_max to 65536 via Chassis UI
+	// while an older 99-singctl-lowmem.conf still had net.netfilter.nf_conntrack_max = 32768.
+	_ = os.WriteFile(filepath.Join(procSysDir, "net", "netfilter", "nf_conntrack_max"), []byte("65536\n"), 0644)
+	_ = os.WriteFile(filepath.Join(procSysDir, "vm", "vfs_cache_pressure"), []byte("100\n"), 0644)
+	_ = os.WriteFile(userSysctl, []byte("net.ipv4.tcp_congestion_control=bbr\nnet.netfilter.nf_conntrack_max=65536\n"), 0644)
+	_ = os.WriteFile(lowMemSysctl, []byte("# Managed by singctl adaptive low-memory host tuner\nnet.netfilter.nf_conntrack_max = 32768\nvm.vfs_cache_pressure = 125\n"), 0644)
+
+	res := daemon.ReconcileLowMemHost(t.Context(), daemon.LowMemHostTuneDeps{
+		TotalRAMBytes:      479 * mib,
+		IsOpenWrt:          true,
+		ProcSysRoot:        procSysDir,
+		SysctlConfPath:     lowMemSysctl,
+		UserSysctlConfPath: userSysctl,
+	})
+
+	// Must NOT clamp nf_conntrack_max back down to 32768!
+	gotCT, err := os.ReadFile(filepath.Join(procSysDir, "net", "netfilter", "nf_conntrack_max"))
+	if err != nil || strings.TrimSpace(string(gotCT)) != "65536" {
+		t.Fatalf("ReconcileLowMemHost overwrote user nf_conntrack_max: got=%q err=%v want=65536", strings.TrimSpace(string(gotCT)), err)
+	}
+	// Must STILL tune vm.vfs_cache_pressure to 125.
+	gotVFS, err := os.ReadFile(filepath.Join(procSysDir, "vm", "vfs_cache_pressure"))
+	if err != nil || strings.TrimSpace(string(gotVFS)) != "125" {
+		t.Fatalf("expected vm.vfs_cache_pressure=125, got=%q err=%v", strings.TrimSpace(string(gotVFS)), err)
+	}
+	// Must drop conflicting nf_conntrack_max line from 99-singctl-lowmem.conf!
+	lowRaw, err := os.ReadFile(lowMemSysctl)
+	if err != nil {
+		t.Fatalf("read lowmem sysctl: %v", err)
+	}
+	if strings.Contains(string(lowRaw), "nf_conntrack_max") {
+		t.Fatalf("99-singctl-lowmem.conf must omit nf_conntrack_max when overridden in /etc/sysctl.conf; got:\n%s", string(lowRaw))
+	}
+	if !strings.Contains(string(lowRaw), "vm.vfs_cache_pressure = 125") {
+		t.Fatalf("99-singctl-lowmem.conf must keep vm.vfs_cache_pressure; got:\n%s", string(lowRaw))
+	}
+	_ = res
+
+	// Commented-out override in /etc/sysctl.conf must NOT suppress default lowmem cap.
+	_ = os.WriteFile(userSysctl, []byte("# net.netfilter.nf_conntrack_max=65536\n"), 0644)
+	_ = os.WriteFile(filepath.Join(procSysDir, "net", "netfilter", "nf_conntrack_max"), []byte("65536\n"), 0644)
+	daemon.ReconcileLowMemHost(t.Context(), daemon.LowMemHostTuneDeps{
+		TotalRAMBytes:      479 * mib,
+		IsOpenWrt:          true,
+		ProcSysRoot:        procSysDir,
+		SysctlConfPath:     lowMemSysctl,
+		UserSysctlConfPath: userSysctl,
+	})
+	gotCT2, _ := os.ReadFile(filepath.Join(procSysDir, "net", "netfilter", "nf_conntrack_max"))
+	if strings.TrimSpace(string(gotCT2)) != "32768" {
+		t.Fatalf("commented-out user sysctl should not block lowmem cap: got=%q want=32768", strings.TrimSpace(string(gotCT2)))
+	}
+}

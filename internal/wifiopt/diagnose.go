@@ -154,16 +154,64 @@ func rule5GDFSChannel(ov *Overview, _ *probeState) {
 	}
 }
 
-func ruleHighRxErrorRate(ov *Overview, _ *probeState) {
+func statsScopeLabel(scope string) string {
+	switch scope {
+	case "post_optimize":
+		return "优化后实测"
+	case "retest":
+		return "重测实时"
+	default:
+		return "自开机累计"
+	}
+}
+
+func ruleHighRxErrorRate(ov *Overview, st *probeState) {
+	isMTWifi := st != nil && st.Driver == "mtwifi"
+	scopeLabel := statsScopeLabel(ov.StatsScope)
 	for _, r := range ov.Radios {
-		if !r.Disabled && r.RxPackets >= 500 && r.RxErrorRatePct >= 5.0 {
+		if r.Disabled {
+			continue
+		}
+		// 1. 真实接口丢包率（rx_dropped + tx_dropped + tx_errors）：>= 1% 才代表客户端实际掉包
+		totalPkts := r.RxPackets + r.TxPackets
+		if totalPkts >= 500 && r.PacketLossRatePct >= 1.0 {
+			ov.Diagnostics = append(ov.Diagnostics, DiagnosisItem{
+				ID:         "pkt_loss_high_" + r.Band,
+				Severity:   "warn",
+				Band:       r.Band,
+				Title:      fmt.Sprintf("%s 射频%s丢包率偏高（%.2f%%）", strings.ToUpper(r.Band), scopeLabel, r.PacketLossRatePct),
+				Detail:     fmt.Sprintf("收发共 %d 包中出现 %d 个丢包（RX 丢包 %d / TX 丢包 %d），可能导致视频卡顿或游戏跳 Ping。", totalPkts, r.RxDropped+r.TxDropped, r.RxDropped, r.TxDropped),
+				ActionHint: "建议扫描周边干扰并切换更干净信道，同时开启下方多核 RPS 底盘加速。",
+				AutoFix:    false,
+			})
+		}
+
+		// 2. 空口 RX 错帧率（PHY/CRC 错帧）
+		if r.RxPackets >= 500 && r.RxErrorRatePct >= 5.0 {
+			// MediaTek mtwifi 2.4G 主射频的 rx_errs 计入周边 2.4G 背景底噪帧（邻居/蓝牙/微波炉），不代表已连设备丢包。
+			if isMTWifi && r.Band == "2g" && !r.OverlappingCh && !strings.Contains(strings.ToUpper(r.HTMode), "40") {
+				ov.Diagnostics = append(ov.Diagnostics, DiagnosisItem{
+					ID:         "rx_err_env_" + r.Band,
+					Severity:   "info",
+					Band:       r.Band,
+					Title:      fmt.Sprintf("2.4G 周边空口底噪计数较高（%s %.1f%%，实际丢包 %.2f%%）", scopeLabel, r.RxErrorRatePct, r.PacketLossRatePct),
+					Detail:     "注：MTK 驱动把周边 2.4G 蓝牙/邻居背景干扰帧计入空口错帧，不等于已连设备掉包；当前已锁定正交信道与 20MHz 最佳抗干扰配置。",
+					ActionHint: "可点击「重测丢包率」查看当前实时采样，或点击「扫描周边干扰」确认最干净信道。",
+					AutoFix:    false,
+				})
+				continue
+			}
+			// MediaTek mtwifi 5G 已处于非 DFS 信道且实际丢包率 < 1% 时，轻度空口背景 CRC（< 15%）不误报「待优化」
+			if isMTWifi && r.Band == "5g" && !r.DFSChannel && r.PacketLossRatePct < 1.0 && r.RxErrorRatePct < 15.0 {
+				continue
+			}
 			ov.Diagnostics = append(ov.Diagnostics, DiagnosisItem{
 				ID:         "rx_err_high_" + r.Band,
 				Severity:   "warn",
 				Band:       r.Band,
-				Title:      fmt.Sprintf("%s 射频累计 RX 错包率偏高（%.1f%%）", strings.ToUpper(r.Band), r.RxErrorRatePct),
-				Detail:     fmt.Sprintf("收包 %d 中出现 %d 个错包，通常由邻频干扰或弱信号边缘设备引起。", r.RxPackets, r.RxErrors),
-				ActionHint: "扫描并切换至更干净的正交信道。",
+				Title:      fmt.Sprintf("%s 射频%s空口 RX 错帧率偏高（%.1f%%）", strings.ToUpper(r.Band), scopeLabel, r.RxErrorRatePct),
+				Detail:     fmt.Sprintf("收包 %d 中出现 %d 个错帧（实际接口丢包率 %.2f%%），通常由邻频干扰或弱信号边缘设备引起。", r.RxPackets, r.RxErrors, r.PacketLossRatePct),
+				ActionHint: "扫描并切换至更干净的正交/非 DFS 信道，再点击「重测丢包率」复核。",
 				AutoFix:    false,
 			})
 		}
@@ -182,14 +230,18 @@ func ruleWeakClients(ov *Overview, _ *probeState) {
 			ID:         "weak_clients_present",
 			Severity:   "info",
 			Title:      fmt.Sprintf("当前有 %d 台弱信号/低速无线终端", weak),
-			Detail:     "弱信号设备（≤ -82 dBm 或协商速率 < 30 Mbps）容易占用更多空口时间，建议近处主力设备优先连 5G 隔离影响。",
+			Detail:     "弱信号设备（≤ -82 dBm，或 ≤ -76 dBm 且协商速率 < 30 Mbps）容易占用更多空口时间，建议近处主力设备优先连 5G 隔离影响。",
 			ActionHint: "保持双频合一 + 2.4G HE20 干净信道即可将影响降到最低。",
 			AutoFix:    false,
 		})
 	}
 }
 
-func ruleIEEE80211kHint(ov *Overview, _ *probeState) {
+func ruleIEEE80211kHint(ov *Overview, st *probeState) {
+	if st != nil && st.Driver == "mtwifi" {
+		// MediaTek mtwifi 驱动默认在 .dat 中已启用 RRMEnable=1（802.11k），无需冗余提醒
+		return
+	}
 	missing := false
 	for _, s := range ov.SSIDs {
 		if !s.Disabled && !s.Isolate && !s.IEEE80211k {
@@ -204,7 +256,7 @@ func ruleIEEE80211kHint(ov *Overview, _ *probeState) {
 			Title:      "尚未显式启用 802.11k 邻居报告",
 			Detail:     "开启 802.11k 可帮助手机/平板更快发现同 SSID 的 5G 频段并加速双频切换。",
 			ActionHint: "一键优化将自动为双频主 SSID 显式启用 802.11k。",
-			AutoFix:    true,
+			AutoFix:    false,
 		})
 	}
 }
@@ -228,7 +280,7 @@ func findRadioByBand(ov *Overview, band string) *RadioInfo {
 }
 
 func buildAutoOptimizePlan(ov *Overview, st *probeState, rec2GCh, rec5GCh int, pref5GWidth string) []OptimizationStep {
-	var steps []OptimizationStep
+	steps := []OptimizationStep{}
 	r2 := findRadioByBand(ov, "2g")
 	r5 := findRadioByBand(ov, "5g")
 

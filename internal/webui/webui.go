@@ -156,6 +156,7 @@ type Server struct {
 	safeCommitMgr     *safecommit.Manager
 	vlanApplyMu       sync.Mutex
 	wifiApplyMu       sync.Mutex
+	wifiOptSvc        *wifiopt.Service
 
 	// /api/sb/traffic 按需后台采样器（无请求 15s 自动停止）
 	trafficMu                  sync.Mutex
@@ -213,6 +214,11 @@ func New(opts Options) *Server {
 	}
 	cpuSampler.Prime()
 
+	wifiOptSvc := opts.WifiOptServiceForTest
+	if wifiOptSvc == nil {
+		wifiOptSvc = wifiopt.NewService(wifiopt.Env{})
+	}
+
 	s := &Server{
 		opts:              opts,
 		Mux:               http.NewServeMux(),
@@ -224,6 +230,7 @@ func New(opts Options) *Server {
 		smartDNSStatsRing: sdRing,
 		smartDNSTailer:    sdTailer,
 		cpuSampler:        cpuSampler,
+		wifiOptSvc:        wifiOptSvc,
 		shutdownCh:        make(chan struct{}),
 	}
 	initPW := opts.Password
@@ -437,6 +444,7 @@ func (s *Server) registerRoutes() {
 	// OpenWrt Wi-Fi 体检、按需信道干扰扫描、一键双频安全优化与高并发底盘加速 API
 	s.Mux.HandleFunc("GET /api/wifi/overview", s.guard(s.handleWifiOverviewGet))
 	s.Mux.HandleFunc("POST /api/wifi/scan", s.guard(s.handleWifiScanPost))
+	s.Mux.HandleFunc("POST /api/wifi/retest", s.guard(s.handleWifiRetestPost))
 	s.Mux.HandleFunc("POST /api/wifi/apply", s.guard(s.handleWifiApplyPost))
 	s.Mux.HandleFunc("POST /api/wifi/chassis", s.guard(s.handleWifiChassisPost))
 

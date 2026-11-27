@@ -11,17 +11,20 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"singctl/internal/common/fsx"
 )
 
 const (
-	defaultWirelessFile  = "/etc/config/wireless"
-	defaultSysctlFile    = "/etc/sysctl.conf"
-	defaultRCLocalFile   = "/etc/rc.local"
-	defaultPollInterval  = 1 * time.Second
-	defaultVerifyTimeout = 25 * time.Second
+	defaultWirelessFile     = "/etc/config/wireless"
+	defaultSysctlFile       = "/etc/sysctl.conf"
+	defaultLowMemSysctlFile = "/etc/sysctl.d/99-singctl-lowmem.conf"
+	defaultRCLocalFile      = "/etc/rc.local"
+	defaultPollInterval     = 1 * time.Second
+	defaultVerifyTimeout    = 25 * time.Second
+	defaultRetestWindow     = 3 * time.Second
 )
 
 var (
@@ -36,24 +39,32 @@ var (
 type Env struct {
 	RunCmd        func(ctx context.Context, name string, args ...string) ([]byte, error)
 	LookPath      func(file string) (string, error)
-	ReadFile      func(path string) ([]byte, error)
-	WriteFile0600 func(path string, data []byte) error
-	ReadDir       func(path string) ([]string, error)
-	Glob          func(pattern string) ([]string, error)
-	Now           func() time.Time
-	Sleep         func(ctx context.Context, d time.Duration) error
-	ReloadWifi    func(ctx context.Context) error
-	WirelessFile  string
-	SysctlFile    string
-	RCLocalFile   string
-	PollInterval  time.Duration
-	VerifyTimeout time.Duration
-	CPUCount      int
+	ReadFile         func(path string) ([]byte, error)
+	WriteFile0600    func(path string, data []byte) error
+	WriteSysfs       func(path string, data []byte) error
+	ReadDir          func(path string) ([]string, error)
+	Glob             func(pattern string) ([]string, error)
+	Now              func() time.Time
+	Sleep            func(ctx context.Context, d time.Duration) error
+	ReloadWifi       func(ctx context.Context) error
+	WirelessFile     string
+	SysctlFile       string
+	LowMemSysctlFile string
+	RCLocalFile      string
+	PollInterval     time.Duration
+	VerifyTimeout    time.Duration
+	RetestWindow     time.Duration
+	CPUCount         int
 }
 
 // Service 提供 Wi-Fi 体检、周边信道扫描、安全应用与高并发底盘加速能力。
 type Service struct {
 	env Env
+
+	statsMu         sync.Mutex
+	statsBaseline   map[string]netDevStat
+	statsBaselineAt time.Time
+	statsScope      string
 }
 
 // NewService 创建 Wi-Fi 调优领域服务（未注入字段自动回退生产默认实现）。
@@ -93,11 +104,21 @@ func (s *Service) writeFile0600(path string, data []byte) error {
 }
 
 func (s *Service) writeSysfs(path string, data []byte) error {
+	if s.env.WriteSysfs != nil {
+		return s.env.WriteSysfs(path, data)
+	}
 	if s.env.WriteFile0600 != nil {
 		return s.env.WriteFile0600(path, data)
 	}
 	// sysfs 虚拟文件不支持同目录临时文件原子 rename，必须直接写入
 	return os.WriteFile(path, data, 0644)
+}
+
+func (s *Service) writeSystemFile(path string, data []byte, perm os.FileMode) error {
+	if s.env.WriteFile0600 != nil {
+		return s.env.WriteFile0600(path, data)
+	}
+	return fsx.WriteAtomic(path, data, perm)
 }
 
 func (s *Service) glob(pattern string) ([]string, error) {
@@ -136,8 +157,19 @@ func (s *Service) sysctlFile() string {
 	return cmp.Or(strings.TrimSpace(s.env.SysctlFile), defaultSysctlFile)
 }
 
+func (s *Service) lowMemSysctlFile() string {
+	return cmp.Or(strings.TrimSpace(s.env.LowMemSysctlFile), defaultLowMemSysctlFile)
+}
+
 func (s *Service) rcLocalFile() string {
 	return cmp.Or(strings.TrimSpace(s.env.RCLocalFile), defaultRCLocalFile)
+}
+
+func (s *Service) retestWindow() time.Duration {
+	if s.env.RetestWindow > 0 {
+		return s.env.RetestWindow
+	}
+	return defaultRetestWindow
 }
 
 func (s *Service) pollInterval() time.Duration {

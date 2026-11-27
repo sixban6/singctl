@@ -56,7 +56,10 @@ func (s *Server) wifiOptService() *wifiopt.Service {
 	if s.opts.WifiOptServiceForTest != nil {
 		return s.opts.WifiOptServiceForTest
 	}
-	return wifiopt.NewService(wifiopt.Env{})
+	if s.wifiOptSvc == nil {
+		s.wifiOptSvc = wifiopt.NewService(wifiopt.Env{})
+	}
+	return s.wifiOptSvc
 }
 
 func (s *Server) invalidateWifiCache() {
@@ -94,6 +97,16 @@ func (s *Server) handleWifiScanPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *Server) handleWifiRetestPost(w http.ResponseWriter, r *http.Request) {
+	ov, err := s.wifiOptService().RetestStats(r.Context())
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "实时重测 Wi-Fi 丢包与错帧失败: "+err.Error())
+		return
+	}
+	s.invalidateWifiCache()
+	writeJSON(w, http.StatusOK, ov)
 }
 
 func (s *Server) handleWifiApplyPost(w http.ResponseWriter, r *http.Request) {

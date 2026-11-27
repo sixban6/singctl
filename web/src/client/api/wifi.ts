@@ -21,6 +21,13 @@ export const wifiApi = {
       timeoutMs: 20000,
     }),
 
+  retestWifiStats: () =>
+    request<WifiOverview>('/api/wifi/retest', {
+      method: 'POST',
+      body: JSON.stringify({}),
+      timeoutMs: 15000,
+    }),
+
   applyWifiOptimize: (payload: WifiApplyRequest) =>
     request<WifiApplyResponse>('/api/wifi/apply', {
       method: 'POST',

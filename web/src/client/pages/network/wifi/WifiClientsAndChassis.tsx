@@ -26,13 +26,15 @@ function maskIP(ip: string | undefined, mask: boolean): string {
 }
 
 export const WifiClientsAndChassis: React.FC<WifiClientsAndChassisProps> = ({
-  clients,
+  clients: rawClients,
   chassis,
   privacyMask,
   busy,
   chassisBusy,
   onApplyChassis,
 }) => {
+  const clients = rawClients ?? [];
+  const rpsInterfaces = chassis?.rpsInterfaces ?? [];
   const sortedClients = [...clients].sort((a, b) => {
     if (a.band !== b.band) return a.band === '5g' ? -1 : 1;
     return b.signalDbm - a.signalDbm;
@@ -153,9 +155,9 @@ export const WifiClientsAndChassis: React.FC<WifiClientsAndChassisProps> = ({
               <div className="text-[11px] text-secondary leading-relaxed">
                 将有线主网口软中断平摊到全部 {chassis.cpuCores} 核，避免多设备高速下载时 CPU0 软中断打满。
               </div>
-              {chassis.rpsInterfaces.length > 0 && (
+              {rpsInterfaces.length > 0 && (
                 <div className="flex flex-wrap gap-1.5 pt-1 font-mono text-[11px]">
-                  {chassis.rpsInterfaces.map((item) => (
+                  {rpsInterfaces.map((item) => (
                     <span
                       key={item.interface}
                       className="px-2 py-0.5 rounded bg-white/5 border border-white/10 text-secondary"
@@ -195,7 +197,13 @@ export const WifiClientsAndChassis: React.FC<WifiClientsAndChassisProps> = ({
               icon={<Zap className="w-3.5 h-3.5" />}
               onClick={() => onApplyChassis(!chassis.rpsOptimal, !chassis.conntrackOptimal)}
             >
-              {chassis.optimal ? '底盘已处于高并发最优状态' : '一键开启多核 RPS 与连接表扩容'}
+              {chassis.optimal
+                ? '底盘已处于高并发最优状态'
+                : !chassis.rpsOptimal && !chassis.conntrackOptimal
+                  ? '一键开启多核 RPS 与连接表扩容'
+                  : !chassis.rpsOptimal
+                    ? '一键开启多核 RPS 均衡'
+                    : '一键扩容 Conntrack 连接表'}
             </Button>
           </div>
         )}
