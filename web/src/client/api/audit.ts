@@ -5,6 +5,9 @@ import {
   AuditBlockBatchItem,
   AuditBlockBatchResult,
   AuditDeviceAccessResult,
+  AuditDeviceProfile,
+  AuditDeviceProfileAISummary,
+  AuditDeviceProfileRange,
   AuditFlowRecord,
   AuditReport,
   AuditRouteRuleDeleteRequest,
@@ -120,5 +123,25 @@ export const auditApi = {
     request<AuditRouteRuleResponse>('/api/audit/route-rule', {
       method: 'DELETE',
       body: JSON.stringify(payload),
+    }),
+
+  getAuditDeviceProfile: (
+    deviceIp: string,
+    range: AuditDeviceProfileRange = '24h',
+    signal?: AbortSignal,
+  ) =>
+    request<AuditDeviceProfile>(
+      `/api/audit/device-profile?ip=${encodeURIComponent(deviceIp)}&range=${encodeURIComponent(range)}`,
+      { timeoutMs: 8000, ...(signal ? { signal } : {}) },
+    ),
+
+  summarizeAuditDeviceProfile: (
+    deviceIp: string,
+    range: AuditDeviceProfileRange = '24h',
+  ) =>
+    request<AuditDeviceProfileAISummary>('/api/audit/device-profile/ai', {
+      method: 'POST',
+      timeoutMs: 28000,
+      body: JSON.stringify({ deviceIp, range }),
     }),
 };

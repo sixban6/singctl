@@ -254,10 +254,15 @@ func (c *Collector) ingestConnectionsLocked(
 		nextRates = make(map[string]flowLiveRate, len(conns))
 	}
 
+	profileSamples := make([]profileConnDelta, 0, len(conns))
+
 	for _, conn := range conns {
-		flowKey, changed := ingestSingleConnection(state, conn, devDir, selfIPs, activeByKey, engine, nowUnix, isNight)
+		flowKey, changed, pSample, hasSample := ingestSingleConnection(state, conn, devDir, selfIPs, activeByKey, engine, nowUnix, isNight)
 		if changed {
 			mutated = true
+		}
+		if hasSample {
+			profileSamples = append(profileSamples, pSample)
 		}
 		if flowKey == "" {
 			continue
@@ -311,6 +316,9 @@ func (c *Collector) ingestConnectionsLocked(
 		c.flowLiveRates = nextRates
 		c.lastPollAt = now
 	}
+	if len(profileSamples) > 0 && c.recordProfileSamplesLocked(state, profileSamples, devDir, now) {
+		mutated = true
+	}
 	return mutated
 }
 
@@ -323,18 +331,18 @@ func ingestSingleConnection(
 	engine *NonlinearEngine,
 	nowUnix int64,
 	isNight bool,
-) (string, bool) {
+) (string, bool, profileConnDelta, bool) {
 	rawSrc := cmp.Or(strings.TrimSpace(conn.Metadata.SourceIP), "127.0.0.1")
 	srcIP := normalizeSourceDeviceIP(rawSrc, selfIPs, devDir)
 	rawHost, destIP, target, isDirectIP := resolveConnTarget(conn)
 	if target == "" {
-		return "", false
+		return "", false, profileConnDelta{}, false
 	}
 	if len(conn.Chains) > 0 && strings.EqualFold(conn.Chains[0], "block") {
-		return "", false
+		return "", false, profileConnDelta{}, false
 	}
 	if engine != nil && engine.IsBlocked(srcIP, target) {
-		return "", false
+		return "", false, profileConnDelta{}, false
 	}
 
 	network := strings.ToLower(cmp.Or(strings.TrimSpace(conn.Metadata.Network), "tcp"))
@@ -382,7 +390,30 @@ func ingestSingleConnection(
 	if isNewConn {
 		recordNewConnArrival(entry, conn.Start, nowUnix, isNight, deltaUp)
 	}
-	return key, mutated
+	outbound := ""
+	if len(conn.Chains) > 0 {
+		outbound = conn.Chains[0]
+	}
+	ruleStr := strings.TrimSpace(conn.Rule)
+	if ruleStr != "" && strings.TrimSpace(conn.RulePayload) != "" {
+		ruleStr = ruleStr + "(" + strings.TrimSpace(conn.RulePayload) + ")"
+	}
+	sample := profileConnDelta{
+		DeviceIP:     srcIP,
+		DeviceName:   entry.DeviceName,
+		DeviceMAC:    entry.DeviceMAC,
+		Target:       target,
+		RawHost:      rawHost,
+		DestIP:       destIP,
+		Rule:         cmp.Or(entry.Rule, ruleStr),
+		Outbound:     cmp.Or(entry.Outbound, outbound),
+		DeltaUp:      deltaUp,
+		DeltaDown:    deltaDown,
+		IsNewConn:    isNewConn,
+		ArrivalCount: len(entry.ArrivalsUnix),
+		IntervalCV:   computeIntervalCV(entry.ArrivalsUnix),
+	}
+	return key, mutated, sample, deltaUp > 0 || deltaDown > 0 || isNewConn
 }
 
 // computeIntervalCV 计算建连时间序列的间隔变异系数 CV = sigma / mu。

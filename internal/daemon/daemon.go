@@ -814,6 +814,9 @@ func (d *Daemon) monitorLoop() error {
 	optTickers.sync(cfg, d.p2pLastActive.Load())
 
 	defer func() {
+		if d.auditCollector != nil {
+			d.auditCollector.FlushProfileHistory()
+		}
 		watchdogTicker.Stop()
 		failoverTicker.Stop()
 		p2pAssistTicker.Stop()

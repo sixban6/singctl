@@ -4,6 +4,9 @@ package audit
 import (
 	"cmp"
 	"maps"
+	"os"
+	"path/filepath"
+	"runtime"
 	"slices"
 	"time"
 
@@ -78,10 +81,11 @@ func resolveLowMemoryTier(opts CollectorOptions) (lowMem bool, ultraLowMem bool)
 // NewCollectorWithOptions 按显式选项或宿主机内存自适应创建审计采集器。
 func NewCollectorWithOptions(cfg *config.Config, opts CollectorOptions) *Collector {
 	c := &Collector{
-		cfg:             cfg,
-		statePath:       defaultStatePath(),
-		endpoints:       singbox.ClashAPIEndpoints(),
-		secret:          singbox.ClashAPISecret(),
+		cfg:                cfg,
+		statePath:          defaultStatePath(),
+		profileHistoryPath: defaultProfileHistoryPath(),
+		endpoints:          singbox.ClashAPIEndpoints(),
+		secret:             singbox.ClashAPISecret(),
 		clashClient:     clashapi.NewClient(clashapi.Options{RequestTimeout: 2500 * time.Millisecond}),
 		leaseFiles:      []string{"/tmp/dhcp.leases", "/var/lib/misc/dnsmasq.leases", "/tmp/dnsmasq.leases"},
 		arpFile:         "/proc/net/arp",
@@ -107,19 +111,49 @@ func (c *Collector) applyCollectorOptionsLocked(opts CollectorOptions, lowMem, u
 		c.deviceRefreshInterval = cmp.Or(opts.DeviceRefreshMinInterval, UltraLowMemDeviceRefreshInterval)
 		c.ipv6RefreshInterval = cmp.Or(opts.IPv6NeighRefreshInterval, UltraLowMemIPv6NeighRefreshInterval)
 		c.selfIPsRefreshInterval = 5 * time.Minute
+		c.maxProfileDevices = 16
+		c.maxAppsPerDevice = 10
+		if c.profileHistoryMaxBytes <= 0 {
+			c.profileHistoryMaxBytes = 48 << 10
+		}
 	} else if lowMem {
 		c.maxTrackedFlows = cmp.Or(opts.MaxTrackedFlows, LowMemMaxTrackedFlows)
 		c.maxConnCursors = LowMemMaxTrackedConnCursors
 		c.deviceRefreshInterval = cmp.Or(opts.DeviceRefreshMinInterval, LowMemDeviceRefreshInterval)
 		c.ipv6RefreshInterval = cmp.Or(opts.IPv6NeighRefreshInterval, LowMemIPv6NeighRefreshInterval)
 		c.selfIPsRefreshInterval = 3 * time.Minute
+		c.maxProfileDevices = 24
+		c.maxAppsPerDevice = 12
+		if c.profileHistoryMaxBytes <= 0 {
+			c.profileHistoryMaxBytes = 64 << 10
+		}
 	} else {
 		c.maxTrackedFlows = cmp.Or(opts.MaxTrackedFlows, DefaultMaxTrackedFlows)
 		c.maxConnCursors = maxTrackedConnDeltas
 		c.deviceRefreshInterval = opts.DeviceRefreshMinInterval
 		c.ipv6RefreshInterval = cmp.Or(opts.IPv6NeighRefreshInterval, 15*time.Second)
 		c.selfIPsRefreshInterval = 30 * time.Second
+		c.maxProfileDevices = 64
+		c.maxAppsPerDevice = 24
+		if c.profileHistoryMaxBytes <= 0 {
+			c.profileHistoryMaxBytes = 128 << 10
+		}
 	}
+}
+
+func defaultProfileHistoryPath() string {
+	if runtime.GOOS == "linux" {
+		const dir = "/etc/singctl"
+		if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
+			if probe, pErr := os.CreateTemp(dir, ".profile-probe-*"); pErr == nil {
+				name := probe.Name()
+				_ = probe.Close()
+				_ = os.Remove(name)
+				return filepath.Join(dir, "audit-profile-history.json")
+			}
+		}
+	}
+	return filepath.Join(os.TempDir(), "singctl-audit-profile-history.json")
 }
 
 // SetLowMemoryForTest 供单元测试显式切换采集器的低内存有界与降频模式。
@@ -387,5 +421,6 @@ func (c *Collector) enforceBoundsLocked(
 	}
 	curTrimmed := pruneExcessConnCursors(st, c.effectiveMaxCursorsLocked(), activeByKey, c.lowMemory, nowUnix)
 	flowTrimmed := trimFlowsRiskAware(st, c.effectiveMaxFlowsLocked(), activeByKey, devDir, selfIPs, engine)
-	return curTrimmed || flowTrimmed
+	profTrimmed := trimLiveProfilesLocked(st, cmp.Or(c.maxProfileDevices, 64), cmp.Or(c.maxAppsPerDevice, 24))
+	return curTrimmed || flowTrimmed || profTrimmed
 }

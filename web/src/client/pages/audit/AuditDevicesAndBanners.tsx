@@ -1,12 +1,17 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
+  Activity,
   AlertTriangle,
+  ChevronDown,
+  ChevronUp,
   ExternalLink,
+  Filter,
   Globe,
   Home,
   Laptop,
   Network,
   Pencil,
+  Search,
   ShieldCheck,
   X,
 } from 'lucide-react';
@@ -22,11 +27,17 @@ import { AuditDeviceSummary, AuditReport } from '../../types';
 import { AuditSelectedDevice } from './auditFlowModel';
 import { formatDeviceRoleLabel } from './auditHelpers';
 
+const DEFAULT_VISIBLE_DEVICES = 8;
+
+type DeviceQuickFilter = 'all' | 'risky' | 'direct';
+type DeviceSortKey = 'default' | 'upload' | 'download' | 'risk';
+
 export interface AuditDevicesAndBannersProps {
   report: AuditReport | null;
   loading: boolean;
   selectedDevice: AuditSelectedDevice | null;
   onSelectDevice: (device: AuditSelectedDevice | null) => void;
+  onOpenProfile?: (device: AuditDeviceSummary) => void;
   onRenameDevice?: (device: AuditDeviceSummary) => void;
   isAuditOnlyMode?: boolean;
   isDelegatedMode?: boolean;
@@ -44,6 +55,7 @@ export const AuditDevicesAndBanners: React.FC<AuditDevicesAndBannersProps> = ({
   loading,
   selectedDevice,
   onSelectDevice,
+  onOpenProfile,
   onRenameDevice,
   isAuditOnlyMode = false,
   isDelegatedMode = false,
@@ -55,18 +67,86 @@ export const AuditDevicesAndBanners: React.FC<AuditDevicesAndBannersProps> = ({
   onDismissPcdnBanner,
   onEnablePCDNBlock,
 }) => {
+  const [expanded, setExpanded] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [quickFilter, setQuickFilter] = useState<DeviceQuickFilter>('all');
+  const [sortBy, setSortBy] = useState<DeviceSortKey>('default');
+  const [sortDir, setSortDir] = useState<'desc' | 'asc'>('desc');
+
+  const allDevices = report?.devices || [];
+  const totalDevices = allDevices.length;
+
   const natSubRouter = useMemo(() => {
     const total = Number(report?.totalFlows || 0);
-    if (total < 20 || !report?.devices) return null;
+    if (total < 20 || !allDevices.length) return null;
     return (
-      report.devices.find(
+      allDevices.find(
         (d) =>
           d.deviceRole === 'router' &&
           d.deviceIp !== '127.0.0.1' &&
           (d.flowCount || 0) / total >= 0.7,
       ) || null
     );
-  }, [report]);
+  }, [report?.totalFlows, allDevices]);
+
+  const filteredDevices = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    let list = allDevices.filter((d) => {
+      if (quickFilter === 'risky') {
+        const hasRisk =
+          (d.highRiskCount || 0) + (d.suspiciousCount || 0) > 0 || (d.maxRiskScore || 0) >= 35;
+        if (!hasRisk) return false;
+      } else if (quickFilter === 'direct') {
+        if (d.allowOverseas !== false) return false;
+      }
+      if (!q) return true;
+      return (
+        (d.deviceName || '').toLowerCase().includes(q) ||
+        (d.deviceIp || '').toLowerCase().includes(q) ||
+        (d.deviceMac || '').toLowerCase().includes(q)
+      );
+    });
+
+    if (sortBy !== 'default') {
+      const dir = sortDir === 'asc' ? 1 : -1;
+      list = [...list].sort((a, b) => {
+        if (sortBy === 'upload') return dir * ((a.uploadBytes || 0) - (b.uploadBytes || 0));
+        if (sortBy === 'download') return dir * ((a.downloadBytes || 0) - (b.downloadBytes || 0));
+        return dir * ((a.maxRiskScore || 0) - (b.maxRiskScore || 0));
+      });
+    }
+    return list;
+  }, [allDevices, quickFilter, searchQuery, sortBy, sortDir]);
+
+  const isFiltering = searchQuery.trim() !== '' || quickFilter !== 'all';
+
+  const displayedDevices = useMemo(() => {
+    if (expanded || isFiltering || filteredDevices.length <= DEFAULT_VISIBLE_DEVICES) {
+      return filteredDevices;
+    }
+    const base = filteredDevices.slice(0, DEFAULT_VISIBLE_DEVICES);
+    if (selectedDevice?.ip) {
+      const targetIP = selectedDevice.ip.toLowerCase();
+      const inBase = base.some((d) => d.deviceIp.toLowerCase() === targetIP);
+      if (!inBase) {
+        const pinned = filteredDevices.find((d) => d.deviceIp.toLowerCase() === targetIP);
+        if (pinned) {
+          return [...base, pinned];
+        }
+      }
+    }
+    return base;
+  }, [expanded, isFiltering, filteredDevices, selectedDevice?.ip]);
+
+  const handleSort = (key: string) => {
+    const next = key as DeviceSortKey;
+    if (sortBy === next) {
+      setSortDir((prev) => (prev === 'desc' ? 'asc' : 'desc'));
+    } else {
+      setSortBy(next);
+      setSortDir('desc');
+    }
+  };
 
   const deviceColumns: DataColumn<AuditDeviceSummary>[] = [
     {
@@ -75,7 +155,9 @@ export const AuditDevicesAndBanners: React.FC<AuditDevicesAndBannersProps> = ({
       render: (d) => (
         <div className="flex items-start justify-between gap-2 group">
           <div className="min-w-0">
-            <div className="font-semibold text-xs text-primary truncate">{d.deviceName || d.deviceIp}</div>
+            <div className="font-semibold text-xs text-primary truncate group-hover:text-accent transition-colors">
+              {d.deviceName || d.deviceIp}
+            </div>
             <div className="font-mono text-[11px] text-muted">
               {d.deviceIp}
               {d.deviceMac ? ` · ${d.deviceMac}` : ''}
@@ -114,12 +196,14 @@ export const AuditDevicesAndBanners: React.FC<AuditDevicesAndBannersProps> = ({
       key: 'up',
       header: '累计上传 ↑',
       align: 'right',
+      sortKey: 'upload',
       render: (d) => <span className="font-mono tnum text-xs">{fmtBytes(d.uploadBytes)}</span>,
     },
     {
       key: 'down',
       header: '累计下载 ↓',
       align: 'right',
+      sortKey: 'download',
       render: (d) => <span className="font-mono tnum text-xs text-secondary">{fmtBytes(d.downloadBytes)}</span>,
     },
     {
@@ -143,6 +227,7 @@ export const AuditDevicesAndBanners: React.FC<AuditDevicesAndBannersProps> = ({
     {
       key: 'risk',
       header: '最高评分',
+      sortKey: 'risk',
       render: (d) => {
         const tone =
           d.maxRiskScore >= 80
@@ -267,27 +352,54 @@ export const AuditDevicesAndBanners: React.FC<AuditDevicesAndBannersProps> = ({
       render: (d) => {
         const active = selectedDevice?.ip.toLowerCase() === d.deviceIp.toLowerCase();
         return (
-          <Button
-            size="xs"
-            variant={active ? 'primary' : 'secondary'}
-            onClick={() =>
-              onSelectDevice(
-                active
-                  ? null
-                  : {
-                      ip: d.deviceIp,
-                      label: d.deviceName || d.deviceIp,
-                      mac: d.deviceMac,
-                    },
-              )
-            }
+          <div
+            className="inline-flex items-center justify-end gap-1.5 whitespace-nowrap"
+            onClick={(e) => e.stopPropagation()}
           >
-            {active ? '取消筛选' : '只看此设备'}
-          </Button>
+            {onOpenProfile && (
+              <Button
+                size="xs"
+                variant="secondary"
+                icon={<Activity className="w-3 h-3 text-accent" />}
+                onClick={() => onOpenProfile(d)}
+                title="查看该设备近 24h / 7 天偏好 App 与停留时长画像"
+              >
+                画像
+              </Button>
+            )}
+            <Button
+              size="xs"
+              variant={active ? 'primary' : 'secondary'}
+              icon={<Filter className="w-3 h-3" />}
+              onClick={() =>
+                onSelectDevice(
+                  active
+                    ? null
+                    : {
+                        ip: d.deviceIp,
+                        label: d.deviceName || d.deviceIp,
+                        mac: d.deviceMac,
+                      },
+                )
+              }
+            >
+              {active ? '取消筛选' : '只看'}
+            </Button>
+          </div>
         );
       },
     },
   ];
+
+  const subtitle =
+    totalDevices <= DEFAULT_VISIBLE_DEVICES
+      ? `共 ${totalDevices} 台活跃设备 · 点击任意设备查看行为画像，或点「只看」联动下方连接明细`
+      : expanded || isFiltering
+        ? `共 ${totalDevices} 台活跃设备（当前显示 ${displayedDevices.length} 台）· 点击设备查看行为画像`
+        : `共 ${totalDevices} 台活跃设备，默认展示前 ${DEFAULT_VISIBLE_DEVICES} 台 · 可搜索筛选或底部展开全部`;
+
+  const remainingHidden = Math.max(0, filteredDevices.length - displayedDevices.length);
+  const canToggleExpand = !isFiltering && filteredDevices.length > DEFAULT_VISIBLE_DEVICES;
 
   return (
     <>
@@ -369,19 +481,120 @@ export const AuditDevicesAndBanners: React.FC<AuditDevicesAndBannersProps> = ({
 
       <SectionCard
         title="局域网设备活跃排行"
-        subtitle={`共 ${report?.devices?.length || 0} 台活跃设备，默认展示前 12 台 · 点击「只看此设备」联动下方明细`}
+        subtitle={subtitle}
         icon={<Laptop className="w-4 h-4" />}
         collapsible
         defaultOpen
         noPadding
+        actions={
+          totalDevices > DEFAULT_VISIBLE_DEVICES ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="relative">
+                <Search className="w-3.5 h-3.5 text-muted absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="搜设备 / IP / MAC"
+                  className="pl-7 pr-6 py-1 rounded-lg bg-surface2/80 border border-subtle text-xs text-primary placeholder:text-muted focus:outline-none focus:border-accent w-40 sm:w-44"
+                />
+                {searchQuery && (
+                  <button
+                    type="button"
+                    onClick={() => setSearchQuery('')}
+                    className="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted hover:text-primary cursor-pointer"
+                    aria-label="清空设备搜索"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
+              <div className="inline-flex items-center p-0.5 rounded-lg bg-surface2/80 border border-subtle text-[11px]">
+                {(
+                  [
+                    { id: 'all', label: '全部' },
+                    { id: 'risky', label: '有风险' },
+                    { id: 'direct', label: '仅限直连' },
+                  ] as const
+                ).map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => setQuickFilter(item.id)}
+                    className={`px-2 py-0.5 rounded-md transition-colors cursor-pointer ${
+                      quickFilter === item.id
+                        ? 'bg-accent/20 text-accent font-semibold'
+                        : 'text-muted hover:text-primary'
+                    }`}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : undefined
+        }
       >
         <DataTable
           columns={deviceColumns}
-          rows={(report?.devices || []).slice(0, 12)}
+          rows={displayedDevices}
           rowKey={(d) => d.deviceIp}
           loading={loading}
-          emptyText="暂无局域网设备活跃流量"
+          emptyText={isFiltering ? '未找到匹配条件的设备' : '暂无局域网设备活跃流量'}
+          emptyAction={
+            isFiltering ? (
+              <Button
+                size="xs"
+                variant="secondary"
+                onClick={() => {
+                  setSearchQuery('');
+                  setQuickFilter('all');
+                }}
+              >
+                清除设备过滤
+              </Button>
+            ) : undefined
+          }
           compact
+          sortBy={sortBy === 'default' ? undefined : sortBy}
+          sortDir={sortDir}
+          onSort={handleSort}
+          onRowClick={onOpenProfile}
+          rowClassName={(d) => {
+            const selected =
+              selectedDevice?.ip.toLowerCase() === d.deviceIp.toLowerCase()
+                ? 'bg-accent/10'
+                : '';
+            const clickable = onOpenProfile ? 'cursor-pointer' : '';
+            return `${clickable} ${selected}`.trim();
+          }}
+          maxHeightClassName={expanded && displayedDevices.length > 10 ? 'max-h-[460px] overflow-y-auto' : undefined}
+          stickyHeader={expanded && displayedDevices.length > 10}
+          footerSlot={
+            canToggleExpand ? (
+              <div className="px-4 py-2 border-t border-subtle/60 bg-surface2/30 flex items-center justify-center">
+                <button
+                  type="button"
+                  onClick={() => setExpanded((v) => !v)}
+                  className="inline-flex items-center gap-1.5 text-xs font-medium text-accent hover:text-primary transition-colors cursor-pointer py-0.5 px-3 rounded-lg hover:bg-surface2"
+                >
+                  {expanded ? (
+                    <>
+                      <ChevronUp className="w-3.5 h-3.5" />
+                      <span>收起为前 {DEFAULT_VISIBLE_DEVICES} 台</span>
+                    </>
+                  ) : (
+                    <>
+                      <ChevronDown className="w-3.5 h-3.5" />
+                      <span>
+                        展开剩余 {remainingHidden} 台（共 {filteredDevices.length} 台）
+                      </span>
+                    </>
+                  )}
+                </button>
+              </div>
+            ) : undefined
+          }
         />
       </SectionCard>
     </>

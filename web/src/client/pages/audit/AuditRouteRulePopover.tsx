@@ -142,7 +142,12 @@ export const AuditRouteRulePopover: React.FC<AuditRouteRulePopoverProps> = ({
     const onKey = (ev: KeyboardEvent) => {
       if (ev.key === 'Escape') onClose();
     };
-    const onScroll = () => onClose();
+    const onScroll = (ev: Event) => {
+      if (menuRef.current && ev.target instanceof Node && menuRef.current.contains(ev.target)) {
+        return;
+      }
+      onClose();
+    };
     window.addEventListener('mousedown', onDown);
     window.addEventListener('keydown', onKey);
     window.addEventListener('scroll', onScroll, true);
@@ -157,14 +162,27 @@ export const AuditRouteRulePopover: React.FC<AuditRouteRulePopoverProps> = ({
 
   const rect = anchorEl.getBoundingClientRect();
   const menuW = 286;
-  const estH = 340;
+  const maxH = 440;
   const vw = window.innerWidth || 1280;
   const vh = window.innerHeight || 800;
   let left = rect.right - menuW;
   if (left < 8) left = 8;
   if (left + menuW > vw - 8) left = vw - menuW - 8;
   const spaceBelow = vh - rect.bottom;
-  const top = spaceBelow >= estH ? rect.bottom + 6 : Math.max(8, rect.top - estH - 6);
+  const openUpward = spaceBelow < Math.min(maxH, 300) && rect.top > spaceBelow;
+  const posStyle: React.CSSProperties = openUpward
+    ? {
+        bottom: Math.max(8, vh - rect.top + 6),
+        left,
+        width: menuW,
+        maxHeight: Math.max(200, Math.min(maxH, rect.top - 14)),
+      }
+    : {
+        top: Math.max(8, rect.bottom + 6),
+        left,
+        width: menuW,
+        maxHeight: Math.max(200, Math.min(maxH, vh - rect.bottom - 14)),
+      };
 
   const directTag = routingReport?.directTag || '#DC';
   const effectiveTarget = isIP
@@ -197,11 +215,13 @@ export const AuditRouteRulePopover: React.FC<AuditRouteRulePopoverProps> = ({
   return createPortal(
     <div
       ref={menuRef}
-      style={{ top, left, width: menuW }}
+      style={posStyle}
       onClick={(e) => e.stopPropagation()}
-      className="fixed z-[90] rounded-xl border border-strong bg-slate-900/98 backdrop-blur-xl shadow-2xl p-2.5 space-y-2.5 text-xs animate-sc-in"
+      onWheel={(e) => e.stopPropagation()}
+      onTouchMove={(e) => e.stopPropagation()}
+      className="fixed z-[90] flex flex-col rounded-xl border border-strong bg-slate-900/98 backdrop-blur-xl shadow-2xl p-2.5 gap-2.5 text-xs animate-sc-in overscroll-contain"
     >
-      <div className="flex items-center justify-between gap-2 pb-1.5 border-b border-subtle/70">
+      <div className="shrink-0 flex items-center justify-between gap-2 pb-1.5 border-b border-subtle/70">
         <div className="min-w-0">
           <div className="font-semibold text-primary flex items-center gap-1.5">
             <ArrowRightLeft className="w-3.5 h-3.5 text-accent shrink-0" />
@@ -213,7 +233,7 @@ export const AuditRouteRulePopover: React.FC<AuditRouteRulePopoverProps> = ({
       </div>
 
       {!isIP && (
-        <div className="space-y-1">
+        <div className="shrink-0 space-y-1">
           <div className="text-[10.5px] text-muted">匹配范围（同步写入路由与 DNS）</div>
           <div className="grid grid-cols-2 gap-1">
             <button
@@ -245,7 +265,7 @@ export const AuditRouteRulePopover: React.FC<AuditRouteRulePopoverProps> = ({
       )}
 
       {canScopeDevice && (
-        <div className="grid grid-cols-2 gap-1">
+        <div className="shrink-0 grid grid-cols-2 gap-1">
           <button
             type="button"
             onClick={() => setScopeDevice(false)}
@@ -274,7 +294,7 @@ export const AuditRouteRulePopover: React.FC<AuditRouteRulePopoverProps> = ({
         </div>
       )}
 
-      <div className="space-y-1 max-h-48 overflow-y-auto pr-0.5">
+      <div className="flex-1 min-h-0 space-y-1 overflow-y-auto overscroll-contain pr-0.5">
         <button
           type="button"
           disabled={busy}
@@ -320,7 +340,7 @@ export const AuditRouteRulePopover: React.FC<AuditRouteRulePopoverProps> = ({
       </div>
 
       {matchedRule && (
-        <div className="pt-1.5 border-t border-subtle/70">
+        <div className="shrink-0 pt-1.5 border-t border-subtle/70">
           <button
             type="button"
             disabled={busy}

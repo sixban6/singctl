@@ -67,10 +67,11 @@ type connByteCursor struct {
 }
 
 type persistedAuditState struct {
-	SchemaVersion int                            `json:"schemaVersion,omitempty"`
-	UpdatedUnix   int64                          `json:"updatedUnix"`
-	Flows         map[string]*persistedFlowEntry `json:"flows"`
-	ConnCursors   map[string]connByteCursor      `json:"connCursors"`
+	SchemaVersion int                                `json:"schemaVersion,omitempty"`
+	UpdatedUnix   int64                              `json:"updatedUnix"`
+	Flows         map[string]*persistedFlowEntry     `json:"flows"`
+	ConnCursors   map[string]connByteCursor          `json:"connCursors"`
+	Profiles      map[string]*persistedDeviceProfile `json:"profiles,omitempty"`
 }
 
 func purgeExpiredFlows(flows map[string]*persistedFlowEntry, nowUnix int64) bool {

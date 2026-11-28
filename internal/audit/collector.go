@@ -75,6 +75,16 @@ type Collector struct {
 	deviceRefreshInterval  time.Duration
 	ipv6RefreshInterval    time.Duration
 	selfIPsRefreshInterval time.Duration
+	profileHistoryPath     string
+	profileHistoryMaxBytes int
+	maxProfileDevices      int
+	maxAppsPerDevice       int
+	cachedHistory          *persistedProfileHistory
+	cachedHistoryFp        string
+	historyDirty           bool
+	historyDirtyNewMins    int
+	lastHistorySavedUnix   int64
+	lastHistoryDate        string
 }
 
 // NewCollector 创建默认客户端审计采集器（自动兼容 OpenWrt /etc/TZ 与 /etc/config/system 本地时区及低内存自适应预算）。
@@ -105,6 +115,13 @@ func (c *Collector) SetEndpointsForTest(endpoints []string, secret, statePath st
 		c.connRateCursors = nil
 		c.flowLiveRates = nil
 		c.flowActiveDetails = nil
+		c.profileHistoryPath = statePath + ".profile-history.json"
+		c.cachedHistory = nil
+		c.cachedHistoryFp = ""
+		c.historyDirty = false
+		c.historyDirtyNewMins = 0
+		c.lastHistorySavedUnix = 0
+		c.lastHistoryDate = ""
 		ResetAICacheForTest(statePath + ".ai-cache.json")
 	}
 }
@@ -219,7 +236,28 @@ func purgeBlockedFlows(
 	maps.DeleteFunc(state.Flows, func(_ string, e *persistedFlowEntry) bool {
 		return e == nil || engine.IsBlocked(normalizeSourceDeviceIP(e.DeviceIP, selfIPs, devDirectory), e.Target)
 	})
-	return len(state.Flows) != before
+	changed := len(state.Flows) != before
+	for _, prof := range state.Profiles {
+		if prof == nil {
+			continue
+		}
+		normDev := normalizeSourceDeviceIP(prof.DeviceIP, selfIPs, devDirectory)
+		for _, app := range prof.Apps {
+			if app == nil || len(app.SampleTargets) == 0 {
+				continue
+			}
+			kept := app.SampleTargets[:0]
+			for _, t := range app.SampleTargets {
+				if engine.IsBlocked(normDev, t) {
+					changed = true
+					continue
+				}
+				kept = append(kept, t)
+			}
+			app.SampleTargets = kept
+		}
+	}
+	return changed
 }
 
 const auditReadPathSaveDebounceSec = 30
@@ -298,6 +336,7 @@ func (c *Collector) sampleActiveLocked(ctx context.Context, now time.Time, persi
 	if c.shouldSaveSampledStateLocked(state, now, persistImmediately, blockTrimmed) {
 		c.saveStateLocked(state, activeByKey, now)
 	}
+	c.maybeFlushProfileHistoryLocked(now)
 	return state, activeByKey, devDirectory, selfIPs, engine, addr, true
 }
 
@@ -429,7 +468,7 @@ func buildRawFlowRecords(
 			DeviceMAC:          devMAC,
 			DeviceRole:         InferDeviceRole(devName),
 			Target:             entry.Target,
-			AppName:            IdentifyApp(entry.Target, entry.DestIP, entry.Rule, entry.RawHost),
+			AppName:            cmp.Or(ClassifyApp(entry.Target, entry.DestIP, entry.Rule, entry.RawHost).Name, IdentifyApp(entry.Target, entry.DestIP, entry.Rule, entry.RawHost)),
 			RawHost:            entry.RawHost,
 			DestIP:             entry.DestIP,
 			DestPort:           entry.DestPort,

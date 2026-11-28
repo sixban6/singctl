@@ -189,3 +189,100 @@ export interface AuditAIModelsResponse {
   resolvedUrl?: string;
   error?: string;
 }
+
+export type AuditAppCategory =
+  | 'video'
+  | 'social'
+  | 'ai_dev'
+  | 'shopping'
+  | 'gaming_music'
+  | 'system'
+  | 'other';
+
+export type AuditDeviceProfileRange = '24h' | '7d';
+
+export interface AuditDeviceAppStat {
+  appName: string;
+  category: AuditAppCategory | string;
+  categoryLabel: string;
+  isInfra: boolean;
+  foregroundMinutes: number;
+  backgroundMinutes: number;
+  sessions: number;
+  avgSessionMin: number;
+  longestSessionMin: number;
+  uploadBytes: number;
+  downloadBytes: number;
+  peakPeriod: string;
+  lastSeen?: string;
+  sampleTargets?: string[];
+}
+
+export interface AuditDeviceCategoryStat {
+  category: AuditAppCategory | string;
+  label: string;
+  minutes: number;
+  sharePct: number;
+  bytes: number;
+}
+
+export interface AuditDeviceHourStat {
+  hour: number;
+  foregroundMinutes: number;
+  bytes: number;
+}
+
+export interface AuditDeviceDayStat {
+  date: string;
+  foregroundMinutes: number;
+  uploadBytes: number;
+  downloadBytes: number;
+  topApp?: string;
+  topAppMinutes?: number;
+}
+
+export interface AuditDevicePersonaTag {
+  id: string;
+  label: string;
+  tone: 'accent' | 'ok' | 'warn' | 'neutral' | string;
+  detail: string;
+}
+
+export interface AuditDeviceProfileStorage {
+  retentionDays: number;
+  historyDays: number;
+  historyBytes: number;
+  maxHistoryBytes: number;
+  autoCleanup: boolean;
+}
+
+export interface AuditDeviceProfile {
+  deviceIp: string;
+  deviceName: string;
+  deviceMac?: string;
+  deviceRole: string;
+  range: AuditDeviceProfileRange;
+  generatedAt: string;
+  totalForegroundMinutes: number;
+  totalBackgroundMinutes: number;
+  activeAppCount: number;
+  uploadBytes: number;
+  downloadBytes: number;
+  proxySharePct: number;
+  isNatSubRouter: boolean;
+  peakHourLabel: string;
+  personaTags: AuditDevicePersonaTag[];
+  categories: AuditDeviceCategoryStat[];
+  topApps: AuditDeviceAppStat[];
+  systemApps: AuditDeviceAppStat[];
+  hourlyTimeline: AuditDeviceHourStat[];
+  dailyTrend: AuditDeviceDayStat[];
+  storage: AuditDeviceProfileStorage;
+}
+
+export interface AuditDeviceProfileAISummary {
+  ok: boolean;
+  source: string;
+  summary: string;
+  generatedAt: string;
+}

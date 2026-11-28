@@ -15,6 +15,7 @@ import { DeviceEditDrawer, DeviceEditInitial } from './network/homedomain/Device
 import { AuditAIConfigDrawer } from './audit/AuditAIConfigDrawer';
 import { AuditBlacklistDrawer } from './audit/AuditBlacklistDrawer';
 import { AuditCustomRoutesDrawer } from './audit/AuditCustomRoutesDrawer';
+import { AuditDeviceProfileDrawer } from './audit/AuditDeviceProfileDrawer';
 import { AuditDevicesAndBanners } from './audit/AuditDevicesAndBanners';
 import { AuditFlowDetailDrawer } from './audit/AuditFlowDetailDrawer';
 import { AuditFlowsSection } from './audit/AuditFlowsSection';
@@ -44,6 +45,7 @@ export const AuditPage: React.FC<AuditPageProps> = ({
   const [renameInit, setRenameInit] = useState<DeviceEditInitial | null>(null);
   const [renameSuffix, setRenameSuffix] = useState('home');
   const [renameSaving, setRenameSaving] = useState(false);
+  const [profileDevice, setProfileDevice] = useState<AuditDeviceSummary | null>(null);
   const isAuditOnlyMode = status?.gateway?.effectiveWorkMode === 'audit';
 
   const {
@@ -59,7 +61,12 @@ export const AuditPage: React.FC<AuditPageProps> = ({
 
   const ctrl = useAuditFlowsController({
     active,
-    drawerBlockingRefresh: blockDrawerOpen || customRoutesOpen || aiCfgOpen || renameDrawerOpen,
+    drawerBlockingRefresh:
+      blockDrawerOpen ||
+      customRoutesOpen ||
+      aiCfgOpen ||
+      renameDrawerOpen ||
+      Boolean(profileDevice),
     setCachedReview,
     getCachedReview,
     flushCachedReviews,
@@ -275,6 +282,7 @@ export const AuditPage: React.FC<AuditPageProps> = ({
         loading={ctrl.loading}
         selectedDevice={ctrl.selectedDevice}
         onSelectDevice={handleSelectDeviceFromRanking}
+        onOpenProfile={(d) => setProfileDevice(d)}
         onRenameDevice={(d) => void handleOpenRenameDevice(d)}
         isAuditOnlyMode={isAuditOnlyMode}
         isDelegatedMode={isDelegatedMode}
@@ -410,6 +418,19 @@ export const AuditPage: React.FC<AuditPageProps> = ({
         initial={renameInit}
         onClose={() => setRenameDrawerOpen(false)}
         onSubmit={handleSubmitRenameDevice}
+      />
+
+      <AuditDeviceProfileDrawer
+        device={profileDevice}
+        onClose={() => setProfileDevice(null)}
+        onFilterByDevice={(dev) => {
+          ctrl.setSearchQuery('');
+          handleSelectDeviceFromRanking(dev);
+        }}
+        onFilterByApp={(dev, appName) => {
+          ctrl.setSearchQuery(appName);
+          handleSelectDeviceFromRanking(dev);
+        }}
       />
 
       <AuditFlowDetailDrawer

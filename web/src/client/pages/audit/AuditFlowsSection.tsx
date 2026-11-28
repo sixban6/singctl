@@ -238,7 +238,7 @@ export const AuditFlowsSection: React.FC<AuditFlowsSectionProps> = ({
   return (
     <div ref={sectionAnchorRef}>
       <SectionCard
-        title="连接行为与可疑上传明细"
+        title="连接明细"
         subtitle={
           processedFlows.length > 0
             ? '点击任意行打开实时子连接显微镜与诊断抽屉 · 悬停表格自动暂缓刷新'

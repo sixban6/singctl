@@ -394,6 +394,8 @@ func (s *Server) registerRoutes() {
 
 	// 局域网设备行为审计与拉黑 API
 	s.Mux.HandleFunc("GET /api/audit", s.guard(s.handleAuditGet))
+	s.Mux.HandleFunc("GET /api/audit/device-profile", s.guard(s.handleAuditDeviceProfileGet))
+	s.Mux.HandleFunc("POST /api/audit/device-profile/ai", s.guard(s.handleAuditDeviceProfileAIPost))
 	s.Mux.HandleFunc("GET /api/audit/ai-config", s.guard(s.handleAuditAIConfigGet))
 	s.Mux.HandleFunc("POST /api/audit/ai-config", s.guard(s.handleAuditAIConfigPost))
 	s.Mux.HandleFunc("POST /api/audit/ai-models", s.guard(s.handleAuditAIModelsPost))
