@@ -1,0 +1,198 @@
+name: Build & Publish Custom RuleSets
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'rules/*.json'
+      - '.github/workflows/rulesets-release.yml'
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: '即使 rules/*.json 指纹未变化也强制重新编译发布'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rulesets-release
+  cancel-in-progress: false
+
+jobs:
+  publish-rulesets:
+    name: Compile & Publish Custom RuleSets (.srs)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: Check RuleSet Sources Fingerprint (Zero-Waste Gate)
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORCE_REBUILD: ${{ inputs.force_rebuild }}
+        run: |
+          set -euo pipefail
+
+          shopt -s nullglob
+          RULE_FILES=(rules/*.json)
+          if [ "${#RULE_FILES[@]}" -eq 0 ]; then
+            echo "::error::No rules/*.json source files found"
+            exit 1
+          fi
+
+          # 对有序 rules/*.json 列表校验 JSON 合法性并生成确定性指纹
+          FINGERPRINT=$(LC_ALL=C printf '%s\n' "${RULE_FILES[@]}" | sort | xargs sha256sum | sha256sum | awk '{print substr($1, 1, 16)}')
+          echo "Resolved rulesets fingerprint: ${FINGERPRINT}"
+
+          EXPECTED_ASSETS=("checksums.txt")
+          for f in "${RULE_FILES[@]}"; do
+            base=$(basename "${f}" .json)
+            EXPECTED_ASSETS+=("${base}.srs")
+          done
+
+          EXISTING_BODY=$(gh release view rulesets-latest -R "${GITHUB_REPOSITORY}" --json body -q '.body' 2>/dev/null || true)
+          EXISTING_ASSETS=$(gh release view rulesets-latest -R "${GITHUB_REPOSITORY}" --json assets -q '.assets[].name' 2>/dev/null || true)
+
+          ALL_ASSETS_PRESENT=true
+          for want in "${EXPECTED_ASSETS[@]}"; do
+            if ! printf '%s\n' "${EXISTING_ASSETS}" | grep -Fxq "${want}"; then
+              ALL_ASSETS_PRESENT=false
+              break
+            fi
+          done
+
+          HAS_FP=false
+          if printf '%s\n' "${EXISTING_BODY}" | grep -Fq "<!-- rulesets-fingerprint: ${FINGERPRINT} -->"; then
+            HAS_FP=true
+          fi
+
+          if [ "${FORCE_REBUILD}" != "true" ] && [ "${HAS_FP}" = "true" ] && [ "${ALL_ASSETS_PRESENT}" = "true" ]; then
+            echo "✅ rulesets-latest 已包含最新规则集源码指纹 (${FINGERPRINT}) 的全部产物与 checksums.txt，跳过编译。"
+            {
+              echo "should_build=false"
+              echo "fingerprint=${FINGERPRINT}"
+            } >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          echo "🚀 检测到需要编译发布自定义规则集 (fingerprint=${FINGERPRINT}, force_rebuild=${FORCE_REBUILD})"
+          {
+            echo "should_build=true"
+            echo "fingerprint=${FINGERPRINT}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Setup Official sing-box Binary
+        if: steps.gate.outputs.should_build == 'true'
+        id: sb
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/sb-tool && mkdir -p /tmp/sb-tool
+          TAG_NAME=$(gh release view -R SagerNet/sing-box --json tagName -q '.tagName' 2>/dev/null || \
+            curl -fsSL --retry 3 --connect-timeout 10 -H "Accept: application/vnd.github+json" "https://api.github.com/repos/SagerNet/sing-box/releases/latest" | jq -r '.tag_name')
+          VER="${TAG_NAME#v}"
+          if [ -z "${VER}" ]; then
+            echo "::error::Failed to resolve latest SagerNet/sing-box release version"
+            exit 1
+          fi
+          TAR_NAME="sing-box-${VER}-linux-amd64.tar.gz"
+          gh release download "${TAG_NAME}" -R SagerNet/sing-box -p "${TAR_NAME}" -D /tmp/sb-tool
+          tar -xzf "/tmp/sb-tool/${TAR_NAME}" -C /tmp/sb-tool --strip-components=1 "sing-box-${VER}-linux-amd64/sing-box"
+          chmod +x /tmp/sb-tool/sing-box
+          /tmp/sb-tool/sing-box version
+          echo "sb_version=${VER}" >> "${GITHUB_OUTPUT}"
+
+      - name: Compile & Verify .srs RuleSets
+        if: steps.gate.outputs.should_build == 'true'
+        run: |
+          set -euo pipefail
+          rm -rf dist && mkdir -p dist
+          shopt -s nullglob
+
+          ASSETS=()
+          for src in rules/*.json; do
+            jq empty "${src}"
+            base=$(basename "${src}" .json)
+            out="dist/${base}.srs"
+            /tmp/sb-tool/sing-box rule-set compile --output "${out}" "${src}"
+
+            magic=$(head -c 4 "${out}" | tr -dc 'A-Z')
+            if [[ "${magic}" != SRS* && "${magic}" != RULE* ]]; then
+              echo "::error::Invalid compiled .srs header for ${src}: '${magic}'"
+              exit 1
+            fi
+            /tmp/sb-tool/sing-box rule-set decompile --output /dev/null "${out}"
+            ASSETS+=("${base}.srs")
+          done
+
+          (
+            cd dist
+            sha256sum "${ASSETS[@]}" > checksums.txt
+            ls -lh
+            cat checksums.txt
+          )
+
+      - name: Publish Atomic Rolling Release (rulesets-latest)
+        if: steps.gate.outputs.should_build == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FINGERPRINT: ${{ steps.gate.outputs.fingerprint }}
+          SB_VERSION: ${{ steps.sb.outputs.sb_version }}
+        run: |
+          set -euo pipefail
+          REPO_BASE="https://github.com/${GITHUB_REPOSITORY}/releases/download/rulesets-latest"
+
+          {
+            echo "## SingCtl 自定义 sing-box 规则集 (.srs)"
+            echo ""
+            echo "- **编译内核**: \`SagerNet/sing-box v${SB_VERSION}\`"
+            echo "- **发布通道**: 独立固定 \`prerelease\` 通道（\`--latest=false\`），仅包含最新产物，绝不影响主程序 \`/releases/latest\`"
+            echo ""
+            echo "### 规则清单与直接下载地址"
+            echo ""
+            echo "| 规则集 | 源文件 | 下载地址 |"
+            echo "| --- | --- | --- |"
+            for src in rules/*.json; do
+              base=$(basename "${src}" .json)
+              echo "| \`${base}.srs\` | [\`${src}\`](https://github.com/${GITHUB_REPOSITORY}/blob/main/${src}) | \`${REPO_BASE}/${base}.srs\` |"
+            done
+            echo ""
+            echo "### SHA256 Checksums"
+            echo '```'
+            cat dist/checksums.txt
+            echo '```'
+            echo ""
+            echo "<!-- rulesets-fingerprint: ${FINGERPRINT} -->"
+          } > /tmp/rulesets-notes.md
+
+          if gh release view rulesets-latest -R "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "==> 覆盖更新现有 rulesets-latest Release..."
+            gh release upload rulesets-latest \
+              dist/*.srs dist/checksums.txt \
+              --clobber -R "${GITHUB_REPOSITORY}"
+
+            gh release edit rulesets-latest \
+              --prerelease \
+              --latest=false \
+              --title "Custom RuleSets (sing-box .srs)" \
+              --notes-file /tmp/rulesets-notes.md \
+              -R "${GITHUB_REPOSITORY}"
+          else
+            echo "==> 首次创建 rulesets-latest Prerelease (latest=false)..."
+            gh release create rulesets-latest \
+              --target "${GITHUB_SHA}" \
+              --prerelease \
+              --latest=false \
+              --title "Custom RuleSets (sing-box .srs)" \
+              --notes-file /tmp/rulesets-notes.md \
+              dist/*.srs dist/checksums.txt \
+              -R "${GITHUB_REPOSITORY}"
+          fi
+          rm -rf /tmp/rulesets-notes.md /tmp/sb-tool

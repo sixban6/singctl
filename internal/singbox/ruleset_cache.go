@@ -193,6 +193,14 @@ func LocalizeRuleSets(jsonStr string, opts LocalizeOptions) (string, RuleSetStat
 			if dlURL == "" && meta.Original != nil {
 				dlURL, _ = meta.Original["url"].(string)
 			}
+			if rewritten, changed := CanonicalizeRuleSetURL(dlURL); changed {
+				dlURL = rewritten
+				meta.URL = rewritten
+				if meta.Original != nil {
+					meta.Original["url"] = rewritten
+				}
+				manifest[tag] = meta
+			}
 			if dlURL != "" {
 				if !opts.Silent {
 					log.Warn("⚠️ 检测到本地规则集文件缺失 (%s)，正在尝试从远程重新下载恢复...", tag)
@@ -211,6 +219,10 @@ func LocalizeRuleSets(jsonStr string, opts LocalizeOptions) (string, RuleSetStat
 
 		if typ != "remote" || url == "" {
 			continue
+		}
+		if rewritten, changed := CanonicalizeRuleSetURL(url); changed {
+			url = rewritten
+			entry["url"] = rewritten
 		}
 		stats.Remote++
 		tasks = append(tasks, ruleSetTask{idx: i, tag: tag, url: url, format: format, entry: entry})
@@ -494,6 +506,15 @@ func RefreshConfigCache(configPath string, opts LocalizeOptions) (bool, RuleSetS
 			meta, ok := manifest[tag]
 			if !ok || meta.URL == "" {
 				continue
+			}
+			if rewritten, changed := CanonicalizeRuleSetURL(meta.URL); changed {
+				meta.URL = rewritten
+				if meta.Original != nil {
+					meta.Original["url"] = rewritten
+				}
+				// 切换权威来源后清零时间戳，促使立即从新地址拉取而非复用旧源 TTL 缓存
+				meta.UpdatedAt = ""
+				manifest[tag] = meta
 			}
 			format, _ := entry["format"].(string)
 			if format == "" {

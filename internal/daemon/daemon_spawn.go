@@ -38,14 +38,50 @@ func BuildDaemonSpawnEnv(parentEnv []string) []string {
 			}
 			continue
 		}
-		if k == envDaemonized {
+		if k == EnvDaemonized {
 			continue
 		}
 		out = append(out, kv)
 	}
-	out = append(out, envDaemonized+"=1")
+	out = append(out, EnvDaemonized+"=1")
 	if deferHandoff {
 		out = append(out, EnvDeferWebHandoff+"=1")
+	}
+	return out
+}
+
+// BuildCleanSubprocessEnv 基于 parentEnv 构造干净的子进程环境变量：
+// 若 parentEnv == nil 则读取当前进程 os.Environ()；
+// 显式剥离 SINGCTL_DAEMONIZED 及 extra 指定键（传入 "KEY=" 则仅移除不追加，传入 "KEY=VAL" 则去重覆写；并阻止通过 extra 重新注入 SINGCTL_DAEMONIZED）。
+func BuildCleanSubprocessEnv(parentEnv []string, extra ...string) []string {
+	base := parentEnv
+	if base == nil {
+		base = os.Environ()
+	}
+	drop := make(map[string]struct{}, len(extra)+1)
+	drop[EnvDaemonized] = struct{}{}
+	for _, kv := range extra {
+		if k, _, ok := strings.Cut(kv, "="); ok && k != "" {
+			drop[k] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(base)+len(extra))
+	for _, kv := range base {
+		k, _, ok := strings.Cut(kv, "=")
+		if !ok {
+			continue
+		}
+		if _, shouldDrop := drop[k]; shouldDrop {
+			continue
+		}
+		out = append(out, kv)
+	}
+	for _, kv := range extra {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok || k == "" || k == EnvDaemonized || v == "" {
+			continue
+		}
+		out = append(out, kv)
 	}
 	return out
 }

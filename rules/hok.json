@@ -1,0 +1,31 @@
+{
+  "version": 2,
+  "rules": [
+    {
+      "domain_suffix": [
+        "anticheatexpert.com",
+        "gcloud.qq.com",
+        "gcloudcs.com",
+        "gcloudsdk.com",
+        "gvoice.qq.com",
+        "gvoiceplat.com",
+        "hkgcloudcs.com",
+        "hok5v5.com",
+        "honorofkings.com",
+        "iegcom.com",
+        "igamecj.com",
+        "intlgame.com",
+        "levelinfinite.com",
+        "nagcloudcs.com",
+        "oalstv-inapps.appsflyersdk.com",
+        "oalstv-skadsdkless.appsflyersdk.com",
+        "playerinfinite.com",
+        "proximabeta.com",
+        "sgameglobal.com",
+        "singaporepaya.com",
+        "tencent-gcloud.com",
+        "vasdgame.com"
+      ]
+    }
+  ]
+}

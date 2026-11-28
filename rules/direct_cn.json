@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "rules": [
+    {
+      "domain_suffix": [
+        "duse0.com",
+        "duse1.com",
+        "duse2.com",
+        "duse3.com",
+        "mediycn-my.sharepoint.com",
+        "pan.mediy.cn"
+      ]
+    }
+  ]
+}

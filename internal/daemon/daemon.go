@@ -28,7 +28,8 @@ import (
 )
 
 const (
-	envDaemonized                         = "SINGCTL_DAEMONIZED"
+	// EnvDaemonized 标记当前进程已进入后台守护进程前台主循环，禁止泄漏给重启/热更新等子进程。
+	EnvDaemonized                         = "SINGCTL_DAEMONIZED"
 	readyFd                               = 3
 	ruleSetRetryCooldown                  = 30 * time.Minute
 	p2pDirectEventInterval                = 2 * time.Hour
@@ -461,7 +462,7 @@ func (d *Daemon) reloadConfigIfChanged(force bool) (bool, *config.Config) {
 
 // Start 启动守护进程。
 func (d *Daemon) Start() error {
-	if os.Getenv(envDaemonized) == "1" {
+	if os.Getenv(EnvDaemonized) == "1" {
 		return d.runForeground()
 	}
 	if err := AcquirePidLock(); err != nil {
@@ -702,6 +703,7 @@ func (d *Daemon) BuildForegroundLifecycle() *lifecycle.Group {
 }
 
 func (d *Daemon) runForeground() error {
+	_ = os.Unsetenv(EnvDaemonized)
 	lc := d.BuildForegroundLifecycle()
 	if err := lc.Start(d.ctx); err != nil {
 		notifyParentReady(false)

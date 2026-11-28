@@ -22,6 +22,12 @@ func TestSharedConstants_ContractsAndPaths(t *testing.T) {
 	if constant.GitHubRepoURL != "https://github.com/sixban6/singctl" {
 		t.Fatalf("GitHubRepoURL = %q, want %q", constant.GitHubRepoURL, "https://github.com/sixban6/singctl")
 	}
+	if constant.RuleSetsReleaseTag != "rulesets-latest" {
+		t.Fatalf("RuleSetsReleaseTag = %q, want %q", constant.RuleSetsReleaseTag, "rulesets-latest")
+	}
+	if wantBase := "https://github.com/sixban6/singctl/releases/download/rulesets-latest"; constant.RuleSetReleaseBaseURL != wantBase {
+		t.Fatalf("RuleSetReleaseBaseURL = %q, want %q", constant.RuleSetReleaseBaseURL, wantBase)
+	}
 	if constant.SingBoxConfigFile == "" || constant.AdGuardConfigFile == "" || constant.CaddyMtlsCACert == "" {
 		t.Fatalf("expected non-empty platform paths on %s: singbox=%q adguard=%q ca=%q",
 			runtime.GOOS, constant.SingBoxConfigFile, constant.AdGuardConfigFile, constant.CaddyMtlsCACert)

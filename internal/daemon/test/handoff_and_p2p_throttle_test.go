@@ -4,6 +4,7 @@ package daemon_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -77,13 +78,157 @@ func TestBuildDaemonSpawnEnv_PropagatesDeferWebHandoff(t *testing.T) {
 					deferCount++
 				}
 			}
-			if daemonizedCount != 1 {
+	if daemonizedCount != 1 {
 				t.Fatalf("expected exactly 1 SINGCTL_DAEMONIZED entry, got %d (%v)", daemonizedCount, got)
 			}
 			if tc.wantDefer == "1" && deferCount != 1 {
 				t.Fatalf("expected exactly 1 %s entry, got %d (%v)", daemon.EnvDeferWebHandoff, deferCount, got)
 			}
 		})
+	}
+}
+
+func TestBuildCleanSubprocessEnv_StripsDaemonizedAndAppliesExtras(t *testing.T) {
+	tests := []struct {
+		name      string
+		parentEnv []string
+		extra     []string
+		wantSet   map[string]string
+		wantUnset []string
+	}{
+		{
+			name:      "strips_single_and_duplicate_daemonized_preserves_other",
+			parentEnv: []string{"PATH=/usr/bin", "SINGCTL_DAEMONIZED=1", "SINGCTL_DAEMONIZED=true", "HOME=/root"},
+			extra:     []string{"LC_ALL=C"},
+			wantSet:   map[string]string{"PATH": "/usr/bin", "HOME": "/root", "LC_ALL": "C"},
+			wantUnset: []string{daemon.EnvDaemonized},
+		},
+		{
+			name:      "extra_empty_value_explicitly_removes_key",
+			parentEnv: []string{"PATH=/usr/bin", "REMOVE_ME=secret", "KEEP=yes"},
+			extra:     []string{"REMOVE_ME=", "EXTRA=ok"},
+			wantSet:   map[string]string{"PATH": "/usr/bin", "KEEP": "yes", "EXTRA": "ok"},
+			wantUnset: []string{daemon.EnvDaemonized, "REMOVE_ME"},
+		},
+		{
+			name:      "empty_slice_parent_env_does_not_leak_daemonized",
+			parentEnv: []string{},
+			extra:     []string{"LC_ALL=C", "SINGCTL_DAEMONIZED=1"},
+			wantSet:   map[string]string{"LC_ALL": "C"},
+			wantUnset: []string{daemon.EnvDaemonized},
+		},
+		{
+			name:      "nil_parent_env_reads_os_environ_and_strips_daemonized",
+			parentEnv: nil,
+			extra:     []string{"LC_ALL=C"},
+			wantSet:   map[string]string{"LC_ALL": "C"},
+			wantUnset: []string{daemon.EnvDaemonized},
+		},
+	}
+
+	t.Setenv(daemon.EnvDaemonized, "1")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := daemon.BuildCleanSubprocessEnv(tc.parentEnv, tc.extra...)
+			gotMap := envSliceToMap(got)
+			for k, wantV := range tc.wantSet {
+				if gotMap[k] != wantV {
+					t.Fatalf("expected %s=%q, got %q (env=%v)", k, wantV, gotMap[k], got)
+				}
+			}
+			for _, k := range tc.wantUnset {
+				if _, exists := gotMap[k]; exists {
+					t.Fatalf("expected %s stripped from env, found %q (env=%v)", k, gotMap[k], got)
+				}
+			}
+		})
+	}
+}
+
+func TestBuildDetachedHandoffCmd_StripsDaemonizedEnv(t *testing.T) {
+	tests := []struct {
+		name     string
+		cfgPath  string
+		wantArgs []string
+	}{
+		{
+			name:     "with_config_path",
+			cfgPath:  "/etc/singctl/singctl.yaml",
+			wantArgs: []string{"/usr/bin/singctl", "--config", "/etc/singctl/singctl.yaml", "dm", "restart"},
+		},
+		{
+			name:     "without_config_path",
+			cfgPath:  "  ",
+			wantArgs: []string{"/usr/bin/singctl", "dm", "restart"},
+		},
+	}
+
+	parentEnv := []string{"PATH=/usr/bin", "SINGCTL_DAEMONIZED=1", "CUSTOM_KEEP=1"}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := daemon.BuildDetachedHandoffCmd("/usr/bin/singctl", tc.cfgPath, parentEnv)
+			if cmd == nil {
+				t.Fatal("expected non-nil *exec.Cmd")
+			}
+			if len(cmd.Args) != len(tc.wantArgs) {
+				t.Fatalf("unexpected cmd.Args %v, want %v", cmd.Args, tc.wantArgs)
+			}
+			for i := range tc.wantArgs {
+				if cmd.Args[i] != tc.wantArgs[i] {
+					t.Fatalf("cmd.Args[%d] = %q, want %q", i, cmd.Args[i], tc.wantArgs[i])
+				}
+			}
+			if cmd.Stdin != nil || cmd.Stdout != nil || cmd.Stderr != nil {
+				t.Fatalf("expected nil stdio streams on detached cmd")
+			}
+			if cmd.Env == nil {
+				t.Fatalf("expected explicit non-nil cmd.Env stripped of %s, got nil", daemon.EnvDaemonized)
+			}
+			envMap := envSliceToMap(cmd.Env)
+			if _, leaked := envMap[daemon.EnvDaemonized]; leaked {
+				t.Fatalf("expected %s stripped from cmd.Env, got %v", daemon.EnvDaemonized, cmd.Env)
+			}
+			if envMap["PATH"] != "/usr/bin" || envMap["CUSTOM_KEEP"] != "1" {
+				t.Fatalf("expected parent env preserved, got %v", cmd.Env)
+			}
+		})
+	}
+}
+
+func TestDaemonRunForeground_UnsetsDaemonizedEnv(t *testing.T) {
+	t.Setenv(daemon.EnvDaemonized, "1")
+	tmpDir := t.TempDir()
+	sentinel := errors.New("stop foreground start after pid hook")
+	var envInside string
+	pidCalled := false
+
+	d := daemon.NewDaemonWithOptions(&config.Config{}, daemon.DaemonOptions{
+		Version: "v1.0.0-test",
+		Paths: daemon.Paths{
+			PidFile:   filepath.Join(tmpDir, "daemon.pid"),
+			StateFile: filepath.Join(tmpDir, "daemon.state"),
+			LogFile:   filepath.Join(tmpDir, "daemon.log"),
+		},
+		SkipSignalSetup: true,
+		PidWriter: func() error {
+			pidCalled = true
+			envInside = os.Getenv(daemon.EnvDaemonized)
+			return sentinel
+		},
+	})
+
+	err := d.Start()
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("expected sentinel error from foreground lifecycle, got %v", err)
+	}
+	if !pidCalled {
+		t.Fatal("expected PidWriter invoked inside runForeground()")
+	}
+	if envInside != "" {
+		t.Fatalf("expected %s unset inside runForeground before lifecycle start, got %q", daemon.EnvDaemonized, envInside)
+	}
+	if got := os.Getenv(daemon.EnvDaemonized); got != "" {
+		t.Fatalf("expected %s cleared in process env, got %q", daemon.EnvDaemonized, got)
 	}
 }
 

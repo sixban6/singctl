@@ -359,6 +359,21 @@ func (t *singctlAutoUpdateTarget) Run(ctx context.Context, cfg *config.Config) (
 	}, nil
 }
 
+// BuildDetachedHandoffCmd 构造脱离父守护进程会话与控制流、且已剥离 SINGCTL_DAEMONIZED 的平滑自重启命令。
+func BuildDetachedHandoffCmd(exePath, cfgPath string, parentEnv []string) *exec.Cmd {
+	args := []string{"dm", "restart"}
+	if strings.TrimSpace(cfgPath) != "" {
+		args = []string{"--config", cfgPath, "dm", "restart"}
+	}
+	cmd := exec.Command(exePath, args...)
+	cmd.Stdin = nil
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	cmd.Env = BuildCleanSubprocessEnv(parentEnv)
+	detachExecCmd(cmd)
+	return cmd
+}
+
 func scheduleDetachedSingCtlHandoff(cfgPath string) {
 	exePath, err := updater.ResolveExecutablePath()
 	if err != nil || strings.TrimSpace(exePath) == "" {
@@ -374,15 +389,7 @@ func scheduleDetachedSingCtlHandoff(cfgPath string) {
 			}
 			cancel()
 		}
-		args := []string{"dm", "restart"}
-		if strings.TrimSpace(cfgPath) != "" {
-			args = []string{"--config", cfgPath, "dm", "restart"}
-		}
-		cmd := exec.Command(exePath, args...)
-		cmd.Stdin = nil
-		cmd.Stdout = nil
-		cmd.Stderr = nil
-		detachExecCmd(cmd)
+		cmd := BuildDetachedHandoffCmd(exePath, cfgPath, os.Environ())
 		if startErr := cmd.Start(); startErr != nil {
 			logger.Warn("[AutoUpdate] 脱离重启 singctl dm 失败: %v", startErr)
 		}

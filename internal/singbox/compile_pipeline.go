@@ -132,6 +132,19 @@ var defaultConfigCompileStages = []CompileStage{
 		},
 	},
 	{
+		Name: "canonicalize_ruleset_urls",
+		Apply: func(_ *ConfigGenerator, doc *CompileDoc) error {
+			d, err := doc.EnsureDoc()
+			if err != nil {
+				return err
+			}
+			if RewriteLegacyRuleSetURLsInDoc(d) {
+				doc.dirty = true
+			}
+			return nil
+		},
+	},
+	{
 		Name: "inject_traffic_routing",
 		AppliesTo: func(g *ConfigGenerator, _ *CompileDoc) bool {
 			return g != nil && g.config != nil && !g.config.IsDirectAuditMode()

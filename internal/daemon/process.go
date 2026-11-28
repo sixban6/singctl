@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"singctl/internal/common/execx"
 	"singctl/internal/common/fsx"
 	"singctl/internal/common/proc"
 	"singctl/internal/updater"
@@ -372,7 +373,8 @@ func RestartDaemon(configPath string) error {
 		devNull = nFile
 		defer nFile.Close()
 	}
-	return RunCmdTimeoutIO(context.Background(), defaultDaemonRunTimeout, devNull, os.Stdout, os.Stderr, exe, args...)
+	cleanEnv := BuildCleanSubprocessEnv(os.Environ(), "LC_ALL=C")
+	return execx.RunIO(context.Background(), defaultDaemonRunTimeout, cleanEnv, devNull, os.Stdout, os.Stderr, exe, args...)
 }
 
 // IsSingBoxRunning 检查 sing-box 进程是否运行。

@@ -18,6 +18,12 @@ const (
 	// CaddyReleaseTag 为本仓库独立托管的定制版 Caddy (Cloudflare DNS + Layer4) 滚动 Prerelease 标签（--latest=false）。
 	CaddyReleaseTag = "caddy-latest"
 
+	// RuleSetsReleaseTag 为本仓库独立托管的自定义 sing-box 规则集 (.srs) 滚动 Prerelease 标签（--latest=false）。
+	RuleSetsReleaseTag = "rulesets-latest"
+
+	// RuleSetReleaseBaseURL 为自定义规则集滚动发布通道的权威下载前缀。
+	RuleSetReleaseBaseURL = GitHubRepoURL + "/releases/download/" + RuleSetsReleaseTag
+
 	AppName          = "SFM"
 	ExitNode         = "exit-node"
 	MainRouter       = "router"

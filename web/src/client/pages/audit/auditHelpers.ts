@@ -31,7 +31,7 @@ export const PRESET_RULESETS: { label: string; url: string; reason: string }[] =
   },
   {
     label: '🎮 王者荣耀 (hok.srs)',
-    url: 'https://raw.githubusercontent.com/sixban6/rulesets/main/rule/hok.srs',
+    url: 'https://github.com/sixban6/singctl/releases/download/rulesets-latest/hok.srs',
     reason: '规则集封禁: 🎮 王者荣耀 (hok.srs)',
   },
   {
@@ -91,13 +91,13 @@ export const PRESET_RULESETS: { label: string; url: string; reason: string }[] =
   },
   {
     label: '📱 抖音短视频 (douyin.srs)',
-    url: 'https://raw.githubusercontent.com/sixban6/rulesets/main/rule/douyin.srs',
+    url: 'https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/douyin.srs',
     reason: '规则集封禁: 📱 抖音短视频 (douyin.srs)',
   },
   {
-    label: '📱 微信视频号 (wx_shortvideo.srs)',
-    url: 'https://raw.githubusercontent.com/sixban6/rulesets/main/rule/wx_shortvideo.srs',
-    reason: '规则集封禁: 📱 微信视频号 (wx_shortvideo.srs)',
+    label: '📱 微信视频号 (wx_video.srs)',
+    url: 'https://github.com/sixban6/singctl/releases/download/rulesets-latest/wx_video.srs',
+    reason: '规则集封禁: 📱 微信视频号 (wx_video.srs)',
   },
 ];
 

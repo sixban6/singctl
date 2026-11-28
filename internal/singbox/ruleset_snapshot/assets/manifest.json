@@ -156,13 +156,13 @@
       "updated_at": "2026-08-17T16:46:29Z"
     },
     "geosite-ctm_cn": {
-      "url": "https://github.com/sixban6/rulesets/raw/refs/heads/main/rule/direct_cn.srs",
+      "url": "https://github.com/sixban6/singctl/releases/download/rulesets-latest/direct_cn.srs",
       "format": "binary",
       "file": "geosite-ctm_cn.srs.gz",
       "sha256": "b93b38fffd3f80abe242feed5451f043002d26dd9380033b8cc620bcaa3cb6d6",
       "size": 110,
       "via": "direct",
-      "updated_at": "2026-08-17T16:46:29Z"
+      "updated_at": "2026-11-28T10:30:00Z"
     },
     "geosite-ctrip": {
       "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/ctrip.srs",
@@ -228,13 +228,13 @@
       "updated_at": "2026-08-17T16:46:29Z"
     },
     "geosite-hok": {
-      "url": "https://github.com/sixban6/rulesets/raw/refs/heads/main/rule/hok.srs",
+      "url": "https://github.com/sixban6/singctl/releases/download/rulesets-latest/hok.srs",
       "format": "binary",
       "file": "geosite-hok.srs.gz",
       "sha256": "d159fe1ce64a5c6e53aa3eaafb89d0c6bb64d619abbf698df932e36a5ff000bf",
       "size": 289,
       "via": "direct",
-      "updated_at": "2026-11-08T07:25:00Z"
+      "updated_at": "2026-11-28T10:30:00Z"
     },
     "geosite-jd": {
       "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/jd.srs",

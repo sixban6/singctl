@@ -1,0 +1,22 @@
+{
+  "version": 2,
+  "rules": [
+    {
+      "domain_suffix": [
+        "channels.weixin.qq.com",
+        "finder.video.qq.com",
+        "findercdn.video.qq.com",
+        "finderlivereplay.video.qq.com",
+        "findermp.video.qq.com",
+        "findershort.weixin.qq.com",
+        "hkfindershort.weixin.qq.com",
+        "mlfindershort.weixin.qq.com",
+        "sgfindershort.wechat.com",
+        "szaxshort.weixin.qq.com",
+        "szfindershort.weixin.qq.com",
+        "vweixinf.tc.qq.com",
+        "wxvideo.tc.qq.com"
+      ]
+    }
+  ]
+}

@@ -258,10 +258,14 @@ func TestWebUI_ActionHandoffConditions_TableDriven(t *testing.T) {
 
 func TestBuildCleanSubprocessEnv_StripsDeferWebHandoffAndRequestShutdownRaceSafe(t *testing.T) {
 	t.Setenv(daemon.EnvDeferWebHandoff, "1")
+	t.Setenv(daemon.EnvDaemonized, "1")
 	env := webui.BuildCleanSubprocessEnv("TERM=dumb")
 	for _, kv := range env {
 		if strings.HasPrefix(kv, daemon.EnvDeferWebHandoff+"=") {
 			t.Fatalf("expected BuildCleanSubprocessEnv to strip %s, found %q", daemon.EnvDeferWebHandoff, kv)
+		}
+		if strings.HasPrefix(kv, daemon.EnvDaemonized+"=") {
+			t.Fatalf("expected BuildCleanSubprocessEnv to strip %s, found %q", daemon.EnvDaemonized, kv)
 		}
 	}
 

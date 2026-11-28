@@ -243,12 +243,13 @@ func NormalizeLegacyWildcardListen(listen string) string {
 }
 
 // BuildCleanSubprocessEnv 构造干净的子进程环境变量：
-// 强制剥离后台标记（SINGCTL_WEB_BACKGROUND / SINGCTL_WEB_READY_FD / SINGCTL_FROM_WEBUI / SINGCTL_DEFER_WEB_HANDOFF），
+// 强制剥离后台与看门狗标记（SINGCTL_WEB_BACKGROUND / SINGCTL_WEB_READY_FD / SINGCTL_DAEMONIZED / SINGCTL_FROM_WEBUI / SINGCTL_DEFER_WEB_HANDOFF），
 // 并对传入的 extra (KEY=VAL) 去重覆写；若传入 KEY=（空值）亦可显式移除父环境同名键。
 func BuildCleanSubprocessEnv(extra ...string) []string {
 	return execx.CleanEnv([]string{
 		envWebBackground,
 		envWebReadyFd,
+		daemon.EnvDaemonized,
 		daemon.EnvFromWebUI,
 		daemon.EnvDeferWebHandoff,
 	}, extra...)
