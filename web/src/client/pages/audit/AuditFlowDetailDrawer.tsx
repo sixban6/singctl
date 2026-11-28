@@ -191,7 +191,7 @@ export const AuditFlowDetailDrawer: React.FC<AuditFlowDetailDrawerProps> = ({
                 icon={<Bot className="w-3.5 h-3.5" />}
                 onClick={() => onReviewSingleFlow(detailFlow, true)}
               >
-                重新 AI 研判
+                重新 AI 分析
               </Button>
               {!isAuditOnlyMode && !protectedTarget && onUpsertRouteRule && (
                 <button

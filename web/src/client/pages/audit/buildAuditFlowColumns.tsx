@@ -338,16 +338,21 @@ export function buildAuditFlowColumns({
                     type="button"
                     onClick={() => onReviewSingleFlow(f, true)}
                     disabled={pending}
-                    title="重新触发 AI 研判"
-                    className="text-[10.5px] text-accent hover:underline cursor-pointer"
+                    title={pending ? '正在重新 AI 分析…' : '重新 AI 分析'}
+                    aria-label={pending ? '正在重新 AI 分析' : '重新 AI 分析'}
+                    className={`w-5 h-5 inline-flex items-center justify-center rounded-md border transition-all ${
+                      pending
+                        ? 'opacity-100 bg-accent/15 border-accent/40 text-accent cursor-wait'
+                        : 'opacity-100 sm:opacity-0 sm:group-hover/row:opacity-100 focus-visible:opacity-100 bg-surface2/80 border-subtle/80 text-muted hover:text-accent hover:border-accent/40 hover:bg-accent/10 cursor-pointer'
+                    }`}
                   >
-                    重判
+                    <RefreshCw className={`w-3 h-3 ${pending ? 'animate-spin' : ''}`} />
                   </button>
                 </>
               ) : pending ? (
-                <span className="inline-flex items-center gap-1 text-[10.5px] text-muted">
-                  <RefreshCw className="w-2.5 h-2.5 animate-spin text-accent" />
-                  AI中
+                <span className="inline-flex items-center gap-1 text-[10.5px] text-accent">
+                  <RefreshCw className="w-2.5 h-2.5 animate-spin" />
+                  AI 分析中
                 </span>
               ) : (
                 <button
@@ -356,7 +361,7 @@ export function buildAuditFlowColumns({
                   className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-surface2 border border-subtle text-[10.5px] text-secondary hover:text-primary cursor-pointer"
                 >
                   <Bot className="w-2.5 h-2.5" />
-                  AI研判
+                  AI 分析
                 </button>
               )}
             </div>
