@@ -424,3 +424,239 @@ func TestWifiAPI_AuthGuardOverviewScanApplyAndChassis(t *testing.T) {
 		}
 	})
 }
+
+func TestWifiAPI_ChassisSocketBufferTune(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "singctl.yaml")
+	if err := os.WriteFile(cfgPath, []byte("subs: []\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	quicSysctl := filepath.Join(tmp, "99-quic-buffer.conf")
+	sysctlFile := filepath.Join(tmp, "sysctl.conf")
+	_ = os.WriteFile(sysctlFile, []byte("# sysctl\n"), 0644)
+
+	var mu sync.Mutex
+	files := map[string][]byte{
+		"/proc/meminfo":                                     []byte("MemTotal:       490496 kB\n"),
+		"/proc/sys/net/core/rmem_max":                       []byte("212992\n"),
+		"/proc/sys/net/core/wmem_max":                       []byte("212992\n"),
+		"/proc/sys/net/core/rmem_default":                   []byte("212992\n"),
+		"/proc/sys/net/core/wmem_default":                   []byte("212992\n"),
+		"/proc/sys/net/core/default_qdisc":                  []byte("fq_codel\n"),
+		"/proc/sys/net/ipv4/tcp_congestion_control":         []byte("cubic\n"),
+		"/proc/sys/net/ipv4/tcp_available_congestion_control": []byte("reno cubic bbr\n"),
+		"/proc/net/snmp": []byte("Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors\nUdp: 100 0 0 80 15 0\n"),
+	}
+
+	wifiSvc := wifiopt.NewService(wifiopt.Env{
+		GOOS:           "linux",
+		SysctlFile:     sysctlFile,
+		QuicSysctlFile: quicSysctl,
+		CPUCount:       2,
+		ReadFile: func(p string) ([]byte, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			if b, ok := files[p]; ok {
+				return slices.Clone(b), nil
+			}
+			return os.ReadFile(p)
+		},
+		WriteFile0600: func(p string, d []byte) error {
+			mu.Lock()
+			defer mu.Unlock()
+			if strings.HasPrefix(p, "/proc/") || strings.HasPrefix(p, "/sys/") {
+				files[p] = slices.Clone(d)
+				return nil
+			}
+			return os.WriteFile(p, d, 0644)
+		},
+		Glob: func(string) ([]string, error) { return nil, nil },
+		RunCmd: func(_ context.Context, name string, args ...string) ([]byte, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			if name == "sysctl" && len(args) >= 2 && args[0] == "-p" {
+				raw, err := os.ReadFile(args[1])
+				if err != nil {
+					return nil, err
+				}
+				for line := range strings.SplitSeq(string(raw), "\n") {
+					tline := strings.TrimSpace(line)
+					if tline == "" || strings.HasPrefix(tline, "#") {
+						continue
+					}
+					if k, v, ok := strings.Cut(tline, "="); ok {
+						procPath := "/proc/sys/" + strings.ReplaceAll(strings.TrimSpace(k), ".", "/")
+						files[procPath] = []byte(strings.TrimSpace(v) + "\n")
+					}
+				}
+			}
+			return nil, nil
+		},
+	})
+
+	srv := webui.New(webui.Options{
+		ConfigPath:            cfgPath,
+		WifiOptServiceForTest: wifiSvc,
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/wifi/chassis", bytes.NewBufferString(`{"tuneSocketBuffer":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /api/wifi/chassis status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp wifiopt.ChassisApplyResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode chassis result: %v", err)
+	}
+	if !resp.OK || !resp.RestartSingBoxRecommended || resp.Chassis.SocketBuffer == nil || !resp.Chassis.SocketBuffer.Optimal {
+		t.Fatalf("expected RestartSingBoxRecommended + SocketBuffer optimal, got %+v", resp)
+	}
+	if resp.Chassis.SocketBuffer.RmemMax != 4194304 {
+		t.Fatalf("expected 479MB tier rmemMax=4194304, got %d", resp.Chassis.SocketBuffer.RmemMax)
+	}
+}
+
+func TestChassisAndCapabilities_StatusAndEndpoint(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "singctl.yaml")
+	if err := os.WriteFile(cfgPath, []byte("subs: []\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	quicSysctl := filepath.Join(tmp, "99-quic-buffer.conf")
+	sysctlFile := filepath.Join(tmp, "sysctl.conf")
+	_ = os.WriteFile(sysctlFile, []byte("# sysctl\n"), 0644)
+
+	var mu sync.Mutex
+	files := map[string][]byte{
+		"/proc/meminfo":                                     []byte("MemTotal:       1843200 kB\n"),
+		"/proc/sys/net/core/rmem_max":                       []byte("212992\n"),
+		"/proc/sys/net/core/wmem_max":                       []byte("212992\n"),
+		"/proc/sys/net/core/rmem_default":                   []byte("212992\n"),
+		"/proc/sys/net/core/wmem_default":                   []byte("212992\n"),
+		"/proc/sys/net/core/default_qdisc":                  []byte("fq_codel\n"),
+		"/proc/sys/net/ipv4/tcp_congestion_control":         []byte("cubic\n"),
+		"/proc/sys/net/ipv4/tcp_available_congestion_control": []byte("reno cubic bbr\n"),
+		"/proc/net/snmp": []byte("Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors\nUdp: 100 0 0 80 0 0\n"),
+	}
+
+	wifiSvc := wifiopt.NewService(wifiopt.Env{
+		GOOS:           "linux",
+		IsOpenWrt:      func() bool { return false },
+		SysctlFile:     sysctlFile,
+		QuicSysctlFile: quicSysctl,
+		CPUCount:       4,
+		ReadFile: func(p string) ([]byte, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			if b, ok := files[p]; ok {
+				return slices.Clone(b), nil
+			}
+			return os.ReadFile(p)
+		},
+		WriteFile0600: func(p string, d []byte) error {
+			mu.Lock()
+			defer mu.Unlock()
+			if strings.HasPrefix(p, "/proc/") || strings.HasPrefix(p, "/sys/") {
+				files[p] = slices.Clone(d)
+				return nil
+			}
+			return os.WriteFile(p, d, 0644)
+		},
+		Glob: func(string) ([]string, error) { return nil, nil },
+		RunCmd: func(_ context.Context, name string, args ...string) ([]byte, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			if name == "sysctl" && len(args) >= 2 && args[0] == "-p" {
+				raw, err := os.ReadFile(args[1])
+				if err != nil {
+					return nil, err
+				}
+				for line := range strings.SplitSeq(string(raw), "\n") {
+					tline := strings.TrimSpace(line)
+					if tline == "" || strings.HasPrefix(tline, "#") {
+						continue
+					}
+					if k, v, ok := strings.Cut(tline, "="); ok {
+						procPath := "/proc/sys/" + strings.ReplaceAll(strings.TrimSpace(k), ".", "/")
+						files[procPath] = []byte(strings.TrimSpace(v) + "\n")
+					}
+				}
+			}
+			return nil, nil
+		},
+	})
+
+	caps := webui.HostCapabilities{
+		Firewall: true,
+		Vlan:     false,
+		Wifi:     false,
+		Chassis:  true,
+	}
+	srvAuth := webui.New(webui.Options{
+		ConfigPath:              cfgPath,
+		Password:                "pass1234",
+		WifiOptServiceForTest:   wifiSvc,
+		HostCapabilitiesForTest: &caps,
+	})
+
+	// Unauthenticated GET /api/chassis must return 401.
+	recUnauth := httptest.NewRecorder()
+	srvAuth.Mux.ServeHTTP(recUnauth, httptest.NewRequest(http.MethodGet, "/api/chassis", nil))
+	if recUnauth.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for unauthenticated GET /api/chassis, got %d", recUnauth.Code)
+	}
+
+	srv := webui.New(webui.Options{
+		ConfigPath:              cfgPath,
+		WifiOptServiceForTest:   wifiSvc,
+		HostCapabilitiesForTest: &caps,
+	})
+
+	// GET /api/status exposes host.capabilities.
+	recStatus := httptest.NewRecorder()
+	srv.Mux.ServeHTTP(recStatus, httptest.NewRequest(http.MethodGet, "/api/status", nil))
+	if recStatus.Code != http.StatusOK {
+		t.Fatalf("GET /api/status status=%d body=%s", recStatus.Code, recStatus.Body.String())
+	}
+	var stPayload struct {
+		Host struct {
+			Capabilities webui.HostCapabilities `json:"capabilities"`
+		} `json:"host"`
+	}
+	if err := json.Unmarshal(recStatus.Body.Bytes(), &stPayload); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	if !stPayload.Host.Capabilities.Firewall || stPayload.Host.Capabilities.Vlan || stPayload.Host.Capabilities.Wifi || !stPayload.Host.Capabilities.Chassis {
+		t.Fatalf("unexpected capabilities: %+v", stPayload.Host.Capabilities)
+	}
+
+	// GET /api/chassis returns ChassisStatus with SocketBuffer without invoking wireless scans.
+	recChassis := httptest.NewRecorder()
+	srv.Mux.ServeHTTP(recChassis, httptest.NewRequest(http.MethodGet, "/api/chassis", nil))
+	if recChassis.Code != http.StatusOK {
+		t.Fatalf("GET /api/chassis status=%d body=%s", recChassis.Code, recChassis.Body.String())
+	}
+	var ch wifiopt.ChassisStatus
+	if err := json.Unmarshal(recChassis.Body.Bytes(), &ch); err != nil {
+		t.Fatalf("decode chassis: %v", err)
+	}
+	if !ch.Supported || ch.SocketBuffer == nil || ch.SocketBuffer.RecommendedRmemMax != 16777216 {
+		t.Fatalf("unexpected GET /api/chassis payload: %+v", ch)
+	}
+
+	// POST /api/chassis works identically to POST /api/wifi/chassis.
+	reqPost := httptest.NewRequest(http.MethodPost, "/api/chassis", bytes.NewBufferString(`{"tuneSocketBuffer":true}`))
+	reqPost.Header.Set("Content-Type", "application/json")
+	recPost := httptest.NewRecorder()
+	srv.Mux.ServeHTTP(recPost, reqPost)
+	if recPost.Code != http.StatusOK {
+		t.Fatalf("POST /api/chassis status=%d body=%s", recPost.Code, recPost.Body.String())
+	}
+	var postResp wifiopt.ChassisApplyResult
+	if err := json.Unmarshal(recPost.Body.Bytes(), &postResp); err != nil || !postResp.OK || !postResp.Chassis.Optimal {
+		t.Fatalf("unexpected POST /api/chassis resp=%+v err=%v", postResp, err)
+	}
+}
+

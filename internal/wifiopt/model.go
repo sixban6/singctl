@@ -1,7 +1,11 @@
 // 文件职责：定义 OpenWrt Wi-Fi 体检、周边信道干扰扫描、安全一键优化与高并发底盘调优的纯数据模型与入参校验契约。
 package wifiopt
 
-import "errors"
+import (
+	"errors"
+
+	"singctl/internal/common/socktune"
+)
 
 var (
 	// ErrUnsupported 表示当前宿主机无 OpenWrt 无线射频环境。
@@ -135,7 +139,7 @@ type RPSInterfaceStatus struct {
 	Balanced    bool   `json:"balanced"`
 }
 
-// ChassisStatus 描述高并发有线底盘状态（多核 RPS 均衡与 Conntrack 连接表上限）。
+// ChassisStatus 描述高并发有线底盘状态（多核 RPS 均衡、Conntrack 连接表上限与 QUIC/UDP Socket 缓冲）。
 type ChassisStatus struct {
 	Supported            bool                 `json:"supported"`
 	CPUCores             int                  `json:"cpuCores"`
@@ -146,6 +150,7 @@ type ChassisStatus struct {
 	ConntrackMax         int                  `json:"conntrackMax"`
 	RecommendedConntrack int                  `json:"recommendedConntrack"`
 	ConntrackOptimal     bool                 `json:"conntrackOptimal"`
+	SocketBuffer         *socktune.Status     `json:"socketBuffer,omitempty"`
 	Optimal              bool                 `json:"optimal"`
 }
 
@@ -217,14 +222,17 @@ type ApplyResult struct {
 
 // ChassisApplyRequest 描述 POST /api/wifi/chassis 请求。
 type ChassisApplyRequest struct {
-	EnableRPS     bool `json:"enableRps"`
-	TuneConntrack bool `json:"tuneConntrack"`
-	ConntrackMax  int  `json:"conntrackMax,omitempty"`
+	EnableRPS        bool `json:"enableRps"`
+	TuneConntrack    bool `json:"tuneConntrack"`
+	ConntrackMax     int  `json:"conntrackMax,omitempty"`
+	TuneSocketBuffer bool `json:"tuneSocketBuffer,omitempty"`
 }
 
 // ChassisApplyResult 描述底盘加速应用结果。
 type ChassisApplyResult struct {
-	OK      bool          `json:"ok"`
-	Actions []string      `json:"actions"`
-	Chassis ChassisStatus `json:"chassis"`
+	OK                        bool          `json:"ok"`
+	Actions                   []string      `json:"actions"`
+	Warnings                  []string      `json:"warnings,omitzero"`
+	RestartSingBoxRecommended bool          `json:"restartSingBoxRecommended,omitempty"`
+	Chassis                   ChassisStatus `json:"chassis"`
 }

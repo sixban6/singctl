@@ -58,6 +58,10 @@ func (s *Server) collectStatusSnapshot(ctx context.Context) map[string]any {
 	go func() { defer wg.Done(); as = s.autoStartStatusSummary(ctx) }()
 	wg.Wait()
 
+	if host != nil {
+		host["capabilities"] = s.hostCapabilities(ctx, fw.Supported)
+	}
+
 	return map[string]any{
 		"host":      host,
 		"singbox":   sb,
@@ -131,6 +135,18 @@ func (s *Server) collectHostTelemetry() sysinfo.HostTelemetry {
 		return sysinfo.CollectHostTelemetryWithDeps(s.cpuSampler, *s.opts.TelemetryDeps)
 	}
 	return sysinfo.CollectHostTelemetry(s.cpuSampler)
+}
+
+func (s *Server) hostCapabilities(ctx context.Context, fwSupported bool) HostCapabilities {
+	if s != nil && s.opts.HostCapabilitiesForTest != nil {
+		return *s.opts.HostCapabilitiesForTest
+	}
+	return HostCapabilities{
+		Firewall: fwSupported,
+		Vlan:     s.vlanService().QuickSupported(),
+		Wifi:     s.wifiOptService().QuickSupported(),
+		Chassis:  s.wifiOptService().InspectChassis(ctx).Supported,
+	}
 }
 
 func (s *Server) hostInfo() map[string]any {

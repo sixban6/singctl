@@ -1,4 +1,10 @@
-import { CamouflageDefaultsResponse, CamouflageReport, CheckUpdateResponse } from '../types';
+import {
+  CamouflageDefaultsResponse,
+  CamouflageReport,
+  CheckUpdateResponse,
+  ServerSocketTuneApplyResponse,
+  ServerSocketTuneStatus,
+} from '../types';
 import { LONG_OP_TIMEOUT_MS, MEDIUM_OP_TIMEOUT_MS, request } from './http';
 
 export const servicesApi = {
@@ -35,6 +41,16 @@ export const servicesApi = {
   enableBBR: () =>
     request<{ message: string; bbr: boolean }>('/api/server/bbr', {
       method: 'POST',
+    }),
+
+  getSocketTune: () =>
+    request<ServerSocketTuneStatus>('/api/server/socket-tune'),
+
+  applySocketTune: (payload: { defaultPreset?: 'auto' | '4m' | '8m'; restartCaddy?: boolean }) =>
+    request<ServerSocketTuneApplyResponse>('/api/server/socket-tune', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      timeoutMs: MEDIUM_OP_TIMEOUT_MS,
     }),
 
   updateSNI: (sni: string) =>

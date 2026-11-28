@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"singctl/internal/common/socktune"
 	"singctl/internal/config"
 	"singctl/internal/logger"
 )
@@ -107,20 +108,23 @@ func RunPreflight(cfg *config.Config, fixBBR bool) (*PreflightReport, error) {
 		}
 	}
 
-	// 5. 检查并开启 BBR
+	// 5. 检查并开启 BBR 及服务端 QUIC/UDP Socket 缓冲调优
+	if fixBBR {
+		logger.Info("  ➜ 正在应用服务端 QUIC/UDP Socket 缓冲与 TCP BBR/FQ 优化...")
+		if res, err := socktune.Apply(context.Background(), socktune.ProfileServer, socktune.ApplyRequest{}, socktune.Env{}); err != nil {
+			logger.Warn("  ⚠ QUIC/UDP Socket 缓冲自动优化未完全生效 (非致命): %v", err)
+			if !isBBREnabled() {
+				if err := enableBBR(); err != nil {
+					logger.Warn("  ⚠ 开启 BBR 失败 (非致命, 可能处于容器沙盒环境): %v", err)
+				}
+			}
+		} else {
+			logger.Success("  ✓ %s", res.Status.Summary)
+		}
+	}
 	report.BBREnabled = isBBREnabled()
 	if report.BBREnabled {
 		logger.Success("  ✓ Linux 内核 TCP BBR 加速已启用")
-	} else if fixBBR {
-		logger.Info("  ➜ 正在尝试自动开启 TCP BBR 加速...")
-		if err := enableBBR(); err != nil {
-			logger.Warn("  ⚠ 开启 BBR 失败 (非致命, 可能处于容器沙盒环境): %v", err)
-		} else {
-			report.BBREnabled = isBBREnabled()
-			if report.BBREnabled {
-				logger.Success("  ✓ 已成功开启 TCP BBR 加速！")
-			}
-		}
 	}
 
 	logger.Success("预检完成。\n")

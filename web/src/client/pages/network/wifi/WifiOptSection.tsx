@@ -53,13 +53,12 @@ export const WifiOptSection: React.FC<WifiOptSectionProps> = ({
   const [scanning, setScanning] = useState(false);
   const [retesting, setRetesting] = useState(false);
   const [applying, setApplying] = useState(false);
-  const [chassisBusy, setChassisBusy] = useState(false);
 
   const [pendingReq, setPendingReq] = useState<WifiApplyRequest | null>(null);
   const [pendingChanges, setPendingChanges] = useState<WifiOptimizationStep[]>([]);
   const [pendingTitle, setPendingTitle] = useState('');
 
-  const allBusy = busy || applying || scanning || retesting || chassisBusy;
+  const allBusy = busy || applying || scanning || retesting;
 
   const scoreTone = useMemo(() => {
     const lv = overview?.healthLevel;
@@ -188,21 +187,6 @@ export const WifiOptSection: React.FC<WifiOptSectionProps> = ({
     }
   };
 
-  const handleApplyChassis = async (enableRps: boolean, tuneConntrack: boolean) => {
-    setChassisBusy(true);
-    try {
-      const res = await clientApi.applyWifiChassis({ enableRps, tuneConntrack });
-      if (overview) {
-        setData({ ...overview, chassis: res.chassis });
-      }
-      success(`底盘加速已生效：${res.actions.join('；')}`);
-    } catch (err: unknown) {
-      toastError(err instanceof Error ? err.message : '应用底盘加速失败');
-    } finally {
-      setChassisBusy(false);
-    }
-  };
-
   if (loading && !overview) {
     return (
       <div className="space-y-4">
@@ -257,7 +241,7 @@ export const WifiOptSection: React.FC<WifiOptSectionProps> = ({
           subtitle={overview.unsupportedHint || 'Wi-Fi 体检与调优仅适用于带无线网卡的 OpenWrt 路由器'}
         >
           <p className="text-xs text-secondary">
-            如当前为旁路由（如 N1 / x86 软路由），下方仍可直接查看并一键开启「高并发底盘加速（多核 RPS 与 Conntrack 扩容）」。
+            当前设备无可用无线网卡。如需调整多核 RPS、Conntrack 或 QUIC/UDP Socket 缓冲，请前往「网关模式 (主/旁路由)」。
           </p>
         </SectionCard>
       ) : (
@@ -438,14 +422,9 @@ export const WifiOptSection: React.FC<WifiOptSectionProps> = ({
         </>
       )}
 
-      <WifiClientsAndChassis
-        clients={clients}
-        chassis={overview.chassis}
-        privacyMask={privacyMask}
-        busy={allBusy}
-        chassisBusy={chassisBusy}
-        onApplyChassis={(rps, ct) => void handleApplyChassis(rps, ct)}
-      />
+      {overview.supported && (
+        <WifiClientsAndChassis clients={clients} privacyMask={privacyMask} />
+      )}
 
       <ConfirmDialog
         open={pendingReq !== null}

@@ -3,6 +3,7 @@ import {
   WifiApplyResponse,
   WifiChassisApplyRequest,
   WifiChassisApplyResponse,
+  WifiChassisStatus,
   WifiOverview,
   WifiScanResult,
 } from '../types';
@@ -35,8 +36,13 @@ export const wifiApi = {
       timeoutMs: 45000,
     }),
 
+  getChassis: () =>
+    request<WifiChassisStatus>('/api/chassis', {
+      timeoutMs: 8000,
+    }),
+
   applyWifiChassis: (payload: WifiChassisApplyRequest) =>
-    request<WifiChassisApplyResponse>('/api/wifi/chassis', {
+    request<WifiChassisApplyResponse>('/api/chassis', {
       method: 'POST',
       body: JSON.stringify(payload),
       timeoutMs: 15000,

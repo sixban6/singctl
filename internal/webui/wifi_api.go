@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"singctl/internal/common/socktune"
 	"singctl/internal/logger"
 	"singctl/internal/safecommit"
 	"singctl/internal/wifiopt"
@@ -218,6 +219,10 @@ func (s *Server) handleWifiApplyPost(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) handleChassisGet(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.wifiOptService().InspectChassis(r.Context()))
+}
+
 func (s *Server) handleWifiChassisPost(w http.ResponseWriter, r *http.Request) {
 	var req wifiopt.ChassisApplyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
@@ -226,7 +231,7 @@ func (s *Server) handleWifiChassisPost(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := s.wifiOptService().ApplyChassis(r.Context(), req)
 	if err != nil {
-		if errors.Is(err, wifiopt.ErrInvalidRequest) {
+		if errors.Is(err, wifiopt.ErrInvalidRequest) || errors.Is(err, wifiopt.ErrUnsupported) || errors.Is(err, socktune.ErrReadOnlyKernel) {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}

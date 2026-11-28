@@ -46,6 +46,14 @@ const SessionCookieName = "singctl_session"
 //go:embed static
 var staticFS embed.FS
 
+// HostCapabilities 描述当前宿主机支持的可选网络与底盘模块（零子进程快速判定，用于前端动态显隐控制面）。
+type HostCapabilities struct {
+	Firewall bool `json:"firewall"`
+	Vlan     bool `json:"vlan"`
+	Wifi     bool `json:"wifi"`
+	Chassis  bool `json:"chassis"`
+}
+
 // Options Web 服务显式配置与测试依赖注入选项。
 type Options struct {
 	ConfigPath              string                                                                            // singctl 配置文件路径
@@ -116,6 +124,7 @@ type Options struct {
 	VLANAsyncReloadDelayForTest *time.Duration                                                                    // 仅供离线单元测试覆盖 VLAN 异步延迟重载时长（0=同步）
 	WifiOptServiceForTest       *wifiopt.Service                                                                  // 仅供离线单元测试注入 OpenWrt Wi-Fi 体检与调优服务
 	WifiAsyncReloadDelayForTest *time.Duration                                                                    // 仅供离线单元测试覆盖 Wi-Fi 异步延迟重载时长（0=同步）
+	HostCapabilitiesForTest     *HostCapabilities                                                                 // 仅供离线单元测试覆盖宿主机模块能力标志
 	AutoStartServiceMgr         servicemgr.Manager                                                                // 可选：测试注入开机自启服务管理器替身
 	AutoStartProcdDir           string                                                                            // 可选：测试注入开机自启 procd 目录
 }
@@ -441,7 +450,11 @@ func (s *Server) registerRoutes() {
 	s.Mux.HandleFunc("POST /api/vlan/delete/preview", s.guard(s.handleVLANDeletePreviewPost))
 	s.Mux.HandleFunc("DELETE /api/vlan/segment/{id}", s.guard(s.handleVLANDelete))
 
-	// OpenWrt Wi-Fi 体检、按需信道干扰扫描、一键双频安全优化与高并发底盘加速 API
+	// 网关底盘与内核 Socket 调优独立 API
+	s.Mux.HandleFunc("GET /api/chassis", s.guard(s.handleChassisGet))
+	s.Mux.HandleFunc("POST /api/chassis", s.guard(s.handleWifiChassisPost))
+
+	// OpenWrt Wi-Fi 体检、按需信道干扰扫描、一键双频安全优化与向后兼容底盘加速 API
 	s.Mux.HandleFunc("GET /api/wifi/overview", s.guard(s.handleWifiOverviewGet))
 	s.Mux.HandleFunc("POST /api/wifi/scan", s.guard(s.handleWifiScanPost))
 	s.Mux.HandleFunc("POST /api/wifi/retest", s.guard(s.handleWifiRetestPost))

@@ -38,6 +38,8 @@ type Env struct {
 	SideRoutesFile        string
 	BoardJSONPath         string
 	DHCPLeasesPath        string
+	NetworkFile           string
+	WirelessFile          string
 }
 
 // Service 提供 OpenWrt VLAN 分段的硬件探测、只读总览、Dry-Run 预览、原子应用与安全删除编排。
@@ -52,6 +54,54 @@ func NewService(env Env) *Service {
 		env:      env,
 		registry: NewDefaultRegistry(),
 	}
+}
+
+// QuickSupported 以零子进程纯文件只读方式快速探测宿主机是否具备物理网口/交换机或无线分段能力。
+func QuickSupported(env Env) bool {
+	return NewService(env).QuickSupported()
+}
+
+// QuickSupported 以零子进程纯文件只读方式快速探测宿主机是否具备物理网口/交换机或无线分段能力。
+func (s *Service) QuickSupported() bool {
+	if !s.isOpenWrt() {
+		return false
+	}
+	netPath := cmp.Or(strings.TrimSpace(s.env.NetworkFile), "/etc/config/network")
+	if raw, err := s.readFile(netPath); err == nil {
+		portCount := 0
+		for line := range strings.SplitSeq(string(raw), "\n") {
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			if strings.HasPrefix(trimmed, "config switch") || strings.HasPrefix(trimmed, "config bridge-vlan") {
+				return true
+			}
+			for _, prefix := range []string{"list ports ", "list ports\t", "option ports ", "option ports\t"} {
+				if rest, ok := strings.CutPrefix(trimmed, prefix); ok {
+					clean := strings.Trim(strings.TrimSpace(rest), "'\"")
+					portCount += len(strings.Fields(clean))
+				}
+			}
+		}
+		if portCount >= 2 {
+			return true
+		}
+	}
+
+	wifiPath := cmp.Or(strings.TrimSpace(s.env.WirelessFile), "/etc/config/wireless")
+	if raw, err := s.readFile(wifiPath); err == nil {
+		for line := range strings.SplitSeq(string(raw), "\n") {
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			if strings.HasPrefix(trimmed, "config wifi-device") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (s *Service) inspectState(ctx context.Context, callerIP string) (*Overview, *parsedState, error) {

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"singctl/internal/common/fsx"
+	"singctl/internal/common/sysinfo"
 )
 
 const (
@@ -37,7 +38,8 @@ var (
 
 // Env 封装全部外部系统副作用（命令执行、文件读写、时钟），测试时显式注入替身，绝不读写宿主机真实配置。
 type Env struct {
-	RunCmd        func(ctx context.Context, name string, args ...string) ([]byte, error)
+	IsOpenWrt        func() bool
+	RunCmd           func(ctx context.Context, name string, args ...string) ([]byte, error)
 	LookPath      func(file string) (string, error)
 	ReadFile         func(path string) ([]byte, error)
 	WriteFile0600    func(path string, data []byte) error
@@ -50,7 +52,10 @@ type Env struct {
 	WirelessFile     string
 	SysctlFile       string
 	LowMemSysctlFile string
+	QuicSysctlFile   string
+	ModulesDir       string
 	RCLocalFile      string
+	GOOS             string
 	PollInterval     time.Duration
 	VerifyTimeout    time.Duration
 	RetestWindow     time.Duration
@@ -198,6 +203,37 @@ func (s *Service) reloadWifi(ctx context.Context) error {
 		return s.env.ReloadWifi(ctx)
 	}
 	return ReloadOpenWrtWireless(ctx)
+}
+
+func (s *Service) isOpenWrt() bool {
+	if s.env.IsOpenWrt != nil {
+		return s.env.IsOpenWrt()
+	}
+	if s.env.GOOS != "" {
+		return s.env.GOOS == "linux"
+	}
+	return sysinfo.IsOpenWrt()
+}
+
+// QuickSupported 以零子进程纯文件只读方式快速探测当前 OpenWrt 宿主机是否具备无线射频设备。
+func (s *Service) QuickSupported() bool {
+	if !s.isOpenWrt() {
+		return false
+	}
+	raw, err := s.readFile(s.wirelessFile())
+	if err != nil {
+		return false
+	}
+	for line := range strings.SplitSeq(string(raw), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "config wifi-device") {
+			return true
+		}
+	}
+	return false
 }
 
 // ReloadOpenWrtWireless 仅安全重载 OpenWrt 无线子系统（供 SafeCommit 纯无线回滚复用，严禁触碰有线/WAN/network）。

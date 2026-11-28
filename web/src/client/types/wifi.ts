@@ -112,6 +112,34 @@ export interface WifiRPSInterfaceStatus {
   balanced: boolean;
 }
 
+export interface SocketTuneStatus {
+  supported: boolean;
+  profile: string;
+  totalMemMb: number;
+  rmemMax: number;
+  wmemMax: number;
+  rmemDefault: number;
+  wmemDefault: number;
+  recommendedRmemMax: number;
+  recommendedWmemMax: number;
+  recommendedRmemDefault: number;
+  recommendedWmemDefault: number;
+  defaultQdisc: string;
+  recommendedQdisc: string;
+  tcpCongestion: string;
+  bbrAvailable: boolean;
+  bbrEnabled: boolean;
+  udpRcvbufErrors: number;
+  udpSndbufErrors: number;
+  maxBufferOptimal: boolean;
+  defaultBufferOptimal: boolean;
+  excessiveDefault: boolean;
+  defaultBottleneck: boolean;
+  qdiscOptimal: boolean;
+  optimal: boolean;
+  summary: string;
+}
+
 export interface WifiChassisStatus {
   supported: boolean;
   cpuCores: number;
@@ -122,6 +150,7 @@ export interface WifiChassisStatus {
   conntrackMax: number;
   recommendedConntrack: number;
   conntrackOptimal: boolean;
+  socketBuffer?: SocketTuneStatus;
   optimal: boolean;
 }
 
@@ -193,10 +222,13 @@ export interface WifiChassisApplyRequest {
   enableRps: boolean;
   tuneConntrack: boolean;
   conntrackMax?: number;
+  tuneSocketBuffer?: boolean;
 }
 
 export interface WifiChassisApplyResponse {
   ok: boolean;
   actions: string[];
+  warnings?: string[];
+  restartSingBoxRecommended?: boolean;
   chassis: WifiChassisStatus;
 }

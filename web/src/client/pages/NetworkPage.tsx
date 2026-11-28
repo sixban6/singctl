@@ -6,7 +6,6 @@ import {
   EyeOff,
   Flame,
   GitFork,
-  Globe,
   Monitor,
   Network,
   RefreshCw,
@@ -16,7 +15,7 @@ import {
   Wifi,
   X,
 } from 'lucide-react';
-import { Badge, Button, SegmentedTabs, useToast } from '../../ui';
+import { Badge, Button, SegmentedTabItem, SegmentedTabs, useToast } from '../../ui';
 import {
   BROWSER_DOH_EVENT,
   getCachedBrowserDoH,
@@ -32,8 +31,8 @@ import {
 import { BrowserDoHCheckResponse, ClientStatusResponse, SafeCommitStatusReport } from '../types';
 import { FirewallPanel } from './firewall/FirewallPanel';
 import { GatewayModePage, GatewayModePageProps } from './network/GatewayModePage';
+import { MeshAndDomainSection, MeshDomainView } from './network/MeshAndDomainSection';
 import { ModemPage } from './network/ModemPage';
-import { HomeDomainSection } from './network/homedomain/HomeDomainSection';
 import { TailscalePage, TailscalePageProps } from './network/TailscalePage';
 import { VlanManagerSection } from './network/vlan/VlanManagerSection';
 import { WifiOptSection } from './network/wifi/WifiOptSection';
@@ -42,15 +41,14 @@ export { GatewayModePage, TailscalePage };
 export type { GatewayModePageProps, TailscalePageProps };
 
 export type NetSubTab = 'gw' | 'ts' | 'home' | 'fw' | 'vlan' | 'wifi' | 'modem';
+type EffectiveNetSubTab = 'gw' | 'ts' | 'fw' | 'vlan' | 'wifi' | 'modem';
 
-function normalizeNetSubTab(raw?: string): NetSubTab {
+function normalizeNetSubTab(raw?: string): EffectiveNetSubTab {
   if (raw === 'fw') return 'fw';
-  if (raw === 'ts') return 'ts';
-  if (raw === 'home') return 'home';
+  if (raw === 'ts' || raw === 'home') return 'ts';
   if (raw === 'vlan') return 'vlan';
   if (raw === 'wifi') return 'wifi';
   if (raw === 'modem') return 'modem';
-  if (raw === 'gw') return 'gw';
   return 'gw';
 }
 
@@ -76,7 +74,8 @@ export const NetworkHubPage: React.FC<NetworkHubPageProps> = ({
   onSafeCommitUpdated,
 }) => {
   const { success, toast } = useToast();
-  const [sub, setSub] = useState<NetSubTab>(() => normalizeNetSubTab(initialSub));
+  const [sub, setSub] = useState<EffectiveNetSubTab>(() => normalizeNetSubTab(initialSub));
+  const [meshView, setMeshView] = useState<MeshDomainView>(() => (initialSub === 'home' ? 'home' : 'ts'));
   const [privacyMask, setPrivacyMask] = useState<boolean>(() => readPrivacyMaskPref());
   const [browserDoH, setBrowserDoH] = useState<BrowserDoHCheckResponse | null>(() => getCachedBrowserDoH());
   const [dohChecking, setDohChecking] = useState(false);
@@ -87,8 +86,69 @@ export const NetworkHubPage: React.FC<NetworkHubPageProps> = ({
   useEffect(() => {
     if (initialSub !== undefined) {
       setSub(normalizeNetSubTab(initialSub));
+      if (initialSub === 'home') {
+        setMeshView('home');
+      } else if (initialSub === 'ts') {
+        setMeshView('ts');
+      }
     }
   }, [initialSub]);
+
+  const caps = status?.host?.capabilities;
+  const showFirewall = caps ? caps.firewall : Boolean(status?.firewall?.supported);
+  const showVlan = Boolean(caps?.vlan);
+  const showWifi = Boolean(caps?.wifi);
+
+  const tabItems = useMemo<SegmentedTabItem<EffectiveNetSubTab>[]>(() => {
+    const items: SegmentedTabItem<EffectiveNetSubTab>[] = [
+      {
+        key: 'gw',
+        label: '网关模式 (主/旁路由)',
+        icon: <GitFork className="w-3.5 h-3.5" />,
+      },
+      {
+        key: 'ts',
+        label: '异地组网与域名',
+        icon: <Share2 className="w-3.5 h-3.5" />,
+      },
+    ];
+    if (showFirewall) {
+      items.push({
+        key: 'fw',
+        label: 'nftables 防火墙加固',
+        icon: <Flame className="w-3.5 h-3.5" />,
+      });
+    }
+    if (showVlan) {
+      items.push({
+        key: 'vlan',
+        label: '子网隔离 (VLAN)',
+        icon: <Network className="w-3.5 h-3.5" />,
+      });
+    }
+    if (showWifi) {
+      items.push({
+        key: 'wifi',
+        label: 'Wi-Fi 调优',
+        icon: <Wifi className="w-3.5 h-3.5" />,
+      });
+    }
+    items.push({
+      key: 'modem',
+      label: '上游光猫',
+      icon: <Router className="w-3.5 h-3.5" />,
+    });
+    return items;
+  }, [showFirewall, showVlan, showWifi]);
+
+  // 仅当设备能力探针已就绪且当前页签不可用时回退，避免冷启动直达链接闪烁跳转
+  useEffect(() => {
+    if (!caps) return;
+    if (!tabItems.some((item) => item.key === sub)) {
+      setSub('gw');
+      onSubChange?.('gw');
+    }
+  }, [caps, onSubChange, sub, tabItems]);
 
   useEffect(() => {
     const onMaskChange = (ev: Event) => {
@@ -153,7 +213,7 @@ export const NetworkHubPage: React.FC<NetworkHubPageProps> = ({
     }
   };
 
-  const handleSelect = (next: NetSubTab) => {
+  const handleSelect = (next: EffectiveNetSubTab) => {
     setSub(next);
     onSubChange?.(next);
   };
@@ -166,44 +226,8 @@ export const NetworkHubPage: React.FC<NetworkHubPageProps> = ({
       <div className="flex flex-wrap items-center justify-between gap-3">
         <SegmentedTabs
           value={sub}
-          onChange={(k) => handleSelect(k as NetSubTab)}
-          items={[
-            {
-              key: 'gw',
-              label: '网关模式 (主/旁路由)',
-              icon: <GitFork className="w-3.5 h-3.5" />,
-            },
-            {
-              key: 'ts',
-              label: 'Tailscale 异地组网',
-              icon: <Share2 className="w-3.5 h-3.5" />,
-            },
-            {
-              key: 'home',
-              label: '本地域名 (.home)',
-              icon: <Globe className="w-3.5 h-3.5" />,
-            },
-            {
-              key: 'fw',
-              label: 'nftables 防火墙加固',
-              icon: <Flame className="w-3.5 h-3.5" />,
-            },
-            {
-              key: 'vlan',
-              label: '子网隔离 (VLAN)',
-              icon: <Network className="w-3.5 h-3.5" />,
-            },
-            {
-              key: 'wifi',
-              label: 'Wi-Fi 调优',
-              icon: <Wifi className="w-3.5 h-3.5" />,
-            },
-            {
-              key: 'modem',
-              label: '上游光猫',
-              icon: <Router className="w-3.5 h-3.5" />,
-            },
-          ]}
+          onChange={(k) => handleSelect(k as EffectiveNetSubTab)}
+          items={tabItems}
         />
 
         <Button
@@ -293,27 +317,23 @@ export const NetworkHubPage: React.FC<NetworkHubPageProps> = ({
           status={status}
           busy={busy}
           privacyMask={privacyMask}
+          onAction={onAction}
           onNavigate={onNavigate}
           onSaved={onRefreshStatus}
         />
       )}
       {sub === 'ts' && (
-        <TailscalePage
+        <MeshAndDomainSection
           status={status}
           busy={busy}
           privacyMask={privacyMask}
+          initialView={meshView}
+          onViewChange={setMeshView}
           onAction={onAction}
           onRefreshStatus={onRefreshStatus}
         />
       )}
-      {sub === 'home' && (
-        <HomeDomainSection
-          busy={busy}
-          privacyMask={privacyMask}
-          onRefreshStatus={onRefreshStatus}
-        />
-      )}
-      {sub === 'fw' && (
+      {sub === 'fw' && showFirewall && (
         <FirewallPanel
           status={status}
           busy={busy}
@@ -321,7 +341,7 @@ export const NetworkHubPage: React.FC<NetworkHubPageProps> = ({
           onRefreshStatus={onRefreshStatus}
         />
       )}
-      {sub === 'vlan' && (
+      {sub === 'vlan' && showVlan && (
         <VlanManagerSection
           busy={busy}
           privacyMask={privacyMask}
@@ -330,7 +350,7 @@ export const NetworkHubPage: React.FC<NetworkHubPageProps> = ({
           onSafeCommitUpdated={onSafeCommitUpdated}
         />
       )}
-      {sub === 'wifi' && (
+      {sub === 'wifi' && showWifi && (
         <WifiOptSection
           busy={busy}
           privacyMask={privacyMask}

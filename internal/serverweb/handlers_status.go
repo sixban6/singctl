@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"singctl/internal/common/socktune"
 	"singctl/internal/common/swrcache"
 	"singctl/internal/common/sysinfo"
 	"singctl/internal/component"
@@ -453,6 +454,7 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) getSystemMetricsBounded() map[string]any {
 	m := readProcSystemMetrics()
+	m["socketTune"] = socktune.Inspect(socktune.ProfileServer, s.sockTuneEnv())
 	if used, total, pct, ok := s.getCachedRootDiskUsage(); ok {
 		m["diskUsed"] = used
 		m["diskTotal"] = total

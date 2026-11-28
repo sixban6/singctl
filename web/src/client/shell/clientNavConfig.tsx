@@ -105,7 +105,7 @@ export function buildClientNavGroups(status?: ClientStatusResponse | null): NavG
           key: 'net',
           label: '网络与组网',
           shortLabel: '组网',
-          desc: 'Tailscale 异地子网组网与 nftables 防火墙加固',
+          desc: '网关模式、异地组网与内网域名及本机网络调优',
           icon: Network,
         },
       ],

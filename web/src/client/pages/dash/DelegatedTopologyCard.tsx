@@ -30,14 +30,16 @@ export const DelegatedTopologyCard: React.FC<DelegatedTopologyCardProps> = ({
       }
       actions={
         <div className="flex items-center gap-2 flex-wrap">
-          <Button
-            size="xs"
-            variant="secondary"
-            icon={<Network className="w-3.5 h-3.5" />}
-            onClick={() => onNavigate('net', 'vlan')}
-          >
-            管理子网 / Wi-Fi 分流
-          </Button>
+          {status.host?.capabilities?.vlan !== false && (
+            <Button
+              size="xs"
+              variant="secondary"
+              icon={<Network className="w-3.5 h-3.5" />}
+              onClick={() => onNavigate('net', 'vlan')}
+            >
+              管理子网 / Wi-Fi 分流
+            </Button>
+          )}
           {sideIP && (
             <a
               href={`http://${sideIP}:8090`}

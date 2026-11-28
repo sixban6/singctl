@@ -1,7 +1,47 @@
 import type { AuditLogItem } from './security';
 
+export interface ServerSocketTuneStatus {
+  supported: boolean;
+  profile: string;
+  totalMemMb: number;
+  rmemMax: number;
+  wmemMax: number;
+  rmemDefault: number;
+  wmemDefault: number;
+  recommendedRmemMax: number;
+  recommendedWmemMax: number;
+  recommendedRmemDefault: number;
+  recommendedWmemDefault: number;
+  defaultQdisc: string;
+  recommendedQdisc: string;
+  tcpCongestion: string;
+  bbrAvailable: boolean;
+  bbrEnabled: boolean;
+  udpRcvbufErrors: number;
+  udpSndbufErrors: number;
+  maxBufferOptimal: boolean;
+  defaultBufferOptimal: boolean;
+  excessiveDefault: boolean;
+  defaultBottleneck: boolean;
+  qdiscOptimal: boolean;
+  optimal: boolean;
+  summary: string;
+}
+
+export interface ServerSocketTuneApplyResponse {
+  ok: boolean;
+  message: string;
+  actions: string[];
+  warnings?: string[];
+  defaultBufferChanged: boolean;
+  restartRecommended: boolean;
+  asyncCaddyRestart: boolean;
+  status: ServerSocketTuneStatus;
+}
+
 export interface SystemMetrics {
   bbr: boolean;
+  socketTune?: ServerSocketTuneStatus;
   uptime?: string;
   memTotalMB?: number;
   memUsedMB?: number;

@@ -18,6 +18,7 @@ import (
 
 	"singctl/internal/common/execx"
 	"singctl/internal/common/httpx"
+	"singctl/internal/common/socktune"
 	"singctl/internal/config"
 	"singctl/internal/deploy"
 	"singctl/internal/fleet"
@@ -58,9 +59,11 @@ type Deps struct {
 	WarpApplyDeps      *deploy.LiveWarpApplyDeps
 	WarpDaemonProbe    func(forceRefresh bool) WarpDaemonStatus
 	WarpPortChecker    func() bool
-	WarpExitFetcher    func(timeout time.Duration) (ip, loc, traceRaw string, ok bool)
-	WarpRotateIdentity func(previousIP string) (string, string, error)
-	WarpWatchdogDeps   *WarpWatchdogDeps
+	WarpExitFetcher               func(timeout time.Duration) (ip, loc, traceRaw string, ok bool)
+	WarpRotateIdentity            func(previousIP string) (string, string, error)
+	WarpWatchdogDeps              *WarpWatchdogDeps
+	SockTuneEnv                   *socktune.Env
+	CaddyAsyncRestartDelayForTest *time.Duration
 }
 
 // SessionRecord 记录管理员会话创建时间与最后活跃时间。
@@ -287,6 +290,12 @@ func (s *Server) SetDeps(d Deps) {
 	if d.WarpRotateIdentity != nil {
 		s.deps.WarpRotateIdentity = d.WarpRotateIdentity
 	}
+	if d.SockTuneEnv != nil {
+		s.deps.SockTuneEnv = d.SockTuneEnv
+	}
+	if d.CaddyAsyncRestartDelayForTest != nil {
+		s.deps.CaddyAsyncRestartDelayForTest = d.CaddyAsyncRestartDelayForTest
+	}
 	s.mu.Unlock()
 
 	if s.warp != nil {
@@ -426,6 +435,8 @@ func (s *Server) registerRoutes() {
 	s.Mux.HandleFunc("GET /api/server/net/return", s.guard(s.handleNetReturn))
 	s.Mux.HandleFunc("POST /api/server/net/return", s.guard(s.handleNetReturn))
 	s.Mux.HandleFunc("POST /api/server/bbr", s.guard(s.handleEnableBBR))
+	s.Mux.HandleFunc("GET /api/server/socket-tune", s.guard(s.handleGetSocketTune))
+	s.Mux.HandleFunc("POST /api/server/socket-tune", s.guard(s.handleApplySocketTune))
 	s.Mux.HandleFunc("GET /api/server/warp/diagnose", s.guard(s.handleWarpDiagnose))
 	s.Mux.HandleFunc("GET /api/server/warp/routing", s.guard(s.handleGetWarpRouting))
 	s.Mux.HandleFunc("PUT /api/server/warp/routing", s.guard(s.handleUpdateWarpRouting))

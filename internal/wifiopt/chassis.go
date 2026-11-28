@@ -3,11 +3,15 @@ package wifiopt
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+
+	"singctl/internal/common/socktune"
 )
 
 const (
@@ -73,22 +77,56 @@ func (s *Service) InspectChassis(_ context.Context) ChassisStatus {
 		status.ConntrackOptimal = false
 	}
 
-	status.Supported = len(status.RPSInterfaces) > 0 || status.ConntrackMax > 0
-	status.Optimal = status.RPSOptimal && status.ConntrackOptimal
+	sb := socktune.Inspect(socktune.ProfileClient, s.socktuneEnv())
+	if sb.Supported {
+		status.SocketBuffer = &sb
+	}
+
+	status.Supported = len(status.RPSInterfaces) > 0 || status.ConntrackMax > 0 || sb.Supported
+	status.Optimal = status.RPSOptimal && status.ConntrackOptimal && (!sb.Supported || sb.Optimal)
 	return status
 }
 
-// ApplyChassis 一键应用并持久化多核 RPS 均衡与 Conntrack 上限调优。
+func (s *Service) socktuneEnv() socktune.Env {
+	var writeFileFn func(string, []byte, os.FileMode) error
+	if s.env.WriteFile0600 != nil {
+		writeFileFn = func(path string, data []byte, _ os.FileMode) error {
+			return s.env.WriteFile0600(path, data)
+		}
+	}
+	var writeProcFn func(string, []byte) error
+	if s.env.WriteSysfs != nil || s.env.WriteFile0600 != nil {
+		writeProcFn = s.writeSysfs
+	}
+	return socktune.Env{
+		GOOS:           s.env.GOOS,
+		ReadFile:       s.env.ReadFile,
+		WriteFile:      writeFileFn,
+		WriteProc:      writeProcFn,
+		RunCmd:         s.env.RunCmd,
+		QuicSysctlFile: s.env.QuicSysctlFile,
+		ConflictSysctlFiles: []string{
+			s.sysctlFile(),
+			"/etc/sysctl.d/99-custom.conf",
+			"/etc/sysctl.d/99-singctl-bbr.conf",
+		},
+		ModulesDir: s.env.ModulesDir,
+	}
+}
+
+// ApplyChassis 一键应用并持久化多核 RPS 均衡、Conntrack 上限扩容与 QUIC/UDP Socket 缓冲优化。
 func (s *Service) ApplyChassis(ctx context.Context, req ChassisApplyRequest) (*ChassisApplyResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if !req.EnableRPS && !req.TuneConntrack {
+	if !req.EnableRPS && !req.TuneConntrack && !req.TuneSocketBuffer {
 		return nil, fmt.Errorf("%w: 请至少勾选一项底盘加速项", ErrInvalidRequest)
 	}
 
 	cur := s.InspectChassis(ctx)
 	actions := []string{}
+	var warnings []string
+	restartSingBox := false
 
 	if req.EnableRPS && cur.CPUCores > 1 && len(cur.RPSInterfaces) > 0 {
 		targetMask := fullCPUMaskHex(cur.CPUCores)
@@ -138,10 +176,29 @@ func (s *Service) ApplyChassis(ctx context.Context, req ChassisApplyRequest) (*C
 		actions = append(actions, fmt.Sprintf("nf_conntrack_max: %d -> %d", cur.ConntrackMax, target))
 	}
 
+	if req.TuneSocketBuffer {
+		sbRes, sbErr := socktune.Apply(ctx, socktune.ProfileClient, socktune.ApplyRequest{}, s.socktuneEnv())
+		if sbErr != nil {
+			switch {
+			case errors.Is(sbErr, socktune.ErrInvalidRequest):
+				return nil, fmt.Errorf("%w: %w", ErrInvalidRequest, sbErr)
+			case errors.Is(sbErr, socktune.ErrUnsupported):
+				return nil, fmt.Errorf("%w: %w", ErrUnsupported, sbErr)
+			default:
+				return nil, sbErr
+			}
+		}
+		actions = append(actions, sbRes.Actions...)
+		warnings = append(warnings, sbRes.Warnings...)
+		restartSingBox = sbRes.RestartRecommended
+	}
+
 	return &ChassisApplyResult{
-		OK:      true,
-		Actions: actions,
-		Chassis: s.InspectChassis(ctx),
+		OK:                        true,
+		Actions:                   actions,
+		Warnings:                  warnings,
+		RestartSingBoxRecommended: restartSingBox,
+		Chassis:                   s.InspectChassis(ctx),
 	}, nil
 }
 

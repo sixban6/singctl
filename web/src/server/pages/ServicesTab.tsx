@@ -22,6 +22,7 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
   const [savingConfig, setSavingConfig] = useState(false);
 
   const [enablingBBR, setEnablingBBR] = useState(false);
+  const [applyingSockTune, setApplyingSockTune] = useState(false);
   const [editingSNI, setEditingSNI] = useState(false);
   const [sniInput, setSniInput] = useState('');
   const [updatingSNI, setUpdatingSNI] = useState(false);
@@ -85,6 +86,20 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
       error(err.message || '启用 BBR 失败');
     } finally {
       setEnablingBBR(false);
+    }
+  };
+
+  const handleApplySocketTune = async (defaultPreset: 'auto' | '4m' | '8m') => {
+    setApplyingSockTune(true);
+    try {
+      const res = await api.applySocketTune({ defaultPreset, restartCaddy: true });
+      const warnSuffix = res.warnings?.length ? `（提示：${res.warnings.join('；')}）` : '';
+      success(`${res.message || 'Socket 缓冲优化已应用'}${warnSuffix}`);
+      setTimeout(onRefresh, res.asyncCaddyRestart ? 2800 : 800);
+    } catch (err: any) {
+      error(err.message || '应用 QUIC/UDP 缓冲优化失败');
+    } finally {
+      setApplyingSockTune(false);
     }
   };
 
@@ -201,6 +216,8 @@ export const ServicesTab: React.FC<ServicesTabProps> = ({ status, onRefresh, onO
         status={status}
         enablingBBR={enablingBBR}
         onEnableBBR={handleEnableBBR}
+        applyingSockTune={applyingSockTune}
+        onApplySocketTune={handleApplySocketTune}
         editingSNI={editingSNI}
         setEditingSNI={setEditingSNI}
         sniInput={sniInput}

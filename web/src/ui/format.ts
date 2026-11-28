@@ -10,3 +10,17 @@ export function formatBytes(bytes?: number): string {
   if (val >= KB) return `${(val / KB).toFixed(1)} KB`;
   return `${Math.round(val)} B`;
 }
+
+export function formatSocketBytes(bytes?: number): string {
+  const val = Math.max(0, Number(bytes) || 0);
+  if (val === 0) return '-';
+  const KB = 1024;
+  const MB = 1024 * KB;
+  if (val >= MB) {
+    return val % MB === 0 ? `${val / MB} MB` : `${(val / MB).toFixed(1)} MB`;
+  }
+  if (val >= KB) {
+    return `${Math.round(val / KB)} KB`;
+  }
+  return `${Math.round(val)} B`;
+}

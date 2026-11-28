@@ -37,6 +37,13 @@ export interface HostTelemetry {
   collectedAt: number;
 }
 
+export interface ClientHostCapabilities {
+  firewall: boolean;
+  vlan: boolean;
+  wifi: boolean;
+  chassis: boolean;
+}
+
 export interface ClientHostInfo {
   hostname: string;
   os: string;
@@ -44,6 +51,7 @@ export interface ClientHostInfo {
   openwrt: boolean;
   lanIP: string;
   telemetry?: HostTelemetry;
+  capabilities?: ClientHostCapabilities;
 }
 
 export interface ClientConfigSubSummary {

@@ -19,6 +19,7 @@ import {
   GatewayIPv6Mode,
   GatewayRoleMode,
 } from '../../types';
+import { ChassisAccelCard } from './ChassisAccelCard';
 import { GatewayIPv6Section } from './GatewayIPv6Section';
 import { GatewayFlowOffloadSection } from './GatewayFlowOffloadSection';
 import { SideRouterDelegationCard } from './SideRouterDelegationCard';
@@ -27,6 +28,7 @@ export interface GatewayModePageProps {
   status?: ClientStatusResponse | null;
   busy: boolean;
   privacyMask?: boolean;
+  onAction?: (name: string, params?: Record<string, unknown>, confirmMsg?: string) => void;
   onNavigate?: (tab: string, sub?: string) => void;
   onSaved?: () => void;
 }
@@ -80,6 +82,7 @@ export const GatewayModePage: React.FC<GatewayModePageProps> = ({
   status,
   busy,
   privacyMask = false,
+  onAction,
   onNavigate,
   onSaved,
 }) => {
@@ -500,7 +503,11 @@ export const GatewayModePage: React.FC<GatewayModePageProps> = ({
                 setSideFailover(checked);
                 setSideRouterDirty(true);
               }}
-              onGoVlan={onNavigate ? () => onNavigate('net', 'vlan') : undefined}
+              onGoVlan={
+                onNavigate && status?.host?.capabilities?.vlan !== false
+                  ? () => onNavigate('net', 'vlan')
+                  : undefined
+              }
             />
           )}
 
@@ -649,6 +656,12 @@ export const GatewayModePage: React.FC<GatewayModePageProps> = ({
         privacyMask={privacyMask}
         rebootNotice={offloadRebootNotice}
         onApply={handleApplyFlowOffload}
+      />
+
+      <ChassisAccelCard
+        busy={busy}
+        supportedHint={status?.host?.capabilities?.chassis}
+        onAction={onAction}
       />
 
       <DNSLeakTestCard privacyMask={privacyMask} />
