@@ -2,11 +2,14 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { RefreshCw, RotateCcw, Search, SlidersHorizontal, X } from 'lucide-react';
 import { Badge, Button, SectionCard } from '../../../ui';
 import {
+  AuditRouteRuleDeleteRequest,
+  AuditRouteRuleUpsertRequest,
   ClientRoutingPresetState,
   ClientRoutingReport,
   SbProxiesSnapshot,
   SbProxyGroup,
 } from '../../types';
+import { SmartRoutingCustomRulesCard } from './SmartRoutingCustomRulesCard';
 
 export interface SmartRoutingSectionProps {
   routing: ClientRoutingReport | null;
@@ -15,6 +18,7 @@ export interface SmartRoutingSectionProps {
   proxiesSnap: SbProxiesSnapshot | null;
   savingId: string | null;
   resetting: boolean;
+  customRuleBusy?: boolean;
   onReload: () => void;
   onOpenResetConfirm: () => void;
   onUpdatePreset: (
@@ -23,6 +27,8 @@ export interface SmartRoutingSectionProps {
     nextOutbound?: string,
     toastLabel?: string,
   ) => void;
+  onUpsertCustomRule?: (req: AuditRouteRuleUpsertRequest) => void;
+  onDeleteCustomRule?: (req: AuditRouteRuleDeleteRequest) => void;
   onJumpToGroup: (groupTag: string) => void;
 }
 
@@ -33,9 +39,12 @@ export const SmartRoutingSection: React.FC<SmartRoutingSectionProps> = ({
   proxiesSnap,
   savingId,
   resetting,
+  customRuleBusy = false,
   onReload,
   onOpenResetConfirm,
   onUpdatePreset,
+  onUpsertCustomRule,
+  onDeleteCustomRule,
   onJumpToGroup,
 }) => {
   const [activeCategory, setActiveCategory] = useState<string>('ai');
@@ -310,6 +319,15 @@ export const SmartRoutingSection: React.FC<SmartRoutingSectionProps> = ({
               );
             })}
           </div>
+        )}
+
+        {routing && onUpsertCustomRule && onDeleteCustomRule && (
+          <SmartRoutingCustomRulesCard
+            routing={routing}
+            busy={customRuleBusy || resetting}
+            onChangeOutbound={onUpsertCustomRule}
+            onDeleteRule={onDeleteCustomRule}
+          />
         )}
       </div>
     </SectionCard>

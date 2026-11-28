@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 
+	"singctl/internal/config"
 	"singctl/internal/singbox/sboption"
 )
 
@@ -61,6 +62,7 @@ type ClientRoutingReport struct {
 	DirectTag    string                     `json:"directTag"`
 	Categories   []TrafficCategoryInfo      `json:"categories"`
 	Items        []ClientRoutingPresetState `json:"items"`
+	CustomRules  []config.TrafficCustomRule `json:"customRules,omitempty"`
 	EnabledCount int                        `json:"enabledCount"`
 	CustomCount  int                        `json:"customCount"`
 	TotalCount   int                        `json:"totalCount"`

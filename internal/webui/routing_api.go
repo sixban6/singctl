@@ -3,6 +3,7 @@ package webui
 
 import (
 	"cmp"
+	"context"
 	"encoding/json"
 	"net/http"
 	"os"
@@ -53,6 +54,33 @@ func (s *Server) handleTrafficRoutingGet(w http.ResponseWriter, _ *http.Request)
 	writeJSON(w, http.StatusOK, report)
 }
 
+func (s *Server) compileAndApplyTrafficRouting(
+	ctx context.Context,
+	prevRules []config.TrafficCustomRule,
+	cfg *config.Config,
+) (applied bool, liveJSON string, err error) {
+	sbPath := s.sbConfigPath()
+	rawSBBytes, sbErr := os.ReadFile(sbPath)
+	rawSB := string(rawSBBytes)
+	liveJSON = rawSB
+	if sbErr != nil || strings.TrimSpace(rawSB) == "" {
+		return false, liveJSON, nil
+	}
+	updatedJSON, convErr := singbox.ApplyTrafficRoutingWithPrevRules(rawSB, prevRules, cfg.TrafficRouting, cfg.CustomRules)
+	if convErr != nil {
+		return false, liveJSON, &apiStatusError{status: http.StatusInternalServerError, msg: "编译分流规则失败: " + convErr.Error()}
+	}
+	if applyErr := singbox.ApplyLiveSingBoxConfig(ctx, sbPath, s.sbWorkConfigPath(), updatedJSON, "routing"); applyErr != nil {
+		return false, liveJSON, &apiStatusError{status: http.StatusBadRequest, msg: "应用配置或 sing-box 校验失败: " + applyErr.Error()}
+	}
+	if baseRaw, bErr := singbox.LoadBaseSnapshot(sbPath); bErr == nil && strings.TrimSpace(baseRaw) != "" {
+		if updatedBase, uErr := singbox.ApplyTrafficRoutingWithPrevRules(baseRaw, prevRules, cfg.TrafficRouting, cfg.CustomRules); uErr == nil {
+			_ = singbox.SaveBaseSnapshot(sbPath, updatedBase)
+		}
+	}
+	return true, updatedJSON, nil
+}
+
 func (s *Server) handleTrafficRoutingPut(w http.ResponseWriter, r *http.Request) {
 	var body trafficRoutingPutRequest
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -62,36 +90,20 @@ func (s *Server) handleTrafficRoutingPut(w http.ResponseWriter, r *http.Request)
 
 	sbPath := s.sbConfigPath()
 	var (
-		applied  bool
-		liveJSON string
+		applied   bool
+		liveJSON  string
+		prevRules []config.TrafficCustomRule
 	)
 	cfg, err := s.updateConfigTx(configTxOptions{
 		InvalidateIOS: true,
 		SaveErrPrefix: "保存 singctl.yaml 失败: ",
 		LiveApply: func(cfg *config.Config) error {
-			rawSBBytes, sbErr := os.ReadFile(sbPath)
-			rawSB := string(rawSBBytes)
-			liveJSON = rawSB
-			if sbErr != nil || strings.TrimSpace(rawSB) == "" {
-				return nil
-			}
-			updatedJSON, convErr := singbox.ApplyTrafficRoutingToConfigJSON(rawSB, cfg.TrafficRouting, cfg.CustomRules)
-			if convErr != nil {
-				return &apiStatusError{status: http.StatusInternalServerError, msg: "编译分流规则失败: " + convErr.Error()}
-			}
-			if applyErr := singbox.ApplyLiveSingBoxConfig(r.Context(), sbPath, s.sbWorkConfigPath(), updatedJSON, "routing"); applyErr != nil {
-				return &apiStatusError{status: http.StatusBadRequest, msg: "应用配置或 sing-box 校验失败: " + applyErr.Error()}
-			}
-			if baseRaw, bErr := singbox.LoadBaseSnapshot(sbPath); bErr == nil && strings.TrimSpace(baseRaw) != "" {
-				if updatedBase, uErr := singbox.ApplyTrafficRoutingToConfigJSON(baseRaw, cfg.TrafficRouting, cfg.CustomRules); uErr == nil {
-					_ = singbox.SaveBaseSnapshot(sbPath, updatedBase)
-				}
-			}
-			applied = true
-			liveJSON = updatedJSON
-			return nil
+			var applyErr error
+			applied, liveJSON, applyErr = s.compileAndApplyTrafficRouting(r.Context(), prevRules, cfg)
+			return applyErr
 		},
 	}, func(cfg *config.Config) error {
+		prevRules = slices.Clone(cfg.TrafficRouting.Rules)
 		rawSBBytes, sbErr := os.ReadFile(sbPath)
 		rawSB := string(rawSBBytes)
 		hasLiveSB := sbErr == nil && strings.TrimSpace(rawSB) != ""
@@ -106,7 +118,10 @@ func (s *Server) handleTrafficRoutingPut(w http.ResponseWriter, r *http.Request)
 		if valErr != nil {
 			return valErr
 		}
-		cfg.TrafficRouting = config.TrafficRoutingConfig{Presets: nextPresets}.Normalized()
+		cfg.TrafficRouting = config.TrafficRoutingConfig{
+			Presets: nextPresets,
+			Rules:   slices.Clone(prevRules),
+		}.Normalized()
 		return nil
 	})
 	if err != nil {

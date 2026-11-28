@@ -60,10 +60,11 @@ type StatusSnapshot struct {
 	Peers        []PeerStatus `json:"peers"`
 }
 
-// NetMapSnapshot 描述 `tailscale debug netmap` 提取出的候选公网端口映射。
+// NetMapSnapshot 描述 `tailscale debug netmap` 提取出的候选公网端口映射与云端 ACL 过滤规则快照。
 type NetMapSnapshot struct {
 	SelfEndpoints []string
 	PeerEndpoints map[string][]string
+	PacketFilter  *PacketFilterSnapshot
 }
 
 // PingResult 描述 LocalAPI DISCO ping 响应。
@@ -236,7 +237,9 @@ func (c *UnixLocalAPIClient) NetMap(ctx context.Context) (*NetMapSnapshot, error
 	if c.NetMapRunner != nil {
 		rawBytes, err = c.NetMapRunner(ctx, bin)
 	} else {
-		rawBytes, err = exec.CommandContext(ctx, bin, "debug", "netmap").Output()
+		nmCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		rawBytes, err = exec.CommandContext(nmCtx, bin, "debug", "netmap").Output()
 	}
 	if err != nil {
 		return nil, fmt.Errorf("tailscale debug netmap: %w", err)
@@ -258,6 +261,7 @@ func (c *UnixLocalAPIClient) NetMap(ctx context.Context) (*NetMapSnapshot, error
 	snap := &NetMapSnapshot{
 		SelfEndpoints: slices.Clone(decoded.SelfNode.Endpoints),
 		PeerEndpoints: make(map[string][]string, len(decoded.Peers)),
+		PacketFilter:  ParseNetmapPacketFilter(rawBytes),
 	}
 	for _, p := range decoded.Peers {
 		id := strings.TrimSpace(p.StableID)

@@ -73,8 +73,9 @@ func BuildClientRoutingReport(cfg *config.Config, rawConfigJSON string) ClientRo
 		DirectTag:    directTag,
 		Categories:   resolveCategoriesForGroups(groupTags, directTag),
 		Items:        items,
+		CustomRules:  slices.Clone(tr.Rules),
 		EnabledCount: enabledCount,
-		CustomCount:  customCount,
+		CustomCount:  customCount + len(tr.Rules),
 		TotalCount:   len(items),
 		HasConfig:    strings.TrimSpace(rawConfigJSON) != "",
 	}
@@ -112,11 +113,20 @@ func resolveCategoriesForGroups(groupTags []string, directTag string) []TrafficC
 
 // ApplyTrafficRoutingToConfigJSON 将客户端「智能分流开关中心」策略幂等地编译注入 sing-box config.json。
 func ApplyTrafficRoutingToConfigJSON(rawJSON string, tr config.TrafficRoutingConfig, cr config.CustomRulesConfig) (string, error) {
-	return ApplyTrafficRoutingForPlatform(rawJSON, tr, cr, "")
+	return ApplyTrafficRoutingWithPrevRules(rawJSON, nil, tr, cr)
+}
+
+// ApplyTrafficRoutingWithPrevRules 将当前与历史审计自定义出口规则一同对齐编译，更新或删除时零残留剥离旧规则。
+func ApplyTrafficRoutingWithPrevRules(rawJSON string, prevRules []config.TrafficCustomRule, tr config.TrafficRoutingConfig, cr config.CustomRulesConfig) (string, error) {
+	return applyTrafficRoutingWithPrevForPlatform(rawJSON, prevRules, tr, cr, "")
 }
 
 // ApplyTrafficRoutingForPlatform 与 ApplyTrafficRoutingToConfigJSON 逻辑一致，额外感知目标平台。
 func ApplyTrafficRoutingForPlatform(rawJSON string, tr config.TrafficRoutingConfig, cr config.CustomRulesConfig, platform string) (string, error) {
+	return applyTrafficRoutingWithPrevForPlatform(rawJSON, nil, tr, cr, platform)
+}
+
+func applyTrafficRoutingWithPrevForPlatform(rawJSON string, prevRules []config.TrafficCustomRule, tr config.TrafficRoutingConfig, cr config.CustomRulesConfig, platform string) (string, error) {
 	if strings.TrimSpace(rawJSON) == "" {
 		return rawJSON, nil
 	}
@@ -124,11 +134,15 @@ func ApplyTrafficRoutingForPlatform(rawJSON string, tr config.TrafficRoutingConf
 	if err != nil {
 		return "", fmt.Errorf("解析 sing-box config.json 失败: %w", err)
 	}
-	applyTrafficRoutingToDoc(doc, tr, cr, platform)
+	applyTrafficRoutingWithPrevToDoc(doc, prevRules, tr, cr, platform)
 	return doc.MarshalPretty()
 }
 
 func applyTrafficRoutingToDoc(doc *sboption.Document, tr config.TrafficRoutingConfig, cr config.CustomRulesConfig, platform string) {
+	applyTrafficRoutingWithPrevToDoc(doc, nil, tr, cr, platform)
+}
+
+func applyTrafficRoutingWithPrevToDoc(doc *sboption.Document, prevRules []config.TrafficCustomRule, tr config.TrafficRoutingConfig, cr config.CustomRulesConfig, platform string) {
 	if doc == nil {
 		return
 	}
@@ -149,20 +163,31 @@ func applyTrafficRoutingToDoc(doc *sboption.Document, tr config.TrafficRoutingCo
 	managedSuffixes, managedRuleSets := collectManagedSignatures(preserveNativeHoK)
 	customRouteSet := buildCustomRuleSignatures(cr)
 
-	strippedRouteRules := stripManagedRouteRules(doc.Route.Rules, managedSuffixes, managedRuleSets, customRouteSet)
-	managedRouteRules := compileManagedRouteRules(normTR, groupTags, directTag, definedRuleSets, preserveNativeHoK)
-	insertRouteIdx := sboption.TrafficRouteInsertIndex(strippedRouteRules)
-	doc.Route.Rules = slices.Insert(strippedRouteRules, insertRouteIdx, managedRouteRules...)
-
 	isIOS := strings.EqualFold(strings.TrimSpace(platform), PlatformIOS)
+	var proxyDNS, directDNS string
 	if doc.DNS != nil {
-		proxyDNS, directDNS := resolveClientDNSTags(doc.DNS)
+		proxyDNS, directDNS = resolveClientDNSTags(doc.DNS)
+	}
+	customTrafficSig := buildCustomTrafficRuleSignatures(prevRules, normTR.Rules, groupTags, directTag, proxyDNS, directDNS, isIOS)
+
+	strippedRouteRules := stripManagedRouteRules(doc.Route.Rules, managedSuffixes, managedRuleSets, customRouteSet)
+	strippedRouteRules = stripCustomTrafficRouteRules(strippedRouteRules, customTrafficSig.routeJSONs, customRouteSet)
+	customTrafficRoutes := compileCustomTrafficRouteRules(normTR.Rules, groupTags, directTag, isIOS)
+	managedRouteRules := compileManagedRouteRules(normTR, groupTags, directTag, definedRuleSets, preserveNativeHoK)
+	allTrafficRoutes := append(customTrafficRoutes, managedRouteRules...)
+	insertRouteIdx := sboption.TrafficRouteInsertIndex(strippedRouteRules)
+	doc.Route.Rules = slices.Insert(strippedRouteRules, insertRouteIdx, allTrafficRoutes...)
+
+	if doc.DNS != nil {
 		if proxyDNS != "" || directDNS != "" {
 			skipEnabledGeositeDNS := isIOS && proxyDNS != "" && strings.TrimSpace(doc.DNS.Final) == proxyDNS
 			strippedDNSRules := stripManagedDNSRules(doc.DNS.Rules, managedSuffixes, managedRuleSets, customRouteSet)
+			strippedDNSRules = stripCustomTrafficDNSRules(strippedDNSRules, customTrafficSig.dnsJSONs, customRouteSet)
+			customTrafficDNS := compileCustomTrafficDNSRules(normTR.Rules, groupTags, directTag, proxyDNS, directDNS, isIOS)
 			managedDNSRules := compileManagedDNSRules(normTR, proxyDNS, directDNS, definedRuleSets, preserveNativeHoK, skipEnabledGeositeDNS)
+			allTrafficDNS := append(customTrafficDNS, managedDNSRules...)
 			insertDNSIdx := sboption.TrafficDNSInsertIndex(strippedDNSRules)
-			doc.DNS.Rules = slices.Insert(strippedDNSRules, insertDNSIdx, managedDNSRules...)
+			doc.DNS.Rules = slices.Insert(strippedDNSRules, insertDNSIdx, allTrafficDNS...)
 		}
 	}
 }

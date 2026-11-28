@@ -7,6 +7,9 @@ import {
   AuditDeviceAccessResult,
   AuditFlowRecord,
   AuditReport,
+  AuditRouteRuleDeleteRequest,
+  AuditRouteRuleResponse,
+  AuditRouteRuleUpsertRequest,
 } from '../types';
 import { clientHttp, request } from './session';
 
@@ -93,6 +96,7 @@ export const auditApi = {
     connIds?: string[];
     deviceIp?: string;
     target?: string;
+    matchSuffix?: boolean;
     network?: string;
   }) =>
     request<{ ok: boolean; closed: number; all: boolean; message: string }>('/api/audit/close-connections', {
@@ -104,5 +108,17 @@ export const auditApi = {
     request<AuditDeviceAccessResult>('/api/audit/device-access', {
       method: 'POST',
       body: JSON.stringify({ deviceIp, allowOverseas }),
+    }),
+
+  upsertAuditRouteRule: (payload: AuditRouteRuleUpsertRequest) =>
+    request<AuditRouteRuleResponse>('/api/audit/route-rule', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  deleteAuditRouteRule: (payload: AuditRouteRuleDeleteRequest) =>
+    request<AuditRouteRuleResponse>('/api/audit/route-rule', {
+      method: 'DELETE',
+      body: JSON.stringify(payload),
     }),
 };

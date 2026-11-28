@@ -185,7 +185,7 @@ var knownYAMLKeys = []string{
 	"gateway", "work_mode", "main_router_ip", "side_router_ip", "side_router_failover", "modem_ip", "lan_iface", "ipv6_mode",
 	"audit", "whitelist", "pcdn_block", "direct_devices", "throttles", "rate_kbps", "comment", "ai", "endpoint", "api_key", "model",
 	"firewall", "ban_timeout_days", "ping_limit_per_sec", "extra_forever_ban", "protected_ports",
-	"traffic_routing", "outbound",
+	"traffic_routing", "outbound", "rules", "match_type",
 	"home_domain", "suffix", "tailscale_dns", "follow_dhcp", "devices", "alias", "display_name", "ip", "mac", "source", "wildcard", "services", "label", "scheme", "note",
 	"notify", "cooldown_minutes", "daily_limit", "quiet_hours", "events",
 	"watchdog_heal", "safe_commit_rollback", "resource_guard", "audit_high_risk", "new_device", "sub_or_node_fail", "server_quota_or_ban",

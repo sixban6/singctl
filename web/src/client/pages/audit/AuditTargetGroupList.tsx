@@ -142,14 +142,24 @@ export const AuditTargetGroupList: React.FC<AuditTargetGroupListProps> = ({
               </div>
 
               <div className="flex items-center gap-3 shrink-0" onClick={(e) => e.stopPropagation()}>
-                <div className="text-right font-mono tnum text-[11px] whitespace-nowrap">
-                  {(g.currentUploadBps > 0 || g.currentDownloadBps > 0) && (
-                    <div>
-                      <span className="text-emerald-400 font-semibold">↑{fmtBps(g.currentUploadBps)}</span>{' '}
-                      <span className="text-sky-400">↓{fmtBps(g.currentDownloadBps)}</span>
-                    </div>
-                  )}
+                <div className="text-right font-mono tnum text-[11px] whitespace-nowrap space-y-0.5">
+                  <div>
+                    <span className="text-[10px] font-sans text-muted mr-1.5">实时</span>
+                    {g.currentUploadBps > 0 || g.currentDownloadBps > 0 ? (
+                      <span>
+                        <span className={g.currentUploadBps > 0 ? 'text-emerald-400 font-semibold' : 'text-muted'}>
+                          ↑{fmtBps(g.currentUploadBps)}
+                        </span>{' '}
+                        <span className={g.currentDownloadBps > 0 ? 'text-sky-400' : 'text-muted'}>
+                          ↓{fmtBps(g.currentDownloadBps)}
+                        </span>
+                      </span>
+                    ) : (
+                      <span className="text-muted">{g.activeConns > 0 ? '空闲' : '—'}</span>
+                    )}
+                  </div>
                   <div className="text-secondary">
+                    <span className="text-[10px] font-sans text-muted mr-1.5">累计</span>
                     ↑{fmtBytes(g.uploadBytes)} / ↓{fmtBytes(g.downloadBytes)}
                   </div>
                 </div>

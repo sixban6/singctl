@@ -1,6 +1,7 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
+  ArrowRightLeft,
   Ban,
   Bot,
   ChevronDown,
@@ -19,7 +20,13 @@ import {
   SlideDrawer,
   formatBytes as fmtBytes,
 } from '../../../ui';
-import { AuditAIReview, AuditFlowRecord } from '../../types';
+import {
+  AuditAIReview,
+  AuditFlowRecord,
+  AuditRouteRuleDeleteRequest,
+  AuditRouteRuleUpsertRequest,
+  ClientRoutingReport,
+} from '../../types';
 import {
   fmtBps,
   fmtDurationSpan,
@@ -30,6 +37,7 @@ import {
   NONLINEAR_FACTOR_LABELS,
   SubnetBlockConfirmState,
 } from './auditHelpers';
+import { AuditRouteRulePopover, findMatchingCustomRule } from './AuditRouteRulePopover';
 import { AuditSubConnsCard } from './AuditSubConnsCard';
 
 export interface AuditFlowDetailDrawerProps {
@@ -37,6 +45,9 @@ export interface AuditFlowDetailDrawerProps {
   detailIndex: number;
   totalCount: number;
   throttleBusy: boolean;
+  isAuditOnlyMode?: boolean;
+  routeBusy?: boolean;
+  routingReport?: ClientRoutingReport | null;
   getCachedReview: (f: AuditFlowRecord) => AuditAIReview | null;
   onClose: () => void;
   onNavigatePrev: () => void;
@@ -48,6 +59,8 @@ export interface AuditFlowDetailDrawerProps {
   onWhitelistAction: (action: 'add' | 'remove', target: string) => void;
   onBlockFlow: (f: AuditFlowRecord, deviceOnly: boolean) => void;
   onSetThrottle: (f: AuditFlowRecord, rateKbps: number) => void;
+  onUpsertRouteRule?: (req: AuditRouteRuleUpsertRequest) => void;
+  onDeleteRouteRule?: (req: AuditRouteRuleDeleteRequest) => void;
   onFilterByDevice: (f: AuditFlowRecord) => void;
   onFilterByChain: (chain: string) => void;
   onFilterBySubnet: (cidr: string) => void;
@@ -59,6 +72,9 @@ export const AuditFlowDetailDrawer: React.FC<AuditFlowDetailDrawerProps> = ({
   detailIndex,
   totalCount,
   throttleBusy,
+  isAuditOnlyMode = false,
+  routeBusy = false,
+  routingReport = null,
   getCachedReview,
   onClose,
   onNavigatePrev,
@@ -70,6 +86,8 @@ export const AuditFlowDetailDrawer: React.FC<AuditFlowDetailDrawerProps> = ({
   onWhitelistAction,
   onBlockFlow,
   onSetThrottle,
+  onUpsertRouteRule,
+  onDeleteRouteRule,
   onFilterByDevice,
   onFilterByChain,
   onFilterBySubnet,
@@ -78,9 +96,12 @@ export const AuditFlowDetailDrawer: React.FC<AuditFlowDetailDrawerProps> = ({
   const flowKey = detailFlow ? getFlowCacheKey(detailFlow) : '';
   const isRisky = detailFlow?.threat === 'high_risk' || detailFlow?.threat === 'suspicious';
   const [techOpen, setTechOpen] = useState(Boolean(isRisky));
+  const [routeOpen, setRouteOpen] = useState(false);
+  const routeBtnRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     setTechOpen(Boolean(isRisky));
+    setRouteOpen(false);
   }, [flowKey, isRisky]);
 
   useEffect(() => {
@@ -172,6 +193,22 @@ export const AuditFlowDetailDrawer: React.FC<AuditFlowDetailDrawerProps> = ({
               >
                 重新 AI 研判
               </Button>
+              {!isAuditOnlyMode && !protectedTarget && onUpsertRouteRule && (
+                <button
+                  ref={routeBtnRef}
+                  type="button"
+                  disabled={routeBusy}
+                  onClick={() => setRouteOpen((v) => !v)}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors cursor-pointer disabled:opacity-50 ${
+                    findMatchingCustomRule(detailFlow, routingReport?.customRules)
+                      ? 'bg-accent/18 border-accent/45 text-accent hover:bg-accent/25'
+                      : 'bg-surface2 border-subtle text-primary hover:bg-surfaceHover'
+                  }`}
+                >
+                  <ArrowRightLeft className="w-3.5 h-3.5" />
+                  <span>切换出口</span>
+                </button>
+              )}
               {(detailFlow.activeConns || 0) > 0 && (
                 <Button
                   size="sm"
@@ -612,6 +649,18 @@ export const AuditFlowDetailDrawer: React.FC<AuditFlowDetailDrawerProps> = ({
             )}
           </div>
         </div>
+      )}
+      {detailFlow && !isAuditOnlyMode && !protectedTarget && onUpsertRouteRule && onDeleteRouteRule && (
+        <AuditRouteRulePopover
+          open={routeOpen}
+          anchorEl={routeBtnRef.current}
+          flow={detailFlow}
+          routingReport={routingReport ?? null}
+          busy={routeBusy}
+          onSelectOutbound={onUpsertRouteRule}
+          onDeleteRule={onDeleteRouteRule}
+          onClose={() => setRouteOpen(false)}
+        />
       )}
     </SlideDrawer>
   );

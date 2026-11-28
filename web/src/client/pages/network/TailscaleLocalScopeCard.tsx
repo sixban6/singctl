@@ -18,6 +18,7 @@ import {
   TailscaleLocalNetworkDTO,
   TailscaleSubnetScope,
 } from '../../types';
+import { TailscaleCloudAclAlert } from './TailscaleCloudAclAlert';
 
 export interface LocalSubnetDraft {
   cidr: string;
@@ -95,6 +96,17 @@ export const TailscaleLocalScopeCard: React.FC<TailscaleLocalScopeCardProps> = (
   ];
 
   const selectedCount = mergedNetworks.filter((n) => subnetDrafts[n.cidr]?.selected).length;
+  const aclBlockedCidrs =
+    isSubnetRole && tsStatus?.running
+      ? mergedNetworks
+          .filter(
+            (n) =>
+              Boolean(subnetDrafts[n.cidr]?.selected) &&
+              Boolean(n.approved) &&
+              n.aclStatus === 'blocked',
+          )
+          .map((n) => n.cidr)
+      : [];
 
   const handleAddSubnet = () => {
     const val = newSubnetInput.trim();
@@ -146,6 +158,8 @@ export const TailscaleLocalScopeCard: React.FC<TailscaleLocalScopeCardProps> = (
             </span>
           </div>
         )}
+
+        <TailscaleCloudAclAlert blockedCidrs={aclBlockedCidrs} privacyMask={privacyMask} />
 
         <div className="space-y-2.5">
           {mergedNetworks.length === 0 ? (
@@ -205,7 +219,13 @@ export const TailscaleLocalScopeCard: React.FC<TailscaleLocalScopeCardProps> = (
                           <Badge tone={kindMeta.tone}>{kindMeta.label}</Badge>
                           {tsStatus?.running && activeInNet && (
                             net.approved ? (
-                              <Badge tone="ok">已生效</Badge>
+                              net.aclStatus === 'blocked' ? (
+                                <Badge tone="danger">云端 ACL 未放行</Badge>
+                              ) : net.aclStatus === 'partial' ? (
+                                <Badge tone="warn">云端 ACL 部分放行</Badge>
+                              ) : (
+                                <Badge tone="ok">已生效</Badge>
+                              )
                             ) : net.selected ? (
                               <Badge tone="warn">待后台批准</Badge>
                             ) : null
@@ -244,9 +264,27 @@ export const TailscaleLocalScopeCard: React.FC<TailscaleLocalScopeCardProps> = (
                     )}
                   </div>
 
+                  {tsStatus?.running && activeInNet && net.approved && net.aclStatus === 'blocked' && (
+                    <div className="text-[10.5px] text-rose-300/95 pl-6 leading-relaxed">
+                      已获批通告，但云端 ACL 未放行该网段，远端设备访问将被 tailscaled 丢弃 (no rules matched)。
+                    </div>
+                  )}
+
+                  {tsStatus?.running && activeInNet && net.approved && net.aclStatus === 'partial' && (
+                    <div className="text-[10.5px] text-amber-300/95 pl-6 leading-relaxed">
+                      云端 ACL 仅放行部分地址/端口
+                      {!privacyMask && net.aclMatchedRanges?.length
+                        ? `（${net.aclMatchedRanges.join('、')}）`
+                        : ''}
+                      ，其余访问将被拦截。
+                    </div>
+                  )}
+
                   {tsStatus?.running && activeInNet && net.selected && !net.approved && (
                     <div className="text-[10.5px] text-amber-300/90 pl-6 leading-relaxed">
-                      首次通告需在 Tailscale 网页后台 Edit route settings 批准后生效。
+                      {net.aclStatus === 'blocked'
+                        ? '首次通告需在 Tailscale 网页后台 Edit route settings 批准，并在 Access Controls (ACL) 中放行该网段后生效。'
+                        : '首次通告需在 Tailscale 网页后台 Edit route settings 批准后生效。'}
                     </div>
                   )}
 

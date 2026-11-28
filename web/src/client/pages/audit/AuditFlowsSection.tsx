@@ -1,7 +1,14 @@
 import React, { useMemo } from 'react';
 import { ShieldAlert, Unplug } from 'lucide-react';
 import { Button, DataTable, SectionCard } from '../../../ui';
-import { AuditAIReview, AuditFlowRecord, AuditReport } from '../../types';
+import {
+  AuditAIReview,
+  AuditFlowRecord,
+  AuditReport,
+  AuditRouteRuleDeleteRequest,
+  AuditRouteRuleUpsertRequest,
+  ClientRoutingReport,
+} from '../../types';
 import { AuditBulkBar } from './AuditBulkBar';
 import { AuditFlowMobileCards } from './AuditFlowMobileCards';
 import {
@@ -60,6 +67,7 @@ export interface AuditFlowsSectionProps {
   hasAnyFilter: boolean;
   onResetAllFilters: () => void;
   isAuditOnlyMode: boolean;
+  routingReport?: ClientRoutingReport | null;
   filterTransitioning: boolean;
   closingAll: boolean;
   batchBusy: boolean;
@@ -90,6 +98,8 @@ export interface AuditFlowsSectionProps {
   onWhitelistAction: (action: 'add' | 'remove', target: string) => void;
   onBlockFlow: (f: AuditFlowRecord, deviceOnly: boolean) => void;
   onSetThrottle: (f: AuditFlowRecord, rateKbps: number) => void;
+  onUpsertRouteRule?: (req: AuditRouteRuleUpsertRequest) => void;
+  onDeleteRouteRule?: (req: AuditRouteRuleDeleteRequest) => void;
   onCopyText: (text: string, label?: string) => void;
 }
 
@@ -134,6 +144,7 @@ export const AuditFlowsSection: React.FC<AuditFlowsSectionProps> = ({
   hasAnyFilter,
   onResetAllFilters,
   isAuditOnlyMode,
+  routingReport = null,
   filterTransitioning,
   closingAll,
   batchBusy,
@@ -164,6 +175,8 @@ export const AuditFlowsSection: React.FC<AuditFlowsSectionProps> = ({
   onWhitelistAction,
   onBlockFlow,
   onSetThrottle,
+  onUpsertRouteRule,
+  onDeleteRouteRule,
   onCopyText,
 }) => {
   const allVisibleSelected =
@@ -192,6 +205,7 @@ export const AuditFlowsSection: React.FC<AuditFlowsSectionProps> = ({
         pendingTargets,
         filterTransitioning,
         isAuditOnlyMode,
+        routingReport,
         getCachedReview,
         onToggleSelectAllVisible,
         onToggleSelectKey,
@@ -204,6 +218,8 @@ export const AuditFlowsSection: React.FC<AuditFlowsSectionProps> = ({
         onWhitelistAction,
         onCloseFlowConnections,
         onSetThrottle,
+        onUpsertRouteRule,
+        onDeleteRouteRule,
         onCopyText,
       }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -214,6 +230,7 @@ export const AuditFlowsSection: React.FC<AuditFlowsSectionProps> = ({
       pendingTargets,
       filterTransitioning,
       isAuditOnlyMode,
+      routingReport,
       getCachedReview,
     ],
   );
@@ -371,6 +388,7 @@ export const AuditFlowsSection: React.FC<AuditFlowsSectionProps> = ({
                   pendingTargets={pendingTargets}
                   filterTransitioning={filterTransitioning}
                   isAuditOnlyMode={isAuditOnlyMode}
+                  routingReport={routingReport}
                   getCachedReview={getCachedReview}
                   onToggleSelect={onToggleSelectKey}
                   onSelectFlowDetail={onSelectFlowDetail}
@@ -380,6 +398,8 @@ export const AuditFlowsSection: React.FC<AuditFlowsSectionProps> = ({
                   onWhitelistAction={onWhitelistAction}
                   onCloseFlowConnections={onCloseFlowConnections}
                   onSetThrottle={onSetThrottle}
+                  onUpsertRouteRule={onUpsertRouteRule}
+                  onDeleteRouteRule={onDeleteRouteRule}
                   onFilterByDevice={handleFilterDeviceFromFlow}
                   onFilterByChain={onSelectChain}
                   onFilterBySubnet={onSearchQueryChange}

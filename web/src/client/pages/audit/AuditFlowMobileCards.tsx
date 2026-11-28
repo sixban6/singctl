@@ -1,7 +1,13 @@
 import React from 'react';
 import { Bot, Copy } from 'lucide-react';
 import { Badge, Button, formatBytes as fmtBytes } from '../../../ui';
-import { AuditAIReview, AuditFlowRecord } from '../../types';
+import {
+  AuditAIReview,
+  AuditFlowRecord,
+  AuditRouteRuleDeleteRequest,
+  AuditRouteRuleUpsertRequest,
+  ClientRoutingReport,
+} from '../../types';
 import { AuditActionCell } from './AuditActionCell';
 import { formatCompactRule } from './auditFlowModel';
 import {
@@ -20,6 +26,7 @@ export interface AuditFlowMobileCardsProps {
   pendingTargets: Set<string>;
   filterTransitioning: boolean;
   isAuditOnlyMode: boolean;
+  routingReport?: ClientRoutingReport | null;
   getCachedReview: (f: AuditFlowRecord) => AuditAIReview | null;
   onToggleSelect: (fk: string) => void;
   onSelectFlowDetail: (fk: string) => void;
@@ -29,6 +36,8 @@ export interface AuditFlowMobileCardsProps {
   onWhitelistAction: (action: 'add' | 'remove', target: string) => void;
   onCloseFlowConnections: (f: AuditFlowRecord) => void;
   onSetThrottle: (f: AuditFlowRecord, rateKbps: number) => void;
+  onUpsertRouteRule?: (req: AuditRouteRuleUpsertRequest) => void;
+  onDeleteRouteRule?: (req: AuditRouteRuleDeleteRequest) => void;
   onFilterByDevice: (f: AuditFlowRecord) => void;
   onFilterByChain: (chain: string) => void;
   onFilterBySubnet: (cidr: string) => void;
@@ -43,6 +52,7 @@ export const AuditFlowMobileCards: React.FC<AuditFlowMobileCardsProps> = ({
   pendingTargets,
   filterTransitioning,
   isAuditOnlyMode,
+  routingReport = null,
   getCachedReview,
   onToggleSelect,
   onSelectFlowDetail,
@@ -52,6 +62,8 @@ export const AuditFlowMobileCards: React.FC<AuditFlowMobileCardsProps> = ({
   onWhitelistAction,
   onCloseFlowConnections,
   onSetThrottle,
+  onUpsertRouteRule,
+  onDeleteRouteRule,
   onFilterByDevice,
   onFilterByChain,
   onFilterBySubnet,
@@ -162,29 +174,37 @@ export const AuditFlowMobileCards: React.FC<AuditFlowMobileCardsProps> = ({
               </Badge>
             </div>
 
-            {/* Traffic & speed row */}
+            {/* Traffic & speed row (separated semantic slots: 实时 vs 累计) */}
             <div className="rounded-xl bg-surface2/55 border border-subtle/80 px-2.5 py-2 space-y-1.5">
               <div className="flex items-center justify-between gap-2 font-mono tnum text-[11px]">
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-1.5 min-w-0">
                   <span
-                    className={`w-1.5 h-1.5 rounded-full ${
+                    className={`w-1.5 h-1.5 rounded-full shrink-0 ${
                       activeCnt > 0 ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'
                     }`}
                   />
-                  {activeCnt > 0 ? (
-                    <span>
-                      <span className="text-emerald-400 font-semibold">
+                  <span className="text-[10px] text-muted font-sans shrink-0">实时</span>
+                  {activeCnt > 0 && ((f.currentUploadBps || 0) > 0 || (f.currentDownloadBps || 0) > 0) ? (
+                    <span className="truncate">
+                      <span className={(f.currentUploadBps || 0) > 0 ? 'text-emerald-400 font-semibold' : 'text-muted'}>
                         ↑{fmtBps(f.currentUploadBps)}
                       </span>{' '}
-                      <span className="text-sky-400">↓{fmtBps(f.currentDownloadBps)}</span>
+                      <span className={(f.currentDownloadBps || 0) > 0 ? 'text-sky-400' : 'text-muted'}>
+                        ↓{fmtBps(f.currentDownloadBps)}
+                      </span>
                     </span>
+                  ) : activeCnt > 0 ? (
+                    <span className="text-muted">空闲</span>
                   ) : (
                     <span className="text-muted">历史 · {formatRelativeSeen(f.lastSeen)}</span>
                   )}
                 </div>
-                <span className="text-secondary">
-                  ↑{fmtBytes(f.uploadBytes)} / ↓{fmtBytes(f.downloadBytes)}
-                </span>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <span className="text-[10px] text-muted font-sans">累计</span>
+                  <span className="text-secondary">
+                    ↑{fmtBytes(f.uploadBytes)} / ↓{fmtBytes(f.downloadBytes)}
+                  </span>
+                </div>
               </div>
               <div className="h-1 rounded-full bg-sky-500/35 overflow-hidden">
                 <div className="h-full bg-emerald-400" style={{ width: `${upPct}%` }} />
@@ -241,11 +261,15 @@ export const AuditFlowMobileCards: React.FC<AuditFlowMobileCardsProps> = ({
                 isBusy={busyFlowKeys.has(fk)}
                 isDualAlert={dual}
                 disabled={filterTransitioning}
+                isAuditOnlyMode={isAuditOnlyMode}
+                routingReport={routingReport}
                 onMarkPointerInteraction={onMarkPointerInteraction}
                 onBlockFlow={onBlockFlow}
                 onWhitelistAction={onWhitelistAction}
                 onCloseFlowConnections={onCloseFlowConnections}
                 onSetThrottle={onSetThrottle}
+                onUpsertRouteRule={onUpsertRouteRule}
+                onDeleteRouteRule={onDeleteRouteRule}
                 onFilterByDevice={onFilterByDevice}
                 onFilterBySubnet={onFilterBySubnet}
                 onCopyTarget={onCopyTarget}

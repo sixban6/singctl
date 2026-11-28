@@ -9,10 +9,12 @@ import {
 
 export type AuditSortKey =
   | 'latest'
+  | 'live_total'
   | 'live_up'
   | 'live_down'
   | 'active'
   | 'risk'
+  | 'total'
   | 'upload'
   | 'download'
   | 'ratio';
@@ -74,9 +76,11 @@ export interface AuditTargetGroup {
 export const AUDIT_SORT_OPTIONS: { value: AuditSortKey; label: string }[] = [
   { value: 'active', label: '综合活跃与风险' },
   { value: 'latest', label: '最新活跃' },
+  { value: 'live_total', label: '实时总速率最快' },
   { value: 'live_up', label: '实时上行最快' },
   { value: 'live_down', label: '实时下行最快' },
   { value: 'risk', label: '风险评分最高' },
+  { value: 'total', label: '累计总流量最多' },
   { value: 'upload', label: '累计上传最多' },
   { value: 'download', label: '累计下载最多' },
   { value: 'ratio', label: '上/下比最高' },
@@ -308,6 +312,15 @@ export function sortAuditFlows(
       if (c !== 0) return c;
       return ((b.activeConns || 0) - (a.activeConns || 0)) || getFlowCacheKey(a).localeCompare(getFlowCacheKey(b));
     }
+    if (sortBy === 'live_total') {
+      const aRate = (a.currentUploadBps || 0) + (a.currentDownloadBps || 0);
+      const bRate = (b.currentUploadBps || 0) + (b.currentDownloadBps || 0);
+      const c = (bRate - aRate) * sign;
+      if (c !== 0) return c;
+      const bTot = (b.uploadBytes || 0) + (b.downloadBytes || 0);
+      const aTot = (a.uploadBytes || 0) + (a.downloadBytes || 0);
+      return (bTot - aTot) * sign;
+    }
     if (sortBy === 'live_up') {
       const c = ((b.currentUploadBps || 0) - (a.currentUploadBps || 0)) * sign;
       if (c !== 0) return c;
@@ -317,6 +330,13 @@ export function sortAuditFlows(
       const c = ((b.currentDownloadBps || 0) - (a.currentDownloadBps || 0)) * sign;
       if (c !== 0) return c;
       return ((b.downloadBytes || 0) - (a.downloadBytes || 0)) * sign;
+    }
+    if (sortBy === 'total') {
+      const aTot = (a.uploadBytes || 0) + (a.downloadBytes || 0);
+      const bTot = (b.uploadBytes || 0) + (b.downloadBytes || 0);
+      const c = (bTot - aTot) * sign;
+      if (c !== 0) return c;
+      return (b.riskScore || 0) - (a.riskScore || 0);
     }
     if (sortBy === 'upload') {
       const c = ((b.uploadBytes || 0) - (a.uploadBytes || 0)) * sign;

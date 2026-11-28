@@ -330,6 +330,9 @@ func (s *Server) buildTailscaleMeshPayload(ctx context.Context, cfg *config.Conf
 	if v, ok := tsStatus["liveSubnets"].(string); ok {
 		liveSubnets = v
 	}
+	if liveSubnets == "" && s.opts.TailscaleP2PForTest != nil && strings.TrimSpace(s.opts.TailscaleP2PForTest.LiveSubnets) != "" {
+		liveSubnets = strings.TrimSpace(s.opts.TailscaleP2PForTest.LiveSubnets)
+	}
 	if v, ok := tsStatus["running"].(bool); ok {
 		tsRunning = v
 	}
@@ -355,7 +358,13 @@ func (s *Server) buildTailscaleMeshPayload(ctx context.Context, cfg *config.Conf
 		NeighText:             neighText,
 	})
 
-	p2pReport := s.buildTailscaleP2PReport(ctx, cfg)
+	p2pReport, netmapSnap := s.buildTailscaleP2PReportWithNetMap(ctx, cfg)
+	var pfSnap *tailscale.PacketFilterSnapshot
+	if netmapSnap != nil {
+		pfSnap = netmapSnap.PacketFilter
+	}
+	tailscale.AnnotateLocalNetworksACL(localNets, pfSnap)
+	cloudACL := tailscale.SummarizeCloudACL(localNets, pfSnap)
 	var allPeers []tailscale.P2PPeerView
 	if rawPeers, ok := p2pReport["peers"].([]tailscale.P2PPeerView); ok {
 		allPeers = rawPeers
@@ -384,6 +393,7 @@ func (s *Server) buildTailscaleMeshPayload(ctx context.Context, cfg *config.Conf
 		"tailscaleStatus":       tsStatus,
 		"config":                tailscaleConfigResponse(cfg),
 		"localNetworks":         localNets,
+		"cloudAcl":              cloudACL,
 		"p2p":                   p2pReport,
 		"gatewayPeers":          gatewayPeers,
 		"personalDevices":       personalDevices,

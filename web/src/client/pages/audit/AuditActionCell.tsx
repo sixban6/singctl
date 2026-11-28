@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
+  ArrowRightLeft,
   Ban,
   ChevronDown,
   Copy,
@@ -14,19 +15,29 @@ import {
   Unplug,
 } from 'lucide-react';
 import { Badge, Button } from '../../../ui';
-import { AuditFlowRecord } from '../../types';
+import {
+  AuditFlowRecord,
+  AuditRouteRuleDeleteRequest,
+  AuditRouteRuleUpsertRequest,
+  ClientRoutingReport,
+} from '../../types';
 import { isProtectedBootstrapTarget } from './auditHelpers';
+import { AuditRouteRulePopover, findMatchingCustomRule } from './AuditRouteRulePopover';
 
 export interface AuditActionCellProps {
   flow: AuditFlowRecord;
   isBusy: boolean;
   isDualAlert: boolean;
   disabled: boolean;
+  isAuditOnlyMode?: boolean;
+  routingReport?: ClientRoutingReport | null;
   onMarkPointerInteraction: () => void;
   onBlockFlow: (f: AuditFlowRecord, deviceOnly: boolean) => void;
   onWhitelistAction: (action: 'add' | 'remove', target: string) => void;
   onCloseFlowConnections: (f: AuditFlowRecord) => void;
   onSetThrottle: (f: AuditFlowRecord, rateKbps: number) => void;
+  onUpsertRouteRule?: (req: AuditRouteRuleUpsertRequest) => void;
+  onDeleteRouteRule?: (req: AuditRouteRuleDeleteRequest) => void;
   onFilterByDevice: (f: AuditFlowRecord) => void;
   onFilterBySubnet: (cidr: string) => void;
   onCopyTarget: (target: string) => void;
@@ -53,20 +64,27 @@ export const AuditActionCell: React.FC<AuditActionCellProps> = ({
   isBusy,
   isDualAlert,
   disabled,
+  isAuditOnlyMode = false,
+  routingReport = null,
   onMarkPointerInteraction,
   onBlockFlow,
   onWhitelistAction,
   onCloseFlowConnections,
   onSetThrottle,
+  onUpsertRouteRule,
+  onDeleteRouteRule,
   onFilterByDevice,
   onFilterBySubnet,
   onCopyTarget,
 }) => {
   const [openMenu, setOpenMenu] = useState<'block' | 'more' | null>(null);
+  const [routeOpen, setRouteOpen] = useState(false);
   const [coords, setCoords] = useState<MenuCoords>({ top: 0, left: 0 });
   const blockBtnRef = useRef<HTMLButtonElement>(null);
+  const routeBtnRef = useRef<HTMLButtonElement>(null);
   const moreBtnRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const matchedRule = findMatchingCustomRule(flow, routingReport?.customRules);
 
   useEffect(() => {
     if (!openMenu) return;
@@ -103,6 +121,7 @@ export const AuditActionCell: React.FC<AuditActionCellProps> = ({
   const toggleMenu = (kind: 'block' | 'more', e: React.MouseEvent) => {
     e.stopPropagation();
     onMarkPointerInteraction();
+    setRouteOpen(false);
     if (openMenu === kind) {
       setOpenMenu(null);
       return;
@@ -183,6 +202,33 @@ export const AuditActionCell: React.FC<AuditActionCellProps> = ({
         >
           放行
         </Button>
+      )}
+
+      {!isAuditOnlyMode && onUpsertRouteRule && (
+        <button
+          ref={routeBtnRef}
+          type="button"
+          disabled={isBusy || disabled}
+          onClick={(e) => {
+            e.stopPropagation();
+            onMarkPointerInteraction();
+            setOpenMenu(null);
+            setRouteOpen((v) => !v);
+          }}
+          className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium border transition-colors cursor-pointer disabled:opacity-50 ${
+            matchedRule
+              ? 'bg-accent/16 border-accent/45 text-accent hover:bg-accent/25'
+              : 'bg-surface2/75 border-subtle text-secondary hover:text-primary hover:bg-surfaceHover'
+          }`}
+          title={
+            matchedRule
+              ? `已固定出口 → ${matchedRule.outbound}，点击修改或恢复默认分流`
+              : '一键切换该目标的出站节点组或直连，并自动加入永久分流/DNS 规则'
+          }
+        >
+          <ArrowRightLeft className="w-3 h-3" />
+          <span>改出口</span>
+        </button>
       )}
 
       <button
@@ -352,6 +398,19 @@ export const AuditActionCell: React.FC<AuditActionCellProps> = ({
           </div>,
           document.body,
         )}
+
+      {!isAuditOnlyMode && onUpsertRouteRule && onDeleteRouteRule && (
+        <AuditRouteRulePopover
+          open={routeOpen}
+          anchorEl={routeBtnRef.current}
+          flow={flow}
+          routingReport={routingReport ?? null}
+          busy={isBusy || disabled}
+          onSelectOutbound={onUpsertRouteRule}
+          onDeleteRule={onDeleteRouteRule}
+          onClose={() => setRouteOpen(false)}
+        />
+      )}
     </div>
   );
 };

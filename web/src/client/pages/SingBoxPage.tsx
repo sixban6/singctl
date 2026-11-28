@@ -4,6 +4,8 @@ import { Badge, ConfirmDialog, PageHeader, SegmentedTabs, useToast } from '../..
 import { clientApi } from '../api';
 import { useVisibilityInterval } from '../../hooks';
 import {
+  AuditRouteRuleDeleteRequest,
+  AuditRouteRuleUpsertRequest,
   ClientRoutingPresetState,
   ClientRoutingReport,
   ClientStatusResponse,
@@ -66,6 +68,7 @@ export const SingBoxPage: React.FC<SingBoxPageProps> = ({
   const [routing, setRouting] = useState<ClientRoutingReport | null>(null);
   const [routingLoading, setRoutingLoading] = useState(true);
   const [savingId, setSavingId] = useState<string | null>(null);
+  const [customRuleBusy, setCustomRuleBusy] = useState(false);
   const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
   const [resetting, setResetting] = useState(false);
 
@@ -276,6 +279,36 @@ export const SingBoxPage: React.FC<SingBoxPageProps> = ({
     }
   };
 
+  const handleUpsertCustomRule = async (req: AuditRouteRuleUpsertRequest) => {
+    setCustomRuleBusy(true);
+    try {
+      const res = await clientApi.upsertAuditRouteRule(req);
+      if (res.report) setRouting(res.report);
+      if (sbRunning) void loadProxies(true);
+      success(res.message || '已更新自定义出口规则');
+      if (sub === 'editor' || sbCfg) void loadSbConfig();
+    } catch (err: unknown) {
+      error(`更新自定义出口规则失败：${err instanceof Error ? err.message : '未知错误'}`);
+    } finally {
+      setCustomRuleBusy(false);
+    }
+  };
+
+  const handleDeleteCustomRule = async (req: AuditRouteRuleDeleteRequest) => {
+    setCustomRuleBusy(true);
+    try {
+      const res = await clientApi.deleteAuditRouteRule(req);
+      if (res.report) setRouting(res.report);
+      if (sbRunning) void loadProxies(true);
+      success(res.message || `已移除 ${req.target} 自定义出口规则`);
+      if (sub === 'editor' || sbCfg) void loadSbConfig();
+    } catch (err: unknown) {
+      error(`移除自定义出口规则失败：${err instanceof Error ? err.message : '未知错误'}`);
+    } finally {
+      setCustomRuleBusy(false);
+    }
+  };
+
   const formatJson = () => {
     try {
       setJsonText(JSON.stringify(JSON.parse(jsonText), null, 2));
@@ -427,11 +460,14 @@ export const SingBoxPage: React.FC<SingBoxPageProps> = ({
           proxiesSnap={proxiesSnap}
           savingId={savingId}
           resetting={resetting}
+          customRuleBusy={customRuleBusy}
           onReload={() => void loadRouting(false)}
           onOpenResetConfirm={() => setResetConfirmOpen(true)}
           onUpdatePreset={(item, nextEnabled, nextOutbound, toastLabel) =>
             void handleUpdatePreset(item, nextEnabled, nextOutbound, toastLabel)
           }
+          onUpsertCustomRule={(req) => void handleUpsertCustomRule(req)}
+          onDeleteCustomRule={(req) => void handleDeleteCustomRule(req)}
           onJumpToGroup={(groupTag) => {
             setFocusGroup(groupTag);
             selectSubTab('nodes');

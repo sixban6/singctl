@@ -53,6 +53,7 @@ type P2PReportOptions struct {
 	UjailAvailable bool
 	DefaultLANCIDR string
 	Now            time.Time
+	OnNetMap       func(*NetMapSnapshot)
 }
 
 // NormalizeAndValidateP2PAssistConfig 校验并归一化 Tailscale P2P 防线配置。
@@ -213,6 +214,9 @@ func BuildP2PReport(ctx context.Context, opts P2PReportOptions) map[string]any {
 	var netmapSnap *NetMapSnapshot
 	if statusErr == nil && statusSnap != nil {
 		netmapSnap, _ = api.NetMap(ctx)
+		if opts.OnNetMap != nil {
+			opts.OnNetMap(netmapSnap)
+		}
 	}
 
 	selfIPs := resolveReportSelfIPs(statusSnap, netmapSnap, ctrl)

@@ -11,6 +11,7 @@ import (
 	"maps"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -216,11 +217,12 @@ func (c *Collector) saveStateLocked(st *persistedAuditState, activeByKey map[str
 
 // CloseConnectionsRequest 描述 WebUI 临时断开活跃连接的筛选条件。
 type CloseConnectionsRequest struct {
-	All      bool     `json:"all,omitempty"`
-	ConnIDs  []string `json:"connIds,omitempty"`
-	DeviceIP string   `json:"deviceIp,omitempty"`
-	Target   string   `json:"target,omitempty"`
-	Network  string   `json:"network,omitempty"`
+	All         bool     `json:"all,omitempty"`
+	ConnIDs     []string `json:"connIds,omitempty"`
+	DeviceIP    string   `json:"deviceIp,omitempty"`
+	Target      string   `json:"target,omitempty"`
+	MatchSuffix bool     `json:"matchSuffix,omitempty"`
+	Network     string   `json:"network,omitempty"`
 }
 
 // CloseConnectionsResult 返回本次踢断活跃连接的结果统计。
@@ -238,6 +240,8 @@ func connMatchesCloseFilter(
 	selfIPs map[string]bool,
 	devDir map[string]lanDeviceInfo,
 	wantDev, wantNet, wantTarget string,
+	wantPrefix *netip.Prefix,
+	matchSuffix bool,
 ) bool {
 	if conn.ID == "" {
 		return false
@@ -250,11 +254,25 @@ func connMatchesCloseFilter(
 	if wantNet != "" && connNet != wantNet {
 		return false
 	}
-	if wantTarget == "" {
+	if wantTarget == "" && wantPrefix == nil {
 		return true
 	}
 	_, destIP, connTarget, _ := resolveConnTarget(conn)
-	return strings.EqualFold(connTarget, wantTarget) || destIP == wantTarget
+	if wantPrefix != nil {
+		if addr, err := netip.ParseAddr(strings.TrimSpace(destIP)); err == nil && wantPrefix.Contains(addr.Unmap()) {
+			return true
+		}
+	}
+	if strings.EqualFold(connTarget, wantTarget) || destIP == wantTarget {
+		return true
+	}
+	if matchSuffix && wantTarget != "" && connTarget != "" {
+		lowerConn := strings.ToLower(strings.TrimSuffix(connTarget, "."))
+		if strings.HasSuffix(lowerConn, "."+wantTarget) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Collector) resolveMatchingConnIDs(
@@ -272,7 +290,14 @@ func (c *Collector) resolveMatchingConnIDs(
 	wantTarget := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(req.Target)), ".")
 	wantDev := strings.TrimSpace(req.DeviceIP)
 	wantNet := strings.ToLower(strings.TrimSpace(req.Network))
-	if wantTarget == "" && wantDev == "" && len(targetIDs) > 0 {
+	var wantPrefix *netip.Prefix
+	if strings.Contains(wantTarget, "/") {
+		if pfx, err := netip.ParsePrefix(wantTarget); err == nil {
+			normPfx := netip.PrefixFrom(pfx.Addr().Unmap(), pfx.Bits()).Masked()
+			wantPrefix = &normPfx
+		}
+	}
+	if wantTarget == "" && wantPrefix == nil && wantDev == "" && len(targetIDs) > 0 {
 		return targetIDs, false, nil
 	}
 
@@ -286,7 +311,7 @@ func (c *Collector) resolveMatchingConnIDs(
 	devDir := c.resolveLANDevicesLocked()
 	c.mu.Unlock()
 	for _, conn := range parsed.Connections {
-		if connMatchesCloseFilter(conn, selfIPs, devDir, wantDev, wantNet, wantTarget) && !slices.Contains(targetIDs, conn.ID) {
+		if connMatchesCloseFilter(conn, selfIPs, devDir, wantDev, wantNet, wantTarget, wantPrefix, req.MatchSuffix) && !slices.Contains(targetIDs, conn.ID) {
 			targetIDs = append(targetIDs, conn.ID)
 		}
 	}

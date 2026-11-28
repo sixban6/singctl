@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import {
   AlertTriangle,
+  ArrowRightLeft,
   Ban,
   Bot,
   Download,
@@ -13,6 +14,7 @@ import { AuditDeviceSummary, ClientStatusResponse, HomeDomainDeviceUpsertPayload
 import { DeviceEditDrawer, DeviceEditInitial } from './network/homedomain/DeviceEditDrawer';
 import { AuditAIConfigDrawer } from './audit/AuditAIConfigDrawer';
 import { AuditBlacklistDrawer } from './audit/AuditBlacklistDrawer';
+import { AuditCustomRoutesDrawer } from './audit/AuditCustomRoutesDrawer';
 import { AuditDevicesAndBanners } from './audit/AuditDevicesAndBanners';
 import { AuditFlowDetailDrawer } from './audit/AuditFlowDetailDrawer';
 import { AuditFlowsSection } from './audit/AuditFlowsSection';
@@ -21,6 +23,7 @@ import { getFlowCacheKey } from './audit/auditHelpers';
 import { useAuditActions } from './audit/useAuditActions';
 import { useAuditAICache, useAuditViewportPrefetch } from './audit/useAuditAIPrefetch';
 import { useAuditFlowsController } from './audit/useAuditFlowsController';
+import { useAuditRouteRules } from './audit/useAuditRouteRules';
 
 export interface AuditPageProps {
   active?: boolean;
@@ -34,12 +37,14 @@ export const AuditPage: React.FC<AuditPageProps> = ({
 }) => {
   const { success, error } = useToast();
   const [blockDrawerOpen, setBlockDrawerOpen] = useState(false);
+  const [customRoutesOpen, setCustomRoutesOpen] = useState(false);
   const [aiCfgOpen, setAiCfgOpen] = useState(false);
   const [pcdnBannerDismissed, setPcdnBannerDismissed] = useState(false);
   const [renameDrawerOpen, setRenameDrawerOpen] = useState(false);
   const [renameInit, setRenameInit] = useState<DeviceEditInitial | null>(null);
   const [renameSuffix, setRenameSuffix] = useState('home');
   const [renameSaving, setRenameSaving] = useState(false);
+  const isAuditOnlyMode = status?.gateway?.effectiveWorkMode === 'audit';
 
   const {
     aiEnabled,
@@ -54,10 +59,17 @@ export const AuditPage: React.FC<AuditPageProps> = ({
 
   const ctrl = useAuditFlowsController({
     active,
-    drawerBlockingRefresh: blockDrawerOpen || aiCfgOpen || renameDrawerOpen,
+    drawerBlockingRefresh: blockDrawerOpen || customRoutesOpen || aiCfgOpen || renameDrawerOpen,
     setCachedReview,
     getCachedReview,
     flushCachedReviews,
+  });
+
+  const routeCtrl = useAuditRouteRules({
+    active,
+    isAuditOnlyMode,
+    actionInFlightRef: ctrl.actionInFlightRef,
+    loadAudit: ctrl.loadAudit,
   });
 
   const actions = useAuditActions({
@@ -163,7 +175,7 @@ export const AuditPage: React.FC<AuditPageProps> = ({
   const whitelist = ctrl.report?.whitelist || [];
   const whitelistCount = ctrl.report?.whitelistCount ?? whitelist.length;
   const pcdnOn = ctrl.report?.pcdnBlockEnabled ?? true;
-  const isAuditOnlyMode = status?.gateway?.effectiveWorkMode === 'audit';
+  const customRoutesCount = routeCtrl.routingReport?.customRules?.length ?? 0;
   const isDelegatedMode = status?.gateway?.effectiveWorkMode === 'delegated';
   const sideRouterIP = status?.gateway?.sideRouterIP?.trim() || '';
 
@@ -216,6 +228,16 @@ export const AuditPage: React.FC<AuditPageProps> = ({
             >
               黑名单 ({blockCount})
             </Button>
+            {!isAuditOnlyMode && customRoutesCount > 0 && (
+              <Button
+                size="sm"
+                variant="secondary"
+                icon={<ArrowRightLeft className="w-3.5 h-3.5 text-accent" />}
+                onClick={() => setCustomRoutesOpen(true)}
+              >
+                自定义出口 ({customRoutesCount})
+              </Button>
+            )}
             <Button
               size="sm"
               variant="secondary"
@@ -309,6 +331,7 @@ export const AuditPage: React.FC<AuditPageProps> = ({
         hasAnyFilter={ctrl.hasAnyFilter}
         onResetAllFilters={ctrl.handleResetAllFilters}
         isAuditOnlyMode={isAuditOnlyMode}
+        routingReport={routeCtrl.routingReport}
         filterTransitioning={ctrl.filterTransitioning}
         closingAll={actions.closingAll}
         batchBusy={actions.batchBusy}
@@ -353,6 +376,8 @@ export const AuditPage: React.FC<AuditPageProps> = ({
         onWhitelistAction={(act, target) => void actions.handleWhitelist(act, target)}
         onBlockFlow={(f, deviceOnly) => void actions.handleBlockFlow(f, deviceOnly)}
         onSetThrottle={(f, rate) => void actions.handleSetThrottle(f, rate)}
+        onUpsertRouteRule={(req) => void routeCtrl.handleUpsertRouteRule(req)}
+        onDeleteRouteRule={(req) => void routeCtrl.handleDeleteRouteRule(req)}
         onCopyText={(text, label) => void actions.handleCopyText(text, label)}
       />
 
@@ -365,6 +390,15 @@ export const AuditPage: React.FC<AuditPageProps> = ({
         onManualBlock={actions.handleManualBlock}
         onUnblock={(r) => void actions.handleUnblock(r)}
         onWhitelist={actions.handleWhitelist}
+      />
+
+      <AuditCustomRoutesDrawer
+        open={customRoutesOpen}
+        routingReport={routeCtrl.routingReport}
+        busy={routeCtrl.routeBusy}
+        onClose={() => setCustomRoutesOpen(false)}
+        onChangeOutbound={(req) => void routeCtrl.handleUpsertRouteRule(req)}
+        onDeleteRule={(req) => void routeCtrl.handleDeleteRouteRule(req)}
       />
 
       <AuditAIConfigDrawer open={aiCfgOpen} onClose={() => setAiCfgOpen(false)} />
@@ -383,6 +417,9 @@ export const AuditPage: React.FC<AuditPageProps> = ({
         detailIndex={ctrl.detailIndex}
         totalCount={ctrl.processedFlows.length}
         throttleBusy={actions.throttleBusy}
+        isAuditOnlyMode={isAuditOnlyMode}
+        routeBusy={routeCtrl.routeBusy}
+        routingReport={routeCtrl.routingReport}
         getCachedReview={getCachedReview}
         onClose={() => ctrl.setDetailFlowKey(null)}
         onNavigatePrev={() => {
@@ -402,6 +439,8 @@ export const AuditPage: React.FC<AuditPageProps> = ({
         onWhitelistAction={(act, target) => void actions.handleWhitelist(act, target)}
         onBlockFlow={(f, deviceOnly) => void actions.handleBlockFlow(f, deviceOnly)}
         onSetThrottle={(f, rate) => void actions.handleSetThrottle(f, rate)}
+        onUpsertRouteRule={(req) => void routeCtrl.handleUpsertRouteRule(req)}
+        onDeleteRouteRule={(req) => void routeCtrl.handleDeleteRouteRule(req)}
         onFilterByDevice={(f) =>
           ctrl.setSelectedDevice({
             ip: f.deviceIp,

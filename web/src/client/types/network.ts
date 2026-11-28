@@ -232,6 +232,7 @@ export interface ClientTailscaleStatus {
 
 export type TailscaleLocalNetworkKind = 'primary_lan' | 'vlan' | 'downstream_subnet' | 'custom' | string;
 export type TailscaleSubnetScope = 'all' | 'allowlist' | 'denylist';
+export type TailscaleACLStatus = 'allowed' | 'partial' | 'blocked' | '';
 
 export interface TailscaleLocalDeviceDTO {
   ip: string;
@@ -262,7 +263,15 @@ export interface TailscaleLocalNetworkDTO {
   selectedDevices?: string[];
   devices?: TailscaleLocalDeviceDTO[];
   approved?: boolean;
+  aclStatus?: TailscaleACLStatus;
+  aclMatchedRanges?: string[];
   natHint?: string;
+}
+
+export interface TailscaleCloudAclSummary {
+  checked: boolean;
+  blockedSubnets?: string[];
+  partialSubnets?: string[];
 }
 
 export interface AuthPasswordUpdateResponse {
@@ -378,6 +387,7 @@ export interface TailscaleMeshTopologyResponse {
   tailscaleStatus: ClientTailscaleStatus;
   config: TailscaleConfigResponse;
   localNetworks: TailscaleLocalNetworkDTO[];
+  cloudAcl?: TailscaleCloudAclSummary;
   p2p: TailscaleP2PReport;
   gatewayPeers: TailscaleP2PPeerView[];
   personalDevices: TailscaleP2PPeerView[];

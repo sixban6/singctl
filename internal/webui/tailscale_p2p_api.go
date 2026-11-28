@@ -24,6 +24,7 @@ type TailscaleP2PTestHooks struct {
 	UjailApply       func(ctx context.Context, enable bool) (bool, error)
 	Now              func() time.Time
 	DefaultLANCIDR   string
+	LiveSubnets      string
 	RouteOutput      string
 	LeaseText        string
 	NeighText        string
@@ -92,10 +93,11 @@ func (s *Server) ujailAvailable() bool {
 	return runtime.GOOS == "linux" && tailscale.IsUjailAvailable()
 }
 
-func (s *Server) buildTailscaleP2PReport(ctx context.Context, cfg *config.Config) map[string]any {
+func (s *Server) buildTailscaleP2PReportWithNetMap(ctx context.Context, cfg *config.Config) (map[string]any, *tailscale.NetMapSnapshot) {
 	dmSnap := daemon.LoadRuntimeSnapshot()
 	fw4OK := s.fw4Available()
-	return tailscale.BuildP2PReport(ctx, tailscale.P2PReportOptions{
+	var netmapSnap *tailscale.NetMapSnapshot
+	report := tailscale.BuildP2PReport(ctx, tailscale.P2PReportOptions{
 		Config:         cfg,
 		Controller:     s.tailscaleP2PController(),
 		DaemonRuntime:  dmSnap.TailscaleP2P,
@@ -106,7 +108,16 @@ func (s *Server) buildTailscaleP2PReport(ctx context.Context, cfg *config.Config
 		UjailAvailable: s.ujailAvailable(),
 		DefaultLANCIDR: s.effectiveProtectedLANCIDRs(),
 		Now:            s.tailscaleP2PNow(),
+		OnNetMap: func(nm *tailscale.NetMapSnapshot) {
+			netmapSnap = nm
+		},
 	})
+	return report, netmapSnap
+}
+
+func (s *Server) buildTailscaleP2PReport(ctx context.Context, cfg *config.Config) map[string]any {
+	report, _ := s.buildTailscaleP2PReportWithNetMap(ctx, cfg)
+	return report
 }
 
 func (s *Server) handleTailscaleP2PGet(w http.ResponseWriter, r *http.Request) {

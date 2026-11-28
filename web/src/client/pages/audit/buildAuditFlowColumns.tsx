@@ -1,8 +1,15 @@
 import { Bot, Copy, RefreshCw } from 'lucide-react';
 import { Badge, DataColumn, formatBytes as fmtBytes } from '../../../ui';
-import { AuditAIReview, AuditFlowRecord } from '../../types';
+import {
+  AuditAIReview,
+  AuditFlowRecord,
+  AuditRouteRuleDeleteRequest,
+  AuditRouteRuleUpsertRequest,
+  ClientRoutingReport,
+} from '../../types';
 import { AuditActionCell } from './AuditActionCell';
 import { formatCompactRule } from './auditFlowModel';
+import { findMatchingCustomRule } from './AuditRouteRulePopover';
 import {
   checkIsDualAlert,
   fmtBps,
@@ -21,6 +28,7 @@ export interface BuildAuditFlowColumnsParams {
   pendingTargets: Set<string>;
   filterTransitioning: boolean;
   isAuditOnlyMode: boolean;
+  routingReport?: ClientRoutingReport | null;
   getCachedReview: (f: AuditFlowRecord) => AuditAIReview | null;
   onToggleSelectAllVisible: () => void;
   onToggleSelectKey: (fk: string) => void;
@@ -33,6 +41,8 @@ export interface BuildAuditFlowColumnsParams {
   onWhitelistAction: (action: 'add' | 'remove', target: string) => void;
   onCloseFlowConnections: (f: AuditFlowRecord) => void;
   onSetThrottle: (f: AuditFlowRecord, rateKbps: number) => void;
+  onUpsertRouteRule?: (req: AuditRouteRuleUpsertRequest) => void;
+  onDeleteRouteRule?: (req: AuditRouteRuleDeleteRequest) => void;
   onCopyText: (text: string, label?: string) => void;
 }
 
@@ -43,6 +53,7 @@ export function buildAuditFlowColumns({
   pendingTargets,
   filterTransitioning,
   isAuditOnlyMode,
+  routingReport = null,
   getCachedReview,
   onToggleSelectAllVisible,
   onToggleSelectKey,
@@ -55,6 +66,8 @@ export function buildAuditFlowColumns({
   onWhitelistAction,
   onCloseFlowConnections,
   onSetThrottle,
+  onUpsertRouteRule,
+  onDeleteRouteRule,
   onCopyText,
 }: BuildAuditFlowColumnsParams): DataColumn<AuditFlowRecord>[] {
   return [
@@ -170,26 +183,37 @@ export function buildAuditFlowColumns({
           ? `${f.chains![0]} → ${f.chains![f.chains!.length - 1]}`
           : outMeta.label;
         const dimDirect = isAuditOnlyMode && outMeta.tone === 'neutral';
+        const customMatch = !isAuditOnlyMode ? findMatchingCustomRule(f, routingReport?.customRules) : null;
 
         return (
           <div
             className={`space-y-1 whitespace-nowrap ${dimDirect ? 'opacity-65' : ''}`}
             title={`完整分流链: ${chainPath}${f.rule ? ` · 规则: ${f.rule}` : ''}\n点击筛选同链路`}
           >
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                onSelectChain(f.outbound || 'DIRECT');
-              }}
-              className="cursor-pointer hover:opacity-90 text-left"
-            >
-              <Badge tone={outMeta.tone}>
-                <span className="max-w-[155px] truncate inline-block align-bottom">
-                  {compactLabel}
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onSelectChain(f.outbound || 'DIRECT');
+                }}
+                className="cursor-pointer hover:opacity-90 text-left"
+              >
+                <Badge tone={outMeta.tone}>
+                  <span className="max-w-[155px] truncate inline-block align-bottom">
+                    {compactLabel}
+                  </span>
+                </Badge>
+              </button>
+              {customMatch && (
+                <span
+                  className="text-[10px] px-1 py-0.5 rounded bg-accent/15 border border-accent/35 text-accent"
+                  title={`已固定出口规则: ${customMatch.target} → ${customMatch.outbound}`}
+                >
+                  固定
                 </span>
-              </Badge>
-            </button>
+              )}
+            </div>
             <div className="text-[10.5px] font-mono tnum text-muted">
               {activeCnt > 0 ? (
                 <span className="text-emerald-400 font-semibold">{activeCnt} 活跃</span>
@@ -203,14 +227,41 @@ export function buildAuditFlowColumns({
       },
     },
     {
-      key: 'traffic',
-      header: '速率 / 流量',
-      sortKey: 'live_up',
+      key: 'live_speed',
+      header: '实时速率',
+      sortKey: 'live_total',
       align: 'right',
       render: (f) => {
         const activeCnt = Number(f.activeConns || 0);
         const upBps = Number(f.currentUploadBps || 0);
         const downBps = Number(f.currentDownloadBps || 0);
+
+        if (activeCnt > 0 && (upBps > 0 || downBps > 0)) {
+          return (
+            <div className="text-right font-mono tnum whitespace-nowrap leading-tight space-y-0.5 text-[11px]">
+              <div className={upBps > 0 ? 'text-emerald-400 font-semibold' : 'text-muted'}>
+                ↑ {fmtBps(upBps)}
+              </div>
+              <div className={downBps > 0 ? 'text-sky-400 font-medium' : 'text-muted'}>
+                ↓ {fmtBps(downBps)}
+              </div>
+            </div>
+          );
+        }
+
+        return (
+          <div className="text-right font-mono tnum whitespace-nowrap text-[11px] text-muted">
+            {activeCnt > 0 ? '空闲' : '—'}
+          </div>
+        );
+      },
+    },
+    {
+      key: 'cumulative_traffic',
+      header: '累计流量',
+      sortKey: 'total',
+      align: 'right',
+      render: (f) => {
         const totalBytes = Math.max(1, (f.uploadBytes || 0) + (f.downloadBytes || 0));
         const upPct = Math.min(100, Math.round(((f.uploadBytes || 0) / totalBytes) * 100));
         const ratio = Number(f.uploadRatio || 0);
@@ -218,29 +269,11 @@ export function buildAuditFlowColumns({
         return (
           <div className="text-right font-mono tnum whitespace-nowrap space-y-1">
             <div className="text-xs">
-              {activeCnt > 0 && (upBps > 0 || downBps > 0) ? (
-                <span>
-                  <span className={upBps > 0 ? 'text-emerald-400 font-semibold' : 'text-muted'}>
-                    ↑{fmtBps(upBps)}
-                  </span>{' '}
-                  <span className={downBps > 0 ? 'text-sky-400 font-medium' : 'text-muted'}>
-                    ↓{fmtBps(downBps)}
-                  </span>
-                </span>
-              ) : (
-                <span className="text-primary font-semibold">
-                  ↑{fmtBytes(f.uploadBytes)}{' '}
-                  <span className="text-secondary font-normal">↓{fmtBytes(f.downloadBytes)}</span>
-                </span>
-              )}
+              <span className="text-primary font-semibold">↑{fmtBytes(f.uploadBytes)}</span>{' '}
+              <span className="text-secondary font-normal">↓{fmtBytes(f.downloadBytes)}</span>
             </div>
 
             <div className="flex items-center justify-end gap-1.5 text-[10.5px]">
-              {activeCnt > 0 && (upBps > 0 || downBps > 0) && (
-                <span className="text-muted">
-                  ↑{fmtBytes(f.uploadBytes)} / ↓{fmtBytes(f.downloadBytes)}
-                </span>
-              )}
               <div
                 className="w-12 h-1.5 rounded-full bg-sky-500/35 overflow-hidden shrink-0"
                 title={`上行占比 ${upPct}% · 上/下比 ${ratio.toFixed(1)}x`}
@@ -359,11 +392,15 @@ export function buildAuditFlowColumns({
           isBusy={busyFlowKeys.has(getFlowCacheKey(f))}
           isDualAlert={checkIsDualAlert(f, getCachedReview(f))}
           disabled={filterTransitioning}
+          isAuditOnlyMode={isAuditOnlyMode}
+          routingReport={routingReport}
           onMarkPointerInteraction={onMarkPointerInteraction}
           onBlockFlow={onBlockFlow}
           onWhitelistAction={onWhitelistAction}
           onCloseFlowConnections={onCloseFlowConnections}
           onSetThrottle={onSetThrottle}
+          onUpsertRouteRule={onUpsertRouteRule}
+          onDeleteRouteRule={onDeleteRouteRule}
           onFilterByDevice={onFilterByDevice}
           onFilterBySubnet={onSearchQueryChange}
           onCopyTarget={(t) => onCopyText(t, '目标')}

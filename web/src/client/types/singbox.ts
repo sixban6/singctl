@@ -92,11 +92,51 @@ export interface ClientRoutingPresetState {
   customized: boolean;
 }
 
+export type TrafficMatchType = 'domain_suffix' | 'domain' | 'ip_cidr';
+
+export interface TrafficCustomRule {
+  target: string;
+  matchType?: TrafficMatchType | string;
+  outbound: string;
+  sourceIp?: string;
+  note?: string;
+  createdAt?: string;
+}
+
+export interface AuditRouteRuleUpsertRequest {
+  target: string;
+  matchType?: TrafficMatchType | string;
+  outbound: string;
+  sourceIp?: string;
+  note?: string;
+  connTarget?: string;
+  closeConnections?: boolean;
+}
+
+export interface AuditRouteRuleDeleteRequest {
+  target: string;
+  matchType?: TrafficMatchType | string;
+  sourceIp?: string;
+  closeConnections?: boolean;
+}
+
+export interface AuditRouteRuleResponse {
+  ok: boolean;
+  applied?: boolean;
+  removed?: boolean;
+  closedConnections: number;
+  rule?: TrafficCustomRule;
+  rules?: TrafficCustomRule[];
+  report?: ClientRoutingReport;
+  message?: string;
+}
+
 export interface ClientRoutingReport {
   groups: ClientRoutingGroupInfo[];
   directTag: string;
   categories: TrafficCategoryInfo[];
   items: ClientRoutingPresetState[];
+  customRules?: TrafficCustomRule[];
   enabledCount: number;
   customCount: number;
   totalCount: number;

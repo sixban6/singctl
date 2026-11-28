@@ -42,9 +42,11 @@ type LocalNetwork struct {
 	SSID            string        `json:"ssid,omitempty"`
 	VLANID          int           `json:"vlanId,omitempty"`
 	OnlineClients   int           `json:"onlineClients,omitempty"`
-	Selected        bool          `json:"selected"`
-	Approved        bool          `json:"approved"`
-	Scope           string        `json:"scope,omitempty"`
+	Selected         bool          `json:"selected"`
+	Approved         bool          `json:"approved"`
+	ACLStatus        string        `json:"aclStatus,omitempty"`
+	ACLMatchedRanges []string      `json:"aclMatchedRanges,omitempty"`
+	Scope            string        `json:"scope,omitempty"`
 	SelectedDevices []string      `json:"selectedDevices,omitempty"`
 	Devices         []LocalDevice `json:"devices,omitempty"`
 	NATHint         string        `json:"natHint,omitempty"`
