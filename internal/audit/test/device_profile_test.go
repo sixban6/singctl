@@ -515,3 +515,74 @@ func TestAdvisor_SummarizeDeviceProfile_SanitizedAndOfflineFallback(t *testing.T
 		t.Fatalf("Rule 01 violation: real device IP/MAC/hostname leaked into AI prompt: %s", capturedBody)
 	}
 }
+
+func TestClassifyApp_CloudflareIPPriorityAndExpandedCatalog(t *testing.T) {
+	cases := []struct {
+		target   string
+		destIP   string
+		rule     string
+		wantName string
+		wantCat  audit.AppCategory
+		wantInf  bool
+	}{
+		// Cloudflare reverse-proxy IPs MUST NOT hijack domain classification or mislabel unknown sites
+		{target: "usemagpie.ai", destIP: "104.21.10.5", rule: "final", wantName: "Magpie AI", wantCat: audit.AppCategoryAIDev, wantInf: false},
+		{target: "obsidian.md", destIP: "104.21.10.5", rule: "final", wantName: "Obsidian", wantCat: audit.AppCategoryAIDev, wantInf: false},
+		{target: "alerts.home-assistant.io", destIP: "104.21.10.5", rule: "final", wantName: "Home Assistant", wantCat: audit.AppCategoryAIDev, wantInf: false},
+		{target: "unknown-site-behind-cf.example", destIP: "104.21.10.5", rule: "final", wantName: "", wantCat: audit.AppCategoryOther, wantInf: false},
+		// Direct-IP Cloudflare connections (no hostname) & CF's own domains MUST still identify as Cloudflare
+		{target: "104.21.10.5", destIP: "104.21.10.5", rule: "final", wantName: "Cloudflare", wantCat: audit.AppCategorySystem, wantInf: true},
+		{target: "", destIP: "172.67.10.20", rule: "final", wantName: "Cloudflare", wantCat: audit.AppCategorySystem, wantInf: true},
+		{target: "workers.cloudflare.com", destIP: "104.21.10.5", wantName: "Cloudflare", wantCat: audit.AppCategorySystem, wantInf: true},
+
+		// Rule-set label fixes
+		{target: "unknown.example", rule: "rule_set=geosite-hok => route(#Nodes)", wantName: "王者荣耀国际服", wantCat: audit.AppCategoryGamingMusic, wantInf: false},
+		{target: "unknown.example", rule: "rule_set=geosite-ctm_cn => route(#DC)", wantName: "自定义直连", wantCat: audit.AppCategorySystem, wantInf: true},
+
+		// Kuaishou CDN family
+		{target: "s2-12769.kwimgs.com", wantName: "快手", wantCat: audit.AppCategoryVideo, wantInf: false},
+		{target: "p66-plat.wsukwai.com", wantName: "快手", wantCat: audit.AppCategoryVideo, wantInf: false},
+		{target: "p4-plat.wskwai.com", wantName: "快手", wantCat: audit.AppCategoryVideo, wantInf: false},
+		{target: "api.kuaishouzt.com", wantName: "快手", wantCat: audit.AppCategoryVideo, wantInf: false},
+		{target: "az2-api.ksapisrv.com", wantName: "快手", wantCat: audit.AppCategoryVideo, wantInf: false},
+		{target: "app.kwaixiaodian.com", wantName: "快手", wantCat: audit.AppCategoryVideo, wantInf: false},
+		{target: "djvod.ndcimgs.com", wantName: "快手", wantCat: audit.AppCategoryVideo, wantInf: false},
+
+		// Douyin / ByteDance effect & CDN family
+		{target: "lf26-effect-302.byteeffecttos.com", wantName: "抖音", wantCat: audit.AppCategoryVideo, wantInf: false},
+		{target: "abc.wmzfylgdsz.com", wantName: "抖音", wantCat: audit.AppCategoryVideo, wantInf: false},
+		{target: "4b19a02d-9.sjxydc.com", wantName: "抖音", wantCat: audit.AppCategoryVideo, wantInf: false},
+
+		// Gaming
+		{target: "camp.honorofkings.com", wantName: "王者荣耀国际服", wantCat: audit.AppCategoryGamingMusic, wantInf: false},
+		{target: "act.sgameglobal.com", wantName: "王者荣耀国际服", wantCat: audit.AppCategoryGamingMusic, wantInf: false},
+		{target: "static.hok5v5.com", wantName: "王者荣耀国际服", wantCat: audit.AppCategoryGamingMusic, wantInf: false},
+		{target: "id.supercell.com", wantName: "Supercell", wantCat: audit.AppCategoryGamingMusic, wantInf: false},
+		{target: "coc-social.supercellgame.cn", wantName: "Supercell", wantCat: audit.AppCategoryGamingMusic, wantInf: false},
+		{target: "global.yzfchat.com", wantName: "腾讯游戏", wantCat: audit.AppCategoryGamingMusic, wantInf: false},
+
+		// High-frequency apps, AI/Dev & Infra
+		{target: "api.futunn.com", wantName: "富途牛牛", wantCat: audit.AppCategoryShopping, wantInf: false},
+		{target: "cdn.futustatic.com", wantName: "富途牛牛", wantCat: audit.AppCategoryShopping, wantInf: false},
+		{target: "app.nio.com", wantName: "蔚来 NIO", wantCat: audit.AppCategoryShopping, wantInf: false},
+		{target: "api2.mashangfangxin.com", wantName: "阿里健康", wantCat: audit.AppCategoryShopping, wantInf: false},
+		{target: "img.bosszhipin.com", wantName: "BOSS 直聘", wantCat: audit.AppCategoryShopping, wantInf: false},
+		{target: "api.docker.com", wantName: "Docker", wantCat: audit.AppCategoryAIDev, wantInf: false},
+		{target: "mcp.exa.ai", wantName: "Exa AI", wantCat: audit.AppCategoryAIDev, wantInf: false},
+		{target: "models.dev", wantName: "Models.dev", wantCat: audit.AppCategoryAIDev, wantInf: false},
+		{target: "zh.wikipedia.org", wantName: "维基百科", wantCat: audit.AppCategoryOther, wantInf: false},
+		{target: "ghfast.top", wantName: "GitHub 镜像", wantCat: audit.AppCategorySystem, wantInf: true},
+		{target: "gh-proxy.com", wantName: "GitHub 镜像", wantCat: audit.AppCategorySystem, wantInf: true},
+		{target: "mirrors.tuna.tsinghua.edu.cn", wantName: "开源镜像站", wantCat: audit.AppCategorySystem, wantInf: true},
+		{target: "anti-ad.net", wantName: "广告规则源", wantCat: audit.AppCategorySystem, wantInf: true},
+		{target: "rdelivery.tdos.vip", wantName: "腾讯热更新 SDK", wantCat: audit.AppCategorySystem, wantInf: true},
+	}
+
+	for _, tc := range cases {
+		got := audit.ClassifyApp(tc.target, tc.destIP, tc.rule)
+		if got.Name != tc.wantName || got.Category != tc.wantCat || got.IsInfra != tc.wantInf {
+			t.Errorf("ClassifyApp(%q, %q, %q) = %+v, want Name=%q Category=%q IsInfra=%v",
+				tc.target, tc.destIP, tc.rule, got, tc.wantName, tc.wantCat, tc.wantInf)
+		}
+	}
+}

@@ -149,14 +149,14 @@ var clientRoutingPresets = []TrafficPresetDef{
 	},
 	{
 		ID:             "ai_dev",
-		Name:           "Cursor / Perplexity / Grok",
+		Name:           "Cursor / Perplexity / Grok / AI 服务",
 		Category:       "ai",
 		CategoryLabel:  "AI 大模型",
-		Description:    "AI 编程 IDE 与新一代 AI 搜索引擎",
-		DomainsSummary: "cursor.sh / cursor.com / perplexity.ai / grok.com / x.ai / z.ai",
+		Description:    "AI 编程 IDE、新兴 AI 搜索引擎与代理服务",
+		DomainsSummary: "cursor.sh / cursor.com / perplexity.ai / grok.com / x.ai / z.ai / usemagpie.ai / exa.ai / models.dev",
 		DefaultOn:      true,
 		PreferVPS:      true,
-		DomainSuffixes: []string{"cursor.sh", "cursor.com", "perplexity.ai", "x.ai", "grok.com", "z.ai"},
+		DomainSuffixes: []string{"cursor.sh", "cursor.com", "perplexity.ai", "x.ai", "grok.com", "z.ai", "usemagpie.ai", "exa.ai", "models.dev"},
 	},
 	{
 		ID:             "ai_other",

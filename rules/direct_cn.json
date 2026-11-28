@@ -3,12 +3,17 @@
   "rules": [
     {
       "domain_suffix": [
+        "anti-ad.net",
+        "ax1x.com",
         "duse0.com",
         "duse1.com",
         "duse2.com",
         "duse3.com",
+        "gh-proxy.com",
+        "ghfast.top",
         "mediycn-my.sharepoint.com",
-        "pan.mediy.cn"
+        "pan.mediy.cn",
+        "tdos.vip"
       ]
     }
   ]

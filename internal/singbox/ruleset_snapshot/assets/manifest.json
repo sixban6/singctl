@@ -159,10 +159,10 @@
       "url": "https://github.com/sixban6/singctl/releases/download/rulesets-latest/direct_cn.srs",
       "format": "binary",
       "file": "geosite-ctm_cn.srs.gz",
-      "sha256": "b93b38fffd3f80abe242feed5451f043002d26dd9380033b8cc620bcaa3cb6d6",
-      "size": 110,
+      "sha256": "a84abb24bba3bce205ba151421e10c682128100ed1a38aa3132a3c31b00427d6",
+      "size": 156,
       "via": "direct",
-      "updated_at": "2026-11-28T10:30:00Z"
+      "updated_at": "2026-11-28T13:01:00Z"
     },
     "geosite-ctrip": {
       "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/ctrip.srs",

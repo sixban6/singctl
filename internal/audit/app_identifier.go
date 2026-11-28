@@ -56,14 +56,15 @@ var ruleSetAppDisplayNames = map[string]string{
 	"geosite-paypal":         "PayPal",
 	"geosite-cryptocurrency": "加密货币 Crypto",
 	"geosite-sourcehut":      "SourceHut",
-	"geosite-ctm_cn":         "中国电信/运营商",
+	"geosite-hok":            "王者荣耀国际服",
+	"geosite-ctm_cn":         "自定义直连",
 }
 
 // orderedAppRuleSetTags 定义匹配优先级（越靠前越具体，优先于泛化规则集）。
 var orderedAppRuleSetTags = []string{
 	"geosite-telegram", "geoip-telegram",
 	"geosite-youtube", "geosite-onedrive", "geosite-github",
-	"geosite-chat", "geosite-tiktok", "geosite-bili",
+	"geosite-chat", "geosite-tiktok", "geosite-hok", "geosite-bili",
 	"geosite-netflix", "geoip-netflix", "geosite-disney", "geosite-hbo", "geosite-primevideo", "geosite-spotify",
 	"geosite-x", "geosite-paypal", "geosite-cryptocurrency", "geosite-sourcehut",
 	"geosite-jd", "geosite-pdd", "geosite-meituan", "geosite-ctrip", "geosite-bank-cn",
@@ -583,16 +584,10 @@ func matchBuiltinService(target, destIP string) string {
 			if ip4 := ip.To4(); ip4 != nil && ip4[0] == 17 {
 				return "Apple"
 			}
-			// Cloudflare Anycast CDN / QUIC 边缘网段
-			for _, cfNet := range builtinCloudflareNets() {
-				if cfNet.Contains(ip) {
-					return "Cloudflare"
-				}
-			}
 		}
 	}
 
-	// 2. 常见域名特征兜底（即使本地尚未生成 .srs 缓存也能立刻识别）
+	// 2. 常见域名特征兜底（即使本地尚未生成 .srs 缓存也能立刻识别；优先于 Cloudflare 边缘 IP 兜底，防反代域名被误标为 Cloudflare）
 	switch {
 	case strings.Contains(target, "telegram") || strings.HasSuffix(target, ".t.me"):
 		return "Telegram"
@@ -644,6 +639,22 @@ func matchBuiltinService(target, destIP string) string {
 		return "Tailscale"
 	case strings.Contains(target, "cloudflare"):
 		return "Cloudflare"
+	}
+
+	// 3. 仅对纯 IP 直连（无域名 SNI）识别 Cloudflare 边缘 Anycast 网段，避免托管在 CF 背后的第三方站点全部被误标为 Cloudflare
+	if target == "" || net.ParseIP(target) != nil {
+		for _, ipStr := range []string{destIP, target} {
+			if ipStr == "" {
+				continue
+			}
+			if ip := net.ParseIP(ipStr); ip != nil {
+				for _, cfNet := range builtinCloudflareNets() {
+					if cfNet.Contains(ip) {
+						return "Cloudflare"
+					}
+				}
+			}
+		}
 	}
 	return ""
 }

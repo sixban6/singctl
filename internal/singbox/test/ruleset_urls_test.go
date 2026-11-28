@@ -322,8 +322,13 @@ func TestRepoCustomRuleSets_SourceJSONAndSnapshotIntegrity(t *testing.T) {
 		t.Fatalf("rules/direct_cn.json must NOT contain tailscale.com:\n%s", directRaw)
 	}
 	suffixesRaw, _ := directParsed.Rules[0]["domain_suffix"].([]any)
-	if len(suffixesRaw) != 6 {
-		t.Fatalf("expected 6 domain_suffix entries in rules/direct_cn.json, got %d (%v)", len(suffixesRaw), suffixesRaw)
+	if len(suffixesRaw) != 11 {
+		t.Fatalf("expected 11 domain_suffix entries in rules/direct_cn.json, got %d (%v)", len(suffixesRaw), suffixesRaw)
+	}
+	for _, must := range []string{"ghfast.top", "gh-proxy.com", "anti-ad.net", "tdos.vip", "ax1x.com"} {
+		if !strings.Contains(directRaw, must) {
+			t.Fatalf("expected rules/direct_cn.json to include %q:\n%s", must, directRaw)
+		}
 	}
 
 	_, hokParsed := loadRuleSet("hok.json")
@@ -362,6 +367,18 @@ func TestRepoCustomRuleSets_SourceJSONAndSnapshotIntegrity(t *testing.T) {
 			if err != nil || (!bytes.HasPrefix(rawSRS, []byte("SRS")) && !bytes.HasPrefix(rawSRS, []byte("RULE"))) {
 				t.Fatalf("snapshot Extract(%q) invalid: err=%v prefix=%q", tag, err, rawSRS[:min(4, len(rawSRS))])
 			}
+		}
+	}
+}
+
+func TestTrafficRouting_AIDevIncludesMagpieExaModels(t *testing.T) {
+	preset, ok := singbox.LookupClientRoutingPreset("ai_dev")
+	if !ok {
+		t.Fatal("expected ai_dev routing preset present")
+	}
+	for _, domain := range []string{"usemagpie.ai", "exa.ai", "models.dev"} {
+		if !slices.Contains(preset.DomainSuffixes, domain) {
+			t.Fatalf("expected ai_dev preset DomainSuffixes to include %q, got %v", domain, preset.DomainSuffixes)
 		}
 	}
 }
